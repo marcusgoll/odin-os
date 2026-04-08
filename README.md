@@ -1,6 +1,6 @@
 ---
 title: Odin OS
-phase: "00"
+phase: "01"
 status: active
 updated: 2026-04-08
 ---
@@ -30,4 +30,4 @@ This repository is the runtime root. `odin-orchestrator` is a migration source o
 
 ## Current Status
 
-Phase 00 establishes architectural authority only. The implementation tree described by the contracts is the target structure for subsequent phases, not a promise that every package has already been scaffolded in this commit.
+Phase 00 and Phase 01 are in place. The repository now includes the authority docs, the target directory scaffold, a minimal buildable `odin` command, and baseline local and CI verification entrypoints. The deeper runtime and domain packages remain placeholders for later phases.

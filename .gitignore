@@ -1,0 +1,15 @@
+/bin/
+/odin
+/data/*.db
+/runs/logs/*
+!/runs/logs/.gitkeep
+/runs/artifacts/*
+!/runs/artifacts/.gitkeep
+/runs/summaries/*
+!/runs/summaries/.gitkeep
+/state/cache/*
+!/state/cache/.gitkeep
+/state/snapshots/*
+!/state/snapshots/.gitkeep
+/state/compiled/*
+!/state/compiled/.gitkeep
