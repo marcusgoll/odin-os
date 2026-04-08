@@ -1,2 +1,32 @@
-# Phase 01 placeholder.
-# Managed project manifest schema is introduced in later phases.
+version: 1
+
+projects:
+  - key: odin-core
+    name: Odin Core
+    project_class: system_project
+    system_project: true
+    git_root: ..
+    default_branch: main
+    policy:
+      allowed_commands:
+        - status
+        - test
+        - build
+      branch_rules:
+        protected_branches:
+          - main
+        require_worktree: true
+        require_task_branch: true
+        allow_default_branch_mutation: false
+      approval_gates:
+        require_for_governance_changes: true
+        require_for_destructive_operations: true
+        require_for_system_project_changes: true
+      merge_policy:
+        mode: squash
+        allow_direct_to_default_branch: false
+      destructive_operations:
+        allow_reset: false
+        allow_clean: false
+        allow_force_push: false
+        require_explicit_approval: true
