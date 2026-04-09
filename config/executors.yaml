@@ -1,2 +1,65 @@
-# Phase 01 placeholder.
-# Executor routing configuration is introduced in later phases.
+version: 1
+
+executors:
+  - key: codex_headless
+    adapter: codex_headless
+    class: plan_backed_cli
+    enabled: true
+    priority: 10
+    model_ref: codex-latest
+  - key: claude_code_headless
+    adapter: claude_code_headless
+    class: plan_backed_cli
+    enabled: true
+    priority: 20
+    model_ref: claude-code-latest
+  - key: gemini_cli_headless
+    adapter: gemini_cli_headless
+    class: plan_backed_cli
+    enabled: true
+    priority: 30
+    model_ref: gemini-cli-latest
+  - key: openai_api
+    adapter: openai_api
+    class: api_executor
+    enabled: true
+    priority: 40
+    model_ref: gpt-5.4
+  - key: anthropic_api
+    adapter: anthropic_api
+    class: api_executor
+    enabled: true
+    priority: 50
+    model_ref: claude-sonnet
+  - key: google_api
+    adapter: google_api
+    class: api_executor
+    enabled: true
+    priority: 60
+    model_ref: gemini-pro
+  - key: xai_api
+    adapter: xai_api
+    class: api_executor
+    enabled: true
+    priority: 70
+    model_ref: grok-latest
+  - key: openrouter_api
+    adapter: openrouter_api
+    class: broker_executor
+    enabled: true
+    priority: 80
+    model_ref: broker-default
+
+routes:
+  - name: default
+    match:
+      task_kinds: [general, plan, build, review, qa]
+      scopes: [global, odin-core, project, new-project]
+    preferred: [codex_headless, claude_code_headless, openai_api]
+    fallback: [anthropic_api, openrouter_api]
+  - name: research
+    match:
+      task_kinds: [research]
+      scopes: [global, project, odin-core]
+    preferred: [gemini_cli_headless, google_api]
+    fallback: [openrouter_api]

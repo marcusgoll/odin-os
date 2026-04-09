@@ -1,2 +1,35 @@
-# Phase 01 placeholder.
-# Model registry and routing details are introduced in later phases.
+version: 1
+
+models:
+  - key: codex-latest
+    provider: openai
+    access: plan_backed_cli
+    adapter: codex_headless
+  - key: claude-code-latest
+    provider: anthropic
+    access: plan_backed_cli
+    adapter: claude_code_headless
+  - key: gemini-cli-latest
+    provider: google
+    access: plan_backed_cli
+    adapter: gemini_cli_headless
+  - key: gpt-5.4
+    provider: openai
+    access: api
+    adapter: openai_api
+  - key: claude-sonnet
+    provider: anthropic
+    access: api
+    adapter: anthropic_api
+  - key: gemini-pro
+    provider: google
+    access: api
+    adapter: google_api
+  - key: grok-latest
+    provider: xai
+    access: api
+    adapter: xai_api
+  - key: broker-default
+    provider: openrouter
+    access: broker
+    adapter: openrouter_api
