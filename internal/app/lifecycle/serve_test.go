@@ -140,6 +140,53 @@ service:
 	}
 }
 
+func TestRunServeExecutesStartupRecoveryWhenContextAlreadyCanceled(t *testing.T) {
+	t.Parallel()
+
+	root := createRuntimeRoot(t)
+	writeRuntimeConfig(t, root, `
+version: 1
+runtime:
+  root: .
+service:
+  http_addr: 127.0.0.1:0
+  startup_recovery: true
+`)
+
+	projectID, taskID, runID := seedRunningTask(t, root)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	var stdout bytes.Buffer
+	err := Run(ctx, root, []string{"serve"}, strings.NewReader(""), &stdout)
+	if err != nil && !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run(serve) error = %v", err)
+	}
+
+	store, openErr := sqlite.Open(filepath.Join(root, "data", "odin.db"))
+	if openErr != nil {
+		t.Fatalf("sqlite.Open() error = %v", openErr)
+	}
+	defer store.Close()
+
+	gotRun, err := store.GetRun(context.Background(), runID)
+	if err != nil {
+		t.Fatalf("GetRun() error = %v", err)
+	}
+	if gotRun.Status != "interrupted" {
+		t.Fatalf("GetRun().Status = %q, want %q", gotRun.Status, "interrupted")
+	}
+
+	packet, err := store.GetLatestTaskWakePacket(context.Background(), projectID, taskID)
+	if err != nil {
+		t.Fatalf("GetLatestTaskWakePacket() error = %v", err)
+	}
+	if packet.Trigger != string(checkpoints.TriggerRestart) {
+		t.Fatalf("WakePacket.Trigger = %q, want %q", packet.Trigger, checkpoints.TriggerRestart)
+	}
+}
+
 func TestRunServeRunsSelfHealCycleBeforeShutdown(t *testing.T) {
 	t.Parallel()
 
@@ -175,6 +222,7 @@ service:
 	}()
 
 	ctx, cancel := context.WithCancel(context.Background())
+	actionObserved := make(chan struct{})
 	time.AfterFunc(30*time.Millisecond, func() {
 		staleAt := time.Now().Add(-2 * time.Hour).UTC().Format(time.RFC3339Nano)
 		if _, err := store.DB().ExecContext(context.Background(), `
@@ -185,7 +233,35 @@ service:
 			t.Errorf("force stale projection freshness error = %v", err)
 		}
 	})
-	time.AfterFunc(140*time.Millisecond, cancel)
+	go func() {
+		deadline := time.NewTimer(2 * time.Second)
+		defer deadline.Stop()
+
+		ticker := time.NewTicker(10 * time.Millisecond)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-deadline.C:
+				cancel()
+				return
+			case <-ticker.C:
+				events, err := store.ListEvents(context.Background(), sqlite.ListEventsParams{})
+				if err != nil {
+					continue
+				}
+				for _, event := range events {
+					if string(event.Type) == "recovery.action_executed" {
+						close(actionObserved)
+						cancel()
+						return
+					}
+				}
+			}
+		}
+	}()
 
 	var stdout bytes.Buffer
 	err = Run(ctx, root, []string{"serve"}, strings.NewReader(""), &stdout)
@@ -197,6 +273,12 @@ service:
 	if err != nil {
 		t.Fatalf("ListEvents() error = %v", err)
 	}
+
+	select {
+	case <-actionObserved:
+	default:
+	}
+
 	found := false
 	for _, event := range events {
 		if string(event.Type) == "recovery.action_executed" {

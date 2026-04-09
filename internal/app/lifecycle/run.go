@@ -10,6 +10,7 @@ import (
 	stdhttp "net/http"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	apihttp "odin-os/internal/api/http"
@@ -42,7 +43,12 @@ func Run(ctx context.Context, root string, args []string, stdin io.Reader, stdou
 		return err
 	}
 
-	app, err := bootstrap.Load(ctx, root, cfg.RuntimeRoot)
+	loadCtx := ctx
+	if len(args) > 0 && args[0] == "serve" {
+		loadCtx = context.WithoutCancel(ctx)
+	}
+
+	app, err := bootstrap.Load(loadCtx, root, cfg.RuntimeRoot)
 	if err != nil {
 		return err
 	}
@@ -122,8 +128,10 @@ func runtimeEnv() map[string]string {
 }
 
 func runServe(ctx context.Context, app bootstrap.App, cfg appconfig.Config, stdout io.Writer) error {
+	operationCtx := context.WithoutCancel(ctx)
+
 	if cfg.Service.StartupRecovery {
-		result, err := recovery.Service{Store: app.Store}.RunStartupRecovery(ctx)
+		result, err := recovery.Service{Store: app.Store}.RunStartupRecovery(operationCtx)
 		if err != nil {
 			return err
 		}
@@ -163,15 +171,17 @@ func runServe(ctx context.Context, app bootstrap.App, cfg appconfig.Config, stdo
 		Logger:          logger,
 	}
 
-	if err := jobService.ExecuteNextQueued(ctx); err != nil {
+	if err := jobService.ExecuteNextQueued(operationCtx); err != nil {
 		logBackgroundError(logger, "task_runner", err)
 	}
-	if _, err := recoveryService.RunCycle(ctx); err != nil {
+	if _, err := recoveryService.RunCycle(operationCtx); err != nil {
 		logBackgroundError(logger, "self_heal", err)
 	}
 
-	go runTaskLoop(ctx, jobService, logger)
-	go runSelfHealLoop(ctx, recoveryService, logger)
+	var background sync.WaitGroup
+	background.Add(2)
+	go runTaskLoop(ctx, operationCtx, &background, jobService, logger)
+	go runSelfHealLoop(ctx, operationCtx, &background, recoveryService, logger)
 
 	listener, err := net.Listen("tcp", cfg.Service.HTTPAddr)
 	if err != nil {
@@ -206,6 +216,7 @@ func runServe(ctx context.Context, app bootstrap.App, cfg appconfig.Config, stdo
 
 	err = server.Serve(listener)
 	<-shutdownDone
+	background.Wait()
 	if errors.Is(err, stdhttp.ErrServerClosed) {
 		return ctx.Err()
 	}
@@ -229,7 +240,9 @@ func openServiceLogger(runtimeRoot string) (*logs.Logger, io.Closer, error) {
 	}, file, nil
 }
 
-func runTaskLoop(ctx context.Context, service jobs.Service, logger *logs.Logger) {
+func runTaskLoop(ctx context.Context, operationCtx context.Context, wg *sync.WaitGroup, service jobs.Service, logger *logs.Logger) {
+	defer wg.Done()
+
 	ticker := time.NewTicker(serveTaskLoopInterval)
 	defer ticker.Stop()
 
@@ -238,14 +251,16 @@ func runTaskLoop(ctx context.Context, service jobs.Service, logger *logs.Logger)
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if err := service.ExecuteNextQueued(ctx); err != nil {
+			if err := service.ExecuteNextQueued(operationCtx); err != nil {
 				logBackgroundError(logger, "task_runner", err)
 			}
 		}
 	}
 }
 
-func runSelfHealLoop(ctx context.Context, service recovery.Service, logger *logs.Logger) {
+func runSelfHealLoop(ctx context.Context, operationCtx context.Context, wg *sync.WaitGroup, service recovery.Service, logger *logs.Logger) {
+	defer wg.Done()
+
 	ticker := time.NewTicker(serveSelfHealLoopInterval)
 	defer ticker.Stop()
 
@@ -254,7 +269,7 @@ func runSelfHealLoop(ctx context.Context, service recovery.Service, logger *logs
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if _, err := service.RunCycle(ctx); err != nil {
+			if _, err := service.RunCycle(operationCtx); err != nil {
 				logBackgroundError(logger, "self_heal", err)
 			}
 		}
