@@ -212,6 +212,39 @@ type ListContextPacketsParams struct {
 	Status      string
 }
 
+type WorktreeLease struct {
+	ID           int64
+	ProjectID    int64
+	TaskID       int64
+	RunID        int64
+	Mode         string
+	BranchName   string
+	WorktreePath string
+	RepoRoot     string
+	State        string
+	HeartbeatAt  time.Time
+	ReleasedAt   *time.Time
+	CleanedUpAt  *time.Time
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
+}
+
+type CreateWorktreeLeaseParams struct {
+	ProjectID    int64
+	TaskID       int64
+	RunID        int64
+	Mode         string
+	BranchName   string
+	WorktreePath string
+	RepoRoot     string
+	State        string
+}
+
+type ReleaseWorktreeLeaseParams struct {
+	LeaseID int64
+	State   string
+}
+
 type ListEventsParams struct {
 	ProjectID *int64
 	TaskID    *int64

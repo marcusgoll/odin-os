@@ -3,6 +3,9 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"errors"
+	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -10,6 +13,8 @@ import (
 
 	_ "modernc.org/sqlite"
 )
+
+var ErrWorktreeLeaseConflict = errors.New("worktree lease conflict")
 
 type Store struct {
 	db        *sql.DB
@@ -949,6 +954,211 @@ func (store *Store) GetLatestTaskWakePacket(ctx context.Context, projectID int64
 	return scanContextPacket(row)
 }
 
+func (store *Store) CreateWorktreeLease(ctx context.Context, params CreateWorktreeLeaseParams) (WorktreeLease, error) {
+	now := store.now()
+	var lease WorktreeLease
+	state := params.State
+	if state == "" {
+		state = "active"
+	}
+
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		result, err := tx.ExecContext(ctx, `
+			INSERT INTO worktree_leases (
+				project_id,
+				task_id,
+				run_id,
+				mode,
+				branch_name,
+				worktree_path,
+				repo_root,
+				state,
+				heartbeat_at,
+				released_at,
+				cleaned_up_at,
+				created_at,
+				updated_at
+			)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?)
+		`,
+			params.ProjectID,
+			params.TaskID,
+			params.RunID,
+			params.Mode,
+			params.BranchName,
+			params.WorktreePath,
+			params.RepoRoot,
+			state,
+			formatTime(now),
+			formatTime(now),
+			formatTime(now),
+		)
+		if err != nil {
+			return mapWorktreeLeaseError(err)
+		}
+
+		leaseID, err := result.LastInsertId()
+		if err != nil {
+			return err
+		}
+
+		lease = WorktreeLease{
+			ID:           leaseID,
+			ProjectID:    params.ProjectID,
+			TaskID:       params.TaskID,
+			RunID:        params.RunID,
+			Mode:         params.Mode,
+			BranchName:   params.BranchName,
+			WorktreePath: params.WorktreePath,
+			RepoRoot:     params.RepoRoot,
+			State:        state,
+			HeartbeatAt:  now,
+			CreatedAt:    now,
+			UpdatedAt:    now,
+		}
+
+		return nil
+	})
+
+	return lease, err
+}
+
+func (store *Store) HeartbeatWorktreeLease(ctx context.Context, leaseID int64) (WorktreeLease, error) {
+	now := store.now()
+	if _, err := store.db.ExecContext(ctx, `
+		UPDATE worktree_leases
+		SET heartbeat_at = ?, updated_at = ?
+		WHERE id = ?
+	`, formatTime(now), formatTime(now), leaseID); err != nil {
+		return WorktreeLease{}, err
+	}
+
+	return store.GetWorktreeLease(ctx, leaseID)
+}
+
+func (store *Store) ReleaseWorktreeLease(ctx context.Context, params ReleaseWorktreeLeaseParams) (WorktreeLease, error) {
+	now := store.now()
+	state := params.State
+	if state == "" {
+		state = "released"
+	}
+
+	if _, err := store.db.ExecContext(ctx, `
+		UPDATE worktree_leases
+		SET state = ?, released_at = ?, updated_at = ?
+		WHERE id = ?
+	`, state, formatTime(now), formatTime(now), params.LeaseID); err != nil {
+		return WorktreeLease{}, err
+	}
+
+	return store.GetWorktreeLease(ctx, params.LeaseID)
+}
+
+func (store *Store) GetWorktreeLease(ctx context.Context, leaseID int64) (WorktreeLease, error) {
+	row := store.db.QueryRowContext(ctx, `
+		SELECT
+			id,
+			project_id,
+			task_id,
+			run_id,
+			mode,
+			branch_name,
+			worktree_path,
+			repo_root,
+			state,
+			heartbeat_at,
+			released_at,
+			cleaned_up_at,
+			created_at,
+			updated_at
+		FROM worktree_leases
+		WHERE id = ?
+	`, leaseID)
+	return scanWorktreeLease(row)
+}
+
+func (store *Store) GetActiveWorktreeLeaseByTaskRun(ctx context.Context, taskID int64, runID int64) (WorktreeLease, error) {
+	row := store.db.QueryRowContext(ctx, `
+		SELECT
+			id,
+			project_id,
+			task_id,
+			run_id,
+			mode,
+			branch_name,
+			worktree_path,
+			repo_root,
+			state,
+			heartbeat_at,
+			released_at,
+			cleaned_up_at,
+			created_at,
+			updated_at
+		FROM worktree_leases
+		WHERE task_id = ?
+		  AND run_id = ?
+		  AND state = 'active'
+		ORDER BY id DESC
+		LIMIT 1
+	`, taskID, runID)
+	return scanWorktreeLease(row)
+}
+
+func (store *Store) ListCleanupEligibleWorktreeLeases(ctx context.Context, staleBefore time.Time) ([]WorktreeLease, error) {
+	rows, err := store.db.QueryContext(ctx, `
+		SELECT
+			id,
+			project_id,
+			task_id,
+			run_id,
+			mode,
+			branch_name,
+			worktree_path,
+			repo_root,
+			state,
+			heartbeat_at,
+			released_at,
+			cleaned_up_at,
+			created_at,
+			updated_at
+		FROM worktree_leases
+		WHERE cleaned_up_at IS NULL
+		  AND (
+			state = 'released'
+			OR (state = 'active' AND heartbeat_at < ?)
+		  )
+		ORDER BY id ASC
+	`, formatTime(staleBefore))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var leases []WorktreeLease
+	for rows.Next() {
+		lease, err := scanWorktreeLease(rows)
+		if err != nil {
+			return nil, err
+		}
+		leases = append(leases, lease)
+	}
+
+	return leases, rows.Err()
+}
+
+func (store *Store) MarkWorktreeLeaseCleanedUp(ctx context.Context, leaseID int64) (WorktreeLease, error) {
+	now := store.now()
+	if _, err := store.db.ExecContext(ctx, `
+		UPDATE worktree_leases
+		SET state = 'cleaned', cleaned_up_at = ?, updated_at = ?
+		WHERE id = ?
+	`, formatTime(now), formatTime(now), leaseID); err != nil {
+		return WorktreeLease{}, err
+	}
+
+	return store.GetWorktreeLease(ctx, leaseID)
+}
+
 func (store *Store) ListEvents(ctx context.Context, params ListEventsParams) ([]runtimeevents.Record, error) {
 	query := `
 		SELECT id, stream_type, stream_id, event_type, event_version, scope, project_id, task_id, run_id, payload_json, occurred_at
@@ -1529,6 +1739,56 @@ func scanContextPacket(row interface{ Scan(...any) error }) (ContextPacket, erro
 	return packet, nil
 }
 
+func scanWorktreeLease(row interface{ Scan(...any) error }) (WorktreeLease, error) {
+	var lease WorktreeLease
+	var heartbeatAt string
+	var releasedAt sql.NullString
+	var cleanedUpAt sql.NullString
+	var createdAt string
+	var updatedAt string
+	if err := row.Scan(
+		&lease.ID,
+		&lease.ProjectID,
+		&lease.TaskID,
+		&lease.RunID,
+		&lease.Mode,
+		&lease.BranchName,
+		&lease.WorktreePath,
+		&lease.RepoRoot,
+		&lease.State,
+		&heartbeatAt,
+		&releasedAt,
+		&cleanedUpAt,
+		&createdAt,
+		&updatedAt,
+	); err != nil {
+		return WorktreeLease{}, err
+	}
+
+	var err error
+	lease.HeartbeatAt, err = parseTime(heartbeatAt)
+	if err != nil {
+		return WorktreeLease{}, err
+	}
+	lease.ReleasedAt, err = parseNullableTime(releasedAt)
+	if err != nil {
+		return WorktreeLease{}, err
+	}
+	lease.CleanedUpAt, err = parseNullableTime(cleanedUpAt)
+	if err != nil {
+		return WorktreeLease{}, err
+	}
+	lease.CreatedAt, err = parseTime(createdAt)
+	if err != nil {
+		return WorktreeLease{}, err
+	}
+	lease.UpdatedAt, err = parseTime(updatedAt)
+	if err != nil {
+		return WorktreeLease{}, err
+	}
+	return lease, nil
+}
+
 func scanEvent(rows *sql.Rows) (runtimeevents.Record, error) {
 	var record runtimeevents.Record
 	var streamType string
@@ -1567,6 +1827,18 @@ func scanEvent(rows *sql.Rows) (runtimeevents.Record, error) {
 	record.Payload = []byte(payload)
 	record.OccurredAt = parsed
 	return record, nil
+}
+
+func mapWorktreeLeaseError(err error) error {
+	if strings.Contains(err.Error(), "idx_worktree_leases_active_task") ||
+		strings.Contains(err.Error(), "idx_worktree_leases_active_branch") ||
+		strings.Contains(err.Error(), "idx_worktree_leases_active_path") ||
+		strings.Contains(err.Error(), "UNIQUE constraint failed: worktree_leases.project_id, worktree_leases.task_id") ||
+		strings.Contains(err.Error(), "UNIQUE constraint failed: worktree_leases.branch_name") ||
+		strings.Contains(err.Error(), "UNIQUE constraint failed: worktree_leases.worktree_path") {
+		return fmt.Errorf("%w: %v", ErrWorktreeLeaseConflict, err)
+	}
+	return err
 }
 
 func parseTime(value string) (time.Time, error) {
