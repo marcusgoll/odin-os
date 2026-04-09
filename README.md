@@ -1,6 +1,6 @@
 ---
 title: Odin OS
-phase: "06"
+phase: "07"
 status: active
 updated: 2026-04-09
 ---
@@ -30,4 +30,4 @@ This repository is the runtime root. `odin-orchestrator` is a migration source o
 
 ## Current Status
 
-Phase 00 through Phase 06 are in place. The repository now includes the authority docs, the target directory scaffold, the Markdown registry system, the baseline SQLite runtime store, authored project governance, the interactive Odin shell, and a model-agnostic executor contract with declarative routing plus skeletal adapter coverage for CLI, API, and broker lanes. Live provider execution and broader orchestration remain for later phases.
+Phase 00 through Phase 07 are in place. The repository now includes the authority docs, the target directory scaffold, the Markdown registry system, the baseline SQLite runtime store, project governance, the interactive Odin shell, the model-agnostic executor architecture, and a dynamic tool broker that exposes thin capability catalogs with budgeted expansion and planner-side integration. Broader orchestration and live provider execution remain for later phases.
