@@ -1,0 +1,16 @@
+[Unit]
+Description=Odin OS homelab runtime
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/odin-os
+EnvironmentFile=%h/.config/odin/odin.env
+ExecStart=%h/odin-os/bin/odin serve
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=15
+
+[Install]
+WantedBy=multi-user.target

@@ -1,2 +1,6 @@
-# Phase 01 placeholder.
-# The Odin runtime configuration schema is introduced in later phases.
+version: 1
+runtime:
+  root: .
+service:
+  http_addr: 127.0.0.1:9443
+  startup_recovery: true

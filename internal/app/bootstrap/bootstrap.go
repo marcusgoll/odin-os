@@ -17,15 +17,15 @@ type App struct {
 	SessionStore        repl.SessionStore
 }
 
-func Load(ctx context.Context, root string) (App, error) {
-	if err := os.MkdirAll(filepath.Join(root, "data"), 0o755); err != nil {
+func Load(ctx context.Context, repoRoot string, runtimeRoot string) (App, error) {
+	if err := os.MkdirAll(filepath.Join(runtimeRoot, "data"), 0o755); err != nil {
 		return App{}, err
 	}
-	if err := os.MkdirAll(filepath.Join(root, "state", "cache"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(runtimeRoot, "state", "cache"), 0o755); err != nil {
 		return App{}, err
 	}
 
-	store, err := sqlite.Open(filepath.Join(root, "data", "odin.db"))
+	store, err := sqlite.Open(filepath.Join(runtimeRoot, "data", "odin.db"))
 	if err != nil {
 		return App{}, err
 	}
@@ -35,7 +35,7 @@ func Load(ctx context.Context, root string) (App, error) {
 		return App{}, err
 	}
 
-	registry, diagnostics, err := projects.Register(filepath.Join(root, "config", "projects.yaml"))
+	registry, diagnostics, err := projects.Register(filepath.Join(repoRoot, "config", "projects.yaml"))
 	if err != nil {
 		_ = store.Close()
 		return App{}, err
@@ -46,7 +46,7 @@ func Load(ctx context.Context, root string) (App, error) {
 		Registry:            registry,
 		RegistryDiagnostics: diagnostics,
 		SessionStore: repl.SessionStore{
-			Path: filepath.Join(root, "state", "cache", "cli-session.json"),
+			Path: filepath.Join(runtimeRoot, "state", "cache", "cli-session.json"),
 		},
 	}, nil
 }

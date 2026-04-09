@@ -15,7 +15,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := lifecycle.Run(context.Background(), root, os.Stdin, os.Stdout); err != nil {
+	if err := lifecycle.Run(context.Background(), root, os.Args[1:], os.Stdin, os.Stdout); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}

@@ -322,6 +322,13 @@ func (store *Store) FinishRun(ctx context.Context, params FinishRunParams) (Run,
 		`, params.Status, formatTime(now), params.Summary, params.RunID); err != nil {
 			return err
 		}
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE tasks
+			SET current_run_id = NULL, updated_at = ?
+			WHERE id = ?
+		`, formatTime(now), task.ID); err != nil {
+			return err
+		}
 
 		current.Status = params.Status
 		current.FinishedAt = &now
@@ -1556,6 +1563,30 @@ func (store *Store) GetRun(ctx context.Context, runID int64) (Run, error) {
 		WHERE id = ?
 	`, runID)
 	return scanRun(row)
+}
+
+func (store *Store) ListRunsByStatus(ctx context.Context, status string) ([]Run, error) {
+	rows, err := store.db.QueryContext(ctx, `
+		SELECT id, task_id, executor, status, attempt, started_at, finished_at, summary
+		FROM runs
+		WHERE status = ?
+		ORDER BY started_at ASC, id ASC
+	`, status)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var runs []Run
+	for rows.Next() {
+		run, err := scanRun(rows)
+		if err != nil {
+			return nil, err
+		}
+		runs = append(runs, run)
+	}
+
+	return runs, rows.Err()
 }
 
 func (store *Store) GetApproval(ctx context.Context, approvalID int64) (Approval, error) {

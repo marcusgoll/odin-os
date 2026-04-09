@@ -56,11 +56,21 @@ projects:
 `), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
+	if err := os.WriteFile(filepath.Join(root, "config", "odin.yaml"), []byte(`
+version: 1
+runtime:
+  root: .
+service:
+  http_addr: 127.0.0.1:9443
+  startup_recovery: true
+`), 0o644); err != nil {
+		t.Fatalf("write odin config: %v", err)
+	}
 
 	stdin := strings.NewReader("/help\n")
 	var stdout bytes.Buffer
 
-	err := Run(context.Background(), root, stdin, &stdout)
+	err := Run(context.Background(), root, nil, stdin, &stdout)
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
