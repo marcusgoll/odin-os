@@ -7,7 +7,11 @@ type Registry struct {
 }
 
 func Register(path string) (Registry, []Diagnostic, error) {
-	cfg, err := LoadManifestFile(path)
+	return RegisterPaths(path)
+}
+
+func RegisterPaths(paths ...string) (Registry, []Diagnostic, error) {
+	cfg, err := LoadManifestFiles(paths...)
 	if err != nil {
 		return Registry{}, nil, err
 	}

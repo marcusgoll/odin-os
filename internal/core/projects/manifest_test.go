@@ -121,3 +121,102 @@ projects:
 		t.Fatalf("odin git root = %q, want %q", cfg.Projects[1].GitRoot, root)
 	}
 }
+
+func TestLoadManifestFilesMergesBaseAndOverlay(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	baseRoot := filepath.Join(root, "base")
+	overlayRoot := filepath.Join(root, "overlay")
+	alphaRoot := filepath.Join(root, "alpha")
+	for _, dir := range []string{baseRoot, overlayRoot, alphaRoot} {
+		if err := os.MkdirAll(filepath.Join(dir, ".git"), 0o755); err != nil {
+			t.Fatalf("mkdir git root: %v", err)
+		}
+	}
+
+	basePath := filepath.Join(root, "projects.yaml")
+	if err := os.WriteFile(basePath, []byte(`
+version: 1
+projects:
+  - key: odin-core
+    name: Odin Core
+    project_class: system_project
+    system_project: true
+    git_root: base
+    default_branch: main
+    policy:
+      allowed_commands: [status]
+      branch_rules:
+        protected_branches: [main]
+        require_worktree: true
+        require_task_branch: true
+        allow_default_branch_mutation: false
+      approval_gates:
+        require_for_governance_changes: true
+        require_for_destructive_operations: true
+        require_for_system_project_changes: true
+      merge_policy:
+        mode: squash
+        allow_direct_to_default_branch: false
+      destructive_operations:
+        allow_reset: false
+        allow_clean: false
+        allow_force_push: false
+        require_explicit_approval: true
+`), 0o644); err != nil {
+		t.Fatalf("write base manifest: %v", err)
+	}
+
+	overlayPath := filepath.Join(root, "projects.overlay.yaml")
+	if err := os.WriteFile(overlayPath, []byte(`
+version: 1
+projects:
+  - key: alpha
+    name: Alpha
+    project_class: github_backed_project
+    git_root: alpha
+    default_branch: main
+    github:
+      repo: acme/alpha
+    policy:
+      allowed_commands: [status]
+      branch_rules:
+        protected_branches: [main]
+        require_worktree: true
+        require_task_branch: true
+        allow_default_branch_mutation: false
+      approval_gates:
+        require_for_governance_changes: true
+        require_for_destructive_operations: true
+        require_for_system_project_changes: false
+      merge_policy:
+        mode: squash
+        allow_direct_to_default_branch: false
+      destructive_operations:
+        allow_reset: false
+        allow_clean: false
+        allow_force_push: false
+        require_explicit_approval: true
+`), 0o644); err != nil {
+		t.Fatalf("write overlay manifest: %v", err)
+	}
+
+	cfg, err := LoadManifestFiles(basePath, overlayPath)
+	if err != nil {
+		t.Fatalf("LoadManifestFiles() error = %v", err)
+	}
+
+	if len(cfg.Projects) != 2 {
+		t.Fatalf("project count = %d, want 2", len(cfg.Projects))
+	}
+	if cfg.Projects[0].Key != "odin-core" {
+		t.Fatalf("projects[0].Key = %q, want odin-core", cfg.Projects[0].Key)
+	}
+	if cfg.Projects[1].Key != "alpha" {
+		t.Fatalf("projects[1].Key = %q, want alpha", cfg.Projects[1].Key)
+	}
+	if cfg.Projects[1].GitRoot != alphaRoot {
+		t.Fatalf("alpha git root = %q, want %q", cfg.Projects[1].GitRoot, alphaRoot)
+	}
+}

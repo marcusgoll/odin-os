@@ -56,7 +56,13 @@ func Load(ctx context.Context, repoRoot string, runtimeRoot string) (App, error)
 		return App{}, err
 	}
 
-	registry, diagnostics, err := projects.Register(filepath.Join(repoRoot, "config", "projects.yaml"))
+	registryPaths, err := projectManifestPaths(repoRoot)
+	if err != nil {
+		_ = store.Close()
+		return App{}, err
+	}
+
+	registry, diagnostics, err := projects.RegisterPaths(registryPaths...)
 	if err != nil {
 		_ = store.Close()
 		return App{}, err
@@ -93,6 +99,25 @@ func Load(ctx context.Context, repoRoot string, runtimeRoot string) (App, error)
 		ExecutorConfig: executorConfig,
 		Executors:      executors,
 	}, nil
+}
+
+func projectManifestPaths(repoRoot string) ([]string, error) {
+	paths := []string{filepath.Join(repoRoot, "config", "projects.yaml")}
+
+	if overlay := os.Getenv("ODIN_PROJECTS_OVERLAY"); overlay != "" {
+		paths = append(paths, overlay)
+		return paths, nil
+	}
+
+	localOverlay := filepath.Join(repoRoot, "config", "projects.local.yaml")
+	if _, err := os.Stat(localOverlay); err == nil {
+		paths = append(paths, localOverlay)
+		return paths, nil
+	} else if !os.IsNotExist(err) {
+		return nil, err
+	}
+
+	return paths, nil
 }
 
 func initializeReadinessState(ctx context.Context, store *sqlite.Store, registryRoot string, snapshot registry.Snapshot, executors map[string]contract.Executor) error {

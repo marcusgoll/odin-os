@@ -2,14 +2,16 @@
 
 ## Scope
 
-This audit covers shadow-only onboarding for `family-ops` on the operational line, with `pbs` restored as a second real managed GitHub-backed project in the same manifest set. No limited-action authority was enabled.
+This audit covers shadow-only onboarding for `family-ops` on the operational line using a machine-local project overlay. `pbs` was included in the same overlay so Odin could supervise more than one real external project without putting machine-specific paths into canonical repo config. No limited-action authority was enabled.
 
 ## Changes
 
-- added `pbs` back to `config/projects.yaml` as a conservative GitHub-backed project
-- added `family-ops` to `config/projects.yaml` as a conservative GitHub-backed project
+- kept `config/projects.yaml` portable and canonical
+- added optional project-overlay support through `ODIN_PROJECTS_OVERLAY` and `config/projects.local.yaml`
 - added multi-project shell coverage in `internal/cli/repl/shell_test.go`
-- added real-config coverage in `tests/integration/alpha_acceptance_test.go`
+- added manifest merge coverage in `internal/core/projects/manifest_test.go`
+- added bootstrap overlay coverage in `internal/app/bootstrap/bootstrap_test.go`
+- added operator documentation in `docs/operations/project-overlays.md`
 
 ## Live Verification
 
@@ -28,7 +30,7 @@ The interactive shell successfully resolved both:
 - `/project pbs`
 - `/project family-ops`
 
-That confirms the manifest loaded both external projects on this branch.
+That confirms the overlay-loaded registry contained both external projects for this machine without changing the canonical manifest.
 
 ### Transition and observe/compare behavior
 
@@ -99,7 +101,7 @@ Post-run shell output stayed coherent:
 
 `family-ops` is truly shadow-only on this branch.
 
-The operational line can now supervise more than one real external project without mutation:
+The operational line can now supervise more than one real external project without mutation when supplied with a machine-local overlay:
 
 - `pbs`
 - `family-ops`
@@ -108,7 +110,7 @@ The promoted action-key and lease infrastructure did not broaden operational aut
 
 ## Recommendation
 
-Go for broader shadow-only onboarding of additional projects.
+Go for broader shadow-only onboarding of additional projects through local overlays.
 
 Do not broaden limited-action on the operational line yet.
 

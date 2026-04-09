@@ -17,23 +17,19 @@
 
 **Step 1: Add `family-ops` as a conservative GitHub-backed project**
 
-Add a new `projects:` entry with:
+Keep `config/projects.yaml` canonical.
 
-- `key: family-ops`
-- `name: Family Ops`
-- `project_class: github_backed_project`
-- `git_root: /home/orchestrator/family-ops`
-- `default_branch: main`
-- `github.repo: marcusgoll/family-ops`
-- conservative policy matching `pbs`
-- no `limited_actions`
+Implement local project-overlay support so machine-local projects can be loaded from:
+
+- `ODIN_PROJECTS_OVERLAY`
+- `config/projects.local.yaml`
 
 **Step 2: Run the focused manifest validation test**
 
 Run:
 
 ```bash
-go test ./internal/core/projects -count=1
+go test ./internal/core/projects ./internal/app/bootstrap -count=1
 ```
 
 Expected: PASS
@@ -41,8 +37,8 @@ Expected: PASS
 **Step 3: Commit**
 
 ```bash
-git add config/projects.yaml
-git commit -m "chore: add family-ops shadow manifest"
+git add .gitignore internal/core/projects/manifest.go internal/core/projects/register.go internal/app/bootstrap/bootstrap.go internal/core/projects/manifest_test.go internal/app/bootstrap/bootstrap_test.go docs/operations/project-overlays.md
+git commit -m "feat: add local project overlay support"
 ```
 
 ### Task 2: Add Multi-Project Shadow Scope Coverage
@@ -91,7 +87,7 @@ git add internal/cli/repl/shell_test.go
 git commit -m "test: cover multi-project shadow scope behavior"
 ```
 
-### Task 3: Run the Real Family-Ops Shadow Smoke
+### Task 3: Run the Real Family-Ops Shadow Smoke Through a Local Overlay
 
 **Files:**
 - Create: `docs/audits/phase-23a-second-project-shadow-onboarding.md`
@@ -108,7 +104,7 @@ Expected: PASS
 
 **Step 2: Create a fresh runtime root and run the CLI smoke**
 
-Run a fresh `ODIN_ROOT` through:
+Create a machine-local overlay manifest containing `pbs` and `family-ops`, then run a fresh `ODIN_ROOT` through:
 
 - `./bin/odin doctor --json`
 - `/project family-ops`

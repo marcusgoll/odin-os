@@ -1,6 +1,7 @@
 package projects
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 
@@ -95,6 +96,26 @@ func LoadManifestFile(path string) (Config, error) {
 	}
 
 	return cfg, nil
+}
+
+func LoadManifestFiles(paths ...string) (Config, error) {
+	if len(paths) == 0 {
+		return Config{}, fmt.Errorf("at least one manifest path is required")
+	}
+
+	merged := Config{}
+	for _, manifestPath := range paths {
+		cfg, err := LoadManifestFile(manifestPath)
+		if err != nil {
+			return Config{}, err
+		}
+		if merged.Version == 0 {
+			merged.Version = cfg.Version
+		}
+		merged.Projects = append(merged.Projects, cfg.Projects...)
+	}
+
+	return merged, nil
 }
 
 func resolveGitRoot(baseDir, gitRoot string) string {

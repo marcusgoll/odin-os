@@ -64,15 +64,14 @@ The runtime and CLI already support shadow-mode supervision. The missing proof i
 
 ### Manifest
 
-Add `family-ops` to `config/projects.yaml` as a `github_backed_project` with:
+Keep `config/projects.yaml` canonical and portable.
 
-- `git_root: /home/orchestrator/family-ops`
-- `default_branch: main`
-- `github.repo: marcusgoll/family-ops`
-- conservative policy matching `pbs`
-- no `limited_actions`
+Load `pbs` and `family-ops` through a machine-local overlay instead:
 
-That keeps main operationally shadow-only.
+- `ODIN_PROJECTS_OVERLAY` when explicitly set
+- `config/projects.local.yaml` when present on one machine
+
+That keeps main operationally shadow-only without hard-coding machine-local repo roots into canonical config.
 
 ### Test Coverage
 

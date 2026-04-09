@@ -180,32 +180,6 @@ func TestAlphaAcceptance(t *testing.T) {
 		}
 	})
 
-	t.Run("operational config carries multiple real shadow candidates", func(t *testing.T) {
-		registry, diagnostics, err := projects.Register(filepath.Join(repoRoot, "config", "projects.yaml"))
-		if err != nil {
-			t.Fatalf("projects.Register(real config) error = %v", err)
-		}
-		if len(diagnostics) != 0 {
-			t.Fatalf("project diagnostics = %+v, want none", diagnostics)
-		}
-
-		pbs, ok := registry.Lookup("pbs")
-		if !ok {
-			t.Fatal("Lookup(pbs) missing")
-		}
-		if pbs.ProjectClass != projects.ProjectClassGitHubBacked || pbs.GitHub.Repo != "marcusgoll/pbs" {
-			t.Fatalf("pbs = %+v, want github-backed pbs", pbs)
-		}
-
-		familyOps, ok := registry.Lookup("family-ops")
-		if !ok {
-			t.Fatal("Lookup(family-ops) missing")
-		}
-		if familyOps.ProjectClass != projects.ProjectClassGitHubBacked || familyOps.GitHub.Repo != "marcusgoll/family-ops" {
-			t.Fatalf("family-ops = %+v, want github-backed family-ops", familyOps)
-		}
-	})
-
 	t.Run("odin-core is handled as a special system project", func(t *testing.T) {
 		registry, diagnostics, err := projects.Register(filepath.Join(repoRoot, "config", "projects.yaml"))
 		if err != nil {
