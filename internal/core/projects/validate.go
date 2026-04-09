@@ -3,6 +3,7 @@ package projects
 import (
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 )
@@ -124,8 +125,27 @@ func validatePolicy(project Manifest, addDiagnostic func(code string, format str
 		if len(rule.PathPrefixes) == 0 {
 			addDiagnostic("invalid_limited_action", "policy.limited_actions.%s.path_prefixes is required for %q", key, project.Key)
 		}
+		normalizedPrefixes := make([]string, 0, len(rule.PathPrefixes))
+		for index, prefix := range rule.PathPrefixes {
+			normalizedPrefix, err := normalizeRepoRelativePath(prefix)
+			if err != nil {
+				addDiagnostic("invalid_limited_action", "policy.limited_actions.%s.path_prefixes[%d] %q is invalid for %q: %v", key, index, prefix, project.Key, err)
+				continue
+			}
+			normalizedPrefixes = append(normalizedPrefixes, normalizedPrefix)
+		}
 		if rule.ContentMode == "" {
 			addDiagnostic("invalid_limited_action", "policy.limited_actions.%s.content_mode is required for %q", key, project.Key)
+		}
+
+		normalizedTarget := ""
+		if rule.TargetPath != "" {
+			targetPath, err := normalizeRepoRelativePath(rule.TargetPath)
+			if err != nil {
+				addDiagnostic("invalid_limited_action", "policy.limited_actions.%s.target_path %q is invalid for %q: %v", key, rule.TargetPath, project.Key, err)
+			} else {
+				normalizedTarget = targetPath
+			}
 		}
 
 		switch key {
@@ -142,7 +162,7 @@ func validatePolicy(project Manifest, addDiagnostic func(code string, format str
 			}
 		}
 
-		if rule.TargetPath != "" && !pathAllowedByPrefixes(rule.TargetPath, rule.PathPrefixes) {
+		if normalizedTarget != "" && !pathAllowedByPrefixes(normalizedTarget, normalizedPrefixes) {
 			addDiagnostic("invalid_limited_action", "policy.limited_actions.%s.target_path %q must be covered by path_prefixes for %q", key, rule.TargetPath, project.Key)
 		}
 	}
@@ -207,9 +227,33 @@ func isGitRepository(root string) bool {
 
 func pathAllowedByPrefixes(target string, prefixes []string) bool {
 	for _, prefix := range prefixes {
-		if strings.HasPrefix(target, prefix) {
+		if target == prefix || strings.HasPrefix(target, prefix+"/") {
 			return true
 		}
 	}
 	return false
+}
+
+func normalizeRepoRelativePath(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", fmt.Errorf("must not be empty")
+	}
+	if strings.Contains(raw, "\\") {
+		return "", fmt.Errorf("must use forward slashes")
+	}
+	if path.IsAbs(raw) {
+		return "", fmt.Errorf("must be repo-relative")
+	}
+	for _, segment := range strings.Split(raw, "/") {
+		if segment == ".." {
+			return "", fmt.Errorf("must not contain parent-directory traversal")
+		}
+	}
+
+	cleaned := path.Clean(raw)
+	if cleaned == "." || cleaned == ".." || strings.HasPrefix(cleaned, "../") {
+		return "", fmt.Errorf("must resolve inside the repository")
+	}
+	return cleaned, nil
 }
