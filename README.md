@@ -1,6 +1,6 @@
 ---
 title: Odin OS
-phase: "11"
+phase: "12"
 status: active
 updated: 2026-04-09
 ---
@@ -30,4 +30,4 @@ This repository is the runtime root. `odin-orchestrator` is a migration source o
 
 ## Current Status
 
-Phase 00 through Phase 11 are in place. The repository now includes the authority docs, the target directory scaffold, the Markdown registry system, the baseline SQLite runtime store, project governance, the interactive Odin shell, the model-agnostic executor architecture, the dynamic tool broker, structured context compaction with append-only wake packets, a task-owned Git worktree plus lease model for isolated multi-agent mutation, first-class observability surfaces for logs, health, metrics, incidents, recoveries, and operator projections, and deterministic self-heal playbooks with bounded retries and escalation. Broader orchestration and live provider execution remain for later phases.
+Phase 00 through Phase 12 are in place. The repository now includes the authority docs, the target directory scaffold, the Markdown registry system, the baseline SQLite runtime store, project governance, the interactive Odin shell, the model-agnostic executor architecture, the dynamic tool broker, structured context compaction with append-only wake packets, a task-owned Git worktree plus lease model for isolated multi-agent mutation, first-class observability surfaces for logs, health, metrics, incidents, recoveries, and operator projections, deterministic self-heal playbooks with bounded retries and escalation, and a migration extractor that inventories `odin-orchestrator`, flags likely duplicates and backups, and can emit review-only draft registry assets under `state/migration/`. Broader orchestration and live provider execution remain for later phases.

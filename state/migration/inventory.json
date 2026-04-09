@@ -1,0 +1,3744 @@
+{
+  "source_root": "/home/orchestrator/odin-orchestrator",
+  "candidates": [
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.agents/skills/brand-ad-generator/SKILL.md",
+      "relative_path": ".agents/skills/brand-ad-generator/SKILL.md",
+      "kind": "skill",
+      "key": "brand-ad-generator",
+      "title": "Brand Ad Generator",
+      "content_hash": "f6d08767c713367ef70a1a093a56b557a314989385370d85fc770e415aece9a4",
+      "path_signals": [
+        "agents_root"
+      ],
+      "classification": "rewrite",
+      "rationale": "legacy asset needs normalization into the new contract",
+      "duplicate_group": "dup-7ef795910f990dd3"
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.agents/skills/claude-api/SKILL.md",
+      "relative_path": ".agents/skills/claude-api/SKILL.md",
+      "kind": "skill",
+      "key": "claude-api",
+      "title": "Building LLM-Powered Applications with Claude",
+      "content_hash": "bdbd2080d675adb18d961a46d1bd6e3a3d26806bfda7c6cd36e6de638d18f6ac",
+      "path_signals": [
+        "agents_root"
+      ],
+      "classification": "rewrite",
+      "rationale": "legacy asset needs normalization into the new contract",
+      "duplicate_group": "dup-8a26d51283c36ec8"
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.agents/skills/claude-api/shared/prompt-caching.md",
+      "relative_path": ".agents/skills/claude-api/shared/prompt-caching.md",
+      "kind": "prompt",
+      "key": "prompt-caching",
+      "title": "Prompt Caching — Design \u0026 Optimization",
+      "content_hash": "b1edaacebd8eaccd2de9522e543ae34cac6eadf10eabfc56555dff098badec0a",
+      "path_signals": [
+        "agents_root"
+      ],
+      "classification": "rewrite",
+      "rationale": "legacy asset needs normalization into the new contract",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.agents/skills/mcp-builder/SKILL.md",
+      "relative_path": ".agents/skills/mcp-builder/SKILL.md",
+      "kind": "skill",
+      "key": "mcp-builder",
+      "title": "MCP Server Development Guide",
+      "content_hash": "0f4592dcb53cf2b5d6b7febee6b4152018b565551a1c29e3c612f57b218ab295",
+      "path_signals": [
+        "agents_root"
+      ],
+      "classification": "rewrite",
+      "rationale": "legacy asset needs normalization into the new contract",
+      "duplicate_group": "dup-48973ad0cbf3efd6"
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.agents/skills/odin-control-plane-contract-checks/SKILL.md",
+      "relative_path": ".agents/skills/odin-control-plane-contract-checks/SKILL.md",
+      "kind": "skill",
+      "key": "odin-control-plane-contract-checks",
+      "title": "Odin Control Plane Contract Checks",
+      "content_hash": "3a71ae5c5e93daa063295ae8f6a37d793478ea2b934d4ada5ddb207a7818fde6",
+      "path_signals": [
+        "agents_root"
+      ],
+      "classification": "rewrite",
+      "rationale": "legacy asset needs normalization into the new contract",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.agents/skills/skill-creator/SKILL.md",
+      "relative_path": ".agents/skills/skill-creator/SKILL.md",
+      "kind": "skill",
+      "key": "skill-creator",
+      "title": "Skill Creator",
+      "content_hash": "dcd4803e61e913e6fc27294184cd3a71f09f5e924ff20c8a9a20173e7b3c2bcf",
+      "path_signals": [
+        "agents_root"
+      ],
+      "classification": "rewrite",
+      "rationale": "legacy asset needs normalization into the new contract",
+      "duplicate_group": "dup-e75d79b8cd5e5516"
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.agents/skills/slack-gif-creator/SKILL.md",
+      "relative_path": ".agents/skills/slack-gif-creator/SKILL.md",
+      "kind": "skill",
+      "key": "slack-gif-creator",
+      "title": "Slack GIF Creator",
+      "content_hash": "2efca615ce55a3edd8fc05c779068a8085816617991987e446606403cd3abb22",
+      "path_signals": [
+        "agents_root"
+      ],
+      "classification": "rewrite",
+      "rationale": "legacy asset needs normalization into the new contract",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.agents/skills/upgrade-stripe/SKILL.md",
+      "relative_path": ".agents/skills/upgrade-stripe/SKILL.md",
+      "kind": "skill",
+      "key": "upgrade-stripe",
+      "title": "Upgrading Stripe Versions",
+      "content_hash": "11961cac880180a1095ec6ca2eef766dc33e392aabde590e57ea44684288ede2",
+      "path_signals": [
+        "agents_root"
+      ],
+      "classification": "rewrite",
+      "rationale": "legacy asset needs normalization into the new contract",
+      "duplicate_group": "dup-ac80efa2b3b6105c"
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.agents/skills/webapp-testing/SKILL.md",
+      "relative_path": ".agents/skills/webapp-testing/SKILL.md",
+      "kind": "skill",
+      "key": "webapp-testing",
+      "title": "Web Application Testing",
+      "content_hash": "51b7349e77ec63b7744a6f63647e7566a0b4d2e301121cc10e8c2113af6556a2",
+      "path_signals": [
+        "agents_root"
+      ],
+      "classification": "rewrite",
+      "rationale": "legacy asset needs normalization into the new contract",
+      "duplicate_group": "dup-676310a60fc80ed7"
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/agent-designer/SKILL.md",
+      "relative_path": ".claude/skills/agent-designer/SKILL.md",
+      "kind": "skill",
+      "key": "agent-designer",
+      "title": "Agent Designer - Multi-Agent System Architecture",
+      "content_hash": "45502e68e9de1f7a1c648c091fea368b4dd5d7bb9153cdd23ffa57d31b7cb88d",
+      "path_signals": [
+        "claude_root"
+      ],
+      "classification": "rewrite",
+      "rationale": "legacy asset needs normalization into the new contract",
+      "duplicate_group": "dup-eb7149fa843cf106",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/agent-workflow-designer/SKILL.md",
+      "relative_path": ".claude/skills/agent-workflow-designer/SKILL.md",
+      "kind": "skill",
+      "key": "agent-workflow-designer",
+      "title": "Agent Workflow Designer",
+      "content_hash": "1948cf4d936782c7cb1ce4135c6cd22773fd169d60a3669873c691ffda28fe69",
+      "path_signals": [
+        "claude_root"
+      ],
+      "classification": "rewrite",
+      "rationale": "legacy asset needs normalization into the new contract",
+      "duplicate_group": "dup-ecce09658358a267",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/agents-skills-backup/agent-designer/SKILL.md",
+      "relative_path": ".claude/skills/agents-skills-backup/agent-designer/SKILL.md",
+      "kind": "skill",
+      "key": "agent-designer",
+      "title": "Agent Designer - Multi-Agent System Architecture",
+      "content_hash": "45502e68e9de1f7a1c648c091fea368b4dd5d7bb9153cdd23ffa57d31b7cb88d",
+      "path_signals": [
+        "claude_root",
+        "backup_path"
+      ],
+      "classification": "archive",
+      "rationale": "backup or worktree path is not canonical",
+      "duplicate_group": "dup-eb7149fa843cf106"
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/agents-skills-backup/agent-workflow-designer/SKILL.md",
+      "relative_path": ".claude/skills/agents-skills-backup/agent-workflow-designer/SKILL.md",
+      "kind": "skill",
+      "key": "agent-workflow-designer",
+      "title": "Agent Workflow Designer",
+      "content_hash": "1948cf4d936782c7cb1ce4135c6cd22773fd169d60a3669873c691ffda28fe69",
+      "path_signals": [
+        "claude_root",
+        "backup_path"
+      ],
+      "classification": "archive",
+      "rationale": "backup or worktree path is not canonical",
+      "duplicate_group": "dup-ecce09658358a267"
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/agents-skills-backup/api-design-reviewer/SKILL.md",
+      "relative_path": ".claude/skills/agents-skills-backup/api-design-reviewer/SKILL.md",
+      "kind": "skill",
+      "key": "api-design-reviewer",
+      "title": "API Design Reviewer",
+      "content_hash": "4e327e206a34868d7e5d3c773cf02833c1198f76aa51b6cc0e7c5c407b1791a7",
+      "path_signals": [
+        "claude_root",
+        "backup_path"
+      ],
+      "classification": "archive",
+      "rationale": "backup or worktree path is not canonical",
+      "duplicate_group": "dup-627becc0f6d5bd05"
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/agents-skills-backup/api-test-suite-builder/SKILL.md",
+      "relative_path": ".claude/skills/agents-skills-backup/api-test-suite-builder/SKILL.md",
+      "kind": "skill",
+      "key": "api-test-suite-builder",
+      "title": "API Test Suite Builder",
+      "content_hash": "2a076f52d5ee590c2cf77e8ad1714ee60cac84b5fe420e1f436956b5190d7dbe",
+      "path_signals": [
+        "claude_root",
+        "backup_path"
+      ],
+      "classification": "archive",
+      "rationale": "backup or worktree path is not canonical",
+      "duplicate_group": "dup-7d325c8095923533"
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/agents-skills-backup/blog-writer/SKILL.md",
+      "relative_path": ".claude/skills/agents-skills-backup/blog-writer/SKILL.md",
+      "kind": "skill",
+      "key": "blog-writer",
+      "title": "Blog Writer",
+      "content_hash": "1a9e79856a2cc992909455c6aaed50ebdfee42e492e0333db04373192bc7f5ff",
+      "path_signals": [
+        "claude_root",
+        "backup_path"
+      ],
+      "classification": "archive",
+      "rationale": "backup or worktree path is not canonical",
+      "duplicate_group": "dup-9f61e955f8c1e491"
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/agents-skills-backup/changelog-generator/SKILL.md",
+      "relative_path": ".claude/skills/agents-skills-backup/changelog-generator/SKILL.md",
+      "kind": "skill",
+      "key": "changelog-generator",
+      "title": "Changelog Generator",
+      "content_hash": "e7620f5452313ecb75bfea33184287878fb9303cf45e014c82884d9b2caa103b",
+      "path_signals": [
+        "claude_root",
+        "backup_path"
+      ],
+      "classification": "archive",
+      "rationale": "backup or worktree path is not canonical",
+      "duplicate_group": "dup-e63ca1ea9b6df81f"
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/agents-skills-backup/ci-cd-pipeline-builder/SKILL.md",
+      "relative_path": ".claude/skills/agents-skills-backup/ci-cd-pipeline-builder/SKILL.md",
+      "kind": "skill",
+      "key": "ci-cd-pipeline-builder",
+      "title": "CI/CD Pipeline Builder",
+      "content_hash": "2c78b14b51b4544e1f2eab2aeb9ea6fd8be5902f197cd949904bc314290fafcc",
+      "path_signals": [
+        "claude_root",
+        "backup_path"
+      ],
+      "classification": "archive",
+      "rationale": "backup or worktree path is not canonical",
+      "duplicate_group": "dup-312726c67c815f26"
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/agents-skills-backup/code-reviewer/SKILL.md",
+      "relative_path": ".claude/skills/agents-skills-backup/code-reviewer/SKILL.md",
+      "kind": "skill",
+      "key": "code-reviewer",
+      "title": "Code Reviewer",
+      "content_hash": "428a98e3e3bd40043e76426aa2fa42c2c3bf3438623dd96d7105795c78cb1bc3",
+      "path_signals": [
+        "claude_root",
+        "backup_path"
+      ],
+      "classification": "archive",
+      "rationale": "backup or worktree path is not canonical",
+      "duplicate_group": "dup-233eddc523056283"
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/agents-skills-backup/codebase-onboarding/SKILL.md",
+      "relative_path": ".claude/skills/agents-skills-backup/codebase-onboarding/SKILL.md",
+      "kind": "skill",
+      "key": "codebase-onboarding",
+      "title": "Codebase Onboarding",
+      "content_hash": "0b678294ba81cf1e1907255be507eb9c885fceb98878db2428f567a40fb11e60",
+      "path_signals": [
+        "claude_root",
+        "backup_path"
+      ],
+      "classification": "archive",
+      "rationale": "backup or worktree path is not canonical",
+      "duplicate_group": "dup-fe2c9b208d6b7fa7"
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/agents-skills-backup/dependency-auditor/SKILL.md",
+      "relative_path": ".claude/skills/agents-skills-backup/dependency-auditor/SKILL.md",
+      "kind": "skill",
+      "key": "dependency-auditor",
+      "title": "Dependency Auditor",
+      "content_hash": "2b34a457ace1deb1f682e9cf920ab6fe7b6cc9fbcab1bc3f13af6f6276f148d1",
+      "path_signals": [
+        "claude_root",
+        "backup_path"
+      ],
+      "classification": "archive",
+      "rationale": "backup or worktree path is not canonical",
+      "duplicate_group": "dup-c9005b7a34946d2b"
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/agents-skills-backup/docx/SKILL.md",
+      "relative_path": ".claude/skills/agents-skills-backup/docx/SKILL.md",
+      "kind": "skill",
+      "key": "docx",
+      "title": "DOCX creation, editing, and analysis",
+      "content_hash": "cfbabd72b1aec7dfaad988fb6e5e16b27dc744b9a00cae15db9045e95f53903e",
+      "path_signals": [
+        "claude_root",
+        "backup_path"
+      ],
+      "classification": "archive",
+      "rationale": "backup or worktree path is not canonical",
+      "duplicate_group": "dup-76ae1217764e9509"
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/agents-skills-backup/email-marketer/SKILL.md",
+      "relative_path": ".claude/skills/agents-skills-backup/email-marketer/SKILL.md",
+      "kind": "skill",
+      "key": "email-marketer",
+      "title": "Email Marketer",
+      "content_hash": "9ad0db15c28e6aee127cce479283fc02a4028989ed0a3978a4461b9299367f41",
+      "path_signals": [
+        "claude_root",
+        "backup_path"
+      ],
+      "classification": "archive",
+      "rationale": "backup or worktree path is not canonical",
+      "duplicate_group": "dup-fc8a9cfee9638dd6"
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/agents-skills-backup/env-secrets-manager/SKILL.md",
+      "relative_path": ".claude/skills/agents-skills-backup/env-secrets-manager/SKILL.md",
+      "kind": "skill",
+      "key": "env-secrets-manager",
+      "title": "Env \u0026 Secrets Manager",
+      "content_hash": "21f767eb7ac8fe8685c7e94298cb6a6388a8988cadfe6299d9129355731b6260",
+      "path_signals": [
+        "claude_root",
+        "backup_path"
+      ],
+      "classification": "archive",
+      "rationale": "backup or worktree path is not canonical",
+      "duplicate_group": "dup-1e10671d8c2a61d1"
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/agents-skills-backup/frontend-design/SKILL.md",
+      "relative_path": ".claude/skills/agents-skills-backup/frontend-design/SKILL.md",
+      "kind": "skill",
+      "key": "frontend-design",
+      "title": "Design Thinking",
+      "content_hash": "b81e2ff87ed8fa4d6c377ccb127a7254c9e6a77e3ae94f21e6b514f7bb2945a0",
+      "path_signals": [
+        "claude_root",
+        "backup_path"
+      ],
+      "classification": "archive",
+      "rationale": "backup or worktree path is not canonical",
+      "duplicate_group": "dup-bc19ea9437940d31"
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/agents-skills-backup/gdpr-dsgvo-expert/SKILL.md",
+      "relative_path": ".claude/skills/agents-skills-backup/gdpr-dsgvo-expert/SKILL.md",
+      "kind": "skill",
+      "key": "gdpr-dsgvo-expert",
+      "title": "GDPR/DSGVO Expert",
+      "content_hash": "0217d307bc9b0ba20cde28fc9ac0ae256c14f3f98c06c9e7ba946a09c06a211e",
+      "path_signals": [
+        "claude_root",
+        "backup_path"
+      ],
+      "classification": "archive",
+      "rationale": "backup or worktree path is not canonical",
+      "duplicate_group": "dup-b0e962d6806ccecb"
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/agents-skills-backup/git-worktree-manager/SKILL.md",
+      "relative_path": ".claude/skills/agents-skills-backup/git-worktree-manager/SKILL.md",
+      "kind": "skill",
+      "key": "git-worktree-manager",
+      "title": "Git Worktree Manager",
+      "content_hash": "660d29b530db87ae18d8d98756b294b7d7da639b23b46c727b6808b63ee65111",
+      "path_signals": [
+        "claude_root",
+        "backup_path",
+        "worktree_path"
+      ],
+      "classification": "archive",
+      "rationale": "backup or worktree path is not canonical",
+      "duplicate_group": "dup-a70ac453ff0b6b30",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/agents-skills-backup/humanized-writer/SKILL.md",
+      "relative_path": ".claude/skills/agents-skills-backup/humanized-writer/SKILL.md",
+      "kind": "skill",
+      "key": "humanized-writer",
+      "title": "Humanized Writer — Foundation Quality Layer",
+      "content_hash": "c2bce7efe3e253bd1cec5bf59686d99dafcd91ee0c9e1c3f746dfcbac034336f",
+      "path_signals": [
+        "claude_root",
+        "backup_path"
+      ],
+      "classification": "archive",
+      "rationale": "backup or worktree path is not canonical",
+      "duplicate_group": "dup-bdff6e5c91c648c1"
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/agents-skills-backup/incident-commander/SKILL.md",
+      "relative_path": ".claude/skills/agents-skills-backup/incident-commander/SKILL.md",
+      "kind": "skill",
+      "key": "incident-commander",
+      "title": "Incident Commander Skill",
+      "content_hash": "42f1d96589fea7c5fb56726781488ae11b94c2afbada4f2f0dc6bcb000abb0b6",
+      "path_signals": [
+        "claude_root",
+        "backup_path"
+      ],
+      "classification": "archive",
+      "rationale": "backup or worktree path is not canonical",
+      "duplicate_group": "dup-a30859b49ee6aa23"
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/agents-skills-backup/marketing-copywriter/SKILL.md",
+      "relative_path": ".claude/skills/agents-skills-backup/marketing-copywriter/SKILL.md",
+      "kind": "skill",
+      "key": "marketing-copywriter",
+      "title": "Marketing Copywriter",
+      "content_hash": "540626e59b57fcca8e0268a3f5a76572bc33ab1d98aeb76cefbaf243067d5ead",
+      "path_signals": [
+        "claude_root",
+        "backup_path"
+      ],
+      "classification": "archive",
+      "rationale": "backup or worktree path is not canonical",
+      "duplicate_group": "dup-e1be8cbbef693ad2"
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/agents-skills-backup/mcp-builder/SKILL.md",
+      "relative_path": ".claude/skills/agents-skills-backup/mcp-builder/SKILL.md",
+      "kind": "skill",
+      "key": "mcp-builder",
+      "title": "MCP Server Development Guide",
+      "content_hash": "0f4592dcb53cf2b5d6b7febee6b4152018b565551a1c29e3c612f57b218ab295",
+      "path_signals": [
+        "claude_root",
+        "backup_path"
+      ],
+      "classification": "archive",
+      "rationale": "backup or worktree path is not canonical",
+      "duplicate_group": "dup-48973ad0cbf3efd6"
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/agents-skills-backup/migration-architect/SKILL.md",
+      "relative_path": ".claude/skills/agents-skills-backup/migration-architect/SKILL.md",
+      "kind": "skill",
+      "key": "migration-architect",
+      "title": "Migration Architect",
+      "content_hash": "b3eb84c0f0e5695010becc03301f9bd5b0f7981b083fb6edd1792c3db4592624",
+      "path_signals": [
+        "claude_root",
+        "backup_path"
+      ],
+      "classification": "archive",
+      "rationale": "backup or worktree path is not canonical",
+      "duplicate_group": "dup-8ea02f6397a3e8af"
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/agents-skills-backup/observability-designer/SKILL.md",
+      "relative_path": ".claude/skills/agents-skills-backup/observability-designer/SKILL.md",
+      "kind": "skill",
+      "key": "observability-designer",
+      "title": "Observability Designer (POWERFUL)",
+      "content_hash": "7557946f4029269454fe10210b2c2054f937a24c1e573f8ef38b7366a1a94639",
+      "path_signals": [
+        "claude_root",
+        "backup_path"
+      ],
+      "classification": "archive",
+      "rationale": "backup or worktree path is not canonical",
+      "duplicate_group": "dup-21a6e3dfd00ca986"
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/agents-skills-backup/odin-agent-browser/SKILL.md",
+      "relative_path": ".claude/skills/agents-skills-backup/odin-agent-browser/SKILL.md",
+      "kind": "skill",
+      "key": "odin-agent-browser",
+      "title": "Odin Agent-Browser Reference",
+      "content_hash": "9260384a2547fe1b2b684ac5dfcf1ac793b5e4b0b85aacae17f5ee87173585c1",
+      "path_signals": [
+        "claude_root",
+        "backup_path"
+      ],
+      "classification": "archive",
+      "rationale": "backup or worktree path is not canonical",
+      "duplicate_group": "dup-041c1b9f09ebe2eb"
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/agents-skills-backup/odin-ai-agent-frameworks/SKILL.md",
+      "relative_path": ".claude/skills/agents-skills-backup/odin-ai-agent-frameworks/SKILL.md",
+      "kind": "skill",
+      "key": "odin-ai-agent-frameworks",
+      "title": "AI Agent Framework Landscape - March 2026",
+      "content_hash": "7292428e63bd1c2d09a35fd844e11605aabb2544ba69df0e27ff722ce76cadbf",
+      "path_signals": [
+        "claude_root",
+        "backup_path"
+      ],
+      "classification": "archive",
+      "rationale": "backup or worktree path is not canonical",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/agents-skills-backup/odin-backlog-triage/SKILL.md",
+      "relative_path": ".claude/skills/agents-skills-backup/odin-backlog-triage/SKILL.md",
+      "kind": "skill",
+      "key": "odin-backlog-triage",
+      "title": "Odin Backlog Triage",
+      "content_hash": "0a2c622d261a96e42df7ea4b2d83a12d461dbf3a9313d9fb99cfae462f8b4254",
+      "path_signals": [
+        "claude_root",
+        "backup_path"
+      ],
+      "classification": "archive",
+      "rationale": "backup or worktree path is not canonical",
+      "duplicate_group": "dup-d882fe39afdcedc4"
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/agents-skills-backup/odin-dispatch-efficiency/SKILL.md",
+      "relative_path": ".claude/skills/agents-skills-backup/odin-dispatch-efficiency/SKILL.md",
+      "kind": "skill",
+      "key": "odin-dispatch-efficiency",
+      "title": "Odin Dispatch Efficiency",
+      "content_hash": "84178e5dc627c371e2870761794daf015e9f291a60c61613cb4cb415b83b246c",
+      "path_signals": [
+        "claude_root",
+        "backup_path"
+      ],
+      "classification": "archive",
+      "rationale": "backup or worktree path is not canonical",
+      "duplicate_group": "dup-fe108abf82ef24e7"
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/agents-skills-backup/odin-dispatch-modes/SKILL.md",
+      "relative_path": ".claude/skills/agents-skills-backup/odin-dispatch-modes/SKILL.md",
+      "kind": "skill",
+      "key": "odin-dispatch-modes",
+      "title": "odin-dispatch-modes",
+      "content_hash": "9d8dd16e45b652886058cb06b731157fd2c382833ec6c49aa2b9f30091770d9c",
+      "path_signals": [
+        "claude_root",
+        "backup_path"
+      ],
+      "classification": "archive",
+      "rationale": "backup or worktree path is not canonical",
+      "duplicate_group": "dup-3e6792a792084515"
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/agents-skills-backup/odin-github-auth-boundaries/SKILL.md",
+      "relative_path": ".claude/skills/agents-skills-backup/odin-github-auth-boundaries/SKILL.md",
+      "kind": "skill",
+      "key": "odin-github-auth-boundaries",
+      "title": "Odin GitHub Auth Boundaries",
+      "content_hash": "5fd896df96bb1948d907968e8c4dcbbe52b7f60f1e8c4dbfc585ea11301d8c85",
+      "path_signals": [
+        "claude_root",
+        "backup_path"
+      ],
+      "classification": "archive",
+      "rationale": "backup or worktree path is not canonical",
+      "duplicate_group": "dup-75673919606f824c"
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/agents-skills-backup/odin-learnings-pollution/SKILL.md",
+      "relative_path": ".claude/skills/agents-skills-backup/odin-learnings-pollution/SKILL.md",
+      "kind": "skill",
+      "key": "odin-learnings-pollution",
+      "title": "Odin Learnings File Pollution",
+      "content_hash": "d976dc352562d18b1256bbd09cc1fc08e57ef00aea728f88a164458d36b8bb3f",
+      "path_signals": [
+        "claude_root",
+        "backup_path"
+      ],
+      "classification": "archive",
+      "rationale": "backup or worktree path is not canonical",
+      "duplicate_group": "dup-0af631652439b505"
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/agents-skills-backup/odin-n8n-workflow-ops/SKILL.md",
+      "relative_path": ".claude/skills/agents-skills-backup/odin-n8n-workflow-ops/SKILL.md",
+      "kind": "skill",
+      "key": "odin-n8n-workflow-ops",
+      "title": "n8n Workflow Operations (v2)",
+      "content_hash": "a1233155ceeeecc93e55ab9895b7b57c1b576803018d02203db267008865b438",
+      "path_signals": [
+        "claude_root",
+        "backup_path"
+      ],
+      "classification": "archive",
+      "rationale": "backup or worktree path is not canonical",
+      "duplicate_group": "dup-5b8dee6c989183d8"
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/agents-skills-backup/odin-pr-state-check/SKILL.md",
+      "relative_path": ".claude/skills/agents-skills-backup/odin-pr-state-check/SKILL.md",
+      "kind": "skill",
+      "key": "odin-pr-state-check",
+      "title": "PR State Pre-Check",
+      "content_hash": "85940ed70a9057657cd5a3ebc52a648d5642e90288982af06aecbbad79ab1a22",
+      "path_signals": [
+        "claude_root",
+        "backup_path"
+      ],
+      "classification": "archive",
+      "rationale": "backup or worktree path is not canonical",
+      "duplicate_group": "dup-e09111e6be989c61"
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/agents-skills-backup/odin-research/SKILL.md",
+      "relative_path": ".claude/skills/agents-skills-backup/odin-research/SKILL.md",
+      "kind": "skill",
+      "key": "odin-research",
+      "title": "Odin Research Skill",
+      "content_hash": "133e32dd5e07752fe482bb2cb035dff1ec1c78c029dc45389481693411a059e5",
+      "path_signals": [
+        "claude_root",
+        "backup_path"
+      ],
+      "classification": "archive",
+      "rationale": "backup or worktree path is not canonical",
+      "duplicate_group": "dup-10b0fa784514281f"
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/agents-skills-backup/odin-sentry/SKILL.md",
+      "relative_path": ".claude/skills/agents-skills-backup/odin-sentry/SKILL.md",
+      "kind": "skill",
+      "key": "odin-sentry",
+      "title": "Odin Sentry Remediation",
+      "content_hash": "05acb6ecaec99f2f3f45a655cb31e4f1897b270da181c853fdf2d0343d279f8a",
+      "path_signals": [
+        "claude_root",
+        "backup_path"
+      ],
+      "classification": "archive",
+      "rationale": "backup or worktree path is not canonical",
+      "duplicate_group": "dup-a9122c21ace1b848"
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/agents-skills-backup/odin-skill-scout/SKILL.md",
+      "relative_path": ".claude/skills/agents-skills-backup/odin-skill-scout/SKILL.md",
+      "kind": "skill",
+      "key": "odin-skill-scout",
+      "title": "Skill Scout",
+      "content_hash": "1542a3e7356ce5ea76caf89d51d4a8215d5d1cbee0ae3f3cf29a2d2131c462a3",
+      "path_signals": [
+        "claude_root",
+        "backup_path"
+      ],
+      "classification": "archive",
+      "rationale": "backup or worktree path is not canonical",
+      "duplicate_group": "dup-f06a6e2b0abc6e49"
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/agents-skills-backup/odin-task-timing/SKILL.md",
+      "relative_path": ".claude/skills/agents-skills-backup/odin-task-timing/SKILL.md",
+      "kind": "skill",
+      "key": "odin-task-timing",
+      "title": "odin-task-timing",
+      "content_hash": "8c9f298e48eb5909f9b859800dda25b282d01758e449419d1df2a1bcd4d41449",
+      "path_signals": [
+        "claude_root",
+        "backup_path"
+      ],
+      "classification": "archive",
+      "rationale": "backup or worktree path is not canonical",
+      "duplicate_group": "dup-b5f3235494d92236"
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/agents-skills-backup/odin-task-type-reference/SKILL.md",
+      "relative_path": ".claude/skills/agents-skills-backup/odin-task-type-reference/SKILL.md",
+      "kind": "skill",
+      "key": "odin-task-type-reference",
+      "title": "Odin Task Type Reference",
+      "content_hash": "eebcb86e4d306622858b1ecc461c1ac32ef671157b268539df225a475fdb0c40",
+      "path_signals": [
+        "claude_root",
+        "backup_path"
+      ],
+      "classification": "archive",
+      "rationale": "backup or worktree path is not canonical",
+      "duplicate_group": "dup-613879b2579b42d2"
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/agents-skills-backup/odin-telegram-safety/SKILL.md",
+      "relative_path": ".claude/skills/agents-skills-backup/odin-telegram-safety/SKILL.md",
+      "kind": "skill",
+      "key": "odin-telegram-safety",
+      "title": "odin-telegram-safety",
+      "content_hash": "42864d40a7a0c31391516c5c79ecb2808dc9a32184fc6320d3c0151cd90dd3ae",
+      "path_signals": [
+        "claude_root",
+        "backup_path"
+      ],
+      "classification": "archive",
+      "rationale": "backup or worktree path is not canonical",
+      "duplicate_group": "dup-e169fc8d18e5a578"
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/agents-skills-backup/odin-webhook-dedup/SKILL.md",
+      "relative_path": ".claude/skills/agents-skills-backup/odin-webhook-dedup/SKILL.md",
+      "kind": "skill",
+      "key": "odin-webhook-dedup",
+      "title": "odin-webhook-dedup",
+      "content_hash": "99bfb4b72d210294845a989df6f6f646efe9cc135c518573821b8904afca75a6",
+      "path_signals": [
+        "claude_root",
+        "backup_path"
+      ],
+      "classification": "archive",
+      "rationale": "backup or worktree path is not canonical",
+      "duplicate_group": "dup-901446db31e65d7f"
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/agents-skills-backup/pdf/SKILL.md",
+      "relative_path": ".claude/skills/agents-skills-backup/pdf/SKILL.md",
+      "kind": "skill",
+      "key": "pdf",
+      "title": "PDF Processing Guide",
+      "content_hash": "9f78b8359fbd4943ad260a7a1e436e5a96503406d6c34e99f69223d647d85b9c",
+      "path_signals": [
+        "claude_root",
+        "backup_path"
+      ],
+      "classification": "archive",
+      "rationale": "backup or worktree path is not canonical",
+      "duplicate_group": "dup-bb4585c1da82b76f"
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/agents-skills-backup/pptx/SKILL.md",
+      "relative_path": ".claude/skills/agents-skills-backup/pptx/SKILL.md",
+      "kind": "skill",
+      "key": "pptx",
+      "title": "PPTX Skill",
+      "content_hash": "e5b0df918cbe9d62508b3cf808d73899633f82fc19f6258a25ef9f0de7e62125",
+      "path_signals": [
+        "claude_root",
+        "backup_path"
+      ],
+      "classification": "archive",
+      "rationale": "backup or worktree path is not canonical",
+      "duplicate_group": "dup-f6318ce305205c02"
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/agents-skills-backup/pr-review-expert/SKILL.md",
+      "relative_path": ".claude/skills/agents-skills-backup/pr-review-expert/SKILL.md",
+      "kind": "skill",
+      "key": "pr-review-expert",
+      "title": "PR Review Expert",
+      "content_hash": "1204a7428bf1bc73a7b94ccd89a990b770f7faaf78efb8c5124cdae5b74780ea",
+      "path_signals": [
+        "claude_root",
+        "backup_path"
+      ],
+      "classification": "archive",
+      "rationale": "backup or worktree path is not canonical",
+      "duplicate_group": "dup-c2239406588ed2a1"
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/agents-skills-backup/prompt-engineer-toolkit/SKILL.md",
+      "relative_path": ".claude/skills/agents-skills-backup/prompt-engineer-toolkit/SKILL.md",
+      "kind": "skill",
+      "key": "prompt-engineer-toolkit",
+      "title": "Prompt Engineer Toolkit",
+      "content_hash": "2d325a31b0462bed2d466714b7a1d263d6588d9c0de68723661608d38609c7d3",
+      "path_signals": [
+        "claude_root",
+        "backup_path"
+      ],
+      "classification": "archive",
+      "rationale": "backup or worktree path is not canonical",
+      "duplicate_group": "dup-6d8c9a60cd965098"
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/agents-skills-backup/prompt-engineer-toolkit/references/prompt-templates.md",
+      "relative_path": ".claude/skills/agents-skills-backup/prompt-engineer-toolkit/references/prompt-templates.md",
+      "kind": "prompt",
+      "key": "prompt-templates",
+      "title": "Prompt Templates",
+      "content_hash": "97cdeb34a625c74cb30d0ff3d39541cfd6889f19d212086bf5904d16f91bb014",
+      "path_signals": [
+        "claude_root",
+        "backup_path"
+      ],
+      "classification": "archive",
+      "rationale": "backup or worktree path is not canonical",
+      "duplicate_group": "dup-70c5440c22ebd182"
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/agents-skills-backup/prompt-engineer-toolkit/scripts/prompt_tester.py",
+      "relative_path": ".claude/skills/agents-skills-backup/prompt-engineer-toolkit/scripts/prompt_tester.py",
+      "kind": "prompt",
+      "key": "prompt_tester",
+      "title": "!/usr/bin/env python3",
+      "content_hash": "250effa4dd83e85d3f1952d9ae5c204de49215831fd72cb91783aa8d549eb359",
+      "path_signals": [
+        "claude_root",
+        "backup_path"
+      ],
+      "classification": "archive",
+      "rationale": "backup or worktree path is not canonical",
+      "duplicate_group": "dup-22580ab8c1acaf0e"
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/agents-skills-backup/prompt-engineer-toolkit/scripts/prompt_versioner.py",
+      "relative_path": ".claude/skills/agents-skills-backup/prompt-engineer-toolkit/scripts/prompt_versioner.py",
+      "kind": "prompt",
+      "key": "prompt_versioner",
+      "title": "!/usr/bin/env python3",
+      "content_hash": "407a025b70785a5c8d40ed9b745a26127a6e487f1bd24dc8c80e6cc1d1d17465",
+      "path_signals": [
+        "claude_root",
+        "backup_path"
+      ],
+      "classification": "archive",
+      "rationale": "backup or worktree path is not canonical",
+      "duplicate_group": "dup-8b8dd16690963969"
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/agents-skills-backup/release-manager/SKILL.md",
+      "relative_path": ".claude/skills/agents-skills-backup/release-manager/SKILL.md",
+      "kind": "skill",
+      "key": "release-manager",
+      "title": "Release Manager",
+      "content_hash": "6a931844e7275fd03077cd94fe24a5929f9bc7bad4de2c9d30ebd5c5662855ca",
+      "path_signals": [
+        "claude_root",
+        "backup_path"
+      ],
+      "classification": "archive",
+      "rationale": "backup or worktree path is not canonical",
+      "duplicate_group": "dup-ae936099e937199d"
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/agents-skills-backup/runbook-generator/SKILL.md",
+      "relative_path": ".claude/skills/agents-skills-backup/runbook-generator/SKILL.md",
+      "kind": "skill",
+      "key": "runbook-generator",
+      "title": "Runbook Generator",
+      "content_hash": "c5b4dfce42a0d8288b31ef0c2f023b3da03a2ffc331cf966c9de24ee3631796e",
+      "path_signals": [
+        "claude_root",
+        "backup_path"
+      ],
+      "classification": "archive",
+      "rationale": "backup or worktree path is not canonical",
+      "duplicate_group": "dup-7cd29b3c6addee03"
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/agents-skills-backup/senior-prompt-engineer/SKILL.md",
+      "relative_path": ".claude/skills/agents-skills-backup/senior-prompt-engineer/SKILL.md",
+      "kind": "skill",
+      "key": "senior-prompt-engineer",
+      "title": "Senior Prompt Engineer",
+      "content_hash": "ce3f1ef8aa555ae2a83eefa9f8c7a10fbd97d14c0ce4e62dd3f9137c912c5c30",
+      "path_signals": [
+        "claude_root",
+        "backup_path"
+      ],
+      "classification": "archive",
+      "rationale": "backup or worktree path is not canonical",
+      "duplicate_group": "dup-473bef0f5f9d8781"
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/agents-skills-backup/senior-prompt-engineer/references/prompt_engineering_patterns.md",
+      "relative_path": ".claude/skills/agents-skills-backup/senior-prompt-engineer/references/prompt_engineering_patterns.md",
+      "kind": "prompt",
+      "key": "prompt_engineering_patterns",
+      "title": "Prompt Engineering Patterns",
+      "content_hash": "d9c0cc3207a7e8b095d4148d5014c623f8d93f72c08af5841ae93a37c7497da5",
+      "path_signals": [
+        "claude_root",
+        "backup_path"
+      ],
+      "classification": "archive",
+      "rationale": "backup or worktree path is not canonical",
+      "duplicate_group": "dup-e4375bf0ee2e94cd"
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/agents-skills-backup/senior-prompt-engineer/scripts/prompt_optimizer.py",
+      "relative_path": ".claude/skills/agents-skills-backup/senior-prompt-engineer/scripts/prompt_optimizer.py",
+      "kind": "prompt",
+      "key": "prompt_optimizer",
+      "title": "!/usr/bin/env python3",
+      "content_hash": "4d9fbc0da266517847a377ade997d5e5d1dfdfa31a42b0cf7222cbb85ba210c1",
+      "path_signals": [
+        "claude_root",
+        "backup_path"
+      ],
+      "classification": "archive",
+      "rationale": "backup or worktree path is not canonical",
+      "duplicate_group": "dup-f930d1e99bb9a7dd"
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/agents-skills-backup/senior-secops/SKILL.md",
+      "relative_path": ".claude/skills/agents-skills-backup/senior-secops/SKILL.md",
+      "kind": "skill",
+      "key": "senior-secops",
+      "title": "Senior SecOps Engineer",
+      "content_hash": "4003717f9491b8070618bb87a786ed2c9ddc831ef0663bb30970465e1ba7dd11",
+      "path_signals": [
+        "claude_root",
+        "backup_path"
+      ],
+      "classification": "archive",
+      "rationale": "backup or worktree path is not canonical",
+      "duplicate_group": "dup-77b9dd6e71ff29a8"
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/agents-skills-backup/simplify/SKILL.md",
+      "relative_path": ".claude/skills/agents-skills-backup/simplify/SKILL.md",
+      "kind": "skill",
+      "key": "simplify",
+      "title": "Simplify",
+      "content_hash": "19fddbcbbb2df071916fcb46428e2728a763d9b8117b888015ff04c2a36083f0",
+      "path_signals": [
+        "claude_root",
+        "backup_path"
+      ],
+      "classification": "archive",
+      "rationale": "backup or worktree path is not canonical",
+      "duplicate_group": "dup-179b21ed17b5f1cb"
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/agents-skills-backup/skill-creator/SKILL.md",
+      "relative_path": ".claude/skills/agents-skills-backup/skill-creator/SKILL.md",
+      "kind": "skill",
+      "key": "skill-creator",
+      "title": "Skill Creator",
+      "content_hash": "ba8bebb2c085444120743af8dc859dd7c2592d6290e93aa5e1c08403109bdce7",
+      "path_signals": [
+        "claude_root",
+        "backup_path"
+      ],
+      "classification": "archive",
+      "rationale": "backup or worktree path is not canonical",
+      "duplicate_group": "dup-e75d79b8cd5e5516"
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/agents-skills-backup/skill-security-auditor/SKILL.md",
+      "relative_path": ".claude/skills/agents-skills-backup/skill-security-auditor/SKILL.md",
+      "kind": "skill",
+      "key": "skill-security-auditor",
+      "title": "Skill Security Auditor",
+      "content_hash": "5dd0ae3390374174905f558749741e5653231fbed10a0134666d493e6a2fb95e",
+      "path_signals": [
+        "claude_root",
+        "backup_path"
+      ],
+      "classification": "archive",
+      "rationale": "backup or worktree path is not canonical",
+      "duplicate_group": "dup-407930c86c720aea"
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/agents-skills-backup/skill-tester/SKILL.md",
+      "relative_path": ".claude/skills/agents-skills-backup/skill-tester/SKILL.md",
+      "kind": "skill",
+      "key": "skill-tester",
+      "title": "Skill Tester",
+      "content_hash": "109f9f25624a2ff78ca1d325587706a6e97c0412bd5c8108f99acd5fedbd8af5",
+      "path_signals": [
+        "claude_root",
+        "backup_path"
+      ],
+      "classification": "archive",
+      "rationale": "backup or worktree path is not canonical",
+      "duplicate_group": "dup-da415608c4b0af76"
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/agents-skills-backup/skill-tester/assets/sample-skill/SKILL.md",
+      "relative_path": ".claude/skills/agents-skills-backup/skill-tester/assets/sample-skill/SKILL.md",
+      "kind": "skill",
+      "key": "sample-skill",
+      "title": "Sample Text Processor",
+      "content_hash": "8365a36db737bcb0abf83efea91d3bb513aea1699a0017ccc74e727941fdd1a6",
+      "path_signals": [
+        "claude_root",
+        "backup_path"
+      ],
+      "classification": "archive",
+      "rationale": "backup or worktree path is not canonical",
+      "duplicate_group": "dup-30ad27f0ca370bff"
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/agents-skills-backup/social-media-writer/SKILL.md",
+      "relative_path": ".claude/skills/agents-skills-backup/social-media-writer/SKILL.md",
+      "kind": "skill",
+      "key": "social-media-writer",
+      "title": "Social Media Writer",
+      "content_hash": "9afbb14da541fc2c70f9394567021bdc8ba4418ee9f5d29ccade0a8e6361ac3a",
+      "path_signals": [
+        "claude_root",
+        "backup_path"
+      ],
+      "classification": "archive",
+      "rationale": "backup or worktree path is not canonical",
+      "duplicate_group": "dup-01d69e5b0c1db291"
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/agents-skills-backup/tech-debt-tracker/SKILL.md",
+      "relative_path": ".claude/skills/agents-skills-backup/tech-debt-tracker/SKILL.md",
+      "kind": "skill",
+      "key": "tech-debt-tracker",
+      "title": "Tech Debt Tracker",
+      "content_hash": "3856fa329a0721500aae6ccc3f8b66e954a6ab4531b3aa8e4c409c6b7d1375af",
+      "path_signals": [
+        "claude_root",
+        "backup_path"
+      ],
+      "classification": "archive",
+      "rationale": "backup or worktree path is not canonical",
+      "duplicate_group": "dup-1347c5b21029c3fd"
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/agents-skills-backup/webapp-testing/SKILL.md",
+      "relative_path": ".claude/skills/agents-skills-backup/webapp-testing/SKILL.md",
+      "kind": "skill",
+      "key": "webapp-testing",
+      "title": "Web Application Testing",
+      "content_hash": "51b7349e77ec63b7744a6f63647e7566a0b4d2e301121cc10e8c2113af6556a2",
+      "path_signals": [
+        "claude_root",
+        "backup_path"
+      ],
+      "classification": "archive",
+      "rationale": "backup or worktree path is not canonical",
+      "duplicate_group": "dup-676310a60fc80ed7"
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/agents-skills-backup/xlsx/SKILL.md",
+      "relative_path": ".claude/skills/agents-skills-backup/xlsx/SKILL.md",
+      "kind": "skill",
+      "key": "xlsx",
+      "title": "Requirements for Outputs",
+      "content_hash": "dd316db7785a6be12966c2a2d848931fbf5f518b3cdb0a66fa62ee835ead1cfc",
+      "path_signals": [
+        "claude_root",
+        "backup_path"
+      ],
+      "classification": "archive",
+      "rationale": "backup or worktree path is not canonical",
+      "duplicate_group": "dup-4263f660e76a855b"
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/api-design-reviewer/SKILL.md",
+      "relative_path": ".claude/skills/api-design-reviewer/SKILL.md",
+      "kind": "skill",
+      "key": "api-design-reviewer",
+      "title": "API Design Reviewer",
+      "content_hash": "4e327e206a34868d7e5d3c773cf02833c1198f76aa51b6cc0e7c5c407b1791a7",
+      "path_signals": [
+        "claude_root"
+      ],
+      "classification": "rewrite",
+      "rationale": "legacy asset needs normalization into the new contract",
+      "duplicate_group": "dup-627becc0f6d5bd05",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/api-test-suite-builder/SKILL.md",
+      "relative_path": ".claude/skills/api-test-suite-builder/SKILL.md",
+      "kind": "skill",
+      "key": "api-test-suite-builder",
+      "title": "API Test Suite Builder",
+      "content_hash": "2a076f52d5ee590c2cf77e8ad1714ee60cac84b5fe420e1f436956b5190d7dbe",
+      "path_signals": [
+        "claude_root"
+      ],
+      "classification": "rewrite",
+      "rationale": "legacy asset needs normalization into the new contract",
+      "duplicate_group": "dup-7d325c8095923533",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/blog-writer/SKILL.md",
+      "relative_path": ".claude/skills/blog-writer/SKILL.md",
+      "kind": "skill",
+      "key": "blog-writer",
+      "title": "Blog Writer",
+      "content_hash": "1a9e79856a2cc992909455c6aaed50ebdfee42e492e0333db04373192bc7f5ff",
+      "path_signals": [
+        "claude_root"
+      ],
+      "classification": "rewrite",
+      "rationale": "legacy asset needs normalization into the new contract",
+      "duplicate_group": "dup-9f61e955f8c1e491",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/brand-ad-generator/SKILL.md",
+      "relative_path": ".claude/skills/brand-ad-generator/SKILL.md",
+      "kind": "skill",
+      "key": "brand-ad-generator",
+      "title": "Brand Ad Generator",
+      "content_hash": "f6d08767c713367ef70a1a093a56b557a314989385370d85fc770e415aece9a4",
+      "path_signals": [
+        "claude_root"
+      ],
+      "classification": "rewrite",
+      "rationale": "legacy asset needs normalization into the new contract",
+      "duplicate_group": "dup-7ef795910f990dd3",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/changelog-generator/SKILL.md",
+      "relative_path": ".claude/skills/changelog-generator/SKILL.md",
+      "kind": "skill",
+      "key": "changelog-generator",
+      "title": "Changelog Generator",
+      "content_hash": "e7620f5452313ecb75bfea33184287878fb9303cf45e014c82884d9b2caa103b",
+      "path_signals": [
+        "claude_root"
+      ],
+      "classification": "rewrite",
+      "rationale": "legacy asset needs normalization into the new contract",
+      "duplicate_group": "dup-e63ca1ea9b6df81f",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/ci-cd-pipeline-builder/SKILL.md",
+      "relative_path": ".claude/skills/ci-cd-pipeline-builder/SKILL.md",
+      "kind": "skill",
+      "key": "ci-cd-pipeline-builder",
+      "title": "CI/CD Pipeline Builder",
+      "content_hash": "2c78b14b51b4544e1f2eab2aeb9ea6fd8be5902f197cd949904bc314290fafcc",
+      "path_signals": [
+        "claude_root"
+      ],
+      "classification": "rewrite",
+      "rationale": "legacy asset needs normalization into the new contract",
+      "duplicate_group": "dup-312726c67c815f26",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/claude-api/SKILL.md",
+      "relative_path": ".claude/skills/claude-api/SKILL.md",
+      "kind": "skill",
+      "key": "claude-api",
+      "title": "Building LLM-Powered Applications with Claude",
+      "content_hash": "c002a63824a58fab2e00a100eed4956a00cbe52d282c74fc5bb3e7e4db9230bd",
+      "path_signals": [
+        "claude_root"
+      ],
+      "classification": "rewrite",
+      "rationale": "legacy asset needs normalization into the new contract",
+      "duplicate_group": "dup-8a26d51283c36ec8",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/cloudflare/SKILL.md",
+      "relative_path": ".claude/skills/cloudflare/SKILL.md",
+      "kind": "skill",
+      "key": "cloudflare",
+      "title": "Cloudflare Platform Skill",
+      "content_hash": "a8a8198011650bfc8005bcef0a4e315808468e4180e6d9169c78d3b200261e2a",
+      "path_signals": [
+        "claude_root"
+      ],
+      "classification": "rewrite",
+      "rationale": "legacy asset needs normalization into the new contract",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/code-reviewer/SKILL.md",
+      "relative_path": ".claude/skills/code-reviewer/SKILL.md",
+      "kind": "skill",
+      "key": "code-reviewer",
+      "title": "Code Reviewer",
+      "content_hash": "428a98e3e3bd40043e76426aa2fa42c2c3bf3438623dd96d7105795c78cb1bc3",
+      "path_signals": [
+        "claude_root"
+      ],
+      "classification": "rewrite",
+      "rationale": "legacy asset needs normalization into the new contract",
+      "duplicate_group": "dup-233eddc523056283",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/codebase-onboarding/SKILL.md",
+      "relative_path": ".claude/skills/codebase-onboarding/SKILL.md",
+      "kind": "skill",
+      "key": "codebase-onboarding",
+      "title": "Codebase Onboarding",
+      "content_hash": "0b678294ba81cf1e1907255be507eb9c885fceb98878db2428f567a40fb11e60",
+      "path_signals": [
+        "claude_root"
+      ],
+      "classification": "rewrite",
+      "rationale": "legacy asset needs normalization into the new contract",
+      "duplicate_group": "dup-fe2c9b208d6b7fa7",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/dependency-auditor/SKILL.md",
+      "relative_path": ".claude/skills/dependency-auditor/SKILL.md",
+      "kind": "skill",
+      "key": "dependency-auditor",
+      "title": "Dependency Auditor",
+      "content_hash": "2b34a457ace1deb1f682e9cf920ab6fe7b6cc9fbcab1bc3f13af6f6276f148d1",
+      "path_signals": [
+        "claude_root"
+      ],
+      "classification": "rewrite",
+      "rationale": "legacy asset needs normalization into the new contract",
+      "duplicate_group": "dup-c9005b7a34946d2b",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/doc-coauthoring/SKILL.md",
+      "relative_path": ".claude/skills/doc-coauthoring/SKILL.md",
+      "kind": "skill",
+      "key": "doc-coauthoring",
+      "title": "Doc Co-Authoring Workflow",
+      "content_hash": "2e47d78846faeea4a56e9809c52700087a15a2155a3f293a3efbaded81398ef4",
+      "path_signals": [
+        "claude_root"
+      ],
+      "classification": "rewrite",
+      "rationale": "legacy asset needs normalization into the new contract",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/docker-development/SKILL.md",
+      "relative_path": ".claude/skills/docker-development/SKILL.md",
+      "kind": "skill",
+      "key": "docker-development",
+      "title": "Docker Development",
+      "content_hash": "76f1de3051cf40e9c38d849ab877d921bff3520e1a71d0449693cd4815bee0ba",
+      "path_signals": [
+        "claude_root"
+      ],
+      "classification": "rewrite",
+      "rationale": "legacy asset needs normalization into the new contract",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/docx/SKILL.md",
+      "relative_path": ".claude/skills/docx/SKILL.md",
+      "kind": "skill",
+      "key": "docx",
+      "title": "DOCX creation, editing, and analysis",
+      "content_hash": "cfbabd72b1aec7dfaad988fb6e5e16b27dc744b9a00cae15db9045e95f53903e",
+      "path_signals": [
+        "claude_root"
+      ],
+      "classification": "rewrite",
+      "rationale": "legacy asset needs normalization into the new contract",
+      "duplicate_group": "dup-76ae1217764e9509",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/email-marketer/SKILL.md",
+      "relative_path": ".claude/skills/email-marketer/SKILL.md",
+      "kind": "skill",
+      "key": "email-marketer",
+      "title": "Email Marketer",
+      "content_hash": "9ad0db15c28e6aee127cce479283fc02a4028989ed0a3978a4461b9299367f41",
+      "path_signals": [
+        "claude_root"
+      ],
+      "classification": "rewrite",
+      "rationale": "legacy asset needs normalization into the new contract",
+      "duplicate_group": "dup-fc8a9cfee9638dd6",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/env-secrets-manager/SKILL.md",
+      "relative_path": ".claude/skills/env-secrets-manager/SKILL.md",
+      "kind": "skill",
+      "key": "env-secrets-manager",
+      "title": "Env \u0026 Secrets Manager",
+      "content_hash": "21f767eb7ac8fe8685c7e94298cb6a6388a8988cadfe6299d9129355731b6260",
+      "path_signals": [
+        "claude_root"
+      ],
+      "classification": "rewrite",
+      "rationale": "legacy asset needs normalization into the new contract",
+      "duplicate_group": "dup-1e10671d8c2a61d1",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/find-skills/SKILL.md",
+      "relative_path": ".claude/skills/find-skills/SKILL.md",
+      "kind": "skill",
+      "key": "find-skills",
+      "title": "Find Skills",
+      "content_hash": "1e85f6f9686e145aca4a124e3b704b9bbea9aa87e08515c1e352eee70f6e6e7a",
+      "path_signals": [
+        "claude_root"
+      ],
+      "classification": "rewrite",
+      "rationale": "legacy asset needs normalization into the new contract",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/frontend-design/SKILL.md",
+      "relative_path": ".claude/skills/frontend-design/SKILL.md",
+      "kind": "skill",
+      "key": "frontend-design",
+      "title": "Design Thinking",
+      "content_hash": "b81e2ff87ed8fa4d6c377ccb127a7254c9e6a77e3ae94f21e6b514f7bb2945a0",
+      "path_signals": [
+        "claude_root"
+      ],
+      "classification": "rewrite",
+      "rationale": "legacy asset needs normalization into the new contract",
+      "duplicate_group": "dup-bc19ea9437940d31",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/gdpr-dsgvo-expert/SKILL.md",
+      "relative_path": ".claude/skills/gdpr-dsgvo-expert/SKILL.md",
+      "kind": "skill",
+      "key": "gdpr-dsgvo-expert",
+      "title": "GDPR/DSGVO Expert",
+      "content_hash": "0217d307bc9b0ba20cde28fc9ac0ae256c14f3f98c06c9e7ba946a09c06a211e",
+      "path_signals": [
+        "claude_root"
+      ],
+      "classification": "rewrite",
+      "rationale": "legacy asset needs normalization into the new contract",
+      "duplicate_group": "dup-b0e962d6806ccecb",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/git-worktree-manager/SKILL.md",
+      "relative_path": ".claude/skills/git-worktree-manager/SKILL.md",
+      "kind": "skill",
+      "key": "git-worktree-manager",
+      "title": "Git Worktree Manager",
+      "content_hash": "660d29b530db87ae18d8d98756b294b7d7da639b23b46c727b6808b63ee65111",
+      "path_signals": [
+        "claude_root",
+        "worktree_path"
+      ],
+      "classification": "archive",
+      "rationale": "backup or worktree path is not canonical",
+      "duplicate_group": "dup-a70ac453ff0b6b30"
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/google-workspace-cli/SKILL.md",
+      "relative_path": ".claude/skills/google-workspace-cli/SKILL.md",
+      "kind": "skill",
+      "key": "google-workspace-cli",
+      "title": "Google Workspace CLI",
+      "content_hash": "16232288086943b1232453686e9f5f15d7de8c16d14c9e4d1f944020635d19c2",
+      "path_signals": [
+        "claude_root"
+      ],
+      "classification": "rewrite",
+      "rationale": "legacy asset needs normalization into the new contract",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/humanized-writer/SKILL.md",
+      "relative_path": ".claude/skills/humanized-writer/SKILL.md",
+      "kind": "skill",
+      "key": "humanized-writer",
+      "title": "Humanized Writer — Foundation Quality Layer",
+      "content_hash": "c2bce7efe3e253bd1cec5bf59686d99dafcd91ee0c9e1c3f746dfcbac034336f",
+      "path_signals": [
+        "claude_root"
+      ],
+      "classification": "rewrite",
+      "rationale": "legacy asset needs normalization into the new contract",
+      "duplicate_group": "dup-bdff6e5c91c648c1",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/incident-commander/SKILL.md",
+      "relative_path": ".claude/skills/incident-commander/SKILL.md",
+      "kind": "skill",
+      "key": "incident-commander",
+      "title": "Incident Commander Skill",
+      "content_hash": "42f1d96589fea7c5fb56726781488ae11b94c2afbada4f2f0dc6bcb000abb0b6",
+      "path_signals": [
+        "claude_root"
+      ],
+      "classification": "rewrite",
+      "rationale": "legacy asset needs normalization into the new contract",
+      "duplicate_group": "dup-a30859b49ee6aa23",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/internal-comms/SKILL.md",
+      "relative_path": ".claude/skills/internal-comms/SKILL.md",
+      "kind": "skill",
+      "key": "internal-comms",
+      "title": "When to use this skill",
+      "content_hash": "067b7587a344a928fc6534ef66b1bcd591fc7c26d207ea7ca3334aeb678d6475",
+      "path_signals": [
+        "claude_root"
+      ],
+      "classification": "rewrite",
+      "rationale": "legacy asset needs normalization into the new contract",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/marketing-copywriter/SKILL.md",
+      "relative_path": ".claude/skills/marketing-copywriter/SKILL.md",
+      "kind": "skill",
+      "key": "marketing-copywriter",
+      "title": "Marketing Copywriter",
+      "content_hash": "540626e59b57fcca8e0268a3f5a76572bc33ab1d98aeb76cefbaf243067d5ead",
+      "path_signals": [
+        "claude_root"
+      ],
+      "classification": "rewrite",
+      "rationale": "legacy asset needs normalization into the new contract",
+      "duplicate_group": "dup-e1be8cbbef693ad2",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/mcp-builder/SKILL.md",
+      "relative_path": ".claude/skills/mcp-builder/SKILL.md",
+      "kind": "skill",
+      "key": "mcp-builder",
+      "title": "MCP Server Development Guide",
+      "content_hash": "0f4592dcb53cf2b5d6b7febee6b4152018b565551a1c29e3c612f57b218ab295",
+      "path_signals": [
+        "claude_root"
+      ],
+      "classification": "rewrite",
+      "rationale": "legacy asset needs normalization into the new contract",
+      "duplicate_group": "dup-48973ad0cbf3efd6",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/migration-architect/SKILL.md",
+      "relative_path": ".claude/skills/migration-architect/SKILL.md",
+      "kind": "skill",
+      "key": "migration-architect",
+      "title": "Migration Architect",
+      "content_hash": "b3eb84c0f0e5695010becc03301f9bd5b0f7981b083fb6edd1792c3db4592624",
+      "path_signals": [
+        "claude_root"
+      ],
+      "classification": "rewrite",
+      "rationale": "legacy asset needs normalization into the new contract",
+      "duplicate_group": "dup-8ea02f6397a3e8af",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/observability-designer/SKILL.md",
+      "relative_path": ".claude/skills/observability-designer/SKILL.md",
+      "kind": "skill",
+      "key": "observability-designer",
+      "title": "Observability Designer (POWERFUL)",
+      "content_hash": "7557946f4029269454fe10210b2c2054f937a24c1e573f8ef38b7366a1a94639",
+      "path_signals": [
+        "claude_root"
+      ],
+      "classification": "rewrite",
+      "rationale": "legacy asset needs normalization into the new contract",
+      "duplicate_group": "dup-21a6e3dfd00ca986",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/odin-agent-browser/SKILL.md",
+      "relative_path": ".claude/skills/odin-agent-browser/SKILL.md",
+      "kind": "skill",
+      "key": "odin-agent-browser",
+      "title": "Odin Agent-Browser Reference",
+      "content_hash": "9260384a2547fe1b2b684ac5dfcf1ac793b5e4b0b85aacae17f5ee87173585c1",
+      "path_signals": [
+        "claude_root"
+      ],
+      "classification": "rewrite",
+      "rationale": "legacy asset needs normalization into the new contract",
+      "duplicate_group": "dup-041c1b9f09ebe2eb",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/odin-backlog-triage/SKILL.md",
+      "relative_path": ".claude/skills/odin-backlog-triage/SKILL.md",
+      "kind": "skill",
+      "key": "odin-backlog-triage",
+      "title": "Odin Backlog Triage",
+      "content_hash": "0a2c622d261a96e42df7ea4b2d83a12d461dbf3a9313d9fb99cfae462f8b4254",
+      "path_signals": [
+        "claude_root"
+      ],
+      "classification": "rewrite",
+      "rationale": "legacy asset needs normalization into the new contract",
+      "duplicate_group": "dup-d882fe39afdcedc4",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/odin-circuit-breaker/SKILL.md",
+      "relative_path": ".claude/skills/odin-circuit-breaker/SKILL.md",
+      "kind": "skill",
+      "key": "odin-circuit-breaker",
+      "title": "Odin Circuit Breaker",
+      "content_hash": "9781e7dec35513ad8de6822f486ff49886cd8feeba11af318ab3a379331aa435",
+      "path_signals": [
+        "claude_root"
+      ],
+      "classification": "rewrite",
+      "rationale": "legacy asset needs normalization into the new contract",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/odin-content-insight/SKILL.md",
+      "relative_path": ".claude/skills/odin-content-insight/SKILL.md",
+      "kind": "skill",
+      "key": "odin-content-insight",
+      "title": "Odin Content Insight",
+      "content_hash": "4db2b16139d8aad656d0073d657401233a266af1e5e6df8dcba0e6393d3ed7d0",
+      "path_signals": [
+        "claude_root"
+      ],
+      "classification": "rewrite",
+      "rationale": "legacy asset needs normalization into the new contract",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/odin-dispatch-efficiency/SKILL.md",
+      "relative_path": ".claude/skills/odin-dispatch-efficiency/SKILL.md",
+      "kind": "skill",
+      "key": "odin-dispatch-efficiency",
+      "title": "Odin Dispatch Efficiency",
+      "content_hash": "84178e5dc627c371e2870761794daf015e9f291a60c61613cb4cb415b83b246c",
+      "path_signals": [
+        "claude_root"
+      ],
+      "classification": "rewrite",
+      "rationale": "legacy asset needs normalization into the new contract",
+      "duplicate_group": "dup-fe108abf82ef24e7",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/odin-dispatch-modes/SKILL.md",
+      "relative_path": ".claude/skills/odin-dispatch-modes/SKILL.md",
+      "kind": "skill",
+      "key": "odin-dispatch-modes",
+      "title": "odin-dispatch-modes",
+      "content_hash": "9d8dd16e45b652886058cb06b731157fd2c382833ec6c49aa2b9f30091770d9c",
+      "path_signals": [
+        "claude_root"
+      ],
+      "classification": "rewrite",
+      "rationale": "legacy asset needs normalization into the new contract",
+      "duplicate_group": "dup-3e6792a792084515",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/odin-github-auth-boundaries/SKILL.md",
+      "relative_path": ".claude/skills/odin-github-auth-boundaries/SKILL.md",
+      "kind": "skill",
+      "key": "odin-github-auth-boundaries",
+      "title": "Odin GitHub Auth Boundaries",
+      "content_hash": "5fd896df96bb1948d907968e8c4dcbbe52b7f60f1e8c4dbfc585ea11301d8c85",
+      "path_signals": [
+        "claude_root"
+      ],
+      "classification": "rewrite",
+      "rationale": "legacy asset needs normalization into the new contract",
+      "duplicate_group": "dup-75673919606f824c",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/odin-learnings-pollution/SKILL.md",
+      "relative_path": ".claude/skills/odin-learnings-pollution/SKILL.md",
+      "kind": "skill",
+      "key": "odin-learnings-pollution",
+      "title": "Odin Learnings File Pollution",
+      "content_hash": "d976dc352562d18b1256bbd09cc1fc08e57ef00aea728f88a164458d36b8bb3f",
+      "path_signals": [
+        "claude_root"
+      ],
+      "classification": "rewrite",
+      "rationale": "legacy asset needs normalization into the new contract",
+      "duplicate_group": "dup-0af631652439b505",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/odin-n8n-workflow-ops/SKILL.md",
+      "relative_path": ".claude/skills/odin-n8n-workflow-ops/SKILL.md",
+      "kind": "skill",
+      "key": "odin-n8n-workflow-ops",
+      "title": "n8n Workflow Operations (v2)",
+      "content_hash": "a1233155ceeeecc93e55ab9895b7b57c1b576803018d02203db267008865b438",
+      "path_signals": [
+        "claude_root"
+      ],
+      "classification": "rewrite",
+      "rationale": "legacy asset needs normalization into the new contract",
+      "duplicate_group": "dup-5b8dee6c989183d8",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/odin-pr-state-check/SKILL.md",
+      "relative_path": ".claude/skills/odin-pr-state-check/SKILL.md",
+      "kind": "skill",
+      "key": "odin-pr-state-check",
+      "title": "PR State Pre-Check",
+      "content_hash": "85940ed70a9057657cd5a3ebc52a648d5642e90288982af06aecbbad79ab1a22",
+      "path_signals": [
+        "claude_root"
+      ],
+      "classification": "rewrite",
+      "rationale": "legacy asset needs normalization into the new contract",
+      "duplicate_group": "dup-e09111e6be989c61",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/odin-research/SKILL.md",
+      "relative_path": ".claude/skills/odin-research/SKILL.md",
+      "kind": "skill",
+      "key": "odin-research",
+      "title": "Odin Research Skill",
+      "content_hash": "133e32dd5e07752fe482bb2cb035dff1ec1c78c029dc45389481693411a059e5",
+      "path_signals": [
+        "claude_root"
+      ],
+      "classification": "rewrite",
+      "rationale": "legacy asset needs normalization into the new contract",
+      "duplicate_group": "dup-10b0fa784514281f",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/odin-sentry/SKILL.md",
+      "relative_path": ".claude/skills/odin-sentry/SKILL.md",
+      "kind": "skill",
+      "key": "odin-sentry",
+      "title": "Odin Sentry Remediation",
+      "content_hash": "05acb6ecaec99f2f3f45a655cb31e4f1897b270da181c853fdf2d0343d279f8a",
+      "path_signals": [
+        "claude_root"
+      ],
+      "classification": "rewrite",
+      "rationale": "legacy asset needs normalization into the new contract",
+      "duplicate_group": "dup-a9122c21ace1b848",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/odin-skill-scout/SKILL.md",
+      "relative_path": ".claude/skills/odin-skill-scout/SKILL.md",
+      "kind": "skill",
+      "key": "odin-skill-scout",
+      "title": "Skill Scout",
+      "content_hash": "1542a3e7356ce5ea76caf89d51d4a8215d5d1cbee0ae3f3cf29a2d2131c462a3",
+      "path_signals": [
+        "claude_root"
+      ],
+      "classification": "rewrite",
+      "rationale": "legacy asset needs normalization into the new contract",
+      "duplicate_group": "dup-f06a6e2b0abc6e49",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/odin-task-timing/SKILL.md",
+      "relative_path": ".claude/skills/odin-task-timing/SKILL.md",
+      "kind": "skill",
+      "key": "odin-task-timing",
+      "title": "odin-task-timing",
+      "content_hash": "8c9f298e48eb5909f9b859800dda25b282d01758e449419d1df2a1bcd4d41449",
+      "path_signals": [
+        "claude_root"
+      ],
+      "classification": "rewrite",
+      "rationale": "legacy asset needs normalization into the new contract",
+      "duplicate_group": "dup-b5f3235494d92236",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/odin-task-type-reference/SKILL.md",
+      "relative_path": ".claude/skills/odin-task-type-reference/SKILL.md",
+      "kind": "skill",
+      "key": "odin-task-type-reference",
+      "title": "Odin Task Type Reference",
+      "content_hash": "eebcb86e4d306622858b1ecc461c1ac32ef671157b268539df225a475fdb0c40",
+      "path_signals": [
+        "claude_root"
+      ],
+      "classification": "rewrite",
+      "rationale": "legacy asset needs normalization into the new contract",
+      "duplicate_group": "dup-613879b2579b42d2",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/odin-telegram-safety/SKILL.md",
+      "relative_path": ".claude/skills/odin-telegram-safety/SKILL.md",
+      "kind": "skill",
+      "key": "odin-telegram-safety",
+      "title": "odin-telegram-safety",
+      "content_hash": "42864d40a7a0c31391516c5c79ecb2808dc9a32184fc6320d3c0151cd90dd3ae",
+      "path_signals": [
+        "claude_root"
+      ],
+      "classification": "rewrite",
+      "rationale": "legacy asset needs normalization into the new contract",
+      "duplicate_group": "dup-e169fc8d18e5a578",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/odin-webhook-dedup/SKILL.md",
+      "relative_path": ".claude/skills/odin-webhook-dedup/SKILL.md",
+      "kind": "skill",
+      "key": "odin-webhook-dedup",
+      "title": "odin-webhook-dedup",
+      "content_hash": "99bfb4b72d210294845a989df6f6f646efe9cc135c518573821b8904afca75a6",
+      "path_signals": [
+        "claude_root"
+      ],
+      "classification": "rewrite",
+      "rationale": "legacy asset needs normalization into the new contract",
+      "duplicate_group": "dup-901446db31e65d7f",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/pdf/SKILL.md",
+      "relative_path": ".claude/skills/pdf/SKILL.md",
+      "kind": "skill",
+      "key": "pdf",
+      "title": "PDF Processing Guide",
+      "content_hash": "9f78b8359fbd4943ad260a7a1e436e5a96503406d6c34e99f69223d647d85b9c",
+      "path_signals": [
+        "claude_root"
+      ],
+      "classification": "rewrite",
+      "rationale": "legacy asset needs normalization into the new contract",
+      "duplicate_group": "dup-bb4585c1da82b76f",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/pptx/SKILL.md",
+      "relative_path": ".claude/skills/pptx/SKILL.md",
+      "kind": "skill",
+      "key": "pptx",
+      "title": "PPTX Skill",
+      "content_hash": "e5b0df918cbe9d62508b3cf808d73899633f82fc19f6258a25ef9f0de7e62125",
+      "path_signals": [
+        "claude_root"
+      ],
+      "classification": "rewrite",
+      "rationale": "legacy asset needs normalization into the new contract",
+      "duplicate_group": "dup-f6318ce305205c02",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/pr-review-expert/SKILL.md",
+      "relative_path": ".claude/skills/pr-review-expert/SKILL.md",
+      "kind": "skill",
+      "key": "pr-review-expert",
+      "title": "PR Review Expert",
+      "content_hash": "1204a7428bf1bc73a7b94ccd89a990b770f7faaf78efb8c5124cdae5b74780ea",
+      "path_signals": [
+        "claude_root"
+      ],
+      "classification": "rewrite",
+      "rationale": "legacy asset needs normalization into the new contract",
+      "duplicate_group": "dup-c2239406588ed2a1",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/prompt-engineer-toolkit/SKILL.md",
+      "relative_path": ".claude/skills/prompt-engineer-toolkit/SKILL.md",
+      "kind": "skill",
+      "key": "prompt-engineer-toolkit",
+      "title": "Prompt Engineer Toolkit",
+      "content_hash": "2d325a31b0462bed2d466714b7a1d263d6588d9c0de68723661608d38609c7d3",
+      "path_signals": [
+        "claude_root"
+      ],
+      "classification": "rewrite",
+      "rationale": "legacy asset needs normalization into the new contract",
+      "duplicate_group": "dup-6d8c9a60cd965098",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/prompt-engineer-toolkit/references/prompt-templates.md",
+      "relative_path": ".claude/skills/prompt-engineer-toolkit/references/prompt-templates.md",
+      "kind": "prompt",
+      "key": "prompt-templates",
+      "title": "Prompt Templates",
+      "content_hash": "97cdeb34a625c74cb30d0ff3d39541cfd6889f19d212086bf5904d16f91bb014",
+      "path_signals": [
+        "claude_root"
+      ],
+      "classification": "rewrite",
+      "rationale": "legacy asset needs normalization into the new contract",
+      "duplicate_group": "dup-70c5440c22ebd182",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/prompt-engineer-toolkit/scripts/prompt_tester.py",
+      "relative_path": ".claude/skills/prompt-engineer-toolkit/scripts/prompt_tester.py",
+      "kind": "prompt",
+      "key": "prompt_tester",
+      "title": "!/usr/bin/env python3",
+      "content_hash": "250effa4dd83e85d3f1952d9ae5c204de49215831fd72cb91783aa8d549eb359",
+      "path_signals": [
+        "claude_root"
+      ],
+      "classification": "rewrite",
+      "rationale": "legacy asset needs normalization into the new contract",
+      "duplicate_group": "dup-22580ab8c1acaf0e",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/prompt-engineer-toolkit/scripts/prompt_versioner.py",
+      "relative_path": ".claude/skills/prompt-engineer-toolkit/scripts/prompt_versioner.py",
+      "kind": "prompt",
+      "key": "prompt_versioner",
+      "title": "!/usr/bin/env python3",
+      "content_hash": "407a025b70785a5c8d40ed9b745a26127a6e487f1bd24dc8c80e6cc1d1d17465",
+      "path_signals": [
+        "claude_root"
+      ],
+      "classification": "rewrite",
+      "rationale": "legacy asset needs normalization into the new contract",
+      "duplicate_group": "dup-8b8dd16690963969",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/release-manager/SKILL.md",
+      "relative_path": ".claude/skills/release-manager/SKILL.md",
+      "kind": "skill",
+      "key": "release-manager",
+      "title": "Release Manager",
+      "content_hash": "6a931844e7275fd03077cd94fe24a5929f9bc7bad4de2c9d30ebd5c5662855ca",
+      "path_signals": [
+        "claude_root"
+      ],
+      "classification": "rewrite",
+      "rationale": "legacy asset needs normalization into the new contract",
+      "duplicate_group": "dup-ae936099e937199d",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/runbook-generator/SKILL.md",
+      "relative_path": ".claude/skills/runbook-generator/SKILL.md",
+      "kind": "skill",
+      "key": "runbook-generator",
+      "title": "Runbook Generator",
+      "content_hash": "c5b4dfce42a0d8288b31ef0c2f023b3da03a2ffc331cf966c9de24ee3631796e",
+      "path_signals": [
+        "claude_root"
+      ],
+      "classification": "rewrite",
+      "rationale": "legacy asset needs normalization into the new contract",
+      "duplicate_group": "dup-7cd29b3c6addee03",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/senior-prompt-engineer/SKILL.md",
+      "relative_path": ".claude/skills/senior-prompt-engineer/SKILL.md",
+      "kind": "skill",
+      "key": "senior-prompt-engineer",
+      "title": "Senior Prompt Engineer",
+      "content_hash": "ce3f1ef8aa555ae2a83eefa9f8c7a10fbd97d14c0ce4e62dd3f9137c912c5c30",
+      "path_signals": [
+        "claude_root"
+      ],
+      "classification": "rewrite",
+      "rationale": "legacy asset needs normalization into the new contract",
+      "duplicate_group": "dup-473bef0f5f9d8781",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/senior-prompt-engineer/references/prompt_engineering_patterns.md",
+      "relative_path": ".claude/skills/senior-prompt-engineer/references/prompt_engineering_patterns.md",
+      "kind": "prompt",
+      "key": "prompt_engineering_patterns",
+      "title": "Prompt Engineering Patterns",
+      "content_hash": "d9c0cc3207a7e8b095d4148d5014c623f8d93f72c08af5841ae93a37c7497da5",
+      "path_signals": [
+        "claude_root"
+      ],
+      "classification": "rewrite",
+      "rationale": "legacy asset needs normalization into the new contract",
+      "duplicate_group": "dup-e4375bf0ee2e94cd",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/senior-prompt-engineer/scripts/prompt_optimizer.py",
+      "relative_path": ".claude/skills/senior-prompt-engineer/scripts/prompt_optimizer.py",
+      "kind": "prompt",
+      "key": "prompt_optimizer",
+      "title": "!/usr/bin/env python3",
+      "content_hash": "4d9fbc0da266517847a377ade997d5e5d1dfdfa31a42b0cf7222cbb85ba210c1",
+      "path_signals": [
+        "claude_root"
+      ],
+      "classification": "rewrite",
+      "rationale": "legacy asset needs normalization into the new contract",
+      "duplicate_group": "dup-f930d1e99bb9a7dd",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/senior-secops/SKILL.md",
+      "relative_path": ".claude/skills/senior-secops/SKILL.md",
+      "kind": "skill",
+      "key": "senior-secops",
+      "title": "Senior SecOps Engineer",
+      "content_hash": "4003717f9491b8070618bb87a786ed2c9ddc831ef0663bb30970465e1ba7dd11",
+      "path_signals": [
+        "claude_root"
+      ],
+      "classification": "rewrite",
+      "rationale": "legacy asset needs normalization into the new contract",
+      "duplicate_group": "dup-77b9dd6e71ff29a8",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/sentry-fix-issues/SKILL.md",
+      "relative_path": ".claude/skills/sentry-fix-issues/SKILL.md",
+      "kind": "skill",
+      "key": "sentry-fix-issues",
+      "title": "Fix Sentry Issues",
+      "content_hash": "217e029b21df3c58437c2e91df0dafa77b6a5035345b1f9080cac49659d9448b",
+      "path_signals": [
+        "claude_root"
+      ],
+      "classification": "rewrite",
+      "rationale": "legacy asset needs normalization into the new contract",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/simplify/SKILL.md",
+      "relative_path": ".claude/skills/simplify/SKILL.md",
+      "kind": "skill",
+      "key": "simplify",
+      "title": "Simplify",
+      "content_hash": "b09357a6c157b47d9be1692a1500c5375eca888add155daf1c0dda1af6ed36fe",
+      "path_signals": [
+        "claude_root"
+      ],
+      "classification": "rewrite",
+      "rationale": "legacy asset needs normalization into the new contract",
+      "duplicate_group": "dup-179b21ed17b5f1cb",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/skill-creator/SKILL.md",
+      "relative_path": ".claude/skills/skill-creator/SKILL.md",
+      "kind": "skill",
+      "key": "skill-creator",
+      "title": "Skill Creator",
+      "content_hash": "ba8bebb2c085444120743af8dc859dd7c2592d6290e93aa5e1c08403109bdce7",
+      "path_signals": [
+        "claude_root"
+      ],
+      "classification": "rewrite",
+      "rationale": "legacy asset needs normalization into the new contract",
+      "duplicate_group": "dup-e75d79b8cd5e5516",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/skill-security-auditor/SKILL.md",
+      "relative_path": ".claude/skills/skill-security-auditor/SKILL.md",
+      "kind": "skill",
+      "key": "skill-security-auditor",
+      "title": "Skill Security Auditor",
+      "content_hash": "5dd0ae3390374174905f558749741e5653231fbed10a0134666d493e6a2fb95e",
+      "path_signals": [
+        "claude_root"
+      ],
+      "classification": "rewrite",
+      "rationale": "legacy asset needs normalization into the new contract",
+      "duplicate_group": "dup-407930c86c720aea",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/skill-tester/SKILL.md",
+      "relative_path": ".claude/skills/skill-tester/SKILL.md",
+      "kind": "skill",
+      "key": "skill-tester",
+      "title": "Skill Tester",
+      "content_hash": "109f9f25624a2ff78ca1d325587706a6e97c0412bd5c8108f99acd5fedbd8af5",
+      "path_signals": [
+        "claude_root"
+      ],
+      "classification": "rewrite",
+      "rationale": "legacy asset needs normalization into the new contract",
+      "duplicate_group": "dup-da415608c4b0af76",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/skill-tester/assets/sample-skill/SKILL.md",
+      "relative_path": ".claude/skills/skill-tester/assets/sample-skill/SKILL.md",
+      "kind": "skill",
+      "key": "sample-skill",
+      "title": "Sample Text Processor",
+      "content_hash": "8365a36db737bcb0abf83efea91d3bb513aea1699a0017ccc74e727941fdd1a6",
+      "path_signals": [
+        "claude_root"
+      ],
+      "classification": "rewrite",
+      "rationale": "legacy asset needs normalization into the new contract",
+      "duplicate_group": "dup-30ad27f0ca370bff",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/social-media-writer/SKILL.md",
+      "relative_path": ".claude/skills/social-media-writer/SKILL.md",
+      "kind": "skill",
+      "key": "social-media-writer",
+      "title": "Social Media Writer",
+      "content_hash": "9afbb14da541fc2c70f9394567021bdc8ba4418ee9f5d29ccade0a8e6361ac3a",
+      "path_signals": [
+        "claude_root"
+      ],
+      "classification": "rewrite",
+      "rationale": "legacy asset needs normalization into the new contract",
+      "duplicate_group": "dup-01d69e5b0c1db291",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/tech-debt-tracker/SKILL.md",
+      "relative_path": ".claude/skills/tech-debt-tracker/SKILL.md",
+      "kind": "skill",
+      "key": "tech-debt-tracker",
+      "title": "Tech Debt Tracker",
+      "content_hash": "3856fa329a0721500aae6ccc3f8b66e954a6ab4531b3aa8e4c409c6b7d1375af",
+      "path_signals": [
+        "claude_root"
+      ],
+      "classification": "rewrite",
+      "rationale": "legacy asset needs normalization into the new contract",
+      "duplicate_group": "dup-1347c5b21029c3fd",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/upgrade-stripe/SKILL.md",
+      "relative_path": ".claude/skills/upgrade-stripe/SKILL.md",
+      "kind": "skill",
+      "key": "upgrade-stripe",
+      "title": "Upgrading Stripe Versions",
+      "content_hash": "11961cac880180a1095ec6ca2eef766dc33e392aabde590e57ea44684288ede2",
+      "path_signals": [
+        "claude_root"
+      ],
+      "classification": "rewrite",
+      "rationale": "legacy asset needs normalization into the new contract",
+      "duplicate_group": "dup-ac80efa2b3b6105c",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/web-artifacts-builder/SKILL.md",
+      "relative_path": ".claude/skills/web-artifacts-builder/SKILL.md",
+      "kind": "skill",
+      "key": "web-artifacts-builder",
+      "title": "Web Artifacts Builder",
+      "content_hash": "81c5002c6643b0de7b8710b00e7a9038daa6fb9b68d59870ee6adb12da8d10f8",
+      "path_signals": [
+        "claude_root"
+      ],
+      "classification": "rewrite",
+      "rationale": "legacy asset needs normalization into the new contract",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/webapp-testing/SKILL.md",
+      "relative_path": ".claude/skills/webapp-testing/SKILL.md",
+      "kind": "skill",
+      "key": "webapp-testing",
+      "title": "Web Application Testing",
+      "content_hash": "51b7349e77ec63b7744a6f63647e7566a0b4d2e301121cc10e8c2113af6556a2",
+      "path_signals": [
+        "claude_root"
+      ],
+      "classification": "rewrite",
+      "rationale": "legacy asset needs normalization into the new contract",
+      "duplicate_group": "dup-676310a60fc80ed7",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/.claude/skills/xlsx/SKILL.md",
+      "relative_path": ".claude/skills/xlsx/SKILL.md",
+      "kind": "skill",
+      "key": "xlsx",
+      "title": "Requirements for Outputs",
+      "content_hash": "dd316db7785a6be12966c2a2d848931fbf5f518b3cdb0a66fa62ee835ead1cfc",
+      "path_signals": [
+        "claude_root"
+      ],
+      "classification": "rewrite",
+      "rationale": "legacy asset needs normalization into the new contract",
+      "duplicate_group": "dup-4263f660e76a855b",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/docs/adr/2026-03-20-odin-engine-v2.md",
+      "relative_path": "docs/adr/2026-03-20-odin-engine-v2.md",
+      "kind": "architecture_doc",
+      "key": "2026-03-20-odin-engine-v2",
+      "title": "ADR: Replace Bash Dispatch Loop with Go Engine",
+      "content_hash": "03ac382ed13e52a6365eb449d43c6f0d5b9b5d7dcf0b6bbf48b120105da55839",
+      "path_signals": [
+        "docs_root"
+      ],
+      "classification": "reference_only",
+      "rationale": "architecture material should inform design but not be promoted directly",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/docs/adr/2026-03-27-odin-cognitive-control-plane.md",
+      "relative_path": "docs/adr/2026-03-27-odin-cognitive-control-plane.md",
+      "kind": "architecture_doc",
+      "key": "2026-03-27-odin-cognitive-control-plane",
+      "title": "ADR-0008: Odin Cognitive Control Plane",
+      "content_hash": "9276d7fac0b93c19efe721df512e8d42df17f80539ae65f1bbfc928e62bd3a33",
+      "path_signals": [
+        "docs_root"
+      ],
+      "classification": "reference_only",
+      "rationale": "architecture material should inform design but not be promoted directly",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/docs/adrs/ADR-001-codex-nested-delegation-guard.md",
+      "relative_path": "docs/adrs/ADR-001-codex-nested-delegation-guard.md",
+      "kind": "architecture_doc",
+      "key": "adr-001-codex-nested-delegation-guard",
+      "title": "ADR-001: Codex Nested Delegation Guard",
+      "content_hash": "a99d3270e094c830928b349c3bb75f87d8ca8c08ef7005f7407b3505587553cb",
+      "path_signals": [
+        "docs_root"
+      ],
+      "classification": "reference_only",
+      "rationale": "architecture material should inform design but not be promoted directly",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/docs/adrs/ADR-002-openapi-contract-check-branch-protection.md",
+      "relative_path": "docs/adrs/ADR-002-openapi-contract-check-branch-protection.md",
+      "kind": "architecture_doc",
+      "key": "adr-002-openapi-contract-check-branch-protection",
+      "title": "ADR-002: OpenAPI Contract Check as Required Branch Protection",
+      "content_hash": "31b14408bb51f46cdbcc96b356bfa5ebcf30a4f8db15b5f091ca30393e62b715",
+      "path_signals": [
+        "docs_root"
+      ],
+      "classification": "reference_only",
+      "rationale": "architecture material should inform design but not be promoted directly",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/docs/adrs/ADR-003-agent-model-routing.md",
+      "relative_path": "docs/adrs/ADR-003-agent-model-routing.md",
+      "kind": "architecture_doc",
+      "key": "adr-003-agent-model-routing",
+      "title": "ADR-003: Agent Model Routing and Failover Policy",
+      "content_hash": "90457234627c91b5eb803d3434de7b1e7f3246e42778f36fe2f9f67ccb55750f",
+      "path_signals": [
+        "docs_root"
+      ],
+      "classification": "reference_only",
+      "rationale": "architecture material should inform design but not be promoted directly",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/docs/adrs/ADR-004-managed-mcp-browser-architecture.md",
+      "relative_path": "docs/adrs/ADR-004-managed-mcp-browser-architecture.md",
+      "kind": "architecture_doc",
+      "key": "adr-004-managed-mcp-browser-architecture",
+      "title": "ADR-004: Managed MCP Browser Architecture",
+      "content_hash": "7c14760d9cfba97c93dda72876ddd0d2f0259266d1dee941c7a638db726277b1",
+      "path_signals": [
+        "docs_root"
+      ],
+      "classification": "reference_only",
+      "rationale": "architecture material should inform design but not be promoted directly",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/docs/adrs/ADR-005-claude-github-app-permissions.md",
+      "relative_path": "docs/adrs/ADR-005-claude-github-app-permissions.md",
+      "kind": "architecture_doc",
+      "key": "adr-005-claude-github-app-permissions",
+      "title": "ADR-005: Claude GitHub App Permission Approval",
+      "content_hash": "a3161d88d138bfc2b3addcb1ecbb6959c21cde43d6f721d179f3a4b6c997e1f1",
+      "path_signals": [
+        "docs_root"
+      ],
+      "classification": "reference_only",
+      "rationale": "architecture material should inform design but not be promoted directly",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/docs/audits/2026-03-27-odin-shims-prompts-workflow-audit.md",
+      "relative_path": "docs/audits/2026-03-27-odin-shims-prompts-workflow-audit.md",
+      "kind": "prompt",
+      "key": "2026-03-27-odin-shims-prompts-workflow-audit",
+      "title": "Executive Summary",
+      "content_hash": "40f5bdc93e0307e01c0f5a5c13851f6fcd51bf3df9b641e6ddecbda44f72b922",
+      "path_signals": [
+        "docs_root"
+      ],
+      "classification": "rewrite",
+      "rationale": "legacy asset needs normalization into the new contract",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/docs/checklists/finance-readout-delivery-review.md",
+      "relative_path": "docs/checklists/finance-readout-delivery-review.md",
+      "kind": "operational_playbook",
+      "key": "finance-readout-delivery-review",
+      "title": "Finance Readout Delivery Review Checklist",
+      "content_hash": "b7f110478155c6cfe8268e2f368a7fde1979f62d269f0abc359059e227d8c6fc",
+      "path_signals": [
+        "docs_root"
+      ],
+      "classification": "rewrite",
+      "rationale": "legacy asset needs normalization into the new contract",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/docs/checklists/finance-readout-draft-review.md",
+      "relative_path": "docs/checklists/finance-readout-draft-review.md",
+      "kind": "operational_playbook",
+      "key": "finance-readout-draft-review",
+      "title": "Finance Readout Draft Review Checklist",
+      "content_hash": "570a40bfcbba7e0d714c75526f81bf140c77a65e1753546d4a12e806acd9ff4a",
+      "path_signals": [
+        "docs_root"
+      ],
+      "classification": "rewrite",
+      "rationale": "legacy asset needs normalization into the new contract",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/docs/checklists/finance-readout-review.md",
+      "relative_path": "docs/checklists/finance-readout-review.md",
+      "kind": "operational_playbook",
+      "key": "finance-readout-review",
+      "title": "Finance Readout Review Checklist",
+      "content_hash": "94ab167863cb49344f57d8e3c721d2657dcacfd1b24d5d1210afa58f8158c1db",
+      "path_signals": [
+        "docs_root"
+      ],
+      "classification": "rewrite",
+      "rationale": "legacy asset needs normalization into the new contract",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/docs/checklists/finance-summary-review.md",
+      "relative_path": "docs/checklists/finance-summary-review.md",
+      "kind": "operational_playbook",
+      "key": "finance-summary-review",
+      "title": "Finance Summary Review Checklist",
+      "content_hash": "6a368839af33d55b3c5a88108d25d8b2281b445ab815893ae9d0aa70f9a64818",
+      "path_signals": [
+        "docs_root"
+      ],
+      "classification": "rewrite",
+      "rationale": "legacy asset needs normalization into the new contract",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/docs/deployments/staging-and-promotion.md",
+      "relative_path": "docs/deployments/staging-and-promotion.md",
+      "kind": "operational_playbook",
+      "key": "staging-and-promotion",
+      "title": "Staging \u0026 Promotion Pipeline",
+      "content_hash": "2d2adce45e263d1a48cb1e5cd2fc231f58c6f6a42a379a60c470801f07ecd5f1",
+      "path_signals": [
+        "docs_root"
+      ],
+      "classification": "rewrite",
+      "rationale": "legacy asset needs normalization into the new contract",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/docs/plans/2026-03-22-content-visual-pipeline-design.md",
+      "relative_path": "docs/plans/2026-03-22-content-visual-pipeline-design.md",
+      "kind": "architecture_doc",
+      "key": "2026-03-22-content-visual-pipeline-design",
+      "title": "Content Visual Pipeline Design",
+      "content_hash": "cb9459f444e32f58102e6c26295e5256143bc1769dcdc9819d521705bf3b3cdf",
+      "path_signals": [
+        "docs_root"
+      ],
+      "classification": "reference_only",
+      "rationale": "architecture material should inform design but not be promoted directly",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/docs/plans/2026-03-22-content-visual-pipeline.md",
+      "relative_path": "docs/plans/2026-03-22-content-visual-pipeline.md",
+      "kind": "architecture_doc",
+      "key": "2026-03-22-content-visual-pipeline",
+      "title": "Content Visual Pipeline Implementation Plan",
+      "content_hash": "ab17538fa75391012e9a5305be1c94100ea5156fc231e569d4b5996cd2dfe559",
+      "path_signals": [
+        "docs_root"
+      ],
+      "classification": "reference_only",
+      "rationale": "architecture material should inform design but not be promoted directly",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/docs/plans/2026-03-22-github-intake-consolidation-design.md",
+      "relative_path": "docs/plans/2026-03-22-github-intake-consolidation-design.md",
+      "kind": "architecture_doc",
+      "key": "2026-03-22-github-intake-consolidation-design",
+      "title": "GitHub Intake Consolidation Implementation Plan",
+      "content_hash": "6cddb02d53310cb4dc89a32063477a72829aea75b969ef40ec1a8f3f33dc99a0",
+      "path_signals": [
+        "docs_root"
+      ],
+      "classification": "reference_only",
+      "rationale": "architecture material should inform design but not be promoted directly",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/docs/plans/2026-03-22-huginn-extraction-quality.md",
+      "relative_path": "docs/plans/2026-03-22-huginn-extraction-quality.md",
+      "kind": "architecture_doc",
+      "key": "2026-03-22-huginn-extraction-quality",
+      "title": "Huginn Extraction Quality Upgrades",
+      "content_hash": "2254f1cb82ba109a4039ddd09889f872ae7b338daff6d51a914551e3d6749ff4",
+      "path_signals": [
+        "docs_root"
+      ],
+      "classification": "reference_only",
+      "rationale": "architecture material should inform design but not be promoted directly",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/docs/plans/2026-03-22-jarvis-mode-design.md",
+      "relative_path": "docs/plans/2026-03-22-jarvis-mode-design.md",
+      "kind": "architecture_doc",
+      "key": "2026-03-22-jarvis-mode-design",
+      "title": "J.A.R.V.I.S. Mode — Design Document",
+      "content_hash": "a5a92a2908816950d9de149011a5e6eb67762e5f0975f360eaf091dccc64fed2",
+      "path_signals": [
+        "docs_root"
+      ],
+      "classification": "reference_only",
+      "rationale": "architecture material should inform design but not be promoted directly",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/docs/plans/2026-03-22-jarvis-mode-implementation.md",
+      "relative_path": "docs/plans/2026-03-22-jarvis-mode-implementation.md",
+      "kind": "architecture_doc",
+      "key": "2026-03-22-jarvis-mode-implementation",
+      "title": "J.A.R.V.I.S. Mode Implementation Plan",
+      "content_hash": "5a9f6b3a3eff6bd4c78a0376bb486b8cef0a8a807a75a4bd7256092cbc2518fb",
+      "path_signals": [
+        "docs_root"
+      ],
+      "classification": "reference_only",
+      "rationale": "architecture material should inform design but not be promoted directly",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/docs/plans/2026-03-22-sentry-pipeline-fix-design.md",
+      "relative_path": "docs/plans/2026-03-22-sentry-pipeline-fix-design.md",
+      "kind": "architecture_doc",
+      "key": "2026-03-22-sentry-pipeline-fix-design",
+      "title": "Sentry Pipeline Fix — Design",
+      "content_hash": "e7ac6d8ae40c10b9cd4208ec6e96e8092fb3b2f303aea651889ff6b677d15d46",
+      "path_signals": [
+        "docs_root"
+      ],
+      "classification": "reference_only",
+      "rationale": "architecture material should inform design but not be promoted directly",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/docs/plans/2026-03-22-sentry-pipeline-fix-plan.md",
+      "relative_path": "docs/plans/2026-03-22-sentry-pipeline-fix-plan.md",
+      "kind": "architecture_doc",
+      "key": "2026-03-22-sentry-pipeline-fix-plan",
+      "title": "Sentry Pipeline Fix — Implementation Plan",
+      "content_hash": "341a2cb832c7be0e053d01885f4f2a3e16024e992af7611099dce9a99361f126",
+      "path_signals": [
+        "docs_root"
+      ],
+      "classification": "reference_only",
+      "rationale": "architecture material should inform design but not be promoted directly",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/docs/plans/2026-03-23-whisparr-homelab-design.md",
+      "relative_path": "docs/plans/2026-03-23-whisparr-homelab-design.md",
+      "kind": "architecture_doc",
+      "key": "2026-03-23-whisparr-homelab-design",
+      "title": "Whisparr Homelab Design",
+      "content_hash": "987b81dd6dbb984b09acc46b0d66f1787452a69fb10787ce459eff00d8b49243",
+      "path_signals": [
+        "docs_root"
+      ],
+      "classification": "reference_only",
+      "rationale": "architecture material should inform design but not be promoted directly",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/docs/plans/2026-03-23-whisparr-homelab.md",
+      "relative_path": "docs/plans/2026-03-23-whisparr-homelab.md",
+      "kind": "architecture_doc",
+      "key": "2026-03-23-whisparr-homelab",
+      "title": "Whisparr Homelab Implementation Plan",
+      "content_hash": "5cde50ac89cb0b1b6fcaad387f75b99b6edfe7626a7e58cd82fa20f4459de983",
+      "path_signals": [
+        "docs_root"
+      ],
+      "classification": "reference_only",
+      "rationale": "architecture material should inform design but not be promoted directly",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/docs/plans/2026-03-23-whisparr-integrations-design.md",
+      "relative_path": "docs/plans/2026-03-23-whisparr-integrations-design.md",
+      "kind": "architecture_doc",
+      "key": "2026-03-23-whisparr-integrations-design",
+      "title": "Whisparr Integrations Design",
+      "content_hash": "5684e2b68a6bef5526324605a5135af58e654de57e3c4dec082423cb1af67024",
+      "path_signals": [
+        "docs_root"
+      ],
+      "classification": "reference_only",
+      "rationale": "architecture material should inform design but not be promoted directly",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/docs/plans/2026-03-23-whisparr-integrations.md",
+      "relative_path": "docs/plans/2026-03-23-whisparr-integrations.md",
+      "kind": "architecture_doc",
+      "key": "2026-03-23-whisparr-integrations",
+      "title": "Whisparr Integrations Implementation Plan",
+      "content_hash": "5cb1b59dc3d7c37eb73a207879627bdde9382af9009eb2456e53110a9f76e618",
+      "path_signals": [
+        "docs_root"
+      ],
+      "classification": "reference_only",
+      "rationale": "architecture material should inform design but not be promoted directly",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/docs/plans/2026-03-23-whisparr-public-indexer-expansion-design.md",
+      "relative_path": "docs/plans/2026-03-23-whisparr-public-indexer-expansion-design.md",
+      "kind": "architecture_doc",
+      "key": "2026-03-23-whisparr-public-indexer-expansion-design",
+      "title": "Whisparr Public Indexer Expansion Design",
+      "content_hash": "7c493c8f90f998cc4c040ed865608fe25fdfbdbfe3ef321be1026fc29423845b",
+      "path_signals": [
+        "docs_root"
+      ],
+      "classification": "reference_only",
+      "rationale": "architecture material should inform design but not be promoted directly",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/docs/plans/2026-03-23-whisparr-public-indexer-expansion.md",
+      "relative_path": "docs/plans/2026-03-23-whisparr-public-indexer-expansion.md",
+      "kind": "architecture_doc",
+      "key": "2026-03-23-whisparr-public-indexer-expansion",
+      "title": "Whisparr Public Indexer Expansion Implementation Plan",
+      "content_hash": "341de23c5201dd84bee9d591b7ad0e2ff9c742a9360596ae956c581209c6a473",
+      "path_signals": [
+        "docs_root"
+      ],
+      "classification": "reference_only",
+      "rationale": "architecture material should inform design but not be promoted directly",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/docs/plans/2026-03-24-autonomous-perception-layer-design.md",
+      "relative_path": "docs/plans/2026-03-24-autonomous-perception-layer-design.md",
+      "kind": "architecture_doc",
+      "key": "2026-03-24-autonomous-perception-layer-design",
+      "title": "Autonomous Perception Layer — Design Document",
+      "content_hash": "94ce994113fe79b5fd0f43f62720f68f7ab50319daec5e184d859c3631daacbe",
+      "path_signals": [
+        "docs_root"
+      ],
+      "classification": "reference_only",
+      "rationale": "architecture material should inform design but not be promoted directly",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/docs/plans/2026-03-24-autonomous-perception-layer-plan.md",
+      "relative_path": "docs/plans/2026-03-24-autonomous-perception-layer-plan.md",
+      "kind": "architecture_doc",
+      "key": "2026-03-24-autonomous-perception-layer-plan",
+      "title": "Autonomous Perception Layer — Implementation Plan",
+      "content_hash": "31aa4d74f5d22664b2360c2fdb21b7f602274f289ec4c16a08212f205d866686",
+      "path_signals": [
+        "docs_root"
+      ],
+      "classification": "reference_only",
+      "rationale": "architecture material should inform design but not be promoted directly",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/docs/plans/2026-03-24-dynamic-model-router-design.md",
+      "relative_path": "docs/plans/2026-03-24-dynamic-model-router-design.md",
+      "kind": "architecture_doc",
+      "key": "2026-03-24-dynamic-model-router-design",
+      "title": "Dynamic Model Router — Design",
+      "content_hash": "e0998f3128c9034959d4cd74f29d3a7196964d5ff69c2b627e9494be3e71530f",
+      "path_signals": [
+        "docs_root"
+      ],
+      "classification": "reference_only",
+      "rationale": "architecture material should inform design but not be promoted directly",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/docs/plans/2026-03-24-dynamic-model-router-impl.md",
+      "relative_path": "docs/plans/2026-03-24-dynamic-model-router-impl.md",
+      "kind": "architecture_doc",
+      "key": "2026-03-24-dynamic-model-router-impl",
+      "title": "Dynamic Model Router — Implementation Plan",
+      "content_hash": "4e6f01f894e76ccc5297b49055a1359fbea80dc218ac56871348fbfd792cb08a",
+      "path_signals": [
+        "docs_root"
+      ],
+      "classification": "reference_only",
+      "rationale": "architecture material should inform design but not be promoted directly",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/docs/plans/2026-03-24-error-handling-observability.md",
+      "relative_path": "docs/plans/2026-03-24-error-handling-observability.md",
+      "kind": "architecture_doc",
+      "key": "2026-03-24-error-handling-observability",
+      "title": "Error Handling \u0026 Observability Hardening",
+      "content_hash": "38751c624097ca34877517be5a0a5d7e75e146a1205e18af5aa81a23c4e8c40f",
+      "path_signals": [
+        "docs_root"
+      ],
+      "classification": "reference_only",
+      "rationale": "architecture material should inform design but not be promoted directly",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/docs/plans/2026-03-24-huginn-captcha-solving-design.md",
+      "relative_path": "docs/plans/2026-03-24-huginn-captcha-solving-design.md",
+      "kind": "architecture_doc",
+      "key": "2026-03-24-huginn-captcha-solving-design",
+      "title": "Huginn CAPTCHA Solving — Design",
+      "content_hash": "04626887a952431e40f6c8474578dcfbb164bdc51b54917dc3edb3689771e431",
+      "path_signals": [
+        "docs_root"
+      ],
+      "classification": "reference_only",
+      "rationale": "architecture material should inform design but not be promoted directly",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/docs/plans/2026-03-24-huginn-captcha-solving-impl.md",
+      "relative_path": "docs/plans/2026-03-24-huginn-captcha-solving-impl.md",
+      "kind": "architecture_doc",
+      "key": "2026-03-24-huginn-captcha-solving-impl",
+      "title": "Huginn CAPTCHA Solving — Implementation Plan",
+      "content_hash": "aefe012d0e1e91e67c99dcd21767f33d2b6d60879782041fd1f22c6c1d0746c3",
+      "path_signals": [
+        "docs_root"
+      ],
+      "classification": "reference_only",
+      "rationale": "architecture material should inform design but not be promoted directly",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/docs/plans/2026-03-24-qa-pr-pipeline-design.md",
+      "relative_path": "docs/plans/2026-03-24-qa-pr-pipeline-design.md",
+      "kind": "architecture_doc",
+      "key": "2026-03-24-qa-pr-pipeline-design",
+      "title": "QA \u0026 PR Pipeline: Fix, Simplify, and Ship",
+      "content_hash": "0c1421ef81a574a4e5e64e15d08a0d627f4ae3e99e5885117e8b5fe08c882786",
+      "path_signals": [
+        "docs_root"
+      ],
+      "classification": "reference_only",
+      "rationale": "architecture material should inform design but not be promoted directly",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/docs/plans/2026-03-24-qa-pr-pipeline-impl.md",
+      "relative_path": "docs/plans/2026-03-24-qa-pr-pipeline-impl.md",
+      "kind": "architecture_doc",
+      "key": "2026-03-24-qa-pr-pipeline-impl",
+      "title": "QA \u0026 PR Pipeline Implementation Plan",
+      "content_hash": "7643e4984a5617eb42d4e9d56585debeac529ab293cd00ec6d853ad88abed1ef",
+      "path_signals": [
+        "docs_root"
+      ],
+      "classification": "reference_only",
+      "rationale": "architecture material should inform design but not be promoted directly",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/docs/plans/2026-03-24-simulation-engine-design.md",
+      "relative_path": "docs/plans/2026-03-24-simulation-engine-design.md",
+      "kind": "architecture_doc",
+      "key": "2026-03-24-simulation-engine-design",
+      "title": "Simulation Engine Design — Impact Prediction via Swarm Intelligence",
+      "content_hash": "40eb0c1f3558eb2afe48d6c81ed2e0f5057461152a1e9085a73fcd9f8f8f3154",
+      "path_signals": [
+        "docs_root"
+      ],
+      "classification": "reference_only",
+      "rationale": "architecture material should inform design but not be promoted directly",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/docs/plans/2026-03-24-simulation-engine-impl.md",
+      "relative_path": "docs/plans/2026-03-24-simulation-engine-impl.md",
+      "kind": "architecture_doc",
+      "key": "2026-03-24-simulation-engine-impl",
+      "title": "Simulation Engine Implementation Plan",
+      "content_hash": "94e61bcab6cfcfc084981e3060d9bcff41ae19999f7a4068b25f799f008f1f4e",
+      "path_signals": [
+        "docs_root"
+      ],
+      "classification": "reference_only",
+      "rationale": "architecture material should inform design but not be promoted directly",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/docs/plans/2026-03-24-stall-kill-per-role-scheduling-design.md",
+      "relative_path": "docs/plans/2026-03-24-stall-kill-per-role-scheduling-design.md",
+      "kind": "architecture_doc",
+      "key": "2026-03-24-stall-kill-per-role-scheduling-design",
+      "title": "Stall Kill + Per-Role Scheduling",
+      "content_hash": "9c9d7d4aedae4590076b37a37e08b14f9432850d730acc024075c7ed9f0c2e76",
+      "path_signals": [
+        "docs_root"
+      ],
+      "classification": "reference_only",
+      "rationale": "architecture material should inform design but not be promoted directly",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/docs/plans/2026-03-24-stall-kill-per-role-scheduling.md",
+      "relative_path": "docs/plans/2026-03-24-stall-kill-per-role-scheduling.md",
+      "kind": "architecture_doc",
+      "key": "2026-03-24-stall-kill-per-role-scheduling",
+      "title": "Stall Kill + Per-Role Scheduling Implementation Plan",
+      "content_hash": "54270d0484cab486ac1ea7ac46671a73c803ed7519f178d73d4788fcbaf211fe",
+      "path_signals": [
+        "docs_root"
+      ],
+      "classification": "reference_only",
+      "rationale": "architecture material should inform design but not be promoted directly",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/docs/plans/2026-03-25-dynamic-model-router-audit-remediation.md",
+      "relative_path": "docs/plans/2026-03-25-dynamic-model-router-audit-remediation.md",
+      "kind": "architecture_doc",
+      "key": "2026-03-25-dynamic-model-router-audit-remediation",
+      "title": "Dynamic Model Router Audit Remediation Implementation Plan",
+      "content_hash": "b81c3f772f30d5fdc708621ca18677fa597b2de88bd00572c1cf2d4e177c5f9a",
+      "path_signals": [
+        "docs_root"
+      ],
+      "classification": "reference_only",
+      "rationale": "architecture material should inform design but not be promoted directly",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/docs/plans/2026-03-25-odin-pipeline-hardening-design.md",
+      "relative_path": "docs/plans/2026-03-25-odin-pipeline-hardening-design.md",
+      "kind": "architecture_doc",
+      "key": "2026-03-25-odin-pipeline-hardening-design",
+      "title": "Odin Pipeline Hardening Design",
+      "content_hash": "50b8cad5ad39503f0e700f2e2eb684b7148d74bb2c9e7c2e17b4925d241db8ce",
+      "path_signals": [
+        "docs_root"
+      ],
+      "classification": "reference_only",
+      "rationale": "architecture material should inform design but not be promoted directly",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/docs/plans/2026-03-25-odin-pipeline-hardening.md",
+      "relative_path": "docs/plans/2026-03-25-odin-pipeline-hardening.md",
+      "kind": "architecture_doc",
+      "key": "2026-03-25-odin-pipeline-hardening",
+      "title": "Odin Pipeline Hardening Implementation Plan",
+      "content_hash": "0736909efb90e99f4f0be86edbac40e99c3f24a34f2424ab60871ea9ac0d029f",
+      "path_signals": [
+        "docs_root"
+      ],
+      "classification": "reference_only",
+      "rationale": "architecture material should inform design but not be promoted directly",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/docs/plans/2026-03-26-backend-health-automation.md",
+      "relative_path": "docs/plans/2026-03-26-backend-health-automation.md",
+      "kind": "architecture_doc",
+      "key": "2026-03-26-backend-health-automation",
+      "title": "Backend Health Automation Implementation Plan",
+      "content_hash": "8a9c146392cfd93b4ea4630907ba591675105613a6d653cc905fec585482e36c",
+      "path_signals": [
+        "docs_root"
+      ],
+      "classification": "reference_only",
+      "rationale": "architecture material should inform design but not be promoted directly",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/docs/plans/2026-03-26-ceo-direct-line-status-e2e.md",
+      "relative_path": "docs/plans/2026-03-26-ceo-direct-line-status-e2e.md",
+      "kind": "architecture_doc",
+      "key": "2026-03-26-ceo-direct-line-status-e2e",
+      "title": "CEO Direct-Line Status E2E Implementation Plan",
+      "content_hash": "2654632b1d64529d2d63c3e65921fe73163ce011bc79b67925950ca9e4245f40",
+      "path_signals": [
+        "docs_root"
+      ],
+      "classification": "reference_only",
+      "rationale": "architecture material should inform design but not be promoted directly",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/docs/plans/2026-03-26-ceo-shim-contract-design.md",
+      "relative_path": "docs/plans/2026-03-26-ceo-shim-contract-design.md",
+      "kind": "architecture_doc",
+      "key": "2026-03-26-ceo-shim-contract-design",
+      "title": "CEO Shim Contract Design",
+      "content_hash": "29df3518d3459153a967e6e7859cbf021f2f5914e4b31a7406aa052ae0c82b3e",
+      "path_signals": [
+        "docs_root"
+      ],
+      "classification": "reference_only",
+      "rationale": "architecture material should inform design but not be promoted directly",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/docs/plans/2026-03-26-ceo-shim-contract.md",
+      "relative_path": "docs/plans/2026-03-26-ceo-shim-contract.md",
+      "kind": "architecture_doc",
+      "key": "2026-03-26-ceo-shim-contract",
+      "title": "CEO Shim Contract Implementation Plan",
+      "content_hash": "105caf3e24d07bc234790d3ecc62543e64f5aae71acbdcb8521b04c12917f476",
+      "path_signals": [
+        "docs_root"
+      ],
+      "classification": "reference_only",
+      "rationale": "architecture material should inform design but not be promoted directly",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/docs/plans/2026-03-26-infra-maintenance-hardening.md",
+      "relative_path": "docs/plans/2026-03-26-infra-maintenance-hardening.md",
+      "kind": "architecture_doc",
+      "key": "2026-03-26-infra-maintenance-hardening",
+      "title": "Infra Maintenance Hardening Implementation Plan",
+      "content_hash": "ca31f16f159ad59d1c53e9d460e304defe01bb9ee88b169c80b524f6178f84d6",
+      "path_signals": [
+        "docs_root"
+      ],
+      "classification": "reference_only",
+      "rationale": "architecture material should inform design but not be promoted directly",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/docs/plans/2026-03-26-llm-backend-failover.md",
+      "relative_path": "docs/plans/2026-03-26-llm-backend-failover.md",
+      "kind": "architecture_doc",
+      "key": "2026-03-26-llm-backend-failover",
+      "title": "LLM Backend Failover Implementation Plan",
+      "content_hash": "db65bb8b13722f54b12d5acaf765508898190e5ee5f3a821a8cc42113e4f63bb",
+      "path_signals": [
+        "docs_root"
+      ],
+      "classification": "reference_only",
+      "rationale": "architecture material should inform design but not be promoted directly",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/docs/plans/2026-03-26-main-push-ci-workflow-design.md",
+      "relative_path": "docs/plans/2026-03-26-main-push-ci-workflow-design.md",
+      "kind": "architecture_doc",
+      "key": "2026-03-26-main-push-ci-workflow-design",
+      "title": "Main Push CI Workflow Design",
+      "content_hash": "2d8cada298fb0329f36da284ffea5791d753de9e37bb8f6f1c709ef5c3f9914e",
+      "path_signals": [
+        "docs_root"
+      ],
+      "classification": "reference_only",
+      "rationale": "architecture material should inform design but not be promoted directly",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/docs/plans/2026-03-26-main-push-ci-workflow.md",
+      "relative_path": "docs/plans/2026-03-26-main-push-ci-workflow.md",
+      "kind": "architecture_doc",
+      "key": "2026-03-26-main-push-ci-workflow",
+      "title": "Main Push CI Workflow Implementation Plan",
+      "content_hash": "abbdcf7f567900db99acba280951940205984b30e9dc70bb66ca8e8409d47bca",
+      "path_signals": [
+        "docs_root"
+      ],
+      "classification": "reference_only",
+      "rationale": "architecture material should inform design but not be promoted directly",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/docs/plans/2026-03-26-odin-self-hosted-runner-stack-design.md",
+      "relative_path": "docs/plans/2026-03-26-odin-self-hosted-runner-stack-design.md",
+      "kind": "architecture_doc",
+      "key": "2026-03-26-odin-self-hosted-runner-stack-design",
+      "title": "Odin Self-Hosted Runner Stack Design",
+      "content_hash": "36e565ed18ee6a31d206ff290c6b693f864836b8b34c5d67748f23dc0e3c6769",
+      "path_signals": [
+        "docs_root"
+      ],
+      "classification": "reference_only",
+      "rationale": "architecture material should inform design but not be promoted directly",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/docs/plans/2026-03-26-odin-self-hosted-runner-stack.md",
+      "relative_path": "docs/plans/2026-03-26-odin-self-hosted-runner-stack.md",
+      "kind": "architecture_doc",
+      "key": "2026-03-26-odin-self-hosted-runner-stack",
+      "title": "Odin Self-Hosted Runner Stack Implementation Plan",
+      "content_hash": "6db0311f346edd9fedb36bc9b3ef8fb5bb39904c7f586891c676dacdb9d75462",
+      "path_signals": [
+        "docs_root"
+      ],
+      "classification": "reference_only",
+      "rationale": "architecture material should inform design but not be promoted directly",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/docs/plans/2026-03-26-odin-token-burn-reduction-design.md",
+      "relative_path": "docs/plans/2026-03-26-odin-token-burn-reduction-design.md",
+      "kind": "architecture_doc",
+      "key": "2026-03-26-odin-token-burn-reduction-design",
+      "title": "Odin Token Burn Reduction Design",
+      "content_hash": "4e64c5f3a7608686609c35e806f41b306c638cc5a2364a441f040e8aef42d800",
+      "path_signals": [
+        "docs_root"
+      ],
+      "classification": "reference_only",
+      "rationale": "architecture material should inform design but not be promoted directly",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/docs/plans/2026-03-26-odin-token-burn-reduction.md",
+      "relative_path": "docs/plans/2026-03-26-odin-token-burn-reduction.md",
+      "kind": "architecture_doc",
+      "key": "2026-03-26-odin-token-burn-reduction",
+      "title": "Odin Token Burn Reduction Implementation Plan",
+      "content_hash": "600b9c23306d22d5fce3c414f3a24cd2977770a8972f4f325cddc412ea472b0d",
+      "path_signals": [
+        "docs_root"
+      ],
+      "classification": "reference_only",
+      "rationale": "architecture material should inform design but not be promoted directly",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/docs/plans/2026-03-26-odin-tui-task-labels-design.md",
+      "relative_path": "docs/plans/2026-03-26-odin-tui-task-labels-design.md",
+      "kind": "architecture_doc",
+      "key": "2026-03-26-odin-tui-task-labels-design",
+      "title": "Odin TUI Task Labels Design",
+      "content_hash": "29d44aa0af3daa6510b715c9c7d1149c91108a113f909f3bff079e394db6f0d5",
+      "path_signals": [
+        "docs_root"
+      ],
+      "classification": "reference_only",
+      "rationale": "architecture material should inform design but not be promoted directly",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/docs/plans/2026-03-26-odin-tui-task-labels.md",
+      "relative_path": "docs/plans/2026-03-26-odin-tui-task-labels.md",
+      "kind": "architecture_doc",
+      "key": "2026-03-26-odin-tui-task-labels",
+      "title": "Odin TUI Task Labels Implementation Plan",
+      "content_hash": "d07848d2c3b1e35f0dfdcd22280f13f5e29e689ab1260e5d4399ef21299c3980",
+      "path_signals": [
+        "docs_root"
+      ],
+      "classification": "reference_only",
+      "rationale": "architecture material should inform design but not be promoted directly",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/docs/plans/2026-03-27-gmail-watch-renew-fail-closed.md",
+      "relative_path": "docs/plans/2026-03-27-gmail-watch-renew-fail-closed.md",
+      "kind": "architecture_doc",
+      "key": "2026-03-27-gmail-watch-renew-fail-closed",
+      "title": "Gmail Watch Renew Fail-Closed Implementation Plan",
+      "content_hash": "a8773b9ed8bdbce901a21cd9af2ca4575177d6a832bad38bd0ea56d2ce3a5a00",
+      "path_signals": [
+        "docs_root"
+      ],
+      "classification": "reference_only",
+      "rationale": "architecture material should inform design but not be promoted directly",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/docs/plans/2026-03-27-odin-agentic-roadmap-design.md",
+      "relative_path": "docs/plans/2026-03-27-odin-agentic-roadmap-design.md",
+      "kind": "architecture_doc",
+      "key": "2026-03-27-odin-agentic-roadmap-design",
+      "title": "Executive Summary",
+      "content_hash": "53b7e5c2f55b0dab43b3da4633efc60a31edf97383fadfa1293f384141e92e66",
+      "path_signals": [
+        "docs_root"
+      ],
+      "classification": "reference_only",
+      "rationale": "architecture material should inform design but not be promoted directly",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/docs/plans/2026-03-27-odin-agentic-roadmap.md",
+      "relative_path": "docs/plans/2026-03-27-odin-agentic-roadmap.md",
+      "kind": "architecture_doc",
+      "key": "2026-03-27-odin-agentic-roadmap",
+      "title": "Odin Agentic Roadmap Implementation Plan",
+      "content_hash": "34ad6f29c0cea9e9da14b6dc25e761b596389290c2875ad94cf632df4b2f0c24",
+      "path_signals": [
+        "docs_root"
+      ],
+      "classification": "reference_only",
+      "rationale": "architecture material should inform design but not be promoted directly",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/docs/plans/2026-03-27-odin-overseer-tui-design.md",
+      "relative_path": "docs/plans/2026-03-27-odin-overseer-tui-design.md",
+      "kind": "architecture_doc",
+      "key": "2026-03-27-odin-overseer-tui-design",
+      "title": "Odin Overseer TUI Design",
+      "content_hash": "2dd6ab793b3b21bc6059937e8cb3a6eeec521b20725a6553a527b8f3361d341f",
+      "path_signals": [
+        "docs_root"
+      ],
+      "classification": "reference_only",
+      "rationale": "architecture material should inform design but not be promoted directly",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/docs/plans/2026-03-27-odin-overseer-tui.md",
+      "relative_path": "docs/plans/2026-03-27-odin-overseer-tui.md",
+      "kind": "architecture_doc",
+      "key": "2026-03-27-odin-overseer-tui",
+      "title": "Odin Overseer TUI Implementation Plan",
+      "content_hash": "b517cb95487a0f628f80ee249faa42686d7c2fd348263b01efb1203dd532017b",
+      "path_signals": [
+        "docs_root"
+      ],
+      "classification": "reference_only",
+      "rationale": "architecture material should inform design but not be promoted directly",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/docs/plans/2026-03-27-odin-pr-workflow-design.md",
+      "relative_path": "docs/plans/2026-03-27-odin-pr-workflow-design.md",
+      "kind": "architecture_doc",
+      "key": "2026-03-27-odin-pr-workflow-design",
+      "title": "Executive Summary",
+      "content_hash": "27d2e096d38948a6f05c4176423c78ea0a40912b5b36288d15420adc40e07167",
+      "path_signals": [
+        "docs_root"
+      ],
+      "classification": "reference_only",
+      "rationale": "architecture material should inform design but not be promoted directly",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/docs/plans/2026-03-27-odin-pr-workflow-implementation.md",
+      "relative_path": "docs/plans/2026-03-27-odin-pr-workflow-implementation.md",
+      "kind": "architecture_doc",
+      "key": "2026-03-27-odin-pr-workflow-implementation",
+      "title": "Odin PR Workflow Implementation Plan",
+      "content_hash": "4103c66d35eb2f6498f5220c182c0701e94692069b5c76bde4d813042d04ae60",
+      "path_signals": [
+        "docs_root"
+      ],
+      "classification": "reference_only",
+      "rationale": "architecture material should inform design but not be promoted directly",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/docs/plans/2026-03-27-odin-shims-prompts-audit-design.md",
+      "relative_path": "docs/plans/2026-03-27-odin-shims-prompts-audit-design.md",
+      "kind": "architecture_doc",
+      "key": "2026-03-27-odin-shims-prompts-audit-design",
+      "title": "Odin Shims And Agent Prompts Audit Design",
+      "content_hash": "b910d8e6010eb3b8616bfb10ffa0822c065606d1e1ad2f92844fd4fe80257fcc",
+      "path_signals": [
+        "docs_root"
+      ],
+      "classification": "reference_only",
+      "rationale": "architecture material should inform design but not be promoted directly",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/docs/plans/2026-03-27-odin-shims-prompts-audit.md",
+      "relative_path": "docs/plans/2026-03-27-odin-shims-prompts-audit.md",
+      "kind": "architecture_doc",
+      "key": "2026-03-27-odin-shims-prompts-audit",
+      "title": "Odin Shims And Agent Prompts Audit Implementation Plan",
+      "content_hash": "fddee1119a70e7595b009d1f386ef37a1c24b898c2a6d64a6a41eb368552d0db",
+      "path_signals": [
+        "docs_root"
+      ],
+      "classification": "reference_only",
+      "rationale": "architecture material should inform design but not be promoted directly",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/docs/plans/2026-03-27-odin-trust-audit-design.md",
+      "relative_path": "docs/plans/2026-03-27-odin-trust-audit-design.md",
+      "kind": "architecture_doc",
+      "key": "2026-03-27-odin-trust-audit-design",
+      "title": "Odin Trust Audit Design",
+      "content_hash": "e19cd8a35a897eea111077710a6d999b432964195e588c357c1f8b497b1797d3",
+      "path_signals": [
+        "docs_root"
+      ],
+      "classification": "reference_only",
+      "rationale": "architecture material should inform design but not be promoted directly",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/docs/plans/2026-03-27-odin-trust-audit.md",
+      "relative_path": "docs/plans/2026-03-27-odin-trust-audit.md",
+      "kind": "architecture_doc",
+      "key": "2026-03-27-odin-trust-audit",
+      "title": "Odin Trust Audit Implementation Plan",
+      "content_hash": "58f3ad6f56714554b921b4e5eeaf3106557cf8e1995363a270a42e188cff1222",
+      "path_signals": [
+        "docs_root"
+      ],
+      "classification": "reference_only",
+      "rationale": "architecture material should inform design but not be promoted directly",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/docs/plans/2026-03-27-odin-web-standards-hardening-design.md",
+      "relative_path": "docs/plans/2026-03-27-odin-web-standards-hardening-design.md",
+      "kind": "architecture_doc",
+      "key": "2026-03-27-odin-web-standards-hardening-design",
+      "title": "Odin Web Standards Hardening Design",
+      "content_hash": "645a29a40d74e2a7c32f8cb9ae73019fbb38dc2a0230bdad759ce16ca6701eb9",
+      "path_signals": [
+        "docs_root"
+      ],
+      "classification": "reference_only",
+      "rationale": "architecture material should inform design but not be promoted directly",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/docs/plans/2026-03-27-odin-web-standards-hardening.md",
+      "relative_path": "docs/plans/2026-03-27-odin-web-standards-hardening.md",
+      "kind": "architecture_doc",
+      "key": "2026-03-27-odin-web-standards-hardening",
+      "title": "Odin Web Standards Hardening Implementation Plan",
+      "content_hash": "b2bb92431f9d1f10971fa1413bb8cfde54dde4eb40ae501e8e72d5ec68b1053f",
+      "path_signals": [
+        "docs_root"
+      ],
+      "classification": "reference_only",
+      "rationale": "architecture material should inform design but not be promoted directly",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/docs/plans/2026-03-27-pr-merge-orchestration-design.md",
+      "relative_path": "docs/plans/2026-03-27-pr-merge-orchestration-design.md",
+      "kind": "architecture_doc",
+      "key": "2026-03-27-pr-merge-orchestration-design",
+      "title": "PR Merge Orchestration — Design Document",
+      "content_hash": "c4908cb59d3276bfd018485fec63712c7df0b62d5c505ff0315c8478a12f15a4",
+      "path_signals": [
+        "docs_root"
+      ],
+      "classification": "reference_only",
+      "rationale": "architecture material should inform design but not be promoted directly",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/docs/plans/2026-03-27-pr-merge-orchestration-impl.md",
+      "relative_path": "docs/plans/2026-03-27-pr-merge-orchestration-impl.md",
+      "kind": "architecture_doc",
+      "key": "2026-03-27-pr-merge-orchestration-impl",
+      "title": "PR Merge Orchestration Implementation Plan",
+      "content_hash": "1f4482d9348e756cac96cf242bbdac00e0d40ba86ee0aeefd0828425508d7f33",
+      "path_signals": [
+        "docs_root"
+      ],
+      "classification": "reference_only",
+      "rationale": "architecture material should inform design but not be promoted directly",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/docs/plans/2026-03-27-token-efficiency-audit-design.md",
+      "relative_path": "docs/plans/2026-03-27-token-efficiency-audit-design.md",
+      "kind": "architecture_doc",
+      "key": "2026-03-27-token-efficiency-audit-design",
+      "title": "Token \u0026 LLM Efficiency Audit — Design Document",
+      "content_hash": "5d3b2f9ed196935bc34aa14349f32818546694d410037c075d24114c091ca43c",
+      "path_signals": [
+        "docs_root"
+      ],
+      "classification": "reference_only",
+      "rationale": "architecture material should inform design but not be promoted directly",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/docs/plans/2026-03-27-token-efficiency-audit-plan.md",
+      "relative_path": "docs/plans/2026-03-27-token-efficiency-audit-plan.md",
+      "kind": "architecture_doc",
+      "key": "2026-03-27-token-efficiency-audit-plan",
+      "title": "Token \u0026 LLM Efficiency Audit — Implementation Plan",
+      "content_hash": "eb828d312879ee781585cf8a4a8be5050f4fd1387232fb73b0e349694439310e",
+      "path_signals": [
+        "docs_root"
+      ],
+      "classification": "reference_only",
+      "rationale": "architecture material should inform design but not be promoted directly",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/docs/plans/2026-03-28-merge-first-pipeline-design.md",
+      "relative_path": "docs/plans/2026-03-28-merge-first-pipeline-design.md",
+      "kind": "architecture_doc",
+      "key": "2026-03-28-merge-first-pipeline-design",
+      "title": "Merge-First Pipeline — Design Document",
+      "content_hash": "6317845bddd2ccefd2dfa28c4389127ad6075d8844482f2e7393f3a59d6667e0",
+      "path_signals": [
+        "docs_root"
+      ],
+      "classification": "reference_only",
+      "rationale": "architecture material should inform design but not be promoted directly",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/docs/plans/2026-03-28-merge-first-pipeline.md",
+      "relative_path": "docs/plans/2026-03-28-merge-first-pipeline.md",
+      "kind": "architecture_doc",
+      "key": "2026-03-28-merge-first-pipeline",
+      "title": "Merge-First Pipeline Implementation Plan",
+      "content_hash": "81706a57b8e21813595a2b756e924d6391914f03ff3b0ada1c80657dd7526b8b",
+      "path_signals": [
+        "docs_root"
+      ],
+      "classification": "reference_only",
+      "rationale": "architecture material should inform design but not be promoted directly",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/docs/plans/2026-03-30-automated-promotion-design.md",
+      "relative_path": "docs/plans/2026-03-30-automated-promotion-design.md",
+      "kind": "architecture_doc",
+      "key": "2026-03-30-automated-promotion-design",
+      "title": "Automated Staging-to-Production Promotion",
+      "content_hash": "698eafcbd638f6abe26ba711cc3fef3c2ae5b0dd3cc9bfa4bc017ed92b97843c",
+      "path_signals": [
+        "docs_root"
+      ],
+      "classification": "reference_only",
+      "rationale": "architecture material should inform design but not be promoted directly",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/docs/plans/2026-03-30-automated-promotion-impl.md",
+      "relative_path": "docs/plans/2026-03-30-automated-promotion-impl.md",
+      "kind": "architecture_doc",
+      "key": "2026-03-30-automated-promotion-impl",
+      "title": "Automated Promotion Implementation Plan",
+      "content_hash": "8a66db63246a33894f823d7cbf1ad24cfb80507d9a2c4f2d3f9168f4beb00fc6",
+      "path_signals": [
+        "docs_root"
+      ],
+      "classification": "reference_only",
+      "rationale": "architecture material should inform design but not be promoted directly",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/docs/plans/2026-03-30-server-management-design.md",
+      "relative_path": "docs/plans/2026-03-30-server-management-design.md",
+      "kind": "architecture_doc",
+      "key": "2026-03-30-server-management-design",
+      "title": "Odin Server Management Design",
+      "content_hash": "062d59e3c48f9699f2dae0882cc84bb5f2dc58c4f8f834b1eb95084207b6e4c1",
+      "path_signals": [
+        "docs_root"
+      ],
+      "classification": "reference_only",
+      "rationale": "architecture material should inform design but not be promoted directly",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/docs/plans/2026-03-30-server-management-impl.md",
+      "relative_path": "docs/plans/2026-03-30-server-management-impl.md",
+      "kind": "architecture_doc",
+      "key": "2026-03-30-server-management-impl",
+      "title": "Server Management Implementation Plan",
+      "content_hash": "e1ccbbd7d38cab93ba80bddeff1446a90ee9299d9f484a4daf82c93d3b8758a1",
+      "path_signals": [
+        "docs_root"
+      ],
+      "classification": "reference_only",
+      "rationale": "architecture material should inform design but not be promoted directly",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/docs/plans/2026-04-01-finance-week3-reconciliation-gates-design.md",
+      "relative_path": "docs/plans/2026-04-01-finance-week3-reconciliation-gates-design.md",
+      "kind": "architecture_doc",
+      "key": "2026-04-01-finance-week3-reconciliation-gates-design",
+      "title": "Finance Week 3 Reconciliation Gates Design",
+      "content_hash": "3b96068588fab2d09b38c0889e2fa0c1e5b066e954383f326c1d3cc0b57bf0ea",
+      "path_signals": [
+        "docs_root"
+      ],
+      "classification": "reference_only",
+      "rationale": "architecture material should inform design but not be promoted directly",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/docs/plans/2026-04-01-finance-week3-reconciliation-gates.md",
+      "relative_path": "docs/plans/2026-04-01-finance-week3-reconciliation-gates.md",
+      "kind": "architecture_doc",
+      "key": "2026-04-01-finance-week3-reconciliation-gates",
+      "title": "Finance Week 3 Reconciliation Gates Implementation Plan",
+      "content_hash": "c89fac597f70f21c395fe22f68daffad8c250b9ad48ba567cc7dcff83cf288d5",
+      "path_signals": [
+        "docs_root"
+      ],
+      "classification": "reference_only",
+      "rationale": "architecture material should inform design but not be promoted directly",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/docs/plans/2026-04-01-finance-week4-summary-surfaces-design.md",
+      "relative_path": "docs/plans/2026-04-01-finance-week4-summary-surfaces-design.md",
+      "kind": "architecture_doc",
+      "key": "2026-04-01-finance-week4-summary-surfaces-design",
+      "title": "Finance Week 4 Summary Surfaces Design",
+      "content_hash": "d923883d53d7ddb288f29b78861ae226fa2ffe0918df8720abf83952872336c1",
+      "path_signals": [
+        "docs_root"
+      ],
+      "classification": "reference_only",
+      "rationale": "architecture material should inform design but not be promoted directly",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/docs/plans/2026-04-01-finance-week4-summary-surfaces.md",
+      "relative_path": "docs/plans/2026-04-01-finance-week4-summary-surfaces.md",
+      "kind": "architecture_doc",
+      "key": "2026-04-01-finance-week4-summary-surfaces",
+      "title": "Finance Week 4 Summary Surfaces Implementation Plan",
+      "content_hash": "61fd81c73cdf48ad459322490eb56627de61b1039ad0a2875f5deb02a2b3866b",
+      "path_signals": [
+        "docs_root"
+      ],
+      "classification": "reference_only",
+      "rationale": "architecture material should inform design but not be promoted directly",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/docs/plans/2026-04-01-odin-finance-audit-design.md",
+      "relative_path": "docs/plans/2026-04-01-odin-finance-audit-design.md",
+      "kind": "architecture_doc",
+      "key": "2026-04-01-odin-finance-audit-design",
+      "title": "Odin Finance Audit Design",
+      "content_hash": "8889491e504989284c7290061736cf5d3e0a6e9f41d5c0bb20b1ce5911ba3507",
+      "path_signals": [
+        "docs_root"
+      ],
+      "classification": "reference_only",
+      "rationale": "architecture material should inform design but not be promoted directly",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/docs/plans/2026-04-01-odin-finance-audit.md",
+      "relative_path": "docs/plans/2026-04-01-odin-finance-audit.md",
+      "kind": "architecture_doc",
+      "key": "2026-04-01-odin-finance-audit",
+      "title": "Odin Finance Audit Implementation Plan",
+      "content_hash": "aa9d844136bdba1f5bcd7292e7ce0933193a00c07ab6cbaaf6f2ea34f3518d44",
+      "path_signals": [
+        "docs_root"
+      ],
+      "classification": "reference_only",
+      "rationale": "architecture material should inform design but not be promoted directly",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/docs/plans/2026-04-03-finance-week5-readout-artifacts-design.md",
+      "relative_path": "docs/plans/2026-04-03-finance-week5-readout-artifacts-design.md",
+      "kind": "architecture_doc",
+      "key": "2026-04-03-finance-week5-readout-artifacts-design",
+      "title": "Finance Week 5 Readout Artifacts Design",
+      "content_hash": "275da71dbf44306967a49d6e16f2fc9119c3e32ffd73b9a959af8c971ff6b837",
+      "path_signals": [
+        "docs_root"
+      ],
+      "classification": "reference_only",
+      "rationale": "architecture material should inform design but not be promoted directly",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/docs/plans/2026-04-03-finance-week5-readout-artifacts.md",
+      "relative_path": "docs/plans/2026-04-03-finance-week5-readout-artifacts.md",
+      "kind": "architecture_doc",
+      "key": "2026-04-03-finance-week5-readout-artifacts",
+      "title": "Finance Week 5 Readout Artifacts Implementation Plan",
+      "content_hash": "257db6d149c3b4b49329d76436fd3378a2dc58e1c46725fff856fa9c92291c48",
+      "path_signals": [
+        "docs_root"
+      ],
+      "classification": "reference_only",
+      "rationale": "architecture material should inform design but not be promoted directly",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/docs/plans/2026-04-03-finance-week6-draft-handoff-design.md",
+      "relative_path": "docs/plans/2026-04-03-finance-week6-draft-handoff-design.md",
+      "kind": "architecture_doc",
+      "key": "2026-04-03-finance-week6-draft-handoff-design",
+      "title": "Finance Week 6 Draft Handoff Design",
+      "content_hash": "effd2f4a27dcd0d8937b73cbe7d7265a972d881c3e96bf32785c77ba9db7e47a",
+      "path_signals": [
+        "docs_root"
+      ],
+      "classification": "reference_only",
+      "rationale": "architecture material should inform design but not be promoted directly",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/docs/plans/2026-04-03-finance-week6-draft-handoff.md",
+      "relative_path": "docs/plans/2026-04-03-finance-week6-draft-handoff.md",
+      "kind": "architecture_doc",
+      "key": "2026-04-03-finance-week6-draft-handoff",
+      "title": "Finance Week 6 Draft Handoff Implementation Plan",
+      "content_hash": "68424a1160b230959b2b2953cfb902ed895331bfd2b7c9793950441267d4f8bc",
+      "path_signals": [
+        "docs_root"
+      ],
+      "classification": "reference_only",
+      "rationale": "architecture material should inform design but not be promoted directly",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/docs/plans/2026-04-03-finance-week7-gmail-draft-design.md",
+      "relative_path": "docs/plans/2026-04-03-finance-week7-gmail-draft-design.md",
+      "kind": "architecture_doc",
+      "key": "2026-04-03-finance-week7-gmail-draft-design",
+      "title": "Finance Week 7 Gmail Draft Design",
+      "content_hash": "5a2c106f3d9b53ac0e8d21ae525c7af89c1092043d0241b1ae5e720aa4250d0f",
+      "path_signals": [
+        "docs_root"
+      ],
+      "classification": "reference_only",
+      "rationale": "architecture material should inform design but not be promoted directly",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/docs/plans/2026-04-03-finance-week7-gmail-draft.md",
+      "relative_path": "docs/plans/2026-04-03-finance-week7-gmail-draft.md",
+      "kind": "architecture_doc",
+      "key": "2026-04-03-finance-week7-gmail-draft",
+      "title": "Finance Week 7 Gmail Draft Implementation Plan",
+      "content_hash": "7c1fbd6868f0663308c740e92a39c22274c833eb2ff3e53b61a64401aed9b187",
+      "path_signals": [
+        "docs_root"
+      ],
+      "classification": "reference_only",
+      "rationale": "architecture material should inform design but not be promoted directly",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/docs/plans/2026-04-04-memory-pruning-and-scope-fix-design.md",
+      "relative_path": "docs/plans/2026-04-04-memory-pruning-and-scope-fix-design.md",
+      "kind": "architecture_doc",
+      "key": "2026-04-04-memory-pruning-and-scope-fix-design",
+      "title": "Memory Pruning \u0026 Scope Fix Design",
+      "content_hash": "4c98fcf9cc37cf0ccb720e080e085fc22ce8c15be0319327f0a094a8f0eb5118",
+      "path_signals": [
+        "docs_root"
+      ],
+      "classification": "reference_only",
+      "rationale": "architecture material should inform design but not be promoted directly",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/docs/plans/2026-04-05-ci-gates-design.md",
+      "relative_path": "docs/plans/2026-04-05-ci-gates-design.md",
+      "kind": "architecture_doc",
+      "key": "2026-04-05-ci-gates-design",
+      "title": "Odin CI Gates — Design",
+      "content_hash": "1a18476a1b770689d98cf649c10fa95285812f5b3c2325524d3b821a4f49d206",
+      "path_signals": [
+        "docs_root"
+      ],
+      "classification": "reference_only",
+      "rationale": "architecture material should inform design but not be promoted directly",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/docs/plans/2026-04-05-ci-gates-implementation.md",
+      "relative_path": "docs/plans/2026-04-05-ci-gates-implementation.md",
+      "kind": "architecture_doc",
+      "key": "2026-04-05-ci-gates-implementation",
+      "title": "CI Gates Implementation Plan",
+      "content_hash": "1ed7d0800727aa18385a81464d4f0646d5b11189a52982cd506373584a9c8aa4",
+      "path_signals": [
+        "docs_root"
+      ],
+      "classification": "reference_only",
+      "rationale": "architecture material should inform design but not be promoted directly",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/docs/plans/2026-04-05-odin-autonomy-loop-design.md",
+      "relative_path": "docs/plans/2026-04-05-odin-autonomy-loop-design.md",
+      "kind": "architecture_doc",
+      "key": "2026-04-05-odin-autonomy-loop-design",
+      "title": "Odin Autonomy Loop Implementation Plan",
+      "content_hash": "d784c4d3d3948012fc0995088ceac9387cb14dd3cc961854bfa68ee84703110b",
+      "path_signals": [
+        "docs_root"
+      ],
+      "classification": "reference_only",
+      "rationale": "architecture material should inform design but not be promoted directly",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/docs/process/CODEX_SESSION_PROTOCOL.md",
+      "relative_path": "docs/process/CODEX_SESSION_PROTOCOL.md",
+      "kind": "operational_playbook",
+      "key": "codex_session_protocol",
+      "title": "CODEX_SESSION_PROTOCOL",
+      "content_hash": "75124482afc3c71a8f94bc28f360deaec0bd3df67aac1255f6099f287073790f",
+      "path_signals": [
+        "docs_root"
+      ],
+      "classification": "rewrite",
+      "rationale": "legacy asset needs normalization into the new contract",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/docs/process/ODIN_WORKFLOW_EVENT_MODEL.md",
+      "relative_path": "docs/process/ODIN_WORKFLOW_EVENT_MODEL.md",
+      "kind": "operational_playbook",
+      "key": "odin_workflow_event_model",
+      "title": "ODIN_WORKFLOW_EVENT_MODEL",
+      "content_hash": "3d6ad14ea6e41e3678ae141c21a36ee897cc899734198350d6e9a38a14532551",
+      "path_signals": [
+        "docs_root"
+      ],
+      "classification": "rewrite",
+      "rationale": "legacy asset needs normalization into the new contract",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/docs/process/PR_POLICY_ONBOARDING.md",
+      "relative_path": "docs/process/PR_POLICY_ONBOARDING.md",
+      "kind": "operational_playbook",
+      "key": "pr_policy_onboarding",
+      "title": "PR Policy Onboarding",
+      "content_hash": "b0e2ada0eb0364d4e1f73170a0085f43c572aaf215acb39ece9ac29df93aac43",
+      "path_signals": [
+        "docs_root"
+      ],
+      "classification": "rewrite",
+      "rationale": "legacy asset needs normalization into the new contract",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/docs/process/WORKFLOW_STAGE_GATES.md",
+      "relative_path": "docs/process/WORKFLOW_STAGE_GATES.md",
+      "kind": "operational_playbook",
+      "key": "workflow_stage_gates",
+      "title": "CFIPros Workflow Stage Gates",
+      "content_hash": "c4d0c389225b9d9f803c6c4d56b86ebb664c13d6a72074b96bcdc499c0fcd00e",
+      "path_signals": [
+        "docs_root"
+      ],
+      "classification": "rewrite",
+      "rationale": "legacy asset needs normalization into the new contract",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/ops/github-runner/.env.example",
+      "relative_path": "ops/github-runner/.env.example",
+      "kind": "operational_playbook",
+      "key": ".env",
+      "title": ".env",
+      "content_hash": "5f85494f61f756780c4226c9851e3448ba00674e75cb16ee30214da00e4f70d3",
+      "path_signals": [
+        "ops_root"
+      ],
+      "classification": "rewrite",
+      "rationale": "legacy asset needs normalization into the new contract",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/ops/github-runner/.gitignore",
+      "relative_path": "ops/github-runner/.gitignore",
+      "kind": "operational_playbook",
+      "key": "",
+      "title": "",
+      "content_hash": "69aa73cf5bc3377a7d97f2e8d2bb773195815efe225af7f1be6f5b9306bbe14f",
+      "path_signals": [
+        "ops_root"
+      ],
+      "classification": "rewrite",
+      "rationale": "legacy asset needs normalization into the new contract",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/ops/github-runner/README.md",
+      "relative_path": "ops/github-runner/README.md",
+      "kind": "operational_playbook",
+      "key": "readme",
+      "title": "Odin GitHub Runner Stack",
+      "content_hash": "0913e09f9ec0a88bb6c791cbe9033d4af99e33659b8f6ff1bcbdbd996af4b294",
+      "path_signals": [
+        "ops_root"
+      ],
+      "classification": "rewrite",
+      "rationale": "legacy asset needs normalization into the new contract",
+      "duplicate_group": "dup-9c694fe6627627b6",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/ops/github-runner/docker-compose.yml",
+      "relative_path": "ops/github-runner/docker-compose.yml",
+      "kind": "operational_playbook",
+      "key": "docker-compose",
+      "title": "Docker Compose",
+      "content_hash": "b53febf35c4c98262b54b3b3c3114fa7e76a2f5247c5ae177a31bf54ed5be7cb",
+      "path_signals": [
+        "ops_root"
+      ],
+      "classification": "rewrite",
+      "rationale": "legacy asset needs normalization into the new contract",
+      "duplicate_group": "dup-66fa2011ac8a97d2",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/ops/homelab/watchtower/README.md",
+      "relative_path": "ops/homelab/watchtower/README.md",
+      "kind": "operational_playbook",
+      "key": "readme",
+      "title": "Watchtower Policy",
+      "content_hash": "1706dee472aadea77db1c85c69673146905f7de2efbc22611a12fe24d63acf5a",
+      "path_signals": [
+        "ops_root"
+      ],
+      "classification": "rewrite",
+      "rationale": "legacy asset needs normalization into the new contract",
+      "duplicate_group": "dup-9c694fe6627627b6"
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/ops/homelab/watchtower/allowed-services.txt",
+      "relative_path": "ops/homelab/watchtower/allowed-services.txt",
+      "kind": "operational_playbook",
+      "key": "allowed-services",
+      "title": "Explicit Watchtower opt-in allowlist.",
+      "content_hash": "47bb41848d39de0c1f348c18cb67d6e4771ac854fccb673771819cf0741d3eb5",
+      "path_signals": [
+        "ops_root"
+      ],
+      "classification": "rewrite",
+      "rationale": "legacy asset needs normalization into the new contract",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/ops/homelab/watchtower/docker-compose.yml",
+      "relative_path": "ops/homelab/watchtower/docker-compose.yml",
+      "kind": "operational_playbook",
+      "key": "docker-compose",
+      "title": "Docker Compose",
+      "content_hash": "68b096ef63c4c03666ca32ad440f1fe932a6e78b0988ef53decc16eeae4adaf6",
+      "path_signals": [
+        "ops_root"
+      ],
+      "classification": "rewrite",
+      "rationale": "legacy asset needs normalization into the new contract",
+      "duplicate_group": "dup-66fa2011ac8a97d2"
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/scripts/odin/odin-prompt.md",
+      "relative_path": "scripts/odin/odin-prompt.md",
+      "kind": "prompt",
+      "key": "odin-prompt",
+      "title": "Odin Orchestrator System Prompt",
+      "content_hash": "34b814e535d45c5c2d32285cb58561f5cf29ebec4b6e226dd731d852deb0d7e3",
+      "path_signals": [
+        "legacy_path"
+      ],
+      "classification": "rewrite",
+      "rationale": "legacy asset needs normalization into the new contract",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/scripts/odin/tests/compliance-prompt-part61-141-test.sh",
+      "relative_path": "scripts/odin/tests/compliance-prompt-part61-141-test.sh",
+      "kind": "prompt",
+      "key": "compliance-prompt-part61-141-test",
+      "title": "!/usr/bin/env bash",
+      "content_hash": "cad2079c48195ddbad74b3dba4c0f4de48ec31e7fb612658cddf5bffe10aa02b",
+      "path_signals": [
+        "legacy_path"
+      ],
+      "classification": "rewrite",
+      "rationale": "legacy asset needs normalization into the new contract",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/scripts/odin/tests/odin-prompt-direct-line-routing-test.sh",
+      "relative_path": "scripts/odin/tests/odin-prompt-direct-line-routing-test.sh",
+      "kind": "prompt",
+      "key": "odin-prompt-direct-line-routing-test",
+      "title": "!/usr/bin/env bash",
+      "content_hash": "95aa50b2f2abd546338a5d2a3e4f8ad8481108d027f6535dbe53f65e28e67ea1",
+      "path_signals": [
+        "legacy_path"
+      ],
+      "classification": "rewrite",
+      "rationale": "legacy asset needs normalization into the new contract",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/scripts/odin/tests/perf-prompt-repo-awareness-test.sh",
+      "relative_path": "scripts/odin/tests/perf-prompt-repo-awareness-test.sh",
+      "kind": "prompt",
+      "key": "perf-prompt-repo-awareness-test",
+      "title": "!/usr/bin/env bash",
+      "content_hash": "e490f33ff3d06f75eeac2d8cd4ef2d0528cf78deaa2e4b17f131f1f4c8cb388d",
+      "path_signals": [
+        "legacy_path"
+      ],
+      "classification": "rewrite",
+      "rationale": "legacy asset needs normalization into the new contract",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/scripts/odin/tests/po-repo-awareness-prompt-test.sh",
+      "relative_path": "scripts/odin/tests/po-repo-awareness-prompt-test.sh",
+      "kind": "prompt",
+      "key": "po-repo-awareness-prompt-test",
+      "title": "!/usr/bin/env bash",
+      "content_hash": "67d8561fc027cf9befc6fb8f84231c4193219eb6ec64c052cff520dbed27d807",
+      "path_signals": [
+        "legacy_path"
+      ],
+      "classification": "rewrite",
+      "rationale": "legacy asset needs normalization into the new contract",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/scripts/odin/tests/qa-lead-web-review-prompt-test.sh",
+      "relative_path": "scripts/odin/tests/qa-lead-web-review-prompt-test.sh",
+      "kind": "prompt",
+      "key": "qa-lead-web-review-prompt-test",
+      "title": "!/usr/bin/env bash",
+      "content_hash": "279eaf93f3d5064ac936a7ccec4eed7b3e52e3ad4e45782f203fe1358fecba96",
+      "path_signals": [
+        "legacy_path"
+      ],
+      "classification": "rewrite",
+      "rationale": "legacy asset needs normalization into the new contract",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/scripts/odin/tests/sass-prompt-policy-test.sh",
+      "relative_path": "scripts/odin/tests/sass-prompt-policy-test.sh",
+      "kind": "prompt",
+      "key": "sass-prompt-policy-test",
+      "title": "!/usr/bin/env bash",
+      "content_hash": "5b481b6821ac56e144a500c18ce0e67a077af251118a8db51cfde8941bc42eea",
+      "path_signals": [
+        "legacy_path"
+      ],
+      "classification": "rewrite",
+      "rationale": "legacy asset needs normalization into the new contract",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/scripts/odin/tests/sentry-fix-prompt-contract-test.sh",
+      "relative_path": "scripts/odin/tests/sentry-fix-prompt-contract-test.sh",
+      "kind": "prompt",
+      "key": "sentry-fix-prompt-contract-test",
+      "title": "!/usr/bin/env bash",
+      "content_hash": "d33e340d475e15a273c635087ed3a03944e1ff5942c200b98a370b7da7c454fd",
+      "path_signals": [
+        "legacy_path"
+      ],
+      "classification": "rewrite",
+      "rationale": "legacy asset needs normalization into the new contract",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/specs/ultrathink/odin-self-learning-self-healing.yaml",
+      "relative_path": "specs/ultrathink/odin-self-learning-self-healing.yaml",
+      "kind": "workflow",
+      "key": "odin-self-learning-self-healing",
+      "title": "Ultrathink Session Output",
+      "content_hash": "7ccce089c390b4f07f20ec3163c2ee0fa9951f694221c933c88e3d55b45d16ef",
+      "path_signals": [
+        "specs_root"
+      ],
+      "classification": "rewrite",
+      "rationale": "legacy asset needs normalization into the new contract",
+      "is_primary": true
+    },
+    {
+      "source_path": "/home/orchestrator/odin-orchestrator/specs/ultrathink/skill-observability-lifecycle.yaml",
+      "relative_path": "specs/ultrathink/skill-observability-lifecycle.yaml",
+      "kind": "workflow",
+      "key": "skill-observability-lifecycle",
+      "title": "Ultrathink Session Output",
+      "content_hash": "aa991bd32e1da0600716a34eec73ace18f4c2b3c8f2cf1e4993584330b6c1ebd",
+      "path_signals": [
+        "specs_root"
+      ],
+      "classification": "rewrite",
+      "rationale": "legacy asset needs normalization into the new contract",
+      "is_primary": true
+    }
+  ],
+  "generated_at": "2026-04-09T02:43:35.817579309Z"
+}
