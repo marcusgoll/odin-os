@@ -123,6 +123,14 @@ func (store *Store) applyMigration(ctx context.Context, migration migration) err
 	}
 	defer rollbackOnError(tx)
 
+	applied, err := migrationAlreadyApplied(ctx, tx, migration.Version)
+	if err != nil {
+		return err
+	}
+	if applied {
+		return tx.Commit()
+	}
+
 	if _, err := tx.ExecContext(ctx, migration.SQL); err != nil {
 		return err
 	}
@@ -138,6 +146,14 @@ func (store *Store) applyMigration(ctx context.Context, migration migration) err
 	}
 
 	return tx.Commit()
+}
+
+func migrationAlreadyApplied(ctx context.Context, tx *sql.Tx, version int) (bool, error) {
+	var exists int
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = ?)`, version).Scan(&exists); err != nil {
+		return false, err
+	}
+	return exists == 1, nil
 }
 
 func rollbackOnError(tx *sql.Tx) {

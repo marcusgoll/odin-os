@@ -34,6 +34,12 @@ func Load(ctx context.Context, repoRoot string, runtimeRoot string) (App, error)
 		return App{}, err
 	}
 
+	lock, err := acquireBootstrapLock(ctx, runtimeRoot)
+	if err != nil {
+		return App{}, err
+	}
+	defer lock.Release()
+
 	store, err := sqlite.Open(filepath.Join(runtimeRoot, "data", "odin.db"))
 	if err != nil {
 		return App{}, err
