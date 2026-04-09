@@ -30,3 +30,61 @@ projects:
         allow_clean: false
         allow_force_push: false
         require_explicit_approval: true
+  - key: pbs
+    name: PBS
+    project_class: github_backed_project
+    git_root: /home/orchestrator/pbs
+    default_branch: master
+    github:
+      repo: marcusgoll/pbs
+    policy:
+      allowed_commands:
+        - status
+        - test
+      branch_rules:
+        protected_branches:
+          - master
+        require_worktree: true
+        require_task_branch: true
+        allow_default_branch_mutation: false
+      approval_gates:
+        require_for_governance_changes: true
+        require_for_destructive_operations: true
+        require_for_system_project_changes: false
+      merge_policy:
+        mode: squash
+        allow_direct_to_default_branch: false
+      destructive_operations:
+        allow_reset: false
+        allow_clean: false
+        allow_force_push: false
+        require_explicit_approval: true
+  - key: family-ops
+    name: Family Ops
+    project_class: github_backed_project
+    git_root: /home/orchestrator/family-ops
+    default_branch: main
+    github:
+      repo: marcusgoll/family-ops
+    policy:
+      allowed_commands:
+        - status
+        - test
+      branch_rules:
+        protected_branches:
+          - main
+        require_worktree: true
+        require_task_branch: true
+        allow_default_branch_mutation: false
+      approval_gates:
+        require_for_governance_changes: true
+        require_for_destructive_operations: true
+        require_for_system_project_changes: false
+      merge_policy:
+        mode: squash
+        allow_direct_to_default_branch: false
+      destructive_operations:
+        allow_reset: false
+        allow_clean: false
+        allow_force_push: false
+        require_explicit_approval: true

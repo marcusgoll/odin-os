@@ -444,6 +444,97 @@ func TestShellCompareRecordsCompareReport(t *testing.T) {
 	}
 }
 
+func TestShellScopesShadowAndComparePerProject(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	env := newTestEnvironment(t)
+	env.Registry = writeRegistry(t, map[string]string{
+		"odin-core":  "system_project",
+		"alpha":      "github_backed_project",
+		"family-ops": "github_backed_project",
+	})
+
+	shell, err := New(env)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	var output bytes.Buffer
+	if err := shell.HandleLine(ctx, "/project alpha", &output); err != nil {
+		t.Fatalf("HandleLine(/project alpha) error = %v", err)
+	}
+	output.Reset()
+	if err := shell.HandleLine(ctx, "/transition set shadow because observe alpha only", &output); err != nil {
+		t.Fatalf("HandleLine(/transition set shadow) error = %v", err)
+	}
+	output.Reset()
+	if err := shell.HandleLine(ctx, "/observe alpha legacy deploy observed", &output); err != nil {
+		t.Fatalf("HandleLine(/observe) error = %v", err)
+	}
+
+	output.Reset()
+	if err := shell.HandleLine(ctx, "/project family-ops", &output); err != nil {
+		t.Fatalf("HandleLine(/project family-ops) error = %v", err)
+	}
+	output.Reset()
+	if err := shell.HandleLine(ctx, "/transition", &output); err != nil {
+		t.Fatalf("HandleLine(/transition family-ops) error = %v", err)
+	}
+	for _, want := range []string{
+		"project=family-ops",
+		"state=inventory",
+		"controller=legacy_odin",
+		"mutation_authority=legacy_odin",
+		"odin_can_mutate=false",
+	} {
+		if !strings.Contains(output.String(), want) {
+			t.Fatalf("family-ops transition output = %q, want %q", output.String(), want)
+		}
+	}
+
+	output.Reset()
+	if err := shell.HandleLine(ctx, "/transition set compare because compare family-ops only", &output); err != nil {
+		t.Fatalf("HandleLine(/transition set compare) error = %v", err)
+	}
+	output.Reset()
+	if err := shell.HandleLine(ctx, "/compare family-ops compare note", &output); err != nil {
+		t.Fatalf("HandleLine(/compare) error = %v", err)
+	}
+	output.Reset()
+	if err := shell.HandleLine(ctx, "/leases all", &output); err != nil {
+		t.Fatalf("HandleLine(/leases all) error = %v", err)
+	}
+	if !strings.Contains(output.String(), "no leases") {
+		t.Fatalf("leases output = %q, want no leases", output.String())
+	}
+
+	alphaProject, err := env.Store.GetProjectByKey(ctx, "alpha")
+	if err != nil {
+		t.Fatalf("GetProjectByKey(alpha) error = %v", err)
+	}
+	familyProject, err := env.Store.GetProjectByKey(ctx, "family-ops")
+	if err != nil {
+		t.Fatalf("GetProjectByKey(family-ops) error = %v", err)
+	}
+
+	alphaReports, err := env.Store.ListProjectTransitionReports(ctx, alphaProject.ID)
+	if err != nil {
+		t.Fatalf("ListProjectTransitionReports(alpha) error = %v", err)
+	}
+	if len(alphaReports) != 1 || alphaReports[0].ReportType != "shadow_observation" {
+		t.Fatalf("alpha reports = %+v, want one shadow_observation", alphaReports)
+	}
+
+	familyReports, err := env.Store.ListProjectTransitionReports(ctx, familyProject.ID)
+	if err != nil {
+		t.Fatalf("ListProjectTransitionReports(family-ops) error = %v", err)
+	}
+	if len(familyReports) != 1 || familyReports[0].ReportType != "compare_report" {
+		t.Fatalf("family-ops reports = %+v, want one compare_report", familyReports)
+	}
+}
+
 func TestShellTransitionRejectedInGlobalScope(t *testing.T) {
 	t.Parallel()
 
