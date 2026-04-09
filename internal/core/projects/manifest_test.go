@@ -30,6 +30,18 @@ projects:
     policy:
       allowed_commands:
         - status
+      limited_actions:
+        docs_audit_note:
+          description: Create an additive audit note under docs/audits
+          path_prefixes:
+            - docs/audits/
+          content_mode: create_markdown_note
+        docs_update:
+          description: Append a bounded note to an existing docs file
+          path_prefixes:
+            - docs/
+          target_path: docs/plans/2026-03-27-aviation-tooling-audit-report.md
+          content_mode: append_markdown_note
       branch_rules:
         protected_branches:
           - main
@@ -95,6 +107,12 @@ projects:
 	}
 	if cfg.Projects[0].GitRoot != projectRoot {
 		t.Fatalf("alpha git root = %q, want %q", cfg.Projects[0].GitRoot, projectRoot)
+	}
+	if cfg.Projects[0].Policy.LimitedActions["docs_audit_note"].ContentMode != "create_markdown_note" {
+		t.Fatalf("docs_audit_note content mode = %q, want create_markdown_note", cfg.Projects[0].Policy.LimitedActions["docs_audit_note"].ContentMode)
+	}
+	if cfg.Projects[0].Policy.LimitedActions["docs_update"].TargetPath != "docs/plans/2026-03-27-aviation-tooling-audit-report.md" {
+		t.Fatalf("docs_update target path = %q, want configured path", cfg.Projects[0].Policy.LimitedActions["docs_update"].TargetPath)
 	}
 	if !cfg.Projects[1].SystemProject {
 		t.Fatalf("expected odin-core to be marked as system project")

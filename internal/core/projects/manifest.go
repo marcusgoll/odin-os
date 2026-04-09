@@ -37,11 +37,19 @@ type GitHub struct {
 }
 
 type Policy struct {
-	AllowedCommands       []string              `yaml:"allowed_commands"`
-	BranchRules           BranchRules           `yaml:"branch_rules"`
-	ApprovalGates         ApprovalGates         `yaml:"approval_gates"`
-	MergePolicy           MergePolicy           `yaml:"merge_policy"`
-	DestructiveOperations DestructiveOperations `yaml:"destructive_operations"`
+	AllowedCommands       []string                     `yaml:"allowed_commands"`
+	LimitedActions        map[string]LimitedActionRule `yaml:"limited_actions"`
+	BranchRules           BranchRules                  `yaml:"branch_rules"`
+	ApprovalGates         ApprovalGates                `yaml:"approval_gates"`
+	MergePolicy           MergePolicy                  `yaml:"merge_policy"`
+	DestructiveOperations DestructiveOperations        `yaml:"destructive_operations"`
+}
+
+type LimitedActionRule struct {
+	Description  string   `yaml:"description"`
+	PathPrefixes []string `yaml:"path_prefixes"`
+	TargetPath   string   `yaml:"target_path"`
+	ContentMode  string   `yaml:"content_mode"`
 }
 
 type BranchRules struct {

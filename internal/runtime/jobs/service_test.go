@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -56,6 +57,38 @@ func TestCreateTaskFromActEnsuresRuntimeProjectAndCreatesQueuedTask(t *testing.T
 	}
 	if project.Key != "alpha" {
 		t.Fatalf("project key = %q, want alpha", project.Key)
+	}
+}
+
+func TestCreateTaskFromActStoresExplicitActionKey(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openJobStore(t)
+	defer store.Close()
+
+	registry := writeRegistry(t)
+	service := Service{
+		Store:    store,
+		Registry: registry,
+		Now: func() time.Time {
+			return time.Date(2026, 4, 9, 12, 0, 0, 0, time.UTC)
+		},
+	}
+
+	task, err := service.CreateTaskFromAct(ctx, scope.Resolution{
+		Kind:       scope.ScopeProject,
+		ProjectKey: "alpha",
+	}, "action:docs_audit_note Create docs audit note for limited action pilot")
+	if err != nil {
+		t.Fatalf("CreateTaskFromAct() error = %v", err)
+	}
+
+	if task.ActionKey != "docs_audit_note" {
+		t.Fatalf("task.ActionKey = %q, want docs_audit_note", task.ActionKey)
+	}
+	if task.Title != "Create docs audit note for limited action pilot" {
+		t.Fatalf("task.Title = %q, want trimmed title", task.Title)
 	}
 }
 
@@ -222,6 +255,81 @@ func TestExecuteNextQueuedRejectsShadowModeMutation(t *testing.T) {
 	}
 }
 
+func TestExecuteNextQueuedRejectsExplicitBoundedActionOnPromotionLine(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openJobStore(t)
+	defer store.Close()
+
+	registry := writeRegistry(t)
+	service := Service{
+		Store:          store,
+		Registry:       registry,
+		Executors:      router.DefaultCatalog(),
+		ExecutorConfig: mustLoadExecutorConfig(t),
+		Transitions:    projects.Service{Store: store},
+		Leases: leases.Manager{
+			Store:        store,
+			Git:          &jobTestGit{},
+			WorktreeRoot: t.TempDir(),
+		},
+		Now: time.Now,
+	}
+
+	task, err := service.CreateTaskFromAct(ctx, scope.Resolution{
+		Kind:       scope.ScopeProject,
+		ProjectKey: "alpha",
+	}, "action:docs_audit_note Create docs audit note for limited action pilot")
+	if err != nil {
+		t.Fatalf("CreateTaskFromAct() error = %v", err)
+	}
+
+	project, err := store.GetProjectByKey(ctx, "alpha")
+	if err != nil {
+		t.Fatalf("GetProjectByKey(alpha) error = %v", err)
+	}
+	if _, err := service.Transitions.SetTransitionState(ctx, projects.TransitionStateInput{
+		ProjectID:      project.ID,
+		Actor:          projects.TransitionControllerOdinOS,
+		TargetState:    projects.TransitionStateLimitedAction,
+		LimitedActions: []string{"docs_audit_note"},
+		ChangedBy:      "test",
+		Notes:          "infra only",
+	}); err != nil {
+		t.Fatalf("SetTransitionState(limited_action) error = %v", err)
+	}
+
+	err = service.ExecuteNextQueued(ctx)
+	if err == nil {
+		t.Fatalf("ExecuteNextQueued() error = nil, want fail-closed bounded action denial")
+	}
+	if !strings.Contains(err.Error(), "not enabled on this line") {
+		t.Fatalf("ExecuteNextQueued() error = %v, want line-disabled denial", err)
+	}
+
+	gotTask, err := store.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
+	}
+	if gotTask.Status != "failed" {
+		t.Fatalf("GetTask().Status = %q, want failed", gotTask.Status)
+	}
+
+	row := store.DB().QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM worktree_leases
+		WHERE task_id = ?
+	`, task.ID)
+	var leaseCount int
+	if err := row.Scan(&leaseCount); err != nil {
+		t.Fatalf("Scan(leaseCount) error = %v", err)
+	}
+	if leaseCount != 0 {
+		t.Fatalf("leaseCount = %d, want 0", leaseCount)
+	}
+}
+
 type jobTestGit struct{}
 
 func (jobTestGit) BranchExists(context.Context, string, string) (bool, error) { return false, nil }
@@ -292,6 +400,11 @@ projects:
     default_branch: main
     policy:
       allowed_commands: [status]
+      limited_actions:
+        docs_audit_note:
+          description: Create an additive audit note under docs/audits
+          path_prefixes: [docs/audits/]
+          content_mode: create_markdown_note
       branch_rules:
         protected_branches: [main]
         require_worktree: true
@@ -318,6 +431,11 @@ projects:
       repo: acme/alpha
     policy:
       allowed_commands: [status]
+      limited_actions:
+        docs_audit_note:
+          description: Create an additive audit note under docs/audits
+          path_prefixes: [docs/audits/]
+          content_mode: create_markdown_note
       branch_rules:
         protected_branches: [main]
         require_worktree: true

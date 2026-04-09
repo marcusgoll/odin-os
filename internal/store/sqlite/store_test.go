@@ -43,6 +43,7 @@ func TestStoreMigrateLifecycleAndReopen(t *testing.T) {
 		ProjectID:   project.ID,
 		Key:         "phase-03",
 		Title:       "Implement runtime store",
+		ActionKey:   "docs_audit_note",
 		Status:      "queued",
 		Scope:       "odin-core",
 		RequestedBy: "operator",
@@ -177,6 +178,14 @@ func TestStoreMigrateLifecycleAndReopen(t *testing.T) {
 		t.Fatalf("first event type = %q, want %q", allEvents[0].Type, runtimeevents.EventProjectCreated)
 	}
 
+	taskEventPayload, err := runtimeevents.DecodePayload[runtimeevents.TaskCreatedPayload](allEvents[1].Payload)
+	if err != nil {
+		t.Fatalf("DecodePayload(TaskCreatedPayload) error = %v", err)
+	}
+	if taskEventPayload.ActionKey != "docs_audit_note" {
+		t.Fatalf("task created event action key = %q, want %q", taskEventPayload.ActionKey, "docs_audit_note")
+	}
+
 	packetEventPayload, err := runtimeevents.DecodePayload[runtimeevents.ContextPacketCreatedPayload](allEvents[len(allEvents)-1].Payload)
 	if err != nil {
 		t.Fatalf("DecodePayload(ContextPacketCreatedPayload) error = %v", err)
@@ -224,8 +233,8 @@ func TestStoreMigrateLifecycleAndReopen(t *testing.T) {
 	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM schema_migrations`).Scan(&migrationCount); err != nil {
 		t.Fatalf("schema_migrations count query error = %v", err)
 	}
-	if migrationCount != 6 {
-		t.Fatalf("schema_migrations count = %d, want 6", migrationCount)
+	if migrationCount != 7 {
+		t.Fatalf("schema_migrations count = %d, want 7", migrationCount)
 	}
 
 	if err := store.Close(); err != nil {

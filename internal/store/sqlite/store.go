@@ -141,12 +141,13 @@ func (store *Store) CreateTask(ctx context.Context, params CreateTaskParams) (Ta
 		}
 
 		result, err := tx.ExecContext(ctx, `
-			INSERT INTO tasks (project_id, key, title, status, scope, requested_by, current_run_id, created_at, updated_at)
-			VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?)
+			INSERT INTO tasks (project_id, key, title, action_key, status, scope, requested_by, current_run_id, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
 		`,
 			params.ProjectID,
 			params.Key,
 			params.Title,
+			params.ActionKey,
 			params.Status,
 			params.Scope,
 			params.RequestedBy,
@@ -167,6 +168,7 @@ func (store *Store) CreateTask(ctx context.Context, params CreateTaskParams) (Ta
 			ProjectID:   params.ProjectID,
 			Key:         params.Key,
 			Title:       params.Title,
+			ActionKey:   params.ActionKey,
 			Status:      params.Status,
 			Scope:       params.Scope,
 			RequestedBy: params.RequestedBy,
@@ -184,6 +186,7 @@ func (store *Store) CreateTask(ctx context.Context, params CreateTaskParams) (Ta
 			Payload: runtimeevents.TaskCreatedPayload{
 				Key:         task.Key,
 				Title:       task.Title,
+				ActionKey:   task.ActionKey,
 				Status:      task.Status,
 				Scope:       task.Scope,
 				RequestedBy: task.RequestedBy,
@@ -1848,6 +1851,43 @@ func (store *Store) GetWorktreeLease(ctx context.Context, leaseID int64) (Worktr
 	return scanWorktreeLease(row)
 }
 
+func (store *Store) ListWorktreeLeases(ctx context.Context) ([]WorktreeLease, error) {
+	rows, err := store.db.QueryContext(ctx, `
+		SELECT
+			id,
+			project_id,
+			task_id,
+			run_id,
+			mode,
+			branch_name,
+			worktree_path,
+			repo_root,
+			state,
+			heartbeat_at,
+			released_at,
+			cleaned_up_at,
+			created_at,
+			updated_at
+		FROM worktree_leases
+		ORDER BY id ASC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var leases []WorktreeLease
+	for rows.Next() {
+		lease, err := scanWorktreeLease(rows)
+		if err != nil {
+			return nil, err
+		}
+		leases = append(leases, lease)
+	}
+
+	return leases, rows.Err()
+}
+
 func (store *Store) GetActiveWorktreeLeaseByTaskRun(ctx context.Context, taskID int64, runID int64) (WorktreeLease, error) {
 	row := store.db.QueryRowContext(ctx, `
 		SELECT
@@ -2052,7 +2092,7 @@ func (store *Store) getTaskTx(ctx context.Context, tx *sql.Tx, taskID int64) (Ta
 
 func (store *Store) getTaskQuery(ctx context.Context, queryer sqlQueryRow, taskID int64) (Task, error) {
 	row := queryer.QueryRowContext(ctx, `
-		SELECT id, project_id, key, title, status, scope, requested_by, current_run_id, created_at, updated_at
+		SELECT id, project_id, key, title, action_key, status, scope, requested_by, current_run_id, created_at, updated_at
 		FROM tasks
 		WHERE id = ?
 	`, taskID)
@@ -2539,6 +2579,7 @@ func scanTask(row interface{ Scan(...any) error }) (Task, error) {
 		&task.ProjectID,
 		&task.Key,
 		&task.Title,
+		&task.ActionKey,
 		&task.Status,
 		&task.Scope,
 		&task.RequestedBy,

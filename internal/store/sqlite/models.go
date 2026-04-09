@@ -30,6 +30,7 @@ type Task struct {
 	ProjectID    int64
 	Key          string
 	Title        string
+	ActionKey    string
 	Status       string
 	Scope        string
 	RequestedBy  string
@@ -42,6 +43,7 @@ type CreateTaskParams struct {
 	ProjectID   int64
 	Key         string
 	Title       string
+	ActionKey   string
 	Status      string
 	Scope       string
 	RequestedBy string

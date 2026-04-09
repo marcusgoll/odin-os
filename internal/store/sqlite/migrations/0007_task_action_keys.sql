@@ -1,0 +1,1 @@
+ALTER TABLE tasks ADD COLUMN action_key TEXT NOT NULL DEFAULT '';

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -13,6 +14,7 @@ import (
 	"odin-os/internal/core/projects"
 	runtimeevents "odin-os/internal/runtime/events"
 	"odin-os/internal/store/sqlite"
+	"odin-os/internal/vcs/worktrees"
 )
 
 func TestShellRestoresValidSessionOnStartup(t *testing.T) {
@@ -230,7 +232,7 @@ func TestShellHelpIncludesTransitionCommands(t *testing.T) {
 		t.Fatalf("HandleLine(/help) error = %v", err)
 	}
 
-	for _, want := range []string{"/transition", "/observe", "/compare"} {
+	for _, want := range []string{"/transition", "/observe", "/compare", "/leases", "/leases inspect <lease-id>", "/leases cleanup confirm"} {
 		if !strings.Contains(output.String(), want) {
 			t.Fatalf("help output = %q, want %q", output.String(), want)
 		}
@@ -461,6 +463,119 @@ func TestShellTransitionRejectedInGlobalScope(t *testing.T) {
 	}
 }
 
+func TestShellLeasesShowsReleasedLeaseDetails(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	env := newTestEnvironment(t)
+	shell, err := New(env)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	project, _, _, lease := createReleasedLeaseFixtureAtPath(t, ctx, env, "/tmp/alpha/task-1/run-1/try-1")
+
+	var output bytes.Buffer
+	if err := shell.HandleLine(ctx, "/project "+project.Key, &output); err != nil {
+		t.Fatalf("HandleLine(/project) error = %v", err)
+	}
+	output.Reset()
+	if err := shell.HandleLine(ctx, "/leases all", &output); err != nil {
+		t.Fatalf("HandleLine(/leases all) error = %v", err)
+	}
+
+	for _, want := range []string{"project=alpha", "state=released", "cleanup=pending", lease.BranchName, lease.WorktreePath} {
+		if !strings.Contains(output.String(), want) {
+			t.Fatalf("leases output = %q, want %q", output.String(), want)
+		}
+	}
+}
+
+func TestShellLeasesInspectShowsLeaseDetails(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	env := newTestEnvironment(t)
+	shell, err := New(env)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	project, task, run, lease := createReleasedLeaseFixtureAtPath(t, ctx, env, "/tmp/alpha/task-1/run-1/try-1")
+
+	var output bytes.Buffer
+	if err := shell.HandleLine(ctx, "/project "+project.Key, &output); err != nil {
+		t.Fatalf("HandleLine(/project) error = %v", err)
+	}
+	output.Reset()
+	if err := shell.HandleLine(ctx, "/leases inspect "+strconv.FormatInt(lease.ID, 10), &output); err != nil {
+		t.Fatalf("HandleLine(/leases inspect) error = %v", err)
+	}
+
+	for _, want := range []string{
+		"lease_id=" + strconv.FormatInt(lease.ID, 10),
+		"project=alpha",
+		"task=" + strconv.FormatInt(task.ID, 10),
+		"run=" + strconv.FormatInt(run.ID, 10),
+		"branch=" + lease.BranchName,
+		"worktree=" + lease.WorktreePath,
+		"repo_root=/tmp/alpha",
+		"state=released",
+		"cleanup=pending",
+	} {
+		if !strings.Contains(output.String(), want) {
+			t.Fatalf("inspect output = %q, want %q", output.String(), want)
+		}
+	}
+}
+
+func TestShellLeasesCleanupRemovesReleasedLease(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	env := newTestEnvironment(t)
+	worktreePath := filepath.Join(t.TempDir(), "alpha", "task-1", "run-1", "try-1")
+	env.Worktrees = worktrees.Manager{
+		Store: env.Store,
+		Git:   shellCleanupGit{},
+	}
+	shell, err := New(env)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	project, _, _, lease := createReleasedLeaseFixtureAtPath(t, ctx, env, worktreePath)
+	if err := os.MkdirAll(worktreePath, 0o755); err != nil {
+		t.Fatalf("MkdirAll(worktreePath) error = %v", err)
+	}
+
+	var output bytes.Buffer
+	if err := shell.HandleLine(ctx, "/project "+project.Key, &output); err != nil {
+		t.Fatalf("HandleLine(/project) error = %v", err)
+	}
+	output.Reset()
+	if err := shell.HandleLine(ctx, "/leases cleanup confirm", &output); err != nil {
+		t.Fatalf("HandleLine(/leases cleanup confirm) error = %v", err)
+	}
+
+	updated, err := env.Store.GetWorktreeLease(ctx, lease.ID)
+	if err != nil {
+		t.Fatalf("GetWorktreeLease() error = %v", err)
+	}
+	if updated.State != "cleaned" {
+		t.Fatalf("updated.State = %q, want cleaned", updated.State)
+	}
+	if updated.CleanedUpAt == nil {
+		t.Fatalf("updated.CleanedUpAt = nil, want value")
+	}
+	if _, err := os.Stat(worktreePath); !os.IsNotExist(err) {
+		t.Fatalf("Stat(worktreePath) err = %v, want not exist", err)
+	}
+	if !strings.Contains(output.String(), "cleaned 1 lease") {
+		t.Fatalf("cleanup output = %q, want cleaned count", output.String())
+	}
+}
+
 func newTestEnvironment(t *testing.T) Environment {
 	t.Helper()
 
@@ -499,6 +614,69 @@ func newTestEnvironment(t *testing.T) Environment {
 		Registry:     registry,
 		SessionStore: SessionStore{Path: filepath.Join(stateDir, "cli-session.json")},
 	}
+}
+
+func createReleasedLeaseFixtureAtPath(t *testing.T, ctx context.Context, env Environment, worktreePath string) (sqlite.Project, sqlite.Task, sqlite.Run, sqlite.WorktreeLease) {
+	t.Helper()
+
+	project, err := env.Store.CreateProject(ctx, sqlite.CreateProjectParams{
+		Key:           "alpha",
+		Name:          "Alpha",
+		Scope:         "project",
+		GitRoot:       "/tmp/alpha",
+		DefaultBranch: "main",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+	task, err := env.Store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "lease-task",
+		Title:       "Lease task",
+		Status:      "completed",
+		Scope:       "project",
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+	run, err := env.Store.StartRun(ctx, sqlite.StartRunParams{
+		TaskID:   task.ID,
+		Executor: "codex_headless",
+		Attempt:  1,
+		Status:   "running",
+	})
+	if err != nil {
+		t.Fatalf("StartRun() error = %v", err)
+	}
+	lease, err := env.Store.CreateWorktreeLease(ctx, sqlite.CreateWorktreeLeaseParams{
+		ProjectID:    project.ID,
+		TaskID:       task.ID,
+		RunID:        run.ID,
+		Mode:         "mutable",
+		BranchName:   "odin/alpha/task-1/run-1/try-1",
+		WorktreePath: worktreePath,
+		RepoRoot:     "/tmp/alpha",
+		State:        "active",
+	})
+	if err != nil {
+		t.Fatalf("CreateWorktreeLease() error = %v", err)
+	}
+	lease, err = env.Store.ReleaseWorktreeLease(ctx, sqlite.ReleaseWorktreeLeaseParams{
+		LeaseID: lease.ID,
+		State:   "released",
+	})
+	if err != nil {
+		t.Fatalf("ReleaseWorktreeLease() error = %v", err)
+	}
+	return project, task, run, lease
+}
+
+type shellCleanupGit struct{}
+
+func (shellCleanupGit) RemoveWorktree(_ context.Context, _ string, worktreePath string) error {
+	return os.RemoveAll(worktreePath)
 }
 
 func hasTransitionEvent(events []runtimeevents.Record, want runtimeevents.Type) bool {

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 const odinCoreKey = "odin-core"
@@ -108,6 +109,44 @@ func validateProject(project Manifest, seenKeys map[string]struct{}) []Diagnosti
 }
 
 func validatePolicy(project Manifest, addDiagnostic func(code string, format string, args ...any)) []Diagnostic {
+	knownLimitedActions := KnownLimitedActionKeys()
+	for key, rule := range project.Policy.LimitedActions {
+		if key == "" {
+			addDiagnostic("invalid_limited_action", "policy.limited_actions contains an empty key for %q", project.Key)
+			continue
+		}
+		if _, ok := knownLimitedActions[key]; !ok {
+			addDiagnostic("invalid_limited_action", "policy.limited_actions.%s is not a known bounded action for %q", key, project.Key)
+		}
+		if rule.Description == "" {
+			addDiagnostic("invalid_limited_action", "policy.limited_actions.%s.description is required for %q", key, project.Key)
+		}
+		if len(rule.PathPrefixes) == 0 {
+			addDiagnostic("invalid_limited_action", "policy.limited_actions.%s.path_prefixes is required for %q", key, project.Key)
+		}
+		if rule.ContentMode == "" {
+			addDiagnostic("invalid_limited_action", "policy.limited_actions.%s.content_mode is required for %q", key, project.Key)
+		}
+
+		switch key {
+		case string(LimitedActionDocsAuditNote), string(LimitedActionRepoHygieneNote):
+			if rule.ContentMode != string(LimitedActionContentModeCreateMarkdownNote) {
+				addDiagnostic("invalid_limited_action", "policy.limited_actions.%s.content_mode must be %q for %q", key, LimitedActionContentModeCreateMarkdownNote, project.Key)
+			}
+		case string(LimitedActionDocsUpdate):
+			if rule.ContentMode != string(LimitedActionContentModeAppendMarkdownNote) {
+				addDiagnostic("invalid_limited_action", "policy.limited_actions.%s.content_mode must be %q for %q", key, LimitedActionContentModeAppendMarkdownNote, project.Key)
+			}
+			if rule.TargetPath == "" {
+				addDiagnostic("invalid_limited_action", "policy.limited_actions.%s.target_path is required for %q", key, project.Key)
+			}
+		}
+
+		if rule.TargetPath != "" && !pathAllowedByPrefixes(rule.TargetPath, rule.PathPrefixes) {
+			addDiagnostic("invalid_limited_action", "policy.limited_actions.%s.target_path %q must be covered by path_prefixes for %q", key, rule.TargetPath, project.Key)
+		}
+	}
+
 	if project.Policy.BranchRules.RequireWorktree == nil {
 		addDiagnostic("missing_policy_field", "policy.branch_rules.require_worktree is required for %q", project.Key)
 	}
@@ -164,4 +203,13 @@ func isGitRepository(root string) bool {
 		return false
 	}
 	return info.Mode().IsRegular() || info.IsDir()
+}
+
+func pathAllowedByPrefixes(target string, prefixes []string) bool {
+	for _, prefix := range prefixes {
+		if strings.HasPrefix(target, prefix) {
+			return true
+		}
+	}
+	return false
 }

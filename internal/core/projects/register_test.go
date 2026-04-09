@@ -31,6 +31,11 @@ projects:
     default_branch: main
     policy:
       allowed_commands: [status]
+      limited_actions:
+        docs_audit_note:
+          description: Create an additive audit note under docs/audits
+          path_prefixes: [docs/audits/]
+          content_mode: create_markdown_note
       branch_rules:
         protected_branches: [main]
         require_worktree: true
@@ -57,6 +62,11 @@ projects:
       repo: acme/alpha
     policy:
       allowed_commands: [status]
+      limited_actions:
+        docs_audit_note:
+          description: Create an additive audit note under docs/audits
+          path_prefixes: [docs/audits/]
+          content_mode: create_markdown_note
       branch_rules:
         protected_branches: [main]
         require_worktree: true

@@ -81,6 +81,7 @@ type ProjectCreatedPayload struct {
 type TaskCreatedPayload struct {
 	Key         string `json:"key"`
 	Title       string `json:"title"`
+	ActionKey   string `json:"action_key,omitempty"`
 	Status      string `json:"status"`
 	Scope       string `json:"scope"`
 	RequestedBy string `json:"requested_by"`

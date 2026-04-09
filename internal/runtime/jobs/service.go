@@ -57,6 +57,11 @@ func (service Service) CreateTaskFromAct(ctx context.Context, resolved scope.Res
 		return sqlite.Task{}, err
 	}
 
+	actionKey, title, err := parseActInput(title)
+	if err != nil {
+		return sqlite.Task{}, err
+	}
+
 	now := time.Now().UTC()
 	if service.Now != nil {
 		now = service.Now().UTC()
@@ -66,6 +71,7 @@ func (service Service) CreateTaskFromAct(ctx context.Context, resolved scope.Res
 		ProjectID:   project.ID,
 		Key:         fmt.Sprintf("%s-%s", slugify(title), now.Format("20060102-150405")),
 		Title:       title,
+		ActionKey:   actionKey,
 		Status:      "queued",
 		Scope:       taskScope,
 		RequestedBy: "operator",
@@ -128,6 +134,7 @@ func (service Service) ExecuteNextQueued(ctx context.Context) error {
 			"task_id":     fmt.Sprintf("%d", task.ID),
 		},
 	}
+	actionKey := runtimeActionKey(task.ActionKey)
 
 	decision, err := selector.Select(ctx, spec)
 	if err != nil {
@@ -182,11 +189,17 @@ func (service Service) ExecuteNextQueued(ctx context.Context) error {
 	if err := authorizeMutation(manifest); err != nil {
 		return finishFailure(err)
 	}
+	if task.ActionKey != "" && !projects.SupportsLimitedAction(manifest, task.ActionKey) {
+		return finishFailure(fmt.Errorf("action key %q is not supported by project policy", task.ActionKey))
+	}
+	if task.ActionKey != "" {
+		return finishFailure(fmt.Errorf("action key %q is not enabled on this line", task.ActionKey))
+	}
 	if _, err := service.Transitions.AuthorizeAction(ctx, projects.ActionInput{
 		ProjectID:   project.ID,
 		Actor:       projects.TransitionControllerOdinOS,
 		ActionClass: projects.ActionClassIsolatedMutation,
-		ActionKey:   "run_task",
+		ActionKey:   actionKey,
 	}); err != nil {
 		return finishFailure(err)
 	}
@@ -247,6 +260,34 @@ func (service Service) ExecuteNextQueued(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+func parseActInput(input string) (string, string, error) {
+	input = strings.TrimSpace(input)
+	if !strings.HasPrefix(strings.ToLower(input), "action:") {
+		return "", input, nil
+	}
+
+	parts := strings.Fields(input)
+	if len(parts) == 0 {
+		return "", "", fmt.Errorf("act input is required")
+	}
+
+	key := strings.TrimSpace(parts[0][len("action:"):])
+	if key == "" {
+		return "", "", fmt.Errorf("explicit action key is required after action:")
+	}
+	if len(parts) == 1 {
+		return "", "", fmt.Errorf("act input with action:%s requires a task title", key)
+	}
+	return key, strings.Join(parts[1:], " "), nil
+}
+
+func runtimeActionKey(actionKey string) string {
+	if actionKey == "" {
+		return "run_task"
+	}
+	return actionKey
 }
 
 func (service Service) ensureRuntimeProject(ctx context.Context, manifest projects.Manifest) (sqlite.Project, error) {

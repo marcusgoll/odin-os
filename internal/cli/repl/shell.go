@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 	"time"
 
@@ -18,6 +19,8 @@ import (
 	jobsvc "odin-os/internal/runtime/jobs"
 	runsvc "odin-os/internal/runtime/runs"
 	"odin-os/internal/store/sqlite"
+	"odin-os/internal/vcs/git"
+	"odin-os/internal/vcs/worktrees"
 )
 
 type Environment struct {
@@ -25,6 +28,7 @@ type Environment struct {
 	Registry            projects.Registry
 	RegistryDiagnostics []projects.Diagnostic
 	SessionStore        SessionStore
+	Worktrees           worktrees.Manager
 }
 
 type Shell struct {
@@ -34,9 +38,11 @@ type Shell struct {
 	jobs        jobsvc.Service
 	runs        runsvc.Service
 	transitions projects.Service
+	worktrees   worktrees.Manager
 }
 
 const transitionUsage = "/transition [status] | /transition set <state> [allow=<csv>] [confirm] because <reason...>"
+const leaseUsage = "/leases [active|released|all] | /leases inspect <lease-id> | /leases cleanup confirm"
 
 func New(env Environment) (*Shell, error) {
 	cache, err := env.SessionStore.Load()
@@ -45,6 +51,13 @@ func New(env Environment) (*Shell, error) {
 	}
 
 	state := ResolveStartupState(cache, env.Registry)
+	worktreeManager := env.Worktrees
+	if worktreeManager.Store == nil {
+		worktreeManager.Store = env.Store
+	}
+	if worktreeManager.Git == nil {
+		worktreeManager.Git = git.Adapter{}
+	}
 	shell := &Shell{
 		env:   env,
 		state: state,
@@ -62,6 +75,7 @@ func New(env Environment) (*Shell, error) {
 		transitions: projects.Service{
 			Store: env.Store,
 		},
+		worktrees: worktreeManager,
 	}
 
 	if err := shell.persistState(); err != nil {
@@ -152,10 +166,13 @@ func (shell *Shell) renderPrompt(ctx context.Context, output io.Writer) error {
 func (shell *Shell) handleCommand(ctx context.Context, command commands.Command, output io.Writer) error {
 	switch command.Name {
 	case "help":
-		if _, err := fmt.Fprintln(output, "/help /mode /scope /project /transition /observe /compare /jobs /runs /approvals /logs /doctor /self"); err != nil {
+		if _, err := fmt.Fprintln(output, "/help /mode /scope /project /transition /observe /compare /leases /jobs /runs /approvals /logs /doctor /self"); err != nil {
 			return err
 		}
-		_, err := fmt.Fprintf(output, "%s\n", transitionUsage)
+		if _, err := fmt.Fprintf(output, "%s\n", transitionUsage); err != nil {
+			return err
+		}
+		_, err := fmt.Fprintf(output, "%s\n", leaseUsage)
 		return err
 	case "mode":
 		return shell.handleMode(command.Args, output)
@@ -169,6 +186,8 @@ func (shell *Shell) handleCommand(ctx context.Context, command commands.Command,
 		return shell.handleObserve(ctx, command.Args, output)
 	case "compare":
 		return shell.handleCompare(ctx, command.Args, output)
+	case "leases":
+		return shell.handleLeases(ctx, command.Args, output)
 	case "jobs":
 		return shell.handleJobs(ctx, output)
 	case "runs":
@@ -429,6 +448,164 @@ func (shell *Shell) handleTransitionReport(ctx context.Context, args []string, o
 
 	_, err = fmt.Fprintf(output, "recorded %s for %s: %s\n", reportType, manifest.Key, summary)
 	return err
+}
+
+func (shell *Shell) handleLeases(ctx context.Context, args []string, output io.Writer) error {
+	if len(args) > 0 {
+		switch strings.ToLower(args[0]) {
+		case "inspect":
+			return shell.handleLeaseInspect(ctx, args[1:], output)
+		case "cleanup":
+			return shell.handleLeaseCleanup(ctx, args[1:], output)
+		}
+	}
+
+	filter := "active"
+	if len(args) > 0 {
+		filter = strings.ToLower(args[0])
+	}
+	switch filter {
+	case "active", "released", "all":
+	default:
+		_, err := fmt.Fprintln(output, "usage: "+leaseUsage)
+		return err
+	}
+
+	leases, err := shell.env.Store.ListWorktreeLeases(ctx)
+	if err != nil {
+		return err
+	}
+
+	projectKeyByID := map[int64]string{}
+	count := 0
+	for _, lease := range leases {
+		projectKey, err := shell.projectKeyForID(ctx, projectKeyByID, lease.ProjectID)
+		if err != nil {
+			return err
+		}
+		if !shell.projectInScope(projectKey) {
+			continue
+		}
+		if filter != "all" && lease.State != filter {
+			continue
+		}
+
+		cleanup := "pending"
+		if lease.CleanedUpAt != nil || lease.State == "cleaned" {
+			cleanup = "complete"
+		}
+		if _, err := fmt.Fprintf(output, "project=%s state=%s cleanup=%s task=%d run=%d branch=%s worktree=%s\n", projectKey, lease.State, cleanup, lease.TaskID, lease.RunID, lease.BranchName, lease.WorktreePath); err != nil {
+			return err
+		}
+		count++
+	}
+
+	if count == 0 {
+		_, err := fmt.Fprintln(output, "no leases")
+		return err
+	}
+	return nil
+}
+
+func (shell *Shell) handleLeaseInspect(ctx context.Context, args []string, output io.Writer) error {
+	if len(args) != 1 {
+		_, err := fmt.Fprintln(output, "usage: /leases inspect <lease-id>")
+		return err
+	}
+
+	leaseID, err := strconv.ParseInt(args[0], 10, 64)
+	if err != nil {
+		_, err = fmt.Fprintln(output, "lease id must be numeric")
+		return err
+	}
+
+	lease, err := shell.env.Store.GetWorktreeLease(ctx, leaseID)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			_, err = fmt.Fprintln(output, "lease not found")
+			return err
+		}
+		return err
+	}
+
+	project, err := shell.env.Store.GetProject(ctx, lease.ProjectID)
+	if err != nil {
+		return err
+	}
+	if !shell.projectInScope(project.Key) {
+		_, err := fmt.Fprintln(output, "lease is outside the current scope")
+		return err
+	}
+
+	cleanup := "pending"
+	if lease.CleanedUpAt != nil || lease.State == "cleaned" {
+		cleanup = "complete"
+	}
+	_, err = fmt.Fprintf(output, "lease_id=%d project=%s task=%d run=%d branch=%s worktree=%s repo_root=%s state=%s cleanup=%s\n", lease.ID, project.Key, lease.TaskID, lease.RunID, lease.BranchName, lease.WorktreePath, lease.RepoRoot, lease.State, cleanup)
+	return err
+}
+
+func (shell *Shell) handleLeaseCleanup(ctx context.Context, args []string, output io.Writer) error {
+	if len(args) != 1 || strings.ToLower(args[0]) != "confirm" {
+		_, err := fmt.Fprintln(output, "usage: /leases cleanup confirm")
+		return err
+	}
+
+	leases, err := shell.env.Store.ListWorktreeLeases(ctx)
+	if err != nil {
+		return err
+	}
+
+	projectKeyByID := map[int64]string{}
+	cleanupEligible := make([]sqlite.WorktreeLease, 0)
+	for _, lease := range leases {
+		projectKey, err := shell.projectKeyForID(ctx, projectKeyByID, lease.ProjectID)
+		if err != nil {
+			return err
+		}
+		if !shell.projectInScope(projectKey) {
+			continue
+		}
+		if lease.State != "released" || lease.CleanedUpAt != nil {
+			continue
+		}
+		cleanupEligible = append(cleanupEligible, lease)
+	}
+
+	if len(cleanupEligible) == 0 {
+		_, err := fmt.Fprintln(output, "no cleanup-eligible leases")
+		return err
+	}
+
+	result, err := shell.worktrees.CleanupLeases(ctx, cleanupEligible)
+	if err != nil {
+		return err
+	}
+	_, err = fmt.Fprintf(output, "cleaned %d lease(s)\n", len(result.Removed))
+	return err
+}
+
+func (shell *Shell) projectKeyForID(ctx context.Context, cache map[int64]string, projectID int64) (string, error) {
+	if projectKey := cache[projectID]; projectKey != "" {
+		return projectKey, nil
+	}
+	project, err := shell.env.Store.GetProject(ctx, projectID)
+	if err != nil {
+		return "", err
+	}
+	cache[projectID] = project.Key
+	return project.Key, nil
+}
+
+func (shell *Shell) projectInScope(projectKey string) bool {
+	switch shell.state.Scope.Kind {
+	case scope.ScopeGlobal:
+		return true
+	case scope.ScopeProject, scope.ScopeOdinCore:
+		return projectKey == shell.state.Scope.ProjectKey
+	default:
+		return false
+	}
 }
 
 func (shell *Shell) handleJobs(ctx context.Context, output io.Writer) error {
