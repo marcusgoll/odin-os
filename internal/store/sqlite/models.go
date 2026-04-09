@@ -262,6 +262,42 @@ type ReleaseWorktreeLeaseParams struct {
 	State   string
 }
 
+type ProjectTransition struct {
+	ID                 int64
+	ProjectID          int64
+	State              string
+	Controller         string
+	LimitedActionsJSON string
+	Notes              string
+	ChangedBy          string
+	ChangedAt          time.Time
+}
+
+type SetProjectTransitionParams struct {
+	ProjectID          int64
+	State              string
+	Controller         string
+	LimitedActionsJSON string
+	Notes              string
+	ChangedBy          string
+}
+
+type ProjectTransitionReport struct {
+	ID          int64
+	ProjectID   int64
+	ReportType  string
+	Summary     string
+	DetailsJSON string
+	RecordedAt  time.Time
+}
+
+type RecordProjectTransitionReportParams struct {
+	ProjectID   int64
+	ReportType  string
+	Summary     string
+	DetailsJSON string
+}
+
 type ProjectionFreshness struct {
 	Surface     string
 	Status      string

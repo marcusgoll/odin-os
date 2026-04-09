@@ -22,22 +22,26 @@ const (
 type Type string
 
 const (
-	EventProjectCreated          Type = "project.created"
-	EventTaskCreated             Type = "task.created"
-	EventTaskStatusChanged       Type = "task.status_changed"
-	EventRunStarted              Type = "run.started"
-	EventRunFinished             Type = "run.finished"
-	EventApprovalRequested       Type = "approval.requested"
-	EventApprovalResolved        Type = "approval.resolved"
-	EventIncidentOpened          Type = "incident.opened"
-	EventIncidentResolved        Type = "incident.resolved"
-	EventIncidentEscalated       Type = "incident.escalated"
-	EventRecoveryStarted         Type = "recovery.started"
-	EventRecoveryActionExecuted  Type = "recovery.action_executed"
-	EventRecoveryCompleted       Type = "recovery.completed"
-	EventRegistryVersionRecorded Type = "registry_version.recorded"
-	EventExecutorHealthRecorded  Type = "executor_health.recorded"
-	EventContextPacketCreated    Type = "context_packet.created"
+	EventProjectCreated                   Type = "project.created"
+	EventTaskCreated                      Type = "task.created"
+	EventTaskStatusChanged                Type = "task.status_changed"
+	EventRunStarted                       Type = "run.started"
+	EventRunFinished                      Type = "run.finished"
+	EventApprovalRequested                Type = "approval.requested"
+	EventApprovalResolved                 Type = "approval.resolved"
+	EventIncidentOpened                   Type = "incident.opened"
+	EventIncidentResolved                 Type = "incident.resolved"
+	EventIncidentEscalated                Type = "incident.escalated"
+	EventRecoveryStarted                  Type = "recovery.started"
+	EventRecoveryActionExecuted           Type = "recovery.action_executed"
+	EventRecoveryCompleted                Type = "recovery.completed"
+	EventRegistryVersionRecorded          Type = "registry_version.recorded"
+	EventExecutorHealthRecorded           Type = "executor_health.recorded"
+	EventContextPacketCreated             Type = "context_packet.created"
+	EventProjectTransitionChanged         Type = "project.transition_changed"
+	EventProjectShadowObservationRecorded Type = "project.shadow_observation_recorded"
+	EventProjectCompareReportRecorded     Type = "project.compare_report_recorded"
+	EventProjectTransitionDenied          Type = "project.transition_denied"
 )
 
 type Record struct {
@@ -156,6 +160,24 @@ type ContextPacketCreatedPayload struct {
 	Trigger     string `json:"trigger"`
 	Status      string `json:"status"`
 	Summary     string `json:"summary"`
+}
+
+type ProjectTransitionChangedPayload struct {
+	State          string `json:"state"`
+	Controller     string `json:"controller"`
+	LimitedActions string `json:"limited_actions,omitempty"`
+	Notes          string `json:"notes,omitempty"`
+	ChangedBy      string `json:"changed_by"`
+}
+
+type ProjectTransitionReportRecordedPayload struct {
+	ReportType string `json:"report_type"`
+	Summary    string `json:"summary"`
+}
+
+type ProjectTransitionDeniedPayload struct {
+	ActionClass string `json:"action_class"`
+	Reason      string `json:"reason"`
 }
 
 func EncodePayload(payload any) (json.RawMessage, error) {

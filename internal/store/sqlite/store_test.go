@@ -224,8 +224,8 @@ func TestStoreMigrateLifecycleAndReopen(t *testing.T) {
 	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM schema_migrations`).Scan(&migrationCount); err != nil {
 		t.Fatalf("schema_migrations count query error = %v", err)
 	}
-	if migrationCount != 4 {
-		t.Fatalf("schema_migrations count = %d, want 4", migrationCount)
+	if migrationCount != 5 {
+		t.Fatalf("schema_migrations count = %d, want 5", migrationCount)
 	}
 
 	if err := store.Close(); err != nil {
@@ -264,5 +264,200 @@ func TestStoreMigrateLifecycleAndReopen(t *testing.T) {
 	}
 	if gotApproval.Status != "approved" {
 		t.Fatalf("GetApproval().Status = %q, want %q", gotApproval.Status, "approved")
+	}
+}
+
+func TestProjectTransitionStateLifecycle(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "odin.db")
+
+	store, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer store.Close()
+
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
+	}
+
+	project, err := store.CreateProject(ctx, CreateProjectParams{
+		Key:           "cfipros",
+		Name:          "CFIPros",
+		Scope:         "project",
+		GitRoot:       "/tmp/cfipros",
+		DefaultBranch: "main",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+
+	transition, err := store.SetProjectTransition(ctx, SetProjectTransitionParams{
+		ProjectID:          project.ID,
+		State:              "inventory",
+		Controller:         "legacy_odin",
+		LimitedActionsJSON: "",
+		Notes:              "initial enrollment",
+		ChangedBy:          "operator",
+	})
+	if err != nil {
+		t.Fatalf("SetProjectTransition(inventory) error = %v", err)
+	}
+
+	if transition.State != "inventory" {
+		t.Fatalf("transition.State = %q, want %q", transition.State, "inventory")
+	}
+	if transition.Controller != "legacy_odin" {
+		t.Fatalf("transition.Controller = %q, want %q", transition.Controller, "legacy_odin")
+	}
+
+	transition, err = store.SetProjectTransition(ctx, SetProjectTransitionParams{
+		ProjectID:          project.ID,
+		State:              "limited_action",
+		Controller:         "odin_os",
+		LimitedActionsJSON: `["isolated_mutation"]`,
+		Notes:              "allow proposal work only",
+		ChangedBy:          "operator",
+	})
+	if err != nil {
+		t.Fatalf("SetProjectTransition(limited_action) error = %v", err)
+	}
+
+	if transition.State != "limited_action" {
+		t.Fatalf("transition.State = %q, want %q", transition.State, "limited_action")
+	}
+	if transition.Controller != "odin_os" {
+		t.Fatalf("transition.Controller = %q, want %q", transition.Controller, "odin_os")
+	}
+	if transition.LimitedActionsJSON != `["isolated_mutation"]` {
+		t.Fatalf("transition.LimitedActionsJSON = %q, want %q", transition.LimitedActionsJSON, `["isolated_mutation"]`)
+	}
+
+	got, err := store.GetProjectTransition(ctx, project.ID)
+	if err != nil {
+		t.Fatalf("GetProjectTransition() error = %v", err)
+	}
+
+	if got.State != "limited_action" {
+		t.Fatalf("GetProjectTransition().State = %q, want %q", got.State, "limited_action")
+	}
+
+	projectEvents, err := store.ListEvents(ctx, ListEventsParams{
+		ProjectID: &project.ID,
+	})
+	if err != nil {
+		t.Fatalf("ListEvents(project) error = %v", err)
+	}
+
+	var transitionEvents int
+	for _, event := range projectEvents {
+		if event.Type == runtimeevents.EventProjectTransitionChanged {
+			transitionEvents++
+		}
+	}
+	if transitionEvents != 2 {
+		t.Fatalf("transition event count = %d, want 2", transitionEvents)
+	}
+}
+
+func TestProjectTransitionReportsAreAppendOnly(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "odin.db")
+
+	store, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer store.Close()
+
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
+	}
+
+	project, err := store.CreateProject(ctx, CreateProjectParams{
+		Key:           "cfipros",
+		Name:          "CFIPros",
+		Scope:         "project",
+		GitRoot:       "/tmp/cfipros",
+		DefaultBranch: "main",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+
+	if _, err := store.SetProjectTransition(ctx, SetProjectTransitionParams{
+		ProjectID:  project.ID,
+		State:      "compare",
+		Controller: "legacy_odin",
+		ChangedBy:  "operator",
+		Notes:      "compare before cutover",
+	}); err != nil {
+		t.Fatalf("SetProjectTransition(compare) error = %v", err)
+	}
+
+	shadowReport, err := store.RecordProjectTransitionReport(ctx, RecordProjectTransitionReportParams{
+		ProjectID:   project.ID,
+		ReportType:  "shadow_observation",
+		Summary:     "legacy run observed",
+		DetailsJSON: `{"task":"deploy","status":"completed"}`,
+	})
+	if err != nil {
+		t.Fatalf("RecordProjectTransitionReport(shadow) error = %v", err)
+	}
+
+	compareReport, err := store.RecordProjectTransitionReport(ctx, RecordProjectTransitionReportParams{
+		ProjectID:   project.ID,
+		ReportType:  "compare_report",
+		Summary:     "decision mismatch",
+		DetailsJSON: `{"legacy_summary":"ship","odin_summary":"hold","verdict":"mismatch"}`,
+	})
+	if err != nil {
+		t.Fatalf("RecordProjectTransitionReport(compare) error = %v", err)
+	}
+
+	if shadowReport.ID == compareReport.ID {
+		t.Fatalf("report ids should differ, both were %d", shadowReport.ID)
+	}
+
+	reports, err := store.ListProjectTransitionReports(ctx, project.ID)
+	if err != nil {
+		t.Fatalf("ListProjectTransitionReports() error = %v", err)
+	}
+
+	if len(reports) != 2 {
+		t.Fatalf("ListProjectTransitionReports() len = %d, want 2", len(reports))
+	}
+	if reports[0].ReportType != "shadow_observation" {
+		t.Fatalf("reports[0].ReportType = %q, want %q", reports[0].ReportType, "shadow_observation")
+	}
+	if reports[1].ReportType != "compare_report" {
+		t.Fatalf("reports[1].ReportType = %q, want %q", reports[1].ReportType, "compare_report")
+	}
+
+	projectEvents, err := store.ListEvents(ctx, ListEventsParams{
+		ProjectID: &project.ID,
+	})
+	if err != nil {
+		t.Fatalf("ListEvents(project) error = %v", err)
+	}
+
+	var shadowEvents int
+	var compareEvents int
+	for _, event := range projectEvents {
+		switch event.Type {
+		case runtimeevents.EventProjectShadowObservationRecorded:
+			shadowEvents++
+		case runtimeevents.EventProjectCompareReportRecorded:
+			compareEvents++
+		}
+	}
+
+	if shadowEvents != 1 {
+		t.Fatalf("shadow event count = %d, want 1", shadowEvents)
+	}
+	if compareEvents != 1 {
+		t.Fatalf("compare event count = %d, want 1", compareEvents)
 	}
 }

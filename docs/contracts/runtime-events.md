@@ -2,7 +2,7 @@
 title: Runtime Event Contract
 status: active
 date: 2026-04-09
-phase: "11"
+phase: "13"
 ---
 
 # Runtime Event Contract
@@ -40,7 +40,7 @@ Phase 03 through Phase 08 stream types are:
 
 ## Event types
 
-Phase 03 through Phase 11 event types are:
+Phase 03 through Phase 13 event types are:
 
 - `project.created`
 - `task.created`
@@ -58,6 +58,10 @@ Phase 03 through Phase 11 event types are:
 - `registry_version.recorded`
 - `executor_health.recorded`
 - `context_packet.created`
+- `project.transition_changed`
+- `project.shadow_observation_recorded`
+- `project.compare_report_recorded`
+- `project.transition_denied`
 
 ## Contract rules
 
@@ -86,6 +90,14 @@ Phase 03 replay support must be able to reconstruct:
 - approval state
 
 This replay is a correctness requirement for lifecycle auditing and restart safety.
+
+## Transition expectation
+
+Phase 13 extends the runtime event stream so project onboarding and cutover remain auditable:
+
+- every transition state change must append `project.transition_changed`
+- shadow and compare records must append explicit project report events
+- denied transition-gated mutations must append `project.transition_denied`
 
 ## Self-heal expectation
 

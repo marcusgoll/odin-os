@@ -45,13 +45,17 @@ type PendingApprovalView struct {
 }
 
 type ProjectTransitionView struct {
-	ProjectID     int64
-	ProjectKey    string
-	Name          string
-	Scope         string
-	TaskCount     int
-	OpenTaskCount int
-	LastEventAt   *string
+	ProjectID       int64
+	ProjectKey      string
+	Name            string
+	Scope           string
+	TaskCount       int
+	OpenTaskCount   int
+	LastEventAt     *string
+	TransitionState string
+	Controller      string
+	LastReportType  string
+	LastReportAt    *string
 }
 
 type ActiveRunView struct {
@@ -247,10 +251,27 @@ func ListProjectTransitionViews(ctx context.Context, queryer Queryer) ([]Project
 			p.scope,
 			COUNT(DISTINCT t.id),
 			COUNT(DISTINCT CASE WHEN t.status NOT IN ('completed', 'cancelled') THEN t.id END),
-			MAX(e.occurred_at)
+			MAX(e.occurred_at),
+			COALESCE(pt.state, ''),
+			COALESCE(pt.controller, ''),
+			COALESCE((
+				SELECT ptr.report_type
+				FROM project_transition_reports ptr
+				WHERE ptr.project_id = p.id
+				ORDER BY ptr.id DESC
+				LIMIT 1
+			), ''),
+			(
+				SELECT ptr.recorded_at
+				FROM project_transition_reports ptr
+				WHERE ptr.project_id = p.id
+				ORDER BY ptr.id DESC
+				LIMIT 1
+			)
 		FROM projects p
 		LEFT JOIN tasks t ON t.project_id = p.id
 		LEFT JOIN events e ON e.project_id = p.id
+		LEFT JOIN project_transitions pt ON pt.project_id = p.id
 		GROUP BY p.id, p.key, p.name, p.scope
 		ORDER BY p.id ASC
 	`)
@@ -263,6 +284,7 @@ func ListProjectTransitionViews(ctx context.Context, queryer Queryer) ([]Project
 	for rows.Next() {
 		var view ProjectTransitionView
 		var lastEventAt sql.NullString
+		var lastReportAt sql.NullString
 		if err := rows.Scan(
 			&view.ProjectID,
 			&view.ProjectKey,
@@ -271,11 +293,18 @@ func ListProjectTransitionViews(ctx context.Context, queryer Queryer) ([]Project
 			&view.TaskCount,
 			&view.OpenTaskCount,
 			&lastEventAt,
+			&view.TransitionState,
+			&view.Controller,
+			&view.LastReportType,
+			&lastReportAt,
 		); err != nil {
 			return nil, err
 		}
 		if lastEventAt.Valid {
 			view.LastEventAt = &lastEventAt.String
+		}
+		if lastReportAt.Valid {
+			view.LastReportAt = &lastReportAt.String
 		}
 		views = append(views, view)
 	}

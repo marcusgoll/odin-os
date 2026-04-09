@@ -886,6 +886,198 @@ func (store *Store) CreateContextPacket(ctx context.Context, params CreateContex
 	return packet, err
 }
 
+func (store *Store) SetProjectTransition(ctx context.Context, params SetProjectTransitionParams) (ProjectTransition, error) {
+	now := store.now()
+	var transition ProjectTransition
+
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		project, err := store.getProjectTx(ctx, tx, params.ProjectID)
+		if err != nil {
+			return err
+		}
+
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO project_transitions (
+				project_id,
+				state,
+				controller,
+				limited_actions_json,
+				notes,
+				changed_by,
+				changed_at
+			)
+			VALUES (?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT(project_id) DO UPDATE SET
+				state = excluded.state,
+				controller = excluded.controller,
+				limited_actions_json = excluded.limited_actions_json,
+				notes = excluded.notes,
+				changed_by = excluded.changed_by,
+				changed_at = excluded.changed_at
+		`,
+			params.ProjectID,
+			params.State,
+			params.Controller,
+			params.LimitedActionsJSON,
+			params.Notes,
+			params.ChangedBy,
+			formatTime(now),
+		); err != nil {
+			return err
+		}
+
+		row := tx.QueryRowContext(ctx, `
+			SELECT project_id, state, controller, limited_actions_json, notes, changed_by, changed_at
+			FROM project_transitions
+			WHERE project_id = ?
+		`, params.ProjectID)
+		transition, err = scanProjectTransition(row)
+		if err != nil {
+			return err
+		}
+
+		return appendEventTx(ctx, tx, eventInsert{
+			StreamType: runtimeevents.StreamProject,
+			StreamID:   project.ID,
+			EventType:  runtimeevents.EventProjectTransitionChanged,
+			Scope:      project.Scope,
+			ProjectID:  &project.ID,
+			Payload: runtimeevents.ProjectTransitionChangedPayload{
+				State:          transition.State,
+				Controller:     transition.Controller,
+				LimitedActions: transition.LimitedActionsJSON,
+				Notes:          transition.Notes,
+				ChangedBy:      transition.ChangedBy,
+			},
+			OccurredAt: now,
+		})
+	})
+
+	return transition, err
+}
+
+func (store *Store) GetProjectTransition(ctx context.Context, projectID int64) (ProjectTransition, error) {
+	row := store.db.QueryRowContext(ctx, `
+		SELECT project_id, state, controller, limited_actions_json, notes, changed_by, changed_at
+		FROM project_transitions
+		WHERE project_id = ?
+	`, projectID)
+	return scanProjectTransition(row)
+}
+
+func (store *Store) RecordProjectTransitionReport(ctx context.Context, params RecordProjectTransitionReportParams) (ProjectTransitionReport, error) {
+	now := store.now()
+	var report ProjectTransitionReport
+
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		project, err := store.getProjectTx(ctx, tx, params.ProjectID)
+		if err != nil {
+			return err
+		}
+
+		result, err := tx.ExecContext(ctx, `
+			INSERT INTO project_transition_reports (project_id, report_type, summary, details_json, recorded_at)
+			VALUES (?, ?, ?, ?, ?)
+		`,
+			params.ProjectID,
+			params.ReportType,
+			params.Summary,
+			params.DetailsJSON,
+			formatTime(now),
+		)
+		if err != nil {
+			return err
+		}
+
+		reportID, err := result.LastInsertId()
+		if err != nil {
+			return err
+		}
+
+		report = ProjectTransitionReport{
+			ID:          reportID,
+			ProjectID:   params.ProjectID,
+			ReportType:  params.ReportType,
+			Summary:     params.Summary,
+			DetailsJSON: params.DetailsJSON,
+			RecordedAt:  now,
+		}
+
+		eventType := runtimeevents.EventProjectShadowObservationRecorded
+		switch params.ReportType {
+		case "shadow_observation":
+			eventType = runtimeevents.EventProjectShadowObservationRecorded
+		case "compare_report":
+			eventType = runtimeevents.EventProjectCompareReportRecorded
+		default:
+			return fmt.Errorf("unsupported transition report type %q", params.ReportType)
+		}
+
+		return appendEventTx(ctx, tx, eventInsert{
+			StreamType: runtimeevents.StreamProject,
+			StreamID:   project.ID,
+			EventType:  eventType,
+			Scope:      project.Scope,
+			ProjectID:  &project.ID,
+			Payload: runtimeevents.ProjectTransitionReportRecordedPayload{
+				ReportType: report.ReportType,
+				Summary:    report.Summary,
+			},
+			OccurredAt: now,
+		})
+	})
+
+	return report, err
+}
+
+func (store *Store) RecordProjectTransitionDenied(ctx context.Context, projectID int64, actionClass string, reason string) error {
+	now := store.now()
+
+	return store.withTx(ctx, func(tx *sql.Tx) error {
+		project, err := store.getProjectTx(ctx, tx, projectID)
+		if err != nil {
+			return err
+		}
+
+		return appendEventTx(ctx, tx, eventInsert{
+			StreamType: runtimeevents.StreamProject,
+			StreamID:   project.ID,
+			EventType:  runtimeevents.EventProjectTransitionDenied,
+			Scope:      project.Scope,
+			ProjectID:  &project.ID,
+			Payload: runtimeevents.ProjectTransitionDeniedPayload{
+				ActionClass: actionClass,
+				Reason:      reason,
+			},
+			OccurredAt: now,
+		})
+	})
+}
+
+func (store *Store) ListProjectTransitionReports(ctx context.Context, projectID int64) ([]ProjectTransitionReport, error) {
+	rows, err := store.db.QueryContext(ctx, `
+		SELECT id, project_id, report_type, summary, details_json, recorded_at
+		FROM project_transition_reports
+		WHERE project_id = ?
+		ORDER BY id ASC
+	`, projectID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var reports []ProjectTransitionReport
+	for rows.Next() {
+		report, err := scanProjectTransitionReport(rows)
+		if err != nil {
+			return nil, err
+		}
+		reports = append(reports, report)
+	}
+
+	return reports, rows.Err()
+}
+
 func (store *Store) GetTask(ctx context.Context, taskID int64) (Task, error) {
 	return store.getTaskQuery(ctx, store.db, taskID)
 }
@@ -2029,6 +2221,52 @@ func scanContextPacket(row interface{ Scan(...any) error }) (ContextPacket, erro
 		return ContextPacket{}, err
 	}
 	return packet, nil
+}
+
+func scanProjectTransition(row interface{ Scan(...any) error }) (ProjectTransition, error) {
+	var transition ProjectTransition
+	var changedAt string
+	if err := row.Scan(
+		&transition.ProjectID,
+		&transition.State,
+		&transition.Controller,
+		&transition.LimitedActionsJSON,
+		&transition.Notes,
+		&transition.ChangedBy,
+		&changedAt,
+	); err != nil {
+		return ProjectTransition{}, err
+	}
+
+	var err error
+	transition.ID = transition.ProjectID
+	transition.ChangedAt, err = parseTime(changedAt)
+	if err != nil {
+		return ProjectTransition{}, err
+	}
+	return transition, nil
+}
+
+func scanProjectTransitionReport(row interface{ Scan(...any) error }) (ProjectTransitionReport, error) {
+	var report ProjectTransitionReport
+	var recordedAt string
+	if err := row.Scan(
+		&report.ID,
+		&report.ProjectID,
+		&report.ReportType,
+		&report.Summary,
+		&report.DetailsJSON,
+		&recordedAt,
+	); err != nil {
+		return ProjectTransitionReport{}, err
+	}
+
+	var err error
+	report.RecordedAt, err = parseTime(recordedAt)
+	if err != nil {
+		return ProjectTransitionReport{}, err
+	}
+	return report, nil
 }
 
 func scanWorktreeLease(row interface{ Scan(...any) error }) (WorktreeLease, error) {
