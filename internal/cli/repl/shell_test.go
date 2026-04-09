@@ -10,6 +10,8 @@ import (
 	"testing"
 
 	"odin-os/internal/cli/scope"
+	"odin-os/internal/core/projects"
+	runtimeevents "odin-os/internal/runtime/events"
 	"odin-os/internal/store/sqlite"
 )
 
@@ -214,6 +216,251 @@ func TestDoctorCommandSupportsJSONOutput(t *testing.T) {
 	}
 }
 
+func TestShellHelpIncludesTransitionCommands(t *testing.T) {
+	t.Parallel()
+
+	env := newTestEnvironment(t)
+	shell, err := New(env)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	var output bytes.Buffer
+	if err := shell.HandleLine(context.Background(), "/help", &output); err != nil {
+		t.Fatalf("HandleLine(/help) error = %v", err)
+	}
+
+	for _, want := range []string{"/transition", "/observe", "/compare"} {
+		if !strings.Contains(output.String(), want) {
+			t.Fatalf("help output = %q, want %q", output.String(), want)
+		}
+	}
+}
+
+func TestShellTransitionStatusShowsDefaultInventoryAuthority(t *testing.T) {
+	t.Parallel()
+
+	env := newTestEnvironment(t)
+	shell, err := New(env)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	var output bytes.Buffer
+	if err := shell.HandleLine(context.Background(), "/project alpha", &output); err != nil {
+		t.Fatalf("HandleLine(/project) error = %v", err)
+	}
+	output.Reset()
+	if err := shell.HandleLine(context.Background(), "/transition", &output); err != nil {
+		t.Fatalf("HandleLine(/transition) error = %v", err)
+	}
+
+	for _, want := range []string{
+		"project=alpha",
+		"state=inventory",
+		"controller=legacy_odin",
+		"mutation_authority=legacy_odin",
+		"odin_can_mutate=false",
+	} {
+		if !strings.Contains(output.String(), want) {
+			t.Fatalf("transition output = %q, want %q", output.String(), want)
+		}
+	}
+}
+
+func TestShellTransitionSetShadowRecordsEvent(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	env := newTestEnvironment(t)
+	shell, err := New(env)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	var output bytes.Buffer
+	if err := shell.HandleLine(ctx, "/project alpha", &output); err != nil {
+		t.Fatalf("HandleLine(/project) error = %v", err)
+	}
+	output.Reset()
+	if err := shell.HandleLine(ctx, "/transition set shadow because observe only", &output); err != nil {
+		t.Fatalf("HandleLine(/transition set shadow) error = %v", err)
+	}
+
+	project, err := env.Store.GetProjectByKey(ctx, "alpha")
+	if err != nil {
+		t.Fatalf("GetProjectByKey(alpha) error = %v", err)
+	}
+	transition, err := env.Store.GetProjectTransition(ctx, project.ID)
+	if err != nil {
+		t.Fatalf("GetProjectTransition() error = %v", err)
+	}
+	if transition.State != string(projects.TransitionStateShadow) {
+		t.Fatalf("transition.State = %q, want %q", transition.State, projects.TransitionStateShadow)
+	}
+
+	events, err := env.Store.ListEvents(ctx, sqlite.ListEventsParams{ProjectID: &project.ID})
+	if err != nil {
+		t.Fatalf("ListEvents() error = %v", err)
+	}
+	if !hasTransitionEvent(events, runtimeevents.EventProjectTransitionChanged) {
+		t.Fatalf("events missing project.transition_changed: %+v", events)
+	}
+}
+
+func TestShellTransitionSetCutoverRequiresConfirm(t *testing.T) {
+	t.Parallel()
+
+	env := newTestEnvironment(t)
+	shell, err := New(env)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	var output bytes.Buffer
+	if err := shell.HandleLine(context.Background(), "/project alpha", &output); err != nil {
+		t.Fatalf("HandleLine(/project) error = %v", err)
+	}
+	output.Reset()
+	if err := shell.HandleLine(context.Background(), "/transition set cutover because take ownership", &output); err != nil {
+		t.Fatalf("HandleLine(/transition set cutover) error = %v", err)
+	}
+
+	if !strings.Contains(output.String(), "confirm") {
+		t.Fatalf("output = %q, want confirm requirement", output.String())
+	}
+}
+
+func TestShellTransitionSetLimitedActionRequiresAllowlist(t *testing.T) {
+	t.Parallel()
+
+	env := newTestEnvironment(t)
+	shell, err := New(env)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	var output bytes.Buffer
+	if err := shell.HandleLine(context.Background(), "/project alpha", &output); err != nil {
+		t.Fatalf("HandleLine(/project) error = %v", err)
+	}
+	output.Reset()
+	if err := shell.HandleLine(context.Background(), "/transition set limited_action confirm because pilot", &output); err != nil {
+		t.Fatalf("HandleLine(/transition set limited_action) error = %v", err)
+	}
+
+	if !strings.Contains(output.String(), "allow=") {
+		t.Fatalf("output = %q, want allowlist requirement", output.String())
+	}
+}
+
+func TestShellObserveRecordsShadowObservation(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	env := newTestEnvironment(t)
+	shell, err := New(env)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	var output bytes.Buffer
+	if err := shell.HandleLine(ctx, "/project alpha", &output); err != nil {
+		t.Fatalf("HandleLine(/project) error = %v", err)
+	}
+	output.Reset()
+	if err := shell.HandleLine(ctx, "/transition set shadow because observe only", &output); err != nil {
+		t.Fatalf("HandleLine(/transition set shadow) error = %v", err)
+	}
+	output.Reset()
+	if err := shell.HandleLine(ctx, "/observe legacy deploy observed", &output); err != nil {
+		t.Fatalf("HandleLine(/observe) error = %v", err)
+	}
+
+	project, err := env.Store.GetProjectByKey(ctx, "alpha")
+	if err != nil {
+		t.Fatalf("GetProjectByKey(alpha) error = %v", err)
+	}
+	reports, err := env.Store.ListProjectTransitionReports(ctx, project.ID)
+	if err != nil {
+		t.Fatalf("ListProjectTransitionReports() error = %v", err)
+	}
+	if len(reports) != 1 || reports[0].ReportType != "shadow_observation" {
+		t.Fatalf("reports = %+v, want one shadow_observation", reports)
+	}
+
+	events, err := env.Store.ListEvents(ctx, sqlite.ListEventsParams{ProjectID: &project.ID})
+	if err != nil {
+		t.Fatalf("ListEvents() error = %v", err)
+	}
+	if !hasTransitionEvent(events, runtimeevents.EventProjectShadowObservationRecorded) {
+		t.Fatalf("events missing project.shadow_observation_recorded: %+v", events)
+	}
+}
+
+func TestShellCompareRecordsCompareReport(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	env := newTestEnvironment(t)
+	shell, err := New(env)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	var output bytes.Buffer
+	if err := shell.HandleLine(ctx, "/project alpha", &output); err != nil {
+		t.Fatalf("HandleLine(/project) error = %v", err)
+	}
+	output.Reset()
+	if err := shell.HandleLine(ctx, "/transition set compare because compare live decisions", &output); err != nil {
+		t.Fatalf("HandleLine(/transition set compare) error = %v", err)
+	}
+	output.Reset()
+	if err := shell.HandleLine(ctx, "/compare route mismatch on candidate", &output); err != nil {
+		t.Fatalf("HandleLine(/compare) error = %v", err)
+	}
+
+	project, err := env.Store.GetProjectByKey(ctx, "alpha")
+	if err != nil {
+		t.Fatalf("GetProjectByKey(alpha) error = %v", err)
+	}
+	reports, err := env.Store.ListProjectTransitionReports(ctx, project.ID)
+	if err != nil {
+		t.Fatalf("ListProjectTransitionReports() error = %v", err)
+	}
+	if len(reports) != 1 || reports[0].ReportType != "compare_report" {
+		t.Fatalf("reports = %+v, want one compare_report", reports)
+	}
+
+	events, err := env.Store.ListEvents(ctx, sqlite.ListEventsParams{ProjectID: &project.ID})
+	if err != nil {
+		t.Fatalf("ListEvents() error = %v", err)
+	}
+	if !hasTransitionEvent(events, runtimeevents.EventProjectCompareReportRecorded) {
+		t.Fatalf("events missing project.compare_report_recorded: %+v", events)
+	}
+}
+
+func TestShellTransitionRejectedInGlobalScope(t *testing.T) {
+	t.Parallel()
+
+	env := newTestEnvironment(t)
+	shell, err := New(env)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	var output bytes.Buffer
+	if err := shell.HandleLine(context.Background(), "/transition", &output); err != nil {
+		t.Fatalf("HandleLine(/transition) error = %v", err)
+	}
+
+	if !strings.Contains(output.String(), "project scope") {
+		t.Fatalf("output = %q, want project-scope rejection", output.String())
+	}
+}
+
 func newTestEnvironment(t *testing.T) Environment {
 	t.Helper()
 
@@ -252,4 +499,13 @@ func newTestEnvironment(t *testing.T) Environment {
 		Registry:     registry,
 		SessionStore: SessionStore{Path: filepath.Join(stateDir, "cli-session.json")},
 	}
+}
+
+func hasTransitionEvent(events []runtimeevents.Record, want runtimeevents.Type) bool {
+	for _, event := range events {
+		if event.Type == want {
+			return true
+		}
+	}
+	return false
 }
