@@ -2,20 +2,32 @@ package lifecycle
 
 import (
 	"context"
-	"fmt"
 	"io"
+
+	"odin-os/internal/app/bootstrap"
+	"odin-os/internal/cli/repl"
 )
 
-const scaffoldMessage = "Odin OS scaffold initialized. Implementation phases pending."
+// Run boots the Odin interactive shell for the provided repository root.
+func Run(ctx context.Context, root string, stdin io.Reader, stdout io.Writer) error {
+	app, err := bootstrap.Load(ctx, root)
+	if err != nil {
+		return err
+	}
+	defer app.Store.Close()
 
-// Run emits the minimal process message for the Phase 01 scaffold.
-func Run(ctx context.Context, stdout io.Writer) error {
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	default:
+	shell, err := repl.New(repl.Environment{
+		Store:               app.Store,
+		Registry:            app.Registry,
+		RegistryDiagnostics: app.RegistryDiagnostics,
+		SessionStore:        app.SessionStore,
+	})
+	if err != nil {
+		return err
 	}
 
-	_, err := fmt.Fprintln(stdout, scaffoldMessage)
-	return err
+	if err := shell.Run(ctx, stdin, stdout); err != nil && err != io.EOF {
+		return err
+	}
+	return nil
 }

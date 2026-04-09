@@ -9,7 +9,13 @@ import (
 )
 
 func main() {
-	if err := lifecycle.Run(context.Background(), os.Stdout); err != nil {
+	root, err := os.Getwd()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	if err := lifecycle.Run(context.Background(), root, os.Stdin, os.Stdout); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}

@@ -780,6 +780,15 @@ func (store *Store) GetTask(ctx context.Context, taskID int64) (Task, error) {
 	return store.getTaskQuery(ctx, store.db, taskID)
 }
 
+func (store *Store) GetProjectByKey(ctx context.Context, key string) (Project, error) {
+	row := store.db.QueryRowContext(ctx, `
+		SELECT id, key, name, scope, git_root, default_branch, github_repo, manifest_path, created_at, updated_at
+		FROM projects
+		WHERE key = ?
+	`, key)
+	return scanProject(row)
+}
+
 func (store *Store) GetRun(ctx context.Context, runID int64) (Run, error) {
 	row := store.db.QueryRowContext(ctx, `
 		SELECT id, task_id, executor, status, attempt, started_at, finished_at, summary
