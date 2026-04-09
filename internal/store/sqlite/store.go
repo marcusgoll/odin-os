@@ -720,6 +720,7 @@ func (store *Store) RecordExecutorHealth(ctx context.Context, params RecordExecu
 func (store *Store) CreateContextPacket(ctx context.Context, params CreateContextPacketParams) (ContextPacket, error) {
 	now := store.now()
 	var packet ContextPacket
+	params = normalizeCreateContextPacketParams(params)
 
 	err := store.withTx(ctx, func(tx *sql.Tx) error {
 		contextRow, err := store.contextPacketContextTx(ctx, tx, params.TaskID, params.RunID)
@@ -728,12 +729,29 @@ func (store *Store) CreateContextPacket(ctx context.Context, params CreateContex
 		}
 
 		result, err := tx.ExecContext(ctx, `
-			INSERT INTO context_packets (task_id, run_id, packet_kind, summary, payload_json, created_at)
-			VALUES (?, ?, ?, ?, ?, ?)
+			INSERT INTO context_packets (
+				task_id,
+				run_id,
+				packet_kind,
+				packet_scope,
+				trigger,
+				checkpoint_key,
+				supersedes_packet_id,
+				status,
+				summary,
+				payload_json,
+				created_at
+			)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		`,
 			nullInt64(params.TaskID),
 			nullInt64(params.RunID),
 			params.PacketKind,
+			params.PacketScope,
+			params.Trigger,
+			params.CheckpointKey,
+			nullInt64(params.SupersedesPacketID),
+			params.Status,
 			params.Summary,
 			params.PayloadJSON,
 			formatTime(now),
@@ -748,13 +766,18 @@ func (store *Store) CreateContextPacket(ctx context.Context, params CreateContex
 		}
 
 		packet = ContextPacket{
-			ID:          packetID,
-			TaskID:      params.TaskID,
-			RunID:       params.RunID,
-			PacketKind:  params.PacketKind,
-			Summary:     params.Summary,
-			PayloadJSON: params.PayloadJSON,
-			CreatedAt:   now,
+			ID:                 packetID,
+			TaskID:             params.TaskID,
+			RunID:              params.RunID,
+			PacketKind:         params.PacketKind,
+			PacketScope:        params.PacketScope,
+			Trigger:            params.Trigger,
+			CheckpointKey:      params.CheckpointKey,
+			SupersedesPacketID: params.SupersedesPacketID,
+			Status:             params.Status,
+			Summary:            params.Summary,
+			PayloadJSON:        params.PayloadJSON,
+			CreatedAt:          now,
 		}
 
 		return appendEventTx(ctx, tx, eventInsert{
@@ -766,8 +789,11 @@ func (store *Store) CreateContextPacket(ctx context.Context, params CreateContex
 			TaskID:     params.TaskID,
 			RunID:      params.RunID,
 			Payload: runtimeevents.ContextPacketCreatedPayload{
-				PacketKind: packet.PacketKind,
-				Summary:    packet.Summary,
+				PacketKind:  packet.PacketKind,
+				PacketScope: packet.PacketScope,
+				Trigger:     packet.Trigger,
+				Status:      packet.Status,
+				Summary:     packet.Summary,
 			},
 			OccurredAt: now,
 		})
@@ -778,6 +804,15 @@ func (store *Store) CreateContextPacket(ctx context.Context, params CreateContex
 
 func (store *Store) GetTask(ctx context.Context, taskID int64) (Task, error) {
 	return store.getTaskQuery(ctx, store.db, taskID)
+}
+
+func (store *Store) GetProject(ctx context.Context, projectID int64) (Project, error) {
+	row := store.db.QueryRowContext(ctx, `
+		SELECT id, key, name, scope, git_root, default_branch, github_repo, manifest_path, created_at, updated_at
+		FROM projects
+		WHERE id = ?
+	`, projectID)
+	return scanProject(row)
 }
 
 func (store *Store) GetProjectByKey(ctx context.Context, key string) (Project, error) {
@@ -805,6 +840,113 @@ func (store *Store) GetApproval(ctx context.Context, approvalID int64) (Approval
 		WHERE id = ?
 	`, approvalID)
 	return scanApproval(row)
+}
+
+func (store *Store) GetContextPacket(ctx context.Context, packetID int64) (ContextPacket, error) {
+	row := store.db.QueryRowContext(ctx, `
+		SELECT
+			id,
+			task_id,
+			run_id,
+			packet_kind,
+			packet_scope,
+			trigger,
+			checkpoint_key,
+			supersedes_packet_id,
+			status,
+			summary,
+			payload_json,
+			created_at
+		FROM context_packets
+		WHERE id = ?
+	`, packetID)
+	return scanContextPacket(row)
+}
+
+func (store *Store) ListContextPackets(ctx context.Context, params ListContextPacketsParams) ([]ContextPacket, error) {
+	query := `
+		SELECT
+			id,
+			task_id,
+			run_id,
+			packet_kind,
+			packet_scope,
+			trigger,
+			checkpoint_key,
+			supersedes_packet_id,
+			status,
+			summary,
+			payload_json,
+			created_at
+		FROM context_packets
+		WHERE 1 = 1
+	`
+	var args []any
+	if params.TaskID != nil {
+		query += ` AND task_id = ?`
+		args = append(args, *params.TaskID)
+	}
+	if params.RunID != nil {
+		query += ` AND run_id = ?`
+		args = append(args, *params.RunID)
+	}
+	if params.PacketKind != "" {
+		query += ` AND packet_kind = ?`
+		args = append(args, params.PacketKind)
+	}
+	if params.PacketScope != "" {
+		query += ` AND packet_scope = ?`
+		args = append(args, params.PacketScope)
+	}
+	if params.Status != "" {
+		query += ` AND status = ?`
+		args = append(args, params.Status)
+	}
+	query += ` ORDER BY id ASC`
+
+	rows, err := store.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var packets []ContextPacket
+	for rows.Next() {
+		packet, err := scanContextPacket(rows)
+		if err != nil {
+			return nil, err
+		}
+		packets = append(packets, packet)
+	}
+
+	return packets, rows.Err()
+}
+
+func (store *Store) GetLatestTaskWakePacket(ctx context.Context, projectID int64, taskID int64) (ContextPacket, error) {
+	row := store.db.QueryRowContext(ctx, `
+		SELECT
+			cp.id,
+			cp.task_id,
+			cp.run_id,
+			cp.packet_kind,
+			cp.packet_scope,
+			cp.trigger,
+			cp.checkpoint_key,
+			cp.supersedes_packet_id,
+			cp.status,
+			cp.summary,
+			cp.payload_json,
+			cp.created_at
+		FROM context_packets cp
+		JOIN tasks t ON t.id = cp.task_id
+		WHERE t.project_id = ?
+		  AND cp.task_id = ?
+		  AND cp.packet_scope = 'task_wake_packet'
+		  AND cp.status IN ('active', 'sealed')
+		ORDER BY cp.id DESC
+		LIMIT 1
+	`, projectID, taskID)
+	return scanContextPacket(row)
 }
 
 func (store *Store) ListEvents(ctx context.Context, params ListEventsParams) ([]runtimeevents.Record, error) {
@@ -1201,6 +1343,26 @@ func appendEventTx(ctx context.Context, tx *sql.Tx, params eventInsert) error {
 	return err
 }
 
+func normalizeCreateContextPacketParams(params CreateContextPacketParams) CreateContextPacketParams {
+	if params.PacketScope == "" {
+		switch params.PacketKind {
+		case "project":
+			params.PacketScope = "project_context"
+		case "run":
+			params.PacketScope = "run_context"
+		default:
+			params.PacketScope = "task_wake_packet"
+		}
+	}
+	if params.Trigger == "" {
+		params.Trigger = "handoff"
+	}
+	if params.Status == "" {
+		params.Status = "active"
+	}
+	return params
+}
+
 func scanProject(row interface{ Scan(...any) error }) (Project, error) {
 	var project Project
 	var githubRepo sql.NullString
@@ -1331,6 +1493,40 @@ func scanApproval(row interface{ Scan(...any) error }) (Approval, error) {
 	approval.DecisionBy = decisionBy.String
 	approval.Reason = reason.String
 	return approval, nil
+}
+
+func scanContextPacket(row interface{ Scan(...any) error }) (ContextPacket, error) {
+	var packet ContextPacket
+	var taskID sql.NullInt64
+	var runID sql.NullInt64
+	var supersedesPacketID sql.NullInt64
+	var createdAt string
+	if err := row.Scan(
+		&packet.ID,
+		&taskID,
+		&runID,
+		&packet.PacketKind,
+		&packet.PacketScope,
+		&packet.Trigger,
+		&packet.CheckpointKey,
+		&supersedesPacketID,
+		&packet.Status,
+		&packet.Summary,
+		&packet.PayloadJSON,
+		&createdAt,
+	); err != nil {
+		return ContextPacket{}, err
+	}
+
+	var err error
+	packet.TaskID = nullableInt64Ptr(taskID)
+	packet.RunID = nullableInt64Ptr(runID)
+	packet.SupersedesPacketID = nullableInt64Ptr(supersedesPacketID)
+	packet.CreatedAt, err = parseTime(createdAt)
+	if err != nil {
+		return ContextPacket{}, err
+	}
+	return packet, nil
 }
 
 func scanEvent(rows *sql.Rows) (runtimeevents.Record, error) {

@@ -177,21 +177,39 @@ type RecordExecutorHealthParams struct {
 }
 
 type ContextPacket struct {
-	ID          int64
-	TaskID      *int64
-	RunID       *int64
-	PacketKind  string
-	Summary     string
-	PayloadJSON string
-	CreatedAt   time.Time
+	ID                 int64
+	TaskID             *int64
+	RunID              *int64
+	PacketKind         string
+	PacketScope        string
+	Trigger            string
+	CheckpointKey      string
+	SupersedesPacketID *int64
+	Status             string
+	Summary            string
+	PayloadJSON        string
+	CreatedAt          time.Time
 }
 
 type CreateContextPacketParams struct {
+	TaskID             *int64
+	RunID              *int64
+	PacketKind         string
+	PacketScope        string
+	Trigger            string
+	CheckpointKey      string
+	SupersedesPacketID *int64
+	Status             string
+	Summary            string
+	PayloadJSON        string
+}
+
+type ListContextPacketsParams struct {
 	TaskID      *int64
 	RunID       *int64
 	PacketKind  string
-	Summary     string
-	PayloadJSON string
+	PacketScope string
+	Status      string
 }
 
 type ListEventsParams struct {

@@ -127,8 +127,11 @@ type ExecutorHealthRecordedPayload struct {
 }
 
 type ContextPacketCreatedPayload struct {
-	PacketKind string `json:"packet_kind"`
-	Summary    string `json:"summary"`
+	PacketKind  string `json:"packet_kind"`
+	PacketScope string `json:"packet_scope"`
+	Trigger     string `json:"trigger"`
+	Status      string `json:"status"`
+	Summary     string `json:"summary"`
 }
 
 func EncodePayload(payload any) (json.RawMessage, error) {

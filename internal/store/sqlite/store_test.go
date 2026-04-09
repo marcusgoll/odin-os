@@ -177,6 +177,17 @@ func TestStoreMigrateLifecycleAndReopen(t *testing.T) {
 		t.Fatalf("first event type = %q, want %q", allEvents[0].Type, runtimeevents.EventProjectCreated)
 	}
 
+	packetEventPayload, err := runtimeevents.DecodePayload[runtimeevents.ContextPacketCreatedPayload](allEvents[len(allEvents)-1].Payload)
+	if err != nil {
+		t.Fatalf("DecodePayload(ContextPacketCreatedPayload) error = %v", err)
+	}
+	if packetEventPayload.PacketScope != "task_wake_packet" {
+		t.Fatalf("context packet event scope = %q, want %q", packetEventPayload.PacketScope, "task_wake_packet")
+	}
+	if packetEventPayload.Trigger != "handoff" {
+		t.Fatalf("context packet event trigger = %q, want %q", packetEventPayload.Trigger, "handoff")
+	}
+
 	views, err := projections.ListTaskStatusViews(ctx, store.DB())
 	if err != nil {
 		t.Fatalf("ListTaskStatusViews() error = %v", err)
@@ -213,8 +224,8 @@ func TestStoreMigrateLifecycleAndReopen(t *testing.T) {
 	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM schema_migrations`).Scan(&migrationCount); err != nil {
 		t.Fatalf("schema_migrations count query error = %v", err)
 	}
-	if migrationCount != 1 {
-		t.Fatalf("schema_migrations count = %d, want 1", migrationCount)
+	if migrationCount != 2 {
+		t.Fatalf("schema_migrations count = %d, want 2", migrationCount)
 	}
 
 	if err := store.Close(); err != nil {

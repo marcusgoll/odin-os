@@ -1,8 +1,8 @@
 ---
 title: Runtime Event Contract
 status: active
-date: 2026-04-08
-phase: "03"
+date: 2026-04-09
+phase: "08"
 ---
 
 # Runtime Event Contract
@@ -26,7 +26,7 @@ Every stored event must include:
 
 ## Stream types
 
-Phase 03 stream types are:
+Phase 03 through Phase 08 stream types are:
 
 - `project`
 - `task`
@@ -40,7 +40,7 @@ Phase 03 stream types are:
 
 ## Event types
 
-Phase 03 event types are:
+Phase 03 through Phase 08 event types are:
 
 - `project.created`
 - `task.created`
@@ -63,6 +63,16 @@ Phase 03 event types are:
 - Events are append-only. Corrections happen through later events, not in-place event mutation.
 - Operator projections are derived and read-only.
 - Event history must be sufficient to replay basic lifecycle state for tasks, runs, and approvals.
+
+## Context packet payload
+
+`context_packet.created` now records the packet envelope needed for durable wake-packet handoffs:
+
+- `packet_kind`
+- `packet_scope`
+- `trigger`
+- `status`
+- `summary`
 
 ## Replay expectation
 
