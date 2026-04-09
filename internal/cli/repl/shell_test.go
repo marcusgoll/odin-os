@@ -3,6 +3,7 @@ package repl
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -143,6 +144,73 @@ func TestActModeRejectedInGlobalScope(t *testing.T) {
 	}
 	if !strings.Contains(output.String(), "global scope") {
 		t.Fatalf("output = %q, want global-scope rejection", output.String())
+	}
+}
+
+func TestDoctorCommandRendersStructuredTextOutput(t *testing.T) {
+	t.Parallel()
+
+	env := newTestEnvironment(t)
+	shell, err := New(env)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	var output bytes.Buffer
+	if err := shell.HandleLine(context.Background(), "/doctor", &output); err != nil {
+		t.Fatalf("HandleLine(/doctor) error = %v", err)
+	}
+
+	for _, want := range []string{"status=", "database=", "registry=", "executor=", "queue=", "projections=", "sources="} {
+		if !strings.Contains(output.String(), want) {
+			t.Fatalf("output = %q, want substring %q", output.String(), want)
+		}
+	}
+}
+
+func TestDoctorCommandSupportsJSONOutput(t *testing.T) {
+	t.Parallel()
+
+	env := newTestEnvironment(t)
+	if _, err := env.Store.RecordExecutorHealth(context.Background(), sqlite.RecordExecutorHealthParams{
+		Executor:    "codex",
+		Status:      "healthy",
+		LatencyMS:   42,
+		DetailsJSON: `{"mode":"local"}`,
+	}); err != nil {
+		t.Fatalf("RecordExecutorHealth() error = %v", err)
+	}
+	if _, err := env.Store.RecordRegistryVersion(context.Background(), sqlite.RecordRegistryVersionParams{
+		Source:      "registry",
+		VersionHash: "abc123",
+		Notes:       "fresh compile",
+	}); err != nil {
+		t.Fatalf("RecordRegistryVersion() error = %v", err)
+	}
+	if _, err := env.Store.RecordProjectionFreshness(context.Background(), sqlite.RecordProjectionFreshnessParams{
+		Surface:     "doctor",
+		Status:      "healthy",
+		DetailsJSON: `{"source":"runtime"}`,
+	}); err != nil {
+		t.Fatalf("RecordProjectionFreshness() error = %v", err)
+	}
+
+	shell, err := New(env)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	var output bytes.Buffer
+	if err := shell.HandleLine(context.Background(), "/doctor json", &output); err != nil {
+		t.Fatalf("HandleLine(/doctor json) error = %v", err)
+	}
+
+	var decoded map[string]any
+	if err := json.Unmarshal(output.Bytes(), &decoded); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	if decoded["status"] == nil {
+		t.Fatalf("decoded status missing: %#v", decoded)
 	}
 }
 

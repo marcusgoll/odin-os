@@ -245,6 +245,20 @@ type ReleaseWorktreeLeaseParams struct {
 	State   string
 }
 
+type ProjectionFreshness struct {
+	Surface     string
+	Status      string
+	RefreshedAt time.Time
+	DetailsJSON string
+	UpdatedAt   time.Time
+}
+
+type RecordProjectionFreshnessParams struct {
+	Surface     string
+	Status      string
+	DetailsJSON string
+}
+
 type ListEventsParams struct {
 	ProjectID *int64
 	TaskID    *int64

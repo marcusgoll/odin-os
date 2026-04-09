@@ -1,2 +1,19 @@
-# Phase 01 placeholder.
-# Telemetry sink and retention settings are introduced in later phases.
+logging:
+  format: json
+  level: info
+  write_runs_logs: true
+
+health:
+  queue_pressure_threshold: 5
+  executor_stale_after: 15m
+  projection_stale_after: 15m
+  source_fresh_after: 1h
+
+metrics:
+  exporter: prometheus_text
+  enabled: true
+  namespace: odin
+
+doctor:
+  default_output: text
+  json_enabled: true

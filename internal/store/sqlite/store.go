@@ -1159,6 +1159,79 @@ func (store *Store) MarkWorktreeLeaseCleanedUp(ctx context.Context, leaseID int6
 	return store.GetWorktreeLease(ctx, leaseID)
 }
 
+func (store *Store) RecordProjectionFreshness(ctx context.Context, params RecordProjectionFreshnessParams) (ProjectionFreshness, error) {
+	now := store.now()
+	if _, err := store.db.ExecContext(ctx, `
+		INSERT INTO projection_freshness (surface, status, refreshed_at, details_json, updated_at)
+		VALUES (?, ?, ?, ?, ?)
+		ON CONFLICT(surface) DO UPDATE SET
+			status = excluded.status,
+			refreshed_at = excluded.refreshed_at,
+			details_json = excluded.details_json,
+			updated_at = excluded.updated_at
+	`, params.Surface, params.Status, formatTime(now), params.DetailsJSON, formatTime(now)); err != nil {
+		return ProjectionFreshness{}, err
+	}
+
+	return store.GetProjectionFreshness(ctx, params.Surface)
+}
+
+func (store *Store) GetProjectionFreshness(ctx context.Context, surface string) (ProjectionFreshness, error) {
+	row := store.db.QueryRowContext(ctx, `
+		SELECT surface, status, refreshed_at, details_json, updated_at
+		FROM projection_freshness
+		WHERE surface = ?
+	`, surface)
+	return scanProjectionFreshness(row)
+}
+
+func (store *Store) ListProjectionFreshness(ctx context.Context) ([]ProjectionFreshness, error) {
+	rows, err := store.db.QueryContext(ctx, `
+		SELECT surface, status, refreshed_at, details_json, updated_at
+		FROM projection_freshness
+		ORDER BY surface ASC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var records []ProjectionFreshness
+	for rows.Next() {
+		record, err := scanProjectionFreshness(rows)
+		if err != nil {
+			return nil, err
+		}
+		records = append(records, record)
+	}
+
+	return records, rows.Err()
+}
+
+func (store *Store) ListStaleProjectionFreshness(ctx context.Context, staleBefore time.Time) ([]ProjectionFreshness, error) {
+	rows, err := store.db.QueryContext(ctx, `
+		SELECT surface, status, refreshed_at, details_json, updated_at
+		FROM projection_freshness
+		WHERE refreshed_at < ?
+		ORDER BY refreshed_at ASC, surface ASC
+	`, formatTime(staleBefore))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var records []ProjectionFreshness
+	for rows.Next() {
+		record, err := scanProjectionFreshness(rows)
+		if err != nil {
+			return nil, err
+		}
+		records = append(records, record)
+	}
+
+	return records, rows.Err()
+}
+
 func (store *Store) ListEvents(ctx context.Context, params ListEventsParams) ([]runtimeevents.Record, error) {
 	query := `
 		SELECT id, stream_type, stream_id, event_type, event_version, scope, project_id, task_id, run_id, payload_json, occurred_at
@@ -1787,6 +1860,32 @@ func scanWorktreeLease(row interface{ Scan(...any) error }) (WorktreeLease, erro
 		return WorktreeLease{}, err
 	}
 	return lease, nil
+}
+
+func scanProjectionFreshness(row interface{ Scan(...any) error }) (ProjectionFreshness, error) {
+	var record ProjectionFreshness
+	var refreshedAt string
+	var updatedAt string
+	if err := row.Scan(
+		&record.Surface,
+		&record.Status,
+		&refreshedAt,
+		&record.DetailsJSON,
+		&updatedAt,
+	); err != nil {
+		return ProjectionFreshness{}, err
+	}
+
+	var err error
+	record.RefreshedAt, err = parseTime(refreshedAt)
+	if err != nil {
+		return ProjectionFreshness{}, err
+	}
+	record.UpdatedAt, err = parseTime(updatedAt)
+	if err != nil {
+		return ProjectionFreshness{}, err
+	}
+	return record, nil
 }
 
 func scanEvent(rows *sql.Rows) (runtimeevents.Record, error) {

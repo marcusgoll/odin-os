@@ -3,6 +3,7 @@ package projections
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 
 	runtimeevents "odin-os/internal/runtime/events"
@@ -51,6 +52,63 @@ type ProjectTransitionView struct {
 	TaskCount     int
 	OpenTaskCount int
 	LastEventAt   *string
+}
+
+type ActiveRunView struct {
+	RunID      int64
+	TaskID     int64
+	TaskKey    string
+	ProjectKey string
+	Executor   string
+	Status     string
+	Attempt    int
+	StartedAt  string
+}
+
+type BlockedItemView struct {
+	TaskID     int64
+	TaskKey    string
+	ProjectKey string
+	Source     string
+	Reason     string
+}
+
+type IncidentView struct {
+	IncidentID int64
+	RunID      int64
+	TaskID     int64
+	TaskKey    string
+	ProjectKey string
+	Severity   string
+	Status     string
+	Summary    string
+	OpenedAt   string
+}
+
+type RecoveryView struct {
+	RecoveryID int64
+	RunID      int64
+	Status     string
+	Strategy   string
+	StartedAt  string
+}
+
+type FreshnessView struct {
+	Surface     string
+	Status      string
+	RefreshedAt string
+	DetailsJSON string
+}
+
+type ProjectPortfolioView struct {
+	ProjectID            int64
+	ProjectKey           string
+	Name                 string
+	Scope                string
+	OpenTaskCount        int
+	ActiveRunCount       int
+	PendingApprovalCount int
+	OpenIncidentCount    int
 }
 
 func ListTaskStatusViews(ctx context.Context, queryer Queryer) ([]TaskStatusView, error) {
@@ -225,6 +283,334 @@ func ListProjectTransitionViews(ctx context.Context, queryer Queryer) ([]Project
 	return views, rows.Err()
 }
 
+func ListActiveRunViews(ctx context.Context, queryer Queryer) ([]ActiveRunView, error) {
+	rows, err := queryer.QueryContext(ctx, `
+		SELECT
+			r.id,
+			r.task_id,
+			t.key,
+			p.key,
+			r.executor,
+			r.status,
+			r.attempt,
+			r.started_at
+		FROM runs r
+		JOIN tasks t ON t.id = r.task_id
+		JOIN projects p ON p.id = t.project_id
+		WHERE r.status NOT IN ('completed', 'cancelled', 'failed')
+		ORDER BY r.id ASC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var views []ActiveRunView
+	for rows.Next() {
+		var view ActiveRunView
+		if err := rows.Scan(
+			&view.RunID,
+			&view.TaskID,
+			&view.TaskKey,
+			&view.ProjectKey,
+			&view.Executor,
+			&view.Status,
+			&view.Attempt,
+			&view.StartedAt,
+		); err != nil {
+			return nil, err
+		}
+		views = append(views, view)
+	}
+	return views, rows.Err()
+}
+
+func ListBlockedItemViews(ctx context.Context, queryer Queryer) ([]BlockedItemView, error) {
+	var views []BlockedItemView
+
+	approvalRows, err := queryer.QueryContext(ctx, `
+		SELECT t.id, t.key, p.key, a.status
+		FROM approvals a
+		JOIN tasks t ON t.id = a.task_id
+		JOIN projects p ON p.id = t.project_id
+		WHERE a.status = 'pending'
+		ORDER BY a.id ASC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer approvalRows.Close()
+
+	for approvalRows.Next() {
+		var view BlockedItemView
+		var approvalStatus string
+		if err := approvalRows.Scan(&view.TaskID, &view.TaskKey, &view.ProjectKey, &approvalStatus); err != nil {
+			return nil, err
+		}
+		view.Source = "approval"
+		view.Reason = approvalStatus
+		views = append(views, view)
+	}
+	if err := approvalRows.Err(); err != nil {
+		return nil, err
+	}
+
+	incidentRows, err := queryer.QueryContext(ctx, `
+		SELECT t.id, t.key, p.key, i.summary
+		FROM incidents i
+		JOIN runs r ON r.id = i.run_id
+		JOIN tasks t ON t.id = r.task_id
+		JOIN projects p ON p.id = t.project_id
+		WHERE i.status = 'open'
+		ORDER BY i.id ASC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer incidentRows.Close()
+
+	for incidentRows.Next() {
+		var view BlockedItemView
+		if err := incidentRows.Scan(&view.TaskID, &view.TaskKey, &view.ProjectKey, &view.Reason); err != nil {
+			return nil, err
+		}
+		view.Source = "incident"
+		views = append(views, view)
+	}
+	if err := incidentRows.Err(); err != nil {
+		return nil, err
+	}
+
+	wakeRows, err := queryer.QueryContext(ctx, `
+		SELECT cp.task_id, t.key, p.key, cp.payload_json
+		FROM context_packets cp
+		JOIN tasks t ON t.id = cp.task_id
+		JOIN projects p ON p.id = t.project_id
+		WHERE cp.packet_scope = 'task_wake_packet'
+		  AND cp.status = 'active'
+		ORDER BY cp.id DESC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer wakeRows.Close()
+
+	seenWakeTasks := make(map[int64]bool)
+	for wakeRows.Next() {
+		var taskID int64
+		var taskKey string
+		var projectKey string
+		var payloadJSON string
+		if err := wakeRows.Scan(&taskID, &taskKey, &projectKey, &payloadJSON); err != nil {
+			return nil, err
+		}
+		if seenWakeTasks[taskID] {
+			continue
+		}
+		seenWakeTasks[taskID] = true
+
+		var payload struct {
+			BlockingReason string `json:"blocking_reason"`
+		}
+		if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
+			return nil, err
+		}
+		if payload.BlockingReason == "" {
+			continue
+		}
+		views = append(views, BlockedItemView{
+			TaskID:     taskID,
+			TaskKey:    taskKey,
+			ProjectKey: projectKey,
+			Source:     "wake_packet",
+			Reason:     payload.BlockingReason,
+		})
+	}
+
+	return views, wakeRows.Err()
+}
+
+func ListIncidentViews(ctx context.Context, queryer Queryer) ([]IncidentView, error) {
+	rows, err := queryer.QueryContext(ctx, `
+		SELECT
+			i.id,
+			r.id,
+			t.id,
+			t.key,
+			p.key,
+			i.severity,
+			i.status,
+			i.summary,
+			i.opened_at
+		FROM incidents i
+		JOIN runs r ON r.id = i.run_id
+		JOIN tasks t ON t.id = r.task_id
+		JOIN projects p ON p.id = t.project_id
+		ORDER BY i.id ASC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var views []IncidentView
+	for rows.Next() {
+		var view IncidentView
+		if err := rows.Scan(
+			&view.IncidentID,
+			&view.RunID,
+			&view.TaskID,
+			&view.TaskKey,
+			&view.ProjectKey,
+			&view.Severity,
+			&view.Status,
+			&view.Summary,
+			&view.OpenedAt,
+		); err != nil {
+			return nil, err
+		}
+		views = append(views, view)
+	}
+	return views, rows.Err()
+}
+
+func ListRecoveryViews(ctx context.Context, queryer Queryer) ([]RecoveryView, error) {
+	rows, err := queryer.QueryContext(ctx, `
+		SELECT id, COALESCE(run_id, 0), status, strategy, started_at
+		FROM recoveries
+		ORDER BY id ASC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var views []RecoveryView
+	for rows.Next() {
+		var view RecoveryView
+		if err := rows.Scan(&view.RecoveryID, &view.RunID, &view.Status, &view.Strategy, &view.StartedAt); err != nil {
+			return nil, err
+		}
+		views = append(views, view)
+	}
+	return views, rows.Err()
+}
+
+func ListFreshnessViews(ctx context.Context, queryer Queryer) ([]FreshnessView, error) {
+	var views []FreshnessView
+
+	rows, err := queryer.QueryContext(ctx, `
+		SELECT surface, status, refreshed_at, details_json
+		FROM projection_freshness
+		ORDER BY surface ASC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var view FreshnessView
+		if err := rows.Scan(&view.Surface, &view.Status, &view.RefreshedAt, &view.DetailsJSON); err != nil {
+			return nil, err
+		}
+		views = append(views, view)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	var compiledAt string
+	if err := scanOptionalSingleString(queryer, `
+		SELECT compiled_at
+		FROM registry_versions
+		ORDER BY compiled_at DESC, id DESC
+		LIMIT 1
+	`, &compiledAt); err != nil {
+		return nil, err
+	}
+	if compiledAt != "" {
+		views = append(views, FreshnessView{
+			Surface:     "registry_source",
+			Status:      "recorded",
+			RefreshedAt: compiledAt,
+			DetailsJSON: "{}",
+		})
+	}
+
+	var executorCheckedAt string
+	if err := scanOptionalSingleString(queryer, `
+		SELECT checked_at
+		FROM executor_health
+		ORDER BY checked_at DESC, id DESC
+		LIMIT 1
+	`, &executorCheckedAt); err != nil {
+		return nil, err
+	}
+	if executorCheckedAt != "" {
+		views = append(views, FreshnessView{
+			Surface:     "executor_health",
+			Status:      "recorded",
+			RefreshedAt: executorCheckedAt,
+			DetailsJSON: "{}",
+		})
+	}
+
+	return views, nil
+}
+
+func ListProjectPortfolioViews(ctx context.Context, queryer Queryer) ([]ProjectPortfolioView, error) {
+	rows, err := queryer.QueryContext(ctx, `
+		SELECT
+			p.id,
+			p.key,
+			p.name,
+			p.scope,
+			(SELECT COUNT(*) FROM tasks t WHERE t.project_id = p.id AND t.status NOT IN ('completed', 'cancelled')) AS open_task_count,
+			(SELECT COUNT(*)
+			 FROM runs r
+			 JOIN tasks t ON t.id = r.task_id
+			 WHERE t.project_id = p.id
+			   AND r.status NOT IN ('completed', 'cancelled', 'failed')) AS active_run_count,
+			(SELECT COUNT(*)
+			 FROM approvals a
+			 JOIN tasks t ON t.id = a.task_id
+			 WHERE t.project_id = p.id
+			   AND a.status = 'pending') AS pending_approval_count,
+			(SELECT COUNT(*)
+			 FROM incidents i
+			 JOIN runs r ON r.id = i.run_id
+			 JOIN tasks t ON t.id = r.task_id
+			 WHERE t.project_id = p.id
+			   AND i.status = 'open') AS open_incident_count
+		FROM projects p
+		ORDER BY p.id ASC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var views []ProjectPortfolioView
+	for rows.Next() {
+		var view ProjectPortfolioView
+		if err := rows.Scan(
+			&view.ProjectID,
+			&view.ProjectKey,
+			&view.Name,
+			&view.Scope,
+			&view.OpenTaskCount,
+			&view.ActiveRunCount,
+			&view.PendingApprovalCount,
+			&view.OpenIncidentCount,
+		); err != nil {
+			return nil, err
+		}
+		views = append(views, view)
+	}
+	return views, rows.Err()
+}
+
 type LifecycleReplay struct {
 	Tasks     map[int64]TaskReplay
 	Runs      map[int64]RunReplay
@@ -346,6 +732,20 @@ func ReplayLifecycle(records []runtimeevents.Record) (LifecycleReplay, error) {
 	}
 
 	return replay, nil
+}
+
+func scanOptionalSingleString(queryer Queryer, query string, value *string) error {
+	rows, err := queryer.QueryContext(context.Background(), query)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	if rows.Next() {
+		if err := rows.Scan(value); err != nil {
+			return err
+		}
+	}
+	return rows.Err()
 }
 
 func nullableInt64Ptr(value sql.NullInt64) *int64 {

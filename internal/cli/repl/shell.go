@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"io"
 	"strings"
@@ -162,7 +163,7 @@ func (shell *Shell) handleCommand(ctx context.Context, command commands.Command,
 	case "logs":
 		return shell.handleLogs(ctx, output)
 	case "doctor":
-		return shell.handleDoctor(ctx, output)
+		return shell.handleDoctor(ctx, command.Args, output)
 	case "self":
 		return shell.handleSelf(output)
 	case "exit", "quit":
@@ -382,19 +383,36 @@ func (shell *Shell) handleLogs(ctx context.Context, output io.Writer) error {
 	return nil
 }
 
-func (shell *Shell) handleDoctor(ctx context.Context, output io.Writer) error {
-	summary, err := shell.health.Summary(ctx, len(shell.env.RegistryDiagnostics) == 0)
+func (shell *Shell) handleDoctor(ctx context.Context, args []string, output io.Writer) error {
+	report, err := shell.health.Doctor(ctx, len(shell.env.RegistryDiagnostics) == 0)
 	if err != nil {
 		return err
 	}
 
+	if len(args) > 0 && strings.EqualFold(args[0], "json") {
+		encoder := json.NewEncoder(output)
+		return encoder.Encode(report)
+	}
+
+	checks := make(map[string]string, len(report.Checks))
+	for _, check := range report.Checks {
+		key := check.Name
+		if key == "source_freshness" {
+			key = "sources"
+		}
+		checks[key] = string(check.Status)
+	}
+
 	_, err = fmt.Fprintf(
 		output,
-		"health=%s database=%t registry=%t executor=%s\n",
-		summary.Status,
-		summary.DatabaseHealthy,
-		summary.RegistryHealthy,
-		summary.ExecutorStatus,
+		"status=%s database=%s registry=%s executor=%s queue=%s projections=%s sources=%s\n",
+		report.Status,
+		checks["database"],
+		checks["registry"],
+		checks["executor"],
+		checks["queue"],
+		checks["projections"],
+		checks["sources"],
 	)
 	return err
 }
