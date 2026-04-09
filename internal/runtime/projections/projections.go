@@ -115,6 +115,29 @@ type ProjectPortfolioView struct {
 	OpenIncidentCount    int
 }
 
+type LearningProposalView struct {
+	ProposalID      int64
+	ProposalType    string
+	Scope           string
+	TargetKey       string
+	Summary         string
+	Status          string
+	LatestScore     *float64
+	LatestOutcome   string
+	LastEvaluatedAt *string
+}
+
+type ActiveLearningPromotionView struct {
+	PromotionID  int64
+	ProposalID   int64
+	ProposalType string
+	Scope        string
+	TargetKey    string
+	Status       string
+	PromotedBy   string
+	PromotedAt   string
+}
+
 func ListTaskStatusViews(ctx context.Context, queryer Queryer) ([]TaskStatusView, error) {
 	rows, err := queryer.QueryContext(ctx, `
 		SELECT
@@ -637,6 +660,97 @@ func ListProjectPortfolioViews(ctx context.Context, queryer Queryer) ([]ProjectP
 		}
 		views = append(views, view)
 	}
+	return views, rows.Err()
+}
+
+func ListLearningProposalViews(ctx context.Context, queryer Queryer) ([]LearningProposalView, error) {
+	rows, err := queryer.QueryContext(ctx, `
+		SELECT
+			lp.id,
+			lp.proposal_type,
+			lp.scope,
+			lp.target_key,
+			lp.summary,
+			lp.status,
+			le.score,
+			COALESCE(le.outcome, ''),
+			le.recorded_at
+		FROM learning_proposals lp
+		LEFT JOIN learning_evaluations le ON le.id = (
+			SELECT le2.id
+			FROM learning_evaluations le2
+			WHERE le2.proposal_id = lp.id
+			ORDER BY le2.id DESC
+			LIMIT 1
+		)
+		ORDER BY lp.id ASC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var views []LearningProposalView
+	for rows.Next() {
+		var view LearningProposalView
+		var latestScore sql.NullFloat64
+		var lastEvaluatedAt sql.NullString
+		if err := rows.Scan(
+			&view.ProposalID,
+			&view.ProposalType,
+			&view.Scope,
+			&view.TargetKey,
+			&view.Summary,
+			&view.Status,
+			&latestScore,
+			&view.LatestOutcome,
+			&lastEvaluatedAt,
+		); err != nil {
+			return nil, err
+		}
+		if latestScore.Valid {
+			score := latestScore.Float64
+			view.LatestScore = &score
+		}
+		if lastEvaluatedAt.Valid {
+			view.LastEvaluatedAt = &lastEvaluatedAt.String
+		}
+		views = append(views, view)
+	}
+
+	return views, rows.Err()
+}
+
+func ListActiveLearningPromotionViews(ctx context.Context, queryer Queryer) ([]ActiveLearningPromotionView, error) {
+	rows, err := queryer.QueryContext(ctx, `
+		SELECT id, proposal_id, proposal_type, scope, target_key, status, promoted_by, promoted_at
+		FROM learning_promotions
+		WHERE status = 'active'
+		ORDER BY id ASC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var views []ActiveLearningPromotionView
+	for rows.Next() {
+		var view ActiveLearningPromotionView
+		if err := rows.Scan(
+			&view.PromotionID,
+			&view.ProposalID,
+			&view.ProposalType,
+			&view.Scope,
+			&view.TargetKey,
+			&view.Status,
+			&view.PromotedBy,
+			&view.PromotedAt,
+		); err != nil {
+			return nil, err
+		}
+		views = append(views, view)
+	}
+
 	return views, rows.Err()
 }
 

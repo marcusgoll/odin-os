@@ -224,8 +224,8 @@ func TestStoreMigrateLifecycleAndReopen(t *testing.T) {
 	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM schema_migrations`).Scan(&migrationCount); err != nil {
 		t.Fatalf("schema_migrations count query error = %v", err)
 	}
-	if migrationCount != 5 {
-		t.Fatalf("schema_migrations count = %d, want 5", migrationCount)
+	if migrationCount != 6 {
+		t.Fatalf("schema_migrations count = %d, want 6", migrationCount)
 	}
 
 	if err := store.Close(); err != nil {
@@ -459,5 +459,209 @@ func TestProjectTransitionReportsAreAppendOnly(t *testing.T) {
 	}
 	if compareEvents != 1 {
 		t.Fatalf("compare event count = %d, want 1", compareEvents)
+	}
+}
+
+func TestLearningProposalLifecycleSupportsEvaluationPromotionAndRollback(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "odin.db")
+
+	store, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer store.Close()
+
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
+	}
+
+	firstProposal, err := store.CreateLearningProposal(ctx, CreateLearningProposalParams{
+		ProposalType:      "routing_rule_refinement",
+		Scope:             "global",
+		TargetKey:         "router/default",
+		Summary:           "Prefer low-latency primary route",
+		Hypothesis:        "Lower latency without more policy violations",
+		ChangePayloadJSON: `{"executor":"codex","priority":10}`,
+		CreatedBy:         "odin",
+		Status:            "draft",
+	})
+	if err != nil {
+		t.Fatalf("CreateLearningProposal(first) error = %v", err)
+	}
+
+	firstProposal, err = store.UpdateLearningProposalStatus(ctx, UpdateLearningProposalStatusParams{
+		ProposalID: firstProposal.ID,
+		Status:     "submitted",
+	})
+	if err != nil {
+		t.Fatalf("UpdateLearningProposalStatus(submitted) error = %v", err)
+	}
+
+	firstEvaluation, err := store.RecordLearningEvaluation(ctx, RecordLearningEvaluationParams{
+		ProposalID:           firstProposal.ID,
+		FixtureKey:           "router-latency-fixture",
+		Mode:                 "replay",
+		Score:                0.82,
+		BaselineSummaryJSON:  `{"success_rate":0.93,"latency_ms":220,"policy_violations":0}`,
+		CandidateSummaryJSON: `{"success_rate":0.94,"latency_ms":180,"policy_violations":0}`,
+		ResultSummary:        "candidate improved latency while preserving policy compliance",
+		Outcome:              "approved",
+	})
+	if err != nil {
+		t.Fatalf("RecordLearningEvaluation(first) error = %v", err)
+	}
+
+	if firstEvaluation.Outcome != "approved" {
+		t.Fatalf("first evaluation outcome = %q, want %q", firstEvaluation.Outcome, "approved")
+	}
+
+	firstProposal, err = store.UpdateLearningProposalStatus(ctx, UpdateLearningProposalStatusParams{
+		ProposalID: firstProposal.ID,
+		Status:     "approved",
+	})
+	if err != nil {
+		t.Fatalf("UpdateLearningProposalStatus(approved) error = %v", err)
+	}
+
+	firstPromotion, err := store.PromoteLearningProposal(ctx, PromoteLearningProposalParams{
+		ProposalID: firstProposal.ID,
+		PromotedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("PromoteLearningProposal(first) error = %v", err)
+	}
+
+	if firstPromotion.Status != "active" {
+		t.Fatalf("first promotion status = %q, want %q", firstPromotion.Status, "active")
+	}
+
+	secondProposal, err := store.CreateLearningProposal(ctx, CreateLearningProposalParams{
+		ProposalType:      "routing_rule_refinement",
+		Scope:             "global",
+		TargetKey:         "router/default",
+		Summary:           "Prefer lower-cost route",
+		Hypothesis:        "Lower cost while keeping success rate stable",
+		ChangePayloadJSON: `{"executor":"openai_api","priority":20}`,
+		CreatedBy:         "odin",
+		Status:            "draft",
+	})
+	if err != nil {
+		t.Fatalf("CreateLearningProposal(second) error = %v", err)
+	}
+
+	secondProposal, err = store.UpdateLearningProposalStatus(ctx, UpdateLearningProposalStatusParams{
+		ProposalID: secondProposal.ID,
+		Status:     "submitted",
+	})
+	if err != nil {
+		t.Fatalf("UpdateLearningProposalStatus(second submitted) error = %v", err)
+	}
+
+	if _, err := store.RecordLearningEvaluation(ctx, RecordLearningEvaluationParams{
+		ProposalID:           secondProposal.ID,
+		FixtureKey:           "router-cost-fixture",
+		Mode:                 "sandbox",
+		Score:                0.87,
+		BaselineSummaryJSON:  `{"success_rate":0.94,"cost":0.021,"violations":0}`,
+		CandidateSummaryJSON: `{"success_rate":0.94,"cost":0.015,"violations":0}`,
+		ResultSummary:        "candidate reduced cost without quality regression",
+		Outcome:              "approved",
+	}); err != nil {
+		t.Fatalf("RecordLearningEvaluation(second) error = %v", err)
+	}
+
+	secondProposal, err = store.UpdateLearningProposalStatus(ctx, UpdateLearningProposalStatusParams{
+		ProposalID: secondProposal.ID,
+		Status:     "approved",
+	})
+	if err != nil {
+		t.Fatalf("UpdateLearningProposalStatus(second approved) error = %v", err)
+	}
+
+	secondPromotion, err := store.PromoteLearningProposal(ctx, PromoteLearningProposalParams{
+		ProposalID: secondProposal.ID,
+		PromotedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("PromoteLearningProposal(second) error = %v", err)
+	}
+
+	if secondPromotion.Status != "active" {
+		t.Fatalf("second promotion status = %q, want %q", secondPromotion.Status, "active")
+	}
+	if secondPromotion.SupersedesPromotionID == nil || *secondPromotion.SupersedesPromotionID != firstPromotion.ID {
+		t.Fatalf("second promotion supersedes = %v, want %d", secondPromotion.SupersedesPromotionID, firstPromotion.ID)
+	}
+
+	activePromotions, err := store.ListActiveLearningPromotions(ctx)
+	if err != nil {
+		t.Fatalf("ListActiveLearningPromotions() error = %v", err)
+	}
+	if len(activePromotions) != 1 || activePromotions[0].ID != secondPromotion.ID {
+		t.Fatalf("active promotions = %+v, want second promotion %d", activePromotions, secondPromotion.ID)
+	}
+
+	rolledBack, err := store.RollbackLearningPromotion(ctx, RollbackLearningPromotionParams{
+		PromotionID:    secondPromotion.ID,
+		RolledBackBy:   "operator",
+		RollbackReason: "cost win was too narrow under review",
+	})
+	if err != nil {
+		t.Fatalf("RollbackLearningPromotion() error = %v", err)
+	}
+
+	if rolledBack.Status != "rolled_back" {
+		t.Fatalf("rolled back promotion status = %q, want %q", rolledBack.Status, "rolled_back")
+	}
+
+	activePromotions, err = store.ListActiveLearningPromotions(ctx)
+	if err != nil {
+		t.Fatalf("ListActiveLearningPromotions(after rollback) error = %v", err)
+	}
+	if len(activePromotions) != 1 || activePromotions[0].ID != firstPromotion.ID {
+		t.Fatalf("active promotions after rollback = %+v, want first promotion %d", activePromotions, firstPromotion.ID)
+	}
+
+	firstPromotionAfterRollback, err := store.GetLearningPromotion(ctx, firstPromotion.ID)
+	if err != nil {
+		t.Fatalf("GetLearningPromotion(first) error = %v", err)
+	}
+	if firstPromotionAfterRollback.Status != "active" {
+		t.Fatalf("first promotion after rollback status = %q, want %q", firstPromotionAfterRollback.Status, "active")
+	}
+
+	evaluations, err := store.ListLearningEvaluations(ctx, firstProposal.ID)
+	if err != nil {
+		t.Fatalf("ListLearningEvaluations(first proposal) error = %v", err)
+	}
+	if len(evaluations) != 1 {
+		t.Fatalf("ListLearningEvaluations(first proposal) len = %d, want 1", len(evaluations))
+	}
+
+	allEvents, err := store.ListEvents(ctx, ListEventsParams{})
+	if err != nil {
+		t.Fatalf("ListEvents(all) error = %v", err)
+	}
+
+	counts := make(map[runtimeevents.Type]int)
+	for _, event := range allEvents {
+		counts[event.Type]++
+	}
+
+	if counts[runtimeevents.EventLearningProposalCreated] != 2 {
+		t.Fatalf("learning.proposal_created count = %d, want 2", counts[runtimeevents.EventLearningProposalCreated])
+	}
+	if counts[runtimeevents.EventLearningProposalSubmitted] != 2 {
+		t.Fatalf("learning.proposal_submitted count = %d, want 2", counts[runtimeevents.EventLearningProposalSubmitted])
+	}
+	if counts[runtimeevents.EventLearningEvaluationRecorded] != 2 {
+		t.Fatalf("learning.evaluation_recorded count = %d, want 2", counts[runtimeevents.EventLearningEvaluationRecorded])
+	}
+	if counts[runtimeevents.EventLearningPromotionApplied] != 2 {
+		t.Fatalf("learning.promotion_applied count = %d, want 2", counts[runtimeevents.EventLearningPromotionApplied])
+	}
+	if counts[runtimeevents.EventLearningPromotionRolledBack] != 1 {
+		t.Fatalf("learning.promotion_rolled_back count = %d, want 1", counts[runtimeevents.EventLearningPromotionRolledBack])
 	}
 }

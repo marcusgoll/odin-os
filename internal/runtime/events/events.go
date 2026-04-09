@@ -8,15 +8,18 @@ import (
 type StreamType string
 
 const (
-	StreamProject         StreamType = "project"
-	StreamTask            StreamType = "task"
-	StreamRun             StreamType = "run"
-	StreamApproval        StreamType = "approval"
-	StreamIncident        StreamType = "incident"
-	StreamRecovery        StreamType = "recovery"
-	StreamRegistryVersion StreamType = "registry_version"
-	StreamExecutorHealth  StreamType = "executor_health"
-	StreamContextPacket   StreamType = "context_packet"
+	StreamProject            StreamType = "project"
+	StreamTask               StreamType = "task"
+	StreamRun                StreamType = "run"
+	StreamApproval           StreamType = "approval"
+	StreamIncident           StreamType = "incident"
+	StreamRecovery           StreamType = "recovery"
+	StreamRegistryVersion    StreamType = "registry_version"
+	StreamExecutorHealth     StreamType = "executor_health"
+	StreamContextPacket      StreamType = "context_packet"
+	StreamLearningProposal   StreamType = "learning_proposal"
+	StreamLearningEvaluation StreamType = "learning_evaluation"
+	StreamLearningPromotion  StreamType = "learning_promotion"
 )
 
 type Type string
@@ -42,6 +45,12 @@ const (
 	EventProjectShadowObservationRecorded Type = "project.shadow_observation_recorded"
 	EventProjectCompareReportRecorded     Type = "project.compare_report_recorded"
 	EventProjectTransitionDenied          Type = "project.transition_denied"
+	EventLearningProposalCreated          Type = "learning.proposal_created"
+	EventLearningProposalSubmitted        Type = "learning.proposal_submitted"
+	EventLearningProposalRejected         Type = "learning.proposal_rejected"
+	EventLearningEvaluationRecorded       Type = "learning.evaluation_recorded"
+	EventLearningPromotionApplied         Type = "learning.promotion_applied"
+	EventLearningPromotionRolledBack      Type = "learning.promotion_rolled_back"
 )
 
 type Record struct {
@@ -178,6 +187,42 @@ type ProjectTransitionReportRecordedPayload struct {
 type ProjectTransitionDeniedPayload struct {
 	ActionClass string `json:"action_class"`
 	Reason      string `json:"reason"`
+}
+
+type LearningProposalCreatedPayload struct {
+	ProposalType string `json:"proposal_type"`
+	Scope        string `json:"scope"`
+	TargetKey    string `json:"target_key"`
+	Status       string `json:"status"`
+	Summary      string `json:"summary"`
+}
+
+type LearningProposalStatusPayload struct {
+	Status string `json:"status"`
+}
+
+type LearningEvaluationRecordedPayload struct {
+	ProposalID int64   `json:"proposal_id"`
+	FixtureKey string  `json:"fixture_key"`
+	Mode       string  `json:"mode"`
+	Score      float64 `json:"score"`
+	Outcome    string  `json:"outcome"`
+}
+
+type LearningPromotionAppliedPayload struct {
+	ProposalID            int64  `json:"proposal_id"`
+	ProposalType          string `json:"proposal_type"`
+	Scope                 string `json:"scope"`
+	TargetKey             string `json:"target_key"`
+	Status                string `json:"status"`
+	SupersedesPromotionID *int64 `json:"supersedes_promotion_id,omitempty"`
+}
+
+type LearningPromotionRolledBackPayload struct {
+	ProposalID          int64  `json:"proposal_id"`
+	RolledBackBy        string `json:"rolled_back_by"`
+	RollbackReason      string `json:"rollback_reason"`
+	RestoredPromotionID *int64 `json:"restored_promotion_id,omitempty"`
 }
 
 func EncodePayload(payload any) (json.RawMessage, error) {

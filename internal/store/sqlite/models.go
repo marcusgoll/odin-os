@@ -298,6 +298,88 @@ type RecordProjectTransitionReportParams struct {
 	DetailsJSON string
 }
 
+type LearningProposal struct {
+	ID                int64
+	ProjectID         *int64
+	ProposalType      string
+	Scope             string
+	TargetKey         string
+	Summary           string
+	Hypothesis        string
+	ChangePayloadJSON string
+	Status            string
+	CreatedBy         string
+	CreatedAt         time.Time
+	UpdatedAt         time.Time
+}
+
+type CreateLearningProposalParams struct {
+	ProjectID         *int64
+	ProposalType      string
+	Scope             string
+	TargetKey         string
+	Summary           string
+	Hypothesis        string
+	ChangePayloadJSON string
+	Status            string
+	CreatedBy         string
+}
+
+type UpdateLearningProposalStatusParams struct {
+	ProposalID int64
+	Status     string
+}
+
+type LearningEvaluation struct {
+	ID                   int64
+	ProposalID           int64
+	FixtureKey           string
+	Mode                 string
+	Score                float64
+	BaselineSummaryJSON  string
+	CandidateSummaryJSON string
+	ResultSummary        string
+	Outcome              string
+	RecordedAt           time.Time
+}
+
+type RecordLearningEvaluationParams struct {
+	ProposalID           int64
+	FixtureKey           string
+	Mode                 string
+	Score                float64
+	BaselineSummaryJSON  string
+	CandidateSummaryJSON string
+	ResultSummary        string
+	Outcome              string
+}
+
+type LearningPromotion struct {
+	ID                    int64
+	ProposalID            int64
+	ProposalType          string
+	Scope                 string
+	TargetKey             string
+	Status                string
+	SupersedesPromotionID *int64
+	PromotedBy            string
+	PromotedAt            time.Time
+	RolledBackBy          string
+	RolledBackAt          *time.Time
+	RollbackReason        string
+}
+
+type PromoteLearningProposalParams struct {
+	ProposalID int64
+	PromotedBy string
+}
+
+type RollbackLearningPromotionParams struct {
+	PromotionID    int64
+	RolledBackBy   string
+	RollbackReason string
+}
+
 type ProjectionFreshness struct {
 	Surface     string
 	Status      string

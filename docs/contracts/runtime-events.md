@@ -2,7 +2,7 @@
 title: Runtime Event Contract
 status: active
 date: 2026-04-09
-phase: "13"
+phase: "14"
 ---
 
 # Runtime Event Contract
@@ -26,7 +26,7 @@ Every stored event must include:
 
 ## Stream types
 
-Phase 03 through Phase 08 stream types are:
+Phase 03 through Phase 14 stream types are:
 
 - `project`
 - `task`
@@ -37,10 +37,13 @@ Phase 03 through Phase 08 stream types are:
 - `registry_version`
 - `executor_health`
 - `context_packet`
+- `learning_proposal`
+- `learning_evaluation`
+- `learning_promotion`
 
 ## Event types
 
-Phase 03 through Phase 13 event types are:
+Phase 03 through Phase 14 event types are:
 
 - `project.created`
 - `task.created`
@@ -62,6 +65,12 @@ Phase 03 through Phase 13 event types are:
 - `project.shadow_observation_recorded`
 - `project.compare_report_recorded`
 - `project.transition_denied`
+- `learning.proposal_created`
+- `learning.proposal_submitted`
+- `learning.proposal_rejected`
+- `learning.evaluation_recorded`
+- `learning.promotion_applied`
+- `learning.promotion_rolled_back`
 
 ## Contract rules
 
@@ -98,6 +107,15 @@ Phase 13 extends the runtime event stream so project onboarding and cutover rema
 - every transition state change must append `project.transition_changed`
 - shadow and compare records must append explicit project report events
 - denied transition-gated mutations must append `project.transition_denied`
+
+## Self-improvement expectation
+
+Phase 14 extends the runtime event stream so bounded self-improvement remains auditable:
+
+- every proposal creation and submission must append explicit learning proposal events
+- every deterministic evaluation must append `learning.evaluation_recorded`
+- every runtime activation must append `learning.promotion_applied`
+- every rollback must append `learning.promotion_rolled_back`
 
 ## Self-heal expectation
 

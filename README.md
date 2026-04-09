@@ -1,6 +1,6 @@
 ---
 title: Odin OS
-phase: "13"
+phase: "14"
 status: active
 updated: 2026-04-09
 ---
@@ -30,4 +30,4 @@ This repository is the runtime root. `odin-orchestrator` is a migration source o
 
 ## Current Status
 
-Phase 00 through Phase 13 are in place. The repository now includes the authority docs, the target directory scaffold, the Markdown registry system, the baseline SQLite runtime store, project governance, the interactive Odin shell, the model-agnostic executor architecture, the dynamic tool broker, structured context compaction with append-only wake packets, a task-owned Git worktree plus lease model for isolated multi-agent mutation, first-class observability surfaces for logs, health, metrics, incidents, recoveries, and operator projections, deterministic self-heal playbooks with bounded retries and escalation, a migration extractor that inventories `odin-orchestrator`, flags likely duplicates and backups, and can emit review-only draft registry assets under `state/migration/`, and an explicit project transition ladder with read-only shadow and compare modes, limited-action gating, and auditable cutover state. Broader orchestration and live provider execution remain for later phases.
+Phase 00 through Phase 14 are in place. The repository now includes the authority docs, the target directory scaffold, the Markdown registry system, the baseline SQLite runtime store, project governance, the interactive Odin shell, the model-agnostic executor architecture, the dynamic tool broker, structured context compaction with append-only wake packets, a task-owned Git worktree plus lease model for isolated multi-agent mutation, first-class observability surfaces for logs, health, metrics, incidents, recoveries, and operator projections, deterministic self-heal playbooks with bounded retries and escalation, a migration extractor that inventories `odin-orchestrator`, flags likely duplicates and backups, and can emit review-only draft registry assets under `state/migration/`, an explicit project transition ladder with read-only shadow and compare modes, limited-action gating, and auditable cutover state, and a proposal-driven self-improvement pipeline with deterministic evaluation, runtime-only promotion, and explicit rollback. Broader orchestration and live provider execution remain for later phases.

@@ -1078,6 +1078,455 @@ func (store *Store) ListProjectTransitionReports(ctx context.Context, projectID 
 	return reports, rows.Err()
 }
 
+func (store *Store) CreateLearningProposal(ctx context.Context, params CreateLearningProposalParams) (LearningProposal, error) {
+	now := store.now()
+	var proposal LearningProposal
+
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		result, err := tx.ExecContext(ctx, `
+			INSERT INTO learning_proposals (
+				project_id,
+				proposal_type,
+				scope,
+				target_key,
+				summary,
+				hypothesis,
+				change_payload_json,
+				status,
+				created_by,
+				created_at,
+				updated_at
+			)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`,
+			nullInt64(params.ProjectID),
+			params.ProposalType,
+			params.Scope,
+			params.TargetKey,
+			params.Summary,
+			params.Hypothesis,
+			params.ChangePayloadJSON,
+			params.Status,
+			params.CreatedBy,
+			formatTime(now),
+			formatTime(now),
+		)
+		if err != nil {
+			return err
+		}
+
+		proposalID, err := result.LastInsertId()
+		if err != nil {
+			return err
+		}
+
+		proposal = LearningProposal{
+			ID:                proposalID,
+			ProjectID:         params.ProjectID,
+			ProposalType:      params.ProposalType,
+			Scope:             params.Scope,
+			TargetKey:         params.TargetKey,
+			Summary:           params.Summary,
+			Hypothesis:        params.Hypothesis,
+			ChangePayloadJSON: params.ChangePayloadJSON,
+			Status:            params.Status,
+			CreatedBy:         params.CreatedBy,
+			CreatedAt:         now,
+			UpdatedAt:         now,
+		}
+
+		return appendEventTx(ctx, tx, eventInsert{
+			StreamType: runtimeevents.StreamLearningProposal,
+			StreamID:   proposal.ID,
+			EventType:  runtimeevents.EventLearningProposalCreated,
+			Scope:      proposal.Scope,
+			ProjectID:  proposal.ProjectID,
+			Payload: runtimeevents.LearningProposalCreatedPayload{
+				ProposalType: proposal.ProposalType,
+				Scope:        proposal.Scope,
+				TargetKey:    proposal.TargetKey,
+				Status:       proposal.Status,
+				Summary:      proposal.Summary,
+			},
+			OccurredAt: now,
+		})
+	})
+
+	return proposal, err
+}
+
+func (store *Store) UpdateLearningProposalStatus(ctx context.Context, params UpdateLearningProposalStatusParams) (LearningProposal, error) {
+	now := store.now()
+	var proposal LearningProposal
+
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		current, err := store.getLearningProposalTx(ctx, tx, params.ProposalID)
+		if err != nil {
+			return err
+		}
+
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE learning_proposals
+			SET status = ?, updated_at = ?
+			WHERE id = ?
+		`, params.Status, formatTime(now), params.ProposalID); err != nil {
+			return err
+		}
+
+		current.Status = params.Status
+		current.UpdatedAt = now
+		proposal = current
+
+		var eventType runtimeevents.Type
+		switch params.Status {
+		case "submitted":
+			eventType = runtimeevents.EventLearningProposalSubmitted
+		case "rejected":
+			eventType = runtimeevents.EventLearningProposalRejected
+		default:
+			return nil
+		}
+
+		return appendEventTx(ctx, tx, eventInsert{
+			StreamType: runtimeevents.StreamLearningProposal,
+			StreamID:   proposal.ID,
+			EventType:  eventType,
+			Scope:      proposal.Scope,
+			ProjectID:  proposal.ProjectID,
+			Payload: runtimeevents.LearningProposalStatusPayload{
+				Status: proposal.Status,
+			},
+			OccurredAt: now,
+		})
+	})
+
+	return proposal, err
+}
+
+func (store *Store) GetLearningProposal(ctx context.Context, proposalID int64) (LearningProposal, error) {
+	row := store.db.QueryRowContext(ctx, `
+		SELECT id, project_id, proposal_type, scope, target_key, summary, hypothesis, change_payload_json, status, created_by, created_at, updated_at
+		FROM learning_proposals
+		WHERE id = ?
+	`, proposalID)
+	return scanLearningProposal(row)
+}
+
+func (store *Store) RecordLearningEvaluation(ctx context.Context, params RecordLearningEvaluationParams) (LearningEvaluation, error) {
+	now := store.now()
+	var evaluation LearningEvaluation
+
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		proposal, err := store.getLearningProposalTx(ctx, tx, params.ProposalID)
+		if err != nil {
+			return err
+		}
+
+		result, err := tx.ExecContext(ctx, `
+			INSERT INTO learning_evaluations (
+				proposal_id,
+				fixture_key,
+				mode,
+				score,
+				baseline_summary_json,
+				candidate_summary_json,
+				result_summary,
+				outcome,
+				recorded_at
+			)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`,
+			params.ProposalID,
+			params.FixtureKey,
+			params.Mode,
+			params.Score,
+			params.BaselineSummaryJSON,
+			params.CandidateSummaryJSON,
+			params.ResultSummary,
+			params.Outcome,
+			formatTime(now),
+		)
+		if err != nil {
+			return err
+		}
+
+		evaluationID, err := result.LastInsertId()
+		if err != nil {
+			return err
+		}
+
+		evaluation = LearningEvaluation{
+			ID:                   evaluationID,
+			ProposalID:           params.ProposalID,
+			FixtureKey:           params.FixtureKey,
+			Mode:                 params.Mode,
+			Score:                params.Score,
+			BaselineSummaryJSON:  params.BaselineSummaryJSON,
+			CandidateSummaryJSON: params.CandidateSummaryJSON,
+			ResultSummary:        params.ResultSummary,
+			Outcome:              params.Outcome,
+			RecordedAt:           now,
+		}
+
+		return appendEventTx(ctx, tx, eventInsert{
+			StreamType: runtimeevents.StreamLearningEvaluation,
+			StreamID:   evaluation.ID,
+			EventType:  runtimeevents.EventLearningEvaluationRecorded,
+			Scope:      proposal.Scope,
+			ProjectID:  proposal.ProjectID,
+			Payload: runtimeevents.LearningEvaluationRecordedPayload{
+				ProposalID: evaluation.ProposalID,
+				FixtureKey: evaluation.FixtureKey,
+				Mode:       evaluation.Mode,
+				Score:      evaluation.Score,
+				Outcome:    evaluation.Outcome,
+			},
+			OccurredAt: now,
+		})
+	})
+
+	return evaluation, err
+}
+
+func (store *Store) ListLearningEvaluations(ctx context.Context, proposalID int64) ([]LearningEvaluation, error) {
+	rows, err := store.db.QueryContext(ctx, `
+		SELECT id, proposal_id, fixture_key, mode, score, baseline_summary_json, candidate_summary_json, result_summary, outcome, recorded_at
+		FROM learning_evaluations
+		WHERE proposal_id = ?
+		ORDER BY id ASC
+	`, proposalID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var evaluations []LearningEvaluation
+	for rows.Next() {
+		evaluation, err := scanLearningEvaluation(rows)
+		if err != nil {
+			return nil, err
+		}
+		evaluations = append(evaluations, evaluation)
+	}
+
+	return evaluations, rows.Err()
+}
+
+func (store *Store) PromoteLearningProposal(ctx context.Context, params PromoteLearningProposalParams) (LearningPromotion, error) {
+	now := store.now()
+	var promotion LearningPromotion
+
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		proposal, err := store.getLearningProposalTx(ctx, tx, params.ProposalID)
+		if err != nil {
+			return err
+		}
+
+		var supersedesPromotionID *int64
+		active, err := store.getActiveLearningPromotionForTargetTx(ctx, tx, proposal.ProposalType, proposal.Scope, proposal.TargetKey)
+		if err != nil && err != sql.ErrNoRows {
+			return err
+		}
+		if err == nil {
+			if _, err := tx.ExecContext(ctx, `
+				UPDATE learning_promotions
+				SET status = ?
+				WHERE id = ?
+			`, "superseded", active.ID); err != nil {
+				return err
+			}
+			supersedesPromotionID = &active.ID
+		}
+
+		result, err := tx.ExecContext(ctx, `
+			INSERT INTO learning_promotions (
+				proposal_id,
+				proposal_type,
+				scope,
+				target_key,
+				status,
+				supersedes_promotion_id,
+				promoted_by,
+				promoted_at,
+				rollback_reason
+			)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, '')
+		`,
+			proposal.ID,
+			proposal.ProposalType,
+			proposal.Scope,
+			proposal.TargetKey,
+			"active",
+			nullInt64(supersedesPromotionID),
+			params.PromotedBy,
+			formatTime(now),
+		)
+		if err != nil {
+			return err
+		}
+
+		promotionID, err := result.LastInsertId()
+		if err != nil {
+			return err
+		}
+
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE learning_proposals
+			SET status = ?, updated_at = ?
+			WHERE id = ?
+		`, "promoted", formatTime(now), proposal.ID); err != nil {
+			return err
+		}
+
+		promotion = LearningPromotion{
+			ID:                    promotionID,
+			ProposalID:            proposal.ID,
+			ProposalType:          proposal.ProposalType,
+			Scope:                 proposal.Scope,
+			TargetKey:             proposal.TargetKey,
+			Status:                "active",
+			SupersedesPromotionID: supersedesPromotionID,
+			PromotedBy:            params.PromotedBy,
+			PromotedAt:            now,
+		}
+
+		return appendEventTx(ctx, tx, eventInsert{
+			StreamType: runtimeevents.StreamLearningPromotion,
+			StreamID:   promotion.ID,
+			EventType:  runtimeevents.EventLearningPromotionApplied,
+			Scope:      proposal.Scope,
+			ProjectID:  proposal.ProjectID,
+			Payload: runtimeevents.LearningPromotionAppliedPayload{
+				ProposalID:            promotion.ProposalID,
+				ProposalType:          promotion.ProposalType,
+				Scope:                 promotion.Scope,
+				TargetKey:             promotion.TargetKey,
+				Status:                promotion.Status,
+				SupersedesPromotionID: promotion.SupersedesPromotionID,
+			},
+			OccurredAt: now,
+		})
+	})
+
+	return promotion, err
+}
+
+func (store *Store) GetLearningPromotion(ctx context.Context, promotionID int64) (LearningPromotion, error) {
+	row := store.db.QueryRowContext(ctx, `
+		SELECT id, proposal_id, proposal_type, scope, target_key, status, supersedes_promotion_id, promoted_by, promoted_at, rolled_back_by, rolled_back_at, rollback_reason
+		FROM learning_promotions
+		WHERE id = ?
+	`, promotionID)
+	return scanLearningPromotion(row)
+}
+
+func (store *Store) ListActiveLearningPromotions(ctx context.Context) ([]LearningPromotion, error) {
+	rows, err := store.db.QueryContext(ctx, `
+		SELECT id, proposal_id, proposal_type, scope, target_key, status, supersedes_promotion_id, promoted_by, promoted_at, rolled_back_by, rolled_back_at, rollback_reason
+		FROM learning_promotions
+		WHERE status = 'active'
+		ORDER BY id ASC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var promotions []LearningPromotion
+	for rows.Next() {
+		promotion, err := scanLearningPromotion(rows)
+		if err != nil {
+			return nil, err
+		}
+		promotions = append(promotions, promotion)
+	}
+
+	return promotions, rows.Err()
+}
+
+func (store *Store) RollbackLearningPromotion(ctx context.Context, params RollbackLearningPromotionParams) (LearningPromotion, error) {
+	now := store.now()
+	var rolledBack LearningPromotion
+
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		current, err := store.getLearningPromotionTx(ctx, tx, params.PromotionID)
+		if err != nil {
+			return err
+		}
+		if current.Status != "active" {
+			return fmt.Errorf("learning promotion %d is not active", current.ID)
+		}
+
+		proposal, err := store.getLearningProposalTx(ctx, tx, current.ProposalID)
+		if err != nil {
+			return err
+		}
+
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE learning_promotions
+			SET status = ?, rolled_back_by = ?, rolled_back_at = ?, rollback_reason = ?
+			WHERE id = ?
+		`, "rolled_back", params.RolledBackBy, formatTime(now), params.RollbackReason, current.ID); err != nil {
+			return err
+		}
+
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE learning_proposals
+			SET status = ?, updated_at = ?
+			WHERE id = ?
+		`, "rolled_back", formatTime(now), current.ProposalID); err != nil {
+			return err
+		}
+
+		var restoredPromotionID *int64
+		if current.SupersedesPromotionID != nil {
+			if _, err := tx.ExecContext(ctx, `
+				UPDATE learning_promotions
+				SET status = ?
+				WHERE id = ?
+			`, "active", *current.SupersedesPromotionID); err != nil {
+				return err
+			}
+			restoredPromotionID = current.SupersedesPromotionID
+
+			restoredPromotion, err := store.getLearningPromotionTx(ctx, tx, *current.SupersedesPromotionID)
+			if err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(ctx, `
+				UPDATE learning_proposals
+				SET status = ?, updated_at = ?
+				WHERE id = ?
+			`, "promoted", formatTime(now), restoredPromotion.ProposalID); err != nil {
+				return err
+			}
+		}
+
+		rolledBack = current
+		rolledBack.Status = "rolled_back"
+		rolledBack.RolledBackBy = params.RolledBackBy
+		rolledBack.RolledBackAt = &now
+		rolledBack.RollbackReason = params.RollbackReason
+
+		return appendEventTx(ctx, tx, eventInsert{
+			StreamType: runtimeevents.StreamLearningPromotion,
+			StreamID:   current.ID,
+			EventType:  runtimeevents.EventLearningPromotionRolledBack,
+			Scope:      proposal.Scope,
+			ProjectID:  proposal.ProjectID,
+			Payload: runtimeevents.LearningPromotionRolledBackPayload{
+				ProposalID:          current.ProposalID,
+				RolledBackBy:        params.RolledBackBy,
+				RollbackReason:      params.RollbackReason,
+				RestoredPromotionID: restoredPromotionID,
+			},
+			OccurredAt: now,
+		})
+	})
+
+	return rolledBack, err
+}
+
 func (store *Store) GetTask(ctx context.Context, taskID int64) (Task, error) {
 	return store.getTaskQuery(ctx, store.db, taskID)
 }
@@ -1584,6 +2033,33 @@ func (store *Store) getProjectTx(ctx context.Context, tx *sql.Tx, projectID int6
 		WHERE id = ?
 	`, projectID)
 	return scanProject(row)
+}
+
+func (store *Store) getLearningProposalTx(ctx context.Context, tx *sql.Tx, proposalID int64) (LearningProposal, error) {
+	row := tx.QueryRowContext(ctx, `
+		SELECT id, project_id, proposal_type, scope, target_key, summary, hypothesis, change_payload_json, status, created_by, created_at, updated_at
+		FROM learning_proposals
+		WHERE id = ?
+	`, proposalID)
+	return scanLearningProposal(row)
+}
+
+func (store *Store) getLearningPromotionTx(ctx context.Context, tx *sql.Tx, promotionID int64) (LearningPromotion, error) {
+	row := tx.QueryRowContext(ctx, `
+		SELECT id, proposal_id, proposal_type, scope, target_key, status, supersedes_promotion_id, promoted_by, promoted_at, rolled_back_by, rolled_back_at, rollback_reason
+		FROM learning_promotions
+		WHERE id = ?
+	`, promotionID)
+	return scanLearningPromotion(row)
+}
+
+func (store *Store) getActiveLearningPromotionForTargetTx(ctx context.Context, tx *sql.Tx, proposalType string, scope string, targetKey string) (LearningPromotion, error) {
+	row := tx.QueryRowContext(ctx, `
+		SELECT id, proposal_id, proposal_type, scope, target_key, status, supersedes_promotion_id, promoted_by, promoted_at, rolled_back_by, rolled_back_at, rollback_reason
+		FROM learning_promotions
+		WHERE proposal_type = ? AND scope = ? AND target_key = ? AND status = 'active'
+	`, proposalType, scope, targetKey)
+	return scanLearningPromotion(row)
 }
 
 func (store *Store) getRunWithTaskTx(ctx context.Context, tx *sql.Tx, runID int64) (Run, Task, error) {
@@ -2267,6 +2743,104 @@ func scanProjectTransitionReport(row interface{ Scan(...any) error }) (ProjectTr
 		return ProjectTransitionReport{}, err
 	}
 	return report, nil
+}
+
+func scanLearningProposal(row interface{ Scan(...any) error }) (LearningProposal, error) {
+	var proposal LearningProposal
+	var projectID sql.NullInt64
+	var createdAt string
+	var updatedAt string
+	if err := row.Scan(
+		&proposal.ID,
+		&projectID,
+		&proposal.ProposalType,
+		&proposal.Scope,
+		&proposal.TargetKey,
+		&proposal.Summary,
+		&proposal.Hypothesis,
+		&proposal.ChangePayloadJSON,
+		&proposal.Status,
+		&proposal.CreatedBy,
+		&createdAt,
+		&updatedAt,
+	); err != nil {
+		return LearningProposal{}, err
+	}
+
+	var err error
+	proposal.ProjectID = nullableInt64Ptr(projectID)
+	proposal.CreatedAt, err = parseTime(createdAt)
+	if err != nil {
+		return LearningProposal{}, err
+	}
+	proposal.UpdatedAt, err = parseTime(updatedAt)
+	if err != nil {
+		return LearningProposal{}, err
+	}
+	return proposal, nil
+}
+
+func scanLearningEvaluation(row interface{ Scan(...any) error }) (LearningEvaluation, error) {
+	var evaluation LearningEvaluation
+	var recordedAt string
+	if err := row.Scan(
+		&evaluation.ID,
+		&evaluation.ProposalID,
+		&evaluation.FixtureKey,
+		&evaluation.Mode,
+		&evaluation.Score,
+		&evaluation.BaselineSummaryJSON,
+		&evaluation.CandidateSummaryJSON,
+		&evaluation.ResultSummary,
+		&evaluation.Outcome,
+		&recordedAt,
+	); err != nil {
+		return LearningEvaluation{}, err
+	}
+
+	var err error
+	evaluation.RecordedAt, err = parseTime(recordedAt)
+	if err != nil {
+		return LearningEvaluation{}, err
+	}
+	return evaluation, nil
+}
+
+func scanLearningPromotion(row interface{ Scan(...any) error }) (LearningPromotion, error) {
+	var promotion LearningPromotion
+	var supersedesPromotionID sql.NullInt64
+	var promotedAt string
+	var rolledBackBy sql.NullString
+	var rolledBackAt sql.NullString
+	if err := row.Scan(
+		&promotion.ID,
+		&promotion.ProposalID,
+		&promotion.ProposalType,
+		&promotion.Scope,
+		&promotion.TargetKey,
+		&promotion.Status,
+		&supersedesPromotionID,
+		&promotion.PromotedBy,
+		&promotedAt,
+		&rolledBackBy,
+		&rolledBackAt,
+		&promotion.RollbackReason,
+	); err != nil {
+		return LearningPromotion{}, err
+	}
+
+	var err error
+	promotion.SupersedesPromotionID = nullableInt64Ptr(supersedesPromotionID)
+	promotion.PromotedAt, err = parseTime(promotedAt)
+	if err != nil {
+		return LearningPromotion{}, err
+	}
+	promotion.RolledBackBy = rolledBackBy.String
+	promotion.RolledBackAt, err = parseNullableTime(rolledBackAt)
+	if err != nil {
+		return LearningPromotion{}, err
+	}
+	return promotion, nil
 }
 
 func scanWorktreeLease(row interface{ Scan(...any) error }) (WorktreeLease, error) {
