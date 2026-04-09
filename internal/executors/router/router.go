@@ -2,6 +2,7 @@ package router
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 
@@ -122,4 +123,72 @@ func hasString(values []string, value string) bool {
 		}
 	}
 	return false
+}
+
+type RoutingRefinement struct {
+	RouteName  string
+	Preferred  []string
+	Fallback   []string
+	SourceKind string
+	SourceID   int64
+}
+
+type routingRefinementPayload struct {
+	Preferred []string `json:"preferred"`
+	Fallback  []string `json:"fallback"`
+	Executor  string   `json:"executor"`
+}
+
+func ApplyRoutingRefinements(cfg Config, refinements []RoutingRefinement) (Config, error) {
+	if len(refinements) == 0 {
+		return cfg, nil
+	}
+
+	applied := Config{
+		Version:   cfg.Version,
+		Executors: append([]ExecutorConfig{}, cfg.Executors...),
+		Routes:    make([]RouteConfig, len(cfg.Routes)),
+	}
+	copy(applied.Routes, cfg.Routes)
+
+	for _, refinement := range refinements {
+		index := -1
+		for routeIndex, route := range applied.Routes {
+			if route.Name == refinement.RouteName {
+				index = routeIndex
+				break
+			}
+		}
+		if index == -1 {
+			return Config{}, fmt.Errorf("route refinement references unknown route %q", refinement.RouteName)
+		}
+
+		if len(refinement.Preferred) > 0 {
+			applied.Routes[index].Preferred = append([]string{}, refinement.Preferred...)
+		}
+		if len(refinement.Fallback) > 0 {
+			applied.Routes[index].Fallback = append([]string{}, refinement.Fallback...)
+		}
+	}
+
+	return applied, nil
+}
+
+func ParseRoutingRefinementChange(changePayloadJSON string, routeName string, sourceID int64) (RoutingRefinement, error) {
+	var payload routingRefinementPayload
+	if err := json.Unmarshal([]byte(changePayloadJSON), &payload); err != nil {
+		return RoutingRefinement{}, err
+	}
+
+	refinement := RoutingRefinement{
+		RouteName:  routeName,
+		Preferred:  append([]string{}, payload.Preferred...),
+		Fallback:   append([]string{}, payload.Fallback...),
+		SourceKind: "promotion",
+		SourceID:   sourceID,
+	}
+	if payload.Executor != "" && len(refinement.Preferred) == 0 {
+		refinement.Preferred = []string{payload.Executor}
+	}
+	return refinement, nil
 }

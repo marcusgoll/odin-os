@@ -70,6 +70,15 @@ func TestPromotionServiceEvaluatesPromotesAndRollsBack(t *testing.T) {
 		t.Fatalf("updatedFirstProposal.Status = %q, want %q", updatedFirstProposal.Status, "approved")
 	}
 
+	if _, err := service.Promote(ctx, firstProposal.ID, "operator"); err == nil {
+		t.Fatal("Promote(first) before promotion approval succeeded, want rejection")
+	}
+
+	firstProposal, err = proposalService.ApprovePromotion(ctx, firstProposal.ID)
+	if err != nil {
+		t.Fatalf("ApprovePromotion(first) error = %v", err)
+	}
+
 	firstPromotion, err := service.Promote(ctx, firstProposal.ID, "operator")
 	if err != nil {
 		t.Fatalf("Promote(first) error = %v", err)
@@ -118,6 +127,11 @@ func TestPromotionServiceEvaluatesPromotesAndRollsBack(t *testing.T) {
 	}
 	if updatedSecondProposal.Status != "approved" {
 		t.Fatalf("updatedSecondProposal.Status = %q, want %q", updatedSecondProposal.Status, "approved")
+	}
+
+	secondProposal, err = proposalService.ApprovePromotion(ctx, secondProposal.ID)
+	if err != nil {
+		t.Fatalf("ApprovePromotion(second) error = %v", err)
 	}
 
 	configPath := filepath.Clean(filepath.Join("..", "..", "..", "config", "executors.yaml"))

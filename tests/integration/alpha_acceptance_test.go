@@ -144,6 +144,18 @@ func TestAlphaAcceptance(t *testing.T) {
 		}
 	})
 
+	t.Run("fresh runtime becomes ready without manual seeding", func(t *testing.T) {
+		runtimeRoot := t.TempDir()
+
+		output, err := runOdinCommand(t, repoRoot, odinBinary, runtimeRoot, nil, "", "healthcheck")
+		if err != nil {
+			t.Fatalf("runOdinCommand(healthcheck fresh runtime) error = %v\n%s", err, output)
+		}
+		if !strings.Contains(output, "ready") {
+			t.Fatalf("fresh runtime healthcheck output = %q, want ready", output)
+		}
+	})
+
 	t.Run("managed projects support local and github classes", func(t *testing.T) {
 		localRepo := createGitRepository(t)
 		githubRepo := createGitRepository(t)
@@ -652,6 +664,11 @@ func TestAlphaAcceptance(t *testing.T) {
 		}
 		if proposal.Status != "approved" {
 			t.Fatalf("proposal status after evaluation = %q, want approved", proposal.Status)
+		}
+
+		proposal, err = proposalService.ApprovePromotion(ctx, proposal.ID)
+		if err != nil {
+			t.Fatalf("ApprovePromotion() error = %v", err)
 		}
 
 		activePromotion, err := promotionService.Promote(ctx, proposal.ID, "operator")

@@ -69,6 +69,10 @@ func TestLearningProjectionsExposeProposalStatusLatestEvaluationAndActivePromoti
 		t.Fatalf("Evaluate() error = %v", err)
 	}
 
+	if _, err := proposalService.ApprovePromotion(ctx, proposal.ID); err != nil {
+		t.Fatalf("ApprovePromotion() error = %v", err)
+	}
+
 	if _, err := promotionService.Promote(ctx, proposal.ID, "operator"); err != nil {
 		t.Fatalf("Promote() error = %v", err)
 	}

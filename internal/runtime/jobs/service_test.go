@@ -9,7 +9,9 @@ import (
 
 	"odin-os/internal/cli/scope"
 	"odin-os/internal/core/projects"
+	"odin-os/internal/executors/router"
 	"odin-os/internal/store/sqlite"
+	"odin-os/internal/vcs/leases"
 )
 
 func TestCreateTaskFromActEnsuresRuntimeProjectAndCreatesQueuedTask(t *testing.T) {
@@ -95,6 +97,162 @@ func TestListFiltersJobsByScope(t *testing.T) {
 	if len(views) != 1 || views[0].ProjectKey != "alpha" {
 		t.Fatalf("views = %+v, want one alpha task", views)
 	}
+}
+
+func TestExecuteNextQueuedCompletesCutoverProjectTask(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openJobStore(t)
+	defer store.Close()
+
+	registry := writeRegistry(t)
+	service := Service{
+		Store:          store,
+		Registry:       registry,
+		Executors:      router.DefaultCatalog(),
+		ExecutorConfig: mustLoadExecutorConfig(t),
+		Transitions:    projects.Service{Store: store},
+		Leases: leases.Manager{
+			Store:        store,
+			Git:          &jobTestGit{},
+			WorktreeRoot: t.TempDir(),
+		},
+		Now: func() time.Time {
+			return time.Date(2026, 4, 9, 12, 0, 0, 0, time.UTC)
+		},
+	}
+
+	task, err := service.CreateTaskFromAct(ctx, scope.Resolution{
+		Kind:       scope.ScopeProject,
+		ProjectKey: "alpha",
+	}, "Execute queued task")
+	if err != nil {
+		t.Fatalf("CreateTaskFromAct() error = %v", err)
+	}
+
+	project, err := store.GetProjectByKey(ctx, "alpha")
+	if err != nil {
+		t.Fatalf("GetProjectByKey(alpha) error = %v", err)
+	}
+	if _, err := service.Transitions.SetTransitionState(ctx, projects.TransitionStateInput{
+		ProjectID:   project.ID,
+		Actor:       projects.TransitionControllerOdinOS,
+		TargetState: projects.TransitionStateCutover,
+		ChangedBy:   "test",
+	}); err != nil {
+		t.Fatalf("SetTransitionState(cutover) error = %v", err)
+	}
+
+	if err := service.ExecuteNextQueued(ctx); err != nil {
+		t.Fatalf("ExecuteNextQueued() error = %v", err)
+	}
+
+	gotTask, err := store.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
+	}
+	if gotTask.Status != "completed" {
+		t.Fatalf("GetTask().Status = %q, want completed", gotTask.Status)
+	}
+
+	run, err := latestRunForTask(ctx, store, task.ID)
+	if err != nil {
+		t.Fatalf("latestRunForTask() error = %v", err)
+	}
+	if run.Status != "completed" || run.Executor != "codex_headless" {
+		t.Fatalf("run = %+v, want completed codex_headless execution", run)
+	}
+}
+
+func TestExecuteNextQueuedRejectsShadowModeMutation(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openJobStore(t)
+	defer store.Close()
+
+	registry := writeRegistry(t)
+	service := Service{
+		Store:          store,
+		Registry:       registry,
+		Executors:      router.DefaultCatalog(),
+		ExecutorConfig: mustLoadExecutorConfig(t),
+		Transitions:    projects.Service{Store: store},
+		Leases: leases.Manager{
+			Store:        store,
+			Git:          &jobTestGit{},
+			WorktreeRoot: t.TempDir(),
+		},
+		Now: time.Now,
+	}
+
+	task, err := service.CreateTaskFromAct(ctx, scope.Resolution{
+		Kind:       scope.ScopeProject,
+		ProjectKey: "alpha",
+	}, "Blocked shadow mutation")
+	if err != nil {
+		t.Fatalf("CreateTaskFromAct() error = %v", err)
+	}
+
+	project, err := store.GetProjectByKey(ctx, "alpha")
+	if err != nil {
+		t.Fatalf("GetProjectByKey(alpha) error = %v", err)
+	}
+	if _, err := service.Transitions.SetTransitionState(ctx, projects.TransitionStateInput{
+		ProjectID:   project.ID,
+		Actor:       projects.TransitionControllerOdinOS,
+		TargetState: projects.TransitionStateShadow,
+		ChangedBy:   "test",
+	}); err != nil {
+		t.Fatalf("SetTransitionState(shadow) error = %v", err)
+	}
+
+	err = service.ExecuteNextQueued(ctx)
+	if err == nil {
+		t.Fatalf("ExecuteNextQueued() error = nil, want transition denial")
+	}
+
+	gotTask, err := store.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
+	}
+	if gotTask.Status != "failed" {
+		t.Fatalf("GetTask().Status = %q, want failed", gotTask.Status)
+	}
+}
+
+type jobTestGit struct{}
+
+func (jobTestGit) BranchExists(context.Context, string, string) (bool, error) { return false, nil }
+func (jobTestGit) CreateBranch(context.Context, string, string, string) error { return nil }
+func (jobTestGit) AddWorktree(context.Context, string, string, string) error  { return nil }
+func (jobTestGit) RemoveWorktree(context.Context, string, string) error       { return nil }
+
+func mustLoadExecutorConfig(t *testing.T) router.Config {
+	t.Helper()
+
+	cfg, err := router.LoadConfig(filepath.Clean(filepath.Join("..", "..", "..", "config", "executors.yaml")))
+	if err != nil {
+		t.Fatalf("LoadConfig(executors) error = %v", err)
+	}
+	return cfg
+}
+
+func latestRunForTask(ctx context.Context, store *sqlite.Store, taskID int64) (sqlite.Run, error) {
+	row := store.DB().QueryRowContext(ctx, `
+		SELECT id
+		FROM runs
+		WHERE task_id = ?
+		ORDER BY id DESC
+		LIMIT 1
+	`, taskID)
+
+	var runID int64
+	if err := row.Scan(&runID); err != nil {
+		return sqlite.Run{}, err
+	}
+	return store.GetRun(ctx, runID)
 }
 
 func openJobStore(t *testing.T) *sqlite.Store {

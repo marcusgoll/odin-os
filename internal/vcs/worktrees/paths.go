@@ -2,6 +2,7 @@ package worktrees
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 )
@@ -37,6 +38,7 @@ func ResolvePath(params PathParams) string {
 	if root == "" {
 		root = DefaultRoot()
 	}
+	root = expandHome(root)
 
 	projectKey := sanitizeProjectKey(params.ProjectKey)
 	try := params.Try
@@ -75,4 +77,19 @@ func sanitizeProjectKey(value string) string {
 		return "project"
 	}
 	return sanitized
+}
+
+func expandHome(path string) string {
+	if path == "~" {
+		if home, err := os.UserHomeDir(); err == nil && home != "" {
+			return home
+		}
+		return path
+	}
+	if strings.HasPrefix(path, "~/") || strings.HasPrefix(path, "~\\") {
+		if home, err := os.UserHomeDir(); err == nil && home != "" {
+			return filepath.Join(home, path[2:])
+		}
+	}
+	return path
 }

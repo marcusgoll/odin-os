@@ -39,6 +39,9 @@ func TestLoggerWritesStructuredJSONWithCorrelationIdentifiers(t *testing.T) {
 	if err := json.Unmarshal(output.Bytes(), &decoded); err != nil {
 		t.Fatalf("Unmarshal() error = %v", err)
 	}
+	if !bytes.HasSuffix(output.Bytes(), []byte("\n")) {
+		t.Fatalf("Log() output = %q, want newline-delimited record", output.String())
+	}
 
 	for key, want := range map[string]any{
 		"level":          "info",

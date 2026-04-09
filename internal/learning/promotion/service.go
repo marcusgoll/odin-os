@@ -87,8 +87,8 @@ func (service Service) Promote(ctx context.Context, proposalID int64, promotedBy
 	if err != nil {
 		return sqlite.LearningPromotion{}, err
 	}
-	if proposal.Status != "approved" {
-		return sqlite.LearningPromotion{}, fmt.Errorf("proposal %d must be approved before promotion", proposal.ID)
+	if proposal.Status != "promotion_ready" {
+		return sqlite.LearningPromotion{}, fmt.Errorf("proposal %d must be promotion_ready before promotion", proposal.ID)
 	}
 
 	return service.Store.PromoteLearningProposal(ctx, sqlite.PromoteLearningProposalParams{

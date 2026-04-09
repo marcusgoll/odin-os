@@ -52,10 +52,36 @@ func TestRunHealthcheckHealthyReturnsNil(t *testing.T) {
 	}
 }
 
+func TestRunHealthcheckFreshRuntimeReturnsNil(t *testing.T) {
+	t.Parallel()
+
+	root := createRuntimeRoot(t)
+
+	var stdout bytes.Buffer
+	if err := Run(context.Background(), root, []string{"healthcheck"}, strings.NewReader(""), &stdout); err != nil {
+		t.Fatalf("Run(healthcheck fresh runtime) error = %v", err)
+	}
+	if !strings.Contains(stdout.String(), "ready") {
+		t.Fatalf("healthcheck output = %q, want readiness message", stdout.String())
+	}
+}
+
 func TestRunHealthcheckDegradedReturnsError(t *testing.T) {
 	t.Parallel()
 
 	root := createRuntimeRoot(t)
+	if err := os.WriteFile(filepath.Join(root, "config", "projects.yaml"), []byte(`
+version: 1
+projects:
+  - key: odin-core
+    name: Odin Core
+    project_class: system_project
+    system_project: true
+    git_root: ..
+    default_branch: main
+`), 0o644); err != nil {
+		t.Fatalf("write invalid projects config: %v", err)
+	}
 
 	var stdout bytes.Buffer
 	err := Run(context.Background(), root, []string{"healthcheck"}, strings.NewReader(""), &stdout)
@@ -111,6 +137,75 @@ service:
 	}
 	if packet.Trigger != string(checkpoints.TriggerRestart) {
 		t.Fatalf("WakePacket.Trigger = %q, want %q", packet.Trigger, checkpoints.TriggerRestart)
+	}
+}
+
+func TestRunServeRunsSelfHealCycleBeforeShutdown(t *testing.T) {
+	t.Parallel()
+
+	root := createRuntimeRoot(t)
+	writeRuntimeConfig(t, root, `
+version: 1
+runtime:
+  root: .
+service:
+  http_addr: 127.0.0.1:0
+  startup_recovery: true
+`)
+	seedHealthyRuntime(t, root)
+
+	store, err := sqlite.Open(filepath.Join(root, "data", "odin.db"))
+	if err != nil {
+		t.Fatalf("sqlite.Open() error = %v", err)
+	}
+	defer store.Close()
+
+	if _, err := store.RecordProjectionFreshness(context.Background(), sqlite.RecordProjectionFreshnessParams{
+		Surface:     "doctor",
+		Status:      "stale",
+		DetailsJSON: `{"source":"serve-test"}`,
+	}); err != nil {
+		t.Fatalf("RecordProjectionFreshness() error = %v", err)
+	}
+
+	originalSelfHealInterval := serveSelfHealLoopInterval
+	serveSelfHealLoopInterval = 20 * time.Millisecond
+	defer func() {
+		serveSelfHealLoopInterval = originalSelfHealInterval
+	}()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	time.AfterFunc(30*time.Millisecond, func() {
+		staleAt := time.Now().Add(-2 * time.Hour).UTC().Format(time.RFC3339Nano)
+		if _, err := store.DB().ExecContext(context.Background(), `
+			UPDATE projection_freshness
+			SET refreshed_at = ?, updated_at = ?
+			WHERE surface = 'doctor'
+		`, staleAt, staleAt); err != nil {
+			t.Errorf("force stale projection freshness error = %v", err)
+		}
+	})
+	time.AfterFunc(140*time.Millisecond, cancel)
+
+	var stdout bytes.Buffer
+	err = Run(ctx, root, []string{"serve"}, strings.NewReader(""), &stdout)
+	if err != nil && !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run(serve) error = %v", err)
+	}
+
+	events, err := store.ListEvents(context.Background(), sqlite.ListEventsParams{})
+	if err != nil {
+		t.Fatalf("ListEvents() error = %v", err)
+	}
+	found := false
+	for _, event := range events {
+		if string(event.Type) == "recovery.action_executed" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("events = %+v, want recovery.action_executed from background self-heal cycle", events)
 	}
 }
 
@@ -172,6 +267,23 @@ projects:
         require_explicit_approval: true
 `), 0o644); err != nil {
 		t.Fatalf("write projects config: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "config", "executors.yaml"), []byte(`
+version: 1
+executors:
+  - key: codex_headless
+    adapter: codex_headless
+    class: plan_backed_cli
+    enabled: true
+    priority: 10
+routes:
+  - name: default
+    match:
+      task_kinds: [general, plan, build, review, qa, research]
+      scopes: [global, odin-core, project, new-project]
+    preferred: [codex_headless]
+`), 0o644); err != nil {
+		t.Fatalf("write executors config: %v", err)
 	}
 
 	return root

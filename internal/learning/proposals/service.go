@@ -59,3 +59,22 @@ func (service Service) Reject(ctx context.Context, proposalID int64) (sqlite.Lea
 		Status:     "rejected",
 	})
 }
+
+func (service Service) ApprovePromotion(ctx context.Context, proposalID int64) (sqlite.LearningProposal, error) {
+	if service.Store == nil {
+		return sqlite.LearningProposal{}, fmt.Errorf("proposal store is required")
+	}
+
+	proposal, err := service.Store.GetLearningProposal(ctx, proposalID)
+	if err != nil {
+		return sqlite.LearningProposal{}, err
+	}
+	if proposal.Status != "approved" {
+		return sqlite.LearningProposal{}, fmt.Errorf("proposal %d must be approved by evaluation before promotion approval", proposal.ID)
+	}
+
+	return service.Store.UpdateLearningProposalStatus(ctx, sqlite.UpdateLearningProposalStatusParams{
+		ProposalID: proposalID,
+		Status:     "promotion_ready",
+	})
+}

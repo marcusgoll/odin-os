@@ -19,6 +19,9 @@ func TestRunStartsInteractiveShell(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(root, "data"), 0o755); err != nil {
 		t.Fatalf("mkdir data: %v", err)
 	}
+	if err := os.MkdirAll(filepath.Join(root, "registry"), 0o755); err != nil {
+		t.Fatalf("mkdir registry: %v", err)
+	}
 	if err := os.MkdirAll(filepath.Join(root, "state", "cache"), 0o755); err != nil {
 		t.Fatalf("mkdir state: %v", err)
 	}
@@ -55,6 +58,23 @@ projects:
         require_explicit_approval: true
 `), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "config", "executors.yaml"), []byte(`
+version: 1
+executors:
+  - key: codex_headless
+    adapter: codex_headless
+    class: plan_backed_cli
+    enabled: true
+    priority: 10
+routes:
+  - name: default
+    match:
+      task_kinds: [general, plan, build, review, qa, research]
+      scopes: [global, odin-core, project, new-project]
+    preferred: [codex_headless]
+`), 0o644); err != nil {
+		t.Fatalf("write executors config: %v", err)
 	}
 	if err := os.WriteFile(filepath.Join(root, "config", "odin.yaml"), []byte(`
 version: 1

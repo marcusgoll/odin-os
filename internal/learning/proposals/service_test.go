@@ -8,7 +8,7 @@ import (
 	"odin-os/internal/store/sqlite"
 )
 
-func TestProposalServiceCreatesSubmitsAndRejects(t *testing.T) {
+func TestProposalServiceCreatesSubmitsApprovesAndRejects(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
@@ -39,6 +39,22 @@ func TestProposalServiceCreatesSubmitsAndRejects(t *testing.T) {
 	}
 	if proposal.Status != "submitted" {
 		t.Fatalf("submitted proposal.Status = %q, want %q", proposal.Status, "submitted")
+	}
+
+	proposal, err = store.UpdateLearningProposalStatus(ctx, sqlite.UpdateLearningProposalStatusParams{
+		ProposalID: proposal.ID,
+		Status:     "approved",
+	})
+	if err != nil {
+		t.Fatalf("UpdateLearningProposalStatus(approved) error = %v", err)
+	}
+
+	proposal, err = service.ApprovePromotion(ctx, proposal.ID)
+	if err != nil {
+		t.Fatalf("ApprovePromotion() error = %v", err)
+	}
+	if proposal.Status != "promotion_ready" {
+		t.Fatalf("promotion-ready proposal.Status = %q, want %q", proposal.Status, "promotion_ready")
 	}
 
 	proposal, err = service.Reject(ctx, proposal.ID)

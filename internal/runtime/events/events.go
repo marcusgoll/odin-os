@@ -47,6 +47,7 @@ const (
 	EventProjectTransitionDenied          Type = "project.transition_denied"
 	EventLearningProposalCreated          Type = "learning.proposal_created"
 	EventLearningProposalSubmitted        Type = "learning.proposal_submitted"
+	EventLearningProposalPromotionReady   Type = "learning.proposal_promotion_ready"
 	EventLearningProposalRejected         Type = "learning.proposal_rejected"
 	EventLearningEvaluationRecorded       Type = "learning.evaluation_recorded"
 	EventLearningPromotionApplied         Type = "learning.promotion_applied"

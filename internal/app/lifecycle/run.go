@@ -10,18 +10,30 @@ import (
 	stdhttp "net/http"
 	"os"
 	"path/filepath"
+	"time"
 
 	apihttp "odin-os/internal/api/http"
 	appbackup "odin-os/internal/app/backup"
 	"odin-os/internal/app/bootstrap"
 	appconfig "odin-os/internal/app/config"
 	"odin-os/internal/cli/repl"
+	"odin-os/internal/core/projects"
 	healthsvc "odin-os/internal/runtime/health"
+	"odin-os/internal/runtime/jobs"
 	"odin-os/internal/runtime/recovery"
+	"odin-os/internal/telemetry/logs"
 	metricsvc "odin-os/internal/telemetry/metrics"
+	gitadapter "odin-os/internal/vcs/git"
+	"odin-os/internal/vcs/leases"
+	"odin-os/internal/vcs/worktrees"
 )
 
 var errRuntimeNotReady = errors.New("runtime not ready")
+
+var (
+	serveTaskLoopInterval     = 1 * time.Second
+	serveSelfHealLoopInterval = 30 * time.Second
+)
 
 // Run dispatches between the interactive shell and machine-oriented operational commands.
 func Run(ctx context.Context, root string, args []string, stdin io.Reader, stdout io.Writer) error {
@@ -122,6 +134,45 @@ func runServe(ctx context.Context, app bootstrap.App, cfg appconfig.Config, stdo
 		}
 	}
 
+	logger, logCloser, err := openServiceLogger(cfg.RuntimeRoot)
+	if err != nil {
+		return err
+	}
+	if logCloser != nil {
+		defer logCloser.Close()
+	}
+
+	jobService := jobs.Service{
+		Store:          app.Store,
+		Registry:       app.Registry,
+		Executors:      app.Executors,
+		ExecutorConfig: app.ExecutorConfig,
+		Transitions:    projects.Service{Store: app.Store},
+		Leases: leases.Manager{
+			Store:        app.Store,
+			Git:          gitadapter.Adapter{},
+			WorktreeRoot: worktrees.DefaultRoot(),
+		},
+		Now: time.Now,
+	}
+	recoveryService := recovery.Service{
+		Store:           app.Store,
+		RegistryRoot:    filepath.Join(app.RepoRoot, "registry"),
+		ExecutorCatalog: app.Executors,
+		HealthConfig:    healthsvc.DefaultConfig(),
+		Logger:          logger,
+	}
+
+	if err := jobService.ExecuteNextQueued(ctx); err != nil {
+		logBackgroundError(logger, "task_runner", err)
+	}
+	if _, err := recoveryService.RunCycle(ctx); err != nil {
+		logBackgroundError(logger, "self_heal", err)
+	}
+
+	go runTaskLoop(ctx, jobService, logger)
+	go runSelfHealLoop(ctx, recoveryService, logger)
+
 	listener, err := net.Listen("tcp", cfg.Service.HTTPAddr)
 	if err != nil {
 		return err
@@ -159,6 +210,71 @@ func runServe(ctx context.Context, app bootstrap.App, cfg appconfig.Config, stdo
 		return ctx.Err()
 	}
 	return err
+}
+
+func openServiceLogger(runtimeRoot string) (*logs.Logger, io.Closer, error) {
+	logDir := filepath.Join(runtimeRoot, "runs", "logs")
+	if err := os.MkdirAll(logDir, 0o755); err != nil {
+		return nil, nil, err
+	}
+
+	file, err := os.OpenFile(filepath.Join(logDir, "odin-service.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return &logs.Logger{
+		Writer: file,
+		Now:    time.Now,
+	}, file, nil
+}
+
+func runTaskLoop(ctx context.Context, service jobs.Service, logger *logs.Logger) {
+	ticker := time.NewTicker(serveTaskLoopInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := service.ExecuteNextQueued(ctx); err != nil {
+				logBackgroundError(logger, "task_runner", err)
+			}
+		}
+	}
+}
+
+func runSelfHealLoop(ctx context.Context, service recovery.Service, logger *logs.Logger) {
+	ticker := time.NewTicker(serveSelfHealLoopInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if _, err := service.RunCycle(ctx); err != nil {
+				logBackgroundError(logger, "self_heal", err)
+			}
+		}
+	}
+}
+
+func logBackgroundError(logger *logs.Logger, component string, err error) {
+	if logger == nil {
+		return
+	}
+	_ = logger.Log(logs.Record{
+		Level:         logs.LevelError,
+		Component:     component,
+		Message:       "background loop error",
+		CorrelationID: component,
+		Scope:         "global",
+		Fields: map[string]any{
+			"error": err.Error(),
+		},
+	})
 }
 
 func runBackup(ctx context.Context, service appbackup.Service, args []string, stdout io.Writer) error {

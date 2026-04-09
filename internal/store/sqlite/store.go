@@ -1188,6 +1188,8 @@ func (store *Store) UpdateLearningProposalStatus(ctx context.Context, params Upd
 		switch params.Status {
 		case "submitted":
 			eventType = runtimeevents.EventLearningProposalSubmitted
+		case "promotion_ready":
+			eventType = runtimeevents.EventLearningProposalPromotionReady
 		case "rejected":
 			eventType = runtimeevents.EventLearningProposalRejected
 		default:

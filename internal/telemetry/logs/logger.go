@@ -65,6 +65,7 @@ func (logger Logger) Log(record Record) error {
 	if err != nil {
 		return err
 	}
+	encoded = append(encoded, '\n')
 	_, err = logger.Writer.Write(encoded)
 	return err
 }
