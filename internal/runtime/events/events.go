@@ -30,7 +30,10 @@ const (
 	EventApprovalRequested       Type = "approval.requested"
 	EventApprovalResolved        Type = "approval.resolved"
 	EventIncidentOpened          Type = "incident.opened"
+	EventIncidentResolved        Type = "incident.resolved"
+	EventIncidentEscalated       Type = "incident.escalated"
 	EventRecoveryStarted         Type = "recovery.started"
+	EventRecoveryActionExecuted  Type = "recovery.action_executed"
 	EventRecoveryCompleted       Type = "recovery.completed"
 	EventRegistryVersionRecorded Type = "registry_version.recorded"
 	EventExecutorHealthRecorded  Type = "executor_health.recorded"
@@ -105,9 +108,30 @@ type IncidentOpenedPayload struct {
 	Summary  string `json:"summary"`
 }
 
+type IncidentResolvedPayload struct {
+	PreviousStatus string `json:"previous_status"`
+	Status         string `json:"status"`
+	Reason         string `json:"reason"`
+}
+
+type IncidentEscalatedPayload struct {
+	PreviousStatus string `json:"previous_status"`
+	Status         string `json:"status"`
+	Reason         string `json:"reason"`
+}
+
 type RecoveryStartedPayload struct {
 	Status   string `json:"status"`
 	Strategy string `json:"strategy"`
+}
+
+type RecoveryActionExecutedPayload struct {
+	Playbook    string `json:"playbook"`
+	FaultKey    string `json:"fault_key"`
+	ActionName  string `json:"action_name"`
+	Attempt     int    `json:"attempt"`
+	Result      string `json:"result"`
+	Description string `json:"description,omitempty"`
 }
 
 type RecoveryCompletedPayload struct {

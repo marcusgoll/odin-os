@@ -11,16 +11,17 @@ import (
 )
 
 type Snapshot struct {
-	GeneratedAt      time.Time
-	ActiveRuns       int
-	BlockedItems     int
-	ApprovalsWaiting int
-	OpenIncidents    int
-	ActiveRecoveries int
-	QueuedTasks      int
-	StaleExecutors   int
-	StaleSources     int
-	StaleProjections int
+	GeneratedAt        time.Time
+	ActiveRuns         int
+	BlockedItems       int
+	ApprovalsWaiting   int
+	OpenIncidents      int
+	EscalatedIncidents int
+	ActiveRecoveries   int
+	QueuedTasks        int
+	StaleExecutors     int
+	StaleSources       int
+	StaleProjections   int
 }
 
 type Config struct {
@@ -41,6 +42,7 @@ func Render(snapshot Snapshot) string {
 		fmt.Sprintf("odin_blocked_items %d", snapshot.BlockedItems),
 		fmt.Sprintf("odin_approvals_waiting %d", snapshot.ApprovalsWaiting),
 		fmt.Sprintf("odin_open_incidents %d", snapshot.OpenIncidents),
+		fmt.Sprintf("odin_escalated_incidents %d", snapshot.EscalatedIncidents),
 		fmt.Sprintf("odin_active_recoveries %d", snapshot.ActiveRecoveries),
 		fmt.Sprintf("odin_queued_tasks %d", snapshot.QueuedTasks),
 		fmt.Sprintf("odin_stale_executors %d", snapshot.StaleExecutors),
@@ -93,6 +95,11 @@ func (service Service) Collect(ctx context.Context) (Snapshot, error) {
 		return Snapshot{}, err
 	}
 
+	var escalatedIncidents int
+	if err := service.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM incidents WHERE status = 'escalated'`).Scan(&escalatedIncidents); err != nil {
+		return Snapshot{}, err
+	}
+
 	var staleExecutors int
 	if err := service.DB.QueryRowContext(ctx, `
 		SELECT COUNT(*)
@@ -131,16 +138,17 @@ func (service Service) Collect(ctx context.Context) (Snapshot, error) {
 	}
 
 	return Snapshot{
-		GeneratedAt:      now,
-		ActiveRuns:       len(activeRuns),
-		BlockedItems:     len(blocked),
-		ApprovalsWaiting: len(approvals),
-		OpenIncidents:    len(incidents),
-		ActiveRecoveries: countActiveRecoveries(recoveries),
-		QueuedTasks:      queuedTasks,
-		StaleExecutors:   staleExecutors,
-		StaleSources:     staleSources,
-		StaleProjections: staleProjections,
+		GeneratedAt:        now,
+		ActiveRuns:         len(activeRuns),
+		BlockedItems:       len(blocked),
+		ApprovalsWaiting:   len(approvals),
+		OpenIncidents:      len(incidents),
+		EscalatedIncidents: escalatedIncidents,
+		ActiveRecoveries:   countActiveRecoveries(recoveries),
+		QueuedTasks:        queuedTasks,
+		StaleExecutors:     staleExecutors,
+		StaleSources:       staleSources,
+		StaleProjections:   staleProjections,
 	}, nil
 }
 

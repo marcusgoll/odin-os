@@ -2,7 +2,7 @@
 title: Runtime Event Contract
 status: active
 date: 2026-04-09
-phase: "08"
+phase: "11"
 ---
 
 # Runtime Event Contract
@@ -40,7 +40,7 @@ Phase 03 through Phase 08 stream types are:
 
 ## Event types
 
-Phase 03 through Phase 08 event types are:
+Phase 03 through Phase 11 event types are:
 
 - `project.created`
 - `task.created`
@@ -50,7 +50,10 @@ Phase 03 through Phase 08 event types are:
 - `approval.requested`
 - `approval.resolved`
 - `incident.opened`
+- `incident.resolved`
+- `incident.escalated`
 - `recovery.started`
+- `recovery.action_executed`
 - `recovery.completed`
 - `registry_version.recorded`
 - `executor_health.recorded`
@@ -83,3 +86,11 @@ Phase 03 replay support must be able to reconstruct:
 - approval state
 
 This replay is a correctness requirement for lifecycle auditing and restart safety.
+
+## Self-heal expectation
+
+Phase 11 extends the runtime event stream so deterministic self-heal actions are auditable:
+
+- incident status changes caused by self-heal must append explicit incident events
+- every bounded recovery action attempt must append `recovery.action_executed`
+- escalation must appear in both recovery state and incident state, not only in logs

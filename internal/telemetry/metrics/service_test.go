@@ -14,16 +14,17 @@ func TestRenderExportsMachineParseableMetrics(t *testing.T) {
 	t.Parallel()
 
 	exported := Render(Snapshot{
-		GeneratedAt:      time.Date(2026, 4, 9, 19, 0, 0, 0, time.UTC),
-		ActiveRuns:       3,
-		BlockedItems:     2,
-		ApprovalsWaiting: 4,
-		OpenIncidents:    1,
-		ActiveRecoveries: 1,
-		QueuedTasks:      5,
-		StaleExecutors:   1,
-		StaleSources:     2,
-		StaleProjections: 1,
+		GeneratedAt:        time.Date(2026, 4, 9, 19, 0, 0, 0, time.UTC),
+		ActiveRuns:         3,
+		BlockedItems:       2,
+		ApprovalsWaiting:   4,
+		OpenIncidents:      1,
+		EscalatedIncidents: 2,
+		ActiveRecoveries:   1,
+		QueuedTasks:        5,
+		StaleExecutors:     1,
+		StaleSources:       2,
+		StaleProjections:   1,
 	})
 
 	for _, want := range []string{
@@ -31,6 +32,7 @@ func TestRenderExportsMachineParseableMetrics(t *testing.T) {
 		"odin_blocked_items 2",
 		"odin_approvals_waiting 4",
 		"odin_open_incidents 1",
+		"odin_escalated_incidents 2",
 		"odin_active_recoveries 1",
 		"odin_queued_tasks 5",
 		"odin_stale_executors 1",

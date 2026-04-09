@@ -120,6 +120,13 @@ type OpenIncidentParams struct {
 	DetailsJSON string
 }
 
+type UpdateIncidentStatusParams struct {
+	IncidentID  int64
+	Status      string
+	Reason      string
+	DetailsJSON string
+}
+
 type Recovery struct {
 	ID          int64
 	IncidentID  *int64
@@ -144,6 +151,16 @@ type CompleteRecoveryParams struct {
 	RecoveryID  int64
 	Status      string
 	DetailsJSON string
+}
+
+type RecordRecoveryActionParams struct {
+	RecoveryID  int64
+	Playbook    string
+	FaultKey    string
+	ActionName  string
+	Attempt     int
+	Result      string
+	Description string
 }
 
 type RegistryVersion struct {

@@ -19,6 +19,7 @@ var ErrWorktreeLeaseConflict = errors.New("worktree lease conflict")
 type Store struct {
 	db        *sql.DB
 	closeOnce sync.Once
+	Now       func() time.Time
 }
 
 func Open(path string) (*Store, error) {
@@ -60,6 +61,9 @@ func (store *Store) DB() *sql.DB {
 }
 
 func (store *Store) now() time.Time {
+	if store.Now != nil {
+		return store.Now().UTC()
+	}
 	return time.Now().UTC()
 }
 
@@ -515,6 +519,51 @@ func (store *Store) OpenIncident(ctx context.Context, params OpenIncidentParams)
 	return incident, err
 }
 
+func (store *Store) UpdateIncidentStatus(ctx context.Context, params UpdateIncidentStatusParams) (Incident, error) {
+	now := store.now()
+	var incident Incident
+
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		current, contextRow, err := store.getIncidentTx(ctx, tx, params.IncidentID)
+		if err != nil {
+			return err
+		}
+
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE incidents
+			SET status = ?, details_json = ?, updated_at = ?
+			WHERE id = ?
+		`, params.Status, params.DetailsJSON, formatTime(now), params.IncidentID); err != nil {
+			return err
+		}
+
+		previousStatus := current.Status
+		current.Status = params.Status
+		current.DetailsJSON = params.DetailsJSON
+		current.UpdatedAt = now
+		incident = current
+
+		eventType, payload, ok := incidentStatusEvent(previousStatus, params.Status, params.Reason)
+		if !ok {
+			return nil
+		}
+
+		return appendEventTx(ctx, tx, eventInsert{
+			StreamType: runtimeevents.StreamIncident,
+			StreamID:   incident.ID,
+			EventType:  eventType,
+			Scope:      contextRow.Scope,
+			ProjectID:  contextRow.ProjectID,
+			TaskID:     contextRow.TaskID,
+			RunID:      incident.RunID,
+			Payload:    payload,
+			OccurredAt: now,
+		})
+	})
+
+	return incident, err
+}
+
 func (store *Store) StartRecovery(ctx context.Context, params StartRecoveryParams) (Recovery, error) {
 	now := store.now()
 	var recovery Recovery
@@ -574,6 +623,36 @@ func (store *Store) StartRecovery(ctx context.Context, params StartRecoveryParam
 	})
 
 	return recovery, err
+}
+
+func (store *Store) RecordRecoveryAction(ctx context.Context, params RecordRecoveryActionParams) error {
+	now := store.now()
+
+	return store.withTx(ctx, func(tx *sql.Tx) error {
+		recovery, contextRow, err := store.getRecoveryTx(ctx, tx, params.RecoveryID)
+		if err != nil {
+			return err
+		}
+
+		return appendEventTx(ctx, tx, eventInsert{
+			StreamType: runtimeevents.StreamRecovery,
+			StreamID:   recovery.ID,
+			EventType:  runtimeevents.EventRecoveryActionExecuted,
+			Scope:      contextRow.Scope,
+			ProjectID:  contextRow.ProjectID,
+			TaskID:     contextRow.TaskID,
+			RunID:      recovery.RunID,
+			Payload: runtimeevents.RecoveryActionExecutedPayload{
+				Playbook:    params.Playbook,
+				FaultKey:    params.FaultKey,
+				ActionName:  params.ActionName,
+				Attempt:     params.Attempt,
+				Result:      params.Result,
+				Description: params.Description,
+			},
+			OccurredAt: now,
+		})
+	})
 }
 
 func (store *Store) CompleteRecovery(ctx context.Context, params CompleteRecoveryParams) (Recovery, error) {
@@ -845,6 +924,24 @@ func (store *Store) GetApproval(ctx context.Context, approvalID int64) (Approval
 		WHERE id = ?
 	`, approvalID)
 	return scanApproval(row)
+}
+
+func (store *Store) GetIncident(ctx context.Context, incidentID int64) (Incident, error) {
+	row := store.db.QueryRowContext(ctx, `
+		SELECT id, run_id, severity, status, summary, details_json, opened_at, updated_at
+		FROM incidents
+		WHERE id = ?
+	`, incidentID)
+	return scanIncident(row)
+}
+
+func (store *Store) GetRecovery(ctx context.Context, recoveryID int64) (Recovery, error) {
+	row := store.db.QueryRowContext(ctx, `
+		SELECT id, incident_id, run_id, status, strategy, details_json, started_at, finished_at, updated_at
+		FROM recoveries
+		WHERE id = ?
+	`, recoveryID)
+	return scanRecovery(row)
 }
 
 func (store *Store) GetContextPacket(ctx context.Context, packetID int64) (ContextPacket, error) {
@@ -1433,6 +1530,58 @@ func (store *Store) getApprovalWithTaskTx(ctx context.Context, tx *sql.Tx, appro
 	return approval, task, nil
 }
 
+func (store *Store) getIncidentTx(ctx context.Context, tx *sql.Tx, incidentID int64) (Incident, contextualIDs, error) {
+	row := tx.QueryRowContext(ctx, `
+		SELECT
+			i.id, i.run_id, i.severity, i.status, i.summary, i.details_json, i.opened_at, i.updated_at,
+			t.project_id, t.id, t.scope
+		FROM incidents i
+		LEFT JOIN runs r ON r.id = i.run_id
+		LEFT JOIN tasks t ON t.id = r.task_id
+		WHERE i.id = ?
+	`, incidentID)
+
+	var incident Incident
+	var runID sql.NullInt64
+	var openedAt string
+	var updatedAt string
+	var projectID sql.NullInt64
+	var taskID sql.NullInt64
+	var scope sql.NullString
+	if err := row.Scan(
+		&incident.ID,
+		&runID,
+		&incident.Severity,
+		&incident.Status,
+		&incident.Summary,
+		&incident.DetailsJSON,
+		&openedAt,
+		&updatedAt,
+		&projectID,
+		&taskID,
+		&scope,
+	); err != nil {
+		return Incident{}, contextualIDs{}, err
+	}
+
+	var err error
+	incident.RunID = nullableInt64Ptr(runID)
+	incident.OpenedAt, err = parseTime(openedAt)
+	if err != nil {
+		return Incident{}, contextualIDs{}, err
+	}
+	incident.UpdatedAt, err = parseTime(updatedAt)
+	if err != nil {
+		return Incident{}, contextualIDs{}, err
+	}
+
+	return incident, contextualIDs{
+		ProjectID: nullableInt64Ptr(projectID),
+		TaskID:    nullableInt64Ptr(taskID),
+		Scope:     stringOrDefault(scope, "global"),
+	}, nil
+}
+
 type contextualIDs struct {
 	ProjectID *int64
 	TaskID    *int64
@@ -1778,6 +1927,76 @@ func scanApproval(row interface{ Scan(...any) error }) (Approval, error) {
 	return approval, nil
 }
 
+func scanIncident(row interface{ Scan(...any) error }) (Incident, error) {
+	var incident Incident
+	var runID sql.NullInt64
+	var openedAt string
+	var updatedAt string
+	if err := row.Scan(
+		&incident.ID,
+		&runID,
+		&incident.Severity,
+		&incident.Status,
+		&incident.Summary,
+		&incident.DetailsJSON,
+		&openedAt,
+		&updatedAt,
+	); err != nil {
+		return Incident{}, err
+	}
+
+	var err error
+	incident.RunID = nullableInt64Ptr(runID)
+	incident.OpenedAt, err = parseTime(openedAt)
+	if err != nil {
+		return Incident{}, err
+	}
+	incident.UpdatedAt, err = parseTime(updatedAt)
+	if err != nil {
+		return Incident{}, err
+	}
+	return incident, nil
+}
+
+func scanRecovery(row interface{ Scan(...any) error }) (Recovery, error) {
+	var recovery Recovery
+	var incidentID sql.NullInt64
+	var runID sql.NullInt64
+	var startedAt string
+	var finishedAt sql.NullString
+	var updatedAt string
+	if err := row.Scan(
+		&recovery.ID,
+		&incidentID,
+		&runID,
+		&recovery.Status,
+		&recovery.Strategy,
+		&recovery.DetailsJSON,
+		&startedAt,
+		&finishedAt,
+		&updatedAt,
+	); err != nil {
+		return Recovery{}, err
+	}
+
+	var err error
+	recovery.IncidentID = nullableInt64Ptr(incidentID)
+	recovery.RunID = nullableInt64Ptr(runID)
+	recovery.StartedAt, err = parseTime(startedAt)
+	if err != nil {
+		return Recovery{}, err
+	}
+	recovery.FinishedAt, err = parseNullableTime(finishedAt)
+	if err != nil {
+		return Recovery{}, err
+	}
+	recovery.UpdatedAt, err = parseTime(updatedAt)
+	if err != nil {
+		return Recovery{}, err
+	}
+	return recovery, nil
+}
+
 func scanContextPacket(row interface{ Scan(...any) error }) (ContextPacket, error) {
 	var packet ContextPacket
 	var taskID sql.NullInt64
@@ -1926,6 +2145,25 @@ func scanEvent(rows *sql.Rows) (runtimeevents.Record, error) {
 	record.Payload = []byte(payload)
 	record.OccurredAt = parsed
 	return record, nil
+}
+
+func incidentStatusEvent(previousStatus string, status string, reason string) (runtimeevents.Type, any, bool) {
+	switch status {
+	case "resolved":
+		return runtimeevents.EventIncidentResolved, runtimeevents.IncidentResolvedPayload{
+			PreviousStatus: previousStatus,
+			Status:         status,
+			Reason:         reason,
+		}, true
+	case "escalated":
+		return runtimeevents.EventIncidentEscalated, runtimeevents.IncidentEscalatedPayload{
+			PreviousStatus: previousStatus,
+			Status:         status,
+			Reason:         reason,
+		}, true
+	default:
+		return "", nil, false
+	}
 }
 
 func mapWorktreeLeaseError(err error) error {
