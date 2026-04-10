@@ -53,8 +53,7 @@ func TestRunHealthcheckHealthyReturnsNil(t *testing.T) {
 }
 
 func TestRunHealthcheckFreshRuntimeReturnsNil(t *testing.T) {
-	t.Parallel()
-
+	configureServeHarnessDriver(t)
 	root := createRuntimeRoot(t)
 
 	var stdout bytes.Buffer
@@ -474,4 +473,20 @@ func writeRuntimeConfig(t *testing.T, root string, content string) {
 	if err := os.WriteFile(filepath.Join(root, "config", "odin.yaml"), []byte(content), 0o644); err != nil {
 		t.Fatalf("write odin config: %v", err)
 	}
+}
+
+func configureServeHarnessDriver(t *testing.T) {
+	t.Helper()
+
+	path := filepath.Join(t.TempDir(), "codex-driver.sh")
+	if err := os.WriteFile(path, []byte(`#!/usr/bin/env bash
+cat >/dev/null
+printf '{"status":"completed","output":"driver test ok","external_id":"fixture-driver"}'
+`), 0o755); err != nil {
+		t.Fatalf("WriteFile(driver) error = %v", err)
+	}
+	if err := os.Chmod(path, 0o755); err != nil {
+		t.Fatalf("Chmod(driver) error = %v", err)
+	}
+	t.Setenv("ODIN_CODEX_DRIVER", path)
 }

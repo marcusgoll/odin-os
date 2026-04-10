@@ -64,8 +64,7 @@ func TestServiceRespondAnswersModeQuestion(t *testing.T) {
 }
 
 func TestServiceRespondUsesExecutorBackedFallback(t *testing.T) {
-	t.Parallel()
-
+	configureConversationHarnessDriver(t)
 	service, _ := newTestService(t)
 
 	result, err := service.Respond(context.Background(), Request{
@@ -282,6 +281,22 @@ func newTestService(t *testing.T) (Service, *sqlite.Store) {
 		ExecutorConfig: mustLoadExecutorConfig(t),
 		Executors:      router.DefaultCatalog(),
 	}, store
+}
+
+func configureConversationHarnessDriver(t *testing.T) {
+	t.Helper()
+
+	path := filepath.Join(t.TempDir(), "codex-driver.sh")
+	if err := os.WriteFile(path, []byte(`#!/usr/bin/env bash
+cat >/dev/null
+printf '{"status":"completed","output":"codex_headless says hello","external_id":"fixture-driver"}'
+`), 0o755); err != nil {
+		t.Fatalf("WriteFile(driver) error = %v", err)
+	}
+	if err := os.Chmod(path, 0o755); err != nil {
+		t.Fatalf("Chmod(driver) error = %v", err)
+	}
+	t.Setenv("ODIN_CODEX_DRIVER", path)
 }
 
 func mustLoadExecutorConfig(t *testing.T) router.Config {

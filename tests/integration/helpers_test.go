@@ -63,6 +63,24 @@ func runOdinCommand(t *testing.T, repoRoot string, binaryPath string, runtimeRoo
 	return string(output), err
 }
 
+func acceptanceHarnessDriverEnv(t *testing.T) map[string]string {
+	t.Helper()
+
+	path := filepath.Join(t.TempDir(), "codex-driver.sh")
+	if err := os.WriteFile(path, []byte(`#!/usr/bin/env bash
+cat >/dev/null
+printf '{"status":"completed","output":"driver test ok","external_id":"fixture-driver"}'
+`), 0o755); err != nil {
+		t.Fatalf("WriteFile(driver) error = %v", err)
+	}
+	if err := os.Chmod(path, 0o755); err != nil {
+		t.Fatalf("Chmod(driver) error = %v", err)
+	}
+	return map[string]string{
+		"ODIN_CODEX_DRIVER": path,
+	}
+}
+
 func requirePathExists(t *testing.T, path string) {
 	t.Helper()
 

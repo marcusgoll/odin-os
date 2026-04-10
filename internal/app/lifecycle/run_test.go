@@ -187,8 +187,7 @@ func TestRunTaskCreateJSON(t *testing.T) {
 }
 
 func TestRunTaskRunJSON(t *testing.T) {
-	t.Parallel()
-
+	configureLifecycleHarnessDriver(t)
 	root := testRepoRoot(t)
 	cleanupTaskRunWorktree(t, testProjectKey)
 	if err := Run(context.Background(), root, []string{"project", "select", testProjectKey}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
@@ -379,4 +378,20 @@ func cleanupTaskRunWorktree(t *testing.T, projectKey string) {
 	if err := os.RemoveAll(path); err != nil {
 		t.Fatalf("RemoveAll(%s) error = %v", path, err)
 	}
+}
+
+func configureLifecycleHarnessDriver(t *testing.T) {
+	t.Helper()
+
+	path := filepath.Join(t.TempDir(), "codex-driver.sh")
+	if err := os.WriteFile(path, []byte(`#!/usr/bin/env bash
+cat >/dev/null
+printf '{"status":"completed","output":"driver test ok","external_id":"fixture-driver"}'
+`), 0o755); err != nil {
+		t.Fatalf("WriteFile(driver) error = %v", err)
+	}
+	if err := os.Chmod(path, 0o755); err != nil {
+		t.Fatalf("Chmod(driver) error = %v", err)
+	}
+	t.Setenv("ODIN_CODEX_DRIVER", path)
 }

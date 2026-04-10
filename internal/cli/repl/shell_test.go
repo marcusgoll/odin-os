@@ -162,8 +162,7 @@ func TestActModeCreatesTaskInProjectScope(t *testing.T) {
 }
 
 func TestActModeCreatesTaskAndAttemptsRunImmediately(t *testing.T) {
-	t.Parallel()
-
+	configureShellHarnessDriver(t)
 	env := newTestEnvironment(t)
 	shell, err := New(env)
 	if err != nil {
@@ -210,8 +209,7 @@ func TestActModeCreatesTaskAndAttemptsRunImmediately(t *testing.T) {
 }
 
 func TestActModePrintsPolicyDenialInlineWhenMutationBlocked(t *testing.T) {
-	t.Parallel()
-
+	configureShellHarnessDriver(t)
 	env := newTestEnvironment(t)
 	shell, err := New(env)
 	if err != nil {
@@ -252,8 +250,7 @@ func TestActModePrintsPolicyDenialInlineWhenMutationBlocked(t *testing.T) {
 }
 
 func TestActModePrintsCompletedResultInlineWhenExecutionSucceeds(t *testing.T) {
-	t.Parallel()
-
+	configureShellHarnessDriver(t)
 	env := newTestEnvironment(t)
 	shell, err := New(env)
 	if err != nil {
@@ -382,7 +379,7 @@ func TestDoctorCommandSupportsJSONOutput(t *testing.T) {
 	}
 }
 
-func TestShellHelpIncludesTransitionCommands(t *testing.T) {
+func TestShellHelpIncludesExplicitCompatibilitySurface(t *testing.T) {
 	t.Parallel()
 
 	env := newTestEnvironment(t)
@@ -396,9 +393,21 @@ func TestShellHelpIncludesTransitionCommands(t *testing.T) {
 		t.Fatalf("HandleLine(/help) error = %v", err)
 	}
 
-	for _, want := range []string{"/transition", "/observe", "/compare"} {
+	for _, want := range []string{
+		"prefer explicit cli commands outside the repl",
+		"odin help",
+		"odin status --json",
+		"odin task run --project <key> --title <title>",
+		"odin repl",
+		"/transition",
+	} {
 		if !strings.Contains(output.String(), want) {
 			t.Fatalf("help output = %q, want %q", output.String(), want)
+		}
+	}
+	for _, stale := range []string{"/observe", "/compare"} {
+		if strings.Contains(output.String(), stale) {
+			t.Fatalf("help output = %q, do not want stale command %q", output.String(), stale)
 		}
 	}
 }
@@ -672,6 +681,22 @@ func newTestEnvironment(t *testing.T) Environment {
 			WorktreeRoot: t.TempDir(),
 		},
 	}
+}
+
+func configureShellHarnessDriver(t *testing.T) {
+	t.Helper()
+
+	path := filepath.Join(t.TempDir(), "codex-driver.sh")
+	if err := os.WriteFile(path, []byte(`#!/usr/bin/env bash
+cat >/dev/null
+printf '{"status":"completed","output":"driver test ok","external_id":"fixture-driver"}'
+`), 0o755); err != nil {
+		t.Fatalf("WriteFile(driver) error = %v", err)
+	}
+	if err := os.Chmod(path, 0o755); err != nil {
+		t.Fatalf("Chmod(driver) error = %v", err)
+	}
+	t.Setenv("ODIN_CODEX_DRIVER", path)
 }
 
 type shellTestGit struct{}
