@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 	"time"
 
@@ -14,10 +15,14 @@ import (
 	"odin-os/internal/cli/render"
 	"odin-os/internal/cli/scope"
 	"odin-os/internal/core/projects"
+	"odin-os/internal/executors/contract"
+	executorrouter "odin-os/internal/executors/router"
+	convsvc "odin-os/internal/runtime/conversation"
 	healthsvc "odin-os/internal/runtime/health"
 	jobsvc "odin-os/internal/runtime/jobs"
 	runsvc "odin-os/internal/runtime/runs"
 	"odin-os/internal/store/sqlite"
+	"odin-os/internal/vcs/leases"
 )
 
 type Environment struct {
@@ -25,15 +30,19 @@ type Environment struct {
 	Registry            projects.Registry
 	RegistryDiagnostics []projects.Diagnostic
 	SessionStore        SessionStore
+	ExecutorConfig      executorrouter.Config
+	Executors           map[string]contract.Executor
+	Leases              leases.Manager
 }
 
 type Shell struct {
-	env         Environment
-	state       State
-	health      healthsvc.Service
-	jobs        jobsvc.Service
-	runs        runsvc.Service
-	transitions projects.Service
+	env          Environment
+	state        State
+	health       healthsvc.Service
+	jobs         jobsvc.Service
+	runs         runsvc.Service
+	transitions  projects.Service
+	conversation convsvc.Service
 }
 
 const transitionUsage = "/transition [status] | /transition set <state> [allow=<csv>] [confirm] because <reason...>"
@@ -45,6 +54,10 @@ func New(env Environment) (*Shell, error) {
 	}
 
 	state := ResolveStartupState(cache, env.Registry)
+	leaseManager := env.Leases
+	if leaseManager.Store == nil {
+		leaseManager.Store = env.Store
+	}
 	shell := &Shell{
 		env:   env,
 		state: state,
@@ -52,15 +65,26 @@ func New(env Environment) (*Shell, error) {
 			DB: env.Store.DB(),
 		},
 		jobs: jobsvc.Service{
-			Store:    env.Store,
-			Registry: env.Registry,
-			Now:      time.Now,
+			Store:          env.Store,
+			Registry:       env.Registry,
+			Executors:      env.Executors,
+			ExecutorConfig: env.ExecutorConfig,
+			Transitions:    projects.Service{Store: env.Store},
+			Leases:         leaseManager,
+			Now:            time.Now,
 		},
 		runs: runsvc.Service{
 			DB: env.Store.DB(),
 		},
 		transitions: projects.Service{
 			Store: env.Store,
+		},
+		conversation: convsvc.Service{
+			Store:               env.Store,
+			Registry:            env.Registry,
+			RegistryDiagnostics: env.RegistryDiagnostics,
+			ExecutorConfig:      env.ExecutorConfig,
+			Executors:           env.Executors,
 		},
 	}
 
@@ -118,8 +142,21 @@ func (shell *Shell) HandleLine(ctx context.Context, line string, output io.Write
 	if err := shell.persistState(); err != nil {
 		return err
 	}
-	_, err = fmt.Fprintf(output, "created task %s (%s)\n", task.Key, task.Status)
-	return err
+	if _, err := fmt.Fprintf(output, "created task %s (%s)\n", task.Key, task.Status); err != nil {
+		return err
+	}
+
+	outcome, runErr := shell.jobs.ExecuteTask(ctx, task.ID)
+	if outcome.Task.ID != 0 {
+		shell.state.ActiveTask = outcome.Task.Key
+	}
+	if outcome.Run != nil {
+		shell.state.ActiveRun = strconv.FormatInt(outcome.Run.ID, 10)
+	}
+	if err := shell.persistState(); err != nil {
+		return err
+	}
+	return shell.renderActOutcome(output, outcome, runErr)
 }
 
 func (shell *Shell) renderPrompt(ctx context.Context, output io.Writer) error {
@@ -190,29 +227,33 @@ func (shell *Shell) handleCommand(ctx context.Context, command commands.Command,
 }
 
 func (shell *Shell) handleAsk(ctx context.Context, line string, output io.Writer) error {
-	switch commands.RouteAskIntent(line) {
-	case commands.IntentHelp:
-		return shell.handleCommand(ctx, commands.Command{Name: "help"}, output)
-	case commands.IntentMode:
-		return shell.handleCommand(ctx, commands.Command{Name: "mode"}, output)
-	case commands.IntentScope:
-		return shell.handleCommand(ctx, commands.Command{Name: "scope"}, output)
-	case commands.IntentProject:
-		return shell.handleCommand(ctx, commands.Command{Name: "project"}, output)
-	case commands.IntentJobs:
-		return shell.handleCommand(ctx, commands.Command{Name: "jobs"}, output)
-	case commands.IntentRuns:
-		return shell.handleCommand(ctx, commands.Command{Name: "runs"}, output)
-	case commands.IntentApprovals:
-		return shell.handleCommand(ctx, commands.Command{Name: "approvals"}, output)
-	case commands.IntentLogs:
-		return shell.handleCommand(ctx, commands.Command{Name: "logs"}, output)
-	case commands.IntentDoctor:
-		return shell.handleCommand(ctx, commands.Command{Name: "doctor"}, output)
-	default:
-		_, err := fmt.Fprintln(output, "local ask is limited in Phase 05. Try /help, /scope, /project, /jobs, /runs, /approvals, /logs, or /doctor.")
+	result, err := shell.conversation.Respond(ctx, convsvc.Request{
+		Scope:  shell.state.Scope,
+		Mode:   string(shell.state.Mode),
+		Prompt: line,
+	})
+	if err != nil {
+		_, writeErr := fmt.Fprintf(output, "ask failed: %v\n", err)
+		return writeErr
+	}
+	_, err = fmt.Fprintln(output, result.Answer)
+	return err
+}
+
+func (shell *Shell) renderActOutcome(output io.Writer, outcome jobsvc.ExecutionOutcome, runErr error) error {
+	if outcome.Run != nil {
+		summary := strings.TrimSpace(outcome.Run.Summary)
+		if summary == "" {
+			summary = "no summary"
+		}
+		_, err := fmt.Fprintf(output, "run %d %s %s: %s\n", outcome.Run.ID, outcome.Run.Executor, outcome.Run.Status, summary)
 		return err
 	}
+	if runErr != nil {
+		_, err := fmt.Fprintf(output, "run failed before start: %v\n", runErr)
+		return err
+	}
+	return nil
 }
 
 func (shell *Shell) handleMode(args []string, output io.Writer) error {

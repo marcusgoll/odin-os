@@ -210,15 +210,15 @@ func TestAlphaAcceptance(t *testing.T) {
 
 	t.Run("cli shell supports ask and act with explicit scope visibility", func(t *testing.T) {
 		runtimeRoot := t.TempDir()
-		output, err := runOdinCommand(t, repoRoot, odinBinary, runtimeRoot, nil, "what is my scope?\n/project odin-core\n/mode act\nalpha acceptance cli task\n/quit\n")
+		output, err := runOdinCommand(t, repoRoot, odinBinary, runtimeRoot, nil, "hello there\n/project odin-core\n/mode act\nalpha acceptance cli task\n/quit\n")
 		if err != nil {
 			t.Fatalf("runOdinCommand(interactive) error = %v\n%s", err, output)
 		}
 		if !strings.Contains(output, "scope=global mode=ask") {
 			t.Fatalf("interactive output missing global ask header: %q", output)
 		}
-		if !strings.Contains(output, "scope=global") {
-			t.Fatalf("interactive output missing ask scope response: %q", output)
+		if strings.Contains(output, "Phase 05") {
+			t.Fatalf("interactive output still uses placeholder ask response: %q", output)
 		}
 		if !strings.Contains(output, "project=odin-core scope=odin-core") {
 			t.Fatalf("interactive output missing project switch: %q", output)
@@ -229,6 +229,9 @@ func TestAlphaAcceptance(t *testing.T) {
 		if !strings.Contains(output, "created task") {
 			t.Fatalf("interactive output missing task creation: %q", output)
 		}
+		if !strings.Contains(output, "run") {
+			t.Fatalf("interactive output missing immediate run visibility: %q", output)
+		}
 
 		store := openRuntimeStore(t, runtimeRoot)
 		defer store.Close()
@@ -238,6 +241,13 @@ func TestAlphaAcceptance(t *testing.T) {
 		}
 		if len(views) == 0 {
 			t.Fatalf("task views = 0, want created task from act mode")
+		}
+		runViews, err := projections.ListRunSummaryViews(ctx, store.DB())
+		if err != nil {
+			t.Fatalf("ListRunSummaryViews() error = %v", err)
+		}
+		if len(runViews) == 0 {
+			t.Fatalf("run views = 0, want immediate act run visibility")
 		}
 	})
 
@@ -477,7 +487,10 @@ func TestAlphaAcceptance(t *testing.T) {
 		defer store.Close()
 		seedHealthyObservability(t, ctx, store, now)
 
-		report, err := healthsvc.Service{DB: store.DB()}.Doctor(ctx, true)
+		report, err := healthsvc.Service{
+			DB:  store.DB(),
+			Now: func() time.Time { return now },
+		}.Doctor(ctx, true)
 		if err != nil {
 			t.Fatalf("Doctor() error = %v", err)
 		}

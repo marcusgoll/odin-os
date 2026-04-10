@@ -35,7 +35,10 @@ func TestRouteAskIntent(t *testing.T) {
 		{input: "what scope am i in?", want: IntentScope},
 		{input: "show approvals waiting", want: IntentApprovals},
 		{input: "show runs", want: IntentRuns},
+		{input: "show logs", want: IntentLogs},
 		{input: "help", want: IntentHelp},
+		{input: "can you run through the release plan?", want: IntentUnknown},
+		{input: "log this idea for later", want: IntentUnknown},
 		{input: "write a refactor", want: IntentUnknown},
 	}
 

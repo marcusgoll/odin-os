@@ -78,6 +78,13 @@ func Run(ctx context.Context, root string, args []string, stdin io.Reader, stdou
 		Registry:            app.Registry,
 		RegistryDiagnostics: app.RegistryDiagnostics,
 		SessionStore:        app.SessionStore,
+		ExecutorConfig:      app.ExecutorConfig,
+		Executors:           app.Executors,
+		Leases: leases.Manager{
+			Store:        app.Store,
+			Git:          gitadapter.Adapter{},
+			WorktreeRoot: worktrees.DefaultRoot(),
+		},
 	})
 	if err != nil {
 		return err

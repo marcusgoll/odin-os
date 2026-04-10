@@ -222,6 +222,177 @@ func TestExecuteNextQueuedRejectsShadowModeMutation(t *testing.T) {
 	}
 }
 
+func TestForegroundActExecutionPersistsTranscriptAndEpisode(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openJobStore(t)
+	defer store.Close()
+
+	registry := writeRegistry(t)
+	service := Service{
+		Store:          store,
+		Registry:       registry,
+		Executors:      router.DefaultCatalog(),
+		ExecutorConfig: mustLoadExecutorConfig(t),
+		Transitions:    projects.Service{Store: store},
+		Leases: leases.Manager{
+			Store:        store,
+			Git:          &jobTestGit{},
+			WorktreeRoot: t.TempDir(),
+		},
+		Now: func() time.Time {
+			return time.Date(2026, 4, 9, 12, 0, 0, 0, time.UTC)
+		},
+	}
+
+	task, err := service.CreateTaskFromAct(ctx, scope.Resolution{
+		Kind:       scope.ScopeProject,
+		ProjectKey: "alpha",
+	}, "Persist act transcript")
+	if err != nil {
+		t.Fatalf("CreateTaskFromAct() error = %v", err)
+	}
+
+	project, err := store.GetProjectByKey(ctx, "alpha")
+	if err != nil {
+		t.Fatalf("GetProjectByKey(alpha) error = %v", err)
+	}
+	if _, err := service.Transitions.SetTransitionState(ctx, projects.TransitionStateInput{
+		ProjectID:      project.ID,
+		Actor:          projects.TransitionControllerOdinOS,
+		TargetState:    projects.TransitionStateLimitedAction,
+		LimitedActions: []string{"run_task"},
+		ChangedBy:      "test",
+		Notes:          "allow foreground execution",
+	}); err != nil {
+		t.Fatalf("SetTransitionState(limited_action) error = %v", err)
+	}
+
+	outcome, err := service.ExecuteTask(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("ExecuteTask() error = %v", err)
+	}
+	if outcome.Run == nil {
+		t.Fatal("Run = nil, want completed run")
+	}
+
+	transcripts, err := store.ListConversationTranscripts(ctx, sqlite.ListConversationTranscriptsParams{
+		ProjectID: &project.ID,
+		TaskID:    &task.ID,
+		RunID:     &outcome.Run.ID,
+		Scope:     "project",
+		ScopeKey:  project.Key,
+		Mode:      "act",
+	})
+	if err != nil {
+		t.Fatalf("ListConversationTranscripts() error = %v", err)
+	}
+	if len(transcripts) != 1 {
+		t.Fatalf("transcripts len = %d, want 1", len(transcripts))
+	}
+
+	summaries, err := store.ListMemorySummaries(ctx, sqlite.ListMemorySummariesParams{
+		ProjectID:  &project.ID,
+		TaskID:     &task.ID,
+		RunID:      &outcome.Run.ID,
+		Scope:      "project",
+		ScopeKey:   project.Key,
+		MemoryType: "episode",
+	})
+	if err != nil {
+		t.Fatalf("ListMemorySummaries() error = %v", err)
+	}
+	if len(summaries) != 1 {
+		t.Fatalf("summaries len = %d, want 1", len(summaries))
+	}
+}
+
+func TestForegroundActDenialPersistsTranscriptAndEpisode(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openJobStore(t)
+	defer store.Close()
+
+	registry := writeRegistry(t)
+	service := Service{
+		Store:          store,
+		Registry:       registry,
+		Executors:      router.DefaultCatalog(),
+		ExecutorConfig: mustLoadExecutorConfig(t),
+		Transitions:    projects.Service{Store: store},
+		Leases: leases.Manager{
+			Store:        store,
+			Git:          &jobTestGit{},
+			WorktreeRoot: t.TempDir(),
+		},
+		Now: time.Now,
+	}
+
+	task, err := service.CreateTaskFromAct(ctx, scope.Resolution{
+		Kind:       scope.ScopeProject,
+		ProjectKey: "alpha",
+	}, "Persist denied act transcript")
+	if err != nil {
+		t.Fatalf("CreateTaskFromAct() error = %v", err)
+	}
+
+	project, err := store.GetProjectByKey(ctx, "alpha")
+	if err != nil {
+		t.Fatalf("GetProjectByKey(alpha) error = %v", err)
+	}
+	if _, err := service.Transitions.SetTransitionState(ctx, projects.TransitionStateInput{
+		ProjectID:   project.ID,
+		Actor:       projects.TransitionControllerOdinOS,
+		TargetState: projects.TransitionStateShadow,
+		ChangedBy:   "test",
+	}); err != nil {
+		t.Fatalf("SetTransitionState(shadow) error = %v", err)
+	}
+
+	outcome, err := service.ExecuteTask(ctx, task.ID)
+	if err == nil {
+		t.Fatalf("ExecuteTask() error = nil, want transition denial")
+	}
+	if outcome.Run == nil {
+		t.Fatal("Run = nil, want failed run record")
+	}
+
+	transcripts, err := store.ListConversationTranscripts(ctx, sqlite.ListConversationTranscriptsParams{
+		ProjectID: &project.ID,
+		TaskID:    &task.ID,
+		RunID:     &outcome.Run.ID,
+		Scope:     "project",
+		ScopeKey:  project.Key,
+		Mode:      "act",
+	})
+	if err != nil {
+		t.Fatalf("ListConversationTranscripts() error = %v", err)
+	}
+	if len(transcripts) != 1 {
+		t.Fatalf("transcripts len = %d, want 1", len(transcripts))
+	}
+	if transcripts[0].Response == "" {
+		t.Fatalf("Response = empty, want denial summary")
+	}
+
+	summaries, err := store.ListMemorySummaries(ctx, sqlite.ListMemorySummariesParams{
+		ProjectID:  &project.ID,
+		TaskID:     &task.ID,
+		RunID:      &outcome.Run.ID,
+		Scope:      "project",
+		ScopeKey:   project.Key,
+		MemoryType: "episode",
+	})
+	if err != nil {
+		t.Fatalf("ListMemorySummaries() error = %v", err)
+	}
+	if len(summaries) != 1 {
+		t.Fatalf("summaries len = %d, want 1", len(summaries))
+	}
+}
+
 type jobTestGit struct{}
 
 func (jobTestGit) BranchExists(context.Context, string, string) (bool, error) { return false, nil }

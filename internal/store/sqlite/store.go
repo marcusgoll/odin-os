@@ -893,6 +893,357 @@ func (store *Store) CreateContextPacket(ctx context.Context, params CreateContex
 	return packet, err
 }
 
+func (store *Store) RecordConversationTranscript(ctx context.Context, params RecordConversationTranscriptParams) (ConversationTranscript, error) {
+	now := store.now()
+	var transcript ConversationTranscript
+
+	params.Scope = strings.TrimSpace(params.Scope)
+	params.ScopeKey = strings.TrimSpace(params.ScopeKey)
+	params.Mode = strings.TrimSpace(params.Mode)
+	if params.Scope == "" {
+		return ConversationTranscript{}, fmt.Errorf("conversation transcript scope is required")
+	}
+	if params.ScopeKey == "" {
+		return ConversationTranscript{}, fmt.Errorf("conversation transcript scope key is required")
+	}
+	if params.Mode == "" {
+		params.Mode = "ask"
+	}
+
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		if _, _, _, err := store.validateProjectTaskRunLineageTx(ctx, tx, params.ProjectID, params.TaskID, params.RunID, params.Scope, params.ScopeKey, "conversation transcript"); err != nil {
+			return err
+		}
+
+		result, err := tx.ExecContext(ctx, `
+			INSERT INTO conversation_transcripts (
+				project_id,
+				task_id,
+				run_id,
+				scope,
+				scope_key,
+				mode,
+				prompt,
+				response,
+				tool_summary,
+				executor,
+				created_at
+			)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`,
+			nullInt64(params.ProjectID),
+			nullInt64(params.TaskID),
+			nullInt64(params.RunID),
+			params.Scope,
+			params.ScopeKey,
+			params.Mode,
+			params.Prompt,
+			params.Response,
+			params.ToolSummary,
+			params.Executor,
+			formatTime(now),
+		)
+		if err != nil {
+			return err
+		}
+
+		transcriptID, err := result.LastInsertId()
+		if err != nil {
+			return err
+		}
+
+		transcript = ConversationTranscript{
+			ID:          transcriptID,
+			ProjectID:   params.ProjectID,
+			TaskID:      params.TaskID,
+			RunID:       params.RunID,
+			Scope:       params.Scope,
+			ScopeKey:    params.ScopeKey,
+			Mode:        params.Mode,
+			Prompt:      params.Prompt,
+			Response:    params.Response,
+			ToolSummary: params.ToolSummary,
+			Executor:    params.Executor,
+			CreatedAt:   now,
+		}
+
+		return appendEventTx(ctx, tx, eventInsert{
+			StreamType: runtimeevents.StreamConversation,
+			StreamID:   transcript.ID,
+			EventType:  runtimeevents.EventConversationTranscriptRecorded,
+			Scope:      transcript.Scope,
+			ProjectID:  transcript.ProjectID,
+			TaskID:     transcript.TaskID,
+			RunID:      transcript.RunID,
+			Payload: runtimeevents.ConversationTranscriptRecordedPayload{
+				Scope:    transcript.Scope,
+				ScopeKey: transcript.ScopeKey,
+				Mode:     transcript.Mode,
+				Executor: transcript.Executor,
+				TaskID:   transcript.TaskID,
+				RunID:    transcript.RunID,
+			},
+			OccurredAt: now,
+		})
+	})
+
+	return transcript, err
+}
+
+func (store *Store) ListConversationTranscripts(ctx context.Context, params ListConversationTranscriptsParams) ([]ConversationTranscript, error) {
+	query := `
+		SELECT
+			id,
+			project_id,
+			task_id,
+			run_id,
+			scope,
+			scope_key,
+			mode,
+			prompt,
+			response,
+			tool_summary,
+			executor,
+			created_at
+		FROM conversation_transcripts
+		WHERE 1 = 1
+	`
+	var args []any
+	if params.ProjectID != nil {
+		query += ` AND project_id = ?`
+		args = append(args, *params.ProjectID)
+	}
+	if params.TaskID != nil {
+		query += ` AND task_id = ?`
+		args = append(args, *params.TaskID)
+	}
+	if params.RunID != nil {
+		query += ` AND run_id = ?`
+		args = append(args, *params.RunID)
+	}
+	if params.Scope != "" {
+		query += ` AND scope = ?`
+		args = append(args, params.Scope)
+	}
+	if params.ScopeKey != "" {
+		query += ` AND scope_key = ?`
+		args = append(args, params.ScopeKey)
+	}
+	if params.Mode != "" {
+		query += ` AND mode = ?`
+		args = append(args, params.Mode)
+	}
+	query += ` ORDER BY id ASC`
+
+	rows, err := store.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var transcripts []ConversationTranscript
+	for rows.Next() {
+		transcript, err := scanConversationTranscript(rows)
+		if err != nil {
+			return nil, err
+		}
+		transcripts = append(transcripts, transcript)
+	}
+
+	return transcripts, rows.Err()
+}
+
+func (store *Store) RecordMemorySummary(ctx context.Context, params RecordMemorySummaryParams) (MemorySummary, error) {
+	now := store.now()
+	var summary MemorySummary
+
+	params.Scope = strings.TrimSpace(params.Scope)
+	params.ScopeKey = strings.TrimSpace(params.ScopeKey)
+	params.MemoryType = strings.TrimSpace(params.MemoryType)
+	if params.Scope == "" {
+		return MemorySummary{}, fmt.Errorf("memory summary scope is required")
+	}
+	if params.ScopeKey == "" {
+		return MemorySummary{}, fmt.Errorf("memory summary scope key is required")
+	}
+	if params.MemoryType == "" {
+		return MemorySummary{}, fmt.Errorf("memory summary type is required")
+	}
+
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		if _, _, _, err := store.validateProjectTaskRunLineageTx(ctx, tx, params.ProjectID, params.TaskID, params.RunID, params.Scope, params.ScopeKey, "memory summary"); err != nil {
+			return err
+		}
+		if params.SourceTranscriptID != nil {
+			transcript, err := store.getConversationTranscriptTx(ctx, tx, *params.SourceTranscriptID)
+			if err != nil {
+				return err
+			}
+			if params.Scope != transcript.Scope || params.ScopeKey != transcript.ScopeKey {
+				return fmt.Errorf("memory summary scope %q/%q does not match source transcript scope %q/%q", params.Scope, params.ScopeKey, transcript.Scope, transcript.ScopeKey)
+			}
+			switch {
+			case transcript.ProjectID != nil && params.ProjectID == nil:
+				return fmt.Errorf("memory summary sourced from transcript %d requires matching project", transcript.ID)
+			case transcript.ProjectID == nil && params.ProjectID != nil:
+				return fmt.Errorf("memory summary project %d does not match global source transcript %d", *params.ProjectID, transcript.ID)
+			case transcript.ProjectID != nil && params.ProjectID != nil && *transcript.ProjectID != *params.ProjectID:
+				return fmt.Errorf("memory summary project %d does not match source transcript project %d", *params.ProjectID, *transcript.ProjectID)
+			}
+			if params.TaskID != nil {
+				if transcript.TaskID == nil || *transcript.TaskID != *params.TaskID {
+					return fmt.Errorf("memory summary task %d does not match source transcript task", *params.TaskID)
+				}
+			}
+			if params.RunID != nil {
+				if transcript.RunID == nil || *transcript.RunID != *params.RunID {
+					return fmt.Errorf("memory summary run %d does not match source transcript run", *params.RunID)
+				}
+			}
+		}
+
+		result, err := tx.ExecContext(ctx, `
+			INSERT INTO memory_summaries (
+				project_id,
+				source_transcript_id,
+				task_id,
+				run_id,
+				scope,
+				scope_key,
+				memory_type,
+				summary,
+				details_json,
+				created_at,
+				updated_at
+			)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`,
+			nullInt64(params.ProjectID),
+			nullInt64(params.SourceTranscriptID),
+			nullInt64(params.TaskID),
+			nullInt64(params.RunID),
+			params.Scope,
+			params.ScopeKey,
+			params.MemoryType,
+			params.Summary,
+			params.DetailsJSON,
+			formatTime(now),
+			formatTime(now),
+		)
+		if err != nil {
+			return err
+		}
+
+		summaryID, err := result.LastInsertId()
+		if err != nil {
+			return err
+		}
+
+		summary = MemorySummary{
+			ID:                 summaryID,
+			ProjectID:          params.ProjectID,
+			SourceTranscriptID: params.SourceTranscriptID,
+			TaskID:             params.TaskID,
+			RunID:              params.RunID,
+			Scope:              params.Scope,
+			ScopeKey:           params.ScopeKey,
+			MemoryType:         params.MemoryType,
+			Summary:            params.Summary,
+			DetailsJSON:        params.DetailsJSON,
+			CreatedAt:          now,
+			UpdatedAt:          now,
+		}
+
+		return appendEventTx(ctx, tx, eventInsert{
+			StreamType: runtimeevents.StreamMemorySummary,
+			StreamID:   summary.ID,
+			EventType:  runtimeevents.EventMemorySummaryRecorded,
+			Scope:      summary.Scope,
+			ProjectID:  summary.ProjectID,
+			TaskID:     summary.TaskID,
+			RunID:      summary.RunID,
+			Payload: runtimeevents.MemorySummaryRecordedPayload{
+				Scope:              summary.Scope,
+				ScopeKey:           summary.ScopeKey,
+				MemoryType:         summary.MemoryType,
+				SourceTranscriptID: summary.SourceTranscriptID,
+				TaskID:             summary.TaskID,
+				RunID:              summary.RunID,
+			},
+			OccurredAt: now,
+		})
+	})
+
+	return summary, err
+}
+
+func (store *Store) ListMemorySummaries(ctx context.Context, params ListMemorySummariesParams) ([]MemorySummary, error) {
+	query := `
+		SELECT
+			id,
+			project_id,
+			source_transcript_id,
+			task_id,
+			run_id,
+			scope,
+			scope_key,
+			memory_type,
+			summary,
+			details_json,
+			created_at,
+			updated_at
+		FROM memory_summaries
+		WHERE 1 = 1
+	`
+	var args []any
+	if params.ProjectID != nil {
+		query += ` AND project_id = ?`
+		args = append(args, *params.ProjectID)
+	}
+	if params.SourceTranscriptID != nil {
+		query += ` AND source_transcript_id = ?`
+		args = append(args, *params.SourceTranscriptID)
+	}
+	if params.TaskID != nil {
+		query += ` AND task_id = ?`
+		args = append(args, *params.TaskID)
+	}
+	if params.RunID != nil {
+		query += ` AND run_id = ?`
+		args = append(args, *params.RunID)
+	}
+	if params.Scope != "" {
+		query += ` AND scope = ?`
+		args = append(args, params.Scope)
+	}
+	if params.ScopeKey != "" {
+		query += ` AND scope_key = ?`
+		args = append(args, params.ScopeKey)
+	}
+	if params.MemoryType != "" {
+		query += ` AND memory_type = ?`
+		args = append(args, params.MemoryType)
+	}
+	query += ` ORDER BY id ASC`
+
+	rows, err := store.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var summaries []MemorySummary
+	for rows.Next() {
+		summary, err := scanMemorySummary(rows)
+		if err != nil {
+			return nil, err
+		}
+		summaries = append(summaries, summary)
+	}
+
+	return summaries, rows.Err()
+}
+
 func (store *Store) SetProjectTransition(ctx context.Context, params SetProjectTransitionParams) (ProjectTransition, error) {
 	now := store.now()
 	var transition ProjectTransition
@@ -2068,6 +2419,83 @@ func (store *Store) getProjectTx(ctx context.Context, tx *sql.Tx, projectID int6
 	return scanProject(row)
 }
 
+func (store *Store) getRunTx(ctx context.Context, tx *sql.Tx, runID int64) (Run, error) {
+	row := tx.QueryRowContext(ctx, `
+		SELECT id, task_id, executor, status, attempt, started_at, finished_at, summary
+		FROM runs
+		WHERE id = ?
+	`, runID)
+	return scanRun(row)
+}
+
+func (store *Store) getConversationTranscriptTx(ctx context.Context, tx *sql.Tx, transcriptID int64) (ConversationTranscript, error) {
+	row := tx.QueryRowContext(ctx, `
+		SELECT
+			id,
+			project_id,
+			task_id,
+			run_id,
+			scope,
+			scope_key,
+			mode,
+			prompt,
+			response,
+			tool_summary,
+			executor,
+			created_at
+		FROM conversation_transcripts
+		WHERE id = ?
+	`, transcriptID)
+	return scanConversationTranscript(row)
+}
+
+func (store *Store) validateProjectTaskRunLineageTx(ctx context.Context, tx *sql.Tx, projectID *int64, taskID *int64, runID *int64, scope string, scopeKey string, recordLabel string) (Project, Task, Run, error) {
+	var (
+		project Project
+		task    Task
+		run     Run
+		err     error
+	)
+
+	if projectID != nil {
+		project, err = store.getProjectTx(ctx, tx, *projectID)
+		if err != nil {
+			return Project{}, Task{}, Run{}, err
+		}
+		if scope != "global" && strings.TrimSpace(scopeKey) != "" && project.Key != scopeKey {
+			return Project{}, Task{}, Run{}, fmt.Errorf("%s scope key %q does not match project %q", recordLabel, scopeKey, project.Key)
+		}
+	}
+
+	if taskID != nil {
+		task, err = store.getTaskTx(ctx, tx, *taskID)
+		if err != nil {
+			return Project{}, Task{}, Run{}, err
+		}
+		if projectID != nil && task.ProjectID != *projectID {
+			return Project{}, Task{}, Run{}, fmt.Errorf("%s task %d does not belong to project %d", recordLabel, task.ID, *projectID)
+		}
+		if strings.TrimSpace(scope) != "" && task.Scope != scope {
+			return Project{}, Task{}, Run{}, fmt.Errorf("%s task %d has scope %q, want %q", recordLabel, task.ID, task.Scope, scope)
+		}
+	}
+
+	if runID != nil {
+		if taskID == nil {
+			return Project{}, Task{}, Run{}, fmt.Errorf("%s run lineage requires task identity", recordLabel)
+		}
+		run, err = store.getRunTx(ctx, tx, *runID)
+		if err != nil {
+			return Project{}, Task{}, Run{}, err
+		}
+		if run.TaskID != *taskID {
+			return Project{}, Task{}, Run{}, fmt.Errorf("%s run %d does not belong to task %d", recordLabel, run.ID, *taskID)
+		}
+	}
+
+	return project, task, run, nil
+}
+
 func (store *Store) getLearningProposalTx(ctx context.Context, tx *sql.Tx, proposalID int64) (LearningProposal, error) {
 	row := tx.QueryRowContext(ctx, `
 		SELECT id, project_id, proposal_type, scope, target_key, summary, hypothesis, change_payload_json, status, created_by, created_at, updated_at
@@ -2730,6 +3158,81 @@ func scanContextPacket(row interface{ Scan(...any) error }) (ContextPacket, erro
 		return ContextPacket{}, err
 	}
 	return packet, nil
+}
+
+func scanConversationTranscript(row interface{ Scan(...any) error }) (ConversationTranscript, error) {
+	var transcript ConversationTranscript
+	var projectID sql.NullInt64
+	var taskID sql.NullInt64
+	var runID sql.NullInt64
+	var createdAt string
+	if err := row.Scan(
+		&transcript.ID,
+		&projectID,
+		&taskID,
+		&runID,
+		&transcript.Scope,
+		&transcript.ScopeKey,
+		&transcript.Mode,
+		&transcript.Prompt,
+		&transcript.Response,
+		&transcript.ToolSummary,
+		&transcript.Executor,
+		&createdAt,
+	); err != nil {
+		return ConversationTranscript{}, err
+	}
+
+	var err error
+	transcript.ProjectID = nullableInt64Ptr(projectID)
+	transcript.TaskID = nullableInt64Ptr(taskID)
+	transcript.RunID = nullableInt64Ptr(runID)
+	transcript.CreatedAt, err = parseTime(createdAt)
+	if err != nil {
+		return ConversationTranscript{}, err
+	}
+	return transcript, nil
+}
+
+func scanMemorySummary(row interface{ Scan(...any) error }) (MemorySummary, error) {
+	var summary MemorySummary
+	var projectID sql.NullInt64
+	var sourceTranscriptID sql.NullInt64
+	var taskID sql.NullInt64
+	var runID sql.NullInt64
+	var createdAt string
+	var updatedAt string
+	if err := row.Scan(
+		&summary.ID,
+		&projectID,
+		&sourceTranscriptID,
+		&taskID,
+		&runID,
+		&summary.Scope,
+		&summary.ScopeKey,
+		&summary.MemoryType,
+		&summary.Summary,
+		&summary.DetailsJSON,
+		&createdAt,
+		&updatedAt,
+	); err != nil {
+		return MemorySummary{}, err
+	}
+
+	var err error
+	summary.ProjectID = nullableInt64Ptr(projectID)
+	summary.SourceTranscriptID = nullableInt64Ptr(sourceTranscriptID)
+	summary.TaskID = nullableInt64Ptr(taskID)
+	summary.RunID = nullableInt64Ptr(runID)
+	summary.CreatedAt, err = parseTime(createdAt)
+	if err != nil {
+		return MemorySummary{}, err
+	}
+	summary.UpdatedAt, err = parseTime(updatedAt)
+	if err != nil {
+		return MemorySummary{}, err
+	}
+	return summary, nil
 }
 
 func scanProjectTransition(row interface{ Scan(...any) error }) (ProjectTransition, error) {

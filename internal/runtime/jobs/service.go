@@ -3,6 +3,7 @@ package jobs
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -24,6 +25,11 @@ type Service struct {
 	Transitions    projects.Service
 	Leases         leases.Manager
 	Now            func() time.Time
+}
+
+type ExecutionOutcome struct {
+	Task sqlite.Task
+	Run  *sqlite.Run
 }
 
 func (service Service) List(ctx context.Context, resolved scope.Resolution) ([]projections.TaskStatusView, error) {
@@ -85,9 +91,23 @@ func (service Service) ExecuteNextQueued(ctx context.Context) error {
 		return err
 	}
 
+	_, err = service.ExecuteTask(ctx, task.ID)
+	return err
+}
+
+func (service Service) ExecuteTask(ctx context.Context, taskID int64) (ExecutionOutcome, error) {
+	if service.Store == nil {
+		return ExecutionOutcome{}, fmt.Errorf("job store is required")
+	}
+
+	task, err := service.Store.GetTask(ctx, taskID)
+	if err != nil {
+		return ExecutionOutcome{}, err
+	}
+
 	project, err := service.Store.GetProject(ctx, task.ProjectID)
 	if err != nil {
-		return err
+		return ExecutionOutcome{}, err
 	}
 	manifest, ok := service.Registry.Lookup(project.Key)
 	if !ok {
@@ -95,7 +115,11 @@ func (service Service) ExecuteNextQueued(ctx context.Context) error {
 			TaskID: task.ID,
 			Status: "failed",
 		})
-		return fmt.Errorf("unknown manifest for project %q", project.Key)
+		failedTask, loadErr := service.Store.GetTask(ctx, task.ID)
+		if loadErr == nil {
+			return ExecutionOutcome{Task: failedTask}, fmt.Errorf("unknown manifest for project %q", project.Key)
+		}
+		return ExecutionOutcome{}, fmt.Errorf("unknown manifest for project %q", project.Key)
 	}
 
 	executors := service.Executors
@@ -108,7 +132,7 @@ func (service Service) ExecuteNextQueued(ctx context.Context) error {
 
 	config, err := service.executionConfig(ctx)
 	if err != nil {
-		return err
+		return ExecutionOutcome{}, err
 	}
 	selector := executorrouter.Selector{
 		Config:    config,
@@ -135,12 +159,16 @@ func (service Service) ExecuteNextQueued(ctx context.Context) error {
 			TaskID: task.ID,
 			Status: "failed",
 		})
-		return err
+		failedTask, loadErr := service.Store.GetTask(ctx, task.ID)
+		if loadErr == nil {
+			return ExecutionOutcome{Task: failedTask}, err
+		}
+		return ExecutionOutcome{}, err
 	}
 
 	attempt, err := service.nextRunAttempt(ctx, task.ID)
 	if err != nil {
-		return err
+		return ExecutionOutcome{}, err
 	}
 
 	run, err := service.Store.StartRun(ctx, sqlite.StartRunParams{
@@ -150,17 +178,17 @@ func (service Service) ExecuteNextQueued(ctx context.Context) error {
 		Status:   "running",
 	})
 	if err != nil {
-		return err
+		return ExecutionOutcome{}, err
 	}
 
 	if _, err := service.Store.UpdateTaskStatus(ctx, sqlite.UpdateTaskStatusParams{
 		TaskID: task.ID,
 		Status: "running",
 	}); err != nil {
-		return err
+		return ExecutionOutcome{}, err
 	}
 
-	finishFailure := func(cause error) error {
+	finishFailure := func(cause error) (ExecutionOutcome, error) {
 		_, _ = service.Store.FinishRun(ctx, sqlite.FinishRunParams{
 			RunID:   run.ID,
 			Status:  "failed",
@@ -170,7 +198,27 @@ func (service Service) ExecuteNextQueued(ctx context.Context) error {
 			TaskID: task.ID,
 			Status: "failed",
 		})
-		return cause
+		outcome, loadErr := service.executionOutcome(ctx, task.ID, run.ID)
+		if loadErr == nil {
+			if persistErr := service.recordExecutionMemory(ctx, project, outcome.Task, outcome.Run, task.Title); persistErr != nil {
+				return outcome, persistErr
+			}
+			return outcome, cause
+		}
+		failedRun := run
+		failedRun.Status = "failed"
+		failedRun.Summary = cause.Error()
+		return ExecutionOutcome{
+			Task: sqlite.Task{
+				ID:        task.ID,
+				ProjectID: task.ProjectID,
+				Key:       task.Key,
+				Title:     task.Title,
+				Status:    "failed",
+				Scope:     task.Scope,
+			},
+			Run: &failedRun,
+		}, cause
 	}
 
 	assignment := leases.Assignment{
@@ -237,16 +285,23 @@ func (service Service) ExecuteNextQueued(ctx context.Context) error {
 		Status:  runStatus,
 		Summary: result.Output,
 	}); err != nil {
-		return err
+		return ExecutionOutcome{}, err
 	}
 	if _, err := service.Store.UpdateTaskStatus(ctx, sqlite.UpdateTaskStatusParams{
 		TaskID: task.ID,
 		Status: taskStatus,
 	}); err != nil {
-		return err
+		return ExecutionOutcome{}, err
 	}
 
-	return nil
+	outcome, err := service.executionOutcome(ctx, task.ID, run.ID)
+	if err != nil {
+		return ExecutionOutcome{}, err
+	}
+	if err := service.recordExecutionMemory(ctx, project, outcome.Task, outcome.Run, task.Title); err != nil {
+		return ExecutionOutcome{}, err
+	}
+	return outcome, nil
 }
 
 func (service Service) ensureRuntimeProject(ctx context.Context, manifest projects.Manifest) (sqlite.Project, error) {
@@ -333,6 +388,86 @@ func (service Service) nextRunAttempt(ctx context.Context, taskID int64) (int, e
 		return 0, err
 	}
 	return attempt, nil
+}
+
+func (service Service) executionOutcome(ctx context.Context, taskID int64, runID int64) (ExecutionOutcome, error) {
+	task, err := service.Store.GetTask(ctx, taskID)
+	if err != nil {
+		return ExecutionOutcome{}, err
+	}
+	run, err := service.Store.GetRun(ctx, runID)
+	if err != nil {
+		return ExecutionOutcome{}, err
+	}
+	return ExecutionOutcome{
+		Task: task,
+		Run:  &run,
+	}, nil
+}
+
+func (service Service) recordExecutionMemory(ctx context.Context, project sqlite.Project, task sqlite.Task, run *sqlite.Run, prompt string) error {
+	if run == nil {
+		return nil
+	}
+	responseText := strings.TrimSpace(run.Summary)
+	if responseText == "" {
+		responseText = fmt.Sprintf("Task %s finished with status %s.", task.Key, run.Status)
+	}
+
+	toolSummaryBytes, err := json.Marshal(map[string]string{
+		"executor":    run.Executor,
+		"run_status":  run.Status,
+		"task_status": task.Status,
+	})
+	if err != nil {
+		return err
+	}
+	transcript, err := service.Store.RecordConversationTranscript(ctx, sqlite.RecordConversationTranscriptParams{
+		ProjectID:   &project.ID,
+		TaskID:      &task.ID,
+		RunID:       &run.ID,
+		Scope:       task.Scope,
+		ScopeKey:    project.Key,
+		Mode:        "act",
+		Prompt:      strings.TrimSpace(prompt),
+		Response:    responseText,
+		ToolSummary: string(toolSummaryBytes),
+		Executor:    run.Executor,
+	})
+	if err != nil {
+		return err
+	}
+
+	detailsBytes, err := json.Marshal(map[string]string{
+		"task_key":    task.Key,
+		"task_status": task.Status,
+		"run_status":  run.Status,
+		"executor":    run.Executor,
+		"prompt":      strings.TrimSpace(prompt),
+	})
+	if err != nil {
+		return err
+	}
+
+	summaryText := strings.TrimSpace(run.Summary)
+	if summaryText == "" {
+		summaryText = fmt.Sprintf("Task %s finished with status %s.", task.Key, run.Status)
+	} else {
+		summaryText = fmt.Sprintf("Task %s %s via %s: %s", task.Key, run.Status, run.Executor, summaryText)
+	}
+
+	_, err = service.Store.RecordMemorySummary(ctx, sqlite.RecordMemorySummaryParams{
+		ProjectID:          &project.ID,
+		SourceTranscriptID: &transcript.ID,
+		TaskID:             &task.ID,
+		RunID:              &run.ID,
+		Scope:              task.Scope,
+		ScopeKey:           project.Key,
+		MemoryType:         "episode",
+		Summary:            summaryText,
+		DetailsJSON:        string(detailsBytes),
+	})
+	return err
 }
 
 func (service Service) executionConfig(ctx context.Context) (executorrouter.Config, error) {

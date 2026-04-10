@@ -11,8 +11,10 @@ import (
 
 	"odin-os/internal/cli/scope"
 	"odin-os/internal/core/projects"
+	executorrouter "odin-os/internal/executors/router"
 	runtimeevents "odin-os/internal/runtime/events"
 	"odin-os/internal/store/sqlite"
+	"odin-os/internal/vcs/leases"
 )
 
 func TestShellRestoresValidSessionOnStartup(t *testing.T) {
@@ -73,12 +75,44 @@ func TestAskModeHandlesFreeTextWithoutCreatingTask(t *testing.T) {
 	}
 
 	var output bytes.Buffer
-	if err := shell.HandleLine(context.Background(), "what scope am i in?", &output); err != nil {
+	if err := shell.HandleLine(context.Background(), "hello there", &output); err != nil {
 		t.Fatalf("HandleLine() error = %v", err)
 	}
 
-	if !strings.Contains(output.String(), "global") {
-		t.Fatalf("HandleLine() output = %q, want scope answer", output.String())
+	if strings.Contains(output.String(), "Phase 05") {
+		t.Fatalf("HandleLine() output = %q, want executor-backed answer", output.String())
+	}
+
+	views, err := shell.jobs.List(context.Background(), shell.state.Scope)
+	if err != nil {
+		t.Fatalf("jobs.List() error = %v", err)
+	}
+	if len(views) != 0 {
+		t.Fatalf("jobs len = %d, want 0", len(views))
+	}
+}
+
+func TestAskModeAnswersScopeQuestionsWithoutCreatingTask(t *testing.T) {
+	t.Parallel()
+
+	env := newTestEnvironment(t)
+	shell, err := New(env)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	var output bytes.Buffer
+	if err := shell.HandleLine(context.Background(), "/project alpha", &output); err != nil {
+		t.Fatalf("HandleLine(/project) error = %v", err)
+	}
+	output.Reset()
+	if err := shell.HandleLine(context.Background(), "what scope am i in?", &output); err != nil {
+		t.Fatalf("HandleLine(scope question) error = %v", err)
+	}
+
+	response := strings.TrimSpace(output.String())
+	if strings.HasPrefix(response, "scope=") {
+		t.Fatalf("HandleLine() output = %q, want conversational answer", output.String())
 	}
 
 	views, err := shell.jobs.List(context.Background(), shell.state.Scope)
@@ -124,6 +158,138 @@ func TestActModeCreatesTaskInProjectScope(t *testing.T) {
 	}
 	if !strings.Contains(output.String(), "created task") {
 		t.Fatalf("output = %q, want creation message", output.String())
+	}
+}
+
+func TestActModeCreatesTaskAndAttemptsRunImmediately(t *testing.T) {
+	t.Parallel()
+
+	env := newTestEnvironment(t)
+	shell, err := New(env)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	var output bytes.Buffer
+	if err := shell.HandleLine(context.Background(), "/project alpha", &output); err != nil {
+		t.Fatalf("HandleLine(/project) error = %v", err)
+	}
+	output.Reset()
+	if err := shell.HandleLine(context.Background(), "/mode act", &output); err != nil {
+		t.Fatalf("HandleLine(/mode) error = %v", err)
+	}
+	output.Reset()
+	if err := shell.HandleLine(context.Background(), "Implement the shell", &output); err != nil {
+		t.Fatalf("HandleLine(act input) error = %v", err)
+	}
+
+	views, err := shell.jobs.List(context.Background(), scope.Resolution{
+		Kind:       scope.ScopeProject,
+		ProjectKey: "alpha",
+	})
+	if err != nil {
+		t.Fatalf("jobs.List() error = %v", err)
+	}
+	if len(views) != 1 {
+		t.Fatalf("jobs len = %d, want 1", len(views))
+	}
+
+	runs, err := shell.runs.List(context.Background(), scope.Resolution{
+		Kind:       scope.ScopeProject,
+		ProjectKey: "alpha",
+	})
+	if err != nil {
+		t.Fatalf("runs.List() error = %v", err)
+	}
+	if len(runs) != 1 {
+		t.Fatalf("runs len = %d, want 1 immediate run", len(runs))
+	}
+	if !strings.Contains(output.String(), "run") {
+		t.Fatalf("output = %q, want inline run visibility", output.String())
+	}
+}
+
+func TestActModePrintsPolicyDenialInlineWhenMutationBlocked(t *testing.T) {
+	t.Parallel()
+
+	env := newTestEnvironment(t)
+	shell, err := New(env)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	var output bytes.Buffer
+	if err := shell.HandleLine(context.Background(), "/project alpha", &output); err != nil {
+		t.Fatalf("HandleLine(/project) error = %v", err)
+	}
+	output.Reset()
+	if err := shell.HandleLine(context.Background(), "/transition set shadow because mutation is blocked", &output); err != nil {
+		t.Fatalf("HandleLine(/transition set shadow) error = %v", err)
+	}
+	output.Reset()
+	if err := shell.HandleLine(context.Background(), "/mode act", &output); err != nil {
+		t.Fatalf("HandleLine(/mode) error = %v", err)
+	}
+	output.Reset()
+	if err := shell.HandleLine(context.Background(), "apply the blocked mutation", &output); err != nil {
+		t.Fatalf("HandleLine(act input) error = %v", err)
+	}
+
+	if !strings.Contains(strings.ToLower(output.String()), "denied") {
+		t.Fatalf("output = %q, want inline policy denial", output.String())
+	}
+
+	runs, err := shell.runs.List(context.Background(), scope.Resolution{
+		Kind:       scope.ScopeProject,
+		ProjectKey: "alpha",
+	})
+	if err != nil {
+		t.Fatalf("runs.List() error = %v", err)
+	}
+	if len(runs) != 1 {
+		t.Fatalf("runs len = %d, want immediate blocked run record", len(runs))
+	}
+}
+
+func TestActModePrintsCompletedResultInlineWhenExecutionSucceeds(t *testing.T) {
+	t.Parallel()
+
+	env := newTestEnvironment(t)
+	shell, err := New(env)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	var output bytes.Buffer
+	if err := shell.HandleLine(context.Background(), "/project alpha", &output); err != nil {
+		t.Fatalf("HandleLine(/project) error = %v", err)
+	}
+	output.Reset()
+	if err := shell.HandleLine(context.Background(), "/transition set limited_action allow=run_task confirm because shell immediate execution", &output); err != nil {
+		t.Fatalf("HandleLine(/transition set limited_action) error = %v", err)
+	}
+	output.Reset()
+	if err := shell.HandleLine(context.Background(), "/mode act", &output); err != nil {
+		t.Fatalf("HandleLine(/mode) error = %v", err)
+	}
+	output.Reset()
+	if err := shell.HandleLine(context.Background(), "Complete the shell implementation", &output); err != nil {
+		t.Fatalf("HandleLine(act input) error = %v", err)
+	}
+
+	if !strings.Contains(strings.ToLower(output.String()), "completed") {
+		t.Fatalf("output = %q, want inline completed result", output.String())
+	}
+
+	runs, err := shell.runs.List(context.Background(), scope.Resolution{
+		Kind:       scope.ScopeProject,
+		ProjectKey: "alpha",
+	})
+	if err != nil {
+		t.Fatalf("runs.List() error = %v", err)
+	}
+	if len(runs) != 1 {
+		t.Fatalf("runs len = %d, want completed run record", len(runs))
 	}
 }
 
@@ -495,10 +661,34 @@ func newTestEnvironment(t *testing.T) Environment {
 	}
 
 	return Environment{
-		Store:        store,
-		Registry:     registry,
-		SessionStore: SessionStore{Path: filepath.Join(stateDir, "cli-session.json")},
+		Store:          store,
+		Registry:       registry,
+		SessionStore:   SessionStore{Path: filepath.Join(stateDir, "cli-session.json")},
+		ExecutorConfig: mustLoadExecutorConfig(t),
+		Executors:      executorrouter.DefaultCatalog(),
+		Leases: leases.Manager{
+			Store:        store,
+			Git:          shellTestGit{},
+			WorktreeRoot: t.TempDir(),
+		},
 	}
+}
+
+type shellTestGit struct{}
+
+func (shellTestGit) BranchExists(context.Context, string, string) (bool, error) { return false, nil }
+func (shellTestGit) CreateBranch(context.Context, string, string, string) error { return nil }
+func (shellTestGit) AddWorktree(context.Context, string, string, string) error  { return nil }
+func (shellTestGit) RemoveWorktree(context.Context, string, string) error       { return nil }
+
+func mustLoadExecutorConfig(t *testing.T) executorrouter.Config {
+	t.Helper()
+
+	cfg, err := executorrouter.LoadConfig(filepath.Clean(filepath.Join("..", "..", "..", "config", "executors.yaml")))
+	if err != nil {
+		t.Fatalf("LoadConfig(executors) error = %v", err)
+	}
+	return cfg
 }
 
 func hasTransitionEvent(events []runtimeevents.Record, want runtimeevents.Type) bool {
