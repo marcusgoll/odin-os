@@ -125,7 +125,7 @@ func TestCreateTaskFromProjectKeyUsesExplicitProject(t *testing.T) {
 }
 
 func TestExecuteNextQueuedCompletesCutoverProjectTask(t *testing.T) {
-	t.Parallel()
+	configureHarnessDriver(t)
 
 	ctx := context.Background()
 	store := openJobStore(t)
@@ -191,7 +191,7 @@ func TestExecuteNextQueuedCompletesCutoverProjectTask(t *testing.T) {
 }
 
 func TestExecuteNextQueuedRejectsShadowModeMutation(t *testing.T) {
-	t.Parallel()
+	configureHarnessDriver(t)
 
 	ctx := context.Background()
 	store := openJobStore(t)
@@ -248,7 +248,7 @@ func TestExecuteNextQueuedRejectsShadowModeMutation(t *testing.T) {
 }
 
 func TestForegroundActExecutionPersistsTranscriptAndEpisode(t *testing.T) {
-	t.Parallel()
+	configureHarnessDriver(t)
 
 	ctx := context.Background()
 	store := openJobStore(t)
@@ -334,7 +334,7 @@ func TestForegroundActExecutionPersistsTranscriptAndEpisode(t *testing.T) {
 }
 
 func TestForegroundActDenialPersistsTranscriptAndEpisode(t *testing.T) {
-	t.Parallel()
+	configureHarnessDriver(t)
 
 	ctx := context.Background()
 	store := openJobStore(t)
@@ -424,6 +424,22 @@ func (jobTestGit) BranchExists(context.Context, string, string) (bool, error) { 
 func (jobTestGit) CreateBranch(context.Context, string, string, string) error { return nil }
 func (jobTestGit) AddWorktree(context.Context, string, string, string) error  { return nil }
 func (jobTestGit) RemoveWorktree(context.Context, string, string) error       { return nil }
+
+func configureHarnessDriver(t *testing.T) {
+	t.Helper()
+
+	path := filepath.Join(t.TempDir(), "codex-driver.sh")
+	if err := os.WriteFile(path, []byte(`#!/usr/bin/env bash
+cat >/dev/null
+printf '{"status":"completed","output":"driver test ok","external_id":"fixture-driver"}'
+`), 0o755); err != nil {
+		t.Fatalf("WriteFile(driver) error = %v", err)
+	}
+	if err := os.Chmod(path, 0o755); err != nil {
+		t.Fatalf("Chmod(driver) error = %v", err)
+	}
+	t.Setenv("ODIN_CODEX_DRIVER", path)
+}
 
 func mustLoadExecutorConfig(t *testing.T) router.Config {
 	t.Helper()

@@ -55,7 +55,7 @@ routes:
     match:
       task_kinds: [general, plan, build, review, qa]
       scopes: [global, odin-core, project, new-project]
-    preferred: [codex_headless, claude_code_headless, openai_api]
+    preferred: [codex_headless, claude_code_headless]
     fallback: [anthropic_api, openrouter_api]
   - name: research
     match:
