@@ -14,6 +14,7 @@ import (
 	"odin-os/internal/cli/commands"
 	"odin-os/internal/cli/render"
 	"odin-os/internal/cli/scope"
+	clistate "odin-os/internal/cli/state"
 	"odin-os/internal/core/projects"
 	"odin-os/internal/executors/contract"
 	executorrouter "odin-os/internal/executors/router"
@@ -263,7 +264,7 @@ func (shell *Shell) handleMode(args []string, output io.Writer) error {
 	}
 
 	requested := Mode(strings.ToLower(args[0]))
-	sanitized := sanitizeMode(requested, shell.state.Scope)
+	sanitized := clistate.SanitizeMode(requested, shell.state.Scope)
 	if requested == ModeAct && sanitized != ModeAct {
 		shell.state.Mode = ModeAsk
 		if err := shell.persistState(); err != nil {
@@ -301,7 +302,7 @@ func (shell *Shell) handleScope(args []string, output io.Writer) error {
 		return err
 	}
 
-	shell.state.Mode = sanitizeMode(shell.state.Mode, shell.state.Scope)
+	shell.state.Mode = clistate.SanitizeMode(shell.state.Mode, shell.state.Scope)
 	if err := shell.persistState(); err != nil {
 		return err
 	}
@@ -339,7 +340,7 @@ func (shell *Shell) handleProject(args []string, output io.Writer) error {
 	})
 	shell.state.ActiveTask = ""
 	shell.state.ActiveRun = ""
-	shell.state.Mode = sanitizeMode(shell.state.Mode, shell.state.Scope)
+	shell.state.Mode = clistate.SanitizeMode(shell.state.Mode, shell.state.Scope)
 	if err := shell.persistState(); err != nil {
 		return err
 	}
@@ -613,7 +614,7 @@ func (shell *Shell) handleSelf(output io.Writer) error {
 	})
 	shell.state.ActiveTask = ""
 	shell.state.ActiveRun = ""
-	shell.state.Mode = sanitizeMode(shell.state.Mode, shell.state.Scope)
+	shell.state.Mode = clistate.SanitizeMode(shell.state.Mode, shell.state.Scope)
 	if err := shell.persistState(); err != nil {
 		return err
 	}
