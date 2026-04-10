@@ -99,6 +99,31 @@ func TestListFiltersJobsByScope(t *testing.T) {
 	}
 }
 
+func TestCreateTaskFromProjectKeyUsesExplicitProject(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openJobStore(t)
+	defer store.Close()
+
+	registry := writeRegistry(t)
+	service := Service{
+		Store:    store,
+		Registry: registry,
+		Now: func() time.Time {
+			return time.Date(2026, 4, 9, 12, 0, 0, 0, time.UTC)
+		},
+	}
+
+	task, err := service.CreateTaskFromProjectKey(ctx, "alpha", "CLI explicit project")
+	if err != nil {
+		t.Fatalf("CreateTaskFromProjectKey() error = %v", err)
+	}
+	if task.Status != "queued" || task.Scope != string(scope.ScopeProject) {
+		t.Fatalf("task = %+v, want queued project task", task)
+	}
+}
+
 func TestExecuteNextQueuedCompletesCutoverProjectTask(t *testing.T) {
 	t.Parallel()
 

@@ -78,6 +78,21 @@ func (service Service) CreateTaskFromAct(ctx context.Context, resolved scope.Res
 	})
 }
 
+func (service Service) CreateTaskFromProjectKey(ctx context.Context, projectKey string, title string) (sqlite.Task, error) {
+	manifest, ok := service.Registry.Lookup(projectKey)
+	if !ok {
+		return sqlite.Task{}, fmt.Errorf("unknown project %q", projectKey)
+	}
+
+	resolved := scope.Resolve(scope.ResolveInput{
+		ExplicitTarget: &scope.Target{
+			ProjectKey:    manifest.Key,
+			SystemProject: manifest.SystemProject,
+		},
+	})
+	return service.CreateTaskFromAct(ctx, resolved, title)
+}
+
 func (service Service) ExecuteNextQueued(ctx context.Context) error {
 	if service.Store == nil {
 		return fmt.Errorf("job store is required")
@@ -327,6 +342,10 @@ func (service Service) ensureRuntimeProject(ctx context.Context, manifest projec
 		GitHubRepo:    manifest.GitHub.Repo,
 		ManifestPath:  manifest.SourcePath,
 	})
+}
+
+func (service Service) EnsureRuntimeProject(ctx context.Context, manifest projects.Manifest) (sqlite.Project, error) {
+	return service.ensureRuntimeProject(ctx, manifest)
 }
 
 func (service Service) taskOwnerForScope(resolved scope.Resolution) (projects.Manifest, string, error) {

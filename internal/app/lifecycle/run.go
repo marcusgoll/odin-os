@@ -40,7 +40,7 @@ import (
 
 var errRuntimeNotReady = errors.New("runtime not ready")
 
-const rootUsageBanner = "Usage: odin <command> [args]\n\nCommands: help repl doctor healthcheck serve backup restore verify-backup status project scope jobs runs approvals logs"
+const rootUsageBanner = "Usage: odin <command> [args]\n\nCommands: help repl doctor healthcheck serve backup restore verify-backup status project scope jobs runs approvals logs task transition"
 
 var (
 	serveTaskLoopInterval     = 1 * time.Second
@@ -102,6 +102,10 @@ func Run(ctx context.Context, root string, args []string, stdin io.Reader, stdou
 		return runApprovals(ctx, app, rootCommand.Args, stdout)
 	case "logs":
 		return runLogs(ctx, app, rootCommand.Args, stdout)
+	case "task":
+		return runTask(ctx, app, rootCommand.Args, stdout)
+	case "transition":
+		return runTransition(ctx, app, rootCommand.Args, stdout)
 	default:
 		return fmt.Errorf("unknown command: %s", rootCommand.Name)
 	}
@@ -195,12 +199,36 @@ func runProject(app bootstrap.App, args []string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
-	if len(remaining) > 1 || (len(remaining) == 1 && remaining[0] != "list") {
-		return fmt.Errorf("usage: odin project [list] [--json]")
+	if len(remaining) > 2 || (len(remaining) == 1 && remaining[0] != "list") {
+		return fmt.Errorf("usage: odin project [list | select <project>] [--json]")
 	}
 
 	state, err := loadCLIState(app)
 	if err != nil {
+		return err
+	}
+
+	if len(remaining) == 2 && remaining[0] == "select" {
+		project, ok := app.Registry.Lookup(remaining[1])
+		if !ok {
+			return fmt.Errorf("unknown project: %s", remaining[1])
+		}
+
+		state.Scope = scope.Resolve(scope.ResolveInput{
+			ExplicitTarget: &scope.Target{
+				ProjectKey:    project.Key,
+				SystemProject: project.SystemProject,
+			},
+		})
+		state.Mode = clistate.SanitizeMode(state.Mode, state.Scope)
+		if err := saveCLIState(app, state); err != nil {
+			return err
+		}
+
+		if jsonOutput {
+			return commands.WriteJSON(stdout, commands.ScopeView{Scope: scopeLabel(state.Scope)})
+		}
+		_, err := fmt.Fprintf(stdout, "project=%s scope=%s\n", project.Key, scopeLabel(state.Scope))
 		return err
 	}
 
@@ -407,6 +435,134 @@ func runLogs(ctx context.Context, app bootstrap.App, args []string, stdout io.Wr
 	return nil
 }
 
+func runTask(ctx context.Context, app bootstrap.App, args []string, stdout io.Writer) error {
+	command, err := commands.ParseTask(args)
+	if err != nil {
+		return err
+	}
+
+	jobService := jobs.Service{
+		Store:          app.Store,
+		Registry:       app.Registry,
+		Executors:      app.Executors,
+		ExecutorConfig: app.ExecutorConfig,
+		Transitions:    projects.Service{Store: app.Store},
+		Leases: leases.Manager{
+			Store:        app.Store,
+			Git:          gitadapter.Adapter{},
+			WorktreeRoot: worktrees.DefaultRoot(),
+		},
+		Now: time.Now,
+	}
+
+	task, err := jobService.CreateTaskFromProjectKey(ctx, command.ProjectKey, command.Title)
+	if err != nil {
+		return err
+	}
+
+	taskView := commands.TaskCreateView{
+		ID:     task.ID,
+		Key:    task.Key,
+		Status: task.Status,
+		Scope:  task.Scope,
+	}
+	if command.Name == "create" {
+		return commands.WriteJSON(stdout, taskView)
+	}
+
+	outcome, err := jobService.ExecuteTask(ctx, task.ID)
+	if err != nil {
+		return err
+	}
+
+	payload := commands.TaskRunView{
+		Task: commands.TaskCreateView{
+			ID:     outcome.Task.ID,
+			Key:    outcome.Task.Key,
+			Status: outcome.Task.Status,
+			Scope:  outcome.Task.Scope,
+		},
+	}
+	if outcome.Run != nil {
+		payload.Run = &commands.TaskRunResultView{
+			ID:       outcome.Run.ID,
+			Executor: outcome.Run.Executor,
+			Status:   outcome.Run.Status,
+			Summary:  outcome.Run.Summary,
+		}
+	}
+	return commands.WriteJSON(stdout, payload)
+}
+
+func runTransition(ctx context.Context, app bootstrap.App, args []string, stdout io.Writer) error {
+	if len(args) > 0 && strings.EqualFold(args[0], "help") {
+		_, err := fmt.Fprintln(stdout, transitionUsage)
+		return err
+	}
+
+	state, err := loadCLIState(app)
+	if err != nil {
+		return err
+	}
+	manifest, err := scopedManifest(app.Registry, state.Scope)
+	if err != nil {
+		_, writeErr := fmt.Fprintln(stdout, err.Error())
+		return writeErr
+	}
+
+	if len(args) == 0 || strings.EqualFold(args[0], "status") {
+		status, err := currentTransitionStatus(ctx, app.Store, manifest)
+		if err != nil {
+			return err
+		}
+		_, err = fmt.Fprintln(stdout, renderTransitionStatus(manifest.Key, status))
+		return err
+	}
+
+	if !strings.EqualFold(args[0], "set") || len(args) < 2 {
+		return fmt.Errorf("usage: %s", transitionUsage)
+	}
+
+	request, err := parseTransitionSetRequest(args[1:])
+	if err != nil {
+		_, writeErr := fmt.Fprintln(stdout, err.Error())
+		return writeErr
+	}
+
+	jobService := jobs.Service{
+		Store:    app.Store,
+		Registry: app.Registry,
+	}
+	project, err := jobService.EnsureRuntimeProject(ctx, manifest)
+	if err != nil {
+		return err
+	}
+
+	record, err := projects.Service{Store: app.Store}.SetTransitionState(ctx, projects.TransitionStateInput{
+		ProjectID:      project.ID,
+		Actor:          projects.TransitionControllerOdinOS,
+		TargetState:    request.State,
+		LimitedActions: request.LimitedActions,
+		ChangedBy:      "operator",
+		Notes:          request.Reason,
+	})
+	if err != nil {
+		_, writeErr := fmt.Fprintf(stdout, "unable to change transition: %v\n", err)
+		return writeErr
+	}
+
+	status := transitionStatus{
+		State:             projects.TransitionState(record.State),
+		Controller:        projects.TransitionController(record.Controller),
+		MutationAuthority: projects.TransitionController(record.Controller),
+		OdinCanMutate:     record.Controller == string(projects.TransitionControllerOdinOS),
+		LimitedActions:    decodeCSVOrJSON(record.LimitedActionsJSON),
+		Notes:             record.Notes,
+	}
+	_, err = fmt.Fprintln(stdout, renderTransitionStatus(manifest.Key, status))
+	return err
+}
+
 func runHealthcheck(ctx context.Context, app bootstrap.App, stdout io.Writer) error {
 	report, err := healthsvc.Service{DB: app.Store.DB()}.Doctor(ctx, len(app.RegistryDiagnostics) == 0)
 	if err != nil {
@@ -435,6 +591,16 @@ func loadCLIState(app bootstrap.App) (clistate.State, error) {
 		return clistate.State{}, err
 	}
 	return clistate.ResolveStartupState(cache, app.Registry), nil
+}
+
+func saveCLIState(app bootstrap.App, state clistate.State) error {
+	cache := clistate.Cache{
+		Mode: state.Mode,
+	}
+	if state.Scope.Kind == scope.ScopeProject || state.Scope.Kind == scope.ScopeOdinCore {
+		cache.ProjectKey = state.Scope.ProjectKey
+	}
+	return app.SessionStore.Save(cache)
 }
 
 func consumeJSONFlag(args []string) (bool, []string, error) {
@@ -550,6 +716,202 @@ func matchesEventScope(eventScope string, resolved scope.Resolution) bool {
 	default:
 		return false
 	}
+}
+
+const transitionUsage = "transition [status] | transition set <state> [allow=<csv>] [confirm] because <reason...>"
+
+type transitionStatus struct {
+	State             projects.TransitionState
+	Controller        projects.TransitionController
+	MutationAuthority projects.TransitionController
+	OdinCanMutate     bool
+	LimitedActions    []string
+	Notes             string
+}
+
+type transitionSetRequest struct {
+	State          projects.TransitionState
+	LimitedActions []string
+	Reason         string
+	Confirmed      bool
+}
+
+func scopedManifest(registry projects.Registry, resolved scope.Resolution) (projects.Manifest, error) {
+	switch resolved.Kind {
+	case scope.ScopeProject, scope.ScopeOdinCore:
+		manifest, ok := registry.Lookup(resolved.ProjectKey)
+		if !ok {
+			return projects.Manifest{}, fmt.Errorf("unknown project: %s", resolved.ProjectKey)
+		}
+		return manifest, nil
+	default:
+		return projects.Manifest{}, fmt.Errorf("transition commands require project scope")
+	}
+}
+
+func currentTransitionStatus(ctx context.Context, store *sqlite.Store, manifest projects.Manifest) (transitionStatus, error) {
+	project, err := store.GetProjectByKey(ctx, manifest.Key)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return transitionStatus{
+				State:             projects.TransitionStateInventory,
+				Controller:        projects.TransitionControllerLegacyOdin,
+				MutationAuthority: projects.TransitionControllerLegacyOdin,
+				OdinCanMutate:     false,
+			}, nil
+		}
+		return transitionStatus{}, err
+	}
+
+	record, err := store.GetProjectTransition(ctx, project.ID)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return transitionStatus{
+				State:             projects.TransitionStateInventory,
+				Controller:        projects.TransitionControllerLegacyOdin,
+				MutationAuthority: projects.TransitionControllerLegacyOdin,
+				OdinCanMutate:     false,
+			}, nil
+		}
+		return transitionStatus{}, err
+	}
+
+	controller := projects.TransitionController(record.Controller)
+	return transitionStatus{
+		State:             projects.TransitionState(record.State),
+		Controller:        controller,
+		MutationAuthority: controller,
+		OdinCanMutate:     controller == projects.TransitionControllerOdinOS,
+		LimitedActions:    decodeCSVOrJSON(record.LimitedActionsJSON),
+		Notes:             record.Notes,
+	}, nil
+}
+
+func parseTransitionSetRequest(args []string) (transitionSetRequest, error) {
+	if len(args) == 0 {
+		return transitionSetRequest{}, fmt.Errorf("transition target state is required")
+	}
+
+	state := projects.TransitionState(strings.ToLower(args[0]))
+	validState := map[projects.TransitionState]bool{
+		projects.TransitionStateInventory:      true,
+		projects.TransitionStateShadow:         true,
+		projects.TransitionStateCompare:        true,
+		projects.TransitionStateLimitedAction:  true,
+		projects.TransitionStateCutover:        true,
+		projects.TransitionStateDecommissioned: true,
+	}
+	if !validState[state] {
+		return transitionSetRequest{}, fmt.Errorf("unsupported transition state: %s", args[0])
+	}
+
+	becauseIndex := -1
+	for index := 1; index < len(args); index++ {
+		if strings.EqualFold(args[index], "because") {
+			becauseIndex = index
+			break
+		}
+	}
+	if becauseIndex == -1 || becauseIndex == len(args)-1 {
+		return transitionSetRequest{}, fmt.Errorf("transition changes require a reason: use 'because <reason...>'")
+	}
+
+	request := transitionSetRequest{
+		State:  state,
+		Reason: strings.Join(args[becauseIndex+1:], " "),
+	}
+	for _, token := range args[1:becauseIndex] {
+		switch {
+		case strings.EqualFold(token, "confirm"):
+			request.Confirmed = true
+		case strings.HasPrefix(strings.ToLower(token), "allow="):
+			raw := strings.TrimSpace(token[len("allow="):])
+			if raw == "" {
+				return transitionSetRequest{}, fmt.Errorf("limited_action requires allow=<csv>")
+			}
+			for _, action := range strings.Split(raw, ",") {
+				action = strings.TrimSpace(action)
+				if action != "" {
+					request.LimitedActions = append(request.LimitedActions, action)
+				}
+			}
+		default:
+			return transitionSetRequest{}, fmt.Errorf("unknown transition option: %s", token)
+		}
+	}
+
+	switch state {
+	case projects.TransitionStateLimitedAction:
+		if len(request.LimitedActions) == 0 {
+			return transitionSetRequest{}, fmt.Errorf("limited_action requires allow=<csv>")
+		}
+		if !request.Confirmed {
+			return transitionSetRequest{}, fmt.Errorf("limited_action requires confirm")
+		}
+	case projects.TransitionStateCutover, projects.TransitionStateDecommissioned:
+		if !request.Confirmed {
+			return transitionSetRequest{}, fmt.Errorf("%s requires confirm", state)
+		}
+	default:
+		if len(request.LimitedActions) != 0 {
+			return transitionSetRequest{}, fmt.Errorf("allow=<csv> is only valid for limited_action")
+		}
+	}
+
+	return request, nil
+}
+
+func renderTransitionStatus(projectKey string, status transitionStatus) string {
+	limitedActions := "none"
+	if len(status.LimitedActions) > 0 {
+		limitedActions = strings.Join(status.LimitedActions, ",")
+	}
+
+	if status.Notes != "" {
+		return fmt.Sprintf(
+			"project=%s state=%s controller=%s mutation_authority=%s odin_can_mutate=%t limited_actions=%s notes=%s",
+			projectKey,
+			status.State,
+			status.Controller,
+			status.MutationAuthority,
+			status.OdinCanMutate,
+			limitedActions,
+			status.Notes,
+		)
+	}
+
+	return fmt.Sprintf(
+		"project=%s state=%s controller=%s mutation_authority=%s odin_can_mutate=%t limited_actions=%s",
+		projectKey,
+		status.State,
+		status.Controller,
+		status.MutationAuthority,
+		status.OdinCanMutate,
+		limitedActions,
+	)
+}
+
+func decodeCSVOrJSON(raw string) []string {
+	if raw == "" {
+		return nil
+	}
+
+	if strings.HasPrefix(strings.TrimSpace(raw), "[") {
+		var decoded []string
+		if err := json.Unmarshal([]byte(raw), &decoded); err == nil {
+			return decoded
+		}
+	}
+
+	parts := strings.Split(raw, ",")
+	decoded := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			decoded = append(decoded, part)
+		}
+	}
+	return decoded
 }
 
 func runServe(ctx context.Context, app bootstrap.App, cfg appconfig.Config, stdout io.Writer) error {

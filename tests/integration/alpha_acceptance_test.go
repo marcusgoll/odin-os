@@ -3,7 +3,10 @@ package integration_test
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -36,6 +39,7 @@ import (
 	"odin-os/internal/vcs/branches"
 	gitadapter "odin-os/internal/vcs/git"
 	"odin-os/internal/vcs/leases"
+	"odin-os/internal/vcs/worktrees"
 	worktreemgr "odin-os/internal/vcs/worktrees"
 )
 
@@ -321,6 +325,84 @@ func TestAlphaAcceptance(t *testing.T) {
 		}
 		if !strings.Contains(logsOutput, "task.created") {
 			t.Fatalf("logs output = %q, want task event", logsOutput)
+		}
+	})
+
+	t.Run("explicit mutating cli commands can select project transition and run task", func(t *testing.T) {
+		runtimeRoot := t.TempDir()
+
+		projectOutput, err := runOdinCommand(t, repoRoot, odinBinary, runtimeRoot, nil, "", "project", "select", "pbs")
+		if err != nil {
+			t.Fatalf("runOdinCommand(project select pbs) error = %v\n%s", err, projectOutput)
+		}
+		if !strings.Contains(projectOutput, "project=pbs") {
+			t.Fatalf("project output = %q, want pbs selection", projectOutput)
+		}
+
+		transitionOutput, err := runOdinCommand(
+			t,
+			repoRoot,
+			odinBinary,
+			runtimeRoot,
+			nil,
+			"",
+			"transition",
+			"set",
+			"limited_action",
+			"allow=run_task",
+			"confirm",
+			"because",
+			"acceptance",
+			"task",
+			"run",
+		)
+		if err != nil {
+			t.Fatalf("runOdinCommand(transition set limited_action) error = %v\n%s", err, transitionOutput)
+		}
+		if !strings.Contains(transitionOutput, "project=pbs") || !strings.Contains(transitionOutput, "state=limited_action") {
+			t.Fatalf("transition output = %q, want pbs limited_action state", transitionOutput)
+		}
+
+		cleanupAcceptanceWorktree(t, "/home/orchestrator/pbs", "pbs", 1, 1, 1)
+
+		taskOutput, err := runOdinCommand(
+			t,
+			repoRoot,
+			odinBinary,
+			runtimeRoot,
+			nil,
+			"",
+			"task",
+			"run",
+			"--project",
+			"pbs",
+			"--title",
+			"acceptance cli task run",
+			"--json",
+		)
+		if err != nil {
+			t.Fatalf("runOdinCommand(task run --json) error = %v\n%s", err, taskOutput)
+		}
+
+		var payload struct {
+			Task struct {
+				Key    string `json:"key"`
+				Status string `json:"status"`
+				Scope  string `json:"scope"`
+			} `json:"task"`
+			Run struct {
+				Executor string `json:"executor"`
+				Status   string `json:"status"`
+			} `json:"run"`
+		}
+		if err := json.Unmarshal([]byte(taskOutput), &payload); err != nil {
+			t.Fatalf("task output json = %v\n%s", err, taskOutput)
+		}
+		if payload.Task.Key == "" || payload.Task.Status != "completed" || payload.Task.Scope != "project" {
+			t.Fatalf("task payload = %+v, want completed project task", payload.Task)
+		}
+		if payload.Run.Executor == "" || payload.Run.Status != "completed" {
+			t.Fatalf("run payload = %+v, want completed run", payload.Run)
 		}
 	})
 
@@ -838,4 +920,25 @@ func TestAlphaAcceptance(t *testing.T) {
 		}
 		requirePathExists(t, filepath.Join(restoreRoot, "data", "odin.db"))
 	})
+}
+
+func cleanupAcceptanceWorktree(t *testing.T, repoRoot string, projectKey string, taskID int64, runID int64, attempt int) {
+	t.Helper()
+
+	path := worktrees.ResolvePath(worktrees.PathParams{
+		Root:       worktrees.DefaultRoot(),
+		ProjectKey: projectKey,
+		TaskID:     taskID,
+		RunID:      runID,
+		Try:        attempt,
+	})
+	if err := os.RemoveAll(path); err != nil {
+		t.Fatalf("RemoveAll(%s) error = %v", path, err)
+	}
+
+	command := exec.Command("git", "-C", repoRoot, "worktree", "prune")
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git worktree prune: %v\n%s", err, output)
+	}
 }
