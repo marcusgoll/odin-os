@@ -9,26 +9,72 @@ import (
 	"testing"
 )
 
-func TestRunStartsInteractiveShell(t *testing.T) {
+func TestRunReplStartsInteractiveShell(t *testing.T) {
 	t.Parallel()
 
+	root := testRepoRoot(t)
+
+	stdin := strings.NewReader("/help\n")
+	var stdout bytes.Buffer
+
+	err := Run(context.Background(), root, []string{"repl"}, stdin, &stdout)
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	output := stdout.String()
+	if !strings.Contains(output, "scope=") {
+		t.Fatalf("Run() output = %q, want header", output)
+	}
+	if !strings.Contains(output, "/help") {
+		t.Fatalf("Run() output = %q, want help", output)
+	}
+}
+
+func TestRunWithoutArgsPrintsUsageInsteadOfStartingShell(t *testing.T) {
+	t.Parallel()
+
+	root := testRepoRoot(t)
+	var stdout bytes.Buffer
+
+	err := Run(context.Background(), root, nil, strings.NewReader(""), &stdout)
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	output := stdout.String()
+	if !strings.Contains(output, "Usage: odin") {
+		t.Fatalf("stdout = %q, want usage banner", output)
+	}
+	if strings.Contains(output, "odin>") {
+		t.Fatalf("stdout = %q, should not contain repl prompt", output)
+	}
+}
+
+func testRepoRoot(t *testing.T) string {
+	t.Helper()
+
 	root := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(root, "config"), 0o755); err != nil {
-		t.Fatalf("mkdir config: %v", err)
+	mustMkdirAll := func(path string) {
+		t.Helper()
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", path, err)
+		}
 	}
-	if err := os.MkdirAll(filepath.Join(root, "data"), 0o755); err != nil {
-		t.Fatalf("mkdir data: %v", err)
+	mustWriteFile := func(path string, contents string) {
+		t.Helper()
+		if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
+			t.Fatalf("write %s: %v", path, err)
+		}
 	}
-	if err := os.MkdirAll(filepath.Join(root, "registry"), 0o755); err != nil {
-		t.Fatalf("mkdir registry: %v", err)
-	}
-	if err := os.MkdirAll(filepath.Join(root, "state", "cache"), 0o755); err != nil {
-		t.Fatalf("mkdir state: %v", err)
-	}
-	if err := os.MkdirAll(filepath.Join(root, ".git"), 0o755); err != nil {
-		t.Fatalf("mkdir git root: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(root, "config", "projects.yaml"), []byte(`
+
+	mustMkdirAll(filepath.Join(root, "config"))
+	mustMkdirAll(filepath.Join(root, "data"))
+	mustMkdirAll(filepath.Join(root, "registry"))
+	mustMkdirAll(filepath.Join(root, "state", "cache"))
+	mustMkdirAll(filepath.Join(root, ".git"))
+
+	mustWriteFile(filepath.Join(root, "config", "projects.yaml"), `
 version: 1
 projects:
   - key: odin-core
@@ -56,10 +102,8 @@ projects:
         allow_clean: false
         allow_force_push: false
         require_explicit_approval: true
-`), 0o644); err != nil {
-		t.Fatalf("write config: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(root, "config", "executors.yaml"), []byte(`
+`)
+	mustWriteFile(filepath.Join(root, "config", "executors.yaml"), `
 version: 1
 executors:
   - key: codex_headless
@@ -73,33 +117,15 @@ routes:
       task_kinds: [general, plan, build, review, qa, research]
       scopes: [global, odin-core, project, new-project]
     preferred: [codex_headless]
-`), 0o644); err != nil {
-		t.Fatalf("write executors config: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(root, "config", "odin.yaml"), []byte(`
+`)
+	mustWriteFile(filepath.Join(root, "config", "odin.yaml"), `
 version: 1
 runtime:
   root: .
 service:
   http_addr: 127.0.0.1:9443
   startup_recovery: true
-`), 0o644); err != nil {
-		t.Fatalf("write odin config: %v", err)
-	}
+`)
 
-	stdin := strings.NewReader("/help\n")
-	var stdout bytes.Buffer
-
-	err := Run(context.Background(), root, nil, stdin, &stdout)
-	if err != nil {
-		t.Fatalf("Run() error = %v", err)
-	}
-
-	output := stdout.String()
-	if !strings.Contains(output, "scope=") {
-		t.Fatalf("Run() output = %q, want header", output)
-	}
-	if !strings.Contains(output, "/help") {
-		t.Fatalf("Run() output = %q, want help", output)
-	}
+	return root
 }

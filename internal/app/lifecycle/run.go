@@ -17,6 +17,7 @@ import (
 	appbackup "odin-os/internal/app/backup"
 	"odin-os/internal/app/bootstrap"
 	appconfig "odin-os/internal/app/config"
+	"odin-os/internal/cli/commands"
 	"odin-os/internal/cli/repl"
 	"odin-os/internal/core/projects"
 	healthsvc "odin-os/internal/runtime/health"
@@ -31,20 +32,30 @@ import (
 
 var errRuntimeNotReady = errors.New("runtime not ready")
 
+const rootUsageBanner = "Usage: odin <command> [args]\n\nCommands: help repl doctor healthcheck serve backup restore verify-backup status project scope transition jobs runs approvals logs task"
+
 var (
 	serveTaskLoopInterval     = 1 * time.Second
 	serveSelfHealLoopInterval = 30 * time.Second
 )
 
-// Run dispatches between the interactive shell and machine-oriented operational commands.
+// Run dispatches between root commands and the interactive shell.
 func Run(ctx context.Context, root string, args []string, stdin io.Reader, stdout io.Writer) error {
+	rootCommand := commands.ParseRoot(args)
+
+	switch rootCommand.Name {
+	case "help":
+		_, err := fmt.Fprintln(stdout, rootUsageBanner)
+		return err
+	}
+
 	cfg, err := appconfig.Load(filepath.Join(root, "config", "odin.yaml"), root, runtimeEnv())
 	if err != nil {
 		return err
 	}
 
 	loadCtx := ctx
-	if len(args) > 0 && args[0] == "serve" {
+	if rootCommand.Name == "serve" {
 		loadCtx = context.WithoutCancel(ctx)
 	}
 
@@ -54,25 +65,27 @@ func Run(ctx context.Context, root string, args []string, stdin io.Reader, stdou
 	}
 	defer app.Store.Close()
 
-	if len(args) > 0 {
-		switch args[0] {
-		case "doctor":
-			return runDoctor(ctx, app, args[1:], stdout)
-		case "healthcheck":
-			return runHealthcheck(ctx, app, stdout)
-		case "serve":
-			return runServe(ctx, app, cfg, stdout)
-		case "backup":
-			return runBackup(ctx, appbackup.Service{RepoRoot: root, RuntimeRoot: cfg.RuntimeRoot}, args[1:], stdout)
-		case "restore":
-			return runRestore(ctx, appbackup.Service{RepoRoot: root, RuntimeRoot: cfg.RuntimeRoot}, args[1:], stdout)
-		case "verify-backup":
-			return runVerifyBackup(ctx, appbackup.Service{RepoRoot: root, RuntimeRoot: cfg.RuntimeRoot}, args[1:], stdout)
-		default:
-			return fmt.Errorf("unknown command: %s", args[0])
-		}
+	switch rootCommand.Name {
+	case "repl":
+		return runRepl(ctx, app, stdin, stdout)
+	case "doctor":
+		return runDoctor(ctx, app, rootCommand.Args, stdout)
+	case "healthcheck":
+		return runHealthcheck(ctx, app, stdout)
+	case "serve":
+		return runServe(ctx, app, cfg, stdout)
+	case "backup":
+		return runBackup(ctx, appbackup.Service{RepoRoot: root, RuntimeRoot: cfg.RuntimeRoot}, rootCommand.Args, stdout)
+	case "restore":
+		return runRestore(ctx, appbackup.Service{RepoRoot: root, RuntimeRoot: cfg.RuntimeRoot}, rootCommand.Args, stdout)
+	case "verify-backup":
+		return runVerifyBackup(ctx, appbackup.Service{RepoRoot: root, RuntimeRoot: cfg.RuntimeRoot}, rootCommand.Args, stdout)
+	default:
+		return fmt.Errorf("unknown command: %s", rootCommand.Name)
 	}
+}
 
+func runRepl(ctx context.Context, app bootstrap.App, stdin io.Reader, stdout io.Writer) error {
 	shell, err := repl.New(repl.Environment{
 		Store:               app.Store,
 		Registry:            app.Registry,
