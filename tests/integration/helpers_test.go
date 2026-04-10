@@ -3,10 +3,12 @@ package integration_test
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -66,7 +68,7 @@ func runOdinCommand(t *testing.T, repoRoot string, binaryPath string, runtimeRoo
 func acceptanceHarnessDriverEnv(t *testing.T) map[string]string {
 	t.Helper()
 
-	path := filepath.Join(t.TempDir(), "codex-driver.sh")
+	path := filepath.Join(t.TempDir(), "harness-driver.sh")
 	if err := os.WriteFile(path, []byte(`#!/usr/bin/env bash
 cat >/dev/null
 printf '{"status":"completed","output":"driver test ok","external_id":"fixture-driver"}'
@@ -77,8 +79,150 @@ printf '{"status":"completed","output":"driver test ok","external_id":"fixture-d
 		t.Fatalf("Chmod(driver) error = %v", err)
 	}
 	return map[string]string{
-		"ODIN_CODEX_DRIVER": path,
+		"ODIN_CODEX_DRIVER":  path,
+		"ODIN_CLAUDE_DRIVER": path,
 	}
+}
+
+func TestAcceptanceHarnessDriverEnvProvidesCodexAndClaudeDrivers(t *testing.T) {
+	t.Parallel()
+
+	env := acceptanceHarnessDriverEnv(t)
+	if strings.TrimSpace(env["ODIN_CODEX_DRIVER"]) == "" {
+		t.Fatalf("ODIN_CODEX_DRIVER missing from acceptance env: %#v", env)
+	}
+	if strings.TrimSpace(env["ODIN_CLAUDE_DRIVER"]) == "" {
+		t.Fatalf("ODIN_CLAUDE_DRIVER missing from acceptance env: %#v", env)
+	}
+}
+
+func acceptanceWorktreeRoot(extraEnv map[string]string) string {
+	homePath := strings.TrimSpace(extraEnv["HOME"])
+	if homePath == "" {
+		return ""
+	}
+	return filepath.Join(homePath, ".config", "superpowers", "worktrees", "odin-os")
+}
+
+func createCLIRepoRootWithPreferredExecutor(t *testing.T, executorKey string) string {
+	t.Helper()
+
+	root := t.TempDir()
+	for _, dir := range []string{
+		filepath.Join(root, "config"),
+		filepath.Join(root, "data"),
+		filepath.Join(root, "registry"),
+		filepath.Join(root, "state", "cache"),
+		filepath.Join(root, "alpha"),
+	} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("MkdirAll(%s) error = %v", dir, err)
+		}
+	}
+
+	writeTextFile(t, filepath.Join(root, "config", "projects.yaml"), `
+version: 1
+projects:
+  - key: alpha-cli
+    name: Alpha
+    project_class: github_backed_project
+    git_root: ../alpha
+    default_branch: main
+    github:
+      repo: acme/alpha
+    policy:
+      allowed_commands: [status]
+      branch_rules:
+        protected_branches: [main]
+        require_worktree: true
+        require_task_branch: true
+        allow_default_branch_mutation: false
+      approval_gates:
+        require_for_governance_changes: true
+        require_for_destructive_operations: true
+        require_for_system_project_changes: false
+      merge_policy:
+        mode: squash
+        allow_direct_to_default_branch: false
+      destructive_operations:
+        allow_reset: false
+        allow_clean: false
+        allow_force_push: false
+        require_explicit_approval: true
+  - key: odin-core
+    name: Odin Core
+    project_class: system_project
+    system_project: true
+    git_root: ..
+    default_branch: main
+    policy:
+      allowed_commands: [status]
+      branch_rules:
+        protected_branches: [main]
+        require_worktree: true
+        require_task_branch: true
+        allow_default_branch_mutation: false
+      approval_gates:
+        require_for_governance_changes: true
+        require_for_destructive_operations: true
+        require_for_system_project_changes: true
+      merge_policy:
+        mode: squash
+        allow_direct_to_default_branch: false
+      destructive_operations:
+        allow_reset: false
+        allow_clean: false
+        allow_force_push: false
+        require_explicit_approval: true
+`)
+	writeTextFile(t, filepath.Join(root, "config", "executors.yaml"), fmt.Sprintf(`
+version: 1
+executors:
+  - key: %s
+    adapter: %s
+    class: plan_backed_cli
+    enabled: true
+    priority: 10
+routes:
+  - name: default
+    match:
+      task_kinds: [general, plan, build, review, qa, research]
+      scopes: [global, odin-core, project, new-project]
+    preferred: [%s]
+`, executorKey, executorKey, executorKey))
+	writeTextFile(t, filepath.Join(root, "config", "odin.yaml"), `
+version: 1
+runtime:
+  root: .
+service:
+  http_addr: 127.0.0.1:9443
+  startup_recovery: true
+`)
+	writeTextFile(t, filepath.Join(root, "README.md"), "alpha test repo\n")
+	writeTextFile(t, filepath.Join(root, "alpha", "README.md"), "alpha nested repo\n")
+
+	initializeGitRepo(t, root)
+	initializeGitRepo(t, filepath.Join(root, "alpha"))
+
+	return root
+}
+
+func writeTextFile(t *testing.T, path string, content string) {
+	t.Helper()
+
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("WriteFile(%s) error = %v", path, err)
+	}
+}
+
+func initializeGitRepo(t *testing.T, dir string) {
+	t.Helper()
+
+	runGit(t, dir, "init", "-b", "main")
+	runGit(t, dir, "config", "user.email", "odin@example.com")
+	runGit(t, dir, "config", "user.name", "Odin Acceptance")
+	runGit(t, dir, "add", ".")
+	runGit(t, dir, "commit", "-m", "fixture")
 }
 
 func requirePathExists(t *testing.T, path string) {

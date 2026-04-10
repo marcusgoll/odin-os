@@ -399,15 +399,13 @@ func TestShellHelpIncludesExplicitCompatibilitySurface(t *testing.T) {
 		"odin status --json",
 		"odin task run --project <key> --title <title>",
 		"odin repl",
+		"/scope",
 		"/transition",
+		"/observe",
+		"/compare",
 	} {
 		if !strings.Contains(output.String(), want) {
 			t.Fatalf("help output = %q, want %q", output.String(), want)
-		}
-	}
-	for _, stale := range []string{"/observe", "/compare"} {
-		if strings.Contains(output.String(), stale) {
-			t.Fatalf("help output = %q, do not want stale command %q", output.String(), stale)
 		}
 	}
 }

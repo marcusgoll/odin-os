@@ -41,7 +41,8 @@ make build
 make install-local
 odin help
 odin status --json
-odin task run --project odin-core --title "smoke"
+# replace YOUR_PROJECT_KEY with a non-system project key from config/projects.yaml
+odin task run --project YOUR_PROJECT_KEY --title "smoke"
 odin repl
 ```
 

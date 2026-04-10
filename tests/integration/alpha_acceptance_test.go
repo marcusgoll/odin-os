@@ -367,7 +367,7 @@ func TestAlphaAcceptance(t *testing.T) {
 			t.Fatalf("transition output = %q, want pbs limited_action state", transitionOutput)
 		}
 
-		cleanupAcceptanceWorktree(t, "/home/orchestrator/pbs", "pbs", 1, 1, 1)
+		cleanupAcceptanceWorktree(t, "/home/orchestrator/pbs", acceptanceWorktreeRoot(extraEnv), "pbs", 1, 1, 1)
 
 		taskOutput, err := runOdinCommand(
 			t,
@@ -995,11 +995,65 @@ func TestReplRequiresExplicitSubcommand(t *testing.T) {
 	}
 }
 
-func cleanupAcceptanceWorktree(t *testing.T, repoRoot string, projectKey string, taskID int64, runID int64, attempt int) {
+func TestExplicitCommandsCanExecuteViaClaudeHarnessDriver(t *testing.T) {
+	t.Parallel()
+
+	sourceRepoRoot := projectRoot(t)
+	odinBinary := buildOdinBinary(t, sourceRepoRoot)
+	repoRoot := createCLIRepoRootWithPreferredExecutor(t, "claude_code_headless")
+	runtimeRoot := t.TempDir()
+	extraEnv := acceptanceHarnessDriverEnv(t)
+	homePath := filepath.Join(t.TempDir(), "home")
+	if err := os.MkdirAll(homePath, 0o755); err != nil {
+		t.Fatalf("MkdirAll(home) error = %v", err)
+	}
+	extraEnv["HOME"] = homePath
+	cleanupAcceptanceWorktree(t, repoRoot, acceptanceWorktreeRoot(extraEnv), "alpha-cli", 1, 1, 1)
+
+	if output, err := runOdinCommand(t, repoRoot, odinBinary, runtimeRoot, extraEnv, "", "project", "select", "alpha-cli"); err != nil {
+		t.Fatalf("runOdinCommand(project select) error = %v\n%s", err, output)
+	}
+	if output, err := runOdinCommand(t, repoRoot, odinBinary, runtimeRoot, extraEnv, "", "transition", "set", "cutover", "confirm", "because", "claude acceptance"); err != nil {
+		t.Fatalf("runOdinCommand(transition set) error = %v\n%s", err, output)
+	}
+
+	output, err := runOdinCommand(t, repoRoot, odinBinary, runtimeRoot, extraEnv, "", "task", "run", "--project", "alpha-cli", "--title", "claude smoke", "--json")
+	if err != nil {
+		t.Fatalf("runOdinCommand(task run) error = %v\n%s", err, output)
+	}
+
+	var payload struct {
+		Task struct {
+			ID     int64  `json:"id"`
+			Status string `json:"status"`
+		} `json:"task"`
+		Run struct {
+			ID       int64  `json:"id"`
+			Executor string `json:"executor"`
+			Status   string `json:"status"`
+		} `json:"run"`
+	}
+	if err := json.Unmarshal([]byte(output), &payload); err != nil {
+		t.Fatalf("task run json = %v\n%s", err, output)
+	}
+	if payload.Task.Status != "completed" {
+		t.Fatalf("Task.Status = %q, want completed", payload.Task.Status)
+	}
+	if payload.Run.Executor != "claude_code_headless" {
+		t.Fatalf("Run.Executor = %q, want claude_code_headless", payload.Run.Executor)
+	}
+	if payload.Run.Status != "completed" {
+		t.Fatalf("Run.Status = %q, want completed", payload.Run.Status)
+	}
+
+	cleanupAcceptanceWorktree(t, repoRoot, acceptanceWorktreeRoot(extraEnv), "alpha-cli", payload.Task.ID, payload.Run.ID, 1)
+}
+
+func cleanupAcceptanceWorktree(t *testing.T, repoRoot string, worktreeRoot string, projectKey string, taskID int64, runID int64, attempt int) {
 	t.Helper()
 
 	path := worktrees.ResolvePath(worktrees.PathParams{
-		Root:       worktrees.DefaultRoot(),
+		Root:       worktreeRoot,
 		ProjectKey: projectKey,
 		TaskID:     taskID,
 		RunID:      runID,
