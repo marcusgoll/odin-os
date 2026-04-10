@@ -132,8 +132,33 @@ func TestListFiltersJobsByScope(t *testing.T) {
 	}
 }
 
-func TestExecuteNextQueuedCompletesCutoverProjectTask(t *testing.T) {
+func TestCreateTaskFromProjectKeyUsesExplicitProject(t *testing.T) {
 	t.Parallel()
+
+	ctx := context.Background()
+	store := openJobStore(t)
+	defer store.Close()
+
+	registry := writeRegistry(t)
+	service := Service{
+		Store:    store,
+		Registry: registry,
+		Now: func() time.Time {
+			return time.Date(2026, 4, 9, 12, 0, 0, 0, time.UTC)
+		},
+	}
+
+	task, err := service.CreateTaskFromProjectKey(ctx, "alpha", "CLI explicit project")
+	if err != nil {
+		t.Fatalf("CreateTaskFromProjectKey() error = %v", err)
+	}
+	if task.Status != "queued" || task.Scope != string(scope.ScopeProject) {
+		t.Fatalf("task = %+v, want queued project task", task)
+	}
+}
+
+func TestExecuteNextQueuedCompletesCutoverProjectTask(t *testing.T) {
+	configureHarnessDriver(t)
 
 	ctx := context.Background()
 	store := openJobStore(t)
@@ -198,8 +223,66 @@ func TestExecuteNextQueuedCompletesCutoverProjectTask(t *testing.T) {
 	}
 }
 
-func TestExecuteNextQueuedRejectsShadowModeMutation(t *testing.T) {
+func TestExecuteTaskFailsCleanlyWithoutHarnessDriver(t *testing.T) {
 	t.Parallel()
+
+	ctx := context.Background()
+	store := openJobStore(t)
+	defer store.Close()
+
+	registry := writeRegistry(t)
+	service := Service{
+		Store:          store,
+		Registry:       registry,
+		Executors:      router.DefaultCatalog(),
+		ExecutorConfig: mustLoadExecutorConfig(t),
+		Transitions:    projects.Service{Store: store},
+		Leases: leases.Manager{
+			Store:        store,
+			Git:          &jobTestGit{},
+			WorktreeRoot: t.TempDir(),
+		},
+		Now: time.Now,
+	}
+
+	task, err := service.CreateTaskFromAct(ctx, scope.Resolution{
+		Kind:       scope.ScopeProject,
+		ProjectKey: "alpha",
+	}, "No harness driver configured")
+	if err != nil {
+		t.Fatalf("CreateTaskFromAct() error = %v", err)
+	}
+
+	project, err := store.GetProjectByKey(ctx, "alpha")
+	if err != nil {
+		t.Fatalf("GetProjectByKey(alpha) error = %v", err)
+	}
+	if _, err := service.Transitions.SetTransitionState(ctx, projects.TransitionStateInput{
+		ProjectID:   project.ID,
+		Actor:       projects.TransitionControllerOdinOS,
+		TargetState: projects.TransitionStateCutover,
+		ChangedBy:   "test",
+	}); err != nil {
+		t.Fatalf("SetTransitionState(cutover) error = %v", err)
+	}
+
+	outcome, err := service.ExecuteTask(ctx, task.ID)
+	if err == nil {
+		t.Fatal("ExecuteTask() error = nil, want harness driver failure")
+	}
+	if !strings.Contains(err.Error(), "no harness driver configured") {
+		t.Fatalf("error = %v, want no harness driver configured", err)
+	}
+	if outcome.Run != nil {
+		t.Fatalf("Run = %+v, want nil because execution never started", outcome.Run)
+	}
+	if outcome.Task.Status != "failed" {
+		t.Fatalf("Task.Status = %q, want failed", outcome.Task.Status)
+	}
+}
+
+func TestExecuteNextQueuedRejectsShadowModeMutation(t *testing.T) {
+	configureHarnessDriver(t)
 
 	ctx := context.Background()
 	store := openJobStore(t)
@@ -256,7 +339,7 @@ func TestExecuteNextQueuedRejectsShadowModeMutation(t *testing.T) {
 }
 
 func TestExecuteNextQueuedRejectsExplicitBoundedActionOnPromotionLine(t *testing.T) {
-	t.Parallel()
+	configureHarnessDriver(t)
 
 	ctx := context.Background()
 	store := openJobStore(t)
@@ -330,12 +413,199 @@ func TestExecuteNextQueuedRejectsExplicitBoundedActionOnPromotionLine(t *testing
 	}
 }
 
+func TestForegroundActExecutionPersistsTranscriptAndEpisode(t *testing.T) {
+	configureHarnessDriver(t)
+
+	ctx := context.Background()
+	store := openJobStore(t)
+	defer store.Close()
+
+	registry := writeRegistry(t)
+	service := Service{
+		Store:          store,
+		Registry:       registry,
+		Executors:      router.DefaultCatalog(),
+		ExecutorConfig: mustLoadExecutorConfig(t),
+		Transitions:    projects.Service{Store: store},
+		Leases: leases.Manager{
+			Store:        store,
+			Git:          &jobTestGit{},
+			WorktreeRoot: t.TempDir(),
+		},
+		Now: func() time.Time {
+			return time.Date(2026, 4, 9, 12, 0, 0, 0, time.UTC)
+		},
+	}
+
+	task, err := service.CreateTaskFromAct(ctx, scope.Resolution{
+		Kind:       scope.ScopeProject,
+		ProjectKey: "alpha",
+	}, "Persist act transcript")
+	if err != nil {
+		t.Fatalf("CreateTaskFromAct() error = %v", err)
+	}
+
+	project, err := store.GetProjectByKey(ctx, "alpha")
+	if err != nil {
+		t.Fatalf("GetProjectByKey(alpha) error = %v", err)
+	}
+	if _, err := service.Transitions.SetTransitionState(ctx, projects.TransitionStateInput{
+		ProjectID:      project.ID,
+		Actor:          projects.TransitionControllerOdinOS,
+		TargetState:    projects.TransitionStateLimitedAction,
+		LimitedActions: []string{"run_task"},
+		ChangedBy:      "test",
+		Notes:          "allow foreground execution",
+	}); err != nil {
+		t.Fatalf("SetTransitionState(limited_action) error = %v", err)
+	}
+
+	outcome, err := service.ExecuteTask(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("ExecuteTask() error = %v", err)
+	}
+	if outcome.Run == nil {
+		t.Fatal("Run = nil, want completed run")
+	}
+
+	transcripts, err := store.ListConversationTranscripts(ctx, sqlite.ListConversationTranscriptsParams{
+		ProjectID: &project.ID,
+		TaskID:    &task.ID,
+		RunID:     &outcome.Run.ID,
+		Scope:     "project",
+		ScopeKey:  project.Key,
+		Mode:      "act",
+	})
+	if err != nil {
+		t.Fatalf("ListConversationTranscripts() error = %v", err)
+	}
+	if len(transcripts) != 1 {
+		t.Fatalf("transcripts len = %d, want 1", len(transcripts))
+	}
+
+	summaries, err := store.ListMemorySummaries(ctx, sqlite.ListMemorySummariesParams{
+		ProjectID:  &project.ID,
+		TaskID:     &task.ID,
+		RunID:      &outcome.Run.ID,
+		Scope:      "project",
+		ScopeKey:   project.Key,
+		MemoryType: "episode",
+	})
+	if err != nil {
+		t.Fatalf("ListMemorySummaries() error = %v", err)
+	}
+	if len(summaries) != 1 {
+		t.Fatalf("summaries len = %d, want 1", len(summaries))
+	}
+}
+
+func TestForegroundActDenialPersistsTranscriptAndEpisode(t *testing.T) {
+	configureHarnessDriver(t)
+
+	ctx := context.Background()
+	store := openJobStore(t)
+	defer store.Close()
+
+	registry := writeRegistry(t)
+	service := Service{
+		Store:          store,
+		Registry:       registry,
+		Executors:      router.DefaultCatalog(),
+		ExecutorConfig: mustLoadExecutorConfig(t),
+		Transitions:    projects.Service{Store: store},
+		Leases: leases.Manager{
+			Store:        store,
+			Git:          &jobTestGit{},
+			WorktreeRoot: t.TempDir(),
+		},
+		Now: time.Now,
+	}
+
+	task, err := service.CreateTaskFromAct(ctx, scope.Resolution{
+		Kind:       scope.ScopeProject,
+		ProjectKey: "alpha",
+	}, "Persist denied act transcript")
+	if err != nil {
+		t.Fatalf("CreateTaskFromAct() error = %v", err)
+	}
+
+	project, err := store.GetProjectByKey(ctx, "alpha")
+	if err != nil {
+		t.Fatalf("GetProjectByKey(alpha) error = %v", err)
+	}
+	if _, err := service.Transitions.SetTransitionState(ctx, projects.TransitionStateInput{
+		ProjectID:   project.ID,
+		Actor:       projects.TransitionControllerOdinOS,
+		TargetState: projects.TransitionStateShadow,
+		ChangedBy:   "test",
+	}); err != nil {
+		t.Fatalf("SetTransitionState(shadow) error = %v", err)
+	}
+
+	outcome, err := service.ExecuteTask(ctx, task.ID)
+	if err == nil {
+		t.Fatalf("ExecuteTask() error = nil, want transition denial")
+	}
+	if outcome.Run == nil {
+		t.Fatal("Run = nil, want failed run record")
+	}
+
+	transcripts, err := store.ListConversationTranscripts(ctx, sqlite.ListConversationTranscriptsParams{
+		ProjectID: &project.ID,
+		TaskID:    &task.ID,
+		RunID:     &outcome.Run.ID,
+		Scope:     "project",
+		ScopeKey:  project.Key,
+		Mode:      "act",
+	})
+	if err != nil {
+		t.Fatalf("ListConversationTranscripts() error = %v", err)
+	}
+	if len(transcripts) != 1 {
+		t.Fatalf("transcripts len = %d, want 1", len(transcripts))
+	}
+	if transcripts[0].Response == "" {
+		t.Fatalf("Response = empty, want denial summary")
+	}
+
+	summaries, err := store.ListMemorySummaries(ctx, sqlite.ListMemorySummariesParams{
+		ProjectID:  &project.ID,
+		TaskID:     &task.ID,
+		RunID:      &outcome.Run.ID,
+		Scope:      "project",
+		ScopeKey:   project.Key,
+		MemoryType: "episode",
+	})
+	if err != nil {
+		t.Fatalf("ListMemorySummaries() error = %v", err)
+	}
+	if len(summaries) != 1 {
+		t.Fatalf("summaries len = %d, want 1", len(summaries))
+	}
+}
+
 type jobTestGit struct{}
 
 func (jobTestGit) BranchExists(context.Context, string, string) (bool, error) { return false, nil }
 func (jobTestGit) CreateBranch(context.Context, string, string, string) error { return nil }
 func (jobTestGit) AddWorktree(context.Context, string, string, string) error  { return nil }
 func (jobTestGit) RemoveWorktree(context.Context, string, string) error       { return nil }
+
+func configureHarnessDriver(t *testing.T) {
+	t.Helper()
+
+	path := filepath.Join(t.TempDir(), "codex-driver.sh")
+	if err := os.WriteFile(path, []byte(`#!/usr/bin/env bash
+cat >/dev/null
+printf '{"status":"completed","output":"driver test ok","external_id":"fixture-driver"}'
+`), 0o755); err != nil {
+		t.Fatalf("WriteFile(driver) error = %v", err)
+	}
+	if err := os.Chmod(path, 0o755); err != nil {
+		t.Fatalf("Chmod(driver) error = %v", err)
+	}
+	t.Setenv("ODIN_CODEX_DRIVER", path)
+}
 
 func mustLoadExecutorConfig(t *testing.T) router.Config {
 	t.Helper()

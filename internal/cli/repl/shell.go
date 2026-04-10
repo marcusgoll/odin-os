@@ -14,12 +14,16 @@ import (
 	"odin-os/internal/cli/commands"
 	"odin-os/internal/cli/render"
 	"odin-os/internal/cli/scope"
+	clistate "odin-os/internal/cli/state"
 	"odin-os/internal/core/projects"
+	"odin-os/internal/executors/contract"
+	executorrouter "odin-os/internal/executors/router"
+	convsvc "odin-os/internal/runtime/conversation"
 	healthsvc "odin-os/internal/runtime/health"
 	jobsvc "odin-os/internal/runtime/jobs"
 	runsvc "odin-os/internal/runtime/runs"
 	"odin-os/internal/store/sqlite"
-	"odin-os/internal/vcs/git"
+	"odin-os/internal/vcs/leases"
 	"odin-os/internal/vcs/worktrees"
 )
 
@@ -28,17 +32,20 @@ type Environment struct {
 	Registry            projects.Registry
 	RegistryDiagnostics []projects.Diagnostic
 	SessionStore        SessionStore
-	Worktrees           worktrees.Manager
+	ExecutorConfig      executorrouter.Config
+	Executors           map[string]contract.Executor
+	Leases              leases.Manager
 }
 
 type Shell struct {
-	env         Environment
-	state       State
-	health      healthsvc.Service
-	jobs        jobsvc.Service
-	runs        runsvc.Service
-	transitions projects.Service
-	worktrees   worktrees.Manager
+	env          Environment
+	state        State
+	health       healthsvc.Service
+	jobs         jobsvc.Service
+	runs         runsvc.Service
+	transitions  projects.Service
+	conversation convsvc.Service
+	worktrees    worktrees.Manager
 }
 
 const transitionUsage = "/transition [status] | /transition set <state> [allow=<csv>] [confirm] because <reason...>"
@@ -51,12 +58,13 @@ func New(env Environment) (*Shell, error) {
 	}
 
 	state := ResolveStartupState(cache, env.Registry)
-	worktreeManager := env.Worktrees
-	if worktreeManager.Store == nil {
-		worktreeManager.Store = env.Store
+	leaseManager := env.Leases
+	if leaseManager.Store == nil {
+		leaseManager.Store = env.Store
 	}
-	if worktreeManager.Git == nil {
-		worktreeManager.Git = git.Adapter{}
+	worktreeManager := worktrees.Manager{
+		Store: leaseManager.Store,
+		Git:   leaseManager.Git,
 	}
 	shell := &Shell{
 		env:   env,
@@ -65,15 +73,26 @@ func New(env Environment) (*Shell, error) {
 			DB: env.Store.DB(),
 		},
 		jobs: jobsvc.Service{
-			Store:    env.Store,
-			Registry: env.Registry,
-			Now:      time.Now,
+			Store:          env.Store,
+			Registry:       env.Registry,
+			Executors:      env.Executors,
+			ExecutorConfig: env.ExecutorConfig,
+			Transitions:    projects.Service{Store: env.Store},
+			Leases:         leaseManager,
+			Now:            time.Now,
 		},
 		runs: runsvc.Service{
 			DB: env.Store.DB(),
 		},
 		transitions: projects.Service{
 			Store: env.Store,
+		},
+		conversation: convsvc.Service{
+			Store:               env.Store,
+			Registry:            env.Registry,
+			RegistryDiagnostics: env.RegistryDiagnostics,
+			ExecutorConfig:      env.ExecutorConfig,
+			Executors:           env.Executors,
 		},
 		worktrees: worktreeManager,
 	}
@@ -132,8 +151,21 @@ func (shell *Shell) HandleLine(ctx context.Context, line string, output io.Write
 	if err := shell.persistState(); err != nil {
 		return err
 	}
-	_, err = fmt.Fprintf(output, "created task %s (%s)\n", task.Key, task.Status)
-	return err
+	if _, err := fmt.Fprintf(output, "created task %s (%s)\n", task.Key, task.Status); err != nil {
+		return err
+	}
+
+	outcome, runErr := shell.jobs.ExecuteTask(ctx, task.ID)
+	if outcome.Task.ID != 0 {
+		shell.state.ActiveTask = outcome.Task.Key
+	}
+	if outcome.Run != nil {
+		shell.state.ActiveRun = strconv.FormatInt(outcome.Run.ID, 10)
+	}
+	if err := shell.persistState(); err != nil {
+		return err
+	}
+	return shell.renderActOutcome(output, outcome, runErr)
 }
 
 func (shell *Shell) renderPrompt(ctx context.Context, output io.Writer) error {
@@ -166,7 +198,10 @@ func (shell *Shell) renderPrompt(ctx context.Context, output io.Writer) error {
 func (shell *Shell) handleCommand(ctx context.Context, command commands.Command, output io.Writer) error {
 	switch command.Name {
 	case "help":
-		if _, err := fmt.Fprintln(output, "/help /mode /scope /project /transition /observe /compare /leases /jobs /runs /approvals /logs /doctor /self"); err != nil {
+		if _, err := fmt.Fprintln(output, "prefer explicit cli commands outside the repl: odin help | odin status --json | odin task run --project <key> --title <title> | odin repl"); err != nil {
+			return err
+		}
+		if _, err := fmt.Fprintln(output, "repl compatibility commands: /help /mode /scope /project /transition /observe /compare /leases /jobs /runs /approvals /logs /doctor /self /quit"); err != nil {
 			return err
 		}
 		if _, err := fmt.Fprintf(output, "%s\n", transitionUsage); err != nil {
@@ -209,29 +244,33 @@ func (shell *Shell) handleCommand(ctx context.Context, command commands.Command,
 }
 
 func (shell *Shell) handleAsk(ctx context.Context, line string, output io.Writer) error {
-	switch commands.RouteAskIntent(line) {
-	case commands.IntentHelp:
-		return shell.handleCommand(ctx, commands.Command{Name: "help"}, output)
-	case commands.IntentMode:
-		return shell.handleCommand(ctx, commands.Command{Name: "mode"}, output)
-	case commands.IntentScope:
-		return shell.handleCommand(ctx, commands.Command{Name: "scope"}, output)
-	case commands.IntentProject:
-		return shell.handleCommand(ctx, commands.Command{Name: "project"}, output)
-	case commands.IntentJobs:
-		return shell.handleCommand(ctx, commands.Command{Name: "jobs"}, output)
-	case commands.IntentRuns:
-		return shell.handleCommand(ctx, commands.Command{Name: "runs"}, output)
-	case commands.IntentApprovals:
-		return shell.handleCommand(ctx, commands.Command{Name: "approvals"}, output)
-	case commands.IntentLogs:
-		return shell.handleCommand(ctx, commands.Command{Name: "logs"}, output)
-	case commands.IntentDoctor:
-		return shell.handleCommand(ctx, commands.Command{Name: "doctor"}, output)
-	default:
-		_, err := fmt.Fprintln(output, "local ask is limited in Phase 05. Try /help, /scope, /project, /jobs, /runs, /approvals, /logs, or /doctor.")
+	result, err := shell.conversation.Respond(ctx, convsvc.Request{
+		Scope:  shell.state.Scope,
+		Mode:   string(shell.state.Mode),
+		Prompt: line,
+	})
+	if err != nil {
+		_, writeErr := fmt.Fprintf(output, "ask failed: %v\n", err)
+		return writeErr
+	}
+	_, err = fmt.Fprintln(output, result.Answer)
+	return err
+}
+
+func (shell *Shell) renderActOutcome(output io.Writer, outcome jobsvc.ExecutionOutcome, runErr error) error {
+	if outcome.Run != nil {
+		summary := strings.TrimSpace(outcome.Run.Summary)
+		if summary == "" {
+			summary = "no summary"
+		}
+		_, err := fmt.Fprintf(output, "run %d %s %s: %s\n", outcome.Run.ID, outcome.Run.Executor, outcome.Run.Status, summary)
 		return err
 	}
+	if runErr != nil {
+		_, err := fmt.Fprintf(output, "run failed before start: %v\n", runErr)
+		return err
+	}
+	return nil
 }
 
 func (shell *Shell) handleMode(args []string, output io.Writer) error {
@@ -241,7 +280,7 @@ func (shell *Shell) handleMode(args []string, output io.Writer) error {
 	}
 
 	requested := Mode(strings.ToLower(args[0]))
-	sanitized := sanitizeMode(requested, shell.state.Scope)
+	sanitized := clistate.SanitizeMode(requested, shell.state.Scope)
 	if requested == ModeAct && sanitized != ModeAct {
 		shell.state.Mode = ModeAsk
 		if err := shell.persistState(); err != nil {
@@ -279,7 +318,7 @@ func (shell *Shell) handleScope(args []string, output io.Writer) error {
 		return err
 	}
 
-	shell.state.Mode = sanitizeMode(shell.state.Mode, shell.state.Scope)
+	shell.state.Mode = clistate.SanitizeMode(shell.state.Mode, shell.state.Scope)
 	if err := shell.persistState(); err != nil {
 		return err
 	}
@@ -317,7 +356,7 @@ func (shell *Shell) handleProject(args []string, output io.Writer) error {
 	})
 	shell.state.ActiveTask = ""
 	shell.state.ActiveRun = ""
-	shell.state.Mode = sanitizeMode(shell.state.Mode, shell.state.Scope)
+	shell.state.Mode = clistate.SanitizeMode(shell.state.Mode, shell.state.Scope)
 	if err := shell.persistState(); err != nil {
 		return err
 	}
@@ -471,14 +510,14 @@ func (shell *Shell) handleLeases(ctx context.Context, args []string, output io.W
 		return err
 	}
 
-	leases, err := shell.env.Store.ListWorktreeLeases(ctx)
+	leasesList, err := shell.env.Store.ListWorktreeLeases(ctx)
 	if err != nil {
 		return err
 	}
 
 	projectKeyByID := map[int64]string{}
 	count := 0
-	for _, lease := range leases {
+	for _, lease := range leasesList {
 		projectKey, err := shell.projectKeyForID(ctx, projectKeyByID, lease.ProjectID)
 		if err != nil {
 			return err
@@ -551,14 +590,14 @@ func (shell *Shell) handleLeaseCleanup(ctx context.Context, args []string, outpu
 		return err
 	}
 
-	leases, err := shell.env.Store.ListWorktreeLeases(ctx)
+	leasesList, err := shell.env.Store.ListWorktreeLeases(ctx)
 	if err != nil {
 		return err
 	}
 
 	projectKeyByID := map[int64]string{}
 	cleanupEligible := make([]sqlite.WorktreeLease, 0)
-	for _, lease := range leases {
+	for _, lease := range leasesList {
 		projectKey, err := shell.projectKeyForID(ctx, projectKeyByID, lease.ProjectID)
 		if err != nil {
 			return err
@@ -749,7 +788,7 @@ func (shell *Shell) handleSelf(output io.Writer) error {
 	})
 	shell.state.ActiveTask = ""
 	shell.state.ActiveRun = ""
-	shell.state.Mode = sanitizeMode(shell.state.Mode, shell.state.Scope)
+	shell.state.Mode = clistate.SanitizeMode(shell.state.Mode, shell.state.Scope)
 	if err := shell.persistState(); err != nil {
 		return err
 	}

@@ -7,7 +7,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"odin-os/internal/cli/repl"
+	clistate "odin-os/internal/cli/state"
 	"odin-os/internal/core/projects"
 	"odin-os/internal/executors/contract"
 	executorrouter "odin-os/internal/executors/router"
@@ -21,7 +21,7 @@ type App struct {
 	RepoRoot            string
 	Registry            projects.Registry
 	RegistryDiagnostics []projects.Diagnostic
-	SessionStore        repl.SessionStore
+	SessionStore        clistate.SessionStore
 	ExecutorConfig      executorrouter.Config
 	Executors           map[string]contract.Executor
 }
@@ -93,7 +93,7 @@ func Load(ctx context.Context, repoRoot string, runtimeRoot string) (App, error)
 		RepoRoot:            repoRoot,
 		Registry:            registry,
 		RegistryDiagnostics: diagnostics,
-		SessionStore: repl.SessionStore{
+		SessionStore: clistate.SessionStore{
 			Path: filepath.Join(runtimeRoot, "state", "cache", "cli-session.json"),
 		},
 		ExecutorConfig: executorConfig,

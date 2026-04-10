@@ -231,6 +231,80 @@ type ListContextPacketsParams struct {
 	Status      string
 }
 
+type ConversationTranscript struct {
+	ID          int64
+	ProjectID   *int64
+	TaskID      *int64
+	RunID       *int64
+	Scope       string
+	ScopeKey    string
+	Mode        string
+	Prompt      string
+	Response    string
+	ToolSummary string
+	Executor    string
+	CreatedAt   time.Time
+}
+
+type RecordConversationTranscriptParams struct {
+	ProjectID   *int64
+	TaskID      *int64
+	RunID       *int64
+	Scope       string
+	ScopeKey    string
+	Mode        string
+	Prompt      string
+	Response    string
+	ToolSummary string
+	Executor    string
+}
+
+type ListConversationTranscriptsParams struct {
+	ProjectID *int64
+	TaskID    *int64
+	RunID     *int64
+	Scope     string
+	ScopeKey  string
+	Mode      string
+}
+
+type MemorySummary struct {
+	ID                 int64
+	ProjectID          *int64
+	SourceTranscriptID *int64
+	TaskID             *int64
+	RunID              *int64
+	Scope              string
+	ScopeKey           string
+	MemoryType         string
+	Summary            string
+	DetailsJSON        string
+	CreatedAt          time.Time
+	UpdatedAt          time.Time
+}
+
+type RecordMemorySummaryParams struct {
+	ProjectID          *int64
+	SourceTranscriptID *int64
+	TaskID             *int64
+	RunID              *int64
+	Scope              string
+	ScopeKey           string
+	MemoryType         string
+	Summary            string
+	DetailsJSON        string
+}
+
+type ListMemorySummariesParams struct {
+	ProjectID          *int64
+	SourceTranscriptID *int64
+	TaskID             *int64
+	RunID              *int64
+	Scope              string
+	ScopeKey           string
+	MemoryType         string
+}
+
 type WorktreeLease struct {
 	ID           int64
 	ProjectID    int64
@@ -400,4 +474,94 @@ type ListEventsParams struct {
 	ProjectID *int64
 	TaskID    *int64
 	RunID     *int64
+}
+
+type Delegation struct {
+	ID              int64
+	ParentTaskID    int64
+	ParentRunID     *int64
+	ProjectID       int64
+	Scope           string
+	DelegationKey   string
+	Role            string
+	ActionClass     string
+	ActionKey       string
+	MutationMode    string
+	Status          string
+	ConvergenceMode string
+	ArtifactTarget  string
+	Executor        string
+	ChildTaskID     *int64
+	ChildRunID      *int64
+	WorktreeLeaseID *int64
+	BranchName      string
+	DetailsJSON     string
+	CreatedAt       time.Time
+	UpdatedAt       time.Time
+}
+
+type CreateDelegationParams struct {
+	ParentTaskID    int64
+	ParentRunID     *int64
+	ProjectID       int64
+	Scope           string
+	DelegationKey   string
+	Role            string
+	ActionClass     string
+	ActionKey       string
+	MutationMode    string
+	Status          string
+	ConvergenceMode string
+	ArtifactTarget  string
+	Executor        string
+	WorktreeLeaseID *int64
+	BranchName      string
+	DetailsJSON     string
+}
+
+type UpdateDelegationStatusParams struct {
+	DelegationID int64
+	Status       string
+}
+
+type AttachDelegationChildTaskParams struct {
+	DelegationID int64
+	ChildTaskID  int64
+	ChildRunID   *int64
+}
+
+type AttachDelegationWorktreeParams struct {
+	DelegationID    int64
+	WorktreeLeaseID *int64
+	BranchName      string
+}
+
+type ListDelegationsParams struct {
+	ProjectID       *int64
+	ParentTaskID    *int64
+	ChildTaskID     *int64
+	WorktreeLeaseID *int64
+	Status          string
+	DelegationKey   string
+}
+
+type DelegationArtifact struct {
+	ID           int64
+	DelegationID int64
+	ArtifactType string
+	Summary      string
+	DetailsJSON  string
+	CreatedAt    time.Time
+}
+
+type CreateDelegationArtifactParams struct {
+	DelegationID int64
+	ArtifactType string
+	Summary      string
+	DetailsJSON  string
+}
+
+type ListDelegationArtifactsParams struct {
+	DelegationID int64
+	ArtifactType string
 }
