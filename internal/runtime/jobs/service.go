@@ -168,6 +168,18 @@ func (service Service) ExecuteTask(ctx context.Context, taskID int64) (Execution
 		},
 	}
 
+	if err := service.ensureHarnessDriverConfigured(ctx, config, executors, spec); err != nil {
+		_, _ = service.Store.UpdateTaskStatus(ctx, sqlite.UpdateTaskStatusParams{
+			TaskID: task.ID,
+			Status: "failed",
+		})
+		failedTask, loadErr := service.Store.GetTask(ctx, task.ID)
+		if loadErr == nil {
+			return ExecutionOutcome{Task: failedTask}, err
+		}
+		return ExecutionOutcome{}, err
+	}
+
 	decision, err := selector.Select(ctx, spec)
 	if err != nil {
 		_, _ = service.Store.UpdateTaskStatus(ctx, sqlite.UpdateTaskStatusParams{
@@ -519,6 +531,51 @@ func (service Service) executionConfig(ctx context.Context) (executorrouter.Conf
 	return executorrouter.ApplyRoutingRefinements(config, refinements)
 }
 
+func (service Service) ensureHarnessDriverConfigured(ctx context.Context, config executorrouter.Config, executors map[string]contract.Executor, spec contract.TaskSpec) error {
+	if !spec.Requirements.NeedsHeadlessPlan {
+		return nil
+	}
+
+	route, ok := matchRouteConfig(config, spec)
+	if !ok {
+		return nil
+	}
+
+	order := append([]string{}, route.Preferred...)
+	order = append(order, route.Fallback...)
+
+	headlessCandidates := 0
+	for _, key := range order {
+		executorConfig, ok := config.ExecutorByKey(key)
+		if !ok || !executorConfig.Enabled || executorConfig.Class != contract.ExecutorClassPlanBackedCLI {
+			continue
+		}
+		executor, ok := executors[key]
+		if !ok {
+			continue
+		}
+		capabilities, err := executor.Capabilities(ctx)
+		if err != nil || !capabilities.Matches(spec) {
+			continue
+		}
+		headlessCandidates++
+
+		health, err := executor.Health(ctx)
+		if err != nil {
+			continue
+		}
+		if health.Status == contract.HealthStatusHealthy || health.Status == contract.HealthStatusDegraded {
+			return nil
+		}
+	}
+
+	if headlessCandidates == 0 {
+		return nil
+	}
+
+	return fmt.Errorf("no harness driver configured for route %q", route.Name)
+}
+
 func normalizeRouteName(targetKey string) string {
 	targetKey = strings.TrimSpace(targetKey)
 	targetKey = strings.TrimPrefix(targetKey, "router/")
@@ -526,6 +583,37 @@ func normalizeRouteName(targetKey string) string {
 		return "default"
 	}
 	return targetKey
+}
+
+func matchRouteConfig(config executorrouter.Config, spec contract.TaskSpec) (executorrouter.RouteConfig, bool) {
+	for _, route := range config.Routes {
+		if len(route.Match.TaskKinds) > 0 && !taskKindsContain(route.Match.TaskKinds, spec.Kind) {
+			continue
+		}
+		if len(route.Match.Scopes) > 0 && !stringsContain(route.Match.Scopes, spec.Scope) {
+			continue
+		}
+		return route, true
+	}
+	return executorrouter.RouteConfig{}, false
+}
+
+func taskKindsContain(values []contract.TaskKind, value contract.TaskKind) bool {
+	for _, candidate := range values {
+		if candidate == value {
+			return true
+		}
+	}
+	return false
+}
+
+func stringsContain(values []string, value string) bool {
+	for _, candidate := range values {
+		if candidate == value {
+			return true
+		}
+	}
+	return false
 }
 
 func authorizeMutation(manifest projects.Manifest) error {

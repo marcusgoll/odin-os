@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -187,6 +188,64 @@ func TestExecuteNextQueuedCompletesCutoverProjectTask(t *testing.T) {
 	}
 	if run.Status != "completed" || run.Executor != "codex_headless" {
 		t.Fatalf("run = %+v, want completed codex_headless execution", run)
+	}
+}
+
+func TestExecuteTaskFailsCleanlyWithoutHarnessDriver(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openJobStore(t)
+	defer store.Close()
+
+	registry := writeRegistry(t)
+	service := Service{
+		Store:          store,
+		Registry:       registry,
+		Executors:      router.DefaultCatalog(),
+		ExecutorConfig: mustLoadExecutorConfig(t),
+		Transitions:    projects.Service{Store: store},
+		Leases: leases.Manager{
+			Store:        store,
+			Git:          &jobTestGit{},
+			WorktreeRoot: t.TempDir(),
+		},
+		Now: time.Now,
+	}
+
+	task, err := service.CreateTaskFromAct(ctx, scope.Resolution{
+		Kind:       scope.ScopeProject,
+		ProjectKey: "alpha",
+	}, "No harness driver configured")
+	if err != nil {
+		t.Fatalf("CreateTaskFromAct() error = %v", err)
+	}
+
+	project, err := store.GetProjectByKey(ctx, "alpha")
+	if err != nil {
+		t.Fatalf("GetProjectByKey(alpha) error = %v", err)
+	}
+	if _, err := service.Transitions.SetTransitionState(ctx, projects.TransitionStateInput{
+		ProjectID:   project.ID,
+		Actor:       projects.TransitionControllerOdinOS,
+		TargetState: projects.TransitionStateCutover,
+		ChangedBy:   "test",
+	}); err != nil {
+		t.Fatalf("SetTransitionState(cutover) error = %v", err)
+	}
+
+	outcome, err := service.ExecuteTask(ctx, task.ID)
+	if err == nil {
+		t.Fatal("ExecuteTask() error = nil, want harness driver failure")
+	}
+	if !strings.Contains(err.Error(), "no harness driver configured") {
+		t.Fatalf("error = %v, want no harness driver configured", err)
+	}
+	if outcome.Run != nil {
+		t.Fatalf("Run = %+v, want nil because execution never started", outcome.Run)
+	}
+	if outcome.Task.Status != "failed" {
+		t.Fatalf("Task.Status = %q, want failed", outcome.Task.Status)
 	}
 }
 
