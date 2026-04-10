@@ -3,6 +3,7 @@ package lifecycle
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -48,6 +49,48 @@ func TestRunWithoutArgsPrintsUsageInsteadOfStartingShell(t *testing.T) {
 	}
 	if strings.Contains(output, "odin>") {
 		t.Fatalf("stdout = %q, should not contain repl prompt", output)
+	}
+}
+
+func TestRunStatusJSON(t *testing.T) {
+	t.Parallel()
+
+	root := testRepoRoot(t)
+	var stdout bytes.Buffer
+
+	err := Run(context.Background(), root, []string{"status", "--json"}, strings.NewReader(""), &stdout)
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	var payload struct {
+		Health           string `json:"health"`
+		PendingApprovals int    `json:"pending_approvals"`
+		RegistryHealthy  bool   `json:"registry_healthy"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("status json = %v", err)
+	}
+	if payload.Health == "" {
+		t.Fatalf("Health = %q, want non-empty", payload.Health)
+	}
+	if !payload.RegistryHealthy {
+		t.Fatalf("RegistryHealthy = false, want true")
+	}
+}
+
+func TestRunProjectListText(t *testing.T) {
+	t.Parallel()
+
+	root := testRepoRoot(t)
+	var stdout bytes.Buffer
+
+	err := Run(context.Background(), root, []string{"project", "list"}, strings.NewReader(""), &stdout)
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if !strings.Contains(stdout.String(), "odin-core") {
+		t.Fatalf("stdout = %q, want project key", stdout.String())
 	}
 }
 

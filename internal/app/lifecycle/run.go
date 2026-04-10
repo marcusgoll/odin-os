@@ -2,6 +2,7 @@ package lifecycle
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,6 +11,8 @@ import (
 	stdhttp "net/http"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -19,10 +22,15 @@ import (
 	appconfig "odin-os/internal/app/config"
 	"odin-os/internal/cli/commands"
 	"odin-os/internal/cli/repl"
+	"odin-os/internal/cli/scope"
+	clistate "odin-os/internal/cli/state"
 	"odin-os/internal/core/projects"
+	runtimeevents "odin-os/internal/runtime/events"
 	healthsvc "odin-os/internal/runtime/health"
 	"odin-os/internal/runtime/jobs"
 	"odin-os/internal/runtime/recovery"
+	"odin-os/internal/runtime/runs"
+	"odin-os/internal/store/sqlite"
 	"odin-os/internal/telemetry/logs"
 	metricsvc "odin-os/internal/telemetry/metrics"
 	gitadapter "odin-os/internal/vcs/git"
@@ -32,7 +40,7 @@ import (
 
 var errRuntimeNotReady = errors.New("runtime not ready")
 
-const rootUsageBanner = "Usage: odin <command> [args]\n\nCommands: help repl doctor healthcheck serve backup restore verify-backup"
+const rootUsageBanner = "Usage: odin <command> [args]\n\nCommands: help repl doctor healthcheck serve backup restore verify-backup status project scope jobs runs approvals logs"
 
 var (
 	serveTaskLoopInterval     = 1 * time.Second
@@ -80,6 +88,20 @@ func Run(ctx context.Context, root string, args []string, stdin io.Reader, stdou
 		return runRestore(ctx, appbackup.Service{RepoRoot: root, RuntimeRoot: cfg.RuntimeRoot}, rootCommand.Args, stdout)
 	case "verify-backup":
 		return runVerifyBackup(ctx, appbackup.Service{RepoRoot: root, RuntimeRoot: cfg.RuntimeRoot}, rootCommand.Args, stdout)
+	case "status":
+		return runStatus(ctx, app, rootCommand.Args, stdout)
+	case "project":
+		return runProject(app, rootCommand.Args, stdout)
+	case "scope":
+		return runScope(app, rootCommand.Args, stdout)
+	case "jobs":
+		return runJobs(ctx, app, rootCommand.Args, stdout)
+	case "runs":
+		return runRuns(ctx, app, rootCommand.Args, stdout)
+	case "approvals":
+		return runApprovals(ctx, app, rootCommand.Args, stdout)
+	case "logs":
+		return runLogs(ctx, app, rootCommand.Args, stdout)
 	default:
 		return fmt.Errorf("unknown command: %s", rootCommand.Name)
 	}
@@ -125,6 +147,266 @@ func runDoctor(ctx context.Context, app bootstrap.App, args []string, stdout io.
 	return err
 }
 
+func runStatus(ctx context.Context, app bootstrap.App, args []string, stdout io.Writer) error {
+	jsonOutput, remaining, err := consumeJSONFlag(args)
+	if err != nil {
+		return err
+	}
+	if len(remaining) != 0 {
+		return fmt.Errorf("usage: odin status [--json]")
+	}
+
+	state, err := loadCLIState(app)
+	if err != nil {
+		return err
+	}
+
+	pendingApprovals, err := listPendingApprovals(ctx, app.Store, state.Scope)
+	if err != nil {
+		return err
+	}
+
+	summary, err := healthsvc.Service{DB: app.Store.DB()}.Summary(ctx, len(app.RegistryDiagnostics) == 0)
+	if err != nil {
+		return err
+	}
+
+	view := commands.StatusView{
+		Health:           string(summary.Status),
+		PendingApprovals: len(pendingApprovals),
+		RegistryHealthy:  summary.RegistryHealthy,
+	}
+	if jsonOutput {
+		return commands.WriteStatusJSON(stdout, view)
+	}
+
+	_, err = fmt.Fprintf(
+		stdout,
+		"health=%s pending_approvals=%d registry_healthy=%t\n",
+		view.Health,
+		view.PendingApprovals,
+		view.RegistryHealthy,
+	)
+	return err
+}
+
+func runProject(app bootstrap.App, args []string, stdout io.Writer) error {
+	jsonOutput, remaining, err := consumeJSONFlag(args)
+	if err != nil {
+		return err
+	}
+	if len(remaining) > 1 || (len(remaining) == 1 && remaining[0] != "list") {
+		return fmt.Errorf("usage: odin project [list] [--json]")
+	}
+
+	state, err := loadCLIState(app)
+	if err != nil {
+		return err
+	}
+
+	current := state.Scope.ProjectKey
+	if current == "" {
+		current = "none"
+	}
+
+	projectKeys := make([]string, 0, len(app.Registry.Projects()))
+	for _, project := range app.Registry.Projects() {
+		projectKeys = append(projectKeys, project.Key)
+	}
+	sort.Strings(projectKeys)
+
+	view := commands.ProjectListView{
+		Current:  current,
+		Projects: projectKeys,
+	}
+	if jsonOutput {
+		return commands.WriteJSON(stdout, view)
+	}
+
+	_, err = fmt.Fprintf(stdout, "current=%s projects=%s\n", view.Current, strings.Join(view.Projects, ","))
+	return err
+}
+
+func runScope(app bootstrap.App, args []string, stdout io.Writer) error {
+	jsonOutput, remaining, err := consumeJSONFlag(args)
+	if err != nil {
+		return err
+	}
+	if len(remaining) != 0 {
+		return fmt.Errorf("usage: odin scope [--json]")
+	}
+
+	state, err := loadCLIState(app)
+	if err != nil {
+		return err
+	}
+
+	view := commands.ScopeView{Scope: scopeLabel(state.Scope)}
+	if jsonOutput {
+		return commands.WriteJSON(stdout, view)
+	}
+
+	_, err = fmt.Fprintf(stdout, "scope=%s\n", view.Scope)
+	return err
+}
+
+func runJobs(ctx context.Context, app bootstrap.App, args []string, stdout io.Writer) error {
+	jsonOutput, remaining, err := consumeJSONFlag(args)
+	if err != nil {
+		return err
+	}
+	if len(remaining) != 0 {
+		return fmt.Errorf("usage: odin jobs [--json]")
+	}
+
+	state, err := loadCLIState(app)
+	if err != nil {
+		return err
+	}
+
+	views, err := jobs.Service{Store: app.Store}.List(ctx, state.Scope)
+	if err != nil {
+		return err
+	}
+	if jsonOutput {
+		jobViews := make([]commands.JobView, 0, len(views))
+		for _, view := range views {
+			jobViews = append(jobViews, commands.JobView{
+				ProjectKey: view.ProjectKey,
+				TaskKey:    view.TaskKey,
+				Status:     view.Status,
+			})
+		}
+		return commands.WriteJSON(stdout, commands.JobsView{Jobs: jobViews})
+	}
+	if len(views) == 0 {
+		_, err := fmt.Fprintln(stdout, "no jobs")
+		return err
+	}
+
+	for _, view := range views {
+		if _, err := fmt.Fprintf(stdout, "%s %s %s\n", view.ProjectKey, view.TaskKey, view.Status); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func runRuns(ctx context.Context, app bootstrap.App, args []string, stdout io.Writer) error {
+	jsonOutput, remaining, err := consumeJSONFlag(args)
+	if err != nil {
+		return err
+	}
+	if len(remaining) != 0 {
+		return fmt.Errorf("usage: odin runs [--json]")
+	}
+
+	state, err := loadCLIState(app)
+	if err != nil {
+		return err
+	}
+
+	views, err := runs.Service{DB: app.Store.DB()}.List(ctx, state.Scope)
+	if err != nil {
+		return err
+	}
+	if jsonOutput {
+		runViews := make([]commands.RunView, 0, len(views))
+		for _, view := range views {
+			runViews = append(runViews, commands.RunView{
+				TaskKey:  view.TaskKey,
+				Executor: view.Executor,
+				Status:   view.Status,
+			})
+		}
+		return commands.WriteJSON(stdout, commands.RunsView{Runs: runViews})
+	}
+	if len(views) == 0 {
+		_, err := fmt.Fprintln(stdout, "no runs")
+		return err
+	}
+	for _, view := range views {
+		if _, err := fmt.Fprintf(stdout, "%s %s %s\n", view.TaskKey, view.Executor, view.Status); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func runApprovals(ctx context.Context, app bootstrap.App, args []string, stdout io.Writer) error {
+	jsonOutput, remaining, err := consumeJSONFlag(args)
+	if err != nil {
+		return err
+	}
+	if len(remaining) != 0 {
+		return fmt.Errorf("usage: odin approvals [--json]")
+	}
+
+	state, err := loadCLIState(app)
+	if err != nil {
+		return err
+	}
+
+	approvals, err := listPendingApprovals(ctx, app.Store, state.Scope)
+	if err != nil {
+		return err
+	}
+	if jsonOutput {
+		return commands.WriteJSON(stdout, commands.ApprovalsView{Approvals: approvals})
+	}
+	if len(approvals) == 0 {
+		_, err := fmt.Fprintln(stdout, "no approvals waiting")
+		return err
+	}
+	for _, approval := range approvals {
+		if _, err := fmt.Fprintf(stdout, "%s %s\n", approval.TaskKey, approval.Status); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func runLogs(ctx context.Context, app bootstrap.App, args []string, stdout io.Writer) error {
+	jsonOutput, remaining, err := consumeJSONFlag(args)
+	if err != nil {
+		return err
+	}
+	if len(remaining) != 0 {
+		return fmt.Errorf("usage: odin logs [--json]")
+	}
+
+	state, err := loadCLIState(app)
+	if err != nil {
+		return err
+	}
+
+	records, err := listLogs(ctx, app.Store, state.Scope)
+	if err != nil {
+		return err
+	}
+	if jsonOutput {
+		logViews := make([]commands.LogView, 0, len(records))
+		for _, record := range records {
+			logViews = append(logViews, commands.LogView{
+				ID:    record.ID,
+				Type:  string(record.Type),
+				Scope: record.Scope,
+			})
+		}
+		return commands.WriteJSON(stdout, commands.LogsView{Logs: logViews})
+	}
+	if len(records) == 0 {
+		_, err := fmt.Fprintln(stdout, "no logs")
+		return err
+	}
+	for _, record := range records {
+		if _, err := fmt.Fprintf(stdout, "%d %s %s\n", record.ID, record.Type, record.Scope); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func runHealthcheck(ctx context.Context, app bootstrap.App, stdout io.Writer) error {
 	report, err := healthsvc.Service{DB: app.Store.DB()}.Doctor(ctx, len(app.RegistryDiagnostics) == 0)
 	if err != nil {
@@ -144,6 +426,129 @@ func runtimeEnv() map[string]string {
 	return map[string]string{
 		"ODIN_ROOT":      os.Getenv("ODIN_ROOT"),
 		"ODIN_HTTP_ADDR": os.Getenv("ODIN_HTTP_ADDR"),
+	}
+}
+
+func loadCLIState(app bootstrap.App) (clistate.State, error) {
+	cache, err := app.SessionStore.Load()
+	if err != nil {
+		return clistate.State{}, err
+	}
+	return clistate.ResolveStartupState(cache, app.Registry), nil
+}
+
+func consumeJSONFlag(args []string) (bool, []string, error) {
+	jsonOutput := false
+	remaining := make([]string, 0, len(args))
+	for _, arg := range args {
+		if arg == "--json" {
+			if jsonOutput {
+				return false, nil, fmt.Errorf("duplicate --json flag")
+			}
+			jsonOutput = true
+			continue
+		}
+		remaining = append(remaining, arg)
+	}
+	return jsonOutput, remaining, nil
+}
+
+func scopeLabel(resolved scope.Resolution) string {
+	switch resolved.Kind {
+	case scope.ScopeProject, scope.ScopeOdinCore:
+		return resolved.ProjectKey
+	default:
+		return string(resolved.Kind)
+	}
+}
+
+func listPendingApprovals(ctx context.Context, store *sqlite.Store, resolved scope.Resolution) ([]commands.ApprovalView, error) {
+	rows, err := store.DB().QueryContext(ctx, `
+		SELECT t.key, a.status, t.scope, p.key
+		FROM approvals a
+		JOIN tasks t ON t.id = a.task_id
+		JOIN projects p ON p.id = t.project_id
+		WHERE a.status = 'pending'
+		ORDER BY a.id ASC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var approvals []commands.ApprovalView
+	for rows.Next() {
+		var approval commands.ApprovalView
+		var projectKey string
+		var taskScope string
+		if err := rows.Scan(&approval.TaskKey, &approval.Status, &taskScope, &projectKey); err != nil {
+			return nil, err
+		}
+		if matchesTaskProjectionScope(projectKey, taskScope, resolved) {
+			approvals = append(approvals, approval)
+		}
+	}
+
+	return approvals, rows.Err()
+}
+
+func listLogs(ctx context.Context, store *sqlite.Store, resolved scope.Resolution) ([]runtimeevents.Record, error) {
+	params := sqlite.ListEventsParams{}
+	if resolved.Kind == scope.ScopeProject || resolved.Kind == scope.ScopeOdinCore {
+		project, err := store.GetProjectByKey(ctx, resolved.ProjectKey)
+		switch err {
+		case nil:
+			params.ProjectID = &project.ID
+		case sql.ErrNoRows:
+			return nil, nil
+		default:
+			return nil, err
+		}
+	}
+
+	records, err := store.ListEvents(ctx, params)
+	if err != nil {
+		return nil, err
+	}
+
+	filtered := make([]runtimeevents.Record, 0, 10)
+	for _, record := range records {
+		if !matchesEventScope(record.Scope, resolved) {
+			continue
+		}
+		filtered = append(filtered, record)
+		if len(filtered) == 10 {
+			break
+		}
+	}
+	return filtered, nil
+}
+
+func matchesTaskProjectionScope(projectKey, taskScope string, resolved scope.Resolution) bool {
+	switch resolved.Kind {
+	case scope.ScopeGlobal:
+		return true
+	case scope.ScopeNewProject:
+		return taskScope == string(scope.ScopeNewProject)
+	case scope.ScopeProject, scope.ScopeOdinCore:
+		return projectKey == resolved.ProjectKey
+	default:
+		return false
+	}
+}
+
+func matchesEventScope(eventScope string, resolved scope.Resolution) bool {
+	switch resolved.Kind {
+	case scope.ScopeGlobal:
+		return true
+	case scope.ScopeProject:
+		return eventScope == string(scope.ScopeProject)
+	case scope.ScopeOdinCore:
+		return eventScope == string(scope.ScopeOdinCore)
+	case scope.ScopeNewProject:
+		return eventScope == string(scope.ScopeNewProject)
+	default:
+		return false
 	}
 }
 

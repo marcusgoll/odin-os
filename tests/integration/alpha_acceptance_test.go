@@ -251,6 +251,79 @@ func TestAlphaAcceptance(t *testing.T) {
 		}
 	})
 
+	t.Run("explicit operational cli commands expose read-only runtime state", func(t *testing.T) {
+		runtimeRoot := t.TempDir()
+		store := openRuntimeStore(t, runtimeRoot)
+		_, task, run := seedTaskRunFixture(t, ctx, store, "odin-core", string(scope.ScopeOdinCore), "cli-read-task", "read-only cli check", "codex_headless", now)
+		if _, err := store.RequestApproval(ctx, sqlite.RequestApprovalParams{
+			TaskID:      task.ID,
+			RunID:       &run.ID,
+			Status:      "pending",
+			RequestedBy: "operator",
+		}); err != nil {
+			t.Fatalf("RequestApproval() error = %v", err)
+		}
+		if err := store.Close(); err != nil {
+			t.Fatalf("Close(runtime store) error = %v", err)
+		}
+
+		statusOutput, err := runOdinCommand(t, repoRoot, odinBinary, runtimeRoot, nil, "", "status", "--json")
+		if err != nil {
+			t.Fatalf("runOdinCommand(status --json) error = %v\n%s", err, statusOutput)
+		}
+		if !strings.Contains(statusOutput, "\"pending_approvals\": 1") {
+			t.Fatalf("status output = %q, want pending approval count", statusOutput)
+		}
+
+		scopeOutput, err := runOdinCommand(t, repoRoot, odinBinary, runtimeRoot, nil, "", "scope", "--json")
+		if err != nil {
+			t.Fatalf("runOdinCommand(scope --json) error = %v\n%s", err, scopeOutput)
+		}
+		if !strings.Contains(scopeOutput, "\"scope\": \"global\"") {
+			t.Fatalf("scope output = %q, want global scope", scopeOutput)
+		}
+
+		projectOutput, err := runOdinCommand(t, repoRoot, odinBinary, runtimeRoot, nil, "", "project", "list")
+		if err != nil {
+			t.Fatalf("runOdinCommand(project list) error = %v\n%s", err, projectOutput)
+		}
+		if !strings.Contains(projectOutput, "odin-core") {
+			t.Fatalf("project output = %q, want odin-core", projectOutput)
+		}
+
+		jobsOutput, err := runOdinCommand(t, repoRoot, odinBinary, runtimeRoot, nil, "", "jobs", "--json")
+		if err != nil {
+			t.Fatalf("runOdinCommand(jobs --json) error = %v\n%s", err, jobsOutput)
+		}
+		if !strings.Contains(jobsOutput, task.Key) {
+			t.Fatalf("jobs output = %q, want task key", jobsOutput)
+		}
+
+		runsOutput, err := runOdinCommand(t, repoRoot, odinBinary, runtimeRoot, nil, "", "runs", "--json")
+		if err != nil {
+			t.Fatalf("runOdinCommand(runs --json) error = %v\n%s", err, runsOutput)
+		}
+		if !strings.Contains(runsOutput, run.Executor) {
+			t.Fatalf("runs output = %q, want executor", runsOutput)
+		}
+
+		approvalsOutput, err := runOdinCommand(t, repoRoot, odinBinary, runtimeRoot, nil, "", "approvals", "--json")
+		if err != nil {
+			t.Fatalf("runOdinCommand(approvals --json) error = %v\n%s", err, approvalsOutput)
+		}
+		if !strings.Contains(approvalsOutput, task.Key) {
+			t.Fatalf("approvals output = %q, want task key", approvalsOutput)
+		}
+
+		logsOutput, err := runOdinCommand(t, repoRoot, odinBinary, runtimeRoot, nil, "", "logs", "--json")
+		if err != nil {
+			t.Fatalf("runOdinCommand(logs --json) error = %v\n%s", err, logsOutput)
+		}
+		if !strings.Contains(logsOutput, "task.created") {
+			t.Fatalf("logs output = %q, want task event", logsOutput)
+		}
+	})
+
 	t.Run("executor abstraction supports headless cli and api lanes", func(t *testing.T) {
 		cfg, err := executorrouter.LoadConfig(filepath.Join(repoRoot, "config", "executors.yaml"))
 		if err != nil {
