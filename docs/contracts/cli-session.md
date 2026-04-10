@@ -10,6 +10,7 @@ phase: "05"
 The Odin interactive shell persists only light operator context.
 
 Session state is stored in `state/cache/cli-session.json`.
+Reusable session primitives live in `internal/cli/state`; the REPL package re-exports them for compatibility.
 
 ## Persisted fields
 
