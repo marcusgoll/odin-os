@@ -61,5 +61,5 @@ routes:
     match:
       task_kinds: [research]
       scopes: [global, project, odin-core]
-    preferred: [gemini_cli_headless, google_api]
-    fallback: [openrouter_api]
+    preferred: [codex_headless, claude_code_headless]
+    fallback: []
