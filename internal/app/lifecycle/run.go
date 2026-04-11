@@ -48,7 +48,7 @@ func Run(ctx context.Context, root string, args []string, stdin io.Reader, stdou
 
 	loadCtx := ctx
 	if len(args) > 0 && args[0] == "serve" {
-		loadCtx = context.WithoutCancel(ctx)
+		loadCtx = serveLoadContext(ctx)
 	}
 
 	app, err := bootstrap.Load(loadCtx, root, cfg.RuntimeRoot)
@@ -128,6 +128,13 @@ func runtimeEnv() map[string]string {
 		"ODIN_ROOT":      os.Getenv("ODIN_ROOT"),
 		"ODIN_HTTP_ADDR": os.Getenv("ODIN_HTTP_ADDR"),
 	}
+}
+
+func serveLoadContext(parent context.Context) context.Context {
+	if parent.Err() == nil {
+		return parent
+	}
+	return context.WithoutCancel(parent)
 }
 
 func runServe(ctx context.Context, app bootstrap.App, cfg appconfig.Config, stdout io.Writer) error {

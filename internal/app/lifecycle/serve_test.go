@@ -492,6 +492,38 @@ service:
 	}
 }
 
+func TestServeLoadContextUsesParentWhenActive(t *testing.T) {
+	t.Parallel()
+
+	parent, cancelParent := context.WithCancel(context.Background())
+	defer cancelParent()
+
+	loadCtx := serveLoadContext(parent)
+	if loadCtx != parent {
+		t.Fatal("serveLoadContext() should return the parent context when it is still active")
+	}
+}
+
+func TestServeLoadContextDetachesOnlyAfterCancellation(t *testing.T) {
+	t.Parallel()
+
+	parent, cancelParent := context.WithCancel(context.Background())
+	cancelParent()
+
+	loadCtx := serveLoadContext(parent)
+	if loadCtx == parent {
+		t.Fatal("serveLoadContext() should detach from a canceled parent context")
+	}
+	if loadCtx.Err() != nil {
+		t.Fatalf("serveLoadContext() Err() = %v, want nil after detaching", loadCtx.Err())
+	}
+	select {
+	case <-loadCtx.Done():
+		t.Fatal("detached load context should not be done immediately")
+	default:
+	}
+}
+
 func TestRunServeReturnsServerErrorWithoutWaitingForShutdown(t *testing.T) {
 	root := createRuntimeRoot(t)
 	writeRuntimeConfig(t, root, `
