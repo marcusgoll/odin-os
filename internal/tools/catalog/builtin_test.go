@@ -1,6 +1,11 @@
 package catalog
 
-import "testing"
+import (
+	"context"
+	"testing"
+
+	"odin-os/internal/tools/invocation"
+)
 
 func TestBuiltinDefinitionsIncludeSchemasAndHandlers(t *testing.T) {
 	t.Parallel()
@@ -20,4 +25,52 @@ func TestBuiltinDefinitionsIncludeSchemasAndHandlers(t *testing.T) {
 	if taskList.Invoke == nil {
 		t.Fatalf("task_list invoke = nil, want handler")
 	}
+}
+
+func TestBuiltinProjectStatusInvokesRuntimeDriver(t *testing.T) {
+	t.Parallel()
+
+	invoker := &stubToolInvoker{
+		result: invocation.Result{
+			Source: "driver",
+			Summary: "Project alpha status from runtime.",
+			KeyFacts: map[string]string{
+				"project_key":     "alpha",
+				"open_task_count": "2",
+			},
+			FollowOnOptions: []string{"inspect tasks"},
+			RawRef:          "driver://project_status/alpha",
+			RawOutput:       "project=alpha open_tasks=2",
+		},
+	}
+
+	definitions := BuiltinDefinitionsWithInvoker(invoker)
+	result, err := definitions["project_status"].Invoke(map[string]string{"project_key": "alpha"})
+	if err != nil {
+		t.Fatalf("Invoke(project_status) error = %v", err)
+	}
+	if invoker.key != "project_status" {
+		t.Fatalf("invoked key = %q, want project_status", invoker.key)
+	}
+	if invoker.args["project_key"] != "alpha" {
+		t.Fatalf("project_key arg = %q, want alpha", invoker.args["project_key"])
+	}
+	if result.Source != "driver" {
+		t.Fatalf("result source = %q, want driver", result.Source)
+	}
+	if result.RawRef != "driver://project_status/alpha" {
+		t.Fatalf("raw ref = %q, want driver-backed ref", result.RawRef)
+	}
+}
+
+type stubToolInvoker struct {
+	key    string
+	args   map[string]string
+	result invocation.Result
+}
+
+func (invoker *stubToolInvoker) Invoke(_ context.Context, key string, request invocation.Request) (invocation.Result, error) {
+	invoker.key = key
+	invoker.args = request.Args
+	return invoker.result, nil
 }
