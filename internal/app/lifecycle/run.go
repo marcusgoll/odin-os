@@ -35,6 +35,7 @@ var (
 	serveTaskLoopInterval     = 1 * time.Second
 	serveSelfHealLoopInterval = 30 * time.Second
 	serveMetricsLoopInterval  = 1 * time.Minute
+	serveOperationTimeout     = 30 * time.Second
 )
 
 // Run dispatches between the interactive shell and machine-oriented operational commands.
@@ -132,7 +133,9 @@ func runServe(ctx context.Context, app bootstrap.App, cfg appconfig.Config, stdo
 	operationCtx := context.WithoutCancel(ctx)
 
 	if cfg.Service.StartupRecovery {
-		result, err := recovery.Service{Store: app.Store}.RunStartupRecovery(operationCtx)
+		startupCtx, cancel := serveOperationContext(operationCtx)
+		result, err := recovery.Service{Store: app.Store}.RunStartupRecovery(startupCtx)
+		cancel()
 		if err != nil {
 			return err
 		}
@@ -175,12 +178,19 @@ func runServe(ctx context.Context, app bootstrap.App, cfg appconfig.Config, stdo
 		DB: app.Store.DB(),
 	}
 
-	if err := jobService.ExecuteNextQueued(operationCtx); err != nil {
+	taskCtx, cancel := serveOperationContext(operationCtx)
+	if err := jobService.ExecuteNextQueued(taskCtx); err != nil {
+		cancel()
 		logBackgroundError(logger, "task_runner", err)
 	}
-	if _, err := recoveryService.RunCycle(operationCtx); err != nil {
+	cancel()
+
+	recoveryCtx, cancel := serveOperationContext(operationCtx)
+	if _, err := recoveryService.RunCycle(recoveryCtx); err != nil {
+		cancel()
 		logBackgroundError(logger, "self_heal", err)
 	}
+	cancel()
 
 	var background sync.WaitGroup
 	background.Add(3)
@@ -260,9 +270,12 @@ func runTaskLoop(ctx context.Context, operationCtx context.Context, wg *sync.Wai
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if err := service.ExecuteNextQueued(operationCtx); err != nil {
+			taskCtx, cancel := serveOperationContext(operationCtx)
+			if err := service.ExecuteNextQueued(taskCtx); err != nil {
+				cancel()
 				logBackgroundError(logger, "task_runner", err)
 			}
+			cancel()
 		}
 	}
 }
@@ -282,9 +295,12 @@ func runSelfHealLoop(ctx context.Context, operationCtx context.Context, wg *sync
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if _, err := service.RunCycle(operationCtx); err != nil {
+			recoveryCtx, cancel := serveOperationContext(operationCtx)
+			if _, err := service.RunCycle(recoveryCtx); err != nil {
+				cancel()
 				logBackgroundError(logger, "self_heal", err)
 			}
+			cancel()
 		}
 	}
 }
@@ -304,7 +320,9 @@ func runMetricsLoop(ctx context.Context, operationCtx context.Context, wg *sync.
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			snapshot, err := service.Collect(operationCtx)
+			metricsCtx, cancel := serveOperationContext(operationCtx)
+			snapshot, err := service.Collect(metricsCtx)
+			cancel()
 			if err != nil {
 				logBackgroundError(logger, "metrics", err)
 				continue
@@ -324,6 +342,10 @@ func runMetricsLoop(ctx context.Context, operationCtx context.Context, wg *sync.
 			})
 		}
 	}
+}
+
+func serveOperationContext(parent context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(parent, serveOperationTimeout)
 }
 
 func logBackgroundError(logger *logs.Logger, component string, err error) {

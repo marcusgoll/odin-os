@@ -449,6 +449,32 @@ service:
 	}
 }
 
+func TestServeOperationContextHasDeadline(t *testing.T) {
+	t.Parallel()
+
+	originalTimeout := serveOperationTimeout
+	serveOperationTimeout = 20 * time.Millisecond
+	defer func() {
+		serveOperationTimeout = originalTimeout
+	}()
+
+	ctx, cancel := serveOperationContext(context.Background())
+	defer cancel()
+
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		t.Fatal("serveOperationContext() returned context without deadline")
+	}
+	if time.Until(deadline) <= 0 {
+		t.Fatalf("deadline = %v, want future deadline", deadline)
+	}
+
+	<-ctx.Done()
+	if !errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		t.Fatalf("ctx.Err() = %v, want context deadline exceeded", ctx.Err())
+	}
+}
+
 func createRuntimeRoot(t *testing.T) string {
 	t.Helper()
 
