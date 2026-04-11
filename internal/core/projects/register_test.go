@@ -11,9 +11,10 @@ func TestRegisterBuildsLookupAndSystemProjectView(t *testing.T) {
 
 	root := t.TempDir()
 	odinRoot := filepath.Join(root, "odin")
+	pbsRoot := filepath.Join(root, "pbs")
 	projectRoot := filepath.Join(root, "alpha")
 
-	for _, dir := range []string{odinRoot, projectRoot} {
+	for _, dir := range []string{odinRoot, pbsRoot, projectRoot} {
 		if err := os.MkdirAll(filepath.Join(dir, ".git"), 0o755); err != nil {
 			t.Fatalf("mkdir git root: %v", err)
 		}
@@ -74,57 +75,10 @@ projects:
         allow_clean: false
         allow_force_push: false
         require_explicit_approval: true
-`), 0o644); err != nil {
-		t.Fatalf("write manifest: %v", err)
-	}
-
-	registry, diagnostics, err := Register(configPath)
-	if err != nil {
-		t.Fatalf("register: %v", err)
-	}
-	if len(diagnostics) != 0 {
-		t.Fatalf("unexpected diagnostics: %#v", diagnostics)
-	}
-
-	alpha, ok := registry.Lookup("alpha")
-	if !ok {
-		t.Fatalf("expected alpha lookup")
-	}
-	if alpha.ProjectClass != ProjectClassGitHubBacked {
-		t.Fatalf("alpha class = %q, want %q", alpha.ProjectClass, ProjectClassGitHubBacked)
-	}
-
-	systemProject, ok := registry.SystemProject()
-	if !ok {
-		t.Fatalf("expected system project")
-	}
-	if systemProject.Key != "odin-core" {
-		t.Fatalf("system project key = %q, want odin-core", systemProject.Key)
-	}
-}
-
-func TestRegisterExposesCutoverPilotLookup(t *testing.T) {
-	t.Parallel()
-
-	root := t.TempDir()
-	for _, dir := range []string{
-		filepath.Join(root, "odin", ".git"),
-		filepath.Join(root, "pbs", ".git"),
-	} {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			t.Fatalf("mkdir git root: %v", err)
-		}
-	}
-
-	configPath := filepath.Join(root, "projects.yaml")
-	if err := os.WriteFile(configPath, []byte(`
-version: 1
-projects:
-  - key: odin-core
-    name: Odin Core
-    project_class: system_project
-    system_project: true
-    git_root: `+filepath.Join(root, "odin")+`
+  - key: pbs
+    name: PBS
+    project_class: local_git_project
+    git_root: `+pbsRoot+`
     default_branch: main
     policy:
       allowed_commands: [status]
@@ -136,7 +90,7 @@ projects:
       approval_gates:
         require_for_governance_changes: true
         require_for_destructive_operations: true
-        require_for_system_project_changes: true
+        require_for_system_project_changes: false
       merge_policy:
         mode: squash
         allow_direct_to_default_branch: false
@@ -172,14 +126,27 @@ cutover:
 		t.Fatalf("unexpected diagnostics: %#v", diagnostics)
 	}
 
+	alpha, ok := registry.Lookup("alpha")
+	if !ok {
+		t.Fatalf("expected alpha lookup")
+	}
+	if alpha.ProjectClass != ProjectClassGitHubBacked {
+		t.Fatalf("alpha class = %q, want %q", alpha.ProjectClass, ProjectClassGitHubBacked)
+	}
+
+	systemProject, ok := registry.SystemProject()
+	if !ok {
+		t.Fatalf("expected system project")
+	}
+	if systemProject.Key != "odin-core" {
+		t.Fatalf("system project key = %q, want odin-core", systemProject.Key)
+	}
+
 	pilot, ok := registry.CutoverPilotProject("pbs")
 	if !ok {
-		t.Fatal("expected pbs pilot lookup")
-	}
-	if pilot.Key != "pbs" {
-		t.Fatalf("pilot key = %q, want pbs", pilot.Key)
+		t.Fatal("expected pbs cutover pilot lookup")
 	}
 	if pilot.PrimaryController != "odin_os" {
-		t.Fatalf("primary controller = %q, want odin_os", pilot.PrimaryController)
+		t.Fatalf("pilot primary controller = %q, want odin_os", pilot.PrimaryController)
 	}
 }

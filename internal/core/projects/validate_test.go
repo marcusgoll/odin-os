@@ -155,3 +155,97 @@ func TestValidateRejectsUnsafeProjectDefinitions(t *testing.T) {
 		}
 	}
 }
+
+func TestValidateRejectsInvalidCutoverPilotProjects(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	for _, dir := range []string{
+		filepath.Join(root, "pbs"),
+		filepath.Join(root, "odin-core"),
+	} {
+		if err := os.MkdirAll(filepath.Join(dir, ".git"), 0o755); err != nil {
+			t.Fatalf("mkdir git root: %v", err)
+		}
+	}
+
+	trueValue := true
+	falseValue := false
+	validPolicy := Policy{
+		AllowedCommands: []string{"status"},
+		BranchRules: BranchRules{
+			ProtectedBranches:          []string{"main"},
+			RequireWorktree:            &trueValue,
+			RequireTaskBranch:          &trueValue,
+			AllowDefaultBranchMutation: &falseValue,
+		},
+		ApprovalGates: ApprovalGates{
+			RequireForGovernanceChanges:     &trueValue,
+			RequireForDestructiveOperations: &trueValue,
+			RequireForSystemProjectChanges:  &falseValue,
+		},
+		MergePolicy: MergePolicy{
+			Mode:                       "squash",
+			AllowDirectToDefaultBranch: &falseValue,
+		},
+		DestructiveOperations: DestructiveOperations{
+			AllowReset:              &falseValue,
+			AllowClean:              &falseValue,
+			AllowForcePush:          &falseValue,
+			RequireExplicitApproval: &trueValue,
+		},
+	}
+	systemPolicy := validPolicy
+	systemPolicy.ApprovalGates.RequireForSystemProjectChanges = &trueValue
+
+	cfg := Config{
+		Version: 1,
+		Projects: []Manifest{
+			{
+				Key:           "pbs",
+				Name:          "PBS",
+				ProjectClass:  ProjectClassLocalGit,
+				GitRoot:       filepath.Join(root, "pbs"),
+				DefaultBranch: "main",
+				Policy:        validPolicy,
+			},
+			{
+				Key:           "odin-core",
+				Name:          "Odin Core",
+				ProjectClass:  ProjectClassSystem,
+				SystemProject: true,
+				GitRoot:       filepath.Join(root, "odin-core"),
+				DefaultBranch: "main",
+				Policy:        systemPolicy,
+			},
+		},
+		Cutover: CutoverConfig{
+			PilotProjects: []CutoverPilotProject{
+				{Key: "", RuntimeOwner: "odin_os"},
+				{Key: "pbs", RuntimeOwner: "odin_os"},
+				{Key: "pbs", RuntimeOwner: "odin_os"},
+				{Key: "ghost", RuntimeOwner: "odin_os"},
+			},
+		},
+	}
+
+	diagnostics := Validate(cfg)
+	if len(diagnostics) == 0 {
+		t.Fatalf("expected diagnostics")
+	}
+
+	codes := make(map[string]bool, len(diagnostics))
+	for _, diagnostic := range diagnostics {
+		codes[diagnostic.Code] = true
+	}
+
+	for _, code := range []string{
+		"missing_field",
+		"duplicate_cutover_pilot_key",
+		"unknown_cutover_pilot_project",
+	} {
+		if !codes[code] {
+			t.Fatalf("expected diagnostic code %q, got %#v", code, codes)
+		}
+	}
+}

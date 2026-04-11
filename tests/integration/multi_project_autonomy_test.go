@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -15,8 +14,6 @@ import (
 	"odin-os/internal/app/bootstrap"
 	"odin-os/internal/cli/scope"
 	"odin-os/internal/core/projects"
-	"odin-os/internal/executors/contract"
-	executorrouter "odin-os/internal/executors/router"
 	jobsvc "odin-os/internal/runtime/jobs"
 	"odin-os/internal/runtime/projections"
 	"odin-os/internal/store/sqlite"
@@ -63,12 +60,14 @@ func TestCutoverPilotProjectsStayRunnableWithoutLegacyPrimary(t *testing.T) {
 	ctx := context.Background()
 	repoRoot := projectRoot(t)
 
-	cfg, err := projects.LoadManifestFile(filepath.Join(repoRoot, "config", "projects.yaml"))
+	runtimeRoot := t.TempDir()
+	app, err := bootstrap.Load(ctx, repoRoot, runtimeRoot)
 	if err != nil {
-		t.Fatalf("LoadManifestFile() error = %v", err)
+		t.Fatalf("bootstrap.Load() error = %v", err)
 	}
+	defer app.Store.Close()
 
-	pilot, ok := cfg.CutoverPilotProject("pbs")
+	pilot, ok := app.Registry.CutoverPilotProject("pbs")
 	if !ok {
 		t.Fatal("expected pbs pilot metadata in cutover config")
 	}
@@ -133,47 +132,20 @@ func TestCutoverPilotProjectsStayRunnableWithoutLegacyPrimary(t *testing.T) {
 		"pilot requires the legacy stack for routine completion",
 	})
 
-	runtimeRoot := t.TempDir()
-	store := openRuntimeStore(t, runtimeRoot)
-	defer store.Close()
-
-	registry, err := buildPilotRegistry(t)
-	if err != nil {
-		t.Fatalf("buildPilotRegistry() error = %v", err)
+	projectManifest, ok := app.Registry.Lookup("pbs")
+	if !ok {
+		t.Fatal("expected pbs project manifest in registry")
 	}
 
 	service := jobsvc.Service{
-		Store:    store,
-		Registry: registry,
-		Executors: map[string]contract.Executor{
-			"pbs_stub": pbsExecutor{},
-		},
-		ExecutorConfig: executorrouter.Config{
-			Version: 1,
-			Executors: []executorrouter.ExecutorConfig{
-				{
-					Key:      "pbs_stub",
-					Adapter:  "stub",
-					Class:    contract.ExecutorClassPlanBackedCLI,
-					Enabled:  true,
-					Priority: 1,
-				},
-			},
-			Routes: []executorrouter.RouteConfig{
-				{
-					Name: "pbs-pilot",
-					Match: executorrouter.RouteMatch{
-						TaskKinds: []contract.TaskKind{contract.TaskKindGeneral},
-						Scopes:    []string{"project"},
-					},
-					Preferred: []string{"pbs_stub"},
-				},
-			},
-		},
-		Transitions: projects.Service{Store: store},
+		Store:          app.Store,
+		Registry:       app.Registry,
+		Executors:      app.Executors,
+		ExecutorConfig: app.ExecutorConfig,
+		Transitions:    projects.Service{Store: app.Store},
 		Leases: leases.Manager{
-			Store:        store,
-			Git:          pbsGit{},
+			Store:        app.Store,
+			Git:          pilotGitAdapter{},
 			WorktreeRoot: t.TempDir(),
 		},
 		Now: time.Now,
@@ -181,13 +153,13 @@ func TestCutoverPilotProjectsStayRunnableWithoutLegacyPrimary(t *testing.T) {
 
 	task, err := service.CreateTaskFromAct(ctx, scope.Resolution{
 		Kind:       scope.ScopeProject,
-		ProjectKey: pilot.Key,
-	}, "Pilot cutover task")
+		ProjectKey: projectManifest.Key,
+	}, "PBS pilot cutover task")
 	if err != nil {
 		t.Fatalf("CreateTaskFromAct() error = %v", err)
 	}
 
-	project, err := store.GetProjectByKey(ctx, pilot.Key)
+	project, err := app.Store.GetProjectByKey(ctx, projectManifest.Key)
 	if err != nil {
 		t.Fatalf("GetProjectByKey() error = %v", err)
 	}
@@ -213,7 +185,7 @@ func TestCutoverPilotProjectsStayRunnableWithoutLegacyPrimary(t *testing.T) {
 		t.Fatalf("ExecuteNextQueued() error = %v", err)
 	}
 
-	completedTask, err := store.GetTask(ctx, task.ID)
+	completedTask, err := app.Store.GetTask(ctx, task.ID)
 	if err != nil {
 		t.Fatalf("GetTask() error = %v", err)
 	}
@@ -221,7 +193,7 @@ func TestCutoverPilotProjectsStayRunnableWithoutLegacyPrimary(t *testing.T) {
 		t.Fatalf("task status = %q, want completed", completedTask.Status)
 	}
 
-	approvals, err := projections.ListPendingApprovalViews(ctx, store.DB())
+	approvals, err := projections.ListPendingApprovalViews(ctx, app.Store.DB())
 	if err != nil {
 		t.Fatalf("ListPendingApprovalViews() error = %v", err)
 	}
@@ -322,96 +294,6 @@ func TestOperationalAutonomyRequiresApprovalForHighRiskMutation(t *testing.T) {
 	}
 }
 
-func buildPilotRegistry(t *testing.T) (projects.Registry, error) {
-	t.Helper()
-
-	root := t.TempDir()
-	for _, key := range []string{"pbs", "odin-orchestrator"} {
-		if err := os.MkdirAll(filepath.Join(root, key, ".git"), 0o755); err != nil {
-			t.Fatalf("MkdirAll(%s/.git) error = %v", key, err)
-		}
-	}
-
-	manifestPath := filepath.Join(root, "projects.yaml")
-	if err := os.WriteFile(manifestPath, []byte(`
-version: 1
-projects:
-  - key: pbs
-    name: PBS
-    project_class: local_git_project
-    git_root: pbs
-    default_branch: main
-    scheduler:
-      max_concurrent_runs: 1
-      max_starts_per_cycle: 1
-      stalled_run_retry_limit: 2
-    policy:
-      allowed_commands:
-        - status
-        - test
-      branch_rules:
-        protected_branches:
-          - main
-        require_worktree: true
-        require_task_branch: true
-        allow_default_branch_mutation: false
-      approval_gates:
-        require_for_governance_changes: false
-        require_for_destructive_operations: false
-        require_for_system_project_changes: false
-      merge_policy:
-        mode: squash
-        allow_direct_to_default_branch: false
-      destructive_operations:
-        allow_reset: false
-        allow_clean: false
-        allow_force_push: false
-        require_explicit_approval: true
-  - key: odin-orchestrator
-    name: Odin Orchestrator
-    project_class: local_git_project
-    git_root: odin-orchestrator
-    default_branch: main
-    scheduler:
-      max_concurrent_runs: 1
-      max_starts_per_cycle: 1
-      stalled_run_retry_limit: 2
-    policy:
-      allowed_commands:
-        - status
-        - test
-      branch_rules:
-        protected_branches:
-          - main
-        require_worktree: true
-        require_task_branch: true
-        allow_default_branch_mutation: false
-      approval_gates:
-        require_for_governance_changes: false
-        require_for_destructive_operations: false
-        require_for_system_project_changes: false
-      merge_policy:
-        mode: squash
-        allow_direct_to_default_branch: false
-      destructive_operations:
-        allow_reset: false
-        allow_clean: false
-        allow_force_push: false
-        require_explicit_approval: true
-`), 0o644); err != nil {
-		t.Fatalf("WriteFile(%s) error = %v", manifestPath, err)
-	}
-
-	registry, diagnostics, err := projects.Register(manifestPath)
-	if err != nil {
-		return projects.Registry{}, err
-	}
-	if len(diagnostics) != 0 {
-		return projects.Registry{}, fmt.Errorf("registry diagnostics: %+v", diagnostics)
-	}
-	return registry, nil
-}
-
 func assertFileContains(t *testing.T, path string, required []string) {
 	t.Helper()
 
@@ -427,53 +309,12 @@ func assertFileContains(t *testing.T, path string, required []string) {
 	}
 }
 
-type pbsExecutor struct{}
+type pilotGitAdapter struct{}
 
-func (pbsExecutor) Key() string { return "pbs_stub" }
-
-func (pbsExecutor) Class() contract.ExecutorClass { return contract.ExecutorClassPlanBackedCLI }
-
-func (pbsExecutor) Health(context.Context) (contract.HealthReport, error) {
-	return contract.HealthReport{Status: contract.HealthStatusHealthy, CheckedAt: time.Now().UTC()}, nil
-}
-
-func (pbsExecutor) Capabilities(context.Context) (contract.Capabilities, error) {
-	return contract.Capabilities{
-		ExecutorClass:        contract.ExecutorClassPlanBackedCLI,
-		SupportsResume:       true,
-		SupportsCancel:       true,
-		SupportsTools:        true,
-		SupportsHeadlessPlan: true,
-		TaskKinds:            []contract.TaskKind{contract.TaskKindGeneral},
-		Scopes:               []string{"project"},
-	}, nil
-}
-
-func (pbsExecutor) RunTask(context.Context, contract.TaskSpec) (contract.ExecutionResult, error) {
-	return contract.ExecutionResult{
-		Status: "completed",
-		Output: "pbs pilot task completed",
-	}, nil
-}
-
-func (pbsExecutor) ResumeTask(context.Context, contract.TaskHandle, contract.ResumePacket) (contract.ExecutionResult, error) {
-	return contract.ExecutionResult{}, fmt.Errorf("resume not supported in test executor")
-}
-
-func (pbsExecutor) CancelTask(context.Context, contract.TaskHandle) error {
-	return fmt.Errorf("cancel not supported in test executor")
-}
-
-func (pbsExecutor) EstimateCost(context.Context, contract.TaskSpec) (contract.CostEstimate, error) {
-	return contract.CostEstimate{}, fmt.Errorf("estimate cost not supported in test executor")
-}
-
-type pbsGit struct{}
-
-func (pbsGit) BranchExists(context.Context, string, string) (bool, error) { return false, nil }
-func (pbsGit) CreateBranch(context.Context, string, string, string) error { return nil }
-func (pbsGit) AddWorktree(context.Context, string, string, string) error  { return nil }
-func (pbsGit) RemoveWorktree(context.Context, string, string) error       { return nil }
+func (pilotGitAdapter) BranchExists(context.Context, string, string) (bool, error) { return false, nil }
+func (pilotGitAdapter) CreateBranch(context.Context, string, string, string) error { return nil }
+func (pilotGitAdapter) AddWorktree(context.Context, string, string, string) error  { return nil }
+func (pilotGitAdapter) RemoveWorktree(context.Context, string, string) error       { return nil }
 
 func TestOperationalAutonomySchedulesAcrossMultipleProjects(t *testing.T) {
 	ctx := context.Background()
