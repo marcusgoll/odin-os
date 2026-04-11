@@ -129,6 +129,7 @@ func (broker *Broker) InvokeTool(key string, input map[string]string) (catalog.S
 func (broker *Broker) Compact(result catalog.StructuredResult) (catalog.CompactedResult, error) {
 	compacted := catalog.CompactedResult{
 		CapabilityKey:   result.CapabilityKey,
+		Source:          result.Source,
 		Summary:         result.Summary,
 		KeyFacts:        cloneStringMap(result.KeyFacts),
 		FollowOnOptions: append([]string(nil), result.FollowOnOptions...),

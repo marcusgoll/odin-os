@@ -32,7 +32,7 @@ func TestBuiltinProjectStatusInvokesRuntimeDriver(t *testing.T) {
 
 	invoker := &stubToolInvoker{
 		result: invocation.Result{
-			Source: "driver",
+			Source:  "script",
 			Summary: "Project alpha status from runtime.",
 			KeyFacts: map[string]string{
 				"project_key":     "alpha",

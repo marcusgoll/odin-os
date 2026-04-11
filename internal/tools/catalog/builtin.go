@@ -148,14 +148,9 @@ func structuredResultFromInvocation(result invocation.Result, projectKey string)
 		keyFacts["project_key"] = projectKey
 	}
 
-	source := result.Source
-	if source == "" {
-		source = "driver"
-	}
-
 	return StructuredResult{
 		CapabilityKey:   "project_status",
-		Source:          source,
+		Source:          "driver",
 		Summary:         result.Summary,
 		KeyFacts:        keyFacts,
 		FollowOnOptions: append([]string(nil), result.FollowOnOptions...),

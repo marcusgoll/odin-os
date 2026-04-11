@@ -34,6 +34,7 @@ import (
 	"odin-os/internal/tools/broker"
 	"odin-os/internal/tools/budgets"
 	"odin-os/internal/tools/catalog"
+	"odin-os/internal/tools/invocation"
 	"odin-os/internal/vcs/branches"
 	gitadapter "odin-os/internal/vcs/git"
 	"odin-os/internal/vcs/leases"
@@ -289,11 +290,37 @@ func TestAlphaAcceptance(t *testing.T) {
 	})
 
 	t.Run("dynamic tool loading is working", func(t *testing.T) {
+		runtimeRoot := t.TempDir()
+		store := openRuntimeStore(t, runtimeRoot)
+		defer store.Close()
+
+		project, err := store.CreateProject(ctx, sqlite.CreateProjectParams{
+			Key:           "odin-core",
+			Name:          "Odin Core",
+			Scope:         "odin-core",
+			GitRoot:       runtimeRoot,
+			DefaultBranch: "main",
+			ManifestPath:  "config/projects.yaml",
+		})
+		if err != nil {
+			t.Fatalf("CreateProject() error = %v", err)
+		}
+		if _, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
+			ProjectID:   project.ID,
+			Key:         "odin-core-queued",
+			Title:       "Queued runtime task",
+			Status:      "queued",
+			Scope:       "odin-core",
+			RequestedBy: "test",
+		}); err != nil {
+			t.Fatalf("CreateTask() error = %v", err)
+		}
+
 		snapshot, err := loader.LoadDir(filepath.Join(repoRoot, "registry"))
 		if err != nil {
 			t.Fatalf("LoadDir(registry) error = %v", err)
 		}
-		suiteBroker := broker.New(snapshot, catalog.BuiltinDefinitions(), budgets.Limits{
+		suiteBroker := broker.New(snapshot, catalog.BuiltinDefinitionsWithInvoker(invocation.Service{RuntimeRoot: runtimeRoot}), budgets.Limits{
 			Tool: budgets.Tool{
 				MaxSelections:  6,
 				MaxInvocations: 4,
@@ -335,9 +362,18 @@ func TestAlphaAcceptance(t *testing.T) {
 		if err != nil {
 			t.Fatalf("InvokeTool(project_status) error = %v", err)
 		}
+		if result.Source != "driver" {
+			t.Fatalf("InvokeTool(project_status).Source = %q, want driver", result.Source)
+		}
+		if result.KeyFacts["open_task_count"] != "1" {
+			t.Fatalf("InvokeTool(project_status).open_task_count = %q, want 1", result.KeyFacts["open_task_count"])
+		}
 		compacted, err := suiteBroker.Compact(result)
 		if err != nil {
 			t.Fatalf("Compact() error = %v", err)
+		}
+		if compacted.Source != "driver" {
+			t.Fatalf("Compact().Source = %q, want driver", compacted.Source)
 		}
 		if compacted.Bytes <= 0 {
 			t.Fatalf("CompactedResult.Bytes = %d, want > 0", compacted.Bytes)
