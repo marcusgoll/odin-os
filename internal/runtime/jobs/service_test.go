@@ -757,6 +757,102 @@ func TestSchedulerKeepsConcurrencyAfterRecoveringStalledRunWithLiveRun(t *testin
 	}
 }
 
+func TestSchedulerSkipsStalledRunRecoveryRace(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openJobStore(t)
+	defer store.Close()
+
+	registry := writeRegistry(t)
+	service := Service{
+		Store:          store,
+		Registry:       registry,
+		Runs:           runsvc.Service{Store: store},
+		Executors:      router.DefaultCatalog(),
+		ExecutorConfig: mustLoadExecutorConfig(t),
+		Transitions:    projects.Service{Store: store},
+		Leases: leases.Manager{
+			Store:        store,
+			Git:          &jobTestGit{},
+			WorktreeRoot: t.TempDir(),
+		},
+		Now: time.Now,
+	}
+
+	task, err := service.CreateTaskFromAct(ctx, scope.Resolution{
+		Kind:       scope.ScopeProject,
+		ProjectKey: "alpha",
+	}, "Stalled race")
+	if err != nil {
+		t.Fatalf("CreateTaskFromAct() error = %v", err)
+	}
+
+	project, err := store.GetProjectByKey(ctx, "alpha")
+	if err != nil {
+		t.Fatalf("GetProjectByKey(alpha) error = %v", err)
+	}
+	if _, err := service.Transitions.SetTransitionState(ctx, projects.TransitionStateInput{
+		ProjectID:   project.ID,
+		Actor:       projects.TransitionControllerOdinOS,
+		TargetState: projects.TransitionStateCutover,
+		ChangedBy:   "test",
+	}); err != nil {
+		t.Fatalf("SetTransitionState(cutover) error = %v", err)
+	}
+
+	run, err := service.Runs.Start(ctx, task, "fake_headless")
+	if err != nil {
+		t.Fatalf("Runs.Start() error = %v", err)
+	}
+	lease, err := store.CreateWorktreeLease(ctx, sqlite.CreateWorktreeLeaseParams{
+		ProjectID:    project.ID,
+		TaskID:       task.ID,
+		RunID:        run.ID,
+		Mode:         "read_write",
+		BranchName:   "task/stalled-race",
+		WorktreePath: filepath.Join(t.TempDir(), "worktree"),
+		RepoRoot:     project.GitRoot,
+		State:        "active",
+	})
+	if err != nil {
+		t.Fatalf("CreateWorktreeLease() error = %v", err)
+	}
+
+	if err := service.Runs.Complete(ctx, run.ID, contract.ExecutionResult{
+		Status: "completed",
+		Output: "finished before recovery",
+	}); err != nil {
+		t.Fatalf("Runs.Complete() error = %v", err)
+	}
+
+	err = service.resolveStalledRun(ctx, projections.StalledRunView{
+		ProjectKey: "alpha",
+		TaskID:     task.ID,
+		RunID:      run.ID,
+		Attempt:    1,
+	})
+	if err != nil {
+		t.Fatalf("resolveStalledRun() error = %v", err)
+	}
+
+	gotTask, err := store.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
+	}
+	if gotTask.Status != "completed" {
+		t.Fatalf("task status = %q, want completed", gotTask.Status)
+	}
+
+	gotLease, err := store.GetWorktreeLease(ctx, lease.ID)
+	if err != nil {
+		t.Fatalf("GetWorktreeLease() error = %v", err)
+	}
+	if gotLease.State != "active" {
+		t.Fatalf("lease state = %q, want active after skipped recovery", gotLease.State)
+	}
+}
+
 func TestSchedulerDeadLettersStalledRunsWhenRetryBudgetExhausted(t *testing.T) {
 	t.Parallel()
 

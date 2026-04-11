@@ -278,7 +278,7 @@ func (service Service) runSchedulerCycle(ctx context.Context) error {
 			updatedActiveByProject, refreshErr := service.activeRunsByProject(ctx)
 			if refreshErr != nil {
 				cycleErrors = append(cycleErrors, fmt.Errorf("project %s active refresh: %w", projectKey, refreshErr))
-				continue
+				return errors.Join(cycleErrors...)
 			}
 			activeByProject = updatedActiveByProject
 			continue
@@ -304,7 +304,7 @@ func (service Service) runSchedulerCycle(ctx context.Context) error {
 			updatedActiveByProject, refreshErr := service.activeRunsByProject(ctx)
 			if refreshErr != nil {
 				cycleErrors = append(cycleErrors, fmt.Errorf("project %s active refresh: %w", projectKey, refreshErr))
-				continue
+				return errors.Join(cycleErrors...)
 			}
 			activeByProject = updatedActiveByProject
 		}
@@ -346,6 +346,9 @@ func (service Service) resolveStalledRun(ctx context.Context, view projections.S
 			TerminalReason: reason,
 			ArtifactsJSON:  "[]",
 		}); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return nil
+			}
 			return err
 		}
 		return nil
@@ -359,6 +362,9 @@ func (service Service) resolveStalledRun(ctx context.Context, view projections.S
 		TerminalReason: reason,
 		ArtifactsJSON:  "[]",
 	}); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
 		return err
 	}
 
