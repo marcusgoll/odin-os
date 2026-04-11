@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -96,8 +97,6 @@ projects:
 }
 
 func TestRunServeExecutesStartupRecoveryBeforeShutdown(t *testing.T) {
-	t.Parallel()
-
 	root := createRuntimeRoot(t)
 	writeRuntimeConfig(t, root, `
 version: 1
@@ -143,8 +142,6 @@ service:
 }
 
 func TestRunServeExecutesStartupRecoveryWhenContextAlreadyCanceled(t *testing.T) {
-	t.Parallel()
-
 	root := createRuntimeRoot(t)
 	writeRuntimeConfig(t, root, `
 version: 1
@@ -190,8 +187,6 @@ service:
 }
 
 func TestRunServeRunsSelfHealCycleBeforeShutdown(t *testing.T) {
-	t.Parallel()
-
 	root := createRuntimeRoot(t)
 	writeRuntimeConfig(t, root, `
 version: 1
@@ -294,8 +289,6 @@ service:
 }
 
 func TestRunServeDrainsQueuedTaskAfterStartup(t *testing.T) {
-	t.Parallel()
-
 	root := createRuntimeRoot(t)
 	writeRuntimeConfig(t, root, `
 version: 1
@@ -391,8 +384,6 @@ service:
 }
 
 func TestRunServeEmitsMetricsLoopLogRecords(t *testing.T) {
-	t.Parallel()
-
 	root := createRuntimeRoot(t)
 	writeRuntimeConfig(t, root, `
 version: 1
@@ -450,8 +441,6 @@ service:
 }
 
 func TestServeOperationContextHasDeadline(t *testing.T) {
-	t.Parallel()
-
 	originalTimeout := serveOperationTimeout
 	serveOperationTimeout = 20 * time.Millisecond
 	defer func() {
@@ -472,6 +461,72 @@ func TestServeOperationContextHasDeadline(t *testing.T) {
 	<-ctx.Done()
 	if !errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		t.Fatalf("ctx.Err() = %v, want context deadline exceeded", ctx.Err())
+	}
+}
+
+func TestServeServeContextPropagatesCancellation(t *testing.T) {
+	root := createRuntimeRoot(t)
+	writeRuntimeConfig(t, root, `
+version: 1
+runtime:
+  root: .
+service:
+  http_addr: 127.0.0.1:0
+  startup_recovery: true
+`)
+	seedHealthyRuntime(t, root)
+
+	parent, cancelParent := context.WithCancel(context.Background())
+	serveCtx, cancelServe := serveServeContext(parent)
+	defer cancelServe()
+
+	cancelParent()
+
+	select {
+	case <-serveCtx.Done():
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("serve context did not cancel when parent context was canceled")
+	}
+	if !errors.Is(serveCtx.Err(), context.Canceled) {
+		t.Fatalf("serveCtx.Err() = %v, want context canceled", serveCtx.Err())
+	}
+}
+
+func TestRunServeReturnsServerErrorWithoutWaitingForShutdown(t *testing.T) {
+	root := createRuntimeRoot(t)
+	writeRuntimeConfig(t, root, `
+version: 1
+runtime:
+  root: .
+service:
+  http_addr: 127.0.0.1:0
+  startup_recovery: true
+`)
+	seedHealthyRuntime(t, root)
+
+	originalListen := serveListen
+	originalTimeout := serveOperationTimeout
+	serveListen = func(string, string) (net.Listener, error) {
+		return errTestListener{}, nil
+	}
+	serveOperationTimeout = 20 * time.Millisecond
+	defer func() {
+		serveListen = originalListen
+		serveOperationTimeout = originalTimeout
+	}()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- Run(context.Background(), root, []string{"serve"}, strings.NewReader(""), &bytes.Buffer{})
+	}()
+
+	select {
+	case err := <-errCh:
+		if err == nil || !strings.Contains(err.Error(), "listener exploded") {
+			t.Fatalf("Run(serve) error = %v, want listener failure", err)
+		}
+	case <-time.After(1 * time.Second):
+		t.Fatal("Run(serve) did not return after listener failure")
 	}
 }
 
@@ -659,6 +714,17 @@ func writeRuntimeConfig(t *testing.T, root string, content string) {
 		t.Fatalf("write odin config: %v", err)
 	}
 }
+
+type errTestListener struct{}
+
+func (errTestListener) Accept() (net.Conn, error) { return nil, errors.New("listener exploded") }
+func (errTestListener) Close() error              { return nil }
+func (errTestListener) Addr() net.Addr            { return errTestAddr("test-listener") }
+
+type errTestAddr string
+
+func (addr errTestAddr) Network() string { return string(addr) }
+func (addr errTestAddr) String() string  { return string(addr) }
 
 type servedOutput struct {
 	mu      sync.Mutex

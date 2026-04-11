@@ -72,8 +72,6 @@ func TestResolveRepoRootPrefersCurrentWorkingDirectoryWhenAlreadyInRepo(t *testi
 }
 
 func TestRunReturnsCleanExitOnCanceledLifecycle(t *testing.T) {
-	t.Parallel()
-
 	originalRunLifecycle := runLifecycle
 	runLifecycle = func(context.Context, string, []string, io.Reader, io.Writer) error {
 		return context.Canceled

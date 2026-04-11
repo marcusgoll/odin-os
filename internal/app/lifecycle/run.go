@@ -36,6 +36,7 @@ var (
 	serveSelfHealLoopInterval = 30 * time.Second
 	serveMetricsLoopInterval  = 1 * time.Minute
 	serveOperationTimeout     = 30 * time.Second
+	serveListen               = net.Listen
 )
 
 // Run dispatches between the interactive shell and machine-oriented operational commands.
@@ -130,10 +131,8 @@ func runtimeEnv() map[string]string {
 }
 
 func runServe(ctx context.Context, app bootstrap.App, cfg appconfig.Config, stdout io.Writer) error {
-	operationCtx := context.WithoutCancel(ctx)
-
 	if cfg.Service.StartupRecovery {
-		startupCtx, cancel := serveOperationContext(operationCtx)
+		startupCtx, cancel := serveStartupContext(ctx)
 		result, err := recovery.Service{Store: app.Store}.RunStartupRecovery(startupCtx)
 		cancel()
 		if err != nil {
@@ -178,14 +177,17 @@ func runServe(ctx context.Context, app bootstrap.App, cfg appconfig.Config, stdo
 		DB: app.Store.DB(),
 	}
 
-	taskCtx, cancel := serveOperationContext(operationCtx)
+	serveCtx, cancelServe := serveServeContext(ctx)
+	defer cancelServe()
+
+	taskCtx, cancel := serveOperationContext(serveCtx)
 	if err := jobService.ExecuteNextQueued(taskCtx); err != nil {
 		cancel()
 		logBackgroundError(logger, "task_runner", err)
 	}
 	cancel()
 
-	recoveryCtx, cancel := serveOperationContext(operationCtx)
+	recoveryCtx, cancel := serveOperationContext(serveCtx)
 	if _, err := recoveryService.RunCycle(recoveryCtx); err != nil {
 		cancel()
 		logBackgroundError(logger, "self_heal", err)
@@ -194,11 +196,11 @@ func runServe(ctx context.Context, app bootstrap.App, cfg appconfig.Config, stdo
 
 	var background sync.WaitGroup
 	background.Add(3)
-	go runTaskLoop(ctx, operationCtx, &background, jobService, logger)
-	go runSelfHealLoop(ctx, operationCtx, &background, recoveryService, logger)
-	go runMetricsLoop(ctx, operationCtx, &background, metricsService, logger)
+	go runTaskLoop(serveCtx, &background, jobService, logger)
+	go runSelfHealLoop(serveCtx, &background, recoveryService, logger)
+	go runMetricsLoop(serveCtx, &background, metricsService, logger)
 
-	listener, err := net.Listen("tcp", cfg.Service.HTTPAddr)
+	listener, err := serveListen("tcp", cfg.Service.HTTPAddr)
 	if err != nil {
 		return err
 	}
@@ -217,12 +219,22 @@ func runServe(ctx context.Context, app bootstrap.App, cfg appconfig.Config, stdo
 	}
 
 	shutdownDone := make(chan struct{})
+	shutdownStop := make(chan struct{})
+	var shutdownStopOnce sync.Once
+	stopShutdown := func() {
+		shutdownStopOnce.Do(func() {
+			close(shutdownStop)
+		})
+	}
 	go func() {
 		defer close(shutdownDone)
-		<-ctx.Done()
-		shutdownCtx, cancel := context.WithCancel(context.Background())
-		defer cancel()
-		_ = server.Shutdown(shutdownCtx)
+		select {
+		case <-ctx.Done():
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), serveOperationTimeout)
+			defer cancel()
+			_ = server.Shutdown(shutdownCtx)
+		case <-shutdownStop:
+		}
 	}()
 
 	if _, err := fmt.Fprintf(stdout, "serving on %s\n", listener.Addr().String()); err != nil {
@@ -230,11 +242,14 @@ func runServe(ctx context.Context, app bootstrap.App, cfg appconfig.Config, stdo
 	}
 
 	err = server.Serve(listener)
-	<-shutdownDone
-	background.Wait()
 	if errors.Is(err, stdhttp.ErrServerClosed) {
+		<-shutdownDone
+		background.Wait()
 		return ctx.Err()
 	}
+	stopShutdown()
+	cancelServe()
+	background.Wait()
 	return err
 }
 
@@ -255,7 +270,7 @@ func openServiceLogger(runtimeRoot string) (*logs.Logger, io.Closer, error) {
 	}, file, nil
 }
 
-func runTaskLoop(ctx context.Context, operationCtx context.Context, wg *sync.WaitGroup, service jobs.Service, logger *logs.Logger) {
+func runTaskLoop(ctx context.Context, wg *sync.WaitGroup, service jobs.Service, logger *logs.Logger) {
 	defer wg.Done()
 
 	logBackgroundEvent(logger, logs.LevelInfo, "task_runner", "task loop started", map[string]any{
@@ -270,7 +285,7 @@ func runTaskLoop(ctx context.Context, operationCtx context.Context, wg *sync.Wai
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			taskCtx, cancel := serveOperationContext(operationCtx)
+			taskCtx, cancel := serveOperationContext(ctx)
 			if err := service.ExecuteNextQueued(taskCtx); err != nil {
 				cancel()
 				logBackgroundError(logger, "task_runner", err)
@@ -280,7 +295,7 @@ func runTaskLoop(ctx context.Context, operationCtx context.Context, wg *sync.Wai
 	}
 }
 
-func runSelfHealLoop(ctx context.Context, operationCtx context.Context, wg *sync.WaitGroup, service recovery.Service, logger *logs.Logger) {
+func runSelfHealLoop(ctx context.Context, wg *sync.WaitGroup, service recovery.Service, logger *logs.Logger) {
 	defer wg.Done()
 
 	logBackgroundEvent(logger, logs.LevelInfo, "self_heal", "self-heal loop started", map[string]any{
@@ -295,7 +310,7 @@ func runSelfHealLoop(ctx context.Context, operationCtx context.Context, wg *sync
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			recoveryCtx, cancel := serveOperationContext(operationCtx)
+			recoveryCtx, cancel := serveOperationContext(ctx)
 			if _, err := service.RunCycle(recoveryCtx); err != nil {
 				cancel()
 				logBackgroundError(logger, "self_heal", err)
@@ -305,7 +320,7 @@ func runSelfHealLoop(ctx context.Context, operationCtx context.Context, wg *sync
 	}
 }
 
-func runMetricsLoop(ctx context.Context, operationCtx context.Context, wg *sync.WaitGroup, service metricsvc.Service, logger *logs.Logger) {
+func runMetricsLoop(ctx context.Context, wg *sync.WaitGroup, service metricsvc.Service, logger *logs.Logger) {
 	defer wg.Done()
 
 	logBackgroundEvent(logger, logs.LevelInfo, "metrics", "metrics loop started", map[string]any{
@@ -320,7 +335,7 @@ func runMetricsLoop(ctx context.Context, operationCtx context.Context, wg *sync.
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			metricsCtx, cancel := serveOperationContext(operationCtx)
+			metricsCtx, cancel := serveOperationContext(ctx)
 			snapshot, err := service.Collect(metricsCtx)
 			cancel()
 			if err != nil {
@@ -346,6 +361,14 @@ func runMetricsLoop(ctx context.Context, operationCtx context.Context, wg *sync.
 
 func serveOperationContext(parent context.Context) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(parent, serveOperationTimeout)
+}
+
+func serveStartupContext(parent context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(parent), serveOperationTimeout)
+}
+
+func serveServeContext(parent context.Context) (context.Context, context.CancelFunc) {
+	return context.WithCancel(parent)
 }
 
 func logBackgroundError(logger *logs.Logger, component string, err error) {
