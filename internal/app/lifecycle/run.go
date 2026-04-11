@@ -131,7 +131,7 @@ func runtimeEnv() map[string]string {
 }
 
 func serveLoadContext(parent context.Context) context.Context {
-	if parent.Err() == nil {
+	if !shouldDetachServeContext(parent) {
 		return parent
 	}
 	return context.WithoutCancel(parent)
@@ -371,11 +371,18 @@ func serveOperationContext(parent context.Context) (context.Context, context.Can
 }
 
 func serveStartupContext(parent context.Context) (context.Context, context.CancelFunc) {
-	return context.WithTimeout(context.WithoutCancel(parent), serveOperationTimeout)
+	if shouldDetachServeContext(parent) {
+		parent = context.WithoutCancel(parent)
+	}
+	return context.WithTimeout(parent, serveOperationTimeout)
 }
 
 func serveServeContext(parent context.Context) (context.Context, context.CancelFunc) {
 	return context.WithCancel(parent)
+}
+
+func shouldDetachServeContext(parent context.Context) bool {
+	return errors.Is(parent.Err(), context.Canceled)
 }
 
 func logBackgroundError(logger *logs.Logger, component string, err error) {

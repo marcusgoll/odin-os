@@ -524,6 +524,79 @@ func TestServeLoadContextDetachesOnlyAfterCancellation(t *testing.T) {
 	}
 }
 
+func TestServeLoadContextDoesNotDetachOnDeadlineExceeded(t *testing.T) {
+	t.Parallel()
+
+	parent, cancelParent := context.WithTimeout(context.Background(), 1*time.Millisecond)
+	defer cancelParent()
+	<-parent.Done()
+
+	loadCtx := serveLoadContext(parent)
+	if loadCtx != parent {
+		t.Fatal("serveLoadContext() should not detach for deadline expiration")
+	}
+	if !errors.Is(loadCtx.Err(), context.DeadlineExceeded) {
+		t.Fatalf("serveLoadContext() Err() = %v, want deadline exceeded", loadCtx.Err())
+	}
+}
+
+func TestServeStartupContextUsesParentWhenActive(t *testing.T) {
+	t.Parallel()
+
+	parent, cancelParent := context.WithCancel(context.Background())
+
+	startupCtx, cancelStartup := serveStartupContext(parent)
+	defer cancelStartup()
+
+	if _, ok := startupCtx.Deadline(); !ok {
+		t.Fatal("serveStartupContext() should provide a deadline when the parent is active")
+	}
+
+	cancelParent()
+	select {
+	case <-startupCtx.Done():
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("serveStartupContext() did not cancel when the parent was canceled")
+	}
+}
+
+func TestServeStartupContextDetachesOnlyAfterCancellation(t *testing.T) {
+	t.Parallel()
+
+	parent, cancelParent := context.WithCancel(context.Background())
+	cancelParent()
+
+	startupCtx, cancelStartup := serveStartupContext(parent)
+	defer cancelStartup()
+
+	if startupCtx == parent {
+		t.Fatal("serveStartupContext() should detach from a canceled parent context")
+	}
+	if startupCtx.Err() != nil {
+		t.Fatalf("serveStartupContext() Err() = %v, want nil after detaching", startupCtx.Err())
+	}
+	select {
+	case <-startupCtx.Done():
+		t.Fatal("detached startup context should not be done immediately")
+	default:
+	}
+}
+
+func TestServeStartupContextDoesNotDetachOnDeadlineExceeded(t *testing.T) {
+	t.Parallel()
+
+	parent, cancelParent := context.WithTimeout(context.Background(), 1*time.Millisecond)
+	defer cancelParent()
+	<-parent.Done()
+
+	startupCtx, cancelStartup := serveStartupContext(parent)
+	defer cancelStartup()
+
+	if !errors.Is(startupCtx.Err(), context.DeadlineExceeded) {
+		t.Fatalf("serveStartupContext() Err() = %v, want deadline exceeded", startupCtx.Err())
+	}
+}
+
 func TestRunServeReturnsServerErrorWithoutWaitingForShutdown(t *testing.T) {
 	root := createRuntimeRoot(t)
 	writeRuntimeConfig(t, root, `
