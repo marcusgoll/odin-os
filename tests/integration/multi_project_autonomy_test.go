@@ -55,6 +55,38 @@ func TestOperationalAutonomyFreshRuntimeBecomesHealthy(t *testing.T) {
 	}
 }
 
+func TestOperationalAutonomyStatusJsonWorksOnFreshRuntimeWithoutSeedingReadiness(t *testing.T) {
+	repoRoot := projectRoot(t)
+	odinBinary := buildOdinBinary(t, repoRoot)
+	runtimeRoot := t.TempDir()
+
+	output, err := runOdinCommand(t, repoRoot, odinBinary, runtimeRoot, nil, "", "status", "--json")
+	if err != nil {
+		t.Fatalf("runOdinCommand(status --json) error = %v\n%s", err, output)
+	}
+
+	var report statusReport
+	if err := json.Unmarshal([]byte(output), &report); err != nil {
+		t.Fatalf("status output = %q, want valid JSON: %v", output, err)
+	}
+	if len(report.ApprovalsWaiting) != 0 {
+		t.Fatalf("approvals_waiting = %d, want 0 on fresh runtime", len(report.ApprovalsWaiting))
+	}
+	if len(report.StalledRuns) != 0 {
+		t.Fatalf("stalled_runs = %d, want 0 on fresh runtime", len(report.StalledRuns))
+	}
+	if len(report.ActiveRuns) != 0 {
+		t.Fatalf("active_runs = %d, want 0 on fresh runtime", len(report.ActiveRuns))
+	}
+	if len(report.ProjectTransitions) != 0 {
+		t.Fatalf("project_transitions = %d, want 0 on fresh runtime", len(report.ProjectTransitions))
+	}
+
+	store := openRuntimeStore(t, runtimeRoot)
+	defer store.Close()
+	assertRuntimeReadinessCounts(t, store.DB())
+}
+
 func TestOperationalAutonomyRequiresApprovalForHighRiskMutation(t *testing.T) {
 	ctx := context.Background()
 	repoRoot := projectRoot(t)

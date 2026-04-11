@@ -31,7 +31,7 @@ func Load(ctx context.Context, repoRoot string, runtimeRoot string) (App, error)
 }
 
 func LoadReadOnly(ctx context.Context, repoRoot string, runtimeRoot string) (App, error) {
-	return load(ctx, repoRoot, runtimeRoot, loadOptions{initializeReadiness: false, acquireLock: false, migrate: false})
+	return load(ctx, repoRoot, runtimeRoot, loadOptions{initializeReadiness: false, acquireLock: true, migrate: true})
 }
 
 type loadOptions struct {

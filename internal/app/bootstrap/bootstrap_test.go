@@ -3,13 +3,10 @@ package bootstrap
 import (
 	"context"
 	"errors"
-	"os"
 	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
-
-	"odin-os/internal/store/sqlite"
 )
 
 func TestLoadInitializesFreshRuntimeReadinessState(t *testing.T) {
@@ -34,20 +31,6 @@ func TestLoadInitializesFreshRuntimeReadinessState(t *testing.T) {
 func TestLoadReadOnlyDoesNotInitializeReadinessState(t *testing.T) {
 	repoRoot := filepath.Clean(filepath.Join("..", "..", ".."))
 	runtimeRoot := t.TempDir()
-
-	if err := os.MkdirAll(filepath.Join(runtimeRoot, "data"), 0o755); err != nil {
-		t.Fatalf("MkdirAll(data) error = %v", err)
-	}
-	store, err := sqlite.Open(filepath.Join(runtimeRoot, "data", "odin.db"))
-	if err != nil {
-		t.Fatalf("Open() error = %v", err)
-	}
-	if err := store.Migrate(context.Background()); err != nil {
-		t.Fatalf("Migrate() error = %v", err)
-	}
-	if err := store.Close(); err != nil {
-		t.Fatalf("Close() error = %v", err)
-	}
 
 	app, err := LoadReadOnly(context.Background(), repoRoot, runtimeRoot)
 	if err != nil {
