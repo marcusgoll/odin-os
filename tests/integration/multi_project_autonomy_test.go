@@ -25,6 +25,13 @@ type doctorReport struct {
 	Checks []json.RawMessage `json:"checks"`
 }
 
+type statusReport struct {
+	ApprovalsWaiting   []json.RawMessage `json:"approvals_waiting"`
+	StalledRuns        []json.RawMessage `json:"stalled_runs"`
+	ActiveRuns         []json.RawMessage `json:"active_runs"`
+	ProjectTransitions []json.RawMessage `json:"project_transitions"`
+}
+
 func TestOperationalAutonomyFreshRuntimeBecomesHealthy(t *testing.T) {
 	repoRoot := projectRoot(t)
 	odinBinary := buildOdinBinary(t, repoRoot)
@@ -79,6 +86,21 @@ func TestOperationalAutonomyRequiresApprovalForHighRiskMutation(t *testing.T) {
 		t.Fatalf("CreateTaskFromAct() error = %v", err)
 	}
 
+	project, err := app.Store.GetProjectByKey(ctx, "odin-core")
+	if err != nil {
+		t.Fatalf("GetProjectByKey() error = %v", err)
+	}
+	if _, err := app.Store.SetProjectTransition(ctx, sqlite.SetProjectTransitionParams{
+		ProjectID:          project.ID,
+		State:              "cutover",
+		Controller:         "odin_os",
+		LimitedActionsJSON: "[]",
+		Notes:              "enable managed mutations",
+		ChangedBy:          "operator",
+	}); err != nil {
+		t.Fatalf("SetProjectTransition() error = %v", err)
+	}
+
 	if err := service.ExecuteNextQueued(ctx); err != nil {
 		t.Fatalf("ExecuteNextQueued() error = %v", err)
 	}
@@ -114,6 +136,119 @@ func TestOperationalAutonomySchedulesAcrossMultipleProjects(t *testing.T) {
 		if !slices.Contains(gotKeys, want) {
 			t.Fatalf("portfolio keys = %v, want %q present", gotKeys, want)
 		}
+	}
+}
+
+func TestOperationalAutonomyStatusJsonIncludesBlockedAndRunningWork(t *testing.T) {
+	ctx := context.Background()
+	repoRoot := projectRoot(t)
+	odinBinary := buildOdinBinary(t, repoRoot)
+	runtimeRoot := t.TempDir()
+
+	store := openRuntimeStore(t, runtimeRoot)
+	now := time.Now().UTC()
+	store.Now = func() time.Time { return now.Add(-2 * time.Hour) }
+
+	project, err := store.CreateProject(ctx, sqlite.CreateProjectParams{
+		Key:           "odin-core",
+		Name:          "Odin Core",
+		Scope:         "odin-core",
+		GitRoot:       filepath.Join(runtimeRoot, "repos", "odin-core"),
+		DefaultBranch: "main",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(runtimeRoot, "repos", "odin-core"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(repo) error = %v", err)
+	}
+
+	stalledTask, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "stalled-task",
+		Title:       "Stalled task",
+		Status:      "running",
+		Scope:       "odin-core",
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask(stalled) error = %v", err)
+	}
+	if _, err := store.StartRun(ctx, sqlite.StartRunParams{
+		TaskID:   stalledTask.ID,
+		Executor: "codex_headless",
+		Attempt:  1,
+		Status:   "running",
+	}); err != nil {
+		t.Fatalf("StartRun(stalled) error = %v", err)
+	}
+
+	approvalTask, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "approval-task",
+		Title:       "Approval task",
+		Status:      "running",
+		Scope:       "odin-core",
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask(approval) error = %v", err)
+	}
+	approvalRun, err := store.StartRun(ctx, sqlite.StartRunParams{
+		TaskID:   approvalTask.ID,
+		Executor: "codex_headless",
+		Attempt:  1,
+		Status:   "running",
+	})
+	if err != nil {
+		t.Fatalf("StartRun(approval) error = %v", err)
+	}
+	if _, _, _, err := store.AwaitApproval(ctx, sqlite.AwaitApprovalParams{
+		TaskID:         approvalTask.ID,
+		RunID:          approvalRun.ID,
+		RequestedBy:    "operator",
+		Summary:        "awaiting approval",
+		TerminalReason: "awaiting approval",
+		ArtifactsJSON:  `[]`,
+	}); err != nil {
+		t.Fatalf("AwaitApproval() error = %v", err)
+	}
+
+	if _, err := store.SetProjectTransition(ctx, sqlite.SetProjectTransitionParams{
+		ProjectID:          project.ID,
+		State:              "cutover",
+		Controller:         "odin_os",
+		LimitedActionsJSON: "[]",
+		Notes:              "primary controller",
+		ChangedBy:          "operator",
+	}); err != nil {
+		t.Fatalf("SetProjectTransition() error = %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	output, err := runOdinCommand(t, repoRoot, odinBinary, runtimeRoot, nil, "", "status", "--json")
+	if err != nil {
+		t.Fatalf("runOdinCommand(status --json) error = %v\n%s", err, output)
+	}
+
+	var report statusReport
+	if err := json.Unmarshal([]byte(output), &report); err != nil {
+		t.Fatalf("status output = %q, want valid JSON: %v", output, err)
+	}
+	if len(report.ApprovalsWaiting) == 0 {
+		t.Fatalf("approvals_waiting empty, want pending approvals")
+	}
+	if len(report.StalledRuns) == 0 {
+		t.Fatalf("stalled_runs empty, want stalled running work")
+	}
+	if len(report.ActiveRuns) == 0 {
+		t.Fatalf("active_runs empty, want running work summary")
+	}
+	if len(report.ProjectTransitions) == 0 {
+		t.Fatalf("project_transitions empty, want ownership summary")
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	runtimeevents "odin-os/internal/runtime/events"
 )
@@ -68,6 +69,8 @@ type ActiveRunView struct {
 	Attempt    int
 	StartedAt  string
 }
+
+type StalledRunView = ActiveRunView
 
 type BlockedItemView struct {
 	TaskID     int64
@@ -360,6 +363,49 @@ func ListActiveRunViews(ctx context.Context, queryer Queryer) ([]ActiveRunView, 
 	var views []ActiveRunView
 	for rows.Next() {
 		var view ActiveRunView
+		if err := rows.Scan(
+			&view.RunID,
+			&view.TaskID,
+			&view.TaskKey,
+			&view.ProjectKey,
+			&view.Executor,
+			&view.Status,
+			&view.Attempt,
+			&view.StartedAt,
+		); err != nil {
+			return nil, err
+		}
+		views = append(views, view)
+	}
+	return views, rows.Err()
+}
+
+func ListStalledRunViews(ctx context.Context, queryer Queryer, cutoff time.Time) ([]StalledRunView, error) {
+	rows, err := queryer.QueryContext(ctx, `
+		SELECT
+			r.id,
+			r.task_id,
+			t.key,
+			p.key,
+			r.executor,
+			r.status,
+			r.attempt,
+			r.started_at
+		FROM runs r
+		JOIN tasks t ON t.id = r.task_id
+		JOIN projects p ON p.id = t.project_id
+		WHERE r.status = 'running'
+		  AND r.started_at < ?
+		ORDER BY r.started_at ASC, r.id ASC
+	`, cutoff.UTC().Format(time.RFC3339Nano))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var views []StalledRunView
+	for rows.Next() {
+		var view StalledRunView
 		if err := rows.Scan(
 			&view.RunID,
 			&view.TaskID,

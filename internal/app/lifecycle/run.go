@@ -19,6 +19,7 @@ import (
 	appconfig "odin-os/internal/app/config"
 	"odin-os/internal/cli/repl"
 	"odin-os/internal/core/projects"
+	conversationsvc "odin-os/internal/runtime/conversation"
 	healthsvc "odin-os/internal/runtime/health"
 	"odin-os/internal/runtime/jobs"
 	"odin-os/internal/runtime/recovery"
@@ -63,6 +64,8 @@ func Run(ctx context.Context, root string, args []string, stdin io.Reader, stdou
 			return runDoctor(ctx, app, args[1:], stdout)
 		case "healthcheck":
 			return runHealthcheck(ctx, app, stdout)
+		case "status":
+			return runStatus(ctx, app, args[1:], stdout)
 		case "serve":
 			return runServe(ctx, app, cfg, stdout)
 		case "backup":
@@ -120,6 +123,30 @@ func runHealthcheck(ctx context.Context, app bootstrap.App, stdout io.Writer) er
 	}
 
 	_, err = fmt.Fprintln(stdout, "ready")
+	return err
+}
+
+func runStatus(ctx context.Context, app bootstrap.App, args []string, stdout io.Writer) error {
+	snapshot, err := conversationsvc.Service{
+		DB:             app.Store.DB(),
+		StalledTimeout: 30 * time.Minute,
+	}.Snapshot(ctx)
+	if err != nil {
+		return err
+	}
+
+	if len(args) > 0 && args[0] == "--json" {
+		encoder := json.NewEncoder(stdout)
+		encoder.SetIndent("", "  ")
+		return encoder.Encode(snapshot)
+	}
+
+	_, err = fmt.Fprintf(stdout, "approvals_waiting=%d stalled_runs=%d active_runs=%d project_transitions=%d\n",
+		len(snapshot.ApprovalsWaiting),
+		len(snapshot.StalledRuns),
+		len(snapshot.ActiveRuns),
+		len(snapshot.ProjectTransitions),
+	)
 	return err
 }
 
