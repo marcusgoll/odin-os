@@ -492,15 +492,29 @@ service:
 	}
 }
 
-func TestServeLoadContextUsesParentWhenActive(t *testing.T) {
+func TestServeLoadContextDetachesFromActiveParentCancellation(t *testing.T) {
 	t.Parallel()
 
 	parent, cancelParent := context.WithCancel(context.Background())
-	defer cancelParent()
 
-	loadCtx := serveLoadContext(parent)
-	if loadCtx != parent {
-		t.Fatal("serveLoadContext() should return the parent context when it is still active")
+	loadCtx, cancelLoad := serveLoadContext(parent)
+	defer cancelLoad()
+
+	cancelParent()
+	select {
+	case <-loadCtx.Done():
+		if errors.Is(loadCtx.Err(), context.Canceled) {
+			t.Fatal("serveLoadContext() should ignore parent cancellation during serve startup")
+		}
+	default:
+	}
+	select {
+	case <-loadCtx.Done():
+		t.Fatal("serveLoadContext() should not be canceled by the parent context")
+	case <-time.After(100 * time.Millisecond):
+	}
+	if loadCtx.Err() != nil {
+		t.Fatalf("serveLoadContext() Err() = %v, want nil after detaching from parent cancellation", loadCtx.Err())
 	}
 }
 
@@ -510,7 +524,8 @@ func TestServeLoadContextDetachesOnlyAfterCancellation(t *testing.T) {
 	parent, cancelParent := context.WithCancel(context.Background())
 	cancelParent()
 
-	loadCtx := serveLoadContext(parent)
+	loadCtx, cancelLoad := serveLoadContext(parent)
+	defer cancelLoad()
 	if loadCtx == parent {
 		t.Fatal("serveLoadContext() should detach from a canceled parent context")
 	}
@@ -531,19 +546,22 @@ func TestServeLoadContextDoesNotDetachOnDeadlineExceeded(t *testing.T) {
 	defer cancelParent()
 	<-parent.Done()
 
-	loadCtx := serveLoadContext(parent)
-	if loadCtx != parent {
-		t.Fatal("serveLoadContext() should not detach for deadline expiration")
-	}
+	loadCtx, cancelLoad := serveLoadContext(parent)
+	defer cancelLoad()
 	if !errors.Is(loadCtx.Err(), context.DeadlineExceeded) {
 		t.Fatalf("serveLoadContext() Err() = %v, want deadline exceeded", loadCtx.Err())
 	}
 }
 
-func TestServeStartupContextUsesParentWhenActive(t *testing.T) {
+func TestServeStartupContextDetachesFromActiveParentCancellation(t *testing.T) {
 	t.Parallel()
 
 	parent, cancelParent := context.WithCancel(context.Background())
+	originalTimeout := serveOperationTimeout
+	serveOperationTimeout = 20 * time.Millisecond
+	defer func() {
+		serveOperationTimeout = originalTimeout
+	}()
 
 	startupCtx, cancelStartup := serveStartupContext(parent)
 	defer cancelStartup()
@@ -555,8 +573,14 @@ func TestServeStartupContextUsesParentWhenActive(t *testing.T) {
 	cancelParent()
 	select {
 	case <-startupCtx.Done():
+		if errors.Is(startupCtx.Err(), context.Canceled) {
+			t.Fatal("serveStartupContext() should ignore parent cancellation during startup recovery")
+		}
 	case <-time.After(100 * time.Millisecond):
-		t.Fatal("serveStartupContext() did not cancel when the parent was canceled")
+		t.Fatal("serveStartupContext() did not finish after startup timeout")
+	}
+	if !errors.Is(startupCtx.Err(), context.DeadlineExceeded) {
+		t.Fatalf("serveStartupContext() Err() = %v, want deadline exceeded", startupCtx.Err())
 	}
 }
 

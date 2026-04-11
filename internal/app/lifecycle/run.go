@@ -49,7 +49,9 @@ func Run(ctx context.Context, root string, args []string, stdin io.Reader, stdou
 
 	loadCtx := ctx
 	if len(args) > 0 && args[0] == "serve" {
-		loadCtx = serveLoadContext(ctx)
+		var cancelLoad context.CancelFunc
+		loadCtx, cancelLoad = serveLoadContext(ctx)
+		defer cancelLoad()
 	}
 
 	appLoader := bootstrap.Load
@@ -162,11 +164,14 @@ func runtimeEnv() map[string]string {
 	}
 }
 
-func serveLoadContext(parent context.Context) context.Context {
-	if !shouldDetachServeContext(parent) {
-		return parent
+func serveLoadContext(parent context.Context) (context.Context, context.CancelFunc) {
+	if errors.Is(parent.Err(), context.DeadlineExceeded) {
+		return context.WithTimeout(parent, serveOperationTimeout)
 	}
-	return context.WithoutCancel(parent)
+	if deadline, ok := parent.Deadline(); ok {
+		return context.WithDeadline(context.Background(), deadline)
+	}
+	return context.WithCancel(context.Background())
 }
 
 func runServe(ctx context.Context, app bootstrap.App, cfg appconfig.Config, stdout io.Writer) error {
@@ -403,18 +408,22 @@ func serveOperationContext(parent context.Context) (context.Context, context.Can
 }
 
 func serveStartupContext(parent context.Context) (context.Context, context.CancelFunc) {
-	if shouldDetachServeContext(parent) {
-		parent = context.WithoutCancel(parent)
+	if errors.Is(parent.Err(), context.DeadlineExceeded) {
+		return context.WithTimeout(parent, serveOperationTimeout)
 	}
-	return context.WithTimeout(parent, serveOperationTimeout)
+
+	base := context.Background()
+	if deadline, ok := parent.Deadline(); ok {
+		timeoutDeadline := time.Now().Add(serveOperationTimeout)
+		if deadline.Before(timeoutDeadline) {
+			return context.WithDeadline(base, deadline)
+		}
+	}
+	return context.WithTimeout(base, serveOperationTimeout)
 }
 
 func serveServeContext(parent context.Context) (context.Context, context.CancelFunc) {
 	return context.WithCancel(parent)
-}
-
-func shouldDetachServeContext(parent context.Context) bool {
-	return errors.Is(parent.Err(), context.Canceled)
 }
 
 func logBackgroundError(logger *logs.Logger, component string, err error) {
