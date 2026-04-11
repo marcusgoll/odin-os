@@ -373,6 +373,140 @@ func (store *Store) FinishRun(ctx context.Context, params FinishRunParams) (Run,
 	return run, err
 }
 
+func (store *Store) AwaitApproval(ctx context.Context, params AwaitApprovalParams) (Approval, Run, Task, error) {
+	now := store.now()
+	var approval Approval
+	var run Run
+	var task Task
+	artifactsJSON := normalizeArtifactsJSON(params.ArtifactsJSON)
+	terminalReason := strings.TrimSpace(params.TerminalReason)
+	if terminalReason == "" {
+		terminalReason = "approval required"
+	}
+
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		currentRun, currentTask, err := store.getRunWithTaskTx(ctx, tx, params.RunID)
+		if err != nil {
+			return err
+		}
+		if currentTask.ID != params.TaskID {
+			return fmt.Errorf("run %d does not belong to task %d", params.RunID, params.TaskID)
+		}
+		previousStatus := currentTask.Status
+		runID := params.RunID
+
+		result, err := tx.ExecContext(ctx, `
+			INSERT INTO approvals (task_id, run_id, status, requested_at, resolved_at, decision_by, reason)
+			VALUES (?, ?, 'pending', ?, NULL, '', '')
+		`, params.TaskID, params.RunID, formatTime(now))
+		if err != nil {
+			return err
+		}
+
+		approvalID, err := result.LastInsertId()
+		if err != nil {
+			return err
+		}
+
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE runs
+			SET status = ?, finished_at = ?, summary = ?, terminal_reason = ?, artifacts_json = ?
+			WHERE id = ?
+		`, "awaiting_approval", formatTime(now), params.Summary, terminalReason, artifactsJSON, params.RunID); err != nil {
+			return err
+		}
+
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE tasks
+			SET status = ?, summary = ?, terminal_reason = ?, artifacts_json = ?, current_run_id = NULL, updated_at = ?
+			WHERE id = ?
+		`, "awaiting_approval", params.Summary, terminalReason, artifactsJSON, formatTime(now), params.TaskID); err != nil {
+			return err
+		}
+
+		approval = Approval{
+			ID:          approvalID,
+			TaskID:      params.TaskID,
+			RunID:       &runID,
+			Status:      "pending",
+			RequestedAt: now,
+		}
+		currentRun.Status = "awaiting_approval"
+		currentRun.FinishedAt = &now
+		currentRun.Summary = params.Summary
+		currentRun.TerminalReason = terminalReason
+		currentRun.ArtifactsJSON = artifactsJSON
+		run = currentRun
+
+		currentTask.Status = "awaiting_approval"
+		currentTask.Summary = params.Summary
+		currentTask.TerminalReason = terminalReason
+		currentTask.ArtifactsJSON = artifactsJSON
+		currentTask.CurrentRunID = nil
+		currentTask.UpdatedAt = now
+		task = currentTask
+
+		projectID := task.ProjectID
+		if err := appendEventTx(ctx, tx, eventInsert{
+			StreamType: runtimeevents.StreamApproval,
+			StreamID:   approval.ID,
+			EventType:  runtimeevents.EventApprovalRequested,
+			Scope:      task.Scope,
+			ProjectID:  &projectID,
+			TaskID:     &task.ID,
+			RunID:      approval.RunID,
+			Payload: runtimeevents.ApprovalRequestedPayload{
+				TaskID:      task.ID,
+				RunID:       approval.RunID,
+				Status:      approval.Status,
+				RequestedBy: params.RequestedBy,
+			},
+			OccurredAt: now,
+		}); err != nil {
+			return err
+		}
+		if err := appendEventTx(ctx, tx, eventInsert{
+			StreamType: runtimeevents.StreamRun,
+			StreamID:   run.ID,
+			EventType:  runtimeevents.EventRunFinished,
+			Scope:      task.Scope,
+			ProjectID:  &projectID,
+			TaskID:     &task.ID,
+			RunID:      &run.ID,
+			Payload: runtimeevents.RunFinishedPayload{
+				Status:         run.Status,
+				Summary:        run.Summary,
+				TerminalReason: run.TerminalReason,
+				ArtifactsJSON:  run.ArtifactsJSON,
+			},
+			OccurredAt: now,
+		}); err != nil {
+			return err
+		}
+		return appendEventTx(ctx, tx, eventInsert{
+			StreamType: runtimeevents.StreamTask,
+			StreamID:   task.ID,
+			EventType:  runtimeevents.EventTaskStatusChanged,
+			Scope:      task.Scope,
+			ProjectID:  &projectID,
+			TaskID:     &task.ID,
+			Payload: runtimeevents.TaskStatusChangedPayload{
+				PreviousStatus: previousStatus,
+				Status:         task.Status,
+				Summary:        task.Summary,
+				TerminalReason: task.TerminalReason,
+				ArtifactsJSON:  task.ArtifactsJSON,
+			},
+			OccurredAt: now,
+		})
+	})
+	if err != nil {
+		return Approval{}, Run{}, Task{}, err
+	}
+
+	return approval, run, task, nil
+}
+
 func (store *Store) RequestApproval(ctx context.Context, params RequestApprovalParams) (Approval, error) {
 	now := store.now()
 	var approval Approval

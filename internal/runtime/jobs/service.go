@@ -371,36 +371,15 @@ func (service Service) requestApproval(ctx context.Context, task sqlite.Task, ru
 		reason = "approval required"
 	}
 
-	if _, err := service.Store.RequestApproval(ctx, sqlite.RequestApprovalParams{
-		TaskID:      task.ID,
-		RunID:       &run.ID,
-		Status:      "pending",
-		RequestedBy: string(projects.TransitionControllerOdinOS),
-	}); err != nil {
-		return err
-	}
-
-	if _, err := service.Store.FinishRun(ctx, sqlite.FinishRunParams{
-		RunID:          run.ID,
-		Status:         "awaiting_approval",
-		Summary:        reason,
-		TerminalReason: reason,
-		ArtifactsJSON:  "[]",
-	}); err != nil {
-		return err
-	}
-
-	if _, err := service.Store.UpdateTaskStatus(ctx, sqlite.UpdateTaskStatusParams{
+	_, _, _, err := service.Store.AwaitApproval(ctx, sqlite.AwaitApprovalParams{
 		TaskID:         task.ID,
-		Status:         "awaiting_approval",
+		RunID:          run.ID,
+		RequestedBy:    string(projects.TransitionControllerOdinOS),
 		Summary:        reason,
 		TerminalReason: reason,
 		ArtifactsJSON:  "[]",
-	}); err != nil {
-		return err
-	}
-
-	return nil
+	})
+	return err
 }
 
 func slugify(input string) string {

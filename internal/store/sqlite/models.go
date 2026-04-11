@@ -86,6 +86,15 @@ type FinishRunParams struct {
 	ArtifactsJSON  string
 }
 
+type AwaitApprovalParams struct {
+	TaskID         int64
+	RunID          int64
+	RequestedBy    string
+	Summary        string
+	TerminalReason string
+	ArtifactsJSON  string
+}
+
 type Approval struct {
 	ID          int64
 	TaskID      int64

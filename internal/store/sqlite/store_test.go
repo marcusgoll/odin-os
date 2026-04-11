@@ -384,6 +384,86 @@ func TestProjectTransitionStateLifecycle(t *testing.T) {
 	}
 }
 
+func TestAwaitApprovalAtomicallyPersistsApprovalRunAndTaskState(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "odin.db")
+
+	store, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer store.Close()
+
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
+	}
+
+	project, err := store.CreateProject(ctx, CreateProjectParams{
+		Key:           "odin-core",
+		Name:          "Odin Core",
+		Scope:         "odin-core",
+		GitRoot:       "/home/orchestrator/odin-os",
+		DefaultBranch: "main",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+
+	task, err := store.CreateTask(ctx, CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "phase-35",
+		Title:       "Require approval",
+		Status:      "running",
+		Scope:       "odin-core",
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+
+	run, err := store.StartRun(ctx, StartRunParams{
+		TaskID:   task.ID,
+		Executor: "codex_headless",
+		Attempt:  1,
+		Status:   "running",
+	})
+	if err != nil {
+		t.Fatalf("StartRun() error = %v", err)
+	}
+
+	approval, finishedRun, updatedTask, err := store.AwaitApproval(ctx, AwaitApprovalParams{
+		TaskID:         task.ID,
+		RunID:          run.ID,
+		RequestedBy:    "odin_os",
+		Summary:        "system project requires approval",
+		TerminalReason: "system project requires approval",
+		ArtifactsJSON:  `["runs/artifacts/approval.json"]`,
+	})
+	if err != nil {
+		t.Fatalf("AwaitApproval() error = %v", err)
+	}
+
+	if approval.Status != "pending" {
+		t.Fatalf("approval status = %q, want pending", approval.Status)
+	}
+	if finishedRun.Status != "awaiting_approval" {
+		t.Fatalf("run status = %q, want awaiting_approval", finishedRun.Status)
+	}
+	if finishedRun.ArtifactsJSON != `["runs/artifacts/approval.json"]` {
+		t.Fatalf("run artifacts = %q, want persisted artifact pointer", finishedRun.ArtifactsJSON)
+	}
+	if updatedTask.Status != "awaiting_approval" {
+		t.Fatalf("task status = %q, want awaiting_approval", updatedTask.Status)
+	}
+	if updatedTask.CurrentRunID != nil {
+		t.Fatalf("task current run = %v, want nil after awaiting approval", updatedTask.CurrentRunID)
+	}
+	if updatedTask.ArtifactsJSON != `["runs/artifacts/approval.json"]` {
+		t.Fatalf("task artifacts = %q, want persisted artifact pointer", updatedTask.ArtifactsJSON)
+	}
+}
+
 func TestProjectTransitionReportsAreAppendOnly(t *testing.T) {
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "odin.db")
