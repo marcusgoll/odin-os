@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"odin-os/internal/executors/contract"
@@ -65,5 +66,44 @@ func TestHeadlessHealthRequiresExecutableDriver(t *testing.T) {
 	}
 	if report.Status != contract.HealthStatusDegraded {
 		t.Fatalf("Health().Status = %q, want %q", report.Status, contract.HealthStatusDegraded)
+	}
+}
+
+func TestHeadlessRunTaskWritesArtifactMetadata(t *testing.T) {
+	t.Setenv("ODIN_CODEX_DRIVER_MODE", "fixture")
+
+	worktreePath := t.TempDir()
+	executor := NewHeadless()
+	result, err := executor.RunTask(context.Background(), contract.TaskSpec{
+		ID:     "runtime-smoke",
+		Kind:   contract.TaskKindGeneral,
+		Scope:  "project",
+		Prompt: "say ready",
+		Metadata: map[string]string{
+			"project_key":   "alpha",
+			"worktree_path": worktreePath,
+		},
+	})
+	if err != nil {
+		t.Fatalf("RunTask() error = %v", err)
+	}
+
+	artifactPath := result.Metadata["artifact_path"]
+	if artifactPath == "" {
+		t.Fatal("artifact_path empty, want persisted driver artifact")
+	}
+	if !filepath.IsAbs(artifactPath) {
+		t.Fatalf("artifact_path = %q, want absolute path", artifactPath)
+	}
+	if result.Metadata["artifacts_json"] == "" {
+		t.Fatal("artifacts_json empty, want persisted artifact pointer payload")
+	}
+
+	content, err := os.ReadFile(artifactPath)
+	if err != nil {
+		t.Fatalf("ReadFile(artifact_path) error = %v", err)
+	}
+	if !strings.Contains(string(content), "runtime-smoke") {
+		t.Fatalf("artifact content = %q, want task id runtime-smoke", string(content))
 	}
 }

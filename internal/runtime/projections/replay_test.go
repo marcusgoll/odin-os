@@ -65,16 +65,21 @@ func TestReplayLifecycleBuildsCurrentStateFromEvents(t *testing.T) {
 	}
 
 	if _, err := store.FinishRun(ctx, sqlite.FinishRunParams{
-		RunID:   run.ID,
-		Status:  "completed",
-		Summary: "all done",
+		RunID:          run.ID,
+		Status:         "completed",
+		Summary:        "all done",
+		TerminalReason: "completed",
+		ArtifactsJSON:  `["runs/artifacts/replay.json"]`,
 	}); err != nil {
 		t.Fatalf("FinishRun() error = %v", err)
 	}
 
 	if _, err := store.UpdateTaskStatus(ctx, sqlite.UpdateTaskStatusParams{
-		TaskID: task.ID,
-		Status: "completed",
+		TaskID:         task.ID,
+		Status:         "completed",
+		Summary:        "all done",
+		TerminalReason: "completed",
+		ArtifactsJSON:  `["runs/artifacts/replay.json"]`,
 	}); err != nil {
 		t.Fatalf("UpdateTaskStatus(completed) error = %v", err)
 	}
@@ -111,9 +116,21 @@ func TestReplayLifecycleBuildsCurrentStateFromEvents(t *testing.T) {
 	if replay.Tasks[task.ID].Status != "completed" {
 		t.Fatalf("task replay status = %q, want %q", replay.Tasks[task.ID].Status, "completed")
 	}
+	if replay.Tasks[task.ID].TerminalReason != "completed" {
+		t.Fatalf("task replay terminal reason = %q, want %q", replay.Tasks[task.ID].TerminalReason, "completed")
+	}
+	if replay.Tasks[task.ID].ArtifactsJSON != `["runs/artifacts/replay.json"]` {
+		t.Fatalf("task replay artifacts = %q, want persisted artifact pointer", replay.Tasks[task.ID].ArtifactsJSON)
+	}
 
 	if replay.Runs[run.ID].Status != "completed" {
 		t.Fatalf("run replay status = %q, want %q", replay.Runs[run.ID].Status, "completed")
+	}
+	if replay.Runs[run.ID].TerminalReason != "completed" {
+		t.Fatalf("run replay terminal reason = %q, want %q", replay.Runs[run.ID].TerminalReason, "completed")
+	}
+	if replay.Runs[run.ID].ArtifactsJSON != `["runs/artifacts/replay.json"]` {
+		t.Fatalf("run replay artifacts = %q, want persisted artifact pointer", replay.Runs[run.ID].ArtifactsJSON)
 	}
 
 	if replay.Approvals[approval.ID].Status != "approved" {

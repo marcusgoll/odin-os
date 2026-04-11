@@ -761,21 +761,26 @@ type LifecycleReplay struct {
 }
 
 type TaskReplay struct {
-	ID           int64
-	Key          string
-	Title        string
-	Status       string
-	Scope        string
-	CurrentRunID *int64
+	ID             int64
+	Key            string
+	Title          string
+	Status         string
+	Scope          string
+	Summary        string
+	TerminalReason string
+	ArtifactsJSON  string
+	CurrentRunID   *int64
 }
 
 type RunReplay struct {
-	ID       int64
-	TaskID   int64
-	Executor string
-	Attempt  int
-	Status   string
-	Summary  string
+	ID             int64
+	TaskID         int64
+	Executor       string
+	Attempt        int
+	Status         string
+	Summary        string
+	TerminalReason string
+	ArtifactsJSON  string
 }
 
 type ApprovalReplay struct {
@@ -803,11 +808,12 @@ func ReplayLifecycle(records []runtimeevents.Record) (LifecycleReplay, error) {
 				return LifecycleReplay{}, fmt.Errorf("decode %s payload: %w", record.Type, err)
 			}
 			replay.Tasks[record.StreamID] = TaskReplay{
-				ID:     record.StreamID,
-				Key:    payload.Key,
-				Title:  payload.Title,
-				Status: payload.Status,
-				Scope:  payload.Scope,
+				ID:            record.StreamID,
+				Key:           payload.Key,
+				Title:         payload.Title,
+				Status:        payload.Status,
+				Scope:         payload.Scope,
+				ArtifactsJSON: "[]",
 			}
 		case runtimeevents.EventTaskStatusChanged:
 			payload, err := runtimeevents.DecodePayload[runtimeevents.TaskStatusChangedPayload](record.Payload)
@@ -817,6 +823,12 @@ func ReplayLifecycle(records []runtimeevents.Record) (LifecycleReplay, error) {
 			task := replay.Tasks[record.StreamID]
 			task.ID = record.StreamID
 			task.Status = payload.Status
+			task.Summary = payload.Summary
+			task.TerminalReason = payload.TerminalReason
+			task.ArtifactsJSON = payload.ArtifactsJSON
+			if task.ArtifactsJSON == "" {
+				task.ArtifactsJSON = "[]"
+			}
 			if record.RunID != nil {
 				task.CurrentRunID = record.RunID
 			}
@@ -827,11 +839,12 @@ func ReplayLifecycle(records []runtimeevents.Record) (LifecycleReplay, error) {
 				return LifecycleReplay{}, fmt.Errorf("decode %s payload: %w", record.Type, err)
 			}
 			replay.Runs[record.StreamID] = RunReplay{
-				ID:       record.StreamID,
-				TaskID:   payload.TaskID,
-				Executor: payload.Executor,
-				Attempt:  payload.Attempt,
-				Status:   payload.Status,
+				ID:            record.StreamID,
+				TaskID:        payload.TaskID,
+				Executor:      payload.Executor,
+				Attempt:       payload.Attempt,
+				Status:        payload.Status,
+				ArtifactsJSON: "[]",
 			}
 			task := replay.Tasks[payload.TaskID]
 			task.ID = payload.TaskID
@@ -847,6 +860,11 @@ func ReplayLifecycle(records []runtimeevents.Record) (LifecycleReplay, error) {
 			run.ID = record.StreamID
 			run.Status = payload.Status
 			run.Summary = payload.Summary
+			run.TerminalReason = payload.TerminalReason
+			run.ArtifactsJSON = payload.ArtifactsJSON
+			if run.ArtifactsJSON == "" {
+				run.ArtifactsJSON = "[]"
+			}
 			replay.Runs[record.StreamID] = run
 		case runtimeevents.EventApprovalRequested:
 			payload, err := runtimeevents.DecodePayload[runtimeevents.ApprovalRequestedPayload](record.Payload)

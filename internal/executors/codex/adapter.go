@@ -110,6 +110,9 @@ func runWithDriver(ctx context.Context, spec contract.TaskSpec) (contract.Execut
 	if result.Metadata == nil {
 		result.Metadata = map[string]string{}
 	}
+	if err := ensureArtifactMetadata(spec, output, result.Metadata); err != nil {
+		return contract.ExecutionResult{}, err
+	}
 	return contract.ExecutionResult{
 		Handle: contract.TaskHandle{
 			ExecutorKey: "codex_headless",
@@ -174,6 +177,33 @@ func codexDriverPath() string {
 	return filepath.Clean(filepath.Join(filepath.Dir(file), "..", "..", "..", "scripts", "drivers", "codex-headless.sh"))
 }
 
+func ensureArtifactMetadata(spec contract.TaskSpec, payload []byte, metadata map[string]string) error {
+	if strings.TrimSpace(metadata["artifacts_json"]) != "" || strings.TrimSpace(metadata["artifact_path"]) != "" {
+		return nil
+	}
+
+	baseDir := strings.TrimSpace(spec.Metadata["worktree_path"])
+	if baseDir == "" {
+		baseDir = strings.TrimSpace(spec.Metadata["repo_root"])
+	}
+	if baseDir == "" {
+		return nil
+	}
+
+	artifactPath, err := writeDriverArtifact(baseDir, spec.ID, payload)
+	if err != nil {
+		return err
+	}
+
+	metadata["artifact_path"] = artifactPath
+	encoded, err := json.Marshal([]string{artifactPath})
+	if err != nil {
+		return err
+	}
+	metadata["artifacts_json"] = string(encoded)
+	return nil
+}
+
 func findDriverUpward(start string) (string, bool) {
 	if start == "" {
 		return "", false
@@ -206,4 +236,44 @@ func validateDriverPath(driverPath string) error {
 		return fmt.Errorf("%s is not executable", driverPath)
 	}
 	return nil
+}
+
+func writeDriverArtifact(baseDir, taskID string, payload []byte) (string, error) {
+	artifactDir := filepath.Join(baseDir, ".odin", "artifacts")
+	if err := os.MkdirAll(artifactDir, 0o755); err != nil {
+		return "", err
+	}
+
+	artifactPath := filepath.Join(artifactDir, sanitizeArtifactName(taskID)+".json")
+	if err := os.WriteFile(artifactPath, payload, 0o644); err != nil {
+		return "", err
+	}
+	return artifactPath, nil
+}
+
+func sanitizeArtifactName(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "codex-headless-run"
+	}
+
+	var builder strings.Builder
+	lastDash := false
+	for _, r := range value {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
+			builder.WriteRune(r)
+			lastDash = false
+			continue
+		}
+		if !lastDash {
+			builder.WriteByte('-')
+			lastDash = true
+		}
+	}
+
+	sanitized := strings.Trim(builder.String(), "-")
+	if sanitized == "" {
+		return "codex-headless-run"
+	}
+	return sanitized
 }
