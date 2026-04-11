@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -477,7 +478,10 @@ func TestAlphaAcceptance(t *testing.T) {
 		defer store.Close()
 		seedHealthyObservability(t, ctx, store, now)
 
-		report, err := healthsvc.Service{DB: store.DB()}.Doctor(ctx, true)
+		report, err := healthsvc.Service{
+			DB:  store.DB(),
+			Now: func() time.Time { return now },
+		}.Doctor(ctx, true)
 		if err != nil {
 			t.Fatalf("Doctor() error = %v", err)
 		}
@@ -499,6 +503,41 @@ func TestAlphaAcceptance(t *testing.T) {
 		}
 		if !strings.Contains(output, "\"status\":") {
 			t.Fatalf("doctor output = %q, want JSON status field", output)
+		}
+	})
+
+	t.Run("operational autonomy contract docs exist", func(t *testing.T) {
+		autonomyDoc, err := os.ReadFile(filepath.Join(repoRoot, "docs", "contracts", "operational-autonomy.md"))
+		if err != nil {
+			t.Fatalf("ReadFile(operational-autonomy.md) error = %v", err)
+		}
+		for _, want := range []string{
+			"primary controller",
+			"Approval-required action classes",
+			"Required runtime invariants",
+			"Cutover gates",
+			"Rollback triggers",
+		} {
+			if !strings.Contains(string(autonomyDoc), want) {
+				t.Fatalf("operational-autonomy.md missing %q", want)
+			}
+		}
+
+		exitCriteria, err := os.ReadFile(filepath.Join(repoRoot, "docs", "contracts", "phase-exit-criteria.md"))
+		if err != nil {
+			t.Fatalf("ReadFile(phase-exit-criteria.md) error = %v", err)
+		}
+		for _, want := range []string{
+			"Operational autonomy exit criteria",
+			"fresh bootstrap reaches healthy state without manual seeding",
+			"at least one real executor lane completes durable work end to end",
+			"mutable work uses leased task-owned worktrees and branches",
+			"interrupted work can be recovered after restart",
+			"multi-project queue control exists",
+		} {
+			if !strings.Contains(string(exitCriteria), want) {
+				t.Fatalf("phase-exit-criteria.md missing %q", want)
+			}
 		}
 	})
 
