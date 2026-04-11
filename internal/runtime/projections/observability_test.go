@@ -194,7 +194,7 @@ func TestProjectPortfolioTreatsAwaitingApprovalAsBlockedNotActive(t *testing.T) 
 	}
 }
 
-func TestProjectViewsTreatDeadLetterAsTerminalWork(t *testing.T) {
+func TestProjectViewsTreatInterruptedDeadLetterRecoveryAsTerminalWork(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
@@ -205,9 +205,9 @@ func TestProjectViewsTreatDeadLetterAsTerminalWork(t *testing.T) {
 
 	if _, err := store.FinishRun(ctx, sqlite.FinishRunParams{
 		RunID:          run.ID,
-		Status:         "completed",
-		Summary:        "stalled work recovered elsewhere",
-		TerminalReason: "completed",
+		Status:         "interrupted",
+		Summary:        "stalled run retry budget exhausted",
+		TerminalReason: "stalled run retry budget exhausted",
 	}); err != nil {
 		t.Fatalf("FinishRun() error = %v", err)
 	}
@@ -240,6 +240,17 @@ func TestProjectViewsTreatDeadLetterAsTerminalWork(t *testing.T) {
 	}
 	if portfolio[0].OpenTaskCount != 0 {
 		t.Fatalf("portfolio open task count = %d, want 0 for dead-lettered task", portfolio[0].OpenTaskCount)
+	}
+	if portfolio[0].ActiveRunCount != 0 {
+		t.Fatalf("portfolio active run count = %d, want 0 for interrupted dead-letter recovery", portfolio[0].ActiveRunCount)
+	}
+
+	activeRuns, err := projections.ListActiveRunViews(ctx, store.DB())
+	if err != nil {
+		t.Fatalf("ListActiveRunViews() error = %v", err)
+	}
+	if len(activeRuns) != 0 {
+		t.Fatalf("active runs = %+v, want 0 for interrupted dead-letter recovery", activeRuns)
 	}
 }
 
