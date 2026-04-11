@@ -17,6 +17,7 @@ import (
 	jobsvc "odin-os/internal/runtime/jobs"
 	"odin-os/internal/runtime/projections"
 	"odin-os/internal/store/sqlite"
+	"odin-os/internal/vcs/branches"
 	gitadapter "odin-os/internal/vcs/git"
 	"odin-os/internal/vcs/leases"
 	worktreemgr "odin-os/internal/vcs/worktrees"
@@ -66,6 +67,9 @@ func TestCutoverPilotProjectsStayRunnableWithoutLegacyPrimary(t *testing.T) {
 		t.Fatalf("bootstrap.Load() error = %v", err)
 	}
 	defer app.Store.Close()
+
+	worktreeRoot := t.TempDir()
+	git := &recordingGitAdapter{}
 
 	pilot, ok := app.Registry.CutoverPilotProject("pbs")
 	if !ok {
@@ -145,8 +149,8 @@ func TestCutoverPilotProjectsStayRunnableWithoutLegacyPrimary(t *testing.T) {
 		Transitions:    projects.Service{Store: app.Store},
 		Leases: leases.Manager{
 			Store:        app.Store,
-			Git:          pilotGitAdapter{},
-			WorktreeRoot: t.TempDir(),
+			Git:          git,
+			WorktreeRoot: worktreeRoot,
 		},
 		Now: time.Now,
 	}
@@ -185,6 +189,22 @@ func TestCutoverPilotProjectsStayRunnableWithoutLegacyPrimary(t *testing.T) {
 		t.Fatalf("ExecuteNextQueued() error = %v", err)
 	}
 
+	if git.branchExistsCalls != 1 {
+		t.Fatalf("BranchExists calls = %d, want 1", git.branchExistsCalls)
+	}
+	if git.createBranchCalls != 1 {
+		t.Fatalf("CreateBranch calls = %d, want 1", git.createBranchCalls)
+	}
+	if git.addWorktreeCalls != 1 {
+		t.Fatalf("AddWorktree calls = %d, want 1", git.addWorktreeCalls)
+	}
+	if git.repoRoot != project.GitRoot {
+		t.Fatalf("git repo root = %q, want %q", git.repoRoot, project.GitRoot)
+	}
+	if git.defaultBranch != project.DefaultBranch {
+		t.Fatalf("git default branch = %q, want %q", git.defaultBranch, project.DefaultBranch)
+	}
+
 	completedTask, err := app.Store.GetTask(ctx, task.ID)
 	if err != nil {
 		t.Fatalf("GetTask() error = %v", err)
@@ -199,6 +219,52 @@ func TestCutoverPilotProjectsStayRunnableWithoutLegacyPrimary(t *testing.T) {
 	}
 	if len(approvals) != 0 {
 		t.Fatalf("pending approvals = %d, want 0 for normal pilot completion", len(approvals))
+	}
+
+	leasesSnapshot, err := app.Store.ListCleanupEligibleWorktreeLeases(ctx, time.Now().UTC())
+	if err != nil {
+		t.Fatalf("ListCleanupEligibleWorktreeLeases() error = %v", err)
+	}
+	lease, ok := findWorktreeLeaseByTaskID(leasesSnapshot, task.ID)
+	if !ok {
+		t.Fatalf("lease for task %d not found in cleanup-eligible leases", task.ID)
+	}
+	wantBranch := branches.Name(branches.NameParams{
+		ProjectKey: projectManifest.Key,
+		TaskID:     task.ID,
+		RunID:      lease.RunID,
+		Try:        1,
+	})
+	wantWorktree := worktreemgr.ResolvePath(worktreemgr.PathParams{
+		Root:       worktreeRoot,
+		ProjectKey: projectManifest.Key,
+		TaskID:     task.ID,
+		RunID:      lease.RunID,
+		Try:        1,
+	})
+	if git.branchName != wantBranch {
+		t.Fatalf("git branch name = %q, want %q", git.branchName, wantBranch)
+	}
+	if git.worktreePath != wantWorktree {
+		t.Fatalf("git worktree path = %q, want %q", git.worktreePath, wantWorktree)
+	}
+	if lease.Mode != "mutable" {
+		t.Fatalf("lease mode = %q, want mutable", lease.Mode)
+	}
+	if lease.BranchName != wantBranch {
+		t.Fatalf("lease branch = %q, want %q", lease.BranchName, wantBranch)
+	}
+	if lease.WorktreePath != wantWorktree {
+		t.Fatalf("lease worktree path = %q, want %q", lease.WorktreePath, wantWorktree)
+	}
+	if lease.RepoRoot != project.GitRoot {
+		t.Fatalf("lease repo root = %q, want %q", lease.RepoRoot, project.GitRoot)
+	}
+	if lease.State != "released" {
+		t.Fatalf("lease state = %q, want released", lease.State)
+	}
+	if lease.ReleasedAt == nil {
+		t.Fatal("lease ReleasedAt is nil, want released lease to be persisted")
 	}
 }
 
@@ -309,12 +375,51 @@ func assertFileContains(t *testing.T, path string, required []string) {
 	}
 }
 
-type pilotGitAdapter struct{}
+type recordingGitAdapter struct {
+	repoRoot          string
+	branchName        string
+	defaultBranch     string
+	worktreePath      string
+	branchExistsCalls int
+	createBranchCalls int
+	addWorktreeCalls  int
+}
 
-func (pilotGitAdapter) BranchExists(context.Context, string, string) (bool, error) { return false, nil }
-func (pilotGitAdapter) CreateBranch(context.Context, string, string, string) error { return nil }
-func (pilotGitAdapter) AddWorktree(context.Context, string, string, string) error  { return nil }
-func (pilotGitAdapter) RemoveWorktree(context.Context, string, string) error       { return nil }
+func (git *recordingGitAdapter) BranchExists(_ context.Context, repoRoot, branchName string) (bool, error) {
+	git.repoRoot = repoRoot
+	git.branchName = branchName
+	git.branchExistsCalls++
+	return false, nil
+}
+
+func (git *recordingGitAdapter) CreateBranch(_ context.Context, repoRoot, branchName, defaultBranch string) error {
+	git.repoRoot = repoRoot
+	git.branchName = branchName
+	git.defaultBranch = defaultBranch
+	git.createBranchCalls++
+	return nil
+}
+
+func (git *recordingGitAdapter) AddWorktree(_ context.Context, repoRoot, worktreePath, branchName string) error {
+	git.repoRoot = repoRoot
+	git.branchName = branchName
+	git.worktreePath = worktreePath
+	git.addWorktreeCalls++
+	return nil
+}
+
+func (git *recordingGitAdapter) RemoveWorktree(context.Context, string, string) error {
+	return nil
+}
+
+func findWorktreeLeaseByTaskID(leases []sqlite.WorktreeLease, taskID int64) (sqlite.WorktreeLease, bool) {
+	for _, lease := range leases {
+		if lease.TaskID == taskID {
+			return lease, true
+		}
+	}
+	return sqlite.WorktreeLease{}, false
+}
 
 func TestOperationalAutonomySchedulesAcrossMultipleProjects(t *testing.T) {
 	ctx := context.Background()
