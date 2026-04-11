@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"syscall"
 
 	"odin-os/internal/app/lifecycle"
 )
@@ -27,7 +29,10 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := lifecycle.Run(context.Background(), root, os.Args[1:], os.Stdin, os.Stdout); err != nil {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	if err := lifecycle.Run(ctx, root, os.Args[1:], os.Stdin, os.Stdout); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}

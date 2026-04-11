@@ -34,6 +34,7 @@ var errRuntimeNotReady = errors.New("runtime not ready")
 var (
 	serveTaskLoopInterval     = 1 * time.Second
 	serveSelfHealLoopInterval = 30 * time.Second
+	serveMetricsLoopInterval  = 1 * time.Minute
 )
 
 // Run dispatches between the interactive shell and machine-oriented operational commands.
@@ -170,6 +171,9 @@ func runServe(ctx context.Context, app bootstrap.App, cfg appconfig.Config, stdo
 		HealthConfig:    healthsvc.DefaultConfig(),
 		Logger:          logger,
 	}
+	metricsService := metricsvc.Service{
+		DB: app.Store.DB(),
+	}
 
 	if err := jobService.ExecuteNextQueued(operationCtx); err != nil {
 		logBackgroundError(logger, "task_runner", err)
@@ -179,9 +183,10 @@ func runServe(ctx context.Context, app bootstrap.App, cfg appconfig.Config, stdo
 	}
 
 	var background sync.WaitGroup
-	background.Add(2)
+	background.Add(3)
 	go runTaskLoop(ctx, operationCtx, &background, jobService, logger)
 	go runSelfHealLoop(ctx, operationCtx, &background, recoveryService, logger)
+	go runMetricsLoop(ctx, operationCtx, &background, metricsService, logger)
 
 	listener, err := net.Listen("tcp", cfg.Service.HTTPAddr)
 	if err != nil {
@@ -243,6 +248,10 @@ func openServiceLogger(runtimeRoot string) (*logs.Logger, io.Closer, error) {
 func runTaskLoop(ctx context.Context, operationCtx context.Context, wg *sync.WaitGroup, service jobs.Service, logger *logs.Logger) {
 	defer wg.Done()
 
+	logBackgroundEvent(logger, logs.LevelInfo, "task_runner", "task loop started", map[string]any{
+		"interval_ms": serveTaskLoopInterval.Milliseconds(),
+	})
+
 	ticker := time.NewTicker(serveTaskLoopInterval)
 	defer ticker.Stop()
 
@@ -261,6 +270,10 @@ func runTaskLoop(ctx context.Context, operationCtx context.Context, wg *sync.Wai
 func runSelfHealLoop(ctx context.Context, operationCtx context.Context, wg *sync.WaitGroup, service recovery.Service, logger *logs.Logger) {
 	defer wg.Done()
 
+	logBackgroundEvent(logger, logs.LevelInfo, "self_heal", "self-heal loop started", map[string]any{
+		"interval_ms": serveSelfHealLoopInterval.Milliseconds(),
+	})
+
 	ticker := time.NewTicker(serveSelfHealLoopInterval)
 	defer ticker.Stop()
 
@@ -276,19 +289,60 @@ func runSelfHealLoop(ctx context.Context, operationCtx context.Context, wg *sync
 	}
 }
 
+func runMetricsLoop(ctx context.Context, operationCtx context.Context, wg *sync.WaitGroup, service metricsvc.Service, logger *logs.Logger) {
+	defer wg.Done()
+
+	logBackgroundEvent(logger, logs.LevelInfo, "metrics", "metrics loop started", map[string]any{
+		"interval_ms": serveMetricsLoopInterval.Milliseconds(),
+	})
+
+	ticker := time.NewTicker(serveMetricsLoopInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			snapshot, err := service.Collect(operationCtx)
+			if err != nil {
+				logBackgroundError(logger, "metrics", err)
+				continue
+			}
+			logBackgroundEvent(logger, logs.LevelInfo, "metrics", "metrics snapshot exported", map[string]any{
+				"generated_at":        snapshot.GeneratedAt.Format(time.RFC3339Nano),
+				"active_runs":         snapshot.ActiveRuns,
+				"blocked_items":       snapshot.BlockedItems,
+				"approvals_waiting":   snapshot.ApprovalsWaiting,
+				"open_incidents":      snapshot.OpenIncidents,
+				"escalated_incidents": snapshot.EscalatedIncidents,
+				"active_recoveries":   snapshot.ActiveRecoveries,
+				"queued_tasks":        snapshot.QueuedTasks,
+				"stale_executors":     snapshot.StaleExecutors,
+				"stale_sources":       snapshot.StaleSources,
+				"stale_projections":   snapshot.StaleProjections,
+			})
+		}
+	}
+}
+
 func logBackgroundError(logger *logs.Logger, component string, err error) {
+	logBackgroundEvent(logger, logs.LevelError, component, "background loop error", map[string]any{
+		"error": err.Error(),
+	})
+}
+
+func logBackgroundEvent(logger *logs.Logger, level logs.Level, component, message string, fields map[string]any) {
 	if logger == nil {
 		return
 	}
 	_ = logger.Log(logs.Record{
-		Level:         logs.LevelError,
+		Level:         level,
 		Component:     component,
-		Message:       "background loop error",
+		Message:       message,
 		CorrelationID: component,
 		Scope:         "global",
-		Fields: map[string]any{
-			"error": err.Error(),
-		},
+		Fields:        fields,
 	})
 }
 

@@ -8,9 +8,11 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"odin-os/internal/core/projects"
 	"odin-os/internal/runtime/checkpoints"
 	"odin-os/internal/store/sqlite"
 )
@@ -291,6 +293,162 @@ service:
 	}
 }
 
+func TestRunServeDrainsQueuedTaskAfterStartup(t *testing.T) {
+	t.Parallel()
+
+	root := createRuntimeRoot(t)
+	writeRuntimeConfig(t, root, `
+version: 1
+runtime:
+  root: .
+service:
+  http_addr: 127.0.0.1:0
+  startup_recovery: true
+`)
+	seedHealthyRuntime(t, root)
+
+	store, err := sqlite.Open(filepath.Join(root, "data", "odin.db"))
+	if err != nil {
+		t.Fatalf("sqlite.Open() error = %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	project, err := store.CreateProject(ctx, sqlite.CreateProjectParams{
+		Key:           "odin-core",
+		Name:          "Odin Core",
+		Scope:         "odin-core",
+		GitRoot:       filepath.Join(root, "repos", "odin-core"),
+		DefaultBranch: "main",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+	transitionService := projects.Service{Store: store}
+	if _, err := transitionService.SetTransitionState(ctx, projects.TransitionStateInput{
+		ProjectID:   project.ID,
+		Actor:       projects.TransitionControllerOdinOS,
+		TargetState: projects.TransitionStateCutover,
+		ChangedBy:   "test",
+	}); err != nil {
+		t.Fatalf("SetTransitionState(cutover) error = %v", err)
+	}
+
+	originalTaskInterval := serveTaskLoopInterval
+	serveTaskLoopInterval = 20 * time.Millisecond
+	defer func() {
+		serveTaskLoopInterval = originalTaskInterval
+	}()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	stdout := &servedOutput{started: make(chan struct{}), marker: "serving on"}
+	runErr := make(chan error, 1)
+	go func() {
+		runErr <- Run(ctx, root, []string{"serve"}, strings.NewReader(""), stdout)
+	}()
+
+	stdout.waitStarted(t)
+
+	task, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "queued-task-after-start",
+		Title:       "Queued after serve startup",
+		Status:      "queued",
+		Scope:       "odin-core",
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+
+	deadline := time.NewTimer(2 * time.Second)
+	defer deadline.Stop()
+
+	for {
+		gotTask, err := store.GetTask(context.Background(), task.ID)
+		if err != nil {
+			t.Fatalf("GetTask() error = %v", err)
+		}
+		if gotTask.Status != "queued" {
+			break
+		}
+
+		select {
+		case <-deadline.C:
+			t.Fatal("task remained queued, want background task loop to drain it after serve started")
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	cancel()
+	if err := <-runErr; err != nil && !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run(serve) error = %v", err)
+	}
+}
+
+func TestRunServeEmitsMetricsLoopLogRecords(t *testing.T) {
+	t.Parallel()
+
+	root := createRuntimeRoot(t)
+	writeRuntimeConfig(t, root, `
+version: 1
+runtime:
+  root: .
+service:
+  http_addr: 127.0.0.1:0
+  startup_recovery: true
+`)
+	seedHealthyRuntime(t, root)
+
+	originalMetricsInterval := serveMetricsLoopInterval
+	serveMetricsLoopInterval = 20 * time.Millisecond
+	defer func() {
+		serveMetricsLoopInterval = originalMetricsInterval
+	}()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	stdout := &servedOutput{started: make(chan struct{}), marker: "serving on"}
+	runErr := make(chan error, 1)
+	go func() {
+		runErr <- Run(ctx, root, []string{"serve"}, strings.NewReader(""), stdout)
+	}()
+
+	stdout.waitStarted(t)
+
+	logPath := filepath.Join(root, "runs", "logs", "odin-service.log")
+	deadline := time.NewTimer(2 * time.Second)
+	defer deadline.Stop()
+
+	var logOutput string
+	for {
+		encoded, err := os.ReadFile(logPath)
+		if err == nil {
+			logOutput = string(encoded)
+			if strings.Contains(logOutput, `"component":"metrics"`) && strings.Contains(logOutput, `"message":"metrics snapshot exported"`) {
+				break
+			}
+		}
+
+		select {
+		case <-deadline.C:
+			t.Fatalf("log output = %q, want metrics loop record", logOutput)
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	cancel()
+	if err := <-runErr; err != nil && !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run(serve) error = %v", err)
+	}
+}
+
 func createRuntimeRoot(t *testing.T) string {
 	t.Helper()
 
@@ -473,5 +631,46 @@ func writeRuntimeConfig(t *testing.T, root string, content string) {
 
 	if err := os.WriteFile(filepath.Join(root, "config", "odin.yaml"), []byte(content), 0o644); err != nil {
 		t.Fatalf("write odin config: %v", err)
+	}
+}
+
+type servedOutput struct {
+	mu      sync.Mutex
+	buffer  bytes.Buffer
+	started chan struct{}
+	marker  string
+	once    sync.Once
+}
+
+func (output *servedOutput) Write(p []byte) (int, error) {
+	output.mu.Lock()
+	defer output.mu.Unlock()
+
+	n, err := output.buffer.Write(p)
+	if err != nil {
+		return n, err
+	}
+	if output.marker != "" && strings.Contains(output.buffer.String(), output.marker) {
+		output.once.Do(func() {
+			close(output.started)
+		})
+	}
+	return n, nil
+}
+
+func (output *servedOutput) String() string {
+	output.mu.Lock()
+	defer output.mu.Unlock()
+	return output.buffer.String()
+}
+
+func (output *servedOutput) waitStarted(t *testing.T) {
+	t.Helper()
+
+	select {
+	case <-output.started:
+		return
+	case <-time.After(2 * time.Second):
+		t.Fatalf("serve output = %q, want startup marker %q", output.String(), output.marker)
 	}
 }
