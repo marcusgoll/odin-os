@@ -79,6 +79,7 @@ type Expansion struct {
 
 type StructuredResult struct {
 	CapabilityKey   string
+	Source          string
 	Summary         string
 	Artifacts       []string
 	KeyFacts        map[string]string
