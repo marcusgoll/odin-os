@@ -4,15 +4,20 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
+	"gopkg.in/yaml.v3"
 	"odin-os/internal/app/bootstrap"
 	"odin-os/internal/cli/scope"
 	"odin-os/internal/core/projects"
+	"odin-os/internal/executors/contract"
+	executorrouter "odin-os/internal/executors/router"
 	jobsvc "odin-os/internal/runtime/jobs"
 	"odin-os/internal/runtime/projections"
 	"odin-os/internal/store/sqlite"
@@ -31,6 +36,24 @@ type statusReport struct {
 	StalledRuns        []json.RawMessage `json:"stalled_runs"`
 	ActiveRuns         []json.RawMessage `json:"active_runs"`
 	ProjectTransitions []json.RawMessage `json:"project_transitions"`
+}
+
+type authoredProjectsConfig struct {
+	Cutover cutoverMetadata `yaml:"cutover"`
+}
+
+type cutoverMetadata struct {
+	PilotProjects []pilotProjectMetadata `yaml:"pilot_projects"`
+}
+
+type pilotProjectMetadata struct {
+	Key                       string   `yaml:"key"`
+	RuntimeOwner              string   `yaml:"runtime_owner"`
+	LegacyPrimaryRequired     bool     `yaml:"legacy_primary_required"`
+	ShadowGraduation          []string `yaml:"shadow_graduation"`
+	LimitedActionGraduation   []string `yaml:"limited_action_graduation"`
+	CutoverGraduation         []string `yaml:"cutover_graduation"`
+	LegacyDutiesToRetireOrder []string `yaml:"legacy_duties_to_retire_in_order"`
 }
 
 func TestOperationalAutonomyFreshRuntimeBecomesHealthy(t *testing.T) {
@@ -52,6 +75,166 @@ func TestOperationalAutonomyFreshRuntimeBecomesHealthy(t *testing.T) {
 	}
 	if len(report.Checks) == 0 {
 		t.Fatal("checks empty, want readiness checks")
+	}
+}
+
+func TestCutoverPilotProjectsStayRunnableWithoutLegacyPrimary(t *testing.T) {
+	ctx := context.Background()
+	repoRoot := projectRoot(t)
+
+	evidence := loadCutoverEvidence(t, repoRoot)
+	if len(evidence.Cutover.PilotProjects) == 0 {
+		t.Fatal("cutover metadata has no pilot projects, want at least one")
+	}
+
+	pilot := evidence.Cutover.PilotProjects[0]
+	if pilot.Key != "odin-core" {
+		t.Fatalf("pilot key = %q, want odin-core", pilot.Key)
+	}
+	if pilot.RuntimeOwner != "odin_os" {
+		t.Fatalf("runtime owner = %q, want odin_os", pilot.RuntimeOwner)
+	}
+	if pilot.LegacyPrimaryRequired {
+		t.Fatal("legacy_primary_required = true, want false for first cutover pilot")
+	}
+	if !slices.Equal(pilot.LegacyDutiesToRetireOrder, []string{
+		"read-only observation and compare reporting",
+		"limited-action handling for allowlisted low-risk mutations",
+		"routine queue intake and run selection",
+		"normal project mutation and merge authority",
+		"legacy-primary fallback for routine completion",
+	}) {
+		t.Fatalf("legacy duties = %v, want documented retire order", pilot.LegacyDutiesToRetireOrder)
+	}
+	if !slices.Equal(pilot.ShadowGraduation, []string{
+		"legacy and Odin readouts agree on project scope and ownership",
+		"no mutation attempt requires an allowed action",
+		"operator review confirms the project can stay read-only",
+	}) {
+		t.Fatalf("shadow graduation = %v, want documented criteria", pilot.ShadowGraduation)
+	}
+	if !slices.Equal(pilot.LimitedActionGraduation, []string{
+		"allowlisted isolated mutations complete successfully under Odin ownership",
+		"limited-action work never depends on legacy primary completion",
+		"operator review shows no unbounded approval or recovery drift",
+	}) {
+		t.Fatalf("limited-action graduation = %v, want documented criteria", pilot.LimitedActionGraduation)
+	}
+	if !slices.Equal(pilot.CutoverGraduation, []string{
+		"routine queued work completes under Odin OS ownership",
+		"normal project mutations no longer need legacy-primary intervention",
+		"rollback remains available and rehearsed",
+	}) {
+		t.Fatalf("cutover graduation = %v, want documented criteria", pilot.CutoverGraduation)
+	}
+
+	assertFileContains(t, filepath.Join(repoRoot, "docs/operations/odin-os-cutover.md"), []string{
+		"pilot project selection rules",
+		"shadow graduation criteria",
+		"limited-action graduation criteria",
+		"cutover graduation criteria",
+		"legacy duties to retire in order",
+	})
+	assertFileContains(t, filepath.Join(repoRoot, "docs/operations/odin-os-rollback.md"), []string{
+		"rollback triggers",
+		"pause or roll back",
+		"pilot requires the legacy stack for routine completion",
+	})
+
+	runtimeRoot := t.TempDir()
+	store := openRuntimeStore(t, runtimeRoot)
+	defer store.Close()
+
+	project, err := store.CreateProject(ctx, sqlite.CreateProjectParams{
+		Key:           pilot.Key,
+		Name:          "Odin Core",
+		Scope:         "odin-core",
+		GitRoot:       filepath.Join(repoRoot, "."),
+		DefaultBranch: "main",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+
+	registry, _, err := projects.Register(filepath.Join(repoRoot, "config", "projects.yaml"))
+	if err != nil {
+		t.Fatalf("projects.Register() error = %v", err)
+	}
+
+	service := jobsvc.Service{
+		Store:    store,
+		Registry: registry,
+		Executors: map[string]contract.Executor{
+			"pilot_stub": pilotExecutor{},
+		},
+		ExecutorConfig: executorrouter.Config{
+			Version: 1,
+			Executors: []executorrouter.ExecutorConfig{
+				{
+					Key:      "pilot_stub",
+					Adapter:  "stub",
+					Class:    contract.ExecutorClassPlanBackedCLI,
+					Enabled:  true,
+					Priority: 1,
+				},
+			},
+			Routes: []executorrouter.RouteConfig{
+				{
+					Name: "odin-core-pilot",
+					Match: executorrouter.RouteMatch{
+						TaskKinds: []contract.TaskKind{contract.TaskKindGeneral},
+						Scopes:    []string{"odin-core"},
+					},
+					Preferred: []string{"pilot_stub"},
+				},
+			},
+		},
+		Transitions: projects.Service{Store: store},
+		Leases: leases.Manager{
+			Store:        store,
+			Git:          gitadapter.Adapter{},
+			WorktreeRoot: t.TempDir(),
+		},
+		Now: time.Now,
+	}
+
+	task, err := service.CreateTaskFromAct(ctx, scope.Resolution{
+		Kind:       scope.ScopeOdinCore,
+		ProjectKey: pilot.Key,
+	}, "Pilot cutover task")
+	if err != nil {
+		t.Fatalf("CreateTaskFromAct() error = %v", err)
+	}
+
+	if _, err := service.Transitions.SetTransitionState(ctx, projects.TransitionStateInput{
+		ProjectID:   project.ID,
+		Actor:       projects.TransitionControllerOdinOS,
+		TargetState: projects.TransitionStateCutover,
+		ChangedBy:   "operator",
+		Notes:       "pilot cohort owns normal mutation without legacy primary",
+	}); err != nil {
+		t.Fatalf("SetTransitionState(cutover) error = %v", err)
+	}
+
+	if err := service.ExecuteNextQueued(ctx); err != nil {
+		t.Fatalf("ExecuteNextQueued() error = %v", err)
+	}
+
+	gatedTask, err := store.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
+	}
+	if gatedTask.Status != "awaiting_approval" {
+		t.Fatalf("task status = %q, want awaiting_approval", gatedTask.Status)
+	}
+
+	approvals, err := projections.ListPendingApprovalViews(ctx, store.DB())
+	if err != nil {
+		t.Fatalf("ListPendingApprovalViews() error = %v", err)
+	}
+	if len(approvals) != 1 {
+		t.Fatalf("pending approvals = %d, want 1", len(approvals))
 	}
 }
 
@@ -145,6 +328,78 @@ func TestOperationalAutonomyRequiresApprovalForHighRiskMutation(t *testing.T) {
 	if len(approvals) != 1 {
 		t.Fatalf("pending approvals = %d, want 1", len(approvals))
 	}
+}
+
+func loadCutoverEvidence(t *testing.T, repoRoot string) authoredProjectsConfig {
+	t.Helper()
+
+	configPath := filepath.Join(repoRoot, "config", "projects.yaml")
+	content, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("ReadFile(%s) error = %v", configPath, err)
+	}
+
+	var cfg authoredProjectsConfig
+	if err := yaml.Unmarshal(content, &cfg); err != nil {
+		t.Fatalf("yaml.Unmarshal(projects.yaml) error = %v", err)
+	}
+	return cfg
+}
+
+func assertFileContains(t *testing.T, path string, required []string) {
+	t.Helper()
+
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile(%s) error = %v", path, err)
+	}
+	text := strings.ToLower(string(content))
+	for _, needle := range required {
+		if !strings.Contains(text, strings.ToLower(needle)) {
+			t.Fatalf("%s missing required text %q", path, needle)
+		}
+	}
+}
+
+type pilotExecutor struct{}
+
+func (pilotExecutor) Key() string { return "pilot_stub" }
+
+func (pilotExecutor) Class() contract.ExecutorClass { return contract.ExecutorClassPlanBackedCLI }
+
+func (pilotExecutor) Health(context.Context) (contract.HealthReport, error) {
+	return contract.HealthReport{Status: contract.HealthStatusHealthy, CheckedAt: time.Now().UTC()}, nil
+}
+
+func (pilotExecutor) Capabilities(context.Context) (contract.Capabilities, error) {
+	return contract.Capabilities{
+		ExecutorClass:        contract.ExecutorClassPlanBackedCLI,
+		SupportsResume:       true,
+		SupportsCancel:       true,
+		SupportsTools:        true,
+		SupportsHeadlessPlan: true,
+		TaskKinds:            []contract.TaskKind{contract.TaskKindGeneral},
+		Scopes:               []string{"odin-core"},
+	}, nil
+}
+
+func (pilotExecutor) RunTask(context.Context, contract.TaskSpec) (contract.ExecutionResult, error) {
+	return contract.ExecutionResult{
+		Status: "completed",
+		Output: "pilot cutover task completed",
+	}, nil
+}
+
+func (pilotExecutor) ResumeTask(context.Context, contract.TaskHandle, contract.ResumePacket) (contract.ExecutionResult, error) {
+	return contract.ExecutionResult{}, fmt.Errorf("resume not supported in test executor")
+}
+
+func (pilotExecutor) CancelTask(context.Context, contract.TaskHandle) error {
+	return fmt.Errorf("cancel not supported in test executor")
+}
+
+func (pilotExecutor) EstimateCost(context.Context, contract.TaskSpec) (contract.CostEstimate, error) {
+	return contract.CostEstimate{}, fmt.Errorf("estimate cost not supported in test executor")
 }
 
 func TestOperationalAutonomySchedulesAcrossMultipleProjects(t *testing.T) {

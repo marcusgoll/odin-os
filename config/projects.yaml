@@ -34,3 +34,27 @@ projects:
         allow_clean: false
         allow_force_push: false
         require_explicit_approval: true
+
+cutover:
+  pilot_projects:
+    - key: odin-core
+      runtime_owner: odin_os
+      legacy_primary_required: false
+      shadow_graduation:
+        - legacy and Odin readouts agree on project scope and ownership
+        - no mutation attempt requires an allowed action
+        - operator review confirms the project can stay read-only
+      limited_action_graduation:
+        - allowlisted isolated mutations complete successfully under Odin ownership
+        - limited-action work never depends on legacy primary completion
+        - operator review shows no unbounded approval or recovery drift
+      cutover_graduation:
+        - routine queued work completes under Odin OS ownership
+        - normal project mutations no longer need legacy-primary intervention
+        - rollback remains available and rehearsed
+      legacy_duties_to_retire_in_order:
+        - read-only observation and compare reporting
+        - limited-action handling for allowlisted low-risk mutations
+        - routine queue intake and run selection
+        - normal project mutation and merge authority
+        - legacy-primary fallback for routine completion
