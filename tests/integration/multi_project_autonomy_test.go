@@ -2,6 +2,7 @@ package integration_test
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -225,6 +226,8 @@ func TestOperationalAutonomyStatusJsonIncludesBlockedAndRunningWork(t *testing.T
 	}); err != nil {
 		t.Fatalf("SetProjectTransition() error = %v", err)
 	}
+
+	assertRuntimeReadinessCounts(t, store.DB())
 	if err := store.Close(); err != nil {
 		t.Fatalf("Close() error = %v", err)
 	}
@@ -250,6 +253,10 @@ func TestOperationalAutonomyStatusJsonIncludesBlockedAndRunningWork(t *testing.T
 	if len(report.ProjectTransitions) == 0 {
 		t.Fatalf("project_transitions empty, want ownership summary")
 	}
+
+	postStore := openRuntimeStore(t, runtimeRoot)
+	defer postStore.Close()
+	assertRuntimeReadinessCounts(t, postStore.DB())
 }
 
 func seededRuntimeWithProjects(t *testing.T, projectKeys ...string) string {
@@ -292,4 +299,23 @@ func seededRuntimeWithProjects(t *testing.T, projectKeys ...string) string {
 	}
 
 	return runtimeRoot
+}
+
+func assertRuntimeReadinessCounts(t *testing.T, db *sql.DB) {
+	t.Helper()
+
+	assertCount := func(query string, want int) {
+		row := db.QueryRowContext(context.Background(), query)
+		var count int
+		if err := row.Scan(&count); err != nil {
+			t.Fatalf("Scan(%s) error = %v", query, err)
+		}
+		if count != want {
+			t.Fatalf("%s count = %d, want %d", query, count, want)
+		}
+	}
+
+	assertCount("SELECT COUNT(*) FROM registry_versions", 0)
+	assertCount("SELECT COUNT(*) FROM executor_health", 0)
+	assertCount("SELECT COUNT(*) FROM projection_freshness", 0)
 }

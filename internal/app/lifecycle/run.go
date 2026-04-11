@@ -52,7 +52,12 @@ func Run(ctx context.Context, root string, args []string, stdin io.Reader, stdou
 		loadCtx = serveLoadContext(ctx)
 	}
 
-	app, err := bootstrap.Load(loadCtx, root, cfg.RuntimeRoot)
+	appLoader := bootstrap.Load
+	if len(args) > 0 && args[0] == "status" {
+		appLoader = bootstrap.LoadReadOnly
+	}
+
+	app, err := appLoader(loadCtx, root, cfg.RuntimeRoot)
 	if err != nil {
 		return err
 	}

@@ -16,12 +16,12 @@ type Service struct {
 }
 
 type Snapshot struct {
-	GeneratedAt                time.Time                     `json:"generated_at"`
-	ApprovalsWaiting           []ApprovalWaitingView         `json:"approvals_waiting"`
-	StalledRuns                []StalledRunView             `json:"stalled_runs"`
-	ActiveRuns                 []ActiveRunView              `json:"active_runs"`
-	ProjectTransitions         []ProjectTransitionView      `json:"project_transitions"`
-	ProjectTransitionOwnership ProjectTransitionOwnership    `json:"project_transition_ownership"`
+	GeneratedAt                time.Time                  `json:"generated_at"`
+	ApprovalsWaiting           []ApprovalWaitingView      `json:"approvals_waiting"`
+	StalledRuns                []StalledRunView           `json:"stalled_runs"`
+	ActiveRuns                 []ActiveRunView            `json:"active_runs"`
+	ProjectTransitions         []ProjectTransitionView    `json:"project_transitions"`
+	ProjectTransitionOwnership ProjectTransitionOwnership `json:"project_transition_ownership"`
 }
 
 type ApprovalWaitingView struct {
@@ -55,16 +55,16 @@ type StalledRunView struct {
 }
 
 type ProjectTransitionView struct {
-	ProjectID       int64  `json:"project_id"`
-	ProjectKey      string `json:"project_key"`
-	Name            string `json:"name"`
-	Scope           string `json:"scope"`
-	TaskCount       int    `json:"task_count"`
-	OpenTaskCount   int    `json:"open_task_count"`
+	ProjectID       int64   `json:"project_id"`
+	ProjectKey      string  `json:"project_key"`
+	Name            string  `json:"name"`
+	Scope           string  `json:"scope"`
+	TaskCount       int     `json:"task_count"`
+	OpenTaskCount   int     `json:"open_task_count"`
 	LastEventAt     *string `json:"last_event_at,omitempty"`
-	TransitionState string `json:"transition_state"`
-	Controller      string `json:"controller"`
-	LastReportType  string `json:"last_report_type"`
+	TransitionState string  `json:"transition_state"`
+	Controller      string  `json:"controller"`
+	LastReportType  string  `json:"last_report_type"`
 	LastReportAt    *string `json:"last_report_at,omitempty"`
 }
 
@@ -89,20 +89,29 @@ func (service Service) Snapshot(ctx context.Context) (Snapshot, error) {
 		stalledTimeout = 30 * time.Minute
 	}
 
-	approvals, err := projections.ListPendingApprovalViews(ctx, db)
+	tx, err := db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
 		return Snapshot{}, err
 	}
-	activeRuns, err := projections.ListActiveRunViews(ctx, db)
+	defer tx.Rollback()
+
+	approvals, err := projections.ListPendingApprovalViews(ctx, tx)
 	if err != nil {
 		return Snapshot{}, err
 	}
-	stalledRuns, err := projections.ListStalledRunViews(ctx, db, now.Add(-stalledTimeout))
+	activeRuns, err := projections.ListActiveRunViews(ctx, tx)
 	if err != nil {
 		return Snapshot{}, err
 	}
-	transitions, err := projections.ListProjectTransitionViews(ctx, db)
+	stalledRuns, err := projections.ListStalledRunViews(ctx, tx, now.Add(-stalledTimeout))
 	if err != nil {
+		return Snapshot{}, err
+	}
+	transitions, err := projections.ListProjectTransitionViews(ctx, tx)
+	if err != nil {
+		return Snapshot{}, err
+	}
+	if err := tx.Commit(); err != nil {
 		return Snapshot{}, err
 	}
 

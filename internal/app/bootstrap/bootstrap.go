@@ -27,6 +27,19 @@ type App struct {
 }
 
 func Load(ctx context.Context, repoRoot string, runtimeRoot string) (App, error) {
+	return load(ctx, repoRoot, runtimeRoot, loadOptions{initializeReadiness: true, acquireLock: true})
+}
+
+func LoadReadOnly(ctx context.Context, repoRoot string, runtimeRoot string) (App, error) {
+	return load(ctx, repoRoot, runtimeRoot, loadOptions{initializeReadiness: false, acquireLock: false})
+}
+
+type loadOptions struct {
+	initializeReadiness bool
+	acquireLock         bool
+}
+
+func load(ctx context.Context, repoRoot string, runtimeRoot string, options loadOptions) (App, error) {
 	if err := os.MkdirAll(filepath.Join(runtimeRoot, "data"), 0o755); err != nil {
 		return App{}, err
 	}
@@ -34,11 +47,15 @@ func Load(ctx context.Context, repoRoot string, runtimeRoot string) (App, error)
 		return App{}, err
 	}
 
-	lock, err := acquireBootstrapLock(ctx, runtimeRoot)
-	if err != nil {
-		return App{}, err
+	var lock *bootstrapLock
+	if options.acquireLock {
+		var err error
+		lock, err = acquireBootstrapLock(ctx, runtimeRoot)
+		if err != nil {
+			return App{}, err
+		}
+		defer lock.Release()
 	}
-	defer lock.Release()
 
 	store, err := sqlite.Open(filepath.Join(runtimeRoot, "data", "odin.db"))
 	if err != nil {
@@ -77,9 +94,11 @@ func Load(ctx context.Context, repoRoot string, runtimeRoot string) (App, error)
 	}
 	executors := executorrouter.DefaultCatalog()
 
-	if err := initializeReadinessState(ctx, store, filepath.Join(repoRoot, "registry"), registrySnapshot, executors); err != nil {
-		_ = store.Close()
-		return App{}, err
+	if options.initializeReadiness {
+		if err := initializeReadinessState(ctx, store, filepath.Join(repoRoot, "registry"), registrySnapshot, executors); err != nil {
+			_ = store.Close()
+			return App{}, err
+		}
 	}
 
 	return App{

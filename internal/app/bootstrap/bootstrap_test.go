@@ -3,10 +3,13 @@ package bootstrap
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"odin-os/internal/store/sqlite"
 )
 
 func TestLoadInitializesFreshRuntimeReadinessState(t *testing.T) {
@@ -26,6 +29,35 @@ func TestLoadInitializesFreshRuntimeReadinessState(t *testing.T) {
 	assertCountAtLeast(t, app.Store.DB().QueryRowContext(context.Background(), "SELECT COUNT(*) FROM registry_versions"), 1)
 	assertCountAtLeast(t, app.Store.DB().QueryRowContext(context.Background(), "SELECT COUNT(*) FROM executor_health"), 1)
 	assertCountAtLeast(t, app.Store.DB().QueryRowContext(context.Background(), "SELECT COUNT(*) FROM projection_freshness"), 1)
+}
+
+func TestLoadReadOnlyDoesNotInitializeReadinessState(t *testing.T) {
+	repoRoot := filepath.Clean(filepath.Join("..", "..", ".."))
+	runtimeRoot := t.TempDir()
+
+	if err := os.MkdirAll(filepath.Join(runtimeRoot, "data"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(data) error = %v", err)
+	}
+	store, err := sqlite.Open(filepath.Join(runtimeRoot, "data", "odin.db"))
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	if err := store.Migrate(context.Background()); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	app, err := LoadReadOnly(context.Background(), repoRoot, runtimeRoot)
+	if err != nil {
+		t.Fatalf("LoadReadOnly() error = %v", err)
+	}
+	defer app.Store.Close()
+
+	assertCountExactly(t, app.Store.DB().QueryRowContext(context.Background(), "SELECT COUNT(*) FROM registry_versions"), 0)
+	assertCountExactly(t, app.Store.DB().QueryRowContext(context.Background(), "SELECT COUNT(*) FROM executor_health"), 0)
+	assertCountExactly(t, app.Store.DB().QueryRowContext(context.Background(), "SELECT COUNT(*) FROM projection_freshness"), 0)
 }
 
 func TestLoadSerializesConcurrentBootstrapForFreshRuntime(t *testing.T) {
@@ -146,6 +178,18 @@ func assertCountAtLeast(t *testing.T, row rowScanner, minimum int) {
 	}
 	if count < minimum {
 		t.Fatalf("count = %d, want at least %d", count, minimum)
+	}
+}
+
+func assertCountExactly(t *testing.T, row rowScanner, want int) {
+	t.Helper()
+
+	var count int
+	if err := row.Scan(&count); err != nil {
+		t.Fatalf("Scan() error = %v", err)
+	}
+	if count != want {
+		t.Fatalf("count = %d, want %d", count, want)
 	}
 }
 
