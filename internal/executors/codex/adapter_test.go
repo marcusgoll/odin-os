@@ -107,3 +107,44 @@ func TestHeadlessRunTaskWritesArtifactMetadata(t *testing.T) {
 		t.Fatalf("artifact content = %q, want task id runtime-smoke", string(content))
 	}
 }
+
+func TestHeadlessRunTaskUsesRunScopedArtifactPath(t *testing.T) {
+	t.Setenv("ODIN_CODEX_DRIVER_MODE", "fixture")
+
+	worktreePath := t.TempDir()
+	executor := NewHeadless()
+	first, err := executor.RunTask(context.Background(), contract.TaskSpec{
+		ID:     "runtime-smoke",
+		Kind:   contract.TaskKindGeneral,
+		Scope:  "project",
+		Prompt: "say ready",
+		Metadata: map[string]string{
+			"project_key":   "alpha",
+			"worktree_path": worktreePath,
+			"run_id":        "11",
+			"run_attempt":   "1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("RunTask(first) error = %v", err)
+	}
+	second, err := executor.RunTask(context.Background(), contract.TaskSpec{
+		ID:     "runtime-smoke",
+		Kind:   contract.TaskKindGeneral,
+		Scope:  "project",
+		Prompt: "say ready again",
+		Metadata: map[string]string{
+			"project_key":   "alpha",
+			"worktree_path": worktreePath,
+			"run_id":        "12",
+			"run_attempt":   "2",
+		},
+	})
+	if err != nil {
+		t.Fatalf("RunTask(second) error = %v", err)
+	}
+
+	if first.Metadata["artifact_path"] == second.Metadata["artifact_path"] {
+		t.Fatalf("artifact paths = %q and %q, want distinct run-scoped paths", first.Metadata["artifact_path"], second.Metadata["artifact_path"])
+	}
+}

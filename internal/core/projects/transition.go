@@ -54,6 +54,11 @@ type TransitionDecision struct {
 	Reason  string
 }
 
+type ApprovalRequirement struct {
+	Required bool
+	Reason   string
+}
+
 func AuthorizeTransitionAction(request TransitionAuthRequest) TransitionDecision {
 	if request.ActionClass == ActionClassReadOnly {
 		return TransitionDecision{Allowed: true}
@@ -118,6 +123,28 @@ func ValidateTransitionChange(current RuntimeTransition, request TransitionChang
 	return TransitionDecision{Allowed: true}
 }
 
+func ApprovalRequiredForAction(manifest Manifest, actionClass ActionClass) ApprovalRequirement {
+	if actionClass == ActionClassGovernanceMutation && boolEnabled(manifest.Policy.ApprovalGates.RequireForGovernanceChanges) {
+		return ApprovalRequirement{
+			Required: true,
+			Reason:   fmt.Sprintf("project %q requires approval for governance changes", manifest.Key),
+		}
+	}
+	if actionClass == ActionClassDestructiveMutation && boolEnabled(manifest.Policy.ApprovalGates.RequireForDestructiveOperations) {
+		return ApprovalRequirement{
+			Required: true,
+			Reason:   fmt.Sprintf("project %q requires approval for destructive operations", manifest.Key),
+		}
+	}
+	if manifest.SystemProject && actionClass != ActionClassReadOnly && boolEnabled(manifest.Policy.ApprovalGates.RequireForSystemProjectChanges) {
+		return ApprovalRequirement{
+			Required: true,
+			Reason:   fmt.Sprintf("system project %q requires explicit approval for mutations", manifest.Key),
+		}
+	}
+	return ApprovalRequirement{}
+}
+
 func containsString(values []string, target string) bool {
 	for _, value := range values {
 		if value == target {
@@ -125,4 +152,8 @@ func containsString(values []string, target string) bool {
 		}
 	}
 	return false
+}
+
+func boolEnabled(value *bool) bool {
+	return value != nil && *value
 }

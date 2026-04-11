@@ -190,7 +190,7 @@ func ensureArtifactMetadata(spec contract.TaskSpec, payload []byte, metadata map
 		return nil
 	}
 
-	artifactPath, err := writeDriverArtifact(baseDir, spec.ID, payload)
+	artifactPath, err := writeDriverArtifact(baseDir, artifactFileKey(spec), payload)
 	if err != nil {
 		return err
 	}
@@ -238,17 +238,37 @@ func validateDriverPath(driverPath string) error {
 	return nil
 }
 
-func writeDriverArtifact(baseDir, taskID string, payload []byte) (string, error) {
+func writeDriverArtifact(baseDir, artifactKey string, payload []byte) (string, error) {
 	artifactDir := filepath.Join(baseDir, ".odin", "artifacts")
 	if err := os.MkdirAll(artifactDir, 0o755); err != nil {
 		return "", err
 	}
 
-	artifactPath := filepath.Join(artifactDir, sanitizeArtifactName(taskID)+".json")
+	artifactPath := filepath.Join(artifactDir, sanitizeArtifactName(artifactKey)+".json")
 	if err := os.WriteFile(artifactPath, payload, 0o644); err != nil {
 		return "", err
 	}
 	return artifactPath, nil
+}
+
+func artifactFileKey(spec contract.TaskSpec) string {
+	taskID := spec.ID
+	if taskID == "" {
+		taskID = "codex-headless-run"
+	}
+
+	runID := strings.TrimSpace(spec.Metadata["run_id"])
+	runAttempt := strings.TrimSpace(spec.Metadata["run_attempt"])
+	switch {
+	case runID != "" && runAttempt != "":
+		return fmt.Sprintf("%s-run-%s-try-%s", taskID, runID, runAttempt)
+	case runID != "":
+		return fmt.Sprintf("%s-run-%s", taskID, runID)
+	case runAttempt != "":
+		return fmt.Sprintf("%s-try-%s", taskID, runAttempt)
+	default:
+		return taskID
+	}
 }
 
 func sanitizeArtifactName(value string) string {

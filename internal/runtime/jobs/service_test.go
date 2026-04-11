@@ -12,6 +12,7 @@ import (
 	"odin-os/internal/core/projects"
 	"odin-os/internal/executors/contract"
 	"odin-os/internal/executors/router"
+	"odin-os/internal/runtime/projections"
 	"odin-os/internal/store/sqlite"
 	"odin-os/internal/vcs/leases"
 )
@@ -315,6 +316,211 @@ func TestRunNextPersistsTerminalStateAcrossTaskAndRun(t *testing.T) {
 	}
 }
 
+func TestRunNextRequestsApprovalForSystemProjectMutation(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openJobStore(t)
+	defer store.Close()
+
+	registry := writeRegistry(t)
+	service := Service{
+		Store:          store,
+		Registry:       registry,
+		Executors:      router.DefaultCatalog(),
+		ExecutorConfig: mustLoadExecutorConfig(t),
+		Transitions:    projects.Service{Store: store},
+		Leases: leases.Manager{
+			Store:        store,
+			Git:          &jobTestGit{},
+			WorktreeRoot: t.TempDir(),
+		},
+		Now: time.Now,
+	}
+
+	task, err := service.CreateTaskFromAct(ctx, scope.Resolution{
+		Kind:       scope.ScopeOdinCore,
+		ProjectKey: "odin-core",
+	}, "Mutate odin core")
+	if err != nil {
+		t.Fatalf("CreateTaskFromAct() error = %v", err)
+	}
+
+	project, err := store.GetProjectByKey(ctx, "odin-core")
+	if err != nil {
+		t.Fatalf("GetProjectByKey(odin-core) error = %v", err)
+	}
+	if _, err := service.Transitions.SetTransitionState(ctx, projects.TransitionStateInput{
+		ProjectID:   project.ID,
+		Actor:       projects.TransitionControllerOdinOS,
+		TargetState: projects.TransitionStateCutover,
+		ChangedBy:   "test",
+	}); err != nil {
+		t.Fatalf("SetTransitionState(cutover) error = %v", err)
+	}
+
+	if err := service.RunNext(ctx); err != nil {
+		t.Fatalf("RunNext() error = %v", err)
+	}
+
+	approvals, err := projections.ListPendingApprovalViews(ctx, store.DB())
+	if err != nil {
+		t.Fatalf("ListPendingApprovalViews() error = %v", err)
+	}
+	if len(approvals) != 1 {
+		t.Fatalf("pending approvals = %d, want 1", len(approvals))
+	}
+
+	gotTask, err := store.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
+	}
+	if gotTask.Status != "awaiting_approval" {
+		t.Fatalf("task status = %q, want awaiting_approval", gotTask.Status)
+	}
+}
+
+func TestRunNextPersistsLeasedWorktreeForMutableTask(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openJobStore(t)
+	defer store.Close()
+
+	registry := writeRegistry(t)
+	service := Service{
+		Store:    store,
+		Registry: registry,
+		Executors: map[string]contract.Executor{
+			"fake_headless": jobTestExecutor{
+				result: contract.ExecutionResult{
+					Status: "completed",
+					Output: "leased worktree complete",
+				},
+			},
+		},
+		ExecutorConfig: jobTestExecutorConfig(),
+		Transitions:    projects.Service{Store: store},
+		Leases: leases.Manager{
+			Store:        store,
+			Git:          &jobTestGit{},
+			WorktreeRoot: "~/odin-os-worktrees",
+		},
+		Now: time.Now,
+	}
+
+	task, err := service.CreateTaskFromAct(ctx, scope.Resolution{
+		Kind:       scope.ScopeProject,
+		ProjectKey: "alpha",
+	}, "Mutate alpha")
+	if err != nil {
+		t.Fatalf("CreateTaskFromAct() error = %v", err)
+	}
+
+	project, err := store.GetProjectByKey(ctx, "alpha")
+	if err != nil {
+		t.Fatalf("GetProjectByKey(alpha) error = %v", err)
+	}
+	if _, err := service.Transitions.SetTransitionState(ctx, projects.TransitionStateInput{
+		ProjectID:   project.ID,
+		Actor:       projects.TransitionControllerOdinOS,
+		TargetState: projects.TransitionStateCutover,
+		ChangedBy:   "test",
+	}); err != nil {
+		t.Fatalf("SetTransitionState(cutover) error = %v", err)
+	}
+
+	if err := service.RunNext(ctx); err != nil {
+		t.Fatalf("RunNext() error = %v", err)
+	}
+
+	row := store.DB().QueryRowContext(ctx, `
+		SELECT worktree_path
+		FROM worktree_leases
+		WHERE task_id = ?
+		ORDER BY id DESC
+		LIMIT 1
+	`, task.ID)
+	var worktreePath string
+	if err := row.Scan(&worktreePath); err != nil {
+		t.Fatalf("Scan(worktree_path) error = %v", err)
+	}
+	if worktreePath == "" {
+		t.Fatal("worktree path empty, want leased mutable worktree")
+	}
+	if worktreePath == project.GitRoot {
+		t.Fatalf("worktree path = %q, want isolated path outside repo root", worktreePath)
+	}
+	if strings.HasPrefix(worktreePath, "~") {
+		t.Fatalf("worktree path = %q, want expanded home path", worktreePath)
+	}
+}
+
+func TestRunNextPassesRunIdentityToExecutor(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openJobStore(t)
+	defer store.Close()
+
+	registry := writeRegistry(t)
+	var captured contract.TaskSpec
+	service := Service{
+		Store:    store,
+		Registry: registry,
+		Executors: map[string]contract.Executor{
+			"fake_headless": jobTestExecutor{
+				result: contract.ExecutionResult{
+					Status: "completed",
+					Output: "captured run identity",
+				},
+				onRun: func(spec contract.TaskSpec) {
+					captured = spec
+				},
+			},
+		},
+		ExecutorConfig: jobTestExecutorConfig(),
+		Transitions:    projects.Service{Store: store},
+		Leases: leases.Manager{
+			Store:        store,
+			Git:          &jobTestGit{},
+			WorktreeRoot: t.TempDir(),
+		},
+		Now: time.Now,
+	}
+
+	if _, err := service.CreateTaskFromAct(ctx, scope.Resolution{
+		Kind:       scope.ScopeProject,
+		ProjectKey: "alpha",
+	}, "Capture run identity"); err != nil {
+		t.Fatalf("CreateTaskFromAct() error = %v", err)
+	}
+
+	project, err := store.GetProjectByKey(ctx, "alpha")
+	if err != nil {
+		t.Fatalf("GetProjectByKey(alpha) error = %v", err)
+	}
+	if _, err := service.Transitions.SetTransitionState(ctx, projects.TransitionStateInput{
+		ProjectID:   project.ID,
+		Actor:       projects.TransitionControllerOdinOS,
+		TargetState: projects.TransitionStateCutover,
+		ChangedBy:   "test",
+	}); err != nil {
+		t.Fatalf("SetTransitionState(cutover) error = %v", err)
+	}
+
+	if err := service.RunNext(ctx); err != nil {
+		t.Fatalf("RunNext() error = %v", err)
+	}
+
+	if captured.Metadata["run_id"] == "" {
+		t.Fatal("run_id metadata empty, want run identity passed to executor")
+	}
+	if captured.Metadata["run_attempt"] == "" {
+		t.Fatal("run_attempt metadata empty, want attempt passed to executor")
+	}
+}
+
 type jobTestGit struct{}
 
 func (jobTestGit) BranchExists(context.Context, string, string) (bool, error) { return false, nil }
@@ -324,6 +530,7 @@ func (jobTestGit) RemoveWorktree(context.Context, string, string) error       { 
 
 type jobTestExecutor struct {
 	result contract.ExecutionResult
+	onRun  func(contract.TaskSpec)
 }
 
 func (jobTestExecutor) Key() string { return "fake_headless" }
@@ -349,7 +556,10 @@ func (jobTestExecutor) Capabilities(context.Context) (contract.Capabilities, err
 	}, nil
 }
 
-func (executor jobTestExecutor) RunTask(context.Context, contract.TaskSpec) (contract.ExecutionResult, error) {
+func (executor jobTestExecutor) RunTask(_ context.Context, spec contract.TaskSpec) (contract.ExecutionResult, error) {
+	if executor.onRun != nil {
+		executor.onRun(spec)
+	}
 	return executor.result, nil
 }
 

@@ -156,9 +156,6 @@ func (service Service) RunNext(ctx context.Context) error {
 		WorktreePath: project.GitRoot,
 	}
 
-	if err := authorizeMutation(manifest); err != nil {
-		return finishFailure(err)
-	}
 	if _, err := service.Transitions.AuthorizeAction(ctx, projects.ActionInput{
 		ProjectID:   project.ID,
 		Actor:       projects.TransitionControllerOdinOS,
@@ -166,6 +163,9 @@ func (service Service) RunNext(ctx context.Context) error {
 		ActionKey:   "run_task",
 	}); err != nil {
 		return finishFailure(err)
+	}
+	if requirement := projects.ApprovalRequiredForAction(manifest, projects.ActionClassIsolatedMutation); requirement.Required {
+		return service.requestApproval(ctx, task, run, requirement.Reason)
 	}
 
 	leaseManager := service.Leases
@@ -192,6 +192,8 @@ func (service Service) RunNext(ctx context.Context) error {
 
 	spec.Metadata["branch_name"] = assignment.BranchName
 	spec.Metadata["repo_root"] = assignment.RepoRoot
+	spec.Metadata["run_id"] = fmt.Sprintf("%d", run.ID)
+	spec.Metadata["run_attempt"] = fmt.Sprintf("%d", run.Attempt)
 	spec.Metadata["worktree_path"] = assignment.WorktreePath
 
 	executor := executors[decision.ExecutorKey]
@@ -340,13 +342,6 @@ func normalizeRouteName(targetKey string) string {
 	return targetKey
 }
 
-func authorizeMutation(manifest projects.Manifest) error {
-	if manifest.SystemProject && manifest.Policy.ApprovalGates.RequireForSystemProjectChanges != nil && *manifest.Policy.ApprovalGates.RequireForSystemProjectChanges {
-		return fmt.Errorf("system project %q requires explicit approval for mutations", manifest.Key)
-	}
-	return nil
-}
-
 func validateAssignment(manifest projects.Manifest, project sqlite.Project, assignment leases.Assignment) error {
 	if manifest.Policy.BranchRules.RequireWorktree != nil && *manifest.Policy.BranchRules.RequireWorktree && assignment.WorktreePath == project.GitRoot {
 		return fmt.Errorf("project %q requires an isolated worktree", manifest.Key)
@@ -368,6 +363,44 @@ func releaseAssignment(ctx context.Context, store *sqlite.Store, assignment leas
 		LeaseID: *assignment.LeaseID,
 		State:   "released",
 	})
+}
+
+func (service Service) requestApproval(ctx context.Context, task sqlite.Task, run sqlite.Run, reason string) error {
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		reason = "approval required"
+	}
+
+	if _, err := service.Store.RequestApproval(ctx, sqlite.RequestApprovalParams{
+		TaskID:      task.ID,
+		RunID:       &run.ID,
+		Status:      "pending",
+		RequestedBy: string(projects.TransitionControllerOdinOS),
+	}); err != nil {
+		return err
+	}
+
+	if _, err := service.Store.FinishRun(ctx, sqlite.FinishRunParams{
+		RunID:          run.ID,
+		Status:         "awaiting_approval",
+		Summary:        reason,
+		TerminalReason: reason,
+		ArtifactsJSON:  "[]",
+	}); err != nil {
+		return err
+	}
+
+	if _, err := service.Store.UpdateTaskStatus(ctx, sqlite.UpdateTaskStatusParams{
+		TaskID:         task.ID,
+		Status:         "awaiting_approval",
+		Summary:        reason,
+		TerminalReason: reason,
+		ArtifactsJSON:  "[]",
+	}); err != nil {
+		return err
+	}
+
+	return nil
 }
 
 func slugify(input string) string {
