@@ -277,6 +277,91 @@ func TestSchedulerContinuesAfterTaskFailure(t *testing.T) {
 	}
 }
 
+func TestSchedulerContinuesApprovalGatedWorkWithinProject(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openJobStore(t)
+	defer store.Close()
+
+	registry := writeRegistryWithSchedulers(
+		t,
+		projects.Scheduler{MaxConcurrentRuns: 1, MaxStartsPerCycle: 2, StalledRunRetryLimit: 2},
+		projects.Scheduler{MaxConcurrentRuns: 1, MaxStartsPerCycle: 1, StalledRunRetryLimit: 2},
+		projects.Scheduler{MaxConcurrentRuns: 1, MaxStartsPerCycle: 1, StalledRunRetryLimit: 2},
+	)
+	service := Service{
+		Store:          store,
+		Registry:       registry,
+		Runs:           runsvc.Service{Store: store},
+		Executors:      router.DefaultCatalog(),
+		ExecutorConfig: mustLoadExecutorConfig(t),
+		Transitions:    projects.Service{Store: store},
+		Leases: leases.Manager{
+			Store:        store,
+			Git:          &jobTestGit{},
+			WorktreeRoot: t.TempDir(),
+		},
+		Now: time.Now,
+	}
+
+	firstTask, err := service.CreateTaskFromAct(ctx, scope.Resolution{
+		Kind:       scope.ScopeOdinCore,
+		ProjectKey: "odin-core",
+	}, "Approval gated one")
+	if err != nil {
+		t.Fatalf("CreateTaskFromAct(first) error = %v", err)
+	}
+	secondTask, err := service.CreateTaskFromAct(ctx, scope.Resolution{
+		Kind:       scope.ScopeOdinCore,
+		ProjectKey: "odin-core",
+	}, "Approval gated two")
+	if err != nil {
+		t.Fatalf("CreateTaskFromAct(second) error = %v", err)
+	}
+
+	project, err := store.GetProjectByKey(ctx, "odin-core")
+	if err != nil {
+		t.Fatalf("GetProjectByKey(odin-core) error = %v", err)
+	}
+	if _, err := service.Transitions.SetTransitionState(ctx, projects.TransitionStateInput{
+		ProjectID:   project.ID,
+		Actor:       projects.TransitionControllerOdinOS,
+		TargetState: projects.TransitionStateCutover,
+		ChangedBy:   "test",
+	}); err != nil {
+		t.Fatalf("SetTransitionState(cutover) error = %v", err)
+	}
+
+	if err := service.ExecuteNextQueued(ctx); err != nil {
+		t.Fatalf("ExecuteNextQueued() error = %v", err)
+	}
+
+	gotFirst, err := store.GetTask(ctx, firstTask.ID)
+	if err != nil {
+		t.Fatalf("GetTask(first) error = %v", err)
+	}
+	if gotFirst.Status != "awaiting_approval" {
+		t.Fatalf("first task status = %q, want awaiting_approval", gotFirst.Status)
+	}
+
+	gotSecond, err := store.GetTask(ctx, secondTask.ID)
+	if err != nil {
+		t.Fatalf("GetTask(second) error = %v", err)
+	}
+	if gotSecond.Status != "awaiting_approval" {
+		t.Fatalf("second task status = %q, want awaiting_approval", gotSecond.Status)
+	}
+
+	approvals, err := projections.ListPendingApprovalViews(ctx, store.DB())
+	if err != nil {
+		t.Fatalf("ListPendingApprovalViews() error = %v", err)
+	}
+	if len(approvals) != 2 {
+		t.Fatalf("pending approvals = %d, want 2", len(approvals))
+	}
+}
+
 func TestSchedulerRespectsPerProjectConcurrencyAndBudget(t *testing.T) {
 	t.Parallel()
 
@@ -517,6 +602,155 @@ func TestSchedulerDemotesStalledRuns(t *testing.T) {
 	}
 	if gotRun.Status != "completed" {
 		t.Fatalf("latest run status = %q, want completed", gotRun.Status)
+	}
+}
+
+func TestSchedulerKeepsConcurrencyAfterRecoveringStalledRunWithLiveRun(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openJobStore(t)
+	defer store.Close()
+
+	now := time.Date(2026, 4, 9, 12, 0, 0, 0, time.UTC)
+	store.Now = func() time.Time { return now }
+
+	registry := writeRegistryWithSchedulers(
+		t,
+		projects.Scheduler{MaxConcurrentRuns: 1, MaxStartsPerCycle: 1, StalledRunRetryLimit: 2},
+		projects.Scheduler{MaxConcurrentRuns: 1, MaxStartsPerCycle: 2, StalledRunRetryLimit: 2},
+		projects.Scheduler{MaxConcurrentRuns: 1, MaxStartsPerCycle: 1, StalledRunRetryLimit: 2},
+	)
+	service := Service{
+		Store:    store,
+		Registry: registry,
+		Runs:     runsvc.Service{Store: store},
+		Executors: map[string]contract.Executor{
+			"fake_headless": jobTestExecutor{
+				result: contract.ExecutionResult{
+					Status: "completed",
+					Output: "queued task complete",
+				},
+			},
+		},
+		ExecutorConfig: jobTestExecutorConfig(),
+		Transitions:    projects.Service{Store: store},
+		Leases: leases.Manager{
+			Store:        store,
+			Git:          &jobTestGit{},
+			WorktreeRoot: t.TempDir(),
+		},
+		Now: func() time.Time { return now },
+	}
+
+	liveTask, err := service.CreateTaskFromAct(ctx, scope.Resolution{
+		Kind:       scope.ScopeProject,
+		ProjectKey: "alpha",
+	}, "Live alpha")
+	if err != nil {
+		t.Fatalf("CreateTaskFromAct(live) error = %v", err)
+	}
+	stalledTask, err := service.CreateTaskFromAct(ctx, scope.Resolution{
+		Kind:       scope.ScopeProject,
+		ProjectKey: "alpha",
+	}, "Stalled alpha")
+	if err != nil {
+		t.Fatalf("CreateTaskFromAct(stalled) error = %v", err)
+	}
+	queuedTask, err := service.CreateTaskFromAct(ctx, scope.Resolution{
+		Kind:       scope.ScopeProject,
+		ProjectKey: "alpha",
+	}, "Queued alpha")
+	if err != nil {
+		t.Fatalf("CreateTaskFromAct(queued) error = %v", err)
+	}
+
+	liveRun, err := service.Runs.Start(ctx, liveTask, "fake_headless")
+	if err != nil {
+		t.Fatalf("Runs.Start(live) error = %v", err)
+	}
+	stalledRun, err := service.Runs.Start(ctx, stalledTask, "fake_headless")
+	if err != nil {
+		t.Fatalf("Runs.Start(stalled) error = %v", err)
+	}
+
+	project, err := store.GetProjectByKey(ctx, "alpha")
+	if err != nil {
+		t.Fatalf("GetProjectByKey(alpha) error = %v", err)
+	}
+	lease, err := store.CreateWorktreeLease(ctx, sqlite.CreateWorktreeLeaseParams{
+		ProjectID:    project.ID,
+		TaskID:       stalledTask.ID,
+		RunID:        stalledRun.ID,
+		Mode:         "read_write",
+		BranchName:   "task/stalled-alpha",
+		WorktreePath: filepath.Join(t.TempDir(), "worktree"),
+		RepoRoot:     project.GitRoot,
+		State:        "active",
+	})
+	if err != nil {
+		t.Fatalf("CreateWorktreeLease() error = %v", err)
+	}
+
+	staleAt := now.Add(-2 * time.Hour)
+	if _, err := store.DB().ExecContext(ctx, `
+		UPDATE runs
+		SET started_at = ?
+		WHERE id = ?
+	`, staleAt.Format(time.RFC3339Nano), stalledRun.ID); err != nil {
+		t.Fatalf("force stale run error = %v", err)
+	}
+	if _, err := store.DB().ExecContext(ctx, `
+		UPDATE worktree_leases
+		SET heartbeat_at = ?, updated_at = ?
+		WHERE id = ?
+	`, staleAt.Format(time.RFC3339Nano), staleAt.Format(time.RFC3339Nano), lease.ID); err != nil {
+		t.Fatalf("force stale lease error = %v", err)
+	}
+
+	if _, err := service.Transitions.SetTransitionState(ctx, projects.TransitionStateInput{
+		ProjectID:   project.ID,
+		Actor:       projects.TransitionControllerOdinOS,
+		TargetState: projects.TransitionStateCutover,
+		ChangedBy:   "test",
+	}); err != nil {
+		t.Fatalf("SetTransitionState(cutover) error = %v", err)
+	}
+
+	if err := service.ExecuteNextQueued(ctx); err != nil {
+		t.Fatalf("ExecuteNextQueued() error = %v", err)
+	}
+
+	gotLiveRun, err := store.GetRun(ctx, liveRun.ID)
+	if err != nil {
+		t.Fatalf("GetRun(live) error = %v", err)
+	}
+	if gotLiveRun.Status != "running" {
+		t.Fatalf("live run status = %q, want running", gotLiveRun.Status)
+	}
+
+	gotStalled, err := store.GetTask(ctx, stalledTask.ID)
+	if err != nil {
+		t.Fatalf("GetTask(stalled) error = %v", err)
+	}
+	if gotStalled.Status != "queued" {
+		t.Fatalf("stalled task status = %q, want queued", gotStalled.Status)
+	}
+
+	gotQueued, err := store.GetTask(ctx, queuedTask.ID)
+	if err != nil {
+		t.Fatalf("GetTask(queued) error = %v", err)
+	}
+	if gotQueued.Status != "queued" {
+		t.Fatalf("queued task status = %q, want queued", gotQueued.Status)
+	}
+
+	gotRun, err := latestRunForTask(ctx, store, stalledTask.ID)
+	if err != nil {
+		t.Fatalf("latestRunForTask(stalled) error = %v", err)
+	}
+	if gotRun.Status != "interrupted" {
+		t.Fatalf("stalled run status = %q, want interrupted", gotRun.Status)
 	}
 }
 
@@ -1206,6 +1440,17 @@ func openJobStore(t *testing.T) *sqlite.Store {
 func writeRegistry(t *testing.T) projects.Registry {
 	t.Helper()
 
+	return writeRegistryWithSchedulers(
+		t,
+		projects.Scheduler{MaxConcurrentRuns: 1, MaxStartsPerCycle: 1, StalledRunRetryLimit: 2},
+		projects.Scheduler{MaxConcurrentRuns: 1, MaxStartsPerCycle: 1, StalledRunRetryLimit: 2},
+		projects.Scheduler{MaxConcurrentRuns: 1, MaxStartsPerCycle: 1, StalledRunRetryLimit: 2},
+	)
+}
+
+func writeRegistryWithSchedulers(t *testing.T, odinCoreScheduler, alphaScheduler, betaScheduler projects.Scheduler) projects.Registry {
+	t.Helper()
+
 	root := t.TempDir()
 	configPath := filepath.Join(root, "projects.yaml")
 
@@ -1216,7 +1461,7 @@ func writeRegistry(t *testing.T) projects.Registry {
 		}
 	}
 
-	if err := os.WriteFile(configPath, []byte(`
+	manifest := fmt.Sprintf(`
 version: 1
 projects:
   - key: odin-core
@@ -1226,9 +1471,9 @@ projects:
     git_root: odin-core
     default_branch: main
     scheduler:
-      max_concurrent_runs: 1
-      max_starts_per_cycle: 1
-      stalled_run_retry_limit: 2
+      max_concurrent_runs: %d
+      max_starts_per_cycle: %d
+      stalled_run_retry_limit: %d
     policy:
       allowed_commands: [status]
       branch_rules:
@@ -1254,9 +1499,9 @@ projects:
     git_root: alpha
     default_branch: main
     scheduler:
-      max_concurrent_runs: 1
-      max_starts_per_cycle: 1
-      stalled_run_retry_limit: 2
+      max_concurrent_runs: %d
+      max_starts_per_cycle: %d
+      stalled_run_retry_limit: %d
     github:
       repo: acme/alpha
     policy:
@@ -1284,9 +1529,9 @@ projects:
     git_root: beta
     default_branch: main
     scheduler:
-      max_concurrent_runs: 1
-      max_starts_per_cycle: 1
-      stalled_run_retry_limit: 2
+      max_concurrent_runs: %d
+      max_starts_per_cycle: %d
+      stalled_run_retry_limit: %d
     github:
       repo: acme/beta
     policy:
@@ -1308,7 +1553,11 @@ projects:
         allow_clean: false
         allow_force_push: false
         require_explicit_approval: true
-`), 0o644); err != nil {
+`, odinCoreScheduler.MaxConcurrentRuns, odinCoreScheduler.MaxStartsPerCycle, odinCoreScheduler.StalledRunRetryLimit,
+		alphaScheduler.MaxConcurrentRuns, alphaScheduler.MaxStartsPerCycle, alphaScheduler.StalledRunRetryLimit,
+		betaScheduler.MaxConcurrentRuns, betaScheduler.MaxStartsPerCycle, betaScheduler.StalledRunRetryLimit)
+
+	if err := os.WriteFile(configPath, []byte(manifest), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
 

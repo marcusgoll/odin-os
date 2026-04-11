@@ -373,6 +373,93 @@ func (store *Store) FinishRun(ctx context.Context, params FinishRunParams) (Run,
 	return run, err
 }
 
+func (store *Store) ResolveStalledRun(ctx context.Context, params ResolveStalledRunParams) error {
+	now := store.now()
+	artifactsJSON := normalizeArtifactsJSON(params.ArtifactsJSON)
+	terminalReason := strings.TrimSpace(params.TerminalReason)
+	if terminalReason == "" {
+		terminalReason = "interrupted"
+	}
+	taskStatus := strings.TrimSpace(params.TaskStatus)
+	if taskStatus == "" {
+		taskStatus = "queued"
+	}
+
+	return store.withTx(ctx, func(tx *sql.Tx) error {
+		currentRun, currentTask, err := store.getRunWithTaskTx(ctx, tx, params.RunID)
+		if err != nil {
+			return err
+		}
+		if currentTask.ID != params.TaskID {
+			return fmt.Errorf("run %d does not belong to task %d", params.RunID, params.TaskID)
+		}
+		previousTaskStatus := currentTask.Status
+
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE runs
+			SET status = ?, finished_at = ?, summary = ?, terminal_reason = ?, artifacts_json = ?
+			WHERE id = ?
+		`, "interrupted", formatTime(now), params.Summary, terminalReason, artifactsJSON, params.RunID); err != nil {
+			return err
+		}
+
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE tasks
+			SET status = ?, summary = ?, terminal_reason = ?, artifacts_json = ?, current_run_id = NULL, updated_at = ?
+			WHERE id = ?
+		`, taskStatus, params.Summary, terminalReason, artifactsJSON, formatTime(now), params.TaskID); err != nil {
+			return err
+		}
+
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE worktree_leases
+			SET state = 'released', released_at = ?, updated_at = ?
+			WHERE task_id = ?
+			  AND run_id = ?
+			  AND state = 'active'
+		`, formatTime(now), formatTime(now), params.TaskID, params.RunID); err != nil {
+			return err
+		}
+
+		projectID := currentTask.ProjectID
+		if err := appendEventTx(ctx, tx, eventInsert{
+			StreamType: runtimeevents.StreamRun,
+			StreamID:   currentRun.ID,
+			EventType:  runtimeevents.EventRunFinished,
+			Scope:      currentTask.Scope,
+			ProjectID:  &projectID,
+			TaskID:     &currentTask.ID,
+			RunID:      &currentRun.ID,
+			Payload: runtimeevents.RunFinishedPayload{
+				Status:         "interrupted",
+				Summary:        params.Summary,
+				TerminalReason: terminalReason,
+				ArtifactsJSON:  artifactsJSON,
+			},
+			OccurredAt: now,
+		}); err != nil {
+			return err
+		}
+
+		return appendEventTx(ctx, tx, eventInsert{
+			StreamType: runtimeevents.StreamTask,
+			StreamID:   currentTask.ID,
+			EventType:  runtimeevents.EventTaskStatusChanged,
+			Scope:      currentTask.Scope,
+			ProjectID:  &projectID,
+			TaskID:     &currentTask.ID,
+			Payload: runtimeevents.TaskStatusChangedPayload{
+				PreviousStatus: previousTaskStatus,
+				Status:         taskStatus,
+				Summary:        params.Summary,
+				TerminalReason: terminalReason,
+				ArtifactsJSON:  artifactsJSON,
+			},
+			OccurredAt: now,
+		})
+	})
+}
+
 func (store *Store) AwaitApproval(ctx context.Context, params AwaitApprovalParams) (Approval, Run, Task, error) {
 	now := store.now()
 	var approval Approval

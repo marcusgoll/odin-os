@@ -93,21 +93,22 @@ func (service Service) RunNext(ctx context.Context) error {
 		return err
 	}
 
-	return service.runQueuedTask(ctx, task)
+	_, err = service.runQueuedTask(ctx, task)
+	return err
 }
 
-func (service Service) runQueuedTask(ctx context.Context, task sqlite.Task) error {
+func (service Service) runQueuedTask(ctx context.Context, task sqlite.Task) (bool, error) {
 	if service.Store == nil {
-		return fmt.Errorf("job store is required")
+		return false, fmt.Errorf("job store is required")
 	}
 
 	project, err := service.Store.GetProject(ctx, task.ProjectID)
 	if err != nil {
-		return err
+		return false, err
 	}
 	manifest, ok := service.Registry.Lookup(project.Key)
 	if !ok {
-		return service.failTaskWithoutRun(ctx, task.ID, fmt.Errorf("unknown manifest for project %q", project.Key))
+		return false, service.failTaskWithoutRun(ctx, task.ID, fmt.Errorf("unknown manifest for project %q", project.Key))
 	}
 
 	executors := service.Executors
@@ -120,7 +121,7 @@ func (service Service) runQueuedTask(ctx context.Context, task sqlite.Task) erro
 
 	config, err := service.executionConfig(ctx)
 	if err != nil {
-		return err
+		return false, err
 	}
 	selector := executorrouter.Selector{
 		Config:    config,
@@ -143,14 +144,14 @@ func (service Service) runQueuedTask(ctx context.Context, task sqlite.Task) erro
 
 	decision, err := selector.Select(ctx, spec)
 	if err != nil {
-		return service.failTaskWithoutRun(ctx, task.ID, err)
+		return false, service.failTaskWithoutRun(ctx, task.ID, err)
 	}
 
 	runsService := service.runsService()
 
 	run, err := runsService.Start(ctx, task, decision.ExecutorKey)
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	finishFailure := func(cause error) error {
@@ -172,13 +173,13 @@ func (service Service) runQueuedTask(ctx context.Context, task sqlite.Task) erro
 		ActionClass: projects.ActionClassIsolatedMutation,
 		ActionKey:   "run_task",
 	}); err != nil {
-		return finishFailure(err)
+		return false, finishFailure(err)
 	}
 	if requirement := projects.ApprovalRequiredForAction(manifest, projects.ActionClassIsolatedMutation); requirement.Required {
 		if err := service.requestApproval(ctx, task, run, requirement.Reason); err != nil {
-			return finishFailure(err)
+			return false, finishFailure(err)
 		}
-		return nil
+		return false, nil
 	}
 
 	leaseManager := service.Leases
@@ -196,10 +197,10 @@ func (service Service) runQueuedTask(ctx context.Context, task sqlite.Task) erro
 		Try:           run.Attempt,
 	})
 	if err != nil {
-		return finishFailure(err)
+		return false, finishFailure(err)
 	}
 	if err := validateAssignment(manifest, project, assignment); err != nil {
-		return finishFailure(err)
+		return false, finishFailure(err)
 	}
 	defer releaseAssignment(ctx, service.Store, assignment)
 
@@ -212,9 +213,12 @@ func (service Service) runQueuedTask(ctx context.Context, task sqlite.Task) erro
 	executor := executors[decision.ExecutorKey]
 	result, err := executor.RunTask(ctx, spec)
 	if err != nil {
-		return finishFailure(err)
+		return false, finishFailure(err)
 	}
-	return runsService.Complete(ctx, run.ID, result)
+	if err := runsService.Complete(ctx, run.ID, result); err != nil {
+		return false, err
+	}
+	return false, nil
 }
 
 func (service Service) runSchedulerCycle(ctx context.Context) error {
@@ -223,8 +227,7 @@ func (service Service) runSchedulerCycle(ctx context.Context) error {
 	}
 
 	now := service.now()
-	recoveredActiveCounts, err := service.demoteStalledRuns(ctx, now.Add(-service.stalledRunTimeout()))
-	if err != nil {
+	if err := service.demoteStalledRuns(ctx, now.Add(-service.stalledRunTimeout())); err != nil {
 		return err
 	}
 
@@ -240,15 +243,6 @@ func (service Service) runSchedulerCycle(ctx context.Context) error {
 	activeByProject := make(map[string]int, len(activeRuns))
 	for _, view := range activeRuns {
 		activeByProject[view.ProjectKey]++
-	}
-	for projectKey, count := range recoveredActiveCounts {
-		if count <= 0 {
-			continue
-		}
-		activeByProject[projectKey] -= count
-		if activeByProject[projectKey] < 0 {
-			activeByProject[projectKey] = 0
-		}
 	}
 
 	projectQueues := make(map[string][]int64)
@@ -277,8 +271,13 @@ func (service Service) runSchedulerCycle(ctx context.Context) error {
 				cycleErrors = append(cycleErrors, fmt.Errorf("project %s task %d lookup: %w", projectKey, taskIDs[0], err))
 				continue
 			}
-			if err := service.runQueuedTask(ctx, task); err != nil {
+			occupied, err := service.runQueuedTask(ctx, task)
+			if err != nil {
 				cycleErrors = append(cycleErrors, fmt.Errorf("project %s task %d: %w", projectKey, task.ID, err))
+				continue
+			}
+			if occupied {
+				activeByProject[projectKey]++
 			}
 			continue
 		}
@@ -295,32 +294,34 @@ func (service Service) runSchedulerCycle(ctx context.Context) error {
 				cycleErrors = append(cycleErrors, fmt.Errorf("project %s task %d lookup: %w", projectKey, taskID, err))
 				continue
 			}
-			if err := service.runQueuedTask(ctx, task); err != nil {
+			occupied, err := service.runQueuedTask(ctx, task)
+			if err != nil {
 				cycleErrors = append(cycleErrors, fmt.Errorf("project %s task %d: %w", projectKey, task.ID, err))
+				continue
 			}
 			startedThisCycle++
-			activeByProject[projectKey]++
+			if occupied {
+				activeByProject[projectKey]++
+			}
 		}
 	}
 
 	return errors.Join(cycleErrors...)
 }
 
-func (service Service) demoteStalledRuns(ctx context.Context, cutoff time.Time) (map[string]int, error) {
+func (service Service) demoteStalledRuns(ctx context.Context, cutoff time.Time) error {
 	views, err := projections.ListStalledRunViews(ctx, service.Store.DB(), cutoff)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
-	recoveredActiveCounts := make(map[string]int)
 	for _, view := range views {
 		if err := service.resolveStalledRun(ctx, view); err != nil {
-			return nil, err
+			return err
 		}
-		recoveredActiveCounts[view.ProjectKey]++
 	}
 
-	return recoveredActiveCounts, nil
+	return nil
 }
 
 func (service Service) resolveStalledRun(ctx context.Context, view projections.StalledRunView) error {
@@ -333,39 +334,23 @@ func (service Service) resolveStalledRun(ctx context.Context, view projections.S
 	reason := "interrupted by stalled run recovery"
 	if scheduler.StalledRunRetryLimit > 0 && view.Attempt >= scheduler.StalledRunRetryLimit {
 		reason = "stalled run retry budget exhausted"
-		if _, err := service.Store.FinishRun(ctx, sqlite.FinishRunParams{
+		if err := service.Store.ResolveStalledRun(ctx, sqlite.ResolveStalledRunParams{
 			RunID:          view.RunID,
-			Status:         "interrupted",
-			Summary:        reason,
-			TerminalReason: reason,
-			ArtifactsJSON:  "[]",
-		}); err != nil {
-			return err
-		}
-		if _, err := service.Store.UpdateTaskStatus(ctx, sqlite.UpdateTaskStatusParams{
 			TaskID:         view.TaskID,
-			Status:         "dead_letter",
+			TaskStatus:     "dead_letter",
 			Summary:        reason,
 			TerminalReason: reason,
 			ArtifactsJSON:  "[]",
 		}); err != nil {
 			return err
 		}
-		return service.releaseStalledLease(ctx, view.TaskID, view.RunID)
+		return nil
 	}
 
-	if _, err := service.Store.FinishRun(ctx, sqlite.FinishRunParams{
+	if err := service.Store.ResolveStalledRun(ctx, sqlite.ResolveStalledRunParams{
 		RunID:          view.RunID,
-		Status:         "interrupted",
-		Summary:        reason,
-		TerminalReason: reason,
-		ArtifactsJSON:  "[]",
-	}); err != nil {
-		return err
-	}
-	if _, err := service.Store.UpdateTaskStatus(ctx, sqlite.UpdateTaskStatusParams{
 		TaskID:         view.TaskID,
-		Status:         "queued",
+		TaskStatus:     "queued",
 		Summary:        "",
 		TerminalReason: "",
 		ArtifactsJSON:  "[]",
@@ -373,23 +358,7 @@ func (service Service) resolveStalledRun(ctx context.Context, view projections.S
 		return err
 	}
 
-	return service.releaseStalledLease(ctx, view.TaskID, view.RunID)
-}
-
-func (service Service) releaseStalledLease(ctx context.Context, taskID int64, runID int64) error {
-	lease, err := service.Store.GetActiveWorktreeLeaseByTaskRun(ctx, taskID, runID)
-	if err != nil {
-		if err == sql.ErrNoRows {
-			return nil
-		}
-		return err
-	}
-
-	_, err = service.Store.ReleaseWorktreeLease(ctx, sqlite.ReleaseWorktreeLeaseParams{
-		LeaseID: lease.ID,
-		State:   "released",
-	})
-	return err
+	return nil
 }
 
 func schedulerBudget(manifest projects.Manifest) budgets.SchedulerBudget {
