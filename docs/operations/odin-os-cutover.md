@@ -19,7 +19,7 @@ Select pilot projects with the smallest surface area that still exercises the fu
 - Pick one pilot cohort at a time and keep it narrow until the graduation criteria are met.
 - Prefer the first project that can prove the whole path, not the first project that looks easy.
 
-For the current repo, the first cutover pilot is `odin-core`.
+For the current repo, the first cutover pilot is `pbs`, with `odin-orchestrator` as comparison context.
 
 ## Shadow graduation criteria
 
@@ -68,4 +68,3 @@ Do not retire the next duty until the current one has proven stable for the pilo
 - `config/projects.yaml` lists the pilot cohort and runtime ownership expectations.
 - `docs/operations/odin-os-rollback.md` records the rollback triggers and recovery sequence.
 - `docs/operations/cutover-readiness.md` stays as the broader operational readiness checklist.
-

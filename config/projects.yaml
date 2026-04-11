@@ -37,8 +37,10 @@ projects:
 
 cutover:
   pilot_projects:
-    - key: odin-core
+    - key: pbs
       runtime_owner: odin_os
+      primary_controller: odin_os
+      comparison_context: odin-orchestrator
       legacy_primary_required: false
       shadow_graduation:
         - legacy and Odin readouts agree on project scope and ownership
