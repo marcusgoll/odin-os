@@ -1,27 +1,28 @@
 package integration_test
 
 import (
+	"context"
 	"encoding/json"
-	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
+	"time"
 
+	"odin-os/internal/app/bootstrap"
+	"odin-os/internal/cli/scope"
+	"odin-os/internal/core/projects"
+	jobsvc "odin-os/internal/runtime/jobs"
+	"odin-os/internal/runtime/projections"
 	"odin-os/internal/store/sqlite"
+	gitadapter "odin-os/internal/vcs/git"
+	"odin-os/internal/vcs/leases"
+	worktreemgr "odin-os/internal/vcs/worktrees"
 )
 
 type doctorReport struct {
 	Status string            `json:"status"`
 	Checks []json.RawMessage `json:"checks"`
-}
-
-type taskRunResponse struct {
-	Status string `json:"status"`
-}
-
-type statusResponse struct {
-	Health   string            `json:"health"`
-	Projects []json.RawMessage `json:"projects"`
 }
 
 func TestOperationalAutonomyFreshRuntimeBecomesHealthy(t *testing.T) {
@@ -47,46 +48,73 @@ func TestOperationalAutonomyFreshRuntimeBecomesHealthy(t *testing.T) {
 }
 
 func TestOperationalAutonomyRequiresApprovalForHighRiskMutation(t *testing.T) {
+	ctx := context.Background()
 	repoRoot := projectRoot(t)
-	odinBinary := buildOdinBinary(t, repoRoot)
-	runtimeRoot := seededRuntime(t)
+	runtimeRoot := t.TempDir()
 
-	output, err := runOdinCommand(t, repoRoot, odinBinary, runtimeRoot, nil, "", "task", "run", "--project", "odin-core", "--action", "repo_rewrite")
+	app, err := bootstrap.Load(ctx, repoRoot, runtimeRoot)
 	if err != nil {
-		t.Fatalf("runOdinCommand(task run) error = %v\n%s", err, output)
+		t.Fatalf("bootstrap.Load() error = %v", err)
+	}
+	defer app.Store.Close()
+
+	service := jobsvc.Service{
+		Store:          app.Store,
+		Registry:       app.Registry,
+		Executors:      app.Executors,
+		ExecutorConfig: app.ExecutorConfig,
+		Transitions:    projects.Service{Store: app.Store},
+		Leases: leases.Manager{
+			Store:        app.Store,
+			Git:          gitadapter.Adapter{},
+			WorktreeRoot: worktreemgr.DefaultRoot(),
+		},
+		Now: time.Now,
 	}
 
-	var response taskRunResponse
-	if err := json.Unmarshal([]byte(output), &response); err != nil {
-		t.Fatalf("task run output = %q, want valid JSON: %v", output, err)
+	if _, err := service.CreateTaskFromAct(ctx, scope.Resolution{
+		Kind:       scope.ScopeOdinCore,
+		ProjectKey: "odin-core",
+	}, "repo rewrite"); err != nil {
+		t.Fatalf("CreateTaskFromAct() error = %v", err)
 	}
-	if response.Status != "awaiting_approval" {
-		t.Fatalf("status = %q, want awaiting_approval", response.Status)
+
+	if err := service.ExecuteNextQueued(ctx); err != nil {
+		t.Fatalf("ExecuteNextQueued() error = %v", err)
+	}
+
+	approvals, err := projections.ListPendingApprovalViews(ctx, app.Store.DB())
+	if err != nil {
+		t.Fatalf("ListPendingApprovalViews() error = %v", err)
+	}
+	if len(approvals) != 1 {
+		t.Fatalf("pending approvals = %d, want 1", len(approvals))
 	}
 }
 
 func TestOperationalAutonomySchedulesAcrossMultipleProjects(t *testing.T) {
-	repoRoot := projectRoot(t)
-	odinBinary := buildOdinBinary(t, repoRoot)
+	ctx := context.Background()
 	runtimeRoot := seededRuntimeWithProjects(t, "odin-core", "pbs", "odin-orchestrator")
+	store := openRuntimeStore(t, runtimeRoot)
+	defer store.Close()
 
-	output, err := runOdinCommand(t, repoRoot, odinBinary, runtimeRoot, nil, "", "status", "--json")
+	views, err := projections.ListProjectPortfolioViews(ctx, store.DB())
 	if err != nil {
-		t.Fatalf("runOdinCommand(status --json) error = %v\n%s", err, output)
+		t.Fatalf("ListProjectPortfolioViews() error = %v", err)
+	}
+	if len(views) < 3 {
+		t.Fatalf("portfolio len = %d, want at least 3", len(views))
 	}
 
-	var response statusResponse
-	if err := json.Unmarshal([]byte(output), &response); err != nil {
-		t.Fatalf("status output = %q, want valid JSON: %v", output, err)
+	gotKeys := make([]string, 0, len(views))
+	for _, view := range views {
+		gotKeys = append(gotKeys, view.ProjectKey)
 	}
-	if len(response.Projects) < 3 {
-		t.Fatalf("projects = %d, want at least 3", len(response.Projects))
+	for _, want := range []string{"odin-core", "pbs", "odin-orchestrator"} {
+		if !slices.Contains(gotKeys, want) {
+			t.Fatalf("portfolio keys = %v, want %q present", gotKeys, want)
+		}
 	}
-}
-
-func seededRuntime(t *testing.T) string {
-	t.Helper()
-	return t.TempDir()
 }
 
 func seededRuntimeWithProjects(t *testing.T, projectKeys ...string) string {
@@ -105,15 +133,26 @@ func seededRuntimeWithProjects(t *testing.T, projectKeys ...string) string {
 		if err := os.MkdirAll(repoDir, 0o755); err != nil {
 			t.Fatalf("MkdirAll(%s) error = %v", repoDir, err)
 		}
-		if _, err := store.CreateProject(t.Context(), sqlite.CreateProjectParams{
+		project, err := store.CreateProject(context.Background(), sqlite.CreateProjectParams{
 			Key:           key,
 			Name:          key,
 			Scope:         scope,
 			GitRoot:       repoDir,
 			DefaultBranch: "main",
-			ManifestPath:  fmt.Sprintf("seed/%s.yaml", key),
-		}); err != nil {
+			ManifestPath:  filepath.Join("seed", key+".yaml"),
+		})
+		if err != nil {
 			t.Fatalf("CreateProject(%s) error = %v", key, err)
+		}
+		if _, err := store.CreateTask(context.Background(), sqlite.CreateTaskParams{
+			ProjectID:   project.ID,
+			Key:         key + "-queued-task",
+			Title:       key + " queued task",
+			Status:      "queued",
+			Scope:       scope,
+			RequestedBy: "operator",
+		}); err != nil {
+			t.Fatalf("CreateTask(%s) error = %v", key, err)
 		}
 	}
 
