@@ -4,6 +4,7 @@ type Registry struct {
 	projects      []Manifest
 	projectsByKey map[string]Manifest
 	systemProject *Manifest
+	cutover       CutoverConfig
 }
 
 func Register(path string) (Registry, []Diagnostic, error) {
@@ -20,6 +21,7 @@ func Register(path string) (Registry, []Diagnostic, error) {
 	registry := Registry{
 		projects:      make([]Manifest, len(cfg.Projects)),
 		projectsByKey: make(map[string]Manifest, len(cfg.Projects)),
+		cutover:       cfg.Cutover,
 	}
 	copy(registry.projects, cfg.Projects)
 
@@ -50,4 +52,8 @@ func (registry Registry) Projects() []Manifest {
 	projects := make([]Manifest, len(registry.projects))
 	copy(projects, registry.projects)
 	return projects
+}
+
+func (registry Registry) CutoverPilotProject(key string) (CutoverPilotProject, bool) {
+	return registry.cutover.PilotProject(key)
 }

@@ -12,7 +12,6 @@ import (
 	"testing"
 	"time"
 
-	"gopkg.in/yaml.v3"
 	"odin-os/internal/app/bootstrap"
 	"odin-os/internal/cli/scope"
 	"odin-os/internal/core/projects"
@@ -36,26 +35,6 @@ type statusReport struct {
 	StalledRuns        []json.RawMessage `json:"stalled_runs"`
 	ActiveRuns         []json.RawMessage `json:"active_runs"`
 	ProjectTransitions []json.RawMessage `json:"project_transitions"`
-}
-
-type authoredProjectsConfig struct {
-	Cutover cutoverMetadata `yaml:"cutover"`
-}
-
-type cutoverMetadata struct {
-	PilotProjects []pilotProjectMetadata `yaml:"pilot_projects"`
-}
-
-type pilotProjectMetadata struct {
-	Key                       string   `yaml:"key"`
-	RuntimeOwner              string   `yaml:"runtime_owner"`
-	PrimaryController         string   `yaml:"primary_controller"`
-	ComparisonContext         string   `yaml:"comparison_context"`
-	LegacyPrimaryRequired     bool     `yaml:"legacy_primary_required"`
-	ShadowGraduation          []string `yaml:"shadow_graduation"`
-	LimitedActionGraduation   []string `yaml:"limited_action_graduation"`
-	CutoverGraduation         []string `yaml:"cutover_graduation"`
-	LegacyDutiesToRetireOrder []string `yaml:"legacy_duties_to_retire_in_order"`
 }
 
 func TestOperationalAutonomyFreshRuntimeBecomesHealthy(t *testing.T) {
@@ -84,12 +63,15 @@ func TestCutoverPilotProjectsStayRunnableWithoutLegacyPrimary(t *testing.T) {
 	ctx := context.Background()
 	repoRoot := projectRoot(t)
 
-	evidence := loadCutoverEvidence(t, repoRoot)
-	if len(evidence.Cutover.PilotProjects) == 0 {
-		t.Fatal("cutover metadata has no pilot projects, want at least one")
+	cfg, err := projects.LoadManifestFile(filepath.Join(repoRoot, "config", "projects.yaml"))
+	if err != nil {
+		t.Fatalf("LoadManifestFile() error = %v", err)
 	}
 
-	pilot := evidence.Cutover.PilotProjects[0]
+	pilot, ok := cfg.CutoverPilotProject("pbs")
+	if !ok {
+		t.Fatal("expected pbs pilot metadata in cutover config")
+	}
 	if pilot.Key != "pbs" {
 		t.Fatalf("pilot key = %q, want pbs", pilot.Key)
 	}
@@ -338,22 +320,6 @@ func TestOperationalAutonomyRequiresApprovalForHighRiskMutation(t *testing.T) {
 	if len(approvals) != 1 {
 		t.Fatalf("pending approvals = %d, want 1", len(approvals))
 	}
-}
-
-func loadCutoverEvidence(t *testing.T, repoRoot string) authoredProjectsConfig {
-	t.Helper()
-
-	configPath := filepath.Join(repoRoot, "config", "projects.yaml")
-	content, err := os.ReadFile(configPath)
-	if err != nil {
-		t.Fatalf("ReadFile(%s) error = %v", configPath, err)
-	}
-
-	var cfg authoredProjectsConfig
-	if err := yaml.Unmarshal(content, &cfg); err != nil {
-		t.Fatalf("yaml.Unmarshal(projects.yaml) error = %v", err)
-	}
-	return cfg
 }
 
 func buildPilotRegistry(t *testing.T) (projects.Registry, error) {

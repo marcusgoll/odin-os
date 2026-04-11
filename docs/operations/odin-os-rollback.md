@@ -17,7 +17,6 @@ Cutover must pause or roll back when any of the following occur:
 - approval flows stop protecting high-risk mutations
 - operator surfaces cannot explain current control ownership
 - the `pbs` pilot requires the legacy stack for routine completion
-- pilot requires the legacy stack for routine completion
 
 These triggers are not advisory. If one is present, stop advancing the rollout.
 

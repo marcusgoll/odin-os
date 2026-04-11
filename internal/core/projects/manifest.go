@@ -16,8 +16,9 @@ const (
 )
 
 type Config struct {
-	Version  int        `yaml:"version"`
-	Projects []Manifest `yaml:"projects"`
+	Version  int           `yaml:"version"`
+	Projects []Manifest    `yaml:"projects"`
+	Cutover  CutoverConfig `yaml:"cutover"`
 }
 
 type Manifest struct {
@@ -89,6 +90,22 @@ type DestructiveOperations struct {
 	RequireExplicitApproval *bool `yaml:"require_explicit_approval"`
 }
 
+type CutoverConfig struct {
+	PilotProjects []CutoverPilotProject `yaml:"pilot_projects"`
+}
+
+type CutoverPilotProject struct {
+	Key                       string   `yaml:"key"`
+	RuntimeOwner              string   `yaml:"runtime_owner"`
+	PrimaryController         string   `yaml:"primary_controller"`
+	ComparisonContext         string   `yaml:"comparison_context"`
+	LegacyPrimaryRequired     bool     `yaml:"legacy_primary_required"`
+	ShadowGraduation          []string `yaml:"shadow_graduation"`
+	LimitedActionGraduation   []string `yaml:"limited_action_graduation"`
+	CutoverGraduation         []string `yaml:"cutover_graduation"`
+	LegacyDutiesToRetireOrder []string `yaml:"legacy_duties_to_retire_in_order"`
+}
+
 func LoadManifestFile(path string) (Config, error) {
 	var cfg Config
 
@@ -107,6 +124,19 @@ func LoadManifestFile(path string) (Config, error) {
 	}
 
 	return cfg, nil
+}
+
+func (cfg Config) CutoverPilotProject(key string) (CutoverPilotProject, bool) {
+	return cfg.Cutover.PilotProject(key)
+}
+
+func (cutover CutoverConfig) PilotProject(key string) (CutoverPilotProject, bool) {
+	for _, project := range cutover.PilotProjects {
+		if project.Key == key {
+			return project, true
+		}
+	}
+	return CutoverPilotProject{}, false
 }
 
 func resolveGitRoot(baseDir, gitRoot string) string {
