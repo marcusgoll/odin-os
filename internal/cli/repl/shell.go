@@ -57,7 +57,8 @@ func New(env Environment) (*Shell, error) {
 			Now:      time.Now,
 		},
 		runs: runsvc.Service{
-			DB: env.Store.DB(),
+			DB:    env.Store.DB(),
+			Store: env.Store,
 		},
 		transitions: projects.Service{
 			Store: env.Store,

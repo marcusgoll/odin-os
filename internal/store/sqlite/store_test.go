@@ -70,17 +70,22 @@ func TestStoreMigrateLifecycleAndReopen(t *testing.T) {
 	}
 
 	run, err = store.FinishRun(ctx, FinishRunParams{
-		RunID:   run.ID,
-		Status:  "completed",
-		Summary: "store baseline complete",
+		RunID:          run.ID,
+		Status:         "completed",
+		Summary:        "store baseline complete",
+		TerminalReason: "completed",
+		ArtifactsJSON:  `["runs/artifacts/store-baseline.json"]`,
 	})
 	if err != nil {
 		t.Fatalf("FinishRun() error = %v", err)
 	}
 
 	task, err = store.UpdateTaskStatus(ctx, UpdateTaskStatusParams{
-		TaskID: task.ID,
-		Status: "completed",
+		TaskID:         task.ID,
+		Status:         "completed",
+		Summary:        "store baseline complete",
+		TerminalReason: "completed",
+		ArtifactsJSON:  `["runs/artifacts/store-baseline.json"]`,
 	})
 	if err != nil {
 		t.Fatalf("UpdateTaskStatus(completed) error = %v", err)
@@ -224,8 +229,8 @@ func TestStoreMigrateLifecycleAndReopen(t *testing.T) {
 	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM schema_migrations`).Scan(&migrationCount); err != nil {
 		t.Fatalf("schema_migrations count query error = %v", err)
 	}
-	if migrationCount != 6 {
-		t.Fatalf("schema_migrations count = %d, want 6", migrationCount)
+	if migrationCount != 7 {
+		t.Fatalf("schema_migrations count = %d, want 7", migrationCount)
 	}
 
 	if err := store.Close(); err != nil {
@@ -249,6 +254,15 @@ func TestStoreMigrateLifecycleAndReopen(t *testing.T) {
 	if gotTask.Status != "completed" {
 		t.Fatalf("GetTask().Status = %q, want %q", gotTask.Status, "completed")
 	}
+	if gotTask.Summary != "store baseline complete" {
+		t.Fatalf("GetTask().Summary = %q, want %q", gotTask.Summary, "store baseline complete")
+	}
+	if gotTask.TerminalReason != "completed" {
+		t.Fatalf("GetTask().TerminalReason = %q, want %q", gotTask.TerminalReason, "completed")
+	}
+	if gotTask.ArtifactsJSON != `["runs/artifacts/store-baseline.json"]` {
+		t.Fatalf("GetTask().ArtifactsJSON = %q, want persisted artifact pointer", gotTask.ArtifactsJSON)
+	}
 
 	gotRun, err := reopened.GetRun(ctx, run.ID)
 	if err != nil {
@@ -256,6 +270,15 @@ func TestStoreMigrateLifecycleAndReopen(t *testing.T) {
 	}
 	if gotRun.Status != "completed" {
 		t.Fatalf("GetRun().Status = %q, want %q", gotRun.Status, "completed")
+	}
+	if gotRun.Summary != "store baseline complete" {
+		t.Fatalf("GetRun().Summary = %q, want %q", gotRun.Summary, "store baseline complete")
+	}
+	if gotRun.TerminalReason != "completed" {
+		t.Fatalf("GetRun().TerminalReason = %q, want %q", gotRun.TerminalReason, "completed")
+	}
+	if gotRun.ArtifactsJSON != `["runs/artifacts/store-baseline.json"]` {
+		t.Fatalf("GetRun().ArtifactsJSON = %q, want persisted artifact pointer", gotRun.ArtifactsJSON)
 	}
 
 	gotApproval, err := reopened.GetApproval(ctx, approval.ID)

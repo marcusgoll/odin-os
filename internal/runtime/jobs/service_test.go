@@ -10,6 +10,7 @@ import (
 
 	"odin-os/internal/cli/scope"
 	"odin-os/internal/core/projects"
+	"odin-os/internal/executors/contract"
 	"odin-os/internal/executors/router"
 	"odin-os/internal/store/sqlite"
 	"odin-os/internal/vcs/leases"
@@ -226,12 +227,141 @@ func TestExecuteNextQueuedRejectsShadowModeMutation(t *testing.T) {
 	}
 }
 
+func TestRunNextPersistsTerminalStateAcrossTaskAndRun(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openJobStore(t)
+	defer store.Close()
+
+	registry := writeRegistry(t)
+	service := Service{
+		Store:    store,
+		Registry: registry,
+		Executors: map[string]contract.Executor{
+			"fake_headless": jobTestExecutor{
+				result: contract.ExecutionResult{
+					Status: "completed",
+					Output: "fake executor summary",
+					Metadata: map[string]string{
+						"artifacts_json": `["runs/artifacts/fake-executor.json"]`,
+					},
+				},
+			},
+		},
+		ExecutorConfig: jobTestExecutorConfig(),
+		Transitions:    projects.Service{Store: store},
+		Leases: leases.Manager{
+			Store:        store,
+			Git:          &jobTestGit{},
+			WorktreeRoot: t.TempDir(),
+		},
+		Now: func() time.Time {
+			return time.Date(2026, 4, 9, 12, 0, 0, 0, time.UTC)
+		},
+	}
+
+	task, err := service.CreateTaskFromAct(ctx, scope.Resolution{
+		Kind:       scope.ScopeProject,
+		ProjectKey: "alpha",
+	}, "Persist terminal state")
+	if err != nil {
+		t.Fatalf("CreateTaskFromAct() error = %v", err)
+	}
+
+	project, err := store.GetProjectByKey(ctx, "alpha")
+	if err != nil {
+		t.Fatalf("GetProjectByKey(alpha) error = %v", err)
+	}
+	if _, err := service.Transitions.SetTransitionState(ctx, projects.TransitionStateInput{
+		ProjectID:   project.ID,
+		Actor:       projects.TransitionControllerOdinOS,
+		TargetState: projects.TransitionStateCutover,
+		ChangedBy:   "test",
+	}); err != nil {
+		t.Fatalf("SetTransitionState(cutover) error = %v", err)
+	}
+
+	if err := service.RunNext(ctx); err != nil {
+		t.Fatalf("RunNext() error = %v", err)
+	}
+
+	gotTask, err := store.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
+	}
+	if gotTask.Summary != "fake executor summary" {
+		t.Fatalf("task summary = %q, want fake executor summary", gotTask.Summary)
+	}
+	if gotTask.TerminalReason != "completed" {
+		t.Fatalf("task terminal reason = %q, want completed", gotTask.TerminalReason)
+	}
+	if gotTask.ArtifactsJSON != `["runs/artifacts/fake-executor.json"]` {
+		t.Fatalf("task artifacts = %q, want persisted artifact pointer", gotTask.ArtifactsJSON)
+	}
+
+	run, err := latestRunForTask(ctx, store, task.ID)
+	if err != nil {
+		t.Fatalf("latestRunForTask() error = %v", err)
+	}
+	if run.Summary != "fake executor summary" {
+		t.Fatalf("run summary = %q, want fake executor summary", run.Summary)
+	}
+	if run.TerminalReason != "completed" {
+		t.Fatalf("run terminal reason = %q, want completed", run.TerminalReason)
+	}
+	if run.ArtifactsJSON != `["runs/artifacts/fake-executor.json"]` {
+		t.Fatalf("run artifacts = %q, want persisted artifact pointer", run.ArtifactsJSON)
+	}
+}
+
 type jobTestGit struct{}
 
 func (jobTestGit) BranchExists(context.Context, string, string) (bool, error) { return false, nil }
 func (jobTestGit) CreateBranch(context.Context, string, string, string) error { return nil }
 func (jobTestGit) AddWorktree(context.Context, string, string, string) error  { return nil }
 func (jobTestGit) RemoveWorktree(context.Context, string, string) error       { return nil }
+
+type jobTestExecutor struct {
+	result contract.ExecutionResult
+}
+
+func (jobTestExecutor) Key() string { return "fake_headless" }
+
+func (jobTestExecutor) Class() contract.ExecutorClass {
+	return contract.ExecutorClassPlanBackedCLI
+}
+
+func (jobTestExecutor) Health(context.Context) (contract.HealthReport, error) {
+	return contract.HealthReport{Status: contract.HealthStatusHealthy}, nil
+}
+
+func (jobTestExecutor) Capabilities(context.Context) (contract.Capabilities, error) {
+	return contract.Capabilities{
+		ExecutorClass:        contract.ExecutorClassPlanBackedCLI,
+		SupportsResume:       true,
+		SupportsCancel:       true,
+		SupportsTools:        true,
+		SupportsCostEstimate: true,
+		SupportsHeadlessPlan: true,
+		TaskKinds:            []contract.TaskKind{contract.TaskKindGeneral},
+		Scopes:               []string{"project"},
+	}, nil
+}
+
+func (executor jobTestExecutor) RunTask(context.Context, contract.TaskSpec) (contract.ExecutionResult, error) {
+	return executor.result, nil
+}
+
+func (jobTestExecutor) ResumeTask(context.Context, contract.TaskHandle, contract.ResumePacket) (contract.ExecutionResult, error) {
+	return contract.ExecutionResult{}, nil
+}
+
+func (jobTestExecutor) CancelTask(context.Context, contract.TaskHandle) error { return nil }
+
+func (jobTestExecutor) EstimateCost(context.Context, contract.TaskSpec) (contract.CostEstimate, error) {
+	return contract.CostEstimate{Currency: "USD"}, nil
+}
 
 func mustLoadExecutorConfig(t *testing.T) router.Config {
 	t.Helper()
@@ -241,6 +371,31 @@ func mustLoadExecutorConfig(t *testing.T) router.Config {
 		t.Fatalf("LoadConfig(executors) error = %v", err)
 	}
 	return cfg
+}
+
+func jobTestExecutorConfig() router.Config {
+	return router.Config{
+		Version: 1,
+		Executors: []router.ExecutorConfig{
+			{
+				Key:      "fake_headless",
+				Adapter:  "fake_headless",
+				Class:    contract.ExecutorClassPlanBackedCLI,
+				Enabled:  true,
+				Priority: 1,
+			},
+		},
+		Routes: []router.RouteConfig{
+			{
+				Name: "project-general",
+				Match: router.RouteMatch{
+					TaskKinds: []contract.TaskKind{contract.TaskKindGeneral},
+					Scopes:    []string{"project"},
+				},
+				Preferred: []string{"fake_headless"},
+			},
+		},
+	}
 }
 
 func latestRunForTask(ctx context.Context, store *sqlite.Store, taskID int64) (sqlite.Run, error) {

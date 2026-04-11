@@ -26,16 +26,19 @@ type CreateProjectParams struct {
 }
 
 type Task struct {
-	ID           int64
-	ProjectID    int64
-	Key          string
-	Title        string
-	Status       string
-	Scope        string
-	RequestedBy  string
-	CurrentRunID *int64
-	CreatedAt    time.Time
-	UpdatedAt    time.Time
+	ID             int64
+	ProjectID      int64
+	Key            string
+	Title          string
+	Status         string
+	Scope          string
+	RequestedBy    string
+	Summary        string
+	TerminalReason string
+	ArtifactsJSON  string
+	CurrentRunID   *int64
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
 }
 
 type CreateTaskParams struct {
@@ -48,19 +51,24 @@ type CreateTaskParams struct {
 }
 
 type UpdateTaskStatusParams struct {
-	TaskID int64
-	Status string
+	TaskID         int64
+	Status         string
+	Summary        string
+	TerminalReason string
+	ArtifactsJSON  string
 }
 
 type Run struct {
-	ID         int64
-	TaskID     int64
-	Executor   string
-	Status     string
-	Attempt    int
-	StartedAt  time.Time
-	FinishedAt *time.Time
-	Summary    string
+	ID             int64
+	TaskID         int64
+	Executor       string
+	Status         string
+	Attempt        int
+	StartedAt      time.Time
+	FinishedAt     *time.Time
+	Summary        string
+	TerminalReason string
+	ArtifactsJSON  string
 }
 
 type StartRunParams struct {
@@ -71,9 +79,11 @@ type StartRunParams struct {
 }
 
 type FinishRunParams struct {
-	RunID   int64
-	Status  string
-	Summary string
+	RunID          int64
+	Status         string
+	Summary        string
+	TerminalReason string
+	ArtifactsJSON  string
 }
 
 type Approval struct {

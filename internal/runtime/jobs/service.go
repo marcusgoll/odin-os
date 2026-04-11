@@ -12,6 +12,7 @@ import (
 	"odin-os/internal/executors/contract"
 	executorrouter "odin-os/internal/executors/router"
 	"odin-os/internal/runtime/projections"
+	runsvc "odin-os/internal/runtime/runs"
 	"odin-os/internal/store/sqlite"
 	"odin-os/internal/vcs/leases"
 )
@@ -22,6 +23,7 @@ type Service struct {
 	Executors      map[string]contract.Executor
 	ExecutorConfig executorrouter.Config
 	Transitions    projects.Service
+	Runs           runsvc.Service
 	Leases         leases.Manager
 	Now            func() time.Time
 }
@@ -73,6 +75,10 @@ func (service Service) CreateTaskFromAct(ctx context.Context, resolved scope.Res
 }
 
 func (service Service) ExecuteNextQueued(ctx context.Context) error {
+	return service.RunNext(ctx)
+}
+
+func (service Service) RunNext(ctx context.Context) error {
 	if service.Store == nil {
 		return fmt.Errorf("job store is required")
 	}
@@ -91,11 +97,7 @@ func (service Service) ExecuteNextQueued(ctx context.Context) error {
 	}
 	manifest, ok := service.Registry.Lookup(project.Key)
 	if !ok {
-		_, _ = service.Store.UpdateTaskStatus(ctx, sqlite.UpdateTaskStatusParams{
-			TaskID: task.ID,
-			Status: "failed",
-		})
-		return fmt.Errorf("unknown manifest for project %q", project.Key)
+		return service.failTaskWithoutRun(ctx, task.ID, fmt.Errorf("unknown manifest for project %q", project.Key))
 	}
 
 	executors := service.Executors
@@ -131,45 +133,20 @@ func (service Service) ExecuteNextQueued(ctx context.Context) error {
 
 	decision, err := selector.Select(ctx, spec)
 	if err != nil {
-		_, _ = service.Store.UpdateTaskStatus(ctx, sqlite.UpdateTaskStatusParams{
-			TaskID: task.ID,
-			Status: "failed",
-		})
-		return err
+		return service.failTaskWithoutRun(ctx, task.ID, err)
 	}
 
-	attempt, err := service.nextRunAttempt(ctx, task.ID)
+	runsService := service.runsService()
+
+	run, err := runsService.Start(ctx, task, decision.ExecutorKey)
 	if err != nil {
-		return err
-	}
-
-	run, err := service.Store.StartRun(ctx, sqlite.StartRunParams{
-		TaskID:   task.ID,
-		Executor: decision.ExecutorKey,
-		Attempt:  attempt,
-		Status:   "running",
-	})
-	if err != nil {
-		return err
-	}
-
-	if _, err := service.Store.UpdateTaskStatus(ctx, sqlite.UpdateTaskStatusParams{
-		TaskID: task.ID,
-		Status: "running",
-	}); err != nil {
 		return err
 	}
 
 	finishFailure := func(cause error) error {
-		_, _ = service.Store.FinishRun(ctx, sqlite.FinishRunParams{
-			RunID:   run.ID,
-			Status:  "failed",
-			Summary: cause.Error(),
-		})
-		_, _ = service.Store.UpdateTaskStatus(ctx, sqlite.UpdateTaskStatusParams{
-			TaskID: task.ID,
-			Status: "failed",
-		})
+		if err := runsService.Fail(ctx, run.ID, cause); err != nil {
+			return err
+		}
 		return cause
 	}
 
@@ -203,7 +180,7 @@ func (service Service) ExecuteNextQueued(ctx context.Context) error {
 		RunID:         run.ID,
 		RepoRoot:      project.GitRoot,
 		DefaultBranch: project.DefaultBranch,
-		Try:           attempt,
+		Try:           run.Attempt,
 	})
 	if err != nil {
 		return finishFailure(err)
@@ -222,31 +199,7 @@ func (service Service) ExecuteNextQueued(ctx context.Context) error {
 	if err != nil {
 		return finishFailure(err)
 	}
-
-	runStatus := result.Status
-	if runStatus == "" {
-		runStatus = "completed"
-	}
-	taskStatus := "completed"
-	if runStatus != "completed" {
-		taskStatus = "failed"
-	}
-
-	if _, err := service.Store.FinishRun(ctx, sqlite.FinishRunParams{
-		RunID:   run.ID,
-		Status:  runStatus,
-		Summary: result.Output,
-	}); err != nil {
-		return err
-	}
-	if _, err := service.Store.UpdateTaskStatus(ctx, sqlite.UpdateTaskStatusParams{
-		TaskID: task.ID,
-		Status: taskStatus,
-	}); err != nil {
-		return err
-	}
-
-	return nil
+	return runsService.Complete(ctx, run.ID, result)
 }
 
 func (service Service) ensureRuntimeProject(ctx context.Context, manifest projects.Manifest) (sqlite.Project, error) {
@@ -322,19 +275,6 @@ func (service Service) nextQueuedTask(ctx context.Context) (sqlite.Task, error) 
 	return service.Store.GetTask(ctx, taskID)
 }
 
-func (service Service) nextRunAttempt(ctx context.Context, taskID int64) (int, error) {
-	row := service.Store.DB().QueryRowContext(ctx, `
-		SELECT COALESCE(MAX(attempt), 0) + 1
-		FROM runs
-		WHERE task_id = ?
-	`, taskID)
-	var attempt int
-	if err := row.Scan(&attempt); err != nil {
-		return 0, err
-	}
-	return attempt, nil
-}
-
 func (service Service) executionConfig(ctx context.Context) (executorrouter.Config, error) {
 	config := service.ExecutorConfig
 	promotions, err := service.Store.ListActiveLearningPromotions(ctx)
@@ -363,6 +303,32 @@ func (service Service) executionConfig(ctx context.Context) (executorrouter.Conf
 	}
 
 	return executorrouter.ApplyRoutingRefinements(config, refinements)
+}
+
+func (service Service) runsService() runsvc.Service {
+	runsService := service.Runs
+	if runsService.Store == nil {
+		runsService.Store = service.Store
+	}
+	if runsService.DB == nil && service.Store != nil {
+		runsService.DB = service.Store.DB()
+	}
+	return runsService
+}
+
+func (service Service) failTaskWithoutRun(ctx context.Context, taskID int64, cause error) error {
+	message := strings.TrimSpace(cause.Error())
+	if message == "" {
+		message = "failed"
+	}
+	_, _ = service.Store.UpdateTaskStatus(ctx, sqlite.UpdateTaskStatusParams{
+		TaskID:         taskID,
+		Status:         "failed",
+		Summary:        message,
+		TerminalReason: message,
+		ArtifactsJSON:  "[]",
+	})
+	return cause
 }
 
 func normalizeRouteName(targetKey string) string {

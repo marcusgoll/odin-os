@@ -141,8 +141,8 @@ func (store *Store) CreateTask(ctx context.Context, params CreateTaskParams) (Ta
 		}
 
 		result, err := tx.ExecContext(ctx, `
-			INSERT INTO tasks (project_id, key, title, status, scope, requested_by, current_run_id, created_at, updated_at)
-			VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?)
+			INSERT INTO tasks (project_id, key, title, status, scope, requested_by, current_run_id, summary, terminal_reason, artifacts_json, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, NULL, '', '', '[]', ?, ?)
 		`,
 			params.ProjectID,
 			params.Key,
@@ -163,15 +163,16 @@ func (store *Store) CreateTask(ctx context.Context, params CreateTaskParams) (Ta
 		}
 
 		task = Task{
-			ID:          taskID,
-			ProjectID:   params.ProjectID,
-			Key:         params.Key,
-			Title:       params.Title,
-			Status:      params.Status,
-			Scope:       params.Scope,
-			RequestedBy: params.RequestedBy,
-			CreatedAt:   now,
-			UpdatedAt:   now,
+			ID:            taskID,
+			ProjectID:     params.ProjectID,
+			Key:           params.Key,
+			Title:         params.Title,
+			Status:        params.Status,
+			Scope:         params.Scope,
+			RequestedBy:   params.RequestedBy,
+			ArtifactsJSON: "[]",
+			CreatedAt:     now,
+			UpdatedAt:     now,
 		}
 
 		return appendEventTx(ctx, tx, eventInsert{
@@ -198,6 +199,7 @@ func (store *Store) CreateTask(ctx context.Context, params CreateTaskParams) (Ta
 func (store *Store) UpdateTaskStatus(ctx context.Context, params UpdateTaskStatusParams) (Task, error) {
 	now := store.now()
 	var task Task
+	artifactsJSON := normalizeArtifactsJSON(params.ArtifactsJSON)
 
 	err := store.withTx(ctx, func(tx *sql.Tx) error {
 		current, err := store.getTaskTx(ctx, tx, params.TaskID)
@@ -208,13 +210,16 @@ func (store *Store) UpdateTaskStatus(ctx context.Context, params UpdateTaskStatu
 
 		if _, err := tx.ExecContext(ctx, `
 			UPDATE tasks
-			SET status = ?, updated_at = ?
+			SET status = ?, summary = ?, terminal_reason = ?, artifacts_json = ?, updated_at = ?
 			WHERE id = ?
-		`, params.Status, formatTime(now), params.TaskID); err != nil {
+		`, params.Status, params.Summary, params.TerminalReason, artifactsJSON, formatTime(now), params.TaskID); err != nil {
 			return err
 		}
 
 		current.Status = params.Status
+		current.Summary = params.Summary
+		current.TerminalReason = params.TerminalReason
+		current.ArtifactsJSON = artifactsJSON
 		current.UpdatedAt = now
 		task = current
 
@@ -229,6 +234,9 @@ func (store *Store) UpdateTaskStatus(ctx context.Context, params UpdateTaskStatu
 			Payload: runtimeevents.TaskStatusChangedPayload{
 				PreviousStatus: previousStatus,
 				Status:         params.Status,
+				Summary:        params.Summary,
+				TerminalReason: params.TerminalReason,
+				ArtifactsJSON:  artifactsJSON,
 			},
 			OccurredAt: now,
 		})
@@ -248,8 +256,8 @@ func (store *Store) StartRun(ctx context.Context, params StartRunParams) (Run, e
 		}
 
 		result, err := tx.ExecContext(ctx, `
-			INSERT INTO runs (task_id, executor, status, attempt, started_at, finished_at, summary)
-			VALUES (?, ?, ?, ?, ?, NULL, '')
+			INSERT INTO runs (task_id, executor, status, attempt, started_at, finished_at, summary, terminal_reason, artifacts_json)
+			VALUES (?, ?, ?, ?, ?, NULL, '', '', '[]')
 		`,
 			params.TaskID,
 			params.Executor,
@@ -275,12 +283,13 @@ func (store *Store) StartRun(ctx context.Context, params StartRunParams) (Run, e
 		}
 
 		run = Run{
-			ID:        runID,
-			TaskID:    params.TaskID,
-			Executor:  params.Executor,
-			Status:    params.Status,
-			Attempt:   params.Attempt,
-			StartedAt: now,
+			ID:            runID,
+			TaskID:        params.TaskID,
+			Executor:      params.Executor,
+			Status:        params.Status,
+			Attempt:       params.Attempt,
+			StartedAt:     now,
+			ArtifactsJSON: "[]",
 		}
 
 		projectID := task.ProjectID
@@ -308,6 +317,11 @@ func (store *Store) StartRun(ctx context.Context, params StartRunParams) (Run, e
 func (store *Store) FinishRun(ctx context.Context, params FinishRunParams) (Run, error) {
 	now := store.now()
 	var run Run
+	artifactsJSON := normalizeArtifactsJSON(params.ArtifactsJSON)
+	terminalReason := strings.TrimSpace(params.TerminalReason)
+	if terminalReason == "" {
+		terminalReason = params.Status
+	}
 
 	err := store.withTx(ctx, func(tx *sql.Tx) error {
 		current, task, err := store.getRunWithTaskTx(ctx, tx, params.RunID)
@@ -317,9 +331,9 @@ func (store *Store) FinishRun(ctx context.Context, params FinishRunParams) (Run,
 
 		if _, err := tx.ExecContext(ctx, `
 			UPDATE runs
-			SET status = ?, finished_at = ?, summary = ?
+			SET status = ?, finished_at = ?, summary = ?, terminal_reason = ?, artifacts_json = ?
 			WHERE id = ?
-		`, params.Status, formatTime(now), params.Summary, params.RunID); err != nil {
+		`, params.Status, formatTime(now), params.Summary, terminalReason, artifactsJSON, params.RunID); err != nil {
 			return err
 		}
 		if _, err := tx.ExecContext(ctx, `
@@ -333,6 +347,8 @@ func (store *Store) FinishRun(ctx context.Context, params FinishRunParams) (Run,
 		current.Status = params.Status
 		current.FinishedAt = &now
 		current.Summary = params.Summary
+		current.TerminalReason = terminalReason
+		current.ArtifactsJSON = artifactsJSON
 		run = current
 
 		projectID := task.ProjectID
@@ -345,8 +361,10 @@ func (store *Store) FinishRun(ctx context.Context, params FinishRunParams) (Run,
 			TaskID:     &task.ID,
 			RunID:      &run.ID,
 			Payload: runtimeevents.RunFinishedPayload{
-				Status:  run.Status,
-				Summary: run.Summary,
+				Status:         run.Status,
+				Summary:        run.Summary,
+				TerminalReason: run.TerminalReason,
+				ArtifactsJSON:  run.ArtifactsJSON,
 			},
 			OccurredAt: now,
 		})
@@ -1560,7 +1578,7 @@ func (store *Store) GetProjectByKey(ctx context.Context, key string) (Project, e
 
 func (store *Store) GetRun(ctx context.Context, runID int64) (Run, error) {
 	row := store.db.QueryRowContext(ctx, `
-		SELECT id, task_id, executor, status, attempt, started_at, finished_at, summary
+		SELECT id, task_id, executor, status, attempt, started_at, finished_at, summary, terminal_reason, artifacts_json
 		FROM runs
 		WHERE id = ?
 	`, runID)
@@ -1569,7 +1587,7 @@ func (store *Store) GetRun(ctx context.Context, runID int64) (Run, error) {
 
 func (store *Store) ListRunsByStatus(ctx context.Context, status string) ([]Run, error) {
 	rows, err := store.db.QueryContext(ctx, `
-		SELECT id, task_id, executor, status, attempt, started_at, finished_at, summary
+		SELECT id, task_id, executor, status, attempt, started_at, finished_at, summary, terminal_reason, artifacts_json
 		FROM runs
 		WHERE status = ?
 		ORDER BY started_at ASC, id ASC
@@ -2052,7 +2070,7 @@ func (store *Store) getTaskTx(ctx context.Context, tx *sql.Tx, taskID int64) (Ta
 
 func (store *Store) getTaskQuery(ctx context.Context, queryer sqlQueryRow, taskID int64) (Task, error) {
 	row := queryer.QueryRowContext(ctx, `
-		SELECT id, project_id, key, title, status, scope, requested_by, current_run_id, created_at, updated_at
+		SELECT id, project_id, key, title, status, scope, requested_by, summary, terminal_reason, artifacts_json, current_run_id, created_at, updated_at
 		FROM tasks
 		WHERE id = ?
 	`, taskID)
@@ -2098,8 +2116,8 @@ func (store *Store) getActiveLearningPromotionForTargetTx(ctx context.Context, t
 func (store *Store) getRunWithTaskTx(ctx context.Context, tx *sql.Tx, runID int64) (Run, Task, error) {
 	row := tx.QueryRowContext(ctx, `
 		SELECT
-			r.id, r.task_id, r.executor, r.status, r.attempt, r.started_at, r.finished_at, r.summary,
-			t.id, t.project_id, t.key, t.title, t.status, t.scope, t.requested_by, t.current_run_id, t.created_at, t.updated_at
+			r.id, r.task_id, r.executor, r.status, r.attempt, r.started_at, r.finished_at, r.summary, r.terminal_reason, r.artifacts_json,
+			t.id, t.project_id, t.key, t.title, t.status, t.scope, t.requested_by, t.summary, t.terminal_reason, t.artifacts_json, t.current_run_id, t.created_at, t.updated_at
 		FROM runs r
 		JOIN tasks t ON t.id = r.task_id
 		WHERE r.id = ?
@@ -2109,6 +2127,11 @@ func (store *Store) getRunWithTaskTx(ctx context.Context, tx *sql.Tx, runID int6
 	var task Task
 	var finishedAt sql.NullString
 	var summary sql.NullString
+	var terminalReason sql.NullString
+	var artifactsJSON sql.NullString
+	var taskSummary sql.NullString
+	var taskTerminalReason sql.NullString
+	var taskArtifactsJSON sql.NullString
 	var currentRunID sql.NullInt64
 	var startedAt string
 	var taskCreatedAt string
@@ -2123,6 +2146,8 @@ func (store *Store) getRunWithTaskTx(ctx context.Context, tx *sql.Tx, runID int6
 		&startedAt,
 		&finishedAt,
 		&summary,
+		&terminalReason,
+		&artifactsJSON,
 		&task.ID,
 		&task.ProjectID,
 		&task.Key,
@@ -2130,6 +2155,9 @@ func (store *Store) getRunWithTaskTx(ctx context.Context, tx *sql.Tx, runID int6
 		&task.Status,
 		&task.Scope,
 		&task.RequestedBy,
+		&taskSummary,
+		&taskTerminalReason,
+		&taskArtifactsJSON,
 		&currentRunID,
 		&taskCreatedAt,
 		&taskUpdatedAt,
@@ -2147,7 +2175,12 @@ func (store *Store) getRunWithTaskTx(ctx context.Context, tx *sql.Tx, runID int6
 		return Run{}, Task{}, err
 	}
 	run.Summary = summary.String
+	run.TerminalReason = terminalReason.String
+	run.ArtifactsJSON = normalizeArtifactsJSON(artifactsJSON.String)
 
+	task.Summary = taskSummary.String
+	task.TerminalReason = taskTerminalReason.String
+	task.ArtifactsJSON = normalizeArtifactsJSON(taskArtifactsJSON.String)
 	task.CurrentRunID = nullableInt64Ptr(currentRunID)
 	task.CreatedAt, err = parseTime(taskCreatedAt)
 	if err != nil {
@@ -2165,7 +2198,7 @@ func (store *Store) getApprovalWithTaskTx(ctx context.Context, tx *sql.Tx, appro
 	row := tx.QueryRowContext(ctx, `
 		SELECT
 			a.id, a.task_id, a.run_id, a.status, a.requested_at, a.resolved_at, a.decision_by, a.reason,
-			t.id, t.project_id, t.key, t.title, t.status, t.scope, t.requested_by, t.current_run_id, t.created_at, t.updated_at
+			t.id, t.project_id, t.key, t.title, t.status, t.scope, t.requested_by, t.summary, t.terminal_reason, t.artifacts_json, t.current_run_id, t.created_at, t.updated_at
 		FROM approvals a
 		JOIN tasks t ON t.id = a.task_id
 		WHERE a.id = ?
@@ -2178,6 +2211,9 @@ func (store *Store) getApprovalWithTaskTx(ctx context.Context, tx *sql.Tx, appro
 	var decisionBy sql.NullString
 	var reason sql.NullString
 	var requestedAt string
+	var taskSummary sql.NullString
+	var taskTerminalReason sql.NullString
+	var taskArtifactsJSON sql.NullString
 	var currentRunID sql.NullInt64
 	var taskCreatedAt string
 	var taskUpdatedAt string
@@ -2198,6 +2234,9 @@ func (store *Store) getApprovalWithTaskTx(ctx context.Context, tx *sql.Tx, appro
 		&task.Status,
 		&task.Scope,
 		&task.RequestedBy,
+		&taskSummary,
+		&taskTerminalReason,
+		&taskArtifactsJSON,
 		&currentRunID,
 		&taskCreatedAt,
 		&taskUpdatedAt,
@@ -2218,6 +2257,9 @@ func (store *Store) getApprovalWithTaskTx(ctx context.Context, tx *sql.Tx, appro
 	approval.DecisionBy = decisionBy.String
 	approval.Reason = reason.String
 
+	task.Summary = taskSummary.String
+	task.TerminalReason = taskTerminalReason.String
+	task.ArtifactsJSON = normalizeArtifactsJSON(taskArtifactsJSON.String)
 	task.CurrentRunID = nullableInt64Ptr(currentRunID)
 	task.CreatedAt, err = parseTime(taskCreatedAt)
 	if err != nil {
@@ -2531,6 +2573,9 @@ func scanProject(row interface{ Scan(...any) error }) (Project, error) {
 
 func scanTask(row interface{ Scan(...any) error }) (Task, error) {
 	var task Task
+	var summary sql.NullString
+	var terminalReason sql.NullString
+	var artifactsJSON sql.NullString
 	var currentRunID sql.NullInt64
 	var createdAt string
 	var updatedAt string
@@ -2542,6 +2587,9 @@ func scanTask(row interface{ Scan(...any) error }) (Task, error) {
 		&task.Status,
 		&task.Scope,
 		&task.RequestedBy,
+		&summary,
+		&terminalReason,
+		&artifactsJSON,
 		&currentRunID,
 		&createdAt,
 		&updatedAt,
@@ -2550,6 +2598,9 @@ func scanTask(row interface{ Scan(...any) error }) (Task, error) {
 	}
 
 	var err error
+	task.Summary = summary.String
+	task.TerminalReason = terminalReason.String
+	task.ArtifactsJSON = normalizeArtifactsJSON(artifactsJSON.String)
 	task.CurrentRunID = nullableInt64Ptr(currentRunID)
 	task.CreatedAt, err = parseTime(createdAt)
 	if err != nil {
@@ -2566,6 +2617,8 @@ func scanRun(row interface{ Scan(...any) error }) (Run, error) {
 	var run Run
 	var finishedAt sql.NullString
 	var summary sql.NullString
+	var terminalReason sql.NullString
+	var artifactsJSON sql.NullString
 	var startedAt string
 	if err := row.Scan(
 		&run.ID,
@@ -2576,6 +2629,8 @@ func scanRun(row interface{ Scan(...any) error }) (Run, error) {
 		&startedAt,
 		&finishedAt,
 		&summary,
+		&terminalReason,
+		&artifactsJSON,
 	); err != nil {
 		return Run{}, err
 	}
@@ -2590,6 +2645,8 @@ func scanRun(row interface{ Scan(...any) error }) (Run, error) {
 		return Run{}, err
 	}
 	run.Summary = summary.String
+	run.TerminalReason = terminalReason.String
+	run.ArtifactsJSON = normalizeArtifactsJSON(artifactsJSON.String)
 	return run, nil
 }
 
@@ -3049,6 +3106,14 @@ func nullableInt64Ptr(value sql.NullInt64) *int64 {
 	ptr := new(int64)
 	*ptr = value.Int64
 	return ptr
+}
+
+func normalizeArtifactsJSON(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "[]"
+	}
+	return value
 }
 
 func nullInt64(value *int64) any {
