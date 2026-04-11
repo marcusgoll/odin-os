@@ -2,6 +2,8 @@ package codex
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"odin-os/internal/executors/contract"
@@ -28,5 +30,40 @@ func TestHeadlessRunTaskUsesDriverScript(t *testing.T) {
 	}
 	if result.Metadata["driver"] != "codex_headless_script" {
 		t.Fatalf("driver metadata = %q, want codex_headless_script", result.Metadata["driver"])
+	}
+}
+
+func TestCodexDriverPathPrefersRuntimeWorkingTree(t *testing.T) {
+	root := t.TempDir()
+	driverPath := filepath.Join(root, "scripts", "drivers", "codex-headless.sh")
+	if err := os.MkdirAll(filepath.Dir(driverPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll(driver dir) error = %v", err)
+	}
+	if err := os.WriteFile(driverPath, []byte("#!/usr/bin/env bash\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile(driver) error = %v", err)
+	}
+
+	t.Chdir(filepath.Join(root, "scripts"))
+
+	got := codexDriverPath()
+	if got != driverPath {
+		t.Fatalf("codexDriverPath() = %q, want %q", got, driverPath)
+	}
+}
+
+func TestHeadlessHealthRequiresExecutableDriver(t *testing.T) {
+	root := t.TempDir()
+	driverPath := filepath.Join(root, "driver.sh")
+	if err := os.WriteFile(driverPath, []byte("#!/usr/bin/env bash\nexit 0\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(driver) error = %v", err)
+	}
+	t.Setenv("ODIN_CODEX_DRIVER", driverPath)
+
+	report, err := NewHeadless().Health(context.Background())
+	if err != nil {
+		t.Fatalf("Health() error = %v", err)
+	}
+	if report.Status != contract.HealthStatusDegraded {
+		t.Fatalf("Health().Status = %q, want %q", report.Status, contract.HealthStatusDegraded)
 	}
 }

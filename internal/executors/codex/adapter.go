@@ -31,7 +31,7 @@ func (headlessExecutor) Class() contract.ExecutorClass {
 
 func (headlessExecutor) Health(context.Context) (contract.HealthReport, error) {
 	driverPath := codexDriverPath()
-	if _, err := os.Stat(driverPath); err != nil {
+	if err := validateDriverPath(driverPath); err != nil {
 		return contract.HealthReport{
 			Status:    contract.HealthStatusDegraded,
 			Details:   fmt.Sprintf("codex driver script unavailable: %v", err),
@@ -75,7 +75,12 @@ func runWithDriver(ctx context.Context, spec contract.TaskSpec) (contract.Execut
 		return contract.ExecutionResult{}, err
 	}
 
-	cmd := exec.CommandContext(ctx, codexDriverPath())
+	driverPath := codexDriverPath()
+	if err := validateDriverPath(driverPath); err != nil {
+		return contract.ExecutionResult{}, fmt.Errorf("codex driver unavailable: %w", err)
+	}
+
+	cmd := exec.CommandContext(ctx, driverPath)
 	cmd.Env = append(os.Environ(), "ODIN_CODEX_DRIVER_ACTION=run")
 	cmd.Stdin = bytes.NewReader(payload)
 
@@ -147,11 +152,58 @@ func (headlessExecutor) EstimateCost(context.Context, contract.TaskSpec) (contra
 
 func codexDriverPath() string {
 	if driverPath := strings.TrimSpace(os.Getenv("ODIN_CODEX_DRIVER")); driverPath != "" {
-		return driverPath
+		return filepath.Clean(driverPath)
+	}
+	if cwd, err := os.Getwd(); err == nil {
+		if driverPath, ok := findDriverUpward(cwd); ok {
+			return driverPath
+		}
+	}
+	if executable, err := os.Executable(); err == nil {
+		if resolved, err := filepath.EvalSymlinks(executable); err == nil {
+			executable = resolved
+		}
+		if driverPath, ok := findDriverUpward(filepath.Dir(executable)); ok {
+			return driverPath
+		}
 	}
 	_, file, _, ok := runtime.Caller(0)
 	if !ok {
 		return filepath.Join("scripts", "drivers", "codex-headless.sh")
 	}
 	return filepath.Clean(filepath.Join(filepath.Dir(file), "..", "..", "..", "scripts", "drivers", "codex-headless.sh"))
+}
+
+func findDriverUpward(start string) (string, bool) {
+	if start == "" {
+		return "", false
+	}
+
+	dir := filepath.Clean(start)
+	for {
+		driverPath := filepath.Join(dir, "scripts", "drivers", "codex-headless.sh")
+		if info, err := os.Stat(driverPath); err == nil && !info.IsDir() {
+			return driverPath, true
+		}
+
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return "", false
+		}
+		dir = parent
+	}
+}
+
+func validateDriverPath(driverPath string) error {
+	info, err := os.Stat(driverPath)
+	if err != nil {
+		return err
+	}
+	if info.IsDir() {
+		return fmt.Errorf("%s is a directory", driverPath)
+	}
+	if info.Mode()&0o111 == 0 {
+		return fmt.Errorf("%s is not executable", driverPath)
+	}
+	return nil
 }
