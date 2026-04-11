@@ -27,16 +27,17 @@ type App struct {
 }
 
 func Load(ctx context.Context, repoRoot string, runtimeRoot string) (App, error) {
-	return load(ctx, repoRoot, runtimeRoot, loadOptions{initializeReadiness: true, acquireLock: true})
+	return load(ctx, repoRoot, runtimeRoot, loadOptions{initializeReadiness: true, acquireLock: true, migrate: true})
 }
 
 func LoadReadOnly(ctx context.Context, repoRoot string, runtimeRoot string) (App, error) {
-	return load(ctx, repoRoot, runtimeRoot, loadOptions{initializeReadiness: false, acquireLock: false})
+	return load(ctx, repoRoot, runtimeRoot, loadOptions{initializeReadiness: false, acquireLock: false, migrate: false})
 }
 
 type loadOptions struct {
 	initializeReadiness bool
 	acquireLock         bool
+	migrate             bool
 }
 
 func load(ctx context.Context, repoRoot string, runtimeRoot string, options loadOptions) (App, error) {
@@ -62,9 +63,11 @@ func load(ctx context.Context, repoRoot string, runtimeRoot string, options load
 		return App{}, err
 	}
 
-	if err := store.Migrate(ctx); err != nil {
-		_ = store.Close()
-		return App{}, err
+	if options.migrate {
+		if err := store.Migrate(ctx); err != nil {
+			_ = store.Close()
+			return App{}, err
+		}
 	}
 
 	registrySnapshot, err := registryloader.LoadDir(filepath.Join(repoRoot, "registry"))
