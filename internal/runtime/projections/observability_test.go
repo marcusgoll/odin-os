@@ -152,6 +152,48 @@ func TestObservabilityProjectionsExposeFreshnessAndPortfolioViews(t *testing.T) 
 	}
 }
 
+func TestProjectPortfolioTreatsAwaitingApprovalAsBlockedNotActive(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openObservabilityStore(t)
+	defer store.Close()
+
+	project, task, run := seedObservabilityState(t, ctx, store)
+	if _, _, _, err := store.AwaitApproval(ctx, sqlite.AwaitApprovalParams{
+		TaskID:         task.ID,
+		RunID:          run.ID,
+		RequestedBy:    "odin_os",
+		Summary:        "awaiting operator approval",
+		TerminalReason: "awaiting operator approval",
+		ArtifactsJSON:  `["runs/artifacts/approval.json"]`,
+	}); err != nil {
+		t.Fatalf("AwaitApproval() error = %v", err)
+	}
+
+	portfolio, err := projections.ListProjectPortfolioViews(ctx, store.DB())
+	if err != nil {
+		t.Fatalf("ListProjectPortfolioViews() error = %v", err)
+	}
+	if len(portfolio) != 1 || portfolio[0].ProjectKey != project.Key {
+		t.Fatalf("portfolio = %+v, want project %q", portfolio, project.Key)
+	}
+	if portfolio[0].ActiveRunCount != 0 {
+		t.Fatalf("active run count = %d, want 0 for awaiting approval", portfolio[0].ActiveRunCount)
+	}
+	if portfolio[0].PendingApprovalCount != 1 {
+		t.Fatalf("pending approval count = %d, want 1", portfolio[0].PendingApprovalCount)
+	}
+
+	activeRuns, err := projections.ListActiveRunViews(ctx, store.DB())
+	if err != nil {
+		t.Fatalf("ListActiveRunViews() error = %v", err)
+	}
+	if len(activeRuns) != 0 {
+		t.Fatalf("active runs = %+v, want 0 for awaiting approval", activeRuns)
+	}
+}
+
 func openObservabilityStore(t *testing.T) *sqlite.Store {
 	t.Helper()
 

@@ -165,7 +165,10 @@ func (service Service) RunNext(ctx context.Context) error {
 		return finishFailure(err)
 	}
 	if requirement := projects.ApprovalRequiredForAction(manifest, projects.ActionClassIsolatedMutation); requirement.Required {
-		return service.requestApproval(ctx, task, run, requirement.Reason)
+		if err := service.requestApproval(ctx, task, run, requirement.Reason); err != nil {
+			return finishFailure(err)
+		}
+		return nil
 	}
 
 	leaseManager := service.Leases

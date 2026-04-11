@@ -349,7 +349,7 @@ func ListActiveRunViews(ctx context.Context, queryer Queryer) ([]ActiveRunView, 
 		FROM runs r
 		JOIN tasks t ON t.id = r.task_id
 		JOIN projects p ON p.id = t.project_id
-		WHERE r.status NOT IN ('completed', 'cancelled', 'failed')
+		WHERE r.status NOT IN ('completed', 'cancelled', 'failed', 'awaiting_approval')
 		ORDER BY r.id ASC
 	`)
 	if err != nil {
@@ -623,7 +623,7 @@ func ListProjectPortfolioViews(ctx context.Context, queryer Queryer) ([]ProjectP
 			 FROM runs r
 			 JOIN tasks t ON t.id = r.task_id
 			 WHERE t.project_id = p.id
-			   AND r.status NOT IN ('completed', 'cancelled', 'failed')) AS active_run_count,
+			   AND r.status NOT IN ('completed', 'cancelled', 'failed', 'awaiting_approval')) AS active_run_count,
 			(SELECT COUNT(*)
 			 FROM approvals a
 			 JOIN tasks t ON t.id = a.task_id

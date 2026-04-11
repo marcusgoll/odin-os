@@ -380,6 +380,84 @@ func TestRunNextRequestsApprovalForSystemProjectMutation(t *testing.T) {
 	}
 }
 
+func TestRunNextFailsStartedRunWhenApprovalTransactionFails(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openJobStore(t)
+	defer store.Close()
+
+	if _, err := store.DB().ExecContext(ctx, `
+		CREATE TRIGGER fail_approval_insert
+		BEFORE INSERT ON approvals
+		BEGIN
+			SELECT RAISE(FAIL, 'approval insert blocked');
+		END;
+	`); err != nil {
+		t.Fatalf("create approval failure trigger error = %v", err)
+	}
+
+	registry := writeRegistry(t)
+	service := Service{
+		Store:          store,
+		Registry:       registry,
+		Executors:      router.DefaultCatalog(),
+		ExecutorConfig: mustLoadExecutorConfig(t),
+		Transitions:    projects.Service{Store: store},
+		Leases: leases.Manager{
+			Store:        store,
+			Git:          &jobTestGit{},
+			WorktreeRoot: t.TempDir(),
+		},
+		Now: time.Now,
+	}
+
+	task, err := service.CreateTaskFromAct(ctx, scope.Resolution{
+		Kind:       scope.ScopeOdinCore,
+		ProjectKey: "odin-core",
+	}, "Mutate odin core")
+	if err != nil {
+		t.Fatalf("CreateTaskFromAct() error = %v", err)
+	}
+
+	project, err := store.GetProjectByKey(ctx, "odin-core")
+	if err != nil {
+		t.Fatalf("GetProjectByKey(odin-core) error = %v", err)
+	}
+	if _, err := service.Transitions.SetTransitionState(ctx, projects.TransitionStateInput{
+		ProjectID:   project.ID,
+		Actor:       projects.TransitionControllerOdinOS,
+		TargetState: projects.TransitionStateCutover,
+		ChangedBy:   "test",
+	}); err != nil {
+		t.Fatalf("SetTransitionState(cutover) error = %v", err)
+	}
+
+	err = service.RunNext(ctx)
+	if err == nil {
+		t.Fatal("RunNext() error = nil, want approval transaction failure")
+	}
+
+	gotTask, err := store.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
+	}
+	if gotTask.Status != "failed" {
+		t.Fatalf("task status = %q, want failed", gotTask.Status)
+	}
+	if gotTask.CurrentRunID != nil {
+		t.Fatalf("task current run = %v, want cleared after failure", gotTask.CurrentRunID)
+	}
+
+	run, err := latestRunForTask(ctx, store, task.ID)
+	if err != nil {
+		t.Fatalf("latestRunForTask() error = %v", err)
+	}
+	if run.Status != "failed" {
+		t.Fatalf("run status = %q, want failed", run.Status)
+	}
+}
+
 func TestRunNextPersistsLeasedWorktreeForMutableTask(t *testing.T) {
 	t.Parallel()
 
