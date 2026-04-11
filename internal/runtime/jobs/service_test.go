@@ -2,6 +2,7 @@ package jobs
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -173,6 +174,109 @@ func TestExecuteNextQueuedCompletesCutoverProjectTask(t *testing.T) {
 	}
 }
 
+func TestSchedulerContinuesAfterTaskFailure(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openJobStore(t)
+	defer store.Close()
+
+	registry := writeRegistry(t)
+	service := Service{
+		Store:    store,
+		Registry: registry,
+		Runs:     runsvc.Service{Store: store},
+		Executors: map[string]contract.Executor{
+			"fake_headless": jobTestExecutor{
+				runFunc: func(spec contract.TaskSpec) (contract.ExecutionResult, error) {
+					if spec.Metadata["project_key"] == "beta" {
+						return contract.ExecutionResult{}, fmt.Errorf("broken executor")
+					}
+					return contract.ExecutionResult{
+						Status: "completed",
+						Output: "good task complete",
+					}, nil
+				},
+			},
+		},
+		ExecutorConfig: jobTestExecutorConfig(),
+		Transitions:    projects.Service{Store: store},
+		Leases: leases.Manager{
+			Store:        store,
+			Git:          &jobTestGit{},
+			WorktreeRoot: t.TempDir(),
+		},
+		Now: func() time.Time {
+			return time.Date(2026, 4, 9, 12, 0, 0, 0, time.UTC)
+		},
+	}
+
+	brokenTask, err := service.CreateTaskFromAct(ctx, scope.Resolution{
+		Kind:       scope.ScopeProject,
+		ProjectKey: "beta",
+	}, "Broken task")
+	if err != nil {
+		t.Fatalf("CreateTaskFromAct(beta) error = %v", err)
+	}
+	goodTask, err := service.CreateTaskFromAct(ctx, scope.Resolution{
+		Kind:       scope.ScopeProject,
+		ProjectKey: "alpha",
+	}, "Good task")
+	if err != nil {
+		t.Fatalf("CreateTaskFromAct(alpha) error = %v", err)
+	}
+
+	betaProject, err := store.GetProjectByKey(ctx, "beta")
+	if err != nil {
+		t.Fatalf("GetProjectByKey(beta) error = %v", err)
+	}
+	if _, err := service.Transitions.SetTransitionState(ctx, projects.TransitionStateInput{
+		ProjectID:   betaProject.ID,
+		Actor:       projects.TransitionControllerOdinOS,
+		TargetState: projects.TransitionStateCutover,
+		ChangedBy:   "test",
+	}); err != nil {
+		t.Fatalf("SetTransitionState(beta cutover) error = %v", err)
+	}
+
+	alphaProject, err := store.GetProjectByKey(ctx, "alpha")
+	if err != nil {
+		t.Fatalf("GetProjectByKey(alpha) error = %v", err)
+	}
+	if _, err := service.Transitions.SetTransitionState(ctx, projects.TransitionStateInput{
+		ProjectID:   alphaProject.ID,
+		Actor:       projects.TransitionControllerOdinOS,
+		TargetState: projects.TransitionStateCutover,
+		ChangedBy:   "test",
+	}); err != nil {
+		t.Fatalf("SetTransitionState(alpha cutover) error = %v", err)
+	}
+
+	err = service.ExecuteNextQueued(ctx)
+	if err == nil {
+		t.Fatal("ExecuteNextQueued() error = nil, want isolated task failure")
+	}
+	if !strings.Contains(err.Error(), "broken executor") {
+		t.Fatalf("ExecuteNextQueued() error = %v, want broken executor detail", err)
+	}
+
+	gotBroken, err := store.GetTask(ctx, brokenTask.ID)
+	if err != nil {
+		t.Fatalf("GetTask(broken) error = %v", err)
+	}
+	if gotBroken.Status != "failed" {
+		t.Fatalf("broken task status = %q, want failed", gotBroken.Status)
+	}
+
+	gotGood, err := store.GetTask(ctx, goodTask.ID)
+	if err != nil {
+		t.Fatalf("GetTask(good) error = %v", err)
+	}
+	if gotGood.Status != "completed" {
+		t.Fatalf("good task status = %q, want completed", gotGood.Status)
+	}
+}
+
 func TestSchedulerRespectsPerProjectConcurrencyAndBudget(t *testing.T) {
 	t.Parallel()
 
@@ -312,12 +416,20 @@ func TestSchedulerDemotesStalledRuns(t *testing.T) {
 		Now: func() time.Time { return now },
 	}
 
-	task, err := service.CreateTaskFromAct(ctx, scope.Resolution{
+	stalledTask, err := service.CreateTaskFromAct(ctx, scope.Resolution{
 		Kind:       scope.ScopeProject,
 		ProjectKey: "alpha",
 	}, "Stalled alpha")
 	if err != nil {
 		t.Fatalf("CreateTaskFromAct() error = %v", err)
+	}
+
+	youngerTask, err := service.CreateTaskFromAct(ctx, scope.Resolution{
+		Kind:       scope.ScopeProject,
+		ProjectKey: "alpha",
+	}, "Younger alpha")
+	if err != nil {
+		t.Fatalf("CreateTaskFromAct(younger) error = %v", err)
 	}
 
 	project, err := store.GetProjectByKey(ctx, "alpha")
@@ -333,14 +445,14 @@ func TestSchedulerDemotesStalledRuns(t *testing.T) {
 		t.Fatalf("SetTransitionState(cutover) error = %v", err)
 	}
 
-	run, err := service.Runs.Start(ctx, task, "fake_headless")
+	run, err := service.Runs.Start(ctx, stalledTask, "fake_headless")
 	if err != nil {
 		t.Fatalf("Runs.Start() error = %v", err)
 	}
 
 	lease, err := store.CreateWorktreeLease(ctx, sqlite.CreateWorktreeLeaseParams{
 		ProjectID:    project.ID,
-		TaskID:       task.ID,
+		TaskID:       stalledTask.ID,
 		RunID:        run.ID,
 		Mode:         "read_write",
 		BranchName:   "task/stalled-alpha",
@@ -372,23 +484,20 @@ func TestSchedulerDemotesStalledRuns(t *testing.T) {
 		t.Fatalf("ExecuteNextQueued() error = %v", err)
 	}
 
-	gotRun, err := store.GetRun(ctx, run.ID)
-	if err != nil {
-		t.Fatalf("GetRun() error = %v", err)
-	}
-	if gotRun.Status != "interrupted" {
-		t.Fatalf("run status = %q, want interrupted", gotRun.Status)
-	}
-
-	gotTask, err := store.GetTask(ctx, task.ID)
+	gotTask, err := store.GetTask(ctx, stalledTask.ID)
 	if err != nil {
 		t.Fatalf("GetTask() error = %v", err)
 	}
-	if gotTask.Status != "queued" {
-		t.Fatalf("task status = %q, want queued", gotTask.Status)
+	if gotTask.Status != "completed" {
+		t.Fatalf("task status = %q, want completed", gotTask.Status)
 	}
-	if gotTask.CurrentRunID != nil {
-		t.Fatalf("task current run = %v, want nil", gotTask.CurrentRunID)
+
+	gotYounger, err := store.GetTask(ctx, youngerTask.ID)
+	if err != nil {
+		t.Fatalf("GetTask(younger) error = %v", err)
+	}
+	if gotYounger.Status != "queued" {
+		t.Fatalf("younger task status = %q, want queued", gotYounger.Status)
 	}
 
 	gotLease, err := store.GetWorktreeLease(ctx, lease.ID)
@@ -400,6 +509,149 @@ func TestSchedulerDemotesStalledRuns(t *testing.T) {
 	}
 	if gotLease.ReleasedAt == nil {
 		t.Fatal("lease released_at = nil, want release timestamp")
+	}
+
+	gotRun, err := latestRunForTask(ctx, store, stalledTask.ID)
+	if err != nil {
+		t.Fatalf("latestRunForTask() error = %v", err)
+	}
+	if gotRun.Status != "completed" {
+		t.Fatalf("latest run status = %q, want completed", gotRun.Status)
+	}
+}
+
+func TestSchedulerDeadLettersStalledRunsWhenRetryBudgetExhausted(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openJobStore(t)
+	defer store.Close()
+
+	now := time.Date(2026, 4, 9, 12, 0, 0, 0, time.UTC)
+	store.Now = func() time.Time { return now }
+
+	registry := writeRegistry(t)
+	service := Service{
+		Store:    store,
+		Registry: registry,
+		Runs:     runsvc.Service{Store: store},
+		Executors: map[string]contract.Executor{
+			"fake_headless": jobTestExecutor{
+				result: contract.ExecutionResult{
+					Status: "completed",
+					Output: "dead-lettered task should not run",
+				},
+			},
+		},
+		ExecutorConfig: jobTestExecutorConfig(),
+		Transitions:    projects.Service{Store: store},
+		Leases: leases.Manager{
+			Store:        store,
+			Git:          &jobTestGit{},
+			WorktreeRoot: t.TempDir(),
+		},
+		Now: func() time.Time { return now },
+	}
+
+	task, err := service.CreateTaskFromAct(ctx, scope.Resolution{
+		Kind:       scope.ScopeProject,
+		ProjectKey: "alpha",
+	}, "Retry exhausted")
+	if err != nil {
+		t.Fatalf("CreateTaskFromAct() error = %v", err)
+	}
+
+	project, err := store.GetProjectByKey(ctx, "alpha")
+	if err != nil {
+		t.Fatalf("GetProjectByKey(alpha) error = %v", err)
+	}
+	if _, err := service.Transitions.SetTransitionState(ctx, projects.TransitionStateInput{
+		ProjectID:   project.ID,
+		Actor:       projects.TransitionControllerOdinOS,
+		TargetState: projects.TransitionStateCutover,
+		ChangedBy:   "test",
+	}); err != nil {
+		t.Fatalf("SetTransitionState(cutover) error = %v", err)
+	}
+
+	firstRun, err := service.Runs.Start(ctx, task, "fake_headless")
+	if err != nil {
+		t.Fatalf("Runs.Start(first) error = %v", err)
+	}
+	if err := service.Runs.Fail(ctx, firstRun.ID, fmt.Errorf("first failure")); err != nil {
+		t.Fatalf("Runs.Fail(first) error = %v", err)
+	}
+	secondRun, err := service.Runs.Start(ctx, task, "fake_headless")
+	if err != nil {
+		t.Fatalf("Runs.Start(second) error = %v", err)
+	}
+	if err := service.Runs.Fail(ctx, secondRun.ID, fmt.Errorf("second failure")); err != nil {
+		t.Fatalf("Runs.Fail(second) error = %v", err)
+	}
+	stalledRun, err := service.Runs.Start(ctx, task, "fake_headless")
+	if err != nil {
+		t.Fatalf("Runs.Start(stalled) error = %v", err)
+	}
+
+	lease, err := store.CreateWorktreeLease(ctx, sqlite.CreateWorktreeLeaseParams{
+		ProjectID:    project.ID,
+		TaskID:       task.ID,
+		RunID:        stalledRun.ID,
+		Mode:         "read_write",
+		BranchName:   "task/retry-exhausted",
+		WorktreePath: filepath.Join(t.TempDir(), "worktree"),
+		RepoRoot:     project.GitRoot,
+		State:        "active",
+	})
+	if err != nil {
+		t.Fatalf("CreateWorktreeLease() error = %v", err)
+	}
+
+	staleAt := now.Add(-2 * time.Hour)
+	if _, err := store.DB().ExecContext(ctx, `
+		UPDATE runs
+		SET started_at = ?
+		WHERE id = ?
+	`, staleAt.Format(time.RFC3339Nano), stalledRun.ID); err != nil {
+		t.Fatalf("force stale run error = %v", err)
+	}
+	if _, err := store.DB().ExecContext(ctx, `
+		UPDATE worktree_leases
+		SET heartbeat_at = ?, updated_at = ?
+		WHERE id = ?
+	`, staleAt.Format(time.RFC3339Nano), staleAt.Format(time.RFC3339Nano), lease.ID); err != nil {
+		t.Fatalf("force stale lease error = %v", err)
+	}
+
+	if err := service.ExecuteNextQueued(ctx); err != nil {
+		t.Fatalf("ExecuteNextQueued() error = %v", err)
+	}
+
+	gotTask, err := store.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
+	}
+	if gotTask.Status != "dead_letter" {
+		t.Fatalf("task status = %q, want dead_letter", gotTask.Status)
+	}
+	if gotTask.TerminalReason != "stalled run retry budget exhausted" {
+		t.Fatalf("task terminal reason = %q, want stalled run retry budget exhausted", gotTask.TerminalReason)
+	}
+
+	gotRun, err := store.GetRun(ctx, stalledRun.ID)
+	if err != nil {
+		t.Fatalf("GetRun() error = %v", err)
+	}
+	if gotRun.Status != "interrupted" {
+		t.Fatalf("run status = %q, want interrupted", gotRun.Status)
+	}
+
+	gotLease, err := store.GetWorktreeLease(ctx, lease.ID)
+	if err != nil {
+		t.Fatalf("GetWorktreeLease() error = %v", err)
+	}
+	if gotLease.State != "released" {
+		t.Fatalf("lease state = %q, want released", gotLease.State)
 	}
 }
 
@@ -839,8 +1091,9 @@ func (jobTestGit) AddWorktree(context.Context, string, string, string) error  { 
 func (jobTestGit) RemoveWorktree(context.Context, string, string) error       { return nil }
 
 type jobTestExecutor struct {
-	result contract.ExecutionResult
-	onRun  func(contract.TaskSpec)
+	result  contract.ExecutionResult
+	onRun   func(contract.TaskSpec)
+	runFunc func(contract.TaskSpec) (contract.ExecutionResult, error)
 }
 
 func (jobTestExecutor) Key() string { return "fake_headless" }
@@ -869,6 +1122,9 @@ func (jobTestExecutor) Capabilities(context.Context) (contract.Capabilities, err
 func (executor jobTestExecutor) RunTask(_ context.Context, spec contract.TaskSpec) (contract.ExecutionResult, error) {
 	if executor.onRun != nil {
 		executor.onRun(spec)
+	}
+	if executor.runFunc != nil {
+		return executor.runFunc(spec)
 	}
 	return executor.result, nil
 }

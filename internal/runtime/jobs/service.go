@@ -3,6 +3,7 @@ package jobs
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -222,7 +223,7 @@ func (service Service) runSchedulerCycle(ctx context.Context) error {
 	}
 
 	now := service.now()
-	recoveredTaskIDs, recoveredActiveCounts, err := service.demoteStalledRuns(ctx, now.Add(-service.stalledRunTimeout()))
+	recoveredActiveCounts, err := service.demoteStalledRuns(ctx, now.Add(-service.stalledRunTimeout()))
 	if err != nil {
 		return err
 	}
@@ -256,15 +257,13 @@ func (service Service) runSchedulerCycle(ctx context.Context) error {
 		if view.Status != "queued" {
 			continue
 		}
-		if _, recovered := recoveredTaskIDs[view.TaskID]; recovered {
-			continue
-		}
 		if _, seen := projectQueues[view.ProjectKey]; !seen {
 			projectOrder = append(projectOrder, view.ProjectKey)
 		}
 		projectQueues[view.ProjectKey] = append(projectQueues[view.ProjectKey], view.TaskID)
 	}
 
+	var cycleErrors []error
 	for _, projectKey := range projectOrder {
 		taskIDs := projectQueues[projectKey]
 		if len(taskIDs) == 0 {
@@ -275,10 +274,11 @@ func (service Service) runSchedulerCycle(ctx context.Context) error {
 		if !ok {
 			task, err := service.Store.GetTask(ctx, taskIDs[0])
 			if err != nil {
-				return err
+				cycleErrors = append(cycleErrors, fmt.Errorf("project %s task %d lookup: %w", projectKey, taskIDs[0], err))
+				continue
 			}
 			if err := service.runQueuedTask(ctx, task); err != nil {
-				return err
+				cycleErrors = append(cycleErrors, fmt.Errorf("project %s task %d: %w", projectKey, task.ID, err))
 			}
 			continue
 		}
@@ -292,36 +292,35 @@ func (service Service) runSchedulerCycle(ctx context.Context) error {
 
 			task, err := service.Store.GetTask(ctx, taskID)
 			if err != nil {
-				return err
+				cycleErrors = append(cycleErrors, fmt.Errorf("project %s task %d lookup: %w", projectKey, taskID, err))
+				continue
 			}
 			if err := service.runQueuedTask(ctx, task); err != nil {
-				return err
+				cycleErrors = append(cycleErrors, fmt.Errorf("project %s task %d: %w", projectKey, task.ID, err))
 			}
 			startedThisCycle++
 			activeByProject[projectKey]++
 		}
 	}
 
-	return nil
+	return errors.Join(cycleErrors...)
 }
 
-func (service Service) demoteStalledRuns(ctx context.Context, cutoff time.Time) (map[int64]struct{}, map[string]int, error) {
+func (service Service) demoteStalledRuns(ctx context.Context, cutoff time.Time) (map[string]int, error) {
 	views, err := projections.ListStalledRunViews(ctx, service.Store.DB(), cutoff)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
-	recoveredTaskIDs := make(map[int64]struct{}, len(views))
 	recoveredActiveCounts := make(map[string]int)
 	for _, view := range views {
 		if err := service.resolveStalledRun(ctx, view); err != nil {
-			return nil, nil, err
+			return nil, err
 		}
-		recoveredTaskIDs[view.TaskID] = struct{}{}
 		recoveredActiveCounts[view.ProjectKey]++
 	}
 
-	return recoveredTaskIDs, recoveredActiveCounts, nil
+	return recoveredActiveCounts, nil
 }
 
 func (service Service) resolveStalledRun(ctx context.Context, view projections.StalledRunView) error {
@@ -345,7 +344,7 @@ func (service Service) resolveStalledRun(ctx context.Context, view projections.S
 		}
 		if _, err := service.Store.UpdateTaskStatus(ctx, sqlite.UpdateTaskStatusParams{
 			TaskID:         view.TaskID,
-			Status:         "failed",
+			Status:         "dead_letter",
 			Summary:        reason,
 			TerminalReason: reason,
 			ArtifactsJSON:  "[]",
