@@ -28,8 +28,28 @@ type Manifest struct {
 	DefaultBranch string       `yaml:"default_branch"`
 	SystemProject bool         `yaml:"system_project"`
 	GitHub        GitHub       `yaml:"github"`
+	Scheduler     Scheduler    `yaml:"scheduler"`
 	Policy        Policy       `yaml:"policy"`
 	SourcePath    string       `yaml:"-"`
+}
+
+type Scheduler struct {
+	MaxConcurrentRuns    int `yaml:"max_concurrent_runs"`
+	MaxStartsPerCycle    int `yaml:"max_starts_per_cycle"`
+	StalledRunRetryLimit int `yaml:"stalled_run_retry_limit"`
+}
+
+func (scheduler Scheduler) WithDefaults() Scheduler {
+	if scheduler.MaxConcurrentRuns <= 0 {
+		scheduler.MaxConcurrentRuns = 1
+	}
+	if scheduler.MaxStartsPerCycle <= 0 {
+		scheduler.MaxStartsPerCycle = 1
+	}
+	if scheduler.StalledRunRetryLimit <= 0 {
+		scheduler.StalledRunRetryLimit = 2
+	}
+	return scheduler
 }
 
 type GitHub struct {

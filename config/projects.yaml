@@ -7,6 +7,10 @@ projects:
     system_project: true
     git_root: ..
     default_branch: main
+    scheduler:
+      max_concurrent_runs: 1
+      max_starts_per_cycle: 1
+      stalled_run_retry_limit: 2
     policy:
       allowed_commands:
         - status

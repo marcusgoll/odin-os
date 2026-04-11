@@ -13,6 +13,7 @@ import (
 	"odin-os/internal/executors/contract"
 	"odin-os/internal/executors/router"
 	"odin-os/internal/runtime/projections"
+	runsvc "odin-os/internal/runtime/runs"
 	"odin-os/internal/store/sqlite"
 	"odin-os/internal/vcs/leases"
 )
@@ -113,6 +114,7 @@ func TestExecuteNextQueuedCompletesCutoverProjectTask(t *testing.T) {
 	service := Service{
 		Store:          store,
 		Registry:       registry,
+		Runs:           runsvc.Service{Store: store},
 		Executors:      router.DefaultCatalog(),
 		ExecutorConfig: mustLoadExecutorConfig(t),
 		Transitions:    projects.Service{Store: store},
@@ -168,6 +170,236 @@ func TestExecuteNextQueuedCompletesCutoverProjectTask(t *testing.T) {
 	}
 	if !strings.Contains(run.Summary, "codex_headless_script") {
 		t.Fatalf("run summary = %q, want driver-backed execution marker", run.Summary)
+	}
+}
+
+func TestSchedulerRespectsPerProjectConcurrencyAndBudget(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openJobStore(t)
+	defer store.Close()
+
+	registry := writeRegistry(t)
+	service := Service{
+		Store:          store,
+		Registry:       registry,
+		Runs:           runsvc.Service{Store: store},
+		Executors:      router.DefaultCatalog(),
+		ExecutorConfig: mustLoadExecutorConfig(t),
+		Transitions:    projects.Service{Store: store},
+		Leases: leases.Manager{
+			Store:        store,
+			Git:          &jobTestGit{},
+			WorktreeRoot: t.TempDir(),
+		},
+		Now: func() time.Time {
+			return time.Date(2026, 4, 9, 12, 0, 0, 0, time.UTC)
+		},
+	}
+
+	alphaOld, err := service.CreateTaskFromAct(ctx, scope.Resolution{
+		Kind:       scope.ScopeProject,
+		ProjectKey: "alpha",
+	}, "Alpha old")
+	if err != nil {
+		t.Fatalf("CreateTaskFromAct(alpha old) error = %v", err)
+	}
+	alphaNew, err := service.CreateTaskFromAct(ctx, scope.Resolution{
+		Kind:       scope.ScopeProject,
+		ProjectKey: "alpha",
+	}, "Alpha new")
+	if err != nil {
+		t.Fatalf("CreateTaskFromAct(alpha new) error = %v", err)
+	}
+
+	betaTask, err := service.CreateTaskFromAct(ctx, scope.Resolution{
+		Kind:       scope.ScopeProject,
+		ProjectKey: "beta",
+	}, "Beta queued")
+	if err != nil {
+		t.Fatalf("CreateTaskFromAct(beta) error = %v", err)
+	}
+
+	betaProject, err := store.GetProjectByKey(ctx, "beta")
+	if err != nil {
+		t.Fatalf("GetProjectByKey(beta) error = %v", err)
+	}
+	if _, err := service.Runs.Start(ctx, betaTask, "fake_headless"); err != nil {
+		t.Fatalf("Runs.Start(beta) error = %v", err)
+	}
+	if _, err := service.Transitions.SetTransitionState(ctx, projects.TransitionStateInput{
+		ProjectID:   betaProject.ID,
+		Actor:       projects.TransitionControllerOdinOS,
+		TargetState: projects.TransitionStateCutover,
+		ChangedBy:   "test",
+	}); err != nil {
+		t.Fatalf("SetTransitionState(beta cutover) error = %v", err)
+	}
+
+	alphaProject, err := store.GetProjectByKey(ctx, "alpha")
+	if err != nil {
+		t.Fatalf("GetProjectByKey(alpha) error = %v", err)
+	}
+	if _, err := service.Transitions.SetTransitionState(ctx, projects.TransitionStateInput{
+		ProjectID:   alphaProject.ID,
+		Actor:       projects.TransitionControllerOdinOS,
+		TargetState: projects.TransitionStateCutover,
+		ChangedBy:   "test",
+	}); err != nil {
+		t.Fatalf("SetTransitionState(alpha cutover) error = %v", err)
+	}
+
+	if err := service.ExecuteNextQueued(ctx); err != nil {
+		t.Fatalf("ExecuteNextQueued() error = %v", err)
+	}
+
+	gotAlphaOld, err := store.GetTask(ctx, alphaOld.ID)
+	if err != nil {
+		t.Fatalf("GetTask(alpha old) error = %v", err)
+	}
+	if gotAlphaOld.Status != "completed" {
+		t.Fatalf("alpha old status = %q, want completed", gotAlphaOld.Status)
+	}
+
+	gotAlphaNew, err := store.GetTask(ctx, alphaNew.ID)
+	if err != nil {
+		t.Fatalf("GetTask(alpha new) error = %v", err)
+	}
+	if gotAlphaNew.Status != "queued" {
+		t.Fatalf("alpha new status = %q, want queued", gotAlphaNew.Status)
+	}
+
+	gotBeta, err := store.GetTask(ctx, betaTask.ID)
+	if err != nil {
+		t.Fatalf("GetTask(beta) error = %v", err)
+	}
+	if gotBeta.Status != "running" {
+		t.Fatalf("beta status = %q, want running", gotBeta.Status)
+	}
+}
+
+func TestSchedulerDemotesStalledRuns(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openJobStore(t)
+	defer store.Close()
+
+	now := time.Date(2026, 4, 9, 12, 0, 0, 0, time.UTC)
+	store.Now = func() time.Time { return now }
+
+	registry := writeRegistry(t)
+	service := Service{
+		Store:    store,
+		Registry: registry,
+		Runs:     runsvc.Service{Store: store},
+		Executors: map[string]contract.Executor{
+			"fake_headless": jobTestExecutor{
+				result: contract.ExecutionResult{
+					Status: "completed",
+					Output: "recovered stalled run",
+				},
+			},
+		},
+		ExecutorConfig: jobTestExecutorConfig(),
+		Transitions:    projects.Service{Store: store},
+		Leases: leases.Manager{
+			Store:        store,
+			Git:          &jobTestGit{},
+			WorktreeRoot: t.TempDir(),
+		},
+		Now: func() time.Time { return now },
+	}
+
+	task, err := service.CreateTaskFromAct(ctx, scope.Resolution{
+		Kind:       scope.ScopeProject,
+		ProjectKey: "alpha",
+	}, "Stalled alpha")
+	if err != nil {
+		t.Fatalf("CreateTaskFromAct() error = %v", err)
+	}
+
+	project, err := store.GetProjectByKey(ctx, "alpha")
+	if err != nil {
+		t.Fatalf("GetProjectByKey(alpha) error = %v", err)
+	}
+	if _, err := service.Transitions.SetTransitionState(ctx, projects.TransitionStateInput{
+		ProjectID:   project.ID,
+		Actor:       projects.TransitionControllerOdinOS,
+		TargetState: projects.TransitionStateCutover,
+		ChangedBy:   "test",
+	}); err != nil {
+		t.Fatalf("SetTransitionState(cutover) error = %v", err)
+	}
+
+	run, err := service.Runs.Start(ctx, task, "fake_headless")
+	if err != nil {
+		t.Fatalf("Runs.Start() error = %v", err)
+	}
+
+	lease, err := store.CreateWorktreeLease(ctx, sqlite.CreateWorktreeLeaseParams{
+		ProjectID:    project.ID,
+		TaskID:       task.ID,
+		RunID:        run.ID,
+		Mode:         "read_write",
+		BranchName:   "task/stalled-alpha",
+		WorktreePath: filepath.Join(t.TempDir(), "worktree"),
+		RepoRoot:     project.GitRoot,
+		State:        "active",
+	})
+	if err != nil {
+		t.Fatalf("CreateWorktreeLease() error = %v", err)
+	}
+
+	staleAt := now.Add(-2 * time.Hour)
+	if _, err := store.DB().ExecContext(ctx, `
+		UPDATE runs
+		SET started_at = ?
+		WHERE id = ?
+	`, staleAt.Format(time.RFC3339Nano), run.ID); err != nil {
+		t.Fatalf("force stale run error = %v", err)
+	}
+	if _, err := store.DB().ExecContext(ctx, `
+		UPDATE worktree_leases
+		SET heartbeat_at = ?, updated_at = ?
+		WHERE id = ?
+	`, staleAt.Format(time.RFC3339Nano), staleAt.Format(time.RFC3339Nano), lease.ID); err != nil {
+		t.Fatalf("force stale lease error = %v", err)
+	}
+
+	if err := service.ExecuteNextQueued(ctx); err != nil {
+		t.Fatalf("ExecuteNextQueued() error = %v", err)
+	}
+
+	gotRun, err := store.GetRun(ctx, run.ID)
+	if err != nil {
+		t.Fatalf("GetRun() error = %v", err)
+	}
+	if gotRun.Status != "interrupted" {
+		t.Fatalf("run status = %q, want interrupted", gotRun.Status)
+	}
+
+	gotTask, err := store.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
+	}
+	if gotTask.Status != "queued" {
+		t.Fatalf("task status = %q, want queued", gotTask.Status)
+	}
+	if gotTask.CurrentRunID != nil {
+		t.Fatalf("task current run = %v, want nil", gotTask.CurrentRunID)
+	}
+
+	gotLease, err := store.GetWorktreeLease(ctx, lease.ID)
+	if err != nil {
+		t.Fatalf("GetWorktreeLease() error = %v", err)
+	}
+	if gotLease.State != "released" {
+		t.Fatalf("lease state = %q, want released", gotLease.State)
+	}
+	if gotLease.ReleasedAt == nil {
+		t.Fatal("lease released_at = nil, want release timestamp")
 	}
 }
 
@@ -721,7 +953,7 @@ func writeRegistry(t *testing.T) projects.Registry {
 	root := t.TempDir()
 	configPath := filepath.Join(root, "projects.yaml")
 
-	for _, key := range []string{"odin-core", "alpha"} {
+	for _, key := range []string{"odin-core", "alpha", "beta"} {
 		gitRoot := filepath.Join(root, key)
 		if err := os.MkdirAll(filepath.Join(gitRoot, ".git"), 0o755); err != nil {
 			t.Fatalf("mkdir git root: %v", err)
@@ -737,6 +969,10 @@ projects:
     system_project: true
     git_root: odin-core
     default_branch: main
+    scheduler:
+      max_concurrent_runs: 1
+      max_starts_per_cycle: 1
+      stalled_run_retry_limit: 2
     policy:
       allowed_commands: [status]
       branch_rules:
@@ -761,8 +997,42 @@ projects:
     project_class: github_backed_project
     git_root: alpha
     default_branch: main
+    scheduler:
+      max_concurrent_runs: 1
+      max_starts_per_cycle: 1
+      stalled_run_retry_limit: 2
     github:
       repo: acme/alpha
+    policy:
+      allowed_commands: [status]
+      branch_rules:
+        protected_branches: [main]
+        require_worktree: true
+        require_task_branch: true
+        allow_default_branch_mutation: false
+      approval_gates:
+        require_for_governance_changes: true
+        require_for_destructive_operations: true
+        require_for_system_project_changes: false
+      merge_policy:
+        mode: squash
+        allow_direct_to_default_branch: false
+      destructive_operations:
+        allow_reset: false
+        allow_clean: false
+        allow_force_push: false
+        require_explicit_approval: true
+  - key: beta
+    name: Beta
+    project_class: github_backed_project
+    git_root: beta
+    default_branch: main
+    scheduler:
+      max_concurrent_runs: 1
+      max_starts_per_cycle: 1
+      stalled_run_retry_limit: 2
+    github:
+      repo: acme/beta
     policy:
       allowed_commands: [status]
       branch_rules:

@@ -27,6 +27,10 @@ projects:
     project_class: local_git_project
     git_root: alpha
     default_branch: main
+    scheduler:
+      max_concurrent_runs: 2
+      max_starts_per_cycle: 3
+      stalled_run_retry_limit: 4
     policy:
       allowed_commands:
         - status
@@ -95,6 +99,15 @@ projects:
 	}
 	if cfg.Projects[0].GitRoot != projectRoot {
 		t.Fatalf("alpha git root = %q, want %q", cfg.Projects[0].GitRoot, projectRoot)
+	}
+	if cfg.Projects[0].Scheduler.MaxConcurrentRuns != 2 {
+		t.Fatalf("alpha max concurrent runs = %d, want 2", cfg.Projects[0].Scheduler.MaxConcurrentRuns)
+	}
+	if cfg.Projects[0].Scheduler.MaxStartsPerCycle != 3 {
+		t.Fatalf("alpha max starts per cycle = %d, want 3", cfg.Projects[0].Scheduler.MaxStartsPerCycle)
+	}
+	if cfg.Projects[0].Scheduler.StalledRunRetryLimit != 4 {
+		t.Fatalf("alpha stalled retry limit = %d, want 4", cfg.Projects[0].Scheduler.StalledRunRetryLimit)
 	}
 	if !cfg.Projects[1].SystemProject {
 		t.Fatalf("expected odin-core to be marked as system project")
