@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -162,6 +163,9 @@ func TestExecuteNextQueuedCompletesCutoverProjectTask(t *testing.T) {
 	}
 	if run.Status != "completed" || run.Executor != "codex_headless" {
 		t.Fatalf("run = %+v, want completed codex_headless execution", run)
+	}
+	if !strings.Contains(run.Summary, "codex_headless_script") {
+		t.Fatalf("run summary = %q, want driver-backed execution marker", run.Summary)
 	}
 }
 
