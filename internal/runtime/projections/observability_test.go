@@ -194,6 +194,55 @@ func TestProjectPortfolioTreatsAwaitingApprovalAsBlockedNotActive(t *testing.T) 
 	}
 }
 
+func TestProjectViewsTreatDeadLetterAsTerminalWork(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openObservabilityStore(t)
+	defer store.Close()
+
+	project, task, run := seedObservabilityState(t, ctx, store)
+
+	if _, err := store.FinishRun(ctx, sqlite.FinishRunParams{
+		RunID:          run.ID,
+		Status:         "completed",
+		Summary:        "stalled work recovered elsewhere",
+		TerminalReason: "completed",
+	}); err != nil {
+		t.Fatalf("FinishRun() error = %v", err)
+	}
+	if _, err := store.UpdateTaskStatus(ctx, sqlite.UpdateTaskStatusParams{
+		TaskID:         task.ID,
+		Status:         "dead_letter",
+		Summary:        "retry budget exhausted",
+		TerminalReason: "retry budget exhausted",
+	}); err != nil {
+		t.Fatalf("UpdateTaskStatus(dead_letter) error = %v", err)
+	}
+
+	transition, err := projections.ListProjectTransitionViews(ctx, store.DB())
+	if err != nil {
+		t.Fatalf("ListProjectTransitionViews() error = %v", err)
+	}
+	if len(transition) != 1 || transition[0].ProjectKey != project.Key {
+		t.Fatalf("transition = %+v, want project %q", transition, project.Key)
+	}
+	if transition[0].OpenTaskCount != 0 {
+		t.Fatalf("transition open task count = %d, want 0 for dead-lettered task", transition[0].OpenTaskCount)
+	}
+
+	portfolio, err := projections.ListProjectPortfolioViews(ctx, store.DB())
+	if err != nil {
+		t.Fatalf("ListProjectPortfolioViews() error = %v", err)
+	}
+	if len(portfolio) != 1 || portfolio[0].ProjectKey != project.Key {
+		t.Fatalf("portfolio = %+v, want project %q", portfolio, project.Key)
+	}
+	if portfolio[0].OpenTaskCount != 0 {
+		t.Fatalf("portfolio open task count = %d, want 0 for dead-lettered task", portfolio[0].OpenTaskCount)
+	}
+}
+
 func openObservabilityStore(t *testing.T) *sqlite.Store {
 	t.Helper()
 

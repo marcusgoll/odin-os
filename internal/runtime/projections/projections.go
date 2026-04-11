@@ -276,7 +276,7 @@ func ListProjectTransitionViews(ctx context.Context, queryer Queryer) ([]Project
 			p.name,
 			p.scope,
 			COUNT(DISTINCT t.id),
-			COUNT(DISTINCT CASE WHEN t.status NOT IN ('completed', 'cancelled') THEN t.id END),
+			COUNT(DISTINCT CASE WHEN t.status NOT IN ('completed', 'cancelled', 'dead_letter') THEN t.id END),
 			MAX(e.occurred_at),
 			COALESCE(pt.state, ''),
 			COALESCE(pt.controller, ''),
@@ -664,7 +664,7 @@ func ListProjectPortfolioViews(ctx context.Context, queryer Queryer) ([]ProjectP
 			p.key,
 			p.name,
 			p.scope,
-			(SELECT COUNT(*) FROM tasks t WHERE t.project_id = p.id AND t.status NOT IN ('completed', 'cancelled')) AS open_task_count,
+			(SELECT COUNT(*) FROM tasks t WHERE t.project_id = p.id AND t.status NOT IN ('completed', 'cancelled', 'dead_letter')) AS open_task_count,
 			(SELECT COUNT(*)
 			 FROM runs r
 			 JOIN tasks t ON t.id = r.task_id
