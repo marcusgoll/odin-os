@@ -736,6 +736,9 @@ func TestSchedulerKeepsConcurrencyAfterRecoveringStalledRunWithLiveRun(t *testin
 	if gotStalled.Status != "queued" {
 		t.Fatalf("stalled task status = %q, want queued", gotStalled.Status)
 	}
+	if gotStalled.TerminalReason != "" {
+		t.Fatalf("stalled task terminal reason = %q, want empty after queued stalled recovery", gotStalled.TerminalReason)
+	}
 
 	gotQueued, err := store.GetTask(ctx, queuedTask.ID)
 	if err != nil {

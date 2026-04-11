@@ -375,14 +375,22 @@ func (store *Store) FinishRun(ctx context.Context, params FinishRunParams) (Run,
 
 func (store *Store) ResolveStalledRun(ctx context.Context, params ResolveStalledRunParams) error {
 	now := store.now()
-	artifactsJSON := normalizeArtifactsJSON(params.ArtifactsJSON)
-	terminalReason := strings.TrimSpace(params.TerminalReason)
-	if terminalReason == "" {
-		terminalReason = "interrupted"
+	runArtifactsJSON := normalizeArtifactsJSON(params.ArtifactsJSON)
+	runTerminalReason := strings.TrimSpace(params.TerminalReason)
+	if runTerminalReason == "" {
+		runTerminalReason = "interrupted by stalled run recovery"
 	}
 	taskStatus := strings.TrimSpace(params.TaskStatus)
 	if taskStatus == "" {
 		taskStatus = "queued"
+	}
+	taskArtifactsJSON := runArtifactsJSON
+	taskSummary := strings.TrimSpace(params.Summary)
+	taskTerminalReason := runTerminalReason
+	if taskStatus == "queued" {
+		taskArtifactsJSON = "[]"
+		taskSummary = ""
+		taskTerminalReason = ""
 	}
 
 	return store.withTx(ctx, func(tx *sql.Tx) error {
@@ -393,22 +401,37 @@ func (store *Store) ResolveStalledRun(ctx context.Context, params ResolveStalled
 		if currentTask.ID != params.TaskID {
 			return fmt.Errorf("run %d does not belong to task %d", params.RunID, params.TaskID)
 		}
+		if currentRun.Status != "running" || currentTask.Status != "running" || currentTask.CurrentRunID == nil || *currentTask.CurrentRunID != params.RunID {
+			return sql.ErrNoRows
+		}
 		previousTaskStatus := currentTask.Status
 
-		if _, err := tx.ExecContext(ctx, `
+		result, err := tx.ExecContext(ctx, `
 			UPDATE runs
 			SET status = ?, finished_at = ?, summary = ?, terminal_reason = ?, artifacts_json = ?
-			WHERE id = ?
-		`, "interrupted", formatTime(now), params.Summary, terminalReason, artifactsJSON, params.RunID); err != nil {
+			WHERE id = ? AND status = 'running'
+		`, "interrupted", formatTime(now), params.Summary, runTerminalReason, runArtifactsJSON, params.RunID)
+		if err != nil {
 			return err
 		}
+		if rows, err := result.RowsAffected(); err != nil {
+			return err
+		} else if rows != 1 {
+			return sql.ErrNoRows
+		}
 
-		if _, err := tx.ExecContext(ctx, `
+		result, err = tx.ExecContext(ctx, `
 			UPDATE tasks
 			SET status = ?, summary = ?, terminal_reason = ?, artifacts_json = ?, current_run_id = NULL, updated_at = ?
-			WHERE id = ?
-		`, taskStatus, params.Summary, terminalReason, artifactsJSON, formatTime(now), params.TaskID); err != nil {
+			WHERE id = ? AND status = 'running' AND current_run_id = ?
+		`, taskStatus, taskSummary, taskTerminalReason, taskArtifactsJSON, formatTime(now), params.TaskID, params.RunID)
+		if err != nil {
 			return err
+		}
+		if rows, err := result.RowsAffected(); err != nil {
+			return err
+		} else if rows != 1 {
+			return sql.ErrNoRows
 		}
 
 		if _, err := tx.ExecContext(ctx, `
@@ -433,8 +456,8 @@ func (store *Store) ResolveStalledRun(ctx context.Context, params ResolveStalled
 			Payload: runtimeevents.RunFinishedPayload{
 				Status:         "interrupted",
 				Summary:        params.Summary,
-				TerminalReason: terminalReason,
-				ArtifactsJSON:  artifactsJSON,
+				TerminalReason: runTerminalReason,
+				ArtifactsJSON:  runArtifactsJSON,
 			},
 			OccurredAt: now,
 		}); err != nil {
@@ -451,9 +474,9 @@ func (store *Store) ResolveStalledRun(ctx context.Context, params ResolveStalled
 			Payload: runtimeevents.TaskStatusChangedPayload{
 				PreviousStatus: previousTaskStatus,
 				Status:         taskStatus,
-				Summary:        params.Summary,
-				TerminalReason: terminalReason,
-				ArtifactsJSON:  artifactsJSON,
+				Summary:        taskSummary,
+				TerminalReason: taskTerminalReason,
+				ArtifactsJSON:  taskArtifactsJSON,
 			},
 			OccurredAt: now,
 		})
