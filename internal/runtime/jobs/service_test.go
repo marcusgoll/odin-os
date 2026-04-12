@@ -302,6 +302,7 @@ func TestSchedulerContinuesApprovalGatedWorkWithinProject(t *testing.T) {
 			Git:          &jobTestGit{},
 			WorktreeRoot: t.TempDir(),
 		},
+		RuntimeRoot: t.TempDir(),
 		Now: time.Now,
 	}
 
@@ -777,6 +778,7 @@ func TestSchedulerSkipsStalledRunRecoveryRace(t *testing.T) {
 			Git:          &jobTestGit{},
 			WorktreeRoot: t.TempDir(),
 		},
+		RuntimeRoot: t.TempDir(),
 		Now: time.Now,
 	}
 
@@ -1007,6 +1009,7 @@ func TestExecuteNextQueuedRejectsShadowModeMutation(t *testing.T) {
 			Git:          &jobTestGit{},
 			WorktreeRoot: t.TempDir(),
 		},
+		RuntimeRoot: t.TempDir(),
 		Now: time.Now,
 	}
 
@@ -1152,6 +1155,7 @@ func TestRunNextRequestsApprovalForSystemProjectMutation(t *testing.T) {
 			Git:          &jobTestGit{},
 			WorktreeRoot: t.TempDir(),
 		},
+		RuntimeRoot: t.TempDir(),
 		Now: time.Now,
 	}
 
@@ -1381,7 +1385,8 @@ func TestRunNextPassesRunIdentityToExecutor(t *testing.T) {
 			Git:          &jobTestGit{},
 			WorktreeRoot: t.TempDir(),
 		},
-		Now: time.Now,
+		RuntimeRoot: t.TempDir(),
+		Now:         time.Now,
 	}
 
 	if _, err := service.CreateTaskFromAct(ctx, scope.Resolution{
@@ -1413,6 +1418,9 @@ func TestRunNextPassesRunIdentityToExecutor(t *testing.T) {
 	}
 	if captured.Metadata["run_attempt"] == "" {
 		t.Fatal("run_attempt metadata empty, want attempt passed to executor")
+	}
+	if captured.Metadata["runtime_root"] == "" {
+		t.Fatal("runtime_root metadata empty, want durable artifact root passed to executor")
 	}
 }
 

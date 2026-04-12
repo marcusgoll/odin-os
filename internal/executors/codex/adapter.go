@@ -182,7 +182,10 @@ func ensureArtifactMetadata(spec contract.TaskSpec, payload []byte, metadata map
 		return nil
 	}
 
-	baseDir := strings.TrimSpace(spec.Metadata["worktree_path"])
+	baseDir := strings.TrimSpace(spec.Metadata["runtime_root"])
+	if baseDir == "" {
+		baseDir = strings.TrimSpace(spec.Metadata["worktree_path"])
+	}
 	if baseDir == "" {
 		baseDir = strings.TrimSpace(spec.Metadata["repo_root"])
 	}
@@ -239,7 +242,7 @@ func validateDriverPath(driverPath string) error {
 }
 
 func writeDriverArtifact(baseDir, artifactKey string, payload []byte) (string, error) {
-	artifactDir := filepath.Join(baseDir, ".odin", "artifacts")
+	artifactDir := filepath.Join(baseDir, "runs", "artifacts")
 	if err := os.MkdirAll(artifactDir, 0o755); err != nil {
 		return "", err
 	}

@@ -148,3 +148,56 @@ func TestHeadlessRunTaskUsesRunScopedArtifactPath(t *testing.T) {
 		t.Fatalf("artifact paths = %q and %q, want distinct run-scoped paths", first.Metadata["artifact_path"], second.Metadata["artifact_path"])
 	}
 }
+
+func TestHeadlessRunTaskWritesDurableArtifactOutsideLeasedWorktree(t *testing.T) {
+	t.Setenv("ODIN_CODEX_DRIVER_MODE", "fixture")
+
+	runtimeRoot := t.TempDir()
+	worktreePath := filepath.Join(t.TempDir(), "leased-worktree")
+	if err := os.MkdirAll(worktreePath, 0o755); err != nil {
+		t.Fatalf("MkdirAll(worktree) error = %v", err)
+	}
+
+	executor := NewHeadless()
+	result, err := executor.RunTask(context.Background(), contract.TaskSpec{
+		ID:     "runtime-smoke",
+		Kind:   contract.TaskKindGeneral,
+		Scope:  "project",
+		Prompt: "say ready",
+		Metadata: map[string]string{
+			"project_key":   "alpha",
+			"runtime_root":  runtimeRoot,
+			"worktree_path": worktreePath,
+		},
+	})
+	if err != nil {
+		t.Fatalf("RunTask() error = %v", err)
+	}
+
+	artifactPath := result.Metadata["artifact_path"]
+	if artifactPath == "" {
+		t.Fatal("artifact_path empty, want persisted driver artifact")
+	}
+	if rel, err := filepath.Rel(runtimeRoot, artifactPath); err != nil {
+		t.Fatalf("filepath.Rel(runtime_root, artifact_path) error = %v", err)
+	} else if strings.HasPrefix(rel, "..") {
+		t.Fatalf("artifact_path = %q, want under runtime_root %q", artifactPath, runtimeRoot)
+	}
+	if rel, err := filepath.Rel(worktreePath, artifactPath); err != nil {
+		t.Fatalf("filepath.Rel(worktree_path, artifact_path) error = %v", err)
+	} else if !strings.HasPrefix(rel, "..") {
+		t.Fatalf("artifact_path = %q, want outside leased worktree %q", artifactPath, worktreePath)
+	}
+
+	if err := os.RemoveAll(worktreePath); err != nil {
+		t.Fatalf("RemoveAll(worktree) error = %v", err)
+	}
+
+	content, err := os.ReadFile(artifactPath)
+	if err != nil {
+		t.Fatalf("ReadFile(artifact_path) after worktree cleanup error = %v", err)
+	}
+	if !strings.Contains(string(content), "runtime-smoke") {
+		t.Fatalf("artifact content = %q, want task id runtime-smoke", string(content))
+	}
+}

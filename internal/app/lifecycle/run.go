@@ -202,6 +202,7 @@ func runServe(ctx context.Context, app bootstrap.App, cfg appconfig.Config, stdo
 		Registry:       app.Registry,
 		Executors:      app.Executors,
 		ExecutorConfig: app.ExecutorConfig,
+		RuntimeRoot:    app.RuntimeRoot,
 		Transitions:    projects.Service{Store: app.Store},
 		Leases: leases.Manager{
 			Store:        app.Store,

@@ -19,6 +19,7 @@ import (
 type App struct {
 	Store               *sqlite.Store
 	RepoRoot            string
+	RuntimeRoot         string
 	Registry            projects.Registry
 	RegistryDiagnostics []projects.Diagnostic
 	SessionStore        clistate.SessionStore
@@ -107,6 +108,7 @@ func load(ctx context.Context, repoRoot string, runtimeRoot string, options load
 	return App{
 		Store:               store,
 		RepoRoot:            repoRoot,
+		RuntimeRoot:         runtimeRoot,
 		Registry:            registry,
 		RegistryDiagnostics: diagnostics,
 		SessionStore: clistate.SessionStore{

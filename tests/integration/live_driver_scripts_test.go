@@ -111,6 +111,16 @@ func TestLiveDriverScripts(t *testing.T) {
 		}); err != nil {
 			t.Fatalf("CreateTask() error = %v", err)
 		}
+		if _, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
+			ProjectID:   project.ID,
+			Key:         "alpha-dead-letter",
+			Title:       "Dead letter runtime task",
+			Status:      "dead_letter",
+			Scope:       "project",
+			RequestedBy: "test",
+		}); err != nil {
+			t.Fatalf("CreateTask(dead_letter) error = %v", err)
+		}
 
 		repoRoot := projectRoot(t)
 		scriptPath := filepath.Join(repoRoot, "scripts", "drivers", "project-status.sh")

@@ -41,7 +41,7 @@ def main() -> int:
             SELECT COUNT(*)
             FROM tasks
             WHERE project_id = ?
-              AND status NOT IN ('completed', 'cancelled')
+              AND status NOT IN ('completed', 'cancelled', 'dead_letter')
             """,
             (project["id"],),
         ).fetchone()[0]

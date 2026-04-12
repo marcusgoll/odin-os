@@ -24,6 +24,7 @@ type Service struct {
 	Registry       projects.Registry
 	Executors      map[string]contract.Executor
 	ExecutorConfig executorrouter.Config
+	RuntimeRoot    string
 	Transitions    projects.Service
 	Runs           runsvc.Service
 	Leases         leases.Manager
@@ -140,6 +141,9 @@ func (service Service) runQueuedTask(ctx context.Context, task sqlite.Task) erro
 			"project_key": project.Key,
 			"task_id":     fmt.Sprintf("%d", task.ID),
 		},
+	}
+	if strings.TrimSpace(service.RuntimeRoot) != "" {
+		spec.Metadata["runtime_root"] = service.RuntimeRoot
 	}
 
 	decision, err := selector.Select(ctx, spec)
