@@ -1,11 +1,13 @@
 package broker
 
 import (
+	"context"
 	"testing"
 
 	"odin-os/internal/registry"
 	"odin-os/internal/tools/budgets"
 	"odin-os/internal/tools/catalog"
+	"odin-os/internal/tools/invocation"
 )
 
 func TestCatalogReturnsThinCardsOnly(t *testing.T) {
@@ -92,6 +94,39 @@ func TestInvokeAndCompactRespectBudgets(t *testing.T) {
 	}
 }
 
+func TestCompactPreservesStructuredResultSource(t *testing.T) {
+	t.Parallel()
+
+	broker := New(
+		testSnapshot(),
+		catalog.BuiltinDefinitionsWithInvoker(&stubBrokerInvoker{
+			result: invocation.Result{
+				Source: "script",
+			},
+		}),
+		budgets.Limits{
+			Tool:    budgets.Tool{MaxSelections: 10, MaxInvocations: 10, MaxCostUnits: 20},
+			Context: budgets.Context{MaxExpandedDefinitions: 10, MaxCompactedResults: 10, MaxCompactedBytes: 1000},
+		},
+	)
+
+	result, err := broker.InvokeTool("project_status", map[string]string{"project_key": "alpha"})
+	if err != nil {
+		t.Fatalf("InvokeTool(project_status) error = %v", err)
+	}
+	if result.Source != "driver" {
+		t.Fatalf("result.Source = %q, want driver", result.Source)
+	}
+
+	compacted, err := broker.Compact(result)
+	if err != nil {
+		t.Fatalf("Compact() error = %v", err)
+	}
+	if compacted.Source != "driver" {
+		t.Fatalf("compacted.Source = %q, want driver", compacted.Source)
+	}
+}
+
 func testSnapshot() registry.Snapshot {
 	return registry.Snapshot{
 		Items: []registry.Item{
@@ -120,4 +155,31 @@ func testSnapshot() registry.Snapshot {
 			},
 		},
 	}
+}
+
+type stubBrokerInvoker struct {
+	result invocation.Result
+}
+
+func (invoker *stubBrokerInvoker) Invoke(_ context.Context, key string, request invocation.Request) (invocation.Result, error) {
+	if key != "project_status" {
+		return invocation.Result{}, nil
+	}
+	result := invoker.result
+	if result.KeyFacts == nil {
+		result.KeyFacts = map[string]string{}
+	}
+	if result.Summary == "" {
+		result.Summary = "runtime-backed"
+	}
+	if result.RawRef == "" {
+		result.RawRef = "driver://project_status/alpha"
+	}
+	if result.RawOutput == "" {
+		result.RawOutput = "project=alpha open_tasks=1"
+	}
+	if result.Source == "" {
+		result.Source = "script"
+	}
+	return result, nil
 }

@@ -79,6 +79,7 @@ type Expansion struct {
 
 type StructuredResult struct {
 	CapabilityKey   string
+	Source          string
 	Summary         string
 	Artifacts       []string
 	KeyFacts        map[string]string
@@ -89,6 +90,7 @@ type StructuredResult struct {
 
 type CompactedResult struct {
 	CapabilityKey   string
+	Source          string
 	Summary         string
 	KeyFacts        map[string]string
 	FollowOnOptions []string
@@ -174,7 +176,7 @@ func CloneSections(sections map[string]string) map[string]string {
 }
 
 func CompactedSize(result CompactedResult) int {
-	size := len(result.CapabilityKey) + len(result.Summary) + len(result.RawRef)
+	size := len(result.CapabilityKey) + len(result.Source) + len(result.Summary) + len(result.RawRef)
 	for key, value := range result.KeyFacts {
 		size += len(key) + len(value)
 	}

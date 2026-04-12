@@ -17,8 +17,9 @@ const (
 )
 
 type Config struct {
-	Version  int        `yaml:"version"`
-	Projects []Manifest `yaml:"projects"`
+	Version  int           `yaml:"version"`
+	Projects []Manifest    `yaml:"projects"`
+	Cutover  CutoverConfig `yaml:"cutover"`
 }
 
 type Manifest struct {
@@ -29,8 +30,28 @@ type Manifest struct {
 	DefaultBranch string       `yaml:"default_branch"`
 	SystemProject bool         `yaml:"system_project"`
 	GitHub        GitHub       `yaml:"github"`
+	Scheduler     Scheduler    `yaml:"scheduler"`
 	Policy        Policy       `yaml:"policy"`
 	SourcePath    string       `yaml:"-"`
+}
+
+type Scheduler struct {
+	MaxConcurrentRuns    int `yaml:"max_concurrent_runs"`
+	MaxStartsPerCycle    int `yaml:"max_starts_per_cycle"`
+	StalledRunRetryLimit int `yaml:"stalled_run_retry_limit"`
+}
+
+func (scheduler Scheduler) WithDefaults() Scheduler {
+	if scheduler.MaxConcurrentRuns <= 0 {
+		scheduler.MaxConcurrentRuns = 1
+	}
+	if scheduler.MaxStartsPerCycle <= 0 {
+		scheduler.MaxStartsPerCycle = 1
+	}
+	if scheduler.StalledRunRetryLimit <= 0 {
+		scheduler.StalledRunRetryLimit = 2
+	}
+	return scheduler
 }
 
 type GitHub struct {
@@ -78,6 +99,22 @@ type DestructiveOperations struct {
 	RequireExplicitApproval *bool `yaml:"require_explicit_approval"`
 }
 
+type CutoverConfig struct {
+	PilotProjects []CutoverPilotProject `yaml:"pilot_projects"`
+}
+
+type CutoverPilotProject struct {
+	Key                       string   `yaml:"key"`
+	RuntimeOwner              string   `yaml:"runtime_owner"`
+	PrimaryController         string   `yaml:"primary_controller"`
+	ComparisonContext         string   `yaml:"comparison_context"`
+	LegacyPrimaryRequired     bool     `yaml:"legacy_primary_required"`
+	ShadowGraduation          []string `yaml:"shadow_graduation"`
+	LimitedActionGraduation   []string `yaml:"limited_action_graduation"`
+	CutoverGraduation         []string `yaml:"cutover_graduation"`
+	LegacyDutiesToRetireOrder []string `yaml:"legacy_duties_to_retire_in_order"`
+}
+
 func LoadManifestFile(path string) (Config, error) {
 	var cfg Config
 
@@ -113,9 +150,23 @@ func LoadManifestFiles(paths ...string) (Config, error) {
 			merged.Version = cfg.Version
 		}
 		merged.Projects = append(merged.Projects, cfg.Projects...)
+		merged.Cutover.PilotProjects = append(merged.Cutover.PilotProjects, cfg.Cutover.PilotProjects...)
 	}
 
 	return merged, nil
+}
+
+func (cfg Config) CutoverPilotProject(key string) (CutoverPilotProject, bool) {
+	return cfg.Cutover.PilotProject(key)
+}
+
+func (cutover CutoverConfig) PilotProject(key string) (CutoverPilotProject, bool) {
+	for _, project := range cutover.PilotProjects {
+		if project.Key == key {
+			return project, true
+		}
+	}
+	return CutoverPilotProject{}, false
 }
 
 func resolveGitRoot(baseDir, gitRoot string) string {

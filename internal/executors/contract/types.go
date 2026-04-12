@@ -37,54 +37,54 @@ const (
 var ErrNotImplemented = errors.New("executor method not implemented")
 
 type BudgetHints struct {
-	MaxInputTokens  int
-	MaxOutputTokens int
-	MaxCostUSD      float64
+	MaxInputTokens  int     `json:"max_input_tokens"`
+	MaxOutputTokens int     `json:"max_output_tokens"`
+	MaxCostUSD      float64 `json:"max_cost_usd"`
 }
 
 type ToolPolicy struct {
-	Mode    string
-	Allowed []string
+	Mode    string   `json:"mode"`
+	Allowed []string `json:"allowed"`
 }
 
 type Requirements struct {
-	AllowedClasses      []ExecutorClass
-	NeedsResume         bool
-	NeedsCancel         bool
-	NeedsTools          bool
-	NeedsCostEstimate   bool
-	NeedsHeadlessPlan   bool
-	NeedsBrokerFallback bool
+	AllowedClasses      []ExecutorClass `json:"allowed_classes"`
+	NeedsResume         bool            `json:"needs_resume"`
+	NeedsCancel         bool            `json:"needs_cancel"`
+	NeedsTools          bool            `json:"needs_tools"`
+	NeedsCostEstimate   bool            `json:"needs_cost_estimate"`
+	NeedsHeadlessPlan   bool            `json:"needs_headless_plan"`
+	NeedsBrokerFallback bool            `json:"needs_broker_fallback"`
 }
 
 type TaskSpec struct {
-	ID           string
-	Kind         TaskKind
-	Scope        string
-	Prompt       string
-	Budget       BudgetHints
-	Tools        ToolPolicy
-	Metadata     map[string]string
-	Requirements Requirements
+	ID           string            `json:"id"`
+	Kind         TaskKind          `json:"kind"`
+	Scope        string            `json:"scope"`
+	Prompt       string            `json:"prompt"`
+	Budget       BudgetHints       `json:"budget"`
+	Tools        ToolPolicy        `json:"tools"`
+	Metadata     map[string]string `json:"metadata"`
+	Requirements Requirements      `json:"requirements"`
 }
 
 type ResumePacket struct {
-	Kind    string
-	Summary string
-	Payload map[string]string
+	Kind    string            `json:"kind"`
+	Summary string            `json:"summary"`
+	Payload map[string]string `json:"payload"`
 }
 
 type TaskHandle struct {
-	ExecutorKey string
-	ExternalID  string
-	Status      string
+	ExecutorKey string `json:"executor_key"`
+	ExternalID  string `json:"external_id"`
+	Status      string `json:"status"`
 }
 
 type ExecutionResult struct {
-	Handle   TaskHandle
-	Status   string
-	Output   string
-	Metadata map[string]string
+	Handle   TaskHandle        `json:"handle"`
+	Status   string            `json:"status"`
+	Output   string            `json:"output"`
+	Metadata map[string]string `json:"metadata"`
 }
 
 type HealthReport struct {

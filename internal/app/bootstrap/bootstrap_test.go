@@ -169,6 +169,21 @@ Example
 	}
 }
 
+func TestLoadReadOnlyDoesNotInitializeReadinessState(t *testing.T) {
+	repoRoot := filepath.Clean(filepath.Join("..", "..", ".."))
+	runtimeRoot := t.TempDir()
+
+	app, err := LoadReadOnly(context.Background(), repoRoot, runtimeRoot)
+	if err != nil {
+		t.Fatalf("LoadReadOnly() error = %v", err)
+	}
+	defer app.Store.Close()
+
+	assertCountExactly(t, app.Store.DB().QueryRowContext(context.Background(), "SELECT COUNT(*) FROM registry_versions"), 0)
+	assertCountExactly(t, app.Store.DB().QueryRowContext(context.Background(), "SELECT COUNT(*) FROM executor_health"), 0)
+	assertCountExactly(t, app.Store.DB().QueryRowContext(context.Background(), "SELECT COUNT(*) FROM projection_freshness"), 0)
+}
+
 func TestLoadSerializesConcurrentBootstrapForFreshRuntime(t *testing.T) {
 	repoRoot := filepath.Clean(filepath.Join("..", "..", ".."))
 	runtimeRoot := t.TempDir()
@@ -287,6 +302,18 @@ func assertCountAtLeast(t *testing.T, row rowScanner, minimum int) {
 	}
 	if count < minimum {
 		t.Fatalf("count = %d, want at least %d", count, minimum)
+	}
+}
+
+func assertCountExactly(t *testing.T, row rowScanner, want int) {
+	t.Helper()
+
+	var count int
+	if err := row.Scan(&count); err != nil {
+		t.Fatalf("Scan() error = %v", err)
+	}
+	if count != want {
+		t.Fatalf("count = %d, want %d", count, want)
 	}
 }
 

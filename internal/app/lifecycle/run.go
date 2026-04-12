@@ -25,6 +25,7 @@ import (
 	"odin-os/internal/cli/scope"
 	clistate "odin-os/internal/cli/state"
 	"odin-os/internal/core/projects"
+	conversationsvc "odin-os/internal/runtime/conversation"
 	runtimeevents "odin-os/internal/runtime/events"
 	healthsvc "odin-os/internal/runtime/health"
 	"odin-os/internal/runtime/jobs"
@@ -45,6 +46,9 @@ const rootUsageBanner = "Usage: odin <command> [args]\n\nCommands: help repl doc
 var (
 	serveTaskLoopInterval     = 1 * time.Second
 	serveSelfHealLoopInterval = 30 * time.Second
+	serveMetricsLoopInterval  = 1 * time.Minute
+	serveOperationTimeout     = 30 * time.Second
+	serveListen               = net.Listen
 )
 
 // Run dispatches between root commands and the interactive shell.
@@ -64,10 +68,17 @@ func Run(ctx context.Context, root string, args []string, stdin io.Reader, stdou
 
 	loadCtx := ctx
 	if rootCommand.Name == "serve" {
-		loadCtx = context.WithoutCancel(ctx)
+		var cancelLoad context.CancelFunc
+		loadCtx, cancelLoad = serveLoadContext(ctx)
+		defer cancelLoad()
 	}
 
-	app, err := bootstrap.Load(loadCtx, root, cfg.RuntimeRoot)
+	appLoader := bootstrap.Load
+	if rootCommand.Name == "status" {
+		appLoader = bootstrap.LoadReadOnly
+	}
+
+	app, err := appLoader(loadCtx, root, cfg.RuntimeRoot)
 	if err != nil {
 		return err
 	}
@@ -148,49 +159,6 @@ func runDoctor(ctx context.Context, app bootstrap.App, args []string, stdout io.
 	}
 
 	_, err = fmt.Fprintf(stdout, "status=%s checks=%d\n", report.Status, len(report.Checks))
-	return err
-}
-
-func runStatus(ctx context.Context, app bootstrap.App, args []string, stdout io.Writer) error {
-	jsonOutput, remaining, err := consumeJSONFlag(args)
-	if err != nil {
-		return err
-	}
-	if len(remaining) != 0 {
-		return fmt.Errorf("usage: odin status [--json]")
-	}
-
-	state, err := loadCLIState(app)
-	if err != nil {
-		return err
-	}
-
-	pendingApprovals, err := listPendingApprovals(ctx, app.Store, state.Scope)
-	if err != nil {
-		return err
-	}
-
-	summary, err := healthsvc.Service{DB: app.Store.DB()}.Summary(ctx, len(app.RegistryDiagnostics) == 0)
-	if err != nil {
-		return err
-	}
-
-	view := commands.StatusView{
-		Health:           string(summary.Status),
-		PendingApprovals: len(pendingApprovals),
-		RegistryHealthy:  summary.RegistryHealthy,
-	}
-	if jsonOutput {
-		return commands.WriteStatusJSON(stdout, view)
-	}
-
-	_, err = fmt.Fprintf(
-		stdout,
-		"health=%s pending_approvals=%d registry_healthy=%t\n",
-		view.Health,
-		view.PendingApprovals,
-		view.RegistryHealthy,
-	)
 	return err
 }
 
@@ -578,6 +546,55 @@ func runHealthcheck(ctx context.Context, app bootstrap.App, stdout io.Writer) er
 	return err
 }
 
+func runStatus(ctx context.Context, app bootstrap.App, args []string, stdout io.Writer) error {
+	jsonOutput, remaining, err := consumeJSONFlag(args)
+	if err != nil {
+		return err
+	}
+	if len(remaining) != 0 {
+		return fmt.Errorf("usage: odin status [--json]")
+	}
+
+	snapshot, err := conversationsvc.Service{
+		DB:             app.Store.DB(),
+		StalledTimeout: 30 * time.Minute,
+	}.Snapshot(ctx)
+	if err != nil {
+		return err
+	}
+
+	summary, err := healthsvc.Service{DB: app.Store.DB()}.Summary(ctx, len(app.RegistryDiagnostics) == 0)
+	if err != nil {
+		return err
+	}
+
+	if jsonOutput {
+		encoder := json.NewEncoder(stdout)
+		encoder.SetIndent("", "  ")
+		return encoder.Encode(map[string]any{
+			"health":                       string(summary.Status),
+			"pending_approvals":            len(snapshot.ApprovalsWaiting),
+			"registry_healthy":             summary.RegistryHealthy,
+			"generated_at":                 snapshot.GeneratedAt,
+			"approvals_waiting":            snapshot.ApprovalsWaiting,
+			"stalled_runs":                 snapshot.StalledRuns,
+			"active_runs":                  snapshot.ActiveRuns,
+			"project_transitions":          snapshot.ProjectTransitions,
+			"project_transition_ownership": snapshot.ProjectTransitionOwnership,
+		})
+	}
+
+	_, err = fmt.Fprintf(stdout, "health=%s pending_approvals=%d stalled_runs=%d active_runs=%d project_transitions=%d registry_healthy=%t\n",
+		summary.Status,
+		len(snapshot.ApprovalsWaiting),
+		len(snapshot.StalledRuns),
+		len(snapshot.ActiveRuns),
+		len(snapshot.ProjectTransitions),
+		summary.RegistryHealthy,
+	)
+	return err
+}
+
 func runtimeEnv() map[string]string {
 	return map[string]string{
 		"ODIN_ROOT":      os.Getenv("ODIN_ROOT"),
@@ -914,11 +931,21 @@ func decodeCSVOrJSON(raw string) []string {
 	return decoded
 }
 
-func runServe(ctx context.Context, app bootstrap.App, cfg appconfig.Config, stdout io.Writer) error {
-	operationCtx := context.WithoutCancel(ctx)
+func serveLoadContext(parent context.Context) (context.Context, context.CancelFunc) {
+	if errors.Is(parent.Err(), context.DeadlineExceeded) {
+		return context.WithTimeout(parent, serveOperationTimeout)
+	}
+	if deadline, ok := parent.Deadline(); ok {
+		return context.WithDeadline(context.Background(), deadline)
+	}
+	return context.WithCancel(context.Background())
+}
 
+func runServe(ctx context.Context, app bootstrap.App, cfg appconfig.Config, stdout io.Writer) error {
 	if cfg.Service.StartupRecovery {
-		result, err := recovery.Service{Store: app.Store}.RunStartupRecovery(operationCtx)
+		startupCtx, cancel := serveStartupContext(ctx)
+		result, err := recovery.Service{Store: app.Store}.RunStartupRecovery(startupCtx)
+		cancel()
 		if err != nil {
 			return err
 		}
@@ -942,6 +969,7 @@ func runServe(ctx context.Context, app bootstrap.App, cfg appconfig.Config, stdo
 		Registry:       app.Registry,
 		Executors:      app.Executors,
 		ExecutorConfig: app.ExecutorConfig,
+		RuntimeRoot:    app.RuntimeRoot,
 		Transitions:    projects.Service{Store: app.Store},
 		Leases: leases.Manager{
 			Store:        app.Store,
@@ -957,20 +985,34 @@ func runServe(ctx context.Context, app bootstrap.App, cfg appconfig.Config, stdo
 		HealthConfig:    healthsvc.DefaultConfig(),
 		Logger:          logger,
 	}
+	metricsService := metricsvc.Service{
+		DB: app.Store.DB(),
+	}
 
-	if err := jobService.ExecuteNextQueued(operationCtx); err != nil {
+	serveCtx, cancelServe := serveServeContext(ctx)
+	defer cancelServe()
+
+	taskCtx, cancel := serveOperationContext(serveCtx)
+	if err := jobService.ExecuteNextQueued(taskCtx); err != nil {
+		cancel()
 		logBackgroundError(logger, "task_runner", err)
 	}
-	if _, err := recoveryService.RunCycle(operationCtx); err != nil {
+	cancel()
+
+	recoveryCtx, cancel := serveOperationContext(serveCtx)
+	if _, err := recoveryService.RunCycle(recoveryCtx); err != nil {
+		cancel()
 		logBackgroundError(logger, "self_heal", err)
 	}
+	cancel()
 
 	var background sync.WaitGroup
-	background.Add(2)
-	go runTaskLoop(ctx, operationCtx, &background, jobService, logger)
-	go runSelfHealLoop(ctx, operationCtx, &background, recoveryService, logger)
+	background.Add(3)
+	go runTaskLoop(serveCtx, &background, jobService, logger)
+	go runSelfHealLoop(serveCtx, &background, recoveryService, logger)
+	go runMetricsLoop(serveCtx, &background, metricsService, logger)
 
-	listener, err := net.Listen("tcp", cfg.Service.HTTPAddr)
+	listener, err := serveListen("tcp", cfg.Service.HTTPAddr)
 	if err != nil {
 		return err
 	}
@@ -989,12 +1031,22 @@ func runServe(ctx context.Context, app bootstrap.App, cfg appconfig.Config, stdo
 	}
 
 	shutdownDone := make(chan struct{})
+	shutdownStop := make(chan struct{})
+	var shutdownStopOnce sync.Once
+	stopShutdown := func() {
+		shutdownStopOnce.Do(func() {
+			close(shutdownStop)
+		})
+	}
 	go func() {
 		defer close(shutdownDone)
-		<-ctx.Done()
-		shutdownCtx, cancel := context.WithCancel(context.Background())
-		defer cancel()
-		_ = server.Shutdown(shutdownCtx)
+		select {
+		case <-ctx.Done():
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), serveOperationTimeout)
+			defer cancel()
+			_ = server.Shutdown(shutdownCtx)
+		case <-shutdownStop:
+		}
 	}()
 
 	if _, err := fmt.Fprintf(stdout, "serving on %s\n", listener.Addr().String()); err != nil {
@@ -1002,11 +1054,14 @@ func runServe(ctx context.Context, app bootstrap.App, cfg appconfig.Config, stdo
 	}
 
 	err = server.Serve(listener)
-	<-shutdownDone
-	background.Wait()
 	if errors.Is(err, stdhttp.ErrServerClosed) {
+		<-shutdownDone
+		background.Wait()
 		return ctx.Err()
 	}
+	stopShutdown()
+	cancelServe()
+	background.Wait()
 	return err
 }
 
@@ -1027,8 +1082,12 @@ func openServiceLogger(runtimeRoot string) (*logs.Logger, io.Closer, error) {
 	}, file, nil
 }
 
-func runTaskLoop(ctx context.Context, operationCtx context.Context, wg *sync.WaitGroup, service jobs.Service, logger *logs.Logger) {
+func runTaskLoop(ctx context.Context, wg *sync.WaitGroup, service jobs.Service, logger *logs.Logger) {
 	defer wg.Done()
+
+	logBackgroundEvent(logger, logs.LevelInfo, "task_runner", "task loop started", map[string]any{
+		"interval_ms": serveTaskLoopInterval.Milliseconds(),
+	})
 
 	ticker := time.NewTicker(serveTaskLoopInterval)
 	defer ticker.Stop()
@@ -1038,15 +1097,22 @@ func runTaskLoop(ctx context.Context, operationCtx context.Context, wg *sync.Wai
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if err := service.ExecuteNextQueued(operationCtx); err != nil {
+			taskCtx, cancel := serveOperationContext(ctx)
+			if err := service.ExecuteNextQueued(taskCtx); err != nil {
+				cancel()
 				logBackgroundError(logger, "task_runner", err)
 			}
+			cancel()
 		}
 	}
 }
 
-func runSelfHealLoop(ctx context.Context, operationCtx context.Context, wg *sync.WaitGroup, service recovery.Service, logger *logs.Logger) {
+func runSelfHealLoop(ctx context.Context, wg *sync.WaitGroup, service recovery.Service, logger *logs.Logger) {
 	defer wg.Done()
+
+	logBackgroundEvent(logger, logs.LevelInfo, "self_heal", "self-heal loop started", map[string]any{
+		"interval_ms": serveSelfHealLoopInterval.Milliseconds(),
+	})
 
 	ticker := time.NewTicker(serveSelfHealLoopInterval)
 	defer ticker.Stop()
@@ -1056,26 +1122,95 @@ func runSelfHealLoop(ctx context.Context, operationCtx context.Context, wg *sync
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if _, err := service.RunCycle(operationCtx); err != nil {
+			recoveryCtx, cancel := serveOperationContext(ctx)
+			if _, err := service.RunCycle(recoveryCtx); err != nil {
+				cancel()
 				logBackgroundError(logger, "self_heal", err)
 			}
+			cancel()
 		}
 	}
 }
 
+func runMetricsLoop(ctx context.Context, wg *sync.WaitGroup, service metricsvc.Service, logger *logs.Logger) {
+	defer wg.Done()
+
+	logBackgroundEvent(logger, logs.LevelInfo, "metrics", "metrics loop started", map[string]any{
+		"interval_ms": serveMetricsLoopInterval.Milliseconds(),
+	})
+
+	ticker := time.NewTicker(serveMetricsLoopInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			metricsCtx, cancel := serveOperationContext(ctx)
+			snapshot, err := service.Collect(metricsCtx)
+			cancel()
+			if err != nil {
+				logBackgroundError(logger, "metrics", err)
+				continue
+			}
+			logBackgroundEvent(logger, logs.LevelInfo, "metrics", "metrics snapshot exported", map[string]any{
+				"generated_at":        snapshot.GeneratedAt.Format(time.RFC3339Nano),
+				"active_runs":         snapshot.ActiveRuns,
+				"blocked_items":       snapshot.BlockedItems,
+				"approvals_waiting":   snapshot.ApprovalsWaiting,
+				"open_incidents":      snapshot.OpenIncidents,
+				"escalated_incidents": snapshot.EscalatedIncidents,
+				"active_recoveries":   snapshot.ActiveRecoveries,
+				"queued_tasks":        snapshot.QueuedTasks,
+				"stale_executors":     snapshot.StaleExecutors,
+				"stale_sources":       snapshot.StaleSources,
+				"stale_projections":   snapshot.StaleProjections,
+			})
+		}
+	}
+}
+
+func serveOperationContext(parent context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(parent, serveOperationTimeout)
+}
+
+func serveStartupContext(parent context.Context) (context.Context, context.CancelFunc) {
+	if errors.Is(parent.Err(), context.DeadlineExceeded) {
+		return context.WithTimeout(parent, serveOperationTimeout)
+	}
+
+	base := context.Background()
+	if deadline, ok := parent.Deadline(); ok {
+		timeoutDeadline := time.Now().Add(serveOperationTimeout)
+		if deadline.Before(timeoutDeadline) {
+			return context.WithDeadline(base, deadline)
+		}
+	}
+	return context.WithTimeout(base, serveOperationTimeout)
+}
+
+func serveServeContext(parent context.Context) (context.Context, context.CancelFunc) {
+	return context.WithCancel(parent)
+}
+
 func logBackgroundError(logger *logs.Logger, component string, err error) {
+	logBackgroundEvent(logger, logs.LevelError, component, "background loop error", map[string]any{
+		"error": err.Error(),
+	})
+}
+
+func logBackgroundEvent(logger *logs.Logger, level logs.Level, component, message string, fields map[string]any) {
 	if logger == nil {
 		return
 	}
 	_ = logger.Log(logs.Record{
-		Level:         logs.LevelError,
+		Level:         level,
 		Component:     component,
-		Message:       "background loop error",
+		Message:       message,
 		CorrelationID: component,
 		Scope:         "global",
-		Fields: map[string]any{
-			"error": err.Error(),
-		},
+		Fields:        fields,
 	})
 }
 

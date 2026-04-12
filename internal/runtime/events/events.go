@@ -94,6 +94,9 @@ type TaskCreatedPayload struct {
 type TaskStatusChangedPayload struct {
 	PreviousStatus string `json:"previous_status"`
 	Status         string `json:"status"`
+	Summary        string `json:"summary,omitempty"`
+	TerminalReason string `json:"terminal_reason,omitempty"`
+	ArtifactsJSON  string `json:"artifacts_json,omitempty"`
 }
 
 type RunStartedPayload struct {
@@ -104,8 +107,10 @@ type RunStartedPayload struct {
 }
 
 type RunFinishedPayload struct {
-	Status  string `json:"status"`
-	Summary string `json:"summary"`
+	Status         string `json:"status"`
+	Summary        string `json:"summary"`
+	TerminalReason string `json:"terminal_reason,omitempty"`
+	ArtifactsJSON  string `json:"artifacts_json,omitempty"`
 }
 
 type ApprovalRequestedPayload struct {

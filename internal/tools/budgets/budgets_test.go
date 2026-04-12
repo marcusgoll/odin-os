@@ -45,3 +45,22 @@ func TestTrackerEnforcesContextBudget(t *testing.T) {
 		t.Fatalf("RecordExpansion() error = nil, want budget error")
 	}
 }
+
+func TestSchedulerBudgetRespectsConcurrencyAndCycleCaps(t *testing.T) {
+	t.Parallel()
+
+	budget := SchedulerBudget{
+		MaxConcurrentRuns: 1,
+		MaxStartsPerCycle: 1,
+	}
+
+	if !budget.CanStart(0, 0) {
+		t.Fatal("CanStart(0, 0) = false, want true")
+	}
+	if budget.CanStart(1, 0) {
+		t.Fatal("CanStart(1, 0) = true, want false")
+	}
+	if budget.CanStart(0, 1) {
+		t.Fatal("CanStart(0, 1) = true, want false")
+	}
+}

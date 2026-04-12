@@ -20,6 +20,7 @@ type Diagnostic struct {
 func Validate(cfg Config) []Diagnostic {
 	diagnostics := make([]Diagnostic, 0)
 	seenKeys := make(map[string]struct{}, len(cfg.Projects))
+	registeredKeys := make(map[string]struct{}, len(cfg.Projects))
 
 	if cfg.Version <= 0 {
 		diagnostics = append(diagnostics, Diagnostic{
@@ -29,7 +30,50 @@ func Validate(cfg Config) []Diagnostic {
 	}
 
 	for _, project := range cfg.Projects {
+		if project.Key != "" {
+			registeredKeys[project.Key] = struct{}{}
+		}
 		diagnostics = append(diagnostics, validateProject(project, seenKeys)...)
+	}
+
+	diagnostics = append(diagnostics, validateCutover(cfg, registeredKeys)...)
+
+	return diagnostics
+}
+
+func validateCutover(cfg Config, registeredKeys map[string]struct{}) []Diagnostic {
+	if len(cfg.Cutover.PilotProjects) == 0 {
+		return nil
+	}
+
+	diagnostics := make([]Diagnostic, 0)
+	seenPilotKeys := make(map[string]struct{}, len(cfg.Cutover.PilotProjects))
+
+	for _, pilot := range cfg.Cutover.PilotProjects {
+		if pilot.Key == "" {
+			diagnostics = append(diagnostics, Diagnostic{
+				Code:    "missing_field",
+				Message: "cutover.pilot_projects[].key is required",
+			})
+			continue
+		}
+		if _, exists := seenPilotKeys[pilot.Key]; exists {
+			diagnostics = append(diagnostics, Diagnostic{
+				ProjectKey: pilot.Key,
+				Code:       "duplicate_cutover_pilot_key",
+				Message:    fmt.Sprintf("cutover pilot key %q is duplicated", pilot.Key),
+			})
+			continue
+		}
+		seenPilotKeys[pilot.Key] = struct{}{}
+
+		if _, exists := registeredKeys[pilot.Key]; !exists {
+			diagnostics = append(diagnostics, Diagnostic{
+				ProjectKey: pilot.Key,
+				Code:       "unknown_cutover_pilot_project",
+				Message:    fmt.Sprintf("cutover pilot key %q must match a registered project in the same manifest", pilot.Key),
+			})
+		}
 	}
 
 	return diagnostics

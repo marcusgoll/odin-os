@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	runtimeevents "odin-os/internal/runtime/events"
 )
@@ -68,6 +69,8 @@ type ActiveRunView struct {
 	Attempt    int
 	StartedAt  string
 }
+
+type StalledRunView = ActiveRunView
 
 type BlockedItemView struct {
 	TaskID     int64
@@ -273,7 +276,7 @@ func ListProjectTransitionViews(ctx context.Context, queryer Queryer) ([]Project
 			p.name,
 			p.scope,
 			COUNT(DISTINCT t.id),
-			COUNT(DISTINCT CASE WHEN t.status NOT IN ('completed', 'cancelled') THEN t.id END),
+			COUNT(DISTINCT CASE WHEN t.status NOT IN ('completed', 'cancelled', 'dead_letter') THEN t.id END),
 			MAX(e.occurred_at),
 			COALESCE(pt.state, ''),
 			COALESCE(pt.controller, ''),
@@ -349,7 +352,7 @@ func ListActiveRunViews(ctx context.Context, queryer Queryer) ([]ActiveRunView, 
 		FROM runs r
 		JOIN tasks t ON t.id = r.task_id
 		JOIN projects p ON p.id = t.project_id
-		WHERE r.status NOT IN ('completed', 'cancelled', 'failed')
+		WHERE r.status NOT IN ('completed', 'cancelled', 'failed', 'awaiting_approval', 'interrupted')
 		ORDER BY r.id ASC
 	`)
 	if err != nil {
@@ -360,6 +363,49 @@ func ListActiveRunViews(ctx context.Context, queryer Queryer) ([]ActiveRunView, 
 	var views []ActiveRunView
 	for rows.Next() {
 		var view ActiveRunView
+		if err := rows.Scan(
+			&view.RunID,
+			&view.TaskID,
+			&view.TaskKey,
+			&view.ProjectKey,
+			&view.Executor,
+			&view.Status,
+			&view.Attempt,
+			&view.StartedAt,
+		); err != nil {
+			return nil, err
+		}
+		views = append(views, view)
+	}
+	return views, rows.Err()
+}
+
+func ListStalledRunViews(ctx context.Context, queryer Queryer, cutoff time.Time) ([]StalledRunView, error) {
+	rows, err := queryer.QueryContext(ctx, `
+		SELECT
+			r.id,
+			r.task_id,
+			t.key,
+			p.key,
+			r.executor,
+			r.status,
+			r.attempt,
+			r.started_at
+		FROM runs r
+		JOIN tasks t ON t.id = r.task_id
+		JOIN projects p ON p.id = t.project_id
+		WHERE r.status = 'running'
+		  AND r.started_at < ?
+		ORDER BY r.started_at ASC, r.id ASC
+	`, cutoff.UTC().Format(time.RFC3339Nano))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var views []StalledRunView
+	for rows.Next() {
+		var view StalledRunView
 		if err := rows.Scan(
 			&view.RunID,
 			&view.TaskID,
@@ -618,12 +664,12 @@ func ListProjectPortfolioViews(ctx context.Context, queryer Queryer) ([]ProjectP
 			p.key,
 			p.name,
 			p.scope,
-			(SELECT COUNT(*) FROM tasks t WHERE t.project_id = p.id AND t.status NOT IN ('completed', 'cancelled')) AS open_task_count,
+			(SELECT COUNT(*) FROM tasks t WHERE t.project_id = p.id AND t.status NOT IN ('completed', 'cancelled', 'dead_letter')) AS open_task_count,
 			(SELECT COUNT(*)
 			 FROM runs r
 			 JOIN tasks t ON t.id = r.task_id
 			 WHERE t.project_id = p.id
-			   AND r.status NOT IN ('completed', 'cancelled', 'failed')) AS active_run_count,
+			   AND r.status NOT IN ('completed', 'cancelled', 'failed', 'awaiting_approval', 'interrupted')) AS active_run_count,
 			(SELECT COUNT(*)
 			 FROM approvals a
 			 JOIN tasks t ON t.id = a.task_id
@@ -761,21 +807,26 @@ type LifecycleReplay struct {
 }
 
 type TaskReplay struct {
-	ID           int64
-	Key          string
-	Title        string
-	Status       string
-	Scope        string
-	CurrentRunID *int64
+	ID             int64
+	Key            string
+	Title          string
+	Status         string
+	Scope          string
+	Summary        string
+	TerminalReason string
+	ArtifactsJSON  string
+	CurrentRunID   *int64
 }
 
 type RunReplay struct {
-	ID       int64
-	TaskID   int64
-	Executor string
-	Attempt  int
-	Status   string
-	Summary  string
+	ID             int64
+	TaskID         int64
+	Executor       string
+	Attempt        int
+	Status         string
+	Summary        string
+	TerminalReason string
+	ArtifactsJSON  string
 }
 
 type ApprovalReplay struct {
@@ -803,11 +854,12 @@ func ReplayLifecycle(records []runtimeevents.Record) (LifecycleReplay, error) {
 				return LifecycleReplay{}, fmt.Errorf("decode %s payload: %w", record.Type, err)
 			}
 			replay.Tasks[record.StreamID] = TaskReplay{
-				ID:     record.StreamID,
-				Key:    payload.Key,
-				Title:  payload.Title,
-				Status: payload.Status,
-				Scope:  payload.Scope,
+				ID:            record.StreamID,
+				Key:           payload.Key,
+				Title:         payload.Title,
+				Status:        payload.Status,
+				Scope:         payload.Scope,
+				ArtifactsJSON: "[]",
 			}
 		case runtimeevents.EventTaskStatusChanged:
 			payload, err := runtimeevents.DecodePayload[runtimeevents.TaskStatusChangedPayload](record.Payload)
@@ -817,6 +869,12 @@ func ReplayLifecycle(records []runtimeevents.Record) (LifecycleReplay, error) {
 			task := replay.Tasks[record.StreamID]
 			task.ID = record.StreamID
 			task.Status = payload.Status
+			task.Summary = payload.Summary
+			task.TerminalReason = payload.TerminalReason
+			task.ArtifactsJSON = payload.ArtifactsJSON
+			if task.ArtifactsJSON == "" {
+				task.ArtifactsJSON = "[]"
+			}
 			if record.RunID != nil {
 				task.CurrentRunID = record.RunID
 			}
@@ -827,11 +885,12 @@ func ReplayLifecycle(records []runtimeevents.Record) (LifecycleReplay, error) {
 				return LifecycleReplay{}, fmt.Errorf("decode %s payload: %w", record.Type, err)
 			}
 			replay.Runs[record.StreamID] = RunReplay{
-				ID:       record.StreamID,
-				TaskID:   payload.TaskID,
-				Executor: payload.Executor,
-				Attempt:  payload.Attempt,
-				Status:   payload.Status,
+				ID:            record.StreamID,
+				TaskID:        payload.TaskID,
+				Executor:      payload.Executor,
+				Attempt:       payload.Attempt,
+				Status:        payload.Status,
+				ArtifactsJSON: "[]",
 			}
 			task := replay.Tasks[payload.TaskID]
 			task.ID = payload.TaskID
@@ -847,6 +906,11 @@ func ReplayLifecycle(records []runtimeevents.Record) (LifecycleReplay, error) {
 			run.ID = record.StreamID
 			run.Status = payload.Status
 			run.Summary = payload.Summary
+			run.TerminalReason = payload.TerminalReason
+			run.ArtifactsJSON = payload.ArtifactsJSON
+			if run.ArtifactsJSON == "" {
+				run.ArtifactsJSON = "[]"
+			}
 			replay.Runs[record.StreamID] = run
 		case runtimeevents.EventApprovalRequested:
 			payload, err := runtimeevents.DecodePayload[runtimeevents.ApprovalRequestedPayload](record.Payload)
