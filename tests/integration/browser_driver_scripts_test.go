@@ -33,7 +33,7 @@ func TestHuginnBrowserSessionScript(t *testing.T) {
         })
         assertStructuredDriverOutput(t, stdout, "huginn_browser_session", "completed")
         assertFileContains(t, markerPath, "sourced repo-local browser-access.sh")
-        assertFileContains(t, callsLog, "request:example.com")
+        assertFileContains(t, callsLog, "request:https://example.com")
         assertFileContains(t, callsLog, "start:")
         assertFileContains(t, callsLog, "navigate:https://example.com")
         assertJSONArtifactString(t, stdout, "session_state", "running")
@@ -89,7 +89,7 @@ func TestPlaidTransferApplicationScript(t *testing.T) {
             assertStructuredDriverOutput(t, stdout, "plaid_transfer_application", "completed")
             assertJSONArtifactString(t, stdout, "session_state", tc.wantState)
             assertFileContains(t, markerPath, "sourced repo-local browser-access.sh")
-            assertFileContains(t, callsLog, "request:dashboard.plaid.com")
+            assertFileContains(t, callsLog, "request:https://dashboard.plaid.com/transfer/application")
             assertFileContains(t, callsLog, "start:")
             assertFileContains(t, callsLog, "https://dashboard.plaid.com/transfer/application")
             assertFileContains(t, callsLog, "snapshot:")
@@ -182,7 +182,12 @@ browser_server_health() {
 }
 
 browser_request_domain_access() {
-    printf 'request:%s\n' "$*" >> "${ODIN_BROWSER_STUB_CALLS_LOG}"
+    local target="${1:-}"
+    if [[ ! "${target}" =~ ^https?:// ]]; then
+        printf 'browser_request_domain_access requires a full URL, got: %s\n' "${target}" >&2
+        return 1
+    fi
+    printf 'request:%s\n' "${target}" >> "${ODIN_BROWSER_STUB_CALLS_LOG}"
     return 0
 }
 

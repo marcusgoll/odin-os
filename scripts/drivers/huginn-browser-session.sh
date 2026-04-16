@@ -49,7 +49,7 @@ case "${action}" in
         json_result "completed" "browser session health checked" "${health_state}" "" "" "" "${health_state}"
         ;;
     launch)
-        browser_request_domain_access "$(host_from_url "${url}")"
+        browser_request_domain_access "${url}"
         browser_server_start --url "${url}" --headless
         browser_navigate "${url}"
         snapshot="$(browser_snapshot 2>/dev/null || true)"
