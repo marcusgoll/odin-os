@@ -66,8 +66,8 @@ func (executor driverExecutor) Health(context.Context) (contract.HealthReport, e
 
 func (executor driverExecutor) Capabilities(context.Context) (contract.Capabilities, error) {
 	return contract.Capabilities{
-		ExecutorClass:       contract.ExecutorClassPlanBackedCLI,
-		SupportsTools:       true,
+		ExecutorClass:        contract.ExecutorClassPlanBackedCLI,
+		SupportsTools:        true,
 		SupportsHeadlessPlan: true,
 		TaskKinds: []contract.TaskKind{
 			contract.TaskKindGeneral,
