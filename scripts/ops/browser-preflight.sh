@@ -56,7 +56,7 @@ resolve_chromium_runtime() {
     base="$(basename "${resolved}")"
 
     case "${base}" in
-        google-chrome|google-chrome-stable|chromium-browser|chrome)
+        google-chrome|google-chrome-stable|chromium|chromium-browser|chrome)
             runtime="${dir}/chrome"
             if [[ -x "${runtime}" ]]; then
                 printf '%s\n' "${runtime}"
