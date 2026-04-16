@@ -255,3 +255,80 @@ func TestGatewayReturnsRunLookupError(t *testing.T) {
 		t.Fatalf("GetRun() error = %v, want %v", err, wantErr)
 	}
 }
+
+func TestGatewayReturnsPolicyErrorForDeniedPermission(t *testing.T) {
+	gateway := newGatewayWithDescriptor(Descriptor{
+		Kind:         registry.KindCommand,
+		Key:          "project.status",
+		Version:      "1.0.0",
+		Availability: registry.Availability{Scope: "project"},
+		Permissions:  []string{"filesystem"},
+		InputSchema:  registry.SchemaRef{Type: "object"},
+		OutputSchema: registry.SchemaRef{Type: "object"},
+	}, func(context.Context, InvokeRequest, Descriptor) (InvokeResponse, error) {
+		t.Fatal("invoke callback should not be called when permissions are denied")
+		return InvokeResponse{}, nil
+	})
+
+	_, err := gateway.InvokeCapability(context.Background(), InvokeRequest{
+		RequestID:         "req-1",
+		CapabilityID:      "project.status",
+		CapabilityVersion: "1.0.0",
+		Scope: ScopeRef{
+			Kind: "project",
+		},
+		Caller: CallerRef{
+			Kind: "guest",
+		},
+		Input: json.RawMessage(`{}`),
+	})
+	if err == nil {
+		t.Fatal("InvokeCapability() error = nil, want policy failure")
+	}
+
+	code, ok := errorCode(err)
+	if !ok {
+		t.Fatalf("InvokeCapability() error = %v, want coded policy error", err)
+	}
+	if code != "permission_denied" {
+		t.Fatalf("InvokeCapability() code = %q, want %q", code, "permission_denied")
+	}
+}
+
+func TestGatewayRejectsInvalidScopeForCapability(t *testing.T) {
+	gateway := newGatewayWithDescriptor(Descriptor{
+		Kind:         registry.KindCommand,
+		Key:          "project.status",
+		Version:      "1.0.0",
+		Availability: registry.Availability{Scope: "project"},
+		InputSchema:  registry.SchemaRef{Type: "object"},
+		OutputSchema: registry.SchemaRef{Type: "object"},
+	}, func(context.Context, InvokeRequest, Descriptor) (InvokeResponse, error) {
+		t.Fatal("invoke callback should not be called when scope is invalid")
+		return InvokeResponse{}, nil
+	})
+
+	_, err := gateway.InvokeCapability(context.Background(), InvokeRequest{
+		RequestID:         "req-2",
+		CapabilityID:      "project.status",
+		CapabilityVersion: "1.0.0",
+		Scope: ScopeRef{
+			Kind: "global",
+		},
+		Caller: CallerRef{
+			Kind: "cli",
+		},
+		Input: json.RawMessage(`{}`),
+	})
+	if err == nil {
+		t.Fatal("InvokeCapability() error = nil, want invalid scope failure")
+	}
+
+	code, ok := errorCode(err)
+	if !ok {
+		t.Fatalf("InvokeCapability() error = %v, want coded policy error", err)
+	}
+	if code != "invalid_scope" {
+		t.Fatalf("InvokeCapability() code = %q, want %q", code, "invalid_scope")
+	}
+}

@@ -2,12 +2,11 @@ package capabilities
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
-	"fmt"
 	"sort"
 	"strings"
 
+	"odin-os/internal/core/policy"
 	"odin-os/internal/registry"
 )
 
@@ -25,6 +24,7 @@ type Gateway struct {
 	snapshot func() Snapshot
 	invoke   InvokerFunc
 	runs     RunLookup
+	policy   *policy.Service
 }
 
 type SnapshotSource interface {
@@ -39,6 +39,7 @@ func NewGateway(snapshot SnapshotSource, invoker InvokerFunc, runs RunLookup) *G
 	gateway := &Gateway{
 		invoke: invoker,
 		runs:   runs,
+		policy: policy.NewService(nil),
 	}
 	if snapshot != nil {
 		gateway.snapshot = snapshot.Active
@@ -87,7 +88,10 @@ func (gateway *Gateway) InvokeCapability(ctx context.Context, request InvokeRequ
 		return InvokeResponse{}, err
 	}
 
-	if err := validateInvokeInput(descriptor, request.Input); err != nil {
+	if err := ValidateInvocation(descriptor, request); err != nil {
+		return InvokeResponse{}, err
+	}
+	if err := gateway.authorizeInvocation(ctx, descriptor, request.Scope, request.Caller); err != nil {
 		return InvokeResponse{}, err
 	}
 	if gateway == nil || gateway.invoke == nil {
@@ -168,20 +172,20 @@ func capabilityCard(descriptor Descriptor) CapabilityCard {
 	}
 }
 
-func validateInvokeInput(descriptor Descriptor, input json.RawMessage) error {
-	if descriptor.InputSchema.Type != "object" {
-		return nil
-	}
-	if strings.TrimSpace(string(input)) == "" {
-		return fmt.Errorf("%w: input is required", errInvalidInvokeInput)
+func (gateway *Gateway) authorizeInvocation(ctx context.Context, descriptor Descriptor, scope ScopeRef, caller CallerRef) error {
+	if gateway != nil && gateway.policy != nil {
+		return gateway.policy.AuthorizeInvocation(ctx, policy.Descriptor{
+			Scope:       strings.TrimSpace(descriptor.Availability.Scope),
+			Scopes:      append([]string(nil), descriptor.Scopes...),
+			Permissions: append([]string(nil), descriptor.Permissions...),
+		}, policy.ScopeRef{
+			Kind:       strings.TrimSpace(scope.Kind),
+			ProjectKey: strings.TrimSpace(scope.ProjectKey),
+		}, policy.CallerRef{
+			Kind: strings.TrimSpace(caller.Kind),
+			ID:   strings.TrimSpace(caller.ID),
+		})
 	}
 
-	var payload any
-	if err := json.Unmarshal(input, &payload); err != nil {
-		return fmt.Errorf("%w: %v", errInvalidInvokeInput, err)
-	}
-	if _, ok := payload.(map[string]any); !ok {
-		return fmt.Errorf("%w: expected JSON object input", errInvalidInvokeInput)
-	}
-	return nil
+	return AuthorizeInvocation(ctx, descriptor, scope, caller)
 }
