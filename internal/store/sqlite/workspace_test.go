@@ -18,24 +18,13 @@ func TestWorkspaceStoreMigrationAndRoundTrip(t *testing.T) {
 		t.Fatalf("Migrate() error = %v", err)
 	}
 
-	workspace, err := store.CreateWorkspace(ctx, CreateWorkspaceParams{
-		Key:                 "default",
-		Name:                "Default Workspace",
-		OwnerRef:            "operator",
-		DefaultCompanionKey: "primary",
-		Status:              "active",
-		PolicyJSON:          `{"allow":["branch_proposal"]}`,
-	})
-	if err != nil {
-		t.Fatalf("CreateWorkspace() error = %v", err)
-	}
-
-	got, err := store.GetWorkspaceByKey(ctx, "default")
+	workspace, err := store.GetWorkspaceByKey(ctx, "default")
 	if err != nil {
 		t.Fatalf("GetWorkspaceByKey() error = %v", err)
 	}
-	if got.ID != workspace.ID {
-		t.Fatalf("GetWorkspaceByKey().ID = %d, want %d", got.ID, workspace.ID)
+
+	if workspace.PolicyJSON != `{}` {
+		t.Fatalf("GetWorkspaceByKey().PolicyJSON = %q, want %q", workspace.PolicyJSON, `{}`)
 	}
 
 	updated, err := store.UpdateWorkspacePolicy(ctx, UpdateWorkspacePolicyParams{

@@ -90,7 +90,12 @@ func openInitiativeServiceStore(t *testing.T) *sqlite.Store {
 func createInitiativeServiceWorkspace(t *testing.T, ctx context.Context, store *sqlite.Store, key string) sqlite.Workspace {
 	t.Helper()
 
-	workspace, err := store.CreateWorkspace(ctx, sqlite.CreateWorkspaceParams{
+	workspace, err := store.GetWorkspaceByKey(ctx, key)
+	if err == nil {
+		return workspace
+	}
+
+	workspace, err = store.CreateWorkspace(ctx, sqlite.CreateWorkspaceParams{
 		Key:                 key,
 		Name:                "Default Workspace",
 		OwnerRef:            "operator",

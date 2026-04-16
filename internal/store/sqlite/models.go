@@ -52,6 +52,11 @@ type UpsertInitiativeParams struct {
 	LinkedProjectID  *int64
 }
 
+type ManagedProjectRegistrationParams struct {
+	Workspace CreateWorkspaceParams
+	Project   UpsertProjectParams
+}
+
 type Workspace struct {
 	ID                  int64
 	Key                 string

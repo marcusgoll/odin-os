@@ -15,6 +15,48 @@ CREATE TABLE IF NOT EXISTS initiatives (
   UNIQUE(workspace_id, key)
 );
 
+INSERT INTO workspaces (
+  key,
+  name,
+  owner_ref,
+  default_companion_key,
+  status,
+  created_at,
+  updated_at
+)
+SELECT
+  'default',
+  'Default Workspace',
+  'operator',
+  'primary',
+  'active',
+  STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now'),
+  STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now')
+WHERE NOT EXISTS (
+  SELECT 1
+  FROM workspaces existing
+  WHERE existing.key = 'default'
+);
+
+INSERT INTO workspace_policies (
+  workspace_id,
+  policy_json,
+  created_at,
+  updated_at
+)
+SELECT
+  default_workspace.id,
+  '{}',
+  STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now'),
+  STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now')
+FROM workspaces default_workspace
+WHERE default_workspace.key = 'default'
+  AND NOT EXISTS (
+    SELECT 1
+    FROM workspace_policies existing
+    WHERE existing.workspace_id = default_workspace.id
+  );
+
 INSERT INTO initiatives (
   workspace_id,
   key,

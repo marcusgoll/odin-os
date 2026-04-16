@@ -67,6 +67,63 @@ func TestMigrateBackfillsManagedProjectInitiativesForExistingProjects(t *testing
 	}
 }
 
+func TestMigrateBackfillsManagedProjectInitiativesWithoutPreseededDefaultWorkspace(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openMigrationBackfillStore(t)
+	defer store.Close()
+
+	for _, version := range []int{1, 11} {
+		migration, err := loadMigrationByVersion(version)
+		if err != nil {
+			t.Fatalf("loadMigrationByVersion(%d) error = %v", version, err)
+		}
+		if err := store.applyMigration(ctx, migration); err != nil {
+			t.Fatalf("applyMigration(%d) error = %v", version, err)
+		}
+	}
+
+	project, err := store.CreateProject(ctx, CreateProjectParams{
+		Key:           "alpha",
+		Name:          "Alpha",
+		Scope:         "project",
+		GitRoot:       filepath.Join(t.TempDir(), "alpha"),
+		DefaultBranch: "main",
+		GitHubRepo:    "acme/alpha",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
+	}
+
+	workspace, err := store.GetWorkspaceByKey(ctx, "default")
+	if err != nil {
+		t.Fatalf("GetWorkspaceByKey(default) error = %v", err)
+	}
+	if workspace.PolicyJSON != `{}` {
+		t.Fatalf("workspace.PolicyJSON = %q, want %q", workspace.PolicyJSON, `{}`)
+	}
+
+	initiative, err := store.GetInitiativeByKey(ctx, workspace.ID, project.Key)
+	if err != nil {
+		t.Fatalf("GetInitiativeByKey(alpha) error = %v", err)
+	}
+	if initiative.Kind != "managed_project" {
+		t.Fatalf("initiative.Kind = %q, want %q", initiative.Kind, "managed_project")
+	}
+	if initiative.Title != project.Name {
+		t.Fatalf("initiative.Title = %q, want %q", initiative.Title, project.Name)
+	}
+	if initiative.LinkedProjectID == nil || *initiative.LinkedProjectID != project.ID {
+		t.Fatalf("initiative.LinkedProjectID = %v, want %d", initiative.LinkedProjectID, project.ID)
+	}
+}
+
 func openMigrationBackfillStore(t *testing.T) *Store {
 	t.Helper()
 

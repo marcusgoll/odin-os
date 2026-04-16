@@ -125,34 +125,30 @@ func (service Service) RegisterManagedProject(ctx context.Context, manifest Mani
 		return sqlite.Project{}, fmt.Errorf("project store is required")
 	}
 
-	workspace, err := workspaces.Service{Store: service.Store}.BootstrapDefaultWorkspace(ctx)
-	if err != nil {
-		return sqlite.Project{}, err
-	}
-
 	scopeValue := "project"
 	if manifest.SystemProject {
 		scopeValue = "odin-core"
 	}
 
-	project, err := service.Store.UpsertProject(ctx, sqlite.UpsertProjectParams{
-		Key:           manifest.Key,
-		Name:          manifest.Name,
-		Scope:         scopeValue,
-		GitRoot:       manifest.GitRoot,
-		DefaultBranch: manifest.DefaultBranch,
-		GitHubRepo:    manifest.GitHub.Repo,
-		ManifestPath:  manifest.SourcePath,
+	return service.Store.RegisterManagedProject(ctx, sqlite.ManagedProjectRegistrationParams{
+		Workspace: sqlite.CreateWorkspaceParams{
+			Key:                 workspaces.DefaultWorkspaceKey,
+			Name:                workspaces.DefaultWorkspaceName,
+			OwnerRef:            workspaces.DefaultWorkspaceOwnerRef,
+			DefaultCompanionKey: workspaces.DefaultWorkspaceCompanionKey,
+			Status:              workspaces.WorkspaceStatusActive,
+			PolicyJSON:          string(workspaces.DefaultWorkspacePolicy),
+		},
+		Project: sqlite.UpsertProjectParams{
+			Key:           manifest.Key,
+			Name:          manifest.Name,
+			Scope:         scopeValue,
+			GitRoot:       manifest.GitRoot,
+			DefaultBranch: manifest.DefaultBranch,
+			GitHubRepo:    manifest.GitHub.Repo,
+			ManifestPath:  manifest.SourcePath,
+		},
 	})
-	if err != nil {
-		return sqlite.Project{}, err
-	}
-
-	if _, err := service.RegisterManagedProjectInitiative(ctx, workspace.ID, project, nil); err != nil {
-		return sqlite.Project{}, err
-	}
-
-	return project, nil
 }
 
 func (service Service) recordReport(ctx context.Context, input ReportInput, requiredState TransitionState, reportType string) (sqlite.ProjectTransitionReport, error) {

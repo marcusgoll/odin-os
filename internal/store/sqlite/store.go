@@ -16,6 +16,11 @@ import (
 
 var ErrWorktreeLeaseConflict = errors.New("worktree lease conflict")
 
+const (
+	managedProjectInitiativeKind   = "managed_project"
+	managedProjectInitiativeStatus = "active"
+)
+
 type Store struct {
 	db        *sql.DB
 	closeOnce sync.Once
@@ -135,79 +140,11 @@ func (store *Store) UpsertProject(ctx context.Context, params UpsertProjectParam
 	var project Project
 
 	err := store.withTx(ctx, func(tx *sql.Tx) error {
-		result, err := tx.ExecContext(ctx, `
-			INSERT INTO projects (key, name, scope, git_root, default_branch, github_repo, manifest_path, created_at, updated_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-			ON CONFLICT(key) DO NOTHING
-		`,
-			params.Key,
-			params.Name,
-			params.Scope,
-			params.GitRoot,
-			params.DefaultBranch,
-			nullIfEmpty(params.GitHubRepo),
-			params.ManifestPath,
-			formatTime(now),
-			formatTime(now),
-		)
-		if err != nil {
-			return err
-		}
-
-		rowsAffected, err := result.RowsAffected()
-		if err != nil {
-			return err
-		}
-
-		if rowsAffected == 0 {
-			if _, err := tx.ExecContext(ctx, `
-				UPDATE projects
-				SET name = ?, scope = ?, git_root = ?, default_branch = ?, github_repo = ?, manifest_path = ?, updated_at = ?
-				WHERE key = ?
-			`,
-				params.Name,
-				params.Scope,
-				params.GitRoot,
-				params.DefaultBranch,
-				nullIfEmpty(params.GitHubRepo),
-				params.ManifestPath,
-				formatTime(now),
-				params.Key,
-			); err != nil {
-				return err
-			}
-		}
-
-		record, err := scanProject(tx.QueryRowContext(ctx, `
-			SELECT id, key, name, scope, git_root, default_branch, github_repo, manifest_path, created_at, updated_at
-			FROM projects
-			WHERE key = ?
-		`, params.Key))
+		record, err := store.upsertProjectTx(ctx, tx, params, now)
 		if err != nil {
 			return err
 		}
 		project = record
-
-		if rowsAffected > 0 {
-			return appendEventTx(ctx, tx, eventInsert{
-				StreamType: runtimeevents.StreamProject,
-				StreamID:   project.ID,
-				EventType:  runtimeevents.EventProjectCreated,
-				Scope:      project.Scope,
-				ProjectID:  &project.ID,
-				Payload: runtimeevents.ProjectCreatedPayload{
-					Key:           project.Key,
-					Name:          project.Name,
-					Scope:         project.Scope,
-					GitRoot:       project.GitRoot,
-					DefaultBranch: project.DefaultBranch,
-					GitHubRepo:    project.GitHubRepo,
-					ManifestPath:  project.ManifestPath,
-				},
-				OccurredAt: now,
-			})
-		}
-
 		return nil
 	})
 
@@ -219,53 +156,46 @@ func (store *Store) UpsertInitiative(ctx context.Context, params UpsertInitiativ
 	var initiative Initiative
 
 	err := store.withTx(ctx, func(tx *sql.Tx) error {
-		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO initiatives (
-				workspace_id,
-				key,
-				title,
-				kind,
-				status,
-				summary,
-				owner_companion_id,
-				linked_project_id,
-				created_at,
-				updated_at
-			)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-			ON CONFLICT(workspace_id, key) DO UPDATE SET
-				title = excluded.title,
-				kind = excluded.kind,
-				status = excluded.status,
-				summary = excluded.summary,
-				owner_companion_id = excluded.owner_companion_id,
-				linked_project_id = excluded.linked_project_id,
-				updated_at = excluded.updated_at
-		`,
-			params.WorkspaceID,
-			params.Key,
-			params.Title,
-			params.Kind,
-			params.Status,
-			params.Summary,
-			nullInt64(params.OwnerCompanionID),
-			nullInt64(params.LinkedProjectID),
-			formatTime(now),
-			formatTime(now),
-		); err != nil {
-			return err
-		}
-
-		record, err := store.getInitiativeTx(ctx, tx, params.WorkspaceID, params.Key)
+		record, err := store.upsertInitiativeTx(ctx, tx, params, now)
 		if err != nil {
 			return err
 		}
-
 		initiative = record
 		return nil
 	})
 
 	return initiative, err
+}
+
+func (store *Store) RegisterManagedProject(ctx context.Context, params ManagedProjectRegistrationParams) (Project, error) {
+	now := store.now()
+	var project Project
+
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		workspace, err := store.ensureWorkspaceTx(ctx, tx, params.Workspace, now)
+		if err != nil {
+			return err
+		}
+
+		record, err := store.upsertProjectTx(ctx, tx, params.Project, now)
+		if err != nil {
+			return err
+		}
+		project = record
+
+		_, err = store.upsertInitiativeTx(ctx, tx, UpsertInitiativeParams{
+			WorkspaceID:     workspace.ID,
+			Key:             project.Key,
+			Title:           project.Name,
+			Kind:            managedProjectInitiativeKind,
+			Status:          managedProjectInitiativeStatus,
+			Summary:         "",
+			LinkedProjectID: &project.ID,
+		}, now)
+		return err
+	})
+
+	return project, err
 }
 
 func (store *Store) CreateWorkspace(ctx context.Context, params CreateWorkspaceParams) (Workspace, error) {
@@ -2372,6 +2302,25 @@ func (store *Store) getWorkspaceTx(ctx context.Context, tx *sql.Tx, workspaceID 
 	return scanWorkspace(row)
 }
 
+func (store *Store) getWorkspaceByKeyTx(ctx context.Context, tx *sql.Tx, key string) (Workspace, error) {
+	row := tx.QueryRowContext(ctx, `
+		SELECT
+			w.id,
+			w.key,
+			w.name,
+			w.owner_ref,
+			w.default_companion_key,
+			w.status,
+			COALESCE(NULLIF(p.policy_json, ''), '{}') AS policy_json,
+			w.created_at,
+			w.updated_at
+		FROM workspaces w
+		LEFT JOIN workspace_policies p ON p.workspace_id = w.id
+		WHERE w.key = ?
+	`, key)
+	return scanWorkspace(row)
+}
+
 func (store *Store) getTaskQuery(ctx context.Context, queryer sqlQueryRow, taskID int64) (Task, error) {
 	row := queryer.QueryRowContext(ctx, `
 		SELECT id, project_id, key, title, status, scope, requested_by, current_run_id, created_at, updated_at
@@ -2388,6 +2337,168 @@ func (store *Store) getProjectTx(ctx context.Context, tx *sql.Tx, projectID int6
 		WHERE id = ?
 	`, projectID)
 	return scanProject(row)
+}
+
+func (store *Store) upsertProjectTx(ctx context.Context, tx *sql.Tx, params UpsertProjectParams, now time.Time) (Project, error) {
+	result, err := tx.ExecContext(ctx, `
+		INSERT INTO projects (key, name, scope, git_root, default_branch, github_repo, manifest_path, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(key) DO NOTHING
+	`,
+		params.Key,
+		params.Name,
+		params.Scope,
+		params.GitRoot,
+		params.DefaultBranch,
+		nullIfEmpty(params.GitHubRepo),
+		params.ManifestPath,
+		formatTime(now),
+		formatTime(now),
+	)
+	if err != nil {
+		return Project{}, err
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return Project{}, err
+	}
+
+	if rowsAffected == 0 {
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE projects
+			SET name = ?, scope = ?, git_root = ?, default_branch = ?, github_repo = ?, manifest_path = ?, updated_at = ?
+			WHERE key = ?
+		`,
+			params.Name,
+			params.Scope,
+			params.GitRoot,
+			params.DefaultBranch,
+			nullIfEmpty(params.GitHubRepo),
+			params.ManifestPath,
+			formatTime(now),
+			params.Key,
+		); err != nil {
+			return Project{}, err
+		}
+	}
+
+	record, err := scanProject(tx.QueryRowContext(ctx, `
+		SELECT id, key, name, scope, git_root, default_branch, github_repo, manifest_path, created_at, updated_at
+		FROM projects
+		WHERE key = ?
+	`, params.Key))
+	if err != nil {
+		return Project{}, err
+	}
+
+	if rowsAffected > 0 {
+		if err := appendEventTx(ctx, tx, eventInsert{
+			StreamType: runtimeevents.StreamProject,
+			StreamID:   record.ID,
+			EventType:  runtimeevents.EventProjectCreated,
+			Scope:      record.Scope,
+			ProjectID:  &record.ID,
+			Payload: runtimeevents.ProjectCreatedPayload{
+				Key:           record.Key,
+				Name:          record.Name,
+				Scope:         record.Scope,
+				GitRoot:       record.GitRoot,
+				DefaultBranch: record.DefaultBranch,
+				GitHubRepo:    record.GitHubRepo,
+				ManifestPath:  record.ManifestPath,
+			},
+			OccurredAt: now,
+		}); err != nil {
+			return Project{}, err
+		}
+	}
+
+	return record, nil
+}
+
+func (store *Store) upsertInitiativeTx(ctx context.Context, tx *sql.Tx, params UpsertInitiativeParams, now time.Time) (Initiative, error) {
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO initiatives (
+			workspace_id,
+			key,
+			title,
+			kind,
+			status,
+			summary,
+			owner_companion_id,
+			linked_project_id,
+			created_at,
+			updated_at
+		)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(workspace_id, key) DO UPDATE SET
+			title = excluded.title,
+			kind = excluded.kind,
+			status = excluded.status,
+			summary = excluded.summary,
+			owner_companion_id = excluded.owner_companion_id,
+			linked_project_id = excluded.linked_project_id,
+			updated_at = excluded.updated_at
+	`,
+		params.WorkspaceID,
+		params.Key,
+		params.Title,
+		params.Kind,
+		params.Status,
+		params.Summary,
+		nullInt64(params.OwnerCompanionID),
+		nullInt64(params.LinkedProjectID),
+		formatTime(now),
+		formatTime(now),
+	); err != nil {
+		return Initiative{}, err
+	}
+
+	record, err := store.getInitiativeTx(ctx, tx, params.WorkspaceID, params.Key)
+	if err != nil {
+		return Initiative{}, err
+	}
+
+	return record, nil
+}
+
+func (store *Store) ensureWorkspaceTx(ctx context.Context, tx *sql.Tx, params CreateWorkspaceParams, now time.Time) (Workspace, error) {
+	policyJSON := params.PolicyJSON
+	if policyJSON == "" {
+		policyJSON = `{}`
+	}
+
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO workspaces (key, name, owner_ref, default_companion_key, status, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(key) DO NOTHING
+	`,
+		params.Key,
+		params.Name,
+		params.OwnerRef,
+		params.DefaultCompanionKey,
+		params.Status,
+		formatTime(now),
+		formatTime(now),
+	); err != nil {
+		return Workspace{}, err
+	}
+
+	workspace, err := store.getWorkspaceByKeyTx(ctx, tx, params.Key)
+	if err != nil {
+		return Workspace{}, err
+	}
+
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO workspace_policies (workspace_id, policy_json, created_at, updated_at)
+		VALUES (?, ?, ?, ?)
+		ON CONFLICT(workspace_id) DO NOTHING
+	`, workspace.ID, policyJSON, formatTime(now), formatTime(now)); err != nil {
+		return Workspace{}, err
+	}
+
+	return store.getWorkspaceByKeyTx(ctx, tx, params.Key)
 }
 
 func (store *Store) getLearningProposalTx(ctx context.Context, tx *sql.Tx, proposalID int64) (LearningProposal, error) {

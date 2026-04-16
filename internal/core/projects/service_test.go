@@ -2,6 +2,7 @@ package projects
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"path/filepath"
 	"testing"
@@ -285,6 +286,51 @@ func TestProjectServiceRegisterManagedProjectReconcilesExistingProjectBeforeInit
 	}
 	if initiative.LinkedProjectID == nil || *initiative.LinkedProjectID != project.ID {
 		t.Fatalf("initiative.LinkedProjectID = %v, want %d", initiative.LinkedProjectID, project.ID)
+	}
+}
+
+func TestProjectServiceRegisterManagedProjectRollsBackProjectOnInitiativeFailure(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openTransitionServiceStore(t)
+	defer store.Close()
+
+	if _, err := store.DB().ExecContext(ctx, `
+		CREATE TRIGGER abort_managed_project_initiatives
+		BEFORE INSERT ON initiatives
+		BEGIN
+			SELECT RAISE(ABORT, 'initiative insert blocked');
+		END;
+	`); err != nil {
+		t.Fatalf("create trigger error = %v", err)
+	}
+
+	manifest := Manifest{
+		Key:           "alpha",
+		Name:          "Alpha",
+		ProjectClass:  ProjectClassGitHubBacked,
+		GitRoot:       filepath.Join(t.TempDir(), "alpha"),
+		DefaultBranch: "main",
+		GitHub:        GitHub{Repo: "acme/alpha"},
+		SourcePath:    "config/projects.yaml",
+	}
+
+	_, err := Service{Store: store}.RegisterManagedProject(ctx, manifest)
+	if err == nil {
+		t.Fatalf("RegisterManagedProject() error = nil, want error")
+	}
+
+	if _, err := store.GetProjectByKey(ctx, manifest.Key); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("GetProjectByKey(alpha) error = %v, want sql.ErrNoRows", err)
+	}
+
+	workspace, err := store.GetWorkspaceByKey(ctx, "default")
+	if err != nil {
+		t.Fatalf("GetWorkspaceByKey(default) error = %v", err)
+	}
+	if _, err := store.GetInitiativeByKey(ctx, workspace.ID, manifest.Key); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("GetInitiativeByKey(alpha) error = %v, want sql.ErrNoRows", err)
 	}
 }
 

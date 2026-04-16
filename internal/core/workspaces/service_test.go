@@ -5,7 +5,6 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
-	"time"
 
 	"odin-os/internal/store/sqlite"
 )
@@ -87,30 +86,26 @@ func TestWorkspaceServiceBootstrapsAndRepairsWorkspaceWithoutPolicyRow(t *testin
 	store := openWorkspaceServiceStore(t)
 	defer store.Close()
 
-	createdAt := time.Now().UTC().Format(time.RFC3339Nano)
+	workspace, err := store.GetWorkspaceByKey(ctx, DefaultWorkspaceKey)
+	if err != nil {
+		t.Fatalf("GetWorkspaceByKey(default) error = %v", err)
+	}
+
 	if _, err := store.DB().ExecContext(ctx, `
-		INSERT INTO workspaces (key, name, owner_ref, default_companion_key, status, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?)
-	`,
-		DefaultWorkspaceKey,
-		DefaultWorkspaceName,
-		DefaultWorkspaceOwnerRef,
-		DefaultWorkspaceCompanionKey,
-		WorkspaceStatusActive,
-		createdAt,
-		createdAt,
-	); err != nil {
-		t.Fatalf("seed workspace row without policy error = %v", err)
+		DELETE FROM workspace_policies
+		WHERE workspace_id = ?
+	`, workspace.ID); err != nil {
+		t.Fatalf("delete workspace policy row error = %v", err)
 	}
 
 	service := Service{Store: store}
 
-	workspace, err := service.BootstrapDefaultWorkspace(ctx)
+	bootstrapped, err := service.BootstrapDefaultWorkspace(ctx)
 	if err != nil {
 		t.Fatalf("BootstrapDefaultWorkspace() error = %v", err)
 	}
-	if workspace.Policy != DefaultWorkspacePolicy {
-		t.Fatalf("BootstrapDefaultWorkspace().Policy = %q, want %q", workspace.Policy, DefaultWorkspacePolicy)
+	if bootstrapped.Policy != DefaultWorkspacePolicy {
+		t.Fatalf("BootstrapDefaultWorkspace().Policy = %q, want %q", bootstrapped.Policy, DefaultWorkspacePolicy)
 	}
 
 	var policyCount int
@@ -118,7 +113,7 @@ func TestWorkspaceServiceBootstrapsAndRepairsWorkspaceWithoutPolicyRow(t *testin
 		SELECT COUNT(*)
 		FROM workspace_policies
 		WHERE workspace_id = ?
-	`, workspace.ID).Scan(&policyCount); err != nil {
+	`, bootstrapped.ID).Scan(&policyCount); err != nil {
 		t.Fatalf("policy row count query error = %v", err)
 	}
 	if policyCount != 1 {
