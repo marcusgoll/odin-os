@@ -108,6 +108,43 @@ func TestGatewayReturnsExpandedDescriptor(t *testing.T) {
 	}
 }
 
+func TestGatewayRejectsMissingVersionLookup(t *testing.T) {
+	t.Parallel()
+
+	gateway := &Gateway{
+		snapshot: func() Snapshot {
+			return Snapshot{
+				Digest: "digest-123",
+				Capabilities: map[string]Descriptor{
+					"skill.alpha": {
+						Kind:         registry.KindSkill,
+						Key:          "skill.alpha",
+						Version:      "2.1.0",
+						InputSchema:  registry.SchemaRef{Type: "object"},
+						Availability: registry.Availability{Scope: "project"},
+					},
+				},
+			}
+		},
+		invoke: func(context.Context, InvokeRequest, Descriptor) (InvokeResponse, error) {
+			t.Fatal("invoke callback should not be called for missing version")
+			return InvokeResponse{}, nil
+		},
+	}
+
+	if _, err := gateway.GetCapability("skill.alpha", ""); err == nil {
+		t.Fatal("GetCapability() error = nil, want error")
+	}
+
+	if _, err := gateway.InvokeCapability(context.Background(), InvokeRequest{
+		RequestID:    "req-1",
+		CapabilityID: "skill.alpha",
+		Input:        json.RawMessage(`{"input":"ok"}`),
+	}); err == nil {
+		t.Fatal("InvokeCapability() error = nil, want error")
+	}
+}
+
 func TestGatewayRejectsInvalidInput(t *testing.T) {
 	t.Parallel()
 

@@ -14,6 +14,7 @@ import (
 )
 
 var errCapabilityNotFound = errors.New("capability not found")
+var errCapabilityVersionRequired = errors.New("capability version is required")
 var errCapabilityVersionMismatch = errors.New("capability version mismatch")
 var errCapabilityDispatcherMissing = errors.New("capability dispatcher is not configured")
 var errRunLookupMissing = errors.New("run lookup is not configured")
@@ -127,6 +128,9 @@ func (gateway *Gateway) CancelRun(context.Context, int64) error {
 func (gateway *Gateway) lookupCapability(id, version string) (Descriptor, error) {
 	if gateway == nil || gateway.snapshot == nil {
 		return Descriptor{}, errCapabilityNotFound
+	}
+	if strings.TrimSpace(version) == "" {
+		return Descriptor{}, errCapabilityVersionRequired
 	}
 
 	snapshot := gateway.snapshot()
