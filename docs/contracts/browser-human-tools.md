@@ -17,11 +17,15 @@ The catalog handlers invoke `internal/tools/invocation`, which in turn uses the 
 
 The driver command is read from `ODIN_BROWSER_HUMAN_DRIVER`.
 
-The command must:
+The command must distinguish between two failure classes:
+
+- handled tool-level failures stay in structured JSON on stdout
+- transport or setup failures exit non-zero so the caller can detect the broken driver
+
+The command must also:
 
 - read one JSON request from stdin
 - write one JSON response to stdout
-- exit non-zero on failure
 - keep any opaque browser artifacts in the response envelope
 
 ## Request envelope
@@ -47,7 +51,9 @@ Rules:
 
 Supported input fields:
 
+- `action` string, required by the catalog schema, enum `health`, `launch`, `snapshot`, `screenshot`, `stop`
 - `url` string, optional
+- `path` string, optional
 
 Use this tool for a bounded browser session check or state inspection.
 
@@ -55,7 +61,8 @@ Use this tool for a bounded browser session check or state inspection.
 
 Supported input fields:
 
-- none
+- `application_url` string, optional
+- `path` string, optional
 
 This tool is a bounded Plaid workflow and intentionally has no free-form browser control surface.
 
@@ -84,6 +91,7 @@ Rules:
 - `tool_key` must echo the request tool key.
 - `summary` must be a short operator-facing sentence.
 - `artifacts` must be present and may contain opaque structured data.
+- handled tool-level failures should still return a structured JSON response with a non-completed status and failure details in `artifacts`.
 
 Expected artifact fields:
 

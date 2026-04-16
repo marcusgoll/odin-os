@@ -44,6 +44,13 @@ func TestBuiltinDefinitionsIncludeSchemasAndHandlers(t *testing.T) {
 		}
 	}
 
+	assertSchemaEnum(t, definitions["huginn_browser_session"].Schema, "action", []string{"health", "launch", "snapshot", "screenshot", "stop"})
+	assertSchemaRequired(t, definitions["huginn_browser_session"].Schema, "action")
+	assertSchemaProperty(t, definitions["huginn_browser_session"].Schema, "url")
+	assertSchemaProperty(t, definitions["huginn_browser_session"].Schema, "path")
+	assertSchemaProperty(t, definitions["plaid_transfer_application"].Schema, "application_url")
+	assertSchemaProperty(t, definitions["plaid_transfer_application"].Schema, "path")
+
 	if !hasTag(definitions["huginn_browser_session"].Tags, "browser") {
 		t.Fatalf("huginn_browser_session tags = %#v, want browser tag", definitions["huginn_browser_session"].Tags)
 	}
@@ -109,43 +116,43 @@ func TestBrowserHumanBuiltinsInvokeDriverPathAndHaveBoundedFollowOnOptions(t *te
 	t.Setenv("ODIN_BROWSER_HUMAN_DRIVER", driverScript)
 
 	cases := []struct {
-		name                 string
-		key                  string
-		input                map[string]string
-		requestPath          string
-		responseSummary      string
-		responseState        string
-		responseURL          string
-		responseScreenshot   string
-		responseNextAction   string
-		expectedFollowOn     []string
-		expectedRequestInput any
+		name               string
+		key                string
+		input              map[string]string
+		requestPath        string
+		responseSummary    string
+		responseState      string
+		responseURL        string
+		responseScreenshot string
+		responseNextAction string
+		expectedFollowOn   []string
+		expectedInput      map[string]any
 	}{
 		{
-			name:                 "session",
-			key:                  "huginn_browser_session",
-			input:                map[string]string{"url": "https://example.com"},
-			requestPath:          filepath.Join(t.TempDir(), "huginn-request.json"),
-			responseSummary:      "browser session complete",
-			responseState:        "ready",
-			responseURL:          "https://example.com",
-			responseScreenshot:   "/tmp/huginn-session.png",
-			responseNextAction:   "run plaid transfer workflow",
-			expectedFollowOn:     []string{"inspect browser artifacts", "run plaid_transfer_application"},
-			expectedRequestInput: map[string]any{"url": "https://example.com"},
+			name:               "session",
+			key:                "huginn_browser_session",
+			input:              map[string]string{"action": "snapshot", "url": "https://example.com", "path": "/tmp/session"},
+			requestPath:        filepath.Join(t.TempDir(), "huginn-request.json"),
+			responseSummary:    "browser session complete",
+			responseState:      "ready",
+			responseURL:        "https://example.com",
+			responseScreenshot: "/tmp/huginn-session.png",
+			responseNextAction: "run plaid transfer workflow",
+			expectedFollowOn:   []string{"inspect browser artifacts", "run plaid_transfer_application"},
+			expectedInput:      map[string]any{"action": "snapshot", "url": "https://example.com", "path": "/tmp/session"},
 		},
 		{
-			name:                 "plaid",
-			key:                  "plaid_transfer_application",
-			input:                nil,
-			requestPath:          filepath.Join(t.TempDir(), "plaid-request.json"),
-			responseSummary:      "Plaid transfer blocked on MFA",
-			responseState:        "blocked_on_mfa",
-			responseURL:          "https://plaid.com/transfer",
-			responseScreenshot:   "/tmp/plaid-transfer.png",
-			responseNextAction:   "wait for human MFA",
-			expectedFollowOn:     []string{"inspect browser artifacts", "stop browser session"},
-			expectedRequestInput: nil,
+			name:               "plaid",
+			key:                "plaid_transfer_application",
+			input:              map[string]string{"application_url": "https://plaid.com/transfer", "path": "/tmp/plaid"},
+			requestPath:        filepath.Join(t.TempDir(), "plaid-request.json"),
+			responseSummary:    "Plaid transfer blocked on MFA",
+			responseState:      "blocked_on_mfa",
+			responseURL:        "https://plaid.com/transfer",
+			responseScreenshot: "/tmp/plaid-transfer.png",
+			responseNextAction: "wait for human MFA",
+			expectedFollowOn:   []string{"inspect browser artifacts", "stop browser session"},
+			expectedInput:      map[string]any{"application_url": "https://plaid.com/transfer", "path": "/tmp/plaid"},
 		},
 	}
 
@@ -202,11 +209,60 @@ func TestBrowserHumanBuiltinsInvokeDriverPathAndHaveBoundedFollowOnOptions(t *te
 			if request.ToolKey != tc.key {
 				t.Fatalf("request.ToolKey = %q, want %q", request.ToolKey, tc.key)
 			}
-			if !browserHumanRequestInputEquals(request.Input, tc.expectedRequestInput) {
-				t.Fatalf("request.Input = %#v, want %#v", request.Input, tc.expectedRequestInput)
+			if !browserHumanRequestInputEquals(request.Input, tc.expectedInput) {
+				t.Fatalf("request.Input = %#v, want %#v", request.Input, tc.expectedInput)
 			}
 		})
 	}
+}
+
+func assertSchemaProperty(t *testing.T, schema map[string]any, property string) {
+	t.Helper()
+	properties, ok := schema["properties"].(map[string]any)
+	if !ok {
+		t.Fatalf("schema properties = %#v, want map", schema["properties"])
+	}
+	if _, ok := properties[property]; !ok {
+		t.Fatalf("missing schema property %q", property)
+	}
+}
+
+func assertSchemaEnum(t *testing.T, schema map[string]any, property string, want []string) {
+	t.Helper()
+	properties, ok := schema["properties"].(map[string]any)
+	if !ok {
+		t.Fatalf("schema properties = %#v, want map", schema["properties"])
+	}
+	prop, ok := properties[property].(map[string]any)
+	if !ok {
+		t.Fatalf("schema property %q = %#v, want map", property, properties[property])
+	}
+	enumValues, ok := prop["enum"].([]string)
+	if !ok {
+		t.Fatalf("schema property %q enum = %#v, want []string", property, prop["enum"])
+	}
+	if len(enumValues) != len(want) {
+		t.Fatalf("schema property %q enum len = %d, want %d", property, len(enumValues), len(want))
+	}
+	for i, expected := range want {
+		if enumValues[i] != expected {
+			t.Fatalf("schema property %q enum[%d] = %q, want %q", property, i, enumValues[i], expected)
+		}
+	}
+}
+
+func assertSchemaRequired(t *testing.T, schema map[string]any, property string) {
+	t.Helper()
+	required, ok := schema["required"].([]string)
+	if !ok {
+		t.Fatalf("schema required = %#v, want []string", schema["required"])
+	}
+	for _, candidate := range required {
+		if candidate == property {
+			return
+		}
+	}
+	t.Fatalf("schema required = %#v, want %q present", required, property)
 }
 
 func readBrowserHumanRequest(t *testing.T, path string) browserhuman.Request {
