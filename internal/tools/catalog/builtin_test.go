@@ -1,6 +1,7 @@
 package catalog
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -9,6 +10,7 @@ import (
 	"testing"
 
 	"odin-os/internal/adapters/browserhuman"
+	"odin-os/internal/tools/invocation"
 )
 
 func TestBuiltinDefinitionsIncludeSchemasAndHandlers(t *testing.T) {
@@ -59,7 +61,6 @@ func TestBuiltinCatalogUsesCapabilityRegistryForDynamicEntries(t *testing.T) {
 	definitions := BuiltinDefinitions()
 
 	for _, key := range []string{
-		"project_status",
 		"huginn_browser_session",
 		"plaid_transfer_application",
 		"task_list",
@@ -75,6 +76,45 @@ func TestBuiltinCatalogUsesCapabilityRegistryForDynamicEntries(t *testing.T) {
 		if !strings.HasPrefix(definition.SourceRef, "bootstrap://") {
 			t.Fatalf("%s SourceRef = %q, want bootstrap:// prefix", key, definition.SourceRef)
 		}
+	}
+}
+
+func TestBuiltinProjectStatusInvokesRuntimeDriver(t *testing.T) {
+	t.Parallel()
+
+	invoker := &stubToolInvoker{
+		result: invocation.Result{
+			Source:  "script",
+			Summary: "Project alpha status from runtime.",
+			KeyFacts: map[string]string{
+				"project_key":     "alpha",
+				"open_task_count": "2",
+			},
+			FollowOnOptions: []string{"inspect tasks"},
+			RawRef:          "driver://project_status/alpha",
+			RawOutput:       "project=alpha open_tasks=2",
+		},
+	}
+
+	definitions := BuiltinDefinitionsWithInvoker(invoker)
+	result, err := definitions["project_status"].Invoke(map[string]string{"project_key": "alpha"})
+	if err != nil {
+		t.Fatalf("Invoke(project_status) error = %v", err)
+	}
+	if invoker.key != "project_status" {
+		t.Fatalf("invoked key = %q, want project_status", invoker.key)
+	}
+	if invoker.args["project_key"] != "alpha" {
+		t.Fatalf("project_key arg = %q, want alpha", invoker.args["project_key"])
+	}
+	if result.Source != "driver" {
+		t.Fatalf("result source = %q, want driver", result.Source)
+	}
+	if result.RawRef != "driver://project_status/alpha" {
+		t.Fatalf("raw ref = %q, want driver-backed ref", result.RawRef)
+	}
+	if !hasTag(definitions["project_status"].Tags, "bootstrap-only") {
+		t.Fatalf("project_status tags = %#v, want bootstrap-only marker", definitions["project_status"].Tags)
 	}
 }
 
@@ -265,7 +305,20 @@ func browserHumanRequestInputEquals(got any, want any) bool {
 	}
 	for key, wantValue := range wantMap {
 		gotValue, ok := gotMap[key]
-		if !ok || gotValue != wantValue {
+		if !ok {
+			return false
+		}
+		if key == "path" {
+			gotPath, gotOK := gotValue.(string)
+			wantPath, wantOK := wantValue.(string)
+			if gotOK && wantOK {
+				if gotPath == wantPath || strings.HasSuffix(gotPath, filepath.Base(wantPath)) {
+					continue
+				}
+				return false
+			}
+		}
+		if gotValue != wantValue {
 			return false
 		}
 	}
@@ -288,7 +341,13 @@ func writeBrowserHumanFixtureDriver(t *testing.T) string {
 	script := `#!/usr/bin/env bash
 set -eu
 cat >"$ODIN_BROWSER_REQUEST_PATH"
-printf '{"status":"completed","tool_key":"%s","summary":"%s","artifacts":{"session_state":"%s","current_url":"%s","screenshot_path":"%s","next_action":"%s","evidence":["driver invoked"]}}'   "$ODIN_BROWSER_RESPONSE_TOOL_KEY"   "$ODIN_BROWSER_RESPONSE_SUMMARY"   "$ODIN_BROWSER_RESPONSE_SESSION_STATE"   "$ODIN_BROWSER_RESPONSE_CURRENT_URL"   "$ODIN_BROWSER_RESPONSE_SCREENSHOT_PATH"   "$ODIN_BROWSER_RESPONSE_NEXT_ACTION"
+printf '{"status":"completed","tool_key":"%s","summary":"%s","artifacts":{"session_state":"%s","current_url":"%s","screenshot_path":"%s","next_action":"%s","evidence":["driver invoked"]}}' \
+  "$ODIN_BROWSER_RESPONSE_TOOL_KEY" \
+  "$ODIN_BROWSER_RESPONSE_SUMMARY" \
+  "$ODIN_BROWSER_RESPONSE_SESSION_STATE" \
+  "$ODIN_BROWSER_RESPONSE_CURRENT_URL" \
+  "$ODIN_BROWSER_RESPONSE_SCREENSHOT_PATH" \
+  "$ODIN_BROWSER_RESPONSE_NEXT_ACTION"
 `
 	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
 		t.Fatalf("WriteFile(driver) error = %v", err)
@@ -297,4 +356,16 @@ printf '{"status":"completed","tool_key":"%s","summary":"%s","artifacts":{"sessi
 		t.Fatalf("Chmod(driver) error = %v", err)
 	}
 	return path
+}
+
+type stubToolInvoker struct {
+	key    string
+	args   map[string]string
+	result invocation.Result
+}
+
+func (invoker *stubToolInvoker) Invoke(_ context.Context, key string, request invocation.Request) (invocation.Result, error) {
+	invoker.key = key
+	invoker.args = request.Args
+	return invoker.result, nil
 }

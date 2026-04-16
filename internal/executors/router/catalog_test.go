@@ -42,6 +42,41 @@ func TestDefaultCatalogRegistersSkeletonAdapters(t *testing.T) {
 	}
 }
 
+func TestRepoConfigResearchRouteUsesHarnessBackedLanesOnly(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := LoadConfig(filepath.Clean(filepath.Join("..", "..", "..", "config", "executors.yaml")))
+	if err != nil {
+		t.Fatalf("LoadConfig(repo executors) error = %v", err)
+	}
+
+	var research RouteConfig
+	found := false
+	for _, route := range cfg.Routes {
+		if route.Name == "research" {
+			research = route
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("research route missing from repo config")
+	}
+
+	wantPreferred := []string{"codex_headless", "claude_code_headless"}
+	if len(research.Preferred) != len(wantPreferred) {
+		t.Fatalf("research.Preferred = %#v, want %#v", research.Preferred, wantPreferred)
+	}
+	for index, key := range wantPreferred {
+		if research.Preferred[index] != key {
+			t.Fatalf("research.Preferred = %#v, want %#v", research.Preferred, wantPreferred)
+		}
+	}
+	if len(research.Fallback) != 0 {
+		t.Fatalf("research.Fallback = %#v, want empty", research.Fallback)
+	}
+}
+
 func TestExecutorCatalogRejectsStaleConfig(t *testing.T) {
 	t.Parallel()
 

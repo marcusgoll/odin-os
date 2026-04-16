@@ -1,6 +1,7 @@
 package broker
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -10,6 +11,7 @@ import (
 	"odin-os/internal/registry/parser"
 	"odin-os/internal/tools/budgets"
 	"odin-os/internal/tools/catalog"
+	"odin-os/internal/tools/invocation"
 )
 
 func TestCatalogReturnsThinCardsOnly(t *testing.T) {
@@ -68,14 +70,24 @@ func TestInvokeAndCompactRespectBudgets(t *testing.T) {
 
 	broker := New(
 		testSnapshot(),
-		catalog.BuiltinDefinitions(),
+		catalog.BuiltinDefinitionsWithInvoker(&stubBrokerInvoker{
+			result: invocation.Result{
+				Source:  "script",
+				Summary: "Project alpha status from runtime.",
+				KeyFacts: map[string]string{
+					"project_key": "alpha",
+				},
+				RawRef:    "driver://project_status/alpha",
+				RawOutput: "project=alpha",
+			},
+		}),
 		budgets.Limits{
 			Tool:    budgets.Tool{MaxSelections: 10, MaxInvocations: 1, MaxCostUnits: 10},
 			Context: budgets.Context{MaxExpandedDefinitions: 10, MaxCompactedResults: 1, MaxCompactedBytes: 200},
 		},
 	)
 
-	result, err := broker.InvokeTool("task_list", map[string]string{"scope": "project"})
+	result, err := broker.InvokeTool("project_status", map[string]string{"project_key": "alpha"})
 	if err != nil {
 		t.Fatalf("InvokeTool() error = %v", err)
 	}
@@ -91,7 +103,7 @@ func TestInvokeAndCompactRespectBudgets(t *testing.T) {
 		t.Fatalf("compacted summary empty")
 	}
 
-	if _, err := broker.InvokeTool("task_list", map[string]string{"scope": "project"}); err == nil {
+	if _, err := broker.InvokeTool("project_status", map[string]string{"project_key": "alpha"}); err == nil {
 		t.Fatalf("second InvokeTool() error = nil, want budget denial")
 	}
 }
@@ -179,6 +191,39 @@ func TestCatalogHonorsNormalizedWorkflowScope(t *testing.T) {
 	}
 }
 
+func TestCompactPreservesStructuredResultSource(t *testing.T) {
+	t.Parallel()
+
+	broker := New(
+		testSnapshot(),
+		catalog.BuiltinDefinitionsWithInvoker(&stubBrokerInvoker{
+			result: invocation.Result{
+				Source: "script",
+			},
+		}),
+		budgets.Limits{
+			Tool:    budgets.Tool{MaxSelections: 10, MaxInvocations: 10, MaxCostUnits: 20},
+			Context: budgets.Context{MaxExpandedDefinitions: 10, MaxCompactedResults: 10, MaxCompactedBytes: 1000},
+		},
+	)
+
+	result, err := broker.InvokeTool("project_status", map[string]string{"project_key": "alpha"})
+	if err != nil {
+		t.Fatalf("InvokeTool(project_status) error = %v", err)
+	}
+	if result.Source != "driver" {
+		t.Fatalf("result.Source = %q, want driver", result.Source)
+	}
+
+	compacted, err := broker.Compact(result)
+	if err != nil {
+		t.Fatalf("Compact() error = %v", err)
+	}
+	if compacted.Source != "driver" {
+		t.Fatalf("compacted.Source = %q, want driver", compacted.Source)
+	}
+}
+
 func testSnapshot() registry.Snapshot {
 	return registry.Snapshot{
 		Items: []registry.Item{
@@ -256,4 +301,31 @@ func compiledWorkflowSnapshot(t *testing.T) registry.Snapshot {
 		t.Fatalf("Compile(project-status workflow) diagnostics = %v, want none", snapshot.Diagnostics)
 	}
 	return snapshot
+}
+
+type stubBrokerInvoker struct {
+	result invocation.Result
+}
+
+func (invoker *stubBrokerInvoker) Invoke(_ context.Context, key string, request invocation.Request) (invocation.Result, error) {
+	if key != "project_status" {
+		return invocation.Result{}, nil
+	}
+	result := invoker.result
+	if result.KeyFacts == nil {
+		result.KeyFacts = map[string]string{}
+	}
+	if result.Summary == "" {
+		result.Summary = "runtime-backed"
+	}
+	if result.RawRef == "" {
+		result.RawRef = "driver://project_status/alpha"
+	}
+	if result.RawOutput == "" {
+		result.RawOutput = "project=alpha open_tasks=1"
+	}
+	if result.Source == "" {
+		result.Source = "script"
+	}
+	return result, nil
 }

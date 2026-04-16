@@ -2,12 +2,18 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"syscall"
 
 	"odin-os/internal/app/lifecycle"
 )
+
+var runLifecycle = lifecycle.Run
 
 func main() {
 	cwd, err := os.Getwd()
@@ -27,10 +33,21 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := lifecycle.Run(context.Background(), root, os.Args[1:], os.Stdin, os.Stdout); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	os.Exit(run(ctx, root, os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
+}
+
+func run(ctx context.Context, root string, args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	if err := runLifecycle(ctx, root, args, stdin, stdout); err != nil {
+		if errors.Is(err, context.Canceled) {
+			return 0
+		}
+		fmt.Fprintln(stderr, err)
+		return 1
 	}
+	return 0
 }
 
 func resolveRepoRoot(cwd, executable string) (string, error) {

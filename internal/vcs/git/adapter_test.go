@@ -2,9 +2,14 @@ package git
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
+
+	worktreemgr "odin-os/internal/vcs/worktrees"
 )
 
 func TestAdapterCreatesAndRemovesWorktree(t *testing.T) {
@@ -42,6 +47,55 @@ func TestAdapterCreatesAndRemovesWorktree(t *testing.T) {
 	}
 	if _, err := os.Stat(worktreePath); !os.IsNotExist(err) {
 		t.Fatalf("worktree path still exists after removal")
+	}
+}
+
+func TestAdapterRemoveWorktreeReportsAlreadyRemovedAfterRegistrationCleared(t *testing.T) {
+	ctx := context.Background()
+	repoRoot := initTempRepo(t)
+	worktreePath := filepath.Join(t.TempDir(), "wt")
+	adapter := Adapter{}
+
+	if err := adapter.CreateBranch(ctx, repoRoot, "odin/test/task-2/run-1/try-1", "main"); err != nil {
+		t.Fatalf("CreateBranch() error = %v", err)
+	}
+	if err := adapter.AddWorktree(ctx, repoRoot, worktreePath, "odin/test/task-2/run-1/try-1"); err != nil {
+		t.Fatalf("AddWorktree() error = %v", err)
+	}
+	if err := os.RemoveAll(worktreePath); err != nil {
+		t.Fatalf("RemoveAll(worktreePath) error = %v", err)
+	}
+
+	if err := adapter.RemoveWorktree(ctx, repoRoot, worktreePath); err != nil {
+		t.Fatalf("RemoveWorktree() after manual deletion error = %v", err)
+	}
+
+	err := adapter.RemoveWorktree(ctx, repoRoot, worktreePath)
+	if !errors.Is(err, worktreemgr.ErrWorktreeAlreadyRemoved) {
+		t.Fatalf("RemoveWorktree() second call error = %v, want ErrWorktreeAlreadyRemoved", err)
+	}
+}
+
+func TestAdapterRemoveWorktreeTimesOutWithoutCallerDeadline(t *testing.T) {
+	gitDir := t.TempDir()
+	scriptPath := filepath.Join(gitDir, "git")
+	if err := os.WriteFile(scriptPath, []byte("#!/usr/bin/env bash\nsleep 5\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile(fake git) error = %v", err)
+	}
+	t.Setenv("PATH", gitDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	originalTimeout := worktreeRemoveTimeout
+	worktreeRemoveTimeout = 50 * time.Millisecond
+	t.Cleanup(func() {
+		worktreeRemoveTimeout = originalTimeout
+	})
+
+	err := Adapter{}.RemoveWorktree(context.Background(), t.TempDir(), filepath.Join(t.TempDir(), "wt"))
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("RemoveWorktree() error = %v, want context deadline exceeded", err)
+	}
+	if !strings.Contains(err.Error(), "worktree remove") {
+		t.Fatalf("RemoveWorktree() error = %v, want git command context", err)
 	}
 }
 

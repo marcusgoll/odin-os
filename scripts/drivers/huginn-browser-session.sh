@@ -84,7 +84,10 @@ case "${action}" in
         json_result "completed" "browser session launched" "running" "${url}" "${snapshot}" "" ""
         ;;
     snapshot)
-        snapshot="$(browser_snapshot 2>/dev/null || true)"
+        if ! snapshot="$(browser_snapshot 2>/dev/null)"; then
+            json_result "failed" "browser snapshot failed" "stopped" "" "" "" ""
+            exit 0
+        fi
         json_result "completed" "browser snapshot captured" "running" "${url}" "${snapshot}" "" ""
         ;;
     screenshot)

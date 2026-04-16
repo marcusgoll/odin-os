@@ -20,8 +20,8 @@ func TestHuginnBrowserSessionScript(t *testing.T) {
 		})
 		assertStructuredDriverOutput(t, stdout, "huginn_browser_session", "completed")
 		assertJSONArtifactString(t, stdout, "session_state", "healthy")
-		assertFileContains(t, markerPath, "sourced repo-local browser-access.sh")
-		assertFileContains(t, callsLog, "health:")
+		assertFileContainsSubstring(t, markerPath, "sourced repo-local browser-access.sh")
+		assertFileContainsSubstring(t, callsLog, "health:")
 	})
 
 	t.Run("health stopped is failed", func(t *testing.T) {
@@ -30,8 +30,8 @@ func TestHuginnBrowserSessionScript(t *testing.T) {
 		})
 		assertStructuredDriverOutput(t, stdout, "huginn_browser_session", "failed")
 		assertJSONArtifactString(t, stdout, "session_state", "stopped")
-		assertFileContains(t, markerPath, "sourced repo-local browser-access.sh")
-		assertFileContains(t, callsLog, "health:")
+		assertFileContainsSubstring(t, markerPath, "sourced repo-local browser-access.sh")
+		assertFileContainsSubstring(t, callsLog, "health:")
 	})
 
 	t.Run("health failure closes as unhealthy", func(t *testing.T) {
@@ -40,8 +40,8 @@ func TestHuginnBrowserSessionScript(t *testing.T) {
 		})
 		assertStructuredDriverOutput(t, stdout, "huginn_browser_session", "failed")
 		assertJSONArtifactString(t, stdout, "session_state", "unhealthy")
-		assertFileContains(t, markerPath, "sourced repo-local browser-access.sh")
-		assertFileContains(t, callsLog, "health:")
+		assertFileContainsSubstring(t, markerPath, "sourced repo-local browser-access.sh")
+		assertFileContainsSubstring(t, callsLog, "health:")
 	})
 
 	t.Run("launch cleanup on navigate failure", func(t *testing.T) {
@@ -53,11 +53,11 @@ func TestHuginnBrowserSessionScript(t *testing.T) {
 		}
 		assertStructuredDriverOutput(t, stdout, "huginn_browser_session", "failed")
 		assertJSONArtifactString(t, stdout, "session_state", "failed")
-		assertFileContains(t, markerPath, "sourced repo-local browser-access.sh")
-		assertFileContains(t, callsLog, "request:https://example.com")
-		assertFileContains(t, callsLog, "start:")
-		assertFileContains(t, callsLog, "navigate:https://example.com")
-		assertFileContains(t, callsLog, "stop:")
+		assertFileContainsSubstring(t, markerPath, "sourced repo-local browser-access.sh")
+		assertFileContainsSubstring(t, callsLog, "request:https://example.com")
+		assertFileContainsSubstring(t, callsLog, "start:")
+		assertFileContainsSubstring(t, callsLog, "navigate:https://example.com")
+		assertFileContainsSubstring(t, callsLog, "stop:")
 	})
 
 	t.Run("launch snapshot screenshot stop", func(t *testing.T) {
@@ -68,10 +68,10 @@ func TestHuginnBrowserSessionScript(t *testing.T) {
 			"ODIN_BROWSER_STUB_SCREENSHOT_PATH": screenshotPath,
 		})
 		assertStructuredDriverOutput(t, stdout, "huginn_browser_session", "completed")
-		assertFileContains(t, markerPath, "sourced repo-local browser-access.sh")
-		assertFileContains(t, callsLog, "request:https://example.com")
-		assertFileContains(t, callsLog, "start:")
-		assertFileContains(t, callsLog, "navigate:https://example.com")
+		assertFileContainsSubstring(t, markerPath, "sourced repo-local browser-access.sh")
+		assertFileContainsSubstring(t, callsLog, "request:https://example.com")
+		assertFileContainsSubstring(t, callsLog, "start:")
+		assertFileContainsSubstring(t, callsLog, "navigate:https://example.com")
 		assertJSONArtifactString(t, stdout, "session_state", "running")
 
 		stdout, callsLog, markerPath = runBrowserDriverScript(t, repoRoot, scriptPath, "huginn-browser-session.sh", `{"tool_key":"huginn_browser_session","input":{"action":"snapshot"}}`, map[string]string{
@@ -79,10 +79,21 @@ func TestHuginnBrowserSessionScript(t *testing.T) {
 		})
 		assertStructuredDriverOutput(t, stdout, "huginn_browser_session", "completed")
 		assertJSONArtifactString(t, stdout, "snapshot", "Example Domain")
-		assertFileContains(t, markerPath, "sourced repo-local browser-access.sh")
-		assertFileContains(t, callsLog, "snapshot:")
+		assertFileContainsSubstring(t, markerPath, "sourced repo-local browser-access.sh")
+		assertFileContainsSubstring(t, callsLog, "snapshot:")
 
 		var err error
+		stdout, callsLog, markerPath, err = runBrowserDriverScriptRaw(t, repoRoot, scriptPath, "huginn-browser-session.sh", `{"tool_key":"huginn_browser_session","input":{"action":"snapshot"}}`, map[string]string{
+			"ODIN_BROWSER_STUB_SNAPSHOT_EXIT_CODE": "1",
+		}, browserAccessStubContent())
+		if err != nil {
+			t.Fatalf("expected handled snapshot failure to exit 0, got err=%v\n%s", err, stdout)
+		}
+		assertStructuredDriverOutput(t, stdout, "huginn_browser_session", "failed")
+		assertJSONArtifactString(t, stdout, "session_state", "stopped")
+		assertFileContainsSubstring(t, markerPath, "sourced repo-local browser-access.sh")
+		assertFileContainsSubstring(t, callsLog, "snapshot:")
+
 		stdout, callsLog, markerPath, err = runBrowserDriverScriptRaw(t, repoRoot, scriptPath, "huginn-browser-session.sh", `{"tool_key":"huginn_browser_session","input":{"action":"screenshot","path":"`+screenshotPath+`"}}`, map[string]string{
 			"ODIN_BROWSER_STUB_SNAPSHOT":        "Example Domain",
 			"ODIN_BROWSER_STUB_SCREENSHOT_PATH": screenshotPath,
@@ -92,15 +103,15 @@ func TestHuginnBrowserSessionScript(t *testing.T) {
 		}
 		assertStructuredDriverOutput(t, stdout, "huginn_browser_session", "completed")
 		assertJSONArtifactString(t, stdout, "screenshot_path", screenshotPath)
-		assertFileContains(t, markerPath, "sourced repo-local browser-access.sh")
+		assertFileContainsSubstring(t, markerPath, "sourced repo-local browser-access.sh")
 		assertFileExists(t, screenshotPath)
-		assertFileContains(t, callsLog, "screenshot:")
+		assertFileContainsSubstring(t, callsLog, "screenshot:")
 
 		stdout, callsLog, markerPath = runBrowserDriverScript(t, repoRoot, scriptPath, "huginn-browser-session.sh", `{"tool_key":"huginn_browser_session","input":{"action":"stop"}}`, nil)
 		assertStructuredDriverOutput(t, stdout, "huginn_browser_session", "completed")
 		assertJSONArtifactString(t, stdout, "session_state", "stopped")
-		assertFileContains(t, markerPath, "sourced repo-local browser-access.sh")
-		assertFileContains(t, callsLog, "stop:")
+		assertFileContainsSubstring(t, markerPath, "sourced repo-local browser-access.sh")
+		assertFileContainsSubstring(t, callsLog, "stop:")
 	})
 }
 
@@ -129,12 +140,12 @@ func TestPlaidTransferApplicationScript(t *testing.T) {
 			})
 			assertStructuredDriverOutput(t, stdout, "plaid_transfer_application", "completed")
 			assertJSONArtifactString(t, stdout, "session_state", tc.wantState)
-			assertFileContains(t, markerPath, "sourced repo-local browser-access.sh")
-			assertFileContains(t, callsLog, "request:https://dashboard.plaid.com/transfer/application")
-			assertFileContains(t, callsLog, "start:")
-			assertFileContains(t, callsLog, "https://dashboard.plaid.com/transfer/application")
-			assertFileContains(t, callsLog, "snapshot:")
-			assertFileContains(t, callsLog, "screenshot:")
+			assertFileContainsSubstring(t, markerPath, "sourced repo-local browser-access.sh")
+			assertFileContainsSubstring(t, callsLog, "request:https://dashboard.plaid.com/transfer/application")
+			assertFileContainsSubstring(t, callsLog, "start:")
+			assertFileContainsSubstring(t, callsLog, "https://dashboard.plaid.com/transfer/application")
+			assertFileContainsSubstring(t, callsLog, "snapshot:")
+			assertFileContainsSubstring(t, callsLog, "screenshot:")
 		})
 	}
 
@@ -145,7 +156,7 @@ func TestPlaidTransferApplicationScript(t *testing.T) {
 		}
 		assertStructuredDriverOutput(t, stdout, "plaid_transfer_application", "failed")
 		assertJSONArtifactString(t, stdout, "session_state", "failed")
-		assertFileContains(t, markerPath, "sourced repo-local browser-access.sh")
+		assertFileContainsSubstring(t, markerPath, "sourced repo-local browser-access.sh")
 		assertFileNotContains(t, callsLog, "request:")
 		assertFileNotContains(t, callsLog, "start:")
 		assertFileNotContains(t, callsLog, "snapshot:")
@@ -214,12 +225,12 @@ func TestPlaidTransferApplicationArtifacts(t *testing.T) {
 				t.Fatalf("summary = %q, want %q", got, tc.wantSummary)
 			}
 
-			assertFileContains(t, markerPath, "sourced repo-local browser-access.sh")
-			assertFileContains(t, callsLog, "request:https://dashboard.plaid.com/transfer/application")
-			assertFileContains(t, callsLog, "start:")
-			assertFileContains(t, callsLog, applicationURL)
-			assertFileContains(t, callsLog, "snapshot:")
-			assertFileContains(t, callsLog, "screenshot:")
+			assertFileContainsSubstring(t, markerPath, "sourced repo-local browser-access.sh")
+			assertFileContainsSubstring(t, callsLog, "request:https://dashboard.plaid.com/transfer/application")
+			assertFileContainsSubstring(t, callsLog, "start:")
+			assertFileContainsSubstring(t, callsLog, applicationURL)
+			assertFileContainsSubstring(t, callsLog, "snapshot:")
+			assertFileContainsSubstring(t, callsLog, "screenshot:")
 		})
 	}
 
@@ -248,11 +259,11 @@ func TestPlaidTransferApplicationArtifacts(t *testing.T) {
 		if got := stringValue(payload["summary"]); got != "Plaid transfer workflow is unclassified" {
 			t.Fatalf("summary = %q, want %q", got, "Plaid transfer workflow is unclassified")
 		}
-		assertFileContains(t, markerPath, "sourced repo-local browser-access.sh")
-		assertFileContains(t, callsLog, "request:https://dashboard.plaid.com/transfer/application")
-		assertFileContains(t, callsLog, "start:")
-		assertFileContains(t, callsLog, "snapshot:")
-		assertFileContains(t, callsLog, "screenshot:")
+		assertFileContainsSubstring(t, markerPath, "sourced repo-local browser-access.sh")
+		assertFileContainsSubstring(t, callsLog, "request:https://dashboard.plaid.com/transfer/application")
+		assertFileContainsSubstring(t, callsLog, "start:")
+		assertFileContainsSubstring(t, callsLog, "snapshot:")
+		assertFileContainsSubstring(t, callsLog, "screenshot:")
 	})
 }
 
@@ -524,7 +535,7 @@ func assertJSONArtifactString(t *testing.T, stdout, key, want string) {
 	}
 }
 
-func assertFileContains(t *testing.T, path, needle string) {
+func assertFileContainsSubstring(t *testing.T, path, needle string) {
 	t.Helper()
 
 	content, err := os.ReadFile(path)

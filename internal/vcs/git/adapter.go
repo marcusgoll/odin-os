@@ -4,9 +4,15 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
+	"strings"
+	"time"
+
+	worktreemgr "odin-os/internal/vcs/worktrees"
 )
 
 type Adapter struct{}
+
+var worktreeRemoveTimeout = 15 * time.Second
 
 func (Adapter) BranchExists(ctx context.Context, repoRoot string, branchName string) (bool, error) {
 	cmd := exec.CommandContext(ctx, "git", "-C", repoRoot, "rev-parse", "--verify", "--quiet", branchName)
@@ -28,7 +34,26 @@ func (Adapter) AddWorktree(ctx context.Context, repoRoot string, worktreePath st
 }
 
 func (Adapter) RemoveWorktree(ctx context.Context, repoRoot string, worktreePath string) error {
-	return runGit(ctx, repoRoot, "worktree", "remove", "--force", worktreePath)
+	commandCtx := ctx
+	cancel := func() {}
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline && worktreeRemoveTimeout > 0 {
+		commandCtx, cancel = context.WithTimeout(ctx, worktreeRemoveTimeout)
+	}
+	defer cancel()
+
+	cmd := exec.CommandContext(commandCtx, "git", "-C", repoRoot, "worktree", "remove", "--force", worktreePath)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		if commandErr := commandCtx.Err(); commandErr != nil {
+			return fmt.Errorf("git %v: %w", []string{"worktree", "remove", "--force", worktreePath}, commandErr)
+		}
+		text := strings.TrimSpace(string(output))
+		if strings.Contains(text, "is not a working tree") {
+			return fmt.Errorf("%w: %s", worktreemgr.ErrWorktreeAlreadyRemoved, text)
+		}
+		return fmt.Errorf("git %v: %w: %s", []string{"worktree", "remove", "--force", worktreePath}, err, string(output))
+	}
+	return nil
 }
 
 func runGit(ctx context.Context, repoRoot string, args ...string) error {

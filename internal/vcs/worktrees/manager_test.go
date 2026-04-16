@@ -103,6 +103,84 @@ func TestManagerCleanupPreservesActiveLease(t *testing.T) {
 	}
 }
 
+func TestManagerCleanupLeasesRemovesSelectedReleasedLeases(t *testing.T) {
+	ctx := context.Background()
+	store, project, task, run := openCleanupStore(t)
+	defer store.Close()
+
+	released, err := store.CreateWorktreeLease(ctx, sqlite.CreateWorktreeLeaseParams{
+		ProjectID:    project.ID,
+		TaskID:       task.ID,
+		RunID:        run.ID,
+		Mode:         "mutable",
+		BranchName:   "odin/cfipros/task-1/run-1/try-1",
+		WorktreePath: "/var/tmp/odin-worktrees/cfipros/task-1/run-1/try-1",
+		RepoRoot:     project.GitRoot,
+		State:        "active",
+	})
+	if err != nil {
+		t.Fatalf("CreateWorktreeLease(released) error = %v", err)
+	}
+	released, err = store.ReleaseWorktreeLease(ctx, sqlite.ReleaseWorktreeLeaseParams{
+		LeaseID: released.ID,
+		State:   "released",
+	})
+	if err != nil {
+		t.Fatalf("ReleaseWorktreeLease(released) error = %v", err)
+	}
+
+	other, err := store.CreateWorktreeLease(ctx, sqlite.CreateWorktreeLeaseParams{
+		ProjectID:    project.ID,
+		TaskID:       task.ID,
+		RunID:        run.ID,
+		Mode:         "mutable",
+		BranchName:   "odin/cfipros/task-1/run-1/try-2",
+		WorktreePath: "/var/tmp/odin-worktrees/cfipros/task-1/run-1/try-2",
+		RepoRoot:     project.GitRoot,
+		State:        "active",
+	})
+	if err != nil {
+		t.Fatalf("CreateWorktreeLease(other) error = %v", err)
+	}
+	other, err = store.ReleaseWorktreeLease(ctx, sqlite.ReleaseWorktreeLeaseParams{
+		LeaseID: other.ID,
+		State:   "released",
+	})
+	if err != nil {
+		t.Fatalf("ReleaseWorktreeLease(other) error = %v", err)
+	}
+
+	git := &cleanupGit{}
+	manager := Manager{Store: store, Git: git}
+
+	result, err := manager.CleanupLeases(ctx, []sqlite.WorktreeLease{released})
+	if err != nil {
+		t.Fatalf("CleanupLeases() error = %v", err)
+	}
+	if len(result.Removed) != 1 {
+		t.Fatalf("CleanupLeases().Removed len = %d, want 1", len(result.Removed))
+	}
+	if result.Removed[0].ID != released.ID {
+		t.Fatalf("CleanupLeases().Removed[0].ID = %d, want %d", result.Removed[0].ID, released.ID)
+	}
+
+	cleaned, err := store.GetWorktreeLease(ctx, released.ID)
+	if err != nil {
+		t.Fatalf("GetWorktreeLease(released) error = %v", err)
+	}
+	if cleaned.CleanedUpAt == nil || cleaned.State != "cleaned" {
+		t.Fatalf("cleaned lease = %+v, want cleaned", cleaned)
+	}
+
+	untouched, err := store.GetWorktreeLease(ctx, other.ID)
+	if err != nil {
+		t.Fatalf("GetWorktreeLease(other) error = %v", err)
+	}
+	if untouched.CleanedUpAt != nil || untouched.State != "released" {
+		t.Fatalf("untouched lease = %+v, want released and not cleaned", untouched)
+	}
+}
+
 type cleanupGit struct {
 	removeCalls int
 }

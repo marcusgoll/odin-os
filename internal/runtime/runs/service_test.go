@@ -9,6 +9,7 @@ import (
 
 	"odin-os/internal/cli/scope"
 	"odin-os/internal/core/projects"
+	"odin-os/internal/executors/contract"
 	"odin-os/internal/store/sqlite"
 )
 
@@ -213,6 +214,86 @@ func TestGetRunEnvelopeReturnsEmptyArtifactsByDefault(t *testing.T) {
 	}
 	if len(envelope.Artifacts) != 0 {
 		t.Fatalf("GetRunEnvelope().Artifacts = %+v, want empty", envelope.Artifacts)
+	}
+}
+
+func TestServiceCompletesRunAndTaskWithTerminalState(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openRunStore(t)
+	defer store.Close()
+
+	project, err := store.CreateProject(ctx, sqlite.CreateProjectParams{
+		Key:           "alpha",
+		Name:          "Alpha",
+		Scope:         "project",
+		GitRoot:       "/tmp/alpha",
+		DefaultBranch: "main",
+		GitHubRepo:    "acme/alpha",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject(alpha) error = %v", err)
+	}
+	task, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "alpha-run",
+		Title:       "Alpha run",
+		Status:      "queued",
+		Scope:       "project",
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask(alpha) error = %v", err)
+	}
+
+	service := Service{Store: store}
+	run, err := service.Start(ctx, task, "fake_headless")
+	if err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+
+	result := contract.ExecutionResult{
+		Status: "completed",
+		Output: "run service summary",
+		Metadata: map[string]string{
+			"artifacts_json": `["runs/artifacts/run-service.json"]`,
+		},
+	}
+	if err := service.Complete(ctx, run.ID, result); err != nil {
+		t.Fatalf("Complete() error = %v", err)
+	}
+
+	gotRun, err := store.GetRun(ctx, run.ID)
+	if err != nil {
+		t.Fatalf("GetRun() error = %v", err)
+	}
+	if gotRun.Summary != "run service summary" {
+		t.Fatalf("run summary = %q, want run service summary", gotRun.Summary)
+	}
+	if gotRun.TerminalReason != "completed" {
+		t.Fatalf("run terminal reason = %q, want completed", gotRun.TerminalReason)
+	}
+	if gotRun.ArtifactsJSON != `["runs/artifacts/run-service.json"]` {
+		t.Fatalf("run artifacts = %q, want persisted artifact pointer", gotRun.ArtifactsJSON)
+	}
+
+	gotTask, err := store.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
+	}
+	if gotTask.Status != "completed" {
+		t.Fatalf("task status = %q, want completed", gotTask.Status)
+	}
+	if gotTask.Summary != "run service summary" {
+		t.Fatalf("task summary = %q, want run service summary", gotTask.Summary)
+	}
+	if gotTask.TerminalReason != "completed" {
+		t.Fatalf("task terminal reason = %q, want completed", gotTask.TerminalReason)
+	}
+	if gotTask.ArtifactsJSON != `["runs/artifacts/run-service.json"]` {
+		t.Fatalf("task artifacts = %q, want persisted artifact pointer", gotTask.ArtifactsJSON)
 	}
 }
 

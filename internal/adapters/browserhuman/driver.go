@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"syscall"
 )
@@ -56,6 +57,12 @@ func (driver Driver) Invoke(ctx context.Context, request Request) (Response, err
 		return Response{}, fmt.Errorf("tool key not configured")
 	}
 
+	runtimeRoot, err := invocationRuntimeRoot(request.ToolKey)
+	if err != nil {
+		return Response{}, fmt.Errorf("prepare invocation runtime: %w", err)
+	}
+	request.Input = scopeRequestInput(request.Input, runtimeRoot)
+
 	requestBytes, err := json.Marshal(request)
 	if err != nil {
 		return Response{}, err
@@ -76,6 +83,7 @@ func (driver Driver) Invoke(ctx context.Context, request Request) (Response, err
 	}
 
 	cmd.Stdin = bytes.NewReader(requestBytes)
+	cmd.Env = envWithOverride(os.Environ(), "ODIN_DIR", runtimeRoot)
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
@@ -105,6 +113,109 @@ func (driver Driver) Invoke(ctx context.Context, request Request) (Response, err
 	}
 
 	return response, nil
+}
+
+func invocationRuntimeRoot(toolKey string) (string, error) {
+	toolSegment := sanitizePathSegment(toolKey)
+	if toolSegment == "" {
+		toolSegment = "browserhuman"
+	}
+	baseRoot := strings.TrimSpace(os.Getenv("ODIN_DIR"))
+	if baseRoot == "" {
+		return os.MkdirTemp("", "odin-browserhuman-"+toolSegment+"-")
+	}
+	invocationBase := filepath.Join(baseRoot, "browserhuman", toolSegment)
+	if err := os.MkdirAll(invocationBase, 0o755); err != nil {
+		return "", err
+	}
+	return os.MkdirTemp(invocationBase, "run-")
+}
+
+func sanitizePathSegment(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" {
+		return ""
+	}
+	var builder strings.Builder
+	prevDash := false
+	for _, r := range value {
+		isAlphaNum := (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9')
+		if isAlphaNum {
+			builder.WriteRune(r)
+			prevDash = false
+			continue
+		}
+		if !prevDash {
+			builder.WriteByte('-')
+			prevDash = true
+		}
+	}
+	return strings.Trim(builder.String(), "-")
+}
+
+func scopeRequestInput(input any, runtimeRoot string) any {
+	switch typed := input.(type) {
+	case map[string]any:
+		cloned := make(map[string]any, len(typed))
+		for key, value := range typed {
+			cloned[key] = value
+		}
+		scopePathFieldAny(cloned, runtimeRoot)
+		return cloned
+	case map[string]string:
+		cloned := make(map[string]string, len(typed))
+		for key, value := range typed {
+			cloned[key] = value
+		}
+		scopePathFieldString(cloned, runtimeRoot)
+		return cloned
+	default:
+		return input
+	}
+}
+
+func scopePathFieldAny(values map[string]any, runtimeRoot string) {
+	path, ok := values["path"].(string)
+	if !ok {
+		return
+	}
+	values["path"] = scopedArtifactPath(runtimeRoot, path)
+}
+
+func scopePathFieldString(values map[string]string, runtimeRoot string) {
+	path, ok := values["path"]
+	if !ok {
+		return
+	}
+	values["path"] = scopedArtifactPath(runtimeRoot, path)
+}
+
+func scopedArtifactPath(runtimeRoot string, requested string) string {
+	name := strings.TrimSpace(filepath.Base(requested))
+	if name == "" || name == "." || name == string(filepath.Separator) {
+		name = "artifact"
+	}
+	return filepath.Join(runtimeRoot, "artifacts", name)
+}
+
+func envWithOverride(base []string, key string, value string) []string {
+	prefix := key + "="
+	result := make([]string, 0, len(base)+1)
+	replaced := false
+	for _, entry := range base {
+		if strings.HasPrefix(entry, prefix) {
+			if !replaced {
+				result = append(result, prefix+value)
+				replaced = true
+			}
+			continue
+		}
+		result = append(result, entry)
+	}
+	if !replaced {
+		result = append(result, prefix+value)
+	}
+	return result
 }
 
 func (driver Driver) envVar() string {

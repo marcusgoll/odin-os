@@ -14,37 +14,6 @@ import (
 func BuiltinDefinitions() map[string]ToolDefinition {
 	definitions := []ToolDefinition{
 		{
-			Key:        "project_status",
-			Title:      "Project Status",
-			Summary:    "Summarizes managed project status for planning.",
-			Version:    "1.0.0",
-			Scopes:     []string{"global", "project", "odin-core"},
-			Tags:       []string{"project", "status", "bootstrap-only"},
-			CostHint:   CostHintLow,
-			BudgetCost: 1,
-			SourceRef:  "bootstrap://legacy/project_status",
-			Schema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"project_key": map[string]any{"type": "string"},
-				},
-			},
-			Invoke: func(input map[string]string) (StructuredResult, error) {
-				projectKey := input["project_key"]
-				if projectKey == "" {
-					projectKey = "current"
-				}
-				return StructuredResult{
-					CapabilityKey:   "project_status",
-					Summary:         fmt.Sprintf("Project status prepared for %s.", projectKey),
-					KeyFacts:        map[string]string{"project_key": projectKey},
-					FollowOnOptions: []string{"expand skill", "inspect tasks"},
-					RawRef:          "builtin://project_status/result",
-					RawOutput:       fmt.Sprintf("project=%s status=ready", projectKey),
-				}, nil
-			},
-		},
-		{
 			Key:        "huginn_browser_session",
 			Title:      "Huginn Browser Session",
 			Summary:    "Runs the bounded generic browser session workflow.",
@@ -68,7 +37,7 @@ func BuiltinDefinitions() map[string]ToolDefinition {
 					},
 					"path": map[string]any{
 						"type":        "string",
-						"description": "Optional filesystem path for session artifacts.",
+						"description": "Optional artifact filename scoped under the invocation runtime root.",
 					},
 				},
 				"required":             []string{"action"},
@@ -100,7 +69,7 @@ func BuiltinDefinitions() map[string]ToolDefinition {
 					},
 					"path": map[string]any{
 						"type":        "string",
-						"description": "Optional filesystem path for workflow artifacts.",
+						"description": "Optional artifact filename scoped under the invocation runtime root.",
 					},
 				},
 				"additionalProperties": false,
@@ -181,6 +150,80 @@ func BuiltinDefinitions() map[string]ToolDefinition {
 		index[definition.Key] = definition
 	}
 	return index
+}
+
+func BuiltinDefinitionsWithInvoker(invoker invocation.Invoker) map[string]ToolDefinition {
+	definitions := BuiltinDefinitions()
+	if invoker == nil {
+		return definitions
+	}
+
+	definition := ToolDefinition{
+		Key:        "project_status",
+		Title:      "Project Status",
+		Summary:    "Summarizes managed project status for planning.",
+		Version:    "1.0.0",
+		Scopes:     []string{"global", "project", "odin-core"},
+		Tags:       []string{"project", "status", "bootstrap-only"},
+		CostHint:   CostHintLow,
+		BudgetCost: 1,
+		SourceRef:  "bootstrap://legacy/project_status",
+		Schema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"project_key": map[string]any{"type": "string"},
+			},
+		},
+		Invoke: func(input map[string]string) (StructuredResult, error) {
+			projectKey := input["project_key"]
+			if projectKey == "" {
+				projectKey = "current"
+			}
+
+			result, err := invoker.Invoke(context.Background(), "project_status", invocation.Request{
+				Args: cloneStringMap(input),
+			})
+			if err != nil {
+				return StructuredResult{}, err
+			}
+			return structuredResultFromInvocation(result, projectKey), nil
+		},
+	}
+
+	definitions[definition.Key] = definition
+	return definitions
+}
+
+func structuredResultFromInvocation(result invocation.Result, projectKey string) StructuredResult {
+	keyFacts := cloneStringMap(result.KeyFacts)
+	if keyFacts == nil {
+		keyFacts = make(map[string]string)
+	}
+	if projectKey != "" && keyFacts["project_key"] == "" {
+		keyFacts["project_key"] = projectKey
+	}
+
+	return StructuredResult{
+		CapabilityKey:   "project_status",
+		Source:          "driver",
+		Summary:         result.Summary,
+		KeyFacts:        keyFacts,
+		FollowOnOptions: append([]string(nil), result.FollowOnOptions...),
+		RawRef:          result.RawRef,
+		RawOutput:       result.RawOutput,
+	}
+}
+
+func cloneStringMap(values map[string]string) map[string]string {
+	if len(values) == 0 {
+		return nil
+	}
+
+	cloned := make(map[string]string, len(values))
+	for key, value := range values {
+		cloned[key] = value
+	}
+	return cloned
 }
 
 func invokeBrowserHuman(toolKey string, input map[string]string, followOnOptions []string) (StructuredResult, error) {

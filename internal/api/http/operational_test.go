@@ -73,6 +73,52 @@ func TestOperationalHandlerDegradesReadyzWhenRuntimeIsNotReady(t *testing.T) {
 	assertReportStatus(t, server.URL+"/readyz", http.StatusServiceUnavailable, "degraded")
 }
 
+func TestOperationalHandlerRejectsReadyWhenOnlyOtherExecutorIsHealthy(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openStore(t)
+	defer store.Close()
+
+	if _, err := store.RecordRegistryVersion(ctx, sqlite.RecordRegistryVersionParams{
+		Source:      "registry",
+		VersionHash: "phase-15",
+		Notes:       "healthy test sample",
+	}); err != nil {
+		t.Fatalf("RecordRegistryVersion() error = %v", err)
+	}
+	if _, err := store.RecordExecutorHealth(ctx, sqlite.RecordExecutorHealthParams{
+		Executor:    "openai_api",
+		Status:      "healthy",
+		LatencyMS:   10,
+		DetailsJSON: `{"status":"healthy"}`,
+	}); err != nil {
+		t.Fatalf("RecordExecutorHealth() error = %v", err)
+	}
+	if _, err := store.RecordProjectionFreshness(ctx, sqlite.RecordProjectionFreshnessParams{
+		Surface:     "active_runs",
+		Status:      "current",
+		DetailsJSON: `{"source":"test"}`,
+	}); err != nil {
+		t.Fatalf("RecordProjectionFreshness() error = %v", err)
+	}
+
+	server := httptest.NewServer(httpapi.NewOperationalHandler(httpapi.Dependencies{
+		Health: healthsvc.Service{
+			DB:                store.DB(),
+			ExpectedExecutors: []string{"codex_headless"},
+		},
+		Metrics: metricsvc.Service{
+			DB: store.DB(),
+		},
+		RegistryHealthy: true,
+	}))
+	defer server.Close()
+
+	assertReportStatus(t, server.URL+"/healthz", http.StatusOK, "degraded")
+	assertReportStatus(t, server.URL+"/readyz", http.StatusServiceUnavailable, "degraded")
+}
+
 func openStore(t *testing.T) *sqlite.Store {
 	t.Helper()
 

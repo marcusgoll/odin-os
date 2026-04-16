@@ -3,7 +3,10 @@ package integration_test
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -33,9 +36,11 @@ import (
 	"odin-os/internal/tools/broker"
 	"odin-os/internal/tools/budgets"
 	"odin-os/internal/tools/catalog"
+	"odin-os/internal/tools/invocation"
 	"odin-os/internal/vcs/branches"
 	gitadapter "odin-os/internal/vcs/git"
 	"odin-os/internal/vcs/leases"
+	"odin-os/internal/vcs/worktrees"
 	worktreemgr "odin-os/internal/vcs/worktrees"
 )
 
@@ -44,6 +49,7 @@ func TestAlphaAcceptance(t *testing.T) {
 	repoRoot := projectRoot(t)
 	odinBinary := buildOdinBinary(t, repoRoot)
 	now := time.Date(2026, 4, 9, 23, 0, 0, 0, time.UTC)
+	extraEnv := acceptanceHarnessDriverEnv(t)
 
 	t.Run("repo structure matches canonical layout", func(t *testing.T) {
 		required := []string{
@@ -144,15 +150,15 @@ func TestAlphaAcceptance(t *testing.T) {
 		}
 	})
 
-	t.Run("fresh runtime becomes ready without manual seeding", func(t *testing.T) {
+	t.Run("fresh runtime fails closed without explicit executor driver", func(t *testing.T) {
 		runtimeRoot := t.TempDir()
 
 		output, err := runOdinCommand(t, repoRoot, odinBinary, runtimeRoot, nil, "", "healthcheck")
-		if err != nil {
-			t.Fatalf("runOdinCommand(healthcheck fresh runtime) error = %v\n%s", err, output)
+		if err == nil {
+			t.Fatalf("runOdinCommand(healthcheck fresh runtime) error = nil, want runtime not ready\n%s", output)
 		}
-		if !strings.Contains(output, "ready") {
-			t.Fatalf("fresh runtime healthcheck output = %q, want ready", output)
+		if !strings.Contains(output, "not ready") {
+			t.Fatalf("fresh runtime healthcheck output = %q, want not ready", output)
 		}
 	})
 
@@ -210,15 +216,18 @@ func TestAlphaAcceptance(t *testing.T) {
 
 	t.Run("cli shell supports ask and act with explicit scope visibility", func(t *testing.T) {
 		runtimeRoot := t.TempDir()
-		output, err := runOdinCommand(t, repoRoot, odinBinary, runtimeRoot, nil, "what is my scope?\n/project odin-core\n/mode act\nalpha acceptance cli task\n/quit\n")
+		output, err := runOdinCommand(t, repoRoot, odinBinary, runtimeRoot, extraEnv, "/help\nhello there\n/project odin-core\n/mode act\nalpha acceptance cli task\n/quit\n", "repl")
 		if err != nil {
-			t.Fatalf("runOdinCommand(interactive) error = %v\n%s", err, output)
+			t.Fatalf("runOdinCommand(repl interactive) error = %v\n%s", err, output)
+		}
+		if !strings.Contains(output, "prefer explicit cli commands outside the repl") {
+			t.Fatalf("interactive output missing repl compatibility banner: %q", output)
 		}
 		if !strings.Contains(output, "scope=global mode=ask") {
 			t.Fatalf("interactive output missing global ask header: %q", output)
 		}
-		if !strings.Contains(output, "scope=global") {
-			t.Fatalf("interactive output missing ask scope response: %q", output)
+		if strings.Contains(output, "Phase 05") {
+			t.Fatalf("interactive output still uses placeholder ask response: %q", output)
 		}
 		if !strings.Contains(output, "project=odin-core scope=odin-core") {
 			t.Fatalf("interactive output missing project switch: %q", output)
@@ -228,6 +237,9 @@ func TestAlphaAcceptance(t *testing.T) {
 		}
 		if !strings.Contains(output, "created task") {
 			t.Fatalf("interactive output missing task creation: %q", output)
+		}
+		if !strings.Contains(output, "run") {
+			t.Fatalf("interactive output missing immediate run visibility: %q", output)
 		}
 
 		store := openRuntimeStore(t, runtimeRoot)
@@ -239,6 +251,164 @@ func TestAlphaAcceptance(t *testing.T) {
 		if len(views) == 0 {
 			t.Fatalf("task views = 0, want created task from act mode")
 		}
+		runViews, err := projections.ListRunSummaryViews(ctx, store.DB())
+		if err != nil {
+			t.Fatalf("ListRunSummaryViews() error = %v", err)
+		}
+		if len(runViews) == 0 {
+			t.Fatalf("run views = 0, want immediate act run visibility")
+		}
+	})
+
+	t.Run("explicit operational cli commands expose read-only runtime state", func(t *testing.T) {
+		runtimeRoot := t.TempDir()
+		store := openRuntimeStore(t, runtimeRoot)
+		_, task, run := seedTaskRunFixture(t, ctx, store, "odin-core", string(scope.ScopeOdinCore), "cli-read-task", "read-only cli check", "codex_headless", now)
+		if _, err := store.RequestApproval(ctx, sqlite.RequestApprovalParams{
+			TaskID:      task.ID,
+			RunID:       &run.ID,
+			Status:      "pending",
+			RequestedBy: "operator",
+		}); err != nil {
+			t.Fatalf("RequestApproval() error = %v", err)
+		}
+		if err := store.Close(); err != nil {
+			t.Fatalf("Close(runtime store) error = %v", err)
+		}
+
+		statusOutput, err := runOdinCommand(t, repoRoot, odinBinary, runtimeRoot, extraEnv, "", "status", "--json")
+		if err != nil {
+			t.Fatalf("runOdinCommand(status --json) error = %v\n%s", err, statusOutput)
+		}
+		if !strings.Contains(statusOutput, "\"pending_approvals\": 1") {
+			t.Fatalf("status output = %q, want pending approval count", statusOutput)
+		}
+
+		scopeOutput, err := runOdinCommand(t, repoRoot, odinBinary, runtimeRoot, extraEnv, "", "scope", "--json")
+		if err != nil {
+			t.Fatalf("runOdinCommand(scope --json) error = %v\n%s", err, scopeOutput)
+		}
+		if !strings.Contains(scopeOutput, "\"scope\": \"global\"") {
+			t.Fatalf("scope output = %q, want global scope", scopeOutput)
+		}
+
+		projectOutput, err := runOdinCommand(t, repoRoot, odinBinary, runtimeRoot, extraEnv, "", "project", "list")
+		if err != nil {
+			t.Fatalf("runOdinCommand(project list) error = %v\n%s", err, projectOutput)
+		}
+		if !strings.Contains(projectOutput, "odin-core") {
+			t.Fatalf("project output = %q, want odin-core", projectOutput)
+		}
+
+		jobsOutput, err := runOdinCommand(t, repoRoot, odinBinary, runtimeRoot, extraEnv, "", "jobs", "--json")
+		if err != nil {
+			t.Fatalf("runOdinCommand(jobs --json) error = %v\n%s", err, jobsOutput)
+		}
+		if !strings.Contains(jobsOutput, task.Key) {
+			t.Fatalf("jobs output = %q, want task key", jobsOutput)
+		}
+
+		runsOutput, err := runOdinCommand(t, repoRoot, odinBinary, runtimeRoot, extraEnv, "", "runs", "--json")
+		if err != nil {
+			t.Fatalf("runOdinCommand(runs --json) error = %v\n%s", err, runsOutput)
+		}
+		if !strings.Contains(runsOutput, run.Executor) {
+			t.Fatalf("runs output = %q, want executor", runsOutput)
+		}
+
+		approvalsOutput, err := runOdinCommand(t, repoRoot, odinBinary, runtimeRoot, extraEnv, "", "approvals", "--json")
+		if err != nil {
+			t.Fatalf("runOdinCommand(approvals --json) error = %v\n%s", err, approvalsOutput)
+		}
+		if !strings.Contains(approvalsOutput, task.Key) {
+			t.Fatalf("approvals output = %q, want task key", approvalsOutput)
+		}
+
+		logsOutput, err := runOdinCommand(t, repoRoot, odinBinary, runtimeRoot, extraEnv, "", "logs", "--json")
+		if err != nil {
+			t.Fatalf("runOdinCommand(logs --json) error = %v\n%s", err, logsOutput)
+		}
+		if !strings.Contains(logsOutput, "task.created") {
+			t.Fatalf("logs output = %q, want task event", logsOutput)
+		}
+	})
+
+	t.Run("explicit mutating cli commands can select project transition and run task", func(t *testing.T) {
+		runtimeRoot := t.TempDir()
+
+		projectOutput, err := runOdinCommand(t, repoRoot, odinBinary, runtimeRoot, extraEnv, "", "project", "select", "pbs")
+		if err != nil {
+			t.Fatalf("runOdinCommand(project select pbs) error = %v\n%s", err, projectOutput)
+		}
+		if !strings.Contains(projectOutput, "project=pbs") {
+			t.Fatalf("project output = %q, want pbs selection", projectOutput)
+		}
+
+		transitionOutput, err := runOdinCommand(
+			t,
+			repoRoot,
+			odinBinary,
+			runtimeRoot,
+			extraEnv,
+			"",
+			"transition",
+			"set",
+			"limited_action",
+			"allow=run_task",
+			"confirm",
+			"because",
+			"acceptance",
+			"task",
+			"run",
+		)
+		if err != nil {
+			t.Fatalf("runOdinCommand(transition set limited_action) error = %v\n%s", err, transitionOutput)
+		}
+		if !strings.Contains(transitionOutput, "project=pbs") || !strings.Contains(transitionOutput, "state=limited_action") {
+			t.Fatalf("transition output = %q, want pbs limited_action state", transitionOutput)
+		}
+
+		cleanupAcceptanceWorktree(t, projectGitRootFromManifest(t, repoRoot, "pbs"), acceptanceWorktreeRoot(extraEnv), "pbs", 1, 1, 1)
+
+		taskOutput, err := runOdinCommand(
+			t,
+			repoRoot,
+			odinBinary,
+			runtimeRoot,
+			extraEnv,
+			"",
+			"task",
+			"run",
+			"--project",
+			"pbs",
+			"--title",
+			"acceptance cli task run",
+			"--json",
+		)
+		if err != nil {
+			t.Fatalf("runOdinCommand(task run --json) error = %v\n%s", err, taskOutput)
+		}
+
+		var payload struct {
+			Task struct {
+				Key    string `json:"key"`
+				Status string `json:"status"`
+				Scope  string `json:"scope"`
+			} `json:"task"`
+			Run struct {
+				Executor string `json:"executor"`
+				Status   string `json:"status"`
+			} `json:"run"`
+		}
+		if err := json.Unmarshal([]byte(taskOutput), &payload); err != nil {
+			t.Fatalf("task output json = %v\n%s", err, taskOutput)
+		}
+		if payload.Task.Key == "" || payload.Task.Status != "completed" || payload.Task.Scope != "project" {
+			t.Fatalf("task payload = %+v, want completed project task", payload.Task)
+		}
+		if payload.Run.Executor == "" || payload.Run.Status != "completed" {
+			t.Fatalf("run payload = %+v, want completed run", payload.Run)
+		}
 	})
 
 	t.Run("executor abstraction supports headless cli and api lanes", func(t *testing.T) {
@@ -247,8 +417,43 @@ func TestAlphaAcceptance(t *testing.T) {
 			t.Fatalf("LoadConfig() error = %v", err)
 		}
 		selector := executorrouter.Selector{
-			Config:    cfg,
-			Executors: executorrouter.DefaultCatalog(),
+			Config: cfg,
+			Executors: map[string]contract.Executor{
+				"codex_headless": contract.NewStaticExecutor(
+					"codex_headless",
+					contract.ExecutorClassPlanBackedCLI,
+					contract.HealthReport{Status: contract.HealthStatusHealthy},
+					contract.Capabilities{
+						SupportsTools:        true,
+						SupportsHeadlessPlan: true,
+						TaskKinds: []contract.TaskKind{
+							contract.TaskKindGeneral,
+							contract.TaskKindPlan,
+							contract.TaskKindBuild,
+							contract.TaskKindReview,
+							contract.TaskKindQA,
+							contract.TaskKindResearch,
+						},
+						Scopes: []string{"global", "odin-core", "project", "new-project"},
+					},
+				),
+				"anthropic_api": contract.NewStaticExecutor(
+					"anthropic_api",
+					contract.ExecutorClassAPI,
+					contract.HealthReport{Status: contract.HealthStatusHealthy},
+					contract.Capabilities{
+						TaskKinds: []contract.TaskKind{
+							contract.TaskKindGeneral,
+							contract.TaskKindPlan,
+							contract.TaskKindBuild,
+							contract.TaskKindReview,
+							contract.TaskKindQA,
+							contract.TaskKindResearch,
+						},
+						Scopes: []string{"global", "odin-core", "project", "new-project"},
+					},
+				),
+			},
 		}
 
 		cliDecision, err := selector.Select(ctx, contract.TaskSpec{
@@ -288,11 +493,37 @@ func TestAlphaAcceptance(t *testing.T) {
 	})
 
 	t.Run("dynamic tool loading is working", func(t *testing.T) {
+		runtimeRoot := t.TempDir()
+		store := openRuntimeStore(t, runtimeRoot)
+		defer store.Close()
+
+		project, err := store.CreateProject(ctx, sqlite.CreateProjectParams{
+			Key:           "odin-core",
+			Name:          "Odin Core",
+			Scope:         "odin-core",
+			GitRoot:       runtimeRoot,
+			DefaultBranch: "main",
+			ManifestPath:  "config/projects.yaml",
+		})
+		if err != nil {
+			t.Fatalf("CreateProject() error = %v", err)
+		}
+		if _, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
+			ProjectID:   project.ID,
+			Key:         "odin-core-queued",
+			Title:       "Queued runtime task",
+			Status:      "queued",
+			Scope:       "odin-core",
+			RequestedBy: "test",
+		}); err != nil {
+			t.Fatalf("CreateTask() error = %v", err)
+		}
+
 		snapshot, err := loader.LoadDir(filepath.Join(repoRoot, "registry"))
 		if err != nil {
 			t.Fatalf("LoadDir(registry) error = %v", err)
 		}
-		suiteBroker := broker.New(snapshot, catalog.BuiltinDefinitions(), budgets.Limits{
+		suiteBroker := broker.New(snapshot, catalog.BuiltinDefinitionsWithInvoker(invocation.Service{RuntimeRoot: runtimeRoot}), budgets.Limits{
 			Tool: budgets.Tool{
 				MaxSelections:  6,
 				MaxInvocations: 4,
@@ -334,9 +565,18 @@ func TestAlphaAcceptance(t *testing.T) {
 		if err != nil {
 			t.Fatalf("InvokeTool(project_status) error = %v", err)
 		}
+		if result.Source != "driver" {
+			t.Fatalf("InvokeTool(project_status).Source = %q, want driver", result.Source)
+		}
+		if result.KeyFacts["open_task_count"] != "1" {
+			t.Fatalf("InvokeTool(project_status).open_task_count = %q, want 1", result.KeyFacts["open_task_count"])
+		}
 		compacted, err := suiteBroker.Compact(result)
 		if err != nil {
 			t.Fatalf("Compact() error = %v", err)
+		}
+		if compacted.Source != "driver" {
+			t.Fatalf("Compact().Source = %q, want driver", compacted.Source)
 		}
 		if compacted.Bytes <= 0 {
 			t.Fatalf("CompactedResult.Bytes = %d, want > 0", compacted.Bytes)
@@ -478,7 +718,10 @@ func TestAlphaAcceptance(t *testing.T) {
 		observabilityNow := time.Now().UTC()
 		seedHealthyObservability(t, ctx, store, observabilityNow)
 
-		report, err := healthsvc.Service{DB: store.DB()}.Doctor(ctx, true)
+		report, err := healthsvc.Service{
+			DB:  store.DB(),
+			Now: func() time.Time { return now },
+		}.Doctor(ctx, true)
 		if err != nil {
 			t.Fatalf("Doctor() error = %v", err)
 		}
@@ -494,12 +737,47 @@ func TestAlphaAcceptance(t *testing.T) {
 			t.Fatalf("metrics snapshot = %+v, want generated timestamp", snapshot)
 		}
 
-		output, err := runOdinCommand(t, repoRoot, odinBinary, runtimeRoot, nil, "", "doctor", "--json")
+		output, err := runOdinCommand(t, repoRoot, odinBinary, runtimeRoot, extraEnv, "", "doctor", "--json")
 		if err != nil {
 			t.Fatalf("runOdinCommand(doctor --json) error = %v\n%s", err, output)
 		}
 		if !strings.Contains(output, "\"status\":") {
 			t.Fatalf("doctor output = %q, want JSON status field", output)
+		}
+	})
+
+	t.Run("operational autonomy contract docs exist", func(t *testing.T) {
+		autonomyDoc, err := os.ReadFile(filepath.Join(repoRoot, "docs", "contracts", "operational-autonomy.md"))
+		if err != nil {
+			t.Fatalf("ReadFile(operational-autonomy.md) error = %v", err)
+		}
+		for _, want := range []string{
+			"primary controller",
+			"Approval-required action classes",
+			"Required runtime invariants",
+			"Cutover gates",
+			"Rollback triggers",
+		} {
+			if !strings.Contains(string(autonomyDoc), want) {
+				t.Fatalf("operational-autonomy.md missing %q", want)
+			}
+		}
+
+		exitCriteria, err := os.ReadFile(filepath.Join(repoRoot, "docs", "contracts", "phase-exit-criteria.md"))
+		if err != nil {
+			t.Fatalf("ReadFile(phase-exit-criteria.md) error = %v", err)
+		}
+		for _, want := range []string{
+			"Operational autonomy exit criteria",
+			"fresh bootstrap reaches healthy state without manual seeding",
+			"at least one real executor lane completes durable work end to end",
+			"mutable work uses leased task-owned worktrees and branches",
+			"interrupted work can be recovered after restart",
+			"multi-project queue control exists",
+		} {
+			if !strings.Contains(string(exitCriteria), want) {
+				t.Fatalf("phase-exit-criteria.md missing %q", want)
+			}
 		}
 	})
 
@@ -547,7 +825,7 @@ func TestAlphaAcceptance(t *testing.T) {
 	})
 
 	t.Run("migration extraction from odin-orchestrator works", func(t *testing.T) {
-		sourceRoot := "/home/orchestrator/odin-orchestrator"
+		sourceRoot := legacyOrchestratorSourceRoot(t)
 		requirePathExists(t, sourceRoot)
 
 		docsRoot := filepath.Join(t.TempDir(), "docs")
@@ -728,7 +1006,7 @@ func TestAlphaAcceptance(t *testing.T) {
 			t.Fatalf("WakePacket.Trigger = %q, want restart", packet.Trigger)
 		}
 
-		healthcheckOutput, err := runOdinCommand(t, repoRoot, odinBinary, runtimeRoot, nil, "", "healthcheck")
+		healthcheckOutput, err := runOdinCommand(t, repoRoot, odinBinary, runtimeRoot, extraEnv, "", "healthcheck")
 		if err != nil {
 			t.Fatalf("runOdinCommand(healthcheck) error = %v\n%s", err, healthcheckOutput)
 		}
@@ -753,4 +1031,113 @@ func TestAlphaAcceptance(t *testing.T) {
 		}
 		requirePathExists(t, filepath.Join(restoreRoot, "data", "odin.db"))
 	})
+}
+
+func TestAlphaAcceptanceUsesExplicitCommands(t *testing.T) {
+	t.Parallel()
+
+	repoRoot := projectRoot(t)
+	odinBinary := buildOdinBinary(t, repoRoot)
+	runtimeRoot := t.TempDir()
+	extraEnv := acceptanceHarnessDriverEnv(t)
+
+	output, err := runOdinCommand(t, repoRoot, odinBinary, runtimeRoot, extraEnv, "", "status", "--json")
+	if err != nil {
+		t.Fatalf("runOdinCommand(status) error = %v\n%s", err, output)
+	}
+	if !strings.Contains(output, "\"health\"") {
+		t.Fatalf("output = %q, want health json", output)
+	}
+}
+
+func TestReplRequiresExplicitSubcommand(t *testing.T) {
+	t.Parallel()
+
+	repoRoot := projectRoot(t)
+	odinBinary := buildOdinBinary(t, repoRoot)
+	runtimeRoot := t.TempDir()
+	extraEnv := acceptanceHarnessDriverEnv(t)
+
+	output, err := runOdinCommand(t, repoRoot, odinBinary, runtimeRoot, extraEnv, "/help\n", "repl")
+	if err != nil {
+		t.Fatalf("runOdinCommand(repl) error = %v\n%s", err, output)
+	}
+	if !strings.Contains(output, "odin>") {
+		t.Fatalf("output = %q, want repl prompt", output)
+	}
+}
+
+func TestExplicitCommandsCanExecuteViaClaudeHarnessDriver(t *testing.T) {
+	t.Parallel()
+
+	sourceRepoRoot := projectRoot(t)
+	odinBinary := buildOdinBinary(t, sourceRepoRoot)
+	repoRoot := createCLIRepoRootWithPreferredExecutor(t, "claude_code_headless")
+	runtimeRoot := t.TempDir()
+	extraEnv := acceptanceHarnessDriverEnv(t)
+	homePath := filepath.Join(t.TempDir(), "home")
+	if err := os.MkdirAll(homePath, 0o755); err != nil {
+		t.Fatalf("MkdirAll(home) error = %v", err)
+	}
+	extraEnv["HOME"] = homePath
+	cleanupAcceptanceWorktree(t, repoRoot, acceptanceWorktreeRoot(extraEnv), "alpha-cli", 1, 1, 1)
+
+	if output, err := runOdinCommand(t, repoRoot, odinBinary, runtimeRoot, extraEnv, "", "project", "select", "alpha-cli"); err != nil {
+		t.Fatalf("runOdinCommand(project select) error = %v\n%s", err, output)
+	}
+	if output, err := runOdinCommand(t, repoRoot, odinBinary, runtimeRoot, extraEnv, "", "transition", "set", "cutover", "confirm", "because", "claude acceptance"); err != nil {
+		t.Fatalf("runOdinCommand(transition set) error = %v\n%s", err, output)
+	}
+
+	output, err := runOdinCommand(t, repoRoot, odinBinary, runtimeRoot, extraEnv, "", "task", "run", "--project", "alpha-cli", "--title", "claude smoke", "--json")
+	if err != nil {
+		t.Fatalf("runOdinCommand(task run) error = %v\n%s", err, output)
+	}
+
+	var payload struct {
+		Task struct {
+			ID     int64  `json:"id"`
+			Status string `json:"status"`
+		} `json:"task"`
+		Run struct {
+			ID       int64  `json:"id"`
+			Executor string `json:"executor"`
+			Status   string `json:"status"`
+		} `json:"run"`
+	}
+	if err := json.Unmarshal([]byte(output), &payload); err != nil {
+		t.Fatalf("task run json = %v\n%s", err, output)
+	}
+	if payload.Task.Status != "completed" {
+		t.Fatalf("Task.Status = %q, want completed", payload.Task.Status)
+	}
+	if payload.Run.Executor != "claude_code_headless" {
+		t.Fatalf("Run.Executor = %q, want claude_code_headless", payload.Run.Executor)
+	}
+	if payload.Run.Status != "completed" {
+		t.Fatalf("Run.Status = %q, want completed", payload.Run.Status)
+	}
+
+	cleanupAcceptanceWorktree(t, repoRoot, acceptanceWorktreeRoot(extraEnv), "alpha-cli", payload.Task.ID, payload.Run.ID, 1)
+}
+
+func cleanupAcceptanceWorktree(t *testing.T, repoRoot string, worktreeRoot string, projectKey string, taskID int64, runID int64, attempt int) {
+	t.Helper()
+
+	path := worktrees.ResolvePath(worktrees.PathParams{
+		Root:       worktreeRoot,
+		ProjectKey: projectKey,
+		TaskID:     taskID,
+		RunID:      runID,
+		Try:        attempt,
+	})
+	if err := os.RemoveAll(path); err != nil {
+		t.Fatalf("RemoveAll(%s) error = %v", path, err)
+	}
+
+	command := exec.Command("git", "-C", repoRoot, "worktree", "prune")
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git worktree prune: %v\n%s", err, output)
+	}
 }
