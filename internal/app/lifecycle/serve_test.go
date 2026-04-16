@@ -53,9 +53,8 @@ func TestRunHealthcheckHealthyReturnsNil(t *testing.T) {
 }
 
 func TestRunHealthcheckFreshRuntimeReturnsNil(t *testing.T) {
-	t.Parallel()
-
 	root := createRuntimeRoot(t)
+	t.Setenv("ODIN_CODEX_DRIVER", codexFixtureDriverPath(t))
 
 	var stdout bytes.Buffer
 	if err := Run(context.Background(), root, []string{"healthcheck"}, strings.NewReader(""), &stdout); err != nil {
@@ -289,6 +288,12 @@ service:
 	if !found {
 		t.Fatalf("events = %+v, want recovery.action_executed from background self-heal cycle", events)
 	}
+}
+
+func codexFixtureDriverPath(t *testing.T) string {
+	t.Helper()
+
+	return filepath.Clean(filepath.Join("..", "..", "..", "scripts", "drivers", "codex-headless.sh"))
 }
 
 func createRuntimeRoot(t *testing.T) string {

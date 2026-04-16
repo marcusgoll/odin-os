@@ -12,6 +12,7 @@ import (
 func TestLoadInitializesFreshRuntimeReadinessState(t *testing.T) {
 	repoRoot := filepath.Clean(filepath.Join("..", "..", ".."))
 	runtimeRoot := t.TempDir()
+	t.Setenv("ODIN_CODEX_DRIVER", codexFixtureDriverPath(t))
 
 	app, err := Load(context.Background(), repoRoot, runtimeRoot)
 	if err != nil {
@@ -151,4 +152,10 @@ func assertCountAtLeast(t *testing.T, row rowScanner, minimum int) {
 
 type rowScanner interface {
 	Scan(...any) error
+}
+
+func codexFixtureDriverPath(t *testing.T) string {
+	t.Helper()
+
+	return filepath.Clean(filepath.Join("..", "..", "..", "scripts", "drivers", "codex-headless.sh"))
 }
