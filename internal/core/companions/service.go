@@ -20,21 +20,7 @@ func (service Service) BootstrapDefaultOperator(ctx context.Context, workspaceID
 		return Companion{}, fmt.Errorf("companion store is required")
 	}
 
-	records, err := service.Store.ListCompanions(ctx, sqlite.ListCompanionsParams{WorkspaceID: &workspaceID})
-	if err != nil {
-		return Companion{}, err
-	}
-	for _, record := range records {
-		if record.Key != DefaultOperatorKey {
-			continue
-		}
-		if err := service.Store.SetWorkspaceDefaultCompanion(ctx, workspaceID, record.Key); err != nil {
-			return Companion{}, err
-		}
-		return fromRecord(record), nil
-	}
-
-	record, err := service.Store.CreateCompanion(ctx, sqlite.CreateCompanionParams{
+	record, err := service.Store.EnsureCompanion(ctx, sqlite.CreateCompanionParams{
 		WorkspaceID:         workspaceID,
 		Key:                 DefaultOperatorKey,
 		Title:               defaultOperatorTitle,

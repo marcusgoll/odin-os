@@ -16,7 +16,7 @@ type WorkspacePolicy struct {
 type PolicyOverlay struct {
 	ToolPolicy                        *contract.ToolPolicy
 	ExternalSideEffects               []string
-	RequireApprovalForExternalEffects *bool
+	RequireApprovalForExternalEffects bool
 }
 
 func DefaultWorkspacePolicy() WorkspacePolicy {

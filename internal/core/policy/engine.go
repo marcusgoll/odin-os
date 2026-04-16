@@ -52,9 +52,7 @@ func normalizeWorkspacePolicy(policy policies.WorkspacePolicy) policies.Workspac
 	if policy.ExternalSideEffects == nil {
 		policy.ExternalSideEffects = defaults.ExternalSideEffects
 	}
-	if !policy.RequireApprovalForExternalEffects {
-		policy.RequireApprovalForExternalEffects = defaults.RequireApprovalForExternalEffects
-	}
+	policy.RequireApprovalForExternalEffects = policy.RequireApprovalForExternalEffects || defaults.RequireApprovalForExternalEffects
 
 	return policy
 }
@@ -70,7 +68,7 @@ func applyOverlay(base policies.WorkspacePolicy, overlay *policies.PolicyOverlay
 	if overlay.ExternalSideEffects != nil {
 		base.ExternalSideEffects = intersectStrings(base.ExternalSideEffects, overlay.ExternalSideEffects)
 	}
-	if overlay.RequireApprovalForExternalEffects != nil && *overlay.RequireApprovalForExternalEffects {
+	if overlay.RequireApprovalForExternalEffects {
 		base.RequireApprovalForExternalEffects = true
 	}
 

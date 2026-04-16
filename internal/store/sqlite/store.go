@@ -287,6 +287,60 @@ func (store *Store) CreateCompanion(ctx context.Context, params CreateCompanionP
 	return companion, err
 }
 
+func (store *Store) EnsureCompanion(ctx context.Context, params CreateCompanionParams) (Companion, error) {
+	now := store.now()
+	var companion Companion
+
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		if _, err := store.getWorkspaceTx(ctx, tx, params.WorkspaceID); err != nil {
+			return err
+		}
+
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO companions (
+				workspace_id,
+				key,
+				title,
+				kind,
+				charter,
+				status,
+				initiative_scope_json,
+				tool_policy_json,
+				memory_policy_json,
+				planning_policy_json,
+				created_at,
+				updated_at
+			)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT(workspace_id, key) DO NOTHING
+		`,
+			params.WorkspaceID,
+			params.Key,
+			params.Title,
+			params.Kind,
+			params.Charter,
+			params.Status,
+			params.InitiativeScopeJSON,
+			params.ToolPolicyJSON,
+			params.MemoryPolicyJSON,
+			params.PlanningPolicyJSON,
+			formatTime(now),
+			formatTime(now),
+		); err != nil {
+			return err
+		}
+
+		record, err := store.getCompanionByWorkspaceKeyTx(ctx, tx, params.WorkspaceID, params.Key)
+		if err != nil {
+			return err
+		}
+		companion = record
+		return nil
+	})
+
+	return companion, err
+}
+
 func (store *Store) CreateInitiative(ctx context.Context, params CreateInitiativeParams) (Initiative, error) {
 	now := store.now()
 	var initiative Initiative

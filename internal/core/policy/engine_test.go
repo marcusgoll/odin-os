@@ -30,7 +30,7 @@ func TestWorkspacePolicyOverlayKeepsApprovalGates(t *testing.T) {
 			Mode:    policies.ToolPolicyModeAllow,
 			Allowed: []string{"calendar.read", "calendar.write"},
 		},
-		ExternalSideEffects:              []string{"calendar.write"},
+		ExternalSideEffects:               []string{"calendar.write"},
 		RequireApprovalForExternalEffects: true,
 	}
 	companion := &policies.PolicyOverlay{
@@ -38,11 +38,37 @@ func TestWorkspacePolicyOverlayKeepsApprovalGates(t *testing.T) {
 			Mode:    policies.ToolPolicyModeAllow,
 			Allowed: []string{"calendar.write"},
 		},
-		ExternalSideEffects:              []string{"calendar.write"},
-		RequireApprovalForExternalEffects: boolPtr(false),
+		ExternalSideEffects: []string{"calendar.write"},
 	}
 
 	resolved := engine.Resolve(workspace, nil, companion)
+	decision := engine.DecideExternalEffect(resolved, "calendar.write")
+
+	if !decision.Allowed {
+		t.Fatalf("Allowed = false, want true")
+	}
+	if !decision.RequiresApproval {
+		t.Fatalf("RequiresApproval = false, want true")
+	}
+}
+
+func TestWorkspacePolicyOverlayCanRequestApproval(t *testing.T) {
+	t.Parallel()
+
+	engine := Engine{}
+	workspace := policies.WorkspacePolicy{
+		ToolPolicy: contract.ToolPolicy{
+			Mode:    policies.ToolPolicyModeAllow,
+			Allowed: []string{"calendar.write"},
+		},
+		ExternalSideEffects: []string{"calendar.write"},
+	}
+	initiative := &policies.PolicyOverlay{
+		ExternalSideEffects:               []string{"calendar.write"},
+		RequireApprovalForExternalEffects: true,
+	}
+
+	resolved := engine.Resolve(workspace, initiative, nil)
 	decision := engine.DecideExternalEffect(resolved, "calendar.write")
 
 	if !decision.Allowed {
@@ -76,8 +102,4 @@ func TestWorkspacePolicyRejectsUnknownExternalSideEffects(t *testing.T) {
 	if decision.Reason == "" {
 		t.Fatalf("Reason = empty, want explanation")
 	}
-}
-
-func boolPtr(value bool) *bool {
-	return &value
 }

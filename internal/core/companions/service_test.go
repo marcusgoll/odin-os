@@ -3,6 +3,7 @@ package companions
 import (
 	"context"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"odin-os/internal/core/initiatives"
@@ -56,6 +57,75 @@ func TestCompanionBootstrapDefaultOperator(t *testing.T) {
 	}
 	if storedWorkspace.DefaultCompanionKey != DefaultOperatorKey {
 		t.Fatalf("workspace default companion = %q, want %q", storedWorkspace.DefaultCompanionKey, DefaultOperatorKey)
+	}
+}
+
+func TestCompanionBootstrapDefaultOperatorIsConcurrentSafe(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openCompanionStore(t)
+	defer store.Close()
+
+	workspaceService := workspaces.Service{Store: store}
+	workspace, err := workspaceService.BootstrapDefault(ctx)
+	if err != nil {
+		t.Fatalf("BootstrapDefault() error = %v", err)
+	}
+
+	service := Service{Store: store}
+
+	const callers = 8
+	start := make(chan struct{})
+	results := make(chan Companion, callers)
+	errs := make(chan error, callers)
+
+	var wg sync.WaitGroup
+	for i := 0; i < callers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+
+			companion, err := service.BootstrapDefaultOperator(ctx, workspace.ID)
+			if err != nil {
+				errs <- err
+				return
+			}
+			results <- companion
+		}()
+	}
+
+	close(start)
+	wg.Wait()
+	close(results)
+	close(errs)
+
+	for err := range errs {
+		t.Fatalf("BootstrapDefaultOperator() concurrent error = %v", err)
+	}
+
+	var firstID int64
+	count := 0
+	for companion := range results {
+		count++
+		if firstID == 0 {
+			firstID = companion.ID
+		}
+		if companion.ID != firstID {
+			t.Fatalf("BootstrapDefaultOperator() returned IDs %d and %d, want one shared record", firstID, companion.ID)
+		}
+	}
+	if count != callers {
+		t.Fatalf("BootstrapDefaultOperator() result count = %d, want %d", count, callers)
+	}
+
+	companions, err := store.ListCompanions(ctx, sqlite.ListCompanionsParams{WorkspaceID: &workspace.ID})
+	if err != nil {
+		t.Fatalf("ListCompanions() error = %v", err)
+	}
+	if len(companions) != 1 {
+		t.Fatalf("ListCompanions() len = %d, want 1", len(companions))
 	}
 }
 
