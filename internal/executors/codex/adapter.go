@@ -3,16 +3,23 @@ package codex
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"strings"
+	"syscall"
 	"time"
 
 	"odin-os/internal/executors/contract"
 )
 
 const executorKey = "codex_headless"
+
+var (
+	healthDriverTimeout = 5 * time.Second
+	runDriverTimeout    = 30 * time.Second
+)
 
 type driverRequest struct {
 	Action string            `json:"action"`
@@ -191,10 +198,29 @@ func invokeDriver(ctx context.Context, request driverRequest) (driverResponse, e
 		return driverResponse{}, err
 	}
 
-	cmd := exec.CommandContext(ctx, driver)
+	driverCtx, cancel, timeoutLabel := boundedDriverContext(ctx, request.Action)
+	defer cancel()
+
+	cmd := exec.CommandContext(driverCtx, driver)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		if cmd.Process == nil {
+			return nil
+		}
+		if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+			return err
+		}
+		return nil
+	}
 	cmd.Stdin = strings.NewReader(string(input))
 	output, err := cmd.Output()
 	if err != nil {
+		if errors.Is(driverCtx.Err(), context.DeadlineExceeded) {
+			if timeoutLabel != "" {
+				return driverResponse{}, fmt.Errorf("codex driver timed out after %s: %w", timeoutLabel, driverCtx.Err())
+			}
+			return driverResponse{}, fmt.Errorf("codex driver timed out: %w", driverCtx.Err())
+		}
 		if exitErr, ok := err.(*exec.ExitError); ok && len(exitErr.Stderr) > 0 {
 			return driverResponse{}, fmt.Errorf("codex driver failed: %w: %s", err, strings.TrimSpace(string(exitErr.Stderr)))
 		}
@@ -206,6 +232,19 @@ func invokeDriver(ctx context.Context, request driverRequest) (driverResponse, e
 		return driverResponse{}, fmt.Errorf("codex driver returned invalid JSON: %w", err)
 	}
 	return response, nil
+}
+
+func boundedDriverContext(ctx context.Context, action string) (context.Context, context.CancelFunc, string) {
+	if _, ok := ctx.Deadline(); ok {
+		return ctx, func() {}, ""
+	}
+
+	timeout := runDriverTimeout
+	if action == "health" {
+		timeout = healthDriverTimeout
+	}
+	boundedCtx, cancel := context.WithTimeout(ctx, timeout)
+	return boundedCtx, cancel, timeout.String()
 }
 
 func (headlessExecutor) ResumeTask(context.Context, contract.TaskHandle, contract.ResumePacket) (contract.ExecutionResult, error) {

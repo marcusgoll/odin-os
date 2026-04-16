@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"odin-os/internal/executors/contract"
 )
@@ -274,6 +275,69 @@ func TestHeadlessRunTaskRejectsEmptyDriverStatus(t *testing.T) {
 	}
 }
 
+func TestHeadlessHealthTimesOutWithDefaultBudget(t *testing.T) {
+	originalDriver := os.Getenv("ODIN_CODEX_DRIVER")
+	originalHealthTimeout := healthDriverTimeout
+	driverPath := writeHangingDriver(t)
+	if err := os.Setenv("ODIN_CODEX_DRIVER", driverPath); err != nil {
+		t.Fatalf("Setenv(driver) error = %v", err)
+	}
+	healthDriverTimeout = 25 * time.Millisecond
+	t.Cleanup(func() {
+		healthDriverTimeout = originalHealthTimeout
+		if originalDriver == "" {
+			_ = os.Unsetenv("ODIN_CODEX_DRIVER")
+		} else {
+			_ = os.Setenv("ODIN_CODEX_DRIVER", originalDriver)
+		}
+	})
+
+	health, err := NewHeadless().Health(context.Background())
+	if err != nil {
+		t.Fatalf("Health() error = %v", err)
+	}
+	if health.Status != contract.HealthStatusUnavailable {
+		t.Fatalf("Health().Status = %q, want unavailable", health.Status)
+	}
+	if !strings.Contains(strings.ToLower(health.Details), "timed out") {
+		t.Fatalf("Health().Details = %q, want timeout diagnostic", health.Details)
+	}
+}
+
+func TestHeadlessRunTaskTimesOutWithIncomingDeadline(t *testing.T) {
+	originalDriver := os.Getenv("ODIN_CODEX_DRIVER")
+	originalRunTimeout := runDriverTimeout
+	driverPath := writeHangingDriver(t)
+	if err := os.Setenv("ODIN_CODEX_DRIVER", driverPath); err != nil {
+		t.Fatalf("Setenv(driver) error = %v", err)
+	}
+	runDriverTimeout = 5 * time.Second
+	t.Cleanup(func() {
+		runDriverTimeout = originalRunTimeout
+		if originalDriver == "" {
+			_ = os.Unsetenv("ODIN_CODEX_DRIVER")
+		} else {
+			_ = os.Setenv("ODIN_CODEX_DRIVER", originalDriver)
+		}
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+	defer cancel()
+
+	_, err := NewHeadless().RunTask(ctx, contract.TaskSpec{
+		ID:     "task-123",
+		Kind:   contract.TaskKindGeneral,
+		Scope:  "project",
+		Prompt: "summarize the change",
+	})
+	if err == nil {
+		t.Fatal("RunTask() error = nil, want timeout failure")
+	}
+	if !strings.Contains(strings.ToLower(err.Error()), "timed out") {
+		t.Fatalf("RunTask() error = %v, want timeout diagnostic", err)
+	}
+}
+
 func fixtureDriverPath(t *testing.T) string {
 	t.Helper()
 
@@ -307,6 +371,22 @@ elif action == "run":
 else:
     print(json.dumps({"status":"unavailable","details":f"unknown action: {action}"}))
 PY
+`
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatalf("WriteFile(driver) error = %v", err)
+	}
+	return path
+}
+
+func writeHangingDriver(t *testing.T) string {
+	t.Helper()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "codex-driver-hang.sh")
+	script := `#!/usr/bin/env bash
+set -euo pipefail
+cat >/dev/null
+sleep 3600
 `
 	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
 		t.Fatalf("WriteFile(driver) error = %v", err)
