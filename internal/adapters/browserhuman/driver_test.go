@@ -72,6 +72,23 @@ printf '{"status":"completed","tool_key":"other_tool","summary":"ok","artifacts"
 	}
 }
 
+func TestDriverRejectsMissingResponseToolKey(t *testing.T) {
+	script := writeFixtureDriver(t, `#!/usr/bin/env bash
+printf '{"status":"completed","summary":"ok","artifacts":{"session_state":"ready"}}'
+`)
+	t.Setenv(defaultDriverEnvVar, script)
+
+	driver := NewDriver()
+	driver.DefaultToolKey = "huginn_browser_session"
+
+	if _, err := driver.Invoke(context.Background(), Request{
+		ToolKey: "huginn_browser_session",
+		Input:   map[string]any{"url": "https://example.com"},
+	}); err == nil {
+		t.Fatal("Invoke() error = nil, want missing response tool key failure")
+	}
+}
+
 func TestDriverRejectsNonCompletedStatus(t *testing.T) {
 	script := writeFixtureDriver(t, `#!/usr/bin/env bash
 printf '{"status":"failed","tool_key":"huginn_browser_session","summary":"not done","artifacts":{"session_state":"blocked"}}'
