@@ -52,7 +52,7 @@ func runOdin(t *testing.T, root string, args ...string) runResult {
 func runInteractiveOdin(t *testing.T, root string, extraEnv map[string]string, stdin string) runResult {
 	t.Helper()
 
-	return runOdinWithEnv(t, root, extraEnv, stdin)
+	return runOdinWithEnv(t, root, extraEnv, stdin, "repl")
 }
 
 func runOdinWithEnv(t *testing.T, root string, extraEnv map[string]string, stdin string, args ...string) runResult {

@@ -1,417 +1,163 @@
 package integration_test
 
 import (
-	"bytes"
 	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"reflect"
 	"strings"
 	"testing"
+
+	"odin-os/internal/store/sqlite"
 )
 
-type driverScriptResponse struct {
-	Status    string         `json:"status"`
-	ToolKey   string         `json:"tool_key"`
-	Summary   string         `json:"summary"`
-	Artifacts map[string]any `json:"artifacts"`
-}
+func TestCodexHeadlessDriverScriptReturnsStructuredJSON(t *testing.T) {
+	t.Setenv("ODIN_CODEX_DRIVER_MODE", "fixture")
 
-func TestGoogleCalendarDriverUsesRepoLocalLibraryByDefault(t *testing.T) {
 	repoRoot := projectRoot(t)
-	scriptPath := filepath.Join(repoRoot, "scripts", "drivers", "google-calendar-off-dates.sh")
-	callPath := filepath.Join(t.TempDir(), "google-call.txt")
-
-	request := `{"tool_key":"google_calendar_off_dates","input":{"bid_period":"2026-05","calendar_id":"family@group.calendar.google.com","timezone":"America/Chicago"}}`
-	response := runDriverScript(t, scriptPath, request, map[string]string{
-		"ODIN_TEST_GOOGLE_CALL_PATH": callPath,
-		"ODIN_TEST_GOOGLE_RESPONSE": `{"items":[
-            {"start":{"date":"2026-05-03"},"end":{"date":"2026-05-05"}},
-            {"start":{"dateTime":"2026-04-30T23:00:00-05:00"},"end":{"dateTime":"2026-05-01T01:00:00-05:00"}},
-            {"start":{"dateTime":"2026-05-10T23:30:00-05:00"},"end":{"dateTime":"2026-05-11T01:00:00-05:00"}},
-            {"start":{"date":"2026-06-01"},"end":{"date":"2026-06-02"}}
-        ]}`,
-	})
-
-	if response.Status != "completed" {
-		t.Fatalf("Status = %q, want completed", response.Status)
-	}
-	if response.ToolKey != "google_calendar_off_dates" {
-		t.Fatalf("ToolKey = %q, want google_calendar_off_dates", response.ToolKey)
-	}
-
-	gotDates := artifactStrings(response.Artifacts["off_dates"])
-	wantDates := []string{"2026-05-01", "2026-05-03", "2026-05-04", "2026-05-10", "2026-05-11"}
-	if !reflect.DeepEqual(gotDates, wantDates) {
-		t.Fatalf("off_dates = %#v, want %#v", gotDates, wantDates)
-	}
-
-	recordedCall, err := os.ReadFile(callPath)
-	if err != nil {
-		t.Fatalf("ReadFile(callPath) error = %v", err)
-	}
-	recorded := string(recordedCall)
-	if !strings.Contains(recorded, "family%40group.calendar.google.com") {
-		t.Fatalf("calendar call = %q, want encoded calendar id", recorded)
-	}
-	if !strings.Contains(recorded, "timeMin=") || !strings.Contains(recorded, "timeMax=") {
-		t.Fatalf("calendar call = %q, want bounded time range", recorded)
-	}
-}
-
-func TestGoogleCalendarDriverHonorsExplicitLibraryOverride(t *testing.T) {
-	repoRoot := projectRoot(t)
-	scriptPath := filepath.Join(repoRoot, "scripts", "drivers", "google-calendar-off-dates.sh")
-	fixtureDir := t.TempDir()
-	googleLib := filepath.Join(fixtureDir, "google.sh")
-	callPath := filepath.Join(fixtureDir, "google-call.txt")
-
-	if err := os.WriteFile(googleLib, []byte(`#!/usr/bin/env bash
-google_api_call() {
-    printf '%s\t%s\n' "$1" "$2" >"$ODIN_TEST_GOOGLE_CALL_PATH"
-    printf '%s' "$ODIN_TEST_GOOGLE_RESPONSE"
-}
-`), 0o755); err != nil {
-		t.Fatalf("WriteFile(googleLib) error = %v", err)
-	}
-
-	request := `{"tool_key":"google_calendar_off_dates","input":{"bid_period":"2026-05","calendar_id":"primary","timezone":"America/Chicago"}}`
-	response := runDriverScript(t, scriptPath, request, map[string]string{
-		"ODIN_GOOGLE_LIB_PATH":       googleLib,
-		"ODIN_TEST_GOOGLE_CALL_PATH": callPath,
-		"ODIN_TEST_GOOGLE_RESPONSE":  `{"items":[]}`,
-	})
-
-	if response.Status != "completed" {
-		t.Fatalf("Status = %q, want completed", response.Status)
-	}
-	recordedCall, err := os.ReadFile(callPath)
-	if err != nil {
-		t.Fatalf("ReadFile(callPath) error = %v", err)
-	}
-	if !strings.Contains(string(recordedCall), "/calendars/primary/events") {
-		t.Fatalf("calendar call = %q, want primary calendar request", string(recordedCall))
-	}
-}
-
-func TestGoogleCalendarDriverRefreshesTokenWithRepoLocalLibrary(t *testing.T) {
-	repoRoot := projectRoot(t)
-	scriptPath := filepath.Join(repoRoot, "scripts", "drivers", "google-calendar-off-dates.sh")
-	fixtureDir := t.TempDir()
-	curlPath := filepath.Join(fixtureDir, "curl")
-	tracePath := filepath.Join(fixtureDir, "curl-trace.txt")
-	cachePath := filepath.Join(fixtureDir, "token-cache.json")
-
-	if err := os.WriteFile(curlPath, []byte(`#!/usr/bin/env bash
-set -euo pipefail
-url="${@: -1}"
-printf '%s\n' "$url" >>"$ODIN_TEST_CURL_TRACE"
-case "$url" in
-  "https://oauth2.googleapis.com/token")
-    printf '{"access_token":"token-123","expires_in":3600}\n200'
-    ;;
-  *"/calendars/primary/events"*)
-    printf '{"items":[{"start":{"date":"2026-05-12"},"end":{"date":"2026-05-13"}}]}\n200'
-    ;;
-  *)
-    exit 1
-    ;;
-esac
-`), 0o755); err != nil {
-		t.Fatalf("WriteFile(fake curl) error = %v", err)
-	}
-
-	request := `{"tool_key":"google_calendar_off_dates","input":{"bid_period":"2026-05","calendar_id":"primary","timezone":"America/Chicago"}}`
-	response := runDriverScript(t, scriptPath, request, map[string]string{
-		"PATH":                       fixtureDir + string(os.PathListSeparator) + os.Getenv("PATH"),
-		"GOOGLE_TOKEN_CACHE":         cachePath,
-		"GOOGLE_OAUTH_CLIENT_ID":     "client",
-		"GOOGLE_OAUTH_CLIENT_SECRET": "secret",
-		"GOOGLE_OAUTH_REFRESH_TOKEN": "refresh",
-		"ODIN_TEST_CURL_TRACE":       tracePath,
-	})
-
-	if response.Status != "completed" {
-		t.Fatalf("Status = %q, want completed", response.Status)
-	}
-	if !reflect.DeepEqual(artifactStrings(response.Artifacts["off_dates"]), []string{"2026-05-12"}) {
-		t.Fatalf("off_dates = %#v, want %#v", artifactStrings(response.Artifacts["off_dates"]), []string{"2026-05-12"})
-	}
-
-	traceBytes, err := os.ReadFile(tracePath)
-	if err != nil {
-		t.Fatalf("ReadFile(trace) error = %v", err)
-	}
-	trace := string(traceBytes)
-	if !strings.Contains(trace, "https://oauth2.googleapis.com/token") || !strings.Contains(trace, "/calendars/primary/events") {
-		t.Fatalf("trace = %q, want token refresh and calendar request", trace)
-	}
-}
-
-func TestGoogleCalendarDriverReturnsJsonFailureForInvalidTimezone(t *testing.T) {
-	repoRoot := projectRoot(t)
-	scriptPath := filepath.Join(repoRoot, "scripts", "drivers", "google-calendar-off-dates.sh")
-
-	request := `{"tool_key":"google_calendar_off_dates","input":{"bid_period":"2026-05","calendar_id":"primary","timezone":"Mars/Olympus"}}`
-	response := runDriverScript(t, scriptPath, request, nil)
-
-	if response.Status != "failed" {
-		t.Fatalf("Status = %q, want failed", response.Status)
-	}
-	if response.Artifacts["reason"] != "invalid_timezone" {
-		t.Fatalf("reason = %#v, want invalid_timezone", response.Artifacts["reason"])
-	}
-}
-
-func TestGoogleCalendarDriverRejectsMalformedInputObject(t *testing.T) {
-	repoRoot := projectRoot(t)
-	scriptPath := filepath.Join(repoRoot, "scripts", "drivers", "google-calendar-off-dates.sh")
-
-	request := `{"tool_key":"google_calendar_off_dates","input":"bad"}`
-	response := runDriverScript(t, scriptPath, request, nil)
-
-	if response.Status != "failed" {
-		t.Fatalf("Status = %q, want failed", response.Status)
-	}
-	if response.Artifacts["reason"] != "invalid_request" {
-		t.Fatalf("reason = %#v, want invalid_request", response.Artifacts["reason"])
-	}
-}
-
-func TestGoogleCalendarDriverRejectsNonNumericBidPeriod(t *testing.T) {
-	repoRoot := projectRoot(t)
-	scriptPath := filepath.Join(repoRoot, "scripts", "drivers", "google-calendar-off-dates.sh")
-
-	request := `{"tool_key":"google_calendar_off_dates","input":{"bid_period":"202A-01"}}`
-	response := runDriverScript(t, scriptPath, request, nil)
-
-	if response.Status != "failed" {
-		t.Fatalf("Status = %q, want failed", response.Status)
-	}
-	if response.Artifacts["reason"] != "invalid_request" {
-		t.Fatalf("reason = %#v, want invalid_request", response.Artifacts["reason"])
-	}
-}
-
-func TestHuginnDriverUsesRepoLocalLibraryByDefault(t *testing.T) {
-	repoRoot := projectRoot(t)
-	scriptPath := filepath.Join(repoRoot, "scripts", "drivers", "huginn-pbs-session.sh")
-	tracePath := filepath.Join(t.TempDir(), "huginn-trace.txt")
-
-	request := `{"tool_key":"huginn_pbs_session","input":{"bid_period":"2026-05","workflow_key":"pbs_may_bid","timezone":"America/Chicago"}}`
-	response := runDriverScript(t, scriptPath, request, map[string]string{
-		"ODIN_TEST_HUGINN_TRACE":    tracePath,
-		"ODIN_TEST_HUGINN_HEALTH":   `{"ok":true,"browser":true,"page":true,"url":"https://jia.flica.net/online/mainmenu.cgi"}`,
-		"ODIN_TEST_HUGINN_SNAPSHOT": "Main Menu\nBid Period May 2026",
-	})
-
-	if response.Status != "completed" {
-		t.Fatalf("Status = %q, want completed", response.Status)
-	}
-	if response.Artifacts["session_state"] != "ready" {
-		t.Fatalf("session_state = %#v, want ready", response.Artifacts["session_state"])
-	}
-	if response.Artifacts["session_id"] != "session://default/flica/default" {
-		t.Fatalf("session_id = %#v, want repo-local session handle", response.Artifacts["session_id"])
-	}
-
-	traceBytes, err := os.ReadFile(tracePath)
-	if err != nil {
-		t.Fatalf("ReadFile(trace) error = %v", err)
-	}
-	trace := string(traceBytes)
-	if !strings.Contains(trace, "start\n") || !strings.Contains(trace, "load:flica\n") || !strings.Contains(trace, "navigate:https://jia.flica.net/online/mainmenu.cgi\n") || !strings.Contains(trace, "stop\n") {
-		t.Fatalf("trace = %q, want start/load/navigate/stop sequence", trace)
-	}
-}
-
-func TestHuginnDriverUsesSnapshotTextForLoginDetection(t *testing.T) {
-	repoRoot := projectRoot(t)
-	scriptPath := filepath.Join(repoRoot, "scripts", "drivers", "huginn-pbs-session.sh")
-	fixtureDir := t.TempDir()
-	curlPath := filepath.Join(fixtureDir, "curl")
-	sessionDir := filepath.Join(fixtureDir, "sessions")
-
-	if err := os.MkdirAll(sessionDir, 0o755); err != nil {
-		t.Fatalf("MkdirAll(sessionDir) error = %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(sessionDir, "flica.json"), []byte(`[]`), 0o644); err != nil {
-		t.Fatalf("WriteFile(session file) error = %v", err)
-	}
-	if err := os.WriteFile(curlPath, []byte(`#!/usr/bin/env bash
-set -euo pipefail
-url="${@: -1}"
-case "$url" in
-  *"/health")
-    printf '{"ok":true,"browser":true,"page":true,"url":"https://jia.flica.net/online/mainmenu.cgi"}'
-    ;;
-  *"/cookies/set")
-    printf '{}'
-    ;;
-  *"/navigate")
-    printf '{"url":"https://jia.flica.net/online/mainmenu.cgi"}'
-    ;;
-  *"/snapshot?compact=true")
-    printf '%s' '{"snapshot":"Sign in\\nPassword"}'
-    ;;
-  *"/stop")
-    printf '{}'
-    ;;
-  *)
-    exit 1
-    ;;
-esac
-`), 0o755); err != nil {
-		t.Fatalf("WriteFile(fake curl) error = %v", err)
-	}
-
-	request := `{"tool_key":"huginn_pbs_session","input":{"bid_period":"2026-05","workflow_key":"pbs_may_bid","timezone":"America/Chicago"}}`
-	response := runDriverScript(t, scriptPath, request, map[string]string{
-		"PATH":                     fixtureDir + string(os.PathListSeparator) + os.Getenv("PATH"),
-		"ODIN_BROWSER_SESSION_DIR": sessionDir,
-	})
-
-	if response.Status != "failed" {
-		t.Fatalf("Status = %q, want failed", response.Status)
-	}
-	if response.Artifacts["session_state"] != "login_required" {
-		t.Fatalf("session_state = %#v, want login_required", response.Artifacts["session_state"])
-	}
-}
-
-func TestHuginnDriverDoesNotStopReusableBrowserServer(t *testing.T) {
-	repoRoot := projectRoot(t)
-	scriptPath := filepath.Join(repoRoot, "scripts", "drivers", "huginn-pbs-session.sh")
-	fixtureDir := t.TempDir()
-	curlPath := filepath.Join(fixtureDir, "curl")
-	sessionDir := filepath.Join(fixtureDir, "sessions")
-	tracePath := filepath.Join(fixtureDir, "curl-trace.txt")
-
-	if err := os.MkdirAll(sessionDir, 0o755); err != nil {
-		t.Fatalf("MkdirAll(sessionDir) error = %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(sessionDir, "flica.json"), []byte(`[]`), 0o644); err != nil {
-		t.Fatalf("WriteFile(session file) error = %v", err)
-	}
-	if err := os.WriteFile(curlPath, []byte(`#!/usr/bin/env bash
-set -euo pipefail
-url="${@: -1}"
-printf '%s\n' "$url" >>"$ODIN_TEST_CURL_TRACE"
-case "$url" in
-  *"/health")
-    printf '{"ok":true,"browser":true,"page":true,"url":"https://jia.flica.net/online/mainmenu.cgi"}'
-    ;;
-  *"/cookies/set")
-    printf '{}'
-    ;;
-  *"/navigate")
-    printf '{"url":"https://jia.flica.net/online/mainmenu.cgi"}'
-    ;;
-  *"/snapshot?compact=true")
-    printf '%s' '{"snapshot":"Main Menu"}'
-    ;;
-  *"/stop")
-    printf '{}'
-    ;;
-  *)
-    exit 1
-    ;;
-esac
-`), 0o755); err != nil {
-		t.Fatalf("WriteFile(fake curl) error = %v", err)
-	}
-
-	request := `{"tool_key":"huginn_pbs_session","input":{"bid_period":"2026-05","workflow_key":"pbs_may_bid","timezone":"America/Chicago"}}`
-	response := runDriverScript(t, scriptPath, request, map[string]string{
-		"PATH":                     fixtureDir + string(os.PathListSeparator) + os.Getenv("PATH"),
-		"ODIN_BROWSER_SERVER_URL":  "http://127.0.0.1:9555",
-		"ODIN_BROWSER_SESSION_DIR": sessionDir,
-		"ODIN_TEST_CURL_TRACE":     tracePath,
-	})
-
-	if response.Status != "completed" {
-		t.Fatalf("Status = %q, want completed", response.Status)
-	}
-
-	traceBytes, err := os.ReadFile(tracePath)
-	if err != nil {
-		t.Fatalf("ReadFile(trace) error = %v", err)
-	}
-	if strings.Contains(string(traceBytes), "/stop") {
-		t.Fatalf("trace = %q, want reusable server to remain running", string(traceBytes))
-	}
-}
-
-func TestHuginnPBSSessionDriverScriptReportsLoginRequired(t *testing.T) {
-	repoRoot := projectRoot(t)
-	scriptPath := filepath.Join(repoRoot, "scripts", "drivers", "huginn-pbs-session.sh")
-
-	request := `{"tool_key":"huginn_pbs_session","input":{"bid_period":"2026-05","workflow_key":"pbs_may_bid","timezone":"America/Chicago"}}`
-	response := runDriverScript(t, scriptPath, request, map[string]string{
-		"ODIN_TEST_HUGINN_HEALTH":   `{"ok":true,"browser":true,"page":true,"url":"https://pfloginapp.cloud.aa.com/loginb2e"}`,
-		"ODIN_TEST_HUGINN_SNAPSHOT": "Sign in\nPassword",
-	})
-
-	if response.Status != "failed" {
-		t.Fatalf("Status = %q, want failed", response.Status)
-	}
-	if response.Artifacts["session_state"] != "login_required" {
-		t.Fatalf("session_state = %#v, want login_required", response.Artifacts["session_state"])
-	}
-}
-
-func TestHuginnDriverRejectsMalformedInputObject(t *testing.T) {
-	repoRoot := projectRoot(t)
-	scriptPath := filepath.Join(repoRoot, "scripts", "drivers", "huginn-pbs-session.sh")
-
-	request := `{"tool_key":"huginn_pbs_session","input":"bad"}`
-	response := runDriverScript(t, scriptPath, request, nil)
-
-	if response.Status != "failed" {
-		t.Fatalf("Status = %q, want failed", response.Status)
-	}
-	if response.Artifacts["reason"] != "invalid_request" {
-		t.Fatalf("reason = %#v, want invalid_request", response.Artifacts["reason"])
-	}
-}
-
-func runDriverScript(t *testing.T, scriptPath string, stdin string, extraEnv map[string]string) driverScriptResponse {
-	t.Helper()
-
-	cmd := exec.Command("bash", scriptPath)
-	cmd.Dir = filepath.Dir(filepath.Dir(scriptPath))
-	cmd.Stdin = bytes.NewBufferString(stdin)
-
-	env := append([]string{}, os.Environ()...)
-	for key, value := range extraEnv {
-		env = append(env, key+"="+value)
-	}
-	cmd.Env = env
-
+	scriptPath := filepath.Join(repoRoot, "scripts", "drivers", "codex-headless.sh")
+	cmd := exec.Command(scriptPath)
+	cmd.Stdin = strings.NewReader(`{"id":"driver-smoke","kind":"general","scope":"project","prompt":"say ready","metadata":{"project_key":"alpha"}}`)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		t.Fatalf("%s error = %v\n%s", scriptPath, err, string(output))
+		t.Fatalf("driver script error = %v\n%s", err, string(output))
 	}
 
-	var response driverScriptResponse
-	if err := json.Unmarshal(output, &response); err != nil {
-		t.Fatalf("%s output json error = %v\n%s", scriptPath, err, string(output))
+	var result struct {
+		Status   string            `json:"status"`
+		Output   string            `json:"output"`
+		Metadata map[string]string `json:"metadata"`
 	}
-	return response
+	if err := json.Unmarshal(output, &result); err != nil {
+		t.Fatalf("driver output = %q, want JSON: %v", string(output), err)
+	}
+	if result.Status != "completed" {
+		t.Fatalf("Status = %q, want completed", result.Status)
+	}
+	if result.Metadata["driver"] != "codex_headless_script" {
+		t.Fatalf("driver metadata = %q, want codex_headless_script", result.Metadata["driver"])
+	}
 }
 
-func artifactStrings(raw any) []string {
-	switch value := raw.(type) {
-	case []any:
-		out := make([]string, 0, len(value))
-		for _, item := range value {
-			out = append(out, item.(string))
-		}
-		return out
-	case []string:
-		return append([]string(nil), value...)
-	default:
-		return nil
+func TestCodexHeadlessDriverScriptDelegatesToConfiguredCommand(t *testing.T) {
+	repoRoot := projectRoot(t)
+	scriptPath := filepath.Join(repoRoot, "scripts", "drivers", "codex-headless.sh")
+	stubPath := filepath.Join(t.TempDir(), "codex-driver-stub.sh")
+	if err := os.WriteFile(stubPath, []byte(`#!/usr/bin/env bash
+python3 -c 'import json,sys; spec=json.load(sys.stdin); json.dump({"status":"completed","output":"delegated "+spec.get("id",""),"metadata":{"driver":"delegated_stub"}}, sys.stdout)'
+`), 0o755); err != nil {
+		t.Fatalf("WriteFile(stub) error = %v", err)
 	}
+
+	cmd := exec.Command(scriptPath)
+	cmd.Env = append(os.Environ(), "ODIN_CODEX_DRIVER_COMMAND="+stubPath)
+	cmd.Stdin = strings.NewReader(`{"id":"driver-smoke","kind":"general","scope":"project","prompt":"say ready","metadata":{"project_key":"alpha"}}`)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("driver script error = %v\n%s", err, string(output))
+	}
+
+	var result struct {
+		Status   string            `json:"status"`
+		Output   string            `json:"output"`
+		Metadata map[string]string `json:"metadata"`
+	}
+	if err := json.Unmarshal(output, &result); err != nil {
+		t.Fatalf("driver output = %q, want JSON: %v", string(output), err)
+	}
+	if result.Metadata["driver"] != "delegated_stub" {
+		t.Fatalf("driver metadata = %q, want delegated_stub", result.Metadata["driver"])
+	}
+	if result.Output != "delegated driver-smoke" {
+		t.Fatalf("Output = %q, want delegated driver-smoke", result.Output)
+	}
+}
+
+func TestLiveDriverScripts(t *testing.T) {
+	t.Run("project status returns runtime-backed JSON", func(t *testing.T) {
+		runtimeRoot := t.TempDir()
+		dataDir := filepath.Join(runtimeRoot, "data")
+		if err := os.MkdirAll(dataDir, 0o755); err != nil {
+			t.Fatalf("MkdirAll(data) error = %v", err)
+		}
+
+		store, err := sqlite.Open(filepath.Join(dataDir, "odin.db"))
+		if err != nil {
+			t.Fatalf("sqlite.Open() error = %v", err)
+		}
+		defer store.Close()
+
+		ctx := t.Context()
+		if err := store.Migrate(ctx); err != nil {
+			t.Fatalf("Migrate() error = %v", err)
+		}
+		project, err := store.CreateProject(ctx, sqlite.CreateProjectParams{
+			Key:           "alpha",
+			Name:          "Alpha",
+			Scope:         "project",
+			GitRoot:       runtimeRoot,
+			DefaultBranch: "main",
+		})
+		if err != nil {
+			t.Fatalf("CreateProject() error = %v", err)
+		}
+		if _, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
+			ProjectID:   project.ID,
+			Key:         "alpha-queued",
+			Title:       "Queued runtime task",
+			Status:      "queued",
+			Scope:       "project",
+			RequestedBy: "test",
+		}); err != nil {
+			t.Fatalf("CreateTask() error = %v", err)
+		}
+		if _, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
+			ProjectID:   project.ID,
+			Key:         "alpha-dead-letter",
+			Title:       "Dead letter runtime task",
+			Status:      "dead_letter",
+			Scope:       "project",
+			RequestedBy: "test",
+		}); err != nil {
+			t.Fatalf("CreateTask(dead_letter) error = %v", err)
+		}
+
+		repoRoot := projectRoot(t)
+		scriptPath := filepath.Join(repoRoot, "scripts", "drivers", "project-status.sh")
+		requestBody, err := json.Marshal(map[string]any{
+			"tool":         "project_status",
+			"runtime_root": runtimeRoot,
+			"args": map[string]string{
+				"project_key": "alpha",
+			},
+		})
+		if err != nil {
+			t.Fatalf("Marshal(request) error = %v", err)
+		}
+
+		cmd := exec.Command(scriptPath)
+		cmd.Stdin = strings.NewReader(string(requestBody))
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("project-status driver error = %v\n%s", err, string(output))
+		}
+
+		var result struct {
+			Source    string            `json:"source"`
+			KeyFacts  map[string]string `json:"key_facts"`
+			RawOutput string            `json:"raw_output"`
+		}
+		if err := json.Unmarshal(output, &result); err != nil {
+			t.Fatalf("driver output = %q, want JSON: %v", string(output), err)
+		}
+		if result.Source != "driver" {
+			t.Fatalf("Source = %q, want driver", result.Source)
+		}
+		if result.KeyFacts["open_task_count"] != "1" {
+			t.Fatalf("open_task_count = %q, want 1", result.KeyFacts["open_task_count"])
+		}
+		if !strings.Contains(result.RawOutput, "project=alpha") {
+			t.Fatalf("RawOutput = %q, want project marker", result.RawOutput)
+		}
+	})
 }

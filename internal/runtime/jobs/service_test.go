@@ -2,10 +2,9 @@ package jobs
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"path/filepath"
-	"sync"
+	"strings"
 	"testing"
 	"time"
 
@@ -13,10 +12,9 @@ import (
 	"odin-os/internal/core/projects"
 	"odin-os/internal/executors/contract"
 	"odin-os/internal/executors/router"
+	"odin-os/internal/runtime/projections"
 	"odin-os/internal/store/sqlite"
-	"odin-os/internal/vcs/branches"
 	"odin-os/internal/vcs/leases"
-	"odin-os/internal/vcs/worktrees"
 )
 
 func TestCreateTaskFromActEnsuresRuntimeProjectAndCreatesQueuedTask(t *testing.T) {
@@ -64,6 +62,38 @@ func TestCreateTaskFromActEnsuresRuntimeProjectAndCreatesQueuedTask(t *testing.T
 	}
 }
 
+func TestCreateTaskFromActStoresExplicitActionKey(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openJobStore(t)
+	defer store.Close()
+
+	registry := writeRegistry(t)
+	service := Service{
+		Store:    store,
+		Registry: registry,
+		Now: func() time.Time {
+			return time.Date(2026, 4, 9, 12, 0, 0, 0, time.UTC)
+		},
+	}
+
+	task, err := service.CreateTaskFromAct(ctx, scope.Resolution{
+		Kind:       scope.ScopeProject,
+		ProjectKey: "alpha",
+	}, "action:docs_audit_note Create docs audit note for limited action pilot")
+	if err != nil {
+		t.Fatalf("CreateTaskFromAct() error = %v", err)
+	}
+
+	if task.ActionKey != "docs_audit_note" {
+		t.Fatalf("task.ActionKey = %q, want docs_audit_note", task.ActionKey)
+	}
+	if task.Title != "Create docs audit note for limited action pilot" {
+		t.Fatalf("task.Title = %q, want trimmed title", task.Title)
+	}
+}
+
 func TestListFiltersJobsByScope(t *testing.T) {
 	t.Parallel()
 
@@ -104,14 +134,39 @@ func TestListFiltersJobsByScope(t *testing.T) {
 	}
 }
 
-func TestExecuteNextQueuedCompletesCutoverProjectTask(t *testing.T) {
+func TestCreateTaskFromProjectKeyUsesExplicitProject(t *testing.T) {
+	t.Parallel()
+
 	ctx := context.Background()
 	store := openJobStore(t)
 	defer store.Close()
 
-	t.Setenv("ODIN_CODEX_DRIVER", codexDriverPath(t))
 	registry := writeRegistry(t)
-	git := &jobTestGit{}
+	service := Service{
+		Store:    store,
+		Registry: registry,
+		Now: func() time.Time {
+			return time.Date(2026, 4, 9, 12, 0, 0, 0, time.UTC)
+		},
+	}
+
+	task, err := service.CreateTaskFromProjectKey(ctx, "alpha", "CLI explicit project")
+	if err != nil {
+		t.Fatalf("CreateTaskFromProjectKey() error = %v", err)
+	}
+	if task.Status != "queued" || task.Scope != string(scope.ScopeProject) {
+		t.Fatalf("task = %+v, want queued project task", task)
+	}
+}
+
+func TestExecuteNextQueuedCompletesCutoverProjectTask(t *testing.T) {
+	configureHarnessDriver(t)
+
+	ctx := context.Background()
+	store := openJobStore(t)
+	defer store.Close()
+
+	registry := writeRegistry(t)
 	service := Service{
 		Store:          store,
 		Registry:       registry,
@@ -120,7 +175,7 @@ func TestExecuteNextQueuedCompletesCutoverProjectTask(t *testing.T) {
 		Transitions:    projects.Service{Store: store},
 		Leases: leases.Manager{
 			Store:        store,
-			Git:          git,
+			Git:          &jobTestGit{},
 			WorktreeRoot: t.TempDir(),
 		},
 		Now: func() time.Time {
@@ -168,28 +223,72 @@ func TestExecuteNextQueuedCompletesCutoverProjectTask(t *testing.T) {
 	if run.Status != "completed" || run.Executor != "codex_headless" {
 		t.Fatalf("run = %+v, want completed codex_headless execution", run)
 	}
-	if run.Summary != "fixture codex driver" {
-		t.Fatalf("run.Summary = %q, want fixture codex driver", run.Summary)
-	}
-	if git.removeWorktreeCalls != 1 {
-		t.Fatalf("RemoveWorktree() calls = %d, want 1", git.removeWorktreeCalls)
+}
+
+func TestExecuteTaskFailsCleanlyWithoutHarnessDriver(t *testing.T) {
+	ctx := context.Background()
+	t.Setenv("ODIN_CODEX_DRIVER", filepath.Join(t.TempDir(), "missing-driver.sh"))
+	store := openJobStore(t)
+	defer store.Close()
+
+	registry := writeRegistry(t)
+	service := Service{
+		Store:          store,
+		Registry:       registry,
+		Executors:      router.DefaultCatalog(),
+		ExecutorConfig: mustLoadExecutorConfig(t),
+		Transitions:    projects.Service{Store: store},
+		Leases: leases.Manager{
+			Store:        store,
+			Git:          &jobTestGit{},
+			WorktreeRoot: t.TempDir(),
+		},
+		Now: time.Now,
 	}
 
-	lease := latestLeaseForTaskRun(t, ctx, store, task.ID, run.ID)
-	if lease.State != "cleaned" {
-		t.Fatalf("lease.State = %q, want cleaned", lease.State)
+	task, err := service.CreateTaskFromAct(ctx, scope.Resolution{
+		Kind:       scope.ScopeProject,
+		ProjectKey: "alpha",
+	}, "No harness driver configured")
+	if err != nil {
+		t.Fatalf("CreateTaskFromAct() error = %v", err)
 	}
-	if lease.CleanedUpAt == nil {
-		t.Fatalf("lease.CleanedUpAt = nil, want value")
+
+	project, err := store.GetProjectByKey(ctx, "alpha")
+	if err != nil {
+		t.Fatalf("GetProjectByKey(alpha) error = %v", err)
+	}
+	if _, err := service.Transitions.SetTransitionState(ctx, projects.TransitionStateInput{
+		ProjectID:   project.ID,
+		Actor:       projects.TransitionControllerOdinOS,
+		TargetState: projects.TransitionStateCutover,
+		ChangedBy:   "test",
+	}); err != nil {
+		t.Fatalf("SetTransitionState(cutover) error = %v", err)
+	}
+
+	outcome, err := service.ExecuteTask(ctx, task.ID)
+	if err == nil {
+		t.Fatal("ExecuteTask() error = nil, want harness driver failure")
+	}
+	if !strings.Contains(err.Error(), "no executor satisfied route requirements") {
+		t.Fatalf("error = %v, want route satisfaction failure", err)
+	}
+	if outcome.Run != nil {
+		t.Fatalf("Run = %+v, want nil because execution never started", outcome.Run)
+	}
+	if outcome.Task.Status != "failed" {
+		t.Fatalf("Task.Status = %q, want failed", outcome.Task.Status)
 	}
 }
 
 func TestExecuteNextQueuedRejectsShadowModeMutation(t *testing.T) {
+	configureHarnessDriver(t)
+
 	ctx := context.Background()
 	store := openJobStore(t)
 	defer store.Close()
 
-	t.Setenv("ODIN_CODEX_DRIVER", codexDriverPath(t))
 	registry := writeRegistry(t)
 	service := Service{
 		Store:          store,
@@ -240,15 +339,14 @@ func TestExecuteNextQueuedRejectsShadowModeMutation(t *testing.T) {
 	}
 }
 
-func TestExecuteNextQueuedFailsClosedOnEmptyRunStatus(t *testing.T) {
+func TestExecuteNextQueuedRejectsExplicitBoundedActionOnPromotionLine(t *testing.T) {
+	configureHarnessDriver(t)
+
 	ctx := context.Background()
 	store := openJobStore(t)
 	defer store.Close()
 
-	t.Setenv("ODIN_CODEX_DRIVER", writeConfigurableCodexDriver(t))
-	t.Setenv("ODIN_CODEX_DRIVER_RUN_RESPONSE", `{"status":"","output":"ignored"}`)
 	registry := writeRegistry(t)
-	git := &jobTestGit{}
 	service := Service{
 		Store:          store,
 		Registry:       registry,
@@ -257,18 +355,16 @@ func TestExecuteNextQueuedFailsClosedOnEmptyRunStatus(t *testing.T) {
 		Transitions:    projects.Service{Store: store},
 		Leases: leases.Manager{
 			Store:        store,
-			Git:          git,
+			Git:          &jobTestGit{},
 			WorktreeRoot: t.TempDir(),
 		},
-		Now: func() time.Time {
-			return time.Date(2026, 4, 9, 12, 0, 0, 0, time.UTC)
-		},
+		Now: time.Now,
 	}
 
 	task, err := service.CreateTaskFromAct(ctx, scope.Resolution{
 		Kind:       scope.ScopeProject,
 		ProjectKey: "alpha",
-	}, "Malformed run status")
+	}, "action:docs_audit_note Create docs audit note for limited action pilot")
 	if err != nil {
 		t.Fatalf("CreateTaskFromAct() error = %v", err)
 	}
@@ -278,17 +374,22 @@ func TestExecuteNextQueuedFailsClosedOnEmptyRunStatus(t *testing.T) {
 		t.Fatalf("GetProjectByKey(alpha) error = %v", err)
 	}
 	if _, err := service.Transitions.SetTransitionState(ctx, projects.TransitionStateInput{
-		ProjectID:   project.ID,
-		Actor:       projects.TransitionControllerOdinOS,
-		TargetState: projects.TransitionStateCutover,
-		ChangedBy:   "test",
+		ProjectID:      project.ID,
+		Actor:          projects.TransitionControllerOdinOS,
+		TargetState:    projects.TransitionStateLimitedAction,
+		LimitedActions: []string{"docs_audit_note"},
+		ChangedBy:      "test",
+		Notes:          "infra only",
 	}); err != nil {
-		t.Fatalf("SetTransitionState(cutover) error = %v", err)
+		t.Fatalf("SetTransitionState(limited_action) error = %v", err)
 	}
 
 	err = service.ExecuteNextQueued(ctx)
 	if err == nil {
-		t.Fatal("ExecuteNextQueued() error = nil, want invalid run status failure")
+		t.Fatalf("ExecuteNextQueued() error = nil, want fail-closed bounded action denial")
+	}
+	if !strings.Contains(err.Error(), "not enabled on this line") {
+		t.Fatalf("ExecuteNextQueued() error = %v, want line-disabled denial", err)
 	}
 
 	gotTask, err := store.GetTask(ctx, task.ID)
@@ -298,34 +399,29 @@ func TestExecuteNextQueuedFailsClosedOnEmptyRunStatus(t *testing.T) {
 	if gotTask.Status != "failed" {
 		t.Fatalf("GetTask().Status = %q, want failed", gotTask.Status)
 	}
-	run, err := latestRunForTask(ctx, store, task.ID)
-	if err != nil {
-		t.Fatalf("latestRunForTask() error = %v", err)
-	}
-	if run.Status != "failed" {
-		t.Fatalf("Run.Status = %q, want failed", run.Status)
-	}
-	if git.removeWorktreeCalls != 1 {
-		t.Fatalf("RemoveWorktree() calls = %d, want 1", git.removeWorktreeCalls)
-	}
 
-	lease := latestLeaseForTaskRun(t, ctx, store, task.ID, run.ID)
-	if lease.State != "cleaned" {
-		t.Fatalf("lease.State = %q, want cleaned", lease.State)
+	row := store.DB().QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM worktree_leases
+		WHERE task_id = ?
+	`, task.ID)
+	var leaseCount int
+	if err := row.Scan(&leaseCount); err != nil {
+		t.Fatalf("Scan(leaseCount) error = %v", err)
 	}
-	if lease.CleanedUpAt == nil {
-		t.Fatalf("lease.CleanedUpAt = nil, want value")
+	if leaseCount != 0 {
+		t.Fatalf("leaseCount = %d, want 0", leaseCount)
 	}
 }
 
-func TestExecuteNextQueuedTargetsCleanupToFinishedAssignment(t *testing.T) {
+func TestForegroundActExecutionPersistsTranscriptAndEpisode(t *testing.T) {
+	configureHarnessDriver(t)
+
 	ctx := context.Background()
 	store := openJobStore(t)
 	defer store.Close()
 
-	t.Setenv("ODIN_CODEX_DRIVER", codexDriverPath(t))
 	registry := writeRegistry(t)
-	git := &jobTestGit{}
 	service := Service{
 		Store:          store,
 		Registry:       registry,
@@ -334,7 +430,7 @@ func TestExecuteNextQueuedTargetsCleanupToFinishedAssignment(t *testing.T) {
 		Transitions:    projects.Service{Store: store},
 		Leases: leases.Manager{
 			Store:        store,
-			Git:          git,
+			Git:          &jobTestGit{},
 			WorktreeRoot: t.TempDir(),
 		},
 		Now: func() time.Time {
@@ -345,7 +441,7 @@ func TestExecuteNextQueuedTargetsCleanupToFinishedAssignment(t *testing.T) {
 	task, err := service.CreateTaskFromAct(ctx, scope.Resolution{
 		Kind:       scope.ScopeProject,
 		ProjectKey: "alpha",
-	}, "Targeted cleanup")
+	}, "Persist act transcript")
 	if err != nil {
 		t.Fatalf("CreateTaskFromAct() error = %v", err)
 	}
@@ -355,139 +451,81 @@ func TestExecuteNextQueuedTargetsCleanupToFinishedAssignment(t *testing.T) {
 		t.Fatalf("GetProjectByKey(alpha) error = %v", err)
 	}
 	if _, err := service.Transitions.SetTransitionState(ctx, projects.TransitionStateInput{
-		ProjectID:   project.ID,
-		Actor:       projects.TransitionControllerOdinOS,
-		TargetState: projects.TransitionStateCutover,
-		ChangedBy:   "test",
+		ProjectID:      project.ID,
+		Actor:          projects.TransitionControllerOdinOS,
+		TargetState:    projects.TransitionStateLimitedAction,
+		LimitedActions: []string{"run_task"},
+		ChangedBy:      "test",
+		Notes:          "allow foreground execution",
 	}); err != nil {
-		t.Fatalf("SetTransitionState(cutover) error = %v", err)
+		t.Fatalf("SetTransitionState(limited_action) error = %v", err)
 	}
 
-	unrelatedTask, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
-		ProjectID:   project.ID,
-		Key:         "alpha-unrelated",
-		Title:       "Released worktree",
-		Status:      "running",
-		Scope:       "project",
-		RequestedBy: "operator",
+	outcome, err := service.ExecuteTask(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("ExecuteTask() error = %v", err)
+	}
+	if outcome.Run == nil {
+		t.Fatal("Run = nil, want completed run")
+	}
+
+	transcripts, err := store.ListConversationTranscripts(ctx, sqlite.ListConversationTranscriptsParams{
+		ProjectID: &project.ID,
+		TaskID:    &task.ID,
+		RunID:     &outcome.Run.ID,
+		Scope:     "project",
+		ScopeKey:  project.Key,
+		Mode:      "act",
 	})
 	if err != nil {
-		t.Fatalf("CreateTask(unrelated) error = %v", err)
+		t.Fatalf("ListConversationTranscripts() error = %v", err)
 	}
-	unrelatedRun, err := store.StartRun(ctx, sqlite.StartRunParams{
-		TaskID:   unrelatedTask.ID,
-		Executor: "codex_headless",
-		Attempt:  1,
-		Status:   "running",
+	if len(transcripts) != 1 {
+		t.Fatalf("transcripts len = %d, want 1", len(transcripts))
+	}
+
+	summaries, err := store.ListMemorySummaries(ctx, sqlite.ListMemorySummariesParams{
+		ProjectID:  &project.ID,
+		TaskID:     &task.ID,
+		RunID:      &outcome.Run.ID,
+		Scope:      "project",
+		ScopeKey:   project.Key,
+		MemoryType: "episode",
 	})
 	if err != nil {
-		t.Fatalf("StartRun(unrelated) error = %v", err)
+		t.Fatalf("ListMemorySummaries() error = %v", err)
 	}
-	unrelatedLease, err := store.CreateWorktreeLease(ctx, sqlite.CreateWorktreeLeaseParams{
-		ProjectID:    project.ID,
-		TaskID:       unrelatedTask.ID,
-		RunID:        unrelatedRun.ID,
-		Mode:         "mutable",
-		BranchName:   "odin/alpha/task-999/run-999/try-1",
-		WorktreePath: filepath.Join(t.TempDir(), "released-worktree"),
-		RepoRoot:     project.GitRoot,
-		State:        "active",
-	})
-	if err != nil {
-		t.Fatalf("CreateWorktreeLease(unrelated) error = %v", err)
-	}
-	if _, err := store.ReleaseWorktreeLease(ctx, sqlite.ReleaseWorktreeLeaseParams{
-		LeaseID: unrelatedLease.ID,
-		State:   "released",
-	}); err != nil {
-		t.Fatalf("ReleaseWorktreeLease(unrelated) error = %v", err)
-	}
-
-	if err := service.ExecuteNextQueued(ctx); err != nil {
-		t.Fatalf("ExecuteNextQueued() error = %v", err)
-	}
-	run, err := latestRunForTask(ctx, store, task.ID)
-	if err != nil {
-		t.Fatalf("latestRunForTask() error = %v", err)
-	}
-
-	if git.removeWorktreeCalls != 1 {
-		t.Fatalf("RemoveWorktree() calls = %d, want 1", git.removeWorktreeCalls)
-	}
-	if len(git.removeWorktreePaths) != 1 || git.removeWorktreePaths[0] != git.removeWorktreePath {
-		t.Fatalf("RemoveWorktree paths = %+v, want only finished assignment path %q", git.removeWorktreePaths, git.removeWorktreePath)
-	}
-
-	lease := latestLeaseForTaskRun(t, ctx, store, task.ID, run.ID)
-	if lease.State != "cleaned" {
-		t.Fatalf("finished lease state = %q, want cleaned", lease.State)
-	}
-	unrelatedAfter := latestLeaseByID(t, ctx, store, unrelatedLease.ID)
-	if unrelatedAfter.State != "released" {
-		t.Fatalf("unrelated lease state = %q, want released", unrelatedAfter.State)
-	}
-	if unrelatedAfter.CleanedUpAt != nil {
-		t.Fatalf("unrelated lease cleaned up unexpectedly")
+	if len(summaries) != 1 {
+		t.Fatalf("summaries len = %d, want 1", len(summaries))
 	}
 }
 
-func TestExecuteNextQueuedHeartbeatsMutableLeaseWhileRunning(t *testing.T) {
+func TestForegroundActDenialPersistsTranscriptAndEpisode(t *testing.T) {
+	configureHarnessDriver(t)
+
 	ctx := context.Background()
 	store := openJobStore(t)
 	defer store.Close()
 
-	clock := &testClock{now: time.Date(2026, 4, 9, 12, 0, 0, 0, time.UTC)}
-	store.Now = clock.Now
-
 	registry := writeRegistry(t)
-	git := &jobTestGit{}
-	started := make(chan struct{}, 1)
-	release := make(chan struct{})
 	service := Service{
-		Store:    store,
-		Registry: registry,
-		Executors: map[string]contract.Executor{
-			"blocking": &blockingExecutor{
-				started: started,
-				release: release,
-			},
-		},
-		ExecutorConfig: router.Config{
-			Version: 1,
-			Executors: []router.ExecutorConfig{
-				{
-					Key:      "blocking",
-					Adapter:  "test",
-					Class:    contract.ExecutorClassPlanBackedCLI,
-					Enabled:  true,
-					Priority: 1,
-				},
-			},
-			Routes: []router.RouteConfig{
-				{
-					Name: "default",
-					Match: router.RouteMatch{
-						TaskKinds: []contract.TaskKind{contract.TaskKindGeneral},
-						Scopes:    []string{"project"},
-					},
-					Preferred: []string{"blocking"},
-				},
-			},
-		},
-		Transitions: projects.Service{Store: store},
+		Store:          store,
+		Registry:       registry,
+		Executors:      router.DefaultCatalog(),
+		ExecutorConfig: mustLoadExecutorConfig(t),
+		Transitions:    projects.Service{Store: store},
 		Leases: leases.Manager{
 			Store:        store,
-			Git:          git,
+			Git:          &jobTestGit{},
 			WorktreeRoot: t.TempDir(),
 		},
-		MutableHeartbeatInterval: 10 * time.Millisecond,
-		Now:                      clock.Now,
+		Now: time.Now,
 	}
 
 	task, err := service.CreateTaskFromAct(ctx, scope.Resolution{
 		Kind:       scope.ScopeProject,
 		ProjectKey: "alpha",
-	}, "Heartbeat mutable lease")
+	}, "Persist denied act transcript")
 	if err != nil {
 		t.Fatalf("CreateTaskFromAct() error = %v", err)
 	}
@@ -499,126 +537,86 @@ func TestExecuteNextQueuedHeartbeatsMutableLeaseWhileRunning(t *testing.T) {
 	if _, err := service.Transitions.SetTransitionState(ctx, projects.TransitionStateInput{
 		ProjectID:   project.ID,
 		Actor:       projects.TransitionControllerOdinOS,
-		TargetState: projects.TransitionStateCutover,
+		TargetState: projects.TransitionStateShadow,
 		ChangedBy:   "test",
 	}); err != nil {
-		t.Fatalf("SetTransitionState(cutover) error = %v", err)
+		t.Fatalf("SetTransitionState(shadow) error = %v", err)
 	}
 
-	runDone := make(chan error, 1)
-	go func() {
-		runDone <- service.ExecuteNextQueued(ctx)
-	}()
-
-	select {
-	case <-started:
-	case <-time.After(2 * time.Second):
-		t.Fatal("executor did not start")
+	outcome, err := service.ExecuteTask(ctx, task.ID)
+	if err == nil {
+		t.Fatalf("ExecuteTask() error = nil, want transition denial")
+	}
+	if outcome.Run == nil {
+		t.Fatal("Run = nil, want failed run record")
 	}
 
-	clock.Set(clock.NowValue().Add(31 * time.Minute))
-
-	updatedLease, err := waitForLeaseHeartbeatAfter(t, ctx, store, task.ID, clock.NowValue().Add(-30*time.Minute), 2*time.Second)
+	transcripts, err := store.ListConversationTranscripts(ctx, sqlite.ListConversationTranscriptsParams{
+		ProjectID: &project.ID,
+		TaskID:    &task.ID,
+		RunID:     &outcome.Run.ID,
+		Scope:     "project",
+		ScopeKey:  project.Key,
+		Mode:      "act",
+	})
 	if err != nil {
-		close(release)
-		<-runDone
-		t.Fatal(err)
+		t.Fatalf("ListConversationTranscripts() error = %v", err)
 	}
-	if updatedLease.State != "active" {
-		t.Fatalf("lease.State = %q, want active while run is in progress", updatedLease.State)
+	if len(transcripts) != 1 {
+		t.Fatalf("transcripts len = %d, want 1", len(transcripts))
+	}
+	if transcripts[0].Response == "" {
+		t.Fatalf("Response = empty, want denial summary")
 	}
 
-	manager := worktrees.Manager{
-		Store: store,
-		Git:   git,
-	}
-	result, err := manager.Cleanup(ctx, clock.NowValue().Add(-30*time.Minute))
+	summaries, err := store.ListMemorySummaries(ctx, sqlite.ListMemorySummariesParams{
+		ProjectID:  &project.ID,
+		TaskID:     &task.ID,
+		RunID:      &outcome.Run.ID,
+		Scope:      "project",
+		ScopeKey:   project.Key,
+		MemoryType: "episode",
+	})
 	if err != nil {
-		close(release)
-		<-runDone
-		t.Fatalf("Cleanup() error = %v", err)
+		t.Fatalf("ListMemorySummaries() error = %v", err)
 	}
-	if len(result.Removed) != 0 {
-		close(release)
-		<-runDone
-		t.Fatalf("Cleanup().Removed len = %d, want 0 for active lease", len(result.Removed))
-	}
-	if git.removeWorktreeCalls != 0 {
-		close(release)
-		<-runDone
-		t.Fatalf("RemoveWorktree() calls = %d, want 0 while run is active", git.removeWorktreeCalls)
-	}
-
-	close(release)
-	if err := <-runDone; err != nil {
-		t.Fatalf("ExecuteNextQueued() error = %v", err)
-	}
-
-	if git.removeWorktreeCalls != 1 {
-		t.Fatalf("RemoveWorktree() calls = %d, want 1 after completion", git.removeWorktreeCalls)
-	}
-	run, err := latestRunForTask(ctx, store, task.ID)
-	if err != nil {
-		t.Fatalf("latestRunForTask() error = %v", err)
-	}
-	finishedLease := latestLeaseForTaskRun(t, ctx, store, task.ID, run.ID)
-	if finishedLease.State != "cleaned" {
-		t.Fatalf("finished lease state = %q, want cleaned", finishedLease.State)
-	}
-	if finishedLease.CleanedUpAt == nil {
-		t.Fatalf("finished lease cleaned up at = nil, want value")
+	if len(summaries) != 1 {
+		t.Fatalf("summaries len = %d, want 1", len(summaries))
 	}
 }
 
-func TestExecuteNextQueuedPreservesMutableLeaseWhenTerminalPersistenceFails(t *testing.T) {
+func TestRunNextPersistsTerminalStateAcrossTaskAndRun(t *testing.T) {
+	t.Parallel()
+
 	ctx := context.Background()
-	dbPath := filepath.Join(t.TempDir(), "odin.db")
-	store, err := sqlite.Open(dbPath)
-	if err != nil {
-		t.Fatalf("Open() error = %v", err)
-	}
-	if err := store.Migrate(ctx); err != nil {
-		t.Fatalf("Migrate() error = %v", err)
-	}
+	store := openJobStore(t)
 	defer store.Close()
 
 	registry := writeRegistry(t)
-	git := &jobTestGit{}
 	service := Service{
 		Store:    store,
 		Registry: registry,
 		Executors: map[string]contract.Executor{
-			"closing": &closingExecutor{store: store},
-		},
-		ExecutorConfig: router.Config{
-			Version: 1,
-			Executors: []router.ExecutorConfig{
-				{
-					Key:      "closing",
-					Adapter:  "test",
-					Class:    contract.ExecutorClassPlanBackedCLI,
-					Enabled:  true,
-					Priority: 1,
-				},
-			},
-			Routes: []router.RouteConfig{
-				{
-					Name: "default",
-					Match: router.RouteMatch{
-						TaskKinds: []contract.TaskKind{contract.TaskKindGeneral},
-						Scopes:    []string{"project"},
+			"fake_headless": jobTestExecutor{
+				result: contract.ExecutionResult{
+					Status: "completed",
+					Output: "fake executor summary",
+					Metadata: map[string]string{
+						"artifacts_json": `["runs/artifacts/fake-executor.json"]`,
 					},
-					Preferred: []string{"closing"},
 				},
 			},
 		},
-		Transitions: projects.Service{Store: store},
+		ExecutorConfig: jobTestExecutorConfig(),
+		Transitions:    projects.Service{Store: store},
 		Leases: leases.Manager{
 			Store:        store,
-			Git:          git,
+			Git:          &jobTestGit{},
 			WorktreeRoot: t.TempDir(),
 		},
-		Now: time.Now,
+		Now: func() time.Time {
+			return time.Date(2026, 4, 9, 12, 0, 0, 0, time.UTC)
+		},
 	}
 
 	task, err := service.CreateTaskFromAct(ctx, scope.Resolution{
@@ -642,137 +640,47 @@ func TestExecuteNextQueuedPreservesMutableLeaseWhenTerminalPersistenceFails(t *t
 		t.Fatalf("SetTransitionState(cutover) error = %v", err)
 	}
 
-	err = service.ExecuteNextQueued(ctx)
-	if err == nil {
-		t.Fatal("ExecuteNextQueued() error = nil, want terminal persistence failure")
-	}
-	if git.removeWorktreeCalls != 0 {
-		t.Fatalf("RemoveWorktree() calls = %d, want 0 when terminal persistence fails", git.removeWorktreeCalls)
+	if err := service.RunNext(ctx); err != nil {
+		t.Fatalf("RunNext() error = %v", err)
 	}
 
-	reopened, err := sqlite.Open(dbPath)
+	gotTask, err := store.GetTask(ctx, task.ID)
 	if err != nil {
-		t.Fatalf("reopen store error = %v", err)
+		t.Fatalf("GetTask() error = %v", err)
 	}
-	defer reopened.Close()
-
-	run, err := latestRunForTask(ctx, reopened, task.ID)
-	if err != nil {
-		t.Fatalf("latestRunForTask() error = %v", err)
+	if gotTask.Summary != "fake executor summary" {
+		t.Fatalf("task summary = %q, want fake executor summary", gotTask.Summary)
 	}
-	if run.Status != "running" {
-		t.Fatalf("run.Status = %q, want running when terminal persistence fails", run.Status)
+	if gotTask.TerminalReason != "completed" {
+		t.Fatalf("task terminal reason = %q, want completed", gotTask.TerminalReason)
 	}
-
-	lease := latestLeaseForTaskRun(t, ctx, reopened, task.ID, run.ID)
-	if lease.State != "active" {
-		t.Fatalf("lease.State = %q, want active when terminal persistence fails", lease.State)
-	}
-	if lease.CleanedUpAt != nil {
-		t.Fatalf("lease.CleanedUpAt = %v, want nil when terminal persistence fails", lease.CleanedUpAt)
-	}
-}
-
-func TestExecuteNextQueuedRollsBackTerminalPersistenceWhenTaskUpdateFails(t *testing.T) {
-	ctx := context.Background()
-	store := openJobStore(t)
-	defer store.Close()
-
-	t.Setenv("ODIN_CODEX_DRIVER", codexDriverPath(t))
-	registry := writeRegistry(t)
-	git := &jobTestGit{}
-	service := Service{
-		Store:          store,
-		Registry:       registry,
-		Executors:      router.DefaultCatalog(),
-		ExecutorConfig: mustLoadExecutorConfig(t),
-		Transitions:    projects.Service{Store: store},
-		Leases: leases.Manager{
-			Store:        store,
-			Git:          git,
-			WorktreeRoot: t.TempDir(),
-		},
-		Now: time.Now,
-	}
-
-	task, err := service.CreateTaskFromAct(ctx, scope.Resolution{
-		Kind:       scope.ScopeProject,
-		ProjectKey: "alpha",
-	}, "Rollback terminal persistence")
-	if err != nil {
-		t.Fatalf("CreateTaskFromAct() error = %v", err)
-	}
-
-	project, err := store.GetProjectByKey(ctx, "alpha")
-	if err != nil {
-		t.Fatalf("GetProjectByKey(alpha) error = %v", err)
-	}
-	if _, err := service.Transitions.SetTransitionState(ctx, projects.TransitionStateInput{
-		ProjectID:   project.ID,
-		Actor:       projects.TransitionControllerOdinOS,
-		TargetState: projects.TransitionStateCutover,
-		ChangedBy:   "test",
-	}); err != nil {
-		t.Fatalf("SetTransitionState(cutover) error = %v", err)
-	}
-
-	triggerName := fmt.Sprintf("fail_task_status_%d", task.ID)
-	if _, err := store.DB().ExecContext(ctx, fmt.Sprintf(`
-		CREATE TRIGGER %s
-		BEFORE UPDATE OF status ON tasks
-		FOR EACH ROW
-		WHEN NEW.id = %d AND NEW.status = 'completed'
-		BEGIN
-			SELECT RAISE(FAIL, 'blocked task completion');
-		END;
-	`, triggerName, task.ID)); err != nil {
-		t.Fatalf("create trigger error = %v", err)
-	}
-
-	err = service.ExecuteNextQueued(ctx)
-	if err == nil {
-		t.Fatal("ExecuteNextQueued() error = nil, want blocked task completion")
-	}
-	if git.removeWorktreeCalls != 0 {
-		t.Fatalf("RemoveWorktree() calls = %d, want 0 when terminal persistence rolls back", git.removeWorktreeCalls)
+	if gotTask.ArtifactsJSON != `["runs/artifacts/fake-executor.json"]` {
+		t.Fatalf("task artifacts = %q, want persisted artifact pointer", gotTask.ArtifactsJSON)
 	}
 
 	run, err := latestRunForTask(ctx, store, task.ID)
 	if err != nil {
 		t.Fatalf("latestRunForTask() error = %v", err)
 	}
-	if run.Status != "running" {
-		t.Fatalf("run.Status = %q, want running after rolled-back terminal persistence", run.Status)
+	if run.Summary != "fake executor summary" {
+		t.Fatalf("run summary = %q, want fake executor summary", run.Summary)
 	}
-
-	gotTask, err := store.GetTask(ctx, task.ID)
-	if err != nil {
-		t.Fatalf("GetTask() error = %v", err)
+	if run.TerminalReason != "completed" {
+		t.Fatalf("run terminal reason = %q, want completed", run.TerminalReason)
 	}
-	if gotTask.Status != "running" {
-		t.Fatalf("task.Status = %q, want running after rolled-back terminal persistence", gotTask.Status)
-	}
-	if gotTask.CurrentRunID == nil || *gotTask.CurrentRunID != run.ID {
-		t.Fatalf("task.CurrentRunID = %v, want %d", gotTask.CurrentRunID, run.ID)
-	}
-
-	lease := latestLeaseForTaskRun(t, ctx, store, task.ID, run.ID)
-	if lease.State != "active" {
-		t.Fatalf("lease.State = %q, want active after rolled-back terminal persistence", lease.State)
-	}
-	if lease.CleanedUpAt != nil {
-		t.Fatalf("lease.CleanedUpAt = %v, want nil after rolled-back terminal persistence", lease.CleanedUpAt)
+	if run.ArtifactsJSON != `["runs/artifacts/fake-executor.json"]` {
+		t.Fatalf("run artifacts = %q, want persisted artifact pointer", run.ArtifactsJSON)
 	}
 }
 
-func TestExecuteNextQueuedRollsBackRunLaunchWhenTaskStatusUpdateFails(t *testing.T) {
+func TestRunNextRequestsApprovalForSystemProjectMutation(t *testing.T) {
+	configureHarnessDriver(t)
+
 	ctx := context.Background()
 	store := openJobStore(t)
 	defer store.Close()
 
-	t.Setenv("ODIN_CODEX_DRIVER", codexDriverPath(t))
 	registry := writeRegistry(t)
-	git := &jobTestGit{}
 	service := Service{
 		Store:          store,
 		Registry:       registry,
@@ -781,23 +689,24 @@ func TestExecuteNextQueuedRollsBackRunLaunchWhenTaskStatusUpdateFails(t *testing
 		Transitions:    projects.Service{Store: store},
 		Leases: leases.Manager{
 			Store:        store,
-			Git:          git,
+			Git:          &jobTestGit{},
 			WorktreeRoot: t.TempDir(),
 		},
-		Now: time.Now,
+		RuntimeRoot: t.TempDir(),
+		Now:         time.Now,
 	}
 
 	task, err := service.CreateTaskFromAct(ctx, scope.Resolution{
-		Kind:       scope.ScopeProject,
-		ProjectKey: "alpha",
-	}, "Rollback run launch")
+		Kind:       scope.ScopeOdinCore,
+		ProjectKey: "odin-core",
+	}, "Mutate odin core")
 	if err != nil {
 		t.Fatalf("CreateTaskFromAct() error = %v", err)
 	}
 
-	project, err := store.GetProjectByKey(ctx, "alpha")
+	project, err := store.GetProjectByKey(ctx, "odin-core")
 	if err != nil {
-		t.Fatalf("GetProjectByKey(alpha) error = %v", err)
+		t.Fatalf("GetProjectByKey(odin-core) error = %v", err)
 	}
 	if _, err := service.Transitions.SetTransitionState(ctx, projects.TransitionStateInput{
 		ProjectID:   project.ID,
@@ -808,115 +717,94 @@ func TestExecuteNextQueuedRollsBackRunLaunchWhenTaskStatusUpdateFails(t *testing
 		t.Fatalf("SetTransitionState(cutover) error = %v", err)
 	}
 
-	triggerName := fmt.Sprintf("fail_task_launch_%d", task.ID)
-	if _, err := store.DB().ExecContext(ctx, fmt.Sprintf(`
-		CREATE TRIGGER %s
-		BEFORE UPDATE OF status ON tasks
-		FOR EACH ROW
-		WHEN NEW.id = %d AND NEW.status = 'running'
-		BEGIN
-			SELECT RAISE(FAIL, 'blocked task launch');
-		END;
-	`, triggerName, task.ID)); err != nil {
-		t.Fatalf("create trigger error = %v", err)
+	if err := service.RunNext(ctx); err != nil {
+		t.Fatalf("RunNext() error = %v", err)
 	}
 
-	err = service.ExecuteNextQueued(ctx)
-	if err == nil {
-		t.Fatal("ExecuteNextQueued() error = nil, want blocked task launch")
+	approvals, err := projections.ListPendingApprovalViews(ctx, store.DB())
+	if err != nil {
+		t.Fatalf("ListPendingApprovalViews() error = %v", err)
 	}
-	if git.removeWorktreeCalls != 0 {
-		t.Fatalf("RemoveWorktree() calls = %d, want 0 when run launch rolls back", git.removeWorktreeCalls)
+	if len(approvals) != 1 {
+		t.Fatalf("pending approvals = %d, want 1", len(approvals))
 	}
 
 	gotTask, err := store.GetTask(ctx, task.ID)
 	if err != nil {
 		t.Fatalf("GetTask() error = %v", err)
 	}
-	if gotTask.Status != "queued" {
-		t.Fatalf("task.Status = %q, want queued after rolled-back run launch", gotTask.Status)
+	if gotTask.Status != "awaiting_approval" {
+		t.Fatalf("task status = %q, want awaiting_approval", gotTask.Status)
+	}
+}
+
+func TestRunNextFailsStartedRunWhenApprovalTransactionFails(t *testing.T) {
+	configureHarnessDriver(t)
+
+	ctx := context.Background()
+	store := openJobStore(t)
+	defer store.Close()
+
+	if _, err := store.DB().ExecContext(ctx, `
+		CREATE TRIGGER fail_approval_insert
+		BEFORE INSERT ON approvals
+		BEGIN
+			SELECT RAISE(FAIL, 'approval insert blocked');
+		END;
+	`); err != nil {
+		t.Fatalf("create approval failure trigger error = %v", err)
+	}
+
+	registry := writeRegistry(t)
+	service := Service{
+		Store:          store,
+		Registry:       registry,
+		Executors:      router.DefaultCatalog(),
+		ExecutorConfig: mustLoadExecutorConfig(t),
+		Transitions:    projects.Service{Store: store},
+		Leases: leases.Manager{
+			Store:        store,
+			Git:          &jobTestGit{},
+			WorktreeRoot: t.TempDir(),
+		},
+		Now: time.Now,
+	}
+
+	task, err := service.CreateTaskFromAct(ctx, scope.Resolution{
+		Kind:       scope.ScopeOdinCore,
+		ProjectKey: "odin-core",
+	}, "Mutate odin core")
+	if err != nil {
+		t.Fatalf("CreateTaskFromAct() error = %v", err)
+	}
+
+	project, err := store.GetProjectByKey(ctx, "odin-core")
+	if err != nil {
+		t.Fatalf("GetProjectByKey(odin-core) error = %v", err)
+	}
+	if _, err := service.Transitions.SetTransitionState(ctx, projects.TransitionStateInput{
+		ProjectID:   project.ID,
+		Actor:       projects.TransitionControllerOdinOS,
+		TargetState: projects.TransitionStateCutover,
+		ChangedBy:   "test",
+	}); err != nil {
+		t.Fatalf("SetTransitionState(cutover) error = %v", err)
+	}
+
+	err = service.RunNext(ctx)
+	if err == nil {
+		t.Fatal("RunNext() error = nil, want approval transaction failure")
+	}
+
+	gotTask, err := store.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
+	}
+	if gotTask.Status != "failed" {
+		t.Fatalf("task status = %q, want failed", gotTask.Status)
 	}
 	if gotTask.CurrentRunID != nil {
-		t.Fatalf("task.CurrentRunID = %v, want nil after rolled-back run launch", gotTask.CurrentRunID)
-	}
-
-	row := store.DB().QueryRowContext(ctx, `
-		SELECT COUNT(*)
-		FROM runs
-		WHERE task_id = ?
-	`, task.ID)
-	var runCount int
-	if err := row.Scan(&runCount); err != nil {
-		t.Fatalf("scan run count error = %v", err)
-	}
-	if runCount != 0 {
-		t.Fatalf("run count = %d, want 0 after rolled-back run launch", runCount)
-	}
-}
-
-func TestExecuteNextQueuedCleansPreparedAssignmentWhenValidationFails(t *testing.T) {
-	ctx := context.Background()
-	store := openJobStore(t)
-	defer store.Close()
-
-	registry := writeRegistry(t)
-	git := &jobTestGit{}
-	service := Service{
-		Store:          store,
-		Registry:       registry,
-		Executors:      router.DefaultCatalog(),
-		ExecutorConfig: mustLoadExecutorConfig(t),
-		Transitions:    projects.Service{Store: store},
-		Leases: leases.Manager{
-			Store:        store,
-			Git:          git,
-			WorktreeRoot: t.TempDir(),
-		},
-		Now: time.Now,
-	}
-
-	task, err := service.CreateTaskFromAct(ctx, scope.Resolution{
-		Kind:       scope.ScopeProject,
-		ProjectKey: "alpha",
-	}, "Validation failure cleanup")
-	if err != nil {
-		t.Fatalf("CreateTaskFromAct() error = %v", err)
-	}
-
-	project, err := store.GetProjectByKey(ctx, "alpha")
-	if err != nil {
-		t.Fatalf("GetProjectByKey(alpha) error = %v", err)
-	}
-	nextRunID := int64(1)
-	branchName := branches.Name(branches.NameParams{
-		ProjectKey: project.Key,
-		TaskID:     task.ID,
-		RunID:      nextRunID,
-		Try:        1,
-	})
-	if _, err := store.DB().ExecContext(ctx, `
-		UPDATE projects
-		SET default_branch = ?
-		WHERE id = ?
-	`, branchName, project.ID); err != nil {
-		t.Fatalf("update project default branch error = %v", err)
-	}
-
-	if _, err := service.Transitions.SetTransitionState(ctx, projects.TransitionStateInput{
-		ProjectID:   project.ID,
-		Actor:       projects.TransitionControllerOdinOS,
-		TargetState: projects.TransitionStateCutover,
-		ChangedBy:   "test",
-	}); err != nil {
-		t.Fatalf("SetTransitionState(cutover) error = %v", err)
-	}
-
-	err = service.ExecuteNextQueued(ctx)
-	if err == nil {
-		t.Fatal("ExecuteNextQueued() error = nil, want validation failure")
-	}
-	if git.removeWorktreeCalls != 1 {
-		t.Fatalf("RemoveWorktree() calls = %d, want 1 after validation failure", git.removeWorktreeCalls)
+		t.Fatalf("task current run = %v, want cleared after failure", gotTask.CurrentRunID)
 	}
 
 	run, err := latestRunForTask(ctx, store, task.ID)
@@ -924,147 +812,250 @@ func TestExecuteNextQueuedCleansPreparedAssignmentWhenValidationFails(t *testing
 		t.Fatalf("latestRunForTask() error = %v", err)
 	}
 	if run.Status != "failed" {
-		t.Fatalf("run.Status = %q, want failed", run.Status)
-	}
-
-	lease := latestLeaseForTaskRun(t, ctx, store, task.ID, run.ID)
-	if lease.State != "cleaned" {
-		t.Fatalf("lease.State = %q, want cleaned after validation failure", lease.State)
-	}
-	if lease.CleanedUpAt == nil {
-		t.Fatalf("lease.CleanedUpAt = nil, want value after validation failure")
+		t.Fatalf("run status = %q, want failed", run.Status)
 	}
 }
 
-type jobTestGit struct {
-	createBranchCalls   int
-	addWorktreeCalls    int
-	removeWorktreeCalls int
-	removeRepoRoot      string
-	removeWorktreePath  string
-	removeWorktreePaths []string
-	removeWorktreeErrs  map[string]error
-}
+func TestRunNextPersistsLeasedWorktreeForMutableTask(t *testing.T) {
+	t.Parallel()
 
-func (git *jobTestGit) BranchExists(context.Context, string, string) (bool, error) { return false, nil }
-func (git *jobTestGit) CreateBranch(context.Context, string, string, string) error {
-	git.createBranchCalls++
-	return nil
-}
-func (git *jobTestGit) AddWorktree(context.Context, string, string, string) error {
-	git.addWorktreeCalls++
-	return nil
-}
-func (git *jobTestGit) RemoveWorktree(_ context.Context, repoRoot string, worktreePath string) error {
-	git.removeWorktreeCalls++
-	git.removeRepoRoot = repoRoot
-	git.removeWorktreePath = worktreePath
-	git.removeWorktreePaths = append(git.removeWorktreePaths, worktreePath)
-	if git.removeWorktreeErrs != nil {
-		if err, ok := git.removeWorktreeErrs[worktreePath]; ok {
-			return err
-		}
+	ctx := context.Background()
+	store := openJobStore(t)
+	defer store.Close()
+
+	registry := writeRegistry(t)
+	service := Service{
+		Store:    store,
+		Registry: registry,
+		Executors: map[string]contract.Executor{
+			"fake_headless": jobTestExecutor{
+				result: contract.ExecutionResult{
+					Status: "completed",
+					Output: "leased worktree complete",
+				},
+			},
+		},
+		ExecutorConfig: jobTestExecutorConfig(),
+		Transitions:    projects.Service{Store: store},
+		Leases: leases.Manager{
+			Store:        store,
+			Git:          &jobTestGit{},
+			WorktreeRoot: "~/odin-os-worktrees",
+		},
+		Now: time.Now,
 	}
-	return nil
+
+	task, err := service.CreateTaskFromAct(ctx, scope.Resolution{
+		Kind:       scope.ScopeProject,
+		ProjectKey: "alpha",
+	}, "Mutate alpha")
+	if err != nil {
+		t.Fatalf("CreateTaskFromAct() error = %v", err)
+	}
+
+	project, err := store.GetProjectByKey(ctx, "alpha")
+	if err != nil {
+		t.Fatalf("GetProjectByKey(alpha) error = %v", err)
+	}
+	if _, err := service.Transitions.SetTransitionState(ctx, projects.TransitionStateInput{
+		ProjectID:   project.ID,
+		Actor:       projects.TransitionControllerOdinOS,
+		TargetState: projects.TransitionStateCutover,
+		ChangedBy:   "test",
+	}); err != nil {
+		t.Fatalf("SetTransitionState(cutover) error = %v", err)
+	}
+
+	if err := service.RunNext(ctx); err != nil {
+		t.Fatalf("RunNext() error = %v", err)
+	}
+
+	row := store.DB().QueryRowContext(ctx, `
+		SELECT worktree_path
+		FROM worktree_leases
+		WHERE task_id = ?
+		ORDER BY id DESC
+		LIMIT 1
+	`, task.ID)
+	var worktreePath string
+	if err := row.Scan(&worktreePath); err != nil {
+		t.Fatalf("Scan(worktree_path) error = %v", err)
+	}
+	if worktreePath == "" {
+		t.Fatal("worktree path empty, want leased mutable worktree")
+	}
+	if worktreePath == project.GitRoot {
+		t.Fatalf("worktree path = %q, want isolated path outside repo root", worktreePath)
+	}
+	if strings.HasPrefix(worktreePath, "~") {
+		t.Fatalf("worktree path = %q, want expanded home path", worktreePath)
+	}
 }
 
-type blockingExecutor struct {
-	started chan struct{}
-	release chan struct{}
+func TestRunNextPassesRunIdentityToExecutor(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openJobStore(t)
+	defer store.Close()
+
+	registry := writeRegistry(t)
+	var captured contract.TaskSpec
+	service := Service{
+		Store:    store,
+		Registry: registry,
+		Executors: map[string]contract.Executor{
+			"fake_headless": jobTestExecutor{
+				result: contract.ExecutionResult{
+					Status: "completed",
+					Output: "captured run identity",
+				},
+				onRun: func(spec contract.TaskSpec) {
+					captured = spec
+				},
+			},
+		},
+		ExecutorConfig: jobTestExecutorConfig(),
+		Transitions:    projects.Service{Store: store},
+		Leases: leases.Manager{
+			Store:        store,
+			Git:          &jobTestGit{},
+			WorktreeRoot: t.TempDir(),
+		},
+		RuntimeRoot: t.TempDir(),
+		Now:         time.Now,
+	}
+
+	if _, err := service.CreateTaskFromAct(ctx, scope.Resolution{
+		Kind:       scope.ScopeProject,
+		ProjectKey: "alpha",
+	}, "Capture run identity"); err != nil {
+		t.Fatalf("CreateTaskFromAct() error = %v", err)
+	}
+
+	project, err := store.GetProjectByKey(ctx, "alpha")
+	if err != nil {
+		t.Fatalf("GetProjectByKey(alpha) error = %v", err)
+	}
+	if _, err := service.Transitions.SetTransitionState(ctx, projects.TransitionStateInput{
+		ProjectID:   project.ID,
+		Actor:       projects.TransitionControllerOdinOS,
+		TargetState: projects.TransitionStateCutover,
+		ChangedBy:   "test",
+	}); err != nil {
+		t.Fatalf("SetTransitionState(cutover) error = %v", err)
+	}
+
+	if err := service.RunNext(ctx); err != nil {
+		t.Fatalf("RunNext() error = %v", err)
+	}
+
+	if captured.Metadata["run_id"] == "" {
+		t.Fatal("run_id metadata empty, want run identity passed to executor")
+	}
+	if captured.Metadata["run_attempt"] == "" {
+		t.Fatal("run_attempt metadata empty, want attempt passed to executor")
+	}
+	if captured.Metadata["runtime_root"] == "" {
+		t.Fatal("runtime_root metadata empty, want durable artifact root passed to executor")
+	}
 }
 
-type closingExecutor struct {
-	store *sqlite.Store
+type jobTestGit struct{}
+
+func (jobTestGit) BranchExists(context.Context, string, string) (bool, error) { return false, nil }
+func (jobTestGit) CreateBranch(context.Context, string, string, string) error { return nil }
+func (jobTestGit) AddWorktree(context.Context, string, string, string) error  { return nil }
+func (jobTestGit) RemoveWorktree(context.Context, string, string) error       { return nil }
+
+func configureHarnessDriver(t *testing.T) {
+	t.Helper()
+
+	path := filepath.Join(t.TempDir(), "codex-driver.sh")
+	if err := os.WriteFile(path, []byte(`#!/usr/bin/env bash
+payload="$(cat)"
+PAYLOAD="$payload" python3 - <<'PY'
+import json
+import os
+
+request = json.loads(os.environ["PAYLOAD"])
+action = request.get("action")
+
+if action == "health":
+    response = {
+        "status": "healthy",
+        "details": "job test driver healthy",
+    }
+else:
+    response = {
+        "status": "completed",
+        "output": "driver test ok",
+        "metadata": {
+            "driver": "job_test_harness",
+        },
+        "handle": {
+            "external_id": "fixture-driver",
+        },
+    }
+
+print(json.dumps(response))
+PY
+`), 0o755); err != nil {
+		t.Fatalf("WriteFile(driver) error = %v", err)
+	}
+	if err := os.Chmod(path, 0o755); err != nil {
+		t.Fatalf("Chmod(driver) error = %v", err)
+	}
+	t.Setenv("ODIN_CODEX_DRIVER", path)
 }
 
-func (executor *blockingExecutor) Key() string { return "blocking" }
-func (executor *blockingExecutor) Class() contract.ExecutorClass {
+type jobTestExecutor struct {
+	result  contract.ExecutionResult
+	onRun   func(contract.TaskSpec)
+	runFunc func(contract.TaskSpec) (contract.ExecutionResult, error)
+}
+
+func (jobTestExecutor) Key() string { return "fake_headless" }
+
+func (jobTestExecutor) Class() contract.ExecutorClass {
 	return contract.ExecutorClassPlanBackedCLI
 }
-func (executor *blockingExecutor) Health(context.Context) (contract.HealthReport, error) {
-	return contract.HealthReport{Status: contract.HealthStatusHealthy, CheckedAt: time.Now().UTC()}, nil
+
+func (jobTestExecutor) Health(context.Context) (contract.HealthReport, error) {
+	return contract.HealthReport{Status: contract.HealthStatusHealthy}, nil
 }
-func (executor *blockingExecutor) Capabilities(context.Context) (contract.Capabilities, error) {
+
+func (jobTestExecutor) Capabilities(context.Context) (contract.Capabilities, error) {
 	return contract.Capabilities{
 		ExecutorClass:        contract.ExecutorClassPlanBackedCLI,
+		SupportsResume:       true,
+		SupportsCancel:       true,
+		SupportsTools:        true,
+		SupportsCostEstimate: true,
 		SupportsHeadlessPlan: true,
 		TaskKinds:            []contract.TaskKind{contract.TaskKindGeneral},
 		Scopes:               []string{"project"},
 	}, nil
 }
-func (executor *blockingExecutor) RunTask(ctx context.Context, spec contract.TaskSpec) (contract.ExecutionResult, error) {
-	select {
-	case executor.started <- struct{}{}:
-	default:
+
+func (executor jobTestExecutor) RunTask(_ context.Context, spec contract.TaskSpec) (contract.ExecutionResult, error) {
+	if executor.onRun != nil {
+		executor.onRun(spec)
 	}
-	select {
-	case <-ctx.Done():
-		return contract.ExecutionResult{Status: "interrupted"}, ctx.Err()
-	case <-executor.release:
-		return contract.ExecutionResult{Status: "completed", Output: "done"}, nil
+	if executor.runFunc != nil {
+		return executor.runFunc(spec)
 	}
-}
-func (executor *closingExecutor) Key() string { return "closing" }
-func (executor *closingExecutor) Class() contract.ExecutorClass {
-	return contract.ExecutorClassPlanBackedCLI
-}
-func (executor *closingExecutor) Health(context.Context) (contract.HealthReport, error) {
-	return contract.HealthReport{Status: contract.HealthStatusHealthy, CheckedAt: time.Now().UTC()}, nil
-}
-func (executor *closingExecutor) Capabilities(context.Context) (contract.Capabilities, error) {
-	return contract.Capabilities{
-		ExecutorClass:        contract.ExecutorClassPlanBackedCLI,
-		SupportsHeadlessPlan: true,
-		TaskKinds:            []contract.TaskKind{contract.TaskKindGeneral},
-		Scopes:               []string{"project"},
-	}, nil
-}
-func (executor *closingExecutor) RunTask(context.Context, contract.TaskSpec) (contract.ExecutionResult, error) {
-	if executor.store != nil {
-		_ = executor.store.Close()
-	}
-	return contract.ExecutionResult{Status: "completed", Output: "done"}, nil
-}
-func (executor *closingExecutor) ResumeTask(context.Context, contract.TaskHandle, contract.ResumePacket) (contract.ExecutionResult, error) {
-	return contract.ExecutionResult{}, contract.ErrNotImplemented
-}
-func (executor *closingExecutor) CancelTask(context.Context, contract.TaskHandle) error {
-	return contract.ErrNotImplemented
-}
-func (executor *closingExecutor) EstimateCost(context.Context, contract.TaskSpec) (contract.CostEstimate, error) {
-	return contract.CostEstimate{}, contract.ErrNotImplemented
-}
-func (executor *blockingExecutor) ResumeTask(context.Context, contract.TaskHandle, contract.ResumePacket) (contract.ExecutionResult, error) {
-	return contract.ExecutionResult{}, contract.ErrNotImplemented
-}
-func (executor *blockingExecutor) CancelTask(context.Context, contract.TaskHandle) error {
-	return contract.ErrNotImplemented
-}
-func (executor *blockingExecutor) EstimateCost(context.Context, contract.TaskSpec) (contract.CostEstimate, error) {
-	return contract.CostEstimate{}, contract.ErrNotImplemented
+	return executor.result, nil
 }
 
-type testClock struct {
-	mu  sync.Mutex
-	now time.Time
+func (jobTestExecutor) ResumeTask(context.Context, contract.TaskHandle, contract.ResumePacket) (contract.ExecutionResult, error) {
+	return contract.ExecutionResult{}, nil
 }
 
-func (clock *testClock) Now() time.Time {
-	clock.mu.Lock()
-	defer clock.mu.Unlock()
-	return clock.now
-}
+func (jobTestExecutor) CancelTask(context.Context, contract.TaskHandle) error { return nil }
 
-func (clock *testClock) Set(now time.Time) {
-	clock.mu.Lock()
-	clock.now = now
-	clock.mu.Unlock()
-}
-
-func (clock *testClock) NowValue() time.Time {
-	clock.mu.Lock()
-	defer clock.mu.Unlock()
-	return clock.now
+func (jobTestExecutor) EstimateCost(context.Context, contract.TaskSpec) (contract.CostEstimate, error) {
+	return contract.CostEstimate{Currency: "USD"}, nil
 }
 
 func mustLoadExecutorConfig(t *testing.T) router.Config {
@@ -1077,44 +1068,29 @@ func mustLoadExecutorConfig(t *testing.T) router.Config {
 	return cfg
 }
 
-func codexDriverPath(t *testing.T) string {
-	t.Helper()
-
-	return filepath.Clean(filepath.Join("..", "..", "..", "scripts", "drivers", "codex-headless.sh"))
-}
-
-func writeConfigurableCodexDriver(t *testing.T) string {
-	t.Helper()
-
-	dir := t.TempDir()
-	path := filepath.Join(dir, "codex-driver.sh")
-	script := `#!/usr/bin/env bash
-set -euo pipefail
-payload="$(cat)"
-if [[ -n "${ODIN_CODEX_DRIVER_TRACE:-}" ]]; then
-	printf '%s\n' "$payload" >"${ODIN_CODEX_DRIVER_TRACE}"
-fi
-PAYLOAD="$payload" python3 - <<'PY'
-import json
-import os
-
-request = json.loads(os.environ["PAYLOAD"])
-action = request.get("action")
-health = os.environ.get("ODIN_CODEX_DRIVER_HEALTH_RESPONSE", '{"status":"healthy","details":"fixture codex driver healthy"}')
-run = os.environ.get("ODIN_CODEX_DRIVER_RUN_RESPONSE", '{"status":"completed","output":"fixture codex driver"}')
-
-if action == "health":
-    print(health)
-elif action == "run":
-    print(run)
-else:
-    print(json.dumps({"status":"unavailable","details":f"unknown action: {action}"}))
-PY
-`
-	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
-		t.Fatalf("WriteFile(driver) error = %v", err)
+func jobTestExecutorConfig() router.Config {
+	return router.Config{
+		Version: 1,
+		Executors: []router.ExecutorConfig{
+			{
+				Key:      "fake_headless",
+				Adapter:  "fake_headless",
+				Class:    contract.ExecutorClassPlanBackedCLI,
+				Enabled:  true,
+				Priority: 1,
+			},
+		},
+		Routes: []router.RouteConfig{
+			{
+				Name: "project-general",
+				Match: router.RouteMatch{
+					TaskKinds: []contract.TaskKind{contract.TaskKindGeneral},
+					Scopes:    []string{"project"},
+				},
+				Preferred: []string{"fake_headless"},
+			},
+		},
 	}
-	return path
 }
 
 func latestRunForTask(ctx context.Context, store *sqlite.Store, taskID int64) (sqlite.Run, error) {
@@ -1131,76 +1107,6 @@ func latestRunForTask(ctx context.Context, store *sqlite.Store, taskID int64) (s
 		return sqlite.Run{}, err
 	}
 	return store.GetRun(ctx, runID)
-}
-
-func latestLeaseForTaskRun(t *testing.T, ctx context.Context, store *sqlite.Store, taskID int64, runID int64) sqlite.WorktreeLease {
-	t.Helper()
-
-	row := store.DB().QueryRowContext(ctx, `
-		SELECT id
-		FROM worktree_leases
-		WHERE task_id = ?
-		  AND run_id = ?
-		ORDER BY id DESC
-		LIMIT 1
-	`, taskID, runID)
-
-	var leaseID int64
-	if err := row.Scan(&leaseID); err != nil {
-		t.Fatalf("scan lease id error = %v", err)
-	}
-
-	lease, err := store.GetWorktreeLease(ctx, leaseID)
-	if err != nil {
-		t.Fatalf("GetWorktreeLease() error = %v", err)
-	}
-	return lease
-}
-
-func latestLeaseByID(t *testing.T, ctx context.Context, store *sqlite.Store, leaseID int64) sqlite.WorktreeLease {
-	t.Helper()
-
-	lease, err := store.GetWorktreeLease(ctx, leaseID)
-	if err != nil {
-		t.Fatalf("GetWorktreeLease() error = %v", err)
-	}
-	return lease
-}
-
-func waitForLeaseHeartbeatAfter(t *testing.T, ctx context.Context, store *sqlite.Store, taskID int64, staleBefore time.Time, timeout time.Duration) (sqlite.WorktreeLease, error) {
-	t.Helper()
-
-	deadline := time.NewTimer(timeout)
-	defer deadline.Stop()
-
-	ticker := time.NewTicker(10 * time.Millisecond)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-deadline.C:
-			return sqlite.WorktreeLease{}, fmt.Errorf("timed out waiting for heartbeat after %s", timeout)
-		case <-ticker.C:
-			row := store.DB().QueryRowContext(ctx, `
-				SELECT id
-				FROM worktree_leases
-				WHERE task_id = ?
-				ORDER BY id DESC
-				LIMIT 1
-			`, taskID)
-			var leaseID int64
-			if err := row.Scan(&leaseID); err != nil {
-				continue
-			}
-			lease, err := store.GetWorktreeLease(ctx, leaseID)
-			if err != nil {
-				continue
-			}
-			if lease.HeartbeatAt.After(staleBefore) {
-				return lease, nil
-			}
-		}
-	}
 }
 
 func openJobStore(t *testing.T) *sqlite.Store {
@@ -1240,6 +1146,11 @@ projects:
     default_branch: main
     policy:
       allowed_commands: [status]
+      limited_actions:
+        docs_audit_note:
+          description: Create an additive audit note under docs/audits
+          path_prefixes: [docs/audits/]
+          content_mode: create_markdown_note
       branch_rules:
         protected_branches: [main]
         require_worktree: true
@@ -1266,6 +1177,11 @@ projects:
       repo: acme/alpha
     policy:
       allowed_commands: [status]
+      limited_actions:
+        docs_audit_note:
+          description: Create an additive audit note under docs/audits
+          path_prefixes: [docs/audits/]
+          content_mode: create_markdown_note
       branch_rules:
         protected_branches: [main]
         require_worktree: true

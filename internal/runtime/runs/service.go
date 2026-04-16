@@ -3,17 +3,31 @@ package runs
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
+	"fmt"
+	"strings"
 
 	"odin-os/internal/cli/scope"
+	"odin-os/internal/executors/contract"
 	"odin-os/internal/runtime/projections"
+	"odin-os/internal/store/sqlite"
 )
 
 type Service struct {
-	DB *sql.DB
+	DB    *sql.DB
+	Store *sqlite.Store
 }
 
 func (service Service) List(ctx context.Context, resolved scope.Resolution) ([]projections.RunSummaryView, error) {
-	rows, err := service.DB.QueryContext(ctx, `
+	db := service.DB
+	if db == nil && service.Store != nil {
+		db = service.Store.DB()
+	}
+	if db == nil {
+		return nil, fmt.Errorf("run store is required")
+	}
+
+	rows, err := db.QueryContext(ctx, `
 		SELECT
 			r.id,
 			r.task_id,
@@ -66,6 +80,86 @@ func (service Service) List(ctx context.Context, resolved scope.Resolution) ([]p
 	return views, rows.Err()
 }
 
+func (service Service) Start(ctx context.Context, task sqlite.Task, executorKey string) (sqlite.Run, error) {
+	if service.Store == nil {
+		return sqlite.Run{}, fmt.Errorf("run store is required")
+	}
+
+	attempt, err := service.nextRunAttempt(ctx, task.ID)
+	if err != nil {
+		return sqlite.Run{}, err
+	}
+
+	return service.Store.StartRunAndUpdateTaskStatus(ctx, sqlite.StartRunAndUpdateTaskStatusParams{
+		TaskID:     task.ID,
+		Executor:   executorKey,
+		Attempt:    attempt,
+		RunStatus:  "running",
+		TaskStatus: "running",
+	})
+}
+
+func (service Service) Complete(ctx context.Context, runID int64, result contract.ExecutionResult) error {
+	if service.Store == nil {
+		return fmt.Errorf("run store is required")
+	}
+
+	runStatus := strings.TrimSpace(result.Status)
+	if runStatus == "" {
+		runStatus = "completed"
+	}
+	summary := strings.TrimSpace(result.Output)
+	if summary == "" {
+		summary = runStatus
+	}
+	artifactsJSON := artifactsJSONFromMetadata(result.Metadata)
+
+	run, err := service.Store.GetRun(ctx, runID)
+	if err != nil {
+		return err
+	}
+
+	taskStatus := "completed"
+	if runStatus != "completed" {
+		taskStatus = "failed"
+	}
+	return service.Store.FinishRunAndUpdateTaskStatus(ctx, sqlite.FinishRunAndUpdateTaskStatusParams{
+		RunID:          runID,
+		RunStatus:      runStatus,
+		Summary:        summary,
+		TerminalReason: runStatus,
+		ArtifactsJSON:  artifactsJSON,
+		TaskID:         run.TaskID,
+		TaskStatus:     taskStatus,
+	})
+}
+
+func (service Service) Fail(ctx context.Context, runID int64, cause error) error {
+	if service.Store == nil {
+		return fmt.Errorf("run store is required")
+	}
+
+	terminalReason := "failed"
+	if cause != nil && strings.TrimSpace(cause.Error()) != "" {
+		terminalReason = strings.TrimSpace(cause.Error())
+	}
+
+	run, err := service.Store.GetRun(ctx, runID)
+	if err != nil {
+		return err
+	}
+
+	return service.Store.FinishRunAndUpdateTaskStatus(ctx, sqlite.FinishRunAndUpdateTaskStatusParams{
+		RunID:          runID,
+		RunStatus:      "failed",
+		Summary:        terminalReason,
+		TerminalReason: terminalReason,
+		ArtifactsJSON:  "[]",
+		TaskID:         run.TaskID,
+		TaskStatus:     "failed",
+	})
+}
+
 func matchesRunScope(projectKey, taskScope string, resolved scope.Resolution) bool {
 	switch resolved.Kind {
 	case scope.ScopeGlobal:
@@ -77,4 +171,34 @@ func matchesRunScope(projectKey, taskScope string, resolved scope.Resolution) bo
 	default:
 		return false
 	}
+}
+
+func (service Service) nextRunAttempt(ctx context.Context, taskID int64) (int, error) {
+	row := service.Store.DB().QueryRowContext(ctx, `
+		SELECT COALESCE(MAX(attempt), 0) + 1
+		FROM runs
+		WHERE task_id = ?
+	`, taskID)
+
+	var attempt int
+	if err := row.Scan(&attempt); err != nil {
+		return 0, err
+	}
+	return attempt, nil
+}
+
+func artifactsJSONFromMetadata(metadata map[string]string) string {
+	if len(metadata) == 0 {
+		return "[]"
+	}
+	if value := strings.TrimSpace(metadata["artifacts_json"]); value != "" {
+		return value
+	}
+	if value := strings.TrimSpace(metadata["artifact_path"]); value != "" {
+		payload, err := json.Marshal([]string{value})
+		if err == nil {
+			return string(payload)
+		}
+	}
+	return "[]"
 }

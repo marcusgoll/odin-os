@@ -2,8 +2,6 @@ package worktrees
 
 import (
 	"context"
-	"errors"
-	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -35,9 +33,6 @@ func TestManagerCleanupRemovesReleasedLeaseDeterministically(t *testing.T) {
 		State:   "released",
 	}); err != nil {
 		t.Fatalf("ReleaseWorktreeLease() error = %v", err)
-	}
-	if err := os.MkdirAll(lease.WorktreePath, 0o755); err != nil {
-		t.Fatalf("mkdir worktree path: %v", err)
 	}
 
 	git := &cleanupGit{}
@@ -108,12 +103,12 @@ func TestManagerCleanupPreservesActiveLease(t *testing.T) {
 	}
 }
 
-func TestManagerCleanupRemovesStaleActiveLeaseDeterministically(t *testing.T) {
+func TestManagerCleanupLeasesRemovesSelectedReleasedLeases(t *testing.T) {
 	ctx := context.Background()
 	store, project, task, run := openCleanupStore(t)
 	defer store.Close()
 
-	lease, err := store.CreateWorktreeLease(ctx, sqlite.CreateWorktreeLeaseParams{
+	released, err := store.CreateWorktreeLease(ctx, sqlite.CreateWorktreeLeaseParams{
 		ProjectID:    project.ID,
 		TaskID:       task.ID,
 		RunID:        run.ID,
@@ -124,256 +119,81 @@ func TestManagerCleanupRemovesStaleActiveLeaseDeterministically(t *testing.T) {
 		State:        "active",
 	})
 	if err != nil {
-		t.Fatalf("CreateWorktreeLease() error = %v", err)
+		t.Fatalf("CreateWorktreeLease(released) error = %v", err)
 	}
-	if err := os.MkdirAll(lease.WorktreePath, 0o755); err != nil {
-		t.Fatalf("mkdir worktree path: %v", err)
+	released, err = store.ReleaseWorktreeLease(ctx, sqlite.ReleaseWorktreeLeaseParams{
+		LeaseID: released.ID,
+		State:   "released",
+	})
+	if err != nil {
+		t.Fatalf("ReleaseWorktreeLease(released) error = %v", err)
 	}
 
-	forceLeaseHeartbeatAt(t, ctx, store, lease.ID, time.Now().UTC().Add(-2*time.Hour))
+	other, err := store.CreateWorktreeLease(ctx, sqlite.CreateWorktreeLeaseParams{
+		ProjectID:    project.ID,
+		TaskID:       task.ID,
+		RunID:        run.ID,
+		Mode:         "mutable",
+		BranchName:   "odin/cfipros/task-1/run-1/try-2",
+		WorktreePath: "/var/tmp/odin-worktrees/cfipros/task-1/run-1/try-2",
+		RepoRoot:     project.GitRoot,
+		State:        "active",
+	})
+	if err != nil {
+		t.Fatalf("CreateWorktreeLease(other) error = %v", err)
+	}
+	other, err = store.ReleaseWorktreeLease(ctx, sqlite.ReleaseWorktreeLeaseParams{
+		LeaseID: other.ID,
+		State:   "released",
+	})
+	if err != nil {
+		t.Fatalf("ReleaseWorktreeLease(other) error = %v", err)
+	}
 
 	git := &cleanupGit{}
 	manager := Manager{Store: store, Git: git}
 
-	result, err := manager.Cleanup(ctx, time.Now().UTC().Add(-30*time.Minute))
+	result, err := manager.CleanupLeases(ctx, []sqlite.WorktreeLease{released})
 	if err != nil {
-		t.Fatalf("Cleanup() error = %v", err)
+		t.Fatalf("CleanupLeases() error = %v", err)
 	}
 	if len(result.Removed) != 1 {
-		t.Fatalf("Cleanup().Removed len = %d, want 1", len(result.Removed))
+		t.Fatalf("CleanupLeases().Removed len = %d, want 1", len(result.Removed))
 	}
-	if git.removeCalls != 1 {
-		t.Fatalf("git remove calls = %d, want 1", git.removeCalls)
+	if result.Removed[0].ID != released.ID {
+		t.Fatalf("CleanupLeases().Removed[0].ID = %d, want %d", result.Removed[0].ID, released.ID)
 	}
 
-	updated, err := store.GetWorktreeLease(ctx, lease.ID)
+	cleaned, err := store.GetWorktreeLease(ctx, released.ID)
 	if err != nil {
-		t.Fatalf("GetWorktreeLease() error = %v", err)
+		t.Fatalf("GetWorktreeLease(released) error = %v", err)
 	}
-	if updated.State != "cleaned" {
-		t.Fatalf("GetWorktreeLease().State = %q, want %q", updated.State, "cleaned")
+	if cleaned.CleanedUpAt == nil || cleaned.State != "cleaned" {
+		t.Fatalf("cleaned lease = %+v, want cleaned", cleaned)
 	}
-	if updated.CleanedUpAt == nil {
-		t.Fatalf("GetWorktreeLease().CleanedUpAt = nil, want value")
-	}
-}
 
-func TestManagerCleanupContinuesPastLeaseRemovalFailure(t *testing.T) {
-	ctx := context.Background()
-	store, project, task, run := openCleanupStore(t)
-	defer store.Close()
-
-	failingLease, err := store.CreateWorktreeLease(ctx, sqlite.CreateWorktreeLeaseParams{
-		ProjectID:    project.ID,
-		TaskID:       task.ID,
-		RunID:        run.ID,
-		Mode:         "mutable",
-		BranchName:   "odin/cfipros/task-1/run-1/try-1",
-		WorktreePath: "/var/tmp/odin-worktrees/cfipros/task-1/run-1/try-1",
-		RepoRoot:     project.GitRoot,
-		State:        "active",
-	})
+	untouched, err := store.GetWorktreeLease(ctx, other.ID)
 	if err != nil {
-		t.Fatalf("CreateWorktreeLease(failing) error = %v", err)
+		t.Fatalf("GetWorktreeLease(other) error = %v", err)
 	}
-	if _, err := store.ReleaseWorktreeLease(ctx, sqlite.ReleaseWorktreeLeaseParams{
-		LeaseID: failingLease.ID,
-		State:   "released",
-	}); err != nil {
-		t.Fatalf("ReleaseWorktreeLease(failing) error = %v", err)
-	}
-	if err := os.MkdirAll(failingLease.WorktreePath, 0o755); err != nil {
-		t.Fatalf("mkdir failing worktree path: %v", err)
-	}
-
-	nextTask, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
-		ProjectID:   project.ID,
-		Key:         "phase-09-cleanup-next",
-		Title:       "Cleanup second worktree",
-		Status:      "running",
-		Scope:       "project",
-		RequestedBy: "operator",
-	})
-	if err != nil {
-		t.Fatalf("CreateTask(next) error = %v", err)
-	}
-	nextRun, err := store.StartRun(ctx, sqlite.StartRunParams{
-		TaskID:   nextTask.ID,
-		Executor: "codex",
-		Attempt:  1,
-		Status:   "running",
-	})
-	if err != nil {
-		t.Fatalf("StartRun(next) error = %v", err)
-	}
-	succeedingLease, err := store.CreateWorktreeLease(ctx, sqlite.CreateWorktreeLeaseParams{
-		ProjectID:    project.ID,
-		TaskID:       nextTask.ID,
-		RunID:        nextRun.ID,
-		Mode:         "mutable",
-		BranchName:   "odin/cfipros/task-2/run-1/try-1",
-		WorktreePath: "/var/tmp/odin-worktrees/cfipros/task-2/run-1/try-1",
-		RepoRoot:     project.GitRoot,
-		State:        "active",
-	})
-	if err != nil {
-		t.Fatalf("CreateWorktreeLease(succeeding) error = %v", err)
-	}
-	if _, err := store.ReleaseWorktreeLease(ctx, sqlite.ReleaseWorktreeLeaseParams{
-		LeaseID: succeedingLease.ID,
-		State:   "released",
-	}); err != nil {
-		t.Fatalf("ReleaseWorktreeLease(succeeding) error = %v", err)
-	}
-	if err := os.MkdirAll(succeedingLease.WorktreePath, 0o755); err != nil {
-		t.Fatalf("mkdir succeeding worktree path: %v", err)
-	}
-
-	removeErr := errors.New("remove failed")
-	git := &cleanupGit{
-		errsByPath: map[string]error{
-			failingLease.WorktreePath: removeErr,
-		},
-	}
-	manager := Manager{Store: store, Git: git}
-
-	result, err := manager.Cleanup(ctx, time.Now().UTC().Add(-30*time.Minute))
-	if !errors.Is(err, removeErr) {
-		t.Fatalf("Cleanup() error = %v, want remove failure", err)
-	}
-	if len(result.Removed) != 1 {
-		t.Fatalf("Cleanup().Removed len = %d, want 1", len(result.Removed))
-	}
-	if result.Removed[0].ID != succeedingLease.ID {
-		t.Fatalf("Cleanup().Removed[0].ID = %d, want %d", result.Removed[0].ID, succeedingLease.ID)
-	}
-
-	failingAfter, err := store.GetWorktreeLease(ctx, failingLease.ID)
-	if err != nil {
-		t.Fatalf("GetWorktreeLease(failing) error = %v", err)
-	}
-	if failingAfter.State != "released" {
-		t.Fatalf("failing lease state = %q, want released", failingAfter.State)
-	}
-	if failingAfter.CleanedUpAt != nil {
-		t.Fatalf("failing lease cleaned unexpectedly")
-	}
-
-	succeedingAfter, err := store.GetWorktreeLease(ctx, succeedingLease.ID)
-	if err != nil {
-		t.Fatalf("GetWorktreeLease(succeeding) error = %v", err)
-	}
-	if succeedingAfter.State != "cleaned" {
-		t.Fatalf("succeeding lease state = %q, want cleaned", succeedingAfter.State)
-	}
-	if succeedingAfter.CleanedUpAt == nil {
-		t.Fatalf("succeeding lease cleaned_up_at = nil, want value")
-	}
-}
-
-func TestManagerCleanupMarksMissingWorktreeCleanAfterMarkFailureRetry(t *testing.T) {
-	ctx := context.Background()
-	dbPath := filepath.Join(t.TempDir(), "odin.db")
-	store, project, task, run := openCleanupStoreAt(t, dbPath)
-	defer store.Close()
-
-	worktreePath := filepath.Join(t.TempDir(), "cleanup-retry")
-	if err := os.MkdirAll(worktreePath, 0o755); err != nil {
-		t.Fatalf("mkdir worktree path: %v", err)
-	}
-
-	lease, err := store.CreateWorktreeLease(ctx, sqlite.CreateWorktreeLeaseParams{
-		ProjectID:    project.ID,
-		TaskID:       task.ID,
-		RunID:        run.ID,
-		Mode:         "mutable",
-		BranchName:   "odin/cfipros/task-1/run-1/try-1",
-		WorktreePath: worktreePath,
-		RepoRoot:     project.GitRoot,
-		State:        "active",
-	})
-	if err != nil {
-		t.Fatalf("CreateWorktreeLease() error = %v", err)
-	}
-	if _, err := store.ReleaseWorktreeLease(ctx, sqlite.ReleaseWorktreeLeaseParams{
-		LeaseID: lease.ID,
-		State:   "released",
-	}); err != nil {
-		t.Fatalf("ReleaseWorktreeLease() error = %v", err)
-	}
-
-	firstPass := Manager{
-		Store: store,
-		Git: &markFailureCleanupGit{
-			store: store,
-		},
-	}
-	result, err := firstPass.Cleanup(ctx, time.Now().UTC().Add(-30*time.Minute))
-	if err == nil {
-		t.Fatal("Cleanup() error = nil, want mark failure")
-	}
-	if len(result.Removed) != 0 {
-		t.Fatalf("Cleanup().Removed len = %d, want 0 when mark fails", len(result.Removed))
-	}
-
-	reopened, err := sqlite.Open(dbPath)
-	if err != nil {
-		t.Fatalf("reopen store error = %v", err)
-	}
-	defer reopened.Close()
-
-	retry := Manager{
-		Store: reopened,
-		Git: &cleanupGit{
-			errsByPath: map[string]error{
-				worktreePath: ErrWorktreeAlreadyRemoved,
-			},
-		},
-	}
-	result, err = retry.Cleanup(ctx, time.Now().UTC().Add(-30*time.Minute))
-	if err != nil {
-		t.Fatalf("retry Cleanup() error = %v", err)
-	}
-	if len(result.Removed) != 1 {
-		t.Fatalf("retry Cleanup().Removed len = %d, want 1", len(result.Removed))
-	}
-
-	updated, err := reopened.GetWorktreeLease(ctx, lease.ID)
-	if err != nil {
-		t.Fatalf("GetWorktreeLease() error = %v", err)
-	}
-	if updated.State != "cleaned" {
-		t.Fatalf("lease.State = %q, want cleaned", updated.State)
-	}
-	if updated.CleanedUpAt == nil {
-		t.Fatalf("lease.CleanedUpAt = nil, want value")
+	if untouched.CleanedUpAt != nil || untouched.State != "released" {
+		t.Fatalf("untouched lease = %+v, want released and not cleaned", untouched)
 	}
 }
 
 type cleanupGit struct {
 	removeCalls int
-	errsByPath  map[string]error
 }
 
-func (git *cleanupGit) RemoveWorktree(_ context.Context, _ string, worktreePath string) error {
+func (git *cleanupGit) RemoveWorktree(context.Context, string, string) error {
 	git.removeCalls++
-	if git.errsByPath != nil {
-		if err, ok := git.errsByPath[worktreePath]; ok {
-			return err
-		}
-	}
 	return nil
 }
 
 func openCleanupStore(t *testing.T) (*sqlite.Store, sqlite.Project, sqlite.Task, sqlite.Run) {
 	t.Helper()
 
-	return openCleanupStoreAt(t, filepath.Join(t.TempDir(), "odin.db"))
-}
-
-func openCleanupStoreAt(t *testing.T, dbPath string) (*sqlite.Store, sqlite.Project, sqlite.Task, sqlite.Run) {
-	t.Helper()
-
+	dbPath := filepath.Join(t.TempDir(), "odin.db")
 	store, err := sqlite.Open(dbPath)
 	if err != nil {
 		t.Fatalf("Open() error = %v", err)
@@ -418,31 +238,4 @@ func openCleanupStoreAt(t *testing.T, dbPath string) (*sqlite.Store, sqlite.Proj
 	}
 
 	return store, project, task, run
-}
-
-type markFailureCleanupGit struct {
-	store *sqlite.Store
-}
-
-func (git *markFailureCleanupGit) RemoveWorktree(_ context.Context, _ string, worktreePath string) error {
-	if err := os.RemoveAll(worktreePath); err != nil {
-		return err
-	}
-	if git.store != nil {
-		return git.store.Close()
-	}
-	return nil
-}
-
-func forceLeaseHeartbeatAt(t *testing.T, ctx context.Context, store *sqlite.Store, leaseID int64, when time.Time) {
-	t.Helper()
-
-	formatted := when.UTC().Format(time.RFC3339Nano)
-	if _, err := store.DB().ExecContext(ctx, `
-		UPDATE worktree_leases
-		SET heartbeat_at = ?, updated_at = ?
-		WHERE id = ?
-	`, formatted, formatted, leaseID); err != nil {
-		t.Fatalf("force lease heartbeat error = %v", err)
-	}
 }

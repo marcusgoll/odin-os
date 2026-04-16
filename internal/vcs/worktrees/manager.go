@@ -37,6 +37,17 @@ func (manager Manager) Cleanup(ctx context.Context, staleBefore time.Time) (Clea
 		return CleanupResult{}, err
 	}
 
+	return manager.CleanupLeases(ctx, leases)
+}
+
+func (manager Manager) CleanupLeases(ctx context.Context, leases []sqlite.WorktreeLease) (CleanupResult, error) {
+	if manager.Store == nil {
+		return CleanupResult{}, fmt.Errorf("cleanup store is required")
+	}
+	if manager.Git == nil {
+		return CleanupResult{}, fmt.Errorf("cleanup git adapter is required")
+	}
+
 	result := CleanupResult{}
 	var cleanupErr error
 	for _, lease := range leases {

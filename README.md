@@ -16,8 +16,8 @@ This repository is the runtime root. `odin-orchestrator` is a migration source o
 - Runtime authority lives in SQLite at `data/odin.db`.
 - Authored assets live in-repo as Markdown with frontmatter under `registry/`, `prompts/`, and `memory/`.
 - CLI, API, and worker execution all resolve through shared orchestration, policy, runtime, and executor contracts.
-- Executors are model-agnostic and route through a common contract, including plan-backed headless runners where they fit that contract.
-- Tool, skill, and sub-agent loading is dynamic and scope-aware; Odin must not preload the full catalog into every task context, and the default built-in catalog only exposes runtime-backed operator tools.
+- Executors are model-agnostic and route through a common contract, including harness-driver-backed headless runners where they fit that contract.
+- Tool, skill, and sub-agent loading is dynamic and scope-aware; Odin must not preload the full catalog into every task context.
 - Mutating work is isolated through task-owned worktrees and branches.
 - Self-heal is deterministic, bounded, and auditable; self-improvement is proposal-driven, replay-tested, promotion-gated, and reversible.
 
@@ -30,7 +30,7 @@ This repository is the runtime root. `odin-orchestrator` is a migration source o
 
 ## Current Status
 
-Phase 00 through Phase 15 are in place, and the Phase 17 alpha stabilization pass has closed the minimum trust blockers from the reality audit. Fresh runtimes only count as ready when one real executor lane is configured and healthy, queued work can execute through that live lane, runtime mutation is gated by transition and system-project policy checks, mutable work is forced through leased task-owned worktrees, `odin serve` runs bounded self-heal and queue execution loops, routing promotions require explicit promotion approval before activation, and service logs are newline-delimited JSON again. Placeholder executor surfaces and canned operational built-ins are not presented as live capability; see `docs/contracts/real-world-readiness.md`, `docs/contracts/capability-catalog.md`, and `docs/operations/alpha-readiness.md` for the current alpha operating envelope.
+Phase 00 through Phase 15 are in place, and the Phase 17 alpha stabilization pass has closed the minimum trust blockers from the reality audit. Fresh runtimes now bootstrap into an honest ready state when a harness driver is configured, queued work can execute through harness-backed `codex_headless` and `claude_code_headless` lanes, runtime mutation is gated by transition and system-project policy checks, mutable work is forced through leased task-owned worktrees, `odin serve` runs bounded self-heal and queue execution loops, routing promotions require explicit promotion approval before activation, and service logs are newline-delimited JSON again. Full provider-backed execution and broader unattended orchestration remain deferred; see `docs/operations/alpha-readiness.md` for the current alpha operating envelope.
 
 ## Local Usage
 
@@ -39,7 +39,11 @@ To make `odin` available as a repeatable local command:
 ```bash
 make build
 make install-local
-odin
+odin help
+odin status --json
+# replace YOUR_PROJECT_KEY with a non-system project key from config/projects.yaml
+odin task run --project YOUR_PROJECT_KEY --title "smoke"
+odin repl
 ```
 
 This installs a symlink at `~/.local/bin/odin` pointing to this repo's built binary. Remove it with `make uninstall-local`.
