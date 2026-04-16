@@ -24,16 +24,29 @@ pass "repo-local browser runtime files exist"
 WORK_DIR="$(mktemp -d)"
 ODIN_DIR="${WORK_DIR}/odin-browser-smoke"
 export ODIN_DIR
-export ODIN_BROWSER_PORT="${ODIN_BROWSER_PORT:-19227}"
+unset ODIN_BROWSER_PORT
 mkdir -p "${ODIN_DIR}"
+
+PORT_HOLDER_PID=""
+node -e 'const net = require("node:net"); const server = net.createServer(); server.on("error", (error) => { console.error(error.message); process.exit(1); }); server.listen(19227, "127.0.0.1", () => { setInterval(() => {}, 1 << 30); });' >/dev/null 2>&1 &
+PORT_HOLDER_PID=$!
 
 source "${ACCESS_SH}"
 
 cleanup() {
     browser_server_stop >/dev/null 2>&1 || true
+    if [[ -n "${PORT_HOLDER_PID}" ]]; then
+        kill "${PORT_HOLDER_PID}" >/dev/null 2>&1 || true
+        wait "${PORT_HOLDER_PID}" >/dev/null 2>&1 || true
+    fi
     rm -rf "${WORK_DIR}"
 }
 trap cleanup EXIT
+
+[[ -n "${BROWSER_SERVER_PORT}" ]] || fail "browser_server_port was not resolved"
+[[ "${BROWSER_SERVER_PORT}" != "19227" ]] || fail "browser_server_port unexpectedly used the fixed default"
+[[ "${BROWSER_SERVER_URL}" == "http://127.0.0.1:${BROWSER_SERVER_PORT}" ]] || fail "browser_server_url did not match the resolved port"
+pass "browser_server_port resolved dynamically"
 
 if ! browser_server_start --headless; then
     fail "browser_server_start could not launch Chromium"

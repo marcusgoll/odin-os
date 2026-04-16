@@ -5,8 +5,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 ODIN_DIR="${ODIN_DIR:-${REPO_ROOT}/.odin-browser}"
 BROWSER_STATE_DIR="${ODIN_DIR}/browser-state"
-BROWSER_SERVER_PORT="${ODIN_BROWSER_PORT:-19227}"
-BROWSER_SERVER_URL="http://127.0.0.1:${BROWSER_SERVER_PORT}"
 BROWSER_SERVER_SCRIPT="${SCRIPT_DIR}/odin-huginn-server.js"
 BROWSER_SERVER_PID_FILE="${BROWSER_STATE_DIR}/browser.pid"
 BROWSER_SERVER_LOG="${ODIN_DIR}/logs/$(date +%Y-%m-%d)/browser-runtime.log"
@@ -18,9 +16,88 @@ _ba_json() {
     jq -n "$@"
 }
 
+_ba_resolve_free_port() {
+    node <<'NODE'
+const net = require('node:net');
+const server = net.createServer();
+
+server.on('error', () => process.exit(1));
+server.listen(0, '127.0.0.1', () => {
+  const address = server.address();
+  const port = address && typeof address === 'object' ? address.port : null;
+  server.close(() => {
+    if (port) {
+      console.log(port);
+      return;
+    }
+    process.exit(1);
+  });
+});
+NODE
+}
+
+_ba_browser_domain_denylist() {
+    printf '%s' "${ODIN_BROWSER_DOMAIN_DENYLIST:-localhost,127.0.0.1,::1,*.local}"
+}
+
+_ba_domain_host() {
+    local target="${1:-}" host
+    [[ -n "${target}" ]] || return 1
+
+    host="${target#*://}"
+    host="${host%%/*}"
+    case "${host}" in
+        \[*\]:*)
+            host="${host#\[}"
+            host="${host%%]*}"
+            ;;
+        \[*\])
+            host="${host#\[}"
+            host="${host%]}"
+            ;;
+        *:*:*)
+            ;;
+        *:*)
+            host="${host%%:*}"
+            ;;
+    esac
+
+    host="${host,,}"
+    [[ -n "${host}" ]] || return 1
+    printf '%s' "${host}"
+}
+
 browser_request_domain_access() {
+    local target="${1:-}" host denylist entry suffix
+    [[ -n "${target}" ]] || return 1
+
+    host="$(_ba_domain_host "${target}")" || return 1
+    local IFS=','
+    read -r -a denylist <<< "$(_ba_browser_domain_denylist)"
+    for entry in "${denylist[@]}"; do
+        entry="${entry//[[:space:]]/}"
+        [[ -n "${entry}" ]] || continue
+        entry="${entry,,}"
+        case "${entry}" in
+            \*.*)
+                suffix="${entry#*.}"
+                [[ "${host}" == "${suffix}" || "${host}" == *".${suffix}" ]] && return 1
+                ;;
+            *)
+                [[ "${host}" == "${entry}" ]] && return 1
+                ;;
+        esac
+    done
+
     return 0
 }
+
+if [[ -z "${ODIN_BROWSER_PORT:-}" ]]; then
+    ODIN_BROWSER_PORT="$(_ba_resolve_free_port)"
+fi
+
+BROWSER_SERVER_PORT="${ODIN_BROWSER_PORT}"
+BROWSER_SERVER_URL="http://127.0.0.1:${BROWSER_SERVER_PORT}"
 
 _bc_curl() {
     curl -sf --max-time 30 "$@"
