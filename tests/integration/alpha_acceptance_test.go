@@ -475,7 +475,8 @@ func TestAlphaAcceptance(t *testing.T) {
 		runtimeRoot := t.TempDir()
 		store := openRuntimeStore(t, runtimeRoot)
 		defer store.Close()
-		seedHealthyObservability(t, ctx, store, now)
+		observabilityNow := time.Now().UTC()
+		seedHealthyObservability(t, ctx, store, observabilityNow)
 
 		report, err := healthsvc.Service{DB: store.DB()}.Doctor(ctx, true)
 		if err != nil {
