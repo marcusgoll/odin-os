@@ -15,6 +15,38 @@ CREATE TABLE IF NOT EXISTS initiatives (
   UNIQUE(workspace_id, key)
 );
 
+INSERT INTO initiatives (
+  workspace_id,
+  key,
+  title,
+  kind,
+  status,
+  summary,
+  owner_companion_id,
+  linked_project_id,
+  created_at,
+  updated_at
+)
+SELECT
+  default_workspace.id,
+  p.key,
+  p.name,
+  'managed_project',
+  'active',
+  '',
+  NULL,
+  p.id,
+  STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now'),
+  STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now')
+FROM projects p
+JOIN workspaces default_workspace ON default_workspace.key = 'default'
+WHERE NOT EXISTS (
+  SELECT 1
+  FROM initiatives existing
+  WHERE existing.workspace_id = default_workspace.id
+    AND existing.key = p.key
+);
+
 CREATE INDEX IF NOT EXISTS idx_initiatives_workspace_id ON initiatives(workspace_id, id);
 CREATE INDEX IF NOT EXISTS idx_initiatives_kind ON initiatives(kind, id);
 CREATE INDEX IF NOT EXISTS idx_initiatives_linked_project_id ON initiatives(linked_project_id);

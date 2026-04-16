@@ -39,6 +39,8 @@ type CreateProjectParams struct {
 	ManifestPath  string
 }
 
+type UpsertProjectParams = CreateProjectParams
+
 type UpsertInitiativeParams struct {
 	WorkspaceID      int64
 	Key              string

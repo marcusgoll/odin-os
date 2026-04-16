@@ -130,6 +130,90 @@ func (store *Store) CreateProject(ctx context.Context, params CreateProjectParam
 	return project, err
 }
 
+func (store *Store) UpsertProject(ctx context.Context, params UpsertProjectParams) (Project, error) {
+	now := store.now()
+	var project Project
+
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		result, err := tx.ExecContext(ctx, `
+			INSERT INTO projects (key, name, scope, git_root, default_branch, github_repo, manifest_path, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT(key) DO NOTHING
+		`,
+			params.Key,
+			params.Name,
+			params.Scope,
+			params.GitRoot,
+			params.DefaultBranch,
+			nullIfEmpty(params.GitHubRepo),
+			params.ManifestPath,
+			formatTime(now),
+			formatTime(now),
+		)
+		if err != nil {
+			return err
+		}
+
+		rowsAffected, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+
+		if rowsAffected == 0 {
+			if _, err := tx.ExecContext(ctx, `
+				UPDATE projects
+				SET name = ?, scope = ?, git_root = ?, default_branch = ?, github_repo = ?, manifest_path = ?, updated_at = ?
+				WHERE key = ?
+			`,
+				params.Name,
+				params.Scope,
+				params.GitRoot,
+				params.DefaultBranch,
+				nullIfEmpty(params.GitHubRepo),
+				params.ManifestPath,
+				formatTime(now),
+				params.Key,
+			); err != nil {
+				return err
+			}
+		}
+
+		record, err := scanProject(tx.QueryRowContext(ctx, `
+			SELECT id, key, name, scope, git_root, default_branch, github_repo, manifest_path, created_at, updated_at
+			FROM projects
+			WHERE key = ?
+		`, params.Key))
+		if err != nil {
+			return err
+		}
+		project = record
+
+		if rowsAffected > 0 {
+			return appendEventTx(ctx, tx, eventInsert{
+				StreamType: runtimeevents.StreamProject,
+				StreamID:   project.ID,
+				EventType:  runtimeevents.EventProjectCreated,
+				Scope:      project.Scope,
+				ProjectID:  &project.ID,
+				Payload: runtimeevents.ProjectCreatedPayload{
+					Key:           project.Key,
+					Name:          project.Name,
+					Scope:         project.Scope,
+					GitRoot:       project.GitRoot,
+					DefaultBranch: project.DefaultBranch,
+					GitHubRepo:    project.GitHubRepo,
+					ManifestPath:  project.ManifestPath,
+				},
+				OccurredAt: now,
+			})
+		}
+
+		return nil
+	})
+
+	return project, err
+}
+
 func (store *Store) UpsertInitiative(ctx context.Context, params UpsertInitiativeParams) (Initiative, error) {
 	now := store.now()
 	var initiative Initiative
