@@ -26,6 +26,9 @@ source "${ACCESS_SH}"
 if browser_request_domain_access "https://blocked.example/path"; then
     fail "expected blocked.example to be denied"
 fi
+if browser_request_domain_access "https://user:pass@blocked.example/path"; then
+    fail "expected credentialed blocked.example to be denied"
+fi
 if browser_request_domain_access "https://foo.deny.test/resource"; then
     fail "expected foo.deny.test to be denied by wildcard"
 fi
