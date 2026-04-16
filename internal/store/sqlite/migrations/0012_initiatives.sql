@@ -19,3 +19,31 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_initiatives_linked_project_id
 
 CREATE INDEX IF NOT EXISTS idx_initiatives_workspace_id ON initiatives(workspace_id);
 CREATE INDEX IF NOT EXISTS idx_initiatives_kind_status ON initiatives(kind, status);
+
+INSERT INTO initiatives (
+  workspace_id,
+  key,
+  title,
+  kind,
+  status,
+  summary,
+  linked_project_id,
+  owner_companion_id,
+  created_at,
+  updated_at
+)
+SELECT
+  w.id,
+  p.key,
+  p.name,
+  'managed_project',
+  'active',
+  'Managed project for ' || p.name,
+  p.id,
+  NULL,
+  p.created_at,
+  p.updated_at
+FROM projects p
+JOIN workspaces w ON w.key = 'marcus'
+LEFT JOIN initiatives i ON i.linked_project_id = p.id
+WHERE i.id IS NULL;

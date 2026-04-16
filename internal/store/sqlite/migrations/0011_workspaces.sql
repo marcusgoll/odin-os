@@ -11,3 +11,11 @@ CREATE TABLE IF NOT EXISTS workspaces (
 );
 
 CREATE INDEX IF NOT EXISTS idx_workspaces_status ON workspaces(status);
+
+INSERT INTO workspaces (key, name, owner_ref, status, default_companion_key, policy_json, created_at, updated_at)
+SELECT 'marcus', 'Marcus Workspace', 'marcus', 'active', NULL, '{}', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+WHERE NOT EXISTS (
+  SELECT 1
+  FROM workspaces
+  WHERE key = 'marcus'
+);

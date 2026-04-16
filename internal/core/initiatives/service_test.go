@@ -161,15 +161,9 @@ func openInitiativeStore(t *testing.T) *sqlite.Store {
 func createInitiativeWorkspace(t *testing.T, ctx context.Context, store *sqlite.Store) sqlite.Workspace {
 	t.Helper()
 
-	workspace, err := store.CreateWorkspace(ctx, sqlite.CreateWorkspaceParams{
-		Key:        "marcus",
-		Name:       "Marcus Workspace",
-		OwnerRef:   "marcus",
-		Status:     "active",
-		PolicyJSON: `{}`,
-	})
+	workspace, err := store.EnsureDefaultWorkspace(ctx)
 	if err != nil {
-		t.Fatalf("CreateWorkspace() error = %v", err)
+		t.Fatalf("EnsureDefaultWorkspace() error = %v", err)
 	}
 	return workspace
 }

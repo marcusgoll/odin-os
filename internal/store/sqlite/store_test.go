@@ -308,15 +308,9 @@ func TestWorkspaceStoreLookupAndListActive(t *testing.T) {
 		t.Fatalf("Migrate() error = %v", err)
 	}
 
-	primary, err := store.CreateWorkspace(ctx, CreateWorkspaceParams{
-		Key:        "marcus",
-		Name:       "Marcus Workspace",
-		OwnerRef:   "marcus",
-		Status:     "active",
-		PolicyJSON: `{}`,
-	})
+	primary, err := store.EnsureDefaultWorkspace(ctx)
 	if err != nil {
-		t.Fatalf("CreateWorkspace(primary) error = %v", err)
+		t.Fatalf("EnsureDefaultWorkspace() error = %v", err)
 	}
 
 	active, err := store.CreateWorkspace(ctx, CreateWorkspaceParams{
@@ -378,15 +372,9 @@ func TestInitiativeStoreCreateListAndProjectLink(t *testing.T) {
 		t.Fatalf("Migrate() error = %v", err)
 	}
 
-	workspace, err := store.CreateWorkspace(ctx, CreateWorkspaceParams{
-		Key:        "marcus",
-		Name:       "Marcus Workspace",
-		OwnerRef:   "marcus",
-		Status:     "active",
-		PolicyJSON: `{}`,
-	})
+	workspace, err := store.EnsureDefaultWorkspace(ctx)
 	if err != nil {
-		t.Fatalf("CreateWorkspace() error = %v", err)
+		t.Fatalf("EnsureDefaultWorkspace() error = %v", err)
 	}
 
 	project, err := store.CreateProject(ctx, CreateProjectParams{
@@ -431,6 +419,102 @@ func TestInitiativeStoreCreateListAndProjectLink(t *testing.T) {
 	}
 	if len(initiatives) != 2 {
 		t.Fatalf("ListInitiatives() len = %d, want 2", len(initiatives))
+	}
+}
+
+func TestWorkspaceAndInitiativeBackfillOnMigrationUpgrade(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "odin.db")
+
+	store, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer store.Close()
+
+	if _, err := store.db.ExecContext(ctx, `
+		CREATE TABLE IF NOT EXISTS schema_migrations (
+			version INTEGER PRIMARY KEY,
+			name TEXT NOT NULL,
+			applied_at TEXT NOT NULL
+		)
+	`); err != nil {
+		t.Fatalf("create schema_migrations error = %v", err)
+	}
+
+	for version := 1; version <= 6; version++ {
+		migration, err := loadMigrationByVersion(version)
+		if err != nil {
+			t.Fatalf("loadMigrationByVersion(%d) error = %v", version, err)
+		}
+		if err := store.applyMigration(ctx, migration); err != nil {
+			t.Fatalf("applyMigration(%d) error = %v", version, err)
+		}
+	}
+
+	result, err := store.db.ExecContext(ctx, `
+		INSERT INTO projects (key, name, scope, git_root, default_branch, github_repo, manifest_path, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`,
+		"legacy-project",
+		"Legacy Project",
+		"project",
+		"/tmp/legacy-project",
+		"main",
+		nil,
+		"config/projects.yaml",
+		formatTime(store.now()),
+		formatTime(store.now()),
+	)
+	if err != nil {
+		t.Fatalf("insert legacy project error = %v", err)
+	}
+
+	projectID, err := result.LastInsertId()
+	if err != nil {
+		t.Fatalf("legacy project LastInsertId() error = %v", err)
+	}
+
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate() upgrade error = %v", err)
+	}
+
+	workspace, err := store.GetWorkspaceByKey(ctx, "marcus")
+	if err != nil {
+		t.Fatalf("GetWorkspaceByKey(marcus) error = %v", err)
+	}
+	if workspace.Status != "active" {
+		t.Fatalf("GetWorkspaceByKey(marcus).Status = %q, want %q", workspace.Status, "active")
+	}
+
+	initiative, err := store.GetInitiativeByProjectID(ctx, projectID)
+	if err != nil {
+		t.Fatalf("GetInitiativeByProjectID(legacy) error = %v", err)
+	}
+	if initiative.WorkspaceID != workspace.ID {
+		t.Fatalf("GetInitiativeByProjectID(legacy).WorkspaceID = %d, want %d", initiative.WorkspaceID, workspace.ID)
+	}
+	if initiative.Key != "legacy-project" {
+		t.Fatalf("GetInitiativeByProjectID(legacy).Key = %q, want %q", initiative.Key, "legacy-project")
+	}
+	if initiative.Kind != "managed_project" {
+		t.Fatalf("GetInitiativeByProjectID(legacy).Kind = %q, want %q", initiative.Kind, "managed_project")
+	}
+
+	var workspaceCount int
+	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM workspaces WHERE key = ?`, "marcus").Scan(&workspaceCount); err != nil {
+		t.Fatalf("workspace count query error = %v", err)
+	}
+	if workspaceCount != 1 {
+		t.Fatalf("workspace count = %d, want 1", workspaceCount)
+	}
+
+	var initiativeCount int
+	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM initiatives WHERE linked_project_id = ?`, projectID).Scan(&initiativeCount); err != nil {
+		t.Fatalf("initiative count query error = %v", err)
+	}
+	if initiativeCount != 1 {
+		t.Fatalf("initiative count = %d, want 1", initiativeCount)
 	}
 }
 

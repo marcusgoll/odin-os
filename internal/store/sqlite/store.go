@@ -201,6 +201,22 @@ func (store *Store) CreateWorkspace(ctx context.Context, params CreateWorkspaceP
 	return workspace, err
 }
 
+func (store *Store) EnsureDefaultWorkspace(ctx context.Context) (Workspace, error) {
+	now := store.now()
+	var workspace Workspace
+
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		record, err := store.ensureDefaultWorkspaceTx(ctx, tx, now)
+		if err != nil {
+			return err
+		}
+		workspace = record
+		return nil
+	})
+
+	return workspace, err
+}
+
 func (store *Store) CreateInitiative(ctx context.Context, params CreateInitiativeParams) (Initiative, error) {
 	now := store.now()
 	var initiative Initiative
@@ -2344,17 +2360,10 @@ func (store *Store) getInitiativeByProjectIDTx(ctx context.Context, tx *sql.Tx, 
 }
 
 func (store *Store) ensureDefaultWorkspaceTx(ctx context.Context, tx *sql.Tx, now time.Time) (Workspace, error) {
-	workspace, err := store.getWorkspaceByKeyTx(ctx, tx, defaultWorkspaceKey)
-	if err == nil {
-		return workspace, nil
-	}
-	if !errors.Is(err, sql.ErrNoRows) {
-		return Workspace{}, err
-	}
-
-	result, err := tx.ExecContext(ctx, `
+	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO workspaces (key, name, owner_ref, status, default_companion_key, policy_json, created_at, updated_at)
 		VALUES (?, ?, ?, ?, NULL, ?, ?, ?)
+		ON CONFLICT(key) DO NOTHING
 	`,
 		defaultWorkspaceKey,
 		defaultWorkspaceName,
@@ -2363,26 +2372,11 @@ func (store *Store) ensureDefaultWorkspaceTx(ctx context.Context, tx *sql.Tx, no
 		`{}`,
 		formatTime(now),
 		formatTime(now),
-	)
-	if err != nil {
+	); err != nil {
 		return Workspace{}, err
 	}
 
-	workspaceID, err := result.LastInsertId()
-	if err != nil {
-		return Workspace{}, err
-	}
-
-	return Workspace{
-		ID:         workspaceID,
-		Key:        defaultWorkspaceKey,
-		Name:       defaultWorkspaceName,
-		OwnerRef:   defaultWorkspaceOwner,
-		Status:     defaultWorkspaceStatus,
-		PolicyJSON: `{}`,
-		CreatedAt:  now,
-		UpdatedAt:  now,
-	}, nil
+	return store.getWorkspaceByKeyTx(ctx, tx, defaultWorkspaceKey)
 }
 
 func (store *Store) reconcileManagedProjectInitiativeTx(ctx context.Context, tx *sql.Tx, params ReconcileManagedProjectInitiativeParams, now time.Time) (Initiative, error) {

@@ -42,7 +42,7 @@ type ActionInput struct {
 
 func (service Service) EnsureProjectBackedInitiative(ctx context.Context, projectID int64) (sqlite.Initiative, error) {
 	if service.Store == nil {
-		return sqlite.Initiative{}, fmt.Errorf("transition store is required")
+		return sqlite.Initiative{}, fmt.Errorf("project store is required")
 	}
 
 	project, err := service.Store.GetProject(ctx, projectID)

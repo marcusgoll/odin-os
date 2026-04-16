@@ -2,8 +2,6 @@ package workspaces
 
 import (
 	"context"
-	"database/sql"
-	"errors"
 	"fmt"
 
 	"odin-os/internal/store/sqlite"
@@ -18,21 +16,7 @@ func (service Service) BootstrapDefault(ctx context.Context) (Workspace, error) 
 		return Workspace{}, fmt.Errorf("workspace store is required")
 	}
 
-	record, err := service.Store.GetWorkspaceByKey(ctx, DefaultWorkspaceKey)
-	if err == nil {
-		return fromRecord(record), nil
-	}
-	if !errors.Is(err, sql.ErrNoRows) {
-		return Workspace{}, err
-	}
-
-	record, err = service.Store.CreateWorkspace(ctx, sqlite.CreateWorkspaceParams{
-		Key:        DefaultWorkspaceKey,
-		Name:       DefaultWorkspaceName,
-		OwnerRef:   DefaultOwnerRef,
-		Status:     StatusActive,
-		PolicyJSON: `{}`,
-	})
+	record, err := service.Store.EnsureDefaultWorkspace(ctx)
 	if err != nil {
 		return Workspace{}, err
 	}
