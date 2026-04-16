@@ -6,11 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"sort"
-	"strconv"
 	"strings"
 
 	"odin-os/internal/registry"
-	"odin-os/internal/runtime/runs"
 )
 
 var errCapabilityNotFound = errors.New("capability not found")
@@ -34,7 +32,7 @@ type SnapshotSource interface {
 }
 
 type RunLookup interface {
-	GetRun(context.Context, int64) (runs.RunRecord, error)
+	GetRunEnvelope(context.Context, int64) (RunEnvelope, error)
 }
 
 func NewGateway(snapshot SnapshotSource, invoker InvokerFunc, runs RunLookup) *Gateway {
@@ -99,22 +97,17 @@ func (gateway *Gateway) InvokeCapability(ctx context.Context, request InvokeRequ
 	return gateway.invoke(ctx, request, descriptor)
 }
 
-func (gateway *Gateway) GetRun(ctx context.Context, runID int64) (InvokeResponse, error) {
+func (gateway *Gateway) GetRun(ctx context.Context, runID int64) (RunEnvelope, error) {
 	if gateway == nil || gateway.runs == nil {
-		return InvokeResponse{}, errRunLookupMissing
+		return RunEnvelope{}, errRunLookupMissing
 	}
 
-	record, err := gateway.runs.GetRun(ctx, runID)
+	envelope, err := gateway.runs.GetRunEnvelope(ctx, runID)
 	if err != nil {
-		return InvokeResponse{}, err
+		return RunEnvelope{}, err
 	}
 
-	response := InvokeResponse{
-		RunID:     strconv.FormatInt(record.RunID, 10),
-		Status:    record.Status,
-		Artifacts: []Artifact{},
-	}
-	return response, nil
+	return envelope, nil
 }
 
 func (gateway *Gateway) ResumeRun(context.Context, int64) error {
@@ -179,6 +172,9 @@ func validateInvokeInput(descriptor Descriptor, input json.RawMessage) error {
 	if descriptor.InputSchema.Type != "object" {
 		return nil
 	}
+	if strings.TrimSpace(string(input)) == "" {
+		return fmt.Errorf("%w: input is required", errInvalidInvokeInput)
+	}
 
 	var payload any
 	if err := json.Unmarshal(input, &payload); err != nil {
@@ -186,9 +182,6 @@ func validateInvokeInput(descriptor Descriptor, input json.RawMessage) error {
 	}
 	if _, ok := payload.(map[string]any); !ok {
 		return fmt.Errorf("%w: expected JSON object input", errInvalidInvokeInput)
-	}
-	if strings.TrimSpace(string(input)) == "" {
-		return fmt.Errorf("%w: input is required", errInvalidInvokeInput)
 	}
 	return nil
 }

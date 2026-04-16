@@ -7,17 +7,16 @@ import (
 	"testing"
 
 	"odin-os/internal/registry"
-	"odin-os/internal/runtime/runs"
 )
 
 type testRunLookup struct {
-	run runs.RunRecord
+	run RunEnvelope
 	err error
 }
 
-func (lookup testRunLookup) GetRun(context.Context, int64) (runs.RunRecord, error) {
+func (lookup testRunLookup) GetRunEnvelope(context.Context, int64) (RunEnvelope, error) {
 	if lookup.err != nil {
-		return runs.RunRecord{}, lookup.err
+		return RunEnvelope{}, lookup.err
 	}
 	return lookup.run, nil
 }
@@ -179,15 +178,51 @@ func TestGatewayRejectsInvalidInput(t *testing.T) {
 	}
 }
 
+func TestGatewayRejectsBlankInput(t *testing.T) {
+	t.Parallel()
+
+	gateway := &Gateway{
+		snapshot: func() Snapshot {
+			return Snapshot{
+				Digest: "digest-123",
+				Capabilities: map[string]Descriptor{
+					"skill.alpha": {
+						Kind:        registry.KindSkill,
+						Key:         "skill.alpha",
+						Version:     "1.0.0",
+						InputSchema: registry.SchemaRef{Type: "object"},
+					},
+				},
+			}
+		},
+		invoke: func(context.Context, InvokeRequest, Descriptor) (InvokeResponse, error) {
+			t.Fatal("invoke callback should not be called for blank input")
+			return InvokeResponse{}, nil
+		},
+	}
+
+	_, err := gateway.InvokeCapability(context.Background(), InvokeRequest{
+		RequestID:         "req-2",
+		CapabilityID:      "skill.alpha",
+		CapabilityVersion: "1.0.0",
+		Input:             json.RawMessage(``),
+	})
+	if err == nil {
+		t.Fatal("InvokeCapability() error = nil, want error")
+	}
+}
+
 func TestGatewayReturnsRunEnvelope(t *testing.T) {
 	t.Parallel()
 
 	gateway := &Gateway{
 		runs: testRunLookup{
-			run: runs.RunRecord{
-				RunID:   42,
-				Status:  "completed",
-				Summary: "finished",
+			run: RunEnvelope{
+				RunID:  "42",
+				Status: "completed",
+				Artifacts: []Artifact{
+					{Name: "log", Type: "text/plain", URI: "file:///tmp/run.log"},
+				},
 			},
 		},
 	}
@@ -202,8 +237,8 @@ func TestGatewayReturnsRunEnvelope(t *testing.T) {
 	if envelope.Status != "completed" {
 		t.Fatalf("GetRun().Status = %q, want %q", envelope.Status, "completed")
 	}
-	if len(envelope.Artifacts) != 0 {
-		t.Fatalf("GetRun().Artifacts = %+v, want empty", envelope.Artifacts)
+	if len(envelope.Artifacts) != 1 || envelope.Artifacts[0].Name != "log" {
+		t.Fatalf("GetRun().Artifacts = %+v, want one log artifact", envelope.Artifacts)
 	}
 }
 

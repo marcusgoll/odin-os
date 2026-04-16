@@ -51,6 +51,14 @@ type RunError struct {
 	Message string `json:"message,omitempty"`
 }
 
+type RunEnvelope struct {
+	RunID     string          `json:"run_id,omitempty"`
+	Status    string          `json:"status,omitempty"`
+	Output    json.RawMessage `json:"output,omitempty"`
+	Artifacts []Artifact      `json:"artifacts,omitempty"`
+	Error     *RunError       `json:"error,omitempty"`
+}
+
 type InvokeRequest struct {
 	RequestID         string
 	CapabilityID      string

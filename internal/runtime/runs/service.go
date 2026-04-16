@@ -3,8 +3,10 @@ package runs
 import (
 	"context"
 	"database/sql"
+	"strconv"
 
 	"odin-os/internal/cli/scope"
+	"odin-os/internal/core/capabilities"
 	"odin-os/internal/runtime/projections"
 )
 
@@ -97,6 +99,19 @@ func (service Service) GetRun(ctx context.Context, runID int64) (RunRecord, erro
 	}
 
 	return record, nil
+}
+
+func (service Service) GetRunEnvelope(ctx context.Context, runID int64) (capabilities.RunEnvelope, error) {
+	record, err := service.GetRun(ctx, runID)
+	if err != nil {
+		return capabilities.RunEnvelope{}, err
+	}
+
+	return capabilities.RunEnvelope{
+		RunID:     strconv.FormatInt(record.RunID, 10),
+		Status:    record.Status,
+		Artifacts: []capabilities.Artifact{},
+	}, nil
 }
 
 func matchesRunScope(projectKey, taskScope string, resolved scope.Resolution) bool {
