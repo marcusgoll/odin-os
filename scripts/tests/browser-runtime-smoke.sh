@@ -21,7 +21,8 @@ for path in "${ACCESS_SH}" "${SERVER_JS}" "${CAPTCHA_JS}"; do
 done
 pass "repo-local browser runtime files exist"
 
-ODIN_DIR="${ROOT_DIR}/.odin-browser-smoke"
+WORK_DIR="$(mktemp -d)"
+ODIN_DIR="${WORK_DIR}/odin-browser-smoke"
 export ODIN_DIR
 export ODIN_BROWSER_PORT="${ODIN_BROWSER_PORT:-19227}"
 mkdir -p "${ODIN_DIR}"
@@ -30,6 +31,7 @@ source "${ACCESS_SH}"
 
 cleanup() {
     browser_server_stop >/dev/null 2>&1 || true
+    rm -rf "${WORK_DIR}"
 }
 trap cleanup EXIT
 
@@ -60,4 +62,5 @@ pass "browser_snapshot returned Example Domain"
 
 browser_server_stop >/dev/null
 trap - EXIT
+rm -rf "${WORK_DIR}"
 pass "browser_server_stop completed"

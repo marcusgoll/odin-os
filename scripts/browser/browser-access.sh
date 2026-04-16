@@ -30,26 +30,28 @@ _ba_proc_root() {
     printf '%s' "${BA_PROC_ROOT:-/proc}"
 }
 
-_ba_proc_text() {
-    local path="${1:-}"
-    local parts=()
+_ba_proc_has_exact_entry() {
+    local path="${1:-}" expected="${2:-}" entry
+    [[ -n "${path}" ]] || return 1
+    [[ -n "${expected}" ]] || return 1
     [[ -r "${path}" ]] || return 1
-    mapfile -d '' -t parts < "${path}"
-    printf '%s' "$(printf '%s\n' "${parts[@]}")"
+
+    while IFS= read -r -d '' entry; do
+        [[ "${entry}" == "${expected}" ]] && return 0
+    done < "${path}"
+
+    return 1
 }
 
 _ba_pid_is_browser_runtime() {
-    local pid="${1:-}" proc_root cmdline environ
+    local pid="${1:-}" proc_root
     [[ -n "${pid}" ]] || return 1
     [[ "${pid}" =~ ^[0-9]+$ ]] || return 1
 
     proc_root="$(_ba_proc_root)"
-    cmdline="$(_ba_proc_text "${proc_root}/${pid}/cmdline")" || return 1
-    environ="$(_ba_proc_text "${proc_root}/${pid}/environ")" || return 1
-
-    [[ "${cmdline}" == *"${BROWSER_SERVER_SCRIPT}"* ]] || return 1
-    [[ "${environ}" == *"ODIN_DIR=${ODIN_DIR}"* ]] || return 1
-    [[ "${environ}" == *"ODIN_BROWSER_PORT=${BROWSER_SERVER_PORT}"* ]] || return 1
+    _ba_proc_has_exact_entry "${proc_root}/${pid}/cmdline" "${BROWSER_SERVER_SCRIPT}" || return 1
+    _ba_proc_has_exact_entry "${proc_root}/${pid}/environ" "ODIN_DIR=${ODIN_DIR}" || return 1
+    _ba_proc_has_exact_entry "${proc_root}/${pid}/environ" "ODIN_BROWSER_PORT=${BROWSER_SERVER_PORT}" || return 1
 }
 
 _ba_stop_pid_if_runtime() {
@@ -57,7 +59,9 @@ _ba_stop_pid_if_runtime() {
     if _ba_pid_is_browser_runtime "${pid}"; then
         kill "${pid}" 2>/dev/null || true
         sleep 1
-        kill -9 "${pid}" 2>/dev/null || true
+        if _ba_pid_is_browser_runtime "${pid}"; then
+            kill -9 "${pid}" 2>/dev/null || true
+        fi
     fi
 }
 
