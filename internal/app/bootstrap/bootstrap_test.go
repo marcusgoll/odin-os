@@ -67,6 +67,13 @@ func TestSnapshotDigestIgnoresAbsoluteSourcePaths(t *testing.T) {
 				},
 			},
 		},
+		Diagnostics: []registry.Diagnostic{
+			{
+				Path:    "/tmp/a/registry/skills/example.md",
+				Code:    "read_error",
+				Message: "registry file could not be read",
+			},
+		},
 	}
 
 	other := registry.Snapshot{
@@ -80,6 +87,13 @@ func TestSnapshotDigestIgnoresAbsoluteSourcePaths(t *testing.T) {
 					Path:         "/opt/alt/registry/skills/example.md",
 					RelativePath: "skills/example.md",
 				},
+			},
+		},
+		Diagnostics: []registry.Diagnostic{
+			{
+				Path:    "/opt/alt/registry/skills/example.md",
+				Code:    "read_error",
+				Message: "registry file could not be read",
 			},
 		},
 	}

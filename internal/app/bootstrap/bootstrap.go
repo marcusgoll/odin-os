@@ -168,61 +168,39 @@ func initializeReadinessState(ctx context.Context, store *sqlite.Store, versionH
 }
 
 func snapshotDigest(snapshot registry.Snapshot) (string, error) {
-	payload := struct {
-		Items []struct {
-			Kind       registry.Kind     `json:"kind"`
-			Key        string            `json:"key"`
-			Title      string            `json:"title"`
-			Summary    string            `json:"summary"`
-			Status     string            `json:"status"`
-			Tags       []string          `json:"tags"`
-			Owners     []string          `json:"owners"`
-			Role       string            `json:"role"`
-			Scopes     []string          `json:"scopes"`
-			Tools      []string          `json:"tools"`
-			Strictness string            `json:"strictness"`
-			AppliesTo  []string          `json:"applies_to"`
-			Entrypoint string            `json:"entrypoint"`
-			Composes   []string          `json:"composes"`
-			Command    string            `json:"command"`
-			Aliases    []string          `json:"aliases"`
-			Sections   map[string]string `json:"sections"`
-			Source     struct {
-				RelativePath string `json:"relative_path"`
-			} `json:"source"`
-		} `json:"items"`
-		Diagnostics []registry.Diagnostic `json:"diagnostics"`
-	}{
-		Diagnostics: snapshot.Diagnostics,
+	type digestItem struct {
+		Kind       registry.Kind     `json:"kind"`
+		Key        string            `json:"key"`
+		Title      string            `json:"title"`
+		Summary    string            `json:"summary"`
+		Status     string            `json:"status"`
+		Tags       []string          `json:"tags"`
+		Owners     []string          `json:"owners"`
+		Role       string            `json:"role"`
+		Scopes     []string          `json:"scopes"`
+		Tools      []string          `json:"tools"`
+		Strictness string            `json:"strictness"`
+		AppliesTo  []string          `json:"applies_to"`
+		Entrypoint string            `json:"entrypoint"`
+		Composes   []string          `json:"composes"`
+		Command    string            `json:"command"`
+		Aliases    []string          `json:"aliases"`
+		Sections   map[string]string `json:"sections"`
+		Source     struct {
+			RelativePath string `json:"relative_path"`
+		} `json:"source"`
 	}
+
+	payload := struct {
+		Items []digestItem `json:"items"`
+	}{}
 
 	for _, item := range snapshot.Items {
 		sections := make(map[string]string, len(item.Sections))
 		for key, value := range item.Sections {
 			sections[key] = value
 		}
-		payload.Items = append(payload.Items, struct {
-			Kind       registry.Kind     `json:"kind"`
-			Key        string            `json:"key"`
-			Title      string            `json:"title"`
-			Summary    string            `json:"summary"`
-			Status     string            `json:"status"`
-			Tags       []string          `json:"tags"`
-			Owners     []string          `json:"owners"`
-			Role       string            `json:"role"`
-			Scopes     []string          `json:"scopes"`
-			Tools      []string          `json:"tools"`
-			Strictness string            `json:"strictness"`
-			AppliesTo  []string          `json:"applies_to"`
-			Entrypoint string            `json:"entrypoint"`
-			Composes   []string          `json:"composes"`
-			Command    string            `json:"command"`
-			Aliases    []string          `json:"aliases"`
-			Sections   map[string]string `json:"sections"`
-			Source     struct {
-				RelativePath string `json:"relative_path"`
-			} `json:"source"`
-		}{
+		payload.Items = append(payload.Items, digestItem{
 			Kind:       item.Kind,
 			Key:        item.Key,
 			Title:      item.Title,
