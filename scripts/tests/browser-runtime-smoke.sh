@@ -103,6 +103,14 @@ SNAPSHOT="$(browser_snapshot)"
 [[ "${SNAPSHOT}" == *"Example Domain"* ]] || fail "browser_snapshot did not return Example Domain"
 pass "browser_snapshot returned Example Domain"
 
+SCREENSHOT_PATH="${WORK_DIR}/example-domain.png"
+if ! screenshot_path="$(browser_bc_screenshot --output "${SCREENSHOT_PATH}")"; then
+    fail "browser_bc_screenshot could not capture example.com"
+fi
+[[ "${screenshot_path}" == "${SCREENSHOT_PATH}" ]] || fail "browser_bc_screenshot returned unexpected path"
+[[ -s "${screenshot_path}" ]] || fail "browser_bc_screenshot did not write a screenshot"
+pass "browser_bc_screenshot captured example.com"
+
 for target in \
     'http://localhost/path' \
     'http://127.0.0.2/path' \
