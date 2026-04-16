@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"odin-os/internal/adapters/browserhuman"
 	"odin-os/internal/store/sqlite"
 )
 
@@ -60,6 +61,55 @@ func TestBuiltinToolInvokesRuntimeDriver(t *testing.T) {
 	}
 }
 
+func TestServicePreservesStructuredArtifacts(t *testing.T) {
+	script := writeFixtureDriver(t, `#!/usr/bin/env bash
+printf '{"status":"completed","tool_key":"huginn_browser_session","summary":"ok","artifacts":{"session_state":"ready","snapshots":[{"name":"home","url":"https://example.com"}],"labels":["alpha","beta"]},"debug_note":"preserve-me"}'
+`)
+	t.Setenv("ODIN_BROWSER_HUMAN_DRIVER", script)
+
+	service := Service{}
+	result, err := service.BrowserHuman(context.Background(), browserhuman.Request{
+		ToolKey: "huginn_browser_session",
+		Input:   map[string]any{"url": "https://example.com"},
+	})
+	if err != nil {
+		t.Fatalf("BrowserHuman() error = %v", err)
+	}
+	if result.ToolKey != "huginn_browser_session" {
+		t.Fatalf("ToolKey = %q, want huginn_browser_session", result.ToolKey)
+	}
+	if result.RawOutput == "" {
+		t.Fatal("RawOutput = empty, want driver response")
+	}
+	if got := result.Artifacts["session_state"]; got != "ready" {
+		t.Fatalf("Artifacts.session_state = %#v, want ready", got)
+	}
+}
+
+func TestCloneArtifactsDeepCopiesNestedValues(t *testing.T) {
+	source := map[string]any{
+		"session_state": "ready",
+		"snapshots": []any{
+			map[string]any{"name": "home", "url": "https://example.com"},
+		},
+	}
+
+	cloned := cloneArtifacts(source)
+	cloned["session_state"] = "mutated"
+	clonedSnapshots := cloned["snapshots"].([]any)
+	clonedSnapshot := clonedSnapshots[0].(map[string]any)
+	clonedSnapshot["name"] = "changed"
+
+	if got := source["session_state"]; got != "ready" {
+		t.Fatalf("source session_state = %#v, want ready", got)
+	}
+	sourceSnapshots := source["snapshots"].([]any)
+	sourceSnapshot := sourceSnapshots[0].(map[string]any)
+	if got := sourceSnapshot["name"]; got != "home" {
+		t.Fatalf("source snapshots[0].name = %#v, want home", got)
+	}
+}
+
 func openInvocationStore(t *testing.T, runtimeRoot string) *sqlite.Store {
 	t.Helper()
 
@@ -76,4 +126,17 @@ func openInvocationStore(t *testing.T, runtimeRoot string) *sqlite.Store {
 		t.Fatalf("Migrate() error = %v", err)
 	}
 	return store
+}
+
+func writeFixtureDriver(t *testing.T, content string) string {
+	t.Helper()
+
+	path := filepath.Join(t.TempDir(), "driver.sh")
+	if err := os.WriteFile(path, []byte(content), 0o755); err != nil {
+		t.Fatalf("WriteFile(driver) error = %v", err)
+	}
+	if err := os.Chmod(path, 0o755); err != nil {
+		t.Fatalf("Chmod(driver) error = %v", err)
+	}
+	return path
 }
