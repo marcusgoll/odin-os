@@ -59,6 +59,14 @@ for target in \
         fail "expected ${target} to be denied"
     fi
 done
+for target in \
+    'mailto:user@example.com' \
+    'ftp://example.com/resource' \
+    'custom-scheme://example.com/path'; do
+    if browser_request_domain_access "${target}"; then
+        fail "expected ${target} to be denied by scheme allowlist"
+    fi
+done
 if browser_request_domain_access "https://localhost./path"; then
     fail "expected localhost. to be denied"
 fi
