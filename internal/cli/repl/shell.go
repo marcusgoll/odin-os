@@ -14,6 +14,8 @@ import (
 	"odin-os/internal/cli/render"
 	"odin-os/internal/cli/scope"
 	"odin-os/internal/core/projects"
+	"odin-os/internal/executors/contract"
+	executorrouter "odin-os/internal/executors/router"
 	healthsvc "odin-os/internal/runtime/health"
 	jobsvc "odin-os/internal/runtime/jobs"
 	runsvc "odin-os/internal/runtime/runs"
@@ -25,6 +27,8 @@ type Environment struct {
 	Registry            projects.Registry
 	RegistryDiagnostics []projects.Diagnostic
 	SessionStore        SessionStore
+	Executors           map[string]contract.Executor
+	ExecutorConfig      executorrouter.Config
 }
 
 type Shell struct {
@@ -210,9 +214,81 @@ func (shell *Shell) handleAsk(ctx context.Context, line string, output io.Writer
 	case commands.IntentDoctor:
 		return shell.handleCommand(ctx, commands.Command{Name: "doctor"}, output)
 	default:
-		_, err := fmt.Fprintln(output, "local ask is limited in Phase 05. Try /help, /scope, /project, /jobs, /runs, /approvals, /logs, or /doctor.")
-		return err
+		return shell.handleFreeTextAsk(ctx, line, output)
 	}
+}
+
+func (shell *Shell) handleFreeTextAsk(ctx context.Context, line string, output io.Writer) error {
+	executor, err := shell.codexExecutor(ctx)
+	if err != nil {
+		_, writeErr := fmt.Fprintln(output, err.Error())
+		return writeErr
+	}
+
+	meta := map[string]string{
+		"scope_kind": string(shell.state.Scope.Kind),
+	}
+	if shell.state.Scope.ProjectKey != "" {
+		meta["project_key"] = shell.state.Scope.ProjectKey
+	}
+
+	result, err := executor.RunTask(ctx, contract.TaskSpec{
+		ID:       fmt.Sprintf("ask-%d", time.Now().UnixNano()),
+		Kind:     contract.TaskKindGeneral,
+		Scope:    string(shell.state.Scope.Kind),
+		Prompt:   line,
+		Metadata: meta,
+		Requirements: contract.Requirements{
+			AllowedClasses:    []contract.ExecutorClass{contract.ExecutorClassPlanBackedCLI},
+			NeedsHeadlessPlan: true,
+		},
+	})
+	if err != nil {
+		_, writeErr := fmt.Fprintf(output, "unable to answer: %v\n", err)
+		return writeErr
+	}
+
+	text := strings.TrimSpace(result.Output)
+	if text == "" {
+		text = strings.TrimSpace(result.Status)
+	}
+	if text == "" {
+		text = "no response"
+	}
+
+	_, err = fmt.Fprintln(output, text)
+	return err
+}
+
+func (shell *Shell) codexExecutor(ctx context.Context) (contract.Executor, error) {
+	executorConfig, ok := shell.env.ExecutorConfig.ExecutorByKey("codex_headless")
+	if !ok {
+		return nil, fmt.Errorf("codex_headless executor is not configured")
+	}
+	if !executorConfig.Enabled {
+		return nil, fmt.Errorf("codex_headless executor is disabled")
+	}
+
+	executor, ok := shell.env.Executors["codex_headless"]
+	if !ok {
+		return nil, fmt.Errorf("codex_headless executor is not available")
+	}
+	if executor.Class() != executorConfig.Class {
+		return nil, fmt.Errorf("codex_headless executor class mismatch")
+	}
+
+	health, err := executor.Health(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if health.Status == contract.HealthStatusUnavailable {
+		if health.Details != "" {
+			return nil, fmt.Errorf("codex_headless is unavailable: %s", health.Details)
+		}
+		return nil, fmt.Errorf("codex_headless is unavailable")
+	}
+
+	return executor, nil
 }
 
 func (shell *Shell) handleMode(args []string, output io.Writer) error {

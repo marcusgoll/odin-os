@@ -100,12 +100,11 @@ func TestListFiltersJobsByScope(t *testing.T) {
 }
 
 func TestExecuteNextQueuedCompletesCutoverProjectTask(t *testing.T) {
-	t.Parallel()
-
 	ctx := context.Background()
 	store := openJobStore(t)
 	defer store.Close()
 
+	t.Setenv("ODIN_CODEX_DRIVER", codexDriverPath(t))
 	registry := writeRegistry(t)
 	service := Service{
 		Store:          store,
@@ -163,15 +162,17 @@ func TestExecuteNextQueuedCompletesCutoverProjectTask(t *testing.T) {
 	if run.Status != "completed" || run.Executor != "codex_headless" {
 		t.Fatalf("run = %+v, want completed codex_headless execution", run)
 	}
+	if run.Summary != "fixture codex driver" {
+		t.Fatalf("run.Summary = %q, want fixture codex driver", run.Summary)
+	}
 }
 
 func TestExecuteNextQueuedRejectsShadowModeMutation(t *testing.T) {
-	t.Parallel()
-
 	ctx := context.Background()
 	store := openJobStore(t)
 	defer store.Close()
 
+	t.Setenv("ODIN_CODEX_DRIVER", codexDriverPath(t))
 	registry := writeRegistry(t)
 	service := Service{
 		Store:          store,
@@ -237,6 +238,12 @@ func mustLoadExecutorConfig(t *testing.T) router.Config {
 		t.Fatalf("LoadConfig(executors) error = %v", err)
 	}
 	return cfg
+}
+
+func codexDriverPath(t *testing.T) string {
+	t.Helper()
+
+	return filepath.Clean(filepath.Join("..", "..", "..", "scripts", "drivers", "codex-headless.sh"))
 }
 
 func latestRunForTask(ctx context.Context, store *sqlite.Store, taskID int64) (sqlite.Run, error) {

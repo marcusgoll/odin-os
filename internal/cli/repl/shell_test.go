@@ -11,6 +11,7 @@ import (
 
 	"odin-os/internal/cli/scope"
 	"odin-os/internal/core/projects"
+	"odin-os/internal/executors/router"
 	runtimeevents "odin-os/internal/runtime/events"
 	"odin-os/internal/store/sqlite"
 )
@@ -63,24 +64,86 @@ func TestShellDowngradesInvalidSessionOnStartup(t *testing.T) {
 	}
 }
 
-func TestAskModeHandlesFreeTextWithoutCreatingTask(t *testing.T) {
-	t.Parallel()
-
-	env := newTestEnvironment(t)
+func TestAskModeRoutesUnknownFreeTextThroughCodexExecutor(t *testing.T) {
+	base := newTestEnvironment(t)
+	env := Environment{
+		Store:               base.Store,
+		Registry:            base.Registry,
+		RegistryDiagnostics: base.RegistryDiagnostics,
+		SessionStore:        base.SessionStore,
+		Executors:           router.DefaultCatalog(),
+		ExecutorConfig:      mustLoadExecutorConfig(t),
+	}
+	originalDriver := os.Getenv("ODIN_CODEX_DRIVER")
+	driverPath := filepath.Clean(filepath.Join("..", "..", "..", "scripts", "drivers", "codex-headless.sh"))
+	if err := os.Setenv("ODIN_CODEX_DRIVER", driverPath); err != nil {
+		t.Fatalf("Setenv(driver) error = %v", err)
+	}
+	t.Cleanup(func() {
+		if originalDriver == "" {
+			_ = os.Unsetenv("ODIN_CODEX_DRIVER")
+			return
+		}
+		_ = os.Setenv("ODIN_CODEX_DRIVER", originalDriver)
+	})
 	shell, err := New(env)
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
 
 	var output bytes.Buffer
-	if err := shell.HandleLine(context.Background(), "what scope am i in?", &output); err != nil {
+	if err := shell.HandleLine(context.Background(), "what can you do?", &output); err != nil {
 		t.Fatalf("HandleLine() error = %v", err)
 	}
 
-	if !strings.Contains(output.String(), "global") {
-		t.Fatalf("HandleLine() output = %q, want scope answer", output.String())
+	if !strings.Contains(output.String(), "fixture codex driver") {
+		t.Fatalf("HandleLine() output = %q, want driver answer", output.String())
 	}
 
+	views, err := shell.jobs.List(context.Background(), shell.state.Scope)
+	if err != nil {
+		t.Fatalf("jobs.List() error = %v", err)
+	}
+	if len(views) != 0 {
+		t.Fatalf("jobs len = %d, want 0", len(views))
+	}
+}
+
+func TestAskModeReportsUnavailableWhenCodexDriverIsMissing(t *testing.T) {
+	base := newTestEnvironment(t)
+	env := Environment{
+		Store:               base.Store,
+		Registry:            base.Registry,
+		RegistryDiagnostics: base.RegistryDiagnostics,
+		SessionStore:        base.SessionStore,
+		Executors:           router.DefaultCatalog(),
+		ExecutorConfig:      mustLoadExecutorConfig(t),
+	}
+	originalDriver := os.Getenv("ODIN_CODEX_DRIVER")
+	if err := os.Unsetenv("ODIN_CODEX_DRIVER"); err != nil {
+		t.Fatalf("Unsetenv(driver) error = %v", err)
+	}
+	t.Cleanup(func() {
+		if originalDriver == "" {
+			_ = os.Unsetenv("ODIN_CODEX_DRIVER")
+			return
+		}
+		_ = os.Setenv("ODIN_CODEX_DRIVER", originalDriver)
+	})
+
+	shell, err := New(env)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	var output bytes.Buffer
+	if err := shell.HandleLine(context.Background(), "what can you do?", &output); err != nil {
+		t.Fatalf("HandleLine() error = %v", err)
+	}
+
+	if !strings.Contains(strings.ToLower(output.String()), "unavailable") {
+		t.Fatalf("HandleLine() output = %q, want unavailable error", output.String())
+	}
 	views, err := shell.jobs.List(context.Background(), shell.state.Scope)
 	if err != nil {
 		t.Fatalf("jobs.List() error = %v", err)
@@ -495,10 +558,22 @@ func newTestEnvironment(t *testing.T) Environment {
 	}
 
 	return Environment{
-		Store:        store,
-		Registry:     registry,
-		SessionStore: SessionStore{Path: filepath.Join(stateDir, "cli-session.json")},
+		Store:          store,
+		Registry:       registry,
+		SessionStore:   SessionStore{Path: filepath.Join(stateDir, "cli-session.json")},
+		Executors:      router.DefaultCatalog(),
+		ExecutorConfig: mustLoadExecutorConfig(t),
 	}
+}
+
+func mustLoadExecutorConfig(t *testing.T) router.Config {
+	t.Helper()
+
+	cfg, err := router.LoadConfig(filepath.Clean(filepath.Join("..", "..", "..", "config", "executors.yaml")))
+	if err != nil {
+		t.Fatalf("LoadConfig(executors) error = %v", err)
+	}
+	return cfg
 }
 
 func hasTransitionEvent(events []runtimeevents.Record, want runtimeevents.Type) bool {

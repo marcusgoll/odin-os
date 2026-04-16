@@ -78,6 +78,8 @@ func Run(ctx context.Context, root string, args []string, stdin io.Reader, stdou
 		Registry:            app.Registry,
 		RegistryDiagnostics: app.RegistryDiagnostics,
 		SessionStore:        app.SessionStore,
+		Executors:           app.Executors,
+		ExecutorConfig:      app.ExecutorConfig,
 	})
 	if err != nil {
 		return err
