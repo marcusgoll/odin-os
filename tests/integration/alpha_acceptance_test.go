@@ -825,7 +825,7 @@ func TestAlphaAcceptance(t *testing.T) {
 	})
 
 	t.Run("migration extraction from odin-orchestrator works", func(t *testing.T) {
-		sourceRoot := "/home/orchestrator/odin-orchestrator"
+		sourceRoot := legacyOrchestratorSourceRoot(t)
 		requirePathExists(t, sourceRoot)
 
 		docsRoot := filepath.Join(t.TempDir(), "docs")
