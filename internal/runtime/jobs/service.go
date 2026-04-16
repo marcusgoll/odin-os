@@ -204,9 +204,6 @@ func (service Service) ExecuteNextQueued(ctx context.Context) error {
 	if err != nil {
 		return finishFailure(err)
 	}
-	if err := validateAssignment(manifest, project, assignment); err != nil {
-		return finishFailure(err)
-	}
 
 	teardownCtx := context.WithoutCancel(ctx)
 	heartbeatStop := make(chan struct{})
@@ -241,6 +238,10 @@ func (service Service) ExecuteNextQueued(ctx context.Context) error {
 		releaseAssignment(teardownCtx, service.Store, assignment)
 		cleanupAssignment(teardownCtx, service.Store, leaseManager.Git, assignment)
 	}()
+
+	if err := validateAssignment(manifest, project, assignment); err != nil {
+		return finishFailure(err)
+	}
 
 	spec.Metadata["branch_name"] = assignment.BranchName
 	spec.Metadata["repo_root"] = assignment.RepoRoot

@@ -14,6 +14,7 @@ import (
 	"odin-os/internal/executors/contract"
 	"odin-os/internal/executors/router"
 	"odin-os/internal/store/sqlite"
+	"odin-os/internal/vcs/branches"
 	"odin-os/internal/vcs/leases"
 	"odin-os/internal/vcs/worktrees"
 )
@@ -850,6 +851,88 @@ func TestExecuteNextQueuedRollsBackRunLaunchWhenTaskStatusUpdateFails(t *testing
 	}
 	if runCount != 0 {
 		t.Fatalf("run count = %d, want 0 after rolled-back run launch", runCount)
+	}
+}
+
+func TestExecuteNextQueuedCleansPreparedAssignmentWhenValidationFails(t *testing.T) {
+	ctx := context.Background()
+	store := openJobStore(t)
+	defer store.Close()
+
+	registry := writeRegistry(t)
+	git := &jobTestGit{}
+	service := Service{
+		Store:          store,
+		Registry:       registry,
+		Executors:      router.DefaultCatalog(),
+		ExecutorConfig: mustLoadExecutorConfig(t),
+		Transitions:    projects.Service{Store: store},
+		Leases: leases.Manager{
+			Store:        store,
+			Git:          git,
+			WorktreeRoot: t.TempDir(),
+		},
+		Now: time.Now,
+	}
+
+	task, err := service.CreateTaskFromAct(ctx, scope.Resolution{
+		Kind:       scope.ScopeProject,
+		ProjectKey: "alpha",
+	}, "Validation failure cleanup")
+	if err != nil {
+		t.Fatalf("CreateTaskFromAct() error = %v", err)
+	}
+
+	project, err := store.GetProjectByKey(ctx, "alpha")
+	if err != nil {
+		t.Fatalf("GetProjectByKey(alpha) error = %v", err)
+	}
+	nextRunID := int64(1)
+	branchName := branches.Name(branches.NameParams{
+		ProjectKey: project.Key,
+		TaskID:     task.ID,
+		RunID:      nextRunID,
+		Try:        1,
+	})
+	if _, err := store.DB().ExecContext(ctx, `
+		UPDATE projects
+		SET default_branch = ?
+		WHERE id = ?
+	`, branchName, project.ID); err != nil {
+		t.Fatalf("update project default branch error = %v", err)
+	}
+
+	if _, err := service.Transitions.SetTransitionState(ctx, projects.TransitionStateInput{
+		ProjectID:   project.ID,
+		Actor:       projects.TransitionControllerOdinOS,
+		TargetState: projects.TransitionStateCutover,
+		ChangedBy:   "test",
+	}); err != nil {
+		t.Fatalf("SetTransitionState(cutover) error = %v", err)
+	}
+
+	err = service.ExecuteNextQueued(ctx)
+	if err == nil {
+		t.Fatal("ExecuteNextQueued() error = nil, want validation failure")
+	}
+	if git.removeWorktreeCalls != 1 {
+		t.Fatalf("RemoveWorktree() calls = %d, want 1 after validation failure", git.removeWorktreeCalls)
+	}
+
+	run, err := latestRunForTask(ctx, store, task.ID)
+	if err != nil {
+		t.Fatalf("latestRunForTask() error = %v", err)
+	}
+	if run.Status != "failed" {
+		t.Fatalf("run.Status = %q, want failed", run.Status)
+	}
+
+	lease := latestLeaseForTaskRun(t, ctx, store, task.ID, run.ID)
+	if lease.State != "cleaned" {
+		t.Fatalf("lease.State = %q, want cleaned after validation failure", lease.State)
+	}
+	if lease.CleanedUpAt == nil {
+		t.Fatalf("lease.CleanedUpAt = nil, want value after validation failure")
 	}
 }
 
