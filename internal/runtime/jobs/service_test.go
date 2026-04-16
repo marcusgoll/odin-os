@@ -183,6 +183,63 @@ func TestCreateTaskFromActEnsuresRuntimeProjectAndCreatesQueuedTask(t *testing.T
 	}
 }
 
+func TestCreateTaskFromActPopulatesSemanticLinks(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openJobStore(t)
+	defer store.Close()
+
+	registry := writeRegistry(t)
+	alpha, ok := registry.Lookup("alpha")
+	if !ok {
+		t.Fatalf("expected alpha project")
+	}
+
+	service := Service{
+		Store:    store,
+		Registry: registry,
+		Now: func() time.Time {
+			return time.Date(2026, 4, 9, 12, 0, 0, 0, time.UTC)
+		},
+	}
+
+	task, err := service.CreateTaskFromAct(ctx, scope.Resolve(scope.ResolveInput{
+		ExplicitTarget: &scope.Target{
+			ProjectKey: "alpha",
+		},
+	}).ControlScope(), "Implement shell")
+	if err != nil {
+		t.Fatalf("CreateTaskFromAct() error = %v", err)
+	}
+
+	workspace, err := workspaces.Service{Store: store}.BootstrapDefaultWorkspace(ctx)
+	if err != nil {
+		t.Fatalf("BootstrapDefaultWorkspace() error = %v", err)
+	}
+	companion, err := store.GetCompanionByKey(ctx, workspace.ID, workspace.DefaultCompanionKey)
+	if err != nil {
+		t.Fatalf("GetCompanionByKey() error = %v", err)
+	}
+	initiative, err := store.GetInitiativeByKey(ctx, workspace.ID, alpha.Key)
+	if err != nil {
+		t.Fatalf("GetInitiativeByKey() error = %v", err)
+	}
+
+	if task.WorkspaceID == nil || *task.WorkspaceID != workspace.ID {
+		t.Fatalf("WorkspaceID = %v, want %d", task.WorkspaceID, workspace.ID)
+	}
+	if task.InitiativeID == nil || *task.InitiativeID != initiative.ID {
+		t.Fatalf("InitiativeID = %v, want %d", task.InitiativeID, initiative.ID)
+	}
+	if task.CompanionID == nil || *task.CompanionID != companion.ID {
+		t.Fatalf("CompanionID = %v, want %d", task.CompanionID, companion.ID)
+	}
+	if task.WorkKind != string(scope.ScopeProject) {
+		t.Fatalf("WorkKind = %q, want %q", task.WorkKind, scope.ScopeProject)
+	}
+}
+
 func TestListFiltersJobsByScope(t *testing.T) {
 	t.Parallel()
 

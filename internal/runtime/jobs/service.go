@@ -3,13 +3,16 @@ package jobs
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 
+	"odin-os/internal/core/companions"
 	"odin-os/internal/core/projects"
 	corescope "odin-os/internal/core/scope"
 	"odin-os/internal/core/workitems"
+	"odin-os/internal/core/workspaces"
 	"odin-os/internal/executors/contract"
 	executorrouter "odin-os/internal/executors/router"
 	"odin-os/internal/runtime/projections"
@@ -58,6 +61,22 @@ func (service Service) CreateTaskFromAct(ctx context.Context, resolved corescope
 	if err != nil {
 		return sqlite.Task{}, err
 	}
+	if service.Transitions.Store == nil {
+		service.Transitions = projects.Service{Store: service.Store}
+	}
+
+	workspace, err := service.actWorkspace(ctx, resolved)
+	if err != nil {
+		return sqlite.Task{}, err
+	}
+	companion, err := service.actCompanion(ctx, workspace, resolved)
+	if err != nil {
+		return sqlite.Task{}, err
+	}
+	initiative, err := service.Transitions.RegisterManagedProjectInitiative(ctx, workspace.ID, project, &companion.ID)
+	if err != nil {
+		return sqlite.Task{}, err
+	}
 
 	now := time.Now().UTC()
 	if service.Now != nil {
@@ -65,11 +84,15 @@ func (service Service) CreateTaskFromAct(ctx context.Context, resolved corescope
 	}
 
 	return service.workItemService().Queue(ctx, sqlite.CreateTaskParams{
-		ProjectID:   project.ID,
-		Key:         fmt.Sprintf("%s-%s", slugify(title), now.Format("20060102-150405")),
-		Title:       title,
-		Scope:       taskScope,
-		RequestedBy: "operator",
+		ProjectID:    project.ID,
+		Key:          fmt.Sprintf("%s-%s", slugify(title), now.Format("20060102-150405")),
+		Title:        title,
+		Scope:        taskScope,
+		RequestedBy:  "operator",
+		WorkspaceID:  &workspace.ID,
+		InitiativeID: &initiative.ID,
+		CompanionID:  &companion.ID,
+		WorkKind:     taskScope,
 	})
 }
 
@@ -281,6 +304,28 @@ func (service Service) workItemService() workitems.Service {
 		service.WorkItems.Store = service.Store
 	}
 	return service.WorkItems
+}
+
+func (service Service) actWorkspace(ctx context.Context, resolved corescope.ControlScope) (workspaces.Workspace, error) {
+	workspaceService := workspaces.Service{Store: service.Store}
+	workspace, err := workspaceService.GetWorkspaceByKey(ctx, resolved.WorkspaceKey)
+	if err == nil {
+		return workspace, nil
+	}
+	if errors.Is(err, sql.ErrNoRows) && resolved.WorkspaceKey == workspaces.DefaultWorkspaceKey {
+		return workspaceService.BootstrapDefaultWorkspace(ctx)
+	}
+	return workspaces.Workspace{}, err
+}
+
+func (service Service) actCompanion(ctx context.Context, workspace workspaces.Workspace, resolved corescope.ControlScope) (companions.Companion, error) {
+	companionKey := resolved.CompanionKey
+	if companionKey == "" {
+		companionKey = workspace.DefaultCompanionKey
+	}
+
+	companionService := companions.Service{Store: service.Store}
+	return companionService.GetCompanionByKey(ctx, workspace.ID, companionKey)
 }
 
 type taskFinalizer interface {

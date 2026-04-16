@@ -75,6 +75,14 @@ func (service Service) RequestApproval(ctx context.Context, taskID int64, runID 
 		return sqlite.Approval{}, WorkItem{}, fmt.Errorf("work item store is required")
 	}
 
+	current, err := service.Store.GetTask(ctx, taskID)
+	if err != nil {
+		return sqlite.Approval{}, WorkItem{}, err
+	}
+	if isTerminalStatus(current.Status) {
+		return sqlite.Approval{}, WorkItem{}, fmt.Errorf("task %d is already %s", taskID, current.Status)
+	}
+
 	task, approval, err := service.Store.BlockTaskAndRequestApproval(ctx, sqlite.BlockTaskAndRequestApprovalParams{
 		TaskID:      taskID,
 		RunID:       runID,

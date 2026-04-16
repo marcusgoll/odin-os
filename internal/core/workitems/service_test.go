@@ -58,6 +58,51 @@ func TestWorkItemServiceRequestApprovalRollsBackBlockedStatusOnFailure(t *testin
 	}
 }
 
+func TestWorkItemServiceRejectsApprovalForTerminalTasks(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openWorkItemServiceStore(t)
+	defer store.Close()
+
+	workspaceID, projectID, initiativeID, companionID := seedWorkItemLinks(t, ctx, store)
+	service := Service{Store: store}
+
+	terminalTask := mustQueueWorkItemTask(t, ctx, service, projectID, workspaceID, initiativeID, companionID, "terminal-item")
+	completed, err := service.Complete(ctx, terminalTask.ID)
+	if err != nil {
+		t.Fatalf("Complete() error = %v", err)
+	}
+	if completed.Status != "completed" {
+		t.Fatalf("Complete().Status = %q, want completed", completed.Status)
+	}
+
+	_, _, err = service.RequestApproval(ctx, terminalTask.ID, nil, "operator")
+	if err == nil {
+		t.Fatal("RequestApproval() error = nil, want terminal-task rejection")
+	}
+
+	gotTask, err := store.GetTask(ctx, terminalTask.ID)
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
+	}
+	if gotTask.Status != "completed" {
+		t.Fatalf("GetTask().Status = %q, want completed", gotTask.Status)
+	}
+
+	var approvalCount int
+	if err := store.DB().QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM approvals
+		WHERE task_id = ?
+	`, terminalTask.ID).Scan(&approvalCount); err != nil {
+		t.Fatalf("count approvals error = %v", err)
+	}
+	if approvalCount != 0 {
+		t.Fatalf("approval count = %d, want 0", approvalCount)
+	}
+}
+
 func TestWorkItemServiceFinalizesTaskFromExecutorStatus(t *testing.T) {
 	t.Parallel()
 

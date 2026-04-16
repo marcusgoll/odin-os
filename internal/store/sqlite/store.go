@@ -606,6 +606,9 @@ func (store *Store) BlockTaskAndRequestApproval(ctx context.Context, params Bloc
 		if err != nil {
 			return err
 		}
+		if current.Status == "completed" || current.Status == "failed" {
+			return fmt.Errorf("task %d is already %s", params.TaskID, current.Status)
+		}
 
 		previousStatus := current.Status
 		if _, err := tx.ExecContext(ctx, `
