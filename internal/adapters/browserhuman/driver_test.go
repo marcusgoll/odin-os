@@ -96,6 +96,100 @@ printf '{"status":"completed","tool_key":"huginn_browser_session","summary":"spa
 	}
 }
 
+func TestDriverScopesRuntimeRootAndArtifactPathPerInvocation(t *testing.T) {
+	baseRuntimeRoot := filepath.Join(t.TempDir(), "runtime-root")
+	captureRoot := filepath.Join(t.TempDir(), "captures")
+	if err := os.MkdirAll(captureRoot, 0o755); err != nil {
+		t.Fatalf("MkdirAll(captureRoot) error = %v", err)
+	}
+
+	script := writeFixtureDriver(t, `#!/usr/bin/env bash
+capture_dir="$(mktemp -d "$ODIN_DRIVER_CAPTURE_ROOT/invoke.XXXXXX")"
+printf '%s' "$ODIN_DIR" >"$capture_dir/odin_dir.txt"
+cat >"$capture_dir/request.json"
+printf '{"status":"completed","tool_key":"huginn_browser_session","summary":"ok","artifacts":{"session_state":"ready","capture_dir":"%s"}}' "$capture_dir"
+`)
+	t.Setenv(defaultDriverEnvVar, script)
+	t.Setenv("ODIN_DIR", baseRuntimeRoot)
+	t.Setenv("ODIN_DRIVER_CAPTURE_ROOT", captureRoot)
+
+	driver := NewDriver()
+	driver.DefaultToolKey = "huginn_browser_session"
+
+	invoke := func() (string, Request) {
+		t.Helper()
+
+		response, err := driver.Invoke(context.Background(), Request{
+			ToolKey: "huginn_browser_session",
+			Input:   map[string]any{"action": "screenshot", "path": "/tmp/outside/browser.png"},
+		})
+		if err != nil {
+			t.Fatalf("Invoke() error = %v", err)
+		}
+
+		captureDir, ok := response.Artifacts["capture_dir"].(string)
+		if !ok || strings.TrimSpace(captureDir) == "" {
+			t.Fatalf("Artifacts.capture_dir = %#v, want non-empty string", response.Artifacts["capture_dir"])
+		}
+
+		runtimeBytes, err := os.ReadFile(filepath.Join(captureDir, "odin_dir.txt"))
+		if err != nil {
+			t.Fatalf("ReadFile(odin_dir.txt) error = %v", err)
+		}
+		requestBytes, err := os.ReadFile(filepath.Join(captureDir, "request.json"))
+		if err != nil {
+			t.Fatalf("ReadFile(request.json) error = %v", err)
+		}
+		var request Request
+		if err := json.Unmarshal(requestBytes, &request); err != nil {
+			t.Fatalf("request json = %v", err)
+		}
+		return string(runtimeBytes), request
+	}
+
+	runtimeRoot1, request1 := invoke()
+	runtimeRoot2, request2 := invoke()
+
+	for i, runtimeRoot := range []string{runtimeRoot1, runtimeRoot2} {
+		if runtimeRoot == baseRuntimeRoot {
+			t.Fatalf("runtimeRoot[%d] = %q, want scoped child under base runtime root", i, runtimeRoot)
+		}
+		wantPrefix := baseRuntimeRoot + string(os.PathSeparator)
+		if !strings.HasPrefix(runtimeRoot, wantPrefix) {
+			t.Fatalf("runtimeRoot[%d] = %q, want prefix %q", i, runtimeRoot, wantPrefix)
+		}
+		if _, err := os.Stat(runtimeRoot); err != nil {
+			t.Fatalf("Stat(runtimeRoot[%d]) error = %v", i, err)
+		}
+	}
+	if runtimeRoot1 == runtimeRoot2 {
+		t.Fatalf("runtimeRoot1 == runtimeRoot2 == %q, want distinct invocation runtime roots", runtimeRoot1)
+	}
+
+	assertScopedArtifactPath := func(request Request, runtimeRoot string) {
+		t.Helper()
+
+		input, ok := request.Input.(map[string]any)
+		if !ok {
+			t.Fatalf("request.Input = %#v, want map[string]any", request.Input)
+		}
+		artifactPath, ok := input["path"].(string)
+		if !ok || strings.TrimSpace(artifactPath) == "" {
+			t.Fatalf("request.Input[path] = %#v, want non-empty string", input["path"])
+		}
+		wantPrefix := filepath.Join(runtimeRoot, "artifacts") + string(os.PathSeparator)
+		if !strings.HasPrefix(artifactPath, wantPrefix) {
+			t.Fatalf("artifactPath = %q, want prefix %q", artifactPath, wantPrefix)
+		}
+		if got, want := filepath.Base(artifactPath), "browser.png"; got != want {
+			t.Fatalf("filepath.Base(artifactPath) = %q, want %q", got, want)
+		}
+	}
+
+	assertScopedArtifactPath(request1, runtimeRoot1)
+	assertScopedArtifactPath(request2, runtimeRoot2)
+}
+
 func TestDriverExecsConfiguredCommandForCancellation(t *testing.T) {
 	parentPIDPath := filepath.Join(t.TempDir(), "driver-parent.pid")
 	childPIDPath := filepath.Join(t.TempDir(), "driver-child.pid")

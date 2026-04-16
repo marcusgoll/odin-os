@@ -34,7 +34,7 @@ func BuiltinDefinitions() map[string]ToolDefinition {
 					},
 					"path": map[string]any{
 						"type":        "string",
-						"description": "Optional filesystem path for session artifacts.",
+						"description": "Optional artifact filename scoped under the invocation runtime root.",
 					},
 				},
 				"required":             []string{"action"},
@@ -65,7 +65,7 @@ func BuiltinDefinitions() map[string]ToolDefinition {
 					},
 					"path": map[string]any{
 						"type":        "string",
-						"description": "Optional filesystem path for workflow artifacts.",
+						"description": "Optional artifact filename scoped under the invocation runtime root.",
 					},
 				},
 				"additionalProperties": false,

@@ -83,6 +83,17 @@ func TestHuginnBrowserSessionScript(t *testing.T) {
 		assertFileContains(t, callsLog, "snapshot:")
 
 		var err error
+		stdout, callsLog, markerPath, err = runBrowserDriverScriptRaw(t, repoRoot, scriptPath, "huginn-browser-session.sh", `{"tool_key":"huginn_browser_session","input":{"action":"snapshot"}}`, map[string]string{
+			"ODIN_BROWSER_STUB_SNAPSHOT_EXIT_CODE": "1",
+		}, browserAccessStubContent())
+		if err != nil {
+			t.Fatalf("expected handled snapshot failure to exit 0, got err=%v\n%s", err, stdout)
+		}
+		assertStructuredDriverOutput(t, stdout, "huginn_browser_session", "failed")
+		assertJSONArtifactString(t, stdout, "session_state", "stopped")
+		assertFileContains(t, markerPath, "sourced repo-local browser-access.sh")
+		assertFileContains(t, callsLog, "snapshot:")
+
 		stdout, callsLog, markerPath, err = runBrowserDriverScriptRaw(t, repoRoot, scriptPath, "huginn-browser-session.sh", `{"tool_key":"huginn_browser_session","input":{"action":"screenshot","path":"`+screenshotPath+`"}}`, map[string]string{
 			"ODIN_BROWSER_STUB_SNAPSHOT":        "Example Domain",
 			"ODIN_BROWSER_STUB_SCREENSHOT_PATH": screenshotPath,

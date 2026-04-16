@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"odin-os/internal/adapters/browserhuman"
@@ -297,7 +298,25 @@ func browserHumanRequestInputEquals(got any, want any) bool {
 	}
 	for key, wantValue := range wantMap {
 		gotValue, ok := gotMap[key]
-		if !ok || gotValue != wantValue {
+		if !ok {
+			return false
+		}
+		if key == "path" {
+			gotPath, gotOK := gotValue.(string)
+			wantPath, wantOK := wantValue.(string)
+			if !gotOK || !wantOK {
+				return false
+			}
+			if filepath.Base(gotPath) != filepath.Base(wantPath) {
+				return false
+			}
+			artifactSegment := string(os.PathSeparator) + "artifacts" + string(os.PathSeparator)
+			if !strings.Contains(gotPath, artifactSegment) {
+				return false
+			}
+			continue
+		}
+		if gotValue != wantValue {
 			return false
 		}
 	}
