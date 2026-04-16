@@ -2,16 +2,20 @@ package jobs
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
 	"odin-os/internal/cli/scope"
 	"odin-os/internal/core/projects"
+	"odin-os/internal/executors/contract"
 	"odin-os/internal/executors/router"
 	"odin-os/internal/store/sqlite"
 	"odin-os/internal/vcs/leases"
+	"odin-os/internal/vcs/worktrees"
 )
 
 func TestCreateTaskFromActEnsuresRuntimeProjectAndCreatesQueuedTask(t *testing.T) {
@@ -313,12 +317,265 @@ func TestExecuteNextQueuedFailsClosedOnEmptyRunStatus(t *testing.T) {
 	}
 }
 
+func TestExecuteNextQueuedTargetsCleanupToFinishedAssignment(t *testing.T) {
+	ctx := context.Background()
+	store := openJobStore(t)
+	defer store.Close()
+
+	t.Setenv("ODIN_CODEX_DRIVER", codexDriverPath(t))
+	registry := writeRegistry(t)
+	git := &jobTestGit{}
+	service := Service{
+		Store:          store,
+		Registry:       registry,
+		Executors:      router.DefaultCatalog(),
+		ExecutorConfig: mustLoadExecutorConfig(t),
+		Transitions:    projects.Service{Store: store},
+		Leases: leases.Manager{
+			Store:        store,
+			Git:          git,
+			WorktreeRoot: t.TempDir(),
+		},
+		Now: func() time.Time {
+			return time.Date(2026, 4, 9, 12, 0, 0, 0, time.UTC)
+		},
+	}
+
+	task, err := service.CreateTaskFromAct(ctx, scope.Resolution{
+		Kind:       scope.ScopeProject,
+		ProjectKey: "alpha",
+	}, "Targeted cleanup")
+	if err != nil {
+		t.Fatalf("CreateTaskFromAct() error = %v", err)
+	}
+
+	project, err := store.GetProjectByKey(ctx, "alpha")
+	if err != nil {
+		t.Fatalf("GetProjectByKey(alpha) error = %v", err)
+	}
+	if _, err := service.Transitions.SetTransitionState(ctx, projects.TransitionStateInput{
+		ProjectID:   project.ID,
+		Actor:       projects.TransitionControllerOdinOS,
+		TargetState: projects.TransitionStateCutover,
+		ChangedBy:   "test",
+	}); err != nil {
+		t.Fatalf("SetTransitionState(cutover) error = %v", err)
+	}
+
+	unrelatedTask, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "alpha-unrelated",
+		Title:       "Released worktree",
+		Status:      "running",
+		Scope:       "project",
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask(unrelated) error = %v", err)
+	}
+	unrelatedRun, err := store.StartRun(ctx, sqlite.StartRunParams{
+		TaskID:   unrelatedTask.ID,
+		Executor: "codex_headless",
+		Attempt:  1,
+		Status:   "running",
+	})
+	if err != nil {
+		t.Fatalf("StartRun(unrelated) error = %v", err)
+	}
+	unrelatedLease, err := store.CreateWorktreeLease(ctx, sqlite.CreateWorktreeLeaseParams{
+		ProjectID:    project.ID,
+		TaskID:       unrelatedTask.ID,
+		RunID:        unrelatedRun.ID,
+		Mode:         "mutable",
+		BranchName:   "odin/alpha/task-999/run-999/try-1",
+		WorktreePath: filepath.Join(t.TempDir(), "released-worktree"),
+		RepoRoot:     project.GitRoot,
+		State:        "active",
+	})
+	if err != nil {
+		t.Fatalf("CreateWorktreeLease(unrelated) error = %v", err)
+	}
+	if _, err := store.ReleaseWorktreeLease(ctx, sqlite.ReleaseWorktreeLeaseParams{
+		LeaseID: unrelatedLease.ID,
+		State:   "released",
+	}); err != nil {
+		t.Fatalf("ReleaseWorktreeLease(unrelated) error = %v", err)
+	}
+
+	if err := service.ExecuteNextQueued(ctx); err != nil {
+		t.Fatalf("ExecuteNextQueued() error = %v", err)
+	}
+	run, err := latestRunForTask(ctx, store, task.ID)
+	if err != nil {
+		t.Fatalf("latestRunForTask() error = %v", err)
+	}
+
+	if git.removeWorktreeCalls != 1 {
+		t.Fatalf("RemoveWorktree() calls = %d, want 1", git.removeWorktreeCalls)
+	}
+	if len(git.removeWorktreePaths) != 1 || git.removeWorktreePaths[0] != git.removeWorktreePath {
+		t.Fatalf("RemoveWorktree paths = %+v, want only finished assignment path %q", git.removeWorktreePaths, git.removeWorktreePath)
+	}
+
+	lease := latestLeaseForTaskRun(t, ctx, store, task.ID, run.ID)
+	if lease.State != "cleaned" {
+		t.Fatalf("finished lease state = %q, want cleaned", lease.State)
+	}
+	unrelatedAfter := latestLeaseByID(t, ctx, store, unrelatedLease.ID)
+	if unrelatedAfter.State != "released" {
+		t.Fatalf("unrelated lease state = %q, want released", unrelatedAfter.State)
+	}
+	if unrelatedAfter.CleanedUpAt != nil {
+		t.Fatalf("unrelated lease cleaned up unexpectedly")
+	}
+}
+
+func TestExecuteNextQueuedHeartbeatsMutableLeaseWhileRunning(t *testing.T) {
+	ctx := context.Background()
+	store := openJobStore(t)
+	defer store.Close()
+
+	clock := &testClock{now: time.Date(2026, 4, 9, 12, 0, 0, 0, time.UTC)}
+	store.Now = clock.Now
+
+	registry := writeRegistry(t)
+	git := &jobTestGit{}
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+	service := Service{
+		Store:    store,
+		Registry: registry,
+		Executors: map[string]contract.Executor{
+			"blocking": &blockingExecutor{
+				started: started,
+				release: release,
+			},
+		},
+		ExecutorConfig: router.Config{
+			Version: 1,
+			Executors: []router.ExecutorConfig{
+				{
+					Key:      "blocking",
+					Adapter:  "test",
+					Class:    contract.ExecutorClassPlanBackedCLI,
+					Enabled:  true,
+					Priority: 1,
+				},
+			},
+			Routes: []router.RouteConfig{
+				{
+					Name: "default",
+					Match: router.RouteMatch{
+						TaskKinds: []contract.TaskKind{contract.TaskKindGeneral},
+						Scopes:    []string{"project"},
+					},
+					Preferred: []string{"blocking"},
+				},
+			},
+		},
+		Transitions: projects.Service{Store: store},
+		Leases: leases.Manager{
+			Store:        store,
+			Git:          git,
+			WorktreeRoot: t.TempDir(),
+		},
+		MutableHeartbeatInterval: 10 * time.Millisecond,
+		Now:                      clock.Now,
+	}
+
+	task, err := service.CreateTaskFromAct(ctx, scope.Resolution{
+		Kind:       scope.ScopeProject,
+		ProjectKey: "alpha",
+	}, "Heartbeat mutable lease")
+	if err != nil {
+		t.Fatalf("CreateTaskFromAct() error = %v", err)
+	}
+
+	project, err := store.GetProjectByKey(ctx, "alpha")
+	if err != nil {
+		t.Fatalf("GetProjectByKey(alpha) error = %v", err)
+	}
+	if _, err := service.Transitions.SetTransitionState(ctx, projects.TransitionStateInput{
+		ProjectID:   project.ID,
+		Actor:       projects.TransitionControllerOdinOS,
+		TargetState: projects.TransitionStateCutover,
+		ChangedBy:   "test",
+	}); err != nil {
+		t.Fatalf("SetTransitionState(cutover) error = %v", err)
+	}
+
+	runDone := make(chan error, 1)
+	go func() {
+		runDone <- service.ExecuteNextQueued(ctx)
+	}()
+
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("executor did not start")
+	}
+
+	clock.Set(clock.NowValue().Add(31 * time.Minute))
+
+	updatedLease, err := waitForLeaseHeartbeatAfter(t, ctx, store, task.ID, clock.NowValue().Add(-30*time.Minute), 2*time.Second)
+	if err != nil {
+		close(release)
+		<-runDone
+		t.Fatal(err)
+	}
+	if updatedLease.State != "active" {
+		t.Fatalf("lease.State = %q, want active while run is in progress", updatedLease.State)
+	}
+
+	manager := worktrees.Manager{
+		Store: store,
+		Git:   git,
+	}
+	result, err := manager.Cleanup(ctx, clock.NowValue().Add(-30*time.Minute))
+	if err != nil {
+		close(release)
+		<-runDone
+		t.Fatalf("Cleanup() error = %v", err)
+	}
+	if len(result.Removed) != 0 {
+		close(release)
+		<-runDone
+		t.Fatalf("Cleanup().Removed len = %d, want 0 for active lease", len(result.Removed))
+	}
+	if git.removeWorktreeCalls != 0 {
+		close(release)
+		<-runDone
+		t.Fatalf("RemoveWorktree() calls = %d, want 0 while run is active", git.removeWorktreeCalls)
+	}
+
+	close(release)
+	if err := <-runDone; err != nil {
+		t.Fatalf("ExecuteNextQueued() error = %v", err)
+	}
+
+	if git.removeWorktreeCalls != 1 {
+		t.Fatalf("RemoveWorktree() calls = %d, want 1 after completion", git.removeWorktreeCalls)
+	}
+	run, err := latestRunForTask(ctx, store, task.ID)
+	if err != nil {
+		t.Fatalf("latestRunForTask() error = %v", err)
+	}
+	finishedLease := latestLeaseForTaskRun(t, ctx, store, task.ID, run.ID)
+	if finishedLease.State != "cleaned" {
+		t.Fatalf("finished lease state = %q, want cleaned", finishedLease.State)
+	}
+	if finishedLease.CleanedUpAt == nil {
+		t.Fatalf("finished lease cleaned up at = nil, want value")
+	}
+}
+
 type jobTestGit struct {
 	createBranchCalls   int
 	addWorktreeCalls    int
 	removeWorktreeCalls int
 	removeRepoRoot      string
 	removeWorktreePath  string
+	removeWorktreePaths []string
 }
 
 func (git *jobTestGit) BranchExists(context.Context, string, string) (bool, error) { return false, nil }
@@ -334,7 +591,73 @@ func (git *jobTestGit) RemoveWorktree(_ context.Context, repoRoot string, worktr
 	git.removeWorktreeCalls++
 	git.removeRepoRoot = repoRoot
 	git.removeWorktreePath = worktreePath
+	git.removeWorktreePaths = append(git.removeWorktreePaths, worktreePath)
 	return nil
+}
+
+type blockingExecutor struct {
+	started chan struct{}
+	release chan struct{}
+}
+
+func (executor *blockingExecutor) Key() string { return "blocking" }
+func (executor *blockingExecutor) Class() contract.ExecutorClass {
+	return contract.ExecutorClassPlanBackedCLI
+}
+func (executor *blockingExecutor) Health(context.Context) (contract.HealthReport, error) {
+	return contract.HealthReport{Status: contract.HealthStatusHealthy, CheckedAt: time.Now().UTC()}, nil
+}
+func (executor *blockingExecutor) Capabilities(context.Context) (contract.Capabilities, error) {
+	return contract.Capabilities{
+		ExecutorClass:        contract.ExecutorClassPlanBackedCLI,
+		SupportsHeadlessPlan: true,
+		TaskKinds:            []contract.TaskKind{contract.TaskKindGeneral},
+		Scopes:               []string{"project"},
+	}, nil
+}
+func (executor *blockingExecutor) RunTask(ctx context.Context, spec contract.TaskSpec) (contract.ExecutionResult, error) {
+	select {
+	case executor.started <- struct{}{}:
+	default:
+	}
+	select {
+	case <-ctx.Done():
+		return contract.ExecutionResult{Status: "interrupted"}, ctx.Err()
+	case <-executor.release:
+		return contract.ExecutionResult{Status: "completed", Output: "done"}, nil
+	}
+}
+func (executor *blockingExecutor) ResumeTask(context.Context, contract.TaskHandle, contract.ResumePacket) (contract.ExecutionResult, error) {
+	return contract.ExecutionResult{}, contract.ErrNotImplemented
+}
+func (executor *blockingExecutor) CancelTask(context.Context, contract.TaskHandle) error {
+	return contract.ErrNotImplemented
+}
+func (executor *blockingExecutor) EstimateCost(context.Context, contract.TaskSpec) (contract.CostEstimate, error) {
+	return contract.CostEstimate{}, contract.ErrNotImplemented
+}
+
+type testClock struct {
+	mu  sync.Mutex
+	now time.Time
+}
+
+func (clock *testClock) Now() time.Time {
+	clock.mu.Lock()
+	defer clock.mu.Unlock()
+	return clock.now
+}
+
+func (clock *testClock) Set(now time.Time) {
+	clock.mu.Lock()
+	clock.now = now
+	clock.mu.Unlock()
+}
+
+func (clock *testClock) NowValue() time.Time {
+	clock.mu.Lock()
+	defer clock.mu.Unlock()
+	return clock.now
 }
 
 func mustLoadExecutorConfig(t *testing.T) router.Config {
@@ -425,6 +748,52 @@ func latestLeaseForTaskRun(t *testing.T, ctx context.Context, store *sqlite.Stor
 		t.Fatalf("GetWorktreeLease() error = %v", err)
 	}
 	return lease
+}
+
+func latestLeaseByID(t *testing.T, ctx context.Context, store *sqlite.Store, leaseID int64) sqlite.WorktreeLease {
+	t.Helper()
+
+	lease, err := store.GetWorktreeLease(ctx, leaseID)
+	if err != nil {
+		t.Fatalf("GetWorktreeLease() error = %v", err)
+	}
+	return lease
+}
+
+func waitForLeaseHeartbeatAfter(t *testing.T, ctx context.Context, store *sqlite.Store, taskID int64, staleBefore time.Time, timeout time.Duration) (sqlite.WorktreeLease, error) {
+	t.Helper()
+
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-deadline.C:
+			return sqlite.WorktreeLease{}, fmt.Errorf("timed out waiting for heartbeat after %s", timeout)
+		case <-ticker.C:
+			row := store.DB().QueryRowContext(ctx, `
+				SELECT id
+				FROM worktree_leases
+				WHERE task_id = ?
+				ORDER BY id DESC
+				LIMIT 1
+			`, taskID)
+			var leaseID int64
+			if err := row.Scan(&leaseID); err != nil {
+				continue
+			}
+			lease, err := store.GetWorktreeLease(ctx, leaseID)
+			if err != nil {
+				continue
+			}
+			if lease.HeartbeatAt.After(staleBefore) {
+				return lease, nil
+			}
+		}
+	}
 }
 
 func openJobStore(t *testing.T) *sqlite.Store {

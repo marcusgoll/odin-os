@@ -14,17 +14,17 @@ import (
 	"odin-os/internal/runtime/projections"
 	"odin-os/internal/store/sqlite"
 	"odin-os/internal/vcs/leases"
-	"odin-os/internal/vcs/worktrees"
 )
 
 type Service struct {
-	Store          *sqlite.Store
-	Registry       projects.Registry
-	Executors      map[string]contract.Executor
-	ExecutorConfig executorrouter.Config
-	Transitions    projects.Service
-	Leases         leases.Manager
-	Now            func() time.Time
+	Store                    *sqlite.Store
+	Registry                 projects.Registry
+	Executors                map[string]contract.Executor
+	ExecutorConfig           executorrouter.Config
+	Transitions              projects.Service
+	Leases                   leases.Manager
+	MutableHeartbeatInterval time.Duration
+	Now                      func() time.Time
 }
 
 func (service Service) List(ctx context.Context, resolved scope.Resolution) ([]projections.TaskStatusView, error) {
@@ -212,9 +212,36 @@ func (service Service) ExecuteNextQueued(ctx context.Context) error {
 	if err := validateAssignment(manifest, project, assignment); err != nil {
 		return finishFailure(err)
 	}
+
+	teardownCtx := context.WithoutCancel(ctx)
+	heartbeatStop := make(chan struct{})
+	heartbeatDone := make(chan struct{})
+	if assignment.LeaseID != nil {
+		interval := service.mutableHeartbeatInterval()
+		go func() {
+			defer close(heartbeatDone)
+
+			ticker := time.NewTicker(interval)
+			defer ticker.Stop()
+
+			for {
+				select {
+				case <-heartbeatStop:
+					return
+				case <-ticker.C:
+					_, _ = service.Store.HeartbeatWorktreeLease(teardownCtx, *assignment.LeaseID)
+				}
+			}
+		}()
+	}
+
 	defer func() {
-		releaseAssignment(ctx, service.Store, assignment)
-		cleanupAssignment(ctx, service.Store, leaseManager.Git)
+		if assignment.LeaseID != nil {
+			close(heartbeatStop)
+			<-heartbeatDone
+		}
+		releaseAssignment(teardownCtx, service.Store, assignment)
+		cleanupAssignment(teardownCtx, service.Store, leaseManager.Git, assignment)
 	}()
 
 	spec.Metadata["branch_name"] = assignment.BranchName
@@ -408,16 +435,22 @@ func releaseAssignment(ctx context.Context, store *sqlite.Store, assignment leas
 	})
 }
 
-func cleanupAssignment(ctx context.Context, store *sqlite.Store, git worktrees.Git) {
-	if store == nil || git == nil {
+func cleanupAssignment(ctx context.Context, store *sqlite.Store, git leases.Git, assignment leases.Assignment) {
+	if store == nil || git == nil || assignment.LeaseID == nil {
 		return
 	}
 
-	manager := worktrees.Manager{
-		Store: store,
-		Git:   git,
+	if err := git.RemoveWorktree(ctx, assignment.RepoRoot, assignment.WorktreePath); err != nil {
+		return
 	}
-	_, _ = manager.Cleanup(ctx, time.Now().UTC().Add(-30*time.Minute))
+	_, _ = store.MarkWorktreeLeaseCleanedUp(ctx, *assignment.LeaseID)
+}
+
+func (service Service) mutableHeartbeatInterval() time.Duration {
+	if service.MutableHeartbeatInterval > 0 {
+		return service.MutableHeartbeatInterval
+	}
+	return 15 * time.Second
 }
 
 func slugify(input string) string {

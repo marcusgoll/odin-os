@@ -160,11 +160,12 @@ func runServe(ctx context.Context, app bootstrap.App, cfg appconfig.Config, stdo
 	}
 
 	jobService := jobs.Service{
-		Store:          app.Store,
-		Registry:       app.Registry,
-		Executors:      app.Executors,
-		ExecutorConfig: app.ExecutorConfig,
-		Transitions:    projects.Service{Store: app.Store},
+		Store:                    app.Store,
+		Registry:                 app.Registry,
+		Executors:                app.Executors,
+		ExecutorConfig:           app.ExecutorConfig,
+		Transitions:              projects.Service{Store: app.Store},
+		MutableHeartbeatInterval: 15 * time.Second,
 		Leases: leases.Manager{
 			Store:        app.Store,
 			Git:          gitadapter.Adapter{},
