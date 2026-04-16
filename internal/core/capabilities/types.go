@@ -36,8 +36,9 @@ type CallerRef struct {
 }
 
 type ExecutionRequest struct {
-	Mode    string `json:"mode,omitempty"`
-	Timeout string `json:"timeout,omitempty"`
+	Mode       string `json:"mode,omitempty"`
+	Timeout    string `json:"timeout,omitempty"`
+	RetryLimit int    `json:"retry_limit,omitempty"`
 }
 
 type Artifact struct {

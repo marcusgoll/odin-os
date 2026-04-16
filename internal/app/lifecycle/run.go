@@ -22,6 +22,7 @@ import (
 	healthsvc "odin-os/internal/runtime/health"
 	"odin-os/internal/runtime/jobs"
 	"odin-os/internal/runtime/recovery"
+	"odin-os/internal/runtime/supervision"
 	"odin-os/internal/telemetry/logs"
 	metricsvc "odin-os/internal/telemetry/metrics"
 	gitadapter "odin-os/internal/vcs/git"
@@ -151,19 +152,7 @@ func runServe(ctx context.Context, app bootstrap.App, cfg appconfig.Config, stdo
 		defer logCloser.Close()
 	}
 
-	jobService := jobs.Service{
-		Store:          app.Store,
-		Registry:       app.Registry,
-		Executors:      app.Executors,
-		ExecutorConfig: app.ExecutorConfig,
-		Transitions:    projects.Service{Store: app.Store},
-		Leases: leases.Manager{
-			Store:        app.Store,
-			Git:          gitadapter.Adapter{},
-			WorktreeRoot: worktrees.DefaultRoot(),
-		},
-		Now: time.Now,
-	}
+	jobService := newJobService(app)
 	recoveryService := recovery.Service{
 		Store:           app.Store,
 		RegistryRoot:    filepath.Join(app.RepoRoot, "registry"),
@@ -239,6 +228,23 @@ func openServiceLogger(runtimeRoot string) (*logs.Logger, io.Closer, error) {
 		Writer: file,
 		Now:    time.Now,
 	}, file, nil
+}
+
+func newJobService(app bootstrap.App) jobs.Service {
+	return jobs.Service{
+		Store:          app.Store,
+		Registry:       app.Registry,
+		Executors:      app.Executors,
+		ExecutorConfig: app.ExecutorConfig,
+		Transitions:    projects.Service{Store: app.Store},
+		Leases: leases.Manager{
+			Store:        app.Store,
+			Git:          gitadapter.Adapter{},
+			WorktreeRoot: worktrees.DefaultRoot(),
+		},
+		Supervisor: supervision.Service{},
+		Now:        time.Now,
+	}
 }
 
 func runTaskLoop(ctx context.Context, operationCtx context.Context, wg *sync.WaitGroup, service jobs.Service, logger *logs.Logger) {

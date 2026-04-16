@@ -7,6 +7,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"odin-os/internal/app/bootstrap"
+	"odin-os/internal/runtime/supervision"
 )
 
 func TestRunStartsInteractiveShell(t *testing.T) {
@@ -101,5 +104,17 @@ service:
 	}
 	if !strings.Contains(output, "/help") {
 		t.Fatalf("Run() output = %q, want help", output)
+	}
+}
+
+func TestNewJobServiceIncludesSupervisor(t *testing.T) {
+	t.Parallel()
+
+	service := newJobService(bootstrap.App{})
+	if service.Supervisor == nil {
+		t.Fatal("newJobService() Supervisor = nil, want concrete supervisor")
+	}
+	if _, ok := service.Supervisor.(supervision.Service); !ok {
+		t.Fatalf("newJobService() Supervisor = %T, want supervision.Service", service.Supervisor)
 	}
 }

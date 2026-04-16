@@ -64,11 +64,12 @@ func TestSupervisorEnforcesTimeout(t *testing.T) {
 func TestSupervisorRetriesTransientFailure(t *testing.T) {
 	t.Parallel()
 
-	service := Service{MaxRetries: 2}
+	service := Service{MaxRetries: 0}
 	request := capabilities.InvokeRequest{
 		RequestID: "request-retry",
 		Execution: capabilities.ExecutionRequest{
-			Timeout: "500ms",
+			Timeout:    "500ms",
+			RetryLimit: 2,
 		},
 	}
 

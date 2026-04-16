@@ -190,6 +190,82 @@ func TestObservabilityProjectionsExposeFreshnessAndPortfolioViews(t *testing.T) 
 	}
 }
 
+func TestObservabilityProjectionsTreatTimeoutAsTerminal(t *testing.T) {
+	ctx := context.Background()
+	store := openObservabilityStore(t)
+	defer store.Close()
+
+	project, err := store.CreateProject(ctx, sqlite.CreateProjectParams{
+		Key:           "alpha",
+		Name:          "Alpha",
+		Scope:         "project",
+		GitRoot:       "/tmp/alpha",
+		DefaultBranch: "main",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+
+	task, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "alpha-timeout",
+		Title:       "Timed out task",
+		Status:      "running",
+		Scope:       "project",
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+
+	run, err := store.StartRun(ctx, sqlite.StartRunParams{
+		TaskID:   task.ID,
+		Executor: "codex_headless",
+		Attempt:  1,
+		Status:   "running",
+	})
+	if err != nil {
+		t.Fatalf("StartRun() error = %v", err)
+	}
+
+	if _, err := store.FinishRun(ctx, sqlite.FinishRunParams{
+		RunID:   run.ID,
+		Status:  "timeout",
+		Summary: "execution exceeded the invocation deadline",
+	}); err != nil {
+		t.Fatalf("FinishRun(timeout) error = %v", err)
+	}
+	if _, err := store.UpdateTaskStatus(ctx, sqlite.UpdateTaskStatusParams{
+		TaskID: task.ID,
+		Status: "timeout",
+	}); err != nil {
+		t.Fatalf("UpdateTaskStatus(timeout) error = %v", err)
+	}
+
+	activeRuns, err := projections.ListActiveRunViews(ctx, store.DB())
+	if err != nil {
+		t.Fatalf("ListActiveRunViews() error = %v", err)
+	}
+	if len(activeRuns) != 0 {
+		t.Fatalf("active runs = %+v, want none for timeout", activeRuns)
+	}
+
+	portfolio, err := projections.ListProjectPortfolioViews(ctx, store.DB())
+	if err != nil {
+		t.Fatalf("ListProjectPortfolioViews() error = %v", err)
+	}
+	if len(portfolio) != 1 {
+		t.Fatalf("portfolio = %+v, want one project", portfolio)
+	}
+	if portfolio[0].OpenTaskCount != 0 {
+		t.Fatalf("OpenTaskCount = %d, want 0 for timeout task", portfolio[0].OpenTaskCount)
+	}
+	if portfolio[0].ActiveRunCount != 0 {
+		t.Fatalf("ActiveRunCount = %d, want 0 for timeout run", portfolio[0].ActiveRunCount)
+	}
+}
+
 func openObservabilityStore(t *testing.T) *sqlite.Store {
 	t.Helper()
 

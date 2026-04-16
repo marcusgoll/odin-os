@@ -20,6 +20,11 @@ import (
 	"odin-os/internal/vcs/leases"
 )
 
+const (
+	defaultInvocationTimeout    = 30 * time.Minute
+	defaultInvocationRetryLimit = 1
+)
+
 type Service struct {
 	Store          *sqlite.Store
 	Registry       projects.Registry
@@ -188,6 +193,8 @@ func (service Service) ExecuteNextQueued(ctx context.Context) error {
 		Attempt:    attempt,
 		Scope:      task.Scope,
 		Prompt:     task.Title,
+		Timeout:    defaultInvocationTimeout.String(),
+		RetryLimit: defaultInvocationRetryLimit,
 		Metadata: map[string]string{
 			"project_key": project.Key,
 			"task_id":     fmt.Sprintf("%d", task.ID),
@@ -276,6 +283,10 @@ func (service Service) ExecuteNextQueued(ctx context.Context) error {
 		Caller: capabilities.CallerRef{
 			Kind: "system",
 			ID:   "runtime_jobs",
+		},
+		Execution: capabilities.ExecutionRequest{
+			Timeout:    defaultInvocationTimeout.String(),
+			RetryLimit: defaultInvocationRetryLimit,
 		},
 	}, func(attemptCtx context.Context, _ int) (capabilities.InvokeResponse, error) {
 		execution, execErr := executor.RunTask(attemptCtx, spec)

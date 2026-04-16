@@ -8,8 +8,11 @@ import (
 	"time"
 
 	"odin-os/internal/cli/scope"
+	"odin-os/internal/core/capabilities"
 	"odin-os/internal/core/projects"
 	"odin-os/internal/executors/router"
+	"odin-os/internal/runtime/checkpoints"
+	"odin-os/internal/runtime/supervision"
 	"odin-os/internal/store/sqlite"
 	"odin-os/internal/vcs/leases"
 )
@@ -222,7 +225,87 @@ func TestExecuteNextQueuedRejectsShadowModeMutation(t *testing.T) {
 	}
 }
 
+func TestExecuteNextQueuedPopulatesInvocationPolicyMetadata(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openJobStore(t)
+	defer store.Close()
+
+	registry := writeRegistry(t)
+	recorder := &recordingSupervisor{}
+	service := Service{
+		Store:          store,
+		Registry:       registry,
+		Executors:      router.DefaultCatalog(),
+		ExecutorConfig: mustLoadExecutorConfig(t),
+		Transitions:    projects.Service{Store: store},
+		Leases: leases.Manager{
+			Store:        store,
+			Git:          &jobTestGit{},
+			WorktreeRoot: t.TempDir(),
+		},
+		Supervisor: recorder,
+		Now:        time.Now,
+	}
+
+	task, err := service.CreateTaskFromAct(ctx, scope.Resolution{
+		Kind:       scope.ScopeProject,
+		ProjectKey: "alpha",
+	}, "Inspect invocation metadata")
+	if err != nil {
+		t.Fatalf("CreateTaskFromAct() error = %v", err)
+	}
+
+	project, err := store.GetProjectByKey(ctx, "alpha")
+	if err != nil {
+		t.Fatalf("GetProjectByKey(alpha) error = %v", err)
+	}
+	if _, err := service.Transitions.SetTransitionState(ctx, projects.TransitionStateInput{
+		ProjectID:   project.ID,
+		Actor:       projects.TransitionControllerOdinOS,
+		TargetState: projects.TransitionStateCutover,
+		ChangedBy:   "test",
+	}); err != nil {
+		t.Fatalf("SetTransitionState(cutover) error = %v", err)
+	}
+
+	if err := service.ExecuteNextQueued(ctx); err != nil {
+		t.Fatalf("ExecuteNextQueued() error = %v", err)
+	}
+
+	if recorder.request.Execution.Timeout != defaultInvocationTimeout.String() {
+		t.Fatalf("request timeout = %q, want %q", recorder.request.Execution.Timeout, defaultInvocationTimeout.String())
+	}
+	if recorder.request.Execution.RetryLimit != defaultInvocationRetryLimit {
+		t.Fatalf("request retry limit = %d, want %d", recorder.request.Execution.RetryLimit, defaultInvocationRetryLimit)
+	}
+
+	resumeState, err := (checkpoints.Service{Store: store}).LoadResumeState(ctx, project.ID, task.ID)
+	if err != nil {
+		t.Fatalf("LoadResumeState() error = %v", err)
+	}
+	if resumeState.RunContext == nil || resumeState.RunContext.Invocation == nil {
+		t.Fatalf("ResumeState.RunContext.Invocation = %+v, want invocation metadata", resumeState.RunContext)
+	}
+	if resumeState.RunContext.Invocation.Timeout != defaultInvocationTimeout.String() {
+		t.Fatalf("Invocation.Timeout = %q, want %q", resumeState.RunContext.Invocation.Timeout, defaultInvocationTimeout.String())
+	}
+	if resumeState.RunContext.Invocation.RetryLimit != defaultInvocationRetryLimit {
+		t.Fatalf("Invocation.RetryLimit = %d, want %d", resumeState.RunContext.Invocation.RetryLimit, defaultInvocationRetryLimit)
+	}
+}
+
 type jobTestGit struct{}
+
+type recordingSupervisor struct {
+	request capabilities.InvokeRequest
+}
+
+func (supervisor *recordingSupervisor) Run(ctx context.Context, request capabilities.InvokeRequest, fn supervision.AttemptFunc) (capabilities.InvokeResponse, error) {
+	supervisor.request = request
+	return fn(ctx, 1)
+}
 
 func (jobTestGit) BranchExists(context.Context, string, string) (bool, error) { return false, nil }
 func (jobTestGit) CreateBranch(context.Context, string, string, string) error { return nil }

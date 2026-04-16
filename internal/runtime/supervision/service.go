@@ -34,7 +34,10 @@ func (service Service) Run(ctx context.Context, req capabilities.InvokeRequest, 
 		return capabilities.InvokeResponse{}, fmt.Errorf("invalid invocation timeout %q: %w", req.Execution.Timeout, err)
 	}
 
-	maxRetries := service.MaxRetries
+	maxRetries := req.Execution.RetryLimit
+	if maxRetries <= 0 {
+		maxRetries = service.MaxRetries
+	}
 	if maxRetries < 0 {
 		maxRetries = 0
 	}
