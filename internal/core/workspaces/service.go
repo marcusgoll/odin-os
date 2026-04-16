@@ -112,5 +112,5 @@ func toDomainWorkspace(record sqlite.Workspace) Workspace {
 }
 
 func isWorkspaceKeyConflict(err error) bool {
-	return strings.Contains(err.Error(), "UNIQUE constraint failed: workspaces.key")
+	return strings.Contains(err.Error(), "UNIQUE constraint failed") && strings.Contains(err.Error(), "workspaces.key")
 }

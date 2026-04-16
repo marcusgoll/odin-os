@@ -1610,11 +1610,11 @@ func (store *Store) GetWorkspaceByKey(ctx context.Context, key string) (Workspac
 			w.owner_ref,
 			w.default_companion_key,
 			w.status,
-			p.policy_json,
+			COALESCE(NULLIF(p.policy_json, ''), '{}') AS policy_json,
 			w.created_at,
 			w.updated_at
 		FROM workspaces w
-		JOIN workspace_policies p ON p.workspace_id = w.id
+		LEFT JOIN workspace_policies p ON p.workspace_id = w.id
 		WHERE w.key = ?
 	`, key)
 	return scanWorkspace(row)
@@ -1644,10 +1644,12 @@ func (store *Store) UpdateWorkspacePolicy(ctx context.Context, params UpdateWork
 		}
 
 		if _, err := tx.ExecContext(ctx, `
-			UPDATE workspace_policies
-			SET policy_json = ?, updated_at = ?
-			WHERE workspace_id = ?
-		`, policyJSON, formatTime(now), params.WorkspaceID); err != nil {
+			INSERT INTO workspace_policies (workspace_id, policy_json, created_at, updated_at)
+			VALUES (?, ?, ?, ?)
+			ON CONFLICT(workspace_id) DO UPDATE SET
+				policy_json = excluded.policy_json,
+				updated_at = excluded.updated_at
+		`, params.WorkspaceID, policyJSON, formatTime(now), formatTime(now)); err != nil {
 			return err
 		}
 
@@ -1669,11 +1671,11 @@ func (store *Store) ListActiveWorkspaces(ctx context.Context) ([]Workspace, erro
 			w.owner_ref,
 			w.default_companion_key,
 			w.status,
-			p.policy_json,
+			COALESCE(NULLIF(p.policy_json, ''), '{}') AS policy_json,
 			w.created_at,
 			w.updated_at
 		FROM workspaces w
-		JOIN workspace_policies p ON p.workspace_id = w.id
+		LEFT JOIN workspace_policies p ON p.workspace_id = w.id
 		WHERE w.status = 'active'
 		ORDER BY w.key ASC, w.id ASC
 	`)
@@ -2213,11 +2215,11 @@ func (store *Store) getWorkspaceTx(ctx context.Context, tx *sql.Tx, workspaceID 
 			w.owner_ref,
 			w.default_companion_key,
 			w.status,
-			p.policy_json,
+			COALESCE(NULLIF(p.policy_json, ''), '{}') AS policy_json,
 			w.created_at,
 			w.updated_at
 		FROM workspaces w
-		JOIN workspace_policies p ON p.workspace_id = w.id
+		LEFT JOIN workspace_policies p ON p.workspace_id = w.id
 		WHERE w.id = ?
 	`, workspaceID)
 	return scanWorkspace(row)

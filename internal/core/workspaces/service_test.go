@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	"odin-os/internal/store/sqlite"
 )
@@ -76,6 +77,68 @@ func TestWorkspaceServiceUpdateWorkspacePolicy(t *testing.T) {
 	}
 	if got.Policy != WorkspacePolicy(`{"allow":["branch_proposal"]}`) {
 		t.Fatalf("GetWorkspaceByKey().Policy = %q, want %q", got.Policy, WorkspacePolicy(`{"allow":["branch_proposal"]}`))
+	}
+}
+
+func TestWorkspaceServiceBootstrapsAndRepairsWorkspaceWithoutPolicyRow(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openWorkspaceServiceStore(t)
+	defer store.Close()
+
+	createdAt := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := store.DB().ExecContext(ctx, `
+		INSERT INTO workspaces (key, name, owner_ref, default_companion_key, status, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+	`,
+		DefaultWorkspaceKey,
+		DefaultWorkspaceName,
+		DefaultWorkspaceOwnerRef,
+		DefaultWorkspaceCompanionKey,
+		WorkspaceStatusActive,
+		createdAt,
+		createdAt,
+	); err != nil {
+		t.Fatalf("seed workspace row without policy error = %v", err)
+	}
+
+	service := Service{Store: store}
+
+	workspace, err := service.BootstrapDefaultWorkspace(ctx)
+	if err != nil {
+		t.Fatalf("BootstrapDefaultWorkspace() error = %v", err)
+	}
+	if workspace.Policy != DefaultWorkspacePolicy {
+		t.Fatalf("BootstrapDefaultWorkspace().Policy = %q, want %q", workspace.Policy, DefaultWorkspacePolicy)
+	}
+
+	updatedPolicy := WorkspacePolicy(`{"allow":["branch_proposal"]}`)
+	updated, err := service.UpdateWorkspacePolicy(ctx, DefaultWorkspaceKey, updatedPolicy)
+	if err != nil {
+		t.Fatalf("UpdateWorkspacePolicy() error = %v", err)
+	}
+	if updated.Policy != updatedPolicy {
+		t.Fatalf("UpdateWorkspacePolicy().Policy = %q, want %q", updated.Policy, updatedPolicy)
+	}
+
+	got, err := service.GetWorkspaceByKey(ctx, DefaultWorkspaceKey)
+	if err != nil {
+		t.Fatalf("GetWorkspaceByKey() error = %v", err)
+	}
+	if got.Policy != updatedPolicy {
+		t.Fatalf("GetWorkspaceByKey().Policy = %q, want %q", got.Policy, updatedPolicy)
+	}
+
+	active, err := service.ListActiveWorkspaces(ctx)
+	if err != nil {
+		t.Fatalf("ListActiveWorkspaces() error = %v", err)
+	}
+	if len(active) != 1 {
+		t.Fatalf("ListActiveWorkspaces() len = %d, want 1", len(active))
+	}
+	if active[0].Policy != updatedPolicy {
+		t.Fatalf("ListActiveWorkspaces()[0].Policy = %q, want %q", active[0].Policy, updatedPolicy)
 	}
 }
 
