@@ -60,6 +60,12 @@ func (service Service) RunStartupRecovery(ctx context.Context) (StartupResult, e
 			if _, err := service.workItemService().Requeue(ctx, task.ID); err != nil {
 				return StartupResult{}, err
 			}
+		} else if pendingApprovals > 0 && task.Status != "blocked" {
+			// Repair legacy or partially written approval-gated state so blocked-task
+			// projections and resume state agree with the pending approval.
+			if _, err := service.workItemService().Block(ctx, task.ID); err != nil {
+				return StartupResult{}, err
+			}
 		}
 
 		blockingReason := "previous service instance stopped during execution"

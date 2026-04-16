@@ -228,3 +228,105 @@ func TestRunStartupRecoveryPreservesBlockedApprovalTasks(t *testing.T) {
 		t.Fatalf("LoadResumeState().Status = %q, want %q", resumeState.Status, "blocked")
 	}
 }
+
+func TestRunStartupRecoveryNormalizesRunningTasksWithPendingApprovals(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	now := time.Date(2026, 4, 9, 23, 0, 0, 0, time.UTC)
+
+	store, err := sqlite.Open(filepath.Join(t.TempDir(), "odin.db"))
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer store.Close()
+	store.Now = func() time.Time { return now }
+
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
+	}
+
+	project, err := store.CreateProject(ctx, sqlite.CreateProjectParams{
+		Key:           "alpha",
+		Name:          "Alpha",
+		Scope:         "project",
+		GitRoot:       "/tmp/alpha",
+		DefaultBranch: "main",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+
+	task, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "legacy-approval-task",
+		Title:       "Legacy approval state",
+		Status:      "running",
+		Scope:       "project",
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+
+	run, err := store.StartRun(ctx, sqlite.StartRunParams{
+		TaskID:   task.ID,
+		Executor: "codex_headless",
+		Attempt:  1,
+		Status:   "running",
+	})
+	if err != nil {
+		t.Fatalf("StartRun() error = %v", err)
+	}
+
+	approval, err := store.RequestApproval(ctx, sqlite.RequestApprovalParams{
+		TaskID:      task.ID,
+		RunID:       &run.ID,
+		Status:      "pending",
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("RequestApproval() error = %v", err)
+	}
+
+	service := recovery.Service{
+		Store: store,
+		Now:   func() time.Time { return now },
+	}
+
+	result, err := service.RunStartupRecovery(ctx)
+	if err != nil {
+		t.Fatalf("RunStartupRecovery() error = %v", err)
+	}
+	if result.RecoveredRuns != 1 {
+		t.Fatalf("RecoveredRuns = %d, want 1", result.RecoveredRuns)
+	}
+
+	gotTask, err := store.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
+	}
+	if gotTask.Status != "blocked" {
+		t.Fatalf("GetTask().Status = %q, want %q", gotTask.Status, "blocked")
+	}
+
+	views, err := projections.ListTaskStatusViews(ctx, store.DB())
+	if err != nil {
+		t.Fatalf("ListTaskStatusViews() error = %v", err)
+	}
+	if len(views) != 1 {
+		t.Fatalf("ListTaskStatusViews() len = %d, want 1", len(views))
+	}
+	if views[0].Status != "blocked" {
+		t.Fatalf("ListTaskStatusViews()[0].Status = %q, want %q", views[0].Status, "blocked")
+	}
+
+	gotApproval, err := store.GetApproval(ctx, approval.ID)
+	if err != nil {
+		t.Fatalf("GetApproval() error = %v", err)
+	}
+	if gotApproval.Status != "pending" {
+		t.Fatalf("GetApproval().Status = %q, want %q", gotApproval.Status, "pending")
+	}
+}
