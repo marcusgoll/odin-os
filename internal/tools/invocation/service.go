@@ -99,23 +99,13 @@ func (service Service) Invoke(ctx context.Context, key string, request Request) 
 }
 
 func (service Service) BrowserHuman(ctx context.Context, request browserhuman.Request) (BrowserResult, error) {
-	driver := browserhuman.NewDriver()
-	if strings.TrimSpace(service.Driver.EnvVar) != "" {
-		driver.EnvVar = service.Driver.EnvVar
-	}
-	if strings.TrimSpace(service.Driver.DefaultToolKey) != "" {
-		driver.DefaultToolKey = service.Driver.DefaultToolKey
-	}
+	driver := service.Driver.WithDefaults()
 
 	response, err := driver.Invoke(ctx, request)
 	if err != nil {
 		return BrowserResult{}, err
 	}
-	rawOutput, err := json.Marshal(response)
-	if err != nil {
-		return BrowserResult{}, err
-	}
-	return toBrowserResult(response.ToolKey, response.Summary, response.Artifacts, string(rawOutput)), nil
+	return toBrowserResult(response.ToolKey, response.Summary, response.Artifacts, response.RawOutput), nil
 }
 
 func toBrowserResult(toolKey string, summary string, artifacts map[string]any, rawOutput string) BrowserResult {

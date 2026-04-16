@@ -24,6 +24,7 @@ type Response struct {
 	ToolKey   string         `json:"tool_key"`
 	Summary   string         `json:"summary"`
 	Artifacts map[string]any `json:"artifacts"`
+	RawOutput string         `json:"-"`
 }
 
 type Driver struct {
@@ -58,12 +59,8 @@ func (driver Driver) Invoke(ctx context.Context, request Request) (Response, err
 		return Response{}, err
 	}
 
-	commandParts := strings.Fields(command)
-	if len(commandParts) == 0 {
-		return Response{}, fmt.Errorf("driver command not configured")
-	}
+	cmd := exec.CommandContext(ctx, "sh", "-c", command)
 
-	cmd := exec.CommandContext(ctx, commandParts[0], commandParts[1:]...)
 	cmd.Stdin = bytes.NewReader(requestBytes)
 
 	var stdout bytes.Buffer
@@ -79,6 +76,7 @@ func (driver Driver) Invoke(ctx context.Context, request Request) (Response, err
 	if err := json.Unmarshal(stdout.Bytes(), &response); err != nil {
 		return Response{}, fmt.Errorf("decode driver response: %w", err)
 	}
+	response.RawOutput = stdout.String()
 	if response.ToolKey != request.ToolKey {
 		return Response{}, fmt.Errorf("driver response tool_key %q does not match request %q", response.ToolKey, request.ToolKey)
 	}
@@ -107,4 +105,15 @@ func (driver Driver) defaultToolKey() string {
 		return defaultToolKey
 	}
 	return driver.DefaultToolKey
+}
+
+func (driver Driver) WithDefaults() Driver {
+	defaults := NewDriver()
+	if strings.TrimSpace(driver.EnvVar) == "" {
+		driver.EnvVar = defaults.EnvVar
+	}
+	if strings.TrimSpace(driver.DefaultToolKey) == "" {
+		driver.DefaultToolKey = defaults.DefaultToolKey
+	}
+	return driver
 }
