@@ -24,24 +24,22 @@ func TestFreshRuntimeWithoutCodexDriverIsNotReady(t *testing.T) {
 	}
 }
 
-func TestFreshRuntimeWithCodexDriverCanAnswerAndRun(t *testing.T) {
+func TestFreshRuntimeWithCodexDriverCanAnswerAndQueueActWork(t *testing.T) {
 	root := t.TempDir()
-	// This fixture encodes the planned driver contract; the current runtime does not
-	// consume it yet, which is why this remains a red contract test.
 	driver := writeFixtureCodexDriver(t)
 
 	ask := runInteractiveOdin(t, root, map[string]string{
 		"ODIN_CODEX_DRIVER": driver,
 	}, "what can you do?\n")
-	if strings.Contains(ask.Stdout, "codex_headless completed") {
-		t.Fatalf("ask output = %q, want real answer instead of stub marker", ask.Stdout)
+	if !strings.Contains(ask.Stdout, "fixture codex driver") || strings.Contains(ask.Stdout, "codex_headless completed") {
+		t.Fatalf("ask output = %q, want real driver answer instead of stub marker", ask.Stdout)
 	}
 
 	act := runInteractiveOdin(t, root, map[string]string{
 		"ODIN_CODEX_DRIVER": driver,
 	}, "/project odin-core\n/mode act\nprepare a release note\n")
-	if !strings.Contains(act.Stdout, "run ") || strings.Contains(act.Stdout, "codex_headless completed") {
-		t.Fatalf("act output = %q, want real run output", act.Stdout)
+	if !strings.Contains(act.Stdout, "created task") || strings.Contains(act.Stdout, "codex_headless completed") {
+		t.Fatalf("act output = %q, want durable task creation without stub marker", act.Stdout)
 	}
 }
 
@@ -106,7 +104,19 @@ payload="$(cat)"
 if [[ -n "${ODIN_CODEX_DRIVER_TRACE:-}" ]]; then
 	printf '%s\n' "$payload" >"${ODIN_CODEX_DRIVER_TRACE}"
 fi
-printf '%s\n' "fixture codex driver"
+PAYLOAD="$payload" python3 - <<'PY'
+import json
+import os
+
+request = json.loads(os.environ["PAYLOAD"])
+action = request.get("action")
+if action == "health":
+    print(json.dumps({"status":"healthy","details":"fixture codex driver healthy"}))
+elif action == "run":
+    print(json.dumps({"status":"completed","output":"fixture codex driver"}))
+else:
+    print(json.dumps({"status":"unavailable","details":f"unknown action: {action}"}))
+PY
 `
 	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
 		t.Fatalf("WriteFile(codex driver) error = %v", err)
