@@ -71,6 +71,184 @@ func TestValidateNormalizedAgentDoesNotRequireSchemas(t *testing.T) {
 	}
 }
 
+func TestValidateNormalizedManifestRejectsDivergingKey(t *testing.T) {
+	document := registry.ParsedDocument{
+		Source: registry.SourceFile{
+			Path:         "/tmp/skills/triage.md",
+			RelativePath: "skills/triage.md",
+			ExpectedKind: registry.KindSkill,
+		},
+		Frontmatter: registry.Frontmatter{
+			APIVersion: registry.NormalizedAPIVersion,
+			Kind:       registry.KindSkill,
+			Name:       "triage-skill",
+			Key:        "triage-skill-legacy",
+			Version:    "1.0.0",
+			Availability: registry.Availability{
+				Scope: "global",
+			},
+			Permissions: []string{"filesystem"},
+			InputSchema: registry.SchemaRef{
+				Ref: "schema://odin/skills/triage-skill/input",
+			},
+			OutputSchema: registry.SchemaRef{
+				Ref: "schema://odin/skills/triage-skill/output",
+			},
+			Dependencies: []registry.DependencyRef{
+				{
+					Kind:    registry.KindAgent,
+					Name:    "triage-agent",
+					Version: "1.0.0",
+				},
+			},
+			Execution: registry.ExecutionPolicy{
+				Mode: "local",
+			},
+			Implementation: registry.ImplementationRef{
+				Kind: "markdown",
+				Path: "skills/triage.md",
+			},
+		},
+		Sections: map[string]string{
+			registry.SectionPurpose:         "Purpose",
+			registry.SectionWhenToUse:       "When to use",
+			registry.SectionInputs:          "Inputs",
+			registry.SectionProcedure:       "Procedure",
+			registry.SectionOutputs:         "Outputs",
+			registry.SectionConstraints:     "Constraints",
+			registry.SectionSuccessCriteria: "Success",
+		},
+	}
+
+	diagnostics := validator.ValidateDocuments([]registry.ParsedDocument{document})
+	if len(diagnostics) != 1 {
+		t.Fatalf("ValidateDocuments() diagnostics = %v, want 1 diagnostic", diagnostics)
+	}
+
+	if diagnostics[0].Code != "invalid_identity" {
+		t.Fatalf("diagnostic code = %q, want %q", diagnostics[0].Code, "invalid_identity")
+	}
+}
+
+func TestValidateNormalizedInvokableRejectsMissingSchemas(t *testing.T) {
+	document := registry.ParsedDocument{
+		Source: registry.SourceFile{
+			Path:         "/tmp/commands/project-status.md",
+			RelativePath: "commands/project-status.md",
+			ExpectedKind: registry.KindCommand,
+		},
+		Frontmatter: registry.Frontmatter{
+			APIVersion: registry.NormalizedAPIVersion,
+			Kind:       registry.KindCommand,
+			Name:       "project-status",
+			Version:    "1.0.0",
+			Availability: registry.Availability{
+				Scope: "global",
+			},
+			Permissions: []string{"filesystem"},
+			Dependencies: []registry.DependencyRef{
+				{
+					Kind:    registry.KindSkill,
+					Name:    "triage-skill",
+					Version: "1.0.0",
+				},
+			},
+			Execution: registry.ExecutionPolicy{
+				Mode: "local",
+			},
+			Implementation: registry.ImplementationRef{
+				Kind: "markdown",
+				Path: "commands/project-status.md",
+			},
+		},
+		Sections: map[string]string{
+			registry.SectionPurpose:         "Purpose",
+			registry.SectionWhenToUse:       "When to use",
+			registry.SectionInputs:          "Inputs",
+			registry.SectionProcedure:       "Procedure",
+			registry.SectionOutputs:         "Outputs",
+			registry.SectionConstraints:     "Constraints",
+			registry.SectionSuccessCriteria: "Success",
+		},
+	}
+
+	diagnostics := validator.ValidateDocuments([]registry.ParsedDocument{document})
+	if len(diagnostics) != 2 {
+		t.Fatalf("ValidateDocuments() diagnostics = %v, want 2 diagnostics", diagnostics)
+	}
+
+	foundInput := false
+	foundOutput := false
+	for _, diagnostic := range diagnostics {
+		if diagnostic.Code == "missing_field" && diagnostic.Message == "required frontmatter field inputSchema is missing" {
+			foundInput = true
+		}
+		if diagnostic.Code == "missing_field" && diagnostic.Message == "required frontmatter field outputSchema is missing" {
+			foundOutput = true
+		}
+	}
+
+	if !foundInput || !foundOutput {
+		t.Fatalf("ValidateDocuments() diagnostics = %v, want missing inputSchema and outputSchema", diagnostics)
+	}
+}
+
+func TestValidateNormalizedManifestRejectsIncompleteDependency(t *testing.T) {
+	document := registry.ParsedDocument{
+		Source: registry.SourceFile{
+			Path:         "/tmp/skills/triage.md",
+			RelativePath: "skills/triage.md",
+			ExpectedKind: registry.KindSkill,
+		},
+		Frontmatter: registry.Frontmatter{
+			APIVersion: registry.NormalizedAPIVersion,
+			Kind:       registry.KindSkill,
+			Name:       "triage-skill",
+			Version:    "1.0.0",
+			Availability: registry.Availability{
+				Scope: "global",
+			},
+			Permissions: []string{"filesystem"},
+			InputSchema: registry.SchemaRef{
+				Ref: "schema://odin/skills/triage-skill/input",
+			},
+			OutputSchema: registry.SchemaRef{
+				Ref: "schema://odin/skills/triage-skill/output",
+			},
+			Dependencies: []registry.DependencyRef{
+				{
+					Name: "triage-agent",
+				},
+			},
+			Execution: registry.ExecutionPolicy{
+				Mode: "local",
+			},
+			Implementation: registry.ImplementationRef{
+				Kind: "markdown",
+				Path: "skills/triage.md",
+			},
+		},
+		Sections: map[string]string{
+			registry.SectionPurpose:         "Purpose",
+			registry.SectionWhenToUse:       "When to use",
+			registry.SectionInputs:          "Inputs",
+			registry.SectionProcedure:       "Procedure",
+			registry.SectionOutputs:         "Outputs",
+			registry.SectionConstraints:     "Constraints",
+			registry.SectionSuccessCriteria: "Success",
+		},
+	}
+
+	diagnostics := validator.ValidateDocuments([]registry.ParsedDocument{document})
+	if len(diagnostics) != 1 {
+		t.Fatalf("ValidateDocuments() diagnostics = %v, want 1 diagnostic", diagnostics)
+	}
+
+	if diagnostics[0].Code != "invalid_dependency" {
+		t.Fatalf("diagnostic code = %q, want %q", diagnostics[0].Code, "invalid_dependency")
+	}
+}
+
 func TestValidateDocumentsRejectsKindMismatch(t *testing.T) {
 	document := registry.ParsedDocument{
 		Source: registry.SourceFile{

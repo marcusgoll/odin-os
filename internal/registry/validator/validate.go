@@ -68,9 +68,10 @@ func validateDocument(document registry.ParsedDocument) []registry.Diagnostic {
 		requireString(document.Source.Path, &diagnostics, "missing_field", "version", document.Frontmatter.Version)
 		requireString(document.Source.Path, &diagnostics, "missing_field", "availability.scope", document.Frontmatter.Availability.Scope)
 		requireList(document.Source.Path, &diagnostics, "missing_field", "permissions", document.Frontmatter.Permissions)
-		requireDependencies(document.Source.Path, &diagnostics, "missing_field", "dependencies", document.Frontmatter.Dependencies)
 		requireString(document.Source.Path, &diagnostics, "missing_field", "execution.mode", document.Frontmatter.Execution.Mode)
 		requireString(document.Source.Path, &diagnostics, "missing_field", "implementation.kind", document.Frontmatter.Implementation.Kind)
+		requireNormalizedIdentity(document.Source.Path, &diagnostics, document.Frontmatter.Name, document.Frontmatter.Key)
+		requireNormalizedDependencies(document.Source.Path, &diagnostics, document.Frontmatter.Dependencies)
 		if document.Frontmatter.Kind.IsInvokable() {
 			requireSchema(document.Source.Path, &diagnostics, "missing_field", "inputSchema", document.Frontmatter.InputSchema)
 			requireSchema(document.Source.Path, &diagnostics, "missing_field", "outputSchema", document.Frontmatter.OutputSchema)
@@ -132,5 +133,34 @@ func requireSchema(path string, diagnostics *[]registry.Diagnostic, code string,
 func requireDependencies(path string, diagnostics *[]registry.Diagnostic, code string, field string, values []registry.DependencyRef) {
 	if len(values) == 0 {
 		*diagnostics = append(*diagnostics, registry.ErrorDiagnostic(path, code, "required frontmatter field "+field+" is missing"))
+	}
+}
+
+func requireNormalizedIdentity(path string, diagnostics *[]registry.Diagnostic, name string, key string) {
+	name = strings.TrimSpace(name)
+	key = strings.TrimSpace(key)
+	if key != "" && key != name {
+		*diagnostics = append(*diagnostics, registry.ErrorDiagnostic(
+			path,
+			"invalid_identity",
+			fmt.Sprintf("normalized frontmatter key %q must match canonical name %q", key, name),
+		))
+	}
+}
+
+func requireNormalizedDependencies(path string, diagnostics *[]registry.Diagnostic, values []registry.DependencyRef) {
+	if len(values) == 0 {
+		*diagnostics = append(*diagnostics, registry.ErrorDiagnostic(path, "missing_field", "required frontmatter field dependencies is missing"))
+		return
+	}
+
+	for index, value := range values {
+		if strings.TrimSpace(string(value.Kind)) == "" || strings.TrimSpace(value.Name) == "" || strings.TrimSpace(value.Version) == "" {
+			*diagnostics = append(*diagnostics, registry.ErrorDiagnostic(
+				path,
+				"invalid_dependency",
+				fmt.Sprintf("normalized dependency %d must include kind, name, and version", index),
+			))
+		}
 	}
 }

@@ -56,7 +56,9 @@ func compileItem(document registry.ParsedDocument) registry.Item {
 		name = strings.TrimSpace(frontmatter.Key)
 	}
 	key := strings.TrimSpace(frontmatter.Key)
-	if key == "" {
+	if frontmatter.UsesNormalizedManifest() {
+		key = name
+	} else if key == "" {
 		key = name
 	}
 
