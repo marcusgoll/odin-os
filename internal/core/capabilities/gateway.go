@@ -39,12 +39,18 @@ func NewGateway(snapshot SnapshotSource, invoker InvokerFunc, runs RunLookup) *G
 	gateway := &Gateway{
 		invoke: invoker,
 		runs:   runs,
-		policy: policy.NewService(nil),
 	}
 	if snapshot != nil {
 		gateway.snapshot = snapshot.Active
 	}
 	return gateway
+}
+
+func (gateway *Gateway) SetPolicyService(service *policy.Service) {
+	if gateway == nil {
+		return
+	}
+	gateway.policy = service
 }
 
 func (gateway *Gateway) ListCapabilities(kind registry.Kind, scope string) []CapabilityCard {
@@ -173,19 +179,22 @@ func capabilityCard(descriptor Descriptor) CapabilityCard {
 }
 
 func (gateway *Gateway) authorizeInvocation(ctx context.Context, descriptor Descriptor, scope ScopeRef, caller CallerRef) error {
-	if gateway != nil && gateway.policy != nil {
-		return gateway.policy.AuthorizeInvocation(ctx, policy.Descriptor{
-			Scope:       strings.TrimSpace(descriptor.Availability.Scope),
-			Scopes:      append([]string(nil), descriptor.Scopes...),
-			Permissions: append([]string(nil), descriptor.Permissions...),
-		}, policy.ScopeRef{
-			Kind:       strings.TrimSpace(scope.Kind),
-			ProjectKey: strings.TrimSpace(scope.ProjectKey),
-		}, policy.CallerRef{
-			Kind: strings.TrimSpace(caller.Kind),
-			ID:   strings.TrimSpace(caller.ID),
-		})
-	}
+	return gateway.policyService().AuthorizeInvocation(ctx, policy.Descriptor{
+		Scope:       strings.TrimSpace(descriptor.Availability.Scope),
+		Scopes:      append([]string(nil), descriptor.Scopes...),
+		Permissions: append([]string(nil), descriptor.Permissions...),
+	}, policy.ScopeRef{
+		Kind:       strings.TrimSpace(scope.Kind),
+		ProjectKey: strings.TrimSpace(scope.ProjectKey),
+	}, policy.CallerRef{
+		Kind: strings.TrimSpace(caller.Kind),
+		ID:   strings.TrimSpace(caller.ID),
+	})
+}
 
-	return AuthorizeInvocation(ctx, descriptor, scope, caller)
+func (gateway *Gateway) policyService() *policy.Service {
+	if gateway != nil && gateway.policy != nil {
+		return gateway.policy
+	}
+	return policy.NewService(nil)
 }

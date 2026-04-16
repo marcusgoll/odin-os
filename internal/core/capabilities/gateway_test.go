@@ -6,6 +6,7 @@ import (
 	"errors"
 	"testing"
 
+	"odin-os/internal/core/policy"
 	"odin-os/internal/registry"
 )
 
@@ -330,5 +331,41 @@ func TestGatewayRejectsInvalidScopeForCapability(t *testing.T) {
 	}
 	if code != "invalid_scope" {
 		t.Fatalf("InvokeCapability() code = %q, want %q", code, "invalid_scope")
+	}
+}
+
+func TestGatewayUsesInjectedPolicyService(t *testing.T) {
+	gateway := newGatewayWithDescriptor(Descriptor{
+		Kind:         registry.KindCommand,
+		Key:          "project.status",
+		Version:      "1.0.0",
+		Availability: registry.Availability{Scope: "project"},
+		Permissions:  []string{"filesystem"},
+		InputSchema:  registry.SchemaRef{Type: "object"},
+		OutputSchema: registry.SchemaRef{Type: "object"},
+	}, func(context.Context, InvokeRequest, Descriptor) (InvokeResponse, error) {
+		return InvokeResponse{RunID: "run-1"}, nil
+	})
+	gateway.SetPolicyService(policy.NewService(map[string][]string{
+		"guest": {"filesystem"},
+	}))
+
+	response, err := gateway.InvokeCapability(context.Background(), InvokeRequest{
+		RequestID:         "req-3",
+		CapabilityID:      "project.status",
+		CapabilityVersion: "1.0.0",
+		Scope: ScopeRef{
+			Kind: "project",
+		},
+		Caller: CallerRef{
+			Kind: "guest",
+		},
+		Input: json.RawMessage(`{}`),
+	})
+	if err != nil {
+		t.Fatalf("InvokeCapability() error = %v, want custom policy to allow invocation", err)
+	}
+	if response.RunID != "run-1" {
+		t.Fatalf("InvokeCapability().RunID = %q, want %q", response.RunID, "run-1")
 	}
 }
