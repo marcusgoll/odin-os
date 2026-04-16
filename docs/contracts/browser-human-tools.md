@@ -19,7 +19,7 @@ The driver command is read from `ODIN_BROWSER_HUMAN_DRIVER`.
 
 The command must distinguish between two failure classes:
 
-- handled tool-level failures stay in structured JSON on stdout
+- successful tool runs return structured JSON on stdout with `status: "completed"`
 - transport or setup failures exit non-zero so the caller can detect the broken driver
 
 The command must also:
@@ -87,11 +87,10 @@ The driver must return exactly one JSON response with these required fields:
 
 Rules:
 
-- `status` must be `completed` for successful runs.
+- `status` must be `completed` for successful runs; the adapter rejects any other status as an error.
 - `tool_key` must echo the request tool key.
 - `summary` must be a short operator-facing sentence.
 - `artifacts` must be present and may contain opaque structured data.
-- handled tool-level failures should still return a structured JSON response with a non-completed status and failure details in `artifacts`.
 
 Expected artifact fields:
 
