@@ -58,17 +58,17 @@ detect_state() {
 }
 
 json_result() {
-    local status="$1" summary="$2" session_state="$3" current_url="$4" snapshot="$5" screenshot_path="$6" next_action="$7"
+    local status="$1" summary="$2" session_state="$3" current_url="$4" evidence="$5" screenshot_path="$6" next_action="$7"
     jq -nc \
         --arg status "${status}" \
         --arg tool_key "${tool_key}" \
         --arg summary "${summary}" \
         --arg session_state "${session_state}" \
         --arg current_url "${current_url}" \
-        --arg snapshot "${snapshot}" \
+        --arg evidence "${evidence}" \
         --arg screenshot_path "${screenshot_path}" \
         --arg next_action "${next_action}" \
-        '{status: $status, tool_key: $tool_key, summary: $summary, artifacts: {session_state: $session_state, current_url: $current_url, snapshot: $snapshot, screenshot_path: $screenshot_path, next_action: $next_action}}'
+        '{status: $status, tool_key: $tool_key, summary: $summary, session_state: $session_state, current_url: $current_url, screenshot_path: $screenshot_path, evidence: $evidence, next_action: $next_action, artifacts: {session_state: $session_state, current_url: $current_url, screenshot_path: $screenshot_path, evidence: $evidence, next_action: $next_action}}'
 }
 
 if ! is_plaid_dashboard_url "${application_url}"; then
@@ -85,8 +85,8 @@ if ! browser_server_start --url "${application_url}" --headless; then
     json_result "failed" "Plaid transfer browser launch failed" "failed" "${application_url}" "" "" "launch_failed"
     exit 0
 fi
-snapshot="$(browser_snapshot 2>/dev/null || true)"
-session_state="$(detect_state "${snapshot}")"
+evidence="$(browser_snapshot 2>/dev/null || true)"
+session_state="$(detect_state "${evidence}")"
 
 screenshot_path="${output_path}"
 if [[ -z "${screenshot_path}" ]]; then
@@ -94,32 +94,32 @@ if [[ -z "${screenshot_path}" ]]; then
 fi
 if ! screenshot_path="$(browser_bc_screenshot --output "${screenshot_path}")"; then
     browser_server_stop >/dev/null 2>&1 || true
-    json_result "failed" "Plaid transfer screenshot failed" "${session_state}" "${application_url}" "${snapshot}" "" "screenshot_failed"
+    json_result "failed" "Plaid transfer screenshot failed" "${session_state}" "${application_url}" "${evidence}" "" "screenshot_failed"
     exit 0
 fi
 
 case "${session_state}" in
     ready_for_login)
         next_action="sign in to Plaid"
-        summary="Plaid transfer flow is waiting for login"
+        summary="Plaid transfer workflow requires login"
         ;;
     blocked_on_mfa)
         next_action="complete MFA challenge"
-        summary="Plaid transfer flow is blocked on MFA"
+        summary="Plaid transfer workflow is blocked on MFA"
         ;;
     submitted_for_review)
         next_action="wait for review"
-        summary="Plaid transfer application was submitted for review"
+        summary="Plaid transfer application is under review"
         ;;
     already_enabled)
         next_action="no action needed"
-        summary="Plaid transfer is already enabled"
+        summary="Plaid transfer application is already enabled"
         ;;
     unclassified)
         next_action="inspect dashboard"
-        summary="Plaid transfer flow is in an unclassified state"
+        summary="Plaid transfer workflow is unclassified"
         ;;
 esac
 
 browser_server_stop
-json_result "completed" "${summary}" "${session_state}" "${application_url}" "${snapshot}" "${screenshot_path}" "${next_action}"
+json_result "completed" "${summary}" "${session_state}" "${application_url}" "${evidence}" "${screenshot_path}" "${next_action}"
