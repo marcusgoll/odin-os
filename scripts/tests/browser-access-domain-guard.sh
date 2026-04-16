@@ -26,6 +26,12 @@ source "${ACCESS_SH}"
 if browser_request_domain_access "https://blocked.example/path"; then
     fail "expected blocked.example to be denied"
 fi
+if browser_request_domain_access "https://blocked.example./path"; then
+    fail "expected blocked.example. to be denied"
+fi
+if browser_request_domain_access "https://blocked.example%2e/path"; then
+    fail "expected blocked.example%2e to be denied"
+fi
 if browser_request_domain_access "https://user:pass@blocked.example/path"; then
     fail "expected credentialed blocked.example to be denied"
 fi
@@ -56,6 +62,9 @@ if browser_request_domain_access "https://foo.localhost/path"; then
 fi
 if browser_request_domain_access "https://127.0.0.2/path"; then
     fail "expected 127.0.0.2 to be denied"
+fi
+if browser_request_domain_access "https://127.0.0.1%2e/path"; then
+    fail "expected 127.0.0.1%2e to be denied"
 fi
 if browser_request_domain_access "https://2130706433/path"; then
     fail "expected integer localhost to be denied"

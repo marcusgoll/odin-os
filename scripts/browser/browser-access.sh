@@ -77,8 +77,22 @@ _ba_domain_host() {
             ;;
     esac
 
-    host="${host,,}"
+    host="$(_ba_normalize_host_for_matching "${host}")"
     [[ -n "${host}" ]] || return 1
+    printf '%s' "${host}"
+}
+
+_ba_normalize_host_for_matching() {
+    local host="${1:-}"
+    [[ -n "${host}" ]] || return 1
+
+    host="${host,,}"
+    host="${host//%2e/.}"
+    host="${host//%2E/.}"
+    while [[ "${host}" == *. ]]; do
+        host="${host%.}"
+    done
+
     printf '%s' "${host}"
 }
 
@@ -172,10 +186,7 @@ _ba_host_is_local_service() {
     local host="${1:-}" normalized
     [[ -n "${host}" ]] || return 1
 
-    normalized="${host,,}"
-    while [[ "${normalized}" == *. ]]; do
-        normalized="${normalized%.}"
-    done
+    normalized="$(_ba_normalize_host_for_matching "${host}")"
     if [[ "${normalized}" == *:* ]]; then
         normalized="${normalized%%%*}"
     fi
@@ -303,6 +314,35 @@ _ba_stop_pid_if_runtime() {
     fi
 }
 
+_bc_browser_server_start_attempt() {
+    local url="${1:-}" headless="${2:-true}" server_pid attempt launch_body health
+
+    ODIN_DIR="${ODIN_DIR}" ODIN_BROWSER_PORT="${BROWSER_SERVER_PORT}" node "${BROWSER_SERVER_SCRIPT}" >> "${BROWSER_SERVER_LOG}" 2>&1 &
+    server_pid=$!
+    printf '%s\n' "${server_pid}" > "${BROWSER_SERVER_PID_FILE}"
+    printf '%s\n' "${BROWSER_SERVER_PORT}" > "${BROWSER_SERVER_PORT_FILE}"
+
+    attempt=0
+    until _bc_curl "${BROWSER_SERVER_URL}/health" >/dev/null 2>&1; do
+        if ! kill -0 "${server_pid}" 2>/dev/null; then
+            return 1
+        fi
+        attempt=$((attempt + 1))
+        if [[ "${attempt}" -gt 30 ]]; then
+            return 1
+        fi
+        sleep 1
+    done
+
+    launch_body="$(jq -n --arg url "${url}" --arg headless "${headless}" '{browser:"chromium", headless: ($headless == "true") } | if $url != "" then . + {url: $url} else . end')"
+    if ! _bc_curl -X POST "${BROWSER_SERVER_URL}/launch" -H 'Content-Type: application/json' -d "${launch_body}" >/dev/null; then
+        return 1
+    fi
+
+    health="$(_bc_curl "${BROWSER_SERVER_URL}/health")" || return 1
+    [[ "$(echo "${health}" | jq -r '.engine // empty')" == "chromium" ]]
+}
+
 browser_server_start() {
     local url="" headless="true"
     while [[ $# -gt 0 ]]; do
@@ -324,37 +364,20 @@ browser_server_start() {
         browser_server_stop >/dev/null 2>&1 || true
     fi
 
-    ODIN_DIR="${ODIN_DIR}" ODIN_BROWSER_PORT="${BROWSER_SERVER_PORT}" node "${BROWSER_SERVER_SCRIPT}" >> "${BROWSER_SERVER_LOG}" 2>&1 &
-    local server_pid=$!
-    printf '%s\n' "${server_pid}" > "${BROWSER_SERVER_PID_FILE}"
-    printf '%s\n' "${BROWSER_SERVER_PORT}" > "${BROWSER_SERVER_PORT_FILE}"
-
     local attempt=0
-    until _bc_curl "${BROWSER_SERVER_URL}/health" >/dev/null 2>&1; do
-        if ! kill -0 "${server_pid}" 2>/dev/null; then
-            rm -f "${BROWSER_SERVER_PID_FILE}" "${BROWSER_SERVER_PORT_FILE}"
+    while true; do
+        if _bc_browser_server_start_attempt "${url}" "${headless}"; then
+            return 0
+        fi
+        browser_server_stop >/dev/null 2>&1 || true
+        if [[ "${attempt}" -ge 1 ]]; then
             return 1
         fi
         attempt=$((attempt + 1))
-        if [[ "${attempt}" -gt 30 ]]; then
-            kill "${server_pid}" 2>/dev/null || true
-            wait "${server_pid}" 2>/dev/null || true
-            rm -f "${BROWSER_SERVER_PID_FILE}" "${BROWSER_SERVER_PORT_FILE}"
-            return 1
-        fi
-        sleep 1
+        ODIN_BROWSER_PORT="$(_ba_resolve_free_port)"
+        BROWSER_SERVER_PORT="${ODIN_BROWSER_PORT}"
+        BROWSER_SERVER_URL="http://127.0.0.1:${BROWSER_SERVER_PORT}"
     done
-
-    local launch_body
-    launch_body="$(jq -n --arg url "${url}" --arg headless "${headless}" '{browser:"chromium", headless: ($headless == "true") } | if $url != "" then . + {url: $url} else . end')"
-    if ! _bc_curl -X POST "${BROWSER_SERVER_URL}/launch" -H 'Content-Type: application/json' -d "${launch_body}" >/dev/null; then
-        browser_server_stop >/dev/null 2>&1 || true
-        return 1
-    fi
-
-    local health
-    health="$(_bc_curl "${BROWSER_SERVER_URL}/health")"
-    [[ "$(echo "${health}" | jq -r '.engine // empty')" == "chromium" ]]
 }
 
 browser_server_stop() {
