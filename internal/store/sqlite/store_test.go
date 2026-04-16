@@ -224,8 +224,8 @@ func TestStoreMigrateLifecycleAndReopen(t *testing.T) {
 	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM schema_migrations`).Scan(&migrationCount); err != nil {
 		t.Fatalf("schema_migrations count query error = %v", err)
 	}
-	if migrationCount != 6 {
-		t.Fatalf("schema_migrations count = %d, want 6", migrationCount)
+	if migrationCount != 7 {
+		t.Fatalf("schema_migrations count = %d, want 7", migrationCount)
 	}
 
 	if err := store.Close(); err != nil {

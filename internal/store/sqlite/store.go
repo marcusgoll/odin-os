@@ -130,6 +130,67 @@ func (store *Store) CreateProject(ctx context.Context, params CreateProjectParam
 	return project, err
 }
 
+func (store *Store) CreateWorkspace(ctx context.Context, params CreateWorkspaceParams) (Workspace, error) {
+	now := store.now()
+	var workspace Workspace
+
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		result, err := tx.ExecContext(ctx, `
+			INSERT INTO workspaces (key, name, owner_ref, default_companion_key, status, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?)
+		`,
+			params.Key,
+			params.Name,
+			params.OwnerRef,
+			params.DefaultCompanionKey,
+			params.Status,
+			formatTime(now),
+			formatTime(now),
+		)
+		if err != nil {
+			return err
+		}
+
+		workspaceID, err := result.LastInsertId()
+		if err != nil {
+			return err
+		}
+
+		policyJSON := params.PolicyJSON
+		if policyJSON == "" {
+			policyJSON = `{}`
+		}
+
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO workspace_policies (workspace_id, policy_json, created_at, updated_at)
+			VALUES (?, ?, ?, ?)
+		`,
+			workspaceID,
+			policyJSON,
+			formatTime(now),
+			formatTime(now),
+		); err != nil {
+			return err
+		}
+
+		workspace = Workspace{
+			ID:                  workspaceID,
+			Key:                 params.Key,
+			Name:                params.Name,
+			OwnerRef:            params.OwnerRef,
+			DefaultCompanionKey: params.DefaultCompanionKey,
+			Status:              params.Status,
+			PolicyJSON:          policyJSON,
+			CreatedAt:           now,
+			UpdatedAt:           now,
+		}
+
+		return nil
+	})
+
+	return workspace, err
+}
+
 func (store *Store) CreateTask(ctx context.Context, params CreateTaskParams) (Task, error) {
 	now := store.now()
 	var task Task
@@ -1540,6 +1601,91 @@ func (store *Store) GetTask(ctx context.Context, taskID int64) (Task, error) {
 	return store.getTaskQuery(ctx, store.db, taskID)
 }
 
+func (store *Store) GetWorkspaceByKey(ctx context.Context, key string) (Workspace, error) {
+	row := store.db.QueryRowContext(ctx, `
+		SELECT
+			w.id,
+			w.key,
+			w.name,
+			w.owner_ref,
+			w.default_companion_key,
+			w.status,
+			p.policy_json,
+			w.created_at,
+			w.updated_at
+		FROM workspaces w
+		JOIN workspace_policies p ON p.workspace_id = w.id
+		WHERE w.key = ?
+	`, key)
+	return scanWorkspace(row)
+}
+
+func (store *Store) UpdateWorkspacePolicy(ctx context.Context, params UpdateWorkspacePolicyParams) (Workspace, error) {
+	now := store.now()
+	var workspace Workspace
+
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		current, err := store.getWorkspaceTx(ctx, tx, params.WorkspaceID)
+		if err != nil {
+			return err
+		}
+
+		policyJSON := params.PolicyJSON
+		if policyJSON == "" {
+			policyJSON = `{}`
+		}
+
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE workspace_policies
+			SET policy_json = ?, updated_at = ?
+			WHERE workspace_id = ?
+		`, policyJSON, formatTime(now), params.WorkspaceID); err != nil {
+			return err
+		}
+
+		current.PolicyJSON = policyJSON
+		current.UpdatedAt = now
+		workspace = current
+		return nil
+	})
+
+	return workspace, err
+}
+
+func (store *Store) ListActiveWorkspaces(ctx context.Context) ([]Workspace, error) {
+	rows, err := store.db.QueryContext(ctx, `
+		SELECT
+			w.id,
+			w.key,
+			w.name,
+			w.owner_ref,
+			w.default_companion_key,
+			w.status,
+			p.policy_json,
+			w.created_at,
+			w.updated_at
+		FROM workspaces w
+		JOIN workspace_policies p ON p.workspace_id = w.id
+		WHERE w.status = 'active'
+		ORDER BY w.key ASC, w.id ASC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var workspaces []Workspace
+	for rows.Next() {
+		workspace, err := scanWorkspace(rows)
+		if err != nil {
+			return nil, err
+		}
+		workspaces = append(workspaces, workspace)
+	}
+
+	return workspaces, rows.Err()
+}
+
 func (store *Store) GetProject(ctx context.Context, projectID int64) (Project, error) {
 	row := store.db.QueryRowContext(ctx, `
 		SELECT id, key, name, scope, git_root, default_branch, github_repo, manifest_path, created_at, updated_at
@@ -2050,6 +2196,25 @@ func (store *Store) getTaskTx(ctx context.Context, tx *sql.Tx, taskID int64) (Ta
 	return store.getTaskQuery(ctx, tx, taskID)
 }
 
+func (store *Store) getWorkspaceTx(ctx context.Context, tx *sql.Tx, workspaceID int64) (Workspace, error) {
+	row := tx.QueryRowContext(ctx, `
+		SELECT
+			w.id,
+			w.key,
+			w.name,
+			w.owner_ref,
+			w.default_companion_key,
+			w.status,
+			p.policy_json,
+			w.created_at,
+			w.updated_at
+		FROM workspaces w
+		JOIN workspace_policies p ON p.workspace_id = w.id
+		WHERE w.id = ?
+	`, workspaceID)
+	return scanWorkspace(row)
+}
+
 func (store *Store) getTaskQuery(ctx context.Context, queryer sqlQueryRow, taskID int64) (Task, error) {
 	row := queryer.QueryRowContext(ctx, `
 		SELECT id, project_id, key, title, status, scope, requested_by, current_run_id, created_at, updated_at
@@ -2527,6 +2692,41 @@ func scanProject(row interface{ Scan(...any) error }) (Project, error) {
 		return Project{}, err
 	}
 	return project, nil
+}
+
+func scanWorkspace(row interface{ Scan(...any) error }) (Workspace, error) {
+	var workspace Workspace
+	var policyJSON sql.NullString
+	var createdAt string
+	var updatedAt string
+	if err := row.Scan(
+		&workspace.ID,
+		&workspace.Key,
+		&workspace.Name,
+		&workspace.OwnerRef,
+		&workspace.DefaultCompanionKey,
+		&workspace.Status,
+		&policyJSON,
+		&createdAt,
+		&updatedAt,
+	); err != nil {
+		return Workspace{}, err
+	}
+
+	var err error
+	workspace.PolicyJSON = policyJSON.String
+	if workspace.PolicyJSON == "" && !policyJSON.Valid {
+		workspace.PolicyJSON = `{}`
+	}
+	workspace.CreatedAt, err = parseTime(createdAt)
+	if err != nil {
+		return Workspace{}, err
+	}
+	workspace.UpdatedAt, err = parseTime(updatedAt)
+	if err != nil {
+		return Workspace{}, err
+	}
+	return workspace, nil
 }
 
 func scanTask(row interface{ Scan(...any) error }) (Task, error) {
