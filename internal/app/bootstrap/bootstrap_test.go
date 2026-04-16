@@ -7,6 +7,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"odin-os/internal/registry"
 )
 
 func TestLoadInitializesFreshRuntimeReadinessState(t *testing.T) {
@@ -48,6 +50,51 @@ func TestBootstrapRetainsCapabilityService(t *testing.T) {
 	}
 	if len(active.Diagnostics) != 0 {
 		t.Fatalf("Active().Diagnostics = %+v, want none", active.Diagnostics)
+	}
+}
+
+func TestSnapshotDigestIgnoresAbsoluteSourcePaths(t *testing.T) {
+	base := registry.Snapshot{
+		Items: []registry.Item{
+			{
+				Kind:   registry.KindSkill,
+				Key:    "skill.example",
+				Title:  "Example Skill",
+				Scopes: []string{"project"},
+				Source: registry.SourceInfo{
+					Path:         "/tmp/a/registry/skills/example.md",
+					RelativePath: "skills/example.md",
+				},
+			},
+		},
+	}
+
+	other := registry.Snapshot{
+		Items: []registry.Item{
+			{
+				Kind:   registry.KindSkill,
+				Key:    "skill.example",
+				Title:  "Example Skill",
+				Scopes: []string{"project"},
+				Source: registry.SourceInfo{
+					Path:         "/opt/alt/registry/skills/example.md",
+					RelativePath: "skills/example.md",
+				},
+			},
+		},
+	}
+
+	baseDigest, err := snapshotDigest(base)
+	if err != nil {
+		t.Fatalf("snapshotDigest(base) error = %v", err)
+	}
+	otherDigest, err := snapshotDigest(other)
+	if err != nil {
+		t.Fatalf("snapshotDigest(other) error = %v", err)
+	}
+
+	if baseDigest != otherDigest {
+		t.Fatalf("snapshotDigest() = %q and %q, want equal", baseDigest, otherDigest)
 	}
 }
 
