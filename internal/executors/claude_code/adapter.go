@@ -28,3 +28,7 @@ func NewHeadless() contract.Executor {
 		},
 	)
 }
+
+func NewCapabilityBridge() Bridge {
+	return NewBridge()
+}

@@ -14,6 +14,10 @@ func NewHeadless() contract.Executor {
 	return headlessExecutor{}
 }
 
+func NewCapabilityBridge() Bridge {
+	return NewBridge()
+}
+
 func (headlessExecutor) Key() string {
 	return "codex_headless"
 }
