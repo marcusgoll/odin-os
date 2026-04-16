@@ -73,11 +73,18 @@ json_result() {
 
 if ! is_plaid_dashboard_url "${application_url}"; then
     json_result "failed" "Plaid transfer application URL must be on Plaid Dashboard" "failed" "${application_url}" "" "" "unsupported application URL"
-    exit 0
+    exit 1
 fi
 
-browser_request_domain_access "${application_url}"
-browser_server_start --url "${application_url}" --headless
+if ! browser_request_domain_access "${application_url}"; then
+    json_result "failed" "Plaid transfer application URL must be on Plaid Dashboard" "failed" "${application_url}" "" "" "unsupported application URL"
+    exit 1
+fi
+if ! browser_server_start --url "${application_url}" --headless; then
+    browser_server_stop >/dev/null 2>&1 || true
+    json_result "failed" "Plaid transfer browser launch failed" "failed" "${application_url}" "" "" "launch_failed"
+    exit 1
+fi
 snapshot="$(browser_snapshot 2>/dev/null || true)"
 session_state="$(detect_state "${snapshot}")"
 
@@ -85,7 +92,11 @@ screenshot_path="${output_path}"
 if [[ -z "${screenshot_path}" ]]; then
     screenshot_path="${ODIN_DIR:-${SCRIPT_DIR}/../../.odin-browser}/browser-state/plaid-transfer.png"
 fi
-screenshot_path="$(browser_bc_screenshot --output "${screenshot_path}" 2>/dev/null || true)"
+if ! screenshot_path="$(browser_bc_screenshot --output "${screenshot_path}")"; then
+    browser_server_stop >/dev/null 2>&1 || true
+    json_result "failed" "Plaid transfer screenshot failed" "${session_state}" "${application_url}" "${snapshot}" "" "screenshot_failed"
+    exit 1
+fi
 
 case "${session_state}" in
     ready_for_login)

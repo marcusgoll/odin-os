@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
-import { accessSync, constants as fsConstants, mkdirSync, statSync } from 'node:fs';
+import { accessSync, constants as fsConstants, mkdirSync, statSync, writeFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import net from 'node:net';
@@ -483,6 +483,24 @@ async function snapshotPage() {
   return [currentTitle || '', bodyText].filter(Boolean).join('\n').trim();
 }
 
+async function screenshotPage(body) {
+  if (!cdp) throw new Error('No page open');
+
+  const result = await cdp.call('Page.captureScreenshot', {
+    format: 'png',
+    fromSurface: true,
+  });
+  const data = String(result?.data || '');
+  if (!data) {
+    throw new Error('Screenshot capture failed');
+  }
+
+  const screenshotPath = body?.path ? String(body.path) : join(BROWSER_STATE_DIR, 'browser.png');
+  mkdirSync(dirname(screenshotPath), { recursive: true });
+  writeFileSync(screenshotPath, Buffer.from(data, 'base64'));
+  return { ok: true, screenshot_path: screenshotPath, url: currentUrl, title: currentTitle };
+}
+
 async function stopBrowser() {
   if (cdp) {
     try { cdp.close(); } catch {}
@@ -533,6 +551,13 @@ const server = createServer(async (req, res) => {
     if (req.method === 'GET' && req.url.startsWith('/snapshot')) {
       const snapshot = await snapshotPage();
       json(res, 200, { ok: true, snapshot, url: currentUrl, title: currentTitle });
+      return;
+    }
+
+    if (req.method === 'POST' && req.url === '/screenshot') {
+      const body = await readBody(req);
+      const result = await screenshotPage(body);
+      json(res, 200, result);
       return;
     }
 

@@ -479,6 +479,32 @@ browser_navigate() {
     _bc_curl -X POST "${BROWSER_SERVER_URL}/navigate" -H 'Content-Type: application/json' -d "${body}" >/dev/null
 }
 
+browser_bc_screenshot() {
+    local output_path="" body response screenshot_path
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --output)
+                output_path="$2"
+                shift 2
+                ;;
+            *)
+                shift
+                ;;
+        esac
+    done
+
+    if [[ -z "${output_path}" ]]; then
+        output_path="${BROWSER_STATE_DIR}/browser.png"
+    fi
+    mkdir -p "$(dirname "${output_path}")"
+
+    body="$(jq -nc --arg path "${output_path}" '{path: $path}')"
+    response="$(_bc_curl -X POST "${BROWSER_SERVER_URL}/screenshot" -H 'Content-Type: application/json' -d "${body}")" || return 1
+    screenshot_path="$(jq -r '.screenshot_path // empty' <<<"${response}")"
+    [[ -n "${screenshot_path}" ]] || return 1
+    printf '%s' "${screenshot_path}"
+}
+
 browser_server_health() {
     _bc_curl "${BROWSER_SERVER_URL}/health"
 }
