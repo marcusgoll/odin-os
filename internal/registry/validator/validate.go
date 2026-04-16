@@ -68,8 +68,6 @@ func validateDocument(document registry.ParsedDocument) []registry.Diagnostic {
 		requireString(document.Source.Path, &diagnostics, "missing_field", "version", document.Frontmatter.Version)
 		requireString(document.Source.Path, &diagnostics, "missing_field", "availability.scope", document.Frontmatter.Availability.Scope)
 		requireList(document.Source.Path, &diagnostics, "missing_field", "permissions", document.Frontmatter.Permissions)
-		requireSchema(document.Source.Path, &diagnostics, "missing_field", "inputSchema", document.Frontmatter.InputSchema)
-		requireSchema(document.Source.Path, &diagnostics, "missing_field", "outputSchema", document.Frontmatter.OutputSchema)
 		requireDependencies(document.Source.Path, &diagnostics, "missing_field", "dependencies", document.Frontmatter.Dependencies)
 		requireString(document.Source.Path, &diagnostics, "missing_field", "execution.mode", document.Frontmatter.Execution.Mode)
 		requireString(document.Source.Path, &diagnostics, "missing_field", "implementation.kind", document.Frontmatter.Implementation.Kind)

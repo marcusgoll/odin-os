@@ -23,6 +23,54 @@ func TestValidateRequiresVersionedInvokableSchemas(t *testing.T) {
 	}
 }
 
+func TestValidateNormalizedAgentDoesNotRequireSchemas(t *testing.T) {
+	document := registry.ParsedDocument{
+		Source: registry.SourceFile{
+			Path:         "/tmp/agents/triage-agent.md",
+			RelativePath: "agents/triage-agent.md",
+			ExpectedKind: registry.KindAgent,
+		},
+		Frontmatter: registry.Frontmatter{
+			APIVersion: registry.NormalizedAPIVersion,
+			Kind:       registry.KindAgent,
+			Name:       "triage-agent",
+			Version:    "1.0.0",
+			Availability: registry.Availability{
+				Scope: "global",
+			},
+			Permissions: []string{"filesystem", "web"},
+			Dependencies: []registry.DependencyRef{
+				{
+					Kind:    registry.KindSkill,
+					Name:    "triage-skill",
+					Version: "1.0.0",
+				},
+			},
+			Execution: registry.ExecutionPolicy{
+				Mode: "local",
+			},
+			Implementation: registry.ImplementationRef{
+				Kind: "markdown",
+				Path: "agents/triage-agent.md",
+			},
+		},
+		Sections: map[string]string{
+			registry.SectionPurpose:         "Purpose",
+			registry.SectionWhenToUse:       "When to use",
+			registry.SectionInputs:          "Inputs",
+			registry.SectionProcedure:       "Procedure",
+			registry.SectionOutputs:         "Outputs",
+			registry.SectionConstraints:     "Constraints",
+			registry.SectionSuccessCriteria: "Success",
+		},
+	}
+
+	diagnostics := validator.ValidateDocuments([]registry.ParsedDocument{document})
+	if len(diagnostics) != 0 {
+		t.Fatalf("ValidateDocuments() diagnostics = %v, want none", diagnostics)
+	}
+}
+
 func TestValidateDocumentsRejectsKindMismatch(t *testing.T) {
 	document := registry.ParsedDocument{
 		Source: registry.SourceFile{
