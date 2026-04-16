@@ -79,9 +79,6 @@ func (driver Driver) Invoke(ctx context.Context, request Request) (Response, err
 	if err := json.Unmarshal(stdout.Bytes(), &response); err != nil {
 		return Response{}, fmt.Errorf("decode driver response: %w", err)
 	}
-	if response.ToolKey == "" {
-		response.ToolKey = request.ToolKey
-	}
 	if response.ToolKey != request.ToolKey {
 		return Response{}, fmt.Errorf("driver response tool_key %q does not match request %q", response.ToolKey, request.ToolKey)
 	}
