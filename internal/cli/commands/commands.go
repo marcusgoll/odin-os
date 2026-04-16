@@ -27,6 +27,17 @@ const (
 	IntentDoctor    Intent = "doctor"
 )
 
+var registryCommands = map[string]RegistryCommand{
+	"status": {
+		CapabilityID:      "project.status",
+		CapabilityVersion: "1.0.0",
+	},
+	"stat": {
+		CapabilityID:      "project.status",
+		CapabilityVersion: "1.0.0",
+	},
+}
+
 func Parse(line string) (Command, bool) {
 	line = strings.TrimSpace(line)
 	if !strings.HasPrefix(line, "/") {
@@ -45,15 +56,11 @@ func Parse(line string) (Command, bool) {
 }
 
 func ResolveRegistryCommand(command Command) (RegistryCommand, bool) {
-	switch command.Name {
-	case "status", "stat":
-		return RegistryCommand{
-			CapabilityID:      "project.status",
-			CapabilityVersion: "1.0.0",
-		}, true
-	default:
+	resolved, ok := registryCommands[command.Name]
+	if !ok {
 		return RegistryCommand{}, false
 	}
+	return resolved, true
 }
 
 func RouteAskIntent(line string) Intent {

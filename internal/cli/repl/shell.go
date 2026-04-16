@@ -16,6 +16,7 @@ import (
 	"odin-os/internal/core/capabilities"
 	corecommands "odin-os/internal/core/commands"
 	"odin-os/internal/core/projects"
+	"odin-os/internal/registry"
 	healthsvc "odin-os/internal/runtime/health"
 	jobsvc "odin-os/internal/runtime/jobs"
 	runsvc "odin-os/internal/runtime/runs"
@@ -27,6 +28,7 @@ type Environment struct {
 	Registry            projects.Registry
 	RegistryDiagnostics []projects.Diagnostic
 	SessionStore        SessionStore
+	CapabilityGateway   capabilityGateway
 	CapabilityService   *capabilities.Service
 	CommandService      CommandExecutor
 }
@@ -38,6 +40,7 @@ type CommandExecutor interface {
 type Shell struct {
 	env            Environment
 	state          State
+	capabilities   capabilityGateway
 	commandService CommandExecutor
 	health         healthsvc.Service
 	jobs           jobsvc.Service
@@ -74,9 +77,14 @@ func New(env Environment) (*Shell, error) {
 	}
 	if env.CommandService != nil {
 		shell.commandService = env.CommandService
+	}
+	if env.CapabilityGateway != nil {
+		shell.capabilities = env.CapabilityGateway
 	} else if env.CapabilityService != nil {
-		gateway := capabilities.NewGateway(env.CapabilityService, shell.invokeCapability, nil)
-		shell.commandService = corecommands.NewService(gateway)
+		shell.capabilities = capabilities.NewGateway(env.CapabilityService, shell.invokeCapability, nil)
+	}
+	if shell.commandService == nil && shell.capabilities != nil {
+		shell.commandService = corecommands.NewService(shell.capabilities)
 	}
 
 	if err := shell.persistState(); err != nil {
@@ -168,8 +176,10 @@ func (shell *Shell) handleCommand(ctx context.Context, command commands.Command,
 	switch command.Name {
 	case "status", "stat":
 		return shell.handleRegistryCommand(ctx, command, output)
+	case "capabilities":
+		return shell.handleCapabilities(command.Args, output)
 	case "help":
-		if _, err := fmt.Fprintln(output, "/help /mode /scope /project /transition /observe /compare /status /stat /jobs /runs /approvals /logs /doctor /self"); err != nil {
+		if _, err := fmt.Fprintln(output, "/help /mode /scope /project /transition /observe /compare /status /stat /capabilities /jobs /runs /approvals /logs /doctor /self"); err != nil {
 			return err
 		}
 		_, err := fmt.Fprintf(output, "%s\n", transitionUsage)
@@ -216,28 +226,8 @@ func (shell *Shell) handleRegistryCommand(ctx context.Context, command commands.
 		_, err := fmt.Fprintf(output, "usage: /%s\n", command.Name)
 		return err
 	}
-
 	if shell.commandService == nil {
-		response, err := shell.executeProjectStatus(ctx, capabilities.InvokeRequest{
-			RequestID:         "",
-			CapabilityID:      resolved.CapabilityID,
-			CapabilityVersion: resolved.CapabilityVersion,
-			Scope: capabilities.ScopeRef{
-				Kind:       string(shell.state.Scope.Kind),
-				ProjectKey: shell.state.Scope.ProjectKey,
-			},
-			Caller: capabilities.CallerRef{
-				Kind: "cli",
-				ID:   "shell",
-			},
-			Input:     json.RawMessage(`{}`),
-			Execution: capabilities.ExecutionRequest{Mode: "local"},
-		}, capabilities.Descriptor{Key: resolved.CapabilityID, Version: resolved.CapabilityVersion})
-		if err != nil {
-			return err
-		}
-		_, err = fmt.Fprint(output, string(response.Output))
-		return err
+		return fmt.Errorf("command gateway unavailable")
 	}
 
 	response, err := shell.commandService.Execute(ctx, capabilities.InvokeRequest{
@@ -265,6 +255,31 @@ func (shell *Shell) handleRegistryCommand(ctx context.Context, command commands.
 	if response.Status != "" {
 		_, err = fmt.Fprintln(output, response.Status)
 		return err
+	}
+	return nil
+}
+
+func (shell *Shell) handleCapabilities(args []string, output io.Writer) error {
+	if shell.capabilities == nil {
+		_, err := fmt.Fprintln(output, "no capabilities")
+		return err
+	}
+
+	scopeFilter := string(shell.state.Scope.Kind)
+	if len(args) > 0 {
+		scopeFilter = strings.ToLower(strings.TrimSpace(args[0]))
+	}
+
+	cards := shell.capabilities.ListCapabilities(registry.KindUnknown, scopeFilter)
+	if len(cards) == 0 {
+		_, err := fmt.Fprintln(output, "no capabilities")
+		return err
+	}
+
+	for _, card := range cards {
+		if _, err := fmt.Fprintf(output, "%s %s %s %s\n", card.ID, card.Version, card.Scope, card.Kind); err != nil {
+			return err
+		}
 	}
 	return nil
 }
