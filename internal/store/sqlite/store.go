@@ -609,6 +609,9 @@ func (store *Store) BlockTaskAndRequestApproval(ctx context.Context, params Bloc
 		if current.Status == "completed" || current.Status == "failed" {
 			return fmt.Errorf("task %d is already %s", params.TaskID, current.Status)
 		}
+		if current.Status == "blocked" {
+			return fmt.Errorf("task %d is already %s", params.TaskID, current.Status)
+		}
 
 		previousStatus := current.Status
 		if _, err := tx.ExecContext(ctx, `
@@ -695,6 +698,22 @@ func (store *Store) ResolveApproval(ctx context.Context, params ResolveApprovalP
 		current, task, err := store.getApprovalWithTaskTx(ctx, tx, params.ApprovalID)
 		if err != nil {
 			return err
+		}
+
+		if params.Status == "approved" {
+			runID := current.RunID
+			if runID == nil {
+				runID = task.CurrentRunID
+			}
+			if runID != nil {
+				linkedRun, _, err := store.getRunWithTaskTx(ctx, tx, *runID)
+				if err != nil {
+					return err
+				}
+				if linkedRun.Status == "running" {
+					return fmt.Errorf("approval %d cannot be approved while run %d is still running", current.ID, linkedRun.ID)
+				}
+			}
 		}
 
 		if _, err := tx.ExecContext(ctx, `
