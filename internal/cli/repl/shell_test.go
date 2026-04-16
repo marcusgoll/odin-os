@@ -11,8 +11,10 @@ import (
 	"testing"
 
 	"odin-os/internal/cli/scope"
+	"odin-os/internal/core/capabilities"
 	"odin-os/internal/core/projects"
 	executorrouter "odin-os/internal/executors/router"
+	"odin-os/internal/registry"
 	runtimeevents "odin-os/internal/runtime/events"
 	"odin-os/internal/store/sqlite"
 	"odin-os/internal/vcs/leases"
@@ -380,6 +382,128 @@ func TestDoctorCommandSupportsJSONOutput(t *testing.T) {
 	}
 }
 
+func TestCLICommandDispatchUsesCommandService(t *testing.T) {
+	t.Parallel()
+
+	env := newTestEnvironment(t)
+	service := &recordingCommandService{
+		response: capabilities.InvokeResponse{
+			Status: "ok",
+			Output: json.RawMessage(`status=registry-backed`),
+		},
+	}
+	env.CommandService = service
+
+	shell, err := New(env)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	for _, command := range []string{"/stat", "/status"} {
+		var output bytes.Buffer
+		if err := shell.HandleLine(context.Background(), command, &output); err != nil {
+			t.Fatalf("HandleLine(%s) error = %v", command, err)
+		}
+		if !strings.Contains(output.String(), "registry-backed") {
+			t.Fatalf("output = %q, want registry-backed response", output.String())
+		}
+	}
+
+	if len(service.calls) != 2 {
+		t.Fatalf("command service calls = %d, want 2", len(service.calls))
+	}
+	for i, got := range service.calls {
+		if got.CapabilityID != "project.status" || got.CapabilityVersion != "1.0.0" {
+			t.Fatalf("command request[%d] = %+v, want project.status 1.0.0", i, got)
+		}
+	}
+}
+
+func TestCLIListsCapabilities(t *testing.T) {
+	t.Parallel()
+
+	env := newTestEnvironment(t)
+	gateway := &recordingCapabilityGateway{
+		listByScope: map[string][]capabilities.CapabilityCard{
+			"project": {
+				{ID: "project.status", Kind: registry.KindCommand, Name: "project.status", Version: "1.0.0", Scope: "project"},
+			},
+			"global": {
+				{ID: "global.health", Kind: registry.KindSkill, Name: "global.health", Version: "1.0.0", Scope: "global"},
+			},
+		},
+	}
+	env.CapabilityGateway = gateway
+
+	shell, err := New(env)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	var output bytes.Buffer
+	if err := shell.HandleLine(context.Background(), "/project alpha", &output); err != nil {
+		t.Fatalf("HandleLine(/project) error = %v", err)
+	}
+	output.Reset()
+	if err := shell.HandleLine(context.Background(), "/capabilities", &output); err != nil {
+		t.Fatalf("HandleLine(/capabilities) error = %v", err)
+	}
+
+	if len(gateway.listCalls) != 1 {
+		t.Fatalf("ListCapabilities() calls = %d, want 1", len(gateway.listCalls))
+	}
+	if got := gateway.listCalls[0].scope; got != "project" {
+		t.Fatalf("ListCapabilities() scope = %q, want %q", got, "project")
+	}
+	if !strings.Contains(output.String(), "project.status") {
+		t.Fatalf("output = %q, want project capability", output.String())
+	}
+	if strings.Contains(output.String(), "global.health") {
+		t.Fatalf("output = %q, want scope-filtered project capabilities only", output.String())
+	}
+}
+
+func TestCLIInvokesCapabilityThroughGateway(t *testing.T) {
+	t.Parallel()
+
+	env := newTestEnvironment(t)
+	gateway := &recordingCapabilityGateway{
+		descriptor: capabilities.Descriptor{
+			Kind:         registry.KindCommand,
+			Key:          "project.status",
+			Version:      "1.0.0",
+			InputSchema:  registry.SchemaRef{Type: "object"},
+			OutputSchema: registry.SchemaRef{Type: "object"},
+		},
+		invokeResponse: capabilities.InvokeResponse{
+			Status: "ok",
+			Output: json.RawMessage(`status=registry-backed`),
+		},
+	}
+	env.CapabilityGateway = gateway
+
+	shell, err := New(env)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	var output bytes.Buffer
+	if err := shell.HandleLine(context.Background(), "/project alpha", &output); err != nil {
+		t.Fatalf("HandleLine(/project) error = %v", err)
+	}
+	output.Reset()
+	if err := shell.HandleLine(context.Background(), "/status", &output); err != nil {
+		t.Fatalf("HandleLine(/status) error = %v", err)
+	}
+
+	if len(gateway.invokeCalls) != 1 {
+		t.Fatalf("InvokeCapability() calls = %d, want 1", len(gateway.invokeCalls))
+	}
+	if !strings.Contains(output.String(), "registry-backed") {
+		t.Fatalf("output = %q, want registry-backed response", output.String())
+	}
+}
+
 func TestShellHelpIncludesExplicitCompatibilitySurface(t *testing.T) {
 	t.Parallel()
 
@@ -400,6 +524,9 @@ func TestShellHelpIncludesExplicitCompatibilitySurface(t *testing.T) {
 		"odin status --json",
 		"odin task run --project <key> --title <title>",
 		"odin repl",
+		"/status",
+		"/stat",
+		"/capabilities",
 		"/scope",
 		"/transition",
 		"/observe",
@@ -911,4 +1038,59 @@ func hasTransitionEvent(events []runtimeevents.Record, want runtimeevents.Type) 
 		}
 	}
 	return false
+}
+
+type recordingCommandService struct {
+	calls    []capabilities.InvokeRequest
+	response capabilities.InvokeResponse
+	err      error
+}
+
+func (service *recordingCommandService) Execute(_ context.Context, request capabilities.InvokeRequest) (capabilities.InvokeResponse, error) {
+	service.calls = append(service.calls, request)
+	if service.err != nil {
+		return capabilities.InvokeResponse{}, service.err
+	}
+	return service.response, nil
+}
+
+type recordingCapabilityGateway struct {
+	listByScope    map[string][]capabilities.CapabilityCard
+	listCalls      []recordingCapabilityListCall
+	descriptor     capabilities.Descriptor
+	getCalls       []recordingCapabilityGetCall
+	invokeCalls    []capabilities.InvokeRequest
+	invokeResponse capabilities.InvokeResponse
+}
+
+type recordingCapabilityListCall struct {
+	kind  registry.Kind
+	scope string
+}
+
+type recordingCapabilityGetCall struct {
+	id      string
+	version string
+}
+
+func (gateway *recordingCapabilityGateway) ListCapabilities(kind registry.Kind, scope string) []capabilities.CapabilityCard {
+	gateway.listCalls = append(gateway.listCalls, recordingCapabilityListCall{kind: kind, scope: scope})
+	if cards, ok := gateway.listByScope[scope]; ok {
+		return append([]capabilities.CapabilityCard(nil), cards...)
+	}
+	return nil
+}
+
+func (gateway *recordingCapabilityGateway) GetCapability(id, version string) (capabilities.Descriptor, error) {
+	gateway.getCalls = append(gateway.getCalls, recordingCapabilityGetCall{id: id, version: version})
+	return gateway.descriptor, nil
+}
+
+func (gateway *recordingCapabilityGateway) InvokeCapability(_ context.Context, request capabilities.InvokeRequest) (capabilities.InvokeResponse, error) {
+	gateway.invokeCalls = append(gateway.invokeCalls, request)
+	return gateway.invokeResponse, nil
+}
+
+func (gateway *recordingCapabilityGateway) GetRun(context.Context, int64) (capabilities.RunEnvelope, error) {
+	return capabilities.RunEnvelope{}, nil
 }

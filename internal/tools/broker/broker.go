@@ -107,6 +107,23 @@ func (broker *Broker) Expand(key string) (catalog.Expansion, error) {
 				SourceRef: item.Source.RelativePath,
 			},
 		}, nil
+	case registry.KindWorkflow:
+		return catalog.Expansion{
+			Card: card,
+			Workflow: &catalog.WorkflowDefinition{
+				Key:          item.Key,
+				Title:        item.Title,
+				Summary:      item.Summary,
+				Version:      item.Version,
+				Tags:         append([]string(nil), item.Tags...),
+				Scopes:       append([]string(nil), item.Scopes...),
+				Entrypoint:   item.Entrypoint,
+				Composes:     append([]string(nil), item.Composes...),
+				Dependencies: append([]registry.DependencyRef(nil), item.Dependencies...),
+				Sections:     catalog.CloneSections(item.Sections),
+				SourceRef:    item.Source.RelativePath,
+			},
+		}, nil
 	default:
 		return catalog.Expansion{}, fmt.Errorf("capability %q is not broker-expandable", key)
 	}

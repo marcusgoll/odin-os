@@ -22,6 +22,7 @@ const (
 	StreamLearningProposal   StreamType = "learning_proposal"
 	StreamLearningEvaluation StreamType = "learning_evaluation"
 	StreamLearningPromotion  StreamType = "learning_promotion"
+	StreamCapability         StreamType = "capability"
 )
 
 type Type string
@@ -56,6 +57,8 @@ const (
 	EventLearningEvaluationRecorded       Type = "learning.evaluation_recorded"
 	EventLearningPromotionApplied         Type = "learning.promotion_applied"
 	EventLearningPromotionRolledBack      Type = "learning.promotion_rolled_back"
+	EventCapabilitySnapshotPublished      Type = "capability.snapshot_published"
+	EventCapabilitySnapshotRejected       Type = "capability.snapshot_rejected"
 )
 
 type Record struct {
@@ -252,6 +255,19 @@ type LearningPromotionRolledBackPayload struct {
 	RolledBackBy        string `json:"rolled_back_by"`
 	RollbackReason      string `json:"rollback_reason"`
 	RestoredPromotionID *int64 `json:"restored_promotion_id,omitempty"`
+}
+
+type CapabilitySnapshotPublishedPayload struct {
+	PreviousDigest  string `json:"previous_digest,omitempty"`
+	Digest          string `json:"digest"`
+	CapabilityCount int    `json:"capability_count"`
+}
+
+type CapabilitySnapshotRejectedPayload struct {
+	PreviousDigest  string `json:"previous_digest,omitempty"`
+	Digest          string `json:"digest,omitempty"`
+	CapabilityCount int    `json:"capability_count"`
+	Reason          string `json:"reason"`
 }
 
 func EncodePayload(payload any) (json.RawMessage, error) {

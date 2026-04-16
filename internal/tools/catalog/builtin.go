@@ -9,17 +9,20 @@ import (
 	"odin-os/internal/tools/invocation"
 )
 
+// BuiltinDefinitions contains bootstrap-only tool inventory until each tool has
+// a manifest-backed or gateway-backed replacement.
 func BuiltinDefinitions() map[string]ToolDefinition {
 	definitions := []ToolDefinition{
 		{
 			Key:        "huginn_browser_session",
 			Title:      "Huginn Browser Session",
 			Summary:    "Runs the bounded generic browser session workflow.",
+			Version:    "1.0.0",
 			Scopes:     []string{"global", "project", "odin-core", "new-project"},
-			Tags:       []string{"browser", "human", "session"},
+			Tags:       []string{"browser", "human", "session", "bootstrap-only"},
 			CostHint:   CostHintLow,
 			BudgetCost: 1,
-			SourceRef:  "builtin://huginn_browser_session",
+			SourceRef:  "bootstrap://driver/huginn_browser_session",
 			Schema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -51,11 +54,12 @@ func BuiltinDefinitions() map[string]ToolDefinition {
 			Key:        "plaid_transfer_application",
 			Title:      "Plaid Transfer Application",
 			Summary:    "Runs the bounded Plaid Transfer application workflow.",
+			Version:    "1.0.0",
 			Scopes:     []string{"global", "project", "odin-core", "new-project"},
-			Tags:       []string{"browser", "human", "plaid", "transfer"},
+			Tags:       []string{"browser", "human", "plaid", "transfer", "bootstrap-only"},
 			CostHint:   CostHintMedium,
 			BudgetCost: 2,
-			SourceRef:  "builtin://plaid_transfer_application",
+			SourceRef:  "bootstrap://driver/plaid_transfer_application",
 			Schema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -77,6 +81,68 @@ func BuiltinDefinitions() map[string]ToolDefinition {
 				})
 			},
 		},
+		{
+			Key:        "task_list",
+			Title:      "Task List",
+			Summary:    "Lists task projections for the requested scope.",
+			Version:    "1.0.0",
+			Scopes:     []string{"global", "project", "odin-core", "new-project"},
+			Tags:       []string{"runtime", "tasks", "bootstrap-only"},
+			CostHint:   CostHintLow,
+			BudgetCost: 1,
+			SourceRef:  "bootstrap://legacy/task_list",
+			Schema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"scope": map[string]any{"type": "string"},
+				},
+			},
+			Invoke: func(input map[string]string) (StructuredResult, error) {
+				scope := input["scope"]
+				if scope == "" {
+					scope = "global"
+				}
+				return StructuredResult{
+					CapabilityKey:   "task_list",
+					Summary:         fmt.Sprintf("Task list prepared for %s scope.", scope),
+					KeyFacts:        map[string]string{"scope": scope},
+					FollowOnOptions: []string{"expand sub-agent", "invoke event_log"},
+					RawRef:          "builtin://task_list/result",
+					RawOutput:       fmt.Sprintf("scope=%s tasks=0", scope),
+				}, nil
+			},
+		},
+		{
+			Key:        "event_log",
+			Title:      "Event Log",
+			Summary:    "Retrieves recent audit event summaries.",
+			Version:    "1.0.0",
+			Scopes:     []string{"global", "project", "odin-core", "new-project"},
+			Tags:       []string{"runtime", "events", "bootstrap-only"},
+			CostHint:   CostHintMedium,
+			BudgetCost: 2,
+			SourceRef:  "bootstrap://legacy/event_log",
+			Schema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"limit": map[string]any{"type": "integer"},
+				},
+			},
+			Invoke: func(input map[string]string) (StructuredResult, error) {
+				limit := input["limit"]
+				if limit == "" {
+					limit = "10"
+				}
+				return StructuredResult{
+					CapabilityKey:   "event_log",
+					Summary:         fmt.Sprintf("Event log prepared with limit %s.", limit),
+					KeyFacts:        map[string]string{"limit": limit},
+					FollowOnOptions: []string{"invoke task_list"},
+					RawRef:          "builtin://event_log/result",
+					RawOutput:       fmt.Sprintf("limit=%s events=0", limit),
+				}, nil
+			},
+		},
 	}
 
 	index := make(map[string]ToolDefinition, len(definitions))
@@ -96,11 +162,12 @@ func BuiltinDefinitionsWithInvoker(invoker invocation.Invoker) map[string]ToolDe
 		Key:        "project_status",
 		Title:      "Project Status",
 		Summary:    "Summarizes managed project status for planning.",
+		Version:    "1.0.0",
 		Scopes:     []string{"global", "project", "odin-core"},
-		Tags:       []string{"project", "status"},
+		Tags:       []string{"project", "status", "bootstrap-only"},
 		CostHint:   CostHintLow,
 		BudgetCost: 1,
-		SourceRef:  "builtin://project_status",
+		SourceRef:  "bootstrap://legacy/project_status",
 		Schema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{

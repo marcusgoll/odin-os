@@ -5,9 +5,11 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"odin-os/internal/cli/scope"
+	"odin-os/internal/core/capabilities"
 	"odin-os/internal/executors/contract"
 	"odin-os/internal/runtime/projections"
 	"odin-os/internal/store/sqlite"
@@ -16,6 +18,14 @@ import (
 type Service struct {
 	DB    *sql.DB
 	Store *sqlite.Store
+}
+
+type RunRecord struct {
+	RunID      int64
+	Status     string
+	Summary    string
+	StartedAt  string
+	FinishedAt *string
 }
 
 func (service Service) List(ctx context.Context, resolved scope.Resolution) ([]projections.RunSummaryView, error) {
@@ -78,6 +88,51 @@ func (service Service) List(ctx context.Context, resolved scope.Resolution) ([]p
 	}
 
 	return views, rows.Err()
+}
+
+func (service Service) GetRun(ctx context.Context, runID int64) (RunRecord, error) {
+	db := service.DB
+	if db == nil && service.Store != nil {
+		db = service.Store.DB()
+	}
+	if db == nil {
+		return RunRecord{}, fmt.Errorf("run store is required")
+	}
+
+	row := db.QueryRowContext(ctx, `
+		SELECT id, status, summary, started_at, finished_at
+		FROM runs
+		WHERE id = ?
+	`, runID)
+
+	var record RunRecord
+	var finishedAt sql.NullString
+	if err := row.Scan(
+		&record.RunID,
+		&record.Status,
+		&record.Summary,
+		&record.StartedAt,
+		&finishedAt,
+	); err != nil {
+		return RunRecord{}, err
+	}
+	if finishedAt.Valid {
+		record.FinishedAt = &finishedAt.String
+	}
+	return record, nil
+}
+
+func (service Service) GetRunEnvelope(ctx context.Context, runID int64) (capabilities.RunEnvelope, error) {
+	record, err := service.GetRun(ctx, runID)
+	if err != nil {
+		return capabilities.RunEnvelope{}, err
+	}
+
+	return capabilities.RunEnvelope{
+		RunID:     strconv.FormatInt(record.RunID, 10),
+		Status:    record.Status,
+		Artifacts: []capabilities.Artifact{},
+	}, nil
 }
 
 func (service Service) Start(ctx context.Context, task sqlite.Task, executorKey string) (sqlite.Run, error) {

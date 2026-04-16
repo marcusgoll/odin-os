@@ -10,15 +10,23 @@ import (
 	"time"
 
 	"odin-os/internal/cli/scope"
+	"odin-os/internal/core/capabilities"
 	"odin-os/internal/core/projects"
 	"odin-os/internal/executors/contract"
 	executorrouter "odin-os/internal/executors/router"
+	"odin-os/internal/runtime/checkpoints"
 	"odin-os/internal/runtime/projections"
 	runsvc "odin-os/internal/runtime/runs"
+	"odin-os/internal/runtime/supervision"
 	"odin-os/internal/store/sqlite"
 	"odin-os/internal/tools/budgets"
 	"odin-os/internal/vcs/leases"
 	worktreemgr "odin-os/internal/vcs/worktrees"
+)
+
+const (
+	defaultInvocationTimeout    = 30 * time.Minute
+	defaultInvocationRetryLimit = 1
 )
 
 type Service struct {
@@ -30,6 +38,7 @@ type Service struct {
 	Transitions              projects.Service
 	Runs                     runsvc.Service
 	Leases                   leases.Manager
+	Supervisor               supervision.Supervisor
 	MutableHeartbeatInterval time.Duration
 	Now                      func() time.Time
 }
@@ -241,6 +250,23 @@ func (service Service) runQueuedTask(ctx context.Context, task sqlite.Task) (Exe
 		RepoRoot:     project.GitRoot,
 		WorktreePath: project.GitRoot,
 	}
+	invocation := checkpoints.InvocationContext{
+		RunID:      run.ID,
+		TaskID:     task.ID,
+		TaskKey:    task.Key,
+		ProjectID:  project.ID,
+		ProjectKey: project.Key,
+		Executor:   decision.ExecutorKey,
+		Attempt:    run.Attempt,
+		Scope:      task.Scope,
+		Prompt:     task.Title,
+		Timeout:    defaultInvocationTimeout.String(),
+		RetryLimit: defaultInvocationRetryLimit,
+		Metadata: map[string]string{
+			"project_key": project.Key,
+			"task_id":     fmt.Sprintf("%d", task.ID),
+		},
+	}
 
 	if task.ActionKey != "" && !projects.SupportsLimitedAction(manifest, task.ActionKey) {
 		return finishFailure(fmt.Errorf("action key %q is not supported by project policy", task.ActionKey))
@@ -323,13 +349,78 @@ func (service Service) runQueuedTask(ctx context.Context, task sqlite.Task) (Exe
 	spec.Metadata["run_id"] = fmt.Sprintf("%d", run.ID)
 	spec.Metadata["run_attempt"] = fmt.Sprintf("%d", run.Attempt)
 	spec.Metadata["worktree_path"] = assignment.WorktreePath
+	invocation.Metadata["branch_name"] = assignment.BranchName
+	invocation.Metadata["repo_root"] = assignment.RepoRoot
+	invocation.Metadata["worktree_path"] = assignment.WorktreePath
+
+	if _, err := (checkpoints.Service{Store: service.Store}).Compact(ctx, checkpoints.CompactParams{
+		TaskID:               task.ID,
+		RunID:                &run.ID,
+		Trigger:              checkpoints.TriggerHandoff,
+		CheckpointKey:        fmt.Sprintf("run-start-%d", run.ID),
+		Objective:            task.Title,
+		TaskStatus:           "running",
+		BlockingReason:       "executor handoff in progress",
+		SelectedCapabilities: []string{decision.ExecutorKey},
+		ManifestSummary:      "managed project",
+		PolicySummary:        "bounded runtime execution",
+		OpenTaskSummary:      task.Title,
+		ApprovalSummary:      "none",
+		Invocation:           &invocation,
+	}); err != nil {
+		return finishFailure(err)
+	}
 
 	executor := executors[decision.ExecutorKey]
-	result, err := executor.RunTask(ctx, spec)
+	supervisor := service.Supervisor
+	if supervisor == nil {
+		supervisor = supervision.Service{}
+	}
+
+	var executionResult contract.ExecutionResult
+	response, err := supervisor.Run(ctx, capabilities.InvokeRequest{
+		RequestID:         fmt.Sprintf("run-%d", run.ID),
+		CapabilityID:      task.Key,
+		CapabilityVersion: project.Key,
+		Scope: capabilities.ScopeRef{
+			Kind:       task.Scope,
+			ProjectKey: project.Key,
+		},
+		Caller: capabilities.CallerRef{
+			Kind: "system",
+			ID:   "runtime_jobs",
+		},
+		Execution: capabilities.ExecutionRequest{
+			Timeout:    defaultInvocationTimeout.String(),
+			RetryLimit: defaultInvocationRetryLimit,
+		},
+	}, func(attemptCtx context.Context, _ int) (capabilities.InvokeResponse, error) {
+		var execErr error
+		executionResult, execErr = executor.RunTask(attemptCtx, spec)
+		if execErr != nil {
+			return capabilities.InvokeResponse{}, execErr
+		}
+
+		response := capabilities.InvokeResponse{
+			RunID:  fmt.Sprintf("%d", run.ID),
+			Status: executionResult.Status,
+			Output: json.RawMessage([]byte(executionResult.Output)),
+		}
+		if response.Status == "" {
+			response.Status = "completed"
+		}
+		return response, nil
+	})
 	if err != nil {
 		return finishFailure(err)
 	}
-	if err := runsService.Complete(teardownCtx, run.ID, result); err != nil {
+	if strings.TrimSpace(executionResult.Status) == "" {
+		executionResult.Status = response.Status
+	}
+	if strings.TrimSpace(executionResult.Output) == "" && len(response.Output) > 0 {
+		executionResult.Output = string(response.Output)
+	}
+	if err := runsService.Complete(teardownCtx, run.ID, executionResult); err != nil {
 		return ExecutionOutcome{}, err
 	}
 	terminalStatePersisted = true

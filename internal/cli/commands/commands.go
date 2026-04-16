@@ -7,6 +7,11 @@ type Command struct {
 	Args []string
 }
 
+type RegistryCommand struct {
+	CapabilityID      string
+	CapabilityVersion string
+}
+
 type Intent string
 
 const (
@@ -21,6 +26,19 @@ const (
 	IntentLogs      Intent = "logs"
 	IntentDoctor    Intent = "doctor"
 )
+
+// bootstrapRegistryCommands remains a bootstrap-only alias map until commands are
+// discovered directly from the live capability registry.
+var bootstrapRegistryCommands = map[string]RegistryCommand{
+	"status": {
+		CapabilityID:      "project.status",
+		CapabilityVersion: "1.0.0",
+	},
+	"stat": {
+		CapabilityID:      "project.status",
+		CapabilityVersion: "1.0.0",
+	},
+}
 
 func Parse(line string) (Command, bool) {
 	line = strings.TrimSpace(line)
@@ -37,6 +55,14 @@ func Parse(line string) (Command, bool) {
 		Name: strings.ToLower(fields[0]),
 		Args: fields[1:],
 	}, true
+}
+
+func ResolveRegistryCommand(command Command) (RegistryCommand, bool) {
+	resolved, ok := bootstrapRegistryCommands[command.Name]
+	if !ok {
+		return RegistryCommand{}, false
+	}
+	return resolved, true
 }
 
 func RouteAskIntent(line string) Intent {

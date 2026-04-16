@@ -5,6 +5,8 @@ import (
 	"strings"
 )
 
+const NormalizedAPIVersion = "odin/v1"
+
 type Kind string
 
 const (
@@ -46,8 +48,60 @@ type SourceInfo struct {
 	RelativePath string
 }
 
+type Manifest struct {
+	APIVersion     string            `yaml:"apiVersion"`
+	Kind           Kind              `yaml:"kind"`
+	Name           string            `yaml:"name"`
+	Version        string            `yaml:"version"`
+	Availability   Availability      `yaml:"availability"`
+	Permissions    []string          `yaml:"permissions"`
+	InputSchema    SchemaRef         `yaml:"inputSchema"`
+	OutputSchema   SchemaRef         `yaml:"outputSchema"`
+	Dependencies   []DependencyRef   `yaml:"dependencies"`
+	Execution      ExecutionPolicy   `yaml:"execution"`
+	Implementation ImplementationRef `yaml:"implementation"`
+}
+
+type Availability struct {
+	Scope string `yaml:"scope"`
+	Mode  string `yaml:"mode,omitempty"`
+}
+
+type SchemaRef struct {
+	Ref  string `yaml:"ref,omitempty"`
+	Type string `yaml:"type,omitempty"`
+}
+
+type DependencyRef struct {
+	Kind    Kind   `yaml:"kind,omitempty"`
+	Name    string `yaml:"name,omitempty"`
+	Version string `yaml:"version,omitempty"`
+}
+
+type ExecutionPolicy struct {
+	Mode    string `yaml:"mode,omitempty"`
+	Timeout string `yaml:"timeout,omitempty"`
+}
+
+type ImplementationRef struct {
+	Kind string `yaml:"kind,omitempty"`
+	Ref  string `yaml:"ref,omitempty"`
+	Path string `yaml:"path,omitempty"`
+}
+
 type Frontmatter struct {
-	Kind       Kind     `yaml:"kind"`
+	APIVersion     string            `yaml:"apiVersion"`
+	Kind           Kind              `yaml:"kind"`
+	Name           string            `yaml:"name"`
+	Version        string            `yaml:"version"`
+	Availability   Availability      `yaml:"availability"`
+	Permissions    []string          `yaml:"permissions"`
+	InputSchema    SchemaRef         `yaml:"inputSchema"`
+	OutputSchema   SchemaRef         `yaml:"outputSchema"`
+	Dependencies   []DependencyRef   `yaml:"dependencies"`
+	Execution      ExecutionPolicy   `yaml:"execution"`
+	Implementation ImplementationRef `yaml:"implementation"`
+
 	Key        string   `yaml:"key"`
 	Title      string   `yaml:"title"`
 	Summary    string   `yaml:"summary"`
@@ -85,7 +139,18 @@ type Diagnostic struct {
 }
 
 type Item struct {
-	Kind       Kind
+	APIVersion     string
+	Kind           Kind
+	Name           string
+	Version        string
+	Availability   Availability
+	Permissions    []string
+	InputSchema    SchemaRef
+	OutputSchema   SchemaRef
+	Dependencies   []DependencyRef
+	Execution      ExecutionPolicy
+	Implementation ImplementationRef
+
 	Key        string
 	Title      string
 	Summary    string
@@ -119,6 +184,33 @@ func (kind Kind) Valid() bool {
 	default:
 		return false
 	}
+}
+
+func (kind Kind) ValidDependencyKind() bool {
+	switch kind {
+	case KindAgent, KindSkill, KindCommand, Kind("tool"):
+		return true
+	default:
+		return false
+	}
+}
+
+func (kind Kind) IsInvokable() bool {
+	switch kind {
+	case KindSkill, KindWorkflow, KindCommand:
+		return true
+	default:
+		return false
+	}
+}
+
+func (frontmatter Frontmatter) UsesNormalizedManifest() bool {
+	return strings.TrimSpace(frontmatter.APIVersion) == NormalizedAPIVersion
+}
+
+func (frontmatter Frontmatter) HasUnsupportedAPIVersion() bool {
+	apiVersion := strings.TrimSpace(frontmatter.APIVersion)
+	return apiVersion != "" && apiVersion != NormalizedAPIVersion
 }
 
 func KindFromDirectory(name string) Kind {

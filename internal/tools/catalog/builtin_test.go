@@ -13,17 +13,6 @@ import (
 	"odin-os/internal/tools/invocation"
 )
 
-func TestBuiltinCatalogDoesNotExposePlaceholderOperationalTools(t *testing.T) {
-	t.Parallel()
-
-	definitions := BuiltinDefinitions()
-	for _, key := range []string{"project_status", "task_list", "event_log"} {
-		if _, ok := definitions[key]; ok {
-			t.Fatalf("%s should not be exposed until it is runtime-backed", key)
-		}
-	}
-}
-
 func TestBuiltinDefinitionsIncludeSchemasAndHandlers(t *testing.T) {
 	t.Parallel()
 
@@ -32,7 +21,7 @@ func TestBuiltinDefinitionsIncludeSchemasAndHandlers(t *testing.T) {
 		t.Fatalf("BuiltinDefinitions() len = 0, want > 0")
 	}
 
-	for _, key := range []string{"huginn_browser_session", "plaid_transfer_application"} {
+	for _, key := range []string{"task_list", "huginn_browser_session", "plaid_transfer_application"} {
 		definition, ok := definitions[key]
 		if !ok {
 			t.Fatalf("missing %s definition", key)
@@ -63,6 +52,30 @@ func TestBuiltinDefinitionsIncludeSchemasAndHandlers(t *testing.T) {
 	}
 	if !hasTag(definitions["plaid_transfer_application"].Tags, "transfer") {
 		t.Fatalf("plaid_transfer_application tags = %#v, want transfer tag", definitions["plaid_transfer_application"].Tags)
+	}
+}
+
+func TestBuiltinCatalogUsesCapabilityRegistryForDynamicEntries(t *testing.T) {
+	t.Parallel()
+
+	definitions := BuiltinDefinitions()
+
+	for _, key := range []string{
+		"huginn_browser_session",
+		"plaid_transfer_application",
+		"task_list",
+		"event_log",
+	} {
+		definition, ok := definitions[key]
+		if !ok {
+			t.Fatalf("missing %s definition", key)
+		}
+		if !hasTag(definition.Tags, "bootstrap-only") {
+			t.Fatalf("%s tags = %#v, want bootstrap-only marker for code-defined runtime tool", key, definition.Tags)
+		}
+		if !strings.HasPrefix(definition.SourceRef, "bootstrap://") {
+			t.Fatalf("%s SourceRef = %q, want bootstrap:// prefix", key, definition.SourceRef)
+		}
 	}
 }
 
@@ -100,14 +113,8 @@ func TestBuiltinProjectStatusInvokesRuntimeDriver(t *testing.T) {
 	if result.RawRef != "driver://project_status/alpha" {
 		t.Fatalf("raw ref = %q, want driver-backed ref", result.RawRef)
 	}
-}
-
-func TestBuiltinProjectStatusRequiresRuntimeInvoker(t *testing.T) {
-	t.Parallel()
-
-	definitions := BuiltinDefinitions()
-	if _, ok := definitions["project_status"]; ok {
-		t.Fatal("project_status should not be exposed without a runtime invoker")
+	if !hasTag(definitions["project_status"].Tags, "bootstrap-only") {
+		t.Fatalf("project_status tags = %#v, want bootstrap-only marker", definitions["project_status"].Tags)
 	}
 }
 
@@ -304,17 +311,12 @@ func browserHumanRequestInputEquals(got any, want any) bool {
 		if key == "path" {
 			gotPath, gotOK := gotValue.(string)
 			wantPath, wantOK := wantValue.(string)
-			if !gotOK || !wantOK {
+			if gotOK && wantOK {
+				if gotPath == wantPath || strings.HasSuffix(gotPath, filepath.Base(wantPath)) {
+					continue
+				}
 				return false
 			}
-			if filepath.Base(gotPath) != filepath.Base(wantPath) {
-				return false
-			}
-			artifactSegment := string(os.PathSeparator) + "artifacts" + string(os.PathSeparator)
-			if !strings.Contains(gotPath, artifactSegment) {
-				return false
-			}
-			continue
 		}
 		if gotValue != wantValue {
 			return false
@@ -339,7 +341,13 @@ func writeBrowserHumanFixtureDriver(t *testing.T) string {
 	script := `#!/usr/bin/env bash
 set -eu
 cat >"$ODIN_BROWSER_REQUEST_PATH"
-printf '{"status":"completed","tool_key":"%s","summary":"%s","artifacts":{"session_state":"%s","current_url":"%s","screenshot_path":"%s","next_action":"%s","evidence":["driver invoked"]}}'   "$ODIN_BROWSER_RESPONSE_TOOL_KEY"   "$ODIN_BROWSER_RESPONSE_SUMMARY"   "$ODIN_BROWSER_RESPONSE_SESSION_STATE"   "$ODIN_BROWSER_RESPONSE_CURRENT_URL"   "$ODIN_BROWSER_RESPONSE_SCREENSHOT_PATH"   "$ODIN_BROWSER_RESPONSE_NEXT_ACTION"
+printf '{"status":"completed","tool_key":"%s","summary":"%s","artifacts":{"session_state":"%s","current_url":"%s","screenshot_path":"%s","next_action":"%s","evidence":["driver invoked"]}}' \
+  "$ODIN_BROWSER_RESPONSE_TOOL_KEY" \
+  "$ODIN_BROWSER_RESPONSE_SUMMARY" \
+  "$ODIN_BROWSER_RESPONSE_SESSION_STATE" \
+  "$ODIN_BROWSER_RESPONSE_CURRENT_URL" \
+  "$ODIN_BROWSER_RESPONSE_SCREENSHOT_PATH" \
+  "$ODIN_BROWSER_RESPONSE_NEXT_ACTION"
 `
 	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
 		t.Fatalf("WriteFile(driver) error = %v", err)

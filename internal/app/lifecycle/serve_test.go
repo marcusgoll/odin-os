@@ -17,6 +17,7 @@ import (
 
 	"odin-os/internal/core/projects"
 	"odin-os/internal/runtime/checkpoints"
+	healthsvc "odin-os/internal/runtime/health"
 	"odin-os/internal/store/sqlite"
 	"odin-os/internal/vcs/worktrees"
 )
@@ -210,7 +211,7 @@ service:
 
 	if _, err := store.RecordProjectionFreshness(context.Background(), sqlite.RecordProjectionFreshnessParams{
 		Surface:     "doctor",
-		Status:      "stale",
+		Status:      "current",
 		DetailsJSON: `{"source":"serve-test"}`,
 	}); err != nil {
 		t.Fatalf("RecordProjectionFreshness() error = %v", err)
@@ -221,38 +222,22 @@ service:
 	defer func() {
 		serveSelfHealLoopInterval = originalSelfHealInterval
 	}()
+	originalHealthConfig := serveHealthConfig
+	serveHealthConfig = healthsvc.Config{
+		QueuePressureThreshold: 10,
+		ExecutorFreshnessTTL:   time.Hour,
+		ProjectionFreshnessTTL: 25 * time.Millisecond,
+		SourceFreshnessTTL:     time.Hour,
+	}
+	defer func() {
+		serveHealthConfig = originalHealthConfig
+	}()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	staleProjection := make(chan error, 1)
-	var background sync.WaitGroup
-	background.Add(2)
-
+	selfHealResult := make(chan error, 1)
 	go func() {
-		defer background.Done()
-
-		timer := time.NewTimer(30 * time.Millisecond)
-		defer timer.Stop()
-
-		select {
-		case <-ctx.Done():
-			return
-		case <-timer.C:
-		}
-
-		staleAt := time.Now().Add(-2 * time.Hour).UTC().Format(time.RFC3339Nano)
-		_, err := store.DB().ExecContext(context.Background(), `
-			UPDATE projection_freshness
-			SET refreshed_at = ?, updated_at = ?
-			WHERE surface = 'doctor'
-		`, staleAt, staleAt)
-		staleProjection <- err
-	}()
-
-	go func() {
-		defer background.Done()
-
 		deadline := time.NewTimer(2 * time.Second)
 		defer deadline.Stop()
 
@@ -262,8 +247,10 @@ service:
 		for {
 			select {
 			case <-ctx.Done():
+				selfHealResult <- ctx.Err()
 				return
 			case <-deadline.C:
+				selfHealResult <- errors.New("timed out waiting for background self-heal cycle")
 				cancel()
 				return
 			case <-ticker.C:
@@ -273,6 +260,7 @@ service:
 				}
 				for _, event := range events {
 					if string(event.Type) == "recovery.action_executed" {
+						selfHealResult <- nil
 						cancel()
 						return
 					}
@@ -280,7 +268,6 @@ service:
 			}
 		}
 	}()
-	defer background.Wait()
 
 	var stdout bytes.Buffer
 	err = Run(ctx, root, []string{"serve"}, strings.NewReader(""), &stdout)
@@ -289,12 +276,12 @@ service:
 	}
 
 	select {
-	case err := <-staleProjection:
+	case err := <-selfHealResult:
 		if err != nil {
-			t.Fatalf("force stale projection freshness error = %v", err)
+			t.Fatalf("self-heal wait error = %v", err)
 		}
 	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting to force stale projection freshness")
+		t.Fatal("timed out waiting for background self-heal cycle")
 	}
 
 	events, err := store.ListEvents(context.Background(), sqlite.ListEventsParams{})
