@@ -3,15 +3,19 @@ package jobs
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
 
 	"odin-os/internal/cli/scope"
+	"odin-os/internal/core/capabilities"
 	"odin-os/internal/core/projects"
 	"odin-os/internal/executors/contract"
 	executorrouter "odin-os/internal/executors/router"
+	"odin-os/internal/runtime/checkpoints"
 	"odin-os/internal/runtime/projections"
+	"odin-os/internal/runtime/supervision"
 	"odin-os/internal/store/sqlite"
 	"odin-os/internal/vcs/leases"
 )
@@ -23,6 +27,7 @@ type Service struct {
 	ExecutorConfig executorrouter.Config
 	Transitions    projects.Service
 	Leases         leases.Manager
+	Supervisor     supervision.Supervisor
 	Now            func() time.Time
 }
 
@@ -173,6 +178,22 @@ func (service Service) ExecuteNextQueued(ctx context.Context) error {
 		return cause
 	}
 
+	invocation := checkpoints.InvocationContext{
+		RunID:      run.ID,
+		TaskID:     task.ID,
+		TaskKey:    task.Key,
+		ProjectID:  project.ID,
+		ProjectKey: project.Key,
+		Executor:   decision.ExecutorKey,
+		Attempt:    attempt,
+		Scope:      task.Scope,
+		Prompt:     task.Title,
+		Metadata: map[string]string{
+			"project_key": project.Key,
+			"task_id":     fmt.Sprintf("%d", task.ID),
+		},
+	}
+
 	assignment := leases.Assignment{
 		Mode:         "read_only",
 		RepoRoot:     project.GitRoot,
@@ -216,9 +237,62 @@ func (service Service) ExecuteNextQueued(ctx context.Context) error {
 	spec.Metadata["branch_name"] = assignment.BranchName
 	spec.Metadata["repo_root"] = assignment.RepoRoot
 	spec.Metadata["worktree_path"] = assignment.WorktreePath
+	invocation.Metadata["branch_name"] = assignment.BranchName
+	invocation.Metadata["repo_root"] = assignment.RepoRoot
+	invocation.Metadata["worktree_path"] = assignment.WorktreePath
+
+	if _, err := (checkpoints.Service{Store: service.Store}).Compact(ctx, checkpoints.CompactParams{
+		TaskID:               task.ID,
+		RunID:                &run.ID,
+		Trigger:              checkpoints.TriggerHandoff,
+		CheckpointKey:        fmt.Sprintf("run-start-%d", run.ID),
+		Objective:            task.Title,
+		TaskStatus:           "running",
+		BlockingReason:       "executor handoff in progress",
+		SelectedCapabilities: []string{decision.ExecutorKey},
+		ManifestSummary:      "managed project",
+		PolicySummary:        "bounded runtime execution",
+		OpenTaskSummary:      task.Title,
+		ApprovalSummary:      "none",
+		Invocation:           &invocation,
+	}); err != nil {
+		return finishFailure(err)
+	}
 
 	executor := executors[decision.ExecutorKey]
-	result, err := executor.RunTask(ctx, spec)
+	supervisor := service.Supervisor
+	if supervisor == nil {
+		supervisor = supervision.Service{}
+	}
+
+	result, err := supervisor.Run(ctx, capabilities.InvokeRequest{
+		RequestID:         fmt.Sprintf("run-%d", run.ID),
+		CapabilityID:      task.Key,
+		CapabilityVersion: project.Key,
+		Scope: capabilities.ScopeRef{
+			Kind:       task.Scope,
+			ProjectKey: project.Key,
+		},
+		Caller: capabilities.CallerRef{
+			Kind: "system",
+			ID:   "runtime_jobs",
+		},
+	}, func(attemptCtx context.Context, _ int) (capabilities.InvokeResponse, error) {
+		execution, execErr := executor.RunTask(attemptCtx, spec)
+		if execErr != nil {
+			return capabilities.InvokeResponse{}, execErr
+		}
+
+		response := capabilities.InvokeResponse{
+			RunID:  fmt.Sprintf("%d", run.ID),
+			Status: execution.Status,
+			Output: json.RawMessage([]byte(execution.Output)),
+		}
+		if response.Status == "" {
+			response.Status = "completed"
+		}
+		return response, nil
+	})
 	if err != nil {
 		return finishFailure(err)
 	}
@@ -227,15 +301,12 @@ func (service Service) ExecuteNextQueued(ctx context.Context) error {
 	if runStatus == "" {
 		runStatus = "completed"
 	}
-	taskStatus := "completed"
-	if runStatus != "completed" {
-		taskStatus = "failed"
-	}
+	taskStatus := runStatus
 
 	if _, err := service.Store.FinishRun(ctx, sqlite.FinishRunParams{
 		RunID:   run.ID,
 		Status:  runStatus,
-		Summary: result.Output,
+		Summary: string(result.Output),
 	}); err != nil {
 		return err
 	}
