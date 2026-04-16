@@ -167,6 +167,22 @@ func (store *Store) UpsertInitiative(ctx context.Context, params UpsertInitiativ
 	return initiative, err
 }
 
+func (store *Store) UpsertCompanion(ctx context.Context, params UpsertCompanionParams) (Companion, error) {
+	now := store.now()
+	var companion Companion
+
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		record, err := store.upsertCompanionTx(ctx, tx, params, now)
+		if err != nil {
+			return err
+		}
+		companion = record
+		return nil
+	})
+
+	return companion, err
+}
+
 func (store *Store) RegisterManagedProject(ctx context.Context, params ManagedProjectRegistrationParams) (Project, error) {
 	now := store.now()
 	var project Project
@@ -1791,6 +1807,28 @@ func (store *Store) GetInitiativeByKey(ctx context.Context, workspaceID int64, k
 	return scanInitiative(row)
 }
 
+func (store *Store) GetCompanionByKey(ctx context.Context, workspaceID int64, key string) (Companion, error) {
+	row := store.db.QueryRowContext(ctx, `
+		SELECT
+			id,
+			workspace_id,
+			key,
+			title,
+			kind,
+			charter,
+			status,
+			initiative_scope_json,
+			tool_policy_json,
+			memory_policy_json,
+			planning_policy_json,
+			created_at,
+			updated_at
+		FROM companions
+		WHERE workspace_id = ? AND key = ?
+	`, workspaceID, key)
+	return scanCompanion(row)
+}
+
 func (store *Store) GetRun(ctx context.Context, runID int64) (Run, error) {
 	row := store.db.QueryRowContext(ctx, `
 		SELECT id, task_id, executor, status, attempt, started_at, finished_at, summary
@@ -2463,6 +2501,58 @@ func (store *Store) upsertInitiativeTx(ctx context.Context, tx *sql.Tx, params U
 	return record, nil
 }
 
+func (store *Store) upsertCompanionTx(ctx context.Context, tx *sql.Tx, params UpsertCompanionParams, now time.Time) (Companion, error) {
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO companions (
+			workspace_id,
+			key,
+			title,
+			kind,
+			charter,
+			status,
+			initiative_scope_json,
+			tool_policy_json,
+			memory_policy_json,
+			planning_policy_json,
+			created_at,
+			updated_at
+		)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(workspace_id, key) DO UPDATE SET
+			title = excluded.title,
+			kind = excluded.kind,
+			charter = excluded.charter,
+			status = excluded.status,
+			initiative_scope_json = excluded.initiative_scope_json,
+			tool_policy_json = excluded.tool_policy_json,
+			memory_policy_json = excluded.memory_policy_json,
+			planning_policy_json = excluded.planning_policy_json,
+			updated_at = excluded.updated_at
+	`,
+		params.WorkspaceID,
+		params.Key,
+		params.Title,
+		params.Kind,
+		params.Charter,
+		params.Status,
+		params.InitiativeScopeJSON,
+		params.ToolPolicyJSON,
+		params.MemoryPolicyJSON,
+		params.PlanningPolicyJSON,
+		formatTime(now),
+		formatTime(now),
+	); err != nil {
+		return Companion{}, err
+	}
+
+	record, err := store.getCompanionTx(ctx, tx, params.WorkspaceID, params.Key)
+	if err != nil {
+		return Companion{}, err
+	}
+
+	return record, nil
+}
+
 func (store *Store) ensureWorkspaceTx(ctx context.Context, tx *sql.Tx, params CreateWorkspaceParams, now time.Time) (Workspace, error) {
 	policyJSON := params.PolicyJSON
 	if policyJSON == "" {
@@ -2508,6 +2598,28 @@ func (store *Store) getLearningProposalTx(ctx context.Context, tx *sql.Tx, propo
 		WHERE id = ?
 	`, proposalID)
 	return scanLearningProposal(row)
+}
+
+func (store *Store) getCompanionTx(ctx context.Context, tx *sql.Tx, workspaceID int64, key string) (Companion, error) {
+	row := tx.QueryRowContext(ctx, `
+		SELECT
+			id,
+			workspace_id,
+			key,
+			title,
+			kind,
+			charter,
+			status,
+			initiative_scope_json,
+			tool_policy_json,
+			memory_policy_json,
+			planning_policy_json,
+			created_at,
+			updated_at
+		FROM companions
+		WHERE workspace_id = ? AND key = ?
+	`, workspaceID, key)
+	return scanCompanion(row)
 }
 
 func (store *Store) getLearningPromotionTx(ctx context.Context, tx *sql.Tx, promotionID int64) (LearningPromotion, error) {
@@ -3005,6 +3117,40 @@ func scanInitiative(row interface{ Scan(...any) error }) (Initiative, error) {
 		return Initiative{}, err
 	}
 	return initiative, nil
+}
+
+func scanCompanion(row interface{ Scan(...any) error }) (Companion, error) {
+	var companion Companion
+	var createdAt string
+	var updatedAt string
+	if err := row.Scan(
+		&companion.ID,
+		&companion.WorkspaceID,
+		&companion.Key,
+		&companion.Title,
+		&companion.Kind,
+		&companion.Charter,
+		&companion.Status,
+		&companion.InitiativeScopeJSON,
+		&companion.ToolPolicyJSON,
+		&companion.MemoryPolicyJSON,
+		&companion.PlanningPolicyJSON,
+		&createdAt,
+		&updatedAt,
+	); err != nil {
+		return Companion{}, err
+	}
+
+	var err error
+	companion.CreatedAt, err = parseTime(createdAt)
+	if err != nil {
+		return Companion{}, err
+	}
+	companion.UpdatedAt, err = parseTime(updatedAt)
+	if err != nil {
+		return Companion{}, err
+	}
+	return companion, nil
 }
 
 func scanWorkspace(row interface{ Scan(...any) error }) (Workspace, error) {

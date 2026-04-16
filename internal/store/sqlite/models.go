@@ -29,6 +29,22 @@ type Initiative struct {
 	UpdatedAt        time.Time
 }
 
+type Companion struct {
+	ID                  int64
+	WorkspaceID         int64
+	Key                 string
+	Title               string
+	Kind                string
+	Charter             string
+	Status              string
+	InitiativeScopeJSON string
+	ToolPolicyJSON      string
+	MemoryPolicyJSON    string
+	PlanningPolicyJSON  string
+	CreatedAt           time.Time
+	UpdatedAt           time.Time
+}
+
 type CreateProjectParams struct {
 	Key           string
 	Name          string
@@ -50,6 +66,19 @@ type UpsertInitiativeParams struct {
 	Summary          string
 	OwnerCompanionID *int64
 	LinkedProjectID  *int64
+}
+
+type UpsertCompanionParams struct {
+	WorkspaceID         int64
+	Key                 string
+	Title               string
+	Kind                string
+	Charter             string
+	Status              string
+	InitiativeScopeJSON string
+	ToolPolicyJSON      string
+	MemoryPolicyJSON    string
+	PlanningPolicyJSON  string
 }
 
 type ManagedProjectRegistrationParams struct {
