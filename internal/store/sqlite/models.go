@@ -70,6 +70,14 @@ type StartRunParams struct {
 	Status   string
 }
 
+type StartRunAndUpdateTaskStatusParams struct {
+	TaskID     int64
+	Executor   string
+	Attempt    int
+	RunStatus  string
+	TaskStatus string
+}
+
 type FinishRunParams struct {
 	RunID   int64
 	Status  string

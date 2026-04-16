@@ -305,6 +305,91 @@ func (store *Store) StartRun(ctx context.Context, params StartRunParams) (Run, e
 	return run, err
 }
 
+func (store *Store) StartRunAndUpdateTaskStatus(ctx context.Context, params StartRunAndUpdateTaskStatusParams) (Run, error) {
+	now := store.now()
+	var run Run
+
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		task, err := store.getTaskTx(ctx, tx, params.TaskID)
+		if err != nil {
+			return err
+		}
+		previousStatus := task.Status
+
+		result, err := tx.ExecContext(ctx, `
+			INSERT INTO runs (task_id, executor, status, attempt, started_at, finished_at, summary)
+			VALUES (?, ?, ?, ?, ?, NULL, '')
+		`,
+			params.TaskID,
+			params.Executor,
+			params.RunStatus,
+			params.Attempt,
+			formatTime(now),
+		)
+		if err != nil {
+			return err
+		}
+
+		runID, err := result.LastInsertId()
+		if err != nil {
+			return err
+		}
+
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE tasks
+			SET current_run_id = ?, status = ?, updated_at = ?
+			WHERE id = ?
+		`, runID, params.TaskStatus, formatTime(now), params.TaskID); err != nil {
+			return err
+		}
+
+		run = Run{
+			ID:        runID,
+			TaskID:    params.TaskID,
+			Executor:  params.Executor,
+			Status:    params.RunStatus,
+			Attempt:   params.Attempt,
+			StartedAt: now,
+		}
+
+		projectID := task.ProjectID
+		if err := appendEventTx(ctx, tx, eventInsert{
+			StreamType: runtimeevents.StreamRun,
+			StreamID:   run.ID,
+			EventType:  runtimeevents.EventRunStarted,
+			Scope:      task.Scope,
+			ProjectID:  &projectID,
+			TaskID:     &task.ID,
+			RunID:      &run.ID,
+			Payload: runtimeevents.RunStartedPayload{
+				TaskID:   task.ID,
+				Executor: run.Executor,
+				Attempt:  run.Attempt,
+				Status:   run.Status,
+			},
+			OccurredAt: now,
+		}); err != nil {
+			return err
+		}
+
+		return appendEventTx(ctx, tx, eventInsert{
+			StreamType: runtimeevents.StreamTask,
+			StreamID:   task.ID,
+			EventType:  runtimeevents.EventTaskStatusChanged,
+			Scope:      task.Scope,
+			ProjectID:  &projectID,
+			TaskID:     &task.ID,
+			Payload: runtimeevents.TaskStatusChangedPayload{
+				PreviousStatus: previousStatus,
+				Status:         params.TaskStatus,
+			},
+			OccurredAt: now,
+		})
+	})
+
+	return run, err
+}
+
 func (store *Store) FinishRun(ctx context.Context, params FinishRunParams) (Run, error) {
 	now := store.now()
 	var run Run

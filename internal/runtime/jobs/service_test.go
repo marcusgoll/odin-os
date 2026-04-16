@@ -764,6 +764,95 @@ func TestExecuteNextQueuedRollsBackTerminalPersistenceWhenTaskUpdateFails(t *tes
 	}
 }
 
+func TestExecuteNextQueuedRollsBackRunLaunchWhenTaskStatusUpdateFails(t *testing.T) {
+	ctx := context.Background()
+	store := openJobStore(t)
+	defer store.Close()
+
+	t.Setenv("ODIN_CODEX_DRIVER", codexDriverPath(t))
+	registry := writeRegistry(t)
+	git := &jobTestGit{}
+	service := Service{
+		Store:          store,
+		Registry:       registry,
+		Executors:      router.DefaultCatalog(),
+		ExecutorConfig: mustLoadExecutorConfig(t),
+		Transitions:    projects.Service{Store: store},
+		Leases: leases.Manager{
+			Store:        store,
+			Git:          git,
+			WorktreeRoot: t.TempDir(),
+		},
+		Now: time.Now,
+	}
+
+	task, err := service.CreateTaskFromAct(ctx, scope.Resolution{
+		Kind:       scope.ScopeProject,
+		ProjectKey: "alpha",
+	}, "Rollback run launch")
+	if err != nil {
+		t.Fatalf("CreateTaskFromAct() error = %v", err)
+	}
+
+	project, err := store.GetProjectByKey(ctx, "alpha")
+	if err != nil {
+		t.Fatalf("GetProjectByKey(alpha) error = %v", err)
+	}
+	if _, err := service.Transitions.SetTransitionState(ctx, projects.TransitionStateInput{
+		ProjectID:   project.ID,
+		Actor:       projects.TransitionControllerOdinOS,
+		TargetState: projects.TransitionStateCutover,
+		ChangedBy:   "test",
+	}); err != nil {
+		t.Fatalf("SetTransitionState(cutover) error = %v", err)
+	}
+
+	triggerName := fmt.Sprintf("fail_task_launch_%d", task.ID)
+	if _, err := store.DB().ExecContext(ctx, fmt.Sprintf(`
+		CREATE TRIGGER %s
+		BEFORE UPDATE OF status ON tasks
+		FOR EACH ROW
+		WHEN NEW.id = %d AND NEW.status = 'running'
+		BEGIN
+			SELECT RAISE(FAIL, 'blocked task launch');
+		END;
+	`, triggerName, task.ID)); err != nil {
+		t.Fatalf("create trigger error = %v", err)
+	}
+
+	err = service.ExecuteNextQueued(ctx)
+	if err == nil {
+		t.Fatal("ExecuteNextQueued() error = nil, want blocked task launch")
+	}
+	if git.removeWorktreeCalls != 0 {
+		t.Fatalf("RemoveWorktree() calls = %d, want 0 when run launch rolls back", git.removeWorktreeCalls)
+	}
+
+	gotTask, err := store.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
+	}
+	if gotTask.Status != "queued" {
+		t.Fatalf("task.Status = %q, want queued after rolled-back run launch", gotTask.Status)
+	}
+	if gotTask.CurrentRunID != nil {
+		t.Fatalf("task.CurrentRunID = %v, want nil after rolled-back run launch", gotTask.CurrentRunID)
+	}
+
+	row := store.DB().QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM runs
+		WHERE task_id = ?
+	`, task.ID)
+	var runCount int
+	if err := row.Scan(&runCount); err != nil {
+		t.Fatalf("scan run count error = %v", err)
+	}
+	if runCount != 0 {
+		t.Fatalf("run count = %d, want 0 after rolled-back run launch", runCount)
+	}
+}
+
 type jobTestGit struct {
 	createBranchCalls   int
 	addWorktreeCalls    int

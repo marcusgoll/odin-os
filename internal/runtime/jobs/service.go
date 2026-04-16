@@ -146,20 +146,14 @@ func (service Service) ExecuteNextQueued(ctx context.Context) error {
 		return err
 	}
 
-	run, err := service.Store.StartRun(ctx, sqlite.StartRunParams{
-		TaskID:   task.ID,
-		Executor: decision.ExecutorKey,
-		Attempt:  attempt,
-		Status:   "running",
+	run, err := service.Store.StartRunAndUpdateTaskStatus(ctx, sqlite.StartRunAndUpdateTaskStatusParams{
+		TaskID:     task.ID,
+		Executor:   decision.ExecutorKey,
+		Attempt:    attempt,
+		RunStatus:  "running",
+		TaskStatus: "running",
 	})
 	if err != nil {
-		return err
-	}
-
-	if _, err := service.Store.UpdateTaskStatus(ctx, sqlite.UpdateTaskStatusParams{
-		TaskID: task.ID,
-		Status: "running",
-	}); err != nil {
 		return err
 	}
 
