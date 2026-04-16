@@ -232,22 +232,41 @@ service:
 	go func() {
 		defer background.Done()
 
-		timer := time.NewTimer(30 * time.Millisecond)
-		defer timer.Stop()
+		start := time.NewTimer(30 * time.Millisecond)
+		defer start.Stop()
 
 		select {
 		case <-ctx.Done():
 			return
-		case <-timer.C:
+		case <-start.C:
 		}
 
-		staleAt := time.Now().Add(-2 * time.Hour).UTC().Format(time.RFC3339Nano)
-		_, err := store.DB().ExecContext(context.Background(), `
-			UPDATE projection_freshness
-			SET refreshed_at = ?, updated_at = ?
-			WHERE surface = 'doctor'
-		`, staleAt, staleAt)
-		staleProjection <- err
+		deadline := time.NewTimer(2 * time.Second)
+		defer deadline.Stop()
+		retry := time.NewTicker(10 * time.Millisecond)
+		defer retry.Stop()
+
+		for {
+			staleAt := time.Now().Add(-2 * time.Hour).UTC().Format(time.RFC3339Nano)
+			attemptCtx, cancelAttempt := context.WithTimeout(context.Background(), 50*time.Millisecond)
+			_, err := store.DB().ExecContext(attemptCtx, `
+				UPDATE projection_freshness
+				SET refreshed_at = ?, updated_at = ?
+				WHERE surface = 'doctor'
+			`, staleAt, staleAt)
+			cancelAttempt()
+			if err == nil {
+				staleProjection <- nil
+				return
+			}
+
+			select {
+			case <-deadline.C:
+				staleProjection <- err
+				return
+			case <-retry.C:
+			}
+		}
 	}()
 
 	go func() {
