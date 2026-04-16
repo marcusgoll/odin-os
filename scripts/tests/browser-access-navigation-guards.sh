@@ -43,6 +43,12 @@ if browser_server_start --url "https://blocked.example/path"; then
     fail "expected browser_server_start to reject blocked.example before launch"
 fi
 [[ "${node_calls}" -eq 0 ]] || fail "browser_server_start launched the runtime for a blocked URL"
+if browser_navigate "http://localhost./path"; then
+    fail "expected browser_navigate to reject localhost."
+fi
+if browser_server_start --url "javascript:alert(1)"; then
+    fail "expected browser_server_start to reject javascript: URLs before launch"
+fi
 [[ "${curl_calls}" -eq 0 ]] || fail "blocked browser_server_start called through to the local server"
 
 pass "blocked navigation paths stop before the local browser server"

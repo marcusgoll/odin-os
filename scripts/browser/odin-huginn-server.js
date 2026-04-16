@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
-import { existsSync, mkdirSync } from 'node:fs';
+import { accessSync, constants as fsConstants, mkdirSync, statSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import net from 'node:net';
@@ -51,6 +51,17 @@ function readBody(req) {
   });
 }
 
+function isExecutableFile(filePath) {
+  try {
+    const stats = statSync(filePath);
+    if (!stats.isFile()) return false;
+    accessSync(filePath, fsConstants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function findChromeBinary() {
   const candidates = [
     process.env.CHROME_BIN,
@@ -63,12 +74,12 @@ function findChromeBinary() {
   const pathDirs = (process.env.PATH || '').split(':').filter(Boolean);
   for (const candidate of candidates) {
     if (candidate.includes('/')) {
-      if (existsSync(candidate)) return candidate;
+      if (isExecutableFile(candidate)) return candidate;
       continue;
     }
     for (const dir of pathDirs) {
       const full = join(dir, candidate);
-      if (existsSync(full)) return full;
+      if (isExecutableFile(full)) return full;
     }
   }
   return null;

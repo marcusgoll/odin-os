@@ -68,4 +68,18 @@ if _ba_pid_is_browser_runtime "4244" "${OLD_PORT}"; then
     fail "expected unrelated PID to be rejected"
 fi
 
-pass "PID ownership and persisted-port stop path distinguish browser runtime from false positives"
+
+: > "${BROWSER_SERVER_PID_FILE}"
+rm -f "${BROWSER_SERVER_PORT_FILE}"
+printf '4245\n' > "${BROWSER_SERVER_PID_FILE}"
+
+curl_calls=()
+kill_calls=()
+browser_server_stop
+
+[[ "${#curl_calls[@]}" -eq 0 ]] || fail "pid-only stop path should not send a stop request"
+[[ "${#kill_calls[@]}" -eq 0 ]] || fail "pid-only stop path should not try to kill an unrelated process"
+[[ ! -f "${BROWSER_SERVER_PID_FILE}" ]] || fail "pid-only stop path did not clear the pid file"
+[[ ! -f "${BROWSER_SERVER_PORT_FILE}" ]] || fail "pid-only stop path did not clear the port file"
+
+pass "PID ownership and stop-path handling stay tied to the persisted runtime port"
