@@ -387,6 +387,13 @@ func (store *Store) UpdateTaskStatus(ctx context.Context, params UpdateTaskStatu
 		if err != nil {
 			return err
 		}
+		if current.Status == params.Status {
+			task = current
+			return nil
+		}
+		if len(params.AllowedCurrentStatuses) > 0 && !containsString(params.AllowedCurrentStatuses, current.Status) {
+			return fmt.Errorf("task %d cannot transition from %s to %s", params.TaskID, current.Status, params.Status)
+		}
 		previousStatus := current.Status
 
 		if _, err := tx.ExecContext(ctx, `
@@ -4085,6 +4092,15 @@ func nullIfEmpty(value string) any {
 		return nil
 	}
 	return value
+}
+
+func containsString(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
 }
 
 func stringOrDefault(value sql.NullString, fallback string) string {

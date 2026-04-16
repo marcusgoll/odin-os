@@ -488,6 +488,108 @@ func TestExecuteNextQueuedRollsBackRunWhenWorkItemStartFails(t *testing.T) {
 	}
 }
 
+func TestExecuteNextQueuedPreservesBlockedTaskWhenApprovalGateTripsBeforeStart(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openJobStore(t)
+	defer store.Close()
+
+	registry := writeRegistry(t)
+	service := Service{
+		Store:          store,
+		Registry:       registry,
+		Executors:      router.DefaultCatalog(),
+		ExecutorConfig: mustLoadExecutorConfig(t),
+		Transitions:    projects.Service{Store: store},
+		Leases: leases.Manager{
+			Store:        store,
+			Git:          &jobTestGit{},
+			WorktreeRoot: t.TempDir(),
+		},
+		Now: func() time.Time {
+			return time.Date(2026, 4, 9, 12, 0, 0, 0, time.UTC)
+		},
+	}
+
+	task, err := service.CreateTaskFromAct(ctx, scope.Resolve(scope.ResolveInput{
+		ExplicitTarget: &scope.Target{
+			ProjectKey: "alpha",
+		},
+	}).ControlScope(), "Approval race task")
+	if err != nil {
+		t.Fatalf("CreateTaskFromAct() error = %v", err)
+	}
+
+	project, err := store.GetProjectByKey(ctx, "alpha")
+	if err != nil {
+		t.Fatalf("GetProjectByKey(alpha) error = %v", err)
+	}
+	if _, err := service.Transitions.SetTransitionState(ctx, projects.TransitionStateInput{
+		ProjectID:   project.ID,
+		Actor:       projects.TransitionControllerOdinOS,
+		TargetState: projects.TransitionStateCutover,
+		ChangedBy:   "test",
+	}); err != nil {
+		t.Fatalf("SetTransitionState(cutover) error = %v", err)
+	}
+
+	if _, err := store.DB().ExecContext(ctx, `
+		CREATE TRIGGER runs_insert_blocks_task
+		AFTER INSERT ON runs
+		BEGIN
+			UPDATE tasks
+			SET status = 'blocked'
+			WHERE id = NEW.task_id;
+			INSERT INTO approvals (task_id, run_id, status, requested_at, resolved_at, decision_by, reason)
+			VALUES (
+				NEW.task_id,
+				NEW.id,
+				'pending',
+				strftime('%Y-%m-%dT%H:%M:%fZ','now'),
+				NULL,
+				'',
+				''
+			);
+		END;
+	`); err != nil {
+		t.Fatalf("create trigger error = %v", err)
+	}
+
+	err = service.ExecuteNextQueued(ctx)
+	if err == nil {
+		t.Fatal("ExecuteNextQueued() error = nil, want blocked start rejection")
+	}
+
+	gotTask, err := store.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
+	}
+	if gotTask.Status != "blocked" {
+		t.Fatalf("GetTask().Status = %q, want blocked", gotTask.Status)
+	}
+
+	run, err := latestRunForTask(ctx, store, task.ID)
+	if err != nil {
+		t.Fatalf("latestRunForTask() error = %v", err)
+	}
+	if run.Status != "failed" {
+		t.Fatalf("run.Status = %q, want failed", run.Status)
+	}
+
+	var approvalCount int
+	if err := store.DB().QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM approvals
+		WHERE task_id = ? AND status = 'pending'
+	`, task.ID).Scan(&approvalCount); err != nil {
+		t.Fatalf("count pending approvals error = %v", err)
+	}
+	if approvalCount != 1 {
+		t.Fatalf("pending approval count = %d, want 1", approvalCount)
+	}
+}
+
 type recordingTaskFinalizer struct {
 	taskID int64
 	status string

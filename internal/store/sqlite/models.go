@@ -143,8 +143,9 @@ type CreateTaskParams struct {
 }
 
 type UpdateTaskStatusParams struct {
-	TaskID int64
-	Status string
+	TaskID                 int64
+	Status                 string
+	AllowedCurrentStatuses []string
 }
 
 type Run struct {

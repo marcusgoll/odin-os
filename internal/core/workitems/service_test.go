@@ -188,6 +188,9 @@ func TestWorkItemServiceFinalizesTaskFromExecutorStatus(t *testing.T) {
 	service := Service{Store: store}
 
 	completedTask := mustQueueWorkItemTask(t, ctx, service, projectID, workspaceID, initiativeID, companionID, "complete-item")
+	if _, err := service.Start(ctx, completedTask.ID); err != nil {
+		t.Fatalf("Start(completed) error = %v", err)
+	}
 	completed, err := service.Finalize(ctx, completedTask.ID, "")
 	if err != nil {
 		t.Fatalf("Finalize(completed) error = %v", err)
@@ -197,12 +200,83 @@ func TestWorkItemServiceFinalizesTaskFromExecutorStatus(t *testing.T) {
 	}
 
 	failedTask := mustQueueWorkItemTask(t, ctx, service, projectID, workspaceID, initiativeID, companionID, "fail-item")
+	if _, err := service.Start(ctx, failedTask.ID); err != nil {
+		t.Fatalf("Start(failed) error = %v", err)
+	}
 	failed, err := service.Finalize(ctx, failedTask.ID, "timed_out")
 	if err != nil {
 		t.Fatalf("Finalize(failed) error = %v", err)
 	}
 	if failed.Status != "failed" {
 		t.Fatalf("Finalize(failed).Status = %q, want failed", failed.Status)
+	}
+}
+
+func TestWorkItemServiceRejectsStartForBlockedTasks(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openWorkItemServiceStore(t)
+	defer store.Close()
+
+	workspaceID, projectID, initiativeID, companionID := seedWorkItemLinks(t, ctx, store)
+	service := Service{Store: store}
+
+	blockedTask := mustQueueWorkItemTask(t, ctx, service, projectID, workspaceID, initiativeID, companionID, "blocked-start-item")
+	if _, err := service.Block(ctx, blockedTask.ID); err != nil {
+		t.Fatalf("Block() error = %v", err)
+	}
+
+	if _, err := service.Start(ctx, blockedTask.ID); err == nil {
+		t.Fatal("Start() error = nil, want blocked-task rejection")
+	}
+
+	gotTask, err := store.GetTask(ctx, blockedTask.ID)
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
+	}
+	if gotTask.Status != "blocked" {
+		t.Fatalf("GetTask().Status = %q, want blocked", gotTask.Status)
+	}
+}
+
+func TestWorkItemServiceRejectsFinalizeForBlockedApprovalTask(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openWorkItemServiceStore(t)
+	defer store.Close()
+
+	workspaceID, projectID, initiativeID, companionID := seedWorkItemLinks(t, ctx, store)
+	service := Service{Store: store}
+
+	approvalTask := mustQueueWorkItemTask(t, ctx, service, projectID, workspaceID, initiativeID, companionID, "blocked-finalize-item")
+	approval, approvalItem, err := service.RequestApproval(ctx, approvalTask.ID, nil, "operator")
+	if err != nil {
+		t.Fatalf("RequestApproval() error = %v", err)
+	}
+	if approvalItem.Status != "blocked" {
+		t.Fatalf("RequestApproval().item.Status = %q, want blocked", approvalItem.Status)
+	}
+
+	if _, err := service.Finalize(ctx, approvalTask.ID, "completed"); err == nil {
+		t.Fatal("Finalize() error = nil, want blocked-task rejection")
+	}
+
+	gotTask, err := store.GetTask(ctx, approvalTask.ID)
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
+	}
+	if gotTask.Status != "blocked" {
+		t.Fatalf("GetTask().Status = %q, want blocked", gotTask.Status)
+	}
+
+	gotApproval, err := store.GetApproval(ctx, approval.ID)
+	if err != nil {
+		t.Fatalf("GetApproval() error = %v", err)
+	}
+	if gotApproval.Status != "pending" {
+		t.Fatalf("GetApproval().Status = %q, want pending", gotApproval.Status)
 	}
 }
 
