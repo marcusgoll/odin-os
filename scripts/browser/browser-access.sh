@@ -82,6 +82,15 @@ _ba_domain_host() {
     printf '%s' "${host}"
 }
 
+_ba_parse_numeric_host_part() {
+    local value="${1:-}" parsed
+    [[ -n "${value}" ]] || return 1
+
+    parsed="$(printf '%d' "${value}" 2>/dev/null)" || return 1
+    [[ "${parsed}" =~ ^[0-9]+$ ]] || return 1
+    printf '%s' "${parsed}"
+}
+
 _ba_ipv4_is_loopback() {
     local host="${1:-}" a b c d
     [[ "${host}" =~ ^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$ ]] || return 1
@@ -92,6 +101,46 @@ _ba_ipv4_is_loopback() {
     d="${BASH_REMATCH[4]}"
     [[ $((10#${a})) -le 255 && $((10#${b})) -le 255 && $((10#${c})) -le 255 && $((10#${d})) -le 255 ]] || return 1
     [[ $((10#${a})) -eq 127 ]]
+}
+
+_ba_ipv4_alias_is_loopback() {
+    local host="${1:-}" first second third fourth value
+    local IFS='.'
+    local -a parts=()
+
+    [[ -n "${host}" ]] || return 1
+    read -r -a parts <<< "${host}"
+    case "${#parts[@]}" in
+        1)
+            value="$(_ba_parse_numeric_host_part "${parts[0]}")" || return 1
+            (( value >= 0 && value <= 4294967295 )) || return 1
+            [[ $(( (10#${value} >> 24) & 255 )) -eq 127 ]]
+            ;;
+        2)
+            first="$(_ba_parse_numeric_host_part "${parts[0]}")" || return 1
+            second="$(_ba_parse_numeric_host_part "${parts[1]}")" || return 1
+            [[ $((10#${first})) -le 255 && $((10#${second})) -le 16777215 ]] || return 1
+            [[ $((10#${first})) -eq 127 ]]
+            ;;
+        3)
+            first="$(_ba_parse_numeric_host_part "${parts[0]}")" || return 1
+            second="$(_ba_parse_numeric_host_part "${parts[1]}")" || return 1
+            third="$(_ba_parse_numeric_host_part "${parts[2]}")" || return 1
+            [[ $((10#${first})) -le 255 && $((10#${second})) -le 255 && $((10#${third})) -le 65535 ]] || return 1
+            [[ $((10#${first})) -eq 127 ]]
+            ;;
+        4)
+            first="$(_ba_parse_numeric_host_part "${parts[0]}")" || return 1
+            second="$(_ba_parse_numeric_host_part "${parts[1]}")" || return 1
+            third="$(_ba_parse_numeric_host_part "${parts[2]}")" || return 1
+            fourth="$(_ba_parse_numeric_host_part "${parts[3]}")" || return 1
+            [[ $((10#${first})) -le 255 && $((10#${second})) -le 255 && $((10#${third})) -le 255 && $((10#${fourth})) -le 255 ]] || return 1
+            [[ $((10#${first})) -eq 127 ]]
+            ;;
+        *)
+            return 1
+            ;;
+    esac
 }
 
 _ba_ipv4_mapped_ipv6_is_loopback() {
@@ -134,15 +183,8 @@ _ba_host_is_local_service() {
             ;;
     esac
 
-    if _ba_ipv4_is_loopback "${normalized}"; then
+    if _ba_ipv4_alias_is_loopback "${normalized}"; then
         return 0
-    fi
-
-    if [[ "${normalized}" =~ ^[0-9]+$ ]]; then
-        local value a
-        value=$((10#${normalized}))
-        a=$(( (value >> 24) & 255 ))
-        [[ "${a}" -eq 127 ]] && return 0
     fi
 
     if _ba_ipv4_mapped_ipv6_is_loopback "${normalized}"; then

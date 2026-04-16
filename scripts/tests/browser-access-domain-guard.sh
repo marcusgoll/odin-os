@@ -32,6 +32,15 @@ fi
 if browser_request_domain_access "https://foo.deny.test/resource"; then
     fail "expected foo.deny.test to be denied by wildcard"
 fi
+if browser_request_domain_access "https://127.1/path"; then
+    fail "expected 127.1 to be denied as a loopback alias"
+fi
+if browser_request_domain_access "https://0x7f000001/path"; then
+    fail "expected 0x7f000001 to be denied as a loopback alias"
+fi
+if browser_request_domain_access "https://017700000001/path"; then
+    fail "expected 017700000001 to be denied as a loopback alias"
+fi
 browser_request_domain_access "https://example.com" || fail "expected example.com to be allowed"
 if browser_request_domain_access "javascript:alert(1)"; then
     fail "expected javascript: URLs to be denied"
