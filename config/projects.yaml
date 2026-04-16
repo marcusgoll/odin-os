@@ -37,7 +37,7 @@ projects:
   - key: pbs
     name: PBS
     project_class: github_backed_project
-    git_root: /tmp/odin-os-pbs-fixture-961634988
+    git_root: /home/orchestrator/pbs
     default_branch: master
     github:
       repo: marcusgoll/pbs
