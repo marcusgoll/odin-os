@@ -24,7 +24,7 @@ resolve_chromium_candidate() {
     elif [[ -n "${CHROME_BIN:-}" ]]; then
         candidate="${CHROME_BIN}"
     else
-        for candidate in google-chrome google-chrome-stable chromium chromium-browser; do
+        for candidate in google-chrome google-chrome-stable chromium chromium-browser chrome; do
             if command -v "${candidate}" >/dev/null 2>&1; then
                 command -v "${candidate}"
                 return 0

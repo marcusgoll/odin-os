@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 PREFLIGHT_SH="${ROOT_DIR}/scripts/ops/browser-preflight.sh"
+TMP_BIN_DIR=""
 
 fail() {
     echo "FAIL: $*" >&2
@@ -11,6 +12,29 @@ fail() {
 
 pass() {
     echo "PASS: $*"
+}
+
+cleanup() {
+    [[ -n "${TMP_BIN_DIR}" && -d "${TMP_BIN_DIR}" ]] && rm -rf "${TMP_BIN_DIR}"
+}
+
+trap cleanup EXIT
+
+setup_stub_path() {
+    TMP_BIN_DIR="$(mktemp -d)"
+    local tool target
+
+    for tool in bash readlink dirname basename grep ldd; do
+        target="$(command -v "${tool}")"
+        [[ -n "${target}" ]] || fail "missing required host utility: ${tool}"
+        ln -s "${target}" "${TMP_BIN_DIR}/${tool}"
+    done
+
+    cat >"${TMP_BIN_DIR}/chrome" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+    chmod +x "${TMP_BIN_DIR}/chrome"
 }
 
 run_preflight() {
@@ -53,12 +77,12 @@ if [[ ! -f "${PREFLIGHT_SH}" ]]; then
     fail "missing preflight script: ${PREFLIGHT_SH}"
 fi
 
-CHROME_BIN="/usr/bin/google-chrome"
-[[ -x "${CHROME_BIN}" ]] || fail "expected host Chromium binary at ${CHROME_BIN}"
+setup_stub_path
+GOOD_LDD_OUTPUT=$'linux-vdso.so.1 (0x00007ffd)\n'
 
 assert_success \
-    "chromium preflight passes on the live host" \
-    env BROWSER_PREFLIGHT_CHROME_BIN="${CHROME_BIN}" bash "${PREFLIGHT_SH}"
+    "chromium preflight passes with bare chrome on PATH" \
+    env PATH="${TMP_BIN_DIR}" BROWSER_PREFLIGHT_LDD_OUTPUT="${GOOD_LDD_OUTPUT}" bash "${PREFLIGHT_SH}"
 
 assert_failure_contains \
     "missing chromium binary fails closed" \
@@ -68,16 +92,16 @@ assert_failure_contains \
 assert_failure_contains \
     "missing runtime libraries fails closed" \
     "required runtime libraries are missing" \
-    env BROWSER_PREFLIGHT_CHROME_BIN="${CHROME_BIN}" BROWSER_PREFLIGHT_LDD_OUTPUT=$'linux-vdso.so.1 (0x00007ffd)\nlibmissing.so.1 => not found\n' bash "${PREFLIGHT_SH}"
+    env PATH="${TMP_BIN_DIR}" BROWSER_PREFLIGHT_LDD_OUTPUT=$'linux-vdso.so.1 (0x00007ffd)\nlibmissing.so.1 => not found\n' bash "${PREFLIGHT_SH}"
 
 assert_failure_contains \
     "firefox is rejected in this phase" \
     "Chromium only" \
-    env BROWSER_PREFLIGHT_CHROME_BIN="${CHROME_BIN}" bash "${PREFLIGHT_SH}" --engine firefox
+    env PATH="${TMP_BIN_DIR}" BROWSER_PREFLIGHT_LDD_OUTPUT="${GOOD_LDD_OUTPUT}" bash "${PREFLIGHT_SH}" --engine firefox
 
 assert_failure_contains \
     "webkit is rejected in this phase" \
     "Chromium only" \
-    env BROWSER_PREFLIGHT_CHROME_BIN="${CHROME_BIN}" bash "${PREFLIGHT_SH}" --engine webkit
+    env PATH="${TMP_BIN_DIR}" BROWSER_PREFLIGHT_LDD_OUTPUT="${GOOD_LDD_OUTPUT}" bash "${PREFLIGHT_SH}" --engine webkit
 
 pass "browser preflight contract verified"
