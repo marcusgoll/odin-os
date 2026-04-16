@@ -10,6 +10,83 @@ import (
 	"odin-os/internal/store/sqlite"
 )
 
+func TestWorkItemServiceRequestApprovalRollsBackBlockedStatusOnFailure(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openWorkItemServiceStore(t)
+	defer store.Close()
+
+	workspaceID, projectID, initiativeID, companionID := seedWorkItemLinks(t, ctx, store)
+	service := Service{Store: store}
+
+	approvalTask := mustQueueWorkItemTask(t, ctx, service, projectID, workspaceID, initiativeID, companionID, "approval-item")
+
+	if _, err := store.DB().ExecContext(ctx, `
+		CREATE TRIGGER approvals_insert_blocker
+		BEFORE INSERT ON approvals
+		BEGIN
+			SELECT RAISE(ABORT, 'approval insert blocked');
+		END;
+	`); err != nil {
+		t.Fatalf("create trigger error = %v", err)
+	}
+
+	_, _, err := service.RequestApproval(ctx, approvalTask.ID, nil, "operator")
+	if err == nil {
+		t.Fatal("RequestApproval() error = nil, want approval insert failure")
+	}
+
+	gotTask, err := store.GetTask(ctx, approvalTask.ID)
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
+	}
+	if gotTask.Status != "queued" {
+		t.Fatalf("GetTask().Status = %q, want queued", gotTask.Status)
+	}
+
+	var approvalCount int
+	if err := store.DB().QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM approvals
+		WHERE task_id = ?
+	`, approvalTask.ID).Scan(&approvalCount); err != nil {
+		t.Fatalf("count approvals error = %v", err)
+	}
+	if approvalCount != 0 {
+		t.Fatalf("approval count = %d, want 0", approvalCount)
+	}
+}
+
+func TestWorkItemServiceFinalizesTaskFromExecutorStatus(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openWorkItemServiceStore(t)
+	defer store.Close()
+
+	workspaceID, projectID, initiativeID, companionID := seedWorkItemLinks(t, ctx, store)
+	service := Service{Store: store}
+
+	completedTask := mustQueueWorkItemTask(t, ctx, service, projectID, workspaceID, initiativeID, companionID, "complete-item")
+	completed, err := service.Finalize(ctx, completedTask.ID, "")
+	if err != nil {
+		t.Fatalf("Finalize(completed) error = %v", err)
+	}
+	if completed.Status != "completed" {
+		t.Fatalf("Finalize(completed).Status = %q, want completed", completed.Status)
+	}
+
+	failedTask := mustQueueWorkItemTask(t, ctx, service, projectID, workspaceID, initiativeID, companionID, "fail-item")
+	failed, err := service.Finalize(ctx, failedTask.ID, "timed_out")
+	if err != nil {
+		t.Fatalf("Finalize(failed) error = %v", err)
+	}
+	if failed.Status != "failed" {
+		t.Fatalf("Finalize(failed).Status = %q, want failed", failed.Status)
+	}
+}
+
 func TestWorkItemServiceQueuesTasksWithSemanticLinks(t *testing.T) {
 	t.Parallel()
 

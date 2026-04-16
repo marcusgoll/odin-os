@@ -596,6 +596,94 @@ func (store *Store) RequestApproval(ctx context.Context, params RequestApprovalP
 	return approval, err
 }
 
+func (store *Store) BlockTaskAndRequestApproval(ctx context.Context, params BlockTaskAndRequestApprovalParams) (Task, Approval, error) {
+	now := store.now()
+	var task Task
+	var approval Approval
+
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		current, err := store.getTaskTx(ctx, tx, params.TaskID)
+		if err != nil {
+			return err
+		}
+
+		previousStatus := current.Status
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE tasks
+			SET status = ?, updated_at = ?
+			WHERE id = ?
+		`, "blocked", formatTime(now), params.TaskID); err != nil {
+			return err
+		}
+
+		task = current
+		task.Status = "blocked"
+		task.UpdatedAt = now
+
+		projectID := task.ProjectID
+		if err := appendEventTx(ctx, tx, eventInsert{
+			StreamType: runtimeevents.StreamTask,
+			StreamID:   task.ID,
+			EventType:  runtimeevents.EventTaskStatusChanged,
+			Scope:      task.Scope,
+			ProjectID:  &projectID,
+			TaskID:     &task.ID,
+			Payload: runtimeevents.TaskStatusChangedPayload{
+				PreviousStatus: previousStatus,
+				Status:         task.Status,
+			},
+			OccurredAt: now,
+		}); err != nil {
+			return err
+		}
+
+		result, err := tx.ExecContext(ctx, `
+			INSERT INTO approvals (task_id, run_id, status, requested_at, resolved_at, decision_by, reason)
+			VALUES (?, ?, ?, ?, NULL, '', '')
+		`,
+			params.TaskID,
+			nullInt64(params.RunID),
+			"pending",
+			formatTime(now),
+		)
+		if err != nil {
+			return err
+		}
+
+		approvalID, err := result.LastInsertId()
+		if err != nil {
+			return err
+		}
+
+		approval = Approval{
+			ID:          approvalID,
+			TaskID:      params.TaskID,
+			RunID:       params.RunID,
+			Status:      "pending",
+			RequestedAt: now,
+		}
+
+		return appendEventTx(ctx, tx, eventInsert{
+			StreamType: runtimeevents.StreamApproval,
+			StreamID:   approval.ID,
+			EventType:  runtimeevents.EventApprovalRequested,
+			Scope:      task.Scope,
+			ProjectID:  &projectID,
+			TaskID:     &task.ID,
+			RunID:      params.RunID,
+			Payload: runtimeevents.ApprovalRequestedPayload{
+				TaskID:      task.ID,
+				RunID:       params.RunID,
+				Status:      approval.Status,
+				RequestedBy: params.RequestedBy,
+			},
+			OccurredAt: now,
+		})
+	})
+
+	return task, approval, err
+}
+
 func (store *Store) ResolveApproval(ctx context.Context, params ResolveApprovalParams) (Approval, error) {
 	now := store.now()
 	var approval Approval

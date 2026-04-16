@@ -12,10 +12,29 @@ import (
 	"odin-os/internal/core/projects"
 	corescope "odin-os/internal/core/scope"
 	"odin-os/internal/core/workspaces"
+	"odin-os/internal/executors/contract"
 	"odin-os/internal/executors/router"
 	"odin-os/internal/store/sqlite"
 	"odin-os/internal/vcs/leases"
 )
+
+func TestFinalizeTaskOutcomeDelegatesRawExecutorStatusToWorkItems(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	finalizer := &recordingTaskFinalizer{}
+
+	if err := finalizeTaskOutcome(ctx, finalizer, 42, contract.ExecutionResult{Status: "timed_out"}); err != nil {
+		t.Fatalf("finalizeTaskOutcome() error = %v", err)
+	}
+
+	if finalizer.taskID != 42 {
+		t.Fatalf("finalizer.taskID = %d, want 42", finalizer.taskID)
+	}
+	if finalizer.status != "timed_out" {
+		t.Fatalf("finalizer.status = %q, want timed_out", finalizer.status)
+	}
+}
 
 func TestResolutionCreateTaskFromActUsesControlScope(t *testing.T) {
 	t.Parallel()
@@ -273,6 +292,17 @@ func TestExecuteNextQueuedCompletesCutoverProjectTask(t *testing.T) {
 	if run.Status != "completed" || run.Executor != "codex_headless" {
 		t.Fatalf("run = %+v, want completed codex_headless execution", run)
 	}
+}
+
+type recordingTaskFinalizer struct {
+	taskID int64
+	status string
+}
+
+func (finalizer *recordingTaskFinalizer) Finalize(_ context.Context, taskID int64, status string) (sqlite.Task, error) {
+	finalizer.taskID = taskID
+	finalizer.status = status
+	return sqlite.Task{ID: taskID, Status: status}, nil
 }
 
 func TestExecuteNextQueuedRejectsShadowModeMutation(t *testing.T) {

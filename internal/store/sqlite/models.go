@@ -189,6 +189,12 @@ type RequestApprovalParams struct {
 	RequestedBy string
 }
 
+type BlockTaskAndRequestApprovalParams struct {
+	TaskID      int64
+	RunID       *int64
+	RequestedBy string
+}
+
 type ResolveApprovalParams struct {
 	ApprovalID int64
 	Status     string

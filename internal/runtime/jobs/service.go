@@ -216,10 +216,6 @@ func (service Service) ExecuteNextQueued(ctx context.Context) error {
 	if runStatus == "" {
 		runStatus = "completed"
 	}
-	taskStatus := "completed"
-	if runStatus != "completed" {
-		taskStatus = "failed"
-	}
 
 	if _, err := service.Store.FinishRun(ctx, sqlite.FinishRunParams{
 		RunID:   run.ID,
@@ -228,13 +224,8 @@ func (service Service) ExecuteNextQueued(ctx context.Context) error {
 	}); err != nil {
 		return err
 	}
-	if taskStatus == "completed" {
-		if _, err := service.workItemService().Complete(ctx, task.ID); err != nil {
-			return err
-		}
-		return nil
-	}
-	if _, err := service.workItemService().Fail(ctx, task.ID); err != nil {
+
+	if err := finalizeTaskOutcome(ctx, service.workItemService(), task.ID, result); err != nil {
 		return err
 	}
 
@@ -290,6 +281,15 @@ func (service Service) workItemService() workitems.Service {
 		service.WorkItems.Store = service.Store
 	}
 	return service.WorkItems
+}
+
+type taskFinalizer interface {
+	Finalize(context.Context, int64, string) (sqlite.Task, error)
+}
+
+func finalizeTaskOutcome(ctx context.Context, finalizer taskFinalizer, taskID int64, result contract.ExecutionResult) error {
+	_, err := finalizer.Finalize(ctx, taskID, result.Status)
+	return err
 }
 
 func (service Service) nextRunAttempt(ctx context.Context, taskID int64) (int, error) {
