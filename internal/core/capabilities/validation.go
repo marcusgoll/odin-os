@@ -109,7 +109,7 @@ func validateDeclaredInputType(input json.RawMessage, declaredType string) error
 			return fmt.Errorf("expected JSON null input")
 		}
 	default:
-		return nil
+		return fmt.Errorf("unsupported inputSchema.type %q", declaredType)
 	}
 
 	return nil

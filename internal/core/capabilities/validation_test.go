@@ -186,3 +186,63 @@ func TestValidateInvocationAcceptsDeclaredInputTypes(t *testing.T) {
 		})
 	}
 }
+
+func TestValidateInvocationRejectsUnsupportedDeclaredInputType(t *testing.T) {
+	descriptor := Descriptor{
+		Kind:         registry.KindCommand,
+		Key:          "project.status",
+		Version:      "1.0.0",
+		Availability: registry.Availability{Scope: "project"},
+		InputSchema:  registry.SchemaRef{Ref: "#/components/schemas/Input", Type: "uuid"},
+		OutputSchema: registry.SchemaRef{Type: "object"},
+	}
+	gateway := newGatewayWithDescriptor(descriptor, func(context.Context, InvokeRequest, Descriptor) (InvokeResponse, error) {
+		t.Fatal("invoke callback should not be called when input schema validation fails")
+		return InvokeResponse{}, nil
+	})
+
+	_, err := gateway.InvokeCapability(context.Background(), InvokeRequest{
+		RequestID:         "req-1",
+		CapabilityID:      descriptor.Key,
+		CapabilityVersion: descriptor.Version,
+		Input:             json.RawMessage(`{"key":"value"}`),
+	})
+	if err == nil {
+		t.Fatal("InvokeCapability() error = nil, want validation failure")
+	}
+
+	code, ok := errorCode(err)
+	if !ok {
+		t.Fatalf("InvokeCapability() error = %v, want coded validation error", err)
+	}
+	if code != "validation_failed" {
+		t.Fatalf("InvokeCapability() code = %q, want %q", code, "validation_failed")
+	}
+}
+
+func TestValidateInvocationAcceptsInputSchemaRefWithoutType(t *testing.T) {
+	descriptor := Descriptor{
+		Kind:         registry.KindCommand,
+		Key:          "project.status",
+		Version:      "1.0.0",
+		Availability: registry.Availability{Scope: "project"},
+		InputSchema:  registry.SchemaRef{Ref: "#/components/schemas/Input"},
+		OutputSchema: registry.SchemaRef{Type: "object"},
+	}
+	gateway := newGatewayWithDescriptor(descriptor, func(context.Context, InvokeRequest, Descriptor) (InvokeResponse, error) {
+		return InvokeResponse{RunID: "run-1"}, nil
+	})
+
+	response, err := gateway.InvokeCapability(context.Background(), InvokeRequest{
+		RequestID:         "req-1",
+		CapabilityID:      descriptor.Key,
+		CapabilityVersion: descriptor.Version,
+		Input:             json.RawMessage(`"string"`),
+	})
+	if err != nil {
+		t.Fatalf("InvokeCapability() error = %v, want success", err)
+	}
+	if response.RunID != "run-1" {
+		t.Fatalf("InvokeCapability().RunID = %q, want %q", response.RunID, "run-1")
+	}
+}
