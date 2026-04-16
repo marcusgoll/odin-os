@@ -69,6 +69,8 @@ pass "browser_snapshot returned local data URL content"
 if ! browser_navigate "https://example.com"; then
     fail "browser_navigate could not load example.com"
 fi
+CURRENT_URL="$(curl -sf "${BROWSER_SERVER_URL}/health" | jq -r '.url // empty')"
+[[ "${CURRENT_URL}" == "https://example.com/" ]] || fail "browser health did not report the committed example.com URL"
 SNAPSHOT="$(browser_snapshot)"
 [[ "${SNAPSHOT}" == *"Example Domain"* ]] || fail "browser_snapshot did not return Example Domain"
 pass "browser_snapshot returned Example Domain"

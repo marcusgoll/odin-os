@@ -239,11 +239,15 @@ async function navigate(url) {
   const load = cdp.once('Page.loadEventFired', 15000).catch(() => null);
   await cdp.call('Page.navigate', { url });
   await load;
-  currentUrl = url;
   try {
-    const title = await cdp.call('Runtime.evaluate', { expression: 'document.title', returnByValue: true });
-    currentTitle = title?.result?.value || '';
+    const state = await cdp.call('Runtime.evaluate', {
+      expression: '({ url: location.href, title: document.title })',
+      returnByValue: true,
+    });
+    currentUrl = state?.result?.value?.url || url;
+    currentTitle = state?.result?.value?.title || '';
   } catch {
+    currentUrl = url;
     currentTitle = '';
   }
 }
