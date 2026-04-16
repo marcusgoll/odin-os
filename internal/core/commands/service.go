@@ -8,7 +8,6 @@ import (
 	"strings"
 
 	"odin-os/internal/core/capabilities"
-	"odin-os/internal/registry"
 )
 
 var errCommandGatewayMissing = errors.New("command gateway is required")
@@ -21,17 +20,12 @@ type CapabilityGateway interface {
 	InvokeCapability(ctx context.Context, request capabilities.InvokeRequest) (capabilities.InvokeResponse, error)
 }
 
-type WorkflowRunner interface {
-	Run(context.Context, capabilities.InvokeRequest) (capabilities.InvokeResponse, error)
-}
-
 type Service struct {
-	caps      CapabilityGateway
-	workflows WorkflowRunner
+	caps CapabilityGateway
 }
 
-func NewService(caps CapabilityGateway, workflows WorkflowRunner) *Service {
-	return &Service{caps: caps, workflows: workflows}
+func NewService(caps CapabilityGateway) *Service {
+	return &Service{caps: caps}
 }
 
 func (s *Service) Execute(ctx context.Context, req capabilities.InvokeRequest) (capabilities.InvokeResponse, error) {
@@ -52,10 +46,6 @@ func (s *Service) Execute(ctx context.Context, req capabilities.InvokeRequest) (
 
 	if err := validateCommandInput(descriptor, req.Input); err != nil {
 		return capabilities.InvokeResponse{}, err
-	}
-
-	if descriptor.Kind == registry.KindWorkflow && s.workflows != nil {
-		return s.workflows.Run(ctx, req)
 	}
 
 	return s.caps.InvokeCapability(ctx, req)

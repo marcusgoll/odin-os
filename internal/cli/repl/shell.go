@@ -76,7 +76,7 @@ func New(env Environment) (*Shell, error) {
 		shell.commandService = env.CommandService
 	} else if env.CapabilityService != nil {
 		gateway := capabilities.NewGateway(env.CapabilityService, shell.invokeCapability, nil)
-		shell.commandService = corecommands.NewService(gateway, nil)
+		shell.commandService = corecommands.NewService(gateway)
 	}
 
 	if err := shell.persistState(); err != nil {
