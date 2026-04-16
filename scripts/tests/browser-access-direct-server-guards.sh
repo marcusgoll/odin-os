@@ -72,7 +72,9 @@ assert_rejected() {
 for target in \
     'https://blocked.example/path' \
     'https://blocked.example%2e/path' \
-    'https://foo.deny.test/resource'; do
+    'https://foo.deny.test/resource' \
+    'example.com/path' \
+    '//example.com/path'; do
     assert_rejected launch "${target}"
     assert_rejected navigate "${target}"
 done
@@ -92,6 +94,15 @@ for target in \
     'mailto:user@example.com' \
     'ftp://example.com/resource' \
     'custom-scheme://example.com/path'; do
+    assert_rejected launch "${target}"
+    assert_rejected navigate "${target}"
+done
+for target in \
+    'https://10.0.0.1/path' \
+    'https://172.16.0.1/path' \
+    'https://192.168.0.1/path' \
+    'https://[fd00::1]/path' \
+    'https://[fe80::1%25lo]/path'; do
     assert_rejected launch "${target}"
     assert_rejected navigate "${target}"
 done

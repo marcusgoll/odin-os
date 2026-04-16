@@ -70,6 +70,10 @@ function normalizeHostForMatching(host) {
   return normalized;
 }
 
+function stripIpv6ZoneId(host) {
+  return String(host || '').replace(/%25.*$/, '');
+}
+
 function browserDomainDenylist() {
   return String(process.env.ODIN_BROWSER_DOMAIN_DENYLIST || 'localhost,127.0.0.1,::1,*.local')
     .split(',')
@@ -77,29 +81,86 @@ function browserDomainDenylist() {
     .filter(Boolean);
 }
 
-function browserHostIsLocalService(host) {
+function ipv4IsLocalService(host) {
   const normalized = normalizeHostForMatching(host);
+  const match = normalized.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (!match) {
+    return false;
+  }
+
+  const a = Number.parseInt(match[1], 10);
+  const b = Number.parseInt(match[2], 10);
+  const c = Number.parseInt(match[3], 10);
+  const d = Number.parseInt(match[4], 10);
+  if ([a, b, c, d].some((part) => Number.isNaN(part) || part < 0 || part > 255)) {
+    return false;
+  }
+
+  return a === 127 || a === 10 || (a === 192 && b === 168) || (a === 172 && b >= 16 && b <= 31);
+}
+
+function ipv4ValueIsLocalService(value) {
+  const a = (value >>> 24) & 255;
+  const b = (value >>> 16) & 255;
+  return a === 127 || a === 10 || (a === 192 && b === 168) || (a === 172 && b >= 16 && b <= 31);
+}
+
+function ipv4MappedIpv6IsLocalService(host) {
+  const normalized = stripIpv6ZoneId(normalizeHostForMatching(host));
+  if (!normalized.startsWith('::ffff:')) {
+    return false;
+  }
+
+  const tail = normalized.slice('::ffff:'.length).replace(/\.+$/, '');
+  if (ipv4IsLocalService(tail)) {
+    return true;
+  }
+
+  const mapped = tail.match(/^([0-9a-f]{1,4}):([0-9a-f]{1,4})$/i);
+  if (!mapped) {
+    return false;
+  }
+
+  const hi = Number.parseInt(mapped[1], 16);
+  const lo = Number.parseInt(mapped[2], 16);
+  const ipv4 = ((hi << 16) | lo) >>> 0;
+  return ipv4ValueIsLocalService(ipv4);
+}
+
+function ipv6IsPrivateService(host) {
+  const normalized = stripIpv6ZoneId(normalizeHostForMatching(host));
+  if (!normalized.includes(':')) {
+    return false;
+  }
+
+  if (normalized === '::1') {
+    return true;
+  }
+  if (normalized.startsWith('fd')) {
+    return true;
+  }
+  if (/^fe[89ab]/.test(normalized)) {
+    return true;
+  }
+  return false;
+}
+
+function browserHostIsLocalService(host) {
+  const normalized = stripIpv6ZoneId(normalizeHostForMatching(host));
   if (normalized === 'localhost' || normalized.endsWith('.localhost')) {
     return true;
   }
   if (normalized === '::1') {
     return true;
   }
-  if (normalized === '127.0.0.1' || normalized.startsWith('127.')) {
+  if (ipv4IsLocalService(normalized)) {
     return true;
   }
-  if (normalized.startsWith('::ffff:')) {
-    const tail = normalized.slice('::ffff:'.length).replace(/\.+$/, '');
-    if (tail === '127.0.0.1') {
-      return true;
-    }
-    const mapped = tail.match(/^([0-9a-f]{1,4}):([0-9a-f]{1,4})$/i);
-    if (mapped) {
-      const hi = Number.parseInt(mapped[1], 16);
-      const lo = Number.parseInt(mapped[2], 16);
-      const ipv4 = (hi << 16) | lo;
-      return ((ipv4 >>> 24) & 255) === 127;
-    }
+  if (ipv6IsPrivateService(normalized)) {
+    return true;
+  }
+  if (ipv4MappedIpv6IsLocalService(normalized)) {
+    return true;
   }
   return false;
 }
@@ -137,7 +198,6 @@ function assertBrowserTargetAllowed(target) {
     throw new Error('Blocked browser URL');
   }
 }
-
 function isExecutableFile(filePath) {
   try {
     const stats = statSync(filePath);

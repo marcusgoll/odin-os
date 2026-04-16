@@ -32,6 +32,12 @@ fi
 if browser_request_domain_access "https://blocked.example%2e/path"; then
     fail "expected blocked.example%2e to be denied"
 fi
+if browser_request_domain_access "example.com/path"; then
+    fail "expected scheme-less example.com/path to be denied"
+fi
+if browser_request_domain_access "//example.com/path"; then
+    fail "expected scheme-relative //example.com/path to be denied"
+fi
 if browser_request_domain_access "https://user:pass@blocked.example/path"; then
     fail "expected credentialed blocked.example to be denied"
 fi
@@ -91,6 +97,16 @@ fi
 if browser_request_domain_access "https://[::ffff:127.0.0.1%25lo]/path"; then
     fail "expected IPv4-mapped IPv6 zone-id loopback to be denied"
 fi
+for target in \
+    'https://10.0.0.1/path' \
+    'https://172.16.0.1/path' \
+    'https://192.168.0.1/path' \
+    'https://[fd00::1]/path' \
+    'https://[fe80::1%25lo]/path'; do
+    if browser_request_domain_access "${target}"; then
+        fail "expected ${target} to be denied as a local-service target"
+    fi
+done
 browser_request_domain_access "data:text/html,allowed" || fail "expected data: URLs to remain allowed"
 if browser_request_domain_access "https://[::ffff:7f00:1]/path"; then
     fail "expected canonical IPv4-mapped IPv6 loopback to be denied"

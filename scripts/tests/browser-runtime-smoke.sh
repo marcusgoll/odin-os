@@ -103,7 +103,16 @@ SNAPSHOT="$(browser_snapshot)"
 [[ "${SNAPSHOT}" == *"Example Domain"* ]] || fail "browser_snapshot did not return Example Domain"
 pass "browser_snapshot returned Example Domain"
 
-for target in     'http://localhost/path'     'http://127.0.0.2/path'     'https://[::1]/path'     'https://[::ffff:127.0.0.1]/path'; do
+for target in \
+    'http://localhost/path' \
+    'http://127.0.0.2/path' \
+    'https://[::1]/path' \
+    'https://[::ffff:127.0.0.1]/path' \
+    'https://10.0.0.1/path' \
+    'https://172.16.0.1/path' \
+    'https://192.168.0.1/path' \
+    'https://[fd00::1]/path' \
+    'https://[fe80::1%25lo]/path'; do
     NAVIGATE_STATUS="$(curl -s -o /dev/null -w '%{http_code}' -X POST "${BROWSER_SERVER_URL}/navigate" -H 'Content-Type: application/json' -d "$(jq -nc --arg url "${target}" '{url: $url}')")"
     [[ "${NAVIGATE_STATUS}" != "200" ]] || fail "direct navigate unexpectedly succeeded for ${target}"
     CURRENT_URL_AFTER_NAVIGATE="$(curl -sf "${BROWSER_SERVER_URL}/health" | jq -r '.url // empty')"
@@ -111,7 +120,16 @@ for target in     'http://localhost/path'     'http://127.0.0.2/path'     'https
 done
 pass "direct navigate rejects local-service URLs"
 
-for target in     'http://localhost/path'     'http://127.0.0.2/path'     'https://[::1]/path'     'https://[::ffff:127.0.0.1]/path'; do
+for target in \
+    'http://localhost/path' \
+    'http://127.0.0.2/path' \
+    'https://[::1]/path' \
+    'https://[::ffff:127.0.0.1]/path' \
+    'https://10.0.0.1/path' \
+    'https://172.16.0.1/path' \
+    'https://192.168.0.1/path' \
+    'https://[fd00::1]/path' \
+    'https://[fe80::1%25lo]/path'; do
     LAUNCH_STATUS="$(curl -s -o /dev/null -w '%{http_code}' -X POST "${BROWSER_SERVER_URL}/launch" -H 'Content-Type: application/json' -d "$(jq -nc --arg url "${target}" '{browser:"chromium", headless: true, url: $url}')")"
     [[ "${LAUNCH_STATUS}" != "200" ]] || fail "direct launch unexpectedly succeeded for ${target}"
     CURRENT_URL_AFTER_LAUNCH="$(curl -sf "${BROWSER_SERVER_URL}/health" | jq -r '.url // empty')"
