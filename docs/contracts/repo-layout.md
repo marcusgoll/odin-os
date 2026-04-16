@@ -1,13 +1,15 @@
 ---
 title: Repository Layout Contract
 status: active
-date: 2026-04-08
+date: 2026-04-16
 phase: "00"
 ---
 
 # Repository Layout Contract
 
 This document defines the target package and folder boundaries for the new Odin OS repository. The purpose is to keep responsibilities non-overlapping and to prevent future phases from smearing authored assets, runtime state, adapters, and projections together.
+
+The semantic center of the repo is Odin's control plane for one primary workspace. Durable product objects are `workspace`, `initiative`, `companion`, `policy`, `memory`, `work item`, and `run attempt`. Package boundaries should reinforce that center instead of creating a second architecture around workers, executors, or managed projects.
 
 ## Top-level layout
 
@@ -52,7 +54,7 @@ Owns bootstrap, lifecycle wiring, and configuration loading. It composes the sys
 
 ### `internal/cli`
 
-Owns REPL, command entrypoints, TUI surfaces, rendering, and explicit scope presentation. It is the operator interface layer and should consume projections and orchestration services rather than implement them.
+Owns REPL, command entrypoints, TUI surfaces, rendering, and operator-facing context presentation. It is the operator interface layer and should consume projections and orchestration services rather than implement them.
 
 ### `internal/api`
 
@@ -60,11 +62,11 @@ Owns HTTP and WebSocket transport. It should expose the same underlying orchestr
 
 ### `internal/core`
 
-Owns intake, routing, context management, approvals, policy, scheduling, orchestration, and project governance rules. This is the domain center and must not depend directly on provider-specific adapters.
+Owns the control-plane domain model: workspace, initiative, companion, policy, approvals, scheduling, orchestration, work-item lifecycle, and project governance rules. This is the domain center and must not depend directly on provider-specific adapters.
 
 ### `internal/runtime`
 
-Owns jobs, runs, events, projections, health, recovery, uncertainty handling, and checkpoints. Runtime packages model what happens while Odin is operating and how it recovers or compacts context.
+Owns jobs, run attempts, events, projections, health, recovery, uncertainty handling, and checkpoints. Runtime packages model what happens while Odin is operating and how it recovers or compacts context after control-plane decisions have been made.
 
 ### `internal/registry`
 
@@ -76,15 +78,15 @@ Owns evaluators, proposals, promotion, and replay. It is the bounded self-improv
 
 ### `internal/memory`
 
-Owns runtime services for user, project, run, and knowledge memory access. It should index and project canonical authored memory and runtime-derived knowledge without becoming a second registry.
+Owns runtime services for workspace, initiative, companion, project, run, and knowledge memory access. It should index and project canonical authored memory and runtime-derived knowledge without becoming a second registry.
 
 ### `internal/workers`
 
-Owns planner, builder, reviewer, QA, and research worker roles. Workers coordinate execution behavior, but they should use shared contracts for tools, executors, policy, and runtime state.
+Owns planner, builder, reviewer, QA, and research worker roles in the execution plane. Workers advance bounded work items, but they should use shared contracts for tools, executors, policy, and runtime state instead of owning durable product truth.
 
 ### `internal/executors`
 
-Owns the common executor contract, routing, and backend implementations such as Codex, Claude Code, Gemini CLI, and API-backed executors. Backend-specific code belongs here, never in `core` or `workers`.
+Owns the common executor contract, routing, and backend implementations such as Codex, Claude Code, Gemini CLI, and API-backed executors. Executors are replaceable execution lanes; backend-specific code belongs here, never in `core` or `workers`.
 
 ### `internal/tools`
 
@@ -109,8 +111,10 @@ Owns structured logs, metrics, traces, and audit delivery. Telemetry consumes ev
 ## Boundary rules
 
 - `core/` may depend on contracts and services, but not on transport-specific CLI or API packages.
+- `core/` owns durable control-plane semantics; `runtime/`, `workers/`, and `executors/` must not redefine workspace, initiative, companion, policy, memory, or work-item truth.
 - `adapters/` may depend inward on contracts, never outward on CLI, TUI, or specific worker roles.
 - `executors/` expose a shared contract; plan-backed headless runners fit here only if they satisfy that same contract.
+- `workers/` and `executors/` make up the execution plane and operate on bounded assignments returned by the control plane.
 - `registry/`, `prompts/`, and `memory/` are authored sources; compiled or indexed forms belong in `state/` or SQLite.
 - `runs/` and `state/` are always disposable or reconstructable relative to canonical authorities unless an ADR explicitly promotes a subset.
 
