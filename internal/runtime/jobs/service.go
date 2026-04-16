@@ -15,6 +15,7 @@ import (
 	"odin-os/internal/runtime/projections"
 	"odin-os/internal/store/sqlite"
 	"odin-os/internal/vcs/leases"
+	worktreemgr "odin-os/internal/vcs/worktrees"
 )
 
 type Service struct {
@@ -431,7 +432,7 @@ func cleanupAssignment(ctx context.Context, store *sqlite.Store, git leases.Git,
 		return
 	}
 
-	if err := git.RemoveWorktree(ctx, assignment.RepoRoot, assignment.WorktreePath); err != nil {
+	if err := git.RemoveWorktree(ctx, assignment.RepoRoot, assignment.WorktreePath); err != nil && !errors.Is(err, worktreemgr.ErrWorktreeAlreadyRemoved) {
 		return
 	}
 	_, _ = store.MarkWorktreeLeaseCleanedUp(ctx, *assignment.LeaseID)

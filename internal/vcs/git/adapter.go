@@ -4,6 +4,9 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
+	"strings"
+
+	worktreemgr "odin-os/internal/vcs/worktrees"
 )
 
 type Adapter struct{}
@@ -28,7 +31,16 @@ func (Adapter) AddWorktree(ctx context.Context, repoRoot string, worktreePath st
 }
 
 func (Adapter) RemoveWorktree(ctx context.Context, repoRoot string, worktreePath string) error {
-	return runGit(ctx, repoRoot, "worktree", "remove", "--force", worktreePath)
+	cmd := exec.CommandContext(ctx, "git", "-C", repoRoot, "worktree", "remove", "--force", worktreePath)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		text := strings.TrimSpace(string(output))
+		if strings.Contains(text, "is not a working tree") {
+			return fmt.Errorf("%w: %s", worktreemgr.ErrWorktreeAlreadyRemoved, text)
+		}
+		return fmt.Errorf("git %v: %w: %s", []string{"worktree", "remove", "--force", worktreePath}, err, string(output))
+	}
+	return nil
 }
 
 func runGit(ctx context.Context, repoRoot string, args ...string) error {

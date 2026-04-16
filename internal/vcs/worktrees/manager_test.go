@@ -324,7 +324,11 @@ func TestManagerCleanupMarksMissingWorktreeCleanAfterMarkFailureRetry(t *testing
 
 	retry := Manager{
 		Store: reopened,
-		Git:   &cleanupGit{},
+		Git: &cleanupGit{
+			errsByPath: map[string]error{
+				worktreePath: ErrWorktreeAlreadyRemoved,
+			},
+		},
 	}
 	result, err = retry.Cleanup(ctx, time.Now().UTC().Add(-30*time.Minute))
 	if err != nil {
