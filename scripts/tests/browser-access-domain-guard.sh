@@ -33,4 +33,29 @@ if browser_request_domain_access "https://foo.deny.test/resource"; then
     fail "expected foo.deny.test to be denied by wildcard"
 fi
 browser_request_domain_access "https://example.com" || fail "expected example.com to be allowed"
-pass "domain denylist blocks matches and allows non-blocked domains"
+if browser_request_domain_access "javascript:alert(1)"; then
+    fail "expected javascript: URLs to be denied"
+fi
+if browser_request_domain_access "chrome://settings/"; then
+    fail "expected chrome: URLs to be denied"
+fi
+if browser_request_domain_access "https://localhost./path"; then
+    fail "expected localhost. to be denied"
+fi
+if browser_request_domain_access "https://foo.localhost/path"; then
+    fail "expected foo.localhost to be denied"
+fi
+if browser_request_domain_access "https://127.0.0.2/path"; then
+    fail "expected 127.0.0.2 to be denied"
+fi
+if browser_request_domain_access "https://2130706433/path"; then
+    fail "expected integer localhost to be denied"
+fi
+if browser_request_domain_access "https://[::ffff:127.0.0.1]/path"; then
+    fail "expected IPv4-mapped IPv6 loopback to be denied"
+fi
+browser_request_domain_access "data:text/html,allowed" || fail "expected data: URLs to remain allowed"
+if browser_request_domain_access "https://[::ffff:7f00:1]/path"; then
+    fail "expected canonical IPv4-mapped IPv6 loopback to be denied"
+fi
+pass "domain denylist blocks matches and denies canonical local-service forms"
