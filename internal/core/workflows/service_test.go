@@ -167,6 +167,52 @@ func TestWorkflowServiceRejectsMissingDependency(t *testing.T) {
 	}
 }
 
+func TestWorkflowServiceRejectsUnmarshalableCommandInput(t *testing.T) {
+	t.Parallel()
+
+	gateway := &recordingCapabilityGateway{
+		descriptors: map[string]capabilities.Descriptor{
+			keyFor("project.status", "1.0.0"): {
+				Kind:         registry.KindCommand,
+				Key:          "project.status",
+				Name:         "project.status",
+				Title:        "Project Status",
+				Version:      "1.0.0",
+				Summary:      "Reports project status.",
+				Availability: registry.Availability{Scope: "project"},
+				InputSchema:  registry.SchemaRef{Type: "object"},
+				OutputSchema: registry.SchemaRef{Type: "object"},
+			},
+		},
+	}
+
+	service := NewService(gateway, catalog.BuiltinDefinitions())
+
+	_, err := service.Execute(context.Background(), []Step{
+		{
+			Capability:   "command:project.status",
+			VersionRange: "1.0.0",
+			With: map[string]any{
+				"bad": func() {},
+			},
+		},
+	})
+	if err == nil {
+		t.Fatal("Execute() error = nil, want marshaling error")
+	}
+
+	var depErr *DependencyError
+	if !errors.As(err, &depErr) {
+		t.Fatalf("Execute() error = %v, want DependencyError", err)
+	}
+	if depErr.Stage != "execute" {
+		t.Fatalf("DependencyError.Stage = %q, want execute", depErr.Stage)
+	}
+	if len(gateway.invokeCalls) != 0 {
+		t.Fatalf("InvokeCapability() calls = %d, want 0", len(gateway.invokeCalls))
+	}
+}
+
 func keyFor(id, version string) string {
 	return id + "@" + version
 }

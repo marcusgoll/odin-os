@@ -188,7 +188,7 @@ func (kind Kind) Valid() bool {
 
 func (kind Kind) ValidDependencyKind() bool {
 	switch kind {
-	case KindAgent, KindSkill, KindWorkflow, KindCommand, Kind("tool"):
+	case KindAgent, KindSkill, KindCommand, Kind("tool"):
 		return true
 	default:
 		return false

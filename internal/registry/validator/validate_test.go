@@ -303,6 +303,64 @@ func TestValidateNormalizedManifestAcceptsToolDependencyKind(t *testing.T) {
 	}
 }
 
+func TestValidateNormalizedManifestRejectsWorkflowDependencyKind(t *testing.T) {
+	document := registry.ParsedDocument{
+		Source: registry.SourceFile{
+			Path:         "/tmp/skills/triage.md",
+			RelativePath: "skills/triage.md",
+			ExpectedKind: registry.KindSkill,
+		},
+		Frontmatter: registry.Frontmatter{
+			APIVersion: registry.NormalizedAPIVersion,
+			Kind:       registry.KindSkill,
+			Name:       "triage-skill",
+			Version:    "1.0.0",
+			Availability: registry.Availability{
+				Scope: "global",
+			},
+			Permissions: []string{"filesystem"},
+			InputSchema: registry.SchemaRef{
+				Ref: "schema://odin/skills/triage-skill/input",
+			},
+			OutputSchema: registry.SchemaRef{
+				Ref: "schema://odin/skills/triage-skill/output",
+			},
+			Dependencies: []registry.DependencyRef{
+				{
+					Kind:    registry.KindWorkflow,
+					Name:    "project-status-workflow",
+					Version: "1.0.0",
+				},
+			},
+			Execution: registry.ExecutionPolicy{
+				Mode: "local",
+			},
+			Implementation: registry.ImplementationRef{
+				Kind: "markdown",
+				Path: "skills/triage.md",
+			},
+		},
+		Sections: map[string]string{
+			registry.SectionPurpose:         "Purpose",
+			registry.SectionWhenToUse:       "When to use",
+			registry.SectionInputs:          "Inputs",
+			registry.SectionProcedure:       "Procedure",
+			registry.SectionOutputs:         "Outputs",
+			registry.SectionConstraints:     "Constraints",
+			registry.SectionSuccessCriteria: "Success",
+		},
+	}
+
+	diagnostics := validator.ValidateDocuments([]registry.ParsedDocument{document})
+	if len(diagnostics) != 1 {
+		t.Fatalf("ValidateDocuments() diagnostics = %v, want 1 diagnostic", diagnostics)
+	}
+
+	if diagnostics[0].Code != "invalid_dependency" {
+		t.Fatalf("diagnostic code = %q, want %q", diagnostics[0].Code, "invalid_dependency")
+	}
+}
+
 func TestValidateNormalizedManifestRejectsMissingImplementationPath(t *testing.T) {
 	document := registry.ParsedDocument{
 		Source: registry.SourceFile{

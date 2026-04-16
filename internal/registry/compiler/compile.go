@@ -66,6 +66,10 @@ func compileItem(document registry.ParsedDocument) registry.Item {
 	if strings.TrimSpace(availability.Scope) == "" && len(frontmatter.Scopes) > 0 {
 		availability.Scope = frontmatter.Scopes[0]
 	}
+	scopes := append([]string(nil), frontmatter.Scopes...)
+	if frontmatter.UsesNormalizedManifest() && len(scopes) == 0 && strings.TrimSpace(availability.Scope) != "" {
+		scopes = []string{strings.TrimSpace(availability.Scope)}
+	}
 
 	permissions := append([]string(nil), frontmatter.Permissions...)
 	if len(permissions) == 0 {
@@ -122,7 +126,7 @@ func compileItem(document registry.ParsedDocument) registry.Item {
 		Tags:       append([]string(nil), frontmatter.Tags...),
 		Owners:     append([]string(nil), frontmatter.Owners...),
 		Role:       frontmatter.Role,
-		Scopes:     append([]string(nil), frontmatter.Scopes...),
+		Scopes:     scopes,
 		Tools:      append([]string(nil), frontmatter.Tools...),
 		Strictness: frontmatter.Strictness,
 		AppliesTo:  append([]string(nil), frontmatter.AppliesTo...),

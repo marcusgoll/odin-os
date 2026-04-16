@@ -1,9 +1,13 @@
 package broker
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	"odin-os/internal/registry"
+	"odin-os/internal/registry/compiler"
+	"odin-os/internal/registry/parser"
 	"odin-os/internal/tools/budgets"
 	"odin-os/internal/tools/catalog"
 )
@@ -146,6 +150,35 @@ func TestBrokerUsesNormalizedCapabilitySnapshot(t *testing.T) {
 	}
 }
 
+func TestCatalogHonorsNormalizedWorkflowScope(t *testing.T) {
+	t.Parallel()
+
+	snapshot := compiledWorkflowSnapshot(t)
+	broker := New(snapshot, nil, budgets.Limits{
+		Tool:    budgets.Tool{MaxSelections: 10, MaxInvocations: 10, MaxCostUnits: 20},
+		Context: budgets.Context{MaxExpandedDefinitions: 10, MaxCompactedResults: 10, MaxCompactedBytes: 1000},
+	})
+
+	projectCards := broker.Catalog("project")
+	foundProjectWorkflow := false
+	for _, card := range projectCards {
+		if card.Key == "project-status-workflow" {
+			foundProjectWorkflow = true
+			break
+		}
+	}
+	if !foundProjectWorkflow {
+		t.Fatal("Catalog(project) missing project-status-workflow card")
+	}
+
+	globalCards := broker.Catalog("global")
+	for _, card := range globalCards {
+		if card.Key == "project-status-workflow" {
+			t.Fatalf("Catalog(global) unexpectedly included project-status-workflow card: %+v", card)
+		}
+	}
+}
+
 func testSnapshot() registry.Snapshot {
 	return registry.Snapshot{
 		Items: []registry.Item{
@@ -199,4 +232,28 @@ func testSnapshot() registry.Snapshot {
 			},
 		},
 	}
+}
+
+func compiledWorkflowSnapshot(t *testing.T) registry.Snapshot {
+	t.Helper()
+
+	content, err := os.ReadFile(filepath.Join("..", "..", "..", "registry", "workflows", "project-status.md"))
+	if err != nil {
+		t.Fatalf("ReadFile(project-status workflow) error = %v", err)
+	}
+
+	document, diagnostics := parser.ParseSource(registry.SourceFile{
+		Path:         filepath.Join("/tmp", "project-status.md"),
+		RelativePath: filepath.ToSlash(filepath.Join("registry", "workflows", "project-status.md")),
+		ExpectedKind: registry.KindWorkflow,
+	}, content)
+	if len(diagnostics) != 0 {
+		t.Fatalf("ParseSource(project-status workflow) diagnostics = %v, want none", diagnostics)
+	}
+
+	snapshot := compiler.Compile([]registry.ParsedDocument{document}, nil)
+	if len(snapshot.Diagnostics) != 0 {
+		t.Fatalf("Compile(project-status workflow) diagnostics = %v, want none", snapshot.Diagnostics)
+	}
+	return snapshot
 }

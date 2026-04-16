@@ -225,7 +225,19 @@ func (service *Service) resolveDependency(ctx context.Context, workflow string, 
 	}
 
 	if invoke && kind == string(registry.KindCommand) {
-		input := marshalStepInput(step.With)
+		input, err := marshalStepInput(step.With)
+		if err != nil {
+			return ResolvedStep{}, &DependencyError{
+				Workflow:     workflow,
+				StepIndex:    index,
+				Kind:         kind,
+				CapabilityID: capabilityID,
+				Capability:   step.Capability,
+				VersionRange: step.VersionRange,
+				Stage:        stageFor(invoke),
+				Err:          err,
+			}
+		}
 		response, err := service.caps.InvokeCapability(ctx, capabilities.InvokeRequest{
 			CapabilityID:      capabilityID,
 			CapabilityVersion: step.VersionRange,
@@ -330,13 +342,13 @@ func cloneAnyMap(values map[string]any) map[string]any {
 	return cloned
 }
 
-func marshalStepInput(values map[string]any) json.RawMessage {
+func marshalStepInput(values map[string]any) (json.RawMessage, error) {
 	if len(values) == 0 {
-		return json.RawMessage(`{}`)
+		return json.RawMessage(`{}`), nil
 	}
 	payload, err := json.Marshal(values)
 	if err != nil {
-		return json.RawMessage(`{}`)
+		return nil, err
 	}
-	return payload
+	return payload, nil
 }

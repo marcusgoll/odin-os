@@ -70,6 +70,14 @@ func TestCompileProducesNormalizedDescriptors(t *testing.T) {
 	if item.Implementation.Kind == "" {
 		t.Fatal("item.Implementation.Kind is empty")
 	}
+
+	workflow, ok := snapshot.ByKey["project-status-workflow"]
+	if !ok {
+		t.Fatal("snapshot.ByKey does not contain project-status-workflow")
+	}
+	if len(workflow.Scopes) != 1 || workflow.Scopes[0] != "project" {
+		t.Fatalf("workflow.Scopes = %#v, want [project]", workflow.Scopes)
+	}
 }
 
 func mustParseFixture(t *testing.T, filename string, kind registry.Kind) registry.ParsedDocument {
