@@ -113,6 +113,77 @@ func TestCompanionServiceUpsertsAndLoadsCompanion(t *testing.T) {
 	}
 }
 
+func TestCompanionServiceRejectsInvalidKind(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openCompanionServiceStore(t)
+	defer store.Close()
+
+	workspace, err := store.GetWorkspaceByKey(ctx, "default")
+	if err != nil {
+		t.Fatalf("GetWorkspaceByKey(default) error = %v", err)
+	}
+
+	_, err = Service{Store: store}.UpsertCompanion(ctx, Companion{
+		WorkspaceID:         workspace.ID,
+		Key:                 "bad-kind",
+		Title:               "Bad Kind",
+		Kind:                Kind("bogus"),
+		Charter:             "invalid",
+		Status:              "active",
+		InitiativeScopeJSON: `{}`,
+		ToolPolicyJSON:      `{}`,
+		MemoryPolicyJSON:    `{}`,
+		PlanningPolicyJSON:  `{}`,
+	})
+	if err == nil {
+		t.Fatalf("UpsertCompanion() error = nil, want invalid kind error")
+	}
+}
+
+func TestCompanionServiceDefaultsEmptyPolicyFields(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openCompanionServiceStore(t)
+	defer store.Close()
+
+	workspace, err := store.GetWorkspaceByKey(ctx, "default")
+	if err != nil {
+		t.Fatalf("GetWorkspaceByKey(default) error = %v", err)
+	}
+
+	created, err := Service{Store: store}.UpsertCompanion(ctx, Companion{
+		WorkspaceID:         workspace.ID,
+		Key:                 "defaults",
+		Title:               "Defaults",
+		Kind:                KindAssistant,
+		Charter:             "Normalize blank policy fields.",
+		Status:              "active",
+		InitiativeScopeJSON: "",
+		ToolPolicyJSON:      "",
+		MemoryPolicyJSON:    "",
+		PlanningPolicyJSON:  "",
+	})
+	if err != nil {
+		t.Fatalf("UpsertCompanion() error = %v", err)
+	}
+
+	if created.InitiativeScopeJSON != `{}` {
+		t.Fatalf("created.InitiativeScopeJSON = %q, want %q", created.InitiativeScopeJSON, `{}`)
+	}
+	if created.ToolPolicyJSON != `{}` {
+		t.Fatalf("created.ToolPolicyJSON = %q, want %q", created.ToolPolicyJSON, `{}`)
+	}
+	if created.MemoryPolicyJSON != `{}` {
+		t.Fatalf("created.MemoryPolicyJSON = %q, want %q", created.MemoryPolicyJSON, `{}`)
+	}
+	if created.PlanningPolicyJSON != `{}` {
+		t.Fatalf("created.PlanningPolicyJSON = %q, want %q", created.PlanningPolicyJSON, `{}`)
+	}
+}
+
 func openCompanionServiceStore(t *testing.T) *sqlite.Store {
 	t.Helper()
 

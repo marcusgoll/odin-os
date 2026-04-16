@@ -99,3 +99,116 @@ func TestCompanionStoreMigrationAndRoundTrip(t *testing.T) {
 		t.Fatalf("schema_migrations count = %d, want 9", migrationCount)
 	}
 }
+
+func TestCompanionStoreRejectsInvalidPolicyJSON(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store, err := Open(filepath.Join(t.TempDir(), "odin.db"))
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer store.Close()
+
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
+	}
+
+	workspace, err := store.GetWorkspaceByKey(ctx, "default")
+	if err != nil {
+		t.Fatalf("GetWorkspaceByKey(default) error = %v", err)
+	}
+
+	_, err = store.UpsertCompanion(ctx, UpsertCompanionParams{
+		WorkspaceID:         workspace.ID,
+		Key:                 "bad-json",
+		Title:               "Bad JSON",
+		Kind:                "assistant",
+		Charter:             "invalid",
+		Status:              "active",
+		InitiativeScopeJSON: `{"initiatives":[]}`,
+		ToolPolicyJSON:      `not-json`,
+		MemoryPolicyJSON:    `{}`,
+		PlanningPolicyJSON:  `{}`,
+	})
+	if err == nil {
+		t.Fatalf("UpsertCompanion() error = nil, want invalid json error")
+	}
+}
+
+func TestCompanionStoreDefaultsEmptyPolicyJSON(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store, err := Open(filepath.Join(t.TempDir(), "odin.db"))
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer store.Close()
+
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
+	}
+
+	workspace, err := store.GetWorkspaceByKey(ctx, "default")
+	if err != nil {
+		t.Fatalf("GetWorkspaceByKey(default) error = %v", err)
+	}
+
+	created, err := store.UpsertCompanion(ctx, UpsertCompanionParams{
+		WorkspaceID:         workspace.ID,
+		Key:                 "defaults",
+		Title:               "Defaults",
+		Kind:                "assistant",
+		Charter:             "Normalize blank JSON fields.",
+		Status:              "active",
+		InitiativeScopeJSON: "",
+		ToolPolicyJSON:      "",
+		MemoryPolicyJSON:    "",
+		PlanningPolicyJSON:  "",
+	})
+	if err != nil {
+		t.Fatalf("UpsertCompanion() error = %v", err)
+	}
+
+	if created.InitiativeScopeJSON != `{}` {
+		t.Fatalf("created.InitiativeScopeJSON = %q, want %q", created.InitiativeScopeJSON, `{}`)
+	}
+	if created.ToolPolicyJSON != `{}` {
+		t.Fatalf("created.ToolPolicyJSON = %q, want %q", created.ToolPolicyJSON, `{}`)
+	}
+	if created.MemoryPolicyJSON != `{}` {
+		t.Fatalf("created.MemoryPolicyJSON = %q, want %q", created.MemoryPolicyJSON, `{}`)
+	}
+	if created.PlanningPolicyJSON != `{}` {
+		t.Fatalf("created.PlanningPolicyJSON = %q, want %q", created.PlanningPolicyJSON, `{}`)
+	}
+}
+
+func TestMigrateBackfillsDefaultCompanionForDefaultWorkspace(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store, err := Open(filepath.Join(t.TempDir(), "odin.db"))
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer store.Close()
+
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
+	}
+
+	workspace, err := store.GetWorkspaceByKey(ctx, "default")
+	if err != nil {
+		t.Fatalf("GetWorkspaceByKey(default) error = %v", err)
+	}
+
+	companion, err := store.GetCompanionByKey(ctx, workspace.ID, workspace.DefaultCompanionKey)
+	if err != nil {
+		t.Fatalf("GetCompanionByKey(default) error = %v", err)
+	}
+	if companion.Key != workspace.DefaultCompanionKey {
+		t.Fatalf("companion.Key = %q, want %q", companion.Key, workspace.DefaultCompanionKey)
+	}
+}

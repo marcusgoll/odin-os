@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -19,6 +20,14 @@ var ErrWorktreeLeaseConflict = errors.New("worktree lease conflict")
 const (
 	managedProjectInitiativeKind   = "managed_project"
 	managedProjectInitiativeStatus = "active"
+	companionKindAssistant         = "assistant"
+	companionKindAdvisor           = "advisor"
+	companionKindOperator          = "operator"
+	companionKindSpecialist        = "specialist"
+	defaultCompanionCharter        = "Default companion for this workspace."
+	defaultCompanionStatus         = "active"
+	defaultCompanionTitlePrimary   = "Primary Assistant"
+	defaultCompanionTitleDefault   = "Default Companion"
 )
 
 type Store struct {
@@ -267,6 +276,16 @@ func (store *Store) CreateWorkspace(ctx context.Context, params CreateWorkspaceP
 			PolicyJSON:          policyJSON,
 			CreatedAt:           now,
 			UpdatedAt:           now,
+		}
+
+		hasCompanionsTable, err := store.tableExistsTx(ctx, tx, "companions")
+		if err != nil {
+			return err
+		}
+		if hasCompanionsTable {
+			if _, err := store.upsertCompanionTx(ctx, tx, defaultCompanionParams(workspace.ID, workspace.DefaultCompanionKey), now); err != nil {
+				return err
+			}
 		}
 
 		return nil
@@ -2502,6 +2521,11 @@ func (store *Store) upsertInitiativeTx(ctx context.Context, tx *sql.Tx, params U
 }
 
 func (store *Store) upsertCompanionTx(ctx context.Context, tx *sql.Tx, params UpsertCompanionParams, now time.Time) (Companion, error) {
+	normalized, err := normalizeCompanionUpsertParams(params)
+	if err != nil {
+		return Companion{}, err
+	}
+
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO companions (
 			workspace_id,
@@ -2529,28 +2553,106 @@ func (store *Store) upsertCompanionTx(ctx context.Context, tx *sql.Tx, params Up
 			planning_policy_json = excluded.planning_policy_json,
 			updated_at = excluded.updated_at
 	`,
-		params.WorkspaceID,
-		params.Key,
-		params.Title,
-		params.Kind,
-		params.Charter,
-		params.Status,
-		params.InitiativeScopeJSON,
-		params.ToolPolicyJSON,
-		params.MemoryPolicyJSON,
-		params.PlanningPolicyJSON,
+		normalized.WorkspaceID,
+		normalized.Key,
+		normalized.Title,
+		normalized.Kind,
+		normalized.Charter,
+		normalized.Status,
+		normalized.InitiativeScopeJSON,
+		normalized.ToolPolicyJSON,
+		normalized.MemoryPolicyJSON,
+		normalized.PlanningPolicyJSON,
 		formatTime(now),
 		formatTime(now),
 	); err != nil {
 		return Companion{}, err
 	}
 
-	record, err := store.getCompanionTx(ctx, tx, params.WorkspaceID, params.Key)
+	record, err := store.getCompanionTx(ctx, tx, normalized.WorkspaceID, normalized.Key)
 	if err != nil {
 		return Companion{}, err
 	}
 
 	return record, nil
+}
+
+func normalizeCompanionUpsertParams(params UpsertCompanionParams) (UpsertCompanionParams, error) {
+	if !isCanonicalCompanionKind(params.Kind) {
+		return UpsertCompanionParams{}, fmt.Errorf("invalid companion kind %q", params.Kind)
+	}
+
+	normalized := params
+
+	var err error
+	if normalized.InitiativeScopeJSON, err = normalizeCompanionJSON(normalized.InitiativeScopeJSON); err != nil {
+		return UpsertCompanionParams{}, fmt.Errorf("invalid companion initiative scope JSON: %w", err)
+	}
+	if normalized.ToolPolicyJSON, err = normalizeCompanionJSON(normalized.ToolPolicyJSON); err != nil {
+		return UpsertCompanionParams{}, fmt.Errorf("invalid companion tool policy JSON: %w", err)
+	}
+	if normalized.MemoryPolicyJSON, err = normalizeCompanionJSON(normalized.MemoryPolicyJSON); err != nil {
+		return UpsertCompanionParams{}, fmt.Errorf("invalid companion memory policy JSON: %w", err)
+	}
+	if normalized.PlanningPolicyJSON, err = normalizeCompanionJSON(normalized.PlanningPolicyJSON); err != nil {
+		return UpsertCompanionParams{}, fmt.Errorf("invalid companion planning policy JSON: %w", err)
+	}
+
+	return normalized, nil
+}
+
+func normalizeCompanionJSON(raw string) (string, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return `{}`, nil
+	}
+	if !json.Valid([]byte(trimmed)) {
+		return "", fmt.Errorf("value must be valid JSON")
+	}
+	return trimmed, nil
+}
+
+func isCanonicalCompanionKind(kind string) bool {
+	switch kind {
+	case companionKindAssistant, companionKindAdvisor, companionKindOperator, companionKindSpecialist:
+		return true
+	default:
+		return false
+	}
+}
+
+func defaultCompanionParams(workspaceID int64, key string) UpsertCompanionParams {
+	title := defaultCompanionTitleDefault
+	if key == "primary" {
+		title = defaultCompanionTitlePrimary
+	}
+
+	return UpsertCompanionParams{
+		WorkspaceID:         workspaceID,
+		Key:                 key,
+		Title:               title,
+		Kind:                companionKindAssistant,
+		Charter:             defaultCompanionCharter,
+		Status:              defaultCompanionStatus,
+		InitiativeScopeJSON: `{}`,
+		ToolPolicyJSON:      `{}`,
+		MemoryPolicyJSON:    `{}`,
+		PlanningPolicyJSON:  `{}`,
+	}
+}
+
+func (store *Store) tableExistsTx(ctx context.Context, tx *sql.Tx, tableName string) (bool, error) {
+	var exists int
+	if err := tx.QueryRowContext(ctx, `
+		SELECT EXISTS(
+			SELECT 1
+			FROM sqlite_master
+			WHERE type = 'table' AND name = ?
+		)
+	`, tableName).Scan(&exists); err != nil {
+		return false, err
+	}
+	return exists == 1, nil
 }
 
 func (store *Store) ensureWorkspaceTx(ctx context.Context, tx *sql.Tx, params CreateWorkspaceParams, now time.Time) (Workspace, error) {
@@ -2586,6 +2688,16 @@ func (store *Store) ensureWorkspaceTx(ctx context.Context, tx *sql.Tx, params Cr
 		ON CONFLICT(workspace_id) DO NOTHING
 	`, workspace.ID, policyJSON, formatTime(now), formatTime(now)); err != nil {
 		return Workspace{}, err
+	}
+
+	hasCompanionsTable, err := store.tableExistsTx(ctx, tx, "companions")
+	if err != nil {
+		return Workspace{}, err
+	}
+	if hasCompanionsTable {
+		if _, err := store.upsertCompanionTx(ctx, tx, defaultCompanionParams(workspace.ID, workspace.DefaultCompanionKey), now); err != nil {
+			return Workspace{}, err
+		}
 	}
 
 	return store.getWorkspaceByKeyTx(ctx, tx, params.Key)

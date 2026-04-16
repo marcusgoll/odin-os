@@ -32,6 +32,14 @@ func TestWorkspaceServiceBootstrapsDefaultWorkspace(t *testing.T) {
 		t.Fatalf("BootstrapDefaultWorkspace().Policy = %q, want %q", workspace.Policy, DefaultWorkspacePolicy)
 	}
 
+	companion, err := store.GetCompanionByKey(ctx, workspace.ID, workspace.DefaultCompanionKey)
+	if err != nil {
+		t.Fatalf("GetCompanionByKey(default) error = %v", err)
+	}
+	if companion.Key != workspace.DefaultCompanionKey {
+		t.Fatalf("BootstrapDefaultWorkspace() companion key = %q, want %q", companion.Key, workspace.DefaultCompanionKey)
+	}
+
 	again, err := service.BootstrapDefaultWorkspace(ctx)
 	if err != nil {
 		t.Fatalf("BootstrapDefaultWorkspace() second call error = %v", err)
@@ -216,6 +224,44 @@ func TestWorkspaceServiceBootstrapDefaultWorkspaceIsIdempotentUnderContention(t 
 	}
 	if len(active) != 1 {
 		t.Fatalf("ListActiveWorkspaces() len = %d, want 1", len(active))
+	}
+}
+
+func TestWorkspaceServiceBootstrapsDefaultWorkspaceRepairsMissingDefaultCompanion(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openWorkspaceServiceStore(t)
+	defer store.Close()
+
+	workspace, err := store.GetWorkspaceByKey(ctx, DefaultWorkspaceKey)
+	if err != nil {
+		t.Fatalf("GetWorkspaceByKey(default) error = %v", err)
+	}
+
+	if _, err := store.DB().ExecContext(ctx, `
+		DELETE FROM companions
+		WHERE workspace_id = ? AND key = ?
+	`, workspace.ID, workspace.DefaultCompanionKey); err != nil {
+		t.Fatalf("delete default companion error = %v", err)
+	}
+
+	service := Service{Store: store}
+
+	bootstrapped, err := service.BootstrapDefaultWorkspace(ctx)
+	if err != nil {
+		t.Fatalf("BootstrapDefaultWorkspace() error = %v", err)
+	}
+	if bootstrapped.DefaultCompanionKey != DefaultWorkspaceCompanionKey {
+		t.Fatalf("BootstrapDefaultWorkspace().DefaultCompanionKey = %q, want %q", bootstrapped.DefaultCompanionKey, DefaultWorkspaceCompanionKey)
+	}
+
+	companion, err := store.GetCompanionByKey(ctx, bootstrapped.ID, bootstrapped.DefaultCompanionKey)
+	if err != nil {
+		t.Fatalf("GetCompanionByKey(default) error = %v", err)
+	}
+	if companion.Key != DefaultWorkspaceCompanionKey {
+		t.Fatalf("companion.Key = %q, want %q", companion.Key, DefaultWorkspaceCompanionKey)
 	}
 }
 

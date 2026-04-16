@@ -24,6 +24,9 @@ func (service Service) BootstrapDefaultWorkspace(ctx context.Context) (Workspace
 		if err := service.ensureDefaultWorkspacePolicy(ctx, current.ID); err != nil {
 			return Workspace{}, err
 		}
+		if err := service.ensureDefaultCompanion(ctx, current.ID, current.DefaultCompanionKey); err != nil {
+			return Workspace{}, err
+		}
 		return toDomainWorkspace(current), nil
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
@@ -45,10 +48,17 @@ func (service Service) BootstrapDefaultWorkspace(ctx context.Context) (Workspace
 				if repairErr := service.ensureDefaultWorkspacePolicy(ctx, current.ID); repairErr != nil {
 					return Workspace{}, repairErr
 				}
+				if repairErr := service.ensureDefaultCompanion(ctx, current.ID, current.DefaultCompanionKey); repairErr != nil {
+					return Workspace{}, repairErr
+				}
 				return toDomainWorkspace(current), nil
 			}
 			return Workspace{}, reloadErr
 		}
+		return Workspace{}, err
+	}
+
+	if err := service.ensureDefaultCompanion(ctx, created.ID, created.DefaultCompanionKey); err != nil {
 		return Workspace{}, err
 	}
 
@@ -137,6 +147,22 @@ func (service Service) ensureDefaultWorkspacePolicy(ctx context.Context, workspa
 	_, err := service.Store.UpdateWorkspacePolicy(ctx, sqlite.UpdateWorkspacePolicyParams{
 		WorkspaceID: workspaceID,
 		PolicyJSON:  string(DefaultWorkspacePolicy),
+	})
+	return err
+}
+
+func (service Service) ensureDefaultCompanion(ctx context.Context, workspaceID int64, key string) error {
+	_, err := service.Store.UpsertCompanion(ctx, sqlite.UpsertCompanionParams{
+		WorkspaceID:         workspaceID,
+		Key:                 key,
+		Title:               DefaultWorkspaceCompanionTitle,
+		Kind:                DefaultWorkspaceCompanionKind,
+		Charter:             DefaultWorkspaceCompanionCharter,
+		Status:              DefaultWorkspaceCompanionStatus,
+		InitiativeScopeJSON: `{}`,
+		ToolPolicyJSON:      `{}`,
+		MemoryPolicyJSON:    `{}`,
+		PlanningPolicyJSON:  `{}`,
 	})
 	return err
 }
