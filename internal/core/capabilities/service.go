@@ -2,6 +2,7 @@ package capabilities
 
 import (
 	"errors"
+	"sync"
 
 	"odin-os/internal/registry"
 )
@@ -11,26 +12,48 @@ var errMissingSnapshotDigest = errors.New("capabilities snapshot digest is requi
 var errMissingCapabilities = errors.New("capabilities snapshot capabilities are required")
 
 type Service struct {
+	mu     sync.RWMutex
 	active Snapshot
+	loader LoaderFunc
+	sink   EventSink
 }
 
-func NewService(snapshot Snapshot) (*Service, error) {
-	if snapshot.Digest == "" {
-		return nil, errMissingSnapshotDigest
-	}
-	if snapshot.Capabilities == nil {
-		return nil, errMissingCapabilities
+func NewService(snapshot Snapshot, opts ...Option) (*Service, error) {
+	if err := validateSnapshot(snapshot); err != nil {
+		return nil, err
 	}
 
-	return &Service{
+	service := &Service{
 		active: cloneSnapshot(snapshot),
-	}, nil
+		sink:   noopEventSink,
+	}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(service)
+		}
+	}
+	if service.sink == nil {
+		service.sink = noopEventSink
+	}
+
+	return service, nil
 }
 
 func (s *Service) Active() Snapshot {
 	if s == nil {
 		return Snapshot{}
 	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return cloneSnapshot(s.active)
+}
+
+func (s *Service) currentSnapshot() Snapshot {
+	if s == nil {
+		return Snapshot{}
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	return cloneSnapshot(s.active)
 }
 
@@ -44,6 +67,16 @@ func cloneSnapshot(snapshot Snapshot) Snapshot {
 		cloned.Capabilities[key] = cloneDescriptor(descriptor)
 	}
 	return cloned
+}
+
+func validateSnapshot(snapshot Snapshot) error {
+	if snapshot.Digest == "" {
+		return errMissingSnapshotDigest
+	}
+	if snapshot.Capabilities == nil {
+		return errMissingCapabilities
+	}
+	return nil
 }
 
 func cloneDescriptor(descriptor Descriptor) Descriptor {

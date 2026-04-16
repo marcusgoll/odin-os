@@ -6,9 +6,47 @@ import (
 	"path/filepath"
 	"testing"
 
+	runtimeevents "odin-os/internal/runtime/events"
 	"odin-os/internal/runtime/projections"
 	"odin-os/internal/store/sqlite"
 )
+
+func TestObservabilityProjectionRoundTripsCapabilitySnapshotEvents(t *testing.T) {
+	published := runtimeevents.CapabilitySnapshotPublishedPayload{
+		PreviousDigest:  "digest-a",
+		Digest:          "digest-b",
+		CapabilityCount: 2,
+	}
+	publishedPayload, err := runtimeevents.EncodePayload(published)
+	if err != nil {
+		t.Fatalf("EncodePayload(CapabilitySnapshotPublishedPayload) error = %v", err)
+	}
+	decodedPublished, err := runtimeevents.DecodePayload[runtimeevents.CapabilitySnapshotPublishedPayload](publishedPayload)
+	if err != nil {
+		t.Fatalf("DecodePayload(CapabilitySnapshotPublishedPayload) error = %v", err)
+	}
+	if decodedPublished != published {
+		t.Fatalf("published payload round-trip = %+v, want %+v", decodedPublished, published)
+	}
+
+	rejected := runtimeevents.CapabilitySnapshotRejectedPayload{
+		PreviousDigest:  "digest-b",
+		Digest:          "digest-c",
+		CapabilityCount: 1,
+		Reason:          "capabilities snapshot digest is required",
+	}
+	rejectedPayload, err := runtimeevents.EncodePayload(rejected)
+	if err != nil {
+		t.Fatalf("EncodePayload(CapabilitySnapshotRejectedPayload) error = %v", err)
+	}
+	decodedRejected, err := runtimeevents.DecodePayload[runtimeevents.CapabilitySnapshotRejectedPayload](rejectedPayload)
+	if err != nil {
+		t.Fatalf("DecodePayload(CapabilitySnapshotRejectedPayload) error = %v", err)
+	}
+	if decodedRejected != rejected {
+		t.Fatalf("rejected payload round-trip = %+v, want %+v", decodedRejected, rejected)
+	}
+}
 
 func TestObservabilityProjectionsExposeActiveRunsBlockedItemsIncidentsAndRecoveries(t *testing.T) {
 	ctx := context.Background()

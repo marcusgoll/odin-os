@@ -41,3 +41,37 @@ func (watcher *NoopWatcher) Close() error {
 	})
 	return nil
 }
+
+type ManualWatcher struct {
+	events chan Event
+	once   sync.Once
+}
+
+func NewManual(buffer int) *ManualWatcher {
+	if buffer < 0 {
+		buffer = 0
+	}
+	return &ManualWatcher{
+		events: make(chan Event, buffer),
+	}
+}
+
+func (watcher *ManualWatcher) Events() <-chan Event {
+	return watcher.events
+}
+
+func (watcher *ManualWatcher) Send(event Event) bool {
+	select {
+	case watcher.events <- event:
+		return true
+	default:
+		return false
+	}
+}
+
+func (watcher *ManualWatcher) Close() error {
+	watcher.once.Do(func() {
+		close(watcher.events)
+	})
+	return nil
+}
