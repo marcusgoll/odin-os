@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"odin-os/internal/cli/scope"
 	"odin-os/internal/core/projects"
+	corescope "odin-os/internal/core/scope"
 	"odin-os/internal/executors/contract"
 	executorrouter "odin-os/internal/executors/router"
 	"odin-os/internal/runtime/projections"
@@ -26,7 +26,7 @@ type Service struct {
 	Now            func() time.Time
 }
 
-func (service Service) List(ctx context.Context, resolved scope.Resolution) ([]projections.TaskStatusView, error) {
+func (service Service) List(ctx context.Context, resolved corescope.ControlScope) ([]projections.TaskStatusView, error) {
 	views, err := projections.ListTaskStatusViews(ctx, service.Store.DB())
 	if err != nil {
 		return nil, err
@@ -34,7 +34,7 @@ func (service Service) List(ctx context.Context, resolved scope.Resolution) ([]p
 
 	filtered := make([]projections.TaskStatusView, 0, len(views))
 	for _, view := range views {
-		if matchesTaskScope(view.ProjectKey, view.Scope, resolved) {
+		if resolved.MatchesTask(view.ProjectKey, view.Scope) {
 			filtered = append(filtered, view)
 		}
 	}
@@ -42,8 +42,8 @@ func (service Service) List(ctx context.Context, resolved scope.Resolution) ([]p
 	return filtered, nil
 }
 
-func (service Service) CreateTaskFromAct(ctx context.Context, resolved scope.Resolution, title string) (sqlite.Task, error) {
-	if resolved.Kind == scope.ScopeGlobal {
+func (service Service) CreateTaskFromAct(ctx context.Context, resolved corescope.ControlScope, title string) (sqlite.Task, error) {
+	if resolved.IsGlobal() {
 		return sqlite.Task{}, fmt.Errorf("act mode requires a non-global scope")
 	}
 
@@ -258,35 +258,22 @@ func (service Service) ensureRuntimeProject(ctx context.Context, manifest projec
 	return transitions.RegisterManagedProject(ctx, manifest)
 }
 
-func (service Service) taskOwnerForScope(resolved scope.Resolution) (projects.Manifest, string, error) {
-	switch resolved.Kind {
-	case scope.ScopeProject, scope.ScopeOdinCore:
-		project, ok := service.Registry.Lookup(resolved.ProjectKey)
-		if !ok {
-			return projects.Manifest{}, "", fmt.Errorf("unknown project %q", resolved.ProjectKey)
-		}
-		return project, string(resolved.Kind), nil
-	case scope.ScopeNewProject:
+func (service Service) taskOwnerForScope(resolved corescope.ControlScope) (projects.Manifest, string, error) {
+	switch resolved.SubjectType {
+	case corescope.SubjectTypeNewProject:
 		project, ok := service.Registry.SystemProject()
 		if !ok {
 			return projects.Manifest{}, "", fmt.Errorf("new-project scope requires odin-core")
 		}
-		return project, string(scope.ScopeNewProject), nil
+		return project, resolved.TaskScope(), nil
+	case corescope.SubjectTypeInitiative:
+		project, ok := service.Registry.Lookup(resolved.ProjectKey)
+		if !ok {
+			return projects.Manifest{}, "", fmt.Errorf("unknown project %q", resolved.ProjectKey)
+		}
+		return project, resolved.TaskScope(), nil
 	default:
-		return projects.Manifest{}, "", fmt.Errorf("unsupported scope %q", resolved.Kind)
-	}
-}
-
-func matchesTaskScope(projectKey, taskScope string, resolved scope.Resolution) bool {
-	switch resolved.Kind {
-	case scope.ScopeGlobal:
-		return true
-	case scope.ScopeNewProject:
-		return taskScope == string(scope.ScopeNewProject)
-	case scope.ScopeProject, scope.ScopeOdinCore:
-		return projectKey == resolved.ProjectKey
-	default:
-		return false
+		return projects.Manifest{}, "", fmt.Errorf("unsupported scope %q", resolved.SubjectType)
 	}
 }
 

@@ -121,10 +121,12 @@ func TestAlphaAcceptance(t *testing.T) {
 			Now:      func() time.Time { return now },
 		}
 
-		task, err := jobs.CreateTaskFromAct(ctx, scope.Resolution{
-			Kind:       scope.ScopeOdinCore,
-			ProjectKey: "odin-core",
-		}, "alpha acceptance runtime authority")
+		task, err := jobs.CreateTaskFromAct(ctx, scope.Resolve(scope.ResolveInput{
+			ExplicitTarget: &scope.Target{
+				ProjectKey:    "odin-core",
+				SystemProject: true,
+			},
+		}).ControlScope(), "alpha acceptance runtime authority")
 		if err != nil {
 			t.Fatalf("CreateTaskFromAct() error = %v", err)
 		}

@@ -12,6 +12,7 @@ import (
 	"odin-os/internal/cli/scope"
 	"odin-os/internal/core/initiatives"
 	"odin-os/internal/core/projects"
+	corescope "odin-os/internal/core/scope"
 	"odin-os/internal/core/workspaces"
 	runtimeevents "odin-os/internal/runtime/events"
 	"odin-os/internal/store/sqlite"
@@ -83,12 +84,70 @@ func TestAskModeHandlesFreeTextWithoutCreatingTask(t *testing.T) {
 		t.Fatalf("HandleLine() output = %q, want scope answer", output.String())
 	}
 
-	views, err := shell.jobs.List(context.Background(), shell.state.Scope)
+	views, err := shell.jobs.List(context.Background(), shell.controlScope())
 	if err != nil {
 		t.Fatalf("jobs.List() error = %v", err)
 	}
 	if len(views) != 0 {
 		t.Fatalf("jobs len = %d, want 0", len(views))
+	}
+}
+
+func TestShellControlScopeTracksProjectSelection(t *testing.T) {
+	t.Parallel()
+
+	env := newTestEnvironment(t)
+	shell, err := New(env)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	var output bytes.Buffer
+	if err := shell.HandleLine(context.Background(), "/project alpha", &output); err != nil {
+		t.Fatalf("HandleLine(/project) error = %v", err)
+	}
+
+	got := shell.controlScope()
+	want := corescope.ControlScope{
+		SubjectType:   corescope.SubjectTypeInitiative,
+		SubjectKey:    "alpha",
+		WorkspaceKey:  "default",
+		InitiativeKey: "alpha",
+		ProjectKey:    "alpha",
+		CompanionKey:  "primary",
+	}
+
+	if got != want {
+		t.Fatalf("controlScope() = %+v, want %+v", got, want)
+	}
+}
+
+func TestShellControlScopeTracksNewProjectFlow(t *testing.T) {
+	t.Parallel()
+
+	env := newTestEnvironment(t)
+	shell, err := New(env)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	var output bytes.Buffer
+	if err := shell.HandleLine(context.Background(), "/scope new-project", &output); err != nil {
+		t.Fatalf("HandleLine(/scope new-project) error = %v", err)
+	}
+
+	got := shell.controlScope()
+	want := corescope.ControlScope{
+		SubjectType:   corescope.SubjectTypeNewProject,
+		SubjectKey:    "odin-core",
+		WorkspaceKey:  "default",
+		InitiativeKey: "odin-core",
+		ProjectKey:    "odin-core",
+		CompanionKey:  "primary",
+	}
+
+	if got != want {
+		t.Fatalf("controlScope() = %+v, want %+v", got, want)
 	}
 }
 
@@ -114,10 +173,7 @@ func TestActModeCreatesTaskInProjectScope(t *testing.T) {
 		t.Fatalf("HandleLine(act input) error = %v", err)
 	}
 
-	views, err := shell.jobs.List(context.Background(), scope.Resolution{
-		Kind:       scope.ScopeProject,
-		ProjectKey: "alpha",
-	})
+	views, err := shell.jobs.List(context.Background(), shell.controlScope())
 	if err != nil {
 		t.Fatalf("jobs.List() error = %v", err)
 	}

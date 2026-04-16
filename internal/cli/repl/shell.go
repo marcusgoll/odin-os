@@ -14,6 +14,7 @@ import (
 	"odin-os/internal/cli/render"
 	"odin-os/internal/cli/scope"
 	"odin-os/internal/core/projects"
+	corescope "odin-os/internal/core/scope"
 	healthsvc "odin-os/internal/runtime/health"
 	jobsvc "odin-os/internal/runtime/jobs"
 	runsvc "odin-os/internal/runtime/runs"
@@ -108,7 +109,7 @@ func (shell *Shell) HandleLine(ctx context.Context, line string, output io.Write
 		return shell.handleAsk(ctx, line, output)
 	}
 
-	task, err := shell.jobs.CreateTaskFromAct(ctx, shell.state.Scope, line)
+	task, err := shell.jobs.CreateTaskFromAct(ctx, shell.controlScope(), line)
 	if err != nil {
 		_, _ = fmt.Fprintf(output, "unable to create task: %v\n", err)
 		return nil
@@ -432,7 +433,7 @@ func (shell *Shell) handleTransitionReport(ctx context.Context, args []string, o
 }
 
 func (shell *Shell) handleJobs(ctx context.Context, output io.Writer) error {
-	views, err := shell.jobs.List(ctx, shell.state.Scope)
+	views, err := shell.jobs.List(ctx, shell.controlScope())
 	if err != nil {
 		return err
 	}
@@ -736,6 +737,10 @@ func (shell *Shell) ensureRuntimeProject(ctx context.Context, manifest projects.
 	}
 
 	return transitions.RegisterManagedProject(ctx, manifest)
+}
+
+func (shell *Shell) controlScope() corescope.ControlScope {
+	return shell.state.Scope.ControlScope()
 }
 
 func parseTransitionSetRequest(args []string) (transitionSetRequest, error) {

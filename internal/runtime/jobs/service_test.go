@@ -10,11 +10,97 @@ import (
 	"odin-os/internal/cli/scope"
 	"odin-os/internal/core/initiatives"
 	"odin-os/internal/core/projects"
+	corescope "odin-os/internal/core/scope"
 	"odin-os/internal/core/workspaces"
 	"odin-os/internal/executors/router"
 	"odin-os/internal/store/sqlite"
 	"odin-os/internal/vcs/leases"
 )
+
+func TestResolutionCreateTaskFromActUsesControlScope(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openJobStore(t)
+	defer store.Close()
+
+	registry := writeRegistry(t)
+	service := Service{
+		Store:    store,
+		Registry: registry,
+		Now: func() time.Time {
+			return time.Date(2026, 4, 9, 12, 0, 0, 0, time.UTC)
+		},
+	}
+
+	task, err := service.CreateTaskFromAct(ctx, corescope.ControlScope{
+		SubjectType:   corescope.SubjectTypeInitiative,
+		SubjectKey:    "alpha",
+		WorkspaceKey:  workspaces.DefaultWorkspaceKey,
+		InitiativeKey: "alpha",
+		ProjectKey:    "alpha",
+		CompanionKey:  workspaces.DefaultWorkspaceCompanionKey,
+	}, "Implement shell")
+	if err != nil {
+		t.Fatalf("CreateTaskFromAct() error = %v", err)
+	}
+
+	if task.Scope != "project" {
+		t.Fatalf("Scope = %q, want project", task.Scope)
+	}
+}
+
+func TestResolutionListFiltersJobsByControlScope(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openJobStore(t)
+	defer store.Close()
+
+	registry := writeRegistry(t)
+	service := Service{
+		Store:    store,
+		Registry: registry,
+		Now:      time.Now,
+	}
+
+	if _, err := service.CreateTaskFromAct(ctx, corescope.ControlScope{
+		SubjectType:   corescope.SubjectTypeInitiative,
+		SubjectKey:    "alpha",
+		WorkspaceKey:  workspaces.DefaultWorkspaceKey,
+		InitiativeKey: "alpha",
+		ProjectKey:    "alpha",
+		CompanionKey:  workspaces.DefaultWorkspaceCompanionKey,
+	}, "Project task"); err != nil {
+		t.Fatalf("CreateTaskFromAct(alpha) error = %v", err)
+	}
+	if _, err := service.CreateTaskFromAct(ctx, corescope.ControlScope{
+		SubjectType:   corescope.SubjectTypeNewProject,
+		SubjectKey:    "odin-core",
+		WorkspaceKey:  workspaces.DefaultWorkspaceKey,
+		InitiativeKey: "odin-core",
+		ProjectKey:    "odin-core",
+		CompanionKey:  workspaces.DefaultWorkspaceCompanionKey,
+	}, "New project task"); err != nil {
+		t.Fatalf("CreateTaskFromAct(new-project) error = %v", err)
+	}
+
+	views, err := service.List(ctx, corescope.ControlScope{
+		SubjectType:   corescope.SubjectTypeInitiative,
+		SubjectKey:    "alpha",
+		WorkspaceKey:  workspaces.DefaultWorkspaceKey,
+		InitiativeKey: "alpha",
+		ProjectKey:    "alpha",
+		CompanionKey:  workspaces.DefaultWorkspaceCompanionKey,
+	})
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+
+	if len(views) != 1 || views[0].ProjectKey != "alpha" {
+		t.Fatalf("views = %+v, want one alpha task", views)
+	}
+}
 
 func TestCreateTaskFromActEnsuresRuntimeProjectAndCreatesQueuedTask(t *testing.T) {
 	t.Parallel()
@@ -37,10 +123,11 @@ func TestCreateTaskFromActEnsuresRuntimeProjectAndCreatesQueuedTask(t *testing.T
 		},
 	}
 
-	task, err := service.CreateTaskFromAct(ctx, scope.Resolution{
-		Kind:       scope.ScopeProject,
-		ProjectKey: "alpha",
-	}, "Implement shell")
+	task, err := service.CreateTaskFromAct(ctx, scope.Resolve(scope.ResolveInput{
+		ExplicitTarget: &scope.Target{
+			ProjectKey: "alpha",
+		},
+	}).ControlScope(), "Implement shell")
 	if err != nil {
 		t.Fatalf("CreateTaskFromAct() error = %v", err)
 	}
@@ -91,23 +178,27 @@ func TestListFiltersJobsByScope(t *testing.T) {
 		Now:      time.Now,
 	}
 
-	if _, err := service.CreateTaskFromAct(ctx, scope.Resolution{
-		Kind:       scope.ScopeProject,
-		ProjectKey: "alpha",
-	}, "Project task"); err != nil {
+	if _, err := service.CreateTaskFromAct(ctx, scope.Resolve(scope.ResolveInput{
+		ExplicitTarget: &scope.Target{
+			ProjectKey: "alpha",
+		},
+	}).ControlScope(), "Project task"); err != nil {
 		t.Fatalf("CreateTaskFromAct(alpha) error = %v", err)
 	}
-	if _, err := service.CreateTaskFromAct(ctx, scope.Resolution{
-		Kind:       scope.ScopeOdinCore,
-		ProjectKey: "odin-core",
-	}, "Core task"); err != nil {
+	if _, err := service.CreateTaskFromAct(ctx, scope.Resolve(scope.ResolveInput{
+		ExplicitTarget: &scope.Target{
+			ProjectKey:    "odin-core",
+			SystemProject: true,
+		},
+	}).ControlScope(), "Core task"); err != nil {
 		t.Fatalf("CreateTaskFromAct(odin-core) error = %v", err)
 	}
 
-	views, err := service.List(ctx, scope.Resolution{
-		Kind:       scope.ScopeProject,
-		ProjectKey: "alpha",
-	})
+	views, err := service.List(ctx, scope.Resolve(scope.ResolveInput{
+		ExplicitTarget: &scope.Target{
+			ProjectKey: "alpha",
+		},
+	}).ControlScope())
 	if err != nil {
 		t.Fatalf("List() error = %v", err)
 	}
@@ -141,10 +232,11 @@ func TestExecuteNextQueuedCompletesCutoverProjectTask(t *testing.T) {
 		},
 	}
 
-	task, err := service.CreateTaskFromAct(ctx, scope.Resolution{
-		Kind:       scope.ScopeProject,
-		ProjectKey: "alpha",
-	}, "Execute queued task")
+	task, err := service.CreateTaskFromAct(ctx, scope.Resolve(scope.ResolveInput{
+		ExplicitTarget: &scope.Target{
+			ProjectKey: "alpha",
+		},
+	}).ControlScope(), "Execute queued task")
 	if err != nil {
 		t.Fatalf("CreateTaskFromAct() error = %v", err)
 	}
@@ -205,10 +297,11 @@ func TestExecuteNextQueuedRejectsShadowModeMutation(t *testing.T) {
 		Now: time.Now,
 	}
 
-	task, err := service.CreateTaskFromAct(ctx, scope.Resolution{
-		Kind:       scope.ScopeProject,
-		ProjectKey: "alpha",
-	}, "Blocked shadow mutation")
+	task, err := service.CreateTaskFromAct(ctx, scope.Resolve(scope.ResolveInput{
+		ExplicitTarget: &scope.Target{
+			ProjectKey: "alpha",
+		},
+	}).ControlScope(), "Blocked shadow mutation")
 	if err != nil {
 		t.Fatalf("CreateTaskFromAct() error = %v", err)
 	}
