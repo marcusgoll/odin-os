@@ -13,6 +13,7 @@ const (
 	KindTool     Kind = "tool"
 	KindSkill    Kind = "skill"
 	KindSubAgent Kind = "sub_agent"
+	KindWorkflow Kind = "workflow"
 )
 
 type CostHint string
@@ -39,6 +40,7 @@ type ToolDefinition struct {
 	Key        string
 	Title      string
 	Summary    string
+	Version    string
 	Scopes     []string
 	Tags       []string
 	CostHint   CostHint
@@ -70,11 +72,26 @@ type SubAgentDefinition struct {
 	SourceRef string
 }
 
+type WorkflowDefinition struct {
+	Key          string
+	Title        string
+	Summary      string
+	Version      string
+	Tags         []string
+	Scopes       []string
+	Entrypoint   string
+	Composes     []string
+	Dependencies []registry.DependencyRef
+	Sections     map[string]string
+	SourceRef    string
+}
+
 type Expansion struct {
 	Card     Card
 	Tool     *ToolDefinition
 	Skill    *SkillDefinition
 	SubAgent *SubAgentDefinition
+	Workflow *WorkflowDefinition
 }
 
 type StructuredResult struct {
@@ -127,6 +144,18 @@ func CardFromRegistry(item registry.Item) (Card, bool) {
 	case registry.KindAgent:
 		return Card{
 			Kind:       KindSubAgent,
+			Key:        item.Key,
+			Title:      item.Title,
+			Summary:    item.Summary,
+			Scopes:     append([]string(nil), item.Scopes...),
+			Tags:       append([]string(nil), item.Tags...),
+			CostHint:   CostHintMedium,
+			BudgetCost: 2,
+			SourceRef:  item.Source.RelativePath,
+		}, true
+	case registry.KindWorkflow:
+		return Card{
+			Kind:       KindWorkflow,
 			Key:        item.Key,
 			Title:      item.Title,
 			Summary:    item.Summary,
