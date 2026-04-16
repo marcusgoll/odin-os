@@ -156,7 +156,7 @@ func requireNormalizedDependencies(path string, diagnostics *[]registry.Diagnost
 	}
 
 	for index, value := range values {
-		if !value.Kind.Valid() || strings.TrimSpace(value.Name) == "" || strings.TrimSpace(value.Version) == "" {
+		if !value.Kind.ValidDependencyKind() || strings.TrimSpace(value.Name) == "" || strings.TrimSpace(value.Version) == "" {
 			*diagnostics = append(*diagnostics, registry.ErrorDiagnostic(
 				path,
 				"invalid_dependency",

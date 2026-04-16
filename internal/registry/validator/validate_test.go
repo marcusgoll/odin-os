@@ -249,7 +249,7 @@ func TestValidateNormalizedManifestRejectsIncompleteDependency(t *testing.T) {
 	}
 }
 
-func TestValidateNormalizedManifestRejectsUnsupportedDependencyKind(t *testing.T) {
+func TestValidateNormalizedManifestAcceptsToolDependencyKind(t *testing.T) {
 	document := registry.ParsedDocument{
 		Source: registry.SourceFile{
 			Path:         "/tmp/skills/triage.md",
@@ -298,12 +298,8 @@ func TestValidateNormalizedManifestRejectsUnsupportedDependencyKind(t *testing.T
 	}
 
 	diagnostics := validator.ValidateDocuments([]registry.ParsedDocument{document})
-	if len(diagnostics) != 1 {
-		t.Fatalf("ValidateDocuments() diagnostics = %v, want 1 diagnostic", diagnostics)
-	}
-
-	if diagnostics[0].Code != "invalid_dependency" {
-		t.Fatalf("diagnostic code = %q, want %q", diagnostics[0].Code, "invalid_dependency")
+	if len(diagnostics) != 0 {
+		t.Fatalf("ValidateDocuments() diagnostics = %v, want none", diagnostics)
 	}
 }
 

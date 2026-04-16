@@ -18,8 +18,11 @@ dependencies:
   - kind: skill
     name: triage-skill
     version: 1.0.0
+  - kind: tool
+    name: project_status
+    version: 1.0.0
   - kind: command
-    name: project-status
+    name: project.status
     version: 1.0.0
 execution:
   mode: orchestrated

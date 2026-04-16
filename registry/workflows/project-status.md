@@ -1,18 +1,35 @@
 ---
+apiVersion: odin/v1
 kind: workflow
-key: project-status-workflow
-title: Project Status Workflow
-summary: Coordinates project intake and status gathering.
-status: active
-tags:
-  - projects
-  - status
-owners:
-  - odin-core
-entrypoint: command:project.status
-composes:
-  - triage-skill
-  - triage-agent
+name: project-status-workflow
+version: 1.0.0
+availability:
+  scope: project
+permissions:
+  - filesystem
+  - web
+inputSchema:
+  ref: schema://odin/workflows/project-status/input
+  type: object
+outputSchema:
+  ref: schema://odin/workflows/project-status/output
+  type: object
+dependencies:
+  - kind: skill
+    name: triage-skill
+    version: 1.0.0
+  - kind: tool
+    name: project_status
+    version: 1.0.0
+  - kind: command
+    name: project.status
+    version: 1.0.0
+execution:
+  mode: orchestrated
+  timeout: 60s
+implementation:
+  kind: markdown
+  path: registry/workflows/project-status.md
 ---
 
 # Project Status Workflow

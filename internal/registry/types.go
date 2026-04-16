@@ -186,6 +186,15 @@ func (kind Kind) Valid() bool {
 	}
 }
 
+func (kind Kind) ValidDependencyKind() bool {
+	switch kind {
+	case KindAgent, KindSkill, KindWorkflow, KindCommand, Kind("tool"):
+		return true
+	default:
+		return false
+	}
+}
+
 func (kind Kind) IsInvokable() bool {
 	switch kind {
 	case KindSkill, KindWorkflow, KindCommand:

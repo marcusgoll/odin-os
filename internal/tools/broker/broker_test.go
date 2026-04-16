@@ -132,14 +132,17 @@ func TestBrokerUsesNormalizedCapabilitySnapshot(t *testing.T) {
 	if expansion.Workflow.SourceRef != "internal/registry/testdata/normalized/workflow-project-status.md" {
 		t.Fatalf("workflow source ref = %q, want normalized snapshot path", expansion.Workflow.SourceRef)
 	}
-	if len(expansion.Workflow.Dependencies) != 2 {
-		t.Fatalf("workflow dependencies = %d, want 2", len(expansion.Workflow.Dependencies))
+	if len(expansion.Workflow.Dependencies) != 3 {
+		t.Fatalf("workflow dependencies = %d, want 3", len(expansion.Workflow.Dependencies))
 	}
 	if expansion.Workflow.Dependencies[0].Kind != registry.KindSkill || expansion.Workflow.Dependencies[0].Name != "triage-skill" {
 		t.Fatalf("workflow dependency[0] = %+v, want triage-skill", expansion.Workflow.Dependencies[0])
 	}
-	if expansion.Workflow.Dependencies[1].Kind != registry.KindCommand || expansion.Workflow.Dependencies[1].Name != "project.status" {
-		t.Fatalf("workflow dependency[1] = %+v, want project.status", expansion.Workflow.Dependencies[1])
+	if expansion.Workflow.Dependencies[1].Kind != registry.Kind("tool") || expansion.Workflow.Dependencies[1].Name != "project_status" {
+		t.Fatalf("workflow dependency[1] = %+v, want project_status tool", expansion.Workflow.Dependencies[1])
+	}
+	if expansion.Workflow.Dependencies[2].Kind != registry.KindCommand || expansion.Workflow.Dependencies[2].Name != "project.status" {
+		t.Fatalf("workflow dependency[2] = %+v, want project.status", expansion.Workflow.Dependencies[2])
 	}
 }
 
@@ -179,10 +182,10 @@ func testSnapshot() registry.Snapshot {
 				Version: "1.0.0",
 				Dependencies: []registry.DependencyRef{
 					{Kind: registry.KindSkill, Name: "triage-skill", Version: "1.0.0"},
+					{Kind: registry.Kind("tool"), Name: "project_status", Version: "1.0.0"},
 					{Kind: registry.KindCommand, Name: "project.status", Version: "1.0.0"},
 				},
-				Entrypoint: "command:project.status",
-				Composes:   []string{"triage-skill", "triage-agent"},
+				Composes: []string{"triage-skill", "triage-agent"},
 				Sections: map[string]string{
 					registry.SectionPurpose:         "Coordinate intake and status gathering for a project.",
 					registry.SectionWhenToUse:       "Use this workflow when project context needs to be re-established.",
