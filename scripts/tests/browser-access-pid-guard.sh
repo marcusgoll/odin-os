@@ -22,19 +22,25 @@ export BA_PROC_ROOT="${WORK_DIR}/proc"
 export ODIN_DIR="${WORK_DIR}/odin-browser"
 export ODIN_BROWSER_PORT="19227"
 
-mkdir -p "${BA_PROC_ROOT}/4242" "${BA_PROC_ROOT}/4243" "${ODIN_DIR}/browser-state"
+mkdir -p "${BA_PROC_ROOT}/4242" "${BA_PROC_ROOT}/4243" "${BA_PROC_ROOT}/4244" "${ODIN_DIR}/browser-state"
 
 source "${ACCESS_SH}"
 
 printf 'node\0%s\0' "${BROWSER_SERVER_SCRIPT}" > "${BA_PROC_ROOT}/4242/cmdline"
 printf 'ODIN_DIR=%s\0ODIN_BROWSER_PORT=%s\0' "${ODIN_DIR}" "${ODIN_BROWSER_PORT}" > "${BA_PROC_ROOT}/4242/environ"
 
-printf 'node\0/elsewhere.js\0' > "${BA_PROC_ROOT}/4243/cmdline"
+printf 'node\0%s.bak\0' "${BROWSER_SERVER_SCRIPT}" > "${BA_PROC_ROOT}/4243/cmdline"
 printf 'ODIN_DIR=%s\0ODIN_BROWSER_PORT=%s\0' "${ODIN_DIR}" "${ODIN_BROWSER_PORT}" > "${BA_PROC_ROOT}/4243/environ"
+
+printf 'node\0/elsewhere.js\0' > "${BA_PROC_ROOT}/4244/cmdline"
+printf 'ODIN_DIR=%s\0ODIN_BROWSER_PORT=%s\0' "${ODIN_DIR}" "${ODIN_BROWSER_PORT}" > "${BA_PROC_ROOT}/4244/environ"
 
 _ba_pid_is_browser_runtime "4242" || fail "expected runtime PID to be recognized"
 if _ba_pid_is_browser_runtime "4243"; then
+    fail "expected path-fragment PID to be rejected"
+fi
+if _ba_pid_is_browser_runtime "4244"; then
     fail "expected unrelated PID to be rejected"
 fi
 
-pass "PID ownership guard distinguishes browser runtime from unrelated processes"
+pass "PID ownership guard distinguishes browser runtime from false positives"
