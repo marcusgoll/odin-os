@@ -70,6 +70,7 @@ func validateDocument(document registry.ParsedDocument) []registry.Diagnostic {
 		requireList(document.Source.Path, &diagnostics, "missing_field", "permissions", document.Frontmatter.Permissions)
 		requireString(document.Source.Path, &diagnostics, "missing_field", "execution.mode", document.Frontmatter.Execution.Mode)
 		requireString(document.Source.Path, &diagnostics, "missing_field", "implementation.kind", document.Frontmatter.Implementation.Kind)
+		requireString(document.Source.Path, &diagnostics, "missing_field", "implementation.path", document.Frontmatter.Implementation.Path)
 		requireNormalizedIdentity(document.Source.Path, &diagnostics, document.Frontmatter.Name, document.Frontmatter.Key)
 		requireNormalizedDependencies(document.Source.Path, &diagnostics, document.Frontmatter.Dependencies)
 		if document.Frontmatter.Kind.IsInvokable() {
@@ -155,11 +156,11 @@ func requireNormalizedDependencies(path string, diagnostics *[]registry.Diagnost
 	}
 
 	for index, value := range values {
-		if strings.TrimSpace(string(value.Kind)) == "" || strings.TrimSpace(value.Name) == "" || strings.TrimSpace(value.Version) == "" {
+		if !value.Kind.Valid() || strings.TrimSpace(value.Name) == "" || strings.TrimSpace(value.Version) == "" {
 			*diagnostics = append(*diagnostics, registry.ErrorDiagnostic(
 				path,
 				"invalid_dependency",
-				fmt.Sprintf("normalized dependency %d must include kind, name, and version", index),
+				fmt.Sprintf("normalized dependency %d must include a supported kind, name, and version", index),
 			))
 		}
 	}

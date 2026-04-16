@@ -98,7 +98,7 @@ func compileItem(document registry.ParsedDocument) registry.Item {
 	if strings.TrimSpace(implementation.Kind) == "" {
 		implementation.Kind = "markdown"
 	}
-	if strings.TrimSpace(implementation.Path) == "" {
+	if !frontmatter.UsesNormalizedManifest() && strings.TrimSpace(implementation.Path) == "" {
 		implementation.Path = document.Source.RelativePath
 	}
 
