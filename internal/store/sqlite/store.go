@@ -355,6 +355,73 @@ func (store *Store) FinishRun(ctx context.Context, params FinishRunParams) (Run,
 	return run, err
 }
 
+func (store *Store) FinishRunAndUpdateTaskStatus(ctx context.Context, params FinishRunAndUpdateTaskStatusParams) error {
+	now := store.now()
+
+	return store.withTx(ctx, func(tx *sql.Tx) error {
+		currentRun, task, err := store.getRunWithTaskTx(ctx, tx, params.RunID)
+		if err != nil {
+			return err
+		}
+		if task.ID != params.TaskID {
+			return fmt.Errorf("run %d belongs to task %d, not %d", params.RunID, task.ID, params.TaskID)
+		}
+		previousTaskStatus := task.Status
+
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE runs
+			SET status = ?, finished_at = ?, summary = ?
+			WHERE id = ?
+		`, params.RunStatus, formatTime(now), params.Summary, params.RunID); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE tasks
+			SET current_run_id = NULL, status = ?, updated_at = ?
+			WHERE id = ?
+		`, params.TaskStatus, formatTime(now), params.TaskID); err != nil {
+			return err
+		}
+
+		finishedRun := currentRun
+		finishedRun.Status = params.RunStatus
+		finishedRun.FinishedAt = &now
+		finishedRun.Summary = params.Summary
+
+		projectID := task.ProjectID
+		if err := appendEventTx(ctx, tx, eventInsert{
+			StreamType: runtimeevents.StreamRun,
+			StreamID:   finishedRun.ID,
+			EventType:  runtimeevents.EventRunFinished,
+			Scope:      task.Scope,
+			ProjectID:  &projectID,
+			TaskID:     &task.ID,
+			RunID:      &finishedRun.ID,
+			Payload: runtimeevents.RunFinishedPayload{
+				Status:  finishedRun.Status,
+				Summary: finishedRun.Summary,
+			},
+			OccurredAt: now,
+		}); err != nil {
+			return err
+		}
+
+		return appendEventTx(ctx, tx, eventInsert{
+			StreamType: runtimeevents.StreamTask,
+			StreamID:   task.ID,
+			EventType:  runtimeevents.EventTaskStatusChanged,
+			Scope:      task.Scope,
+			ProjectID:  &projectID,
+			TaskID:     &task.ID,
+			Payload: runtimeevents.TaskStatusChangedPayload{
+				PreviousStatus: previousTaskStatus,
+				Status:         params.TaskStatus,
+			},
+			OccurredAt: now,
+		})
+	})
+}
+
 func (store *Store) RequestApproval(ctx context.Context, params RequestApprovalParams) (Approval, error) {
 	now := store.now()
 	var approval Approval

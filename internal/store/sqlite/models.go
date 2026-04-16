@@ -76,6 +76,14 @@ type FinishRunParams struct {
 	Summary string
 }
 
+type FinishRunAndUpdateTaskStatusParams struct {
+	RunID      int64
+	RunStatus  string
+	Summary    string
+	TaskID     int64
+	TaskStatus string
+}
+
 type Approval struct {
 	ID          int64
 	TaskID      int64

@@ -439,20 +439,13 @@ func cleanupAssignment(ctx context.Context, store *sqlite.Store, git leases.Git,
 }
 
 func persistTerminalState(ctx context.Context, store *sqlite.Store, runID int64, runStatus string, summary string, taskID int64, taskStatus string) error {
-	if _, err := store.FinishRun(ctx, sqlite.FinishRunParams{
-		RunID:   runID,
-		Status:  runStatus,
-		Summary: summary,
-	}); err != nil {
-		return err
-	}
-	if _, err := store.UpdateTaskStatus(ctx, sqlite.UpdateTaskStatusParams{
-		TaskID: taskID,
-		Status: taskStatus,
-	}); err != nil {
-		return err
-	}
-	return nil
+	return store.FinishRunAndUpdateTaskStatus(ctx, sqlite.FinishRunAndUpdateTaskStatusParams{
+		RunID:      runID,
+		RunStatus:  runStatus,
+		Summary:    summary,
+		TaskID:     taskID,
+		TaskStatus: taskStatus,
+	})
 }
 
 func (service Service) mutableHeartbeatInterval() time.Duration {
