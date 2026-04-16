@@ -32,8 +32,9 @@ import (
 var errRuntimeNotReady = errors.New("runtime not ready")
 
 var (
-	serveTaskLoopInterval     = 1 * time.Second
-	serveSelfHealLoopInterval = 30 * time.Second
+	serveTaskLoopInterval        = 1 * time.Second
+	serveSelfHealLoopInterval    = 30 * time.Second
+	serveWorktreeCleanupInterval = 30 * time.Second
 )
 
 // Run dispatches between the interactive shell and machine-oriented operational commands.
@@ -178,6 +179,10 @@ func runServe(ctx context.Context, app bootstrap.App, cfg appconfig.Config, stdo
 		HealthConfig:    healthsvc.DefaultConfig(),
 		Logger:          logger,
 	}
+	worktreeCleanupService := worktrees.Manager{
+		Store: app.Store,
+		Git:   gitadapter.Adapter{},
+	}
 
 	if err := jobService.ExecuteNextQueued(operationCtx); err != nil {
 		logBackgroundError(logger, "task_runner", err)
@@ -185,11 +190,15 @@ func runServe(ctx context.Context, app bootstrap.App, cfg appconfig.Config, stdo
 	if _, err := recoveryService.RunCycle(operationCtx); err != nil {
 		logBackgroundError(logger, "self_heal", err)
 	}
+	if _, err := worktreeCleanupService.Cleanup(operationCtx, time.Now().UTC().Add(-30*time.Minute)); err != nil {
+		logBackgroundError(logger, "worktree_cleanup", err)
+	}
 
 	var background sync.WaitGroup
-	background.Add(2)
+	background.Add(3)
 	go runTaskLoop(ctx, operationCtx, &background, jobService, logger)
 	go runSelfHealLoop(ctx, operationCtx, &background, recoveryService, logger)
+	go runWorktreeCleanupLoop(ctx, operationCtx, &background, worktreeCleanupService, logger)
 
 	listener, err := net.Listen("tcp", cfg.Service.HTTPAddr)
 	if err != nil {
@@ -280,6 +289,24 @@ func runSelfHealLoop(ctx context.Context, operationCtx context.Context, wg *sync
 		case <-ticker.C:
 			if _, err := service.RunCycle(operationCtx); err != nil {
 				logBackgroundError(logger, "self_heal", err)
+			}
+		}
+	}
+}
+
+func runWorktreeCleanupLoop(ctx context.Context, operationCtx context.Context, wg *sync.WaitGroup, service worktrees.Manager, logger *logs.Logger) {
+	defer wg.Done()
+
+	ticker := time.NewTicker(serveWorktreeCleanupInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if _, err := service.Cleanup(operationCtx, time.Now().UTC().Add(-30*time.Minute)); err != nil {
+				logBackgroundError(logger, "worktree_cleanup", err)
 			}
 		}
 	}

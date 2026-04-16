@@ -106,6 +106,7 @@ func TestExecuteNextQueuedCompletesCutoverProjectTask(t *testing.T) {
 
 	t.Setenv("ODIN_CODEX_DRIVER", codexDriverPath(t))
 	registry := writeRegistry(t)
+	git := &jobTestGit{}
 	service := Service{
 		Store:          store,
 		Registry:       registry,
@@ -114,7 +115,7 @@ func TestExecuteNextQueuedCompletesCutoverProjectTask(t *testing.T) {
 		Transitions:    projects.Service{Store: store},
 		Leases: leases.Manager{
 			Store:        store,
-			Git:          &jobTestGit{},
+			Git:          git,
 			WorktreeRoot: t.TempDir(),
 		},
 		Now: func() time.Time {
@@ -164,6 +165,17 @@ func TestExecuteNextQueuedCompletesCutoverProjectTask(t *testing.T) {
 	}
 	if run.Summary != "fixture codex driver" {
 		t.Fatalf("run.Summary = %q, want fixture codex driver", run.Summary)
+	}
+	if git.removeWorktreeCalls != 1 {
+		t.Fatalf("RemoveWorktree() calls = %d, want 1", git.removeWorktreeCalls)
+	}
+
+	lease := latestLeaseForTaskRun(t, ctx, store, task.ID, run.ID)
+	if lease.State != "cleaned" {
+		t.Fatalf("lease.State = %q, want cleaned", lease.State)
+	}
+	if lease.CleanedUpAt == nil {
+		t.Fatalf("lease.CleanedUpAt = nil, want value")
 	}
 }
 
@@ -231,6 +243,7 @@ func TestExecuteNextQueuedFailsClosedOnEmptyRunStatus(t *testing.T) {
 	t.Setenv("ODIN_CODEX_DRIVER", writeConfigurableCodexDriver(t))
 	t.Setenv("ODIN_CODEX_DRIVER_RUN_RESPONSE", `{"status":"","output":"ignored"}`)
 	registry := writeRegistry(t)
+	git := &jobTestGit{}
 	service := Service{
 		Store:          store,
 		Registry:       registry,
@@ -239,7 +252,7 @@ func TestExecuteNextQueuedFailsClosedOnEmptyRunStatus(t *testing.T) {
 		Transitions:    projects.Service{Store: store},
 		Leases: leases.Manager{
 			Store:        store,
-			Git:          &jobTestGit{},
+			Git:          git,
 			WorktreeRoot: t.TempDir(),
 		},
 		Now: func() time.Time {
@@ -287,14 +300,42 @@ func TestExecuteNextQueuedFailsClosedOnEmptyRunStatus(t *testing.T) {
 	if run.Status != "failed" {
 		t.Fatalf("Run.Status = %q, want failed", run.Status)
 	}
+	if git.removeWorktreeCalls != 1 {
+		t.Fatalf("RemoveWorktree() calls = %d, want 1", git.removeWorktreeCalls)
+	}
+
+	lease := latestLeaseForTaskRun(t, ctx, store, task.ID, run.ID)
+	if lease.State != "cleaned" {
+		t.Fatalf("lease.State = %q, want cleaned", lease.State)
+	}
+	if lease.CleanedUpAt == nil {
+		t.Fatalf("lease.CleanedUpAt = nil, want value")
+	}
 }
 
-type jobTestGit struct{}
+type jobTestGit struct {
+	createBranchCalls   int
+	addWorktreeCalls    int
+	removeWorktreeCalls int
+	removeRepoRoot      string
+	removeWorktreePath  string
+}
 
-func (jobTestGit) BranchExists(context.Context, string, string) (bool, error) { return false, nil }
-func (jobTestGit) CreateBranch(context.Context, string, string, string) error { return nil }
-func (jobTestGit) AddWorktree(context.Context, string, string, string) error  { return nil }
-func (jobTestGit) RemoveWorktree(context.Context, string, string) error       { return nil }
+func (git *jobTestGit) BranchExists(context.Context, string, string) (bool, error) { return false, nil }
+func (git *jobTestGit) CreateBranch(context.Context, string, string, string) error {
+	git.createBranchCalls++
+	return nil
+}
+func (git *jobTestGit) AddWorktree(context.Context, string, string, string) error {
+	git.addWorktreeCalls++
+	return nil
+}
+func (git *jobTestGit) RemoveWorktree(_ context.Context, repoRoot string, worktreePath string) error {
+	git.removeWorktreeCalls++
+	git.removeRepoRoot = repoRoot
+	git.removeWorktreePath = worktreePath
+	return nil
+}
 
 func mustLoadExecutorConfig(t *testing.T) router.Config {
 	t.Helper()
@@ -360,6 +401,30 @@ func latestRunForTask(ctx context.Context, store *sqlite.Store, taskID int64) (s
 		return sqlite.Run{}, err
 	}
 	return store.GetRun(ctx, runID)
+}
+
+func latestLeaseForTaskRun(t *testing.T, ctx context.Context, store *sqlite.Store, taskID int64, runID int64) sqlite.WorktreeLease {
+	t.Helper()
+
+	row := store.DB().QueryRowContext(ctx, `
+		SELECT id
+		FROM worktree_leases
+		WHERE task_id = ?
+		  AND run_id = ?
+		ORDER BY id DESC
+		LIMIT 1
+	`, taskID, runID)
+
+	var leaseID int64
+	if err := row.Scan(&leaseID); err != nil {
+		t.Fatalf("scan lease id error = %v", err)
+	}
+
+	lease, err := store.GetWorktreeLease(ctx, leaseID)
+	if err != nil {
+		t.Fatalf("GetWorktreeLease() error = %v", err)
+	}
+	return lease
 }
 
 func openJobStore(t *testing.T) *sqlite.Store {

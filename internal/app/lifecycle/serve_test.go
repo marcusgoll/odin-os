@@ -5,14 +5,20 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"odin-os/internal/runtime/checkpoints"
 	"odin-os/internal/store/sqlite"
+	"odin-os/internal/vcs/branches"
+	gitadapter "odin-os/internal/vcs/git"
+	"odin-os/internal/vcs/worktrees"
 )
 
 func TestRunDoctorJSONWritesStructuredReport(t *testing.T) {
@@ -305,6 +311,200 @@ service:
 	}
 }
 
+func TestRunServeCleansReleasedWorktreeLeasesDuringBackgroundLoop(t *testing.T) {
+	root := createRuntimeRoot(t)
+	writeRuntimeConfig(t, root, `
+version: 1
+runtime:
+  root: .
+service:
+  http_addr: 127.0.0.1:0
+  startup_recovery: false
+`)
+
+	homeDir := filepath.Join(root, "home")
+	t.Setenv("HOME", homeDir)
+	if err := os.MkdirAll(homeDir, 0o755); err != nil {
+		t.Fatalf("mkdir home: %v", err)
+	}
+
+	repoRoot := filepath.Join(root, "repos", "alpha")
+	initServeTestRepo(t, repoRoot)
+
+	if err := os.MkdirAll(filepath.Join(root, "data"), 0o755); err != nil {
+		t.Fatalf("mkdir data: %v", err)
+	}
+
+	store, err := sqlite.Open(filepath.Join(root, "data", "odin.db"))
+	if err != nil {
+		t.Fatalf("sqlite.Open() error = %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
+	}
+
+	project, err := store.CreateProject(ctx, sqlite.CreateProjectParams{
+		Key:           "alpha",
+		Name:          "Alpha",
+		Scope:         "project",
+		GitRoot:       repoRoot,
+		DefaultBranch: "main",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+
+	task, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "alpha-task",
+		Title:       "Cleanup worktree",
+		Status:      "running",
+		Scope:       "project",
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+
+	run, err := store.StartRun(ctx, sqlite.StartRunParams{
+		TaskID:   task.ID,
+		Executor: "codex_headless",
+		Attempt:  1,
+		Status:   "running",
+	})
+	if err != nil {
+		t.Fatalf("StartRun() error = %v", err)
+	}
+
+	worktreePath := worktrees.ResolvePath(worktrees.PathParams{
+		Root:       worktrees.DefaultRoot(),
+		ProjectKey: project.Key,
+		TaskID:     task.ID,
+		RunID:      run.ID,
+		Try:        1,
+	})
+	if err := os.MkdirAll(filepath.Dir(worktreePath), 0o755); err != nil {
+		t.Fatalf("mkdir worktree parent: %v", err)
+	}
+
+	branchName := branches.Name(branches.NameParams{
+		ProjectKey: project.Key,
+		TaskID:     task.ID,
+		RunID:      run.ID,
+		Try:        1,
+	})
+	adapter := gitadapter.Adapter{}
+	if err := adapter.CreateBranch(ctx, repoRoot, branchName, "main"); err != nil {
+		t.Fatalf("CreateBranch() error = %v", err)
+	}
+	if err := adapter.AddWorktree(ctx, repoRoot, worktreePath, branchName); err != nil {
+		t.Fatalf("AddWorktree() error = %v", err)
+	}
+
+	lease, err := store.CreateWorktreeLease(ctx, sqlite.CreateWorktreeLeaseParams{
+		ProjectID:    project.ID,
+		TaskID:       task.ID,
+		RunID:        run.ID,
+		Mode:         "mutable",
+		BranchName:   branchName,
+		WorktreePath: worktreePath,
+		RepoRoot:     repoRoot,
+		State:        "active",
+	})
+	if err != nil {
+		t.Fatalf("CreateWorktreeLease() error = %v", err)
+	}
+	lease, err = store.ReleaseWorktreeLease(ctx, sqlite.ReleaseWorktreeLeaseParams{
+		LeaseID: lease.ID,
+		State:   "released",
+	})
+	if err != nil {
+		t.Fatalf("ReleaseWorktreeLease() error = %v", err)
+	}
+
+	originalCleanupInterval := serveWorktreeCleanupInterval
+	serveWorktreeCleanupInterval = 20 * time.Millisecond
+	t.Cleanup(func() {
+		serveWorktreeCleanupInterval = originalCleanupInterval
+	})
+
+	runCtx, cancel := context.WithCancel(context.Background())
+	cleanupObserved := make(chan struct{})
+	stdout := &lockedBuffer{}
+	runDone := make(chan error, 1)
+	go func() {
+		runDone <- Run(runCtx, root, []string{"serve"}, strings.NewReader(""), stdout)
+	}()
+
+	if err := waitForOutput(stdout, "serving on", 2*time.Second); err != nil {
+		cancel()
+		<-runDone
+		t.Fatal(err)
+	}
+
+	go func() {
+		ticker := time.NewTicker(10 * time.Millisecond)
+		defer ticker.Stop()
+
+		deadline := time.NewTimer(2 * time.Second)
+		defer deadline.Stop()
+
+		for {
+			select {
+			case <-runCtx.Done():
+				return
+			case <-deadline.C:
+				cancel()
+				return
+			case <-ticker.C:
+				current, err := store.GetWorktreeLease(context.Background(), lease.ID)
+				if err != nil {
+					continue
+				}
+				if current.CleanedUpAt != nil {
+					close(cleanupObserved)
+					cancel()
+					return
+				}
+			}
+		}
+	}()
+
+	select {
+	case err := <-runDone:
+		if err != nil && !errors.Is(err, context.Canceled) {
+			t.Fatalf("Run(serve) error = %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		cancel()
+		t.Fatal("timed out waiting for Run(serve) to exit")
+	}
+
+	select {
+	case <-cleanupObserved:
+	default:
+		t.Fatal("cleanup loop did not observe cleaned worktree lease")
+	}
+
+	updatedLease, err := store.GetWorktreeLease(context.Background(), lease.ID)
+	if err != nil {
+		t.Fatalf("GetWorktreeLease() error = %v", err)
+	}
+	if updatedLease.State != "cleaned" {
+		t.Fatalf("lease.State = %q, want cleaned", updatedLease.State)
+	}
+	if updatedLease.CleanedUpAt == nil {
+		t.Fatalf("lease.CleanedUpAt = nil, want value")
+	}
+	if _, err := os.Stat(worktreePath); !os.IsNotExist(err) {
+		t.Fatalf("worktree path still exists after cleanup: %v", err)
+	}
+}
+
 func codexFixtureDriverPath(t *testing.T) string {
 	t.Helper()
 
@@ -537,5 +737,80 @@ func writeRuntimeConfig(t *testing.T, root string, content string) {
 
 	if err := os.WriteFile(filepath.Join(root, "config", "odin.yaml"), []byte(content), 0o644); err != nil {
 		t.Fatalf("write odin config: %v", err)
+	}
+}
+
+func initServeTestRepo(t *testing.T, repoRoot string) {
+	t.Helper()
+
+	if err := os.MkdirAll(repoRoot, 0o755); err != nil {
+		t.Fatalf("mkdir repo root: %v", err)
+	}
+	if err := runServeGit(context.Background(), repoRoot, "init", "-b", "main"); err != nil {
+		t.Fatalf("git init error = %v", err)
+	}
+	if err := runServeGit(context.Background(), repoRoot, "config", "user.name", "Odin Test"); err != nil {
+		t.Fatalf("git config user.name error = %v", err)
+	}
+	if err := runServeGit(context.Background(), repoRoot, "config", "user.email", "odin@example.com"); err != nil {
+		t.Fatalf("git config user.email error = %v", err)
+	}
+
+	readmePath := filepath.Join(repoRoot, "README.md")
+	if err := os.WriteFile(readmePath, []byte("# temp repo\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(README.md) error = %v", err)
+	}
+	if err := runServeGit(context.Background(), repoRoot, "add", "README.md"); err != nil {
+		t.Fatalf("git add error = %v", err)
+	}
+	if err := runServeGit(context.Background(), repoRoot, "commit", "-m", "initial commit"); err != nil {
+		t.Fatalf("git commit error = %v", err)
+	}
+}
+
+func runServeGit(ctx context.Context, repoRoot string, args ...string) error {
+	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", repoRoot}, args...)...)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("git %v: %w: %s", args, err, string(output))
+	}
+	return nil
+}
+
+type lockedBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (buffer *lockedBuffer) Write(p []byte) (int, error) {
+	buffer.mu.Lock()
+	defer buffer.mu.Unlock()
+
+	return buffer.b.Write(p)
+}
+
+func (buffer *lockedBuffer) String() string {
+	buffer.mu.Lock()
+	defer buffer.mu.Unlock()
+
+	return buffer.b.String()
+}
+
+func waitForOutput(buffer *lockedBuffer, want string, timeout time.Duration) error {
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-deadline.C:
+			return fmt.Errorf("timed out waiting for output %q; got %q", want, buffer.String())
+		case <-ticker.C:
+			if strings.Contains(buffer.String(), want) {
+				return nil
+			}
+		}
 	}
 }

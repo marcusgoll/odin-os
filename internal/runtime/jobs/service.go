@@ -14,6 +14,7 @@ import (
 	"odin-os/internal/runtime/projections"
 	"odin-os/internal/store/sqlite"
 	"odin-os/internal/vcs/leases"
+	"odin-os/internal/vcs/worktrees"
 )
 
 type Service struct {
@@ -211,7 +212,10 @@ func (service Service) ExecuteNextQueued(ctx context.Context) error {
 	if err := validateAssignment(manifest, project, assignment); err != nil {
 		return finishFailure(err)
 	}
-	defer releaseAssignment(ctx, service.Store, assignment)
+	defer func() {
+		releaseAssignment(ctx, service.Store, assignment)
+		cleanupAssignment(ctx, service.Store, leaseManager.Git)
+	}()
 
 	spec.Metadata["branch_name"] = assignment.BranchName
 	spec.Metadata["repo_root"] = assignment.RepoRoot
@@ -402,6 +406,18 @@ func releaseAssignment(ctx context.Context, store *sqlite.Store, assignment leas
 		LeaseID: *assignment.LeaseID,
 		State:   "released",
 	})
+}
+
+func cleanupAssignment(ctx context.Context, store *sqlite.Store, git worktrees.Git) {
+	if store == nil || git == nil {
+		return
+	}
+
+	manager := worktrees.Manager{
+		Store: store,
+		Git:   git,
+	}
+	_, _ = manager.Cleanup(ctx, time.Now().UTC().Add(-30*time.Minute))
 }
 
 func slugify(input string) string {
