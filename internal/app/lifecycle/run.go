@@ -92,7 +92,10 @@ func Run(ctx context.Context, root string, args []string, stdin io.Reader, stdou
 }
 
 func runDoctor(ctx context.Context, app bootstrap.App, args []string, stdout io.Writer) error {
-	report, err := healthsvc.Service{DB: app.Store.DB()}.Doctor(ctx, len(app.RegistryDiagnostics) == 0)
+	report, err := healthsvc.Service{
+		DB:                app.Store.DB(),
+		ExpectedExecutors: healthsvc.DefaultExpectedExecutors(),
+	}.Doctor(ctx, len(app.RegistryDiagnostics) == 0)
 	if err != nil {
 		return err
 	}
@@ -108,7 +111,10 @@ func runDoctor(ctx context.Context, app bootstrap.App, args []string, stdout io.
 }
 
 func runHealthcheck(ctx context.Context, app bootstrap.App, stdout io.Writer) error {
-	report, err := healthsvc.Service{DB: app.Store.DB()}.Doctor(ctx, len(app.RegistryDiagnostics) == 0)
+	report, err := healthsvc.Service{
+		DB:                app.Store.DB(),
+		ExpectedExecutors: healthsvc.DefaultExpectedExecutors(),
+	}.Doctor(ctx, len(app.RegistryDiagnostics) == 0)
 	if err != nil {
 		return err
 	}
@@ -194,7 +200,8 @@ func runServe(ctx context.Context, app bootstrap.App, cfg appconfig.Config, stdo
 	server := &stdhttp.Server{
 		Handler: apihttp.NewOperationalHandler(apihttp.Dependencies{
 			Health: healthsvc.Service{
-				DB: app.Store.DB(),
+				DB:                app.Store.DB(),
+				ExpectedExecutors: healthsvc.DefaultExpectedExecutors(),
 			},
 			Metrics: metricsvc.Service{
 				DB: app.Store.DB(),

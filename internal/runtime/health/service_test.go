@@ -42,7 +42,7 @@ func TestDoctorReportIsHealthyWhenChecksAreFresh(t *testing.T) {
 
 	if _, err := store.StartRun(context.Background(), sqlite.StartRunParams{
 		TaskID:   task.ID,
-		Executor: "codex",
+		Executor: "codex_headless",
 		Attempt:  1,
 		Status:   "running",
 	}); err != nil {
@@ -50,7 +50,7 @@ func TestDoctorReportIsHealthyWhenChecksAreFresh(t *testing.T) {
 	}
 
 	if _, err := store.RecordExecutorHealth(context.Background(), sqlite.RecordExecutorHealthParams{
-		Executor:    "codex",
+		Executor:    "codex_headless",
 		Status:      "healthy",
 		LatencyMS:   42,
 		DetailsJSON: `{"mode":"local"}`,
@@ -97,6 +97,75 @@ func TestDoctorReportIsHealthyWhenChecksAreFresh(t *testing.T) {
 	}
 }
 
+func TestDoctorReportUsesExpectedExecutorsInsteadOfLatestSample(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now().UTC()
+	store := openStore(t)
+	defer store.Close()
+
+	if _, err := store.RecordExecutorHealth(context.Background(), sqlite.RecordExecutorHealthParams{
+		Executor:    "codex_headless",
+		Status:      "unavailable",
+		LatencyMS:   0,
+		DetailsJSON: `{"source":"bootstrap"}`,
+	}); err != nil {
+		t.Fatalf("RecordExecutorHealth(codex_headless) error = %v", err)
+	}
+	if _, err := store.DB().ExecContext(context.Background(), `
+		UPDATE executor_health
+		SET checked_at = ?
+		WHERE executor = 'codex_headless'
+	`, now.Add(-10*time.Minute).Format(time.RFC3339Nano)); err != nil {
+		t.Fatalf("force executor freshness error = %v", err)
+	}
+
+	if _, err := store.RecordExecutorHealth(context.Background(), sqlite.RecordExecutorHealthParams{
+		Executor:    "openai_api",
+		Status:      "healthy",
+		LatencyMS:   5,
+		DetailsJSON: `{"source":"noise"}`,
+	}); err != nil {
+		t.Fatalf("RecordExecutorHealth(openai_api) error = %v", err)
+	}
+
+	if _, err := store.RecordRegistryVersion(context.Background(), sqlite.RecordRegistryVersionParams{
+		Source:      "registry",
+		VersionHash: "abc123",
+		Notes:       "fresh compile",
+	}); err != nil {
+		t.Fatalf("RecordRegistryVersion() error = %v", err)
+	}
+
+	if _, err := store.RecordProjectionFreshness(context.Background(), sqlite.RecordProjectionFreshnessParams{
+		Surface:     "doctor",
+		Status:      "healthy",
+		DetailsJSON: `{"source":"runtime"}`,
+	}); err != nil {
+		t.Fatalf("RecordProjectionFreshness() error = %v", err)
+	}
+
+	service := Service{
+		DB: store.DB(),
+		Config: Config{
+			QueuePressureThreshold: 5,
+			ExecutorFreshnessTTL:   time.Hour,
+			SourceFreshnessTTL:     time.Hour,
+			ProjectionFreshnessTTL: time.Hour,
+		},
+		Now:               func() time.Time { return now },
+		ExpectedExecutors: []string{"codex_headless"},
+	}
+
+	report, err := service.Doctor(context.Background(), true)
+	if err != nil {
+		t.Fatalf("Doctor() error = %v", err)
+	}
+	if report.Status != StatusDegraded {
+		t.Fatalf("Status = %q, want %q", report.Status, StatusDegraded)
+	}
+}
+
 func TestDoctorReportIsDegradedWhenQueueAndFreshnessAreStale(t *testing.T) {
 	t.Parallel()
 
@@ -130,7 +199,7 @@ func TestDoctorReportIsDegradedWhenQueueAndFreshnessAreStale(t *testing.T) {
 	}
 
 	if _, err := store.RecordExecutorHealth(context.Background(), sqlite.RecordExecutorHealthParams{
-		Executor:    "codex",
+		Executor:    "codex_headless",
 		Status:      "healthy",
 		LatencyMS:   42,
 		DetailsJSON: `{"mode":"local"}`,

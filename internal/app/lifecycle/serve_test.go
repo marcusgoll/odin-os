@@ -37,9 +37,8 @@ func TestRunDoctorJSONWritesStructuredReport(t *testing.T) {
 }
 
 func TestRunHealthcheckHealthyReturnsNil(t *testing.T) {
-	t.Parallel()
-
 	root := createRuntimeRoot(t)
+	t.Setenv("ODIN_CODEX_DRIVER", codexFixtureDriverPath(t))
 	seedHealthyRuntime(t, root)
 
 	var stdout bytes.Buffer
@@ -62,6 +61,22 @@ func TestRunHealthcheckFreshRuntimeReturnsNil(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "ready") {
 		t.Fatalf("healthcheck output = %q, want readiness message", stdout.String())
+	}
+}
+
+func TestRunHealthcheckRejectsIrrelevantHealthyExecutorSample(t *testing.T) {
+	t.Parallel()
+
+	root := createRuntimeRoot(t)
+	seedUnrelatedHealthyRuntime(t, root)
+
+	var stdout bytes.Buffer
+	err := Run(context.Background(), root, []string{"healthcheck"}, strings.NewReader(""), &stdout)
+	if err == nil {
+		t.Fatalf("Run(healthcheck) error = nil, want readiness error")
+	}
+	if !strings.Contains(stdout.String(), "not ready") {
+		t.Fatalf("healthcheck output = %q, want not ready message", stdout.String())
 	}
 }
 
@@ -404,6 +419,50 @@ func seedHealthyRuntime(t *testing.T, root string) {
 
 	if _, err := store.RecordExecutorHealth(ctx, sqlite.RecordExecutorHealthParams{
 		Executor:    "codex_headless",
+		Status:      "healthy",
+		LatencyMS:   10,
+		DetailsJSON: `{"status":"healthy"}`,
+	}); err != nil {
+		t.Fatalf("RecordExecutorHealth() error = %v", err)
+	}
+
+	if _, err := store.RecordProjectionFreshness(ctx, sqlite.RecordProjectionFreshnessParams{
+		Surface:     "active_runs",
+		Status:      "current",
+		DetailsJSON: `{"source":"test"}`,
+	}); err != nil {
+		t.Fatalf("RecordProjectionFreshness() error = %v", err)
+	}
+}
+
+func seedUnrelatedHealthyRuntime(t *testing.T, root string) {
+	t.Helper()
+
+	if err := os.MkdirAll(filepath.Join(root, "data"), 0o755); err != nil {
+		t.Fatalf("mkdir data: %v", err)
+	}
+
+	store, err := sqlite.Open(filepath.Join(root, "data", "odin.db"))
+	if err != nil {
+		t.Fatalf("sqlite.Open() error = %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
+	}
+
+	if _, err := store.RecordRegistryVersion(ctx, sqlite.RecordRegistryVersionParams{
+		Source:      "registry",
+		VersionHash: "phase-15",
+		Notes:       "healthy test sample",
+	}); err != nil {
+		t.Fatalf("RecordRegistryVersion() error = %v", err)
+	}
+
+	if _, err := store.RecordExecutorHealth(ctx, sqlite.RecordExecutorHealthParams{
+		Executor:    "openai_api",
 		Status:      "healthy",
 		LatencyMS:   10,
 		DetailsJSON: `{"status":"healthy"}`,

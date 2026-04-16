@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -44,9 +45,10 @@ type Config struct {
 }
 
 type Service struct {
-	DB     *sql.DB
-	Config Config
-	Now    func() time.Time
+	DB                *sql.DB
+	Config            Config
+	Now               func() time.Time
+	ExpectedExecutors []string
 }
 
 func DefaultConfig() Config {
@@ -56,6 +58,10 @@ func DefaultConfig() Config {
 		SourceFreshnessTTL:     30 * time.Minute,
 		ProjectionFreshnessTTL: 30 * time.Minute,
 	}
+}
+
+func DefaultExpectedExecutors() []string {
+	return []string{"codex_headless"}
 }
 
 func (service Service) Doctor(ctx context.Context, registryHealthy bool) (Report, error) {
@@ -170,47 +176,67 @@ func (service Service) Summary(ctx context.Context, registryHealthy bool) (Summa
 }
 
 func (service Service) executorCheck(ctx context.Context, now time.Time, config Config) (Check, error) {
+	check := Check{
+		Name:       "executor",
+		Status:     StatusHealthy,
+		Summary:    "expected executors are healthy",
+		ObservedAt: now,
+		Details: map[string]string{
+			"expected_executors": strings.Join(service.expectedExecutors(), ","),
+		},
+	}
+	for _, executorKey := range service.expectedExecutors() {
+		status, checkedAt, err := service.latestExecutorHealth(ctx, executorKey)
+		if err != nil {
+			return Check{}, err
+		}
+		if status == "" {
+			check.Status = combineStatus(check.Status, StatusDegraded)
+			check.Summary = "expected executor health is unavailable or stale"
+			check.Details[executorKey+"_status"] = "missing"
+			continue
+		}
+
+		check.Details[executorKey+"_status"] = status
+		check.Details[executorKey+"_checked_at"] = checkedAt
+
+		parsed, err := time.Parse(time.RFC3339Nano, checkedAt)
+		if err != nil {
+			return Check{}, err
+		}
+		if status != "healthy" || parsed.Before(now.Add(-config.ExecutorFreshnessTTL)) {
+			check.Status = combineStatus(check.Status, StatusDegraded)
+			check.Summary = "expected executor health is unavailable or stale"
+		}
+	}
+	return check, nil
+}
+
+func (service Service) expectedExecutors() []string {
+	if len(service.ExpectedExecutors) == 0 {
+		return DefaultExpectedExecutors()
+	}
+	return service.ExpectedExecutors
+}
+
+func (service Service) latestExecutorHealth(ctx context.Context, executor string) (string, string, error) {
 	var status string
 	var checkedAt string
 	err := service.DB.QueryRowContext(ctx, `
 		SELECT status, checked_at
 		FROM executor_health
+		WHERE executor = ?
 		ORDER BY checked_at DESC, id DESC
 		LIMIT 1
-	`).Scan(&status, &checkedAt)
+	`, executor).Scan(&status, &checkedAt)
 	switch err {
 	case sql.ErrNoRows:
-		return Check{
-			Name:       "executor",
-			Status:     StatusDegraded,
-			Summary:    "no executor health samples recorded",
-			ObservedAt: now,
-		}, nil
+		return "", "", nil
 	case nil:
+		return status, checkedAt, nil
 	default:
-		return Check{}, err
+		return "", "", err
 	}
-
-	parsed, err := time.Parse(time.RFC3339Nano, checkedAt)
-	if err != nil {
-		return Check{}, err
-	}
-
-	check := Check{
-		Name:       "executor",
-		Status:     StatusHealthy,
-		Summary:    "executor health is fresh",
-		ObservedAt: now,
-		Details: map[string]string{
-			"executor_status": status,
-			"checked_at":      checkedAt,
-		},
-	}
-	if status != "healthy" || parsed.Before(now.Add(-config.ExecutorFreshnessTTL)) {
-		check.Status = StatusDegraded
-		check.Summary = "executor health is unavailable or stale"
-	}
-	return check, nil
 }
 
 func (service Service) queueCheck(ctx context.Context, now time.Time, config Config) (Check, error) {
