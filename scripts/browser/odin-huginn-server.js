@@ -51,15 +51,26 @@ function readBody(req) {
   });
 }
 
-function browserHostIsLocalService(host) {
+function normalizeHostForLocalCheck(host) {
   let normalized = String(host || '').toLowerCase();
+  if (normalized.startsWith('[') && normalized.endsWith(']')) {
+    normalized = normalized.slice(1, -1);
+  }
   while (normalized.endsWith('.')) {
     normalized = normalized.slice(0, -1);
   }
+  return normalized;
+}
+
+function browserHostIsLocalService(host) {
+  const normalized = normalizeHostForLocalCheck(host);
   if (normalized === 'localhost' || normalized.endsWith('.localhost')) {
     return true;
   }
-  if (normalized === '127.0.0.1' || normalized === '::1') {
+  if (normalized === '::1') {
+    return true;
+  }
+  if (normalized === '127.0.0.1' || normalized.startsWith('127.')) {
     return true;
   }
   if (normalized.startsWith('::ffff:')) {

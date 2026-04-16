@@ -37,6 +37,9 @@ node() {
 if browser_navigate "https://blocked.example/path"; then
     fail "expected browser_navigate to reject blocked.example"
 fi
+if browser_navigate "https://blocked.example%2e/path"; then
+    fail "expected browser_navigate to reject blocked.example%2e"
+fi
 [[ "${curl_calls}" -eq 0 ]] || fail "browser_navigate called through to the local server"
 
 if browser_server_start --url "https://blocked.example/path"; then
@@ -45,6 +48,9 @@ fi
 [[ "${node_calls}" -eq 0 ]] || fail "browser_server_start launched the runtime for a blocked URL"
 if browser_navigate "http://localhost./path"; then
     fail "expected browser_navigate to reject localhost."
+fi
+if browser_server_start --url "https://127.0.0.1%2e/path"; then
+    fail "expected browser_server_start to reject 127.0.0.1%2e before launch"
 fi
 if browser_server_start --url "javascript:alert(1)"; then
     fail "expected browser_server_start to reject javascript: URLs before launch"
