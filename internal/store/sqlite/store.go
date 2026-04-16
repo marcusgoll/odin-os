@@ -700,6 +700,10 @@ func (store *Store) ResolveApproval(ctx context.Context, params ResolveApprovalP
 			return err
 		}
 
+		if current.Status != "pending" {
+			return fmt.Errorf("approval %d is already %s", current.ID, current.Status)
+		}
+
 		if params.Status == "approved" {
 			runID := current.RunID
 			if runID == nil {

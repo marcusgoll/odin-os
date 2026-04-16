@@ -170,10 +170,6 @@ func (service Service) ExecuteNextQueued(ctx context.Context) error {
 		return err
 	}
 
-	if _, err := service.workItemService().Start(ctx, task.ID); err != nil {
-		return err
-	}
-
 	finishFailure := func(cause error) error {
 		_, _ = service.Store.FinishRun(ctx, sqlite.FinishRunParams{
 			RunID:   run.ID,
@@ -182,6 +178,10 @@ func (service Service) ExecuteNextQueued(ctx context.Context) error {
 		})
 		_, _ = service.workItemService().Fail(ctx, task.ID)
 		return cause
+	}
+
+	if _, err := service.workItemService().Start(ctx, task.ID); err != nil {
+		return finishFailure(err)
 	}
 
 	assignment := leases.Assignment{

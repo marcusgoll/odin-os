@@ -419,6 +419,75 @@ func TestExecuteNextQueuedCompletesCutoverProjectTask(t *testing.T) {
 	}
 }
 
+func TestExecuteNextQueuedRollsBackRunWhenWorkItemStartFails(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openJobStore(t)
+	defer store.Close()
+
+	registry := writeRegistry(t)
+	service := Service{
+		Store:          store,
+		Registry:       registry,
+		Executors:      router.DefaultCatalog(),
+		ExecutorConfig: mustLoadExecutorConfig(t),
+		Transitions:    projects.Service{Store: store},
+		Leases: leases.Manager{
+			Store:        store,
+			Git:          &jobTestGit{},
+			WorktreeRoot: t.TempDir(),
+		},
+		Now: func() time.Time {
+			return time.Date(2026, 4, 9, 12, 0, 0, 0, time.UTC)
+		},
+	}
+
+	task, err := service.CreateTaskFromAct(ctx, scope.Resolve(scope.ResolveInput{
+		ExplicitTarget: &scope.Target{
+			ProjectKey: "alpha",
+		},
+	}).ControlScope(), "Start failure task")
+	if err != nil {
+		t.Fatalf("CreateTaskFromAct() error = %v", err)
+	}
+
+	if _, err := store.DB().ExecContext(ctx, `
+		CREATE TRIGGER task_start_blocker
+		BEFORE UPDATE OF status ON tasks
+		WHEN NEW.status = 'running'
+		BEGIN
+			SELECT RAISE(ABORT, 'start blocked');
+		END;
+	`); err != nil {
+		t.Fatalf("create trigger error = %v", err)
+	}
+
+	err = service.ExecuteNextQueued(ctx)
+	if err == nil {
+		t.Fatal("ExecuteNextQueued() error = nil, want start failure")
+	}
+
+	gotTask, err := store.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
+	}
+	if gotTask.Status != "failed" {
+		t.Fatalf("GetTask().Status = %q, want failed", gotTask.Status)
+	}
+	if gotTask.CurrentRunID != nil {
+		t.Fatalf("GetTask().CurrentRunID = %v, want nil", gotTask.CurrentRunID)
+	}
+
+	run, err := latestRunForTask(ctx, store, task.ID)
+	if err != nil {
+		t.Fatalf("latestRunForTask() error = %v", err)
+	}
+	if run.Status != "failed" {
+		t.Fatalf("run.Status = %q, want failed", run.Status)
+	}
+}
+
 type recordingTaskFinalizer struct {
 	taskID int64
 	status string
