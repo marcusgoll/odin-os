@@ -63,6 +63,17 @@ for target in \
         fail "expected browser_server_start to reject ${target} before launch"
     fi
 done
+for target in \
+    'mailto:user@example.com' \
+    'ftp://example.com/resource' \
+    'custom-scheme://example.com/path'; do
+    if browser_navigate "${target}"; then
+        fail "expected browser_navigate to reject ${target}"
+    fi
+    if browser_server_start --url "${target}"; then
+        fail "expected browser_server_start to reject ${target} before launch"
+    fi
+done
 [[ "${curl_calls}" -eq 0 ]] || fail "blocked browser_server_start called through to the local server"
 
 pass "blocked navigation paths stop before the local browser server"

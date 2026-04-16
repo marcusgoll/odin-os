@@ -25,13 +25,11 @@ let cdp = null;
 let currentUrl = null;
 let currentTitle = null;
 
-const BLOCKED_TARGET_SCHEMES = new Set([
-  'javascript',
-  'chrome',
-  'file',
-  'chrome-extension',
-  'devtools',
-  'view-source',
+const ALLOWED_TARGET_SCHEMES = new Set([
+  'http',
+  'https',
+  'data',
+  'about',
 ]);
 
 function json(res, status, body) {
@@ -129,8 +127,11 @@ function browserHostMatchesDenylist(host) {
 function assertBrowserTargetAllowed(target) {
   const url = new URL(target);
   const scheme = url.protocol.slice(0, -1).toLowerCase();
-  if (BLOCKED_TARGET_SCHEMES.has(scheme)) {
+  if (!ALLOWED_TARGET_SCHEMES.has(scheme)) {
     throw new Error('Blocked browser URL');
+  }
+  if (scheme === 'data' || scheme === 'about') {
+    return;
   }
   if (browserHostIsLocalService(url.hostname) || browserHostMatchesDenylist(url.hostname)) {
     throw new Error('Blocked browser URL');

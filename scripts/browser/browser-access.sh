@@ -214,8 +214,16 @@ browser_request_domain_access() {
 
     scheme="$(_ba_target_scheme "${target}" || true)"
     case "${scheme}" in
-        javascript|chrome|file|chrome-extension|devtools|view-source)
+        ""|http|https|data|about)
+            ;;
+        *)
             return 1
+            ;;
+    esac
+
+    case "${scheme}" in
+        data|about)
+            return 0
             ;;
     esac
 

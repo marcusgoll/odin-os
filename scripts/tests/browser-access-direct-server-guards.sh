@@ -88,4 +88,11 @@ for target in \
     assert_rejected launch "${target}"
     assert_rejected navigate "${target}"
 done
+for target in \
+    'mailto:user@example.com' \
+    'ftp://example.com/resource' \
+    'custom-scheme://example.com/path'; do
+    assert_rejected launch "${target}"
+    assert_rejected navigate "${target}"
+done
 pass "direct server blocks the expanded scheme set"

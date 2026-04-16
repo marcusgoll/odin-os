@@ -28,6 +28,23 @@ unset ODIN_BROWSER_PORT
 mkdir -p "${ODIN_DIR}"
 
 PORT_HOLDER_PID=""
+RETRY_PORT_HOLDER_PID=""
+cleanup() {
+    if declare -F browser_server_stop >/dev/null; then
+        browser_server_stop >/dev/null 2>&1 || true
+    fi
+    if [[ -n "${RETRY_PORT_HOLDER_PID}" ]]; then
+        kill "${RETRY_PORT_HOLDER_PID}" >/dev/null 2>&1 || true
+        wait "${RETRY_PORT_HOLDER_PID}" >/dev/null 2>&1 || true
+    fi
+    if [[ -n "${PORT_HOLDER_PID}" ]]; then
+        kill "${PORT_HOLDER_PID}" >/dev/null 2>&1 || true
+        wait "${PORT_HOLDER_PID}" >/dev/null 2>&1 || true
+    fi
+    rm -rf "${WORK_DIR}"
+}
+trap cleanup EXIT
+
 node -e 'const net = require("node:net"); const server = net.createServer(); server.on("error", (error) => { console.error(error.message); process.exit(1); }); server.listen(19227, "127.0.0.1", () => { setInterval(() => {}, 1 << 30); });' >/dev/null 2>&1 &
 PORT_HOLDER_PID=$!
 
@@ -38,7 +55,6 @@ done
 source "${ACCESS_SH}"
 
 INITIAL_BROWSER_SERVER_PORT="${BROWSER_SERVER_PORT}"
-RETRY_PORT_HOLDER_PID=""
 node -e 'const net = require("node:net"); const port = Number(process.argv[1]); const server = net.createServer(); server.on("error", (error) => { console.error(error.message); process.exit(1); }); server.listen(port, "127.0.0.1", () => { setInterval(() => {}, 1 << 30); });' "${INITIAL_BROWSER_SERVER_PORT}" >/dev/null 2>&1 &
 RETRY_PORT_HOLDER_PID=$!
 
@@ -52,20 +68,6 @@ wait_for_port() {
 }
 
 wait_for_port "${INITIAL_BROWSER_SERVER_PORT}"
-
-cleanup() {
-    browser_server_stop >/dev/null 2>&1 || true
-    if [[ -n "${RETRY_PORT_HOLDER_PID}" ]]; then
-        kill "${RETRY_PORT_HOLDER_PID}" >/dev/null 2>&1 || true
-        wait "${RETRY_PORT_HOLDER_PID}" >/dev/null 2>&1 || true
-    fi
-    if [[ -n "${PORT_HOLDER_PID}" ]]; then
-        kill "${PORT_HOLDER_PID}" >/dev/null 2>&1 || true
-        wait "${PORT_HOLDER_PID}" >/dev/null 2>&1 || true
-    fi
-    rm -rf "${WORK_DIR}"
-}
-trap cleanup EXIT
 
 [[ -n "${BROWSER_SERVER_PORT}" ]] || fail "browser_server_port was not resolved"
 [[ "${BROWSER_SERVER_PORT}" != "19227" ]] || fail "browser_server_port unexpectedly used the fixed default"
