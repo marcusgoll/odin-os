@@ -16,7 +16,11 @@ emit_json() {
     local status="$1"
     local tool_key="$2"
     local summary="$3"
-    local artifacts_json="${4:-{}}"
+    local artifacts_json="${4-}"
+
+    if [[ -z "${artifacts_json}" ]]; then
+        artifacts_json='{}'
+    fi
 
     python3 - "$status" "$tool_key" "$summary" "$artifacts_json" <<'PY'
 import json

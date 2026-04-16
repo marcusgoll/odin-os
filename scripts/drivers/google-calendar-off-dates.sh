@@ -16,7 +16,11 @@ emit_json() {
     local status="$1"
     local tool_key="$2"
     local summary="$3"
-    local artifacts_json="${4:-{}}"
+    local artifacts_json="${4-}"
+
+    if [[ -z "${artifacts_json}" ]]; then
+        artifacts_json='{}'
+    fi
 
     python3 - "$status" "$tool_key" "$summary" "$artifacts_json" <<'PY'
 import json
@@ -87,6 +91,33 @@ bid_period="${request_fields[2]}"
 calendar_id="${request_fields[3]}"
 timezone="${request_fields[4]}"
 google_lib="$(resolve_google_lib)"
+
+timezone_check="$(python3 - "${timezone}" <<'PY'
+from zoneinfo import ZoneInfo
+import sys
+
+try:
+    ZoneInfo(sys.argv[1])
+except Exception as exc:
+    print(exc)
+    raise SystemExit(1)
+PY
+)" || {
+    emit_json "failed" "${tool_key}" "Invalid timezone ${timezone}: ${timezone_check:-unknown error}" "$(python3 - "${bid_period}" "${calendar_id}" "${timezone}" <<'PY'
+import json
+import sys
+
+bid_period, calendar_id, timezone = sys.argv[1:4]
+print(json.dumps({
+    "bid_period": bid_period,
+    "calendar_id": calendar_id,
+    "timezone": timezone,
+    "reason": "invalid_timezone",
+}))
+PY
+)"
+    exit 0
+}
 
 if [[ ! -f "${google_lib}" ]]; then
     emit_json "failed" "${tool_key}" "Google library not found at ${google_lib}." "$(python3 - "${bid_period}" "${calendar_id}" "${timezone}" "${google_lib}" <<'PY'
@@ -170,22 +201,7 @@ year, month = map(int, bid_period.split("-"))
 period_start = date(year, month, 1)
 period_end = date(year + (month // 12), (month % 12) + 1, 1)
 
-try:
-    timezone = ZoneInfo(timezone_name)
-except Exception as exc:
-    print(json.dumps({
-        "status": "failed",
-        "tool_key": tool_key,
-        "summary": f"Invalid timezone {timezone_name}: {exc}",
-        "artifacts": {
-            "bid_period": bid_period,
-            "calendar_id": calendar_id,
-            "timezone": timezone_name,
-            "reason": "invalid_timezone",
-        },
-    }))
-    raise SystemExit(0)
-
+timezone = ZoneInfo(timezone_name)
 try:
     payload = json.loads(os.environ.get("GOOGLE_API_RESPONSE", ""))
 except Exception as exc:

@@ -86,12 +86,13 @@ _google_refresh_token() {
 
     local response http_code response_body access_token expires_in now
     response="$(curl -sS -w '\n%{http_code}' \
-        -X POST "${GOOGLE_TOKEN_ENDPOINT}" \
+        -X POST \
         -H "Content-Type: application/x-www-form-urlencoded" \
         -d "client_id=${GOOGLE_OAUTH_CLIENT_ID}" \
         -d "client_secret=${GOOGLE_OAUTH_CLIENT_SECRET}" \
         -d "refresh_token=${GOOGLE_OAUTH_REFRESH_TOKEN}" \
-        -d "grant_type=refresh_token")" || return 3
+        -d "grant_type=refresh_token" \
+        "${GOOGLE_TOKEN_ENDPOINT}")" || return 3
 
     http_code="$(printf '%s' "${response}" | tail -n1)"
     response_body="$(printf '%s' "${response}" | sed '$d')"
@@ -106,17 +107,19 @@ _google_refresh_token() {
         return 1
     fi
 
-    access_token="$(printf '%s' "${response_body}" | python3 - <<'PY'
+    access_token="$(RESPONSE_BODY="${response_body}" python3 - <<'PY'
 import json
-import sys
-payload = json.load(sys.stdin)
+import os
+
+payload = json.loads(os.environ["RESPONSE_BODY"])
 print(str(payload.get("access_token") or ""))
 PY
 )"
-    expires_in="$(printf '%s' "${response_body}" | python3 - <<'PY'
+    expires_in="$(RESPONSE_BODY="${response_body}" python3 - <<'PY'
 import json
-import sys
-payload = json.load(sys.stdin)
+import os
+
+payload = json.loads(os.environ["RESPONSE_BODY"])
 print(int(payload.get("expires_in") or 3600))
 PY
 )"

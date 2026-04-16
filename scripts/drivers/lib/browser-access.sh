@@ -8,7 +8,7 @@ BROWSER_STATE_DIR="${ODIN_DIR}/browser-state"
 BROWSER_SERVER_PORT="${ODIN_BROWSER_PORT:-9227}"
 BROWSER_SERVER_URL="${ODIN_BROWSER_SERVER_URL:-http://127.0.0.1:${BROWSER_SERVER_PORT}}"
 BROWSER_SERVER_PID_FILE="${BROWSER_STATE_DIR}/odin-browser-server.pid"
-BROWSER_SERVER_SCRIPT="${ODIN_BROWSER_SERVER_SCRIPT:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/odin-huginn-server.js}"
+BROWSER_SERVER_SCRIPT="${ODIN_BROWSER_SERVER_SCRIPT:-}"
 BROWSER_SESSION_DIR="${ODIN_BROWSER_SESSION_DIR:-${BROWSER_STATE_DIR}/sessions}"
 BROWSER_CURL_MAX_TIME="${ODIN_BROWSER_CURL_MAX_TIME:-30}"
 BROWSER_START_TIMEOUT="${ODIN_BROWSER_START_TIMEOUT:-15}"
@@ -95,7 +95,7 @@ browser_server_start() {
     if ! command -v node >/dev/null 2>&1; then
         return 1
     fi
-    if [[ ! -f "${BROWSER_SERVER_SCRIPT}" ]]; then
+    if [[ -z "${BROWSER_SERVER_SCRIPT}" || ! -f "${BROWSER_SERVER_SCRIPT}" ]]; then
         return 1
     fi
 
@@ -166,9 +166,10 @@ print(json.dumps(payload))
 PY
 )" || return 1
 
-    _bc_curl -X POST "${BROWSER_SERVER_URL}/cookies/set" \
+    _bc_curl -X POST \
         -H "Content-Type: application/json" \
-        -d "${payload}" >/dev/null
+        -d "${payload}" \
+        "${BROWSER_SERVER_URL}/cookies/set" >/dev/null
 }
 
 browser_navigate() {
@@ -187,9 +188,10 @@ import sys
 print(json.dumps({"url": sys.argv[1]}))
 PY
 )"
-    _bc_curl -X POST "${BROWSER_SERVER_URL}/navigate" \
+    _bc_curl -X POST \
         -H "Content-Type: application/json" \
-        -d "${payload}" >/dev/null
+        -d "${payload}" \
+        "${BROWSER_SERVER_URL}/navigate" >/dev/null
 }
 
 browser_snapshot() {
@@ -200,10 +202,11 @@ browser_snapshot() {
 
     local response
     response="$(_bc_curl "${BROWSER_SERVER_URL}/snapshot?compact=true")" || return 1
-    printf '%s' "${response}" | python3 - <<'PY'
+    RESPONSE_BODY="${response}" python3 - <<'PY'
 import json
-import sys
-payload = json.load(sys.stdin)
+import os
+
+payload = json.loads(os.environ["RESPONSE_BODY"])
 print(payload.get("snapshot") or "", end="")
 PY
 }

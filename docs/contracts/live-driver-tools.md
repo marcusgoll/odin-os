@@ -42,7 +42,7 @@ These overrides are for explicit local customization only. `odin-os` no longer r
 ## Runtime prerequisites
 
 - `google.sh` requires `curl` and `python3`, plus Google OAuth refresh-token credentials in the environment or `~/.odin-env`.
-- `browser-access.sh` can reuse an already running browser server via `ODIN_BROWSER_SERVER_URL`, or start one from `ODIN_BROWSER_SERVER_SCRIPT` when that script is present and `node` is available.
+- `browser-access.sh` can reuse an already running browser server via `ODIN_BROWSER_SERVER_URL`, or start one when `ODIN_BROWSER_SERVER_SCRIPT` is explicitly set to a compatible server script and `node` is available.
 
 ## Request contract
 

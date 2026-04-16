@@ -95,6 +95,75 @@ google_api_call() {
 	}
 }
 
+func TestGoogleCalendarDriverRefreshesTokenWithRepoLocalLibrary(t *testing.T) {
+	repoRoot := projectRoot(t)
+	scriptPath := filepath.Join(repoRoot, "scripts", "drivers", "google-calendar-off-dates.sh")
+	fixtureDir := t.TempDir()
+	curlPath := filepath.Join(fixtureDir, "curl")
+	tracePath := filepath.Join(fixtureDir, "curl-trace.txt")
+	cachePath := filepath.Join(fixtureDir, "token-cache.json")
+
+	if err := os.WriteFile(curlPath, []byte(`#!/usr/bin/env bash
+set -euo pipefail
+url="${@: -1}"
+printf '%s\n' "$url" >>"$ODIN_TEST_CURL_TRACE"
+case "$url" in
+  "https://oauth2.googleapis.com/token")
+    printf '{"access_token":"token-123","expires_in":3600}\n200'
+    ;;
+  *"/calendars/primary/events"*)
+    printf '{"items":[{"start":{"date":"2026-05-12"},"end":{"date":"2026-05-13"}}]}\n200'
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+`), 0o755); err != nil {
+		t.Fatalf("WriteFile(fake curl) error = %v", err)
+	}
+
+	request := `{"tool_key":"google_calendar_off_dates","input":{"bid_period":"2026-05","calendar_id":"primary","timezone":"America/Chicago"}}`
+	response := runDriverScript(t, scriptPath, request, map[string]string{
+		"PATH":                        fixtureDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"GOOGLE_TOKEN_CACHE":          cachePath,
+		"GOOGLE_OAUTH_CLIENT_ID":      "client",
+		"GOOGLE_OAUTH_CLIENT_SECRET":  "secret",
+		"GOOGLE_OAUTH_REFRESH_TOKEN":  "refresh",
+		"ODIN_TEST_CURL_TRACE":        tracePath,
+	})
+
+	if response.Status != "completed" {
+		t.Fatalf("Status = %q, want completed", response.Status)
+	}
+	if !reflect.DeepEqual(artifactStrings(response.Artifacts["off_dates"]), []string{"2026-05-12"}) {
+		t.Fatalf("off_dates = %#v, want %#v", artifactStrings(response.Artifacts["off_dates"]), []string{"2026-05-12"})
+	}
+
+	traceBytes, err := os.ReadFile(tracePath)
+	if err != nil {
+		t.Fatalf("ReadFile(trace) error = %v", err)
+	}
+	trace := string(traceBytes)
+	if !strings.Contains(trace, "https://oauth2.googleapis.com/token") || !strings.Contains(trace, "/calendars/primary/events") {
+		t.Fatalf("trace = %q, want token refresh and calendar request", trace)
+	}
+}
+
+func TestGoogleCalendarDriverReturnsJsonFailureForInvalidTimezone(t *testing.T) {
+	repoRoot := projectRoot(t)
+	scriptPath := filepath.Join(repoRoot, "scripts", "drivers", "google-calendar-off-dates.sh")
+
+	request := `{"tool_key":"google_calendar_off_dates","input":{"bid_period":"2026-05","calendar_id":"primary","timezone":"Mars/Olympus"}}`
+	response := runDriverScript(t, scriptPath, request, nil)
+
+	if response.Status != "failed" {
+		t.Fatalf("Status = %q, want failed", response.Status)
+	}
+	if response.Artifacts["reason"] != "invalid_timezone" {
+		t.Fatalf("reason = %#v, want invalid_timezone", response.Artifacts["reason"])
+	}
+}
+
 func TestHuginnDriverUsesRepoLocalLibraryByDefault(t *testing.T) {
 	repoRoot := projectRoot(t)
 	scriptPath := filepath.Join(repoRoot, "scripts", "drivers", "huginn-pbs-session.sh")
@@ -124,6 +193,60 @@ func TestHuginnDriverUsesRepoLocalLibraryByDefault(t *testing.T) {
 	trace := string(traceBytes)
 	if !strings.Contains(trace, "start\n") || !strings.Contains(trace, "load:flica\n") || !strings.Contains(trace, "navigate:https://jia.flica.net/online/mainmenu.cgi\n") || !strings.Contains(trace, "stop\n") {
 		t.Fatalf("trace = %q, want start/load/navigate/stop sequence", trace)
+	}
+}
+
+func TestHuginnDriverUsesSnapshotTextForLoginDetection(t *testing.T) {
+	repoRoot := projectRoot(t)
+	scriptPath := filepath.Join(repoRoot, "scripts", "drivers", "huginn-pbs-session.sh")
+	fixtureDir := t.TempDir()
+	curlPath := filepath.Join(fixtureDir, "curl")
+	sessionDir := filepath.Join(fixtureDir, "sessions")
+
+	if err := os.MkdirAll(sessionDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(sessionDir) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(sessionDir, "flica.json"), []byte(`[]`), 0o644); err != nil {
+		t.Fatalf("WriteFile(session file) error = %v", err)
+	}
+	if err := os.WriteFile(curlPath, []byte(`#!/usr/bin/env bash
+set -euo pipefail
+url="${@: -1}"
+case "$url" in
+  *"/health")
+    printf '{"ok":true,"browser":true,"page":true,"url":"https://jia.flica.net/online/mainmenu.cgi"}'
+    ;;
+  *"/cookies/set")
+    printf '{}'
+    ;;
+  *"/navigate")
+    printf '{"url":"https://jia.flica.net/online/mainmenu.cgi"}'
+    ;;
+  *"/snapshot?compact=true")
+    printf '%s' '{"snapshot":"Sign in\\nPassword"}'
+    ;;
+  *"/stop")
+    printf '{}'
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+`), 0o755); err != nil {
+		t.Fatalf("WriteFile(fake curl) error = %v", err)
+	}
+
+	request := `{"tool_key":"huginn_pbs_session","input":{"bid_period":"2026-05","workflow_key":"pbs_may_bid","timezone":"America/Chicago"}}`
+	response := runDriverScript(t, scriptPath, request, map[string]string{
+		"PATH":                     fixtureDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"ODIN_BROWSER_SESSION_DIR": sessionDir,
+	})
+
+	if response.Status != "failed" {
+		t.Fatalf("Status = %q, want failed", response.Status)
+	}
+	if response.Artifacts["session_state"] != "login_required" {
+		t.Fatalf("session_state = %#v, want login_required", response.Artifacts["session_state"])
 	}
 }
 
