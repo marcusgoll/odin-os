@@ -93,8 +93,8 @@ func TestValidateInvocationInputAgainstSchema(t *testing.T) {
 
 func TestValidateInvocationRejectsMismatchedDeclaredInputTypes(t *testing.T) {
 	tests := []struct {
-		name       string
-		inputType  string
+		name      string
+		inputType string
 	}{
 		{name: "array", inputType: "array"},
 		{name: "string", inputType: "string"},
@@ -143,9 +143,9 @@ func TestValidateInvocationRejectsMismatchedDeclaredInputTypes(t *testing.T) {
 
 func TestValidateInvocationAcceptsDeclaredInputTypes(t *testing.T) {
 	tests := []struct {
-		name       string
-		inputType  string
-		input      json.RawMessage
+		name      string
+		inputType string
+		input     json.RawMessage
 	}{
 		{name: "object", inputType: "object", input: json.RawMessage(`{"key":"value"}`)},
 		{name: "array", inputType: "array", input: json.RawMessage(`[1,2,3]`)},
