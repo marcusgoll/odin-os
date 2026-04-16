@@ -13,6 +13,8 @@ import (
 	"odin-os/internal/cli/commands"
 	"odin-os/internal/cli/render"
 	"odin-os/internal/cli/scope"
+	"odin-os/internal/core/capabilities"
+	corecommands "odin-os/internal/core/commands"
 	"odin-os/internal/core/projects"
 	healthsvc "odin-os/internal/runtime/health"
 	jobsvc "odin-os/internal/runtime/jobs"
@@ -25,15 +27,22 @@ type Environment struct {
 	Registry            projects.Registry
 	RegistryDiagnostics []projects.Diagnostic
 	SessionStore        SessionStore
+	CapabilityService   *capabilities.Service
+	CommandService      CommandExecutor
+}
+
+type CommandExecutor interface {
+	Execute(context.Context, capabilities.InvokeRequest) (capabilities.InvokeResponse, error)
 }
 
 type Shell struct {
-	env         Environment
-	state       State
-	health      healthsvc.Service
-	jobs        jobsvc.Service
-	runs        runsvc.Service
-	transitions projects.Service
+	env            Environment
+	state          State
+	commandService CommandExecutor
+	health         healthsvc.Service
+	jobs           jobsvc.Service
+	runs           runsvc.Service
+	transitions    projects.Service
 }
 
 const transitionUsage = "/transition [status] | /transition set <state> [allow=<csv>] [confirm] because <reason...>"
@@ -62,6 +71,12 @@ func New(env Environment) (*Shell, error) {
 		transitions: projects.Service{
 			Store: env.Store,
 		},
+	}
+	if env.CommandService != nil {
+		shell.commandService = env.CommandService
+	} else if env.CapabilityService != nil {
+		gateway := capabilities.NewGateway(env.CapabilityService, shell.invokeCapability, nil)
+		shell.commandService = corecommands.NewService(gateway, nil)
 	}
 
 	if err := shell.persistState(); err != nil {
@@ -151,8 +166,10 @@ func (shell *Shell) renderPrompt(ctx context.Context, output io.Writer) error {
 
 func (shell *Shell) handleCommand(ctx context.Context, command commands.Command, output io.Writer) error {
 	switch command.Name {
+	case "status", "stat":
+		return shell.handleRegistryCommand(ctx, command, output)
 	case "help":
-		if _, err := fmt.Fprintln(output, "/help /mode /scope /project /transition /observe /compare /jobs /runs /approvals /logs /doctor /self"); err != nil {
+		if _, err := fmt.Fprintln(output, "/help /mode /scope /project /transition /observe /compare /status /stat /jobs /runs /approvals /logs /doctor /self"); err != nil {
 			return err
 		}
 		_, err := fmt.Fprintf(output, "%s\n", transitionUsage)
@@ -187,6 +204,98 @@ func (shell *Shell) handleCommand(ctx context.Context, command commands.Command,
 		_, err := fmt.Fprintf(output, "unknown command: /%s\n", command.Name)
 		return err
 	}
+}
+
+func (shell *Shell) handleRegistryCommand(ctx context.Context, command commands.Command, output io.Writer) error {
+	resolved, ok := commands.ResolveRegistryCommand(command)
+	if !ok {
+		_, err := fmt.Fprintf(output, "unknown command: /%s\n", command.Name)
+		return err
+	}
+	if len(command.Args) != 0 {
+		_, err := fmt.Fprintf(output, "usage: /%s\n", command.Name)
+		return err
+	}
+
+	if shell.commandService == nil {
+		response, err := shell.executeProjectStatus(ctx, capabilities.InvokeRequest{
+			RequestID:         "",
+			CapabilityID:      resolved.CapabilityID,
+			CapabilityVersion: resolved.CapabilityVersion,
+			Scope: capabilities.ScopeRef{
+				Kind:       string(shell.state.Scope.Kind),
+				ProjectKey: shell.state.Scope.ProjectKey,
+			},
+			Caller: capabilities.CallerRef{
+				Kind: "cli",
+				ID:   "shell",
+			},
+			Input:     json.RawMessage(`{}`),
+			Execution: capabilities.ExecutionRequest{Mode: "local"},
+		}, capabilities.Descriptor{Key: resolved.CapabilityID, Version: resolved.CapabilityVersion})
+		if err != nil {
+			return err
+		}
+		_, err = fmt.Fprint(output, string(response.Output))
+		return err
+	}
+
+	response, err := shell.commandService.Execute(ctx, capabilities.InvokeRequest{
+		RequestID:         "",
+		CapabilityID:      resolved.CapabilityID,
+		CapabilityVersion: resolved.CapabilityVersion,
+		Scope: capabilities.ScopeRef{
+			Kind:       string(shell.state.Scope.Kind),
+			ProjectKey: shell.state.Scope.ProjectKey,
+		},
+		Caller: capabilities.CallerRef{
+			Kind: "cli",
+			ID:   "shell",
+		},
+		Input:     json.RawMessage(`{}`),
+		Execution: capabilities.ExecutionRequest{Mode: "local"},
+	})
+	if err != nil {
+		return err
+	}
+	if len(response.Output) > 0 {
+		_, err = fmt.Fprint(output, string(response.Output))
+		return err
+	}
+	if response.Status != "" {
+		_, err = fmt.Fprintln(output, response.Status)
+		return err
+	}
+	return nil
+}
+
+func (shell *Shell) invokeCapability(ctx context.Context, request capabilities.InvokeRequest, descriptor capabilities.Descriptor) (capabilities.InvokeResponse, error) {
+	switch descriptor.Key {
+	case "project.status":
+		return shell.executeProjectStatus(ctx, request, descriptor)
+	default:
+		return capabilities.InvokeResponse{}, fmt.Errorf("unsupported registry command: %s", descriptor.Key)
+	}
+}
+
+func (shell *Shell) executeProjectStatus(ctx context.Context, _ capabilities.InvokeRequest, _ capabilities.Descriptor) (capabilities.InvokeResponse, error) {
+	if shell.state.Scope.Kind == scope.ScopeProject || shell.state.Scope.Kind == scope.ScopeOdinCore {
+		manifest, err := shell.scopedManifest()
+		if err == nil {
+			status, err := shell.currentTransitionStatus(ctx, manifest)
+			if err == nil {
+				return capabilities.InvokeResponse{
+					Status: "ok",
+					Output: json.RawMessage(renderTransitionStatus(manifest.Key, status)),
+				}, nil
+			}
+		}
+	}
+
+	return capabilities.InvokeResponse{
+		Status: "ok",
+		Output: json.RawMessage(fmt.Sprintf("scope=%s mode=%s\n", shell.scopeLabel(), shell.state.Mode)),
+	}, nil
 }
 
 func (shell *Shell) handleAsk(ctx context.Context, line string, output io.Writer) error {

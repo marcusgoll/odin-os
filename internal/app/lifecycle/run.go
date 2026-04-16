@@ -78,6 +78,7 @@ func Run(ctx context.Context, root string, args []string, stdin io.Reader, stdou
 		Registry:            app.Registry,
 		RegistryDiagnostics: app.RegistryDiagnostics,
 		SessionStore:        app.SessionStore,
+		CapabilityService:   app.CapabilityService,
 	})
 	if err != nil {
 		return err

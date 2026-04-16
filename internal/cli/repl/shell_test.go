@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"odin-os/internal/cli/scope"
+	"odin-os/internal/core/capabilities"
 	"odin-os/internal/core/projects"
 	runtimeevents "odin-os/internal/runtime/events"
 	"odin-os/internal/store/sqlite"
@@ -213,6 +214,39 @@ func TestDoctorCommandSupportsJSONOutput(t *testing.T) {
 	}
 	if decoded["status"] == nil {
 		t.Fatalf("decoded status missing: %#v", decoded)
+	}
+}
+
+func TestCLICommandDispatchUsesCommandService(t *testing.T) {
+	t.Parallel()
+
+	env := newTestEnvironment(t)
+	service := &recordingCommandService{
+		response: capabilities.InvokeResponse{
+			Status: "ok",
+			Output: json.RawMessage(`status=registry-backed`),
+		},
+	}
+	env.CommandService = service
+
+	shell, err := New(env)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	var output bytes.Buffer
+	if err := shell.HandleLine(context.Background(), "/stat", &output); err != nil {
+		t.Fatalf("HandleLine(/stat) error = %v", err)
+	}
+
+	if len(service.calls) != 1 {
+		t.Fatalf("command service calls = %d, want 1", len(service.calls))
+	}
+	if got := service.calls[0]; got.CapabilityID != "project.status" || got.CapabilityVersion != "1.0.0" {
+		t.Fatalf("command request = %+v, want project.status 1.0.0", got)
+	}
+	if !strings.Contains(output.String(), "registry-backed") {
+		t.Fatalf("output = %q, want registry-backed response", output.String())
 	}
 }
 
@@ -499,6 +533,20 @@ func newTestEnvironment(t *testing.T) Environment {
 		Registry:     registry,
 		SessionStore: SessionStore{Path: filepath.Join(stateDir, "cli-session.json")},
 	}
+}
+
+type recordingCommandService struct {
+	calls    []capabilities.InvokeRequest
+	response capabilities.InvokeResponse
+	err      error
+}
+
+func (service *recordingCommandService) Execute(_ context.Context, request capabilities.InvokeRequest) (capabilities.InvokeResponse, error) {
+	service.calls = append(service.calls, request)
+	if service.err != nil {
+		return capabilities.InvokeResponse{}, service.err
+	}
+	return service.response, nil
 }
 
 func hasTransitionEvent(events []runtimeevents.Record, want runtimeevents.Type) bool {

@@ -7,6 +7,11 @@ type Command struct {
 	Args []string
 }
 
+type RegistryCommand struct {
+	CapabilityID      string
+	CapabilityVersion string
+}
+
 type Intent string
 
 const (
@@ -37,6 +42,18 @@ func Parse(line string) (Command, bool) {
 		Name: strings.ToLower(fields[0]),
 		Args: fields[1:],
 	}, true
+}
+
+func ResolveRegistryCommand(command Command) (RegistryCommand, bool) {
+	switch command.Name {
+	case "status", "stat":
+		return RegistryCommand{
+			CapabilityID:      "project.status",
+			CapabilityVersion: "1.0.0",
+		}, true
+	default:
+		return RegistryCommand{}, false
+	}
 }
 
 func RouteAskIntent(line string) Intent {
