@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"os"
 	"path/filepath"
 
@@ -13,6 +14,7 @@ import (
 	executorrouter "odin-os/internal/executors/router"
 	"odin-os/internal/registry"
 	registryloader "odin-os/internal/registry/loader"
+	healthsvc "odin-os/internal/runtime/health"
 	"odin-os/internal/store/sqlite"
 )
 
@@ -105,7 +107,7 @@ func load(ctx context.Context, repoRoot string, runtimeRoot string, options load
 	executors := executorrouter.DefaultCatalog()
 
 	if options.initializeReadiness {
-		if err := initializeReadinessState(ctx, store, filepath.Join(repoRoot, "registry"), registrySnapshot, executors); err != nil {
+		if err := initializeReadinessState(ctx, store, filepath.Join(repoRoot, "registry"), registrySnapshot, executors, healthsvc.DefaultExpectedExecutors()); err != nil {
 			_ = store.Close()
 			return App{}, err
 		}
@@ -144,7 +146,7 @@ func projectManifestPaths(repoRoot string) ([]string, error) {
 	return paths, nil
 }
 
-func initializeReadinessState(ctx context.Context, store *sqlite.Store, registryRoot string, snapshot registry.Snapshot, executors map[string]contract.Executor) error {
+func initializeReadinessState(ctx context.Context, store *sqlite.Store, registryRoot string, snapshot registry.Snapshot, executors map[string]contract.Executor, expectedExecutors []string) error {
 	if len(snapshot.Diagnostics) == 0 {
 		versionHash, err := registryVersionHash(registryRoot)
 		if err != nil {
@@ -159,20 +161,26 @@ func initializeReadinessState(ctx context.Context, store *sqlite.Store, registry
 		}
 	}
 
-	for key, executor := range executors {
+	for _, key := range expectedExecutors {
+		executor, ok := executors[key]
+		if !ok {
+			if err := recordExecutorReadiness(ctx, store, key, contract.HealthReport{
+				Status:  contract.HealthStatusUnavailable,
+				Details: "executor is not configured",
+			}); err != nil {
+				return err
+			}
+			continue
+		}
+
 		report, err := executor.Health(ctx)
 		if err != nil {
-			continue
+			report = contract.HealthReport{
+				Status:  contract.HealthStatusUnavailable,
+				Details: err.Error(),
+			}
 		}
-		if report.Status != contract.HealthStatusHealthy {
-			continue
-		}
-		if _, err := store.RecordExecutorHealth(ctx, sqlite.RecordExecutorHealthParams{
-			Executor:    key,
-			Status:      string(report.Status),
-			LatencyMS:   0,
-			DetailsJSON: `{"source":"bootstrap"}`,
-		}); err != nil {
+		if err := recordExecutorReadiness(ctx, store, key, report); err != nil {
 			return err
 		}
 	}
@@ -198,6 +206,27 @@ func initializeReadinessState(ctx context.Context, store *sqlite.Store, registry
 	}
 
 	return nil
+}
+
+func recordExecutorReadiness(ctx context.Context, store *sqlite.Store, executorKey string, report contract.HealthReport) error {
+	details := map[string]string{
+		"source": "bootstrap",
+	}
+	if report.Details != "" {
+		details["details"] = report.Details
+	}
+	detailsJSON, err := json.Marshal(details)
+	if err != nil {
+		return err
+	}
+
+	_, err = store.RecordExecutorHealth(ctx, sqlite.RecordExecutorHealthParams{
+		Executor:    executorKey,
+		Status:      string(report.Status),
+		LatencyMS:   0,
+		DetailsJSON: string(detailsJSON),
+	})
+	return err
 }
 
 func registryVersionHash(root string) (string, error) {

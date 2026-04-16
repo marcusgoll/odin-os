@@ -2,6 +2,7 @@ package worktrees
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -16,6 +17,8 @@ type Manager struct {
 	Store *sqlite.Store
 	Git   Git
 }
+
+var ErrWorktreeAlreadyRemoved = errors.New("worktree already removed")
 
 type CleanupResult struct {
 	Removed []sqlite.WorktreeLease
@@ -46,16 +49,19 @@ func (manager Manager) CleanupLeases(ctx context.Context, leases []sqlite.Worktr
 	}
 
 	result := CleanupResult{}
+	var cleanupErr error
 	for _, lease := range leases {
-		if err := manager.Git.RemoveWorktree(ctx, lease.RepoRoot, lease.WorktreePath); err != nil {
-			return CleanupResult{}, err
+		if err := manager.Git.RemoveWorktree(ctx, lease.RepoRoot, lease.WorktreePath); err != nil && !errors.Is(err, ErrWorktreeAlreadyRemoved) {
+			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("remove worktree lease %d: %w", lease.ID, err))
+			continue
 		}
 		updated, err := manager.Store.MarkWorktreeLeaseCleanedUp(ctx, lease.ID)
 		if err != nil {
-			return CleanupResult{}, err
+			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("mark cleaned lease %d: %w", lease.ID, err))
+			continue
 		}
 		result.Removed = append(result.Removed, updated)
 	}
 
-	return result, nil
+	return result, cleanupErr
 }

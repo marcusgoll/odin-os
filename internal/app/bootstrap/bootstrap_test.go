@@ -30,6 +30,32 @@ func TestLoadInitializesFreshRuntimeReadinessState(t *testing.T) {
 	assertCountAtLeast(t, app.Store.DB().QueryRowContext(context.Background(), "SELECT COUNT(*) FROM projection_freshness"), 1)
 }
 
+func TestLoadRecordsExpectedExecutorHealthEvenWhenUnavailable(t *testing.T) {
+	repoRoot := filepath.Clean(filepath.Join("..", "..", ".."))
+	runtimeRoot := t.TempDir()
+	t.Setenv("ODIN_CODEX_DRIVER", filepath.Join(runtimeRoot, "missing-codex-driver"))
+
+	app, err := Load(context.Background(), repoRoot, runtimeRoot)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	defer app.Store.Close()
+
+	var status string
+	if err := app.Store.DB().QueryRowContext(context.Background(), `
+		SELECT status
+		FROM executor_health
+		WHERE executor = 'codex_headless'
+		ORDER BY checked_at DESC, id DESC
+		LIMIT 1
+	`).Scan(&status); err != nil {
+		t.Fatalf("query expected executor health error = %v", err)
+	}
+	if status != "unavailable" {
+		t.Fatalf("codex_headless status = %q, want unavailable", status)
+	}
+}
+
 func TestLoadIncludesConfiguredProjectsOverlay(t *testing.T) {
 	repoRoot := t.TempDir()
 	runtimeRoot := t.TempDir()

@@ -385,8 +385,18 @@ func configureLifecycleHarnessDriver(t *testing.T) {
 
 	path := filepath.Join(t.TempDir(), "codex-driver.sh")
 	if err := os.WriteFile(path, []byte(`#!/usr/bin/env bash
-cat >/dev/null
-printf '{"status":"completed","output":"driver test ok","external_id":"fixture-driver"}'
+payload="$(cat)"
+PAYLOAD="$payload" python3 - <<'PY'
+import json
+import os
+
+request = json.loads(os.environ["PAYLOAD"])
+action = request.get("action")
+if action == "health":
+    print(json.dumps({"status":"healthy","details":"lifecycle test driver healthy"}))
+else:
+    print(json.dumps({"status":"completed","output":"driver test ok","handle":{"external_id":"fixture-driver"}}))
+PY
 `), 0o755); err != nil {
 		t.Fatalf("WriteFile(driver) error = %v", err)
 	}

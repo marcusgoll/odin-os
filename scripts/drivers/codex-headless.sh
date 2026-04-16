@@ -5,30 +5,34 @@ if [[ -n "${ODIN_CODEX_DRIVER_COMMAND:-}" ]]; then
   exec bash -lc "$ODIN_CODEX_DRIVER_COMMAND"
 fi
 
-python3 -c '
+payload="$(cat)"
+
+if [[ -n "${ODIN_CODEX_DRIVER_TRACE:-}" ]]; then
+  printf '%s\n' "$payload" >"${ODIN_CODEX_DRIVER_TRACE}"
+fi
+
+PAYLOAD="$payload" ODIN_CODEX_DRIVER_ACTION="${ODIN_CODEX_DRIVER_ACTION:-}" python3 - <<'PY'
 import json
 import os
 import sys
 
-mode = os.environ.get("ODIN_CODEX_DRIVER_MODE", "fixture")
-if mode == "fail":
-    print("codex headless driver forced failure", file=sys.stderr)
-    sys.exit(1)
+payload = os.environ.get("PAYLOAD", "").strip()
+request = json.loads(payload) if payload else {}
+action = request.get("action") or os.environ.get("ODIN_CODEX_DRIVER_ACTION", "").strip() or "run"
 
-spec = json.load(sys.stdin)
-task_id = spec.get("id", "")
-kind = spec.get("kind", "general")
-scope = spec.get("scope", "project")
-prompt = spec.get("prompt", "")
+if action == "health":
+    response = json.loads(os.environ.get("ODIN_CODEX_DRIVER_HEALTH_RESPONSE", '{"status":"healthy","details":"fixture codex driver healthy"}'))
+elif action == "run":
+    response = json.loads(os.environ.get("ODIN_CODEX_DRIVER_RUN_RESPONSE", '{"status":"completed","output":"fixture codex driver"}'))
+else:
+    response = {
+        "status": "unavailable",
+        "details": f"unknown action: {action}",
+    }
 
-payload = {
-    "status": "completed",
-    "output": f"codex_headless_script completed {kind} task {task_id} in {scope} scope: {prompt}",
-    "metadata": {
-        "driver": "codex_headless_script",
-        "mode": mode,
-        "executor_class": "plan_backed_cli",
-    },
-}
-json.dump(payload, sys.stdout)
-'
+metadata = response.setdefault("metadata", {})
+metadata.setdefault("driver", "codex_headless_script")
+metadata.setdefault("mode", "fixture")
+metadata.setdefault("executor_class", "plan_backed_cli")
+json.dump(response, sys.stdout)
+PY

@@ -150,15 +150,15 @@ func TestAlphaAcceptance(t *testing.T) {
 		}
 	})
 
-	t.Run("fresh runtime becomes ready without manual seeding", func(t *testing.T) {
+	t.Run("fresh runtime fails closed without explicit executor driver", func(t *testing.T) {
 		runtimeRoot := t.TempDir()
 
-		output, err := runOdinCommand(t, repoRoot, odinBinary, runtimeRoot, extraEnv, "", "healthcheck")
-		if err != nil {
-			t.Fatalf("runOdinCommand(healthcheck fresh runtime) error = %v\n%s", err, output)
+		output, err := runOdinCommand(t, repoRoot, odinBinary, runtimeRoot, nil, "", "healthcheck")
+		if err == nil {
+			t.Fatalf("runOdinCommand(healthcheck fresh runtime) error = nil, want runtime not ready\n%s", output)
 		}
-		if !strings.Contains(output, "ready") {
-			t.Fatalf("fresh runtime healthcheck output = %q, want ready", output)
+		if !strings.Contains(output, "not ready") {
+			t.Fatalf("fresh runtime healthcheck output = %q, want not ready", output)
 		}
 	})
 
@@ -417,7 +417,7 @@ func TestAlphaAcceptance(t *testing.T) {
 			t.Fatalf("LoadConfig() error = %v", err)
 		}
 		selector := executorrouter.Selector{
-			Config:    cfg,
+			Config: cfg,
 			Executors: map[string]contract.Executor{
 				"codex_headless": contract.NewStaticExecutor(
 					"codex_headless",

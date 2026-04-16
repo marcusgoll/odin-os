@@ -14,7 +14,10 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-var ErrWorktreeLeaseConflict = errors.New("worktree lease conflict")
+var (
+	ErrTaskLaunchConflict    = errors.New("task launch conflict")
+	ErrWorktreeLeaseConflict = errors.New("worktree lease conflict")
+)
 
 type Store struct {
 	db        *sql.DB
@@ -317,6 +320,118 @@ func (store *Store) StartRun(ctx context.Context, params StartRunParams) (Run, e
 	return run, err
 }
 
+func (store *Store) StartRunAndUpdateTaskStatus(ctx context.Context, params StartRunAndUpdateTaskStatusParams) (Run, error) {
+	now := store.now()
+	var run Run
+
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		task, err := store.getTaskTx(ctx, tx, params.TaskID)
+		if err != nil {
+			return err
+		}
+		previousStatus := task.Status
+
+		claim, err := tx.ExecContext(ctx, `
+			UPDATE tasks
+			SET status = ?, updated_at = ?
+			WHERE id = ?
+			  AND status = 'queued'
+			  AND current_run_id IS NULL
+		`, params.TaskStatus, formatTime(now), params.TaskID)
+		if err != nil {
+			return err
+		}
+		rows, err := claim.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if rows != 1 {
+			return ErrTaskLaunchConflict
+		}
+
+		result, err := tx.ExecContext(ctx, `
+			INSERT INTO runs (task_id, executor, status, attempt, started_at, finished_at, summary, terminal_reason, artifacts_json)
+			VALUES (?, ?, ?, ?, ?, NULL, '', '', '[]')
+		`,
+			params.TaskID,
+			params.Executor,
+			params.RunStatus,
+			params.Attempt,
+			formatTime(now),
+		)
+		if err != nil {
+			return err
+		}
+		runID, err := result.LastInsertId()
+		if err != nil {
+			return err
+		}
+
+		assign, err := tx.ExecContext(ctx, `
+			UPDATE tasks
+			SET current_run_id = ?, updated_at = ?
+			WHERE id = ?
+			  AND current_run_id IS NULL
+		`, runID, formatTime(now), params.TaskID)
+		if err != nil {
+			return err
+		}
+		rows, err = assign.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if rows != 1 {
+			return ErrTaskLaunchConflict
+		}
+
+		run = Run{
+			ID:            runID,
+			TaskID:        params.TaskID,
+			Executor:      params.Executor,
+			Status:        params.RunStatus,
+			Attempt:       params.Attempt,
+			StartedAt:     now,
+			ArtifactsJSON: "[]",
+		}
+
+		projectID := task.ProjectID
+		if err := appendEventTx(ctx, tx, eventInsert{
+			StreamType: runtimeevents.StreamRun,
+			StreamID:   run.ID,
+			EventType:  runtimeevents.EventRunStarted,
+			Scope:      task.Scope,
+			ProjectID:  &projectID,
+			TaskID:     &task.ID,
+			RunID:      &run.ID,
+			Payload: runtimeevents.RunStartedPayload{
+				TaskID:   task.ID,
+				Executor: run.Executor,
+				Attempt:  run.Attempt,
+				Status:   run.Status,
+			},
+			OccurredAt: now,
+		}); err != nil {
+			return err
+		}
+
+		return appendEventTx(ctx, tx, eventInsert{
+			StreamType: runtimeevents.StreamTask,
+			StreamID:   task.ID,
+			EventType:  runtimeevents.EventTaskStatusChanged,
+			Scope:      task.Scope,
+			ProjectID:  &projectID,
+			TaskID:     &task.ID,
+			Payload: runtimeevents.TaskStatusChangedPayload{
+				PreviousStatus: previousStatus,
+				Status:         params.TaskStatus,
+			},
+			OccurredAt: now,
+		})
+	})
+
+	return run, err
+}
+
 func (store *Store) FinishRun(ctx context.Context, params FinishRunParams) (Run, error) {
 	now := store.now()
 	var run Run
@@ -480,6 +595,94 @@ func (store *Store) ResolveStalledRun(ctx context.Context, params ResolveStalled
 				Summary:        taskSummary,
 				TerminalReason: taskTerminalReason,
 				ArtifactsJSON:  taskArtifactsJSON,
+			},
+			OccurredAt: now,
+		})
+	})
+}
+
+func (store *Store) FinishRunAndUpdateTaskStatus(ctx context.Context, params FinishRunAndUpdateTaskStatusParams) error {
+	now := store.now()
+	artifactsJSON := normalizeArtifactsJSON(params.ArtifactsJSON)
+	terminalReason := strings.TrimSpace(params.TerminalReason)
+	if terminalReason == "" {
+		terminalReason = params.RunStatus
+	}
+
+	return store.withTx(ctx, func(tx *sql.Tx) error {
+		currentRun, task, err := store.getRunWithTaskTx(ctx, tx, params.RunID)
+		if err != nil {
+			return err
+		}
+		if task.ID != params.TaskID {
+			return fmt.Errorf("run %d belongs to task %d, not %d", params.RunID, task.ID, params.TaskID)
+		}
+		previousTaskStatus := task.Status
+
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE runs
+			SET status = ?, finished_at = ?, summary = ?, terminal_reason = ?, artifacts_json = ?
+			WHERE id = ?
+		`, params.RunStatus, formatTime(now), params.Summary, terminalReason, artifactsJSON, params.RunID); err != nil {
+			return err
+		}
+		assign, err := tx.ExecContext(ctx, `
+			UPDATE tasks
+			SET current_run_id = NULL, status = ?, summary = ?, terminal_reason = ?, artifacts_json = ?, updated_at = ?
+			WHERE id = ?
+			  AND current_run_id = ?
+		`, params.TaskStatus, params.Summary, terminalReason, artifactsJSON, formatTime(now), params.TaskID, params.RunID)
+		if err != nil {
+			return err
+		}
+		rows, err := assign.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if rows != 1 {
+			return ErrTaskLaunchConflict
+		}
+
+		finishedRun := currentRun
+		finishedRun.Status = params.RunStatus
+		finishedRun.FinishedAt = &now
+		finishedRun.Summary = params.Summary
+		finishedRun.TerminalReason = terminalReason
+		finishedRun.ArtifactsJSON = artifactsJSON
+
+		projectID := task.ProjectID
+		if err := appendEventTx(ctx, tx, eventInsert{
+			StreamType: runtimeevents.StreamRun,
+			StreamID:   finishedRun.ID,
+			EventType:  runtimeevents.EventRunFinished,
+			Scope:      task.Scope,
+			ProjectID:  &projectID,
+			TaskID:     &task.ID,
+			RunID:      &finishedRun.ID,
+			Payload: runtimeevents.RunFinishedPayload{
+				Status:         finishedRun.Status,
+				Summary:        finishedRun.Summary,
+				TerminalReason: finishedRun.TerminalReason,
+				ArtifactsJSON:  finishedRun.ArtifactsJSON,
+			},
+			OccurredAt: now,
+		}); err != nil {
+			return err
+		}
+
+		return appendEventTx(ctx, tx, eventInsert{
+			StreamType: runtimeevents.StreamTask,
+			StreamID:   task.ID,
+			EventType:  runtimeevents.EventTaskStatusChanged,
+			Scope:      task.Scope,
+			ProjectID:  &projectID,
+			TaskID:     &task.ID,
+			Payload: runtimeevents.TaskStatusChangedPayload{
+				PreviousStatus: previousTaskStatus,
+				Status:         params.TaskStatus,
+				Summary:        params.Summary,
+				TerminalReason: terminalReason,
+				ArtifactsJSON:  artifactsJSON,
 			},
 			OccurredAt: now,
 		})

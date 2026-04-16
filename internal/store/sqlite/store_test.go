@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"testing"
 
@@ -300,6 +301,91 @@ func TestStoreMigrateLifecycleAndReopen(t *testing.T) {
 	}
 	if gotApproval.Status != "approved" {
 		t.Fatalf("GetApproval().Status = %q, want %q", gotApproval.Status, "approved")
+	}
+}
+
+func TestStartRunAndUpdateTaskStatusRejectsAlreadyClaimedTask(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "odin.db")
+
+	store, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer store.Close()
+
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
+	}
+
+	project, err := store.CreateProject(ctx, CreateProjectParams{
+		Key:           "alpha",
+		Name:          "Alpha",
+		Scope:         "project",
+		GitRoot:       "/tmp/alpha",
+		DefaultBranch: "main",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+
+	task, err := store.CreateTask(ctx, CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "launch-once",
+		Title:       "Claim queued task",
+		Status:      "queued",
+		Scope:       "project",
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+
+	firstRun, err := store.StartRunAndUpdateTaskStatus(ctx, StartRunAndUpdateTaskStatusParams{
+		TaskID:     task.ID,
+		Executor:   "codex",
+		Attempt:    1,
+		RunStatus:  "running",
+		TaskStatus: "running",
+	})
+	if err != nil {
+		t.Fatalf("StartRunAndUpdateTaskStatus(first) error = %v", err)
+	}
+
+	_, err = store.StartRunAndUpdateTaskStatus(ctx, StartRunAndUpdateTaskStatusParams{
+		TaskID:     task.ID,
+		Executor:   "codex",
+		Attempt:    2,
+		RunStatus:  "running",
+		TaskStatus: "running",
+	})
+	if !errors.Is(err, ErrTaskLaunchConflict) {
+		t.Fatalf("StartRunAndUpdateTaskStatus(second) error = %v, want ErrTaskLaunchConflict", err)
+	}
+
+	updatedTask, err := store.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
+	}
+	if updatedTask.Status != "running" {
+		t.Fatalf("task.Status = %q, want running", updatedTask.Status)
+	}
+	if updatedTask.CurrentRunID == nil || *updatedTask.CurrentRunID != firstRun.ID {
+		t.Fatalf("task.CurrentRunID = %v, want %d", updatedTask.CurrentRunID, firstRun.ID)
+	}
+
+	row := store.DB().QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM runs
+		WHERE task_id = ?
+	`, task.ID)
+	var runCount int
+	if err := row.Scan(&runCount); err != nil {
+		t.Fatalf("scan run count error = %v", err)
+	}
+	if runCount != 1 {
+		t.Fatalf("run count = %d, want 1", runCount)
 	}
 }
 

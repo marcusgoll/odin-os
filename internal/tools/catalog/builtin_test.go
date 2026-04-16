@@ -7,23 +7,14 @@ import (
 	"odin-os/internal/tools/invocation"
 )
 
-func TestBuiltinDefinitionsIncludeSchemasAndHandlers(t *testing.T) {
+func TestBuiltinCatalogDoesNotExposePlaceholderOperationalTools(t *testing.T) {
 	t.Parallel()
 
 	definitions := BuiltinDefinitions()
-	if len(definitions) == 0 {
-		t.Fatalf("BuiltinDefinitions() len = 0, want > 0")
-	}
-
-	taskList, ok := definitions["task_list"]
-	if !ok {
-		t.Fatalf("missing task_list definition")
-	}
-	if taskList.Schema == nil {
-		t.Fatalf("task_list schema = nil, want schema")
-	}
-	if taskList.Invoke == nil {
-		t.Fatalf("task_list invoke = nil, want handler")
+	for _, key := range []string{"project_status", "task_list", "event_log"} {
+		if _, ok := definitions[key]; ok {
+			t.Fatalf("%s should not be exposed until it is runtime-backed", key)
+		}
 	}
 }
 
@@ -63,25 +54,12 @@ func TestBuiltinProjectStatusInvokesRuntimeDriver(t *testing.T) {
 	}
 }
 
-func TestBuiltinProjectStatusKeepsLegacyFallbackWithoutInvoker(t *testing.T) {
+func TestBuiltinProjectStatusRequiresRuntimeInvoker(t *testing.T) {
 	t.Parallel()
 
 	definitions := BuiltinDefinitions()
-	result, err := definitions["project_status"].Invoke(map[string]string{"project_key": "alpha"})
-	if err != nil {
-		t.Fatalf("Invoke(project_status) error = %v", err)
-	}
-	if result.Source != "builtin" {
-		t.Fatalf("result source = %q, want builtin", result.Source)
-	}
-	if result.Summary != "Project status prepared for alpha." {
-		t.Fatalf("summary = %q, want legacy canned summary", result.Summary)
-	}
-	if result.KeyFacts["project_key"] != "alpha" {
-		t.Fatalf("project_key fact = %q, want alpha", result.KeyFacts["project_key"])
-	}
-	if result.RawRef != "builtin://project_status/result" {
-		t.Fatalf("raw ref = %q, want legacy builtin ref", result.RawRef)
+	if _, ok := definitions["project_status"]; ok {
+		t.Fatal("project_status should not be exposed without a runtime invoker")
 	}
 }
 

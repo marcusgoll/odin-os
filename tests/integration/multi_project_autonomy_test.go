@@ -39,6 +39,7 @@ func TestOperationalAutonomyFreshRuntimeBecomesHealthy(t *testing.T) {
 	repoRoot := projectRoot(t)
 	odinBinary := buildOdinBinary(t, repoRoot)
 	runtimeRoot := t.TempDir()
+	t.Setenv("ODIN_CODEX_DRIVER", filepath.Join(repoRoot, "scripts", "drivers", "codex-headless.sh"))
 
 	output, err := runOdinCommand(t, repoRoot, odinBinary, runtimeRoot, nil, "", "doctor", "--json")
 	if err != nil {
@@ -60,6 +61,7 @@ func TestOperationalAutonomyFreshRuntimeBecomesHealthy(t *testing.T) {
 func TestCutoverPilotProjectsStayRunnableWithoutLegacyPrimary(t *testing.T) {
 	ctx := context.Background()
 	repoRoot := projectRoot(t)
+	t.Setenv("ODIN_CODEX_DRIVER", filepath.Join(repoRoot, "scripts", "drivers", "codex-headless.sh"))
 
 	runtimeRoot := t.TempDir()
 	app, err := bootstrap.Load(ctx, repoRoot, runtimeRoot)
@@ -221,13 +223,13 @@ func TestCutoverPilotProjectsStayRunnableWithoutLegacyPrimary(t *testing.T) {
 		t.Fatalf("pending approvals = %d, want 0 for normal pilot completion", len(approvals))
 	}
 
-	leasesSnapshot, err := app.Store.ListCleanupEligibleWorktreeLeases(ctx, time.Now().UTC())
+	leasesSnapshot, err := app.Store.ListWorktreeLeases(ctx)
 	if err != nil {
-		t.Fatalf("ListCleanupEligibleWorktreeLeases() error = %v", err)
+		t.Fatalf("ListWorktreeLeases() error = %v", err)
 	}
 	lease, ok := findWorktreeLeaseByTaskID(leasesSnapshot, task.ID)
 	if !ok {
-		t.Fatalf("lease for task %d not found in cleanup-eligible leases", task.ID)
+		t.Fatalf("lease for task %d not found", task.ID)
 	}
 	wantBranch := branches.Name(branches.NameParams{
 		ProjectKey: projectManifest.Key,
@@ -260,11 +262,14 @@ func TestCutoverPilotProjectsStayRunnableWithoutLegacyPrimary(t *testing.T) {
 	if lease.RepoRoot != project.GitRoot {
 		t.Fatalf("lease repo root = %q, want %q", lease.RepoRoot, project.GitRoot)
 	}
-	if lease.State != "released" {
-		t.Fatalf("lease state = %q, want released", lease.State)
+	if lease.State != "cleaned" {
+		t.Fatalf("lease state = %q, want cleaned", lease.State)
 	}
 	if lease.ReleasedAt == nil {
 		t.Fatal("lease ReleasedAt is nil, want released lease to be persisted")
+	}
+	if lease.CleanedUpAt == nil {
+		t.Fatal("lease CleanedUpAt is nil, want cleanup timestamp")
 	}
 }
 
@@ -303,6 +308,7 @@ func TestOperationalAutonomyStatusJsonWorksOnFreshRuntimeWithoutSeedingReadiness
 func TestOperationalAutonomyRequiresApprovalForHighRiskMutation(t *testing.T) {
 	ctx := context.Background()
 	repoRoot := projectRoot(t)
+	t.Setenv("ODIN_CODEX_DRIVER", filepath.Join(repoRoot, "scripts", "drivers", "codex-headless.sh"))
 	runtimeRoot := t.TempDir()
 
 	app, err := bootstrap.Load(ctx, repoRoot, runtimeRoot)

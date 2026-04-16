@@ -66,14 +66,24 @@ func TestInvokeAndCompactRespectBudgets(t *testing.T) {
 
 	broker := New(
 		testSnapshot(),
-		catalog.BuiltinDefinitions(),
+		catalog.BuiltinDefinitionsWithInvoker(&stubBrokerInvoker{
+			result: invocation.Result{
+				Source:  "script",
+				Summary: "Project alpha status from runtime.",
+				KeyFacts: map[string]string{
+					"project_key": "alpha",
+				},
+				RawRef:    "driver://project_status/alpha",
+				RawOutput: "project=alpha",
+			},
+		}),
 		budgets.Limits{
 			Tool:    budgets.Tool{MaxSelections: 10, MaxInvocations: 1, MaxCostUnits: 10},
 			Context: budgets.Context{MaxExpandedDefinitions: 10, MaxCompactedResults: 1, MaxCompactedBytes: 200},
 		},
 	)
 
-	result, err := broker.InvokeTool("task_list", map[string]string{"scope": "project"})
+	result, err := broker.InvokeTool("project_status", map[string]string{"project_key": "alpha"})
 	if err != nil {
 		t.Fatalf("InvokeTool() error = %v", err)
 	}
@@ -89,7 +99,7 @@ func TestInvokeAndCompactRespectBudgets(t *testing.T) {
 		t.Fatalf("compacted summary empty")
 	}
 
-	if _, err := broker.InvokeTool("task_list", map[string]string{"scope": "project"}); err == nil {
+	if _, err := broker.InvokeTool("project_status", map[string]string{"project_key": "alpha"}); err == nil {
 		t.Fatalf("second InvokeTool() error = nil, want budget denial")
 	}
 }

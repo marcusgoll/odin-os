@@ -18,18 +18,20 @@ import (
 	"odin-os/internal/store/sqlite"
 	"odin-os/internal/tools/budgets"
 	"odin-os/internal/vcs/leases"
+	worktreemgr "odin-os/internal/vcs/worktrees"
 )
 
 type Service struct {
-	Store          *sqlite.Store
-	Registry       projects.Registry
-	Executors      map[string]contract.Executor
-	ExecutorConfig executorrouter.Config
-	RuntimeRoot    string
-	Transitions    projects.Service
-	Runs           runsvc.Service
-	Leases         leases.Manager
-	Now            func() time.Time
+	Store                    *sqlite.Store
+	Registry                 projects.Registry
+	Executors                map[string]contract.Executor
+	ExecutorConfig           executorrouter.Config
+	RuntimeRoot              string
+	Transitions              projects.Service
+	Runs                     runsvc.Service
+	Leases                   leases.Manager
+	MutableHeartbeatInterval time.Duration
+	Now                      func() time.Time
 }
 
 type ExecutionOutcome struct {
@@ -184,9 +186,6 @@ func (service Service) runQueuedTask(ctx context.Context, task sqlite.Task) (Exe
 	}
 	actionKey := runtimeActionKey(task.ActionKey)
 
-	if err := service.ensureHarnessDriverConfigured(ctx, config, executors, spec); err != nil {
-		return service.failTaskWithoutRun(ctx, task.ID, err)
-	}
 	if strings.TrimSpace(service.RuntimeRoot) != "" {
 		spec.Metadata["runtime_root"] = service.RuntimeRoot
 	}
@@ -200,13 +199,20 @@ func (service Service) runQueuedTask(ctx context.Context, task sqlite.Task) (Exe
 
 	run, err := runsService.Start(ctx, task, decision.ExecutorKey)
 	if err != nil {
+		if errors.Is(err, sqlite.ErrTaskLaunchConflict) {
+			return ExecutionOutcome{}, nil
+		}
 		return ExecutionOutcome{}, err
 	}
 
+	teardownCtx := context.WithoutCancel(ctx)
+	terminalStatePersisted := false
+
 	finishFailure := func(cause error) (ExecutionOutcome, error) {
-		if err := runsService.Fail(ctx, run.ID, cause); err != nil {
+		if err := runsService.Fail(teardownCtx, run.ID, cause); err != nil {
 			return ExecutionOutcome{}, err
 		}
+		terminalStatePersisted = true
 		outcome, loadErr := service.executionOutcome(ctx, task.ID, run.ID)
 		if loadErr == nil {
 			if persistErr := service.recordExecutionMemory(ctx, project, outcome.Task, outcome.Run, task.Title); persistErr != nil {
@@ -256,6 +262,9 @@ func (service Service) runQueuedTask(ctx context.Context, task sqlite.Task) (Exe
 		}
 		return service.executionOutcome(ctx, task.ID, run.ID)
 	}
+	if err := service.ensureHarnessDriverConfigured(ctx, config, executors, spec); err != nil {
+		return finishFailure(err)
+	}
 
 	leaseManager := service.Leases
 	if leaseManager.Store == nil {
@@ -277,7 +286,37 @@ func (service Service) runQueuedTask(ctx context.Context, task sqlite.Task) (Exe
 	if err := validateAssignment(manifest, project, assignment); err != nil {
 		return finishFailure(err)
 	}
-	defer releaseAssignment(ctx, service.Store, assignment)
+	heartbeatStop := make(chan struct{})
+	heartbeatDone := make(chan struct{})
+	if assignment.LeaseID != nil {
+		interval := service.mutableHeartbeatInterval()
+		go func() {
+			defer close(heartbeatDone)
+
+			ticker := time.NewTicker(interval)
+			defer ticker.Stop()
+
+			for {
+				select {
+				case <-heartbeatStop:
+					return
+				case <-ticker.C:
+					_, _ = service.Store.HeartbeatWorktreeLease(teardownCtx, *assignment.LeaseID)
+				}
+			}
+		}()
+	}
+	defer func() {
+		if assignment.LeaseID != nil {
+			close(heartbeatStop)
+			<-heartbeatDone
+		}
+		if !terminalStatePersisted {
+			return
+		}
+		releaseAssignment(teardownCtx, service.Store, assignment)
+		cleanupAssignment(teardownCtx, service.Store, leaseManager.Git, assignment)
+	}()
 
 	spec.Metadata["branch_name"] = assignment.BranchName
 	spec.Metadata["repo_root"] = assignment.RepoRoot
@@ -290,9 +329,10 @@ func (service Service) runQueuedTask(ctx context.Context, task sqlite.Task) (Exe
 	if err != nil {
 		return finishFailure(err)
 	}
-	if err := runsService.Complete(ctx, run.ID, result); err != nil {
+	if err := runsService.Complete(teardownCtx, run.ID, result); err != nil {
 		return ExecutionOutcome{}, err
 	}
+	terminalStatePersisted = true
 
 	outcome, err := service.executionOutcome(ctx, task.ID, run.ID)
 	if err != nil {
@@ -583,6 +623,7 @@ func (service Service) nextQueuedTask(ctx context.Context) (sqlite.Task, error) 
 		SELECT id
 		FROM tasks
 		WHERE status = 'queued'
+		  AND current_run_id IS NULL
 		ORDER BY id ASC
 		LIMIT 1
 	`)
@@ -853,6 +894,17 @@ func releaseAssignment(ctx context.Context, store *sqlite.Store, assignment leas
 	})
 }
 
+func cleanupAssignment(ctx context.Context, store *sqlite.Store, git leases.Git, assignment leases.Assignment) {
+	if store == nil || git == nil || assignment.LeaseID == nil {
+		return
+	}
+
+	if err := git.RemoveWorktree(ctx, assignment.RepoRoot, assignment.WorktreePath); err != nil && !errors.Is(err, worktreemgr.ErrWorktreeAlreadyRemoved) {
+		return
+	}
+	_, _ = store.MarkWorktreeLeaseCleanedUp(ctx, *assignment.LeaseID)
+}
+
 func (service Service) requestApproval(ctx context.Context, task sqlite.Task, run sqlite.Run, reason string) error {
 	reason = strings.TrimSpace(reason)
 	if reason == "" {
@@ -896,4 +948,11 @@ func slugify(input string) string {
 		return "task"
 	}
 	return result
+}
+
+func (service Service) mutableHeartbeatInterval() time.Duration {
+	if service.MutableHeartbeatInterval > 0 {
+		return service.MutableHeartbeatInterval
+	}
+	return 15 * time.Second
 }

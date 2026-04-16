@@ -90,27 +90,13 @@ func (service Service) Start(ctx context.Context, task sqlite.Task, executorKey 
 		return sqlite.Run{}, err
 	}
 
-	run, err := service.Store.StartRun(ctx, sqlite.StartRunParams{
-		TaskID:   task.ID,
-		Executor: executorKey,
-		Attempt:  attempt,
-		Status:   "running",
+	return service.Store.StartRunAndUpdateTaskStatus(ctx, sqlite.StartRunAndUpdateTaskStatusParams{
+		TaskID:     task.ID,
+		Executor:   executorKey,
+		Attempt:    attempt,
+		RunStatus:  "running",
+		TaskStatus: "running",
 	})
-	if err != nil {
-		return sqlite.Run{}, err
-	}
-
-	if _, err := service.Store.UpdateTaskStatus(ctx, sqlite.UpdateTaskStatusParams{
-		TaskID:         task.ID,
-		Status:         "running",
-		Summary:        "",
-		TerminalReason: "",
-		ArtifactsJSON:  "[]",
-	}); err != nil {
-		return sqlite.Run{}, err
-	}
-
-	return run, nil
 }
 
 func (service Service) Complete(ctx context.Context, runID int64, result contract.ExecutionResult) error {
@@ -128,16 +114,6 @@ func (service Service) Complete(ctx context.Context, runID int64, result contrac
 	}
 	artifactsJSON := artifactsJSONFromMetadata(result.Metadata)
 
-	if _, err := service.Store.FinishRun(ctx, sqlite.FinishRunParams{
-		RunID:          runID,
-		Status:         runStatus,
-		Summary:        summary,
-		TerminalReason: runStatus,
-		ArtifactsJSON:  artifactsJSON,
-	}); err != nil {
-		return err
-	}
-
 	run, err := service.Store.GetRun(ctx, runID)
 	if err != nil {
 		return err
@@ -147,14 +123,15 @@ func (service Service) Complete(ctx context.Context, runID int64, result contrac
 	if runStatus != "completed" {
 		taskStatus = "failed"
 	}
-	_, err = service.Store.UpdateTaskStatus(ctx, sqlite.UpdateTaskStatusParams{
-		TaskID:         run.TaskID,
-		Status:         taskStatus,
+	return service.Store.FinishRunAndUpdateTaskStatus(ctx, sqlite.FinishRunAndUpdateTaskStatusParams{
+		RunID:          runID,
+		RunStatus:      runStatus,
 		Summary:        summary,
 		TerminalReason: runStatus,
 		ArtifactsJSON:  artifactsJSON,
+		TaskID:         run.TaskID,
+		TaskStatus:     taskStatus,
 	})
-	return err
 }
 
 func (service Service) Fail(ctx context.Context, runID int64, cause error) error {
@@ -167,29 +144,20 @@ func (service Service) Fail(ctx context.Context, runID int64, cause error) error
 		terminalReason = strings.TrimSpace(cause.Error())
 	}
 
-	if _, err := service.Store.FinishRun(ctx, sqlite.FinishRunParams{
-		RunID:          runID,
-		Status:         "failed",
-		Summary:        terminalReason,
-		TerminalReason: terminalReason,
-		ArtifactsJSON:  "[]",
-	}); err != nil {
-		return err
-	}
-
 	run, err := service.Store.GetRun(ctx, runID)
 	if err != nil {
 		return err
 	}
 
-	_, err = service.Store.UpdateTaskStatus(ctx, sqlite.UpdateTaskStatusParams{
-		TaskID:         run.TaskID,
-		Status:         "failed",
+	return service.Store.FinishRunAndUpdateTaskStatus(ctx, sqlite.FinishRunAndUpdateTaskStatusParams{
+		RunID:          runID,
+		RunStatus:      "failed",
 		Summary:        terminalReason,
 		TerminalReason: terminalReason,
 		ArtifactsJSON:  "[]",
+		TaskID:         run.TaskID,
+		TaskStatus:     "failed",
 	})
-	return err
 }
 
 func matchesRunScope(projectKey, taskScope string, resolved scope.Resolution) bool {

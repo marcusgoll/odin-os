@@ -271,8 +271,8 @@ func TestExecuteTaskFailsCleanlyWithoutHarnessDriver(t *testing.T) {
 	if err == nil {
 		t.Fatal("ExecuteTask() error = nil, want harness driver failure")
 	}
-	if !strings.Contains(err.Error(), "no harness driver configured") {
-		t.Fatalf("error = %v, want no harness driver configured", err)
+	if !strings.Contains(err.Error(), "no executor satisfied route requirements") {
+		t.Fatalf("error = %v, want route satisfaction failure", err)
 	}
 	if outcome.Run != nil {
 		t.Fatalf("Run = %+v, want nil because execution never started", outcome.Run)
@@ -674,7 +674,7 @@ func TestRunNextPersistsTerminalStateAcrossTaskAndRun(t *testing.T) {
 }
 
 func TestRunNextRequestsApprovalForSystemProjectMutation(t *testing.T) {
-	t.Parallel()
+	configureHarnessDriver(t)
 
 	ctx := context.Background()
 	store := openJobStore(t)
@@ -739,7 +739,7 @@ func TestRunNextRequestsApprovalForSystemProjectMutation(t *testing.T) {
 }
 
 func TestRunNextFailsStartedRunWhenApprovalTransactionFails(t *testing.T) {
-	t.Parallel()
+	configureHarnessDriver(t)
 
 	ctx := context.Background()
 	store := openJobStore(t)
@@ -973,8 +973,33 @@ func configureHarnessDriver(t *testing.T) {
 
 	path := filepath.Join(t.TempDir(), "codex-driver.sh")
 	if err := os.WriteFile(path, []byte(`#!/usr/bin/env bash
-cat >/dev/null
-printf '{"status":"completed","output":"driver test ok","external_id":"fixture-driver"}'
+payload="$(cat)"
+PAYLOAD="$payload" python3 - <<'PY'
+import json
+import os
+
+request = json.loads(os.environ["PAYLOAD"])
+action = request.get("action")
+
+if action == "health":
+    response = {
+        "status": "healthy",
+        "details": "job test driver healthy",
+    }
+else:
+    response = {
+        "status": "completed",
+        "output": "driver test ok",
+        "metadata": {
+            "driver": "job_test_harness",
+        },
+        "handle": {
+            "external_id": "fixture-driver",
+        },
+    }
+
+print(json.dumps(response))
+PY
 `), 0o755); err != nil {
 		t.Fatalf("WriteFile(driver) error = %v", err)
 	}

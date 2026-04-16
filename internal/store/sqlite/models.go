@@ -80,6 +80,14 @@ type StartRunParams struct {
 	Status   string
 }
 
+type StartRunAndUpdateTaskStatusParams struct {
+	TaskID     int64
+	Executor   string
+	Attempt    int
+	RunStatus  string
+	TaskStatus string
+}
+
 type FinishRunParams struct {
 	RunID          int64
 	Status         string
@@ -104,6 +112,16 @@ type AwaitApprovalParams struct {
 	Summary        string
 	TerminalReason string
 	ArtifactsJSON  string
+}
+
+type FinishRunAndUpdateTaskStatusParams struct {
+	RunID          int64
+	RunStatus      string
+	Summary        string
+	TerminalReason string
+	ArtifactsJSON  string
+	TaskID         int64
+	TaskStatus     string
 }
 
 type Approval struct {

@@ -1,18 +1,52 @@
 package codex
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"odin-os/internal/executors/contract"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
+	"syscall"
 	"time"
+
+	"odin-os/internal/executors/contract"
 )
+
+const executorKey = "codex_headless"
+
+var (
+	healthDriverTimeout = 5 * time.Second
+	runDriverTimeout    = 30 * time.Second
+)
+
+type driverRequest struct {
+	Action string            `json:"action"`
+	Task   *driverTask       `json:"task,omitempty"`
+	Meta   map[string]string `json:"meta,omitempty"`
+	Mode   string            `json:"mode,omitempty"`
+}
+
+type driverTask struct {
+	ID           string                `json:"id"`
+	Kind         contract.TaskKind     `json:"kind"`
+	Scope        string                `json:"scope"`
+	Prompt       string                `json:"prompt"`
+	Budget       contract.BudgetHints  `json:"budget,omitempty"`
+	Tools        contract.ToolPolicy   `json:"tools,omitempty"`
+	Metadata     map[string]string     `json:"metadata,omitempty"`
+	Requirements contract.Requirements `json:"requirements"`
+}
+
+type driverResponse struct {
+	Status   string               `json:"status"`
+	Details  string               `json:"details,omitempty"`
+	Output   string               `json:"output"`
+	Metadata map[string]string    `json:"metadata,omitempty"`
+	Handle   *contract.TaskHandle `json:"handle,omitempty"`
+}
 
 type headlessExecutor struct{}
 
@@ -21,25 +55,45 @@ func NewHeadless() contract.Executor {
 }
 
 func (headlessExecutor) Key() string {
-	return "codex_headless"
+	return executorKey
 }
 
 func (headlessExecutor) Class() contract.ExecutorClass {
 	return contract.ExecutorClassPlanBackedCLI
 }
 
-func (headlessExecutor) Health(context.Context) (contract.HealthReport, error) {
-	driverPath := codexDriverPath()
-	if err := validateDriverPath(driverPath); err != nil {
+func (headlessExecutor) Health(ctx context.Context) (contract.HealthReport, error) {
+	if _, ok := driverPath(); !ok {
 		return contract.HealthReport{
 			Status:    contract.HealthStatusUnavailable,
-			Details:   fmt.Sprintf("codex driver script unavailable: %v", err),
+			Details:   "ODIN_CODEX_DRIVER is unset",
+			CheckedAt: time.Now().UTC(),
+		}, nil
+	}
+
+	response, _, err := invokeDriver(ctx, driverRequest{
+		Action: "health",
+		Mode:   "headless",
+	})
+	if err != nil {
+		return contract.HealthReport{
+			Status:    contract.HealthStatusUnavailable,
+			Details:   err.Error(),
+			CheckedAt: time.Now().UTC(),
+		}, nil
+	}
+
+	status, ok := validateHealthStatus(response.Status)
+	if !ok {
+		return contract.HealthReport{
+			Status:    contract.HealthStatusUnavailable,
+			Details:   fmt.Sprintf("invalid health status %q", response.Status),
 			CheckedAt: time.Now().UTC(),
 		}, nil
 	}
 	return contract.HealthReport{
-		Status:    contract.HealthStatusHealthy,
-		Details:   fmt.Sprintf("codex driver script ready at %s", driverPath),
+		Status:    status,
+		Details:   response.Details,
 		CheckedAt: time.Now().UTC(),
 	}, nil
 }
@@ -47,10 +101,6 @@ func (headlessExecutor) Health(context.Context) (contract.HealthReport, error) {
 func (headlessExecutor) Capabilities(context.Context) (contract.Capabilities, error) {
 	return contract.Capabilities{
 		ExecutorClass:        contract.ExecutorClassPlanBackedCLI,
-		SupportsResume:       true,
-		SupportsCancel:       true,
-		SupportsTools:        true,
-		SupportsCostEstimate: true,
 		SupportsHeadlessPlan: true,
 		TaskKinds: []contract.TaskKind{
 			contract.TaskKindGeneral,
@@ -65,115 +115,178 @@ func (headlessExecutor) Capabilities(context.Context) (contract.Capabilities, er
 }
 
 func (headlessExecutor) RunTask(ctx context.Context, spec contract.TaskSpec) (contract.ExecutionResult, error) {
-	return runWithDriver(ctx, spec)
-}
+	request := driverRequest{
+		Action: "run",
+		Task: &driverTask{
+			ID:           spec.ID,
+			Kind:         spec.Kind,
+			Scope:        spec.Scope,
+			Prompt:       spec.Prompt,
+			Budget:       spec.Budget,
+			Tools:        spec.Tools,
+			Metadata:     spec.Metadata,
+			Requirements: spec.Requirements,
+		},
+		Meta: map[string]string{},
+		Mode: "headless",
+	}
+	for key, value := range spec.Metadata {
+		request.Meta[key] = value
+	}
 
-func runWithDriver(ctx context.Context, spec contract.TaskSpec) (contract.ExecutionResult, error) {
-	payload, err := json.Marshal(spec)
+	response, payload, err := invokeDriver(ctx, request)
+	if err != nil {
+		return contract.ExecutionResult{}, err
+	}
+	runStatus, err := validateRunStatus(response.Status)
 	if err != nil {
 		return contract.ExecutionResult{}, err
 	}
 
-	driverPath := codexDriverPath()
-	if err := validateDriverPath(driverPath); err != nil {
-		return contract.ExecutionResult{}, fmt.Errorf("codex driver unavailable: %w", err)
+	metadata := response.Metadata
+	if metadata == nil {
+		metadata = map[string]string{}
+	}
+	if err := ensureArtifactMetadata(spec, payload, metadata); err != nil {
+		return contract.ExecutionResult{}, err
 	}
 
-	cmd := exec.CommandContext(ctx, driverPath)
-	cmd.Env = append(os.Environ(), "ODIN_CODEX_DRIVER_ACTION=run")
-	cmd.Stdin = bytes.NewReader(payload)
+	handle := contract.TaskHandle{
+		ExecutorKey: executorKey,
+		ExternalID:  spec.ID,
+		Status:      runStatus,
+	}
+	if response.Handle != nil {
+		if response.Handle.ExecutorKey != "" {
+			handle.ExecutorKey = response.Handle.ExecutorKey
+		}
+		if response.Handle.ExternalID != "" {
+			handle.ExternalID = response.Handle.ExternalID
+		}
+	}
 
+	return contract.ExecutionResult{
+		Handle:   handle,
+		Status:   runStatus,
+		Output:   response.Output,
+		Metadata: metadata,
+	}, nil
+}
+
+func validateHealthStatus(status string) (contract.HealthStatus, bool) {
+	switch contract.HealthStatus(status) {
+	case contract.HealthStatusHealthy, contract.HealthStatusDegraded, contract.HealthStatusUnavailable, contract.HealthStatusUnknown:
+		return contract.HealthStatus(status), true
+	default:
+		return contract.HealthStatusUnavailable, false
+	}
+}
+
+func validateRunStatus(status string) (string, error) {
+	normalized := strings.TrimSpace(status)
+	switch normalized {
+	case "completed", "failed", "interrupted":
+		return normalized, nil
+	default:
+		return "", fmt.Errorf("invalid run status %q", status)
+	}
+}
+
+func invokeDriver(ctx context.Context, request driverRequest) (driverResponse, []byte, error) {
+	driver, ok := driverPath()
+	if !ok {
+		return driverResponse{}, nil, fmt.Errorf("codex driver unavailable: ODIN_CODEX_DRIVER is unset")
+	}
+	if err := validateDriverPath(driver); err != nil {
+		return driverResponse{}, nil, fmt.Errorf("codex driver unavailable: %w", err)
+	}
+
+	payload, err := json.Marshal(request)
+	if err != nil {
+		return driverResponse{}, nil, err
+	}
+
+	driverCtx, cancel, timeoutLabel := boundedDriverContext(ctx, request.Action)
+	defer cancel()
+
+	cmd := exec.CommandContext(driverCtx, driver)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		if cmd.Process == nil {
+			return nil
+		}
+		if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+			return err
+		}
+		return nil
+	}
+	cmd.Stdin = strings.NewReader(string(payload))
 	output, err := cmd.Output()
 	if err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			stderr := strings.TrimSpace(string(exitErr.Stderr))
-			if stderr == "" {
-				stderr = strings.TrimSpace(string(output))
+		if errors.Is(driverCtx.Err(), context.DeadlineExceeded) {
+			if timeoutLabel != "" {
+				return driverResponse{}, nil, fmt.Errorf("codex driver timed out after %s: %w", timeoutLabel, driverCtx.Err())
 			}
-			return contract.ExecutionResult{}, fmt.Errorf("codex driver failed: %s", stderr)
+			return driverResponse{}, nil, fmt.Errorf("codex driver timed out: %w", driverCtx.Err())
 		}
-		return contract.ExecutionResult{}, err
+		if exitErr, ok := err.(*exec.ExitError); ok && len(exitErr.Stderr) > 0 {
+			return driverResponse{}, nil, fmt.Errorf("codex driver failed: %w: %s", err, strings.TrimSpace(string(exitErr.Stderr)))
+		}
+		return driverResponse{}, nil, fmt.Errorf("codex driver failed: %w", err)
 	}
 
-	var result struct {
-		Status   string            `json:"status"`
-		Output   string            `json:"output"`
-		Metadata map[string]string `json:"metadata"`
+	var response driverResponse
+	if err := json.Unmarshal(output, &response); err != nil {
+		return driverResponse{}, nil, fmt.Errorf("codex driver returned invalid JSON: %w", err)
 	}
-	if err := json.Unmarshal(output, &result); err != nil {
-		return contract.ExecutionResult{}, fmt.Errorf("decode codex driver output: %w", err)
-	}
-	if result.Status == "" {
-		result.Status = "completed"
-	}
-	if result.Metadata == nil {
-		result.Metadata = map[string]string{}
-	}
-	if err := ensureArtifactMetadata(spec, output, result.Metadata); err != nil {
-		return contract.ExecutionResult{}, err
-	}
-	return contract.ExecutionResult{
-		Handle: contract.TaskHandle{
-			ExecutorKey: "codex_headless",
-			ExternalID:  spec.ID,
-			Status:      result.Status,
-		},
-		Status:   result.Status,
-		Output:   result.Output,
-		Metadata: result.Metadata,
-	}, nil
+	return response, payload, nil
 }
 
-func (headlessExecutor) ResumeTask(ctx context.Context, handle contract.TaskHandle, packet contract.ResumePacket) (contract.ExecutionResult, error) {
-	return contract.ExecutionResult{
-		Handle: contract.TaskHandle{
-			ExecutorKey: "codex_headless",
-			ExternalID:  handle.ExternalID,
-			Status:      "completed",
-		},
-		Status: "completed",
-		Output: fmt.Sprintf("codex_headless resumed %s with %s", handle.ExternalID, packet.Summary),
-		Metadata: map[string]string{
-			"resume_kind": packet.Kind,
-		},
-	}, nil
+func boundedDriverContext(ctx context.Context, action string) (context.Context, context.CancelFunc, string) {
+	if _, ok := ctx.Deadline(); ok {
+		return ctx, func() {}, ""
+	}
+
+	timeout := runDriverTimeout
+	if action == "health" {
+		timeout = healthDriverTimeout
+	}
+	boundedCtx, cancel := context.WithTimeout(ctx, timeout)
+	return boundedCtx, cancel, timeout.String()
+}
+
+func (headlessExecutor) ResumeTask(context.Context, contract.TaskHandle, contract.ResumePacket) (contract.ExecutionResult, error) {
+	return contract.ExecutionResult{}, contract.ErrNotImplemented
 }
 
 func (headlessExecutor) CancelTask(context.Context, contract.TaskHandle) error {
-	return nil
+	return contract.ErrNotImplemented
 }
 
 func (headlessExecutor) EstimateCost(context.Context, contract.TaskSpec) (contract.CostEstimate, error) {
-	return contract.CostEstimate{
-		InputTokens:  0,
-		OutputTokens: 0,
-		EstimatedUSD: 0,
-		Currency:     "USD",
-	}, nil
+	return contract.CostEstimate{}, contract.ErrNotImplemented
 }
 
-func codexDriverPath() string {
-	if driverPath := strings.TrimSpace(os.Getenv("ODIN_CODEX_DRIVER")); driverPath != "" {
-		return filepath.Clean(driverPath)
+func driverPath() (string, bool) {
+	driver := strings.TrimSpace(os.Getenv("ODIN_CODEX_DRIVER"))
+	if driver == "" {
+		return "", false
 	}
-	if cwd, err := os.Getwd(); err == nil {
-		if driverPath, ok := findDriverUpward(cwd); ok {
-			return driverPath
-		}
+	return filepath.Clean(driver), true
+}
+
+func validateDriverPath(driverPath string) error {
+	info, err := os.Stat(driverPath)
+	if err != nil {
+		return err
 	}
-	if executable, err := os.Executable(); err == nil {
-		if resolved, err := filepath.EvalSymlinks(executable); err == nil {
-			executable = resolved
-		}
-		if driverPath, ok := findDriverUpward(filepath.Dir(executable)); ok {
-			return driverPath
-		}
+	if info.IsDir() {
+		return fmt.Errorf("%s is a directory", driverPath)
 	}
-	_, file, _, ok := runtime.Caller(0)
-	if !ok {
-		return filepath.Join("scripts", "drivers", "codex-headless.sh")
+	if info.Mode()&0o111 == 0 {
+		return fmt.Errorf("%s is not executable", driverPath)
 	}
-	return filepath.Clean(filepath.Join(filepath.Dir(file), "..", "..", "..", "scripts", "drivers", "codex-headless.sh"))
+	return nil
 }
 
 func ensureArtifactMetadata(spec contract.TaskSpec, payload []byte, metadata map[string]string) error {
@@ -206,40 +319,6 @@ func ensureArtifactMetadata(spec contract.TaskSpec, payload []byte, metadata map
 	return nil
 }
 
-func findDriverUpward(start string) (string, bool) {
-	if start == "" {
-		return "", false
-	}
-
-	dir := filepath.Clean(start)
-	for {
-		driverPath := filepath.Join(dir, "scripts", "drivers", "codex-headless.sh")
-		if info, err := os.Stat(driverPath); err == nil && !info.IsDir() {
-			return driverPath, true
-		}
-
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			return "", false
-		}
-		dir = parent
-	}
-}
-
-func validateDriverPath(driverPath string) error {
-	info, err := os.Stat(driverPath)
-	if err != nil {
-		return err
-	}
-	if info.IsDir() {
-		return fmt.Errorf("%s is a directory", driverPath)
-	}
-	if info.Mode()&0o111 == 0 {
-		return fmt.Errorf("%s is not executable", driverPath)
-	}
-	return nil
-}
-
 func writeDriverArtifact(baseDir, artifactKey string, payload []byte) (string, error) {
 	artifactDir := filepath.Join(baseDir, "runs", "artifacts")
 	if err := os.MkdirAll(artifactDir, 0o755); err != nil {
@@ -258,19 +337,7 @@ func artifactFileKey(spec contract.TaskSpec) string {
 	if taskID == "" {
 		taskID = "codex-headless-run"
 	}
-
-	runID := strings.TrimSpace(spec.Metadata["run_id"])
-	runAttempt := strings.TrimSpace(spec.Metadata["run_attempt"])
-	switch {
-	case runID != "" && runAttempt != "":
-		return fmt.Sprintf("%s-run-%s-try-%s", taskID, runID, runAttempt)
-	case runID != "":
-		return fmt.Sprintf("%s-run-%s", taskID, runID)
-	case runAttempt != "":
-		return fmt.Sprintf("%s-try-%s", taskID, runAttempt)
-	default:
-		return taskID
-	}
+	return taskID
 }
 
 func sanitizeArtifactName(value string) string {
@@ -280,22 +347,24 @@ func sanitizeArtifactName(value string) string {
 	}
 
 	var builder strings.Builder
-	lastDash := false
-	for _, r := range value {
-		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
-			builder.WriteRune(r)
-			lastDash = false
-			continue
-		}
-		if !lastDash {
+	for _, char := range value {
+		switch {
+		case char >= 'a' && char <= 'z':
+			builder.WriteRune(char)
+		case char >= 'A' && char <= 'Z':
+			builder.WriteRune(char + ('a' - 'A'))
+		case char >= '0' && char <= '9':
+			builder.WriteRune(char)
+		case char == '-' || char == '_':
+			builder.WriteRune(char)
+		default:
 			builder.WriteByte('-')
-			lastDash = true
 		}
 	}
 
-	sanitized := strings.Trim(builder.String(), "-")
-	if sanitized == "" {
+	result := strings.Trim(builder.String(), "-_")
+	if result == "" {
 		return "codex-headless-run"
 	}
-	return sanitized
+	return result
 }

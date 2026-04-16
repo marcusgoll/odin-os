@@ -70,8 +70,33 @@ func acceptanceHarnessDriverEnv(t *testing.T) map[string]string {
 
 	path := filepath.Join(t.TempDir(), "harness-driver.sh")
 	if err := os.WriteFile(path, []byte(`#!/usr/bin/env bash
-cat >/dev/null
-printf '{"status":"completed","output":"driver test ok","external_id":"fixture-driver"}'
+payload="$(cat)"
+PAYLOAD="$payload" python3 - <<'PY'
+import json
+import os
+
+request = json.loads(os.environ["PAYLOAD"])
+action = request.get("action")
+
+if action == "health":
+    response = {
+        "status": "healthy",
+        "details": "acceptance harness driver healthy",
+    }
+else:
+    response = {
+        "status": "completed",
+        "output": "driver test ok",
+        "metadata": {
+            "driver": "acceptance_harness",
+        },
+        "handle": {
+            "external_id": "fixture-driver",
+        },
+    }
+
+print(json.dumps(response))
+PY
 `), 0o755); err != nil {
 		t.Fatalf("WriteFile(driver) error = %v", err)
 	}
