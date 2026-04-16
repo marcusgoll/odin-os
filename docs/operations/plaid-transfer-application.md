@@ -45,5 +45,5 @@ The same fields are also mirrored under `artifacts` for the browser driver harne
 ## Operational Notes
 
 - The driver fails closed on non-Plaid URLs.
-- Screenshot capture is best-effort; if the browser lane cannot provide a screenshot path, the driver still reports the detected state and evidence.
+- Screenshot capture is best-effort; if the browser lane cannot provide a screenshot path or capture fails, the driver still reports the detected state and evidence and leaves `screenshot_path` empty.
 - `current_url` should remain on the Plaid dashboard transfer application page during a healthy inspect run.

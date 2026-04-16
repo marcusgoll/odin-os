@@ -171,6 +171,7 @@ func TestPlaidTransferApplicationArtifacts(t *testing.T) {
 		{name: "mfa", snapshot: "Enter the verification code from your authenticator app", wantState: "blocked_on_mfa", wantSummary: "Plaid transfer workflow is blocked on MFA", wantNextAction: "complete MFA challenge"},
 		{name: "review", snapshot: "Your Transfer application has been submitted for review", wantState: "submitted_for_review", wantSummary: "Plaid transfer application is under review", wantNextAction: "wait for review"},
 		{name: "enabled", snapshot: "Transfer is already enabled for this account", wantState: "already_enabled", wantSummary: "Plaid transfer application is already enabled", wantNextAction: "no action needed"},
+		{name: "unclassified", snapshot: "Plaid dashboard\nApplication state unavailable", wantState: "unclassified", wantSummary: "Plaid transfer workflow is unclassified", wantNextAction: "inspect dashboard"},
 	}
 
 	for _, tc := range cases {
@@ -221,7 +222,40 @@ func TestPlaidTransferApplicationArtifacts(t *testing.T) {
 			assertFileContains(t, callsLog, "screenshot:")
 		})
 	}
+
+	t.Run("screenshot failure is best-effort", func(t *testing.T) {
+		screenshotPath := filepath.Join(t.TempDir(), "plaid.png")
+
+		stdout, callsLog, markerPath, err := runBrowserDriverScriptRaw(t, repoRoot, scriptPath, "plaid-transfer-application.sh", `{"tool_key":"plaid_transfer_application","input":{"action":"inspect","application_url":"https://dashboard.plaid.com/transfer/application"}}`, map[string]string{
+			"ODIN_BROWSER_STUB_SNAPSHOT":             "Plaid dashboard\nApplication state unavailable",
+			"ODIN_BROWSER_STUB_SCREENSHOT_PATH":      screenshotPath,
+			"ODIN_BROWSER_STUB_SCREENSHOT_EXIT_CODE": "1",
+		}, browserAccessStubContent())
+		if err != nil {
+			t.Fatalf("expected handled screenshot failure to exit 0, got err=%v\n%s", err, stdout)
+		}
+		assertStructuredDriverOutput(t, stdout, "plaid_transfer_application", "completed")
+		assertJSONArtifactString(t, stdout, "session_state", "unclassified")
+		assertJSONArtifactString(t, stdout, "current_url", "https://dashboard.plaid.com/transfer/application")
+		assertJSONArtifactString(t, stdout, "screenshot_path", "")
+		assertJSONArtifactString(t, stdout, "evidence", "Plaid dashboard\nApplication state unavailable")
+		assertJSONArtifactString(t, stdout, "next_action", "inspect dashboard")
+
+		var payload map[string]any
+		if err := json.Unmarshal([]byte(stdout), &payload); err != nil {
+			t.Fatalf("driver output is not valid json: %v\nstdout=%s", err, stdout)
+		}
+		if got := stringValue(payload["summary"]); got != "Plaid transfer workflow is unclassified" {
+			t.Fatalf("summary = %q, want %q", got, "Plaid transfer workflow is unclassified")
+		}
+		assertFileContains(t, markerPath, "sourced repo-local browser-access.sh")
+		assertFileContains(t, callsLog, "request:https://dashboard.plaid.com/transfer/application")
+		assertFileContains(t, callsLog, "start:")
+		assertFileContains(t, callsLog, "snapshot:")
+		assertFileContains(t, callsLog, "screenshot:")
+	})
 }
+
 func assertDriverScriptShape(t *testing.T, scriptPath string) {
 	t.Helper()
 

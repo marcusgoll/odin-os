@@ -93,9 +93,7 @@ if [[ -z "${screenshot_path}" ]]; then
     screenshot_path="${ODIN_DIR:-${SCRIPT_DIR}/../../.odin-browser}/browser-state/plaid-transfer.png"
 fi
 if ! screenshot_path="$(browser_bc_screenshot --output "${screenshot_path}")"; then
-    browser_server_stop >/dev/null 2>&1 || true
-    json_result "failed" "Plaid transfer screenshot failed" "${session_state}" "${application_url}" "${evidence}" "" "screenshot_failed"
-    exit 0
+    screenshot_path=""
 fi
 
 case "${session_state}" in
