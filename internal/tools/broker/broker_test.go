@@ -64,14 +64,14 @@ func TestInvokeAndCompactRespectBudgets(t *testing.T) {
 
 	broker := New(
 		testSnapshot(),
-		catalog.BuiltinDefinitions(),
+		testBuiltins(),
 		budgets.Limits{
 			Tool:    budgets.Tool{MaxSelections: 10, MaxInvocations: 1, MaxCostUnits: 10},
 			Context: budgets.Context{MaxExpandedDefinitions: 10, MaxCompactedResults: 1, MaxCompactedBytes: 200},
 		},
 	)
 
-	result, err := broker.InvokeTool("task_list", map[string]string{"scope": "project"})
+	result, err := broker.InvokeTool("runtime_probe", map[string]string{"scope": "project"})
 	if err != nil {
 		t.Fatalf("InvokeTool() error = %v", err)
 	}
@@ -87,8 +87,43 @@ func TestInvokeAndCompactRespectBudgets(t *testing.T) {
 		t.Fatalf("compacted summary empty")
 	}
 
-	if _, err := broker.InvokeTool("task_list", map[string]string{"scope": "project"}); err == nil {
+	if _, err := broker.InvokeTool("runtime_probe", map[string]string{"scope": "project"}); err == nil {
 		t.Fatalf("second InvokeTool() error = nil, want budget denial")
+	}
+}
+
+func testBuiltins() map[string]catalog.ToolDefinition {
+	return map[string]catalog.ToolDefinition{
+		"runtime_probe": {
+			Key:        "runtime_probe",
+			Title:      "Runtime Probe",
+			Summary:    "Returns a deterministic runtime probe result for broker tests.",
+			Scopes:     []string{"project"},
+			Tags:       []string{"test"},
+			CostHint:   catalog.CostHintLow,
+			BudgetCost: 1,
+			SourceRef:  "builtin://runtime_probe",
+			Schema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"scope": map[string]any{"type": "string"},
+				},
+			},
+			Invoke: func(input map[string]string) (catalog.StructuredResult, error) {
+				scope := input["scope"]
+				if scope == "" {
+					scope = "project"
+				}
+				return catalog.StructuredResult{
+					CapabilityKey:   "runtime_probe",
+					Summary:         "Runtime probe completed.",
+					KeyFacts:        map[string]string{"scope": scope},
+					FollowOnOptions: []string{"inspect context"},
+					RawRef:          "builtin://runtime_probe/result",
+					RawOutput:       "probe=ok",
+				}, nil
+			},
+		},
 	}
 }
 

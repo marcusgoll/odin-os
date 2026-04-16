@@ -306,20 +306,15 @@ func TestAlphaAcceptance(t *testing.T) {
 		})
 
 		odinCoreCards := suiteBroker.Catalog("odin-core")
-		if !hasCapability(odinCoreCards, "project_status") || !hasCapability(odinCoreCards, "triage-skill") {
-			t.Fatalf("odin-core catalog missing expected capabilities: %+v", odinCoreCards)
+		if hasCapability(odinCoreCards, "project_status") || hasCapability(odinCoreCards, "task_list") || hasCapability(odinCoreCards, "event_log") {
+			t.Fatalf("odin-core catalog exposes placeholder operational tools: %+v", odinCoreCards)
+		}
+		if !hasCapability(odinCoreCards, "triage-skill") {
+			t.Fatalf("odin-core catalog missing expected skill capability: %+v", odinCoreCards)
 		}
 		projectCards := suiteBroker.Catalog("project")
 		if !hasCapability(projectCards, "triage-agent") {
 			t.Fatalf("project catalog missing triage-agent: %+v", projectCards)
-		}
-
-		toolExpansion, err := suiteBroker.Expand("project_status")
-		if err != nil {
-			t.Fatalf("Expand(project_status) error = %v", err)
-		}
-		if toolExpansion.Tool == nil || len(toolExpansion.Tool.Schema) == 0 {
-			t.Fatalf("tool expansion = %+v, want tool schema", toolExpansion)
 		}
 
 		skillExpansion, err := suiteBroker.Expand("triage-skill")
@@ -328,18 +323,6 @@ func TestAlphaAcceptance(t *testing.T) {
 		}
 		if skillExpansion.Skill == nil || skillExpansion.Skill.Sections[registry.SectionProcedure] == "" {
 			t.Fatalf("skill expansion = %+v, want procedure section", skillExpansion)
-		}
-
-		result, err := suiteBroker.InvokeTool("project_status", map[string]string{"project_key": "odin-core"})
-		if err != nil {
-			t.Fatalf("InvokeTool(project_status) error = %v", err)
-		}
-		compacted, err := suiteBroker.Compact(result)
-		if err != nil {
-			t.Fatalf("Compact() error = %v", err)
-		}
-		if compacted.Bytes <= 0 {
-			t.Fatalf("CompactedResult.Bytes = %d, want > 0", compacted.Bytes)
 		}
 	})
 
@@ -475,7 +458,8 @@ func TestAlphaAcceptance(t *testing.T) {
 		runtimeRoot := t.TempDir()
 		store := openRuntimeStore(t, runtimeRoot)
 		defer store.Close()
-		seedHealthyObservability(t, ctx, store, now)
+		observedNow := time.Now().UTC()
+		seedHealthyObservability(t, ctx, store, observedNow)
 
 		report, err := healthsvc.Service{DB: store.DB()}.Doctor(ctx, true)
 		if err != nil {
