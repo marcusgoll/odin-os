@@ -45,6 +45,6 @@ Do not set the `ldd` override during normal operator runs.
 
 ## Operational Notes
 
-- The host currently uses `/usr/bin/google-chrome`, which resolves to the real runtime at `/opt/google/chrome/chrome`
+- The host currently uses `/usr/bin/google-chrome`, which resolves through `/etc/alternatives/google-chrome` to `/opt/google/chrome/google-chrome`, and that launcher starts `/opt/google/chrome/chrome`
 - If the preflight passes but a browser tool still fails, check the browser runtime logs under the repo-local Odin browser state directory before assuming the host is broken
 - Keep this lane Chromium-only until the phase explicitly expands engine support
