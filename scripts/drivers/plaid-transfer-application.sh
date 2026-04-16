@@ -66,7 +66,7 @@ json_result() {
         '{status: $status, tool_key: $tool_key, summary: $summary, artifacts: {session_state: $session_state, current_url: $current_url, snapshot: $snapshot, screenshot_path: $screenshot_path, next_action: $next_action}}'
 }
 
-browser_request_domain_access "$(host_from_url "${application_url}")"
+browser_request_domain_access "${application_url}"
 browser_server_start --url "${application_url}" --headless
 snapshot="$(browser_snapshot 2>/dev/null || true)"
 session_state="$(detect_state "${snapshot}")"
