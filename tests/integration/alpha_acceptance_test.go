@@ -144,15 +144,15 @@ func TestAlphaAcceptance(t *testing.T) {
 		}
 	})
 
-	t.Run("fresh runtime becomes ready without manual seeding", func(t *testing.T) {
+	t.Run("fresh runtime does not claim ready without a real driver", func(t *testing.T) {
 		runtimeRoot := t.TempDir()
 
 		output, err := runOdinCommand(t, repoRoot, odinBinary, runtimeRoot, nil, "", "healthcheck")
-		if err != nil {
-			t.Fatalf("runOdinCommand(healthcheck fresh runtime) error = %v\n%s", err, output)
+		if err == nil {
+			t.Fatalf("runOdinCommand(healthcheck fresh runtime) exit = 0, want non-zero without real driver\n%s", output)
 		}
-		if !strings.Contains(output, "ready") {
-			t.Fatalf("fresh runtime healthcheck output = %q, want ready", output)
+		if strings.Contains(output, "ready") {
+			t.Fatalf("fresh runtime healthcheck output = %q, want not ready without real driver", output)
 		}
 	})
 
@@ -728,11 +728,11 @@ func TestAlphaAcceptance(t *testing.T) {
 		}
 
 		healthcheckOutput, err := runOdinCommand(t, repoRoot, odinBinary, runtimeRoot, nil, "", "healthcheck")
-		if err != nil {
-			t.Fatalf("runOdinCommand(healthcheck) error = %v\n%s", err, healthcheckOutput)
+		if err == nil {
+			t.Fatalf("runOdinCommand(healthcheck) exit = 0, want non-zero without real driver\n%s", healthcheckOutput)
 		}
-		if !strings.Contains(healthcheckOutput, "ready") {
-			t.Fatalf("healthcheck output = %q, want ready", healthcheckOutput)
+		if strings.Contains(healthcheckOutput, "ready") {
+			t.Fatalf("healthcheck output = %q, want not ready without real driver", healthcheckOutput)
 		}
 
 		archivePath := filepath.Join(t.TempDir(), "odin-alpha-backup.tar.gz")
