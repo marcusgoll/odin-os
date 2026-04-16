@@ -18,7 +18,7 @@ This repository is the runtime root. `odin-orchestrator` is a migration source o
 - Authored assets live in-repo as Markdown with frontmatter under `registry/`, `prompts/`, and `memory/`.
 - CLI and API surfaces consume the same control-plane services; workers run in the execution plane through shared orchestration, policy, runtime, and executor contracts.
 - Executors are model-agnostic execution lanes and route through one common contract, including plan-backed headless runners where they fit that contract.
-- Tool, skill, and worker loading is dynamic and bounded by the resolved control context; Odin must not preload the full catalog into every run.
+- Tool, skill, and worker loading is dynamic and bounded by the resolved control context; Odin must not preload the full catalog into every run attempt.
 - Mutating work is isolated through leased worktrees and branches.
 - Self-heal is deterministic, bounded, and auditable; self-improvement is proposal-driven, replay-tested, promotion-gated, and reversible.
 

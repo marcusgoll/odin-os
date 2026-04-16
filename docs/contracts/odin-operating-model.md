@@ -29,11 +29,13 @@ Odin owns the persistent workspace and its durable decisions:
 - schedules and follow-ups
 - approvals
 - queues
-- checkpoints and projections
+- the durable state surfaced through projections and protected through checkpoints
 - audit history
 - dispatch decisions
 
 If a worker crashes or a provider changes, Odin still knows what the work was, what happened, and what must happen next.
+
+Runtime packages may implement projections, checkpoints, and other supporting services beneath that authority, but they do not become a second source of truth.
 
 ### Execution plane
 
@@ -63,7 +65,7 @@ The explicit rule layer that governs what Odin and its workers may do. Policy co
 
 ### Memory
 
-Durable, typed records with provenance. Memory is not an unbounded transcript dump. Odin should keep memory across workspace, initiative, companion, run, and user-preference contexts with source, owner context, and validation or confidence metadata.
+Durable, typed records with provenance. Memory is not an unbounded transcript dump. Odin should keep memory across workspace, initiative, companion, run attempt, and user-preference contexts with source, owner context, and validation or confidence metadata.
 
 ### Work Item
 

@@ -18,7 +18,7 @@ Use these terms in new product-facing docs, contracts, schemas, and APIs unless 
 | `initiative` | A durable unit of responsibility | referring to meaningful work that may include a managed project |
 | `companion` | A durable role contract | referring to user-facing operating roles |
 | `work item` | The durable object that turns intent into execution | referring to bounded work owned by the control plane |
-| `run attempt` | One disposable execution attempt for a work item | referring to execution-plane records |
+| `run attempt` | One disposable execution attempt for a work item | referring to execution-plane records and related per-attempt artifacts |
 | `control plane` | Odin's persistent state, policy, and dispatch layer | referring to what Odin owns durably |
 | `execution plane` | Short-lived worker and executor activity | referring to bounded execution only |
 

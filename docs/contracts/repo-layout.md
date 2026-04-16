@@ -7,7 +7,7 @@ phase: "00"
 
 # Repository Layout Contract
 
-This document defines the target package and folder boundaries for the new Odin OS repository. The purpose is to keep responsibilities non-overlapping and to prevent future phases from smearing authored assets, runtime state, adapters, and projections together.
+This document defines the target package and folder boundaries for the new Odin OS repository. The purpose is to keep responsibilities non-overlapping and to prevent future phases from smearing authored assets, runtime state, adapters, and supporting read models together.
 
 The semantic center of the repo is Odin's control plane for one primary workspace. Durable product objects are `workspace`, `initiative`, `companion`, `policy`, `memory`, `work item`, and `run attempt`. Package boundaries should reinforce that center instead of creating a second architecture around workers, executors, or managed projects.
 
@@ -36,11 +36,11 @@ odin-os/
 | `cmd/` | Process entrypoints only | shared business logic |
 | `internal/` | Runtime implementation packages | operator-authored registry or memory assets |
 | `registry/` | Canonical authored registry definitions | compiled cache or runtime state |
-| `prompts/` | Canonical prompt assets | mutable run output |
+| `prompts/` | Canonical prompt assets | mutable run attempt output |
 | `memory/` | Canonical authored durable memory docs | transient execution state |
 | `config/` | Operator-authored configuration and manifests | live mutable runtime truth |
 | `data/` | Canonical local runtime database and other durable local data stores | human-authored contracts |
-| `runs/` | Run artifacts, logs, and summaries | source of truth |
+| `runs/` | Run attempt artifacts, logs, and summaries | source of truth |
 | `state/` | Rebuildable caches, compiled assets, snapshots | canonical authored data or canonical runtime authority |
 | `docs/` | ADRs, contracts, migration notes, and operations documentation | runtime implementation |
 | `scripts/` | Development, CI, and migration helpers | hidden application runtime |
@@ -54,7 +54,7 @@ Owns bootstrap, lifecycle wiring, and configuration loading. It composes the sys
 
 ### `internal/cli`
 
-Owns REPL, command entrypoints, TUI surfaces, rendering, and operator-facing context presentation. It is the operator interface layer and should consume projections and orchestration services rather than implement them.
+Owns REPL, command entrypoints, TUI surfaces, rendering, and operator-facing context presentation. It is the operator interface layer and should consume read models and orchestration services rather than implement them.
 
 ### `internal/api`
 
@@ -66,7 +66,7 @@ Owns the control-plane domain model: workspace, initiative, companion, policy, a
 
 ### `internal/runtime`
 
-Owns jobs, run attempts, events, projections, health, recovery, uncertainty handling, and checkpoints. Runtime packages model what happens while Odin is operating and how it recovers or compacts context after control-plane decisions have been made.
+Owns jobs, run attempts, events, health, recovery, uncertainty handling, and the implementation of projections and checkpoints that support control-plane recovery and views. Runtime packages model what happens while Odin is operating after control-plane decisions have been made.
 
 ### `internal/registry`
 
@@ -78,7 +78,7 @@ Owns evaluators, proposals, promotion, and replay. It is the bounded self-improv
 
 ### `internal/memory`
 
-Owns runtime services for workspace, initiative, companion, project, run, and knowledge memory access. It should index and project canonical authored memory and runtime-derived knowledge without becoming a second registry.
+Owns runtime services for workspace, initiative, companion, project, run attempt, and knowledge memory access. It should index and project canonical authored memory and runtime-derived knowledge without becoming a second registry.
 
 ### `internal/workers`
 
@@ -112,6 +112,7 @@ Owns structured logs, metrics, traces, and audit delivery. Telemetry consumes ev
 
 - `core/` may depend on contracts and services, but not on transport-specific CLI or API packages.
 - `core/` owns durable control-plane semantics; `runtime/`, `workers/`, and `executors/` must not redefine workspace, initiative, companion, policy, memory, or work-item truth.
+- `runtime/` may implement projections, checkpoints, and recovery mechanics, but those services remain subordinate to control-plane authority.
 - `adapters/` may depend inward on contracts, never outward on CLI, TUI, or specific worker roles.
 - `executors/` expose a shared contract; plan-backed headless runners fit here only if they satisfy that same contract.
 - `workers/` and `executors/` make up the execution plane and operate on bounded assignments returned by the control plane.
