@@ -1,0 +1,500 @@
+package browserhuman
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"syscall"
+	"testing"
+	"time"
+)
+
+func TestDriverFailsClosedWithoutCommand(t *testing.T) {
+	t.Setenv(defaultDriverEnvVar, "")
+
+	driver := NewDriver()
+	if _, err := driver.Invoke(context.Background(), Request{}); err == nil {
+		t.Fatal("Invoke() error = nil, want missing driver config failure")
+	}
+}
+
+func TestDriverInvokesCommandWithSpaces(t *testing.T) {
+	workDir := filepath.Join(t.TempDir(), "driver dir with spaces")
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(workDir) error = %v", err)
+	}
+
+	scriptPath := filepath.Join(workDir, "driver script.sh")
+	requestPath := filepath.Join(t.TempDir(), "request.json")
+	argPath := filepath.Join(t.TempDir(), "argument.txt")
+	markerPath := filepath.Join(t.TempDir(), "marker.txt")
+	script := `#!/usr/bin/env bash
+printf '%s\n' "$ODIN_DRIVER_MARKER" >"$ODIN_DRIVER_MARKER_PATH"
+printf '%s\n' "$1" >"$ODIN_DRIVER_ARG_PATH"
+cat >"$ODIN_DRIVER_REQUEST_PATH"
+printf '{"status":"completed","tool_key":"huginn_browser_session","summary":"spaces ok","artifacts":{"session_state":"ready"}}'
+`
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("WriteFile(script) error = %v", err)
+	}
+	if err := os.Chmod(scriptPath, 0o755); err != nil {
+		t.Fatalf("Chmod(script) error = %v", err)
+	}
+
+	t.Setenv(defaultDriverEnvVar, fmt.Sprintf("ODIN_DRIVER_MARKER=inline %q %q", scriptPath, "argument with spaces"))
+	t.Setenv("ODIN_DRIVER_REQUEST_PATH", requestPath)
+	t.Setenv("ODIN_DRIVER_ARG_PATH", argPath)
+	t.Setenv("ODIN_DRIVER_MARKER_PATH", markerPath)
+
+	driver := NewDriver()
+	driver.DefaultToolKey = "huginn_browser_session"
+
+	response, err := driver.Invoke(context.Background(), Request{
+		ToolKey: "huginn_browser_session",
+		Input: map[string]any{
+			"url": "https://example.com",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Invoke() error = %v", err)
+	}
+	if response.Summary != "spaces ok" {
+		t.Fatalf("Summary = %q, want spaces ok", response.Summary)
+	}
+
+	markerBytes, err := os.ReadFile(markerPath)
+	if err != nil {
+		t.Fatalf("ReadFile(marker) error = %v", err)
+	}
+	if got := string(markerBytes); got != "inline\n" {
+		t.Fatalf("marker file = %q, want %q", got, "inline\n")
+	}
+
+	argBytes, err := os.ReadFile(argPath)
+	if err != nil {
+		t.Fatalf("ReadFile(arg) error = %v", err)
+	}
+	if got := string(argBytes); got != "argument with spaces\n" {
+		t.Fatalf("argument file = %q, want %q", got, "argument with spaces\n")
+	}
+
+	requestBytes, err := os.ReadFile(requestPath)
+	if err != nil {
+		t.Fatalf("ReadFile(request) error = %v", err)
+	}
+	var request Request
+	if err := json.Unmarshal(requestBytes, &request); err != nil {
+		t.Fatalf("request json = %v", err)
+	}
+	if request.ToolKey != "huginn_browser_session" {
+		t.Fatalf("Request.ToolKey = %q, want huginn_browser_session", request.ToolKey)
+	}
+}
+
+func TestDriverScopesRuntimeRootAndArtifactPathPerInvocation(t *testing.T) {
+	baseRuntimeRoot := filepath.Join(t.TempDir(), "runtime-root")
+	captureRoot := filepath.Join(t.TempDir(), "captures")
+	if err := os.MkdirAll(captureRoot, 0o755); err != nil {
+		t.Fatalf("MkdirAll(captureRoot) error = %v", err)
+	}
+
+	script := writeFixtureDriver(t, `#!/usr/bin/env bash
+capture_dir="$(mktemp -d "$ODIN_DRIVER_CAPTURE_ROOT/invoke.XXXXXX")"
+printf '%s' "$ODIN_DIR" >"$capture_dir/odin_dir.txt"
+cat >"$capture_dir/request.json"
+printf '{"status":"completed","tool_key":"huginn_browser_session","summary":"ok","artifacts":{"session_state":"ready","capture_dir":"%s"}}' "$capture_dir"
+`)
+	t.Setenv(defaultDriverEnvVar, script)
+	t.Setenv("ODIN_DIR", baseRuntimeRoot)
+	t.Setenv("ODIN_DRIVER_CAPTURE_ROOT", captureRoot)
+
+	driver := NewDriver()
+	driver.DefaultToolKey = "huginn_browser_session"
+
+	invoke := func() (string, Request) {
+		t.Helper()
+
+		response, err := driver.Invoke(context.Background(), Request{
+			ToolKey: "huginn_browser_session",
+			Input:   map[string]any{"action": "screenshot", "path": "/tmp/outside/browser.png"},
+		})
+		if err != nil {
+			t.Fatalf("Invoke() error = %v", err)
+		}
+
+		captureDir, ok := response.Artifacts["capture_dir"].(string)
+		if !ok || strings.TrimSpace(captureDir) == "" {
+			t.Fatalf("Artifacts.capture_dir = %#v, want non-empty string", response.Artifacts["capture_dir"])
+		}
+
+		runtimeBytes, err := os.ReadFile(filepath.Join(captureDir, "odin_dir.txt"))
+		if err != nil {
+			t.Fatalf("ReadFile(odin_dir.txt) error = %v", err)
+		}
+		requestBytes, err := os.ReadFile(filepath.Join(captureDir, "request.json"))
+		if err != nil {
+			t.Fatalf("ReadFile(request.json) error = %v", err)
+		}
+		var request Request
+		if err := json.Unmarshal(requestBytes, &request); err != nil {
+			t.Fatalf("request json = %v", err)
+		}
+		return string(runtimeBytes), request
+	}
+
+	runtimeRoot1, request1 := invoke()
+	runtimeRoot2, request2 := invoke()
+
+	for i, runtimeRoot := range []string{runtimeRoot1, runtimeRoot2} {
+		if runtimeRoot == baseRuntimeRoot {
+			t.Fatalf("runtimeRoot[%d] = %q, want scoped child under base runtime root", i, runtimeRoot)
+		}
+		wantPrefix := baseRuntimeRoot + string(os.PathSeparator)
+		if !strings.HasPrefix(runtimeRoot, wantPrefix) {
+			t.Fatalf("runtimeRoot[%d] = %q, want prefix %q", i, runtimeRoot, wantPrefix)
+		}
+		if _, err := os.Stat(runtimeRoot); err != nil {
+			t.Fatalf("Stat(runtimeRoot[%d]) error = %v", i, err)
+		}
+	}
+	if runtimeRoot1 == runtimeRoot2 {
+		t.Fatalf("runtimeRoot1 == runtimeRoot2 == %q, want distinct invocation runtime roots", runtimeRoot1)
+	}
+
+	assertScopedArtifactPath := func(request Request, runtimeRoot string) {
+		t.Helper()
+
+		input, ok := request.Input.(map[string]any)
+		if !ok {
+			t.Fatalf("request.Input = %#v, want map[string]any", request.Input)
+		}
+		artifactPath, ok := input["path"].(string)
+		if !ok || strings.TrimSpace(artifactPath) == "" {
+			t.Fatalf("request.Input[path] = %#v, want non-empty string", input["path"])
+		}
+		wantPrefix := filepath.Join(runtimeRoot, "artifacts") + string(os.PathSeparator)
+		if !strings.HasPrefix(artifactPath, wantPrefix) {
+			t.Fatalf("artifactPath = %q, want prefix %q", artifactPath, wantPrefix)
+		}
+		if got, want := filepath.Base(artifactPath), "browser.png"; got != want {
+			t.Fatalf("filepath.Base(artifactPath) = %q, want %q", got, want)
+		}
+	}
+
+	assertScopedArtifactPath(request1, runtimeRoot1)
+	assertScopedArtifactPath(request2, runtimeRoot2)
+}
+
+func TestDriverExecsConfiguredCommandForCancellation(t *testing.T) {
+	parentPIDPath := filepath.Join(t.TempDir(), "driver-parent.pid")
+	childPIDPath := filepath.Join(t.TempDir(), "driver-child.pid")
+	script := writeFixtureDriver(t, `#!/usr/bin/env bash
+printf '%s' "$$" >"$ODIN_DRIVER_PARENT_PID_PATH"
+sleep 1000 &
+printf '%s' "$!" >"$ODIN_DRIVER_CHILD_PID_PATH"
+while :; do :; done
+`)
+	t.Setenv(defaultDriverEnvVar, script)
+	t.Setenv("ODIN_DRIVER_PARENT_PID_PATH", parentPIDPath)
+	t.Setenv("ODIN_DRIVER_CHILD_PID_PATH", childPIDPath)
+
+	driver := NewDriver()
+	driver.DefaultToolKey = "huginn_browser_session"
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := driver.Invoke(ctx, Request{
+			ToolKey: "huginn_browser_session",
+			Input:   map[string]any{"url": "https://example.com"},
+		})
+		done <- err
+	}()
+
+	parentPID := waitForPIDFile(t, parentPIDPath)
+	childPID := waitForPIDFile(t, childPIDPath)
+	cancel()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("Invoke() error = nil, want cancellation failure")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Invoke() did not return after cancellation")
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for _, pid := range []int{parentPID, childPID} {
+		for {
+			err := syscall.Kill(pid, 0)
+			if errors.Is(err, syscall.ESRCH) {
+				break
+			}
+			if err != nil {
+				t.Fatalf("Kill(%d, 0) error = %v", pid, err)
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("process %d still exists after cancellation", pid)
+			}
+			time.Sleep(25 * time.Millisecond)
+		}
+	}
+}
+
+func TestDriverDefaultsEmptyToolKeyWhenAllowed(t *testing.T) {
+	requestPath := filepath.Join(t.TempDir(), "request.json")
+	script := writeFixtureDriver(t, `#!/usr/bin/env bash
+cat >"$ODIN_DRIVER_REQUEST_PATH"
+printf '{"status":"completed","tool_key":"huginn_browser_session","summary":"ok","artifacts":{"session_state":"ready"}}'
+`)
+	t.Setenv(defaultDriverEnvVar, script)
+	t.Setenv("ODIN_DRIVER_REQUEST_PATH", requestPath)
+
+	driver := NewDriver()
+	driver.DefaultToolKey = "huginn_browser_session"
+
+	response, err := driver.Invoke(context.Background(), Request{
+		AllowDefaultToolKey: true,
+		Input: map[string]any{
+			"url": "https://example.com",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Invoke() error = %v", err)
+	}
+	if response.ToolKey != "huginn_browser_session" {
+		t.Fatalf("ToolKey = %q, want huginn_browser_session", response.ToolKey)
+	}
+
+	requestBytes, err := os.ReadFile(requestPath)
+	if err != nil {
+		t.Fatalf("ReadFile(request) error = %v", err)
+	}
+	var request Request
+	if err := json.Unmarshal(requestBytes, &request); err != nil {
+		t.Fatalf("request json = %v", err)
+	}
+	if request.ToolKey != "huginn_browser_session" {
+		t.Fatalf("Request.ToolKey = %q, want huginn_browser_session", request.ToolKey)
+	}
+}
+
+func TestDriverValidationErrorsIncludeRawStdout(t *testing.T) {
+	t.Run("mismatched tool key", func(t *testing.T) {
+		script := writeFixtureDriver(t, `#!/usr/bin/env bash
+printf '{"status":"completed","tool_key":"other_tool","summary":"ok","artifacts":{"session_state":"ready"}}'
+`)
+		t.Setenv(defaultDriverEnvVar, script)
+
+		driver := NewDriver()
+		driver.DefaultToolKey = "huginn_browser_session"
+
+		_, err := driver.Invoke(context.Background(), Request{
+			ToolKey: "huginn_browser_session",
+			Input:   map[string]any{"url": "https://example.com"},
+		})
+		if err == nil {
+			t.Fatal("Invoke() error = nil, want mismatched response tool key failure")
+		}
+		if !strings.Contains(err.Error(), `stdout="{\"status\":\"completed\",\"tool_key\":\"other_tool\"`) {
+			t.Fatalf("error = %v, want raw stdout payload", err)
+		}
+	})
+
+	t.Run("malformed json", func(t *testing.T) {
+		script := writeFixtureDriver(t, `#!/usr/bin/env bash
+printf 'not-json'
+`)
+		t.Setenv(defaultDriverEnvVar, script)
+
+		driver := NewDriver()
+		driver.DefaultToolKey = "huginn_browser_session"
+
+		_, err := driver.Invoke(context.Background(), Request{
+			ToolKey: "huginn_browser_session",
+			Input:   map[string]any{"url": "https://example.com"},
+		})
+		if err == nil {
+			t.Fatal("Invoke() error = nil, want decode failure")
+		}
+		if !strings.Contains(err.Error(), `stdout="not-json"`) {
+			t.Fatalf("error = %v, want raw stdout payload", err)
+		}
+	})
+}
+
+func TestDriverRejectsMissingResponseToolKey(t *testing.T) {
+	script := writeFixtureDriver(t, `#!/usr/bin/env bash
+printf '{"status":"completed","summary":"ok","artifacts":{"session_state":"ready"}}'
+`)
+	t.Setenv(defaultDriverEnvVar, script)
+
+	driver := NewDriver()
+	driver.DefaultToolKey = "huginn_browser_session"
+
+	if _, err := driver.Invoke(context.Background(), Request{
+		ToolKey: "huginn_browser_session",
+		Input:   map[string]any{"url": "https://example.com"},
+	}); err == nil {
+		t.Fatal("Invoke() error = nil, want missing response tool key failure")
+	}
+}
+
+func TestDriverRejectsNonCompletedStatus(t *testing.T) {
+	script := writeFixtureDriver(t, `#!/usr/bin/env bash
+printf '{"status":"failed","tool_key":"huginn_browser_session","summary":"not done","artifacts":{"session_state":"blocked"}}'
+`)
+	t.Setenv(defaultDriverEnvVar, script)
+
+	driver := NewDriver()
+	driver.DefaultToolKey = "huginn_browser_session"
+
+	if _, err := driver.Invoke(context.Background(), Request{
+		ToolKey: "huginn_browser_session",
+		Input:   map[string]any{"url": "https://example.com"},
+	}); err == nil {
+		t.Fatal("Invoke() error = nil, want non-completed status failure")
+	}
+}
+
+func TestDriverPreservesStructuredArtifacts(t *testing.T) {
+	script := writeFixtureDriver(t, `#!/usr/bin/env bash
+printf '{"status":"completed","tool_key":"huginn_browser_session","summary":"ok","artifacts":{"session_state":"ready","snapshots":[{"name":"home","url":"https://example.com"}],"labels":["alpha","beta"]}}'
+`)
+	t.Setenv(defaultDriverEnvVar, script)
+
+	driver := NewDriver()
+	driver.DefaultToolKey = "huginn_browser_session"
+
+	response, err := driver.Invoke(context.Background(), Request{
+		ToolKey: "huginn_browser_session",
+		Input:   map[string]any{"url": "https://example.com"},
+	})
+	if err != nil {
+		t.Fatalf("Invoke() error = %v", err)
+	}
+
+	snapshots, ok := response.Artifacts["snapshots"].([]any)
+	if !ok || len(snapshots) != 1 {
+		t.Fatalf("Artifacts.snapshots = %#v, want 1 structured item", response.Artifacts["snapshots"])
+	}
+	snapshot, ok := snapshots[0].(map[string]any)
+	if !ok {
+		t.Fatalf("Artifacts.snapshots[0] = %#v, want structured object", snapshots[0])
+	}
+	if snapshot["name"] != "home" {
+		t.Fatalf("Artifacts.snapshots[0].name = %#v, want home", snapshot["name"])
+	}
+	labels, ok := response.Artifacts["labels"].([]any)
+	if !ok || len(labels) != 2 {
+		t.Fatalf("Artifacts.labels = %#v, want 2 labels", response.Artifacts["labels"])
+	}
+}
+
+func TestDriverRejectsMissingOrNullArtifacts(t *testing.T) {
+	t.Run("missing artifacts", func(t *testing.T) {
+		script := writeFixtureDriver(t, `#!/usr/bin/env bash
+printf '{"status":"completed","tool_key":"huginn_browser_session","summary":"ok"}'
+`)
+		t.Setenv(defaultDriverEnvVar, script)
+
+		driver := NewDriver()
+		driver.DefaultToolKey = "huginn_browser_session"
+
+		if _, err := driver.Invoke(context.Background(), Request{
+			ToolKey: "huginn_browser_session",
+			Input:   map[string]any{"url": "https://example.com"},
+		}); err == nil {
+			t.Fatal("Invoke() error = nil, want missing artifacts failure")
+		} else if !strings.Contains(err.Error(), "artifacts are missing") {
+			t.Fatalf("error = %v, want missing artifacts failure", err)
+		}
+	})
+
+	t.Run("null artifacts", func(t *testing.T) {
+		script := writeFixtureDriver(t, `#!/usr/bin/env bash
+printf '{"status":"completed","tool_key":"huginn_browser_session","summary":"ok","artifacts":null}'
+`)
+		t.Setenv(defaultDriverEnvVar, script)
+
+		driver := NewDriver()
+		driver.DefaultToolKey = "huginn_browser_session"
+
+		if _, err := driver.Invoke(context.Background(), Request{
+			ToolKey: "huginn_browser_session",
+			Input:   map[string]any{"url": "https://example.com"},
+		}); err == nil {
+			t.Fatal("Invoke() error = nil, want null artifacts failure")
+		} else if !strings.Contains(err.Error(), "artifacts are missing") {
+			t.Fatalf("error = %v, want null artifacts failure", err)
+		}
+	})
+}
+
+func TestDriverReportsExitStatusAndStderr(t *testing.T) {
+	script := writeFixtureDriver(t, `#!/usr/bin/env bash
+printf 'driver output\n'
+printf 'driver exploded\n' >&2
+exit 42
+`)
+	t.Setenv(defaultDriverEnvVar, script)
+
+	driver := NewDriver()
+	driver.DefaultToolKey = "huginn_browser_session"
+
+	_, err := driver.Invoke(context.Background(), Request{
+		ToolKey: "huginn_browser_session",
+		Input:   map[string]any{"url": "https://example.com"},
+	})
+	if err == nil {
+		t.Fatal("Invoke() error = nil, want non-zero exit failure")
+	}
+	if !strings.Contains(err.Error(), "exit status 42") {
+		t.Fatalf("error = %v, want exit status", err)
+	}
+	if !strings.Contains(err.Error(), `stdout="driver output\n"`) {
+		t.Fatalf("error = %v, want stdout text", err)
+	}
+	if !strings.Contains(err.Error(), `stderr="driver exploded"`) {
+		t.Fatalf("error = %v, want stderr text", err)
+	}
+}
+
+func writeFixtureDriver(t *testing.T, content string) string {
+	t.Helper()
+
+	path := filepath.Join(t.TempDir(), "driver.sh")
+	if err := os.WriteFile(path, []byte(content), 0o755); err != nil {
+		t.Fatalf("WriteFile(driver) error = %v", err)
+	}
+	if err := os.Chmod(path, 0o755); err != nil {
+		t.Fatalf("Chmod(driver) error = %v", err)
+	}
+	return path
+}
+
+func waitForPIDFile(t *testing.T, path string) int {
+	t.Helper()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		data, err := os.ReadFile(path)
+		if err == nil {
+			pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+			if err != nil {
+				t.Fatalf("parse pid file %q: %v", string(data), err)
+			}
+			return pid
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("pid file %s was not written", path)
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+}

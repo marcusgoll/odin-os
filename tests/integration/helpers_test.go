@@ -4,20 +4,29 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"odin-os/internal/core/projects"
 	runtimeevents "odin-os/internal/runtime/events"
 	"odin-os/internal/store/sqlite"
 	"odin-os/internal/tools/catalog"
 )
 
-func projectRoot(t *testing.T) string {
+var portableRepoRootFixture struct {
+	once sync.Once
+	path string
+	err  error
+}
+
+func sourceProjectRoot(t *testing.T) string {
 	t.Helper()
 
 	_, file, _, ok := runtime.Caller(0)
@@ -25,6 +34,145 @@ func projectRoot(t *testing.T) string {
 		t.Fatal("runtime.Caller() failed")
 	}
 	return filepath.Clean(filepath.Join(filepath.Dir(file), "..", ".."))
+}
+
+func projectRoot(t *testing.T) string {
+	t.Helper()
+
+	sourceRoot := sourceProjectRoot(t)
+	if os.Getenv("ODIN_FORCE_PORTABLE_TEST_REPO") != "1" {
+		if _, err := os.Stat("/home/orchestrator/pbs/.git"); err == nil {
+			return sourceRoot
+		}
+	}
+
+	portableRepoRootFixture.once.Do(func() {
+		portableRepoRootFixture.path, portableRepoRootFixture.err = createPortableProjectRoot(sourceRoot)
+	})
+	if portableRepoRootFixture.err != nil {
+		t.Fatalf("createPortableProjectRoot() error = %v", portableRepoRootFixture.err)
+	}
+	return portableRepoRootFixture.path
+}
+
+func createPortableProjectRoot(sourceRoot string) (string, error) {
+	root, err := os.MkdirTemp("", "odin-os-integration-repo-")
+	if err != nil {
+		return "", err
+	}
+	if err := copyPortableRepoTree(sourceRoot, root); err != nil {
+		return "", err
+	}
+
+	pbsRoot, err := os.MkdirTemp("", "odin-os-pbs-fixture-")
+	if err != nil {
+		return "", err
+	}
+	if err := os.WriteFile(filepath.Join(pbsRoot, "README.md"), []byte("# PBS fixture\n"), 0o644); err != nil {
+		return "", err
+	}
+	if err := initializeGitRepoBranchPath(pbsRoot, "master"); err != nil {
+		return "", err
+	}
+
+	configPath := filepath.Join(root, "config", "projects.yaml")
+	configBytes, err := os.ReadFile(configPath)
+	if err != nil {
+		return "", err
+	}
+	updatedConfig := strings.ReplaceAll(string(configBytes), "/home/orchestrator/pbs", filepath.ToSlash(pbsRoot))
+	if updatedConfig == string(configBytes) {
+		return "", fmt.Errorf("projects.yaml did not contain expected pbs path")
+	}
+	if err := os.WriteFile(configPath, []byte(updatedConfig), 0o644); err != nil {
+		return "", err
+	}
+
+	if err := initializeGitRepoBranchPath(root, "main"); err != nil {
+		return "", err
+	}
+	return root, nil
+}
+
+func copyPortableRepoTree(sourceRoot string, destRoot string) error {
+	ignoredDirs := map[string]bool{
+		".git": true,
+		"bin":  true,
+	}
+
+	return filepath.WalkDir(sourceRoot, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		rel, err := filepath.Rel(sourceRoot, path)
+		if err != nil {
+			return err
+		}
+		if rel == "." {
+			return nil
+		}
+		if entry.IsDir() && ignoredDirs[entry.Name()] {
+			return filepath.SkipDir
+		}
+
+		targetPath := filepath.Join(destRoot, rel)
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			return os.MkdirAll(targetPath, info.Mode().Perm())
+		}
+		if err := os.MkdirAll(filepath.Dir(targetPath), 0o755); err != nil {
+			return err
+		}
+		if entry.Type()&os.ModeSymlink != 0 {
+			linkTarget, err := os.Readlink(path)
+			if err != nil {
+				return err
+			}
+			return os.Symlink(linkTarget, targetPath)
+		}
+		content, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(targetPath, content, info.Mode().Perm())
+	})
+}
+
+func initializeGitRepoBranchPath(dir string, branch string) error {
+	for _, args := range [][]string{
+		{"init", "-b", branch},
+		{"config", "user.email", "odin@example.com"},
+		{"config", "user.name", "Odin Acceptance"},
+		{"add", "."},
+		{"commit", "-m", "fixture"},
+	} {
+		cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("git %v: %w\n%s", args, err, string(output))
+		}
+	}
+	return nil
+}
+
+func projectGitRootFromManifest(t *testing.T, repoRoot string, key string) string {
+	t.Helper()
+
+	registry, diagnostics, err := projects.Register(filepath.Join(repoRoot, "config", "projects.yaml"))
+	if err != nil {
+		t.Fatalf("projects.Register(%q) error = %v", filepath.Join(repoRoot, "config", "projects.yaml"), err)
+	}
+	if len(diagnostics) != 0 {
+		t.Fatalf("project diagnostics = %+v, want none", diagnostics)
+	}
+	project, ok := registry.Lookup(key)
+	if !ok {
+		t.Fatalf("Lookup(%s) missing from manifest", key)
+	}
+	return project.GitRoot
 }
 
 func buildOdinBinary(t *testing.T, repoRoot string) string {
@@ -235,9 +383,28 @@ service:
 func writeTextFile(t *testing.T, path string, content string) {
 	t.Helper()
 
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("MkdirAll(%s) error = %v", filepath.Dir(path), err)
+	}
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatalf("WriteFile(%s) error = %v", path, err)
 	}
+}
+
+func legacyOrchestratorSourceRoot(t *testing.T) string {
+	t.Helper()
+
+	const legacyRoot = "/home/orchestrator/odin-orchestrator"
+	if _, err := os.Stat(legacyRoot); err == nil {
+		return legacyRoot
+	}
+
+	root := t.TempDir()
+	writeTextFile(t, filepath.Join(root, ".claude/skills/demo-skill/SKILL.md"), "# Demo Skill\n\nBody.\n")
+	writeTextFile(t, filepath.Join(root, ".agents/skills/demo-skill/SKILL.md"), "# Demo Skill Mirror\n\nBody.\n")
+	writeTextFile(t, filepath.Join(root, "docs/adr/engine.md"), "# Engine\n\nArchitecture.\n")
+	writeTextFile(t, filepath.Join(root, "ops/github-runner/README.md"), "# Runner\n\nRunbook.\n")
+	return root
 }
 
 func initializeGitRepo(t *testing.T, dir string) {

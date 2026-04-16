@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+
+	"odin-os/internal/adapters/browserhuman"
 )
 
 type Request struct {
@@ -25,6 +27,13 @@ type Result struct {
 	RawOutput       string            `json:"raw_output"`
 }
 
+type BrowserResult struct {
+	ToolKey   string
+	Summary   string
+	Artifacts map[string]any
+	RawOutput string
+}
+
 type Invoker interface {
 	Invoke(context.Context, string, Request) (Result, error)
 }
@@ -32,6 +41,7 @@ type Invoker interface {
 type Service struct {
 	RuntimeRoot string
 	DriverPath  string
+	Driver      browserhuman.Driver
 }
 
 func (service Service) Invoke(ctx context.Context, key string, request Request) (Result, error) {
@@ -86,6 +96,25 @@ func (service Service) Invoke(ctx context.Context, key string, request Request) 
 		result.RawOutput = strings.TrimSpace(string(output))
 	}
 	return result, nil
+}
+
+func (service Service) BrowserHuman(ctx context.Context, request browserhuman.Request) (BrowserResult, error) {
+	driver := service.Driver.WithDefaults()
+
+	response, err := driver.Invoke(ctx, request)
+	if err != nil {
+		return BrowserResult{}, err
+	}
+	return toBrowserResult(response.ToolKey, response.Summary, response.Artifacts, response.RawOutput), nil
+}
+
+func toBrowserResult(toolKey string, summary string, artifacts map[string]any, rawOutput string) BrowserResult {
+	return BrowserResult{
+		ToolKey:   toolKey,
+		Summary:   summary,
+		Artifacts: cloneArtifacts(artifacts),
+		RawOutput: rawOutput,
+	}
 }
 
 type driverRequest struct {
@@ -165,4 +194,30 @@ func cloneStringMap(values map[string]string) map[string]string {
 		cloned[key] = value
 	}
 	return cloned
+}
+
+func cloneArtifacts(values map[string]any) map[string]any {
+	if values == nil {
+		return nil
+	}
+	cloned := make(map[string]any, len(values))
+	for key, value := range values {
+		cloned[key] = cloneArtifactValue(value)
+	}
+	return cloned
+}
+
+func cloneArtifactValue(value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		return cloneArtifacts(typed)
+	case []any:
+		cloned := make([]any, len(typed))
+		for i, item := range typed {
+			cloned[i] = cloneArtifactValue(item)
+		}
+		return cloned
+	default:
+		return typed
+	}
 }
