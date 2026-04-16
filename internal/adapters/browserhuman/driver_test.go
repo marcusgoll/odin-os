@@ -32,7 +32,9 @@ func TestDriverInvokesCommandWithSpaces(t *testing.T) {
 	scriptPath := filepath.Join(workDir, "driver script.sh")
 	requestPath := filepath.Join(t.TempDir(), "request.json")
 	argPath := filepath.Join(t.TempDir(), "argument.txt")
+	markerPath := filepath.Join(t.TempDir(), "marker.txt")
 	script := `#!/usr/bin/env bash
+printf '%s\n' "$ODIN_DRIVER_MARKER" >"$ODIN_DRIVER_MARKER_PATH"
 printf '%s\n' "$1" >"$ODIN_DRIVER_ARG_PATH"
 cat >"$ODIN_DRIVER_REQUEST_PATH"
 printf '{"status":"completed","tool_key":"huginn_browser_session","summary":"spaces ok","artifacts":{"session_state":"ready"}}'
@@ -44,9 +46,10 @@ printf '{"status":"completed","tool_key":"huginn_browser_session","summary":"spa
 		t.Fatalf("Chmod(script) error = %v", err)
 	}
 
-	t.Setenv(defaultDriverEnvVar, fmt.Sprintf("%q %q", scriptPath, "argument with spaces"))
+	t.Setenv(defaultDriverEnvVar, fmt.Sprintf("ODIN_DRIVER_MARKER=inline %q %q", scriptPath, "argument with spaces"))
 	t.Setenv("ODIN_DRIVER_REQUEST_PATH", requestPath)
 	t.Setenv("ODIN_DRIVER_ARG_PATH", argPath)
+	t.Setenv("ODIN_DRIVER_MARKER_PATH", markerPath)
 
 	driver := NewDriver()
 	driver.DefaultToolKey = "huginn_browser_session"
@@ -62,6 +65,14 @@ printf '{"status":"completed","tool_key":"huginn_browser_session","summary":"spa
 	}
 	if response.Summary != "spaces ok" {
 		t.Fatalf("Summary = %q, want spaces ok", response.Summary)
+	}
+
+	markerBytes, err := os.ReadFile(markerPath)
+	if err != nil {
+		t.Fatalf("ReadFile(marker) error = %v", err)
+	}
+	if got := string(markerBytes); got != "inline\n" {
+		t.Fatalf("marker file = %q, want %q", got, "inline\n")
 	}
 
 	argBytes, err := os.ReadFile(argPath)
@@ -334,8 +345,8 @@ printf '{"status":"completed","tool_key":"huginn_browser_session","summary":"ok"
 
 func TestDriverReportsExitStatusAndStderr(t *testing.T) {
 	script := writeFixtureDriver(t, `#!/usr/bin/env bash
-printf 'driver exploded
-' >&2
+printf 'driver output\n'
+printf 'driver exploded\n' >&2
 exit 42
 `)
 	t.Setenv(defaultDriverEnvVar, script)
@@ -353,7 +364,10 @@ exit 42
 	if !strings.Contains(err.Error(), "exit status 42") {
 		t.Fatalf("error = %v, want exit status", err)
 	}
-	if !strings.Contains(err.Error(), "driver exploded") {
+	if !strings.Contains(err.Error(), `stdout="driver output\n"`) {
+		t.Fatalf("error = %v, want stdout text", err)
+	}
+	if !strings.Contains(err.Error(), `stderr="driver exploded"`) {
 		t.Fatalf("error = %v, want stderr text", err)
 	}
 }
