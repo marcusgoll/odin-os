@@ -718,7 +718,7 @@ func (store *Store) ResolveApproval(ctx context.Context, params ResolveApprovalP
 		approval = current
 
 		projectID := task.ProjectID
-		return appendEventTx(ctx, tx, eventInsert{
+		if err := appendEventTx(ctx, tx, eventInsert{
 			StreamType: runtimeevents.StreamApproval,
 			StreamID:   approval.ID,
 			EventType:  runtimeevents.EventApprovalResolved,
@@ -732,7 +732,39 @@ func (store *Store) ResolveApproval(ctx context.Context, params ResolveApprovalP
 				Reason:     approval.Reason,
 			},
 			OccurredAt: now,
-		})
+		}); err != nil {
+			return err
+		}
+
+		if params.Status == "approved" && task.Status == "blocked" {
+			previousStatus := task.Status
+			if _, err := tx.ExecContext(ctx, `
+				UPDATE tasks
+				SET status = ?, updated_at = ?
+				WHERE id = ?
+			`, "queued", formatTime(now), task.ID); err != nil {
+				return err
+			}
+
+			task.Status = "queued"
+			task.UpdatedAt = now
+
+			return appendEventTx(ctx, tx, eventInsert{
+				StreamType: runtimeevents.StreamTask,
+				StreamID:   task.ID,
+				EventType:  runtimeevents.EventTaskStatusChanged,
+				Scope:      task.Scope,
+				ProjectID:  &projectID,
+				TaskID:     &task.ID,
+				Payload: runtimeevents.TaskStatusChangedPayload{
+					PreviousStatus: previousStatus,
+					Status:         task.Status,
+				},
+				OccurredAt: now,
+			})
+		}
+
+		return nil
 	})
 
 	return approval, err
