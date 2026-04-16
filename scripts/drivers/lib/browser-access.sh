@@ -12,6 +12,7 @@ BROWSER_SERVER_SCRIPT="${ODIN_BROWSER_SERVER_SCRIPT:-}"
 BROWSER_SESSION_DIR="${ODIN_BROWSER_SESSION_DIR:-${BROWSER_STATE_DIR}/sessions}"
 BROWSER_CURL_MAX_TIME="${ODIN_BROWSER_CURL_MAX_TIME:-30}"
 BROWSER_START_TIMEOUT="${ODIN_BROWSER_START_TIMEOUT:-15}"
+_BA_SERVER_OWNED="${_BA_SERVER_OWNED:-0}"
 
 _ba_trace() {
     if [[ -n "${ODIN_TEST_HUGINN_TRACE:-}" ]]; then
@@ -85,11 +86,13 @@ browser_server_start() {
     done
 
     if [[ -n "${ODIN_TEST_HUGINN_HEALTH:-}" ]]; then
+        _BA_SERVER_OWNED=1
         _ba_trace "start"
         return 0
     fi
 
     if _bc_curl "${BROWSER_SERVER_URL}/health" >/dev/null 2>&1; then
+        _BA_SERVER_OWNED=0
         return 0
     fi
     if ! command -v node >/dev/null 2>&1; then
@@ -105,6 +108,7 @@ browser_server_start() {
     ODIN_AGENT_NAME="$(_ba_agent_name)" \
         node "${BROWSER_SERVER_SCRIPT}" >/dev/null 2>&1 &
     local server_pid=$!
+    _BA_SERVER_OWNED=1
     printf '%s\n' "${server_pid}" >"${BROWSER_SERVER_PID_FILE}"
 
     local elapsed=0
@@ -124,6 +128,9 @@ browser_server_start() {
 browser_server_stop() {
     if [[ -n "${ODIN_TEST_HUGINN_HEALTH:-}" ]]; then
         _ba_trace "stop"
+        return 0
+    fi
+    if [[ "${_BA_SERVER_OWNED}" != "1" ]]; then
         return 0
     fi
 

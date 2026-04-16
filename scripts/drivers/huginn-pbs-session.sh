@@ -49,8 +49,18 @@ except Exception as exc:
     print(f"invalid request json: {exc}")
     raise SystemExit(0)
 
+if not isinstance(request, dict):
+    print("error")
+    print("request must be a JSON object")
+    raise SystemExit(0)
+
 tool_key = str(request.get("tool_key") or "huginn_pbs_session").strip() or "huginn_pbs_session"
 payload = request.get("input") or {}
+if not isinstance(payload, dict):
+    print("error")
+    print("input must be a JSON object")
+    raise SystemExit(0)
+
 bid_period = str(payload.get("bid_period") or "").strip()
 workflow_key = str(payload.get("workflow_key") or "").strip()
 timezone = str(payload.get("timezone") or "America/Chicago").strip() or "America/Chicago"

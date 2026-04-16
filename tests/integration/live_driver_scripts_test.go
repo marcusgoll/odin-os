@@ -124,12 +124,12 @@ esac
 
 	request := `{"tool_key":"google_calendar_off_dates","input":{"bid_period":"2026-05","calendar_id":"primary","timezone":"America/Chicago"}}`
 	response := runDriverScript(t, scriptPath, request, map[string]string{
-		"PATH":                        fixtureDir + string(os.PathListSeparator) + os.Getenv("PATH"),
-		"GOOGLE_TOKEN_CACHE":          cachePath,
-		"GOOGLE_OAUTH_CLIENT_ID":      "client",
-		"GOOGLE_OAUTH_CLIENT_SECRET":  "secret",
-		"GOOGLE_OAUTH_REFRESH_TOKEN":  "refresh",
-		"ODIN_TEST_CURL_TRACE":        tracePath,
+		"PATH":                       fixtureDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"GOOGLE_TOKEN_CACHE":         cachePath,
+		"GOOGLE_OAUTH_CLIENT_ID":     "client",
+		"GOOGLE_OAUTH_CLIENT_SECRET": "secret",
+		"GOOGLE_OAUTH_REFRESH_TOKEN": "refresh",
+		"ODIN_TEST_CURL_TRACE":       tracePath,
 	})
 
 	if response.Status != "completed" {
@@ -161,6 +161,36 @@ func TestGoogleCalendarDriverReturnsJsonFailureForInvalidTimezone(t *testing.T) 
 	}
 	if response.Artifacts["reason"] != "invalid_timezone" {
 		t.Fatalf("reason = %#v, want invalid_timezone", response.Artifacts["reason"])
+	}
+}
+
+func TestGoogleCalendarDriverRejectsMalformedInputObject(t *testing.T) {
+	repoRoot := projectRoot(t)
+	scriptPath := filepath.Join(repoRoot, "scripts", "drivers", "google-calendar-off-dates.sh")
+
+	request := `{"tool_key":"google_calendar_off_dates","input":"bad"}`
+	response := runDriverScript(t, scriptPath, request, nil)
+
+	if response.Status != "failed" {
+		t.Fatalf("Status = %q, want failed", response.Status)
+	}
+	if response.Artifacts["reason"] != "invalid_request" {
+		t.Fatalf("reason = %#v, want invalid_request", response.Artifacts["reason"])
+	}
+}
+
+func TestGoogleCalendarDriverRejectsNonNumericBidPeriod(t *testing.T) {
+	repoRoot := projectRoot(t)
+	scriptPath := filepath.Join(repoRoot, "scripts", "drivers", "google-calendar-off-dates.sh")
+
+	request := `{"tool_key":"google_calendar_off_dates","input":{"bid_period":"202A-01"}}`
+	response := runDriverScript(t, scriptPath, request, nil)
+
+	if response.Status != "failed" {
+		t.Fatalf("Status = %q, want failed", response.Status)
+	}
+	if response.Artifacts["reason"] != "invalid_request" {
+		t.Fatalf("reason = %#v, want invalid_request", response.Artifacts["reason"])
 	}
 }
 
@@ -250,6 +280,69 @@ esac
 	}
 }
 
+func TestHuginnDriverDoesNotStopReusableBrowserServer(t *testing.T) {
+	repoRoot := projectRoot(t)
+	scriptPath := filepath.Join(repoRoot, "scripts", "drivers", "huginn-pbs-session.sh")
+	fixtureDir := t.TempDir()
+	curlPath := filepath.Join(fixtureDir, "curl")
+	sessionDir := filepath.Join(fixtureDir, "sessions")
+	tracePath := filepath.Join(fixtureDir, "curl-trace.txt")
+
+	if err := os.MkdirAll(sessionDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(sessionDir) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(sessionDir, "flica.json"), []byte(`[]`), 0o644); err != nil {
+		t.Fatalf("WriteFile(session file) error = %v", err)
+	}
+	if err := os.WriteFile(curlPath, []byte(`#!/usr/bin/env bash
+set -euo pipefail
+url="${@: -1}"
+printf '%s\n' "$url" >>"$ODIN_TEST_CURL_TRACE"
+case "$url" in
+  *"/health")
+    printf '{"ok":true,"browser":true,"page":true,"url":"https://jia.flica.net/online/mainmenu.cgi"}'
+    ;;
+  *"/cookies/set")
+    printf '{}'
+    ;;
+  *"/navigate")
+    printf '{"url":"https://jia.flica.net/online/mainmenu.cgi"}'
+    ;;
+  *"/snapshot?compact=true")
+    printf '%s' '{"snapshot":"Main Menu"}'
+    ;;
+  *"/stop")
+    printf '{}'
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+`), 0o755); err != nil {
+		t.Fatalf("WriteFile(fake curl) error = %v", err)
+	}
+
+	request := `{"tool_key":"huginn_pbs_session","input":{"bid_period":"2026-05","workflow_key":"pbs_may_bid","timezone":"America/Chicago"}}`
+	response := runDriverScript(t, scriptPath, request, map[string]string{
+		"PATH":                     fixtureDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"ODIN_BROWSER_SERVER_URL":  "http://127.0.0.1:9555",
+		"ODIN_BROWSER_SESSION_DIR": sessionDir,
+		"ODIN_TEST_CURL_TRACE":     tracePath,
+	})
+
+	if response.Status != "completed" {
+		t.Fatalf("Status = %q, want completed", response.Status)
+	}
+
+	traceBytes, err := os.ReadFile(tracePath)
+	if err != nil {
+		t.Fatalf("ReadFile(trace) error = %v", err)
+	}
+	if strings.Contains(string(traceBytes), "/stop") {
+		t.Fatalf("trace = %q, want reusable server to remain running", string(traceBytes))
+	}
+}
+
 func TestHuginnPBSSessionDriverScriptReportsLoginRequired(t *testing.T) {
 	repoRoot := projectRoot(t)
 	scriptPath := filepath.Join(repoRoot, "scripts", "drivers", "huginn-pbs-session.sh")
@@ -265,6 +358,21 @@ func TestHuginnPBSSessionDriverScriptReportsLoginRequired(t *testing.T) {
 	}
 	if response.Artifacts["session_state"] != "login_required" {
 		t.Fatalf("session_state = %#v, want login_required", response.Artifacts["session_state"])
+	}
+}
+
+func TestHuginnDriverRejectsMalformedInputObject(t *testing.T) {
+	repoRoot := projectRoot(t)
+	scriptPath := filepath.Join(repoRoot, "scripts", "drivers", "huginn-pbs-session.sh")
+
+	request := `{"tool_key":"huginn_pbs_session","input":"bad"}`
+	response := runDriverScript(t, scriptPath, request, nil)
+
+	if response.Status != "failed" {
+		t.Fatalf("Status = %q, want failed", response.Status)
+	}
+	if response.Artifacts["reason"] != "invalid_request" {
+		t.Fatalf("reason = %#v, want invalid_request", response.Artifacts["reason"])
 	}
 }
 

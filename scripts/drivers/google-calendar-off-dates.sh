@@ -49,8 +49,18 @@ except Exception as exc:
     print(f"invalid request json: {exc}")
     raise SystemExit(0)
 
+if not isinstance(request, dict):
+    print("error")
+    print("request must be a JSON object")
+    raise SystemExit(0)
+
 tool_key = str(request.get("tool_key") or "google_calendar_off_dates").strip() or "google_calendar_off_dates"
 payload = request.get("input") or {}
+if not isinstance(payload, dict):
+    print("error")
+    print("input must be a JSON object")
+    raise SystemExit(0)
+
 bid_period = str(payload.get("bid_period") or "").strip()
 calendar_id = str(payload.get("calendar_id") or "primary").strip() or "primary"
 timezone = str(payload.get("timezone") or "America/Chicago").strip() or "America/Chicago"
@@ -66,8 +76,14 @@ if len(parts) != 2 or len(parts[0]) != 4 or len(parts[1]) != 2:
     print("bid_period must be YYYY-MM")
     raise SystemExit(0)
 
-year = int(parts[0])
-month = int(parts[1])
+try:
+    year = int(parts[0])
+    month = int(parts[1])
+except ValueError:
+    print("error")
+    print("bid_period must be YYYY-MM")
+    raise SystemExit(0)
+
 if month < 1 or month > 12:
     print("error")
     print("bid_period month must be between 01 and 12")
