@@ -11,6 +11,8 @@ Odin OS is the canonical future runtime for Odin: a Go-first, CLI-first workspac
 
 This repository is the runtime root. `odin-orchestrator` is a migration source only. The system is designed around a workspace-first semantic center: workspace, initiative, companion, managed project, work item, run attempt, control scope, and execution lane. GitHub is optional, but Git is mandatory for any managed project.
 
+See `docs/contracts/ubiquitous-language.md` for the frozen vocabulary and `docs/contracts/workspace-context-map.md` for the bounded-context map.
+
 ## Architecture Summary
 
 - Workspace is the top-level operating environment and the semantic root for all durable work.

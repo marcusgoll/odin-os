@@ -52,6 +52,14 @@ The domain should read from top to bottom as:
 
 `project governance`, `capability catalog`, `memory`, and `integrations` support that flow without becoming the center themselves.
 
+Package alignment:
+
+- `capability catalog` maps primarily to `internal/tools`, with authored definitions living in `registry/`.
+- `integrations` maps primarily to `internal/adapters` and `internal/vcs`.
+- `work execution` maps primarily to `internal/runtime`, `internal/executors`, and the execution-oriented parts of `internal/workers`.
+- `planning` and `project governance` remain centered in `internal/core`.
+- `memory` maps primarily to `internal/memory`, with persistence in `internal/store`.
+
 ## Internal package boundaries
 
 ### `internal/app`
@@ -96,7 +104,7 @@ Owns the common executor contract, routing, execution-lane handling, and backend
 
 ### `internal/tools`
 
-Owns broker access, capability catalogs, invocation, and budgets. Tool loading must be dynamic and control-scope-aware; this package exists to make that explicit.
+Owns broker access, capability catalogs, invocation, and budgets. It is the runtime surface for the capability catalog context, while the authored catalog definitions remain in `registry/`. Tool loading must be dynamic and control-scope-aware; this package exists to make that explicit.
 
 ### `internal/vcs`
 
@@ -104,7 +112,7 @@ Owns Git integration, worktrees, branches, and leases. All mutating project work
 
 ### `internal/adapters`
 
-Owns boundary integrations such as GitHub, shell, filesystem, web, Gmail, and calendar. Adapters translate outside systems into internal contracts; they do not own domain rules.
+Owns boundary integrations such as GitHub, shell, filesystem, web, Gmail, and calendar. Adapters translate outside systems into internal contracts; they do not own domain rules. Git-specific operational behavior that is not domain policy belongs here only when it is an external-system adapter concern.
 
 ### `internal/store`
 
