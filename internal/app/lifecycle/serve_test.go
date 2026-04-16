@@ -311,7 +311,7 @@ service:
 	}
 }
 
-func TestRunServeCleansReleasedWorktreeLeasesDuringBackgroundLoop(t *testing.T) {
+func TestRunServeCleansReleasedAndStaleWorktreeLeasesDuringBackgroundLoop(t *testing.T) {
 	root := createRuntimeRoot(t)
 	writeRuntimeConfig(t, root, `
 version: 1
@@ -358,73 +358,9 @@ service:
 		t.Fatalf("CreateProject() error = %v", err)
 	}
 
-	task, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
-		ProjectID:   project.ID,
-		Key:         "alpha-task",
-		Title:       "Cleanup worktree",
-		Status:      "running",
-		Scope:       "project",
-		RequestedBy: "operator",
-	})
-	if err != nil {
-		t.Fatalf("CreateTask() error = %v", err)
-	}
-
-	run, err := store.StartRun(ctx, sqlite.StartRunParams{
-		TaskID:   task.ID,
-		Executor: "codex_headless",
-		Attempt:  1,
-		Status:   "running",
-	})
-	if err != nil {
-		t.Fatalf("StartRun() error = %v", err)
-	}
-
-	worktreePath := worktrees.ResolvePath(worktrees.PathParams{
-		Root:       worktrees.DefaultRoot(),
-		ProjectKey: project.Key,
-		TaskID:     task.ID,
-		RunID:      run.ID,
-		Try:        1,
-	})
-	if err := os.MkdirAll(filepath.Dir(worktreePath), 0o755); err != nil {
-		t.Fatalf("mkdir worktree parent: %v", err)
-	}
-
-	branchName := branches.Name(branches.NameParams{
-		ProjectKey: project.Key,
-		TaskID:     task.ID,
-		RunID:      run.ID,
-		Try:        1,
-	})
-	adapter := gitadapter.Adapter{}
-	if err := adapter.CreateBranch(ctx, repoRoot, branchName, "main"); err != nil {
-		t.Fatalf("CreateBranch() error = %v", err)
-	}
-	if err := adapter.AddWorktree(ctx, repoRoot, worktreePath, branchName); err != nil {
-		t.Fatalf("AddWorktree() error = %v", err)
-	}
-
-	lease, err := store.CreateWorktreeLease(ctx, sqlite.CreateWorktreeLeaseParams{
-		ProjectID:    project.ID,
-		TaskID:       task.ID,
-		RunID:        run.ID,
-		Mode:         "mutable",
-		BranchName:   branchName,
-		WorktreePath: worktreePath,
-		RepoRoot:     repoRoot,
-		State:        "active",
-	})
-	if err != nil {
-		t.Fatalf("CreateWorktreeLease() error = %v", err)
-	}
-	lease, err = store.ReleaseWorktreeLease(ctx, sqlite.ReleaseWorktreeLeaseParams{
-		LeaseID: lease.ID,
-		State:   "released",
-	})
-	if err != nil {
-		t.Fatalf("ReleaseWorktreeLease() error = %v", err)
-	}
+	releasedLease := createServeCleanupLease(t, ctx, store, repoRoot, project, "released", false)
+	staleLease := createServeCleanupLease(t, ctx, store, repoRoot, project, "stale", true)
+	fixtures := []serveCleanupLeaseFixture{releasedLease, staleLease}
 
 	originalCleanupInterval := serveWorktreeCleanupInterval
 	serveWorktreeCleanupInterval = 20 * time.Millisecond
@@ -461,11 +397,7 @@ service:
 				cancel()
 				return
 			case <-ticker.C:
-				current, err := store.GetWorktreeLease(context.Background(), lease.ID)
-				if err != nil {
-					continue
-				}
-				if current.CleanedUpAt != nil {
+				if serveCleanupFixturesCleaned(context.Background(), store, fixtures) {
 					close(cleanupObserved)
 					cancel()
 					return
@@ -490,18 +422,20 @@ service:
 		t.Fatal("cleanup loop did not observe cleaned worktree lease")
 	}
 
-	updatedLease, err := store.GetWorktreeLease(context.Background(), lease.ID)
-	if err != nil {
-		t.Fatalf("GetWorktreeLease() error = %v", err)
-	}
-	if updatedLease.State != "cleaned" {
-		t.Fatalf("lease.State = %q, want cleaned", updatedLease.State)
-	}
-	if updatedLease.CleanedUpAt == nil {
-		t.Fatalf("lease.CleanedUpAt = nil, want value")
-	}
-	if _, err := os.Stat(worktreePath); !os.IsNotExist(err) {
-		t.Fatalf("worktree path still exists after cleanup: %v", err)
+	for _, fixture := range fixtures {
+		updatedLease, err := store.GetWorktreeLease(context.Background(), fixture.Lease.ID)
+		if err != nil {
+			t.Fatalf("GetWorktreeLease(%d) error = %v", fixture.Lease.ID, err)
+		}
+		if updatedLease.State != "cleaned" {
+			t.Fatalf("lease %d state = %q, want cleaned", fixture.Lease.ID, updatedLease.State)
+		}
+		if updatedLease.CleanedUpAt == nil {
+			t.Fatalf("lease %d CleanedUpAt = nil, want value", fixture.Lease.ID)
+		}
+		if _, err := os.Stat(fixture.WorktreePath); !os.IsNotExist(err) {
+			t.Fatalf("worktree path %q still exists after cleanup: %v", fixture.WorktreePath, err)
+		}
 	}
 }
 
@@ -766,6 +700,112 @@ func initServeTestRepo(t *testing.T, repoRoot string) {
 	if err := runServeGit(context.Background(), repoRoot, "commit", "-m", "initial commit"); err != nil {
 		t.Fatalf("git commit error = %v", err)
 	}
+}
+
+type serveCleanupLeaseFixture struct {
+	Lease        sqlite.WorktreeLease
+	WorktreePath string
+}
+
+func createServeCleanupLease(t *testing.T, ctx context.Context, store *sqlite.Store, repoRoot string, project sqlite.Project, keySuffix string, stale bool) serveCleanupLeaseFixture {
+	t.Helper()
+
+	task, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         fmt.Sprintf("alpha-task-%s", keySuffix),
+		Title:       fmt.Sprintf("Cleanup worktree %s", keySuffix),
+		Status:      "running",
+		Scope:       "project",
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask(%s) error = %v", keySuffix, err)
+	}
+
+	run, err := store.StartRun(ctx, sqlite.StartRunParams{
+		TaskID:   task.ID,
+		Executor: "codex_headless",
+		Attempt:  1,
+		Status:   "running",
+	})
+	if err != nil {
+		t.Fatalf("StartRun(%s) error = %v", keySuffix, err)
+	}
+
+	worktreePath := worktrees.ResolvePath(worktrees.PathParams{
+		Root:       worktrees.DefaultRoot(),
+		ProjectKey: project.Key,
+		TaskID:     task.ID,
+		RunID:      run.ID,
+		Try:        1,
+	})
+	if err := os.MkdirAll(filepath.Dir(worktreePath), 0o755); err != nil {
+		t.Fatalf("mkdir worktree parent (%s): %v", keySuffix, err)
+	}
+
+	branchName := branches.Name(branches.NameParams{
+		ProjectKey: project.Key,
+		TaskID:     task.ID,
+		RunID:      run.ID,
+		Try:        1,
+	})
+	adapter := gitadapter.Adapter{}
+	if err := adapter.CreateBranch(ctx, repoRoot, branchName, "main"); err != nil {
+		t.Fatalf("CreateBranch(%s) error = %v", keySuffix, err)
+	}
+	if err := adapter.AddWorktree(ctx, repoRoot, worktreePath, branchName); err != nil {
+		t.Fatalf("AddWorktree(%s) error = %v", keySuffix, err)
+	}
+
+	lease, err := store.CreateWorktreeLease(ctx, sqlite.CreateWorktreeLeaseParams{
+		ProjectID:    project.ID,
+		TaskID:       task.ID,
+		RunID:        run.ID,
+		Mode:         "mutable",
+		BranchName:   branchName,
+		WorktreePath: worktreePath,
+		RepoRoot:     repoRoot,
+		State:        "active",
+	})
+	if err != nil {
+		t.Fatalf("CreateWorktreeLease(%s) error = %v", keySuffix, err)
+	}
+
+	if stale {
+		staleAt := time.Now().UTC().Add(-2 * time.Hour).Format(time.RFC3339Nano)
+		if _, err := store.DB().ExecContext(ctx, `
+			UPDATE worktree_leases
+			SET heartbeat_at = ?, updated_at = ?
+			WHERE id = ?
+		`, staleAt, staleAt, lease.ID); err != nil {
+			t.Fatalf("force stale worktree lease (%s): %v", keySuffix, err)
+		}
+		lease, err = store.GetWorktreeLease(ctx, lease.ID)
+		if err != nil {
+			t.Fatalf("GetWorktreeLease(%s) error = %v", keySuffix, err)
+		}
+		return serveCleanupLeaseFixture{Lease: lease, WorktreePath: worktreePath}
+	}
+
+	lease, err = store.ReleaseWorktreeLease(ctx, sqlite.ReleaseWorktreeLeaseParams{
+		LeaseID: lease.ID,
+		State:   "released",
+	})
+	if err != nil {
+		t.Fatalf("ReleaseWorktreeLease(%s) error = %v", keySuffix, err)
+	}
+
+	return serveCleanupLeaseFixture{Lease: lease, WorktreePath: worktreePath}
+}
+
+func serveCleanupFixturesCleaned(ctx context.Context, store *sqlite.Store, fixtures []serveCleanupLeaseFixture) bool {
+	for _, fixture := range fixtures {
+		current, err := store.GetWorktreeLease(ctx, fixture.Lease.ID)
+		if err != nil || current.CleanedUpAt == nil {
+			return false
+		}
+	}
+	return true
 }
 
 func runServeGit(ctx context.Context, repoRoot string, args ...string) error {

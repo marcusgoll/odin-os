@@ -103,6 +103,53 @@ func TestManagerCleanupPreservesActiveLease(t *testing.T) {
 	}
 }
 
+func TestManagerCleanupRemovesStaleActiveLeaseDeterministically(t *testing.T) {
+	ctx := context.Background()
+	store, project, task, run := openCleanupStore(t)
+	defer store.Close()
+
+	lease, err := store.CreateWorktreeLease(ctx, sqlite.CreateWorktreeLeaseParams{
+		ProjectID:    project.ID,
+		TaskID:       task.ID,
+		RunID:        run.ID,
+		Mode:         "mutable",
+		BranchName:   "odin/cfipros/task-1/run-1/try-1",
+		WorktreePath: "/var/tmp/odin-worktrees/cfipros/task-1/run-1/try-1",
+		RepoRoot:     project.GitRoot,
+		State:        "active",
+	})
+	if err != nil {
+		t.Fatalf("CreateWorktreeLease() error = %v", err)
+	}
+
+	forceLeaseHeartbeatAt(t, ctx, store, lease.ID, time.Now().UTC().Add(-2*time.Hour))
+
+	git := &cleanupGit{}
+	manager := Manager{Store: store, Git: git}
+
+	result, err := manager.Cleanup(ctx, time.Now().UTC().Add(-30*time.Minute))
+	if err != nil {
+		t.Fatalf("Cleanup() error = %v", err)
+	}
+	if len(result.Removed) != 1 {
+		t.Fatalf("Cleanup().Removed len = %d, want 1", len(result.Removed))
+	}
+	if git.removeCalls != 1 {
+		t.Fatalf("git remove calls = %d, want 1", git.removeCalls)
+	}
+
+	updated, err := store.GetWorktreeLease(ctx, lease.ID)
+	if err != nil {
+		t.Fatalf("GetWorktreeLease() error = %v", err)
+	}
+	if updated.State != "cleaned" {
+		t.Fatalf("GetWorktreeLease().State = %q, want %q", updated.State, "cleaned")
+	}
+	if updated.CleanedUpAt == nil {
+		t.Fatalf("GetWorktreeLease().CleanedUpAt = nil, want value")
+	}
+}
+
 type cleanupGit struct {
 	removeCalls int
 }
@@ -160,4 +207,17 @@ func openCleanupStore(t *testing.T) (*sqlite.Store, sqlite.Project, sqlite.Task,
 	}
 
 	return store, project, task, run
+}
+
+func forceLeaseHeartbeatAt(t *testing.T, ctx context.Context, store *sqlite.Store, leaseID int64, when time.Time) {
+	t.Helper()
+
+	formatted := when.UTC().Format(time.RFC3339Nano)
+	if _, err := store.DB().ExecContext(ctx, `
+		UPDATE worktree_leases
+		SET heartbeat_at = ?, updated_at = ?
+		WHERE id = ?
+	`, formatted, formatted, leaseID); err != nil {
+		t.Fatalf("force lease heartbeat error = %v", err)
+	}
 }
