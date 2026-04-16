@@ -9,6 +9,7 @@ import (
 
 var errMissingSnapshotLoader = errors.New("capabilities snapshot loader is required")
 var errNilService = errors.New("capabilities service is nil")
+var errStaleReloadSnapshot = errors.New("capabilities snapshot changed during reload")
 
 type LoaderFunc func(context.Context) (Snapshot, error)
 
@@ -73,17 +74,60 @@ func (s *Service) Reload(ctx context.Context) (Snapshot, error) {
 		return Snapshot{}, err
 	}
 
+	expectedDigest := s.activeDigest()
 	next, err := loader(ctx)
 	if err != nil {
 		s.emitSnapshotRejected(s.currentSnapshot(), next, err)
 		return Snapshot{}, err
 	}
 
-	if err := s.Publish(next); err != nil {
+	if err := s.publishIfCurrent(expectedDigest, next); err != nil {
 		return Snapshot{}, err
 	}
 
 	return s.Active(), nil
+}
+
+func (s *Service) publishIfCurrent(expectedDigest string, next Snapshot) error {
+	if s == nil {
+		return errNilService
+	}
+
+	if err := validateSnapshot(next); err != nil {
+		s.emitSnapshotRejected(s.currentSnapshot(), next, err)
+		return err
+	}
+
+	s.mu.Lock()
+	previous := cloneSnapshot(s.active)
+	if previous.Digest != expectedDigest {
+		sink := s.sink
+		s.mu.Unlock()
+		if sink == nil {
+			sink = noopEventSink
+		}
+		sink(runtimeevents.EventCapabilitySnapshotRejected, runtimeevents.CapabilitySnapshotRejectedPayload{
+			PreviousDigest:  previous.Digest,
+			Digest:          next.Digest,
+			CapabilityCount: len(next.Capabilities),
+			Reason:          errStaleReloadSnapshot.Error(),
+		})
+		return errStaleReloadSnapshot
+	}
+	cloned := cloneSnapshot(next)
+	s.active = cloned
+	sink := s.sink
+	s.mu.Unlock()
+
+	if sink == nil {
+		sink = noopEventSink
+	}
+	sink(runtimeevents.EventCapabilitySnapshotPublished, runtimeevents.CapabilitySnapshotPublishedPayload{
+		PreviousDigest:  previous.Digest,
+		Digest:          cloned.Digest,
+		CapabilityCount: len(cloned.Capabilities),
+	})
+	return nil
 }
 
 func (s *Service) emitSnapshotRejected(previous Snapshot, next Snapshot, err error) {

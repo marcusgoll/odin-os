@@ -48,6 +48,15 @@ func (s *Service) Active() Snapshot {
 	return cloneSnapshot(s.active)
 }
 
+func (s *Service) activeDigest() string {
+	if s == nil {
+		return ""
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.active.Digest
+}
+
 func (s *Service) currentSnapshot() Snapshot {
 	if s == nil {
 		return Snapshot{}

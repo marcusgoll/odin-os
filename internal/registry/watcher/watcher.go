@@ -61,6 +61,9 @@ func (watcher *ManualWatcher) Events() <-chan Event {
 }
 
 func (watcher *ManualWatcher) Send(event Event) bool {
+	defer func() {
+		_ = recover()
+	}()
 	select {
 	case watcher.events <- event:
 		return true

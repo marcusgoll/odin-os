@@ -1,7 +1,10 @@
 package capabilities
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"sync"
 	"testing"
 
 	"odin-os/internal/registry"
@@ -137,6 +140,74 @@ func TestPublishEmitsCapabilitySnapshotEvents(t *testing.T) {
 	}
 	if rejected.PreviousDigest != "digest-b" {
 		t.Fatalf("rejected payload previous digest = %q, want digest-b", rejected.PreviousDigest)
+	}
+}
+
+func TestReloadDoesNotOverwriteNewerPublish(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	events := make([]capturedEvent, 0, 2)
+	var eventsMu sync.Mutex
+	var startedOnce sync.Once
+	service, err := NewService(testSnapshot("digest-a", "alpha"),
+		WithLoader(func(ctx context.Context) (Snapshot, error) {
+			startedOnce.Do(func() { close(started) })
+			<-release
+			return testSnapshot("digest-stale", "beta"), nil
+		}),
+		WithEventSink(func(typ runtimeevents.Type, payload any) {
+			raw, err := runtimeevents.EncodePayload(payload)
+			if err != nil {
+				t.Fatalf("EncodePayload() error = %v", err)
+			}
+			eventsMu.Lock()
+			defer eventsMu.Unlock()
+			events = append(events, capturedEvent{typ: typ, payload: raw})
+		}),
+	)
+	if err != nil {
+		t.Fatalf("NewService() error = %v", err)
+	}
+
+	reloadErr := make(chan error, 1)
+	go func() {
+		_, err := service.Reload(context.Background())
+		reloadErr <- err
+	}()
+
+	<-started
+	if err := service.Publish(testSnapshot("digest-b", "beta")); err != nil {
+		t.Fatalf("Publish() error = %v", err)
+	}
+	close(release)
+
+	err = <-reloadErr
+	if !errors.Is(err, errStaleReloadSnapshot) {
+		t.Fatalf("Reload() error = %v, want stale reload rejection", err)
+	}
+
+	active := service.Active()
+	if active.Digest != "digest-b" {
+		t.Fatalf("Active().Digest = %q, want digest-b", active.Digest)
+	}
+
+	eventsMu.Lock()
+	defer eventsMu.Unlock()
+	if len(events) != 2 {
+		t.Fatalf("events len = %d, want 2", len(events))
+	}
+	if events[0].typ != runtimeevents.EventCapabilitySnapshotPublished {
+		t.Fatalf("event[0] type = %q, want %q", events[0].typ, runtimeevents.EventCapabilitySnapshotPublished)
+	}
+	if events[1].typ != runtimeevents.EventCapabilitySnapshotRejected {
+		t.Fatalf("event[1] type = %q, want %q", events[1].typ, runtimeevents.EventCapabilitySnapshotRejected)
+	}
+	rejected, err := runtimeevents.DecodePayload[runtimeevents.CapabilitySnapshotRejectedPayload](events[1].payload)
+	if err != nil {
+		t.Fatalf("DecodePayload(CapabilitySnapshotRejectedPayload) error = %v", err)
+	}
+	if rejected.Reason != errStaleReloadSnapshot.Error() {
+		t.Fatalf("rejected payload reason = %q, want %q", rejected.Reason, errStaleReloadSnapshot.Error())
 	}
 }
 
