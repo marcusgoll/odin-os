@@ -152,25 +152,20 @@ func (service Service) ensureDefaultWorkspacePolicy(ctx context.Context, workspa
 }
 
 func (service Service) ensureDefaultCompanion(ctx context.Context, workspaceID int64, key string) error {
-	_, err := service.Store.GetCompanionByKey(ctx, workspaceID, key)
-	if err == nil {
+	hasTable, err := service.Store.HasTable(ctx, "companions")
+	if err != nil {
+		return err
+	}
+	if !hasTable {
 		return nil
 	}
-	if !errors.Is(err, sql.ErrNoRows) {
+
+	if _, err := service.Store.GetCompanionByKey(ctx, workspaceID, key); err == nil {
+		return nil
+	}
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
 
-	_, err = service.Store.UpsertCompanion(ctx, sqlite.UpsertCompanionParams{
-		WorkspaceID:         workspaceID,
-		Key:                 key,
-		Title:               DefaultWorkspaceCompanionTitle,
-		Kind:                DefaultWorkspaceCompanionKind,
-		Charter:             DefaultWorkspaceCompanionCharter,
-		Status:              DefaultWorkspaceCompanionStatus,
-		InitiativeScopeJSON: `{}`,
-		ToolPolicyJSON:      `{}`,
-		MemoryPolicyJSON:    `{}`,
-		PlanningPolicyJSON:  `{}`,
-	})
-	return err
+	return service.Store.EnsureDefaultCompanion(ctx, workspaceID, key)
 }

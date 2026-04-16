@@ -4,6 +4,7 @@ import (
 	"context"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestCompanionStoreMigrationAndRoundTrip(t *testing.T) {
@@ -252,6 +253,129 @@ func TestRegisterManagedProjectPreservesExistingDefaultCompanion(t *testing.T) {
 	}
 	if after.PlanningPolicyJSON != `{"mode":"planning"}` {
 		t.Fatalf("RegisterManagedProject() overwrote planning policy = %q, want %q", after.PlanningPolicyJSON, `{"mode":"planning"}`)
+	}
+}
+
+func TestEnsureDefaultCompanionPreservesConcurrentCustomCreate(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "odin.db")
+
+	first, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open(first) error = %v", err)
+	}
+	defer first.Close()
+
+	second, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open(second) error = %v", err)
+	}
+	defer second.Close()
+
+	if err := first.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate(first) error = %v", err)
+	}
+
+	workspace, err := first.GetWorkspaceByKey(ctx, "default")
+	if err != nil {
+		t.Fatalf("GetWorkspaceByKey(default) error = %v", err)
+	}
+
+	if _, err := first.DB().ExecContext(ctx, `
+		DELETE FROM companions
+		WHERE workspace_id = ? AND key = ?
+	`, workspace.ID, workspace.DefaultCompanionKey); err != nil {
+		t.Fatalf("delete default companion error = %v", err)
+	}
+
+	tx, err := first.DB().BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("BeginTx() error = %v", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO companions (
+			workspace_id,
+			key,
+			title,
+			kind,
+			charter,
+			status,
+			initiative_scope_json,
+			tool_policy_json,
+			memory_policy_json,
+			planning_policy_json,
+			created_at,
+			updated_at
+		)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, workspace.ID, workspace.DefaultCompanionKey, "Custom Assistant", "assistant", "Custom charter", "active", `{"initiatives":["alpha"]}`, `{"allow":["merge_to_main"]}`, `{"mode":"global"}`, `{"mode":"planning"}`, time.Now().UTC().Format(time.RFC3339Nano), time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+		t.Fatalf("seed custom companion in tx error = %v", err)
+	}
+
+	started := make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		close(started)
+		done <- second.EnsureDefaultCompanion(ctx, workspace.ID, workspace.DefaultCompanionKey)
+	}()
+	<-started
+
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("Commit() error = %v", err)
+	}
+
+	if err := <-done; err != nil {
+		t.Fatalf("EnsureDefaultCompanion() error = %v", err)
+	}
+
+	after, err := first.GetCompanionByKey(ctx, workspace.ID, workspace.DefaultCompanionKey)
+	if err != nil {
+		t.Fatalf("GetCompanionByKey(default) error = %v", err)
+	}
+	if after.Title != "Custom Assistant" {
+		t.Fatalf("EnsureDefaultCompanion() overwrote title = %q, want %q", after.Title, "Custom Assistant")
+	}
+	if after.Charter != "Custom charter" {
+		t.Fatalf("EnsureDefaultCompanion() overwrote charter = %q, want %q", after.Charter, "Custom charter")
+	}
+}
+
+func TestEnsureDefaultCompanionCreatesMissingRow(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store, err := Open(filepath.Join(t.TempDir(), "odin.db"))
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer store.Close()
+
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
+	}
+
+	workspace, err := store.GetWorkspaceByKey(ctx, "default")
+	if err != nil {
+		t.Fatalf("GetWorkspaceByKey(default) error = %v", err)
+	}
+
+	if _, err := store.DB().ExecContext(ctx, `
+		DELETE FROM companions
+		WHERE workspace_id = ? AND key = ?
+	`, workspace.ID, workspace.DefaultCompanionKey); err != nil {
+		t.Fatalf("delete default companion error = %v", err)
+	}
+
+	if err := store.EnsureDefaultCompanion(ctx, workspace.ID, workspace.DefaultCompanionKey); err != nil {
+		t.Fatalf("EnsureDefaultCompanion() error = %v", err)
+	}
+
+	after, err := store.GetCompanionByKey(ctx, workspace.ID, workspace.DefaultCompanionKey)
+	if err != nil {
+		t.Fatalf("GetCompanionByKey(default) error = %v", err)
+	}
+	if after.Title != "Primary Assistant" {
+		t.Fatalf("EnsureDefaultCompanion() title = %q, want %q", after.Title, "Primary Assistant")
 	}
 }
 

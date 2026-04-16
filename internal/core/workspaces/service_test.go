@@ -324,6 +324,61 @@ func TestWorkspaceServiceBootstrapDefaultWorkspacePreservesExistingDefaultCompan
 	}
 }
 
+func TestWorkspaceServiceBootstrapsDefaultWorkspaceWithoutCompanionsTable(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store, err := sqlite.Open(filepath.Join(t.TempDir(), "odin.db"))
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer store.Close()
+
+	if _, err := store.DB().ExecContext(ctx, `
+		CREATE TABLE IF NOT EXISTS workspaces (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			key TEXT NOT NULL UNIQUE,
+			name TEXT NOT NULL,
+			owner_ref TEXT NOT NULL,
+			default_companion_key TEXT NOT NULL,
+			status TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL
+		)
+	`); err != nil {
+		t.Fatalf("create workspaces table error = %v", err)
+	}
+	if _, err := store.DB().ExecContext(ctx, `
+		CREATE TABLE IF NOT EXISTS workspace_policies (
+			workspace_id INTEGER PRIMARY KEY,
+			policy_json TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			FOREIGN KEY(workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
+		)
+	`); err != nil {
+		t.Fatalf("create workspace_policies table error = %v", err)
+	}
+	if _, err := store.DB().ExecContext(ctx, `
+		CREATE TABLE IF NOT EXISTS schema_migrations (
+			version INTEGER PRIMARY KEY,
+			name TEXT NOT NULL,
+			applied_at TEXT NOT NULL
+		)
+	`); err != nil {
+		t.Fatalf("create schema_migrations table error = %v", err)
+	}
+
+	service := Service{Store: store}
+	bootstrapped, err := service.BootstrapDefaultWorkspace(ctx)
+	if err != nil {
+		t.Fatalf("BootstrapDefaultWorkspace() error = %v", err)
+	}
+	if bootstrapped.Key != DefaultWorkspaceKey {
+		t.Fatalf("BootstrapDefaultWorkspace().Key = %q, want %q", bootstrapped.Key, DefaultWorkspaceKey)
+	}
+}
+
 func openWorkspaceServiceStore(t *testing.T) *sqlite.Store {
 	t.Helper()
 

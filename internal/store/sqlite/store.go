@@ -192,6 +192,17 @@ func (store *Store) UpsertCompanion(ctx context.Context, params UpsertCompanionP
 	return companion, err
 }
 
+func (store *Store) EnsureCompanion(ctx context.Context, workspaceID int64, key string) error {
+	now := store.now()
+	return store.withTx(ctx, func(tx *sql.Tx) error {
+		return store.ensureDefaultCompanionTx(ctx, tx, workspaceID, key, now)
+	})
+}
+
+func (store *Store) EnsureDefaultCompanion(ctx context.Context, workspaceID int64, key string) error {
+	return store.EnsureCompanion(ctx, workspaceID, key)
+}
+
 func (store *Store) RegisterManagedProject(ctx context.Context, params ManagedProjectRegistrationParams) (Project, error) {
 	now := store.now()
 	var project Project
@@ -2675,6 +2686,20 @@ func (store *Store) ensureDefaultCompanionTx(ctx context.Context, tx *sql.Tx, wo
 		formatTime(now),
 	)
 	return err
+}
+
+func (store *Store) HasTable(ctx context.Context, tableName string) (bool, error) {
+	var exists int
+	if err := store.db.QueryRowContext(ctx, `
+		SELECT EXISTS(
+			SELECT 1
+			FROM sqlite_master
+			WHERE type = 'table' AND name = ?
+		)
+	`, tableName).Scan(&exists); err != nil {
+		return false, err
+	}
+	return exists == 1, nil
 }
 
 func (store *Store) tableExistsTx(ctx context.Context, tx *sql.Tx, tableName string) (bool, error) {
