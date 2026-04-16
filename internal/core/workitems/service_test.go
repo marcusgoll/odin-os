@@ -3,6 +3,7 @@ package workitems
 import (
 	"context"
 	"path/filepath"
+	"reflect"
 	"testing"
 
 	"odin-os/internal/core/initiatives"
@@ -103,6 +104,51 @@ func TestWorkItemServiceRejectsApprovalForTerminalTasks(t *testing.T) {
 	}
 }
 
+func TestWorkItemServiceRejectsApprovalForBlockedTasks(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openWorkItemServiceStore(t)
+	defer store.Close()
+
+	workspaceID, projectID, initiativeID, companionID := seedWorkItemLinks(t, ctx, store)
+	service := Service{Store: store}
+
+	blockedTask := mustQueueWorkItemTask(t, ctx, service, projectID, workspaceID, initiativeID, companionID, "blocked-item")
+	blocked, err := service.Block(ctx, blockedTask.ID)
+	if err != nil {
+		t.Fatalf("Block() error = %v", err)
+	}
+	if blocked.Status != "blocked" {
+		t.Fatalf("Block().Status = %q, want blocked", blocked.Status)
+	}
+
+	_, _, err = service.RequestApproval(ctx, blockedTask.ID, nil, "operator")
+	if err == nil {
+		t.Fatal("RequestApproval() error = nil, want blocked-task rejection")
+	}
+
+	gotTask, err := store.GetTask(ctx, blockedTask.ID)
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
+	}
+	if gotTask.Status != "blocked" {
+		t.Fatalf("GetTask().Status = %q, want blocked", gotTask.Status)
+	}
+
+	var approvalCount int
+	if err := store.DB().QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM approvals
+		WHERE task_id = ?
+	`, blockedTask.ID).Scan(&approvalCount); err != nil {
+		t.Fatalf("count approvals error = %v", err)
+	}
+	if approvalCount != 0 {
+		t.Fatalf("approval count = %d, want 0", approvalCount)
+	}
+}
+
 func TestWorkItemServiceRequeuesTasks(t *testing.T) {
 	t.Parallel()
 
@@ -160,6 +206,45 @@ func TestWorkItemServiceFinalizesTaskFromExecutorStatus(t *testing.T) {
 	}
 }
 
+func TestWorkItemServiceQueuesTasksAsQueuedEvenWithCallerStatus(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openWorkItemServiceStore(t)
+	defer store.Close()
+
+	workspaceID, projectID, initiativeID, companionID := seedWorkItemLinks(t, ctx, store)
+	service := Service{Store: store}
+
+	task, err := service.Queue(ctx, sqlite.CreateTaskParams{
+		ProjectID:    projectID,
+		Key:          "caller-status-item",
+		Title:        "Queue work item",
+		Status:       "blocked",
+		Scope:        "project",
+		RequestedBy:  "operator",
+		WorkspaceID:  &workspaceID,
+		InitiativeID: &initiativeID,
+		CompanionID:  &companionID,
+		WorkKind:     "delivery",
+	})
+	if err != nil {
+		t.Fatalf("Queue() error = %v", err)
+	}
+
+	if task.Status != "queued" {
+		t.Fatalf("Queue().Status = %q, want queued", task.Status)
+	}
+
+	gotTask, err := store.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
+	}
+	if gotTask.Status != "queued" {
+		t.Fatalf("GetTask().Status = %q, want queued", gotTask.Status)
+	}
+}
+
 func TestWorkItemServiceQueuesTasksWithSemanticLinks(t *testing.T) {
 	t.Parallel()
 
@@ -208,8 +293,8 @@ func TestWorkItemServiceQueuesTasksWithSemanticLinks(t *testing.T) {
 	if item.ID != task.ID {
 		t.Fatalf("Get().ID = %d, want %d", item.ID, task.ID)
 	}
-	if item.WorkspaceID != workspaceID {
-		t.Fatalf("Get().WorkspaceID = %d, want %d", item.WorkspaceID, workspaceID)
+	if item.WorkspaceID == nil || *item.WorkspaceID != workspaceID {
+		t.Fatalf("Get().WorkspaceID = %v, want %d", item.WorkspaceID, workspaceID)
 	}
 	if item.InitiativeID == nil || *item.InitiativeID != initiativeID {
 		t.Fatalf("Get().InitiativeID = %v, want %d", item.InitiativeID, initiativeID)
@@ -222,6 +307,50 @@ func TestWorkItemServiceQueuesTasksWithSemanticLinks(t *testing.T) {
 	}
 	if item.Status != "queued" {
 		t.Fatalf("Get().Status = %q, want queued", item.Status)
+	}
+}
+
+func TestWorkItemServicePreservesNilWorkspaceID(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openWorkItemServiceStore(t)
+	defer store.Close()
+
+	_, projectID, initiativeID, companionID := seedWorkItemLinks(t, ctx, store)
+	service := Service{Store: store}
+
+	task, err := service.Queue(ctx, sqlite.CreateTaskParams{
+		ProjectID:    projectID,
+		Key:          "nil-workspace-item",
+		Title:        "Queue work item",
+		Scope:        "project",
+		RequestedBy:  "operator",
+		InitiativeID: &initiativeID,
+		CompanionID:  &companionID,
+		WorkKind:     "delivery",
+	})
+	if err != nil {
+		t.Fatalf("Queue() error = %v", err)
+	}
+	if task.WorkspaceID != nil {
+		t.Fatalf("Queue().WorkspaceID = %v, want nil", task.WorkspaceID)
+	}
+
+	item, err := service.Get(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	if item.WorkspaceID != nil {
+		t.Fatalf("Get().WorkspaceID = %v, want nil", item.WorkspaceID)
+	}
+
+	field, ok := reflect.TypeOf(item).FieldByName("WorkspaceID")
+	if !ok {
+		t.Fatal("WorkItem.WorkspaceID field is missing")
+	}
+	if field.Type.Kind() != reflect.Ptr || field.Type.Elem().Kind() != reflect.Int64 {
+		t.Fatalf("WorkItem.WorkspaceID type = %s, want *int64", field.Type)
 	}
 }
 

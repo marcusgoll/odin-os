@@ -24,9 +24,7 @@ func (service Service) Queue(ctx context.Context, params sqlite.CreateTaskParams
 	if service.Store == nil {
 		return sqlite.Task{}, fmt.Errorf("work item store is required")
 	}
-	if params.Status == "" {
-		params.Status = statusQueued
-	}
+	params.Status = statusQueued
 
 	task, err := service.Store.CreateTask(ctx, params)
 	if err != nil {
@@ -86,6 +84,9 @@ func (service Service) RequestApproval(ctx context.Context, taskID int64, runID 
 	if isTerminalStatus(current.Status) {
 		return sqlite.Approval{}, WorkItem{}, fmt.Errorf("task %d is already %s", taskID, current.Status)
 	}
+	if current.Status == statusBlocked {
+		return sqlite.Approval{}, WorkItem{}, fmt.Errorf("task %d is already %s", taskID, current.Status)
+	}
 
 	task, approval, err := service.Store.BlockTaskAndRequestApproval(ctx, sqlite.BlockTaskAndRequestApprovalParams{
 		TaskID:      taskID,
@@ -134,14 +135,11 @@ func toDomainWorkItem(task sqlite.Task) WorkItem {
 	item := WorkItem{
 		ID:           task.ID,
 		Key:          task.Key,
-		WorkspaceID:  0,
+		WorkspaceID:  task.WorkspaceID,
 		InitiativeID: task.InitiativeID,
 		CompanionID:  task.CompanionID,
 		WorkKind:     task.WorkKind,
 		Status:       task.Status,
-	}
-	if task.WorkspaceID != nil {
-		item.WorkspaceID = *task.WorkspaceID
 	}
 	return item
 }
