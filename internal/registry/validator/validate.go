@@ -53,6 +53,15 @@ func validateDocument(document registry.ParsedDocument) []registry.Diagnostic {
 		))
 	}
 
+	if document.Frontmatter.HasUnsupportedAPIVersion() {
+		diagnostics = append(diagnostics, registry.ErrorDiagnostic(
+			document.Source.Path,
+			"unsupported_api_version",
+			fmt.Sprintf("frontmatter apiVersion %q is not supported; expected %q", document.Frontmatter.APIVersion, registry.NormalizedAPIVersion),
+		))
+		return diagnostics
+	}
+
 	if document.Frontmatter.UsesNormalizedManifest() {
 		requireString(document.Source.Path, &diagnostics, "missing_field", "apiVersion", document.Frontmatter.APIVersion)
 		requireString(document.Source.Path, &diagnostics, "missing_field", "name", document.Frontmatter.Name)

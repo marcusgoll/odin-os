@@ -5,6 +5,8 @@ import (
 	"strings"
 )
 
+const NormalizedAPIVersion = "odin/v1"
+
 type Kind string
 
 const (
@@ -194,7 +196,12 @@ func (kind Kind) IsInvokable() bool {
 }
 
 func (frontmatter Frontmatter) UsesNormalizedManifest() bool {
-	return strings.TrimSpace(frontmatter.APIVersion) != ""
+	return strings.TrimSpace(frontmatter.APIVersion) == NormalizedAPIVersion
+}
+
+func (frontmatter Frontmatter) HasUnsupportedAPIVersion() bool {
+	apiVersion := strings.TrimSpace(frontmatter.APIVersion)
+	return apiVersion != "" && apiVersion != NormalizedAPIVersion
 }
 
 func KindFromDirectory(name string) Kind {
