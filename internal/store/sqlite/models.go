@@ -246,6 +246,32 @@ type WorktreeLease struct {
 	UpdatedAt    time.Time
 }
 
+type RuntimeState struct {
+	SingletonKey       string
+	BootID             string
+	Status             string
+	PID                int
+	StartedAt          time.Time
+	ReadyAt            *time.Time
+	LastHeartbeatAt    time.Time
+	LastShutdownReason string
+	LastError          string
+	UpdatedAt          time.Time
+}
+
+type UpsertRuntimeStateParams struct {
+	BootID             string
+	Status             string
+	PID                int
+	StartedAt          time.Time
+	ReadyAt            *time.Time
+	LastHeartbeatAt    time.Time
+	LastShutdownReason string
+	LastError          string
+	UpdatedAt          time.Time
+	EventReason        string
+}
+
 type CreateWorktreeLeaseParams struct {
 	ProjectID    int64
 	TaskID       int64

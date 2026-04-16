@@ -16,6 +16,12 @@ import (
 
 var ErrWorktreeLeaseConflict = errors.New("worktree lease conflict")
 
+const (
+	runtimeStateSingletonKey = "primary"
+	runtimeStateStreamID     = int64(1)
+	runtimeStateScope        = "service"
+)
+
 type Store struct {
 	db        *sql.DB
 	closeOnce sync.Once
@@ -1947,6 +1953,158 @@ func (store *Store) RecordProjectionFreshness(ctx context.Context, params Record
 	return store.GetProjectionFreshness(ctx, params.Surface)
 }
 
+func (store *Store) GetRuntimeState(ctx context.Context) (RuntimeState, error) {
+	row := store.db.QueryRowContext(ctx, `
+		SELECT
+			singleton_key,
+			boot_id,
+			status,
+			pid,
+			started_at,
+			ready_at,
+			last_heartbeat_at,
+			last_shutdown_reason,
+			last_error,
+			updated_at
+		FROM runtime_state
+		WHERE singleton_key = ?
+	`, runtimeStateSingletonKey)
+	return scanRuntimeState(row)
+}
+
+func (store *Store) UpsertRuntimeState(ctx context.Context, params UpsertRuntimeStateParams) (RuntimeState, error) {
+	updatedAt := params.UpdatedAt.UTC()
+	if updatedAt.IsZero() {
+		updatedAt = store.now()
+	}
+
+	startedAt := params.StartedAt.UTC()
+	if startedAt.IsZero() {
+		startedAt = updatedAt
+	}
+
+	lastHeartbeatAt := params.LastHeartbeatAt.UTC()
+	if lastHeartbeatAt.IsZero() {
+		lastHeartbeatAt = updatedAt
+	}
+
+	var readyAtValue any
+	if params.ReadyAt != nil {
+		readyAtUTC := params.ReadyAt.UTC()
+		params.ReadyAt = &readyAtUTC
+		readyAtValue = formatTime(readyAtUTC)
+	}
+
+	state := RuntimeState{
+		SingletonKey:       runtimeStateSingletonKey,
+		BootID:             params.BootID,
+		Status:             params.Status,
+		PID:                params.PID,
+		StartedAt:          startedAt,
+		ReadyAt:            params.ReadyAt,
+		LastHeartbeatAt:    lastHeartbeatAt,
+		LastShutdownReason: params.LastShutdownReason,
+		LastError:          params.LastError,
+		UpdatedAt:          updatedAt,
+	}
+
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO runtime_state (
+				singleton_key,
+				boot_id,
+				status,
+				pid,
+				started_at,
+				ready_at,
+				last_heartbeat_at,
+				last_shutdown_reason,
+				last_error,
+				updated_at
+			)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT(singleton_key) DO UPDATE SET
+				boot_id = excluded.boot_id,
+				status = excluded.status,
+				pid = excluded.pid,
+				started_at = excluded.started_at,
+				ready_at = excluded.ready_at,
+				last_heartbeat_at = excluded.last_heartbeat_at,
+				last_shutdown_reason = excluded.last_shutdown_reason,
+				last_error = excluded.last_error,
+				updated_at = excluded.updated_at
+		`,
+			state.SingletonKey,
+			state.BootID,
+			state.Status,
+			state.PID,
+			formatTime(state.StartedAt),
+			readyAtValue,
+			formatTime(state.LastHeartbeatAt),
+			state.LastShutdownReason,
+			state.LastError,
+			formatTime(state.UpdatedAt),
+		); err != nil {
+			return err
+		}
+
+		return appendEventTx(ctx, tx, eventInsert{
+			StreamType: runtimeevents.StreamService,
+			StreamID:   runtimeStateStreamID,
+			EventType:  runtimeevents.EventServiceLifecycleChanged,
+			Scope:      runtimeStateScope,
+			Payload: runtimeevents.ServiceLifecyclePayload{
+				BootID: state.BootID,
+				Status: state.Status,
+				Reason: params.EventReason,
+				PID:    state.PID,
+			},
+			OccurredAt: state.UpdatedAt,
+		})
+	})
+
+	return state, err
+}
+
+func (store *Store) UpdateRuntimeHeartbeat(ctx context.Context) (RuntimeState, error) {
+	now := store.now()
+	var state RuntimeState
+
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		current, err := getRuntimeStateTx(ctx, tx)
+		if err != nil {
+			return err
+		}
+
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE runtime_state
+			SET last_heartbeat_at = ?, updated_at = ?
+			WHERE singleton_key = ?
+		`, formatTime(now), formatTime(now), runtimeStateSingletonKey); err != nil {
+			return err
+		}
+
+		current.LastHeartbeatAt = now
+		current.UpdatedAt = now
+		state = current
+
+		return appendEventTx(ctx, tx, eventInsert{
+			StreamType: runtimeevents.StreamService,
+			StreamID:   runtimeStateStreamID,
+			EventType:  runtimeevents.EventServiceHeartbeatRecorded,
+			Scope:      runtimeStateScope,
+			Payload: runtimeevents.ServiceHeartbeatPayload{
+				BootID: state.BootID,
+				Status: state.Status,
+				PID:    state.PID,
+			},
+			OccurredAt: now,
+		})
+	})
+
+	return state, err
+}
+
 func (store *Store) GetProjectionFreshness(ctx context.Context, surface string) (ProjectionFreshness, error) {
 	row := store.db.QueryRowContext(ctx, `
 		SELECT surface, status, refreshed_at, details_json, updated_at
@@ -2876,6 +3034,47 @@ func scanLearningPromotion(row interface{ Scan(...any) error }) (LearningPromoti
 	return promotion, nil
 }
 
+func scanRuntimeState(row interface{ Scan(...any) error }) (RuntimeState, error) {
+	var state RuntimeState
+	var readyAt sql.NullString
+	var startedAt string
+	var lastHeartbeatAt string
+	var updatedAt string
+	if err := row.Scan(
+		&state.SingletonKey,
+		&state.BootID,
+		&state.Status,
+		&state.PID,
+		&startedAt,
+		&readyAt,
+		&lastHeartbeatAt,
+		&state.LastShutdownReason,
+		&state.LastError,
+		&updatedAt,
+	); err != nil {
+		return RuntimeState{}, err
+	}
+
+	var err error
+	state.StartedAt, err = parseTime(startedAt)
+	if err != nil {
+		return RuntimeState{}, err
+	}
+	state.ReadyAt, err = parseNullableTime(readyAt)
+	if err != nil {
+		return RuntimeState{}, err
+	}
+	state.LastHeartbeatAt, err = parseTime(lastHeartbeatAt)
+	if err != nil {
+		return RuntimeState{}, err
+	}
+	state.UpdatedAt, err = parseTime(updatedAt)
+	if err != nil {
+		return RuntimeState{}, err
+	}
+	return state, nil
+}
+
 func scanWorktreeLease(row interface{ Scan(...any) error }) (WorktreeLease, error) {
 	var lease WorktreeLease
 	var heartbeatAt string
@@ -2990,6 +3189,25 @@ func scanEvent(rows *sql.Rows) (runtimeevents.Record, error) {
 	record.Payload = []byte(payload)
 	record.OccurredAt = parsed
 	return record, nil
+}
+
+func getRuntimeStateTx(ctx context.Context, tx *sql.Tx) (RuntimeState, error) {
+	row := tx.QueryRowContext(ctx, `
+		SELECT
+			singleton_key,
+			boot_id,
+			status,
+			pid,
+			started_at,
+			ready_at,
+			last_heartbeat_at,
+			last_shutdown_reason,
+			last_error,
+			updated_at
+		FROM runtime_state
+		WHERE singleton_key = ?
+	`, runtimeStateSingletonKey)
+	return scanRuntimeState(row)
 }
 
 func incidentStatusEvent(previousStatus string, status string, reason string) (runtimeevents.Type, any, bool) {

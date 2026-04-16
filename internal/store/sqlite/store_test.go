@@ -4,6 +4,7 @@ import (
 	"context"
 	"path/filepath"
 	"testing"
+	"time"
 
 	runtimeevents "odin-os/internal/runtime/events"
 	"odin-os/internal/runtime/projections"
@@ -224,8 +225,8 @@ func TestStoreMigrateLifecycleAndReopen(t *testing.T) {
 	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM schema_migrations`).Scan(&migrationCount); err != nil {
 		t.Fatalf("schema_migrations count query error = %v", err)
 	}
-	if migrationCount != 6 {
-		t.Fatalf("schema_migrations count = %d, want 6", migrationCount)
+	if migrationCount != 7 {
+		t.Fatalf("schema_migrations count = %d, want 7", migrationCount)
 	}
 
 	if err := store.Close(); err != nil {
@@ -663,5 +664,117 @@ func TestLearningProposalLifecycleSupportsEvaluationPromotionAndRollback(t *test
 	}
 	if counts[runtimeevents.EventLearningPromotionRolledBack] != 1 {
 		t.Fatalf("learning.promotion_rolled_back count = %d, want 1", counts[runtimeevents.EventLearningPromotionRolledBack])
+	}
+}
+
+func TestRuntimeStateStoreLifecycleAndHeartbeat(t *testing.T) {
+	ctx := context.Background()
+	store := openMigratedTestStore(t, "runtime-state.db")
+	defer store.Close()
+
+	bootAt := time.Date(2026, 4, 16, 9, 0, 0, 0, time.UTC)
+	readyAt := bootAt.Add(90 * time.Second)
+	heartbeatAt := readyAt.Add(45 * time.Second)
+	stoppedAt := heartbeatAt.Add(30 * time.Second)
+
+	state, err := store.UpsertRuntimeState(ctx, UpsertRuntimeStateParams{
+		BootID:          "boot-1",
+		Status:          "booting",
+		PID:             1234,
+		StartedAt:       bootAt,
+		LastHeartbeatAt: bootAt,
+	})
+	if err != nil {
+		t.Fatalf("UpsertRuntimeState(booting) error = %v", err)
+	}
+	if state.SingletonKey != "primary" {
+		t.Fatalf("SingletonKey = %q, want %q", state.SingletonKey, "primary")
+	}
+	if state.Status != "booting" {
+		t.Fatalf("Status = %q, want %q", state.Status, "booting")
+	}
+
+	state, err = store.UpsertRuntimeState(ctx, UpsertRuntimeStateParams{
+		BootID:          "boot-1",
+		Status:          "ready",
+		PID:             1234,
+		StartedAt:       bootAt,
+		ReadyAt:         &readyAt,
+		LastHeartbeatAt: readyAt,
+		UpdatedAt:       readyAt,
+	})
+	if err != nil {
+		t.Fatalf("UpsertRuntimeState(ready) error = %v", err)
+	}
+	if state.ReadyAt == nil || !state.ReadyAt.Equal(readyAt) {
+		t.Fatalf("ReadyAt = %v, want %v", state.ReadyAt, readyAt)
+	}
+
+	store.Now = func() time.Time { return heartbeatAt }
+	state, err = store.UpdateRuntimeHeartbeat(ctx)
+	if err != nil {
+		t.Fatalf("UpdateRuntimeHeartbeat() error = %v", err)
+	}
+	if !state.LastHeartbeatAt.Equal(heartbeatAt) {
+		t.Fatalf("LastHeartbeatAt = %v, want %v", state.LastHeartbeatAt, heartbeatAt)
+	}
+
+	state, err = store.UpsertRuntimeState(ctx, UpsertRuntimeStateParams{
+		BootID:             "boot-1",
+		Status:             "stopped",
+		PID:                1234,
+		StartedAt:          bootAt,
+		ReadyAt:            &readyAt,
+		LastHeartbeatAt:    heartbeatAt,
+		LastShutdownReason: "operator requested shutdown",
+		UpdatedAt:          stoppedAt,
+		EventReason:        "operator requested shutdown",
+	})
+	if err != nil {
+		t.Fatalf("UpsertRuntimeState(stopped) error = %v", err)
+	}
+	if state.LastShutdownReason != "operator requested shutdown" {
+		t.Fatalf("LastShutdownReason = %q, want %q", state.LastShutdownReason, "operator requested shutdown")
+	}
+
+	got, err := store.GetRuntimeState(ctx)
+	if err != nil {
+		t.Fatalf("GetRuntimeState() error = %v", err)
+	}
+	if got.Status != "stopped" {
+		t.Fatalf("GetRuntimeState().Status = %q, want %q", got.Status, "stopped")
+	}
+	if !got.LastHeartbeatAt.Equal(heartbeatAt) {
+		t.Fatalf("GetRuntimeState().LastHeartbeatAt = %v, want %v", got.LastHeartbeatAt, heartbeatAt)
+	}
+
+	events, err := store.ListEvents(ctx, ListEventsParams{})
+	if err != nil {
+		t.Fatalf("ListEvents() error = %v", err)
+	}
+
+	var lifecycleStatuses []string
+	var sawHeartbeat bool
+	for _, event := range events {
+		switch event.Type {
+		case runtimeevents.EventServiceLifecycleChanged:
+			payload, err := runtimeevents.DecodePayload[runtimeevents.ServiceLifecyclePayload](event.Payload)
+			if err != nil {
+				t.Fatalf("DecodePayload(ServiceLifecyclePayload) error = %v", err)
+			}
+			lifecycleStatuses = append(lifecycleStatuses, payload.Status)
+		case runtimeevents.EventServiceHeartbeatRecorded:
+			sawHeartbeat = true
+		}
+	}
+
+	if len(lifecycleStatuses) != 3 {
+		t.Fatalf("lifecycle event count = %d, want %d", len(lifecycleStatuses), 3)
+	}
+	if lifecycleStatuses[0] != "booting" || lifecycleStatuses[1] != "ready" || lifecycleStatuses[2] != "stopped" {
+		t.Fatalf("lifecycle statuses = %v, want [booting ready stopped]", lifecycleStatuses)
+	}
+	if !sawHeartbeat {
+		t.Fatalf("expected service heartbeat event, got %+v", events)
 	}
 }

@@ -8,6 +8,7 @@ import (
 type StreamType string
 
 const (
+	StreamService            StreamType = "service"
 	StreamProject            StreamType = "project"
 	StreamTask               StreamType = "task"
 	StreamRun                StreamType = "run"
@@ -25,6 +26,8 @@ const (
 type Type string
 
 const (
+	EventServiceLifecycleChanged          Type = "service.lifecycle_changed"
+	EventServiceHeartbeatRecorded         Type = "service.heartbeat_recorded"
 	EventProjectCreated                   Type = "project.created"
 	EventTaskCreated                      Type = "task.created"
 	EventTaskStatusChanged                Type = "task.status_changed"
@@ -66,6 +69,19 @@ type Record struct {
 	RunID      *int64
 	Payload    json.RawMessage
 	OccurredAt time.Time
+}
+
+type ServiceLifecyclePayload struct {
+	BootID string `json:"boot_id"`
+	Status string `json:"status"`
+	Reason string `json:"reason,omitempty"`
+	PID    int    `json:"pid"`
+}
+
+type ServiceHeartbeatPayload struct {
+	BootID string `json:"boot_id"`
+	Status string `json:"status"`
+	PID    int    `json:"pid"`
 }
 
 type ProjectCreatedPayload struct {
