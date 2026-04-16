@@ -2641,6 +2641,42 @@ func defaultCompanionParams(workspaceID int64, key string) UpsertCompanionParams
 	}
 }
 
+func (store *Store) ensureDefaultCompanionTx(ctx context.Context, tx *sql.Tx, workspaceID int64, key string, now time.Time) error {
+	params := defaultCompanionParams(workspaceID, key)
+	_, err := tx.ExecContext(ctx, `
+		INSERT INTO companions (
+			workspace_id,
+			key,
+			title,
+			kind,
+			charter,
+			status,
+			initiative_scope_json,
+			tool_policy_json,
+			memory_policy_json,
+			planning_policy_json,
+			created_at,
+			updated_at
+		)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(workspace_id, key) DO NOTHING
+	`,
+		params.WorkspaceID,
+		params.Key,
+		params.Title,
+		params.Kind,
+		params.Charter,
+		params.Status,
+		params.InitiativeScopeJSON,
+		params.ToolPolicyJSON,
+		params.MemoryPolicyJSON,
+		params.PlanningPolicyJSON,
+		formatTime(now),
+		formatTime(now),
+	)
+	return err
+}
+
 func (store *Store) tableExistsTx(ctx context.Context, tx *sql.Tx, tableName string) (bool, error) {
 	var exists int
 	if err := tx.QueryRowContext(ctx, `
@@ -2695,7 +2731,7 @@ func (store *Store) ensureWorkspaceTx(ctx context.Context, tx *sql.Tx, params Cr
 		return Workspace{}, err
 	}
 	if hasCompanionsTable {
-		if _, err := store.upsertCompanionTx(ctx, tx, defaultCompanionParams(workspace.ID, workspace.DefaultCompanionKey), now); err != nil {
+		if err := store.ensureDefaultCompanionTx(ctx, tx, workspace.ID, workspace.DefaultCompanionKey, now); err != nil {
 			return Workspace{}, err
 		}
 	}
