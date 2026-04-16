@@ -9,6 +9,8 @@ import (
 	"odin-os/internal/tools/invocation"
 )
 
+// BuiltinDefinitions contains bootstrap-only tool inventory until each tool has
+// a manifest-backed or gateway-backed replacement.
 func BuiltinDefinitions() map[string]ToolDefinition {
 	definitions := []ToolDefinition{
 		{
@@ -17,10 +19,10 @@ func BuiltinDefinitions() map[string]ToolDefinition {
 			Summary:    "Summarizes managed project status for planning.",
 			Version:    "1.0.0",
 			Scopes:     []string{"global", "project", "odin-core"},
-			Tags:       []string{"project", "status"},
+			Tags:       []string{"project", "status", "bootstrap-only"},
 			CostHint:   CostHintLow,
 			BudgetCost: 1,
-			SourceRef:  "builtin://project_status",
+			SourceRef:  "bootstrap://legacy/project_status",
 			Schema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -48,10 +50,10 @@ func BuiltinDefinitions() map[string]ToolDefinition {
 			Summary:    "Runs the bounded generic browser session workflow.",
 			Version:    "1.0.0",
 			Scopes:     []string{"global", "project", "odin-core", "new-project"},
-			Tags:       []string{"browser", "human", "session"},
+			Tags:       []string{"browser", "human", "session", "bootstrap-only"},
 			CostHint:   CostHintLow,
 			BudgetCost: 1,
-			SourceRef:  "builtin://huginn_browser_session",
+			SourceRef:  "bootstrap://driver/huginn_browser_session",
 			Schema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -85,10 +87,10 @@ func BuiltinDefinitions() map[string]ToolDefinition {
 			Summary:    "Runs the bounded Plaid Transfer application workflow.",
 			Version:    "1.0.0",
 			Scopes:     []string{"global", "project", "odin-core", "new-project"},
-			Tags:       []string{"browser", "human", "plaid", "transfer"},
+			Tags:       []string{"browser", "human", "plaid", "transfer", "bootstrap-only"},
 			CostHint:   CostHintMedium,
 			BudgetCost: 2,
-			SourceRef:  "builtin://plaid_transfer_application",
+			SourceRef:  "bootstrap://driver/plaid_transfer_application",
 			Schema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -116,10 +118,10 @@ func BuiltinDefinitions() map[string]ToolDefinition {
 			Summary:    "Lists task projections for the requested scope.",
 			Version:    "1.0.0",
 			Scopes:     []string{"global", "project", "odin-core", "new-project"},
-			Tags:       []string{"runtime", "tasks"},
+			Tags:       []string{"runtime", "tasks", "bootstrap-only"},
 			CostHint:   CostHintLow,
 			BudgetCost: 1,
-			SourceRef:  "builtin://task_list",
+			SourceRef:  "bootstrap://legacy/task_list",
 			Schema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -147,10 +149,10 @@ func BuiltinDefinitions() map[string]ToolDefinition {
 			Summary:    "Retrieves recent audit event summaries.",
 			Version:    "1.0.0",
 			Scopes:     []string{"global", "project", "odin-core", "new-project"},
-			Tags:       []string{"runtime", "events"},
+			Tags:       []string{"runtime", "events", "bootstrap-only"},
 			CostHint:   CostHintMedium,
 			BudgetCost: 2,
-			SourceRef:  "builtin://event_log",
+			SourceRef:  "bootstrap://legacy/event_log",
 			Schema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{

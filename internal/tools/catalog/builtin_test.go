@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"odin-os/internal/adapters/browserhuman"
@@ -49,6 +50,31 @@ func TestBuiltinDefinitionsIncludeSchemasAndHandlers(t *testing.T) {
 	}
 	if !hasTag(definitions["plaid_transfer_application"].Tags, "transfer") {
 		t.Fatalf("plaid_transfer_application tags = %#v, want transfer tag", definitions["plaid_transfer_application"].Tags)
+	}
+}
+
+func TestBuiltinCatalogUsesCapabilityRegistryForDynamicEntries(t *testing.T) {
+	t.Parallel()
+
+	definitions := BuiltinDefinitions()
+
+	for _, key := range []string{
+		"project_status",
+		"huginn_browser_session",
+		"plaid_transfer_application",
+		"task_list",
+		"event_log",
+	} {
+		definition, ok := definitions[key]
+		if !ok {
+			t.Fatalf("missing %s definition", key)
+		}
+		if !hasTag(definition.Tags, "bootstrap-only") {
+			t.Fatalf("%s tags = %#v, want bootstrap-only marker for code-defined runtime tool", key, definition.Tags)
+		}
+		if !strings.HasPrefix(definition.SourceRef, "bootstrap://") {
+			t.Fatalf("%s SourceRef = %q, want bootstrap:// prefix", key, definition.SourceRef)
+		}
 	}
 }
 

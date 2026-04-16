@@ -2,6 +2,8 @@ package router
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"odin-os/internal/executors/contract"
@@ -37,5 +39,32 @@ func TestDefaultCatalogRegistersSkeletonAdapters(t *testing.T) {
 		if caps.ExecutorClass != wantClass {
 			t.Fatalf("capabilities class for %q = %q, want %q", key, caps.ExecutorClass, wantClass)
 		}
+	}
+}
+
+func TestExecutorCatalogRejectsStaleConfig(t *testing.T) {
+	t.Parallel()
+
+	configPath := filepath.Join(t.TempDir(), "executors.yaml")
+	if err := os.WriteFile(configPath, []byte(`
+version: 1
+executors:
+  - key: stale_executor
+    adapter: codex_headless
+    class: plan_backed_cli
+    enabled: true
+    priority: 10
+routes:
+  - name: default
+    match:
+      task_kinds: [build]
+      scopes: [project]
+    preferred: [stale_executor]
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	if _, err := LoadConfig(configPath); err == nil {
+		t.Fatal("LoadConfig() error = nil, want stale executor config rejection")
 	}
 }

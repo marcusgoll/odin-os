@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 
+	appconfig "odin-os/internal/app/config"
 	clistate "odin-os/internal/cli/state"
 	"odin-os/internal/core/capabilities"
 	"odin-os/internal/core/projects"
@@ -34,6 +35,9 @@ func Load(ctx context.Context, repoRoot string, runtimeRoot string) (App, error)
 		return App{}, err
 	}
 	if err := os.MkdirAll(filepath.Join(runtimeRoot, "state", "cache"), 0o755); err != nil {
+		return App{}, err
+	}
+	if err := appconfig.ValidateRepo(repoRoot); err != nil {
 		return App{}, err
 	}
 
