@@ -28,6 +28,11 @@ normalize_snapshot() {
     tr '[:upper:]' '[:lower:]' <<<"$1"
 }
 
+is_plaid_dashboard_url() {
+    local target="${1:-}"
+    [[ "${target}" =~ ^https://dashboard\.plaid\.com([/?#]|$) ]]
+}
+
 detect_state() {
     local snapshot
     snapshot="$(normalize_snapshot "$1")"
@@ -49,13 +54,13 @@ detect_state() {
         return 0
     fi
 
-    printf '%s' "ready_for_login"
+    printf '%s' "unclassified"
 }
 
 json_result() {
-    local summary="$1" session_state="$2" current_url="$3" snapshot="$4" screenshot_path="$5" next_action="$6"
+    local status="$1" summary="$2" session_state="$3" current_url="$4" snapshot="$5" screenshot_path="$6" next_action="$7"
     jq -nc \
-        --arg status "completed" \
+        --arg status "${status}" \
         --arg tool_key "${tool_key}" \
         --arg summary "${summary}" \
         --arg session_state "${session_state}" \
@@ -65,6 +70,11 @@ json_result() {
         --arg next_action "${next_action}" \
         '{status: $status, tool_key: $tool_key, summary: $summary, artifacts: {session_state: $session_state, current_url: $current_url, snapshot: $snapshot, screenshot_path: $screenshot_path, next_action: $next_action}}'
 }
+
+if ! is_plaid_dashboard_url "${application_url}"; then
+    json_result "failed" "Plaid transfer application URL must be on Plaid Dashboard" "failed" "${application_url}" "" "" "unsupported application URL"
+    exit 0
+fi
 
 browser_request_domain_access "${application_url}"
 browser_server_start --url "${application_url}" --headless
@@ -94,12 +104,11 @@ case "${session_state}" in
         next_action="no action needed"
         summary="Plaid transfer is already enabled"
         ;;
-    *)
+    unclassified)
         next_action="inspect dashboard"
         summary="Plaid transfer flow is in an unclassified state"
-        session_state="ready_for_login"
         ;;
 esac
 
 browser_server_stop
-json_result "${summary}" "${session_state}" "${application_url}" "${snapshot}" "${screenshot_path}" "${next_action}"
+json_result "completed" "${summary}" "${session_state}" "${application_url}" "${snapshot}" "${screenshot_path}" "${next_action}"

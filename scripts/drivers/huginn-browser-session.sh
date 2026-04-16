@@ -43,10 +43,14 @@ case "${action}" in
         health_payload="$(browser_server_health 2>/dev/null || true)"
         if jq -e . >/dev/null 2>&1 <<<"${health_payload}"; then
             health_state="$(jq -r 'if .browser == true then "healthy" else (.state // "stopped") end' <<<"${health_payload}")"
+            json_status="completed"
+            summary="browser session health checked"
         else
-            health_state="${health_payload:-${ODIN_BROWSER_STUB_HEALTH_STATE:-healthy}}"
+            health_state="unhealthy"
+            json_status="failed"
+            summary="browser session health check failed"
         fi
-        json_result "completed" "browser session health checked" "${health_state}" "" "" "" "${health_state}"
+        json_result "${json_status}" "${summary}" "${health_state}" "" "" "" "${health_state}"
         ;;
     launch)
         browser_request_domain_access "${url}"

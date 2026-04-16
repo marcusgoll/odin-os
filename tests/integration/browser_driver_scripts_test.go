@@ -24,6 +24,16 @@ func TestHuginnBrowserSessionScript(t *testing.T) {
         assertFileContains(t, callsLog, "health:")
     })
 
+    t.Run("health failure closes as unhealthy", func(t *testing.T) {
+        stdout, callsLog, markerPath := runBrowserDriverScript(t, repoRoot, scriptPath, "huginn-browser-session.sh", `{"tool_key":"huginn_browser_session","input":{"action":"health"}}`, map[string]string{
+            "ODIN_BROWSER_STUB_HEALTH_EXIT_CODE": "1",
+        })
+        assertStructuredDriverOutput(t, stdout, "huginn_browser_session", "failed")
+        assertJSONArtifactString(t, stdout, "session_state", "unhealthy")
+        assertFileContains(t, markerPath, "sourced repo-local browser-access.sh")
+        assertFileContains(t, callsLog, "health:")
+    })
+
     t.Run("launch snapshot screenshot stop", func(t *testing.T) {
         screenshotPath := filepath.Join(t.TempDir(), "browser.png")
 
@@ -78,6 +88,7 @@ func TestPlaidTransferApplicationScript(t *testing.T) {
         {name: "blocked_on_mfa", snapshot: "Enter the verification code from your authenticator app", wantState: "blocked_on_mfa"},
         {name: "submitted_for_review", snapshot: "Your Transfer application has been submitted for review", wantState: "submitted_for_review"},
         {name: "already_enabled", snapshot: "Transfer is already enabled for this account", wantState: "already_enabled"},
+        {name: "unclassified", snapshot: "Plaid dashboard\nApplication state unavailable", wantState: "unclassified"},
     }
 
     for _, tc := range cases {
@@ -96,6 +107,17 @@ func TestPlaidTransferApplicationScript(t *testing.T) {
             assertFileContains(t, callsLog, "screenshot:")
         })
     }
+
+    t.Run("reject non-plaid urls", func(t *testing.T) {
+        stdout, callsLog, markerPath := runBrowserDriverScript(t, repoRoot, scriptPath, "plaid-transfer-application.sh", `{"tool_key":"plaid_transfer_application","input":{"action":"inspect","application_url":"https://example.com/transfer/application"}}`, nil)
+        assertStructuredDriverOutput(t, stdout, "plaid_transfer_application", "failed")
+        assertJSONArtifactString(t, stdout, "session_state", "failed")
+        assertFileContains(t, markerPath, "sourced repo-local browser-access.sh")
+        assertFileNotContains(t, callsLog, "request:")
+        assertFileNotContains(t, callsLog, "start:")
+        assertFileNotContains(t, callsLog, "snapshot:")
+        assertFileNotContains(t, callsLog, "screenshot:")
+    })
 }
 
 func assertDriverScriptShape(t *testing.T, scriptPath string) {
@@ -178,7 +200,20 @@ printf 'sourced repo-local browser-access.sh\n' > "${ODIN_BROWSER_STUB_SOURCE_MA
 
 browser_server_health() {
     printf 'health:%s\n' "$*" >> "${ODIN_BROWSER_STUB_CALLS_LOG}"
-    printf '%s' "${ODIN_BROWSER_STUB_HEALTH_STATE:-healthy}"
+    if [[ -n "${ODIN_BROWSER_STUB_HEALTH_EXIT_CODE:-}" ]]; then
+        return "${ODIN_BROWSER_STUB_HEALTH_EXIT_CODE}"
+    fi
+    case "${ODIN_BROWSER_STUB_HEALTH_STATE:-healthy}" in
+        healthy)
+            printf '{"browser":true,"state":"healthy"}'
+            ;;
+        stopped)
+            printf '{"browser":false,"state":"stopped"}'
+            ;;
+        *)
+            printf '%s' "${ODIN_BROWSER_STUB_HEALTH_STATE:-healthy}"
+            ;;
+    esac
 }
 
 browser_request_domain_access() {
@@ -285,6 +320,21 @@ func assertFileContains(t *testing.T, path, needle string) {
     }
     if !strings.Contains(string(content), needle) {
         t.Fatalf("%s does not contain %q", path, needle)
+    }
+}
+
+func assertFileNotContains(t *testing.T, path, needle string) {
+    t.Helper()
+
+    content, err := os.ReadFile(path)
+    if err != nil {
+        if os.IsNotExist(err) {
+            return
+        }
+        t.Fatalf("ReadFile(%s) error = %v", path, err)
+    }
+    if strings.Contains(string(content), needle) {
+        t.Fatalf("%s unexpectedly contains %q", path, needle)
     }
 }
 
