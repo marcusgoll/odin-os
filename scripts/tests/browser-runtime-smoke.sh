@@ -33,7 +33,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-if ! browser_server_start --url "https://example.com" --headless; then
+if ! browser_server_start --headless; then
     fail "browser_server_start could not launch Chromium"
 fi
 pass "browser_server_start launched Chromium"
@@ -43,6 +43,17 @@ ENGINE="$(echo "${HEALTH_JSON}" | jq -r '.engine // empty')"
 [[ "${ENGINE}" == "chromium" ]] || fail "expected chromium engine, got '${ENGINE:-empty}'"
 pass "browser health reports chromium"
 
+LOCAL_URL='data:text/html,<title>BrowserSmokeLocal</title><body>BrowserSmokeLocal</body>'
+if ! browser_navigate "${LOCAL_URL}"; then
+    fail "browser_navigate could not load local data URL"
+fi
+LOCAL_SNAPSHOT="$(browser_snapshot)"
+[[ "${LOCAL_SNAPSHOT}" == *"BrowserSmokeLocal"* ]] || fail "browser_snapshot did not return local data URL content"
+pass "browser_snapshot returned local data URL content"
+
+if ! browser_navigate "https://example.com"; then
+    fail "browser_navigate could not load example.com"
+fi
 SNAPSHOT="$(browser_snapshot)"
 [[ "${SNAPSHOT}" == *"Example Domain"* ]] || fail "browser_snapshot did not return Example Domain"
 pass "browser_snapshot returned Example Domain"

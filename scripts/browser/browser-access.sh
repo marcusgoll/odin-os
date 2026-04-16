@@ -11,6 +11,9 @@ BROWSER_SERVER_SCRIPT="${SCRIPT_DIR}/odin-huginn-server.js"
 BROWSER_SERVER_PID_FILE="${BROWSER_STATE_DIR}/browser.pid"
 BROWSER_SERVER_LOG="${ODIN_DIR}/logs/$(date +%Y-%m-%d)/browser-runtime.log"
 
+# Minimal phase-36 shim for the repo-local Chromium runtime.
+# This intentionally exposes only the browser cutover surface needed here.
+
 _ba_json() {
     jq -n "$@"
 }
@@ -21,6 +24,41 @@ browser_request_domain_access() {
 
 _bc_curl() {
     curl -sf --max-time 30 "$@"
+}
+
+_ba_proc_root() {
+    printf '%s' "${BA_PROC_ROOT:-/proc}"
+}
+
+_ba_proc_text() {
+    local path="${1:-}"
+    local parts=()
+    [[ -r "${path}" ]] || return 1
+    mapfile -d '' -t parts < "${path}"
+    printf '%s' "$(printf '%s\n' "${parts[@]}")"
+}
+
+_ba_pid_is_browser_runtime() {
+    local pid="${1:-}" proc_root cmdline environ
+    [[ -n "${pid}" ]] || return 1
+    [[ "${pid}" =~ ^[0-9]+$ ]] || return 1
+
+    proc_root="$(_ba_proc_root)"
+    cmdline="$(_ba_proc_text "${proc_root}/${pid}/cmdline")" || return 1
+    environ="$(_ba_proc_text "${proc_root}/${pid}/environ")" || return 1
+
+    [[ "${cmdline}" == *"${BROWSER_SERVER_SCRIPT}"* ]] || return 1
+    [[ "${environ}" == *"ODIN_DIR=${ODIN_DIR}"* ]] || return 1
+    [[ "${environ}" == *"ODIN_BROWSER_PORT=${BROWSER_SERVER_PORT}"* ]] || return 1
+}
+
+_ba_stop_pid_if_runtime() {
+    local pid="${1:-}"
+    if _ba_pid_is_browser_runtime "${pid}"; then
+        kill "${pid}" 2>/dev/null || true
+        sleep 1
+        kill -9 "${pid}" 2>/dev/null || true
+    fi
 }
 
 browser_server_start() {
@@ -39,17 +77,13 @@ browser_server_start() {
     if [[ -f "${BROWSER_SERVER_PID_FILE}" ]]; then
         local old_pid
         old_pid="$(cat "${BROWSER_SERVER_PID_FILE}" 2>/dev/null || true)"
-        if [[ -n "${old_pid}" ]] && kill -0 "${old_pid}" 2>/dev/null; then
-            kill "${old_pid}" 2>/dev/null || true
-            sleep 1
-        fi
+        _ba_stop_pid_if_runtime "${old_pid}"
         rm -f "${BROWSER_SERVER_PID_FILE}"
     fi
 
-    ODIN_DIR="${ODIN_DIR}" ODIN_BROWSER_PORT="${BROWSER_SERVER_PORT}"         node "${BROWSER_SERVER_SCRIPT}" >> "${BROWSER_SERVER_LOG}" 2>&1 &
+    ODIN_DIR="${ODIN_DIR}" ODIN_BROWSER_PORT="${BROWSER_SERVER_PORT}" node "${BROWSER_SERVER_SCRIPT}" >> "${BROWSER_SERVER_LOG}" 2>&1 &
     local server_pid=$!
-    printf '%s
-' "${server_pid}" > "${BROWSER_SERVER_PID_FILE}"
+    printf '%s\n' "${server_pid}" > "${BROWSER_SERVER_PID_FILE}"
 
     local attempt=0
     until _bc_curl "${BROWSER_SERVER_URL}/health" >/dev/null 2>&1; do
@@ -84,11 +118,7 @@ browser_server_stop() {
     if [[ -f "${BROWSER_SERVER_PID_FILE}" ]]; then
         local pid
         pid="$(cat "${BROWSER_SERVER_PID_FILE}" 2>/dev/null || true)"
-        if [[ -n "${pid}" ]] && kill -0 "${pid}" 2>/dev/null; then
-            kill "${pid}" 2>/dev/null || true
-            sleep 1
-            kill -9 "${pid}" 2>/dev/null || true
-        fi
+        _ba_stop_pid_if_runtime "${pid}"
         rm -f "${BROWSER_SERVER_PID_FILE}"
     fi
 }
