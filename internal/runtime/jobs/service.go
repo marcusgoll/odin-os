@@ -250,28 +250,12 @@ func (service Service) ExecuteNextQueued(ctx context.Context) error {
 }
 
 func (service Service) ensureRuntimeProject(ctx context.Context, manifest projects.Manifest) (sqlite.Project, error) {
-	project, err := service.Store.GetProjectByKey(ctx, manifest.Key)
-	if err == nil {
-		return project, nil
-	}
-	if err != sql.ErrNoRows {
-		return sqlite.Project{}, err
+	transitions := service.Transitions
+	if transitions.Store == nil {
+		transitions = projects.Service{Store: service.Store}
 	}
 
-	scopeValue := "project"
-	if manifest.SystemProject {
-		scopeValue = "odin-core"
-	}
-
-	return service.Store.CreateProject(ctx, sqlite.CreateProjectParams{
-		Key:           manifest.Key,
-		Name:          manifest.Name,
-		Scope:         scopeValue,
-		GitRoot:       manifest.GitRoot,
-		DefaultBranch: manifest.DefaultBranch,
-		GitHubRepo:    manifest.GitHub.Repo,
-		ManifestPath:  manifest.SourcePath,
-	})
+	return transitions.RegisterManagedProject(ctx, manifest)
 }
 
 func (service Service) taskOwnerForScope(resolved scope.Resolution) (projects.Manifest, string, error) {

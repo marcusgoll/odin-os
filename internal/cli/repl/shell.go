@@ -730,28 +730,12 @@ func (shell *Shell) currentTransitionStatus(ctx context.Context, manifest projec
 }
 
 func (shell *Shell) ensureRuntimeProject(ctx context.Context, manifest projects.Manifest) (sqlite.Project, error) {
-	project, err := shell.env.Store.GetProjectByKey(ctx, manifest.Key)
-	if err == nil {
-		return project, nil
-	}
-	if err != sql.ErrNoRows {
-		return sqlite.Project{}, err
+	transitions := shell.transitions
+	if transitions.Store == nil {
+		transitions = projects.Service{Store: shell.env.Store}
 	}
 
-	scopeValue := "project"
-	if manifest.SystemProject {
-		scopeValue = "odin-core"
-	}
-
-	return shell.env.Store.CreateProject(ctx, sqlite.CreateProjectParams{
-		Key:           manifest.Key,
-		Name:          manifest.Name,
-		Scope:         scopeValue,
-		GitRoot:       manifest.GitRoot,
-		DefaultBranch: manifest.DefaultBranch,
-		GitHubRepo:    manifest.GitHub.Repo,
-		ManifestPath:  manifest.SourcePath,
-	})
+	return transitions.RegisterManagedProject(ctx, manifest)
 }
 
 func parseTransitionSetRequest(args []string) (transitionSetRequest, error) {

@@ -8,7 +8,9 @@ import (
 	"time"
 
 	"odin-os/internal/cli/scope"
+	"odin-os/internal/core/initiatives"
 	"odin-os/internal/core/projects"
+	"odin-os/internal/core/workspaces"
 	"odin-os/internal/executors/router"
 	"odin-os/internal/store/sqlite"
 	"odin-os/internal/vcs/leases"
@@ -56,6 +58,22 @@ func TestCreateTaskFromActEnsuresRuntimeProjectAndCreatesQueuedTask(t *testing.T
 	}
 	if project.Key != "alpha" {
 		t.Fatalf("project key = %q, want alpha", project.Key)
+	}
+
+	workspace, err := workspaces.Service{Store: store}.BootstrapDefaultWorkspace(ctx)
+	if err != nil {
+		t.Fatalf("BootstrapDefaultWorkspace() error = %v", err)
+	}
+
+	initiative, err := store.GetInitiativeByKey(ctx, workspace.ID, alpha.Key)
+	if err != nil {
+		t.Fatalf("GetInitiativeByKey(alpha) error = %v", err)
+	}
+	if initiative.Kind != string(initiatives.KindManagedProject) {
+		t.Fatalf("initiative.Kind = %q, want %q", initiative.Kind, initiatives.KindManagedProject)
+	}
+	if initiative.LinkedProjectID == nil || *initiative.LinkedProjectID != project.ID {
+		t.Fatalf("initiative.LinkedProjectID = %v, want %d", initiative.LinkedProjectID, project.ID)
 	}
 }
 

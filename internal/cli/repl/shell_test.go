@@ -10,7 +10,9 @@ import (
 	"testing"
 
 	"odin-os/internal/cli/scope"
+	"odin-os/internal/core/initiatives"
 	"odin-os/internal/core/projects"
+	"odin-os/internal/core/workspaces"
 	runtimeevents "odin-os/internal/runtime/events"
 	"odin-os/internal/store/sqlite"
 )
@@ -124,6 +126,22 @@ func TestActModeCreatesTaskInProjectScope(t *testing.T) {
 	}
 	if !strings.Contains(output.String(), "created task") {
 		t.Fatalf("output = %q, want creation message", output.String())
+	}
+
+	workspace, err := workspaces.Service{Store: env.Store}.BootstrapDefaultWorkspace(context.Background())
+	if err != nil {
+		t.Fatalf("BootstrapDefaultWorkspace() error = %v", err)
+	}
+
+	initiative, err := env.Store.GetInitiativeByKey(context.Background(), workspace.ID, "alpha")
+	if err != nil {
+		t.Fatalf("GetInitiativeByKey(alpha) error = %v", err)
+	}
+	if initiative.Kind != string(initiatives.KindManagedProject) {
+		t.Fatalf("initiative.Kind = %q, want %q", initiative.Kind, initiatives.KindManagedProject)
+	}
+	if initiative.LinkedProjectID == nil {
+		t.Fatalf("initiative.LinkedProjectID = nil, want project id")
 	}
 }
 

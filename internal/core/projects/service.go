@@ -8,6 +8,7 @@ import (
 	"fmt"
 
 	"odin-os/internal/core/initiatives"
+	"odin-os/internal/core/workspaces"
 	"odin-os/internal/store/sqlite"
 )
 
@@ -117,6 +118,46 @@ func (service Service) AuthorizeAction(ctx context.Context, input ActionInput) (
 
 func (service Service) RegisterManagedProjectInitiative(ctx context.Context, workspaceID int64, project sqlite.Project, ownerCompanionID *int64) (initiatives.Initiative, error) {
 	return initiatives.Service{Store: service.Store}.ReconcileManagedProject(ctx, workspaceID, project, ownerCompanionID)
+}
+
+func (service Service) RegisterManagedProject(ctx context.Context, manifest Manifest) (sqlite.Project, error) {
+	if service.Store == nil {
+		return sqlite.Project{}, fmt.Errorf("project store is required")
+	}
+
+	project, err := service.Store.GetProjectByKey(ctx, manifest.Key)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return sqlite.Project{}, err
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		scopeValue := "project"
+		if manifest.SystemProject {
+			scopeValue = "odin-core"
+		}
+
+		project, err = service.Store.CreateProject(ctx, sqlite.CreateProjectParams{
+			Key:           manifest.Key,
+			Name:          manifest.Name,
+			Scope:         scopeValue,
+			GitRoot:       manifest.GitRoot,
+			DefaultBranch: manifest.DefaultBranch,
+			GitHubRepo:    manifest.GitHub.Repo,
+			ManifestPath:  manifest.SourcePath,
+		})
+		if err != nil {
+			return sqlite.Project{}, err
+		}
+	}
+
+	workspace, err := workspaces.Service{Store: service.Store}.BootstrapDefaultWorkspace(ctx)
+	if err != nil {
+		return sqlite.Project{}, err
+	}
+	if _, err := service.RegisterManagedProjectInitiative(ctx, workspace.ID, project, nil); err != nil {
+		return sqlite.Project{}, err
+	}
+
+	return project, nil
 }
 
 func (service Service) recordReport(ctx context.Context, input ReportInput, requiredState TransitionState, reportType string) (sqlite.ProjectTransitionReport, error) {

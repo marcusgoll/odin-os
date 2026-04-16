@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"odin-os/internal/core/initiatives"
 	runtimeevents "odin-os/internal/runtime/events"
 	"odin-os/internal/store/sqlite"
 )
@@ -151,6 +152,48 @@ func TestTransitionServiceLimitedActionAllowsOnlyConfiguredLowRiskAction(t *test
 	})
 	if !errors.Is(err, ErrTransitionDenied) {
 		t.Fatalf("AuthorizeAction(full_mutation) error = %v, want ErrTransitionDenied", err)
+	}
+}
+
+func TestProjectServiceRegistersManagedProjectInitiative(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openTransitionServiceStore(t)
+	defer store.Close()
+
+	manifest := Manifest{
+		Key:           "alpha",
+		Name:          "Alpha",
+		ProjectClass:  ProjectClassGitHubBacked,
+		GitRoot:       filepath.Join(t.TempDir(), "alpha"),
+		DefaultBranch: "main",
+		GitHub:        GitHub{Repo: "acme/alpha"},
+		SourcePath:    "config/projects.yaml",
+	}
+
+	project, err := Service{Store: store}.RegisterManagedProject(ctx, manifest)
+	if err != nil {
+		t.Fatalf("RegisterManagedProject() error = %v", err)
+	}
+
+	workspace, err := store.GetWorkspaceByKey(ctx, "default")
+	if err != nil {
+		t.Fatalf("GetWorkspaceByKey(default) error = %v", err)
+	}
+
+	initiative, err := store.GetInitiativeByKey(ctx, workspace.ID, manifest.Key)
+	if err != nil {
+		t.Fatalf("GetInitiativeByKey(alpha) error = %v", err)
+	}
+	if initiative.Kind != string(initiatives.KindManagedProject) {
+		t.Fatalf("initiative.Kind = %q, want %q", initiative.Kind, initiatives.KindManagedProject)
+	}
+	if initiative.LinkedProjectID == nil || *initiative.LinkedProjectID != project.ID {
+		t.Fatalf("initiative.LinkedProjectID = %v, want %d", initiative.LinkedProjectID, project.ID)
+	}
+	if initiative.Title != manifest.Name {
+		t.Fatalf("initiative.Title = %q, want %q", initiative.Title, manifest.Name)
 	}
 }
 
