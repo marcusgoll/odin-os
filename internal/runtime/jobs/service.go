@@ -154,6 +154,9 @@ func (service Service) ExecuteNextQueued(ctx context.Context) error {
 		TaskStatus: "running",
 	})
 	if err != nil {
+		if errors.Is(err, sqlite.ErrTaskLaunchConflict) {
+			return nil
+		}
 		return err
 	}
 
@@ -328,6 +331,7 @@ func (service Service) nextQueuedTask(ctx context.Context) (sqlite.Task, error) 
 		SELECT id
 		FROM tasks
 		WHERE status = 'queued'
+		  AND current_run_id IS NULL
 		ORDER BY id ASC
 		LIMIT 1
 	`)

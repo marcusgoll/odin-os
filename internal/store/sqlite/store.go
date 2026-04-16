@@ -15,6 +15,7 @@ import (
 )
 
 var ErrWorktreeLeaseConflict = errors.New("worktree lease conflict")
+var ErrTaskLaunchConflict = errors.New("task launch conflict")
 
 type Store struct {
 	db        *sql.DB
@@ -316,6 +317,24 @@ func (store *Store) StartRunAndUpdateTaskStatus(ctx context.Context, params Star
 		}
 		previousStatus := task.Status
 
+		claim, err := tx.ExecContext(ctx, `
+			UPDATE tasks
+			SET status = ?, updated_at = ?
+			WHERE id = ?
+			  AND status = 'queued'
+			  AND current_run_id IS NULL
+		`, params.TaskStatus, formatTime(now), params.TaskID)
+		if err != nil {
+			return err
+		}
+		rows, err := claim.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if rows != 1 {
+			return ErrTaskLaunchConflict
+		}
+
 		result, err := tx.ExecContext(ctx, `
 			INSERT INTO runs (task_id, executor, status, attempt, started_at, finished_at, summary)
 			VALUES (?, ?, ?, ?, ?, NULL, '')
@@ -329,18 +348,25 @@ func (store *Store) StartRunAndUpdateTaskStatus(ctx context.Context, params Star
 		if err != nil {
 			return err
 		}
-
 		runID, err := result.LastInsertId()
 		if err != nil {
 			return err
 		}
-
-		if _, err := tx.ExecContext(ctx, `
+		assign, err := tx.ExecContext(ctx, `
 			UPDATE tasks
-			SET current_run_id = ?, status = ?, updated_at = ?
+			SET current_run_id = ?, updated_at = ?
 			WHERE id = ?
-		`, runID, params.TaskStatus, formatTime(now), params.TaskID); err != nil {
+			  AND current_run_id IS NULL
+		`, runID, formatTime(now), params.TaskID)
+		if err != nil {
 			return err
+		}
+		rows, err = assign.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if rows != 1 {
+			return ErrTaskLaunchConflict
 		}
 
 		run = Run{
@@ -460,12 +486,21 @@ func (store *Store) FinishRunAndUpdateTaskStatus(ctx context.Context, params Fin
 		`, params.RunStatus, formatTime(now), params.Summary, params.RunID); err != nil {
 			return err
 		}
-		if _, err := tx.ExecContext(ctx, `
+		assign, err := tx.ExecContext(ctx, `
 			UPDATE tasks
 			SET current_run_id = NULL, status = ?, updated_at = ?
 			WHERE id = ?
-		`, params.TaskStatus, formatTime(now), params.TaskID); err != nil {
+			  AND current_run_id = ?
+		`, params.TaskStatus, formatTime(now), params.TaskID, params.RunID)
+		if err != nil {
 			return err
+		}
+		rows, err := assign.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if rows != 1 {
+			return ErrTaskLaunchConflict
 		}
 
 		finishedRun := currentRun

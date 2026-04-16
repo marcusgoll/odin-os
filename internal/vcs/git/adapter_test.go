@@ -5,7 +5,9 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	worktreemgr "odin-os/internal/vcs/worktrees"
 )
@@ -71,6 +73,29 @@ func TestAdapterRemoveWorktreeReportsAlreadyRemovedAfterRegistrationCleared(t *t
 	err := adapter.RemoveWorktree(ctx, repoRoot, worktreePath)
 	if !errors.Is(err, worktreemgr.ErrWorktreeAlreadyRemoved) {
 		t.Fatalf("RemoveWorktree() second call error = %v, want ErrWorktreeAlreadyRemoved", err)
+	}
+}
+
+func TestAdapterRemoveWorktreeTimesOutWithoutCallerDeadline(t *testing.T) {
+	gitDir := t.TempDir()
+	scriptPath := filepath.Join(gitDir, "git")
+	if err := os.WriteFile(scriptPath, []byte("#!/usr/bin/env bash\nsleep 5\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile(fake git) error = %v", err)
+	}
+	t.Setenv("PATH", gitDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	originalTimeout := worktreeRemoveTimeout
+	worktreeRemoveTimeout = 50 * time.Millisecond
+	t.Cleanup(func() {
+		worktreeRemoveTimeout = originalTimeout
+	})
+
+	err := Adapter{}.RemoveWorktree(context.Background(), t.TempDir(), filepath.Join(t.TempDir(), "wt"))
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("RemoveWorktree() error = %v, want context deadline exceeded", err)
+	}
+	if !strings.Contains(err.Error(), "worktree remove") {
+		t.Fatalf("RemoveWorktree() error = %v, want git command context", err)
 	}
 }
 
