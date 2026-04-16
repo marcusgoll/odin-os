@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"syscall"
 )
 
 const defaultDriverEnvVar = "ODIN_BROWSER_HUMAN_DRIVER"
@@ -61,7 +62,16 @@ func (driver Driver) Invoke(ctx context.Context, request Request) (Response, err
 
 	// Parse the configured shell command, then exec it so cancellation targets
 	// the actual driver process instead of a wrapper shell.
+	// Unix-only: put the driver in its own process group so context
+	// cancellation can tear down the whole tree, not just the leader.
 	cmd := exec.CommandContext(ctx, "sh", "-c", `eval "set -- $1"; exec "$@"`, "sh", command)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		if cmd.Process == nil {
+			return nil
+		}
+		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	}
 
 	cmd.Stdin = bytes.NewReader(requestBytes)
 
@@ -82,14 +92,14 @@ func (driver Driver) Invoke(ctx context.Context, request Request) (Response, err
 	if response.ToolKey != request.ToolKey {
 		return Response{}, fmt.Errorf("driver response tool_key %q does not match request %q; stdout=%q", response.ToolKey, request.ToolKey, response.RawOutput)
 	}
+	if response.Artifacts == nil {
+		return Response{}, fmt.Errorf("driver response artifacts are missing; stdout=%q", response.RawOutput)
+	}
 	if strings.TrimSpace(response.Status) == "" {
 		return Response{}, fmt.Errorf("driver response status is empty; stdout=%q", response.RawOutput)
 	}
 	if !strings.EqualFold(strings.TrimSpace(response.Status), "completed") {
 		return Response{}, fmt.Errorf("driver response status %q is not completed; stdout=%q", response.Status, response.RawOutput)
-	}
-	if response.Artifacts == nil {
-		response.Artifacts = map[string]any{}
 	}
 
 	return response, nil

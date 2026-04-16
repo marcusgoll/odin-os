@@ -86,14 +86,17 @@ printf '{"status":"completed","tool_key":"huginn_browser_session","summary":"spa
 }
 
 func TestDriverExecsConfiguredCommandForCancellation(t *testing.T) {
-	pidPath := filepath.Join(t.TempDir(), "driver.pid")
+	parentPIDPath := filepath.Join(t.TempDir(), "driver-parent.pid")
+	childPIDPath := filepath.Join(t.TempDir(), "driver-child.pid")
 	script := writeFixtureDriver(t, `#!/usr/bin/env bash
-printf '%s' "$$" >"$ODIN_DRIVER_PID_PATH"
+printf '%s' "$$" >"$ODIN_DRIVER_PARENT_PID_PATH"
+sleep 1000 &
+printf '%s' "$!" >"$ODIN_DRIVER_CHILD_PID_PATH"
 while :; do :; done
-printf '{"status":"completed","tool_key":"huginn_browser_session","summary":"ok","artifacts":{"session_state":"ready"}}'
 `)
 	t.Setenv(defaultDriverEnvVar, script)
-	t.Setenv("ODIN_DRIVER_PID_PATH", pidPath)
+	t.Setenv("ODIN_DRIVER_PARENT_PID_PATH", parentPIDPath)
+	t.Setenv("ODIN_DRIVER_CHILD_PID_PATH", childPIDPath)
 
 	driver := NewDriver()
 	driver.DefaultToolKey = "huginn_browser_session"
@@ -108,7 +111,8 @@ printf '{"status":"completed","tool_key":"huginn_browser_session","summary":"ok"
 		done <- err
 	}()
 
-	pid := waitForPIDFile(t, pidPath)
+	parentPID := waitForPIDFile(t, parentPIDPath)
+	childPID := waitForPIDFile(t, childPIDPath)
 	cancel()
 
 	select {
@@ -121,18 +125,20 @@ printf '{"status":"completed","tool_key":"huginn_browser_session","summary":"ok"
 	}
 
 	deadline := time.Now().Add(5 * time.Second)
-	for {
-		err := syscall.Kill(pid, 0)
-		if errors.Is(err, syscall.ESRCH) {
-			break
+	for _, pid := range []int{parentPID, childPID} {
+		for {
+			err := syscall.Kill(pid, 0)
+			if errors.Is(err, syscall.ESRCH) {
+				break
+			}
+			if err != nil {
+				t.Fatalf("Kill(%d, 0) error = %v", pid, err)
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("process %d still exists after cancellation", pid)
+			}
+			time.Sleep(25 * time.Millisecond)
 		}
-		if err != nil {
-			t.Fatalf("Kill(%d, 0) error = %v", pid, err)
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("process %d still exists after cancellation", pid)
-		}
-		time.Sleep(25 * time.Millisecond)
 	}
 }
 
@@ -283,6 +289,72 @@ printf '{"status":"completed","tool_key":"huginn_browser_session","summary":"ok"
 	labels, ok := response.Artifacts["labels"].([]any)
 	if !ok || len(labels) != 2 {
 		t.Fatalf("Artifacts.labels = %#v, want 2 labels", response.Artifacts["labels"])
+	}
+}
+
+func TestDriverRejectsMissingOrNullArtifacts(t *testing.T) {
+	t.Run("missing artifacts", func(t *testing.T) {
+		script := writeFixtureDriver(t, `#!/usr/bin/env bash
+printf '{"status":"completed","tool_key":"huginn_browser_session","summary":"ok"}'
+`)
+		t.Setenv(defaultDriverEnvVar, script)
+
+		driver := NewDriver()
+		driver.DefaultToolKey = "huginn_browser_session"
+
+		if _, err := driver.Invoke(context.Background(), Request{
+			ToolKey: "huginn_browser_session",
+			Input:   map[string]any{"url": "https://example.com"},
+		}); err == nil {
+			t.Fatal("Invoke() error = nil, want missing artifacts failure")
+		} else if !strings.Contains(err.Error(), "artifacts are missing") {
+			t.Fatalf("error = %v, want missing artifacts failure", err)
+		}
+	})
+
+	t.Run("null artifacts", func(t *testing.T) {
+		script := writeFixtureDriver(t, `#!/usr/bin/env bash
+printf '{"status":"completed","tool_key":"huginn_browser_session","summary":"ok","artifacts":null}'
+`)
+		t.Setenv(defaultDriverEnvVar, script)
+
+		driver := NewDriver()
+		driver.DefaultToolKey = "huginn_browser_session"
+
+		if _, err := driver.Invoke(context.Background(), Request{
+			ToolKey: "huginn_browser_session",
+			Input:   map[string]any{"url": "https://example.com"},
+		}); err == nil {
+			t.Fatal("Invoke() error = nil, want null artifacts failure")
+		} else if !strings.Contains(err.Error(), "artifacts are missing") {
+			t.Fatalf("error = %v, want null artifacts failure", err)
+		}
+	})
+}
+
+func TestDriverReportsExitStatusAndStderr(t *testing.T) {
+	script := writeFixtureDriver(t, `#!/usr/bin/env bash
+printf 'driver exploded
+' >&2
+exit 42
+`)
+	t.Setenv(defaultDriverEnvVar, script)
+
+	driver := NewDriver()
+	driver.DefaultToolKey = "huginn_browser_session"
+
+	_, err := driver.Invoke(context.Background(), Request{
+		ToolKey: "huginn_browser_session",
+		Input:   map[string]any{"url": "https://example.com"},
+	})
+	if err == nil {
+		t.Fatal("Invoke() error = nil, want non-zero exit failure")
+	}
+	if !strings.Contains(err.Error(), "exit status 42") {
+		t.Fatalf("error = %v, want exit status", err)
+	}
+	if !strings.Contains(err.Error(), "driver exploded") {
+		t.Fatalf("error = %v, want stderr text", err)
 	}
 }
 
