@@ -25,6 +25,15 @@ let cdp = null;
 let currentUrl = null;
 let currentTitle = null;
 
+const BLOCKED_TARGET_SCHEMES = new Set([
+  'javascript',
+  'chrome',
+  'file',
+  'chrome-extension',
+  'devtools',
+  'view-source',
+]);
+
 function json(res, status, body) {
   const payload = JSON.stringify(body);
   res.writeHead(status, { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) });
@@ -51,19 +60,27 @@ function readBody(req) {
   });
 }
 
-function normalizeHostForLocalCheck(host) {
+function normalizeHostForMatching(host) {
   let normalized = String(host || '').toLowerCase();
   if (normalized.startsWith('[') && normalized.endsWith(']')) {
     normalized = normalized.slice(1, -1);
   }
+  normalized = normalized.replace(/%2e/gi, '.');
   while (normalized.endsWith('.')) {
     normalized = normalized.slice(0, -1);
   }
   return normalized;
 }
 
+function browserDomainDenylist() {
+  return String(process.env.ODIN_BROWSER_DOMAIN_DENYLIST || 'localhost,127.0.0.1,::1,*.local')
+    .split(',')
+    .map((entry) => entry.trim().toLowerCase())
+    .filter(Boolean);
+}
+
 function browserHostIsLocalService(host) {
-  const normalized = normalizeHostForLocalCheck(host);
+  const normalized = normalizeHostForMatching(host);
   if (normalized === 'localhost' || normalized.endsWith('.localhost')) {
     return true;
   }
@@ -89,13 +106,33 @@ function browserHostIsLocalService(host) {
   return false;
 }
 
+function browserHostMatchesDenylist(host) {
+  const normalized = normalizeHostForMatching(host);
+  if (!normalized) {
+    return false;
+  }
+
+  for (const entry of browserDomainDenylist()) {
+    if (entry.startsWith('*.')) {
+      const suffix = entry.slice(2);
+      if (normalized === suffix || normalized.endsWith('.' + suffix)) {
+        return true;
+      }
+    } else if (normalized === entry) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
 function assertBrowserTargetAllowed(target) {
   const url = new URL(target);
   const scheme = url.protocol.slice(0, -1).toLowerCase();
-  if (scheme === 'javascript' || scheme === 'chrome') {
+  if (BLOCKED_TARGET_SCHEMES.has(scheme)) {
     throw new Error('Blocked browser URL');
   }
-  if (browserHostIsLocalService(url.hostname)) {
+  if (browserHostIsLocalService(url.hostname) || browserHostMatchesDenylist(url.hostname)) {
     throw new Error('Blocked browser URL');
   }
 }

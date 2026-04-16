@@ -214,7 +214,7 @@ browser_request_domain_access() {
 
     scheme="$(_ba_target_scheme "${target}" || true)"
     case "${scheme}" in
-        javascript|chrome)
+        javascript|chrome|file|chrome-extension|devtools|view-source)
             return 1
             ;;
     esac
@@ -364,13 +364,13 @@ browser_server_start() {
         browser_server_stop >/dev/null 2>&1 || true
     fi
 
-    local attempt=0
+    local attempt=1 max_attempts=3
     while true; do
         if _bc_browser_server_start_attempt "${url}" "${headless}"; then
             return 0
         fi
         browser_server_stop >/dev/null 2>&1 || true
-        if [[ "${attempt}" -ge 1 ]]; then
+        if [[ "${attempt}" -ge "${max_attempts}" ]]; then
             return 1
         fi
         attempt=$((attempt + 1))

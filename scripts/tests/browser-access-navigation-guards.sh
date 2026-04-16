@@ -52,9 +52,17 @@ fi
 if browser_server_start --url "https://127.0.0.1%2e/path"; then
     fail "expected browser_server_start to reject 127.0.0.1%2e before launch"
 fi
-if browser_server_start --url "javascript:alert(1)"; then
-    fail "expected browser_server_start to reject javascript: URLs before launch"
-fi
+for target in \
+    'javascript:alert(1)' \
+    'chrome://settings/' \
+    'file:///tmp/browser-access-navigation-guards' \
+    'chrome-extension://abcdef/popup.html' \
+    'devtools://devtools/bundled/inspector.html' \
+    'view-source:https://example.com'; do
+    if browser_server_start --url "${target}"; then
+        fail "expected browser_server_start to reject ${target} before launch"
+    fi
+done
 [[ "${curl_calls}" -eq 0 ]] || fail "blocked browser_server_start called through to the local server"
 
 pass "blocked navigation paths stop before the local browser server"

@@ -48,12 +48,17 @@ if browser_request_domain_access "https://017700000001/path"; then
     fail "expected 017700000001 to be denied as a loopback alias"
 fi
 browser_request_domain_access "https://example.com" || fail "expected example.com to be allowed"
-if browser_request_domain_access "javascript:alert(1)"; then
-    fail "expected javascript: URLs to be denied"
-fi
-if browser_request_domain_access "chrome://settings/"; then
-    fail "expected chrome: URLs to be denied"
-fi
+for target in \
+    'javascript:alert(1)' \
+    'chrome://settings/' \
+    'file:///tmp/browser-access-domain-guard' \
+    'chrome-extension://abcdef/popup.html' \
+    'devtools://devtools/bundled/inspector.html' \
+    'view-source:https://example.com'; do
+    if browser_request_domain_access "${target}"; then
+        fail "expected ${target} to be denied"
+    fi
+done
 if browser_request_domain_access "https://localhost./path"; then
     fail "expected localhost. to be denied"
 fi
