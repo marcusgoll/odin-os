@@ -1097,7 +1097,7 @@ func runTaskLoop(ctx context.Context, wg *sync.WaitGroup, service jobs.Service, 
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			taskCtx, cancel := serveOperationContext(ctx)
+			taskCtx, cancel := serveTaskContext(ctx)
 			if err := service.ExecuteNextQueued(taskCtx); err != nil {
 				cancel()
 				logBackgroundError(logger, "task_runner", err)
@@ -1173,6 +1173,10 @@ func runMetricsLoop(ctx context.Context, wg *sync.WaitGroup, service metricsvc.S
 
 func serveOperationContext(parent context.Context) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(parent, serveOperationTimeout)
+}
+
+func serveTaskContext(parent context.Context) (context.Context, context.CancelFunc) {
+	return context.WithCancel(parent)
 }
 
 func serveStartupContext(parent context.Context) (context.Context, context.CancelFunc) {
