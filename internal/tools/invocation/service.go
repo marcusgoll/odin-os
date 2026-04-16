@@ -2,7 +2,6 @@ package invocation
 
 import (
 	"context"
-	"encoding/json"
 
 	"odin-os/internal/adapters/browserhuman"
 )
@@ -19,32 +18,21 @@ type Service struct {
 }
 
 func (service Service) BrowserHuman(ctx context.Context, request browserhuman.Request) (Result, error) {
-	driver := browserhuman.NewDriver()
-	if service.Driver.EnvVar != "" {
-		driver.EnvVar = service.Driver.EnvVar
-	}
-	if service.Driver.DefaultToolKey != "" {
-		driver.DefaultToolKey = service.Driver.DefaultToolKey
-	}
+	driver := service.Driver.WithDefaults()
 
 	response, err := driver.Invoke(ctx, request)
 	if err != nil {
 		return Result{}, err
 	}
-	return toResult(response.ToolKey, response.Summary, response.Artifacts, response)
+	return toResult(response.ToolKey, response.Summary, response.Artifacts, response.RawOutput)
 }
 
-func toResult(toolKey string, summary string, artifacts map[string]any, response any) (Result, error) {
-	rawOutput, err := json.Marshal(response)
-	if err != nil {
-		return Result{}, err
-	}
-
+func toResult(toolKey string, summary string, artifacts map[string]any, rawOutput string) (Result, error) {
 	return Result{
 		ToolKey:   toolKey,
 		Summary:   summary,
 		Artifacts: cloneArtifacts(artifacts),
-		RawOutput: string(rawOutput),
+		RawOutput: rawOutput,
 	}, nil
 }
 

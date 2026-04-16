@@ -3,6 +3,7 @@ package browserhuman
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -14,6 +15,68 @@ func TestDriverFailsClosedWithoutCommand(t *testing.T) {
 	driver := NewDriver()
 	if _, err := driver.Invoke(context.Background(), Request{}); err == nil {
 		t.Fatal("Invoke() error = nil, want missing driver config failure")
+	}
+}
+
+func TestDriverInvokesCommandWithSpaces(t *testing.T) {
+	workDir := filepath.Join(t.TempDir(), "driver dir with spaces")
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(workDir) error = %v", err)
+	}
+
+	scriptPath := filepath.Join(workDir, "driver script.sh")
+	requestPath := filepath.Join(t.TempDir(), "request.json")
+	argPath := filepath.Join(t.TempDir(), "argument.txt")
+	script := `#!/usr/bin/env bash
+printf '%s\n' "$1" >"$ODIN_DRIVER_ARG_PATH"
+cat >"$ODIN_DRIVER_REQUEST_PATH"
+printf '{"status":"completed","tool_key":"huginn_browser_session","summary":"spaces ok","artifacts":{"session_state":"ready"}}'
+`
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("WriteFile(script) error = %v", err)
+	}
+	if err := os.Chmod(scriptPath, 0o755); err != nil {
+		t.Fatalf("Chmod(script) error = %v", err)
+	}
+
+	t.Setenv(defaultDriverEnvVar, fmt.Sprintf("%q %q", scriptPath, "argument with spaces"))
+	t.Setenv("ODIN_DRIVER_REQUEST_PATH", requestPath)
+	t.Setenv("ODIN_DRIVER_ARG_PATH", argPath)
+
+	driver := NewDriver()
+	driver.DefaultToolKey = "huginn_browser_session"
+
+	response, err := driver.Invoke(context.Background(), Request{
+		ToolKey: "huginn_browser_session",
+		Input: map[string]any{
+			"url": "https://example.com",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Invoke() error = %v", err)
+	}
+	if response.Summary != "spaces ok" {
+		t.Fatalf("Summary = %q, want spaces ok", response.Summary)
+	}
+
+	argBytes, err := os.ReadFile(argPath)
+	if err != nil {
+		t.Fatalf("ReadFile(arg) error = %v", err)
+	}
+	if got := string(argBytes); got != "argument with spaces\n" {
+		t.Fatalf("argument file = %q, want %q", got, "argument with spaces\n")
+	}
+
+	requestBytes, err := os.ReadFile(requestPath)
+	if err != nil {
+		t.Fatalf("ReadFile(request) error = %v", err)
+	}
+	var request Request
+	if err := json.Unmarshal(requestBytes, &request); err != nil {
+		t.Fatalf("request json = %v", err)
+	}
+	if request.ToolKey != "huginn_browser_session" {
+		t.Fatalf("Request.ToolKey = %q, want huginn_browser_session", request.ToolKey)
 	}
 }
 
