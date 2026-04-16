@@ -43,8 +43,21 @@ case "${action}" in
         health_payload="$(browser_server_health 2>/dev/null || true)"
         if jq -e . >/dev/null 2>&1 <<<"${health_payload}"; then
             health_state="$(jq -r 'if .browser == true then "healthy" else (.state // "stopped") end' <<<"${health_payload}")"
-            json_status="completed"
-            summary="browser session health checked"
+            case "${health_state}" in
+                healthy)
+                    json_status="completed"
+                    summary="browser session health checked"
+                    ;;
+                stopped|unhealthy)
+                    json_status="failed"
+                    summary="browser session health reported ${health_state}"
+                    ;;
+                *)
+                    json_status="failed"
+                    summary="browser session health check failed"
+                    health_state="unhealthy"
+                    ;;
+            esac
         else
             health_state="unhealthy"
             json_status="failed"
@@ -53,9 +66,20 @@ case "${action}" in
         json_result "${json_status}" "${summary}" "${health_state}" "" "" "" "${health_state}"
         ;;
     launch)
-        browser_request_domain_access "${url}"
-        browser_server_start --url "${url}" --headless
-        browser_navigate "${url}"
+        if ! browser_request_domain_access "${url}"; then
+            json_result "failed" "browser session launch rejected" "failed" "${url}" "" "" "blocked"
+            exit 1
+        fi
+        if ! browser_server_start --url "${url}" --headless; then
+            browser_server_stop >/dev/null 2>&1 || true
+            json_result "failed" "browser session launch failed" "failed" "${url}" "" "" "stopped"
+            exit 1
+        fi
+        if ! browser_navigate "${url}"; then
+            browser_server_stop >/dev/null 2>&1 || true
+            json_result "failed" "browser session navigate failed" "failed" "${url}" "" "" "stopped"
+            exit 1
+        fi
         snapshot="$(browser_snapshot 2>/dev/null || true)"
         json_result "completed" "browser session launched" "running" "${url}" "${snapshot}" "" ""
         ;;
@@ -67,7 +91,11 @@ case "${action}" in
         if [[ -z "${output_path}" ]]; then
             output_path="${ODIN_DIR:-${SCRIPT_DIR}/../../.odin-browser}/browser-state/browser.png"
         fi
-        screenshot_path="$(browser_bc_screenshot --output "${output_path}" 2>/dev/null || true)"
+        if ! screenshot_path="$(browser_bc_screenshot --output "${output_path}")"; then
+            browser_server_stop >/dev/null 2>&1 || true
+            json_result "failed" "browser screenshot failed" "running" "${url}" "" "" "screenshot_failed"
+            exit 1
+        fi
         json_result "completed" "browser screenshot captured" "running" "${url}" "" "${screenshot_path}" ""
         ;;
     stop)
