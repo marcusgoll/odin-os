@@ -358,10 +358,6 @@ service:
 		t.Fatalf("CreateProject() error = %v", err)
 	}
 
-	releasedLease := createServeCleanupLease(t, ctx, store, repoRoot, project, "released", false)
-	staleLease := createServeCleanupLease(t, ctx, store, repoRoot, project, "stale", true)
-	fixtures := []serveCleanupLeaseFixture{releasedLease, staleLease}
-
 	originalCleanupInterval := serveWorktreeCleanupInterval
 	serveWorktreeCleanupInterval = 20 * time.Millisecond
 	t.Cleanup(func() {
@@ -381,6 +377,10 @@ service:
 		<-runDone
 		t.Fatal(err)
 	}
+
+	releasedLease := createServeCleanupLease(t, ctx, store, repoRoot, project, "released", false)
+	staleLease := createServeCleanupLease(t, ctx, store, repoRoot, project, "stale", true)
+	fixtures := []serveCleanupLeaseFixture{releasedLease, staleLease}
 
 	go func() {
 		ticker := time.NewTicker(10 * time.Millisecond)

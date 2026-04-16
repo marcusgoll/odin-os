@@ -569,6 +569,109 @@ func TestExecuteNextQueuedHeartbeatsMutableLeaseWhileRunning(t *testing.T) {
 	}
 }
 
+func TestExecuteNextQueuedPreservesMutableLeaseWhenTerminalPersistenceFails(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "odin.db")
+	store, err := sqlite.Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
+	}
+	defer store.Close()
+
+	registry := writeRegistry(t)
+	git := &jobTestGit{}
+	service := Service{
+		Store:    store,
+		Registry: registry,
+		Executors: map[string]contract.Executor{
+			"closing": &closingExecutor{store: store},
+		},
+		ExecutorConfig: router.Config{
+			Version: 1,
+			Executors: []router.ExecutorConfig{
+				{
+					Key:      "closing",
+					Adapter:  "test",
+					Class:    contract.ExecutorClassPlanBackedCLI,
+					Enabled:  true,
+					Priority: 1,
+				},
+			},
+			Routes: []router.RouteConfig{
+				{
+					Name: "default",
+					Match: router.RouteMatch{
+						TaskKinds: []contract.TaskKind{contract.TaskKindGeneral},
+						Scopes:    []string{"project"},
+					},
+					Preferred: []string{"closing"},
+				},
+			},
+		},
+		Transitions: projects.Service{Store: store},
+		Leases: leases.Manager{
+			Store:        store,
+			Git:          git,
+			WorktreeRoot: t.TempDir(),
+		},
+		Now: time.Now,
+	}
+
+	task, err := service.CreateTaskFromAct(ctx, scope.Resolution{
+		Kind:       scope.ScopeProject,
+		ProjectKey: "alpha",
+	}, "Persist terminal state")
+	if err != nil {
+		t.Fatalf("CreateTaskFromAct() error = %v", err)
+	}
+
+	project, err := store.GetProjectByKey(ctx, "alpha")
+	if err != nil {
+		t.Fatalf("GetProjectByKey(alpha) error = %v", err)
+	}
+	if _, err := service.Transitions.SetTransitionState(ctx, projects.TransitionStateInput{
+		ProjectID:   project.ID,
+		Actor:       projects.TransitionControllerOdinOS,
+		TargetState: projects.TransitionStateCutover,
+		ChangedBy:   "test",
+	}); err != nil {
+		t.Fatalf("SetTransitionState(cutover) error = %v", err)
+	}
+
+	err = service.ExecuteNextQueued(ctx)
+	if err == nil {
+		t.Fatal("ExecuteNextQueued() error = nil, want terminal persistence failure")
+	}
+	if git.removeWorktreeCalls != 0 {
+		t.Fatalf("RemoveWorktree() calls = %d, want 0 when terminal persistence fails", git.removeWorktreeCalls)
+	}
+
+	reopened, err := sqlite.Open(dbPath)
+	if err != nil {
+		t.Fatalf("reopen store error = %v", err)
+	}
+	defer reopened.Close()
+
+	run, err := latestRunForTask(ctx, reopened, task.ID)
+	if err != nil {
+		t.Fatalf("latestRunForTask() error = %v", err)
+	}
+	if run.Status != "running" {
+		t.Fatalf("run.Status = %q, want running when terminal persistence fails", run.Status)
+	}
+
+	lease := latestLeaseForTaskRun(t, ctx, reopened, task.ID, run.ID)
+	if lease.State != "active" {
+		t.Fatalf("lease.State = %q, want active when terminal persistence fails", lease.State)
+	}
+	if lease.CleanedUpAt != nil {
+		t.Fatalf("lease.CleanedUpAt = %v, want nil when terminal persistence fails", lease.CleanedUpAt)
+	}
+}
+
 type jobTestGit struct {
 	createBranchCalls   int
 	addWorktreeCalls    int
@@ -576,6 +679,7 @@ type jobTestGit struct {
 	removeRepoRoot      string
 	removeWorktreePath  string
 	removeWorktreePaths []string
+	removeWorktreeErrs  map[string]error
 }
 
 func (git *jobTestGit) BranchExists(context.Context, string, string) (bool, error) { return false, nil }
@@ -592,12 +696,21 @@ func (git *jobTestGit) RemoveWorktree(_ context.Context, repoRoot string, worktr
 	git.removeRepoRoot = repoRoot
 	git.removeWorktreePath = worktreePath
 	git.removeWorktreePaths = append(git.removeWorktreePaths, worktreePath)
+	if git.removeWorktreeErrs != nil {
+		if err, ok := git.removeWorktreeErrs[worktreePath]; ok {
+			return err
+		}
+	}
 	return nil
 }
 
 type blockingExecutor struct {
 	started chan struct{}
 	release chan struct{}
+}
+
+type closingExecutor struct {
+	store *sqlite.Store
 }
 
 func (executor *blockingExecutor) Key() string { return "blocking" }
@@ -626,6 +739,36 @@ func (executor *blockingExecutor) RunTask(ctx context.Context, spec contract.Tas
 	case <-executor.release:
 		return contract.ExecutionResult{Status: "completed", Output: "done"}, nil
 	}
+}
+func (executor *closingExecutor) Key() string { return "closing" }
+func (executor *closingExecutor) Class() contract.ExecutorClass {
+	return contract.ExecutorClassPlanBackedCLI
+}
+func (executor *closingExecutor) Health(context.Context) (contract.HealthReport, error) {
+	return contract.HealthReport{Status: contract.HealthStatusHealthy, CheckedAt: time.Now().UTC()}, nil
+}
+func (executor *closingExecutor) Capabilities(context.Context) (contract.Capabilities, error) {
+	return contract.Capabilities{
+		ExecutorClass:        contract.ExecutorClassPlanBackedCLI,
+		SupportsHeadlessPlan: true,
+		TaskKinds:            []contract.TaskKind{contract.TaskKindGeneral},
+		Scopes:               []string{"project"},
+	}, nil
+}
+func (executor *closingExecutor) RunTask(context.Context, contract.TaskSpec) (contract.ExecutionResult, error) {
+	if executor.store != nil {
+		_ = executor.store.Close()
+	}
+	return contract.ExecutionResult{Status: "completed", Output: "done"}, nil
+}
+func (executor *closingExecutor) ResumeTask(context.Context, contract.TaskHandle, contract.ResumePacket) (contract.ExecutionResult, error) {
+	return contract.ExecutionResult{}, contract.ErrNotImplemented
+}
+func (executor *closingExecutor) CancelTask(context.Context, contract.TaskHandle) error {
+	return contract.ErrNotImplemented
+}
+func (executor *closingExecutor) EstimateCost(context.Context, contract.TaskSpec) (contract.CostEstimate, error) {
+	return contract.CostEstimate{}, contract.ErrNotImplemented
 }
 func (executor *blockingExecutor) ResumeTask(context.Context, contract.TaskHandle, contract.ResumePacket) (contract.ExecutionResult, error) {
 	return contract.ExecutionResult{}, contract.ErrNotImplemented

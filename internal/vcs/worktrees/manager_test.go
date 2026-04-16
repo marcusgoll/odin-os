@@ -2,6 +2,7 @@ package worktrees
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -150,12 +151,125 @@ func TestManagerCleanupRemovesStaleActiveLeaseDeterministically(t *testing.T) {
 	}
 }
 
-type cleanupGit struct {
-	removeCalls int
+func TestManagerCleanupContinuesPastLeaseRemovalFailure(t *testing.T) {
+	ctx := context.Background()
+	store, project, task, run := openCleanupStore(t)
+	defer store.Close()
+
+	failingLease, err := store.CreateWorktreeLease(ctx, sqlite.CreateWorktreeLeaseParams{
+		ProjectID:    project.ID,
+		TaskID:       task.ID,
+		RunID:        run.ID,
+		Mode:         "mutable",
+		BranchName:   "odin/cfipros/task-1/run-1/try-1",
+		WorktreePath: "/var/tmp/odin-worktrees/cfipros/task-1/run-1/try-1",
+		RepoRoot:     project.GitRoot,
+		State:        "active",
+	})
+	if err != nil {
+		t.Fatalf("CreateWorktreeLease(failing) error = %v", err)
+	}
+	if _, err := store.ReleaseWorktreeLease(ctx, sqlite.ReleaseWorktreeLeaseParams{
+		LeaseID: failingLease.ID,
+		State:   "released",
+	}); err != nil {
+		t.Fatalf("ReleaseWorktreeLease(failing) error = %v", err)
+	}
+
+	nextTask, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "phase-09-cleanup-next",
+		Title:       "Cleanup second worktree",
+		Status:      "running",
+		Scope:       "project",
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask(next) error = %v", err)
+	}
+	nextRun, err := store.StartRun(ctx, sqlite.StartRunParams{
+		TaskID:   nextTask.ID,
+		Executor: "codex",
+		Attempt:  1,
+		Status:   "running",
+	})
+	if err != nil {
+		t.Fatalf("StartRun(next) error = %v", err)
+	}
+	succeedingLease, err := store.CreateWorktreeLease(ctx, sqlite.CreateWorktreeLeaseParams{
+		ProjectID:    project.ID,
+		TaskID:       nextTask.ID,
+		RunID:        nextRun.ID,
+		Mode:         "mutable",
+		BranchName:   "odin/cfipros/task-2/run-1/try-1",
+		WorktreePath: "/var/tmp/odin-worktrees/cfipros/task-2/run-1/try-1",
+		RepoRoot:     project.GitRoot,
+		State:        "active",
+	})
+	if err != nil {
+		t.Fatalf("CreateWorktreeLease(succeeding) error = %v", err)
+	}
+	if _, err := store.ReleaseWorktreeLease(ctx, sqlite.ReleaseWorktreeLeaseParams{
+		LeaseID: succeedingLease.ID,
+		State:   "released",
+	}); err != nil {
+		t.Fatalf("ReleaseWorktreeLease(succeeding) error = %v", err)
+	}
+
+	removeErr := errors.New("remove failed")
+	git := &cleanupGit{
+		errsByPath: map[string]error{
+			failingLease.WorktreePath: removeErr,
+		},
+	}
+	manager := Manager{Store: store, Git: git}
+
+	result, err := manager.Cleanup(ctx, time.Now().UTC().Add(-30*time.Minute))
+	if !errors.Is(err, removeErr) {
+		t.Fatalf("Cleanup() error = %v, want remove failure", err)
+	}
+	if len(result.Removed) != 1 {
+		t.Fatalf("Cleanup().Removed len = %d, want 1", len(result.Removed))
+	}
+	if result.Removed[0].ID != succeedingLease.ID {
+		t.Fatalf("Cleanup().Removed[0].ID = %d, want %d", result.Removed[0].ID, succeedingLease.ID)
+	}
+
+	failingAfter, err := store.GetWorktreeLease(ctx, failingLease.ID)
+	if err != nil {
+		t.Fatalf("GetWorktreeLease(failing) error = %v", err)
+	}
+	if failingAfter.State != "released" {
+		t.Fatalf("failing lease state = %q, want released", failingAfter.State)
+	}
+	if failingAfter.CleanedUpAt != nil {
+		t.Fatalf("failing lease cleaned unexpectedly")
+	}
+
+	succeedingAfter, err := store.GetWorktreeLease(ctx, succeedingLease.ID)
+	if err != nil {
+		t.Fatalf("GetWorktreeLease(succeeding) error = %v", err)
+	}
+	if succeedingAfter.State != "cleaned" {
+		t.Fatalf("succeeding lease state = %q, want cleaned", succeedingAfter.State)
+	}
+	if succeedingAfter.CleanedUpAt == nil {
+		t.Fatalf("succeeding lease cleaned_up_at = nil, want value")
+	}
 }
 
-func (git *cleanupGit) RemoveWorktree(context.Context, string, string) error {
+type cleanupGit struct {
+	removeCalls int
+	errsByPath  map[string]error
+}
+
+func (git *cleanupGit) RemoveWorktree(_ context.Context, _ string, worktreePath string) error {
 	git.removeCalls++
+	if git.errsByPath != nil {
+		if err, ok := git.errsByPath[worktreePath]; ok {
+			return err
+		}
+	}
 	return nil
 }
 

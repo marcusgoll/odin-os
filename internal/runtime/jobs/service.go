@@ -3,6 +3,7 @@ package jobs
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -161,16 +162,12 @@ func (service Service) ExecuteNextQueued(ctx context.Context) error {
 		return err
 	}
 
+	terminalStatePersisted := false
 	finishFailure := func(cause error) error {
-		_, _ = service.Store.FinishRun(ctx, sqlite.FinishRunParams{
-			RunID:   run.ID,
-			Status:  "failed",
-			Summary: cause.Error(),
-		})
-		_, _ = service.Store.UpdateTaskStatus(ctx, sqlite.UpdateTaskStatusParams{
-			TaskID: task.ID,
-			Status: "failed",
-		})
+		if err := persistTerminalState(ctx, service.Store, run.ID, "failed", cause.Error(), task.ID, "failed"); err != nil {
+			return errors.Join(cause, err)
+		}
+		terminalStatePersisted = true
 		return cause
 	}
 
@@ -240,6 +237,9 @@ func (service Service) ExecuteNextQueued(ctx context.Context) error {
 			close(heartbeatStop)
 			<-heartbeatDone
 		}
+		if !terminalStatePersisted {
+			return
+		}
 		releaseAssignment(teardownCtx, service.Store, assignment)
 		cleanupAssignment(teardownCtx, service.Store, leaseManager.Git, assignment)
 	}()
@@ -263,19 +263,10 @@ func (service Service) ExecuteNextQueued(ctx context.Context) error {
 		taskStatus = "failed"
 	}
 
-	if _, err := service.Store.FinishRun(ctx, sqlite.FinishRunParams{
-		RunID:   run.ID,
-		Status:  runStatus,
-		Summary: result.Output,
-	}); err != nil {
+	if err := persistTerminalState(ctx, service.Store, run.ID, runStatus, result.Output, task.ID, taskStatus); err != nil {
 		return err
 	}
-	if _, err := service.Store.UpdateTaskStatus(ctx, sqlite.UpdateTaskStatusParams{
-		TaskID: task.ID,
-		Status: taskStatus,
-	}); err != nil {
-		return err
-	}
+	terminalStatePersisted = true
 
 	return nil
 }
@@ -444,6 +435,23 @@ func cleanupAssignment(ctx context.Context, store *sqlite.Store, git leases.Git,
 		return
 	}
 	_, _ = store.MarkWorktreeLeaseCleanedUp(ctx, *assignment.LeaseID)
+}
+
+func persistTerminalState(ctx context.Context, store *sqlite.Store, runID int64, runStatus string, summary string, taskID int64, taskStatus string) error {
+	if _, err := store.FinishRun(ctx, sqlite.FinishRunParams{
+		RunID:   runID,
+		Status:  runStatus,
+		Summary: summary,
+	}); err != nil {
+		return err
+	}
+	if _, err := store.UpdateTaskStatus(ctx, sqlite.UpdateTaskStatusParams{
+		TaskID: taskID,
+		Status: taskStatus,
+	}); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (service Service) mutableHeartbeatInterval() time.Duration {
