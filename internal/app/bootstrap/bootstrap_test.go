@@ -28,6 +28,29 @@ func TestLoadInitializesFreshRuntimeReadinessState(t *testing.T) {
 	assertCountAtLeast(t, app.Store.DB().QueryRowContext(context.Background(), "SELECT COUNT(*) FROM projection_freshness"), 1)
 }
 
+func TestBootstrapRetainsCapabilityService(t *testing.T) {
+	repoRoot := filepath.Clean(filepath.Join("..", "..", ".."))
+	runtimeRoot := t.TempDir()
+
+	app, err := Load(context.Background(), repoRoot, runtimeRoot)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	defer app.Store.Close()
+
+	if app.CapabilityService == nil {
+		t.Fatal("CapabilityService = nil, want live service")
+	}
+
+	active := app.CapabilityService.Active()
+	if active.Digest == "" {
+		t.Fatal("Active().Digest = empty, want snapshot digest")
+	}
+	if len(active.Diagnostics) != 0 {
+		t.Fatalf("Active().Diagnostics = %+v, want none", active.Diagnostics)
+	}
+}
+
 func TestLoadSerializesConcurrentBootstrapForFreshRuntime(t *testing.T) {
 	repoRoot := filepath.Clean(filepath.Join("..", "..", ".."))
 	runtimeRoot := t.TempDir()

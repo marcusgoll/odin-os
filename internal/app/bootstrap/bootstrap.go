@@ -4,10 +4,12 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"os"
 	"path/filepath"
 
 	clistate "odin-os/internal/cli/state"
+	"odin-os/internal/core/capabilities"
 	"odin-os/internal/core/projects"
 	"odin-os/internal/executors/contract"
 	executorrouter "odin-os/internal/executors/router"
@@ -21,6 +23,7 @@ type App struct {
 	RepoRoot            string
 	Registry            projects.Registry
 	RegistryDiagnostics []projects.Diagnostic
+	CapabilityService   *capabilities.Service
 	SessionStore        clistate.SessionStore
 	ExecutorConfig      executorrouter.Config
 	Executors           map[string]contract.Executor
@@ -56,6 +59,12 @@ func Load(ctx context.Context, repoRoot string, runtimeRoot string) (App, error)
 		return App{}, err
 	}
 
+	digest, err := snapshotDigest(registrySnapshot)
+	if err != nil {
+		_ = store.Close()
+		return App{}, err
+	}
+
 	registry, diagnostics, err := projects.Register(filepath.Join(repoRoot, "config", "projects.yaml"))
 	if err != nil {
 		_ = store.Close()
@@ -77,7 +86,17 @@ func Load(ctx context.Context, repoRoot string, runtimeRoot string) (App, error)
 	}
 	executors := executorrouter.DefaultCatalog()
 
-	if err := initializeReadinessState(ctx, store, filepath.Join(repoRoot, "registry"), registrySnapshot, executors); err != nil {
+	capabilityService, err := capabilities.NewService(capabilities.Snapshot{
+		Digest:       digest,
+		Diagnostics:  registrySnapshot.Diagnostics,
+		Capabilities: registrySnapshot.ByKey,
+	})
+	if err != nil {
+		_ = store.Close()
+		return App{}, err
+	}
+
+	if err := initializeReadinessState(ctx, store, digest, registrySnapshot, executors); err != nil {
 		_ = store.Close()
 		return App{}, err
 	}
@@ -87,6 +106,7 @@ func Load(ctx context.Context, repoRoot string, runtimeRoot string) (App, error)
 		RepoRoot:            repoRoot,
 		Registry:            registry,
 		RegistryDiagnostics: diagnostics,
+		CapabilityService:   capabilityService,
 		SessionStore: clistate.SessionStore{
 			Path: filepath.Join(runtimeRoot, "state", "cache", "cli-session.json"),
 		},
@@ -95,12 +115,8 @@ func Load(ctx context.Context, repoRoot string, runtimeRoot string) (App, error)
 	}, nil
 }
 
-func initializeReadinessState(ctx context.Context, store *sqlite.Store, registryRoot string, snapshot registry.Snapshot, executors map[string]contract.Executor) error {
+func initializeReadinessState(ctx context.Context, store *sqlite.Store, versionHash string, snapshot registry.Snapshot, executors map[string]contract.Executor) error {
 	if len(snapshot.Diagnostics) == 0 {
-		versionHash, err := registryVersionHash(registryRoot)
-		if err != nil {
-			return err
-		}
 		if _, err := store.RecordRegistryVersion(ctx, sqlite.RecordRegistryVersionParams{
 			Source:      "registry",
 			VersionHash: versionHash,
@@ -151,20 +167,20 @@ func initializeReadinessState(ctx context.Context, store *sqlite.Store, registry
 	return nil
 }
 
-func registryVersionHash(root string) (string, error) {
-	files, err := registryloader.ScanDir(root)
+func snapshotDigest(snapshot registry.Snapshot) (string, error) {
+	payload := struct {
+		Items       []registry.Item       `json:"items"`
+		Diagnostics []registry.Diagnostic `json:"diagnostics"`
+	}{
+		Items:       snapshot.Items,
+		Diagnostics: snapshot.Diagnostics,
+	}
+
+	encoded, err := json.Marshal(payload)
 	if err != nil {
 		return "", err
 	}
 
-	hasher := sha256.New()
-	for _, file := range files {
-		content, err := os.ReadFile(file.Path)
-		if err != nil {
-			return "", err
-		}
-		_, _ = hasher.Write([]byte(filepath.ToSlash(file.RelativePath)))
-		_, _ = hasher.Write(content)
-	}
-	return hex.EncodeToString(hasher.Sum(nil)), nil
+	sum := sha256.Sum256(encoded)
+	return hex.EncodeToString(sum[:]), nil
 }
