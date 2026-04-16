@@ -73,17 +73,17 @@ json_result() {
 
 if ! is_plaid_dashboard_url "${application_url}"; then
     json_result "failed" "Plaid transfer application URL must be on Plaid Dashboard" "failed" "${application_url}" "" "" "unsupported application URL"
-    exit 1
+    exit 0
 fi
 
 if ! browser_request_domain_access "${application_url}"; then
     json_result "failed" "Plaid transfer application URL must be on Plaid Dashboard" "failed" "${application_url}" "" "" "unsupported application URL"
-    exit 1
+    exit 0
 fi
 if ! browser_server_start --url "${application_url}" --headless; then
     browser_server_stop >/dev/null 2>&1 || true
     json_result "failed" "Plaid transfer browser launch failed" "failed" "${application_url}" "" "" "launch_failed"
-    exit 1
+    exit 0
 fi
 snapshot="$(browser_snapshot 2>/dev/null || true)"
 session_state="$(detect_state "${snapshot}")"
@@ -95,7 +95,7 @@ fi
 if ! screenshot_path="$(browser_bc_screenshot --output "${screenshot_path}")"; then
     browser_server_stop >/dev/null 2>&1 || true
     json_result "failed" "Plaid transfer screenshot failed" "${session_state}" "${application_url}" "${snapshot}" "" "screenshot_failed"
-    exit 1
+    exit 0
 fi
 
 case "${session_state}" in

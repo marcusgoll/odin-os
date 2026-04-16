@@ -48,8 +48,8 @@ func TestHuginnBrowserSessionScript(t *testing.T) {
 		stdout, callsLog, markerPath, err := runBrowserDriverScriptRaw(t, repoRoot, scriptPath, "huginn-browser-session.sh", `{"tool_key":"huginn_browser_session","input":{"action":"launch","url":"https://example.com"}}`, map[string]string{
 			"ODIN_BROWSER_STUB_NAVIGATE_EXIT_CODE": "1",
 		}, browserAccessStubContent())
-		if err == nil {
-			t.Fatalf("expected launch to fail")
+		if err != nil {
+			t.Fatalf("expected handled launch failure to exit 0, got err=%v\n%s", err, stdout)
 		}
 		assertStructuredDriverOutput(t, stdout, "huginn_browser_session", "failed")
 		assertJSONArtifactString(t, stdout, "session_state", "failed")
@@ -140,8 +140,8 @@ func TestPlaidTransferApplicationScript(t *testing.T) {
 
 	t.Run("reject non-plaid urls", func(t *testing.T) {
 		stdout, callsLog, markerPath, err := runBrowserDriverScriptRaw(t, repoRoot, scriptPath, "plaid-transfer-application.sh", `{"tool_key":"plaid_transfer_application","input":{"action":"inspect","application_url":"https://example.com/transfer/application"}}`, nil, browserAccessStubContent())
-		if err == nil {
-			t.Fatalf("expected non-Plaid url to fail")
+		if err != nil {
+			t.Fatalf("expected handled non-Plaid url failure to exit 0, got err=%v\n%s", err, stdout)
 		}
 		assertStructuredDriverOutput(t, stdout, "plaid_transfer_application", "failed")
 		assertJSONArtifactString(t, stdout, "session_state", "failed")

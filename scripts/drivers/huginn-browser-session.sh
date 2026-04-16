@@ -68,17 +68,17 @@ case "${action}" in
     launch)
         if ! browser_request_domain_access "${url}"; then
             json_result "failed" "browser session launch rejected" "failed" "${url}" "" "" "blocked"
-            exit 1
+        exit 0
         fi
         if ! browser_server_start --url "${url}" --headless; then
             browser_server_stop >/dev/null 2>&1 || true
             json_result "failed" "browser session launch failed" "failed" "${url}" "" "" "stopped"
-            exit 1
+        exit 0
         fi
         if ! browser_navigate "${url}"; then
             browser_server_stop >/dev/null 2>&1 || true
             json_result "failed" "browser session navigate failed" "failed" "${url}" "" "" "stopped"
-            exit 1
+        exit 0
         fi
         snapshot="$(browser_snapshot 2>/dev/null || true)"
         json_result "completed" "browser session launched" "running" "${url}" "${snapshot}" "" ""
@@ -94,7 +94,7 @@ case "${action}" in
         if ! screenshot_path="$(browser_bc_screenshot --output "${output_path}")"; then
             browser_server_stop >/dev/null 2>&1 || true
             json_result "failed" "browser screenshot failed" "running" "${url}" "" "" "screenshot_failed"
-            exit 1
+        exit 0
         fi
         json_result "completed" "browser screenshot captured" "running" "${url}" "" "${screenshot_path}" ""
         ;;
