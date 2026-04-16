@@ -3,7 +3,6 @@ package capabilities
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"sync"
 	"testing"
 
@@ -146,9 +145,12 @@ func TestPublishEmitsCapabilitySnapshotEvents(t *testing.T) {
 func TestReloadDoesNotOverwriteNewerPublish(t *testing.T) {
 	started := make(chan struct{})
 	release := make(chan struct{})
+	publishedApplied := make(chan struct{})
+	allowReloadReturn := make(chan struct{})
 	events := make([]capturedEvent, 0, 2)
 	var eventsMu sync.Mutex
 	var startedOnce sync.Once
+	var publishedOnce sync.Once
 	service, err := NewService(testSnapshot("digest-a", "alpha"),
 		WithLoader(func(ctx context.Context) (Snapshot, error) {
 			startedOnce.Do(func() { close(started) })
@@ -160,6 +162,16 @@ func TestReloadDoesNotOverwriteNewerPublish(t *testing.T) {
 			if err != nil {
 				t.Fatalf("EncodePayload() error = %v", err)
 			}
+			if typ == runtimeevents.EventCapabilitySnapshotPublished {
+				decoded, err := runtimeevents.DecodePayload[runtimeevents.CapabilitySnapshotPublishedPayload](raw)
+				if err != nil {
+					t.Fatalf("DecodePayload(CapabilitySnapshotPublishedPayload) error = %v", err)
+				}
+				if decoded.Digest == "digest-stale" {
+					publishedOnce.Do(func() { close(publishedApplied) })
+					<-allowReloadReturn
+				}
+			}
 			eventsMu.Lock()
 			defer eventsMu.Unlock()
 			events = append(events, capturedEvent{typ: typ, payload: raw})
@@ -169,21 +181,30 @@ func TestReloadDoesNotOverwriteNewerPublish(t *testing.T) {
 		t.Fatalf("NewService() error = %v", err)
 	}
 
-	reloadErr := make(chan error, 1)
+	type reloadResult struct {
+		snapshot Snapshot
+		err      error
+	}
+	reloadResultCh := make(chan reloadResult, 1)
 	go func() {
-		_, err := service.Reload(context.Background())
-		reloadErr <- err
+		snapshot, err := service.Reload(context.Background())
+		reloadResultCh <- reloadResult{snapshot: snapshot, err: err}
 	}()
 
 	<-started
+	close(release)
+	<-publishedApplied
 	if err := service.Publish(testSnapshot("digest-b", "beta")); err != nil {
 		t.Fatalf("Publish() error = %v", err)
 	}
-	close(release)
+	close(allowReloadReturn)
 
-	err = <-reloadErr
-	if !errors.Is(err, errStaleReloadSnapshot) {
-		t.Fatalf("Reload() error = %v, want stale reload rejection", err)
+	result := <-reloadResultCh
+	if result.err != nil {
+		t.Fatalf("Reload() error = %v, want nil", result.err)
+	}
+	if result.snapshot.Digest != "digest-stale" {
+		t.Fatalf("Reload() snapshot digest = %q, want digest-stale", result.snapshot.Digest)
 	}
 
 	active := service.Active()
@@ -199,15 +220,19 @@ func TestReloadDoesNotOverwriteNewerPublish(t *testing.T) {
 	if events[0].typ != runtimeevents.EventCapabilitySnapshotPublished {
 		t.Fatalf("event[0] type = %q, want %q", events[0].typ, runtimeevents.EventCapabilitySnapshotPublished)
 	}
-	if events[1].typ != runtimeevents.EventCapabilitySnapshotRejected {
-		t.Fatalf("event[1] type = %q, want %q", events[1].typ, runtimeevents.EventCapabilitySnapshotRejected)
+	if events[1].typ != runtimeevents.EventCapabilitySnapshotPublished {
+		t.Fatalf("event[1] type = %q, want %q", events[1].typ, runtimeevents.EventCapabilitySnapshotPublished)
 	}
-	rejected, err := runtimeevents.DecodePayload[runtimeevents.CapabilitySnapshotRejectedPayload](events[1].payload)
-	if err != nil {
-		t.Fatalf("DecodePayload(CapabilitySnapshotRejectedPayload) error = %v", err)
+	digests := map[string]bool{}
+	for i, event := range events {
+		published, err := runtimeevents.DecodePayload[runtimeevents.CapabilitySnapshotPublishedPayload](event.payload)
+		if err != nil {
+			t.Fatalf("DecodePayload(CapabilitySnapshotPublishedPayload) event[%d] error = %v", i, err)
+		}
+		digests[published.Digest] = true
 	}
-	if rejected.Reason != errStaleReloadSnapshot.Error() {
-		t.Fatalf("rejected payload reason = %q, want %q", rejected.Reason, errStaleReloadSnapshot.Error())
+	if !digests["digest-stale"] || !digests["digest-b"] {
+		t.Fatalf("published digests = %+v, want digest-stale and digest-b", digests)
 	}
 }
 

@@ -44,6 +44,8 @@ func (watcher *NoopWatcher) Close() error {
 
 type ManualWatcher struct {
 	events chan Event
+	mu     sync.Mutex
+	closed bool
 	once   sync.Once
 }
 
@@ -61,9 +63,11 @@ func (watcher *ManualWatcher) Events() <-chan Event {
 }
 
 func (watcher *ManualWatcher) Send(event Event) bool {
-	defer func() {
-		_ = recover()
-	}()
+	watcher.mu.Lock()
+	defer watcher.mu.Unlock()
+	if watcher.closed {
+		return false
+	}
 	select {
 	case watcher.events <- event:
 		return true
@@ -74,7 +78,10 @@ func (watcher *ManualWatcher) Send(event Event) bool {
 
 func (watcher *ManualWatcher) Close() error {
 	watcher.once.Do(func() {
+		watcher.mu.Lock()
+		watcher.closed = true
 		close(watcher.events)
+		watcher.mu.Unlock()
 	})
 	return nil
 }

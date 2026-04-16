@@ -81,21 +81,22 @@ func (s *Service) Reload(ctx context.Context) (Snapshot, error) {
 		return Snapshot{}, err
 	}
 
-	if err := s.publishIfCurrent(expectedDigest, next); err != nil {
+	published, err := s.publishIfCurrent(expectedDigest, next)
+	if err != nil {
 		return Snapshot{}, err
 	}
 
-	return s.Active(), nil
+	return published, nil
 }
 
-func (s *Service) publishIfCurrent(expectedDigest string, next Snapshot) error {
+func (s *Service) publishIfCurrent(expectedDigest string, next Snapshot) (Snapshot, error) {
 	if s == nil {
-		return errNilService
+		return Snapshot{}, errNilService
 	}
 
 	if err := validateSnapshot(next); err != nil {
 		s.emitSnapshotRejected(s.currentSnapshot(), next, err)
-		return err
+		return Snapshot{}, err
 	}
 
 	s.mu.Lock()
@@ -112,7 +113,7 @@ func (s *Service) publishIfCurrent(expectedDigest string, next Snapshot) error {
 			CapabilityCount: len(next.Capabilities),
 			Reason:          errStaleReloadSnapshot.Error(),
 		})
-		return errStaleReloadSnapshot
+		return Snapshot{}, errStaleReloadSnapshot
 	}
 	cloned := cloneSnapshot(next)
 	s.active = cloned
@@ -127,7 +128,7 @@ func (s *Service) publishIfCurrent(expectedDigest string, next Snapshot) error {
 		Digest:          cloned.Digest,
 		CapabilityCount: len(cloned.Capabilities),
 	})
-	return nil
+	return cloned, nil
 }
 
 func (s *Service) emitSnapshotRejected(previous Snapshot, next Snapshot, err error) {
