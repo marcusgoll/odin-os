@@ -3,7 +3,6 @@ package workitems
 import (
 	"context"
 	"path/filepath"
-	"reflect"
 	"testing"
 
 	"odin-os/internal/core/initiatives"
@@ -367,8 +366,8 @@ func TestWorkItemServiceQueuesTasksWithSemanticLinks(t *testing.T) {
 	if item.ID != task.ID {
 		t.Fatalf("Get().ID = %d, want %d", item.ID, task.ID)
 	}
-	if item.WorkspaceID == nil || *item.WorkspaceID != workspaceID {
-		t.Fatalf("Get().WorkspaceID = %v, want %d", item.WorkspaceID, workspaceID)
+	if item.WorkspaceID != workspaceID {
+		t.Fatalf("Get().WorkspaceID = %d, want %d", item.WorkspaceID, workspaceID)
 	}
 	if item.InitiativeID == nil || *item.InitiativeID != initiativeID {
 		t.Fatalf("Get().InitiativeID = %v, want %d", item.InitiativeID, initiativeID)
@@ -384,7 +383,7 @@ func TestWorkItemServiceQueuesTasksWithSemanticLinks(t *testing.T) {
 	}
 }
 
-func TestWorkItemServicePreservesNilWorkspaceID(t *testing.T) {
+func TestWorkItemServiceAssignsDefaultWorkspaceWhenMissing(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
@@ -396,7 +395,7 @@ func TestWorkItemServicePreservesNilWorkspaceID(t *testing.T) {
 
 	task, err := service.Queue(ctx, sqlite.CreateTaskParams{
 		ProjectID:    projectID,
-		Key:          "nil-workspace-item",
+		Key:          "default-workspace-item",
 		Title:        "Queue work item",
 		Scope:        "project",
 		RequestedBy:  "operator",
@@ -407,24 +406,21 @@ func TestWorkItemServicePreservesNilWorkspaceID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Queue() error = %v", err)
 	}
-	if task.WorkspaceID != nil {
-		t.Fatalf("Queue().WorkspaceID = %v, want nil", task.WorkspaceID)
+
+	workspace, err := workspaces.Service{Store: store}.BootstrapDefaultWorkspace(ctx)
+	if err != nil {
+		t.Fatalf("BootstrapDefaultWorkspace() error = %v", err)
+	}
+	if task.WorkspaceID == nil || *task.WorkspaceID != workspace.ID {
+		t.Fatalf("Queue().WorkspaceID = %v, want %d", task.WorkspaceID, workspace.ID)
 	}
 
 	item, err := service.Get(ctx, task.ID)
 	if err != nil {
 		t.Fatalf("Get() error = %v", err)
 	}
-	if item.WorkspaceID != nil {
-		t.Fatalf("Get().WorkspaceID = %v, want nil", item.WorkspaceID)
-	}
-
-	field, ok := reflect.TypeOf(item).FieldByName("WorkspaceID")
-	if !ok {
-		t.Fatal("WorkItem.WorkspaceID field is missing")
-	}
-	if field.Type.Kind() != reflect.Ptr || field.Type.Elem().Kind() != reflect.Int64 {
-		t.Fatalf("WorkItem.WorkspaceID type = %s, want *int64", field.Type)
+	if item.WorkspaceID != workspace.ID {
+		t.Fatalf("Get().WorkspaceID = %d, want %d", item.WorkspaceID, workspace.ID)
 	}
 }
 

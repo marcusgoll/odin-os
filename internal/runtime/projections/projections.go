@@ -794,6 +794,7 @@ func ReplayLifecycle(records []runtimeevents.Record) (LifecycleReplay, error) {
 		Runs:      make(map[int64]RunReplay),
 		Approvals: make(map[int64]ApprovalReplay),
 	}
+	pendingApprovalByTask := make(map[int64]int64)
 
 	for _, record := range records {
 		switch record.Type {
@@ -853,6 +854,12 @@ func ReplayLifecycle(records []runtimeevents.Record) (LifecycleReplay, error) {
 			if err != nil {
 				return LifecycleReplay{}, fmt.Errorf("decode %s payload: %w", record.Type, err)
 			}
+			if payload.Status == "pending" {
+				if previousApprovalID, ok := pendingApprovalByTask[payload.TaskID]; ok {
+					delete(replay.Approvals, previousApprovalID)
+				}
+				pendingApprovalByTask[payload.TaskID] = record.StreamID
+			}
 			replay.Approvals[record.StreamID] = ApprovalReplay{
 				ID:          record.StreamID,
 				TaskID:      payload.TaskID,
@@ -871,6 +878,9 @@ func ReplayLifecycle(records []runtimeevents.Record) (LifecycleReplay, error) {
 			approval.DecisionBy = payload.DecisionBy
 			approval.Reason = payload.Reason
 			replay.Approvals[record.StreamID] = approval
+			if approval.TaskID != 0 && pendingApprovalByTask[approval.TaskID] == record.StreamID && payload.Status != "pending" {
+				delete(pendingApprovalByTask, approval.TaskID)
+			}
 		}
 	}
 

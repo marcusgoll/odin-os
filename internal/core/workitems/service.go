@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"odin-os/internal/core/workspaces"
 	"odin-os/internal/store/sqlite"
 )
 
@@ -25,8 +26,12 @@ func (service Service) Queue(ctx context.Context, params sqlite.CreateTaskParams
 		return sqlite.Task{}, fmt.Errorf("work item store is required")
 	}
 	params.Status = statusQueued
+	repairedParams, err := service.ensureCreateTaskWorkspace(ctx, params)
+	if err != nil {
+		return sqlite.Task{}, err
+	}
 
-	task, err := service.Store.CreateTask(ctx, params)
+	task, err := service.Store.CreateTask(ctx, repairedParams)
 	if err != nil {
 		return sqlite.Task{}, err
 	}
@@ -39,6 +44,10 @@ func (service Service) Get(ctx context.Context, taskID int64) (WorkItem, error) 
 	}
 
 	task, err := service.Store.GetTask(ctx, taskID)
+	if err != nil {
+		return WorkItem{}, err
+	}
+	task, err = service.ensureTaskWorkspace(ctx, task)
 	if err != nil {
 		return WorkItem{}, err
 	}
@@ -81,6 +90,10 @@ func (service Service) RequestApproval(ctx context.Context, taskID int64, runID 
 	if err != nil {
 		return sqlite.Approval{}, WorkItem{}, err
 	}
+	current, err = service.ensureTaskWorkspace(ctx, current)
+	if err != nil {
+		return sqlite.Approval{}, WorkItem{}, err
+	}
 	if isTerminalStatus(current.Status) {
 		return sqlite.Approval{}, WorkItem{}, fmt.Errorf("task %d is already %s", taskID, current.Status)
 	}
@@ -104,6 +117,13 @@ func (service Service) transitionStatus(ctx context.Context, taskID int64, statu
 	if service.Store == nil {
 		return sqlite.Task{}, fmt.Errorf("work item store is required")
 	}
+	current, err := service.Store.GetTask(ctx, taskID)
+	if err != nil {
+		return sqlite.Task{}, err
+	}
+	if _, err := service.ensureTaskWorkspace(ctx, current); err != nil {
+		return sqlite.Task{}, err
+	}
 
 	task, err := service.Store.UpdateTaskStatus(ctx, sqlite.UpdateTaskStatusParams{
 		TaskID:                 taskID,
@@ -118,10 +138,14 @@ func (service Service) transitionStatus(ctx context.Context, taskID int64, statu
 }
 
 func toDomainWorkItem(task sqlite.Task) WorkItem {
+	var workspaceID int64
+	if task.WorkspaceID != nil {
+		workspaceID = *task.WorkspaceID
+	}
 	item := WorkItem{
 		ID:           task.ID,
 		Key:          task.Key,
-		WorkspaceID:  task.WorkspaceID,
+		WorkspaceID:  workspaceID,
 		InitiativeID: task.InitiativeID,
 		CompanionID:  task.CompanionID,
 		WorkKind:     task.WorkKind,
@@ -132,4 +156,28 @@ func toDomainWorkItem(task sqlite.Task) WorkItem {
 
 func isTerminalStatus(status string) bool {
 	return status == statusCompleted || status == statusFailed
+}
+
+func (service Service) ensureCreateTaskWorkspace(ctx context.Context, params sqlite.CreateTaskParams) (sqlite.CreateTaskParams, error) {
+	if params.WorkspaceID != nil {
+		return params, nil
+	}
+	workspace, err := workspaces.Service{Store: service.Store}.BootstrapDefaultWorkspace(ctx)
+	if err != nil {
+		return sqlite.CreateTaskParams{}, err
+	}
+	params.WorkspaceID = &workspace.ID
+	return params, nil
+}
+
+func (service Service) ensureTaskWorkspace(ctx context.Context, task sqlite.Task) (sqlite.Task, error) {
+	if task.WorkspaceID != nil {
+		return task, nil
+	}
+
+	workspace, err := workspaces.Service{Store: service.Store}.BootstrapDefaultWorkspace(ctx)
+	if err != nil {
+		return sqlite.Task{}, err
+	}
+	return service.Store.AssignTaskWorkspace(ctx, task.ID, workspace.ID)
 }

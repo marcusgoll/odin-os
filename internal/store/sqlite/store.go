@@ -427,6 +427,37 @@ func (store *Store) UpdateTaskStatus(ctx context.Context, params UpdateTaskStatu
 	return task, err
 }
 
+func (store *Store) AssignTaskWorkspace(ctx context.Context, taskID, workspaceID int64) (Task, error) {
+	now := store.now()
+	var task Task
+
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		current, err := store.getTaskTx(ctx, tx, taskID)
+		if err != nil {
+			return err
+		}
+		if current.WorkspaceID != nil {
+			task = current
+			return nil
+		}
+
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE tasks
+			SET workspace_id = ?, updated_at = ?
+			WHERE id = ? AND workspace_id IS NULL
+		`, workspaceID, formatTime(now), taskID); err != nil {
+			return err
+		}
+
+		current.WorkspaceID = &workspaceID
+		current.UpdatedAt = now
+		task = current
+		return nil
+	})
+
+	return task, err
+}
+
 func (store *Store) StartRun(ctx context.Context, params StartRunParams) (Run, error) {
 	now := store.now()
 	var run Run
