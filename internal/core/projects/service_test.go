@@ -154,6 +154,40 @@ func TestTransitionServiceLimitedActionAllowsOnlyConfiguredLowRiskAction(t *test
 	}
 }
 
+func TestProjectBackedInitiativeReconcilesManagedProjectRecord(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openTransitionServiceStore(t)
+	defer store.Close()
+
+	project := createTransitionServiceProject(t, ctx, store, "delta")
+	service := Service{Store: store}
+
+	if _, err := store.DB().ExecContext(ctx, `
+		UPDATE initiatives
+		SET title = ?, status = ?, summary = ?
+		WHERE linked_project_id = ?
+	`, "stale title", "archived", "stale summary", project.ID); err != nil {
+		t.Fatalf("seed stale initiative error = %v", err)
+	}
+
+	initiative, err := service.EnsureProjectBackedInitiative(ctx, project.ID)
+	if err != nil {
+		t.Fatalf("EnsureProjectBackedInitiative() error = %v", err)
+	}
+
+	if initiative.LinkedProjectID == nil || *initiative.LinkedProjectID != project.ID {
+		t.Fatalf("EnsureProjectBackedInitiative().LinkedProjectID = %v, want %d", initiative.LinkedProjectID, project.ID)
+	}
+	if initiative.Title != project.Name {
+		t.Fatalf("EnsureProjectBackedInitiative().Title = %q, want %q", initiative.Title, project.Name)
+	}
+	if initiative.Status != "active" {
+		t.Fatalf("EnsureProjectBackedInitiative().Status = %q, want %q", initiative.Status, "active")
+	}
+}
+
 func openTransitionServiceStore(t *testing.T) *sqlite.Store {
 	t.Helper()
 

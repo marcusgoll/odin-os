@@ -220,12 +220,31 @@ func TestStoreMigrateLifecycleAndReopen(t *testing.T) {
 		t.Fatalf("project views = %+v, want one project with one task", projectViews)
 	}
 
+	workspace, err := store.GetWorkspaceByKey(ctx, "marcus")
+	if err != nil {
+		t.Fatalf("GetWorkspaceByKey(marcus) error = %v", err)
+	}
+	if workspace.Status != "active" {
+		t.Fatalf("GetWorkspaceByKey(marcus).Status = %q, want %q", workspace.Status, "active")
+	}
+
+	initiative, err := store.GetInitiativeByProjectID(ctx, project.ID)
+	if err != nil {
+		t.Fatalf("GetInitiativeByProjectID() error = %v", err)
+	}
+	if initiative.WorkspaceID != workspace.ID {
+		t.Fatalf("GetInitiativeByProjectID().WorkspaceID = %d, want %d", initiative.WorkspaceID, workspace.ID)
+	}
+	if initiative.Kind != "managed_project" {
+		t.Fatalf("GetInitiativeByProjectID().Kind = %q, want %q", initiative.Kind, "managed_project")
+	}
+
 	var migrationCount int
 	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM schema_migrations`).Scan(&migrationCount); err != nil {
 		t.Fatalf("schema_migrations count query error = %v", err)
 	}
-	if migrationCount != 6 {
-		t.Fatalf("schema_migrations count = %d, want 6", migrationCount)
+	if migrationCount != 8 {
+		t.Fatalf("schema_migrations count = %d, want 8", migrationCount)
 	}
 
 	if err := store.Close(); err != nil {
@@ -264,6 +283,154 @@ func TestStoreMigrateLifecycleAndReopen(t *testing.T) {
 	}
 	if gotApproval.Status != "approved" {
 		t.Fatalf("GetApproval().Status = %q, want %q", gotApproval.Status, "approved")
+	}
+
+	gotInitiative, err := reopened.GetInitiativeByProjectID(ctx, project.ID)
+	if err != nil {
+		t.Fatalf("GetInitiativeByProjectID(reopen) error = %v", err)
+	}
+	if gotInitiative.LinkedProjectID == nil || *gotInitiative.LinkedProjectID != project.ID {
+		t.Fatalf("GetInitiativeByProjectID(reopen).LinkedProjectID = %v, want %d", gotInitiative.LinkedProjectID, project.ID)
+	}
+}
+
+func TestWorkspaceStoreLookupAndListActive(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "odin.db")
+
+	store, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer store.Close()
+
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
+	}
+
+	primary, err := store.CreateWorkspace(ctx, CreateWorkspaceParams{
+		Key:        "marcus",
+		Name:       "Marcus Workspace",
+		OwnerRef:   "marcus",
+		Status:     "active",
+		PolicyJSON: `{}`,
+	})
+	if err != nil {
+		t.Fatalf("CreateWorkspace(primary) error = %v", err)
+	}
+
+	active, err := store.CreateWorkspace(ctx, CreateWorkspaceParams{
+		Key:                 "ops",
+		Name:                "Operations",
+		OwnerRef:            "marcus",
+		Status:              "active",
+		DefaultCompanionKey: "daily-assistant",
+		PolicyJSON:          `{"mode":"active"}`,
+	})
+	if err != nil {
+		t.Fatalf("CreateWorkspace(active) error = %v", err)
+	}
+
+	if _, err := store.CreateWorkspace(ctx, CreateWorkspaceParams{
+		Key:        "archive",
+		Name:       "Archive",
+		OwnerRef:   "marcus",
+		Status:     "archived",
+		PolicyJSON: `{"mode":"archived"}`,
+	}); err != nil {
+		t.Fatalf("CreateWorkspace(archived) error = %v", err)
+	}
+
+	got, err := store.GetWorkspaceByKey(ctx, primary.Key)
+	if err != nil {
+		t.Fatalf("GetWorkspaceByKey() error = %v", err)
+	}
+	if got.ID != primary.ID {
+		t.Fatalf("GetWorkspaceByKey().ID = %d, want %d", got.ID, primary.ID)
+	}
+
+	workspaces, err := store.ListWorkspaces(ctx, ListWorkspacesParams{Status: "active"})
+	if err != nil {
+		t.Fatalf("ListWorkspaces(active) error = %v", err)
+	}
+	if len(workspaces) != 2 {
+		t.Fatalf("ListWorkspaces(active) len = %d, want 2", len(workspaces))
+	}
+	if workspaces[0].ID != primary.ID {
+		t.Fatalf("ListWorkspaces(active)[0].ID = %d, want %d", workspaces[0].ID, primary.ID)
+	}
+	if workspaces[1].ID != active.ID {
+		t.Fatalf("ListWorkspaces(active)[1].ID = %d, want %d", workspaces[1].ID, active.ID)
+	}
+}
+
+func TestInitiativeStoreCreateListAndProjectLink(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "odin.db")
+
+	store, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer store.Close()
+
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
+	}
+
+	workspace, err := store.CreateWorkspace(ctx, CreateWorkspaceParams{
+		Key:        "marcus",
+		Name:       "Marcus Workspace",
+		OwnerRef:   "marcus",
+		Status:     "active",
+		PolicyJSON: `{}`,
+	})
+	if err != nil {
+		t.Fatalf("CreateWorkspace() error = %v", err)
+	}
+
+	project, err := store.CreateProject(ctx, CreateProjectParams{
+		Key:           "cfipros",
+		Name:          "CFI Pros",
+		Scope:         "project",
+		GitRoot:       "/tmp/cfipros",
+		DefaultBranch: "main",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+
+	manual, err := store.CreateInitiative(ctx, CreateInitiativeParams{
+		WorkspaceID: workspace.ID,
+		Key:         "ops-rollout",
+		Title:       "Ops Rollout",
+		Kind:        "program",
+		Status:      "active",
+		Summary:     "Manual program initiative",
+	})
+	if err != nil {
+		t.Fatalf("CreateInitiative() error = %v", err)
+	}
+
+	if manual.Kind != "program" {
+		t.Fatalf("CreateInitiative().Kind = %q, want %q", manual.Kind, "program")
+	}
+
+	linked, err := store.GetInitiativeByProjectID(ctx, project.ID)
+	if err != nil {
+		t.Fatalf("GetInitiativeByProjectID() error = %v", err)
+	}
+	if linked.LinkedProjectID == nil || *linked.LinkedProjectID != project.ID {
+		t.Fatalf("GetInitiativeByProjectID().LinkedProjectID = %v, want %d", linked.LinkedProjectID, project.ID)
+	}
+
+	initiatives, err := store.ListInitiatives(ctx, ListInitiativesParams{WorkspaceID: &workspace.ID})
+	if err != nil {
+		t.Fatalf("ListInitiatives() error = %v", err)
+	}
+	if len(initiatives) != 2 {
+		t.Fatalf("ListInitiatives() len = %d, want 2", len(initiatives))
 	}
 }
 

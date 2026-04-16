@@ -25,6 +25,71 @@ type CreateProjectParams struct {
 	ManifestPath  string
 }
 
+type Workspace struct {
+	ID                  int64
+	Key                 string
+	Name                string
+	OwnerRef            string
+	Status              string
+	DefaultCompanionKey string
+	PolicyJSON          string
+	CreatedAt           time.Time
+	UpdatedAt           time.Time
+}
+
+type CreateWorkspaceParams struct {
+	Key                 string
+	Name                string
+	OwnerRef            string
+	Status              string
+	DefaultCompanionKey string
+	PolicyJSON          string
+}
+
+type ListWorkspacesParams struct {
+	Status string
+}
+
+type Initiative struct {
+	ID               int64
+	WorkspaceID      int64
+	Key              string
+	Title            string
+	Kind             string
+	Status           string
+	Summary          string
+	LinkedProjectID  *int64
+	OwnerCompanionID *int64
+	CreatedAt        time.Time
+	UpdatedAt        time.Time
+}
+
+type CreateInitiativeParams struct {
+	WorkspaceID      int64
+	Key              string
+	Title            string
+	Kind             string
+	Status           string
+	Summary          string
+	LinkedProjectID  *int64
+	OwnerCompanionID *int64
+}
+
+type ListInitiativesParams struct {
+	WorkspaceID *int64
+	Kind        string
+	Status      string
+}
+
+type ReconcileManagedProjectInitiativeParams struct {
+	WorkspaceID int64
+	ProjectID   int64
+	Key         string
+	Title       string
+	Status      string
+	Summary     string
+}
+
 type Task struct {
 	ID           int64
 	ProjectID    int64

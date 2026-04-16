@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 
+	"odin-os/internal/core/workspaces"
 	"odin-os/internal/store/sqlite"
 )
 
@@ -37,6 +38,31 @@ type ActionInput struct {
 	Actor       TransitionController
 	ActionClass ActionClass
 	ActionKey   string
+}
+
+func (service Service) EnsureProjectBackedInitiative(ctx context.Context, projectID int64) (sqlite.Initiative, error) {
+	if service.Store == nil {
+		return sqlite.Initiative{}, fmt.Errorf("transition store is required")
+	}
+
+	project, err := service.Store.GetProject(ctx, projectID)
+	if err != nil {
+		return sqlite.Initiative{}, err
+	}
+
+	workspace, err := workspaces.Service{Store: service.Store}.BootstrapDefault(ctx)
+	if err != nil {
+		return sqlite.Initiative{}, err
+	}
+
+	return service.Store.ReconcileManagedProjectInitiative(ctx, sqlite.ReconcileManagedProjectInitiativeParams{
+		WorkspaceID: workspace.ID,
+		ProjectID:   project.ID,
+		Key:         project.Key,
+		Title:       project.Name,
+		Status:      workspaces.StatusActive,
+		Summary:     fmt.Sprintf("Managed project for %s", project.Name),
+	})
 }
 
 func (service Service) SetTransitionState(ctx context.Context, input TransitionStateInput) (sqlite.ProjectTransition, error) {
