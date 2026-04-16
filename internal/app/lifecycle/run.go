@@ -50,6 +50,7 @@ var (
 	serveSelfHealLoopInterval = 30 * time.Second
 	serveMetricsLoopInterval  = 1 * time.Minute
 	serveOperationTimeout     = 30 * time.Second
+	serveHealthConfig         = healthsvc.DefaultConfig()
 	serveListen               = net.Listen
 )
 
@@ -972,7 +973,7 @@ func runServe(ctx context.Context, app bootstrap.App, cfg appconfig.Config, stdo
 		Store:           app.Store,
 		RegistryRoot:    filepath.Join(app.RepoRoot, "registry"),
 		ExecutorCatalog: app.Executors,
-		HealthConfig:    healthsvc.DefaultConfig(),
+		HealthConfig:    serveHealthConfig,
 		Logger:          logger,
 	}
 	metricsService := metricsvc.Service{
