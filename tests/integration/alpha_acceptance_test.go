@@ -368,7 +368,7 @@ func TestAlphaAcceptance(t *testing.T) {
 			t.Fatalf("transition output = %q, want pbs limited_action state", transitionOutput)
 		}
 
-		cleanupAcceptanceWorktree(t, "/home/orchestrator/pbs", acceptanceWorktreeRoot(extraEnv), "pbs", 1, 1, 1)
+		cleanupAcceptanceWorktree(t, projectGitRootFromManifest(t, repoRoot, "pbs"), acceptanceWorktreeRoot(extraEnv), "pbs", 1, 1, 1)
 
 		taskOutput, err := runOdinCommand(
 			t,

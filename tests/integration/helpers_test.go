@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"odin-os/internal/core/projects"
 	runtimeevents "odin-os/internal/runtime/events"
 	"odin-os/internal/store/sqlite"
 	"odin-os/internal/tools/catalog"
@@ -155,6 +156,23 @@ func initializeGitRepoBranchPath(dir string, branch string) error {
 		}
 	}
 	return nil
+}
+
+func projectGitRootFromManifest(t *testing.T, repoRoot string, key string) string {
+	t.Helper()
+
+	registry, diagnostics, err := projects.Register(filepath.Join(repoRoot, "config", "projects.yaml"))
+	if err != nil {
+		t.Fatalf("projects.Register(%q) error = %v", filepath.Join(repoRoot, "config", "projects.yaml"), err)
+	}
+	if len(diagnostics) != 0 {
+		t.Fatalf("project diagnostics = %+v, want none", diagnostics)
+	}
+	project, ok := registry.Lookup(key)
+	if !ok {
+		t.Fatalf("Lookup(%s) missing from manifest", key)
+	}
+	return project.GitRoot
 }
 
 func buildOdinBinary(t *testing.T, repoRoot string) string {
@@ -365,6 +383,9 @@ service:
 func writeTextFile(t *testing.T, path string, content string) {
 	t.Helper()
 
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("MkdirAll(%s) error = %v", filepath.Dir(path), err)
+	}
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatalf("WriteFile(%s) error = %v", path, err)
 	}
