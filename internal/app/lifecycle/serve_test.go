@@ -217,18 +217,36 @@ service:
 	}()
 
 	ctx, cancel := context.WithCancel(context.Background())
-	actionObserved := make(chan struct{})
-	time.AfterFunc(30*time.Millisecond, func() {
+	defer cancel()
+
+	staleProjection := make(chan error, 1)
+	var background sync.WaitGroup
+	background.Add(2)
+
+	go func() {
+		defer background.Done()
+
+		timer := time.NewTimer(30 * time.Millisecond)
+		defer timer.Stop()
+
+		select {
+		case <-ctx.Done():
+			return
+		case <-timer.C:
+		}
+
 		staleAt := time.Now().Add(-2 * time.Hour).UTC().Format(time.RFC3339Nano)
-		if _, err := store.DB().ExecContext(context.Background(), `
+		_, err := store.DB().ExecContext(context.Background(), `
 			UPDATE projection_freshness
 			SET refreshed_at = ?, updated_at = ?
 			WHERE surface = 'doctor'
-		`, staleAt, staleAt); err != nil {
-			t.Errorf("force stale projection freshness error = %v", err)
-		}
-	})
+		`, staleAt, staleAt)
+		staleProjection <- err
+	}()
+
 	go func() {
+		defer background.Done()
+
 		deadline := time.NewTimer(2 * time.Second)
 		defer deadline.Stop()
 
@@ -249,7 +267,6 @@ service:
 				}
 				for _, event := range events {
 					if string(event.Type) == "recovery.action_executed" {
-						close(actionObserved)
 						cancel()
 						return
 					}
@@ -257,6 +274,7 @@ service:
 			}
 		}
 	}()
+	defer background.Wait()
 
 	var stdout bytes.Buffer
 	err = Run(ctx, root, []string{"serve"}, strings.NewReader(""), &stdout)
@@ -264,14 +282,18 @@ service:
 		t.Fatalf("Run(serve) error = %v", err)
 	}
 
+	select {
+	case err := <-staleProjection:
+		if err != nil {
+			t.Fatalf("force stale projection freshness error = %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting to force stale projection freshness")
+	}
+
 	events, err := store.ListEvents(context.Background(), sqlite.ListEventsParams{})
 	if err != nil {
 		t.Fatalf("ListEvents() error = %v", err)
-	}
-
-	select {
-	case <-actionObserved:
-	default:
 	}
 
 	found := false
