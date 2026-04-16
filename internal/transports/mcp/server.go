@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 
@@ -45,6 +46,9 @@ func (server *Server) ListTools(ctx context.Context, scope string) ([]Tool, erro
 		for _, card := range server.source.ListCapabilities(kind, scope) {
 			descriptor, err := server.source.GetCapability(card.ID, card.Version)
 			if err != nil {
+				if isDescriptorUnavailable(err) {
+					continue
+				}
 				return nil, err
 			}
 			if !descriptor.Kind.IsInvokable() {
@@ -72,4 +76,19 @@ func (server *Server) ListTools(ctx context.Context, scope string) ([]Tool, erro
 	})
 
 	return tools, nil
+}
+
+func isDescriptorUnavailable(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	type coder interface {
+		Code() string
+	}
+	var coded coder
+	if errors.As(err, &coded) && coded.Code() == "not_found" {
+		return true
+	}
+	return err.Error() == "capability not found"
 }

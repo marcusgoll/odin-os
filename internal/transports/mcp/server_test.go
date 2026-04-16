@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"odin-os/internal/core/capabilities"
@@ -11,6 +12,7 @@ import (
 type testCapabilitySource struct {
 	cards map[registry.Kind][]capabilities.CapabilityCard
 	items map[string]capabilities.Descriptor
+	errs  map[string]error
 }
 
 func (source testCapabilitySource) ListCapabilities(kind registry.Kind, scope string) []capabilities.CapabilityCard {
@@ -18,7 +20,14 @@ func (source testCapabilitySource) ListCapabilities(kind registry.Kind, scope st
 }
 
 func (source testCapabilitySource) GetCapability(id, version string) (capabilities.Descriptor, error) {
-	return source.items[id+"@"+version], nil
+	if err, ok := source.errs[id+"@"+version]; ok {
+		return capabilities.Descriptor{}, err
+	}
+	descriptor, ok := source.items[id+"@"+version]
+	if !ok {
+		return capabilities.Descriptor{}, &capabilities.Error{CodeValue: "not_found", Message: "descriptor missing"}
+	}
+	return descriptor, nil
 }
 
 func TestMCPListsCapabilitiesAsTools(t *testing.T) {
@@ -77,5 +86,57 @@ func TestMCPListsCapabilitiesAsTools(t *testing.T) {
 	}
 	if len(tool.Permissions) != 1 || tool.Permissions[0] != "workspace.read" {
 		t.Fatalf("ListTools()[0].Permissions = %+v, want workspace.read", tool.Permissions)
+	}
+}
+
+func TestMCPListToolsSkipsDescriptorsThatDisappearBetweenListAndGet(t *testing.T) {
+	t.Parallel()
+
+	server := NewServer(testCapabilitySource{
+		cards: map[registry.Kind][]capabilities.CapabilityCard{
+			registry.KindCommand: {
+				{ID: "project.status", Kind: registry.KindCommand, Name: "Project Status", Version: "1.2.3", Scope: "project"},
+				{ID: "stale.command", Kind: registry.KindCommand, Name: "Stale Command", Version: "1.0.0", Scope: "project"},
+			},
+		},
+		items: map[string]capabilities.Descriptor{
+			"project.status@1.2.3": {
+				Kind:         registry.KindCommand,
+				Key:          "project.status",
+				Name:         "Project Status",
+				Version:      "1.2.3",
+				Availability: registry.Availability{Scope: "project"},
+				Permissions:  []string{"workspace.read"},
+				InputSchema:  registry.SchemaRef{Type: "object"},
+				OutputSchema: registry.SchemaRef{Type: "object"},
+			},
+		},
+	})
+
+	tools, err := server.ListTools(context.Background(), "project")
+	if err != nil {
+		t.Fatalf("ListTools() error = %v", err)
+	}
+	if len(tools) != 1 || tools[0].CapabilityID != "project.status" {
+		t.Fatalf("ListTools() = %+v, want only the still-resolvable project.status tool", tools)
+	}
+}
+
+func TestMCPListToolsReturnsUnexpectedSourceErrors(t *testing.T) {
+	t.Parallel()
+
+	server := NewServer(testCapabilitySource{
+		cards: map[registry.Kind][]capabilities.CapabilityCard{
+			registry.KindCommand: {
+				{ID: "project.status", Kind: registry.KindCommand, Name: "Project Status", Version: "1.2.3", Scope: "project"},
+			},
+		},
+		errs: map[string]error{
+			"project.status@1.2.3": context.DeadlineExceeded,
+		},
+	})
+
+	if _, err := server.ListTools(context.Background(), "project"); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("ListTools() error = %v, want %v", err, context.DeadlineExceeded)
 	}
 }
