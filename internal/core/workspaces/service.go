@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 
 	"odin-os/internal/store/sqlite"
 )
@@ -35,6 +36,13 @@ func (service Service) BootstrapDefaultWorkspace(ctx context.Context) (Workspace
 		PolicyJSON:          string(DefaultWorkspacePolicy),
 	})
 	if err != nil {
+		if isWorkspaceKeyConflict(err) {
+			current, reloadErr := service.Store.GetWorkspaceByKey(ctx, DefaultWorkspaceKey)
+			if reloadErr == nil {
+				return toDomainWorkspace(current), nil
+			}
+			return Workspace{}, reloadErr
+		}
 		return Workspace{}, err
 	}
 
@@ -101,4 +109,8 @@ func toDomainWorkspace(record sqlite.Workspace) Workspace {
 		DefaultCompanionKey: record.DefaultCompanionKey,
 		Policy:              WorkspacePolicy(record.PolicyJSON),
 	}
+}
+
+func isWorkspaceKeyConflict(err error) bool {
+	return strings.Contains(err.Error(), "UNIQUE constraint failed: workspaces.key")
 }

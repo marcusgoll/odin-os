@@ -1636,6 +1636,14 @@ func (store *Store) UpdateWorkspacePolicy(ctx context.Context, params UpdateWork
 		}
 
 		if _, err := tx.ExecContext(ctx, `
+			UPDATE workspaces
+			SET updated_at = ?
+			WHERE id = ?
+		`, formatTime(now), params.WorkspaceID); err != nil {
+			return err
+		}
+
+		if _, err := tx.ExecContext(ctx, `
 			UPDATE workspace_policies
 			SET policy_json = ?, updated_at = ?
 			WHERE workspace_id = ?

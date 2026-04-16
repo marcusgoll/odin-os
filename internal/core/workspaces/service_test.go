@@ -3,6 +3,7 @@ package workspaces
 import (
 	"context"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"odin-os/internal/store/sqlite"
@@ -78,10 +79,86 @@ func TestWorkspaceServiceUpdateWorkspacePolicy(t *testing.T) {
 	}
 }
 
+func TestWorkspaceServiceBootstrapDefaultWorkspaceIsIdempotentUnderContention(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "odin.db")
+
+	first := openWorkspaceServiceStoreAtPath(t, dbPath)
+	defer first.Close()
+	second := openWorkspaceServiceStoreAtPath(t, dbPath)
+	defer second.Close()
+
+	serviceA := Service{Store: first}
+	serviceB := Service{Store: second}
+
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	errs := make(chan error, 2)
+	workspaces := make(chan Workspace, 2)
+
+	go func() {
+		defer wg.Done()
+		<-start
+		workspace, err := serviceA.BootstrapDefaultWorkspace(ctx)
+		if err != nil {
+			errs <- err
+			return
+		}
+		workspaces <- workspace
+	}()
+
+	go func() {
+		defer wg.Done()
+		<-start
+		workspace, err := serviceB.BootstrapDefaultWorkspace(ctx)
+		if err != nil {
+			errs <- err
+			return
+		}
+		workspaces <- workspace
+	}()
+
+	close(start)
+	wg.Wait()
+	close(errs)
+	close(workspaces)
+
+	for err := range errs {
+		t.Fatalf("BootstrapDefaultWorkspace() concurrent call error = %v", err)
+	}
+
+	var results []Workspace
+	for workspace := range workspaces {
+		results = append(results, workspace)
+	}
+	if len(results) != 2 {
+		t.Fatalf("BootstrapDefaultWorkspace() concurrent result count = %d, want 2", len(results))
+	}
+	if results[0].ID != results[1].ID {
+		t.Fatalf("BootstrapDefaultWorkspace() concurrent IDs = %d and %d, want same workspace", results[0].ID, results[1].ID)
+	}
+
+	active, err := serviceA.ListActiveWorkspaces(ctx)
+	if err != nil {
+		t.Fatalf("ListActiveWorkspaces() error = %v", err)
+	}
+	if len(active) != 1 {
+		t.Fatalf("ListActiveWorkspaces() len = %d, want 1", len(active))
+	}
+}
+
 func openWorkspaceServiceStore(t *testing.T) *sqlite.Store {
 	t.Helper()
 
-	store, err := sqlite.Open(filepath.Join(t.TempDir(), "odin.db"))
+	return openWorkspaceServiceStoreAtPath(t, filepath.Join(t.TempDir(), "odin.db"))
+}
+
+func openWorkspaceServiceStoreAtPath(t *testing.T, dbPath string) *sqlite.Store {
+	t.Helper()
+
+	store, err := sqlite.Open(dbPath)
 	if err != nil {
 		t.Fatalf("Open() error = %v", err)
 	}
