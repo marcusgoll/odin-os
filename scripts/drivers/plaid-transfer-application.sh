@@ -1,0 +1,105 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BROWSER_ACCESS_SH="${SCRIPT_DIR}/../browser/browser-access.sh"
+source "${BROWSER_ACCESS_SH}"
+
+request_json="$(cat)"
+
+tool_key="$(jq -r '.tool_key // "plaid_transfer_application"' <<<"${request_json}")"
+action="$(jq -r '.input.action // "inspect"' <<<"${request_json}")"
+application_url="$(jq -r '.input.application_url // "https://dashboard.plaid.com/transfer/application"' <<<"${request_json}")"
+output_path="$(jq -r '.input.path // empty' <<<"${request_json}")"
+
+host_from_url() {
+    local target="$1" host
+    host="${target#*://}"
+    if [[ "${host}" == "${target}" ]]; then
+        host="${target}"
+    fi
+    host="${host%%[/?#]*}"
+    host="${host##*@}"
+    host="${host%%:*}"
+    printf '%s' "${host}"
+}
+
+normalize_snapshot() {
+    tr '[:upper:]' '[:lower:]' <<<"$1"
+}
+
+detect_state() {
+    local snapshot
+    snapshot="$(normalize_snapshot "$1")"
+
+    if [[ "${snapshot}" == *"verification code"* || "${snapshot}" == *"authenticator"* || "${snapshot}" == *"two-factor"* || "${snapshot}" == *"mfa"* ]]; then
+        printf '%s' "blocked_on_mfa"
+        return 0
+    fi
+    if [[ "${snapshot}" == *"submitted for review"* || "${snapshot}" == *"under review"* ]]; then
+        printf '%s' "submitted_for_review"
+        return 0
+    fi
+    if [[ "${snapshot}" == *"already enabled"* || "${snapshot}" == *"transfer is enabled"* ]]; then
+        printf '%s' "already_enabled"
+        return 0
+    fi
+    if [[ "${snapshot}" == *"sign in"* || "${snapshot}" == *"log in"* || "${snapshot}" == *"login"* ]]; then
+        printf '%s' "ready_for_login"
+        return 0
+    fi
+
+    printf '%s' "ready_for_login"
+}
+
+json_result() {
+    local summary="$1" session_state="$2" current_url="$3" snapshot="$4" screenshot_path="$5" next_action="$6"
+    jq -nc \
+        --arg status "completed" \
+        --arg tool_key "${tool_key}" \
+        --arg summary "${summary}" \
+        --arg session_state "${session_state}" \
+        --arg current_url "${current_url}" \
+        --arg snapshot "${snapshot}" \
+        --arg screenshot_path "${screenshot_path}" \
+        --arg next_action "${next_action}" \
+        '{status: $status, tool_key: $tool_key, summary: $summary, artifacts: {session_state: $session_state, current_url: $current_url, snapshot: $snapshot, screenshot_path: $screenshot_path, next_action: $next_action}}'
+}
+
+browser_request_domain_access "$(host_from_url "${application_url}")"
+browser_server_start --url "${application_url}" --headless
+snapshot="$(browser_snapshot 2>/dev/null || true)"
+session_state="$(detect_state "${snapshot}")"
+
+screenshot_path="${output_path}"
+if [[ -z "${screenshot_path}" ]]; then
+    screenshot_path="${ODIN_DIR:-${SCRIPT_DIR}/../../.odin-browser}/browser-state/plaid-transfer.png"
+fi
+screenshot_path="$(browser_bc_screenshot --output "${screenshot_path}" 2>/dev/null || true)"
+
+case "${session_state}" in
+    ready_for_login)
+        next_action="sign in to Plaid"
+        summary="Plaid transfer flow is waiting for login"
+        ;;
+    blocked_on_mfa)
+        next_action="complete MFA challenge"
+        summary="Plaid transfer flow is blocked on MFA"
+        ;;
+    submitted_for_review)
+        next_action="wait for review"
+        summary="Plaid transfer application was submitted for review"
+        ;;
+    already_enabled)
+        next_action="no action needed"
+        summary="Plaid transfer is already enabled"
+        ;;
+    *)
+        next_action="inspect dashboard"
+        summary="Plaid transfer flow is in an unclassified state"
+        session_state="ready_for_login"
+        ;;
+esac
+
+browser_server_stop
+json_result "${summary}" "${session_state}" "${application_url}" "${snapshot}" "${screenshot_path}" "${next_action}"

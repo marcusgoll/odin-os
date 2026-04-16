@@ -479,6 +479,10 @@ browser_navigate() {
     _bc_curl -X POST "${BROWSER_SERVER_URL}/navigate" -H 'Content-Type: application/json' -d "${body}" >/dev/null
 }
 
+browser_server_health() {
+    _bc_curl "${BROWSER_SERVER_URL}/health"
+}
+
 browser_snapshot() {
     local query=""
     while [[ $# -gt 0 ]]; do
