@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -60,17 +61,18 @@ func (driver Driver) Invoke(ctx context.Context, request Request) (Response, err
 		return Response{}, err
 	}
 
-	// Parse the configured shell command, then exec it so cancellation targets
-	// the actual driver process instead of a wrapper shell.
-	// Unix-only: put the driver in its own process group so context
-	// cancellation can tear down the whole tree, not just the leader.
-	cmd := exec.CommandContext(ctx, "sh", "-c", `eval "set -- $1"; exec "$@"`, "sh", command)
+	// Unix-only: assume the configured value is a shell command string, and
+	// isolate it in its own process group so cancellation can kill the whole tree.
+	cmd := exec.CommandContext(ctx, "sh", "-c", command)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error {
 		if cmd.Process == nil {
 			return nil
 		}
-		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+			return err
+		}
+		return nil
 	}
 
 	cmd.Stdin = bytes.NewReader(requestBytes)
@@ -81,7 +83,7 @@ func (driver Driver) Invoke(ctx context.Context, request Request) (Response, err
 	cmd.Stderr = &stderr
 
 	if err := cmd.Run(); err != nil {
-		return Response{}, fmt.Errorf("driver command failed: %w: %s", err, strings.TrimSpace(stderr.String()))
+		return Response{}, fmt.Errorf("driver command failed: %w; stdout=%q; stderr=%q", err, stdout.String(), strings.TrimSpace(stderr.String()))
 	}
 
 	var response Response
