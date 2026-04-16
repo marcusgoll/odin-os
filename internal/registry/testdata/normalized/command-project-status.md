@@ -12,7 +12,7 @@ inputSchema:
   type: object
 outputSchema:
   ref: schema://odin/commands/project-status/output
-  type: object
+  type: string
 dependencies:
   - kind: skill
     name: triage-skill

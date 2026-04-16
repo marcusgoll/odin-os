@@ -8,11 +8,13 @@ import (
 	"strings"
 
 	"odin-os/internal/core/capabilities"
+	"odin-os/internal/registry"
 )
 
 var errCommandGatewayMissing = errors.New("command gateway is required")
 var errCommandCapabilityIDRequired = errors.New("command capability id is required")
 var errCommandCapabilityVersionRequired = errors.New("command capability version is required")
+var errUnsupportedCommandCapabilityKind = errors.New("unsupported command capability kind")
 var errInvalidCommandInput = errors.New("invalid command input")
 
 type CapabilityGateway interface {
@@ -42,6 +44,9 @@ func (s *Service) Execute(ctx context.Context, req capabilities.InvokeRequest) (
 	descriptor, err := s.caps.GetCapability(req.CapabilityID, req.CapabilityVersion)
 	if err != nil {
 		return capabilities.InvokeResponse{}, err
+	}
+	if descriptor.Kind != registry.KindCommand {
+		return capabilities.InvokeResponse{}, fmt.Errorf("%w: %s", errUnsupportedCommandCapabilityKind, descriptor.Kind)
 	}
 
 	if err := validateCommandInput(descriptor, req.Input); err != nil {

@@ -82,6 +82,40 @@ func TestCommandServiceResolvesRegistryCommand(t *testing.T) {
 	}
 }
 
+func TestCommandServiceRejectsNonCommandDescriptor(t *testing.T) {
+	t.Parallel()
+
+	gateway := &recordingCapabilityGateway{
+		descriptor: capabilities.Descriptor{
+			Kind:         registry.KindSkill,
+			Key:          "skill.triage",
+			Version:      "1.0.0",
+			InputSchema:  registry.SchemaRef{Type: "object"},
+			OutputSchema: registry.SchemaRef{Type: "object"},
+		},
+	}
+
+	service := Service{caps: gateway}
+	_, err := service.Execute(context.Background(), capabilities.InvokeRequest{
+		RequestID:         "req-1",
+		CapabilityID:      "skill.triage",
+		CapabilityVersion: "1.0.0",
+		Input:             json.RawMessage(`{}`),
+	})
+	if err == nil {
+		t.Fatal("Execute() error = nil, want error")
+	}
+	if !errors.Is(err, errUnsupportedCommandCapabilityKind) {
+		t.Fatalf("Execute() error = %v, want errUnsupportedCommandCapabilityKind", err)
+	}
+	if len(gateway.getCalls) != 1 {
+		t.Fatalf("GetCapability() calls = %d, want 1", len(gateway.getCalls))
+	}
+	if len(gateway.invokeCalls) != 0 {
+		t.Fatalf("InvokeCapability() calls = %d, want 0", len(gateway.invokeCalls))
+	}
+}
+
 func TestCommandServiceRejectsInvalidInput(t *testing.T) {
 	t.Parallel()
 

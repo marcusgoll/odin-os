@@ -234,19 +234,23 @@ func TestCLICommandDispatchUsesCommandService(t *testing.T) {
 		t.Fatalf("New() error = %v", err)
 	}
 
-	var output bytes.Buffer
-	if err := shell.HandleLine(context.Background(), "/stat", &output); err != nil {
-		t.Fatalf("HandleLine(/stat) error = %v", err)
+	for _, command := range []string{"/stat", "/status"} {
+		var output bytes.Buffer
+		if err := shell.HandleLine(context.Background(), command, &output); err != nil {
+			t.Fatalf("HandleLine(%s) error = %v", command, err)
+		}
+		if !strings.Contains(output.String(), "registry-backed") {
+			t.Fatalf("output = %q, want registry-backed response", output.String())
+		}
 	}
 
-	if len(service.calls) != 1 {
-		t.Fatalf("command service calls = %d, want 1", len(service.calls))
+	if len(service.calls) != 2 {
+		t.Fatalf("command service calls = %d, want 2", len(service.calls))
 	}
-	if got := service.calls[0]; got.CapabilityID != "project.status" || got.CapabilityVersion != "1.0.0" {
-		t.Fatalf("command request = %+v, want project.status 1.0.0", got)
-	}
-	if !strings.Contains(output.String(), "registry-backed") {
-		t.Fatalf("output = %q, want registry-backed response", output.String())
+	for i, got := range service.calls {
+		if got.CapabilityID != "project.status" || got.CapabilityVersion != "1.0.0" {
+			t.Fatalf("command request[%d] = %+v, want project.status 1.0.0", i, got)
+		}
 	}
 }
 
