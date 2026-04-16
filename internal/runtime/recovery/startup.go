@@ -32,6 +32,11 @@ func (service Service) RunStartupRecovery(ctx context.Context) (StartupResult, e
 		if err != nil {
 			return StartupResult{}, err
 		}
+		pendingApprovals, err := service.pendingApprovalCount(ctx, task.ID)
+		if err != nil {
+			return StartupResult{}, err
+		}
+		requeueable := task.Status != "blocked" && pendingApprovals == 0
 
 		recoveryRecord, err := service.Store.StartRecovery(ctx, sqlite.StartRecoveryParams{
 			RunID:       &run.ID,
@@ -51,22 +56,39 @@ func (service Service) RunStartupRecovery(ctx context.Context) (StartupResult, e
 			return StartupResult{}, err
 		}
 
-		if _, err := service.workItemService().Requeue(ctx, task.ID); err != nil {
-			return StartupResult{}, err
+		if requeueable {
+			if _, err := service.workItemService().Requeue(ctx, task.ID); err != nil {
+				return StartupResult{}, err
+			}
+		}
+
+		blockingReason := "previous service instance stopped during execution"
+		openTaskSummary := "task requeued after restart"
+		approvalSummary := "none"
+		nextSteps := []string{
+			"Review the restart wake packet",
+			"Resume the queued task when the runtime is healthy",
+		}
+		recoveryDescription := "interrupted running run, requeued task, and created restart wake packet"
+		if !requeueable {
+			blockingReason = "pending approval before restart"
+			openTaskSummary = "task remains blocked pending approval"
+			approvalSummary = pendingApprovalSummary(pendingApprovals)
+			nextSteps = []string{
+				"Review the pending approval",
+				"Resume the task after approval is resolved and the runtime is healthy",
+			}
+			recoveryDescription = "interrupted running run, preserved blocked task, and created restart wake packet"
 		}
 
 		compaction, err := checkpoints.Service{Store: service.Store}.Compact(ctx, checkpoints.CompactParams{
-			TaskID:         task.ID,
-			RunID:          &run.ID,
-			Trigger:        checkpoints.TriggerRestart,
-			CheckpointKey:  fmt.Sprintf("startup-recovery-%d", run.ID),
-			Objective:      task.Title,
-			TaskStatus:     "queued",
-			BlockingReason: "previous service instance stopped during execution",
-			NextSteps: []string{
-				"Review the restart wake packet",
-				"Resume the queued task when the runtime is healthy",
-			},
+			TaskID:               task.ID,
+			RunID:                &run.ID,
+			Trigger:              checkpoints.TriggerRestart,
+			CheckpointKey:        fmt.Sprintf("startup-recovery-%d", run.ID),
+			Objective:            task.Title,
+			BlockingReason:       blockingReason,
+			NextSteps:            nextSteps,
 			Constraints:          []string{"previous run was interrupted by restart"},
 			SelectedCapabilities: []string{"startup_recovery"},
 			Evidence: []checkpoints.Evidence{{
@@ -75,8 +97,8 @@ func (service Service) RunStartupRecovery(ctx context.Context) (StartupResult, e
 			}},
 			ManifestSummary: "managed project",
 			PolicySummary:   "bounded startup recovery",
-			OpenTaskSummary: "task requeued after restart",
-			ApprovalSummary: "none",
+			OpenTaskSummary: openTaskSummary,
+			ApprovalSummary: approvalSummary,
 		})
 		if err != nil {
 			return StartupResult{}, err
@@ -89,7 +111,7 @@ func (service Service) RunStartupRecovery(ctx context.Context) (StartupResult, e
 			ActionName:  "interrupt_run_and_checkpoint",
 			Attempt:     1,
 			Result:      "completed",
-			Description: "interrupted running run, requeued task, and created restart wake packet",
+			Description: recoveryDescription,
 		}); err != nil {
 			return StartupResult{}, err
 		}
@@ -109,4 +131,29 @@ func (service Service) RunStartupRecovery(ctx context.Context) (StartupResult, e
 	}
 
 	return result, nil
+}
+
+func (service Service) pendingApprovalCount(ctx context.Context, taskID int64) (int, error) {
+	row := service.Store.DB().QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM approvals
+		WHERE task_id = ? AND status = 'pending'
+	`, taskID)
+
+	var count int
+	if err := row.Scan(&count); err != nil {
+		return 0, err
+	}
+	return count, nil
+}
+
+func pendingApprovalSummary(count int) string {
+	switch count {
+	case 0:
+		return "none"
+	case 1:
+		return "1 pending approval"
+	default:
+		return fmt.Sprintf("%d pending approvals", count)
+	}
 }

@@ -3,7 +3,6 @@ package jobs
 import (
 	"context"
 	"database/sql"
-	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -308,14 +307,14 @@ func (service Service) workItemService() workitems.Service {
 
 func (service Service) actWorkspace(ctx context.Context, resolved corescope.ControlScope) (workspaces.Workspace, error) {
 	workspaceService := workspaces.Service{Store: service.Store}
-	workspace, err := workspaceService.GetWorkspaceByKey(ctx, resolved.WorkspaceKey)
-	if err == nil {
-		return workspace, nil
-	}
-	if errors.Is(err, sql.ErrNoRows) && resolved.WorkspaceKey == workspaces.DefaultWorkspaceKey {
+	if resolved.WorkspaceKey == workspaces.DefaultWorkspaceKey {
 		return workspaceService.BootstrapDefaultWorkspace(ctx)
 	}
-	return workspaces.Workspace{}, err
+	workspace, err := workspaceService.GetWorkspaceByKey(ctx, resolved.WorkspaceKey)
+	if err != nil {
+		return workspaces.Workspace{}, err
+	}
+	return workspace, nil
 }
 
 func (service Service) actCompanion(ctx context.Context, workspace workspaces.Workspace, resolved corescope.ControlScope) (companions.Companion, error) {

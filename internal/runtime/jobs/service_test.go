@@ -183,6 +183,74 @@ func TestCreateTaskFromActEnsuresRuntimeProjectAndCreatesQueuedTask(t *testing.T
 	}
 }
 
+func TestCreateTaskFromActRepairsExistingDefaultWorkspace(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openJobStore(t)
+	defer store.Close()
+
+	workspace, err := workspaces.Service{Store: store}.BootstrapDefaultWorkspace(ctx)
+	if err != nil {
+		t.Fatalf("BootstrapDefaultWorkspace() error = %v", err)
+	}
+	if _, err := store.DB().ExecContext(ctx, `
+		DELETE FROM companions
+		WHERE workspace_id = ? AND key = ?
+	`, workspace.ID, workspace.DefaultCompanionKey); err != nil {
+		t.Fatalf("delete default companion error = %v", err)
+	}
+
+	registry := writeRegistry(t)
+	alpha, ok := registry.Lookup("alpha")
+	if !ok {
+		t.Fatalf("expected alpha project")
+	}
+
+	service := Service{
+		Store:    store,
+		Registry: registry,
+		Now: func() time.Time {
+			return time.Date(2026, 4, 9, 12, 30, 0, 0, time.UTC)
+		},
+	}
+
+	resolved := scope.Resolve(scope.ResolveInput{
+		ExplicitTarget: &scope.Target{
+			ProjectKey: "alpha",
+		},
+	}).ControlScope()
+
+	workspaceFromAct, err := service.actWorkspace(ctx, resolved)
+	if err != nil {
+		t.Fatalf("actWorkspace() error = %v", err)
+	}
+
+	companion, err := service.actCompanion(ctx, workspaceFromAct, resolved)
+	if err != nil {
+		t.Fatalf("actCompanion() error = %v", err)
+	}
+	if companion.Key != workspace.DefaultCompanionKey {
+		t.Fatalf("companion.Key = %q, want %q", companion.Key, workspace.DefaultCompanionKey)
+	}
+
+	task, err := service.CreateTaskFromAct(ctx, resolved, "Repair existing workspace")
+	if err != nil {
+		t.Fatalf("CreateTaskFromAct() error = %v", err)
+	}
+	if task.Status != "queued" {
+		t.Fatalf("CreateTaskFromAct().Status = %q, want queued", task.Status)
+	}
+
+	initiative, err := store.GetInitiativeByKey(ctx, workspace.ID, alpha.Key)
+	if err != nil {
+		t.Fatalf("GetInitiativeByKey(alpha) error = %v", err)
+	}
+	if initiative.Kind != string(initiatives.KindManagedProject) {
+		t.Fatalf("initiative.Kind = %q, want %q", initiative.Kind, initiatives.KindManagedProject)
+	}
+}
+
 func TestCreateTaskFromActPopulatesSemanticLinks(t *testing.T) {
 	t.Parallel()
 
