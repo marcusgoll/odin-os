@@ -206,6 +206,18 @@ func TestReloadDoesNotOverwriteNewerPublish(t *testing.T) {
 	if result.snapshot.Digest != "digest-stale" {
 		t.Fatalf("Reload() snapshot digest = %q, want digest-stale", result.snapshot.Digest)
 	}
+	result.snapshot.Diagnostics[0].Code = "mutated"
+	mutatedDescriptor := result.snapshot.Capabilities["cap.beta"]
+	mutatedDescriptor.Tags[0] = "changed"
+	result.snapshot.Capabilities["cap.beta"] = mutatedDescriptor
+
+	activeAfterMutation := service.Active()
+	if activeAfterMutation.Diagnostics[0].Code != "registry.ok" {
+		t.Fatalf("Active() changed after mutating Reload() result: %+v", activeAfterMutation.Diagnostics)
+	}
+	if got := activeAfterMutation.Capabilities["cap.beta"]; got.Tags[0] != "alpha" {
+		t.Fatalf("Active() capability changed after mutating Reload() result: %+v", got)
+	}
 
 	active := service.Active()
 	if active.Digest != "digest-b" {

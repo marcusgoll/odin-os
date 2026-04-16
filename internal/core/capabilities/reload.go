@@ -86,7 +86,7 @@ func (s *Service) Reload(ctx context.Context) (Snapshot, error) {
 		return Snapshot{}, err
 	}
 
-	return published, nil
+	return cloneSnapshot(published), nil
 }
 
 func (s *Service) publishIfCurrent(expectedDigest string, next Snapshot) (Snapshot, error) {
