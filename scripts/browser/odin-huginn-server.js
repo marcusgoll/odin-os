@@ -275,9 +275,32 @@ async function launchBrowser(body) {
     }
   });
 
-  await waitForHttp('http://' + HOST + ':' + debugPort + '/json/version');
-  await connectPage(body.url || 'about:blank');
-  return { ok: true, engine: ENGINE, url: currentUrl };
+  let cleanupStartupWatchers = () => {};
+  const startupFailure = new Promise((_, reject) => {
+    const onError = (error) => reject(error);
+    const onExit = () => reject(new Error('Chromium exited before launch completed'));
+    cleanupStartupWatchers = () => {
+      browserProcess?.off('error', onError);
+      browserProcess?.off('exit', onExit);
+    };
+    browserProcess.once('error', onError);
+    browserProcess.once('exit', onExit);
+  });
+  const startupReady = Promise.race([
+    waitForHttp('http://' + HOST + ':' + debugPort + '/json/version'),
+    startupFailure,
+  ]).finally(() => {
+    cleanupStartupWatchers();
+  });
+
+  try {
+    await startupReady;
+    await connectPage(body.url || 'about:blank');
+    return { ok: true, engine: ENGINE, url: currentUrl };
+  } catch (error) {
+    await stopBrowser();
+    throw error;
+  }
 }
 
 async function snapshotPage() {
