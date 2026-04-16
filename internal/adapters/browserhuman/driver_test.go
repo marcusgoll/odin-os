@@ -3,10 +3,15 @@ package browserhuman
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
+	"syscall"
 	"testing"
+	"time"
 )
 
 func TestDriverFailsClosedWithoutCommand(t *testing.T) {
@@ -80,6 +85,57 @@ printf '{"status":"completed","tool_key":"huginn_browser_session","summary":"spa
 	}
 }
 
+func TestDriverExecsConfiguredCommandForCancellation(t *testing.T) {
+	pidPath := filepath.Join(t.TempDir(), "driver.pid")
+	script := writeFixtureDriver(t, `#!/usr/bin/env bash
+printf '%s' "$$" >"$ODIN_DRIVER_PID_PATH"
+while :; do :; done
+printf '{"status":"completed","tool_key":"huginn_browser_session","summary":"ok","artifacts":{"session_state":"ready"}}'
+`)
+	t.Setenv(defaultDriverEnvVar, script)
+	t.Setenv("ODIN_DRIVER_PID_PATH", pidPath)
+
+	driver := NewDriver()
+	driver.DefaultToolKey = "huginn_browser_session"
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := driver.Invoke(ctx, Request{
+			ToolKey: "huginn_browser_session",
+			Input:   map[string]any{"url": "https://example.com"},
+		})
+		done <- err
+	}()
+
+	pid := waitForPIDFile(t, pidPath)
+	cancel()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("Invoke() error = nil, want cancellation failure")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Invoke() did not return after cancellation")
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		err := syscall.Kill(pid, 0)
+		if errors.Is(err, syscall.ESRCH) {
+			break
+		}
+		if err != nil {
+			t.Fatalf("Kill(%d, 0) error = %v", pid, err)
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("process %d still exists after cancellation", pid)
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+}
+
 func TestDriverDefaultsEmptyToolKeyWhenAllowed(t *testing.T) {
 	requestPath := filepath.Join(t.TempDir(), "request.json")
 	script := writeFixtureDriver(t, `#!/usr/bin/env bash
@@ -118,21 +174,48 @@ printf '{"status":"completed","tool_key":"huginn_browser_session","summary":"ok"
 	}
 }
 
-func TestDriverRejectsMismatchedToolKey(t *testing.T) {
-	script := writeFixtureDriver(t, `#!/usr/bin/env bash
+func TestDriverValidationErrorsIncludeRawStdout(t *testing.T) {
+	t.Run("mismatched tool key", func(t *testing.T) {
+		script := writeFixtureDriver(t, `#!/usr/bin/env bash
 printf '{"status":"completed","tool_key":"other_tool","summary":"ok","artifacts":{"session_state":"ready"}}'
 `)
-	t.Setenv(defaultDriverEnvVar, script)
+		t.Setenv(defaultDriverEnvVar, script)
 
-	driver := NewDriver()
-	driver.DefaultToolKey = "huginn_browser_session"
+		driver := NewDriver()
+		driver.DefaultToolKey = "huginn_browser_session"
 
-	if _, err := driver.Invoke(context.Background(), Request{
-		ToolKey: "huginn_browser_session",
-		Input:   map[string]any{"url": "https://example.com"},
-	}); err == nil {
-		t.Fatal("Invoke() error = nil, want mismatched response tool key failure")
-	}
+		_, err := driver.Invoke(context.Background(), Request{
+			ToolKey: "huginn_browser_session",
+			Input:   map[string]any{"url": "https://example.com"},
+		})
+		if err == nil {
+			t.Fatal("Invoke() error = nil, want mismatched response tool key failure")
+		}
+		if !strings.Contains(err.Error(), `stdout="{\"status\":\"completed\",\"tool_key\":\"other_tool\"`) {
+			t.Fatalf("error = %v, want raw stdout payload", err)
+		}
+	})
+
+	t.Run("malformed json", func(t *testing.T) {
+		script := writeFixtureDriver(t, `#!/usr/bin/env bash
+printf 'not-json'
+`)
+		t.Setenv(defaultDriverEnvVar, script)
+
+		driver := NewDriver()
+		driver.DefaultToolKey = "huginn_browser_session"
+
+		_, err := driver.Invoke(context.Background(), Request{
+			ToolKey: "huginn_browser_session",
+			Input:   map[string]any{"url": "https://example.com"},
+		})
+		if err == nil {
+			t.Fatal("Invoke() error = nil, want decode failure")
+		}
+		if !strings.Contains(err.Error(), `stdout="not-json"`) {
+			t.Fatalf("error = %v, want raw stdout payload", err)
+		}
+	})
 }
 
 func TestDriverRejectsMissingResponseToolKey(t *testing.T) {
@@ -214,4 +297,24 @@ func writeFixtureDriver(t *testing.T, content string) string {
 		t.Fatalf("Chmod(driver) error = %v", err)
 	}
 	return path
+}
+
+func waitForPIDFile(t *testing.T, path string) int {
+	t.Helper()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		data, err := os.ReadFile(path)
+		if err == nil {
+			pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+			if err != nil {
+				t.Fatalf("parse pid file %q: %v", string(data), err)
+			}
+			return pid
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("pid file %s was not written", path)
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
 }

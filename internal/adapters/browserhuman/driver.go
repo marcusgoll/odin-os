@@ -59,7 +59,9 @@ func (driver Driver) Invoke(ctx context.Context, request Request) (Response, err
 		return Response{}, err
 	}
 
-	cmd := exec.CommandContext(ctx, "sh", "-c", command)
+	// Parse the configured shell command, then exec it so cancellation targets
+	// the actual driver process instead of a wrapper shell.
+	cmd := exec.CommandContext(ctx, "sh", "-c", `eval "set -- $1"; exec "$@"`, "sh", command)
 
 	cmd.Stdin = bytes.NewReader(requestBytes)
 
@@ -74,17 +76,17 @@ func (driver Driver) Invoke(ctx context.Context, request Request) (Response, err
 
 	var response Response
 	if err := json.Unmarshal(stdout.Bytes(), &response); err != nil {
-		return Response{}, fmt.Errorf("decode driver response: %w", err)
+		return Response{}, fmt.Errorf("decode driver response: %w; stdout=%q", err, stdout.String())
 	}
 	response.RawOutput = stdout.String()
 	if response.ToolKey != request.ToolKey {
-		return Response{}, fmt.Errorf("driver response tool_key %q does not match request %q", response.ToolKey, request.ToolKey)
+		return Response{}, fmt.Errorf("driver response tool_key %q does not match request %q; stdout=%q", response.ToolKey, request.ToolKey, response.RawOutput)
 	}
 	if strings.TrimSpace(response.Status) == "" {
-		return Response{}, fmt.Errorf("driver response status is empty")
+		return Response{}, fmt.Errorf("driver response status is empty; stdout=%q", response.RawOutput)
 	}
 	if !strings.EqualFold(strings.TrimSpace(response.Status), "completed") {
-		return Response{}, fmt.Errorf("driver response status %q is not completed", response.Status)
+		return Response{}, fmt.Errorf("driver response status %q is not completed; stdout=%q", response.Status, response.RawOutput)
 	}
 	if response.Artifacts == nil {
 		response.Artifacts = map[string]any{}
