@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 
+	"odin-os/internal/core/initiatives"
 	"odin-os/internal/store/sqlite"
 )
 
@@ -112,6 +113,10 @@ func (service Service) AuthorizeAction(ctx context.Context, input ActionInput) (
 	}
 
 	return decision, nil
+}
+
+func (service Service) RegisterManagedProjectInitiative(ctx context.Context, workspaceID int64, project sqlite.Project, ownerCompanionID *int64) (initiatives.Initiative, error) {
+	return initiatives.Service{Store: service.Store}.ReconcileManagedProject(ctx, workspaceID, project, ownerCompanionID)
 }
 
 func (service Service) recordReport(ctx context.Context, input ReportInput, requiredState TransitionState, reportType string) (sqlite.ProjectTransitionReport, error) {

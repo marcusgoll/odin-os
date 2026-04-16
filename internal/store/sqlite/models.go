@@ -15,6 +15,20 @@ type Project struct {
 	UpdatedAt     time.Time
 }
 
+type Initiative struct {
+	ID               int64
+	WorkspaceID      int64
+	Key              string
+	Title            string
+	Kind             string
+	Status           string
+	Summary          string
+	OwnerCompanionID *int64
+	LinkedProjectID  *int64
+	CreatedAt        time.Time
+	UpdatedAt        time.Time
+}
+
 type CreateProjectParams struct {
 	Key           string
 	Name          string
@@ -23,6 +37,17 @@ type CreateProjectParams struct {
 	DefaultBranch string
 	GitHubRepo    string
 	ManifestPath  string
+}
+
+type UpsertInitiativeParams struct {
+	WorkspaceID      int64
+	Key              string
+	Title            string
+	Kind             string
+	Status           string
+	Summary          string
+	OwnerCompanionID *int64
+	LinkedProjectID  *int64
 }
 
 type Workspace struct {

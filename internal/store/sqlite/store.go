@@ -130,6 +130,60 @@ func (store *Store) CreateProject(ctx context.Context, params CreateProjectParam
 	return project, err
 }
 
+func (store *Store) UpsertInitiative(ctx context.Context, params UpsertInitiativeParams) (Initiative, error) {
+	now := store.now()
+	var initiative Initiative
+
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO initiatives (
+				workspace_id,
+				key,
+				title,
+				kind,
+				status,
+				summary,
+				owner_companion_id,
+				linked_project_id,
+				created_at,
+				updated_at
+			)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT(workspace_id, key) DO UPDATE SET
+				title = excluded.title,
+				kind = excluded.kind,
+				status = excluded.status,
+				summary = excluded.summary,
+				owner_companion_id = excluded.owner_companion_id,
+				linked_project_id = excluded.linked_project_id,
+				updated_at = excluded.updated_at
+		`,
+			params.WorkspaceID,
+			params.Key,
+			params.Title,
+			params.Kind,
+			params.Status,
+			params.Summary,
+			nullInt64(params.OwnerCompanionID),
+			nullInt64(params.LinkedProjectID),
+			formatTime(now),
+			formatTime(now),
+		); err != nil {
+			return err
+		}
+
+		record, err := store.getInitiativeTx(ctx, tx, params.WorkspaceID, params.Key)
+		if err != nil {
+			return err
+		}
+
+		initiative = record
+		return nil
+	})
+
+	return initiative, err
+}
+
 func (store *Store) CreateWorkspace(ctx context.Context, params CreateWorkspaceParams) (Workspace, error) {
 	now := store.now()
 	var workspace Workspace
@@ -1714,6 +1768,15 @@ func (store *Store) GetProjectByKey(ctx context.Context, key string) (Project, e
 	return scanProject(row)
 }
 
+func (store *Store) GetInitiativeByKey(ctx context.Context, workspaceID int64, key string) (Initiative, error) {
+	row := store.db.QueryRowContext(ctx, `
+		SELECT id, workspace_id, key, title, kind, status, summary, owner_companion_id, linked_project_id, created_at, updated_at
+		FROM initiatives
+		WHERE workspace_id = ? AND key = ?
+	`, workspaceID, key)
+	return scanInitiative(row)
+}
+
 func (store *Store) GetRun(ctx context.Context, runID int64) (Run, error) {
 	row := store.db.QueryRowContext(ctx, `
 		SELECT id, task_id, executor, status, attempt, started_at, finished_at, summary
@@ -2609,6 +2672,15 @@ func (store *Store) withTx(ctx context.Context, fn func(*sql.Tx) error) error {
 	return tx.Commit()
 }
 
+func (store *Store) getInitiativeTx(ctx context.Context, tx *sql.Tx, workspaceID int64, key string) (Initiative, error) {
+	row := tx.QueryRowContext(ctx, `
+		SELECT id, workspace_id, key, title, kind, status, summary, owner_companion_id, linked_project_id, created_at, updated_at
+		FROM initiatives
+		WHERE workspace_id = ? AND key = ?
+	`, workspaceID, key)
+	return scanInitiative(row)
+}
+
 type eventInsert struct {
 	StreamType runtimeevents.StreamType
 	StreamID   int64
@@ -2702,6 +2774,42 @@ func scanProject(row interface{ Scan(...any) error }) (Project, error) {
 		return Project{}, err
 	}
 	return project, nil
+}
+
+func scanInitiative(row interface{ Scan(...any) error }) (Initiative, error) {
+	var initiative Initiative
+	var ownerCompanionID sql.NullInt64
+	var linkedProjectID sql.NullInt64
+	var createdAt string
+	var updatedAt string
+	if err := row.Scan(
+		&initiative.ID,
+		&initiative.WorkspaceID,
+		&initiative.Key,
+		&initiative.Title,
+		&initiative.Kind,
+		&initiative.Status,
+		&initiative.Summary,
+		&ownerCompanionID,
+		&linkedProjectID,
+		&createdAt,
+		&updatedAt,
+	); err != nil {
+		return Initiative{}, err
+	}
+
+	var err error
+	initiative.OwnerCompanionID = nullableInt64Ptr(ownerCompanionID)
+	initiative.LinkedProjectID = nullableInt64Ptr(linkedProjectID)
+	initiative.CreatedAt, err = parseTime(createdAt)
+	if err != nil {
+		return Initiative{}, err
+	}
+	initiative.UpdatedAt, err = parseTime(updatedAt)
+	if err != nil {
+		return Initiative{}, err
+	}
+	return initiative, nil
 }
 
 func scanWorkspace(row interface{ Scan(...any) error }) (Workspace, error) {
