@@ -1,11 +1,27 @@
 package validator_test
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	"odin-os/internal/registry"
+	"odin-os/internal/registry/parser"
 	"odin-os/internal/registry/validator"
 )
+
+func TestValidateRequiresVersionedInvokableSchemas(t *testing.T) {
+	documents := []registry.ParsedDocument{
+		mustParseFixture(t, "skill-triage.md"),
+		mustParseFixture(t, "command-project-status.md"),
+		mustParseFixture(t, "workflow-project-status.md"),
+	}
+
+	diagnostics := validator.ValidateDocuments(documents)
+	if len(diagnostics) != 0 {
+		t.Fatalf("ValidateDocuments() diagnostics = %v, want none", diagnostics)
+	}
+}
 
 func TestValidateDocumentsRejectsKindMismatch(t *testing.T) {
 	document := registry.ParsedDocument{
@@ -79,6 +95,35 @@ func TestValidateDocumentsRejectsInvalidKindSpecificField(t *testing.T) {
 	if !found {
 		t.Fatal("expected missing strictness diagnostic")
 	}
+}
+
+func mustParseFixture(t *testing.T, filename string) registry.ParsedDocument {
+	t.Helper()
+
+	content, err := os.ReadFile(filepath.Join("..", "testdata", "normalized", filename))
+	if err != nil {
+		t.Fatalf("ReadFile(%q) error = %v", filename, err)
+	}
+
+	source := registry.SourceFile{
+		Path:         filepath.Join("/tmp", filename),
+		RelativePath: filepath.ToSlash(filepath.Join("testdata", "normalized", filename)),
+		ExpectedKind: registry.KindSkill,
+	}
+
+	switch filename[0] {
+	case 'c':
+		source.ExpectedKind = registry.KindCommand
+	case 'w':
+		source.ExpectedKind = registry.KindWorkflow
+	}
+
+	document, diagnostics := parser.ParseSource(source, content)
+	if len(diagnostics) != 0 {
+		t.Fatalf("ParseSource(%q) diagnostics = %v, want none", filename, diagnostics)
+	}
+
+	return document
 }
 
 func makeValidDocument(relativePath string, key string) registry.ParsedDocument {
