@@ -26,6 +26,8 @@ func TestFreshRuntimeWithoutCodexDriverIsNotReady(t *testing.T) {
 
 func TestFreshRuntimeWithCodexDriverCanAnswerAndRun(t *testing.T) {
 	root := t.TempDir()
+	// This fixture encodes the planned driver contract; the current runtime does not
+	// consume it yet, which is why this remains a red contract test.
 	driver := writeFixtureCodexDriver(t)
 
 	ask := runInteractiveOdin(t, root, map[string]string{
@@ -100,7 +102,10 @@ func writeFixtureCodexDriver(t *testing.T) string {
 	path := filepath.Join(dir, "codex-driver.sh")
 	script := `#!/usr/bin/env bash
 set -euo pipefail
-cat >/dev/null
+payload="$(cat)"
+if [[ -n "${ODIN_CODEX_DRIVER_TRACE:-}" ]]; then
+	printf '%s\n' "$payload" >"${ODIN_CODEX_DRIVER_TRACE}"
+fi
 printf '%s\n' "fixture codex driver"
 `
 	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {

@@ -151,7 +151,7 @@ func TestAlphaAcceptance(t *testing.T) {
 		if err == nil {
 			t.Fatalf("runOdinCommand(healthcheck fresh runtime) exit = 0, want non-zero without real driver\n%s", output)
 		}
-		if strings.Contains(output, "ready") {
+		if hasExactLine(output, "ready") {
 			t.Fatalf("fresh runtime healthcheck output = %q, want not ready without real driver", output)
 		}
 	})
@@ -731,7 +731,7 @@ func TestAlphaAcceptance(t *testing.T) {
 		if err == nil {
 			t.Fatalf("runOdinCommand(healthcheck) exit = 0, want non-zero without real driver\n%s", healthcheckOutput)
 		}
-		if strings.Contains(healthcheckOutput, "ready") {
+		if hasExactLine(healthcheckOutput, "ready") {
 			t.Fatalf("healthcheck output = %q, want not ready without real driver", healthcheckOutput)
 		}
 
@@ -752,4 +752,13 @@ func TestAlphaAcceptance(t *testing.T) {
 		}
 		requirePathExists(t, filepath.Join(restoreRoot, "data", "odin.db"))
 	})
+}
+
+func hasExactLine(output string, want string) bool {
+	for _, line := range strings.Split(output, "\n") {
+		if strings.TrimSpace(line) == want {
+			return true
+		}
+	}
+	return false
 }
