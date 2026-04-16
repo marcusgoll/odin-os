@@ -75,6 +75,18 @@ SNAPSHOT="$(browser_snapshot)"
 [[ "${SNAPSHOT}" == *"Example Domain"* ]] || fail "browser_snapshot did not return Example Domain"
 pass "browser_snapshot returned Example Domain"
 
+NAVIGATE_STATUS="$(curl -s -o /dev/null -w '%{http_code}' -X POST "${BROWSER_SERVER_URL}/navigate" -H 'Content-Type: application/json' -d '{"url":"http://localhost/path"}')"
+[[ "${NAVIGATE_STATUS}" != "200" ]] || fail "direct navigate to localhost unexpectedly succeeded"
+CURRENT_URL_AFTER_NAVIGATE="$(curl -sf "${BROWSER_SERVER_URL}/health" | jq -r '.url // empty')"
+[[ "${CURRENT_URL_AFTER_NAVIGATE}" == "https://example.com/" ]] || fail "direct navigate changed the current URL"
+pass "direct navigate rejects localhost URLs"
+
+LAUNCH_STATUS="$(curl -s -o /dev/null -w '%{http_code}' -X POST "${BROWSER_SERVER_URL}/launch" -H 'Content-Type: application/json' -d '{"browser":"chromium","headless":true,"url":"http://localhost/path"}')"
+[[ "${LAUNCH_STATUS}" != "200" ]] || fail "direct launch with localhost unexpectedly succeeded"
+CURRENT_URL_AFTER_LAUNCH="$(curl -sf "${BROWSER_SERVER_URL}/health" | jq -r '.url // empty')"
+[[ "${CURRENT_URL_AFTER_LAUNCH}" == "https://example.com/" ]] || fail "direct launch changed the current URL"
+pass "direct launch rejects localhost URLs"
+
 browser_server_stop >/dev/null
 trap - EXIT
 rm -rf "${WORK_DIR}"

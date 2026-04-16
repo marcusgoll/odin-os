@@ -60,6 +60,19 @@ browser_server_stop
 [[ ! -f "${BROWSER_SERVER_PID_FILE}" ]] || fail "browser pid file was not cleared"
 [[ ! -f "${BROWSER_SERVER_PORT_FILE}" ]] || fail "browser port file was not cleared"
 
+TAMPERED_PORT="29999"
+printf '4242\n' > "${BROWSER_SERVER_PID_FILE}"
+printf '%s\n' "${TAMPERED_PORT}" > "${BROWSER_SERVER_PORT_FILE}"
+
+curl_calls=()
+kill_calls=()
+browser_server_stop
+
+[[ "${#curl_calls[@]}" -eq 0 ]] || fail "tampered runtime port should not trigger a stop request"
+[[ "${#kill_calls[@]}" -eq 0 ]] || fail "tampered runtime port should not trigger kill attempts"
+[[ ! -f "${BROWSER_SERVER_PID_FILE}" ]] || fail "tampered runtime port did not clear the pid file"
+[[ ! -f "${BROWSER_SERVER_PORT_FILE}" ]] || fail "tampered runtime port did not clear the port file"
+
 _ba_pid_is_browser_runtime "4242" "${OLD_PORT}" || fail "expected runtime PID to be recognized with the persisted port"
 if _ba_pid_is_browser_runtime "4243" "${OLD_PORT}"; then
     fail "expected path-fragment PID to be rejected"

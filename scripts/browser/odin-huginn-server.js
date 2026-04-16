@@ -51,6 +51,44 @@ function readBody(req) {
   });
 }
 
+function browserHostIsLocalService(host) {
+  let normalized = String(host || '').toLowerCase();
+  while (normalized.endsWith('.')) {
+    normalized = normalized.slice(0, -1);
+  }
+  if (normalized === 'localhost' || normalized.endsWith('.localhost')) {
+    return true;
+  }
+  if (normalized === '127.0.0.1' || normalized === '::1') {
+    return true;
+  }
+  if (normalized.startsWith('::ffff:')) {
+    const tail = normalized.slice('::ffff:'.length).replace(/\.+$/, '');
+    if (tail === '127.0.0.1') {
+      return true;
+    }
+    const mapped = tail.match(/^([0-9a-f]{1,4}):([0-9a-f]{1,4})$/i);
+    if (mapped) {
+      const hi = Number.parseInt(mapped[1], 16);
+      const lo = Number.parseInt(mapped[2], 16);
+      const ipv4 = (hi << 16) | lo;
+      return ((ipv4 >>> 24) & 255) === 127;
+    }
+  }
+  return false;
+}
+
+function assertBrowserTargetAllowed(target) {
+  const url = new URL(target);
+  const scheme = url.protocol.slice(0, -1).toLowerCase();
+  if (scheme === 'javascript' || scheme === 'chrome') {
+    throw new Error('Blocked browser URL');
+  }
+  if (browserHostIsLocalService(url.hostname)) {
+    throw new Error('Blocked browser URL');
+  }
+}
+
 function isExecutableFile(filePath) {
   try {
     const stats = statSync(filePath);
@@ -256,6 +294,9 @@ async function launchBrowser(body) {
   if (body.browser && body.browser !== 'chromium' && body.browser !== 'chrome') {
     throw new Error('Only Chromium is supported');
   }
+  if (body.url) {
+    assertBrowserTargetAllowed(body.url);
+  }
 
   await stopBrowser();
   const chrome = findChromeBinary();
@@ -371,6 +412,7 @@ const server = createServer(async (req, res) => {
       if (body.action === 'reload') {
         await navigate(currentUrl || 'about:blank');
       } else if (body.url) {
+        assertBrowserTargetAllowed(body.url);
         await navigate(body.url);
       } else {
         throw new Error('url or action is required');

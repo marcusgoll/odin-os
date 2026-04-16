@@ -176,9 +176,12 @@ _ba_host_is_local_service() {
     while [[ "${normalized}" == *. ]]; do
         normalized="${normalized%.}"
     done
+    if [[ "${normalized}" == *:* ]]; then
+        normalized="${normalized%%%*}"
+    fi
 
     case "${normalized}" in
-        localhost|*.localhost)
+        localhost|*.localhost|::1)
             return 0
             ;;
     esac
@@ -363,12 +366,12 @@ browser_server_stop() {
         port="${runtime_state[1]:-}"
     fi
 
-    if [[ -n "${port}" ]]; then
-        stop_url="$(_ba_browser_runtime_url "${port}")"
-        _bc_curl -X POST "${stop_url}/stop" >/dev/null 2>&1 || true
-    fi
     if [[ -n "${pid}" && -n "${port}" ]]; then
-        _ba_stop_pid_if_runtime "${pid}" "${port}"
+        if _ba_pid_is_browser_runtime "${pid}" "${port}"; then
+            stop_url="$(_ba_browser_runtime_url "${port}")"
+            _bc_curl -X POST "${stop_url}/stop" >/dev/null 2>&1 || true
+            _ba_stop_pid_if_runtime "${pid}" "${port}"
+        fi
     fi
     rm -f "${BROWSER_SERVER_PID_FILE}" "${BROWSER_SERVER_PORT_FILE}"
 }

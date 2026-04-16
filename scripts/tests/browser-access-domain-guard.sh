@@ -63,6 +63,12 @@ fi
 if browser_request_domain_access "https://[::ffff:127.0.0.1]/path"; then
     fail "expected IPv4-mapped IPv6 loopback to be denied"
 fi
+if browser_request_domain_access "https://[::1%25lo]/path"; then
+    fail "expected IPv6 zone-id loopback to be denied"
+fi
+if browser_request_domain_access "https://[::ffff:127.0.0.1%25lo]/path"; then
+    fail "expected IPv4-mapped IPv6 zone-id loopback to be denied"
+fi
 browser_request_domain_access "data:text/html,allowed" || fail "expected data: URLs to remain allowed"
 if browser_request_domain_access "https://[::ffff:7f00:1]/path"; then
     fail "expected canonical IPv4-mapped IPv6 loopback to be denied"
