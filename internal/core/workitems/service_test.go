@@ -103,6 +103,34 @@ func TestWorkItemServiceRejectsApprovalForTerminalTasks(t *testing.T) {
 	}
 }
 
+func TestWorkItemServiceRequeuesTasks(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openWorkItemServiceStore(t)
+	defer store.Close()
+
+	workspaceID, projectID, initiativeID, companionID := seedWorkItemLinks(t, ctx, store)
+	service := Service{Store: store}
+
+	runningTask := mustQueueWorkItemTask(t, ctx, service, projectID, workspaceID, initiativeID, companionID, "running-item")
+	started, err := service.Start(ctx, runningTask.ID)
+	if err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	if started.Status != "running" {
+		t.Fatalf("Start().Status = %q, want running", started.Status)
+	}
+
+	requeued, err := service.Requeue(ctx, runningTask.ID)
+	if err != nil {
+		t.Fatalf("Requeue() error = %v", err)
+	}
+	if requeued.Status != "queued" {
+		t.Fatalf("Requeue().Status = %q, want queued", requeued.Status)
+	}
+}
+
 func TestWorkItemServiceFinalizesTaskFromExecutorStatus(t *testing.T) {
 	t.Parallel()
 

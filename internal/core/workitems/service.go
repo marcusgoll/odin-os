@@ -55,6 +55,10 @@ func (service Service) Block(ctx context.Context, taskID int64) (sqlite.Task, er
 	return service.transitionStatus(ctx, taskID, statusBlocked)
 }
 
+func (service Service) Requeue(ctx context.Context, taskID int64) (sqlite.Task, error) {
+	return service.transitionStatus(ctx, taskID, statusQueued)
+}
+
 func (service Service) Complete(ctx context.Context, taskID int64) (sqlite.Task, error) {
 	return service.transitionStatus(ctx, taskID, statusCompleted)
 }

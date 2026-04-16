@@ -51,10 +51,7 @@ func (service Service) RunStartupRecovery(ctx context.Context) (StartupResult, e
 			return StartupResult{}, err
 		}
 
-		if _, err := service.Store.UpdateTaskStatus(ctx, sqlite.UpdateTaskStatusParams{
-			TaskID: task.ID,
-			Status: "queued",
-		}); err != nil {
+		if _, err := service.workItemService().Requeue(ctx, task.ID); err != nil {
 			return StartupResult{}, err
 		}
 
