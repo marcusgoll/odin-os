@@ -99,6 +99,64 @@ func TestListFiltersRunsByScope(t *testing.T) {
 	}
 }
 
+func TestGetRunReturnsRunRecord(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openRunStore(t)
+	defer store.Close()
+
+	project, err := store.CreateProject(ctx, sqlite.CreateProjectParams{
+		Key:           "alpha",
+		Name:          "Alpha",
+		Scope:         "project",
+		GitRoot:       "/tmp/alpha",
+		DefaultBranch: "main",
+		GitHubRepo:    "acme/alpha",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+
+	task, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "alpha-task",
+		Title:       "Alpha task",
+		Status:      "running",
+		Scope:       "project",
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+
+	run, err := store.StartRun(ctx, sqlite.StartRunParams{
+		TaskID:   task.ID,
+		Executor: "codex",
+		Attempt:  1,
+		Status:   "running",
+	})
+	if err != nil {
+		t.Fatalf("StartRun() error = %v", err)
+	}
+
+	service := Service{DB: store.DB()}
+	record, err := service.GetRun(ctx, run.ID)
+	if err != nil {
+		t.Fatalf("GetRun() error = %v", err)
+	}
+	if record.RunID != run.ID {
+		t.Fatalf("GetRun().RunID = %d, want %d", record.RunID, run.ID)
+	}
+	if record.Status != "running" {
+		t.Fatalf("GetRun().Status = %q, want %q", record.Status, "running")
+	}
+	if record.FinishedAt != nil {
+		t.Fatalf("GetRun().FinishedAt = %v, want nil", record.FinishedAt)
+	}
+}
+
 func openRunStore(t *testing.T) *sqlite.Store {
 	t.Helper()
 

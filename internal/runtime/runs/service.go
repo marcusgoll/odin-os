@@ -12,6 +12,14 @@ type Service struct {
 	DB *sql.DB
 }
 
+type RunRecord struct {
+	RunID      int64
+	Status     string
+	Summary    string
+	StartedAt  string
+	FinishedAt *string
+}
+
 func (service Service) List(ctx context.Context, resolved scope.Resolution) ([]projections.RunSummaryView, error) {
 	rows, err := service.DB.QueryContext(ctx, `
 		SELECT
@@ -64,6 +72,31 @@ func (service Service) List(ctx context.Context, resolved scope.Resolution) ([]p
 	}
 
 	return views, rows.Err()
+}
+
+func (service Service) GetRun(ctx context.Context, runID int64) (RunRecord, error) {
+	row := service.DB.QueryRowContext(ctx, `
+		SELECT id, status, summary, started_at, finished_at
+		FROM runs
+		WHERE id = ?
+	`, runID)
+
+	var record RunRecord
+	var finishedAt sql.NullString
+	if err := row.Scan(
+		&record.RunID,
+		&record.Status,
+		&record.Summary,
+		&record.StartedAt,
+		&finishedAt,
+	); err != nil {
+		return RunRecord{}, err
+	}
+	if finishedAt.Valid {
+		record.FinishedAt = &finishedAt.String
+	}
+
+	return record, nil
 }
 
 func matchesRunScope(projectKey, taskScope string, resolved scope.Resolution) bool {
