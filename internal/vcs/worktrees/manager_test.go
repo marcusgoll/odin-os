@@ -3,6 +3,7 @@ package worktrees
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -34,6 +35,9 @@ func TestManagerCleanupRemovesReleasedLeaseDeterministically(t *testing.T) {
 		State:   "released",
 	}); err != nil {
 		t.Fatalf("ReleaseWorktreeLease() error = %v", err)
+	}
+	if err := os.MkdirAll(lease.WorktreePath, 0o755); err != nil {
+		t.Fatalf("mkdir worktree path: %v", err)
 	}
 
 	git := &cleanupGit{}
@@ -122,6 +126,9 @@ func TestManagerCleanupRemovesStaleActiveLeaseDeterministically(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateWorktreeLease() error = %v", err)
 	}
+	if err := os.MkdirAll(lease.WorktreePath, 0o755); err != nil {
+		t.Fatalf("mkdir worktree path: %v", err)
+	}
 
 	forceLeaseHeartbeatAt(t, ctx, store, lease.ID, time.Now().UTC().Add(-2*time.Hour))
 
@@ -175,6 +182,9 @@ func TestManagerCleanupContinuesPastLeaseRemovalFailure(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("ReleaseWorktreeLease(failing) error = %v", err)
 	}
+	if err := os.MkdirAll(failingLease.WorktreePath, 0o755); err != nil {
+		t.Fatalf("mkdir failing worktree path: %v", err)
+	}
 
 	nextTask, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
 		ProjectID:   project.ID,
@@ -214,6 +224,9 @@ func TestManagerCleanupContinuesPastLeaseRemovalFailure(t *testing.T) {
 		State:   "released",
 	}); err != nil {
 		t.Fatalf("ReleaseWorktreeLease(succeeding) error = %v", err)
+	}
+	if err := os.MkdirAll(succeedingLease.WorktreePath, 0o755); err != nil {
+		t.Fatalf("mkdir succeeding worktree path: %v", err)
 	}
 
 	removeErr := errors.New("remove failed")
@@ -258,6 +271,81 @@ func TestManagerCleanupContinuesPastLeaseRemovalFailure(t *testing.T) {
 	}
 }
 
+func TestManagerCleanupMarksMissingWorktreeCleanAfterMarkFailureRetry(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "odin.db")
+	store, project, task, run := openCleanupStoreAt(t, dbPath)
+	defer store.Close()
+
+	worktreePath := filepath.Join(t.TempDir(), "cleanup-retry")
+	if err := os.MkdirAll(worktreePath, 0o755); err != nil {
+		t.Fatalf("mkdir worktree path: %v", err)
+	}
+
+	lease, err := store.CreateWorktreeLease(ctx, sqlite.CreateWorktreeLeaseParams{
+		ProjectID:    project.ID,
+		TaskID:       task.ID,
+		RunID:        run.ID,
+		Mode:         "mutable",
+		BranchName:   "odin/cfipros/task-1/run-1/try-1",
+		WorktreePath: worktreePath,
+		RepoRoot:     project.GitRoot,
+		State:        "active",
+	})
+	if err != nil {
+		t.Fatalf("CreateWorktreeLease() error = %v", err)
+	}
+	if _, err := store.ReleaseWorktreeLease(ctx, sqlite.ReleaseWorktreeLeaseParams{
+		LeaseID: lease.ID,
+		State:   "released",
+	}); err != nil {
+		t.Fatalf("ReleaseWorktreeLease() error = %v", err)
+	}
+
+	firstPass := Manager{
+		Store: store,
+		Git: &markFailureCleanupGit{
+			store: store,
+		},
+	}
+	result, err := firstPass.Cleanup(ctx, time.Now().UTC().Add(-30*time.Minute))
+	if err == nil {
+		t.Fatal("Cleanup() error = nil, want mark failure")
+	}
+	if len(result.Removed) != 0 {
+		t.Fatalf("Cleanup().Removed len = %d, want 0 when mark fails", len(result.Removed))
+	}
+
+	reopened, err := sqlite.Open(dbPath)
+	if err != nil {
+		t.Fatalf("reopen store error = %v", err)
+	}
+	defer reopened.Close()
+
+	retry := Manager{
+		Store: reopened,
+		Git:   &cleanupGit{},
+	}
+	result, err = retry.Cleanup(ctx, time.Now().UTC().Add(-30*time.Minute))
+	if err != nil {
+		t.Fatalf("retry Cleanup() error = %v", err)
+	}
+	if len(result.Removed) != 1 {
+		t.Fatalf("retry Cleanup().Removed len = %d, want 1", len(result.Removed))
+	}
+
+	updated, err := reopened.GetWorktreeLease(ctx, lease.ID)
+	if err != nil {
+		t.Fatalf("GetWorktreeLease() error = %v", err)
+	}
+	if updated.State != "cleaned" {
+		t.Fatalf("lease.State = %q, want cleaned", updated.State)
+	}
+	if updated.CleanedUpAt == nil {
+		t.Fatalf("lease.CleanedUpAt = nil, want value")
+	}
+}
+
 type cleanupGit struct {
 	removeCalls int
 	errsByPath  map[string]error
@@ -276,7 +364,12 @@ func (git *cleanupGit) RemoveWorktree(_ context.Context, _ string, worktreePath 
 func openCleanupStore(t *testing.T) (*sqlite.Store, sqlite.Project, sqlite.Task, sqlite.Run) {
 	t.Helper()
 
-	dbPath := filepath.Join(t.TempDir(), "odin.db")
+	return openCleanupStoreAt(t, filepath.Join(t.TempDir(), "odin.db"))
+}
+
+func openCleanupStoreAt(t *testing.T, dbPath string) (*sqlite.Store, sqlite.Project, sqlite.Task, sqlite.Run) {
+	t.Helper()
+
 	store, err := sqlite.Open(dbPath)
 	if err != nil {
 		t.Fatalf("Open() error = %v", err)
@@ -321,6 +414,20 @@ func openCleanupStore(t *testing.T) (*sqlite.Store, sqlite.Project, sqlite.Task,
 	}
 
 	return store, project, task, run
+}
+
+type markFailureCleanupGit struct {
+	store *sqlite.Store
+}
+
+func (git *markFailureCleanupGit) RemoveWorktree(_ context.Context, _ string, worktreePath string) error {
+	if err := os.RemoveAll(worktreePath); err != nil {
+		return err
+	}
+	if git.store != nil {
+		return git.store.Close()
+	}
+	return nil
 }
 
 func forceLeaseHeartbeatAt(t *testing.T, ctx context.Context, store *sqlite.Store, leaseID int64, when time.Time) {

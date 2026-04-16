@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"time"
 
 	"odin-os/internal/store/sqlite"
@@ -38,9 +39,16 @@ func (manager Manager) Cleanup(ctx context.Context, staleBefore time.Time) (Clea
 	result := CleanupResult{}
 	var cleanupErr error
 	for _, lease := range leases {
-		if err := manager.Git.RemoveWorktree(ctx, lease.RepoRoot, lease.WorktreePath); err != nil {
-			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("remove worktree lease %d: %w", lease.ID, err))
-			continue
+		if _, err := os.Stat(lease.WorktreePath); err != nil {
+			if !errors.Is(err, os.ErrNotExist) {
+				cleanupErr = errors.Join(cleanupErr, fmt.Errorf("stat worktree lease %d: %w", lease.ID, err))
+				continue
+			}
+		} else {
+			if err := manager.Git.RemoveWorktree(ctx, lease.RepoRoot, lease.WorktreePath); err != nil {
+				cleanupErr = errors.Join(cleanupErr, fmt.Errorf("remove worktree lease %d: %w", lease.ID, err))
+				continue
+			}
 		}
 		updated, err := manager.Store.MarkWorktreeLeaseCleanedUp(ctx, lease.ID)
 		if err != nil {
