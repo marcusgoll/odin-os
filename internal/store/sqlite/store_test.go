@@ -243,8 +243,8 @@ func TestStoreMigrateLifecycleAndReopen(t *testing.T) {
 	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM schema_migrations`).Scan(&migrationCount); err != nil {
 		t.Fatalf("schema_migrations count query error = %v", err)
 	}
-	if migrationCount != 8 {
-		t.Fatalf("schema_migrations count = %d, want 8", migrationCount)
+	if migrationCount != 9 {
+		t.Fatalf("schema_migrations count = %d, want 9", migrationCount)
 	}
 
 	if err := store.Close(); err != nil {
@@ -291,6 +291,94 @@ func TestStoreMigrateLifecycleAndReopen(t *testing.T) {
 	}
 	if gotInitiative.LinkedProjectID == nil || *gotInitiative.LinkedProjectID != project.ID {
 		t.Fatalf("GetInitiativeByProjectID(reopen).LinkedProjectID = %v, want %d", gotInitiative.LinkedProjectID, project.ID)
+	}
+}
+
+func TestCompanionStoreLifecycle(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "odin.db")
+
+	store, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer store.Close()
+
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
+	}
+
+	workspace, err := store.CreateWorkspace(ctx, CreateWorkspaceParams{
+		Key:        "ops",
+		Name:       "Operations",
+		OwnerRef:   "marcus",
+		Status:     "active",
+		PolicyJSON: `{"mode":"default"}`,
+	})
+	if err != nil {
+		t.Fatalf("CreateWorkspace() error = %v", err)
+	}
+
+	companion, err := store.CreateCompanion(ctx, CreateCompanionParams{
+		WorkspaceID:         workspace.ID,
+		Key:                 "operator",
+		Title:               "Operator",
+		Kind:                "operator",
+		Charter:             "Run the workspace operating rhythm.",
+		Status:              "active",
+		InitiativeScopeJSON: `{"mode":"all"}`,
+		ToolPolicyJSON:      `{"mode":"allow","allowed":["calendar.read"]}`,
+		MemoryPolicyJSON:    `{"retention":"workspace"}`,
+		PlanningPolicyJSON:  `{"mode":"stepwise"}`,
+	})
+	if err != nil {
+		t.Fatalf("CreateCompanion() error = %v", err)
+	}
+
+	initiative, err := store.CreateInitiative(ctx, CreateInitiativeParams{
+		WorkspaceID: workspace.ID,
+		Key:         "alpha",
+		Title:       "Alpha",
+		Kind:        "managed_project",
+		Status:      "active",
+		Summary:     "Primary managed initiative",
+	})
+	if err != nil {
+		t.Fatalf("CreateInitiative() error = %v", err)
+	}
+
+	if err := store.SetWorkspaceDefaultCompanion(ctx, workspace.ID, companion.Key); err != nil {
+		t.Fatalf("SetWorkspaceDefaultCompanion() error = %v", err)
+	}
+	if err := store.AssignInitiativeCompanion(ctx, initiative.ID, companion.ID); err != nil {
+		t.Fatalf("AssignInitiativeCompanion() error = %v", err)
+	}
+
+	companions, err := store.ListCompanions(ctx, ListCompanionsParams{WorkspaceID: &workspace.ID})
+	if err != nil {
+		t.Fatalf("ListCompanions() error = %v", err)
+	}
+	if len(companions) != 1 {
+		t.Fatalf("ListCompanions() len = %d, want 1", len(companions))
+	}
+	if companions[0].Charter != companion.Charter {
+		t.Fatalf("ListCompanions()[0].Charter = %q, want %q", companions[0].Charter, companion.Charter)
+	}
+
+	storedWorkspace, err := store.GetWorkspace(ctx, workspace.ID)
+	if err != nil {
+		t.Fatalf("GetWorkspace() error = %v", err)
+	}
+	if storedWorkspace.DefaultCompanionKey != companion.Key {
+		t.Fatalf("GetWorkspace().DefaultCompanionKey = %q, want %q", storedWorkspace.DefaultCompanionKey, companion.Key)
+	}
+
+	storedInitiative, err := store.GetInitiative(ctx, initiative.ID)
+	if err != nil {
+		t.Fatalf("GetInitiative() error = %v", err)
+	}
+	if storedInitiative.OwnerCompanionID == nil || *storedInitiative.OwnerCompanionID != companion.ID {
+		t.Fatalf("GetInitiative().OwnerCompanionID = %v, want %d", storedInitiative.OwnerCompanionID, companion.ID)
 	}
 }
 

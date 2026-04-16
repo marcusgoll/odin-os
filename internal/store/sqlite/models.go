@@ -50,6 +50,40 @@ type ListWorkspacesParams struct {
 	Status string
 }
 
+type Companion struct {
+	ID                  int64
+	WorkspaceID         int64
+	Key                 string
+	Title               string
+	Kind                string
+	Charter             string
+	Status              string
+	InitiativeScopeJSON string
+	ToolPolicyJSON      string
+	MemoryPolicyJSON    string
+	PlanningPolicyJSON  string
+	CreatedAt           time.Time
+	UpdatedAt           time.Time
+}
+
+type CreateCompanionParams struct {
+	WorkspaceID         int64
+	Key                 string
+	Title               string
+	Kind                string
+	Charter             string
+	Status              string
+	InitiativeScopeJSON string
+	ToolPolicyJSON      string
+	MemoryPolicyJSON    string
+	PlanningPolicyJSON  string
+}
+
+type ListCompanionsParams struct {
+	WorkspaceID *int64
+	Status      string
+}
+
 type Initiative struct {
 	ID               int64
 	WorkspaceID      int64

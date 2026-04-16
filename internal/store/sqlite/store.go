@@ -217,6 +217,76 @@ func (store *Store) EnsureDefaultWorkspace(ctx context.Context) (Workspace, erro
 	return workspace, err
 }
 
+func (store *Store) CreateCompanion(ctx context.Context, params CreateCompanionParams) (Companion, error) {
+	now := store.now()
+	var companion Companion
+
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		if _, err := store.getWorkspaceTx(ctx, tx, params.WorkspaceID); err != nil {
+			return err
+		}
+
+		result, err := tx.ExecContext(ctx, `
+			INSERT INTO companions (
+				workspace_id,
+				key,
+				title,
+				kind,
+				charter,
+				status,
+				initiative_scope_json,
+				tool_policy_json,
+				memory_policy_json,
+				planning_policy_json,
+				created_at,
+				updated_at
+			)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`,
+			params.WorkspaceID,
+			params.Key,
+			params.Title,
+			params.Kind,
+			params.Charter,
+			params.Status,
+			params.InitiativeScopeJSON,
+			params.ToolPolicyJSON,
+			params.MemoryPolicyJSON,
+			params.PlanningPolicyJSON,
+			formatTime(now),
+			formatTime(now),
+		)
+		if err != nil {
+			return err
+		}
+
+		companionID, err := result.LastInsertId()
+		if err != nil {
+			return err
+		}
+
+		companion = Companion{
+			ID:                  companionID,
+			WorkspaceID:         params.WorkspaceID,
+			Key:                 params.Key,
+			Title:               params.Title,
+			Kind:                params.Kind,
+			Charter:             params.Charter,
+			Status:              params.Status,
+			InitiativeScopeJSON: params.InitiativeScopeJSON,
+			ToolPolicyJSON:      params.ToolPolicyJSON,
+			MemoryPolicyJSON:    params.MemoryPolicyJSON,
+			PlanningPolicyJSON:  params.PlanningPolicyJSON,
+			CreatedAt:           now,
+			UpdatedAt:           now,
+		}
+
+		return nil
+	})
+
+	return companion, err
+}
+
 func (store *Store) CreateInitiative(ctx context.Context, params CreateInitiativeParams) (Initiative, error) {
 	now := store.now()
 	var initiative Initiative
@@ -1725,6 +1795,54 @@ func (store *Store) GetWorkspaceByKey(ctx context.Context, key string) (Workspac
 	return scanWorkspace(row)
 }
 
+func (store *Store) ListCompanions(ctx context.Context, params ListCompanionsParams) ([]Companion, error) {
+	query := `
+		SELECT
+			id,
+			workspace_id,
+			key,
+			title,
+			kind,
+			charter,
+			status,
+			initiative_scope_json,
+			tool_policy_json,
+			memory_policy_json,
+			planning_policy_json,
+			created_at,
+			updated_at
+		FROM companions
+		WHERE 1 = 1
+	`
+	var args []any
+	if params.WorkspaceID != nil {
+		query += ` AND workspace_id = ?`
+		args = append(args, *params.WorkspaceID)
+	}
+	if params.Status != "" {
+		query += ` AND status = ?`
+		args = append(args, params.Status)
+	}
+	query += ` ORDER BY id ASC`
+
+	rows, err := store.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var companions []Companion
+	for rows.Next() {
+		companion, err := scanCompanion(rows)
+		if err != nil {
+			return nil, err
+		}
+		companions = append(companions, companion)
+	}
+
+	return companions, rows.Err()
+}
+
 func (store *Store) GetInitiative(ctx context.Context, initiativeID int64) (Initiative, error) {
 	row := store.db.QueryRowContext(ctx, `
 		SELECT id, workspace_id, key, title, kind, status, summary, linked_project_id, owner_companion_id, created_at, updated_at
@@ -2350,6 +2468,50 @@ func (store *Store) getWorkspaceByKeyTx(ctx context.Context, tx *sql.Tx, key str
 	return scanWorkspace(row)
 }
 
+func (store *Store) getCompanionTx(ctx context.Context, tx *sql.Tx, companionID int64) (Companion, error) {
+	row := tx.QueryRowContext(ctx, `
+		SELECT
+			id,
+			workspace_id,
+			key,
+			title,
+			kind,
+			charter,
+			status,
+			initiative_scope_json,
+			tool_policy_json,
+			memory_policy_json,
+			planning_policy_json,
+			created_at,
+			updated_at
+		FROM companions
+		WHERE id = ?
+	`, companionID)
+	return scanCompanion(row)
+}
+
+func (store *Store) getCompanionByWorkspaceKeyTx(ctx context.Context, tx *sql.Tx, workspaceID int64, key string) (Companion, error) {
+	row := tx.QueryRowContext(ctx, `
+		SELECT
+			id,
+			workspace_id,
+			key,
+			title,
+			kind,
+			charter,
+			status,
+			initiative_scope_json,
+			tool_policy_json,
+			memory_policy_json,
+			planning_policy_json,
+			created_at,
+			updated_at
+		FROM companions
+		WHERE workspace_id = ? AND key = ?
+	`, workspaceID, key)
+	return scanCompanion(row)
+}
+
 func (store *Store) getInitiativeByProjectIDTx(ctx context.Context, tx *sql.Tx, projectID int64) (Initiative, error) {
 	row := tx.QueryRowContext(ctx, `
 		SELECT id, workspace_id, key, title, kind, status, summary, linked_project_id, owner_companion_id, created_at, updated_at
@@ -2377,6 +2539,60 @@ func (store *Store) ensureDefaultWorkspaceTx(ctx context.Context, tx *sql.Tx, no
 	}
 
 	return store.getWorkspaceByKeyTx(ctx, tx, defaultWorkspaceKey)
+}
+
+func (store *Store) SetWorkspaceDefaultCompanion(ctx context.Context, workspaceID int64, companionKey string) error {
+	now := store.now()
+
+	return store.withTx(ctx, func(tx *sql.Tx) error {
+		if _, err := store.getWorkspaceTx(ctx, tx, workspaceID); err != nil {
+			return err
+		}
+		if _, err := store.getCompanionByWorkspaceKeyTx(ctx, tx, workspaceID, companionKey); err != nil {
+			return err
+		}
+
+		_, err := tx.ExecContext(ctx, `
+			UPDATE workspaces
+			SET default_companion_key = ?, updated_at = ?
+			WHERE id = ?
+		`, companionKey, formatTime(now), workspaceID)
+		return err
+	})
+}
+
+func (store *Store) AssignInitiativeCompanion(ctx context.Context, initiativeID int64, companionID int64) error {
+	now := store.now()
+
+	return store.withTx(ctx, func(tx *sql.Tx) error {
+		initiative, err := store.getInitiativeTx(ctx, tx, initiativeID)
+		if err != nil {
+			return err
+		}
+		companion, err := store.getCompanionTx(ctx, tx, companionID)
+		if err != nil {
+			return err
+		}
+		if initiative.WorkspaceID != companion.WorkspaceID {
+			return fmt.Errorf("initiative %d and companion %d belong to different workspaces", initiativeID, companionID)
+		}
+
+		_, err = tx.ExecContext(ctx, `
+			UPDATE initiatives
+			SET owner_companion_id = ?, updated_at = ?
+			WHERE id = ?
+		`, companionID, formatTime(now), initiativeID)
+		return err
+	})
+}
+
+func (store *Store) getInitiativeTx(ctx context.Context, tx *sql.Tx, initiativeID int64) (Initiative, error) {
+	row := tx.QueryRowContext(ctx, `
+		SELECT id, workspace_id, key, title, kind, status, summary, linked_project_id, owner_companion_id, created_at, updated_at
+		FROM initiatives
+		WHERE id = ?
+	`, initiativeID)
+	return scanInitiative(row)
 }
 
 func (store *Store) reconcileManagedProjectInitiativeTx(ctx context.Context, tx *sql.Tx, params ReconcileManagedProjectInitiativeParams, now time.Time) (Initiative, error) {
@@ -2971,6 +3187,40 @@ func scanWorkspace(row interface{ Scan(...any) error }) (Workspace, error) {
 		return Workspace{}, err
 	}
 	return workspace, nil
+}
+
+func scanCompanion(row interface{ Scan(...any) error }) (Companion, error) {
+	var companion Companion
+	var createdAt string
+	var updatedAt string
+	if err := row.Scan(
+		&companion.ID,
+		&companion.WorkspaceID,
+		&companion.Key,
+		&companion.Title,
+		&companion.Kind,
+		&companion.Charter,
+		&companion.Status,
+		&companion.InitiativeScopeJSON,
+		&companion.ToolPolicyJSON,
+		&companion.MemoryPolicyJSON,
+		&companion.PlanningPolicyJSON,
+		&createdAt,
+		&updatedAt,
+	); err != nil {
+		return Companion{}, err
+	}
+
+	var err error
+	companion.CreatedAt, err = parseTime(createdAt)
+	if err != nil {
+		return Companion{}, err
+	}
+	companion.UpdatedAt, err = parseTime(updatedAt)
+	if err != nil {
+		return Companion{}, err
+	}
+	return companion, nil
 }
 
 func scanInitiative(row interface{ Scan(...any) error }) (Initiative, error) {
