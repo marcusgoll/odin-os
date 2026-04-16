@@ -13,10 +13,10 @@ bash scripts/ops/browser-preflight.sh
 Expected success output:
 
 ```text
-READY: Chromium browser preflight passed (wrapper=/usr/bin/google-chrome runtime=/opt/google/chrome/chrome libs=ok)
+READY: Chromium browser preflight passed (wrapper=/path/to/chrome runtime=/path/to/chrome libs=ok)
 ```
 
-The preflight is Chromium-only in this phase. If you request Firefox or WebKit, it fails closed.
+The exact wrapper/runtime path depends on the host. Bare `chrome` on PATH is accepted if that is what the launcher exposes. The preflight is Chromium-only in this phase. If you request Firefox or WebKit, it fails closed.
 
 ## What It Checks
 
