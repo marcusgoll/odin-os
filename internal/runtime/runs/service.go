@@ -13,6 +13,10 @@ type Service struct {
 }
 
 func (service Service) List(ctx context.Context, resolved scope.Resolution) ([]projections.RunSummaryView, error) {
+	if service.DB == nil {
+		return nil, sql.ErrConnDone
+	}
+
 	rows, err := service.DB.QueryContext(ctx, `
 		SELECT
 			r.id,

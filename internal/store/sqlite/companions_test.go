@@ -96,8 +96,8 @@ func TestCompanionStoreMigrationAndRoundTrip(t *testing.T) {
 	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM schema_migrations`).Scan(&migrationCount); err != nil {
 		t.Fatalf("schema_migrations count query error = %v", err)
 	}
-	if migrationCount != 9 {
-		t.Fatalf("schema_migrations count = %d, want 9", migrationCount)
+	if migrationCount != 10 {
+		t.Fatalf("schema_migrations count = %d, want 10", migrationCount)
 	}
 }
 

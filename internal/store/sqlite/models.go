@@ -120,18 +120,26 @@ type Task struct {
 	Status       string
 	Scope        string
 	RequestedBy  string
+	WorkspaceID  *int64
+	InitiativeID *int64
+	CompanionID  *int64
+	WorkKind     string
 	CurrentRunID *int64
 	CreatedAt    time.Time
 	UpdatedAt    time.Time
 }
 
 type CreateTaskParams struct {
-	ProjectID   int64
-	Key         string
-	Title       string
-	Status      string
-	Scope       string
-	RequestedBy string
+	ProjectID    int64
+	Key          string
+	Title        string
+	Status       string
+	Scope        string
+	RequestedBy  string
+	WorkspaceID  *int64
+	InitiativeID *int64
+	CompanionID  *int64
+	WorkKind     string
 }
 
 type UpdateTaskStatusParams struct {

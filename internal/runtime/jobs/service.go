@@ -9,6 +9,7 @@ import (
 
 	"odin-os/internal/core/projects"
 	corescope "odin-os/internal/core/scope"
+	"odin-os/internal/core/workitems"
 	"odin-os/internal/executors/contract"
 	executorrouter "odin-os/internal/executors/router"
 	"odin-os/internal/runtime/projections"
@@ -22,6 +23,7 @@ type Service struct {
 	Executors      map[string]contract.Executor
 	ExecutorConfig executorrouter.Config
 	Transitions    projects.Service
+	WorkItems      workitems.Service
 	Leases         leases.Manager
 	Now            func() time.Time
 }
@@ -62,11 +64,10 @@ func (service Service) CreateTaskFromAct(ctx context.Context, resolved corescope
 		now = service.Now().UTC()
 	}
 
-	return service.Store.CreateTask(ctx, sqlite.CreateTaskParams{
+	return service.workItemService().Queue(ctx, sqlite.CreateTaskParams{
 		ProjectID:   project.ID,
 		Key:         fmt.Sprintf("%s-%s", slugify(title), now.Format("20060102-150405")),
 		Title:       title,
-		Status:      "queued",
 		Scope:       taskScope,
 		RequestedBy: "operator",
 	})
@@ -91,10 +92,7 @@ func (service Service) ExecuteNextQueued(ctx context.Context) error {
 	}
 	manifest, ok := service.Registry.Lookup(project.Key)
 	if !ok {
-		_, _ = service.Store.UpdateTaskStatus(ctx, sqlite.UpdateTaskStatusParams{
-			TaskID: task.ID,
-			Status: "failed",
-		})
+		_, _ = service.workItemService().Fail(ctx, task.ID)
 		return fmt.Errorf("unknown manifest for project %q", project.Key)
 	}
 
@@ -131,10 +129,7 @@ func (service Service) ExecuteNextQueued(ctx context.Context) error {
 
 	decision, err := selector.Select(ctx, spec)
 	if err != nil {
-		_, _ = service.Store.UpdateTaskStatus(ctx, sqlite.UpdateTaskStatusParams{
-			TaskID: task.ID,
-			Status: "failed",
-		})
+		_, _ = service.workItemService().Fail(ctx, task.ID)
 		return err
 	}
 
@@ -153,10 +148,7 @@ func (service Service) ExecuteNextQueued(ctx context.Context) error {
 		return err
 	}
 
-	if _, err := service.Store.UpdateTaskStatus(ctx, sqlite.UpdateTaskStatusParams{
-		TaskID: task.ID,
-		Status: "running",
-	}); err != nil {
+	if _, err := service.workItemService().Start(ctx, task.ID); err != nil {
 		return err
 	}
 
@@ -166,10 +158,7 @@ func (service Service) ExecuteNextQueued(ctx context.Context) error {
 			Status:  "failed",
 			Summary: cause.Error(),
 		})
-		_, _ = service.Store.UpdateTaskStatus(ctx, sqlite.UpdateTaskStatusParams{
-			TaskID: task.ID,
-			Status: "failed",
-		})
+		_, _ = service.workItemService().Fail(ctx, task.ID)
 		return cause
 	}
 
@@ -239,10 +228,13 @@ func (service Service) ExecuteNextQueued(ctx context.Context) error {
 	}); err != nil {
 		return err
 	}
-	if _, err := service.Store.UpdateTaskStatus(ctx, sqlite.UpdateTaskStatusParams{
-		TaskID: task.ID,
-		Status: taskStatus,
-	}); err != nil {
+	if taskStatus == "completed" {
+		if _, err := service.workItemService().Complete(ctx, task.ID); err != nil {
+			return err
+		}
+		return nil
+	}
+	if _, err := service.workItemService().Fail(ctx, task.ID); err != nil {
 		return err
 	}
 
@@ -291,6 +283,13 @@ func (service Service) nextQueuedTask(ctx context.Context) (sqlite.Task, error) 
 		return sqlite.Task{}, err
 	}
 	return service.Store.GetTask(ctx, taskID)
+}
+
+func (service Service) workItemService() workitems.Service {
+	if service.WorkItems.Store == nil {
+		service.WorkItems.Store = service.Store
+	}
+	return service.WorkItems
 }
 
 func (service Service) nextRunAttempt(ctx context.Context, taskID int64) (int, error) {

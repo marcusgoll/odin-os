@@ -316,8 +316,8 @@ func (store *Store) CreateTask(ctx context.Context, params CreateTaskParams) (Ta
 		}
 
 		result, err := tx.ExecContext(ctx, `
-			INSERT INTO tasks (project_id, key, title, status, scope, requested_by, current_run_id, created_at, updated_at)
-			VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?)
+			INSERT INTO tasks (project_id, key, title, status, scope, requested_by, workspace_id, initiative_id, companion_id, work_kind, current_run_id, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
 		`,
 			params.ProjectID,
 			params.Key,
@@ -325,6 +325,10 @@ func (store *Store) CreateTask(ctx context.Context, params CreateTaskParams) (Ta
 			params.Status,
 			params.Scope,
 			params.RequestedBy,
+			nullInt64(params.WorkspaceID),
+			nullInt64(params.InitiativeID),
+			nullInt64(params.CompanionID),
+			nullIfEmpty(params.WorkKind),
 			formatTime(now),
 			formatTime(now),
 		)
@@ -338,15 +342,19 @@ func (store *Store) CreateTask(ctx context.Context, params CreateTaskParams) (Ta
 		}
 
 		task = Task{
-			ID:          taskID,
-			ProjectID:   params.ProjectID,
-			Key:         params.Key,
-			Title:       params.Title,
-			Status:      params.Status,
-			Scope:       params.Scope,
-			RequestedBy: params.RequestedBy,
-			CreatedAt:   now,
-			UpdatedAt:   now,
+			ID:           taskID,
+			ProjectID:    params.ProjectID,
+			Key:          params.Key,
+			Title:        params.Title,
+			Status:       params.Status,
+			Scope:        params.Scope,
+			RequestedBy:  params.RequestedBy,
+			WorkspaceID:  params.WorkspaceID,
+			InitiativeID: params.InitiativeID,
+			CompanionID:  params.CompanionID,
+			WorkKind:     params.WorkKind,
+			CreatedAt:    now,
+			UpdatedAt:    now,
 		}
 
 		return appendEventTx(ctx, tx, eventInsert{
@@ -2391,7 +2399,7 @@ func (store *Store) getWorkspaceByKeyTx(ctx context.Context, tx *sql.Tx, key str
 
 func (store *Store) getTaskQuery(ctx context.Context, queryer sqlQueryRow, taskID int64) (Task, error) {
 	row := queryer.QueryRowContext(ctx, `
-		SELECT id, project_id, key, title, status, scope, requested_by, current_run_id, created_at, updated_at
+		SELECT id, project_id, key, title, status, scope, requested_by, workspace_id, initiative_id, companion_id, work_kind, current_run_id, created_at, updated_at
 		FROM tasks
 		WHERE id = ?
 	`, taskID)
@@ -2817,7 +2825,7 @@ func (store *Store) getRunWithTaskTx(ctx context.Context, tx *sql.Tx, runID int6
 	row := tx.QueryRowContext(ctx, `
 		SELECT
 			r.id, r.task_id, r.executor, r.status, r.attempt, r.started_at, r.finished_at, r.summary,
-			t.id, t.project_id, t.key, t.title, t.status, t.scope, t.requested_by, t.current_run_id, t.created_at, t.updated_at
+			t.id, t.project_id, t.key, t.title, t.status, t.scope, t.requested_by, t.workspace_id, t.initiative_id, t.companion_id, t.work_kind, t.current_run_id, t.created_at, t.updated_at
 		FROM runs r
 		JOIN tasks t ON t.id = r.task_id
 		WHERE r.id = ?
@@ -2828,6 +2836,10 @@ func (store *Store) getRunWithTaskTx(ctx context.Context, tx *sql.Tx, runID int6
 	var finishedAt sql.NullString
 	var summary sql.NullString
 	var currentRunID sql.NullInt64
+	var workspaceID sql.NullInt64
+	var initiativeID sql.NullInt64
+	var companionID sql.NullInt64
+	var workKind sql.NullString
 	var startedAt string
 	var taskCreatedAt string
 	var taskUpdatedAt string
@@ -2848,6 +2860,10 @@ func (store *Store) getRunWithTaskTx(ctx context.Context, tx *sql.Tx, runID int6
 		&task.Status,
 		&task.Scope,
 		&task.RequestedBy,
+		&workspaceID,
+		&initiativeID,
+		&companionID,
+		&workKind,
 		&currentRunID,
 		&taskCreatedAt,
 		&taskUpdatedAt,
@@ -2866,6 +2882,10 @@ func (store *Store) getRunWithTaskTx(ctx context.Context, tx *sql.Tx, runID int6
 	}
 	run.Summary = summary.String
 
+	task.WorkspaceID = nullableInt64Ptr(workspaceID)
+	task.InitiativeID = nullableInt64Ptr(initiativeID)
+	task.CompanionID = nullableInt64Ptr(companionID)
+	task.WorkKind = stringOrDefault(workKind, "")
 	task.CurrentRunID = nullableInt64Ptr(currentRunID)
 	task.CreatedAt, err = parseTime(taskCreatedAt)
 	if err != nil {
@@ -2883,7 +2903,7 @@ func (store *Store) getApprovalWithTaskTx(ctx context.Context, tx *sql.Tx, appro
 	row := tx.QueryRowContext(ctx, `
 		SELECT
 			a.id, a.task_id, a.run_id, a.status, a.requested_at, a.resolved_at, a.decision_by, a.reason,
-			t.id, t.project_id, t.key, t.title, t.status, t.scope, t.requested_by, t.current_run_id, t.created_at, t.updated_at
+			t.id, t.project_id, t.key, t.title, t.status, t.scope, t.requested_by, t.workspace_id, t.initiative_id, t.companion_id, t.work_kind, t.current_run_id, t.created_at, t.updated_at
 		FROM approvals a
 		JOIN tasks t ON t.id = a.task_id
 		WHERE a.id = ?
@@ -2897,6 +2917,10 @@ func (store *Store) getApprovalWithTaskTx(ctx context.Context, tx *sql.Tx, appro
 	var reason sql.NullString
 	var requestedAt string
 	var currentRunID sql.NullInt64
+	var workspaceID sql.NullInt64
+	var initiativeID sql.NullInt64
+	var companionID sql.NullInt64
+	var workKind sql.NullString
 	var taskCreatedAt string
 	var taskUpdatedAt string
 
@@ -2916,6 +2940,10 @@ func (store *Store) getApprovalWithTaskTx(ctx context.Context, tx *sql.Tx, appro
 		&task.Status,
 		&task.Scope,
 		&task.RequestedBy,
+		&workspaceID,
+		&initiativeID,
+		&companionID,
+		&workKind,
 		&currentRunID,
 		&taskCreatedAt,
 		&taskUpdatedAt,
@@ -2936,6 +2964,10 @@ func (store *Store) getApprovalWithTaskTx(ctx context.Context, tx *sql.Tx, appro
 	approval.DecisionBy = decisionBy.String
 	approval.Reason = reason.String
 
+	task.WorkspaceID = nullableInt64Ptr(workspaceID)
+	task.InitiativeID = nullableInt64Ptr(initiativeID)
+	task.CompanionID = nullableInt64Ptr(companionID)
+	task.WorkKind = stringOrDefault(workKind, "")
 	task.CurrentRunID = nullableInt64Ptr(currentRunID)
 	task.CreatedAt, err = parseTime(taskCreatedAt)
 	if err != nil {
@@ -3364,6 +3396,10 @@ func scanWorkspace(row interface{ Scan(...any) error }) (Workspace, error) {
 func scanTask(row interface{ Scan(...any) error }) (Task, error) {
 	var task Task
 	var currentRunID sql.NullInt64
+	var workspaceID sql.NullInt64
+	var initiativeID sql.NullInt64
+	var companionID sql.NullInt64
+	var workKind sql.NullString
 	var createdAt string
 	var updatedAt string
 	if err := row.Scan(
@@ -3374,6 +3410,10 @@ func scanTask(row interface{ Scan(...any) error }) (Task, error) {
 		&task.Status,
 		&task.Scope,
 		&task.RequestedBy,
+		&workspaceID,
+		&initiativeID,
+		&companionID,
+		&workKind,
 		&currentRunID,
 		&createdAt,
 		&updatedAt,
@@ -3382,6 +3422,10 @@ func scanTask(row interface{ Scan(...any) error }) (Task, error) {
 	}
 
 	var err error
+	task.WorkspaceID = nullableInt64Ptr(workspaceID)
+	task.InitiativeID = nullableInt64Ptr(initiativeID)
+	task.CompanionID = nullableInt64Ptr(companionID)
+	task.WorkKind = stringOrDefault(workKind, "")
 	task.CurrentRunID = nullableInt64Ptr(currentRunID)
 	task.CreatedAt, err = parseTime(createdAt)
 	if err != nil {
