@@ -40,6 +40,12 @@ fi
 if browser_navigate "https://blocked.example%2e/path"; then
     fail "expected browser_navigate to reject blocked.example%2e"
 fi
+if browser_navigate "example.com/path"; then
+    fail "expected browser_navigate to reject scheme-less example.com/path"
+fi
+if browser_server_start --url "//example.com/path"; then
+    fail "expected browser_server_start to reject scheme-relative //example.com/path before launch"
+fi
 [[ "${curl_calls}" -eq 0 ]] || fail "browser_navigate called through to the local server"
 
 if browser_server_start --url "https://blocked.example/path"; then
@@ -67,6 +73,19 @@ for target in \
     'mailto:user@example.com' \
     'ftp://example.com/resource' \
     'custom-scheme://example.com/path'; do
+    if browser_navigate "${target}"; then
+        fail "expected browser_navigate to reject ${target}"
+    fi
+    if browser_server_start --url "${target}"; then
+        fail "expected browser_server_start to reject ${target} before launch"
+    fi
+done
+for target in \
+    'https://10.0.0.1/path' \
+    'https://172.16.0.1/path' \
+    'https://192.168.0.1/path' \
+    'https://[fd00::1]/path' \
+    'https://[fe80::1%25lo]/path'; do
     if browser_navigate "${target}"; then
         fail "expected browser_navigate to reject ${target}"
     fi

@@ -117,7 +117,37 @@ _ba_ipv4_is_loopback() {
     [[ $((10#${a})) -eq 127 ]]
 }
 
-_ba_ipv4_alias_is_loopback() {
+_ba_ipv4_is_private_service() {
+    local host="${1:-}" a b c d
+    [[ "${host}" =~ ^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$ ]] || return 1
+
+    a="${BASH_REMATCH[1]}"
+    b="${BASH_REMATCH[2]}"
+    c="${BASH_REMATCH[3]}"
+    d="${BASH_REMATCH[4]}"
+    [[ $((10#${a})) -le 255 && $((10#${b})) -le 255 && $((10#${c})) -le 255 && $((10#${d})) -le 255 ]] || return 1
+    case "${a}.${b}" in
+        10.*|192.168)
+            return 0
+            ;;
+        172.1[6-9]|172.2[0-9]|172.3[0-1])
+            return 0
+            ;;
+    esac
+
+    return 1
+}
+
+_ba_ipv4_value_is_local_service() {
+    local value="${1:-}" a b
+    [[ -n "${value}" ]] || return 1
+
+    a=$(( (10#${value} >> 24) & 255 ))
+    b=$(( (10#${value} >> 16) & 255 ))
+    (( a == 127 || a == 10 || (a == 192 && b == 168) || (a == 172 && b >= 16 && b <= 31) ))
+}
+
+_ba_ipv4_alias_is_local_service() {
     local host="${1:-}" first second third fourth value
     local IFS='.'
     local -a parts=()
@@ -128,20 +158,22 @@ _ba_ipv4_alias_is_loopback() {
         1)
             value="$(_ba_parse_numeric_host_part "${parts[0]}")" || return 1
             (( value >= 0 && value <= 4294967295 )) || return 1
-            [[ $(( (10#${value} >> 24) & 255 )) -eq 127 ]]
+            _ba_ipv4_value_is_local_service "${value}"
             ;;
         2)
             first="$(_ba_parse_numeric_host_part "${parts[0]}")" || return 1
             second="$(_ba_parse_numeric_host_part "${parts[1]}")" || return 1
             [[ $((10#${first})) -le 255 && $((10#${second})) -le 16777215 ]] || return 1
-            [[ $((10#${first})) -eq 127 ]]
+            value=$(( (10#${first} << 24) | 10#${second} ))
+            _ba_ipv4_value_is_local_service "${value}"
             ;;
         3)
             first="$(_ba_parse_numeric_host_part "${parts[0]}")" || return 1
             second="$(_ba_parse_numeric_host_part "${parts[1]}")" || return 1
             third="$(_ba_parse_numeric_host_part "${parts[2]}")" || return 1
             [[ $((10#${first})) -le 255 && $((10#${second})) -le 255 && $((10#${third})) -le 65535 ]] || return 1
-            [[ $((10#${first})) -eq 127 ]]
+            value=$(( (10#${first} << 24) | (10#${second} << 16) | 10#${third} ))
+            _ba_ipv4_value_is_local_service "${value}"
             ;;
         4)
             first="$(_ba_parse_numeric_host_part "${parts[0]}")" || return 1
@@ -149,7 +181,8 @@ _ba_ipv4_alias_is_loopback() {
             third="$(_ba_parse_numeric_host_part "${parts[2]}")" || return 1
             fourth="$(_ba_parse_numeric_host_part "${parts[3]}")" || return 1
             [[ $((10#${first})) -le 255 && $((10#${second})) -le 255 && $((10#${third})) -le 255 && $((10#${fourth})) -le 255 ]] || return 1
-            [[ $((10#${first})) -eq 127 ]]
+            value=$(( (10#${first} << 24) | (10#${second} << 16) | (10#${third} << 8) | 10#${fourth} ))
+            _ba_ipv4_value_is_local_service "${value}"
             ;;
         *)
             return 1
@@ -157,8 +190,26 @@ _ba_ipv4_alias_is_loopback() {
     esac
 }
 
-_ba_ipv4_mapped_ipv6_is_loopback() {
-    local host="${1:-}" tail hi lo v4 a
+_ba_ipv6_is_private_service() {
+    local host="${1:-}" normalized
+    [[ -n "${host}" ]] || return 1
+
+    normalized="$(_ba_normalize_host_for_matching "${host}")"
+    if [[ "${normalized}" == *:* ]]; then
+        normalized="${normalized%%%*}"
+    fi
+
+    case "${normalized}" in
+        ::1|fd*|fe8*|fe9*|fea*|feb*)
+            return 0
+            ;;
+    esac
+
+    return 1
+}
+
+_ba_ipv4_mapped_ipv6_is_local_service() {
+    local host="${1:-}" tail hi lo v4
     [[ -n "${host}" ]] || return 1
 
     host="${host,,}"
@@ -166,6 +217,10 @@ _ba_ipv4_mapped_ipv6_is_loopback() {
     [[ "${host}" == ::ffff:* ]] || return 1
 
     tail="${host#::ffff:}"
+    if _ba_ipv4_is_private_service "${tail}"; then
+        return 0
+    fi
+
     if _ba_ipv4_is_loopback "${tail}"; then
         return 0
     fi
@@ -174,8 +229,7 @@ _ba_ipv4_mapped_ipv6_is_loopback() {
         hi=$((16#${BASH_REMATCH[1]}))
         lo=$((16#${BASH_REMATCH[2]}))
         v4=$(( (hi << 16) | lo ))
-        a=$(( (v4 >> 24) & 255 ))
-        [[ "${a}" -eq 127 ]]
+        _ba_ipv4_value_is_local_service "${v4}"
         return
     fi
 
@@ -197,11 +251,19 @@ _ba_host_is_local_service() {
             ;;
     esac
 
-    if _ba_ipv4_alias_is_loopback "${normalized}"; then
+    if _ba_ipv4_is_private_service "${normalized}"; then
         return 0
     fi
 
-    if _ba_ipv4_mapped_ipv6_is_loopback "${normalized}"; then
+    if _ba_ipv4_alias_is_local_service "${normalized}"; then
+        return 0
+    fi
+
+    if _ba_ipv6_is_private_service "${normalized}"; then
+        return 0
+    fi
+
+    if _ba_ipv4_mapped_ipv6_is_local_service "${normalized}"; then
         return 0
     fi
 
@@ -214,7 +276,7 @@ browser_request_domain_access() {
 
     scheme="$(_ba_target_scheme "${target}" || true)"
     case "${scheme}" in
-        ""|http|https|data|about)
+        http|https|data|about)
             ;;
         *)
             return 1
@@ -251,6 +313,7 @@ browser_request_domain_access() {
 
     return 0
 }
+
 
 _ba_browser_runtime_state() {
     local pid="" port=""
