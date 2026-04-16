@@ -223,6 +223,72 @@ func TestExecuteNextQueuedRejectsShadowModeMutation(t *testing.T) {
 	}
 }
 
+func TestExecuteNextQueuedFailsClosedOnEmptyRunStatus(t *testing.T) {
+	ctx := context.Background()
+	store := openJobStore(t)
+	defer store.Close()
+
+	t.Setenv("ODIN_CODEX_DRIVER", writeConfigurableCodexDriver(t))
+	t.Setenv("ODIN_CODEX_DRIVER_RUN_RESPONSE", `{"status":"","output":"ignored"}`)
+	registry := writeRegistry(t)
+	service := Service{
+		Store:          store,
+		Registry:       registry,
+		Executors:      router.DefaultCatalog(),
+		ExecutorConfig: mustLoadExecutorConfig(t),
+		Transitions:    projects.Service{Store: store},
+		Leases: leases.Manager{
+			Store:        store,
+			Git:          &jobTestGit{},
+			WorktreeRoot: t.TempDir(),
+		},
+		Now: func() time.Time {
+			return time.Date(2026, 4, 9, 12, 0, 0, 0, time.UTC)
+		},
+	}
+
+	task, err := service.CreateTaskFromAct(ctx, scope.Resolution{
+		Kind:       scope.ScopeProject,
+		ProjectKey: "alpha",
+	}, "Malformed run status")
+	if err != nil {
+		t.Fatalf("CreateTaskFromAct() error = %v", err)
+	}
+
+	project, err := store.GetProjectByKey(ctx, "alpha")
+	if err != nil {
+		t.Fatalf("GetProjectByKey(alpha) error = %v", err)
+	}
+	if _, err := service.Transitions.SetTransitionState(ctx, projects.TransitionStateInput{
+		ProjectID:   project.ID,
+		Actor:       projects.TransitionControllerOdinOS,
+		TargetState: projects.TransitionStateCutover,
+		ChangedBy:   "test",
+	}); err != nil {
+		t.Fatalf("SetTransitionState(cutover) error = %v", err)
+	}
+
+	err = service.ExecuteNextQueued(ctx)
+	if err == nil {
+		t.Fatal("ExecuteNextQueued() error = nil, want invalid run status failure")
+	}
+
+	gotTask, err := store.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
+	}
+	if gotTask.Status != "failed" {
+		t.Fatalf("GetTask().Status = %q, want failed", gotTask.Status)
+	}
+	run, err := latestRunForTask(ctx, store, task.ID)
+	if err != nil {
+		t.Fatalf("latestRunForTask() error = %v", err)
+	}
+	if run.Status != "failed" {
+		t.Fatalf("Run.Status = %q, want failed", run.Status)
+	}
+}
+
 type jobTestGit struct{}
 
 func (jobTestGit) BranchExists(context.Context, string, string) (bool, error) { return false, nil }
@@ -244,6 +310,40 @@ func codexDriverPath(t *testing.T) string {
 	t.Helper()
 
 	return filepath.Clean(filepath.Join("..", "..", "..", "scripts", "drivers", "codex-headless.sh"))
+}
+
+func writeConfigurableCodexDriver(t *testing.T) string {
+	t.Helper()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "codex-driver.sh")
+	script := `#!/usr/bin/env bash
+set -euo pipefail
+payload="$(cat)"
+if [[ -n "${ODIN_CODEX_DRIVER_TRACE:-}" ]]; then
+	printf '%s\n' "$payload" >"${ODIN_CODEX_DRIVER_TRACE}"
+fi
+PAYLOAD="$payload" python3 - <<'PY'
+import json
+import os
+
+request = json.loads(os.environ["PAYLOAD"])
+action = request.get("action")
+health = os.environ.get("ODIN_CODEX_DRIVER_HEALTH_RESPONSE", '{"status":"healthy","details":"fixture codex driver healthy"}')
+run = os.environ.get("ODIN_CODEX_DRIVER_RUN_RESPONSE", '{"status":"completed","output":"fixture codex driver"}')
+
+if action == "health":
+    print(health)
+elif action == "run":
+    print(run)
+else:
+    print(json.dumps({"status":"unavailable","details":f"unknown action: {action}"}))
+PY
+`
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatalf("WriteFile(driver) error = %v", err)
+	}
+	return path
 }
 
 func latestRunForTask(ctx context.Context, store *sqlite.Store, taskID int64) (sqlite.Run, error) {

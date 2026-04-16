@@ -223,9 +223,9 @@ func (service Service) ExecuteNextQueued(ctx context.Context) error {
 		return finishFailure(err)
 	}
 
-	runStatus := result.Status
+	runStatus := strings.TrimSpace(result.Status)
 	if runStatus == "" {
-		runStatus = "completed"
+		return finishFailure(fmt.Errorf("executor %q returned empty run status", decision.ExecutorKey))
 	}
 	taskStatus := "completed"
 	if runStatus != "completed" {

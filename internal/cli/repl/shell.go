@@ -281,11 +281,11 @@ func (shell *Shell) codexExecutor(ctx context.Context) (contract.Executor, error
 	if err != nil {
 		return nil, err
 	}
-	if health.Status == contract.HealthStatusUnavailable {
+	if health.Status != contract.HealthStatusHealthy {
 		if health.Details != "" {
-			return nil, fmt.Errorf("codex_headless is unavailable: %s", health.Details)
+			return nil, fmt.Errorf("codex_headless is not healthy: %s (%s)", health.Status, health.Details)
 		}
-		return nil, fmt.Errorf("codex_headless is unavailable")
+		return nil, fmt.Errorf("codex_headless is not healthy: %s", health.Status)
 	}
 
 	return executor, nil

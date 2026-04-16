@@ -75,9 +75,13 @@ func (headlessExecutor) Health(ctx context.Context) (contract.HealthReport, erro
 		}, nil
 	}
 
-	status := contract.HealthStatus(response.Status)
-	if status == "" {
-		status = contract.HealthStatusUnavailable
+	status, ok := validateHealthStatus(response.Status)
+	if !ok {
+		return contract.HealthReport{
+			Status:    contract.HealthStatusUnavailable,
+			Details:   fmt.Sprintf("invalid health status %q", response.Status),
+			CheckedAt: time.Now().UTC(),
+		}, nil
 	}
 	return contract.HealthReport{
 		Status:    status,
@@ -130,11 +134,15 @@ func (headlessExecutor) RunTask(ctx context.Context, spec contract.TaskSpec) (co
 	if err != nil {
 		return contract.ExecutionResult{}, err
 	}
+	runStatus, err := validateRunStatus(response.Status)
+	if err != nil {
+		return contract.ExecutionResult{}, err
+	}
 
 	handle := contract.TaskHandle{
 		ExecutorKey: executorKey,
 		ExternalID:  spec.ID,
-		Status:      response.Status,
+		Status:      runStatus,
 	}
 	if response.Handle != nil {
 		if response.Handle.ExecutorKey != "" {
@@ -143,23 +151,33 @@ func (headlessExecutor) RunTask(ctx context.Context, spec contract.TaskSpec) (co
 		if response.Handle.ExternalID != "" {
 			handle.ExternalID = response.Handle.ExternalID
 		}
-		if response.Handle.Status != "" {
-			handle.Status = response.Handle.Status
-		}
-	}
-	if handle.Status == "" {
-		handle.Status = "completed"
-	}
-	if response.Status == "" {
-		response.Status = "completed"
 	}
 
 	return contract.ExecutionResult{
 		Handle:   handle,
-		Status:   response.Status,
+		Status:   runStatus,
 		Output:   response.Output,
 		Metadata: response.Metadata,
 	}, nil
+}
+
+func validateHealthStatus(status string) (contract.HealthStatus, bool) {
+	switch contract.HealthStatus(status) {
+	case contract.HealthStatusHealthy, contract.HealthStatusDegraded, contract.HealthStatusUnavailable, contract.HealthStatusUnknown:
+		return contract.HealthStatus(status), true
+	default:
+		return contract.HealthStatusUnavailable, false
+	}
+}
+
+func validateRunStatus(status string) (string, error) {
+	normalized := strings.TrimSpace(status)
+	switch normalized {
+	case "completed", "failed", "interrupted":
+		return normalized, nil
+	default:
+		return "", fmt.Errorf("invalid run status %q", status)
+	}
 }
 
 func invokeDriver(ctx context.Context, request driverRequest) (driverResponse, error) {

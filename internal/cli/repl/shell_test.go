@@ -153,6 +153,56 @@ func TestAskModeReportsUnavailableWhenCodexDriverIsMissing(t *testing.T) {
 	}
 }
 
+func TestAskModeRejectsDegradedCodexHealth(t *testing.T) {
+	base := newTestEnvironment(t)
+	env := Environment{
+		Store:               base.Store,
+		Registry:            base.Registry,
+		RegistryDiagnostics: base.RegistryDiagnostics,
+		SessionStore:        base.SessionStore,
+		Executors:           router.DefaultCatalog(),
+		ExecutorConfig:      mustLoadExecutorConfig(t),
+	}
+	originalDriver := os.Getenv("ODIN_CODEX_DRIVER")
+	originalHealth := os.Getenv("ODIN_CODEX_DRIVER_HEALTH_RESPONSE")
+	driverPath := writeConfigurableCodexDriver(t)
+	if err := os.Setenv("ODIN_CODEX_DRIVER", driverPath); err != nil {
+		t.Fatalf("Setenv(driver) error = %v", err)
+	}
+	if err := os.Setenv("ODIN_CODEX_DRIVER_HEALTH_RESPONSE", `{"status":"degraded","details":"maintenance window"}`); err != nil {
+		t.Fatalf("Setenv(health response) error = %v", err)
+	}
+	t.Cleanup(func() {
+		if originalDriver == "" {
+			_ = os.Unsetenv("ODIN_CODEX_DRIVER")
+		} else {
+			_ = os.Setenv("ODIN_CODEX_DRIVER", originalDriver)
+		}
+		if originalHealth == "" {
+			_ = os.Unsetenv("ODIN_CODEX_DRIVER_HEALTH_RESPONSE")
+		} else {
+			_ = os.Setenv("ODIN_CODEX_DRIVER_HEALTH_RESPONSE", originalHealth)
+		}
+	})
+
+	shell, err := New(env)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	var output bytes.Buffer
+	if err := shell.HandleLine(context.Background(), "what can you do?", &output); err != nil {
+		t.Fatalf("HandleLine() error = %v", err)
+	}
+
+	if !strings.Contains(strings.ToLower(output.String()), "not healthy") {
+		t.Fatalf("HandleLine() output = %q, want not healthy error", output.String())
+	}
+	if strings.Contains(output.String(), "fixture codex driver") {
+		t.Fatalf("HandleLine() output = %q, want no codex response routing", output.String())
+	}
+}
+
 func TestActModeCreatesTaskInProjectScope(t *testing.T) {
 	t.Parallel()
 
@@ -583,4 +633,38 @@ func hasTransitionEvent(events []runtimeevents.Record, want runtimeevents.Type) 
 		}
 	}
 	return false
+}
+
+func writeConfigurableCodexDriver(t *testing.T) string {
+	t.Helper()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "codex-driver.sh")
+	script := `#!/usr/bin/env bash
+set -euo pipefail
+payload="$(cat)"
+if [[ -n "${ODIN_CODEX_DRIVER_TRACE:-}" ]]; then
+	printf '%s\n' "$payload" >"${ODIN_CODEX_DRIVER_TRACE}"
+fi
+PAYLOAD="$payload" python3 - <<'PY'
+import json
+import os
+
+request = json.loads(os.environ["PAYLOAD"])
+action = request.get("action")
+health = os.environ.get("ODIN_CODEX_DRIVER_HEALTH_RESPONSE", '{"status":"healthy","details":"fixture codex driver healthy"}')
+run = os.environ.get("ODIN_CODEX_DRIVER_RUN_RESPONSE", '{"status":"completed","output":"fixture codex driver"}')
+
+if action == "health":
+    print(health)
+elif action == "run":
+    print(run)
+else:
+    print(json.dumps({"status":"unavailable","details":f"unknown action: {action}"}))
+PY
+`
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatalf("WriteFile(driver) error = %v", err)
+	}
+	return path
 }
