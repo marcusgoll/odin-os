@@ -36,7 +36,9 @@ func (service Service) RunStartupRecovery(ctx context.Context) (StartupResult, e
 		if err != nil {
 			return StartupResult{}, err
 		}
-		requeueable := task.Status != "blocked" && pendingApprovals == 0
+		terminalTask := task.Status == "completed" || task.Status == "failed"
+		requeueable := !terminalTask && pendingApprovals == 0
+		needsApprovalRepair := pendingApprovals > 0 && task.Status != "blocked"
 
 		recoveryRecord, err := service.Store.StartRecovery(ctx, sqlite.StartRecoveryParams{
 			RunID:       &run.ID,
@@ -60,7 +62,7 @@ func (service Service) RunStartupRecovery(ctx context.Context) (StartupResult, e
 			if _, err := service.workItemService().Requeue(ctx, task.ID); err != nil {
 				return StartupResult{}, err
 			}
-		} else if pendingApprovals > 0 && task.Status != "blocked" {
+		} else if needsApprovalRepair {
 			// Repair legacy or partially written approval-gated state so blocked-task
 			// projections and resume state agree with the pending approval.
 			if _, err := service.workItemService().Block(ctx, task.ID); err != nil {
@@ -76,7 +78,15 @@ func (service Service) RunStartupRecovery(ctx context.Context) (StartupResult, e
 			"Resume the queued task when the runtime is healthy",
 		}
 		recoveryDescription := "interrupted running run, requeued task, and created restart wake packet"
-		if !requeueable {
+		if terminalTask {
+			blockingReason = "task was already terminal before startup recovery"
+			openTaskSummary = fmt.Sprintf("task remains %s", task.Status)
+			nextSteps = []string{
+				"Review why a terminal task still had a running run",
+				"Confirm no further task action is required",
+			}
+			recoveryDescription = "interrupted stale running run for terminal task and created restart wake packet"
+		} else if !requeueable {
 			blockingReason = "pending approval before restart"
 			openTaskSummary = "task remains blocked pending approval"
 			approvalSummary = pendingApprovalSummary(pendingApprovals)

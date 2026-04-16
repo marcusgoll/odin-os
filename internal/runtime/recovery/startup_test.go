@@ -428,3 +428,201 @@ func TestRunStartupRecoveryToleratesDuplicateRunningRowsForOneTask(t *testing.T)
 		t.Fatalf("GetRun(runTwo).Status = %q, want interrupted", gotRunTwo.Status)
 	}
 }
+
+func TestRunStartupRecoveryRequeuesBlockedTasksWithoutPendingApprovals(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	now := time.Date(2026, 4, 10, 2, 0, 0, 0, time.UTC)
+
+	store, err := sqlite.Open(filepath.Join(t.TempDir(), "odin.db"))
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer store.Close()
+	store.Now = func() time.Time { return now }
+
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
+	}
+
+	project, err := store.CreateProject(ctx, sqlite.CreateProjectParams{
+		Key:           "alpha",
+		Name:          "Alpha",
+		Scope:         "project",
+		GitRoot:       "/tmp/alpha",
+		DefaultBranch: "main",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+
+	task, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "blocked-no-approval",
+		Title:       "Repair blocked state",
+		Status:      "blocked",
+		Scope:       "project",
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+
+	run, err := store.StartRun(ctx, sqlite.StartRunParams{
+		TaskID:   task.ID,
+		Executor: "codex_headless",
+		Attempt:  1,
+		Status:   "running",
+	})
+	if err != nil {
+		t.Fatalf("StartRun() error = %v", err)
+	}
+
+	service := recovery.Service{
+		Store: store,
+		Now:   func() time.Time { return now },
+	}
+
+	result, err := service.RunStartupRecovery(ctx)
+	if err != nil {
+		t.Fatalf("RunStartupRecovery() error = %v", err)
+	}
+	if result.RecoveredRuns != 1 {
+		t.Fatalf("RecoveredRuns = %d, want 1", result.RecoveredRuns)
+	}
+
+	gotTask, err := store.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
+	}
+	if gotTask.Status != "queued" {
+		t.Fatalf("GetTask().Status = %q, want queued", gotTask.Status)
+	}
+
+	gotRun, err := store.GetRun(ctx, run.ID)
+	if err != nil {
+		t.Fatalf("GetRun() error = %v", err)
+	}
+	if gotRun.Status != "interrupted" {
+		t.Fatalf("GetRun().Status = %q, want interrupted", gotRun.Status)
+	}
+}
+
+func TestRunStartupRecoverySkipsTerminalTaskStateAndContinues(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	now := time.Date(2026, 4, 10, 3, 0, 0, 0, time.UTC)
+
+	store, err := sqlite.Open(filepath.Join(t.TempDir(), "odin.db"))
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer store.Close()
+	store.Now = func() time.Time { return now }
+
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
+	}
+
+	project, err := store.CreateProject(ctx, sqlite.CreateProjectParams{
+		Key:           "alpha",
+		Name:          "Alpha",
+		Scope:         "project",
+		GitRoot:       "/tmp/alpha",
+		DefaultBranch: "main",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+
+	terminalTask, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "terminal-task",
+		Title:       "Already complete",
+		Status:      "completed",
+		Scope:       "project",
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask(terminal) error = %v", err)
+	}
+	terminalRun, err := store.StartRun(ctx, sqlite.StartRunParams{
+		TaskID:   terminalTask.ID,
+		Executor: "codex_headless",
+		Attempt:  1,
+		Status:   "running",
+	})
+	if err != nil {
+		t.Fatalf("StartRun(terminal) error = %v", err)
+	}
+
+	activeTask, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "active-task",
+		Title:       "Resume active task",
+		Status:      "running",
+		Scope:       "project",
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask(active) error = %v", err)
+	}
+	activeRun, err := store.StartRun(ctx, sqlite.StartRunParams{
+		TaskID:   activeTask.ID,
+		Executor: "codex_headless",
+		Attempt:  1,
+		Status:   "running",
+	})
+	if err != nil {
+		t.Fatalf("StartRun(active) error = %v", err)
+	}
+
+	service := recovery.Service{
+		Store: store,
+		Now:   func() time.Time { return now },
+	}
+
+	result, err := service.RunStartupRecovery(ctx)
+	if err != nil {
+		t.Fatalf("RunStartupRecovery() error = %v", err)
+	}
+	if result.RecoveredRuns != 2 {
+		t.Fatalf("RecoveredRuns = %d, want 2", result.RecoveredRuns)
+	}
+
+	gotTerminalTask, err := store.GetTask(ctx, terminalTask.ID)
+	if err != nil {
+		t.Fatalf("GetTask(terminal) error = %v", err)
+	}
+	if gotTerminalTask.Status != "completed" {
+		t.Fatalf("GetTask(terminal).Status = %q, want completed", gotTerminalTask.Status)
+	}
+
+	gotActiveTask, err := store.GetTask(ctx, activeTask.ID)
+	if err != nil {
+		t.Fatalf("GetTask(active) error = %v", err)
+	}
+	if gotActiveTask.Status != "queued" {
+		t.Fatalf("GetTask(active).Status = %q, want queued", gotActiveTask.Status)
+	}
+
+	gotTerminalRun, err := store.GetRun(ctx, terminalRun.ID)
+	if err != nil {
+		t.Fatalf("GetRun(terminal) error = %v", err)
+	}
+	if gotTerminalRun.Status != "interrupted" {
+		t.Fatalf("GetRun(terminal).Status = %q, want interrupted", gotTerminalRun.Status)
+	}
+
+	gotActiveRun, err := store.GetRun(ctx, activeRun.ID)
+	if err != nil {
+		t.Fatalf("GetRun(active) error = %v", err)
+	}
+	if gotActiveRun.Status != "interrupted" {
+		t.Fatalf("GetRun(active).Status = %q, want interrupted", gotActiveRun.Status)
+	}
+}
