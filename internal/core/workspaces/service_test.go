@@ -265,6 +265,65 @@ func TestWorkspaceServiceBootstrapsDefaultWorkspaceRepairsMissingDefaultCompanio
 	}
 }
 
+func TestWorkspaceServiceBootstrapDefaultWorkspacePreservesExistingDefaultCompanion(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openWorkspaceServiceStore(t)
+	defer store.Close()
+
+	workspace, err := store.GetWorkspaceByKey(ctx, DefaultWorkspaceKey)
+	if err != nil {
+		t.Fatalf("GetWorkspaceByKey(default) error = %v", err)
+	}
+
+	original, err := store.GetCompanionByKey(ctx, workspace.ID, workspace.DefaultCompanionKey)
+	if err != nil {
+		t.Fatalf("GetCompanionByKey(default) error = %v", err)
+	}
+
+	if _, err := store.DB().ExecContext(ctx, `
+		UPDATE companions
+		SET title = ?, charter = ?, tool_policy_json = ?, memory_policy_json = ?, planning_policy_json = ?
+		WHERE workspace_id = ? AND key = ?
+	`, "Custom Assistant", "Custom charter", `{"allow":["merge_to_main"]}`, `{"mode":"global"}`, `{"mode":"planning"}`, workspace.ID, workspace.DefaultCompanionKey); err != nil {
+		t.Fatalf("update default companion error = %v", err)
+	}
+
+	service := Service{Store: store}
+
+	bootstrapped, err := service.BootstrapDefaultWorkspace(ctx)
+	if err != nil {
+		t.Fatalf("BootstrapDefaultWorkspace() error = %v", err)
+	}
+	if bootstrapped.ID != workspace.ID {
+		t.Fatalf("BootstrapDefaultWorkspace().ID = %d, want %d", bootstrapped.ID, workspace.ID)
+	}
+
+	after, err := store.GetCompanionByKey(ctx, workspace.ID, workspace.DefaultCompanionKey)
+	if err != nil {
+		t.Fatalf("GetCompanionByKey(default after bootstrap) error = %v", err)
+	}
+	if after.Title != "Custom Assistant" {
+		t.Fatalf("BootstrapDefaultWorkspace() overwrote title = %q, want %q", after.Title, "Custom Assistant")
+	}
+	if after.Charter != "Custom charter" {
+		t.Fatalf("BootstrapDefaultWorkspace() overwrote charter = %q, want %q", after.Charter, "Custom charter")
+	}
+	if after.ToolPolicyJSON != `{"allow":["merge_to_main"]}` {
+		t.Fatalf("BootstrapDefaultWorkspace() overwrote tool policy = %q, want %q", after.ToolPolicyJSON, `{"allow":["merge_to_main"]}`)
+	}
+	if after.MemoryPolicyJSON != `{"mode":"global"}` {
+		t.Fatalf("BootstrapDefaultWorkspace() overwrote memory policy = %q, want %q", after.MemoryPolicyJSON, `{"mode":"global"}`)
+	}
+	if after.PlanningPolicyJSON != `{"mode":"planning"}` {
+		t.Fatalf("BootstrapDefaultWorkspace() overwrote planning policy = %q, want %q", after.PlanningPolicyJSON, `{"mode":"planning"}`)
+	}
+	if after.Kind != original.Kind {
+		t.Fatalf("BootstrapDefaultWorkspace() overwrote kind = %q, want %q", after.Kind, original.Kind)
+	}
+}
+
 func openWorkspaceServiceStore(t *testing.T) *sqlite.Store {
 	t.Helper()
 

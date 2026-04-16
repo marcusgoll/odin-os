@@ -152,7 +152,15 @@ func (service Service) ensureDefaultWorkspacePolicy(ctx context.Context, workspa
 }
 
 func (service Service) ensureDefaultCompanion(ctx context.Context, workspaceID int64, key string) error {
-	_, err := service.Store.UpsertCompanion(ctx, sqlite.UpsertCompanionParams{
+	_, err := service.Store.GetCompanionByKey(ctx, workspaceID, key)
+	if err == nil {
+		return nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+
+	_, err = service.Store.UpsertCompanion(ctx, sqlite.UpsertCompanionParams{
 		WorkspaceID:         workspaceID,
 		Key:                 key,
 		Title:               DefaultWorkspaceCompanionTitle,
