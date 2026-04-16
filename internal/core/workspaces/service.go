@@ -21,6 +21,9 @@ func (service Service) BootstrapDefaultWorkspace(ctx context.Context) (Workspace
 
 	current, err := service.Store.GetWorkspaceByKey(ctx, DefaultWorkspaceKey)
 	if err == nil {
+		if err := service.ensureDefaultWorkspacePolicy(ctx, current.ID); err != nil {
+			return Workspace{}, err
+		}
 		return toDomainWorkspace(current), nil
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
@@ -39,6 +42,9 @@ func (service Service) BootstrapDefaultWorkspace(ctx context.Context) (Workspace
 		if isWorkspaceKeyConflict(err) {
 			current, reloadErr := service.Store.GetWorkspaceByKey(ctx, DefaultWorkspaceKey)
 			if reloadErr == nil {
+				if repairErr := service.ensureDefaultWorkspacePolicy(ctx, current.ID); repairErr != nil {
+					return Workspace{}, repairErr
+				}
 				return toDomainWorkspace(current), nil
 			}
 			return Workspace{}, reloadErr
@@ -113,4 +119,24 @@ func toDomainWorkspace(record sqlite.Workspace) Workspace {
 
 func isWorkspaceKeyConflict(err error) bool {
 	return strings.Contains(err.Error(), "UNIQUE constraint failed") && strings.Contains(err.Error(), "workspaces.key")
+}
+
+func (service Service) ensureDefaultWorkspacePolicy(ctx context.Context, workspaceID int64) error {
+	var policyCount int64
+	if err := service.Store.DB().QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM workspace_policies
+		WHERE workspace_id = ?
+	`, workspaceID).Scan(&policyCount); err != nil {
+		return err
+	}
+	if policyCount > 0 {
+		return nil
+	}
+
+	_, err := service.Store.UpdateWorkspacePolicy(ctx, sqlite.UpdateWorkspacePolicyParams{
+		WorkspaceID: workspaceID,
+		PolicyJSON:  string(DefaultWorkspacePolicy),
+	})
+	return err
 }

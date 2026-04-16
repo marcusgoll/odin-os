@@ -113,6 +113,18 @@ func TestWorkspaceServiceBootstrapsAndRepairsWorkspaceWithoutPolicyRow(t *testin
 		t.Fatalf("BootstrapDefaultWorkspace().Policy = %q, want %q", workspace.Policy, DefaultWorkspacePolicy)
 	}
 
+	var policyCount int
+	if err := store.DB().QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM workspace_policies
+		WHERE workspace_id = ?
+	`, workspace.ID).Scan(&policyCount); err != nil {
+		t.Fatalf("policy row count query error = %v", err)
+	}
+	if policyCount != 1 {
+		t.Fatalf("policy row count = %d, want 1", policyCount)
+	}
+
 	updatedPolicy := WorkspacePolicy(`{"allow":["branch_proposal"]}`)
 	updated, err := service.UpdateWorkspacePolicy(ctx, DefaultWorkspaceKey, updatedPolicy)
 	if err != nil {
