@@ -53,11 +53,21 @@ func BuiltinDefinitions() map[string]ToolDefinition {
 			Schema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
+					"action": map[string]any{
+						"type":        "string",
+						"enum":        []string{"health", "launch", "snapshot", "screenshot", "stop"},
+						"description": "Bounded browser session action.",
+					},
 					"url": map[string]any{
 						"type":        "string",
 						"description": "Optional URL to inspect in the browser session.",
 					},
+					"path": map[string]any{
+						"type":        "string",
+						"description": "Optional filesystem path for session artifacts.",
+					},
 				},
+				"required":             []string{"action"},
 				"additionalProperties": false,
 			},
 			Invoke: func(input map[string]string) (StructuredResult, error) {
@@ -77,8 +87,17 @@ func BuiltinDefinitions() map[string]ToolDefinition {
 			BudgetCost: 2,
 			SourceRef:  "builtin://plaid_transfer_application",
 			Schema: map[string]any{
-				"type":                 "object",
-				"properties":           map[string]any{},
+				"type": "object",
+				"properties": map[string]any{
+					"application_url": map[string]any{
+						"type":        "string",
+						"description": "Optional Plaid application URL to open.",
+					},
+					"path": map[string]any{
+						"type":        "string",
+						"description": "Optional filesystem path for workflow artifacts.",
+					},
+				},
 				"additionalProperties": false,
 			},
 			Invoke: func(input map[string]string) (StructuredResult, error) {
