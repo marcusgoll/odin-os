@@ -153,6 +153,75 @@ func TestPlaidTransferApplicationScript(t *testing.T) {
 	})
 }
 
+func TestPlaidTransferApplicationArtifacts(t *testing.T) {
+	repoRoot := projectRoot(t)
+	scriptPath := filepath.Join(repoRoot, "scripts", "drivers", "plaid-transfer-application.sh")
+	assertDriverScriptShape(t, scriptPath)
+
+	const applicationURL = "https://dashboard.plaid.com/transfer/application"
+
+	cases := []struct {
+		name           string
+		snapshot       string
+		wantState      string
+		wantSummary    string
+		wantNextAction string
+	}{
+		{name: "login", snapshot: "Plaid dashboard\nSign in to continue", wantState: "ready_for_login", wantSummary: "Plaid transfer workflow requires login", wantNextAction: "sign in to Plaid"},
+		{name: "mfa", snapshot: "Enter the verification code from your authenticator app", wantState: "blocked_on_mfa", wantSummary: "Plaid transfer workflow is blocked on MFA", wantNextAction: "complete MFA challenge"},
+		{name: "review", snapshot: "Your Transfer application has been submitted for review", wantState: "submitted_for_review", wantSummary: "Plaid transfer application is under review", wantNextAction: "wait for review"},
+		{name: "enabled", snapshot: "Transfer is already enabled for this account", wantState: "already_enabled", wantSummary: "Plaid transfer application is already enabled", wantNextAction: "no action needed"},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			screenshotPath := filepath.Join(t.TempDir(), "plaid.png")
+
+			stdout, callsLog, markerPath := runBrowserDriverScript(t, repoRoot, scriptPath, "plaid-transfer-application.sh", `{"tool_key":"plaid_transfer_application","input":{"action":"inspect","application_url":"https://dashboard.plaid.com/transfer/application"}}`, map[string]string{
+				"ODIN_BROWSER_STUB_SNAPSHOT":        tc.snapshot,
+				"ODIN_BROWSER_STUB_SCREENSHOT_PATH": screenshotPath,
+			})
+			assertStructuredDriverOutput(t, stdout, "plaid_transfer_application", "completed")
+
+			var payload map[string]any
+			if err := json.Unmarshal([]byte(stdout), &payload); err != nil {
+				t.Fatalf("driver output is not valid json: %v\nstdout=%s", err, stdout)
+			}
+			artifacts, ok := payload["artifacts"].(map[string]any)
+			if !ok || len(artifacts) == 0 {
+				t.Fatalf("artifacts = %#v, want non-empty object", payload["artifacts"])
+			}
+
+			assertField := func(key, want string) {
+				t.Helper()
+				if got := stringValue(payload[key]); got != want {
+					t.Fatalf("%s = %q, want %q", key, got, want)
+				}
+				if got := stringValue(artifacts[key]); got != want {
+					t.Fatalf("artifacts[%s] = %q, want %q", key, got, want)
+				}
+			}
+
+			assertField("session_state", tc.wantState)
+			assertField("current_url", applicationURL)
+			assertField("screenshot_path", screenshotPath)
+			assertField("evidence", tc.snapshot)
+			assertField("next_action", tc.wantNextAction)
+
+			if got := stringValue(payload["summary"]); got != tc.wantSummary {
+				t.Fatalf("summary = %q, want %q", got, tc.wantSummary)
+			}
+
+			assertFileContains(t, markerPath, "sourced repo-local browser-access.sh")
+			assertFileContains(t, callsLog, "request:https://dashboard.plaid.com/transfer/application")
+			assertFileContains(t, callsLog, "start:")
+			assertFileContains(t, callsLog, applicationURL)
+			assertFileContains(t, callsLog, "snapshot:")
+			assertFileContains(t, callsLog, "screenshot:")
+		})
+	}
+}
 func assertDriverScriptShape(t *testing.T, scriptPath string) {
 	t.Helper()
 
