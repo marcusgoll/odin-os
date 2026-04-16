@@ -34,6 +34,30 @@ printf '{"status":"completed","tool_key":"huginn_browser_session","summary":"ok"
 	}
 }
 
+func TestCloneArtifactsDeepCopiesNestedValues(t *testing.T) {
+	source := map[string]any{
+		"session_state": "ready",
+		"snapshots": []any{
+			map[string]any{"name": "home", "url": "https://example.com"},
+		},
+	}
+
+	cloned := cloneArtifacts(source)
+	cloned["session_state"] = "mutated"
+	clonedSnapshots := cloned["snapshots"].([]any)
+	clonedSnapshot := clonedSnapshots[0].(map[string]any)
+	clonedSnapshot["name"] = "changed"
+
+	if got := source["session_state"]; got != "ready" {
+		t.Fatalf("source session_state = %#v, want ready", got)
+	}
+	sourceSnapshots := source["snapshots"].([]any)
+	sourceSnapshot := sourceSnapshots[0].(map[string]any)
+	if got := sourceSnapshot["name"]; got != "home" {
+		t.Fatalf("source snapshots[0].name = %#v, want home", got)
+	}
+}
+
 func writeFixtureDriver(t *testing.T, content string) string {
 	t.Helper()
 

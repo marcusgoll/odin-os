@@ -37,9 +37,27 @@ func toResult(toolKey string, summary string, artifacts map[string]any, rawOutpu
 }
 
 func cloneArtifacts(values map[string]any) map[string]any {
+	if values == nil {
+		return nil
+	}
 	cloned := make(map[string]any, len(values))
 	for key, value := range values {
-		cloned[key] = value
+		cloned[key] = cloneArtifactValue(value)
 	}
 	return cloned
+}
+
+func cloneArtifactValue(value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		return cloneArtifacts(typed)
+	case []any:
+		cloned := make([]any, len(typed))
+		for i, item := range typed {
+			cloned[i] = cloneArtifactValue(item)
+		}
+		return cloned
+	default:
+		return typed
+	}
 }
