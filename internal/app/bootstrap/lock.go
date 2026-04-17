@@ -71,7 +71,50 @@ func acquireBootstrapLock(ctx context.Context, runtimeRoot string) (*bootstrapLo
 	}
 }
 
+type serviceLock struct {
+	file *os.File
+	path string
+}
+
+func AcquireServiceLock(runtimeRoot string) (*serviceLock, error) {
+	return acquireServiceLock(runtimeRoot)
+}
+
+func acquireServiceLock(runtimeRoot string) (*serviceLock, error) {
+	lockDir := filepath.Join(runtimeRoot, "state", "cache")
+	if err := os.MkdirAll(lockDir, 0o755); err != nil {
+		return nil, err
+	}
+
+	lockPath := filepath.Join(lockDir, "service.lock")
+	file, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := flockNonBlocking(file); err != nil {
+		_ = file.Close()
+		if isWouldBlock(err) {
+			return nil, fmt.Errorf("serve already in progress for %s", lockPath)
+		}
+		return nil, err
+	}
+
+	return &serviceLock{file: file, path: lockPath}, nil
+}
+
 func (lock *bootstrapLock) Release() error {
+	if lock == nil || lock.file == nil {
+		return nil
+	}
+	if err := syscall.Flock(int(lock.file.Fd()), syscall.LOCK_UN); err != nil {
+		_ = lock.file.Close()
+		return err
+	}
+	return lock.file.Close()
+}
+
+func (lock *serviceLock) Release() error {
 	if lock == nil || lock.file == nil {
 		return nil
 	}

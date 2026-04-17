@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -257,6 +258,40 @@ service:
 		t.Fatalf("lifecycleStatuses() error = %v", err)
 	}
 	assertLifecycleSequence(t, statuses, []string{"booting", "stopped"})
+}
+
+func TestRunServeFailsWhenServiceLockIsHeld(t *testing.T) {
+	t.Parallel()
+
+	root := createRuntimeRoot(t)
+	seedHealthyRuntime(t, root)
+	holdServiceLock(t, root)
+
+	var stdout bytes.Buffer
+	err := Run(context.Background(), root, []string{"serve"}, strings.NewReader(""), &stdout)
+	if err == nil {
+		t.Fatal("Run(serve) error = nil, want service lock conflict")
+	}
+
+	store, openErr := sqlite.Open(filepath.Join(root, "data", "odin.db"))
+	if openErr != nil {
+		t.Fatalf("sqlite.Open() error = %v", openErr)
+	}
+	defer store.Close()
+
+	if _, err := store.GetRuntimeState(context.Background()); err == nil {
+		t.Fatal("GetRuntimeState() error = nil, want no runtime_state mutation")
+	}
+
+	events, err := store.ListEvents(context.Background(), sqlite.ListEventsParams{})
+	if err != nil {
+		t.Fatalf("ListEvents() error = %v", err)
+	}
+	for _, event := range events {
+		if event.Type == runtimeevents.EventServiceLifecycleChanged {
+			t.Fatalf("events = %+v, want no lifecycle mutation while service lock is held", events)
+		}
+	}
 }
 
 func TestRunServeExecutesStartupRecoveryWhenContextAlreadyCanceled(t *testing.T) {
@@ -646,6 +681,26 @@ func seedStaleProjection(t *testing.T, root string) {
 	}); err != nil {
 		t.Fatalf("RecordProjectionFreshness() error = %v", err)
 	}
+}
+
+func holdServiceLock(t *testing.T, root string) {
+	t.Helper()
+
+	if err := os.MkdirAll(filepath.Join(root, "state", "cache"), 0o755); err != nil {
+		t.Fatalf("mkdir state/cache: %v", err)
+	}
+
+	file, err := os.OpenFile(filepath.Join(root, "state", "cache", "service.lock"), os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		t.Fatalf("open service lock: %v", err)
+	}
+	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		t.Fatalf("lock service lock: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = syscall.Flock(int(file.Fd()), syscall.LOCK_UN)
+		_ = file.Close()
+	})
 }
 
 func seedRunningTask(t *testing.T, root string) (int64, int64, int64) {

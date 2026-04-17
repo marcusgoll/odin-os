@@ -47,6 +47,11 @@ func Run(ctx context.Context, root string, args []string, stdin io.Reader, stdou
 
 	loadCtx := ctx
 	if len(args) > 0 && args[0] == "serve" {
+		serveLock, err := bootstrap.AcquireServiceLock(cfg.RuntimeRoot)
+		if err != nil {
+			return err
+		}
+		defer serveLock.Release()
 		loadCtx = bootstrap.WithBootID(context.WithoutCancel(ctx), "boot-"+uuid.NewString())
 	}
 
