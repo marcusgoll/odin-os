@@ -553,6 +553,100 @@ service:
 	}
 }
 
+func TestRunServeHeartbeatsActiveWorktreeLeases(t *testing.T) {
+	root := createRuntimeRoot(t)
+	writeRuntimeConfig(t, root, `
+version: 1
+runtime:
+  root: .
+service:
+  http_addr: 127.0.0.1:0
+  startup_recovery: false
+`)
+	seedHealthyRuntime(t, root)
+
+	store, err := sqlite.Open(filepath.Join(root, "data", "odin.db"))
+	if err != nil {
+		t.Fatalf("sqlite.Open() error = %v", err)
+	}
+	defer store.Close()
+
+	project, err := store.CreateProject(context.Background(), sqlite.CreateProjectParams{
+		Key:           "cfipros",
+		Name:          "CFI Pros",
+		Scope:         "project",
+		GitRoot:       filepath.Join(root, "repos", "alpha"),
+		DefaultBranch: "main",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+	task, err := store.CreateTask(context.Background(), sqlite.CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "heartbeat-active-lease",
+		Title:       "Heartbeat active lease",
+		Status:      "running",
+		Scope:       "project",
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+	run, err := store.StartRun(context.Background(), sqlite.StartRunParams{
+		TaskID:   task.ID,
+		Executor: "codex",
+		Attempt:  1,
+		Status:   "running",
+	})
+	if err != nil {
+		t.Fatalf("StartRun() error = %v", err)
+	}
+	lease, err := store.CreateWorktreeLease(context.Background(), sqlite.CreateWorktreeLeaseParams{
+		ProjectID:    project.ID,
+		TaskID:       task.ID,
+		RunID:        run.ID,
+		Mode:         "mutable",
+		BranchName:   "odin/cfipros/task-1/run-1/try-1",
+		WorktreePath: filepath.ToSlash(filepath.Join(t.TempDir(), "active")),
+		RepoRoot:     project.GitRoot,
+		State:        "active",
+	})
+	if err != nil {
+		t.Fatalf("CreateWorktreeLease() error = %v", err)
+	}
+
+	staleAt := time.Now().UTC().Add(-2 * time.Minute)
+	if _, err := store.DB().ExecContext(context.Background(), `
+		UPDATE worktree_leases
+		SET heartbeat_at = ?, updated_at = ?
+		WHERE id = ?
+	`, staleAt.Format(time.RFC3339Nano), staleAt.Format(time.RFC3339Nano), lease.ID); err != nil {
+		t.Fatalf("force stale heartbeat error = %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	ctx = withServeLoopConfig(ctx, serveLoopConfig{
+		leaseInterval:   20 * time.Millisecond,
+		leaseStaleAfter: 30 * time.Minute,
+	})
+	time.AfterFunc(120*time.Millisecond, cancel)
+
+	var stdout bytes.Buffer
+	err = Run(ctx, root, []string{"serve"}, strings.NewReader(""), &stdout)
+	if err != nil && !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run(serve) error = %v", err)
+	}
+
+	updated, err := store.GetWorktreeLease(context.Background(), lease.ID)
+	if err != nil {
+		t.Fatalf("GetWorktreeLease() error = %v", err)
+	}
+	if !updated.HeartbeatAt.After(staleAt) {
+		t.Fatalf("HeartbeatAt = %v, want later than %v", updated.HeartbeatAt, staleAt)
+	}
+}
+
 func createRuntimeRoot(t *testing.T) string {
 	t.Helper()
 

@@ -38,6 +38,8 @@ type serveLoopConfig struct {
 	taskInterval      time.Duration
 	schedulerInterval time.Duration
 	selfHealInterval  time.Duration
+	leaseInterval     time.Duration
+	leaseStaleAfter   time.Duration
 }
 
 type serveLoopConfigKey struct{}
@@ -46,6 +48,8 @@ var defaultServeLoopConfig = serveLoopConfig{
 	taskInterval:      1 * time.Second,
 	schedulerInterval: 5 * time.Second,
 	selfHealInterval:  30 * time.Second,
+	leaseInterval:     30 * time.Second,
+	leaseStaleAfter:   5 * time.Minute,
 }
 
 func withServeLoopConfig(ctx context.Context, cfg serveLoopConfig) context.Context {
@@ -62,6 +66,12 @@ func serveLoopConfigFromContext(ctx context.Context) serveLoopConfig {
 	}
 	if cfg.selfHealInterval <= 0 {
 		cfg.selfHealInterval = defaultServeLoopConfig.selfHealInterval
+	}
+	if cfg.leaseInterval <= 0 {
+		cfg.leaseInterval = defaultServeLoopConfig.leaseInterval
+	}
+	if cfg.leaseStaleAfter <= 0 {
+		cfg.leaseStaleAfter = defaultServeLoopConfig.leaseStaleAfter
 	}
 	return cfg
 }
@@ -220,6 +230,14 @@ func runServe(ctx context.Context, app bootstrap.App, cfg appconfig.Config, stdo
 		Store: app.Store,
 		Now:   time.Now,
 	}
+	leaseService := leases.Maintenance{
+		Store: app.Store,
+		Cleanup: worktrees.Manager{
+			Store: app.Store,
+			Git:   gitadapter.Adapter{},
+		},
+		Now: time.Now,
+	}
 	loopConfig := serveLoopConfigFromContext(ctx)
 
 	listener, err := net.Listen("tcp", cfg.Service.HTTPAddr)
@@ -241,12 +259,13 @@ func runServe(ctx context.Context, app bootstrap.App, cfg appconfig.Config, stdo
 	}
 
 	var background sync.WaitGroup
-	background.Add(3)
+	background.Add(4)
 	loopCtx, stopLoops := context.WithCancel(context.Background())
 	dispatchNudges := make(chan struct{}, 32)
 	go runSchedulerLoop(loopCtx, operationCtx, &background, schedulerService, dispatchNudges, logger, loopConfig.schedulerInterval)
 	go runTaskLoop(loopCtx, operationCtx, &background, jobService, dispatchNudges, logger, loopConfig.taskInterval)
 	go runSelfHealLoop(loopCtx, operationCtx, &background, recoveryService, logger, loopConfig.selfHealInterval)
+	go runLeaseLoop(loopCtx, operationCtx, &background, leaseService, logger, loopConfig.leaseInterval, loopConfig.leaseStaleAfter)
 	defer func() {
 		stopLoops()
 		background.Wait()
@@ -257,6 +276,12 @@ func runServe(ctx context.Context, app bootstrap.App, cfg appconfig.Config, stdo
 	}
 	if _, err := recoveryService.RunCycle(operationCtx); err != nil {
 		logBackgroundError(logger, "self_heal", err)
+	}
+	if _, err := leaseService.CleanupExpired(operationCtx, loopConfig.leaseStaleAfter); err != nil {
+		logBackgroundError(logger, "worktree_lease_cleanup", err)
+	}
+	if _, err := leaseService.HeartbeatActive(operationCtx); err != nil {
+		logBackgroundError(logger, "worktree_lease_heartbeat", err)
 	}
 
 	if _, err := stateService.MarkReady(operationCtx, runtimestate.TransitionInput{
@@ -422,6 +447,27 @@ func runSelfHealLoop(ctx context.Context, operationCtx context.Context, wg *sync
 		case <-ticker.C:
 			if _, err := service.RunCycle(operationCtx); err != nil {
 				logBackgroundError(logger, "self_heal", err)
+			}
+		}
+	}
+}
+
+func runLeaseLoop(ctx context.Context, operationCtx context.Context, wg *sync.WaitGroup, service leases.Maintenance, logger *logs.Logger, interval time.Duration, staleAfter time.Duration) {
+	defer wg.Done()
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if _, err := service.CleanupExpired(operationCtx, staleAfter); err != nil {
+				logBackgroundError(logger, "worktree_lease_cleanup", err)
+			}
+			if _, err := service.HeartbeatActive(operationCtx); err != nil {
+				logBackgroundError(logger, "worktree_lease_heartbeat", err)
 			}
 		}
 	}
