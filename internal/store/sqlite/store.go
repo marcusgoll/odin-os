@@ -3916,6 +3916,316 @@ func (store *Store) UpdateInitiativeStatus(ctx context.Context, params UpdateIni
 	return initiative, err
 }
 
+func (store *Store) CreateDelegation(ctx context.Context, params CreateDelegationParams) (Delegation, error) {
+	now := store.now()
+	var delegation Delegation
+
+	detailsJSON, err := normalizeDelegationJSON(params.DetailsJSON)
+	if err != nil {
+		return Delegation{}, fmt.Errorf("invalid delegation details JSON: %w", err)
+	}
+	status := strings.TrimSpace(params.Status)
+	if status == "" {
+		status = "queued"
+	}
+
+	err = store.withTx(ctx, func(tx *sql.Tx) error {
+		result, err := tx.ExecContext(ctx, `
+			INSERT INTO delegations (
+				parent_task_id,
+				parent_run_id,
+				project_id,
+				scope,
+				delegation_key,
+				role,
+				action_class,
+				action_key,
+				mutation_mode,
+				status,
+				convergence_mode,
+				artifact_target,
+				executor,
+				child_task_id,
+				child_run_id,
+				worktree_lease_id,
+				branch_name,
+				details_json,
+				created_at,
+				updated_at
+			)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?, ?)
+		`,
+			params.ParentTaskID,
+			nullInt64(params.ParentRunID),
+			params.ProjectID,
+			params.Scope,
+			params.DelegationKey,
+			params.Role,
+			params.ActionClass,
+			params.ActionKey,
+			params.MutationMode,
+			status,
+			params.ConvergenceMode,
+			params.ArtifactTarget,
+			params.Executor,
+			nullInt64(params.WorktreeLeaseID),
+			params.BranchName,
+			detailsJSON,
+			formatTime(now),
+			formatTime(now),
+		)
+		if err != nil {
+			return err
+		}
+
+		delegationID, err := result.LastInsertId()
+		if err != nil {
+			return err
+		}
+		record, err := store.getDelegationTx(ctx, tx, delegationID)
+		if err != nil {
+			return err
+		}
+		delegation = record
+		return nil
+	})
+
+	return delegation, err
+}
+
+func (store *Store) GetDelegation(ctx context.Context, delegationID int64) (Delegation, error) {
+	return store.getDelegationQuery(ctx, store.db, delegationID)
+}
+
+func (store *Store) ListDelegations(ctx context.Context, params ListDelegationsParams) ([]Delegation, error) {
+	query := `
+		SELECT
+			id,
+			parent_task_id,
+			parent_run_id,
+			project_id,
+			scope,
+			delegation_key,
+			role,
+			action_class,
+			action_key,
+			mutation_mode,
+			status,
+			convergence_mode,
+			artifact_target,
+			executor,
+			child_task_id,
+			child_run_id,
+			worktree_lease_id,
+			branch_name,
+			details_json,
+			created_at,
+			updated_at
+		FROM delegations
+		WHERE 1 = 1
+	`
+	args := make([]any, 0, 6)
+	if params.ProjectID != nil {
+		query += ` AND project_id = ?`
+		args = append(args, *params.ProjectID)
+	}
+	if params.ParentTaskID != nil {
+		query += ` AND parent_task_id = ?`
+		args = append(args, *params.ParentTaskID)
+	}
+	if params.ChildTaskID != nil {
+		query += ` AND child_task_id = ?`
+		args = append(args, *params.ChildTaskID)
+	}
+	if params.WorktreeLeaseID != nil {
+		query += ` AND worktree_lease_id = ?`
+		args = append(args, *params.WorktreeLeaseID)
+	}
+	if status := strings.TrimSpace(params.Status); status != "" {
+		query += ` AND status = ?`
+		args = append(args, status)
+	}
+	if delegationKey := strings.TrimSpace(params.DelegationKey); delegationKey != "" {
+		query += ` AND delegation_key = ?`
+		args = append(args, delegationKey)
+	}
+	query += ` ORDER BY id ASC`
+
+	rows, err := store.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var delegations []Delegation
+	for rows.Next() {
+		record, err := scanDelegation(rows)
+		if err != nil {
+			return nil, err
+		}
+		delegations = append(delegations, record)
+	}
+	return delegations, rows.Err()
+}
+
+func (store *Store) UpdateDelegationStatus(ctx context.Context, params UpdateDelegationStatusParams) (Delegation, error) {
+	now := store.now()
+	var delegation Delegation
+
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE delegations
+			SET status = ?, updated_at = ?
+			WHERE id = ?
+		`, params.Status, formatTime(now), params.DelegationID); err != nil {
+			return err
+		}
+
+		record, err := store.getDelegationTx(ctx, tx, params.DelegationID)
+		if err != nil {
+			return err
+		}
+		delegation = record
+		return nil
+	})
+
+	return delegation, err
+}
+
+func (store *Store) AttachDelegationChildTask(ctx context.Context, params AttachDelegationChildTaskParams) (Delegation, error) {
+	now := store.now()
+	var delegation Delegation
+
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE delegations
+			SET child_task_id = ?, child_run_id = ?, updated_at = ?
+			WHERE id = ?
+		`, params.ChildTaskID, nullInt64(params.ChildRunID), formatTime(now), params.DelegationID); err != nil {
+			return err
+		}
+
+		record, err := store.getDelegationTx(ctx, tx, params.DelegationID)
+		if err != nil {
+			return err
+		}
+		delegation = record
+		return nil
+	})
+
+	return delegation, err
+}
+
+func (store *Store) AttachDelegationWorktree(ctx context.Context, params AttachDelegationWorktreeParams) (Delegation, error) {
+	now := store.now()
+	var delegation Delegation
+
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE delegations
+			SET worktree_lease_id = ?, branch_name = ?, updated_at = ?
+			WHERE id = ?
+		`, nullInt64(params.WorktreeLeaseID), params.BranchName, formatTime(now), params.DelegationID); err != nil {
+			return err
+		}
+
+		record, err := store.getDelegationTx(ctx, tx, params.DelegationID)
+		if err != nil {
+			return err
+		}
+		delegation = record
+		return nil
+	})
+
+	return delegation, err
+}
+
+func (store *Store) CreateDelegationArtifact(ctx context.Context, params CreateDelegationArtifactParams) (DelegationArtifact, error) {
+	now := store.now()
+	var artifact DelegationArtifact
+
+	detailsJSON, err := normalizeDelegationJSON(params.DetailsJSON)
+	if err != nil {
+		return DelegationArtifact{}, fmt.Errorf("invalid delegation artifact details JSON: %w", err)
+	}
+
+	err = store.withTx(ctx, func(tx *sql.Tx) error {
+		result, err := tx.ExecContext(ctx, `
+			INSERT INTO delegation_artifacts (
+				delegation_id,
+				artifact_type,
+				summary,
+				details_json,
+				created_at
+			)
+			VALUES (?, ?, ?, ?, ?)
+		`,
+			params.DelegationID,
+			params.ArtifactType,
+			params.Summary,
+			detailsJSON,
+			formatTime(now),
+		)
+		if err != nil {
+			return err
+		}
+
+		artifactID, err := result.LastInsertId()
+		if err != nil {
+			return err
+		}
+
+		record, err := scanDelegationArtifact(tx.QueryRowContext(ctx, `
+			SELECT id, delegation_id, artifact_type, summary, details_json, created_at
+			FROM delegation_artifacts
+			WHERE id = ?
+		`, artifactID))
+		if err != nil {
+			return err
+		}
+		artifact = record
+		return nil
+	})
+
+	return artifact, err
+}
+
+func (store *Store) ListDelegationArtifacts(ctx context.Context, params ListDelegationArtifactsParams) ([]DelegationArtifact, error) {
+	query := `
+		SELECT
+			id,
+			delegation_id,
+			artifact_type,
+			summary,
+			details_json,
+			created_at
+		FROM delegation_artifacts
+		WHERE delegation_id = ?
+	`
+	args := []any{params.DelegationID}
+	if artifactType := strings.TrimSpace(params.ArtifactType); artifactType != "" {
+		query += ` AND artifact_type = ?`
+		args = append(args, artifactType)
+	}
+	query += ` ORDER BY id ASC`
+
+	rows, err := store.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var artifacts []DelegationArtifact
+	for rows.Next() {
+		record, err := scanDelegationArtifact(rows)
+		if err != nil {
+			return nil, err
+		}
+		artifacts = append(artifacts, record)
+	}
+	return artifacts, rows.Err()
+}
+
 func (store *Store) GetCompanionByKey(ctx context.Context, workspaceID int64, key string) (Companion, error) {
 	row := store.db.QueryRowContext(ctx, `
 		SELECT
@@ -3958,6 +4268,41 @@ func (store *Store) GetCompanionByID(ctx context.Context, companionID int64) (Co
 		WHERE id = ?
 	`, companionID)
 	return scanCompanion(row)
+}
+
+func (store *Store) getDelegationTx(ctx context.Context, tx *sql.Tx, delegationID int64) (Delegation, error) {
+	return store.getDelegationQuery(ctx, tx, delegationID)
+}
+
+func (store *Store) getDelegationQuery(ctx context.Context, queryer interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}, delegationID int64) (Delegation, error) {
+	return scanDelegation(queryer.QueryRowContext(ctx, `
+		SELECT
+			id,
+			parent_task_id,
+			parent_run_id,
+			project_id,
+			scope,
+			delegation_key,
+			role,
+			action_class,
+			action_key,
+			mutation_mode,
+			status,
+			convergence_mode,
+			artifact_target,
+			executor,
+			child_task_id,
+			child_run_id,
+			worktree_lease_id,
+			branch_name,
+			details_json,
+			created_at,
+			updated_at
+		FROM delegations
+		WHERE id = ?
+	`, delegationID))
 }
 
 func (store *Store) ListCompanionsByWorkspace(ctx context.Context, params ListCompanionsParams) ([]Companion, error) {
@@ -5095,6 +5440,17 @@ func normalizeCompanionJSON(raw string) (string, error) {
 	return trimmed, nil
 }
 
+func normalizeDelegationJSON(raw string) (string, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return `{}`, nil
+	}
+	if !json.Valid([]byte(trimmed)) {
+		return "", fmt.Errorf("value must be valid JSON")
+	}
+	return trimmed, nil
+}
+
 func isCanonicalCompanionKind(kind string) bool {
 	switch kind {
 	case companionKindAssistant, companionKindAdvisor, companionKindOperator, companionKindSpecialist:
@@ -5986,6 +6342,78 @@ func scanCompanion(row interface{ Scan(...any) error }) (Companion, error) {
 		return Companion{}, err
 	}
 	return companion, nil
+}
+
+func scanDelegation(row interface{ Scan(...any) error }) (Delegation, error) {
+	var delegation Delegation
+	var parentRunID sql.NullInt64
+	var childTaskID sql.NullInt64
+	var childRunID sql.NullInt64
+	var worktreeLeaseID sql.NullInt64
+	var createdAt string
+	var updatedAt string
+	if err := row.Scan(
+		&delegation.ID,
+		&delegation.ParentTaskID,
+		&parentRunID,
+		&delegation.ProjectID,
+		&delegation.Scope,
+		&delegation.DelegationKey,
+		&delegation.Role,
+		&delegation.ActionClass,
+		&delegation.ActionKey,
+		&delegation.MutationMode,
+		&delegation.Status,
+		&delegation.ConvergenceMode,
+		&delegation.ArtifactTarget,
+		&delegation.Executor,
+		&childTaskID,
+		&childRunID,
+		&worktreeLeaseID,
+		&delegation.BranchName,
+		&delegation.DetailsJSON,
+		&createdAt,
+		&updatedAt,
+	); err != nil {
+		return Delegation{}, err
+	}
+
+	var err error
+	delegation.ParentRunID = nullableInt64Ptr(parentRunID)
+	delegation.ChildTaskID = nullableInt64Ptr(childTaskID)
+	delegation.ChildRunID = nullableInt64Ptr(childRunID)
+	delegation.WorktreeLeaseID = nullableInt64Ptr(worktreeLeaseID)
+	delegation.CreatedAt, err = parseTime(createdAt)
+	if err != nil {
+		return Delegation{}, err
+	}
+	delegation.UpdatedAt, err = parseTime(updatedAt)
+	if err != nil {
+		return Delegation{}, err
+	}
+	return delegation, nil
+}
+
+func scanDelegationArtifact(row interface{ Scan(...any) error }) (DelegationArtifact, error) {
+	var artifact DelegationArtifact
+	var createdAt string
+	if err := row.Scan(
+		&artifact.ID,
+		&artifact.DelegationID,
+		&artifact.ArtifactType,
+		&artifact.Summary,
+		&artifact.DetailsJSON,
+		&createdAt,
+	); err != nil {
+		return DelegationArtifact{}, err
+	}
+
+	var err error
+	artifact.CreatedAt, err = parseTime(createdAt)
+	if err != nil {
+		return DelegationArtifact{}, err
+	}
+	return artifact, nil
 }
 
 func scanWorkspace(row interface{ Scan(...any) error }) (Workspace, error) {
