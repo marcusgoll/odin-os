@@ -14,6 +14,8 @@ import (
 	"odin-os/internal/app/backup"
 	"odin-os/internal/app/bootstrap"
 	"odin-os/internal/cli/scope"
+	approvals "odin-os/internal/core/approvals"
+	coremedia "odin-os/internal/core/media"
 	"odin-os/internal/core/projects"
 	"odin-os/internal/executors/contract"
 	executorrouter "odin-os/internal/executors/router"
@@ -27,6 +29,7 @@ import (
 	"odin-os/internal/runtime/checkpoints"
 	healthsvc "odin-os/internal/runtime/health"
 	jobsvc "odin-os/internal/runtime/jobs"
+	mediasvc "odin-os/internal/runtime/media"
 	"odin-os/internal/runtime/projections"
 	recoverysvc "odin-os/internal/runtime/recovery"
 	"odin-os/internal/store/sqlite"
@@ -39,6 +42,78 @@ import (
 	"odin-os/internal/vcs/leases"
 	worktreemgr "odin-os/internal/vcs/worktrees"
 )
+
+func TestMediaMaintenancePreflightDependsOnVerifiedBackup(t *testing.T) {
+	ctx := context.Background()
+	repoRoot := projectRoot(t)
+	runtimeRoot := t.TempDir()
+	now := time.Date(2026, 4, 17, 12, 0, 0, 0, time.UTC)
+
+	app, err := bootstrap.Load(ctx, repoRoot, runtimeRoot)
+	if err != nil {
+		t.Fatalf("bootstrap.Load() error = %v", err)
+	}
+	defer app.Store.Close()
+
+	jobs := jobsvc.Service{
+		Store:    app.Store,
+		Registry: app.Registry,
+		Now:      func() time.Time { return now },
+	}
+	task, err := jobs.CreateTaskFromAct(ctx, scope.Resolution{
+		Kind:       scope.ScopeOdinCore,
+		ProjectKey: "odin-core",
+	}, "media maintenance preflight")
+	if err != nil {
+		t.Fatalf("CreateTaskFromAct() error = %v", err)
+	}
+
+	backupService := backup.Service{
+		RepoRoot:    repoRoot,
+		RuntimeRoot: runtimeRoot,
+	}
+	archivePath := filepath.Join(t.TempDir(), "odin-media-backup.tar.gz")
+	if err := backupService.CreateArchive(ctx, archivePath); err != nil {
+		t.Fatalf("CreateArchive() error = %v", err)
+	}
+	if err := backupService.VerifyArchive(ctx, archivePath); err != nil {
+		t.Fatalf("VerifyArchive() error = %v", err)
+	}
+
+	decision := approvals.Service{}.Evaluate(coremedia.Config{
+		Policies: coremedia.Policies{
+			ApprovalRequired: []string{"restart_plex"},
+		},
+	}, "restart_plex")
+	if !decision.RequiresApproval {
+		t.Fatalf("RequiresApproval = false, want true")
+	}
+
+	result, err := mediasvc.MaintenanceService{
+		Store:       app.Store,
+		Config:      &coremedia.Config{Enabled: true, Policies: coremedia.Policies{ApprovalRequired: []string{"restart_plex"}}},
+		RuntimeRoot: runtimeRoot,
+		Now:         func() time.Time { return now },
+	}.Preflight(ctx, mediasvc.PreflightRequest{
+		TaskID: &task.ID,
+		Action: "restart_plex",
+	})
+	if err != nil {
+		t.Fatalf("Preflight() error = %v", err)
+	}
+	if result.BlockedReason != "" {
+		t.Fatalf("BlockedReason = %q, want empty after verified backup", result.BlockedReason)
+	}
+	if !result.RequiresApproval {
+		t.Fatalf("RequiresApproval = false, want true")
+	}
+	if result.ApprovalID == nil {
+		t.Fatalf("ApprovalID = nil, want pending approval")
+	}
+	if result.EvidencePacketID == nil {
+		t.Fatalf("EvidencePacketID = nil, want preflight evidence packet")
+	}
+}
 
 func TestAlphaAcceptance(t *testing.T) {
 	ctx := context.Background()

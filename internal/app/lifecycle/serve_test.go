@@ -50,6 +50,47 @@ func TestRunDoctorJSONWritesStructuredReport(t *testing.T) {
 	}
 }
 
+func TestRunDoctorJSONIncludesMediaChecksWhenMediaConfigOverrideIsSet(t *testing.T) {
+	root := createRuntimeRoot(t)
+	mediaConfigPath := filepath.Join(t.TempDir(), "media-stack.yaml")
+	if err := os.WriteFile(mediaConfigPath, []byte(`
+enabled: true
+services:
+  - name: plex
+    kind: plex
+policies:
+  auto_allowed:
+    - media_probe_cycle
+`), 0o644); err != nil {
+		t.Fatalf("write media config: %v", err)
+	}
+
+	t.Setenv("ODIN_MEDIA_CONFIG", mediaConfigPath)
+	t.Setenv("ODIN_MEDIA_PROBE_COMMAND", filepath.Join("..", "..", "..", "scripts", "tests", "fixtures", "media-probe-mount-mismatch.sh"))
+
+	var stdout bytes.Buffer
+	if err := Run(context.Background(), root, []string{"doctor", "--json"}, strings.NewReader(""), &stdout); err != nil {
+		t.Fatalf("Run(doctor --json) error = %v", err)
+	}
+
+	var report struct {
+		Checks []struct {
+			Name   string `json:"name"`
+			Status string `json:"status"`
+		} `json:"checks"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+		t.Fatalf("doctor output is not valid json: %v\n%s", err, stdout.String())
+	}
+
+	for _, check := range report.Checks {
+		if check.Name == "media.mounts" && check.Status == "failed" {
+			return
+		}
+	}
+	t.Fatalf("doctor report missing failed media.mounts check: %s", stdout.String())
+}
+
 func TestRunHealthcheckHealthyReturnsNil(t *testing.T) {
 	t.Parallel()
 

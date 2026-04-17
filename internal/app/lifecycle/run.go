@@ -39,6 +39,7 @@ import (
 	runtimeevents "odin-os/internal/runtime/events"
 	healthsvc "odin-os/internal/runtime/health"
 	"odin-os/internal/runtime/jobs"
+	mediasvc "odin-os/internal/runtime/media"
 	"odin-os/internal/runtime/projections"
 	"odin-os/internal/runtime/recovery"
 	"odin-os/internal/runtime/runs"
@@ -59,6 +60,7 @@ const rootUsageBanner = "Usage: odin <command> [args]\n\nCommands: help repl doc
 var (
 	serveTaskLoopInterval     = 1 * time.Second
 	serveFollowUpLoopInterval = 1 * time.Second
+	serveMediaLoopInterval    = 30 * time.Second
 	serveSelfHealLoopInterval = 30 * time.Second
 	serveMetricsLoopInterval  = 1 * time.Minute
 	serveOperationTimeout     = 30 * time.Second
@@ -165,7 +167,7 @@ func Run(ctx context.Context, root string, args []string, stdin io.Reader, stdou
 		}
 		return runRepl(ctx, app, stdin, stdout, now)
 	case "status":
-		return runStatus(ctx, app, args[1:], stdout)
+		return runStatus(ctx, app, cfg, args[1:], stdout)
 	case "project":
 		return runProject(ctx, app, args[1:], stdout)
 	case "scope":
@@ -199,7 +201,7 @@ func Run(ctx context.Context, root string, args []string, stdin io.Reader, stdou
 	case "skills":
 		return runSkills(ctx, app, args[1:], stdout)
 	case "doctor":
-		return runDoctor(ctx, app, args[1:], stdout)
+		return runDoctor(ctx, app, cfg, args[1:], stdout)
 	case "healthcheck":
 		return runHealthcheck(ctx, app, cfg, stdout)
 	case "serve":
@@ -295,12 +297,12 @@ func runJobs(ctx context.Context, app bootstrap.App, args []string, stdout io.Wr
 	return nil
 }
 
-func runDoctor(ctx context.Context, app bootstrap.App, args []string, stdout io.Writer) error {
+func runDoctor(ctx context.Context, app bootstrap.App, cfg appconfig.Config, args []string, stdout io.Writer) error {
 	if err := bootstrap.RefreshReadinessSamples(ctx, app, len(app.RegistryDiagnostics) == 0); err != nil {
 		return err
 	}
 
-	report, err := newHealthService(app, healthsvc.DefaultConfig()).Doctor(ctx, len(app.RegistryDiagnostics) == 0)
+	report, err := newHealthService(app, healthsvc.DefaultConfig(), cfg).Doctor(ctx, len(app.RegistryDiagnostics) == 0)
 	if err != nil {
 		return err
 	}
@@ -761,7 +763,7 @@ func runFollowup(ctx context.Context, app bootstrap.App, args []string, stdout i
 	}
 }
 
-func runStatus(ctx context.Context, app bootstrap.App, args []string, stdout io.Writer) error {
+func runStatus(ctx context.Context, app bootstrap.App, cfg appconfig.Config, args []string, stdout io.Writer) error {
 	jsonOutput, remaining, err := consumeJSONFlag(args)
 	if err != nil {
 		return err
@@ -778,7 +780,7 @@ func runStatus(ctx context.Context, app bootstrap.App, args []string, stdout io.
 		return err
 	}
 
-	summary, err := newHealthService(app, healthsvc.DefaultConfig()).Summary(ctx, len(app.RegistryDiagnostics) == 0)
+	summary, err := newHealthService(app, healthsvc.DefaultConfig(), cfg).Summary(ctx, len(app.RegistryDiagnostics) == 0)
 	if err != nil {
 		return err
 	}
@@ -1058,7 +1060,7 @@ func runHealthcheck(ctx context.Context, app bootstrap.App, cfg appconfig.Config
 
 	healthConfig := healthsvc.DefaultConfig()
 	healthConfig.RuntimeHeartbeatTTL = runtimeHeartbeatTTL(serveLoopConfigFromContext(ctx).healthInterval)
-	report, ready, err := newHealthService(app, healthConfig).Readiness(ctx, len(app.RegistryDiagnostics) == 0)
+	report, ready, err := newHealthService(app, healthConfig, cfg).Readiness(ctx, len(app.RegistryDiagnostics) == 0)
 	if err != nil {
 		return err
 	}
@@ -1087,9 +1089,10 @@ func runHealthcheck(ctx context.Context, app bootstrap.App, cfg appconfig.Config
 
 func runtimeEnv() map[string]string {
 	return map[string]string{
-		"ODIN_ROOT":      os.Getenv("ODIN_ROOT"),
-		"ODIN_HTTP_ADDR": os.Getenv("ODIN_HTTP_ADDR"),
-		"ODIN_NOW":       os.Getenv("ODIN_NOW"),
+		"ODIN_ROOT":         os.Getenv("ODIN_ROOT"),
+		"ODIN_HTTP_ADDR":    os.Getenv("ODIN_HTTP_ADDR"),
+		"ODIN_NOW":          os.Getenv("ODIN_NOW"),
+		"ODIN_MEDIA_CONFIG": os.Getenv("ODIN_MEDIA_CONFIG"),
 	}
 }
 
@@ -1471,6 +1474,7 @@ func runServe(ctx context.Context, app bootstrap.App, cfg appconfig.Config, stdo
 		HealthConfig:    healthsvc.DefaultConfig(),
 		Logger:          logger,
 	}
+	mediaService := newMediaService(app, cfg)
 	schedulerService := supervision.Service{
 		Store: app.Store,
 		Now:   time.Now,
@@ -1488,7 +1492,7 @@ func runServe(ctx context.Context, app bootstrap.App, cfg appconfig.Config, stdo
 	healthConfig.RuntimeHeartbeatTTL = runtimeHeartbeatTTL(loopConfig.healthInterval)
 	var immediateNotReady atomic.Bool
 	immediateNotReady.Store(true)
-	healthService := newHealthService(app, healthConfig)
+	healthService := newHealthService(app, healthConfig, cfg)
 	healthService.ImmediateNotReady = &immediateNotReady
 	metricsService := newMetricsService(app, healthConfig)
 	healthDeps := healthLoopDeps{
@@ -1525,7 +1529,11 @@ func runServe(ctx context.Context, app bootstrap.App, cfg appconfig.Config, stdo
 	runLeaseMaintenanceCycle(operationCtx, leaseService, logger, loopConfig.leaseStaleAfter)
 
 	var background sync.WaitGroup
-	background.Add(6)
+	loopCount := 6
+	if mediaService != nil {
+		loopCount++
+	}
+	background.Add(loopCount)
 	loopCtx, stopLoops := context.WithCancel(context.Background())
 	dispatchNudges := make(chan struct{}, 32)
 	go runSchedulerLoop(loopCtx, operationCtx, &background, schedulerService, dispatchNudges, logger, loopConfig.schedulerInterval)
@@ -1534,6 +1542,9 @@ func runServe(ctx context.Context, app bootstrap.App, cfg appconfig.Config, stdo
 	go runLeaseLoop(loopCtx, operationCtx, &background, leaseService, logger, loopConfig.leaseInterval, loopConfig.leaseStaleAfter)
 	go runHealthLoop(loopCtx, operationCtx, &background, healthDeps, logger, loopConfig.healthInterval)
 	go runFollowUpLoop(loopCtx, &background, followUpService, logger, now)
+	if mediaService != nil {
+		go runMediaLoop(loopCtx, operationCtx, &background, *mediaService, logger)
+	}
 	defer func() {
 		stopLoops()
 		background.Wait()
@@ -1544,6 +1555,11 @@ func runServe(ctx context.Context, app bootstrap.App, cfg appconfig.Config, stdo
 	}
 	if _, err := recoveryService.RunCycle(operationCtx); err != nil {
 		logBackgroundError(logger, "self_heal", err)
+	}
+	if mediaService != nil {
+		if _, err := mediaService.RunCycle(operationCtx); err != nil {
+			logBackgroundError(logger, "media_supervisor", err)
+		}
 	}
 	runHealthCycle(operationCtx, healthDeps, logger)
 	if err := attemptDispatchIfReady(operationCtx, healthService, healthDeps.RegistryHealthy, jobService); err != nil {
@@ -1981,11 +1997,55 @@ func serveStartupContext(parent context.Context) (context.Context, context.Cance
 	return context.WithTimeout(parent, serveOperationTimeout)
 }
 
-func newHealthService(app bootstrap.App, config healthsvc.Config) healthsvc.Service {
-	return healthsvc.Service{
+func newHealthService(app bootstrap.App, config healthsvc.Config, cfg appconfig.Config) healthsvc.Service {
+	service := healthsvc.Service{
 		DB:           app.Store.DB(),
 		Config:       config,
 		ExecutorKeys: enabledExecutorKeys(app.ExecutorConfig),
+	}
+	if cfg.Media != nil {
+		service.Media = &healthsvc.MediaChecks{
+			Config:       cfg.Media,
+			ProbeCommand: os.Getenv("ODIN_MEDIA_PROBE_COMMAND"),
+		}
+	}
+	return service
+}
+
+func newMediaService(app bootstrap.App, cfg appconfig.Config) *mediasvc.Service {
+	if cfg.Media == nil {
+		return nil
+	}
+
+	systemProject, _ := app.Registry.SystemProject()
+	return &mediasvc.Service{
+		Store:         app.Store,
+		Config:        cfg.Media,
+		RuntimeRoot:   cfg.RuntimeRoot,
+		SystemProject: systemProject,
+		Checker: healthsvc.MediaChecks{
+			Config:       cfg.Media,
+			ProbeCommand: os.Getenv("ODIN_MEDIA_PROBE_COMMAND"),
+		},
+		Now: time.Now,
+	}
+}
+
+func runMediaLoop(ctx context.Context, operationCtx context.Context, wg *sync.WaitGroup, service mediasvc.Service, logger *logs.Logger) {
+	defer wg.Done()
+
+	ticker := time.NewTicker(serveMediaLoopInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if _, err := service.RunCycle(operationCtx); err != nil {
+				logBackgroundError(logger, "media_supervisor", err)
+			}
+		}
 	}
 }
 

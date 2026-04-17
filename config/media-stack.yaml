@@ -1,0 +1,56 @@
+enabled: false
+maintenance_window: "Sun 03:00-05:00"
+services:
+  - name: plex
+    kind: plex
+    base_url: http://127.0.0.1:32400
+  - name: radarr
+    kind: radarr
+    base_url: http://127.0.0.1:7878
+  - name: sonarr
+    kind: sonarr
+    base_url: http://127.0.0.1:8989
+  - name: prowlarr
+    kind: prowlarr
+    base_url: http://127.0.0.1:9696
+  - name: downloader
+    kind: downloader
+    base_url: http://127.0.0.1:8080
+  - name: vpn
+    kind: vpn
+mounts:
+  - name: media
+    path: /mnt/media
+    expected_source: /dev/disk/by-uuid/media
+    sentinel: /mnt/media/.odin-media-root
+  - name: downloads
+    path: /mnt/media/downloads
+    expected_source: /dev/disk/by-uuid/media
+    sentinel: /mnt/media/downloads/.odin-download-root
+thresholds:
+  disk_warning_percent: 80
+  disk_critical_percent: 90
+  queue_stalled_minutes: 30
+  import_lag_minutes: 20
+  telemetry_freshness_minutes: 10
+policies:
+  auto_allowed:
+    - media_probe_cycle
+    - media_mount_audit
+    - media_backup_gate
+  notify_only:
+    - media_queue_audit
+    - media_import_audit
+    - media_maintenance_candidate
+  approval_required:
+    - restart_plex
+    - restart_arr
+    - restart_downloader
+    - retry_import_move
+    - queue_mutation
+  forbidden:
+    - delete_media
+    - delete_downloader_payload
+    - remap_root_folders
+    - rotate_media_credentials
+    - change_vpn_networking

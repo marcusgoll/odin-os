@@ -62,6 +62,7 @@ type Service struct {
 	ExecutorKeys      []string
 	ExpectedExecutors []string
 	ImmediateNotReady *atomic.Bool
+	Media             *MediaChecks
 }
 
 func DefaultConfig() Config {
@@ -157,6 +158,17 @@ func (service Service) Doctor(ctx context.Context, registryHealthy bool) (Report
 	}
 	report.Checks = append(report.Checks, sourceCheck)
 	report.Status = combineStatus(report.Status, sourceCheck.Status)
+
+	if service.Media != nil {
+		mediaChecks, err := service.Media.Checks(ctx, config, now)
+		if err != nil {
+			return Report{}, err
+		}
+		for _, mediaCheck := range mediaChecks {
+			report.Checks = append(report.Checks, mediaCheck)
+			report.Status = combineStatus(report.Status, mediaCheck.Status)
+		}
+	}
 
 	return report, nil
 }
@@ -512,6 +524,10 @@ func dispatchSafe(report Report) bool {
 		switch check.Name {
 		case "database", "registry", "executor", "projections", "source_freshness":
 			if check.Status != StatusHealthy {
+				return false
+			}
+		default:
+			if strings.HasPrefix(check.Name, "media.") && check.Status != StatusHealthy {
 				return false
 			}
 		}
