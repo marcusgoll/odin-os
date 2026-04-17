@@ -18,7 +18,7 @@ The binary does not start an interactive session when invoked without a subcomma
 - `odin help` prints the root command surface.
 - `odin repl` starts the compatibility REPL.
 - `odin status --json` exposes runtime readiness and approval state for harness polling.
-- `odin task run --project <key> --title <title>` creates and executes one durable task from an explicit command boundary.
+- `odin task run --project <key> --title <title>` is the legacy compatibility path for durable task execution relative to the newer follow-through vocabulary.
 
 ## Intended root command families
 

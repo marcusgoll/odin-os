@@ -55,12 +55,13 @@ When a follow-up obligation becomes due, Odin materializes a governed `work item
 
 The materialization contract is:
 
-1. identify the workspace and due window for the obligation
-2. check whether a work item already exists for that obligation in the current due window
-3. reuse the existing work item when one exists
-4. otherwise create a new work item that references the obligation
-5. route the work item through the normal planning, approval, and execution path
-6. preserve the original obligation history instead of rewriting the obligation into execution state
+1. identify the workspace and obligation occurrence key for the obligation
+2. derive the occurrence key from the obligation identity plus its current scheduled due occurrence, using the normalized due timestamp for one-time obligations and the normalized cadence occurrence for recurring obligations
+3. check whether a work item already exists for that exact occurrence key
+4. reuse the existing work item when one exists for that occurrence key
+5. otherwise create a new work item that references the obligation and occurrence key
+6. route the work item through the normal planning, approval, and execution path
+7. preserve the original obligation history instead of rewriting the obligation into execution state
 
 This split matters:
 
@@ -68,7 +69,7 @@ This split matters:
 - `Work Item` is the executable instance
 - `Run Attempt` is one bounded execution pass against that work item
 
-Materialization must be idempotent within the due window so the same obligation does not create duplicate work items.
+Materialization is idempotent per obligation occurrence key. The same obligation occurrence must reuse the same work item; a new scheduled occurrence must create a new work item.
 
 ## Bounded Proactive Behavior
 
@@ -93,9 +94,7 @@ The proactive boundary is: due obligation -> materialized work item -> normal go
 
 ## Command Surface Rules
 
-The root CLI exposes explicit command families for the follow-through model rather than relying on REPL-only behavior.
-
-Intended root command families:
+The intended root command families for the follow-through model are:
 
 - `odin initiative`
 - `odin companion`
@@ -105,8 +104,8 @@ Intended root command families:
 
 Rules:
 
-- these commands are explicit root entry points
+- these command families are explicit root entry points
 - machine-readable output is available where the command is operational
-- commands surface workspace, initiative, and due-obligation state without implying hidden background execution
-- no command claims to own durable truth outside the workspace model
+- the command families surface workspace, initiative, and due-obligation state without implying hidden background execution
+- no command family claims to own durable truth outside the workspace model
 - the REPL remains a compatibility surface, not the authoritative operator boundary
