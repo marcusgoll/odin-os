@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	memoryroot "odin-os/internal/memory"
 	"odin-os/internal/store/sqlite"
 )
 
@@ -12,6 +13,8 @@ type Service struct {
 	WorkspaceScope string
 	WorkspaceKey   string
 }
+
+const MemoryTypeOperatingProfileUpdate = memoryroot.MemoryTypeOperatingProfileUpdate
 
 func (service Service) Remember(ctx context.Context, memoryType string, summary string, detailsJSON string) (sqlite.MemorySummary, error) {
 	if service.Store == nil {
@@ -25,6 +28,10 @@ func (service Service) Remember(ctx context.Context, memoryType string, summary 
 		Summary:     summary,
 		DetailsJSON: detailsJSON,
 	})
+}
+
+func (service Service) RememberProfileUpdate(ctx context.Context, summary string, detailsJSON string) (sqlite.MemorySummary, error) {
+	return service.Remember(ctx, MemoryTypeOperatingProfileUpdate, summary, detailsJSON)
 }
 
 func (service Service) List(ctx context.Context) ([]sqlite.MemorySummary, error) {

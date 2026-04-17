@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"odin-os/internal/core/workitems"
+	memorycompanions "odin-os/internal/memory/companions"
+	memoryprojects "odin-os/internal/memory/projects"
 	runtimeevents "odin-os/internal/runtime/events"
 	"odin-os/internal/store/sqlite"
 )
@@ -126,7 +128,14 @@ func (service Service) Complete(ctx context.Context, workspaceID int64, obligati
 	if err != nil {
 		return FollowUpObligation{}, err
 	}
-	return decode(record)
+	updated, err := decode(record)
+	if err != nil {
+		return FollowUpObligation{}, err
+	}
+	if err := service.recordCompletionMemory(ctx, obligation, now); err != nil {
+		return FollowUpObligation{}, err
+	}
+	return updated, nil
 }
 
 func (service Service) Snooze(ctx context.Context, workspaceID int64, obligationID int64, until time.Time) (FollowUpObligation, error) {
@@ -327,6 +336,30 @@ func (service Service) now() time.Time {
 		return service.Now()
 	}
 	return time.Now().UTC()
+}
+
+func (service Service) recordCompletionMemory(ctx context.Context, obligation FollowUpObligation, completedAt time.Time) error {
+	if obligation.CompanionID != nil {
+		companionMemory := memorycompanions.Service{Store: service.Store}
+		if obligation.ScheduleState(completedAt, DefaultOverdueGrace) == ScheduleStateOverdue {
+			if _, err := companionMemory.RememberFollowUpOverdue(ctx, obligation.WorkspaceID, *obligation.CompanionID, obligation.Title, obligation.NextDueAt); err != nil {
+				return err
+			}
+		}
+		_, err := companionMemory.RememberFollowUpCompletion(ctx, obligation.WorkspaceID, *obligation.CompanionID, obligation.Title, completedAt)
+		return err
+	}
+	if obligation.InitiativeID != nil {
+		projectMemory := memoryprojects.Service{Store: service.Store}
+		if obligation.ScheduleState(completedAt, DefaultOverdueGrace) == ScheduleStateOverdue {
+			if _, err := projectMemory.RememberFollowUpOverdue(ctx, obligation.WorkspaceID, *obligation.InitiativeID, obligation.Title, obligation.NextDueAt); err != nil {
+				return err
+			}
+		}
+		_, err := projectMemory.RememberFollowUpCompletion(ctx, obligation.WorkspaceID, *obligation.InitiativeID, obligation.Title, completedAt)
+		return err
+	}
+	return nil
 }
 
 func (service Service) recordRuntimeEvent(ctx context.Context, eventType runtimeevents.Type, obligation FollowUpObligation, taskID int64, payload any) error {

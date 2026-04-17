@@ -2,6 +2,7 @@ package workspaces
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 
 	memoryroot "odin-os/internal/memory"
@@ -46,4 +47,39 @@ func (service Service) Recall(ctx context.Context, workspaceID int64, limit int)
 		VisibilityScope: string(memoryroot.VisibilityWorkspace),
 		Limit:           limit,
 	})
+}
+
+func (service Service) RememberProfileUpdate(ctx context.Context, workspaceID int64, summary string, detailsJSON string) (sqlite.MemorySummary, error) {
+	if service.Store == nil {
+		return sqlite.MemorySummary{}, fmt.Errorf("memory store is required")
+	}
+
+	workspaceKey, err := service.workspaceKey(ctx, workspaceID)
+	if err != nil {
+		return sqlite.MemorySummary{}, err
+	}
+
+	return service.Store.RecordMemorySummary(ctx, sqlite.RecordMemorySummaryParams{
+		Scope:       "workspace",
+		ScopeKey:    workspaceKey,
+		MemoryType:  string(memoryroot.MemoryTypeOperatingProfileUpdate),
+		Summary:     summary,
+		DetailsJSON: detailsJSON,
+	})
+}
+
+func (service Service) workspaceKey(ctx context.Context, workspaceID int64) (string, error) {
+	if workspaceID <= 0 {
+		return "", fmt.Errorf("workspace ID is required")
+	}
+
+	row := service.Store.DB().QueryRowContext(ctx, `SELECT key FROM workspaces WHERE id = ?`, workspaceID)
+	var key string
+	if err := row.Scan(&key); err != nil {
+		if err == sql.ErrNoRows {
+			return "", fmt.Errorf("workspace %d not found", workspaceID)
+		}
+		return "", err
+	}
+	return key, nil
 }

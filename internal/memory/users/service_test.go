@@ -83,6 +83,34 @@ func TestServiceListsWorkspaceMemoryBeforeGlobalMemory(t *testing.T) {
 	}
 }
 
+func TestProfileServiceRememberProfileUpdateUsesWorkspaceScope(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	service := Service{
+		Store:          store,
+		WorkspaceScope: "workspace",
+		WorkspaceKey:   "primary",
+	}
+
+	entry, err := service.RememberProfileUpdate(ctx, "Quiet hours updated", `{"quiet_hours":"22:00-07:00"}`)
+	if err != nil {
+		t.Fatalf("RememberProfileUpdate() error = %v", err)
+	}
+	if entry.Scope != "workspace" {
+		t.Fatalf("entry.Scope = %q, want workspace", entry.Scope)
+	}
+	if entry.ScopeKey != "primary" {
+		t.Fatalf("entry.ScopeKey = %q, want primary", entry.ScopeKey)
+	}
+	if entry.MemoryType != MemoryTypeOperatingProfileUpdate {
+		t.Fatalf("entry.MemoryType = %q, want %q", entry.MemoryType, MemoryTypeOperatingProfileUpdate)
+	}
+}
+
 func openTestStore(t *testing.T) *sqlite.Store {
 	t.Helper()
 

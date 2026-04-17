@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"odin-os/internal/core/workspaces"
+	memoryroot "odin-os/internal/memory"
 	"odin-os/internal/store/sqlite"
 )
 
@@ -371,6 +372,152 @@ func TestFollowUpCompleteRecurringObligationAdvancesNextDueAt(t *testing.T) {
 	}
 	if updated.LastCompletedAt == nil || !updated.LastCompletedAt.Equal(now) {
 		t.Fatalf("LastCompletedAt = %v, want %v", updated.LastCompletedAt, now)
+	}
+}
+
+func TestFollowUpCompleteRecordsCompanionScopedMemory(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openFollowUpStore(t)
+	defer store.Close()
+
+	now := time.Date(2026, 4, 17, 12, 0, 0, 0, time.UTC)
+	workspaceID, initiativeID, companionID, _ := seedFollowUpContext(t, ctx, store)
+	service := Service{
+		Store: store,
+		Now: func() time.Time {
+			return now
+		},
+	}
+
+	obligation, err := service.Create(ctx, CreateParams{
+		WorkspaceID:  workspaceID,
+		InitiativeID: &initiativeID,
+		CompanionID:  &companionID,
+		Title:        "Review mail",
+		Cadence:      Cadence{Mode: CadenceModeOnce},
+		NextDueAt:    now.Add(-time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+
+	if _, err := service.Complete(ctx, workspaceID, obligation.ID); err != nil {
+		t.Fatalf("Complete() error = %v", err)
+	}
+
+	companion, err := store.GetCompanionByID(ctx, companionID)
+	if err != nil {
+		t.Fatalf("GetCompanionByID() error = %v", err)
+	}
+	entries, err := store.ListMemorySummaries(ctx, sqlite.ListMemorySummariesParams{
+		Scope:      "companion",
+		ScopeKey:   companion.Key,
+		MemoryType: memoryroot.MemoryTypeFollowUpCompletion,
+	})
+	if err != nil {
+		t.Fatalf("ListMemorySummaries() error = %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("companion memory len = %d, want 1", len(entries))
+	}
+}
+
+func TestFollowUpCompleteRecordsInitiativeScopedMemoryWithoutCompanion(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openFollowUpStore(t)
+	defer store.Close()
+
+	now := time.Date(2026, 4, 17, 12, 0, 0, 0, time.UTC)
+	workspaceID, initiativeID, _, _ := seedFollowUpContext(t, ctx, store)
+	service := Service{
+		Store: store,
+		Now: func() time.Time {
+			return now
+		},
+	}
+
+	obligation, err := service.Create(ctx, CreateParams{
+		WorkspaceID:  workspaceID,
+		InitiativeID: &initiativeID,
+		Title:        "Pay rent",
+		Cadence:      Cadence{Mode: CadenceModeOnce},
+		NextDueAt:    now.Add(-time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+
+	if _, err := service.Complete(ctx, workspaceID, obligation.ID); err != nil {
+		t.Fatalf("Complete() error = %v", err)
+	}
+
+	initiative, err := store.GetInitiativeByID(ctx, initiativeID)
+	if err != nil {
+		t.Fatalf("GetInitiativeByID() error = %v", err)
+	}
+	entries, err := store.ListMemorySummaries(ctx, sqlite.ListMemorySummariesParams{
+		Scope:      "initiative",
+		ScopeKey:   initiative.Key,
+		MemoryType: memoryroot.MemoryTypeFollowUpCompletion,
+	})
+	if err != nil {
+		t.Fatalf("ListMemorySummaries() error = %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("initiative memory len = %d, want 1", len(entries))
+	}
+}
+
+func TestFollowUpCompleteRecordsOverdueMemoryWhenPastGrace(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openFollowUpStore(t)
+	defer store.Close()
+
+	now := time.Date(2026, 4, 17, 12, 0, 0, 0, time.UTC)
+	workspaceID, initiativeID, companionID, _ := seedFollowUpContext(t, ctx, store)
+	service := Service{
+		Store: store,
+		Now: func() time.Time {
+			return now
+		},
+	}
+
+	obligation, err := service.Create(ctx, CreateParams{
+		WorkspaceID:  workspaceID,
+		InitiativeID: &initiativeID,
+		CompanionID:  &companionID,
+		Title:        "File taxes",
+		Cadence:      Cadence{Mode: CadenceModeOnce},
+		NextDueAt:    now.Add(-48 * time.Hour),
+	})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+
+	if _, err := service.Complete(ctx, workspaceID, obligation.ID); err != nil {
+		t.Fatalf("Complete() error = %v", err)
+	}
+
+	companion, err := store.GetCompanionByID(ctx, companionID)
+	if err != nil {
+		t.Fatalf("GetCompanionByID() error = %v", err)
+	}
+	entries, err := store.ListMemorySummaries(ctx, sqlite.ListMemorySummariesParams{
+		Scope:      "companion",
+		ScopeKey:   companion.Key,
+		MemoryType: memoryroot.MemoryTypeFollowUpOverdue,
+	})
+	if err != nil {
+		t.Fatalf("ListMemorySummaries() error = %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("overdue memory len = %d, want 1", len(entries))
 	}
 }
 

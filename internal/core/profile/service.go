@@ -8,6 +8,7 @@ import (
 	"fmt"
 
 	coreworkspaces "odin-os/internal/core/workspaces"
+	memoryworkspaces "odin-os/internal/memory/workspaces"
 	"odin-os/internal/store/sqlite"
 )
 
@@ -71,7 +72,22 @@ func (service Service) Update(ctx context.Context, params UpdateParams) (Operati
 		return OperatingProfile{}, err
 	}
 
-	return service.save(ctx, workspace, current)
+	updated, err := service.save(ctx, workspace, current)
+	if err != nil {
+		return OperatingProfile{}, err
+	}
+
+	summary, detailsJSON, changed, err := describeProfileUpdate(params)
+	if err != nil {
+		return OperatingProfile{}, err
+	}
+	if changed {
+		if _, err := (memoryworkspaces.Service{Store: service.Store}).RememberProfileUpdate(ctx, workspace.ID, summary, detailsJSON); err != nil {
+			return OperatingProfile{}, err
+		}
+	}
+
+	return updated, nil
 }
 
 func (service Service) save(ctx context.Context, workspace coreworkspaces.Workspace, profile OperatingProfile) (OperatingProfile, error) {
@@ -137,4 +153,25 @@ func (service Service) workspaceKey() string {
 		return service.WorkspaceKey
 	}
 	return DefaultWorkspaceKey
+}
+
+func describeProfileUpdate(params UpdateParams) (string, string, bool, error) {
+	details := map[string]any{}
+	if params.QuietHours != nil {
+		details["quiet_hours"] = *params.QuietHours
+	}
+	if params.RequireHumanApprovalForExternalEffects != nil {
+		details["require_human_approval_for_external_effects"] = *params.RequireHumanApprovalForExternalEffects
+	}
+	if params.ReviewCadence != nil {
+		details["review_cadence"] = *params.ReviewCadence
+	}
+	if len(details) == 0 {
+		return "", "", false, nil
+	}
+	payload, err := json.Marshal(details)
+	if err != nil {
+		return "", "", false, err
+	}
+	return "Updated operating profile", string(payload), true, nil
 }

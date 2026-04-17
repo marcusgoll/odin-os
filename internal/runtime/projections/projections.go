@@ -162,6 +162,7 @@ type WorkspaceOverviewView struct {
 	PendingApprovalCount  int    `json:"pending_approval_count"`
 	OpenIncidentCount     int    `json:"open_incident_count"`
 	BlockedWorkItemCount  int    `json:"blocked_work_item_count"`
+	OverdueFollowUpCount  int    `json:"overdue_follow_up_count"`
 }
 
 type InitiativePortfolioView struct {
@@ -180,6 +181,7 @@ type InitiativePortfolioView struct {
 	PendingApprovalCount int     `json:"pending_approval_count"`
 	OpenIncidentCount    int     `json:"open_incident_count"`
 	BlockedWorkItemCount int     `json:"blocked_work_item_count"`
+	OverdueFollowUpCount int     `json:"overdue_follow_up_count"`
 }
 
 type CompanionAssignmentView struct {
@@ -195,6 +197,7 @@ type CompanionAssignmentView struct {
 	ActiveRunCount       int    `json:"active_run_count"`
 	PendingApprovalCount int    `json:"pending_approval_count"`
 	BlockedWorkItemCount int    `json:"blocked_work_item_count"`
+	OverdueFollowUpCount int    `json:"overdue_follow_up_count"`
 }
 
 type LearningProposalView struct {
@@ -1012,6 +1015,7 @@ func ListProjectPortfolioViews(ctx context.Context, queryer Queryer) ([]ProjectP
 }
 
 func GetWorkspaceOverviewView(ctx context.Context, queryer Queryer, workspaceKey string) (WorkspaceOverviewView, error) {
+	overdueBefore := time.Now().UTC().Add(-followupschedule.DefaultOverdueGrace).Format(time.RFC3339Nano)
 	rows, err := queryer.QueryContext(ctx, `
 		SELECT
 			w.id,
@@ -1046,11 +1050,16 @@ func GetWorkspaceOverviewView(ctx context.Context, queryer Queryer, workspaceKey
 			 LEFT JOIN incidents i ON i.run_id = r.id AND i.status = 'open'
 			 LEFT JOIN context_packets cp ON cp.task_id = t.id AND cp.packet_scope = 'task_wake_packet' AND cp.status = 'active'
 			 WHERE t.workspace_id = w.id
-			   AND (a.id IS NOT NULL OR i.id IS NOT NULL OR cp.id IS NOT NULL)) AS blocked_work_item_count
+			   AND (a.id IS NOT NULL OR i.id IS NOT NULL OR cp.id IS NOT NULL)) AS blocked_work_item_count,
+			(SELECT COUNT(*)
+			 FROM follow_up_obligations fo
+			 WHERE fo.workspace_id = w.id
+			   AND fo.status = 'active'
+			   AND fo.next_due_at <= ?) AS overdue_follow_up_count
 		FROM workspaces w
 		WHERE w.key = ?
 		LIMIT 1
-	`, workspaceKey)
+	`, overdueBefore, workspaceKey)
 	if err != nil {
 		return WorkspaceOverviewView{}, err
 	}
@@ -1078,6 +1087,7 @@ func GetWorkspaceOverviewView(ctx context.Context, queryer Queryer, workspaceKey
 		&view.PendingApprovalCount,
 		&view.OpenIncidentCount,
 		&view.BlockedWorkItemCount,
+		&view.OverdueFollowUpCount,
 	); err != nil {
 		return WorkspaceOverviewView{}, err
 	}
@@ -1085,6 +1095,7 @@ func GetWorkspaceOverviewView(ctx context.Context, queryer Queryer, workspaceKey
 }
 
 func ListInitiativePortfolioViews(ctx context.Context, queryer Queryer, workspaceKey string) ([]InitiativePortfolioView, error) {
+	overdueBefore := time.Now().UTC().Add(-followupschedule.DefaultOverdueGrace).Format(time.RFC3339Nano)
 	rows, err := queryer.QueryContext(ctx, `
 		SELECT
 			i.id,
@@ -1121,14 +1132,19 @@ func ListInitiativePortfolioViews(ctx context.Context, queryer Queryer, workspac
 			 LEFT JOIN incidents inc ON inc.run_id = r.id AND inc.status = 'open'
 			 LEFT JOIN context_packets cp ON cp.task_id = t.id AND cp.packet_scope = 'task_wake_packet' AND cp.status = 'active'
 			 WHERE t.initiative_id = i.id
-			   AND (a.id IS NOT NULL OR inc.id IS NOT NULL OR cp.id IS NOT NULL)) AS blocked_work_item_count
+			   AND (a.id IS NOT NULL OR inc.id IS NOT NULL OR cp.id IS NOT NULL)) AS blocked_work_item_count,
+			(SELECT COUNT(*)
+			 FROM follow_up_obligations fo
+			 WHERE fo.initiative_id = i.id
+			   AND fo.status = 'active'
+			   AND fo.next_due_at <= ?) AS overdue_follow_up_count
 		FROM initiatives i
 		JOIN workspaces w ON w.id = i.workspace_id
 		LEFT JOIN companions c ON c.id = i.owner_companion_id
 		LEFT JOIN projects p ON p.id = i.linked_project_id
 		WHERE w.key = ?
 		ORDER BY i.id ASC
-	`, workspaceKey)
+	`, overdueBefore, workspaceKey)
 	if err != nil {
 		return nil, err
 	}
@@ -1155,6 +1171,7 @@ func ListInitiativePortfolioViews(ctx context.Context, queryer Queryer, workspac
 			&view.PendingApprovalCount,
 			&view.OpenIncidentCount,
 			&view.BlockedWorkItemCount,
+			&view.OverdueFollowUpCount,
 		); err != nil {
 			return nil, err
 		}
@@ -1166,6 +1183,7 @@ func ListInitiativePortfolioViews(ctx context.Context, queryer Queryer, workspac
 }
 
 func ListCompanionAssignmentViews(ctx context.Context, queryer Queryer, workspaceKey string) ([]CompanionAssignmentView, error) {
+	overdueBefore := time.Now().UTC().Add(-followupschedule.DefaultOverdueGrace).Format(time.RFC3339Nano)
 	rows, err := queryer.QueryContext(ctx, `
 		SELECT
 			c.id,
@@ -1194,12 +1212,17 @@ func ListCompanionAssignmentViews(ctx context.Context, queryer Queryer, workspac
 			 LEFT JOIN incidents inc ON inc.run_id = r.id AND inc.status = 'open'
 			 LEFT JOIN context_packets cp ON cp.task_id = t.id AND cp.packet_scope = 'task_wake_packet' AND cp.status = 'active'
 			 WHERE t.companion_id = c.id
-			   AND (a.id IS NOT NULL OR inc.id IS NOT NULL OR cp.id IS NOT NULL)) AS blocked_work_item_count
+			   AND (a.id IS NOT NULL OR inc.id IS NOT NULL OR cp.id IS NOT NULL)) AS blocked_work_item_count,
+			(SELECT COUNT(*)
+			 FROM follow_up_obligations fo
+			 WHERE fo.companion_id = c.id
+			   AND fo.status = 'active'
+			   AND fo.next_due_at <= ?) AS overdue_follow_up_count
 		FROM companions c
 		JOIN workspaces w ON w.id = c.workspace_id
 		WHERE w.key = ?
 		ORDER BY c.id ASC
-	`, workspaceKey)
+	`, overdueBefore, workspaceKey)
 	if err != nil {
 		return nil, err
 	}
@@ -1221,6 +1244,7 @@ func ListCompanionAssignmentViews(ctx context.Context, queryer Queryer, workspac
 			&view.ActiveRunCount,
 			&view.PendingApprovalCount,
 			&view.BlockedWorkItemCount,
+			&view.OverdueFollowUpCount,
 		); err != nil {
 			return nil, err
 		}
