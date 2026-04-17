@@ -121,6 +121,20 @@ func TestMaintenanceCleanupExpiredRemovesReleasedAndStaleLeases(t *testing.T) {
 	`, staleAt.Format(time.RFC3339Nano), staleAt.Format(time.RFC3339Nano), stale.ID); err != nil {
 		t.Fatalf("force stale heartbeat error = %v", err)
 	}
+	if _, err := store.DB().ExecContext(ctx, `
+		UPDATE runs
+		SET status = 'failed', finished_at = ?, summary = ?
+		WHERE id = ?
+	`, staleAt.Format(time.RFC3339Nano), "orphaned", staleRun.ID); err != nil {
+		t.Fatalf("mark stale run orphaned error = %v", err)
+	}
+	if _, err := store.DB().ExecContext(ctx, `
+		UPDATE tasks
+		SET status = 'failed', current_run_id = NULL, updated_at = ?
+		WHERE id = ?
+	`, staleAt.Format(time.RFC3339Nano), staleTask.ID); err != nil {
+		t.Fatalf("mark stale task orphaned error = %v", err)
+	}
 
 	activeTask, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
 		ProjectID:   project.ID,

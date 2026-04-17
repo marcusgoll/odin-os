@@ -2573,27 +2573,39 @@ func (store *Store) ListHeartbeatEligibleWorktreeLeases(ctx context.Context) ([]
 func (store *Store) ListCleanupEligibleWorktreeLeases(ctx context.Context, staleBefore time.Time) ([]WorktreeLease, error) {
 	rows, err := store.db.QueryContext(ctx, `
 		SELECT
-			id,
-			project_id,
-			task_id,
-			run_id,
-			mode,
-			branch_name,
-			worktree_path,
-			repo_root,
-			state,
-			heartbeat_at,
-			released_at,
-			cleaned_up_at,
-			created_at,
-			updated_at
-		FROM worktree_leases
-		WHERE cleaned_up_at IS NULL
+			wl.id,
+			wl.project_id,
+			wl.task_id,
+			wl.run_id,
+			wl.mode,
+			wl.branch_name,
+			wl.worktree_path,
+			wl.repo_root,
+			wl.state,
+			wl.heartbeat_at,
+			wl.released_at,
+			wl.cleaned_up_at,
+			wl.created_at,
+			wl.updated_at
+		FROM worktree_leases wl
+		WHERE wl.cleaned_up_at IS NULL
 		  AND (
-			state = 'released'
-			OR (state = 'active' AND heartbeat_at < ?)
+			wl.state = 'released'
+			OR (
+				wl.state = 'active'
+				AND wl.heartbeat_at < ?
+				AND NOT EXISTS (
+					SELECT 1
+					FROM tasks t
+					JOIN runs r ON r.id = wl.run_id
+					WHERE t.id = wl.task_id
+					  AND t.current_run_id = wl.run_id
+					  AND t.status IN ('preparing', 'running')
+					  AND r.status IN ('preparing', 'running')
+				)
+			)
 		  )
-		ORDER BY id ASC
+		ORDER BY wl.id ASC
 	`, formatTime(staleBefore))
 	if err != nil {
 		return nil, err

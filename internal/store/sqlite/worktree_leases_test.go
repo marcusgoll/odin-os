@@ -151,6 +151,21 @@ func TestCleanupEligibleWorktreeLeasesIncludesReleasedAndStale(t *testing.T) {
 	`, formatTime(time.Now().UTC().Add(-2*time.Hour)), formatTime(time.Now().UTC().Add(-2*time.Hour)), stale.ID); err != nil {
 		t.Fatalf("force stale heartbeat error = %v", err)
 	}
+	staleOrphanedAt := time.Now().UTC().Add(-90 * time.Minute)
+	if _, err := store.DB().ExecContext(ctx, `
+		UPDATE runs
+		SET status = 'failed', finished_at = ?, summary = ?
+		WHERE id = ?
+	`, formatTime(staleOrphanedAt), "orphaned", staleRun.ID); err != nil {
+		t.Fatalf("mark stale run orphaned error = %v", err)
+	}
+	if _, err := store.DB().ExecContext(ctx, `
+		UPDATE tasks
+		SET status = 'failed', current_run_id = NULL, updated_at = ?
+		WHERE id = ?
+	`, formatTime(staleOrphanedAt), staleTask.ID); err != nil {
+		t.Fatalf("mark stale task orphaned error = %v", err)
+	}
 
 	activeTask, err := store.CreateTask(ctx, CreateTaskParams{
 		ProjectID:   project.ID,
@@ -208,6 +223,44 @@ func TestCleanupEligibleWorktreeLeasesIncludesReleasedAndStale(t *testing.T) {
 	}
 	if found[active.ID] {
 		t.Fatalf("active lease %d unexpectedly marked cleanup eligible", active.ID)
+	}
+}
+
+func TestCleanupEligibleWorktreeLeasesExcludesStaleLiveLease(t *testing.T) {
+	ctx := context.Background()
+	store := openMigratedTestStore(t, "worktree-lease-live-cleanup.db")
+	defer store.Close()
+
+	project, task, run := seedContextPacketTask(t, ctx, store)
+
+	lease, err := store.CreateWorktreeLease(ctx, CreateWorktreeLeaseParams{
+		ProjectID:    project.ID,
+		TaskID:       task.ID,
+		RunID:        run.ID,
+		Mode:         "mutable",
+		BranchName:   "odin/cfipros/task-1/run-1/try-1",
+		WorktreePath: "/tmp/odin/cfipros/task-1/run-1/try-1",
+		RepoRoot:     project.GitRoot,
+		State:        "active",
+	})
+	if err != nil {
+		t.Fatalf("CreateWorktreeLease() error = %v", err)
+	}
+	staleAt := time.Now().UTC().Add(-2 * time.Hour)
+	if _, err := store.DB().ExecContext(ctx, `
+		UPDATE worktree_leases
+		SET heartbeat_at = ?, updated_at = ?
+		WHERE id = ?
+	`, formatTime(staleAt), formatTime(staleAt), lease.ID); err != nil {
+		t.Fatalf("force stale heartbeat error = %v", err)
+	}
+
+	eligible, err := store.ListCleanupEligibleWorktreeLeases(ctx, time.Now().UTC().Add(-30*time.Minute))
+	if err != nil {
+		t.Fatalf("ListCleanupEligibleWorktreeLeases() error = %v", err)
+	}
+	if len(eligible) != 0 {
+		t.Fatalf("ListCleanupEligibleWorktreeLeases() len = %d, want 0 for live lease", len(eligible))
 	}
 }
 
