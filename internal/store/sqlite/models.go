@@ -86,6 +86,10 @@ type UpsertCompanionParams struct {
 	PlanningPolicyJSON  string
 }
 
+type ListCompanionsParams struct {
+	WorkspaceID int64
+}
+
 type ManagedProjectRegistrationParams struct {
 	Workspace CreateWorkspaceParams
 	Project   UpsertProjectParams

@@ -48,6 +48,23 @@ func (service Service) GetCompanionByKey(ctx context.Context, workspaceID int64,
 	return toDomainCompanion(record), nil
 }
 
+func (service Service) ListCompanions(ctx context.Context, workspaceID int64) ([]Companion, error) {
+	if service.Store == nil {
+		return nil, fmt.Errorf("companion store is required")
+	}
+
+	records, err := service.Store.ListCompanionsByWorkspace(ctx, sqlite.ListCompanionsParams{WorkspaceID: workspaceID})
+	if err != nil {
+		return nil, err
+	}
+
+	companionList := make([]Companion, 0, len(records))
+	for _, record := range records {
+		companionList = append(companionList, toDomainCompanion(record))
+	}
+	return companionList, nil
+}
+
 func toDomainCompanion(record sqlite.Companion) Companion {
 	return Companion{
 		ID:                  record.ID,

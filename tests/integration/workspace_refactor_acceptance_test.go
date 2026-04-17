@@ -107,6 +107,29 @@ func TestWorkspaceRefactorAcceptance(t *testing.T) {
 		}
 	})
 
+	t.Run("companion lifecycle commands manage durable companion state", func(t *testing.T) {
+		runtimeRoot := t.TempDir()
+
+		createOutput, err := runOdinCommand(t, repoRoot, odinBinary, runtimeRoot, nil, "", "companion", "create", "--kind", "advisor", "--key", "finance", "--title", "Finance Advisor")
+		if err != nil {
+			t.Fatalf("runOdinCommand(companion create) error = %v\n%s", err, createOutput)
+		}
+		if !strings.Contains(createOutput, "finance") {
+			t.Fatalf("companion create output = %q, want finance", createOutput)
+		}
+
+		listOutput, err := runOdinCommand(t, repoRoot, odinBinary, runtimeRoot, nil, "", "companion", "list", "--json")
+		if err != nil {
+			t.Fatalf("runOdinCommand(companion list --json) error = %v\n%s", err, listOutput)
+		}
+		if !strings.Contains(listOutput, `"key": "finance"`) {
+			t.Fatalf("companion list output = %q, want finance entry", listOutput)
+		}
+		if !strings.Contains(listOutput, `"kind": "advisor"`) {
+			t.Fatalf("companion list output = %q, want advisor kind", listOutput)
+		}
+	})
+
 	t.Run("a companion can own a work item", func(t *testing.T) {
 		runtimeRoot := t.TempDir()
 		output, err := runOdinCommand(t, repoRoot, odinBinary, runtimeRoot, nil, "/project odin-core\n/mode act\nworkspace acceptance work item\n/quit\n", "repl")

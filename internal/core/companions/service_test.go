@@ -184,6 +184,75 @@ func TestCompanionServiceDefaultsEmptyPolicyFields(t *testing.T) {
 	}
 }
 
+func TestCompanionServiceListsCompanions(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openCompanionServiceStore(t)
+	defer store.Close()
+
+	workspace, err := store.GetWorkspaceByKey(ctx, "default")
+	if err != nil {
+		t.Fatalf("GetWorkspaceByKey(default) error = %v", err)
+	}
+
+	service := Service{Store: store}
+
+	first, err := service.UpsertCompanion(ctx, Companion{
+		WorkspaceID:         workspace.ID,
+		Key:                 "finance",
+		Title:               "Finance Advisor",
+		Kind:                KindAdvisor,
+		Charter:             "Keep finance decisions clear.",
+		Status:              "active",
+		InitiativeScopeJSON: `{"initiatives":["finance"]}`,
+		ToolPolicyJSON:      `{}`,
+		MemoryPolicyJSON:    `{}`,
+		PlanningPolicyJSON:  `{}`,
+	})
+	if err != nil {
+		t.Fatalf("UpsertCompanion(finance) error = %v", err)
+	}
+
+	second, err := service.UpsertCompanion(ctx, Companion{
+		WorkspaceID:         workspace.ID,
+		Key:                 "ops",
+		Title:               "Operations Specialist",
+		Kind:                KindSpecialist,
+		Charter:             "Keep operations moving.",
+		Status:              "active",
+		InitiativeScopeJSON: `{"initiatives":["ops"]}`,
+		ToolPolicyJSON:      `{}`,
+		MemoryPolicyJSON:    `{}`,
+		PlanningPolicyJSON:  `{}`,
+	})
+	if err != nil {
+		t.Fatalf("UpsertCompanion(ops) error = %v", err)
+	}
+
+	companionList, err := service.ListCompanions(ctx, workspace.ID)
+	if err != nil {
+		t.Fatalf("ListCompanions() error = %v", err)
+	}
+	if len(companionList) < 2 {
+		t.Fatalf("ListCompanions() len = %d, want at least 2", len(companionList))
+	}
+
+	foundFirst := false
+	foundSecond := false
+	for _, companion := range companionList {
+		switch companion.ID {
+		case first.ID:
+			foundFirst = true
+		case second.ID:
+			foundSecond = true
+		}
+	}
+	if !foundFirst || !foundSecond {
+		t.Fatalf("ListCompanions() = %+v, want finance and ops companions", companionList)
+	}
+}
+
 func openCompanionServiceStore(t *testing.T) *sqlite.Store {
 	t.Helper()
 

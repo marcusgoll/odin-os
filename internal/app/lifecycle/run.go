@@ -25,6 +25,7 @@ import (
 	"odin-os/internal/cli/scope"
 	clistate "odin-os/internal/cli/state"
 	"odin-os/internal/core/capabilities"
+	"odin-os/internal/core/companions"
 	"odin-os/internal/core/initiatives"
 	"odin-os/internal/core/projects"
 	"odin-os/internal/core/workspaces"
@@ -45,7 +46,7 @@ import (
 
 var errRuntimeNotReady = errors.New("runtime not ready")
 
-const rootUsageBanner = "Usage: odin <command> [args]\n\nCommands: help repl doctor healthcheck serve backup restore verify-backup status project scope jobs runs approvals logs task initiative transition skills"
+const rootUsageBanner = "Usage: odin <command> [args]\n\nCommands: help repl doctor healthcheck serve backup restore verify-backup status project scope jobs runs approvals logs task initiative companion transition skills"
 
 var (
 	serveTaskLoopInterval     = 1 * time.Second
@@ -122,6 +123,8 @@ func Run(ctx context.Context, root string, args []string, stdin io.Reader, stdou
 		return runTask(ctx, app, rootCommand.Args, stdout)
 	case "initiative":
 		return runInitiative(ctx, app, rootCommand.Args, stdout)
+	case "companion":
+		return runCompanion(ctx, app, rootCommand.Args, stdout)
 	case "transition":
 		return runTransition(ctx, app, rootCommand.Args, stdout)
 	case "skills":
@@ -542,6 +545,84 @@ func runInitiative(ctx context.Context, app bootstrap.App, args []string, stdout
 		return nil
 	default:
 		return fmt.Errorf("unsupported initiative subcommand: %s", command.Name)
+	}
+}
+
+func runCompanion(ctx context.Context, app bootstrap.App, args []string, stdout io.Writer) error {
+	command, err := commands.ParseCompanion(args)
+	if err != nil {
+		return err
+	}
+
+	workspace, err := workspaces.Service{Store: app.Store}.BootstrapDefaultWorkspace(ctx)
+	if err != nil {
+		return err
+	}
+
+	service := companions.Service{Store: app.Store}
+
+	switch command.Name {
+	case "create":
+		companion, err := service.UpsertCompanion(ctx, companions.Companion{
+			WorkspaceID:         workspace.ID,
+			Key:                 command.Key,
+			Title:               command.Title,
+			Kind:                companions.Kind(command.Kind),
+			Charter:             "",
+			Status:              "active",
+			InitiativeScopeJSON: `{}`,
+			ToolPolicyJSON:      `{}`,
+			MemoryPolicyJSON:    `{}`,
+			PlanningPolicyJSON:  `{}`,
+		})
+		if err != nil {
+			return err
+		}
+
+		view := commands.CompanionView{
+			ID:     companion.ID,
+			Key:    companion.Key,
+			Title:  companion.Title,
+			Kind:   string(companion.Kind),
+			Status: companion.Status,
+		}
+		if command.JSON {
+			return commands.WriteJSON(stdout, view)
+		}
+		_, err = fmt.Fprintf(stdout, "created companion key=%s kind=%s status=%s\n", view.Key, view.Kind, view.Status)
+		return err
+	case "list":
+		companionList, err := service.ListCompanions(ctx, workspace.ID)
+		if err != nil {
+			return err
+		}
+
+		views := make([]commands.CompanionView, 0, len(companionList))
+		for _, companion := range companionList {
+			views = append(views, commands.CompanionView{
+				ID:     companion.ID,
+				Key:    companion.Key,
+				Title:  companion.Title,
+				Kind:   string(companion.Kind),
+				Status: companion.Status,
+			})
+		}
+
+		if command.JSON {
+			return commands.WriteJSON(stdout, commands.CompanionListView{Companions: views})
+		}
+		if len(views) == 0 {
+			_, err := fmt.Fprintln(stdout, "no companions")
+			return err
+		}
+		for _, view := range views {
+			if _, err := fmt.Fprintf(stdout, "%s kind=%s status=%s title=%s\n", view.Key, view.Kind, view.Status, view.Title); err != nil {
+				return err
+			}
+		}
+		return nil
+	default:
+		return fmt.Errorf("unsupported companion subcommand: %s", command.Name)
 	}
 }
 

@@ -2773,6 +2773,43 @@ func (store *Store) GetCompanionByKey(ctx context.Context, workspaceID int64, ke
 	return scanCompanion(row)
 }
 
+func (store *Store) ListCompanionsByWorkspace(ctx context.Context, params ListCompanionsParams) ([]Companion, error) {
+	rows, err := store.db.QueryContext(ctx, `
+		SELECT
+			id,
+			workspace_id,
+			key,
+			title,
+			kind,
+			charter,
+			status,
+			initiative_scope_json,
+			tool_policy_json,
+			memory_policy_json,
+			planning_policy_json,
+			created_at,
+			updated_at
+		FROM companions
+		WHERE workspace_id = ?
+		ORDER BY id ASC
+	`, params.WorkspaceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var companions []Companion
+	for rows.Next() {
+		record, err := scanCompanion(rows)
+		if err != nil {
+			return nil, err
+		}
+		companions = append(companions, record)
+	}
+
+	return companions, rows.Err()
+}
+
 func (store *Store) GetRun(ctx context.Context, runID int64) (Run, error) {
 	row := store.db.QueryRowContext(ctx, `
 		SELECT id, task_id, executor, status, attempt, started_at, finished_at, summary, terminal_reason, artifacts_json
