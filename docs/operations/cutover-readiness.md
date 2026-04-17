@@ -46,6 +46,7 @@ Use this checklist before treating Odin OS as the active homelab controller.
 ## Media profile
 
 - media supervision is enabled only through the bounded media profile contract
+- `make test-media` passes against the current repo state before cutover
 - mount audit passes before any approved media maintenance
 - safe automatic actions, approval-required actions, and forbidden actions have been reviewed for the media profile
 - operator has reviewed explicit safe vs unsafe media automation boundaries

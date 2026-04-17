@@ -552,7 +552,10 @@ func TestAlphaAcceptance(t *testing.T) {
 		defer store.Close()
 		seedHealthyObservability(t, ctx, store, now)
 
-		report, err := healthsvc.Service{DB: store.DB()}.Doctor(ctx, true)
+		report, err := healthsvc.Service{
+			DB:  store.DB(),
+			Now: func() time.Time { return now },
+		}.Doctor(ctx, true)
 		if err != nil {
 			t.Fatalf("Doctor() error = %v", err)
 		}
@@ -560,7 +563,10 @@ func TestAlphaAcceptance(t *testing.T) {
 			t.Fatalf("Doctor() = %+v, want healthy report with checks", report)
 		}
 
-		snapshot, err := metrics.Service{DB: store.DB()}.Collect(ctx)
+		snapshot, err := metrics.Service{
+			DB:  store.DB(),
+			Now: func() time.Time { return now },
+		}.Collect(ctx)
 		if err != nil {
 			t.Fatalf("Collect() error = %v", err)
 		}
