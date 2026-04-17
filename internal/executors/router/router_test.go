@@ -244,6 +244,60 @@ routes:
 	}
 }
 
+func TestRouteSelectionRejectsProvidersMissingStreamingSupport(t *testing.T) {
+	t.Parallel()
+
+	configPath := writeRouterConfig(t, `
+version: 1
+executors:
+  - key: openai_api
+    adapter: openai_api
+    class: api_executor
+    enabled: true
+    priority: 20
+routes:
+  - name: default
+    match:
+      task_kinds: [research]
+      scopes: [global]
+    preferred: [openai_api]
+`)
+
+	cfg, err := LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig() error = %v", err)
+	}
+
+	selector := Selector{
+		Config: cfg,
+		Executors: map[string]contract.Executor{
+			"openai_api": contract.NewStaticExecutor(
+				"openai_api",
+				contract.ExecutorClassAPI,
+				contract.HealthReport{Status: contract.HealthStatusHealthy, CheckedAt: time.Now().UTC()},
+				contract.Capabilities{
+					ExecutorClass: contract.ExecutorClassAPI,
+					TaskKinds:     []contract.TaskKind{contract.TaskKindResearch},
+					Scopes:        []string{"global"},
+				},
+			),
+		},
+	}
+
+	_, err = selector.Select(context.Background(), contract.TaskSpec{
+		ID:    "task-4",
+		Kind:  contract.TaskKindResearch,
+		Scope: "global",
+		Requirements: contract.Requirements{
+			AllowedClasses: []contract.ExecutorClass{contract.ExecutorClassAPI},
+			NeedsStreaming: true,
+		},
+	})
+	if err == nil {
+		t.Fatalf("Select() error = nil, want streaming capability rejection")
+	}
+}
+
 func writeRouterConfig(t *testing.T, content string) string {
 	t.Helper()
 

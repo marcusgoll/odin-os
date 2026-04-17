@@ -3,6 +3,7 @@ package broker
 import (
 	"fmt"
 
+	integrationtools "odin-os/internal/integrations/tools"
 	"odin-os/internal/registry"
 	"odin-os/internal/tools/budgets"
 	"odin-os/internal/tools/catalog"
@@ -160,7 +161,33 @@ func (broker *Broker) InvokeTool(key string, input map[string]string) (catalog.S
 	if definition.Invoke == nil {
 		return catalog.StructuredResult{}, fmt.Errorf("tool %q is not invokable", key)
 	}
-	return definition.Invoke(input)
+
+	service := integrationtools.Service{
+		Definitions: broker.builtins,
+	}
+	result, err := service.Invoke(integrationtools.ToolRequest{
+		ToolKey:    key,
+		Scope:      input["scope"],
+		Parameters: input,
+	})
+	if err != nil {
+		return catalog.StructuredResult{}, err
+	}
+
+	artifacts := make([]string, 0, len(result.Artifacts))
+	for _, artifact := range result.Artifacts {
+		artifacts = append(artifacts, artifact.Ref)
+	}
+
+	return catalog.StructuredResult{
+		CapabilityKey:   result.ToolKey,
+		Summary:         result.Summary,
+		Artifacts:       artifacts,
+		KeyFacts:        cloneStringMap(result.KeyFacts),
+		FollowOnOptions: append([]string(nil), result.FollowOnOptions...),
+		RawRef:          result.RawRef,
+		RawOutput:       result.RawOutput,
+	}, nil
 }
 
 func (broker *Broker) Compact(result catalog.StructuredResult) (catalog.CompactedResult, error) {

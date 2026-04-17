@@ -52,6 +52,7 @@ type Requirements struct {
 	NeedsResume         bool
 	NeedsCancel         bool
 	NeedsTools          bool
+	NeedsStreaming      bool
 	NeedsCostEstimate   bool
 	NeedsHeadlessPlan   bool
 	NeedsBrokerFallback bool
@@ -105,6 +106,7 @@ type Capabilities struct {
 	SupportsResume        bool
 	SupportsCancel        bool
 	SupportsTools         bool
+	SupportsStreaming     bool
 	SupportsCostEstimate  bool
 	SupportsHeadlessPlan  bool
 	SupportsBrokerRouting bool
@@ -129,6 +131,9 @@ func (capabilities Capabilities) Matches(spec TaskSpec) bool {
 		return false
 	}
 	if spec.Requirements.NeedsTools && !capabilities.SupportsTools {
+		return false
+	}
+	if spec.Requirements.NeedsStreaming && !capabilities.SupportsStreaming {
 		return false
 	}
 	if spec.Requirements.NeedsCostEstimate && !capabilities.SupportsCostEstimate {
