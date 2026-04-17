@@ -41,6 +41,14 @@ type ActionInput struct {
 	ActionKey   string
 }
 
+type ExecutionAuthorizationInput struct {
+	ProjectID   int64
+	Manifest    Manifest
+	Actor       TransitionController
+	ActionClass ActionClass
+	ActionKey   string
+}
+
 func (service Service) SetTransitionState(ctx context.Context, input TransitionStateInput) (sqlite.ProjectTransition, error) {
 	if service.Store == nil {
 		return sqlite.ProjectTransition{}, fmt.Errorf("transition store is required")
@@ -114,6 +122,19 @@ func (service Service) AuthorizeAction(ctx context.Context, input ActionInput) (
 	}
 
 	return decision, nil
+}
+
+func (service Service) AuthorizeExecutionMutation(ctx context.Context, input ExecutionAuthorizationInput) error {
+	if err := ValidateSystemProjectMutation(input.Manifest); err != nil {
+		return err
+	}
+	_, err := service.AuthorizeAction(ctx, ActionInput{
+		ProjectID:   input.ProjectID,
+		Actor:       input.Actor,
+		ActionClass: input.ActionClass,
+		ActionKey:   input.ActionKey,
+	})
+	return err
 }
 
 func (service Service) RegisterManagedProjectInitiative(ctx context.Context, workspaceID int64, project sqlite.Project, ownerCompanionID *int64) (initiatives.Initiative, error) {

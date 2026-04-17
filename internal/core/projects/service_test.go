@@ -156,6 +156,48 @@ func TestTransitionServiceLimitedActionAllowsOnlyConfiguredLowRiskAction(t *test
 	}
 }
 
+func TestGovernanceAuthorizeExecutionMutationRejectsSystemProjectWithoutExplicitApproval(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openTransitionServiceStore(t)
+	defer store.Close()
+
+	project := createTransitionServiceProject(t, ctx, store, "odin-core")
+	service := Service{Store: store}
+
+	if _, err := service.SetTransitionState(ctx, TransitionStateInput{
+		ProjectID:   project.ID,
+		Actor:       TransitionControllerOdinOS,
+		TargetState: TransitionStateCutover,
+		ChangedBy:   "operator",
+	}); err != nil {
+		t.Fatalf("SetTransitionState(cutover) error = %v", err)
+	}
+
+	manifest := Manifest{
+		Key:           "odin-core",
+		Name:          "Odin Core",
+		SystemProject: true,
+		Policy: Policy{
+			ApprovalGates: ApprovalGates{
+				RequireForSystemProjectChanges: boolPtr(true),
+			},
+		},
+	}
+
+	err := service.AuthorizeExecutionMutation(ctx, ExecutionAuthorizationInput{
+		ProjectID:   project.ID,
+		Manifest:    manifest,
+		Actor:       TransitionControllerOdinOS,
+		ActionClass: ActionClassIsolatedMutation,
+		ActionKey:   "run_task",
+	})
+	if err == nil {
+		t.Fatal("AuthorizeExecutionMutation() error = nil, want system-project rejection")
+	}
+}
+
 func TestProjectServiceRegistersManagedProjectInitiative(t *testing.T) {
 	t.Parallel()
 
@@ -362,4 +404,8 @@ func createTransitionServiceProject(t *testing.T, ctx context.Context, store *sq
 		t.Fatalf("CreateProject() error = %v", err)
 	}
 	return project
+}
+
+func boolPtr(value bool) *bool {
+	return &value
 }

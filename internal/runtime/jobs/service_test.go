@@ -36,6 +36,21 @@ func TestFinalizeTaskOutcomeDelegatesRawExecutorStatusToWorkItems(t *testing.T) 
 	}
 }
 
+func TestExecuteNextQueuedDelegatesToExecutionService(t *testing.T) {
+	t.Parallel()
+
+	executor := &recordingQueueExecutor{err: context.Canceled}
+	service := Service{Execution: executor}
+
+	err := service.ExecuteNextQueued(context.Background())
+	if err != context.Canceled {
+		t.Fatalf("ExecuteNextQueued() error = %v, want %v", err, context.Canceled)
+	}
+	if !executor.called {
+		t.Fatal("ExecuteNextQueued() did not delegate to execution service")
+	}
+}
+
 func TestResolutionCreateTaskFromActUsesControlScope(t *testing.T) {
 	t.Parallel()
 
@@ -673,6 +688,16 @@ func TestExecuteNextQueuedAbandonsRunWhenTaskCompletesBeforeStart(t *testing.T) 
 type recordingTaskFinalizer struct {
 	taskID int64
 	status string
+}
+
+type recordingQueueExecutor struct {
+	called bool
+	err    error
+}
+
+func (executor *recordingQueueExecutor) ExecuteNextQueued(context.Context) error {
+	executor.called = true
+	return executor.err
 }
 
 func (finalizer *recordingTaskFinalizer) Finalize(_ context.Context, taskID int64, status string) (sqlite.Task, error) {

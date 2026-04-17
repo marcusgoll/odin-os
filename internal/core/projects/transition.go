@@ -126,3 +126,28 @@ func containsString(values []string, target string) bool {
 	}
 	return false
 }
+
+type MutationAssignment struct {
+	BranchName   string
+	WorktreePath string
+}
+
+func ValidateSystemProjectMutation(manifest Manifest) error {
+	if manifest.SystemProject && manifest.Policy.ApprovalGates.RequireForSystemProjectChanges != nil && *manifest.Policy.ApprovalGates.RequireForSystemProjectChanges {
+		return fmt.Errorf("system project %q requires explicit approval for mutations", manifest.Key)
+	}
+	return nil
+}
+
+func ValidateMutationAssignment(manifest Manifest, gitRoot string, defaultBranch string, assignment MutationAssignment) error {
+	if manifest.Policy.BranchRules.RequireWorktree != nil && *manifest.Policy.BranchRules.RequireWorktree && assignment.WorktreePath == gitRoot {
+		return fmt.Errorf("project %q requires an isolated worktree", manifest.Key)
+	}
+	if manifest.Policy.BranchRules.RequireTaskBranch != nil && *manifest.Policy.BranchRules.RequireTaskBranch && assignment.BranchName == "" {
+		return fmt.Errorf("project %q requires a task-owned branch", manifest.Key)
+	}
+	if manifest.Policy.BranchRules.AllowDefaultBranchMutation != nil && !*manifest.Policy.BranchRules.AllowDefaultBranchMutation && assignment.BranchName == defaultBranch {
+		return fmt.Errorf("project %q cannot mutate the default branch directly", manifest.Key)
+	}
+	return nil
+}
