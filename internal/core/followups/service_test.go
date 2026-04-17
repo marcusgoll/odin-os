@@ -333,7 +333,7 @@ func TestFollowUpCompleteRecurringObligationAdvancesNextDueAt(t *testing.T) {
 		t.Fatalf("Create() error = %v", err)
 	}
 
-	updated, err := service.Complete(ctx, obligation.ID)
+	updated, err := service.Complete(ctx, workspaceID, obligation.ID)
 	if err != nil {
 		t.Fatalf("Complete() error = %v", err)
 	}
@@ -378,7 +378,7 @@ func TestFollowUpSnoozeMovesNextDueAtForward(t *testing.T) {
 	}
 
 	until := now.Add(48 * time.Hour)
-	updated, err := service.Snooze(ctx, obligation.ID, until)
+	updated, err := service.Snooze(ctx, workspaceID, obligation.ID, until)
 	if err != nil {
 		t.Fatalf("Snooze() error = %v", err)
 	}
@@ -444,4 +444,73 @@ func seedFollowUpContext(t *testing.T, ctx context.Context, store *sqlite.Store)
 	}
 
 	return workspace.ID, initiative.ID, companion.ID, project.ID
+}
+
+func TestFollowUpMutationRejectsCrossWorkspaceAccess(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openFollowUpStore(t)
+	defer store.Close()
+
+	now := time.Date(2026, 4, 17, 12, 0, 0, 0, time.UTC)
+	workspaceID, _, _, _ := seedFollowUpContext(t, ctx, store)
+	otherWorkspace, err := store.CreateWorkspace(ctx, sqlite.CreateWorkspaceParams{
+		Key:                 "secondary",
+		Name:                "Secondary Workspace",
+		OwnerRef:            "operator",
+		DefaultCompanionKey: "assistant",
+		Status:              "active",
+		PolicyJSON:          `{}`,
+	})
+	if err != nil {
+		t.Fatalf("CreateWorkspace() error = %v", err)
+	}
+	otherCompanion, err := store.UpsertCompanion(ctx, sqlite.UpsertCompanionParams{
+		WorkspaceID: otherWorkspace.ID,
+		Key:         "assistant",
+		Title:       "Assistant",
+		Kind:        "assistant",
+		Status:      "active",
+	})
+	if err != nil {
+		t.Fatalf("UpsertCompanion() error = %v", err)
+	}
+	otherInitiative, err := store.UpsertInitiative(ctx, sqlite.UpsertInitiativeParams{
+		WorkspaceID:      otherWorkspace.ID,
+		Key:              "other-life-admin",
+		Title:            "Other Life Admin",
+		Kind:             "routine",
+		Status:           "active",
+		OwnerCompanionID: &otherCompanion.ID,
+	})
+	if err != nil {
+		t.Fatalf("UpsertInitiative() error = %v", err)
+	}
+
+	service := Service{
+		Store: store,
+		Now: func() time.Time {
+			return now
+		},
+	}
+
+	obligation, err := service.Create(ctx, CreateParams{
+		WorkspaceID:  otherWorkspace.ID,
+		InitiativeID: &otherInitiative.ID,
+		Title:        "Cross workspace follow-up",
+		Cadence:      Cadence{Mode: CadenceModeOnce},
+		NextDueAt:    now.Add(-time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+
+	if _, err := service.Complete(ctx, workspaceID, obligation.ID); err == nil {
+		t.Fatal("Complete() error = nil, want cross-workspace rejection")
+	}
+
+	if _, err := service.Snooze(ctx, workspaceID, obligation.ID, now.Add(time.Hour)); err == nil {
+		t.Fatal("Snooze() error = nil, want cross-workspace rejection")
+	}
 }

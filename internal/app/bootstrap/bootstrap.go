@@ -131,7 +131,7 @@ func load(ctx context.Context, repoRoot string, runtimeRoot string, options load
 		})
 	}
 
-	if err := repairLegacyFollowUpTargets(ctx, store, registryPaths); err != nil {
+	if err := repairLegacyFollowUpTargets(ctx, store, repoRoot); err != nil {
 		_ = store.Close()
 		return App{}, err
 	}
@@ -503,7 +503,7 @@ func listProjectKeys(ctx context.Context, store *sqlite.Store) ([]string, error)
 	return keys, nil
 }
 
-func repairLegacyFollowUpTargets(ctx context.Context, store *sqlite.Store, registryPaths []string) error {
+func repairLegacyFollowUpTargets(ctx context.Context, store *sqlite.Store, repoRoot string) error {
 	if _, err := store.RepairFollowUpObligationLinkedTargets(ctx); err != nil {
 		return err
 	}
@@ -514,36 +514,11 @@ func repairLegacyFollowUpTargets(ctx context.Context, store *sqlite.Store, regis
 		return nil
 	}
 
-	if project, err := store.GetProjectByKey(ctx, "odin-core"); err == nil {
-		if _, err := store.RepairFollowUpObligationTargets(ctx, project.ID); err != nil {
-			return err
-		}
-		return finalizeFollowUpTargetRepair(ctx, store)
-	} else if !errors.Is(err, sql.ErrNoRows) {
-		return err
-	}
-
-	project, ok, err := loadDefaultFollowUpTargetProject(registryPaths)
+	projectID, err := ResolveFollowUpTargetProjectID(ctx, store, repoRoot)
 	if err != nil {
 		return err
 	}
-	if !ok {
-		return fmt.Errorf("default target project odin-core is not configured")
-	}
-
-	record, err := store.UpsertProject(ctx, sqlite.UpsertProjectParams{
-		Key:           project.Key,
-		Name:          project.Name,
-		Scope:         followUpProjectScope(project),
-		GitRoot:       project.GitRoot,
-		DefaultBranch: project.DefaultBranch,
-		GitHubRepo:    project.GitHub.Repo,
-		ManifestPath:  project.SourcePath,
-	})
-	if err != nil {
-		return err
-	}
-	if _, err := store.RepairFollowUpObligationTargets(ctx, record.ID); err != nil {
+	if _, err := store.RepairFollowUpObligationTargets(ctx, projectID); err != nil {
 		return err
 	}
 	return finalizeFollowUpTargetRepair(ctx, store)
@@ -558,6 +533,45 @@ func finalizeFollowUpTargetRepair(ctx context.Context, store *sqlite.Store) erro
 		return fmt.Errorf("follow-up obligations still missing target_project_id after bootstrap repair")
 	}
 	return nil
+}
+
+func ResolveFollowUpTargetProjectID(ctx context.Context, store *sqlite.Store, repoRoot string) (int64, error) {
+	if store == nil {
+		return 0, fmt.Errorf("follow-up store is required")
+	}
+
+	if project, err := store.GetProjectByKey(ctx, "odin-core"); err == nil {
+		return project.ID, nil
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return 0, err
+	}
+
+	registryPaths, err := projectManifestPaths(repoRoot)
+	if err != nil {
+		return 0, err
+	}
+
+	project, ok, err := loadDefaultFollowUpTargetProject(registryPaths)
+	if err != nil {
+		return 0, err
+	}
+	if !ok {
+		return 0, fmt.Errorf("default target project odin-core is not configured")
+	}
+
+	record, err := store.UpsertProject(ctx, sqlite.UpsertProjectParams{
+		Key:           project.Key,
+		Name:          project.Name,
+		Scope:         followUpProjectScope(project),
+		GitRoot:       project.GitRoot,
+		DefaultBranch: project.DefaultBranch,
+		GitHubRepo:    project.GitHub.Repo,
+		ManifestPath:  project.SourcePath,
+	})
+	if err != nil {
+		return 0, err
+	}
+	return record.ID, nil
 }
 
 func countFollowUpObligationsMissingTarget(ctx context.Context, store *sqlite.Store) (int64, error) {

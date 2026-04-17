@@ -2,8 +2,13 @@ package integration_test
 
 import (
 	"context"
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"odin-os/internal/app/bootstrap"
 	"odin-os/internal/core/projects"
@@ -107,15 +112,36 @@ func TestWorkspaceRefactorAcceptance(t *testing.T) {
 		}
 	})
 
-	t.Run("follow-up lifecycle commands manage recurring obligations", func(t *testing.T) {
+	t.Run("follow-up add tolerates unrelated project diagnostics", func(t *testing.T) {
 		runtimeRoot := t.TempDir()
+		overlayPath := filepath.Join(t.TempDir(), "projects.overlay.yaml")
+		overlay := []byte(`version: 1
 
-		createOutput, err := runOdinCommand(t, repoRoot, odinBinary, runtimeRoot, nil, "", "initiative", "create", "--kind", "routine", "--key", "life-admin", "--title", "Life Admin")
+projects:
+  - key: diagnostics-a
+    name: Diagnostics A
+    project_class: system_project
+    system_project: true
+    git_root: ..
+    default_branch: main
+  - key: diagnostics-a
+    name: Diagnostics A Duplicate
+    project_class: system_project
+    system_project: true
+    git_root: ..
+    default_branch: main
+`)
+		if err := os.WriteFile(overlayPath, overlay, 0o644); err != nil {
+			t.Fatalf("WriteFile(projects overlay) error = %v", err)
+		}
+		env := map[string]string{"ODIN_PROJECTS_OVERLAY": overlayPath}
+
+		createOutput, err := runOdinCommand(t, repoRoot, odinBinary, runtimeRoot, env, "", "initiative", "create", "--kind", "routine", "--key", "life-admin", "--title", "Life Admin")
 		if err != nil {
 			t.Fatalf("runOdinCommand(initiative create) error = %v\n%s", err, createOutput)
 		}
 
-		addOutput, err := runOdinCommand(t, repoRoot, odinBinary, runtimeRoot, nil, "", "followup", "add", "--initiative", "life-admin", "--title", "Review mail", "--cadence", "weekly")
+		addOutput, err := runOdinCommand(t, repoRoot, odinBinary, runtimeRoot, env, "", "followup", "add", "--initiative", "life-admin", "--title", "Review mail", "--cadence", "weekly")
 		if err != nil {
 			t.Fatalf("runOdinCommand(followup add) error = %v\n%s", err, addOutput)
 		}
@@ -123,7 +149,7 @@ func TestWorkspaceRefactorAcceptance(t *testing.T) {
 			t.Fatalf("followup add output = %q, want created follow-up", addOutput)
 		}
 
-		listOutput, err := runOdinCommand(t, repoRoot, odinBinary, runtimeRoot, nil, "", "followup", "list", "--json")
+		listOutput, err := runOdinCommand(t, repoRoot, odinBinary, runtimeRoot, env, "", "followup", "list", "--json")
 		if err != nil {
 			t.Fatalf("runOdinCommand(followup list --json) error = %v\n%s", err, listOutput)
 		}
@@ -132,6 +158,59 @@ func TestWorkspaceRefactorAcceptance(t *testing.T) {
 		}
 		if !strings.Contains(listOutput, `"status": "active"`) {
 			t.Fatalf("followup list output = %q, want active status", listOutput)
+		}
+	})
+
+	t.Run("follow-up lifecycle commands complete and snooze through the root surface", func(t *testing.T) {
+		runtimeRoot := t.TempDir()
+
+		createOutput, err := runOdinCommand(t, repoRoot, odinBinary, runtimeRoot, nil, "", "initiative", "create", "--kind", "routine", "--key", "life-admin", "--title", "Life Admin")
+		if err != nil {
+			t.Fatalf("runOdinCommand(initiative create) error = %v\n%s", err, createOutput)
+		}
+
+		recurringAddOutput, err := runOdinCommand(t, repoRoot, odinBinary, runtimeRoot, nil, "", "followup", "add", "--initiative", "life-admin", "--title", "Review mail", "--cadence", "weekly")
+		if err != nil {
+			t.Fatalf("runOdinCommand(followup add recurring) error = %v\n%s", err, recurringAddOutput)
+		}
+		if !strings.Contains(recurringAddOutput, "created follow-up") {
+			t.Fatalf("followup add recurring output = %q, want created follow-up", recurringAddOutput)
+		}
+
+		recurringListOutput, err := runOdinCommand(t, repoRoot, odinBinary, runtimeRoot, nil, "", "followup", "list", "--json")
+		if err != nil {
+			t.Fatalf("runOdinCommand(followup list recurring) error = %v\n%s", err, recurringListOutput)
+		}
+		recurringID := followUpIDFromJSON(t, recurringListOutput, "Review mail")
+
+		completeOutput, err := runOdinCommand(t, repoRoot, odinBinary, runtimeRoot, nil, "", "followup", "complete", strconv.FormatInt(recurringID, 10))
+		if err != nil {
+			t.Fatalf("runOdinCommand(followup complete) error = %v\n%s", err, completeOutput)
+		}
+		if !strings.Contains(completeOutput, "completed follow-up") {
+			t.Fatalf("followup complete output = %q, want completed follow-up", completeOutput)
+		}
+
+		snoozeAddOutput, err := runOdinCommand(t, repoRoot, odinBinary, runtimeRoot, nil, "", "followup", "add", "--initiative", "life-admin", "--title", "Archive receipts", "--cadence", "once")
+		if err != nil {
+			t.Fatalf("runOdinCommand(followup add one-time) error = %v\n%s", err, snoozeAddOutput)
+		}
+		if !strings.Contains(snoozeAddOutput, "created follow-up") {
+			t.Fatalf("followup add one-time output = %q, want created follow-up", snoozeAddOutput)
+		}
+
+		snoozeListOutput, err := runOdinCommand(t, repoRoot, odinBinary, runtimeRoot, nil, "", "followup", "list", "--json")
+		if err != nil {
+			t.Fatalf("runOdinCommand(followup list one-time) error = %v\n%s", err, snoozeListOutput)
+		}
+		snoozeID := followUpIDFromJSON(t, snoozeListOutput, "Archive receipts")
+		until := time.Date(2026, 4, 20, 9, 0, 0, 0, time.UTC).Format(time.RFC3339)
+		snoozeOutput, err := runOdinCommand(t, repoRoot, odinBinary, runtimeRoot, nil, "", "followup", "snooze", strconv.FormatInt(snoozeID, 10), "--until", until)
+		if err != nil {
+			t.Fatalf("runOdinCommand(followup snooze) error = %v\n%s", err, snoozeOutput)
+		}
+		if !strings.Contains(snoozeOutput, "snoozed follow-up") {
+			t.Fatalf("followup snooze output = %q, want snoozed follow-up", snoozeOutput)
 		}
 	})
 
@@ -391,4 +470,25 @@ func containsMemoryContent(entries []sqlite.MemoryEntry, target string) bool {
 		}
 	}
 	return false
+}
+
+func followUpIDFromJSON(t *testing.T, payload string, title string) int64 {
+	t.Helper()
+
+	var parsed struct {
+		Obligations []struct {
+			ID    int64  `json:"id"`
+			Title string `json:"title"`
+		} `json:"obligations"`
+	}
+	if err := json.Unmarshal([]byte(payload), &parsed); err != nil {
+		t.Fatalf("json.Unmarshal(follow-up list) error = %v\npayload=%s", err, payload)
+	}
+	for _, obligation := range parsed.Obligations {
+		if obligation.Title == title {
+			return obligation.ID
+		}
+	}
+	t.Fatalf("follow-up list payload missing title %q: %s", title, payload)
+	return 0
 }

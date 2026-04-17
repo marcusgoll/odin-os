@@ -86,14 +86,20 @@ func (service Service) Get(ctx context.Context, obligationID int64) (FollowUpObl
 	return decode(record)
 }
 
-func (service Service) Complete(ctx context.Context, obligationID int64) (FollowUpObligation, error) {
+func (service Service) Complete(ctx context.Context, workspaceID int64, obligationID int64) (FollowUpObligation, error) {
 	if service.Store == nil {
 		return FollowUpObligation{}, fmt.Errorf("follow-up store is required")
+	}
+	if workspaceID <= 0 {
+		return FollowUpObligation{}, fmt.Errorf("workspace ID is required")
 	}
 
 	obligation, err := service.Get(ctx, obligationID)
 	if err != nil {
 		return FollowUpObligation{}, err
+	}
+	if obligation.WorkspaceID != workspaceID {
+		return FollowUpObligation{}, fmt.Errorf("follow-up obligation %d does not belong to workspace %d", obligation.ID, workspaceID)
 	}
 	if isTerminalFollowUpStatus(obligation.Status) {
 		return FollowUpObligation{}, fmt.Errorf("follow-up obligation %d is already %s", obligation.ID, obligation.Status)
@@ -122,9 +128,12 @@ func (service Service) Complete(ctx context.Context, obligationID int64) (Follow
 	return decode(record)
 }
 
-func (service Service) Snooze(ctx context.Context, obligationID int64, until time.Time) (FollowUpObligation, error) {
+func (service Service) Snooze(ctx context.Context, workspaceID int64, obligationID int64, until time.Time) (FollowUpObligation, error) {
 	if service.Store == nil {
 		return FollowUpObligation{}, fmt.Errorf("follow-up store is required")
+	}
+	if workspaceID <= 0 {
+		return FollowUpObligation{}, fmt.Errorf("workspace ID is required")
 	}
 	if until.IsZero() {
 		return FollowUpObligation{}, fmt.Errorf("snooze until time is required")
@@ -133,6 +142,9 @@ func (service Service) Snooze(ctx context.Context, obligationID int64, until tim
 	obligation, err := service.Get(ctx, obligationID)
 	if err != nil {
 		return FollowUpObligation{}, err
+	}
+	if obligation.WorkspaceID != workspaceID {
+		return FollowUpObligation{}, fmt.Errorf("follow-up obligation %d does not belong to workspace %d", obligation.ID, workspaceID)
 	}
 	if isTerminalFollowUpStatus(obligation.Status) {
 		return FollowUpObligation{}, fmt.Errorf("follow-up obligation %d is already %s", obligation.ID, obligation.Status)

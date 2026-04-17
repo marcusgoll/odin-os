@@ -685,30 +685,7 @@ func followUpTargetProjectID(ctx context.Context, app bootstrap.App, initiative 
 	if initiative.Kind == "managed_project" && initiative.LinkedProjectID != nil {
 		return *initiative.LinkedProjectID, nil
 	}
-
-	project, ok := app.Registry.Lookup("odin-core")
-	if !ok {
-		return 0, fmt.Errorf("default target project odin-core is not configured")
-	}
-
-	scopeValue := "project"
-	if project.SystemProject {
-		scopeValue = "odin-core"
-	}
-
-	record, err := app.Store.UpsertProject(ctx, sqlite.UpsertProjectParams{
-		Key:           project.Key,
-		Name:          project.Name,
-		Scope:         scopeValue,
-		GitRoot:       project.GitRoot,
-		DefaultBranch: project.DefaultBranch,
-		GitHubRepo:    project.GitHub.Repo,
-		ManifestPath:  project.SourcePath,
-	})
-	if err != nil {
-		return 0, err
-	}
-	return record.ID, nil
+	return bootstrap.ResolveFollowUpTargetProjectID(ctx, app.Store, app.RepoRoot)
 }
 
 func runFollowup(ctx context.Context, app bootstrap.App, args []string, stdout io.Writer) error {
@@ -792,7 +769,7 @@ func runFollowup(ctx context.Context, app bootstrap.App, args []string, stdout i
 		}
 		return nil
 	case "complete":
-		obligation, err := service.Complete(ctx, command.ID)
+		obligation, err := service.Complete(ctx, workspace.ID, command.ID)
 		if err != nil {
 			return err
 		}
@@ -803,7 +780,7 @@ func runFollowup(ctx context.Context, app bootstrap.App, args []string, stdout i
 		_, err = fmt.Fprintf(stdout, "completed follow-up id=%d initiative=%s status=%s next_due_at=%s\n", view.ID, view.InitiativeKey, view.Status, view.NextDueAt.UTC().Format(time.RFC3339))
 		return err
 	case "snooze":
-		obligation, err := service.Snooze(ctx, command.ID, command.Until)
+		obligation, err := service.Snooze(ctx, workspace.ID, command.ID, command.Until)
 		if err != nil {
 			return err
 		}
