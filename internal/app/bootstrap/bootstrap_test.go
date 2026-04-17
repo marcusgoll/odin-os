@@ -13,11 +13,11 @@ import (
 	"odin-os/internal/store/sqlite"
 )
 
-func TestLoadInitializesFreshRuntimeReadinessState(t *testing.T) {
+func TestLoadInitializesRuntimeReadinessStateForServeBootstrap(t *testing.T) {
 	repoRoot := filepath.Clean(filepath.Join("..", "..", ".."))
 	runtimeRoot := t.TempDir()
 
-	app, err := Load(context.Background(), repoRoot, runtimeRoot)
+	app, err := Load(bootstrapContextWithBootID(context.Background(), "boot-1"), repoRoot, runtimeRoot)
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}

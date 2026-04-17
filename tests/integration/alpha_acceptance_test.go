@@ -162,12 +162,16 @@ func TestAlphaAcceptance(t *testing.T) {
 		store := openRuntimeStore(t, runtimeRoot)
 		store.Now = func() time.Time { return now }
 		seedHealthyObservability(t, ctx, store, now)
+		driverEnv := acceptanceHarnessDriverEnv(t)
 
 		var serveOutput bytes.Buffer
 		cmd := exec.Command(odinBinary, "serve")
 		cmd.Dir = repoRoot
 		cmd.Env = append([]string{}, os.Environ()...)
 		cmd.Env = append(cmd.Env, "ODIN_ROOT="+runtimeRoot, "ODIN_HTTP_ADDR=127.0.0.1:0")
+		for key, value := range driverEnv {
+			cmd.Env = append(cmd.Env, key+"="+value)
+		}
 		cmd.Stdout = &serveOutput
 		cmd.Stderr = &serveOutput
 		if err := cmd.Start(); err != nil {
@@ -263,7 +267,7 @@ func TestAlphaAcceptance(t *testing.T) {
 
 	t.Run("cli shell supports ask and act with explicit scope visibility", func(t *testing.T) {
 		runtimeRoot := t.TempDir()
-		output, err := runOdinCommand(t, repoRoot, odinBinary, runtimeRoot, nil, "what is my scope?\n/project odin-core\n/mode act\nalpha acceptance cli task\n/quit\n")
+		output, err := runOdinCommand(t, repoRoot, odinBinary, runtimeRoot, nil, "what is my scope?\n/project odin-core\n/mode act\nalpha acceptance cli task\n/quit\n", "repl")
 		if err != nil {
 			t.Fatalf("runOdinCommand(interactive) error = %v\n%s", err, output)
 		}
@@ -295,6 +299,9 @@ func TestAlphaAcceptance(t *testing.T) {
 	})
 
 	t.Run("executor abstraction supports headless cli and api lanes", func(t *testing.T) {
+		for key, value := range acceptanceHarnessDriverEnv(t) {
+			t.Setenv(key, value)
+		}
 		cfg, err := executorrouter.LoadConfig(filepath.Join(repoRoot, "config", "executors.yaml"))
 		if err != nil {
 			t.Fatalf("LoadConfig() error = %v", err)
@@ -345,7 +352,7 @@ func TestAlphaAcceptance(t *testing.T) {
 		if err != nil {
 			t.Fatalf("LoadDir(registry) error = %v", err)
 		}
-		suiteBroker := broker.New(snapshot, catalog.BuiltinDefinitions(), budgets.Limits{
+		suiteBroker := broker.New(broker.StaticSource(snapshot), catalog.BuiltinDefinitions(), nil, budgets.Limits{
 			Tool: budgets.Tool{
 				MaxSelections:  6,
 				MaxInvocations: 4,
@@ -358,18 +365,24 @@ func TestAlphaAcceptance(t *testing.T) {
 			},
 		})
 
-		odinCoreCards := suiteBroker.Catalog("odin-core")
-		if !hasCapability(odinCoreCards, "project_status") || !hasCapability(odinCoreCards, "triage-skill") {
+		odinCoreCards, err := suiteBroker.Catalog("odin-core")
+		if err != nil {
+			t.Fatalf("Catalog(odin-core) error = %v", err)
+		}
+		if !hasCapability(odinCoreCards, "status-command") || !hasCapability(odinCoreCards, "triage-skill") {
 			t.Fatalf("odin-core catalog missing expected capabilities: %+v", odinCoreCards)
 		}
-		projectCards := suiteBroker.Catalog("project")
+		projectCards, err := suiteBroker.Catalog("project")
+		if err != nil {
+			t.Fatalf("Catalog(project) error = %v", err)
+		}
 		if !hasCapability(projectCards, "triage-agent") {
 			t.Fatalf("project catalog missing triage-agent: %+v", projectCards)
 		}
 
-		toolExpansion, err := suiteBroker.Expand("project_status")
+		toolExpansion, err := suiteBroker.Expand("task_list")
 		if err != nil {
-			t.Fatalf("Expand(project_status) error = %v", err)
+			t.Fatalf("Expand(task_list) error = %v", err)
 		}
 		if toolExpansion.Tool == nil || len(toolExpansion.Tool.Schema) == 0 {
 			t.Fatalf("tool expansion = %+v, want tool schema", toolExpansion)
@@ -383,9 +396,9 @@ func TestAlphaAcceptance(t *testing.T) {
 			t.Fatalf("skill expansion = %+v, want procedure section", skillExpansion)
 		}
 
-		result, err := suiteBroker.InvokeTool("project_status", map[string]string{"project_key": "odin-core"})
+		result, err := suiteBroker.InvokeTool("task_list", map[string]string{"scope": "odin-core"})
 		if err != nil {
-			t.Fatalf("InvokeTool(project_status) error = %v", err)
+			t.Fatalf("InvokeTool(task_list) error = %v", err)
 		}
 		compacted, err := suiteBroker.Compact(result)
 		if err != nil {
@@ -862,6 +875,7 @@ func TestAlphaAcceptance(t *testing.T) {
 		store.Now = func() time.Time { return now }
 		project, task, run := seedTaskRunFixture(t, ctx, store, "alpha", "project", "alpha-homelab-task", "Alpha homelab task", "codex_headless", now)
 		seedHealthyObservability(t, ctx, store, now)
+		driverEnv := acceptanceHarnessDriverEnv(t)
 
 		t.Setenv("ODIN_ROOT", runtimeRoot)
 		t.Setenv("ODIN_HTTP_ADDR", "127.0.0.1:0")
@@ -871,6 +885,9 @@ func TestAlphaAcceptance(t *testing.T) {
 		cmd.Dir = repoRoot
 		cmd.Env = append([]string{}, os.Environ()...)
 		cmd.Env = append(cmd.Env, "ODIN_ROOT="+runtimeRoot, "ODIN_HTTP_ADDR=127.0.0.1:0")
+		for key, value := range driverEnv {
+			cmd.Env = append(cmd.Env, key+"="+value)
+		}
 		cmd.Stdout = &serveOutput
 		cmd.Stderr = &serveOutput
 		if err := cmd.Start(); err != nil {

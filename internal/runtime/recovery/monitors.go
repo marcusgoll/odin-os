@@ -219,10 +219,10 @@ func (monitor Monitor) repeatedRunFailureObservations(ctx context.Context, confi
 			r.id,
 			t.key,
 			t.scope,
-			COUNT(*) AS failed_runs
+			COUNT(*) AS terminal_runs
 		FROM runs r
 		JOIN tasks t ON t.id = r.task_id
-		WHERE r.status = 'failed'
+		WHERE r.status IN ('failed', 'timeout')
 		GROUP BY t.project_id, t.id, t.key, t.scope
 		HAVING COUNT(*) >= ?
 		ORDER BY t.id ASC
@@ -239,8 +239,8 @@ func (monitor Monitor) repeatedRunFailureObservations(ctx context.Context, confi
 		var latestRunID int64
 		var taskKey string
 		var scope string
-		var failedRuns int
-		if err := rows.Scan(&projectID, &taskID, &latestRunID, &taskKey, &scope, &failedRuns); err != nil {
+		var terminalRuns int
+		if err := rows.Scan(&projectID, &taskID, &latestRunID, &taskKey, &scope, &terminalRuns); err != nil {
 			return nil, err
 		}
 		projectIDCopy := projectID
@@ -251,7 +251,7 @@ func (monitor Monitor) repeatedRunFailureObservations(ctx context.Context, confi
 			SubjectKey: "task:" + taskKey,
 			Scope:      scope,
 			Severity:   "warning",
-			Summary:    fmt.Sprintf("task has %d failed runs", failedRuns),
+			Summary:    fmt.Sprintf("task has %d failed or timed-out runs", terminalRuns),
 			ProjectID:  &projectIDCopy,
 			TaskID:     &taskIDCopy,
 			RunID:      &runIDCopy,

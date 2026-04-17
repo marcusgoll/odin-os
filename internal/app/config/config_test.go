@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -69,6 +70,93 @@ service:
 	}
 	if cfg.Service.StartupRecovery {
 		t.Fatalf("Service.StartupRecovery = true, want false")
+	}
+}
+
+func TestValidateRepoRejectsUnknownAuxiliaryConfigFields(t *testing.T) {
+	t.Parallel()
+
+	repoRoot := t.TempDir()
+	mustWriteConfig(t, filepath.Join(repoRoot, "config", "models.yaml"), `
+version: 1
+models:
+  - key: codex-latest
+    provider: openai
+    access: plan_backed_cli
+    adapter: codex_headless
+    stale_field: true
+`)
+	mustWriteConfig(t, filepath.Join(repoRoot, "config", "telemetry.yaml"), `
+version: 1
+stale_field: true
+`)
+
+	if err := ValidateRepo(repoRoot); err == nil {
+		t.Fatal("ValidateRepo() error = nil, want unknown field rejection")
+	}
+}
+
+func TestValidateRepoAllowsMissingAuxiliaryConfigFiles(t *testing.T) {
+	t.Parallel()
+
+	repoRoot := t.TempDir()
+	if err := ValidateRepo(repoRoot); err != nil {
+		t.Fatalf("ValidateRepo() error = %v, want nil when auxiliary files are absent", err)
+	}
+}
+
+func TestLoadTelemetryAcceptsValidatedBootstrapMarkerOnly(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "telemetry.yaml")
+	mustWriteConfig(t, path, "version: 1\n")
+
+	telemetry, err := LoadTelemetry(path)
+	if err != nil {
+		t.Fatalf("LoadTelemetry() error = %v", err)
+	}
+	if telemetry.Version != 1 {
+		t.Fatalf("LoadTelemetry().Version = %d, want 1", telemetry.Version)
+	}
+}
+
+func TestCapabilityReloadDocsMatchRuntimeSurface(t *testing.T) {
+	t.Parallel()
+
+	repoRoot := filepath.Clean(filepath.Join("..", "..", ".."))
+
+	gatewayDocPath := filepath.Join(repoRoot, "docs", "contracts", "capability-gateway.md")
+	gatewayDoc, err := os.ReadFile(gatewayDocPath)
+	if err != nil {
+		t.Fatalf("ReadFile(%s) error = %v", gatewayDocPath, err)
+	}
+
+	reloadDocPath := filepath.Join(repoRoot, "docs", "operations", "capability-reload.md")
+	reloadDoc, err := os.ReadFile(reloadDocPath)
+	if err != nil {
+		t.Fatalf("ReadFile(%s) error = %v", reloadDocPath, err)
+	}
+
+	for _, route := range []string{
+		"GET /capabilities",
+		"GET /capabilities/{id}",
+		"POST /capabilities/{id}:invoke",
+		"GET /runs/{run_id}",
+	} {
+		if !strings.Contains(string(gatewayDoc), route) {
+			t.Fatalf("capability gateway doc missing runtime route %q", route)
+		}
+	}
+
+	for _, token := range []string{
+		"capability.snapshot_published",
+		"capability.snapshot_rejected",
+		"no public CLI or REPL reload command",
+		"no public HTTP reload route",
+	} {
+		if !strings.Contains(string(reloadDoc), token) {
+			t.Fatalf("capability reload doc missing runtime surface token %q", token)
+		}
 	}
 }
 

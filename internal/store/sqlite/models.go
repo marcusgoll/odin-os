@@ -15,6 +15,36 @@ type Project struct {
 	UpdatedAt     time.Time
 }
 
+type Initiative struct {
+	ID               int64
+	WorkspaceID      int64
+	Key              string
+	Title            string
+	Kind             string
+	Status           string
+	Summary          string
+	OwnerCompanionID *int64
+	LinkedProjectID  *int64
+	CreatedAt        time.Time
+	UpdatedAt        time.Time
+}
+
+type Companion struct {
+	ID                  int64
+	WorkspaceID         int64
+	Key                 string
+	Title               string
+	Kind                string
+	Charter             string
+	Status              string
+	InitiativeScopeJSON string
+	ToolPolicyJSON      string
+	MemoryPolicyJSON    string
+	PlanningPolicyJSON  string
+	CreatedAt           time.Time
+	UpdatedAt           time.Time
+}
+
 type CreateProjectParams struct {
 	Key           string
 	Name          string
@@ -25,14 +55,79 @@ type CreateProjectParams struct {
 	ManifestPath  string
 }
 
+type UpsertProjectParams = CreateProjectParams
+
+type UpsertInitiativeParams struct {
+	WorkspaceID      int64
+	Key              string
+	Title            string
+	Kind             string
+	Status           string
+	Summary          string
+	OwnerCompanionID *int64
+	LinkedProjectID  *int64
+}
+
+type UpsertCompanionParams struct {
+	WorkspaceID         int64
+	Key                 string
+	Title               string
+	Kind                string
+	Charter             string
+	Status              string
+	InitiativeScopeJSON string
+	ToolPolicyJSON      string
+	MemoryPolicyJSON    string
+	PlanningPolicyJSON  string
+}
+
+type ManagedProjectRegistrationParams struct {
+	Workspace CreateWorkspaceParams
+	Project   UpsertProjectParams
+}
+
+type Workspace struct {
+	ID                  int64
+	Key                 string
+	Name                string
+	OwnerRef            string
+	DefaultCompanionKey string
+	Status              string
+	PolicyJSON          string
+	CreatedAt           time.Time
+	UpdatedAt           time.Time
+}
+
+type CreateWorkspaceParams struct {
+	Key                 string
+	Name                string
+	OwnerRef            string
+	DefaultCompanionKey string
+	Status              string
+	PolicyJSON          string
+}
+
+type UpdateWorkspacePolicyParams struct {
+	WorkspaceID int64
+	PolicyJSON  string
+}
+
 type Task struct {
 	ID             int64
 	ProjectID      int64
 	Key            string
 	Title          string
+	ActionKey      string
 	Status         string
 	Scope          string
 	RequestedBy    string
+	WorkspaceID    *int64
+	InitiativeID   *int64
+	CompanionID    *int64
+	WorkKind       string
+	Summary        string
+	TerminalReason string
+	ArtifactsJSON  string
 	CurrentRunID   *int64
 	NextEligibleAt time.Time
 	Priority       int
@@ -45,17 +140,26 @@ type Task struct {
 }
 
 type CreateTaskParams struct {
-	ProjectID   int64
-	Key         string
-	Title       string
-	Status      string
-	Scope       string
-	RequestedBy string
+	ProjectID    int64
+	Key          string
+	Title        string
+	ActionKey    string
+	Status       string
+	Scope        string
+	RequestedBy  string
+	WorkspaceID  *int64
+	InitiativeID *int64
+	CompanionID  *int64
+	WorkKind     string
 }
 
 type UpdateTaskStatusParams struct {
-	TaskID int64
-	Status string
+	TaskID                 int64
+	Status                 string
+	Summary                string
+	TerminalReason         string
+	ArtifactsJSON          string
+	AllowedCurrentStatuses []string
 }
 
 type UpdateTaskQueueStateParams struct {
@@ -86,14 +190,59 @@ type IncrementTaskRetryParams struct {
 }
 
 type Run struct {
-	ID         int64
-	TaskID     int64
-	Executor   string
-	Status     string
-	Attempt    int
-	StartedAt  time.Time
-	FinishedAt *time.Time
-	Summary    string
+	ID             int64
+	TaskID         int64
+	Executor       string
+	Status         string
+	Attempt        int
+	StartedAt      time.Time
+	FinishedAt     *time.Time
+	Summary        string
+	TerminalReason string
+	ArtifactsJSON  string
+}
+
+type MemoryEntry struct {
+	ID              int64
+	WorkspaceID     int64
+	InitiativeID    *int64
+	CompanionID     *int64
+	TaskID          *int64
+	RunID           *int64
+	EntryType       string
+	VisibilityScope string
+	RetentionClass  string
+	Summary         string
+	Content         string
+	MetadataJSON    string
+	CreatedAt       time.Time
+	UpdatedAt       time.Time
+}
+
+type CreateMemoryEntryParams struct {
+	WorkspaceID     int64
+	InitiativeID    *int64
+	CompanionID     *int64
+	TaskID          *int64
+	RunID           *int64
+	EntryType       string
+	VisibilityScope string
+	RetentionClass  string
+	Summary         string
+	Content         string
+	MetadataJSON    string
+}
+
+type ListMemoryEntriesParams struct {
+	WorkspaceID     int64
+	InitiativeID    *int64
+	CompanionID     *int64
+	TaskID          *int64
+	RunID           *int64
+	EntryType       string
+	VisibilityScope string
+	RetentionClass  string
+	Limit           int
 }
 
 type StartRunParams struct {
@@ -104,16 +253,54 @@ type StartRunParams struct {
 	TaskStatus string
 }
 
-type FinishRunParams struct {
-	RunID   int64
-	Status  string
-	Summary string
+type StartRunAndUpdateTaskStatusParams struct {
+	TaskID     int64
+	Executor   string
+	Attempt    int
+	RunStatus  string
+	TaskStatus string
 }
 
 type UpdateRunAndTaskStatusParams struct {
 	RunID      int64
 	RunStatus  string
 	TaskStatus string
+}
+
+type FinishRunParams struct {
+	RunID          int64
+	Status         string
+	Summary        string
+	TerminalReason string
+	ArtifactsJSON  string
+}
+
+type ResolveStalledRunParams struct {
+	RunID          int64
+	TaskID         int64
+	TaskStatus     string
+	Summary        string
+	TerminalReason string
+	ArtifactsJSON  string
+}
+
+type AwaitApprovalParams struct {
+	TaskID         int64
+	RunID          int64
+	RequestedBy    string
+	Summary        string
+	TerminalReason string
+	ArtifactsJSON  string
+}
+
+type FinishRunAndUpdateTaskStatusParams struct {
+	RunID          int64
+	RunStatus      string
+	Summary        string
+	TerminalReason string
+	ArtifactsJSON  string
+	TaskID         int64
+	TaskStatus     string
 }
 
 type FinishRunAndSetTaskStatusParams struct {
@@ -150,6 +337,12 @@ type RequestApprovalParams struct {
 	TaskID      int64
 	RunID       *int64
 	Status      string
+	RequestedBy string
+}
+
+type BlockTaskAndRequestApprovalParams struct {
+	TaskID      int64
+	RunID       *int64
 	RequestedBy string
 }
 
@@ -252,6 +445,21 @@ type RecordExecutorHealthParams struct {
 	DetailsJSON string
 }
 
+type RecordSkillLifecycleEventParams struct {
+	SkillKey         string
+	Scope            string
+	Operation        string
+	Outcome          string
+	ExecutionProfile string
+	Version          string
+	HandlerType      string
+	HandlerRef       string
+	Permissions      []string
+	DurationMS       int64
+	ErrorCode        string
+	ErrorText        string
+}
+
 type ContextPacket struct {
 	ID                 int64
 	TaskID             *int64
@@ -286,6 +494,80 @@ type ListContextPacketsParams struct {
 	PacketKind  string
 	PacketScope string
 	Status      string
+}
+
+type ConversationTranscript struct {
+	ID          int64
+	ProjectID   *int64
+	TaskID      *int64
+	RunID       *int64
+	Scope       string
+	ScopeKey    string
+	Mode        string
+	Prompt      string
+	Response    string
+	ToolSummary string
+	Executor    string
+	CreatedAt   time.Time
+}
+
+type RecordConversationTranscriptParams struct {
+	ProjectID   *int64
+	TaskID      *int64
+	RunID       *int64
+	Scope       string
+	ScopeKey    string
+	Mode        string
+	Prompt      string
+	Response    string
+	ToolSummary string
+	Executor    string
+}
+
+type ListConversationTranscriptsParams struct {
+	ProjectID *int64
+	TaskID    *int64
+	RunID     *int64
+	Scope     string
+	ScopeKey  string
+	Mode      string
+}
+
+type MemorySummary struct {
+	ID                 int64
+	ProjectID          *int64
+	SourceTranscriptID *int64
+	TaskID             *int64
+	RunID              *int64
+	Scope              string
+	ScopeKey           string
+	MemoryType         string
+	Summary            string
+	DetailsJSON        string
+	CreatedAt          time.Time
+	UpdatedAt          time.Time
+}
+
+type RecordMemorySummaryParams struct {
+	ProjectID          *int64
+	SourceTranscriptID *int64
+	TaskID             *int64
+	RunID              *int64
+	Scope              string
+	ScopeKey           string
+	MemoryType         string
+	Summary            string
+	DetailsJSON        string
+}
+
+type ListMemorySummariesParams struct {
+	ProjectID          *int64
+	SourceTranscriptID *int64
+	TaskID             *int64
+	RunID              *int64
+	Scope              string
+	ScopeKey           string
+	MemoryType         string
 }
 
 type WorktreeLease struct {
@@ -488,4 +770,94 @@ type ListEventsParams struct {
 	ProjectID *int64
 	TaskID    *int64
 	RunID     *int64
+}
+
+type Delegation struct {
+	ID              int64
+	ParentTaskID    int64
+	ParentRunID     *int64
+	ProjectID       int64
+	Scope           string
+	DelegationKey   string
+	Role            string
+	ActionClass     string
+	ActionKey       string
+	MutationMode    string
+	Status          string
+	ConvergenceMode string
+	ArtifactTarget  string
+	Executor        string
+	ChildTaskID     *int64
+	ChildRunID      *int64
+	WorktreeLeaseID *int64
+	BranchName      string
+	DetailsJSON     string
+	CreatedAt       time.Time
+	UpdatedAt       time.Time
+}
+
+type CreateDelegationParams struct {
+	ParentTaskID    int64
+	ParentRunID     *int64
+	ProjectID       int64
+	Scope           string
+	DelegationKey   string
+	Role            string
+	ActionClass     string
+	ActionKey       string
+	MutationMode    string
+	Status          string
+	ConvergenceMode string
+	ArtifactTarget  string
+	Executor        string
+	WorktreeLeaseID *int64
+	BranchName      string
+	DetailsJSON     string
+}
+
+type UpdateDelegationStatusParams struct {
+	DelegationID int64
+	Status       string
+}
+
+type AttachDelegationChildTaskParams struct {
+	DelegationID int64
+	ChildTaskID  int64
+	ChildRunID   *int64
+}
+
+type AttachDelegationWorktreeParams struct {
+	DelegationID    int64
+	WorktreeLeaseID *int64
+	BranchName      string
+}
+
+type ListDelegationsParams struct {
+	ProjectID       *int64
+	ParentTaskID    *int64
+	ChildTaskID     *int64
+	WorktreeLeaseID *int64
+	Status          string
+	DelegationKey   string
+}
+
+type DelegationArtifact struct {
+	ID           int64
+	DelegationID int64
+	ArtifactType string
+	Summary      string
+	DetailsJSON  string
+	CreatedAt    time.Time
+}
+
+type CreateDelegationArtifactParams struct {
+	DelegationID int64
+	ArtifactType string
+	Summary      string
+	DetailsJSON  string
+}
+
+type ListDelegationArtifactsParams struct {
+	DelegationID int64
+	ArtifactType string
 }

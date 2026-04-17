@@ -10,7 +10,10 @@ import (
 	"testing"
 
 	"odin-os/internal/cli/scope"
+	"odin-os/internal/core/initiatives"
 	"odin-os/internal/core/projects"
+	corescope "odin-os/internal/core/scope"
+	"odin-os/internal/core/workspaces"
 	runtimeevents "odin-os/internal/runtime/events"
 	"odin-os/internal/store/sqlite"
 )
@@ -90,6 +93,64 @@ func TestAskModeHandlesFreeTextWithoutCreatingTask(t *testing.T) {
 	}
 }
 
+func TestShellControlScopeTracksProjectSelection(t *testing.T) {
+	t.Parallel()
+
+	env := newTestEnvironment(t)
+	shell, err := New(env)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	var output bytes.Buffer
+	if err := shell.HandleLine(context.Background(), "/project alpha", &output); err != nil {
+		t.Fatalf("HandleLine(/project) error = %v", err)
+	}
+
+	got := shell.controlScope()
+	want := corescope.ControlScope{
+		SubjectType:   corescope.SubjectTypeInitiative,
+		SubjectKey:    "alpha",
+		WorkspaceKey:  "default",
+		InitiativeKey: "alpha",
+		ProjectKey:    "alpha",
+		CompanionKey:  "primary",
+	}
+
+	if got != want {
+		t.Fatalf("controlScope() = %+v, want %+v", got, want)
+	}
+}
+
+func TestShellControlScopeTracksNewProjectFlow(t *testing.T) {
+	t.Parallel()
+
+	env := newTestEnvironment(t)
+	shell, err := New(env)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	var output bytes.Buffer
+	if err := shell.HandleLine(context.Background(), "/scope new-project", &output); err != nil {
+		t.Fatalf("HandleLine(/scope new-project) error = %v", err)
+	}
+
+	got := shell.controlScope()
+	want := corescope.ControlScope{
+		SubjectType:   corescope.SubjectTypeNewProject,
+		SubjectKey:    "odin-core",
+		WorkspaceKey:  "default",
+		InitiativeKey: "odin-core",
+		ProjectKey:    "odin-core",
+		CompanionKey:  "primary",
+	}
+
+	if got != want {
+		t.Fatalf("controlScope() = %+v, want %+v", got, want)
+	}
+}
+
 func TestActModeCreatesTaskInProjectScope(t *testing.T) {
 	t.Parallel()
 
@@ -112,10 +173,7 @@ func TestActModeCreatesTaskInProjectScope(t *testing.T) {
 		t.Fatalf("HandleLine(act input) error = %v", err)
 	}
 
-	views, err := shell.jobs.List(context.Background(), scope.Resolution{
-		Kind:       scope.ScopeProject,
-		ProjectKey: "alpha",
-	})
+	views, err := shell.jobs.List(context.Background(), shell.state.Scope)
 	if err != nil {
 		t.Fatalf("jobs.List() error = %v", err)
 	}
@@ -124,6 +182,22 @@ func TestActModeCreatesTaskInProjectScope(t *testing.T) {
 	}
 	if !strings.Contains(output.String(), "created task") {
 		t.Fatalf("output = %q, want creation message", output.String())
+	}
+
+	workspace, err := workspaces.Service{Store: env.Store}.BootstrapDefaultWorkspace(context.Background())
+	if err != nil {
+		t.Fatalf("BootstrapDefaultWorkspace() error = %v", err)
+	}
+
+	initiative, err := env.Store.GetInitiativeByKey(context.Background(), workspace.ID, "alpha")
+	if err != nil {
+		t.Fatalf("GetInitiativeByKey(alpha) error = %v", err)
+	}
+	if initiative.Kind != string(initiatives.KindManagedProject) {
+		t.Fatalf("initiative.Kind = %q, want %q", initiative.Kind, initiatives.KindManagedProject)
+	}
+	if initiative.LinkedProjectID == nil {
+		t.Fatalf("initiative.LinkedProjectID = nil, want project id")
 	}
 }
 
@@ -174,6 +248,75 @@ func TestDoctorCommandSupportsJSONOutput(t *testing.T) {
 	t.Parallel()
 
 	env := newTestEnvironment(t)
+	seedHealthyDoctorState(t, env)
+
+	shell, err := New(env)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	var output bytes.Buffer
+	if err := shell.HandleLine(context.Background(), "/doctor json", &output); err != nil {
+		t.Fatalf("HandleLine(/doctor json) error = %v", err)
+	}
+
+	var decoded map[string]any
+	if err := json.Unmarshal(output.Bytes(), &decoded); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	if decoded["status"] == nil {
+		t.Fatalf("decoded status missing: %#v", decoded)
+	}
+}
+
+func TestShellDoctorReportWritesMarkdownSummary(t *testing.T) {
+	t.Parallel()
+
+	env := newTestEnvironment(t)
+	seedHealthyDoctorState(t, env)
+
+	shell, err := New(env)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	var output bytes.Buffer
+	if err := shell.HandleLine(context.Background(), "/doctor report", &output); err != nil {
+		t.Fatalf("HandleLine(/doctor report) error = %v", err)
+	}
+
+	if !strings.Contains(output.String(), "## Current Health Snapshot") {
+		t.Fatalf("output = %q, want markdown doctor report", output.String())
+	}
+}
+
+func TestShellDoctorRejectsUnknownMode(t *testing.T) {
+	t.Parallel()
+
+	env := newTestEnvironment(t)
+	seedHealthyDoctorState(t, env)
+
+	shell, err := New(env)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	var output bytes.Buffer
+	if err := shell.HandleLine(context.Background(), "/doctor reporrt", &output); err != nil {
+		t.Fatalf("HandleLine(/doctor reporrt) error = %v", err)
+	}
+
+	if !strings.Contains(output.String(), `unsupported /doctor mode "reporrt"; expected json or report`) {
+		t.Fatalf("output = %q, want unsupported doctor mode message", output.String())
+	}
+	if strings.Contains(output.String(), "status=") {
+		t.Fatalf("output = %q, should not fall back to the compact doctor summary", output.String())
+	}
+}
+
+func seedHealthyDoctorState(t *testing.T, env Environment) {
+	t.Helper()
+
 	if _, err := env.Store.RecordExecutorHealth(context.Background(), sqlite.RecordExecutorHealthParams{
 		Executor:    "codex",
 		Status:      "healthy",
@@ -196,24 +339,6 @@ func TestDoctorCommandSupportsJSONOutput(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("RecordProjectionFreshness() error = %v", err)
 	}
-
-	shell, err := New(env)
-	if err != nil {
-		t.Fatalf("New() error = %v", err)
-	}
-
-	var output bytes.Buffer
-	if err := shell.HandleLine(context.Background(), "/doctor json", &output); err != nil {
-		t.Fatalf("HandleLine(/doctor json) error = %v", err)
-	}
-
-	var decoded map[string]any
-	if err := json.Unmarshal(output.Bytes(), &decoded); err != nil {
-		t.Fatalf("Unmarshal() error = %v", err)
-	}
-	if decoded["status"] == nil {
-		t.Fatalf("decoded status missing: %#v", decoded)
-	}
 }
 
 func TestShellHelpIncludesTransitionCommands(t *testing.T) {
@@ -230,9 +355,106 @@ func TestShellHelpIncludesTransitionCommands(t *testing.T) {
 		t.Fatalf("HandleLine(/help) error = %v", err)
 	}
 
-	for _, want := range []string{"/transition", "/observe", "/compare"} {
+	for _, want := range []string{"/workspace", "/initiatives", "/companions", "/transition", "/observe", "/compare", "/doctor json", "/doctor report"} {
 		if !strings.Contains(output.String(), want) {
 			t.Fatalf("help output = %q, want %q", output.String(), want)
+		}
+	}
+}
+
+func TestShellScopeShowsCurrentControlScopeDetails(t *testing.T) {
+	t.Parallel()
+
+	env := newTestEnvironment(t)
+	shell, err := New(env)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	var output bytes.Buffer
+	if err := shell.HandleLine(context.Background(), "/project alpha", &output); err != nil {
+		t.Fatalf("HandleLine(/project) error = %v", err)
+	}
+	output.Reset()
+	if err := shell.HandleLine(context.Background(), "/scope", &output); err != nil {
+		t.Fatalf("HandleLine(/scope) error = %v", err)
+	}
+
+	for _, want := range []string{"scope=alpha", "workspace=default", "initiative=alpha", "project=alpha", "companion=primary"} {
+		if !strings.Contains(output.String(), want) {
+			t.Fatalf("scope output = %q, want %q", output.String(), want)
+		}
+	}
+}
+
+func TestShellOperatorViewsRenderWorkspaceInitiativesAndCompanions(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	env := newTestEnvironment(t)
+	project, err := env.Store.CreateProject(ctx, sqlite.CreateProjectParams{
+		Key:           "alpha",
+		Name:          "Alpha",
+		Scope:         "project",
+		GitRoot:       "/tmp/alpha",
+		DefaultBranch: "main",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+	workspace, err := workspaces.Service{Store: env.Store}.BootstrapDefaultWorkspace(ctx)
+	if err != nil {
+		t.Fatalf("BootstrapDefaultWorkspace() error = %v", err)
+	}
+	companion, err := env.Store.GetCompanionByKey(ctx, workspace.ID, workspace.DefaultCompanionKey)
+	if err != nil {
+		t.Fatalf("GetCompanionByKey(default) error = %v", err)
+	}
+	if _, err := env.Store.UpsertInitiative(ctx, sqlite.UpsertInitiativeParams{
+		WorkspaceID:      workspace.ID,
+		Key:              project.Key,
+		Title:            project.Name,
+		Kind:             string(initiatives.KindManagedProject),
+		Status:           "active",
+		Summary:          "Alpha initiative",
+		OwnerCompanionID: &companion.ID,
+		LinkedProjectID:  &project.ID,
+	}); err != nil {
+		t.Fatalf("UpsertInitiative(alpha) error = %v", err)
+	}
+	shell, err := New(env)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	var output bytes.Buffer
+	if err := shell.HandleLine(ctx, "/workspace", &output); err != nil {
+		t.Fatalf("HandleLine(/workspace) error = %v", err)
+	}
+	for _, want := range []string{"workspace=default", "initiatives=1", "companions=1"} {
+		if !strings.Contains(output.String(), want) {
+			t.Fatalf("workspace output = %q, want %q", output.String(), want)
+		}
+	}
+
+	output.Reset()
+	if err := shell.HandleLine(ctx, "/initiatives", &output); err != nil {
+		t.Fatalf("HandleLine(/initiatives) error = %v", err)
+	}
+	for _, want := range []string{"alpha", "managed_project", "owner=primary", "project=alpha"} {
+		if !strings.Contains(output.String(), want) {
+			t.Fatalf("initiatives output = %q, want %q", output.String(), want)
+		}
+	}
+
+	output.Reset()
+	if err := shell.HandleLine(ctx, "/companions", &output); err != nil {
+		t.Fatalf("HandleLine(/companions) error = %v", err)
+	}
+	for _, want := range []string{"primary", "assistant", "owned_initiatives=1"} {
+		if !strings.Contains(output.String(), want) {
+			t.Fatalf("companions output = %q, want %q", output.String(), want)
 		}
 	}
 }

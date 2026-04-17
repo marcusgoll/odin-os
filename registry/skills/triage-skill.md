@@ -4,6 +4,8 @@ key: triage-skill
 title: Triage Skill
 summary: Guides Odin through intake classification before deeper work starts.
 status: active
+version: "1.0.0"
+enabled: true
 tags:
   - intake
 owners:
@@ -12,6 +14,29 @@ strictness: rigid
 applies_to:
   - intake
   - planning
+scopes:
+  - global
+  - odin-core
+  - project
+permissions:
+  - repo.read
+handler_type: command
+handler_ref: scripts/skills/triage-skill.sh
+timeout_seconds: 15
+input_schema:
+  type: object
+  properties:
+    request:
+      type: string
+    scope:
+      type: string
+output_schema:
+  type: object
+  properties:
+    classification:
+      type: string
+    next_step:
+      type: string
 ---
 
 # Triage Skill

@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 
@@ -29,13 +30,8 @@ type Config struct {
 }
 
 func Load(path string, repoRoot string, env map[string]string) (Config, error) {
-	content, err := os.ReadFile(path)
-	if err != nil {
-		return Config{}, err
-	}
-
 	var raw File
-	if err := yaml.Unmarshal(content, &raw); err != nil {
+	if err := decodeYAMLFile(path, &raw); err != nil {
 		return Config{}, err
 	}
 
@@ -74,4 +70,15 @@ func resolveRuntimeRoot(repoRoot string, configured string) string {
 		return configured
 	}
 	return filepath.Clean(filepath.Join(repoRoot, configured))
+}
+
+func decodeYAMLFile(path string, target any) error {
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+
+	decoder := yaml.NewDecoder(bytes.NewReader(content))
+	decoder.KnownFields(true)
+	return decoder.Decode(target)
 }

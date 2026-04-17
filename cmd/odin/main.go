@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -11,6 +12,8 @@ import (
 
 	"odin-os/internal/app/lifecycle"
 )
+
+var runLifecycle = lifecycle.Run
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -33,14 +36,19 @@ func main() {
 		os.Exit(1)
 	}
 
-	err = lifecycle.Run(ctx, root, os.Args[1:], os.Stdin, os.Stdout)
-	if errors.Is(err, context.Canceled) && len(os.Args) > 1 && os.Args[1] == "serve" {
-		return
+	os.Exit(run(ctx, root, os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
+}
+
+func run(ctx context.Context, root string, args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	err := runLifecycle(ctx, root, args, stdin, stdout)
+	if errors.Is(err, context.Canceled) {
+		return 0
 	}
 	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+		fmt.Fprintln(stderr, err)
+		return 1
 	}
+	return 0
 }
 
 func resolveRepoRoot(cwd, executable string) (string, error) {

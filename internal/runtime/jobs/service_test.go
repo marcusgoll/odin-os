@@ -118,7 +118,7 @@ func TestExecuteNextQueuedCompletesCutoverProjectTask(t *testing.T) {
 	service := Service{
 		Store:          store,
 		Registry:       registry,
-		Executors:      router.DefaultCatalog(),
+		Executors:      testJobExecutors(),
 		ExecutorConfig: mustLoadExecutorConfig(t),
 		Transitions:    projects.Service{Store: store},
 		Leases: leases.Manager{
@@ -187,7 +187,7 @@ func TestExecuteNextQueuedSkipsDispatchWhenShutdownRequested(t *testing.T) {
 	service := Service{
 		Store:          store,
 		Registry:       registry,
-		Executors:      router.DefaultCatalog(),
+		Executors:      testJobExecutors(),
 		ExecutorConfig: mustLoadExecutorConfig(t),
 		Transitions:    projects.Service{Store: store},
 		Leases: leases.Manager{
@@ -250,7 +250,7 @@ func TestExecuteNextQueuedRejectsShadowModeMutation(t *testing.T) {
 	service := Service{
 		Store:          store,
 		Registry:       registry,
-		Executors:      router.DefaultCatalog(),
+		Executors:      testJobExecutors(),
 		ExecutorConfig: mustLoadExecutorConfig(t),
 		Transitions:    projects.Service{Store: store},
 		Leases: leases.Manager{
@@ -313,7 +313,7 @@ func TestExecuteNextQueuedBlocksWhenExecutorHealthIsDegraded(t *testing.T) {
 	service := Service{
 		Store:          store,
 		Registry:       registry,
-		Executors:      router.DefaultCatalog(),
+		Executors:      testJobExecutors(),
 		ExecutorConfig: mustLoadExecutorConfig(t),
 		Transitions:    projects.Service{Store: store},
 		Leases: leases.Manager{
@@ -474,7 +474,7 @@ func TestExecuteNextQueuedBlocksWhenExecutorHealthSampleIsMissing(t *testing.T) 
 	service := Service{
 		Store:          store,
 		Registry:       registry,
-		Executors:      router.DefaultCatalog(),
+		Executors:      testJobExecutors(),
 		ExecutorConfig: mustLoadExecutorConfig(t),
 		Transitions:    projects.Service{Store: store},
 		Leases: leases.Manager{
@@ -540,7 +540,7 @@ func TestExecuteNextQueuedFailsWhenExecutorSelectionHasNoRoute(t *testing.T) {
 	service := Service{
 		Store:          store,
 		Registry:       registry,
-		Executors:      router.DefaultCatalog(),
+		Executors:      testJobExecutors(),
 		ExecutorConfig: mustLoadExecutorConfig(t),
 		Transitions:    projects.Service{Store: store},
 		Leases: leases.Manager{
@@ -605,7 +605,7 @@ func TestExecuteNextQueuedBlocksWhenRequiredApprovalIsMissing(t *testing.T) {
 	service := Service{
 		Store:          store,
 		Registry:       registry,
-		Executors:      router.DefaultCatalog(),
+		Executors:      testJobExecutors(),
 		ExecutorConfig: mustLoadExecutorConfig(t),
 		Transitions:    projects.Service{Store: store},
 		Leases: leases.Manager{
@@ -694,7 +694,7 @@ func TestExecuteNextQueuedRequeuesWhenBlockedWakePacketCompactionFails(t *testin
 	service := Service{
 		Store:          store,
 		Registry:       registry,
-		Executors:      router.DefaultCatalog(),
+		Executors:      testJobExecutors(),
 		ExecutorConfig: mustLoadExecutorConfig(t),
 		Transitions:    projects.Service{Store: store},
 		Leases: leases.Manager{
@@ -774,7 +774,7 @@ func TestExecuteNextQueuedResumesAfterApprovalIsApproved(t *testing.T) {
 	service := Service{
 		Store:          store,
 		Registry:       registry,
-		Executors:      router.DefaultCatalog(),
+		Executors:      testJobExecutors(),
 		ExecutorConfig: mustLoadExecutorConfig(t),
 		Transitions:    projects.Service{Store: store},
 		Leases: leases.Manager{
@@ -862,7 +862,7 @@ func TestExecuteNextQueuedKeepsRunPreparingAndReleasesLeaseOnAdmissionFailure(t 
 	service := Service{
 		Store:          store,
 		Registry:       registry,
-		Executors:      router.DefaultCatalog(),
+		Executors:      testJobExecutors(),
 		ExecutorConfig: mustLoadExecutorConfig(t),
 		Transitions:    projects.Service{Store: store},
 		Leases: leases.Manager{
@@ -974,7 +974,7 @@ func TestExecuteNextQueuedRequeuesWhenFailedDispatchWakePacketCompactionFails(t 
 	service := Service{
 		Store:          store,
 		Registry:       registry,
-		Executors:      router.DefaultCatalog(),
+		Executors:      testJobExecutors(),
 		ExecutorConfig: mustLoadExecutorConfig(t),
 		Transitions:    projects.Service{Store: store},
 		Leases: leases.Manager{
@@ -1351,6 +1351,68 @@ projects:
 	}
 
 	return registry
+}
+
+func testJobExecutors() map[string]contract.Executor {
+	return map[string]contract.Executor{
+		"codex_headless": jobTestExecutor{
+			key: "codex_headless",
+			result: contract.ExecutionResult{
+				Status: "completed",
+				Output: "task complete",
+			},
+		},
+	}
+}
+
+type jobTestExecutor struct {
+	key    string
+	result contract.ExecutionResult
+}
+
+func (executor jobTestExecutor) Key() string { return executor.key }
+
+func (jobTestExecutor) Class() contract.ExecutorClass {
+	return contract.ExecutorClassPlanBackedCLI
+}
+
+func (jobTestExecutor) Health(context.Context) (contract.HealthReport, error) {
+	return contract.HealthReport{
+		Status:    contract.HealthStatusHealthy,
+		CheckedAt: time.Now().UTC(),
+	}, nil
+}
+
+func (jobTestExecutor) Capabilities(context.Context) (contract.Capabilities, error) {
+	return contract.Capabilities{
+		ExecutorClass:        contract.ExecutorClassPlanBackedCLI,
+		SupportsHeadlessPlan: true,
+		TaskKinds: []contract.TaskKind{
+			contract.TaskKindGeneral,
+			contract.TaskKindPlan,
+			contract.TaskKindBuild,
+			contract.TaskKindReview,
+			contract.TaskKindQA,
+			contract.TaskKindResearch,
+		},
+		Scopes: []string{"global", "odin-core", "project", "new-project"},
+	}, nil
+}
+
+func (executor jobTestExecutor) RunTask(context.Context, contract.TaskSpec) (contract.ExecutionResult, error) {
+	return executor.result, nil
+}
+
+func (jobTestExecutor) ResumeTask(context.Context, contract.TaskHandle, contract.ResumePacket) (contract.ExecutionResult, error) {
+	return contract.ExecutionResult{}, contract.ErrNotImplemented
+}
+
+func (jobTestExecutor) CancelTask(context.Context, contract.TaskHandle) error {
+	return contract.ErrNotImplemented
+}
+
+func (jobTestExecutor) EstimateCost(context.Context, contract.TaskSpec) (contract.CostEstimate, error) {
+	return contract.CostEstimate{}, contract.ErrNotImplemented
 }
 
 type transientFailureExecutor struct{}

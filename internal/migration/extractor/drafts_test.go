@@ -11,7 +11,8 @@ import (
 )
 
 func TestDraftGenerationEmitsDraftRegistryFilesThatPassValidation(t *testing.T) {
-	outputRoot := t.TempDir()
+	repoRoot := t.TempDir()
+	outputRoot := filepath.Join(repoRoot, "registry")
 	candidates := []extractor.Candidate{
 		{
 			SourcePath:     "/legacy/.claude/skills/demo-skill/SKILL.md",
@@ -61,6 +62,14 @@ func TestDraftGenerationEmitsDraftRegistryFilesThatPassValidation(t *testing.T) 
 		if !strings.Contains(draftText, want) {
 			t.Fatalf("draft = %q, want substring %q", draftText, want)
 		}
+	}
+
+	handlerPath := filepath.Join(repoRoot, "scripts", "skills", "demo-skill.sh")
+	if err := os.MkdirAll(filepath.Dir(handlerPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll(%s) error = %v", filepath.Dir(handlerPath), err)
+	}
+	if err := os.WriteFile(handlerPath, []byte("#!/usr/bin/env bash\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile(%s) error = %v", handlerPath, err)
 	}
 
 	snapshot, err := loader.LoadDir(outputRoot)

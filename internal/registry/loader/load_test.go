@@ -10,9 +10,11 @@ import (
 )
 
 func TestScanDirInfersKinds(t *testing.T) {
-	root := t.TempDir()
+	repoRoot := t.TempDir()
+	root := filepath.Join(repoRoot, "registry")
 	writeFile(t, filepath.Join(root, "skills", "triage.md"), sampleSkillMarkdown("triage-skill"))
 	writeFile(t, filepath.Join(root, "commands", "status.md"), sampleCommandMarkdown("status-command"))
+	writeExecutable(t, filepath.Join(repoRoot, "scripts", "skills", "triage.sh"))
 
 	files, err := loader.ScanDir(root)
 	if err != nil {
@@ -33,9 +35,11 @@ func TestScanDirInfersKinds(t *testing.T) {
 }
 
 func TestLoadDirCompilesValidFilesAndReportsInvalidOnes(t *testing.T) {
-	root := t.TempDir()
+	repoRoot := t.TempDir()
+	root := filepath.Join(repoRoot, "registry")
 	writeFile(t, filepath.Join(root, "skills", "triage.md"), sampleSkillMarkdown("triage-skill"))
 	writeFile(t, filepath.Join(root, "skills", "broken.md"), brokenSkillMarkdown("broken-skill"))
+	writeExecutable(t, filepath.Join(repoRoot, "scripts", "skills", "triage.sh"))
 
 	snapshot, err := loader.LoadDir(root)
 	if err != nil {
@@ -48,6 +52,22 @@ func TestLoadDirCompilesValidFilesAndReportsInvalidOnes(t *testing.T) {
 
 	if snapshot.Items[0].Key != "triage-skill" {
 		t.Fatalf("snapshot.Items[0].Key = %q, want %q", snapshot.Items[0].Key, "triage-skill")
+	}
+
+	if snapshot.Items[0].Version != "1.0.0" {
+		t.Fatalf("snapshot.Items[0].Version = %q, want %q", snapshot.Items[0].Version, "1.0.0")
+	}
+
+	if !snapshot.Items[0].Enabled {
+		t.Fatalf("snapshot.Items[0].Enabled = false, want true")
+	}
+
+	if snapshot.Items[0].HandlerType != "command" {
+		t.Fatalf("snapshot.Items[0].HandlerType = %q, want %q", snapshot.Items[0].HandlerType, "command")
+	}
+
+	if snapshot.Items[0].HandlerRef != "scripts/skills/triage.sh" {
+		t.Fatalf("snapshot.Items[0].HandlerRef = %q, want %q", snapshot.Items[0].HandlerRef, "scripts/skills/triage.sh")
 	}
 
 	if len(snapshot.Diagnostics) == 0 {
@@ -67,8 +87,8 @@ func TestLoadDirLoadsRepositoryExamples(t *testing.T) {
 		t.Fatalf("snapshot.Diagnostics = %v, want none", snapshot.Diagnostics)
 	}
 
-	if len(snapshot.Items) != 4 {
-		t.Fatalf("snapshot.Items = %d, want 4", len(snapshot.Items))
+	if len(snapshot.Items) != 6 {
+		t.Fatalf("snapshot.Items = %d, want 6", len(snapshot.Items))
 	}
 }
 
@@ -84,15 +104,45 @@ func writeFile(t *testing.T, path string, contents string) {
 	}
 }
 
+func writeExecutable(t *testing.T, path string) {
+	t.Helper()
+
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("MkdirAll(%q) error = %v", filepath.Dir(path), err)
+	}
+	if err := os.WriteFile(path, []byte("#!/usr/bin/env bash\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile(%q) error = %v", path, err)
+	}
+}
+
 func sampleSkillMarkdown(key string) string {
 	return `---
 kind: skill
 key: ` + key + `
 title: Triage Skill
 summary: Helps sort incoming work.
+version: 1.0.0
+enabled: true
 strictness: rigid
 applies_to:
   - intake
+scopes:
+  - project
+permissions:
+  - repo.read
+handler_type: command
+handler_ref: scripts/skills/triage.sh
+timeout_seconds: 15
+input_schema:
+  type: object
+  properties:
+    request:
+      type: string
+output_schema:
+  type: object
+  properties:
+    summary:
+      type: string
 ---
 
 # Triage Skill
@@ -164,9 +214,28 @@ kind: skill
 key: ` + key + `
 title: Broken Skill
 summary: Missing the Procedure section.
+version: 1.0.0
+enabled: true
 strictness: rigid
 applies_to:
   - intake
+scopes:
+  - project
+permissions:
+  - repo.read
+handler_type: command
+handler_ref: scripts/skills/triage.sh
+timeout_seconds: 15
+input_schema:
+  type: object
+  properties:
+    request:
+      type: string
+output_schema:
+  type: object
+  properties:
+    summary:
+      type: string
 ---
 
 # Broken Skill

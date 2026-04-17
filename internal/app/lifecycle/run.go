@@ -2,6 +2,7 @@ package lifecycle
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -20,10 +21,14 @@ import (
 	appbackup "odin-os/internal/app/backup"
 	"odin-os/internal/app/bootstrap"
 	appconfig "odin-os/internal/app/config"
+	clicommands "odin-os/internal/cli/commands"
 	"odin-os/internal/cli/repl"
+	cliscope "odin-os/internal/cli/scope"
+	"odin-os/internal/core/capabilities"
 	"odin-os/internal/core/projects"
 	"odin-os/internal/executors/contract"
 	executorrouter "odin-os/internal/executors/router"
+	conversationsvc "odin-os/internal/runtime/conversation"
 	healthsvc "odin-os/internal/runtime/health"
 	"odin-os/internal/runtime/jobs"
 	"odin-os/internal/runtime/recovery"
@@ -122,42 +127,46 @@ func Run(ctx context.Context, root string, args []string, stdin io.Reader, stdou
 	}
 	defer app.Store.Close()
 
-	if len(args) > 0 {
-		switch args[0] {
-		case "doctor":
-			return runDoctor(ctx, app, args[1:], stdout)
-		case "healthcheck":
-			return runHealthcheck(ctx, app, cfg, stdout)
-		case "serve":
-			return runServe(ctx, app, cfg, stdout)
-		case "backup":
-			return runBackup(ctx, appbackup.Service{RepoRoot: root, RuntimeRoot: cfg.RuntimeRoot}, args[1:], stdout)
-		case "restore":
-			return runRestore(ctx, appbackup.Service{RepoRoot: root, RuntimeRoot: cfg.RuntimeRoot}, args[1:], stdout)
-		case "verify-backup":
-			return runVerifyBackup(ctx, appbackup.Service{RepoRoot: root, RuntimeRoot: cfg.RuntimeRoot}, args[1:], stdout)
-		default:
-			return fmt.Errorf("unknown command: %s", args[0])
-		}
-	}
-
-	shell, err := repl.New(repl.Environment{
-		Store:               app.Store,
-		Registry:            app.Registry,
-		RegistryDiagnostics: app.RegistryDiagnostics,
-		SessionStore:        app.SessionStore,
-	})
-	if err != nil {
+	if len(args) == 0 {
+		_, err := fmt.Fprintln(stdout, "Usage: odin <repl|status|project|transition|task|skills|doctor|healthcheck|serve|backup|restore|verify-backup> ...")
 		return err
 	}
 
-	if err := shell.Run(ctx, stdin, stdout); err != nil && err != io.EOF {
-		return err
+	switch args[0] {
+	case "repl":
+		return runRepl(ctx, app, stdin, stdout)
+	case "status":
+		return runStatus(ctx, app, args[1:], stdout)
+	case "project":
+		return runProject(ctx, app, args[1:], stdout)
+	case "transition":
+		return runTransition(ctx, app, args[1:], stdout)
+	case "task":
+		return runTask(ctx, app, args[1:], stdout)
+	case "skills":
+		return runSkills(ctx, app, args[1:], stdout)
+	case "doctor":
+		return runDoctor(ctx, app, args[1:], stdout)
+	case "healthcheck":
+		return runHealthcheck(ctx, app, cfg, stdout)
+	case "serve":
+		return runServe(ctx, app, cfg, stdout)
+	case "backup":
+		return runBackup(ctx, appbackup.Service{RepoRoot: root, RuntimeRoot: cfg.RuntimeRoot}, args[1:], stdout)
+	case "restore":
+		return runRestore(ctx, appbackup.Service{RepoRoot: root, RuntimeRoot: cfg.RuntimeRoot}, args[1:], stdout)
+	case "verify-backup":
+		return runVerifyBackup(ctx, appbackup.Service{RepoRoot: root, RuntimeRoot: cfg.RuntimeRoot}, args[1:], stdout)
+	default:
+		return fmt.Errorf("unknown command: %s", args[0])
 	}
-	return nil
 }
 
 func runDoctor(ctx context.Context, app bootstrap.App, args []string, stdout io.Writer) error {
+	if err := bootstrap.RefreshReadinessSamples(ctx, app, len(app.RegistryDiagnostics) == 0); err != nil {
+		return err
+	}
+
 	report, err := newHealthService(app, healthsvc.DefaultConfig()).Doctor(ctx, len(app.RegistryDiagnostics) == 0)
 	if err != nil {
 		return err
@@ -173,12 +182,305 @@ func runDoctor(ctx context.Context, app bootstrap.App, args []string, stdout io.
 	return err
 }
 
+func runRepl(ctx context.Context, app bootstrap.App, stdin io.Reader, stdout io.Writer) error {
+	shell, err := newShell(app)
+	if err != nil {
+		return err
+	}
+	if err := shell.Run(ctx, stdin, stdout); err != nil && err != io.EOF {
+		return err
+	}
+	return nil
+}
+
+func runStatus(ctx context.Context, app bootstrap.App, args []string, stdout io.Writer) error {
+	jsonOutput, remaining, err := consumeJSONFlag(args)
+	if err != nil {
+		return err
+	}
+	if len(remaining) != 0 {
+		return fmt.Errorf("usage: odin status [--json]")
+	}
+
+	snapshot, err := conversationsvc.Service{
+		DB:             app.Store.DB(),
+		StalledTimeout: 30 * time.Minute,
+	}.Snapshot(ctx)
+	if err != nil {
+		return err
+	}
+
+	summary, err := newHealthService(app, healthsvc.DefaultConfig()).Summary(ctx, len(app.RegistryDiagnostics) == 0)
+	if err != nil {
+		return err
+	}
+
+	if jsonOutput {
+		encoder := json.NewEncoder(stdout)
+		encoder.SetIndent("", "  ")
+		return encoder.Encode(map[string]any{
+			"health":                       string(summary.Status),
+			"pending_approvals":            len(snapshot.ApprovalsWaiting),
+			"registry_healthy":             summary.RegistryHealthy,
+			"generated_at":                 snapshot.GeneratedAt,
+			"approvals_waiting":            snapshot.ApprovalsWaiting,
+			"stalled_runs":                 snapshot.StalledRuns,
+			"active_runs":                  snapshot.ActiveRuns,
+			"project_transitions":          snapshot.ProjectTransitions,
+			"project_transition_ownership": snapshot.ProjectTransitionOwnership,
+		})
+	}
+
+	_, err = fmt.Fprintf(stdout, "health=%s pending_approvals=%d stalled_runs=%d active_runs=%d project_transitions=%d registry_healthy=%t\n",
+		summary.Status,
+		len(snapshot.ApprovalsWaiting),
+		len(snapshot.StalledRuns),
+		len(snapshot.ActiveRuns),
+		len(snapshot.ProjectTransitions),
+		summary.RegistryHealthy,
+	)
+	return err
+}
+
+func runProject(ctx context.Context, app bootstrap.App, args []string, stdout io.Writer) error {
+	switch len(args) {
+	case 0:
+		return runShellCommand(ctx, app, "/project", stdout)
+	case 1:
+		if strings.EqualFold(args[0], "list") {
+			return runShellCommand(ctx, app, "/project", stdout)
+		}
+	case 2:
+		if strings.EqualFold(args[0], "select") {
+			return runShellCommand(ctx, app, "/project "+args[1], stdout)
+		}
+	}
+	return fmt.Errorf("usage: odin project [list|select <key>]")
+}
+
+func runTransition(ctx context.Context, app bootstrap.App, args []string, stdout io.Writer) error {
+	command := "/transition"
+	if len(args) > 0 {
+		command += " " + strings.Join(args, " ")
+	}
+	return runShellCommand(ctx, app, command, stdout)
+}
+
+func runTask(ctx context.Context, app bootstrap.App, args []string, stdout io.Writer) error {
+	command, err := clicommands.ParseTask(args)
+	if err != nil {
+		return err
+	}
+
+	manifest, ok := app.Registry.Lookup(command.ProjectKey)
+	if !ok {
+		return fmt.Errorf("unknown project: %s", command.ProjectKey)
+	}
+	resolved := cliscope.Resolve(cliscope.ResolveInput{
+		ExplicitTarget: &cliscope.Target{
+			ProjectKey:    manifest.Key,
+			SystemProject: manifest.SystemProject,
+		},
+	})
+
+	jobService := newJobService(app)
+	task, err := jobService.CreateTaskFromAct(ctx, resolved, command.Title)
+	if err != nil {
+		return err
+	}
+
+	if command.Name == "create" {
+		return clicommands.WriteJSON(stdout, clicommands.TaskCreateView{
+			ID:     task.ID,
+			Key:    task.Key,
+			Status: task.Status,
+			Scope:  task.Scope,
+		})
+	}
+
+	if err := bootstrap.RefreshReadinessSamples(ctx, app, len(app.RegistryDiagnostics) == 0); err != nil {
+		return err
+	}
+	if err := jobService.Service.ExecuteNextQueued(ctx); err != nil {
+		return err
+	}
+
+	task, err = app.Store.GetTask(ctx, task.ID)
+	if err != nil {
+		return err
+	}
+	run, err := latestRunForTask(ctx, app.Store, task.ID)
+	if err != nil {
+		return err
+	}
+
+	return clicommands.WriteJSON(stdout, clicommands.TaskRunView{
+		Task: clicommands.TaskCreateView{
+			ID:     task.ID,
+			Key:    task.Key,
+			Status: task.Status,
+			Scope:  task.Scope,
+		},
+		Run: &clicommands.TaskRunResultView{
+			ID:       run.ID,
+			Executor: run.Executor,
+			Status:   run.Status,
+			Summary:  run.Summary,
+		},
+	})
+}
+
+func runShellCommand(ctx context.Context, app bootstrap.App, line string, stdout io.Writer) error {
+	shell, err := newShell(app)
+	if err != nil {
+		return err
+	}
+	return shell.HandleLine(ctx, line, stdout)
+}
+
+type servedJobService struct {
+	jobs.Service
+	Supervisor any
+}
+
+func newJobService(app bootstrap.App) servedJobService {
+	return servedJobService{
+		Service: jobs.Service{
+			Store:          app.Store,
+			Registry:       app.Registry,
+			Executors:      app.Executors,
+			ExecutorConfig: app.ExecutorConfig,
+			Transitions:    projects.Service{Store: app.Store},
+			Leases: leases.Manager{
+				Store:        app.Store,
+				Git:          gitadapter.Adapter{},
+				WorktreeRoot: worktrees.DefaultRoot(),
+			},
+			Now: time.Now,
+		},
+		Supervisor: supervision.Service{
+			Store: app.Store,
+			Now:   time.Now,
+		},
+	}
+}
+
+type servedCommandService struct {
+	app bootstrap.App
+}
+
+func (service servedCommandService) Execute(ctx context.Context, request capabilities.InvokeRequest) (capabilities.InvokeResponse, error) {
+	switch request.CapabilityID {
+	case "project.status":
+		return invokeServedProjectStatus(ctx, service.app, request)
+	default:
+		return capabilities.InvokeResponse{}, fmt.Errorf("unsupported capability: %s", request.CapabilityID)
+	}
+}
+
+func invokeServedProjectStatus(ctx context.Context, app bootstrap.App, request capabilities.InvokeRequest) (capabilities.InvokeResponse, error) {
+	mode := strings.TrimSpace(request.Execution.Mode)
+	if mode == "" {
+		mode = "local"
+	}
+
+	scopeLabel := strings.TrimSpace(request.Scope.Kind)
+	if request.Scope.Kind == "project" || request.Scope.Kind == "odin-core" {
+		if request.Scope.ProjectKey != "" {
+			scopeLabel = request.Scope.ProjectKey
+		}
+		if manifest, ok := app.Registry.Lookup(request.Scope.ProjectKey); ok && app.Store != nil {
+			project, err := projects.Service{Store: app.Store}.RegisterManagedProject(ctx, manifest)
+			if err == nil {
+				record, err := app.Store.GetProjectTransition(ctx, project.ID)
+				if err == nil {
+					return capabilities.InvokeResponse{
+						Status: "ok",
+						Output: json.RawMessage(fmt.Sprintf(
+							"project=%s state=%s controller=%s mutation_authority=%s odin_can_mutate=%t limited_actions=%s\n",
+							manifest.Key,
+							record.State,
+							record.Controller,
+							record.Controller,
+							record.Controller == string(projects.TransitionControllerOdinOS),
+							formatLimitedActions(record.LimitedActionsJSON),
+						)),
+					}, nil
+				}
+			}
+		}
+	}
+	if scopeLabel == "" {
+		scopeLabel = "global"
+	}
+
+	return capabilities.InvokeResponse{
+		Status: "ok",
+		Output: json.RawMessage(fmt.Sprintf("scope=%s mode=%s\n", scopeLabel, mode)),
+	}, nil
+}
+
+func formatLimitedActions(raw string) string {
+	values := strings.TrimSpace(raw)
+	if values == "" || values == "[]" {
+		return "none"
+	}
+	return strings.Trim(values, "[]\"")
+}
+
+func newShell(app bootstrap.App) (*repl.Shell, error) {
+	return repl.New(repl.Environment{
+		Store:               app.Store,
+		Registry:            app.Registry,
+		RegistryDiagnostics: app.RegistryDiagnostics,
+		SessionStore:        app.SessionStore,
+		CommandService:      servedCommandService{app: app},
+		ExecutorConfig:      app.ExecutorConfig,
+		Executors:           app.Executors,
+		Leases: leases.Manager{
+			Store:        app.Store,
+			Git:          gitadapter.Adapter{},
+			WorktreeRoot: worktrees.DefaultRoot(),
+		},
+	})
+}
+
+func latestRunForTask(ctx context.Context, store *sqlite.Store, taskID int64) (sqlite.Run, error) {
+	row := store.DB().QueryRowContext(ctx, `
+		SELECT id
+		FROM runs
+		WHERE task_id = ?
+		ORDER BY id DESC
+		LIMIT 1
+	`, taskID)
+
+	var runID int64
+	if err := row.Scan(&runID); err != nil {
+		return sqlite.Run{}, err
+	}
+	return store.GetRun(ctx, runID)
+}
+
 func runHealthcheck(ctx context.Context, app bootstrap.App, cfg appconfig.Config, stdout io.Writer) error {
 	if reason, active, err := readReadinessFlag(cfg.RuntimeRoot); err != nil {
 		return err
 	} else if active {
 		_, _ = fmt.Fprintf(stdout, "not ready: %s\n", reason)
 		return errRuntimeNotReady
+	}
+
+	state, err := app.Store.GetRuntimeState(ctx)
+	switch err {
+	case nil:
+		if state.Status != "ready" {
+			_, _ = fmt.Fprintln(stdout, "not ready: runtime not ready")
+			return errRuntimeNotReady
+		}
+	case sql.ErrNoRows:
+		_, _ = fmt.Fprintln(stdout, "not ready: runtime not ready")
+		return errRuntimeNotReady
+	default:
+		return err
 	}
 
 	healthConfig := healthsvc.DefaultConfig()

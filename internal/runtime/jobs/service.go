@@ -12,7 +12,9 @@ import (
 	"time"
 
 	"odin-os/internal/cli/scope"
+	"odin-os/internal/core/companions"
 	"odin-os/internal/core/projects"
+	"odin-os/internal/core/workspaces"
 	"odin-os/internal/executors/contract"
 	executorrouter "odin-os/internal/executors/router"
 	"odin-os/internal/runtime/checkpoints"
@@ -77,7 +79,28 @@ func (service Service) CreateTaskFromAct(ctx context.Context, resolved scope.Res
 		return sqlite.Task{}, err
 	}
 
-	project, err := service.ensureRuntimeProject(ctx, projectManifest)
+	transitions := service.Transitions
+	if transitions.Store == nil {
+		transitions = projects.Service{Store: service.Store}
+	}
+
+	project, err := transitions.RegisterManagedProject(ctx, projectManifest)
+	if err != nil {
+		return sqlite.Task{}, err
+	}
+	workspace, err := workspaces.Service{Store: service.Store}.BootstrapDefaultWorkspace(ctx)
+	if err != nil {
+		return sqlite.Task{}, err
+	}
+	companion, err := companions.Service{Store: service.Store}.GetCompanionByKey(ctx, workspace.ID, workspace.DefaultCompanionKey)
+	if err != nil {
+		return sqlite.Task{}, err
+	}
+	ownerCompanionID, err := service.initiativeOwnerCompanionID(ctx, workspace.ID, project.Key, companion.ID)
+	if err != nil {
+		return sqlite.Task{}, err
+	}
+	initiative, err := transitions.RegisterManagedProjectInitiative(ctx, workspace.ID, project, ownerCompanionID)
 	if err != nil {
 		return sqlite.Task{}, err
 	}
@@ -87,13 +110,20 @@ func (service Service) CreateTaskFromAct(ctx context.Context, resolved scope.Res
 		now = service.Now().UTC()
 	}
 
+	taskCompanionID := initiative.OwnerCompanionID
+	workKind := taskScope
+
 	return service.Store.CreateTask(ctx, sqlite.CreateTaskParams{
-		ProjectID:   project.ID,
-		Key:         fmt.Sprintf("%s-%s", slugify(title), now.Format("20060102-150405")),
-		Title:       title,
-		Status:      "queued",
-		Scope:       taskScope,
-		RequestedBy: "operator",
+		ProjectID:    project.ID,
+		Key:          fmt.Sprintf("%s-%s", slugify(title), now.Format("20060102-150405")),
+		Title:        title,
+		Status:       "queued",
+		Scope:        taskScope,
+		RequestedBy:  "operator",
+		WorkspaceID:  &workspace.ID,
+		InitiativeID: &initiative.ID,
+		CompanionID:  taskCompanionID,
+		WorkKind:     workKind,
 	})
 }
 
@@ -270,6 +300,21 @@ func (service Service) ensureRuntimeProject(ctx context.Context, manifest projec
 		GitHubRepo:    manifest.GitHub.Repo,
 		ManifestPath:  manifest.SourcePath,
 	})
+}
+
+func (service Service) initiativeOwnerCompanionID(ctx context.Context, workspaceID int64, initiativeKey string, defaultCompanionID int64) (*int64, error) {
+	initiative, err := service.Store.GetInitiativeByKey(ctx, workspaceID, initiativeKey)
+	switch {
+	case err == nil:
+		if initiative.OwnerCompanionID != nil {
+			return initiative.OwnerCompanionID, nil
+		}
+	case err == sql.ErrNoRows:
+	default:
+		return nil, err
+	}
+
+	return &defaultCompanionID, nil
 }
 
 func (service Service) taskOwnerForScope(resolved scope.Resolution) (projects.Manifest, string, error) {

@@ -60,6 +60,7 @@ type Service struct {
 	Config            Config
 	Now               func() time.Time
 	ExecutorKeys      []string
+	ExpectedExecutors []string
 	ImmediateNotReady *atomic.Bool
 }
 
@@ -290,7 +291,8 @@ func (service Service) executorCheckFor(ctx context.Context, executor string, no
 }
 
 func (service Service) aggregateExecutorCheck(ctx context.Context, now time.Time, config Config) (Check, bool, error) {
-	if service.ExecutorKeys != nil && len(service.ExecutorKeys) == 0 {
+	executorKeys := service.executorKeys()
+	if executorKeys != nil && len(executorKeys) == 0 {
 		return Check{
 			Name:       "executor",
 			Status:     StatusDegraded,
@@ -315,9 +317,9 @@ func (service Service) aggregateExecutorCheck(ctx context.Context, now time.Time
 		) latest ON latest.max_id = eh.id
 	`
 	args := []any{}
-	if service.ExecutorKeys != nil {
-		query += fmt.Sprintf(" WHERE eh.executor IN (%s)", placeholders(len(service.ExecutorKeys)))
-		for _, key := range service.ExecutorKeys {
+	if executorKeys != nil {
+		query += fmt.Sprintf(" WHERE eh.executor IN (%s)", placeholders(len(executorKeys)))
+		for _, key := range executorKeys {
 			args = append(args, key)
 		}
 	}
@@ -386,6 +388,13 @@ func (service Service) aggregateExecutorCheck(ctx context.Context, now time.Time
 	}
 	check.Summary = "executor capacity is available"
 	return check, true, nil
+}
+
+func (service Service) executorKeys() []string {
+	if service.ExecutorKeys != nil {
+		return service.ExecutorKeys
+	}
+	return service.ExpectedExecutors
 }
 
 func (service Service) queueCheck(ctx context.Context, now time.Time, config Config) (Check, error) {

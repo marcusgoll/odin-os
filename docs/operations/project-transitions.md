@@ -30,6 +30,8 @@ From the Odin shell in project scope:
 - limited-action allowlist
 - latest notes when present
 
+Use `/leases`, `/leases active`, `/leases released`, `/leases all`, `/leases inspect <lease-id>`, or `/leases cleanup confirm` to inspect and clean released task-owned worktrees in the current scope.
+
 If the project has not been initialized in the runtime yet, Odin reports the default effective state:
 
 - `state=inventory`
@@ -93,3 +95,5 @@ Examples:
 - transition control remains explicit and auditable
 
 Shadow mode must remain fail-closed for mutation. If Odin does not own mutation authority, queued mutating work fails before branch or worktree allocation.
+
+On the operational line, explicit bounded-action infrastructure may exist without enabling bounded mutation execution. That remains safe because the runtime still fails closed.

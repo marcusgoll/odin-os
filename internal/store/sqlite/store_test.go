@@ -222,12 +222,16 @@ func TestStoreMigrateLifecycleAndReopen(t *testing.T) {
 		t.Fatalf("project views = %+v, want one project with one task", projectViews)
 	}
 
-	var migrationCount int
-	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM schema_migrations`).Scan(&migrationCount); err != nil {
-		t.Fatalf("schema_migrations count query error = %v", err)
+	var workspaceTableCount int
+	if err := store.db.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM sqlite_master
+		WHERE type = 'table' AND name IN ('workspaces', 'workspace_policies')
+	`).Scan(&workspaceTableCount); err != nil {
+		t.Fatalf("workspace table count query error = %v", err)
 	}
-	if migrationCount != 8 {
-		t.Fatalf("schema_migrations count = %d, want 8", migrationCount)
+	if workspaceTableCount != 2 {
+		t.Fatalf("workspace table count = %d, want 2", workspaceTableCount)
 	}
 
 	if err := store.Close(); err != nil {

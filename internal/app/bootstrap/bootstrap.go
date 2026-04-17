@@ -136,12 +136,14 @@ func Load(ctx context.Context, repoRoot string, runtimeRoot string) (App, error)
 	}
 	executors := executorrouter.DefaultCatalog()
 
-	if err := initializeReadinessState(ctx, store, filepath.Join(repoRoot, "registry"), registrySnapshot, executorConfig, executors); err != nil {
-		if failureErr := recordBootstrapFailure(ctx, store, runtimeState, bootID, err); failureErr != nil {
-			err = failureErr
+	if bootID != "" {
+		if err := initializeReadinessState(ctx, store, filepath.Join(repoRoot, "registry"), registrySnapshot, executorConfig, executors); err != nil {
+			if failureErr := recordBootstrapFailure(ctx, store, runtimeState, bootID, err); failureErr != nil {
+				err = failureErr
+			}
+			_ = store.Close()
+			return App{}, err
 		}
-		_ = store.Close()
-		return App{}, err
 	}
 
 	return App{
@@ -157,6 +159,32 @@ func Load(ctx context.Context, repoRoot string, runtimeRoot string) (App, error)
 		BootID:         bootID,
 		RuntimeState:   runtimeState,
 	}, nil
+}
+
+func RefreshReadinessSamples(ctx context.Context, app App, registryHealthy bool) error {
+	if registryHealthy {
+		versionHash, err := registryVersionHash(filepath.Join(app.RepoRoot, "registry"))
+		if err != nil {
+			return err
+		}
+		if _, err := app.Store.RecordRegistryVersion(ctx, sqlite.RecordRegistryVersionParams{
+			Source:      "registry",
+			VersionHash: versionHash,
+			Notes:       "doctor refresh",
+		}); err != nil {
+			return err
+		}
+	}
+
+	if err := (healthsvc.Service{}).SampleConfiguredExecutors(ctx, app.Store, app.ExecutorConfig, app.Executors, "doctor"); err != nil {
+		return err
+	}
+
+	if err := (healthsvc.Service{}).RefreshProjectionFreshness(ctx, app.Store, ServiceOwnedProjectionSurfaces(), "doctor"); err != nil {
+		return err
+	}
+
+	return nil
 }
 
 func bootIDFromContext(ctx context.Context) string {

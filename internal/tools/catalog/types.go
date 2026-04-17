@@ -10,9 +10,11 @@ import (
 type Kind string
 
 const (
-	KindTool     Kind = "tool"
-	KindSkill    Kind = "skill"
-	KindSubAgent Kind = "sub_agent"
+	KindTool            Kind = "tool"
+	KindSkill           Kind = "skill"
+	KindWorkflow        Kind = "workflow"
+	KindAgentRole       Kind = "agent_role"
+	KindOperatorCommand Kind = "operator_command"
 )
 
 type CostHint string
@@ -30,6 +32,8 @@ type Card struct {
 	Summary    string
 	Scopes     []string
 	Tags       []string
+	AppliesTo  []string
+	Composes   []string
 	CostHint   CostHint
 	BudgetCost int
 	SourceRef  string
@@ -39,6 +43,7 @@ type ToolDefinition struct {
 	Key        string
 	Title      string
 	Summary    string
+	Version    string
 	Scopes     []string
 	Tags       []string
 	CostHint   CostHint
@@ -49,36 +54,80 @@ type ToolDefinition struct {
 }
 
 type SkillDefinition struct {
-	Key       string
-	Title     string
-	Summary   string
-	Tags      []string
-	Scopes    []string
-	Sections  map[string]string
-	SourceRef string
+	Key            string
+	Title          string
+	Summary        string
+	Version        string
+	Enabled        bool
+	Tags           []string
+	Scopes         []string
+	AppliesTo      []string
+	Composes       []string
+	Permissions    []string
+	HandlerType    string
+	HandlerRef     string
+	TimeoutSeconds int
+	InputSchema    map[string]any
+	OutputSchema   map[string]any
+	Sections       map[string]string
+	SourceRef      string
 }
 
-type SubAgentDefinition struct {
+type WorkflowDefinition struct {
+	Key          string
+	Title        string
+	Summary      string
+	Version      string
+	Tags         []string
+	Scopes       []string
+	AppliesTo    []string
+	Composes     []string
+	Entrypoint   string
+	Dependencies []registry.DependencyRef
+	Sections     map[string]string
+	SourceRef    string
+}
+
+type AgentRoleDefinition struct {
 	Key       string
 	Title     string
 	Summary   string
 	Tags      []string
 	Scopes    []string
+	AppliesTo []string
+	Composes  []string
 	Tools     []string
 	Role      string
 	Sections  map[string]string
 	SourceRef string
 }
 
+type OperatorCommandDefinition struct {
+	Key       string
+	Title     string
+	Summary   string
+	Tags      []string
+	Scopes    []string
+	AppliesTo []string
+	Composes  []string
+	Command   string
+	Aliases   []string
+	Sections  map[string]string
+	SourceRef string
+}
+
 type Expansion struct {
-	Card     Card
-	Tool     *ToolDefinition
-	Skill    *SkillDefinition
-	SubAgent *SubAgentDefinition
+	Card            Card
+	Tool            *ToolDefinition
+	Skill           *SkillDefinition
+	Workflow        *WorkflowDefinition
+	AgentRole       *AgentRoleDefinition
+	OperatorCommand *OperatorCommandDefinition
 }
 
 type StructuredResult struct {
 	CapabilityKey   string
+	Source          string
 	Summary         string
 	Artifacts       []string
 	KeyFacts        map[string]string
@@ -89,6 +138,7 @@ type StructuredResult struct {
 
 type CompactedResult struct {
 	CapabilityKey   string
+	Source          string
 	Summary         string
 	KeyFacts        map[string]string
 	FollowOnOptions []string
@@ -120,20 +170,52 @@ func CardFromRegistry(item registry.Item) (Card, bool) {
 			Summary:    item.Summary,
 			Scopes:     append([]string(nil), item.Scopes...),
 			Tags:       append([]string(nil), item.Tags...),
+			AppliesTo:  append([]string(nil), item.AppliesTo...),
+			Composes:   append([]string(nil), item.Composes...),
 			CostHint:   CostHintLow,
 			BudgetCost: 1,
 			SourceRef:  item.Source.RelativePath,
 		}, true
 	case registry.KindAgent:
 		return Card{
-			Kind:       KindSubAgent,
+			Kind:       KindAgentRole,
 			Key:        item.Key,
 			Title:      item.Title,
 			Summary:    item.Summary,
 			Scopes:     append([]string(nil), item.Scopes...),
 			Tags:       append([]string(nil), item.Tags...),
+			AppliesTo:  append([]string(nil), item.AppliesTo...),
+			Composes:   append([]string(nil), item.Composes...),
 			CostHint:   CostHintMedium,
 			BudgetCost: 2,
+			SourceRef:  item.Source.RelativePath,
+		}, true
+	case registry.KindWorkflow:
+		return Card{
+			Kind:       KindWorkflow,
+			Key:        item.Key,
+			Title:      item.Title,
+			Summary:    item.Summary,
+			Scopes:     append([]string(nil), item.Scopes...),
+			Tags:       append([]string(nil), item.Tags...),
+			AppliesTo:  append([]string(nil), item.AppliesTo...),
+			Composes:   append([]string(nil), item.Composes...),
+			CostHint:   CostHintMedium,
+			BudgetCost: 2,
+			SourceRef:  item.Source.RelativePath,
+		}, true
+	case registry.KindCommand:
+		return Card{
+			Kind:       KindOperatorCommand,
+			Key:        item.Key,
+			Title:      item.Title,
+			Summary:    item.Summary,
+			Scopes:     append([]string(nil), item.Scopes...),
+			Tags:       append([]string(nil), item.Tags...),
+			AppliesTo:  append([]string(nil), item.AppliesTo...),
+			Composes:   append([]string(nil), item.Composes...),
+			CostHint:   CostHintLow,
+			BudgetCost: 1,
 			SourceRef:  item.Source.RelativePath,
 		}, true
 	default:
@@ -173,8 +255,35 @@ func CloneSections(sections map[string]string) map[string]string {
 	return cloned
 }
 
+func CloneAnyMap(values map[string]any) map[string]any {
+	if len(values) == 0 {
+		return nil
+	}
+
+	cloned := make(map[string]any, len(values))
+	for key, value := range values {
+		cloned[key] = cloneAnyValue(value)
+	}
+	return cloned
+}
+
+func cloneAnyValue(value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		return CloneAnyMap(typed)
+	case []any:
+		cloned := make([]any, len(typed))
+		for i := range typed {
+			cloned[i] = cloneAnyValue(typed[i])
+		}
+		return cloned
+	default:
+		return typed
+	}
+}
+
 func CompactedSize(result CompactedResult) int {
-	size := len(result.CapabilityKey) + len(result.Summary) + len(result.RawRef)
+	size := len(result.CapabilityKey) + len(result.Source) + len(result.Summary) + len(result.RawRef)
 	for key, value := range result.KeyFacts {
 		size += len(key) + len(value)
 	}

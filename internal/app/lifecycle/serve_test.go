@@ -489,16 +489,6 @@ service:
 	ctx, cancel := context.WithCancel(context.Background())
 	ctx = withServeLoopConfig(ctx, serveLoopConfig{selfHealInterval: 20 * time.Millisecond})
 	actionObserved := make(chan struct{})
-	time.AfterFunc(30*time.Millisecond, func() {
-		staleAt := time.Now().Add(-2 * time.Hour).UTC().Format(time.RFC3339Nano)
-		if _, err := store.DB().ExecContext(context.Background(), `
-			UPDATE projection_freshness
-			SET refreshed_at = ?, updated_at = ?
-			WHERE surface = 'doctor'
-		`, staleAt, staleAt); err != nil {
-			t.Errorf("force stale projection freshness error = %v", err)
-		}
-	})
 	go func() {
 		deadline := time.NewTimer(2 * time.Second)
 		defer deadline.Stop()
@@ -506,6 +496,7 @@ service:
 		ticker := time.NewTicker(10 * time.Millisecond)
 		defer ticker.Stop()
 
+		forcedStale := false
 		for {
 			select {
 			case <-ctx.Done():
@@ -514,6 +505,22 @@ service:
 				cancel()
 				return
 			case <-ticker.C:
+				if !forcedStale {
+					state, err := store.GetRuntimeState(context.Background())
+					if err == nil && state.Status == "ready" {
+						staleAt := time.Now().Add(-2 * time.Hour).UTC().Format(time.RFC3339Nano)
+						if _, err := store.DB().ExecContext(context.Background(), `
+							UPDATE projection_freshness
+							SET refreshed_at = ?, updated_at = ?
+							WHERE surface = 'doctor'
+						`, staleAt, staleAt); err != nil {
+							t.Errorf("force stale projection freshness error = %v", err)
+							cancel()
+							return
+						}
+						forcedStale = true
+					}
+				}
 				events, err := store.ListEvents(context.Background(), sqlite.ListEventsParams{})
 				if err != nil {
 					continue

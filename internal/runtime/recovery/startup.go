@@ -2,7 +2,9 @@ package recovery
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
+	"time"
 
 	"odin-os/internal/runtime/checkpoints"
 	"odin-os/internal/store/sqlite"
@@ -37,11 +39,20 @@ func (service Service) RunStartupRecovery(ctx context.Context) (StartupResult, e
 		if err != nil {
 			return StartupResult{}, err
 		}
+		targetStatus, blockedReason, approvalSummary, err := service.recoveryTargetState(ctx, task)
+		if err != nil {
+			return StartupResult{}, err
+		}
 
-		if _, _, err := service.Store.InterruptRunAndRequeueTask(ctx, sqlite.InterruptRunAndRequeueTaskParams{
+		recoveredTask, _, err := service.Store.InterruptRunAndRequeueTask(ctx, sqlite.InterruptRunAndRequeueTaskParams{
 			RunID:   run.ID,
 			Summary: "interrupted by startup recovery",
-		}); err != nil {
+		})
+		if err != nil {
+			return StartupResult{}, err
+		}
+		recoveredTask, err = service.restoreRecoveredTaskState(ctx, recoveredTask, targetStatus, blockedReason)
+		if err != nil {
 			return StartupResult{}, err
 		}
 
@@ -51,8 +62,8 @@ func (service Service) RunStartupRecovery(ctx context.Context) (StartupResult, e
 			Trigger:        checkpoints.TriggerRestart,
 			CheckpointKey:  fmt.Sprintf("startup-recovery-%d", run.ID),
 			Objective:      task.Title,
-			TaskStatus:     "queued",
-			BlockingReason: "previous service instance stopped during execution",
+			TaskStatus:     recoveredTask.Status,
+			BlockingReason: startupRecoveryBlockingReason(recoveredTask.Status, blockedReason),
 			NextSteps: []string{
 				"Review the restart wake packet",
 				"Resume the queued task when the runtime is healthy",
@@ -65,8 +76,8 @@ func (service Service) RunStartupRecovery(ctx context.Context) (StartupResult, e
 			}},
 			ManifestSummary: "managed project",
 			PolicySummary:   "bounded startup recovery",
-			OpenTaskSummary: "task requeued after restart",
-			ApprovalSummary: "none",
+			OpenTaskSummary: startupRecoveryOpenTaskSummary(recoveredTask.Status),
+			ApprovalSummary: approvalSummary,
 		})
 		if err != nil {
 			return StartupResult{}, err
@@ -109,4 +120,71 @@ func (service Service) RunStartupRecovery(ctx context.Context) (StartupResult, e
 	}
 
 	return result, nil
+}
+
+func (service Service) recoveryTargetState(ctx context.Context, task sqlite.Task) (string, string, string, error) {
+	approval, err := service.Store.GetLatestTaskApproval(ctx, task.ID)
+	switch {
+	case err == nil:
+		switch approval.Status {
+		case "pending":
+			return "blocked", "approval_required", "approval pending", nil
+		case "rejected":
+			return "blocked", task.BlockedReason, "approval rejected", nil
+		case "approved":
+			return task.Status, task.BlockedReason, "approval approved", nil
+		default:
+			return task.Status, task.BlockedReason, approval.Status, nil
+		}
+	case err == sql.ErrNoRows:
+	default:
+		return "", "", "", err
+	}
+
+	switch task.Status {
+	case "blocked":
+		if task.BlockedReason != "" {
+			return task.Status, task.BlockedReason, "none", nil
+		}
+		return "queued", "", "none", nil
+	case "completed", "failed", "dead_letter", "timeout":
+		return task.Status, task.BlockedReason, "none", nil
+	default:
+		return "queued", "", "none", nil
+	}
+}
+
+func (service Service) restoreRecoveredTaskState(ctx context.Context, task sqlite.Task, targetStatus string, blockedReason string) (sqlite.Task, error) {
+	if targetStatus == "" || targetStatus == task.Status {
+		return task, nil
+	}
+
+	return service.Store.UpdateTaskQueueState(ctx, sqlite.UpdateTaskQueueStateParams{
+		TaskID:         task.ID,
+		Status:         targetStatus,
+		NextEligibleAt: time.Time{},
+		Priority:       task.Priority,
+		LastError:      task.LastError,
+		RetryCount:     task.RetryCount,
+		MaxAttempts:    task.MaxAttempts,
+		BlockedReason:  blockedReason,
+	})
+}
+
+func startupRecoveryBlockingReason(status string, blockedReason string) string {
+	if status == "blocked" && blockedReason != "" {
+		return blockedReason
+	}
+	return "previous service instance stopped during execution"
+}
+
+func startupRecoveryOpenTaskSummary(status string) string {
+	switch status {
+	case "blocked":
+		return "task remains blocked after restart"
+	case "completed", "failed", "dead_letter", "timeout":
+		return fmt.Sprintf("task remains %s after restart", status)
+	default:
+		return "task requeued after restart"
+	}
 }
