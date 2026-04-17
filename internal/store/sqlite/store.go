@@ -3917,9 +3917,37 @@ func (store *Store) UpdateInitiativeStatus(ctx context.Context, params UpdateIni
 }
 
 func (store *Store) CreateDelegation(ctx context.Context, params CreateDelegationParams) (Delegation, error) {
-	now := store.now()
-	var delegation Delegation
+	delegations, err := store.CreateDelegations(ctx, []CreateDelegationParams{params})
+	if err != nil {
+		return Delegation{}, err
+	}
+	return delegations[0], nil
+}
 
+func (store *Store) CreateDelegations(ctx context.Context, params []CreateDelegationParams) ([]Delegation, error) {
+	if len(params) == 0 {
+		return nil, nil
+	}
+
+	now := store.now()
+	delegations := make([]Delegation, 0, len(params))
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		for _, param := range params {
+			record, err := store.createDelegationTx(ctx, tx, param, now)
+			if err != nil {
+				return err
+			}
+			delegations = append(delegations, record)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return delegations, nil
+}
+
+func (store *Store) createDelegationTx(ctx context.Context, tx *sql.Tx, params CreateDelegationParams, now time.Time) (Delegation, error) {
 	detailsJSON, err := normalizeDelegationJSON(params.DetailsJSON)
 	if err != nil {
 		return Delegation{}, fmt.Errorf("invalid delegation details JSON: %w", err)
@@ -3929,8 +3957,7 @@ func (store *Store) CreateDelegation(ctx context.Context, params CreateDelegatio
 		status = "queued"
 	}
 
-	err = store.withTx(ctx, func(tx *sql.Tx) error {
-		result, err := tx.ExecContext(ctx, `
+	result, err := tx.ExecContext(ctx, `
 			INSERT INTO delegations (
 				parent_task_id,
 				parent_run_id,
@@ -3955,42 +3982,34 @@ func (store *Store) CreateDelegation(ctx context.Context, params CreateDelegatio
 			)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?, ?)
 		`,
-			params.ParentTaskID,
-			nullInt64(params.ParentRunID),
-			params.ProjectID,
-			params.Scope,
-			params.DelegationKey,
-			params.Role,
-			params.ActionClass,
-			params.ActionKey,
-			params.MutationMode,
-			status,
-			params.ConvergenceMode,
-			params.ArtifactTarget,
-			params.Executor,
-			nullInt64(params.WorktreeLeaseID),
-			params.BranchName,
-			detailsJSON,
-			formatTime(now),
-			formatTime(now),
-		)
-		if err != nil {
-			return err
-		}
+		params.ParentTaskID,
+		nullInt64(params.ParentRunID),
+		params.ProjectID,
+		params.Scope,
+		params.DelegationKey,
+		params.Role,
+		params.ActionClass,
+		params.ActionKey,
+		params.MutationMode,
+		status,
+		params.ConvergenceMode,
+		params.ArtifactTarget,
+		params.Executor,
+		nullInt64(params.WorktreeLeaseID),
+		params.BranchName,
+		detailsJSON,
+		formatTime(now),
+		formatTime(now),
+	)
+	if err != nil {
+		return Delegation{}, err
+	}
 
-		delegationID, err := result.LastInsertId()
-		if err != nil {
-			return err
-		}
-		record, err := store.getDelegationTx(ctx, tx, delegationID)
-		if err != nil {
-			return err
-		}
-		delegation = record
-		return nil
-	})
-
-	return delegation, err
+	delegationID, err := result.LastInsertId()
+	if err != nil {
+		return Delegation{}, err
+	}
+	return store.getDelegationTx(ctx, tx, delegationID)
 }
 
 func (store *Store) GetDelegation(ctx context.Context, delegationID int64) (Delegation, error) {

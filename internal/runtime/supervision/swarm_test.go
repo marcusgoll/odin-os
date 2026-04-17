@@ -66,6 +66,85 @@ func TestSwarmAdmissionDeniesPlanWithoutValidTrigger(t *testing.T) {
 	}
 }
 
+func TestSwarmAdmissionRequiresCompanionOwnedParent(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openSupervisionStore(t)
+	defer store.Close()
+
+	project, rootTask, rootRun, _ := mustCreateSwarmParentContext(t, ctx, store, `{"allow":["repo_read"]}`, `{"mode":"initiative"}`, `{"swarm":{"max_children":2}}`)
+	taskWithoutCompanion, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:    project.ID,
+		Key:          "no-companion-parent",
+		Title:        "Parent without companion",
+		ActionKey:    "inventory",
+		Status:       "queued",
+		Scope:        rootTask.Scope,
+		RequestedBy:  "operator",
+		WorkspaceID:  rootTask.WorkspaceID,
+		InitiativeID: rootTask.InitiativeID,
+		WorkKind:     "project",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask(no companion) error = %v", err)
+	}
+	run, err := store.StartRun(ctx, sqlite.StartRunParams{
+		TaskID:     taskWithoutCompanion.ID,
+		Executor:   "codex_headless",
+		Attempt:    1,
+		Status:     "running",
+		TaskStatus: "running",
+	})
+	if err != nil {
+		t.Fatalf("StartRun(no companion) error = %v", err)
+	}
+
+	service := Service{Store: store, Jobs: runtimejobs.Service{Store: store}}
+	_, err = service.PlanSwarm(ctx, PlanSwarmParams{
+		ParentTaskID:    taskWithoutCompanion.ID,
+		ParentRunID:     &run.ID,
+		Trigger:         TriggerParallelResearch,
+		ConvergenceMode: "merge",
+		RequestedBudget: 2,
+		DelegationPlans: []DelegationPlan{
+			{DelegationKey: "research-a", Role: "researcher", ActionClass: "analysis", ActionKey: "inventory", MutationMode: "read_only", ArtifactTarget: "notes", Objective: "Inspect repo state"},
+			{DelegationKey: "research-b", Role: "reviewer", ActionClass: "analysis", ActionKey: "review", MutationMode: "read_only", ArtifactTarget: "notes", Objective: "Review repo state"},
+		},
+	})
+	if !errors.Is(err, ErrSwarmParentCompanionRequired) {
+		t.Fatalf("PlanSwarm() error = %v, want %v", err, ErrSwarmParentCompanionRequired)
+	}
+
+	_ = rootRun
+}
+
+func TestSwarmAdmissionRejectsInvalidDelegationPlan(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openSupervisionStore(t)
+	defer store.Close()
+
+	_, parentTask, parentRun, _ := mustCreateSwarmParentContext(t, ctx, store, `{"allow":["repo_read"]}`, `{"mode":"initiative"}`, `{"swarm":{"max_children":2}}`)
+	service := Service{Store: store, Jobs: runtimejobs.Service{Store: store}}
+
+	_, err := service.PlanSwarm(ctx, PlanSwarmParams{
+		ParentTaskID:    parentTask.ID,
+		ParentRunID:     &parentRun.ID,
+		Trigger:         TriggerParallelResearch,
+		ConvergenceMode: "merge",
+		RequestedBudget: 2,
+		DelegationPlans: []DelegationPlan{
+			{DelegationKey: "", Role: "researcher", ActionClass: "analysis", ActionKey: "inventory", MutationMode: "read_only", ArtifactTarget: "notes", Objective: "Invalid child"},
+			{DelegationKey: "research-b", Role: "reviewer", ActionClass: "analysis", ActionKey: "review", MutationMode: "read_only", ArtifactTarget: "notes", Objective: "Review repo state"},
+		},
+	})
+	if !errors.Is(err, ErrInvalidDelegationPlan) {
+		t.Fatalf("PlanSwarm() error = %v, want %v", err, ErrInvalidDelegationPlan)
+	}
+}
+
 func TestSwarmAdmissionDeniesRecursiveDelegation(t *testing.T) {
 	t.Parallel()
 

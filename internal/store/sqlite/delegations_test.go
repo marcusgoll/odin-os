@@ -285,3 +285,60 @@ func TestDelegationDefaultsBlankStatusToQueued(t *testing.T) {
 		t.Fatalf("CreateDelegation().Status = %q, want %q", delegation.Status, "queued")
 	}
 }
+
+func TestCreateDelegationsIsAtomic(t *testing.T) {
+	ctx := context.Background()
+	store := openMigratedTestStore(t, "delegation-batch.db")
+	defer store.Close()
+
+	project, parentTask, parentRun := seedContextPacketTask(t, ctx, store)
+	parentRunID := parentRun.ID
+
+	_, err := store.CreateDelegations(ctx, []CreateDelegationParams{
+		{
+			ParentTaskID:    parentTask.ID,
+			ParentRunID:     &parentRunID,
+			ProjectID:       project.ID,
+			Scope:           parentTask.Scope,
+			DelegationKey:   "valid",
+			Role:            "specialist",
+			ActionClass:     "analysis",
+			ActionKey:       "inventory",
+			MutationMode:    "read_only",
+			Status:          "queued",
+			ConvergenceMode: "merge",
+			ArtifactTarget:  "notes",
+			Executor:        "codex",
+			DetailsJSON:     `{"objective":"valid"}`,
+		},
+		{
+			ParentTaskID:    parentTask.ID,
+			ParentRunID:     &parentRunID,
+			ProjectID:       project.ID,
+			Scope:           parentTask.Scope,
+			DelegationKey:   "invalid",
+			Role:            "specialist",
+			ActionClass:     "analysis",
+			ActionKey:       "inventory",
+			MutationMode:    "read_only",
+			Status:          "queued",
+			ConvergenceMode: "merge",
+			ArtifactTarget:  "notes",
+			Executor:        "codex",
+			DetailsJSON:     `not-json`,
+		},
+	})
+	if err == nil {
+		t.Fatal("CreateDelegations() error = nil, want validation failure")
+	}
+
+	delegations, err := store.ListDelegations(ctx, ListDelegationsParams{
+		ParentTaskID: &parentTask.ID,
+	})
+	if err != nil {
+		t.Fatalf("ListDelegations() error = %v", err)
+	}
+	if len(delegations) != 0 {
+		t.Fatalf("ListDelegations() len = %d, want 0 after failed batch", len(delegations))
+	}
+}

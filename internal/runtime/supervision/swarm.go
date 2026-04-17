@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 
+	"odin-os/internal/core/workitems"
 	runtimejobs "odin-os/internal/runtime/jobs"
 	"odin-os/internal/store/sqlite"
 )
@@ -19,8 +20,10 @@ const (
 )
 
 var (
-	ErrSwarmTriggerNotAdmitted  = errors.New("no valid swarm trigger")
-	ErrSwarmRecursiveDelegation = errors.New("task is already a child delegation")
+	ErrSwarmTriggerNotAdmitted      = errors.New("no valid swarm trigger")
+	ErrSwarmRecursiveDelegation     = errors.New("task is already a child delegation")
+	ErrSwarmParentCompanionRequired = errors.New("swarm parent must be companion-owned")
+	ErrInvalidDelegationPlan        = errors.New("invalid delegation plan")
 )
 
 type PlanSwarmParams struct {
@@ -52,6 +55,12 @@ type SwarmPlan struct {
 	Trigger     string
 	MaxChildren int
 	Delegations []sqlite.Delegation
+}
+
+type MaterializedSwarm struct {
+	Plan        SwarmPlan
+	Delegations []sqlite.Delegation
+	Tasks       []sqlite.Task
 }
 
 type planningPolicy struct {
@@ -94,6 +103,9 @@ func (service Service) PlanSwarm(ctx context.Context, params PlanSwarmParams) (S
 		return SwarmPlan{}, err
 	}
 	selectedPlans := boundedDelegationPlans(params.DelegationPlans, maxChildren)
+	if err := validateDelegationPlans(selectedPlans); err != nil {
+		return SwarmPlan{}, err
+	}
 	if err := validateSwarmTrigger(params.Trigger, selectedPlans); err != nil {
 		return SwarmPlan{}, err
 	}
@@ -103,7 +115,7 @@ func (service Service) PlanSwarm(ctx context.Context, params PlanSwarmParams) (S
 		jobService.Store = service.Store
 	}
 
-	delegations := make([]sqlite.Delegation, 0, len(selectedPlans))
+	createParams := make([]sqlite.CreateDelegationParams, 0, len(selectedPlans))
 	for _, plan := range selectedPlans {
 		admission, err := jobService.NarrowDelegationAdmission(runtimejobs.DelegationAdmissionInput{
 			ParentTask:            parentTask,
@@ -121,7 +133,7 @@ func (service Service) PlanSwarm(ctx context.Context, params PlanSwarmParams) (S
 			return SwarmPlan{}, err
 		}
 
-		delegation, err := service.Store.CreateDelegation(ctx, sqlite.CreateDelegationParams{
+		createParams = append(createParams, sqlite.CreateDelegationParams{
 			ParentTaskID:    parentTask.ID,
 			ParentRunID:     parentRunID,
 			ProjectID:       parentTask.ProjectID,
@@ -137,19 +149,53 @@ func (service Service) PlanSwarm(ctx context.Context, params PlanSwarmParams) (S
 			Executor:        admission.Executor,
 			DetailsJSON:     detailsJSON,
 		})
-		if err != nil {
-			return SwarmPlan{}, err
-		}
-		delegations = append(delegations, delegation)
 	}
 
-	return SwarmPlan{
+	delegations, err := service.Store.CreateDelegations(ctx, createParams)
+	if err != nil {
+		return SwarmPlan{}, err
+	}
+
+	plan := SwarmPlan{
 		ParentTask:  parentTask,
 		ParentRunID: parentRunID,
 		Trigger:     params.Trigger,
 		MaxChildren: maxChildren,
 		Delegations: delegations,
-	}, nil
+	}
+
+	materialized, err := service.MaterializeSwarm(ctx, plan)
+	if err != nil {
+		return SwarmPlan{}, err
+	}
+	return materialized.Plan, nil
+}
+
+func (service Service) MaterializeSwarm(ctx context.Context, plan SwarmPlan) (MaterializedSwarm, error) {
+	if service.Store == nil {
+		return MaterializedSwarm{}, fmt.Errorf("supervision store is required")
+	}
+	if plan.ParentTask.ID <= 0 {
+		return MaterializedSwarm{}, fmt.Errorf("swarm parent task is required")
+	}
+
+	workItemService := workitems.Service{Store: service.Store}
+	result := MaterializedSwarm{
+		Plan:        plan,
+		Delegations: make([]sqlite.Delegation, 0, len(plan.Delegations)),
+		Tasks:       make([]sqlite.Task, 0, len(plan.Delegations)),
+	}
+
+	for _, delegation := range plan.Delegations {
+		task, updatedDelegation, err := service.materializeDelegationTask(ctx, workItemService, plan.ParentTask, delegation)
+		if err != nil {
+			return MaterializedSwarm{}, err
+		}
+		result.Tasks = append(result.Tasks, task)
+		result.Delegations = append(result.Delegations, updatedDelegation)
+	}
+	result.Plan.Delegations = append([]sqlite.Delegation(nil), result.Delegations...)
+	return result, nil
 }
 
 func (service Service) ensureNotDelegatedChild(ctx context.Context, taskID int64) error {
@@ -181,12 +227,15 @@ func (service Service) resolveParentRunID(ctx context.Context, parentTask sqlite
 
 func (service Service) parentCompanion(ctx context.Context, companionID *int64) (sqlite.Companion, error) {
 	if companionID == nil {
-		return sqlite.Companion{}, nil
+		return sqlite.Companion{}, ErrSwarmParentCompanionRequired
 	}
 	return service.Store.GetCompanionByID(ctx, *companionID)
 }
 
 func resolveMaxChildren(rawPlanningPolicy string, requestedBudget int, availablePlans int) (int, error) {
+	if requestedBudget <= 0 {
+		return 0, fmt.Errorf("%w: requested child budget is required", ErrInvalidDelegationPlan)
+	}
 	policy := planningPolicy{}
 	trimmed := strings.TrimSpace(rawPlanningPolicy)
 	if trimmed != "" && trimmed != "{}" {
@@ -196,9 +245,6 @@ func resolveMaxChildren(rawPlanningPolicy string, requestedBudget int, available
 	}
 
 	maxChildren := requestedBudget
-	if maxChildren <= 0 {
-		maxChildren = availablePlans
-	}
 	if policy.Swarm.MaxChildren > 0 && (maxChildren <= 0 || policy.Swarm.MaxChildren < maxChildren) {
 		maxChildren = policy.Swarm.MaxChildren
 	}
@@ -276,6 +322,61 @@ func isSupportedConvergenceMode(mode string) bool {
 	}
 }
 
+func validateDelegationPlans(plans []DelegationPlan) error {
+	for _, plan := range plans {
+		if strings.TrimSpace(plan.DelegationKey) == "" {
+			return fmt.Errorf("%w: delegation_key is required", ErrInvalidDelegationPlan)
+		}
+		if strings.TrimSpace(plan.Role) == "" {
+			return fmt.Errorf("%w: role is required", ErrInvalidDelegationPlan)
+		}
+		if strings.TrimSpace(plan.ActionClass) == "" {
+			return fmt.Errorf("%w: action_class is required", ErrInvalidDelegationPlan)
+		}
+		if strings.TrimSpace(plan.ActionKey) == "" {
+			return fmt.Errorf("%w: action_key is required", ErrInvalidDelegationPlan)
+		}
+		if strings.TrimSpace(plan.MutationMode) == "" {
+			return fmt.Errorf("%w: mutation_mode is required", ErrInvalidDelegationPlan)
+		}
+		if strings.TrimSpace(plan.ArtifactTarget) == "" {
+			return fmt.Errorf("%w: artifact_target is required", ErrInvalidDelegationPlan)
+		}
+		if strings.TrimSpace(plan.Objective) == "" {
+			return fmt.Errorf("%w: objective is required", ErrInvalidDelegationPlan)
+		}
+	}
+	return nil
+}
+
+func (service Service) materializeDelegationTask(ctx context.Context, workItemService workitems.Service, parentTask sqlite.Task, delegation sqlite.Delegation) (sqlite.Task, sqlite.Delegation, error) {
+	if delegation.ChildTaskID != nil {
+		task, err := service.Store.GetTask(ctx, *delegation.ChildTaskID)
+		if err != nil {
+			return sqlite.Task{}, sqlite.Delegation{}, err
+		}
+		return task, delegation, nil
+	}
+
+	task, err := workItemService.QueueDelegatedChild(ctx, workitems.QueueDelegatedChildParams{
+		ParentTask: parentTask,
+		Delegation: delegation,
+		Objective:  delegationObjective(delegation.DetailsJSON),
+	})
+	if err != nil {
+		return sqlite.Task{}, sqlite.Delegation{}, err
+	}
+
+	updatedDelegation, err := service.Store.AttachDelegationChildTask(ctx, sqlite.AttachDelegationChildTaskParams{
+		DelegationID: delegation.ID,
+		ChildTaskID:  task.ID,
+	})
+	if err != nil {
+		return sqlite.Task{}, sqlite.Delegation{}, err
+	}
+	return task, updatedDelegation, nil
+}
+
 func marshalDelegationDetails(parentTask sqlite.Task, parentRunID *int64, params PlanSwarmParams, maxChildren int, plan DelegationPlan, admission runtimejobs.DelegationAdmissionProfile) (string, error) {
 	type parentRef struct {
 		TaskID       int64  `json:"task_id"`
@@ -339,4 +440,16 @@ func uniqueNonEmptyStrings(values []string) []string {
 		filtered = append(filtered, value)
 	}
 	return filtered
+}
+
+func delegationObjective(detailsJSON string) string {
+	type payload struct {
+		Objective string `json:"objective"`
+	}
+
+	var decoded payload
+	if err := json.Unmarshal([]byte(detailsJSON), &decoded); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(decoded.Objective)
 }

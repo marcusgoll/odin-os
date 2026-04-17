@@ -30,6 +30,12 @@ type QueueFollowUpParams struct {
 	OccurrenceKey        string
 }
 
+type QueueDelegatedChildParams struct {
+	ParentTask sqlite.Task
+	Delegation sqlite.Delegation
+	Objective  string
+}
+
 func (service Service) Queue(ctx context.Context, params sqlite.CreateTaskParams) (sqlite.Task, error) {
 	if service.Store == nil {
 		return sqlite.Task{}, fmt.Errorf("work item store is required")
@@ -96,6 +102,40 @@ func (service Service) QueueFollowUp(ctx context.Context, params QueueFollowUpPa
 		return sqlite.Task{}, false, err
 	}
 	return task, false, nil
+}
+
+func (service Service) QueueDelegatedChild(ctx context.Context, params QueueDelegatedChildParams) (sqlite.Task, error) {
+	if service.Store == nil {
+		return sqlite.Task{}, fmt.Errorf("work item store is required")
+	}
+	if params.ParentTask.ID <= 0 {
+		return sqlite.Task{}, fmt.Errorf("parent task is required")
+	}
+	if params.Delegation.ID <= 0 {
+		return sqlite.Task{}, fmt.Errorf("delegation is required")
+	}
+	if params.Delegation.ChildTaskID != nil {
+		return service.Store.GetTask(ctx, *params.Delegation.ChildTaskID)
+	}
+
+	title := strings.TrimSpace(params.Objective)
+	if title == "" {
+		title = fmt.Sprintf("%s: %s", params.ParentTask.Title, params.Delegation.Role)
+	}
+
+	key := delegatedChildTaskKey(params.ParentTask, params.Delegation)
+	return service.Queue(ctx, sqlite.CreateTaskParams{
+		ProjectID:    params.ParentTask.ProjectID,
+		Key:          key,
+		Title:        title,
+		ActionKey:    params.Delegation.ActionKey,
+		Scope:        params.ParentTask.Scope,
+		RequestedBy:  "supervisor",
+		WorkspaceID:  params.ParentTask.WorkspaceID,
+		InitiativeID: params.ParentTask.InitiativeID,
+		CompanionID:  params.ParentTask.CompanionID,
+		WorkKind:     "swarm_child",
+	})
 }
 
 func (service Service) Get(ctx context.Context, taskID int64) (WorkItem, error) {
@@ -278,4 +318,21 @@ func errorsIsNotFound(err error) bool {
 
 func int64Ptr(value int64) *int64 {
 	return &value
+}
+
+func delegatedChildTaskKey(parentTask sqlite.Task, delegation sqlite.Delegation) string {
+	parentKey := strings.TrimSpace(parentTask.Key)
+	if parentKey == "" {
+		parentKey = fmt.Sprintf("task-%d", parentTask.ID)
+	}
+
+	delegationKey := strings.TrimSpace(delegation.DelegationKey)
+	if delegationKey == "" {
+		delegationKey = fmt.Sprintf("delegation-%d", delegation.ID)
+	}
+
+	if delegation.ID > 0 {
+		return fmt.Sprintf("%s-%s-%d", parentKey, delegationKey, delegation.ID)
+	}
+	return parentKey + "-" + delegationKey
 }
