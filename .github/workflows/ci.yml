@@ -17,14 +17,14 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Check formatting
-        run: make fmtcheck
+      - name: Local CI Stack
+        run: make ci
 
-      - name: Lint
-        run: make lint
-
-      - name: Test
-        run: make test
-
-      - name: Build
-        run: make build
+      - name: Verify Pull Request Body
+        if: github.event_name == 'pull_request'
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          tmp_body="$(mktemp)"
+          printf '%s' "$PR_BODY" >"$tmp_body"
+          bash scripts/ci/verify-pr-template.sh "$tmp_body"
