@@ -11,6 +11,7 @@ import (
 )
 
 var ErrUnsupportedConvergenceMode = errors.New("unsupported swarm convergence mode")
+var ErrVerifierArtifactRequired = errors.New("review_gate convergence requires a verifier artifact")
 
 type AggregationResult struct {
 	ParentTask               sqlite.Task
@@ -18,6 +19,7 @@ type AggregationResult struct {
 	Status                   string
 	Summary                  string
 	TerminalReason           string
+	Confidence               float64
 	EvidenceRefs             []string
 	UnresolvedRisks          []string
 	ProposedNextActions      []string
@@ -63,6 +65,7 @@ func AggregateConvergence(mode string, artifacts []sqlite.DelegationArtifact) (A
 
 	aggregation := AggregationResult{
 		ConvergenceMode:          mode,
+		Confidence:               bestConfidence(results),
 		EvidenceRefs:             collectEvidenceRefs(results),
 		UnresolvedRisks:          collectUnresolvedRisks(results),
 		ProposedNextActions:      collectNextActions(results),
@@ -74,14 +77,13 @@ func AggregateConvergence(mode string, artifacts []sqlite.DelegationArtifact) (A
 	case "merge":
 		helper.applyMergeConvergence(&aggregation, results)
 	case "review_gate":
-		if len(results) == 0 {
-			aggregation.Status = "blocked"
-			aggregation.TerminalReason = "swarm_review_gate_pending_verifier"
-			aggregation.Summary = "Swarm review gate is waiting for verifier output"
-		} else {
-			aggregation.Status = "completed"
-			aggregation.Summary = results[0].Artifact.Summary
+		verifierIndex := bestVerifierArtifactIndex(results)
+		if verifierIndex < 0 {
+			return AggregationResult{}, ErrVerifierArtifactRequired
 		}
+		aggregation.Status = "completed"
+		aggregation.Summary = results[verifierIndex].Artifact.Summary
+		aggregation.Confidence = results[verifierIndex].Confidence
 	case "rank":
 		helper.applyRankConvergence(&aggregation, results)
 	case "quorum":
@@ -136,6 +138,7 @@ func (service Service) AggregateSwarm(ctx context.Context, parentTaskID int64) (
 
 	aggregation := AggregationResult{
 		ConvergenceMode:          mode,
+		Confidence:               bestConfidence(results),
 		EvidenceRefs:             collectEvidenceRefs(results),
 		UnresolvedRisks:          collectUnresolvedRisks(results),
 		ProposedNextActions:      collectNextActions(results),
@@ -240,6 +243,7 @@ func (service Service) applyMergeConvergence(result *AggregationResult, outcomes
 
 	result.Status = "completed"
 	result.Summary = strings.Join(uniqueNonEmptyStrings(summaries), " + ")
+	result.Confidence = bestConfidence(outcomes)
 }
 
 func (service Service) applyReviewGateConvergence(result *AggregationResult, outcomes []delegationResult) {
@@ -279,6 +283,7 @@ func (service Service) applyReviewGateConvergence(result *AggregationResult, out
 	}
 	result.Status = "completed"
 	result.Summary = strings.Join(uniqueNonEmptyStrings(producerSummaries), " + ")
+	result.Confidence = verifier.Confidence
 }
 
 func (service Service) applyRankConvergence(result *AggregationResult, outcomes []delegationResult) {
@@ -299,6 +304,7 @@ func (service Service) applyRankConvergence(result *AggregationResult, outcomes 
 	result.Status = "completed"
 	result.Summary = winner.Artifact.Summary
 	result.WinningDelegationID = &winner.Delegation.ID
+	result.Confidence = winner.Confidence
 }
 
 func (service Service) applyQuorumConvergence(result *AggregationResult, outcomes []delegationResult) {
@@ -330,6 +336,7 @@ func (service Service) applyQuorumConvergence(result *AggregationResult, outcome
 			result.Status = "completed"
 			result.Summary = bucket.result.Artifact.Summary
 			result.WinningDelegationID = &bucket.result.Delegation.ID
+			result.Confidence = bucket.result.Confidence
 			return
 		}
 	}
@@ -411,6 +418,36 @@ func collectMemoryCandidates(outcomes []delegationResult) []string {
 	return uniqueNonEmptyStrings(collected)
 }
 
+func bestConfidence(outcomes []delegationResult) float64 {
+	best := 0.0
+	for _, outcome := range outcomes {
+		if outcome.Confidence > best {
+			best = outcome.Confidence
+		}
+	}
+	return best
+}
+
+func bestVerifierArtifactIndex(outcomes []delegationResult) int {
+	bestIndex := -1
+	bestConfidence := -1.0
+	for i, outcome := range outcomes {
+		if !isVerifierArtifactType(outcome.Artifact.ArtifactType) {
+			continue
+		}
+		if bestIndex < 0 || outcome.Confidence > bestConfidence {
+			bestIndex = i
+			bestConfidence = outcome.Confidence
+		}
+	}
+	return bestIndex
+}
+
+func isVerifierArtifactType(artifactType string) bool {
+	artifactType = strings.ToLower(strings.TrimSpace(artifactType))
+	return strings.Contains(artifactType, "verif") || strings.Contains(artifactType, "review")
+}
+
 func marshalAggregationArtifacts(result AggregationResult, outcomes []delegationResult) (string, error) {
 	artifactIDs := make([]int64, 0, len(outcomes))
 	delegationIDs := make([]int64, 0, len(outcomes))
@@ -425,6 +462,7 @@ func marshalAggregationArtifacts(result AggregationResult, outcomes []delegation
 			"convergence_mode":           result.ConvergenceMode,
 			"status":                     result.Status,
 			"summary":                    result.Summary,
+			"confidence":                 result.Confidence,
 			"artifact_ids":               artifactIDs,
 			"delegation_ids":             delegationIDs,
 			"evidence_refs":              result.EvidenceRefs,

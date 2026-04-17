@@ -3,6 +3,7 @@ package supervision
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
@@ -74,6 +75,25 @@ func TestAggregateMergeConvergenceMergesNonOverlappingChildArtifacts(t *testing.
 }
 
 func TestConvergenceReviewGateRequiresVerifierArtifact(t *testing.T) {
+	t.Parallel()
+
+	artifacts := []sqlite.DelegationArtifact{
+		{
+			ID:           1,
+			DelegationID: 1,
+			ArtifactType: "result",
+			Summary:      "Producer summary",
+			DetailsJSON:  resultEnvelopeJSON(t, "completed", 0.72, []string{"doc-a"}, nil, []string{"request review"}, []string{"memory-a"}),
+		},
+	}
+
+	_, err := AggregateConvergence("review_gate", artifacts)
+	if !errors.Is(err, ErrVerifierArtifactRequired) {
+		t.Fatalf("AggregateConvergence(review_gate) error = %v, want %v", err, ErrVerifierArtifactRequired)
+	}
+}
+
+func TestConvergenceReviewGateServiceRequiresVerifierArtifact(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
@@ -265,6 +285,13 @@ func TestAggregatePropagatesUnresolvedRisksIntoParentState(t *testing.T) {
 	}
 	if len(artifacts) != 1 {
 		t.Fatalf("parent artifacts len = %d, want 1", len(artifacts))
+	}
+	gotConfidence, ok := artifacts[0]["confidence"].(float64)
+	if !ok {
+		t.Fatalf("parent artifacts confidence = %#v, want float64", artifacts[0]["confidence"])
+	}
+	if gotConfidence == 0 {
+		t.Fatalf("parent artifacts confidence = %v, want non-zero confidence", gotConfidence)
 	}
 	gotRisks, ok := artifacts[0]["unresolved_risks"].([]any)
 	if !ok || len(gotRisks) != 1 || gotRisks[0] != "human approval required" {
