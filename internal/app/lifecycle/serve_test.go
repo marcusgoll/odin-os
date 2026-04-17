@@ -59,6 +59,9 @@ func TestRunDoctorMarkdownWritesOperatorReport(t *testing.T) {
 	if strings.Contains(stdout.String(), "| executor |  | executor health is fresh |  | high |") {
 		t.Fatalf("doctor markdown output = %q, want no blank operator rows", stdout.String())
 	}
+	if strings.Contains(stdout.String(), "| Area | Summary | Confidence |\n| --- | --- | --- |\nNone") {
+		t.Fatalf("doctor markdown output = %q, want clean empty-state rendering for root causes", stdout.String())
+	}
 }
 
 func TestRunDoctorRejectsUnknownFormat(t *testing.T) {

@@ -36,11 +36,11 @@ func RenderMarkdownReport(report OperatorReport) string {
 	}
 
 	writeSectionHeading(&builder, "Likely Root Causes")
-	builder.WriteString("| Area | Summary | Confidence |\n")
-	builder.WriteString("| --- | --- | --- |\n")
 	if len(report.RootCauses) == 0 {
 		builder.WriteString("None\n\n")
 	} else {
+		builder.WriteString("| Area | Summary | Confidence |\n")
+		builder.WriteString("| --- | --- | --- |\n")
 		for _, rootCause := range report.RootCauses {
 			writeTableRow(&builder, rootCause.Area, rootCause.Summary, rootCause.Confidence)
 		}

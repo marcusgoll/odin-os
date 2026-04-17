@@ -27,6 +27,33 @@ func TestRenderMarkdownReportIncludesOperatorSections(t *testing.T) {
 	}
 }
 
+func TestRenderMarkdownReportRendersEmptyRootCausesCleanly(t *testing.T) {
+	report := OperatorReport{
+		CurrentHealth: CurrentHealthSnapshot{
+			Status:          StatusHealthy,
+			ChecksEvaluated: 2,
+		},
+		Findings: []Finding{},
+		Recommendations: RecommendationGroups{},
+		FinalVerdict: FinalVerdict{
+			Status:  StatusHealthy,
+			Summary: "all evaluated checks are healthy",
+		},
+	}
+
+	output := RenderMarkdownReport(report)
+
+	if !strings.Contains(output, "## Likely Root Causes") {
+		t.Fatalf("output missing Likely Root Causes heading\n%s", output)
+	}
+	if !strings.Contains(output, "None\n\n") {
+		t.Fatalf("output missing clean empty-state marker\n%s", output)
+	}
+	if strings.Contains(output, "| Area | Summary | Confidence |") {
+		t.Fatalf("output still renders a root causes table header for empty state\n%s", output)
+	}
+}
+
 func TestRenderMarkdownReportOrdersFindingsBeforeRecommendations(t *testing.T) {
 	report := OperatorReport{
 		Findings: []Finding{
