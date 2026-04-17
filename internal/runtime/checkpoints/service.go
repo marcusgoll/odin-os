@@ -31,6 +31,7 @@ type CompactParams struct {
 	PolicySummary          string
 	OpenTaskSummary        string
 	ApprovalSummary        string
+	Invocation             *InvocationContext
 	ToolResults            []ToolResult
 	SupersedesWakePacketID *int64
 }
@@ -108,6 +109,7 @@ func (service Service) Compact(ctx context.Context, params CompactParams) (Compa
 			Attempt:         run.Attempt,
 			Status:          run.Status,
 			ApprovalSummary: params.ApprovalSummary,
+			Invocation:      params.Invocation,
 			ToolResults:     append([]ToolResult(nil), params.ToolResults...),
 		}
 

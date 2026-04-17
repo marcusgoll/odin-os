@@ -38,15 +38,31 @@ type ProjectContext struct {
 	Facts           map[string]string `json:"facts,omitempty"`
 }
 
+type InvocationContext struct {
+	RunID      int64             `json:"run_id"`
+	TaskID     int64             `json:"task_id"`
+	TaskKey    string            `json:"task_key,omitempty"`
+	ProjectID  int64             `json:"project_id,omitempty"`
+	ProjectKey string            `json:"project_key,omitempty"`
+	Executor   string            `json:"executor,omitempty"`
+	Attempt    int               `json:"attempt,omitempty"`
+	Scope      string            `json:"scope,omitempty"`
+	Prompt     string            `json:"prompt,omitempty"`
+	Timeout    string            `json:"timeout,omitempty"`
+	RetryLimit int               `json:"retry_limit,omitempty"`
+	Metadata   map[string]string `json:"metadata,omitempty"`
+}
+
 type RunContext struct {
-	RunID           int64             `json:"run_id"`
-	TaskID          int64             `json:"task_id"`
-	Executor        string            `json:"executor"`
-	Attempt         int               `json:"attempt"`
-	Status          string            `json:"status"`
-	ApprovalSummary string            `json:"approval_summary"`
-	ToolResults     []ToolResult      `json:"tool_results,omitempty"`
-	Facts           map[string]string `json:"facts,omitempty"`
+	RunID           int64              `json:"run_id"`
+	TaskID          int64              `json:"task_id"`
+	Executor        string             `json:"executor"`
+	Attempt         int                `json:"attempt"`
+	Status          string             `json:"status"`
+	ApprovalSummary string             `json:"approval_summary"`
+	Invocation      *InvocationContext `json:"invocation,omitempty"`
+	ToolResults     []ToolResult       `json:"tool_results,omitempty"`
+	Facts           map[string]string  `json:"facts,omitempty"`
 }
 
 type TaskWakePacket struct {

@@ -5,6 +5,8 @@ import (
 	"strings"
 )
 
+const NormalizedAPIVersion = "odin/v1"
+
 type Kind string
 
 const (
@@ -46,23 +48,81 @@ type SourceInfo struct {
 	RelativePath string
 }
 
+type Manifest struct {
+	APIVersion     string            `yaml:"apiVersion"`
+	Kind           Kind              `yaml:"kind"`
+	Name           string            `yaml:"name"`
+	Version        string            `yaml:"version"`
+	Availability   Availability      `yaml:"availability"`
+	Permissions    []string          `yaml:"permissions"`
+	InputSchema    SchemaRef         `yaml:"inputSchema"`
+	OutputSchema   SchemaRef         `yaml:"outputSchema"`
+	Dependencies   []DependencyRef   `yaml:"dependencies"`
+	Execution      ExecutionPolicy   `yaml:"execution"`
+	Implementation ImplementationRef `yaml:"implementation"`
+}
+
+type Availability struct {
+	Scope string `yaml:"scope"`
+	Mode  string `yaml:"mode,omitempty"`
+}
+
+type SchemaRef struct {
+	Ref  string `yaml:"ref,omitempty"`
+	Type string `yaml:"type,omitempty"`
+}
+
+type DependencyRef struct {
+	Kind    Kind   `yaml:"kind,omitempty"`
+	Name    string `yaml:"name,omitempty"`
+	Version string `yaml:"version,omitempty"`
+}
+
+type ExecutionPolicy struct {
+	Mode    string `yaml:"mode,omitempty"`
+	Timeout string `yaml:"timeout,omitempty"`
+}
+
+type ImplementationRef struct {
+	Kind string `yaml:"kind,omitempty"`
+	Ref  string `yaml:"ref,omitempty"`
+	Path string `yaml:"path,omitempty"`
+}
+
 type Frontmatter struct {
-	Kind       Kind     `yaml:"kind"`
-	Key        string   `yaml:"key"`
-	Title      string   `yaml:"title"`
-	Summary    string   `yaml:"summary"`
-	Status     string   `yaml:"status"`
-	Tags       []string `yaml:"tags"`
-	Owners     []string `yaml:"owners"`
-	Role       string   `yaml:"role"`
-	Scopes     []string `yaml:"scopes"`
-	Tools      []string `yaml:"tools"`
-	Strictness string   `yaml:"strictness"`
-	AppliesTo  []string `yaml:"applies_to"`
-	Entrypoint string   `yaml:"entrypoint"`
-	Composes   []string `yaml:"composes"`
-	Command    string   `yaml:"command"`
-	Aliases    []string `yaml:"aliases"`
+	APIVersion     string            `yaml:"apiVersion"`
+	Kind           Kind              `yaml:"kind"`
+	Name           string            `yaml:"name"`
+	Version        string            `yaml:"version"`
+	Availability   Availability      `yaml:"availability"`
+	Permissions    []string          `yaml:"permissions"`
+	InputSchema    SchemaRef         `yaml:"inputSchema"`
+	OutputSchema   SchemaRef         `yaml:"outputSchema"`
+	Dependencies   []DependencyRef   `yaml:"dependencies"`
+	Execution      ExecutionPolicy   `yaml:"execution"`
+	Implementation ImplementationRef `yaml:"implementation"`
+
+	Key                string         `yaml:"key"`
+	Title              string         `yaml:"title"`
+	Summary            string         `yaml:"summary"`
+	Status             string         `yaml:"status"`
+	Enabled            *bool          `yaml:"enabled"`
+	Tags               []string       `yaml:"tags"`
+	Owners             []string       `yaml:"owners"`
+	Role               string         `yaml:"role"`
+	Scopes             []string       `yaml:"scopes"`
+	Tools              []string       `yaml:"tools"`
+	Strictness         string         `yaml:"strictness"`
+	AppliesTo          []string       `yaml:"applies_to"`
+	LegacyInputSchema  map[string]any `yaml:"input_schema"`
+	LegacyOutputSchema map[string]any `yaml:"output_schema"`
+	HandlerType        string         `yaml:"handler_type"`
+	HandlerRef         string         `yaml:"handler_ref"`
+	TimeoutSeconds     int            `yaml:"timeout_seconds"`
+	Entrypoint         string         `yaml:"entrypoint"`
+	Composes           []string       `yaml:"composes"`
+	Command            string         `yaml:"command"`
+	Aliases            []string       `yaml:"aliases"`
 }
 
 type ParsedDocument struct {
@@ -85,24 +145,41 @@ type Diagnostic struct {
 }
 
 type Item struct {
-	Kind       Kind
-	Key        string
-	Title      string
-	Summary    string
-	Status     string
-	Tags       []string
-	Owners     []string
-	Role       string
-	Scopes     []string
-	Tools      []string
-	Strictness string
-	AppliesTo  []string
-	Entrypoint string
-	Composes   []string
-	Command    string
-	Aliases    []string
-	Sections   map[string]string
-	Source     SourceInfo
+	APIVersion     string
+	Kind           Kind
+	Name           string
+	Version        string
+	Availability   Availability
+	Permissions    []string
+	InputSchema    SchemaRef
+	OutputSchema   SchemaRef
+	Dependencies   []DependencyRef
+	Execution      ExecutionPolicy
+	Implementation ImplementationRef
+
+	Key                string
+	Title              string
+	Summary            string
+	Status             string
+	Enabled            bool
+	Tags               []string
+	Owners             []string
+	Role               string
+	Scopes             []string
+	Tools              []string
+	Strictness         string
+	AppliesTo          []string
+	LegacyInputSchema  map[string]any
+	LegacyOutputSchema map[string]any
+	HandlerType        string
+	HandlerRef         string
+	TimeoutSeconds     int
+	Entrypoint         string
+	Composes           []string
+	Command            string
+	Aliases            []string
+	Sections           map[string]string
+	Source             SourceInfo
 }
 
 type Snapshot struct {
@@ -119,6 +196,33 @@ func (kind Kind) Valid() bool {
 	default:
 		return false
 	}
+}
+
+func (kind Kind) ValidDependencyKind() bool {
+	switch kind {
+	case KindAgent, KindSkill, KindCommand, Kind("tool"):
+		return true
+	default:
+		return false
+	}
+}
+
+func (kind Kind) IsInvokable() bool {
+	switch kind {
+	case KindSkill, KindWorkflow, KindCommand:
+		return true
+	default:
+		return false
+	}
+}
+
+func (frontmatter Frontmatter) UsesNormalizedManifest() bool {
+	return strings.TrimSpace(frontmatter.APIVersion) == NormalizedAPIVersion
+}
+
+func (frontmatter Frontmatter) HasUnsupportedAPIVersion() bool {
+	apiVersion := strings.TrimSpace(frontmatter.APIVersion)
+	return apiVersion != "" && apiVersion != NormalizedAPIVersion
 }
 
 func KindFromDirectory(name string) Kind {

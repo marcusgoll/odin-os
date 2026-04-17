@@ -14,14 +14,18 @@ type Service struct {
 }
 
 func (service Service) Create(ctx context.Context, scope controlscope.ControlScope, title string) (WorkItem, error) {
-	return service.create(ctx, scope, title, "")
+	return service.create(ctx, scope, title, "", "")
 }
 
 func (service Service) CreateWithLegacyScope(ctx context.Context, scope controlscope.ControlScope, title string, legacyScope string) (WorkItem, error) {
-	return service.create(ctx, scope, title, legacyScope)
+	return service.create(ctx, scope, title, "", legacyScope)
 }
 
-func (service Service) create(ctx context.Context, scope controlscope.ControlScope, title string, legacyScope string) (WorkItem, error) {
+func (service Service) CreateWithLegacyScopeAndAction(ctx context.Context, scope controlscope.ControlScope, title string, actionKey string, legacyScope string) (WorkItem, error) {
+	return service.create(ctx, scope, title, actionKey, legacyScope)
+}
+
+func (service Service) create(ctx context.Context, scope controlscope.ControlScope, title string, actionKey string, legacyScope string) (WorkItem, error) {
 	if service.Store == nil {
 		return WorkItem{}, fmt.Errorf("work item store is required")
 	}
@@ -82,6 +86,7 @@ func (service Service) create(ctx context.Context, scope controlscope.ControlSco
 		SubjectKey:   scope.SubjectKey,
 		Key:          fmt.Sprintf("work-item-%d", time.Now().UnixNano()),
 		Title:        title,
+		ActionKey:    actionKey,
 		Status:       "queued",
 		Scope:        legacyTaskScope(legacyScope, project.Scope),
 		RequestedBy:  "operator",

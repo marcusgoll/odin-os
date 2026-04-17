@@ -33,6 +33,21 @@ type Tracker struct {
 	usage  Usage
 }
 
+type SchedulerBudget struct {
+	MaxConcurrentRuns int
+	MaxStartsPerCycle int
+}
+
+func (budget SchedulerBudget) CanStart(activeRuns, startsThisCycle int) bool {
+	if budget.MaxConcurrentRuns > 0 && activeRuns >= budget.MaxConcurrentRuns {
+		return false
+	}
+	if budget.MaxStartsPerCycle > 0 && startsThisCycle >= budget.MaxStartsPerCycle {
+		return false
+	}
+	return true
+}
+
 func NewTracker(limits Limits) *Tracker {
 	return &Tracker{limits: limits}
 }

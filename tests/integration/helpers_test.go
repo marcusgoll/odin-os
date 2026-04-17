@@ -3,16 +3,21 @@ package integration_test
 import (
 	"bytes"
 	"context"
+	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	httpapi "odin-os/internal/api/http"
 	"odin-os/internal/core/companions"
 	"odin-os/internal/core/controlscope"
+	"odin-os/internal/core/projects"
 	"odin-os/internal/core/workitems"
 	"odin-os/internal/core/workspaces"
 	"odin-os/internal/runtime/checkpoints"
@@ -32,7 +37,13 @@ type workspaceOperatingModelFixture struct {
 	Approval   sqlite.Approval
 }
 
-func projectRoot(t *testing.T) string {
+var portableRepoRootFixture struct {
+	once sync.Once
+	path string
+	err  error
+}
+
+func sourceProjectRoot(t *testing.T) string {
 	t.Helper()
 
 	_, file, _, ok := runtime.Caller(0)
@@ -40,6 +51,145 @@ func projectRoot(t *testing.T) string {
 		t.Fatal("runtime.Caller() failed")
 	}
 	return filepath.Clean(filepath.Join(filepath.Dir(file), "..", ".."))
+}
+
+func projectRoot(t *testing.T) string {
+	t.Helper()
+
+	sourceRoot := sourceProjectRoot(t)
+	if os.Getenv("ODIN_FORCE_PORTABLE_TEST_REPO") != "1" {
+		if _, err := os.Stat("/home/orchestrator/pbs/.git"); err == nil {
+			return sourceRoot
+		}
+	}
+
+	portableRepoRootFixture.once.Do(func() {
+		portableRepoRootFixture.path, portableRepoRootFixture.err = createPortableProjectRoot(sourceRoot)
+	})
+	if portableRepoRootFixture.err != nil {
+		t.Fatalf("createPortableProjectRoot() error = %v", portableRepoRootFixture.err)
+	}
+	return portableRepoRootFixture.path
+}
+
+func createPortableProjectRoot(sourceRoot string) (string, error) {
+	root, err := os.MkdirTemp("", "odin-os-integration-repo-")
+	if err != nil {
+		return "", err
+	}
+	if err := copyPortableRepoTree(sourceRoot, root); err != nil {
+		return "", err
+	}
+
+	pbsRoot, err := os.MkdirTemp("", "odin-os-pbs-fixture-")
+	if err != nil {
+		return "", err
+	}
+	if err := os.WriteFile(filepath.Join(pbsRoot, "README.md"), []byte("# PBS fixture\n"), 0o644); err != nil {
+		return "", err
+	}
+	if err := initializeGitRepoBranchPath(pbsRoot, "master"); err != nil {
+		return "", err
+	}
+
+	configPath := filepath.Join(root, "config", "projects.yaml")
+	configBytes, err := os.ReadFile(configPath)
+	if err != nil {
+		return "", err
+	}
+	updatedConfig := strings.ReplaceAll(string(configBytes), "/home/orchestrator/pbs", filepath.ToSlash(pbsRoot))
+	if updatedConfig == string(configBytes) {
+		return "", fmt.Errorf("projects.yaml did not contain expected pbs path")
+	}
+	if err := os.WriteFile(configPath, []byte(updatedConfig), 0o644); err != nil {
+		return "", err
+	}
+
+	if err := initializeGitRepoBranchPath(root, "main"); err != nil {
+		return "", err
+	}
+	return root, nil
+}
+
+func copyPortableRepoTree(sourceRoot string, destRoot string) error {
+	ignoredDirs := map[string]bool{
+		".git": true,
+		"bin":  true,
+	}
+
+	return filepath.WalkDir(sourceRoot, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		rel, err := filepath.Rel(sourceRoot, path)
+		if err != nil {
+			return err
+		}
+		if rel == "." {
+			return nil
+		}
+		if entry.IsDir() && ignoredDirs[entry.Name()] {
+			return filepath.SkipDir
+		}
+
+		targetPath := filepath.Join(destRoot, rel)
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			return os.MkdirAll(targetPath, info.Mode().Perm())
+		}
+		if err := os.MkdirAll(filepath.Dir(targetPath), 0o755); err != nil {
+			return err
+		}
+		if entry.Type()&os.ModeSymlink != 0 {
+			linkTarget, err := os.Readlink(path)
+			if err != nil {
+				return err
+			}
+			return os.Symlink(linkTarget, targetPath)
+		}
+		content, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(targetPath, content, info.Mode().Perm())
+	})
+}
+
+func initializeGitRepoBranchPath(dir string, branch string) error {
+	for _, args := range [][]string{
+		{"init", "-b", branch},
+		{"config", "user.email", "odin@example.com"},
+		{"config", "user.name", "Odin Acceptance"},
+		{"add", "."},
+		{"commit", "-m", "fixture"},
+	} {
+		cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("git %v: %w\n%s", args, err, string(output))
+		}
+	}
+	return nil
+}
+
+func projectGitRootFromManifest(t *testing.T, repoRoot string, key string) string {
+	t.Helper()
+
+	registry, diagnostics, err := projects.Register(filepath.Join(repoRoot, "config", "projects.yaml"))
+	if err != nil {
+		t.Fatalf("projects.Register(%q) error = %v", filepath.Join(repoRoot, "config", "projects.yaml"), err)
+	}
+	if len(diagnostics) != 0 {
+		t.Fatalf("project diagnostics = %+v, want none", diagnostics)
+	}
+	project, ok := registry.Lookup(key)
+	if !ok {
+		t.Fatalf("Lookup(%s) missing from manifest", key)
+	}
+	return project.GitRoot
 }
 
 func buildOdinBinary(t *testing.T, repoRoot string) string {
@@ -78,6 +228,210 @@ func runOdinCommand(t *testing.T, repoRoot string, binaryPath string, runtimeRoo
 
 	output, err := cmd.CombinedOutput()
 	return string(output), err
+}
+
+func acceptanceHarnessDriverEnv(t *testing.T) map[string]string {
+	t.Helper()
+
+	path := filepath.Join(t.TempDir(), "harness-driver.sh")
+	if err := os.WriteFile(path, []byte(`#!/usr/bin/env bash
+payload="$(cat)"
+PAYLOAD="$payload" python3 - <<'PY'
+import json
+import os
+
+request = json.loads(os.environ["PAYLOAD"])
+action = request.get("action")
+
+if action == "health":
+    response = {
+        "status": "healthy",
+        "details": "acceptance harness driver healthy",
+    }
+else:
+    response = {
+        "status": "completed",
+        "output": "driver test ok",
+        "metadata": {
+            "driver": "acceptance_harness",
+        },
+        "handle": {
+            "external_id": "fixture-driver",
+        },
+    }
+
+print(json.dumps(response))
+PY
+`), 0o755); err != nil {
+		t.Fatalf("WriteFile(driver) error = %v", err)
+	}
+	if err := os.Chmod(path, 0o755); err != nil {
+		t.Fatalf("Chmod(driver) error = %v", err)
+	}
+	return map[string]string{
+		"ODIN_CODEX_DRIVER":  path,
+		"ODIN_CLAUDE_DRIVER": path,
+	}
+}
+
+func TestAcceptanceHarnessDriverEnvProvidesCodexAndClaudeDrivers(t *testing.T) {
+	t.Parallel()
+
+	env := acceptanceHarnessDriverEnv(t)
+	if strings.TrimSpace(env["ODIN_CODEX_DRIVER"]) == "" {
+		t.Fatalf("ODIN_CODEX_DRIVER missing from acceptance env: %#v", env)
+	}
+	if strings.TrimSpace(env["ODIN_CLAUDE_DRIVER"]) == "" {
+		t.Fatalf("ODIN_CLAUDE_DRIVER missing from acceptance env: %#v", env)
+	}
+}
+
+func acceptanceWorktreeRoot(extraEnv map[string]string) string {
+	homePath := strings.TrimSpace(extraEnv["HOME"])
+	if homePath == "" {
+		return ""
+	}
+	return filepath.Join(homePath, ".config", "superpowers", "worktrees", "odin-os")
+}
+
+func createCLIRepoRootWithPreferredExecutor(t *testing.T, executorKey string) string {
+	t.Helper()
+
+	root := t.TempDir()
+	for _, dir := range []string{
+		filepath.Join(root, "config"),
+		filepath.Join(root, "data"),
+		filepath.Join(root, "registry"),
+		filepath.Join(root, "state", "cache"),
+		filepath.Join(root, "alpha"),
+	} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("MkdirAll(%s) error = %v", dir, err)
+		}
+	}
+
+	writeTextFile(t, filepath.Join(root, "config", "projects.yaml"), `
+version: 1
+projects:
+  - key: alpha-cli
+    name: Alpha
+    project_class: github_backed_project
+    git_root: ../alpha
+    default_branch: main
+    github:
+      repo: acme/alpha
+    policy:
+      allowed_commands: [status]
+      branch_rules:
+        protected_branches: [main]
+        require_worktree: true
+        require_task_branch: true
+        allow_default_branch_mutation: false
+      approval_gates:
+        require_for_governance_changes: true
+        require_for_destructive_operations: true
+        require_for_system_project_changes: false
+      merge_policy:
+        mode: squash
+        allow_direct_to_default_branch: false
+      destructive_operations:
+        allow_reset: false
+        allow_clean: false
+        allow_force_push: false
+        require_explicit_approval: true
+  - key: odin-core
+    name: Odin Core
+    project_class: system_project
+    system_project: true
+    git_root: ..
+    default_branch: main
+    policy:
+      allowed_commands: [status]
+      branch_rules:
+        protected_branches: [main]
+        require_worktree: true
+        require_task_branch: true
+        allow_default_branch_mutation: false
+      approval_gates:
+        require_for_governance_changes: true
+        require_for_destructive_operations: true
+        require_for_system_project_changes: true
+      merge_policy:
+        mode: squash
+        allow_direct_to_default_branch: false
+      destructive_operations:
+        allow_reset: false
+        allow_clean: false
+        allow_force_push: false
+        require_explicit_approval: true
+`)
+	writeTextFile(t, filepath.Join(root, "config", "executors.yaml"), fmt.Sprintf(`
+version: 1
+executors:
+  - key: %s
+    adapter: %s
+    class: plan_backed_cli
+    enabled: true
+    priority: 10
+routes:
+  - name: default
+    match:
+      task_kinds: [general, plan, build, review, qa, research]
+      scopes: [global, odin-core, project, new-project]
+    preferred: [%s]
+`, executorKey, executorKey, executorKey))
+	writeTextFile(t, filepath.Join(root, "config", "odin.yaml"), `
+version: 1
+runtime:
+  root: .
+service:
+  http_addr: 127.0.0.1:9443
+  startup_recovery: true
+`)
+	writeTextFile(t, filepath.Join(root, "README.md"), "alpha test repo\n")
+	writeTextFile(t, filepath.Join(root, "alpha", "README.md"), "alpha nested repo\n")
+
+	initializeGitRepo(t, root)
+	initializeGitRepo(t, filepath.Join(root, "alpha"))
+
+	return root
+}
+
+func writeTextFile(t *testing.T, path string, content string) {
+	t.Helper()
+
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("MkdirAll(%s) error = %v", filepath.Dir(path), err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("WriteFile(%s) error = %v", path, err)
+	}
+}
+
+func legacyOrchestratorSourceRoot(t *testing.T) string {
+	t.Helper()
+
+	const legacyRoot = "/home/orchestrator/odin-orchestrator"
+	if _, err := os.Stat(legacyRoot); err == nil {
+		return legacyRoot
+	}
+
+	root := t.TempDir()
+	writeTextFile(t, filepath.Join(root, ".claude/skills/demo-skill/SKILL.md"), "# Demo Skill\n\nBody.\n")
+	writeTextFile(t, filepath.Join(root, ".agents/skills/demo-skill/SKILL.md"), "# Demo Skill Mirror\n\nBody.\n")
+	writeTextFile(t, filepath.Join(root, "docs/adr/engine.md"), "# Engine\n\nArchitecture.\n")
+	writeTextFile(t, filepath.Join(root, "ops/github-runner/README.md"), "# Runner\n\nRunbook.\n")
+	return root
+}
+
+func initializeGitRepo(t *testing.T, dir string) {
+	t.Helper()
+
+	runGit(t, dir, "init", "-b", "main")
+	runGit(t, dir, "config", "user.email", "odin@example.com")
+	runGit(t, dir, "config", "user.name", "Odin Acceptance")
+	runGit(t, dir, "add", ".")
+	runGit(t, dir, "commit", "-m", "fixture")
 }
 
 func requirePathExists(t *testing.T, path string) {

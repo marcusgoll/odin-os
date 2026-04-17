@@ -84,6 +84,8 @@ It must reject:
 - `destructive_mutation`
 - unlisted isolated mutations
 
+Approval gates still apply after transition authorization. If a project policy requires approval for governance, destructive, or system-project mutations, the runtime must reject the invocation before the handler runs and record the denial.
+
 ### Cutover and decommissioned
 
 `cutover` and `decommissioned` allow normal Odin OS mutation, but all existing project governance rules still apply.

@@ -1,8 +1,10 @@
 package planner
 
 import (
+	"context"
 	"fmt"
 
+	"odin-os/internal/skills"
 	"odin-os/internal/tools/broker"
 	"odin-os/internal/tools/catalog"
 )
@@ -19,6 +21,8 @@ type Selection struct {
 	Key              string
 	InvokeTool       bool
 	ToolInput        map[string]string
+	InvokeSkill      bool
+	SkillInput       map[string]any
 	AllowSubAgentUse bool
 }
 
@@ -32,18 +36,26 @@ func (service Service) Prepare(scope string) (PlanContext, error) {
 	if service.Broker == nil {
 		return PlanContext{}, fmt.Errorf("planner broker is required")
 	}
+	cards, err := service.Broker.Catalog(scope)
+	if err != nil {
+		return PlanContext{}, err
+	}
 	return PlanContext{
-		Cards: service.Broker.Catalog(scope),
+		Cards: cards,
 	}, nil
 }
 
-func (service Service) Materialize(scope string, selections []Selection) (ExecutionContext, error) {
+func (service Service) Materialize(ctx context.Context, scope string, invocationContext skills.InvocationContext, selections []Selection) (ExecutionContext, error) {
 	if service.Broker == nil {
 		return ExecutionContext{}, fmt.Errorf("planner broker is required")
 	}
 
+	cards, err := service.Broker.Catalog(scope)
+	if err != nil {
+		return ExecutionContext{}, err
+	}
 	context := ExecutionContext{
-		Cards: service.Broker.Catalog(scope),
+		Cards: cards,
 	}
 
 	for _, selection := range selections {
@@ -62,6 +74,25 @@ func (service Service) Materialize(scope string, selections []Selection) (Execut
 				return ExecutionContext{}, fmt.Errorf("capability %q is not a tool", selection.Key)
 			}
 			result, err := service.Broker.InvokeTool(selection.Key, selection.ToolInput)
+			if err != nil {
+				return ExecutionContext{}, err
+			}
+			compacted, err := service.Broker.Compact(result)
+			if err != nil {
+				return ExecutionContext{}, err
+			}
+			context.Compacted = append(context.Compacted, compacted)
+		}
+
+		if selection.InvokeSkill {
+			if expansion.Skill == nil {
+				return ExecutionContext{}, fmt.Errorf("capability %q is not a skill", selection.Key)
+			}
+			result, err := service.Broker.InvokeSkill(ctx, skills.InvokeRequest{
+				Key:     selection.Key,
+				Input:   selection.SkillInput,
+				Context: invocationContext,
+			})
 			if err != nil {
 				return ExecutionContext{}, err
 			}

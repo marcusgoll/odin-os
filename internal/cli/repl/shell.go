@@ -7,18 +7,28 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 	"time"
 
 	"odin-os/internal/cli/commands"
 	"odin-os/internal/cli/render"
 	"odin-os/internal/cli/scope"
+	clistate "odin-os/internal/cli/state"
+	"odin-os/internal/core/capabilities"
+	corecommands "odin-os/internal/core/commands"
 	"odin-os/internal/core/projects"
+	"odin-os/internal/executors/contract"
+	executorrouter "odin-os/internal/executors/router"
+	"odin-os/internal/registry"
+	convsvc "odin-os/internal/runtime/conversation"
 	healthsvc "odin-os/internal/runtime/health"
 	jobsvc "odin-os/internal/runtime/jobs"
 	"odin-os/internal/runtime/projections"
 	runsvc "odin-os/internal/runtime/runs"
 	"odin-os/internal/store/sqlite"
+	"odin-os/internal/vcs/leases"
+	"odin-os/internal/vcs/worktrees"
 )
 
 type Environment struct {
@@ -26,18 +36,33 @@ type Environment struct {
 	Registry            projects.Registry
 	RegistryDiagnostics []projects.Diagnostic
 	SessionStore        SessionStore
+	CapabilityGateway   capabilityGateway
+	CapabilityService   *capabilities.Service
+	CommandService      CommandExecutor
+	ExecutorConfig      executorrouter.Config
+	Executors           map[string]contract.Executor
+	Leases              leases.Manager
+}
+
+type CommandExecutor interface {
+	Execute(context.Context, capabilities.InvokeRequest) (capabilities.InvokeResponse, error)
 }
 
 type Shell struct {
-	env         Environment
-	state       State
-	health      healthsvc.Service
-	jobs        jobsvc.Service
-	runs        runsvc.Service
-	transitions projects.Service
+	env            Environment
+	state          State
+	capabilities   capabilityGateway
+	commandService CommandExecutor
+	health         healthsvc.Service
+	jobs           jobsvc.Service
+	runs           runsvc.Service
+	transitions    projects.Service
+	conversation   convsvc.Service
+	worktrees      worktrees.Manager
 }
 
 const transitionUsage = "/transition [status] | /transition set <state> [allow=<csv>] [confirm] because <reason...>"
+const leaseUsage = "/leases [active|released|all] | /leases inspect <lease-id> | /leases cleanup confirm"
 
 func New(env Environment) (*Shell, error) {
 	cache, err := env.SessionStore.Load()
@@ -46,6 +71,14 @@ func New(env Environment) (*Shell, error) {
 	}
 
 	state := ResolveStartupState(cache, env.Registry)
+	leaseManager := env.Leases
+	if leaseManager.Store == nil {
+		leaseManager.Store = env.Store
+	}
+	worktreeManager := worktrees.Manager{
+		Store: leaseManager.Store,
+		Git:   leaseManager.Git,
+	}
 	shell := &Shell{
 		env:   env,
 		state: state,
@@ -53,16 +86,40 @@ func New(env Environment) (*Shell, error) {
 			DB: env.Store.DB(),
 		},
 		jobs: jobsvc.Service{
-			Store:    env.Store,
-			Registry: env.Registry,
-			Now:      time.Now,
+			Store:          env.Store,
+			Registry:       env.Registry,
+			Executors:      env.Executors,
+			ExecutorConfig: env.ExecutorConfig,
+			Transitions:    projects.Service{Store: env.Store},
+			Leases:         leaseManager,
+			Now:            time.Now,
 		},
 		runs: runsvc.Service{
-			DB: env.Store.DB(),
+			DB:    env.Store.DB(),
+			Store: env.Store,
 		},
 		transitions: projects.Service{
 			Store: env.Store,
 		},
+		conversation: convsvc.Service{
+			Store:               env.Store,
+			Registry:            env.Registry,
+			RegistryDiagnostics: env.RegistryDiagnostics,
+			ExecutorConfig:      env.ExecutorConfig,
+			Executors:           env.Executors,
+		},
+		worktrees: worktreeManager,
+	}
+	if env.CommandService != nil {
+		shell.commandService = env.CommandService
+	}
+	if env.CapabilityGateway != nil {
+		shell.capabilities = env.CapabilityGateway
+	} else if env.CapabilityService != nil {
+		shell.capabilities = capabilities.NewGateway(env.CapabilityService, shell.invokeCapability, shell.runs)
+	}
+	if shell.commandService == nil && shell.capabilities != nil {
+		shell.commandService = corecommands.NewService(shell.capabilities)
 	}
 
 	if err := shell.persistState(); err != nil {
@@ -119,8 +176,21 @@ func (shell *Shell) HandleLine(ctx context.Context, line string, output io.Write
 	if err := shell.persistState(); err != nil {
 		return err
 	}
-	_, err = fmt.Fprintf(output, "created task %s (%s)\n", task.Key, task.Status)
-	return err
+	if _, err := fmt.Fprintf(output, "created task %s (%s)\n", task.Key, task.Status); err != nil {
+		return err
+	}
+
+	outcome, runErr := shell.jobs.ExecuteTask(ctx, task.ID)
+	if outcome.Task.ID != 0 {
+		shell.state.ActiveTask = outcome.Task.Key
+	}
+	if outcome.Run != nil {
+		shell.state.ActiveRun = strconv.FormatInt(outcome.Run.ID, 10)
+	}
+	if err := shell.persistState(); err != nil {
+		return err
+	}
+	return shell.renderActOutcome(output, outcome, runErr)
 }
 
 func (shell *Shell) renderPrompt(ctx context.Context, output io.Writer) error {
@@ -152,11 +222,21 @@ func (shell *Shell) renderPrompt(ctx context.Context, output io.Writer) error {
 
 func (shell *Shell) handleCommand(ctx context.Context, command commands.Command, output io.Writer) error {
 	switch command.Name {
+	case "status", "stat":
+		return shell.handleRegistryCommand(ctx, command, output)
+	case "capabilities":
+		return shell.handleCapabilities(command.Args, output)
 	case "help":
-		if _, err := fmt.Fprintln(output, "/help /mode /scope /workspace /initiatives /project /transition /observe /compare /jobs /runs /approvals /logs /doctor /self"); err != nil {
+		if _, err := fmt.Fprintln(output, "prefer explicit cli commands outside the repl: odin help | odin status --json | odin task run --project <key> --title <title> | odin repl"); err != nil {
 			return err
 		}
-		_, err := fmt.Fprintf(output, "%s\n", transitionUsage)
+		if _, err := fmt.Fprintln(output, "repl compatibility commands: /help /mode /scope /workspace /initiatives /project /transition /observe /compare /status /stat /capabilities /leases /jobs [/initiative <key>] /runs /approvals /logs /doctor /self /quit"); err != nil {
+			return err
+		}
+		if _, err := fmt.Fprintf(output, "%s\n", transitionUsage); err != nil {
+			return err
+		}
+		_, err := fmt.Fprintf(output, "%s\n", leaseUsage)
 		return err
 	case "mode":
 		return shell.handleMode(command.Args, output)
@@ -174,6 +254,8 @@ func (shell *Shell) handleCommand(ctx context.Context, command commands.Command,
 		return shell.handleObserve(ctx, command.Args, output)
 	case "compare":
 		return shell.handleCompare(ctx, command.Args, output)
+	case "leases":
+		return shell.handleLeases(ctx, command.Args, output)
 	case "jobs":
 		return shell.handleJobs(ctx, command.Args, output)
 	case "runs":
@@ -194,34 +276,141 @@ func (shell *Shell) handleCommand(ctx context.Context, command commands.Command,
 	}
 }
 
+func (shell *Shell) handleRegistryCommand(ctx context.Context, command commands.Command, output io.Writer) error {
+	resolved, ok := commands.ResolveRegistryCommand(command)
+	if !ok {
+		_, err := fmt.Fprintf(output, "unknown command: /%s\n", command.Name)
+		return err
+	}
+	if len(command.Args) != 0 {
+		_, err := fmt.Fprintf(output, "usage: /%s\n", command.Name)
+		return err
+	}
+	if shell.commandService == nil {
+		return fmt.Errorf("command gateway unavailable")
+	}
+
+	response, err := shell.commandService.Execute(ctx, capabilities.InvokeRequest{
+		CapabilityID:      resolved.CapabilityID,
+		CapabilityVersion: resolved.CapabilityVersion,
+		Scope: capabilities.ScopeRef{
+			Kind:       string(shell.state.Scope.Kind),
+			ProjectKey: shell.state.Scope.ProjectKey,
+		},
+		Caller: capabilities.CallerRef{
+			Kind: "cli",
+			ID:   "shell",
+		},
+		Input:     json.RawMessage(`{}`),
+		Execution: capabilities.ExecutionRequest{Mode: "local"},
+	})
+	if err != nil {
+		return err
+	}
+	if len(response.Output) > 0 {
+		_, err = fmt.Fprint(output, string(response.Output))
+		return err
+	}
+	if response.Status != "" {
+		_, err = fmt.Fprintln(output, response.Status)
+		return err
+	}
+	return nil
+}
+
+func (shell *Shell) handleCapabilities(args []string, output io.Writer) error {
+	if shell.capabilities == nil {
+		_, err := fmt.Fprintln(output, "no capabilities")
+		return err
+	}
+
+	scopeFilter := string(shell.state.Scope.Kind)
+	if len(args) > 0 {
+		scopeFilter = strings.ToLower(strings.TrimSpace(args[0]))
+	}
+
+	cards := shell.capabilities.ListCapabilities(registry.KindUnknown, scopeFilter)
+	if len(cards) == 0 {
+		_, err := fmt.Fprintln(output, "no capabilities")
+		return err
+	}
+
+	for _, card := range cards {
+		if _, err := fmt.Fprintf(output, "%s %s %s %s\n", card.ID, card.Version, card.Scope, card.Kind); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (shell *Shell) handleAsk(ctx context.Context, line string, output io.Writer) error {
 	switch commands.RouteAskIntent(line) {
-	case commands.IntentHelp:
-		return shell.handleCommand(ctx, commands.Command{Name: "help"}, output)
-	case commands.IntentMode:
-		return shell.handleCommand(ctx, commands.Command{Name: "mode"}, output)
 	case commands.IntentWorkspace:
 		return shell.handleCommand(ctx, commands.Command{Name: "workspace"}, output)
 	case commands.IntentInitiatives:
 		return shell.handleCommand(ctx, commands.Command{Name: "initiatives"}, output)
-	case commands.IntentScope:
-		return shell.handleCommand(ctx, commands.Command{Name: "scope"}, output)
-	case commands.IntentProject:
-		return shell.handleCommand(ctx, commands.Command{Name: "project"}, output)
-	case commands.IntentJobs:
-		return shell.handleCommand(ctx, commands.Command{Name: "jobs"}, output)
-	case commands.IntentRuns:
-		return shell.handleCommand(ctx, commands.Command{Name: "runs"}, output)
-	case commands.IntentApprovals:
-		return shell.handleCommand(ctx, commands.Command{Name: "approvals"}, output)
-	case commands.IntentLogs:
-		return shell.handleCommand(ctx, commands.Command{Name: "logs"}, output)
-	case commands.IntentDoctor:
-		return shell.handleCommand(ctx, commands.Command{Name: "doctor"}, output)
+	}
+
+	result, err := shell.conversation.Respond(ctx, convsvc.Request{
+		Scope:  shell.state.Scope,
+		Mode:   string(shell.state.Mode),
+		Prompt: line,
+	})
+	if err != nil {
+		_, writeErr := fmt.Fprintf(output, "ask failed: %v\n", err)
+		return writeErr
+	}
+	_, err = fmt.Fprintln(output, result.Answer)
+	return err
+}
+
+func (shell *Shell) invokeCapability(ctx context.Context, request capabilities.InvokeRequest, descriptor capabilities.Descriptor) (capabilities.InvokeResponse, error) {
+	switch descriptor.Key {
+	case "project.status":
+		return shell.executeProjectStatus(ctx, request)
 	default:
-		_, err := fmt.Fprintln(output, "local ask is limited in Phase 05. Try /help, /scope, /workspace, /initiatives, /project, /jobs, /runs, /approvals, /logs, or /doctor.")
+		return capabilities.InvokeResponse{}, fmt.Errorf("unsupported registry command: %s", descriptor.Key)
+	}
+}
+
+func (shell *Shell) executeProjectStatus(ctx context.Context, request capabilities.InvokeRequest) (capabilities.InvokeResponse, error) {
+	if shell.state.Scope.Kind == scope.ScopeProject || shell.state.Scope.Kind == scope.ScopeOdinCore {
+		manifest, err := shell.scopedManifest()
+		if err == nil {
+			status, err := shell.currentTransitionStatus(ctx, manifest)
+			if err == nil {
+				return capabilities.InvokeResponse{
+					Status: "ok",
+					Output: json.RawMessage(renderTransitionStatus(manifest.Key, status)),
+				}, nil
+			}
+		}
+	}
+
+	mode := strings.TrimSpace(request.Execution.Mode)
+	if mode == "" {
+		mode = "local"
+	}
+	return capabilities.InvokeResponse{
+		Status: "ok",
+		Output: json.RawMessage(fmt.Sprintf("scope=%s mode=%s\n", shell.scopeLabel(), mode)),
+	}, nil
+}
+
+func (shell *Shell) renderActOutcome(output io.Writer, outcome jobsvc.ExecutionOutcome, runErr error) error {
+	if outcome.Run != nil {
+		summary := strings.TrimSpace(outcome.Run.Summary)
+		if summary == "" {
+			summary = "no summary"
+		}
+		_, err := fmt.Fprintf(output, "run %d %s %s: %s\n", outcome.Run.ID, outcome.Run.Executor, outcome.Run.Status, summary)
 		return err
 	}
+	if runErr != nil {
+		_, err := fmt.Fprintf(output, "run failed before start: %v\n", runErr)
+		return err
+	}
+	return nil
 }
 
 func (shell *Shell) handleMode(args []string, output io.Writer) error {
@@ -231,7 +420,7 @@ func (shell *Shell) handleMode(args []string, output io.Writer) error {
 	}
 
 	requested := Mode(strings.ToLower(args[0]))
-	sanitized := sanitizeMode(requested, shell.state.Scope)
+	sanitized := clistate.SanitizeMode(requested, shell.state.Scope)
 	if requested == ModeAct && sanitized != ModeAct {
 		shell.state.Mode = ModeAsk
 		if err := shell.persistState(); err != nil {
@@ -269,7 +458,7 @@ func (shell *Shell) handleScope(args []string, output io.Writer) error {
 		return err
 	}
 
-	shell.state.Mode = sanitizeMode(shell.state.Mode, shell.state.Scope)
+	shell.state.Mode = clistate.SanitizeMode(shell.state.Mode, shell.state.Scope)
 	if err := shell.persistState(); err != nil {
 		return err
 	}
@@ -307,7 +496,7 @@ func (shell *Shell) handleProject(args []string, output io.Writer) error {
 	})
 	shell.state.ActiveTask = ""
 	shell.state.ActiveRun = ""
-	shell.state.Mode = sanitizeMode(shell.state.Mode, shell.state.Scope)
+	shell.state.Mode = clistate.SanitizeMode(shell.state.Mode, shell.state.Scope)
 	if err := shell.persistState(); err != nil {
 		return err
 	}
@@ -516,6 +705,63 @@ func (shell *Shell) handleInitiatives(ctx context.Context, output io.Writer) err
 	return nil
 }
 
+func (shell *Shell) handleLeases(ctx context.Context, args []string, output io.Writer) error {
+	if len(args) > 0 {
+		switch strings.ToLower(args[0]) {
+		case "inspect":
+			return shell.handleLeaseInspect(ctx, args[1:], output)
+		case "cleanup":
+			return shell.handleLeaseCleanup(ctx, args[1:], output)
+		}
+	}
+
+	filter := "active"
+	if len(args) > 0 {
+		filter = strings.ToLower(args[0])
+	}
+	switch filter {
+	case "active", "released", "all":
+	default:
+		_, err := fmt.Fprintln(output, "usage: "+leaseUsage)
+		return err
+	}
+
+	leasesList, err := shell.env.Store.ListWorktreeLeases(ctx)
+	if err != nil {
+		return err
+	}
+
+	projectKeyByID := map[int64]string{}
+	count := 0
+	for _, lease := range leasesList {
+		projectKey, err := shell.projectKeyForID(ctx, projectKeyByID, lease.ProjectID)
+		if err != nil {
+			return err
+		}
+		if !shell.projectInScope(projectKey) {
+			continue
+		}
+		if filter != "all" && lease.State != filter {
+			continue
+		}
+
+		cleanup := "pending"
+		if lease.CleanedUpAt != nil || lease.State == "cleaned" {
+			cleanup = "complete"
+		}
+		if _, err := fmt.Fprintf(output, "project=%s state=%s cleanup=%s task=%d run=%d branch=%s worktree=%s\n", projectKey, lease.State, cleanup, lease.TaskID, lease.RunID, lease.BranchName, lease.WorktreePath); err != nil {
+			return err
+		}
+		count++
+	}
+
+	if count == 0 {
+		_, err := fmt.Fprintln(output, "no leases")
+		return err
+	}
+	return nil
+}
+
 func (shell *Shell) handleJobs(ctx context.Context, args []string, output io.Writer) error {
 	if len(args) == 2 && strings.EqualFold(args[0], "initiative") {
 		workspaceKey, err := shell.currentWorkspaceKey(ctx)
@@ -538,7 +784,6 @@ func (shell *Shell) handleJobs(ctx context.Context, args []string, output io.Wri
 		}
 		return nil
 	}
-
 	views, err := shell.jobs.List(ctx, shell.state.Scope)
 	if err != nil {
 		return err
@@ -554,6 +799,107 @@ func (shell *Shell) handleJobs(ctx context.Context, args []string, output io.Wri
 		}
 	}
 	return nil
+}
+
+func (shell *Shell) handleLeaseInspect(ctx context.Context, args []string, output io.Writer) error {
+	if len(args) != 1 {
+		_, err := fmt.Fprintln(output, "usage: /leases inspect <lease-id>")
+		return err
+	}
+
+	leaseID, err := strconv.ParseInt(args[0], 10, 64)
+	if err != nil {
+		_, err = fmt.Fprintln(output, "lease id must be numeric")
+		return err
+	}
+
+	lease, err := shell.env.Store.GetWorktreeLease(ctx, leaseID)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			_, err = fmt.Fprintln(output, "lease not found")
+			return err
+		}
+		return err
+	}
+
+	project, err := shell.env.Store.GetProject(ctx, lease.ProjectID)
+	if err != nil {
+		return err
+	}
+	if !shell.projectInScope(project.Key) {
+		_, err := fmt.Fprintln(output, "lease is outside the current scope")
+		return err
+	}
+
+	cleanup := "pending"
+	if lease.CleanedUpAt != nil || lease.State == "cleaned" {
+		cleanup = "complete"
+	}
+	_, err = fmt.Fprintf(output, "lease_id=%d project=%s task=%d run=%d branch=%s worktree=%s repo_root=%s state=%s cleanup=%s\n", lease.ID, project.Key, lease.TaskID, lease.RunID, lease.BranchName, lease.WorktreePath, lease.RepoRoot, lease.State, cleanup)
+	return err
+}
+
+func (shell *Shell) handleLeaseCleanup(ctx context.Context, args []string, output io.Writer) error {
+	if len(args) != 1 || strings.ToLower(args[0]) != "confirm" {
+		_, err := fmt.Fprintln(output, "usage: /leases cleanup confirm")
+		return err
+	}
+
+	leasesList, err := shell.env.Store.ListWorktreeLeases(ctx)
+	if err != nil {
+		return err
+	}
+
+	projectKeyByID := map[int64]string{}
+	cleanupEligible := make([]sqlite.WorktreeLease, 0)
+	for _, lease := range leasesList {
+		projectKey, err := shell.projectKeyForID(ctx, projectKeyByID, lease.ProjectID)
+		if err != nil {
+			return err
+		}
+		if !shell.projectInScope(projectKey) {
+			continue
+		}
+		if lease.State != "released" || lease.CleanedUpAt != nil {
+			continue
+		}
+		cleanupEligible = append(cleanupEligible, lease)
+	}
+
+	if len(cleanupEligible) == 0 {
+		_, err := fmt.Fprintln(output, "no cleanup-eligible leases")
+		return err
+	}
+
+	result, err := shell.worktrees.CleanupLeases(ctx, cleanupEligible)
+	if err != nil {
+		return err
+	}
+	_, err = fmt.Fprintf(output, "cleaned %d lease(s)\n", len(result.Removed))
+	return err
+}
+
+func (shell *Shell) projectKeyForID(ctx context.Context, cache map[int64]string, projectID int64) (string, error) {
+	if projectKey := cache[projectID]; projectKey != "" {
+		return projectKey, nil
+	}
+	project, err := shell.env.Store.GetProject(ctx, projectID)
+	if err != nil {
+		return "", err
+	}
+	cache[projectID] = project.Key
+	return project.Key, nil
+}
+
+func (shell *Shell) projectInScope(projectKey string) bool {
+	switch shell.state.Scope.Kind {
+	case scope.ScopeGlobal:
+		return true
+	case scope.ScopeProject, scope.ScopeOdinCore:
+		return projectKey == shell.state.Scope.ProjectKey
+	default:
+		return false
+	}
 }
 
 func (shell *Shell) handleRuns(ctx context.Context, output io.Writer) error {
@@ -679,7 +1025,7 @@ func (shell *Shell) handleSelf(output io.Writer) error {
 	})
 	shell.state.ActiveTask = ""
 	shell.state.ActiveRun = ""
-	shell.state.Mode = sanitizeMode(shell.state.Mode, shell.state.Scope)
+	shell.state.Mode = clistate.SanitizeMode(shell.state.Mode, shell.state.Scope)
 	if err := shell.persistState(); err != nil {
 		return err
 	}
