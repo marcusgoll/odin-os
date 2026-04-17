@@ -12,6 +12,7 @@ Odin OS is the canonical future runtime for Odin: a Go-first, CLI-first workspac
 This repository is the runtime root. `odin-orchestrator` is a migration source only. The system is designed around a workspace-first semantic center: workspace, initiative, companion, managed project, work item, run attempt, control scope, and execution lane. GitHub is optional, but Git is mandatory for any managed project.
 
 See `docs/contracts/ubiquitous-language.md` for the frozen vocabulary and `docs/contracts/workspace-context-map.md` for the bounded-context map.
+See `docs/contracts/follow-through-contract.md` for the workspace-owned operating profile and follow-through model.
 
 ## Architecture Summary
 
@@ -20,6 +21,7 @@ See `docs/contracts/ubiquitous-language.md` for the frozen vocabulary and `docs/
 - Companions are durable AI roles such as assistants, advisors, operators, and specialists.
 - Managed projects are governed initiatives with Git-backed mutation rules and explicit project governance.
 - Work items are the durable unit of governed work, and run attempts are the disposable execution records.
+- Follow-up obligations are durable control-plane objects that materialize into work items when due.
 - Runtime authority lives in SQLite at `data/odin.db`.
 - Authored assets live in-repo as Markdown with frontmatter under `registry/`, `prompts/`, and `memory/`.
 - CLI, API, and worker execution all resolve through shared orchestration, policy, runtime, and executor contracts.
@@ -27,6 +29,7 @@ See `docs/contracts/ubiquitous-language.md` for the frozen vocabulary and `docs/
 - Tool, skill, and companion loading is dynamic and control-scope-aware; Odin must not preload the full catalog into every work item context.
 - Mutating work is isolated through work-item-owned worktrees and branches.
 - Self-heal is deterministic, bounded, and auditable; self-improvement is proposal-driven, replay-tested, promotion-gated, and reversible.
+- The intended root command families for routines and follow-through are `odin initiative`, `odin companion`, `odin profile`, `odin followup`, and `odin agenda`, while the current binary still exposes the existing lifecycle command surface.
 
 ## Canonical Documents
 

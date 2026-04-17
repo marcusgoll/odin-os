@@ -21,12 +21,16 @@ Odin is not a wrapper around Codex, Claude, or any single executor. Model provid
 Odin owns the persistent workspace and its durable decisions:
 
 - workspace state
+- operating profile
 - initiatives
 - companions
 - policy
 - memory
 - work items
 - schedules and follow-ups
+- follow-up obligations
+- agenda visibility
+- due-obligation visibility
 - approvals
 - queues
 - the durable state surfaced through projections and protected through checkpoints
@@ -51,6 +55,8 @@ The stable ownership rule is: Odin owns state and decisions; workers own bounded
 
 The top-level durable environment for Marcus. A workspace owns default preferences, integration boundaries, schedules, policy defaults, and the inventory of active initiatives and companions. Odin should stay friendly to one primary workspace without inventing heavy multi-tenant complexity.
 
+The workspace also owns the operating profile and the visible agenda for due obligations. Those are control-plane objects, not REPL-local session state.
+
 ### Initiative
 
 A durable unit of responsibility. Initiatives are the main container for meaningful work. A managed software project is one initiative kind, not the whole product model.
@@ -71,6 +77,14 @@ Durable, typed records with provenance. Memory is not an unbounded transcript du
 
 The durable operational object that turns intent into governed execution. A work item belongs to a workspace and usually links to an initiative. It may also link to a companion, a managed project, approvals, or scheduled follow-up.
 
+If a follow-up obligation becomes due, Odin materializes a work item from it instead of mutating the obligation into execution state.
+
+### Follow-Up Obligation
+
+A durable control-plane object owned by the workspace. A follow-up obligation records a promised next action, reminder, or recurring commitment and may link to an initiative or companion.
+
+Follow-up obligations are not execution records. They remain durable until the follow-through layer materializes them into governed work items.
+
 ### Run Attempt
 
 One execution attempt against a work item. Run attempts are disposable execution records that capture what happened in the execution plane. They do not replace the durable work item.
@@ -83,6 +97,8 @@ One execution attempt against a work item. Run attempts are disposable execution
 4. Odin decides whether to ask for approval, queue work, or dispatch a worker.
 5. A worker executes one bounded run attempt and returns outputs plus evidence.
 6. Odin records the result, updates memory and work state if allowed, and schedules the next obligation.
+
+Follow-up obligations extend this flow by making the next obligation visible in the agenda and, when due, materializing the next governed work item.
 
 ## Design implications
 
