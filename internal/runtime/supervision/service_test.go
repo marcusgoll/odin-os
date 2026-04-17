@@ -88,6 +88,77 @@ func TestSchedulerLeavesNotYetDueTaskUntouched(t *testing.T) {
 	}
 }
 
+func TestSchedulerDoesNotPromoteClaimedTask(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openSupervisionStore(t)
+	defer store.Close()
+
+	now := time.Date(2026, 4, 17, 12, 0, 0, 0, time.UTC)
+	store.Now = func() time.Time { return now }
+
+	project := mustCreateSupervisionProject(t, ctx, store)
+	task := mustCreateQueuedTaskAt(t, ctx, store, project.ID, "running-task", now.Add(-time.Minute))
+
+	run, err := store.StartRun(ctx, sqlite.StartRunParams{
+		TaskID:   task.ID,
+		Executor: "codex_headless",
+		Attempt:  1,
+		Status:   "running",
+	})
+	if err != nil {
+		t.Fatalf("StartRun() error = %v", err)
+	}
+	if _, err := store.UpdateTaskStatus(ctx, sqlite.UpdateTaskStatusParams{
+		TaskID: task.ID,
+		Status: "running",
+	}); err != nil {
+		t.Fatalf("UpdateTaskStatus(running) error = %v", err)
+	}
+
+	guarded, promoted, err := store.PromoteQueuedTaskIfDue(ctx, sqlite.PromoteQueuedTaskIfDueParams{
+		TaskID: task.ID,
+		Now:    now,
+	})
+	if err != nil {
+		t.Fatalf("PromoteQueuedTaskIfDue() error = %v", err)
+	}
+	if promoted {
+		t.Fatal("PromoteQueuedTaskIfDue() promoted running task, want no-op")
+	}
+	if guarded.Status != "running" {
+		t.Fatalf("PromoteQueuedTaskIfDue().Status = %q, want running", guarded.Status)
+	}
+
+	service := Service{
+		Store: store,
+		Now:   func() time.Time { return now },
+	}
+
+	result, err := service.Tick(ctx)
+	if err != nil {
+		t.Fatalf("Tick() error = %v", err)
+	}
+	if result.Promoted != 0 {
+		t.Fatalf("Promoted = %d, want 0", result.Promoted)
+	}
+
+	updatedTask, err := store.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
+	}
+	if updatedTask.Status != "running" {
+		t.Fatalf("Task.Status = %q, want running", updatedTask.Status)
+	}
+	if updatedTask.CurrentRunID == nil || *updatedTask.CurrentRunID != run.ID {
+		t.Fatalf("Task.CurrentRunID = %v, want %d", updatedTask.CurrentRunID, run.ID)
+	}
+	if !updatedTask.NextEligibleAt.Equal(now.Add(-time.Minute)) {
+		t.Fatalf("Task.NextEligibleAt = %v, want %v", updatedTask.NextEligibleAt, now.Add(-time.Minute))
+	}
+}
+
 func openSupervisionStore(t *testing.T) *sqlite.Store {
 	t.Helper()
 

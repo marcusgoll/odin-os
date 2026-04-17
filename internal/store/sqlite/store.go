@@ -406,6 +406,49 @@ func (store *Store) RequeueTaskAt(ctx context.Context, params RequeueTaskAtParam
 	return task, err
 }
 
+func (store *Store) PromoteQueuedTaskIfDue(ctx context.Context, params PromoteQueuedTaskIfDueParams) (Task, bool, error) {
+	var task Task
+	var promoted bool
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		current, err := store.getTaskTx(ctx, tx, params.TaskID)
+		if err != nil {
+			return err
+		}
+
+		now := store.now()
+		result, err := tx.ExecContext(ctx, `
+			UPDATE tasks
+			SET next_eligible_at = ?, updated_at = ?
+			WHERE id = ?
+			  AND status = 'queued'
+			  AND current_run_id IS NULL
+			  AND next_eligible_at > ?
+			  AND next_eligible_at <= ?
+		`, formatTime(time.Time{}), formatTime(now), params.TaskID, formatTime(time.Time{}), formatTime(params.Now))
+		if err != nil {
+			return err
+		}
+
+		rowsAffected, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if rowsAffected == 0 {
+			task = current
+			return nil
+		}
+
+		updated, err := store.getTaskTx(ctx, tx, params.TaskID)
+		if err != nil {
+			return err
+		}
+		task = updated
+		promoted = true
+		return nil
+	})
+	return task, promoted, err
+}
+
 func (store *Store) IncrementTaskRetry(ctx context.Context, params IncrementTaskRetryParams) (Task, error) {
 	var task Task
 	err := store.withTx(ctx, func(tx *sql.Tx) error {

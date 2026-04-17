@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"os"
 	"strings"
 	"time"
 
@@ -461,7 +462,7 @@ func isTransientFailure(err error) bool {
 	if errors.Is(err, context.Canceled) {
 		return false
 	}
-	if errors.Is(err, context.DeadlineExceeded) {
+	if errors.Is(err, context.DeadlineExceeded) || os.IsTimeout(err) {
 		return true
 	}
 
@@ -470,8 +471,7 @@ func isTransientFailure(err error) bool {
 		return true
 	}
 
-	message := strings.ToLower(err.Error())
-	return strings.Contains(message, "timeout") || strings.Contains(message, "temporar")
+	return false
 }
 
 func slugify(input string) string {

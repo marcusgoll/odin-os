@@ -1135,6 +1135,81 @@ func TestRetryBackoffUpdatesQueueState(t *testing.T) {
 	}
 }
 
+func TestPromoteQueuedTaskIfDueSkipsRunningTask(t *testing.T) {
+	ctx := context.Background()
+	store := openMigratedTestStore(t, "promote-guard.db")
+	defer store.Close()
+
+	now := time.Date(2026, 4, 17, 10, 0, 0, 0, time.UTC)
+	store.Now = func() time.Time { return now }
+
+	project, err := store.CreateProject(ctx, CreateProjectParams{
+		Key:           "promote-guard",
+		Name:          "Promote Guard",
+		Scope:         "project",
+		GitRoot:       "/tmp/promote-guard",
+		DefaultBranch: "main",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+
+	task, err := store.CreateTask(ctx, CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "promote-guard-task",
+		Title:       "Guarded promotion",
+		Status:      "queued",
+		Scope:       "project",
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+	if _, err := store.RequeueTaskAt(ctx, RequeueTaskAtParams{
+		TaskID:         task.ID,
+		NextEligibleAt: now.Add(-time.Minute),
+	}); err != nil {
+		t.Fatalf("RequeueTaskAt() error = %v", err)
+	}
+
+	run, err := store.StartRun(ctx, StartRunParams{
+		TaskID:   task.ID,
+		Executor: "codex",
+		Attempt:  1,
+		Status:   "running",
+	})
+	if err != nil {
+		t.Fatalf("StartRun() error = %v", err)
+	}
+	if _, err := store.UpdateTaskStatus(ctx, UpdateTaskStatusParams{
+		TaskID: task.ID,
+		Status: "running",
+	}); err != nil {
+		t.Fatalf("UpdateTaskStatus(running) error = %v", err)
+	}
+
+	updated, promoted, err := store.PromoteQueuedTaskIfDue(ctx, PromoteQueuedTaskIfDueParams{
+		TaskID: task.ID,
+		Now:    now,
+	})
+	if err != nil {
+		t.Fatalf("PromoteQueuedTaskIfDue() error = %v", err)
+	}
+	if promoted {
+		t.Fatal("PromoteQueuedTaskIfDue() promoted running task, want no-op")
+	}
+	if updated.Status != "running" {
+		t.Fatalf("Status = %q, want running", updated.Status)
+	}
+	if updated.CurrentRunID == nil || *updated.CurrentRunID != run.ID {
+		t.Fatalf("CurrentRunID = %v, want %d", updated.CurrentRunID, run.ID)
+	}
+	if !updated.NextEligibleAt.Equal(now.Add(-time.Minute)) {
+		t.Fatalf("NextEligibleAt = %v, want %v", updated.NextEligibleAt, now.Add(-time.Minute))
+	}
+}
+
 func TestFormatTimeUsesFixedWidthUTC(t *testing.T) {
 	got := formatTime(time.Date(2026, 4, 17, 10, 0, 0, 5*1000*1000, time.FixedZone("offset", 3*60*60)))
 	want := "2026-04-17T07:00:00.005000000Z"
