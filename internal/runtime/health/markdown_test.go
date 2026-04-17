@@ -33,7 +33,7 @@ func TestRenderMarkdownReportRendersEmptyRootCausesCleanly(t *testing.T) {
 			Status:          StatusHealthy,
 			ChecksEvaluated: 2,
 		},
-		Findings: []Finding{},
+		Findings:        []Finding{},
 		Recommendations: RecommendationGroups{},
 		FinalVerdict: FinalVerdict{
 			Status:  StatusHealthy,
@@ -95,5 +95,68 @@ func TestRenderMarkdownReportOrdersFindingsBeforeRecommendations(t *testing.T) {
 	}
 	if !strings.Contains(output, "| Area | Severity | Observation | Why It Matters | Confidence |") {
 		t.Fatalf("output missing findings table header\n%s", output)
+	}
+}
+
+func TestRenderMarkdownReportRendersCoverageProvenanceAndRecommendationMetadata(t *testing.T) {
+	report := OperatorReport{
+		CurrentHealth: CurrentHealthSnapshot{
+			Status:          StatusFailed,
+			ChecksEvaluated: 2,
+		},
+		Coverage: CoverageMetadata{
+			Evaluated: []string{"database"},
+			Unknown:   []string{"cache"},
+		},
+		RootCauses: []RootCause{
+			{Area: "database", Summary: "database connectivity failed", Confidence: "high", Provenance: "confirmed"},
+			{Area: "cache", Summary: "cache shard unavailable", Confidence: "reduced", Provenance: "inferred"},
+		},
+		Recommendations: RecommendationGroups{
+			Immediate: []Recommendation{
+				{
+					Action:              "restore database connectivity",
+					Reason:              "database connectivity failed",
+					ExpectedBenefit:     "restores database-backed health decisions",
+					Effort:              "medium",
+					Risk:                "high",
+					ApprovalRequirement: "ops approval",
+				},
+			},
+		},
+		FinalVerdict: FinalVerdict{
+			Status:  StatusFailed,
+			Summary: "one or more critical checks failed",
+		},
+	}
+
+	output := RenderMarkdownReport(report)
+
+	for _, want := range []string{
+		"## Current Health Snapshot",
+		"### Coverage",
+		"| Evaluated Areas | Unknown Areas |",
+		"database",
+		"cache",
+		"### Confirmed",
+		"### Inferred",
+		"| Area | Summary | Confidence | Provenance |",
+		"| Action | Reason | Expected Benefit | Effort | Risk | Approval Requirement |",
+		"ops approval",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("output missing %q\n%s", want, output)
+		}
+	}
+
+	coverageIdx := strings.Index(output, "### Coverage")
+	confirmedIdx := strings.Index(output, "### Confirmed")
+	inferredIdx := strings.Index(output, "### Inferred")
+	recommendationIdx := strings.Index(output, "| Action | Reason | Expected Benefit | Effort | Risk | Approval Requirement |")
+	if coverageIdx == -1 || confirmedIdx == -1 || inferredIdx == -1 || recommendationIdx == -1 {
+		t.Fatalf("output missing required metadata sections\n%s", output)
+	}
+	if !(coverageIdx < confirmedIdx && confirmedIdx < inferredIdx && inferredIdx < recommendationIdx) {
+		t.Fatalf("metadata sections out of order\n%s", output)
 	}
 }

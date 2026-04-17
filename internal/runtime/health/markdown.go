@@ -17,6 +17,12 @@ func RenderMarkdownReport(report OperatorReport) string {
 	writeTableRow(&builder, "Checks Evaluated", strconv.Itoa(report.CurrentHealth.ChecksEvaluated))
 	builder.WriteString("\n")
 
+	writeSubsectionHeading(&builder, "Coverage")
+	builder.WriteString("| Evaluated Areas | Unknown Areas |\n")
+	builder.WriteString("| --- | --- |\n")
+	writeTableRow(&builder, joinOrNone(report.Coverage.Evaluated), joinOrNone(report.Coverage.Unknown))
+	builder.WriteString("\n")
+
 	writeSectionHeading(&builder, "Key Findings")
 	if len(report.Findings) == 0 {
 		builder.WriteString("No major issues detected\n\n")
@@ -36,16 +42,12 @@ func RenderMarkdownReport(report OperatorReport) string {
 	}
 
 	writeSectionHeading(&builder, "Likely Root Causes")
-	if len(report.RootCauses) == 0 {
-		builder.WriteString("None\n\n")
-	} else {
-		builder.WriteString("| Area | Summary | Confidence |\n")
-		builder.WriteString("| --- | --- | --- |\n")
-		for _, rootCause := range report.RootCauses {
-			writeTableRow(&builder, rootCause.Area, rootCause.Summary, rootCause.Confidence)
-		}
-		builder.WriteString("\n")
-	}
+	writeSubsectionHeading(&builder, "Confirmed")
+	confirmed := filterRootCauses(report.RootCauses, "confirmed")
+	renderRootCauseGroup(&builder, confirmed)
+	writeSubsectionHeading(&builder, "Inferred")
+	inferred := filterRootCauses(report.RootCauses, "inferred")
+	renderRootCauseGroup(&builder, inferred)
 
 	writeSectionHeading(&builder, "Upgrade and Improvement Recommendations")
 	writeRecommendationGroup(&builder, "Immediate", report.Recommendations.Immediate)
@@ -81,16 +83,29 @@ func writeRecommendationGroup(builder *strings.Builder, title string, recommenda
 		builder.WriteString("None\n\n")
 		return
 	}
-	builder.WriteString("| Action | Reason |\n")
-	builder.WriteString("| --- | --- |\n")
+	builder.WriteString("| Action | Reason | Expected Benefit | Effort | Risk | Approval Requirement |\n")
+	builder.WriteString("| --- | --- | --- | --- | --- | --- |\n")
 	for _, recommendation := range recommendations {
-		writeTableRow(builder, recommendation.Action, recommendation.Reason)
+		writeTableRow(builder,
+			recommendation.Action,
+			recommendation.Reason,
+			recommendation.ExpectedBenefit,
+			recommendation.Effort,
+			recommendation.Risk,
+			recommendation.ApprovalRequirement,
+		)
 	}
 	builder.WriteString("\n")
 }
 
 func writeSectionHeading(builder *strings.Builder, title string) {
 	builder.WriteString("## ")
+	builder.WriteString(title)
+	builder.WriteString("\n")
+}
+
+func writeSubsectionHeading(builder *strings.Builder, title string) {
+	builder.WriteString("### ")
 	builder.WriteString(title)
 	builder.WriteString("\n")
 }
@@ -116,4 +131,34 @@ func formatReportTime(value time.Time) string {
 		return "0001-01-01T00:00:00Z"
 	}
 	return value.UTC().Format(time.RFC3339)
+}
+
+func renderRootCauseGroup(builder *strings.Builder, rootCauses []RootCause) {
+	if len(rootCauses) == 0 {
+		builder.WriteString("None\n\n")
+		return
+	}
+	builder.WriteString("| Area | Summary | Confidence | Provenance |\n")
+	builder.WriteString("| --- | --- | --- | --- |\n")
+	for _, rootCause := range rootCauses {
+		writeTableRow(builder, rootCause.Area, rootCause.Summary, rootCause.Confidence, rootCause.Provenance)
+	}
+	builder.WriteString("\n")
+}
+
+func filterRootCauses(rootCauses []RootCause, provenance string) []RootCause {
+	filtered := make([]RootCause, 0, len(rootCauses))
+	for _, rootCause := range rootCauses {
+		if rootCause.Provenance == provenance {
+			filtered = append(filtered, rootCause)
+		}
+	}
+	return filtered
+}
+
+func joinOrNone(values []string) string {
+	if len(values) == 0 {
+		return "None"
+	}
+	return strings.Join(values, ", ")
 }

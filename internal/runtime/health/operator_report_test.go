@@ -140,3 +140,45 @@ func TestBuildOperatorReportUsesExplicitUnmappedFallbackForUnknownChecks(t *test
 		t.Fatalf("MissingTelemetry = %#v, want none for unmapped checks", got.MissingTelemetry)
 	}
 }
+
+func TestBuildOperatorReportTracksCoverageAndRootCauseProvenance(t *testing.T) {
+	raw := Report{
+		Status: StatusFailed,
+		Checks: []Check{
+			{Name: "database", Status: StatusFailed, Summary: "database connectivity failed"},
+			{Name: "cache", Status: StatusDegraded, Summary: "cache shard unavailable"},
+		},
+	}
+
+	got := BuildOperatorReport(raw)
+
+	if diff := len(got.Coverage.Evaluated); diff != 1 || got.Coverage.Evaluated[0] != "database" {
+		t.Fatalf("Coverage.Evaluated = %#v, want [\"database\"]", got.Coverage.Evaluated)
+	}
+	if diff := len(got.Coverage.Unknown); diff != 1 || got.Coverage.Unknown[0] != "cache" {
+		t.Fatalf("Coverage.Unknown = %#v, want [\"cache\"]", got.Coverage.Unknown)
+	}
+
+	if len(got.RootCauses) != 2 {
+		t.Fatalf("RootCauses len = %d, want 2", len(got.RootCauses))
+	}
+	if got.RootCauses[0].Area != "database" || got.RootCauses[0].Provenance != "confirmed" {
+		t.Fatalf("first root cause = %+v, want confirmed database cause", got.RootCauses[0])
+	}
+	if got.RootCauses[1].Area != "cache" || got.RootCauses[1].Provenance != "inferred" {
+		t.Fatalf("second root cause = %+v, want inferred cache cause", got.RootCauses[1])
+	}
+
+	if len(got.Recommendations.Immediate) != 1 {
+		t.Fatalf("Immediate recommendations len = %d, want 1", len(got.Recommendations.Immediate))
+	}
+	if rec := got.Recommendations.Immediate[0]; rec.Action != "restore database connectivity" || rec.ExpectedBenefit != "restores database-backed health decisions" || rec.Effort != "medium" || rec.Risk != "high" || rec.ApprovalRequirement != "ops approval" {
+		t.Fatalf("Immediate recommendation = %+v, want explicit metadata", rec)
+	}
+	if len(got.Recommendations.NearTerm) != 1 {
+		t.Fatalf("NearTerm recommendations len = %d, want 1", len(got.Recommendations.NearTerm))
+	}
+	if rec := got.Recommendations.NearTerm[0]; rec.Action != "add an explicit operator mapping for cache" || rec.ExpectedBenefit != "restores operator visibility for cache warnings" || rec.Effort != "low" || rec.Risk != "low" || rec.ApprovalRequirement != "team review" {
+		t.Fatalf("NearTerm recommendation = %+v, want fallback metadata", rec)
+	}
+}
