@@ -100,7 +100,25 @@ func renderDraft(candidate Candidate) string {
 func draftKindSpecificFrontmatter(candidate Candidate) string {
 	switch candidate.Kind {
 	case KindSkill:
-		return "strictness: review\napplies_to:\n  - migration\n"
+		return fmt.Sprintf(
+			"version: \"0.1.0\"\n"+
+				"enabled: false\n"+
+				"strictness: review\n"+
+				"applies_to:\n"+
+				"  - migration\n"+
+				"scopes:\n"+
+				"  - global\n"+
+				"permissions:\n"+
+				"  - repo.read\n"+
+				"handler_type: command\n"+
+				"handler_ref: scripts/skills/%s.sh\n"+
+				"timeout_seconds: 15\n"+
+				"input_schema:\n"+
+				"  type: object\n"+
+				"output_schema:\n"+
+				"  type: object\n",
+			candidate.Key,
+		)
 	case KindAgent:
 		return "role: migration-review\nscopes:\n  - global\ntools:\n  - review\n"
 	case KindWorkflow:

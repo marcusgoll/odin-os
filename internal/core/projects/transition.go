@@ -13,6 +13,20 @@ const (
 	TransitionStateDecommissioned TransitionState = "decommissioned"
 )
 
+func (state TransitionState) Valid() bool {
+	switch state {
+	case TransitionStateInventory,
+		TransitionStateShadow,
+		TransitionStateCompare,
+		TransitionStateLimitedAction,
+		TransitionStateCutover,
+		TransitionStateDecommissioned:
+		return true
+	default:
+		return false
+	}
+}
+
 type TransitionController string
 
 const (

@@ -9,6 +9,8 @@ phase: "02"
 
 This document defines the canonical authored format for registry assets under `registry/`. Markdown with frontmatter is the authored truth. Runtime code may compile and index these files, but it must not replace them as the source of truth.
 
+Skill-specific execution and lifecycle rules are defined in `docs/contracts/skill-lifecycle.md`. This document only defines the authored registry shape and validation rules.
+
 ## Supported kinds
 
 Registry kinds are:
@@ -54,8 +56,17 @@ Every registry file must begin with YAML frontmatter delimited by `---`.
 
 #### Skill
 
+- `version`
+- `enabled`
 - `strictness`
 - `applies_to`
+- `scopes`
+- `permissions`
+- `handler_type`
+- `handler_ref`
+- `timeout_seconds`
+- `input_schema`
+- `output_schema`
 
 #### Workflow
 
@@ -94,9 +105,11 @@ The registry compiler must reject a file clearly when:
 - frontmatter is missing
 - frontmatter YAML is invalid
 - `kind` is unknown
+- `key` is not a lowercase slug using only letters, digits, `-`, or `_`
 - path kind and frontmatter `kind` differ
 - a required common field is missing
 - a required kind-specific field is missing
+- a skill `handler_ref` leaves the repo or points outside `scripts/skills/`
 - a required Markdown section is missing or empty
 - multiple files declare the same `key`
 

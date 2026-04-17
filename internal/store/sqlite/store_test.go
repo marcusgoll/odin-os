@@ -304,6 +304,70 @@ func TestStoreMigrateLifecycleAndReopen(t *testing.T) {
 	}
 }
 
+func TestStoreRecordSkillLifecycleEventAppendsRuntimeEvent(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(filepath.Join(t.TempDir(), "odin.db"))
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
+	}
+	defer store.Close()
+
+	if err := store.RecordSkillLifecycleEvent(ctx, RecordSkillLifecycleEventParams{
+		SkillKey:         "echo-skill",
+		Operation:        "create",
+		Outcome:          "success",
+		Scope:            "project",
+		ExecutionProfile: "restricted_command_v1",
+		Version:          "1.0.0",
+		HandlerType:      "command",
+		HandlerRef:       "scripts/skills/echo-skill.sh",
+		Permissions:      []string{"repo.read"},
+		DurationMS:       17,
+	}); err != nil {
+		t.Fatalf("RecordSkillLifecycleEvent() error = %v", err)
+	}
+
+	events, err := store.ListEvents(ctx, ListEventsParams{})
+	if err != nil {
+		t.Fatalf("ListEvents() error = %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("ListEvents() len = %d, want 1", len(events))
+	}
+	if events[0].StreamType != runtimeevents.StreamSkill {
+		t.Fatalf("event.StreamType = %q, want %q", events[0].StreamType, runtimeevents.StreamSkill)
+	}
+	if events[0].Type != runtimeevents.EventSkillLifecycleRecorded {
+		t.Fatalf("event.Type = %q, want %q", events[0].Type, runtimeevents.EventSkillLifecycleRecorded)
+	}
+	if events[0].Scope != "project" {
+		t.Fatalf("event.Scope = %q, want project", events[0].Scope)
+	}
+
+	payload, err := runtimeevents.DecodePayload[runtimeevents.SkillLifecycleRecordedPayload](events[0].Payload)
+	if err != nil {
+		t.Fatalf("DecodePayload(SkillLifecycleRecordedPayload) error = %v", err)
+	}
+	if payload.SkillKey != "echo-skill" {
+		t.Fatalf("payload.SkillKey = %q, want echo-skill", payload.SkillKey)
+	}
+	if payload.Operation != "create" {
+		t.Fatalf("payload.Operation = %q, want create", payload.Operation)
+	}
+	if payload.Outcome != "success" {
+		t.Fatalf("payload.Outcome = %q, want success", payload.Outcome)
+	}
+	if payload.ExecutionProfile != "restricted_command_v1" {
+		t.Fatalf("payload.ExecutionProfile = %q, want restricted_command_v1", payload.ExecutionProfile)
+	}
+	if payload.DurationMS != 17 {
+		t.Fatalf("payload.DurationMS = %d, want 17", payload.DurationMS)
+	}
+}
+
 func TestStartRunAndUpdateTaskStatusRejectsAlreadyClaimedTask(t *testing.T) {
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "odin.db")

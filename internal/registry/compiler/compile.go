@@ -30,23 +30,31 @@ func Compile(documents []registry.ParsedDocument, parserDiagnostics []registry.D
 		}
 
 		item := registry.Item{
-			Kind:       document.Frontmatter.Kind,
-			Key:        document.Frontmatter.Key,
-			Title:      document.Frontmatter.Title,
-			Summary:    document.Frontmatter.Summary,
-			Status:     document.Frontmatter.Status,
-			Tags:       append([]string(nil), document.Frontmatter.Tags...),
-			Owners:     append([]string(nil), document.Frontmatter.Owners...),
-			Role:       document.Frontmatter.Role,
-			Scopes:     append([]string(nil), document.Frontmatter.Scopes...),
-			Tools:      append([]string(nil), document.Frontmatter.Tools...),
-			Strictness: document.Frontmatter.Strictness,
-			AppliesTo:  append([]string(nil), document.Frontmatter.AppliesTo...),
-			Entrypoint: document.Frontmatter.Entrypoint,
-			Composes:   append([]string(nil), document.Frontmatter.Composes...),
-			Command:    document.Frontmatter.Command,
-			Aliases:    append([]string(nil), document.Frontmatter.Aliases...),
-			Sections:   cloneSections(document.Sections),
+			Kind:           document.Frontmatter.Kind,
+			Key:            document.Frontmatter.Key,
+			Title:          document.Frontmatter.Title,
+			Summary:        document.Frontmatter.Summary,
+			Status:         document.Frontmatter.Status,
+			Version:        document.Frontmatter.Version,
+			Enabled:        document.Frontmatter.Enabled != nil && *document.Frontmatter.Enabled,
+			Tags:           append([]string(nil), document.Frontmatter.Tags...),
+			Owners:         append([]string(nil), document.Frontmatter.Owners...),
+			Role:           document.Frontmatter.Role,
+			Scopes:         append([]string(nil), document.Frontmatter.Scopes...),
+			Tools:          append([]string(nil), document.Frontmatter.Tools...),
+			Strictness:     document.Frontmatter.Strictness,
+			AppliesTo:      append([]string(nil), document.Frontmatter.AppliesTo...),
+			Permissions:    append([]string(nil), document.Frontmatter.Permissions...),
+			HandlerType:    document.Frontmatter.HandlerType,
+			HandlerRef:     document.Frontmatter.HandlerRef,
+			TimeoutSeconds: document.Frontmatter.TimeoutSeconds,
+			InputSchema:    cloneAnyMap(document.Frontmatter.InputSchema),
+			OutputSchema:   cloneAnyMap(document.Frontmatter.OutputSchema),
+			Entrypoint:     document.Frontmatter.Entrypoint,
+			Composes:       append([]string(nil), document.Frontmatter.Composes...),
+			Command:        document.Frontmatter.Command,
+			Aliases:        append([]string(nil), document.Frontmatter.Aliases...),
+			Sections:       cloneSections(document.Sections),
 			Source: registry.SourceInfo{
 				Path:         document.Source.Path,
 				RelativePath: document.Source.RelativePath,
@@ -67,4 +75,31 @@ func cloneSections(sections map[string]string) map[string]string {
 		cloned[key] = value
 	}
 	return cloned
+}
+
+func cloneAnyMap(values map[string]any) map[string]any {
+	if len(values) == 0 {
+		return nil
+	}
+
+	cloned := make(map[string]any, len(values))
+	for key, value := range values {
+		cloned[key] = cloneAnyValue(value)
+	}
+	return cloned
+}
+
+func cloneAnyValue(value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		return cloneAnyMap(typed)
+	case []any:
+		cloned := make([]any, len(typed))
+		for i := range typed {
+			cloned[i] = cloneAnyValue(typed[i])
+		}
+		return cloned
+	default:
+		return typed
+	}
 }

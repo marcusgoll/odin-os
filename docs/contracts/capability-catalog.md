@@ -33,6 +33,7 @@ The tool broker exposes a thin capability catalog before any full definitions ar
 - thin cards must not include full skill bodies
 - thin cards must not include full sub-agent definitions
 - expansion occurs only after selection
+- registry-backed skills must be discoverable from a fresh registry load, not a stale startup snapshot
 - the default built-in catalog must expose only runtime-backed operator tools
 - placeholder or canned operational tools must not appear in the default catalog
 
@@ -44,4 +45,4 @@ The tool broker exposes a thin capability catalog before any full definitions ar
 
 ## Current posture
 
-As of Phase 17, the default built-in operator catalog is intentionally empty until a built-in tool is wired to a real runtime surface. Registry-backed skills and sub-agents remain discoverable, but placeholder operational tools such as canned project status, task list, or event log summaries are not advertised.
+As of Phase 17, the default built-in operator catalog is intentionally empty until a built-in tool is wired to a real runtime surface. Registry-backed skills and sub-agents remain discoverable from the canonical registry, and executable skills can be invoked through the shared skill service rather than per-skill broker hacks. Placeholder operational tools such as canned project status, task list, or event log summaries are not advertised.

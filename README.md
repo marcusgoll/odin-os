@@ -27,6 +27,7 @@ This repository is the runtime root. `odin-orchestrator` is a migration source o
 - `docs/adr/0002-migration-policy.md` defines how legacy assets from `odin-orchestrator` are classified and moved into this repo.
 - `docs/contracts/repo-layout.md` defines package and folder responsibilities.
 - `docs/contracts/phase-exit-criteria.md` defines the acceptance gate for Phase 00 and the baseline gate every later phase must satisfy.
+- `docs/contracts/skill-lifecycle.md` defines the canonical skill contract, CRUD rules, discovery model, and Codex maintenance workflow.
 
 ## Current Status
 
@@ -41,9 +42,42 @@ make build
 make install-local
 odin help
 odin status --json
+odin skills list --json
 # replace YOUR_PROJECT_KEY with a non-system project key from config/projects.yaml
 odin task run --project YOUR_PROJECT_KEY --title "smoke"
 odin repl
 ```
 
 This installs a symlink at `~/.local/bin/odin` pointing to this repo's built binary. Remove it with `make uninstall-local`.
+
+## Skill maintenance
+
+Skills are canonical registry assets under `registry/skills/*.md`. The recommended maintenance path is the repo-owned CLI:
+
+```bash
+odin skills list --json
+odin skills get triage-skill --json
+odin skills create --spec /tmp/echo-skill.json --json
+odin skills invoke echo-skill --input '{"message":"hello"}' --json
+odin skills update echo-skill --spec /tmp/echo-skill-v2.json --json
+odin skills delete echo-skill --json
+```
+
+Use that path for lifecycle operations so authored files, validation, runtime discovery, and invocation stay aligned.
+
+Command-backed skills execute through the restricted wrapper. The wrapper runs handlers from the repo root, strips inherited environment variables down to the allowlisted execution context, and records `restricted_command_v1` on invoke. Handlers that resolve outside `scripts/skills/` are rejected.
+
+Skill invocation now enforces the declared permission model:
+
+- `repo.read` and `runtime.read` are allowed in global scope
+- mutating permissions require project-backed scope
+- isolated mutations require a matching `limited_action` allowlist
+- governance, destructive, and system-project mutations can require explicit approval before the handler runs
+
+Typical gated workflow:
+
+```bash
+odin project select alpha-cli
+odin transition set limited_action allow=docs_audit_note confirm because "skill maintenance"
+odin skills invoke isolated-skill --input '{"message":"hello"}' --json
+```

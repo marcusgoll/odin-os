@@ -47,22 +47,30 @@ type SourceInfo struct {
 }
 
 type Frontmatter struct {
-	Kind       Kind     `yaml:"kind"`
-	Key        string   `yaml:"key"`
-	Title      string   `yaml:"title"`
-	Summary    string   `yaml:"summary"`
-	Status     string   `yaml:"status"`
-	Tags       []string `yaml:"tags"`
-	Owners     []string `yaml:"owners"`
-	Role       string   `yaml:"role"`
-	Scopes     []string `yaml:"scopes"`
-	Tools      []string `yaml:"tools"`
-	Strictness string   `yaml:"strictness"`
-	AppliesTo  []string `yaml:"applies_to"`
-	Entrypoint string   `yaml:"entrypoint"`
-	Composes   []string `yaml:"composes"`
-	Command    string   `yaml:"command"`
-	Aliases    []string `yaml:"aliases"`
+	Kind           Kind           `yaml:"kind"`
+	Key            string         `yaml:"key"`
+	Title          string         `yaml:"title"`
+	Summary        string         `yaml:"summary"`
+	Status         string         `yaml:"status"`
+	Version        string         `yaml:"version"`
+	Enabled        *bool          `yaml:"enabled"`
+	Tags           []string       `yaml:"tags"`
+	Owners         []string       `yaml:"owners"`
+	Role           string         `yaml:"role"`
+	Scopes         []string       `yaml:"scopes"`
+	Tools          []string       `yaml:"tools"`
+	Strictness     string         `yaml:"strictness"`
+	AppliesTo      []string       `yaml:"applies_to"`
+	Permissions    []string       `yaml:"permissions"`
+	HandlerType    string         `yaml:"handler_type"`
+	HandlerRef     string         `yaml:"handler_ref"`
+	TimeoutSeconds int            `yaml:"timeout_seconds"`
+	InputSchema    map[string]any `yaml:"input_schema"`
+	OutputSchema   map[string]any `yaml:"output_schema"`
+	Entrypoint     string         `yaml:"entrypoint"`
+	Composes       []string       `yaml:"composes"`
+	Command        string         `yaml:"command"`
+	Aliases        []string       `yaml:"aliases"`
 }
 
 type ParsedDocument struct {
@@ -85,24 +93,32 @@ type Diagnostic struct {
 }
 
 type Item struct {
-	Kind       Kind
-	Key        string
-	Title      string
-	Summary    string
-	Status     string
-	Tags       []string
-	Owners     []string
-	Role       string
-	Scopes     []string
-	Tools      []string
-	Strictness string
-	AppliesTo  []string
-	Entrypoint string
-	Composes   []string
-	Command    string
-	Aliases    []string
-	Sections   map[string]string
-	Source     SourceInfo
+	Kind           Kind
+	Key            string
+	Title          string
+	Summary        string
+	Status         string
+	Version        string
+	Enabled        bool
+	Tags           []string
+	Owners         []string
+	Role           string
+	Scopes         []string
+	Tools          []string
+	Strictness     string
+	AppliesTo      []string
+	Permissions    []string
+	HandlerType    string
+	HandlerRef     string
+	TimeoutSeconds int
+	InputSchema    map[string]any
+	OutputSchema   map[string]any
+	Entrypoint     string
+	Composes       []string
+	Command        string
+	Aliases        []string
+	Sections       map[string]string
+	Source         SourceInfo
 }
 
 type Snapshot struct {
