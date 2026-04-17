@@ -2113,6 +2113,15 @@ func (store *Store) GetInitiativeByKey(ctx context.Context, key string) (Initiat
 	return scanInitiative(row)
 }
 
+func (store *Store) GetInitiativeByWorkspaceKey(ctx context.Context, workspaceID int64, key string) (Initiative, error) {
+	row := store.db.QueryRowContext(ctx, `
+		SELECT id, workspace_id, key, title, kind, status, summary, linked_project_id, owner_companion_id, created_at, updated_at
+		FROM initiatives
+		WHERE workspace_id = ? AND key = ?
+	`, workspaceID, key)
+	return scanInitiative(row)
+}
+
 func (store *Store) GetInitiativeByProjectID(ctx context.Context, projectID int64) (Initiative, error) {
 	row := store.db.QueryRowContext(ctx, `
 		SELECT id, workspace_id, key, title, kind, status, summary, linked_project_id, owner_companion_id, created_at, updated_at
@@ -2141,6 +2150,28 @@ func (store *Store) GetCompanionByKey(ctx context.Context, key string) (Companio
 		FROM companions
 		WHERE key = ?
 	`, key)
+	return scanCompanion(row)
+}
+
+func (store *Store) GetCompanionByWorkspaceKey(ctx context.Context, workspaceID int64, key string) (Companion, error) {
+	row := store.db.QueryRowContext(ctx, `
+		SELECT
+			id,
+			workspace_id,
+			key,
+			title,
+			kind,
+			charter,
+			status,
+			initiative_scope_json,
+			tool_policy_json,
+			memory_policy_json,
+			planning_policy_json,
+			created_at,
+			updated_at
+		FROM companions
+		WHERE workspace_id = ? AND key = ?
+	`, workspaceID, key)
 	return scanCompanion(row)
 }
 
@@ -2717,7 +2748,7 @@ func (store *Store) getTaskTx(ctx context.Context, tx *sql.Tx, taskID int64) (Ta
 
 func (store *Store) getTaskQuery(ctx context.Context, queryer sqlQueryRow, taskID int64) (Task, error) {
 	row := queryer.QueryRowContext(ctx, `
-		SELECT id, project_id, key, title, status, scope, requested_by, current_run_id, created_at, updated_at
+		SELECT id, project_id, workspace_id, initiative_id, companion_id, key, title, status, scope, requested_by, current_run_id, created_at, updated_at
 		FROM tasks
 		WHERE id = ?
 	`, taskID)
@@ -2817,6 +2848,15 @@ func (store *Store) getCompanionByWorkspaceKeyTx(ctx context.Context, tx *sql.Tx
 		WHERE workspace_id = ? AND key = ?
 	`, workspaceID, key)
 	return scanCompanion(row)
+}
+
+func (store *Store) getInitiativeByWorkspaceKeyTx(ctx context.Context, tx *sql.Tx, workspaceID int64, key string) (Initiative, error) {
+	row := tx.QueryRowContext(ctx, `
+		SELECT id, workspace_id, key, title, kind, status, summary, linked_project_id, owner_companion_id, created_at, updated_at
+		FROM initiatives
+		WHERE workspace_id = ? AND key = ?
+	`, workspaceID, key)
+	return scanInitiative(row)
 }
 
 func (store *Store) getInitiativeByProjectIDTx(ctx context.Context, tx *sql.Tx, projectID int64) (Initiative, error) {
@@ -3568,12 +3608,17 @@ func scanInitiative(row interface{ Scan(...any) error }) (Initiative, error) {
 
 func scanTask(row interface{ Scan(...any) error }) (Task, error) {
 	var task Task
+	var initiativeID sql.NullInt64
+	var companionID sql.NullInt64
 	var currentRunID sql.NullInt64
 	var createdAt string
 	var updatedAt string
 	if err := row.Scan(
 		&task.ID,
 		&task.ProjectID,
+		&task.WorkspaceID,
+		&initiativeID,
+		&companionID,
 		&task.Key,
 		&task.Title,
 		&task.Status,
@@ -3587,6 +3632,8 @@ func scanTask(row interface{ Scan(...any) error }) (Task, error) {
 	}
 
 	var err error
+	task.InitiativeID = nullableInt64Ptr(initiativeID)
+	task.CompanionID = nullableInt64Ptr(companionID)
 	task.CurrentRunID = nullableInt64Ptr(currentRunID)
 	task.CreatedAt, err = parseTime(createdAt)
 	if err != nil {

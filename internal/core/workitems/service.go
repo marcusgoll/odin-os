@@ -26,7 +26,23 @@ func (service Service) Create(ctx context.Context, scope controlscope.ControlSco
 		return WorkItem{}, err
 	}
 
+	var initiative sqlite.Initiative
 	projectKey := scope.ProjectKey
+	var initiativeID *int64
+	if scope.InitiativeKey != "" {
+		initiative, err = service.Store.GetInitiativeByWorkspaceKey(ctx, workspace.ID, scope.InitiativeKey)
+		if err != nil {
+			return WorkItem{}, err
+		}
+		initiativeID = &initiative.ID
+	}
+	if projectKey == "" && initiative.LinkedProjectID != nil {
+		project, err := service.Store.GetProject(ctx, *initiative.LinkedProjectID)
+		if err != nil {
+			return WorkItem{}, err
+		}
+		projectKey = project.Key
+	}
 	if projectKey == "" {
 		projectKey = "odin-core"
 	}
@@ -35,27 +51,14 @@ func (service Service) Create(ctx context.Context, scope controlscope.ControlSco
 		return WorkItem{}, err
 	}
 
-	var initiativeID *int64
-	if scope.InitiativeKey != "" {
-		initiative, err := service.Store.GetInitiativeByKey(ctx, scope.InitiativeKey)
-		if err != nil {
-			return WorkItem{}, err
-		}
-		initiativeID = &initiative.ID
-	}
-
 	var companionID *int64
 	if scope.CompanionKey != "" {
-		companion, err := service.Store.GetCompanionByKey(ctx, scope.CompanionKey)
+		companion, err := service.Store.GetCompanionByWorkspaceKey(ctx, workspace.ID, scope.CompanionKey)
 		if err != nil {
 			return WorkItem{}, err
 		}
 		companionID = &companion.ID
 	} else if initiativeID != nil {
-		initiative, err := service.Store.GetInitiativeByKey(ctx, scope.InitiativeKey)
-		if err != nil {
-			return WorkItem{}, err
-		}
 		companionID = initiative.OwnerCompanionID
 	}
 
@@ -94,7 +97,15 @@ func (service Service) LinkCompanion(ctx context.Context, workItemID int64, comp
 	if service.Store == nil {
 		return WorkItem{}, fmt.Errorf("work item store is required")
 	}
-	companion, err := service.Store.GetCompanionByKey(ctx, companionKey)
+	workItem, err := service.Get(ctx, workItemID)
+	if err != nil {
+		return WorkItem{}, err
+	}
+	workspace, err := service.Store.GetWorkspaceByKey(ctx, workItem.WorkspaceKey)
+	if err != nil {
+		return WorkItem{}, err
+	}
+	companion, err := service.Store.GetCompanionByWorkspaceKey(ctx, workspace.ID, companionKey)
 	if err != nil {
 		return WorkItem{}, err
 	}

@@ -7,7 +7,6 @@ import (
 
 	"odin-os/internal/core/companions"
 	"odin-os/internal/core/controlscope"
-	"odin-os/internal/core/initiatives"
 	"odin-os/internal/core/workspaces"
 	"odin-os/internal/store/sqlite"
 )
@@ -51,21 +50,18 @@ func TestWorkItemCreateFromInitiativeContext(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BootstrapDefault() error = %v", err)
 	}
-	if _, err := bootstrapWorkItemProjects(ctx, store); err != nil {
+	projectKeys, err := bootstrapWorkItemProjects(ctx, store)
+	if err != nil {
 		t.Fatalf("bootstrapWorkItemProjects() error = %v", err)
 	}
-
-	initiativeService := initiatives.Service{Store: store}
-	initiative, err := initiativeService.Create(ctx, initiatives.CreateInput{
-		WorkspaceID: workspace.ID,
-		Key:         "ops",
-		Title:       "Ops",
-		Kind:        initiatives.KindManagedProject,
-		Status:      initiatives.StatusActive,
-		Summary:     "Ops initiative",
-	})
+	project, err := store.GetProjectByKey(ctx, projectKeys["alpha"])
 	if err != nil {
-		t.Fatalf("Create() error = %v", err)
+		t.Fatalf("GetProjectByKey(alpha) error = %v", err)
+	}
+
+	initiative, err := store.GetInitiativeByProjectID(ctx, project.ID)
+	if err != nil {
+		t.Fatalf("GetInitiativeByProjectID() error = %v", err)
 	}
 
 	service := Service{Store: store}
@@ -76,6 +72,9 @@ func TestWorkItemCreateFromInitiativeContext(t *testing.T) {
 
 	if workItem.Scope.SubjectType != controlscope.SubjectTypeInitiative {
 		t.Fatalf("Scope.SubjectType = %q, want %q", workItem.Scope.SubjectType, controlscope.SubjectTypeInitiative)
+	}
+	if workItem.ProjectKey != "alpha" {
+		t.Fatalf("ProjectKey = %q, want %q", workItem.ProjectKey, "alpha")
 	}
 }
 
@@ -128,6 +127,85 @@ func TestWorkItemLinkCompanionAndProject(t *testing.T) {
 	}
 	if project.Scope.SubjectKey != workspace.Key {
 		t.Fatalf("LinkProject().Scope.SubjectKey = %q, want %q", project.Scope.SubjectKey, workspace.Key)
+	}
+}
+
+func TestWorkItemLinkCompanionUsesWorkItemWorkspace(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openWorkItemStore(t)
+	defer store.Close()
+
+	workspaceService := workspaces.Service{Store: store}
+	workspace, err := workspaceService.BootstrapDefault(ctx)
+	if err != nil {
+		t.Fatalf("BootstrapDefault() error = %v", err)
+	}
+	if _, err := bootstrapWorkItemProjects(ctx, store); err != nil {
+		t.Fatalf("bootstrapWorkItemProjects() error = %v", err)
+	}
+
+	otherWorkspace, err := store.CreateWorkspace(ctx, sqlite.CreateWorkspaceParams{
+		Key:      "ops",
+		Name:     "Ops Workspace",
+		OwnerRef: "marcus",
+		Status:   "active",
+	})
+	if err != nil {
+		t.Fatalf("CreateWorkspace() error = %v", err)
+	}
+
+	primaryCompanion, err := store.CreateCompanion(ctx, sqlite.CreateCompanionParams{
+		WorkspaceID:         workspace.ID,
+		Key:                 "operator",
+		Title:               "Workspace Operator",
+		Kind:                companions.KindOperator,
+		Charter:             "Default workspace operator.",
+		Status:              companions.StatusActive,
+		InitiativeScopeJSON: `{"mode":"all"}`,
+		ToolPolicyJSON:      `{"mode":"deny","allowed":[]}`,
+		MemoryPolicyJSON:    `{"retention":"workspace"}`,
+		PlanningPolicyJSON:  `{"mode":"stepwise"}`,
+	})
+	if err != nil {
+		t.Fatalf("CreateCompanion(primary) error = %v", err)
+	}
+	if _, err := store.CreateCompanion(ctx, sqlite.CreateCompanionParams{
+		WorkspaceID:         otherWorkspace.ID,
+		Key:                 "operator",
+		Title:               "Other Operator",
+		Kind:                companions.KindOperator,
+		Charter:             "Other workspace operator.",
+		Status:              companions.StatusActive,
+		InitiativeScopeJSON: `{"mode":"all"}`,
+		ToolPolicyJSON:      `{"mode":"deny","allowed":[]}`,
+		MemoryPolicyJSON:    `{"retention":"workspace"}`,
+		PlanningPolicyJSON:  `{"mode":"stepwise"}`,
+	}); err != nil {
+		t.Fatalf("CreateCompanion(other) error = %v", err)
+	}
+
+	service := Service{Store: store}
+	workItem, err := service.Create(ctx, controlscope.Service{}.ResolveWorkspace(workspace.Key), "Workspace follow-up")
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+
+	linked, err := service.LinkCompanion(ctx, workItem.ID, primaryCompanion.Key)
+	if err != nil {
+		t.Fatalf("LinkCompanion() error = %v", err)
+	}
+	if linked.CompanionKey != primaryCompanion.Key {
+		t.Fatalf("LinkCompanion().CompanionKey = %q, want %q", linked.CompanionKey, primaryCompanion.Key)
+	}
+
+	stored, err := store.GetTask(ctx, workItem.ID)
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
+	}
+	if stored.CompanionID == nil || *stored.CompanionID != primaryCompanion.ID {
+		t.Fatalf("GetTask().CompanionID = %v, want %d", stored.CompanionID, primaryCompanion.ID)
 	}
 }
 
