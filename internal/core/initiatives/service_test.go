@@ -74,6 +74,118 @@ func TestInitiativeServiceReconcilesManagedProjectInitiative(t *testing.T) {
 	}
 }
 
+func TestInitiativeServiceUpsertsAndListsNonProjectInitiatives(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openInitiativeServiceStore(t)
+	defer store.Close()
+
+	workspace := createInitiativeServiceWorkspace(t, ctx, store, "default")
+	service := Service{Store: store}
+
+	created, err := service.UpsertNonProject(ctx, workspace.ID, UpsertInput{
+		Key:    "life-admin",
+		Title:  "Life Admin",
+		Kind:   KindRoutine,
+		Status: "",
+	})
+	if err != nil {
+		t.Fatalf("UpsertNonProject() error = %v", err)
+	}
+	if created.Kind != KindRoutine {
+		t.Fatalf("created.Kind = %q, want %q", created.Kind, KindRoutine)
+	}
+	if created.Status != statusActive {
+		t.Fatalf("created.Status = %q, want %q", created.Status, statusActive)
+	}
+	if created.LinkedProjectID != nil {
+		t.Fatalf("created.LinkedProjectID = %v, want nil", created.LinkedProjectID)
+	}
+
+	again, err := service.UpsertNonProject(ctx, workspace.ID, UpsertInput{
+		Key:    "life-admin",
+		Title:  "Life Admin",
+		Kind:   KindRoutine,
+		Status: statusActive,
+	})
+	if err != nil {
+		t.Fatalf("UpsertNonProject() second call error = %v", err)
+	}
+	if again.ID != created.ID {
+		t.Fatalf("again.ID = %d, want %d", again.ID, created.ID)
+	}
+
+	initiatives, err := service.ListInitiatives(ctx, workspace.ID)
+	if err != nil {
+		t.Fatalf("ListInitiatives() error = %v", err)
+	}
+	if len(initiatives) != 1 {
+		t.Fatalf("ListInitiatives() len = %d, want 1", len(initiatives))
+	}
+	if initiatives[0].Key != "life-admin" {
+		t.Fatalf("ListInitiatives()[0].Key = %q, want life-admin", initiatives[0].Key)
+	}
+	if initiatives[0].Kind != KindRoutine {
+		t.Fatalf("ListInitiatives()[0].Kind = %q, want %q", initiatives[0].Kind, KindRoutine)
+	}
+}
+
+func TestInitiativeServicePausesAndArchivesInitiatives(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openInitiativeServiceStore(t)
+	defer store.Close()
+
+	workspace := createInitiativeServiceWorkspace(t, ctx, store, "default")
+	service := Service{Store: store}
+
+	created, err := service.UpsertNonProject(ctx, workspace.ID, UpsertInput{
+		Key:   "life-admin",
+		Title: "Life Admin",
+		Kind:  KindRoutine,
+	})
+	if err != nil {
+		t.Fatalf("UpsertNonProject() error = %v", err)
+	}
+
+	paused, err := service.PauseInitiative(ctx, workspace.ID, created.Key)
+	if err != nil {
+		t.Fatalf("PauseInitiative() error = %v", err)
+	}
+	if paused.Status != statusPaused {
+		t.Fatalf("PauseInitiative().Status = %q, want %q", paused.Status, statusPaused)
+	}
+
+	archived, err := service.ArchiveInitiative(ctx, workspace.ID, created.Key)
+	if err != nil {
+		t.Fatalf("ArchiveInitiative() error = %v", err)
+	}
+	if archived.Status != statusArchived {
+		t.Fatalf("ArchiveInitiative().Status = %q, want %q", archived.Status, statusArchived)
+	}
+}
+
+func TestInitiativeServiceRejectsManagedProjectKinds(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openInitiativeServiceStore(t)
+	defer store.Close()
+
+	workspace := createInitiativeServiceWorkspace(t, ctx, store, "default")
+	service := Service{Store: store}
+
+	if _, err := service.UpsertNonProject(ctx, workspace.ID, UpsertInput{
+		Key:   "life-admin",
+		Title: "Life Admin",
+		Kind:  KindManagedProject,
+	}); err == nil {
+		t.Fatal("UpsertNonProject() error = nil, want managed project rejection")
+	}
+}
+
 func openInitiativeServiceStore(t *testing.T) *sqlite.Store {
 	t.Helper()
 

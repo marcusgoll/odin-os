@@ -68,6 +68,11 @@ type UpsertInitiativeParams struct {
 	LinkedProjectID  *int64
 }
 
+type UpdateInitiativeStatusParams struct {
+	InitiativeID int64
+	Status       string
+}
+
 type UpsertCompanionParams struct {
 	WorkspaceID         int64
 	Key                 string

@@ -84,6 +84,29 @@ func TestWorkspaceRefactorAcceptance(t *testing.T) {
 		}
 	})
 
+	t.Run("initiative lifecycle commands manage non-project work", func(t *testing.T) {
+		runtimeRoot := t.TempDir()
+
+		createOutput, err := runOdinCommand(t, repoRoot, odinBinary, runtimeRoot, nil, "", "initiative", "create", "--kind", "routine", "--key", "life-admin", "--title", "Life Admin")
+		if err != nil {
+			t.Fatalf("runOdinCommand(initiative create) error = %v\n%s", err, createOutput)
+		}
+		if !strings.Contains(createOutput, "life-admin") {
+			t.Fatalf("initiative create output = %q, want life-admin", createOutput)
+		}
+
+		listOutput, err := runOdinCommand(t, repoRoot, odinBinary, runtimeRoot, nil, "", "initiative", "list", "--json")
+		if err != nil {
+			t.Fatalf("runOdinCommand(initiative list --json) error = %v\n%s", err, listOutput)
+		}
+		if !strings.Contains(listOutput, `"key": "life-admin"`) {
+			t.Fatalf("initiative list output = %q, want life-admin entry", listOutput)
+		}
+		if !strings.Contains(listOutput, `"kind": "routine"`) {
+			t.Fatalf("initiative list output = %q, want routine kind", listOutput)
+		}
+	})
+
 	t.Run("a companion can own a work item", func(t *testing.T) {
 		runtimeRoot := t.TempDir()
 		output, err := runOdinCommand(t, repoRoot, odinBinary, runtimeRoot, nil, "/project odin-core\n/mode act\nworkspace acceptance work item\n/quit\n", "repl")

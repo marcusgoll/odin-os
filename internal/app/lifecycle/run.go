@@ -25,7 +25,9 @@ import (
 	"odin-os/internal/cli/scope"
 	clistate "odin-os/internal/cli/state"
 	"odin-os/internal/core/capabilities"
+	"odin-os/internal/core/initiatives"
 	"odin-os/internal/core/projects"
+	"odin-os/internal/core/workspaces"
 	conversationsvc "odin-os/internal/runtime/conversation"
 	runtimeevents "odin-os/internal/runtime/events"
 	healthsvc "odin-os/internal/runtime/health"
@@ -43,7 +45,7 @@ import (
 
 var errRuntimeNotReady = errors.New("runtime not ready")
 
-const rootUsageBanner = "Usage: odin <command> [args]\n\nCommands: help repl doctor healthcheck serve backup restore verify-backup status project scope jobs runs approvals logs task transition skills"
+const rootUsageBanner = "Usage: odin <command> [args]\n\nCommands: help repl doctor healthcheck serve backup restore verify-backup status project scope jobs runs approvals logs task initiative transition skills"
 
 var (
 	serveTaskLoopInterval     = 1 * time.Second
@@ -118,6 +120,8 @@ func Run(ctx context.Context, root string, args []string, stdin io.Reader, stdou
 		return runLogs(ctx, app, rootCommand.Args, stdout)
 	case "task":
 		return runTask(ctx, app, rootCommand.Args, stdout)
+	case "initiative":
+		return runInitiative(ctx, app, rootCommand.Args, stdout)
 	case "transition":
 		return runTransition(ctx, app, rootCommand.Args, stdout)
 	case "skills":
@@ -466,6 +470,79 @@ func runTask(ctx context.Context, app bootstrap.App, args []string, stdout io.Wr
 		}
 	}
 	return commands.WriteJSON(stdout, payload)
+}
+
+func runInitiative(ctx context.Context, app bootstrap.App, args []string, stdout io.Writer) error {
+	command, err := commands.ParseInitiative(args)
+	if err != nil {
+		return err
+	}
+
+	workspace, err := workspaces.Service{Store: app.Store}.BootstrapDefaultWorkspace(ctx)
+	if err != nil {
+		return err
+	}
+
+	service := initiatives.Service{Store: app.Store}
+
+	switch command.Name {
+	case "create":
+		initiative, err := service.UpsertNonProject(ctx, workspace.ID, initiatives.UpsertInput{
+			Key:   command.Key,
+			Title: command.Title,
+			Kind:  initiatives.Kind(command.Kind),
+		})
+		if err != nil {
+			return err
+		}
+
+		view := commands.InitiativeView{
+			ID:      initiative.ID,
+			Key:     initiative.Key,
+			Title:   initiative.Title,
+			Kind:    string(initiative.Kind),
+			Status:  initiative.Status,
+			Summary: initiative.Summary,
+		}
+		if command.JSON {
+			return commands.WriteJSON(stdout, view)
+		}
+		_, err = fmt.Fprintf(stdout, "created initiative key=%s kind=%s status=%s\n", view.Key, view.Kind, view.Status)
+		return err
+	case "list":
+		initiativesList, err := service.ListInitiatives(ctx, workspace.ID)
+		if err != nil {
+			return err
+		}
+
+		views := make([]commands.InitiativeView, 0, len(initiativesList))
+		for _, initiative := range initiativesList {
+			views = append(views, commands.InitiativeView{
+				ID:      initiative.ID,
+				Key:     initiative.Key,
+				Title:   initiative.Title,
+				Kind:    string(initiative.Kind),
+				Status:  initiative.Status,
+				Summary: initiative.Summary,
+			})
+		}
+
+		if command.JSON {
+			return commands.WriteJSON(stdout, commands.InitiativeListView{Initiatives: views})
+		}
+		if len(views) == 0 {
+			_, err := fmt.Fprintln(stdout, "no initiatives")
+			return err
+		}
+		for _, view := range views {
+			if _, err := fmt.Fprintf(stdout, "%s kind=%s status=%s title=%s\n", view.Key, view.Kind, view.Status, view.Title); err != nil {
+				return err
+			}
+		}
+		return nil
+	default:
+		return fmt.Errorf("unsupported initiative subcommand: %s", command.Name)
+	}
 }
 
 func runTransition(ctx context.Context, app bootstrap.App, args []string, stdout io.Writer) error {

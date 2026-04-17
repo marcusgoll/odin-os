@@ -2698,6 +2698,59 @@ func (store *Store) GetInitiativeByKey(ctx context.Context, workspaceID int64, k
 	return scanInitiative(row)
 }
 
+func (store *Store) ListInitiativesByWorkspace(ctx context.Context, workspaceID int64) ([]Initiative, error) {
+	rows, err := store.db.QueryContext(ctx, `
+		SELECT id, workspace_id, key, title, kind, status, summary, owner_companion_id, linked_project_id, created_at, updated_at
+		FROM initiatives
+		WHERE workspace_id = ?
+		ORDER BY id ASC
+	`, workspaceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var initiatives []Initiative
+	for rows.Next() {
+		record, err := scanInitiative(rows)
+		if err != nil {
+			return nil, err
+		}
+		initiatives = append(initiatives, record)
+	}
+
+	return initiatives, rows.Err()
+}
+
+func (store *Store) UpdateInitiativeStatus(ctx context.Context, params UpdateInitiativeStatusParams) (Initiative, error) {
+	now := store.now()
+	var initiative Initiative
+
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE initiatives
+			SET status = ?, updated_at = ?
+			WHERE id = ?
+		`, params.Status, formatTime(now), params.InitiativeID); err != nil {
+			return err
+		}
+
+		record, err := scanInitiative(tx.QueryRowContext(ctx, `
+			SELECT id, workspace_id, key, title, kind, status, summary, owner_companion_id, linked_project_id, created_at, updated_at
+			FROM initiatives
+			WHERE id = ?
+		`, params.InitiativeID))
+		if err != nil {
+			return err
+		}
+
+		initiative = record
+		return nil
+	})
+
+	return initiative, err
+}
+
 func (store *Store) GetCompanionByKey(ctx context.Context, workspaceID int64, key string) (Companion, error) {
 	row := store.db.QueryRowContext(ctx, `
 		SELECT
