@@ -238,9 +238,6 @@ func classifyCheck(check Check) (*Finding, *RootCause, *Recommendation, string, 
 	if !ok {
 		return nil, nil, nil, "", ""
 	}
-	if rule.Severity == "" {
-		return nil, nil, nil, "", ""
-	}
 	finding := &Finding{
 		Area:         check.Name,
 		Severity:     rule.Severity,
@@ -264,7 +261,7 @@ func classifyCheck(check Check) (*Finding, *RootCause, *Recommendation, string, 
 func lookupReportRule(check Check) (reportRule, bool) {
 	rules, ok := operatorReportRules[check.Name]
 	if !ok {
-		return defaultReportRule(check), check.Status == StatusFailed || check.Status == StatusDegraded
+		return unmappedReportRule(check), check.Status == StatusFailed || check.Status == StatusDegraded
 	}
 
 	rule, ok := rules[reportRuleKey{Status: check.Status, Summary: check.Summary}]
@@ -273,7 +270,7 @@ func lookupReportRule(check Check) (reportRule, bool) {
 	}
 
 	if check.Status == StatusFailed || check.Status == StatusDegraded {
-		return defaultReportRule(check), true
+		return unmappedReportRule(check), true
 	}
 	return reportRule{}, false
 }
@@ -289,19 +286,20 @@ func verdictSummary(status Status) string {
 	}
 }
 
-func defaultReportRule(check Check) reportRule {
+func unmappedReportRule(check Check) reportRule {
 	rule := reportRule{
-		Confidence:     "high",
-		WhyItMatters:   "this subsystem is part of the runtime health contract",
-		Recommendation: "inspect " + check.Name,
+		Confidence:   "reduced",
+		WhyItMatters: "operator mapping is missing for this health check and needs to be added",
 	}
 
 	switch check.Status {
 	case StatusFailed:
 		rule.Severity = SeverityHigh
+		rule.Recommendation = "add an explicit operator mapping for " + check.Name
 		rule.RecommendationSet = "immediate"
 	case StatusDegraded:
 		rule.Severity = SeverityMedium
+		rule.Recommendation = "add an explicit operator mapping for " + check.Name
 		rule.RecommendationSet = "near-term"
 	}
 

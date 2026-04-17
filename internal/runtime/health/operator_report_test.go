@@ -84,3 +84,34 @@ func TestBuildOperatorReportUsesExplicitStaleMapping(t *testing.T) {
 		t.Fatalf("Immediate recommendations = %#v, want rebuild source freshness records", got.Recommendations.Immediate)
 	}
 }
+
+func TestBuildOperatorReportUsesExplicitUnmappedFallbackForUnknownChecks(t *testing.T) {
+	raw := Report{
+		Status: StatusFailed,
+		Checks: []Check{
+			{Name: "cache", Status: StatusFailed, Summary: "cache shard unavailable"},
+			{Name: "search", Status: StatusDegraded, Summary: "search latency elevated"},
+		},
+	}
+
+	got := BuildOperatorReport(raw)
+
+	if len(got.Findings) != 2 {
+		t.Fatalf("Findings len = %d, want 2", len(got.Findings))
+	}
+	if got.Findings[0].Area != "cache" || got.Findings[0].Observation != "cache shard unavailable" || got.Findings[0].Confidence != "reduced" {
+		t.Fatalf("first finding = %+v, want explicit unmapped failed cache finding", got.Findings[0])
+	}
+	if got.Findings[1].Area != "search" || got.Findings[1].Observation != "search latency elevated" || got.Findings[1].Confidence != "reduced" {
+		t.Fatalf("second finding = %+v, want explicit unmapped degraded search finding", got.Findings[1])
+	}
+	if len(got.Recommendations.Immediate) != 1 || got.Recommendations.Immediate[0].Action != "add an explicit operator mapping for cache" {
+		t.Fatalf("Immediate recommendations = %#v, want explicit cache mapping recommendation", got.Recommendations.Immediate)
+	}
+	if len(got.Recommendations.NearTerm) != 1 || got.Recommendations.NearTerm[0].Action != "add an explicit operator mapping for search" {
+		t.Fatalf("NearTerm recommendations = %#v, want explicit search mapping recommendation", got.Recommendations.NearTerm)
+	}
+	if len(got.MissingTelemetry) != 0 {
+		t.Fatalf("MissingTelemetry = %#v, want none for unmapped checks", got.MissingTelemetry)
+	}
+}
