@@ -417,7 +417,7 @@ func TestAlphaAcceptance(t *testing.T) {
 			t.Fatalf("LoadConfig() error = %v", err)
 		}
 		selector := executorrouter.Selector{
-			Config:    cfg,
+			Config: cfg,
 			Executors: map[string]contract.Executor{
 				"codex_headless": contract.NewStaticExecutor(
 					"codex_headless",

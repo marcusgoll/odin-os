@@ -84,10 +84,10 @@ func TestMemoryMigrationBootstrapScriptBackfillsScopedOwnership(t *testing.T) {
 	}
 
 	if _, err := store.RecordMemorySummary(ctx, sqlite.RecordMemorySummaryParams{
-		Scope:      "global",
-		ScopeKey:   "global",
-		MemoryType: "user_preference",
-		Summary:    "Prefer concise replies.",
+		Scope:       "global",
+		ScopeKey:    "global",
+		MemoryType:  "user_preference",
+		Summary:     "Prefer concise replies.",
 		DetailsJSON: `{"source":"test"}`,
 	}); err != nil {
 		t.Fatalf("RecordMemorySummary(global) error = %v", err)
@@ -222,11 +222,11 @@ func TestMemoryMigrationBootstrapScriptBackfillsScopedOwnership(t *testing.T) {
 	}
 
 	projectEpisodes, err := reopened.ListMemorySummaries(ctx, sqlite.ListMemorySummariesParams{
-		ProjectID: &projectID,
-		TaskID:    &taskID,
-		RunID:     &runID,
-		Scope:     "project",
-		ScopeKey:  project.Key,
+		ProjectID:  &projectID,
+		TaskID:     &taskID,
+		RunID:      &runID,
+		Scope:      "project",
+		ScopeKey:   project.Key,
 		MemoryType: "episode",
 	})
 	if err != nil {

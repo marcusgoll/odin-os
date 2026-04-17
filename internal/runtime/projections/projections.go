@@ -165,9 +165,9 @@ type CompanionMemoryView struct {
 }
 
 type CompanionMemoryQuery struct {
-	WorkspaceID  *int64
-	CompanionID  *int64
-	Limit        int
+	WorkspaceID *int64
+	CompanionID *int64
+	Limit       int
 }
 
 type LearningProposalView struct {
