@@ -2,7 +2,7 @@
 title: Odin OS
 phase: "17"
 status: active
-updated: 2026-04-09
+updated: 2026-04-17
 ---
 
 # Odin OS
@@ -27,6 +27,7 @@ This repository is the runtime root. `odin-orchestrator` is a migration source o
 - `docs/adr/0002-migration-policy.md` defines how legacy assets from `odin-orchestrator` are classified and moved into this repo.
 - `docs/contracts/repo-layout.md` defines package and folder responsibilities.
 - `docs/contracts/phase-exit-criteria.md` defines the acceptance gate for Phase 00 and the baseline gate every later phase must satisfy.
+- `docs/contracts/verification-model.md` defines how Odin proves behavior across unit, contract, integration, and real `odin` command execution.
 
 ## Current Status
 
@@ -43,3 +44,20 @@ odin
 ```
 
 This installs a symlink at `~/.local/bin/odin` pointing to this repo's built binary. Remove it with `make uninstall-local`.
+
+## Contribution Workflow
+
+Before opening a pull request:
+
+- read `docs/contracts/verification-model.md`
+- prefer `make ci` to mirror the local CI verification stack
+- run additional targeted commands when the change needs narrower iteration than `make ci`
+- if the change affects user-visible or orchestration-facing behavior, run the real repo-owned `odin` command path against a controlled `ODIN_ROOT`
+
+Pull requests are expected to use the repo template and report:
+
+- `Proven`
+- `Unproven`
+- `Commands Run`
+
+On `pull_request` events, CI validates that the PR body includes those sections and, for operator-visible changes, includes real `odin` command evidence.

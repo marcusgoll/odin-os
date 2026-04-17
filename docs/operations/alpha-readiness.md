@@ -2,6 +2,8 @@
 
 Odin OS is ready for cautious alpha dogfooding when the checks below stay true in the current repo and runtime root.
 
+Proof expectations follow [docs/contracts/verification-model.md](/home/orchestrator/odin-os/docs/contracts/verification-model.md). Passing internal tests alone is not sufficient evidence for operator-visible behavior.
+
 ## Resolved blockers
 
 - Fresh runtimes no longer stay degraded by default. Bootstrap now records registry freshness, executor health, and baseline projection freshness so `odin healthcheck` can succeed on a clean `ODIN_ROOT`.
@@ -20,6 +22,7 @@ Odin OS is ready for cautious alpha dogfooding when the checks below stay true i
 - `odin doctor --json` returns structured output and shows healthy or honestly degraded state.
 - `odin serve` can restart cleanly and produce restart wake packets for interrupted work.
 - Backup, verify, and restore succeed against the current runtime root.
+- Alpha verification notes clearly distinguish what was proven by real `odin` commands versus what remains unproven.
 - `odin-core` stays governed as a system project and mutating work is denied without explicit approval.
 - Any external project used in alpha is explicitly registered and kept in `shadow` mode unless an audited transition says otherwise.
 - Any project allowed to mutate is in `cutover` or an explicitly allowlisted `limited_action` state.
