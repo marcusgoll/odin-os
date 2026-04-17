@@ -23,15 +23,13 @@ func TestWorkspaceRefactorAcceptance(t *testing.T) {
 	t.Run("workspace exists after bootstrap", func(t *testing.T) {
 		runtimeRoot := t.TempDir()
 
-		output, err := runOdinCommand(t, repoRoot, odinBinary, runtimeRoot, nil, "", "healthcheck")
+		app, err := bootstrap.Load(ctx, repoRoot, runtimeRoot)
 		if err != nil {
-			t.Fatalf("runOdinCommand(healthcheck) error = %v\n%s", err, output)
+			t.Fatalf("bootstrap.Load() error = %v", err)
 		}
+		defer app.Store.Close()
 
-		store := openRuntimeStore(t, runtimeRoot)
-		defer store.Close()
-
-		workspace, err := store.GetWorkspaceByKey(ctx, workspaces.DefaultWorkspaceKey)
+		workspace, err := app.Store.GetWorkspaceByKey(ctx, workspaces.DefaultWorkspaceKey)
 		if err != nil {
 			t.Fatalf("GetWorkspaceByKey(default) error = %v", err)
 		}
@@ -39,7 +37,7 @@ func TestWorkspaceRefactorAcceptance(t *testing.T) {
 			t.Fatalf("GetWorkspaceByKey(default).DefaultCompanionKey = %q, want %q", workspace.DefaultCompanionKey, workspaces.DefaultWorkspaceCompanionKey)
 		}
 
-		companion, err := store.GetCompanionByKey(ctx, workspace.ID, workspace.DefaultCompanionKey)
+		companion, err := app.Store.GetCompanionByKey(ctx, workspace.ID, workspace.DefaultCompanionKey)
 		if err != nil {
 			t.Fatalf("GetCompanionByKey(default) error = %v", err)
 		}
@@ -88,7 +86,7 @@ func TestWorkspaceRefactorAcceptance(t *testing.T) {
 
 	t.Run("a companion can own a work item", func(t *testing.T) {
 		runtimeRoot := t.TempDir()
-		output, err := runOdinCommand(t, repoRoot, odinBinary, runtimeRoot, nil, "/project odin-core\n/mode act\nworkspace acceptance work item\n/quit\n")
+		output, err := runOdinCommand(t, repoRoot, odinBinary, runtimeRoot, nil, "/project odin-core\n/mode act\nworkspace acceptance work item\n/quit\n", "repl")
 		if err != nil {
 			t.Fatalf("runOdinCommand(interactive act) error = %v\n%s", err, output)
 		}

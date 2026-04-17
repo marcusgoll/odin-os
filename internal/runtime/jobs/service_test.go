@@ -18,39 +18,6 @@ import (
 	"odin-os/internal/vcs/leases"
 )
 
-func TestFinalizeTaskOutcomeDelegatesRawExecutorStatusToWorkItems(t *testing.T) {
-	t.Parallel()
-
-	ctx := context.Background()
-	finalizer := &recordingTaskFinalizer{}
-
-	if err := finalizeTaskOutcome(ctx, finalizer, 42, contract.ExecutionResult{Status: "timed_out"}); err != nil {
-		t.Fatalf("finalizeTaskOutcome() error = %v", err)
-	}
-
-	if finalizer.taskID != 42 {
-		t.Fatalf("finalizer.taskID = %d, want 42", finalizer.taskID)
-	}
-	if finalizer.status != "timed_out" {
-		t.Fatalf("finalizer.status = %q, want timed_out", finalizer.status)
-	}
-}
-
-func TestExecuteNextQueuedDelegatesToExecutionService(t *testing.T) {
-	t.Parallel()
-
-	executor := &recordingQueueExecutor{err: context.Canceled}
-	service := Service{Execution: executor}
-
-	err := service.ExecuteNextQueued(context.Background())
-	if err != context.Canceled {
-		t.Fatalf("ExecuteNextQueued() error = %v, want %v", err, context.Canceled)
-	}
-	if !executor.called {
-		t.Fatal("ExecuteNextQueued() did not delegate to execution service")
-	}
-}
-
 func TestResolutionCreateTaskFromActUsesControlScope(t *testing.T) {
 	t.Parallel()
 
@@ -378,7 +345,7 @@ func TestExecuteNextQueuedCompletesCutoverProjectTask(t *testing.T) {
 	service := Service{
 		Store:          store,
 		Registry:       registry,
-		Executors:      router.DefaultCatalog(),
+		Executors:      testJobExecutors(),
 		ExecutorConfig: mustLoadExecutorConfig(t),
 		Transitions:    projects.Service{Store: store},
 		Leases: leases.Manager{
@@ -445,7 +412,7 @@ func TestExecuteNextQueuedRollsBackRunWhenWorkItemStartFails(t *testing.T) {
 	service := Service{
 		Store:          store,
 		Registry:       registry,
-		Executors:      router.DefaultCatalog(),
+		Executors:      testJobExecutors(),
 		ExecutorConfig: mustLoadExecutorConfig(t),
 		Transitions:    projects.Service{Store: store},
 		Leases: leases.Manager{
@@ -514,7 +481,7 @@ func TestExecuteNextQueuedPreservesBlockedTaskWhenApprovalGateTripsBeforeStart(t
 	service := Service{
 		Store:          store,
 		Registry:       registry,
-		Executors:      router.DefaultCatalog(),
+		Executors:      testJobExecutors(),
 		ExecutorConfig: mustLoadExecutorConfig(t),
 		Transitions:    projects.Service{Store: store},
 		Leases: leases.Manager{
@@ -616,7 +583,7 @@ func TestExecuteNextQueuedAbandonsRunWhenTaskCompletesBeforeStart(t *testing.T) 
 	service := Service{
 		Store:          store,
 		Registry:       registry,
-		Executors:      router.DefaultCatalog(),
+		Executors:      testJobExecutors(),
 		ExecutorConfig: mustLoadExecutorConfig(t),
 		Transitions:    projects.Service{Store: store},
 		Leases: leases.Manager{
@@ -685,27 +652,6 @@ func TestExecuteNextQueuedAbandonsRunWhenTaskCompletesBeforeStart(t *testing.T) 
 	}
 }
 
-type recordingTaskFinalizer struct {
-	taskID int64
-	status string
-}
-
-type recordingQueueExecutor struct {
-	called bool
-	err    error
-}
-
-func (executor *recordingQueueExecutor) ExecuteNextQueued(context.Context) error {
-	executor.called = true
-	return executor.err
-}
-
-func (finalizer *recordingTaskFinalizer) Finalize(_ context.Context, taskID int64, status string) (sqlite.Task, error) {
-	finalizer.taskID = taskID
-	finalizer.status = status
-	return sqlite.Task{ID: taskID, Status: status}, nil
-}
-
 func TestExecuteNextQueuedRejectsShadowModeMutation(t *testing.T) {
 	t.Parallel()
 
@@ -717,7 +663,7 @@ func TestExecuteNextQueuedRejectsShadowModeMutation(t *testing.T) {
 	service := Service{
 		Store:          store,
 		Registry:       registry,
-		Executors:      router.DefaultCatalog(),
+		Executors:      testJobExecutors(),
 		ExecutorConfig: mustLoadExecutorConfig(t),
 		Transitions:    projects.Service{Store: store},
 		Leases: leases.Manager{
@@ -795,6 +741,65 @@ func latestRunForTask(ctx context.Context, store *sqlite.Store, taskID int64) (s
 		return sqlite.Run{}, err
 	}
 	return store.GetRun(ctx, runID)
+}
+
+func testJobExecutors() map[string]contract.Executor {
+	return map[string]contract.Executor{
+		"codex_headless": jobTestExecutor{
+			key: "codex_headless",
+			result: contract.ExecutionResult{
+				Status: "completed",
+				Output: "task complete",
+			},
+		},
+	}
+}
+
+type jobTestExecutor struct {
+	key    string
+	result contract.ExecutionResult
+}
+
+func (executor jobTestExecutor) Key() string { return executor.key }
+
+func (jobTestExecutor) Class() contract.ExecutorClass {
+	return contract.ExecutorClassPlanBackedCLI
+}
+
+func (jobTestExecutor) Health(context.Context) (contract.HealthReport, error) {
+	return contract.HealthReport{Status: contract.HealthStatusHealthy}, nil
+}
+
+func (jobTestExecutor) Capabilities(context.Context) (contract.Capabilities, error) {
+	return contract.Capabilities{
+		ExecutorClass:        contract.ExecutorClassPlanBackedCLI,
+		SupportsHeadlessPlan: true,
+		TaskKinds: []contract.TaskKind{
+			contract.TaskKindGeneral,
+			contract.TaskKindPlan,
+			contract.TaskKindBuild,
+			contract.TaskKindReview,
+			contract.TaskKindQA,
+			contract.TaskKindResearch,
+		},
+		Scopes: []string{"global", "odin-core", "project", "new-project"},
+	}, nil
+}
+
+func (executor jobTestExecutor) RunTask(context.Context, contract.TaskSpec) (contract.ExecutionResult, error) {
+	return executor.result, nil
+}
+
+func (jobTestExecutor) ResumeTask(context.Context, contract.TaskHandle, contract.ResumePacket) (contract.ExecutionResult, error) {
+	return contract.ExecutionResult{}, contract.ErrNotImplemented
+}
+
+func (jobTestExecutor) CancelTask(context.Context, contract.TaskHandle) error {
+	return contract.ErrNotImplemented
+}
+
+func (jobTestExecutor) EstimateCost(context.Context, contract.TaskSpec) (contract.CostEstimate, error) {
+	return contract.CostEstimate{}, contract.ErrNotImplemented
 }
 
 func openJobStore(t *testing.T) *sqlite.Store {

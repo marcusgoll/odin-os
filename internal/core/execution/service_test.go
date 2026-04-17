@@ -10,6 +10,7 @@ import (
 	"odin-os/internal/core/projects"
 	"odin-os/internal/core/workitems"
 	"odin-os/internal/core/workspaces"
+	"odin-os/internal/executors/contract"
 	"odin-os/internal/executors/router"
 	"odin-os/internal/store/sqlite"
 	"odin-os/internal/vcs/leases"
@@ -28,7 +29,7 @@ func TestExecuteNextQueuedCompletesCutoverProjectTask(t *testing.T) {
 	service := Service{
 		Store:          store,
 		Registry:       registry,
-		Executors:      router.DefaultCatalog(),
+		Executors:      testExecutionExecutors(),
 		ExecutorConfig: mustLoadExecutionConfig(t),
 		Governance:     projects.Service{Store: store},
 		WorkItems:      workitems.Service{Store: store},
@@ -74,7 +75,7 @@ func TestExecuteNextQueuedRejectsShadowModeMutation(t *testing.T) {
 	service := Service{
 		Store:          store,
 		Registry:       registry,
-		Executors:      router.DefaultCatalog(),
+		Executors:      testExecutionExecutors(),
 		ExecutorConfig: mustLoadExecutionConfig(t),
 		Governance:     projects.Service{Store: store},
 		WorkItems:      workitems.Service{Store: store},
@@ -121,7 +122,7 @@ func TestExecuteNextQueuedPreservesBlockedTaskWhenApprovalGateTripsBeforeStart(t
 	service := Service{
 		Store:          store,
 		Registry:       registry,
-		Executors:      router.DefaultCatalog(),
+		Executors:      testExecutionExecutors(),
 		ExecutorConfig: mustLoadExecutionConfig(t),
 		Governance:     projects.Service{Store: store},
 		WorkItems:      workitems.Service{Store: store},
@@ -334,4 +335,63 @@ func mustLoadExecutionConfig(t *testing.T) router.Config {
 		t.Fatalf("LoadConfig(executors) error = %v", err)
 	}
 	return cfg
+}
+
+func testExecutionExecutors() map[string]contract.Executor {
+	return map[string]contract.Executor{
+		"codex_headless": executionTestExecutor{
+			key: "codex_headless",
+			result: contract.ExecutionResult{
+				Status: "completed",
+				Output: "task complete",
+			},
+		},
+	}
+}
+
+type executionTestExecutor struct {
+	key    string
+	result contract.ExecutionResult
+}
+
+func (executor executionTestExecutor) Key() string { return executor.key }
+
+func (executor executionTestExecutor) Class() contract.ExecutorClass {
+	return contract.ExecutorClassPlanBackedCLI
+}
+
+func (executor executionTestExecutor) Health(context.Context) (contract.HealthReport, error) {
+	return contract.HealthReport{Status: contract.HealthStatusHealthy}, nil
+}
+
+func (executor executionTestExecutor) Capabilities(context.Context) (contract.Capabilities, error) {
+	return contract.Capabilities{
+		ExecutorClass:        contract.ExecutorClassPlanBackedCLI,
+		SupportsHeadlessPlan: true,
+		TaskKinds: []contract.TaskKind{
+			contract.TaskKindGeneral,
+			contract.TaskKindPlan,
+			contract.TaskKindBuild,
+			contract.TaskKindReview,
+			contract.TaskKindQA,
+			contract.TaskKindResearch,
+		},
+		Scopes: []string{"global", "odin-core", "project", "new-project"},
+	}, nil
+}
+
+func (executor executionTestExecutor) RunTask(context.Context, contract.TaskSpec) (contract.ExecutionResult, error) {
+	return executor.result, nil
+}
+
+func (executionTestExecutor) ResumeTask(context.Context, contract.TaskHandle, contract.ResumePacket) (contract.ExecutionResult, error) {
+	return contract.ExecutionResult{}, contract.ErrNotImplemented
+}
+
+func (executionTestExecutor) CancelTask(context.Context, contract.TaskHandle) error {
+	return contract.ErrNotImplemented
+}
+
+func (executionTestExecutor) EstimateCost(context.Context, contract.TaskSpec) (contract.CostEstimate, error) {
+	return contract.CostEstimate{}, contract.ErrNotImplemented
 }

@@ -1,8 +1,10 @@
 package planner
 
 import (
+	"context"
 	"fmt"
 
+	"odin-os/internal/skills"
 	"odin-os/internal/tools/broker"
 	"odin-os/internal/tools/catalog"
 )
@@ -54,16 +56,19 @@ type Selection struct {
 	Key               string
 	InvokeTool        bool
 	ToolInput         map[string]string
+	InvokeSkill       bool
+	SkillInput        map[string]any
 	AllowAgentRoleUse bool
 }
 
 type MaterializeInput struct {
-	Scope            string
-	Workspace        WorkspaceContext
-	Initiative       *InitiativeContext
-	Companion        *CompanionContext
-	MemoryReferences []MemoryReference
-	Selections       []Selection
+	Scope             string
+	Workspace         WorkspaceContext
+	Initiative        *InitiativeContext
+	Companion         *CompanionContext
+	MemoryReferences  []MemoryReference
+	InvocationContext skills.InvocationContext
+	Selections        []Selection
 }
 
 type ExecutionContext struct {
@@ -82,28 +87,36 @@ func (service Service) Prepare(input PrepareInput) (PlanContext, error) {
 		return PlanContext{}, fmt.Errorf("planner broker is required")
 	}
 
+	cards, err := service.Broker.Catalog(input.Scope)
+	if err != nil {
+		return PlanContext{}, err
+	}
 	return PlanContext{
 		Scope:            input.Scope,
 		Workspace:        input.Workspace,
 		Initiative:       cloneInitiativeContext(input.Initiative),
 		Companion:        cloneCompanionContext(input.Companion),
 		MemoryReferences: cloneMemoryReferences(input.MemoryReferences),
-		Cards:            service.Broker.Catalog(input.Scope),
+		Cards:            cards,
 	}, nil
 }
 
-func (service Service) Materialize(input MaterializeInput) (ExecutionContext, error) {
+func (service Service) Materialize(ctx context.Context, input MaterializeInput) (ExecutionContext, error) {
 	if service.Broker == nil {
 		return ExecutionContext{}, fmt.Errorf("planner broker is required")
 	}
 
-	context := ExecutionContext{
+	cards, err := service.Broker.Catalog(input.Scope)
+	if err != nil {
+		return ExecutionContext{}, err
+	}
+	result := ExecutionContext{
 		Scope:            input.Scope,
 		Workspace:        input.Workspace,
 		Initiative:       cloneInitiativeContext(input.Initiative),
 		Companion:        cloneCompanionContext(input.Companion),
 		MemoryReferences: cloneMemoryReferences(input.MemoryReferences),
-		Cards:            service.Broker.Catalog(input.Scope),
+		Cards:            cards,
 	}
 
 	for _, selection := range input.Selections {
@@ -115,25 +128,44 @@ func (service Service) Materialize(input MaterializeInput) (ExecutionContext, er
 			return ExecutionContext{}, fmt.Errorf("agent-role expansion requires explicit plan opt-in")
 		}
 
-		context.Expansions = append(context.Expansions, expansion)
+		result.Expansions = append(result.Expansions, expansion)
 
 		if selection.InvokeTool {
 			if expansion.Tool == nil {
 				return ExecutionContext{}, fmt.Errorf("capability %q is not a tool", selection.Key)
 			}
-			result, err := service.Broker.InvokeTool(selection.Key, selection.ToolInput)
+			structured, err := service.Broker.InvokeTool(selection.Key, selection.ToolInput)
 			if err != nil {
 				return ExecutionContext{}, err
 			}
-			compacted, err := service.Broker.Compact(result)
+			compacted, err := service.Broker.Compact(structured)
 			if err != nil {
 				return ExecutionContext{}, err
 			}
-			context.Compacted = append(context.Compacted, compacted)
+			result.Compacted = append(result.Compacted, compacted)
+		}
+
+		if selection.InvokeSkill {
+			if expansion.Skill == nil {
+				return ExecutionContext{}, fmt.Errorf("capability %q is not a skill", selection.Key)
+			}
+			structured, err := service.Broker.InvokeSkill(ctx, skills.InvokeRequest{
+				Key:     selection.Key,
+				Input:   selection.SkillInput,
+				Context: input.InvocationContext,
+			})
+			if err != nil {
+				return ExecutionContext{}, err
+			}
+			compacted, err := service.Broker.Compact(structured)
+			if err != nil {
+				return ExecutionContext{}, err
+			}
+			result.Compacted = append(result.Compacted, compacted)
 		}
 	}
 
-	return context, nil
+	return result, nil
 }
 
 func cloneInitiativeContext(input *InitiativeContext) *InitiativeContext {

@@ -43,6 +43,7 @@ type ToolDefinition struct {
 	Key        string
 	Title      string
 	Summary    string
+	Version    string
 	Scopes     []string
 	Tags       []string
 	CostHint   CostHint
@@ -53,28 +54,38 @@ type ToolDefinition struct {
 }
 
 type SkillDefinition struct {
-	Key       string
-	Title     string
-	Summary   string
-	Tags      []string
-	Scopes    []string
-	AppliesTo []string
-	Composes  []string
-	Sections  map[string]string
-	SourceRef string
+	Key            string
+	Title          string
+	Summary        string
+	Version        string
+	Enabled        bool
+	Tags           []string
+	Scopes         []string
+	AppliesTo      []string
+	Composes       []string
+	Permissions    []string
+	HandlerType    string
+	HandlerRef     string
+	TimeoutSeconds int
+	InputSchema    map[string]any
+	OutputSchema   map[string]any
+	Sections       map[string]string
+	SourceRef      string
 }
 
 type WorkflowDefinition struct {
-	Key        string
-	Title      string
-	Summary    string
-	Tags       []string
-	Scopes     []string
-	AppliesTo  []string
-	Composes   []string
-	Entrypoint string
-	Sections   map[string]string
-	SourceRef  string
+	Key          string
+	Title        string
+	Summary      string
+	Version      string
+	Tags         []string
+	Scopes       []string
+	AppliesTo    []string
+	Composes     []string
+	Entrypoint   string
+	Dependencies []registry.DependencyRef
+	Sections     map[string]string
+	SourceRef    string
 }
 
 type AgentRoleDefinition struct {
@@ -116,6 +127,7 @@ type Expansion struct {
 
 type StructuredResult struct {
 	CapabilityKey   string
+	Source          string
 	Summary         string
 	Artifacts       []string
 	KeyFacts        map[string]string
@@ -126,6 +138,7 @@ type StructuredResult struct {
 
 type CompactedResult struct {
 	CapabilityKey   string
+	Source          string
 	Summary         string
 	KeyFacts        map[string]string
 	FollowOnOptions []string
@@ -242,8 +255,35 @@ func CloneSections(sections map[string]string) map[string]string {
 	return cloned
 }
 
+func CloneAnyMap(values map[string]any) map[string]any {
+	if len(values) == 0 {
+		return nil
+	}
+
+	cloned := make(map[string]any, len(values))
+	for key, value := range values {
+		cloned[key] = cloneAnyValue(value)
+	}
+	return cloned
+}
+
+func cloneAnyValue(value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		return CloneAnyMap(typed)
+	case []any:
+		cloned := make([]any, len(typed))
+		for i := range typed {
+			cloned[i] = cloneAnyValue(typed[i])
+		}
+		return cloned
+	default:
+		return typed
+	}
+}
+
 func CompactedSize(result CompactedResult) int {
-	size := len(result.CapabilityKey) + len(result.Summary) + len(result.RawRef)
+	size := len(result.CapabilityKey) + len(result.Source) + len(result.Summary) + len(result.RawRef)
 	for key, value := range result.KeyFacts {
 		size += len(key) + len(value)
 	}

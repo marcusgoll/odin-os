@@ -86,6 +86,10 @@ Owns jobs, runs, execution lanes, run attempts, events, projections, health, rec
 
 Owns loading, parsing, validating, compiling, and watching authored registry assets. It translates Markdown-frontmatter content into runtime-usable forms but does not own the authored source itself.
 
+### `internal/skills`
+
+Owns canonical skill CRUD, rendering, reference checks, and runtime invocation against the registry-backed skill contract. It is the single lifecycle layer for skill maintenance and execution and should be reused by CLI, broker, and Codex-facing workflows.
+
 ### `internal/learning`
 
 Owns evaluators, proposals, promotion, and replay. It is the bounded self-improvement subsystem and must remain proposal-driven and reversible.

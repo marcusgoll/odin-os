@@ -131,7 +131,7 @@ func TestMigrateDeduplicatesPendingApprovalsBeforeAddingUniquenessIndex(t *testi
 	store := openMigrationBackfillStore(t)
 	defer store.Close()
 
-	for _, version := range []int{1, 11, 12, 13, 14} {
+	for version := 1; version <= 14; version++ {
 		migration, err := loadMigrationByVersion(version)
 		if err != nil {
 			t.Fatalf("loadMigrationByVersion(%d) error = %v", version, err)

@@ -13,3 +13,5 @@
 !/state/snapshots/.gitkeep
 /state/compiled/*
 !/state/compiled/.gitkeep
+/config/projects.local.yaml
+/registry/.skill-mutations.lock

@@ -40,6 +40,7 @@ Phase 03 through Phase 14 stream types are:
 - `learning_proposal`
 - `learning_evaluation`
 - `learning_promotion`
+- `skill`
 
 ## Event types
 
@@ -71,6 +72,7 @@ Phase 03 through Phase 14 event types are:
 - `learning.evaluation_recorded`
 - `learning.promotion_applied`
 - `learning.promotion_rolled_back`
+- `skill.lifecycle_recorded`
 
 ## Contract rules
 
@@ -124,3 +126,34 @@ Phase 11 extends the runtime event stream so deterministic self-heal actions are
 - incident status changes caused by self-heal must append explicit incident events
 - every bounded recovery action attempt must append `recovery.action_executed`
 - escalation must appear in both recovery state and incident state, not only in logs
+
+## Skill lifecycle expectation
+
+Skill CRUD and invocation now append `skill.lifecycle_recorded` events when they run through Odin's runtime app path.
+
+CRUD lifecycle events keep `scope=repo`. Invoke lifecycle events record the normalized runtime scope so project- and odin-core-scoped activity remains filterable alongside other runtime events.
+
+The payload must include enough information to reconstruct operator-visible skill activity:
+
+- `skill_key`
+- `operation`
+- `outcome`
+- optional `execution_profile`
+- `version`
+- `handler_type`
+- `handler_ref`
+- `permissions`
+- `duration_ms`
+- optional `error_code`
+- optional `error_text`
+
+Permission-gated invoke denials use stable `error_code` values so operators and tests can distinguish policy failures from generic handler failures:
+
+- `unknown_permission`
+- `mutation_requires_project_scope`
+- `transition_denied`
+- `approval_required`
+
+Because skill files live in the repo rather than SQLite, these events are appended immediately after the lifecycle action instead of sharing a SQL transaction with a row mutation. The repo remains the source of truth; the event stream is the auditable runtime trail.
+
+Allowed invokes record `execution_profile=restricted_command_v1`. Denied pre-exec invokes leave `execution_profile` empty so the event stream does not claim a wrapper profile that never ran.

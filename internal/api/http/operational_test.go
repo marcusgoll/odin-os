@@ -98,7 +98,7 @@ func TestOperationalHandlerExposesWorkspaceInitiativeCompanionAndBlockedReadMode
 	defer server.Close()
 
 	var workspace projections.WorkspaceOverviewView
-	decodeJSON(t, server.URL+"/workspace", &workspace)
+	decodeURLJSON(t, server.URL+"/workspace", &workspace)
 	if workspace.WorkspaceKey != "default" {
 		t.Fatalf("/workspace workspace_key = %q, want default", workspace.WorkspaceKey)
 	}
@@ -107,19 +107,19 @@ func TestOperationalHandlerExposesWorkspaceInitiativeCompanionAndBlockedReadMode
 	}
 
 	var initiatives []projections.InitiativePortfolioView
-	decodeJSON(t, server.URL+"/initiatives", &initiatives)
+	decodeURLJSON(t, server.URL+"/initiatives", &initiatives)
 	if len(initiatives) != 1 || initiatives[0].InitiativeKey != "alpha" {
 		t.Fatalf("/initiatives = %+v, want alpha initiative", initiatives)
 	}
 
 	var companions []projections.CompanionAssignmentView
-	decodeJSON(t, server.URL+"/companions", &companions)
+	decodeURLJSON(t, server.URL+"/companions", &companions)
 	if len(companions) != 1 || companions[0].CompanionKey != "primary" {
 		t.Fatalf("/companions = %+v, want primary companion", companions)
 	}
 
 	var blocked []projections.BlockedItemView
-	decodeJSON(t, server.URL+"/blocked", &blocked)
+	decodeURLJSON(t, server.URL+"/blocked", &blocked)
 	if len(blocked) != 1 || blocked[0].InitiativeKey == nil || *blocked[0].InitiativeKey != "alpha" {
 		t.Fatalf("/blocked = %+v, want blocked item for alpha", blocked)
 	}
@@ -187,7 +187,7 @@ func assertReportStatus(t *testing.T, url string, wantCode int, wantStatus strin
 	}
 }
 
-func decodeJSON(t *testing.T, url string, target any) {
+func decodeURLJSON(t *testing.T, url string, target any) {
 	t.Helper()
 
 	response, err := http.Get(url)

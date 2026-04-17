@@ -1,5 +1,6 @@
 version: 1
 
+# Adapter values are validated against the bootstrap executor catalog.
 models:
   - key: codex-latest
     provider: openai

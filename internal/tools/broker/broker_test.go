@@ -12,15 +12,19 @@ func TestCatalogReturnsThinCardsOnly(t *testing.T) {
 	t.Parallel()
 
 	broker := New(
-		testSnapshot(),
+		StaticSource(testSnapshot()),
 		catalog.BuiltinDefinitions(),
+		nil,
 		budgets.Limits{
 			Tool:    budgets.Tool{MaxSelections: 10, MaxInvocations: 10, MaxCostUnits: 20},
 			Context: budgets.Context{MaxExpandedDefinitions: 10, MaxCompactedResults: 10, MaxCompactedBytes: 1000},
 		},
 	)
 
-	cards := broker.Catalog("project")
+	cards, err := broker.Catalog("project")
+	if err != nil {
+		t.Fatalf("Catalog() error = %v", err)
+	}
 	if len(cards) == 0 {
 		t.Fatalf("Catalog() len = 0, want > 0")
 	}
@@ -36,8 +40,9 @@ func TestExpandReturnsFullSelectedDefinitionOnly(t *testing.T) {
 	t.Parallel()
 
 	broker := New(
-		testSnapshot(),
+		StaticSource(testSnapshot()),
 		catalog.BuiltinDefinitions(),
+		nil,
 		budgets.Limits{
 			Tool:    budgets.Tool{MaxSelections: 10, MaxInvocations: 10, MaxCostUnits: 20},
 			Context: budgets.Context{MaxExpandedDefinitions: 10, MaxCompactedResults: 10, MaxCompactedBytes: 1000},
@@ -63,8 +68,9 @@ func TestExpandReturnsWorkflowAgentRoleAndOperatorCommandDefinitions(t *testing.
 	t.Parallel()
 
 	broker := New(
-		testSnapshot(),
+		StaticSource(testSnapshot()),
 		catalog.BuiltinDefinitions(),
+		nil,
 		budgets.Limits{
 			Tool:    budgets.Tool{MaxSelections: 10, MaxInvocations: 10, MaxCostUnits: 20},
 			Context: budgets.Context{MaxExpandedDefinitions: 10, MaxCompactedResults: 10, MaxCompactedBytes: 1000},
@@ -109,8 +115,9 @@ func TestInvokeAndCompactRespectBudgets(t *testing.T) {
 	t.Parallel()
 
 	broker := New(
-		testSnapshot(),
+		StaticSource(testSnapshot()),
 		catalog.BuiltinDefinitions(),
+		nil,
 		budgets.Limits{
 			Tool:    budgets.Tool{MaxSelections: 10, MaxInvocations: 1, MaxCostUnits: 10},
 			Context: budgets.Context{MaxExpandedDefinitions: 10, MaxCompactedResults: 1, MaxCompactedBytes: 200},

@@ -15,7 +15,8 @@ import (
 var ErrTransitionDenied = errors.New("project transition denied")
 
 type Service struct {
-	Store *sqlite.Store
+	Store        *sqlite.Store
+	RecordDenied func(context.Context, int64, string, string) error
 }
 
 type TransitionStateInput struct {
@@ -53,6 +54,10 @@ func (service Service) SetTransitionState(ctx context.Context, input TransitionS
 	if service.Store == nil {
 		return sqlite.ProjectTransition{}, fmt.Errorf("transition store is required")
 	}
+	if !input.TargetState.Valid() {
+		reason := fmt.Sprintf("unsupported transition state %q", input.TargetState)
+		return sqlite.ProjectTransition{}, service.transitionDenied(ctx, input.ProjectID, string(ActionClassTransitionControl), reason)
+	}
 
 	current, found, err := service.loadTransition(ctx, input.ProjectID)
 	if err != nil {
@@ -62,8 +67,7 @@ func (service Service) SetTransitionState(ctx context.Context, input TransitionS
 	if !found {
 		decision := initialTransitionDecision(input.Actor, input.TargetState)
 		if !decision.Allowed {
-			_ = service.Store.RecordProjectTransitionDenied(ctx, input.ProjectID, string(ActionClassTransitionControl), decision.Reason)
-			return sqlite.ProjectTransition{}, fmt.Errorf("%w: %s", ErrTransitionDenied, decision.Reason)
+			return sqlite.ProjectTransition{}, service.transitionDenied(ctx, input.ProjectID, string(ActionClassTransitionControl), decision.Reason)
 		}
 	} else {
 		decision := ValidateTransitionChange(current, TransitionChangeRequest{
@@ -71,15 +75,13 @@ func (service Service) SetTransitionState(ctx context.Context, input TransitionS
 			TargetState: input.TargetState,
 		})
 		if !decision.Allowed {
-			_ = service.Store.RecordProjectTransitionDenied(ctx, input.ProjectID, string(ActionClassTransitionControl), decision.Reason)
-			return sqlite.ProjectTransition{}, fmt.Errorf("%w: %s", ErrTransitionDenied, decision.Reason)
+			return sqlite.ProjectTransition{}, service.transitionDenied(ctx, input.ProjectID, string(ActionClassTransitionControl), decision.Reason)
 		}
 	}
 
 	limitedActionsJSON, err := normalizeLimitedActions(input.TargetState, input.LimitedActions)
 	if err != nil {
-		_ = service.Store.RecordProjectTransitionDenied(ctx, input.ProjectID, string(ActionClassTransitionControl), err.Error())
-		return sqlite.ProjectTransition{}, fmt.Errorf("%w: %s", ErrTransitionDenied, err.Error())
+		return sqlite.ProjectTransition{}, service.transitionDenied(ctx, input.ProjectID, string(ActionClassTransitionControl), err.Error())
 	}
 
 	return service.Store.SetProjectTransition(ctx, sqlite.SetProjectTransitionParams{
@@ -117,23 +119,39 @@ func (service Service) AuthorizeAction(ctx context.Context, input ActionInput) (
 		ActionKey:   input.ActionKey,
 	})
 	if !decision.Allowed {
-		_ = service.Store.RecordProjectTransitionDenied(ctx, input.ProjectID, string(input.ActionClass), decision.Reason)
-		return decision, fmt.Errorf("%w: %s", ErrTransitionDenied, decision.Reason)
+		return decision, service.transitionDenied(ctx, input.ProjectID, string(input.ActionClass), decision.Reason)
 	}
 
 	return decision, nil
+}
+
+func (service Service) AuthorizeMutation(ctx context.Context, input ActionInput, manifest Manifest) (TransitionDecision, error) {
+	decision, err := service.AuthorizeAction(ctx, input)
+	if err != nil {
+		return decision, err
+	}
+
+	requirement := ApprovalRequiredForAction(manifest, input.ActionClass)
+	if !requirement.Required {
+		return decision, nil
+	}
+
+	return TransitionDecision{
+		Allowed: false,
+		Reason:  requirement.Reason,
+	}, service.transitionDenied(ctx, input.ProjectID, string(input.ActionClass), requirement.Reason)
 }
 
 func (service Service) AuthorizeExecutionMutation(ctx context.Context, input ExecutionAuthorizationInput) error {
 	if err := ValidateSystemProjectMutation(input.Manifest); err != nil {
 		return err
 	}
-	_, err := service.AuthorizeAction(ctx, ActionInput{
+	_, err := service.AuthorizeMutation(ctx, ActionInput{
 		ProjectID:   input.ProjectID,
 		Actor:       input.Actor,
 		ActionClass: input.ActionClass,
 		ActionKey:   input.ActionKey,
-	})
+	}, input.Manifest)
 	return err
 }
 
@@ -183,8 +201,7 @@ func (service Service) recordReport(ctx context.Context, input ReportInput, requ
 	}
 	if current.State != requiredState {
 		reason := fmt.Sprintf("%s reports require state %q", reportType, requiredState)
-		_ = service.Store.RecordProjectTransitionDenied(ctx, input.ProjectID, string(ActionClassReadOnly), reason)
-		return sqlite.ProjectTransitionReport{}, fmt.Errorf("%w: %s", ErrTransitionDenied, reason)
+		return sqlite.ProjectTransitionReport{}, service.transitionDenied(ctx, input.ProjectID, string(ActionClassReadOnly), reason)
 	}
 
 	return service.Store.RecordProjectTransitionReport(ctx, sqlite.RecordProjectTransitionReportParams{
@@ -258,4 +275,21 @@ func decodeLimitedActions(encoded string) []string {
 		return nil
 	}
 	return decoded
+}
+
+func (service Service) transitionDenied(ctx context.Context, projectID int64, actionClass string, reason string) error {
+	if err := service.recordDenied(ctx, projectID, actionClass, reason); err != nil {
+		return fmt.Errorf("%w: %s (audit write failed: %v)", ErrTransitionDenied, reason, err)
+	}
+	return fmt.Errorf("%w: %s", ErrTransitionDenied, reason)
+}
+
+func (service Service) recordDenied(ctx context.Context, projectID int64, actionClass string, reason string) error {
+	if service.RecordDenied != nil {
+		return service.RecordDenied(ctx, projectID, actionClass, reason)
+	}
+	if service.Store == nil {
+		return fmt.Errorf("transition store is required")
+	}
+	return service.Store.RecordProjectTransitionDenied(ctx, projectID, actionClass, reason)
 }

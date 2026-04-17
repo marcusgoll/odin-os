@@ -3,6 +3,7 @@ package recovery
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 
 	"odin-os/internal/runtime/checkpoints"
@@ -46,6 +47,11 @@ func (service Service) RunStartupRecovery(ctx context.Context) (StartupResult, e
 		requeueable := !terminalTask && pendingApprovals == 0 && !rejectedApprovalBlock
 		needsApprovalRepair := pendingApprovals > 0 && task.Status != "blocked"
 
+		resumeState, resumeErr := (checkpoints.Service{Store: service.Store}).LoadResumeState(ctx, task.ProjectID, task.ID)
+		if resumeErr != nil && !errors.Is(resumeErr, sql.ErrNoRows) {
+			return StartupResult{}, resumeErr
+		}
+
 		recoveryRecord, err := service.Store.StartRecovery(ctx, sqlite.StartRecoveryParams{
 			RunID:       &run.ID,
 			Status:      "running",
@@ -68,15 +74,28 @@ func (service Service) RunStartupRecovery(ctx context.Context) (StartupResult, e
 			}
 		}
 
+		objective := task.Title
+		taskStatus := "queued"
 		blockingReason := "previous service instance stopped during execution"
-		openTaskSummary := "task requeued after restart"
-		approvalSummary := "none"
 		nextSteps := []string{
 			"Review the restart wake packet",
 			"Resume the queued task when the runtime is healthy",
 		}
+		constraints := []string{"previous run was interrupted by restart"}
+		selectedCapabilities := []string{"startup_recovery"}
+		evidence := []checkpoints.Evidence{{
+			Kind:    "restart",
+			Summary: fmt.Sprintf("run %d was still marked running at startup", run.ID),
+		}}
+		manifestSummary := "managed project"
+		policySummary := "bounded startup recovery"
+		openTaskSummary := "task requeued after restart"
+		approvalSummary := "none"
+		var invocation *checkpoints.InvocationContext
 		recoveryDescription := "interrupted running run, requeued task, and created restart wake packet"
+
 		if terminalTask {
+			taskStatus = task.Status
 			blockingReason = "task was already terminal before startup recovery"
 			openTaskSummary = fmt.Sprintf("task remains %s", task.Status)
 			nextSteps = []string{
@@ -85,6 +104,7 @@ func (service Service) RunStartupRecovery(ctx context.Context) (StartupResult, e
 			}
 			recoveryDescription = "interrupted stale running run for terminal task and created restart wake packet"
 		} else if rejectedApprovalBlock {
+			taskStatus = "blocked"
 			blockingReason = "approval was rejected before restart"
 			openTaskSummary = "task remains blocked after rejected approval"
 			approvalSummary = "rejected"
@@ -94,6 +114,7 @@ func (service Service) RunStartupRecovery(ctx context.Context) (StartupResult, e
 			}
 			recoveryDescription = "interrupted running run and preserved blocked task after rejected approval"
 		} else if !requeueable {
+			taskStatus = "blocked"
 			blockingReason = "pending approval before restart"
 			openTaskSummary = "task remains blocked pending approval"
 			approvalSummary = pendingApprovalSummary(pendingApprovals)
@@ -104,24 +125,55 @@ func (service Service) RunStartupRecovery(ctx context.Context) (StartupResult, e
 			recoveryDescription = "interrupted running run, preserved blocked task, and created restart wake packet"
 		}
 
+		if resumeErr == nil {
+			if resumeState.Objective != "" {
+				objective = resumeState.Objective
+			}
+			if resumeState.BlockingReason != "" {
+				blockingReason = resumeState.BlockingReason
+			}
+			if len(resumeState.NextSteps) > 0 {
+				nextSteps = append([]string(nil), resumeState.NextSteps...)
+			}
+			if len(resumeState.Constraints) > 0 {
+				constraints = append([]string(nil), resumeState.Constraints...)
+			}
+			if len(resumeState.Capabilities) > 0 {
+				selectedCapabilities = append([]string(nil), resumeState.Capabilities...)
+			}
+			if resumeState.ProjectContext != nil {
+				if resumeState.ProjectContext.ManifestSummary != "" {
+					manifestSummary = resumeState.ProjectContext.ManifestSummary
+				}
+				if resumeState.ProjectContext.PolicySummary != "" {
+					policySummary = resumeState.ProjectContext.PolicySummary
+				}
+				if resumeState.ProjectContext.OpenTaskSummary != "" {
+					openTaskSummary = resumeState.ProjectContext.OpenTaskSummary
+				}
+			}
+			if resumeState.RunContext != nil {
+				invocation = resumeState.RunContext.Invocation
+			}
+		}
+
 		compaction, err := checkpoints.Service{Store: service.Store}.Compact(ctx, checkpoints.CompactParams{
 			TaskID:               task.ID,
 			RunID:                &run.ID,
 			Trigger:              checkpoints.TriggerRestart,
 			CheckpointKey:        fmt.Sprintf("startup-recovery-%d", run.ID),
-			Objective:            task.Title,
+			Objective:            objective,
+			TaskStatus:           taskStatus,
 			BlockingReason:       blockingReason,
 			NextSteps:            nextSteps,
-			Constraints:          []string{"previous run was interrupted by restart"},
-			SelectedCapabilities: []string{"startup_recovery"},
-			Evidence: []checkpoints.Evidence{{
-				Kind:    "restart",
-				Summary: fmt.Sprintf("run %d was still marked running at startup", run.ID),
-			}},
-			ManifestSummary: "managed project",
-			PolicySummary:   "bounded startup recovery",
-			OpenTaskSummary: openTaskSummary,
-			ApprovalSummary: approvalSummary,
+			Constraints:          constraints,
+			SelectedCapabilities: selectedCapabilities,
+			Evidence:             evidence,
+			ManifestSummary:      manifestSummary,
+			PolicySummary:        policySummary,
+			OpenTaskSummary:      openTaskSummary,
+			ApprovalSummary:      approvalSummary,
+			Invocation:           invocation,
 		})
 		if err != nil {
 			return StartupResult{}, err
