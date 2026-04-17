@@ -22,6 +22,7 @@ const (
 	StreamLearningProposal   StreamType = "learning_proposal"
 	StreamLearningEvaluation StreamType = "learning_evaluation"
 	StreamLearningPromotion  StreamType = "learning_promotion"
+	StreamSkill              StreamType = "skill"
 	StreamCapability         StreamType = "capability"
 )
 
@@ -57,8 +58,16 @@ const (
 	EventLearningEvaluationRecorded       Type = "learning.evaluation_recorded"
 	EventLearningPromotionApplied         Type = "learning.promotion_applied"
 	EventLearningPromotionRolledBack      Type = "learning.promotion_rolled_back"
+	EventSkillLifecycleRecorded           Type = "skill.lifecycle_recorded"
 	EventCapabilitySnapshotPublished      Type = "capability.snapshot_published"
 	EventCapabilitySnapshotRejected       Type = "capability.snapshot_rejected"
+)
+
+const (
+	SkillLifecycleErrorUnknownPermission            = "unknown_permission"
+	SkillLifecycleErrorMutationRequiresProjectScope = "mutation_requires_project_scope"
+	SkillLifecycleErrorTransitionDenied             = "transition_denied"
+	SkillLifecycleErrorApprovalRequired             = "approval_required"
 )
 
 type Record struct {
@@ -255,6 +264,20 @@ type LearningPromotionRolledBackPayload struct {
 	RolledBackBy        string `json:"rolled_back_by"`
 	RollbackReason      string `json:"rollback_reason"`
 	RestoredPromotionID *int64 `json:"restored_promotion_id,omitempty"`
+}
+
+type SkillLifecycleRecordedPayload struct {
+	SkillKey         string   `json:"skill_key"`
+	Operation        string   `json:"operation"`
+	Outcome          string   `json:"outcome"`
+	ExecutionProfile string   `json:"execution_profile,omitempty"`
+	Version          string   `json:"version,omitempty"`
+	HandlerType      string   `json:"handler_type,omitempty"`
+	HandlerRef       string   `json:"handler_ref,omitempty"`
+	Permissions      []string `json:"permissions,omitempty"`
+	DurationMS       int64    `json:"duration_ms"`
+	ErrorCode        string   `json:"error_code,omitempty"`
+	ErrorText        string   `json:"error_text,omitempty"`
 }
 
 type CapabilitySnapshotPublishedPayload struct {

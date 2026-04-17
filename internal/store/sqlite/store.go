@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"strings"
 	"sync"
 	"time"
@@ -1274,6 +1275,37 @@ func (store *Store) RecordExecutorHealth(ctx context.Context, params RecordExecu
 	})
 
 	return health, err
+}
+
+func (store *Store) RecordSkillLifecycleEvent(ctx context.Context, params RecordSkillLifecycleEventParams) error {
+	now := store.now()
+	scope := strings.TrimSpace(params.Scope)
+	if scope == "" {
+		scope = "repo"
+	}
+
+	return store.withTx(ctx, func(tx *sql.Tx) error {
+		return appendEventTx(ctx, tx, eventInsert{
+			StreamType: runtimeevents.StreamSkill,
+			StreamID:   skillStreamID(params.SkillKey),
+			EventType:  runtimeevents.EventSkillLifecycleRecorded,
+			Scope:      scope,
+			Payload: runtimeevents.SkillLifecycleRecordedPayload{
+				SkillKey:         params.SkillKey,
+				Operation:        params.Operation,
+				Outcome:          params.Outcome,
+				ExecutionProfile: params.ExecutionProfile,
+				Version:          params.Version,
+				HandlerType:      params.HandlerType,
+				HandlerRef:       params.HandlerRef,
+				Permissions:      append([]string(nil), params.Permissions...),
+				DurationMS:       params.DurationMS,
+				ErrorCode:        params.ErrorCode,
+				ErrorText:        params.ErrorText,
+			},
+			OccurredAt: now,
+		})
+	})
 }
 
 func (store *Store) CreateContextPacket(ctx context.Context, params CreateContextPacketParams) (ContextPacket, error) {
@@ -3453,6 +3485,12 @@ func normalizeCreateContextPacketParams(params CreateContextPacketParams) Create
 		params.Status = "active"
 	}
 	return params
+}
+
+func skillStreamID(skillKey string) int64 {
+	hasher := fnv.New64a()
+	_, _ = hasher.Write([]byte(skillKey))
+	return int64(hasher.Sum64())
 }
 
 func scanProject(row interface{ Scan(...any) error }) (Project, error) {

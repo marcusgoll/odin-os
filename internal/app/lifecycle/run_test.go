@@ -237,6 +237,215 @@ func TestRunTaskRunJSON(t *testing.T) {
 	}
 }
 
+func TestRunSkillsCrudAndInvokeJSON(t *testing.T) {
+	t.Parallel()
+
+	root := testRepoRoot(t)
+	scriptPath := filepath.Join(root, "scripts", "skills", "echo-skill.sh")
+	if err := os.MkdirAll(filepath.Dir(scriptPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll(script dir) error = %v", err)
+	}
+	if err := os.WriteFile(scriptPath, []byte(`#!/usr/bin/env bash
+cat >/dev/null
+printf '%s\n' '{"status":"ok","summary":"echo complete","output":{"message":"hello"}}'
+`), 0o755); err != nil {
+		t.Fatalf("WriteFile(script) error = %v", err)
+	}
+
+	createSpecPath := filepath.Join(root, "echo-skill.json")
+	if err := os.WriteFile(createSpecPath, []byte(`{
+  "key": "echo-skill",
+  "title": "Echo Skill",
+  "summary": "Echoes a structured response.",
+  "status": "active",
+  "version": "1.0.0",
+  "enabled": true,
+  "tags": ["testing"],
+  "owners": ["odin-core"],
+  "strictness": "rigid",
+  "applies_to": ["testing"],
+  "scopes": ["project"],
+  "permissions": ["repo.read"],
+  "handler_type": "command",
+  "handler_ref": "scripts/skills/echo-skill.sh",
+  "timeout_seconds": 15,
+  "input_schema": {"type":"object"},
+  "output_schema": {"type":"object"},
+  "sections": {
+    "Purpose": "Echo input.",
+    "When to Use": "When testing.",
+    "Inputs": "A message.",
+    "Procedure": "Read and echo.",
+    "Outputs": "A JSON response.",
+    "Constraints": "Stay deterministic.",
+    "Success Criteria": "The caller gets a stable response."
+  }
+}`), 0o644); err != nil {
+		t.Fatalf("WriteFile(spec) error = %v", err)
+	}
+
+	updateSpecPath := filepath.Join(root, "echo-skill-v2.json")
+	if err := os.WriteFile(updateSpecPath, []byte(`{
+  "key": "echo-skill",
+  "title": "Echo Skill",
+  "summary": "Updated summary.",
+  "status": "active",
+  "version": "1.0.1",
+  "enabled": true,
+  "tags": ["testing"],
+  "owners": ["odin-core"],
+  "strictness": "rigid",
+  "applies_to": ["testing"],
+  "scopes": ["project"],
+  "permissions": ["repo.read"],
+  "handler_type": "command",
+  "handler_ref": "scripts/skills/echo-skill.sh",
+  "timeout_seconds": 15,
+  "input_schema": {"type":"object"},
+  "output_schema": {"type":"object"},
+  "sections": {
+    "Purpose": "Echo input.",
+    "When to Use": "When testing.",
+    "Inputs": "A message.",
+    "Procedure": "Read and echo.",
+    "Outputs": "A JSON response.",
+    "Constraints": "Stay deterministic.",
+    "Success Criteria": "The caller gets a stable response."
+  }
+}`), 0o644); err != nil {
+		t.Fatalf("WriteFile(update spec) error = %v", err)
+	}
+
+	var stdout bytes.Buffer
+	if err := Run(context.Background(), root, []string{"skills", "create", "--spec", createSpecPath, "--json"}, strings.NewReader(""), &stdout); err != nil {
+		t.Fatalf("Run(skills create) error = %v", err)
+	}
+
+	stdout.Reset()
+	if err := Run(context.Background(), root, []string{"skills", "list", "--json"}, strings.NewReader(""), &stdout); err != nil {
+		t.Fatalf("Run(skills list) error = %v", err)
+	}
+	if !strings.Contains(stdout.String(), "echo-skill") {
+		t.Fatalf("skills list output = %q, want echo-skill", stdout.String())
+	}
+
+	stdout.Reset()
+	if err := Run(context.Background(), root, []string{"skills", "get", "echo-skill", "--json"}, strings.NewReader(""), &stdout); err != nil {
+		t.Fatalf("Run(skills get) error = %v", err)
+	}
+	if !strings.Contains(stdout.String(), "\"version\": \"1.0.0\"") {
+		t.Fatalf("skills get output = %q, want version 1.0.0", stdout.String())
+	}
+
+	stdout.Reset()
+	if err := Run(context.Background(), root, []string{"skills", "invoke", "echo-skill", "--input", `{"message":"hello"}`, "--json"}, strings.NewReader(""), &stdout); err != nil {
+		t.Fatalf("Run(skills invoke) error = %v", err)
+	}
+	if !strings.Contains(stdout.String(), "echo complete") {
+		t.Fatalf("skills invoke output = %q, want echo summary", stdout.String())
+	}
+
+	stdout.Reset()
+	if err := Run(context.Background(), root, []string{"skills", "update", "echo-skill", "--spec", updateSpecPath, "--json"}, strings.NewReader(""), &stdout); err != nil {
+		t.Fatalf("Run(skills update) error = %v", err)
+	}
+	if !strings.Contains(stdout.String(), "\"version\": \"1.0.1\"") {
+		t.Fatalf("skills update output = %q, want version 1.0.1", stdout.String())
+	}
+
+	stdout.Reset()
+	if err := Run(context.Background(), root, []string{"skills", "delete", "echo-skill", "--json"}, strings.NewReader(""), &stdout); err != nil {
+		t.Fatalf("Run(skills delete) error = %v", err)
+	}
+
+	stdout.Reset()
+	if err := Run(context.Background(), root, []string{"skills", "list", "--json"}, strings.NewReader(""), &stdout); err != nil {
+		t.Fatalf("Run(skills list after delete) error = %v", err)
+	}
+	if strings.Contains(stdout.String(), "echo-skill") {
+		t.Fatalf("skills list after delete output = %q, should not contain echo-skill", stdout.String())
+	}
+}
+
+func TestRunSkillsInvokeUsesSelectedProjectTransitionState(t *testing.T) {
+	t.Parallel()
+
+	root := testRepoRoot(t)
+	scriptPath := filepath.Join(root, "scripts", "skills", "audit-note.sh")
+	if err := os.MkdirAll(filepath.Dir(scriptPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll(script dir) error = %v", err)
+	}
+	if err := os.WriteFile(scriptPath, []byte(`#!/usr/bin/env bash
+cat >/dev/null
+printf '%s\n' '{"status":"ok","summary":"audit note recorded"}'
+`), 0o755); err != nil {
+		t.Fatalf("WriteFile(script) error = %v", err)
+	}
+
+	createSpecPath := filepath.Join(root, "audit-note.json")
+	if err := os.WriteFile(createSpecPath, []byte(`{
+  "key": "audit-note",
+  "title": "Audit Note",
+  "summary": "Writes a limited action note.",
+  "status": "active",
+  "version": "1.0.0",
+  "enabled": true,
+  "tags": ["testing"],
+  "owners": ["odin-core"],
+  "strictness": "rigid",
+  "applies_to": ["testing"],
+  "scopes": ["project"],
+  "permissions": ["repo.mutate.isolated:docs_audit_note"],
+  "handler_type": "command",
+  "handler_ref": "scripts/skills/audit-note.sh",
+  "timeout_seconds": 15,
+  "input_schema": {"type":"object"},
+  "output_schema": {"type":"object"},
+  "sections": {
+    "Purpose": "Write an audit note.",
+    "When to Use": "When testing transition policy.",
+    "Inputs": "A structured note.",
+    "Procedure": "Record the note.",
+    "Outputs": "A JSON response.",
+    "Constraints": "Stay deterministic.",
+    "Success Criteria": "The caller gets a stable response."
+  }
+}`), 0o644); err != nil {
+		t.Fatalf("WriteFile(spec) error = %v", err)
+	}
+
+	if err := Run(context.Background(), root, []string{"skills", "create", "--spec", createSpecPath, "--json"}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+		t.Fatalf("Run(skills create) error = %v", err)
+	}
+	if err := Run(context.Background(), root, []string{"project", "select", testProjectKey}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+		t.Fatalf("Run(project select) error = %v", err)
+	}
+	if err := Run(
+		context.Background(),
+		root,
+		[]string{"transition", "set", "limited_action", "allow=docs_audit_note", "confirm", "because", "cli transition smoke"},
+		strings.NewReader(""),
+		&bytes.Buffer{},
+	); err != nil {
+		t.Fatalf("Run(transition set) error = %v", err)
+	}
+
+	var stdout bytes.Buffer
+	err := Run(
+		context.Background(),
+		root,
+		[]string{"skills", "invoke", "audit-note", "--json"},
+		strings.NewReader(""),
+		&stdout,
+	)
+	if err != nil {
+		t.Fatalf("Run(skills invoke) error = %v", err)
+	}
+	if !strings.Contains(stdout.String(), "audit note recorded") {
+		t.Fatalf("skills invoke output = %q, want audit note summary", stdout.String())
+	}
+}
+
 func TestNewJobServiceIncludesSupervisor(t *testing.T) {
 	t.Parallel()
 

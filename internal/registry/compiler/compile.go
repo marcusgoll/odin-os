@@ -32,7 +32,6 @@ func Compile(documents []registry.ParsedDocument, parserDiagnostics []registry.D
 		}
 
 		item := compileItem(document)
-
 		snapshot.Items = append(snapshot.Items, item)
 		snapshot.ByKey[item.Key] = item
 		snapshot.ByKind[item.Kind] = append(snapshot.ByKind[item.Kind], item)
@@ -47,6 +46,33 @@ func cloneSections(sections map[string]string) map[string]string {
 		cloned[key] = value
 	}
 	return cloned
+}
+
+func cloneAnyMap(values map[string]any) map[string]any {
+	if len(values) == 0 {
+		return nil
+	}
+
+	cloned := make(map[string]any, len(values))
+	for key, value := range values {
+		cloned[key] = cloneAnyValue(value)
+	}
+	return cloned
+}
+
+func cloneAnyValue(value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		return cloneAnyMap(typed)
+	case []any:
+		cloned := make([]any, len(typed))
+		for i := range typed {
+			cloned[i] = cloneAnyValue(typed[i])
+		}
+		return cloned
+	default:
+		return typed
+	}
 }
 
 func compileItem(document registry.ParsedDocument) registry.Item {
@@ -119,22 +145,28 @@ func compileItem(document registry.ParsedDocument) registry.Item {
 		Execution:      execution,
 		Implementation: implementation,
 
-		Key:        key,
-		Title:      fallbackString(frontmatter.Title, name),
-		Summary:    frontmatter.Summary,
-		Status:     frontmatter.Status,
-		Tags:       append([]string(nil), frontmatter.Tags...),
-		Owners:     append([]string(nil), frontmatter.Owners...),
-		Role:       frontmatter.Role,
-		Scopes:     scopes,
-		Tools:      append([]string(nil), frontmatter.Tools...),
-		Strictness: frontmatter.Strictness,
-		AppliesTo:  append([]string(nil), frontmatter.AppliesTo...),
-		Entrypoint: frontmatter.Entrypoint,
-		Composes:   append([]string(nil), frontmatter.Composes...),
-		Command:    frontmatter.Command,
-		Aliases:    append([]string(nil), frontmatter.Aliases...),
-		Sections:   cloneSections(document.Sections),
+		Key:                key,
+		Title:              fallbackString(frontmatter.Title, name),
+		Summary:            frontmatter.Summary,
+		Status:             frontmatter.Status,
+		Enabled:            frontmatter.Enabled != nil && *frontmatter.Enabled,
+		Tags:               append([]string(nil), frontmatter.Tags...),
+		Owners:             append([]string(nil), frontmatter.Owners...),
+		Role:               frontmatter.Role,
+		Scopes:             scopes,
+		Tools:              append([]string(nil), frontmatter.Tools...),
+		Strictness:         frontmatter.Strictness,
+		AppliesTo:          append([]string(nil), frontmatter.AppliesTo...),
+		LegacyInputSchema:  cloneAnyMap(frontmatter.LegacyInputSchema),
+		LegacyOutputSchema: cloneAnyMap(frontmatter.LegacyOutputSchema),
+		HandlerType:        frontmatter.HandlerType,
+		HandlerRef:         frontmatter.HandlerRef,
+		TimeoutSeconds:     frontmatter.TimeoutSeconds,
+		Entrypoint:         frontmatter.Entrypoint,
+		Composes:           append([]string(nil), frontmatter.Composes...),
+		Command:            frontmatter.Command,
+		Aliases:            append([]string(nil), frontmatter.Aliases...),
+		Sections:           cloneSections(document.Sections),
 		Source: registry.SourceInfo{
 			Path:         document.Source.Path,
 			RelativePath: document.Source.RelativePath,

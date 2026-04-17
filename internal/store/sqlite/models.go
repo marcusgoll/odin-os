@@ -241,6 +241,21 @@ type RecordExecutorHealthParams struct {
 	DetailsJSON string
 }
 
+type RecordSkillLifecycleEventParams struct {
+	SkillKey         string
+	Scope            string
+	Operation        string
+	Outcome          string
+	ExecutionProfile string
+	Version          string
+	HandlerType      string
+	HandlerRef       string
+	Permissions      []string
+	DurationMS       int64
+	ErrorCode        string
+	ErrorText        string
+}
+
 type ContextPacket struct {
 	ID                 int64
 	TaskID             *int64

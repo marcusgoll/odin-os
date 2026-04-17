@@ -51,13 +51,21 @@ type ToolDefinition struct {
 }
 
 type SkillDefinition struct {
-	Key       string
-	Title     string
-	Summary   string
-	Tags      []string
-	Scopes    []string
-	Sections  map[string]string
-	SourceRef string
+	Key            string
+	Title          string
+	Summary        string
+	Version        string
+	Enabled        bool
+	Tags           []string
+	Scopes         []string
+	Permissions    []string
+	HandlerType    string
+	HandlerRef     string
+	TimeoutSeconds int
+	InputSchema    map[string]any
+	OutputSchema   map[string]any
+	Sections       map[string]string
+	SourceRef      string
 }
 
 type SubAgentDefinition struct {
@@ -202,6 +210,33 @@ func CloneSections(sections map[string]string) map[string]string {
 		cloned[key] = value
 	}
 	return cloned
+}
+
+func CloneAnyMap(values map[string]any) map[string]any {
+	if len(values) == 0 {
+		return nil
+	}
+
+	cloned := make(map[string]any, len(values))
+	for key, value := range values {
+		cloned[key] = cloneAnyValue(value)
+	}
+	return cloned
+}
+
+func cloneAnyValue(value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		return CloneAnyMap(typed)
+	case []any:
+		cloned := make([]any, len(typed))
+		for i := range typed {
+			cloned[i] = cloneAnyValue(typed[i])
+		}
+		return cloned
+	default:
+		return typed
+	}
 }
 
 func CompactedSize(result CompactedResult) int {

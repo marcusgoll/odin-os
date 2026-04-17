@@ -9,6 +9,8 @@ phase: "02"
 
 This document defines the canonical authored format for registry assets under `registry/` and the normalized `odin/v1` manifest contract used by the compiler.
 
+Skill-specific execution and lifecycle rules are defined in `docs/contracts/skill-lifecycle.md`. This document only defines the authored registry shape and validation rules.
+
 ## Supported kinds
 
 Registry kinds are:
@@ -30,6 +32,34 @@ The directory kind and frontmatter `kind` must agree.
 ## Authored format
 
 Markdown files remain the authored source of truth. Files must begin with YAML frontmatter delimited by `---` and include the required Markdown sections:
+
+### Legacy authored fields
+
+Legacy markdown manifests remain supported during the migration. Common required legacy fields are:
+
+- `kind`
+- `key`
+- `title`
+- `summary`
+
+Common optional legacy fields are:
+
+- `status`
+- `tags`
+- `owners`
+
+Kind-specific legacy requirements:
+
+- `agent`: `role`, `scopes`, `tools`
+- `skill`: `version`, `enabled`, `strictness`, `applies_to`, `scopes`, `permissions`, `handler_type`, `handler_ref`, `timeout_seconds`, `input_schema`, `output_schema`
+- `workflow`: `entrypoint`, `composes`
+- `command`: `command`, `scopes`
+
+Legacy command manifests may also declare `aliases`.
+
+## Required Markdown sections
+
+Each registry file must include these level-two headings:
 
 - `## Purpose`
 - `## When to Use`
@@ -92,8 +122,11 @@ The registry compiler must reject a file clearly when:
 - frontmatter is missing
 - frontmatter YAML is invalid
 - `kind` is unknown
+- `key` is not a lowercase slug using only letters, digits, `-`, or `_`
 - path kind and frontmatter `kind` differ
 - a required normalized field is missing from an `odin/v1` manifest
+- a required legacy field is missing from a legacy manifest
+- a skill `handler_ref` leaves the repo or points outside `scripts/skills/`
 - a required Markdown section is missing or empty
 - multiple files declare the same `key`
 

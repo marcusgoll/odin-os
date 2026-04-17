@@ -1,9 +1,12 @@
 package planner
 
 import (
+	"context"
 	"testing"
 
+	"odin-os/internal/core/projects"
 	"odin-os/internal/registry"
+	"odin-os/internal/skills"
 	"odin-os/internal/tools/broker"
 	"odin-os/internal/tools/budgets"
 	"odin-os/internal/tools/catalog"
@@ -14,12 +17,10 @@ func TestPrepareStartsFromThinCatalogOnly(t *testing.T) {
 
 	service := Service{
 		Broker: broker.New(
-			testSnapshot(),
+			broker.StaticSource(testSnapshot()),
 			catalog.BuiltinDefinitions(),
-			budgets.Limits{
-				Tool:    budgets.Tool{MaxSelections: 10, MaxInvocations: 10, MaxCostUnits: 20},
-				Context: budgets.Context{MaxExpandedDefinitions: 10, MaxCompactedResults: 10, MaxCompactedBytes: 1000},
-			},
+			nil,
+			testLimits(),
 		),
 	}
 
@@ -40,16 +41,14 @@ func TestMaterializeExpandsOnlySelectedCapability(t *testing.T) {
 
 	service := Service{
 		Broker: broker.New(
-			testSnapshot(),
+			broker.StaticSource(testSnapshot()),
 			catalog.BuiltinDefinitions(),
-			budgets.Limits{
-				Tool:    budgets.Tool{MaxSelections: 10, MaxInvocations: 10, MaxCostUnits: 20},
-				Context: budgets.Context{MaxExpandedDefinitions: 10, MaxCompactedResults: 10, MaxCompactedBytes: 1000},
-			},
+			nil,
+			testLimits(),
 		),
 	}
 
-	execution, err := service.Materialize("project", []Selection{
+	execution, err := service.Materialize(context.Background(), "project", skills.InvocationContext{ResolvedScopeKind: "project"}, []Selection{
 		{Key: "triage-skill"},
 	})
 	if err != nil {
@@ -63,21 +62,78 @@ func TestMaterializeExpandsOnlySelectedCapability(t *testing.T) {
 	}
 }
 
+func TestMaterializeInvokesRegistryBackedSkill(t *testing.T) {
+	t.Parallel()
+
+	invoker := &stubSkillInvoker{
+		response: skills.InvokeResponse{
+			Status:    "ok",
+			Summary:   "triage complete",
+			Output:    map[string]any{"message": "hello"},
+			RawRef:    "skill://triage",
+			RawOutput: `{"message":"hello"}`,
+		},
+	}
+
+	service := Service{
+		Broker: broker.New(
+			broker.StaticSource(testSnapshot()),
+			catalog.BuiltinDefinitions(),
+			invoker,
+			testLimits(),
+		),
+	}
+
+	ctx := context.WithValue(context.Background(), plannerContextKey("request_id"), "planner-1")
+	invocationContext := skills.InvocationContext{
+		ResolvedScopeKind: "project",
+		Project: &skills.InvocationProject{
+			ID:  42,
+			Key: "alpha",
+		},
+		Manifest: projects.Manifest{Key: "alpha"},
+	}
+
+	execution, err := service.Materialize(ctx, "project", invocationContext, []Selection{
+		{
+			Key:         "triage-skill",
+			InvokeSkill: true,
+			SkillInput:  map[string]any{"message": "hello"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Materialize() error = %v", err)
+	}
+	if len(execution.Compacted) != 1 {
+		t.Fatalf("compacted len = %d, want 1", len(execution.Compacted))
+	}
+	if execution.Compacted[0].CapabilityKey != "triage-skill" {
+		t.Fatalf("CapabilityKey = %q, want triage-skill", execution.Compacted[0].CapabilityKey)
+	}
+	if got := invoker.lastRequest.Context.Project.Key; got != "alpha" {
+		t.Fatalf("invoked project key = %q, want alpha", got)
+	}
+	if got := invoker.lastRequest.Context.Manifest.Key; got != "alpha" {
+		t.Fatalf("invoked manifest key = %q, want alpha", got)
+	}
+	if got := invoker.lastContext.Value(plannerContextKey("request_id")); got != "planner-1" {
+		t.Fatalf("ctx request_id = %v, want planner-1", got)
+	}
+}
+
 func TestMaterializeRejectsSubAgentWithoutPlanOptIn(t *testing.T) {
 	t.Parallel()
 
 	service := Service{
 		Broker: broker.New(
-			testSnapshot(),
+			broker.StaticSource(testSnapshot()),
 			catalog.BuiltinDefinitions(),
-			budgets.Limits{
-				Tool:    budgets.Tool{MaxSelections: 10, MaxInvocations: 10, MaxCostUnits: 20},
-				Context: budgets.Context{MaxExpandedDefinitions: 10, MaxCompactedResults: 10, MaxCompactedBytes: 1000},
-			},
+			nil,
+			testLimits(),
 		),
 	}
 
-	_, err := service.Materialize("project", []Selection{
+	_, err := service.Materialize(context.Background(), "project", skills.InvocationContext{ResolvedScopeKind: "project"}, []Selection{
 		{Key: "triage-agent"},
 	})
 	if err == nil {
@@ -89,10 +145,23 @@ func testSnapshot() registry.Snapshot {
 	return registry.Snapshot{
 		Items: []registry.Item{
 			{
-				Kind:    registry.KindSkill,
-				Key:     "triage-skill",
-				Title:   "Triage Skill",
-				Summary: "Classifies requests.",
+				Kind:           registry.KindSkill,
+				Key:            "triage-skill",
+				Title:          "Triage Skill",
+				Summary:        "Classifies requests.",
+				Version:        "1.0.0",
+				Enabled:        true,
+				Scopes:         []string{"project"},
+				Permissions:    []string{"repo.read"},
+				HandlerType:    "command",
+				HandlerRef:     "scripts/skills/triage-skill.sh",
+				TimeoutSeconds: 15,
+				LegacyInputSchema: map[string]any{
+					"type": "object",
+				},
+				LegacyOutputSchema: map[string]any{
+					"type": "object",
+				},
 				Sections: map[string]string{
 					registry.SectionPurpose: "Decide the next action.",
 				},
@@ -112,3 +181,28 @@ func testSnapshot() registry.Snapshot {
 		},
 	}
 }
+
+func testLimits() budgets.Limits {
+	return budgets.Limits{
+		Tool:    budgets.Tool{MaxSelections: 10, MaxInvocations: 10, MaxCostUnits: 20},
+		Context: budgets.Context{MaxExpandedDefinitions: 10, MaxCompactedResults: 10, MaxCompactedBytes: 1000},
+	}
+}
+
+type stubSkillInvoker struct {
+	response    skills.InvokeResponse
+	lastContext context.Context
+	lastRequest skills.InvokeRequest
+}
+
+func (invoker *stubSkillInvoker) Invoke(ctx context.Context, request skills.InvokeRequest) (skills.InvokeResponse, error) {
+	invoker.lastContext = ctx
+	invoker.lastRequest = request
+	response := invoker.response
+	if response.SkillKey == "" {
+		response.SkillKey = request.Key
+	}
+	return response, nil
+}
+
+type plannerContextKey string

@@ -43,7 +43,7 @@ import (
 
 var errRuntimeNotReady = errors.New("runtime not ready")
 
-const rootUsageBanner = "Usage: odin <command> [args]\n\nCommands: help repl doctor healthcheck serve backup restore verify-backup status project scope jobs runs approvals logs task transition"
+const rootUsageBanner = "Usage: odin <command> [args]\n\nCommands: help repl doctor healthcheck serve backup restore verify-backup status project scope jobs runs approvals logs task transition skills"
 
 var (
 	serveTaskLoopInterval     = 1 * time.Second
@@ -120,6 +120,8 @@ func Run(ctx context.Context, root string, args []string, stdin io.Reader, stdou
 		return runTask(ctx, app, rootCommand.Args, stdout)
 	case "transition":
 		return runTransition(ctx, app, rootCommand.Args, stdout)
+	case "skills":
+		return runSkills(ctx, app, rootCommand.Args, stdout)
 	default:
 		return fmt.Errorf("unknown command: %s", rootCommand.Name)
 	}

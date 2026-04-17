@@ -5,7 +5,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -290,11 +289,19 @@ projects:
 
 	for _, kind := range []string{"agents", "skills", "workflows", "commands"} {
 		path := filepath.Join(repoRoot, "registry", kind, "example.md")
-		if err := os.WriteFile(path, []byte(`---
-kind: `+strings.TrimSuffix(kind, "s")+`
+		var contents string
+		switch kind {
+		case "agents":
+			contents = `---
+kind: agent
 key: example
 title: Example
 summary: Example
+role: operator
+scopes:
+  - global
+tools:
+  - project_status
 ---
 
 ## Purpose
@@ -317,7 +324,118 @@ Example
 
 ## Success Criteria
 Example
-`), 0o644); err != nil {
+`
+		case "skills":
+			contents = `---
+kind: skill
+key: example
+title: Example
+summary: Example
+version: "1.0.0"
+enabled: true
+strictness: rigid
+applies_to:
+  - intake
+scopes:
+  - global
+permissions:
+  - repo.read
+handler_type: command
+handler_ref: scripts/skills/example.sh
+timeout_seconds: 15
+input_schema:
+  type: object
+output_schema:
+  type: object
+---
+
+## Purpose
+Example
+
+## When to Use
+Example
+
+## Inputs
+Example
+
+## Procedure
+Example
+
+## Outputs
+Example
+
+## Constraints
+Example
+
+## Success Criteria
+Example
+`
+		case "workflows":
+			contents = `---
+kind: workflow
+key: example
+title: Example
+summary: Example
+entrypoint: triage-agent
+composes:
+  - triage-skill
+---
+
+## Purpose
+Example
+
+## When to Use
+Example
+
+## Inputs
+Example
+
+## Procedure
+Example
+
+## Outputs
+Example
+
+## Constraints
+Example
+
+## Success Criteria
+Example
+`
+		case "commands":
+			contents = `---
+kind: command
+key: example
+title: Example
+summary: Example
+command: example
+scopes:
+  - global
+---
+
+## Purpose
+Example
+
+## When to Use
+Example
+
+## Inputs
+Example
+
+## Procedure
+Example
+
+## Outputs
+Example
+
+## Constraints
+Example
+
+## Success Criteria
+Example
+`
+		}
+		if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
 			t.Fatalf("WriteFile(%q) error = %v", path, err)
 		}
 	}
