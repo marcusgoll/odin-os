@@ -294,6 +294,76 @@ func TestStoreMigrateLifecycleAndReopen(t *testing.T) {
 	}
 }
 
+func TestCreateTaskDerivesProjectLinksForOdinCoreScope(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "odin.db")
+
+	store, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer store.Close()
+
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
+	}
+
+	project, err := store.CreateProject(ctx, CreateProjectParams{
+		Key:           "odin-core",
+		Name:          "Odin Core",
+		Scope:         "odin-core",
+		GitRoot:       "/home/orchestrator/odin-os",
+		DefaultBranch: "main",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+
+	initiative, err := store.GetInitiativeByProjectID(ctx, project.ID)
+	if err != nil {
+		t.Fatalf("GetInitiativeByProjectID() error = %v", err)
+	}
+
+	task, err := store.CreateTask(ctx, CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "scope-bootstrap",
+		Title:       "Bootstrap system task",
+		Status:      "queued",
+		Scope:       "odin-core",
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+
+	if task.WorkspaceID != initiative.WorkspaceID {
+		t.Fatalf("CreateTask().WorkspaceID = %d, want %d", task.WorkspaceID, initiative.WorkspaceID)
+	}
+	if task.InitiativeID == nil || *task.InitiativeID != initiative.ID {
+		t.Fatalf("CreateTask().InitiativeID = %v, want %d", task.InitiativeID, initiative.ID)
+	}
+
+	events, err := store.ListEvents(ctx, ListEventsParams{TaskID: &task.ID})
+	if err != nil {
+		t.Fatalf("ListEvents() error = %v", err)
+	}
+	if len(events) == 0 {
+		t.Fatalf("ListEvents() len = 0, want at least one task event")
+	}
+	if events[0].Scope != "odin-core" {
+		t.Fatalf("task.created scope = %q, want %q", events[0].Scope, "odin-core")
+	}
+
+	payload, err := runtimeevents.DecodePayload[runtimeevents.TaskCreatedPayload](events[0].Payload)
+	if err != nil {
+		t.Fatalf("DecodePayload(TaskCreatedPayload) error = %v", err)
+	}
+	if payload.Scope != "odin-core" {
+		t.Fatalf("task.created payload scope = %q, want %q", payload.Scope, "odin-core")
+	}
+}
+
 func TestCompanionStoreLifecycle(t *testing.T) {
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "odin.db")

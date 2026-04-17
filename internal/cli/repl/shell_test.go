@@ -90,6 +90,20 @@ func TestAskModeHandlesFreeTextWithoutCreatingTask(t *testing.T) {
 	}
 }
 
+func TestMatchesEventScopeAllowsControlScopedEventsInProjectViews(t *testing.T) {
+	t.Parallel()
+
+	if !matchesEventScope("workspace", scope.Resolution{Kind: scope.ScopeOdinCore, ProjectKey: "odin-core"}) {
+		t.Fatalf("matchesEventScope(workspace, odin-core) = false, want true")
+	}
+	if !matchesEventScope("initiative", scope.Resolution{Kind: scope.ScopeProject, ProjectKey: "alpha"}) {
+		t.Fatalf("matchesEventScope(initiative, project) = false, want true")
+	}
+	if matchesEventScope("workspace", scope.Resolution{Kind: scope.ScopeNewProject}) {
+		t.Fatalf("matchesEventScope(workspace, new-project) = true, want false")
+	}
+}
+
 func TestActModeCreatesTaskInProjectScope(t *testing.T) {
 	t.Parallel()
 

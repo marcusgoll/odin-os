@@ -426,52 +426,32 @@ func (store *Store) CreateTask(ctx context.Context, params CreateTaskParams) (Ta
 		workspaceID := params.WorkspaceID
 		initiativeID := params.InitiativeID
 		companionID := params.CompanionID
+		subjectType := taskSubjectType(params.SubjectType, params.Scope, initiativeID)
 
-		if workspaceID == 0 {
-			if params.Scope == "project" {
-				workspace, derivedInitiative, derivedCompanion, err := store.taskContextForProjectTx(ctx, tx, project.ID, now)
-				if err != nil {
-					return err
-				}
-				workspaceID = workspace.ID
-				if initiativeID == nil {
-					initiativeID = derivedInitiative
-				}
-				if companionID == nil {
-					companionID = derivedCompanion
-				}
+		if subjectType == controlscope.SubjectTypeProject && (workspaceID == 0 || initiativeID == nil || companionID == nil) {
+			workspace, derivedInitiative, derivedCompanion, err := store.taskContextForProjectTx(ctx, tx, project.ID, now)
+			if err != nil {
+				return err
 			}
 			if workspaceID == 0 {
-				workspace, err := store.ensureDefaultWorkspaceTx(ctx, tx, now)
-				if err != nil {
-					return err
-				}
 				workspaceID = workspace.ID
 			}
-		}
-		if initiativeID == nil && params.Scope == "project" {
-			if initiative, err := store.getInitiativeByProjectIDTx(ctx, tx, project.ID); err == nil {
-				initiativeID = &initiative.ID
-				if workspaceID == 0 {
-					workspaceID = initiative.WorkspaceID
-				}
-				if companionID == nil {
-					companionID = initiative.OwnerCompanionID
-				}
+			if initiativeID == nil {
+				initiativeID = derivedInitiative
 			}
+			if companionID == nil {
+				companionID = derivedCompanion
+			}
+		}
+		if workspaceID == 0 {
+			workspace, err := store.ensureDefaultWorkspaceTx(ctx, tx, now)
+			if err != nil {
+				return err
+			}
+			workspaceID = workspace.ID
 		}
 
-		subjectType := params.SubjectType
 		subjectKey := params.SubjectKey
-		if subjectType == "" {
-			if params.Scope == "new-project" {
-				subjectType = controlscope.SubjectTypeWorkspace
-			} else if initiativeID != nil {
-				subjectType = controlscope.SubjectTypeInitiative
-			} else {
-				subjectType = controlscope.SubjectTypeProject
-			}
-		}
 		if subjectKey == "" {
 			switch subjectType {
 			case controlscope.SubjectTypeWorkspace:
@@ -537,18 +517,20 @@ func (store *Store) CreateTask(ctx context.Context, params CreateTaskParams) (Ta
 			UpdatedAt:    now,
 		}
 
+		eventScope := taskCreatedEventScope(subjectType, task.Scope)
+
 		return appendEventTx(ctx, tx, eventInsert{
 			StreamType: runtimeevents.StreamTask,
 			StreamID:   task.ID,
 			EventType:  runtimeevents.EventTaskCreated,
-			Scope:      task.Scope,
+			Scope:      eventScope,
 			ProjectID:  &project.ID,
 			TaskID:     &task.ID,
 			Payload: runtimeevents.TaskCreatedPayload{
 				Key:         task.Key,
 				Title:       task.Title,
 				Status:      task.Status,
-				Scope:       task.Scope,
+				Scope:       eventScope,
 				RequestedBy: task.RequestedBy,
 			},
 			OccurredAt: now,
@@ -556,6 +538,28 @@ func (store *Store) CreateTask(ctx context.Context, params CreateTaskParams) (Ta
 	})
 
 	return task, err
+}
+
+func taskSubjectType(explicit controlscope.SubjectType, legacyScope string, initiativeID *int64) controlscope.SubjectType {
+	if explicit != "" {
+		return explicit
+	}
+	if legacyScope == "new-project" {
+		return controlscope.SubjectTypeWorkspace
+	}
+	if initiativeID != nil {
+		return controlscope.SubjectTypeInitiative
+	}
+	return controlscope.SubjectTypeProject
+}
+
+func taskCreatedEventScope(subjectType controlscope.SubjectType, legacyScope string) string {
+	switch subjectType {
+	case controlscope.SubjectTypeWorkspace, controlscope.SubjectTypeInitiative:
+		return string(subjectType)
+	default:
+		return legacyScope
+	}
 }
 
 func (store *Store) UpdateTaskProject(ctx context.Context, taskID int64, projectID int64) (Task, error) {

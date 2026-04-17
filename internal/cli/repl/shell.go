@@ -651,10 +651,8 @@ func matchesEventScope(eventScope string, resolved scope.Resolution) bool {
 	switch resolved.Kind {
 	case scope.ScopeGlobal:
 		return true
-	case scope.ScopeProject:
-		return eventScope == string(scope.ScopeProject)
-	case scope.ScopeOdinCore:
-		return eventScope == string(scope.ScopeOdinCore)
+	case scope.ScopeProject, scope.ScopeOdinCore:
+		return true
 	case scope.ScopeNewProject:
 		return eventScope == string(scope.ScopeNewProject)
 	default:

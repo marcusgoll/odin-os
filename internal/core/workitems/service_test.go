@@ -8,6 +8,7 @@ import (
 	"odin-os/internal/core/companions"
 	"odin-os/internal/core/controlscope"
 	"odin-os/internal/core/workspaces"
+	runtimeevents "odin-os/internal/runtime/events"
 	"odin-os/internal/store/sqlite"
 )
 
@@ -35,6 +36,24 @@ func TestWorkItemCreateFromWorkspaceContext(t *testing.T) {
 
 	if workItem.Scope.SubjectType != controlscope.SubjectTypeWorkspace {
 		t.Fatalf("Scope.SubjectType = %q, want %q", workItem.Scope.SubjectType, controlscope.SubjectTypeWorkspace)
+	}
+
+	events, err := store.ListEvents(ctx, sqlite.ListEventsParams{TaskID: &workItem.ID})
+	if err != nil {
+		t.Fatalf("ListEvents() error = %v", err)
+	}
+	if len(events) == 0 {
+		t.Fatalf("ListEvents() len = 0, want at least one event")
+	}
+	if events[0].Scope != string(controlscope.SubjectTypeWorkspace) {
+		t.Fatalf("task.created scope = %q, want %q", events[0].Scope, controlscope.SubjectTypeWorkspace)
+	}
+	payload, err := runtimeevents.DecodePayload[runtimeevents.TaskCreatedPayload](events[0].Payload)
+	if err != nil {
+		t.Fatalf("DecodePayload(TaskCreatedPayload) error = %v", err)
+	}
+	if payload.Scope != string(controlscope.SubjectTypeWorkspace) {
+		t.Fatalf("task.created payload scope = %q, want %q", payload.Scope, controlscope.SubjectTypeWorkspace)
 	}
 }
 
@@ -75,6 +94,24 @@ func TestWorkItemCreateFromInitiativeContext(t *testing.T) {
 	}
 	if workItem.ProjectKey != "alpha" {
 		t.Fatalf("ProjectKey = %q, want %q", workItem.ProjectKey, "alpha")
+	}
+
+	events, err := store.ListEvents(ctx, sqlite.ListEventsParams{TaskID: &workItem.ID})
+	if err != nil {
+		t.Fatalf("ListEvents() error = %v", err)
+	}
+	if len(events) == 0 {
+		t.Fatalf("ListEvents() len = 0, want at least one event")
+	}
+	if events[0].Scope != string(controlscope.SubjectTypeInitiative) {
+		t.Fatalf("task.created scope = %q, want %q", events[0].Scope, controlscope.SubjectTypeInitiative)
+	}
+	payload, err := runtimeevents.DecodePayload[runtimeevents.TaskCreatedPayload](events[0].Payload)
+	if err != nil {
+		t.Fatalf("DecodePayload(TaskCreatedPayload) error = %v", err)
+	}
+	if payload.Scope != string(controlscope.SubjectTypeInitiative) {
+		t.Fatalf("task.created payload scope = %q, want %q", payload.Scope, controlscope.SubjectTypeInitiative)
 	}
 }
 
