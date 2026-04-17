@@ -776,6 +776,14 @@ func TestAlphaAcceptance(t *testing.T) {
 		if !strings.Contains(output, "## Final Verdict") {
 			t.Fatalf("doctor markdown output = %q, want final verdict", output)
 		}
+
+		output, err = runOdinCommand(t, repoRoot, odinBinary, runtimeRoot, nil, "", "doctor", "--report")
+		if err != nil {
+			t.Fatalf("runOdinCommand(doctor --report) error = %v\n%s", err, output)
+		}
+		if !strings.Contains(output, "## Final Verdict") {
+			t.Fatalf("doctor report output = %q, want final verdict", output)
+		}
 	})
 
 	t.Run("operational autonomy contract docs exist", func(t *testing.T) {
