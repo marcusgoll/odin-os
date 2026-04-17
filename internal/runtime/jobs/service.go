@@ -68,13 +68,14 @@ func (service Service) CreateTaskFromAct(ctx context.Context, resolved scope.Res
 	if err != nil {
 		return sqlite.Task{}, err
 	}
+	if _, err := service.Store.UpdateTaskScope(ctx, workItem.ID, taskScope); err != nil {
+		return sqlite.Task{}, err
+	}
 
 	created, err := service.Store.GetTask(ctx, workItem.ID)
 	if err != nil {
 		return sqlite.Task{}, err
 	}
-	created.ProjectID = project.ID
-	created.Scope = taskScope
 	return created, nil
 }
 

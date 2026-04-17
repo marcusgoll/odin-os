@@ -149,6 +149,8 @@ type CreateTaskParams struct {
 	WorkspaceID  int64
 	InitiativeID *int64
 	CompanionID  *int64
+	SubjectType  controlscope.SubjectType
+	SubjectKey   string
 	Key          string
 	Title        string
 	Status       string

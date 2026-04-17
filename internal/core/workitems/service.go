@@ -64,6 +64,8 @@ func (service Service) Create(ctx context.Context, scope controlscope.ControlSco
 		WorkspaceID:  workspace.ID,
 		InitiativeID: initiativeID,
 		CompanionID:  companionID,
+		SubjectType:  scope.SubjectType,
+		SubjectKey:   scope.SubjectKey,
 		Key:          fmt.Sprintf("work-item-%d", time.Now().UnixNano()),
 		Title:        title,
 		Status:       "queued",

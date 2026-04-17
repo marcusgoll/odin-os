@@ -1,6 +1,8 @@
 ALTER TABLE tasks ADD COLUMN workspace_id INTEGER REFERENCES workspaces(id) ON DELETE CASCADE;
 ALTER TABLE tasks ADD COLUMN initiative_id INTEGER REFERENCES initiatives(id) ON DELETE SET NULL;
 ALTER TABLE tasks ADD COLUMN companion_id INTEGER REFERENCES companions(id) ON DELETE SET NULL;
+ALTER TABLE tasks ADD COLUMN subject_type TEXT NOT NULL DEFAULT 'project';
+ALTER TABLE tasks ADD COLUMN subject_key TEXT NOT NULL DEFAULT '';
 
 UPDATE tasks
 SET workspace_id = COALESCE(
@@ -29,6 +31,24 @@ SET companion_id = (
   LIMIT 1
 )
 WHERE companion_id IS NULL;
+
+UPDATE tasks
+SET subject_type = 'workspace',
+    subject_key = COALESCE(
+      (SELECT w.key FROM workspaces w WHERE w.id = tasks.workspace_id LIMIT 1),
+      'marcus'
+    )
+WHERE scope = 'new-project';
+
+UPDATE tasks
+SET subject_type = 'project',
+    subject_key = (
+      SELECT p.key
+      FROM projects p
+      WHERE p.id = tasks.project_id
+      LIMIT 1
+    )
+WHERE scope != 'new-project';
 
 CREATE INDEX IF NOT EXISTS idx_tasks_workspace_id ON tasks(workspace_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_initiative_id ON tasks(initiative_id);

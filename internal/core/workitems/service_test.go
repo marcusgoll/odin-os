@@ -123,6 +123,12 @@ func TestWorkItemLinkCompanionAndProject(t *testing.T) {
 	if project.ProjectKey != "alpha" {
 		t.Fatalf("LinkProject().ProjectKey = %q, want %q", project.ProjectKey, "alpha")
 	}
+	if project.Scope.SubjectType != controlscope.SubjectTypeWorkspace {
+		t.Fatalf("LinkProject().Scope.SubjectType = %q, want %q", project.Scope.SubjectType, controlscope.SubjectTypeWorkspace)
+	}
+	if project.Scope.SubjectKey != workspace.Key {
+		t.Fatalf("LinkProject().Scope.SubjectKey = %q, want %q", project.Scope.SubjectKey, workspace.Key)
+	}
 }
 
 func TestRunAttemptHistoryAcrossRetries(t *testing.T) {

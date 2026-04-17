@@ -59,6 +59,36 @@ func TestCreateTaskFromActEnsuresRuntimeProjectAndCreatesQueuedTask(t *testing.T
 	}
 }
 
+func TestWorkItemFromActPersistsLegacyScope(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openJobStore(t)
+	defer store.Close()
+
+	registry := writeRegistry(t)
+	service := Service{
+		Store:    store,
+		Registry: registry,
+		Now:      time.Now,
+	}
+
+	task, err := service.CreateTaskFromAct(ctx, scope.Resolution{
+		Kind: scope.ScopeNewProject,
+	}, "Create runtime bootstrap")
+	if err != nil {
+		t.Fatalf("CreateTaskFromAct() error = %v", err)
+	}
+
+	stored, err := store.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
+	}
+	if stored.Scope != string(scope.ScopeNewProject) {
+		t.Fatalf("GetTask().Scope = %q, want %q", stored.Scope, scope.ScopeNewProject)
+	}
+}
+
 func TestListFiltersJobsByScope(t *testing.T) {
 	t.Parallel()
 

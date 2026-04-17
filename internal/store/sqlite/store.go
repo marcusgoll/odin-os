@@ -461,14 +461,50 @@ func (store *Store) CreateTask(ctx context.Context, params CreateTaskParams) (Ta
 			}
 		}
 
+		subjectType := params.SubjectType
+		subjectKey := params.SubjectKey
+		if subjectType == "" {
+			if params.Scope == "new-project" {
+				subjectType = controlscope.SubjectTypeWorkspace
+			} else if initiativeID != nil {
+				subjectType = controlscope.SubjectTypeInitiative
+			} else {
+				subjectType = controlscope.SubjectTypeProject
+			}
+		}
+		if subjectKey == "" {
+			switch subjectType {
+			case controlscope.SubjectTypeWorkspace:
+				workspace, err := store.getWorkspaceTx(ctx, tx, workspaceID)
+				if err != nil {
+					return err
+				}
+				subjectKey = workspace.Key
+			case controlscope.SubjectTypeInitiative:
+				if initiativeID == nil {
+					return fmt.Errorf("initiative subject requires initiative link")
+				}
+				initiative, err := store.getInitiativeTx(ctx, tx, *initiativeID)
+				if err != nil {
+					return err
+				}
+				subjectKey = initiative.Key
+			default:
+				subjectType = controlscope.SubjectTypeProject
+				subjectKey = project.Key
+			}
+		}
+
 		result, err := tx.ExecContext(ctx, `
-			INSERT INTO tasks (project_id, workspace_id, initiative_id, companion_id, key, title, status, scope, requested_by, current_run_id, created_at, updated_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
+			INSERT INTO tasks (project_id, workspace_id, initiative_id, companion_id, subject_type, subject_key, key, title, status, scope, requested_by, current_run_id, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
 		`,
 			params.ProjectID,
 			workspaceID,
 			nullInt64(initiativeID),
 			nullInt64(companionID),
+			string(subjectType),
+			subjectKey,
 			params.Key,
 			params.Title,
 			params.Status,
@@ -517,6 +553,31 @@ func (store *Store) CreateTask(ctx context.Context, params CreateTaskParams) (Ta
 			},
 			OccurredAt: now,
 		})
+	})
+
+	return task, err
+}
+
+func (store *Store) UpdateTaskScope(ctx context.Context, taskID int64, scope string) (Task, error) {
+	now := store.now()
+	var task Task
+
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		current, err := store.getTaskTx(ctx, tx, taskID)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE tasks
+			SET scope = ?, updated_at = ?
+			WHERE id = ?
+		`, scope, formatTime(now), taskID); err != nil {
+			return err
+		}
+		current.Scope = scope
+		current.UpdatedAt = now
+		task = current
+		return nil
 	})
 
 	return task, err
@@ -584,12 +645,14 @@ func (store *Store) UpdateTaskCompanion(ctx context.Context, taskID int64, compa
 
 func (store *Store) GetWorkItem(ctx context.Context, taskID int64) (WorkItem, error) {
 	row := store.db.QueryRowContext(ctx, `
-		SELECT
+	SELECT
 			t.id,
 			t.project_id,
 			t.workspace_id,
 			t.initiative_id,
 			t.companion_id,
+			t.subject_type,
+			t.subject_key,
 			t.key,
 			t.title,
 			t.status,
@@ -3541,6 +3604,8 @@ func scanWorkItem(row interface{ Scan(...any) error }) (WorkItem, error) {
 	var currentRunID sql.NullInt64
 	var initiativeID sql.NullInt64
 	var companionID sql.NullInt64
+	var subjectType string
+	var subjectKey string
 	var createdAt string
 	var updatedAt string
 	if err := row.Scan(
@@ -3549,6 +3614,8 @@ func scanWorkItem(row interface{ Scan(...any) error }) (WorkItem, error) {
 		&workItem.WorkspaceID,
 		&initiativeID,
 		&companionID,
+		&subjectType,
+		&subjectKey,
 		&workItem.Key,
 		&workItem.Title,
 		&workItem.Status,
@@ -3577,18 +3644,8 @@ func scanWorkItem(row interface{ Scan(...any) error }) (WorkItem, error) {
 	if err != nil {
 		return WorkItem{}, err
 	}
-	subjectType := controlscope.SubjectTypeProject
-	subjectKey := workItem.ProjectKey
-	switch {
-	case workItem.ProjectKey == "odin-core" && workItem.InitiativeKey == "":
-		subjectType = controlscope.SubjectTypeWorkspace
-		subjectKey = workItem.WorkspaceKey
-	case workItem.InitiativeKey != "" && workItem.InitiativeKey != workItem.ProjectKey:
-		subjectType = controlscope.SubjectTypeInitiative
-		subjectKey = workItem.InitiativeKey
-	}
 	workItem.Scope = controlscope.ControlScope{
-		SubjectType:   subjectType,
+		SubjectType:   controlscope.SubjectType(subjectType),
 		SubjectKey:    subjectKey,
 		WorkspaceKey:  workItem.WorkspaceKey,
 		InitiativeKey: workItem.InitiativeKey,
