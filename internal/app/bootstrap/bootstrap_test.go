@@ -3,10 +3,14 @@ package bootstrap
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	runtimeevents "odin-os/internal/runtime/events"
+	"odin-os/internal/store/sqlite"
 )
 
 func TestLoadInitializesFreshRuntimeReadinessState(t *testing.T) {
@@ -26,6 +30,79 @@ func TestLoadInitializesFreshRuntimeReadinessState(t *testing.T) {
 	assertCountAtLeast(t, app.Store.DB().QueryRowContext(context.Background(), "SELECT COUNT(*) FROM registry_versions"), 1)
 	assertCountAtLeast(t, app.Store.DB().QueryRowContext(context.Background(), "SELECT COUNT(*) FROM executor_health"), 1)
 	assertCountAtLeast(t, app.Store.DB().QueryRowContext(context.Background(), "SELECT COUNT(*) FROM projection_freshness"), 1)
+}
+
+func TestLoadRecordsBootingWhenServeBootIDIsPresent(t *testing.T) {
+	repoRoot := createBootstrapRepoRoot(t, true)
+	runtimeRoot := t.TempDir()
+
+	ctx := context.WithValue(context.Background(), "odin.boot_id", "boot-1")
+	app, err := Load(ctx, repoRoot, runtimeRoot)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	defer app.Store.Close()
+
+	got, err := app.Store.GetRuntimeState(context.Background())
+	if err != nil {
+		t.Fatalf("GetRuntimeState() error = %v", err)
+	}
+	if got.Status != "booting" {
+		t.Fatalf("RuntimeState.Status = %q, want %q", got.Status, "booting")
+	}
+	if got.BootID != "boot-1" {
+		t.Fatalf("RuntimeState.BootID = %q, want %q", got.BootID, "boot-1")
+	}
+
+	events, err := app.Store.ListEvents(context.Background(), sqlite.ListEventsParams{})
+	if err != nil {
+		t.Fatalf("ListEvents() error = %v", err)
+	}
+	found := false
+	for _, event := range events {
+		if event.Type != runtimeevents.EventServiceLifecycleChanged {
+			continue
+		}
+		lifecycle, err := runtimeevents.DecodePayload[runtimeevents.ServiceLifecyclePayload](event.Payload)
+		if err != nil {
+			t.Fatalf("DecodePayload(ServiceLifecyclePayload) error = %v", err)
+		}
+		if lifecycle.Status == "booting" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("events = %+v, want booting lifecycle event", events)
+	}
+}
+
+func TestLoadRecordsStoppedWithLastErrorWhenBootstrapFailsAfterBooting(t *testing.T) {
+	repoRoot := createBootstrapRepoRoot(t, false)
+	runtimeRoot := t.TempDir()
+
+	ctx := context.WithValue(context.Background(), "odin.boot_id", "boot-1")
+	_, err := Load(ctx, repoRoot, runtimeRoot)
+	if err == nil {
+		t.Fatal("Load() error = nil, want bootstrap failure")
+	}
+
+	store, openErr := sqlite.Open(filepath.Join(runtimeRoot, "data", "odin.db"))
+	if openErr != nil {
+		t.Fatalf("sqlite.Open() error = %v", openErr)
+	}
+	defer store.Close()
+
+	got, err := store.GetRuntimeState(context.Background())
+	if err != nil {
+		t.Fatalf("GetRuntimeState() error = %v", err)
+	}
+	if got.Status != "stopped" {
+		t.Fatalf("RuntimeState.Status = %q, want %q", got.Status, "stopped")
+	}
+	if got.LastError == "" {
+		t.Fatal("RuntimeState.LastError = empty, want bootstrap error")
+	}
 }
 
 func TestLoadSerializesConcurrentBootstrapForFreshRuntime(t *testing.T) {
@@ -151,4 +228,60 @@ func assertCountAtLeast(t *testing.T, row rowScanner, minimum int) {
 
 type rowScanner interface {
 	Scan(...any) error
+}
+
+func createBootstrapRepoRoot(t *testing.T, includeProjectsConfig bool) string {
+	t.Helper()
+
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "config"), 0o755); err != nil {
+		t.Fatalf("mkdir config: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "registry"), 0o755); err != nil {
+		t.Fatalf("mkdir registry: %v", err)
+	}
+
+	if err := os.WriteFile(filepath.Join(root, "config", "odin.yaml"), []byte(`
+version: 1
+runtime:
+  root: .
+service:
+  http_addr: 127.0.0.1:0
+  startup_recovery: true
+`), 0o644); err != nil {
+		t.Fatalf("write odin config: %v", err)
+	}
+	if includeProjectsConfig {
+		if err := os.WriteFile(filepath.Join(root, "config", "projects.yaml"), []byte(`
+version: 1
+projects:
+  - key: odin-core
+    name: Odin Core
+    project_class: system_project
+    system_project: true
+    git_root: ..
+    default_branch: main
+`), 0o644); err != nil {
+			t.Fatalf("write projects config: %v", err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(root, "config", "executors.yaml"), []byte(`
+version: 1
+executors:
+  - key: codex_headless
+    adapter: codex_headless
+    class: plan_backed_cli
+    enabled: true
+    priority: 10
+routes:
+  - name: default
+    match:
+      task_kinds: [general, plan, build, review, qa, research]
+      scopes: [global, odin-core, project, new-project]
+    preferred: [codex_headless]
+`), 0o644); err != nil {
+		t.Fatalf("write executors config: %v", err)
+	}
+
+	return root
 }

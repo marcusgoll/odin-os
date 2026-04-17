@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"os"
 	"path/filepath"
 
@@ -13,6 +14,7 @@ import (
 	executorrouter "odin-os/internal/executors/router"
 	"odin-os/internal/registry"
 	registryloader "odin-os/internal/registry/loader"
+	runtimestate "odin-os/internal/runtime/state"
 	"odin-os/internal/store/sqlite"
 )
 
@@ -24,6 +26,8 @@ type App struct {
 	SessionStore        clistate.SessionStore
 	ExecutorConfig      executorrouter.Config
 	Executors           map[string]contract.Executor
+	BootID              string
+	RuntimeState        runtimestate.Service
 }
 
 func Load(ctx context.Context, repoRoot string, runtimeRoot string) (App, error) {
@@ -45,19 +49,38 @@ func Load(ctx context.Context, repoRoot string, runtimeRoot string) (App, error)
 		return App{}, err
 	}
 
+	bootID := bootIDFromContext(ctx)
+	runtimeState := runtimestate.Service{Store: store}
+
 	if err := store.Migrate(ctx); err != nil {
 		_ = store.Close()
 		return App{}, err
 	}
 
+	if bootID != "" {
+		if _, err := runtimeState.MarkBooting(ctx, runtimestate.BootInput{
+			BootID: bootID,
+			PID:    os.Getpid(),
+		}); err != nil {
+			_ = store.Close()
+			return App{}, err
+		}
+	}
+
 	registrySnapshot, err := registryloader.LoadDir(filepath.Join(repoRoot, "registry"))
 	if err != nil {
+		if failureErr := markBootstrapFailed(ctx, runtimeState, bootID, err); failureErr != nil {
+			err = failureErr
+		}
 		_ = store.Close()
 		return App{}, err
 	}
 
 	registry, diagnostics, err := projects.Register(filepath.Join(repoRoot, "config", "projects.yaml"))
 	if err != nil {
+		if failureErr := markBootstrapFailed(ctx, runtimeState, bootID, err); failureErr != nil {
+			err = failureErr
+		}
 		_ = store.Close()
 		return App{}, err
 	}
@@ -72,12 +95,18 @@ func Load(ctx context.Context, repoRoot string, runtimeRoot string) (App, error)
 
 	executorConfig, err := executorrouter.LoadConfig(filepath.Join(repoRoot, "config", "executors.yaml"))
 	if err != nil {
+		if failureErr := markBootstrapFailed(ctx, runtimeState, bootID, err); failureErr != nil {
+			err = failureErr
+		}
 		_ = store.Close()
 		return App{}, err
 	}
 	executors := executorrouter.DefaultCatalog()
 
 	if err := initializeReadinessState(ctx, store, filepath.Join(repoRoot, "registry"), registrySnapshot, executors); err != nil {
+		if failureErr := markBootstrapFailed(ctx, runtimeState, bootID, err); failureErr != nil {
+			err = failureErr
+		}
 		_ = store.Close()
 		return App{}, err
 	}
@@ -92,7 +121,29 @@ func Load(ctx context.Context, repoRoot string, runtimeRoot string) (App, error)
 		},
 		ExecutorConfig: executorConfig,
 		Executors:      executors,
+		BootID:         bootID,
+		RuntimeState:   runtimeState,
 	}, nil
+}
+
+func bootIDFromContext(ctx context.Context) string {
+	value, _ := ctx.Value("odin.boot_id").(string)
+	return value
+}
+
+func markBootstrapFailed(ctx context.Context, service runtimestate.Service, bootID string, cause error) error {
+	if bootID == "" || service.Store == nil {
+		return cause
+	}
+
+	if _, err := service.MarkStopped(ctx, runtimestate.TransitionInput{
+		BootID: bootID,
+		Reason: "bootstrap failed",
+		Error:  cause.Error(),
+	}); err != nil {
+		return errors.Join(cause, err)
+	}
+	return cause
 }
 
 func initializeReadinessState(ctx context.Context, store *sqlite.Store, registryRoot string, snapshot registry.Snapshot, executors map[string]contract.Executor) error {

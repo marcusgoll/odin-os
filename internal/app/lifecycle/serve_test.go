@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"odin-os/internal/runtime/checkpoints"
+	runtimeevents "odin-os/internal/runtime/events"
 	"odin-os/internal/store/sqlite"
 )
 
@@ -138,6 +140,104 @@ service:
 	if packet.Trigger != string(checkpoints.TriggerRestart) {
 		t.Fatalf("WakePacket.Trigger = %q, want %q", packet.Trigger, checkpoints.TriggerRestart)
 	}
+}
+
+func TestRunServeRecordsLifecycleTransitionsAndShutdown(t *testing.T) {
+	t.Parallel()
+
+	root := createRuntimeRoot(t)
+	seedHealthyRuntime(t, root)
+	writeRuntimeConfig(t, root, `
+version: 1
+runtime:
+  root: .
+service:
+  http_addr: 127.0.0.1:0
+  startup_recovery: true
+`)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	time.AfterFunc(200*time.Millisecond, cancel)
+
+	var stdout bytes.Buffer
+	err := Run(ctx, root, []string{"serve"}, strings.NewReader(""), &stdout)
+	if err != nil && !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run(serve) error = %v", err)
+	}
+
+	store, openErr := sqlite.Open(filepath.Join(root, "data", "odin.db"))
+	if openErr != nil {
+		t.Fatalf("sqlite.Open() error = %v", openErr)
+	}
+	defer store.Close()
+
+	got, err := store.GetRuntimeState(context.Background())
+	if err != nil {
+		t.Fatalf("GetRuntimeState() error = %v", err)
+	}
+	if got.Status != "stopped" {
+		t.Fatalf("RuntimeState.Status = %q, want %q", got.Status, "stopped")
+	}
+	if got.ReadyAt == nil {
+		t.Fatal("RuntimeState.ReadyAt = nil, want ready transition before shutdown")
+	}
+
+	statuses, err := lifecycleStatuses(store)
+	if err != nil {
+		t.Fatalf("lifecycleStatuses() error = %v", err)
+	}
+	assertLifecycleSequence(t, statuses, []string{"booting", "recovering", "ready", "draining", "stopped"})
+}
+
+func TestRunServeStopsWithoutReadyWhenListenerBindingFails(t *testing.T) {
+	t.Parallel()
+
+	root := createRuntimeRoot(t)
+	seedHealthyRuntime(t, root)
+
+	occupied, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("net.Listen() error = %v", err)
+	}
+	defer occupied.Close()
+
+	writeRuntimeConfig(t, root, `
+version: 1
+runtime:
+  root: .
+service:
+  http_addr: `+occupied.Addr().String()+`
+  startup_recovery: true
+`)
+
+	var stdout bytes.Buffer
+	err = Run(context.Background(), root, []string{"serve"}, strings.NewReader(""), &stdout)
+	if err == nil {
+		t.Fatal("Run(serve) error = nil, want listener binding failure")
+	}
+
+	store, openErr := sqlite.Open(filepath.Join(root, "data", "odin.db"))
+	if openErr != nil {
+		t.Fatalf("sqlite.Open() error = %v", openErr)
+	}
+	defer store.Close()
+
+	got, err := store.GetRuntimeState(context.Background())
+	if err != nil {
+		t.Fatalf("GetRuntimeState() error = %v", err)
+	}
+	if got.Status != "stopped" {
+		t.Fatalf("RuntimeState.Status = %q, want %q", got.Status, "stopped")
+	}
+	if got.LastError == "" {
+		t.Fatal("RuntimeState.LastError = empty, want listener binding error")
+	}
+
+	statuses, err := lifecycleStatuses(store)
+	if err != nil {
+		t.Fatalf("lifecycleStatuses() error = %v", err)
+	}
+	assertLifecycleSequence(t, statuses, []string{"booting", "recovering", "stopped"})
 }
 
 func TestRunServeExecutesStartupRecoveryWhenContextAlreadyCanceled(t *testing.T) {
@@ -473,5 +573,49 @@ func writeRuntimeConfig(t *testing.T, root string, content string) {
 
 	if err := os.WriteFile(filepath.Join(root, "config", "odin.yaml"), []byte(content), 0o644); err != nil {
 		t.Fatalf("write odin config: %v", err)
+	}
+}
+
+func lifecycleStatuses(store *sqlite.Store) ([]string, error) {
+	events, err := store.ListEvents(context.Background(), sqlite.ListEventsParams{})
+	if err != nil {
+		return nil, err
+	}
+
+	statuses := make([]string, 0, len(events))
+	for _, event := range events {
+		if event.Type != runtimeevents.EventServiceLifecycleChanged {
+			continue
+		}
+		payload, err := runtimeevents.DecodePayload[runtimeevents.ServiceLifecyclePayload](event.Payload)
+		if err != nil {
+			return nil, err
+		}
+		statuses = append(statuses, payload.Status)
+	}
+	return statuses, nil
+}
+
+func assertLifecycleSequence(t *testing.T, statuses []string, want []string) {
+	t.Helper()
+
+	if len(statuses) < len(want) {
+		t.Fatalf("lifecycle statuses = %v, want sequence at least %v", statuses, want)
+	}
+
+	cursor := 0
+	for _, status := range want {
+		found := false
+		for cursor < len(statuses) {
+			if statuses[cursor] == status {
+				found = true
+				cursor++
+				break
+			}
+			cursor++
+		}
+		if !found {
+			t.Fatalf("lifecycle statuses = %v, missing %q in order %v", statuses, status, want)
+		}
 	}
 }
