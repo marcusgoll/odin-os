@@ -1,6 +1,10 @@
 package sqlite
 
-import "time"
+import (
+	"time"
+
+	"odin-os/internal/core/controlscope"
+)
 
 type Project struct {
 	ID            int64
@@ -127,6 +131,9 @@ type ReconcileManagedProjectInitiativeParams struct {
 type Task struct {
 	ID           int64
 	ProjectID    int64
+	WorkspaceID  int64
+	InitiativeID *int64
+	CompanionID  *int64
 	Key          string
 	Title        string
 	Status       string
@@ -138,12 +145,15 @@ type Task struct {
 }
 
 type CreateTaskParams struct {
-	ProjectID   int64
-	Key         string
-	Title       string
-	Status      string
-	Scope       string
-	RequestedBy string
+	ProjectID    int64
+	WorkspaceID  int64
+	InitiativeID *int64
+	CompanionID  *int64
+	Key          string
+	Title        string
+	Status       string
+	Scope        string
+	RequestedBy  string
 }
 
 type UpdateTaskStatusParams struct {
@@ -173,6 +183,15 @@ type FinishRunParams struct {
 	RunID   int64
 	Status  string
 	Summary string
+}
+
+type WorkItem struct {
+	Task
+	Scope         controlscope.ControlScope
+	ProjectKey    string
+	WorkspaceKey  string
+	InitiativeKey string
+	CompanionKey  string
 }
 
 type Approval struct {

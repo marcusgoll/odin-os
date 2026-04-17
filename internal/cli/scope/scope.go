@@ -1,5 +1,7 @@
 package scope
 
+import "odin-os/internal/core/controlscope"
+
 type Kind string
 
 const (
@@ -45,4 +47,22 @@ func Resolve(input ResolveInput) Resolution {
 	}
 
 	return Resolution{Kind: ScopeGlobal}
+}
+
+func ToControlScope(resolution Resolution) controlscope.ControlScope {
+	switch resolution.Kind {
+	case ScopeProject, ScopeOdinCore:
+		return controlscope.ControlScope{
+			SubjectType: controlscope.SubjectTypeProject,
+			SubjectKey:  resolution.ProjectKey,
+			ProjectKey:  resolution.ProjectKey,
+		}
+	case ScopeNewProject:
+		return controlscope.ControlScope{
+			SubjectType: controlscope.SubjectTypeProject,
+			SubjectKey:  string(ScopeNewProject),
+		}
+	default:
+		return controlscope.ControlScope{}
+	}
 }

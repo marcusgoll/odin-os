@@ -9,6 +9,7 @@ import (
 
 	"odin-os/internal/cli/scope"
 	"odin-os/internal/core/projects"
+	"odin-os/internal/core/workitems"
 	"odin-os/internal/executors/contract"
 	executorrouter "odin-os/internal/executors/router"
 	"odin-os/internal/runtime/projections"
@@ -57,19 +58,24 @@ func (service Service) CreateTaskFromAct(ctx context.Context, resolved scope.Res
 		return sqlite.Task{}, err
 	}
 
-	now := time.Now().UTC()
-	if service.Now != nil {
-		now = service.Now().UTC()
+	workScope := scope.ToControlScope(resolved)
+	workScope.ProjectKey = project.Key
+	if workScope.WorkspaceKey == "" {
+		workScope.WorkspaceKey = "marcus"
 	}
 
-	return service.Store.CreateTask(ctx, sqlite.CreateTaskParams{
-		ProjectID:   project.ID,
-		Key:         fmt.Sprintf("%s-%s", slugify(title), now.Format("20060102-150405")),
-		Title:       title,
-		Status:      "queued",
-		Scope:       taskScope,
-		RequestedBy: "operator",
-	})
+	workItem, err := workitems.Service{Store: service.Store}.Create(ctx, workScope, title)
+	if err != nil {
+		return sqlite.Task{}, err
+	}
+
+	created, err := service.Store.GetTask(ctx, workItem.ID)
+	if err != nil {
+		return sqlite.Task{}, err
+	}
+	created.ProjectID = project.ID
+	created.Scope = taskScope
+	return created, nil
 }
 
 func (service Service) ExecuteNextQueued(ctx context.Context) error {
@@ -294,6 +300,11 @@ func (service Service) taskOwnerForScope(resolved scope.Resolution) (projects.Ma
 }
 
 func matchesTaskScope(projectKey, taskScope string, resolved scope.Resolution) bool {
+	control := scope.ToControlScope(resolved)
+	if control.ProjectKey != "" {
+		return projectKey == control.ProjectKey
+	}
+
 	switch resolved.Kind {
 	case scope.ScopeGlobal:
 		return true

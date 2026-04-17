@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"odin-os/internal/core/controlscope"
 	runtimeevents "odin-os/internal/runtime/events"
 
 	_ "modernc.org/sqlite"
@@ -422,11 +423,52 @@ func (store *Store) CreateTask(ctx context.Context, params CreateTaskParams) (Ta
 			return err
 		}
 
+		workspaceID := params.WorkspaceID
+		initiativeID := params.InitiativeID
+		companionID := params.CompanionID
+
+		if workspaceID == 0 {
+			if params.Scope == "project" {
+				workspace, derivedInitiative, derivedCompanion, err := store.taskContextForProjectTx(ctx, tx, project.ID, now)
+				if err != nil {
+					return err
+				}
+				workspaceID = workspace.ID
+				if initiativeID == nil {
+					initiativeID = derivedInitiative
+				}
+				if companionID == nil {
+					companionID = derivedCompanion
+				}
+			}
+			if workspaceID == 0 {
+				workspace, err := store.ensureDefaultWorkspaceTx(ctx, tx, now)
+				if err != nil {
+					return err
+				}
+				workspaceID = workspace.ID
+			}
+		}
+		if initiativeID == nil && params.Scope == "project" {
+			if initiative, err := store.getInitiativeByProjectIDTx(ctx, tx, project.ID); err == nil {
+				initiativeID = &initiative.ID
+				if workspaceID == 0 {
+					workspaceID = initiative.WorkspaceID
+				}
+				if companionID == nil {
+					companionID = initiative.OwnerCompanionID
+				}
+			}
+		}
+
 		result, err := tx.ExecContext(ctx, `
-			INSERT INTO tasks (project_id, key, title, status, scope, requested_by, current_run_id, created_at, updated_at)
-			VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?)
+			INSERT INTO tasks (project_id, workspace_id, initiative_id, companion_id, key, title, status, scope, requested_by, current_run_id, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
 		`,
 			params.ProjectID,
+			workspaceID,
+			nullInt64(initiativeID),
+			nullInt64(companionID),
 			params.Key,
 			params.Title,
 			params.Status,
@@ -445,15 +487,18 @@ func (store *Store) CreateTask(ctx context.Context, params CreateTaskParams) (Ta
 		}
 
 		task = Task{
-			ID:          taskID,
-			ProjectID:   params.ProjectID,
-			Key:         params.Key,
-			Title:       params.Title,
-			Status:      params.Status,
-			Scope:       params.Scope,
-			RequestedBy: params.RequestedBy,
-			CreatedAt:   now,
-			UpdatedAt:   now,
+			ID:           taskID,
+			ProjectID:    params.ProjectID,
+			WorkspaceID:  workspaceID,
+			InitiativeID: initiativeID,
+			CompanionID:  companionID,
+			Key:          params.Key,
+			Title:        params.Title,
+			Status:       params.Status,
+			Scope:        params.Scope,
+			RequestedBy:  params.RequestedBy,
+			CreatedAt:    now,
+			UpdatedAt:    now,
 		}
 
 		return appendEventTx(ctx, tx, eventInsert{
@@ -475,6 +520,96 @@ func (store *Store) CreateTask(ctx context.Context, params CreateTaskParams) (Ta
 	})
 
 	return task, err
+}
+
+func (store *Store) UpdateTaskProject(ctx context.Context, taskID int64, projectID int64) (Task, error) {
+	now := store.now()
+	var task Task
+
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		current, err := store.getTaskTx(ctx, tx, taskID)
+		if err != nil {
+			return err
+		}
+		project, err := store.getProjectTx(ctx, tx, projectID)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE tasks
+			SET project_id = ?, scope = ?, updated_at = ?
+			WHERE id = ?
+		`, projectID, project.Scope, formatTime(now), taskID); err != nil {
+			return err
+		}
+		current.ProjectID = projectID
+		current.Scope = project.Scope
+		current.UpdatedAt = now
+		task = current
+		return nil
+	})
+
+	return task, err
+}
+
+func (store *Store) UpdateTaskCompanion(ctx context.Context, taskID int64, companionID *int64) (Task, error) {
+	now := store.now()
+	var task Task
+
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		current, err := store.getTaskTx(ctx, tx, taskID)
+		if err != nil {
+			return err
+		}
+		if companionID != nil {
+			if _, err := store.getCompanionTx(ctx, tx, *companionID); err != nil {
+				return err
+			}
+		}
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE tasks
+			SET companion_id = ?, updated_at = ?
+			WHERE id = ?
+		`, nullInt64(companionID), formatTime(now), taskID); err != nil {
+			return err
+		}
+		current.CompanionID = companionID
+		current.UpdatedAt = now
+		task = current
+		return nil
+	})
+
+	return task, err
+}
+
+func (store *Store) GetWorkItem(ctx context.Context, taskID int64) (WorkItem, error) {
+	row := store.db.QueryRowContext(ctx, `
+		SELECT
+			t.id,
+			t.project_id,
+			t.workspace_id,
+			t.initiative_id,
+			t.companion_id,
+			t.key,
+			t.title,
+			t.status,
+			t.scope,
+			t.requested_by,
+			t.current_run_id,
+			t.created_at,
+			t.updated_at,
+			p.key,
+			w.key,
+			COALESCE(i.key, ''),
+			COALESCE(c.key, '')
+		FROM tasks t
+		JOIN projects p ON p.id = t.project_id
+		JOIN workspaces w ON w.id = t.workspace_id
+		LEFT JOIN initiatives i ON i.id = t.initiative_id
+		LEFT JOIN companions c ON c.id = t.companion_id
+		WHERE t.id = ?
+	`, taskID)
+	return scanWorkItem(row)
 }
 
 func (store *Store) UpdateTaskStatus(ctx context.Context, params UpdateTaskStatusParams) (Task, error) {
@@ -1906,6 +2041,15 @@ func (store *Store) GetInitiative(ctx context.Context, initiativeID int64) (Init
 	return scanInitiative(row)
 }
 
+func (store *Store) GetInitiativeByKey(ctx context.Context, key string) (Initiative, error) {
+	row := store.db.QueryRowContext(ctx, `
+		SELECT id, workspace_id, key, title, kind, status, summary, linked_project_id, owner_companion_id, created_at, updated_at
+		FROM initiatives
+		WHERE key = ?
+	`, key)
+	return scanInitiative(row)
+}
+
 func (store *Store) GetInitiativeByProjectID(ctx context.Context, projectID int64) (Initiative, error) {
 	row := store.db.QueryRowContext(ctx, `
 		SELECT id, workspace_id, key, title, kind, status, summary, linked_project_id, owner_companion_id, created_at, updated_at
@@ -1913,6 +2057,28 @@ func (store *Store) GetInitiativeByProjectID(ctx context.Context, projectID int6
 		WHERE linked_project_id = ?
 	`, projectID)
 	return scanInitiative(row)
+}
+
+func (store *Store) GetCompanionByKey(ctx context.Context, key string) (Companion, error) {
+	row := store.db.QueryRowContext(ctx, `
+		SELECT
+			id,
+			workspace_id,
+			key,
+			title,
+			kind,
+			charter,
+			status,
+			initiative_scope_json,
+			tool_policy_json,
+			memory_policy_json,
+			planning_policy_json,
+			created_at,
+			updated_at
+		FROM companions
+		WHERE key = ?
+	`, key)
+	return scanCompanion(row)
 }
 
 func (store *Store) ListWorkspaces(ctx context.Context, params ListWorkspacesParams) ([]Workspace, error) {
@@ -2493,6 +2659,30 @@ func (store *Store) getTaskQuery(ctx context.Context, queryer sqlQueryRow, taskI
 		WHERE id = ?
 	`, taskID)
 	return scanTask(row)
+}
+
+func (store *Store) taskContextForProjectTx(ctx context.Context, tx *sql.Tx, projectID int64, now time.Time) (Workspace, *int64, *int64, error) {
+	initiative, err := store.getInitiativeByProjectIDTx(ctx, tx, projectID)
+	if err == nil {
+		workspace, err := store.getWorkspaceTx(ctx, tx, initiative.WorkspaceID)
+		if err != nil {
+			return Workspace{}, nil, nil, err
+		}
+		var companionID *int64
+		if initiative.OwnerCompanionID != nil {
+			companionID = initiative.OwnerCompanionID
+		}
+		return workspace, &initiative.ID, companionID, nil
+	}
+	if err != sql.ErrNoRows {
+		return Workspace{}, nil, nil, err
+	}
+
+	workspace, err := store.ensureDefaultWorkspaceTx(ctx, tx, now)
+	if err != nil {
+		return Workspace{}, nil, nil, err
+	}
+	return workspace, nil, nil, nil
 }
 
 func (store *Store) getProjectTx(ctx context.Context, tx *sql.Tx, projectID int64) (Project, error) {
@@ -3344,6 +3534,68 @@ func scanTask(row interface{ Scan(...any) error }) (Task, error) {
 		return Task{}, err
 	}
 	return task, nil
+}
+
+func scanWorkItem(row interface{ Scan(...any) error }) (WorkItem, error) {
+	var workItem WorkItem
+	var currentRunID sql.NullInt64
+	var initiativeID sql.NullInt64
+	var companionID sql.NullInt64
+	var createdAt string
+	var updatedAt string
+	if err := row.Scan(
+		&workItem.ID,
+		&workItem.ProjectID,
+		&workItem.WorkspaceID,
+		&initiativeID,
+		&companionID,
+		&workItem.Key,
+		&workItem.Title,
+		&workItem.Status,
+		&workItem.Task.Scope,
+		&workItem.RequestedBy,
+		&currentRunID,
+		&createdAt,
+		&updatedAt,
+		&workItem.ProjectKey,
+		&workItem.WorkspaceKey,
+		&workItem.InitiativeKey,
+		&workItem.CompanionKey,
+	); err != nil {
+		return WorkItem{}, err
+	}
+
+	var err error
+	workItem.Task.CurrentRunID = nullableInt64Ptr(currentRunID)
+	workItem.Task.InitiativeID = nullableInt64Ptr(initiativeID)
+	workItem.Task.CompanionID = nullableInt64Ptr(companionID)
+	workItem.CreatedAt, err = parseTime(createdAt)
+	if err != nil {
+		return WorkItem{}, err
+	}
+	workItem.UpdatedAt, err = parseTime(updatedAt)
+	if err != nil {
+		return WorkItem{}, err
+	}
+	subjectType := controlscope.SubjectTypeProject
+	subjectKey := workItem.ProjectKey
+	switch {
+	case workItem.ProjectKey == "odin-core" && workItem.InitiativeKey == "":
+		subjectType = controlscope.SubjectTypeWorkspace
+		subjectKey = workItem.WorkspaceKey
+	case workItem.InitiativeKey != "" && workItem.InitiativeKey != workItem.ProjectKey:
+		subjectType = controlscope.SubjectTypeInitiative
+		subjectKey = workItem.InitiativeKey
+	}
+	workItem.Scope = controlscope.ControlScope{
+		SubjectType:   subjectType,
+		SubjectKey:    subjectKey,
+		WorkspaceKey:  workItem.WorkspaceKey,
+		InitiativeKey: workItem.InitiativeKey,
+		ProjectKey:    workItem.ProjectKey,
+		CompanionKey:  workItem.CompanionKey,
+	}
+	return workItem, nil
 }
 
 func scanRun(row interface{ Scan(...any) error }) (Run, error) {

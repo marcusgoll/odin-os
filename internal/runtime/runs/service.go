@@ -67,6 +67,11 @@ func (service Service) List(ctx context.Context, resolved scope.Resolution) ([]p
 }
 
 func matchesRunScope(projectKey, taskScope string, resolved scope.Resolution) bool {
+	control := scope.ToControlScope(resolved)
+	if control.ProjectKey != "" {
+		return projectKey == control.ProjectKey
+	}
+
 	switch resolved.Kind {
 	case scope.ScopeGlobal:
 		return true
