@@ -130,6 +130,55 @@ func TestWorkspaceRefactorAcceptance(t *testing.T) {
 		}
 	})
 
+	t.Run("companion create does not wipe durable companion fields on rerun", func(t *testing.T) {
+		runtimeRoot := t.TempDir()
+
+		createOutput, err := runOdinCommand(t, repoRoot, odinBinary, runtimeRoot, nil, "", "companion", "create", "--kind", "advisor", "--key", "finance", "--title", "Finance Advisor")
+		if err != nil {
+			t.Fatalf("runOdinCommand(companion create seed) error = %v\n%s", err, createOutput)
+		}
+
+		store := openRuntimeStore(t, runtimeRoot)
+		defer store.Close()
+
+		workspace, err := store.GetWorkspaceByKey(ctx, workspaces.DefaultWorkspaceKey)
+		if err != nil {
+			t.Fatalf("GetWorkspaceByKey(default) error = %v", err)
+		}
+		if _, err := store.DB().ExecContext(ctx, `
+			UPDATE companions
+			SET charter = ?, status = ?, initiative_scope_json = ?, tool_policy_json = ?, memory_policy_json = ?, planning_policy_json = ?
+			WHERE workspace_id = ? AND key = ?
+		`, "Keep finance decisions clear.", "disabled", `{"initiatives":["finance"]}`, `{"allow":["budget_review"]}`, `{"mode":"project"}`, `{"mode":"guided"}`, workspace.ID, "finance"); err != nil {
+			t.Fatalf("seed companion customization error = %v", err)
+		}
+
+		rerunOutput, err := runOdinCommand(t, repoRoot, odinBinary, runtimeRoot, nil, "", "companion", "create", "--kind", "advisor", "--key", "finance", "--title", "Finance Advisor")
+		if err != nil {
+			t.Fatalf("runOdinCommand(companion create rerun) error = %v\n%s", err, rerunOutput)
+		}
+
+		reloaded, err := store.GetCompanionByKey(ctx, workspace.ID, "finance")
+		if err != nil {
+			t.Fatalf("GetCompanionByKey(finance) error = %v", err)
+		}
+		if reloaded.Charter != "Keep finance decisions clear." {
+			t.Fatalf("reloaded.Charter = %q, want preserved charter", reloaded.Charter)
+		}
+		if reloaded.Status != "disabled" {
+			t.Fatalf("reloaded.Status = %q, want preserved status", reloaded.Status)
+		}
+		if reloaded.ToolPolicyJSON != `{"allow":["budget_review"]}` {
+			t.Fatalf("reloaded.ToolPolicyJSON = %q, want preserved policy", reloaded.ToolPolicyJSON)
+		}
+		if reloaded.MemoryPolicyJSON != `{"mode":"project"}` {
+			t.Fatalf("reloaded.MemoryPolicyJSON = %q, want preserved policy", reloaded.MemoryPolicyJSON)
+		}
+		if reloaded.PlanningPolicyJSON != `{"mode":"guided"}` {
+			t.Fatalf("reloaded.PlanningPolicyJSON = %q, want preserved policy", reloaded.PlanningPolicyJSON)
+		}
+	})
+
 	t.Run("a companion can own a work item", func(t *testing.T) {
 		runtimeRoot := t.TempDir()
 		output, err := runOdinCommand(t, repoRoot, odinBinary, runtimeRoot, nil, "/project odin-core\n/mode act\nworkspace acceptance work item\n/quit\n", "repl")

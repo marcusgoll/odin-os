@@ -253,6 +253,68 @@ func TestCompanionServiceListsCompanions(t *testing.T) {
 	}
 }
 
+func TestCompanionServiceCreateOrUpdatePreservesExistingFields(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openCompanionServiceStore(t)
+	defer store.Close()
+
+	workspace, err := store.GetWorkspaceByKey(ctx, "default")
+	if err != nil {
+		t.Fatalf("GetWorkspaceByKey(default) error = %v", err)
+	}
+
+	service := Service{Store: store}
+
+	if _, err := service.UpsertCompanion(ctx, Companion{
+		WorkspaceID:         workspace.ID,
+		Key:                 "finance",
+		Title:               "Finance Advisor",
+		Kind:                KindAdvisor,
+		Charter:             "Keep finance decisions clear.",
+		Status:              "disabled",
+		InitiativeScopeJSON: `{"initiatives":["finance"]}`,
+		ToolPolicyJSON:      `{"allow":["budget_review"]}`,
+		MemoryPolicyJSON:    `{"mode":"project"}`,
+		PlanningPolicyJSON:  `{"mode":"guided"}`,
+	}); err != nil {
+		t.Fatalf("UpsertCompanion(seed) error = %v", err)
+	}
+
+	created, err := service.CreateOrUpdateCompanion(ctx, Companion{
+		WorkspaceID:         workspace.ID,
+		Key:                 "finance",
+		Title:               "Finance Advisor",
+		Kind:                KindAdvisor,
+		Charter:             "",
+		Status:              "",
+		InitiativeScopeJSON: "",
+		ToolPolicyJSON:      "",
+		MemoryPolicyJSON:    "",
+		PlanningPolicyJSON:  "",
+	})
+	if err != nil {
+		t.Fatalf("CreateOrUpdateCompanion() error = %v", err)
+	}
+
+	if created.Charter != "Keep finance decisions clear." {
+		t.Fatalf("created.Charter = %q, want %q", created.Charter, "Keep finance decisions clear.")
+	}
+	if created.Status != "disabled" {
+		t.Fatalf("created.Status = %q, want %q", created.Status, "disabled")
+	}
+	if created.ToolPolicyJSON != `{"allow":["budget_review"]}` {
+		t.Fatalf("created.ToolPolicyJSON = %q, want %q", created.ToolPolicyJSON, `{"allow":["budget_review"]}`)
+	}
+	if created.MemoryPolicyJSON != `{"mode":"project"}` {
+		t.Fatalf("created.MemoryPolicyJSON = %q, want %q", created.MemoryPolicyJSON, `{"mode":"project"}`)
+	}
+	if created.PlanningPolicyJSON != `{"mode":"guided"}` {
+		t.Fatalf("created.PlanningPolicyJSON = %q, want %q", created.PlanningPolicyJSON, `{"mode":"guided"}`)
+	}
+}
+
 func openCompanionServiceStore(t *testing.T) *sqlite.Store {
 	t.Helper()
 

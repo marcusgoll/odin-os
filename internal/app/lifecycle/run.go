@@ -563,17 +563,17 @@ func runCompanion(ctx context.Context, app bootstrap.App, args []string, stdout 
 
 	switch command.Name {
 	case "create":
-		companion, err := service.UpsertCompanion(ctx, companions.Companion{
+		companion, err := service.CreateOrUpdateCompanion(ctx, companions.Companion{
 			WorkspaceID:         workspace.ID,
 			Key:                 command.Key,
 			Title:               command.Title,
 			Kind:                companions.Kind(command.Kind),
 			Charter:             "",
-			Status:              "active",
-			InitiativeScopeJSON: `{}`,
-			ToolPolicyJSON:      `{}`,
-			MemoryPolicyJSON:    `{}`,
-			PlanningPolicyJSON:  `{}`,
+			Status:              "",
+			InitiativeScopeJSON: "",
+			ToolPolicyJSON:      "",
+			MemoryPolicyJSON:    "",
+			PlanningPolicyJSON:  "",
 		})
 		if err != nil {
 			return err
