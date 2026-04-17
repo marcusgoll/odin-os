@@ -13,7 +13,9 @@ The tool broker exposes a thin capability catalog before any full definitions ar
 
 - `tool`
 - `skill`
-- `sub_agent`
+- `workflow`
+- `agent_role`
+- `operator_command`
 
 ## Thin card fields
 
@@ -23,6 +25,8 @@ The tool broker exposes a thin capability catalog before any full definitions ar
 - `summary`
 - `scopes`
 - `tags`
+- `applies_to`
+- `composes`
 - `cost_hint`
 - `budget_cost`
 - `source_ref`
@@ -31,11 +35,15 @@ The tool broker exposes a thin capability catalog before any full definitions ar
 
 - thin cards must not include full tool schemas
 - thin cards must not include full skill bodies
-- thin cards must not include full sub-agent definitions
+- thin cards must not include full workflow bodies
+- thin cards must not include full agent-role definitions
+- thin cards must not include full operator-command definitions
 - expansion occurs only after selection
 
 ## Sources in Phase 07
 
 - built-in tool definitions authored in code
 - registry-backed `skill` items
-- registry-backed `agent` items mapped to `sub_agent`
+- registry-backed `workflow` items
+- registry-backed `agent` items mapped to `agent_role`
+- registry-backed `command` items mapped to `operator_command`

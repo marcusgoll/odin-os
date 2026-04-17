@@ -58,7 +58,7 @@ func BuiltinDefinitions() map[string]ToolDefinition {
 					CapabilityKey:   "task_list",
 					Summary:         fmt.Sprintf("Task list prepared for %s scope.", scope),
 					KeyFacts:        map[string]string{"scope": scope},
-					FollowOnOptions: []string{"expand sub-agent", "invoke event_log"},
+					FollowOnOptions: []string{"expand agent role", "invoke event_log"},
 					RawRef:          "builtin://task_list/result",
 					RawOutput:       fmt.Sprintf("scope=%s tasks=0", scope),
 				}, nil

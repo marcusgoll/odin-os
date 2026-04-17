@@ -10,9 +10,11 @@ import (
 type Kind string
 
 const (
-	KindTool     Kind = "tool"
-	KindSkill    Kind = "skill"
-	KindSubAgent Kind = "sub_agent"
+	KindTool            Kind = "tool"
+	KindSkill           Kind = "skill"
+	KindWorkflow        Kind = "workflow"
+	KindAgentRole       Kind = "agent_role"
+	KindOperatorCommand Kind = "operator_command"
 )
 
 type CostHint string
@@ -30,6 +32,8 @@ type Card struct {
 	Summary    string
 	Scopes     []string
 	Tags       []string
+	AppliesTo  []string
+	Composes   []string
 	CostHint   CostHint
 	BudgetCost int
 	SourceRef  string
@@ -54,27 +58,60 @@ type SkillDefinition struct {
 	Summary   string
 	Tags      []string
 	Scopes    []string
+	AppliesTo []string
+	Composes  []string
 	Sections  map[string]string
 	SourceRef string
 }
 
-type SubAgentDefinition struct {
+type WorkflowDefinition struct {
+	Key        string
+	Title      string
+	Summary    string
+	Tags       []string
+	Scopes     []string
+	AppliesTo  []string
+	Composes   []string
+	Entrypoint string
+	Sections   map[string]string
+	SourceRef  string
+}
+
+type AgentRoleDefinition struct {
 	Key       string
 	Title     string
 	Summary   string
 	Tags      []string
 	Scopes    []string
+	AppliesTo []string
+	Composes  []string
 	Tools     []string
 	Role      string
 	Sections  map[string]string
 	SourceRef string
 }
 
+type OperatorCommandDefinition struct {
+	Key       string
+	Title     string
+	Summary   string
+	Tags      []string
+	Scopes    []string
+	AppliesTo []string
+	Composes  []string
+	Command   string
+	Aliases   []string
+	Sections  map[string]string
+	SourceRef string
+}
+
 type Expansion struct {
-	Card     Card
-	Tool     *ToolDefinition
-	Skill    *SkillDefinition
-	SubAgent *SubAgentDefinition
+	Card            Card
+	Tool            *ToolDefinition
+	Skill           *SkillDefinition
+	Workflow        *WorkflowDefinition
+	AgentRole       *AgentRoleDefinition
+	OperatorCommand *OperatorCommandDefinition
 }
 
 type StructuredResult struct {
@@ -120,20 +157,52 @@ func CardFromRegistry(item registry.Item) (Card, bool) {
 			Summary:    item.Summary,
 			Scopes:     append([]string(nil), item.Scopes...),
 			Tags:       append([]string(nil), item.Tags...),
+			AppliesTo:  append([]string(nil), item.AppliesTo...),
+			Composes:   append([]string(nil), item.Composes...),
 			CostHint:   CostHintLow,
 			BudgetCost: 1,
 			SourceRef:  item.Source.RelativePath,
 		}, true
 	case registry.KindAgent:
 		return Card{
-			Kind:       KindSubAgent,
+			Kind:       KindAgentRole,
 			Key:        item.Key,
 			Title:      item.Title,
 			Summary:    item.Summary,
 			Scopes:     append([]string(nil), item.Scopes...),
 			Tags:       append([]string(nil), item.Tags...),
+			AppliesTo:  append([]string(nil), item.AppliesTo...),
+			Composes:   append([]string(nil), item.Composes...),
 			CostHint:   CostHintMedium,
 			BudgetCost: 2,
+			SourceRef:  item.Source.RelativePath,
+		}, true
+	case registry.KindWorkflow:
+		return Card{
+			Kind:       KindWorkflow,
+			Key:        item.Key,
+			Title:      item.Title,
+			Summary:    item.Summary,
+			Scopes:     append([]string(nil), item.Scopes...),
+			Tags:       append([]string(nil), item.Tags...),
+			AppliesTo:  append([]string(nil), item.AppliesTo...),
+			Composes:   append([]string(nil), item.Composes...),
+			CostHint:   CostHintMedium,
+			BudgetCost: 2,
+			SourceRef:  item.Source.RelativePath,
+		}, true
+	case registry.KindCommand:
+		return Card{
+			Kind:       KindOperatorCommand,
+			Key:        item.Key,
+			Title:      item.Title,
+			Summary:    item.Summary,
+			Scopes:     append([]string(nil), item.Scopes...),
+			Tags:       append([]string(nil), item.Tags...),
+			AppliesTo:  append([]string(nil), item.AppliesTo...),
+			Composes:   append([]string(nil), item.Composes...),
+			CostHint:   CostHintLow,
+			BudgetCost: 1,
 			SourceRef:  item.Source.RelativePath,
 		}, true
 	default:

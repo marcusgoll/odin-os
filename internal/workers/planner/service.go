@@ -11,48 +11,108 @@ type Service struct {
 	Broker *broker.Broker
 }
 
+type WorkspaceContext struct {
+	Key string
+}
+
+type InitiativeContext struct {
+	Key  string
+	Kind string
+}
+
+type CompanionContext struct {
+	Key                string
+	Kind               string
+	ToolPolicyJSON     string
+	PlanningPolicyJSON string
+}
+
+type MemoryReference struct {
+	Scope   string
+	Summary string
+	Ref     string
+}
+
+type PrepareInput struct {
+	Scope            string
+	Workspace        WorkspaceContext
+	Initiative       *InitiativeContext
+	Companion        *CompanionContext
+	MemoryReferences []MemoryReference
+}
+
 type PlanContext struct {
-	Cards []catalog.Card
+	Scope            string
+	Workspace        WorkspaceContext
+	Initiative       *InitiativeContext
+	Companion        *CompanionContext
+	MemoryReferences []MemoryReference
+	Cards            []catalog.Card
 }
 
 type Selection struct {
-	Key              string
-	InvokeTool       bool
-	ToolInput        map[string]string
-	AllowSubAgentUse bool
+	Key               string
+	InvokeTool        bool
+	ToolInput         map[string]string
+	AllowAgentRoleUse bool
+}
+
+type MaterializeInput struct {
+	Scope            string
+	Workspace        WorkspaceContext
+	Initiative       *InitiativeContext
+	Companion        *CompanionContext
+	MemoryReferences []MemoryReference
+	Selections       []Selection
 }
 
 type ExecutionContext struct {
-	Cards      []catalog.Card
-	Expansions []catalog.Expansion
-	Compacted  []catalog.CompactedResult
+	Scope            string
+	Workspace        WorkspaceContext
+	Initiative       *InitiativeContext
+	Companion        *CompanionContext
+	MemoryReferences []MemoryReference
+	Cards            []catalog.Card
+	Expansions       []catalog.Expansion
+	Compacted        []catalog.CompactedResult
 }
 
-func (service Service) Prepare(scope string) (PlanContext, error) {
+func (service Service) Prepare(input PrepareInput) (PlanContext, error) {
 	if service.Broker == nil {
 		return PlanContext{}, fmt.Errorf("planner broker is required")
 	}
+
 	return PlanContext{
-		Cards: service.Broker.Catalog(scope),
+		Scope:            input.Scope,
+		Workspace:        input.Workspace,
+		Initiative:       cloneInitiativeContext(input.Initiative),
+		Companion:        cloneCompanionContext(input.Companion),
+		MemoryReferences: cloneMemoryReferences(input.MemoryReferences),
+		Cards:            service.Broker.Catalog(input.Scope),
 	}, nil
 }
 
-func (service Service) Materialize(scope string, selections []Selection) (ExecutionContext, error) {
+func (service Service) Materialize(input MaterializeInput) (ExecutionContext, error) {
 	if service.Broker == nil {
 		return ExecutionContext{}, fmt.Errorf("planner broker is required")
 	}
 
 	context := ExecutionContext{
-		Cards: service.Broker.Catalog(scope),
+		Scope:            input.Scope,
+		Workspace:        input.Workspace,
+		Initiative:       cloneInitiativeContext(input.Initiative),
+		Companion:        cloneCompanionContext(input.Companion),
+		MemoryReferences: cloneMemoryReferences(input.MemoryReferences),
+		Cards:            service.Broker.Catalog(input.Scope),
 	}
 
-	for _, selection := range selections {
+	for _, selection := range input.Selections {
 		expansion, err := service.Broker.Expand(selection.Key)
 		if err != nil {
 			return ExecutionContext{}, err
 		}
-		if expansion.SubAgent != nil && !selection.AllowSubAgentUse {
-			return ExecutionContext{}, fmt.Errorf("sub-agent expansion requires explicit plan opt-in")
+		if expansion.AgentRole != nil && !selection.AllowAgentRoleUse {
+			return ExecutionContext{}, fmt.Errorf("agent-role expansion requires explicit plan opt-in")
 		}
 
 		context.Expansions = append(context.Expansions, expansion)
@@ -74,4 +134,29 @@ func (service Service) Materialize(scope string, selections []Selection) (Execut
 	}
 
 	return context, nil
+}
+
+func cloneInitiativeContext(input *InitiativeContext) *InitiativeContext {
+	if input == nil {
+		return nil
+	}
+	cloned := *input
+	return &cloned
+}
+
+func cloneCompanionContext(input *CompanionContext) *CompanionContext {
+	if input == nil {
+		return nil
+	}
+	cloned := *input
+	return &cloned
+}
+
+func cloneMemoryReferences(input []MemoryReference) []MemoryReference {
+	if len(input) == 0 {
+		return nil
+	}
+	cloned := make([]MemoryReference, len(input))
+	copy(cloned, input)
+	return cloned
 }

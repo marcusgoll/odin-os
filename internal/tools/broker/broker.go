@@ -88,6 +88,8 @@ func (broker *Broker) Expand(key string) (catalog.Expansion, error) {
 				Summary:   item.Summary,
 				Tags:      append([]string(nil), item.Tags...),
 				Scopes:    append([]string(nil), item.Scopes...),
+				AppliesTo: append([]string(nil), item.AppliesTo...),
+				Composes:  append([]string(nil), item.Composes...),
 				Sections:  catalog.CloneSections(item.Sections),
 				SourceRef: item.Source.RelativePath,
 			},
@@ -95,14 +97,49 @@ func (broker *Broker) Expand(key string) (catalog.Expansion, error) {
 	case registry.KindAgent:
 		return catalog.Expansion{
 			Card: card,
-			SubAgent: &catalog.SubAgentDefinition{
+			AgentRole: &catalog.AgentRoleDefinition{
 				Key:       item.Key,
 				Title:     item.Title,
 				Summary:   item.Summary,
 				Tags:      append([]string(nil), item.Tags...),
 				Scopes:    append([]string(nil), item.Scopes...),
+				AppliesTo: append([]string(nil), item.AppliesTo...),
+				Composes:  append([]string(nil), item.Composes...),
 				Tools:     append([]string(nil), item.Tools...),
 				Role:      item.Role,
+				Sections:  catalog.CloneSections(item.Sections),
+				SourceRef: item.Source.RelativePath,
+			},
+		}, nil
+	case registry.KindWorkflow:
+		return catalog.Expansion{
+			Card: card,
+			Workflow: &catalog.WorkflowDefinition{
+				Key:        item.Key,
+				Title:      item.Title,
+				Summary:    item.Summary,
+				Tags:       append([]string(nil), item.Tags...),
+				Scopes:     append([]string(nil), item.Scopes...),
+				AppliesTo:  append([]string(nil), item.AppliesTo...),
+				Composes:   append([]string(nil), item.Composes...),
+				Entrypoint: item.Entrypoint,
+				Sections:   catalog.CloneSections(item.Sections),
+				SourceRef:  item.Source.RelativePath,
+			},
+		}, nil
+	case registry.KindCommand:
+		return catalog.Expansion{
+			Card: card,
+			OperatorCommand: &catalog.OperatorCommandDefinition{
+				Key:       item.Key,
+				Title:     item.Title,
+				Summary:   item.Summary,
+				Tags:      append([]string(nil), item.Tags...),
+				Scopes:    append([]string(nil), item.Scopes...),
+				AppliesTo: append([]string(nil), item.AppliesTo...),
+				Composes:  append([]string(nil), item.Composes...),
+				Command:   item.Command,
+				Aliases:   append([]string(nil), item.Aliases...),
 				Sections:  catalog.CloneSections(item.Sections),
 				SourceRef: item.Source.RelativePath,
 			},
