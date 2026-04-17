@@ -149,8 +149,17 @@ func renderRootCauseGroup(builder *strings.Builder, rootCauses []RootCause) {
 func filterRootCauses(rootCauses []RootCause, provenance string) []RootCause {
 	filtered := make([]RootCause, 0, len(rootCauses))
 	for _, rootCause := range rootCauses {
-		if rootCause.Provenance == provenance {
-			filtered = append(filtered, rootCause)
+		if provenance == "confirmed" {
+			if rootCause.Provenance == "confirmed" {
+				filtered = append(filtered, rootCause)
+			}
+			continue
+		}
+
+		if rootCause.Provenance != "confirmed" {
+			normalized := rootCause
+			normalized.Provenance = "inferred"
+			filtered = append(filtered, normalized)
 		}
 	}
 	return filtered

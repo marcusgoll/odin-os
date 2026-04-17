@@ -161,6 +161,28 @@ func TestRenderMarkdownReportRendersCoverageProvenanceAndRecommendationMetadata(
 	}
 }
 
+func TestRenderMarkdownReportDefaultsUnknownRootCauseProvenanceToInferred(t *testing.T) {
+	report := OperatorReport{
+		RootCauses: []RootCause{
+			{Area: "database", Summary: "database connectivity failed", Confidence: "high", Provenance: "confirmed"},
+			{Area: "cache", Summary: "cache shard unavailable", Confidence: "reduced", Provenance: ""},
+			{Area: "search", Summary: "search latency elevated", Confidence: "reduced", Provenance: "mystery"},
+		},
+	}
+
+	output := RenderMarkdownReport(report)
+
+	if !strings.Contains(output, "### Confirmed") || !strings.Contains(output, "database") {
+		t.Fatalf("output missing confirmed root cause\n%s", output)
+	}
+	if !strings.Contains(output, "### Inferred") || !strings.Contains(output, "cache") || !strings.Contains(output, "search") {
+		t.Fatalf("output should render empty and unknown provenance root causes as inferred\n%s", output)
+	}
+	if strings.Contains(output, "mystery") {
+		t.Fatalf("output should normalize unknown provenance instead of exposing raw value\n%s", output)
+	}
+}
+
 func TestRenderMarkdownReportRendersHealthyCoverageAsEvaluatedOnly(t *testing.T) {
 	report := OperatorReport{
 		Coverage: CoverageMetadata{
