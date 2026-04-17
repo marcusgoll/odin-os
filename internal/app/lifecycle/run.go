@@ -11,27 +11,28 @@ import (
 	stdhttp "net/http"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	"github.com/google/uuid"
 	apihttp "odin-os/internal/api/http"
 	appbackup "odin-os/internal/app/backup"
 	"odin-os/internal/app/bootstrap"
 	appconfig "odin-os/internal/app/config"
-	"odin-os/internal/cli/commands"
+	clicommands "odin-os/internal/cli/commands"
 	"odin-os/internal/cli/repl"
-	"odin-os/internal/cli/scope"
-	clistate "odin-os/internal/cli/state"
+	cliscope "odin-os/internal/cli/scope"
 	"odin-os/internal/core/capabilities"
 	"odin-os/internal/core/projects"
+	"odin-os/internal/executors/contract"
+	executorrouter "odin-os/internal/executors/router"
 	conversationsvc "odin-os/internal/runtime/conversation"
-	runtimeevents "odin-os/internal/runtime/events"
 	healthsvc "odin-os/internal/runtime/health"
 	"odin-os/internal/runtime/jobs"
 	"odin-os/internal/runtime/recovery"
-	"odin-os/internal/runtime/runs"
+	runtimestate "odin-os/internal/runtime/state"
 	"odin-os/internal/runtime/supervision"
 	"odin-os/internal/store/sqlite"
 	"odin-os/internal/telemetry/logs"
@@ -43,555 +44,153 @@ import (
 
 var errRuntimeNotReady = errors.New("runtime not ready")
 
-const rootUsageBanner = "Usage: odin <command> [args]\n\nCommands: help repl doctor healthcheck serve backup restore verify-backup status project scope jobs runs approvals logs task transition skills"
+type serveLoopConfig struct {
+	taskInterval      time.Duration
+	schedulerInterval time.Duration
+	selfHealInterval  time.Duration
+	leaseInterval     time.Duration
+	leaseStaleAfter   time.Duration
+	healthInterval    time.Duration
+}
 
-var (
-	serveTaskLoopInterval     = 1 * time.Second
-	serveSelfHealLoopInterval = 30 * time.Second
-	serveMetricsLoopInterval  = 1 * time.Minute
-	serveOperationTimeout     = 30 * time.Second
-	serveHealthConfig         = healthsvc.DefaultConfig()
-	serveListen               = net.Listen
-)
+type serveLoopConfigKey struct{}
 
-// Run dispatches between root commands and the interactive shell.
-func Run(ctx context.Context, root string, args []string, stdin io.Reader, stdout io.Writer) error {
-	rootCommand := commands.ParseRoot(args)
+var defaultServeLoopConfig = serveLoopConfig{
+	taskInterval:      1 * time.Second,
+	schedulerInterval: 5 * time.Second,
+	selfHealInterval:  30 * time.Second,
+	leaseInterval:     30 * time.Second,
+	leaseStaleAfter:   5 * time.Minute,
+	healthInterval:    30 * time.Second,
+}
 
-	switch rootCommand.Name {
-	case "help":
-		_, err := fmt.Fprintln(stdout, rootUsageBanner)
-		return err
+func withServeLoopConfig(ctx context.Context, cfg serveLoopConfig) context.Context {
+	return context.WithValue(ctx, serveLoopConfigKey{}, cfg)
+}
+
+func serveLoopConfigFromContext(ctx context.Context) serveLoopConfig {
+	cfg, _ := ctx.Value(serveLoopConfigKey{}).(serveLoopConfig)
+	if cfg.taskInterval <= 0 {
+		cfg.taskInterval = defaultServeLoopConfig.taskInterval
 	}
+	if cfg.schedulerInterval <= 0 {
+		cfg.schedulerInterval = defaultServeLoopConfig.schedulerInterval
+	}
+	if cfg.selfHealInterval <= 0 {
+		cfg.selfHealInterval = defaultServeLoopConfig.selfHealInterval
+	}
+	if cfg.leaseInterval <= 0 {
+		cfg.leaseInterval = defaultServeLoopConfig.leaseInterval
+	}
+	if cfg.leaseStaleAfter <= 0 {
+		cfg.leaseStaleAfter = defaultServeLoopConfig.leaseStaleAfter
+	}
+	if cfg.healthInterval <= 0 {
+		cfg.healthInterval = defaultServeLoopConfig.healthInterval
+	}
+	return cfg
+}
 
+type healthLoopDeps struct {
+	Store              *sqlite.Store
+	RuntimeState       runtimestate.Service
+	Health             healthsvc.Service
+	Executors          map[string]contract.Executor
+	ExecutorConfig     executorrouter.Config
+	RegistryHealthy    bool
+	ProjectionSurfaces []string
+	ShutdownRequested  *atomic.Bool
+	BootID             string
+	RuntimeRoot        string
+}
+
+// Run dispatches between the interactive shell and machine-oriented operational commands.
+func Run(ctx context.Context, root string, args []string, stdin io.Reader, stdout io.Writer) error {
 	cfg, err := appconfig.Load(filepath.Join(root, "config", "odin.yaml"), root, runtimeEnv())
 	if err != nil {
 		return err
 	}
 
 	loadCtx := ctx
-	if rootCommand.Name == "serve" {
-		var cancelLoad context.CancelFunc
-		loadCtx, cancelLoad = serveLoadContext(ctx)
-		defer cancelLoad()
+	if len(args) > 0 && args[0] == "serve" {
+		serveLock, err := bootstrap.AcquireServiceLock(cfg.RuntimeRoot)
+		if err != nil {
+			return err
+		}
+		defer serveLock.Release()
+		loadCtx = bootstrap.WithBootID(context.WithoutCancel(ctx), "boot-"+uuid.NewString())
 	}
 
-	appLoader := bootstrap.Load
-	if rootCommand.Name == "status" {
-		appLoader = bootstrap.LoadReadOnly
-	}
-
-	app, err := appLoader(loadCtx, root, cfg.RuntimeRoot)
+	app, err := bootstrap.Load(loadCtx, root, cfg.RuntimeRoot)
 	if err != nil {
 		return err
 	}
 	defer app.Store.Close()
 
-	switch rootCommand.Name {
+	if len(args) == 0 {
+		_, err := fmt.Fprintln(stdout, "Usage: odin <repl|status|project|transition|task|skills|doctor|healthcheck|serve|backup|restore|verify-backup> ...")
+		return err
+	}
+
+	switch args[0] {
 	case "repl":
 		return runRepl(ctx, app, stdin, stdout)
+	case "status":
+		return runStatus(ctx, app, args[1:], stdout)
+	case "project":
+		return runProject(ctx, app, args[1:], stdout)
+	case "transition":
+		return runTransition(ctx, app, args[1:], stdout)
+	case "task":
+		return runTask(ctx, app, args[1:], stdout)
+	case "skills":
+		return runSkills(ctx, app, args[1:], stdout)
 	case "doctor":
-		return runDoctor(ctx, app, rootCommand.Args, stdout)
+		return runDoctor(ctx, app, args[1:], stdout)
 	case "healthcheck":
-		return runHealthcheck(ctx, app, stdout)
+		return runHealthcheck(ctx, app, cfg, stdout)
 	case "serve":
 		return runServe(ctx, app, cfg, stdout)
 	case "backup":
-		return runBackup(ctx, appbackup.Service{RepoRoot: root, RuntimeRoot: cfg.RuntimeRoot}, rootCommand.Args, stdout)
+		return runBackup(ctx, appbackup.Service{RepoRoot: root, RuntimeRoot: cfg.RuntimeRoot}, args[1:], stdout)
 	case "restore":
-		return runRestore(ctx, appbackup.Service{RepoRoot: root, RuntimeRoot: cfg.RuntimeRoot}, rootCommand.Args, stdout)
+		return runRestore(ctx, appbackup.Service{RepoRoot: root, RuntimeRoot: cfg.RuntimeRoot}, args[1:], stdout)
 	case "verify-backup":
-		return runVerifyBackup(ctx, appbackup.Service{RepoRoot: root, RuntimeRoot: cfg.RuntimeRoot}, rootCommand.Args, stdout)
-	case "status":
-		return runStatus(ctx, app, rootCommand.Args, stdout)
-	case "project":
-		return runProject(app, rootCommand.Args, stdout)
-	case "scope":
-		return runScope(app, rootCommand.Args, stdout)
-	case "jobs":
-		return runJobs(ctx, app, rootCommand.Args, stdout)
-	case "runs":
-		return runRuns(ctx, app, rootCommand.Args, stdout)
-	case "approvals":
-		return runApprovals(ctx, app, rootCommand.Args, stdout)
-	case "logs":
-		return runLogs(ctx, app, rootCommand.Args, stdout)
-	case "task":
-		return runTask(ctx, app, rootCommand.Args, stdout)
-	case "transition":
-		return runTransition(ctx, app, rootCommand.Args, stdout)
-	case "skills":
-		return runSkills(ctx, app, rootCommand.Args, stdout)
+		return runVerifyBackup(ctx, appbackup.Service{RepoRoot: root, RuntimeRoot: cfg.RuntimeRoot}, args[1:], stdout)
 	default:
-		return fmt.Errorf("unknown command: %s", rootCommand.Name)
+		return fmt.Errorf("unknown command: %s", args[0])
 	}
 }
 
-func runRepl(ctx context.Context, app bootstrap.App, stdin io.Reader, stdout io.Writer) error {
-	shell, err := repl.New(repl.Environment{
-		Store:               app.Store,
-		Registry:            app.Registry,
-		RegistryDiagnostics: app.RegistryDiagnostics,
-		SessionStore:        app.SessionStore,
-		CapabilityService:   app.CapabilityService,
-		ExecutorConfig:      app.ExecutorConfig,
-		Executors:           app.Executors,
-		Leases: leases.Manager{
-			Store:        app.Store,
-			Git:          gitadapter.Adapter{},
-			WorktreeRoot: worktrees.DefaultRoot(),
-		},
-	})
+func runDoctor(ctx context.Context, app bootstrap.App, args []string, stdout io.Writer) error {
+	if err := bootstrap.RefreshReadinessSamples(ctx, app, len(app.RegistryDiagnostics) == 0); err != nil {
+		return err
+	}
+
+	report, err := newHealthService(app, healthsvc.DefaultConfig()).Doctor(ctx, len(app.RegistryDiagnostics) == 0)
 	if err != nil {
 		return err
 	}
 
+	if len(args) > 0 && args[0] == "--json" {
+		encoder := json.NewEncoder(stdout)
+		encoder.SetIndent("", "  ")
+		return encoder.Encode(report)
+	}
+
+	_, err = fmt.Fprintf(stdout, "status=%s checks=%d\n", report.Status, len(report.Checks))
+	return err
+}
+
+func runRepl(ctx context.Context, app bootstrap.App, stdin io.Reader, stdout io.Writer) error {
+	shell, err := newShell(app)
+	if err != nil {
+		return err
+	}
 	if err := shell.Run(ctx, stdin, stdout); err != nil && err != io.EOF {
 		return err
 	}
 	return nil
-}
-
-func runDoctor(ctx context.Context, app bootstrap.App, args []string, stdout io.Writer) error {
-	format, err := parseDoctorFormat(args)
-	if err != nil {
-		return err
-	}
-
-	report, err := healthsvc.Service{DB: app.Store.DB()}.Doctor(ctx, len(app.RegistryDiagnostics) == 0)
-	if err != nil {
-		return err
-	}
-
-	switch format {
-	case "json":
-		encoder := json.NewEncoder(stdout)
-		encoder.SetIndent("", "  ")
-		return encoder.Encode(report)
-	case "markdown":
-		operatorReport := healthsvc.BuildOperatorReport(report)
-		_, err = fmt.Fprint(stdout, healthsvc.RenderMarkdownReport(operatorReport))
-		return err
-	default:
-		_, err = fmt.Fprintf(stdout, "status=%s checks=%d\n", report.Status, len(report.Checks))
-		return err
-	}
-}
-
-func parseDoctorFormat(args []string) (string, error) {
-	if len(args) == 0 {
-		return "", nil
-	}
-
-	switch args[0] {
-	case "--json":
-		if len(args) != 1 {
-			return "", fmt.Errorf("doctor: unexpected arguments after --json")
-		}
-		return "json", nil
-	case "--report":
-		if len(args) != 1 {
-			return "", fmt.Errorf("doctor: unexpected arguments after --report")
-		}
-		return "markdown", nil
-	case "--format":
-		if len(args) < 2 {
-			return "", fmt.Errorf("doctor: --format requires a value")
-		}
-		if len(args) != 2 {
-			return "", fmt.Errorf("doctor: unexpected arguments after --format %s", args[1])
-		}
-		if args[1] != "markdown" {
-			return "", fmt.Errorf("doctor: unsupported format %q", args[1])
-		}
-		return "markdown", nil
-	default:
-		return "", fmt.Errorf("doctor: unknown flag %q", args[0])
-	}
-}
-
-func runProject(app bootstrap.App, args []string, stdout io.Writer) error {
-	jsonOutput, remaining, err := consumeJSONFlag(args)
-	if err != nil {
-		return err
-	}
-	if len(remaining) > 2 || (len(remaining) == 1 && remaining[0] != "list") {
-		return fmt.Errorf("usage: odin project [list | select <project>] [--json]")
-	}
-
-	state, err := loadCLIState(app)
-	if err != nil {
-		return err
-	}
-
-	if len(remaining) == 2 && remaining[0] == "select" {
-		project, ok := app.Registry.Lookup(remaining[1])
-		if !ok {
-			return fmt.Errorf("unknown project: %s", remaining[1])
-		}
-
-		state.Scope = scope.Resolve(scope.ResolveInput{
-			ExplicitTarget: &scope.Target{
-				ProjectKey:    project.Key,
-				SystemProject: project.SystemProject,
-			},
-		})
-		state.Mode = clistate.SanitizeMode(state.Mode, state.Scope)
-		if err := saveCLIState(app, state); err != nil {
-			return err
-		}
-
-		if jsonOutput {
-			return commands.WriteJSON(stdout, commands.ScopeView{Scope: scopeLabel(state.Scope)})
-		}
-		_, err := fmt.Fprintf(stdout, "project=%s scope=%s\n", project.Key, scopeLabel(state.Scope))
-		return err
-	}
-
-	current := state.Scope.ProjectKey
-	if current == "" {
-		current = "none"
-	}
-
-	projectKeys := make([]string, 0, len(app.Registry.Projects()))
-	for _, project := range app.Registry.Projects() {
-		projectKeys = append(projectKeys, project.Key)
-	}
-	sort.Strings(projectKeys)
-
-	view := commands.ProjectListView{
-		Current:  current,
-		Projects: projectKeys,
-	}
-	if jsonOutput {
-		return commands.WriteJSON(stdout, view)
-	}
-
-	_, err = fmt.Fprintf(stdout, "current=%s projects=%s\n", view.Current, strings.Join(view.Projects, ","))
-	return err
-}
-
-func runScope(app bootstrap.App, args []string, stdout io.Writer) error {
-	jsonOutput, remaining, err := consumeJSONFlag(args)
-	if err != nil {
-		return err
-	}
-	if len(remaining) != 0 {
-		return fmt.Errorf("usage: odin scope [--json]")
-	}
-
-	state, err := loadCLIState(app)
-	if err != nil {
-		return err
-	}
-
-	view := commands.ScopeView{Scope: scopeLabel(state.Scope)}
-	if jsonOutput {
-		return commands.WriteJSON(stdout, view)
-	}
-
-	_, err = fmt.Fprintf(stdout, "scope=%s\n", view.Scope)
-	return err
-}
-
-func runJobs(ctx context.Context, app bootstrap.App, args []string, stdout io.Writer) error {
-	jsonOutput, remaining, err := consumeJSONFlag(args)
-	if err != nil {
-		return err
-	}
-	if len(remaining) != 0 {
-		return fmt.Errorf("usage: odin jobs [--json]")
-	}
-
-	state, err := loadCLIState(app)
-	if err != nil {
-		return err
-	}
-
-	views, err := jobs.Service{Store: app.Store}.List(ctx, state.Scope)
-	if err != nil {
-		return err
-	}
-	if jsonOutput {
-		jobViews := make([]commands.JobView, 0, len(views))
-		for _, view := range views {
-			jobViews = append(jobViews, commands.JobView{
-				ProjectKey: view.ProjectKey,
-				TaskKey:    view.TaskKey,
-				Status:     view.Status,
-			})
-		}
-		return commands.WriteJSON(stdout, commands.JobsView{Jobs: jobViews})
-	}
-	if len(views) == 0 {
-		_, err := fmt.Fprintln(stdout, "no jobs")
-		return err
-	}
-
-	for _, view := range views {
-		if _, err := fmt.Fprintf(stdout, "%s %s %s\n", view.ProjectKey, view.TaskKey, view.Status); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func runRuns(ctx context.Context, app bootstrap.App, args []string, stdout io.Writer) error {
-	jsonOutput, remaining, err := consumeJSONFlag(args)
-	if err != nil {
-		return err
-	}
-	if len(remaining) != 0 {
-		return fmt.Errorf("usage: odin runs [--json]")
-	}
-
-	state, err := loadCLIState(app)
-	if err != nil {
-		return err
-	}
-
-	views, err := runs.Service{DB: app.Store.DB()}.List(ctx, state.Scope)
-	if err != nil {
-		return err
-	}
-	if jsonOutput {
-		runViews := make([]commands.RunView, 0, len(views))
-		for _, view := range views {
-			runViews = append(runViews, commands.RunView{
-				TaskKey:  view.TaskKey,
-				Executor: view.Executor,
-				Status:   view.Status,
-			})
-		}
-		return commands.WriteJSON(stdout, commands.RunsView{Runs: runViews})
-	}
-	if len(views) == 0 {
-		_, err := fmt.Fprintln(stdout, "no runs")
-		return err
-	}
-	for _, view := range views {
-		if _, err := fmt.Fprintf(stdout, "%s %s %s\n", view.TaskKey, view.Executor, view.Status); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func runApprovals(ctx context.Context, app bootstrap.App, args []string, stdout io.Writer) error {
-	jsonOutput, remaining, err := consumeJSONFlag(args)
-	if err != nil {
-		return err
-	}
-	if len(remaining) != 0 {
-		return fmt.Errorf("usage: odin approvals [--json]")
-	}
-
-	state, err := loadCLIState(app)
-	if err != nil {
-		return err
-	}
-
-	approvals, err := listPendingApprovals(ctx, app.Store, state.Scope)
-	if err != nil {
-		return err
-	}
-	if jsonOutput {
-		return commands.WriteJSON(stdout, commands.ApprovalsView{Approvals: approvals})
-	}
-	if len(approvals) == 0 {
-		_, err := fmt.Fprintln(stdout, "no approvals waiting")
-		return err
-	}
-	for _, approval := range approvals {
-		if _, err := fmt.Fprintf(stdout, "%s %s\n", approval.TaskKey, approval.Status); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func runLogs(ctx context.Context, app bootstrap.App, args []string, stdout io.Writer) error {
-	jsonOutput, remaining, err := consumeJSONFlag(args)
-	if err != nil {
-		return err
-	}
-	if len(remaining) != 0 {
-		return fmt.Errorf("usage: odin logs [--json]")
-	}
-
-	state, err := loadCLIState(app)
-	if err != nil {
-		return err
-	}
-
-	records, err := listLogs(ctx, app.Store, state.Scope)
-	if err != nil {
-		return err
-	}
-	if jsonOutput {
-		logViews := make([]commands.LogView, 0, len(records))
-		for _, record := range records {
-			logViews = append(logViews, commands.LogView{
-				ID:    record.ID,
-				Type:  string(record.Type),
-				Scope: record.Scope,
-			})
-		}
-		return commands.WriteJSON(stdout, commands.LogsView{Logs: logViews})
-	}
-	if len(records) == 0 {
-		_, err := fmt.Fprintln(stdout, "no logs")
-		return err
-	}
-	for _, record := range records {
-		if _, err := fmt.Fprintf(stdout, "%d %s %s\n", record.ID, record.Type, record.Scope); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func runTask(ctx context.Context, app bootstrap.App, args []string, stdout io.Writer) error {
-	command, err := commands.ParseTask(args)
-	if err != nil {
-		return err
-	}
-
-	jobService := jobs.Service{
-		Store:          app.Store,
-		Registry:       app.Registry,
-		Executors:      app.Executors,
-		ExecutorConfig: app.ExecutorConfig,
-		Transitions:    projects.Service{Store: app.Store},
-		Leases: leases.Manager{
-			Store:        app.Store,
-			Git:          gitadapter.Adapter{},
-			WorktreeRoot: worktrees.DefaultRoot(),
-		},
-		Now: time.Now,
-	}
-
-	task, err := jobService.CreateTaskFromProjectKey(ctx, command.ProjectKey, command.Title)
-	if err != nil {
-		return err
-	}
-
-	taskView := commands.TaskCreateView{
-		ID:     task.ID,
-		Key:    task.Key,
-		Status: task.Status,
-		Scope:  task.Scope,
-	}
-	if command.Name == "create" {
-		return commands.WriteJSON(stdout, taskView)
-	}
-
-	outcome, err := jobService.ExecuteTask(ctx, task.ID)
-	if err != nil {
-		return err
-	}
-
-	payload := commands.TaskRunView{
-		Task: commands.TaskCreateView{
-			ID:     outcome.Task.ID,
-			Key:    outcome.Task.Key,
-			Status: outcome.Task.Status,
-			Scope:  outcome.Task.Scope,
-		},
-	}
-	if outcome.Run != nil {
-		payload.Run = &commands.TaskRunResultView{
-			ID:       outcome.Run.ID,
-			Executor: outcome.Run.Executor,
-			Status:   outcome.Run.Status,
-			Summary:  outcome.Run.Summary,
-		}
-	}
-	return commands.WriteJSON(stdout, payload)
-}
-
-func runTransition(ctx context.Context, app bootstrap.App, args []string, stdout io.Writer) error {
-	if len(args) > 0 && strings.EqualFold(args[0], "help") {
-		_, err := fmt.Fprintln(stdout, transitionUsage)
-		return err
-	}
-
-	state, err := loadCLIState(app)
-	if err != nil {
-		return err
-	}
-	manifest, err := scopedManifest(app.Registry, state.Scope)
-	if err != nil {
-		_, writeErr := fmt.Fprintln(stdout, err.Error())
-		return writeErr
-	}
-
-	if len(args) == 0 || strings.EqualFold(args[0], "status") {
-		status, err := currentTransitionStatus(ctx, app.Store, manifest)
-		if err != nil {
-			return err
-		}
-		_, err = fmt.Fprintln(stdout, renderTransitionStatus(manifest.Key, status))
-		return err
-	}
-
-	if !strings.EqualFold(args[0], "set") || len(args) < 2 {
-		return fmt.Errorf("usage: %s", transitionUsage)
-	}
-
-	request, err := parseTransitionSetRequest(args[1:])
-	if err != nil {
-		_, writeErr := fmt.Fprintln(stdout, err.Error())
-		return writeErr
-	}
-
-	jobService := jobs.Service{
-		Store:    app.Store,
-		Registry: app.Registry,
-	}
-	project, err := jobService.EnsureRuntimeProject(ctx, manifest)
-	if err != nil {
-		return err
-	}
-
-	record, err := projects.Service{Store: app.Store}.SetTransitionState(ctx, projects.TransitionStateInput{
-		ProjectID:      project.ID,
-		Actor:          projects.TransitionControllerOdinOS,
-		TargetState:    request.State,
-		LimitedActions: request.LimitedActions,
-		ChangedBy:      "operator",
-		Notes:          request.Reason,
-	})
-	if err != nil {
-		_, writeErr := fmt.Fprintf(stdout, "unable to change transition: %v\n", err)
-		return writeErr
-	}
-
-	status := transitionStatus{
-		State:             projects.TransitionState(record.State),
-		Controller:        projects.TransitionController(record.Controller),
-		MutationAuthority: projects.TransitionController(record.Controller),
-		OdinCanMutate:     record.Controller == string(projects.TransitionControllerOdinOS),
-		LimitedActions:    decodeCSVOrJSON(record.LimitedActionsJSON),
-		Notes:             record.Notes,
-	}
-	_, err = fmt.Fprintln(stdout, renderTransitionStatus(manifest.Key, status))
-	return err
-}
-
-func runHealthcheck(ctx context.Context, app bootstrap.App, stdout io.Writer) error {
-	report, err := healthsvc.Service{DB: app.Store.DB()}.Doctor(ctx, len(app.RegistryDiagnostics) == 0)
-	if err != nil {
-		return err
-	}
-
-	if report.Status != healthsvc.StatusHealthy {
-		_, _ = fmt.Fprintf(stdout, "not ready: %s\n", report.Status)
-		return errRuntimeNotReady
-	}
-
-	_, err = fmt.Fprintln(stdout, "ready")
-	return err
 }
 
 func runStatus(ctx context.Context, app bootstrap.App, args []string, stdout io.Writer) error {
@@ -611,7 +210,7 @@ func runStatus(ctx context.Context, app bootstrap.App, args []string, stdout io.
 		return err
 	}
 
-	summary, err := healthsvc.Service{DB: app.Store.DB()}.Summary(ctx, len(app.RegistryDiagnostics) == 0)
+	summary, err := newHealthService(app, healthsvc.DefaultConfig()).Summary(ctx, len(app.RegistryDiagnostics) == 0)
 	if err != nil {
 		return err
 	}
@@ -643,6 +242,276 @@ func runStatus(ctx context.Context, app bootstrap.App, args []string, stdout io.
 	return err
 }
 
+func runProject(ctx context.Context, app bootstrap.App, args []string, stdout io.Writer) error {
+	switch len(args) {
+	case 0:
+		return runShellCommand(ctx, app, "/project", stdout)
+	case 1:
+		if strings.EqualFold(args[0], "list") {
+			return runShellCommand(ctx, app, "/project", stdout)
+		}
+	case 2:
+		if strings.EqualFold(args[0], "select") {
+			return runShellCommand(ctx, app, "/project "+args[1], stdout)
+		}
+	}
+	return fmt.Errorf("usage: odin project [list|select <key>]")
+}
+
+func runTransition(ctx context.Context, app bootstrap.App, args []string, stdout io.Writer) error {
+	command := "/transition"
+	if len(args) > 0 {
+		command += " " + strings.Join(args, " ")
+	}
+	return runShellCommand(ctx, app, command, stdout)
+}
+
+func runTask(ctx context.Context, app bootstrap.App, args []string, stdout io.Writer) error {
+	command, err := clicommands.ParseTask(args)
+	if err != nil {
+		return err
+	}
+
+	manifest, ok := app.Registry.Lookup(command.ProjectKey)
+	if !ok {
+		return fmt.Errorf("unknown project: %s", command.ProjectKey)
+	}
+	resolved := cliscope.Resolve(cliscope.ResolveInput{
+		ExplicitTarget: &cliscope.Target{
+			ProjectKey:    manifest.Key,
+			SystemProject: manifest.SystemProject,
+		},
+	})
+
+	jobService := newJobService(app)
+	task, err := jobService.CreateTaskFromAct(ctx, resolved, command.Title)
+	if err != nil {
+		return err
+	}
+
+	if command.Name == "create" {
+		return clicommands.WriteJSON(stdout, clicommands.TaskCreateView{
+			ID:     task.ID,
+			Key:    task.Key,
+			Status: task.Status,
+			Scope:  task.Scope,
+		})
+	}
+
+	if err := bootstrap.RefreshReadinessSamples(ctx, app, len(app.RegistryDiagnostics) == 0); err != nil {
+		return err
+	}
+	if err := jobService.Service.ExecuteNextQueued(ctx); err != nil {
+		return err
+	}
+
+	task, err = app.Store.GetTask(ctx, task.ID)
+	if err != nil {
+		return err
+	}
+	run, err := latestRunForTask(ctx, app.Store, task.ID)
+	if err != nil {
+		return err
+	}
+
+	return clicommands.WriteJSON(stdout, clicommands.TaskRunView{
+		Task: clicommands.TaskCreateView{
+			ID:     task.ID,
+			Key:    task.Key,
+			Status: task.Status,
+			Scope:  task.Scope,
+		},
+		Run: &clicommands.TaskRunResultView{
+			ID:       run.ID,
+			Executor: run.Executor,
+			Status:   run.Status,
+			Summary:  run.Summary,
+		},
+	})
+}
+
+func runShellCommand(ctx context.Context, app bootstrap.App, line string, stdout io.Writer) error {
+	shell, err := newShell(app)
+	if err != nil {
+		return err
+	}
+	return shell.HandleLine(ctx, line, stdout)
+}
+
+type servedJobService struct {
+	jobs.Service
+	Supervisor any
+}
+
+func newJobService(app bootstrap.App) servedJobService {
+	return servedJobService{
+		Service: jobs.Service{
+			Store:          app.Store,
+			Registry:       app.Registry,
+			Executors:      app.Executors,
+			ExecutorConfig: app.ExecutorConfig,
+			Transitions:    projects.Service{Store: app.Store},
+			Leases: leases.Manager{
+				Store:        app.Store,
+				Git:          gitadapter.Adapter{},
+				WorktreeRoot: worktrees.DefaultRoot(),
+			},
+			Now: time.Now,
+		},
+		Supervisor: supervision.Service{
+			Store: app.Store,
+			Now:   time.Now,
+		},
+	}
+}
+
+type servedCommandService struct {
+	app bootstrap.App
+}
+
+func (service servedCommandService) Execute(ctx context.Context, request capabilities.InvokeRequest) (capabilities.InvokeResponse, error) {
+	switch request.CapabilityID {
+	case "project.status":
+		return invokeServedProjectStatus(ctx, service.app, request)
+	default:
+		return capabilities.InvokeResponse{}, fmt.Errorf("unsupported capability: %s", request.CapabilityID)
+	}
+}
+
+func invokeServedProjectStatus(ctx context.Context, app bootstrap.App, request capabilities.InvokeRequest) (capabilities.InvokeResponse, error) {
+	mode := strings.TrimSpace(request.Execution.Mode)
+	if mode == "" {
+		mode = "local"
+	}
+
+	scopeLabel := strings.TrimSpace(request.Scope.Kind)
+	if request.Scope.Kind == "project" || request.Scope.Kind == "odin-core" {
+		if request.Scope.ProjectKey != "" {
+			scopeLabel = request.Scope.ProjectKey
+		}
+		if manifest, ok := app.Registry.Lookup(request.Scope.ProjectKey); ok && app.Store != nil {
+			project, err := projects.Service{Store: app.Store}.RegisterManagedProject(ctx, manifest)
+			if err == nil {
+				record, err := app.Store.GetProjectTransition(ctx, project.ID)
+				if err == nil {
+					return capabilities.InvokeResponse{
+						Status: "ok",
+						Output: json.RawMessage(fmt.Sprintf(
+							"project=%s state=%s controller=%s mutation_authority=%s odin_can_mutate=%t limited_actions=%s\n",
+							manifest.Key,
+							record.State,
+							record.Controller,
+							record.Controller,
+							record.Controller == string(projects.TransitionControllerOdinOS),
+							formatLimitedActions(record.LimitedActionsJSON),
+						)),
+					}, nil
+				}
+			}
+		}
+	}
+	if scopeLabel == "" {
+		scopeLabel = "global"
+	}
+
+	return capabilities.InvokeResponse{
+		Status: "ok",
+		Output: json.RawMessage(fmt.Sprintf("scope=%s mode=%s\n", scopeLabel, mode)),
+	}, nil
+}
+
+func formatLimitedActions(raw string) string {
+	values := strings.TrimSpace(raw)
+	if values == "" || values == "[]" {
+		return "none"
+	}
+	return strings.Trim(values, "[]\"")
+}
+
+func newShell(app bootstrap.App) (*repl.Shell, error) {
+	return repl.New(repl.Environment{
+		Store:               app.Store,
+		Registry:            app.Registry,
+		RegistryDiagnostics: app.RegistryDiagnostics,
+		SessionStore:        app.SessionStore,
+		CommandService:      servedCommandService{app: app},
+		ExecutorConfig:      app.ExecutorConfig,
+		Executors:           app.Executors,
+		Leases: leases.Manager{
+			Store:        app.Store,
+			Git:          gitadapter.Adapter{},
+			WorktreeRoot: worktrees.DefaultRoot(),
+		},
+	})
+}
+
+func latestRunForTask(ctx context.Context, store *sqlite.Store, taskID int64) (sqlite.Run, error) {
+	row := store.DB().QueryRowContext(ctx, `
+		SELECT id
+		FROM runs
+		WHERE task_id = ?
+		ORDER BY id DESC
+		LIMIT 1
+	`, taskID)
+
+	var runID int64
+	if err := row.Scan(&runID); err != nil {
+		return sqlite.Run{}, err
+	}
+	return store.GetRun(ctx, runID)
+}
+
+func runHealthcheck(ctx context.Context, app bootstrap.App, cfg appconfig.Config, stdout io.Writer) error {
+	if reason, active, err := readReadinessFlag(cfg.RuntimeRoot); err != nil {
+		return err
+	} else if active {
+		_, _ = fmt.Fprintf(stdout, "not ready: %s\n", reason)
+		return errRuntimeNotReady
+	}
+
+	state, err := app.Store.GetRuntimeState(ctx)
+	switch err {
+	case nil:
+		if state.Status != "ready" {
+			_, _ = fmt.Fprintln(stdout, "not ready: runtime not ready")
+			return errRuntimeNotReady
+		}
+	case sql.ErrNoRows:
+		_, _ = fmt.Fprintln(stdout, "not ready: runtime not ready")
+		return errRuntimeNotReady
+	default:
+		return err
+	}
+
+	healthConfig := healthsvc.DefaultConfig()
+	healthConfig.RuntimeHeartbeatTTL = runtimeHeartbeatTTL(serveLoopConfigFromContext(ctx).healthInterval)
+	report, ready, err := newHealthService(app, healthConfig).Readiness(ctx, len(app.RegistryDiagnostics) == 0)
+	if err != nil {
+		return err
+	}
+
+	if !ready {
+		reason := string(report.Status)
+		if report.Status == healthsvc.StatusHealthy {
+			reason = "runtime not ready"
+		}
+		_, _ = fmt.Fprintf(stdout, "not ready: %s\n", reason)
+		return errRuntimeNotReady
+	}
+
+	lockHeld, err := bootstrap.ServiceLockHeld(cfg.RuntimeRoot)
+	if err != nil {
+		return err
+	}
+	if !lockHeld {
+		_, _ = fmt.Fprintln(stdout, "not ready: no live odin serve process owns runtime root")
+		return errRuntimeNotReady
+	}
+
+	_, err = fmt.Fprintln(stdout, "ready")
+	return err
+}
+
 func runtimeEnv() map[string]string {
 	return map[string]string{
 		"ODIN_ROOT":      os.Getenv("ODIN_ROOT"),
@@ -650,627 +519,205 @@ func runtimeEnv() map[string]string {
 	}
 }
 
-func loadCLIState(app bootstrap.App) (clistate.State, error) {
-	cache, err := app.SessionStore.Load()
-	if err != nil {
-		return clistate.State{}, err
-	}
-	return clistate.ResolveStartupState(cache, app.Registry), nil
-}
-
-func saveCLIState(app bootstrap.App, state clistate.State) error {
-	cache := clistate.Cache{
-		Mode: state.Mode,
-	}
-	if state.Scope.Kind == scope.ScopeProject || state.Scope.Kind == scope.ScopeOdinCore {
-		cache.ProjectKey = state.Scope.ProjectKey
-	}
-	return app.SessionStore.Save(cache)
-}
-
-func consumeJSONFlag(args []string) (bool, []string, error) {
-	jsonOutput := false
-	remaining := make([]string, 0, len(args))
-	for _, arg := range args {
-		if arg == "--json" {
-			if jsonOutput {
-				return false, nil, fmt.Errorf("duplicate --json flag")
-			}
-			jsonOutput = true
-			continue
-		}
-		remaining = append(remaining, arg)
-	}
-	return jsonOutput, remaining, nil
-}
-
-func scopeLabel(resolved scope.Resolution) string {
-	switch resolved.Kind {
-	case scope.ScopeProject, scope.ScopeOdinCore:
-		return resolved.ProjectKey
-	default:
-		return string(resolved.Kind)
-	}
-}
-
-func listPendingApprovals(ctx context.Context, store *sqlite.Store, resolved scope.Resolution) ([]commands.ApprovalView, error) {
-	rows, err := store.DB().QueryContext(ctx, `
-		SELECT t.key, a.status, t.scope, p.key
-		FROM approvals a
-		JOIN tasks t ON t.id = a.task_id
-		JOIN projects p ON p.id = t.project_id
-		WHERE a.status = 'pending'
-		ORDER BY a.id ASC
-	`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var approvals []commands.ApprovalView
-	for rows.Next() {
-		var approval commands.ApprovalView
-		var projectKey string
-		var taskScope string
-		if err := rows.Scan(&approval.TaskKey, &approval.Status, &taskScope, &projectKey); err != nil {
-			return nil, err
-		}
-		if matchesTaskProjectionScope(projectKey, taskScope, resolved) {
-			approvals = append(approvals, approval)
-		}
-	}
-
-	return approvals, rows.Err()
-}
-
-func listLogs(ctx context.Context, store *sqlite.Store, resolved scope.Resolution) ([]runtimeevents.Record, error) {
-	params := sqlite.ListEventsParams{}
-	if resolved.Kind == scope.ScopeProject || resolved.Kind == scope.ScopeOdinCore {
-		project, err := store.GetProjectByKey(ctx, resolved.ProjectKey)
-		switch err {
-		case nil:
-			params.ProjectID = &project.ID
-		case sql.ErrNoRows:
-			return nil, nil
-		default:
-			return nil, err
-		}
-	}
-
-	records, err := store.ListEvents(ctx, params)
-	if err != nil {
-		return nil, err
-	}
-
-	filtered := make([]runtimeevents.Record, 0, 10)
-	for _, record := range records {
-		if !matchesEventScope(record.Scope, resolved) {
-			continue
-		}
-		filtered = append(filtered, record)
-		if len(filtered) == 10 {
-			break
-		}
-	}
-	return filtered, nil
-}
-
-func matchesTaskProjectionScope(projectKey, taskScope string, resolved scope.Resolution) bool {
-	switch resolved.Kind {
-	case scope.ScopeGlobal:
-		return true
-	case scope.ScopeNewProject:
-		return taskScope == string(scope.ScopeNewProject)
-	case scope.ScopeProject, scope.ScopeOdinCore:
-		return projectKey == resolved.ProjectKey
-	default:
-		return false
-	}
-}
-
-func matchesEventScope(eventScope string, resolved scope.Resolution) bool {
-	switch resolved.Kind {
-	case scope.ScopeGlobal:
-		return true
-	case scope.ScopeProject:
-		return eventScope == string(scope.ScopeProject)
-	case scope.ScopeOdinCore:
-		return eventScope == string(scope.ScopeOdinCore)
-	case scope.ScopeNewProject:
-		return eventScope == string(scope.ScopeNewProject)
-	default:
-		return false
-	}
-}
-
-const transitionUsage = "transition [status] | transition set <state> [allow=<csv>] [confirm] because <reason...>"
-
-type transitionStatus struct {
-	State             projects.TransitionState
-	Controller        projects.TransitionController
-	MutationAuthority projects.TransitionController
-	OdinCanMutate     bool
-	LimitedActions    []string
-	Notes             string
-}
-
-type transitionSetRequest struct {
-	State          projects.TransitionState
-	LimitedActions []string
-	Reason         string
-	Confirmed      bool
-}
-
-func scopedManifest(registry projects.Registry, resolved scope.Resolution) (projects.Manifest, error) {
-	switch resolved.Kind {
-	case scope.ScopeProject, scope.ScopeOdinCore:
-		manifest, ok := registry.Lookup(resolved.ProjectKey)
-		if !ok {
-			return projects.Manifest{}, fmt.Errorf("unknown project: %s", resolved.ProjectKey)
-		}
-		return manifest, nil
-	default:
-		return projects.Manifest{}, fmt.Errorf("transition commands require project scope")
-	}
-}
-
-func currentTransitionStatus(ctx context.Context, store *sqlite.Store, manifest projects.Manifest) (transitionStatus, error) {
-	project, err := store.GetProjectByKey(ctx, manifest.Key)
-	if err != nil {
-		if err == sql.ErrNoRows {
-			return transitionStatus{
-				State:             projects.TransitionStateInventory,
-				Controller:        projects.TransitionControllerLegacyOdin,
-				MutationAuthority: projects.TransitionControllerLegacyOdin,
-				OdinCanMutate:     false,
-			}, nil
-		}
-		return transitionStatus{}, err
-	}
-
-	record, err := store.GetProjectTransition(ctx, project.ID)
-	if err != nil {
-		if err == sql.ErrNoRows {
-			return transitionStatus{
-				State:             projects.TransitionStateInventory,
-				Controller:        projects.TransitionControllerLegacyOdin,
-				MutationAuthority: projects.TransitionControllerLegacyOdin,
-				OdinCanMutate:     false,
-			}, nil
-		}
-		return transitionStatus{}, err
-	}
-
-	controller := projects.TransitionController(record.Controller)
-	return transitionStatus{
-		State:             projects.TransitionState(record.State),
-		Controller:        controller,
-		MutationAuthority: controller,
-		OdinCanMutate:     controller == projects.TransitionControllerOdinOS,
-		LimitedActions:    decodeCSVOrJSON(record.LimitedActionsJSON),
-		Notes:             record.Notes,
-	}, nil
-}
-
-func parseTransitionSetRequest(args []string) (transitionSetRequest, error) {
-	if len(args) == 0 {
-		return transitionSetRequest{}, fmt.Errorf("transition target state is required")
-	}
-
-	state := projects.TransitionState(strings.ToLower(args[0]))
-	validState := map[projects.TransitionState]bool{
-		projects.TransitionStateInventory:      true,
-		projects.TransitionStateShadow:         true,
-		projects.TransitionStateCompare:        true,
-		projects.TransitionStateLimitedAction:  true,
-		projects.TransitionStateCutover:        true,
-		projects.TransitionStateDecommissioned: true,
-	}
-	if !validState[state] {
-		return transitionSetRequest{}, fmt.Errorf("unsupported transition state: %s", args[0])
-	}
-
-	becauseIndex := -1
-	for index := 1; index < len(args); index++ {
-		if strings.EqualFold(args[index], "because") {
-			becauseIndex = index
-			break
-		}
-	}
-	if becauseIndex == -1 || becauseIndex == len(args)-1 {
-		return transitionSetRequest{}, fmt.Errorf("transition changes require a reason: use 'because <reason...>'")
-	}
-
-	request := transitionSetRequest{
-		State:  state,
-		Reason: strings.Join(args[becauseIndex+1:], " "),
-	}
-	for _, token := range args[1:becauseIndex] {
-		switch {
-		case strings.EqualFold(token, "confirm"):
-			request.Confirmed = true
-		case strings.HasPrefix(strings.ToLower(token), "allow="):
-			raw := strings.TrimSpace(token[len("allow="):])
-			if raw == "" {
-				return transitionSetRequest{}, fmt.Errorf("limited_action requires allow=<csv>")
-			}
-			for _, action := range strings.Split(raw, ",") {
-				action = strings.TrimSpace(action)
-				if action != "" {
-					request.LimitedActions = append(request.LimitedActions, action)
-				}
-			}
-		default:
-			return transitionSetRequest{}, fmt.Errorf("unknown transition option: %s", token)
-		}
-	}
-
-	switch state {
-	case projects.TransitionStateLimitedAction:
-		if len(request.LimitedActions) == 0 {
-			return transitionSetRequest{}, fmt.Errorf("limited_action requires allow=<csv>")
-		}
-		if !request.Confirmed {
-			return transitionSetRequest{}, fmt.Errorf("limited_action requires confirm")
-		}
-	case projects.TransitionStateCutover, projects.TransitionStateDecommissioned:
-		if !request.Confirmed {
-			return transitionSetRequest{}, fmt.Errorf("%s requires confirm", state)
-		}
-	default:
-		if len(request.LimitedActions) != 0 {
-			return transitionSetRequest{}, fmt.Errorf("allow=<csv> is only valid for limited_action")
-		}
-	}
-
-	return request, nil
-}
-
-func renderTransitionStatus(projectKey string, status transitionStatus) string {
-	limitedActions := "none"
-	if len(status.LimitedActions) > 0 {
-		limitedActions = strings.Join(status.LimitedActions, ",")
-	}
-
-	if status.Notes != "" {
-		return fmt.Sprintf(
-			"project=%s state=%s controller=%s mutation_authority=%s odin_can_mutate=%t limited_actions=%s notes=%s",
-			projectKey,
-			status.State,
-			status.Controller,
-			status.MutationAuthority,
-			status.OdinCanMutate,
-			limitedActions,
-			status.Notes,
-		)
-	}
-
-	return fmt.Sprintf(
-		"project=%s state=%s controller=%s mutation_authority=%s odin_can_mutate=%t limited_actions=%s",
-		projectKey,
-		status.State,
-		status.Controller,
-		status.MutationAuthority,
-		status.OdinCanMutate,
-		limitedActions,
-	)
-}
-
-func decodeCSVOrJSON(raw string) []string {
-	if raw == "" {
-		return nil
-	}
-
-	if strings.HasPrefix(strings.TrimSpace(raw), "[") {
-		var decoded []string
-		if err := json.Unmarshal([]byte(raw), &decoded); err == nil {
-			return decoded
-		}
-	}
-
-	parts := strings.Split(raw, ",")
-	decoded := make([]string, 0, len(parts))
-	for _, part := range parts {
-		part = strings.TrimSpace(part)
-		if part != "" {
-			decoded = append(decoded, part)
-		}
-	}
-	return decoded
-}
-
-func serveLoadContext(parent context.Context) (context.Context, context.CancelFunc) {
-	if errors.Is(parent.Err(), context.DeadlineExceeded) {
-		return context.WithTimeout(parent, serveOperationTimeout)
-	}
-	if deadline, ok := parent.Deadline(); ok {
-		return context.WithDeadline(context.Background(), deadline)
-	}
-	return context.WithCancel(context.Background())
-}
-
 func runServe(ctx context.Context, app bootstrap.App, cfg appconfig.Config, stdout io.Writer) error {
+	operationCtx := context.WithoutCancel(ctx)
+	bootID := app.BootID
+	stateService := app.RuntimeState
+	if bootID == "" {
+		return fmt.Errorf("boot_id is required")
+	}
+
 	if cfg.Service.StartupRecovery {
-		startupCtx, cancel := serveStartupContext(ctx)
-		result, err := recovery.Service{Store: app.Store}.RunStartupRecovery(startupCtx)
-		cancel()
+		result, err := recovery.Service{Store: app.Store}.RunStartupRecovery(operationCtx)
 		if err != nil {
-			return err
+			return recordServeStopped(operationCtx, stateService, bootID, "startup recovery failed", err)
 		}
 		if result.RecoveredRuns > 0 {
 			if _, err := fmt.Fprintf(stdout, "startup recovery recovered %d run(s)\n", result.RecoveredRuns); err != nil {
-				return err
+				return recordServeStopped(operationCtx, stateService, bootID, "startup recovery output failed", err)
 			}
+		}
+		if _, err := stateService.MarkRecovering(operationCtx, runtimestate.TransitionInput{
+			BootID: bootID,
+			Reason: "startup recovery complete",
+		}); err != nil {
+			return recordServeStopped(operationCtx, stateService, bootID, "recovering state write failed", err)
 		}
 	}
 
 	logger, logCloser, err := openServiceLogger(cfg.RuntimeRoot)
 	if err != nil {
-		return err
+		return recordServeStopped(operationCtx, stateService, bootID, "service logger failed", err)
 	}
 	if logCloser != nil {
 		defer logCloser.Close()
 	}
 
-	jobService := newJobService(app)
+	var shutdownRequested atomic.Bool
+	jobService := jobs.Service{
+		Store:          app.Store,
+		Registry:       app.Registry,
+		Executors:      app.Executors,
+		ExecutorConfig: app.ExecutorConfig,
+		Transitions:    projects.Service{Store: app.Store},
+		Leases: leases.Manager{
+			Store:        app.Store,
+			Git:          gitadapter.Adapter{},
+			WorktreeRoot: worktrees.DefaultRoot(),
+		},
+		ShutdownRequested: &shutdownRequested,
+		Now:               time.Now,
+	}
 	recoveryService := recovery.Service{
 		Store:           app.Store,
 		RegistryRoot:    filepath.Join(app.RepoRoot, "registry"),
 		ExecutorCatalog: app.Executors,
-		HealthConfig:    serveHealthConfig,
+		HealthConfig:    healthsvc.DefaultConfig(),
 		Logger:          logger,
 	}
-	metricsService := metricsvc.Service{
-		DB: app.Store.DB(),
+	schedulerService := supervision.Service{
+		Store: app.Store,
+		Now:   time.Now,
 	}
-
-	serveCtx, cancelServe := serveServeContext(ctx)
-	defer cancelServe()
-
-	taskCtx, cancel := serveOperationContext(serveCtx)
-	if err := jobService.ExecuteNextQueued(taskCtx); err != nil {
-		cancel()
-		logBackgroundError(logger, "task_runner", err)
+	leaseService := leases.Maintenance{
+		Store: app.Store,
+		Cleanup: worktrees.Manager{
+			Store: app.Store,
+			Git:   gitadapter.Adapter{},
+		},
+		Now: time.Now,
 	}
-	cancel()
-
-	recoveryCtx, cancel := serveOperationContext(serveCtx)
-	if _, err := recoveryService.RunCycle(recoveryCtx); err != nil {
-		cancel()
-		logBackgroundError(logger, "self_heal", err)
+	loopConfig := serveLoopConfigFromContext(ctx)
+	healthConfig := healthsvc.DefaultConfig()
+	healthConfig.RuntimeHeartbeatTTL = runtimeHeartbeatTTL(loopConfig.healthInterval)
+	var immediateNotReady atomic.Bool
+	immediateNotReady.Store(true)
+	healthService := newHealthService(app, healthConfig)
+	healthService.ImmediateNotReady = &immediateNotReady
+	metricsService := newMetricsService(app, healthConfig)
+	healthDeps := healthLoopDeps{
+		Store:              app.Store,
+		RuntimeState:       stateService,
+		Health:             healthService,
+		Executors:          app.Executors,
+		ExecutorConfig:     app.ExecutorConfig,
+		RegistryHealthy:    len(app.RegistryDiagnostics) == 0,
+		ProjectionSurfaces: bootstrap.ServiceOwnedProjectionSurfaces(),
+		ShutdownRequested:  &shutdownRequested,
+		BootID:             bootID,
+		RuntimeRoot:        cfg.RuntimeRoot,
 	}
-	cancel()
-
-	var background sync.WaitGroup
-	background.Add(3)
-	go runTaskLoop(serveCtx, &background, jobService, logger)
-	go runSelfHealLoop(serveCtx, &background, recoveryService, logger)
-	go runMetricsLoop(serveCtx, &background, metricsService, logger)
-
-	listener, err := serveListen("tcp", cfg.Service.HTTPAddr)
+	listener, err := net.Listen("tcp", cfg.Service.HTTPAddr)
 	if err != nil {
-		return err
+		return recordServeStopped(operationCtx, stateService, bootID, "listener binding failed", err)
 	}
 	defer listener.Close()
 
 	server := &stdhttp.Server{
-		Handler: apihttp.NewCapabilitiesHandler(apihttp.CapabilitiesDependencies{
-			Gateway: newServeCapabilityGateway(app),
-			Fallback: apihttp.NewOperationalHandler(apihttp.Dependencies{
-				Health: healthsvc.Service{
-					DB: app.Store.DB(),
-				},
-				Metrics: metricsvc.Service{
-					DB: app.Store.DB(),
-				},
-				ReadModels:      app.Store.DB(),
-				RegistryHealthy: len(app.RegistryDiagnostics) == 0,
-			}),
+		Handler: apihttp.NewOperationalHandler(apihttp.Dependencies{
+			Health:          healthService,
+			Metrics:         metricsService,
+			RegistryHealthy: healthDeps.RegistryHealthy,
 		}),
 	}
 
-	shutdownDone := make(chan struct{})
-	shutdownStop := make(chan struct{})
-	var shutdownStopOnce sync.Once
-	stopShutdown := func() {
-		shutdownStopOnce.Do(func() {
-			close(shutdownStop)
-		})
+	runLeaseMaintenanceCycle(operationCtx, leaseService, logger, loopConfig.leaseStaleAfter)
+
+	var background sync.WaitGroup
+	background.Add(5)
+	loopCtx, stopLoops := context.WithCancel(context.Background())
+	dispatchNudges := make(chan struct{}, 32)
+	go runSchedulerLoop(loopCtx, operationCtx, &background, schedulerService, dispatchNudges, logger, loopConfig.schedulerInterval)
+	go runTaskLoop(loopCtx, operationCtx, &background, healthService, healthDeps.RegistryHealthy, jobService, dispatchNudges, logger, loopConfig.taskInterval)
+	go runSelfHealLoop(loopCtx, operationCtx, &background, recoveryService, logger, loopConfig.selfHealInterval)
+	go runLeaseLoop(loopCtx, operationCtx, &background, leaseService, logger, loopConfig.leaseInterval, loopConfig.leaseStaleAfter)
+	go runHealthLoop(loopCtx, operationCtx, &background, healthDeps, logger, loopConfig.healthInterval)
+	defer func() {
+		stopLoops()
+		background.Wait()
+	}()
+
+	if _, err := recoveryService.RunCycle(operationCtx); err != nil {
+		logBackgroundError(logger, "self_heal", err)
 	}
+	runHealthCycle(operationCtx, healthDeps, logger)
+	if err := attemptDispatchIfReady(operationCtx, healthService, healthDeps.RegistryHealthy, jobService); err != nil {
+		logBackgroundError(logger, "task_runner", err)
+	}
+
+	shutdownControlCtx, cancelShutdown := context.WithCancel(context.Background())
+	shutdownDone := make(chan struct{})
 	go func() {
 		defer close(shutdownDone)
 		select {
 		case <-ctx.Done():
-			shutdownCtx, cancel := context.WithTimeout(context.Background(), serveOperationTimeout)
+			reason := "shutdown requested"
+			if ctx.Err() != nil {
+				reason = ctx.Err().Error()
+			}
+			shutdownRequested.Store(true)
+			stopLoops()
+			immediateNotReady.Store(true)
+			if err := writeReadinessFlag(cfg.RuntimeRoot, reason); err != nil {
+				logBackgroundError(logger, "readiness_flag", err)
+			}
+			if _, err := stateService.MarkDraining(operationCtx, runtimestate.TransitionInput{
+				BootID: bootID,
+				Reason: reason,
+			}); err != nil {
+				logBackgroundError(logger, "runtime_state", err)
+			}
+			shutdownCtx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			_ = server.Shutdown(shutdownCtx)
-		case <-shutdownStop:
+		case <-shutdownControlCtx.Done():
 		}
+	}()
+	defer func() {
+		cancelShutdown()
+		<-shutdownDone
 	}()
 
 	if _, err := fmt.Fprintf(stdout, "serving on %s\n", listener.Addr().String()); err != nil {
-		return err
+		return recordServeStopped(operationCtx, stateService, bootID, "stdout write failed", err)
 	}
 
 	err = server.Serve(listener)
 	if errors.Is(err, stdhttp.ErrServerClosed) {
-		<-shutdownDone
-		background.Wait()
+		reason := "shutdown complete"
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			reason = ctxErr.Error()
+		}
+		if stopErr := recordServeStopped(operationCtx, stateService, bootID, reason, nil); stopErr != nil {
+			return stopErr
+		}
 		return ctx.Err()
 	}
-	stopShutdown()
-	cancelServe()
-	background.Wait()
-	return err
+	return recordServeStopped(operationCtx, stateService, bootID, "server error", err)
 }
 
-func newServeCapabilityGateway(app bootstrap.App) *capabilities.Gateway {
-	if app.CapabilityService == nil {
-		return nil
+func recordServeStopped(ctx context.Context, service runtimestate.Service, bootID string, reason string, cause error) error {
+	if bootID == "" || service.Store == nil {
+		return cause
 	}
 
-	return capabilities.NewGateway(
-		app.CapabilityService,
-		func(ctx context.Context, request capabilities.InvokeRequest, descriptor capabilities.Descriptor) (capabilities.InvokeResponse, error) {
-			return invokeServedCapability(ctx, app, request, descriptor)
-		},
-		runs.Service{DB: app.Store.DB(), Store: app.Store},
-	)
-}
+	errorText := ""
+	if cause != nil {
+		errorText = cause.Error()
+	}
 
-func invokeServedCapability(ctx context.Context, app bootstrap.App, request capabilities.InvokeRequest, descriptor capabilities.Descriptor) (capabilities.InvokeResponse, error) {
-	switch descriptor.Key {
-	case "project.status":
-		return invokeServedProjectStatus(ctx, app, request)
-	default:
-		return capabilities.InvokeResponse{}, &capabilities.Error{
-			CodeValue: "not_found",
-			Message:   fmt.Sprintf("unsupported capability: %s", descriptor.Key),
+	if _, err := service.MarkStopped(ctx, runtimestate.TransitionInput{
+		BootID: bootID,
+		Reason: reason,
+		Error:  errorText,
+	}); err != nil {
+		if cause != nil {
+			return errors.Join(cause, err)
 		}
-	}
-}
-
-func invokeServedProjectStatus(ctx context.Context, app bootstrap.App, request capabilities.InvokeRequest) (capabilities.InvokeResponse, error) {
-	scopeRef := request.Scope
-	scopeKind := strings.TrimSpace(scopeRef.Kind)
-	projectKey := strings.TrimSpace(scopeRef.ProjectKey)
-
-	if (scopeKind == "project" || scopeKind == "odin-core") && projectKey != "" {
-		if manifest, ok := app.Registry.Lookup(projectKey); ok {
-			status, err := loadServedTransitionStatus(ctx, app, manifest.Key)
-			if err != nil {
-				return capabilities.InvokeResponse{}, err
-			}
-			return capabilities.InvokeResponse{
-				Status: "ok",
-				Output: json.RawMessage(renderServedTransitionStatus(manifest.Key, status)),
-			}, nil
-		}
+		return err
 	}
 
-	return capabilities.InvokeResponse{
-		Status: "ok",
-		Output: json.RawMessage(fmt.Sprintf("scope=%s mode=%s\n", servedScopeLabel(scopeRef), servedMode(request))),
-	}, nil
-}
-
-type servedTransitionStatus struct {
-	State             projects.TransitionState
-	Controller        projects.TransitionController
-	MutationAuthority projects.TransitionController
-	OdinCanMutate     bool
-	LimitedActions    []string
-	Notes             string
-}
-
-func loadServedTransitionStatus(ctx context.Context, app bootstrap.App, projectKey string) (servedTransitionStatus, error) {
-	project, err := app.Store.GetProjectByKey(ctx, projectKey)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return servedTransitionStatus{
-				State:             projects.TransitionStateInventory,
-				Controller:        projects.TransitionControllerLegacyOdin,
-				MutationAuthority: projects.TransitionControllerLegacyOdin,
-				OdinCanMutate:     false,
-			}, nil
-		}
-		return servedTransitionStatus{}, err
-	}
-
-	record, err := app.Store.GetProjectTransition(ctx, project.ID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return servedTransitionStatus{
-				State:             projects.TransitionStateInventory,
-				Controller:        projects.TransitionControllerLegacyOdin,
-				MutationAuthority: projects.TransitionControllerLegacyOdin,
-				OdinCanMutate:     false,
-			}, nil
-		}
-		return servedTransitionStatus{}, err
-	}
-
-	controller := projects.TransitionController(record.Controller)
-	return servedTransitionStatus{
-		State:             projects.TransitionState(record.State),
-		Controller:        controller,
-		MutationAuthority: controller,
-		OdinCanMutate:     controller == projects.TransitionControllerOdinOS,
-		LimitedActions:    decodeCSVList(record.LimitedActionsJSON),
-		Notes:             record.Notes,
-	}, nil
-}
-
-func renderServedTransitionStatus(projectKey string, status servedTransitionStatus) string {
-	limitedActions := "none"
-	if len(status.LimitedActions) > 0 {
-		limitedActions = strings.Join(status.LimitedActions, ",")
-	}
-
-	if status.Notes != "" {
-		return fmt.Sprintf(
-			"project=%s state=%s controller=%s mutation_authority=%s odin_can_mutate=%t limited_actions=%s notes=%s",
-			projectKey,
-			status.State,
-			status.Controller,
-			status.MutationAuthority,
-			status.OdinCanMutate,
-			limitedActions,
-			status.Notes,
-		)
-	}
-
-	return fmt.Sprintf(
-		"project=%s state=%s controller=%s mutation_authority=%s odin_can_mutate=%t limited_actions=%s",
-		projectKey,
-		status.State,
-		status.Controller,
-		status.MutationAuthority,
-		status.OdinCanMutate,
-		limitedActions,
-	)
-}
-
-func decodeCSVList(raw string) []string {
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		return nil
-	}
-
-	if strings.HasPrefix(raw, "[") {
-		var decoded []string
-		if err := json.Unmarshal([]byte(raw), &decoded); err == nil {
-			return decoded
-		}
-	}
-
-	parts := strings.Split(raw, ",")
-	decoded := make([]string, 0, len(parts))
-	for _, part := range parts {
-		part = strings.TrimSpace(part)
-		if part != "" {
-			decoded = append(decoded, part)
-		}
-	}
-	return decoded
-}
-
-func servedMode(request capabilities.InvokeRequest) string {
-	mode := strings.TrimSpace(request.Execution.Mode)
-	if mode == "" {
-		return "local"
-	}
-	return mode
-}
-
-func servedScopeLabel(scopeRef capabilities.ScopeRef) string {
-	switch strings.TrimSpace(scopeRef.Kind) {
-	case "project", "odin-core":
-		if strings.TrimSpace(scopeRef.ProjectKey) != "" {
-			return strings.TrimSpace(scopeRef.ProjectKey)
-		}
-	}
-	return strings.TrimSpace(scopeRef.Kind)
+	return cause
 }
 
 func openServiceLogger(runtimeRoot string) (*logs.Logger, io.Closer, error) {
@@ -1290,57 +737,32 @@ func openServiceLogger(runtimeRoot string) (*logs.Logger, io.Closer, error) {
 	}, file, nil
 }
 
-func newJobService(app bootstrap.App) jobs.Service {
-	return jobs.Service{
-		Store:          app.Store,
-		Registry:       app.Registry,
-		Executors:      app.Executors,
-		ExecutorConfig: app.ExecutorConfig,
-		RuntimeRoot:    app.RuntimeRoot,
-		Transitions:    projects.Service{Store: app.Store},
-		Leases: leases.Manager{
-			Store:        app.Store,
-			Git:          gitadapter.Adapter{},
-			WorktreeRoot: worktrees.DefaultRoot(),
-		},
-		Supervisor: supervision.Service{},
-		Now:        time.Now,
-	}
-}
-
-func runTaskLoop(ctx context.Context, wg *sync.WaitGroup, service jobs.Service, logger *logs.Logger) {
+func runTaskLoop(ctx context.Context, operationCtx context.Context, wg *sync.WaitGroup, healthService healthsvc.Service, registryHealthy bool, service jobs.Service, nudges <-chan struct{}, logger *logs.Logger, interval time.Duration) {
 	defer wg.Done()
 
-	logBackgroundEvent(logger, logs.LevelInfo, "task_runner", "task loop started", map[string]any{
-		"interval_ms": serveTaskLoopInterval.Milliseconds(),
-	})
-
-	ticker := time.NewTicker(serveTaskLoopInterval)
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
-			taskCtx, cancel := serveTaskContext(ctx)
-			if err := service.ExecuteNextQueued(taskCtx); err != nil {
-				cancel()
+		case <-nudges:
+			if err := attemptDispatchIfReady(operationCtx, healthService, registryHealthy, service); err != nil {
 				logBackgroundError(logger, "task_runner", err)
 			}
-			cancel()
+		case <-ticker.C:
+			if err := attemptDispatchIfReady(operationCtx, healthService, registryHealthy, service); err != nil {
+				logBackgroundError(logger, "task_runner", err)
+			}
 		}
 	}
 }
 
-func runSelfHealLoop(ctx context.Context, wg *sync.WaitGroup, service recovery.Service, logger *logs.Logger) {
+func runSchedulerLoop(ctx context.Context, operationCtx context.Context, wg *sync.WaitGroup, service supervision.Service, nudges chan<- struct{}, logger *logs.Logger, interval time.Duration) {
 	defer wg.Done()
 
-	logBackgroundEvent(logger, logs.LevelInfo, "self_heal", "self-heal loop started", map[string]any{
-		"interval_ms": serveSelfHealLoopInterval.Milliseconds(),
-	})
-
-	ticker := time.NewTicker(serveSelfHealLoopInterval)
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
 	for {
@@ -1348,24 +770,52 @@ func runSelfHealLoop(ctx context.Context, wg *sync.WaitGroup, service recovery.S
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			recoveryCtx, cancel := serveOperationContext(ctx)
-			if _, err := service.RunCycle(recoveryCtx); err != nil {
-				cancel()
+			if result, err := service.Tick(operationCtx); err != nil {
+				logBackgroundError(logger, "scheduler", err)
+			} else if result.Promoted > 0 && logger != nil {
+				for promoted := 0; promoted < result.Promoted; promoted++ {
+					select {
+					case nudges <- struct{}{}:
+					default:
+					}
+				}
+				_ = logger.Log(logs.Record{
+					Level:         logs.LevelInfo,
+					Component:     "scheduler",
+					Message:       "scheduler dispatched delayed task candidates",
+					CorrelationID: "scheduler",
+					Scope:         "global",
+					Fields: map[string]any{
+						"promoted": result.Promoted,
+					},
+				})
+			}
+		}
+	}
+}
+
+func runSelfHealLoop(ctx context.Context, operationCtx context.Context, wg *sync.WaitGroup, service recovery.Service, logger *logs.Logger, interval time.Duration) {
+	defer wg.Done()
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if _, err := service.RunCycle(operationCtx); err != nil {
 				logBackgroundError(logger, "self_heal", err)
 			}
-			cancel()
 		}
 	}
 }
 
-func runMetricsLoop(ctx context.Context, wg *sync.WaitGroup, service metricsvc.Service, logger *logs.Logger) {
+func runLeaseLoop(ctx context.Context, operationCtx context.Context, wg *sync.WaitGroup, service leases.Maintenance, logger *logs.Logger, interval time.Duration, staleAfter time.Duration) {
 	defer wg.Done()
 
-	logBackgroundEvent(logger, logs.LevelInfo, "metrics", "metrics loop started", map[string]any{
-		"interval_ms": serveMetricsLoopInterval.Milliseconds(),
-	})
-
-	ticker := time.NewTicker(serveMetricsLoopInterval)
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
 	for {
@@ -1373,74 +823,269 @@ func runMetricsLoop(ctx context.Context, wg *sync.WaitGroup, service metricsvc.S
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			metricsCtx, cancel := serveOperationContext(ctx)
-			snapshot, err := service.Collect(metricsCtx)
-			cancel()
-			if err != nil {
-				logBackgroundError(logger, "metrics", err)
-				continue
+			runLeaseMaintenanceCycle(operationCtx, service, logger, staleAfter)
+		}
+	}
+}
+
+func runHealthLoop(ctx context.Context, operationCtx context.Context, wg *sync.WaitGroup, deps healthLoopDeps, logger *logs.Logger, interval time.Duration) {
+	defer wg.Done()
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			runHealthCycle(operationCtx, deps, logger)
+		}
+	}
+}
+
+func runLeaseMaintenanceCycle(ctx context.Context, service leases.Maintenance, logger *logs.Logger, staleAfter time.Duration) {
+	if _, err := service.CleanupExpired(ctx, staleAfter); err != nil {
+		logBackgroundError(logger, "worktree_lease_cleanup", err)
+	}
+	if _, err := service.HeartbeatActive(ctx); err != nil {
+		logBackgroundError(logger, "worktree_lease_heartbeat", err)
+	}
+}
+
+func runHealthCycle(ctx context.Context, deps healthLoopDeps, logger *logs.Logger) {
+	if err := deps.Health.SampleConfiguredExecutors(ctx, deps.Store, deps.ExecutorConfig, deps.Executors, "serve.health_loop"); err != nil {
+		setImmediateNotReady(deps.Health, true)
+		writeNotReadyFlag(logger, deps.RuntimeRoot, "executor health sampling failed")
+		logBackgroundError(logger, "executor_health", err)
+		markRuntimeDegraded(ctx, deps, logger, "executor health sampling failed", err)
+		return
+	}
+	if err := deps.Health.RefreshProjectionFreshness(ctx, deps.Store, deps.ProjectionSurfaces, "serve.health_loop"); err != nil {
+		setImmediateNotReady(deps.Health, true)
+		writeNotReadyFlag(logger, deps.RuntimeRoot, "projection freshness refresh failed")
+		logBackgroundError(logger, "projection_freshness", err)
+		markRuntimeDegraded(ctx, deps, logger, "projection freshness refresh failed", err)
+		return
+	}
+	if _, err := deps.RuntimeState.Heartbeat(ctx, runtimestate.HeartbeatInput{BootID: deps.BootID}); err != nil {
+		setImmediateNotReady(deps.Health, true)
+		writeNotReadyFlag(logger, deps.RuntimeRoot, "runtime heartbeat failed")
+		logBackgroundError(logger, "runtime_state", err)
+		markRuntimeDegraded(ctx, deps, logger, "runtime heartbeat failed", err)
+		return
+	}
+
+	report, safeToDispatch, err := deps.Health.DispatchReport(ctx, deps.RegistryHealthy)
+	if err != nil {
+		setImmediateNotReady(deps.Health, true)
+		writeNotReadyFlag(logger, deps.RuntimeRoot, "health evaluation failed")
+		logBackgroundError(logger, "health", err)
+		markRuntimeDegraded(ctx, deps, logger, "health evaluation failed", err)
+		return
+	}
+
+	state, err := deps.Store.GetRuntimeState(ctx)
+	if err != nil {
+		setImmediateNotReady(deps.Health, true)
+		logBackgroundError(logger, "runtime_state", err)
+		return
+	}
+	if state.Status == "draining" || state.Status == "stopped" {
+		setImmediateNotReady(deps.Health, true)
+		preserveNotReadyFlag(logger, deps.RuntimeRoot, state.Status)
+		return
+	}
+	if deps.ShutdownRequested != nil && deps.ShutdownRequested.Load() {
+		setImmediateNotReady(deps.Health, true)
+		preserveNotReadyFlag(logger, deps.RuntimeRoot, "shutdown requested")
+		return
+	}
+
+	if safeToDispatch {
+		if state.Status == "booting" || state.Status == "recovering" || state.Status == "degraded" {
+			if _, err := deps.RuntimeState.MarkReady(ctx, runtimestate.TransitionInput{
+				BootID: deps.BootID,
+				Reason: "health checks passed",
+			}); err != nil {
+				setImmediateNotReady(deps.Health, true)
+				logBackgroundError(logger, "runtime_state", err)
+				return
 			}
-			logBackgroundEvent(logger, logs.LevelInfo, "metrics", "metrics snapshot exported", map[string]any{
-				"generated_at":        snapshot.GeneratedAt.Format(time.RFC3339Nano),
-				"active_runs":         snapshot.ActiveRuns,
-				"blocked_items":       snapshot.BlockedItems,
-				"approvals_waiting":   snapshot.ApprovalsWaiting,
-				"open_incidents":      snapshot.OpenIncidents,
-				"escalated_incidents": snapshot.EscalatedIncidents,
-				"active_recoveries":   snapshot.ActiveRecoveries,
-				"queued_tasks":        snapshot.QueuedTasks,
-				"stale_executors":     snapshot.StaleExecutors,
-				"stale_sources":       snapshot.StaleSources,
-				"stale_projections":   snapshot.StaleProjections,
-			})
+		}
+		setImmediateNotReady(deps.Health, false)
+		clearNotReadyFlag(logger, deps.RuntimeRoot)
+		return
+	}
+
+	setImmediateNotReady(deps.Health, true)
+	writeNotReadyFlag(logger, deps.RuntimeRoot, fmt.Sprintf("dispatch paused: %s", report.Status))
+	markRuntimeDegraded(ctx, deps, logger, fmt.Sprintf("dispatch paused: %s", report.Status), nil)
+}
+
+func markRuntimeDegraded(ctx context.Context, deps healthLoopDeps, logger *logs.Logger, reason string, cause error) {
+	state, err := deps.Store.GetRuntimeState(ctx)
+	if err != nil {
+		logBackgroundError(logger, "runtime_state", err)
+		return
+	}
+	if state.Status == "degraded" || state.Status == "draining" || state.Status == "stopped" {
+		return
+	}
+
+	errorText := ""
+	if cause != nil {
+		errorText = cause.Error()
+	}
+	if _, err := deps.RuntimeState.MarkDegraded(ctx, runtimestate.TransitionInput{
+		BootID: deps.BootID,
+		Reason: reason,
+		Error:  errorText,
+	}); err != nil {
+		logBackgroundError(logger, "runtime_state", err)
+	}
+}
+
+func attemptDispatchIfReady(ctx context.Context, healthService healthsvc.Service, registryHealthy bool, service jobs.Service) error {
+	_, ready, err := healthService.Readiness(ctx, registryHealthy)
+	if err != nil {
+		return err
+	}
+	if !ready {
+		return nil
+	}
+	return service.ExecuteNextQueued(ctx)
+}
+
+func enabledExecutorKeys(config executorrouter.Config) []string {
+	keys := make([]string, 0, len(config.Executors))
+	for _, executor := range config.Executors {
+		if executor.Enabled {
+			keys = append(keys, executor.Key)
 		}
 	}
+	return keys
 }
 
-func serveOperationContext(parent context.Context) (context.Context, context.CancelFunc) {
-	return context.WithTimeout(parent, serveOperationTimeout)
-}
-
-func serveTaskContext(parent context.Context) (context.Context, context.CancelFunc) {
-	return context.WithCancel(parent)
-}
-
-func serveStartupContext(parent context.Context) (context.Context, context.CancelFunc) {
-	if errors.Is(parent.Err(), context.DeadlineExceeded) {
-		return context.WithTimeout(parent, serveOperationTimeout)
+func newHealthService(app bootstrap.App, config healthsvc.Config) healthsvc.Service {
+	return healthsvc.Service{
+		DB:           app.Store.DB(),
+		Config:       config,
+		ExecutorKeys: enabledExecutorKeys(app.ExecutorConfig),
 	}
+}
 
-	base := context.Background()
-	if deadline, ok := parent.Deadline(); ok {
-		timeoutDeadline := time.Now().Add(serveOperationTimeout)
-		if deadline.Before(timeoutDeadline) {
-			return context.WithDeadline(base, deadline)
+func newMetricsService(app bootstrap.App, config healthsvc.Config) metricsvc.Service {
+	return metricsvc.Service{
+		DB: app.Store.DB(),
+		Config: metricsvc.Config{
+			ExecutorFreshnessTTL:   config.ExecutorFreshnessTTL,
+			SourceFreshnessTTL:     config.SourceFreshnessTTL,
+			ProjectionFreshnessTTL: config.ProjectionFreshnessTTL,
+		},
+		ExecutorKeys: enabledExecutorKeys(app.ExecutorConfig),
+	}
+}
+
+func runtimeHeartbeatTTL(interval time.Duration) time.Duration {
+	if interval <= 0 {
+		return healthsvc.DefaultConfig().RuntimeHeartbeatTTL
+	}
+	ttl := interval * 2
+	if ttl < time.Second {
+		return time.Second
+	}
+	return ttl
+}
+
+func setImmediateNotReady(service healthsvc.Service, value bool) {
+	if service.ImmediateNotReady != nil {
+		service.ImmediateNotReady.Store(value)
+	}
+}
+
+func writeNotReadyFlag(logger *logs.Logger, runtimeRoot string, reason string) {
+	if err := writeReadinessFlag(runtimeRoot, reason); err != nil {
+		logBackgroundError(logger, "readiness_flag", err)
+	}
+}
+
+func clearNotReadyFlag(logger *logs.Logger, runtimeRoot string) {
+	if err := clearReadinessFlag(runtimeRoot); err != nil {
+		logBackgroundError(logger, "readiness_flag", err)
+	}
+}
+
+func preserveNotReadyFlag(logger *logs.Logger, runtimeRoot string, reason string) {
+	existing, active, err := readReadinessFlag(runtimeRoot)
+	if err != nil {
+		logBackgroundError(logger, "readiness_flag", err)
+		return
+	}
+	if active && strings.TrimSpace(existing) != "" {
+		return
+	}
+	writeNotReadyFlag(logger, runtimeRoot, reason)
+}
+
+func readReadinessFlag(runtimeRoot string) (string, bool, error) {
+	path := readinessFlagPath(runtimeRoot)
+	content, err := os.ReadFile(path)
+	if err == nil {
+		reason := strings.TrimSpace(string(content))
+		if reason == "" {
+			reason = "runtime not ready"
 		}
+		return reason, true, nil
 	}
-	return context.WithTimeout(base, serveOperationTimeout)
+	if errors.Is(err, os.ErrNotExist) {
+		return "", false, nil
+	}
+	return "", false, err
 }
 
-func serveServeContext(parent context.Context) (context.Context, context.CancelFunc) {
-	return context.WithCancel(parent)
+func writeReadinessFlag(runtimeRoot string, reason string) error {
+	if runtimeRoot == "" {
+		return nil
+	}
+	if reason == "" {
+		reason = "runtime not ready"
+	}
+	path := readinessFlagPath(runtimeRoot)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(path, []byte(reason+"\n"), 0o644)
+}
+
+func clearReadinessFlag(runtimeRoot string) error {
+	if runtimeRoot == "" {
+		return nil
+	}
+	err := os.Remove(readinessFlagPath(runtimeRoot))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	return err
+}
+
+func readinessFlagPath(runtimeRoot string) string {
+	return filepath.Join(runtimeRoot, "state", "cache", "readiness.flag")
 }
 
 func logBackgroundError(logger *logs.Logger, component string, err error) {
-	logBackgroundEvent(logger, logs.LevelError, component, "background loop error", map[string]any{
-		"error": err.Error(),
-	})
-}
-
-func logBackgroundEvent(logger *logs.Logger, level logs.Level, component, message string, fields map[string]any) {
 	if logger == nil {
 		return
 	}
 	_ = logger.Log(logs.Record{
-		Level:         level,
+		Level:         logs.LevelError,
 		Component:     component,
-		Message:       message,
+		Message:       "background loop error",
 		CorrelationID: component,
 		Scope:         "global",
-		Fields:        fields,
+		Fields: map[string]any{
+			"error": err.Error(),
+		},
 	})
 }
 

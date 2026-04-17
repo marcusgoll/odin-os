@@ -84,7 +84,7 @@ func TestAskModeHandlesFreeTextWithoutCreatingTask(t *testing.T) {
 		t.Fatalf("HandleLine() output = %q, want scope answer", output.String())
 	}
 
-	views, err := shell.jobs.List(context.Background(), shell.controlScope())
+	views, err := shell.jobs.List(context.Background(), shell.state.Scope)
 	if err != nil {
 		t.Fatalf("jobs.List() error = %v", err)
 	}
@@ -173,7 +173,7 @@ func TestActModeCreatesTaskInProjectScope(t *testing.T) {
 		t.Fatalf("HandleLine(act input) error = %v", err)
 	}
 
-	views, err := shell.jobs.List(context.Background(), shell.controlScope())
+	views, err := shell.jobs.List(context.Background(), shell.state.Scope)
 	if err != nil {
 		t.Fatalf("jobs.List() error = %v", err)
 	}

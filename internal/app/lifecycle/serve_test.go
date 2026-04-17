@@ -6,19 +6,26 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"sync"
+	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
+	"odin-os/internal/app/bootstrap"
 	"odin-os/internal/core/projects"
 	"odin-os/internal/runtime/checkpoints"
+	runtimeevents "odin-os/internal/runtime/events"
 	healthsvc "odin-os/internal/runtime/health"
+	runtimestate "odin-os/internal/runtime/state"
 	"odin-os/internal/store/sqlite"
+	"odin-os/internal/vcs/leases"
 	"odin-os/internal/vcs/worktrees"
 )
 
@@ -43,61 +50,13 @@ func TestRunDoctorJSONWritesStructuredReport(t *testing.T) {
 	}
 }
 
-func TestRunDoctorMarkdownWritesOperatorReport(t *testing.T) {
-	t.Parallel()
-
-	root := createRuntimeRoot(t)
-
-	var stdout bytes.Buffer
-	if err := Run(context.Background(), root, []string{"doctor", "--format", "markdown"}, strings.NewReader(""), &stdout); err != nil {
-		t.Fatalf("Run(doctor --format markdown) error = %v", err)
-	}
-
-	if !strings.Contains(stdout.String(), "## Current Health Snapshot") {
-		t.Fatalf("doctor markdown output = %q, want report heading", stdout.String())
-	}
-	if strings.Contains(stdout.String(), "| executor |  | executor health is fresh |  | high |") {
-		t.Fatalf("doctor markdown output = %q, want no blank operator rows", stdout.String())
-	}
-	if strings.Contains(stdout.String(), "| Area | Summary | Confidence |\n| --- | --- | --- |\nNone") {
-		t.Fatalf("doctor markdown output = %q, want clean empty-state rendering for root causes", stdout.String())
-	}
-}
-
-func TestRunDoctorRejectsUnknownFormat(t *testing.T) {
-	t.Parallel()
-
-	root := createRuntimeRoot(t)
-
-	var stdout bytes.Buffer
-	err := Run(context.Background(), root, []string{"doctor", "--format", "yaml"}, strings.NewReader(""), &stdout)
-	if err == nil {
-		t.Fatalf("Run(doctor --format yaml) error = nil, want rejection")
-	}
-	if !strings.Contains(err.Error(), `doctor: unsupported format "yaml"`) {
-		t.Fatalf("Run(doctor --format yaml) error = %v, want clear unsupported-format message", err)
-	}
-}
-
-func TestRunDoctorReportAliasWritesOperatorReport(t *testing.T) {
-	t.Parallel()
-
-	root := createRuntimeRoot(t)
-
-	var stdout bytes.Buffer
-	if err := Run(context.Background(), root, []string{"doctor", "--report"}, strings.NewReader(""), &stdout); err != nil {
-		t.Fatalf("Run(doctor --report) error = %v", err)
-	}
-
-	if !strings.Contains(stdout.String(), "## Current Health Snapshot") {
-		t.Fatalf("doctor report alias output = %q, want report heading", stdout.String())
-	}
-}
-
 func TestRunHealthcheckHealthyReturnsNil(t *testing.T) {
-	configureServeHarnessDriver(t)
+	t.Parallel()
+
 	root := createRuntimeRoot(t)
 	seedHealthyRuntime(t, root)
+	seedRuntimeState(t, root, "ready", time.Now().UTC())
+	holdServiceLock(t, root)
 
 	var stdout bytes.Buffer
 	if err := Run(context.Background(), root, []string{"healthcheck"}, strings.NewReader(""), &stdout); err != nil {
@@ -109,16 +68,55 @@ func TestRunHealthcheckHealthyReturnsNil(t *testing.T) {
 	}
 }
 
-func TestRunHealthcheckFreshRuntimeReturnsNil(t *testing.T) {
-	configureServeHarnessDriver(t)
+func TestRunHealthcheckReadyStateWithoutLiveServiceLockReturnsError(t *testing.T) {
+	t.Parallel()
+
+	root := createRuntimeRoot(t)
+	seedHealthyRuntime(t, root)
+	seedRuntimeState(t, root, "ready", time.Now().UTC())
+
+	var stdout bytes.Buffer
+	err := Run(context.Background(), root, []string{"healthcheck"}, strings.NewReader(""), &stdout)
+	if err == nil {
+		t.Fatal("Run(healthcheck) error = nil, want readiness error without live service lock")
+	}
+	if !strings.Contains(stdout.String(), "no live odin serve process owns runtime root") {
+		t.Fatalf("healthcheck output = %q, want missing-service-owner message", stdout.String())
+	}
+}
+
+func TestRunHealthcheckFreshRuntimeReturnsError(t *testing.T) {
+	t.Parallel()
+
 	root := createRuntimeRoot(t)
 
 	var stdout bytes.Buffer
-	if err := Run(context.Background(), root, []string{"healthcheck"}, strings.NewReader(""), &stdout); err != nil {
-		t.Fatalf("Run(healthcheck fresh runtime) error = %v", err)
+	err := Run(context.Background(), root, []string{"healthcheck"}, strings.NewReader(""), &stdout)
+	if err == nil {
+		t.Fatal("Run(healthcheck fresh runtime) error = nil, want readiness error")
 	}
-	if !strings.Contains(stdout.String(), "ready") {
-		t.Fatalf("healthcheck output = %q, want readiness message", stdout.String())
+	if !strings.Contains(stdout.String(), "runtime not ready") {
+		t.Fatalf("healthcheck output = %q, want runtime-not-ready message", stdout.String())
+	}
+}
+
+func TestRunHealthcheckFailsWhenReadinessFlagIsPresent(t *testing.T) {
+	t.Parallel()
+
+	root := createRuntimeRoot(t)
+	seedHealthyRuntime(t, root)
+	seedRuntimeState(t, root, "ready", time.Now().UTC())
+	if err := writeReadinessFlag(root, "runtime heartbeat failed"); err != nil {
+		t.Fatalf("writeReadinessFlag() error = %v", err)
+	}
+
+	var stdout bytes.Buffer
+	err := Run(context.Background(), root, []string{"healthcheck"}, strings.NewReader(""), &stdout)
+	if err == nil {
+		t.Fatal("Run(healthcheck) error = nil, want readiness error")
+	}
+	if !strings.Contains(stdout.String(), "runtime heartbeat failed") {
+		t.Fatalf("healthcheck output = %q, want readiness-flag reason", stdout.String())
 	}
 }
 
@@ -149,7 +147,32 @@ projects:
 	}
 }
 
+func TestRunDoctorScopesEnabledExecutors(t *testing.T) {
+	t.Parallel()
+
+	root := createRuntimeRoot(t)
+	writeUnavailableExecutorsConfig(t, root)
+	seedHealthyRuntime(t, root)
+
+	var stdout bytes.Buffer
+	if err := Run(context.Background(), root, []string{"doctor", "--json"}, strings.NewReader(""), &stdout); err != nil {
+		t.Fatalf("Run(doctor --json) error = %v", err)
+	}
+
+	var report struct {
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+		t.Fatalf("doctor output is not valid json: %v\n%s", err, stdout.String())
+	}
+	if report.Status != "degraded" {
+		t.Fatalf("doctor report status = %q, want %q", report.Status, "degraded")
+	}
+}
+
 func TestRunServeExecutesStartupRecoveryBeforeShutdown(t *testing.T) {
+	t.Parallel()
+
 	root := createRuntimeRoot(t)
 	writeRuntimeConfig(t, root, `
 version: 1
@@ -194,7 +217,160 @@ service:
 	}
 }
 
+func TestRunServeRecordsLifecycleTransitionsAndShutdown(t *testing.T) {
+	t.Parallel()
+
+	root := createRuntimeRoot(t)
+	seedHealthyRuntime(t, root)
+	writeRuntimeConfig(t, root, `
+version: 1
+runtime:
+  root: .
+service:
+  http_addr: 127.0.0.1:0
+  startup_recovery: true
+`)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	time.AfterFunc(200*time.Millisecond, cancel)
+
+	var stdout bytes.Buffer
+	err := Run(ctx, root, []string{"serve"}, strings.NewReader(""), &stdout)
+	if err != nil && !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run(serve) error = %v", err)
+	}
+
+	store, openErr := sqlite.Open(filepath.Join(root, "data", "odin.db"))
+	if openErr != nil {
+		t.Fatalf("sqlite.Open() error = %v", openErr)
+	}
+	defer store.Close()
+
+	got, err := store.GetRuntimeState(context.Background())
+	if err != nil {
+		t.Fatalf("GetRuntimeState() error = %v", err)
+	}
+	if got.Status != "stopped" {
+		t.Fatalf("RuntimeState.Status = %q, want %q", got.Status, "stopped")
+	}
+	if got.ReadyAt == nil {
+		t.Fatal("RuntimeState.ReadyAt = nil, want ready transition before shutdown")
+	}
+
+	statuses, err := lifecycleStatuses(store)
+	if err != nil {
+		t.Fatalf("lifecycleStatuses() error = %v", err)
+	}
+	assertLifecycleSequence(t, statuses, []string{"booting", "recovering", "ready", "draining", "stopped"})
+}
+
+func TestRunServeStopsWithoutReadyWhenListenerBindingFails(t *testing.T) {
+	t.Parallel()
+
+	root := createRuntimeRoot(t)
+	_, taskID := seedQueuedTask(t, root)
+	seedStaleProjection(t, root)
+
+	occupied, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("net.Listen() error = %v", err)
+	}
+	defer occupied.Close()
+
+	writeRuntimeConfig(t, root, `
+version: 1
+runtime:
+  root: .
+service:
+  http_addr: `+occupied.Addr().String()+`
+  startup_recovery: false
+`)
+
+	var stdout bytes.Buffer
+	err = Run(context.Background(), root, []string{"serve"}, strings.NewReader(""), &stdout)
+	if err == nil {
+		t.Fatal("Run(serve) error = nil, want listener binding failure")
+	}
+
+	store, openErr := sqlite.Open(filepath.Join(root, "data", "odin.db"))
+	if openErr != nil {
+		t.Fatalf("sqlite.Open() error = %v", openErr)
+	}
+	defer store.Close()
+
+	got, err := store.GetRuntimeState(context.Background())
+	if err != nil {
+		t.Fatalf("GetRuntimeState() error = %v", err)
+	}
+	if got.Status != "stopped" {
+		t.Fatalf("RuntimeState.Status = %q, want %q", got.Status, "stopped")
+	}
+	if got.LastError == "" {
+		t.Fatal("RuntimeState.LastError = empty, want listener binding error")
+	}
+
+	task, err := store.GetTask(context.Background(), taskID)
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
+	}
+	if task.Status != "queued" {
+		t.Fatalf("Task.Status = %q, want %q", task.Status, "queued")
+	}
+
+	events, err := store.ListEvents(context.Background(), sqlite.ListEventsParams{})
+	if err != nil {
+		t.Fatalf("ListEvents() error = %v", err)
+	}
+	for _, event := range events {
+		if event.Type == runtimeevents.EventRecoveryActionExecuted {
+			t.Fatalf("events = %+v, want no recovery action on listener failure", events)
+		}
+	}
+
+	statuses, err := lifecycleStatuses(store)
+	if err != nil {
+		t.Fatalf("lifecycleStatuses() error = %v", err)
+	}
+	assertLifecycleSequence(t, statuses, []string{"booting", "stopped"})
+}
+
+func TestRunServeFailsWhenServiceLockIsHeld(t *testing.T) {
+	t.Parallel()
+
+	root := createRuntimeRoot(t)
+	seedHealthyRuntime(t, root)
+	holdServiceLock(t, root)
+
+	var stdout bytes.Buffer
+	err := Run(context.Background(), root, []string{"serve"}, strings.NewReader(""), &stdout)
+	if err == nil {
+		t.Fatal("Run(serve) error = nil, want service lock conflict")
+	}
+
+	store, openErr := sqlite.Open(filepath.Join(root, "data", "odin.db"))
+	if openErr != nil {
+		t.Fatalf("sqlite.Open() error = %v", openErr)
+	}
+	defer store.Close()
+
+	if _, err := store.GetRuntimeState(context.Background()); err == nil {
+		t.Fatal("GetRuntimeState() error = nil, want no runtime_state mutation")
+	}
+
+	events, err := store.ListEvents(context.Background(), sqlite.ListEventsParams{})
+	if err != nil {
+		t.Fatalf("ListEvents() error = %v", err)
+	}
+	for _, event := range events {
+		if event.Type == runtimeevents.EventServiceLifecycleChanged {
+			t.Fatalf("events = %+v, want no lifecycle mutation while service lock is held", events)
+		}
+	}
+}
+
 func TestRunServeExecutesStartupRecoveryWhenContextAlreadyCanceled(t *testing.T) {
+	t.Parallel()
+
 	root := createRuntimeRoot(t)
 	writeRuntimeConfig(t, root, `
 version: 1
@@ -237,9 +413,54 @@ service:
 	if packet.Trigger != string(checkpoints.TriggerRestart) {
 		t.Fatalf("WakePacket.Trigger = %q, want %q", packet.Trigger, checkpoints.TriggerRestart)
 	}
+
+	statuses, err := lifecycleStatuses(store)
+	if err != nil {
+		t.Fatalf("lifecycleStatuses() error = %v", err)
+	}
+	assertLifecycleSequence(t, statuses, []string{"booting", "recovering", "ready", "draining", "stopped"})
+}
+
+func TestRunServeSkipsRecoveringWhenStartupRecoveryDisabled(t *testing.T) {
+	t.Parallel()
+
+	root := createRuntimeRoot(t)
+	writeRuntimeConfig(t, root, `
+version: 1
+runtime:
+  root: .
+service:
+  http_addr: 127.0.0.1:0
+  startup_recovery: false
+`)
+	seedHealthyRuntime(t, root)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	time.AfterFunc(100*time.Millisecond, cancel)
+
+	var stdout bytes.Buffer
+	err := Run(ctx, root, []string{"serve"}, strings.NewReader(""), &stdout)
+	if err != nil && !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run(serve) error = %v", err)
+	}
+
+	store, err := sqlite.Open(filepath.Join(root, "data", "odin.db"))
+	if err != nil {
+		t.Fatalf("sqlite.Open() error = %v", err)
+	}
+	defer store.Close()
+
+	statuses, err := lifecycleStatuses(store)
+	if err != nil {
+		t.Fatalf("lifecycleStatuses() error = %v", err)
+	}
+	assertNoLifecycleStatus(t, statuses, "recovering")
+	assertLifecycleSequence(t, statuses, []string{"booting", "ready", "draining", "stopped"})
 }
 
 func TestRunServeRunsSelfHealCycleBeforeShutdown(t *testing.T) {
+	t.Parallel()
+
 	root := createRuntimeRoot(t)
 	writeRuntimeConfig(t, root, `
 version: 1
@@ -250,9 +471,6 @@ service:
   startup_recovery: true
 `)
 	seedHealthyRuntime(t, root)
-	if err := os.RemoveAll(filepath.Join(worktrees.DefaultRoot(), "alpha", "task-1", "run-1", "try-1")); err != nil {
-		t.Fatalf("RemoveAll(stale worktree path) error = %v", err)
-	}
 
 	store, err := sqlite.Open(filepath.Join(root, "data", "odin.db"))
 	if err != nil {
@@ -262,32 +480,15 @@ service:
 
 	if _, err := store.RecordProjectionFreshness(context.Background(), sqlite.RecordProjectionFreshnessParams{
 		Surface:     "doctor",
-		Status:      "current",
+		Status:      "stale",
 		DetailsJSON: `{"source":"serve-test"}`,
 	}); err != nil {
 		t.Fatalf("RecordProjectionFreshness() error = %v", err)
 	}
 
-	originalSelfHealInterval := serveSelfHealLoopInterval
-	serveSelfHealLoopInterval = 20 * time.Millisecond
-	defer func() {
-		serveSelfHealLoopInterval = originalSelfHealInterval
-	}()
-	originalHealthConfig := serveHealthConfig
-	serveHealthConfig = healthsvc.Config{
-		QueuePressureThreshold: 10,
-		ExecutorFreshnessTTL:   time.Hour,
-		ProjectionFreshnessTTL: 25 * time.Millisecond,
-		SourceFreshnessTTL:     time.Hour,
-	}
-	defer func() {
-		serveHealthConfig = originalHealthConfig
-	}()
-
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	selfHealResult := make(chan error, 1)
+	ctx = withServeLoopConfig(ctx, serveLoopConfig{selfHealInterval: 20 * time.Millisecond})
+	actionObserved := make(chan struct{})
 	go func() {
 		deadline := time.NewTimer(2 * time.Second)
 		defer deadline.Stop()
@@ -295,23 +496,38 @@ service:
 		ticker := time.NewTicker(10 * time.Millisecond)
 		defer ticker.Stop()
 
+		forcedStale := false
 		for {
 			select {
 			case <-ctx.Done():
-				selfHealResult <- ctx.Err()
 				return
 			case <-deadline.C:
-				selfHealResult <- errors.New("timed out waiting for background self-heal cycle")
 				cancel()
 				return
 			case <-ticker.C:
+				if !forcedStale {
+					state, err := store.GetRuntimeState(context.Background())
+					if err == nil && state.Status == "ready" {
+						staleAt := time.Now().Add(-2 * time.Hour).UTC().Format(time.RFC3339Nano)
+						if _, err := store.DB().ExecContext(context.Background(), `
+							UPDATE projection_freshness
+							SET refreshed_at = ?, updated_at = ?
+							WHERE surface = 'doctor'
+						`, staleAt, staleAt); err != nil {
+							t.Errorf("force stale projection freshness error = %v", err)
+							cancel()
+							return
+						}
+						forcedStale = true
+					}
+				}
 				events, err := store.ListEvents(context.Background(), sqlite.ListEventsParams{})
 				if err != nil {
 					continue
 				}
 				for _, event := range events {
 					if string(event.Type) == "recovery.action_executed" {
-						selfHealResult <- nil
+						close(actionObserved)
 						cancel()
 						return
 					}
@@ -326,18 +542,14 @@ service:
 		t.Fatalf("Run(serve) error = %v", err)
 	}
 
-	select {
-	case err := <-selfHealResult:
-		if err != nil {
-			t.Fatalf("self-heal wait error = %v", err)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for background self-heal cycle")
-	}
-
 	events, err := store.ListEvents(context.Background(), sqlite.ListEventsParams{})
 	if err != nil {
 		t.Fatalf("ListEvents() error = %v", err)
+	}
+
+	select {
+	case <-actionObserved:
+	default:
 	}
 
 	found := false
@@ -352,7 +564,7 @@ service:
 	}
 }
 
-func TestRunServeDrainsQueuedTaskAfterStartup(t *testing.T) {
+func TestRunServeSchedulerDispatchesDelayedTasksBeforeTaskLoopWakeup(t *testing.T) {
 	root := createRuntimeRoot(t)
 	writeRuntimeConfig(t, root, `
 version: 1
@@ -360,9 +572,12 @@ runtime:
   root: .
 service:
   http_addr: 127.0.0.1:0
-  startup_recovery: true
+  startup_recovery: false
 `)
+	writeMutableProjectsConfig(t, root)
+	initGitRepo(t, filepath.Join(root, "repos", "alpha"))
 	seedHealthyRuntime(t, root)
+	projectID, taskID := seedQueuedTask(t, root)
 
 	store, err := sqlite.Open(filepath.Join(root, "data", "odin.db"))
 	if err != nil {
@@ -370,21 +585,8 @@ service:
 	}
 	defer store.Close()
 
-	ctx := context.Background()
-	project, err := store.CreateProject(ctx, sqlite.CreateProjectParams{
-		Key:           "odin-core",
-		Name:          "Odin Core",
-		Scope:         "odin-core",
-		GitRoot:       filepath.Join(root, "repos", "odin-core"),
-		DefaultBranch: "main",
-		ManifestPath:  "config/projects.yaml",
-	})
-	if err != nil {
-		t.Fatalf("CreateProject() error = %v", err)
-	}
-	transitionService := projects.Service{Store: store}
-	if _, err := transitionService.SetTransitionState(ctx, projects.TransitionStateInput{
-		ProjectID:   project.ID,
+	if _, err := (projects.Service{Store: store}).SetTransitionState(context.Background(), projects.TransitionStateInput{
+		ProjectID:   projectID,
 		Actor:       projects.TransitionControllerOdinOS,
 		TargetState: projects.TransitionStateCutover,
 		ChangedBy:   "test",
@@ -392,62 +594,189 @@ service:
 		t.Fatalf("SetTransitionState(cutover) error = %v", err)
 	}
 
-	originalTaskInterval := serveTaskLoopInterval
-	serveTaskLoopInterval = 20 * time.Millisecond
-	defer func() {
-		serveTaskLoopInterval = originalTaskInterval
-	}()
+	delay := 150 * time.Millisecond
+	if _, err := store.RequeueTaskAt(context.Background(), sqlite.RequeueTaskAtParams{
+		TaskID:         taskID,
+		NextEligibleAt: time.Now().Add(delay),
+	}); err != nil {
+		t.Fatalf("RequeueTaskAt() error = %v", err)
+	}
+
+	if err := os.MkdirAll(filepath.Join(root, "home"), 0o755); err != nil {
+		t.Fatalf("mkdir home: %v", err)
+	}
+	t.Setenv("HOME", filepath.Join(root, "home"))
 
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	stdout := &servedOutput{started: make(chan struct{}), marker: "serving on"}
-	runErr := make(chan error, 1)
-	go func() {
-		runErr <- Run(ctx, root, []string{"serve"}, strings.NewReader(""), stdout)
-	}()
-
-	stdout.waitStarted(t)
-
-	task, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
-		ProjectID:   project.ID,
-		Key:         "queued-task-after-start",
-		Title:       "Queued after serve startup",
-		Status:      "queued",
-		Scope:       "odin-core",
-		RequestedBy: "operator",
+	ctx = withServeLoopConfig(ctx, serveLoopConfig{
+		taskInterval:      5 * time.Second,
+		schedulerInterval: 20 * time.Millisecond,
 	})
-	if err != nil {
-		t.Fatalf("CreateTask() error = %v", err)
-	}
+	time.AfterFunc(700*time.Millisecond, cancel)
 
-	deadline := time.NewTimer(2 * time.Second)
-	defer deadline.Stop()
-
-	for {
-		gotTask, err := store.GetTask(context.Background(), task.ID)
-		if err != nil {
-			t.Fatalf("GetTask() error = %v", err)
-		}
-		if gotTask.Status != "queued" {
-			break
-		}
-
-		select {
-		case <-deadline.C:
-			t.Fatal("task remained queued, want background task loop to drain it after serve started")
-		default:
-			time.Sleep(10 * time.Millisecond)
-		}
-	}
-
-	cancel()
-	if err := <-runErr; err != nil && !errors.Is(err, context.Canceled) {
+	var stdout bytes.Buffer
+	err = Run(ctx, root, []string{"serve"}, strings.NewReader(""), &stdout)
+	if err != nil && !errors.Is(err, context.Canceled) {
 		t.Fatalf("Run(serve) error = %v", err)
+	}
+
+	gotTask, err := store.GetTask(context.Background(), taskID)
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
+	}
+	if gotTask.Status != "completed" {
+		logPath := filepath.Join(root, "runs", "logs", "odin-service.log")
+		logContent, _ := os.ReadFile(logPath)
+		t.Fatalf("Task.Status = %q, want completed (last_error=%q retry_count=%d next_eligible_at=%v log=%s)", gotTask.Status, gotTask.LastError, gotTask.RetryCount, gotTask.NextEligibleAt, string(logContent))
 	}
 }
 
-func TestRunServeAllowsQueuedTaskToOutliveOperationTimeout(t *testing.T) {
+func TestRunHealthCycleDoesNotPromoteDrainingRuntimeToReady(t *testing.T) {
+	t.Parallel()
+
+	root := createRuntimeRoot(t)
+	ctx := bootstrap.WithBootID(context.Background(), "boot-test")
+	app, err := bootstrap.Load(ctx, root, root)
+	if err != nil {
+		t.Fatalf("bootstrap.Load() error = %v", err)
+	}
+	defer app.Store.Close()
+
+	if _, err := app.RuntimeState.MarkDraining(context.Background(), runtimestate.TransitionInput{
+		BootID: "boot-test",
+		Reason: "shutdown requested",
+	}); err != nil {
+		t.Fatalf("MarkDraining() error = %v", err)
+	}
+
+	runHealthCycle(context.Background(), healthLoopDeps{
+		Store:              app.Store,
+		RuntimeState:       app.RuntimeState,
+		Health:             healthsvc.Service{DB: app.Store.DB(), Config: healthsvc.DefaultConfig(), ExecutorKeys: enabledExecutorKeys(app.ExecutorConfig)},
+		Executors:          app.Executors,
+		ExecutorConfig:     app.ExecutorConfig,
+		RegistryHealthy:    len(app.RegistryDiagnostics) == 0,
+		ProjectionSurfaces: bootstrap.ServiceOwnedProjectionSurfaces(),
+		BootID:             "boot-test",
+	}, nil)
+
+	state, err := app.Store.GetRuntimeState(context.Background())
+	if err != nil {
+		t.Fatalf("GetRuntimeState() error = %v", err)
+	}
+	if state.Status != "draining" {
+		t.Fatalf("RuntimeState.Status = %q, want %q", state.Status, "draining")
+	}
+}
+
+func TestRunHealthCycleKeepsRuntimeNotReadyWhenShutdownRequested(t *testing.T) {
+	t.Parallel()
+
+	root := createRuntimeRoot(t)
+	ctx := bootstrap.WithBootID(context.Background(), "boot-test")
+	app, err := bootstrap.Load(ctx, root, root)
+	if err != nil {
+		t.Fatalf("bootstrap.Load() error = %v", err)
+	}
+	defer app.Store.Close()
+
+	if _, err := app.RuntimeState.MarkReady(context.Background(), runtimestate.TransitionInput{
+		BootID: "boot-test",
+		Reason: "ready for shutdown guard test",
+	}); err != nil {
+		t.Fatalf("MarkReady() error = %v", err)
+	}
+	if err := writeReadinessFlag(root, "shutdown requested"); err != nil {
+		t.Fatalf("writeReadinessFlag() error = %v", err)
+	}
+
+	var immediateNotReady atomic.Bool
+	var shutdownRequested atomic.Bool
+	shutdownRequested.Store(true)
+
+	runHealthCycle(context.Background(), healthLoopDeps{
+		Store:        app.Store,
+		RuntimeState: app.RuntimeState,
+		Health: healthsvc.Service{
+			DB:                app.Store.DB(),
+			Config:            healthsvc.DefaultConfig(),
+			ExecutorKeys:      enabledExecutorKeys(app.ExecutorConfig),
+			ImmediateNotReady: &immediateNotReady,
+		},
+		Executors:          app.Executors,
+		ExecutorConfig:     app.ExecutorConfig,
+		RegistryHealthy:    len(app.RegistryDiagnostics) == 0,
+		ProjectionSurfaces: bootstrap.ServiceOwnedProjectionSurfaces(),
+		ShutdownRequested:  &shutdownRequested,
+		BootID:             "boot-test",
+		RuntimeRoot:        root,
+	}, nil)
+
+	if !immediateNotReady.Load() {
+		t.Fatal("ImmediateNotReady = false, want shutdown to keep readiness latched closed")
+	}
+	reason, active, err := readReadinessFlag(root)
+	if err != nil {
+		t.Fatalf("readReadinessFlag() error = %v", err)
+	}
+	if !active {
+		t.Fatal("readiness flag missing after shutdown-requested health cycle")
+	}
+	if !strings.Contains(reason, "shutdown requested") {
+		t.Fatalf("readiness flag reason = %q, want shutdown requested", reason)
+	}
+}
+
+func TestRunHealthCyclePreservesReadinessReasonWhileDraining(t *testing.T) {
+	t.Parallel()
+
+	root := createRuntimeRoot(t)
+	ctx := bootstrap.WithBootID(context.Background(), "boot-test")
+	app, err := bootstrap.Load(ctx, root, root)
+	if err != nil {
+		t.Fatalf("bootstrap.Load() error = %v", err)
+	}
+	defer app.Store.Close()
+
+	if _, err := app.RuntimeState.MarkDraining(context.Background(), runtimestate.TransitionInput{
+		BootID: "boot-test",
+		Reason: "operator requested shutdown",
+	}); err != nil {
+		t.Fatalf("MarkDraining() error = %v", err)
+	}
+	if err := writeReadinessFlag(root, "operator requested shutdown"); err != nil {
+		t.Fatalf("writeReadinessFlag() error = %v", err)
+	}
+
+	runHealthCycle(context.Background(), healthLoopDeps{
+		Store:        app.Store,
+		RuntimeState: app.RuntimeState,
+		Health: healthsvc.Service{
+			DB:           app.Store.DB(),
+			Config:       healthsvc.DefaultConfig(),
+			ExecutorKeys: enabledExecutorKeys(app.ExecutorConfig),
+		},
+		Executors:          app.Executors,
+		ExecutorConfig:     app.ExecutorConfig,
+		RegistryHealthy:    len(app.RegistryDiagnostics) == 0,
+		ProjectionSurfaces: bootstrap.ServiceOwnedProjectionSurfaces(),
+		BootID:             "boot-test",
+		RuntimeRoot:        root,
+	}, nil)
+
+	reason, active, err := readReadinessFlag(root)
+	if err != nil {
+		t.Fatalf("readReadinessFlag() error = %v", err)
+	}
+	if !active {
+		t.Fatal("readiness flag missing while draining")
+	}
+	if reason != "operator requested shutdown" {
+		t.Fatalf("readiness flag reason = %q, want operator requested shutdown", reason)
+	}
+}
+
+func TestRunServeHeartbeatsActiveWorktreeLeases(t *testing.T) {
 	root := createRuntimeRoot(t)
 	writeRuntimeConfig(t, root, `
 version: 1
@@ -455,16 +784,9 @@ runtime:
   root: .
 service:
   http_addr: 127.0.0.1:0
-  startup_recovery: true
+  startup_recovery: false
 `)
-	projectKey := fmt.Sprintf("alpha-%d", time.Now().UnixNano())
-	repoRoot := filepath.Join(root, "repos", "alpha")
-	initServeGitRepo(t, repoRoot)
-	writeServeProjectManifest(t, root, projectKey, repoRoot)
 	seedHealthyRuntime(t, root)
-	if err := os.RemoveAll(filepath.Join(worktrees.DefaultRoot(), projectKey, "task-1", "run-1", "try-1")); err != nil {
-		t.Fatalf("RemoveAll(stale worktree path) error = %v", err)
-	}
 
 	store, err := sqlite.Open(filepath.Join(root, "data", "odin.db"))
 	if err != nil {
@@ -472,365 +794,349 @@ service:
 	}
 	defer store.Close()
 
-	ctx := context.Background()
-	project, err := store.CreateProject(ctx, sqlite.CreateProjectParams{
-		Key:           projectKey,
-		Name:          "Alpha",
+	project, err := store.CreateProject(context.Background(), sqlite.CreateProjectParams{
+		Key:           "cfipros",
+		Name:          "CFI Pros",
 		Scope:         "project",
-		GitRoot:       repoRoot,
+		GitRoot:       filepath.Join(root, "repos", "alpha"),
 		DefaultBranch: "main",
 		ManifestPath:  "config/projects.yaml",
 	})
 	if err != nil {
 		t.Fatalf("CreateProject() error = %v", err)
 	}
-	transitionService := projects.Service{Store: store}
-	if _, err := transitionService.SetTransitionState(ctx, projects.TransitionStateInput{
+	task, err := store.CreateTask(context.Background(), sqlite.CreateTaskParams{
 		ProjectID:   project.ID,
-		Actor:       projects.TransitionControllerOdinOS,
-		TargetState: projects.TransitionStateCutover,
-		ChangedBy:   "test",
-	}); err != nil {
-		t.Fatalf("SetTransitionState(cutover) error = %v", err)
-	}
-
-	originalTaskInterval := serveTaskLoopInterval
-	originalTimeout := serveOperationTimeout
-	serveTaskLoopInterval = 20 * time.Millisecond
-	serveOperationTimeout = 20 * time.Millisecond
-	defer func() {
-		serveTaskLoopInterval = originalTaskInterval
-		serveOperationTimeout = originalTimeout
-	}()
-
-	configureServeHarnessDriverWithDelay(t, 50*time.Millisecond)
-
-	serveCtx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	stdout := &servedOutput{started: make(chan struct{}), marker: "serving on"}
-	runErr := make(chan error, 1)
-	go func() {
-		runErr <- Run(serveCtx, root, []string{"serve"}, strings.NewReader(""), stdout)
-	}()
-
-	stdout.waitStarted(t)
-
-	task, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
-		ProjectID:   project.ID,
-		Key:         "queued-task-outlives-timeout",
-		Title:       "Queued task outlives serve operation timeout",
-		Status:      "queued",
+		Key:         "heartbeat-active-lease",
+		Title:       "Heartbeat active lease",
+		Status:      "running",
 		Scope:       "project",
 		RequestedBy: "operator",
 	})
 	if err != nil {
 		t.Fatalf("CreateTask() error = %v", err)
 	}
-
-	deadline := time.NewTimer(2 * time.Second)
-	defer deadline.Stop()
-
-	for {
-		gotTask, err := store.GetTask(context.Background(), task.ID)
-		if err != nil {
-			t.Fatalf("GetTask() error = %v", err)
-		}
-		if gotTask.Status == "completed" {
-			break
-		}
-		if gotTask.Status == "failed" || gotTask.Status == "dead_letter" {
-			t.Fatalf("task status = %q, want completed (summary=%q terminal_reason=%q)", gotTask.Status, gotTask.Summary, gotTask.TerminalReason)
-		}
-
-		select {
-		case <-deadline.C:
-			t.Fatal("task did not complete under serve after exceeding serveOperationTimeout once")
-		default:
-			time.Sleep(10 * time.Millisecond)
-		}
+	run, err := store.StartRun(context.Background(), sqlite.StartRunParams{
+		TaskID:   task.ID,
+		Executor: "codex",
+		Attempt:  1,
+		Status:   "running",
+	})
+	if err != nil {
+		t.Fatalf("StartRun() error = %v", err)
+	}
+	lease, err := store.CreateWorktreeLease(context.Background(), sqlite.CreateWorktreeLeaseParams{
+		ProjectID:    project.ID,
+		TaskID:       task.ID,
+		RunID:        run.ID,
+		Mode:         "mutable",
+		BranchName:   "odin/cfipros/task-1/run-1/try-1",
+		WorktreePath: filepath.ToSlash(filepath.Join(t.TempDir(), "active")),
+		RepoRoot:     project.GitRoot,
+		State:        "active",
+	})
+	if err != nil {
+		t.Fatalf("CreateWorktreeLease() error = %v", err)
 	}
 
-	cancel()
-	if err := <-runErr; err != nil && !errors.Is(err, context.Canceled) {
-		t.Fatalf("Run(serve) error = %v", err)
+	staleAt := time.Now().UTC().Add(-2 * time.Minute)
+	if _, err := store.DB().ExecContext(context.Background(), `
+		UPDATE worktree_leases
+		SET heartbeat_at = ?, updated_at = ?
+		WHERE id = ?
+	`, staleAt.Format(time.RFC3339Nano), staleAt.Format(time.RFC3339Nano), lease.ID); err != nil {
+		t.Fatalf("force stale heartbeat error = %v", err)
 	}
-}
-
-func TestRunServeEmitsMetricsLoopLogRecords(t *testing.T) {
-	root := createRuntimeRoot(t)
-	writeRuntimeConfig(t, root, `
-version: 1
-runtime:
-  root: .
-service:
-  http_addr: 127.0.0.1:0
-  startup_recovery: true
-`)
-	seedHealthyRuntime(t, root)
-
-	originalMetricsInterval := serveMetricsLoopInterval
-	serveMetricsLoopInterval = 20 * time.Millisecond
-	defer func() {
-		serveMetricsLoopInterval = originalMetricsInterval
-	}()
 
 	ctx, cancel := context.WithCancel(context.Background())
+	ctx = withServeLoopConfig(ctx, serveLoopConfig{
+		leaseInterval:   20 * time.Millisecond,
+		leaseStaleAfter: 30 * time.Minute,
+	})
+	time.AfterFunc(120*time.Millisecond, cancel)
+
+	var stdout bytes.Buffer
+	err = Run(ctx, root, []string{"serve"}, strings.NewReader(""), &stdout)
+	if err != nil && !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run(serve) error = %v", err)
+	}
+
+	updated, err := store.GetWorktreeLease(context.Background(), lease.ID)
+	if err != nil {
+		t.Fatalf("GetWorktreeLease() error = %v", err)
+	}
+	if !updated.HeartbeatAt.After(staleAt) {
+		t.Fatalf("HeartbeatAt = %v, want later than %v", updated.HeartbeatAt, staleAt)
+	}
+}
+
+func TestServeHealthLoopRefreshesExecutorHealthAndRuntimeHeartbeat(t *testing.T) {
+	root := createRuntimeRoot(t)
+	writeRuntimeConfig(t, root, `
+version: 1
+runtime:
+  root: .
+service:
+  http_addr: 127.0.0.1:0
+  startup_recovery: false
+`)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	ctx = withServeLoopConfig(ctx, serveLoopConfig{
+		healthInterval: 80 * time.Millisecond,
+	})
+	time.AfterFunc(300*time.Millisecond, cancel)
+
+	var stdout bytes.Buffer
+	err := Run(ctx, root, []string{"serve"}, strings.NewReader(""), &stdout)
+	if err != nil && !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run(serve) error = %v", err)
+	}
+
+	store, err := sqlite.Open(filepath.Join(root, "data", "odin.db"))
+	if err != nil {
+		t.Fatalf("sqlite.Open() error = %v", err)
+	}
+	defer store.Close()
+
+	state, err := store.GetRuntimeState(context.Background())
+	if err != nil {
+		t.Fatalf("GetRuntimeState() error = %v", err)
+	}
+	if state.ReadyAt == nil {
+		t.Fatal("RuntimeState.ReadyAt = nil, want ready transition before periodic heartbeat")
+	}
+	if !state.LastHeartbeatAt.After(*state.ReadyAt) {
+		t.Fatalf("RuntimeState.LastHeartbeatAt = %s, want later than ReadyAt = %s", state.LastHeartbeatAt.Format(time.RFC3339Nano), state.ReadyAt.Format(time.RFC3339Nano))
+	}
+
+	var samples int
+	if err := store.DB().QueryRowContext(context.Background(), `
+		SELECT COUNT(*)
+		FROM executor_health
+		WHERE executor = 'codex_headless'
+	`).Scan(&samples); err != nil {
+		t.Fatalf("count executor_health rows error = %v", err)
+	}
+	if samples < 3 {
+		t.Fatalf("codex_headless samples = %d, want at least 3 after bootstrap, initial health cycle, and periodic refresh", samples)
+	}
+}
+
+func TestServeDegradedRuntimePausesDispatch(t *testing.T) {
+	root := createRuntimeRoot(t)
+	addr := allocateHTTPAddr(t)
+	writeRuntimeConfig(t, root, `
+version: 1
+runtime:
+  root: .
+service:
+  http_addr: `+addr+`
+  startup_recovery: false
+`)
+	writeMutableProjectsConfig(t, root)
+	writeUnavailableExecutorsConfig(t, root)
+	initGitRepo(t, filepath.Join(root, "repos", "alpha"))
+	projectID, taskID := seedQueuedTask(t, root)
+
+	store, err := sqlite.Open(filepath.Join(root, "data", "odin.db"))
+	if err != nil {
+		t.Fatalf("sqlite.Open() error = %v", err)
+	}
+	defer store.Close()
+
+	if _, err := (projects.Service{Store: store}).SetTransitionState(context.Background(), projects.TransitionStateInput{
+		ProjectID:   projectID,
+		Actor:       projects.TransitionControllerOdinOS,
+		TargetState: projects.TransitionStateCutover,
+		ChangedBy:   "test",
+	}); err != nil {
+		t.Fatalf("SetTransitionState(cutover) error = %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	ctx = withServeLoopConfig(ctx, serveLoopConfig{
+		taskInterval:   20 * time.Millisecond,
+		healthInterval: 20 * time.Millisecond,
+	})
 	defer cancel()
 
-	stdout := &servedOutput{started: make(chan struct{}), marker: "serving on"}
 	runErr := make(chan error, 1)
 	go func() {
-		runErr <- Run(ctx, root, []string{"serve"}, strings.NewReader(""), stdout)
+		runErr <- Run(ctx, root, []string{"serve"}, strings.NewReader(""), io.Discard)
 	}()
 
-	stdout.waitStarted(t)
-
-	logPath := filepath.Join(root, "runs", "logs", "odin-service.log")
-	deadline := time.NewTimer(2 * time.Second)
-	defer deadline.Stop()
-
-	var logOutput string
-	for {
-		encoded, err := os.ReadFile(logPath)
-		if err == nil {
-			logOutput = string(encoded)
-			if strings.Contains(logOutput, `"component":"metrics"`) && strings.Contains(logOutput, `"message":"metrics snapshot exported"`) {
-				break
-			}
-		}
-
-		select {
-		case <-deadline.C:
-			t.Fatalf("log output = %q, want metrics loop record", logOutput)
-		default:
-			time.Sleep(10 * time.Millisecond)
-		}
+	if err := waitForServeHealthStatus(ctx, "http://"+addr, http.StatusOK, "degraded"); err != nil {
+		t.Fatal(err)
+	}
+	if err := waitForServeHealthStatus(ctx, "http://"+addr, http.StatusServiceUnavailable, "degraded", "/readyz"); err != nil {
+		t.Fatal(err)
 	}
 
 	cancel()
-	if err := <-runErr; err != nil && !errors.Is(err, context.Canceled) {
+
+	err = <-runErr
+	if err != nil && !errors.Is(err, context.Canceled) {
 		t.Fatalf("Run(serve) error = %v", err)
 	}
-}
 
-func TestServeOperationContextHasDeadline(t *testing.T) {
-	originalTimeout := serveOperationTimeout
-	serveOperationTimeout = 20 * time.Millisecond
-	defer func() {
-		serveOperationTimeout = originalTimeout
-	}()
-
-	ctx, cancel := serveOperationContext(context.Background())
-	defer cancel()
-
-	deadline, ok := ctx.Deadline()
-	if !ok {
-		t.Fatal("serveOperationContext() returned context without deadline")
+	task, err := store.GetTask(context.Background(), taskID)
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
 	}
-	if time.Until(deadline) <= 0 {
-		t.Fatalf("deadline = %v, want future deadline", deadline)
+	if task.Status != "queued" {
+		t.Fatalf("Task.Status = %q, want %q while runtime is degraded", task.Status, "queued")
 	}
 
-	<-ctx.Done()
-	if !errors.Is(ctx.Err(), context.DeadlineExceeded) {
-		t.Fatalf("ctx.Err() = %v, want context deadline exceeded", ctx.Err())
+	statuses, err := lifecycleStatuses(store)
+	if err != nil {
+		t.Fatalf("lifecycleStatuses() error = %v", err)
 	}
-}
-
-func TestServeServeContextPropagatesCancellation(t *testing.T) {
-	root := createRuntimeRoot(t)
-	writeRuntimeConfig(t, root, `
-version: 1
-runtime:
-  root: .
-service:
-  http_addr: 127.0.0.1:0
-  startup_recovery: true
-`)
-	seedHealthyRuntime(t, root)
-
-	parent, cancelParent := context.WithCancel(context.Background())
-	serveCtx, cancelServe := serveServeContext(parent)
-	defer cancelServe()
-
-	cancelParent()
-
-	select {
-	case <-serveCtx.Done():
-	case <-time.After(100 * time.Millisecond):
-		t.Fatal("serve context did not cancel when parent context was canceled")
-	}
-	if !errors.Is(serveCtx.Err(), context.Canceled) {
-		t.Fatalf("serveCtx.Err() = %v, want context canceled", serveCtx.Err())
-	}
-}
-
-func TestServeLoadContextDetachesFromActiveParentCancellation(t *testing.T) {
-	t.Parallel()
-
-	parent, cancelParent := context.WithCancel(context.Background())
-
-	loadCtx, cancelLoad := serveLoadContext(parent)
-	defer cancelLoad()
-
-	cancelParent()
-	select {
-	case <-loadCtx.Done():
-		if errors.Is(loadCtx.Err(), context.Canceled) {
-			t.Fatal("serveLoadContext() should ignore parent cancellation during serve startup")
+	for _, status := range statuses {
+		if status == "ready" {
+			t.Fatalf("statuses = %v, want degraded runtime without ready transition", statuses)
 		}
-	default:
 	}
-	select {
-	case <-loadCtx.Done():
-		t.Fatal("serveLoadContext() should not be canceled by the parent context")
-	case <-time.After(100 * time.Millisecond):
-	}
-	if loadCtx.Err() != nil {
-		t.Fatalf("serveLoadContext() Err() = %v, want nil after detaching from parent cancellation", loadCtx.Err())
-	}
-}
-
-func TestServeLoadContextDetachesOnlyAfterCancellation(t *testing.T) {
-	t.Parallel()
-
-	parent, cancelParent := context.WithCancel(context.Background())
-	cancelParent()
-
-	loadCtx, cancelLoad := serveLoadContext(parent)
-	defer cancelLoad()
-	if loadCtx == parent {
-		t.Fatal("serveLoadContext() should detach from a canceled parent context")
-	}
-	if loadCtx.Err() != nil {
-		t.Fatalf("serveLoadContext() Err() = %v, want nil after detaching", loadCtx.Err())
-	}
-	select {
-	case <-loadCtx.Done():
-		t.Fatal("detached load context should not be done immediately")
-	default:
-	}
-}
-
-func TestServeLoadContextDoesNotDetachOnDeadlineExceeded(t *testing.T) {
-	t.Parallel()
-
-	parent, cancelParent := context.WithTimeout(context.Background(), 1*time.Millisecond)
-	defer cancelParent()
-	<-parent.Done()
-
-	loadCtx, cancelLoad := serveLoadContext(parent)
-	defer cancelLoad()
-	if !errors.Is(loadCtx.Err(), context.DeadlineExceeded) {
-		t.Fatalf("serveLoadContext() Err() = %v, want deadline exceeded", loadCtx.Err())
-	}
-}
-
-func TestServeStartupContextDetachesFromActiveParentCancellation(t *testing.T) {
-	t.Parallel()
-
-	parent, cancelParent := context.WithCancel(context.Background())
-	originalTimeout := serveOperationTimeout
-	serveOperationTimeout = 20 * time.Millisecond
-	defer func() {
-		serveOperationTimeout = originalTimeout
-	}()
-
-	startupCtx, cancelStartup := serveStartupContext(parent)
-	defer cancelStartup()
-
-	if _, ok := startupCtx.Deadline(); !ok {
-		t.Fatal("serveStartupContext() should provide a deadline when the parent is active")
-	}
-
-	cancelParent()
-	select {
-	case <-startupCtx.Done():
-		if errors.Is(startupCtx.Err(), context.Canceled) {
-			t.Fatal("serveStartupContext() should ignore parent cancellation during startup recovery")
+	foundDegraded := false
+	for _, status := range statuses {
+		if status == "degraded" {
+			foundDegraded = true
+			break
 		}
-	case <-time.After(100 * time.Millisecond):
-		t.Fatal("serveStartupContext() did not finish after startup timeout")
 	}
-	if !errors.Is(startupCtx.Err(), context.DeadlineExceeded) {
-		t.Fatalf("serveStartupContext() Err() = %v, want deadline exceeded", startupCtx.Err())
+	if !foundDegraded {
+		t.Fatalf("statuses = %v, want degraded transition", statuses)
 	}
 }
 
-func TestServeStartupContextDetachesOnlyAfterCancellation(t *testing.T) {
-	t.Parallel()
-
-	parent, cancelParent := context.WithCancel(context.Background())
-	cancelParent()
-
-	startupCtx, cancelStartup := serveStartupContext(parent)
-	defer cancelStartup()
-
-	if startupCtx == parent {
-		t.Fatal("serveStartupContext() should detach from a canceled parent context")
+func TestRunLeaseMaintenanceCycleHeartbeatsLiveLeasesWhenCleanupFails(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlite.Open(filepath.Join(t.TempDir(), "odin.db"))
+	if err != nil {
+		t.Fatalf("sqlite.Open() error = %v", err)
 	}
-	if startupCtx.Err() != nil {
-		t.Fatalf("serveStartupContext() Err() = %v, want nil after detaching", startupCtx.Err())
+	defer store.Close()
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
 	}
-	select {
-	case <-startupCtx.Done():
-		t.Fatal("detached startup context should not be done immediately")
-	default:
+
+	project, err := store.CreateProject(ctx, sqlite.CreateProjectParams{
+		Key:           "cfipros",
+		Name:          "CFI Pros",
+		Scope:         "project",
+		GitRoot:       filepath.Join(t.TempDir(), "repo"),
+		DefaultBranch: "main",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+
+	releasedTask, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "released-cleanup",
+		Title:       "Released cleanup candidate",
+		Status:      "running",
+		Scope:       "project",
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask(released) error = %v", err)
+	}
+	releasedRun, err := store.StartRun(ctx, sqlite.StartRunParams{
+		TaskID:   releasedTask.ID,
+		Executor: "codex",
+		Attempt:  1,
+		Status:   "running",
+	})
+	if err != nil {
+		t.Fatalf("StartRun(released) error = %v", err)
+	}
+	releasedLease, err := store.CreateWorktreeLease(ctx, sqlite.CreateWorktreeLeaseParams{
+		ProjectID:    project.ID,
+		TaskID:       releasedTask.ID,
+		RunID:        releasedRun.ID,
+		Mode:         "mutable",
+		BranchName:   "odin/cfipros/task-1/run-1/try-1",
+		WorktreePath: filepath.ToSlash(filepath.Join(t.TempDir(), "released")),
+		RepoRoot:     project.GitRoot,
+		State:        "active",
+	})
+	if err != nil {
+		t.Fatalf("CreateWorktreeLease(released) error = %v", err)
+	}
+	if _, err := store.ReleaseWorktreeLease(ctx, sqlite.ReleaseWorktreeLeaseParams{
+		LeaseID: releasedLease.ID,
+		State:   "released",
+	}); err != nil {
+		t.Fatalf("ReleaseWorktreeLease() error = %v", err)
+	}
+
+	liveTask, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "live-heartbeat",
+		Title:       "Live lease heartbeat",
+		Status:      "running",
+		Scope:       "project",
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask(live) error = %v", err)
+	}
+	liveRun, err := store.StartRun(ctx, sqlite.StartRunParams{
+		TaskID:   liveTask.ID,
+		Executor: "codex",
+		Attempt:  2,
+		Status:   "running",
+	})
+	if err != nil {
+		t.Fatalf("StartRun(live) error = %v", err)
+	}
+	liveLease, err := store.CreateWorktreeLease(ctx, sqlite.CreateWorktreeLeaseParams{
+		ProjectID:    project.ID,
+		TaskID:       liveTask.ID,
+		RunID:        liveRun.ID,
+		Mode:         "mutable",
+		BranchName:   "odin/cfipros/task-2/run-2/try-1",
+		WorktreePath: filepath.ToSlash(filepath.Join(t.TempDir(), "live")),
+		RepoRoot:     project.GitRoot,
+		State:        "active",
+	})
+	if err != nil {
+		t.Fatalf("CreateWorktreeLease(live) error = %v", err)
+	}
+
+	maint := leases.Maintenance{
+		Store: store,
+		Cleanup: worktrees.Manager{
+			Store: store,
+			Git: &cleanupFailureGit{
+				err: errors.New("remove failed"),
+			},
+		},
+		Now: func() time.Time {
+			return liveLease.HeartbeatAt.Add(30 * time.Second)
+		},
+	}
+	store.Now = maint.Now
+
+	runLeaseMaintenanceCycle(ctx, maint, nil, 30*time.Minute)
+
+	updated, err := store.GetWorktreeLease(ctx, liveLease.ID)
+	if err != nil {
+		t.Fatalf("GetWorktreeLease(live) error = %v", err)
+	}
+	if !updated.HeartbeatAt.After(liveLease.HeartbeatAt) {
+		t.Fatalf("HeartbeatAt = %v, want later than %v", updated.HeartbeatAt, liveLease.HeartbeatAt)
 	}
 }
 
-func TestServeStartupContextDoesNotDetachOnDeadlineExceeded(t *testing.T) {
-	t.Parallel()
-
-	parent, cancelParent := context.WithTimeout(context.Background(), 1*time.Millisecond)
-	defer cancelParent()
-	<-parent.Done()
-
-	startupCtx, cancelStartup := serveStartupContext(parent)
-	defer cancelStartup()
-
-	if !errors.Is(startupCtx.Err(), context.DeadlineExceeded) {
-		t.Fatalf("serveStartupContext() Err() = %v, want deadline exceeded", startupCtx.Err())
-	}
+type cleanupFailureGit struct {
+	err error
 }
 
-func TestRunServeReturnsServerErrorWithoutWaitingForShutdown(t *testing.T) {
-	root := createRuntimeRoot(t)
-	writeRuntimeConfig(t, root, `
-version: 1
-runtime:
-  root: .
-service:
-  http_addr: 127.0.0.1:0
-  startup_recovery: true
-`)
-	seedHealthyRuntime(t, root)
-
-	originalListen := serveListen
-	originalTimeout := serveOperationTimeout
-	serveListen = func(string, string) (net.Listener, error) {
-		return errTestListener{}, nil
-	}
-	serveOperationTimeout = 20 * time.Millisecond
-	defer func() {
-		serveListen = originalListen
-		serveOperationTimeout = originalTimeout
-	}()
-
-	errCh := make(chan error, 1)
-	go func() {
-		errCh <- Run(context.Background(), root, []string{"serve"}, strings.NewReader(""), &bytes.Buffer{})
-	}()
-
-	select {
-	case err := <-errCh:
-		if err == nil || !strings.Contains(err.Error(), "listener exploded") {
-			t.Fatalf("Run(serve) error = %v, want listener failure", err)
-		}
-	case <-time.After(1 * time.Second):
-		t.Fatal("Run(serve) did not return after listener failure")
-	}
+func (git *cleanupFailureGit) RemoveWorktree(context.Context, string, string) error {
+	return git.err
 }
 
 func createRuntimeRoot(t *testing.T) string {
@@ -913,17 +1219,68 @@ routes:
 	return root
 }
 
-func writeServeProjectManifest(t *testing.T, root string, projectKey string, repoRoot string) {
+func writeUnavailableExecutorsConfig(t *testing.T, root string) {
 	t.Helper()
 
-	content := fmt.Sprintf(`
+	if err := os.WriteFile(filepath.Join(root, "config", "executors.yaml"), []byte(`
+version: 1
+executors:
+  - key: claude_code_headless
+    adapter: claude_code_headless
+    class: plan_backed_cli
+    enabled: true
+    priority: 10
+routes:
+  - name: default
+    match:
+      task_kinds: [general, plan, build, review, qa, research]
+      scopes: [global, odin-core, project, new-project]
+    preferred: [claude_code_headless]
+`), 0o644); err != nil {
+		t.Fatalf("write executors config: %v", err)
+	}
+}
+
+func writeMutableProjectsConfig(t *testing.T, root string) {
+	t.Helper()
+
+	repoRoot := filepath.Join(root, "repos", "alpha")
+
+	if err := os.WriteFile(filepath.Join(root, "config", "projects.yaml"), []byte(fmt.Sprintf(`
 version: 1
 projects:
-  - key: %s
-    name: Alpha
-    project_class: local_git_project
+  - key: odin-core
+    name: Odin Core
+    project_class: system_project
+    system_project: true
     git_root: %s
     default_branch: main
+    policy:
+      allowed_commands: [status]
+      branch_rules:
+        protected_branches: [main]
+        require_worktree: true
+        require_task_branch: true
+        allow_default_branch_mutation: false
+      approval_gates:
+        require_for_governance_changes: true
+        require_for_destructive_operations: true
+        require_for_system_project_changes: true
+      merge_policy:
+        mode: squash
+        allow_direct_to_default_branch: false
+      destructive_operations:
+        allow_reset: false
+        allow_clean: false
+        allow_force_push: false
+        require_explicit_approval: true
+  - key: alpha
+    name: Alpha
+    project_class: github_backed_project
+    git_root: %s
+    default_branch: main
+    github:
+      repo: acme/alpha
     policy:
       allowed_commands: [status]
       branch_rules:
@@ -943,37 +1300,33 @@ projects:
         allow_clean: false
         allow_force_push: false
         require_explicit_approval: true
-`, projectKey, repoRoot)
-	if err := os.WriteFile(filepath.Join(root, "config", "projects.yaml"), []byte(content), 0o644); err != nil {
-		t.Fatalf("write project config: %v", err)
+`, root, repoRoot)), 0o644); err != nil {
+		t.Fatalf("write projects config: %v", err)
 	}
 }
 
-func initServeGitRepo(t *testing.T, repoRoot string) {
+func initGitRepo(t *testing.T, root string) {
 	t.Helper()
 
-	if err := os.MkdirAll(repoRoot, 0o755); err != nil {
+	if err := os.MkdirAll(root, 0o755); err != nil {
 		t.Fatalf("mkdir repo root: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(repoRoot, "README.md"), []byte("# alpha\n"), 0o644); err != nil {
-		t.Fatalf("write repo readme: %v", err)
+
+	run := func(args ...string) {
+		t.Helper()
+
+		cmd := exec.Command("git", args...)
+		cmd.Dir = root
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, string(output))
+		}
 	}
 
-	runServeGit(t, repoRoot, "init", "-b", "main")
-	runServeGit(t, repoRoot, "config", "user.name", "Serve Test")
-	runServeGit(t, repoRoot, "config", "user.email", "serve-test@example.com")
-	runServeGit(t, repoRoot, "add", "README.md")
-	runServeGit(t, repoRoot, "commit", "-m", "init")
-}
-
-func runServeGit(t *testing.T, repoRoot string, args ...string) {
-	t.Helper()
-
-	cmd := exec.Command("git", append([]string{"-C", repoRoot}, args...)...)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("git %v error = %v\n%s", args, err, string(output))
-	}
+	run("init", "-b", "main", ".")
+	run("config", "user.email", "test@example.com")
+	run("config", "user.name", "Test User")
+	run("commit", "--allow-empty", "-m", "initial commit")
 }
 
 func seedHealthyRuntime(t *testing.T, root string) {
@@ -1018,6 +1371,143 @@ func seedHealthyRuntime(t *testing.T, root string) {
 	}); err != nil {
 		t.Fatalf("RecordProjectionFreshness() error = %v", err)
 	}
+}
+
+func seedRuntimeState(t *testing.T, root string, status string, heartbeatAt time.Time) {
+	t.Helper()
+
+	store, err := sqlite.Open(filepath.Join(root, "data", "odin.db"))
+	if err != nil {
+		t.Fatalf("sqlite.Open() error = %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
+	}
+
+	readyAt := (*time.Time)(nil)
+	if status == "ready" {
+		readyValue := heartbeatAt.UTC()
+		readyAt = &readyValue
+	}
+	if _, err := store.UpsertRuntimeState(ctx, sqlite.UpsertRuntimeStateParams{
+		BootID:             "boot-test",
+		Status:             status,
+		PID:                1234,
+		StartedAt:          heartbeatAt.UTC(),
+		ReadyAt:            readyAt,
+		LastHeartbeatAt:    heartbeatAt.UTC(),
+		LastShutdownReason: "",
+		LastError:          "",
+		UpdatedAt:          heartbeatAt.UTC(),
+	}, sqlite.RuntimeStateWriteOptions{}); err != nil {
+		t.Fatalf("UpsertRuntimeState() error = %v", err)
+	}
+}
+
+func seedQueuedTask(t *testing.T, root string) (int64, int64) {
+	t.Helper()
+
+	if err := os.MkdirAll(filepath.Join(root, "data"), 0o755); err != nil {
+		t.Fatalf("mkdir data: %v", err)
+	}
+
+	store, err := sqlite.Open(filepath.Join(root, "data", "odin.db"))
+	if err != nil {
+		t.Fatalf("sqlite.Open() error = %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
+	}
+
+	project, err := store.CreateProject(ctx, sqlite.CreateProjectParams{
+		Key:           "alpha",
+		Name:          "Alpha",
+		Scope:         "project",
+		GitRoot:       filepath.Join(root, "repos", "alpha"),
+		DefaultBranch: "main",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+	task, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "alpha-task",
+		Title:       "Queued alpha work",
+		Status:      "queued",
+		Scope:       "project",
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+
+	return project.ID, task.ID
+}
+
+func seedStaleProjection(t *testing.T, root string) {
+	t.Helper()
+
+	if err := os.MkdirAll(filepath.Join(root, "data"), 0o755); err != nil {
+		t.Fatalf("mkdir data: %v", err)
+	}
+
+	store, err := sqlite.Open(filepath.Join(root, "data", "odin.db"))
+	if err != nil {
+		t.Fatalf("sqlite.Open() error = %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
+	}
+
+	if _, err := store.RecordProjectionFreshness(ctx, sqlite.RecordProjectionFreshnessParams{
+		Surface:     "doctor",
+		Status:      "stale",
+		DetailsJSON: `{"source":"serve-test"}`,
+	}); err != nil {
+		t.Fatalf("RecordProjectionFreshness() error = %v", err)
+	}
+}
+
+func holdServiceLock(t *testing.T, root string) {
+	t.Helper()
+
+	if err := os.MkdirAll(filepath.Join(root, "state", "cache"), 0o755); err != nil {
+		t.Fatalf("mkdir state/cache: %v", err)
+	}
+
+	file, err := os.OpenFile(filepath.Join(root, "state", "cache", "service.lock"), os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		t.Fatalf("open service lock: %v", err)
+	}
+	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		t.Fatalf("lock service lock: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = syscall.Flock(int(file.Fd()), syscall.LOCK_UN)
+		_ = file.Close()
+	})
+}
+
+func allocateHTTPAddr(t *testing.T) string {
+	t.Helper()
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("net.Listen() error = %v", err)
+	}
+	defer listener.Close()
+
+	return listener.Addr().String()
 }
 
 func seedRunningTask(t *testing.T, root string) (int64, int64, int64) {
@@ -1081,93 +1571,95 @@ func writeRuntimeConfig(t *testing.T, root string, content string) {
 	}
 }
 
-func configureServeHarnessDriver(t *testing.T) {
-	t.Helper()
-	configureServeHarnessDriverWithDelay(t, 0)
-}
-
-func configureServeHarnessDriverWithDelay(t *testing.T, delay time.Duration) {
-	t.Helper()
-
-	path := filepath.Join(t.TempDir(), "codex-driver.sh")
-	script := fmt.Sprintf(`#!/usr/bin/env bash
-payload="$(cat)"
-sleep_ms=%d
-if [[ "${sleep_ms}" != "0" ]]; then
-  python3 - <<'PY'
-import time
-time.sleep(%0.6f)
-PY
-fi
-PAYLOAD="$payload" python3 - <<'PY'
-import json
-import os
-
-request = json.loads(os.environ["PAYLOAD"])
-action = request.get("action")
-if action == "health":
-    print(json.dumps({"status":"healthy","details":"serve test driver healthy"}))
-else:
-    print(json.dumps({"status":"completed","output":"driver test ok","handle":{"external_id":"fixture-driver"}}))
-PY
-`, delay.Milliseconds(), delay.Seconds())
-	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
-		t.Fatalf("WriteFile(driver) error = %v", err)
-	}
-	if err := os.Chmod(path, 0o755); err != nil {
-		t.Fatalf("Chmod(driver) error = %v", err)
-	}
-	t.Setenv("ODIN_CODEX_DRIVER", path)
-}
-
-type errTestListener struct{}
-
-func (errTestListener) Accept() (net.Conn, error) { return nil, errors.New("listener exploded") }
-func (errTestListener) Close() error              { return nil }
-func (errTestListener) Addr() net.Addr            { return errTestAddr("test-listener") }
-
-type errTestAddr string
-
-func (addr errTestAddr) Network() string { return string(addr) }
-func (addr errTestAddr) String() string  { return string(addr) }
-
-type servedOutput struct {
-	mu      sync.Mutex
-	buffer  bytes.Buffer
-	started chan struct{}
-	marker  string
-	once    sync.Once
-}
-
-func (output *servedOutput) Write(p []byte) (int, error) {
-	output.mu.Lock()
-	defer output.mu.Unlock()
-
-	n, err := output.buffer.Write(p)
+func lifecycleStatuses(store *sqlite.Store) ([]string, error) {
+	events, err := store.ListEvents(context.Background(), sqlite.ListEventsParams{})
 	if err != nil {
-		return n, err
+		return nil, err
 	}
-	if output.marker != "" && strings.Contains(output.buffer.String(), output.marker) {
-		output.once.Do(func() {
-			close(output.started)
-		})
+
+	statuses := make([]string, 0, len(events))
+	for _, event := range events {
+		if event.Type != runtimeevents.EventServiceLifecycleChanged {
+			continue
+		}
+		payload, err := runtimeevents.DecodePayload[runtimeevents.ServiceLifecyclePayload](event.Payload)
+		if err != nil {
+			return nil, err
+		}
+		statuses = append(statuses, payload.Status)
 	}
-	return n, nil
+	return statuses, nil
 }
 
-func (output *servedOutput) String() string {
-	output.mu.Lock()
-	defer output.mu.Unlock()
-	return output.buffer.String()
+func waitForServeHealthStatus(ctx context.Context, baseURL string, wantCode int, wantStatus string, pathOverride ...string) error {
+	path := "/healthz"
+	if len(pathOverride) > 0 && pathOverride[0] != "" {
+		path = pathOverride[0]
+	}
+
+	deadline := time.NewTimer(2 * time.Second)
+	defer deadline.Stop()
+
+	ticker := time.NewTicker(20 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("timed out waiting for %s%s readiness probe", baseURL, path)
+		case <-deadline.C:
+			return fmt.Errorf("timed out waiting for %s%s readiness probe", baseURL, path)
+		case <-ticker.C:
+			response, err := http.Get(baseURL + path)
+			if err != nil {
+				continue
+			}
+
+			var report struct {
+				Status string `json:"status"`
+			}
+			decodeErr := json.NewDecoder(response.Body).Decode(&report)
+			_ = response.Body.Close()
+			if decodeErr != nil {
+				continue
+			}
+			if response.StatusCode == wantCode && report.Status == wantStatus {
+				return nil
+			}
+		}
+	}
 }
 
-func (output *servedOutput) waitStarted(t *testing.T) {
+func assertLifecycleSequence(t *testing.T, statuses []string, want []string) {
 	t.Helper()
 
-	select {
-	case <-output.started:
-		return
-	case <-time.After(2 * time.Second):
-		t.Fatalf("serve output = %q, want startup marker %q", output.String(), output.marker)
+	if len(statuses) < len(want) {
+		t.Fatalf("lifecycle statuses = %v, want sequence at least %v", statuses, want)
+	}
+
+	cursor := 0
+	for _, status := range want {
+		found := false
+		for cursor < len(statuses) {
+			if statuses[cursor] == status {
+				found = true
+				cursor++
+				break
+			}
+			cursor++
+		}
+		if !found {
+			t.Fatalf("lifecycle statuses = %v, missing %q in order %v", statuses, status, want)
+		}
+	}
+}
+
+func assertNoLifecycleStatus(t *testing.T, statuses []string, forbidden string) {
+	t.Helper()
+
+	for _, status := range statuses {
+		if status == forbidden {
+			t.Fatalf("lifecycle statuses = %v, want no %q", statuses, forbidden)
+		}
 	}
 }

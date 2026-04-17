@@ -24,6 +24,12 @@ type TaskStatusView struct {
 	Scope            string
 	CurrentRunID     *int64
 	CurrentRunStatus string
+	NextEligibleAt   string
+	Priority         int
+	RetryCount       int
+	MaxAttempts      int
+	LastError        string
+	BlockedReason    string
 }
 
 type RunSummaryView struct {
@@ -205,7 +211,13 @@ func ListTaskStatusViews(ctx context.Context, queryer Queryer) ([]TaskStatusView
 			t.status,
 			t.scope,
 			t.current_run_id,
-			COALESCE(r.status, '')
+			COALESCE(r.status, ''),
+			t.next_eligible_at,
+			t.priority,
+			t.retry_count,
+			t.max_attempts,
+			t.last_error,
+			t.blocked_reason
 		FROM tasks t
 		JOIN projects p ON p.id = t.project_id
 		LEFT JOIN runs r ON r.id = t.current_run_id
@@ -230,6 +242,12 @@ func ListTaskStatusViews(ctx context.Context, queryer Queryer) ([]TaskStatusView
 			&view.Scope,
 			&currentRunID,
 			&view.CurrentRunStatus,
+			&view.NextEligibleAt,
+			&view.Priority,
+			&view.RetryCount,
+			&view.MaxAttempts,
+			&view.LastError,
+			&view.BlockedReason,
 		); err != nil {
 			return nil, err
 		}
@@ -477,7 +495,20 @@ func ListStalledRunViews(ctx context.Context, queryer Queryer, cutoff time.Time)
 }
 
 func ListBlockedItemViews(ctx context.Context, queryer Queryer) ([]BlockedItemView, error) {
-	views := make([]BlockedItemView, 0)
+	var views []BlockedItemView
+	seen := make(map[int64]int)
+
+	addView := func(view BlockedItemView) {
+		if index, ok := seen[view.TaskID]; ok {
+			if views[index].Source == "task" || view.Source != "task" {
+				return
+			}
+			views[index] = view
+			return
+		}
+		seen[view.TaskID] = len(views)
+		views = append(views, view)
+	}
 
 	approvalRows, err := queryer.QueryContext(ctx, `
 		SELECT
@@ -524,7 +555,7 @@ func ListBlockedItemViews(ctx context.Context, queryer Queryer) ([]BlockedItemVi
 		view.CompanionKey = nullableStringPtr(companionKey)
 		view.Source = "approval"
 		view.Reason = approvalStatus
-		views = append(views, view)
+		addView(view)
 	}
 	if err := approvalRows.Err(); err != nil {
 		return nil, err
@@ -574,7 +605,7 @@ func ListBlockedItemViews(ctx context.Context, queryer Queryer) ([]BlockedItemVi
 		view.InitiativeKey = nullableStringPtr(initiativeKey)
 		view.CompanionKey = nullableStringPtr(companionKey)
 		view.Source = "incident"
-		views = append(views, view)
+		addView(view)
 	}
 	if err := incidentRows.Err(); err != nil {
 		return nil, err
@@ -641,7 +672,7 @@ func ListBlockedItemViews(ctx context.Context, queryer Queryer) ([]BlockedItemVi
 		if payload.BlockingReason == "" {
 			continue
 		}
-		views = append(views, BlockedItemView{
+		addView(BlockedItemView{
 			TaskID:        taskID,
 			TaskKey:       taskKey,
 			ProjectKey:    projectKey,
@@ -652,6 +683,56 @@ func ListBlockedItemViews(ctx context.Context, queryer Queryer) ([]BlockedItemVi
 			Source:        "wake_packet",
 			Reason:        payload.BlockingReason,
 		})
+	}
+
+	blockedTaskRows, err := queryer.QueryContext(ctx, `
+		SELECT
+			t.id,
+			t.key,
+			p.key,
+			COALESCE(w.key, ''),
+			i.key,
+			c.key,
+			COALESCE(t.work_kind, ''),
+			t.blocked_reason
+		FROM tasks t
+		JOIN projects p ON p.id = t.project_id
+		LEFT JOIN workspaces w ON w.id = t.workspace_id
+		LEFT JOIN initiatives i ON i.id = t.initiative_id
+		LEFT JOIN companions c ON c.id = t.companion_id
+		WHERE t.status = 'blocked'
+		  AND t.blocked_reason <> ''
+		ORDER BY t.id ASC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer blockedTaskRows.Close()
+
+	for blockedTaskRows.Next() {
+		var view BlockedItemView
+		var initiativeKey sql.NullString
+		var companionKey sql.NullString
+		if err := blockedTaskRows.Scan(
+			&view.TaskID,
+			&view.TaskKey,
+			&view.ProjectKey,
+			&view.WorkspaceKey,
+			&initiativeKey,
+			&companionKey,
+			&view.WorkKind,
+			&view.Reason,
+		); err != nil {
+			return nil, err
+		}
+		view.InitiativeKey = nullableStringPtr(initiativeKey)
+		view.CompanionKey = nullableStringPtr(companionKey)
+		view.Source = "task"
+		addView(view)
+	}
+
+	if err := blockedTaskRows.Err(); err != nil {
+		return nil, err
 	}
 
 	return views, wakeRows.Err()
@@ -793,7 +874,7 @@ func ListProjectPortfolioViews(ctx context.Context, queryer Queryer) ([]ProjectP
 			p.key,
 			p.name,
 			p.scope,
-			(SELECT COUNT(*) FROM tasks t WHERE t.project_id = p.id AND t.status NOT IN ('completed', 'cancelled', 'dead_letter', 'timeout')) AS open_task_count,
+			(SELECT COUNT(*) FROM tasks t WHERE t.project_id = p.id AND t.status NOT IN ('completed', 'cancelled', 'failed', 'dead_letter', 'timeout')) AS open_task_count,
 			(SELECT COUNT(*)
 			 FROM runs r
 			 JOIN tasks t ON t.id = r.task_id
@@ -849,12 +930,12 @@ func GetWorkspaceOverviewView(ctx context.Context, queryer Queryer, workspaceKey
 			w.default_companion_key,
 			(SELECT COUNT(*) FROM initiatives i WHERE i.workspace_id = w.id AND i.status = 'active') AS active_initiative_count,
 			(SELECT COUNT(*) FROM companions c WHERE c.workspace_id = w.id AND c.status = 'active') AS active_companion_count,
-			(SELECT COUNT(*) FROM tasks t WHERE t.workspace_id = w.id AND t.status NOT IN ('completed', 'cancelled', 'failed')) AS open_work_item_count,
+			(SELECT COUNT(*) FROM tasks t WHERE t.workspace_id = w.id AND t.status NOT IN ('completed', 'cancelled', 'failed', 'dead_letter', 'timeout')) AS open_work_item_count,
 			(SELECT COUNT(*)
 			 FROM runs r
 			 JOIN tasks t ON t.id = r.task_id
 			 WHERE t.workspace_id = w.id
-			   AND r.status NOT IN ('completed', 'cancelled', 'failed')) AS active_run_count,
+			   AND r.status NOT IN ('completed', 'cancelled', 'failed', 'awaiting_approval', 'interrupted', 'timeout')) AS active_run_count,
 			(SELECT COUNT(*)
 			 FROM approvals a
 			 JOIN tasks t ON t.id = a.task_id
@@ -873,7 +954,7 @@ func GetWorkspaceOverviewView(ctx context.Context, queryer Queryer, workspaceKey
 			 LEFT JOIN incidents i ON i.run_id = r.id AND i.status = 'open'
 			 LEFT JOIN context_packets cp ON cp.task_id = t.id AND cp.packet_scope = 'task_wake_packet' AND cp.status = 'active'
 			 WHERE t.workspace_id = w.id
-			   AND (a.id IS NOT NULL OR i.id IS NOT NULL OR cp.id IS NOT NULL)) AS blocked_work_item_count
+			   AND (a.id IS NOT NULL OR i.id IS NOT NULL OR cp.id IS NOT NULL OR (t.status = 'blocked' AND t.blocked_reason <> ''))) AS blocked_work_item_count
 		FROM workspaces w
 		WHERE w.key = ?
 		LIMIT 1
@@ -924,12 +1005,12 @@ func ListInitiativePortfolioViews(ctx context.Context, queryer Queryer, workspac
 			i.summary,
 			c.key,
 			p.key,
-			(SELECT COUNT(*) FROM tasks t WHERE t.initiative_id = i.id AND t.status NOT IN ('completed', 'cancelled', 'failed')) AS open_work_item_count,
+			(SELECT COUNT(*) FROM tasks t WHERE t.initiative_id = i.id AND t.status NOT IN ('completed', 'cancelled', 'failed', 'dead_letter', 'timeout')) AS open_work_item_count,
 			(SELECT COUNT(*)
 			 FROM runs r
 			 JOIN tasks t ON t.id = r.task_id
 			 WHERE t.initiative_id = i.id
-			   AND r.status NOT IN ('completed', 'cancelled', 'failed')) AS active_run_count,
+			   AND r.status NOT IN ('completed', 'cancelled', 'failed', 'awaiting_approval', 'interrupted', 'timeout')) AS active_run_count,
 			(SELECT COUNT(*)
 			 FROM approvals a
 			 JOIN tasks t ON t.id = a.task_id
@@ -948,7 +1029,7 @@ func ListInitiativePortfolioViews(ctx context.Context, queryer Queryer, workspac
 			 LEFT JOIN incidents inc ON inc.run_id = r.id AND inc.status = 'open'
 			 LEFT JOIN context_packets cp ON cp.task_id = t.id AND cp.packet_scope = 'task_wake_packet' AND cp.status = 'active'
 			 WHERE t.initiative_id = i.id
-			   AND (a.id IS NOT NULL OR inc.id IS NOT NULL OR cp.id IS NOT NULL)) AS blocked_work_item_count
+			   AND (a.id IS NOT NULL OR inc.id IS NOT NULL OR cp.id IS NOT NULL OR (t.status = 'blocked' AND t.blocked_reason <> ''))) AS blocked_work_item_count
 		FROM initiatives i
 		JOIN workspaces w ON w.id = i.workspace_id
 		LEFT JOIN companions c ON c.id = i.owner_companion_id
@@ -1003,12 +1084,12 @@ func ListCompanionAssignmentViews(ctx context.Context, queryer Queryer, workspac
 			c.kind,
 			c.status,
 			(SELECT COUNT(*) FROM initiatives i WHERE i.owner_companion_id = c.id AND i.status = 'active') AS owned_initiative_count,
-			(SELECT COUNT(*) FROM tasks t WHERE t.companion_id = c.id AND t.status NOT IN ('completed', 'cancelled', 'failed')) AS open_work_item_count,
+			(SELECT COUNT(*) FROM tasks t WHERE t.companion_id = c.id AND t.status NOT IN ('completed', 'cancelled', 'failed', 'dead_letter', 'timeout')) AS open_work_item_count,
 			(SELECT COUNT(*)
 			 FROM runs r
 			 JOIN tasks t ON t.id = r.task_id
 			 WHERE t.companion_id = c.id
-			   AND r.status NOT IN ('completed', 'cancelled', 'failed')) AS active_run_count,
+			   AND r.status NOT IN ('completed', 'cancelled', 'failed', 'awaiting_approval', 'interrupted', 'timeout')) AS active_run_count,
 			(SELECT COUNT(*)
 			 FROM approvals a
 			 JOIN tasks t ON t.id = a.task_id
@@ -1021,7 +1102,7 @@ func ListCompanionAssignmentViews(ctx context.Context, queryer Queryer, workspac
 			 LEFT JOIN incidents inc ON inc.run_id = r.id AND inc.status = 'open'
 			 LEFT JOIN context_packets cp ON cp.task_id = t.id AND cp.packet_scope = 'task_wake_packet' AND cp.status = 'active'
 			 WHERE t.companion_id = c.id
-			   AND (a.id IS NOT NULL OR inc.id IS NOT NULL OR cp.id IS NOT NULL)) AS blocked_work_item_count
+			   AND (a.id IS NOT NULL OR inc.id IS NOT NULL OR cp.id IS NOT NULL OR (t.status = 'blocked' AND t.blocked_reason <> ''))) AS blocked_work_item_count
 		FROM companions c
 		JOIN workspaces w ON w.id = c.workspace_id
 		WHERE w.key = ?
@@ -1159,21 +1240,22 @@ type TaskReplay struct {
 	Title          string
 	Status         string
 	Scope          string
-	Summary        string
-	TerminalReason string
-	ArtifactsJSON  string
 	CurrentRunID   *int64
+	NextEligibleAt string
+	Priority       int
+	RetryCount     int
+	MaxAttempts    int
+	LastError      string
+	BlockedReason  string
 }
 
 type RunReplay struct {
-	ID             int64
-	TaskID         int64
-	Executor       string
-	Attempt        int
-	Status         string
-	Summary        string
-	TerminalReason string
-	ArtifactsJSON  string
+	ID       int64
+	TaskID   int64
+	Executor string
+	Attempt  int
+	Status   string
+	Summary  string
 }
 
 type ApprovalReplay struct {
@@ -1192,7 +1274,6 @@ func ReplayLifecycle(records []runtimeevents.Record) (LifecycleReplay, error) {
 		Runs:      make(map[int64]RunReplay),
 		Approvals: make(map[int64]ApprovalReplay),
 	}
-	pendingApprovalByTask := make(map[int64]int64)
 
 	for _, record := range records {
 		switch record.Type {
@@ -1202,12 +1283,17 @@ func ReplayLifecycle(records []runtimeevents.Record) (LifecycleReplay, error) {
 				return LifecycleReplay{}, fmt.Errorf("decode %s payload: %w", record.Type, err)
 			}
 			replay.Tasks[record.StreamID] = TaskReplay{
-				ID:            record.StreamID,
-				Key:           payload.Key,
-				Title:         payload.Title,
-				Status:        payload.Status,
-				Scope:         payload.Scope,
-				ArtifactsJSON: "[]",
+				ID:             record.StreamID,
+				Key:            payload.Key,
+				Title:          payload.Title,
+				Status:         payload.Status,
+				Scope:          payload.Scope,
+				NextEligibleAt: payload.NextEligibleAt,
+				Priority:       payload.Priority,
+				RetryCount:     payload.RetryCount,
+				MaxAttempts:    payload.MaxAttempts,
+				LastError:      payload.LastError,
+				BlockedReason:  payload.BlockedReason,
 			}
 		case runtimeevents.EventTaskStatusChanged:
 			payload, err := runtimeevents.DecodePayload[runtimeevents.TaskStatusChangedPayload](record.Payload)
@@ -1217,14 +1303,30 @@ func ReplayLifecycle(records []runtimeevents.Record) (LifecycleReplay, error) {
 			task := replay.Tasks[record.StreamID]
 			task.ID = record.StreamID
 			task.Status = payload.Status
-			task.Summary = payload.Summary
-			task.TerminalReason = payload.TerminalReason
-			task.ArtifactsJSON = payload.ArtifactsJSON
-			if task.ArtifactsJSON == "" {
-				task.ArtifactsJSON = "[]"
-			}
 			if record.RunID != nil {
 				task.CurrentRunID = record.RunID
+			} else if payload.Status != "running" {
+				task.CurrentRunID = nil
+			}
+			replay.Tasks[record.StreamID] = task
+		case runtimeevents.EventTaskQueueStateChanged:
+			payload, err := runtimeevents.DecodePayload[runtimeevents.TaskQueueStateChangedPayload](record.Payload)
+			if err != nil {
+				return LifecycleReplay{}, fmt.Errorf("decode %s payload: %w", record.Type, err)
+			}
+			task := replay.Tasks[record.StreamID]
+			task.ID = record.StreamID
+			task.Status = payload.Status
+			task.NextEligibleAt = payload.NextEligibleAt
+			task.Priority = payload.Priority
+			task.RetryCount = payload.RetryCount
+			task.MaxAttempts = payload.MaxAttempts
+			task.LastError = payload.LastError
+			task.BlockedReason = payload.BlockedReason
+			if record.RunID != nil {
+				task.CurrentRunID = record.RunID
+			} else if payload.Status != "running" {
+				task.CurrentRunID = nil
 			}
 			replay.Tasks[record.StreamID] = task
 		case runtimeevents.EventRunStarted:
@@ -1233,18 +1335,26 @@ func ReplayLifecycle(records []runtimeevents.Record) (LifecycleReplay, error) {
 				return LifecycleReplay{}, fmt.Errorf("decode %s payload: %w", record.Type, err)
 			}
 			replay.Runs[record.StreamID] = RunReplay{
-				ID:            record.StreamID,
-				TaskID:        payload.TaskID,
-				Executor:      payload.Executor,
-				Attempt:       payload.Attempt,
-				Status:        payload.Status,
-				ArtifactsJSON: "[]",
+				ID:       record.StreamID,
+				TaskID:   payload.TaskID,
+				Executor: payload.Executor,
+				Attempt:  payload.Attempt,
+				Status:   payload.Status,
 			}
 			task := replay.Tasks[payload.TaskID]
 			task.ID = payload.TaskID
 			runID := record.StreamID
 			task.CurrentRunID = &runID
 			replay.Tasks[payload.TaskID] = task
+		case runtimeevents.EventRunStatusChanged:
+			payload, err := runtimeevents.DecodePayload[runtimeevents.RunStatusChangedPayload](record.Payload)
+			if err != nil {
+				return LifecycleReplay{}, fmt.Errorf("decode %s payload: %w", record.Type, err)
+			}
+			run := replay.Runs[record.StreamID]
+			run.ID = record.StreamID
+			run.Status = payload.Status
+			replay.Runs[record.StreamID] = run
 		case runtimeevents.EventRunFinished:
 			payload, err := runtimeevents.DecodePayload[runtimeevents.RunFinishedPayload](record.Payload)
 			if err != nil {
@@ -1254,22 +1364,11 @@ func ReplayLifecycle(records []runtimeevents.Record) (LifecycleReplay, error) {
 			run.ID = record.StreamID
 			run.Status = payload.Status
 			run.Summary = payload.Summary
-			run.TerminalReason = payload.TerminalReason
-			run.ArtifactsJSON = payload.ArtifactsJSON
-			if run.ArtifactsJSON == "" {
-				run.ArtifactsJSON = "[]"
-			}
 			replay.Runs[record.StreamID] = run
 		case runtimeevents.EventApprovalRequested:
 			payload, err := runtimeevents.DecodePayload[runtimeevents.ApprovalRequestedPayload](record.Payload)
 			if err != nil {
 				return LifecycleReplay{}, fmt.Errorf("decode %s payload: %w", record.Type, err)
-			}
-			if payload.Status == "pending" {
-				if previousApprovalID, ok := pendingApprovalByTask[payload.TaskID]; ok {
-					delete(replay.Approvals, previousApprovalID)
-				}
-				pendingApprovalByTask[payload.TaskID] = record.StreamID
 			}
 			replay.Approvals[record.StreamID] = ApprovalReplay{
 				ID:          record.StreamID,
@@ -1289,9 +1388,6 @@ func ReplayLifecycle(records []runtimeevents.Record) (LifecycleReplay, error) {
 			approval.DecisionBy = payload.DecisionBy
 			approval.Reason = payload.Reason
 			replay.Approvals[record.StreamID] = approval
-			if approval.TaskID != 0 && pendingApprovalByTask[approval.TaskID] == record.StreamID && payload.Status != "pending" {
-				delete(pendingApprovalByTask, approval.TaskID)
-			}
 		}
 	}
 

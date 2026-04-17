@@ -29,13 +29,17 @@ func NewOperationalHandler(deps Dependencies) http.Handler {
 		writeJSON(writer, http.StatusOK, report)
 	})
 	mux.HandleFunc("/readyz", func(writer http.ResponseWriter, request *http.Request) {
-		report, err := deps.Health.Doctor(request.Context(), deps.RegistryHealthy)
+		report, ready, err := deps.Health.Readiness(request.Context(), deps.RegistryHealthy)
 		if err != nil {
 			http.Error(writer, err.Error(), http.StatusServiceUnavailable)
 			return
 		}
 
-		writeJSON(writer, readyStatusCode(report.Status), report)
+		statusCode := http.StatusOK
+		if !ready {
+			statusCode = http.StatusServiceUnavailable
+		}
+		writeJSON(writer, statusCode, report)
 	})
 	mux.HandleFunc("/metrics", func(writer http.ResponseWriter, request *http.Request) {
 		snapshot, err := deps.Metrics.Collect(request.Context())
@@ -101,13 +105,6 @@ func NewOperationalHandler(deps Dependencies) http.Handler {
 		writeJSON(writer, http.StatusOK, views)
 	})
 	return mux
-}
-
-func readyStatusCode(status healthsvc.Status) int {
-	if status == healthsvc.StatusHealthy {
-		return http.StatusOK
-	}
-	return http.StatusServiceUnavailable
 }
 
 func writeJSON(writer http.ResponseWriter, statusCode int, payload any) {

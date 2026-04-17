@@ -168,7 +168,7 @@ func (shell *Shell) HandleLine(ctx context.Context, line string, output io.Write
 		return shell.handleAsk(ctx, line, output)
 	}
 
-	task, err := shell.jobs.CreateTaskFromAct(ctx, shell.controlScope(), line)
+	task, err := shell.jobs.CreateTaskFromAct(ctx, shell.state.Scope, line)
 	if err != nil {
 		_, _ = fmt.Fprintf(output, "unable to create task: %v\n", err)
 		return nil
@@ -181,18 +181,7 @@ func (shell *Shell) HandleLine(ctx context.Context, line string, output io.Write
 	if _, err := fmt.Fprintf(output, "created task %s (%s)\n", task.Key, task.Status); err != nil {
 		return err
 	}
-
-	outcome, runErr := shell.jobs.ExecuteTask(ctx, task.ID)
-	if outcome.Task.ID != 0 {
-		shell.state.ActiveTask = outcome.Task.Key
-	}
-	if outcome.Run != nil {
-		shell.state.ActiveRun = strconv.FormatInt(outcome.Run.ID, 10)
-	}
-	if err := shell.persistState(); err != nil {
-		return err
-	}
-	return shell.renderActOutcome(output, outcome, runErr)
+	return nil
 }
 
 func (shell *Shell) renderPrompt(ctx context.Context, output io.Writer) error {
@@ -426,22 +415,6 @@ func (shell *Shell) executeProjectStatus(ctx context.Context, request capabiliti
 		Status: "ok",
 		Output: json.RawMessage(fmt.Sprintf("scope=%s mode=%s\n", shell.scopeLabel(), mode)),
 	}, nil
-}
-
-func (shell *Shell) renderActOutcome(output io.Writer, outcome jobsvc.ExecutionOutcome, runErr error) error {
-	if outcome.Run != nil {
-		summary := strings.TrimSpace(outcome.Run.Summary)
-		if summary == "" {
-			summary = "no summary"
-		}
-		_, err := fmt.Fprintf(output, "run %d %s %s: %s\n", outcome.Run.ID, outcome.Run.Executor, outcome.Run.Status, summary)
-		return err
-	}
-	if runErr != nil {
-		_, err := fmt.Fprintf(output, "run failed before start: %v\n", runErr)
-		return err
-	}
-	return nil
 }
 
 func (shell *Shell) handleMode(args []string, output io.Writer) error {
@@ -833,7 +806,7 @@ func (shell *Shell) projectInScope(projectKey string) bool {
 }
 
 func (shell *Shell) handleJobs(ctx context.Context, output io.Writer) error {
-	views, err := shell.jobs.List(ctx, shell.controlScope())
+	views, err := shell.jobs.List(ctx, shell.state.Scope)
 	if err != nil {
 		return err
 	}

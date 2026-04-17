@@ -16,6 +16,9 @@ import (
 var runLifecycle = lifecycle.Run
 
 func main() {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
 	cwd, err := os.Getwd()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -33,17 +36,15 @@ func main() {
 		os.Exit(1)
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-
 	os.Exit(run(ctx, root, os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
 }
 
 func run(ctx context.Context, root string, args []string, stdin io.Reader, stdout, stderr io.Writer) int {
-	if err := runLifecycle(ctx, root, args, stdin, stdout); err != nil {
-		if errors.Is(err, context.Canceled) {
-			return 0
-		}
+	err := runLifecycle(ctx, root, args, stdin, stdout)
+	if errors.Is(err, context.Canceled) {
+		return 0
+	}
+	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
