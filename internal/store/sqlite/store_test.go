@@ -1068,6 +1068,71 @@ func TestTaskQueueStatusChangesEmitReplayableEvents(t *testing.T) {
 	}
 }
 
+func TestRunLifecycleEventsReplayCurrentRunDuringPreparing(t *testing.T) {
+	ctx := context.Background()
+	store := openMigratedTestStore(t, "run-lifecycle-events.db")
+	defer store.Close()
+
+	project, err := store.CreateProject(ctx, CreateProjectParams{
+		Key:           "run-events",
+		Name:          "Run Events",
+		Scope:         "project",
+		GitRoot:       "/tmp/run-events",
+		DefaultBranch: "main",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+
+	task, err := store.CreateTask(ctx, CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "run-events-task",
+		Title:       "Track run lifecycle",
+		Status:      "queued",
+		Scope:       "project",
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+
+	run, err := store.StartRun(ctx, StartRunParams{
+		TaskID:     task.ID,
+		Executor:   "codex",
+		Attempt:    1,
+		Status:     "preparing",
+		TaskStatus: "preparing",
+	})
+	if err != nil {
+		t.Fatalf("StartRun() error = %v", err)
+	}
+	if _, _, err := store.UpdateRunAndTaskStatus(ctx, UpdateRunAndTaskStatusParams{
+		RunID:      run.ID,
+		RunStatus:  "running",
+		TaskStatus: "running",
+	}); err != nil {
+		t.Fatalf("UpdateRunAndTaskStatus() error = %v", err)
+	}
+
+	events, err := store.ListEvents(ctx, ListEventsParams{TaskID: &task.ID})
+	if err != nil {
+		t.Fatalf("ListEvents() error = %v", err)
+	}
+	replay, err := projections.ReplayLifecycle(events)
+	if err != nil {
+		t.Fatalf("ReplayLifecycle() error = %v", err)
+	}
+
+	replayedTask := replay.Tasks[task.ID]
+	if replayedTask.CurrentRunID == nil || *replayedTask.CurrentRunID != run.ID {
+		t.Fatalf("ReplayLifecycle().Tasks[%d].CurrentRunID = %v, want %d", task.ID, replayedTask.CurrentRunID, run.ID)
+	}
+	if replay.Runs[run.ID].Status != "running" {
+		t.Fatalf("ReplayLifecycle().Runs[%d].Status = %q, want running", run.ID, replay.Runs[run.ID].Status)
+	}
+}
+
 func TestRetryBackoffUpdatesQueueState(t *testing.T) {
 	ctx := context.Background()
 	store := openMigratedTestStore(t, "retry-backoff.db")

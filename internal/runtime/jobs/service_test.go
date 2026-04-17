@@ -366,6 +366,75 @@ func TestExecuteNextQueuedBlocksWhenExecutorHealthSampleIsMissing(t *testing.T) 
 	}
 }
 
+func TestExecuteNextQueuedFailsWhenExecutorSelectionHasNoRoute(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openJobStore(t)
+	defer store.Close()
+
+	registry := writeRegistry(t)
+	alpha, ok := registry.Lookup("alpha")
+	if !ok {
+		t.Fatalf("expected alpha project")
+	}
+	service := Service{
+		Store:          store,
+		Registry:       registry,
+		Executors:      router.DefaultCatalog(),
+		ExecutorConfig: mustLoadExecutorConfig(t),
+		Transitions:    projects.Service{Store: store},
+		Leases: leases.Manager{
+			Store:        store,
+			Git:          &jobTestGit{},
+			WorktreeRoot: t.TempDir(),
+		},
+		Now: time.Now,
+	}
+
+	project, err := store.CreateProject(ctx, sqlite.CreateProjectParams{
+		Key:           alpha.Key,
+		Name:          alpha.Name,
+		Scope:         "project",
+		GitRoot:       alpha.GitRoot,
+		DefaultBranch: alpha.DefaultBranch,
+		GitHubRepo:    alpha.GitHub.Repo,
+		ManifestPath:  alpha.SourcePath,
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+	task, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "no-route-task",
+		Title:       "No route available",
+		Status:      "queued",
+		Scope:       "unsupported-scope",
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+
+	if err := service.ExecuteNextQueued(ctx); err != nil {
+		t.Fatalf("ExecuteNextQueued() error = %v", err)
+	}
+
+	gotTask, err := store.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
+	}
+	if gotTask.Status != "failed" {
+		t.Fatalf("Task.Status = %q, want failed", gotTask.Status)
+	}
+	if gotTask.LastError == "" {
+		t.Fatalf("LastError = empty, want selector failure detail")
+	}
+	if _, err := latestRunForTask(ctx, store, task.ID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("latestRunForTask() error = %v, want sql.ErrNoRows", err)
+	}
+}
+
 func TestExecuteNextQueuedBlocksWhenRequiredApprovalIsMissing(t *testing.T) {
 	t.Parallel()
 

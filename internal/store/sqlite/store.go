@@ -300,7 +300,7 @@ func (store *Store) updateTaskQueueStateTx(ctx context.Context, tx *sql.Tx, para
 		return Task{}, err
 	}
 
-	if err := appendTaskStatusChangedEventTx(ctx, tx, current, updated, now); err != nil {
+	if err := appendTaskStatusChangedEventTx(ctx, tx, current, updated, nil, now); err != nil {
 		return Task{}, err
 	}
 	if err := appendTaskQueueStateChangedEventTx(ctx, tx, current, updated, now); err != nil {
@@ -331,7 +331,7 @@ func (store *Store) BlockTask(ctx context.Context, params BlockTaskParams) (Task
 		if err != nil {
 			return err
 		}
-		if err := appendTaskStatusChangedEventTx(ctx, tx, current, updated, now); err != nil {
+		if err := appendTaskStatusChangedEventTx(ctx, tx, current, updated, nil, now); err != nil {
 			return err
 		}
 		if err := appendTaskQueueStateChangedEventTx(ctx, tx, current, updated, now); err != nil {
@@ -364,7 +364,7 @@ func (store *Store) RequeueTaskAt(ctx context.Context, params RequeueTaskAtParam
 		if err != nil {
 			return err
 		}
-		if err := appendTaskStatusChangedEventTx(ctx, tx, current, updated, now); err != nil {
+		if err := appendTaskStatusChangedEventTx(ctx, tx, current, updated, nil, now); err != nil {
 			return err
 		}
 		if err := appendTaskQueueStateChangedEventTx(ctx, tx, current, updated, now); err != nil {
@@ -397,7 +397,7 @@ func (store *Store) IncrementTaskRetry(ctx context.Context, params IncrementTask
 		if err != nil {
 			return err
 		}
-		if err := appendTaskStatusChangedEventTx(ctx, tx, current, updated, now); err != nil {
+		if err := appendTaskStatusChangedEventTx(ctx, tx, current, updated, nil, now); err != nil {
 			return err
 		}
 		if err := appendTaskQueueStateChangedEventTx(ctx, tx, current, updated, now); err != nil {
@@ -409,7 +409,7 @@ func (store *Store) IncrementTaskRetry(ctx context.Context, params IncrementTask
 	return task, err
 }
 
-func appendTaskStatusChangedEventTx(ctx context.Context, tx *sql.Tx, previous Task, updated Task, occurredAt time.Time) error {
+func appendTaskStatusChangedEventTx(ctx context.Context, tx *sql.Tx, previous Task, updated Task, runID *int64, occurredAt time.Time) error {
 	if previous.Status == updated.Status {
 		return nil
 	}
@@ -422,6 +422,7 @@ func appendTaskStatusChangedEventTx(ctx context.Context, tx *sql.Tx, previous Ta
 		Scope:      updated.Scope,
 		ProjectID:  &projectID,
 		TaskID:     &updated.ID,
+		RunID:      runID,
 		Payload: runtimeevents.TaskStatusChangedPayload{
 			PreviousStatus: previous.Status,
 			Status:         updated.Status,
@@ -567,7 +568,7 @@ func (store *Store) StartRun(ctx context.Context, params StartRunParams) (Run, e
 		if err != nil {
 			return err
 		}
-		return appendTaskStatusChangedEventTx(ctx, tx, currentTask, updatedTask, now)
+		return appendTaskStatusChangedEventTx(ctx, tx, currentTask, updatedTask, &run.ID, now)
 	})
 
 	return run, err
@@ -611,7 +612,7 @@ func (store *Store) UpdateRunAndTaskStatus(ctx context.Context, params UpdateRun
 		if err := appendRunStatusChangedEventTx(ctx, tx, currentTask, previousRun, currentRun, now); err != nil {
 			return err
 		}
-		if err := appendTaskStatusChangedEventTx(ctx, tx, currentTask, updatedTask, now); err != nil {
+		if err := appendTaskStatusChangedEventTx(ctx, tx, currentTask, updatedTask, &currentRun.ID, now); err != nil {
 			return err
 		}
 
@@ -727,7 +728,7 @@ func (store *Store) FinishRunAndSetTaskStatus(ctx context.Context, params Finish
 		}); err != nil {
 			return err
 		}
-		if err := appendTaskStatusChangedEventTx(ctx, tx, currentTask, updatedTask, now); err != nil {
+		if err := appendTaskStatusChangedEventTx(ctx, tx, currentTask, updatedTask, nil, now); err != nil {
 			return err
 		}
 
@@ -793,7 +794,7 @@ func (store *Store) FailRunAndRetryTask(ctx context.Context, params FailRunAndRe
 		}); err != nil {
 			return err
 		}
-		if err := appendTaskStatusChangedEventTx(ctx, tx, currentTask, updatedTask, now); err != nil {
+		if err := appendTaskStatusChangedEventTx(ctx, tx, currentTask, updatedTask, nil, now); err != nil {
 			return err
 		}
 		if err := appendTaskQueueStateChangedEventTx(ctx, tx, currentTask, updatedTask, now); err != nil {

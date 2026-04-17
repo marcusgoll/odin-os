@@ -151,9 +151,8 @@ func (service Service) ExecuteNextQueued(ctx context.Context) error {
 	decision, err := selector.Select(ctx, spec)
 	if err != nil {
 		return service.applyAdmissionDecision(ctx, task, admissionDecision{
-			Outcome:       admissionBlocked,
-			BlockedReason: "executor_unavailable",
-			LastError:     err.Error(),
+			Outcome:   admissionFailed,
+			LastError: err.Error(),
 		})
 	}
 
@@ -432,7 +431,9 @@ func (service Service) prepareLease(ctx context.Context, task sqlite.Task, proje
 		return leases.Assignment{}, admissionDecision{}, err
 	}
 	if err := validateAssignment(manifest, project, assignment); err != nil {
-		releaseAssignment(ctx, service.Store, assignment)
+		if cleanupErr := releaseAssignment(ctx, service.Store, assignment); cleanupErr != nil {
+			return leases.Assignment{}, admissionDecision{}, cleanupErr
+		}
 		return leases.Assignment{}, admissionDecision{
 			Outcome:   admissionFailed,
 			LastError: fmt.Sprintf("policy_denied: %v", err),
@@ -589,14 +590,15 @@ func validateAssignment(manifest projects.Manifest, project sqlite.Project, assi
 	return nil
 }
 
-func releaseAssignment(ctx context.Context, store *sqlite.Store, assignment leases.Assignment) {
+func releaseAssignment(ctx context.Context, store *sqlite.Store, assignment leases.Assignment) error {
 	if assignment.LeaseID == nil {
-		return
+		return nil
 	}
-	_, _ = store.ReleaseWorktreeLease(ctx, sqlite.ReleaseWorktreeLeaseParams{
+	_, err := store.ReleaseWorktreeLease(ctx, sqlite.ReleaseWorktreeLeaseParams{
 		LeaseID: *assignment.LeaseID,
 		State:   "released",
 	})
+	return err
 }
 
 func retryDelay(retryCount int) time.Duration {
