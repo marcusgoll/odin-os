@@ -25,6 +25,7 @@ type Finding struct {
 	Observation  string   `json:"observation"`
 	WhyItMatters string   `json:"why_it_matters"`
 	Confidence   string   `json:"confidence"`
+	Evidence     []string `json:"evidence,omitempty"`
 	SourceStatus Status   `json:"-"`
 }
 
@@ -236,10 +237,6 @@ func BuildOperatorReport(raw Report) OperatorReport {
 			GeneratedAt:     raw.GeneratedAt,
 			ChecksEvaluated: len(raw.Checks),
 		},
-		FinalVerdict: FinalVerdict{
-			Status:  raw.Status,
-			Summary: verdictSummary(raw.Status),
-		},
 	}
 	evaluatedSeen := map[string]struct{}{}
 	unknownSeen := map[string]struct{}{}
@@ -297,6 +294,8 @@ func BuildOperatorReport(raw Report) OperatorReport {
 		})
 	}
 
+	report.FinalVerdict = synthesizeFinalVerdict(report)
+
 	return report
 }
 
@@ -315,6 +314,7 @@ func classifyCheck(check Check, match reportRuleMatch) (*Finding, *RootCause, *R
 		Observation:  check.Summary,
 		WhyItMatters: rule.WhyItMatters,
 		Confidence:   rule.Confidence,
+		Evidence:     buildFindingEvidence(check, match),
 		SourceStatus: check.Status,
 	}
 	rootCause := &RootCause{
@@ -360,17 +360,6 @@ func lookupReportRule(check Check) reportRuleMatch {
 	return reportRuleMatch{}
 }
 
-func verdictSummary(status Status) string {
-	switch status {
-	case StatusFailed:
-		return "one or more critical checks failed"
-	case StatusDegraded:
-		return "the system is operating with degraded subsystems"
-	default:
-		return "all evaluated checks are healthy"
-	}
-}
-
 func unmappedReportRule(check Check) reportRule {
 	rule := reportRule{
 		Confidence:          "reduced",
@@ -403,11 +392,82 @@ func provenanceForMatch(match reportRuleMatch) string {
 	return "inferred"
 }
 
+func buildFindingEvidence(check Check, match reportRuleMatch) []string {
+	evidence := []string{
+		"check summary: " + check.Summary,
+		"check status: " + string(check.Status),
+	}
+
+	if match.explicit {
+		evidence = append(evidence, "operator mapping: explicit")
+	} else if match.matched {
+		evidence = append(evidence, "operator mapping: inferred")
+	}
+
+	if match.rule.Confidence != "" {
+		evidence = append(evidence, "rule confidence: "+match.rule.Confidence)
+	}
+	if match.rule.MissingTelemetry != "" {
+		evidence = append(evidence, "missing telemetry: "+match.rule.MissingTelemetry)
+	}
+
+	if len(check.Details) > 0 {
+		keys := make([]string, 0, len(check.Details))
+		for key := range check.Details {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			evidence = append(evidence, "detail "+key+": "+check.Details[key])
+		}
+	}
+
+	return evidence
+}
+
 func shouldMarkCoverageUnknown(check Check, match reportRuleMatch) bool {
 	if check.Status == StatusHealthy {
 		return false
 	}
 	return !match.explicit || match.rule.Confidence == "reduced"
+}
+
+func synthesizeFinalVerdict(report OperatorReport) FinalVerdict {
+	status := report.CurrentHealth.Status
+	coverageUncertain := hasCoverageUncertainty(report)
+
+	if status == StatusHealthy && coverageUncertain {
+		status = StatusDegraded
+	}
+
+	return FinalVerdict{
+		Status:  status,
+		Summary: verdictSummaryForReport(status, report.CurrentHealth.Status == StatusHealthy, coverageUncertain),
+	}
+}
+
+func verdictSummaryForReport(status Status, healthyRaw bool, coverageUncertain bool) string {
+	switch status {
+	case StatusFailed:
+		if coverageUncertain {
+			return "one or more critical checks failed and operator coverage is incomplete"
+		}
+		return "one or more critical checks failed"
+	case StatusDegraded:
+		if healthyRaw && coverageUncertain {
+			return "health is good, but operator coverage is incomplete"
+		}
+		if coverageUncertain {
+			return "the system is operating with degraded subsystems and operator coverage is incomplete"
+		}
+		return "the system is operating with degraded subsystems"
+	default:
+		return "all evaluated checks are healthy"
+	}
+}
+
+func hasCoverageUncertainty(report OperatorReport) bool {
+	return len(report.Coverage.Unknown) > 0 || len(report.MissingTelemetry) > 0
 }
 
 func severityOrder(severity Severity) int {

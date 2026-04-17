@@ -63,6 +63,7 @@ func TestRenderMarkdownReportOrdersFindingsBeforeRecommendations(t *testing.T) {
 				Observation:  "database connectivity failed",
 				WhyItMatters: "database access is required for runtime health decisions",
 				Confidence:   "high",
+				Evidence:     []string{"check summary: database connectivity failed"},
 			},
 		},
 		Recommendations: RecommendationGroups{
@@ -93,8 +94,39 @@ func TestRenderMarkdownReportOrdersFindingsBeforeRecommendations(t *testing.T) {
 		}
 		lastIdx = idx
 	}
-	if !strings.Contains(output, "| Area | Severity | Observation | Why It Matters | Confidence |") {
+	if !strings.Contains(output, "| Area | Severity | Observation | Why It Matters | Confidence | Evidence |") {
 		t.Fatalf("output missing findings table header\n%s", output)
+	}
+}
+
+func TestRenderMarkdownReportRendersFindingEvidence(t *testing.T) {
+	report := OperatorReport{
+		Findings: []Finding{
+			{
+				Area:         "queue",
+				Severity:     SeverityMedium,
+				Observation:  "queue pressure is above threshold",
+				WhyItMatters: "queue pressure affects throughput and latency",
+				Confidence:   "high",
+				Evidence: []string{
+					"check summary: queue pressure is above threshold",
+					"detail queued_tasks: 12",
+				},
+			},
+		},
+		FinalVerdict: FinalVerdict{
+			Status:  StatusDegraded,
+			Summary: "health is good, but operator coverage is incomplete",
+		},
+	}
+
+	output := RenderMarkdownReport(report)
+
+	if !strings.Contains(output, "| Area | Severity | Observation | Why It Matters | Confidence | Evidence |") {
+		t.Fatalf("output missing evidence column header\n%s", output)
+	}
+	if !strings.Contains(output, "check summary: queue pressure is above threshold<br>detail queued_tasks: 12") {
+		t.Fatalf("output missing rendered evidence entries\n%s", output)
 	}
 }
 

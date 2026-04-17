@@ -2,6 +2,69 @@ package health
 
 import "testing"
 
+func TestBuildOperatorReportIncludesEvidenceReferences(t *testing.T) {
+	raw := Report{
+		Status: StatusDegraded,
+		Checks: []Check{
+			{
+				Name:    "queue",
+				Status:  StatusDegraded,
+				Summary: "queue pressure is above threshold",
+				Details: map[string]string{
+					"queued_tasks":  "12",
+					"running_tasks": "3",
+				},
+			},
+		},
+	}
+
+	got := BuildOperatorReport(raw)
+
+	if len(got.Findings) != 1 {
+		t.Fatalf("Findings len = %d, want 1", len(got.Findings))
+	}
+
+	want := []string{
+		"check summary: queue pressure is above threshold",
+		"check status: degraded",
+		"operator mapping: explicit",
+		"rule confidence: high",
+		"detail queued_tasks: 12",
+		"detail running_tasks: 3",
+	}
+
+	if len(got.Findings[0].Evidence) != len(want) {
+		t.Fatalf("Evidence len = %d, want %d: %#v", len(got.Findings[0].Evidence), len(want), got.Findings[0].Evidence)
+	}
+	for i, expected := range want {
+		if got.Findings[0].Evidence[i] != expected {
+			t.Fatalf("Evidence[%d] = %q, want %q", i, got.Findings[0].Evidence[i], expected)
+		}
+	}
+}
+
+func TestBuildOperatorReportDowngradesHealthyRawVerdictWhenCoverageIsUnknown(t *testing.T) {
+	raw := Report{
+		Status: StatusHealthy,
+		Checks: []Check{
+			{
+				Name:    "cache",
+				Status:  StatusFailed,
+				Summary: "cache shard unavailable",
+			},
+		},
+	}
+
+	got := BuildOperatorReport(raw)
+
+	if got.FinalVerdict.Status != StatusDegraded {
+		t.Fatalf("FinalVerdict.Status = %q, want %q", got.FinalVerdict.Status, StatusDegraded)
+	}
+	if got.FinalVerdict.Summary != "health is good, but operator coverage is incomplete" {
+		t.Fatalf("FinalVerdict.Summary = %q, want %q", got.FinalVerdict.Summary, "health is good, but operator coverage is incomplete")
+	}
+}
+
 func TestBuildOperatorReportOmitsHealthyChecksFromOperatorSections(t *testing.T) {
 	raw := Report{
 		Status: StatusHealthy,
