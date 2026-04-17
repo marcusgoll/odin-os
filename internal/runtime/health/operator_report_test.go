@@ -257,6 +257,47 @@ func TestBuildOperatorReportFlagsMissingTelemetry(t *testing.T) {
 	if got.MissingTelemetry[0] != "executor health samples" {
 		t.Fatalf("MissingTelemetry[0] = %q, want %q", got.MissingTelemetry[0], "executor health samples")
 	}
+	if len(got.Recommendations.Strategic) != 1 || got.Recommendations.Strategic[0].Action != "add telemetry coverage for missing evidence paths" {
+		t.Fatalf("Strategic recommendations = %#v, want telemetry coverage recommendation", got.Recommendations.Strategic)
+	}
+}
+
+func TestBuildOperatorReportPreservesTelemetryRecommendationAlongsideOtherStrategicItems(t *testing.T) {
+	original := operatorReportRules["queue"][reportRuleKey{Status: StatusDegraded, Summary: "queue pressure is above threshold"}]
+	operatorReportRules["queue"][reportRuleKey{Status: StatusDegraded, Summary: "queue pressure is above threshold"}] = reportRule{
+		Severity:            original.Severity,
+		Confidence:          original.Confidence,
+		WhyItMatters:        original.WhyItMatters,
+		Recommendation:      "scale queue workers for sustained pressure",
+		RecommendationSet:   "strategic",
+		ExpectedBenefit:     "adds long-term queue headroom",
+		Effort:              "medium",
+		Risk:                "medium",
+		ApprovalRequirement: "ops approval",
+	}
+	defer func() {
+		operatorReportRules["queue"][reportRuleKey{Status: StatusDegraded, Summary: "queue pressure is above threshold"}] = original
+	}()
+
+	raw := Report{
+		Status: StatusDegraded,
+		Checks: []Check{
+			{Name: "executor", Status: StatusDegraded, Summary: "no executor health samples recorded"},
+			{Name: "queue", Status: StatusDegraded, Summary: "queue pressure is above threshold"},
+		},
+	}
+
+	got := BuildOperatorReport(raw)
+
+	if len(got.Recommendations.Strategic) != 2 {
+		t.Fatalf("Strategic recommendations len = %d, want 2: %#v", len(got.Recommendations.Strategic), got.Recommendations.Strategic)
+	}
+	if got.Recommendations.Strategic[0].Action != "scale queue workers for sustained pressure" {
+		t.Fatalf("Strategic recommendations[0] = %#v, want queue scaling recommendation first", got.Recommendations.Strategic[0])
+	}
+	if got.Recommendations.Strategic[1].Action != "add telemetry coverage for missing evidence paths" {
+		t.Fatalf("Strategic recommendations[1] = %#v, want telemetry coverage recommendation preserved", got.Recommendations.Strategic[1])
+	}
 }
 
 func TestBuildOperatorReportRanksFailedFindingsBeforeDegradedWhenSeverityMatches(t *testing.T) {

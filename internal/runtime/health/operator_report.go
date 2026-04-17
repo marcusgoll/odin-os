@@ -289,7 +289,7 @@ func BuildOperatorReport(raw Report) OperatorReport {
 	})
 
 	report.MissingTelemetry = uniqueStrings(report.MissingTelemetry)
-	if len(report.Recommendations.Strategic) == 0 && len(report.MissingTelemetry) > 0 {
+	if len(report.MissingTelemetry) > 0 && !hasRecommendationAction(report.Recommendations, "add telemetry coverage for missing evidence paths") {
 		report.Recommendations.Strategic = append(report.Recommendations.Strategic, Recommendation{
 			Action:              "add telemetry coverage for missing evidence paths",
 			Reason:              "the report cannot confidently judge every subsystem from the available samples",
@@ -483,6 +483,25 @@ func verdictCoverageConfidence(coverageUncertain bool) string {
 
 func hasCoverageUncertainty(report OperatorReport) bool {
 	return len(report.Coverage.Unknown) > 0 || len(report.MissingTelemetry) > 0
+}
+
+func hasRecommendationAction(groups RecommendationGroups, action string) bool {
+	for _, recommendation := range groups.Immediate {
+		if recommendation.Action == action {
+			return true
+		}
+	}
+	for _, recommendation := range groups.NearTerm {
+		if recommendation.Action == action {
+			return true
+		}
+	}
+	for _, recommendation := range groups.Strategic {
+		if recommendation.Action == action {
+			return true
+		}
+	}
+	return false
 }
 
 func severityOrder(severity Severity) int {

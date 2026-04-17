@@ -290,6 +290,30 @@ func TestShellDoctorReportWritesMarkdownSummary(t *testing.T) {
 	}
 }
 
+func TestShellDoctorRejectsUnknownMode(t *testing.T) {
+	t.Parallel()
+
+	env := newTestEnvironment(t)
+	seedHealthyDoctorState(t, env)
+
+	shell, err := New(env)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	var output bytes.Buffer
+	if err := shell.HandleLine(context.Background(), "/doctor reporrt", &output); err != nil {
+		t.Fatalf("HandleLine(/doctor reporrt) error = %v", err)
+	}
+
+	if !strings.Contains(output.String(), `unsupported /doctor mode "reporrt"; expected json or report`) {
+		t.Fatalf("output = %q, want unsupported doctor mode message", output.String())
+	}
+	if strings.Contains(output.String(), "status=") {
+		t.Fatalf("output = %q, should not fall back to the compact doctor summary", output.String())
+	}
+}
+
 func seedHealthyDoctorState(t *testing.T, env Environment) {
 	t.Helper()
 
@@ -331,7 +355,7 @@ func TestShellHelpIncludesTransitionCommands(t *testing.T) {
 		t.Fatalf("HandleLine(/help) error = %v", err)
 	}
 
-	for _, want := range []string{"/workspace", "/initiatives", "/companions", "/transition", "/observe", "/compare"} {
+	for _, want := range []string{"/workspace", "/initiatives", "/companions", "/transition", "/observe", "/compare", "/doctor json", "/doctor report"} {
 		if !strings.Contains(output.String(), want) {
 			t.Fatalf("help output = %q, want %q", output.String(), want)
 		}
