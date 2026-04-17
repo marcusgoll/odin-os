@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net"
 	"path/filepath"
 	"strings"
@@ -289,3 +290,9 @@ func runServeOnceForFollowUpTest(t *testing.T, root string) error {
 	err := Run(context.Background(), root, []string{"serve"}, strings.NewReader(""), &stdout)
 	return err
 }
+
+type errTestListener struct{}
+
+func (errTestListener) Accept() (net.Conn, error) { return nil, errors.New("listener exploded") }
+func (errTestListener) Close() error              { return nil }
+func (errTestListener) Addr() net.Addr            { return &net.TCPAddr{IP: net.IPv4zero, Port: 0} }

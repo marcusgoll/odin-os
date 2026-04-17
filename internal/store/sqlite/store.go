@@ -17,8 +17,13 @@ import (
 )
 
 var ErrWorktreeLeaseConflict = errors.New("worktree lease conflict")
+var ErrRuntimeStateBootMismatch = errors.New("runtime state boot mismatch")
+var ErrRuntimeStateConcurrentUpdate = errors.New("runtime state concurrent update")
 
 const (
+	runtimeStateSingletonKey       = "primary"
+	runtimeStateStreamID           = int64(1)
+	runtimeStateScope              = "service"
 	managedProjectInitiativeKind   = "managed_project"
 	managedProjectInitiativeStatus = "active"
 	companionKindAssistant         = "assistant"
@@ -577,6 +582,12 @@ func (store *Store) CreateTask(ctx context.Context, params CreateTaskParams) (Ta
 			FollowUpOccurrenceKey: params.FollowUpOccurrenceKey,
 			WorkKind:              params.WorkKind,
 			ArtifactsJSON:         "[]",
+			NextEligibleAt:        time.Time{},
+			Priority:              100,
+			LastError:             "",
+			RetryCount:            0,
+			MaxAttempts:           3,
+			BlockedReason:         "",
 			CreatedAt:             now,
 			UpdatedAt:             now,
 		}
@@ -589,12 +600,18 @@ func (store *Store) CreateTask(ctx context.Context, params CreateTaskParams) (Ta
 			ProjectID:  &project.ID,
 			TaskID:     &task.ID,
 			Payload: runtimeevents.TaskCreatedPayload{
-				Key:         task.Key,
-				Title:       task.Title,
-				ActionKey:   task.ActionKey,
-				Status:      task.Status,
-				Scope:       task.Scope,
-				RequestedBy: task.RequestedBy,
+				Key:            task.Key,
+				Title:          task.Title,
+				ActionKey:      task.ActionKey,
+				Status:         task.Status,
+				Scope:          task.Scope,
+				RequestedBy:    task.RequestedBy,
+				NextEligibleAt: formatTime(task.NextEligibleAt),
+				Priority:       task.Priority,
+				RetryCount:     task.RetryCount,
+				MaxAttempts:    task.MaxAttempts,
+				LastError:      task.LastError,
+				BlockedReason:  task.BlockedReason,
 			},
 			OccurredAt: now,
 		})
@@ -659,6 +676,248 @@ func (store *Store) UpdateTaskStatus(ctx context.Context, params UpdateTaskStatu
 	return task, err
 }
 
+func (store *Store) UpdateTaskQueueState(ctx context.Context, params UpdateTaskQueueStateParams) (Task, error) {
+	var task Task
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		updated, err := store.updateTaskQueueStateTx(ctx, tx, params)
+		if err != nil {
+			return err
+		}
+		task = updated
+		return nil
+	})
+	return task, err
+}
+
+func (store *Store) updateTaskQueueStateTx(ctx context.Context, tx *sql.Tx, params UpdateTaskQueueStateParams) (Task, error) {
+	current, err := store.getTaskTx(ctx, tx, params.TaskID)
+	if err != nil {
+		return Task{}, err
+	}
+
+	now := store.now()
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE tasks
+		SET status = ?, next_eligible_at = ?, priority = ?, last_error = ?, retry_count = ?, max_attempts = ?, blocked_reason = ?, updated_at = ?
+		WHERE id = ?
+	`,
+		params.Status,
+		formatTime(params.NextEligibleAt),
+		params.Priority,
+		params.LastError,
+		params.RetryCount,
+		params.MaxAttempts,
+		params.BlockedReason,
+		formatTime(now),
+		params.TaskID,
+	); err != nil {
+		return Task{}, err
+	}
+
+	updated, err := store.getTaskTx(ctx, tx, params.TaskID)
+	if err != nil {
+		return Task{}, err
+	}
+	if current.Status == "blocked" && updated.Status != "blocked" {
+		if err := supersedeActiveTaskWakePacketsTx(ctx, tx, current.ID); err != nil {
+			return Task{}, err
+		}
+	}
+
+	if err := appendTaskStatusChangedEventTx(ctx, tx, current, updated, nil, now); err != nil {
+		return Task{}, err
+	}
+	if err := appendTaskQueueStateChangedEventTx(ctx, tx, current, updated, now); err != nil {
+		return Task{}, err
+	}
+
+	return updated, nil
+}
+
+func (store *Store) BlockTask(ctx context.Context, params BlockTaskParams) (Task, error) {
+	var task Task
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		now := store.now()
+		current, err := store.getTaskTx(ctx, tx, params.TaskID)
+		if err != nil {
+			return err
+		}
+
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE tasks
+			SET status = ?, blocked_reason = ?, updated_at = ?
+			WHERE id = ?
+		`, "blocked", params.Reason, formatTime(now), params.TaskID); err != nil {
+			return err
+		}
+
+		updated, err := store.getTaskTx(ctx, tx, params.TaskID)
+		if err != nil {
+			return err
+		}
+		if err := appendTaskStatusChangedEventTx(ctx, tx, current, updated, nil, now); err != nil {
+			return err
+		}
+		if err := appendTaskQueueStateChangedEventTx(ctx, tx, current, updated, now); err != nil {
+			return err
+		}
+		task = updated
+		return nil
+	})
+	return task, err
+}
+
+func (store *Store) RequeueTaskAt(ctx context.Context, params RequeueTaskAtParams) (Task, error) {
+	var task Task
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		now := store.now()
+		current, err := store.getTaskTx(ctx, tx, params.TaskID)
+		if err != nil {
+			return err
+		}
+
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE tasks
+			SET status = ?, next_eligible_at = ?, blocked_reason = '', updated_at = ?
+			WHERE id = ?
+		`, "queued", formatTime(params.NextEligibleAt), formatTime(now), params.TaskID); err != nil {
+			return err
+		}
+
+		updated, err := store.getTaskTx(ctx, tx, params.TaskID)
+		if err != nil {
+			return err
+		}
+		if current.Status == "blocked" && updated.Status != "blocked" {
+			if err := supersedeActiveTaskWakePacketsTx(ctx, tx, current.ID); err != nil {
+				return err
+			}
+		}
+		if err := appendTaskStatusChangedEventTx(ctx, tx, current, updated, nil, now); err != nil {
+			return err
+		}
+		if err := appendTaskQueueStateChangedEventTx(ctx, tx, current, updated, now); err != nil {
+			return err
+		}
+		task = updated
+		return nil
+	})
+	return task, err
+}
+
+func (store *Store) IncrementTaskRetry(ctx context.Context, params IncrementTaskRetryParams) (Task, error) {
+	var task Task
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		now := store.now()
+		current, err := store.getTaskTx(ctx, tx, params.TaskID)
+		if err != nil {
+			return err
+		}
+
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE tasks
+			SET status = ?, next_eligible_at = ?, last_error = ?, retry_count = retry_count + 1, blocked_reason = '', updated_at = ?
+			WHERE id = ?
+		`, "queued", formatTime(params.NextEligibleAt), params.LastError, formatTime(now), params.TaskID); err != nil {
+			return err
+		}
+
+		updated, err := store.getTaskTx(ctx, tx, params.TaskID)
+		if err != nil {
+			return err
+		}
+		if err := appendTaskStatusChangedEventTx(ctx, tx, current, updated, nil, now); err != nil {
+			return err
+		}
+		if err := appendTaskQueueStateChangedEventTx(ctx, tx, current, updated, now); err != nil {
+			return err
+		}
+		task = updated
+		return nil
+	})
+	return task, err
+}
+
+func appendTaskStatusChangedEventTx(ctx context.Context, tx *sql.Tx, previous Task, updated Task, runID *int64, occurredAt time.Time) error {
+	if previous.Status == updated.Status {
+		return nil
+	}
+
+	projectID := updated.ProjectID
+	return appendEventTx(ctx, tx, eventInsert{
+		StreamType: runtimeevents.StreamTask,
+		StreamID:   updated.ID,
+		EventType:  runtimeevents.EventTaskStatusChanged,
+		Scope:      updated.Scope,
+		ProjectID:  &projectID,
+		TaskID:     &updated.ID,
+		RunID:      runID,
+		Payload: runtimeevents.TaskStatusChangedPayload{
+			PreviousStatus: previous.Status,
+			Status:         updated.Status,
+			Summary:        updated.Summary,
+			TerminalReason: updated.TerminalReason,
+			ArtifactsJSON:  updated.ArtifactsJSON,
+		},
+		OccurredAt: occurredAt,
+	})
+}
+
+func appendRunStatusChangedEventTx(ctx context.Context, tx *sql.Tx, task Task, previous Run, updated Run, occurredAt time.Time) error {
+	if previous.Status == updated.Status {
+		return nil
+	}
+
+	projectID := task.ProjectID
+	return appendEventTx(ctx, tx, eventInsert{
+		StreamType: runtimeevents.StreamRun,
+		StreamID:   updated.ID,
+		EventType:  runtimeevents.EventRunStatusChanged,
+		Scope:      task.Scope,
+		ProjectID:  &projectID,
+		TaskID:     &task.ID,
+		RunID:      &updated.ID,
+		Payload: runtimeevents.RunStatusChangedPayload{
+			PreviousStatus: previous.Status,
+			Status:         updated.Status,
+		},
+		OccurredAt: occurredAt,
+	})
+}
+
+func appendTaskQueueStateChangedEventTx(ctx context.Context, tx *sql.Tx, previous Task, updated Task, occurredAt time.Time) error {
+	if previous.Status == updated.Status &&
+		previous.NextEligibleAt.Equal(updated.NextEligibleAt) &&
+		previous.Priority == updated.Priority &&
+		previous.LastError == updated.LastError &&
+		previous.RetryCount == updated.RetryCount &&
+		previous.MaxAttempts == updated.MaxAttempts &&
+		previous.BlockedReason == updated.BlockedReason {
+		return nil
+	}
+
+	projectID := updated.ProjectID
+	return appendEventTx(ctx, tx, eventInsert{
+		StreamType: runtimeevents.StreamTask,
+		StreamID:   updated.ID,
+		EventType:  runtimeevents.EventTaskQueueStateChanged,
+		Scope:      updated.Scope,
+		ProjectID:  &projectID,
+		TaskID:     &updated.ID,
+		Payload: runtimeevents.TaskQueueStateChangedPayload{
+			PreviousStatus: previous.Status,
+			Status:         updated.Status,
+			NextEligibleAt: formatTime(updated.NextEligibleAt),
+			Priority:       updated.Priority,
+			RetryCount:     updated.RetryCount,
+			MaxAttempts:    updated.MaxAttempts,
+			LastError:      updated.LastError,
+			BlockedReason:  updated.BlockedReason,
+		},
+		OccurredAt: occurredAt,
+	})
+}
+
 func (store *Store) AssignTaskWorkspace(ctx context.Context, taskID, workspaceID int64) (Task, error) {
 	now := store.now()
 	var task Task
@@ -699,6 +958,7 @@ func (store *Store) StartRun(ctx context.Context, params StartRunParams) (Run, e
 		if err != nil {
 			return err
 		}
+		currentTask := task
 
 		result, err := tx.ExecContext(ctx, `
 			INSERT INTO runs (task_id, executor, status, attempt, started_at, finished_at, summary, terminal_reason, artifacts_json)
@@ -726,6 +986,15 @@ func (store *Store) StartRun(ctx context.Context, params StartRunParams) (Run, e
 		`, runID, formatTime(now), params.TaskID); err != nil {
 			return err
 		}
+		if params.TaskStatus != "" {
+			if _, err := tx.ExecContext(ctx, `
+				UPDATE tasks
+				SET status = ?, updated_at = ?
+				WHERE id = ?
+			`, params.TaskStatus, formatTime(now), params.TaskID); err != nil {
+				return err
+			}
+		}
 
 		run = Run{
 			ID:            runID,
@@ -738,7 +1007,7 @@ func (store *Store) StartRun(ctx context.Context, params StartRunParams) (Run, e
 		}
 
 		projectID := task.ProjectID
-		return appendEventTx(ctx, tx, eventInsert{
+		if err := appendEventTx(ctx, tx, eventInsert{
 			StreamType: runtimeevents.StreamRun,
 			StreamID:   run.ID,
 			EventType:  runtimeevents.EventRunStarted,
@@ -753,10 +1022,109 @@ func (store *Store) StartRun(ctx context.Context, params StartRunParams) (Run, e
 				Status:   run.Status,
 			},
 			OccurredAt: now,
-		})
+		}); err != nil {
+			return err
+		}
+		if params.TaskStatus == "" {
+			return nil
+		}
+
+		updatedTask, err := store.getTaskTx(ctx, tx, params.TaskID)
+		if err != nil {
+			return err
+		}
+		return appendTaskStatusChangedEventTx(ctx, tx, currentTask, updatedTask, &run.ID, now)
 	})
 
 	return run, err
+}
+
+func (store *Store) UpdateRunAndTaskStatus(ctx context.Context, params UpdateRunAndTaskStatusParams) (Task, Run, error) {
+	now := store.now()
+	var (
+		task Task
+		run  Run
+	)
+
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		currentRun, currentTask, err := store.getRunWithTaskTx(ctx, tx, params.RunID)
+		if err != nil {
+			return err
+		}
+		previousRun := currentRun
+
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE runs
+			SET status = ?
+			WHERE id = ?
+		`, params.RunStatus, params.RunID); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE tasks
+			SET status = ?, current_run_id = ?, updated_at = ?
+			WHERE id = ?
+		`, params.TaskStatus, params.RunID, formatTime(now), currentTask.ID); err != nil {
+			return err
+		}
+
+		updatedTask, err := store.getTaskTx(ctx, tx, currentTask.ID)
+		if err != nil {
+			return err
+		}
+
+		currentRun.Status = params.RunStatus
+		if err := appendRunStatusChangedEventTx(ctx, tx, currentTask, previousRun, currentRun, now); err != nil {
+			return err
+		}
+		if err := appendTaskStatusChangedEventTx(ctx, tx, currentTask, updatedTask, &currentRun.ID, now); err != nil {
+			return err
+		}
+
+		task = updatedTask
+		run = currentRun
+		return nil
+	})
+
+	return task, run, err
+}
+
+func releaseActiveWorktreeLeaseByTaskRunTx(ctx context.Context, tx *sql.Tx, taskID int64, runID int64, now time.Time) error {
+	row := tx.QueryRowContext(ctx, `
+		SELECT id
+		FROM worktree_leases
+		WHERE task_id = ?
+		  AND run_id = ?
+		  AND state = 'active'
+		ORDER BY id DESC
+		LIMIT 1
+	`, taskID, runID)
+
+	var leaseID int64
+	if err := row.Scan(&leaseID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		return err
+	}
+
+	_, err := tx.ExecContext(ctx, `
+		UPDATE worktree_leases
+		SET state = ?, released_at = ?, updated_at = ?
+		WHERE id = ?
+	`, "released", formatTime(now), formatTime(now), leaseID)
+	return err
+}
+
+func supersedeActiveTaskWakePacketsTx(ctx context.Context, tx *sql.Tx, taskID int64) error {
+	_, err := tx.ExecContext(ctx, `
+		UPDATE context_packets
+		SET status = 'superseded'
+		WHERE task_id = ?
+		  AND packet_scope = 'task_wake_packet'
+		  AND status = 'active'
+	`, taskID)
+	return err
 }
 
 func (store *Store) FinishRun(ctx context.Context, params FinishRunParams) (Run, error) {
@@ -813,6 +1181,225 @@ func (store *Store) FinishRun(ctx context.Context, params FinishRunParams) (Run,
 	})
 
 	return run, err
+}
+
+func (store *Store) FinishRunAndSetTaskStatus(ctx context.Context, params FinishRunAndSetTaskStatusParams) (Task, Run, error) {
+	now := store.now()
+	var (
+		task Task
+		run  Run
+	)
+
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		currentRun, currentTask, err := store.getRunWithTaskTx(ctx, tx, params.RunID)
+		if err != nil {
+			return err
+		}
+
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE runs
+			SET status = ?, finished_at = ?, summary = ?
+			WHERE id = ?
+		`, params.RunStatus, formatTime(now), params.Summary, params.RunID); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE tasks
+			SET status = ?, current_run_id = NULL, updated_at = ?
+			WHERE id = ?
+		`, params.TaskStatus, formatTime(now), currentTask.ID); err != nil {
+			return err
+		}
+		if err := releaseActiveWorktreeLeaseByTaskRunTx(ctx, tx, currentTask.ID, currentRun.ID, now); err != nil {
+			return err
+		}
+
+		updatedTask, err := store.getTaskTx(ctx, tx, currentTask.ID)
+		if err != nil {
+			return err
+		}
+
+		currentRun.Status = params.RunStatus
+		currentRun.FinishedAt = &now
+		currentRun.Summary = params.Summary
+
+		projectID := currentTask.ProjectID
+		if err := appendEventTx(ctx, tx, eventInsert{
+			StreamType: runtimeevents.StreamRun,
+			StreamID:   currentRun.ID,
+			EventType:  runtimeevents.EventRunFinished,
+			Scope:      currentTask.Scope,
+			ProjectID:  &projectID,
+			TaskID:     &currentTask.ID,
+			RunID:      &currentRun.ID,
+			Payload: runtimeevents.RunFinishedPayload{
+				Status:         currentRun.Status,
+				Summary:        currentRun.Summary,
+				TerminalReason: currentRun.TerminalReason,
+				ArtifactsJSON:  currentRun.ArtifactsJSON,
+			},
+			OccurredAt: now,
+		}); err != nil {
+			return err
+		}
+		if err := appendTaskStatusChangedEventTx(ctx, tx, currentTask, updatedTask, nil, now); err != nil {
+			return err
+		}
+
+		task = updatedTask
+		run = currentRun
+		return nil
+	})
+
+	return task, run, err
+}
+
+func (store *Store) FailRunAndRetryTask(ctx context.Context, params FailRunAndRetryTaskParams) (Task, Run, error) {
+	now := store.now()
+	var (
+		task Task
+		run  Run
+	)
+
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		currentRun, currentTask, err := store.getRunWithTaskTx(ctx, tx, params.RunID)
+		if err != nil {
+			return err
+		}
+
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE runs
+			SET status = ?, finished_at = ?, summary = ?
+			WHERE id = ?
+		`, "failed", formatTime(now), params.Summary, params.RunID); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE tasks
+			SET status = ?, current_run_id = NULL, next_eligible_at = ?, last_error = ?, retry_count = retry_count + 1, blocked_reason = '', updated_at = ?
+			WHERE id = ?
+		`, "queued", formatTime(params.NextEligibleAt), params.LastError, formatTime(now), currentTask.ID); err != nil {
+			return err
+		}
+		if err := releaseActiveWorktreeLeaseByTaskRunTx(ctx, tx, currentTask.ID, currentRun.ID, now); err != nil {
+			return err
+		}
+
+		updatedTask, err := store.getTaskTx(ctx, tx, currentTask.ID)
+		if err != nil {
+			return err
+		}
+
+		currentRun.Status = "failed"
+		currentRun.FinishedAt = &now
+		currentRun.Summary = params.Summary
+
+		projectID := currentTask.ProjectID
+		if err := appendEventTx(ctx, tx, eventInsert{
+			StreamType: runtimeevents.StreamRun,
+			StreamID:   currentRun.ID,
+			EventType:  runtimeevents.EventRunFinished,
+			Scope:      currentTask.Scope,
+			ProjectID:  &projectID,
+			TaskID:     &currentTask.ID,
+			RunID:      &currentRun.ID,
+			Payload: runtimeevents.RunFinishedPayload{
+				Status:         currentRun.Status,
+				Summary:        currentRun.Summary,
+				TerminalReason: currentRun.TerminalReason,
+				ArtifactsJSON:  currentRun.ArtifactsJSON,
+			},
+			OccurredAt: now,
+		}); err != nil {
+			return err
+		}
+		if err := appendTaskStatusChangedEventTx(ctx, tx, currentTask, updatedTask, nil, now); err != nil {
+			return err
+		}
+		if err := appendTaskQueueStateChangedEventTx(ctx, tx, currentTask, updatedTask, now); err != nil {
+			return err
+		}
+
+		task = updatedTask
+		run = currentRun
+		return nil
+	})
+
+	return task, run, err
+}
+
+func (store *Store) InterruptRunAndRequeueTask(ctx context.Context, params InterruptRunAndRequeueTaskParams) (Task, Run, error) {
+	now := store.now()
+	var (
+		task Task
+		run  Run
+	)
+
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		currentRun, currentTask, err := store.getRunWithTaskTx(ctx, tx, params.RunID)
+		if err != nil {
+			return err
+		}
+
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE runs
+			SET status = ?, finished_at = ?, summary = ?
+			WHERE id = ?
+		`, "interrupted", formatTime(now), params.Summary, params.RunID); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE tasks
+			SET status = ?, current_run_id = NULL, next_eligible_at = ?, blocked_reason = '', updated_at = ?
+			WHERE id = ?
+		`, "queued", formatTime(time.Time{}), formatTime(now), currentTask.ID); err != nil {
+			return err
+		}
+		if err := releaseActiveWorktreeLeaseByTaskRunTx(ctx, tx, currentTask.ID, currentRun.ID, now); err != nil {
+			return err
+		}
+
+		updatedTask, err := store.getTaskTx(ctx, tx, currentTask.ID)
+		if err != nil {
+			return err
+		}
+
+		currentRun.Status = "interrupted"
+		currentRun.FinishedAt = &now
+		currentRun.Summary = params.Summary
+
+		projectID := currentTask.ProjectID
+		if err := appendEventTx(ctx, tx, eventInsert{
+			StreamType: runtimeevents.StreamRun,
+			StreamID:   currentRun.ID,
+			EventType:  runtimeevents.EventRunFinished,
+			Scope:      currentTask.Scope,
+			ProjectID:  &projectID,
+			TaskID:     &currentTask.ID,
+			RunID:      &currentRun.ID,
+			Payload: runtimeevents.RunFinishedPayload{
+				Status:         currentRun.Status,
+				Summary:        currentRun.Summary,
+				TerminalReason: currentRun.TerminalReason,
+				ArtifactsJSON:  currentRun.ArtifactsJSON,
+			},
+			OccurredAt: now,
+		}); err != nil {
+			return err
+		}
+		if err := appendTaskStatusChangedEventTx(ctx, tx, currentTask, updatedTask, nil, now); err != nil {
+			return err
+		}
+		if err := appendTaskQueueStateChangedEventTx(ctx, tx, currentTask, updatedTask, now); err != nil {
+			return err
+		}
+
+		task = updatedTask
+		run = currentRun
+		return nil
+	})
+
+	return task, run, err
 }
 
 func (store *Store) RequestApproval(ctx context.Context, params RequestApprovalParams) (Approval, error) {
@@ -1130,7 +1717,7 @@ func (store *Store) ResolveApproval(ctx context.Context, params ResolveApprovalP
 				if err != nil {
 					return err
 				}
-				if linkedRun.Status == "running" {
+				if linkedRun.Status == "running" && task.Status != "blocked" {
 					return fmt.Errorf("approval %d cannot be approved while run %d is still running", current.ID, linkedRun.ID)
 				}
 			}
@@ -1189,31 +1776,25 @@ func (store *Store) ResolveApproval(ctx context.Context, params ResolveApprovalP
 				return nil
 			}
 
-			previousStatus := task.Status
+			previousTask := task
 			if _, err := tx.ExecContext(ctx, `
 				UPDATE tasks
-				SET status = ?, updated_at = ?
+				SET status = ?, current_run_id = NULL, blocked_reason = '', updated_at = ?
 				WHERE id = ?
 			`, "queued", formatTime(now), task.ID); err != nil {
 				return err
 			}
 
+			if err := supersedeActiveTaskWakePacketsTx(ctx, tx, task.ID); err != nil {
+				return err
+			}
+
 			task.Status = "queued"
+			task.CurrentRunID = nil
+			task.BlockedReason = ""
 			task.UpdatedAt = now
 
-			return appendEventTx(ctx, tx, eventInsert{
-				StreamType: runtimeevents.StreamTask,
-				StreamID:   task.ID,
-				EventType:  runtimeevents.EventTaskStatusChanged,
-				Scope:      task.Scope,
-				ProjectID:  &projectID,
-				TaskID:     &task.ID,
-				Payload: runtimeevents.TaskStatusChangedPayload{
-					PreviousStatus: previousStatus,
-					Status:         task.Status,
-				},
-				OccurredAt: now,
-			})
+			return appendTaskStatusChangedEventTx(ctx, tx, previousTask, task, nil, now)
 		}
 
 		return nil
@@ -2465,6 +3046,12 @@ func (store *Store) GetTaskByFollowUpOccurrence(ctx context.Context, obligationI
 			terminal_reason,
 			artifacts_json,
 			current_run_id,
+			next_eligible_at,
+			priority,
+			last_error,
+			retry_count,
+			max_attempts,
+			blocked_reason,
 			created_at,
 			updated_at
 		FROM tasks
@@ -3120,6 +3707,31 @@ func (store *Store) GetTask(ctx context.Context, taskID int64) (Task, error) {
 	return store.getTaskQuery(ctx, store.db, taskID)
 }
 
+func (store *Store) ListEligibleQueuedTasks(ctx context.Context, now time.Time) ([]Task, error) {
+	rows, err := store.db.QueryContext(ctx, `
+		SELECT id, project_id, key, title, action_key, status, scope, requested_by, workspace_id, initiative_id, companion_id, follow_up_obligation_id, follow_up_occurrence_key, work_kind, summary, terminal_reason, artifacts_json, current_run_id, next_eligible_at, priority, last_error, retry_count, max_attempts, blocked_reason, created_at, updated_at
+		FROM tasks
+		WHERE status = 'queued'
+		  AND next_eligible_at <= ?
+		ORDER BY priority ASC, next_eligible_at ASC, id ASC
+	`, formatTime(now))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var tasks []Task
+	for rows.Next() {
+		task, err := scanTask(rows)
+		if err != nil {
+			return nil, err
+		}
+		tasks = append(tasks, task)
+	}
+
+	return tasks, rows.Err()
+}
+
 func (store *Store) GetWorkspaceByKey(ctx context.Context, key string) (Workspace, error) {
 	row := store.db.QueryRowContext(ctx, `
 		SELECT
@@ -3424,6 +4036,17 @@ func (store *Store) GetApproval(ctx context.Context, approvalID int64) (Approval
 		FROM approvals
 		WHERE id = ?
 	`, approvalID)
+	return scanApproval(row)
+}
+
+func (store *Store) GetLatestTaskApproval(ctx context.Context, taskID int64) (Approval, error) {
+	row := store.db.QueryRowContext(ctx, `
+		SELECT id, task_id, run_id, status, requested_at, resolved_at, decision_by, reason
+		FROM approvals
+		WHERE task_id = ?
+		ORDER BY id DESC
+		LIMIT 1
+	`, taskID)
 	return scanApproval(row)
 }
 
@@ -3739,6 +4362,88 @@ func (store *Store) ListWorktreeLeases(ctx context.Context) ([]WorktreeLease, er
 	return leases, rows.Err()
 }
 
+func (store *Store) ListActiveWorktreeLeases(ctx context.Context) ([]WorktreeLease, error) {
+	rows, err := store.db.QueryContext(ctx, `
+		SELECT
+			id,
+			project_id,
+			task_id,
+			run_id,
+			mode,
+			branch_name,
+			worktree_path,
+			repo_root,
+			state,
+			heartbeat_at,
+			released_at,
+			cleaned_up_at,
+			created_at,
+			updated_at
+		FROM worktree_leases
+		WHERE state = 'active'
+		ORDER BY id ASC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var leases []WorktreeLease
+	for rows.Next() {
+		lease, err := scanWorktreeLease(rows)
+		if err != nil {
+			return nil, err
+		}
+		leases = append(leases, lease)
+	}
+
+	return leases, rows.Err()
+}
+
+func (store *Store) ListHeartbeatEligibleWorktreeLeases(ctx context.Context) ([]WorktreeLease, error) {
+	rows, err := store.db.QueryContext(ctx, `
+		SELECT
+			wl.id,
+			wl.project_id,
+			wl.task_id,
+			wl.run_id,
+			wl.mode,
+			wl.branch_name,
+			wl.worktree_path,
+			wl.repo_root,
+			wl.state,
+			wl.heartbeat_at,
+			wl.released_at,
+			wl.cleaned_up_at,
+			wl.created_at,
+			wl.updated_at
+		FROM worktree_leases wl
+		JOIN tasks t ON t.id = wl.task_id
+		JOIN runs r ON r.id = wl.run_id
+		WHERE wl.state = 'active'
+		  AND wl.cleaned_up_at IS NULL
+		  AND t.current_run_id = wl.run_id
+		  AND t.status IN ('preparing', 'running')
+		  AND r.status IN ('preparing', 'running')
+		ORDER BY wl.id ASC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var leases []WorktreeLease
+	for rows.Next() {
+		lease, err := scanWorktreeLease(rows)
+		if err != nil {
+			return nil, err
+		}
+		leases = append(leases, lease)
+	}
+
+	return leases, rows.Err()
+}
+
 func (store *Store) ListCleanupEligibleWorktreeLeases(ctx context.Context, staleBefore time.Time) ([]WorktreeLease, error) {
 	rows, err := store.db.QueryContext(ctx, `
 		SELECT
@@ -3760,7 +4465,19 @@ func (store *Store) ListCleanupEligibleWorktreeLeases(ctx context.Context, stale
 		WHERE cleaned_up_at IS NULL
 		  AND (
 			state = 'released'
-			OR (state = 'active' AND heartbeat_at < ?)
+			OR (
+				state = 'active'
+				AND heartbeat_at < ?
+				AND NOT EXISTS (
+					SELECT 1
+					FROM tasks t
+					JOIN runs r ON r.id = worktree_leases.run_id
+					WHERE t.id = worktree_leases.task_id
+					  AND t.current_run_id = worktree_leases.run_id
+					  AND t.status IN ('preparing', 'running')
+					  AND r.status IN ('preparing', 'running')
+				)
+			)
 		  )
 		ORDER BY id ASC
 	`, formatTime(staleBefore))
@@ -3809,6 +4526,171 @@ func (store *Store) RecordProjectionFreshness(ctx context.Context, params Record
 	}
 
 	return store.GetProjectionFreshness(ctx, params.Surface)
+}
+
+func (store *Store) GetRuntimeState(ctx context.Context) (RuntimeState, error) {
+	row := store.db.QueryRowContext(ctx, `
+		SELECT
+			singleton_key,
+			boot_id,
+			status,
+			pid,
+			started_at,
+			ready_at,
+			last_heartbeat_at,
+			last_shutdown_reason,
+			last_error,
+			updated_at
+		FROM runtime_state
+		WHERE singleton_key = ?
+	`, runtimeStateSingletonKey)
+	return scanRuntimeState(row)
+}
+
+func (store *Store) UpsertRuntimeState(ctx context.Context, params UpsertRuntimeStateParams, options RuntimeStateWriteOptions) (RuntimeState, error) {
+	updatedAt := params.UpdatedAt.UTC()
+	if updatedAt.IsZero() {
+		updatedAt = store.now()
+	}
+
+	startedAt := params.StartedAt.UTC()
+	if startedAt.IsZero() {
+		startedAt = updatedAt
+	}
+
+	lastHeartbeatAt := params.LastHeartbeatAt.UTC()
+	if lastHeartbeatAt.IsZero() {
+		lastHeartbeatAt = updatedAt
+	}
+
+	var readyAtValue any
+	if params.ReadyAt != nil {
+		readyAtUTC := params.ReadyAt.UTC()
+		params.ReadyAt = &readyAtUTC
+		readyAtValue = formatTime(readyAtUTC)
+	}
+
+	state := RuntimeState{
+		SingletonKey:       runtimeStateSingletonKey,
+		BootID:             params.BootID,
+		Status:             params.Status,
+		PID:                params.PID,
+		StartedAt:          startedAt,
+		ReadyAt:            params.ReadyAt,
+		LastHeartbeatAt:    lastHeartbeatAt,
+		LastShutdownReason: params.LastShutdownReason,
+		LastError:          params.LastError,
+		UpdatedAt:          updatedAt,
+	}
+
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		if options.ExpectedBootID != "" || !options.ExpectedUpdatedAt.IsZero() {
+			current, err := getRuntimeStateForBootTx(ctx, tx, options.ExpectedBootID)
+			if err != nil {
+				return err
+			}
+			if params.BootID != "" && options.ExpectedBootID != "" && params.BootID != options.ExpectedBootID {
+				return ErrRuntimeStateBootMismatch
+			}
+			if !options.ExpectedUpdatedAt.IsZero() && !current.UpdatedAt.Equal(options.ExpectedUpdatedAt.UTC()) {
+				return ErrRuntimeStateConcurrentUpdate
+			}
+		}
+
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO runtime_state (
+				singleton_key,
+				boot_id,
+				status,
+				pid,
+				started_at,
+				ready_at,
+				last_heartbeat_at,
+				last_shutdown_reason,
+				last_error,
+				updated_at
+			)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT(singleton_key) DO UPDATE SET
+				boot_id = excluded.boot_id,
+				status = excluded.status,
+				pid = excluded.pid,
+				started_at = excluded.started_at,
+				ready_at = excluded.ready_at,
+				last_heartbeat_at = excluded.last_heartbeat_at,
+				last_shutdown_reason = excluded.last_shutdown_reason,
+				last_error = excluded.last_error,
+				updated_at = excluded.updated_at
+		`,
+			state.SingletonKey,
+			state.BootID,
+			state.Status,
+			state.PID,
+			formatTime(state.StartedAt),
+			readyAtValue,
+			formatTime(state.LastHeartbeatAt),
+			state.LastShutdownReason,
+			state.LastError,
+			formatTime(state.UpdatedAt),
+		); err != nil {
+			return err
+		}
+
+		return appendEventTx(ctx, tx, eventInsert{
+			StreamType: runtimeevents.StreamService,
+			StreamID:   runtimeStateStreamID,
+			EventType:  runtimeevents.EventServiceLifecycleChanged,
+			Scope:      runtimeStateScope,
+			Payload: runtimeevents.ServiceLifecyclePayload{
+				BootID: state.BootID,
+				Status: state.Status,
+				Reason: options.EventReason,
+				PID:    state.PID,
+			},
+			OccurredAt: state.UpdatedAt,
+		})
+	})
+
+	return state, err
+}
+
+func (store *Store) UpdateRuntimeHeartbeat(ctx context.Context, expectedBootID string) (RuntimeState, error) {
+	now := store.now()
+	var state RuntimeState
+
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		current, err := getRuntimeStateForBootTx(ctx, tx, expectedBootID)
+		if err != nil {
+			return err
+		}
+
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE runtime_state
+			SET last_heartbeat_at = ?, updated_at = ?
+			WHERE singleton_key = ?
+		`, formatTime(now), formatTime(now), runtimeStateSingletonKey); err != nil {
+			return err
+		}
+
+		current.LastHeartbeatAt = now
+		current.UpdatedAt = now
+		state = current
+
+		return appendEventTx(ctx, tx, eventInsert{
+			StreamType: runtimeevents.StreamService,
+			StreamID:   runtimeStateStreamID,
+			EventType:  runtimeevents.EventServiceHeartbeatRecorded,
+			Scope:      runtimeStateScope,
+			Payload: runtimeevents.ServiceHeartbeatPayload{
+				BootID: state.BootID,
+				Status: state.Status,
+				PID:    state.PID,
+			},
+			OccurredAt: now,
+		})
+	})
+
+	return state, err
 }
 
 func (store *Store) GetProjectionFreshness(ctx context.Context, surface string) (ProjectionFreshness, error) {
@@ -3954,7 +4836,7 @@ func (store *Store) getWorkspaceByKeyTx(ctx context.Context, tx *sql.Tx, key str
 
 func (store *Store) getTaskQuery(ctx context.Context, queryer sqlQueryRow, taskID int64) (Task, error) {
 	row := queryer.QueryRowContext(ctx, `
-		SELECT id, project_id, key, title, action_key, status, scope, requested_by, workspace_id, initiative_id, companion_id, follow_up_obligation_id, follow_up_occurrence_key, work_kind, summary, terminal_reason, artifacts_json, current_run_id, created_at, updated_at
+		SELECT id, project_id, key, title, action_key, status, scope, requested_by, workspace_id, initiative_id, companion_id, follow_up_obligation_id, follow_up_occurrence_key, work_kind, summary, terminal_reason, artifacts_json, current_run_id, next_eligible_at, priority, last_error, retry_count, max_attempts, blocked_reason, created_at, updated_at
 		FROM tasks
 		WHERE id = ?
 	`, taskID)
@@ -4484,7 +5366,7 @@ func (store *Store) getRunWithTaskTx(ctx context.Context, tx *sql.Tx, runID int6
 	row := tx.QueryRowContext(ctx, `
 		SELECT
 			r.id, r.task_id, r.executor, r.status, r.attempt, r.started_at, r.finished_at, r.summary, r.terminal_reason, r.artifacts_json,
-			t.id, t.project_id, t.key, t.title, t.action_key, t.status, t.scope, t.requested_by, t.workspace_id, t.initiative_id, t.companion_id, t.follow_up_obligation_id, t.follow_up_occurrence_key, t.work_kind, t.summary, t.terminal_reason, t.artifacts_json, t.current_run_id, t.created_at, t.updated_at
+			t.id, t.project_id, t.key, t.title, t.action_key, t.status, t.scope, t.requested_by, t.workspace_id, t.initiative_id, t.companion_id, t.follow_up_obligation_id, t.follow_up_occurrence_key, t.work_kind, t.summary, t.terminal_reason, t.artifacts_json, t.current_run_id, t.next_eligible_at, t.priority, t.last_error, t.retry_count, t.max_attempts, t.blocked_reason, t.created_at, t.updated_at
 		FROM runs r
 		JOIN tasks t ON t.id = r.task_id
 		WHERE r.id = ?
@@ -4506,6 +5388,12 @@ func (store *Store) getRunWithTaskTx(ctx context.Context, tx *sql.Tx, runID int6
 	var followUpObligationID sql.NullInt64
 	var followUpOccurrenceKey sql.NullString
 	var workKind sql.NullString
+	var nextEligibleAt string
+	var priority int
+	var lastError string
+	var retryCount int
+	var maxAttempts int
+	var blockedReason string
 	var startedAt string
 	var taskCreatedAt string
 	var taskUpdatedAt string
@@ -4539,6 +5427,12 @@ func (store *Store) getRunWithTaskTx(ctx context.Context, tx *sql.Tx, runID int6
 		&taskTerminalReason,
 		&taskArtifactsJSON,
 		&currentRunID,
+		&nextEligibleAt,
+		&priority,
+		&lastError,
+		&retryCount,
+		&maxAttempts,
+		&blockedReason,
 		&taskCreatedAt,
 		&taskUpdatedAt,
 	); err != nil {
@@ -4568,6 +5462,15 @@ func (store *Store) getRunWithTaskTx(ctx context.Context, tx *sql.Tx, runID int6
 	task.TerminalReason = taskTerminalReason.String
 	task.ArtifactsJSON = normalizeArtifactsJSON(taskArtifactsJSON.String)
 	task.CurrentRunID = nullableInt64Ptr(currentRunID)
+	task.NextEligibleAt, err = parseTime(nextEligibleAt)
+	if err != nil {
+		return Run{}, Task{}, err
+	}
+	task.Priority = priority
+	task.LastError = lastError
+	task.RetryCount = retryCount
+	task.MaxAttempts = maxAttempts
+	task.BlockedReason = blockedReason
 	task.CreatedAt, err = parseTime(taskCreatedAt)
 	if err != nil {
 		return Run{}, Task{}, err
@@ -4584,7 +5487,7 @@ func (store *Store) getApprovalWithTaskTx(ctx context.Context, tx *sql.Tx, appro
 	row := tx.QueryRowContext(ctx, `
 		SELECT
 			a.id, a.task_id, a.run_id, a.status, a.requested_at, a.resolved_at, a.decision_by, a.reason,
-			t.id, t.project_id, t.key, t.title, t.action_key, t.status, t.scope, t.requested_by, t.workspace_id, t.initiative_id, t.companion_id, t.follow_up_obligation_id, t.follow_up_occurrence_key, t.work_kind, t.summary, t.terminal_reason, t.artifacts_json, t.current_run_id, t.created_at, t.updated_at
+			t.id, t.project_id, t.key, t.title, t.action_key, t.status, t.scope, t.requested_by, t.workspace_id, t.initiative_id, t.companion_id, t.follow_up_obligation_id, t.follow_up_occurrence_key, t.work_kind, t.summary, t.terminal_reason, t.artifacts_json, t.current_run_id, t.next_eligible_at, t.priority, t.last_error, t.retry_count, t.max_attempts, t.blocked_reason, t.created_at, t.updated_at
 		FROM approvals a
 		JOIN tasks t ON t.id = a.task_id
 		WHERE a.id = ?
@@ -4607,6 +5510,12 @@ func (store *Store) getApprovalWithTaskTx(ctx context.Context, tx *sql.Tx, appro
 	var followUpObligationID sql.NullInt64
 	var followUpOccurrenceKey sql.NullString
 	var workKind sql.NullString
+	var nextEligibleAt string
+	var priority int
+	var lastError string
+	var retryCount int
+	var maxAttempts int
+	var blockedReason string
 	var taskCreatedAt string
 	var taskUpdatedAt string
 
@@ -4637,6 +5546,12 @@ func (store *Store) getApprovalWithTaskTx(ctx context.Context, tx *sql.Tx, appro
 		&taskTerminalReason,
 		&taskArtifactsJSON,
 		&currentRunID,
+		&nextEligibleAt,
+		&priority,
+		&lastError,
+		&retryCount,
+		&maxAttempts,
+		&blockedReason,
 		&taskCreatedAt,
 		&taskUpdatedAt,
 	); err != nil {
@@ -4666,6 +5581,15 @@ func (store *Store) getApprovalWithTaskTx(ctx context.Context, tx *sql.Tx, appro
 	task.TerminalReason = taskTerminalReason.String
 	task.ArtifactsJSON = normalizeArtifactsJSON(taskArtifactsJSON.String)
 	task.CurrentRunID = nullableInt64Ptr(currentRunID)
+	task.NextEligibleAt, err = parseTime(nextEligibleAt)
+	if err != nil {
+		return Approval{}, Task{}, err
+	}
+	task.Priority = priority
+	task.LastError = lastError
+	task.RetryCount = retryCount
+	task.MaxAttempts = maxAttempts
+	task.BlockedReason = blockedReason
 	task.CreatedAt, err = parseTime(taskCreatedAt)
 	if err != nil {
 		return Approval{}, Task{}, err
@@ -5111,6 +6035,7 @@ func scanTask(row interface{ Scan(...any) error }) (Task, error) {
 	var followUpObligationID sql.NullInt64
 	var followUpOccurrenceKey sql.NullString
 	var workKind sql.NullString
+	var nextEligibleAt string
 	var createdAt string
 	var updatedAt string
 	if err := row.Scan(
@@ -5132,6 +6057,12 @@ func scanTask(row interface{ Scan(...any) error }) (Task, error) {
 		&terminalReason,
 		&artifactsJSON,
 		&currentRunID,
+		&nextEligibleAt,
+		&task.Priority,
+		&task.LastError,
+		&task.RetryCount,
+		&task.MaxAttempts,
+		&task.BlockedReason,
 		&createdAt,
 		&updatedAt,
 	); err != nil {
@@ -5149,6 +6080,10 @@ func scanTask(row interface{ Scan(...any) error }) (Task, error) {
 	task.TerminalReason = terminalReason.String
 	task.ArtifactsJSON = normalizeArtifactsJSON(artifactsJSON.String)
 	task.CurrentRunID = nullableInt64Ptr(currentRunID)
+	task.NextEligibleAt, err = parseTime(nextEligibleAt)
+	if err != nil {
+		return Task{}, err
+	}
 	task.CreatedAt, err = parseTime(createdAt)
 	if err != nil {
 		return Task{}, err
@@ -5684,6 +6619,47 @@ func scanLearningPromotion(row interface{ Scan(...any) error }) (LearningPromoti
 	return promotion, nil
 }
 
+func scanRuntimeState(row interface{ Scan(...any) error }) (RuntimeState, error) {
+	var state RuntimeState
+	var readyAt sql.NullString
+	var startedAt string
+	var lastHeartbeatAt string
+	var updatedAt string
+	if err := row.Scan(
+		&state.SingletonKey,
+		&state.BootID,
+		&state.Status,
+		&state.PID,
+		&startedAt,
+		&readyAt,
+		&lastHeartbeatAt,
+		&state.LastShutdownReason,
+		&state.LastError,
+		&updatedAt,
+	); err != nil {
+		return RuntimeState{}, err
+	}
+
+	var err error
+	state.StartedAt, err = parseTime(startedAt)
+	if err != nil {
+		return RuntimeState{}, err
+	}
+	state.ReadyAt, err = parseNullableTime(readyAt)
+	if err != nil {
+		return RuntimeState{}, err
+	}
+	state.LastHeartbeatAt, err = parseTime(lastHeartbeatAt)
+	if err != nil {
+		return RuntimeState{}, err
+	}
+	state.UpdatedAt, err = parseTime(updatedAt)
+	if err != nil {
+		return RuntimeState{}, err
+	}
+	return state, nil
+}
+
 func scanWorktreeLease(row interface{ Scan(...any) error }) (WorktreeLease, error) {
 	var lease WorktreeLease
 	var heartbeatAt string
@@ -5800,6 +6776,39 @@ func scanEvent(rows *sql.Rows) (runtimeevents.Record, error) {
 	return record, nil
 }
 
+func getRuntimeStateTx(ctx context.Context, tx *sql.Tx) (RuntimeState, error) {
+	row := tx.QueryRowContext(ctx, `
+		SELECT
+			singleton_key,
+			boot_id,
+			status,
+			pid,
+			started_at,
+			ready_at,
+			last_heartbeat_at,
+			last_shutdown_reason,
+			last_error,
+			updated_at
+		FROM runtime_state
+		WHERE singleton_key = ?
+	`, runtimeStateSingletonKey)
+	return scanRuntimeState(row)
+}
+
+func getRuntimeStateForBootTx(ctx context.Context, tx *sql.Tx, expectedBootID string) (RuntimeState, error) {
+	current, err := getRuntimeStateTx(ctx, tx)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) && expectedBootID != "" {
+			return RuntimeState{}, ErrRuntimeStateBootMismatch
+		}
+		return RuntimeState{}, err
+	}
+	if expectedBootID != "" && current.BootID != expectedBootID {
+		return RuntimeState{}, ErrRuntimeStateBootMismatch
+	}
+	return current, nil
+}
+
 func incidentStatusEvent(previousStatus string, status string, reason string) (runtimeevents.Type, any, bool) {
 	switch status {
 	case "resolved":
@@ -5847,7 +6856,7 @@ func parseNullableTime(value sql.NullString) (*time.Time, error) {
 }
 
 func formatTime(value time.Time) string {
-	return value.UTC().Format(time.RFC3339Nano)
+	return value.UTC().Format("2006-01-02T15:04:05.000000000Z")
 }
 
 func nullableInt64Ptr(value sql.NullInt64) *int64 {

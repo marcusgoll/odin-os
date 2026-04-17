@@ -163,7 +163,7 @@ func TestMonitorDetectsDefinedFaults(t *testing.T) {
 	assertFaultPresent(t, observations, recovery.FaultRunFailureRepeated, "task:"+task.Key)
 }
 
-func TestMonitorTreatsRepeatedTimeoutsAsRunFailures(t *testing.T) {
+func TestMonitorIgnoresDelayedQueuedTasksForQueuePressure(t *testing.T) {
 	ctx := context.Background()
 	store, err := sqlite.Open(filepath.Join(t.TempDir(), "odin.db"))
 	if err != nil {
@@ -174,6 +174,8 @@ func TestMonitorTreatsRepeatedTimeoutsAsRunFailures(t *testing.T) {
 	if err := store.Migrate(ctx); err != nil {
 		t.Fatalf("Migrate() error = %v", err)
 	}
+
+	now := time.Date(2026, 4, 9, 12, 0, 0, 0, time.UTC)
 
 	project, err := store.CreateProject(ctx, sqlite.CreateProjectParams{
 		Key:           "demo",
@@ -187,51 +189,61 @@ func TestMonitorTreatsRepeatedTimeoutsAsRunFailures(t *testing.T) {
 		t.Fatalf("CreateProject() error = %v", err)
 	}
 
-	task, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
+	runnableTask, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
 		ProjectID:   project.ID,
-		Key:         "timeout-task",
-		Title:       "Timed out task",
-		Status:      "timeout",
+		Key:         "build-app",
+		Title:       "Build app",
+		Status:      "queued",
 		Scope:       "project",
 		RequestedBy: "operator",
 	})
 	if err != nil {
-		t.Fatalf("CreateTask() error = %v", err)
+		t.Fatalf("CreateTask(runnable) error = %v", err)
 	}
 
-	for attempt := 1; attempt <= 2; attempt++ {
-		run, err := store.StartRun(ctx, sqlite.StartRunParams{
-			TaskID:   task.ID,
-			Executor: "codex_headless",
-			Attempt:  attempt,
-			Status:   "running",
+	for index := 0; index < 3; index++ {
+		delayedTask, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
+			ProjectID:   project.ID,
+			Key:         "delayed-task-" + string(rune('a'+index)),
+			Title:       "Delayed task",
+			Status:      "queued",
+			Scope:       "project",
+			RequestedBy: "operator",
 		})
 		if err != nil {
-			t.Fatalf("StartRun(attempt %d) error = %v", attempt, err)
+			t.Fatalf("CreateTask(delayed %d) error = %v", index, err)
 		}
-		if _, err := store.FinishRun(ctx, sqlite.FinishRunParams{
-			RunID:   run.ID,
-			Status:  "timeout",
-			Summary: "execution exceeded timeout",
+		if _, err := store.RequeueTaskAt(ctx, sqlite.RequeueTaskAtParams{
+			TaskID:         delayedTask.ID,
+			NextEligibleAt: now.Add(500 * time.Millisecond),
 		}); err != nil {
-			t.Fatalf("FinishRun(attempt %d) error = %v", attempt, err)
+			t.Fatalf("RequeueTaskAt(delayed %d) error = %v", index, err)
 		}
 	}
 
 	monitor := recovery.Monitor{
 		DB: store.DB(),
 		Config: recovery.Config{
+			QueuePressureThreshold:      1,
+			ExecutorFreshnessTTL:        time.Hour,
+			ProjectionFreshnessTTL:      time.Hour,
+			SourceFreshnessTTL:          time.Hour,
 			RepeatedRunFailureThreshold: 2,
 		},
-		Now: func() time.Time { return time.Date(2026, 4, 9, 12, 0, 0, 0, time.UTC) },
+		Now: func() time.Time { return now },
 	}
 
 	observations, err := monitor.Observe(ctx)
 	if err != nil {
 		t.Fatalf("Observe() error = %v", err)
 	}
+	for _, observation := range observations {
+		if observation.FaultKey == recovery.FaultQueuePressureHigh && observation.SubjectKey == "task_queue" {
+			t.Fatalf("unexpected queue pressure observation with delayed tasks present: %+v", observations)
+		}
+	}
 
-	assertFaultPresent(t, observations, recovery.FaultRunFailureRepeated, "task:"+task.Key)
+	_ = runnableTask
 }
 
 func assertFaultPresent(t *testing.T, observations []recovery.Observation, faultKey recovery.FaultKey, subjectKey string) {

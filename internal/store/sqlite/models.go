@@ -189,6 +189,12 @@ type Task struct {
 	TerminalReason        string
 	ArtifactsJSON         string
 	CurrentRunID          *int64
+	NextEligibleAt        time.Time
+	Priority              int
+	LastError             string
+	RetryCount            int
+	MaxAttempts           int
+	BlockedReason         string
 	CreatedAt             time.Time
 	UpdatedAt             time.Time
 }
@@ -216,6 +222,33 @@ type UpdateTaskStatusParams struct {
 	TerminalReason         string
 	ArtifactsJSON          string
 	AllowedCurrentStatuses []string
+}
+
+type UpdateTaskQueueStateParams struct {
+	TaskID         int64
+	Status         string
+	NextEligibleAt time.Time
+	Priority       int
+	LastError      string
+	RetryCount     int
+	MaxAttempts    int
+	BlockedReason  string
+}
+
+type BlockTaskParams struct {
+	TaskID int64
+	Reason string
+}
+
+type RequeueTaskAtParams struct {
+	TaskID         int64
+	NextEligibleAt time.Time
+}
+
+type IncrementTaskRetryParams struct {
+	TaskID         int64
+	LastError      string
+	NextEligibleAt time.Time
 }
 
 type Run struct {
@@ -275,16 +308,23 @@ type ListMemoryEntriesParams struct {
 }
 
 type StartRunParams struct {
-	TaskID   int64
-	Executor string
-	Attempt  int
-	Status   string
+	TaskID     int64
+	Executor   string
+	Attempt    int
+	Status     string
+	TaskStatus string
 }
 
 type StartRunAndUpdateTaskStatusParams struct {
 	TaskID     int64
 	Executor   string
 	Attempt    int
+	RunStatus  string
+	TaskStatus string
+}
+
+type UpdateRunAndTaskStatusParams struct {
+	RunID      int64
 	RunStatus  string
 	TaskStatus string
 }
@@ -323,6 +363,25 @@ type FinishRunAndUpdateTaskStatusParams struct {
 	ArtifactsJSON  string
 	TaskID         int64
 	TaskStatus     string
+}
+
+type FinishRunAndSetTaskStatusParams struct {
+	RunID      int64
+	RunStatus  string
+	Summary    string
+	TaskStatus string
+}
+
+type FailRunAndRetryTaskParams struct {
+	RunID          int64
+	Summary        string
+	LastError      string
+	NextEligibleAt time.Time
+}
+
+type InterruptRunAndRequeueTaskParams struct {
+	RunID   int64
+	Summary string
 }
 
 type Approval struct {
@@ -604,6 +663,37 @@ type WorktreeLease struct {
 	CleanedUpAt  *time.Time
 	CreatedAt    time.Time
 	UpdatedAt    time.Time
+}
+
+type RuntimeState struct {
+	SingletonKey       string
+	BootID             string
+	Status             string
+	PID                int
+	StartedAt          time.Time
+	ReadyAt            *time.Time
+	LastHeartbeatAt    time.Time
+	LastShutdownReason string
+	LastError          string
+	UpdatedAt          time.Time
+}
+
+type UpsertRuntimeStateParams struct {
+	BootID             string
+	Status             string
+	PID                int
+	StartedAt          time.Time
+	ReadyAt            *time.Time
+	LastHeartbeatAt    time.Time
+	LastShutdownReason string
+	LastError          string
+	UpdatedAt          time.Time
+}
+
+type RuntimeStateWriteOptions struct {
+	ExpectedBootID    string
+	ExpectedUpdatedAt time.Time
+	EventReason       string
 }
 
 type CreateWorktreeLeaseParams struct {

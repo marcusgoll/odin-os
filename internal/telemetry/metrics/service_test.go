@@ -82,6 +82,26 @@ func TestServiceCollectReflectsRuntimeConditions(t *testing.T) {
 		t.Fatalf("CreateTask(queued) error = %v", err)
 	}
 	_ = queuedTask
+
+	for index := 0; index < 3; index++ {
+		delayedTask, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
+			ProjectID:   project.ID,
+			Key:         "delayed-task-" + string(rune('a'+index)),
+			Title:       "Delayed task",
+			Status:      "queued",
+			Scope:       "project",
+			RequestedBy: "operator",
+		})
+		if err != nil {
+			t.Fatalf("CreateTask(delayed %d) error = %v", index, err)
+		}
+		if _, err := store.RequeueTaskAt(ctx, sqlite.RequeueTaskAtParams{
+			TaskID:         delayedTask.ID,
+			NextEligibleAt: now.Add(500 * time.Millisecond),
+		}); err != nil {
+			t.Fatalf("RequeueTaskAt(delayed %d) error = %v", index, err)
+		}
+	}
 	runningTask, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
 		ProjectID:   project.ID,
 		Key:         "running-task",
@@ -183,5 +203,42 @@ func TestServiceCollectReflectsRuntimeConditions(t *testing.T) {
 	}
 	if snapshot.BlockedItems == 0 {
 		t.Fatalf("blocked items = %d, want > 0", snapshot.BlockedItems)
+	}
+}
+
+func TestServiceCollectIgnoresHistoricalExecutorsWhenScopeIsExplicitlyEmpty(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	now := time.Now().UTC()
+	store, err := sqlite.Open(filepath.Join(t.TempDir(), "odin.db"))
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer store.Close()
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
+	}
+
+	if _, err := store.RecordExecutorHealth(ctx, sqlite.RecordExecutorHealthParams{
+		Executor:    "codex_headless",
+		Status:      "unavailable",
+		LatencyMS:   10,
+		DetailsJSON: `{"source":"test"}`,
+	}); err != nil {
+		t.Fatalf("RecordExecutorHealth() error = %v", err)
+	}
+
+	snapshot, err := Service{
+		DB:           store.DB(),
+		Config:       Config{ExecutorFreshnessTTL: time.Hour, SourceFreshnessTTL: time.Hour, ProjectionFreshnessTTL: time.Hour},
+		Now:          func() time.Time { return now },
+		ExecutorKeys: []string{},
+	}.Collect(ctx)
+	if err != nil {
+		t.Fatalf("Collect() error = %v", err)
+	}
+	if snapshot.StaleExecutors != 0 {
+		t.Fatalf("StaleExecutors = %d, want 0 when executor scope is explicitly empty", snapshot.StaleExecutors)
 	}
 }

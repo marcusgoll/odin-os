@@ -14,13 +14,14 @@ import (
 
 	httpapi "odin-os/internal/api/http"
 	"odin-os/internal/core/initiatives"
+	"odin-os/internal/core/workspaces"
 	healthsvc "odin-os/internal/runtime/health"
 	"odin-os/internal/runtime/projections"
 	"odin-os/internal/store/sqlite"
 	metricsvc "odin-os/internal/telemetry/metrics"
 )
 
-func TestOperationalHandlerExposesHealthReadyAndMetrics(t *testing.T) {
+func TestReadyzReturnsHealthyWhenRuntimeIsReady(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
@@ -28,6 +29,7 @@ func TestOperationalHandlerExposesHealthReadyAndMetrics(t *testing.T) {
 	defer store.Close()
 
 	seedHealthyObservability(t, ctx, store)
+	seedRuntimeState(t, ctx, store, "ready")
 
 	server := httptest.NewServer(httpapi.NewOperationalHandler(httpapi.Dependencies{
 		Health: healthsvc.Service{DB: store.DB()},
@@ -59,7 +61,60 @@ func TestOperationalHandlerExposesHealthReadyAndMetrics(t *testing.T) {
 	}
 }
 
-func TestOperationalHandlerDegradesReadyzWhenRuntimeIsNotReady(t *testing.T) {
+func TestReadyzFailsClosedWhenRuntimeIsNotReady(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openStore(t)
+	defer store.Close()
+
+	seedHealthyObservability(t, ctx, store)
+	seedRuntimeState(t, ctx, store, "booting")
+
+	server := httptest.NewServer(httpapi.NewOperationalHandler(httpapi.Dependencies{
+		Health: healthsvc.Service{DB: store.DB()},
+		Metrics: metricsvc.Service{
+			DB: store.DB(),
+		},
+		RegistryHealthy: true,
+	}))
+	defer server.Close()
+
+	assertReportStatus(t, server.URL+"/healthz", http.StatusOK, "healthy")
+	assertReportStatus(t, server.URL+"/readyz", http.StatusServiceUnavailable, "healthy")
+}
+
+func TestReadyzFailsClosedWhenRuntimeHeartbeatIsStale(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now().UTC()
+	ctx := context.Background()
+	store := openStore(t)
+	defer store.Close()
+
+	seedHealthyObservability(t, ctx, store)
+	seedRuntimeStateWithHeartbeat(t, ctx, store, "ready", now.Add(-2*time.Hour))
+
+	server := httptest.NewServer(httpapi.NewOperationalHandler(httpapi.Dependencies{
+		Health: healthsvc.Service{
+			DB: store.DB(),
+			Config: healthsvc.Config{
+				RuntimeHeartbeatTTL: 1 * time.Minute,
+			},
+			Now: func() time.Time { return now },
+		},
+		Metrics: metricsvc.Service{
+			DB: store.DB(),
+		},
+		RegistryHealthy: true,
+	}))
+	defer server.Close()
+
+	assertReportStatus(t, server.URL+"/healthz", http.StatusOK, "healthy")
+	assertReportStatus(t, server.URL+"/readyz", http.StatusServiceUnavailable, "healthy")
+}
+
+func TestReadyzIsUnavailableWhenDoctorIsDegraded(t *testing.T) {
 	t.Parallel()
 
 	store := openStore(t)
@@ -168,6 +223,66 @@ func TestOperationalHandlerExposesAgendaReadModel(t *testing.T) {
 	}
 }
 
+func TestOperationalHandlerExposesDefaultWorkspaceMemoryReadModels(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openStore(t)
+	defer store.Close()
+
+	seedHealthyObservability(t, ctx, store)
+	seedMemoryReadModelState(t, ctx, store)
+
+	server := httptest.NewServer(httpapi.NewOperationalHandler(httpapi.Dependencies{
+		Health: healthsvc.Service{DB: store.DB()},
+		Metrics: metricsvc.Service{
+			DB: store.DB(),
+		},
+		ReadModels:      store.DB(),
+		RegistryHealthy: true,
+	}))
+	defer server.Close()
+
+	var report struct {
+		Workspace []struct {
+			WorkspaceKey         string `json:"workspace_key"`
+			WorkspaceEntryCount  int    `json:"workspace_entry_count"`
+			InitiativeEntryCount int    `json:"initiative_entry_count"`
+			CompanionEntryCount  int    `json:"companion_entry_count"`
+		} `json:"workspace"`
+		Initiatives []struct {
+			InitiativeKey string `json:"initiative_key"`
+			EntryCount    int    `json:"entry_count"`
+			LastSummary   string `json:"last_summary"`
+		} `json:"initiatives"`
+		Companions []struct {
+			CompanionKey string `json:"companion_key"`
+			EntryCount   int    `json:"entry_count"`
+			LastSummary  string `json:"last_summary"`
+		} `json:"companions"`
+	}
+	decodeURLJSON(t, server.URL+"/memoryz", &report)
+
+	if len(report.Workspace) != 1 || report.Workspace[0].WorkspaceKey != workspaces.DefaultWorkspaceKey {
+		t.Fatalf("/memoryz workspace = %+v, want only default workspace", report.Workspace)
+	}
+	if report.Workspace[0].WorkspaceEntryCount != 1 || report.Workspace[0].InitiativeEntryCount != 1 || report.Workspace[0].CompanionEntryCount != 1 {
+		t.Fatalf("/memoryz workspace counts = %+v, want one entry per scope", report.Workspace[0])
+	}
+	if len(report.Initiatives) != 1 || report.Initiatives[0].InitiativeKey != "alpha" || report.Initiatives[0].EntryCount != 1 {
+		t.Fatalf("/memoryz initiatives = %+v, want alpha initiative memory", report.Initiatives)
+	}
+	if report.Initiatives[0].LastSummary != "Alpha memory summary" {
+		t.Fatalf("/memoryz initiative last summary = %q, want alpha memory summary", report.Initiatives[0].LastSummary)
+	}
+	if len(report.Companions) != 1 || report.Companions[0].CompanionKey != workspaces.DefaultWorkspaceCompanionKey || report.Companions[0].EntryCount != 1 {
+		t.Fatalf("/memoryz companions = %+v, want primary companion memory", report.Companions)
+	}
+	if report.Companions[0].LastSummary != "Primary companion memory" {
+		t.Fatalf("/memoryz companion last summary = %q, want primary companion memory", report.Companions[0].LastSummary)
+	}
+}
+
 func openStore(t *testing.T) *sqlite.Store {
 	t.Helper()
 
@@ -205,6 +320,35 @@ func seedHealthyObservability(t *testing.T, ctx context.Context, store *sqlite.S
 		DetailsJSON: `{"source":"test"}`,
 	}); err != nil {
 		t.Fatalf("RecordProjectionFreshness() error = %v", err)
+	}
+}
+
+func seedRuntimeState(t *testing.T, ctx context.Context, store *sqlite.Store, status string) {
+	t.Helper()
+
+	seedRuntimeStateWithHeartbeat(t, ctx, store, status, time.Now().UTC())
+}
+
+func seedRuntimeStateWithHeartbeat(t *testing.T, ctx context.Context, store *sqlite.Store, status string, heartbeatAt time.Time) {
+	t.Helper()
+
+	readyAt := (*time.Time)(nil)
+	if status == "ready" {
+		readyValue := heartbeatAt
+		readyAt = &readyValue
+	}
+	if _, err := store.UpsertRuntimeState(ctx, sqlite.UpsertRuntimeStateParams{
+		BootID:             "boot-test",
+		Status:             status,
+		PID:                1234,
+		StartedAt:          heartbeatAt,
+		ReadyAt:            readyAt,
+		LastHeartbeatAt:    heartbeatAt,
+		LastShutdownReason: "",
+		LastError:          "",
+		UpdatedAt:          heartbeatAt,
+	}, sqlite.RuntimeStateWriteOptions{}); err != nil {
+		t.Fatalf("UpsertRuntimeState() error = %v", err)
 	}
 }
 
@@ -386,5 +530,100 @@ func createAgendaFollowUpObligation(t *testing.T, ctx context.Context, store *sq
 		PolicyJSON:      `{}`,
 	}); err != nil {
 		t.Fatalf("CreateFollowUpObligation(%s) error = %v", title, err)
+	}
+}
+
+func seedMemoryReadModelState(t *testing.T, ctx context.Context, store *sqlite.Store) {
+	t.Helper()
+
+	project, err := store.CreateProject(ctx, sqlite.CreateProjectParams{
+		Key:           "alpha",
+		Name:          "Alpha",
+		Scope:         "project",
+		GitRoot:       "/tmp/alpha",
+		DefaultBranch: "main",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+
+	workspace, err := store.GetWorkspaceByKey(ctx, workspaces.DefaultWorkspaceKey)
+	if err != nil {
+		t.Fatalf("GetWorkspaceByKey(default) error = %v", err)
+	}
+	companion, err := store.GetCompanionByKey(ctx, workspace.ID, workspace.DefaultCompanionKey)
+	if err != nil {
+		t.Fatalf("GetCompanionByKey(default) error = %v", err)
+	}
+	initiative, err := store.UpsertInitiative(ctx, sqlite.UpsertInitiativeParams{
+		WorkspaceID:      workspace.ID,
+		Key:              project.Key,
+		Title:            project.Name,
+		Kind:             string(initiatives.KindManagedProject),
+		Status:           "active",
+		Summary:          "Alpha initiative",
+		OwnerCompanionID: &companion.ID,
+		LinkedProjectID:  &project.ID,
+	})
+	if err != nil {
+		t.Fatalf("UpsertInitiative() error = %v", err)
+	}
+	if _, err := store.CreateMemoryEntry(ctx, sqlite.CreateMemoryEntryParams{
+		WorkspaceID:     workspace.ID,
+		EntryType:       "note",
+		VisibilityScope: "workspace",
+		RetentionClass:  "durable",
+		Summary:         "Workspace memory summary",
+		Content:         "Workspace memory content",
+	}); err != nil {
+		t.Fatalf("CreateMemoryEntry(workspace) error = %v", err)
+	}
+	if _, err := store.CreateMemoryEntry(ctx, sqlite.CreateMemoryEntryParams{
+		WorkspaceID:     workspace.ID,
+		InitiativeID:    &initiative.ID,
+		EntryType:       "summary",
+		VisibilityScope: "initiative",
+		RetentionClass:  "durable",
+		Summary:         "Alpha memory summary",
+		Content:         "Alpha initiative memory content",
+	}); err != nil {
+		t.Fatalf("CreateMemoryEntry(initiative) error = %v", err)
+	}
+	if _, err := store.CreateMemoryEntry(ctx, sqlite.CreateMemoryEntryParams{
+		WorkspaceID:     workspace.ID,
+		CompanionID:     &companion.ID,
+		EntryType:       "note",
+		VisibilityScope: "companion",
+		RetentionClass:  "working",
+		Summary:         "Primary companion memory",
+		Content:         "Primary companion memory content",
+	}); err != nil {
+		t.Fatalf("CreateMemoryEntry(companion) error = %v", err)
+	}
+
+	secondary, err := store.CreateWorkspace(ctx, sqlite.CreateWorkspaceParams{
+		Key:                 "secondary",
+		Name:                "Secondary Workspace",
+		OwnerRef:            "secondary",
+		DefaultCompanionKey: "secondary-primary",
+		Status:              "active",
+		PolicyJSON:          "{}",
+	})
+	if err != nil {
+		t.Fatalf("CreateWorkspace(secondary) error = %v", err)
+	}
+	if err := store.EnsureDefaultCompanion(ctx, secondary.ID, secondary.DefaultCompanionKey); err != nil {
+		t.Fatalf("EnsureDefaultCompanion(secondary) error = %v", err)
+	}
+	if _, err := store.CreateMemoryEntry(ctx, sqlite.CreateMemoryEntryParams{
+		WorkspaceID:     secondary.ID,
+		EntryType:       "note",
+		VisibilityScope: "workspace",
+		RetentionClass:  "durable",
+		Summary:         "Secondary workspace memory",
+		Content:         "Secondary workspace memory content",
+	}); err != nil {
+		t.Fatalf("CreateMemoryEntry(secondary workspace) error = %v", err)
 	}
 }

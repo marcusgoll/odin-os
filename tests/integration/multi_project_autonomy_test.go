@@ -186,6 +186,9 @@ func TestCutoverPilotProjectsStayRunnableWithoutLegacyPrimary(t *testing.T) {
 	if transition.State != string(projects.TransitionStateCutover) {
 		t.Fatalf("transition state = %q, want cutover", transition.State)
 	}
+	if err := bootstrap.RefreshReadinessSamples(ctx, app, len(app.RegistryDiagnostics) == 0); err != nil {
+		t.Fatalf("RefreshReadinessSamples() error = %v", err)
+	}
 
 	if err := service.ExecuteNextQueued(ctx); err != nil {
 		t.Fatalf("ExecuteNextQueued() error = %v", err)
@@ -262,14 +265,14 @@ func TestCutoverPilotProjectsStayRunnableWithoutLegacyPrimary(t *testing.T) {
 	if lease.RepoRoot != project.GitRoot {
 		t.Fatalf("lease repo root = %q, want %q", lease.RepoRoot, project.GitRoot)
 	}
-	if lease.State != "cleaned" {
-		t.Fatalf("lease state = %q, want cleaned", lease.State)
+	if lease.State != "released" {
+		t.Fatalf("lease state = %q, want released", lease.State)
 	}
 	if lease.ReleasedAt == nil {
 		t.Fatal("lease ReleasedAt is nil, want released lease to be persisted")
 	}
-	if lease.CleanedUpAt == nil {
-		t.Fatal("lease CleanedUpAt is nil, want cleanup timestamp")
+	if lease.CleanedUpAt != nil {
+		t.Fatalf("lease CleanedUpAt = %v, want nil until maintenance cleanup runs", lease.CleanedUpAt)
 	}
 }
 

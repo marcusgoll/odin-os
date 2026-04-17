@@ -11,14 +11,15 @@ import (
 
 	"odin-os/internal/core/followups"
 	"odin-os/internal/core/workspaces"
+	runtimeevents "odin-os/internal/runtime/events"
 	"odin-os/internal/store/sqlite"
 )
 
-func TestLoadInitializesFreshRuntimeReadinessState(t *testing.T) {
-	repoRoot := bootstrapTestRepoRoot(t)
+func TestLoadInitializesRuntimeReadinessStateForServeBootstrap(t *testing.T) {
+	repoRoot := createBootstrapRepoRoot(t, true)
 	runtimeRoot := t.TempDir()
 
-	app, err := Load(context.Background(), repoRoot, runtimeRoot)
+	app, err := Load(bootstrapContextWithBootID(context.Background(), "boot-1"), repoRoot, runtimeRoot)
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
@@ -33,113 +34,118 @@ func TestLoadInitializesFreshRuntimeReadinessState(t *testing.T) {
 	assertCountAtLeast(t, app.Store.DB().QueryRowContext(context.Background(), "SELECT COUNT(*) FROM projection_freshness"), 1)
 }
 
-func TestLoadBootstrapsDefaultWorkspaceAndCompanion(t *testing.T) {
-	repoRoot := bootstrapTestRepoRoot(t)
+func TestLoadRecordsStoppedWithLastErrorWhenMigrationFailsDuringServeBootstrap(t *testing.T) {
+	repoRoot := createBootstrapRepoRoot(t, true)
 	runtimeRoot := t.TempDir()
 
-	app, err := Load(context.Background(), repoRoot, runtimeRoot)
-	if err != nil {
-		t.Fatalf("Load() error = %v", err)
+	originalMigrate := migrateStoreFn
+	migrateStoreFn = func(ctx context.Context, store *sqlite.Store) error {
+		return errors.New("migrate failed")
 	}
-	defer app.Store.Close()
+	t.Cleanup(func() {
+		migrateStoreFn = originalMigrate
+	})
 
-	workspace, err := app.Store.GetWorkspaceByKey(context.Background(), workspaces.DefaultWorkspaceKey)
-	if err != nil {
-		t.Fatalf("GetWorkspaceByKey(default) error = %v", err)
-	}
-	if workspace.DefaultCompanionKey != workspaces.DefaultWorkspaceCompanionKey {
-		t.Fatalf("GetWorkspaceByKey(default).DefaultCompanionKey = %q, want %q", workspace.DefaultCompanionKey, workspaces.DefaultWorkspaceCompanionKey)
+	ctx := bootstrapContextWithBootID(context.Background(), "boot-1")
+	_, err := Load(ctx, repoRoot, runtimeRoot)
+	if err == nil {
+		t.Fatal("Load() error = nil, want migration failure")
 	}
 
-	companion, err := app.Store.GetCompanionByKey(context.Background(), workspace.ID, workspace.DefaultCompanionKey)
-	if err != nil {
-		t.Fatalf("GetCompanionByKey(default) error = %v", err)
+	store, openErr := sqlite.Open(filepath.Join(runtimeRoot, "data", "odin.db"))
+	if openErr != nil {
+		t.Fatalf("sqlite.Open() error = %v", openErr)
 	}
-	if companion.Key != workspace.DefaultCompanionKey {
-		t.Fatalf("GetCompanionByKey(default).Key = %q, want %q", companion.Key, workspace.DefaultCompanionKey)
+	defer store.Close()
+
+	got, err := store.GetRuntimeState(context.Background())
+	if err != nil {
+		t.Fatalf("GetRuntimeState() error = %v", err)
+	}
+	if got.Status != "stopped" {
+		t.Fatalf("RuntimeState.Status = %q, want %q", got.Status, "stopped")
+	}
+	if got.LastError != "migrate failed" {
+		t.Fatalf("RuntimeState.LastError = %q, want %q", got.LastError, "migrate failed")
 	}
 }
 
-func TestLoadRepairsLegacyProjectsAndTasksIntoWorkspaceModel(t *testing.T) {
-	ctx := context.Background()
-	repoRoot := bootstrapTestRepoRoot(t)
+func TestLoadRecordsBootingWhenServeBootIDIsPresent(t *testing.T) {
+	repoRoot := createBootstrapRepoRoot(t, true)
 	runtimeRoot := t.TempDir()
 
-	if err := os.MkdirAll(filepath.Join(runtimeRoot, "data"), 0o755); err != nil {
-		t.Fatalf("MkdirAll(data) error = %v", err)
-	}
-
-	seedStore, err := sqlite.Open(filepath.Join(runtimeRoot, "data", "odin.db"))
-	if err != nil {
-		t.Fatalf("sqlite.Open(seed) error = %v", err)
-	}
-	if err := seedStore.Migrate(ctx); err != nil {
-		t.Fatalf("Migrate(seed) error = %v", err)
-	}
-
-	project, err := seedStore.CreateProject(ctx, sqlite.CreateProjectParams{
-		Key:           "legacy-project",
-		Name:          "Legacy Project",
-		Scope:         "project",
-		GitRoot:       filepath.Join(t.TempDir(), "legacy-project"),
-		DefaultBranch: "main",
-		ManifestPath:  "config/projects.yaml",
-	})
-	if err != nil {
-		t.Fatalf("CreateProject() error = %v", err)
-	}
-	task, err := seedStore.CreateTask(ctx, sqlite.CreateTaskParams{
-		ProjectID:   project.ID,
-		Key:         "legacy-task",
-		Title:       "Legacy task",
-		Status:      "queued",
-		Scope:       "project",
-		RequestedBy: "operator",
-	})
-	if err != nil {
-		t.Fatalf("CreateTask() error = %v", err)
-	}
-	if err := seedStore.Close(); err != nil {
-		t.Fatalf("seedStore.Close() error = %v", err)
-	}
-
+	ctx := bootstrapContextWithBootID(context.Background(), "boot-1")
 	app, err := Load(ctx, repoRoot, runtimeRoot)
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
 	defer app.Store.Close()
 
-	workspace, err := app.Store.GetWorkspaceByKey(ctx, workspaces.DefaultWorkspaceKey)
+	got, err := app.Store.GetRuntimeState(context.Background())
 	if err != nil {
-		t.Fatalf("GetWorkspaceByKey(default) error = %v", err)
+		t.Fatalf("GetRuntimeState() error = %v", err)
+	}
+	if got.Status != "booting" {
+		t.Fatalf("RuntimeState.Status = %q, want %q", got.Status, "booting")
+	}
+	if got.BootID != "boot-1" {
+		t.Fatalf("RuntimeState.BootID = %q, want %q", got.BootID, "boot-1")
 	}
 
-	initiative, err := app.Store.GetInitiativeByKey(ctx, workspace.ID, project.Key)
+	events, err := app.Store.ListEvents(context.Background(), sqlite.ListEventsParams{})
 	if err != nil {
-		t.Fatalf("GetInitiativeByKey(legacy-project) error = %v", err)
+		t.Fatalf("ListEvents() error = %v", err)
 	}
-	if initiative.LinkedProjectID == nil || *initiative.LinkedProjectID != project.ID {
-		t.Fatalf("GetInitiativeByKey(legacy-project).LinkedProjectID = %v, want %d", initiative.LinkedProjectID, project.ID)
+	found := false
+	for _, event := range events {
+		if event.Type != runtimeevents.EventServiceLifecycleChanged {
+			continue
+		}
+		lifecycle, err := runtimeevents.DecodePayload[runtimeevents.ServiceLifecyclePayload](event.Payload)
+		if err != nil {
+			t.Fatalf("DecodePayload(ServiceLifecyclePayload) error = %v", err)
+		}
+		if lifecycle.Status == "booting" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("events = %+v, want booting lifecycle event", events)
+	}
+}
+
+func TestLoadRecordsStoppedWithLastErrorWhenBootstrapFailsAfterBooting(t *testing.T) {
+	repoRoot := createBootstrapRepoRoot(t, false)
+	runtimeRoot := t.TempDir()
+
+	ctx := bootstrapContextWithBootID(context.Background(), "boot-1")
+	_, err := Load(ctx, repoRoot, runtimeRoot)
+	if err == nil {
+		t.Fatal("Load() error = nil, want bootstrap failure")
 	}
 
-	repairedTask, err := app.Store.GetTask(ctx, task.ID)
+	store, openErr := sqlite.Open(filepath.Join(runtimeRoot, "data", "odin.db"))
+	if openErr != nil {
+		t.Fatalf("sqlite.Open() error = %v", openErr)
+	}
+	defer store.Close()
+
+	got, err := store.GetRuntimeState(context.Background())
 	if err != nil {
-		t.Fatalf("GetTask(legacy-task) error = %v", err)
+		t.Fatalf("GetRuntimeState() error = %v", err)
 	}
-	if repairedTask.WorkspaceID == nil || *repairedTask.WorkspaceID != workspace.ID {
-		t.Fatalf("GetTask(legacy-task).WorkspaceID = %v, want %d", repairedTask.WorkspaceID, workspace.ID)
+	if got.Status != "stopped" {
+		t.Fatalf("RuntimeState.Status = %q, want %q", got.Status, "stopped")
 	}
-	if repairedTask.InitiativeID == nil || *repairedTask.InitiativeID != initiative.ID {
-		t.Fatalf("GetTask(legacy-task).InitiativeID = %v, want %d", repairedTask.InitiativeID, initiative.ID)
-	}
-	if repairedTask.WorkKind != repairedTask.Scope {
-		t.Fatalf("GetTask(legacy-task).WorkKind = %q, want %q", repairedTask.WorkKind, repairedTask.Scope)
+	if got.LastError == "" {
+		t.Fatal("RuntimeState.LastError = empty, want bootstrap error")
 	}
 }
 
 func TestLoadRepairsLegacyFollowUpObligationTargetsBeforeMaterialization(t *testing.T) {
 	ctx := context.Background()
-	repoRoot := bootstrapTestRepoRoot(t)
+	repoRoot := createBootstrapRepoRoot(t, true)
 	runtimeRoot := t.TempDir()
 
 	if err := os.MkdirAll(filepath.Join(runtimeRoot, "data"), 0o755); err != nil {
@@ -260,7 +266,7 @@ func TestLoadRepairsLegacyFollowUpObligationTargetsBeforeMaterialization(t *test
 
 func TestLoadRepairsLegacyFollowUpObligationTargetsDespiteProjectDiagnostics(t *testing.T) {
 	ctx := context.Background()
-	repoRoot := bootstrapTestRepoRoot(t)
+	repoRoot := createBootstrapRepoRoot(t, true)
 	runtimeRoot := t.TempDir()
 
 	if err := os.WriteFile(filepath.Join(repoRoot, "config", "projects.local.yaml"), []byte(`version: 1
@@ -382,7 +388,7 @@ projects:
 }
 
 func TestLoadSerializesConcurrentBootstrapForFreshRuntime(t *testing.T) {
-	repoRoot := bootstrapTestRepoRoot(t)
+	repoRoot := filepath.Clean(filepath.Join("..", "..", ".."))
 	runtimeRoot := t.TempDir()
 
 	var entered int32
@@ -444,7 +450,7 @@ func TestLoadSerializesConcurrentBootstrapForFreshRuntime(t *testing.T) {
 }
 
 func TestLoadReturnsBootstrapTimeoutWhenLockWaitExceedsConfiguredLimit(t *testing.T) {
-	repoRoot := bootstrapTestRepoRoot(t)
+	repoRoot := filepath.Clean(filepath.Join("..", "..", ".."))
 	runtimeRoot := t.TempDir()
 	t.Setenv("ODIN_BOOTSTRAP_TIMEOUT", "50ms")
 
@@ -490,43 +496,59 @@ func TestLoadReturnsBootstrapTimeoutWhenLockWaitExceedsConfiguredLimit(t *testin
 	}
 }
 
-func bootstrapTestRepoRoot(t *testing.T) string {
+func assertCountAtLeast(t *testing.T, row rowScanner, minimum int) {
 	t.Helper()
 
-	sourceRoot := filepath.Clean(filepath.Join("..", "..", ".."))
+	var count int
+	if err := row.Scan(&count); err != nil {
+		t.Fatalf("Scan() error = %v", err)
+	}
+	if count < minimum {
+		t.Fatalf("count = %d, want at least %d", count, minimum)
+	}
+}
+
+type rowScanner interface {
+	Scan(...any) error
+}
+
+func createBootstrapRepoRoot(t *testing.T, includeProjectsConfig bool) string {
+	t.Helper()
+
 	root := t.TempDir()
-
-	for _, dir := range []string{
-		filepath.Join(root, "config"),
-		filepath.Join(root, "registry"),
-		filepath.Join(root, "odin-core", ".git"),
-	} {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			t.Fatalf("MkdirAll(%s) error = %v", dir, err)
-		}
+	if err := os.MkdirAll(filepath.Join(root, "config"), 0o755); err != nil {
+		t.Fatalf("mkdir config: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "registry"), 0o755); err != nil {
+		t.Fatalf("mkdir registry: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "odin-core", ".git"), 0o755); err != nil {
+		t.Fatalf("mkdir odin-core git root: %v", err)
 	}
 
-	for _, name := range []string{"odin.yaml", "executors.yaml", "models.yaml", "telemetry.yaml"} {
-		sourcePath := filepath.Join(sourceRoot, "config", name)
-		content, err := os.ReadFile(sourcePath)
-		if err != nil {
-			t.Fatalf("ReadFile(%s) error = %v", sourcePath, err)
-		}
-		if err := os.WriteFile(filepath.Join(root, "config", name), content, 0o644); err != nil {
-			t.Fatalf("WriteFile(%s) error = %v", name, err)
-		}
+	if err := os.WriteFile(filepath.Join(root, "config", "odin.yaml"), []byte(`
+version: 1
+runtime:
+  root: .
+service:
+  http_addr: 127.0.0.1:0
+  startup_recovery: true
+`), 0o644); err != nil {
+		t.Fatalf("write odin config: %v", err)
 	}
-
-	projectsYAML := []byte(`version: 1
+	if includeProjectsConfig {
+		if err := os.WriteFile(filepath.Join(root, "config", "projects.yaml"), []byte(`
+version: 1
 projects:
   - key: odin-core
     name: Odin Core
     project_class: system_project
     system_project: true
-    git_root: ` + filepath.Join(root, "odin-core") + `
+    git_root: `+filepath.Join(root, "odin-core")+`
     default_branch: main
     policy:
-      allowed_commands: [status]
+      allowed_commands:
+        - status
       branch_rules:
         protected_branches: [main]
         require_worktree: true
@@ -544,32 +566,31 @@ projects:
         allow_clean: false
         allow_force_push: false
         require_explicit_approval: true
-`)
-	if err := os.WriteFile(filepath.Join(root, "config", "projects.yaml"), projectsYAML, 0o644); err != nil {
-		t.Fatalf("WriteFile(projects.yaml) error = %v", err)
+`), 0o644); err != nil {
+			t.Fatalf("write projects config: %v", err)
+		}
 	}
-
-	registryLink := filepath.Join(root, "registry")
-	_ = os.RemoveAll(registryLink)
-	if err := os.Symlink(filepath.Join(sourceRoot, "registry"), registryLink); err != nil {
-		t.Fatalf("Symlink(registry) error = %v", err)
+	if err := os.WriteFile(filepath.Join(root, "config", "executors.yaml"), []byte(`
+version: 1
+executors:
+  - key: codex_headless
+    adapter: codex_headless
+    class: plan_backed_cli
+    enabled: true
+    priority: 10
+routes:
+  - name: default
+    match:
+      task_kinds: [general, plan, build, review, qa, research]
+      scopes: [global, odin-core, project, new-project]
+    preferred: [codex_headless]
+`), 0o644); err != nil {
+		t.Fatalf("write executors config: %v", err)
 	}
 
 	return root
 }
 
-func assertCountAtLeast(t *testing.T, row rowScanner, minimum int) {
-	t.Helper()
-
-	var count int
-	if err := row.Scan(&count); err != nil {
-		t.Fatalf("Scan() error = %v", err)
-	}
-	if count < minimum {
-		t.Fatalf("count = %d, want at least %d", count, minimum)
-	}
-}
-
-type rowScanner interface {
-	Scan(...any) error
+func bootstrapContextWithBootID(ctx context.Context, bootID string) context.Context {
+	return WithBootID(ctx, bootID)
 }

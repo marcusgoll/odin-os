@@ -2,137 +2,252 @@ package supervision
 
 import (
 	"context"
-	"errors"
+	"path/filepath"
 	"testing"
 	"time"
 
-	"odin-os/internal/core/capabilities"
+	"odin-os/internal/store/sqlite"
 )
 
-type transientFailure struct {
-	message string
-}
-
-func (failure transientFailure) Error() string {
-	return failure.message
-}
-
-func (failure transientFailure) Transient() bool {
-	return true
-}
-
-func TestSupervisorEnforcesTimeout(t *testing.T) {
+func TestSchedulerPromotesDueQueuedTask(t *testing.T) {
 	t.Parallel()
 
-	service := Service{MaxRetries: 0}
-	request := capabilities.InvokeRequest{
-		RequestID: "request-timeout",
-		Execution: capabilities.ExecutionRequest{
-			Timeout: "25ms",
-		},
+	ctx := context.Background()
+	store := openSupervisionStore(t)
+	defer store.Close()
+
+	now := time.Date(2026, 4, 17, 12, 0, 0, 0, time.UTC)
+	store.Now = func() time.Time { return now }
+
+	project := mustCreateSupervisionProject(t, ctx, store)
+	dueTask := mustCreateQueuedTaskAt(t, ctx, store, project.ID, "due-task", now.Add(-time.Minute))
+	notYetDueTask := mustCreateQueuedTaskAt(t, ctx, store, project.ID, "future-task", now.Add(2*time.Minute))
+
+	service := Service{
+		Store: store,
+		Now:   func() time.Time { return now },
 	}
 
-	attempts := 0
-	response, err := service.Run(context.Background(), request, func(ctx context.Context, attempt int) (capabilities.InvokeResponse, error) {
-		attempts++
-		if attempt != 1 {
-			t.Fatalf("attempt = %d, want 1", attempt)
-		}
-
-		select {
-		case <-ctx.Done():
-			if !errors.Is(ctx.Err(), context.DeadlineExceeded) {
-				t.Fatalf("ctx.Err() = %v, want deadline exceeded", ctx.Err())
-			}
-			return capabilities.InvokeResponse{}, ctx.Err()
-		case <-time.After(500 * time.Millisecond):
-			t.Fatal("attempt was not cancelled by the timeout")
-			return capabilities.InvokeResponse{}, nil
-		}
-	})
+	result, err := service.Tick(ctx)
 	if err != nil {
-		t.Fatalf("Run() error = %v", err)
+		t.Fatalf("Tick() error = %v", err)
 	}
-	if response.Status != "timeout" {
-		t.Fatalf("Run().Status = %q, want %q", response.Status, "timeout")
+	if result.Promoted != 1 {
+		t.Fatalf("Promoted = %d, want 1", result.Promoted)
 	}
-	if attempts != 1 {
-		t.Fatalf("attempts = %d, want 1", attempts)
+
+	updatedDue, err := store.GetTask(ctx, dueTask.ID)
+	if err != nil {
+		t.Fatalf("GetTask(due) error = %v", err)
+	}
+	if !updatedDue.NextEligibleAt.Equal(now.Add(-time.Minute)) {
+		t.Fatalf("due task next_eligible_at = %v, want %v", updatedDue.NextEligibleAt, now.Add(-time.Minute))
+	}
+
+	updatedFuture, err := store.GetTask(ctx, notYetDueTask.ID)
+	if err != nil {
+		t.Fatalf("GetTask(future) error = %v", err)
+	}
+	if !updatedFuture.NextEligibleAt.Equal(now.Add(2 * time.Minute)) {
+		t.Fatalf("future task next_eligible_at = %v, want %v", updatedFuture.NextEligibleAt, now.Add(2*time.Minute))
 	}
 }
 
-func TestSupervisorRetriesTransientFailure(t *testing.T) {
+func TestSchedulerLeavesNotYetDueTaskUntouched(t *testing.T) {
 	t.Parallel()
 
-	service := Service{MaxRetries: 0}
-	request := capabilities.InvokeRequest{
-		RequestID: "request-retry",
-		Execution: capabilities.ExecutionRequest{
-			Timeout:    "500ms",
-			RetryLimit: 2,
-		},
+	ctx := context.Background()
+	store := openSupervisionStore(t)
+	defer store.Close()
+
+	now := time.Date(2026, 4, 17, 12, 0, 0, 0, time.UTC)
+	store.Now = func() time.Time { return now }
+
+	project := mustCreateSupervisionProject(t, ctx, store)
+	task := mustCreateQueuedTaskAt(t, ctx, store, project.ID, "future-task", now.Add(3*time.Minute))
+
+	service := Service{
+		Store: store,
+		Now:   func() time.Time { return now },
 	}
 
-	attempts := 0
-	response, err := service.Run(context.Background(), request, func(ctx context.Context, attempt int) (capabilities.InvokeResponse, error) {
-		attempts++
-		if attempt != attempts {
-			t.Fatalf("attempt = %d, want %d", attempt, attempts)
-		}
-		switch attempts {
-		case 1, 2:
-			return capabilities.InvokeResponse{}, transientFailure{message: "transient executor failure"}
-		case 3:
-			return capabilities.InvokeResponse{Status: "completed"}, nil
-		default:
-			t.Fatalf("unexpected attempt count %d", attempts)
-			return capabilities.InvokeResponse{}, nil
-		}
-	})
+	result, err := service.Tick(ctx)
 	if err != nil {
-		t.Fatalf("Run() error = %v", err)
+		t.Fatalf("Tick() error = %v", err)
 	}
-	if response.Status != "completed" {
-		t.Fatalf("Run().Status = %q, want %q", response.Status, "completed")
+	if result.Promoted != 0 {
+		t.Fatalf("Promoted = %d, want 0", result.Promoted)
 	}
-	if attempts != 3 {
-		t.Fatalf("attempts = %d, want 3", attempts)
+
+	updated, err := store.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
+	}
+	if !updated.NextEligibleAt.Equal(now.Add(3 * time.Minute)) {
+		t.Fatalf("NextEligibleAt = %v, want %v", updated.NextEligibleAt, now.Add(3*time.Minute))
 	}
 }
 
-func TestSupervisorCancelsRun(t *testing.T) {
+func TestSchedulerDoesNotPromoteClaimedTask(t *testing.T) {
 	t.Parallel()
 
-	service := Service{MaxRetries: 0}
-	ctx, cancel := context.WithCancel(context.Background())
-	request := capabilities.InvokeRequest{
-		RequestID: "request-cancel",
-		Execution: capabilities.ExecutionRequest{
-			Timeout: "500ms",
-		},
-	}
+	ctx := context.Background()
+	store := openSupervisionStore(t)
+	defer store.Close()
 
-	started := make(chan struct{})
-	go func() {
-		<-started
-		cancel()
-	}()
+	now := time.Date(2026, 4, 17, 12, 0, 0, 0, time.UTC)
+	store.Now = func() time.Time { return now }
 
-	response, err := service.Run(ctx, request, func(ctx context.Context, attempt int) (capabilities.InvokeResponse, error) {
-		if attempt != 1 {
-			t.Fatalf("attempt = %d, want 1", attempt)
-		}
-		close(started)
-		<-ctx.Done()
-		if !errors.Is(ctx.Err(), context.Canceled) {
-			t.Fatalf("ctx.Err() = %v, want canceled", ctx.Err())
-		}
-		return capabilities.InvokeResponse{}, ctx.Err()
+	project := mustCreateSupervisionProject(t, ctx, store)
+	task := mustCreateQueuedTaskAt(t, ctx, store, project.ID, "running-task", now.Add(-time.Minute))
+
+	run, err := store.StartRun(ctx, sqlite.StartRunParams{
+		TaskID:   task.ID,
+		Executor: "codex_headless",
+		Attempt:  1,
+		Status:   "running",
 	})
 	if err != nil {
-		t.Fatalf("Run() error = %v", err)
+		t.Fatalf("StartRun() error = %v", err)
 	}
-	if response.Status != "cancelled" {
-		t.Fatalf("Run().Status = %q, want %q", response.Status, "cancelled")
+	if _, err := store.UpdateTaskStatus(ctx, sqlite.UpdateTaskStatusParams{
+		TaskID: task.ID,
+		Status: "running",
+	}); err != nil {
+		t.Fatalf("UpdateTaskStatus(running) error = %v", err)
 	}
+
+	service := Service{
+		Store: store,
+		Now:   func() time.Time { return now },
+	}
+
+	result, err := service.Tick(ctx)
+	if err != nil {
+		t.Fatalf("Tick() error = %v", err)
+	}
+	if result.Promoted != 0 {
+		t.Fatalf("Promoted = %d, want 0", result.Promoted)
+	}
+
+	updatedTask, err := store.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
+	}
+	if updatedTask.Status != "running" {
+		t.Fatalf("Task.Status = %q, want running", updatedTask.Status)
+	}
+	if updatedTask.CurrentRunID == nil || *updatedTask.CurrentRunID != run.ID {
+		t.Fatalf("Task.CurrentRunID = %v, want %d", updatedTask.CurrentRunID, run.ID)
+	}
+	if !updatedTask.NextEligibleAt.Equal(now.Add(-time.Minute)) {
+		t.Fatalf("Task.NextEligibleAt = %v, want %v", updatedTask.NextEligibleAt, now.Add(-time.Minute))
+	}
+}
+
+func TestSchedulerPreservesDueOrderForMultipleDelayedTasks(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openSupervisionStore(t)
+	defer store.Close()
+
+	now := time.Date(2026, 4, 17, 12, 0, 0, 0, time.UTC)
+	store.Now = func() time.Time { return now }
+
+	project := mustCreateSupervisionProject(t, ctx, store)
+	laterDue := mustCreateQueuedTaskAt(t, ctx, store, project.ID, "later-due", now.Add(-time.Minute))
+	earlierDue := mustCreateQueuedTaskAt(t, ctx, store, project.ID, "earlier-due", now.Add(-2*time.Minute))
+
+	beforeTick, err := store.ListEligibleQueuedTasks(ctx, now)
+	if err != nil {
+		t.Fatalf("ListEligibleQueuedTasks(before) error = %v", err)
+	}
+	if len(beforeTick) != 2 {
+		t.Fatalf("eligible before tick = %d, want 2", len(beforeTick))
+	}
+	if beforeTick[0].ID != earlierDue.ID || beforeTick[1].ID != laterDue.ID {
+		t.Fatalf("before tick order = [%d %d], want [%d %d]", beforeTick[0].ID, beforeTick[1].ID, earlierDue.ID, laterDue.ID)
+	}
+
+	service := Service{
+		Store: store,
+		Now:   func() time.Time { return now },
+	}
+
+	result, err := service.Tick(ctx)
+	if err != nil {
+		t.Fatalf("Tick() error = %v", err)
+	}
+	if result.Promoted != 2 {
+		t.Fatalf("Promoted = %d, want 2", result.Promoted)
+	}
+
+	afterTick, err := store.ListEligibleQueuedTasks(ctx, now)
+	if err != nil {
+		t.Fatalf("ListEligibleQueuedTasks(after) error = %v", err)
+	}
+	if len(afterTick) != 2 {
+		t.Fatalf("eligible after tick = %d, want 2", len(afterTick))
+	}
+	if afterTick[0].ID != earlierDue.ID || afterTick[1].ID != laterDue.ID {
+		t.Fatalf("after tick order = [%d %d], want [%d %d]", afterTick[0].ID, afterTick[1].ID, earlierDue.ID, laterDue.ID)
+	}
+}
+
+func openSupervisionStore(t *testing.T) *sqlite.Store {
+	t.Helper()
+
+	store, err := sqlite.Open(filepath.Join(t.TempDir(), "odin.db"))
+	if err != nil {
+		t.Fatalf("sqlite.Open() error = %v", err)
+	}
+	if err := store.Migrate(context.Background()); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
+	}
+	return store
+}
+
+func mustCreateSupervisionProject(t *testing.T, ctx context.Context, store *sqlite.Store) sqlite.Project {
+	t.Helper()
+
+	project, err := store.CreateProject(ctx, sqlite.CreateProjectParams{
+		Key:           "alpha",
+		Name:          "Alpha",
+		Scope:         "project",
+		GitRoot:       "/tmp/alpha",
+		DefaultBranch: "main",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+	return project
+}
+
+func mustCreateQueuedTaskAt(t *testing.T, ctx context.Context, store *sqlite.Store, projectID int64, key string, nextEligibleAt time.Time) sqlite.Task {
+	t.Helper()
+
+	task, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:   projectID,
+		Key:         key,
+		Title:       key,
+		Status:      "queued",
+		Scope:       "project",
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+	if _, err := store.RequeueTaskAt(ctx, sqlite.RequeueTaskAtParams{
+		TaskID:         task.ID,
+		NextEligibleAt: nextEligibleAt,
+	}); err != nil {
+		t.Fatalf("RequeueTaskAt() error = %v", err)
+	}
+	updated, err := store.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
+	}
+	return updated
 }

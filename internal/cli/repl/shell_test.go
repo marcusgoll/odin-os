@@ -86,7 +86,7 @@ func TestAskModeHandlesFreeTextWithoutCreatingTask(t *testing.T) {
 		t.Fatalf("HandleLine() output = %q, want scope answer", output.String())
 	}
 
-	views, err := shell.jobs.List(context.Background(), shell.controlScope())
+	views, err := shell.jobs.List(context.Background(), shell.state.Scope)
 	if err != nil {
 		t.Fatalf("jobs.List() error = %v", err)
 	}
@@ -175,7 +175,7 @@ func TestActModeCreatesTaskInProjectScope(t *testing.T) {
 		t.Fatalf("HandleLine(act input) error = %v", err)
 	}
 
-	views, err := shell.jobs.List(context.Background(), shell.controlScope())
+	views, err := shell.jobs.List(context.Background(), shell.state.Scope)
 	if err != nil {
 		t.Fatalf("jobs.List() error = %v", err)
 	}
@@ -250,6 +250,75 @@ func TestDoctorCommandSupportsJSONOutput(t *testing.T) {
 	t.Parallel()
 
 	env := newTestEnvironment(t)
+	seedHealthyDoctorState(t, env)
+
+	shell, err := New(env)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	var output bytes.Buffer
+	if err := shell.HandleLine(context.Background(), "/doctor json", &output); err != nil {
+		t.Fatalf("HandleLine(/doctor json) error = %v", err)
+	}
+
+	var decoded map[string]any
+	if err := json.Unmarshal(output.Bytes(), &decoded); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	if decoded["status"] == nil {
+		t.Fatalf("decoded status missing: %#v", decoded)
+	}
+}
+
+func TestShellDoctorReportWritesMarkdownSummary(t *testing.T) {
+	t.Parallel()
+
+	env := newTestEnvironment(t)
+	seedHealthyDoctorState(t, env)
+
+	shell, err := New(env)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	var output bytes.Buffer
+	if err := shell.HandleLine(context.Background(), "/doctor report", &output); err != nil {
+		t.Fatalf("HandleLine(/doctor report) error = %v", err)
+	}
+
+	if !strings.Contains(output.String(), "## Current Health Snapshot") {
+		t.Fatalf("output = %q, want markdown doctor report", output.String())
+	}
+}
+
+func TestShellDoctorRejectsUnknownMode(t *testing.T) {
+	t.Parallel()
+
+	env := newTestEnvironment(t)
+	seedHealthyDoctorState(t, env)
+
+	shell, err := New(env)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	var output bytes.Buffer
+	if err := shell.HandleLine(context.Background(), "/doctor reporrt", &output); err != nil {
+		t.Fatalf("HandleLine(/doctor reporrt) error = %v", err)
+	}
+
+	if !strings.Contains(output.String(), `unsupported /doctor mode "reporrt"; expected json or report`) {
+		t.Fatalf("output = %q, want unsupported doctor mode message", output.String())
+	}
+	if strings.Contains(output.String(), "status=") {
+		t.Fatalf("output = %q, should not fall back to the compact doctor summary", output.String())
+	}
+}
+
+func seedHealthyDoctorState(t *testing.T, env Environment) {
+	t.Helper()
+
 	if _, err := env.Store.RecordExecutorHealth(context.Background(), sqlite.RecordExecutorHealthParams{
 		Executor:    "codex",
 		Status:      "healthy",
@@ -272,24 +341,6 @@ func TestDoctorCommandSupportsJSONOutput(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("RecordProjectionFreshness() error = %v", err)
 	}
-
-	shell, err := New(env)
-	if err != nil {
-		t.Fatalf("New() error = %v", err)
-	}
-
-	var output bytes.Buffer
-	if err := shell.HandleLine(context.Background(), "/doctor json", &output); err != nil {
-		t.Fatalf("HandleLine(/doctor json) error = %v", err)
-	}
-
-	var decoded map[string]any
-	if err := json.Unmarshal(output.Bytes(), &decoded); err != nil {
-		t.Fatalf("Unmarshal() error = %v", err)
-	}
-	if decoded["status"] == nil {
-		t.Fatalf("decoded status missing: %#v", decoded)
-	}
 }
 
 func TestShellHelpIncludesTransitionCommands(t *testing.T) {
@@ -306,7 +357,7 @@ func TestShellHelpIncludesTransitionCommands(t *testing.T) {
 		t.Fatalf("HandleLine(/help) error = %v", err)
 	}
 
-	for _, want := range []string{"/workspace", "/initiatives", "/companions", "/transition", "/observe", "/compare"} {
+	for _, want := range []string{"/workspace", "/initiatives", "/companions", "/transition", "/observe", "/compare", "/doctor json", "/doctor report"} {
 		if !strings.Contains(output.String(), want) {
 			t.Fatalf("help output = %q, want %q", output.String(), want)
 		}
@@ -416,9 +467,7 @@ func TestAgendaCommandRendersDueWorkBlockedWorkAndApprovals(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 4, 17, 9, 0, 0, 0, time.UTC)
 	env := newTestEnvironment(t)
-	env.Now = func() time.Time {
-		return now
-	}
+	env.Now = func() time.Time { return now }
 	project, err := env.Store.CreateProject(ctx, sqlite.CreateProjectParams{
 		Key:           "alpha",
 		Name:          "Alpha",
@@ -538,6 +587,111 @@ func TestAgendaCommandRendersDueWorkBlockedWorkAndApprovals(t *testing.T) {
 	}
 }
 
+func TestMemoryCommandRendersWorkspaceMemoryStatus(t *testing.T) {
+	t.Parallel()
+
+	env := newTestEnvironment(t)
+	seedShellMemoryFixture(t, env)
+
+	shell, err := New(env)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	var output bytes.Buffer
+	if err := shell.HandleLine(context.Background(), "/memory", &output); err != nil {
+		t.Fatalf("HandleLine(/memory) error = %v", err)
+	}
+
+	for _, want := range []string{"workspace=default", "workspace_entries=1", "initiative_entries=2", "companion_entries=1"} {
+		if !strings.Contains(output.String(), want) {
+			t.Fatalf("output = %q, want substring %q", output.String(), want)
+		}
+	}
+}
+
+func TestInitiativeMemoryCommandHonorsProjectScope(t *testing.T) {
+	t.Parallel()
+
+	env := newTestEnvironment(t)
+	seedShellMemoryFixture(t, env)
+
+	shell, err := New(env)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	var output bytes.Buffer
+	if err := shell.HandleLine(context.Background(), "/project alpha", &output); err != nil {
+		t.Fatalf("HandleLine(/project alpha) error = %v", err)
+	}
+	output.Reset()
+	if err := shell.HandleLine(context.Background(), "/memory initiatives", &output); err != nil {
+		t.Fatalf("HandleLine(/memory initiatives) error = %v", err)
+	}
+
+	if !strings.Contains(output.String(), "alpha entries=1") {
+		t.Fatalf("output = %q, want alpha initiative memory", output.String())
+	}
+	if strings.Contains(output.String(), "beta") {
+		t.Fatalf("output = %q, want project-scoped initiative filtering", output.String())
+	}
+}
+
+func TestCompanionMemoryCommandListsCompanionMemory(t *testing.T) {
+	t.Parallel()
+
+	env := newTestEnvironment(t)
+	seedShellMemoryFixture(t, env)
+
+	shell, err := New(env)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	var output bytes.Buffer
+	if err := shell.HandleLine(context.Background(), "/memory companions", &output); err != nil {
+		t.Fatalf("HandleLine(/memory companions) error = %v", err)
+	}
+
+	for _, want := range []string{"primary entries=1", "Primary companion memory"} {
+		if !strings.Contains(output.String(), want) {
+			t.Fatalf("output = %q, want substring %q", output.String(), want)
+		}
+	}
+}
+
+func TestAskModeRendersWorkspaceMemoryWithoutCreatingTask(t *testing.T) {
+	t.Parallel()
+
+	env := newTestEnvironment(t)
+	seedShellMemoryFixture(t, env)
+
+	shell, err := New(env)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	var output bytes.Buffer
+	if err := shell.HandleLine(context.Background(), "show workspace memory", &output); err != nil {
+		t.Fatalf("HandleLine(memory question) error = %v", err)
+	}
+
+	if !strings.Contains(output.String(), "workspace=default") {
+		t.Fatalf("output = %q, want workspace memory answer", output.String())
+	}
+	if !strings.Contains(output.String(), "workspace_entries=1") {
+		t.Fatalf("output = %q, want workspace memory counts", output.String())
+	}
+
+	views, err := shell.jobs.List(context.Background(), shell.state.Scope)
+	if err != nil {
+		t.Fatalf("jobs.List() error = %v", err)
+	}
+	if len(views) != 0 {
+		t.Fatalf("jobs len = %d, want 0", len(views))
+	}
+}
 func TestShellTransitionStatusShowsDefaultInventoryAuthority(t *testing.T) {
 	t.Parallel()
 
@@ -826,5 +980,113 @@ func createShellFollowUpObligation(t *testing.T, ctx context.Context, store *sql
 		PolicyJSON:      `{}`,
 	}); err != nil {
 		t.Fatalf("CreateFollowUpObligation(%s) error = %v", title, err)
+	}
+}
+
+func seedShellMemoryFixture(t *testing.T, env Environment) {
+	t.Helper()
+
+	ctx := context.Background()
+	workspace, err := workspaces.Service{Store: env.Store}.BootstrapDefaultWorkspace(ctx)
+	if err != nil {
+		t.Fatalf("BootstrapDefaultWorkspace() error = %v", err)
+	}
+	companion, err := env.Store.GetCompanionByKey(ctx, workspace.ID, workspace.DefaultCompanionKey)
+	if err != nil {
+		t.Fatalf("GetCompanionByKey(default) error = %v", err)
+	}
+
+	alphaProject, err := env.Store.CreateProject(ctx, sqlite.CreateProjectParams{
+		Key:           "alpha",
+		Name:          "Alpha",
+		Scope:         "project",
+		GitRoot:       "/tmp/alpha",
+		DefaultBranch: "main",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject(alpha) error = %v", err)
+	}
+	betaProject, err := env.Store.CreateProject(ctx, sqlite.CreateProjectParams{
+		Key:           "beta",
+		Name:          "Beta",
+		Scope:         "project",
+		GitRoot:       "/tmp/beta",
+		DefaultBranch: "main",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject(beta) error = %v", err)
+	}
+
+	alphaInitiative, err := env.Store.UpsertInitiative(ctx, sqlite.UpsertInitiativeParams{
+		WorkspaceID:      workspace.ID,
+		Key:              alphaProject.Key,
+		Title:            alphaProject.Name,
+		Kind:             string(initiatives.KindManagedProject),
+		Status:           "active",
+		Summary:          "Alpha initiative",
+		OwnerCompanionID: &companion.ID,
+		LinkedProjectID:  &alphaProject.ID,
+	})
+	if err != nil {
+		t.Fatalf("UpsertInitiative(alpha) error = %v", err)
+	}
+	betaInitiative, err := env.Store.UpsertInitiative(ctx, sqlite.UpsertInitiativeParams{
+		WorkspaceID:      workspace.ID,
+		Key:              betaProject.Key,
+		Title:            betaProject.Name,
+		Kind:             string(initiatives.KindManagedProject),
+		Status:           "active",
+		Summary:          "Beta initiative",
+		OwnerCompanionID: &companion.ID,
+		LinkedProjectID:  &betaProject.ID,
+	})
+	if err != nil {
+		t.Fatalf("UpsertInitiative(beta) error = %v", err)
+	}
+
+	if _, err := env.Store.CreateMemoryEntry(ctx, sqlite.CreateMemoryEntryParams{
+		WorkspaceID:     workspace.ID,
+		EntryType:       "note",
+		VisibilityScope: "workspace",
+		RetentionClass:  "durable",
+		Summary:         "Workspace memory summary",
+		Content:         "Workspace memory content",
+	}); err != nil {
+		t.Fatalf("CreateMemoryEntry(workspace) error = %v", err)
+	}
+	if _, err := env.Store.CreateMemoryEntry(ctx, sqlite.CreateMemoryEntryParams{
+		WorkspaceID:     workspace.ID,
+		InitiativeID:    &alphaInitiative.ID,
+		EntryType:       "summary",
+		VisibilityScope: "initiative",
+		RetentionClass:  "durable",
+		Summary:         "Alpha memory summary",
+		Content:         "Alpha initiative memory content",
+	}); err != nil {
+		t.Fatalf("CreateMemoryEntry(alpha initiative) error = %v", err)
+	}
+	if _, err := env.Store.CreateMemoryEntry(ctx, sqlite.CreateMemoryEntryParams{
+		WorkspaceID:     workspace.ID,
+		InitiativeID:    &betaInitiative.ID,
+		EntryType:       "summary",
+		VisibilityScope: "initiative",
+		RetentionClass:  "durable",
+		Summary:         "Beta memory summary",
+		Content:         "Beta initiative memory content",
+	}); err != nil {
+		t.Fatalf("CreateMemoryEntry(beta initiative) error = %v", err)
+	}
+	if _, err := env.Store.CreateMemoryEntry(ctx, sqlite.CreateMemoryEntryParams{
+		WorkspaceID:     workspace.ID,
+		CompanionID:     &companion.ID,
+		EntryType:       "note",
+		VisibilityScope: "companion",
+		RetentionClass:  "working",
+		Summary:         "Primary companion memory",
+		Content:         "Primary companion memory content",
+	}); err != nil {
+		t.Fatalf("CreateMemoryEntry(companion) error = %v", err)
 	}
 }

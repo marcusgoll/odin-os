@@ -38,13 +38,17 @@ func NewOperationalHandler(deps Dependencies) http.Handler {
 		writeJSON(writer, http.StatusOK, report)
 	})
 	mux.HandleFunc("/readyz", func(writer http.ResponseWriter, request *http.Request) {
-		report, err := deps.Health.Doctor(request.Context(), deps.RegistryHealthy)
+		report, ready, err := deps.Health.Readiness(request.Context(), deps.RegistryHealthy)
 		if err != nil {
 			http.Error(writer, err.Error(), http.StatusServiceUnavailable)
 			return
 		}
 
-		writeJSON(writer, readyStatusCode(report.Status), report)
+		statusCode := http.StatusOK
+		if !ready {
+			statusCode = http.StatusServiceUnavailable
+		}
+		writeJSON(writer, statusCode, report)
 	})
 	mux.HandleFunc("/metrics", func(writer http.ResponseWriter, request *http.Request) {
 		snapshot, err := deps.Metrics.Collect(request.Context())
@@ -97,6 +101,41 @@ func NewOperationalHandler(deps Dependencies) http.Handler {
 		}
 		writeJSON(writer, http.StatusOK, views)
 	})
+	mux.HandleFunc("/memoryz", func(writer http.ResponseWriter, request *http.Request) {
+		if deps.ReadModels == nil {
+			http.Error(writer, "read models unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		workspaceViews, err := projections.ListWorkspaceMemoryViews(request.Context(), deps.ReadModels, projections.WorkspaceMemoryQuery{
+			WorkspaceKey: workspaces.DefaultWorkspaceKey,
+			Limit:        1,
+		})
+		if err != nil {
+			http.Error(writer, err.Error(), http.StatusServiceUnavailable)
+			return
+		}
+		initiativeViews, err := projections.ListInitiativeMemoryViews(request.Context(), deps.ReadModels, projections.InitiativeMemoryQuery{
+			WorkspaceKey: workspaces.DefaultWorkspaceKey,
+			Limit:        50,
+		})
+		if err != nil {
+			http.Error(writer, err.Error(), http.StatusServiceUnavailable)
+			return
+		}
+		companionViews, err := projections.ListCompanionMemoryViews(request.Context(), deps.ReadModels, projections.CompanionMemoryQuery{
+			WorkspaceKey: workspaces.DefaultWorkspaceKey,
+			Limit:        50,
+		})
+		if err != nil {
+			http.Error(writer, err.Error(), http.StatusServiceUnavailable)
+			return
+		}
+		writeJSON(writer, http.StatusOK, map[string]any{
+			"workspace":   workspaceViews,
+			"initiatives": initiativeViews,
+			"companions":  companionViews,
+		})
+	})
 	mux.HandleFunc("/blocked", func(writer http.ResponseWriter, request *http.Request) {
 		if deps.ReadModels == nil {
 			http.Error(writer, "read models unavailable", http.StatusServiceUnavailable)
@@ -126,13 +165,6 @@ func NewOperationalHandler(deps Dependencies) http.Handler {
 		writeJSON(writer, http.StatusOK, view)
 	})
 	return mux
-}
-
-func readyStatusCode(status healthsvc.Status) int {
-	if status == healthsvc.StatusHealthy {
-		return http.StatusOK
-	}
-	return http.StatusServiceUnavailable
 }
 
 func writeJSON(writer http.ResponseWriter, statusCode int, payload any) {

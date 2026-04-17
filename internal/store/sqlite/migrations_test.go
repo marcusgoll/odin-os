@@ -226,11 +226,11 @@ func TestProfileMigrationCreatesWorkspaceProfileTable(t *testing.T) {
 	}
 
 	var migrationCount int
-	if err := store.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM schema_migrations WHERE version = 17`).Scan(&migrationCount); err != nil {
+	if err := store.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM schema_migrations WHERE version = 19`).Scan(&migrationCount); err != nil {
 		t.Fatalf("schema_migrations query error = %v", err)
 	}
 	if migrationCount != 1 {
-		t.Fatalf("schema_migrations version 17 count = %d, want 1", migrationCount)
+		t.Fatalf("schema_migrations version 19 count = %d, want 1", migrationCount)
 	}
 }
 
@@ -267,11 +267,11 @@ func TestFollowUpMigrationCreatesObligationTableAndTaskProvenance(t *testing.T) 
 	}
 
 	var migrationCount int
-	if err := store.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM schema_migrations WHERE version = 18`).Scan(&migrationCount); err != nil {
+	if err := store.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM schema_migrations WHERE version = 20`).Scan(&migrationCount); err != nil {
 		t.Fatalf("schema_migrations query error = %v", err)
 	}
 	if migrationCount != 1 {
-		t.Fatalf("schema_migrations version 18 count = %d, want 1", migrationCount)
+		t.Fatalf("schema_migrations version 20 count = %d, want 1", migrationCount)
 	}
 }
 
@@ -298,11 +298,11 @@ func TestFollowUpTargetProjectMigrationCreatesTargetProjectColumn(t *testing.T) 
 	}
 
 	var migrationCount int
-	if err := store.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM schema_migrations WHERE version = 19`).Scan(&migrationCount); err != nil {
+	if err := store.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM schema_migrations WHERE version = 21`).Scan(&migrationCount); err != nil {
 		t.Fatalf("schema_migrations query error = %v", err)
 	}
 	if migrationCount != 1 {
-		t.Fatalf("schema_migrations version 19 count = %d, want 1", migrationCount)
+		t.Fatalf("schema_migrations version 21 count = %d, want 1", migrationCount)
 	}
 }
 
@@ -313,7 +313,7 @@ func TestCreateTaskFailsClosedWhenFollowUpColumnsAreMissing(t *testing.T) {
 	store := openMigrationBackfillStore(t)
 	defer store.Close()
 
-	for version := 1; version <= 17; version++ {
+	for version := 1; version <= 19; version++ {
 		migration, err := loadMigrationByVersion(version)
 		if err != nil {
 			t.Fatalf("loadMigrationByVersion(%d) error = %v", version, err)

@@ -8,6 +8,7 @@ import (
 type StreamType string
 
 const (
+	StreamService            StreamType = "service"
 	StreamProject            StreamType = "project"
 	StreamTask               StreamType = "task"
 	StreamRun                StreamType = "run"
@@ -30,10 +31,14 @@ const (
 type Type string
 
 const (
+	EventServiceLifecycleChanged          Type = "service.lifecycle_changed"
+	EventServiceHeartbeatRecorded         Type = "service.heartbeat_recorded"
 	EventProjectCreated                   Type = "project.created"
 	EventTaskCreated                      Type = "task.created"
 	EventTaskStatusChanged                Type = "task.status_changed"
+	EventTaskQueueStateChanged            Type = "task.queue_state_changed"
 	EventRunStarted                       Type = "run.started"
+	EventRunStatusChanged                 Type = "run.status_changed"
 	EventRunFinished                      Type = "run.finished"
 	EventApprovalRequested                Type = "approval.requested"
 	EventApprovalResolved                 Type = "approval.resolved"
@@ -87,6 +92,19 @@ type Record struct {
 	OccurredAt time.Time
 }
 
+type ServiceLifecyclePayload struct {
+	BootID string `json:"boot_id"`
+	Status string `json:"status"`
+	Reason string `json:"reason,omitempty"`
+	PID    int    `json:"pid"`
+}
+
+type ServiceHeartbeatPayload struct {
+	BootID string `json:"boot_id"`
+	Status string `json:"status"`
+	PID    int    `json:"pid"`
+}
+
 type ProjectCreatedPayload struct {
 	Key           string `json:"key"`
 	Name          string `json:"name"`
@@ -98,12 +116,18 @@ type ProjectCreatedPayload struct {
 }
 
 type TaskCreatedPayload struct {
-	Key         string `json:"key"`
-	Title       string `json:"title"`
-	ActionKey   string `json:"action_key,omitempty"`
-	Status      string `json:"status"`
-	Scope       string `json:"scope"`
-	RequestedBy string `json:"requested_by"`
+	Key            string `json:"key"`
+	Title          string `json:"title"`
+	ActionKey      string `json:"action_key,omitempty"`
+	Status         string `json:"status"`
+	Scope          string `json:"scope"`
+	RequestedBy    string `json:"requested_by"`
+	NextEligibleAt string `json:"next_eligible_at,omitempty"`
+	Priority       int    `json:"priority,omitempty"`
+	RetryCount     int    `json:"retry_count,omitempty"`
+	MaxAttempts    int    `json:"max_attempts,omitempty"`
+	LastError      string `json:"last_error,omitempty"`
+	BlockedReason  string `json:"blocked_reason,omitempty"`
 }
 
 type TaskStatusChangedPayload struct {
@@ -112,6 +136,17 @@ type TaskStatusChangedPayload struct {
 	Summary        string `json:"summary,omitempty"`
 	TerminalReason string `json:"terminal_reason,omitempty"`
 	ArtifactsJSON  string `json:"artifacts_json,omitempty"`
+}
+
+type TaskQueueStateChangedPayload struct {
+	PreviousStatus string `json:"previous_status"`
+	Status         string `json:"status"`
+	NextEligibleAt string `json:"next_eligible_at"`
+	Priority       int    `json:"priority"`
+	RetryCount     int    `json:"retry_count"`
+	MaxAttempts    int    `json:"max_attempts"`
+	LastError      string `json:"last_error,omitempty"`
+	BlockedReason  string `json:"blocked_reason,omitempty"`
 }
 
 type FollowUpMaterializedPayload struct {
@@ -133,6 +168,11 @@ type RunStartedPayload struct {
 	Executor string `json:"executor"`
 	Attempt  int    `json:"attempt"`
 	Status   string `json:"status"`
+}
+
+type RunStatusChangedPayload struct {
+	PreviousStatus string `json:"previous_status"`
+	Status         string `json:"status"`
 }
 
 type RunFinishedPayload struct {

@@ -35,7 +35,7 @@ The phase preserves deterministic behavior where possible and emits events, proj
 Any self-heal or self-improvement behavior introduced by the phase is policy-bounded, auditable, replay-tested when applicable, and reversible.
 
 8. Tests and verification exist.
-The phase adds or updates the tests, replay coverage, or verification commands needed to prove its behavior.
+The phase adds or updates the tests, replay coverage, or verification commands needed to prove its behavior. Proof expectations follow `docs/contracts/verification-model.md`.
 
 9. Documentation and migration notes exist.
 The phase updates docs for new contracts and records migration notes when it replaces or removes legacy concepts.
@@ -63,6 +63,7 @@ Before a later phase is closed, it should be able to answer these questions dire
 - Which packages own the implementation?
 - How is scope identified and surfaced?
 - How is the behavior tested and observed?
+- Which real `odin` command checks prove the user-visible behavior when applicable?
 - What legacy concept was replaced, and where was that migration recorded?
 
 If a phase cannot answer those questions cleanly, it is not ready to exit.
