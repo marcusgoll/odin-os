@@ -49,10 +49,11 @@ func (service Service) Compact(ctx context.Context, params CompactParams) (Compa
 		return CompactionResult{}, fmt.Errorf("checkpoint store is required")
 	}
 
-	task, err := service.Store.GetTask(ctx, params.TaskID)
+	workItem, err := service.Store.GetWorkItem(ctx, params.TaskID)
 	if err != nil {
 		return CompactionResult{}, err
 	}
+	task := workItem.Task
 	project, err := service.Store.GetProject(ctx, task.ProjectID)
 	if err != nil {
 		return CompactionResult{}, err
@@ -148,6 +149,10 @@ func (service Service) Compact(ctx context.Context, params CompactParams) (Compa
 		TaskID:                 task.ID,
 		TaskKey:                task.Key,
 		Scope:                  task.Scope,
+		WorkspaceKey:           workItem.WorkspaceKey,
+		InitiativeKey:          workItem.InitiativeKey,
+		CompanionKey:           workItem.CompanionKey,
+		ProjectKey:             workItem.ProjectKey,
 		Objective:              stringOrFallback(params.Objective, task.Title),
 		Status:                 stringOrFallback(params.TaskStatus, task.Status),
 		Trigger:                params.Trigger,
@@ -213,6 +218,10 @@ func (service Service) LoadResumeState(ctx context.Context, projectID int64, tas
 		TaskID:          wake.TaskID,
 		TaskKey:         wake.TaskKey,
 		Scope:           wake.Scope,
+		WorkspaceKey:    wake.WorkspaceKey,
+		InitiativeKey:   wake.InitiativeKey,
+		CompanionKey:    wake.CompanionKey,
+		ProjectKey:      wake.ProjectKey,
 		Objective:       wake.Objective,
 		Status:          wake.Status,
 		Trigger:         wake.Trigger,

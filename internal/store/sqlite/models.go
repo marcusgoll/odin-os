@@ -313,6 +313,40 @@ type RecordExecutorHealthParams struct {
 	DetailsJSON string
 }
 
+type MemoryEntry struct {
+	ID              int64
+	ScopeType       string
+	ScopeKey        string
+	SourceScope     string
+	VisibilityScope string
+	RetentionIntent string
+	EntryKind       string
+	Summary         string
+	Content         string
+	SourceRunID     *int64
+	SourceRef       string
+	CreatedAt       time.Time
+}
+
+type CreateMemoryEntryParams struct {
+	ScopeType       string
+	ScopeKey        string
+	SourceScope     string
+	VisibilityScope string
+	RetentionIntent string
+	EntryKind       string
+	Summary         string
+	Content         string
+	SourceRunID     *int64
+	SourceRef       string
+}
+
+type ListMemoryEntriesParams struct {
+	ScopeType string
+	ScopeKey  string
+	Limit     int
+}
+
 type ContextPacket struct {
 	ID                 int64
 	TaskID             *int64

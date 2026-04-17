@@ -53,6 +53,10 @@ type TaskWakePacket struct {
 	TaskID                 int64      `json:"task_id"`
 	TaskKey                string     `json:"task_key"`
 	Scope                  string     `json:"scope"`
+	WorkspaceKey           string     `json:"workspace_key,omitempty"`
+	InitiativeKey          string     `json:"initiative_key,omitempty"`
+	CompanionKey           string     `json:"companion_key,omitempty"`
+	ProjectKey             string     `json:"project_key,omitempty"`
 	Objective              string     `json:"objective"`
 	Status                 string     `json:"status"`
 	Trigger                Trigger    `json:"trigger"`
@@ -83,6 +87,10 @@ type ResumeState struct {
 	TaskID          int64
 	TaskKey         string
 	Scope           string
+	WorkspaceKey    string
+	InitiativeKey   string
+	CompanionKey    string
+	ProjectKey      string
 	Objective       string
 	Status          string
 	Trigger         Trigger

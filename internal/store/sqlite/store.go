@@ -1267,6 +1267,138 @@ func (store *Store) RecordExecutorHealth(ctx context.Context, params RecordExecu
 	return health, err
 }
 
+func (store *Store) CreateMemoryEntry(ctx context.Context, params CreateMemoryEntryParams) (MemoryEntry, error) {
+	now := store.now()
+	var entry MemoryEntry
+
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		if params.ScopeType == "" {
+			return fmt.Errorf("memory scope type is required")
+		}
+		if params.ScopeKey == "" {
+			return fmt.Errorf("memory scope key is required")
+		}
+		if params.SourceScope == "" {
+			return fmt.Errorf("memory source scope is required")
+		}
+		if params.VisibilityScope == "" {
+			return fmt.Errorf("memory visibility scope is required")
+		}
+		if params.RetentionIntent == "" {
+			return fmt.Errorf("memory retention intent is required")
+		}
+		if params.Summary == "" {
+			return fmt.Errorf("memory summary is required")
+		}
+
+		if params.SourceRunID != nil {
+			if _, err := store.getRunTx(ctx, tx, *params.SourceRunID); err != nil {
+				return err
+			}
+		}
+
+		entryKind := params.EntryKind
+		if entryKind == "" {
+			entryKind = "note"
+		}
+
+		result, err := tx.ExecContext(ctx, `
+			INSERT INTO memory_entries (
+				scope_type,
+				scope_key,
+				source_scope,
+				visibility_scope,
+				retention_intent,
+				entry_kind,
+				summary,
+				content,
+				source_run_id,
+				source_ref,
+				created_at
+			)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`,
+			params.ScopeType,
+			params.ScopeKey,
+			params.SourceScope,
+			params.VisibilityScope,
+			params.RetentionIntent,
+			entryKind,
+			params.Summary,
+			params.Content,
+			nullInt64(params.SourceRunID),
+			params.SourceRef,
+			formatTime(now),
+		)
+		if err != nil {
+			return err
+		}
+
+		entryID, err := result.LastInsertId()
+		if err != nil {
+			return err
+		}
+
+		entry = MemoryEntry{
+			ID:              entryID,
+			ScopeType:       params.ScopeType,
+			ScopeKey:        params.ScopeKey,
+			SourceScope:     params.SourceScope,
+			VisibilityScope: params.VisibilityScope,
+			RetentionIntent: params.RetentionIntent,
+			EntryKind:       entryKind,
+			Summary:         params.Summary,
+			Content:         params.Content,
+			SourceRunID:     params.SourceRunID,
+			SourceRef:       params.SourceRef,
+			CreatedAt:       now,
+		}
+
+		return nil
+	})
+
+	return entry, err
+}
+
+func (store *Store) ListMemoryEntries(ctx context.Context, params ListMemoryEntriesParams) ([]MemoryEntry, error) {
+	query := `
+		SELECT id, scope_type, scope_key, source_scope, visibility_scope, retention_intent, entry_kind, summary, content, source_run_id, source_ref, created_at
+		FROM memory_entries
+		WHERE 1 = 1
+	`
+	var args []any
+	if params.ScopeType != "" {
+		query += ` AND scope_type = ?`
+		args = append(args, params.ScopeType)
+	}
+	if params.ScopeKey != "" {
+		query += ` AND scope_key = ?`
+		args = append(args, params.ScopeKey)
+	}
+	query += ` ORDER BY id DESC`
+	if params.Limit > 0 {
+		query += ` LIMIT ?`
+		args = append(args, params.Limit)
+	}
+
+	rows, err := store.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var entries []MemoryEntry
+	for rows.Next() {
+		entry, err := scanMemoryEntry(rows)
+		if err != nil {
+			return nil, err
+		}
+		entries = append(entries, entry)
+	}
+
+	return entries, rows.Err()
+}
+
 func (store *Store) CreateContextPacket(ctx context.Context, params CreateContextPacketParams) (ContextPacket, error) {
 	now := store.now()
 	var packet ContextPacket
@@ -2721,6 +2853,15 @@ type sqlQueryRow interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
 }
 
+func (store *Store) getRunTx(ctx context.Context, tx *sql.Tx, runID int64) (Run, error) {
+	row := tx.QueryRowContext(ctx, `
+		SELECT id, task_id, executor, status, attempt, started_at, finished_at, summary
+		FROM runs
+		WHERE id = ?
+	`, runID)
+	return scanRun(row)
+}
+
 func (store *Store) getTaskTx(ctx context.Context, tx *sql.Tx, taskID int64) (Task, error) {
 	return store.getTaskQuery(ctx, tx, taskID)
 }
@@ -3815,6 +3956,37 @@ func scanRecovery(row interface{ Scan(...any) error }) (Recovery, error) {
 		return Recovery{}, err
 	}
 	return recovery, nil
+}
+
+func scanMemoryEntry(row interface{ Scan(...any) error }) (MemoryEntry, error) {
+	var entry MemoryEntry
+	var sourceRunID sql.NullInt64
+	var createdAt string
+	if err := row.Scan(
+		&entry.ID,
+		&entry.ScopeType,
+		&entry.ScopeKey,
+		&entry.SourceScope,
+		&entry.VisibilityScope,
+		&entry.RetentionIntent,
+		&entry.EntryKind,
+		&entry.Summary,
+		&entry.Content,
+		&sourceRunID,
+		&entry.SourceRef,
+		&createdAt,
+	); err != nil {
+		return MemoryEntry{}, err
+	}
+
+	var err error
+	entry.SourceRunID = nullableInt64Ptr(sourceRunID)
+	entry.CreatedAt, err = parseTime(createdAt)
+	if err != nil {
+		return MemoryEntry{}, err
+	}
+
+	return entry, nil
 }
 
 func scanContextPacket(row interface{ Scan(...any) error }) (ContextPacket, error) {

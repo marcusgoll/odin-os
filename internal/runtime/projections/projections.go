@@ -70,11 +70,16 @@ type ActiveRunView struct {
 }
 
 type BlockedItemView struct {
-	TaskID     int64
-	TaskKey    string
-	ProjectKey string
-	Source     string
-	Reason     string
+	TaskID        int64
+	TaskKey       string
+	ProjectKey    string
+	WorkspaceKey  string
+	InitiativeKey string
+	CompanionKey  string
+	Objective     string
+	NextStep      string
+	Source        string
+	Reason        string
 }
 
 type IncidentView struct {
@@ -381,10 +386,13 @@ func ListBlockedItemViews(ctx context.Context, queryer Queryer) ([]BlockedItemVi
 	var views []BlockedItemView
 
 	approvalRows, err := queryer.QueryContext(ctx, `
-		SELECT t.id, t.key, p.key, a.status
+		SELECT t.id, t.key, p.key, w.key, COALESCE(i.key, ''), COALESCE(c.key, ''), a.status
 		FROM approvals a
 		JOIN tasks t ON t.id = a.task_id
 		JOIN projects p ON p.id = t.project_id
+		JOIN workspaces w ON w.id = t.workspace_id
+		LEFT JOIN initiatives i ON i.id = t.initiative_id
+		LEFT JOIN companions c ON c.id = t.companion_id
 		WHERE a.status = 'pending'
 		ORDER BY a.id ASC
 	`)
@@ -396,7 +404,7 @@ func ListBlockedItemViews(ctx context.Context, queryer Queryer) ([]BlockedItemVi
 	for approvalRows.Next() {
 		var view BlockedItemView
 		var approvalStatus string
-		if err := approvalRows.Scan(&view.TaskID, &view.TaskKey, &view.ProjectKey, &approvalStatus); err != nil {
+		if err := approvalRows.Scan(&view.TaskID, &view.TaskKey, &view.ProjectKey, &view.WorkspaceKey, &view.InitiativeKey, &view.CompanionKey, &approvalStatus); err != nil {
 			return nil, err
 		}
 		view.Source = "approval"
@@ -408,11 +416,14 @@ func ListBlockedItemViews(ctx context.Context, queryer Queryer) ([]BlockedItemVi
 	}
 
 	incidentRows, err := queryer.QueryContext(ctx, `
-		SELECT t.id, t.key, p.key, i.summary
+		SELECT t.id, t.key, p.key, w.key, COALESCE(wi.key, ''), COALESCE(c.key, ''), i.summary
 		FROM incidents i
 		JOIN runs r ON r.id = i.run_id
 		JOIN tasks t ON t.id = r.task_id
 		JOIN projects p ON p.id = t.project_id
+		JOIN workspaces w ON w.id = t.workspace_id
+		LEFT JOIN initiatives wi ON wi.id = t.initiative_id
+		LEFT JOIN companions c ON c.id = t.companion_id
 		WHERE i.status = 'open'
 		ORDER BY i.id ASC
 	`)
@@ -423,7 +434,7 @@ func ListBlockedItemViews(ctx context.Context, queryer Queryer) ([]BlockedItemVi
 
 	for incidentRows.Next() {
 		var view BlockedItemView
-		if err := incidentRows.Scan(&view.TaskID, &view.TaskKey, &view.ProjectKey, &view.Reason); err != nil {
+		if err := incidentRows.Scan(&view.TaskID, &view.TaskKey, &view.ProjectKey, &view.WorkspaceKey, &view.InitiativeKey, &view.CompanionKey, &view.Reason); err != nil {
 			return nil, err
 		}
 		view.Source = "incident"
@@ -434,10 +445,13 @@ func ListBlockedItemViews(ctx context.Context, queryer Queryer) ([]BlockedItemVi
 	}
 
 	wakeRows, err := queryer.QueryContext(ctx, `
-		SELECT cp.task_id, t.key, p.key, cp.payload_json
+		SELECT cp.task_id, t.key, p.key, w.key, i.key, c.key, cp.payload_json
 		FROM context_packets cp
 		JOIN tasks t ON t.id = cp.task_id
 		JOIN projects p ON p.id = t.project_id
+		JOIN workspaces w ON w.id = t.workspace_id
+		LEFT JOIN initiatives i ON i.id = t.initiative_id
+		LEFT JOIN companions c ON c.id = t.companion_id
 		WHERE cp.packet_scope = 'task_wake_packet'
 		  AND cp.status = 'active'
 		ORDER BY cp.id DESC
@@ -452,8 +466,11 @@ func ListBlockedItemViews(ctx context.Context, queryer Queryer) ([]BlockedItemVi
 		var taskID int64
 		var taskKey string
 		var projectKey string
+		var workspaceKey string
+		var initiativeKey sql.NullString
+		var companionKey sql.NullString
 		var payloadJSON string
-		if err := wakeRows.Scan(&taskID, &taskKey, &projectKey, &payloadJSON); err != nil {
+		if err := wakeRows.Scan(&taskID, &taskKey, &projectKey, &workspaceKey, &initiativeKey, &companionKey, &payloadJSON); err != nil {
 			return nil, err
 		}
 		if seenWakeTasks[taskID] {
@@ -462,7 +479,13 @@ func ListBlockedItemViews(ctx context.Context, queryer Queryer) ([]BlockedItemVi
 		seenWakeTasks[taskID] = true
 
 		var payload struct {
-			BlockingReason string `json:"blocking_reason"`
+			WorkspaceKey   string   `json:"workspace_key"`
+			InitiativeKey  string   `json:"initiative_key"`
+			CompanionKey   string   `json:"companion_key"`
+			ProjectKey     string   `json:"project_key"`
+			Objective      string   `json:"objective"`
+			BlockingReason string   `json:"blocking_reason"`
+			NextSteps      []string `json:"next_steps"`
 		}
 		if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
 			return nil, err
@@ -470,12 +493,37 @@ func ListBlockedItemViews(ctx context.Context, queryer Queryer) ([]BlockedItemVi
 		if payload.BlockingReason == "" {
 			continue
 		}
+		itemWorkspaceKey := workspaceKey
+		if payload.WorkspaceKey != "" {
+			itemWorkspaceKey = payload.WorkspaceKey
+		}
+		itemInitiativeKey := initiativeKey.String
+		if payload.InitiativeKey != "" {
+			itemInitiativeKey = payload.InitiativeKey
+		}
+		itemCompanionKey := companionKey.String
+		if payload.CompanionKey != "" {
+			itemCompanionKey = payload.CompanionKey
+		}
+		itemProjectKey := projectKey
+		if payload.ProjectKey != "" {
+			itemProjectKey = payload.ProjectKey
+		}
+		nextStep := ""
+		if len(payload.NextSteps) > 0 {
+			nextStep = payload.NextSteps[0]
+		}
 		views = append(views, BlockedItemView{
-			TaskID:     taskID,
-			TaskKey:    taskKey,
-			ProjectKey: projectKey,
-			Source:     "wake_packet",
-			Reason:     payload.BlockingReason,
+			TaskID:        taskID,
+			TaskKey:       taskKey,
+			ProjectKey:    itemProjectKey,
+			WorkspaceKey:  itemWorkspaceKey,
+			InitiativeKey: itemInitiativeKey,
+			CompanionKey:  itemCompanionKey,
+			Objective:     payload.Objective,
+			NextStep:      nextStep,
+			Source:        "wake_packet",
+			Reason:        payload.BlockingReason,
 		})
 	}
 

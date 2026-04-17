@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"testing"
 
+	"odin-os/internal/core/companions"
+	"odin-os/internal/runtime/checkpoints"
 	"odin-os/internal/runtime/projections"
 	"odin-os/internal/store/sqlite"
 )
@@ -149,6 +151,90 @@ func TestObservabilityProjectionsExposeFreshnessAndPortfolioViews(t *testing.T) 
 	}
 	if len(portfolio) != 1 || portfolio[0].ProjectKey != project.Key {
 		t.Fatalf("portfolio = %+v, want project %q", portfolio, project.Key)
+	}
+}
+
+func TestObservabilityProjectionsExposeBlockedFollowUpOwnershipAndNextStep(t *testing.T) {
+	ctx := context.Background()
+	store := openObservabilityStore(t)
+	defer store.Close()
+
+	project, task, run := seedObservabilityState(t, ctx, store)
+	workspace, err := store.GetWorkspaceByKey(ctx, "marcus")
+	if err != nil {
+		t.Fatalf("GetWorkspaceByKey(marcus) error = %v", err)
+	}
+	initiative, err := store.GetInitiativeByProjectID(ctx, project.ID)
+	if err != nil {
+		t.Fatalf("GetInitiativeByProjectID() error = %v", err)
+	}
+	companion, err := store.CreateCompanion(ctx, sqlite.CreateCompanionParams{
+		WorkspaceID:         workspace.ID,
+		Key:                 "operator",
+		Title:               "Operator",
+		Kind:                companions.KindOperator,
+		Charter:             "Run the workspace rhythm.",
+		Status:              companions.StatusActive,
+		InitiativeScopeJSON: `{"mode":"all"}`,
+		ToolPolicyJSON:      `{"mode":"deny","allowed":[]}`,
+		MemoryPolicyJSON:    `{"retention":"workspace"}`,
+		PlanningPolicyJSON:  `{"mode":"stepwise"}`,
+	})
+	if err != nil {
+		t.Fatalf("CreateCompanion() error = %v", err)
+	}
+	if _, err := store.UpdateTaskCompanion(ctx, task.ID, &companion.ID); err != nil {
+		t.Fatalf("UpdateTaskCompanion() error = %v", err)
+	}
+
+	if _, err := (checkpoints.Service{Store: store}).Compact(ctx, checkpoints.CompactParams{
+		TaskID:          task.ID,
+		RunID:           &run.ID,
+		Trigger:         checkpoints.TriggerApprovalWait,
+		CheckpointKey:   "follow-up-1",
+		Objective:       "Resume work after approval",
+		TaskStatus:      "blocked",
+		BlockingReason:  "awaiting operator approval",
+		NextSteps:       []string{"resume once approved", "run verification"},
+		ManifestSummary: "managed project",
+		PolicySummary:   "approval required",
+		OpenTaskSummary: "one blocked task",
+		ApprovalSummary: "one pending approval",
+	}); err != nil {
+		t.Fatalf("Compact() error = %v", err)
+	}
+
+	blocked, err := projections.ListBlockedItemViews(ctx, store.DB())
+	if err != nil {
+		t.Fatalf("ListBlockedItemViews() error = %v", err)
+	}
+
+	var followUp projections.BlockedItemView
+	found := false
+	for _, item := range blocked {
+		if item.Source == "wake_packet" {
+			followUp = item
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("ListBlockedItemViews() missing wake_packet follow-up: %+v", blocked)
+	}
+	if followUp.WorkspaceKey != workspace.Key {
+		t.Fatalf("WorkspaceKey = %q, want %q", followUp.WorkspaceKey, workspace.Key)
+	}
+	if followUp.InitiativeKey != initiative.Key {
+		t.Fatalf("InitiativeKey = %q, want %q", followUp.InitiativeKey, initiative.Key)
+	}
+	if followUp.CompanionKey != companion.Key {
+		t.Fatalf("CompanionKey = %q, want %q", followUp.CompanionKey, companion.Key)
+	}
+	if followUp.Objective != "Resume work after approval" {
+		t.Fatalf("Objective = %q, want %q", followUp.Objective, "Resume work after approval")
+	}
+	if followUp.NextStep != "resume once approved" {
+		t.Fatalf("NextStep = %q, want %q", followUp.NextStep, "resume once approved")
 	}
 }
 
