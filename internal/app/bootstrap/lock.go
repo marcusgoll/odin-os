@@ -27,7 +27,8 @@ type bootstrapLock struct {
 }
 
 type bootstrapHooks struct {
-	afterLockAcquired func()
+	afterLockAcquired           func()
+	beforeWorkspaceMemoryCommit func() error
 }
 
 var testBootstrapHooks bootstrapHooks
