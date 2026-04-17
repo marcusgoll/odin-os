@@ -19,6 +19,7 @@ const (
 	IntentHelp        Intent = "help"
 	IntentMode        Intent = "mode"
 	IntentScope       Intent = "scope"
+	IntentMemory      Intent = "memory"
 	IntentWorkspace   Intent = "workspace"
 	IntentInitiatives Intent = "initiatives"
 	IntentCompanions  Intent = "companions"
@@ -82,6 +83,8 @@ func RouteAskIntent(line string) Intent {
 		return IntentMode
 	case hasToken(tokens, "scope") && looksLikeStateQuestion(normalized):
 		return IntentScope
+	case hasToken(tokens, "memory") && (looksLikeStateQuestion(normalized) || looksLikeListing(normalized)):
+		return IntentMemory
 	case strings.Contains(normalized, "workspace"):
 		return IntentWorkspace
 	case strings.Contains(normalized, "initiative"):

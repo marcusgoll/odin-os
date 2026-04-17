@@ -459,6 +459,112 @@ func TestShellOperatorViewsRenderWorkspaceInitiativesAndCompanions(t *testing.T)
 	}
 }
 
+func TestMemoryCommandRendersWorkspaceMemoryStatus(t *testing.T) {
+	t.Parallel()
+
+	env := newTestEnvironment(t)
+	seedShellMemoryFixture(t, env)
+
+	shell, err := New(env)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	var output bytes.Buffer
+	if err := shell.HandleLine(context.Background(), "/memory", &output); err != nil {
+		t.Fatalf("HandleLine(/memory) error = %v", err)
+	}
+
+	for _, want := range []string{"workspace=default", "workspace_entries=1", "initiative_entries=2", "companion_entries=1"} {
+		if !strings.Contains(output.String(), want) {
+			t.Fatalf("output = %q, want substring %q", output.String(), want)
+		}
+	}
+}
+
+func TestInitiativeMemoryCommandHonorsProjectScope(t *testing.T) {
+	t.Parallel()
+
+	env := newTestEnvironment(t)
+	seedShellMemoryFixture(t, env)
+
+	shell, err := New(env)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	var output bytes.Buffer
+	if err := shell.HandleLine(context.Background(), "/project alpha", &output); err != nil {
+		t.Fatalf("HandleLine(/project alpha) error = %v", err)
+	}
+	output.Reset()
+	if err := shell.HandleLine(context.Background(), "/memory initiatives", &output); err != nil {
+		t.Fatalf("HandleLine(/memory initiatives) error = %v", err)
+	}
+
+	if !strings.Contains(output.String(), "alpha entries=1") {
+		t.Fatalf("output = %q, want alpha initiative memory", output.String())
+	}
+	if strings.Contains(output.String(), "beta") {
+		t.Fatalf("output = %q, want project-scoped initiative filtering", output.String())
+	}
+}
+
+func TestCompanionMemoryCommandListsCompanionMemory(t *testing.T) {
+	t.Parallel()
+
+	env := newTestEnvironment(t)
+	seedShellMemoryFixture(t, env)
+
+	shell, err := New(env)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	var output bytes.Buffer
+	if err := shell.HandleLine(context.Background(), "/memory companions", &output); err != nil {
+		t.Fatalf("HandleLine(/memory companions) error = %v", err)
+	}
+
+	for _, want := range []string{"primary entries=1", "Primary companion memory"} {
+		if !strings.Contains(output.String(), want) {
+			t.Fatalf("output = %q, want substring %q", output.String(), want)
+		}
+	}
+}
+
+func TestAskModeRendersWorkspaceMemoryWithoutCreatingTask(t *testing.T) {
+	t.Parallel()
+
+	env := newTestEnvironment(t)
+	seedShellMemoryFixture(t, env)
+
+	shell, err := New(env)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	var output bytes.Buffer
+	if err := shell.HandleLine(context.Background(), "show workspace memory", &output); err != nil {
+		t.Fatalf("HandleLine(memory question) error = %v", err)
+	}
+
+	if !strings.Contains(output.String(), "workspace=default") {
+		t.Fatalf("output = %q, want workspace memory answer", output.String())
+	}
+	if !strings.Contains(output.String(), "workspace_entries=1") {
+		t.Fatalf("output = %q, want workspace memory counts", output.String())
+	}
+
+	views, err := shell.jobs.List(context.Background(), shell.controlScope())
+	if err != nil {
+		t.Fatalf("jobs.List() error = %v", err)
+	}
+	if len(views) != 0 {
+		t.Fatalf("jobs len = %d, want 0", len(views))
+	}
+}
+
 func TestShellTransitionStatusShowsDefaultInventoryAuthority(t *testing.T) {
 	t.Parallel()
 
@@ -730,4 +836,112 @@ func hasTransitionEvent(events []runtimeevents.Record, want runtimeevents.Type) 
 		}
 	}
 	return false
+}
+
+func seedShellMemoryFixture(t *testing.T, env Environment) {
+	t.Helper()
+
+	ctx := context.Background()
+	workspace, err := workspaces.Service{Store: env.Store}.BootstrapDefaultWorkspace(ctx)
+	if err != nil {
+		t.Fatalf("BootstrapDefaultWorkspace() error = %v", err)
+	}
+	companion, err := env.Store.GetCompanionByKey(ctx, workspace.ID, workspace.DefaultCompanionKey)
+	if err != nil {
+		t.Fatalf("GetCompanionByKey(default) error = %v", err)
+	}
+
+	alphaProject, err := env.Store.CreateProject(ctx, sqlite.CreateProjectParams{
+		Key:           "alpha",
+		Name:          "Alpha",
+		Scope:         "project",
+		GitRoot:       "/tmp/alpha",
+		DefaultBranch: "main",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject(alpha) error = %v", err)
+	}
+	betaProject, err := env.Store.CreateProject(ctx, sqlite.CreateProjectParams{
+		Key:           "beta",
+		Name:          "Beta",
+		Scope:         "project",
+		GitRoot:       "/tmp/beta",
+		DefaultBranch: "main",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject(beta) error = %v", err)
+	}
+
+	alphaInitiative, err := env.Store.UpsertInitiative(ctx, sqlite.UpsertInitiativeParams{
+		WorkspaceID:      workspace.ID,
+		Key:              alphaProject.Key,
+		Title:            alphaProject.Name,
+		Kind:             string(initiatives.KindManagedProject),
+		Status:           "active",
+		Summary:          "Alpha initiative",
+		OwnerCompanionID: &companion.ID,
+		LinkedProjectID:  &alphaProject.ID,
+	})
+	if err != nil {
+		t.Fatalf("UpsertInitiative(alpha) error = %v", err)
+	}
+	betaInitiative, err := env.Store.UpsertInitiative(ctx, sqlite.UpsertInitiativeParams{
+		WorkspaceID:      workspace.ID,
+		Key:              betaProject.Key,
+		Title:            betaProject.Name,
+		Kind:             string(initiatives.KindManagedProject),
+		Status:           "active",
+		Summary:          "Beta initiative",
+		OwnerCompanionID: &companion.ID,
+		LinkedProjectID:  &betaProject.ID,
+	})
+	if err != nil {
+		t.Fatalf("UpsertInitiative(beta) error = %v", err)
+	}
+
+	if _, err := env.Store.CreateMemoryEntry(ctx, sqlite.CreateMemoryEntryParams{
+		WorkspaceID:     workspace.ID,
+		EntryType:       "note",
+		VisibilityScope: "workspace",
+		RetentionClass:  "durable",
+		Summary:         "Workspace memory summary",
+		Content:         "Workspace memory content",
+	}); err != nil {
+		t.Fatalf("CreateMemoryEntry(workspace) error = %v", err)
+	}
+	if _, err := env.Store.CreateMemoryEntry(ctx, sqlite.CreateMemoryEntryParams{
+		WorkspaceID:     workspace.ID,
+		InitiativeID:    &alphaInitiative.ID,
+		EntryType:       "summary",
+		VisibilityScope: "initiative",
+		RetentionClass:  "durable",
+		Summary:         "Alpha memory summary",
+		Content:         "Alpha initiative memory content",
+	}); err != nil {
+		t.Fatalf("CreateMemoryEntry(alpha initiative) error = %v", err)
+	}
+	if _, err := env.Store.CreateMemoryEntry(ctx, sqlite.CreateMemoryEntryParams{
+		WorkspaceID:     workspace.ID,
+		InitiativeID:    &betaInitiative.ID,
+		EntryType:       "summary",
+		VisibilityScope: "initiative",
+		RetentionClass:  "durable",
+		Summary:         "Beta memory summary",
+		Content:         "Beta initiative memory content",
+	}); err != nil {
+		t.Fatalf("CreateMemoryEntry(beta initiative) error = %v", err)
+	}
+	if _, err := env.Store.CreateMemoryEntry(ctx, sqlite.CreateMemoryEntryParams{
+		WorkspaceID:     workspace.ID,
+		CompanionID:     &companion.ID,
+		EntryType:       "note",
+		VisibilityScope: "companion",
+		RetentionClass:  "working",
+		Summary:         "Primary companion memory",
+		Content:         "Primary companion memory content",
+	}); err != nil {
+		t.Fatalf("CreateMemoryEntry(companion) error = %v", err)
+	}
 }
