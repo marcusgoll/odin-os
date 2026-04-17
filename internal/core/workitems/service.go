@@ -63,6 +63,22 @@ func (service Service) Block(ctx context.Context, taskID int64) (sqlite.Task, er
 }
 
 func (service Service) Requeue(ctx context.Context, taskID int64) (sqlite.Task, error) {
+	if service.Store == nil {
+		return sqlite.Task{}, fmt.Errorf("work item store is required")
+	}
+	current, err := service.Store.GetTask(ctx, taskID)
+	if err != nil {
+		return sqlite.Task{}, err
+	}
+	if current.Status == statusBlocked {
+		pendingApprovals, err := service.pendingApprovalCount(ctx, taskID)
+		if err != nil {
+			return sqlite.Task{}, err
+		}
+		if pendingApprovals > 0 {
+			return sqlite.Task{}, fmt.Errorf("task %d still has pending approval", taskID)
+		}
+	}
 	return service.transitionStatus(ctx, taskID, statusQueued, statusRunning, statusBlocked)
 }
 
@@ -180,4 +196,18 @@ func (service Service) ensureTaskWorkspace(ctx context.Context, task sqlite.Task
 		return sqlite.Task{}, err
 	}
 	return service.Store.AssignTaskWorkspace(ctx, task.ID, workspace.ID)
+}
+
+func (service Service) pendingApprovalCount(ctx context.Context, taskID int64) (int, error) {
+	row := service.Store.DB().QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM approvals
+		WHERE task_id = ? AND status = 'pending'
+	`, taskID)
+
+	var count int
+	if err := row.Scan(&count); err != nil {
+		return 0, err
+	}
+	return count, nil
 }

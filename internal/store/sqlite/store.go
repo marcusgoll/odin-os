@@ -743,12 +743,15 @@ func (store *Store) ResolveApproval(ctx context.Context, params ResolveApprovalP
 		}
 
 		if params.Status == "approved" {
-			runID := current.RunID
-			if runID == nil {
-				runID = task.CurrentRunID
+			runIDs := make([]int64, 0, 2)
+			if current.RunID != nil {
+				runIDs = append(runIDs, *current.RunID)
 			}
-			if runID != nil {
-				linkedRun, _, err := store.getRunWithTaskTx(ctx, tx, *runID)
+			if task.CurrentRunID != nil && (current.RunID == nil || *task.CurrentRunID != *current.RunID) {
+				runIDs = append(runIDs, *task.CurrentRunID)
+			}
+			for _, runID := range runIDs {
+				linkedRun, _, err := store.getRunWithTaskTx(ctx, tx, runID)
 				if err != nil {
 					return err
 				}
@@ -798,6 +801,19 @@ func (store *Store) ResolveApproval(ctx context.Context, params ResolveApprovalP
 		}
 
 		if params.Status == "approved" && task.Status == "blocked" {
+			row := tx.QueryRowContext(ctx, `
+				SELECT COUNT(*)
+				FROM approvals
+				WHERE task_id = ? AND status = 'pending'
+			`, task.ID)
+			var pendingApprovals int
+			if err := row.Scan(&pendingApprovals); err != nil {
+				return err
+			}
+			if pendingApprovals > 0 {
+				return nil
+			}
+
 			previousStatus := task.Status
 			if _, err := tx.ExecContext(ctx, `
 				UPDATE tasks

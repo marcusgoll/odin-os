@@ -2,6 +2,7 @@ package recovery
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 
 	"odin-os/internal/runtime/checkpoints"
@@ -36,8 +37,13 @@ func (service Service) RunStartupRecovery(ctx context.Context) (StartupResult, e
 		if err != nil {
 			return StartupResult{}, err
 		}
+		latestApprovalStatus, hasApproval, err := service.latestApprovalStatus(ctx, task.ID)
+		if err != nil {
+			return StartupResult{}, err
+		}
 		terminalTask := task.Status == "completed" || task.Status == "failed"
-		requeueable := !terminalTask && pendingApprovals == 0
+		rejectedApprovalBlock := task.Status == "blocked" && pendingApprovals == 0 && hasApproval && latestApprovalStatus == "rejected"
+		requeueable := !terminalTask && pendingApprovals == 0 && !rejectedApprovalBlock
 		needsApprovalRepair := pendingApprovals > 0 && task.Status != "blocked"
 
 		recoveryRecord, err := service.Store.StartRecovery(ctx, sqlite.StartRecoveryParams{
@@ -47,14 +53,6 @@ func (service Service) RunStartupRecovery(ctx context.Context) (StartupResult, e
 			DetailsJSON: `{"trigger":"restart"}`,
 		})
 		if err != nil {
-			return StartupResult{}, err
-		}
-
-		if _, err := service.Store.FinishRun(ctx, sqlite.FinishRunParams{
-			RunID:   run.ID,
-			Status:  "interrupted",
-			Summary: "interrupted by startup recovery",
-		}); err != nil {
 			return StartupResult{}, err
 		}
 
@@ -86,6 +84,15 @@ func (service Service) RunStartupRecovery(ctx context.Context) (StartupResult, e
 				"Confirm no further task action is required",
 			}
 			recoveryDescription = "interrupted stale running run for terminal task and created restart wake packet"
+		} else if rejectedApprovalBlock {
+			blockingReason = "approval was rejected before restart"
+			openTaskSummary = "task remains blocked after rejected approval"
+			approvalSummary = "rejected"
+			nextSteps = []string{
+				"Review the rejected approval decision",
+				"Create a new work item if the task should be attempted again",
+			}
+			recoveryDescription = "interrupted running run and preserved blocked task after rejected approval"
 		} else if !requeueable {
 			blockingReason = "pending approval before restart"
 			openTaskSummary = "task remains blocked pending approval"
@@ -132,6 +139,14 @@ func (service Service) RunStartupRecovery(ctx context.Context) (StartupResult, e
 			return StartupResult{}, err
 		}
 
+		if _, err := service.Store.FinishRun(ctx, sqlite.FinishRunParams{
+			RunID:   run.ID,
+			Status:  "interrupted",
+			Summary: "interrupted by startup recovery",
+		}); err != nil {
+			return StartupResult{}, err
+		}
+
 		completed, err := service.Store.CompleteRecovery(ctx, sqlite.CompleteRecoveryParams{
 			RecoveryID:  recoveryRecord.ID,
 			Status:      "completed",
@@ -161,6 +176,25 @@ func (service Service) pendingApprovalCount(ctx context.Context, taskID int64) (
 		return 0, err
 	}
 	return count, nil
+}
+
+func (service Service) latestApprovalStatus(ctx context.Context, taskID int64) (string, bool, error) {
+	row := service.Store.DB().QueryRowContext(ctx, `
+		SELECT status
+		FROM approvals
+		WHERE task_id = ?
+		ORDER BY id DESC
+		LIMIT 1
+	`, taskID)
+
+	var status string
+	if err := row.Scan(&status); err != nil {
+		if err == sql.ErrNoRows {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+	return status, true, nil
 }
 
 func pendingApprovalSummary(count int) string {

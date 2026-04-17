@@ -573,8 +573,8 @@ func TestExecuteNextQueuedPreservesBlockedTaskWhenApprovalGateTripsBeforeStart(t
 	if err != nil {
 		t.Fatalf("latestRunForTask() error = %v", err)
 	}
-	if run.Status != "failed" {
-		t.Fatalf("run.Status = %q, want failed", run.Status)
+	if run.Status != "interrupted" {
+		t.Fatalf("run.Status = %q, want interrupted", run.Status)
 	}
 
 	var approvalCount int
@@ -587,6 +587,86 @@ func TestExecuteNextQueuedPreservesBlockedTaskWhenApprovalGateTripsBeforeStart(t
 	}
 	if approvalCount != 1 {
 		t.Fatalf("pending approval count = %d, want 1", approvalCount)
+	}
+}
+
+func TestExecuteNextQueuedAbandonsRunWhenTaskCompletesBeforeStart(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openJobStore(t)
+	defer store.Close()
+
+	registry := writeRegistry(t)
+	service := Service{
+		Store:          store,
+		Registry:       registry,
+		Executors:      router.DefaultCatalog(),
+		ExecutorConfig: mustLoadExecutorConfig(t),
+		Transitions:    projects.Service{Store: store},
+		Leases: leases.Manager{
+			Store:        store,
+			Git:          &jobTestGit{},
+			WorktreeRoot: t.TempDir(),
+		},
+		Now: func() time.Time {
+			return time.Date(2026, 4, 9, 12, 0, 0, 0, time.UTC)
+		},
+	}
+
+	task, err := service.CreateTaskFromAct(ctx, scope.Resolve(scope.ResolveInput{
+		ExplicitTarget: &scope.Target{
+			ProjectKey: "alpha",
+		},
+	}).ControlScope(), "Completed before start")
+	if err != nil {
+		t.Fatalf("CreateTaskFromAct() error = %v", err)
+	}
+
+	project, err := store.GetProjectByKey(ctx, "alpha")
+	if err != nil {
+		t.Fatalf("GetProjectByKey(alpha) error = %v", err)
+	}
+	if _, err := service.Transitions.SetTransitionState(ctx, projects.TransitionStateInput{
+		ProjectID:   project.ID,
+		Actor:       projects.TransitionControllerOdinOS,
+		TargetState: projects.TransitionStateCutover,
+		ChangedBy:   "test",
+	}); err != nil {
+		t.Fatalf("SetTransitionState(cutover) error = %v", err)
+	}
+
+	if _, err := store.DB().ExecContext(ctx, `
+		CREATE TRIGGER runs_insert_completes_task
+		AFTER INSERT ON runs
+		BEGIN
+			UPDATE tasks
+			SET status = 'completed'
+			WHERE id = NEW.task_id;
+		END;
+	`); err != nil {
+		t.Fatalf("create trigger error = %v", err)
+	}
+
+	err = service.ExecuteNextQueued(ctx)
+	if err == nil {
+		t.Fatal("ExecuteNextQueued() error = nil, want stale-read rejection")
+	}
+
+	gotTask, err := store.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
+	}
+	if gotTask.Status != "completed" {
+		t.Fatalf("GetTask().Status = %q, want completed", gotTask.Status)
+	}
+
+	run, err := latestRunForTask(ctx, store, task.ID)
+	if err != nil {
+		t.Fatalf("latestRunForTask() error = %v", err)
+	}
+	if run.Status != "interrupted" {
+		t.Fatalf("run.Status = %q, want interrupted", run.Status)
 	}
 }
 

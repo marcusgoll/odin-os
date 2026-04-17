@@ -176,6 +176,34 @@ func TestWorkItemServiceRequeuesTasks(t *testing.T) {
 	}
 }
 
+func TestWorkItemServiceRejectsRequeueForBlockedTaskWithPendingApproval(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openWorkItemServiceStore(t)
+	defer store.Close()
+
+	workspaceID, projectID, initiativeID, companionID := seedWorkItemLinks(t, ctx, store)
+	service := Service{Store: store}
+
+	approvalTask := mustQueueWorkItemTask(t, ctx, service, projectID, workspaceID, initiativeID, companionID, "pending-approval-item")
+	if _, _, err := service.RequestApproval(ctx, approvalTask.ID, nil, "operator"); err != nil {
+		t.Fatalf("RequestApproval() error = %v", err)
+	}
+
+	if _, err := service.Requeue(ctx, approvalTask.ID); err == nil {
+		t.Fatal("Requeue() error = nil, want pending-approval rejection")
+	}
+
+	gotTask, err := store.GetTask(ctx, approvalTask.ID)
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
+	}
+	if gotTask.Status != "blocked" {
+		t.Fatalf("GetTask().Status = %q, want blocked", gotTask.Status)
+	}
+}
+
 func TestWorkItemServiceFinalizesTaskFromExecutorStatus(t *testing.T) {
 	t.Parallel()
 

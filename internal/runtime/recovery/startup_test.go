@@ -626,3 +626,186 @@ func TestRunStartupRecoverySkipsTerminalTaskStateAndContinues(t *testing.T) {
 		t.Fatalf("GetRun(active).Status = %q, want interrupted", gotActiveRun.Status)
 	}
 }
+
+func TestRunStartupRecoveryLeavesRunRunningWhenTaskRepairFails(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	now := time.Date(2026, 4, 10, 4, 0, 0, 0, time.UTC)
+
+	store, err := sqlite.Open(filepath.Join(t.TempDir(), "odin.db"))
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer store.Close()
+	store.Now = func() time.Time { return now }
+
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
+	}
+
+	project, err := store.CreateProject(ctx, sqlite.CreateProjectParams{
+		Key:           "alpha",
+		Name:          "Alpha",
+		Scope:         "project",
+		GitRoot:       "/tmp/alpha",
+		DefaultBranch: "main",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+
+	task, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "repair-failure-task",
+		Title:       "Repair failure",
+		Status:      "running",
+		Scope:       "project",
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+
+	run, err := store.StartRun(ctx, sqlite.StartRunParams{
+		TaskID:   task.ID,
+		Executor: "codex_headless",
+		Attempt:  1,
+		Status:   "running",
+	})
+	if err != nil {
+		t.Fatalf("StartRun() error = %v", err)
+	}
+
+	if _, err := store.DB().ExecContext(ctx, `
+		CREATE TRIGGER task_requeue_blocker
+		BEFORE UPDATE OF status ON tasks
+		WHEN NEW.status = 'queued'
+		BEGIN
+			SELECT RAISE(ABORT, 'requeue blocked');
+		END;
+	`); err != nil {
+		t.Fatalf("create trigger error = %v", err)
+	}
+
+	service := recovery.Service{
+		Store: store,
+		Now:   func() time.Time { return now },
+	}
+
+	_, err = service.RunStartupRecovery(ctx)
+	if err == nil {
+		t.Fatal("RunStartupRecovery() error = nil, want requeue failure")
+	}
+
+	gotRun, err := store.GetRun(ctx, run.ID)
+	if err != nil {
+		t.Fatalf("GetRun() error = %v", err)
+	}
+	if gotRun.Status != "running" {
+		t.Fatalf("GetRun().Status = %q, want running", gotRun.Status)
+	}
+
+	gotTask, err := store.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
+	}
+	if gotTask.Status != "running" {
+		t.Fatalf("GetTask().Status = %q, want running", gotTask.Status)
+	}
+}
+
+func TestRunStartupRecoveryPreservesRejectedApprovalBlocks(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	now := time.Date(2026, 4, 10, 5, 0, 0, 0, time.UTC)
+
+	store, err := sqlite.Open(filepath.Join(t.TempDir(), "odin.db"))
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer store.Close()
+	store.Now = func() time.Time { return now }
+
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
+	}
+
+	project, err := store.CreateProject(ctx, sqlite.CreateProjectParams{
+		Key:           "alpha",
+		Name:          "Alpha",
+		Scope:         "project",
+		GitRoot:       "/tmp/alpha",
+		DefaultBranch: "main",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+
+	task, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "rejected-approval-task",
+		Title:       "Preserve rejection",
+		Status:      "running",
+		Scope:       "project",
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+
+	run, err := store.StartRun(ctx, sqlite.StartRunParams{
+		TaskID:   task.ID,
+		Executor: "codex_headless",
+		Attempt:  1,
+		Status:   "running",
+	})
+	if err != nil {
+		t.Fatalf("StartRun() error = %v", err)
+	}
+
+	approval, _, err := workitems.Service{Store: store}.RequestApproval(ctx, task.ID, &run.ID, "operator")
+	if err != nil {
+		t.Fatalf("RequestApproval() error = %v", err)
+	}
+	if _, err := store.ResolveApproval(ctx, sqlite.ResolveApprovalParams{
+		ApprovalID: approval.ID,
+		Status:     "rejected",
+		DecisionBy: "reviewer",
+		Reason:     "unsafe",
+	}); err != nil {
+		t.Fatalf("ResolveApproval(rejected) error = %v", err)
+	}
+
+	service := recovery.Service{
+		Store: store,
+		Now:   func() time.Time { return now },
+	}
+
+	result, err := service.RunStartupRecovery(ctx)
+	if err != nil {
+		t.Fatalf("RunStartupRecovery() error = %v", err)
+	}
+	if result.RecoveredRuns != 1 {
+		t.Fatalf("RecoveredRuns = %d, want 1", result.RecoveredRuns)
+	}
+
+	gotTask, err := store.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
+	}
+	if gotTask.Status != "blocked" {
+		t.Fatalf("GetTask().Status = %q, want blocked", gotTask.Status)
+	}
+
+	gotRun, err := store.GetRun(ctx, run.ID)
+	if err != nil {
+		t.Fatalf("GetRun() error = %v", err)
+	}
+	if gotRun.Status != "interrupted" {
+		t.Fatalf("GetRun().Status = %q, want interrupted", gotRun.Status)
+	}
+}

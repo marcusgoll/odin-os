@@ -179,8 +179,20 @@ func (service Service) ExecuteNextQueued(ctx context.Context) error {
 		_, _ = service.workItemService().Fail(ctx, task.ID)
 		return cause
 	}
+	interruptRun := func(cause error) error {
+		_, _ = service.Store.FinishRun(ctx, sqlite.FinishRunParams{
+			RunID:   run.ID,
+			Status:  "interrupted",
+			Summary: cause.Error(),
+		})
+		return cause
+	}
 
 	if _, err := service.workItemService().Start(ctx, task.ID); err != nil {
+		current, loadErr := service.Store.GetTask(ctx, task.ID)
+		if loadErr == nil && current.Status != "queued" {
+			return interruptRun(err)
+		}
 		return finishFailure(err)
 	}
 
