@@ -157,6 +157,58 @@ func TestAlphaAcceptance(t *testing.T) {
 		}
 	})
 
+	t.Run("healthcheck fails closed after ungraceful daemon death", func(t *testing.T) {
+		runtimeRoot := t.TempDir()
+		store := openRuntimeStore(t, runtimeRoot)
+		store.Now = func() time.Time { return now }
+		seedHealthyObservability(t, ctx, store, now)
+
+		var serveOutput bytes.Buffer
+		cmd := exec.Command(odinBinary, "serve")
+		cmd.Dir = repoRoot
+		cmd.Env = append([]string{}, os.Environ()...)
+		cmd.Env = append(cmd.Env, "ODIN_ROOT="+runtimeRoot, "ODIN_HTTP_ADDR=127.0.0.1:0")
+		cmd.Stdout = &serveOutput
+		cmd.Stderr = &serveOutput
+		if err := cmd.Start(); err != nil {
+			t.Fatalf("cmd.Start(serve) error = %v", err)
+		}
+		t.Cleanup(func() {
+			if cmd.ProcessState != nil && cmd.ProcessState.Exited() {
+				return
+			}
+			if cmd.Process != nil {
+				_ = cmd.Process.Kill()
+				_ = cmd.Wait()
+			}
+		})
+
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			output, err := runOdinCommand(t, repoRoot, odinBinary, runtimeRoot, nil, "", "healthcheck")
+			if err == nil && strings.Contains(output, "ready") {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("serve never became ready\noutput:\n%s", serveOutput.String())
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+
+		if err := cmd.Process.Kill(); err != nil {
+			t.Fatalf("Process.Kill() error = %v", err)
+		}
+		_ = cmd.Wait()
+
+		output, err := runOdinCommand(t, repoRoot, odinBinary, runtimeRoot, nil, "", "healthcheck")
+		if err == nil {
+			t.Fatalf("runOdinCommand(healthcheck after kill -9) error = nil, want readiness failure\n%s", output)
+		}
+		if !strings.Contains(output, "not ready:") {
+			t.Fatalf("healthcheck output = %q, want not ready message", output)
+		}
+	})
+
 	t.Run("managed projects support local and github classes", func(t *testing.T) {
 		localRepo := createGitRepository(t)
 		githubRepo := createGitRepository(t)

@@ -80,6 +80,30 @@ func AcquireServiceLock(runtimeRoot string) (*serviceLock, error) {
 	return acquireServiceLock(runtimeRoot)
 }
 
+func ServiceLockHeld(runtimeRoot string) (bool, error) {
+	lockDir := filepath.Join(runtimeRoot, "state", "cache")
+	if err := os.MkdirAll(lockDir, 0o755); err != nil {
+		return false, err
+	}
+
+	file, err := os.OpenFile(filepath.Join(lockDir, "service.lock"), os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		return false, err
+	}
+	defer file.Close()
+
+	if err := flockNonBlocking(file); err != nil {
+		if isWouldBlock(err) {
+			return true, nil
+		}
+		return false, err
+	}
+	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_UN); err != nil {
+		return false, err
+	}
+	return false, nil
+}
+
 func acquireServiceLock(runtimeRoot string) (*serviceLock, error) {
 	lockDir := filepath.Join(runtimeRoot, "state", "cache")
 	if err := os.MkdirAll(lockDir, 0o755); err != nil {

@@ -56,6 +56,7 @@ func TestRunHealthcheckHealthyReturnsNil(t *testing.T) {
 	root := createRuntimeRoot(t)
 	seedHealthyRuntime(t, root)
 	seedRuntimeState(t, root, "ready", time.Now().UTC())
+	holdServiceLock(t, root)
 
 	var stdout bytes.Buffer
 	if err := Run(context.Background(), root, []string{"healthcheck"}, strings.NewReader(""), &stdout); err != nil {
@@ -64,6 +65,23 @@ func TestRunHealthcheckHealthyReturnsNil(t *testing.T) {
 
 	if !strings.Contains(stdout.String(), "ready") {
 		t.Fatalf("healthcheck output = %q, want readiness message", stdout.String())
+	}
+}
+
+func TestRunHealthcheckReadyStateWithoutLiveServiceLockReturnsError(t *testing.T) {
+	t.Parallel()
+
+	root := createRuntimeRoot(t)
+	seedHealthyRuntime(t, root)
+	seedRuntimeState(t, root, "ready", time.Now().UTC())
+
+	var stdout bytes.Buffer
+	err := Run(context.Background(), root, []string{"healthcheck"}, strings.NewReader(""), &stdout)
+	if err == nil {
+		t.Fatal("Run(healthcheck) error = nil, want readiness error without live service lock")
+	}
+	if !strings.Contains(stdout.String(), "no live odin serve process owns runtime root") {
+		t.Fatalf("healthcheck output = %q, want missing-service-owner message", stdout.String())
 	}
 }
 

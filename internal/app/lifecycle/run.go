@@ -197,6 +197,15 @@ func runHealthcheck(ctx context.Context, app bootstrap.App, cfg appconfig.Config
 		return errRuntimeNotReady
 	}
 
+	lockHeld, err := bootstrap.ServiceLockHeld(cfg.RuntimeRoot)
+	if err != nil {
+		return err
+	}
+	if !lockHeld {
+		_, _ = fmt.Fprintln(stdout, "not ready: no live odin serve process owns runtime root")
+		return errRuntimeNotReady
+	}
+
 	_, err = fmt.Fprintln(stdout, "ready")
 	return err
 }
