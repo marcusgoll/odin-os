@@ -56,6 +56,9 @@ func TestRunDoctorMarkdownWritesOperatorReport(t *testing.T) {
 	if !strings.Contains(stdout.String(), "## Current Health Snapshot") {
 		t.Fatalf("doctor markdown output = %q, want report heading", stdout.String())
 	}
+	if strings.Contains(stdout.String(), "| executor |  | executor health is fresh |  | high |") {
+		t.Fatalf("doctor markdown output = %q, want no blank operator rows", stdout.String())
+	}
 }
 
 func TestRunDoctorRejectsUnknownFormat(t *testing.T) {
@@ -67,6 +70,24 @@ func TestRunDoctorRejectsUnknownFormat(t *testing.T) {
 	err := Run(context.Background(), root, []string{"doctor", "--format", "yaml"}, strings.NewReader(""), &stdout)
 	if err == nil {
 		t.Fatalf("Run(doctor --format yaml) error = nil, want rejection")
+	}
+	if !strings.Contains(err.Error(), `doctor: unsupported format "yaml"`) {
+		t.Fatalf("Run(doctor --format yaml) error = %v, want clear unsupported-format message", err)
+	}
+}
+
+func TestRunDoctorReportAliasWritesOperatorReport(t *testing.T) {
+	t.Parallel()
+
+	root := createRuntimeRoot(t)
+
+	var stdout bytes.Buffer
+	if err := Run(context.Background(), root, []string{"doctor", "--report"}, strings.NewReader(""), &stdout); err != nil {
+		t.Fatalf("Run(doctor --report) error = %v", err)
+	}
+
+	if !strings.Contains(stdout.String(), "## Current Health Snapshot") {
+		t.Fatalf("doctor report alias output = %q, want report heading", stdout.String())
 	}
 }
 

@@ -2,6 +2,31 @@ package health
 
 import "testing"
 
+func TestBuildOperatorReportOmitsHealthyChecksFromOperatorSections(t *testing.T) {
+	raw := Report{
+		Status: StatusHealthy,
+		Checks: []Check{
+			{Name: "executor", Status: StatusHealthy, Summary: "executor health is fresh"},
+			{Name: "queue", Status: StatusHealthy, Summary: "queue pressure is within threshold"},
+		},
+	}
+
+	got := BuildOperatorReport(raw)
+
+	if len(got.Findings) != 0 {
+		t.Fatalf("Findings len = %d, want 0 for healthy checks", len(got.Findings))
+	}
+	if len(got.RootCauses) != 0 {
+		t.Fatalf("RootCauses len = %d, want 0 for healthy checks", len(got.RootCauses))
+	}
+	if len(got.Recommendations.Immediate) != 0 || len(got.Recommendations.NearTerm) != 0 || len(got.Recommendations.Strategic) != 0 {
+		t.Fatalf("Recommendations = %#v, want none for healthy checks", got.Recommendations)
+	}
+	if got.CurrentHealth.Status != StatusHealthy || got.CurrentHealth.ChecksEvaluated != 2 {
+		t.Fatalf("CurrentHealth = %+v, want healthy snapshot with 2 checks evaluated", got.CurrentHealth)
+	}
+}
+
 func TestBuildOperatorReportRanksFailuresBeforeDegradedFindings(t *testing.T) {
 	raw := Report{
 		Status: StatusFailed,

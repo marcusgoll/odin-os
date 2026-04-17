@@ -234,6 +234,10 @@ func BuildOperatorReport(raw Report) OperatorReport {
 }
 
 func classifyCheck(check Check) (*Finding, *RootCause, *Recommendation, string, string) {
+	if check.Status == StatusHealthy {
+		return nil, nil, nil, "", ""
+	}
+
 	rule, ok := lookupReportRule(check)
 	if !ok {
 		return nil, nil, nil, "", ""
