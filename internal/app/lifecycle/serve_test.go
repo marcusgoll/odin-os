@@ -43,6 +43,33 @@ func TestRunDoctorJSONWritesStructuredReport(t *testing.T) {
 	}
 }
 
+func TestRunDoctorMarkdownWritesOperatorReport(t *testing.T) {
+	t.Parallel()
+
+	root := createRuntimeRoot(t)
+
+	var stdout bytes.Buffer
+	if err := Run(context.Background(), root, []string{"doctor", "--format", "markdown"}, strings.NewReader(""), &stdout); err != nil {
+		t.Fatalf("Run(doctor --format markdown) error = %v", err)
+	}
+
+	if !strings.Contains(stdout.String(), "## Current Health Snapshot") {
+		t.Fatalf("doctor markdown output = %q, want report heading", stdout.String())
+	}
+}
+
+func TestRunDoctorRejectsUnknownFormat(t *testing.T) {
+	t.Parallel()
+
+	root := createRuntimeRoot(t)
+
+	var stdout bytes.Buffer
+	err := Run(context.Background(), root, []string{"doctor", "--format", "yaml"}, strings.NewReader(""), &stdout)
+	if err == nil {
+		t.Fatalf("Run(doctor --format yaml) error = nil, want rejection")
+	}
+}
+
 func TestRunHealthcheckHealthyReturnsNil(t *testing.T) {
 	configureServeHarnessDriver(t)
 	root := createRuntimeRoot(t)
