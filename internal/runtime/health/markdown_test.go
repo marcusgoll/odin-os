@@ -3,6 +3,7 @@ package health
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestRenderMarkdownReportIncludesOperatorSections(t *testing.T) {
@@ -24,6 +25,42 @@ func TestRenderMarkdownReportIncludesOperatorSections(t *testing.T) {
 		if !strings.Contains(output, want) {
 			t.Fatalf("output missing %q\n%s", want, output)
 		}
+	}
+}
+
+func TestRenderMarkdownReportShowsImpactAndVerdictConfidence(t *testing.T) {
+	report := OperatorReport{
+		Status:      StatusDegraded,
+		GeneratedAt: time.Date(2026, time.April, 17, 7, 30, 0, 0, time.UTC),
+		Findings: []Finding{
+			{
+				Area:        "queue",
+				Severity:    SeverityMedium,
+				Observation: "queue pressure is above threshold",
+				Impact:      "queue pressure affects throughput and latency",
+				Confidence:  "reduced",
+			},
+		},
+		FinalVerdict: FinalVerdict{
+			Status:             StatusDegraded,
+			Summary:            "the system is operating with degraded subsystems and operator coverage is incomplete",
+			CoverageConfidence: "reduced",
+		},
+	}
+
+	output := RenderMarkdownReport(report)
+
+	if !strings.Contains(output, "| Area | Severity | Observation | Impact | Confidence | Evidence |") {
+		t.Fatalf("output missing impact column header\n%s", output)
+	}
+	if !strings.Contains(output, "queue pressure affects throughput and latency") {
+		t.Fatalf("output missing impact text\n%s", output)
+	}
+	if !strings.Contains(output, "| Status | degraded |") {
+		t.Fatalf("output missing verdict status row\n%s", output)
+	}
+	if !strings.Contains(output, "| Coverage Confidence | reduced |") {
+		t.Fatalf("output missing verdict confidence row\n%s", output)
 	}
 }
 
@@ -58,12 +95,12 @@ func TestRenderMarkdownReportOrdersFindingsBeforeRecommendations(t *testing.T) {
 	report := OperatorReport{
 		Findings: []Finding{
 			{
-				Area:         "database",
-				Severity:     SeverityCritical,
-				Observation:  "database connectivity failed",
-				WhyItMatters: "database access is required for runtime health decisions",
-				Confidence:   "high",
-				Evidence:     []string{"check summary: database connectivity failed"},
+				Area:        "database",
+				Severity:    SeverityCritical,
+				Observation: "database connectivity failed",
+				Impact:      "database access is required for runtime health decisions",
+				Confidence:  "high",
+				Evidence:    []string{"check summary: database connectivity failed"},
 			},
 		},
 		Recommendations: RecommendationGroups{
@@ -94,7 +131,7 @@ func TestRenderMarkdownReportOrdersFindingsBeforeRecommendations(t *testing.T) {
 		}
 		lastIdx = idx
 	}
-	if !strings.Contains(output, "| Area | Severity | Observation | Why It Matters | Confidence | Evidence |") {
+	if !strings.Contains(output, "| Area | Severity | Observation | Impact | Confidence | Evidence |") {
 		t.Fatalf("output missing findings table header\n%s", output)
 	}
 }
@@ -103,11 +140,11 @@ func TestRenderMarkdownReportRendersFindingEvidence(t *testing.T) {
 	report := OperatorReport{
 		Findings: []Finding{
 			{
-				Area:         "queue",
-				Severity:     SeverityMedium,
-				Observation:  "queue pressure is above threshold",
-				WhyItMatters: "queue pressure affects throughput and latency",
-				Confidence:   "high",
+				Area:        "queue",
+				Severity:    SeverityMedium,
+				Observation: "queue pressure is above threshold",
+				Impact:      "queue pressure affects throughput and latency",
+				Confidence:  "high",
 				Evidence: []string{
 					"check summary: queue pressure is above threshold",
 					"observed at: 2026-04-17T05:22:00Z",
@@ -123,7 +160,7 @@ func TestRenderMarkdownReportRendersFindingEvidence(t *testing.T) {
 
 	output := RenderMarkdownReport(report)
 
-	if !strings.Contains(output, "| Area | Severity | Observation | Why It Matters | Confidence | Evidence |") {
+	if !strings.Contains(output, "| Area | Severity | Observation | Impact | Confidence | Evidence |") {
 		t.Fatalf("output missing evidence column header\n%s", output)
 	}
 	if !strings.Contains(output, "check summary: queue pressure is above threshold<br>observed at: 2026-04-17T05:22:00Z<br>detail queued_tasks: 12") {

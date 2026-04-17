@@ -23,7 +23,8 @@ type Finding struct {
 	Area         string   `json:"area"`
 	Severity     Severity `json:"severity"`
 	Observation  string   `json:"observation"`
-	WhyItMatters string   `json:"why_it_matters"`
+	Impact       string   `json:"impact"`
+	WhyItMatters string   `json:"-"`
 	Confidence   string   `json:"confidence"`
 	Evidence     []string `json:"evidence,omitempty"`
 	SourceStatus Status   `json:"-"`
@@ -57,11 +58,14 @@ type CoverageMetadata struct {
 }
 
 type FinalVerdict struct {
-	Status  Status `json:"status"`
-	Summary string `json:"summary"`
+	Status             Status `json:"status"`
+	Summary            string `json:"summary"`
+	CoverageConfidence string `json:"coverage_confidence"`
 }
 
 type OperatorReport struct {
+	Status           Status                `json:"status"`
+	GeneratedAt      time.Time             `json:"generated_at"`
 	CurrentHealth    CurrentHealthSnapshot `json:"current_health"`
 	Coverage         CoverageMetadata      `json:"coverage"`
 	Findings         []Finding             `json:"findings"`
@@ -232,6 +236,8 @@ var operatorReportRules = map[string]map[reportRuleKey]reportRule{
 
 func BuildOperatorReport(raw Report) OperatorReport {
 	report := OperatorReport{
+		Status:      raw.Status,
+		GeneratedAt: raw.GeneratedAt,
 		CurrentHealth: CurrentHealthSnapshot{
 			Status:          raw.Status,
 			GeneratedAt:     raw.GeneratedAt,
@@ -312,6 +318,7 @@ func classifyCheck(check Check, match reportRuleMatch) (*Finding, *RootCause, *R
 		Area:         check.Name,
 		Severity:     rule.Severity,
 		Observation:  check.Summary,
+		Impact:       rule.WhyItMatters,
 		WhyItMatters: rule.WhyItMatters,
 		Confidence:   rule.Confidence,
 		Evidence:     buildFindingEvidence(check, match),
@@ -438,25 +445,16 @@ func shouldMarkCoverageUnknown(check Check, match reportRuleMatch) bool {
 
 func synthesizeFinalVerdict(report OperatorReport) FinalVerdict {
 	rawStatus := report.CurrentHealth.Status
-	status := rawStatus
 	coverageUncertain := hasCoverageUncertainty(report)
 
-	if coverageUncertain {
-		switch status {
-		case StatusHealthy:
-			status = StatusDegraded
-		case StatusDegraded:
-			status = StatusFailed
-		}
-	}
-
 	return FinalVerdict{
-		Status:  status,
-		Summary: verdictSummaryForReport(status, rawStatus == StatusHealthy, coverageUncertain),
+		Status:             rawStatus,
+		Summary:            verdictSummaryForReport(rawStatus, coverageUncertain),
+		CoverageConfidence: verdictCoverageConfidence(coverageUncertain),
 	}
 }
 
-func verdictSummaryForReport(status Status, healthyRaw bool, coverageUncertain bool) string {
+func verdictSummaryForReport(status Status, coverageUncertain bool) string {
 	switch status {
 	case StatusFailed:
 		if coverageUncertain {
@@ -464,16 +462,23 @@ func verdictSummaryForReport(status Status, healthyRaw bool, coverageUncertain b
 		}
 		return "one or more critical checks failed"
 	case StatusDegraded:
-		if healthyRaw && coverageUncertain {
-			return "health is good, but operator coverage is incomplete"
-		}
 		if coverageUncertain {
 			return "the system is operating with degraded subsystems and operator coverage is incomplete"
 		}
 		return "the system is operating with degraded subsystems"
 	default:
+		if coverageUncertain {
+			return "health is good, but operator coverage is incomplete"
+		}
 		return "all evaluated checks are healthy"
 	}
+}
+
+func verdictCoverageConfidence(coverageUncertain bool) string {
+	if coverageUncertain {
+		return "reduced"
+	}
+	return "high"
 }
 
 func hasCoverageUncertainty(report OperatorReport) bool {

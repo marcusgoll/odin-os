@@ -27,14 +27,14 @@ func RenderMarkdownReport(report OperatorReport) string {
 	if len(report.Findings) == 0 {
 		builder.WriteString("No major issues detected\n\n")
 	} else {
-		builder.WriteString("| Area | Severity | Observation | Why It Matters | Confidence | Evidence |\n")
+		builder.WriteString("| Area | Severity | Observation | Impact | Confidence | Evidence |\n")
 		builder.WriteString("| --- | --- | --- | --- | --- | --- |\n")
 		for _, finding := range report.Findings {
 			writeTableRow(&builder,
 				finding.Area,
 				string(finding.Severity),
 				finding.Observation,
-				finding.WhyItMatters,
+				finding.Impact,
 				finding.Confidence,
 				joinEvidence(finding.Evidence),
 			)
@@ -72,6 +72,7 @@ func RenderMarkdownReport(report OperatorReport) string {
 	builder.WriteString("| --- | --- |\n")
 	writeTableRow(&builder, "Status", string(report.FinalVerdict.Status))
 	writeTableRow(&builder, "Summary", report.FinalVerdict.Summary)
+	writeTableRow(&builder, "Coverage Confidence", report.FinalVerdict.CoverageConfidence)
 
 	return builder.String()
 }

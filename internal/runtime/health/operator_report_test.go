@@ -1,9 +1,46 @@
 package health
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 )
+
+func TestBuildOperatorReportPopulatesTopLevelStatusAndGeneratedAt(t *testing.T) {
+	generatedAt := time.Date(2026, time.April, 17, 7, 30, 0, 0, time.UTC)
+	raw := Report{
+		Status:      StatusFailed,
+		GeneratedAt: generatedAt,
+		Checks: []Check{
+			{Name: "database", Status: StatusFailed, Summary: "database connectivity failed"},
+		},
+	}
+
+	got := BuildOperatorReport(raw)
+
+	if got.Status != StatusFailed {
+		t.Fatalf("Status = %q, want %q", got.Status, StatusFailed)
+	}
+	if !got.GeneratedAt.Equal(generatedAt) {
+		t.Fatalf("GeneratedAt = %s, want %s", got.GeneratedAt, generatedAt)
+	}
+
+	encoded, err := json.Marshal(got)
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+
+	var decoded map[string]any
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	if decoded["status"] != string(StatusFailed) {
+		t.Fatalf("decoded status = %v, want %q", decoded["status"], StatusFailed)
+	}
+	if _, ok := decoded["generated_at"]; !ok {
+		t.Fatalf("decoded report missing generated_at field")
+	}
+}
 
 func TestBuildOperatorReportIncludesEvidenceReferences(t *testing.T) {
 	raw := Report{
@@ -27,6 +64,12 @@ func TestBuildOperatorReportIncludesEvidenceReferences(t *testing.T) {
 	if len(got.Findings) != 1 {
 		t.Fatalf("Findings len = %d, want 1", len(got.Findings))
 	}
+	if got.Findings[0].Impact == "" {
+		t.Fatalf("Finding.Impact = %q, want non-empty impact text", got.Findings[0].Impact)
+	}
+	if got.Findings[0].WhyItMatters == "" {
+		t.Fatalf("Finding.WhyItMatters = %q, want compatibility text retained", got.Findings[0].WhyItMatters)
+	}
 
 	want := []string{
 		"check summary: queue pressure is above threshold",
@@ -48,7 +91,7 @@ func TestBuildOperatorReportIncludesEvidenceReferences(t *testing.T) {
 	}
 }
 
-func TestBuildOperatorReportDowngradesHealthyRawVerdictWhenCoverageIsUnknown(t *testing.T) {
+func TestBuildOperatorReportKeepsHealthyRawVerdictHealthyWhenCoverageIsUnknown(t *testing.T) {
 	raw := Report{
 		Status: StatusHealthy,
 		Checks: []Check{
@@ -62,15 +105,18 @@ func TestBuildOperatorReportDowngradesHealthyRawVerdictWhenCoverageIsUnknown(t *
 
 	got := BuildOperatorReport(raw)
 
-	if got.FinalVerdict.Status != StatusDegraded {
-		t.Fatalf("FinalVerdict.Status = %q, want %q", got.FinalVerdict.Status, StatusDegraded)
+	if got.FinalVerdict.Status != StatusHealthy {
+		t.Fatalf("FinalVerdict.Status = %q, want %q", got.FinalVerdict.Status, StatusHealthy)
+	}
+	if got.FinalVerdict.CoverageConfidence != "reduced" {
+		t.Fatalf("FinalVerdict.CoverageConfidence = %q, want %q", got.FinalVerdict.CoverageConfidence, "reduced")
 	}
 	if got.FinalVerdict.Summary != "health is good, but operator coverage is incomplete" {
 		t.Fatalf("FinalVerdict.Summary = %q, want %q", got.FinalVerdict.Summary, "health is good, but operator coverage is incomplete")
 	}
 }
 
-func TestBuildOperatorReportEscalatesDegradedRawVerdictWhenCoverageIsUnknown(t *testing.T) {
+func TestBuildOperatorReportKeepsDegradedRawVerdictDegradedWhenCoverageIsUnknown(t *testing.T) {
 	raw := Report{
 		Status: StatusDegraded,
 		Checks: []Check{
@@ -84,11 +130,14 @@ func TestBuildOperatorReportEscalatesDegradedRawVerdictWhenCoverageIsUnknown(t *
 
 	got := BuildOperatorReport(raw)
 
-	if got.FinalVerdict.Status != StatusFailed {
-		t.Fatalf("FinalVerdict.Status = %q, want %q", got.FinalVerdict.Status, StatusFailed)
+	if got.FinalVerdict.Status != StatusDegraded {
+		t.Fatalf("FinalVerdict.Status = %q, want %q", got.FinalVerdict.Status, StatusDegraded)
 	}
-	if got.FinalVerdict.Summary != "one or more critical checks failed and operator coverage is incomplete" {
-		t.Fatalf("FinalVerdict.Summary = %q, want %q", got.FinalVerdict.Summary, "one or more critical checks failed and operator coverage is incomplete")
+	if got.FinalVerdict.CoverageConfidence != "reduced" {
+		t.Fatalf("FinalVerdict.CoverageConfidence = %q, want %q", got.FinalVerdict.CoverageConfidence, "reduced")
+	}
+	if got.FinalVerdict.Summary != "the system is operating with degraded subsystems and operator coverage is incomplete" {
+		t.Fatalf("FinalVerdict.Summary = %q, want %q", got.FinalVerdict.Summary, "the system is operating with degraded subsystems and operator coverage is incomplete")
 	}
 }
 
@@ -108,6 +157,9 @@ func TestBuildOperatorReportKeepsFailedRawVerdictFailedWithoutCoverageUncertaint
 
 	if got.FinalVerdict.Status != StatusFailed {
 		t.Fatalf("FinalVerdict.Status = %q, want %q", got.FinalVerdict.Status, StatusFailed)
+	}
+	if got.FinalVerdict.CoverageConfidence != "high" {
+		t.Fatalf("FinalVerdict.CoverageConfidence = %q, want %q", got.FinalVerdict.CoverageConfidence, "high")
 	}
 	if got.FinalVerdict.Summary != "one or more critical checks failed" {
 		t.Fatalf("FinalVerdict.Summary = %q, want %q", got.FinalVerdict.Summary, "one or more critical checks failed")
@@ -130,6 +182,9 @@ func TestBuildOperatorReportKeepsHealthyRawVerdictHealthyWithoutCoverageUncertai
 
 	if got.FinalVerdict.Status != StatusHealthy {
 		t.Fatalf("FinalVerdict.Status = %q, want %q", got.FinalVerdict.Status, StatusHealthy)
+	}
+	if got.FinalVerdict.CoverageConfidence != "high" {
+		t.Fatalf("FinalVerdict.CoverageConfidence = %q, want %q", got.FinalVerdict.CoverageConfidence, "high")
 	}
 	if got.FinalVerdict.Summary != "all evaluated checks are healthy" {
 		t.Fatalf("FinalVerdict.Summary = %q, want %q", got.FinalVerdict.Summary, "all evaluated checks are healthy")
