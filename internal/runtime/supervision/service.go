@@ -5,11 +5,13 @@ import (
 	"fmt"
 	"time"
 
+	runtimejobs "odin-os/internal/runtime/jobs"
 	"odin-os/internal/store/sqlite"
 )
 
 type Service struct {
 	Store *sqlite.Store
+	Jobs  runtimejobs.Service
 	Now   func() time.Time
 }
 

@@ -3,6 +3,7 @@ package jobs
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -36,6 +37,30 @@ type Service struct {
 	Now                 func() time.Time
 }
 
+type DelegationAdmissionInput struct {
+	ParentTask            sqlite.Task
+	ParentRunID           *int64
+	Companion             sqlite.Companion
+	RequestedTools        []string
+	RequestedMemoryScopes []string
+	PreferredExecutor     string
+}
+
+type DelegationMemoryView struct {
+	Mode         string   `json:"mode"`
+	Scopes       []string `json:"scopes"`
+	WorkspaceID  *int64   `json:"workspace_id,omitempty"`
+	InitiativeID *int64   `json:"initiative_id,omitempty"`
+	CompanionID  *int64   `json:"companion_id,omitempty"`
+	ParentRunID  *int64   `json:"parent_run_id,omitempty"`
+}
+
+type DelegationAdmissionProfile struct {
+	Executor     string               `json:"executor"`
+	AllowedTools []string             `json:"allowed_tools"`
+	MemoryView   DelegationMemoryView `json:"memory_view"`
+}
+
 type admissionOutcome string
 
 const (
@@ -51,6 +76,38 @@ type admissionDecision struct {
 	BlockedReason  string
 	LastError      string
 	NextEligibleAt time.Time
+}
+
+func (service Service) NarrowDelegationAdmission(input DelegationAdmissionInput) (DelegationAdmissionProfile, error) {
+	if input.ParentTask.ID <= 0 {
+		return DelegationAdmissionProfile{}, fmt.Errorf("parent task is required")
+	}
+
+	allowedTools, err := intersectAllowedTools(input.Companion.ToolPolicyJSON, input.RequestedTools)
+	if err != nil {
+		return DelegationAdmissionProfile{}, err
+	}
+
+	memoryMode, err := delegationMemoryMode(input.Companion.MemoryPolicyJSON)
+	if err != nil {
+		return DelegationAdmissionProfile{}, err
+	}
+
+	scopes := intersectMemoryScopes(input.ParentTask, input.ParentRunID, input.RequestedMemoryScopes)
+	memoryView := DelegationMemoryView{
+		Mode:         memoryMode,
+		Scopes:       scopes,
+		WorkspaceID:  pointerIfScope(scopes, "workspace", input.ParentTask.WorkspaceID),
+		InitiativeID: pointerIfScope(scopes, "initiative", input.ParentTask.InitiativeID),
+		CompanionID:  pointerIfScope(scopes, "companion", input.ParentTask.CompanionID),
+		ParentRunID:  pointerIfScope(scopes, "run", input.ParentRunID),
+	}
+
+	return DelegationAdmissionProfile{
+		Executor:     service.defaultDelegationExecutor(input.PreferredExecutor),
+		AllowedTools: allowedTools,
+		MemoryView:   memoryView,
+	}, nil
 }
 
 func (service Service) List(ctx context.Context, resolved scope.Resolution) ([]projections.TaskStatusView, error) {
@@ -410,6 +467,170 @@ func normalizeRouteName(targetKey string) string {
 		return "default"
 	}
 	return targetKey
+}
+
+func (service Service) defaultDelegationExecutor(preferred string) string {
+	preferred = strings.TrimSpace(preferred)
+	if preferred != "" {
+		return preferred
+	}
+	if _, ok := service.Executors["codex_headless"]; ok {
+		return "codex_headless"
+	}
+	if len(service.ExecutorConfig.Executors) > 0 {
+		for _, executor := range service.ExecutorConfig.Executors {
+			if strings.TrimSpace(executor.Key) != "" {
+				return executor.Key
+			}
+		}
+	}
+	return "codex_headless"
+}
+
+func intersectAllowedTools(rawPolicy string, requested []string) ([]string, error) {
+	type toolPolicy struct {
+		Allow []string `json:"allow"`
+	}
+
+	policy := toolPolicy{}
+	trimmed := strings.TrimSpace(rawPolicy)
+	if trimmed != "" && trimmed != "{}" {
+		if err := json.Unmarshal([]byte(trimmed), &policy); err != nil {
+			return nil, fmt.Errorf("invalid companion tool policy JSON: %w", err)
+		}
+	}
+
+	allowed := uniqueStrings(policy.Allow)
+	if len(requested) == 0 {
+		return allowed, nil
+	}
+	if len(allowed) == 0 {
+		return uniqueStrings(requested), nil
+	}
+
+	allowedSet := make(map[string]struct{}, len(allowed))
+	for _, tool := range allowed {
+		allowedSet[tool] = struct{}{}
+	}
+
+	filtered := make([]string, 0, len(requested))
+	seen := make(map[string]struct{}, len(requested))
+	for _, tool := range requested {
+		tool = strings.TrimSpace(tool)
+		if tool == "" {
+			continue
+		}
+		if _, ok := allowedSet[tool]; !ok {
+			continue
+		}
+		if _, ok := seen[tool]; ok {
+			continue
+		}
+		seen[tool] = struct{}{}
+		filtered = append(filtered, tool)
+	}
+	return filtered, nil
+}
+
+func delegationMemoryMode(rawPolicy string) (string, error) {
+	type memoryPolicy struct {
+		Mode string `json:"mode"`
+	}
+
+	policy := memoryPolicy{Mode: "companion"}
+	trimmed := strings.TrimSpace(rawPolicy)
+	if trimmed == "" || trimmed == "{}" {
+		return policy.Mode, nil
+	}
+	if err := json.Unmarshal([]byte(trimmed), &policy); err != nil {
+		return "", fmt.Errorf("invalid companion memory policy JSON: %w", err)
+	}
+	policy.Mode = strings.TrimSpace(policy.Mode)
+	if policy.Mode == "" {
+		policy.Mode = "companion"
+	}
+	return policy.Mode, nil
+}
+
+func intersectMemoryScopes(parentTask sqlite.Task, parentRunID *int64, requested []string) []string {
+	available := availableMemoryScopes(parentTask, parentRunID)
+	if len(requested) == 0 {
+		return available
+	}
+
+	availableSet := make(map[string]struct{}, len(available))
+	for _, scope := range available {
+		availableSet[scope] = struct{}{}
+	}
+
+	filtered := make([]string, 0, len(requested))
+	seen := make(map[string]struct{}, len(requested))
+	for _, scope := range requested {
+		scope = strings.TrimSpace(scope)
+		if scope == "" {
+			continue
+		}
+		if _, ok := availableSet[scope]; !ok {
+			continue
+		}
+		if _, ok := seen[scope]; ok {
+			continue
+		}
+		seen[scope] = struct{}{}
+		filtered = append(filtered, scope)
+	}
+	return filtered
+}
+
+func availableMemoryScopes(parentTask sqlite.Task, parentRunID *int64) []string {
+	scopes := make([]string, 0, 4)
+	if parentTask.WorkspaceID != nil {
+		scopes = append(scopes, "workspace")
+	}
+	if parentTask.InitiativeID != nil {
+		scopes = append(scopes, "initiative")
+	}
+	if parentTask.CompanionID != nil {
+		scopes = append(scopes, "companion")
+	}
+	if parentRunID != nil {
+		scopes = append(scopes, "run")
+	}
+	return scopes
+}
+
+func uniqueStrings(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	filtered := make([]string, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		filtered = append(filtered, value)
+	}
+	return filtered
+}
+
+func pointerIfScope(scopes []string, required string, value *int64) *int64 {
+	if value == nil {
+		return nil
+	}
+	for _, scope := range scopes {
+		if scope != required {
+			continue
+		}
+		copied := *value
+		return &copied
+	}
+	return nil
 }
 
 func (service Service) admitTask(ctx context.Context, task sqlite.Task, project sqlite.Project, manifest projects.Manifest, executorKey string) (admissionDecision, error) {

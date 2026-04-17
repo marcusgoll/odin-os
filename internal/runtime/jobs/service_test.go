@@ -389,6 +389,137 @@ func TestExecuteNextQueuedBlocksWhenExecutorHealthIsDegraded(t *testing.T) {
 	}
 }
 
+func TestDelegationAdmissionNarrowsChildPermissionsRelativeToParentAndCompanion(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openJobStore(t)
+	defer store.Close()
+
+	workspace, err := store.CreateWorkspace(ctx, sqlite.CreateWorkspaceParams{
+		Key:                 "jobs-workspace",
+		Name:                "Jobs Workspace",
+		OwnerRef:            "marcus",
+		DefaultCompanionKey: "primary",
+		Status:              "active",
+		PolicyJSON:          `{}`,
+	})
+	if err != nil {
+		t.Fatalf("CreateWorkspace() error = %v", err)
+	}
+	initiative, err := store.UpsertInitiative(ctx, sqlite.UpsertInitiativeParams{
+		WorkspaceID: workspace.ID,
+		Key:         "jobs-initiative",
+		Title:       "Jobs Initiative",
+		Kind:        "delivery",
+		Status:      "active",
+	})
+	if err != nil {
+		t.Fatalf("UpsertInitiative() error = %v", err)
+	}
+	companion, err := store.UpsertCompanion(ctx, sqlite.UpsertCompanionParams{
+		WorkspaceID:         workspace.ID,
+		Key:                 "builder",
+		Title:               "Builder",
+		Kind:                "assistant",
+		Charter:             "Coordinates child work",
+		Status:              "active",
+		InitiativeScopeJSON: `{"allow":["jobs-initiative"]}`,
+		ToolPolicyJSON:      `{"allow":["repo_read","branch_proposal"]}`,
+		MemoryPolicyJSON:    `{"mode":"initiative"}`,
+		PlanningPolicyJSON:  `{"swarm":{"max_children":2}}`,
+	})
+	if err != nil {
+		t.Fatalf("UpsertCompanion() error = %v", err)
+	}
+
+	project, err := store.CreateProject(ctx, sqlite.CreateProjectParams{
+		Key:           "jobs-project",
+		Name:          "Jobs Project",
+		Scope:         "project",
+		GitRoot:       "/tmp/jobs-project",
+		DefaultBranch: "main",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+
+	task, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:    project.ID,
+		Key:          "parent-task",
+		Title:        "Parent task",
+		ActionKey:    "execute",
+		Status:       "queued",
+		Scope:        "project",
+		RequestedBy:  "operator",
+		WorkspaceID:  &workspace.ID,
+		InitiativeID: &initiative.ID,
+		CompanionID:  &companion.ID,
+		WorkKind:     "project",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+
+	run, err := store.StartRun(ctx, sqlite.StartRunParams{
+		TaskID:     task.ID,
+		Executor:   "codex_headless",
+		Attempt:    1,
+		Status:     "running",
+		TaskStatus: "running",
+	})
+	if err != nil {
+		t.Fatalf("StartRun() error = %v", err)
+	}
+
+	service := Service{
+		Store:          store,
+		Executors:      testJobExecutors(),
+		ExecutorConfig: mustLoadExecutorConfig(t),
+	}
+
+	profile, err := service.NarrowDelegationAdmission(DelegationAdmissionInput{
+		ParentTask:            task,
+		ParentRunID:           &run.ID,
+		Companion:             companion,
+		RequestedTools:        []string{"repo_read", "merge_to_main", "branch_proposal"},
+		RequestedMemoryScopes: []string{"workspace", "initiative", "global", "companion", "run"},
+		PreferredExecutor:     "",
+	})
+	if err != nil {
+		t.Fatalf("NarrowDelegationAdmission() error = %v", err)
+	}
+
+	if profile.Executor != "codex_headless" {
+		t.Fatalf("Executor = %q, want codex_headless", profile.Executor)
+	}
+	wantTools := []string{"repo_read", "branch_proposal"}
+	if len(profile.AllowedTools) != len(wantTools) {
+		t.Fatalf("AllowedTools len = %d, want %d", len(profile.AllowedTools), len(wantTools))
+	}
+	for i, want := range wantTools {
+		if profile.AllowedTools[i] != want {
+			t.Fatalf("AllowedTools[%d] = %q, want %q", i, profile.AllowedTools[i], want)
+		}
+	}
+	if profile.MemoryView.Mode != "initiative" {
+		t.Fatalf("MemoryView.Mode = %q, want initiative", profile.MemoryView.Mode)
+	}
+	wantScopes := []string{"workspace", "initiative", "companion", "run"}
+	if len(profile.MemoryView.Scopes) != len(wantScopes) {
+		t.Fatalf("MemoryView.Scopes len = %d, want %d", len(profile.MemoryView.Scopes), len(wantScopes))
+	}
+	for i, want := range wantScopes {
+		if profile.MemoryView.Scopes[i] != want {
+			t.Fatalf("MemoryView.Scopes[%d] = %q, want %q", i, profile.MemoryView.Scopes[i], want)
+		}
+	}
+	if profile.MemoryView.ParentRunID == nil || *profile.MemoryView.ParentRunID != run.ID {
+		t.Fatalf("MemoryView.ParentRunID = %v, want %d", profile.MemoryView.ParentRunID, run.ID)
+	}
+}
+
 func TestInterruptDispatchCreatesResumableWakePacket(t *testing.T) {
 	t.Parallel()
 
