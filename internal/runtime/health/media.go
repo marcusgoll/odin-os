@@ -30,7 +30,7 @@ func (checks MediaChecks) Checks(ctx context.Context, _ Config, now time.Time) (
 		if err != nil {
 			results = append(results, Check{
 				Name:       "media.probe",
-				Status:     StatusDegraded,
+				Status:     StatusFailed,
 				Summary:    "media probe command failed",
 				ObservedAt: now,
 				Details:    map[string]string{"error": err.Error()},

@@ -38,6 +38,20 @@ func TestMediaChecksFailOnMountMismatch(t *testing.T) {
 	assertCheckStatus(t, checks, "media.mounts", StatusFailed)
 }
 
+func TestMediaChecksFailWhenProbeCommandErrors(t *testing.T) {
+	t.Parallel()
+
+	checks, err := MediaChecks{
+		Config:       enabledMediaConfig(),
+		ProbeCommand: "/definitely/missing/media-probe-command",
+	}.Checks(context.Background(), DefaultConfig(), nowFixture())
+	if err != nil {
+		t.Fatalf("Checks() error = %v", err)
+	}
+
+	assertCheckStatus(t, checks, "media.probe", StatusFailed)
+}
+
 func TestMediaChecksDegradeWhenPlexIsUnreachable(t *testing.T) {
 	t.Parallel()
 

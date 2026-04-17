@@ -103,6 +103,33 @@ func TestOperationalHandlerFailsReadyzWhenMediaProfileFailsClosed(t *testing.T) 
 	assertReportStatus(t, server.URL+"/readyz", http.StatusServiceUnavailable, "failed")
 }
 
+func TestOperationalHandlerFailsReadyzWhenMediaProbeCommandFails(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openStore(t)
+	defer store.Close()
+	seedHealthyObservability(t, ctx, store)
+
+	server := httptest.NewServer(httpapi.NewOperationalHandler(httpapi.Dependencies{
+		Health: healthsvc.Service{
+			DB: store.DB(),
+			Media: &healthsvc.MediaChecks{
+				Config:       healthMediaConfig(),
+				ProbeCommand: "/definitely/missing/media-probe-command",
+			},
+		},
+		Metrics: metricsvc.Service{
+			DB: store.DB(),
+		},
+		RegistryHealthy: true,
+	}))
+	defer server.Close()
+
+	assertReportStatus(t, server.URL+"/healthz", http.StatusOK, "failed")
+	assertReportStatus(t, server.URL+"/readyz", http.StatusServiceUnavailable, "failed")
+}
+
 func openStore(t *testing.T) *sqlite.Store {
 	t.Helper()
 
