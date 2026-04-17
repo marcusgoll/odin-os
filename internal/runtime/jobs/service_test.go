@@ -9,6 +9,7 @@ import (
 
 	"odin-os/internal/cli/scope"
 	"odin-os/internal/core/projects"
+	"odin-os/internal/executors/contract"
 	"odin-os/internal/executors/router"
 	"odin-os/internal/store/sqlite"
 	"odin-os/internal/vcs/leases"
@@ -291,6 +292,86 @@ func TestRetryBackoffSkipsTaskUntilEligible(t *testing.T) {
 	}
 }
 
+func TestExecuteNextQueuedRequeuesTransientExecutorFailureWithBackoff(t *testing.T) {
+	ctx := context.Background()
+	store := openJobStore(t)
+	defer store.Close()
+
+	registry := writeRegistry(t)
+	now := time.Date(2026, 4, 17, 10, 0, 0, 0, time.UTC)
+	store.Now = func() time.Time { return now }
+
+	service := Service{
+		Store:    store,
+		Registry: registry,
+		Executors: map[string]contract.Executor{
+			"codex_headless": transientFailureExecutor{},
+		},
+		ExecutorConfig: mustLoadExecutorConfig(t),
+		Transitions:    projects.Service{Store: store},
+		Leases: leases.Manager{
+			Store:        store,
+			Git:          &jobTestGit{},
+			WorktreeRoot: t.TempDir(),
+		},
+		Now: func() time.Time { return now },
+	}
+
+	project, err := store.CreateProject(ctx, sqlite.CreateProjectParams{
+		Key:           "alpha",
+		Name:          "Alpha",
+		Scope:         "project",
+		GitRoot:       "/tmp/alpha",
+		DefaultBranch: "main",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+
+	if _, err := (projects.Service{Store: store}).SetTransitionState(ctx, projects.TransitionStateInput{
+		ProjectID:   project.ID,
+		Actor:       projects.TransitionControllerOdinOS,
+		TargetState: projects.TransitionStateCutover,
+		ChangedBy:   "test",
+	}); err != nil {
+		t.Fatalf("SetTransitionState(cutover) error = %v", err)
+	}
+
+	task, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "transient-failure",
+		Title:       "Retry me",
+		Status:      "queued",
+		Scope:       "project",
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+
+	if err := service.ExecuteNextQueued(ctx); err != nil {
+		t.Fatalf("ExecuteNextQueued() error = %v", err)
+	}
+
+	gotTask, err := store.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
+	}
+	if gotTask.Status != "queued" {
+		t.Fatalf("Task.Status = %q, want queued", gotTask.Status)
+	}
+	if gotTask.RetryCount != 1 {
+		t.Fatalf("RetryCount = %d, want 1", gotTask.RetryCount)
+	}
+	if gotTask.LastError != "temporary executor outage" {
+		t.Fatalf("LastError = %q, want temporary executor outage", gotTask.LastError)
+	}
+	if gotTask.NextEligibleAt != now.Add(time.Second) {
+		t.Fatalf("NextEligibleAt = %v, want %v", gotTask.NextEligibleAt, now.Add(time.Second))
+	}
+}
+
 type jobTestGit struct{}
 
 func (jobTestGit) BranchExists(context.Context, string, string) (bool, error) { return false, nil }
@@ -418,3 +499,51 @@ projects:
 
 	return registry
 }
+
+type transientFailureExecutor struct{}
+
+func (transientFailureExecutor) Key() string { return "codex_headless" }
+
+func (transientFailureExecutor) Class() contract.ExecutorClass {
+	return contract.ExecutorClassPlanBackedCLI
+}
+
+func (transientFailureExecutor) Health(context.Context) (contract.HealthReport, error) {
+	return contract.HealthReport{
+		Status:    contract.HealthStatusHealthy,
+		CheckedAt: time.Now().UTC(),
+	}, nil
+}
+
+func (transientFailureExecutor) Capabilities(context.Context) (contract.Capabilities, error) {
+	return contract.Capabilities{
+		ExecutorClass:        contract.ExecutorClassPlanBackedCLI,
+		SupportsHeadlessPlan: true,
+		TaskKinds: []contract.TaskKind{
+			contract.TaskKindGeneral,
+		},
+		Scopes: []string{"project"},
+	}, nil
+}
+
+func (transientFailureExecutor) RunTask(context.Context, contract.TaskSpec) (contract.ExecutionResult, error) {
+	return contract.ExecutionResult{}, transientExecutorError{}
+}
+
+func (transientFailureExecutor) ResumeTask(context.Context, contract.TaskHandle, contract.ResumePacket) (contract.ExecutionResult, error) {
+	return contract.ExecutionResult{}, contract.ErrNotImplemented
+}
+
+func (transientFailureExecutor) CancelTask(context.Context, contract.TaskHandle) error {
+	return nil
+}
+
+func (transientFailureExecutor) EstimateCost(context.Context, contract.TaskSpec) (contract.CostEstimate, error) {
+	return contract.CostEstimate{}, nil
+}
+
+type transientExecutorError struct{}
+
+func (transientExecutorError) Error() string   { return "temporary executor outage" }
+func (transientExecutorError) Timeout() bool   { return true }
+func (transientExecutorError) Temporary() bool { return true }

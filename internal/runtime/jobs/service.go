@@ -3,7 +3,9 @@ package jobs
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
+	"net"
 	"strings"
 	"time"
 
@@ -173,6 +175,31 @@ func (service Service) ExecuteNextQueued(ctx context.Context) error {
 		return cause
 	}
 
+	retryFailure := func(cause error) error {
+		if task.RetryCount+1 >= task.MaxAttempts {
+			return finishFailure(cause)
+		}
+
+		if _, err := service.Store.FinishRun(ctx, sqlite.FinishRunParams{
+			RunID:   run.ID,
+			Status:  "failed",
+			Summary: cause.Error(),
+		}); err != nil {
+			return err
+		}
+
+		nextRetryCount := task.RetryCount + 1
+		nextEligibleAt := service.now().Add(retryDelay(nextRetryCount))
+		if _, err := service.Store.IncrementTaskRetry(ctx, sqlite.IncrementTaskRetryParams{
+			TaskID:         task.ID,
+			LastError:      cause.Error(),
+			NextEligibleAt: nextEligibleAt,
+		}); err != nil {
+			return err
+		}
+		return nil
+	}
+
 	assignment := leases.Assignment{
 		Mode:         "read_only",
 		RepoRoot:     project.GitRoot,
@@ -220,6 +247,9 @@ func (service Service) ExecuteNextQueued(ctx context.Context) error {
 	executor := executors[decision.ExecutorKey]
 	result, err := executor.RunTask(ctx, spec)
 	if err != nil {
+		if isTransientFailure(err) {
+			return retryFailure(err)
+		}
 		return finishFailure(err)
 	}
 
@@ -404,6 +434,44 @@ func releaseAssignment(ctx context.Context, store *sqlite.Store, assignment leas
 		LeaseID: *assignment.LeaseID,
 		State:   "released",
 	})
+}
+
+func retryDelay(retryCount int) time.Duration {
+	if retryCount <= 1 {
+		return time.Second
+	}
+
+	delay := time.Second
+	for attempt := 1; attempt < retryCount; attempt++ {
+		if delay >= time.Minute {
+			return time.Minute
+		}
+		delay *= 2
+	}
+	if delay > time.Minute {
+		return time.Minute
+	}
+	return delay
+}
+
+func isTransientFailure(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+
+	var netErr net.Error
+	if errors.As(err, &netErr) && (netErr.Timeout() || netErr.Temporary()) {
+		return true
+	}
+
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "timeout") || strings.Contains(message, "temporar")
 }
 
 func slugify(input string) string {

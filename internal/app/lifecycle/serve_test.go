@@ -5,14 +5,17 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
 	"time"
 
+	"odin-os/internal/core/projects"
 	"odin-os/internal/runtime/checkpoints"
 	runtimeevents "odin-os/internal/runtime/events"
 	"odin-os/internal/store/sqlite"
@@ -488,6 +491,78 @@ service:
 	}
 }
 
+func TestRunServePromotesDelayedTasksAndDispatchesThem(t *testing.T) {
+	root := createRuntimeRoot(t)
+	writeRuntimeConfig(t, root, `
+version: 1
+runtime:
+  root: .
+service:
+  http_addr: 127.0.0.1:0
+  startup_recovery: false
+`)
+	writeMutableProjectsConfig(t, root)
+	initGitRepo(t, filepath.Join(root, "repos", "alpha"))
+	seedHealthyRuntime(t, root)
+	projectID, taskID := seedQueuedTask(t, root)
+
+	store, err := sqlite.Open(filepath.Join(root, "data", "odin.db"))
+	if err != nil {
+		t.Fatalf("sqlite.Open() error = %v", err)
+	}
+	defer store.Close()
+
+	if _, err := (projects.Service{Store: store}).SetTransitionState(context.Background(), projects.TransitionStateInput{
+		ProjectID:   projectID,
+		Actor:       projects.TransitionControllerOdinOS,
+		TargetState: projects.TransitionStateCutover,
+		ChangedBy:   "test",
+	}); err != nil {
+		t.Fatalf("SetTransitionState(cutover) error = %v", err)
+	}
+
+	delay := 150 * time.Millisecond
+	if _, err := store.RequeueTaskAt(context.Background(), sqlite.RequeueTaskAtParams{
+		TaskID:         taskID,
+		NextEligibleAt: time.Now().Add(delay),
+	}); err != nil {
+		t.Fatalf("RequeueTaskAt() error = %v", err)
+	}
+
+	originalTaskInterval := serveTaskLoopInterval
+	originalSchedulerInterval := serveSchedulerLoopInterval
+	serveTaskLoopInterval = 20 * time.Millisecond
+	serveSchedulerLoopInterval = 20 * time.Millisecond
+	defer func() {
+		serveTaskLoopInterval = originalTaskInterval
+		serveSchedulerLoopInterval = originalSchedulerInterval
+	}()
+
+	if err := os.MkdirAll(filepath.Join(root, "home"), 0o755); err != nil {
+		t.Fatalf("mkdir home: %v", err)
+	}
+	t.Setenv("HOME", filepath.Join(root, "home"))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	time.AfterFunc(700*time.Millisecond, cancel)
+
+	var stdout bytes.Buffer
+	err = Run(ctx, root, []string{"serve"}, strings.NewReader(""), &stdout)
+	if err != nil && !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run(serve) error = %v", err)
+	}
+
+	gotTask, err := store.GetTask(context.Background(), taskID)
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
+	}
+	if gotTask.Status != "completed" {
+		logPath := filepath.Join(root, "runs", "logs", "odin-service.log")
+		logContent, _ := os.ReadFile(logPath)
+		t.Fatalf("Task.Status = %q, want completed (last_error=%q retry_count=%d next_eligible_at=%v log=%s)", gotTask.Status, gotTask.LastError, gotTask.RetryCount, gotTask.NextEligibleAt, string(logContent))
+	}
+}
+
 func createRuntimeRoot(t *testing.T) string {
 	t.Helper()
 
@@ -566,6 +641,94 @@ routes:
 	}
 
 	return root
+}
+
+func writeMutableProjectsConfig(t *testing.T, root string) {
+	t.Helper()
+
+	repoRoot := filepath.Join(root, "repos", "alpha")
+
+	if err := os.WriteFile(filepath.Join(root, "config", "projects.yaml"), []byte(fmt.Sprintf(`
+version: 1
+projects:
+  - key: odin-core
+    name: Odin Core
+    project_class: system_project
+    system_project: true
+    git_root: %s
+    default_branch: main
+    policy:
+      allowed_commands: [status]
+      branch_rules:
+        protected_branches: [main]
+        require_worktree: true
+        require_task_branch: true
+        allow_default_branch_mutation: false
+      approval_gates:
+        require_for_governance_changes: true
+        require_for_destructive_operations: true
+        require_for_system_project_changes: true
+      merge_policy:
+        mode: squash
+        allow_direct_to_default_branch: false
+      destructive_operations:
+        allow_reset: false
+        allow_clean: false
+        allow_force_push: false
+        require_explicit_approval: true
+  - key: alpha
+    name: Alpha
+    project_class: github_backed_project
+    git_root: %s
+    default_branch: main
+    github:
+      repo: acme/alpha
+    policy:
+      allowed_commands: [status]
+      branch_rules:
+        protected_branches: [main]
+        require_worktree: true
+        require_task_branch: true
+        allow_default_branch_mutation: false
+      approval_gates:
+        require_for_governance_changes: true
+        require_for_destructive_operations: true
+        require_for_system_project_changes: false
+      merge_policy:
+        mode: squash
+        allow_direct_to_default_branch: false
+      destructive_operations:
+        allow_reset: false
+        allow_clean: false
+        allow_force_push: false
+        require_explicit_approval: true
+`, root, repoRoot)), 0o644); err != nil {
+		t.Fatalf("write projects config: %v", err)
+	}
+}
+
+func initGitRepo(t *testing.T, root string) {
+	t.Helper()
+
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatalf("mkdir repo root: %v", err)
+	}
+
+	run := func(args ...string) {
+		t.Helper()
+
+		cmd := exec.Command("git", args...)
+		cmd.Dir = root
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, string(output))
+		}
+	}
+
+	run("init", "-b", "main", ".")
+	run("config", "user.email", "test@example.com")
+	run("config", "user.name", "Test User")
+	run("commit", "--allow-empty", "-m", "initial commit")
 }
 
 func seedHealthyRuntime(t *testing.T, root string) {

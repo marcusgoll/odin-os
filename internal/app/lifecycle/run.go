@@ -24,6 +24,7 @@ import (
 	"odin-os/internal/runtime/jobs"
 	"odin-os/internal/runtime/recovery"
 	runtimestate "odin-os/internal/runtime/state"
+	"odin-os/internal/runtime/supervision"
 	"odin-os/internal/telemetry/logs"
 	metricsvc "odin-os/internal/telemetry/metrics"
 	gitadapter "odin-os/internal/vcs/git"
@@ -34,8 +35,9 @@ import (
 var errRuntimeNotReady = errors.New("runtime not ready")
 
 var (
-	serveTaskLoopInterval     = 1 * time.Second
-	serveSelfHealLoopInterval = 30 * time.Second
+	serveTaskLoopInterval      = 1 * time.Second
+	serveSchedulerLoopInterval = 5 * time.Second
+	serveSelfHealLoopInterval  = 30 * time.Second
 )
 
 // Run dispatches between the interactive shell and machine-oriented operational commands.
@@ -188,6 +190,10 @@ func runServe(ctx context.Context, app bootstrap.App, cfg appconfig.Config, stdo
 		HealthConfig:    healthsvc.DefaultConfig(),
 		Logger:          logger,
 	}
+	schedulerService := supervision.Service{
+		Store: app.Store,
+		Now:   time.Now,
+	}
 
 	listener, err := net.Listen("tcp", cfg.Service.HTTPAddr)
 	if err != nil {
@@ -208,8 +214,9 @@ func runServe(ctx context.Context, app bootstrap.App, cfg appconfig.Config, stdo
 	}
 
 	var background sync.WaitGroup
-	background.Add(2)
+	background.Add(3)
 	loopCtx, stopLoops := context.WithCancel(context.Background())
+	go runSchedulerLoop(loopCtx, operationCtx, &background, schedulerService, logger)
 	go runTaskLoop(loopCtx, operationCtx, &background, jobService, logger)
 	go runSelfHealLoop(loopCtx, operationCtx, &background, recoveryService, logger)
 	defer func() {
@@ -330,6 +337,35 @@ func runTaskLoop(ctx context.Context, operationCtx context.Context, wg *sync.Wai
 		case <-ticker.C:
 			if err := service.ExecuteNextQueued(operationCtx); err != nil {
 				logBackgroundError(logger, "task_runner", err)
+			}
+		}
+	}
+}
+
+func runSchedulerLoop(ctx context.Context, operationCtx context.Context, wg *sync.WaitGroup, service supervision.Service, logger *logs.Logger) {
+	defer wg.Done()
+
+	ticker := time.NewTicker(serveSchedulerLoopInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if result, err := service.Tick(operationCtx); err != nil {
+				logBackgroundError(logger, "scheduler", err)
+			} else if result.Promoted > 0 && logger != nil {
+				_ = logger.Log(logs.Record{
+					Level:         logs.LevelInfo,
+					Component:     "scheduler",
+					Message:       "scheduled delayed task promotion",
+					CorrelationID: "scheduler",
+					Scope:         "global",
+					Fields: map[string]any{
+						"promoted": result.Promoted,
+					},
+				})
 			}
 		}
 	}
