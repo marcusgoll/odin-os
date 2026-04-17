@@ -683,7 +683,7 @@ func TestRuntimeStateStoreLifecycleAndHeartbeat(t *testing.T) {
 		PID:             1234,
 		StartedAt:       bootAt,
 		LastHeartbeatAt: bootAt,
-	})
+	}, RuntimeStateWriteOptions{})
 	if err != nil {
 		t.Fatalf("UpsertRuntimeState(booting) error = %v", err)
 	}
@@ -702,7 +702,7 @@ func TestRuntimeStateStoreLifecycleAndHeartbeat(t *testing.T) {
 		ReadyAt:         &readyAt,
 		LastHeartbeatAt: readyAt,
 		UpdatedAt:       readyAt,
-	})
+	}, RuntimeStateWriteOptions{ExpectedBootID: "boot-1"})
 	if err != nil {
 		t.Fatalf("UpsertRuntimeState(ready) error = %v", err)
 	}
@@ -711,7 +711,7 @@ func TestRuntimeStateStoreLifecycleAndHeartbeat(t *testing.T) {
 	}
 
 	store.Now = func() time.Time { return heartbeatAt }
-	state, err = store.UpdateRuntimeHeartbeat(ctx)
+	state, err = store.UpdateRuntimeHeartbeat(ctx, "boot-1")
 	if err != nil {
 		t.Fatalf("UpdateRuntimeHeartbeat() error = %v", err)
 	}
@@ -728,7 +728,9 @@ func TestRuntimeStateStoreLifecycleAndHeartbeat(t *testing.T) {
 		LastHeartbeatAt:    heartbeatAt,
 		LastShutdownReason: "operator requested shutdown",
 		UpdatedAt:          stoppedAt,
-		EventReason:        "operator requested shutdown",
+	}, RuntimeStateWriteOptions{
+		ExpectedBootID: "boot-1",
+		EventReason:    "operator requested shutdown",
 	})
 	if err != nil {
 		t.Fatalf("UpsertRuntimeState(stopped) error = %v", err)

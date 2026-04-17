@@ -269,7 +269,11 @@ type UpsertRuntimeStateParams struct {
 	LastShutdownReason string
 	LastError          string
 	UpdatedAt          time.Time
-	EventReason        string
+}
+
+type RuntimeStateWriteOptions struct {
+	ExpectedBootID string
+	EventReason    string
 }
 
 type CreateWorktreeLeaseParams struct {

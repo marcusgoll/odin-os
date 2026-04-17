@@ -15,6 +15,7 @@ import (
 )
 
 var ErrWorktreeLeaseConflict = errors.New("worktree lease conflict")
+var ErrRuntimeStateBootMismatch = errors.New("runtime state boot mismatch")
 
 const (
 	runtimeStateSingletonKey = "primary"
@@ -1972,7 +1973,7 @@ func (store *Store) GetRuntimeState(ctx context.Context) (RuntimeState, error) {
 	return scanRuntimeState(row)
 }
 
-func (store *Store) UpsertRuntimeState(ctx context.Context, params UpsertRuntimeStateParams) (RuntimeState, error) {
+func (store *Store) UpsertRuntimeState(ctx context.Context, params UpsertRuntimeStateParams, options RuntimeStateWriteOptions) (RuntimeState, error) {
 	updatedAt := params.UpdatedAt.UTC()
 	if updatedAt.IsZero() {
 		updatedAt = store.now()
@@ -2009,6 +2010,15 @@ func (store *Store) UpsertRuntimeState(ctx context.Context, params UpsertRuntime
 	}
 
 	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		if options.ExpectedBootID != "" {
+			if _, err := getRuntimeStateForBootTx(ctx, tx, options.ExpectedBootID); err != nil {
+				return err
+			}
+			if params.BootID != "" && params.BootID != options.ExpectedBootID {
+				return ErrRuntimeStateBootMismatch
+			}
+		}
+
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO runtime_state (
 				singleton_key,
@@ -2056,7 +2066,7 @@ func (store *Store) UpsertRuntimeState(ctx context.Context, params UpsertRuntime
 			Payload: runtimeevents.ServiceLifecyclePayload{
 				BootID: state.BootID,
 				Status: state.Status,
-				Reason: params.EventReason,
+				Reason: options.EventReason,
 				PID:    state.PID,
 			},
 			OccurredAt: state.UpdatedAt,
@@ -2066,12 +2076,12 @@ func (store *Store) UpsertRuntimeState(ctx context.Context, params UpsertRuntime
 	return state, err
 }
 
-func (store *Store) UpdateRuntimeHeartbeat(ctx context.Context) (RuntimeState, error) {
+func (store *Store) UpdateRuntimeHeartbeat(ctx context.Context, expectedBootID string) (RuntimeState, error) {
 	now := store.now()
 	var state RuntimeState
 
 	err := store.withTx(ctx, func(tx *sql.Tx) error {
-		current, err := getRuntimeStateTx(ctx, tx)
+		current, err := getRuntimeStateForBootTx(ctx, tx, expectedBootID)
 		if err != nil {
 			return err
 		}
@@ -3208,6 +3218,20 @@ func getRuntimeStateTx(ctx context.Context, tx *sql.Tx) (RuntimeState, error) {
 		WHERE singleton_key = ?
 	`, runtimeStateSingletonKey)
 	return scanRuntimeState(row)
+}
+
+func getRuntimeStateForBootTx(ctx context.Context, tx *sql.Tx, expectedBootID string) (RuntimeState, error) {
+	current, err := getRuntimeStateTx(ctx, tx)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) && expectedBootID != "" {
+			return RuntimeState{}, ErrRuntimeStateBootMismatch
+		}
+		return RuntimeState{}, err
+	}
+	if expectedBootID != "" && current.BootID != expectedBootID {
+		return RuntimeState{}, ErrRuntimeStateBootMismatch
+	}
+	return current, nil
 }
 
 func incidentStatusEvent(previousStatus string, status string, reason string) (runtimeevents.Type, any, bool) {

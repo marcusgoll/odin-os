@@ -19,8 +19,13 @@ type BootInput struct {
 }
 
 type TransitionInput struct {
+	BootID string
 	Reason string
 	Error  string
+}
+
+type HeartbeatInput struct {
+	BootID string
 }
 
 func (service Service) MarkBooting(ctx context.Context, input BootInput) (sqlite.RuntimeState, error) {
@@ -41,7 +46,7 @@ func (service Service) MarkBooting(ctx context.Context, input BootInput) (sqlite
 		LastShutdownReason: "",
 		LastError:          "",
 		UpdatedAt:          now,
-	})
+	}, sqlite.RuntimeStateWriteOptions{})
 }
 
 func (service Service) MarkRecovering(ctx context.Context, input TransitionInput) (sqlite.RuntimeState, error) {
@@ -84,15 +89,21 @@ func (service Service) MarkStopped(ctx context.Context, input TransitionInput) (
 	return service.transition(ctx, "stopped", input, func(params *sqlite.UpsertRuntimeStateParams, now time.Time) {
 		params.LastHeartbeatAt = now
 		params.LastShutdownReason = input.Reason
+		if input.Error != "" {
+			params.LastError = input.Error
+		}
 	})
 }
 
-func (service Service) Heartbeat(ctx context.Context) (sqlite.RuntimeState, error) {
+func (service Service) Heartbeat(ctx context.Context, input HeartbeatInput) (sqlite.RuntimeState, error) {
 	if service.Store == nil {
 		return sqlite.RuntimeState{}, fmt.Errorf("runtime state store is required")
 	}
+	if input.BootID == "" {
+		return sqlite.RuntimeState{}, fmt.Errorf("boot_id is required")
+	}
 	if service.Now == nil {
-		return service.Store.UpdateRuntimeHeartbeat(ctx)
+		return service.Store.UpdateRuntimeHeartbeat(ctx, input.BootID)
 	}
 
 	originalNow := service.Store.Now
@@ -101,12 +112,15 @@ func (service Service) Heartbeat(ctx context.Context) (sqlite.RuntimeState, erro
 		service.Store.Now = originalNow
 	}()
 
-	return service.Store.UpdateRuntimeHeartbeat(ctx)
+	return service.Store.UpdateRuntimeHeartbeat(ctx, input.BootID)
 }
 
 func (service Service) transition(ctx context.Context, status string, input TransitionInput, mutate func(*sqlite.UpsertRuntimeStateParams, time.Time)) (sqlite.RuntimeState, error) {
 	if service.Store == nil {
 		return sqlite.RuntimeState{}, fmt.Errorf("runtime state store is required")
+	}
+	if input.BootID == "" {
+		return sqlite.RuntimeState{}, fmt.Errorf("boot_id is required")
 	}
 
 	current, err := service.Store.GetRuntimeState(ctx)
@@ -116,7 +130,7 @@ func (service Service) transition(ctx context.Context, status string, input Tran
 
 	now := service.now()
 	params := sqlite.UpsertRuntimeStateParams{
-		BootID:             current.BootID,
+		BootID:             input.BootID,
 		Status:             status,
 		PID:                current.PID,
 		StartedAt:          current.StartedAt,
@@ -125,13 +139,15 @@ func (service Service) transition(ctx context.Context, status string, input Tran
 		LastShutdownReason: current.LastShutdownReason,
 		LastError:          current.LastError,
 		UpdatedAt:          now,
-		EventReason:        transitionReason(input),
 	}
 	if mutate != nil {
 		mutate(&params, now)
 	}
 
-	return service.Store.UpsertRuntimeState(ctx, params)
+	return service.Store.UpsertRuntimeState(ctx, params, sqlite.RuntimeStateWriteOptions{
+		ExpectedBootID: input.BootID,
+		EventReason:    transitionReason(input),
+	})
 }
 
 func transitionReason(input TransitionInput) string {
