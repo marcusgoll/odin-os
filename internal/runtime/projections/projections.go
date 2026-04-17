@@ -70,11 +70,15 @@ type ActiveRunView struct {
 }
 
 type BlockedItemView struct {
-	TaskID     int64
-	TaskKey    string
-	ProjectKey string
-	Source     string
-	Reason     string
+	TaskID        int64   `json:"task_id"`
+	TaskKey       string  `json:"task_key"`
+	ProjectKey    string  `json:"project_key"`
+	WorkspaceKey  string  `json:"workspace_key"`
+	InitiativeKey *string `json:"initiative_key,omitempty"`
+	CompanionKey  *string `json:"companion_key,omitempty"`
+	WorkKind      string  `json:"work_kind,omitempty"`
+	Source        string  `json:"source"`
+	Reason        string  `json:"reason"`
 }
 
 type IncidentView struct {
@@ -113,6 +117,55 @@ type ProjectPortfolioView struct {
 	ActiveRunCount       int
 	PendingApprovalCount int
 	OpenIncidentCount    int
+}
+
+type WorkspaceOverviewView struct {
+	WorkspaceID           int64  `json:"workspace_id"`
+	WorkspaceKey          string `json:"workspace_key"`
+	Name                  string `json:"name"`
+	OwnerRef              string `json:"owner_ref"`
+	Status                string `json:"status"`
+	DefaultCompanionKey   string `json:"default_companion_key"`
+	ActiveInitiativeCount int    `json:"active_initiative_count"`
+	ActiveCompanionCount  int    `json:"active_companion_count"`
+	OpenWorkItemCount     int    `json:"open_work_item_count"`
+	ActiveRunCount        int    `json:"active_run_count"`
+	PendingApprovalCount  int    `json:"pending_approval_count"`
+	OpenIncidentCount     int    `json:"open_incident_count"`
+	BlockedWorkItemCount  int    `json:"blocked_work_item_count"`
+}
+
+type InitiativePortfolioView struct {
+	InitiativeID         int64   `json:"initiative_id"`
+	WorkspaceID          int64   `json:"workspace_id"`
+	WorkspaceKey         string  `json:"workspace_key"`
+	InitiativeKey        string  `json:"initiative_key"`
+	Title                string  `json:"title"`
+	Kind                 string  `json:"kind"`
+	Status               string  `json:"status"`
+	Summary              string  `json:"summary"`
+	OwnerCompanionKey    *string `json:"owner_companion_key,omitempty"`
+	LinkedProjectKey     *string `json:"linked_project_key,omitempty"`
+	OpenWorkItemCount    int     `json:"open_work_item_count"`
+	ActiveRunCount       int     `json:"active_run_count"`
+	PendingApprovalCount int     `json:"pending_approval_count"`
+	OpenIncidentCount    int     `json:"open_incident_count"`
+	BlockedWorkItemCount int     `json:"blocked_work_item_count"`
+}
+
+type CompanionAssignmentView struct {
+	CompanionID          int64  `json:"companion_id"`
+	WorkspaceID          int64  `json:"workspace_id"`
+	WorkspaceKey         string `json:"workspace_key"`
+	CompanionKey         string `json:"companion_key"`
+	Title                string `json:"title"`
+	Kind                 string `json:"kind"`
+	Status               string `json:"status"`
+	OwnedInitiativeCount int    `json:"owned_initiative_count"`
+	OpenWorkItemCount    int    `json:"open_work_item_count"`
+	ActiveRunCount       int    `json:"active_run_count"`
+	PendingApprovalCount int    `json:"pending_approval_count"`
+	BlockedWorkItemCount int    `json:"blocked_work_item_count"`
 }
 
 type LearningProposalView struct {
@@ -378,13 +431,24 @@ func ListActiveRunViews(ctx context.Context, queryer Queryer) ([]ActiveRunView, 
 }
 
 func ListBlockedItemViews(ctx context.Context, queryer Queryer) ([]BlockedItemView, error) {
-	var views []BlockedItemView
+	views := make([]BlockedItemView, 0)
 
 	approvalRows, err := queryer.QueryContext(ctx, `
-		SELECT t.id, t.key, p.key, a.status
+		SELECT
+			t.id,
+			t.key,
+			p.key,
+			COALESCE(w.key, ''),
+			i.key,
+			c.key,
+			COALESCE(t.work_kind, ''),
+			a.status
 		FROM approvals a
 		JOIN tasks t ON t.id = a.task_id
 		JOIN projects p ON p.id = t.project_id
+		LEFT JOIN workspaces w ON w.id = t.workspace_id
+		LEFT JOIN initiatives i ON i.id = t.initiative_id
+		LEFT JOIN companions c ON c.id = t.companion_id
 		WHERE a.status = 'pending'
 		ORDER BY a.id ASC
 	`)
@@ -395,10 +459,23 @@ func ListBlockedItemViews(ctx context.Context, queryer Queryer) ([]BlockedItemVi
 
 	for approvalRows.Next() {
 		var view BlockedItemView
+		var initiativeKey sql.NullString
+		var companionKey sql.NullString
 		var approvalStatus string
-		if err := approvalRows.Scan(&view.TaskID, &view.TaskKey, &view.ProjectKey, &approvalStatus); err != nil {
+		if err := approvalRows.Scan(
+			&view.TaskID,
+			&view.TaskKey,
+			&view.ProjectKey,
+			&view.WorkspaceKey,
+			&initiativeKey,
+			&companionKey,
+			&view.WorkKind,
+			&approvalStatus,
+		); err != nil {
 			return nil, err
 		}
+		view.InitiativeKey = nullableStringPtr(initiativeKey)
+		view.CompanionKey = nullableStringPtr(companionKey)
 		view.Source = "approval"
 		view.Reason = approvalStatus
 		views = append(views, view)
@@ -408,11 +485,22 @@ func ListBlockedItemViews(ctx context.Context, queryer Queryer) ([]BlockedItemVi
 	}
 
 	incidentRows, err := queryer.QueryContext(ctx, `
-		SELECT t.id, t.key, p.key, i.summary
+		SELECT
+			t.id,
+			t.key,
+			p.key,
+			COALESCE(w.key, ''),
+			inv.key,
+			c.key,
+			COALESCE(t.work_kind, ''),
+			i.summary
 		FROM incidents i
 		JOIN runs r ON r.id = i.run_id
 		JOIN tasks t ON t.id = r.task_id
 		JOIN projects p ON p.id = t.project_id
+		LEFT JOIN workspaces w ON w.id = t.workspace_id
+		LEFT JOIN initiatives inv ON inv.id = t.initiative_id
+		LEFT JOIN companions c ON c.id = t.companion_id
 		WHERE i.status = 'open'
 		ORDER BY i.id ASC
 	`)
@@ -423,9 +511,22 @@ func ListBlockedItemViews(ctx context.Context, queryer Queryer) ([]BlockedItemVi
 
 	for incidentRows.Next() {
 		var view BlockedItemView
-		if err := incidentRows.Scan(&view.TaskID, &view.TaskKey, &view.ProjectKey, &view.Reason); err != nil {
+		var initiativeKey sql.NullString
+		var companionKey sql.NullString
+		if err := incidentRows.Scan(
+			&view.TaskID,
+			&view.TaskKey,
+			&view.ProjectKey,
+			&view.WorkspaceKey,
+			&initiativeKey,
+			&companionKey,
+			&view.WorkKind,
+			&view.Reason,
+		); err != nil {
 			return nil, err
 		}
+		view.InitiativeKey = nullableStringPtr(initiativeKey)
+		view.CompanionKey = nullableStringPtr(companionKey)
 		view.Source = "incident"
 		views = append(views, view)
 	}
@@ -434,10 +535,21 @@ func ListBlockedItemViews(ctx context.Context, queryer Queryer) ([]BlockedItemVi
 	}
 
 	wakeRows, err := queryer.QueryContext(ctx, `
-		SELECT cp.task_id, t.key, p.key, cp.payload_json
+		SELECT
+			cp.task_id,
+			t.key,
+			p.key,
+			COALESCE(w.key, ''),
+			i.key,
+			c.key,
+			COALESCE(t.work_kind, ''),
+			cp.payload_json
 		FROM context_packets cp
 		JOIN tasks t ON t.id = cp.task_id
 		JOIN projects p ON p.id = t.project_id
+		LEFT JOIN workspaces w ON w.id = t.workspace_id
+		LEFT JOIN initiatives i ON i.id = t.initiative_id
+		LEFT JOIN companions c ON c.id = t.companion_id
 		WHERE cp.packet_scope = 'task_wake_packet'
 		  AND cp.status = 'active'
 		ORDER BY cp.id DESC
@@ -452,8 +564,21 @@ func ListBlockedItemViews(ctx context.Context, queryer Queryer) ([]BlockedItemVi
 		var taskID int64
 		var taskKey string
 		var projectKey string
+		var workspaceKey string
+		var initiativeKey sql.NullString
+		var companionKey sql.NullString
+		var workKind string
 		var payloadJSON string
-		if err := wakeRows.Scan(&taskID, &taskKey, &projectKey, &payloadJSON); err != nil {
+		if err := wakeRows.Scan(
+			&taskID,
+			&taskKey,
+			&projectKey,
+			&workspaceKey,
+			&initiativeKey,
+			&companionKey,
+			&workKind,
+			&payloadJSON,
+		); err != nil {
 			return nil, err
 		}
 		if seenWakeTasks[taskID] {
@@ -471,11 +596,15 @@ func ListBlockedItemViews(ctx context.Context, queryer Queryer) ([]BlockedItemVi
 			continue
 		}
 		views = append(views, BlockedItemView{
-			TaskID:     taskID,
-			TaskKey:    taskKey,
-			ProjectKey: projectKey,
-			Source:     "wake_packet",
-			Reason:     payload.BlockingReason,
+			TaskID:        taskID,
+			TaskKey:       taskKey,
+			ProjectKey:    projectKey,
+			WorkspaceKey:  workspaceKey,
+			InitiativeKey: nullableStringPtr(initiativeKey),
+			CompanionKey:  nullableStringPtr(companionKey),
+			WorkKind:      workKind,
+			Source:        "wake_packet",
+			Reason:        payload.BlockingReason,
 		})
 	}
 
@@ -655,6 +784,224 @@ func ListProjectPortfolioViews(ctx context.Context, queryer Queryer) ([]ProjectP
 			&view.ActiveRunCount,
 			&view.PendingApprovalCount,
 			&view.OpenIncidentCount,
+		); err != nil {
+			return nil, err
+		}
+		views = append(views, view)
+	}
+	return views, rows.Err()
+}
+
+func GetWorkspaceOverviewView(ctx context.Context, queryer Queryer, workspaceKey string) (WorkspaceOverviewView, error) {
+	rows, err := queryer.QueryContext(ctx, `
+		SELECT
+			w.id,
+			w.key,
+			w.name,
+			w.owner_ref,
+			w.status,
+			w.default_companion_key,
+			(SELECT COUNT(*) FROM initiatives i WHERE i.workspace_id = w.id AND i.status = 'active') AS active_initiative_count,
+			(SELECT COUNT(*) FROM companions c WHERE c.workspace_id = w.id AND c.status = 'active') AS active_companion_count,
+			(SELECT COUNT(*) FROM tasks t WHERE t.workspace_id = w.id AND t.status NOT IN ('completed', 'cancelled', 'failed')) AS open_work_item_count,
+			(SELECT COUNT(*)
+			 FROM runs r
+			 JOIN tasks t ON t.id = r.task_id
+			 WHERE t.workspace_id = w.id
+			   AND r.status NOT IN ('completed', 'cancelled', 'failed')) AS active_run_count,
+			(SELECT COUNT(*)
+			 FROM approvals a
+			 JOIN tasks t ON t.id = a.task_id
+			 WHERE t.workspace_id = w.id
+			   AND a.status = 'pending') AS pending_approval_count,
+			(SELECT COUNT(*)
+			 FROM incidents i
+			 JOIN runs r ON r.id = i.run_id
+			 JOIN tasks t ON t.id = r.task_id
+			 WHERE t.workspace_id = w.id
+			   AND i.status = 'open') AS open_incident_count,
+			(SELECT COUNT(DISTINCT t.id)
+			 FROM tasks t
+			 LEFT JOIN approvals a ON a.task_id = t.id AND a.status = 'pending'
+			 LEFT JOIN runs r ON r.task_id = t.id
+			 LEFT JOIN incidents i ON i.run_id = r.id AND i.status = 'open'
+			 LEFT JOIN context_packets cp ON cp.task_id = t.id AND cp.packet_scope = 'task_wake_packet' AND cp.status = 'active'
+			 WHERE t.workspace_id = w.id
+			   AND (a.id IS NOT NULL OR i.id IS NOT NULL OR cp.id IS NOT NULL)) AS blocked_work_item_count
+		FROM workspaces w
+		WHERE w.key = ?
+		LIMIT 1
+	`, workspaceKey)
+	if err != nil {
+		return WorkspaceOverviewView{}, err
+	}
+	defer rows.Close()
+
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return WorkspaceOverviewView{}, err
+		}
+		return WorkspaceOverviewView{}, sql.ErrNoRows
+	}
+
+	var view WorkspaceOverviewView
+	if err := rows.Scan(
+		&view.WorkspaceID,
+		&view.WorkspaceKey,
+		&view.Name,
+		&view.OwnerRef,
+		&view.Status,
+		&view.DefaultCompanionKey,
+		&view.ActiveInitiativeCount,
+		&view.ActiveCompanionCount,
+		&view.OpenWorkItemCount,
+		&view.ActiveRunCount,
+		&view.PendingApprovalCount,
+		&view.OpenIncidentCount,
+		&view.BlockedWorkItemCount,
+	); err != nil {
+		return WorkspaceOverviewView{}, err
+	}
+	return view, rows.Err()
+}
+
+func ListInitiativePortfolioViews(ctx context.Context, queryer Queryer, workspaceKey string) ([]InitiativePortfolioView, error) {
+	rows, err := queryer.QueryContext(ctx, `
+		SELECT
+			i.id,
+			w.id,
+			w.key,
+			i.key,
+			i.title,
+			i.kind,
+			i.status,
+			i.summary,
+			c.key,
+			p.key,
+			(SELECT COUNT(*) FROM tasks t WHERE t.initiative_id = i.id AND t.status NOT IN ('completed', 'cancelled', 'failed')) AS open_work_item_count,
+			(SELECT COUNT(*)
+			 FROM runs r
+			 JOIN tasks t ON t.id = r.task_id
+			 WHERE t.initiative_id = i.id
+			   AND r.status NOT IN ('completed', 'cancelled', 'failed')) AS active_run_count,
+			(SELECT COUNT(*)
+			 FROM approvals a
+			 JOIN tasks t ON t.id = a.task_id
+			 WHERE t.initiative_id = i.id
+			   AND a.status = 'pending') AS pending_approval_count,
+			(SELECT COUNT(*)
+			 FROM incidents inc
+			 JOIN runs r ON r.id = inc.run_id
+			 JOIN tasks t ON t.id = r.task_id
+			 WHERE t.initiative_id = i.id
+			   AND inc.status = 'open') AS open_incident_count,
+			(SELECT COUNT(DISTINCT t.id)
+			 FROM tasks t
+			 LEFT JOIN approvals a ON a.task_id = t.id AND a.status = 'pending'
+			 LEFT JOIN runs r ON r.task_id = t.id
+			 LEFT JOIN incidents inc ON inc.run_id = r.id AND inc.status = 'open'
+			 LEFT JOIN context_packets cp ON cp.task_id = t.id AND cp.packet_scope = 'task_wake_packet' AND cp.status = 'active'
+			 WHERE t.initiative_id = i.id
+			   AND (a.id IS NOT NULL OR inc.id IS NOT NULL OR cp.id IS NOT NULL)) AS blocked_work_item_count
+		FROM initiatives i
+		JOIN workspaces w ON w.id = i.workspace_id
+		LEFT JOIN companions c ON c.id = i.owner_companion_id
+		LEFT JOIN projects p ON p.id = i.linked_project_id
+		WHERE w.key = ?
+		ORDER BY i.id ASC
+	`, workspaceKey)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	views := make([]InitiativePortfolioView, 0)
+	for rows.Next() {
+		var view InitiativePortfolioView
+		var ownerCompanionKey sql.NullString
+		var linkedProjectKey sql.NullString
+		if err := rows.Scan(
+			&view.InitiativeID,
+			&view.WorkspaceID,
+			&view.WorkspaceKey,
+			&view.InitiativeKey,
+			&view.Title,
+			&view.Kind,
+			&view.Status,
+			&view.Summary,
+			&ownerCompanionKey,
+			&linkedProjectKey,
+			&view.OpenWorkItemCount,
+			&view.ActiveRunCount,
+			&view.PendingApprovalCount,
+			&view.OpenIncidentCount,
+			&view.BlockedWorkItemCount,
+		); err != nil {
+			return nil, err
+		}
+		view.OwnerCompanionKey = nullableStringPtr(ownerCompanionKey)
+		view.LinkedProjectKey = nullableStringPtr(linkedProjectKey)
+		views = append(views, view)
+	}
+	return views, rows.Err()
+}
+
+func ListCompanionAssignmentViews(ctx context.Context, queryer Queryer, workspaceKey string) ([]CompanionAssignmentView, error) {
+	rows, err := queryer.QueryContext(ctx, `
+		SELECT
+			c.id,
+			w.id,
+			w.key,
+			c.key,
+			c.title,
+			c.kind,
+			c.status,
+			(SELECT COUNT(*) FROM initiatives i WHERE i.owner_companion_id = c.id AND i.status = 'active') AS owned_initiative_count,
+			(SELECT COUNT(*) FROM tasks t WHERE t.companion_id = c.id AND t.status NOT IN ('completed', 'cancelled', 'failed')) AS open_work_item_count,
+			(SELECT COUNT(*)
+			 FROM runs r
+			 JOIN tasks t ON t.id = r.task_id
+			 WHERE t.companion_id = c.id
+			   AND r.status NOT IN ('completed', 'cancelled', 'failed')) AS active_run_count,
+			(SELECT COUNT(*)
+			 FROM approvals a
+			 JOIN tasks t ON t.id = a.task_id
+			 WHERE t.companion_id = c.id
+			   AND a.status = 'pending') AS pending_approval_count,
+			(SELECT COUNT(DISTINCT t.id)
+			 FROM tasks t
+			 LEFT JOIN approvals a ON a.task_id = t.id AND a.status = 'pending'
+			 LEFT JOIN runs r ON r.task_id = t.id
+			 LEFT JOIN incidents inc ON inc.run_id = r.id AND inc.status = 'open'
+			 LEFT JOIN context_packets cp ON cp.task_id = t.id AND cp.packet_scope = 'task_wake_packet' AND cp.status = 'active'
+			 WHERE t.companion_id = c.id
+			   AND (a.id IS NOT NULL OR inc.id IS NOT NULL OR cp.id IS NOT NULL)) AS blocked_work_item_count
+		FROM companions c
+		JOIN workspaces w ON w.id = c.workspace_id
+		WHERE w.key = ?
+		ORDER BY c.id ASC
+	`, workspaceKey)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	views := make([]CompanionAssignmentView, 0)
+	for rows.Next() {
+		var view CompanionAssignmentView
+		if err := rows.Scan(
+			&view.CompanionID,
+			&view.WorkspaceID,
+			&view.WorkspaceKey,
+			&view.CompanionKey,
+			&view.Title,
+			&view.Kind,
+			&view.Status,
+			&view.OwnedInitiativeCount,
+			&view.OpenWorkItemCount,
+			&view.ActiveRunCount,
+			&view.PendingApprovalCount,
+			&view.BlockedWorkItemCount,
 		); err != nil {
 			return nil, err
 		}
@@ -907,5 +1254,14 @@ func nullableInt64Ptr(value sql.NullInt64) *int64 {
 	}
 	ptr := new(int64)
 	*ptr = value.Int64
+	return ptr
+}
+
+func nullableStringPtr(value sql.NullString) *string {
+	if !value.Valid {
+		return nil
+	}
+	ptr := new(string)
+	*ptr = value.String
 	return ptr
 }

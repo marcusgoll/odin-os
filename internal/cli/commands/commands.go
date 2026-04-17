@@ -10,16 +10,19 @@ type Command struct {
 type Intent string
 
 const (
-	IntentUnknown   Intent = "unknown"
-	IntentHelp      Intent = "help"
-	IntentMode      Intent = "mode"
-	IntentScope     Intent = "scope"
-	IntentProject   Intent = "project"
-	IntentJobs      Intent = "jobs"
-	IntentRuns      Intent = "runs"
-	IntentApprovals Intent = "approvals"
-	IntentLogs      Intent = "logs"
-	IntentDoctor    Intent = "doctor"
+	IntentUnknown     Intent = "unknown"
+	IntentHelp        Intent = "help"
+	IntentMode        Intent = "mode"
+	IntentScope       Intent = "scope"
+	IntentWorkspace   Intent = "workspace"
+	IntentInitiatives Intent = "initiatives"
+	IntentCompanions  Intent = "companions"
+	IntentProject     Intent = "project"
+	IntentJobs        Intent = "jobs"
+	IntentRuns        Intent = "runs"
+	IntentApprovals   Intent = "approvals"
+	IntentLogs        Intent = "logs"
+	IntentDoctor      Intent = "doctor"
 )
 
 func Parse(line string) (Command, bool) {
@@ -49,6 +52,12 @@ func RouteAskIntent(line string) Intent {
 		return IntentMode
 	case strings.Contains(normalized, "scope"):
 		return IntentScope
+	case strings.Contains(normalized, "workspace"):
+		return IntentWorkspace
+	case strings.Contains(normalized, "initiative"):
+		return IntentInitiatives
+	case strings.Contains(normalized, "companion") || strings.Contains(normalized, "assistant") || strings.Contains(normalized, "advisor"):
+		return IntentCompanions
 	case strings.Contains(normalized, "project") || strings.Contains(normalized, "self"):
 		return IntentProject
 	case strings.Contains(normalized, "job") || strings.Contains(normalized, "task"):

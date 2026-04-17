@@ -197,6 +197,7 @@ func runServe(ctx context.Context, app bootstrap.App, cfg appconfig.Config, stdo
 			Metrics: metricsvc.Service{
 				DB: app.Store.DB(),
 			},
+			ReadModels:      app.Store.DB(),
 			RegistryHealthy: len(app.RegistryDiagnostics) == 0,
 		}),
 	}

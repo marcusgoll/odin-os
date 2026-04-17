@@ -304,9 +304,106 @@ func TestShellHelpIncludesTransitionCommands(t *testing.T) {
 		t.Fatalf("HandleLine(/help) error = %v", err)
 	}
 
-	for _, want := range []string{"/transition", "/observe", "/compare"} {
+	for _, want := range []string{"/workspace", "/initiatives", "/companions", "/transition", "/observe", "/compare"} {
 		if !strings.Contains(output.String(), want) {
 			t.Fatalf("help output = %q, want %q", output.String(), want)
+		}
+	}
+}
+
+func TestShellScopeShowsCurrentControlScopeDetails(t *testing.T) {
+	t.Parallel()
+
+	env := newTestEnvironment(t)
+	shell, err := New(env)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	var output bytes.Buffer
+	if err := shell.HandleLine(context.Background(), "/project alpha", &output); err != nil {
+		t.Fatalf("HandleLine(/project) error = %v", err)
+	}
+	output.Reset()
+	if err := shell.HandleLine(context.Background(), "/scope", &output); err != nil {
+		t.Fatalf("HandleLine(/scope) error = %v", err)
+	}
+
+	for _, want := range []string{"scope=alpha", "workspace=default", "initiative=alpha", "project=alpha", "companion=primary"} {
+		if !strings.Contains(output.String(), want) {
+			t.Fatalf("scope output = %q, want %q", output.String(), want)
+		}
+	}
+}
+
+func TestShellOperatorViewsRenderWorkspaceInitiativesAndCompanions(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	env := newTestEnvironment(t)
+	project, err := env.Store.CreateProject(ctx, sqlite.CreateProjectParams{
+		Key:           "alpha",
+		Name:          "Alpha",
+		Scope:         "project",
+		GitRoot:       "/tmp/alpha",
+		DefaultBranch: "main",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+	workspace, err := workspaces.Service{Store: env.Store}.BootstrapDefaultWorkspace(ctx)
+	if err != nil {
+		t.Fatalf("BootstrapDefaultWorkspace() error = %v", err)
+	}
+	companion, err := env.Store.GetCompanionByKey(ctx, workspace.ID, workspace.DefaultCompanionKey)
+	if err != nil {
+		t.Fatalf("GetCompanionByKey(default) error = %v", err)
+	}
+	if _, err := env.Store.UpsertInitiative(ctx, sqlite.UpsertInitiativeParams{
+		WorkspaceID:      workspace.ID,
+		Key:              project.Key,
+		Title:            project.Name,
+		Kind:             string(initiatives.KindManagedProject),
+		Status:           "active",
+		Summary:          "Alpha initiative",
+		OwnerCompanionID: &companion.ID,
+		LinkedProjectID:  &project.ID,
+	}); err != nil {
+		t.Fatalf("UpsertInitiative(alpha) error = %v", err)
+	}
+	shell, err := New(env)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	var output bytes.Buffer
+	if err := shell.HandleLine(ctx, "/workspace", &output); err != nil {
+		t.Fatalf("HandleLine(/workspace) error = %v", err)
+	}
+	for _, want := range []string{"workspace=default", "initiatives=1", "companions=1"} {
+		if !strings.Contains(output.String(), want) {
+			t.Fatalf("workspace output = %q, want %q", output.String(), want)
+		}
+	}
+
+	output.Reset()
+	if err := shell.HandleLine(ctx, "/initiatives", &output); err != nil {
+		t.Fatalf("HandleLine(/initiatives) error = %v", err)
+	}
+	for _, want := range []string{"alpha", "managed_project", "owner=primary", "project=alpha"} {
+		if !strings.Contains(output.String(), want) {
+			t.Fatalf("initiatives output = %q, want %q", output.String(), want)
+		}
+	}
+
+	output.Reset()
+	if err := shell.HandleLine(ctx, "/companions", &output); err != nil {
+		t.Fatalf("HandleLine(/companions) error = %v", err)
+	}
+	for _, want := range []string{"primary", "assistant", "owned_initiatives=1"} {
+		if !strings.Contains(output.String(), want) {
+			t.Fatalf("companions output = %q, want %q", output.String(), want)
 		}
 	}
 }
