@@ -18,6 +18,8 @@ type Service struct {
 	Now   func() time.Time
 }
 
+const defaultTargetProjectKey = "odin-core"
+
 func (service Service) Create(ctx context.Context, params CreateParams) (FollowUpObligation, error) {
 	if service.Store == nil {
 		return FollowUpObligation{}, fmt.Errorf("follow-up store is required")
@@ -37,6 +39,10 @@ func (service Service) Create(ctx context.Context, params CreateParams) (FollowU
 	if err := service.validateOwnership(ctx, params.WorkspaceID, params.InitiativeID, params.CompanionID); err != nil {
 		return FollowUpObligation{}, err
 	}
+	targetProjectID, err := service.resolveTargetProjectID(ctx, params.InitiativeID, params.TargetProjectID)
+	if err != nil {
+		return FollowUpObligation{}, err
+	}
 
 	cadenceJSON, err := json.Marshal(params.Cadence)
 	if err != nil {
@@ -51,14 +57,15 @@ func (service Service) Create(ctx context.Context, params CreateParams) (FollowU
 	}
 
 	record, err := service.Store.CreateFollowUpObligation(ctx, sqlite.CreateFollowUpObligationParams{
-		WorkspaceID:  params.WorkspaceID,
-		InitiativeID: params.InitiativeID,
-		CompanionID:  params.CompanionID,
-		Title:        strings.TrimSpace(params.Title),
-		Status:       string(StatusActive),
-		CadenceJSON:  string(cadenceJSON),
-		NextDueAt:    params.NextDueAt.UTC(),
-		PolicyJSON:   policyJSON,
+		WorkspaceID:     params.WorkspaceID,
+		InitiativeID:    params.InitiativeID,
+		CompanionID:     params.CompanionID,
+		TargetProjectID: targetProjectID,
+		Title:           strings.TrimSpace(params.Title),
+		Status:          string(StatusActive),
+		CadenceJSON:     string(cadenceJSON),
+		NextDueAt:       params.NextDueAt.UTC(),
+		PolicyJSON:      policyJSON,
 	})
 	if err != nil {
 		return FollowUpObligation{}, err
@@ -174,9 +181,6 @@ func (service Service) Materialize(ctx context.Context, params MaterializeParams
 	if service.Store == nil {
 		return MaterializationResult{}, fmt.Errorf("follow-up store is required")
 	}
-	if params.ProjectID <= 0 {
-		return MaterializationResult{}, fmt.Errorf("project ID is required")
-	}
 	if strings.TrimSpace(params.TaskKey) == "" {
 		return MaterializationResult{}, fmt.Errorf("task key is required")
 	}
@@ -187,6 +191,9 @@ func (service Service) Materialize(ctx context.Context, params MaterializeParams
 	}
 	if obligation.DueStatus(service.now()) != StatusDue {
 		return MaterializationResult{}, fmt.Errorf("follow-up obligation %d is not due", obligation.ID)
+	}
+	if obligation.TargetProjectID <= 0 {
+		return MaterializationResult{}, fmt.Errorf("follow-up obligation %d has no target project", obligation.ID)
 	}
 
 	title := strings.TrimSpace(params.Title)
@@ -204,7 +211,7 @@ func (service Service) Materialize(ctx context.Context, params MaterializeParams
 
 	task, reused, err := workitems.Service{Store: service.Store}.QueueFollowUp(ctx, workitems.QueueFollowUpParams{
 		CreateTask: sqlite.CreateTaskParams{
-			ProjectID:    params.ProjectID,
+			ProjectID:    obligation.TargetProjectID,
 			Key:          strings.TrimSpace(params.TaskKey),
 			Title:        title,
 			ActionKey:    strings.TrimSpace(params.ActionKey),
@@ -274,6 +281,31 @@ func (service Service) validateOwnership(ctx context.Context, workspaceID int64,
 	return nil
 }
 
+func (service Service) resolveTargetProjectID(ctx context.Context, initiativeID *int64, explicitTargetID *int64) (int64, error) {
+	if initiativeID != nil {
+		initiative, err := service.Store.GetInitiativeByID(ctx, *initiativeID)
+		if err != nil {
+			return 0, err
+		}
+		if initiative.Kind == "managed_project" && initiative.LinkedProjectID != nil {
+			return *initiative.LinkedProjectID, nil
+		}
+	}
+
+	if explicitTargetID != nil {
+		if _, err := service.Store.GetProject(ctx, *explicitTargetID); err != nil {
+			return 0, err
+		}
+		return *explicitTargetID, nil
+	}
+
+	defaultProject, err := service.Store.GetProjectByKey(ctx, defaultTargetProjectKey)
+	if err != nil {
+		return 0, err
+	}
+	return defaultProject.ID, nil
+}
+
 func decode(record sqlite.FollowUpObligation) (FollowUpObligation, error) {
 	var cadence Cadence
 	if err := json.Unmarshal([]byte(record.CadenceJSON), &cadence); err != nil {
@@ -288,6 +320,7 @@ func decode(record sqlite.FollowUpObligation) (FollowUpObligation, error) {
 		WorkspaceID:        record.WorkspaceID,
 		InitiativeID:       record.InitiativeID,
 		CompanionID:        record.CompanionID,
+		TargetProjectID:    record.TargetProjectID,
 		Title:              record.Title,
 		Status:             Status(record.Status),
 		Cadence:            cadence,

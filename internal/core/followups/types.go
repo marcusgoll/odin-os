@@ -44,6 +44,7 @@ type FollowUpObligation struct {
 	WorkspaceID        int64
 	InitiativeID       *int64
 	CompanionID        *int64
+	TargetProjectID    int64
 	Title              string
 	Status             Status
 	Cadence            Cadence
@@ -56,18 +57,18 @@ type FollowUpObligation struct {
 }
 
 type CreateParams struct {
-	WorkspaceID  int64
-	InitiativeID *int64
-	CompanionID  *int64
-	Title        string
-	Cadence      Cadence
-	NextDueAt    time.Time
-	PolicyJSON   string
+	WorkspaceID     int64
+	InitiativeID    *int64
+	CompanionID     *int64
+	TargetProjectID *int64
+	Title           string
+	Cadence         Cadence
+	NextDueAt       time.Time
+	PolicyJSON      string
 }
 
 type MaterializeParams struct {
 	ObligationID int64
-	ProjectID    int64
 	TaskKey      string
 	Title        string
 	ActionKey    string

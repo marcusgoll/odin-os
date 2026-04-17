@@ -423,14 +423,15 @@ func TestWorkItemServiceQueueFollowUpReusesExistingOccurrence(t *testing.T) {
 	service := Service{Store: store}
 
 	obligation, err := store.CreateFollowUpObligation(ctx, sqlite.CreateFollowUpObligationParams{
-		WorkspaceID:  workspaceID,
-		InitiativeID: &initiativeID,
-		CompanionID:  &companionID,
-		Title:        "Review mail",
-		Status:       "active",
-		CadenceJSON:  `{"mode":"once"}`,
-		NextDueAt:    time.Date(2026, 4, 18, 9, 0, 0, 0, time.UTC),
-		PolicyJSON:   `{}`,
+		WorkspaceID:     workspaceID,
+		InitiativeID:    &initiativeID,
+		CompanionID:     &companionID,
+		TargetProjectID: projectID,
+		Title:           "Review mail",
+		Status:          "active",
+		CadenceJSON:     `{"mode":"once"}`,
+		NextDueAt:       time.Date(2026, 4, 18, 9, 0, 0, 0, time.UTC),
+		PolicyJSON:      `{}`,
 	})
 	if err != nil {
 		t.Fatalf("CreateFollowUpObligation() error = %v", err)

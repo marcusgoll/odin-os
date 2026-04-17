@@ -512,6 +512,9 @@ func (store *Store) CreateTask(ctx context.Context, params CreateTaskParams) (Ta
 			formatTime(now),
 		)
 		if err != nil && isMissingTaskFollowUpColumns(err) {
+			if hasTaskFollowUpProvenance(params) {
+				return fmt.Errorf("follow-up provenance requires follow-up task columns")
+			}
 			result, err = tx.ExecContext(ctx, `
 				INSERT INTO tasks (
 					project_id,
@@ -2216,6 +2219,7 @@ func (store *Store) CreateFollowUpObligation(ctx context.Context, params CreateF
 				workspace_id,
 				initiative_id,
 				companion_id,
+				target_project_id,
 				title,
 				status,
 				cadence_json,
@@ -2226,11 +2230,12 @@ func (store *Store) CreateFollowUpObligation(ctx context.Context, params CreateF
 				created_at,
 				updated_at
 			)
-			VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?)
 		`,
 			params.WorkspaceID,
 			nullInt64(params.InitiativeID),
 			nullInt64(params.CompanionID),
+			params.TargetProjectID,
 			params.Title,
 			params.Status,
 			params.CadenceJSON,
@@ -2270,6 +2275,7 @@ func (store *Store) ListFollowUpObligations(ctx context.Context, params ListFoll
 			workspace_id,
 			initiative_id,
 			companion_id,
+			target_project_id,
 			title,
 			status,
 			cadence_json,
@@ -3904,6 +3910,7 @@ func (store *Store) getFollowUpObligationQuery(ctx context.Context, queryer sqlQ
 			workspace_id,
 			initiative_id,
 			companion_id,
+			target_project_id,
 			title,
 			status,
 			cadence_json,
@@ -5095,6 +5102,7 @@ func scanFollowUpObligation(row interface{ Scan(...any) error }) (FollowUpObliga
 	var obligation FollowUpObligation
 	var initiativeID sql.NullInt64
 	var companionID sql.NullInt64
+	var targetProjectID sql.NullInt64
 	var lastMaterializedAt sql.NullString
 	var lastCompletedAt sql.NullString
 	var nextDueAt string
@@ -5105,6 +5113,7 @@ func scanFollowUpObligation(row interface{ Scan(...any) error }) (FollowUpObliga
 		&obligation.WorkspaceID,
 		&initiativeID,
 		&companionID,
+		&targetProjectID,
 		&obligation.Title,
 		&obligation.Status,
 		&obligation.CadenceJSON,
@@ -5121,6 +5130,10 @@ func scanFollowUpObligation(row interface{ Scan(...any) error }) (FollowUpObliga
 	var err error
 	obligation.InitiativeID = nullableInt64Ptr(initiativeID)
 	obligation.CompanionID = nullableInt64Ptr(companionID)
+	if !targetProjectID.Valid {
+		return FollowUpObligation{}, fmt.Errorf("follow-up obligation missing target project")
+	}
+	obligation.TargetProjectID = targetProjectID.Int64
 	obligation.NextDueAt, err = parseTime(nextDueAt)
 	if err != nil {
 		return FollowUpObligation{}, err
@@ -5808,6 +5821,10 @@ func isMissingTaskFollowUpColumns(err error) bool {
 	message := err.Error()
 	return strings.Contains(message, "has no column named follow_up_obligation_id") ||
 		strings.Contains(message, "has no column named follow_up_occurrence_key")
+}
+
+func hasTaskFollowUpProvenance(params CreateTaskParams) bool {
+	return params.FollowUpObligationID != nil || strings.TrimSpace(params.FollowUpOccurrenceKey) != ""
 }
 
 func nullInt64(value *int64) any {

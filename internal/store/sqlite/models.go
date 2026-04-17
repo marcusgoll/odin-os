@@ -112,6 +112,7 @@ type FollowUpObligation struct {
 	WorkspaceID        int64
 	InitiativeID       *int64
 	CompanionID        *int64
+	TargetProjectID    int64
 	Title              string
 	Status             string
 	CadenceJSON        string
@@ -138,14 +139,15 @@ type UpdateWorkspacePolicyParams struct {
 }
 
 type CreateFollowUpObligationParams struct {
-	WorkspaceID  int64
-	InitiativeID *int64
-	CompanionID  *int64
-	Title        string
-	Status       string
-	CadenceJSON  string
-	NextDueAt    time.Time
-	PolicyJSON   string
+	WorkspaceID     int64
+	InitiativeID    *int64
+	CompanionID     *int64
+	TargetProjectID int64
+	Title           string
+	Status          string
+	CadenceJSON     string
+	NextDueAt       time.Time
+	PolicyJSON      string
 }
 
 type ListFollowUpObligationsParams struct {

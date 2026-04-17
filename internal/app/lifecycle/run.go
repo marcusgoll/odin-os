@@ -681,6 +681,36 @@ func followupCadenceLabel(cadence followups.Cadence) string {
 	}
 }
 
+func followUpTargetProjectID(ctx context.Context, app bootstrap.App, initiative sqlite.Initiative) (int64, error) {
+	if initiative.Kind == "managed_project" && initiative.LinkedProjectID != nil {
+		return *initiative.LinkedProjectID, nil
+	}
+
+	project, ok := app.Registry.Lookup("odin-core")
+	if !ok {
+		return 0, fmt.Errorf("default target project odin-core is not configured")
+	}
+
+	scopeValue := "project"
+	if project.SystemProject {
+		scopeValue = "odin-core"
+	}
+
+	record, err := app.Store.UpsertProject(ctx, sqlite.UpsertProjectParams{
+		Key:           project.Key,
+		Name:          project.Name,
+		Scope:         scopeValue,
+		GitRoot:       project.GitRoot,
+		DefaultBranch: project.DefaultBranch,
+		GitHubRepo:    project.GitHub.Repo,
+		ManifestPath:  project.SourcePath,
+	})
+	if err != nil {
+		return 0, err
+	}
+	return record.ID, nil
+}
+
 func runFollowup(ctx context.Context, app bootstrap.App, args []string, stdout io.Writer) error {
 	command, err := commands.ParseFollowUp(args)
 	if err != nil {
@@ -701,6 +731,11 @@ func runFollowup(ctx context.Context, app bootstrap.App, args []string, stdout i
 			return err
 		}
 
+		targetProjectID, err := followUpTargetProjectID(ctx, app, initiative)
+		if err != nil {
+			return err
+		}
+
 		cadence, err := parseFollowUpCadence(command.Cadence)
 		if err != nil {
 			return err
@@ -711,11 +746,12 @@ func runFollowup(ctx context.Context, app bootstrap.App, args []string, stdout i
 		}
 
 		obligation, err := service.Create(ctx, followups.CreateParams{
-			WorkspaceID:  workspace.ID,
-			InitiativeID: &initiative.ID,
-			Title:        command.Title,
-			Cadence:      cadence,
-			NextDueAt:    nextDue,
+			WorkspaceID:     workspace.ID,
+			InitiativeID:    &initiative.ID,
+			TargetProjectID: &targetProjectID,
+			Title:           command.Title,
+			Cadence:         cadence,
+			NextDueAt:       nextDue,
 		})
 		if err != nil {
 			return err

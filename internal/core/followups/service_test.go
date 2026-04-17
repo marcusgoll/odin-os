@@ -77,6 +77,86 @@ func TestFollowUpCreateRecurringObligation(t *testing.T) {
 	}
 }
 
+func TestFollowUpCreateDefaultsTargetProjectToOdinCoreForRoutineInitiative(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openFollowUpStore(t)
+	defer store.Close()
+
+	workspaceID, initiativeID, companionID, projectID := seedFollowUpContext(t, ctx, store)
+	service := Service{Store: store}
+
+	obligation, err := service.Create(ctx, CreateParams{
+		WorkspaceID:  workspaceID,
+		InitiativeID: &initiativeID,
+		CompanionID:  &companionID,
+		Title:        "Weekly review",
+		Cadence: Cadence{
+			Mode:     CadenceModeRecurring,
+			Interval: CadenceIntervalWeekly,
+		},
+		NextDueAt: time.Date(2026, 4, 21, 9, 0, 0, 0, time.UTC),
+	})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+
+	if obligation.TargetProjectID != projectID {
+		t.Fatalf("TargetProjectID = %d, want %d", obligation.TargetProjectID, projectID)
+	}
+}
+
+func TestFollowUpCreateUsesManagedProjectLinkedTargetProject(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openFollowUpStore(t)
+	defer store.Close()
+
+	workspaceID, _, companionID, _ := seedFollowUpContext(t, ctx, store)
+	service := Service{Store: store}
+
+	linkedProject, err := store.CreateProject(ctx, sqlite.CreateProjectParams{
+		Key:           "alpha",
+		Name:          "Alpha",
+		Scope:         "project",
+		GitRoot:       filepath.Join(t.TempDir(), "alpha"),
+		DefaultBranch: "main",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+	initiative, err := store.UpsertInitiative(ctx, sqlite.UpsertInitiativeParams{
+		WorkspaceID:      workspaceID,
+		Key:              "alpha",
+		Title:            "Alpha",
+		Kind:             "managed_project",
+		Status:           "active",
+		OwnerCompanionID: &companionID,
+		LinkedProjectID:  &linkedProject.ID,
+	})
+	if err != nil {
+		t.Fatalf("UpsertInitiative() error = %v", err)
+	}
+
+	obligation, err := service.Create(ctx, CreateParams{
+		WorkspaceID:  workspaceID,
+		InitiativeID: &initiative.ID,
+		Title:        "Managed project follow-up",
+		Cadence:      Cadence{Mode: CadenceModeOnce},
+		NextDueAt:    time.Date(2026, 4, 18, 9, 0, 0, 0, time.UTC),
+	})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+
+	if obligation.TargetProjectID != linkedProject.ID {
+		t.Fatalf("TargetProjectID = %d, want %d", obligation.TargetProjectID, linkedProject.ID)
+	}
+}
+
 func TestFollowUpCreateRejectsCrossWorkspaceOwnership(t *testing.T) {
 	t.Parallel()
 
@@ -182,10 +262,12 @@ func TestFollowUpMaterializeReusesSameOccurrenceTask(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create() error = %v", err)
 	}
+	if obligation.TargetProjectID != projectID {
+		t.Fatalf("TargetProjectID = %d, want %d", obligation.TargetProjectID, projectID)
+	}
 
 	first, err := service.Materialize(ctx, MaterializeParams{
 		ObligationID: obligation.ID,
-		ProjectID:    projectID,
 		TaskKey:      "review-mail-1",
 		Title:        "Review mail",
 		Scope:        "project",
@@ -197,10 +279,16 @@ func TestFollowUpMaterializeReusesSameOccurrenceTask(t *testing.T) {
 	if first.Reused {
 		t.Fatalf("Materialize(first).Reused = true, want false")
 	}
+	task, err := store.GetTask(ctx, first.TaskID)
+	if err != nil {
+		t.Fatalf("GetTask(first) error = %v", err)
+	}
+	if task.ProjectID != projectID {
+		t.Fatalf("Task.ProjectID = %d, want %d", task.ProjectID, projectID)
+	}
 
 	second, err := service.Materialize(ctx, MaterializeParams{
 		ObligationID: obligation.ID,
-		ProjectID:    projectID,
 		TaskKey:      "review-mail-2",
 		Title:        "Review mail again",
 		Scope:        "project",
@@ -344,10 +432,10 @@ func seedFollowUpContext(t *testing.T, ctx context.Context, store *sqlite.Store)
 	}
 
 	project, err := store.CreateProject(ctx, sqlite.CreateProjectParams{
-		Key:           "alpha",
-		Name:          "Alpha",
-		Scope:         "project",
-		GitRoot:       filepath.Join(t.TempDir(), "alpha"),
+		Key:           "odin-core",
+		Name:          "Odin Core",
+		Scope:         "odin-core",
+		GitRoot:       filepath.Join(t.TempDir(), "odin-core"),
 		DefaultBranch: "main",
 		ManifestPath:  "config/projects.yaml",
 	})
