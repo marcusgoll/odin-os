@@ -17,6 +17,8 @@ const (
 	StreamRegistryVersion    StreamType = "registry_version"
 	StreamExecutorHealth     StreamType = "executor_health"
 	StreamContextPacket      StreamType = "context_packet"
+	StreamConversation       StreamType = "conversation"
+	StreamMemorySummary      StreamType = "memory_summary"
 	StreamLearningProposal   StreamType = "learning_proposal"
 	StreamLearningEvaluation StreamType = "learning_evaluation"
 	StreamLearningPromotion  StreamType = "learning_promotion"
@@ -41,6 +43,8 @@ const (
 	EventRegistryVersionRecorded          Type = "registry_version.recorded"
 	EventExecutorHealthRecorded           Type = "executor_health.recorded"
 	EventContextPacketCreated             Type = "context_packet.created"
+	EventConversationTranscriptRecorded   Type = "conversation.transcript_recorded"
+	EventMemorySummaryRecorded            Type = "memory_summary.recorded"
 	EventProjectTransitionChanged         Type = "project.transition_changed"
 	EventProjectShadowObservationRecorded Type = "project.shadow_observation_recorded"
 	EventProjectCompareReportRecorded     Type = "project.compare_report_recorded"
@@ -170,6 +174,24 @@ type ContextPacketCreatedPayload struct {
 	Trigger     string `json:"trigger"`
 	Status      string `json:"status"`
 	Summary     string `json:"summary"`
+}
+
+type ConversationTranscriptRecordedPayload struct {
+	Scope    string `json:"scope"`
+	ScopeKey string `json:"scope_key"`
+	Mode     string `json:"mode"`
+	Executor string `json:"executor"`
+	TaskID   *int64 `json:"task_id,omitempty"`
+	RunID    *int64 `json:"run_id,omitempty"`
+}
+
+type MemorySummaryRecordedPayload struct {
+	Scope              string `json:"scope"`
+	ScopeKey           string `json:"scope_key"`
+	MemoryType         string `json:"memory_type"`
+	SourceTranscriptID *int64 `json:"source_transcript_id,omitempty"`
+	TaskID             *int64 `json:"task_id,omitempty"`
+	RunID              *int64 `json:"run_id,omitempty"`
 }
 
 type ProjectTransitionChangedPayload struct {
