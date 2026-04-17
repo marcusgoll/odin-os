@@ -14,7 +14,7 @@ import (
 )
 
 func TestLoadInitializesRuntimeReadinessStateForServeBootstrap(t *testing.T) {
-	repoRoot := filepath.Clean(filepath.Join("..", "..", ".."))
+	repoRoot := createBootstrapRepoRoot(t, true)
 	runtimeRoot := t.TempDir()
 
 	app, err := Load(bootstrapContextWithBootID(context.Background(), "boot-1"), repoRoot, runtimeRoot)
@@ -276,6 +276,9 @@ func createBootstrapRepoRoot(t *testing.T, includeProjectsConfig bool) string {
 	if err := os.MkdirAll(filepath.Join(root, "registry"), 0o755); err != nil {
 		t.Fatalf("mkdir registry: %v", err)
 	}
+	if err := os.MkdirAll(filepath.Join(root, "odin-core", ".git"), 0o755); err != nil {
+		t.Fatalf("mkdir odin-core git root: %v", err)
+	}
 
 	if err := os.WriteFile(filepath.Join(root, "config", "odin.yaml"), []byte(`
 version: 1
@@ -295,8 +298,28 @@ projects:
     name: Odin Core
     project_class: system_project
     system_project: true
-    git_root: ..
+    git_root: `+filepath.Join(root, "odin-core")+`
     default_branch: main
+    policy:
+      allowed_commands:
+        - status
+      branch_rules:
+        protected_branches: [main]
+        require_worktree: true
+        require_task_branch: true
+        allow_default_branch_mutation: false
+      approval_gates:
+        require_for_governance_changes: true
+        require_for_destructive_operations: true
+        require_for_system_project_changes: true
+      merge_policy:
+        mode: squash
+        allow_direct_to_default_branch: false
+      destructive_operations:
+        allow_reset: false
+        allow_clean: false
+        allow_force_push: false
+        require_explicit_approval: true
 `), 0o644); err != nil {
 			t.Fatalf("write projects config: %v", err)
 		}

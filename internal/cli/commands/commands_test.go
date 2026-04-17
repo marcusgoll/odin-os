@@ -83,6 +83,8 @@ func TestRouteAskIntent(t *testing.T) {
 		input string
 		want  Intent
 	}{
+		{input: "show workspace memory", want: Intent("memory")},
+		{input: "what initiative memory do we have?", want: Intent("memory")},
 		{input: "show workspace status", want: IntentWorkspace},
 		{input: "list initiatives", want: IntentInitiatives},
 		{input: "show companions", want: IntentCompanions},

@@ -221,10 +221,10 @@ func (shell *Shell) handleCommand(ctx context.Context, command commands.Command,
 		if _, err := fmt.Fprintln(output, "prefer explicit cli commands outside the repl: odin help | odin status --json | odin task run --project <key> --title <title> | odin repl"); err != nil {
 			return err
 		}
-		if _, err := fmt.Fprintln(output, "/help /mode /scope /workspace /initiatives /companions /project /transition /observe /compare /jobs /runs /approvals /logs /doctor /doctor json /doctor report /self"); err != nil {
+		if _, err := fmt.Fprintln(output, "/help /mode /scope /memory /workspace /initiatives /companions /project /transition /observe /compare /jobs /runs /approvals /logs /doctor /doctor json /doctor report /self"); err != nil {
 			return err
 		}
-		if _, err := fmt.Fprintln(output, "repl compatibility commands: /help /mode /scope /project /transition /observe /compare /status /stat /capabilities /leases /jobs /runs /approvals /logs /doctor /doctor json /doctor report /self /quit"); err != nil {
+		if _, err := fmt.Fprintln(output, "repl compatibility commands: /help /mode /scope /memory /project /transition /observe /compare /status /stat /capabilities /leases /jobs /runs /approvals /logs /doctor /doctor json /doctor report /self /quit"); err != nil {
 			return err
 		}
 		if _, err := fmt.Fprintf(output, "%s\n", transitionUsage); err != nil {
@@ -236,6 +236,8 @@ func (shell *Shell) handleCommand(ctx context.Context, command commands.Command,
 		return shell.handleMode(command.Args, output)
 	case "scope":
 		return shell.handleScope(command.Args, output)
+	case "memory":
+		return shell.handleMemory(ctx, command.Args, output)
 	case "workspace":
 		return shell.handleWorkspace(ctx, output)
 	case "initiatives":
@@ -280,6 +282,8 @@ func (shell *Shell) handleAsk(ctx context.Context, line string, output io.Writer
 		return shell.handleCommand(ctx, commands.Command{Name: "mode"}, output)
 	case commands.IntentScope:
 		return shell.handleCommand(ctx, commands.Command{Name: "scope"}, output)
+	case commands.IntentMemory:
+		return shell.handleCommand(ctx, commands.Command{Name: "memory"}, output)
 	case commands.IntentWorkspace:
 		return shell.handleCommand(ctx, commands.Command{Name: "workspace"}, output)
 	case commands.IntentInitiatives:
@@ -312,7 +316,7 @@ func (shell *Shell) handleAsk(ctx context.Context, line string, output io.Writer
 			_, err = fmt.Fprintln(output, result.Answer)
 			return err
 		}
-		_, err := fmt.Fprintln(output, "local ask is limited in Phase 05. Try /help, /scope, /workspace, /initiatives, /companions, /project, /jobs, /runs, /approvals, /logs, or /doctor.")
+		_, err := fmt.Fprintln(output, "local ask is limited in Phase 05. Try /help, /scope, /memory, /workspace, /initiatives, /companions, /project, /jobs, /runs, /approvals, /logs, or /doctor.")
 		return err
 	}
 }
@@ -866,6 +870,99 @@ func (shell *Shell) handleWorkspace(ctx context.Context, output io.Writer) error
 		view.BlockedWorkItemCount,
 	)
 	return err
+}
+
+func (shell *Shell) handleMemory(ctx context.Context, args []string, output io.Writer) error {
+	switch len(args) {
+	case 0:
+		return shell.handleWorkspaceMemory(ctx, output)
+	case 1:
+		switch strings.ToLower(strings.TrimSpace(args[0])) {
+		case "workspace":
+			return shell.handleWorkspaceMemory(ctx, output)
+		case "initiatives":
+			return shell.handleInitiativeMemory(ctx, output)
+		case "companions":
+			return shell.handleCompanionMemory(ctx, output)
+		}
+	}
+	_, err := fmt.Fprintln(output, "usage: /memory [workspace|initiatives|companions]")
+	return err
+}
+
+func (shell *Shell) handleWorkspaceMemory(ctx context.Context, output io.Writer) error {
+	views, err := projections.ListWorkspaceMemoryViews(ctx, shell.env.Store.DB(), projections.WorkspaceMemoryQuery{
+		WorkspaceKey: workspaces.DefaultWorkspaceKey,
+		Limit:        1,
+	})
+	if err != nil {
+		return err
+	}
+	if len(views) == 0 {
+		_, err := fmt.Fprintln(output, "no workspace memory")
+		return err
+	}
+
+	view := views[0]
+	_, err = fmt.Fprintf(
+		output,
+		"workspace=%s workspace_entries=%d initiative_entries=%d companion_entries=%d\n",
+		view.WorkspaceKey,
+		view.WorkspaceEntryCount,
+		view.InitiativeEntryCount,
+		view.CompanionEntryCount,
+	)
+	return err
+}
+
+func (shell *Shell) handleInitiativeMemory(ctx context.Context, output io.Writer) error {
+	query := projections.InitiativeMemoryQuery{
+		WorkspaceKey: workspaces.DefaultWorkspaceKey,
+		Limit:        20,
+	}
+	switch shell.state.Scope.Kind {
+	case scope.ScopeProject, scope.ScopeOdinCore, scope.ScopeNewProject:
+		if initiativeKey := shell.controlScope().InitiativeKey; initiativeKey != "" {
+			query.InitiativeKey = initiativeKey
+		}
+	}
+
+	views, err := projections.ListInitiativeMemoryViews(ctx, shell.env.Store.DB(), query)
+	if err != nil {
+		return err
+	}
+	if len(views) == 0 {
+		_, err := fmt.Fprintln(output, "no initiative memory")
+		return err
+	}
+
+	for _, view := range views {
+		if _, err := fmt.Fprintf(output, "%s entries=%d %s\n", view.InitiativeKey, view.EntryCount, view.LastSummary); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (shell *Shell) handleCompanionMemory(ctx context.Context, output io.Writer) error {
+	views, err := projections.ListCompanionMemoryViews(ctx, shell.env.Store.DB(), projections.CompanionMemoryQuery{
+		WorkspaceKey: workspaces.DefaultWorkspaceKey,
+		Limit:        20,
+	})
+	if err != nil {
+		return err
+	}
+	if len(views) == 0 {
+		_, err := fmt.Fprintln(output, "no companion memory")
+		return err
+	}
+
+	for _, view := range views {
+		if _, err := fmt.Fprintf(output, "%s entries=%d %s\n", view.CompanionKey, view.EntryCount, view.LastSummary); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (shell *Shell) handleInitiatives(ctx context.Context, output io.Writer) error {
