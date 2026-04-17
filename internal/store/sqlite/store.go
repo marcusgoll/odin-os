@@ -305,6 +305,161 @@ func (store *Store) CreateWorkspace(ctx context.Context, params CreateWorkspaceP
 	return workspace, err
 }
 
+func (store *Store) CreateMemoryEntry(ctx context.Context, params CreateMemoryEntryParams) (MemoryEntry, error) {
+	now := store.now()
+	params, err := normalizeCreateMemoryEntryParams(params)
+	if err != nil {
+		return MemoryEntry{}, err
+	}
+
+	var entry MemoryEntry
+	err = store.withTx(ctx, func(tx *sql.Tx) error {
+		result, err := tx.ExecContext(ctx, `
+			INSERT INTO memory_entries (
+				workspace_id,
+				initiative_id,
+				companion_id,
+				task_id,
+				run_id,
+				entry_type,
+				visibility_scope,
+				retention_class,
+				summary,
+				content,
+				metadata_json,
+				created_at,
+				updated_at
+			)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`,
+			params.WorkspaceID,
+			nullInt64(params.InitiativeID),
+			nullInt64(params.CompanionID),
+			nullInt64(params.TaskID),
+			nullInt64(params.RunID),
+			params.EntryType,
+			params.VisibilityScope,
+			params.RetentionClass,
+			params.Summary,
+			params.Content,
+			params.MetadataJSON,
+			formatTime(now),
+			formatTime(now),
+		)
+		if err != nil {
+			return err
+		}
+
+		entryID, err := result.LastInsertId()
+		if err != nil {
+			return err
+		}
+
+		entry = MemoryEntry{
+			ID:              entryID,
+			WorkspaceID:     params.WorkspaceID,
+			InitiativeID:    cloneInt64Ptr(params.InitiativeID),
+			CompanionID:     cloneInt64Ptr(params.CompanionID),
+			TaskID:          cloneInt64Ptr(params.TaskID),
+			RunID:           cloneInt64Ptr(params.RunID),
+			EntryType:       params.EntryType,
+			VisibilityScope: params.VisibilityScope,
+			RetentionClass:  params.RetentionClass,
+			Summary:         params.Summary,
+			Content:         params.Content,
+			MetadataJSON:    params.MetadataJSON,
+			CreatedAt:       now,
+			UpdatedAt:       now,
+		}
+
+		return nil
+	})
+
+	return entry, err
+}
+
+func (store *Store) ListMemoryEntries(ctx context.Context, params ListMemoryEntriesParams) ([]MemoryEntry, error) {
+	if params.WorkspaceID <= 0 {
+		return nil, fmt.Errorf("workspace ID is required")
+	}
+
+	limit := params.Limit
+	if limit <= 0 {
+		limit = 20
+	}
+
+	var query strings.Builder
+	query.WriteString(`
+		SELECT
+			id,
+			workspace_id,
+			initiative_id,
+			companion_id,
+			task_id,
+			run_id,
+			entry_type,
+			visibility_scope,
+			retention_class,
+			summary,
+			content,
+			metadata_json,
+			created_at,
+			updated_at
+		FROM memory_entries
+		WHERE workspace_id = ?
+	`)
+
+	args := []any{params.WorkspaceID}
+	if params.InitiativeID != nil {
+		query.WriteString(` AND initiative_id = ?`)
+		args = append(args, *params.InitiativeID)
+	}
+	if params.CompanionID != nil {
+		query.WriteString(` AND companion_id = ?`)
+		args = append(args, *params.CompanionID)
+	}
+	if params.TaskID != nil {
+		query.WriteString(` AND task_id = ?`)
+		args = append(args, *params.TaskID)
+	}
+	if params.RunID != nil {
+		query.WriteString(` AND run_id = ?`)
+		args = append(args, *params.RunID)
+	}
+	if entryType := strings.TrimSpace(params.EntryType); entryType != "" {
+		query.WriteString(` AND entry_type = ?`)
+		args = append(args, entryType)
+	}
+	if visibilityScope := strings.TrimSpace(params.VisibilityScope); visibilityScope != "" {
+		query.WriteString(` AND visibility_scope = ?`)
+		args = append(args, visibilityScope)
+	}
+	if retentionClass := strings.TrimSpace(params.RetentionClass); retentionClass != "" {
+		query.WriteString(` AND retention_class = ?`)
+		args = append(args, retentionClass)
+	}
+
+	query.WriteString(` ORDER BY created_at DESC, id DESC LIMIT ?`)
+	args = append(args, limit)
+
+	rows, err := store.db.QueryContext(ctx, query.String(), args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var entries []MemoryEntry
+	for rows.Next() {
+		entry, err := scanMemoryEntry(rows)
+		if err != nil {
+			return nil, err
+		}
+		entries = append(entries, entry)
+	}
+
+	return entries, rows.Err()
+}
+
 func (store *Store) CreateTask(ctx context.Context, params CreateTaskParams) (Task, error) {
 	now := store.now()
 	var task Task
@@ -3669,6 +3824,49 @@ func scanRun(row interface{ Scan(...any) error }) (Run, error) {
 	return run, nil
 }
 
+func scanMemoryEntry(row interface{ Scan(...any) error }) (MemoryEntry, error) {
+	var entry MemoryEntry
+	var initiativeID sql.NullInt64
+	var companionID sql.NullInt64
+	var taskID sql.NullInt64
+	var runID sql.NullInt64
+	var createdAt string
+	var updatedAt string
+	if err := row.Scan(
+		&entry.ID,
+		&entry.WorkspaceID,
+		&initiativeID,
+		&companionID,
+		&taskID,
+		&runID,
+		&entry.EntryType,
+		&entry.VisibilityScope,
+		&entry.RetentionClass,
+		&entry.Summary,
+		&entry.Content,
+		&entry.MetadataJSON,
+		&createdAt,
+		&updatedAt,
+	); err != nil {
+		return MemoryEntry{}, err
+	}
+
+	var err error
+	entry.InitiativeID = nullableInt64Ptr(initiativeID)
+	entry.CompanionID = nullableInt64Ptr(companionID)
+	entry.TaskID = nullableInt64Ptr(taskID)
+	entry.RunID = nullableInt64Ptr(runID)
+	entry.CreatedAt, err = parseTime(createdAt)
+	if err != nil {
+		return MemoryEntry{}, err
+	}
+	entry.UpdatedAt, err = parseTime(updatedAt)
+	if err != nil {
+		return MemoryEntry{}, err
+	}
+	return entry, nil
+}
+
 func scanApproval(row interface{ Scan(...any) error }) (Approval, error) {
 	var approval Approval
 	var runID sql.NullInt64
@@ -4127,6 +4325,15 @@ func nullableInt64Ptr(value sql.NullInt64) *int64 {
 	return ptr
 }
 
+func cloneInt64Ptr(value *int64) *int64 {
+	if value == nil {
+		return nil
+	}
+	ptr := new(int64)
+	*ptr = *value
+	return ptr
+}
+
 func nullInt64(value *int64) any {
 	if value == nil {
 		return nil
@@ -4155,4 +4362,37 @@ func stringOrDefault(value sql.NullString, fallback string) string {
 		return value.String
 	}
 	return fallback
+}
+
+func normalizeCreateMemoryEntryParams(params CreateMemoryEntryParams) (CreateMemoryEntryParams, error) {
+	params.EntryType = strings.ToLower(strings.TrimSpace(params.EntryType))
+	params.VisibilityScope = strings.ToLower(strings.TrimSpace(params.VisibilityScope))
+	params.RetentionClass = strings.ToLower(strings.TrimSpace(params.RetentionClass))
+	params.Summary = strings.TrimSpace(params.Summary)
+	params.Content = strings.TrimSpace(params.Content)
+	params.MetadataJSON = strings.TrimSpace(params.MetadataJSON)
+
+	if params.WorkspaceID <= 0 {
+		return CreateMemoryEntryParams{}, fmt.Errorf("workspace ID is required")
+	}
+	if params.EntryType == "" {
+		return CreateMemoryEntryParams{}, fmt.Errorf("memory entry type is required")
+	}
+	if params.VisibilityScope == "" {
+		return CreateMemoryEntryParams{}, fmt.Errorf("memory visibility scope is required")
+	}
+	if params.RetentionClass == "" {
+		return CreateMemoryEntryParams{}, fmt.Errorf("memory retention class is required")
+	}
+	if params.Content == "" {
+		return CreateMemoryEntryParams{}, fmt.Errorf("memory content is required")
+	}
+	if params.MetadataJSON == "" {
+		params.MetadataJSON = `{}`
+	}
+	if !json.Valid([]byte(params.MetadataJSON)) {
+		return CreateMemoryEntryParams{}, fmt.Errorf("invalid memory metadata JSON")
+	}
+
+	return params, nil
 }

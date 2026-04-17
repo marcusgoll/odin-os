@@ -159,6 +159,49 @@ type Run struct {
 	Summary    string
 }
 
+type MemoryEntry struct {
+	ID              int64
+	WorkspaceID     int64
+	InitiativeID    *int64
+	CompanionID     *int64
+	TaskID          *int64
+	RunID           *int64
+	EntryType       string
+	VisibilityScope string
+	RetentionClass  string
+	Summary         string
+	Content         string
+	MetadataJSON    string
+	CreatedAt       time.Time
+	UpdatedAt       time.Time
+}
+
+type CreateMemoryEntryParams struct {
+	WorkspaceID     int64
+	InitiativeID    *int64
+	CompanionID     *int64
+	TaskID          *int64
+	RunID           *int64
+	EntryType       string
+	VisibilityScope string
+	RetentionClass  string
+	Summary         string
+	Content         string
+	MetadataJSON    string
+}
+
+type ListMemoryEntriesParams struct {
+	WorkspaceID     int64
+	InitiativeID    *int64
+	CompanionID     *int64
+	TaskID          *int64
+	RunID           *int64
+	EntryType       string
+	VisibilityScope string
+	RetentionClass  string
+	Limit           int
+}
+
 type StartRunParams struct {
 	TaskID   int64
 	Executor string
