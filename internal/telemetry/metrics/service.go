@@ -22,6 +22,8 @@ type Snapshot struct {
 	StaleExecutors     int
 	StaleSources       int
 	StaleProjections   int
+	MediaOpenIncidents int
+	MediaCandidates    int
 }
 
 type Config struct {
@@ -48,6 +50,8 @@ func Render(snapshot Snapshot) string {
 		fmt.Sprintf("odin_stale_executors %d", snapshot.StaleExecutors),
 		fmt.Sprintf("odin_stale_sources %d", snapshot.StaleSources),
 		fmt.Sprintf("odin_stale_projections %d", snapshot.StaleProjections),
+		fmt.Sprintf("odin_media_open_incidents %d", snapshot.MediaOpenIncidents),
+		fmt.Sprintf("odin_media_candidates %d", snapshot.MediaCandidates),
 	}
 	return strings.Join(lines, "\n")
 }
@@ -137,6 +141,27 @@ func (service Service) Collect(ctx context.Context) (Snapshot, error) {
 		return Snapshot{}, err
 	}
 
+	var mediaOpenIncidents int
+	if err := service.DB.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM incidents
+		WHERE status IN ('open', 'escalated')
+		  AND details_json LIKE '%"domain":"media"%'
+	`).Scan(&mediaOpenIncidents); err != nil {
+		return Snapshot{}, err
+	}
+
+	var mediaCandidates int
+	if err := service.DB.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM tasks
+		WHERE status = 'blocked'
+		  AND requested_by = 'media-supervisor'
+		  AND key LIKE 'media-maintenance-%'
+	`).Scan(&mediaCandidates); err != nil {
+		return Snapshot{}, err
+	}
+
 	return Snapshot{
 		GeneratedAt:        now,
 		ActiveRuns:         len(activeRuns),
@@ -149,6 +174,8 @@ func (service Service) Collect(ctx context.Context) (Snapshot, error) {
 		StaleExecutors:     staleExecutors,
 		StaleSources:       staleSources,
 		StaleProjections:   staleProjections,
+		MediaOpenIncidents: mediaOpenIncidents,
+		MediaCandidates:    mediaCandidates,
 	}, nil
 }
 

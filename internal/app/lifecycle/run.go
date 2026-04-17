@@ -22,6 +22,7 @@ import (
 	"odin-os/internal/core/projects"
 	healthsvc "odin-os/internal/runtime/health"
 	"odin-os/internal/runtime/jobs"
+	mediasvc "odin-os/internal/runtime/media"
 	"odin-os/internal/runtime/recovery"
 	"odin-os/internal/telemetry/logs"
 	metricsvc "odin-os/internal/telemetry/metrics"
@@ -34,6 +35,7 @@ var errRuntimeNotReady = errors.New("runtime not ready")
 
 var (
 	serveTaskLoopInterval     = 1 * time.Second
+	serveMediaLoopInterval    = 30 * time.Second
 	serveSelfHealLoopInterval = 30 * time.Second
 )
 
@@ -174,6 +176,7 @@ func runServe(ctx context.Context, app bootstrap.App, cfg appconfig.Config, stdo
 		HealthConfig:    healthsvc.DefaultConfig(),
 		Logger:          logger,
 	}
+	mediaService := newMediaService(app, cfg)
 
 	if err := jobService.ExecuteNextQueued(operationCtx); err != nil {
 		logBackgroundError(logger, "task_runner", err)
@@ -181,11 +184,23 @@ func runServe(ctx context.Context, app bootstrap.App, cfg appconfig.Config, stdo
 	if _, err := recoveryService.RunCycle(operationCtx); err != nil {
 		logBackgroundError(logger, "self_heal", err)
 	}
+	if mediaService != nil {
+		if _, err := mediaService.RunCycle(operationCtx); err != nil {
+			logBackgroundError(logger, "media_supervisor", err)
+		}
+	}
 
 	var background sync.WaitGroup
-	background.Add(2)
+	backgroundLoops := 2
+	if mediaService != nil {
+		backgroundLoops++
+	}
+	background.Add(backgroundLoops)
 	go runTaskLoop(ctx, operationCtx, &background, jobService, logger)
 	go runSelfHealLoop(ctx, operationCtx, &background, recoveryService, logger)
+	if mediaService != nil {
+		go runMediaLoop(ctx, operationCtx, &background, *mediaService, logger)
+	}
 
 	listener, err := net.Listen("tcp", cfg.Service.HTTPAddr)
 	if err != nil {
@@ -238,6 +253,24 @@ func newHealthService(app bootstrap.App, cfg appconfig.Config) healthsvc.Service
 	return service
 }
 
+func newMediaService(app bootstrap.App, cfg appconfig.Config) *mediasvc.Service {
+	if cfg.Media == nil {
+		return nil
+	}
+
+	systemProject, _ := app.Registry.SystemProject()
+	return &mediasvc.Service{
+		Store:         app.Store,
+		Config:        cfg.Media,
+		SystemProject: systemProject,
+		Checker: healthsvc.MediaChecks{
+			Config:       cfg.Media,
+			ProbeCommand: os.Getenv("ODIN_MEDIA_PROBE_COMMAND"),
+		},
+		Now: time.Now,
+	}
+}
+
 func openServiceLogger(runtimeRoot string) (*logs.Logger, io.Closer, error) {
 	logDir := filepath.Join(runtimeRoot, "runs", "logs")
 	if err := os.MkdirAll(logDir, 0o755); err != nil {
@@ -286,6 +319,24 @@ func runSelfHealLoop(ctx context.Context, operationCtx context.Context, wg *sync
 		case <-ticker.C:
 			if _, err := service.RunCycle(operationCtx); err != nil {
 				logBackgroundError(logger, "self_heal", err)
+			}
+		}
+	}
+}
+
+func runMediaLoop(ctx context.Context, operationCtx context.Context, wg *sync.WaitGroup, service mediasvc.Service, logger *logs.Logger) {
+	defer wg.Done()
+
+	ticker := time.NewTicker(serveMediaLoopInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if _, err := service.RunCycle(operationCtx); err != nil {
+				logBackgroundError(logger, "media_supervisor", err)
 			}
 		}
 	}
