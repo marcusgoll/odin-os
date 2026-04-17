@@ -82,9 +82,8 @@ func (service Service) Update(ctx context.Context, params UpdateParams) (Operati
 		return OperatingProfile{}, err
 	}
 	if changed {
-		if _, err := (memoryworkspaces.Service{Store: service.Store}).RememberProfileUpdate(ctx, workspace.ID, summary, detailsJSON); err != nil {
-			return OperatingProfile{}, err
-		}
+		// Profile persistence is the primary mutation; memory summaries are best-effort.
+		_, _ = (memoryworkspaces.Service{Store: service.Store}).RememberProfileUpdate(ctx, workspace.ID, summary, detailsJSON)
 	}
 
 	return updated, nil

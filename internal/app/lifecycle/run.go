@@ -1338,7 +1338,7 @@ func runServe(ctx context.Context, app bootstrap.App, cfg appconfig.Config, stdo
 	}
 
 	jobService := newJobService(app)
-	followUpService := followups.Service{Store: app.Store}
+	followUpService := followups.Service{Store: app.Store, Now: now}
 	recoveryService := recovery.Service{
 		Store:           app.Store,
 		RegistryRoot:    filepath.Join(app.RepoRoot, "registry"),

@@ -132,9 +132,8 @@ func (service Service) Complete(ctx context.Context, workspaceID int64, obligati
 	if err != nil {
 		return FollowUpObligation{}, err
 	}
-	if err := service.recordCompletionMemory(ctx, obligation, now); err != nil {
-		return FollowUpObligation{}, err
-	}
+	// Completion is the primary mutation; lifecycle memory is best-effort.
+	_ = service.recordCompletionMemory(ctx, obligation, now)
 	return updated, nil
 }
 
