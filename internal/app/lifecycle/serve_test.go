@@ -491,7 +491,7 @@ service:
 	}
 }
 
-func TestRunServePromotesDelayedTasksAndDispatchesThem(t *testing.T) {
+func TestRunServeDispatchesDelayedTasksWhenTheyBecomeEligible(t *testing.T) {
 	root := createRuntimeRoot(t)
 	writeRuntimeConfig(t, root, `
 version: 1

@@ -294,23 +294,11 @@ func (store *Store) updateTaskQueueStateTx(ctx context.Context, tx *sql.Tx, para
 		return Task{}, err
 	}
 
-	if current.Status != updated.Status {
-		projectID := updated.ProjectID
-		if err := appendEventTx(ctx, tx, eventInsert{
-			StreamType: runtimeevents.StreamTask,
-			StreamID:   updated.ID,
-			EventType:  runtimeevents.EventTaskStatusChanged,
-			Scope:      updated.Scope,
-			ProjectID:  &projectID,
-			TaskID:     &updated.ID,
-			Payload: runtimeevents.TaskStatusChangedPayload{
-				PreviousStatus: current.Status,
-				Status:         updated.Status,
-			},
-			OccurredAt: now,
-		}); err != nil {
-			return Task{}, err
-		}
+	if err := appendTaskStatusChangedEventTx(ctx, tx, current, updated, now); err != nil {
+		return Task{}, err
+	}
+	if err := appendTaskQueueStateChangedEventTx(ctx, tx, current, updated, now); err != nil {
+		return Task{}, err
 	}
 
 	return updated, nil
@@ -337,23 +325,11 @@ func (store *Store) BlockTask(ctx context.Context, params BlockTaskParams) (Task
 		if err != nil {
 			return err
 		}
-		if current.Status != updated.Status {
-			projectID := updated.ProjectID
-			if err := appendEventTx(ctx, tx, eventInsert{
-				StreamType: runtimeevents.StreamTask,
-				StreamID:   updated.ID,
-				EventType:  runtimeevents.EventTaskStatusChanged,
-				Scope:      updated.Scope,
-				ProjectID:  &projectID,
-				TaskID:     &updated.ID,
-				Payload: runtimeevents.TaskStatusChangedPayload{
-					PreviousStatus: current.Status,
-					Status:         updated.Status,
-				},
-				OccurredAt: now,
-			}); err != nil {
-				return err
-			}
+		if err := appendTaskStatusChangedEventTx(ctx, tx, current, updated, now); err != nil {
+			return err
+		}
+		if err := appendTaskQueueStateChangedEventTx(ctx, tx, current, updated, now); err != nil {
+			return err
 		}
 		task = updated
 		return nil
@@ -382,71 +358,16 @@ func (store *Store) RequeueTaskAt(ctx context.Context, params RequeueTaskAtParam
 		if err != nil {
 			return err
 		}
-		if current.Status != updated.Status {
-			projectID := updated.ProjectID
-			if err := appendEventTx(ctx, tx, eventInsert{
-				StreamType: runtimeevents.StreamTask,
-				StreamID:   updated.ID,
-				EventType:  runtimeevents.EventTaskStatusChanged,
-				Scope:      updated.Scope,
-				ProjectID:  &projectID,
-				TaskID:     &updated.ID,
-				Payload: runtimeevents.TaskStatusChangedPayload{
-					PreviousStatus: current.Status,
-					Status:         updated.Status,
-				},
-				OccurredAt: now,
-			}); err != nil {
-				return err
-			}
+		if err := appendTaskStatusChangedEventTx(ctx, tx, current, updated, now); err != nil {
+			return err
+		}
+		if err := appendTaskQueueStateChangedEventTx(ctx, tx, current, updated, now); err != nil {
+			return err
 		}
 		task = updated
 		return nil
 	})
 	return task, err
-}
-
-func (store *Store) PromoteQueuedTaskIfDue(ctx context.Context, params PromoteQueuedTaskIfDueParams) (Task, bool, error) {
-	var task Task
-	var promoted bool
-	err := store.withTx(ctx, func(tx *sql.Tx) error {
-		current, err := store.getTaskTx(ctx, tx, params.TaskID)
-		if err != nil {
-			return err
-		}
-
-		now := store.now()
-		result, err := tx.ExecContext(ctx, `
-			UPDATE tasks
-			SET next_eligible_at = ?, updated_at = ?
-			WHERE id = ?
-			  AND status = 'queued'
-			  AND current_run_id IS NULL
-			  AND next_eligible_at > ?
-			  AND next_eligible_at <= ?
-		`, formatTime(time.Time{}), formatTime(now), params.TaskID, formatTime(time.Time{}), formatTime(params.Now))
-		if err != nil {
-			return err
-		}
-
-		rowsAffected, err := result.RowsAffected()
-		if err != nil {
-			return err
-		}
-		if rowsAffected == 0 {
-			task = current
-			return nil
-		}
-
-		updated, err := store.getTaskTx(ctx, tx, params.TaskID)
-		if err != nil {
-			return err
-		}
-		task = updated
-		promoted = true
-		return nil
-	})
-	return task, promoted, err
 }
 
 func (store *Store) IncrementTaskRetry(ctx context.Context, params IncrementTaskRetryParams) (Task, error) {
@@ -470,28 +391,70 @@ func (store *Store) IncrementTaskRetry(ctx context.Context, params IncrementTask
 		if err != nil {
 			return err
 		}
-		if current.Status != updated.Status {
-			projectID := updated.ProjectID
-			if err := appendEventTx(ctx, tx, eventInsert{
-				StreamType: runtimeevents.StreamTask,
-				StreamID:   updated.ID,
-				EventType:  runtimeevents.EventTaskStatusChanged,
-				Scope:      updated.Scope,
-				ProjectID:  &projectID,
-				TaskID:     &updated.ID,
-				Payload: runtimeevents.TaskStatusChangedPayload{
-					PreviousStatus: current.Status,
-					Status:         updated.Status,
-				},
-				OccurredAt: now,
-			}); err != nil {
-				return err
-			}
+		if err := appendTaskStatusChangedEventTx(ctx, tx, current, updated, now); err != nil {
+			return err
+		}
+		if err := appendTaskQueueStateChangedEventTx(ctx, tx, current, updated, now); err != nil {
+			return err
 		}
 		task = updated
 		return nil
 	})
 	return task, err
+}
+
+func appendTaskStatusChangedEventTx(ctx context.Context, tx *sql.Tx, previous Task, updated Task, occurredAt time.Time) error {
+	if previous.Status == updated.Status {
+		return nil
+	}
+
+	projectID := updated.ProjectID
+	return appendEventTx(ctx, tx, eventInsert{
+		StreamType: runtimeevents.StreamTask,
+		StreamID:   updated.ID,
+		EventType:  runtimeevents.EventTaskStatusChanged,
+		Scope:      updated.Scope,
+		ProjectID:  &projectID,
+		TaskID:     &updated.ID,
+		Payload: runtimeevents.TaskStatusChangedPayload{
+			PreviousStatus: previous.Status,
+			Status:         updated.Status,
+		},
+		OccurredAt: occurredAt,
+	})
+}
+
+func appendTaskQueueStateChangedEventTx(ctx context.Context, tx *sql.Tx, previous Task, updated Task, occurredAt time.Time) error {
+	if previous.Status == updated.Status &&
+		previous.NextEligibleAt.Equal(updated.NextEligibleAt) &&
+		previous.Priority == updated.Priority &&
+		previous.LastError == updated.LastError &&
+		previous.RetryCount == updated.RetryCount &&
+		previous.MaxAttempts == updated.MaxAttempts &&
+		previous.BlockedReason == updated.BlockedReason {
+		return nil
+	}
+
+	projectID := updated.ProjectID
+	return appendEventTx(ctx, tx, eventInsert{
+		StreamType: runtimeevents.StreamTask,
+		StreamID:   updated.ID,
+		EventType:  runtimeevents.EventTaskQueueStateChanged,
+		Scope:      updated.Scope,
+		ProjectID:  &projectID,
+		TaskID:     &updated.ID,
+		Payload: runtimeevents.TaskQueueStateChangedPayload{
+			PreviousStatus: previous.Status,
+			Status:         updated.Status,
+			NextEligibleAt: formatTime(updated.NextEligibleAt),
+			Priority:       updated.Priority,
+			RetryCount:     updated.RetryCount,
+			MaxAttempts:    updated.MaxAttempts,
+			LastError:      updated.LastError,
+			BlockedReason:  updated.BlockedReason,
+		},
+		OccurredAt: occurredAt,
+	})
 }
 
 func (store *Store) StartRun(ctx context.Context, params StartRunParams) (Run, error) {

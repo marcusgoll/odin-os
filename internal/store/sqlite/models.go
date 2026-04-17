@@ -79,11 +79,6 @@ type RequeueTaskAtParams struct {
 	NextEligibleAt time.Time
 }
 
-type PromoteQueuedTaskIfDueParams struct {
-	TaskID int64
-	Now    time.Time
-}
-
 type IncrementTaskRetryParams struct {
 	TaskID         int64
 	LastError      string

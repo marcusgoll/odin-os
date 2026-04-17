@@ -40,8 +40,8 @@ func TestSchedulerPromotesDueQueuedTask(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetTask(due) error = %v", err)
 	}
-	if !updatedDue.NextEligibleAt.IsZero() {
-		t.Fatalf("due task next_eligible_at = %v, want immediate", updatedDue.NextEligibleAt)
+	if !updatedDue.NextEligibleAt.Equal(now.Add(-time.Minute)) {
+		t.Fatalf("due task next_eligible_at = %v, want %v", updatedDue.NextEligibleAt, now.Add(-time.Minute))
 	}
 
 	updatedFuture, err := store.GetTask(ctx, notYetDueTask.ID)
@@ -117,20 +117,6 @@ func TestSchedulerDoesNotPromoteClaimedTask(t *testing.T) {
 		t.Fatalf("UpdateTaskStatus(running) error = %v", err)
 	}
 
-	guarded, promoted, err := store.PromoteQueuedTaskIfDue(ctx, sqlite.PromoteQueuedTaskIfDueParams{
-		TaskID: task.ID,
-		Now:    now,
-	})
-	if err != nil {
-		t.Fatalf("PromoteQueuedTaskIfDue() error = %v", err)
-	}
-	if promoted {
-		t.Fatal("PromoteQueuedTaskIfDue() promoted running task, want no-op")
-	}
-	if guarded.Status != "running" {
-		t.Fatalf("PromoteQueuedTaskIfDue().Status = %q, want running", guarded.Status)
-	}
-
 	service := Service{
 		Store: store,
 		Now:   func() time.Time { return now },
@@ -156,6 +142,56 @@ func TestSchedulerDoesNotPromoteClaimedTask(t *testing.T) {
 	}
 	if !updatedTask.NextEligibleAt.Equal(now.Add(-time.Minute)) {
 		t.Fatalf("Task.NextEligibleAt = %v, want %v", updatedTask.NextEligibleAt, now.Add(-time.Minute))
+	}
+}
+
+func TestSchedulerPreservesDueOrderForMultipleDelayedTasks(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openSupervisionStore(t)
+	defer store.Close()
+
+	now := time.Date(2026, 4, 17, 12, 0, 0, 0, time.UTC)
+	store.Now = func() time.Time { return now }
+
+	project := mustCreateSupervisionProject(t, ctx, store)
+	laterDue := mustCreateQueuedTaskAt(t, ctx, store, project.ID, "later-due", now.Add(-time.Minute))
+	earlierDue := mustCreateQueuedTaskAt(t, ctx, store, project.ID, "earlier-due", now.Add(-2*time.Minute))
+
+	beforeTick, err := store.ListEligibleQueuedTasks(ctx, now)
+	if err != nil {
+		t.Fatalf("ListEligibleQueuedTasks(before) error = %v", err)
+	}
+	if len(beforeTick) != 2 {
+		t.Fatalf("eligible before tick = %d, want 2", len(beforeTick))
+	}
+	if beforeTick[0].ID != earlierDue.ID || beforeTick[1].ID != laterDue.ID {
+		t.Fatalf("before tick order = [%d %d], want [%d %d]", beforeTick[0].ID, beforeTick[1].ID, earlierDue.ID, laterDue.ID)
+	}
+
+	service := Service{
+		Store: store,
+		Now:   func() time.Time { return now },
+	}
+
+	result, err := service.Tick(ctx)
+	if err != nil {
+		t.Fatalf("Tick() error = %v", err)
+	}
+	if result.Promoted != 2 {
+		t.Fatalf("Promoted = %d, want 2", result.Promoted)
+	}
+
+	afterTick, err := store.ListEligibleQueuedTasks(ctx, now)
+	if err != nil {
+		t.Fatalf("ListEligibleQueuedTasks(after) error = %v", err)
+	}
+	if len(afterTick) != 2 {
+		t.Fatalf("eligible after tick = %d, want 2", len(afterTick))
+	}
+	if afterTick[0].ID != earlierDue.ID || afterTick[1].ID != laterDue.ID {
+		t.Fatalf("after tick order = [%d %d], want [%d %d]", afterTick[0].ID, afterTick[1].ID, earlierDue.ID, laterDue.ID)
 	}
 }
 

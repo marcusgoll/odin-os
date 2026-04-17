@@ -41,16 +41,7 @@ func (service Service) Tick(ctx context.Context) (TickResult, error) {
 			continue
 		}
 
-		_, promoted, err := service.Store.PromoteQueuedTaskIfDue(ctx, sqlite.PromoteQueuedTaskIfDueParams{
-			TaskID: task.ID,
-			Now:    now,
-		})
-		if err != nil {
-			return result, err
-		}
-		if promoted {
-			result.Promoted++
-		}
+		result.Promoted++
 	}
 
 	return result, nil

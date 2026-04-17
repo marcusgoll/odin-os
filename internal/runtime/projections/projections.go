@@ -818,12 +818,18 @@ type LifecycleReplay struct {
 }
 
 type TaskReplay struct {
-	ID           int64
-	Key          string
-	Title        string
-	Status       string
-	Scope        string
-	CurrentRunID *int64
+	ID             int64
+	Key            string
+	Title          string
+	Status         string
+	Scope          string
+	CurrentRunID   *int64
+	NextEligibleAt string
+	Priority       int
+	RetryCount     int
+	MaxAttempts    int
+	LastError      string
+	BlockedReason  string
 }
 
 type RunReplay struct {
@@ -876,6 +882,28 @@ func ReplayLifecycle(records []runtimeevents.Record) (LifecycleReplay, error) {
 			task.Status = payload.Status
 			if record.RunID != nil {
 				task.CurrentRunID = record.RunID
+			} else if payload.Status != "running" {
+				task.CurrentRunID = nil
+			}
+			replay.Tasks[record.StreamID] = task
+		case runtimeevents.EventTaskQueueStateChanged:
+			payload, err := runtimeevents.DecodePayload[runtimeevents.TaskQueueStateChangedPayload](record.Payload)
+			if err != nil {
+				return LifecycleReplay{}, fmt.Errorf("decode %s payload: %w", record.Type, err)
+			}
+			task := replay.Tasks[record.StreamID]
+			task.ID = record.StreamID
+			task.Status = payload.Status
+			task.NextEligibleAt = payload.NextEligibleAt
+			task.Priority = payload.Priority
+			task.RetryCount = payload.RetryCount
+			task.MaxAttempts = payload.MaxAttempts
+			task.LastError = payload.LastError
+			task.BlockedReason = payload.BlockedReason
+			if record.RunID != nil {
+				task.CurrentRunID = record.RunID
+			} else if payload.Status != "running" {
+				task.CurrentRunID = nil
 			}
 			replay.Tasks[record.StreamID] = task
 		case runtimeevents.EventRunStarted:

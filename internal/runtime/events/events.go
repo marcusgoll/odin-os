@@ -31,6 +31,7 @@ const (
 	EventProjectCreated                   Type = "project.created"
 	EventTaskCreated                      Type = "task.created"
 	EventTaskStatusChanged                Type = "task.status_changed"
+	EventTaskQueueStateChanged            Type = "task.queue_state_changed"
 	EventRunStarted                       Type = "run.started"
 	EventRunFinished                      Type = "run.finished"
 	EventApprovalRequested                Type = "approval.requested"
@@ -105,6 +106,17 @@ type TaskCreatedPayload struct {
 type TaskStatusChangedPayload struct {
 	PreviousStatus string `json:"previous_status"`
 	Status         string `json:"status"`
+}
+
+type TaskQueueStateChangedPayload struct {
+	PreviousStatus string `json:"previous_status"`
+	Status         string `json:"status"`
+	NextEligibleAt string `json:"next_eligible_at"`
+	Priority       int    `json:"priority"`
+	RetryCount     int    `json:"retry_count"`
+	MaxAttempts    int    `json:"max_attempts"`
+	LastError      string `json:"last_error,omitempty"`
+	BlockedReason  string `json:"blocked_reason,omitempty"`
 }
 
 type RunStartedPayload struct {
