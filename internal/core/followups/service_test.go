@@ -77,6 +77,60 @@ func TestFollowUpCreateRecurringObligation(t *testing.T) {
 	}
 }
 
+func TestFollowUpCreateRejectsCrossWorkspaceOwnership(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openFollowUpStore(t)
+	defer store.Close()
+
+	workspaceID, _, _, _ := seedFollowUpContext(t, ctx, store)
+	otherWorkspace, err := store.CreateWorkspace(ctx, sqlite.CreateWorkspaceParams{
+		Key:                 "secondary",
+		Name:                "Secondary Workspace",
+		OwnerRef:            "operator",
+		DefaultCompanionKey: "assistant",
+		Status:              "active",
+		PolicyJSON:          `{}`,
+	})
+	if err != nil {
+		t.Fatalf("CreateWorkspace() error = %v", err)
+	}
+
+	otherCompanion, err := store.UpsertCompanion(ctx, sqlite.UpsertCompanionParams{
+		WorkspaceID: otherWorkspace.ID,
+		Key:         "assistant",
+		Title:       "Assistant",
+		Kind:        "assistant",
+		Status:      "active",
+	})
+	if err != nil {
+		t.Fatalf("UpsertCompanion() error = %v", err)
+	}
+	otherInitiative, err := store.UpsertInitiative(ctx, sqlite.UpsertInitiativeParams{
+		WorkspaceID:      otherWorkspace.ID,
+		Key:              "other-life-admin",
+		Title:            "Other Life Admin",
+		Kind:             "routine",
+		Status:           "active",
+		OwnerCompanionID: &otherCompanion.ID,
+	})
+	if err != nil {
+		t.Fatalf("UpsertInitiative() error = %v", err)
+	}
+
+	_, err = Service{Store: store}.Create(ctx, CreateParams{
+		WorkspaceID:  workspaceID,
+		InitiativeID: &otherInitiative.ID,
+		Title:        "Cross workspace follow-up",
+		Cadence:      Cadence{Mode: CadenceModeOnce},
+		NextDueAt:    time.Date(2026, 4, 18, 9, 0, 0, 0, time.UTC),
+	})
+	if err == nil {
+		t.Fatal("Create() error = nil, want cross-workspace rejection")
+	}
+}
+
 func TestFollowUpDueStatusUsesCadenceAndTimestamps(t *testing.T) {
 	t.Parallel()
 
@@ -160,6 +214,94 @@ func TestFollowUpMaterializeReusesSameOccurrenceTask(t *testing.T) {
 	}
 	if second.TaskID != first.TaskID {
 		t.Fatalf("TaskID = %d, want %d", second.TaskID, first.TaskID)
+	}
+}
+
+func TestFollowUpCompleteRecurringObligationAdvancesNextDueAt(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openFollowUpStore(t)
+	defer store.Close()
+
+	now := time.Date(2026, 4, 17, 12, 0, 0, 0, time.UTC)
+	workspaceID, initiativeID, companionID, _ := seedFollowUpContext(t, ctx, store)
+	service := Service{
+		Store: store,
+		Now: func() time.Time {
+			return now
+		},
+	}
+
+	obligation, err := service.Create(ctx, CreateParams{
+		WorkspaceID:  workspaceID,
+		InitiativeID: &initiativeID,
+		CompanionID:  &companionID,
+		Title:        "Weekly review",
+		Cadence:      Cadence{Mode: CadenceModeRecurring, Interval: CadenceIntervalWeekly},
+		NextDueAt:    now.Add(-time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+
+	updated, err := service.Complete(ctx, obligation.ID)
+	if err != nil {
+		t.Fatalf("Complete() error = %v", err)
+	}
+	if updated.Status != StatusActive {
+		t.Fatalf("Status = %q, want active", updated.Status)
+	}
+	wantNextDue := now.Add(-time.Minute).AddDate(0, 0, 7)
+	if !updated.NextDueAt.Equal(wantNextDue) {
+		t.Fatalf("NextDueAt = %v, want %v", updated.NextDueAt, wantNextDue)
+	}
+	if updated.LastCompletedAt == nil || !updated.LastCompletedAt.Equal(now) {
+		t.Fatalf("LastCompletedAt = %v, want %v", updated.LastCompletedAt, now)
+	}
+}
+
+func TestFollowUpSnoozeMovesNextDueAtForward(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openFollowUpStore(t)
+	defer store.Close()
+
+	now := time.Date(2026, 4, 17, 12, 0, 0, 0, time.UTC)
+	workspaceID, initiativeID, companionID, _ := seedFollowUpContext(t, ctx, store)
+	service := Service{
+		Store: store,
+		Now: func() time.Time {
+			return now
+		},
+	}
+
+	obligation, err := service.Create(ctx, CreateParams{
+		WorkspaceID:  workspaceID,
+		InitiativeID: &initiativeID,
+		CompanionID:  &companionID,
+		Title:        "Review mail",
+		Cadence:      Cadence{Mode: CadenceModeOnce},
+		NextDueAt:    now.Add(-time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+
+	until := now.Add(48 * time.Hour)
+	updated, err := service.Snooze(ctx, obligation.ID, until)
+	if err != nil {
+		t.Fatalf("Snooze() error = %v", err)
+	}
+	if updated.Status != StatusActive {
+		t.Fatalf("Status = %q, want active", updated.Status)
+	}
+	if !updated.NextDueAt.Equal(until) {
+		t.Fatalf("NextDueAt = %v, want %v", updated.NextDueAt, until)
+	}
+	if updated.LastCompletedAt != nil {
+		t.Fatalf("LastCompletedAt = %v, want nil", updated.LastCompletedAt)
 	}
 }
 

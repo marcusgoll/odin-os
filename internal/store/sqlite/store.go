@@ -2339,6 +2339,43 @@ func (store *Store) RecordFollowUpMaterialization(ctx context.Context, params Re
 	return obligation, err
 }
 
+func (store *Store) UpdateFollowUpObligation(ctx context.Context, params UpdateFollowUpObligationParams) (FollowUpObligation, error) {
+	now := store.now()
+	var obligation FollowUpObligation
+
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		updates := []string{"status = ?", "updated_at = ?"}
+		args := []any{params.Status, formatTime(now)}
+		if params.NextDueAt != nil {
+			updates = append(updates, "next_due_at = ?")
+			args = append(args, formatTime(*params.NextDueAt))
+		}
+		if params.LastMaterializedAt != nil {
+			updates = append(updates, "last_materialized_at = ?")
+			args = append(args, formatTime(*params.LastMaterializedAt))
+		}
+		if params.LastCompletedAt != nil {
+			updates = append(updates, "last_completed_at = ?")
+			args = append(args, formatTime(*params.LastCompletedAt))
+		}
+		args = append(args, params.ObligationID)
+
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE follow_up_obligations
+			SET `+strings.Join(updates, ", ")+`
+			WHERE id = ?
+		`, args...); err != nil {
+			return err
+		}
+
+		var err error
+		obligation, err = store.getFollowUpObligationTx(ctx, tx, params.ObligationID)
+		return err
+	})
+
+	return obligation, err
+}
+
 func (store *Store) GetTaskByFollowUpOccurrence(ctx context.Context, obligationID int64, occurrenceKey string) (Task, error) {
 	row := store.db.QueryRowContext(ctx, `
 		SELECT
@@ -3137,6 +3174,15 @@ func (store *Store) GetInitiativeByKey(ctx context.Context, workspaceID int64, k
 	return scanInitiative(row)
 }
 
+func (store *Store) GetInitiativeByID(ctx context.Context, initiativeID int64) (Initiative, error) {
+	row := store.db.QueryRowContext(ctx, `
+		SELECT id, workspace_id, key, title, kind, status, summary, owner_companion_id, linked_project_id, created_at, updated_at
+		FROM initiatives
+		WHERE id = ?
+	`, initiativeID)
+	return scanInitiative(row)
+}
+
 func (store *Store) ListInitiativesByWorkspace(ctx context.Context, workspaceID int64) ([]Initiative, error) {
 	rows, err := store.db.QueryContext(ctx, `
 		SELECT id, workspace_id, key, title, kind, status, summary, owner_companion_id, linked_project_id, created_at, updated_at
@@ -3209,6 +3255,28 @@ func (store *Store) GetCompanionByKey(ctx context.Context, workspaceID int64, ke
 		FROM companions
 		WHERE workspace_id = ? AND key = ?
 	`, workspaceID, key)
+	return scanCompanion(row)
+}
+
+func (store *Store) GetCompanionByID(ctx context.Context, companionID int64) (Companion, error) {
+	row := store.db.QueryRowContext(ctx, `
+		SELECT
+			id,
+			workspace_id,
+			key,
+			title,
+			kind,
+			charter,
+			status,
+			initiative_scope_json,
+			tool_policy_json,
+			memory_policy_json,
+			planning_policy_json,
+			created_at,
+			updated_at
+		FROM companions
+		WHERE id = ?
+	`, companionID)
 	return scanCompanion(row)
 }
 

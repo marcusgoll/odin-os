@@ -107,6 +107,34 @@ func TestWorkspaceRefactorAcceptance(t *testing.T) {
 		}
 	})
 
+	t.Run("follow-up lifecycle commands manage recurring obligations", func(t *testing.T) {
+		runtimeRoot := t.TempDir()
+
+		createOutput, err := runOdinCommand(t, repoRoot, odinBinary, runtimeRoot, nil, "", "initiative", "create", "--kind", "routine", "--key", "life-admin", "--title", "Life Admin")
+		if err != nil {
+			t.Fatalf("runOdinCommand(initiative create) error = %v\n%s", err, createOutput)
+		}
+
+		addOutput, err := runOdinCommand(t, repoRoot, odinBinary, runtimeRoot, nil, "", "followup", "add", "--initiative", "life-admin", "--title", "Review mail", "--cadence", "weekly")
+		if err != nil {
+			t.Fatalf("runOdinCommand(followup add) error = %v\n%s", err, addOutput)
+		}
+		if !strings.Contains(addOutput, "created follow-up") {
+			t.Fatalf("followup add output = %q, want created follow-up", addOutput)
+		}
+
+		listOutput, err := runOdinCommand(t, repoRoot, odinBinary, runtimeRoot, nil, "", "followup", "list", "--json")
+		if err != nil {
+			t.Fatalf("runOdinCommand(followup list --json) error = %v\n%s", err, listOutput)
+		}
+		if !strings.Contains(listOutput, `"initiative_key": "life-admin"`) {
+			t.Fatalf("followup list output = %q, want life-admin entry", listOutput)
+		}
+		if !strings.Contains(listOutput, `"status": "active"`) {
+			t.Fatalf("followup list output = %q, want active status", listOutput)
+		}
+	})
+
 	t.Run("companion lifecycle commands manage durable companion state", func(t *testing.T) {
 		runtimeRoot := t.TempDir()
 

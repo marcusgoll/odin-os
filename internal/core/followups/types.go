@@ -101,6 +101,33 @@ func (cadence Cadence) Validate() error {
 	}
 }
 
+func (cadence Cadence) NextDueAfter(base time.Time) (time.Time, error) {
+	if err := cadence.Validate(); err != nil {
+		return time.Time{}, err
+	}
+
+	base = base.UTC()
+	switch cadence.Mode {
+	case CadenceModeOnce:
+		return base, nil
+	case CadenceModeRecurring:
+		switch cadence.Interval {
+		case CadenceIntervalDaily:
+			return base.AddDate(0, 0, 1), nil
+		case CadenceIntervalWeekly:
+			return base.AddDate(0, 0, 7), nil
+		case CadenceIntervalMonthly:
+			return base.AddDate(0, 1, 0), nil
+		case CadenceIntervalQuarterly:
+			return base.AddDate(0, 3, 0), nil
+		default:
+			return time.Time{}, fmt.Errorf("unsupported recurring cadence interval %q", cadence.Interval)
+		}
+	default:
+		return time.Time{}, fmt.Errorf("unsupported cadence mode %q", cadence.Mode)
+	}
+}
+
 func (obligation FollowUpObligation) DueStatus(now time.Time) Status {
 	switch obligation.Status {
 	case StatusPaused, StatusBlocked, StatusCompleted, StatusSkipped, StatusArchived:

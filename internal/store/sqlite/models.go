@@ -160,6 +160,14 @@ type RecordFollowUpMaterializationParams struct {
 	NextDueAt          *time.Time
 }
 
+type UpdateFollowUpObligationParams struct {
+	ObligationID       int64
+	Status             string
+	NextDueAt          *time.Time
+	LastMaterializedAt *time.Time
+	LastCompletedAt    *time.Time
+}
+
 type Task struct {
 	ID                    int64
 	ProjectID             int64

@@ -74,11 +74,8 @@ func (service Service) QueueFollowUp(ctx context.Context, params QueueFollowUpPa
 
 	task, err := service.Queue(ctx, createTask)
 	if err != nil {
-		if isFollowUpOccurrenceConflict(err) {
-			existing, lookupErr := service.Store.GetTaskByFollowUpOccurrence(ctx, params.FollowUpObligationID, occurrenceKey)
-			if lookupErr == nil {
-				return existing, true, nil
-			}
+		if existing, lookupErr := service.Store.GetTaskByFollowUpOccurrence(ctx, params.FollowUpObligationID, occurrenceKey); lookupErr == nil {
+			return existing, true, nil
 		}
 		return sqlite.Task{}, false, err
 	}
@@ -265,14 +262,4 @@ func errorsIsNotFound(err error) bool {
 
 func int64Ptr(value int64) *int64 {
 	return &value
-}
-
-func isFollowUpOccurrenceConflict(err error) bool {
-	if err == nil {
-		return false
-	}
-	message := err.Error()
-	return strings.Contains(message, "UNIQUE constraint failed") &&
-		strings.Contains(message, "tasks.follow_up_obligation_id") &&
-		strings.Contains(message, "tasks.follow_up_occurrence_key")
 }

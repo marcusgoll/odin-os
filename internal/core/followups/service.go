@@ -34,6 +34,9 @@ func (service Service) Create(ctx context.Context, params CreateParams) (FollowU
 	if err := params.Cadence.Validate(); err != nil {
 		return FollowUpObligation{}, err
 	}
+	if err := service.validateOwnership(ctx, params.WorkspaceID, params.InitiativeID, params.CompanionID); err != nil {
+		return FollowUpObligation{}, err
+	}
 
 	cadenceJSON, err := json.Marshal(params.Cadence)
 	if err != nil {
@@ -70,6 +73,74 @@ func (service Service) Get(ctx context.Context, obligationID int64) (FollowUpObl
 	}
 
 	record, err := service.Store.GetFollowUpObligation(ctx, obligationID)
+	if err != nil {
+		return FollowUpObligation{}, err
+	}
+	return decode(record)
+}
+
+func (service Service) Complete(ctx context.Context, obligationID int64) (FollowUpObligation, error) {
+	if service.Store == nil {
+		return FollowUpObligation{}, fmt.Errorf("follow-up store is required")
+	}
+
+	obligation, err := service.Get(ctx, obligationID)
+	if err != nil {
+		return FollowUpObligation{}, err
+	}
+	if isTerminalFollowUpStatus(obligation.Status) {
+		return FollowUpObligation{}, fmt.Errorf("follow-up obligation %d is already %s", obligation.ID, obligation.Status)
+	}
+
+	now := service.now()
+	params := sqlite.UpdateFollowUpObligationParams{
+		ObligationID:    obligation.ID,
+		LastCompletedAt: &now,
+	}
+	if obligation.Cadence.Mode == CadenceModeRecurring {
+		nextDue, err := obligation.Cadence.NextDueAfter(obligation.NextDueAt)
+		if err != nil {
+			return FollowUpObligation{}, err
+		}
+		params.Status = string(StatusActive)
+		params.NextDueAt = &nextDue
+	} else {
+		params.Status = string(StatusCompleted)
+	}
+
+	record, err := service.Store.UpdateFollowUpObligation(ctx, params)
+	if err != nil {
+		return FollowUpObligation{}, err
+	}
+	return decode(record)
+}
+
+func (service Service) Snooze(ctx context.Context, obligationID int64, until time.Time) (FollowUpObligation, error) {
+	if service.Store == nil {
+		return FollowUpObligation{}, fmt.Errorf("follow-up store is required")
+	}
+	if until.IsZero() {
+		return FollowUpObligation{}, fmt.Errorf("snooze until time is required")
+	}
+
+	obligation, err := service.Get(ctx, obligationID)
+	if err != nil {
+		return FollowUpObligation{}, err
+	}
+	if isTerminalFollowUpStatus(obligation.Status) {
+		return FollowUpObligation{}, fmt.Errorf("follow-up obligation %d is already %s", obligation.ID, obligation.Status)
+	}
+
+	now := service.now()
+	if !until.UTC().After(now) {
+		return FollowUpObligation{}, fmt.Errorf("snooze until time must be in the future")
+	}
+
+	record, err := service.Store.UpdateFollowUpObligation(ctx, sqlite.UpdateFollowUpObligationParams{
+		ObligationID: obligation.ID,
+		Status:       string(StatusActive),
+		NextDueAt:    timePtr(until.UTC()),
+	})
 	if err != nil {
 		return FollowUpObligation{}, err
 	}
@@ -179,6 +250,30 @@ func (service Service) now() time.Time {
 	return time.Now().UTC()
 }
 
+func (service Service) validateOwnership(ctx context.Context, workspaceID int64, initiativeID *int64, companionID *int64) error {
+	if initiativeID != nil {
+		initiative, err := service.Store.GetInitiativeByID(ctx, *initiativeID)
+		if err != nil {
+			return err
+		}
+		if initiative.WorkspaceID != workspaceID {
+			return fmt.Errorf("initiative %d does not belong to workspace %d", *initiativeID, workspaceID)
+		}
+	}
+
+	if companionID != nil {
+		companion, err := service.Store.GetCompanionByID(ctx, *companionID)
+		if err != nil {
+			return err
+		}
+		if companion.WorkspaceID != workspaceID {
+			return fmt.Errorf("companion %d does not belong to workspace %d", *companionID, workspaceID)
+		}
+	}
+
+	return nil
+}
+
 func decode(record sqlite.FollowUpObligation) (FollowUpObligation, error) {
 	var cadence Cadence
 	if err := json.Unmarshal([]byte(record.CadenceJSON), &cadence); err != nil {
@@ -207,6 +302,19 @@ func decode(record sqlite.FollowUpObligation) (FollowUpObligation, error) {
 
 func int64Ptr(value int64) *int64 {
 	return &value
+}
+
+func timePtr(value time.Time) *time.Time {
+	return &value
+}
+
+func isTerminalFollowUpStatus(status Status) bool {
+	switch status {
+	case StatusCompleted, StatusSkipped, StatusArchived:
+		return true
+	default:
+		return false
+	}
 }
 
 func IsNotFound(err error) bool {

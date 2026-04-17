@@ -26,6 +26,7 @@ import (
 	clistate "odin-os/internal/cli/state"
 	"odin-os/internal/core/capabilities"
 	"odin-os/internal/core/companions"
+	"odin-os/internal/core/followups"
 	"odin-os/internal/core/initiatives"
 	"odin-os/internal/core/projects"
 	"odin-os/internal/core/workspaces"
@@ -46,7 +47,7 @@ import (
 
 var errRuntimeNotReady = errors.New("runtime not ready")
 
-const rootUsageBanner = "Usage: odin <command> [args]\n\nCommands: help repl doctor healthcheck serve backup restore verify-backup status project scope jobs runs approvals logs task initiative companion profile transition skills"
+const rootUsageBanner = "Usage: odin <command> [args]\n\nCommands: help repl doctor healthcheck serve backup restore verify-backup status project scope jobs runs approvals logs task initiative companion profile followup transition skills"
 
 var (
 	serveTaskLoopInterval     = 1 * time.Second
@@ -127,6 +128,8 @@ func Run(ctx context.Context, root string, args []string, stdin io.Reader, stdou
 		return runCompanion(ctx, app, rootCommand.Args, stdout)
 	case "profile":
 		return commands.RunProfile(ctx, app.Store, rootCommand.Args, stdout)
+	case "followup":
+		return runFollowup(ctx, app, rootCommand.Args, stdout)
 	case "transition":
 		return runTransition(ctx, app, rootCommand.Args, stdout)
 	case "skills":
@@ -625,6 +628,157 @@ func runCompanion(ctx context.Context, app bootstrap.App, args []string, stdout 
 		return nil
 	default:
 		return fmt.Errorf("unsupported companion subcommand: %s", command.Name)
+	}
+}
+
+func parseFollowUpCadence(value string) (followups.Cadence, error) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case string(followups.CadenceModeOnce):
+		return followups.Cadence{Mode: followups.CadenceModeOnce}, nil
+	case string(followups.CadenceIntervalDaily):
+		return followups.Cadence{Mode: followups.CadenceModeRecurring, Interval: followups.CadenceIntervalDaily}, nil
+	case string(followups.CadenceIntervalWeekly):
+		return followups.Cadence{Mode: followups.CadenceModeRecurring, Interval: followups.CadenceIntervalWeekly}, nil
+	case string(followups.CadenceIntervalMonthly):
+		return followups.Cadence{Mode: followups.CadenceModeRecurring, Interval: followups.CadenceIntervalMonthly}, nil
+	case string(followups.CadenceIntervalQuarterly):
+		return followups.Cadence{Mode: followups.CadenceModeRecurring, Interval: followups.CadenceIntervalQuarterly}, nil
+	default:
+		return followups.Cadence{}, fmt.Errorf("unsupported follow-up cadence: %s", value)
+	}
+}
+
+func renderFollowUpView(ctx context.Context, store *sqlite.Store, obligation followups.FollowUpObligation) (commands.FollowUpView, error) {
+	view := commands.FollowUpView{
+		ID:                 obligation.ID,
+		InitiativeID:       obligation.InitiativeID,
+		CompanionID:        obligation.CompanionID,
+		Title:              obligation.Title,
+		Status:             string(obligation.Status),
+		Cadence:            followupCadenceLabel(obligation.Cadence),
+		NextDueAt:          obligation.NextDueAt,
+		LastMaterializedAt: obligation.LastMaterializedAt,
+		LastCompletedAt:    obligation.LastCompletedAt,
+	}
+	if obligation.InitiativeID != nil {
+		initiative, err := store.GetInitiativeByID(ctx, *obligation.InitiativeID)
+		if err != nil {
+			return commands.FollowUpView{}, err
+		}
+		view.InitiativeKey = initiative.Key
+	}
+	return view, nil
+}
+
+func followupCadenceLabel(cadence followups.Cadence) string {
+	switch cadence.Mode {
+	case followups.CadenceModeOnce:
+		return string(followups.CadenceModeOnce)
+	case followups.CadenceModeRecurring:
+		return string(cadence.Interval)
+	default:
+		return string(cadence.Mode)
+	}
+}
+
+func runFollowup(ctx context.Context, app bootstrap.App, args []string, stdout io.Writer) error {
+	command, err := commands.ParseFollowUp(args)
+	if err != nil {
+		return err
+	}
+
+	workspace, err := workspaces.Service{Store: app.Store}.BootstrapDefaultWorkspace(ctx)
+	if err != nil {
+		return err
+	}
+
+	service := followups.Service{Store: app.Store}
+
+	switch command.Name {
+	case "add":
+		initiative, err := app.Store.GetInitiativeByKey(ctx, workspace.ID, command.Initiative)
+		if err != nil {
+			return err
+		}
+
+		cadence, err := parseFollowUpCadence(command.Cadence)
+		if err != nil {
+			return err
+		}
+		nextDue, err := cadence.NextDueAfter(time.Now().UTC())
+		if err != nil {
+			return err
+		}
+
+		obligation, err := service.Create(ctx, followups.CreateParams{
+			WorkspaceID:  workspace.ID,
+			InitiativeID: &initiative.ID,
+			Title:        command.Title,
+			Cadence:      cadence,
+			NextDueAt:    nextDue,
+		})
+		if err != nil {
+			return err
+		}
+
+		view, err := renderFollowUpView(ctx, app.Store, obligation)
+		if err != nil {
+			return err
+		}
+		_, err = fmt.Fprintf(stdout, "created follow-up id=%d initiative=%s status=%s next_due_at=%s\n", view.ID, view.InitiativeKey, view.Status, view.NextDueAt.UTC().Format(time.RFC3339))
+		return err
+	case "list":
+		obligations, err := service.ListByWorkspace(ctx, workspace.ID)
+		if err != nil {
+			return err
+		}
+
+		views := make([]commands.FollowUpView, 0, len(obligations))
+		for _, obligation := range obligations {
+			view, err := renderFollowUpView(ctx, app.Store, obligation)
+			if err != nil {
+				return err
+			}
+			views = append(views, view)
+		}
+
+		if command.JSON {
+			return commands.WriteJSON(stdout, commands.FollowUpListView{Obligations: views})
+		}
+		if len(views) == 0 {
+			_, err := fmt.Fprintln(stdout, "no follow-ups")
+			return err
+		}
+		for _, view := range views {
+			if _, err := fmt.Fprintf(stdout, "%d initiative=%s status=%s title=%s next_due_at=%s\n", view.ID, view.InitiativeKey, view.Status, view.Title, view.NextDueAt.UTC().Format(time.RFC3339)); err != nil {
+				return err
+			}
+		}
+		return nil
+	case "complete":
+		obligation, err := service.Complete(ctx, command.ID)
+		if err != nil {
+			return err
+		}
+		view, err := renderFollowUpView(ctx, app.Store, obligation)
+		if err != nil {
+			return err
+		}
+		_, err = fmt.Fprintf(stdout, "completed follow-up id=%d initiative=%s status=%s next_due_at=%s\n", view.ID, view.InitiativeKey, view.Status, view.NextDueAt.UTC().Format(time.RFC3339))
+		return err
+	case "snooze":
+		obligation, err := service.Snooze(ctx, command.ID, command.Until)
+		if err != nil {
+			return err
+		}
+		view, err := renderFollowUpView(ctx, app.Store, obligation)
+		if err != nil {
+			return err
+		}
+		_, err = fmt.Fprintf(stdout, "snoozed follow-up id=%d initiative=%s status=%s next_due_at=%s\n", view.ID, view.InitiativeKey, view.Status, view.NextDueAt.UTC().Format(time.RFC3339))
+		return err
+	default:
+		return fmt.Errorf("unsupported followup subcommand: %s", command.Name)
 	}
 }
 
