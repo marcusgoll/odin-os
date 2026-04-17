@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 
+	coremedia "odin-os/internal/core/media"
+
 	"gopkg.in/yaml.v3"
 )
 
@@ -23,9 +25,11 @@ type ServiceSettings struct {
 }
 
 type Config struct {
-	Version     int
-	RuntimeRoot string
-	Service     ServiceSettings
+	Version         int
+	RuntimeRoot     string
+	Service         ServiceSettings
+	MediaConfigPath string
+	Media           *coremedia.Config
 }
 
 func Load(path string, repoRoot string, env map[string]string) (Config, error) {
@@ -62,6 +66,13 @@ func Load(path string, repoRoot string, env map[string]string) (Config, error) {
 	if value := env["ODIN_HTTP_ADDR"]; value != "" {
 		cfg.Service.HTTPAddr = value
 	}
+
+	mediaPath, mediaConfig, err := loadMediaConfig(repoRoot, env)
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.MediaConfigPath = mediaPath
+	cfg.Media = mediaConfig
 
 	return cfg, nil
 }
