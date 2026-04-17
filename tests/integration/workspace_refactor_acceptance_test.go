@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -212,6 +213,89 @@ projects:
 		if !strings.Contains(snoozeOutput, "snoozed follow-up") {
 			t.Fatalf("followup snooze output = %q, want snoozed follow-up", snoozeOutput)
 		}
+	})
+
+	t.Run("follow-up serve materializes blocked work items visible in jobs", func(t *testing.T) {
+		runtimeRoot := t.TempDir()
+
+		createOutput, err := runOdinCommand(t, repoRoot, odinBinary, runtimeRoot, nil, "", "initiative", "create", "--kind", "routine", "--key", "life-admin", "--title", "Life Admin")
+		if err != nil {
+			t.Fatalf("runOdinCommand(initiative create) error = %v\n%s", err, createOutput)
+		}
+		addOutput, err := runOdinCommand(t, repoRoot, odinBinary, runtimeRoot, nil, "", "followup", "add", "--initiative", "life-admin", "--title", "Review mail", "--cadence", "once")
+		if err != nil {
+			t.Fatalf("runOdinCommand(followup add) error = %v\n%s", err, addOutput)
+		}
+		if !strings.Contains(addOutput, "created follow-up") {
+			t.Fatalf("followup add output = %q, want created follow-up", addOutput)
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		cmd := exec.CommandContext(ctx, odinBinary, "serve")
+		cmd.Dir = repoRoot
+		cmd.Env = append(os.Environ(),
+			"ODIN_ROOT="+runtimeRoot,
+			"ODIN_HTTP_ADDR=127.0.0.1:0",
+		)
+		stdout, err := cmd.StdoutPipe()
+		if err != nil {
+			t.Fatalf("StdoutPipe() error = %v", err)
+		}
+		stderr, err := cmd.StderrPipe()
+		if err != nil {
+			t.Fatalf("StderrPipe() error = %v", err)
+		}
+		if err := cmd.Start(); err != nil {
+			t.Fatalf("cmd.Start() error = %v", err)
+		}
+		stopped := false
+		defer func() {
+			if stopped {
+				return
+			}
+			_ = cmd.Process.Signal(os.Interrupt)
+			_ = cmd.Wait()
+		}()
+
+		_ = waitForServeAddress(t, stdout, stderr)
+
+		deadline := time.After(3 * time.Second)
+		for {
+			jobsOutput, err := runOdinCommand(t, repoRoot, odinBinary, runtimeRoot, nil, "", "jobs", "--json")
+			if err != nil {
+				t.Fatalf("runOdinCommand(jobs --json) error = %v\n%s", err, jobsOutput)
+			}
+
+			var jobsView struct {
+				Jobs []struct {
+					ProjectKey string `json:"project_key"`
+					TaskKey    string `json:"task_key"`
+					Status     string `json:"status"`
+				} `json:"jobs"`
+			}
+			if err := json.Unmarshal([]byte(jobsOutput), &jobsView); err != nil {
+				t.Fatalf("json.Unmarshal(jobs output) error = %v\n%s", err, jobsOutput)
+			}
+			if len(jobsView.Jobs) == 1 && jobsView.Jobs[0].Status == "blocked" {
+				break
+			}
+
+			select {
+			case <-deadline:
+				t.Fatalf("jobs output = %s, want one blocked follow-up work item", jobsOutput)
+			case <-time.After(100 * time.Millisecond):
+			}
+		}
+
+		if err := cmd.Process.Signal(os.Interrupt); err != nil {
+			t.Fatalf("Signal(os.Interrupt) error = %v", err)
+		}
+		if err := cmd.Wait(); err != nil {
+			t.Fatalf("cmd.Wait() error = %v", err)
+		}
+		stopped = true
 	})
 
 	t.Run("companion lifecycle commands manage durable companion state", func(t *testing.T) {

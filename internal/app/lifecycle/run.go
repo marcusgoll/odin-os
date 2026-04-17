@@ -29,6 +29,7 @@ import (
 	"odin-os/internal/core/followups"
 	"odin-os/internal/core/initiatives"
 	"odin-os/internal/core/projects"
+	"odin-os/internal/core/workitems"
 	"odin-os/internal/core/workspaces"
 	conversationsvc "odin-os/internal/runtime/conversation"
 	runtimeevents "odin-os/internal/runtime/events"
@@ -52,6 +53,7 @@ const rootUsageBanner = "Usage: odin <command> [args]\n\nCommands: help repl doc
 
 var (
 	serveTaskLoopInterval     = 1 * time.Second
+	serveFollowUpLoopInterval = 1 * time.Second
 	serveSelfHealLoopInterval = 30 * time.Second
 	serveMetricsLoopInterval  = 1 * time.Minute
 	serveOperationTimeout     = 30 * time.Second
@@ -1337,6 +1339,8 @@ func runServe(ctx context.Context, app bootstrap.App, cfg appconfig.Config, stdo
 	}
 
 	jobService := newJobService(app)
+	followUpService := followups.Service{Store: app.Store}
+	workItemService := workitems.Service{Store: app.Store}
 	recoveryService := recovery.Service{
 		Store:           app.Store,
 		RegistryRoot:    filepath.Join(app.RepoRoot, "registry"),
@@ -1350,6 +1354,13 @@ func runServe(ctx context.Context, app bootstrap.App, cfg appconfig.Config, stdo
 
 	serveCtx, cancelServe := serveServeContext(ctx)
 	defer cancelServe()
+
+	followUpCtx, cancel := serveOperationContext(serveCtx)
+	if _, err := runFollowUpCycle(followUpCtx, followUpService, workItemService, now()); err != nil {
+		cancel()
+		logBackgroundError(logger, "follow_up", err)
+	}
+	cancel()
 
 	taskCtx, cancel := serveOperationContext(serveCtx)
 	if err := jobService.ExecuteNextQueued(taskCtx); err != nil {
@@ -1366,9 +1377,10 @@ func runServe(ctx context.Context, app bootstrap.App, cfg appconfig.Config, stdo
 	cancel()
 
 	var background sync.WaitGroup
-	background.Add(3)
+	background.Add(4)
 	go runTaskLoop(serveCtx, &background, jobService, logger)
 	go runSelfHealLoop(serveCtx, &background, recoveryService, logger)
+	go runFollowUpLoop(serveCtx, &background, followUpService, workItemService, logger, now)
 	go runMetricsLoop(serveCtx, &background, metricsService, logger)
 
 	listener, err := serveListen("tcp", cfg.Service.HTTPAddr)
@@ -1720,6 +1732,100 @@ func runMetricsLoop(ctx context.Context, wg *sync.WaitGroup, service metricsvc.S
 			})
 		}
 	}
+}
+
+func runFollowUpLoop(ctx context.Context, wg *sync.WaitGroup, followUpService followups.Service, workItemService workitems.Service, logger *logs.Logger, now func() time.Time) {
+	defer wg.Done()
+
+	logBackgroundEvent(logger, logs.LevelInfo, "follow_up", "follow-up loop started", map[string]any{
+		"interval_ms": serveFollowUpLoopInterval.Milliseconds(),
+	})
+
+	ticker := time.NewTicker(serveFollowUpLoopInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			followUpCtx, cancel := serveOperationContext(ctx)
+			if _, err := runFollowUpCycle(followUpCtx, followUpService, workItemService, now()); err != nil {
+				cancel()
+				logBackgroundError(logger, "follow_up", err)
+			}
+			cancel()
+		}
+	}
+}
+
+func runFollowUpCycle(ctx context.Context, followUpService followups.Service, workItemService workitems.Service, now time.Time) (int, error) {
+	if followUpService.Store == nil {
+		return 0, fmt.Errorf("follow-up store is required")
+	}
+
+	workspace, err := workspaces.Service{Store: followUpService.Store}.BootstrapDefaultWorkspace(ctx)
+	if err != nil {
+		return 0, err
+	}
+
+	obligations, err := followUpService.ListByWorkspace(ctx, workspace.ID)
+	if err != nil {
+		return 0, err
+	}
+
+	mutated := 0
+	for _, obligation := range obligations {
+		if obligation.InitiativeID != nil {
+			initiative, err := followUpService.Store.GetInitiativeByID(ctx, *obligation.InitiativeID)
+			if err != nil {
+				return mutated, err
+			}
+			if initiative.Status == "paused" || initiative.Status == "archived" {
+				if obligation.Status != followups.StatusPaused {
+					if _, err := followUpService.Pause(ctx, workspace.ID, obligation.ID); err != nil {
+						return mutated, err
+					}
+					mutated++
+				}
+				continue
+			}
+		}
+
+		if obligation.DueStatus(now) != followups.StatusDue {
+			continue
+		}
+
+		taskKey := followUpTaskKey(obligation)
+		materialization, err := followUpService.Materialize(ctx, followups.MaterializeParams{
+			ObligationID: obligation.ID,
+			TaskKey:      taskKey,
+			Title:        obligation.Title,
+			Scope:        "project",
+			RequestedBy:  "operator",
+		})
+		if err != nil {
+			return mutated, err
+		}
+		mutated++
+
+		task, err := workItemService.Get(ctx, materialization.TaskID)
+		if err != nil {
+			return mutated, err
+		}
+		if task.Status != "blocked" {
+			if _, err := workItemService.Block(ctx, task.ID); err != nil {
+				return mutated, err
+			}
+			mutated++
+		}
+	}
+
+	return mutated, nil
+}
+
+func followUpTaskKey(obligation followups.FollowUpObligation) string {
+	return fmt.Sprintf("followup-%d-%s", obligation.ID, obligation.NextDueAt.UTC().Format("20060102-150405Z0700"))
 }
 
 func serveOperationContext(parent context.Context) (context.Context, context.CancelFunc) {

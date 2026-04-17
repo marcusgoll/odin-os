@@ -1324,6 +1324,7 @@ type LifecycleReplay struct {
 	Tasks     map[int64]TaskReplay
 	Runs      map[int64]RunReplay
 	Approvals map[int64]ApprovalReplay
+	FollowUps map[int64]FollowUpReplay
 }
 
 type TaskReplay struct {
@@ -1359,11 +1360,22 @@ type ApprovalReplay struct {
 	Reason      string
 }
 
+type FollowUpReplay struct {
+	ID               int64
+	ObligationID     int64
+	TaskID           *int64
+	OccurrenceKey    string
+	Status           string
+	Reused           bool
+	InitiativeStatus string
+}
+
 func ReplayLifecycle(records []runtimeevents.Record) (LifecycleReplay, error) {
 	replay := LifecycleReplay{
 		Tasks:     make(map[int64]TaskReplay),
 		Runs:      make(map[int64]RunReplay),
 		Approvals: make(map[int64]ApprovalReplay),
+		FollowUps: make(map[int64]FollowUpReplay),
 	}
 	pendingApprovalByTask := make(map[int64]int64)
 
@@ -1464,6 +1476,31 @@ func ReplayLifecycle(records []runtimeevents.Record) (LifecycleReplay, error) {
 			replay.Approvals[record.StreamID] = approval
 			if approval.TaskID != 0 && pendingApprovalByTask[approval.TaskID] == record.StreamID && payload.Status != "pending" {
 				delete(pendingApprovalByTask, approval.TaskID)
+			}
+		case runtimeevents.EventFollowUpMaterialized:
+			payload, err := runtimeevents.DecodePayload[runtimeevents.FollowUpMaterializedPayload](record.Payload)
+			if err != nil {
+				return LifecycleReplay{}, fmt.Errorf("decode %s payload: %w", record.Type, err)
+			}
+			taskID := payload.TaskID
+			replay.FollowUps[record.StreamID] = FollowUpReplay{
+				ID:            record.StreamID,
+				ObligationID:  payload.ObligationID,
+				TaskID:        &taskID,
+				OccurrenceKey: payload.OccurrenceKey,
+				Status:        payload.TaskStatus,
+				Reused:        payload.Reused,
+			}
+		case runtimeevents.EventFollowUpPaused:
+			payload, err := runtimeevents.DecodePayload[runtimeevents.FollowUpPausedPayload](record.Payload)
+			if err != nil {
+				return LifecycleReplay{}, fmt.Errorf("decode %s payload: %w", record.Type, err)
+			}
+			replay.FollowUps[record.StreamID] = FollowUpReplay{
+				ID:               record.StreamID,
+				ObligationID:     payload.ObligationID,
+				Status:           payload.Status,
+				InitiativeStatus: payload.InitiativeStatus,
 			}
 		}
 	}

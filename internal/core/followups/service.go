@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"odin-os/internal/core/workitems"
+	runtimeevents "odin-os/internal/runtime/events"
 	"odin-os/internal/store/sqlite"
 )
 
@@ -166,6 +167,46 @@ func (service Service) Snooze(ctx context.Context, workspaceID int64, obligation
 	return decode(record)
 }
 
+func (service Service) Pause(ctx context.Context, workspaceID int64, obligationID int64) (FollowUpObligation, error) {
+	if service.Store == nil {
+		return FollowUpObligation{}, fmt.Errorf("follow-up store is required")
+	}
+	if workspaceID <= 0 {
+		return FollowUpObligation{}, fmt.Errorf("workspace ID is required")
+	}
+
+	obligation, err := service.Get(ctx, obligationID)
+	if err != nil {
+		return FollowUpObligation{}, err
+	}
+	if obligation.WorkspaceID != workspaceID {
+		return FollowUpObligation{}, fmt.Errorf("follow-up obligation %d does not belong to workspace %d", obligation.ID, workspaceID)
+	}
+	if obligation.Status == StatusPaused || isTerminalFollowUpStatus(obligation.Status) {
+		return obligation, nil
+	}
+
+	record, err := service.Store.UpdateFollowUpObligation(ctx, sqlite.UpdateFollowUpObligationParams{
+		ObligationID: obligation.ID,
+		Status:       string(StatusPaused),
+	})
+	if err != nil {
+		return FollowUpObligation{}, err
+	}
+	updated, err := decode(record)
+	if err != nil {
+		return FollowUpObligation{}, err
+	}
+	if err := service.recordRuntimeEvent(ctx, runtimeevents.EventFollowUpPaused, updated, 0, runtimeevents.FollowUpPausedPayload{
+		ObligationID:     updated.ID,
+		Status:           string(StatusPaused),
+		InitiativeStatus: "",
+	}); err != nil {
+		return FollowUpObligation{}, err
+	}
+	return updated, nil
+}
+
 func (service Service) ListByWorkspace(ctx context.Context, workspaceID int64) ([]FollowUpObligation, error) {
 	if service.Store == nil {
 		return nil, fmt.Errorf("follow-up store is required")
@@ -254,6 +295,16 @@ func (service Service) Materialize(ctx context.Context, params MaterializeParams
 		}
 	}
 
+	if err := service.recordRuntimeEvent(ctx, runtimeevents.EventFollowUpMaterialized, obligation, task.ID, runtimeevents.FollowUpMaterializedPayload{
+		ObligationID:  obligation.ID,
+		TaskID:        task.ID,
+		OccurrenceKey: obligation.OccurrenceKey(),
+		TaskStatus:    task.Status,
+		Reused:        reused,
+	}); err != nil {
+		return MaterializationResult{}, err
+	}
+
 	return MaterializationResult{
 		Obligation:    obligation,
 		TaskID:        task.ID,
@@ -267,6 +318,50 @@ func (service Service) now() time.Time {
 		return service.Now()
 	}
 	return time.Now().UTC()
+}
+
+func (service Service) recordRuntimeEvent(ctx context.Context, eventType runtimeevents.Type, obligation FollowUpObligation, taskID int64, payload any) error {
+	if service.Store == nil {
+		return fmt.Errorf("follow-up store is required")
+	}
+
+	encoded, err := runtimeevents.EncodePayload(payload)
+	if err != nil {
+		return err
+	}
+
+	var taskArg any
+	if taskID > 0 {
+		taskArg = taskID
+	}
+
+	_, err = service.Store.DB().ExecContext(ctx, `
+		INSERT INTO events (
+			stream_type,
+			stream_id,
+			event_type,
+			event_version,
+			scope,
+			project_id,
+			task_id,
+			run_id,
+			payload_json,
+			occurred_at
+		)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`,
+		string(runtimeevents.StreamFollowUp),
+		obligation.ID,
+		string(eventType),
+		1,
+		"workspace",
+		obligation.TargetProjectID,
+		taskArg,
+		nil,
+		string(encoded),
+		service.now().UTC().Format(time.RFC3339Nano),
+	)
+	return err
 }
 
 func (service Service) validateOwnership(ctx context.Context, workspaceID int64, initiativeID *int64, companionID *int64) error {

@@ -418,6 +418,43 @@ func TestFollowUpSnoozeMovesNextDueAtForward(t *testing.T) {
 	}
 }
 
+func TestFollowUpPauseMarksObligationPaused(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openFollowUpStore(t)
+	defer store.Close()
+
+	now := time.Date(2026, 4, 17, 12, 0, 0, 0, time.UTC)
+	workspaceID, initiativeID, companionID, _ := seedFollowUpContext(t, ctx, store)
+	service := Service{
+		Store: store,
+		Now: func() time.Time {
+			return now
+		},
+	}
+
+	obligation, err := service.Create(ctx, CreateParams{
+		WorkspaceID:  workspaceID,
+		InitiativeID: &initiativeID,
+		CompanionID:  &companionID,
+		Title:        "Review mail",
+		Cadence:      Cadence{Mode: CadenceModeOnce},
+		NextDueAt:    now.Add(-time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+
+	paused, err := service.Pause(ctx, workspaceID, obligation.ID)
+	if err != nil {
+		t.Fatalf("Pause() error = %v", err)
+	}
+	if paused.Status != StatusPaused {
+		t.Fatalf("Pause().Status = %q, want paused", paused.Status)
+	}
+}
+
 func openFollowUpStore(t *testing.T) *sqlite.Store {
 	t.Helper()
 
