@@ -109,6 +109,13 @@ type FinishRunParams struct {
 	Summary string
 }
 
+type FinishRunAndSetTaskStatusParams struct {
+	RunID      int64
+	RunStatus  string
+	Summary    string
+	TaskStatus string
+}
+
 type FailRunAndRetryTaskParams struct {
 	RunID          int64
 	Summary        string

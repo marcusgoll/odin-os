@@ -1249,6 +1249,75 @@ func TestFailRunAndRetryTaskUpdatesRunAndTaskTogether(t *testing.T) {
 	}
 }
 
+func TestFinishRunAndSetTaskStatusUpdatesRunAndTaskTogether(t *testing.T) {
+	ctx := context.Background()
+	store := openMigratedTestStore(t, "finish-run-status.db")
+	defer store.Close()
+
+	project, err := store.CreateProject(ctx, CreateProjectParams{
+		Key:           "finish-run-status",
+		Name:          "Finish Run Status",
+		Scope:         "project",
+		GitRoot:       "/tmp/finish-run-status",
+		DefaultBranch: "main",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+
+	task, err := store.CreateTask(ctx, CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "finish-run-status-task",
+		Title:       "Finish this run",
+		Status:      "queued",
+		Scope:       "project",
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+	if _, err := store.UpdateTaskStatus(ctx, UpdateTaskStatusParams{
+		TaskID: task.ID,
+		Status: "running",
+	}); err != nil {
+		t.Fatalf("UpdateTaskStatus(running) error = %v", err)
+	}
+
+	run, err := store.StartRun(ctx, StartRunParams{
+		TaskID:   task.ID,
+		Executor: "codex_headless",
+		Attempt:  1,
+		Status:   "running",
+	})
+	if err != nil {
+		t.Fatalf("StartRun() error = %v", err)
+	}
+
+	finishedTask, finishedRun, err := store.FinishRunAndSetTaskStatus(ctx, FinishRunAndSetTaskStatusParams{
+		RunID:      run.ID,
+		RunStatus:  "failed",
+		Summary:    "exhausted retries",
+		TaskStatus: "failed",
+	})
+	if err != nil {
+		t.Fatalf("FinishRunAndSetTaskStatus() error = %v", err)
+	}
+
+	if finishedRun.Status != "failed" {
+		t.Fatalf("Run.Status = %q, want failed", finishedRun.Status)
+	}
+	if finishedRun.Summary != "exhausted retries" {
+		t.Fatalf("Run.Summary = %q, want exhausted retries", finishedRun.Summary)
+	}
+	if finishedTask.Status != "failed" {
+		t.Fatalf("Task.Status = %q, want failed", finishedTask.Status)
+	}
+	if finishedTask.CurrentRunID != nil {
+		t.Fatalf("Task.CurrentRunID = %v, want nil", finishedTask.CurrentRunID)
+	}
+}
+
 func TestFormatTimeUsesFixedWidthUTC(t *testing.T) {
 	got := formatTime(time.Date(2026, 4, 17, 10, 0, 0, 5*1000*1000, time.FixedZone("offset", 3*60*60)))
 	want := "2026-04-17T07:00:00.005000000Z"

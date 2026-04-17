@@ -164,15 +164,14 @@ func (service Service) ExecuteNextQueued(ctx context.Context) error {
 	}
 
 	finishFailure := func(cause error) error {
-		_, _ = service.Store.FinishRun(ctx, sqlite.FinishRunParams{
-			RunID:   run.ID,
-			Status:  "failed",
-			Summary: cause.Error(),
-		})
-		_, _ = service.Store.UpdateTaskStatus(ctx, sqlite.UpdateTaskStatusParams{
-			TaskID: task.ID,
-			Status: "failed",
-		})
+		if _, _, err := service.Store.FinishRunAndSetTaskStatus(ctx, sqlite.FinishRunAndSetTaskStatusParams{
+			RunID:      run.ID,
+			RunStatus:  "failed",
+			Summary:    cause.Error(),
+			TaskStatus: "failed",
+		}); err != nil {
+			return err
+		}
 		return cause
 	}
 
@@ -256,16 +255,11 @@ func (service Service) ExecuteNextQueued(ctx context.Context) error {
 		taskStatus = "failed"
 	}
 
-	if _, err := service.Store.FinishRun(ctx, sqlite.FinishRunParams{
-		RunID:   run.ID,
-		Status:  runStatus,
-		Summary: result.Output,
-	}); err != nil {
-		return err
-	}
-	if _, err := service.Store.UpdateTaskStatus(ctx, sqlite.UpdateTaskStatusParams{
-		TaskID: task.ID,
-		Status: taskStatus,
+	if _, _, err := service.Store.FinishRunAndSetTaskStatus(ctx, sqlite.FinishRunAndSetTaskStatusParams{
+		RunID:      run.ID,
+		RunStatus:  runStatus,
+		Summary:    result.Output,
+		TaskStatus: taskStatus,
 	}); err != nil {
 		return err
 	}
