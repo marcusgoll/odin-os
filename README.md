@@ -11,13 +11,14 @@ Odin OS is the canonical future runtime for Odin: a Go-first, CLI-first orchestr
 
 This repository is the runtime root. `odin-orchestrator` is a migration source only. The system is designed around a workspace-first semantic center that still operates across explicit scopes: global control, the reserved `odin-core` system project, managed local or GitHub-backed projects, and new-project setup flows. GitHub is optional, but Git is mandatory for any managed project.
 
-See `docs/contracts/ubiquitous-language.md` for the frozen vocabulary, `docs/contracts/workspace-context-map.md` for the bounded-context map, and `docs/contracts/follow-through-contract.md` for the workspace-owned operating profile and follow-through model.
+See `docs/contracts/ubiquitous-language.md` for the frozen vocabulary, `docs/contracts/workspace-context-map.md` for the bounded-context map, `docs/contracts/follow-through-contract.md` for the workspace-owned operating profile and follow-through model, and `docs/contracts/companion-swarm-orchestration.md` for bounded companion delegation and swarm rules.
 
 ## Architecture Summary
 
 - Workspace is the top-level operating environment and the semantic root for all durable work.
 - Initiatives are durable responsibility streams that can hold managed projects or non-project life and work streams.
 - Companions are durable AI roles such as assistants, advisors, operators, and specialists.
+- Bounded swarms are supervised execution patterns behind companion-owned work, built from existing tasks, runs, approvals, and delegations.
 - Managed projects are governed initiatives with Git-backed mutation rules and explicit project governance.
 - Work items are the durable unit of governed work, and run attempts are the disposable execution records.
 - Follow-up obligations are durable control-plane objects that materialize into work items when due.
@@ -28,7 +29,8 @@ See `docs/contracts/ubiquitous-language.md` for the frozen vocabulary, `docs/con
 - Tool, skill, and sub-agent loading is dynamic and scope-aware; Odin must not preload the full catalog into every task context.
 - Mutating work is isolated through task-owned worktrees and branches.
 - Self-heal is deterministic, bounded, and auditable; self-improvement is proposal-driven, replay-tested, promotion-gated, and reversible.
-- The intended root command families for routines and follow-through are `odin initiative`, `odin companion`, `odin profile`, `odin followup`, and `odin agenda`, while the current binary still exposes the existing lifecycle command surface.
+- The root command surface includes `odin initiative`, `odin companion`, `odin profile`, `odin followup`, and `odin agenda` alongside the broader lifecycle commands.
+- Companion lifecycle commands are implemented today; companion execution and swarm inspection should continue to extend that same command family rather than introducing a second CLI.
 
 ## Canonical Documents
 
