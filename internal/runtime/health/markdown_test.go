@@ -110,6 +110,7 @@ func TestRenderMarkdownReportRendersFindingEvidence(t *testing.T) {
 				Confidence:   "high",
 				Evidence: []string{
 					"check summary: queue pressure is above threshold",
+					"observed at: 2026-04-17T05:22:00Z",
 					"detail queued_tasks: 12",
 				},
 			},
@@ -125,7 +126,7 @@ func TestRenderMarkdownReportRendersFindingEvidence(t *testing.T) {
 	if !strings.Contains(output, "| Area | Severity | Observation | Why It Matters | Confidence | Evidence |") {
 		t.Fatalf("output missing evidence column header\n%s", output)
 	}
-	if !strings.Contains(output, "check summary: queue pressure is above threshold<br>detail queued_tasks: 12") {
+	if !strings.Contains(output, "check summary: queue pressure is above threshold<br>observed at: 2026-04-17T05:22:00Z<br>detail queued_tasks: 12") {
 		t.Fatalf("output missing rendered evidence entries\n%s", output)
 	}
 }

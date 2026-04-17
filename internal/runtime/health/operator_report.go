@@ -398,6 +398,10 @@ func buildFindingEvidence(check Check, match reportRuleMatch) []string {
 		"check status: " + string(check.Status),
 	}
 
+	if !check.ObservedAt.IsZero() {
+		evidence = append(evidence, "observed at: "+check.ObservedAt.UTC().Format(time.RFC3339))
+	}
+
 	if match.explicit {
 		evidence = append(evidence, "operator mapping: explicit")
 	} else if match.matched {
@@ -433,16 +437,22 @@ func shouldMarkCoverageUnknown(check Check, match reportRuleMatch) bool {
 }
 
 func synthesizeFinalVerdict(report OperatorReport) FinalVerdict {
-	status := report.CurrentHealth.Status
+	rawStatus := report.CurrentHealth.Status
+	status := rawStatus
 	coverageUncertain := hasCoverageUncertainty(report)
 
-	if status == StatusHealthy && coverageUncertain {
-		status = StatusDegraded
+	if coverageUncertain {
+		switch status {
+		case StatusHealthy:
+			status = StatusDegraded
+		case StatusDegraded:
+			status = StatusFailed
+		}
 	}
 
 	return FinalVerdict{
 		Status:  status,
-		Summary: verdictSummaryForReport(status, report.CurrentHealth.Status == StatusHealthy, coverageUncertain),
+		Summary: verdictSummaryForReport(status, rawStatus == StatusHealthy, coverageUncertain),
 	}
 }
 

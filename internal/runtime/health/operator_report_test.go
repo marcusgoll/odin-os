@@ -1,15 +1,19 @@
 package health
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestBuildOperatorReportIncludesEvidenceReferences(t *testing.T) {
 	raw := Report{
 		Status: StatusDegraded,
 		Checks: []Check{
 			{
-				Name:    "queue",
-				Status:  StatusDegraded,
-				Summary: "queue pressure is above threshold",
+				Name:       "queue",
+				Status:     StatusDegraded,
+				Summary:    "queue pressure is above threshold",
+				ObservedAt: time.Date(2026, time.April, 17, 5, 22, 0, 0, time.UTC),
 				Details: map[string]string{
 					"queued_tasks":  "12",
 					"running_tasks": "3",
@@ -27,6 +31,7 @@ func TestBuildOperatorReportIncludesEvidenceReferences(t *testing.T) {
 	want := []string{
 		"check summary: queue pressure is above threshold",
 		"check status: degraded",
+		"observed at: 2026-04-17T05:22:00Z",
 		"operator mapping: explicit",
 		"rule confidence: high",
 		"detail queued_tasks: 12",
@@ -62,6 +67,72 @@ func TestBuildOperatorReportDowngradesHealthyRawVerdictWhenCoverageIsUnknown(t *
 	}
 	if got.FinalVerdict.Summary != "health is good, but operator coverage is incomplete" {
 		t.Fatalf("FinalVerdict.Summary = %q, want %q", got.FinalVerdict.Summary, "health is good, but operator coverage is incomplete")
+	}
+}
+
+func TestBuildOperatorReportEscalatesDegradedRawVerdictWhenCoverageIsUnknown(t *testing.T) {
+	raw := Report{
+		Status: StatusDegraded,
+		Checks: []Check{
+			{
+				Name:    "executor",
+				Status:  StatusDegraded,
+				Summary: "no executor health samples recorded",
+			},
+		},
+	}
+
+	got := BuildOperatorReport(raw)
+
+	if got.FinalVerdict.Status != StatusFailed {
+		t.Fatalf("FinalVerdict.Status = %q, want %q", got.FinalVerdict.Status, StatusFailed)
+	}
+	if got.FinalVerdict.Summary != "one or more critical checks failed and operator coverage is incomplete" {
+		t.Fatalf("FinalVerdict.Summary = %q, want %q", got.FinalVerdict.Summary, "one or more critical checks failed and operator coverage is incomplete")
+	}
+}
+
+func TestBuildOperatorReportKeepsFailedRawVerdictFailedWithoutCoverageUncertainty(t *testing.T) {
+	raw := Report{
+		Status: StatusFailed,
+		Checks: []Check{
+			{
+				Name:    "database",
+				Status:  StatusFailed,
+				Summary: "database connectivity failed",
+			},
+		},
+	}
+
+	got := BuildOperatorReport(raw)
+
+	if got.FinalVerdict.Status != StatusFailed {
+		t.Fatalf("FinalVerdict.Status = %q, want %q", got.FinalVerdict.Status, StatusFailed)
+	}
+	if got.FinalVerdict.Summary != "one or more critical checks failed" {
+		t.Fatalf("FinalVerdict.Summary = %q, want %q", got.FinalVerdict.Summary, "one or more critical checks failed")
+	}
+}
+
+func TestBuildOperatorReportKeepsHealthyRawVerdictHealthyWithoutCoverageUncertainty(t *testing.T) {
+	raw := Report{
+		Status: StatusHealthy,
+		Checks: []Check{
+			{
+				Name:    "queue",
+				Status:  StatusHealthy,
+				Summary: "queue pressure is within threshold",
+			},
+		},
+	}
+
+	got := BuildOperatorReport(raw)
+
+	if got.FinalVerdict.Status != StatusHealthy {
+		t.Fatalf("FinalVerdict.Status = %q, want %q", got.FinalVerdict.Status, StatusHealthy)
+	}
+	if got.FinalVerdict.Summary != "all evaluated checks are healthy" {
+		t.Fatalf("FinalVerdict.Summary = %q, want %q", got.FinalVerdict.Summary, "all evaluated checks are healthy")
 	}
 }
 
