@@ -92,19 +92,22 @@ func Run(ctx context.Context, root string, args []string, stdin io.Reader, stdou
 	}
 	defer app.Store.Close()
 
-	now, err := runtimeNow()
-	if err != nil {
-		return err
-	}
-
 	switch rootCommand.Name {
 	case "repl":
+		now, err := runtimeNow()
+		if err != nil {
+			return err
+		}
 		return runRepl(ctx, app, stdin, stdout, now)
 	case "doctor":
 		return runDoctor(ctx, app, rootCommand.Args, stdout)
 	case "healthcheck":
 		return runHealthcheck(ctx, app, stdout)
 	case "serve":
+		now, err := runtimeNow()
+		if err != nil {
+			return err
+		}
 		return runServe(ctx, app, cfg, stdout, now)
 	case "backup":
 		return runBackup(ctx, appbackup.Service{RepoRoot: root, RuntimeRoot: cfg.RuntimeRoot}, rootCommand.Args, stdout)
@@ -125,6 +128,10 @@ func Run(ctx context.Context, root string, args []string, stdin io.Reader, stdou
 	case "approvals":
 		return runApprovals(ctx, app, rootCommand.Args, stdout)
 	case "agenda":
+		now, err := runtimeNow()
+		if err != nil {
+			return err
+		}
 		return runAgenda(ctx, app, rootCommand.Args, stdout, now)
 	case "logs":
 		return runLogs(ctx, app, rootCommand.Args, stdout)
