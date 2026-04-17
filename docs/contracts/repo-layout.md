@@ -1,7 +1,7 @@
 ---
 title: Repository Layout Contract
 status: active
-date: 2026-04-08
+date: 2026-04-17
 phase: "00"
 ---
 
@@ -60,11 +60,11 @@ Owns HTTP and WebSocket transport. It should expose the same underlying orchestr
 
 ### `internal/core`
 
-Owns intake, routing, context management, approvals, policy, scheduling, orchestration, and project governance rules. This is the domain center and must not depend directly on provider-specific adapters.
+Owns intake, routing, context management, approvals, policy, scheduling, orchestration, project governance rules, and workspace-era owner entities such as workspaces, initiatives, and companions. This is the domain center and must not depend directly on provider-specific adapters.
 
 ### `internal/runtime`
 
-Owns jobs, runs, events, projections, health, recovery, uncertainty handling, and checkpoints. Runtime packages model what happens while Odin is operating and how it recovers or compacts context.
+Owns jobs, runs, events, projections, health, recovery, uncertainty handling, checkpoints, and read-only runtime views over workspace-era memory. Runtime packages model what happens while Odin is operating and how it recovers or compacts context.
 
 ### `internal/registry`
 
@@ -76,7 +76,7 @@ Owns evaluators, proposals, promotion, and replay. It is the bounded self-improv
 
 ### `internal/memory`
 
-Owns runtime services for user, project, run, and knowledge memory access. It should index and project canonical authored memory and runtime-derived knowledge without becoming a second registry.
+Owns scoped runtime memory services for workspace, initiative, companion, project lineage, run lineage, user-facing compatibility, and general knowledge access. It should project and persist runtime-owned memory without becoming a second registry or a companion-specific silo.
 
 ### `internal/workers`
 
@@ -111,7 +111,7 @@ Owns structured logs, metrics, traces, and audit delivery. Telemetry consumes ev
 - `core/` may depend on contracts and services, but not on transport-specific CLI or API packages.
 - `adapters/` may depend inward on contracts, never outward on CLI, TUI, or specific worker roles.
 - `executors/` expose a shared contract; plan-backed headless runners fit here only if they satisfy that same contract.
-- `registry/`, `prompts/`, and `memory/` are authored sources; compiled or indexed forms belong in `state/` or SQLite.
+- `registry/`, `prompts/`, and reviewed docs under `memory/` are authored sources; mutable runtime memory belongs in SQLite, and compiled or indexed forms belong in `state/` or SQLite.
 - `runs/` and `state/` are always disposable or reconstructable relative to canonical authorities unless an ADR explicitly promotes a subset.
 
 ## Governance-sensitive areas

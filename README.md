@@ -2,7 +2,7 @@
 title: Odin OS
 phase: "17"
 status: active
-updated: 2026-04-09
+updated: 2026-04-17
 ---
 
 # Odin OS
@@ -15,6 +15,7 @@ This repository is the runtime root. `odin-orchestrator` is a migration source o
 
 - Runtime authority lives in SQLite at `data/odin.db`.
 - Authored assets live in-repo as Markdown with frontmatter under `registry/`, `prompts/`, and `memory/`.
+- Workspace, initiative, companion, and run memory now live as first-class runtime-owned records in SQLite; reviewed authored memory under `memory/` remains optional source input, not mutable runtime truth.
 - CLI, API, and worker execution all resolve through shared orchestration, policy, runtime, and executor contracts.
 - Executors are model-agnostic and route through a common contract, including harness-driver-backed headless runners where they fit that contract.
 - Tool, skill, and sub-agent loading is dynamic and scope-aware; Odin must not preload the full catalog into every task context.
@@ -26,11 +27,12 @@ This repository is the runtime root. `odin-orchestrator` is a migration source o
 - `docs/adr/0001-canonical-authority.md` defines the system's source-of-truth model, scope model, and governance rules.
 - `docs/adr/0002-migration-policy.md` defines how legacy assets from `odin-orchestrator` are classified and moved into this repo.
 - `docs/contracts/repo-layout.md` defines package and folder responsibilities.
+- `docs/contracts/workspace-context-map.md` defines the current workspace-era runtime ownership map for memory and execution context.
 - `docs/contracts/phase-exit-criteria.md` defines the acceptance gate for Phase 00 and the baseline gate every later phase must satisfy.
 
 ## Current Status
 
-Phase 00 through Phase 15 are in place, and the Phase 17 alpha stabilization pass has closed the minimum trust blockers from the reality audit. Fresh runtimes now bootstrap into an honest ready state when a harness driver is configured, queued work can execute through harness-backed `codex_headless` and `claude_code_headless` lanes, runtime mutation is gated by transition and system-project policy checks, mutable work is forced through leased task-owned worktrees, `odin serve` runs bounded self-heal and queue execution loops, routing promotions require explicit promotion approval before activation, and service logs are newline-delimited JSON again. Full provider-backed execution and broader unattended orchestration remain deferred; see `docs/operations/alpha-readiness.md` for the current alpha operating envelope.
+Phase 00 through Phase 15 are in place, and the Phase 17 alpha stabilization pass has closed the minimum trust blockers from the reality audit. Fresh runtimes now bootstrap into an honest ready state when a harness driver is configured, queued work can execute through harness-backed `codex_headless` and `claude_code_headless` lanes, runtime mutation is gated by transition and system-project policy checks, mutable work is forced through leased task-owned worktrees, `odin serve` runs bounded self-heal and queue execution loops, routing promotions require explicit promotion approval before activation, service logs are newline-delimited JSON again, and workspace-era memory ownership now boots and projects correctly through workspace, initiative, companion, and run lineage. Richer retrieval ranking, lifecycle rotation, and operator mutation tooling for memory remain intentionally deferred; see `docs/operations/alpha-readiness.md` and `docs/operations/workspace-memory-bootstrap.md` for the current operating envelope.
 
 ## Local Usage
 
