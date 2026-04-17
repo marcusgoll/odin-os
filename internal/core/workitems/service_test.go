@@ -209,6 +209,44 @@ func TestWorkItemLinkCompanionUsesWorkItemWorkspace(t *testing.T) {
 	}
 }
 
+func TestWorkItemCreateRejectsMismatchedInitiativeProject(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openWorkItemStore(t)
+	defer store.Close()
+
+	workspaceService := workspaces.Service{Store: store}
+	workspace, err := workspaceService.BootstrapDefault(ctx)
+	if err != nil {
+		t.Fatalf("BootstrapDefault() error = %v", err)
+	}
+	projectKeys, err := bootstrapWorkItemProjects(ctx, store)
+	if err != nil {
+		t.Fatalf("bootstrapWorkItemProjects() error = %v", err)
+	}
+	project, err := store.GetProjectByKey(ctx, projectKeys["alpha"])
+	if err != nil {
+		t.Fatalf("GetProjectByKey(alpha) error = %v", err)
+	}
+	initiative, err := store.GetInitiativeByProjectID(ctx, project.ID)
+	if err != nil {
+		t.Fatalf("GetInitiativeByProjectID() error = %v", err)
+	}
+
+	service := Service{Store: store}
+	_, err = service.Create(ctx, controlscope.ControlScope{
+		SubjectType:   controlscope.SubjectTypeInitiative,
+		SubjectKey:    initiative.Key,
+		WorkspaceKey:  workspace.Key,
+		InitiativeKey: initiative.Key,
+		ProjectKey:    "odin-core",
+	}, "Mismatched links")
+	if err == nil {
+		t.Fatalf("Create() error = nil, want initiative/project mismatch")
+	}
+}
+
 func TestRunAttemptHistoryAcrossRetries(t *testing.T) {
 	t.Parallel()
 

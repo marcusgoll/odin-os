@@ -89,6 +89,39 @@ func TestWorkItemFromActPersistsLegacyScope(t *testing.T) {
 	}
 }
 
+func TestWorkItemFromActPersistsLegacyScopeInCreatedEvent(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openJobStore(t)
+	defer store.Close()
+
+	registry := writeRegistry(t)
+	service := Service{
+		Store:    store,
+		Registry: registry,
+		Now:      time.Now,
+	}
+
+	task, err := service.CreateTaskFromAct(ctx, scope.Resolution{
+		Kind: scope.ScopeNewProject,
+	}, "Create runtime bootstrap")
+	if err != nil {
+		t.Fatalf("CreateTaskFromAct() error = %v", err)
+	}
+
+	events, err := store.ListEvents(ctx, sqlite.ListEventsParams{TaskID: &task.ID})
+	if err != nil {
+		t.Fatalf("ListEvents() error = %v", err)
+	}
+	if len(events) == 0 {
+		t.Fatalf("ListEvents() len = 0, want at least one event")
+	}
+	if events[0].Scope != string(scope.ScopeNewProject) {
+		t.Fatalf("task.created scope = %q, want %q", events[0].Scope, scope.ScopeNewProject)
+	}
+}
+
 func TestListFiltersJobsByScope(t *testing.T) {
 	t.Parallel()
 

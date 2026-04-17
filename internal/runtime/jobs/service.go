@@ -64,11 +64,8 @@ func (service Service) CreateTaskFromAct(ctx context.Context, resolved scope.Res
 		workScope.WorkspaceKey = "marcus"
 	}
 
-	workItem, err := workitems.Service{Store: service.Store}.Create(ctx, workScope, title)
+	workItem, err := workitems.Service{Store: service.Store}.CreateWithLegacyScope(ctx, workScope, title, taskScope)
 	if err != nil {
-		return sqlite.Task{}, err
-	}
-	if _, err := service.Store.UpdateTaskScope(ctx, workItem.ID, taskScope); err != nil {
 		return sqlite.Task{}, err
 	}
 

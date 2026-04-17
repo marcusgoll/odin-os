@@ -14,6 +14,14 @@ type Service struct {
 }
 
 func (service Service) Create(ctx context.Context, scope controlscope.ControlScope, title string) (WorkItem, error) {
+	return service.create(ctx, scope, title, "")
+}
+
+func (service Service) CreateWithLegacyScope(ctx context.Context, scope controlscope.ControlScope, title string, legacyScope string) (WorkItem, error) {
+	return service.create(ctx, scope, title, legacyScope)
+}
+
+func (service Service) create(ctx context.Context, scope controlscope.ControlScope, title string, legacyScope string) (WorkItem, error) {
 	if service.Store == nil {
 		return WorkItem{}, fmt.Errorf("work item store is required")
 	}
@@ -50,6 +58,9 @@ func (service Service) Create(ctx context.Context, scope controlscope.ControlSco
 	if err != nil {
 		return WorkItem{}, err
 	}
+	if initiativeID != nil && initiative.LinkedProjectID != nil && *initiative.LinkedProjectID != project.ID {
+		return WorkItem{}, fmt.Errorf("initiative %q is linked to a different project", initiative.Key)
+	}
 
 	var companionID *int64
 	if scope.CompanionKey != "" {
@@ -72,7 +83,7 @@ func (service Service) Create(ctx context.Context, scope controlscope.ControlSco
 		Key:          fmt.Sprintf("work-item-%d", time.Now().UnixNano()),
 		Title:        title,
 		Status:       "queued",
-		Scope:        project.Scope,
+		Scope:        legacyTaskScope(legacyScope, project.Scope),
 		RequestedBy:  "operator",
 	})
 	if err != nil {
@@ -80,6 +91,13 @@ func (service Service) Create(ctx context.Context, scope controlscope.ControlSco
 	}
 
 	return service.Get(ctx, task.ID)
+}
+
+func legacyTaskScope(legacyScope string, fallback string) string {
+	if legacyScope != "" {
+		return legacyScope
+	}
+	return fallback
 }
 
 func (service Service) Get(ctx context.Context, workItemID int64) (WorkItem, error) {

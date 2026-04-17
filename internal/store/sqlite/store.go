@@ -558,31 +558,6 @@ func (store *Store) CreateTask(ctx context.Context, params CreateTaskParams) (Ta
 	return task, err
 }
 
-func (store *Store) UpdateTaskScope(ctx context.Context, taskID int64, scope string) (Task, error) {
-	now := store.now()
-	var task Task
-
-	err := store.withTx(ctx, func(tx *sql.Tx) error {
-		current, err := store.getTaskTx(ctx, tx, taskID)
-		if err != nil {
-			return err
-		}
-		if _, err := tx.ExecContext(ctx, `
-			UPDATE tasks
-			SET scope = ?, updated_at = ?
-			WHERE id = ?
-		`, scope, formatTime(now), taskID); err != nil {
-			return err
-		}
-		current.Scope = scope
-		current.UpdatedAt = now
-		task = current
-		return nil
-	})
-
-	return task, err
-}
-
 func (store *Store) UpdateTaskProject(ctx context.Context, taskID int64, projectID int64) (Task, error) {
 	now := store.now()
 	var task Task
