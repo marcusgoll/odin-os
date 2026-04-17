@@ -186,10 +186,10 @@ func TestInvokeEmitsUnknownPermissionLifecycleEvent(t *testing.T) {
 		HandlerType:    "command",
 		HandlerRef:     "scripts/skills/unknown-permission-skill.sh",
 		TimeoutSeconds: 15,
-		InputSchema: map[string]any{
+		LegacyInputSchema: map[string]any{
 			"type": "object",
 		},
-		OutputSchema: map[string]any{
+		LegacyOutputSchema: map[string]any{
 			"type": "object",
 		},
 	}

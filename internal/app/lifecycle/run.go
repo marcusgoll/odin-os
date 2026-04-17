@@ -24,6 +24,7 @@ import (
 	"odin-os/internal/cli/repl"
 	"odin-os/internal/cli/scope"
 	clistate "odin-os/internal/cli/state"
+	"odin-os/internal/core/capabilities"
 	"odin-os/internal/core/projects"
 	conversationsvc "odin-os/internal/runtime/conversation"
 	runtimeevents "odin-os/internal/runtime/events"
@@ -31,6 +32,7 @@ import (
 	"odin-os/internal/runtime/jobs"
 	"odin-os/internal/runtime/recovery"
 	"odin-os/internal/runtime/runs"
+	"odin-os/internal/runtime/supervision"
 	"odin-os/internal/store/sqlite"
 	"odin-os/internal/telemetry/logs"
 	metricsvc "odin-os/internal/telemetry/metrics"
@@ -48,6 +50,7 @@ var (
 	serveSelfHealLoopInterval = 30 * time.Second
 	serveMetricsLoopInterval  = 1 * time.Minute
 	serveOperationTimeout     = 30 * time.Second
+	serveHealthConfig         = healthsvc.DefaultConfig()
 	serveListen               = net.Listen
 )
 
@@ -130,6 +133,7 @@ func runRepl(ctx context.Context, app bootstrap.App, stdin io.Reader, stdout io.
 		Registry:            app.Registry,
 		RegistryDiagnostics: app.RegistryDiagnostics,
 		SessionStore:        app.SessionStore,
+		CapabilityService:   app.CapabilityService,
 		ExecutorConfig:      app.ExecutorConfig,
 		Executors:           app.Executors,
 		Leases: leases.Manager{
@@ -966,25 +970,12 @@ func runServe(ctx context.Context, app bootstrap.App, cfg appconfig.Config, stdo
 		defer logCloser.Close()
 	}
 
-	jobService := jobs.Service{
-		Store:          app.Store,
-		Registry:       app.Registry,
-		Executors:      app.Executors,
-		ExecutorConfig: app.ExecutorConfig,
-		RuntimeRoot:    app.RuntimeRoot,
-		Transitions:    projects.Service{Store: app.Store},
-		Leases: leases.Manager{
-			Store:        app.Store,
-			Git:          gitadapter.Adapter{},
-			WorktreeRoot: worktrees.DefaultRoot(),
-		},
-		Now: time.Now,
-	}
+	jobService := newJobService(app)
 	recoveryService := recovery.Service{
 		Store:           app.Store,
 		RegistryRoot:    filepath.Join(app.RepoRoot, "registry"),
 		ExecutorCatalog: app.Executors,
-		HealthConfig:    healthsvc.DefaultConfig(),
+		HealthConfig:    serveHealthConfig,
 		Logger:          logger,
 	}
 	metricsService := metricsvc.Service{
@@ -1021,14 +1012,17 @@ func runServe(ctx context.Context, app bootstrap.App, cfg appconfig.Config, stdo
 	defer listener.Close()
 
 	server := &stdhttp.Server{
-		Handler: apihttp.NewOperationalHandler(apihttp.Dependencies{
-			Health: healthsvc.Service{
-				DB: app.Store.DB(),
-			},
-			Metrics: metricsvc.Service{
-				DB: app.Store.DB(),
-			},
-			RegistryHealthy: len(app.RegistryDiagnostics) == 0,
+		Handler: apihttp.NewCapabilitiesHandler(apihttp.CapabilitiesDependencies{
+			Gateway: newServeCapabilityGateway(app),
+			Fallback: apihttp.NewOperationalHandler(apihttp.Dependencies{
+				Health: healthsvc.Service{
+					DB: app.Store.DB(),
+				},
+				Metrics: metricsvc.Service{
+					DB: app.Store.DB(),
+				},
+				RegistryHealthy: len(app.RegistryDiagnostics) == 0,
+			}),
 		}),
 	}
 
@@ -1067,6 +1061,175 @@ func runServe(ctx context.Context, app bootstrap.App, cfg appconfig.Config, stdo
 	return err
 }
 
+func newServeCapabilityGateway(app bootstrap.App) *capabilities.Gateway {
+	if app.CapabilityService == nil {
+		return nil
+	}
+
+	return capabilities.NewGateway(
+		app.CapabilityService,
+		func(ctx context.Context, request capabilities.InvokeRequest, descriptor capabilities.Descriptor) (capabilities.InvokeResponse, error) {
+			return invokeServedCapability(ctx, app, request, descriptor)
+		},
+		runs.Service{DB: app.Store.DB(), Store: app.Store},
+	)
+}
+
+func invokeServedCapability(ctx context.Context, app bootstrap.App, request capabilities.InvokeRequest, descriptor capabilities.Descriptor) (capabilities.InvokeResponse, error) {
+	switch descriptor.Key {
+	case "project.status":
+		return invokeServedProjectStatus(ctx, app, request)
+	default:
+		return capabilities.InvokeResponse{}, &capabilities.Error{
+			CodeValue: "not_found",
+			Message:   fmt.Sprintf("unsupported capability: %s", descriptor.Key),
+		}
+	}
+}
+
+func invokeServedProjectStatus(ctx context.Context, app bootstrap.App, request capabilities.InvokeRequest) (capabilities.InvokeResponse, error) {
+	scopeRef := request.Scope
+	scopeKind := strings.TrimSpace(scopeRef.Kind)
+	projectKey := strings.TrimSpace(scopeRef.ProjectKey)
+
+	if (scopeKind == "project" || scopeKind == "odin-core") && projectKey != "" {
+		if manifest, ok := app.Registry.Lookup(projectKey); ok {
+			status, err := loadServedTransitionStatus(ctx, app, manifest.Key)
+			if err != nil {
+				return capabilities.InvokeResponse{}, err
+			}
+			return capabilities.InvokeResponse{
+				Status: "ok",
+				Output: json.RawMessage(renderServedTransitionStatus(manifest.Key, status)),
+			}, nil
+		}
+	}
+
+	return capabilities.InvokeResponse{
+		Status: "ok",
+		Output: json.RawMessage(fmt.Sprintf("scope=%s mode=%s\n", servedScopeLabel(scopeRef), servedMode(request))),
+	}, nil
+}
+
+type servedTransitionStatus struct {
+	State             projects.TransitionState
+	Controller        projects.TransitionController
+	MutationAuthority projects.TransitionController
+	OdinCanMutate     bool
+	LimitedActions    []string
+	Notes             string
+}
+
+func loadServedTransitionStatus(ctx context.Context, app bootstrap.App, projectKey string) (servedTransitionStatus, error) {
+	project, err := app.Store.GetProjectByKey(ctx, projectKey)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return servedTransitionStatus{
+				State:             projects.TransitionStateInventory,
+				Controller:        projects.TransitionControllerLegacyOdin,
+				MutationAuthority: projects.TransitionControllerLegacyOdin,
+				OdinCanMutate:     false,
+			}, nil
+		}
+		return servedTransitionStatus{}, err
+	}
+
+	record, err := app.Store.GetProjectTransition(ctx, project.ID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return servedTransitionStatus{
+				State:             projects.TransitionStateInventory,
+				Controller:        projects.TransitionControllerLegacyOdin,
+				MutationAuthority: projects.TransitionControllerLegacyOdin,
+				OdinCanMutate:     false,
+			}, nil
+		}
+		return servedTransitionStatus{}, err
+	}
+
+	controller := projects.TransitionController(record.Controller)
+	return servedTransitionStatus{
+		State:             projects.TransitionState(record.State),
+		Controller:        controller,
+		MutationAuthority: controller,
+		OdinCanMutate:     controller == projects.TransitionControllerOdinOS,
+		LimitedActions:    decodeCSVList(record.LimitedActionsJSON),
+		Notes:             record.Notes,
+	}, nil
+}
+
+func renderServedTransitionStatus(projectKey string, status servedTransitionStatus) string {
+	limitedActions := "none"
+	if len(status.LimitedActions) > 0 {
+		limitedActions = strings.Join(status.LimitedActions, ",")
+	}
+
+	if status.Notes != "" {
+		return fmt.Sprintf(
+			"project=%s state=%s controller=%s mutation_authority=%s odin_can_mutate=%t limited_actions=%s notes=%s",
+			projectKey,
+			status.State,
+			status.Controller,
+			status.MutationAuthority,
+			status.OdinCanMutate,
+			limitedActions,
+			status.Notes,
+		)
+	}
+
+	return fmt.Sprintf(
+		"project=%s state=%s controller=%s mutation_authority=%s odin_can_mutate=%t limited_actions=%s",
+		projectKey,
+		status.State,
+		status.Controller,
+		status.MutationAuthority,
+		status.OdinCanMutate,
+		limitedActions,
+	)
+}
+
+func decodeCSVList(raw string) []string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+
+	if strings.HasPrefix(raw, "[") {
+		var decoded []string
+		if err := json.Unmarshal([]byte(raw), &decoded); err == nil {
+			return decoded
+		}
+	}
+
+	parts := strings.Split(raw, ",")
+	decoded := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			decoded = append(decoded, part)
+		}
+	}
+	return decoded
+}
+
+func servedMode(request capabilities.InvokeRequest) string {
+	mode := strings.TrimSpace(request.Execution.Mode)
+	if mode == "" {
+		return "local"
+	}
+	return mode
+}
+
+func servedScopeLabel(scopeRef capabilities.ScopeRef) string {
+	switch strings.TrimSpace(scopeRef.Kind) {
+	case "project", "odin-core":
+		if strings.TrimSpace(scopeRef.ProjectKey) != "" {
+			return strings.TrimSpace(scopeRef.ProjectKey)
+		}
+	}
+	return strings.TrimSpace(scopeRef.Kind)
+}
+
 func openServiceLogger(runtimeRoot string) (*logs.Logger, io.Closer, error) {
 	logDir := filepath.Join(runtimeRoot, "runs", "logs")
 	if err := os.MkdirAll(logDir, 0o755); err != nil {
@@ -1084,6 +1247,24 @@ func openServiceLogger(runtimeRoot string) (*logs.Logger, io.Closer, error) {
 	}, file, nil
 }
 
+func newJobService(app bootstrap.App) jobs.Service {
+	return jobs.Service{
+		Store:          app.Store,
+		Registry:       app.Registry,
+		Executors:      app.Executors,
+		ExecutorConfig: app.ExecutorConfig,
+		RuntimeRoot:    app.RuntimeRoot,
+		Transitions:    projects.Service{Store: app.Store},
+		Leases: leases.Manager{
+			Store:        app.Store,
+			Git:          gitadapter.Adapter{},
+			WorktreeRoot: worktrees.DefaultRoot(),
+		},
+		Supervisor: supervision.Service{},
+		Now:        time.Now,
+	}
+}
+
 func runTaskLoop(ctx context.Context, wg *sync.WaitGroup, service jobs.Service, logger *logs.Logger) {
 	defer wg.Done()
 
@@ -1099,7 +1280,7 @@ func runTaskLoop(ctx context.Context, wg *sync.WaitGroup, service jobs.Service, 
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			taskCtx, cancel := serveOperationContext(ctx)
+			taskCtx, cancel := serveTaskContext(ctx)
 			if err := service.ExecuteNextQueued(taskCtx); err != nil {
 				cancel()
 				logBackgroundError(logger, "task_runner", err)
@@ -1175,6 +1356,10 @@ func runMetricsLoop(ctx context.Context, wg *sync.WaitGroup, service metricsvc.S
 
 func serveOperationContext(parent context.Context) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(parent, serveOperationTimeout)
+}
+
+func serveTaskContext(parent context.Context) (context.Context, context.CancelFunc) {
+	return context.WithCancel(parent)
 }
 
 func serveStartupContext(parent context.Context) (context.Context, context.CancelFunc) {

@@ -10,6 +10,9 @@ import (
 	"strings"
 	"testing"
 
+	"odin-os/internal/app/bootstrap"
+	"odin-os/internal/core/capabilities"
+	"odin-os/internal/runtime/supervision"
 	"odin-os/internal/vcs/worktrees"
 )
 
@@ -440,6 +443,57 @@ printf '%s\n' '{"status":"ok","summary":"audit note recorded"}'
 	}
 	if !strings.Contains(stdout.String(), "audit note recorded") {
 		t.Fatalf("skills invoke output = %q, want audit note summary", stdout.String())
+	}
+}
+
+func TestNewJobServiceIncludesSupervisor(t *testing.T) {
+	t.Parallel()
+
+	service := newJobService(bootstrap.App{})
+	if service.Supervisor == nil {
+		t.Fatal("newJobService() Supervisor = nil, want concrete supervisor")
+	}
+	if _, ok := service.Supervisor.(supervision.Service); !ok {
+		t.Fatalf("newJobService() Supervisor = %T, want supervision.Service", service.Supervisor)
+	}
+}
+
+func TestInvokeServedProjectStatusFallsBackToScopeAndMode(t *testing.T) {
+	t.Parallel()
+
+	response, err := invokeServedProjectStatus(context.Background(), bootstrap.App{}, capabilities.InvokeRequest{
+		Scope: capabilities.ScopeRef{
+			Kind: "global",
+		},
+		Execution: capabilities.ExecutionRequest{
+			Mode: "local",
+		},
+	})
+	if err != nil {
+		t.Fatalf("invokeServedProjectStatus() error = %v", err)
+	}
+	if string(response.Output) != "scope=global mode=local\n" {
+		t.Fatalf("response output = %q, want %q", response.Output, "scope=global mode=local\n")
+	}
+}
+
+func TestInvokeServedProjectStatusFallsBackToProjectScopeLabel(t *testing.T) {
+	t.Parallel()
+
+	response, err := invokeServedProjectStatus(context.Background(), bootstrap.App{}, capabilities.InvokeRequest{
+		Scope: capabilities.ScopeRef{
+			Kind:       "project",
+			ProjectKey: "alpha",
+		},
+		Execution: capabilities.ExecutionRequest{
+			Mode: "local",
+		},
+	})
+	if err != nil {
+		t.Fatalf("invokeServedProjectStatus() error = %v", err)
+	}
+	if string(response.Output) != "scope=alpha mode=local\n" {
+		t.Fatalf("response output = %q, want %q", response.Output, "scope=alpha mode=local\n")
 	}
 }
 

@@ -368,7 +368,7 @@ func TestAlphaAcceptance(t *testing.T) {
 			t.Fatalf("transition output = %q, want pbs limited_action state", transitionOutput)
 		}
 
-		cleanupAcceptanceWorktree(t, "/home/orchestrator/pbs", acceptanceWorktreeRoot(extraEnv), "pbs", 1, 1, 1)
+		cleanupAcceptanceWorktree(t, projectGitRootFromManifest(t, repoRoot, "pbs"), acceptanceWorktreeRoot(extraEnv), "pbs", 1, 1, 1)
 
 		taskOutput, err := runOdinCommand(
 			t,
@@ -721,7 +721,8 @@ func TestAlphaAcceptance(t *testing.T) {
 		runtimeRoot := t.TempDir()
 		store := openRuntimeStore(t, runtimeRoot)
 		defer store.Close()
-		seedHealthyObservability(t, ctx, store, now)
+		observabilityNow := time.Now().UTC()
+		seedHealthyObservability(t, ctx, store, observabilityNow)
 
 		report, err := healthsvc.Service{
 			DB:  store.DB(),
@@ -830,7 +831,7 @@ func TestAlphaAcceptance(t *testing.T) {
 	})
 
 	t.Run("migration extraction from odin-orchestrator works", func(t *testing.T) {
-		sourceRoot := "/home/orchestrator/odin-orchestrator"
+		sourceRoot := legacyOrchestratorSourceRoot(t)
 		requirePathExists(t, sourceRoot)
 
 		docsRoot := filepath.Join(t.TempDir(), "docs")

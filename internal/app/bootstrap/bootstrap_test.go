@@ -8,10 +8,72 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"odin-os/internal/registry"
 )
 
+func bootstrapRepoRoot(t *testing.T) string {
+	t.Helper()
+
+	sourceRoot := filepath.Clean(filepath.Join("..", "..", ".."))
+	if os.Getenv("ODIN_FORCE_PORTABLE_TEST_REPO") != "1" {
+		if _, err := os.Stat("/home/orchestrator/pbs/.git"); err == nil {
+			return sourceRoot
+		}
+	}
+
+	root := t.TempDir()
+	for _, dir := range []string{
+		filepath.Join(root, ".git"),
+		filepath.Join(root, "config"),
+		filepath.Join(root, "registry", "agents"),
+		filepath.Join(root, "registry", "skills"),
+		filepath.Join(root, "registry", "workflows"),
+		filepath.Join(root, "registry", "commands"),
+	} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("MkdirAll(%q) error = %v", dir, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(root, "config", "projects.yaml"), []byte(`
+version: 1
+projects:
+  - key: odin-core
+    name: Odin Core
+    project_class: system_project
+    system_project: true
+    git_root: ..
+    default_branch: main
+    policy:
+      allowed_commands: [status]
+      branch_rules:
+        protected_branches: [main]
+        require_worktree: true
+        require_task_branch: true
+        allow_default_branch_mutation: false
+      approval_gates:
+        require_for_governance_changes: true
+        require_for_destructive_operations: true
+        require_for_system_project_changes: true
+      merge_policy:
+        mode: squash
+        allow_direct_to_default_branch: false
+      destructive_operations:
+        allow_reset: false
+        allow_clean: false
+        allow_force_push: false
+        require_explicit_approval: true
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile(projects.yaml) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "config", "executors.yaml"), []byte("version: 1\nexecutors: []\nroutes: []\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(executors.yaml) error = %v", err)
+	}
+	return root
+}
+
 func TestLoadInitializesFreshRuntimeReadinessState(t *testing.T) {
-	repoRoot := filepath.Clean(filepath.Join("..", "..", ".."))
+	repoRoot := bootstrapRepoRoot(t)
 	runtimeRoot := t.TempDir()
 
 	app, err := Load(context.Background(), repoRoot, runtimeRoot)
@@ -30,7 +92,7 @@ func TestLoadInitializesFreshRuntimeReadinessState(t *testing.T) {
 }
 
 func TestLoadRecordsExpectedExecutorHealthEvenWhenUnavailable(t *testing.T) {
-	repoRoot := filepath.Clean(filepath.Join("..", "..", ".."))
+	repoRoot := bootstrapRepoRoot(t)
 	runtimeRoot := t.TempDir()
 	t.Setenv("ODIN_CODEX_DRIVER", filepath.Join(runtimeRoot, "missing-codex-driver"))
 
@@ -52,6 +114,88 @@ func TestLoadRecordsExpectedExecutorHealthEvenWhenUnavailable(t *testing.T) {
 	}
 	if status != "unavailable" {
 		t.Fatalf("codex_headless status = %q, want unavailable", status)
+	}
+}
+
+func TestBootstrapRetainsCapabilityService(t *testing.T) {
+	repoRoot := bootstrapRepoRoot(t)
+	runtimeRoot := t.TempDir()
+
+	app, err := Load(context.Background(), repoRoot, runtimeRoot)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	defer app.Store.Close()
+
+	if app.CapabilityService == nil {
+		t.Fatal("CapabilityService = nil, want live service")
+	}
+
+	active := app.CapabilityService.Active()
+	if active.Digest == "" {
+		t.Fatal("Active().Digest = empty, want snapshot digest")
+	}
+	if len(active.Diagnostics) != 0 {
+		t.Fatalf("Active().Diagnostics = %+v, want none", active.Diagnostics)
+	}
+}
+
+func TestSnapshotDigestIgnoresAbsoluteSourcePaths(t *testing.T) {
+	base := registry.Snapshot{
+		Items: []registry.Item{
+			{
+				Kind:   registry.KindSkill,
+				Key:    "skill.example",
+				Title:  "Example Skill",
+				Scopes: []string{"project"},
+				Source: registry.SourceInfo{
+					Path:         "/tmp/a/registry/skills/example.md",
+					RelativePath: "skills/example.md",
+				},
+			},
+		},
+		Diagnostics: []registry.Diagnostic{
+			{
+				Path:    "/tmp/a/registry/skills/example.md",
+				Code:    "read_error",
+				Message: "registry file could not be read",
+			},
+		},
+	}
+
+	other := registry.Snapshot{
+		Items: []registry.Item{
+			{
+				Kind:   registry.KindSkill,
+				Key:    "skill.example",
+				Title:  "Example Skill",
+				Scopes: []string{"project"},
+				Source: registry.SourceInfo{
+					Path:         "/opt/alt/registry/skills/example.md",
+					RelativePath: "skills/example.md",
+				},
+			},
+		},
+		Diagnostics: []registry.Diagnostic{
+			{
+				Path:    "/opt/alt/registry/skills/example.md",
+				Code:    "read_error",
+				Message: "registry file could not be read",
+			},
+		},
+	}
+
+	baseDigest, err := snapshotDigest(base)
+	if err != nil {
+		t.Fatalf("snapshotDigest(base) error = %v", err)
+	}
+	otherDigest, err := snapshotDigest(other)
+	if err != nil {
+		t.Fatalf("snapshotDigest(other) error = %v", err)
+	}
+
+	if baseDigest != otherDigest {
+		t.Fatalf("snapshotDigest() = %q and %q, want equal", baseDigest, otherDigest)
 	}
 }
 
@@ -314,7 +458,7 @@ Example
 }
 
 func TestLoadReadOnlyDoesNotInitializeReadinessState(t *testing.T) {
-	repoRoot := filepath.Clean(filepath.Join("..", "..", ".."))
+	repoRoot := bootstrapRepoRoot(t)
 	runtimeRoot := t.TempDir()
 
 	app, err := LoadReadOnly(context.Background(), repoRoot, runtimeRoot)
@@ -329,7 +473,7 @@ func TestLoadReadOnlyDoesNotInitializeReadinessState(t *testing.T) {
 }
 
 func TestLoadSerializesConcurrentBootstrapForFreshRuntime(t *testing.T) {
-	repoRoot := filepath.Clean(filepath.Join("..", "..", ".."))
+	repoRoot := bootstrapRepoRoot(t)
 	runtimeRoot := t.TempDir()
 
 	var entered int32
@@ -391,7 +535,7 @@ func TestLoadSerializesConcurrentBootstrapForFreshRuntime(t *testing.T) {
 }
 
 func TestLoadReturnsBootstrapTimeoutWhenLockWaitExceedsConfiguredLimit(t *testing.T) {
-	repoRoot := filepath.Clean(filepath.Join("..", "..", ".."))
+	repoRoot := bootstrapRepoRoot(t)
 	runtimeRoot := t.TempDir()
 	t.Setenv("ODIN_BOOTSTRAP_TIMEOUT", "50ms")
 

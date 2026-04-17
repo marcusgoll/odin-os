@@ -163,6 +163,77 @@ func TestMonitorDetectsDefinedFaults(t *testing.T) {
 	assertFaultPresent(t, observations, recovery.FaultRunFailureRepeated, "task:"+task.Key)
 }
 
+func TestMonitorTreatsRepeatedTimeoutsAsRunFailures(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlite.Open(filepath.Join(t.TempDir(), "odin.db"))
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer store.Close()
+
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
+	}
+
+	project, err := store.CreateProject(ctx, sqlite.CreateProjectParams{
+		Key:           "demo",
+		Name:          "Demo",
+		Scope:         "project",
+		GitRoot:       "/tmp/demo",
+		DefaultBranch: "main",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+
+	task, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "timeout-task",
+		Title:       "Timed out task",
+		Status:      "timeout",
+		Scope:       "project",
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+
+	for attempt := 1; attempt <= 2; attempt++ {
+		run, err := store.StartRun(ctx, sqlite.StartRunParams{
+			TaskID:   task.ID,
+			Executor: "codex_headless",
+			Attempt:  attempt,
+			Status:   "running",
+		})
+		if err != nil {
+			t.Fatalf("StartRun(attempt %d) error = %v", attempt, err)
+		}
+		if _, err := store.FinishRun(ctx, sqlite.FinishRunParams{
+			RunID:   run.ID,
+			Status:  "timeout",
+			Summary: "execution exceeded timeout",
+		}); err != nil {
+			t.Fatalf("FinishRun(attempt %d) error = %v", attempt, err)
+		}
+	}
+
+	monitor := recovery.Monitor{
+		DB: store.DB(),
+		Config: recovery.Config{
+			RepeatedRunFailureThreshold: 2,
+		},
+		Now: func() time.Time { return time.Date(2026, 4, 9, 12, 0, 0, 0, time.UTC) },
+	}
+
+	observations, err := monitor.Observe(ctx)
+	if err != nil {
+		t.Fatalf("Observe() error = %v", err)
+	}
+
+	assertFaultPresent(t, observations, recovery.FaultRunFailureRepeated, "task:"+task.Key)
+}
+
 func assertFaultPresent(t *testing.T, observations []recovery.Observation, faultKey recovery.FaultKey, subjectKey string) {
 	t.Helper()
 	for _, observation := range observations {

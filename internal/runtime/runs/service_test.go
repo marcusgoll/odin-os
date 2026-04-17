@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 
 	"odin-os/internal/cli/scope"
@@ -97,6 +98,122 @@ func TestListFiltersRunsByScope(t *testing.T) {
 
 	if len(views) != 1 || views[0].TaskKey != "alpha-task" {
 		t.Fatalf("views = %+v, want one alpha run", views)
+	}
+}
+
+func TestGetRunReturnsRunRecord(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openRunStore(t)
+	defer store.Close()
+
+	project, err := store.CreateProject(ctx, sqlite.CreateProjectParams{
+		Key:           "alpha",
+		Name:          "Alpha",
+		Scope:         "project",
+		GitRoot:       "/tmp/alpha",
+		DefaultBranch: "main",
+		GitHubRepo:    "acme/alpha",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+
+	task, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "alpha-task",
+		Title:       "Alpha task",
+		Status:      "running",
+		Scope:       "project",
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+
+	run, err := store.StartRun(ctx, sqlite.StartRunParams{
+		TaskID:   task.ID,
+		Executor: "codex",
+		Attempt:  1,
+		Status:   "running",
+	})
+	if err != nil {
+		t.Fatalf("StartRun() error = %v", err)
+	}
+
+	service := Service{DB: store.DB()}
+	record, err := service.GetRun(ctx, run.ID)
+	if err != nil {
+		t.Fatalf("GetRun() error = %v", err)
+	}
+	if record.RunID != run.ID {
+		t.Fatalf("GetRun().RunID = %d, want %d", record.RunID, run.ID)
+	}
+	if record.Status != "running" {
+		t.Fatalf("GetRun().Status = %q, want %q", record.Status, "running")
+	}
+	if record.FinishedAt != nil {
+		t.Fatalf("GetRun().FinishedAt = %v, want nil", record.FinishedAt)
+	}
+}
+
+func TestGetRunEnvelopeReturnsEmptyArtifactsByDefault(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openRunStore(t)
+	defer store.Close()
+
+	project, err := store.CreateProject(ctx, sqlite.CreateProjectParams{
+		Key:           "alpha",
+		Name:          "Alpha",
+		Scope:         "project",
+		GitRoot:       "/tmp/alpha",
+		DefaultBranch: "main",
+		GitHubRepo:    "acme/alpha",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+
+	task, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "alpha-task",
+		Title:       "Alpha task",
+		Status:      "running",
+		Scope:       "project",
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+
+	run, err := store.StartRun(ctx, sqlite.StartRunParams{
+		TaskID:   task.ID,
+		Executor: "codex",
+		Attempt:  1,
+		Status:   "running",
+	})
+	if err != nil {
+		t.Fatalf("StartRun() error = %v", err)
+	}
+
+	service := Service{DB: store.DB()}
+	envelope, err := service.GetRunEnvelope(ctx, run.ID)
+	if err != nil {
+		t.Fatalf("GetRunEnvelope() error = %v", err)
+	}
+	if envelope.RunID != strconv.FormatInt(run.ID, 10) {
+		t.Fatalf("GetRunEnvelope().RunID = %q, want %q", envelope.RunID, strconv.FormatInt(run.ID, 10))
+	}
+	if envelope.Status != "running" {
+		t.Fatalf("GetRunEnvelope().Status = %q, want %q", envelope.Status, "running")
+	}
+	if len(envelope.Artifacts) != 0 {
+		t.Fatalf("GetRunEnvelope().Artifacts = %+v, want empty", envelope.Artifacts)
 	}
 }
 

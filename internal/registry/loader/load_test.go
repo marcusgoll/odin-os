@@ -87,8 +87,8 @@ func TestLoadDirLoadsRepositoryExamples(t *testing.T) {
 		t.Fatalf("snapshot.Diagnostics = %v, want none", snapshot.Diagnostics)
 	}
 
-	if len(snapshot.Items) != 4 {
-		t.Fatalf("snapshot.Items = %d, want 4", len(snapshot.Items))
+	if len(snapshot.Items) != 6 {
+		t.Fatalf("snapshot.Items = %d, want 6", len(snapshot.Items))
 	}
 }
 

@@ -304,10 +304,10 @@ func TestInvokeRejectsInjectedInvalidPermissionsBeforeHandlerRuns(t *testing.T) 
 		HandlerType:    "command",
 		HandlerRef:     "scripts/skills/injected-invalid-skill.sh",
 		TimeoutSeconds: 15,
-		InputSchema: map[string]any{
+		LegacyInputSchema: map[string]any{
 			"type": "object",
 		},
-		OutputSchema: map[string]any{
+		LegacyOutputSchema: map[string]any{
 			"type": "object",
 		},
 	}
@@ -354,10 +354,10 @@ func TestInvokeRejectsInjectedEmptyPermissionsBeforeHandlerRuns(t *testing.T) {
 		HandlerType:    "command",
 		HandlerRef:     "scripts/skills/injected-empty-skill.sh",
 		TimeoutSeconds: 15,
-		InputSchema: map[string]any{
+		LegacyInputSchema: map[string]any{
 			"type": "object",
 		},
-		OutputSchema: map[string]any{
+		LegacyOutputSchema: map[string]any{
 			"type": "object",
 		},
 	}

@@ -156,10 +156,10 @@ func testSnapshot() registry.Snapshot {
 				HandlerType:    "command",
 				HandlerRef:     "scripts/skills/triage-skill.sh",
 				TimeoutSeconds: 15,
-				InputSchema: map[string]any{
+				LegacyInputSchema: map[string]any{
 					"type": "object",
 				},
-				OutputSchema: map[string]any{
+				LegacyOutputSchema: map[string]any{
 					"type": "object",
 				},
 				Sections: map[string]string{

@@ -114,8 +114,8 @@ func (broker *Broker) Expand(key string) (catalog.Expansion, error) {
 				HandlerType:    item.HandlerType,
 				HandlerRef:     item.HandlerRef,
 				TimeoutSeconds: item.TimeoutSeconds,
-				InputSchema:    catalog.CloneAnyMap(item.InputSchema),
-				OutputSchema:   catalog.CloneAnyMap(item.OutputSchema),
+				InputSchema:    catalog.CloneAnyMap(item.LegacyInputSchema),
+				OutputSchema:   catalog.CloneAnyMap(item.LegacyOutputSchema),
 				Sections:       catalog.CloneSections(item.Sections),
 				SourceRef:      item.Source.RelativePath,
 			},
@@ -133,6 +133,23 @@ func (broker *Broker) Expand(key string) (catalog.Expansion, error) {
 				Role:      item.Role,
 				Sections:  catalog.CloneSections(item.Sections),
 				SourceRef: item.Source.RelativePath,
+			},
+		}, nil
+	case registry.KindWorkflow:
+		return catalog.Expansion{
+			Card: card,
+			Workflow: &catalog.WorkflowDefinition{
+				Key:          item.Key,
+				Title:        item.Title,
+				Summary:      item.Summary,
+				Version:      item.Version,
+				Tags:         append([]string(nil), item.Tags...),
+				Scopes:       append([]string(nil), item.Scopes...),
+				Entrypoint:   item.Entrypoint,
+				Composes:     append([]string(nil), item.Composes...),
+				Dependencies: append([]registry.DependencyRef(nil), item.Dependencies...),
+				Sections:     catalog.CloneSections(item.Sections),
+				SourceRef:    item.Source.RelativePath,
 			},
 		}, nil
 	default:
