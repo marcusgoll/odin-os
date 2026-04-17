@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"odin-os/internal/core/workitems"
 	"odin-os/internal/executors/contract"
 	"odin-os/internal/runtime/health"
 	"odin-os/internal/store/sqlite"
@@ -20,6 +21,7 @@ type Service struct {
 	Monitor         Monitor
 	Diagnoser       Diagnoser
 	Executor        Executor
+	WorkItems       workitems.Service
 	Now             func() time.Time
 }
 
@@ -102,6 +104,13 @@ func (service Service) RunCycle(ctx context.Context) (CycleResult, error) {
 	}
 
 	return result, nil
+}
+
+func (service Service) workItemService() workitems.Service {
+	if service.WorkItems.Store == nil {
+		service.WorkItems.Store = service.Store
+	}
+	return service.WorkItems
 }
 
 func (service Service) logDecision(now time.Time, decision Decision, status string, errMessage string) {

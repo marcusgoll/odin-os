@@ -1,10 +1,6 @@
 package sqlite
 
-import (
-	"time"
-
-	"odin-os/internal/core/controlscope"
-)
+import "time"
 
 type Project struct {
 	ID            int64
@@ -19,39 +15,18 @@ type Project struct {
 	UpdatedAt     time.Time
 }
 
-type CreateProjectParams struct {
-	Key           string
-	Name          string
-	Scope         string
-	GitRoot       string
-	DefaultBranch string
-	GitHubRepo    string
-	ManifestPath  string
-}
-
-type Workspace struct {
-	ID                  int64
-	Key                 string
-	Name                string
-	OwnerRef            string
-	Status              string
-	DefaultCompanionKey string
-	PolicyJSON          string
-	CreatedAt           time.Time
-	UpdatedAt           time.Time
-}
-
-type CreateWorkspaceParams struct {
-	Key                 string
-	Name                string
-	OwnerRef            string
-	Status              string
-	DefaultCompanionKey string
-	PolicyJSON          string
-}
-
-type ListWorkspacesParams struct {
-	Status string
+type Initiative struct {
+	ID               int64
+	WorkspaceID      int64
+	Key              string
+	Title            string
+	Kind             string
+	Status           string
+	Summary          string
+	OwnerCompanionID *int64
+	LinkedProjectID  *int64
+	CreatedAt        time.Time
+	UpdatedAt        time.Time
 }
 
 type Companion struct {
@@ -70,7 +45,30 @@ type Companion struct {
 	UpdatedAt           time.Time
 }
 
-type CreateCompanionParams struct {
+type CreateProjectParams struct {
+	Key           string
+	Name          string
+	Scope         string
+	GitRoot       string
+	DefaultBranch string
+	GitHubRepo    string
+	ManifestPath  string
+}
+
+type UpsertProjectParams = CreateProjectParams
+
+type UpsertInitiativeParams struct {
+	WorkspaceID      int64
+	Key              string
+	Title            string
+	Kind             string
+	Status           string
+	Summary          string
+	OwnerCompanionID *int64
+	LinkedProjectID  *int64
+}
+
+type UpsertCompanionParams struct {
 	WorkspaceID         int64
 	Key                 string
 	Title               string
@@ -83,63 +81,50 @@ type CreateCompanionParams struct {
 	PlanningPolicyJSON  string
 }
 
-type ListCompanionsParams struct {
-	WorkspaceID *int64
-	Status      string
+type ManagedProjectRegistrationParams struct {
+	Workspace CreateWorkspaceParams
+	Project   UpsertProjectParams
 }
 
-type Initiative struct {
-	ID               int64
-	WorkspaceID      int64
-	Key              string
-	Title            string
-	Kind             string
-	Status           string
-	Summary          string
-	LinkedProjectID  *int64
-	OwnerCompanionID *int64
-	CreatedAt        time.Time
-	UpdatedAt        time.Time
+type Workspace struct {
+	ID                  int64
+	Key                 string
+	Name                string
+	OwnerRef            string
+	DefaultCompanionKey string
+	Status              string
+	PolicyJSON          string
+	CreatedAt           time.Time
+	UpdatedAt           time.Time
 }
 
-type CreateInitiativeParams struct {
-	WorkspaceID      int64
-	Key              string
-	Title            string
-	Kind             string
-	Status           string
-	Summary          string
-	LinkedProjectID  *int64
-	OwnerCompanionID *int64
+type CreateWorkspaceParams struct {
+	Key                 string
+	Name                string
+	OwnerRef            string
+	DefaultCompanionKey string
+	Status              string
+	PolicyJSON          string
 }
 
-type ListInitiativesParams struct {
-	WorkspaceID *int64
-	Kind        string
-	Status      string
-}
-
-type ReconcileManagedProjectInitiativeParams struct {
+type UpdateWorkspacePolicyParams struct {
 	WorkspaceID int64
-	ProjectID   int64
-	Key         string
-	Title       string
-	Status      string
-	Summary     string
+	PolicyJSON  string
 }
 
 type Task struct {
 	ID             int64
 	ProjectID      int64
-	WorkspaceID    int64
-	InitiativeID   *int64
-	CompanionID    *int64
 	Key            string
 	Title          string
 	ActionKey      string
 	Status         string
 	Scope          string
 	RequestedBy    string
+	WorkspaceID    *int64
+	InitiativeID   *int64
+	CompanionID    *int64
+	WorkKind       string
 	Summary        string
 	TerminalReason string
 	ArtifactsJSON  string
@@ -150,25 +135,25 @@ type Task struct {
 
 type CreateTaskParams struct {
 	ProjectID    int64
-	WorkspaceID  int64
-	InitiativeID *int64
-	CompanionID  *int64
-	SubjectType  controlscope.SubjectType
-	SubjectKey   string
 	Key          string
 	Title        string
 	ActionKey    string
 	Status       string
 	Scope        string
 	RequestedBy  string
+	WorkspaceID  *int64
+	InitiativeID *int64
+	CompanionID  *int64
+	WorkKind     string
 }
 
 type UpdateTaskStatusParams struct {
-	TaskID         int64
-	Status         string
-	Summary        string
-	TerminalReason string
-	ArtifactsJSON  string
+	TaskID                 int64
+	Status                 string
+	Summary                string
+	TerminalReason         string
+	ArtifactsJSON          string
+	AllowedCurrentStatuses []string
 }
 
 type Run struct {
@@ -182,6 +167,49 @@ type Run struct {
 	Summary        string
 	TerminalReason string
 	ArtifactsJSON  string
+}
+
+type MemoryEntry struct {
+	ID              int64
+	WorkspaceID     int64
+	InitiativeID    *int64
+	CompanionID     *int64
+	TaskID          *int64
+	RunID           *int64
+	EntryType       string
+	VisibilityScope string
+	RetentionClass  string
+	Summary         string
+	Content         string
+	MetadataJSON    string
+	CreatedAt       time.Time
+	UpdatedAt       time.Time
+}
+
+type CreateMemoryEntryParams struct {
+	WorkspaceID     int64
+	InitiativeID    *int64
+	CompanionID     *int64
+	TaskID          *int64
+	RunID           *int64
+	EntryType       string
+	VisibilityScope string
+	RetentionClass  string
+	Summary         string
+	Content         string
+	MetadataJSON    string
+}
+
+type ListMemoryEntriesParams struct {
+	WorkspaceID     int64
+	InitiativeID    *int64
+	CompanionID     *int64
+	TaskID          *int64
+	RunID           *int64
+	EntryType       string
+	VisibilityScope string
+	RetentionClass  string
+	Limit           int
 }
 
 type StartRunParams struct {
@@ -235,15 +263,6 @@ type FinishRunAndUpdateTaskStatusParams struct {
 	TaskStatus     string
 }
 
-type WorkItem struct {
-	Task
-	Scope         controlscope.ControlScope
-	ProjectKey    string
-	WorkspaceKey  string
-	InitiativeKey string
-	CompanionKey  string
-}
-
 type Approval struct {
 	ID          int64
 	TaskID      int64
@@ -259,6 +278,12 @@ type RequestApprovalParams struct {
 	TaskID      int64
 	RunID       *int64
 	Status      string
+	RequestedBy string
+}
+
+type BlockTaskAndRequestApprovalParams struct {
+	TaskID      int64
+	RunID       *int64
 	RequestedBy string
 }
 
@@ -359,40 +384,6 @@ type RecordExecutorHealthParams struct {
 	Status      string
 	LatencyMS   int64
 	DetailsJSON string
-}
-
-type MemoryEntry struct {
-	ID              int64
-	ScopeType       string
-	ScopeKey        string
-	SourceScope     string
-	VisibilityScope string
-	RetentionIntent string
-	EntryKind       string
-	Summary         string
-	Content         string
-	SourceRunID     *int64
-	SourceRef       string
-	CreatedAt       time.Time
-}
-
-type CreateMemoryEntryParams struct {
-	ScopeType       string
-	ScopeKey        string
-	SourceScope     string
-	VisibilityScope string
-	RetentionIntent string
-	EntryKind       string
-	Summary         string
-	Content         string
-	SourceRunID     *int64
-	SourceRef       string
-}
-
-type ListMemoryEntriesParams struct {
-	ScopeType string
-	ScopeKey  string
-	Limit     int
 }
 
 type RecordSkillLifecycleEventParams struct {

@@ -1,6 +1,6 @@
 package scope
 
-import "odin-os/internal/core/controlscope"
+import corescope "odin-os/internal/core/scope"
 
 type Kind string
 
@@ -27,6 +27,13 @@ type Resolution struct {
 	ProjectKey string
 }
 
+func (resolution Resolution) ControlScope() corescope.ControlScope {
+	return corescope.ResolveLegacy(corescope.LegacyScope{
+		Kind:       string(resolution.Kind),
+		ProjectKey: resolution.ProjectKey,
+	})
+}
+
 func Resolve(input ResolveInput) Resolution {
 	if input.ExplicitTarget != nil {
 		if input.ExplicitTarget.SystemProject || input.ExplicitTarget.ProjectKey == "odin-core" {
@@ -47,22 +54,4 @@ func Resolve(input ResolveInput) Resolution {
 	}
 
 	return Resolution{Kind: ScopeGlobal}
-}
-
-func ToControlScope(resolution Resolution) controlscope.ControlScope {
-	switch resolution.Kind {
-	case ScopeProject, ScopeOdinCore:
-		return controlscope.ControlScope{
-			SubjectType: controlscope.SubjectTypeProject,
-			SubjectKey:  resolution.ProjectKey,
-			ProjectKey:  resolution.ProjectKey,
-		}
-	case ScopeNewProject:
-		return controlscope.ControlScope{
-			SubjectType: controlscope.SubjectTypeProject,
-			SubjectKey:  string(ScopeNewProject),
-		}
-	default:
-		return controlscope.ControlScope{}
-	}
 }

@@ -2,10 +2,15 @@ package initiatives
 
 import "time"
 
-const (
-	KindManagedProject = "managed_project"
+type Kind string
 
-	StatusActive = "active"
+const (
+	KindManagedProject Kind = "managed_project"
+	KindGoal           Kind = "goal"
+	KindCase           Kind = "case"
+	KindRoutine        Kind = "routine"
+	KindCampaign       Kind = "campaign"
+	KindPersonalAdmin  Kind = "personal_admin"
 )
 
 type Initiative struct {
@@ -13,31 +18,11 @@ type Initiative struct {
 	WorkspaceID      int64
 	Key              string
 	Title            string
-	Kind             string
+	Kind             Kind
 	Status           string
 	Summary          string
-	LinkedProjectID  *int64
 	OwnerCompanionID *int64
+	LinkedProjectID  *int64
 	CreatedAt        time.Time
 	UpdatedAt        time.Time
-}
-
-type CreateInput struct {
-	WorkspaceID      int64
-	Key              string
-	Title            string
-	Kind             string
-	Status           string
-	Summary          string
-	LinkedProjectID  *int64
-	OwnerCompanionID *int64
-}
-
-type ManagedProjectInput struct {
-	WorkspaceID int64
-	ProjectID   int64
-	ProjectKey  string
-	ProjectName string
-	Status      string
-	Summary     string
 }

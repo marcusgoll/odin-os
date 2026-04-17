@@ -2,12 +2,13 @@ package companions
 
 import "time"
 
+type Kind string
+
 const (
-	DefaultOperatorKey = "operator"
-
-	KindOperator = "operator"
-
-	StatusActive = "active"
+	KindAssistant  Kind = "assistant"
+	KindAdvisor    Kind = "advisor"
+	KindOperator   Kind = "operator"
+	KindSpecialist Kind = "specialist"
 )
 
 type Companion struct {
@@ -15,7 +16,7 @@ type Companion struct {
 	WorkspaceID         int64
 	Key                 string
 	Title               string
-	Kind                string
+	Kind                Kind
 	Charter             string
 	Status              string
 	InitiativeScopeJSON string

@@ -3,19 +3,18 @@ CREATE TABLE IF NOT EXISTS workspaces (
   key TEXT NOT NULL UNIQUE,
   name TEXT NOT NULL,
   owner_ref TEXT NOT NULL,
+  default_companion_key TEXT NOT NULL,
   status TEXT NOT NULL,
-  default_companion_key TEXT,
-  policy_json TEXT NOT NULL,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
 
-CREATE INDEX IF NOT EXISTS idx_workspaces_status ON workspaces(status);
+CREATE INDEX IF NOT EXISTS idx_workspaces_status ON workspaces(status, id);
 
-INSERT INTO workspaces (key, name, owner_ref, status, default_companion_key, policy_json, created_at, updated_at)
-SELECT 'marcus', 'Marcus Workspace', 'marcus', 'active', NULL, '{}', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-WHERE NOT EXISTS (
-  SELECT 1
-  FROM workspaces
-  WHERE key = 'marcus'
+CREATE TABLE IF NOT EXISTS workspace_policies (
+  workspace_id INTEGER PRIMARY KEY,
+  policy_json TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY(workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
 );

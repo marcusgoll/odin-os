@@ -11,12 +11,9 @@ import (
 	"testing"
 
 	httpapi "odin-os/internal/api/http"
-	"odin-os/internal/core/companions"
-	"odin-os/internal/core/controlscope"
-	"odin-os/internal/core/workitems"
-	"odin-os/internal/core/workspaces"
-	"odin-os/internal/runtime/checkpoints"
+	"odin-os/internal/core/initiatives"
 	healthsvc "odin-os/internal/runtime/health"
+	"odin-os/internal/runtime/projections"
 	"odin-os/internal/store/sqlite"
 	metricsvc "odin-os/internal/telemetry/metrics"
 )
@@ -35,6 +32,7 @@ func TestOperationalHandlerExposesHealthReadyAndMetrics(t *testing.T) {
 		Metrics: metricsvc.Service{
 			DB: store.DB(),
 		},
+		ReadModels:      store.DB(),
 		RegistryHealthy: true,
 	}))
 	defer server.Close()
@@ -70,6 +68,7 @@ func TestOperationalHandlerDegradesReadyzWhenRuntimeIsNotReady(t *testing.T) {
 		Metrics: metricsvc.Service{
 			DB: store.DB(),
 		},
+		ReadModels:      store.DB(),
 		RegistryHealthy: true,
 	}))
 	defer server.Close()
@@ -78,130 +77,52 @@ func TestOperationalHandlerDegradesReadyzWhenRuntimeIsNotReady(t *testing.T) {
 	assertReportStatus(t, server.URL+"/readyz", http.StatusServiceUnavailable, "degraded")
 }
 
-func TestOperationalHandlerExposesWorkspaceHome(t *testing.T) {
-
+func TestOperationalHandlerExposesWorkspaceInitiativeCompanionAndBlockedReadModels(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
 	store := openStore(t)
 	defer store.Close()
 
-	workspaceKey, initiativeKey, companionKey, taskKey := seedWorkspaceHTTPState(t, ctx, store)
+	seedHealthyObservability(t, ctx, store)
+	seedOperatorReadModels(t, ctx, store)
 
 	server := httptest.NewServer(httpapi.NewOperationalHandler(httpapi.Dependencies{
-		Store: store,
-		Health: healthsvc.Service{
-			DB: store.DB(),
-		},
+		Health: healthsvc.Service{DB: store.DB()},
 		Metrics: metricsvc.Service{
 			DB: store.DB(),
 		},
+		ReadModels:      store.DB(),
 		RegistryHealthy: true,
 	}))
 	defer server.Close()
 
-	response, err := http.Get(server.URL + "/workspace")
-	if err != nil {
-		t.Fatalf("GET /workspace error = %v", err)
+	var workspace projections.WorkspaceOverviewView
+	decodeURLJSON(t, server.URL+"/workspace", &workspace)
+	if workspace.WorkspaceKey != "default" {
+		t.Fatalf("/workspace workspace_key = %q, want default", workspace.WorkspaceKey)
 	}
-	defer response.Body.Close()
-	if response.StatusCode != http.StatusOK {
-		t.Fatalf("/workspace status = %d, want %d", response.StatusCode, http.StatusOK)
-	}
-
-	var payload struct {
-		Workspace struct {
-			Key                  string `json:"key"`
-			InitiativeCount      int    `json:"initiative_count"`
-			CompanionCount       int    `json:"companion_count"`
-			PendingApprovalCount int    `json:"pending_approval_count"`
-			BlockedItemCount     int    `json:"blocked_item_count"`
-		} `json:"workspace"`
-		Initiatives []struct {
-			Key               string `json:"key"`
-			OwnerCompanionKey string `json:"owner_companion_key"`
-		} `json:"initiatives"`
-		InitiativeWorkItems []struct {
-			InitiativeKey string `json:"initiative_key"`
-			TaskKey       string `json:"task_key"`
-			Status        string `json:"status"`
-		} `json:"initiative_work_items"`
-		BlockedItems []struct {
-			TaskKey      string `json:"task_key"`
-			CompanionKey string `json:"companion_key"`
-			NextStep     string `json:"next_step"`
-		} `json:"blocked_items"`
-		PendingApprovals []struct {
-			ProjectKey string `json:"project_key"`
-			TaskKey    string `json:"task_key"`
-			Status     string `json:"status"`
-		} `json:"pending_approvals"`
-	}
-	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
-		t.Fatalf("Decode(/workspace) error = %v", err)
+	if workspace.ActiveInitiativeCount != 1 {
+		t.Fatalf("/workspace active_initiative_count = %d, want 1", workspace.ActiveInitiativeCount)
 	}
 
-	if payload.Workspace.Key != workspaceKey || payload.Workspace.InitiativeCount != 1 || payload.Workspace.CompanionCount != 1 || payload.Workspace.PendingApprovalCount != 1 || payload.Workspace.BlockedItemCount != 1 {
-		t.Fatalf("/workspace payload = %+v, want workspace counts for %s", payload.Workspace, workspaceKey)
-	}
-	if len(payload.Initiatives) != 1 || payload.Initiatives[0].Key != initiativeKey || payload.Initiatives[0].OwnerCompanionKey != companionKey {
-		t.Fatalf("/workspace initiatives = %+v, want initiative %s owned by %s", payload.Initiatives, initiativeKey, companionKey)
-	}
-	if len(payload.InitiativeWorkItems) != 1 || payload.InitiativeWorkItems[0].InitiativeKey != initiativeKey || payload.InitiativeWorkItems[0].TaskKey != taskKey || payload.InitiativeWorkItems[0].Status != "blocked" {
-		t.Fatalf("/workspace initiative work items = %+v, want blocked work item for %s", payload.InitiativeWorkItems, initiativeKey)
-	}
-	if len(payload.BlockedItems) != 1 || payload.BlockedItems[0].TaskKey != taskKey || payload.BlockedItems[0].CompanionKey != companionKey || payload.BlockedItems[0].NextStep != "resume once approved" {
-		t.Fatalf("/workspace blocked items = %+v, want blocked item for %s", payload.BlockedItems, taskKey)
-	}
-	if len(payload.PendingApprovals) != 1 || payload.PendingApprovals[0].ProjectKey != "odin-core" || payload.PendingApprovals[0].TaskKey != taskKey || payload.PendingApprovals[0].Status != "pending" {
-		t.Fatalf("/workspace approvals = %+v, want pending approval for %s", payload.PendingApprovals, taskKey)
-	}
-}
-
-func TestOperationalHandlerRejectsReadyWhenOnlyOtherExecutorIsHealthy(t *testing.T) {
-	t.Parallel()
-
-	ctx := context.Background()
-	store := openStore(t)
-	defer store.Close()
-
-	if _, err := store.RecordRegistryVersion(ctx, sqlite.RecordRegistryVersionParams{
-		Source:      "registry",
-		VersionHash: "phase-15",
-		Notes:       "healthy test sample",
-	}); err != nil {
-		t.Fatalf("RecordRegistryVersion() error = %v", err)
-	}
-	if _, err := store.RecordExecutorHealth(ctx, sqlite.RecordExecutorHealthParams{
-		Executor:    "openai_api",
-		Status:      "healthy",
-		LatencyMS:   10,
-		DetailsJSON: `{"status":"healthy"}`,
-	}); err != nil {
-		t.Fatalf("RecordExecutorHealth() error = %v", err)
-	}
-	if _, err := store.RecordProjectionFreshness(ctx, sqlite.RecordProjectionFreshnessParams{
-		Surface:     "active_runs",
-		Status:      "current",
-		DetailsJSON: `{"source":"test"}`,
-	}); err != nil {
-		t.Fatalf("RecordProjectionFreshness() error = %v", err)
+	var initiatives []projections.InitiativePortfolioView
+	decodeURLJSON(t, server.URL+"/initiatives", &initiatives)
+	if len(initiatives) != 1 || initiatives[0].InitiativeKey != "alpha" {
+		t.Fatalf("/initiatives = %+v, want alpha initiative", initiatives)
 	}
 
-	server := httptest.NewServer(httpapi.NewOperationalHandler(httpapi.Dependencies{
-		Health: healthsvc.Service{
-			DB:                store.DB(),
-			ExpectedExecutors: []string{"codex_headless"},
-		},
-		Metrics: metricsvc.Service{
-			DB: store.DB(),
-		},
-		RegistryHealthy: true,
-	}))
-	defer server.Close()
+	var companions []projections.CompanionAssignmentView
+	decodeURLJSON(t, server.URL+"/companions", &companions)
+	if len(companions) != 1 || companions[0].CompanionKey != "primary" {
+		t.Fatalf("/companions = %+v, want primary companion", companions)
+	}
 
-	assertReportStatus(t, server.URL+"/healthz", http.StatusOK, "degraded")
-	assertReportStatus(t, server.URL+"/readyz", http.StatusServiceUnavailable, "degraded")
+	var blocked []projections.BlockedItemView
+	decodeURLJSON(t, server.URL+"/blocked", &blocked)
+	if len(blocked) != 1 || blocked[0].InitiativeKey == nil || *blocked[0].InitiativeKey != "alpha" {
+		t.Fatalf("/blocked = %+v, want blocked item for alpha", blocked)
+	}
 }
 
 func openStore(t *testing.T) *sqlite.Store {
@@ -266,77 +187,85 @@ func assertReportStatus(t *testing.T, url string, wantCode int, wantStatus strin
 	}
 }
 
-func seedWorkspaceHTTPState(t *testing.T, ctx context.Context, store *sqlite.Store) (workspaceKey string, initiativeKey string, companionKey string, taskKey string) {
+func decodeURLJSON(t *testing.T, url string, target any) {
 	t.Helper()
 
-	bootstrapped, err := workspaces.Service{Store: store}.BootstrapDefault(ctx)
+	response, err := http.Get(url)
 	if err != nil {
-		t.Fatalf("BootstrapDefault() error = %v", err)
+		t.Fatalf("GET %s error = %v", url, err)
 	}
-	workspace, err := store.GetWorkspaceByKey(ctx, bootstrapped.Key)
-	if err != nil {
-		t.Fatalf("GetWorkspaceByKey(%s) error = %v", bootstrapped.Key, err)
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("%s status = %d, want %d", url, response.StatusCode, http.StatusOK)
 	}
+	if err := json.NewDecoder(response.Body).Decode(target); err != nil {
+		t.Fatalf("Decode(%s) error = %v", url, err)
+	}
+}
+
+func seedOperatorReadModels(t *testing.T, ctx context.Context, store *sqlite.Store) {
+	t.Helper()
+
 	project, err := store.CreateProject(ctx, sqlite.CreateProjectParams{
-		Key:           "odin-core",
-		Name:          "Odin Core",
-		Scope:         "odin-core",
-		GitRoot:       filepath.Join(t.TempDir(), "odin-core"),
+		Key:           "alpha",
+		Name:          "Alpha",
+		Scope:         "project",
+		GitRoot:       "/tmp/alpha",
 		DefaultBranch: "main",
 		ManifestPath:  "config/projects.yaml",
 	})
 	if err != nil {
-		t.Fatalf("CreateProject(odin-core) error = %v", err)
+		t.Fatalf("CreateProject() error = %v", err)
 	}
-	companion, err := store.CreateCompanion(ctx, sqlite.CreateCompanionParams{
-		WorkspaceID:         workspace.ID,
-		Key:                 "operator",
-		Title:               "Operator",
-		Kind:                companions.KindOperator,
-		Charter:             "Run the workspace rhythm.",
-		Status:              companions.StatusActive,
-		InitiativeScopeJSON: `{"mode":"all"}`,
-		ToolPolicyJSON:      `{"mode":"deny","allowed":[]}`,
-		MemoryPolicyJSON:    `{"retention":"workspace"}`,
-		PlanningPolicyJSON:  `{"mode":"stepwise"}`,
+
+	workspace, err := store.GetWorkspaceByKey(ctx, "default")
+	if err != nil {
+		t.Fatalf("GetWorkspaceByKey(default) error = %v", err)
+	}
+	companion, err := store.GetCompanionByKey(ctx, workspace.ID, workspace.DefaultCompanionKey)
+	if err != nil {
+		t.Fatalf("GetCompanionByKey(default) error = %v", err)
+	}
+	initiative, err := store.UpsertInitiative(ctx, sqlite.UpsertInitiativeParams{
+		WorkspaceID:      workspace.ID,
+		Key:              project.Key,
+		Title:            project.Name,
+		Kind:             string(initiatives.KindManagedProject),
+		Status:           "active",
+		Summary:          "Alpha initiative",
+		OwnerCompanionID: &companion.ID,
+		LinkedProjectID:  &project.ID,
 	})
 	if err != nil {
-		t.Fatalf("CreateCompanion() error = %v", err)
+		t.Fatalf("UpsertInitiative() error = %v", err)
 	}
-	initiative, err := store.GetInitiativeByProjectID(ctx, project.ID)
+
+	task, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:    project.ID,
+		Key:          "alpha-task",
+		Title:        "Alpha task",
+		Status:       "blocked",
+		Scope:        "project",
+		RequestedBy:  "operator",
+		WorkspaceID:  &workspace.ID,
+		InitiativeID: &initiative.ID,
+		CompanionID:  &companion.ID,
+		WorkKind:     "automation",
+	})
 	if err != nil {
-		t.Fatalf("GetInitiativeByProjectID() error = %v", err)
+		t.Fatalf("CreateTask() error = %v", err)
 	}
-	if err := store.AssignInitiativeCompanion(ctx, initiative.ID, companion.ID); err != nil {
-		t.Fatalf("AssignInitiativeCompanion() error = %v", err)
-	}
-	initiative, err = store.GetInitiative(ctx, initiative.ID)
-	if err != nil {
-		t.Fatalf("GetInitiative() error = %v", err)
-	}
-	workItem, err := workitems.Service{Store: store}.Create(ctx, controlscope.Service{}.ResolveInitiative(workspace.Key, initiative.Key), "Follow up on approvals")
-	if err != nil {
-		t.Fatalf("Create(work item) error = %v", err)
-	}
-	task, err := store.GetTask(ctx, workItem.ID)
-	if err != nil {
-		t.Fatalf("GetTask() error = %v", err)
-	}
+
 	run, err := store.StartRun(ctx, sqlite.StartRunParams{
 		TaskID:   task.ID,
-		Executor: "codex_headless",
+		Executor: "codex",
 		Attempt:  1,
 		Status:   "running",
 	})
 	if err != nil {
 		t.Fatalf("StartRun() error = %v", err)
 	}
-	if _, err := store.UpdateTaskStatus(ctx, sqlite.UpdateTaskStatusParams{
-		TaskID: task.ID,
-		Status: "blocked",
-	}); err != nil {
-		t.Fatalf("UpdateTaskStatus(blocked) error = %v", err)
-	}
+
 	if _, err := store.RequestApproval(ctx, sqlite.RequestApprovalParams{
 		TaskID:      task.ID,
 		RunID:       &run.ID,
@@ -345,22 +274,4 @@ func seedWorkspaceHTTPState(t *testing.T, ctx context.Context, store *sqlite.Sto
 	}); err != nil {
 		t.Fatalf("RequestApproval() error = %v", err)
 	}
-	if _, err := (checkpoints.Service{Store: store}).Compact(ctx, checkpoints.CompactParams{
-		TaskID:          task.ID,
-		RunID:           &run.ID,
-		Trigger:         checkpoints.TriggerApprovalWait,
-		CheckpointKey:   "workspace-home",
-		Objective:       task.Title,
-		TaskStatus:      "blocked",
-		BlockingReason:  "awaiting operator approval",
-		NextSteps:       []string{"resume once approved"},
-		ManifestSummary: "workspace task",
-		PolicySummary:   "approval required",
-		OpenTaskSummary: "one blocked task",
-		ApprovalSummary: "one pending approval",
-	}); err != nil {
-		t.Fatalf("Compact() error = %v", err)
-	}
-
-	return workspace.Key, initiative.Key, companion.Key, task.Key
 }

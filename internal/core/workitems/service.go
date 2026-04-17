@@ -3,168 +3,211 @@ package workitems
 import (
 	"context"
 	"fmt"
-	"time"
 
-	"odin-os/internal/core/controlscope"
+	"odin-os/internal/core/workspaces"
 	"odin-os/internal/store/sqlite"
+)
+
+const (
+	statusQueued          = "queued"
+	statusRunning         = "running"
+	statusBlocked         = "blocked"
+	statusCompleted       = "completed"
+	statusFailed          = "failed"
+	statusApprovalPending = "pending"
 )
 
 type Service struct {
 	Store *sqlite.Store
 }
 
-func (service Service) Create(ctx context.Context, scope controlscope.ControlScope, title string) (WorkItem, error) {
-	return service.create(ctx, scope, title, "", "")
+func (service Service) Queue(ctx context.Context, params sqlite.CreateTaskParams) (sqlite.Task, error) {
+	if service.Store == nil {
+		return sqlite.Task{}, fmt.Errorf("work item store is required")
+	}
+	params.Status = statusQueued
+	repairedParams, err := service.ensureCreateTaskWorkspace(ctx, params)
+	if err != nil {
+		return sqlite.Task{}, err
+	}
+
+	task, err := service.Store.CreateTask(ctx, repairedParams)
+	if err != nil {
+		return sqlite.Task{}, err
+	}
+	return task, nil
 }
 
-func (service Service) CreateWithLegacyScope(ctx context.Context, scope controlscope.ControlScope, title string, legacyScope string) (WorkItem, error) {
-	return service.create(ctx, scope, title, "", legacyScope)
-}
-
-func (service Service) CreateWithLegacyScopeAndAction(ctx context.Context, scope controlscope.ControlScope, title string, actionKey string, legacyScope string) (WorkItem, error) {
-	return service.create(ctx, scope, title, actionKey, legacyScope)
-}
-
-func (service Service) create(ctx context.Context, scope controlscope.ControlScope, title string, actionKey string, legacyScope string) (WorkItem, error) {
+func (service Service) Get(ctx context.Context, taskID int64) (WorkItem, error) {
 	if service.Store == nil {
 		return WorkItem{}, fmt.Errorf("work item store is required")
 	}
-	if scope.WorkspaceKey == "" {
-		return WorkItem{}, fmt.Errorf("workspace key is required")
-	}
 
-	workspace, err := service.Store.GetWorkspaceByKey(ctx, scope.WorkspaceKey)
+	task, err := service.Store.GetTask(ctx, taskID)
 	if err != nil {
 		return WorkItem{}, err
 	}
-
-	var initiative sqlite.Initiative
-	projectKey := scope.ProjectKey
-	var initiativeID *int64
-	if scope.InitiativeKey != "" {
-		initiative, err = service.Store.GetInitiativeByWorkspaceKey(ctx, workspace.ID, scope.InitiativeKey)
-		if err != nil {
-			return WorkItem{}, err
-		}
-		initiativeID = &initiative.ID
-	}
-	if projectKey == "" && initiative.LinkedProjectID != nil {
-		project, err := service.Store.GetProject(ctx, *initiative.LinkedProjectID)
-		if err != nil {
-			return WorkItem{}, err
-		}
-		projectKey = project.Key
-	}
-	if projectKey == "" {
-		projectKey = "odin-core"
-	}
-	project, err := service.Store.GetProjectByKey(ctx, projectKey)
+	task, err = service.ensureTaskWorkspace(ctx, task)
 	if err != nil {
 		return WorkItem{}, err
 	}
-	if initiativeID != nil && initiative.LinkedProjectID != nil && *initiative.LinkedProjectID != project.ID {
-		return WorkItem{}, fmt.Errorf("initiative %q is linked to a different project", initiative.Key)
-	}
+	return toDomainWorkItem(task), nil
+}
 
-	var companionID *int64
-	if scope.CompanionKey != "" {
-		companion, err := service.Store.GetCompanionByWorkspaceKey(ctx, workspace.ID, scope.CompanionKey)
+func (service Service) Start(ctx context.Context, taskID int64) (sqlite.Task, error) {
+	return service.transitionStatus(ctx, taskID, statusRunning, statusQueued)
+}
+
+func (service Service) Block(ctx context.Context, taskID int64) (sqlite.Task, error) {
+	return service.transitionStatus(ctx, taskID, statusBlocked, statusQueued, statusRunning)
+}
+
+func (service Service) Requeue(ctx context.Context, taskID int64) (sqlite.Task, error) {
+	if service.Store == nil {
+		return sqlite.Task{}, fmt.Errorf("work item store is required")
+	}
+	current, err := service.Store.GetTask(ctx, taskID)
+	if err != nil {
+		return sqlite.Task{}, err
+	}
+	if current.Status == statusBlocked {
+		pendingApprovals, err := service.pendingApprovalCount(ctx, taskID)
 		if err != nil {
-			return WorkItem{}, err
+			return sqlite.Task{}, err
 		}
-		companionID = &companion.ID
-	} else if initiativeID != nil {
-		companionID = initiative.OwnerCompanionID
+		if pendingApprovals > 0 {
+			return sqlite.Task{}, fmt.Errorf("task %d still has pending approval", taskID)
+		}
+	}
+	return service.transitionStatus(ctx, taskID, statusQueued, statusRunning, statusBlocked)
+}
+
+func (service Service) Complete(ctx context.Context, taskID int64) (sqlite.Task, error) {
+	return service.transitionStatus(ctx, taskID, statusCompleted, statusQueued, statusRunning)
+}
+
+func (service Service) Fail(ctx context.Context, taskID int64) (sqlite.Task, error) {
+	return service.transitionStatus(ctx, taskID, statusFailed, statusQueued, statusRunning)
+}
+
+func (service Service) Finalize(ctx context.Context, taskID int64, executorStatus string) (sqlite.Task, error) {
+	if executorStatus == "" || executorStatus == statusCompleted {
+		return service.transitionStatus(ctx, taskID, statusCompleted, statusRunning)
+	}
+	return service.transitionStatus(ctx, taskID, statusFailed, statusRunning)
+}
+
+func (service Service) RequestApproval(ctx context.Context, taskID int64, runID *int64, requestedBy string) (sqlite.Approval, WorkItem, error) {
+	if service.Store == nil {
+		return sqlite.Approval{}, WorkItem{}, fmt.Errorf("work item store is required")
 	}
 
-	task, err := service.Store.CreateTask(ctx, sqlite.CreateTaskParams{
-		ProjectID:    project.ID,
-		WorkspaceID:  workspace.ID,
-		InitiativeID: initiativeID,
-		CompanionID:  companionID,
-		SubjectType:  scope.SubjectType,
-		SubjectKey:   scope.SubjectKey,
-		Key:          fmt.Sprintf("work-item-%d", time.Now().UnixNano()),
-		Title:        title,
-		ActionKey:    actionKey,
-		Status:       "queued",
-		Scope:        legacyTaskScope(legacyScope, project.Scope),
-		RequestedBy:  "operator",
+	current, err := service.Store.GetTask(ctx, taskID)
+	if err != nil {
+		return sqlite.Approval{}, WorkItem{}, err
+	}
+	current, err = service.ensureTaskWorkspace(ctx, current)
+	if err != nil {
+		return sqlite.Approval{}, WorkItem{}, err
+	}
+	if isTerminalStatus(current.Status) {
+		return sqlite.Approval{}, WorkItem{}, fmt.Errorf("task %d is already %s", taskID, current.Status)
+	}
+	if current.Status == statusBlocked {
+		return sqlite.Approval{}, WorkItem{}, fmt.Errorf("task %d is already %s", taskID, current.Status)
+	}
+
+	task, approval, err := service.Store.BlockTaskAndRequestApproval(ctx, sqlite.BlockTaskAndRequestApprovalParams{
+		TaskID:      taskID,
+		RunID:       runID,
+		RequestedBy: requestedBy,
 	})
 	if err != nil {
-		return WorkItem{}, err
+		return sqlite.Approval{}, WorkItem{}, err
 	}
 
-	return service.Get(ctx, task.ID)
+	return approval, toDomainWorkItem(task), nil
 }
 
-func legacyTaskScope(legacyScope string, fallback string) string {
-	if legacyScope != "" {
-		return legacyScope
-	}
-	return fallback
-}
-
-func (service Service) Get(ctx context.Context, workItemID int64) (WorkItem, error) {
+func (service Service) transitionStatus(ctx context.Context, taskID int64, status string, allowedCurrentStatuses ...string) (sqlite.Task, error) {
 	if service.Store == nil {
-		return WorkItem{}, fmt.Errorf("work item store is required")
+		return sqlite.Task{}, fmt.Errorf("work item store is required")
 	}
-	record, err := service.Store.GetWorkItem(ctx, workItemID)
+	current, err := service.Store.GetTask(ctx, taskID)
 	if err != nil {
-		return WorkItem{}, err
+		return sqlite.Task{}, err
 	}
-	return fromRecord(record), nil
+	if _, err := service.ensureTaskWorkspace(ctx, current); err != nil {
+		return sqlite.Task{}, err
+	}
+
+	task, err := service.Store.UpdateTaskStatus(ctx, sqlite.UpdateTaskStatusParams{
+		TaskID:                 taskID,
+		Status:                 status,
+		AllowedCurrentStatuses: allowedCurrentStatuses,
+	})
+	if err != nil {
+		return sqlite.Task{}, err
+	}
+
+	return task, nil
 }
 
-func (service Service) LinkCompanion(ctx context.Context, workItemID int64, companionKey string) (WorkItem, error) {
-	if service.Store == nil {
-		return WorkItem{}, fmt.Errorf("work item store is required")
+func toDomainWorkItem(task sqlite.Task) WorkItem {
+	var workspaceID int64
+	if task.WorkspaceID != nil {
+		workspaceID = *task.WorkspaceID
 	}
-	workItem, err := service.Get(ctx, workItemID)
-	if err != nil {
-		return WorkItem{}, err
+	item := WorkItem{
+		ID:           task.ID,
+		Key:          task.Key,
+		WorkspaceID:  workspaceID,
+		InitiativeID: task.InitiativeID,
+		CompanionID:  task.CompanionID,
+		WorkKind:     task.WorkKind,
+		Status:       task.Status,
 	}
-	workspace, err := service.Store.GetWorkspaceByKey(ctx, workItem.WorkspaceKey)
-	if err != nil {
-		return WorkItem{}, err
-	}
-	companion, err := service.Store.GetCompanionByWorkspaceKey(ctx, workspace.ID, companionKey)
-	if err != nil {
-		return WorkItem{}, err
-	}
-	if _, err := service.Store.UpdateTaskCompanion(ctx, workItemID, &companion.ID); err != nil {
-		return WorkItem{}, err
-	}
-	return service.Get(ctx, workItemID)
+	return item
 }
 
-func (service Service) LinkProject(ctx context.Context, workItemID int64, projectKey string) (WorkItem, error) {
-	if service.Store == nil {
-		return WorkItem{}, fmt.Errorf("work item store is required")
-	}
-	project, err := service.Store.GetProjectByKey(ctx, projectKey)
-	if err != nil {
-		return WorkItem{}, err
-	}
-	if _, err := service.Store.UpdateTaskProject(ctx, workItemID, project.ID); err != nil {
-		return WorkItem{}, err
-	}
-	return service.Get(ctx, workItemID)
+func isTerminalStatus(status string) bool {
+	return status == statusCompleted || status == statusFailed
 }
 
-func fromRecord(record sqlite.WorkItem) WorkItem {
-	return WorkItem{
-		ID:            record.ID,
-		Scope:         record.Scope,
-		WorkspaceKey:  record.WorkspaceKey,
-		InitiativeKey: record.InitiativeKey,
-		ProjectKey:    record.ProjectKey,
-		CompanionKey:  record.CompanionKey,
-		Status:        record.Status,
-		Title:         record.Title,
-		RequestedBy:   record.RequestedBy,
-		CurrentRunID:  record.CurrentRunID,
-		CreatedAt:     record.CreatedAt,
-		UpdatedAt:     record.UpdatedAt,
+func (service Service) ensureCreateTaskWorkspace(ctx context.Context, params sqlite.CreateTaskParams) (sqlite.CreateTaskParams, error) {
+	if params.WorkspaceID != nil {
+		return params, nil
 	}
+	workspace, err := workspaces.Service{Store: service.Store}.BootstrapDefaultWorkspace(ctx)
+	if err != nil {
+		return sqlite.CreateTaskParams{}, err
+	}
+	params.WorkspaceID = &workspace.ID
+	return params, nil
+}
+
+func (service Service) ensureTaskWorkspace(ctx context.Context, task sqlite.Task) (sqlite.Task, error) {
+	if task.WorkspaceID != nil {
+		return task, nil
+	}
+
+	workspace, err := workspaces.Service{Store: service.Store}.BootstrapDefaultWorkspace(ctx)
+	if err != nil {
+		return sqlite.Task{}, err
+	}
+	return service.Store.AssignTaskWorkspace(ctx, task.ID, workspace.ID)
+}
+
+func (service Service) pendingApprovalCount(ctx context.Context, taskID int64) (int, error) {
+	row := service.Store.DB().QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM approvals
+		WHERE task_id = ? AND status = 'pending'
+	`, taskID)
+
+	var count int
+	if err := row.Scan(&count); err != nil {
+		return 0, err
+	}
+	return count, nil
 }

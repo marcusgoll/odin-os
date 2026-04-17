@@ -3,253 +3,188 @@ package companions
 import (
 	"context"
 	"path/filepath"
-	"sync"
 	"testing"
 
-	"odin-os/internal/core/initiatives"
-	"odin-os/internal/core/workspaces"
 	"odin-os/internal/store/sqlite"
 )
 
-func TestCompanionBootstrapDefaultOperator(t *testing.T) {
+func TestCompanionCanonicalKinds(t *testing.T) {
 	t.Parallel()
 
-	ctx := context.Background()
-	store := openCompanionStore(t)
-	defer store.Close()
+	got := []Kind{KindAssistant, KindAdvisor, KindOperator, KindSpecialist}
+	want := []Kind{"assistant", "advisor", "operator", "specialist"}
 
-	workspaceService := workspaces.Service{Store: store}
-	workspace, err := workspaceService.BootstrapDefault(ctx)
-	if err != nil {
-		t.Fatalf("BootstrapDefault() error = %v", err)
+	if len(got) != len(want) {
+		t.Fatalf("kind count = %d, want %d", len(got), len(want))
 	}
-
-	service := Service{Store: store}
-
-	first, err := service.BootstrapDefaultOperator(ctx, workspace.ID)
-	if err != nil {
-		t.Fatalf("BootstrapDefaultOperator() error = %v", err)
-	}
-	if first.WorkspaceID != workspace.ID {
-		t.Fatalf("BootstrapDefaultOperator().WorkspaceID = %d, want %d", first.WorkspaceID, workspace.ID)
-	}
-	if first.Key != DefaultOperatorKey {
-		t.Fatalf("BootstrapDefaultOperator().Key = %q, want %q", first.Key, DefaultOperatorKey)
-	}
-	if first.Kind != KindOperator {
-		t.Fatalf("BootstrapDefaultOperator().Kind = %q, want %q", first.Kind, KindOperator)
-	}
-	if first.Status != StatusActive {
-		t.Fatalf("BootstrapDefaultOperator().Status = %q, want %q", first.Status, StatusActive)
-	}
-
-	second, err := service.BootstrapDefaultOperator(ctx, workspace.ID)
-	if err != nil {
-		t.Fatalf("BootstrapDefaultOperator() second call error = %v", err)
-	}
-	if second.ID != first.ID {
-		t.Fatalf("BootstrapDefaultOperator() second ID = %d, want %d", second.ID, first.ID)
-	}
-
-	storedWorkspace, err := store.GetWorkspace(ctx, workspace.ID)
-	if err != nil {
-		t.Fatalf("GetWorkspace() error = %v", err)
-	}
-	if storedWorkspace.DefaultCompanionKey != DefaultOperatorKey {
-		t.Fatalf("workspace default companion = %q, want %q", storedWorkspace.DefaultCompanionKey, DefaultOperatorKey)
-	}
-}
-
-func TestCompanionBootstrapDefaultOperatorIsConcurrentSafe(t *testing.T) {
-	t.Parallel()
-
-	ctx := context.Background()
-	store := openCompanionStore(t)
-	defer store.Close()
-
-	workspaceService := workspaces.Service{Store: store}
-	workspace, err := workspaceService.BootstrapDefault(ctx)
-	if err != nil {
-		t.Fatalf("BootstrapDefault() error = %v", err)
-	}
-
-	service := Service{Store: store}
-
-	const callers = 8
-	start := make(chan struct{})
-	results := make(chan Companion, callers)
-	errs := make(chan error, callers)
-
-	var wg sync.WaitGroup
-	for i := 0; i < callers; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			<-start
-
-			companion, err := service.BootstrapDefaultOperator(ctx, workspace.ID)
-			if err != nil {
-				errs <- err
-				return
-			}
-			results <- companion
-		}()
-	}
-
-	close(start)
-	wg.Wait()
-	close(results)
-	close(errs)
-
-	for err := range errs {
-		t.Fatalf("BootstrapDefaultOperator() concurrent error = %v", err)
-	}
-
-	var firstID int64
-	count := 0
-	for companion := range results {
-		count++
-		if firstID == 0 {
-			firstID = companion.ID
-		}
-		if companion.ID != firstID {
-			t.Fatalf("BootstrapDefaultOperator() returned IDs %d and %d, want one shared record", firstID, companion.ID)
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("kind[%d] = %q, want %q", i, got[i], want[i])
 		}
 	}
-	if count != callers {
-		t.Fatalf("BootstrapDefaultOperator() result count = %d, want %d", count, callers)
-	}
-
-	companions, err := store.ListCompanions(ctx, sqlite.ListCompanionsParams{WorkspaceID: &workspace.ID})
-	if err != nil {
-		t.Fatalf("ListCompanions() error = %v", err)
-	}
-	if len(companions) != 1 {
-		t.Fatalf("ListCompanions() len = %d, want 1", len(companions))
-	}
 }
 
-func TestCompanionListForWorkspace(t *testing.T) {
+func TestCompanionServiceUpsertsAndLoadsCompanion(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
-	store := openCompanionStore(t)
+	store := openCompanionServiceStore(t)
 	defer store.Close()
 
-	workspace, err := store.CreateWorkspace(ctx, sqlite.CreateWorkspaceParams{
-		Key:        "ops",
-		Name:       "Operations",
-		OwnerRef:   "marcus",
-		Status:     "active",
-		PolicyJSON: `{}`,
-	})
+	workspace, err := store.GetWorkspaceByKey(ctx, "default")
 	if err != nil {
-		t.Fatalf("CreateWorkspace() error = %v", err)
-	}
-
-	if _, err := store.CreateCompanion(ctx, sqlite.CreateCompanionParams{
-		WorkspaceID:         workspace.ID,
-		Key:                 DefaultOperatorKey,
-		Title:               "Operator",
-		Kind:                KindOperator,
-		Charter:             "Run the workspace operating rhythm.",
-		Status:              StatusActive,
-		InitiativeScopeJSON: `{"mode":"all"}`,
-		ToolPolicyJSON:      `{"mode":"allow","allowed":["calendar.read"]}`,
-		MemoryPolicyJSON:    `{"retention":"workspace"}`,
-		PlanningPolicyJSON:  `{"mode":"stepwise"}`,
-	}); err != nil {
-		t.Fatalf("CreateCompanion(operator) error = %v", err)
-	}
-
-	if _, err := store.CreateCompanion(ctx, sqlite.CreateCompanionParams{
-		WorkspaceID:         workspace.ID,
-		Key:                 "research-advisor",
-		Title:               "Research Advisor",
-		Kind:                "advisor",
-		Charter:             "Analyze research inputs conservatively.",
-		Status:              StatusActive,
-		InitiativeScopeJSON: `{"initiative_keys":["alpha"]}`,
-		ToolPolicyJSON:      `{"mode":"allow","allowed":["web.search"]}`,
-		MemoryPolicyJSON:    `{"retention":"initiative"}`,
-		PlanningPolicyJSON:  `{"mode":"advisory"}`,
-	}); err != nil {
-		t.Fatalf("CreateCompanion(research-advisor) error = %v", err)
+		t.Fatalf("GetWorkspaceByKey(default) error = %v", err)
 	}
 
 	service := Service{Store: store}
-	companions, err := service.ListForWorkspace(ctx, workspace.ID)
+
+	created, err := service.UpsertCompanion(ctx, Companion{
+		WorkspaceID:         workspace.ID,
+		Key:                 "primary",
+		Title:               "Primary Assistant",
+		Kind:                KindAssistant,
+		Charter:             "Keep the workspace aligned and safe.",
+		Status:              "active",
+		InitiativeScopeJSON: `{"initiatives":["alpha"]}`,
+		ToolPolicyJSON:      `{"allow":["branch_proposal"]}`,
+		MemoryPolicyJSON:    `{"mode":"project"}`,
+		PlanningPolicyJSON:  `{"mode":"guided"}`,
+	})
 	if err != nil {
-		t.Fatalf("ListForWorkspace() error = %v", err)
+		t.Fatalf("UpsertCompanion() error = %v", err)
 	}
-	if len(companions) != 2 {
-		t.Fatalf("ListForWorkspace() len = %d, want 2", len(companions))
+
+	if created.WorkspaceID != workspace.ID {
+		t.Fatalf("created.WorkspaceID = %d, want %d", created.WorkspaceID, workspace.ID)
 	}
-	if companions[0].Key != DefaultOperatorKey {
-		t.Fatalf("ListForWorkspace()[0].Key = %q, want %q", companions[0].Key, DefaultOperatorKey)
+	if created.Key != "primary" {
+		t.Fatalf("created.Key = %q, want %q", created.Key, "primary")
 	}
-	if companions[1].Key != "research-advisor" {
-		t.Fatalf("ListForWorkspace()[1].Key = %q, want %q", companions[1].Key, "research-advisor")
+	if created.Kind != KindAssistant {
+		t.Fatalf("created.Kind = %q, want %q", created.Kind, KindAssistant)
+	}
+	if created.ToolPolicyJSON != `{"allow":["branch_proposal"]}` {
+		t.Fatalf("created.ToolPolicyJSON = %q, want %q", created.ToolPolicyJSON, `{"allow":["branch_proposal"]}`)
+	}
+
+	if _, err := store.DB().ExecContext(ctx, `
+		UPDATE companions
+		SET title = ?, kind = ?, status = ?, charter = ?, initiative_scope_json = ?, tool_policy_json = ?, memory_policy_json = ?, planning_policy_json = ?
+		WHERE workspace_id = ? AND key = ?
+	`, "Stale Title", "advisor", "disabled", "stale charter", `{"initiatives":[]}`, `{"allow":[]}`, `{"mode":"global"}`, `{"mode":"ad hoc"}`, workspace.ID, "primary"); err != nil {
+		t.Fatalf("seed companion drift error = %v", err)
+	}
+
+	reconciled, err := service.UpsertCompanion(ctx, Companion{
+		WorkspaceID:         workspace.ID,
+		Key:                 "primary",
+		Title:               "Primary Assistant",
+		Kind:                KindAssistant,
+		Charter:             "Keep the workspace aligned and safe.",
+		Status:              "active",
+		InitiativeScopeJSON: `{"initiatives":["alpha"]}`,
+		ToolPolicyJSON:      `{"allow":["branch_proposal"]}`,
+		MemoryPolicyJSON:    `{"mode":"project"}`,
+		PlanningPolicyJSON:  `{"mode":"guided"}`,
+	})
+	if err != nil {
+		t.Fatalf("UpsertCompanion() reconcile error = %v", err)
+	}
+
+	if reconciled.ID != created.ID {
+		t.Fatalf("reconciled.ID = %d, want %d", reconciled.ID, created.ID)
+	}
+	if reconciled.Kind != KindAssistant {
+		t.Fatalf("reconciled.Kind = %q, want %q", reconciled.Kind, KindAssistant)
+	}
+	if reconciled.Status != "active" {
+		t.Fatalf("reconciled.Status = %q, want %q", reconciled.Status, "active")
+	}
+
+	got, err := service.GetCompanionByKey(ctx, workspace.ID, "primary")
+	if err != nil {
+		t.Fatalf("GetCompanionByKey() error = %v", err)
+	}
+	if got.ID != created.ID {
+		t.Fatalf("GetCompanionByKey().ID = %d, want %d", got.ID, created.ID)
+	}
+	if got.Title != "Primary Assistant" {
+		t.Fatalf("GetCompanionByKey().Title = %q, want %q", got.Title, "Primary Assistant")
 	}
 }
 
-func TestCompanionAssignToInitiative(t *testing.T) {
+func TestCompanionServiceRejectsInvalidKind(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
-	store := openCompanionStore(t)
+	store := openCompanionServiceStore(t)
 	defer store.Close()
 
-	workspaceService := workspaces.Service{Store: store}
-	workspace, err := workspaceService.BootstrapDefault(ctx)
+	workspace, err := store.GetWorkspaceByKey(ctx, "default")
 	if err != nil {
-		t.Fatalf("BootstrapDefault() error = %v", err)
+		t.Fatalf("GetWorkspaceByKey(default) error = %v", err)
 	}
 
-	companion, err := store.CreateCompanion(ctx, sqlite.CreateCompanionParams{
+	_, err = Service{Store: store}.UpsertCompanion(ctx, Companion{
 		WorkspaceID:         workspace.ID,
-		Key:                 DefaultOperatorKey,
-		Title:               "Operator",
-		Kind:                KindOperator,
-		Charter:             "Run the workspace operating rhythm.",
-		Status:              StatusActive,
-		InitiativeScopeJSON: `{"mode":"all"}`,
-		ToolPolicyJSON:      `{"mode":"allow","allowed":["calendar.read"]}`,
-		MemoryPolicyJSON:    `{"retention":"workspace"}`,
-		PlanningPolicyJSON:  `{"mode":"stepwise"}`,
+		Key:                 "bad-kind",
+		Title:               "Bad Kind",
+		Kind:                Kind("bogus"),
+		Charter:             "invalid",
+		Status:              "active",
+		InitiativeScopeJSON: `{}`,
+		ToolPolicyJSON:      `{}`,
+		MemoryPolicyJSON:    `{}`,
+		PlanningPolicyJSON:  `{}`,
 	})
-	if err != nil {
-		t.Fatalf("CreateCompanion() error = %v", err)
-	}
-
-	initiativeService := initiatives.Service{Store: store}
-	initiative, err := initiativeService.Create(ctx, initiatives.CreateInput{
-		WorkspaceID: workspace.ID,
-		Key:         "alpha",
-		Title:       "Alpha",
-		Kind:        initiatives.KindManagedProject,
-		Status:      initiatives.StatusActive,
-		Summary:     "Primary managed initiative",
-	})
-	if err != nil {
-		t.Fatalf("Create() error = %v", err)
-	}
-
-	service := Service{Store: store}
-	if err := service.AssignToInitiative(ctx, initiative.ID, companion.ID); err != nil {
-		t.Fatalf("AssignToInitiative() error = %v", err)
-	}
-
-	storedInitiative, err := store.GetInitiative(ctx, initiative.ID)
-	if err != nil {
-		t.Fatalf("GetInitiative() error = %v", err)
-	}
-	if storedInitiative.OwnerCompanionID == nil || *storedInitiative.OwnerCompanionID != companion.ID {
-		t.Fatalf("GetInitiative().OwnerCompanionID = %v, want %d", storedInitiative.OwnerCompanionID, companion.ID)
+	if err == nil {
+		t.Fatalf("UpsertCompanion() error = nil, want invalid kind error")
 	}
 }
 
-func openCompanionStore(t *testing.T) *sqlite.Store {
+func TestCompanionServiceDefaultsEmptyPolicyFields(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openCompanionServiceStore(t)
+	defer store.Close()
+
+	workspace, err := store.GetWorkspaceByKey(ctx, "default")
+	if err != nil {
+		t.Fatalf("GetWorkspaceByKey(default) error = %v", err)
+	}
+
+	created, err := Service{Store: store}.UpsertCompanion(ctx, Companion{
+		WorkspaceID:         workspace.ID,
+		Key:                 "defaults",
+		Title:               "Defaults",
+		Kind:                KindAssistant,
+		Charter:             "Normalize blank policy fields.",
+		Status:              "active",
+		InitiativeScopeJSON: "",
+		ToolPolicyJSON:      "",
+		MemoryPolicyJSON:    "",
+		PlanningPolicyJSON:  "",
+	})
+	if err != nil {
+		t.Fatalf("UpsertCompanion() error = %v", err)
+	}
+
+	if created.InitiativeScopeJSON != `{}` {
+		t.Fatalf("created.InitiativeScopeJSON = %q, want %q", created.InitiativeScopeJSON, `{}`)
+	}
+	if created.ToolPolicyJSON != `{}` {
+		t.Fatalf("created.ToolPolicyJSON = %q, want %q", created.ToolPolicyJSON, `{}`)
+	}
+	if created.MemoryPolicyJSON != `{}` {
+		t.Fatalf("created.MemoryPolicyJSON = %q, want %q", created.MemoryPolicyJSON, `{}`)
+	}
+	if created.PlanningPolicyJSON != `{}` {
+		t.Fatalf("created.PlanningPolicyJSON = %q, want %q", created.PlanningPolicyJSON, `{}`)
+	}
+}
+
+func openCompanionServiceStore(t *testing.T) *sqlite.Store {
 	t.Helper()
 
 	store, err := sqlite.Open(filepath.Join(t.TempDir(), "odin.db"))
@@ -257,7 +192,6 @@ func openCompanionStore(t *testing.T) *sqlite.Store {
 		t.Fatalf("Open() error = %v", err)
 	}
 	if err := store.Migrate(context.Background()); err != nil {
-		_ = store.Close()
 		t.Fatalf("Migrate() error = %v", err)
 	}
 	return store

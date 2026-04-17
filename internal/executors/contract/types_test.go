@@ -59,3 +59,26 @@ func TestCapabilitiesRejectUnsupportedClassAndFeatures(t *testing.T) {
 		t.Fatalf("Matches() = true, want false")
 	}
 }
+
+func TestCapabilitiesRejectStreamingWhenUnavailable(t *testing.T) {
+	t.Parallel()
+
+	spec := TaskSpec{
+		Kind:  TaskKindResearch,
+		Scope: "global",
+		Requirements: Requirements{
+			AllowedClasses: []ExecutorClass{ExecutorClassAPI},
+			NeedsStreaming: true,
+		},
+	}
+
+	caps := Capabilities{
+		ExecutorClass: ExecutorClassAPI,
+		TaskKinds:     []TaskKind{TaskKindResearch},
+		Scopes:        []string{"global"},
+	}
+
+	if caps.Matches(spec) {
+		t.Fatalf("Matches() = true, want false")
+	}
+}

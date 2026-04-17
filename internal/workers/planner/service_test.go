@@ -4,9 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"odin-os/internal/core/projects"
 	"odin-os/internal/registry"
-	"odin-os/internal/skills"
 	"odin-os/internal/tools/broker"
 	"odin-os/internal/tools/budgets"
 	"odin-os/internal/tools/catalog"
@@ -20,16 +18,43 @@ func TestPrepareStartsFromThinCatalogOnly(t *testing.T) {
 			broker.StaticSource(testSnapshot()),
 			catalog.BuiltinDefinitions(),
 			nil,
-			testLimits(),
+			budgets.Limits{
+				Tool:    budgets.Tool{MaxSelections: 10, MaxInvocations: 10, MaxCostUnits: 20},
+				Context: budgets.Context{MaxExpandedDefinitions: 10, MaxCompactedResults: 10, MaxCompactedBytes: 1000},
+			},
 		),
 	}
 
-	context, err := service.Prepare("project")
+	context, err := service.Prepare(PrepareInput{
+		Scope: "project",
+		Workspace: WorkspaceContext{
+			Key: "default",
+		},
+		Initiative: &InitiativeContext{
+			Key:  "alpha",
+			Kind: "managed_project",
+		},
+		Companion: &CompanionContext{
+			Key:                "primary",
+			Kind:               "assistant",
+			ToolPolicyJSON:     `{"allow":["project_status"]}`,
+			PlanningPolicyJSON: `{"mode":"guided"}`,
+		},
+		MemoryReferences: []MemoryReference{
+			{Scope: "workspace", Summary: "Marcus prefers concise plans."},
+		},
+	})
 	if err != nil {
 		t.Fatalf("Prepare() error = %v", err)
 	}
 	if len(context.Cards) == 0 {
 		t.Fatalf("Prepare() cards len = 0, want > 0")
+	}
+	if context.Workspace.Key != "default" {
+		t.Fatalf("Prepare().Workspace.Key = %q, want default", context.Workspace.Key)
+	}
+	if context.Companion == nil || context.Companion.Key != "primary" {
+		t.Fatalf("Prepare().Companion = %+v, want primary companion", context.Companion)
 	}
 	if service.Broker.Usage().ExpandedDefinitions != 0 {
 		t.Fatalf("expanded definitions = %d, want 0", service.Broker.Usage().ExpandedDefinitions)
@@ -44,12 +69,31 @@ func TestMaterializeExpandsOnlySelectedCapability(t *testing.T) {
 			broker.StaticSource(testSnapshot()),
 			catalog.BuiltinDefinitions(),
 			nil,
-			testLimits(),
+			budgets.Limits{
+				Tool:    budgets.Tool{MaxSelections: 10, MaxInvocations: 10, MaxCostUnits: 20},
+				Context: budgets.Context{MaxExpandedDefinitions: 10, MaxCompactedResults: 10, MaxCompactedBytes: 1000},
+			},
 		),
 	}
 
-	execution, err := service.Materialize(context.Background(), "project", skills.InvocationContext{ResolvedScopeKind: "project"}, []Selection{
-		{Key: "triage-skill"},
+	execution, err := service.Materialize(context.Background(), MaterializeInput{
+		Scope: "project",
+		Workspace: WorkspaceContext{
+			Key: "default",
+		},
+		Initiative: &InitiativeContext{
+			Key:  "alpha",
+			Kind: "managed_project",
+		},
+		Companion: &CompanionContext{
+			Key:                "primary",
+			Kind:               "assistant",
+			ToolPolicyJSON:     `{"allow":["project_status"]}`,
+			PlanningPolicyJSON: `{"mode":"guided"}`,
+		},
+		Selections: []Selection{
+			{Key: "triage-skill"},
+		},
 	})
 	if err != nil {
 		t.Fatalf("Materialize() error = %v", err)
@@ -57,71 +101,15 @@ func TestMaterializeExpandsOnlySelectedCapability(t *testing.T) {
 	if len(execution.Expansions) != 1 {
 		t.Fatalf("expansions len = %d, want 1", len(execution.Expansions))
 	}
+	if execution.Workspace.Key != "default" {
+		t.Fatalf("Materialize().Workspace.Key = %q, want default", execution.Workspace.Key)
+	}
 	if service.Broker.Usage().ExpandedDefinitions != 1 {
 		t.Fatalf("expanded definitions = %d, want 1", service.Broker.Usage().ExpandedDefinitions)
 	}
 }
 
-func TestMaterializeInvokesRegistryBackedSkill(t *testing.T) {
-	t.Parallel()
-
-	invoker := &stubSkillInvoker{
-		response: skills.InvokeResponse{
-			Status:    "ok",
-			Summary:   "triage complete",
-			Output:    map[string]any{"message": "hello"},
-			RawRef:    "skill://triage",
-			RawOutput: `{"message":"hello"}`,
-		},
-	}
-
-	service := Service{
-		Broker: broker.New(
-			broker.StaticSource(testSnapshot()),
-			catalog.BuiltinDefinitions(),
-			invoker,
-			testLimits(),
-		),
-	}
-
-	ctx := context.WithValue(context.Background(), plannerContextKey("request_id"), "planner-1")
-	invocationContext := skills.InvocationContext{
-		ResolvedScopeKind: "project",
-		Project: &skills.InvocationProject{
-			ID:  42,
-			Key: "alpha",
-		},
-		Manifest: projects.Manifest{Key: "alpha"},
-	}
-
-	execution, err := service.Materialize(ctx, "project", invocationContext, []Selection{
-		{
-			Key:         "triage-skill",
-			InvokeSkill: true,
-			SkillInput:  map[string]any{"message": "hello"},
-		},
-	})
-	if err != nil {
-		t.Fatalf("Materialize() error = %v", err)
-	}
-	if len(execution.Compacted) != 1 {
-		t.Fatalf("compacted len = %d, want 1", len(execution.Compacted))
-	}
-	if execution.Compacted[0].CapabilityKey != "triage-skill" {
-		t.Fatalf("CapabilityKey = %q, want triage-skill", execution.Compacted[0].CapabilityKey)
-	}
-	if got := invoker.lastRequest.Context.Project.Key; got != "alpha" {
-		t.Fatalf("invoked project key = %q, want alpha", got)
-	}
-	if got := invoker.lastRequest.Context.Manifest.Key; got != "alpha" {
-		t.Fatalf("invoked manifest key = %q, want alpha", got)
-	}
-	if got := invoker.lastContext.Value(plannerContextKey("request_id")); got != "planner-1" {
-		t.Fatalf("ctx request_id = %v, want planner-1", got)
-	}
-}
-
-func TestMaterializeRejectsSubAgentWithoutPlanOptIn(t *testing.T) {
+func TestMaterializeRejectsAgentRoleWithoutPlanOptIn(t *testing.T) {
 	t.Parallel()
 
 	service := Service{
@@ -129,15 +117,24 @@ func TestMaterializeRejectsSubAgentWithoutPlanOptIn(t *testing.T) {
 			broker.StaticSource(testSnapshot()),
 			catalog.BuiltinDefinitions(),
 			nil,
-			testLimits(),
+			budgets.Limits{
+				Tool:    budgets.Tool{MaxSelections: 10, MaxInvocations: 10, MaxCostUnits: 20},
+				Context: budgets.Context{MaxExpandedDefinitions: 10, MaxCompactedResults: 10, MaxCompactedBytes: 1000},
+			},
 		),
 	}
 
-	_, err := service.Materialize(context.Background(), "project", skills.InvocationContext{ResolvedScopeKind: "project"}, []Selection{
-		{Key: "triage-agent"},
+	_, err := service.Materialize(context.Background(), MaterializeInput{
+		Scope: "project",
+		Workspace: WorkspaceContext{
+			Key: "default",
+		},
+		Selections: []Selection{
+			{Key: "triage-agent"},
+		},
 	})
 	if err == nil {
-		t.Fatalf("Materialize() error = nil, want sub-agent denial")
+		t.Fatalf("Materialize() error = nil, want agent-role denial")
 	}
 }
 
@@ -145,23 +142,10 @@ func testSnapshot() registry.Snapshot {
 	return registry.Snapshot{
 		Items: []registry.Item{
 			{
-				Kind:           registry.KindSkill,
-				Key:            "triage-skill",
-				Title:          "Triage Skill",
-				Summary:        "Classifies requests.",
-				Version:        "1.0.0",
-				Enabled:        true,
-				Scopes:         []string{"project"},
-				Permissions:    []string{"repo.read"},
-				HandlerType:    "command",
-				HandlerRef:     "scripts/skills/triage-skill.sh",
-				TimeoutSeconds: 15,
-				LegacyInputSchema: map[string]any{
-					"type": "object",
-				},
-				LegacyOutputSchema: map[string]any{
-					"type": "object",
-				},
+				Kind:    registry.KindSkill,
+				Key:     "triage-skill",
+				Title:   "Triage Skill",
+				Summary: "Classifies requests.",
 				Sections: map[string]string{
 					registry.SectionPurpose: "Decide the next action.",
 				},
@@ -173,36 +157,36 @@ func testSnapshot() registry.Snapshot {
 				Title:   "Triage Agent",
 				Summary: "Routes work.",
 				Scopes:  []string{"project"},
+				Role:    "intake-triager",
+				Tools:   []string{"filesystem"},
 				Sections: map[string]string{
 					registry.SectionPurpose: "Route work deterministically.",
 				},
 				Source: registry.SourceInfo{RelativePath: "agents/triage-agent.md"},
 			},
+			{
+				Kind:     registry.KindWorkflow,
+				Key:      "project-intake",
+				Title:    "Project Intake Workflow",
+				Summary:  "Turns raw project work into bounded intake output.",
+				Composes: []string{"triage-skill", "triage-agent"},
+				Sections: map[string]string{
+					registry.SectionPurpose: "Normalize project intake.",
+				},
+				Source: registry.SourceInfo{RelativePath: "workflows/project-intake.md"},
+			},
+			{
+				Kind:    registry.KindCommand,
+				Key:     "status-command",
+				Title:   "Status Command",
+				Summary: "Shows current runtime scope.",
+				Command: "status",
+				Aliases: []string{"stat"},
+				Sections: map[string]string{
+					registry.SectionPurpose: "Render runtime status.",
+				},
+				Source: registry.SourceInfo{RelativePath: "commands/status.md"},
+			},
 		},
 	}
 }
-
-func testLimits() budgets.Limits {
-	return budgets.Limits{
-		Tool:    budgets.Tool{MaxSelections: 10, MaxInvocations: 10, MaxCostUnits: 20},
-		Context: budgets.Context{MaxExpandedDefinitions: 10, MaxCompactedResults: 10, MaxCompactedBytes: 1000},
-	}
-}
-
-type stubSkillInvoker struct {
-	response    skills.InvokeResponse
-	lastContext context.Context
-	lastRequest skills.InvokeRequest
-}
-
-func (invoker *stubSkillInvoker) Invoke(ctx context.Context, request skills.InvokeRequest) (skills.InvokeResponse, error) {
-	invoker.lastContext = ctx
-	invoker.lastRequest = request
-	response := invoker.response
-	if response.SkillKey == "" {
-		response.SkillKey = request.Key
-	}
-	return response, nil
-}
-
-type plannerContextKey string

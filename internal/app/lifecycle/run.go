@@ -1015,13 +1015,13 @@ func runServe(ctx context.Context, app bootstrap.App, cfg appconfig.Config, stdo
 		Handler: apihttp.NewCapabilitiesHandler(apihttp.CapabilitiesDependencies{
 			Gateway: newServeCapabilityGateway(app),
 			Fallback: apihttp.NewOperationalHandler(apihttp.Dependencies{
-				Store: app.Store,
 				Health: healthsvc.Service{
 					DB: app.Store.DB(),
 				},
 				Metrics: metricsvc.Service{
 					DB: app.Store.DB(),
 				},
+				ReadModels:      app.Store.DB(),
 				RegistryHealthy: len(app.RegistryDiagnostics) == 0,
 			}),
 		}),

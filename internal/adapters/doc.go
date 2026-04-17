@@ -1,2 +1,2 @@
-// Package adapters owns integrations that translate external systems into internal contracts.
+// Package adapters owns low-level external-system adapters that sit behind provider and tool integration ACLs.
 package adapters

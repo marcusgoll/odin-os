@@ -9,168 +9,390 @@ import (
 	"odin-os/internal/store/sqlite"
 )
 
-func TestWorkspaceBootstrapDefault(t *testing.T) {
+func TestWorkspaceServiceBootstrapsDefaultWorkspace(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
-	store := openWorkspaceStore(t)
+	store := openWorkspaceServiceStore(t)
 	defer store.Close()
 
 	service := Service{Store: store}
 
-	first, err := service.BootstrapDefault(ctx)
+	workspace, err := service.BootstrapDefaultWorkspace(ctx)
 	if err != nil {
-		t.Fatalf("BootstrapDefault() error = %v", err)
+		t.Fatalf("BootstrapDefaultWorkspace() error = %v", err)
 	}
-	if first.Key != DefaultWorkspaceKey {
-		t.Fatalf("BootstrapDefault().Key = %q, want %q", first.Key, DefaultWorkspaceKey)
+	if workspace.Key != DefaultWorkspaceKey {
+		t.Fatalf("BootstrapDefaultWorkspace().Key = %q, want %q", workspace.Key, DefaultWorkspaceKey)
 	}
-	if first.Status != StatusActive {
-		t.Fatalf("BootstrapDefault().Status = %q, want %q", first.Status, StatusActive)
+	if workspace.Status != WorkspaceStatusActive {
+		t.Fatalf("BootstrapDefaultWorkspace().Status = %q, want %q", workspace.Status, WorkspaceStatusActive)
+	}
+	if workspace.Policy != DefaultWorkspacePolicy {
+		t.Fatalf("BootstrapDefaultWorkspace().Policy = %q, want %q", workspace.Policy, DefaultWorkspacePolicy)
 	}
 
-	second, err := service.BootstrapDefault(ctx)
+	companion, err := store.GetCompanionByKey(ctx, workspace.ID, workspace.DefaultCompanionKey)
 	if err != nil {
-		t.Fatalf("BootstrapDefault() second call error = %v", err)
+		t.Fatalf("GetCompanionByKey(default) error = %v", err)
 	}
-	if second.ID != first.ID {
-		t.Fatalf("BootstrapDefault() second ID = %d, want %d", second.ID, first.ID)
+	if companion.Key != workspace.DefaultCompanionKey {
+		t.Fatalf("BootstrapDefaultWorkspace() companion key = %q, want %q", companion.Key, workspace.DefaultCompanionKey)
+	}
+
+	again, err := service.BootstrapDefaultWorkspace(ctx)
+	if err != nil {
+		t.Fatalf("BootstrapDefaultWorkspace() second call error = %v", err)
+	}
+	if again.ID != workspace.ID {
+		t.Fatalf("BootstrapDefaultWorkspace() second call returned ID %d, want %d", again.ID, workspace.ID)
+	}
+
+	active, err := service.ListActiveWorkspaces(ctx)
+	if err != nil {
+		t.Fatalf("ListActiveWorkspaces() error = %v", err)
+	}
+	if len(active) != 1 {
+		t.Fatalf("ListActiveWorkspaces() len = %d, want 1", len(active))
 	}
 }
 
-func TestWorkspaceGetByKey(t *testing.T) {
+func TestWorkspaceServiceUpdateWorkspacePolicy(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
-	store := openWorkspaceStore(t)
+	store := openWorkspaceServiceStore(t)
 	defer store.Close()
 
 	service := Service{Store: store}
-	want, err := service.BootstrapDefault(ctx)
-	if err != nil {
-		t.Fatalf("BootstrapDefault() error = %v", err)
+
+	if _, err := service.BootstrapDefaultWorkspace(ctx); err != nil {
+		t.Fatalf("BootstrapDefaultWorkspace() error = %v", err)
 	}
 
-	got, err := service.GetByKey(ctx, DefaultWorkspaceKey)
+	updated, err := service.UpdateWorkspacePolicy(ctx, DefaultWorkspaceKey, WorkspacePolicy(`{"allow":["branch_proposal"]}`))
 	if err != nil {
-		t.Fatalf("GetByKey() error = %v", err)
+		t.Fatalf("UpdateWorkspacePolicy() error = %v", err)
 	}
-	if got.ID != want.ID {
-		t.Fatalf("GetByKey().ID = %d, want %d", got.ID, want.ID)
+	if updated.Policy != WorkspacePolicy(`{"allow":["branch_proposal"]}`) {
+		t.Fatalf("UpdateWorkspacePolicy().Policy = %q, want %q", updated.Policy, WorkspacePolicy(`{"allow":["branch_proposal"]}`))
 	}
-	if got.OwnerRef != want.OwnerRef {
-		t.Fatalf("GetByKey().OwnerRef = %q, want %q", got.OwnerRef, want.OwnerRef)
+
+	got, err := service.GetWorkspaceByKey(ctx, DefaultWorkspaceKey)
+	if err != nil {
+		t.Fatalf("GetWorkspaceByKey() error = %v", err)
+	}
+	if got.Policy != WorkspacePolicy(`{"allow":["branch_proposal"]}`) {
+		t.Fatalf("GetWorkspaceByKey().Policy = %q, want %q", got.Policy, WorkspacePolicy(`{"allow":["branch_proposal"]}`))
 	}
 }
 
-func TestWorkspaceListActive(t *testing.T) {
+func TestWorkspaceServiceBootstrapsAndRepairsWorkspaceWithoutPolicyRow(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
-	store := openWorkspaceStore(t)
+	store := openWorkspaceServiceStore(t)
 	defer store.Close()
 
+	workspace, err := store.GetWorkspaceByKey(ctx, DefaultWorkspaceKey)
+	if err != nil {
+		t.Fatalf("GetWorkspaceByKey(default) error = %v", err)
+	}
+
+	if _, err := store.DB().ExecContext(ctx, `
+		DELETE FROM workspace_policies
+		WHERE workspace_id = ?
+	`, workspace.ID); err != nil {
+		t.Fatalf("delete workspace policy row error = %v", err)
+	}
+
 	service := Service{Store: store}
-	primary, err := service.BootstrapDefault(ctx)
+
+	bootstrapped, err := service.BootstrapDefaultWorkspace(ctx)
 	if err != nil {
-		t.Fatalf("BootstrapDefault() error = %v", err)
+		t.Fatalf("BootstrapDefaultWorkspace() error = %v", err)
+	}
+	if bootstrapped.Policy != DefaultWorkspacePolicy {
+		t.Fatalf("BootstrapDefaultWorkspace().Policy = %q, want %q", bootstrapped.Policy, DefaultWorkspacePolicy)
 	}
 
-	active, err := store.CreateWorkspace(ctx, sqlite.CreateWorkspaceParams{
-		Key:                 "ops",
-		Name:                "Operations",
-		OwnerRef:            "marcus",
-		Status:              StatusActive,
-		DefaultCompanionKey: "daily-assistant",
-		PolicyJSON:          `{"mode":"active"}`,
-	})
-	if err != nil {
-		t.Fatalf("CreateWorkspace(active) error = %v", err)
+	var policyCount int
+	if err := store.DB().QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM workspace_policies
+		WHERE workspace_id = ?
+	`, bootstrapped.ID).Scan(&policyCount); err != nil {
+		t.Fatalf("policy row count query error = %v", err)
+	}
+	if policyCount != 1 {
+		t.Fatalf("policy row count = %d, want 1", policyCount)
 	}
 
-	if _, err := store.CreateWorkspace(ctx, sqlite.CreateWorkspaceParams{
-		Key:        "archive",
-		Name:       "Archive",
-		OwnerRef:   "marcus",
-		Status:     "archived",
-		PolicyJSON: `{"mode":"archived"}`,
-	}); err != nil {
-		t.Fatalf("CreateWorkspace(archived) error = %v", err)
+	updatedPolicy := WorkspacePolicy(`{"allow":["branch_proposal"]}`)
+	updated, err := service.UpdateWorkspacePolicy(ctx, DefaultWorkspaceKey, updatedPolicy)
+	if err != nil {
+		t.Fatalf("UpdateWorkspacePolicy() error = %v", err)
+	}
+	if updated.Policy != updatedPolicy {
+		t.Fatalf("UpdateWorkspacePolicy().Policy = %q, want %q", updated.Policy, updatedPolicy)
 	}
 
-	workspaces, err := service.ListActive(ctx)
+	got, err := service.GetWorkspaceByKey(ctx, DefaultWorkspaceKey)
 	if err != nil {
-		t.Fatalf("ListActive() error = %v", err)
+		t.Fatalf("GetWorkspaceByKey() error = %v", err)
 	}
-	if len(workspaces) != 2 {
-		t.Fatalf("ListActive() len = %d, want 2", len(workspaces))
+	if got.Policy != updatedPolicy {
+		t.Fatalf("GetWorkspaceByKey().Policy = %q, want %q", got.Policy, updatedPolicy)
 	}
-	if workspaces[0].ID != primary.ID {
-		t.Fatalf("ListActive()[0].ID = %d, want %d", workspaces[0].ID, primary.ID)
+
+	active, err := service.ListActiveWorkspaces(ctx)
+	if err != nil {
+		t.Fatalf("ListActiveWorkspaces() error = %v", err)
 	}
-	if workspaces[1].ID != active.ID {
-		t.Fatalf("ListActive()[1].ID = %d, want %d", workspaces[1].ID, active.ID)
+	if len(active) != 1 {
+		t.Fatalf("ListActiveWorkspaces() len = %d, want 1", len(active))
+	}
+	if active[0].Policy != updatedPolicy {
+		t.Fatalf("ListActiveWorkspaces()[0].Policy = %q, want %q", active[0].Policy, updatedPolicy)
 	}
 }
 
-func TestWorkspaceBootstrapDefaultConcurrentFirstUse(t *testing.T) {
-	t.Parallel()
-
+func TestWorkspaceServiceBootstrapDefaultWorkspaceIsIdempotentUnderContention(t *testing.T) {
 	ctx := context.Background()
-	store := openWorkspaceStore(t)
-	defer store.Close()
+	dbPath := filepath.Join(t.TempDir(), "odin.db")
 
-	service := Service{Store: store}
+	first := openWorkspaceServiceStoreAtPath(t, dbPath)
+	defer first.Close()
+	second := openWorkspaceServiceStoreAtPath(t, dbPath)
+	defer second.Close()
 
-	const callers = 12
-	results := make([]Workspace, callers)
-	errs := make([]error, callers)
+	serviceA := Service{Store: first}
+	serviceB := Service{Store: second}
 
 	start := make(chan struct{})
 	var wg sync.WaitGroup
-	for i := 0; i < callers; i++ {
-		wg.Add(1)
-		go func(index int) {
-			defer wg.Done()
-			<-start
-			results[index], errs[index] = service.BootstrapDefault(ctx)
-		}(i)
-	}
+	wg.Add(2)
+
+	errs := make(chan error, 2)
+	workspaces := make(chan Workspace, 2)
+
+	go func() {
+		defer wg.Done()
+		<-start
+		workspace, err := serviceA.BootstrapDefaultWorkspace(ctx)
+		if err != nil {
+			errs <- err
+			return
+		}
+		workspaces <- workspace
+	}()
+
+	go func() {
+		defer wg.Done()
+		<-start
+		workspace, err := serviceB.BootstrapDefaultWorkspace(ctx)
+		if err != nil {
+			errs <- err
+			return
+		}
+		workspaces <- workspace
+	}()
 
 	close(start)
 	wg.Wait()
+	close(errs)
+	close(workspaces)
 
-	for i, err := range errs {
-		if err != nil {
-			t.Fatalf("BootstrapDefault() caller %d error = %v", i, err)
-		}
+	for err := range errs {
+		t.Fatalf("BootstrapDefaultWorkspace() concurrent call error = %v", err)
 	}
 
-	firstID := results[0].ID
-	for i, workspace := range results {
-		if workspace.ID != firstID {
-			t.Fatalf("BootstrapDefault() caller %d ID = %d, want %d", i, workspace.ID, firstID)
-		}
+	var results []Workspace
+	for workspace := range workspaces {
+		results = append(results, workspace)
+	}
+	if len(results) != 2 {
+		t.Fatalf("BootstrapDefaultWorkspace() concurrent result count = %d, want 2", len(results))
+	}
+	if results[0].ID != results[1].ID {
+		t.Fatalf("BootstrapDefaultWorkspace() concurrent IDs = %d and %d, want same workspace", results[0].ID, results[1].ID)
 	}
 
-	workspaces, err := service.ListActive(ctx)
+	active, err := serviceA.ListActiveWorkspaces(ctx)
 	if err != nil {
-		t.Fatalf("ListActive() error = %v", err)
+		t.Fatalf("ListActiveWorkspaces() error = %v", err)
 	}
-	if len(workspaces) != 1 {
-		t.Fatalf("ListActive() len = %d, want 1", len(workspaces))
+	if len(active) != 1 {
+		t.Fatalf("ListActiveWorkspaces() len = %d, want 1", len(active))
 	}
 }
 
-func openWorkspaceStore(t *testing.T) *sqlite.Store {
-	t.Helper()
+func TestWorkspaceServiceBootstrapsDefaultWorkspaceRepairsMissingDefaultCompanion(t *testing.T) {
+	t.Parallel()
 
+	ctx := context.Background()
+	store := openWorkspaceServiceStore(t)
+	defer store.Close()
+
+	workspace, err := store.GetWorkspaceByKey(ctx, DefaultWorkspaceKey)
+	if err != nil {
+		t.Fatalf("GetWorkspaceByKey(default) error = %v", err)
+	}
+
+	if _, err := store.DB().ExecContext(ctx, `
+		DELETE FROM companions
+		WHERE workspace_id = ? AND key = ?
+	`, workspace.ID, workspace.DefaultCompanionKey); err != nil {
+		t.Fatalf("delete default companion error = %v", err)
+	}
+
+	service := Service{Store: store}
+
+	bootstrapped, err := service.BootstrapDefaultWorkspace(ctx)
+	if err != nil {
+		t.Fatalf("BootstrapDefaultWorkspace() error = %v", err)
+	}
+	if bootstrapped.DefaultCompanionKey != DefaultWorkspaceCompanionKey {
+		t.Fatalf("BootstrapDefaultWorkspace().DefaultCompanionKey = %q, want %q", bootstrapped.DefaultCompanionKey, DefaultWorkspaceCompanionKey)
+	}
+
+	companion, err := store.GetCompanionByKey(ctx, bootstrapped.ID, bootstrapped.DefaultCompanionKey)
+	if err != nil {
+		t.Fatalf("GetCompanionByKey(default) error = %v", err)
+	}
+	if companion.Key != DefaultWorkspaceCompanionKey {
+		t.Fatalf("companion.Key = %q, want %q", companion.Key, DefaultWorkspaceCompanionKey)
+	}
+}
+
+func TestWorkspaceServiceBootstrapDefaultWorkspacePreservesExistingDefaultCompanion(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openWorkspaceServiceStore(t)
+	defer store.Close()
+
+	workspace, err := store.GetWorkspaceByKey(ctx, DefaultWorkspaceKey)
+	if err != nil {
+		t.Fatalf("GetWorkspaceByKey(default) error = %v", err)
+	}
+
+	original, err := store.GetCompanionByKey(ctx, workspace.ID, workspace.DefaultCompanionKey)
+	if err != nil {
+		t.Fatalf("GetCompanionByKey(default) error = %v", err)
+	}
+
+	if _, err := store.DB().ExecContext(ctx, `
+		UPDATE companions
+		SET title = ?, charter = ?, tool_policy_json = ?, memory_policy_json = ?, planning_policy_json = ?
+		WHERE workspace_id = ? AND key = ?
+	`, "Custom Assistant", "Custom charter", `{"allow":["merge_to_main"]}`, `{"mode":"global"}`, `{"mode":"planning"}`, workspace.ID, workspace.DefaultCompanionKey); err != nil {
+		t.Fatalf("update default companion error = %v", err)
+	}
+
+	service := Service{Store: store}
+
+	bootstrapped, err := service.BootstrapDefaultWorkspace(ctx)
+	if err != nil {
+		t.Fatalf("BootstrapDefaultWorkspace() error = %v", err)
+	}
+	if bootstrapped.ID != workspace.ID {
+		t.Fatalf("BootstrapDefaultWorkspace().ID = %d, want %d", bootstrapped.ID, workspace.ID)
+	}
+
+	after, err := store.GetCompanionByKey(ctx, workspace.ID, workspace.DefaultCompanionKey)
+	if err != nil {
+		t.Fatalf("GetCompanionByKey(default after bootstrap) error = %v", err)
+	}
+	if after.Title != "Custom Assistant" {
+		t.Fatalf("BootstrapDefaultWorkspace() overwrote title = %q, want %q", after.Title, "Custom Assistant")
+	}
+	if after.Charter != "Custom charter" {
+		t.Fatalf("BootstrapDefaultWorkspace() overwrote charter = %q, want %q", after.Charter, "Custom charter")
+	}
+	if after.ToolPolicyJSON != `{"allow":["merge_to_main"]}` {
+		t.Fatalf("BootstrapDefaultWorkspace() overwrote tool policy = %q, want %q", after.ToolPolicyJSON, `{"allow":["merge_to_main"]}`)
+	}
+	if after.MemoryPolicyJSON != `{"mode":"global"}` {
+		t.Fatalf("BootstrapDefaultWorkspace() overwrote memory policy = %q, want %q", after.MemoryPolicyJSON, `{"mode":"global"}`)
+	}
+	if after.PlanningPolicyJSON != `{"mode":"planning"}` {
+		t.Fatalf("BootstrapDefaultWorkspace() overwrote planning policy = %q, want %q", after.PlanningPolicyJSON, `{"mode":"planning"}`)
+	}
+	if after.Kind != original.Kind {
+		t.Fatalf("BootstrapDefaultWorkspace() overwrote kind = %q, want %q", after.Kind, original.Kind)
+	}
+}
+
+func TestWorkspaceServiceBootstrapsDefaultWorkspaceWithoutCompanionsTable(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
 	store, err := sqlite.Open(filepath.Join(t.TempDir(), "odin.db"))
 	if err != nil {
 		t.Fatalf("Open() error = %v", err)
 	}
+	defer store.Close()
+
+	if _, err := store.DB().ExecContext(ctx, `
+		CREATE TABLE IF NOT EXISTS workspaces (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			key TEXT NOT NULL UNIQUE,
+			name TEXT NOT NULL,
+			owner_ref TEXT NOT NULL,
+			default_companion_key TEXT NOT NULL,
+			status TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL
+		)
+	`); err != nil {
+		t.Fatalf("create workspaces table error = %v", err)
+	}
+	if _, err := store.DB().ExecContext(ctx, `
+		CREATE TABLE IF NOT EXISTS workspace_policies (
+			workspace_id INTEGER PRIMARY KEY,
+			policy_json TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			FOREIGN KEY(workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
+		)
+	`); err != nil {
+		t.Fatalf("create workspace_policies table error = %v", err)
+	}
+	if _, err := store.DB().ExecContext(ctx, `
+		CREATE TABLE IF NOT EXISTS schema_migrations (
+			version INTEGER PRIMARY KEY,
+			name TEXT NOT NULL,
+			applied_at TEXT NOT NULL
+		)
+	`); err != nil {
+		t.Fatalf("create schema_migrations table error = %v", err)
+	}
+
+	service := Service{Store: store}
+	bootstrapped, err := service.BootstrapDefaultWorkspace(ctx)
+	if err != nil {
+		t.Fatalf("BootstrapDefaultWorkspace() error = %v", err)
+	}
+	if bootstrapped.Key != DefaultWorkspaceKey {
+		t.Fatalf("BootstrapDefaultWorkspace().Key = %q, want %q", bootstrapped.Key, DefaultWorkspaceKey)
+	}
+}
+
+func openWorkspaceServiceStore(t *testing.T) *sqlite.Store {
+	t.Helper()
+
+	return openWorkspaceServiceStoreAtPath(t, filepath.Join(t.TempDir(), "odin.db"))
+}
+
+func openWorkspaceServiceStoreAtPath(t *testing.T, dbPath string) *sqlite.Store {
+	t.Helper()
+
+	store, err := sqlite.Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
 	if err := store.Migrate(context.Background()); err != nil {
-		_ = store.Close()
 		t.Fatalf("Migrate() error = %v", err)
 	}
 	return store

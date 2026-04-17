@@ -1,14 +1,6 @@
 package workspaces
 
-import "time"
-
-const (
-	DefaultWorkspaceKey  = "marcus"
-	DefaultWorkspaceName = "Marcus Workspace"
-	DefaultOwnerRef      = "marcus"
-
-	StatusActive = "active"
-)
+type WorkspacePolicy string
 
 type Workspace struct {
 	ID                  int64
@@ -17,7 +9,18 @@ type Workspace struct {
 	OwnerRef            string
 	Status              string
 	DefaultCompanionKey string
-	PolicyJSON          string
-	CreatedAt           time.Time
-	UpdatedAt           time.Time
+	Policy              WorkspacePolicy
 }
+
+const (
+	DefaultWorkspaceKey                              = "default"
+	DefaultWorkspaceName                             = "Default Workspace"
+	DefaultWorkspaceOwnerRef                         = "operator"
+	WorkspaceStatusActive                            = "active"
+	DefaultWorkspaceCompanionKey                     = "primary"
+	DefaultWorkspaceCompanionTitle                   = "Primary Assistant"
+	DefaultWorkspaceCompanionKind                    = "assistant"
+	DefaultWorkspaceCompanionCharter                 = "Default companion for this workspace."
+	DefaultWorkspaceCompanionStatus                  = "active"
+	DefaultWorkspacePolicy           WorkspacePolicy = `{}`
+)

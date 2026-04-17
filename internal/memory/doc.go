@@ -1,2 +1,2 @@
-// Package memory owns runtime access to durable workspace, initiative, companion, project, run, and user memory.
+// Package memory owns runtime access to durable workspace, initiative, companion, run, and knowledge memory.
 package memory

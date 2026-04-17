@@ -145,13 +145,58 @@ func (service Service) Start(ctx context.Context, task sqlite.Task, executorKey 
 		return sqlite.Run{}, err
 	}
 
-	return service.Store.StartRunAndUpdateTaskStatus(ctx, sqlite.StartRunAndUpdateTaskStatusParams{
-		TaskID:     task.ID,
-		Executor:   executorKey,
-		Attempt:    attempt,
-		RunStatus:  "running",
-		TaskStatus: "running",
+	run, err := service.Store.StartRun(ctx, sqlite.StartRunParams{
+		TaskID:   task.ID,
+		Executor: executorKey,
+		Attempt:  attempt,
+		Status:   "running",
 	})
+	if err != nil {
+		return sqlite.Run{}, err
+	}
+	if _, err := service.Store.UpdateTaskStatus(ctx, sqlite.UpdateTaskStatusParams{
+		TaskID:                 task.ID,
+		Status:                 "running",
+		AllowedCurrentStatuses: []string{"queued"},
+	}); err != nil {
+		currentTask, loadErr := service.Store.GetTask(ctx, task.ID)
+		if loadErr != nil {
+			return sqlite.Run{}, loadErr
+		}
+		if currentTask.Status != "queued" {
+			if _, finishErr := service.Store.FinishRun(ctx, sqlite.FinishRunParams{
+				RunID:          run.ID,
+				Status:         "interrupted",
+				Summary:        err.Error(),
+				TerminalReason: err.Error(),
+				ArtifactsJSON:  "[]",
+			}); finishErr != nil {
+				return sqlite.Run{}, finishErr
+			}
+			return sqlite.Run{}, err
+		}
+		if _, finishErr := service.Store.FinishRun(ctx, sqlite.FinishRunParams{
+			RunID:          run.ID,
+			Status:         "failed",
+			Summary:        err.Error(),
+			TerminalReason: err.Error(),
+			ArtifactsJSON:  "[]",
+		}); finishErr != nil {
+			return sqlite.Run{}, finishErr
+		}
+		if _, taskErr := service.Store.UpdateTaskStatus(ctx, sqlite.UpdateTaskStatusParams{
+			TaskID:                 task.ID,
+			Status:                 "failed",
+			Summary:                err.Error(),
+			TerminalReason:         err.Error(),
+			ArtifactsJSON:          "[]",
+			AllowedCurrentStatuses: []string{"queued", "running"},
+		}); taskErr != nil {
+			return sqlite.Run{}, taskErr
+		}
+		return sqlite.Run{}, err
+	}
+	return run, nil
 }
 
 func (service Service) Complete(ctx context.Context, runID int64, result contract.ExecutionResult) error {
@@ -178,15 +223,24 @@ func (service Service) Complete(ctx context.Context, runID int64, result contrac
 	if runStatus != "completed" {
 		taskStatus = "failed"
 	}
-	return service.Store.FinishRunAndUpdateTaskStatus(ctx, sqlite.FinishRunAndUpdateTaskStatusParams{
+	if _, err := service.Store.FinishRun(ctx, sqlite.FinishRunParams{
 		RunID:          runID,
-		RunStatus:      runStatus,
+		Status:         runStatus,
 		Summary:        summary,
 		TerminalReason: runStatus,
 		ArtifactsJSON:  artifactsJSON,
-		TaskID:         run.TaskID,
-		TaskStatus:     taskStatus,
+	}); err != nil {
+		return err
+	}
+	_, err = service.Store.UpdateTaskStatus(ctx, sqlite.UpdateTaskStatusParams{
+		TaskID:                 run.TaskID,
+		Status:                 taskStatus,
+		Summary:                summary,
+		TerminalReason:         runStatus,
+		ArtifactsJSON:          artifactsJSON,
+		AllowedCurrentStatuses: []string{"running"},
 	})
+	return err
 }
 
 func (service Service) Fail(ctx context.Context, runID int64, cause error) error {
@@ -204,23 +258,27 @@ func (service Service) Fail(ctx context.Context, runID int64, cause error) error
 		return err
 	}
 
-	return service.Store.FinishRunAndUpdateTaskStatus(ctx, sqlite.FinishRunAndUpdateTaskStatusParams{
+	if _, err := service.Store.FinishRun(ctx, sqlite.FinishRunParams{
 		RunID:          runID,
-		RunStatus:      "failed",
+		Status:         "failed",
 		Summary:        terminalReason,
 		TerminalReason: terminalReason,
 		ArtifactsJSON:  "[]",
-		TaskID:         run.TaskID,
-		TaskStatus:     "failed",
+	}); err != nil {
+		return err
+	}
+	_, err = service.Store.UpdateTaskStatus(ctx, sqlite.UpdateTaskStatusParams{
+		TaskID:                 run.TaskID,
+		Status:                 "failed",
+		Summary:                terminalReason,
+		TerminalReason:         terminalReason,
+		ArtifactsJSON:          "[]",
+		AllowedCurrentStatuses: []string{"running"},
 	})
+	return err
 }
 
 func matchesRunScope(projectKey, taskScope string, resolved scope.Resolution) bool {
-	control := scope.ToControlScope(resolved)
-	if control.ProjectKey != "" {
-		return projectKey == control.ProjectKey
-	}
-
 	switch resolved.Kind {
 	case scope.ScopeGlobal:
 		return true

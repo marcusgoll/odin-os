@@ -6,46 +6,41 @@ date: 2026-04-16
 
 # Ubiquitous Language Contract
 
-This contract defines the canonical product vocabulary for Odin OS and narrows older runtime terms that still exist elsewhere in the repo.
+This document freezes the canonical language for Odin OS. New design, planning, and implementation work should use these terms instead of the older project-centric vocabulary.
 
 ## Canonical terms
 
-Use these terms in new product-facing docs, contracts, schemas, and APIs unless a narrower technical boundary requires otherwise.
-
-| Term | Canonical meaning | Use when |
+| Term | Meaning | Notes |
 | --- | --- | --- |
-| `workspace` | The top-level durable environment for Marcus | referring to Odin's primary operating environment |
-| `initiative` | A durable unit of responsibility | referring to meaningful work that may include a managed project |
-| `companion` | A durable role contract | referring to user-facing operating roles |
-| `work item` | The durable object that turns intent into execution | referring to bounded work owned by the control plane |
-| `run attempt` | One disposable execution attempt for a work item | referring to execution-plane records and related per-attempt artifacts |
-| `control plane` | Odin's persistent state, policy, and dispatch layer | referring to what Odin owns durably |
-| `execution plane` | Short-lived worker and executor activity | referring to bounded execution only |
+| `Workspace` | The top-level operating environment for a human or organization in Odin. It is the semantic root for all durable work, memory, and execution. | Every initiative, companion, and execution lane belongs to exactly one workspace. |
+| `Initiative` | A durable responsibility stream inside a workspace. Initiatives can represent work, life, or ongoing operational commitments. | Managed projects are one specialized initiative type. |
+| `Companion` | A durable AI role attached to a workspace, optionally scoped further to one or more initiatives. Companions include assistants, advisors, operators, and specialists. | Companion is the user-facing term for a persistent AI role. |
+| `Managed Project` | A governed initiative subtype with explicit policy, reviewability, and Git-backed mutation rules. | Use this term when the initiative is project-shaped and subject to project governance. |
+| `Work Item` | The durable unit of governed work. A work item is what gets planned, routed, executed, and completed. | This is the preferred unit for product semantics and operator-facing language. |
+| `Run Attempt` | One execution attempt for a work item inside an execution lane. | Run attempts are disposable records of execution, not the durable work itself. |
+| `Control Scope` | The explicit authority boundary that determines what the operator and system may inspect, mutate, or route. | This is the preferred term for authority boundaries. |
+| `Execution Lane` | A bounded execution path that carries work items through planning, runtime execution, and retries. | Lanes are operational capacity and routing constructs, not the work itself. |
 
-## Narrowed or legacy terms
+## Legacy or narrowed terms
 
-These terms still have valid uses in the repo, but they are no longer the default product vocabulary.
+The following terms still appear in implementation and migration surfaces, but they are not the preferred product vocabulary:
 
-| Term | Status | Keep using it for | Prefer instead |
-| --- | --- | --- | --- |
-| `task` | narrowed legacy runtime term | current queue, event, worktree, executor, and observability contracts until the work-item migration lands | `work item` for control-plane work, `run attempt` for execution records |
-| `agent` | narrowed legacy registry term | existing registry item kinds, capability catalogs, and older sub-agent references | `companion` for durable roles, `worker` for execution units |
-| `scope` | narrowed legacy CLI and routing term | current CLI, session, routing, and event contracts until control-context migration lands | explicit `workspace`, `initiative`, `project`, or `companion` context |
-| `command` | narrowed interface term | CLI verbs and authored command definitions in registry contracts | explicit object names for product concepts; do not use as a synonym for work |
+- `task` is a narrowed term for executor payloads, runtime jobs, or external system mappings. Use `work item` in product language.
+- `agent` is a narrowed term for internal worker constructs, registry payloads, or model-backed roles. Use `companion` in product language.
+- `command` is a narrowed term for CLI entrypoints, approved invocation verbs, or adapter-level triggers. Use the specific action or work item name where possible.
+- `scope` is a narrowed term for implementation details about control boundaries or execution boundaries. Use `control scope` when the authority boundary matters to the product.
 
-## Intentional remaining legacy zones
+## Canonical relationships
 
-The grep audit for `README.md` and `docs/contracts/` will still find narrowed terms in existing contracts. Those hits are expected where the current implementation genuinely still uses them, including:
+- A workspace contains initiatives.
+- An initiative may contain work items and companions.
+- A managed project is a governed initiative, not a separate top-level concept.
+- A work item may produce multiple run attempts over time.
+- A run attempt occurs inside exactly one execution lane.
+- Control scope determines what can be seen or changed at each step.
 
-- runtime and observability contracts that still model queue state with `task`
-- registry and capability contracts that still expose `agent` and `command` item kinds
-- CLI and session contracts that still define explicit `scope` behavior
-- Git worktree and project-governance contracts that still describe task-owned mutation paths
+## Usage rules
 
-Those terms should be treated as implementation-era vocabulary, not the semantic center of the product.
-
-## Writing rules
-
-- Prefer canonical terms in new docs, APIs, projections, and package-level design notes.
-- When a narrowed legacy term is unavoidable, pair it with the canonical meaning nearby on first use.
-- Do not introduce new parallel abstractions that overlap `workspace`, `initiative`, `companion`, `work item`, or `run attempt` without explicit justification.
+- Use the canonical terms in new docs, planning artifacts, UI copy, and APIs unless the legacy mapping is the point of the document.
+- Do not reintroduce `task`, `agent`, `command`, or `scope` as primary product nouns in new contracts.
+- When a legacy term is unavoidable, define it once in the same document and map it back to the canonical term.

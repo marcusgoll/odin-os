@@ -6,18 +6,16 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"testing"
 
 	"odin-os/internal/cli/scope"
-	"odin-os/internal/core/capabilities"
+	"odin-os/internal/core/initiatives"
 	"odin-os/internal/core/projects"
-	executorrouter "odin-os/internal/executors/router"
-	"odin-os/internal/registry"
+	corescope "odin-os/internal/core/scope"
+	"odin-os/internal/core/workspaces"
 	runtimeevents "odin-os/internal/runtime/events"
 	"odin-os/internal/store/sqlite"
-	"odin-os/internal/vcs/leases"
 )
 
 func TestShellRestoresValidSessionOnStartup(t *testing.T) {
@@ -78,15 +76,15 @@ func TestAskModeHandlesFreeTextWithoutCreatingTask(t *testing.T) {
 	}
 
 	var output bytes.Buffer
-	if err := shell.HandleLine(context.Background(), "hello there", &output); err != nil {
+	if err := shell.HandleLine(context.Background(), "what scope am i in?", &output); err != nil {
 		t.Fatalf("HandleLine() error = %v", err)
 	}
 
-	if strings.Contains(output.String(), "Phase 05") {
-		t.Fatalf("HandleLine() output = %q, want executor-backed answer", output.String())
+	if !strings.Contains(output.String(), "global") {
+		t.Fatalf("HandleLine() output = %q, want scope answer", output.String())
 	}
 
-	views, err := shell.jobs.List(context.Background(), shell.state.Scope)
+	views, err := shell.jobs.List(context.Background(), shell.controlScope())
 	if err != nil {
 		t.Fatalf("jobs.List() error = %v", err)
 	}
@@ -95,7 +93,7 @@ func TestAskModeHandlesFreeTextWithoutCreatingTask(t *testing.T) {
 	}
 }
 
-func TestAskModeAnswersScopeQuestionsWithoutCreatingTask(t *testing.T) {
+func TestShellControlScopeTracksProjectSelection(t *testing.T) {
 	t.Parallel()
 
 	env := newTestEnvironment(t)
@@ -108,36 +106,48 @@ func TestAskModeAnswersScopeQuestionsWithoutCreatingTask(t *testing.T) {
 	if err := shell.HandleLine(context.Background(), "/project alpha", &output); err != nil {
 		t.Fatalf("HandleLine(/project) error = %v", err)
 	}
-	output.Reset()
-	if err := shell.HandleLine(context.Background(), "what scope am i in?", &output); err != nil {
-		t.Fatalf("HandleLine(scope question) error = %v", err)
+
+	got := shell.controlScope()
+	want := corescope.ControlScope{
+		SubjectType:   corescope.SubjectTypeInitiative,
+		SubjectKey:    "alpha",
+		WorkspaceKey:  "default",
+		InitiativeKey: "alpha",
+		ProjectKey:    "alpha",
+		CompanionKey:  "primary",
 	}
 
-	response := strings.TrimSpace(output.String())
-	if strings.HasPrefix(response, "scope=") {
-		t.Fatalf("HandleLine() output = %q, want conversational answer", output.String())
-	}
-
-	views, err := shell.jobs.List(context.Background(), shell.state.Scope)
-	if err != nil {
-		t.Fatalf("jobs.List() error = %v", err)
-	}
-	if len(views) != 0 {
-		t.Fatalf("jobs len = %d, want 0", len(views))
+	if got != want {
+		t.Fatalf("controlScope() = %+v, want %+v", got, want)
 	}
 }
 
-func TestMatchesEventScopeAllowsControlScopedEventsInProjectViews(t *testing.T) {
+func TestShellControlScopeTracksNewProjectFlow(t *testing.T) {
 	t.Parallel()
 
-	if !matchesEventScope("workspace", scope.Resolution{Kind: scope.ScopeOdinCore, ProjectKey: "odin-core"}) {
-		t.Fatalf("matchesEventScope(workspace, odin-core) = false, want true")
+	env := newTestEnvironment(t)
+	shell, err := New(env)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
 	}
-	if !matchesEventScope("initiative", scope.Resolution{Kind: scope.ScopeProject, ProjectKey: "alpha"}) {
-		t.Fatalf("matchesEventScope(initiative, project) = false, want true")
+
+	var output bytes.Buffer
+	if err := shell.HandleLine(context.Background(), "/scope new-project", &output); err != nil {
+		t.Fatalf("HandleLine(/scope new-project) error = %v", err)
 	}
-	if matchesEventScope("workspace", scope.Resolution{Kind: scope.ScopeNewProject}) {
-		t.Fatalf("matchesEventScope(workspace, new-project) = true, want false")
+
+	got := shell.controlScope()
+	want := corescope.ControlScope{
+		SubjectType:   corescope.SubjectTypeNewProject,
+		SubjectKey:    "odin-core",
+		WorkspaceKey:  "default",
+		InitiativeKey: "odin-core",
+		ProjectKey:    "odin-core",
+		CompanionKey:  "primary",
+	}
+
+	if got != want {
+		t.Fatalf("controlScope() = %+v, want %+v", got, want)
 	}
 }
 
@@ -163,10 +173,7 @@ func TestActModeCreatesTaskInProjectScope(t *testing.T) {
 		t.Fatalf("HandleLine(act input) error = %v", err)
 	}
 
-	views, err := shell.jobs.List(context.Background(), scope.Resolution{
-		Kind:       scope.ScopeProject,
-		ProjectKey: "alpha",
-	})
+	views, err := shell.jobs.List(context.Background(), shell.controlScope())
 	if err != nil {
 		t.Fatalf("jobs.List() error = %v", err)
 	}
@@ -176,134 +183,21 @@ func TestActModeCreatesTaskInProjectScope(t *testing.T) {
 	if !strings.Contains(output.String(), "created task") {
 		t.Fatalf("output = %q, want creation message", output.String())
 	}
-}
 
-func TestActModeCreatesTaskAndAttemptsRunImmediately(t *testing.T) {
-	configureShellHarnessDriver(t)
-	env := newTestEnvironment(t)
-	shell, err := New(env)
+	workspace, err := workspaces.Service{Store: env.Store}.BootstrapDefaultWorkspace(context.Background())
 	if err != nil {
-		t.Fatalf("New() error = %v", err)
+		t.Fatalf("BootstrapDefaultWorkspace() error = %v", err)
 	}
 
-	var output bytes.Buffer
-	if err := shell.HandleLine(context.Background(), "/project alpha", &output); err != nil {
-		t.Fatalf("HandleLine(/project) error = %v", err)
-	}
-	output.Reset()
-	if err := shell.HandleLine(context.Background(), "/mode act", &output); err != nil {
-		t.Fatalf("HandleLine(/mode) error = %v", err)
-	}
-	output.Reset()
-	if err := shell.HandleLine(context.Background(), "Implement the shell", &output); err != nil {
-		t.Fatalf("HandleLine(act input) error = %v", err)
-	}
-
-	views, err := shell.jobs.List(context.Background(), scope.Resolution{
-		Kind:       scope.ScopeProject,
-		ProjectKey: "alpha",
-	})
+	initiative, err := env.Store.GetInitiativeByKey(context.Background(), workspace.ID, "alpha")
 	if err != nil {
-		t.Fatalf("jobs.List() error = %v", err)
+		t.Fatalf("GetInitiativeByKey(alpha) error = %v", err)
 	}
-	if len(views) != 1 {
-		t.Fatalf("jobs len = %d, want 1", len(views))
+	if initiative.Kind != string(initiatives.KindManagedProject) {
+		t.Fatalf("initiative.Kind = %q, want %q", initiative.Kind, initiatives.KindManagedProject)
 	}
-
-	runs, err := shell.runs.List(context.Background(), scope.Resolution{
-		Kind:       scope.ScopeProject,
-		ProjectKey: "alpha",
-	})
-	if err != nil {
-		t.Fatalf("runs.List() error = %v", err)
-	}
-	if len(runs) != 1 {
-		t.Fatalf("runs len = %d, want 1 immediate run", len(runs))
-	}
-	if !strings.Contains(output.String(), "run") {
-		t.Fatalf("output = %q, want inline run visibility", output.String())
-	}
-}
-
-func TestActModePrintsPolicyDenialInlineWhenMutationBlocked(t *testing.T) {
-	configureShellHarnessDriver(t)
-	env := newTestEnvironment(t)
-	shell, err := New(env)
-	if err != nil {
-		t.Fatalf("New() error = %v", err)
-	}
-
-	var output bytes.Buffer
-	if err := shell.HandleLine(context.Background(), "/project alpha", &output); err != nil {
-		t.Fatalf("HandleLine(/project) error = %v", err)
-	}
-	output.Reset()
-	if err := shell.HandleLine(context.Background(), "/transition set shadow because mutation is blocked", &output); err != nil {
-		t.Fatalf("HandleLine(/transition set shadow) error = %v", err)
-	}
-	output.Reset()
-	if err := shell.HandleLine(context.Background(), "/mode act", &output); err != nil {
-		t.Fatalf("HandleLine(/mode) error = %v", err)
-	}
-	output.Reset()
-	if err := shell.HandleLine(context.Background(), "apply the blocked mutation", &output); err != nil {
-		t.Fatalf("HandleLine(act input) error = %v", err)
-	}
-
-	if !strings.Contains(strings.ToLower(output.String()), "denied") {
-		t.Fatalf("output = %q, want inline policy denial", output.String())
-	}
-
-	runs, err := shell.runs.List(context.Background(), scope.Resolution{
-		Kind:       scope.ScopeProject,
-		ProjectKey: "alpha",
-	})
-	if err != nil {
-		t.Fatalf("runs.List() error = %v", err)
-	}
-	if len(runs) != 1 {
-		t.Fatalf("runs len = %d, want immediate blocked run record", len(runs))
-	}
-}
-
-func TestActModePrintsCompletedResultInlineWhenExecutionSucceeds(t *testing.T) {
-	configureShellHarnessDriver(t)
-	env := newTestEnvironment(t)
-	shell, err := New(env)
-	if err != nil {
-		t.Fatalf("New() error = %v", err)
-	}
-
-	var output bytes.Buffer
-	if err := shell.HandleLine(context.Background(), "/project alpha", &output); err != nil {
-		t.Fatalf("HandleLine(/project) error = %v", err)
-	}
-	output.Reset()
-	if err := shell.HandleLine(context.Background(), "/transition set limited_action allow=run_task confirm because shell immediate execution", &output); err != nil {
-		t.Fatalf("HandleLine(/transition set limited_action) error = %v", err)
-	}
-	output.Reset()
-	if err := shell.HandleLine(context.Background(), "/mode act", &output); err != nil {
-		t.Fatalf("HandleLine(/mode) error = %v", err)
-	}
-	output.Reset()
-	if err := shell.HandleLine(context.Background(), "Complete the shell implementation", &output); err != nil {
-		t.Fatalf("HandleLine(act input) error = %v", err)
-	}
-
-	if !strings.Contains(strings.ToLower(output.String()), "completed") {
-		t.Fatalf("output = %q, want inline completed result", output.String())
-	}
-
-	runs, err := shell.runs.List(context.Background(), scope.Resolution{
-		Kind:       scope.ScopeProject,
-		ProjectKey: "alpha",
-	})
-	if err != nil {
-		t.Fatalf("runs.List() error = %v", err)
-	}
-	if len(runs) != 1 {
-		t.Fatalf("runs len = %d, want completed run record", len(runs))
+	if initiative.LinkedProjectID == nil {
+		t.Fatalf("initiative.LinkedProjectID = nil, want project id")
 	}
 }
 
@@ -396,129 +290,7 @@ func TestDoctorCommandSupportsJSONOutput(t *testing.T) {
 	}
 }
 
-func TestCLICommandDispatchUsesCommandService(t *testing.T) {
-	t.Parallel()
-
-	env := newTestEnvironment(t)
-	service := &recordingCommandService{
-		response: capabilities.InvokeResponse{
-			Status: "ok",
-			Output: json.RawMessage(`status=registry-backed`),
-		},
-	}
-	env.CommandService = service
-
-	shell, err := New(env)
-	if err != nil {
-		t.Fatalf("New() error = %v", err)
-	}
-
-	for _, command := range []string{"/stat", "/status"} {
-		var output bytes.Buffer
-		if err := shell.HandleLine(context.Background(), command, &output); err != nil {
-			t.Fatalf("HandleLine(%s) error = %v", command, err)
-		}
-		if !strings.Contains(output.String(), "registry-backed") {
-			t.Fatalf("output = %q, want registry-backed response", output.String())
-		}
-	}
-
-	if len(service.calls) != 2 {
-		t.Fatalf("command service calls = %d, want 2", len(service.calls))
-	}
-	for i, got := range service.calls {
-		if got.CapabilityID != "project.status" || got.CapabilityVersion != "1.0.0" {
-			t.Fatalf("command request[%d] = %+v, want project.status 1.0.0", i, got)
-		}
-	}
-}
-
-func TestCLIListsCapabilities(t *testing.T) {
-	t.Parallel()
-
-	env := newTestEnvironment(t)
-	gateway := &recordingCapabilityGateway{
-		listByScope: map[string][]capabilities.CapabilityCard{
-			"project": {
-				{ID: "project.status", Kind: registry.KindCommand, Name: "project.status", Version: "1.0.0", Scope: "project"},
-			},
-			"global": {
-				{ID: "global.health", Kind: registry.KindSkill, Name: "global.health", Version: "1.0.0", Scope: "global"},
-			},
-		},
-	}
-	env.CapabilityGateway = gateway
-
-	shell, err := New(env)
-	if err != nil {
-		t.Fatalf("New() error = %v", err)
-	}
-
-	var output bytes.Buffer
-	if err := shell.HandleLine(context.Background(), "/project alpha", &output); err != nil {
-		t.Fatalf("HandleLine(/project) error = %v", err)
-	}
-	output.Reset()
-	if err := shell.HandleLine(context.Background(), "/capabilities", &output); err != nil {
-		t.Fatalf("HandleLine(/capabilities) error = %v", err)
-	}
-
-	if len(gateway.listCalls) != 1 {
-		t.Fatalf("ListCapabilities() calls = %d, want 1", len(gateway.listCalls))
-	}
-	if got := gateway.listCalls[0].scope; got != "project" {
-		t.Fatalf("ListCapabilities() scope = %q, want %q", got, "project")
-	}
-	if !strings.Contains(output.String(), "project.status") {
-		t.Fatalf("output = %q, want project capability", output.String())
-	}
-	if strings.Contains(output.String(), "global.health") {
-		t.Fatalf("output = %q, want scope-filtered project capabilities only", output.String())
-	}
-}
-
-func TestCLIInvokesCapabilityThroughGateway(t *testing.T) {
-	t.Parallel()
-
-	env := newTestEnvironment(t)
-	gateway := &recordingCapabilityGateway{
-		descriptor: capabilities.Descriptor{
-			Kind:         registry.KindCommand,
-			Key:          "project.status",
-			Version:      "1.0.0",
-			InputSchema:  registry.SchemaRef{Type: "object"},
-			OutputSchema: registry.SchemaRef{Type: "object"},
-		},
-		invokeResponse: capabilities.InvokeResponse{
-			Status: "ok",
-			Output: json.RawMessage(`status=registry-backed`),
-		},
-	}
-	env.CapabilityGateway = gateway
-
-	shell, err := New(env)
-	if err != nil {
-		t.Fatalf("New() error = %v", err)
-	}
-
-	var output bytes.Buffer
-	if err := shell.HandleLine(context.Background(), "/project alpha", &output); err != nil {
-		t.Fatalf("HandleLine(/project) error = %v", err)
-	}
-	output.Reset()
-	if err := shell.HandleLine(context.Background(), "/status", &output); err != nil {
-		t.Fatalf("HandleLine(/status) error = %v", err)
-	}
-
-	if len(gateway.invokeCalls) != 1 {
-		t.Fatalf("InvokeCapability() calls = %d, want 1", len(gateway.invokeCalls))
-	}
-	if !strings.Contains(output.String(), "registry-backed") {
-		t.Fatalf("output = %q, want registry-backed response", output.String())
-	}
-}
-
-func TestShellHelpIncludesExplicitCompatibilitySurface(t *testing.T) {
+func TestShellHelpIncludesTransitionCommands(t *testing.T) {
 	t.Parallel()
 
 	env := newTestEnvironment(t)
@@ -532,25 +304,106 @@ func TestShellHelpIncludesExplicitCompatibilitySurface(t *testing.T) {
 		t.Fatalf("HandleLine(/help) error = %v", err)
 	}
 
-	for _, want := range []string{
-		"prefer explicit cli commands outside the repl",
-		"odin help",
-		"odin status --json",
-		"odin task run --project <key> --title <title>",
-		"odin repl",
-		"/status",
-		"/stat",
-		"/capabilities",
-		"/scope",
-		"/transition",
-		"/observe",
-		"/compare",
-		"/leases",
-		"/leases inspect <lease-id>",
-		"/leases cleanup confirm",
-	} {
+	for _, want := range []string{"/workspace", "/initiatives", "/companions", "/transition", "/observe", "/compare"} {
 		if !strings.Contains(output.String(), want) {
 			t.Fatalf("help output = %q, want %q", output.String(), want)
+		}
+	}
+}
+
+func TestShellScopeShowsCurrentControlScopeDetails(t *testing.T) {
+	t.Parallel()
+
+	env := newTestEnvironment(t)
+	shell, err := New(env)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	var output bytes.Buffer
+	if err := shell.HandleLine(context.Background(), "/project alpha", &output); err != nil {
+		t.Fatalf("HandleLine(/project) error = %v", err)
+	}
+	output.Reset()
+	if err := shell.HandleLine(context.Background(), "/scope", &output); err != nil {
+		t.Fatalf("HandleLine(/scope) error = %v", err)
+	}
+
+	for _, want := range []string{"scope=alpha", "workspace=default", "initiative=alpha", "project=alpha", "companion=primary"} {
+		if !strings.Contains(output.String(), want) {
+			t.Fatalf("scope output = %q, want %q", output.String(), want)
+		}
+	}
+}
+
+func TestShellOperatorViewsRenderWorkspaceInitiativesAndCompanions(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	env := newTestEnvironment(t)
+	project, err := env.Store.CreateProject(ctx, sqlite.CreateProjectParams{
+		Key:           "alpha",
+		Name:          "Alpha",
+		Scope:         "project",
+		GitRoot:       "/tmp/alpha",
+		DefaultBranch: "main",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+	workspace, err := workspaces.Service{Store: env.Store}.BootstrapDefaultWorkspace(ctx)
+	if err != nil {
+		t.Fatalf("BootstrapDefaultWorkspace() error = %v", err)
+	}
+	companion, err := env.Store.GetCompanionByKey(ctx, workspace.ID, workspace.DefaultCompanionKey)
+	if err != nil {
+		t.Fatalf("GetCompanionByKey(default) error = %v", err)
+	}
+	if _, err := env.Store.UpsertInitiative(ctx, sqlite.UpsertInitiativeParams{
+		WorkspaceID:      workspace.ID,
+		Key:              project.Key,
+		Title:            project.Name,
+		Kind:             string(initiatives.KindManagedProject),
+		Status:           "active",
+		Summary:          "Alpha initiative",
+		OwnerCompanionID: &companion.ID,
+		LinkedProjectID:  &project.ID,
+	}); err != nil {
+		t.Fatalf("UpsertInitiative(alpha) error = %v", err)
+	}
+	shell, err := New(env)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	var output bytes.Buffer
+	if err := shell.HandleLine(ctx, "/workspace", &output); err != nil {
+		t.Fatalf("HandleLine(/workspace) error = %v", err)
+	}
+	for _, want := range []string{"workspace=default", "initiatives=1", "companions=1"} {
+		if !strings.Contains(output.String(), want) {
+			t.Fatalf("workspace output = %q, want %q", output.String(), want)
+		}
+	}
+
+	output.Reset()
+	if err := shell.HandleLine(ctx, "/initiatives", &output); err != nil {
+		t.Fatalf("HandleLine(/initiatives) error = %v", err)
+	}
+	for _, want := range []string{"alpha", "managed_project", "owner=primary", "project=alpha"} {
+		if !strings.Contains(output.String(), want) {
+			t.Fatalf("initiatives output = %q, want %q", output.String(), want)
+		}
+	}
+
+	output.Reset()
+	if err := shell.HandleLine(ctx, "/companions", &output); err != nil {
+		t.Fatalf("HandleLine(/companions) error = %v", err)
+	}
+	for _, want := range []string{"primary", "assistant", "owned_initiatives=1"} {
+		if !strings.Contains(output.String(), want) {
+			t.Fatalf("companions output = %q, want %q", output.String(), want)
 		}
 	}
 }
@@ -779,116 +632,6 @@ func TestShellTransitionRejectedInGlobalScope(t *testing.T) {
 	}
 }
 
-func TestShellLeasesShowsReleasedLeaseDetails(t *testing.T) {
-	t.Parallel()
-
-	ctx := context.Background()
-	env := newTestEnvironment(t)
-	shell, err := New(env)
-	if err != nil {
-		t.Fatalf("New() error = %v", err)
-	}
-
-	project, _, _, lease := createReleasedLeaseFixtureAtPath(t, ctx, env, "/tmp/alpha/task-1/run-1/try-1")
-
-	var output bytes.Buffer
-	if err := shell.HandleLine(ctx, "/project "+project.Key, &output); err != nil {
-		t.Fatalf("HandleLine(/project) error = %v", err)
-	}
-	output.Reset()
-	if err := shell.HandleLine(ctx, "/leases all", &output); err != nil {
-		t.Fatalf("HandleLine(/leases all) error = %v", err)
-	}
-
-	for _, want := range []string{"project=alpha", "state=released", "cleanup=pending", lease.BranchName, lease.WorktreePath} {
-		if !strings.Contains(output.String(), want) {
-			t.Fatalf("leases output = %q, want %q", output.String(), want)
-		}
-	}
-}
-
-func TestShellLeasesInspectShowsLeaseDetails(t *testing.T) {
-	t.Parallel()
-
-	ctx := context.Background()
-	env := newTestEnvironment(t)
-	shell, err := New(env)
-	if err != nil {
-		t.Fatalf("New() error = %v", err)
-	}
-
-	project, task, run, lease := createReleasedLeaseFixtureAtPath(t, ctx, env, "/tmp/alpha/task-1/run-1/try-1")
-
-	var output bytes.Buffer
-	if err := shell.HandleLine(ctx, "/project "+project.Key, &output); err != nil {
-		t.Fatalf("HandleLine(/project) error = %v", err)
-	}
-	output.Reset()
-	if err := shell.HandleLine(ctx, "/leases inspect "+strconv.FormatInt(lease.ID, 10), &output); err != nil {
-		t.Fatalf("HandleLine(/leases inspect) error = %v", err)
-	}
-
-	for _, want := range []string{
-		"lease_id=" + strconv.FormatInt(lease.ID, 10),
-		"project=alpha",
-		"task=" + strconv.FormatInt(task.ID, 10),
-		"run=" + strconv.FormatInt(run.ID, 10),
-		"branch=" + lease.BranchName,
-		"worktree=" + lease.WorktreePath,
-		"repo_root=/tmp/alpha",
-		"state=released",
-		"cleanup=pending",
-	} {
-		if !strings.Contains(output.String(), want) {
-			t.Fatalf("inspect output = %q, want %q", output.String(), want)
-		}
-	}
-}
-
-func TestShellLeasesCleanupRemovesReleasedLease(t *testing.T) {
-	t.Parallel()
-
-	ctx := context.Background()
-	env := newTestEnvironment(t)
-	worktreePath := filepath.Join(t.TempDir(), "alpha", "task-1", "run-1", "try-1")
-	env.Leases.Git = shellCleanupGit{}
-	shell, err := New(env)
-	if err != nil {
-		t.Fatalf("New() error = %v", err)
-	}
-
-	project, _, _, lease := createReleasedLeaseFixtureAtPath(t, ctx, env, worktreePath)
-	if err := os.MkdirAll(worktreePath, 0o755); err != nil {
-		t.Fatalf("MkdirAll(worktreePath) error = %v", err)
-	}
-
-	var output bytes.Buffer
-	if err := shell.HandleLine(ctx, "/project "+project.Key, &output); err != nil {
-		t.Fatalf("HandleLine(/project) error = %v", err)
-	}
-	output.Reset()
-	if err := shell.HandleLine(ctx, "/leases cleanup confirm", &output); err != nil {
-		t.Fatalf("HandleLine(/leases cleanup confirm) error = %v", err)
-	}
-
-	updated, err := env.Store.GetWorktreeLease(ctx, lease.ID)
-	if err != nil {
-		t.Fatalf("GetWorktreeLease() error = %v", err)
-	}
-	if updated.State != "cleaned" {
-		t.Fatalf("updated.State = %q, want cleaned", updated.State)
-	}
-	if updated.CleanedUpAt == nil {
-		t.Fatalf("updated.CleanedUpAt = nil, want value")
-	}
-	if _, err := os.Stat(worktreePath); !os.IsNotExist(err) {
-		t.Fatalf("Stat(worktreePath) err = %v, want not exist", err)
-	}
-	if !strings.Contains(output.String(), "cleaned 1 lease") {
-		t.Fatalf("cleanup output = %q, want cleaned count", output.String())
-	}
-}
-
 func newTestEnvironment(t *testing.T) Environment {
 	t.Helper()
 
@@ -923,126 +666,10 @@ func newTestEnvironment(t *testing.T) Environment {
 	}
 
 	return Environment{
-		Store:          store,
-		Registry:       registry,
-		SessionStore:   SessionStore{Path: filepath.Join(stateDir, "cli-session.json")},
-		ExecutorConfig: mustLoadExecutorConfig(t),
-		Executors:      executorrouter.DefaultCatalog(),
-		Leases: leases.Manager{
-			Store:        store,
-			Git:          shellTestGit{},
-			WorktreeRoot: t.TempDir(),
-		},
+		Store:        store,
+		Registry:     registry,
+		SessionStore: SessionStore{Path: filepath.Join(stateDir, "cli-session.json")},
 	}
-}
-
-func configureShellHarnessDriver(t *testing.T) {
-	t.Helper()
-
-	path := filepath.Join(t.TempDir(), "codex-driver.sh")
-	if err := os.WriteFile(path, []byte(`#!/usr/bin/env bash
-payload="$(cat)"
-PAYLOAD="$payload" python3 - <<'PY'
-import json
-import os
-
-request = json.loads(os.environ["PAYLOAD"])
-action = request.get("action")
-if action == "health":
-    print(json.dumps({"status":"healthy","details":"shell test driver healthy"}))
-else:
-    print(json.dumps({"status":"completed","output":"driver test ok","handle":{"external_id":"fixture-driver"}}))
-PY
-`), 0o755); err != nil {
-		t.Fatalf("WriteFile(driver) error = %v", err)
-	}
-	if err := os.Chmod(path, 0o755); err != nil {
-		t.Fatalf("Chmod(driver) error = %v", err)
-	}
-	t.Setenv("ODIN_CODEX_DRIVER", path)
-}
-
-func createReleasedLeaseFixtureAtPath(t *testing.T, ctx context.Context, env Environment, worktreePath string) (sqlite.Project, sqlite.Task, sqlite.Run, sqlite.WorktreeLease) {
-	t.Helper()
-
-	project, err := env.Store.CreateProject(ctx, sqlite.CreateProjectParams{
-		Key:           "alpha",
-		Name:          "Alpha",
-		Scope:         "project",
-		GitRoot:       "/tmp/alpha",
-		DefaultBranch: "main",
-		ManifestPath:  "config/projects.yaml",
-	})
-	if err != nil {
-		t.Fatalf("CreateProject() error = %v", err)
-	}
-	task, err := env.Store.CreateTask(ctx, sqlite.CreateTaskParams{
-		ProjectID:   project.ID,
-		Key:         "lease-task",
-		Title:       "Lease task",
-		Status:      "completed",
-		Scope:       "project",
-		RequestedBy: "operator",
-	})
-	if err != nil {
-		t.Fatalf("CreateTask() error = %v", err)
-	}
-	run, err := env.Store.StartRun(ctx, sqlite.StartRunParams{
-		TaskID:   task.ID,
-		Executor: "codex_headless",
-		Attempt:  1,
-		Status:   "running",
-	})
-	if err != nil {
-		t.Fatalf("StartRun() error = %v", err)
-	}
-	lease, err := env.Store.CreateWorktreeLease(ctx, sqlite.CreateWorktreeLeaseParams{
-		ProjectID:    project.ID,
-		TaskID:       task.ID,
-		RunID:        run.ID,
-		Mode:         "mutable",
-		BranchName:   "odin/alpha/task-1/run-1/try-1",
-		WorktreePath: worktreePath,
-		RepoRoot:     "/tmp/alpha",
-		State:        "active",
-	})
-	if err != nil {
-		t.Fatalf("CreateWorktreeLease() error = %v", err)
-	}
-	lease, err = env.Store.ReleaseWorktreeLease(ctx, sqlite.ReleaseWorktreeLeaseParams{
-		LeaseID: lease.ID,
-		State:   "released",
-	})
-	if err != nil {
-		t.Fatalf("ReleaseWorktreeLease() error = %v", err)
-	}
-	return project, task, run, lease
-}
-
-type shellCleanupGit struct{}
-
-func (shellCleanupGit) BranchExists(context.Context, string, string) (bool, error) { return false, nil }
-func (shellCleanupGit) CreateBranch(context.Context, string, string, string) error { return nil }
-func (shellCleanupGit) AddWorktree(context.Context, string, string, string) error  { return nil }
-func (shellCleanupGit) RemoveWorktree(_ context.Context, _ string, worktreePath string) error {
-	return os.RemoveAll(worktreePath)
-}
-
-type shellTestGit struct{}
-
-func (shellTestGit) BranchExists(context.Context, string, string) (bool, error) { return false, nil }
-func (shellTestGit) CreateBranch(context.Context, string, string, string) error { return nil }
-func (shellTestGit) AddWorktree(context.Context, string, string, string) error  { return nil }
-func (shellTestGit) RemoveWorktree(context.Context, string, string) error       { return nil }
-
-func mustLoadExecutorConfig(t *testing.T) executorrouter.Config {
-	t.Helper()
-
-	cfg, err := executorrouter.LoadConfig(filepath.Clean(filepath.Join("..", "..", "..", "config", "executors.yaml")))
-	if err != nil {
-		t.Fatalf("LoadConfig(executors) error = %v", err)
-	}
-	return cfg
 }
 
 func hasTransitionEvent(events []runtimeevents.Record, want runtimeevents.Type) bool {
@@ -1052,59 +679,4 @@ func hasTransitionEvent(events []runtimeevents.Record, want runtimeevents.Type) 
 		}
 	}
 	return false
-}
-
-type recordingCommandService struct {
-	calls    []capabilities.InvokeRequest
-	response capabilities.InvokeResponse
-	err      error
-}
-
-func (service *recordingCommandService) Execute(_ context.Context, request capabilities.InvokeRequest) (capabilities.InvokeResponse, error) {
-	service.calls = append(service.calls, request)
-	if service.err != nil {
-		return capabilities.InvokeResponse{}, service.err
-	}
-	return service.response, nil
-}
-
-type recordingCapabilityGateway struct {
-	listByScope    map[string][]capabilities.CapabilityCard
-	listCalls      []recordingCapabilityListCall
-	descriptor     capabilities.Descriptor
-	getCalls       []recordingCapabilityGetCall
-	invokeCalls    []capabilities.InvokeRequest
-	invokeResponse capabilities.InvokeResponse
-}
-
-type recordingCapabilityListCall struct {
-	kind  registry.Kind
-	scope string
-}
-
-type recordingCapabilityGetCall struct {
-	id      string
-	version string
-}
-
-func (gateway *recordingCapabilityGateway) ListCapabilities(kind registry.Kind, scope string) []capabilities.CapabilityCard {
-	gateway.listCalls = append(gateway.listCalls, recordingCapabilityListCall{kind: kind, scope: scope})
-	if cards, ok := gateway.listByScope[scope]; ok {
-		return append([]capabilities.CapabilityCard(nil), cards...)
-	}
-	return nil
-}
-
-func (gateway *recordingCapabilityGateway) GetCapability(id, version string) (capabilities.Descriptor, error) {
-	gateway.getCalls = append(gateway.getCalls, recordingCapabilityGetCall{id: id, version: version})
-	return gateway.descriptor, nil
-}
-
-func (gateway *recordingCapabilityGateway) InvokeCapability(_ context.Context, request capabilities.InvokeRequest) (capabilities.InvokeResponse, error) {
-	gateway.invokeCalls = append(gateway.invokeCalls, request)
-	return gateway.invokeResponse, nil
-}
-
-func (gateway *recordingCapabilityGateway) GetRun(context.Context, int64) (capabilities.RunEnvelope, error) {
-	return capabilities.RunEnvelope{}, nil
 }

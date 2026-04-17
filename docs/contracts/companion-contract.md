@@ -1,28 +1,42 @@
+---
+title: Companion Contract
+status: active
+date: 2026-04-16
+---
+
 # Companion Contract
 
-Companions are durable role contracts scoped to a workspace. They are not provider-specific prompt bundles.
+Companions are durable runtime roles attached to a workspace. They represent persistent operational identities such as assistants, advisors, operators, and specialists.
 
-Each companion record stores:
+## Canonical kinds
 
-- `workspace_id`
-- `key`
-- `title`
-- `kind`
-- `charter`
-- `status`
-- `initiative_scope_json`
-- `tool_policy_json`
-- `memory_policy_json`
-- `planning_policy_json`
+- `assistant`
+- `advisor`
+- `operator`
+- `specialist`
 
-Workspace linkage:
+## Contract rules
 
-- `workspaces.default_companion_key` points at the workspace's default companion key.
-- `initiatives.owner_companion_id` points at the companion assigned to lead an initiative.
+- A companion is durable state, not a transient prompt bundle.
+- A companion may reference catalog capabilities, tool policies, memory policy, and planning policy.
+- A companion is not itself provider-specific. Provider prompts, model wrappers, and executor-specific bundles belong elsewhere.
+- Companion records should be stable across runs and updated through explicit persistence, not inferred from one-off conversations.
 
-Task 3 keeps the contract intentionally thin:
+## Persistence shape
 
-- bootstrap or reuse a default operator companion per workspace
-- list companions for a workspace
-- assign a companion to an initiative
-- treat workspace policy defaults and companion or initiative overlays as fail-closed governance inputs
+A companion is identified by workspace and key, and stores:
+
+- title
+- kind
+- charter
+- status
+- initiative scope JSON
+- tool policy JSON
+- memory policy JSON
+- planning policy JSON
+
+## Usage guidance
+
+- Use companions as the durable role layer when a workspace needs named assistants or advisors.
+- Keep provider-specific prompt construction outside the companion contract.
+- Treat companion policy fields as declarative inputs for downstream systems, not as execution logic themselves.

@@ -13,7 +13,7 @@ import (
 	"odin-os/internal/store/sqlite"
 )
 
-func TestRunAttemptListFiltersRunsByScope(t *testing.T) {
+func TestListFiltersRunsByScope(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
