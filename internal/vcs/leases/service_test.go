@@ -278,6 +278,74 @@ func TestMaintenanceHeartbeatActiveLeasesSkipsOrphanActiveLease(t *testing.T) {
 	}
 }
 
+func TestMaintenanceHeartbeatActiveLeasesIncludesPreparingCurrentRunLease(t *testing.T) {
+	ctx := context.Background()
+	store := openManagerTestStore(t)
+	defer store.Close()
+
+	project, err := store.CreateProject(ctx, sqlite.CreateProjectParams{
+		Key:           "cfipros",
+		Name:          "CFI Pros",
+		Scope:         "project",
+		GitRoot:       "/home/orchestrator/projects/cfipros",
+		DefaultBranch: "main",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+	task, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "preparing-heartbeat",
+		Title:       "Preparing lease heartbeat",
+		Status:      "queued",
+		Scope:       "project",
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+	run, err := store.StartRun(ctx, sqlite.StartRunParams{
+		TaskID:     task.ID,
+		Executor:   "codex",
+		Attempt:    1,
+		Status:     "preparing",
+		TaskStatus: "preparing",
+	})
+	if err != nil {
+		t.Fatalf("StartRun() error = %v", err)
+	}
+	lease, err := store.CreateWorktreeLease(ctx, sqlite.CreateWorktreeLeaseParams{
+		ProjectID:    project.ID,
+		TaskID:       task.ID,
+		RunID:        run.ID,
+		Mode:         "mutable",
+		BranchName:   "odin/cfipros/task-preparing/run-1/try-1",
+		WorktreePath: filepath.ToSlash(filepath.Join(t.TempDir(), "preparing")),
+		RepoRoot:     project.GitRoot,
+		State:        "active",
+	})
+	if err != nil {
+		t.Fatalf("CreateWorktreeLease() error = %v", err)
+	}
+
+	maint := Maintenance{
+		Store: store,
+		Now: func() time.Time {
+			return lease.HeartbeatAt.Add(30 * time.Second)
+		},
+	}
+	store.Now = maint.Now
+
+	result, err := maint.HeartbeatActive(ctx)
+	if err != nil {
+		t.Fatalf("HeartbeatActive() error = %v", err)
+	}
+	if result.Updated != 1 {
+		t.Fatalf("HeartbeatActive().Updated = %d, want 1", result.Updated)
+	}
+}
+
 type fakeCleanupGit struct {
 	removeCalls int
 	removeErr   error

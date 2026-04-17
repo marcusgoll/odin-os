@@ -2549,7 +2549,7 @@ func (store *Store) ListHeartbeatEligibleWorktreeLeases(ctx context.Context) ([]
 		WHERE wl.state = 'active'
 		  AND wl.cleaned_up_at IS NULL
 		  AND t.current_run_id = wl.run_id
-		  AND t.status = 'running'
+		  AND t.status IN ('preparing', 'running')
 		  AND r.status IN ('preparing', 'running')
 		ORDER BY wl.id ASC
 	`)
