@@ -254,6 +254,95 @@ func TestProjectViewsTreatInterruptedDeadLetterRecoveryAsTerminalWork(t *testing
 	}
 }
 
+func TestWorkspaceMemoryProjectionsExposeScopedSummaries(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openObservabilityStore(t)
+	defer store.Close()
+
+	seedProjectionMemoryFixture(t, ctx, store)
+
+	workspaceViews, err := projections.ListWorkspaceMemoryViews(ctx, store.DB(), projections.WorkspaceMemoryQuery{
+		Limit: 10,
+	})
+	if err != nil {
+		t.Fatalf("ListWorkspaceMemoryViews() error = %v", err)
+	}
+	if len(workspaceViews) != 1 || workspaceViews[0].WorkspaceKey != "marcus" || workspaceViews[0].WorkspaceSummaryCount != 1 {
+		t.Fatalf("workspace views = %+v, want marcus workspace summary count", workspaceViews)
+	}
+
+	initiativeViews, err := projections.ListInitiativeMemoryViews(ctx, store.DB(), projections.InitiativeMemoryQuery{
+		Limit: 10,
+	})
+	if err != nil {
+		t.Fatalf("ListInitiativeMemoryViews() error = %v", err)
+	}
+	if len(initiativeViews) != 1 || initiativeViews[0].InitiativeKey != "alpha-initiative" || initiativeViews[0].SummaryCount != 1 {
+		t.Fatalf("initiative views = %+v, want alpha-initiative summary count", initiativeViews)
+	}
+	if initiativeViews[0].LastSummary != "Alpha uses worktree isolation." {
+		t.Fatalf("initiative last summary = %q, want project summary", initiativeViews[0].LastSummary)
+	}
+
+	companionViews, err := projections.ListCompanionMemoryViews(ctx, store.DB(), projections.CompanionMemoryQuery{
+		Limit: 10,
+	})
+	if err != nil {
+		t.Fatalf("ListCompanionMemoryViews() error = %v", err)
+	}
+	if len(companionViews) != 1 || companionViews[0].CompanionKey != "strategist" || companionViews[0].SummaryCount != 1 {
+		t.Fatalf("companion views = %+v, want strategist summary count", companionViews)
+	}
+	if companionViews[0].LastSummary != "Escalate policy-sensitive changes." {
+		t.Fatalf("companion last summary = %q, want overlay summary", companionViews[0].LastSummary)
+	}
+}
+
+func TestMemoryProjectionsHonorScopedQueries(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openObservabilityStore(t)
+	defer store.Close()
+
+	marcusWorkspaceID, secondaryWorkspaceID := seedProjectionScopedMemoryFixture(t, ctx, store)
+
+	workspaceViews, err := projections.ListWorkspaceMemoryViews(ctx, store.DB(), projections.WorkspaceMemoryQuery{
+		WorkspaceID: &marcusWorkspaceID,
+		Limit:       1,
+	})
+	if err != nil {
+		t.Fatalf("ListWorkspaceMemoryViews(filtered) error = %v", err)
+	}
+	if len(workspaceViews) != 1 || workspaceViews[0].WorkspaceID != marcusWorkspaceID {
+		t.Fatalf("workspace views = %+v, want only marcus workspace", workspaceViews)
+	}
+
+	initiativeViews, err := projections.ListInitiativeMemoryViews(ctx, store.DB(), projections.InitiativeMemoryQuery{
+		WorkspaceID: &marcusWorkspaceID,
+		Limit:       1,
+	})
+	if err != nil {
+		t.Fatalf("ListInitiativeMemoryViews(filtered) error = %v", err)
+	}
+	if len(initiativeViews) != 1 || initiativeViews[0].WorkspaceID != marcusWorkspaceID {
+		t.Fatalf("initiative views = %+v, want only marcus initiative view", initiativeViews)
+	}
+
+	companionViews, err := projections.ListCompanionMemoryViews(ctx, store.DB(), projections.CompanionMemoryQuery{
+		WorkspaceID: &secondaryWorkspaceID,
+		Limit:       1,
+	})
+	if err != nil {
+		t.Fatalf("ListCompanionMemoryViews(filtered) error = %v", err)
+	}
+	if len(companionViews) != 1 || companionViews[0].WorkspaceID != secondaryWorkspaceID {
+		t.Fatalf("companion views = %+v, want only secondary companion view", companionViews)
+	}
+}
+
 func openObservabilityStore(t *testing.T) *sqlite.Store {
 	t.Helper()
 
@@ -265,6 +354,185 @@ func openObservabilityStore(t *testing.T) *sqlite.Store {
 		t.Fatalf("Migrate() error = %v", err)
 	}
 	return store
+}
+
+func seedProjectionMemoryFixture(t *testing.T, ctx context.Context, store *sqlite.Store) {
+	t.Helper()
+
+	workspace, err := store.CreateWorkspace(ctx, sqlite.CreateWorkspaceParams{
+		Key:        "marcus",
+		Name:       "Marcus",
+		OwnerRef:   "marcus",
+		Status:     "active",
+		PolicyJSON: "{}",
+	})
+	if err != nil {
+		t.Fatalf("CreateWorkspace() error = %v", err)
+	}
+	project, err := store.CreateProject(ctx, sqlite.CreateProjectParams{
+		Key:           "alpha",
+		Name:          "Alpha",
+		Scope:         "project",
+		GitRoot:       "/tmp/alpha",
+		DefaultBranch: "main",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+	initiative, err := store.CreateInitiative(ctx, sqlite.CreateInitiativeParams{
+		WorkspaceID:     workspace.ID,
+		Key:             "alpha-initiative",
+		Title:           "Alpha Initiative",
+		Kind:            "managed_project",
+		Status:          "active",
+		Summary:         "Alpha delivery",
+		LinkedProjectID: &project.ID,
+	})
+	if err != nil {
+		t.Fatalf("CreateInitiative() error = %v", err)
+	}
+	companion, err := store.CreateCompanion(ctx, sqlite.CreateCompanionParams{
+		WorkspaceID:         workspace.ID,
+		Key:                 "strategist",
+		Title:               "Strategist",
+		Kind:                "advisor",
+		Charter:             "Guide strategic decisions",
+		Status:              "active",
+		InitiativeScopeJSON: "[]",
+		MemoryPolicyJSON:    "{}",
+		PlanningPolicyJSON:  "{}",
+		ToolPolicyJSON:      "{}",
+	})
+	if err != nil {
+		t.Fatalf("CreateCompanion() error = %v", err)
+	}
+
+	if _, err := store.RecordMemorySummary(ctx, sqlite.RecordMemorySummaryParams{
+		WorkspaceID:     &workspace.ID,
+		Scope:           "workspace",
+		ScopeKey:        workspace.Key,
+		VisibilityScope: "workspace",
+		RetentionClass:  "durable",
+		MemoryType:      "user_preference",
+		Summary:         "Prefer concise replies.",
+		DetailsJSON:     `{"source":"test"}`,
+	}); err != nil {
+		t.Fatalf("RecordMemorySummary(workspace) error = %v", err)
+	}
+	if _, err := store.RecordMemorySummary(ctx, sqlite.RecordMemorySummaryParams{
+		WorkspaceID:     &workspace.ID,
+		InitiativeID:    &initiative.ID,
+		Scope:           "initiative",
+		ScopeKey:        initiative.Key,
+		VisibilityScope: "initiative",
+		RetentionClass:  "durable",
+		MemoryType:      "project_summary",
+		Summary:         "Alpha uses worktree isolation.",
+		DetailsJSON:     `{"source":"test"}`,
+	}); err != nil {
+		t.Fatalf("RecordMemorySummary(initiative) error = %v", err)
+	}
+	if _, err := store.RecordMemorySummary(ctx, sqlite.RecordMemorySummaryParams{
+		WorkspaceID:     &workspace.ID,
+		CompanionID:     &companion.ID,
+		Scope:           "companion",
+		ScopeKey:        companion.Key,
+		VisibilityScope: "companion",
+		RetentionClass:  "working",
+		MemoryType:      "overlay_note",
+		Summary:         "Escalate policy-sensitive changes.",
+		DetailsJSON:     `{"source":"test"}`,
+	}); err != nil {
+		t.Fatalf("RecordMemorySummary(companion) error = %v", err)
+	}
+}
+
+func seedProjectionScopedMemoryFixture(t *testing.T, ctx context.Context, store *sqlite.Store) (int64, int64) {
+	t.Helper()
+
+	seedProjectionMemoryFixture(t, ctx, store)
+
+	workspace, err := store.CreateWorkspace(ctx, sqlite.CreateWorkspaceParams{
+		Key:        "secondary",
+		Name:       "Secondary",
+		OwnerRef:   "secondary",
+		Status:     "active",
+		PolicyJSON: "{}",
+	})
+	if err != nil {
+		t.Fatalf("CreateWorkspace(secondary) error = %v", err)
+	}
+	initiative, err := store.CreateInitiative(ctx, sqlite.CreateInitiativeParams{
+		WorkspaceID: workspace.ID,
+		Key:         "secondary-initiative",
+		Title:       "Secondary Initiative",
+		Kind:        "delivery",
+		Status:      "active",
+		Summary:     "Secondary delivery",
+	})
+	if err != nil {
+		t.Fatalf("CreateInitiative(secondary) error = %v", err)
+	}
+	companion, err := store.CreateCompanion(ctx, sqlite.CreateCompanionParams{
+		WorkspaceID:         workspace.ID,
+		Key:                 "shadow",
+		Title:               "Shadow",
+		Kind:                "advisor",
+		Charter:             "Secondary helper",
+		Status:              "active",
+		InitiativeScopeJSON: "[]",
+		MemoryPolicyJSON:    "{}",
+		PlanningPolicyJSON:  "{}",
+		ToolPolicyJSON:      "{}",
+	})
+	if err != nil {
+		t.Fatalf("CreateCompanion(secondary) error = %v", err)
+	}
+	if _, err := store.RecordMemorySummary(ctx, sqlite.RecordMemorySummaryParams{
+		WorkspaceID:     &workspace.ID,
+		Scope:           "workspace",
+		ScopeKey:        workspace.Key,
+		VisibilityScope: "workspace",
+		RetentionClass:  "durable",
+		MemoryType:      "user_preference",
+		Summary:         "Secondary workspace memory.",
+		DetailsJSON:     `{"source":"test"}`,
+	}); err != nil {
+		t.Fatalf("RecordMemorySummary(secondary workspace) error = %v", err)
+	}
+	if _, err := store.RecordMemorySummary(ctx, sqlite.RecordMemorySummaryParams{
+		WorkspaceID:     &workspace.ID,
+		InitiativeID:    &initiative.ID,
+		Scope:           "initiative",
+		ScopeKey:        initiative.Key,
+		VisibilityScope: "initiative",
+		RetentionClass:  "durable",
+		MemoryType:      "project_summary",
+		Summary:         "Secondary initiative memory.",
+		DetailsJSON:     `{"source":"test"}`,
+	}); err != nil {
+		t.Fatalf("RecordMemorySummary(secondary initiative) error = %v", err)
+	}
+	if _, err := store.RecordMemorySummary(ctx, sqlite.RecordMemorySummaryParams{
+		WorkspaceID:     &workspace.ID,
+		CompanionID:     &companion.ID,
+		Scope:           "companion",
+		ScopeKey:        companion.Key,
+		VisibilityScope: "companion",
+		RetentionClass:  "working",
+		MemoryType:      "overlay_note",
+		Summary:         "Secondary companion memory.",
+		DetailsJSON:     `{"source":"test"}`,
+	}); err != nil {
+		t.Fatalf("RecordMemorySummary(secondary companion) error = %v", err)
+	}
+
+	marcusWorkspace, err := store.GetWorkspaceByKey(ctx, "marcus")
+	if err != nil {
+		t.Fatalf("GetWorkspaceByKey(marcus) error = %v", err)
+	}
+	return marcusWorkspace.ID, workspace.ID
 }
 
 func seedObservabilityState(t *testing.T, ctx context.Context, store *sqlite.Store) (sqlite.Project, sqlite.Task, sqlite.Run) {

@@ -152,6 +152,189 @@ func TestConversationRespondPersistsScopedTranscriptOwnership(t *testing.T) {
 	}
 }
 
+func TestServiceRespondScopesInitiativeMemoryToCurrentProject(t *testing.T) {
+	t.Parallel()
+
+	service, store := newTestService(t)
+	ctx := context.Background()
+
+	workspace := createConversationWorkspace(t, ctx, store)
+	alphaProject, err := store.GetProjectByKey(ctx, "alpha")
+	if err != nil {
+		t.Fatalf("GetProjectByKey(alpha) error = %v", err)
+	}
+	betaProject, err := store.CreateProject(ctx, sqlite.CreateProjectParams{
+		Key:           "beta",
+		Name:          "Beta",
+		Scope:         "project",
+		GitRoot:       "/tmp/beta",
+		DefaultBranch: "main",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject(beta) error = %v", err)
+	}
+	alphaInitiative := createConversationInitiative(t, ctx, store, workspace.ID, "alpha-initiative", &alphaProject.ID)
+	betaInitiative := createConversationInitiative(t, ctx, store, workspace.ID, "beta-initiative", &betaProject.ID)
+
+	recordConversationMemorySummary(t, ctx, store, sqlite.RecordMemorySummaryParams{
+		WorkspaceID:     &workspace.ID,
+		InitiativeID:    &alphaInitiative.ID,
+		Scope:           "initiative",
+		ScopeKey:        alphaInitiative.Key,
+		VisibilityScope: "initiative",
+		RetentionClass:  "durable",
+		MemoryType:      "summary",
+		Summary:         "alpha milestone captured",
+	})
+	recordConversationMemorySummary(t, ctx, store, sqlite.RecordMemorySummaryParams{
+		WorkspaceID:     &workspace.ID,
+		InitiativeID:    &betaInitiative.ID,
+		Scope:           "initiative",
+		ScopeKey:        betaInitiative.Key,
+		VisibilityScope: "initiative",
+		RetentionClass:  "durable",
+		MemoryType:      "summary",
+		Summary:         "beta milestone captured",
+	})
+
+	result, err := service.Respond(ctx, Request{
+		Scope:  scope.Resolution{Kind: scope.ScopeProject, ProjectKey: "alpha"},
+		Mode:   "ask",
+		Prompt: "show initiative memory",
+	})
+	if err != nil {
+		t.Fatalf("Respond() error = %v", err)
+	}
+	if result.Intent != "memory" {
+		t.Fatalf("Intent = %q, want memory", result.Intent)
+	}
+	if !strings.Contains(result.Answer, "alpha-initiative") {
+		t.Fatalf("Answer = %q, want alpha initiative", result.Answer)
+	}
+	if strings.Contains(result.Answer, "beta-initiative") {
+		t.Fatalf("Answer = %q, should not leak beta initiative", result.Answer)
+	}
+}
+
+func TestServiceRespondScopesWorkspaceAndCompanionMemoryToMarcus(t *testing.T) {
+	t.Parallel()
+
+	service, store := newTestService(t)
+	ctx := context.Background()
+
+	marcus := createConversationWorkspace(t, ctx, store)
+	other, err := store.CreateWorkspace(ctx, sqlite.CreateWorkspaceParams{
+		Key:        "other",
+		Name:       "Other",
+		OwnerRef:   "other",
+		Status:     "active",
+		PolicyJSON: "{}",
+	})
+	if err != nil {
+		t.Fatalf("CreateWorkspace(other) error = %v", err)
+	}
+
+	recordConversationMemorySummary(t, ctx, store, sqlite.RecordMemorySummaryParams{
+		WorkspaceID:     &marcus.ID,
+		Scope:           "workspace",
+		ScopeKey:        marcus.Key,
+		VisibilityScope: "workspace",
+		RetentionClass:  "durable",
+		MemoryType:      "summary",
+		Summary:         "marcus workspace summary",
+	})
+	recordConversationMemorySummary(t, ctx, store, sqlite.RecordMemorySummaryParams{
+		WorkspaceID:     &other.ID,
+		Scope:           "workspace",
+		ScopeKey:        other.Key,
+		VisibilityScope: "workspace",
+		RetentionClass:  "durable",
+		MemoryType:      "summary",
+		Summary:         "other workspace summary",
+	})
+
+	strategist, err := store.CreateCompanion(ctx, sqlite.CreateCompanionParams{
+		WorkspaceID:         marcus.ID,
+		Key:                 "strategist",
+		Title:               "Strategist",
+		Kind:                "advisor",
+		Status:              "active",
+		InitiativeScopeJSON: "[]",
+		MemoryPolicyJSON:    "{}",
+		PlanningPolicyJSON:  "{}",
+		ToolPolicyJSON:      "{}",
+	})
+	if err != nil {
+		t.Fatalf("CreateCompanion(strategist) error = %v", err)
+	}
+	outsider, err := store.CreateCompanion(ctx, sqlite.CreateCompanionParams{
+		WorkspaceID:         other.ID,
+		Key:                 "outsider",
+		Title:               "Outsider",
+		Kind:                "advisor",
+		Status:              "active",
+		InitiativeScopeJSON: "[]",
+		MemoryPolicyJSON:    "{}",
+		PlanningPolicyJSON:  "{}",
+		ToolPolicyJSON:      "{}",
+	})
+	if err != nil {
+		t.Fatalf("CreateCompanion(outsider) error = %v", err)
+	}
+
+	recordConversationMemorySummary(t, ctx, store, sqlite.RecordMemorySummaryParams{
+		WorkspaceID:     &marcus.ID,
+		CompanionID:     &strategist.ID,
+		Scope:           "companion",
+		ScopeKey:        strategist.Key,
+		VisibilityScope: "companion",
+		RetentionClass:  "durable",
+		MemoryType:      "summary",
+		Summary:         "strategist remembered planning cadence",
+	})
+	recordConversationMemorySummary(t, ctx, store, sqlite.RecordMemorySummaryParams{
+		WorkspaceID:     &other.ID,
+		CompanionID:     &outsider.ID,
+		Scope:           "companion",
+		ScopeKey:        outsider.Key,
+		VisibilityScope: "companion",
+		RetentionClass:  "durable",
+		MemoryType:      "summary",
+		Summary:         "outsider memory should stay hidden",
+	})
+
+	workspaceResult, err := service.Respond(ctx, Request{
+		Scope:  scope.Resolution{Kind: scope.ScopeGlobal},
+		Mode:   "ask",
+		Prompt: "show workspace memory",
+	})
+	if err != nil {
+		t.Fatalf("Respond(workspace) error = %v", err)
+	}
+	if !strings.Contains(workspaceResult.Answer, "Workspace marcus") {
+		t.Fatalf("workspace answer = %q, want Marcus workspace", workspaceResult.Answer)
+	}
+	if strings.Contains(workspaceResult.Answer, "other") {
+		t.Fatalf("workspace answer = %q, should not leak other workspace", workspaceResult.Answer)
+	}
+
+	companionResult, err := service.Respond(ctx, Request{
+		Scope:  scope.Resolution{Kind: scope.ScopeGlobal},
+		Mode:   "ask",
+		Prompt: "show companion memory",
+	})
+	if err != nil {
+		t.Fatalf("Respond(companion) error = %v", err)
+	}
+	if !strings.Contains(companionResult.Answer, "strategist") {
+		t.Fatalf("companion answer = %q, want strategist", companionResult.Answer)
+	}
+	if strings.Contains(companionResult.Answer, "outsider") {
+		t.Fatalf("companion answer = %q, should not leak outsider", companionResult.Answer)
+	}
+}
+
 func TestServiceRespondSurfacesExecutorFailure(t *testing.T) {
 	t.Parallel()
 
@@ -473,6 +656,16 @@ func createConversationInitiative(t *testing.T, ctx context.Context, store *sqli
 		t.Fatalf("CreateInitiative() error = %v", err)
 	}
 	return initiative
+}
+
+func recordConversationMemorySummary(t *testing.T, ctx context.Context, store *sqlite.Store, params sqlite.RecordMemorySummaryParams) sqlite.MemorySummary {
+	t.Helper()
+
+	summary, err := store.RecordMemorySummary(ctx, params)
+	if err != nil {
+		t.Fatalf("RecordMemorySummary() error = %v", err)
+	}
+	return summary
 }
 
 func configureConversationHarnessDriver(t *testing.T) {

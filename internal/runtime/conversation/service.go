@@ -195,6 +195,16 @@ func (service Service) Respond(ctx context.Context, request Request) (Response, 
 			Intent:     "doctor",
 			ScopeLabel: scopeLabel,
 		}
+	case commands.IntentMemory:
+		answer, err := service.memoryAnswer(ctx, request.Scope, prompt)
+		if err != nil {
+			return Response{}, err
+		}
+		response = Response{
+			Answer:     answer,
+			Intent:     "memory",
+			ScopeLabel: scopeLabel,
+		}
 	default:
 		answer, executorKey, warning, err := service.executorAnswer(ctx, request, prompt, scopeLabel)
 		if err != nil {
@@ -417,6 +427,145 @@ func (service Service) doctorAnswer(ctx context.Context) (string, error) {
 		return "", err
 	}
 	return fmt.Sprintf("Runtime health is %s.", summary.Status), nil
+}
+
+func (service Service) memoryAnswer(ctx context.Context, resolved scope.Resolution, prompt string) (string, error) {
+	if service.Store == nil {
+		return "", fmt.Errorf("conversation store is required")
+	}
+
+	workspace, err := service.workspaceMemoryContext(ctx)
+	if err != nil {
+		return "", err
+	}
+	if workspace == nil {
+		return "There is no workspace memory recorded yet.", nil
+	}
+
+	normalized := strings.ToLower(strings.TrimSpace(prompt))
+	switch {
+	case strings.Contains(normalized, "companion"):
+		views, err := projections.ListCompanionMemoryViews(ctx, service.Store.DB(), projections.CompanionMemoryQuery{
+			WorkspaceID: &workspace.ID,
+			Limit:       10,
+		})
+		if err != nil {
+			return "", err
+		}
+		return companionMemoryAnswer(workspace.Key, views), nil
+	case strings.Contains(normalized, "initiative"):
+		initiative, err := service.initiativeMemoryContext(ctx, workspace.ID, resolved)
+		if err != nil {
+			return "", err
+		}
+		query := projections.InitiativeMemoryQuery{
+			WorkspaceID: &workspace.ID,
+			Limit:       10,
+		}
+		if initiative != nil {
+			query.InitiativeID = &initiative.ID
+			query.Limit = 1
+		}
+		views, err := projections.ListInitiativeMemoryViews(ctx, service.Store.DB(), query)
+		if err != nil {
+			return "", err
+		}
+		return initiativeMemoryAnswer(workspace.Key, initiative, views), nil
+	default:
+		views, err := projections.ListWorkspaceMemoryViews(ctx, service.Store.DB(), projections.WorkspaceMemoryQuery{
+			WorkspaceID: &workspace.ID,
+			Limit:       1,
+		})
+		if err != nil {
+			return "", err
+		}
+		for _, view := range views {
+			return fmt.Sprintf(
+				"Workspace %s has %d workspace summaries, %d initiative summaries, and %d companion summaries.",
+				view.WorkspaceKey,
+				view.WorkspaceSummaryCount,
+				view.InitiativeSummaryCount,
+				view.CompanionSummaryCount,
+			), nil
+		}
+		return "There is no workspace memory recorded yet.", nil
+	}
+}
+
+func (service Service) workspaceMemoryContext(ctx context.Context) (*sqlite.Workspace, error) {
+	workspace, err := coreworkspaces.Service{Store: service.Store}.GetByKey(ctx, defaultWorkspaceKey)
+	switch err {
+	case nil:
+		return &workspace, nil
+	case sql.ErrNoRows:
+		return nil, nil
+	default:
+		return nil, err
+	}
+}
+
+func (service Service) initiativeMemoryContext(ctx context.Context, workspaceID int64, resolved scope.Resolution) (*sqlite.Initiative, error) {
+	projectID, err := service.projectIDForScope(ctx, resolved)
+	if err != nil || projectID == nil {
+		return nil, err
+	}
+
+	initiatives, err := coreinitiatives.Service{Store: service.Store}.ListByWorkspace(ctx, workspaceID)
+	if err != nil {
+		return nil, err
+	}
+	for _, initiative := range initiatives {
+		if initiative.LinkedProjectID != nil && *initiative.LinkedProjectID == *projectID {
+			return &initiative, nil
+		}
+	}
+	return nil, nil
+}
+
+func initiativeMemoryAnswer(workspaceKey string, scoped *sqlite.Initiative, views []projections.InitiativeMemoryView) string {
+	withSummaries := make([]projections.InitiativeMemoryView, 0, len(views))
+	for _, view := range views {
+		if view.SummaryCount == 0 {
+			continue
+		}
+		withSummaries = append(withSummaries, view)
+	}
+	if len(withSummaries) == 0 {
+		return "There is no initiative memory recorded yet."
+	}
+	if scoped != nil {
+		view := withSummaries[0]
+		return fmt.Sprintf("Initiative %s has %d memory summary items. Latest: %s.", view.InitiativeKey, view.SummaryCount, view.LastSummary)
+	}
+	examples := make([]string, 0, min(3, len(withSummaries)))
+	for _, view := range withSummaries {
+		examples = append(examples, fmt.Sprintf("%s (%d): %s", view.InitiativeKey, view.SummaryCount, view.LastSummary))
+		if len(examples) == 3 {
+			break
+		}
+	}
+	return fmt.Sprintf("Workspace %s has %d initiative(s) with memory. %s.", workspaceKey, len(withSummaries), strings.Join(examples, "; "))
+}
+
+func companionMemoryAnswer(workspaceKey string, views []projections.CompanionMemoryView) string {
+	withSummaries := make([]projections.CompanionMemoryView, 0, len(views))
+	for _, view := range views {
+		if view.SummaryCount == 0 {
+			continue
+		}
+		withSummaries = append(withSummaries, view)
+	}
+	if len(withSummaries) == 0 {
+		return "There is no companion memory recorded yet."
+	}
+	examples := make([]string, 0, min(3, len(withSummaries)))
+	for _, view := range withSummaries {
+		examples = append(examples, fmt.Sprintf("%s (%d): %s", view.CompanionKey, view.SummaryCount, view.LastSummary))
+		if len(examples) == 3 {
+			break
+		}
+	}
+	return fmt.Sprintf("Workspace %s has %d companion(s) with memory. %s.", workspaceKey, len(withSummaries), strings.Join(examples, "; "))
 }
 
 func (service Service) executorAnswer(ctx context.Context, request Request, prompt string, scopeLabel string) (string, string, string, error) {

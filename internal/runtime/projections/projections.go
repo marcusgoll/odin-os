@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	runtimeevents "odin-os/internal/runtime/events"
@@ -116,6 +117,57 @@ type ProjectPortfolioView struct {
 	ActiveRunCount       int
 	PendingApprovalCount int
 	OpenIncidentCount    int
+}
+
+type WorkspaceMemoryView struct {
+	WorkspaceID            int64   `json:"workspace_id"`
+	WorkspaceKey           string  `json:"workspace_key"`
+	WorkspaceName          string  `json:"workspace_name"`
+	WorkspaceSummaryCount  int     `json:"workspace_summary_count"`
+	InitiativeSummaryCount int     `json:"initiative_summary_count"`
+	CompanionSummaryCount  int     `json:"companion_summary_count"`
+	LastMemoryAt           *string `json:"last_memory_at,omitempty"`
+}
+
+type WorkspaceMemoryQuery struct {
+	WorkspaceID *int64
+	Limit       int
+}
+
+type InitiativeMemoryView struct {
+	InitiativeID  int64   `json:"initiative_id"`
+	WorkspaceID   int64   `json:"workspace_id"`
+	InitiativeKey string  `json:"initiative_key"`
+	Title         string  `json:"title"`
+	Kind          string  `json:"kind"`
+	Status        string  `json:"status"`
+	SummaryCount  int     `json:"summary_count"`
+	LastSummary   string  `json:"last_summary"`
+	LastUpdatedAt *string `json:"last_updated_at,omitempty"`
+}
+
+type InitiativeMemoryQuery struct {
+	WorkspaceID  *int64
+	InitiativeID *int64
+	Limit        int
+}
+
+type CompanionMemoryView struct {
+	CompanionID   int64   `json:"companion_id"`
+	WorkspaceID   int64   `json:"workspace_id"`
+	CompanionKey  string  `json:"companion_key"`
+	Title         string  `json:"title"`
+	Kind          string  `json:"kind"`
+	Status        string  `json:"status"`
+	SummaryCount  int     `json:"summary_count"`
+	LastSummary   string  `json:"last_summary"`
+	LastUpdatedAt *string `json:"last_updated_at,omitempty"`
+}
+
+type CompanionMemoryQuery struct {
+	WorkspaceID  *int64
+	CompanionID  *int64
+	Limit        int
 }
 
 type LearningProposalView struct {
@@ -265,6 +317,171 @@ func ListPendingApprovalViews(ctx context.Context, queryer Queryer) ([]PendingAp
 		views = append(views, view)
 	}
 
+	return views, rows.Err()
+}
+
+func ListWorkspaceMemoryViews(ctx context.Context, queryer Queryer, query WorkspaceMemoryQuery) ([]WorkspaceMemoryView, error) {
+	sqlQuery := `
+		SELECT
+			w.id,
+			w.key,
+			w.name,
+			(SELECT COUNT(*) FROM memory_summaries ms WHERE ms.workspace_id = w.id AND ms.scope = 'workspace') AS workspace_summary_count,
+			(SELECT COUNT(*) FROM memory_summaries ms WHERE ms.workspace_id = w.id AND ms.initiative_id IS NOT NULL) AS initiative_summary_count,
+			(SELECT COUNT(*) FROM memory_summaries ms WHERE ms.workspace_id = w.id AND ms.companion_id IS NOT NULL) AS companion_summary_count,
+			(SELECT MAX(ms.updated_at) FROM memory_summaries ms WHERE ms.workspace_id = w.id) AS last_memory_at
+		FROM workspaces w
+	`
+	args := make([]any, 0, 1)
+	if query.WorkspaceID != nil {
+		sqlQuery += ` WHERE w.id = ?`
+		args = append(args, *query.WorkspaceID)
+	}
+	sqlQuery += ` ORDER BY w.id ASC`
+	sqlQuery += projectionLimitClause(query.Limit)
+
+	rows, err := queryer.QueryContext(ctx, sqlQuery, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var views []WorkspaceMemoryView
+	for rows.Next() {
+		var view WorkspaceMemoryView
+		var lastMemoryAt sql.NullString
+		if err := rows.Scan(
+			&view.WorkspaceID,
+			&view.WorkspaceKey,
+			&view.WorkspaceName,
+			&view.WorkspaceSummaryCount,
+			&view.InitiativeSummaryCount,
+			&view.CompanionSummaryCount,
+			&lastMemoryAt,
+		); err != nil {
+			return nil, err
+		}
+		view.LastMemoryAt = nullableStringPtr(lastMemoryAt)
+		views = append(views, view)
+	}
+	return views, rows.Err()
+}
+
+func ListInitiativeMemoryViews(ctx context.Context, queryer Queryer, query InitiativeMemoryQuery) ([]InitiativeMemoryView, error) {
+	sqlQuery := `
+		SELECT
+			i.id,
+			i.workspace_id,
+			i.key,
+			i.title,
+			i.kind,
+			i.status,
+			(SELECT COUNT(*) FROM memory_summaries ms WHERE ms.initiative_id = i.id) AS summary_count,
+			COALESCE((SELECT ms.summary FROM memory_summaries ms WHERE ms.initiative_id = i.id ORDER BY ms.updated_at DESC, ms.id DESC LIMIT 1), '') AS last_summary,
+			(SELECT MAX(ms.updated_at) FROM memory_summaries ms WHERE ms.initiative_id = i.id) AS last_updated_at
+		FROM initiatives i
+	`
+	clauses := make([]string, 0, 2)
+	args := make([]any, 0, 2)
+	if query.WorkspaceID != nil {
+		clauses = append(clauses, `i.workspace_id = ?`)
+		args = append(args, *query.WorkspaceID)
+	}
+	if query.InitiativeID != nil {
+		clauses = append(clauses, `i.id = ?`)
+		args = append(args, *query.InitiativeID)
+	}
+	if len(clauses) > 0 {
+		sqlQuery += ` WHERE ` + strings.Join(clauses, ` AND `)
+	}
+	sqlQuery += ` ORDER BY i.id ASC`
+	sqlQuery += projectionLimitClause(query.Limit)
+
+	rows, err := queryer.QueryContext(ctx, sqlQuery, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var views []InitiativeMemoryView
+	for rows.Next() {
+		var view InitiativeMemoryView
+		var lastUpdatedAt sql.NullString
+		if err := rows.Scan(
+			&view.InitiativeID,
+			&view.WorkspaceID,
+			&view.InitiativeKey,
+			&view.Title,
+			&view.Kind,
+			&view.Status,
+			&view.SummaryCount,
+			&view.LastSummary,
+			&lastUpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		view.LastUpdatedAt = nullableStringPtr(lastUpdatedAt)
+		views = append(views, view)
+	}
+	return views, rows.Err()
+}
+
+func ListCompanionMemoryViews(ctx context.Context, queryer Queryer, query CompanionMemoryQuery) ([]CompanionMemoryView, error) {
+	sqlQuery := `
+		SELECT
+			c.id,
+			c.workspace_id,
+			c.key,
+			c.title,
+			c.kind,
+			c.status,
+			(SELECT COUNT(*) FROM memory_summaries ms WHERE ms.companion_id = c.id) AS summary_count,
+			COALESCE((SELECT ms.summary FROM memory_summaries ms WHERE ms.companion_id = c.id ORDER BY ms.updated_at DESC, ms.id DESC LIMIT 1), '') AS last_summary,
+			(SELECT MAX(ms.updated_at) FROM memory_summaries ms WHERE ms.companion_id = c.id) AS last_updated_at
+		FROM companions c
+	`
+	clauses := make([]string, 0, 2)
+	args := make([]any, 0, 2)
+	if query.WorkspaceID != nil {
+		clauses = append(clauses, `c.workspace_id = ?`)
+		args = append(args, *query.WorkspaceID)
+	}
+	if query.CompanionID != nil {
+		clauses = append(clauses, `c.id = ?`)
+		args = append(args, *query.CompanionID)
+	}
+	if len(clauses) > 0 {
+		sqlQuery += ` WHERE ` + strings.Join(clauses, ` AND `)
+	}
+	sqlQuery += ` ORDER BY c.id ASC`
+	sqlQuery += projectionLimitClause(query.Limit)
+
+	rows, err := queryer.QueryContext(ctx, sqlQuery, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var views []CompanionMemoryView
+	for rows.Next() {
+		var view CompanionMemoryView
+		var lastUpdatedAt sql.NullString
+		if err := rows.Scan(
+			&view.CompanionID,
+			&view.WorkspaceID,
+			&view.CompanionKey,
+			&view.Title,
+			&view.Kind,
+			&view.Status,
+			&view.SummaryCount,
+			&view.LastSummary,
+			&lastUpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		view.LastUpdatedAt = nullableStringPtr(lastUpdatedAt)
+		views = append(views, view)
+	}
 	return views, rows.Err()
 }
 
@@ -962,4 +1179,20 @@ func nullableInt64Ptr(value sql.NullInt64) *int64 {
 	ptr := new(int64)
 	*ptr = value.Int64
 	return ptr
+}
+
+func nullableStringPtr(value sql.NullString) *string {
+	if !value.Valid {
+		return nil
+	}
+	ptr := new(string)
+	*ptr = value.String
+	return ptr
+}
+
+func projectionLimitClause(limit int) string {
+	if limit <= 0 {
+		return ``
+	}
+	return fmt.Sprintf(" LIMIT %d", limit)
 }

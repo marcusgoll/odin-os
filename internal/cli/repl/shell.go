@@ -21,6 +21,7 @@ import (
 	convsvc "odin-os/internal/runtime/conversation"
 	healthsvc "odin-os/internal/runtime/health"
 	jobsvc "odin-os/internal/runtime/jobs"
+	"odin-os/internal/runtime/projections"
 	runsvc "odin-os/internal/runtime/runs"
 	"odin-os/internal/store/sqlite"
 	"odin-os/internal/vcs/leases"
@@ -50,6 +51,8 @@ type Shell struct {
 
 const transitionUsage = "/transition [status] | /transition set <state> [allow=<csv>] [confirm] because <reason...>"
 const leaseUsage = "/leases [active|released|all] | /leases inspect <lease-id> | /leases cleanup confirm"
+const memoryUsage = "/memory [workspace|initiatives|companions]"
+const memoryViewLimit = 10
 
 func New(env Environment) (*Shell, error) {
 	cache, err := env.SessionStore.Load()
@@ -202,13 +205,16 @@ func (shell *Shell) handleCommand(ctx context.Context, command commands.Command,
 		if _, err := fmt.Fprintln(output, "prefer explicit cli commands outside the repl: odin help | odin status --json | odin task run --project <key> --title <title> | odin repl"); err != nil {
 			return err
 		}
-		if _, err := fmt.Fprintln(output, "repl compatibility commands: /help /mode /scope /project /transition /observe /compare /leases /jobs /runs /approvals /logs /doctor /self /quit"); err != nil {
+		if _, err := fmt.Fprintln(output, "repl compatibility commands: /help /mode /scope /project /transition /observe /compare /leases /jobs /runs /approvals /logs /doctor /memory /self /quit"); err != nil {
 			return err
 		}
 		if _, err := fmt.Fprintf(output, "%s\n", transitionUsage); err != nil {
 			return err
 		}
-		_, err := fmt.Fprintf(output, "%s\n", leaseUsage)
+		if _, err := fmt.Fprintf(output, "%s\n", leaseUsage); err != nil {
+			return err
+		}
+		_, err := fmt.Fprintf(output, "%s\n", memoryUsage)
 		return err
 	case "mode":
 		return shell.handleMode(command.Args, output)
@@ -234,6 +240,8 @@ func (shell *Shell) handleCommand(ctx context.Context, command commands.Command,
 		return shell.handleLogs(ctx, output)
 	case "doctor":
 		return shell.handleDoctor(ctx, command.Args, output)
+	case "memory":
+		return shell.handleMemory(ctx, command.Args, output)
 	case "self":
 		return shell.handleSelf(output)
 	case "exit", "quit":
@@ -795,6 +803,178 @@ func (shell *Shell) handleSelf(output io.Writer) error {
 	}
 	_, err := fmt.Fprintf(output, "project=%s scope=%s\n", project.Key, shell.scopeLabel())
 	return err
+}
+
+func (shell *Shell) handleMemory(ctx context.Context, args []string, output io.Writer) error {
+	target := "workspace"
+	if len(args) > 0 {
+		target = strings.ToLower(args[0])
+	}
+
+	switch target {
+	case "workspace":
+		return shell.renderWorkspaceMemory(ctx, output)
+	case "initiative", "initiatives":
+		return shell.renderInitiativeMemory(ctx, output)
+	case "companion", "companions":
+		return shell.renderCompanionMemory(ctx, output)
+	default:
+		_, err := fmt.Fprintf(output, "usage: %s\n", memoryUsage)
+		return err
+	}
+}
+
+func (shell *Shell) renderWorkspaceMemory(ctx context.Context, output io.Writer) error {
+	workspace, err := shell.workspaceMemoryContext(ctx)
+	if err != nil {
+		return err
+	}
+	if workspace == nil {
+		_, err := fmt.Fprintln(output, "no workspace memory")
+		return err
+	}
+
+	views, err := projections.ListWorkspaceMemoryViews(ctx, shell.env.Store.DB(), projections.WorkspaceMemoryQuery{
+		WorkspaceID: &workspace.ID,
+		Limit:       1,
+	})
+	if err != nil {
+		return err
+	}
+	if len(views) == 0 {
+		_, err := fmt.Fprintln(output, "no workspace memory")
+		return err
+	}
+
+	for _, view := range views {
+		if _, err := fmt.Fprintf(
+			output,
+			"workspace %s workspace_summaries=%d initiative_summaries=%d companion_summaries=%d\n",
+			view.WorkspaceKey,
+			view.WorkspaceSummaryCount,
+			view.InitiativeSummaryCount,
+			view.CompanionSummaryCount,
+		); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (shell *Shell) renderInitiativeMemory(ctx context.Context, output io.Writer) error {
+	workspace, initiative, err := shell.initiativeMemoryContext(ctx)
+	if err != nil {
+		return err
+	}
+	if workspace == nil {
+		_, err := fmt.Fprintln(output, "no initiative memory")
+		return err
+	}
+
+	query := projections.InitiativeMemoryQuery{
+		WorkspaceID: &workspace.ID,
+		Limit:       memoryViewLimit,
+	}
+	if initiative != nil {
+		query.InitiativeID = &initiative.ID
+		query.Limit = 1
+	}
+
+	views, err := projections.ListInitiativeMemoryViews(ctx, shell.env.Store.DB(), query)
+	if err != nil {
+		return err
+	}
+	count := 0
+	for _, view := range views {
+		if view.SummaryCount == 0 {
+			continue
+		}
+		if _, err := fmt.Fprintf(output, "initiative %s summaries=%d latest=%s\n", view.InitiativeKey, view.SummaryCount, view.LastSummary); err != nil {
+			return err
+		}
+		count++
+	}
+	if count == 0 {
+		_, err := fmt.Fprintln(output, "no initiative memory")
+		return err
+	}
+	return nil
+}
+
+func (shell *Shell) renderCompanionMemory(ctx context.Context, output io.Writer) error {
+	workspace, err := shell.workspaceMemoryContext(ctx)
+	if err != nil {
+		return err
+	}
+	if workspace == nil {
+		_, err := fmt.Fprintln(output, "no companion memory")
+		return err
+	}
+
+	views, err := projections.ListCompanionMemoryViews(ctx, shell.env.Store.DB(), projections.CompanionMemoryQuery{
+		WorkspaceID: &workspace.ID,
+		Limit:       memoryViewLimit,
+	})
+	if err != nil {
+		return err
+	}
+	count := 0
+	for _, view := range views {
+		if view.SummaryCount == 0 {
+			continue
+		}
+		if _, err := fmt.Fprintf(output, "companion %s summaries=%d latest=%s\n", view.CompanionKey, view.SummaryCount, view.LastSummary); err != nil {
+			return err
+		}
+		count++
+	}
+	if count == 0 {
+		_, err := fmt.Fprintln(output, "no companion memory")
+		return err
+	}
+	return nil
+}
+
+func (shell *Shell) workspaceMemoryContext(ctx context.Context) (*sqlite.Workspace, error) {
+	workspace, err := shell.env.Store.GetWorkspaceByKey(ctx, "marcus")
+	switch err {
+	case nil:
+		return &workspace, nil
+	case sql.ErrNoRows:
+		return nil, nil
+	default:
+		return nil, err
+	}
+}
+
+func (shell *Shell) initiativeMemoryContext(ctx context.Context) (*sqlite.Workspace, *sqlite.Initiative, error) {
+	workspace, err := shell.workspaceMemoryContext(ctx)
+	if err != nil || workspace == nil {
+		return workspace, nil, err
+	}
+	if shell.state.Scope.Kind != scope.ScopeProject && shell.state.Scope.Kind != scope.ScopeOdinCore {
+		return workspace, nil, nil
+	}
+
+	project, err := shell.env.Store.GetProjectByKey(ctx, shell.state.Scope.ProjectKey)
+	switch err {
+	case nil:
+	case sql.ErrNoRows:
+		return workspace, nil, nil
+	default:
+		return nil, nil, err
+	}
+
+	initiatives, err := shell.env.Store.ListInitiatives(ctx, sqlite.ListInitiativesParams{WorkspaceID: workspace.ID})
+	if err != nil {
+		return nil, nil, err
+	}
+	for _, initiative := range initiatives {
+		if initiative.LinkedProjectID != nil && *initiative.LinkedProjectID == project.ID {
+			return workspace, &initiative, nil
+		}
+	}
+	return workspace, nil, nil
 }
 
 func (shell *Shell) persistState() error {

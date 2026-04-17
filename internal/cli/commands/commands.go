@@ -20,6 +20,7 @@ const (
 	IntentApprovals Intent = "approvals"
 	IntentLogs      Intent = "logs"
 	IntentDoctor    Intent = "doctor"
+	IntentMemory    Intent = "memory"
 )
 
 func Parse(line string) (Command, bool) {
@@ -65,6 +66,8 @@ func RouteAskIntent(line string) Intent {
 		return IntentLogs
 	case normalized == "doctor" || strings.HasPrefix(normalized, "doctor ") || (hasToken(tokens, "health") && looksLikeStateQuestion(normalized)):
 		return IntentDoctor
+	case hasToken(tokens, "memory") && (looksLikeStateQuestion(normalized) || looksLikeListing(normalized)):
+		return IntentMemory
 	default:
 		return IntentUnknown
 	}

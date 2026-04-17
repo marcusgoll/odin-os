@@ -33,6 +33,7 @@ func TestRouteAskIntent(t *testing.T) {
 		want  Intent
 	}{
 		{input: "what scope am i in?", want: IntentScope},
+		{input: "show workspace memory", want: IntentMemory},
 		{input: "show approvals waiting", want: IntentApprovals},
 		{input: "show runs", want: IntentRuns},
 		{input: "show logs", want: IntentLogs},
@@ -51,5 +52,19 @@ func TestRouteAskIntent(t *testing.T) {
 				t.Fatalf("RouteAskIntent(%q) = %q, want %q", testCase.input, got, testCase.want)
 			}
 		})
+	}
+}
+
+func TestMemoryRouteAskIntent(t *testing.T) {
+	t.Parallel()
+
+	for _, input := range []string{
+		"show workspace memory",
+		"list companion memory",
+		"what initiative memory do we have?",
+	} {
+		if got := RouteAskIntent(input); got != IntentMemory {
+			t.Fatalf("RouteAskIntent(%q) = %q, want %q", input, got, IntentMemory)
+		}
 	}
 }
