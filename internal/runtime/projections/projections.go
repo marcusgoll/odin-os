@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	followupschedule "odin-os/internal/core/followups/schedule"
 	runtimeevents "odin-os/internal/runtime/events"
 )
 
@@ -45,11 +46,36 @@ type RunSummaryView struct {
 }
 
 type PendingApprovalView struct {
-	ApprovalID  int64
-	TaskID      int64
-	TaskKey     string
-	Status      string
-	RequestedAt string
+	ApprovalID    int64   `json:"approval_id"`
+	TaskID        int64   `json:"task_id"`
+	TaskKey       string  `json:"task_key"`
+	ProjectKey    string  `json:"project_key"`
+	TaskScope     string  `json:"task_scope"`
+	WorkspaceKey  string  `json:"workspace_key"`
+	InitiativeKey *string `json:"initiative_key,omitempty"`
+	CompanionKey  *string `json:"companion_key,omitempty"`
+	Status        string  `json:"status"`
+	RequestedAt   string  `json:"requested_at"`
+}
+
+type FollowUpSummaryView struct {
+	ObligationID     int64      `json:"obligation_id"`
+	WorkspaceKey     string     `json:"workspace_key"`
+	InitiativeKey    *string    `json:"initiative_key,omitempty"`
+	CompanionKey     *string    `json:"companion_key,omitempty"`
+	TargetProjectKey string     `json:"target_project_key"`
+	Title            string     `json:"title"`
+	Status           string     `json:"status"`
+	DueStatus        string     `json:"due_status"`
+	NextDueAt        time.Time  `json:"next_due_at"`
+	LastCompletedAt  *time.Time `json:"last_completed_at,omitempty"`
+}
+
+type AgendaView struct {
+	WorkspaceKey string                `json:"workspace_key"`
+	DueWork      []FollowUpSummaryView `json:"due_work"`
+	BlockedWork  []BlockedItemView     `json:"blocked_work"`
+	Approvals    []PendingApprovalView `json:"approvals"`
 }
 
 type ProjectTransitionView struct {
@@ -143,6 +169,7 @@ type WorkspaceOverviewView struct {
 	PendingApprovalCount  int    `json:"pending_approval_count"`
 	OpenIncidentCount     int    `json:"open_incident_count"`
 	BlockedWorkItemCount  int    `json:"blocked_work_item_count"`
+	OverdueFollowUpCount  int    `json:"overdue_follow_up_count"`
 }
 
 type InitiativePortfolioView struct {
@@ -161,6 +188,7 @@ type InitiativePortfolioView struct {
 	PendingApprovalCount int     `json:"pending_approval_count"`
 	OpenIncidentCount    int     `json:"open_incident_count"`
 	BlockedWorkItemCount int     `json:"blocked_work_item_count"`
+	OverdueFollowUpCount int     `json:"overdue_follow_up_count"`
 }
 
 type CompanionAssignmentView struct {
@@ -176,6 +204,7 @@ type CompanionAssignmentView struct {
 	ActiveRunCount       int    `json:"active_run_count"`
 	PendingApprovalCount int    `json:"pending_approval_count"`
 	BlockedWorkItemCount int    `json:"blocked_work_item_count"`
+	OverdueFollowUpCount int    `json:"overdue_follow_up_count"`
 }
 
 type WorkspaceMemoryView struct {
@@ -363,10 +392,19 @@ func ListPendingApprovalViews(ctx context.Context, queryer Queryer) ([]PendingAp
 			a.id,
 			a.task_id,
 			t.key,
+			p.key,
+			t.scope,
+			COALESCE(w.key, ''),
+			i.key,
+			c.key,
 			a.status,
 			a.requested_at
 		FROM approvals a
 		JOIN tasks t ON t.id = a.task_id
+		JOIN projects p ON p.id = t.project_id
+		LEFT JOIN workspaces w ON w.id = t.workspace_id
+		LEFT JOIN initiatives i ON i.id = t.initiative_id
+		LEFT JOIN companions c ON c.id = t.companion_id
 		WHERE a.status = 'pending'
 		ORDER BY a.id ASC
 	`)
@@ -378,19 +416,157 @@ func ListPendingApprovalViews(ctx context.Context, queryer Queryer) ([]PendingAp
 	var views []PendingApprovalView
 	for rows.Next() {
 		var view PendingApprovalView
+		var initiativeKey sql.NullString
+		var companionKey sql.NullString
 		if err := rows.Scan(
 			&view.ApprovalID,
 			&view.TaskID,
 			&view.TaskKey,
+			&view.ProjectKey,
+			&view.TaskScope,
+			&view.WorkspaceKey,
+			&initiativeKey,
+			&companionKey,
 			&view.Status,
 			&view.RequestedAt,
 		); err != nil {
 			return nil, err
 		}
+		view.InitiativeKey = nullableStringPtr(initiativeKey)
+		view.CompanionKey = nullableStringPtr(companionKey)
 		views = append(views, view)
 	}
 
 	return views, rows.Err()
+}
+
+func ListFollowUpSummaryViews(ctx context.Context, queryer Queryer, workspaceKey string, now time.Time) ([]FollowUpSummaryView, error) {
+	rows, err := queryer.QueryContext(ctx, `
+		SELECT
+			fo.id,
+			w.key,
+			i.key,
+			c.key,
+			p.key,
+			fo.title,
+			fo.status,
+			fo.next_due_at,
+			fo.last_completed_at
+		FROM follow_up_obligations fo
+		JOIN workspaces w ON w.id = fo.workspace_id
+		LEFT JOIN initiatives i ON i.id = fo.initiative_id
+		LEFT JOIN companions c ON c.id = fo.companion_id
+		JOIN projects p ON p.id = fo.target_project_id
+		WHERE w.key = ?
+		ORDER BY fo.next_due_at ASC, fo.id ASC
+	`, workspaceKey)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	now = now.UTC()
+	views := make([]FollowUpSummaryView, 0)
+	for rows.Next() {
+		var view FollowUpSummaryView
+		var initiativeKey sql.NullString
+		var companionKey sql.NullString
+		var nextDueAt string
+		var lastCompletedAt sql.NullString
+		if err := rows.Scan(
+			&view.ObligationID,
+			&view.WorkspaceKey,
+			&initiativeKey,
+			&companionKey,
+			&view.TargetProjectKey,
+			&view.Title,
+			&view.Status,
+			&nextDueAt,
+			&lastCompletedAt,
+		); err != nil {
+			return nil, err
+		}
+		parsedNextDueAt, err := time.Parse(time.RFC3339Nano, nextDueAt)
+		if err != nil {
+			return nil, err
+		}
+		view.InitiativeKey = nullableStringPtr(initiativeKey)
+		view.CompanionKey = nullableStringPtr(companionKey)
+		view.NextDueAt = parsedNextDueAt.UTC()
+		view.DueStatus = followupschedule.SummaryStatus(
+			view.Status,
+			view.NextDueAt,
+			now,
+			followupschedule.DefaultOverdueGrace,
+		)
+		if lastCompletedAt.Valid {
+			parsedLastCompletedAt, err := time.Parse(time.RFC3339Nano, lastCompletedAt.String)
+			if err != nil {
+				return nil, err
+			}
+			view.LastCompletedAt = &parsedLastCompletedAt
+		}
+		views = append(views, view)
+	}
+
+	return views, rows.Err()
+}
+
+func ListDueFollowUpSummaryViews(ctx context.Context, queryer Queryer, workspaceKey string, now time.Time) ([]FollowUpSummaryView, error) {
+	views, err := ListFollowUpSummaryViews(ctx, queryer, workspaceKey, now)
+	if err != nil {
+		return nil, err
+	}
+
+	due := make([]FollowUpSummaryView, 0, len(views))
+	for _, view := range views {
+		if view.DueStatus == "due" || view.DueStatus == "overdue" {
+			due = append(due, view)
+		}
+	}
+	return due, nil
+}
+
+func ListOverdueFollowUpSummaryViews(ctx context.Context, queryer Queryer, workspaceKey string, now time.Time) ([]FollowUpSummaryView, error) {
+	views, err := ListFollowUpSummaryViews(ctx, queryer, workspaceKey, now)
+	if err != nil {
+		return nil, err
+	}
+
+	overdue := make([]FollowUpSummaryView, 0, len(views))
+	for _, view := range views {
+		if view.DueStatus == "overdue" {
+			overdue = append(overdue, view)
+		}
+	}
+	return overdue, nil
+}
+
+func GetAgendaView(ctx context.Context, queryer Queryer, workspaceKey string, now time.Time) (AgendaView, error) {
+	workspace, err := GetWorkspaceOverviewView(ctx, queryer, workspaceKey)
+	if err != nil {
+		return AgendaView{}, err
+	}
+
+	dueWork, err := ListDueFollowUpSummaryViews(ctx, queryer, workspace.WorkspaceKey, now)
+	if err != nil {
+		return AgendaView{}, err
+	}
+	blockedItems, err := ListBlockedItemViews(ctx, queryer)
+	if err != nil {
+		return AgendaView{}, err
+	}
+	approvals, err := ListPendingApprovalViews(ctx, queryer)
+	if err != nil {
+		return AgendaView{}, err
+	}
+
+	return AgendaView{
+		WorkspaceKey: workspace.WorkspaceKey,
+		DueWork:      dueWork,
+		BlockedWork:  filterBlockedItemsByWorkspace(blockedItems, workspace.WorkspaceKey),
+		Approvals:    filterApprovalsByWorkspace(approvals, workspace.WorkspaceKey),
+	}, nil
 }
 
 func ListWorkspaceMemoryViews(ctx context.Context, queryer Queryer, query WorkspaceMemoryQuery) ([]WorkspaceMemoryView, error) {
@@ -1149,6 +1325,7 @@ func ListProjectPortfolioViews(ctx context.Context, queryer Queryer) ([]ProjectP
 }
 
 func GetWorkspaceOverviewView(ctx context.Context, queryer Queryer, workspaceKey string) (WorkspaceOverviewView, error) {
+	overdueBefore := time.Now().UTC().Add(-followupschedule.DefaultOverdueGrace).Format(time.RFC3339Nano)
 	rows, err := queryer.QueryContext(ctx, `
 		SELECT
 			w.id,
@@ -1183,11 +1360,16 @@ func GetWorkspaceOverviewView(ctx context.Context, queryer Queryer, workspaceKey
 			 LEFT JOIN incidents i ON i.run_id = r.id AND i.status = 'open'
 			 LEFT JOIN context_packets cp ON cp.task_id = t.id AND cp.packet_scope = 'task_wake_packet' AND cp.status = 'active'
 			 WHERE t.workspace_id = w.id
-			   AND (a.id IS NOT NULL OR i.id IS NOT NULL OR cp.id IS NOT NULL OR (t.status = 'blocked' AND t.blocked_reason <> ''))) AS blocked_work_item_count
+			   AND (a.id IS NOT NULL OR i.id IS NOT NULL OR cp.id IS NOT NULL OR (t.status = 'blocked' AND t.blocked_reason <> ''))) AS blocked_work_item_count,
+			(SELECT COUNT(*)
+			 FROM follow_up_obligations fo
+			 WHERE fo.workspace_id = w.id
+			   AND fo.status = 'active'
+			   AND fo.next_due_at <= ?) AS overdue_follow_up_count
 		FROM workspaces w
 		WHERE w.key = ?
 		LIMIT 1
-	`, workspaceKey)
+	`, overdueBefore, workspaceKey)
 	if err != nil {
 		return WorkspaceOverviewView{}, err
 	}
@@ -1215,6 +1397,7 @@ func GetWorkspaceOverviewView(ctx context.Context, queryer Queryer, workspaceKey
 		&view.PendingApprovalCount,
 		&view.OpenIncidentCount,
 		&view.BlockedWorkItemCount,
+		&view.OverdueFollowUpCount,
 	); err != nil {
 		return WorkspaceOverviewView{}, err
 	}
@@ -1222,6 +1405,7 @@ func GetWorkspaceOverviewView(ctx context.Context, queryer Queryer, workspaceKey
 }
 
 func ListInitiativePortfolioViews(ctx context.Context, queryer Queryer, workspaceKey string) ([]InitiativePortfolioView, error) {
+	overdueBefore := time.Now().UTC().Add(-followupschedule.DefaultOverdueGrace).Format(time.RFC3339Nano)
 	rows, err := queryer.QueryContext(ctx, `
 		SELECT
 			i.id,
@@ -1258,14 +1442,19 @@ func ListInitiativePortfolioViews(ctx context.Context, queryer Queryer, workspac
 			 LEFT JOIN incidents inc ON inc.run_id = r.id AND inc.status = 'open'
 			 LEFT JOIN context_packets cp ON cp.task_id = t.id AND cp.packet_scope = 'task_wake_packet' AND cp.status = 'active'
 			 WHERE t.initiative_id = i.id
-			   AND (a.id IS NOT NULL OR inc.id IS NOT NULL OR cp.id IS NOT NULL OR (t.status = 'blocked' AND t.blocked_reason <> ''))) AS blocked_work_item_count
+			   AND (a.id IS NOT NULL OR inc.id IS NOT NULL OR cp.id IS NOT NULL OR (t.status = 'blocked' AND t.blocked_reason <> ''))) AS blocked_work_item_count,
+			(SELECT COUNT(*)
+			 FROM follow_up_obligations fo
+			 WHERE fo.initiative_id = i.id
+			   AND fo.status = 'active'
+			   AND fo.next_due_at <= ?) AS overdue_follow_up_count
 		FROM initiatives i
 		JOIN workspaces w ON w.id = i.workspace_id
 		LEFT JOIN companions c ON c.id = i.owner_companion_id
 		LEFT JOIN projects p ON p.id = i.linked_project_id
 		WHERE w.key = ?
 		ORDER BY i.id ASC
-	`, workspaceKey)
+	`, overdueBefore, workspaceKey)
 	if err != nil {
 		return nil, err
 	}
@@ -1292,6 +1481,7 @@ func ListInitiativePortfolioViews(ctx context.Context, queryer Queryer, workspac
 			&view.PendingApprovalCount,
 			&view.OpenIncidentCount,
 			&view.BlockedWorkItemCount,
+			&view.OverdueFollowUpCount,
 		); err != nil {
 			return nil, err
 		}
@@ -1303,6 +1493,7 @@ func ListInitiativePortfolioViews(ctx context.Context, queryer Queryer, workspac
 }
 
 func ListCompanionAssignmentViews(ctx context.Context, queryer Queryer, workspaceKey string) ([]CompanionAssignmentView, error) {
+	overdueBefore := time.Now().UTC().Add(-followupschedule.DefaultOverdueGrace).Format(time.RFC3339Nano)
 	rows, err := queryer.QueryContext(ctx, `
 		SELECT
 			c.id,
@@ -1331,12 +1522,17 @@ func ListCompanionAssignmentViews(ctx context.Context, queryer Queryer, workspac
 			 LEFT JOIN incidents inc ON inc.run_id = r.id AND inc.status = 'open'
 			 LEFT JOIN context_packets cp ON cp.task_id = t.id AND cp.packet_scope = 'task_wake_packet' AND cp.status = 'active'
 			 WHERE t.companion_id = c.id
-			   AND (a.id IS NOT NULL OR inc.id IS NOT NULL OR cp.id IS NOT NULL OR (t.status = 'blocked' AND t.blocked_reason <> ''))) AS blocked_work_item_count
+			   AND (a.id IS NOT NULL OR inc.id IS NOT NULL OR cp.id IS NOT NULL OR (t.status = 'blocked' AND t.blocked_reason <> ''))) AS blocked_work_item_count,
+			(SELECT COUNT(*)
+			 FROM follow_up_obligations fo
+			 WHERE fo.companion_id = c.id
+			   AND fo.status = 'active'
+			   AND fo.next_due_at <= ?) AS overdue_follow_up_count
 		FROM companions c
 		JOIN workspaces w ON w.id = c.workspace_id
 		WHERE w.key = ?
 		ORDER BY c.id ASC
-	`, workspaceKey)
+	`, overdueBefore, workspaceKey)
 	if err != nil {
 		return nil, err
 	}
@@ -1358,6 +1554,7 @@ func ListCompanionAssignmentViews(ctx context.Context, queryer Queryer, workspac
 			&view.ActiveRunCount,
 			&view.PendingApprovalCount,
 			&view.BlockedWorkItemCount,
+			&view.OverdueFollowUpCount,
 		); err != nil {
 			return nil, err
 		}
@@ -1461,6 +1658,7 @@ type LifecycleReplay struct {
 	Tasks     map[int64]TaskReplay
 	Runs      map[int64]RunReplay
 	Approvals map[int64]ApprovalReplay
+	FollowUps map[int64]FollowUpReplay
 }
 
 type TaskReplay struct {
@@ -1497,11 +1695,22 @@ type ApprovalReplay struct {
 	Reason      string
 }
 
+type FollowUpReplay struct {
+	ID               int64
+	ObligationID     int64
+	TaskID           *int64
+	OccurrenceKey    string
+	Status           string
+	Reused           bool
+	InitiativeStatus string
+}
+
 func ReplayLifecycle(records []runtimeevents.Record) (LifecycleReplay, error) {
 	replay := LifecycleReplay{
 		Tasks:     make(map[int64]TaskReplay),
 		Runs:      make(map[int64]RunReplay),
 		Approvals: make(map[int64]ApprovalReplay),
+		FollowUps: make(map[int64]FollowUpReplay),
 	}
 
 	for _, record := range records {
@@ -1617,6 +1826,31 @@ func ReplayLifecycle(records []runtimeevents.Record) (LifecycleReplay, error) {
 			approval.DecisionBy = payload.DecisionBy
 			approval.Reason = payload.Reason
 			replay.Approvals[record.StreamID] = approval
+		case runtimeevents.EventFollowUpMaterialized:
+			payload, err := runtimeevents.DecodePayload[runtimeevents.FollowUpMaterializedPayload](record.Payload)
+			if err != nil {
+				return LifecycleReplay{}, fmt.Errorf("decode %s payload: %w", record.Type, err)
+			}
+			taskID := payload.TaskID
+			replay.FollowUps[record.StreamID] = FollowUpReplay{
+				ID:            record.StreamID,
+				ObligationID:  payload.ObligationID,
+				TaskID:        &taskID,
+				OccurrenceKey: payload.OccurrenceKey,
+				Status:        payload.TaskStatus,
+				Reused:        payload.Reused,
+			}
+		case runtimeevents.EventFollowUpPaused:
+			payload, err := runtimeevents.DecodePayload[runtimeevents.FollowUpPausedPayload](record.Payload)
+			if err != nil {
+				return LifecycleReplay{}, fmt.Errorf("decode %s payload: %w", record.Type, err)
+			}
+			replay.FollowUps[record.StreamID] = FollowUpReplay{
+				ID:               record.StreamID,
+				ObligationID:     payload.ObligationID,
+				Status:           payload.Status,
+				InitiativeStatus: payload.InitiativeStatus,
+			}
 		}
 	}
 
@@ -1635,6 +1869,26 @@ func scanOptionalSingleString(queryer Queryer, query string, value *string) erro
 		}
 	}
 	return rows.Err()
+}
+
+func filterBlockedItemsByWorkspace(views []BlockedItemView, workspaceKey string) []BlockedItemView {
+	filtered := make([]BlockedItemView, 0, len(views))
+	for _, view := range views {
+		if view.WorkspaceKey == workspaceKey {
+			filtered = append(filtered, view)
+		}
+	}
+	return filtered
+}
+
+func filterApprovalsByWorkspace(views []PendingApprovalView, workspaceKey string) []PendingApprovalView {
+	filtered := make([]PendingApprovalView, 0, len(views))
+	for _, view := range views {
+		if view.WorkspaceKey == workspaceKey {
+			filtered = append(filtered, view)
+		}
+	}
+	return filtered
 }
 
 func nullableInt64Ptr(value sql.NullInt64) *int64 {

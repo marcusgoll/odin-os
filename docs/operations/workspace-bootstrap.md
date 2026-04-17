@@ -19,6 +19,8 @@ Any command path that goes through `internal/app/bootstrap.Load` will now ensure
 
 This means a fresh runtime can start from an empty `data/odin.db` and still expose workspace, initiative, companion, and work-item semantics immediately.
 
+Once bootstrap is in place, routine follow-through flows can be managed through the normal operator commands documented in [followup-routines.md](followup-routines.md).
+
 ## Repairing existing runtimes
 
 For older runtimes that already contain `projects` and `tasks`, run:

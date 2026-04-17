@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"odin-os/internal/cli/scope"
 	"odin-os/internal/core/initiatives"
@@ -459,6 +461,132 @@ func TestShellOperatorViewsRenderWorkspaceInitiativesAndCompanions(t *testing.T)
 	}
 }
 
+func TestAgendaCommandRendersDueWorkBlockedWorkAndApprovals(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	now := time.Date(2026, 4, 17, 9, 0, 0, 0, time.UTC)
+	env := newTestEnvironment(t)
+	env.Now = func() time.Time { return now }
+	project, err := env.Store.CreateProject(ctx, sqlite.CreateProjectParams{
+		Key:           "alpha",
+		Name:          "Alpha",
+		Scope:         "project",
+		GitRoot:       "/tmp/alpha",
+		DefaultBranch: "main",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+	workspace, err := workspaces.Service{Store: env.Store}.BootstrapDefaultWorkspace(ctx)
+	if err != nil {
+		t.Fatalf("BootstrapDefaultWorkspace() error = %v", err)
+	}
+	companion, err := env.Store.GetCompanionByKey(ctx, workspace.ID, workspace.DefaultCompanionKey)
+	if err != nil {
+		t.Fatalf("GetCompanionByKey(default) error = %v", err)
+	}
+	initiative, err := env.Store.UpsertInitiative(ctx, sqlite.UpsertInitiativeParams{
+		WorkspaceID:      workspace.ID,
+		Key:              project.Key,
+		Title:            project.Name,
+		Kind:             string(initiatives.KindManagedProject),
+		Status:           "active",
+		Summary:          "Alpha initiative",
+		OwnerCompanionID: &companion.ID,
+		LinkedProjectID:  &project.ID,
+	})
+	if err != nil {
+		t.Fatalf("UpsertInitiative(alpha) error = %v", err)
+	}
+
+	approvalTask, err := env.Store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:    project.ID,
+		Key:          "alpha-task",
+		Title:        "Alpha task",
+		Status:       "blocked",
+		Scope:        "project",
+		RequestedBy:  "operator",
+		WorkspaceID:  &workspace.ID,
+		InitiativeID: &initiative.ID,
+		CompanionID:  &companion.ID,
+		WorkKind:     "automation",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask(alpha-task) error = %v", err)
+	}
+	approvalRun, err := env.Store.StartRun(ctx, sqlite.StartRunParams{
+		TaskID:   approvalTask.ID,
+		Executor: "codex",
+		Attempt:  1,
+		Status:   "running",
+	})
+	if err != nil {
+		t.Fatalf("StartRun() error = %v", err)
+	}
+	if _, err := env.Store.RequestApproval(ctx, sqlite.RequestApprovalParams{
+		TaskID:      approvalTask.ID,
+		RunID:       &approvalRun.ID,
+		Status:      "pending",
+		RequestedBy: "system",
+	}); err != nil {
+		t.Fatalf("RequestApproval() error = %v", err)
+	}
+
+	createShellFollowUpObligation(t, ctx, env.Store, project.ID, workspace.ID, initiative.ID, companion.ID, "Review mail", now)
+	createShellFollowUpObligation(t, ctx, env.Store, project.ID, workspace.ID, initiative.ID, companion.ID, "File taxes", now.Add(-48*time.Hour))
+
+	wakeTask, err := env.Store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:    project.ID,
+		Key:          "alpha-wake",
+		Title:        "Resume wake packet",
+		Status:       "blocked",
+		Scope:        "project",
+		RequestedBy:  "operator",
+		WorkspaceID:  &workspace.ID,
+		InitiativeID: &initiative.ID,
+		CompanionID:  &companion.ID,
+		WorkKind:     "follow_up",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask(alpha-wake) error = %v", err)
+	}
+	if _, err := env.Store.CreateContextPacket(ctx, sqlite.CreateContextPacketParams{
+		TaskID:        &wakeTask.ID,
+		PacketKind:    "wake",
+		PacketScope:   "task_wake_packet",
+		Trigger:       "follow_up_wait",
+		CheckpointKey: "agenda-wake",
+		Status:        "active",
+		Summary:       "waiting on follow-up context",
+		PayloadJSON:   fmt.Sprintf(`{"task_id":%d,"task_key":"%s","scope":"project","objective":"Resume wake work","status":"waiting","trigger":"follow_up_wait","blocking_reason":"waiting on supporting context"}`, wakeTask.ID, wakeTask.Key),
+	}); err != nil {
+		t.Fatalf("CreateContextPacket() error = %v", err)
+	}
+
+	shell, err := New(env)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	var output bytes.Buffer
+	if err := shell.HandleLine(ctx, "/agenda", &output); err != nil {
+		t.Fatalf("HandleLine(/agenda) error = %v", err)
+	}
+
+	for _, want := range []string{
+		"due overdue alpha File taxes",
+		"due due alpha Review mail",
+		"blocked alpha-wake wake_packet",
+		"approval alpha-task pending",
+	} {
+		if !strings.Contains(output.String(), want) {
+			t.Fatalf("agenda output = %q, want %q", output.String(), want)
+		}
+	}
+}
+
 func TestMemoryCommandRendersWorkspaceMemoryStatus(t *testing.T) {
 	t.Parallel()
 
@@ -564,7 +692,6 @@ func TestAskModeRendersWorkspaceMemoryWithoutCreatingTask(t *testing.T) {
 		t.Fatalf("jobs len = %d, want 0", len(views))
 	}
 }
-
 func TestShellTransitionStatusShowsDefaultInventoryAuthority(t *testing.T) {
 	t.Parallel()
 
@@ -836,6 +963,24 @@ func hasTransitionEvent(events []runtimeevents.Record, want runtimeevents.Type) 
 		}
 	}
 	return false
+}
+
+func createShellFollowUpObligation(t *testing.T, ctx context.Context, store *sqlite.Store, projectID, workspaceID, initiativeID, companionID int64, title string, nextDueAt time.Time) {
+	t.Helper()
+
+	if _, err := store.CreateFollowUpObligation(ctx, sqlite.CreateFollowUpObligationParams{
+		WorkspaceID:     workspaceID,
+		InitiativeID:    &initiativeID,
+		CompanionID:     &companionID,
+		TargetProjectID: projectID,
+		Title:           title,
+		Status:          "active",
+		CadenceJSON:     `{"mode":"once"}`,
+		NextDueAt:       nextDueAt,
+		PolicyJSON:      `{}`,
+	}); err != nil {
+		t.Fatalf("CreateFollowUpObligation(%s) error = %v", title, err)
+	}
 }
 
 func seedShellMemoryFixture(t *testing.T, env Environment) {

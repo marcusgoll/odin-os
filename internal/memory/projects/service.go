@@ -2,7 +2,9 @@ package projects
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"time"
 
 	memoryroot "odin-os/internal/memory"
 	memoryworkspaces "odin-os/internal/memory/workspaces"
@@ -126,4 +128,61 @@ func remainingLimit(limit int, used int) int {
 		return 0
 	}
 	return remaining
+}
+
+func (service Service) RememberFollowUpCompletion(ctx context.Context, workspaceID int64, initiativeID int64, title string, completedAt time.Time) (sqlite.MemorySummary, error) {
+	detailsJSON, err := json.Marshal(map[string]string{
+		"title":        title,
+		"completed_at": completedAt.UTC().Format(time.RFC3339Nano),
+	})
+	if err != nil {
+		return sqlite.MemorySummary{}, err
+	}
+	return service.rememberFollowUpState(ctx, workspaceID, initiativeID, memoryroot.MemoryTypeFollowUpCompletion, fmt.Sprintf("Completed follow-up: %s", title), string(detailsJSON))
+}
+
+func (service Service) RememberFollowUpOverdue(ctx context.Context, workspaceID int64, initiativeID int64, title string, dueAt time.Time) (sqlite.MemorySummary, error) {
+	detailsJSON, err := json.Marshal(map[string]string{
+		"title":  title,
+		"due_at": dueAt.UTC().Format(time.RFC3339Nano),
+		"state":  "overdue",
+	})
+	if err != nil {
+		return sqlite.MemorySummary{}, err
+	}
+	return service.rememberFollowUpState(ctx, workspaceID, initiativeID, memoryroot.MemoryTypeFollowUpOverdue, fmt.Sprintf("Overdue follow-up: %s", title), string(detailsJSON))
+}
+
+func (service Service) rememberFollowUpState(ctx context.Context, workspaceID int64, initiativeID int64, memoryType string, summary string, detailsJSON string) (sqlite.MemorySummary, error) {
+	if service.Store == nil {
+		return sqlite.MemorySummary{}, fmt.Errorf("memory store is required")
+	}
+
+	initiative, err := service.scopeInitiative(ctx, workspaceID, initiativeID)
+	if err != nil {
+		return sqlite.MemorySummary{}, err
+	}
+
+	return service.Store.RecordMemorySummary(ctx, sqlite.RecordMemorySummaryParams{
+		Scope:       "initiative",
+		ScopeKey:    initiative.Key,
+		MemoryType:  memoryType,
+		Summary:     summary,
+		DetailsJSON: detailsJSON,
+	})
+}
+
+func (service Service) scopeInitiative(ctx context.Context, workspaceID int64, initiativeID int64) (sqlite.Initiative, error) {
+	if initiativeID <= 0 {
+		return sqlite.Initiative{}, fmt.Errorf("initiative ID is required")
+	}
+
+	initiative, err := service.Store.GetInitiativeByID(ctx, initiativeID)
+	if err != nil {
+		return sqlite.Initiative{}, err
+	}
+	if workspaceID > 0 && initiative.WorkspaceID != workspaceID {
+		return sqlite.Initiative{}, fmt.Errorf("initiative %d does not belong to workspace %d", initiativeID, workspaceID)
+	}
+	return initiative, nil
 }

@@ -62,11 +62,16 @@ func loadMigrations() ([]migration, error) {
 	}
 
 	var migrations []migration
+	seenVersions := make(map[int]string)
 	for _, entry := range entries {
 		version, err := migrationVersion(entry)
 		if err != nil {
 			return nil, err
 		}
+		if existing, ok := seenVersions[version]; ok {
+			return nil, fmt.Errorf("duplicate migration version %04d: %s and %s", version, existing, path.Base(entry))
+		}
+		seenVersions[version] = path.Base(entry)
 
 		sqlBytes, err := migrationFiles.ReadFile(entry)
 		if err != nil {

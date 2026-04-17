@@ -44,6 +44,7 @@ type Environment struct {
 	ExecutorConfig      executorrouter.Config
 	Executors           map[string]contract.Executor
 	Leases              leases.Manager
+	Now                 func() time.Time
 }
 
 type CommandExecutor interface {
@@ -61,6 +62,7 @@ type Shell struct {
 	transitions    projects.Service
 	conversation   convsvc.Service
 	worktrees      worktrees.Manager
+	now            func() time.Time
 }
 
 const transitionUsage = "/transition [status] | /transition set <state> [allow=<csv>] [confirm] because <reason...>"
@@ -80,6 +82,12 @@ func New(env Environment) (*Shell, error) {
 	worktreeManager := worktrees.Manager{
 		Store: leaseManager.Store,
 		Git:   leaseManager.Git,
+	}
+	now := env.Now
+	if now == nil {
+		now = func() time.Time {
+			return time.Now().UTC()
+		}
 	}
 	shell := &Shell{
 		env:   env,
@@ -111,6 +119,7 @@ func New(env Environment) (*Shell, error) {
 			Executors:           env.Executors,
 		},
 		worktrees: worktreeManager,
+		now:       now,
 	}
 	if env.CommandService != nil {
 		shell.commandService = env.CommandService
@@ -221,10 +230,10 @@ func (shell *Shell) handleCommand(ctx context.Context, command commands.Command,
 		if _, err := fmt.Fprintln(output, "prefer explicit cli commands outside the repl: odin help | odin status --json | odin task run --project <key> --title <title> | odin repl"); err != nil {
 			return err
 		}
-		if _, err := fmt.Fprintln(output, "/help /mode /scope /memory /workspace /initiatives /companions /project /transition /observe /compare /jobs /runs /approvals /logs /doctor /doctor json /doctor report /self"); err != nil {
+		if _, err := fmt.Fprintln(output, "/help /mode /scope /memory /workspace /initiatives /companions /agenda /project /transition /observe /compare /jobs /runs /approvals /logs /doctor /doctor json /doctor report /self"); err != nil {
 			return err
 		}
-		if _, err := fmt.Fprintln(output, "repl compatibility commands: /help /mode /scope /memory /project /transition /observe /compare /status /stat /capabilities /leases /jobs /runs /approvals /logs /doctor /doctor json /doctor report /self /quit"); err != nil {
+		if _, err := fmt.Fprintln(output, "repl compatibility commands: /help /mode /scope /memory /project /transition /observe /compare /status /stat /capabilities /leases /jobs /runs /approvals /agenda /logs /doctor /doctor json /doctor report /self /quit"); err != nil {
 			return err
 		}
 		if _, err := fmt.Fprintf(output, "%s\n", transitionUsage); err != nil {
@@ -244,6 +253,8 @@ func (shell *Shell) handleCommand(ctx context.Context, command commands.Command,
 		return shell.handleInitiatives(ctx, output)
 	case "companions":
 		return shell.handleCompanions(ctx, output)
+	case "agenda":
+		return shell.handleAgenda(ctx, output)
 	case "project":
 		return shell.handleProject(command.Args, output)
 	case "transition":
@@ -316,7 +327,7 @@ func (shell *Shell) handleAsk(ctx context.Context, line string, output io.Writer
 			_, err = fmt.Fprintln(output, result.Answer)
 			return err
 		}
-		_, err := fmt.Fprintln(output, "local ask is limited in Phase 05. Try /help, /scope, /memory, /workspace, /initiatives, /companions, /project, /jobs, /runs, /approvals, /logs, or /doctor.")
+		_, err := fmt.Fprintln(output, "local ask is limited in Phase 05. Try /help, /scope, /memory, /workspace, /initiatives, /companions, /agenda, /project, /jobs, /runs, /approvals, /logs, or /doctor.")
 		return err
 	}
 }
@@ -1033,6 +1044,18 @@ func (shell *Shell) handleCompanions(ctx context.Context, output io.Writer) erro
 	return nil
 }
 
+func (shell *Shell) handleAgenda(ctx context.Context, output io.Writer) error {
+	view, err := projections.GetAgendaView(ctx, shell.env.Store.DB(), workspaces.DefaultWorkspaceKey, shell.now().UTC())
+	if err != nil {
+		if err == sql.ErrNoRows {
+			_, writeErr := fmt.Fprintln(output, "no agenda items")
+			return writeErr
+		}
+		return err
+	}
+	return commands.WriteAgendaText(output, view)
+}
+
 func (shell *Shell) handleApprovals(ctx context.Context, output io.Writer) error {
 	approvals, err := shell.pendingApprovals(ctx)
 	if err != nil {
@@ -1181,39 +1204,19 @@ func (shell *Shell) scopeLabel() string {
 	}
 }
 
-func (shell *Shell) pendingApprovals(ctx context.Context) ([]pendingApproval, error) {
-	rows, err := shell.env.Store.DB().QueryContext(ctx, `
-		SELECT t.key, a.status, t.scope, p.key
-		FROM approvals a
-		JOIN tasks t ON t.id = a.task_id
-		JOIN projects p ON p.id = t.project_id
-		WHERE a.status = 'pending'
-		ORDER BY a.id ASC
-	`)
+func (shell *Shell) pendingApprovals(ctx context.Context) ([]projections.PendingApprovalView, error) {
+	views, err := projections.ListPendingApprovalViews(ctx, shell.env.Store.DB())
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 
-	var approvals []pendingApproval
-	for rows.Next() {
-		var approval pendingApproval
-		var projectKey string
-		var taskScope string
-		if err := rows.Scan(&approval.TaskKey, &approval.Status, &taskScope, &projectKey); err != nil {
-			return nil, err
-		}
-		if matchesTaskProjectionScope(projectKey, taskScope, shell.state.Scope) {
-			approvals = append(approvals, approval)
+	approvals := make([]projections.PendingApprovalView, 0, len(views))
+	for _, view := range views {
+		if matchesTaskProjectionScope(view.ProjectKey, view.TaskScope, shell.state.Scope) {
+			approvals = append(approvals, view)
 		}
 	}
-
-	return approvals, rows.Err()
-}
-
-type pendingApproval struct {
-	TaskKey string
-	Status  string
+	return approvals, nil
 }
 
 func matchesTaskProjectionScope(projectKey, taskScope string, resolved scope.Resolution) bool {

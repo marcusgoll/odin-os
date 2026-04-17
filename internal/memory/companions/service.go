@@ -2,7 +2,9 @@ package companions
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"time"
 
 	memoryroot "odin-os/internal/memory"
 	memoryworkspaces "odin-os/internal/memory/workspaces"
@@ -12,6 +14,11 @@ import (
 type Service struct {
 	Store *sqlite.Store
 }
+
+const (
+	MemoryTypeFollowUpCompletion = memoryroot.MemoryTypeFollowUpCompletion
+	MemoryTypeFollowUpOverdue    = memoryroot.MemoryTypeFollowUpOverdue
+)
 
 func (service Service) Record(ctx context.Context, workspaceID int64, companionID int64, input memoryroot.WriteInput) (sqlite.MemoryEntry, error) {
 	if service.Store == nil {
@@ -75,4 +82,61 @@ func remainingLimit(limit int, used int) int {
 		return 0
 	}
 	return remaining
+}
+
+func (service Service) RememberFollowUpCompletion(ctx context.Context, workspaceID int64, companionID int64, title string, completedAt time.Time) (sqlite.MemorySummary, error) {
+	detailsJSON, err := json.Marshal(map[string]string{
+		"title":        title,
+		"completed_at": completedAt.UTC().Format(time.RFC3339Nano),
+	})
+	if err != nil {
+		return sqlite.MemorySummary{}, err
+	}
+	return service.rememberFollowUpState(ctx, workspaceID, companionID, MemoryTypeFollowUpCompletion, fmt.Sprintf("Completed follow-up: %s", title), string(detailsJSON))
+}
+
+func (service Service) RememberFollowUpOverdue(ctx context.Context, workspaceID int64, companionID int64, title string, dueAt time.Time) (sqlite.MemorySummary, error) {
+	detailsJSON, err := json.Marshal(map[string]string{
+		"title":  title,
+		"due_at": dueAt.UTC().Format(time.RFC3339Nano),
+		"state":  "overdue",
+	})
+	if err != nil {
+		return sqlite.MemorySummary{}, err
+	}
+	return service.rememberFollowUpState(ctx, workspaceID, companionID, MemoryTypeFollowUpOverdue, fmt.Sprintf("Overdue follow-up: %s", title), string(detailsJSON))
+}
+
+func (service Service) rememberFollowUpState(ctx context.Context, workspaceID int64, companionID int64, memoryType string, summary string, detailsJSON string) (sqlite.MemorySummary, error) {
+	if service.Store == nil {
+		return sqlite.MemorySummary{}, fmt.Errorf("memory store is required")
+	}
+
+	companion, err := service.scopeCompanion(ctx, workspaceID, companionID)
+	if err != nil {
+		return sqlite.MemorySummary{}, err
+	}
+
+	return service.Store.RecordMemorySummary(ctx, sqlite.RecordMemorySummaryParams{
+		Scope:       "companion",
+		ScopeKey:    companion.Key,
+		MemoryType:  memoryType,
+		Summary:     summary,
+		DetailsJSON: detailsJSON,
+	})
+}
+
+func (service Service) scopeCompanion(ctx context.Context, workspaceID int64, companionID int64) (sqlite.Companion, error) {
+	if companionID <= 0 {
+		return sqlite.Companion{}, fmt.Errorf("companion ID is required")
+	}
+
+	companion, err := service.Store.GetCompanionByID(ctx, companionID)
+	if err != nil {
+		return sqlite.Companion{}, err
+	}
+	if workspaceID > 0 && companion.WorkspaceID != workspaceID {
+		return sqlite.Companion{}, fmt.Errorf("companion %d does not belong to workspace %d", companionID, workspaceID)
+	}
+	return companion, nil
 }

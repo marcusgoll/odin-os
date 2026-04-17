@@ -3,14 +3,18 @@ package bootstrap
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"time"
 
 	clistate "odin-os/internal/cli/state"
+	"odin-os/internal/core/initiatives"
 	"odin-os/internal/core/projects"
+	"odin-os/internal/core/workspaces"
 	"odin-os/internal/executors/contract"
 	executorrouter "odin-os/internal/executors/router"
 	"odin-os/internal/registry"
@@ -30,6 +34,16 @@ type App struct {
 	Executors           map[string]contract.Executor
 	BootID              string
 	RuntimeState        runtimestate.Service
+}
+
+type WorkspaceRuntimeReport struct {
+	WorkspaceID             int64
+	DefaultCompanionID      int64
+	ProjectsReconciled      int
+	TasksBoundToWorkspace   int64
+	TasksLinkedToInitiative int64
+	TasksBoundToCompanion   int64
+	TasksBackfilledWorkKind int64
 }
 
 type bootIDContextKey struct{}
@@ -90,6 +104,14 @@ func Load(ctx context.Context, repoRoot string, runtimeRoot string) (App, error)
 		return App{}, err
 	}
 
+	if _, err := BootstrapWorkspaceRuntimeState(ctx, store); err != nil {
+		if failureErr := recordBootstrapFailure(ctx, store, runtimeState, bootID, err); failureErr != nil {
+			err = failureErr
+		}
+		_ = store.Close()
+		return App{}, err
+	}
+
 	if bootID != "" {
 		if _, err := runtimeState.MarkBooting(ctx, runtimestate.BootInput{
 			BootID: bootID,
@@ -124,6 +146,14 @@ func Load(ctx context.Context, repoRoot string, runtimeRoot string) (App, error)
 			Code:    diagnostic.Code,
 			Message: diagnostic.Message,
 		})
+	}
+
+	if err := repairLegacyFollowUpTargets(ctx, store, repoRoot); err != nil {
+		if failureErr := recordBootstrapFailure(ctx, store, runtimeState, bootID, err); failureErr != nil {
+			err = failureErr
+		}
+		_ = store.Close()
+		return App{}, err
 	}
 
 	executorConfig, err := executorrouter.LoadConfig(filepath.Join(repoRoot, "config", "executors.yaml"))
@@ -299,4 +329,279 @@ func registryVersionHash(root string) (string, error) {
 		_, _ = hasher.Write(content)
 	}
 	return hex.EncodeToString(hasher.Sum(nil)), nil
+}
+
+func BootstrapWorkspaceRuntimeState(ctx context.Context, store *sqlite.Store) (WorkspaceRuntimeReport, error) {
+	if store == nil {
+		return WorkspaceRuntimeReport{}, fmt.Errorf("workspace runtime store is required")
+	}
+
+	workspace, err := workspaces.Service{Store: store}.BootstrapDefaultWorkspace(ctx)
+	if err != nil {
+		return WorkspaceRuntimeReport{}, err
+	}
+
+	defaultCompanion, err := store.GetCompanionByKey(ctx, workspace.ID, workspace.DefaultCompanionKey)
+	if err != nil {
+		return WorkspaceRuntimeReport{}, err
+	}
+
+	report := WorkspaceRuntimeReport{
+		WorkspaceID:        workspace.ID,
+		DefaultCompanionID: defaultCompanion.ID,
+	}
+
+	rows, err := store.DB().QueryContext(ctx, `
+		SELECT key
+		FROM projects
+		ORDER BY id
+	`)
+	if err != nil {
+		return WorkspaceRuntimeReport{}, err
+	}
+
+	projectKeys := make([]string, 0, 8)
+	for rows.Next() {
+		var projectKey string
+		if err := rows.Scan(&projectKey); err != nil {
+			_ = rows.Close()
+			return WorkspaceRuntimeReport{}, err
+		}
+		projectKeys = append(projectKeys, projectKey)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return WorkspaceRuntimeReport{}, err
+	}
+	if err := rows.Close(); err != nil {
+		return WorkspaceRuntimeReport{}, err
+	}
+
+	for _, projectKey := range projectKeys {
+		project, err := store.GetProjectByKey(ctx, projectKey)
+		if err != nil {
+			return WorkspaceRuntimeReport{}, err
+		}
+
+		ownerCompanionID := &defaultCompanion.ID
+		if initiative, err := store.GetInitiativeByKey(ctx, workspace.ID, project.Key); err == nil && initiative.OwnerCompanionID != nil {
+			ownerCompanionID = initiative.OwnerCompanionID
+		} else if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return WorkspaceRuntimeReport{}, err
+		}
+
+		if _, err := (initiatives.Service{Store: store}).ReconcileManagedProject(ctx, workspace.ID, project, ownerCompanionID); err != nil {
+			return WorkspaceRuntimeReport{}, err
+		}
+		report.ProjectsReconciled++
+	}
+
+	now := bootstrapNow(store).Format(time.RFC3339Nano)
+
+	if report.TasksBoundToWorkspace, err = updateRowsAffected(ctx, store.DB(), `
+		UPDATE tasks
+		SET workspace_id = ?, updated_at = ?
+		WHERE workspace_id IS NULL
+	`, workspace.ID, now); err != nil {
+		return WorkspaceRuntimeReport{}, err
+	}
+
+	if report.TasksLinkedToInitiative, err = updateRowsAffected(ctx, store.DB(), `
+		UPDATE tasks
+		SET initiative_id = (
+			SELECT initiatives.id
+			FROM initiatives
+			WHERE initiatives.workspace_id = ?
+				AND initiatives.linked_project_id = tasks.project_id
+			ORDER BY initiatives.id DESC
+			LIMIT 1
+		),
+		    updated_at = ?
+		WHERE initiative_id IS NULL
+		  AND EXISTS (
+			SELECT 1
+			FROM initiatives
+			WHERE initiatives.workspace_id = ?
+			  AND initiatives.linked_project_id = tasks.project_id
+		  )
+	`, workspace.ID, now, workspace.ID); err != nil {
+		return WorkspaceRuntimeReport{}, err
+	}
+
+	if report.TasksBoundToCompanion, err = updateRowsAffected(ctx, store.DB(), `
+		UPDATE tasks
+		SET companion_id = (
+			SELECT initiatives.owner_companion_id
+			FROM initiatives
+			WHERE initiatives.id = tasks.initiative_id
+			LIMIT 1
+		),
+		    updated_at = ?
+		WHERE companion_id IS NULL
+		  AND initiative_id IS NOT NULL
+		  AND EXISTS (
+			SELECT 1
+			FROM initiatives
+			WHERE initiatives.id = tasks.initiative_id
+			  AND initiatives.owner_companion_id IS NOT NULL
+		  )
+	`, now); err != nil {
+		return WorkspaceRuntimeReport{}, err
+	}
+
+	if report.TasksBackfilledWorkKind, err = updateRowsAffected(ctx, store.DB(), `
+		UPDATE tasks
+		SET work_kind = scope,
+		    updated_at = ?
+		WHERE TRIM(COALESCE(work_kind, '')) = ''
+	`, now); err != nil {
+		return WorkspaceRuntimeReport{}, err
+	}
+
+	return report, nil
+}
+
+func projectManifestPaths(repoRoot string) ([]string, error) {
+	paths := []string{filepath.Join(repoRoot, "config", "projects.yaml")}
+
+	if overlay := os.Getenv("ODIN_PROJECTS_OVERLAY"); overlay != "" {
+		paths = append(paths, overlay)
+		return paths, nil
+	}
+
+	localOverlay := filepath.Join(repoRoot, "config", "projects.local.yaml")
+	if _, err := os.Stat(localOverlay); err == nil {
+		paths = append(paths, localOverlay)
+		return paths, nil
+	} else if !os.IsNotExist(err) {
+		return nil, err
+	}
+
+	return paths, nil
+}
+
+func repairLegacyFollowUpTargets(ctx context.Context, store *sqlite.Store, repoRoot string) error {
+	if _, err := store.RepairFollowUpObligationLinkedTargets(ctx); err != nil {
+		return err
+	}
+
+	if remaining, err := countFollowUpObligationsMissingTarget(ctx, store); err != nil {
+		return err
+	} else if remaining == 0 {
+		return nil
+	}
+
+	projectID, err := ResolveFollowUpTargetProjectID(ctx, store, repoRoot)
+	if err != nil {
+		return err
+	}
+	if _, err := store.RepairFollowUpObligationTargets(ctx, projectID); err != nil {
+		return err
+	}
+	return finalizeFollowUpTargetRepair(ctx, store)
+}
+
+func finalizeFollowUpTargetRepair(ctx context.Context, store *sqlite.Store) error {
+	remaining, err := countFollowUpObligationsMissingTarget(ctx, store)
+	if err != nil {
+		return err
+	}
+	if remaining > 0 {
+		return fmt.Errorf("follow-up obligations still missing target_project_id after bootstrap repair")
+	}
+	return nil
+}
+
+func ResolveFollowUpTargetProjectID(ctx context.Context, store *sqlite.Store, repoRoot string) (int64, error) {
+	if store == nil {
+		return 0, fmt.Errorf("follow-up store is required")
+	}
+
+	if project, err := store.GetProjectByKey(ctx, "odin-core"); err == nil {
+		return project.ID, nil
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return 0, err
+	}
+
+	registryPaths, err := projectManifestPaths(repoRoot)
+	if err != nil {
+		return 0, err
+	}
+
+	project, ok, err := loadDefaultFollowUpTargetProject(registryPaths)
+	if err != nil {
+		return 0, err
+	}
+	if !ok {
+		return 0, fmt.Errorf("default target project odin-core is not configured")
+	}
+
+	record, err := store.UpsertProject(ctx, sqlite.UpsertProjectParams{
+		Key:           project.Key,
+		Name:          project.Name,
+		Scope:         followUpProjectScope(project),
+		GitRoot:       project.GitRoot,
+		DefaultBranch: project.DefaultBranch,
+		GitHubRepo:    project.GitHub.Repo,
+		ManifestPath:  project.SourcePath,
+	})
+	if err != nil {
+		return 0, err
+	}
+	return record.ID, nil
+}
+
+func countFollowUpObligationsMissingTarget(ctx context.Context, store *sqlite.Store) (int64, error) {
+	var remaining int64
+	if err := store.DB().QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM follow_up_obligations
+		WHERE target_project_id IS NULL
+	`).Scan(&remaining); err != nil {
+		return 0, err
+	}
+	return remaining, nil
+}
+
+func loadDefaultFollowUpTargetProject(registryPaths []string) (projects.Manifest, bool, error) {
+	cfg, err := projects.LoadManifestFiles(registryPaths...)
+	if err != nil {
+		return projects.Manifest{}, false, err
+	}
+
+	var project projects.Manifest
+	found := false
+	for _, candidate := range cfg.Projects {
+		if candidate.Key == "odin-core" {
+			project = candidate
+			found = true
+		}
+	}
+	return project, found, nil
+}
+
+func followUpProjectScope(project projects.Manifest) string {
+	if project.SystemProject {
+		return "odin-core"
+	}
+	return "project"
+}
+
+func updateRowsAffected(ctx context.Context, db *sql.DB, query string, args ...any) (int64, error) {
+	result, err := db.ExecContext(ctx, query, args...)
+	if err != nil {
+		return 0, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	return affected, nil
+}
+
+func bootstrapNow(store *sqlite.Store) time.Time {
+	if store.Now != nil {
+		return store.Now().UTC()
+	}
+	return time.Now().UTC()
 }

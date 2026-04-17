@@ -11,12 +11,26 @@ phase: "17"
 
 The binary does not start an interactive session when invoked without a subcommand. No-arg invocation must print root usage so a Codex or Claude harness can decide which explicit command to run next.
 
+`cmd/odin/main.go` is the binary entrypoint. It resolves the repo root, creates process-level context, and forwards command arguments into the lifecycle dispatcher in `internal/app/lifecycle/run.go`.
+
 ## Entry points
 
 - `odin help` prints the root command surface.
 - `odin repl` starts the compatibility REPL.
 - `odin status --json` exposes runtime readiness and approval state for harness polling.
-- `odin task run --project <key> --title <title>` creates and executes one durable task from an explicit command boundary.
+- `odin task run --project <key> --title <title>` is the legacy compatibility path for durable task execution relative to the newer follow-through vocabulary.
+
+## Intended root command families
+
+The current root command dispatcher lives in `internal/app/lifecycle/run.go`. That surface still exposes the existing command set, but the intended product-facing root families are:
+
+- `odin initiative`
+- `odin companion`
+- `odin profile`
+- `odin followup`
+- `odin agenda`
+
+These are the command families the docs should name for the follow-through model. They are not yet claimed as implemented CLI subcommands by this contract.
 
 ## Command boundary rules
 
@@ -24,6 +38,7 @@ The binary does not start an interactive session when invoked without a subcomma
 - machine-readable output must be available on operational commands through `--json`
 - the REPL is optional compatibility surface, not the default operator entry point
 - harnesses own the conversational loop and invoke `odin` commands as needed
+- the root command surface should remain stable enough for a harness to select `initiative`, `companion`, `profile`, `followup`, or `agenda` when those command families land
 
 ## Execution rules
 

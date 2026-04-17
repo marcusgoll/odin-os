@@ -9,10 +9,18 @@ updated: 2026-04-17
 
 Odin OS is the canonical future runtime for Odin: a Go-first, CLI-first orchestration system with SQLite as its initial runtime authority, Markdown with frontmatter as its canonical authored format, and Git-governed project execution as a baseline requirement.
 
-This repository is the runtime root. `odin-orchestrator` is a migration source only. The system is designed to operate across explicit scopes: global control, the reserved `odin-core` system project, managed local or GitHub-backed projects, and new-project setup flows. GitHub is optional, but Git is mandatory for any managed project.
+This repository is the runtime root. `odin-orchestrator` is a migration source only. The system is designed around a workspace-first semantic center that still operates across explicit scopes: global control, the reserved `odin-core` system project, managed local or GitHub-backed projects, and new-project setup flows. GitHub is optional, but Git is mandatory for any managed project.
+
+See `docs/contracts/ubiquitous-language.md` for the frozen vocabulary, `docs/contracts/workspace-context-map.md` for the bounded-context map, and `docs/contracts/follow-through-contract.md` for the workspace-owned operating profile and follow-through model.
 
 ## Architecture Summary
 
+- Workspace is the top-level operating environment and the semantic root for all durable work.
+- Initiatives are durable responsibility streams that can hold managed projects or non-project life and work streams.
+- Companions are durable AI roles such as assistants, advisors, operators, and specialists.
+- Managed projects are governed initiatives with Git-backed mutation rules and explicit project governance.
+- Work items are the durable unit of governed work, and run attempts are the disposable execution records.
+- Follow-up obligations are durable control-plane objects that materialize into work items when due.
 - Runtime authority lives in SQLite at `data/odin.db`.
 - Authored assets live in-repo as Markdown with frontmatter under `registry/`, `prompts/`, and `memory/`.
 - CLI, API, and worker execution all resolve through shared orchestration, policy, runtime, and executor contracts.
@@ -20,6 +28,7 @@ This repository is the runtime root. `odin-orchestrator` is a migration source o
 - Tool, skill, and sub-agent loading is dynamic and scope-aware; Odin must not preload the full catalog into every task context.
 - Mutating work is isolated through task-owned worktrees and branches.
 - Self-heal is deterministic, bounded, and auditable; self-improvement is proposal-driven, replay-tested, promotion-gated, and reversible.
+- The intended root command families for routines and follow-through are `odin initiative`, `odin companion`, `odin profile`, `odin followup`, and `odin agenda`, while the current binary still exposes the existing lifecycle command surface.
 
 ## Canonical Documents
 

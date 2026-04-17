@@ -25,6 +25,7 @@ const (
 	StreamLearningPromotion  StreamType = "learning_promotion"
 	StreamSkill              StreamType = "skill"
 	StreamCapability         StreamType = "capability"
+	StreamFollowUp           StreamType = "follow_up"
 )
 
 type Type string
@@ -66,6 +67,8 @@ const (
 	EventSkillLifecycleRecorded           Type = "skill.lifecycle_recorded"
 	EventCapabilitySnapshotPublished      Type = "capability.snapshot_published"
 	EventCapabilitySnapshotRejected       Type = "capability.snapshot_rejected"
+	EventFollowUpMaterialized             Type = "follow_up.materialized"
+	EventFollowUpPaused                   Type = "follow_up.paused"
 )
 
 const (
@@ -144,6 +147,20 @@ type TaskQueueStateChangedPayload struct {
 	MaxAttempts    int    `json:"max_attempts"`
 	LastError      string `json:"last_error,omitempty"`
 	BlockedReason  string `json:"blocked_reason,omitempty"`
+}
+
+type FollowUpMaterializedPayload struct {
+	ObligationID  int64  `json:"obligation_id"`
+	TaskID        int64  `json:"task_id"`
+	OccurrenceKey string `json:"occurrence_key"`
+	TaskStatus    string `json:"task_status"`
+	Reused        bool   `json:"reused"`
+}
+
+type FollowUpPausedPayload struct {
+	ObligationID     int64  `json:"obligation_id"`
+	Status           string `json:"status"`
+	InitiativeStatus string `json:"initiative_status,omitempty"`
 }
 
 type RunStartedPayload struct {

@@ -3,12 +3,14 @@ package httpapi_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	httpapi "odin-os/internal/api/http"
 	"odin-os/internal/core/initiatives"
@@ -17,7 +19,6 @@ import (
 	"odin-os/internal/runtime/projections"
 	"odin-os/internal/store/sqlite"
 	metricsvc "odin-os/internal/telemetry/metrics"
-	"time"
 )
 
 func TestReadyzReturnsHealthyWhenRuntimeIsReady(t *testing.T) {
@@ -178,6 +179,47 @@ func TestOperationalHandlerExposesWorkspaceInitiativeCompanionAndBlockedReadMode
 	decodeURLJSON(t, server.URL+"/blocked", &blocked)
 	if len(blocked) != 1 || blocked[0].InitiativeKey == nil || *blocked[0].InitiativeKey != "alpha" {
 		t.Fatalf("/blocked = %+v, want blocked item for alpha", blocked)
+	}
+}
+
+func TestOperationalHandlerExposesAgendaReadModel(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	now := time.Date(2026, 4, 17, 9, 0, 0, 0, time.UTC)
+	store := openStore(t)
+	defer store.Close()
+
+	seedHealthyObservability(t, ctx, store)
+	seedOperatorReadModels(t, ctx, store)
+	seedAgendaReadModels(t, ctx, store, now)
+
+	server := httptest.NewServer(httpapi.NewOperationalHandler(httpapi.Dependencies{
+		Health: healthsvc.Service{DB: store.DB()},
+		Metrics: metricsvc.Service{
+			DB: store.DB(),
+		},
+		ReadModels:      store.DB(),
+		RegistryHealthy: true,
+		Now: func() time.Time {
+			return now
+		},
+	}))
+	defer server.Close()
+
+	var agenda projections.AgendaView
+	decodeURLJSON(t, server.URL+"/agenda", &agenda)
+	if agenda.WorkspaceKey != "default" {
+		t.Fatalf("/agenda workspace_key = %q, want default", agenda.WorkspaceKey)
+	}
+	if len(agenda.DueWork) != 2 {
+		t.Fatalf("/agenda due_work = %+v, want 2 entries", agenda.DueWork)
+	}
+	if len(agenda.BlockedWork) < 2 {
+		t.Fatalf("/agenda blocked_work = %+v, want at least 2 entries", agenda.BlockedWork)
+	}
+	if len(agenda.Approvals) != 1 || agenda.Approvals[0].TaskKey != "alpha-task" {
+		t.Fatalf("/agenda approvals = %+v, want alpha-task approval", agenda.Approvals)
 	}
 }
 
@@ -418,6 +460,76 @@ func seedOperatorReadModels(t *testing.T, ctx context.Context, store *sqlite.Sto
 		RequestedBy: "system",
 	}); err != nil {
 		t.Fatalf("RequestApproval() error = %v", err)
+	}
+}
+
+func seedAgendaReadModels(t *testing.T, ctx context.Context, store *sqlite.Store, now time.Time) {
+	t.Helper()
+
+	project, err := store.GetProjectByKey(ctx, "alpha")
+	if err != nil {
+		t.Fatalf("GetProjectByKey(alpha) error = %v", err)
+	}
+	workspace, err := store.GetWorkspaceByKey(ctx, "default")
+	if err != nil {
+		t.Fatalf("GetWorkspaceByKey(default) error = %v", err)
+	}
+	companion, err := store.GetCompanionByKey(ctx, workspace.ID, workspace.DefaultCompanionKey)
+	if err != nil {
+		t.Fatalf("GetCompanionByKey(default) error = %v", err)
+	}
+	initiative, err := store.GetInitiativeByKey(ctx, workspace.ID, "alpha")
+	if err != nil {
+		t.Fatalf("GetInitiativeByKey(alpha) error = %v", err)
+	}
+
+	createAgendaFollowUpObligation(t, ctx, store, project.ID, workspace.ID, initiative.ID, companion.ID, "Review mail", now)
+	createAgendaFollowUpObligation(t, ctx, store, project.ID, workspace.ID, initiative.ID, companion.ID, "File taxes", now.Add(-48*time.Hour))
+
+	wakeTask, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:    project.ID,
+		Key:          "alpha-wake",
+		Title:        "Resume wake packet",
+		Status:       "blocked",
+		Scope:        "project",
+		RequestedBy:  "operator",
+		WorkspaceID:  &workspace.ID,
+		InitiativeID: &initiative.ID,
+		CompanionID:  &companion.ID,
+		WorkKind:     "follow_up",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask(alpha-wake) error = %v", err)
+	}
+	if _, err := store.CreateContextPacket(ctx, sqlite.CreateContextPacketParams{
+		TaskID:        &wakeTask.ID,
+		PacketKind:    "wake",
+		PacketScope:   "task_wake_packet",
+		Trigger:       "follow_up_wait",
+		CheckpointKey: "agenda-wake",
+		Status:        "active",
+		Summary:       "waiting on follow-up context",
+		PayloadJSON:   fmt.Sprintf(`{"task_id":%d,"task_key":"%s","scope":"project","objective":"Resume wake work","status":"waiting","trigger":"follow_up_wait","blocking_reason":"waiting on supporting context"}`, wakeTask.ID, wakeTask.Key),
+	}); err != nil {
+		t.Fatalf("CreateContextPacket() error = %v", err)
+	}
+}
+
+func createAgendaFollowUpObligation(t *testing.T, ctx context.Context, store *sqlite.Store, projectID, workspaceID, initiativeID, companionID int64, title string, nextDueAt time.Time) {
+	t.Helper()
+
+	if _, err := store.CreateFollowUpObligation(ctx, sqlite.CreateFollowUpObligationParams{
+		WorkspaceID:     workspaceID,
+		InitiativeID:    &initiativeID,
+		CompanionID:     &companionID,
+		TargetProjectID: projectID,
+		Title:           title,
+		Status:          "active",
+		CadenceJSON:     `{"mode":"once"}`,
+		NextDueAt:       nextDueAt,
+		PolicyJSON:      `{}`,
+	}); err != nil {
+		t.Fatalf("CreateFollowUpObligation(%s) error = %v", title, err)
 	}
 }
 

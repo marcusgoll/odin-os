@@ -3,6 +3,7 @@ package projections_test
 import (
 	"context"
 	"testing"
+	"time"
 
 	"odin-os/internal/core/initiatives"
 	"odin-os/internal/runtime/projections"
@@ -15,6 +16,20 @@ func TestOperatorProjectionsExposeWorkspaceInitiativesCompanionsAndBlockedWork(t
 	defer store.Close()
 
 	project, workspace, initiative, companion := seedOperatorReadModelState(t, ctx, store)
+
+	if _, err := store.CreateFollowUpObligation(ctx, sqlite.CreateFollowUpObligationParams{
+		WorkspaceID:     workspace.ID,
+		InitiativeID:    &initiative.ID,
+		CompanionID:     &companion.ID,
+		TargetProjectID: project.ID,
+		Title:           "Overdue review",
+		Status:          "active",
+		CadenceJSON:     `{"mode":"once"}`,
+		NextDueAt:       time.Now().UTC().Add(-48 * time.Hour),
+		PolicyJSON:      `{}`,
+	}); err != nil {
+		t.Fatalf("CreateFollowUpObligation() error = %v", err)
+	}
 
 	workspaceView, err := projections.GetWorkspaceOverviewView(ctx, store.DB(), workspace.Key)
 	if err != nil {
@@ -35,6 +50,9 @@ func TestOperatorProjectionsExposeWorkspaceInitiativesCompanionsAndBlockedWork(t
 	if workspaceView.BlockedWorkItemCount != 1 {
 		t.Fatalf("workspace blocked work items = %d, want 1", workspaceView.BlockedWorkItemCount)
 	}
+	if workspaceView.OverdueFollowUpCount != 1 {
+		t.Fatalf("workspace overdue follow-ups = %d, want 1", workspaceView.OverdueFollowUpCount)
+	}
 
 	initiativeViews, err := projections.ListInitiativePortfolioViews(ctx, store.DB(), workspace.Key)
 	if err != nil {
@@ -52,6 +70,9 @@ func TestOperatorProjectionsExposeWorkspaceInitiativesCompanionsAndBlockedWork(t
 	if initiativeViews[0].LinkedProjectKey == nil || *initiativeViews[0].LinkedProjectKey != project.Key {
 		t.Fatalf("linked project key = %v, want %q", initiativeViews[0].LinkedProjectKey, project.Key)
 	}
+	if initiativeViews[0].OverdueFollowUpCount != 1 {
+		t.Fatalf("initiative overdue follow-ups = %d, want 1", initiativeViews[0].OverdueFollowUpCount)
+	}
 
 	companionViews, err := projections.ListCompanionAssignmentViews(ctx, store.DB(), workspace.Key)
 	if err != nil {
@@ -68,6 +89,9 @@ func TestOperatorProjectionsExposeWorkspaceInitiativesCompanionsAndBlockedWork(t
 	}
 	if companionViews[0].BlockedWorkItemCount != 1 {
 		t.Fatalf("companion blocked work items = %d, want 1", companionViews[0].BlockedWorkItemCount)
+	}
+	if companionViews[0].OverdueFollowUpCount != 1 {
+		t.Fatalf("companion overdue follow-ups = %d, want 1", companionViews[0].OverdueFollowUpCount)
 	}
 
 	blockedViews, err := projections.ListBlockedItemViews(ctx, store.DB())

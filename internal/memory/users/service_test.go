@@ -42,6 +42,75 @@ func TestServiceListsOnlyGlobalMemory(t *testing.T) {
 	}
 }
 
+func TestServiceListsWorkspaceMemoryBeforeGlobalMemory(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	service := Service{
+		Store:          store,
+		WorkspaceScope: "workspace",
+		WorkspaceKey:   "primary",
+	}
+
+	globalEntry, err := store.RecordMemorySummary(ctx, sqlite.RecordMemorySummaryParams{
+		Scope:       "global",
+		ScopeKey:    "global",
+		MemoryType:  "user_preference",
+		Summary:     "Prefer concise replies.",
+		DetailsJSON: `{"source":"test"}`,
+	})
+	if err != nil {
+		t.Fatalf("RecordMemorySummary(global) error = %v", err)
+	}
+
+	workspaceEntry, err := service.Remember(ctx, "operator_preference", "Use workspace defaults.", `{"source":"test"}`)
+	if err != nil {
+		t.Fatalf("Remember() error = %v", err)
+	}
+
+	entries, err := service.List(ctx)
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("entries len = %d, want 2", len(entries))
+	}
+	if entries[0].ID != workspaceEntry.ID || entries[1].ID != globalEntry.ID {
+		t.Fatalf("entries = %+v, want workspace then global", entries)
+	}
+}
+
+func TestProfileServiceRememberProfileUpdateUsesWorkspaceScope(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	service := Service{
+		Store:          store,
+		WorkspaceScope: "workspace",
+		WorkspaceKey:   "primary",
+	}
+
+	entry, err := service.RememberProfileUpdate(ctx, "Quiet hours updated", `{"quiet_hours":"22:00-07:00"}`)
+	if err != nil {
+		t.Fatalf("RememberProfileUpdate() error = %v", err)
+	}
+	if entry.Scope != "workspace" {
+		t.Fatalf("entry.Scope = %q, want workspace", entry.Scope)
+	}
+	if entry.ScopeKey != "primary" {
+		t.Fatalf("entry.ScopeKey = %q, want primary", entry.ScopeKey)
+	}
+	if entry.MemoryType != MemoryTypeOperatingProfileUpdate {
+		t.Fatalf("entry.MemoryType = %q, want %q", entry.MemoryType, MemoryTypeOperatingProfileUpdate)
+	}
+}
+
 func openTestStore(t *testing.T) *sqlite.Store {
 	t.Helper()
 
