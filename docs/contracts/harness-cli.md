@@ -11,6 +11,8 @@ phase: "17"
 
 The binary does not start an interactive session when invoked without a subcommand. No-arg invocation must print root usage so a Codex or Claude harness can decide which explicit command to run next.
 
+`cmd/odin/main.go` is the binary entrypoint. It resolves the repo root, creates process-level context, and forwards command arguments into the lifecycle dispatcher in `internal/app/lifecycle/run.go`.
+
 ## Entry points
 
 - `odin help` prints the root command surface.
@@ -20,7 +22,7 @@ The binary does not start an interactive session when invoked without a subcomma
 
 ## Intended root command families
 
-The current root command implementation lives in `internal/app/lifecycle/run.go`. That surface still exposes the existing command set, but the intended product-facing root families are:
+The current root command dispatcher lives in `internal/app/lifecycle/run.go`. That surface still exposes the existing command set, but the intended product-facing root families are:
 
 - `odin initiative`
 - `odin companion`

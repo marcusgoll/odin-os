@@ -12,7 +12,7 @@ This document freezes the bounded follow-through model for Odin OS. It defines t
 
 Follow-through is the control-plane layer that keeps recurring obligations, reminders, and routine commitments visible and actionable inside a workspace.
 
-It is not a generic scheduler, a background cron system, or a direct execution path. Any real side effect still flows through the normal work-item and run-attempt contracts.
+It is not a generic scheduler, a background cron system, or a direct execution path. Any real side effect flows through the normal work-item and run-attempt contracts.
 
 ## OperatingProfile
 
@@ -31,7 +31,7 @@ Contract rules:
 
 - one workspace owns one active operating profile
 - the operating profile is durable control-plane state, not a persona
-- the profile may inform automation, but it must not directly execute external side effects
+- the profile informs automation, but it must not directly execute external side effects
 - profile changes are explicit workspace mutations and should be visible through workspace projections
 
 ## FollowUpObligation
@@ -47,7 +47,7 @@ Contract rules:
 - an obligation carries due information, cadence rules, status, and history
 - an obligation does not become a work item until it is due or otherwise materialized by the follow-through loop
 
-Suggested lifecycle states include active, paused, due, blocked, completed, and skipped. Implementations may store these differently, but they must preserve visibility into the same control-plane facts.
+Lifecycle states include active, paused, due, blocked, completed, and skipped. Implementations may store these differently, but they must preserve visibility into the same control-plane facts.
 
 ## Obligation To Work Item Materialization
 
@@ -93,7 +93,7 @@ The proactive boundary is: due obligation -> materialized work item -> normal go
 
 ## Command Surface Rules
 
-The root CLI should expose explicit command families for the follow-through model rather than relying on REPL-only behavior.
+The root CLI exposes explicit command families for the follow-through model rather than relying on REPL-only behavior.
 
 Intended root command families:
 
@@ -105,9 +105,8 @@ Intended root command families:
 
 Rules:
 
-- these commands should be explicit root entry points
-- machine-readable output should be available where the command is operational
-- commands should surface workspace, initiative, and due-obligation state without implying hidden background execution
-- no command should claim to own durable truth outside the workspace model
+- these commands are explicit root entry points
+- machine-readable output is available where the command is operational
+- commands surface workspace, initiative, and due-obligation state without implying hidden background execution
+- no command claims to own durable truth outside the workspace model
 - the REPL remains a compatibility surface, not the authoritative operator boundary
-
