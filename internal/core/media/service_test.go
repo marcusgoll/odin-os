@@ -55,3 +55,32 @@ func TestMediaValidateRejectsServiceWithoutRequiredIdentifiers(t *testing.T) {
 		t.Fatalf("Validate() error = nil, want validation failure")
 	}
 }
+
+func TestMediaValidateRejectsUnknownServiceKind(t *testing.T) {
+	t.Parallel()
+
+	err := Service{}.Validate(Config{
+		Services: []StackService{
+			{
+				Name: "plex",
+				Kind: ServiceKind("prowlerr"),
+			},
+		},
+	})
+	if err == nil {
+		t.Fatalf("Validate() error = nil, want unknown kind failure")
+	}
+}
+
+func TestMediaValidateRejectsUnknownPolicyAction(t *testing.T) {
+	t.Parallel()
+
+	err := Service{}.Validate(Config{
+		Policies: Policies{
+			AutoAllowed: []string{"media_probe_cylce"},
+		},
+	})
+	if err == nil {
+		t.Fatalf("Validate() error = nil, want unknown action failure")
+	}
+}

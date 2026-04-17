@@ -15,6 +15,9 @@ func (Service) Validate(config Config) error {
 		if strings.TrimSpace(string(service.Kind)) == "" {
 			return fmt.Errorf("media service %q kind is required", service.Name)
 		}
+		if !knownServiceKinds[service.Kind] {
+			return fmt.Errorf("media service %q kind %q is unknown", service.Name, service.Kind)
+		}
 	}
 
 	return validatePolicies(config.Policies)
@@ -58,6 +61,9 @@ func validatePolicies(policies Policies) error {
 			if normalized == "" {
 				continue
 			}
+			if !knownActions[normalized] {
+				return fmt.Errorf("media action %q is unknown", normalized)
+			}
 			if previous, exists := seen[normalized]; exists {
 				return fmt.Errorf("media action %q is configured in both %q and %q", normalized, previous, entry.class)
 			}
@@ -75,4 +81,35 @@ func containsAction(actions []string, action string) bool {
 		}
 	}
 	return false
+}
+
+var knownServiceKinds = map[ServiceKind]bool{
+	ServiceKindPlex:       true,
+	ServiceKindRadarr:     true,
+	ServiceKindSonarr:     true,
+	ServiceKindProwlarr:   true,
+	ServiceKindDownloader: true,
+	ServiceKindVPN:        true,
+	ServiceKindSeedbox:    true,
+	ServiceKindUsenet:     true,
+	ServiceKindSync:       true,
+}
+
+var knownActions = map[string]bool{
+	"media_probe_cycle":           true,
+	"media_mount_audit":           true,
+	"media_backup_gate":           true,
+	"media_queue_audit":           true,
+	"media_import_audit":          true,
+	"media_maintenance_candidate": true,
+	"restart_plex":                true,
+	"restart_arr":                 true,
+	"restart_downloader":          true,
+	"retry_import_move":           true,
+	"queue_mutation":              true,
+	"delete_media":                true,
+	"delete_downloader_payload":   true,
+	"remap_root_folders":          true,
+	"rotate_media_credentials":    true,
+	"change_vpn_networking":       true,
 }
