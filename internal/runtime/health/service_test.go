@@ -81,7 +81,7 @@ func TestDoctorReportIsHealthyWhenChecksAreFresh(t *testing.T) {
 		}
 		if _, err := store.RequeueTaskAt(context.Background(), sqlite.RequeueTaskAtParams{
 			TaskID:         delayedTask.ID,
-			NextEligibleAt: now.Add(time.Hour),
+			NextEligibleAt: now.Add(500 * time.Millisecond),
 		}); err != nil {
 			t.Fatalf("RequeueTaskAt(delayed %d) error = %v", index, err)
 		}

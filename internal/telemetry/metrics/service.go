@@ -36,6 +36,10 @@ type Service struct {
 	Now    func() time.Time
 }
 
+func formatSQLiteTime(value time.Time) string {
+	return value.UTC().Format("2006-01-02T15:04:05.000000000Z")
+}
+
 func Render(snapshot Snapshot) string {
 	lines := []string{
 		fmt.Sprintf("odin_active_runs %d", snapshot.ActiveRuns),
@@ -91,7 +95,7 @@ func (service Service) Collect(ctx context.Context) (Snapshot, error) {
 	}
 
 	var queuedTasks int
-	if err := service.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM tasks WHERE status = 'queued' AND next_eligible_at <= ?`, now.Format(time.RFC3339Nano)).Scan(&queuedTasks); err != nil {
+	if err := service.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM tasks WHERE status = 'queued' AND next_eligible_at <= ?`, formatSQLiteTime(now)).Scan(&queuedTasks); err != nil {
 		return Snapshot{}, err
 	}
 
@@ -110,7 +114,7 @@ func (service Service) Collect(ctx context.Context) (Snapshot, error) {
 			LIMIT 1
 		)
 		WHERE status != 'healthy' OR checked_at < ?
-	`, now.Add(-config.ExecutorFreshnessTTL).Format(time.RFC3339Nano)).Scan(&staleExecutors); err != nil {
+	`, formatSQLiteTime(now.Add(-config.ExecutorFreshnessTTL))).Scan(&staleExecutors); err != nil {
 		return Snapshot{}, err
 	}
 
@@ -124,7 +128,7 @@ func (service Service) Collect(ctx context.Context) (Snapshot, error) {
 			LIMIT 1
 		)
 		WHERE compiled_at < ?
-	`, now.Add(-config.SourceFreshnessTTL).Format(time.RFC3339Nano)).Scan(&staleSources); err != nil {
+	`, formatSQLiteTime(now.Add(-config.SourceFreshnessTTL))).Scan(&staleSources); err != nil {
 		return Snapshot{}, err
 	}
 
@@ -133,7 +137,7 @@ func (service Service) Collect(ctx context.Context) (Snapshot, error) {
 		SELECT COUNT(*)
 		FROM projection_freshness
 		WHERE refreshed_at < ?
-	`, now.Add(-config.ProjectionFreshnessTTL).Format(time.RFC3339Nano)).Scan(&staleProjections); err != nil {
+	`, formatSQLiteTime(now.Add(-config.ProjectionFreshnessTTL))).Scan(&staleProjections); err != nil {
 		return Snapshot{}, err
 	}
 

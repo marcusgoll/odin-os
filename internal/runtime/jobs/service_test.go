@@ -277,7 +277,7 @@ func TestRetryBackoffSkipsTaskUntilEligible(t *testing.T) {
 
 	if _, err := store.RequeueTaskAt(ctx, sqlite.RequeueTaskAtParams{
 		TaskID:         delayedTask.ID,
-		NextEligibleAt: now.Add(30 * time.Minute),
+		NextEligibleAt: now.Add(500 * time.Millisecond),
 	}); err != nil {
 		t.Fatalf("RequeueTaskAt() error = %v", err)
 	}

@@ -43,6 +43,10 @@ type Config struct {
 	ProjectionFreshnessTTL time.Duration
 }
 
+func formatSQLiteTime(value time.Time) string {
+	return value.UTC().Format("2006-01-02T15:04:05.000000000Z")
+}
+
 type Service struct {
 	DB     *sql.DB
 	Config Config
@@ -221,7 +225,7 @@ func (service Service) queueCheck(ctx context.Context, now time.Time, config Con
 			COUNT(CASE WHEN status = 'queued' AND next_eligible_at <= ? THEN 1 END),
 			COUNT(CASE WHEN status = 'running' THEN 1 END)
 		FROM tasks
-	`, now.Format(time.RFC3339Nano)).Scan(&queued, &running); err != nil {
+	`, formatSQLiteTime(now)).Scan(&queued, &running); err != nil {
 		return Check{}, err
 	}
 
@@ -250,7 +254,7 @@ func (service Service) projectionCheck(ctx context.Context, now time.Time, confi
 			COUNT(*),
 			COUNT(CASE WHEN refreshed_at < ? THEN 1 END)
 		FROM projection_freshness
-	`, now.Add(-config.ProjectionFreshnessTTL).Format(time.RFC3339Nano)).Scan(&total, &stale); err != nil {
+	`, formatSQLiteTime(now.Add(-config.ProjectionFreshnessTTL))).Scan(&total, &stale); err != nil {
 		return Check{}, err
 	}
 

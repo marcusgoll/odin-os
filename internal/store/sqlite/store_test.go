@@ -1087,7 +1087,7 @@ func TestRetryBackoffUpdatesQueueState(t *testing.T) {
 		t.Fatalf("CreateTask() error = %v", err)
 	}
 
-	retryAt := now.Add(15 * time.Minute)
+	retryAt := now.Add(500 * time.Millisecond)
 	updated, err := store.IncrementTaskRetry(ctx, IncrementTaskRetryParams{
 		TaskID:         task.ID,
 		LastError:      "transient executor failure",
@@ -1132,5 +1132,25 @@ func TestRetryBackoffUpdatesQueueState(t *testing.T) {
 	}
 	if len(eligible) != 1 || eligible[0].ID != task.ID {
 		t.Fatalf("ListEligibleQueuedTasks(retryAt) = %+v, want task %d", eligible, task.ID)
+	}
+}
+
+func TestFormatTimeUsesFixedWidthUTC(t *testing.T) {
+	got := formatTime(time.Date(2026, 4, 17, 10, 0, 0, 5*1000*1000, time.FixedZone("offset", 3*60*60)))
+	want := "2026-04-17T07:00:00.005000000Z"
+	if got != want {
+		t.Fatalf("formatTime() = %q, want %q", got, want)
+	}
+}
+
+func TestParseTimeAcceptsVariableWidthRFC3339Nano(t *testing.T) {
+	got, err := parseTime("2026-04-17T07:00:00.5Z")
+	if err != nil {
+		t.Fatalf("parseTime() error = %v", err)
+	}
+
+	want := time.Date(2026, 4, 17, 7, 0, 0, 500*1000*1000, time.UTC)
+	if !got.Equal(want) {
+		t.Fatalf("parseTime() = %v, want %v", got, want)
 	}
 }
