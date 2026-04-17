@@ -1026,9 +1026,13 @@ func (shell *Shell) handleDoctor(ctx context.Context, args []string, output io.W
 		return err
 	}
 
-	if len(args) > 0 && strings.EqualFold(args[0], "json") {
+	switch {
+	case len(args) > 0 && strings.EqualFold(args[0], "json"):
 		encoder := json.NewEncoder(output)
 		return encoder.Encode(report)
+	case len(args) > 0 && strings.EqualFold(args[0], "report"):
+		_, err = fmt.Fprint(output, healthsvc.RenderMarkdownReport(healthsvc.BuildOperatorReport(report)))
+		return err
 	}
 
 	checks := make(map[string]string, len(report.Checks))

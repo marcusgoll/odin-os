@@ -248,6 +248,51 @@ func TestDoctorCommandSupportsJSONOutput(t *testing.T) {
 	t.Parallel()
 
 	env := newTestEnvironment(t)
+	seedHealthyDoctorState(t, env)
+
+	shell, err := New(env)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	var output bytes.Buffer
+	if err := shell.HandleLine(context.Background(), "/doctor json", &output); err != nil {
+		t.Fatalf("HandleLine(/doctor json) error = %v", err)
+	}
+
+	var decoded map[string]any
+	if err := json.Unmarshal(output.Bytes(), &decoded); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	if decoded["status"] == nil {
+		t.Fatalf("decoded status missing: %#v", decoded)
+	}
+}
+
+func TestShellDoctorReportWritesMarkdownSummary(t *testing.T) {
+	t.Parallel()
+
+	env := newTestEnvironment(t)
+	seedHealthyDoctorState(t, env)
+
+	shell, err := New(env)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	var output bytes.Buffer
+	if err := shell.HandleLine(context.Background(), "/doctor report", &output); err != nil {
+		t.Fatalf("HandleLine(/doctor report) error = %v", err)
+	}
+
+	if !strings.Contains(output.String(), "## Current Health Snapshot") {
+		t.Fatalf("output = %q, want markdown doctor report", output.String())
+	}
+}
+
+func seedHealthyDoctorState(t *testing.T, env Environment) {
+	t.Helper()
+
 	if _, err := env.Store.RecordExecutorHealth(context.Background(), sqlite.RecordExecutorHealthParams{
 		Executor:    "codex",
 		Status:      "healthy",
@@ -269,24 +314,6 @@ func TestDoctorCommandSupportsJSONOutput(t *testing.T) {
 		DetailsJSON: `{"source":"runtime"}`,
 	}); err != nil {
 		t.Fatalf("RecordProjectionFreshness() error = %v", err)
-	}
-
-	shell, err := New(env)
-	if err != nil {
-		t.Fatalf("New() error = %v", err)
-	}
-
-	var output bytes.Buffer
-	if err := shell.HandleLine(context.Background(), "/doctor json", &output); err != nil {
-		t.Fatalf("HandleLine(/doctor json) error = %v", err)
-	}
-
-	var decoded map[string]any
-	if err := json.Unmarshal(output.Bytes(), &decoded); err != nil {
-		t.Fatalf("Unmarshal() error = %v", err)
-	}
-	if decoded["status"] == nil {
-		t.Fatalf("decoded status missing: %#v", decoded)
 	}
 }
 
