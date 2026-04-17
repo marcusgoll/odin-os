@@ -2,7 +2,7 @@
 title: Odin OS
 phase: "17"
 status: active
-updated: 2026-04-16
+updated: 2026-04-17
 ---
 
 # Odin OS
@@ -37,6 +37,7 @@ See `docs/contracts/ubiquitous-language.md` for the frozen vocabulary and `docs/
 - `docs/contracts/repo-layout.md` defines package and folder responsibilities.
 - `docs/contracts/phase-exit-criteria.md` defines the acceptance gate for Phase 00 and the baseline gate every later phase must satisfy.
 - `docs/operations/workspace-bootstrap.md` explains fresh-runtime workspace bootstrap and legacy runtime repair.
+- `docs/contracts/verification-model.md` defines how Odin proves behavior across unit, contract, integration, and real `odin` command execution.
 
 ## Current Status
 
@@ -63,3 +64,20 @@ go run ./scripts/migrate/bootstrap_workspace -runtime-root /path/to/odin-root
 ```
 
 The helper is additive and idempotent. It bootstraps the default workspace and companion, reconciles managed-project initiatives, and binds legacy tasks into the workspace model without renaming the underlying `tasks` table.
+
+## Contribution Workflow
+
+Before opening a pull request:
+
+- read `docs/contracts/verification-model.md`
+- prefer `make ci` to mirror the local CI verification stack
+- run additional targeted commands when the change needs narrower iteration than `make ci`
+- if the change affects user-visible or orchestration-facing behavior, run the real repo-owned `odin` command path against a controlled `ODIN_ROOT`
+
+Pull requests are expected to use the repo template and report:
+
+- `Proven`
+- `Unproven`
+- `Commands Run`
+
+On `pull_request` events, CI validates that the PR body includes those sections and, for operator-visible changes, includes real `odin` command evidence.
