@@ -2382,6 +2382,68 @@ func (store *Store) UpdateFollowUpObligation(ctx context.Context, params UpdateF
 	return obligation, err
 }
 
+func (store *Store) RepairFollowUpObligationTargets(ctx context.Context, defaultTargetProjectID int64) (int64, error) {
+	if defaultTargetProjectID <= 0 {
+		return 0, fmt.Errorf("default target project ID is required")
+	}
+
+	now := store.now()
+	var repaired int64
+
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		result, err := tx.ExecContext(ctx, `
+			UPDATE follow_up_obligations
+			SET target_project_id = COALESCE(
+				(SELECT linked_project_id FROM initiatives WHERE initiatives.id = follow_up_obligations.initiative_id),
+				?
+			),
+			updated_at = ?
+			WHERE target_project_id IS NULL
+		`, defaultTargetProjectID, formatTime(now))
+		if err != nil {
+			return err
+		}
+
+		repaired, err = result.RowsAffected()
+		return err
+	})
+
+	return repaired, err
+}
+
+func (store *Store) RepairFollowUpObligationLinkedTargets(ctx context.Context) (int64, error) {
+	now := store.now()
+	var repaired int64
+
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		result, err := tx.ExecContext(ctx, `
+			UPDATE follow_up_obligations
+			SET target_project_id = (
+				SELECT linked_project_id
+				FROM initiatives
+				WHERE initiatives.id = follow_up_obligations.initiative_id
+			),
+			updated_at = ?
+			WHERE target_project_id IS NULL
+			  AND initiative_id IS NOT NULL
+			  AND EXISTS (
+				SELECT 1
+				FROM initiatives
+				WHERE initiatives.id = follow_up_obligations.initiative_id
+				  AND initiatives.linked_project_id IS NOT NULL
+			)
+		`, formatTime(now))
+		if err != nil {
+			return err
+		}
+
+		repaired, err = result.RowsAffected()
+		return err
+	})
+
+	return repaired, err
+}
+
 func (store *Store) GetTaskByFollowUpOccurrence(ctx context.Context, obligationID int64, occurrenceKey string) (Task, error) {
 	row := store.db.QueryRowContext(ctx, `
 		SELECT

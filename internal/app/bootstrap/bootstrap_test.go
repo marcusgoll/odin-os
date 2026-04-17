@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"odin-os/internal/core/followups"
 	"odin-os/internal/core/workspaces"
 	"odin-os/internal/store/sqlite"
 )
@@ -133,6 +134,127 @@ func TestLoadRepairsLegacyProjectsAndTasksIntoWorkspaceModel(t *testing.T) {
 	}
 	if repairedTask.WorkKind != repairedTask.Scope {
 		t.Fatalf("GetTask(legacy-task).WorkKind = %q, want %q", repairedTask.WorkKind, repairedTask.Scope)
+	}
+}
+
+func TestLoadRepairsLegacyFollowUpObligationTargetsBeforeMaterialization(t *testing.T) {
+	ctx := context.Background()
+	repoRoot := bootstrapTestRepoRoot(t)
+	runtimeRoot := t.TempDir()
+
+	if err := os.MkdirAll(filepath.Join(runtimeRoot, "data"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(data) error = %v", err)
+	}
+
+	seedStore, err := sqlite.Open(filepath.Join(runtimeRoot, "data", "odin.db"))
+	if err != nil {
+		t.Fatalf("sqlite.Open(seed) error = %v", err)
+	}
+	if err := seedStore.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate(seed) error = %v", err)
+	}
+
+	workspaceService := workspaces.Service{Store: seedStore}
+	if _, err := workspaceService.BootstrapDefaultWorkspace(ctx); err != nil {
+		t.Fatalf("BootstrapDefaultWorkspace() error = %v", err)
+	}
+	workspace, err := seedStore.GetWorkspaceByKey(ctx, workspaces.DefaultWorkspaceKey)
+	if err != nil {
+		t.Fatalf("GetWorkspaceByKey(default) error = %v", err)
+	}
+	companion, err := seedStore.UpsertCompanion(ctx, sqlite.UpsertCompanionParams{
+		WorkspaceID: workspace.ID,
+		Key:         workspaces.DefaultWorkspaceCompanionKey,
+		Title:       "Primary Assistant",
+		Kind:        "assistant",
+		Charter:     "Default companion for this workspace.",
+		Status:      "active",
+	})
+	if err != nil {
+		t.Fatalf("UpsertCompanion() error = %v", err)
+	}
+	initiative, err := seedStore.UpsertInitiative(ctx, sqlite.UpsertInitiativeParams{
+		WorkspaceID:      workspace.ID,
+		Key:              "life-admin",
+		Title:            "Life Admin",
+		Kind:             "routine",
+		Status:           "active",
+		OwnerCompanionID: &companion.ID,
+	})
+	if err != nil {
+		t.Fatalf("UpsertInitiative() error = %v", err)
+	}
+
+	nextDueAt := time.Date(2026, 4, 17, 9, 0, 0, 0, time.UTC)
+	result, err := seedStore.DB().ExecContext(ctx, `
+		INSERT INTO follow_up_obligations (
+			workspace_id,
+			initiative_id,
+			companion_id,
+			target_project_id,
+			title,
+			status,
+			cadence_json,
+			next_due_at,
+			last_materialized_at,
+			last_completed_at,
+			policy_json,
+			created_at,
+			updated_at
+		)
+		VALUES (?, ?, ?, NULL, ?, ?, ?, ?, NULL, NULL, ?, ?, ?)
+	`, workspace.ID, initiative.ID, companion.ID, "Review mail", "active", `{"mode":"once"}`, nextDueAt.Format(time.RFC3339Nano), `{}`, nextDueAt.Format(time.RFC3339Nano), nextDueAt.Format(time.RFC3339Nano))
+	if err != nil {
+		t.Fatalf("seed follow_up_obligations row error = %v", err)
+	}
+	obligationID, err := result.LastInsertId()
+	if err != nil {
+		t.Fatalf("LastInsertId() error = %v", err)
+	}
+	if err := seedStore.Close(); err != nil {
+		t.Fatalf("seedStore.Close() error = %v", err)
+	}
+
+	app, err := Load(ctx, repoRoot, runtimeRoot)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	defer app.Store.Close()
+
+	obligation, err := app.Store.GetFollowUpObligation(ctx, obligationID)
+	if err != nil {
+		t.Fatalf("GetFollowUpObligation() error = %v", err)
+	}
+	defaultProject, err := app.Store.GetProjectByKey(ctx, "odin-core")
+	if err != nil {
+		t.Fatalf("GetProjectByKey(odin-core) error = %v", err)
+	}
+	if obligation.TargetProjectID != defaultProject.ID {
+		t.Fatalf("TargetProjectID = %d, want %d", obligation.TargetProjectID, defaultProject.ID)
+	}
+
+	materialized, err := followups.Service{
+		Store: app.Store,
+		Now: func() time.Time {
+			return nextDueAt.Add(time.Hour)
+		},
+	}.Materialize(ctx, followups.MaterializeParams{
+		ObligationID: obligationID,
+		TaskKey:      "review-mail-1",
+		Title:        "Review mail",
+		Scope:        "project",
+		RequestedBy:  "operator",
+	})
+	if err != nil {
+		t.Fatalf("Materialize() error = %v", err)
+	}
+
+	task, err := app.Store.GetTask(ctx, materialized.TaskID)
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
+	}
+	if task.ProjectID != defaultProject.ID {
+		t.Fatalf("Task.ProjectID = %d, want %d", task.ProjectID, defaultProject.ID)
 	}
 }
 

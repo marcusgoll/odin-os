@@ -131,6 +131,13 @@ func load(ctx context.Context, repoRoot string, runtimeRoot string, options load
 		})
 	}
 
+	if len(diagnostics) == 0 {
+		if err := repairLegacyFollowUpTargets(ctx, store, registry); err != nil {
+			_ = store.Close()
+			return App{}, err
+		}
+	}
+
 	executorConfig, err := executorrouter.LoadConfig(filepath.Join(repoRoot, "config", "executors.yaml"))
 	if err != nil {
 		_ = store.Close()
@@ -496,6 +503,50 @@ func listProjectKeys(ctx context.Context, store *sqlite.Store) ([]string, error)
 	}
 
 	return keys, nil
+}
+
+func repairLegacyFollowUpTargets(ctx context.Context, store *sqlite.Store, registry projects.Registry) error {
+	if _, err := store.RepairFollowUpObligationLinkedTargets(ctx); err != nil {
+		return err
+	}
+
+	var remaining int64
+	if err := store.DB().QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM follow_up_obligations
+		WHERE target_project_id IS NULL
+	`).Scan(&remaining); err != nil {
+		return err
+	}
+	if remaining == 0 {
+		return nil
+	}
+
+	project, ok := registry.Lookup("odin-core")
+	if !ok {
+		return fmt.Errorf("default target project odin-core is not configured")
+	}
+
+	scopeValue := "project"
+	if project.SystemProject {
+		scopeValue = "odin-core"
+	}
+
+	record, err := store.UpsertProject(ctx, sqlite.UpsertProjectParams{
+		Key:           project.Key,
+		Name:          project.Name,
+		Scope:         scopeValue,
+		GitRoot:       project.GitRoot,
+		DefaultBranch: project.DefaultBranch,
+		GitHubRepo:    project.GitHub.Repo,
+		ManifestPath:  project.SourcePath,
+	})
+	if err != nil {
+		return err
+	}
+
+	_, err = store.RepairFollowUpObligationTargets(ctx, record.ID)
+	return err
 }
 
 func bootstrapInitiativeOwner(ctx context.Context, store *sqlite.Store, workspaceID int64, projectKey string, defaultCompanionID int64) (*int64, error) {
