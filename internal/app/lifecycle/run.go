@@ -258,6 +258,8 @@ func runServe(ctx context.Context, app bootstrap.App, cfg appconfig.Config, stdo
 		}),
 	}
 
+	runLeaseMaintenanceCycle(operationCtx, leaseService, logger, loopConfig.leaseStaleAfter)
+
 	var background sync.WaitGroup
 	background.Add(4)
 	loopCtx, stopLoops := context.WithCancel(context.Background())
@@ -276,12 +278,6 @@ func runServe(ctx context.Context, app bootstrap.App, cfg appconfig.Config, stdo
 	}
 	if _, err := recoveryService.RunCycle(operationCtx); err != nil {
 		logBackgroundError(logger, "self_heal", err)
-	}
-	if _, err := leaseService.CleanupExpired(operationCtx, loopConfig.leaseStaleAfter); err != nil {
-		logBackgroundError(logger, "worktree_lease_cleanup", err)
-	}
-	if _, err := leaseService.HeartbeatActive(operationCtx); err != nil {
-		logBackgroundError(logger, "worktree_lease_heartbeat", err)
 	}
 
 	if _, err := stateService.MarkReady(operationCtx, runtimestate.TransitionInput{
@@ -463,13 +459,18 @@ func runLeaseLoop(ctx context.Context, operationCtx context.Context, wg *sync.Wa
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if _, err := service.CleanupExpired(operationCtx, staleAfter); err != nil {
-				logBackgroundError(logger, "worktree_lease_cleanup", err)
-			}
-			if _, err := service.HeartbeatActive(operationCtx); err != nil {
-				logBackgroundError(logger, "worktree_lease_heartbeat", err)
-			}
+			runLeaseMaintenanceCycle(operationCtx, service, logger, staleAfter)
 		}
+	}
+}
+
+func runLeaseMaintenanceCycle(ctx context.Context, service leases.Maintenance, logger *logs.Logger, staleAfter time.Duration) {
+	if _, err := service.CleanupExpired(ctx, staleAfter); err != nil {
+		logBackgroundError(logger, "worktree_lease_cleanup", err)
+		return
+	}
+	if _, err := service.HeartbeatActive(ctx); err != nil {
+		logBackgroundError(logger, "worktree_lease_heartbeat", err)
 	}
 }
 
