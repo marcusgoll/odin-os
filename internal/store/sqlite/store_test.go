@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -778,5 +779,93 @@ func TestRuntimeStateStoreLifecycleAndHeartbeat(t *testing.T) {
 	}
 	if !sawHeartbeat {
 		t.Fatalf("expected service heartbeat event, got %+v", events)
+	}
+}
+
+func TestRuntimeStateStoreRejectsStaleSameBootSnapshot(t *testing.T) {
+	ctx := context.Background()
+	store := openMigratedTestStore(t, "runtime-state-stale-snapshot.db")
+	defer store.Close()
+
+	bootAt := time.Date(2026, 4, 17, 9, 0, 0, 0, time.UTC)
+	degradedAt := bootAt.Add(1 * time.Minute)
+	staleWriteAt := degradedAt.Add(1 * time.Minute)
+
+	booting, err := store.UpsertRuntimeState(ctx, UpsertRuntimeStateParams{
+		BootID:          "boot-1",
+		Status:          "booting",
+		PID:             1234,
+		StartedAt:       bootAt,
+		LastHeartbeatAt: bootAt,
+	}, RuntimeStateWriteOptions{})
+	if err != nil {
+		t.Fatalf("UpsertRuntimeState(booting) error = %v", err)
+	}
+
+	snapshot, err := store.GetRuntimeState(ctx)
+	if err != nil {
+		t.Fatalf("GetRuntimeState(snapshot) error = %v", err)
+	}
+
+	degraded, err := store.UpsertRuntimeState(ctx, UpsertRuntimeStateParams{
+		BootID:          "boot-1",
+		Status:          "degraded",
+		PID:             booting.PID,
+		StartedAt:       booting.StartedAt,
+		LastHeartbeatAt: degradedAt,
+		LastError:       "dependency stale",
+		UpdatedAt:       degradedAt,
+	}, RuntimeStateWriteOptions{
+		ExpectedBootID:    "boot-1",
+		ExpectedUpdatedAt: snapshot.UpdatedAt,
+		EventReason:       "dependency stale",
+	})
+	if err != nil {
+		t.Fatalf("UpsertRuntimeState(degraded) error = %v", err)
+	}
+
+	_, err = store.UpsertRuntimeState(ctx, UpsertRuntimeStateParams{
+		BootID:          "boot-1",
+		Status:          "ready",
+		PID:             snapshot.PID,
+		StartedAt:       snapshot.StartedAt,
+		ReadyAt:         &staleWriteAt,
+		LastHeartbeatAt: staleWriteAt,
+		LastError:       snapshot.LastError,
+		UpdatedAt:       staleWriteAt,
+	}, RuntimeStateWriteOptions{
+		ExpectedBootID:    "boot-1",
+		ExpectedUpdatedAt: snapshot.UpdatedAt,
+	})
+	if !errors.Is(err, ErrRuntimeStateConcurrentUpdate) {
+		t.Fatalf("UpsertRuntimeState(stale snapshot) error = %v, want %v", err, ErrRuntimeStateConcurrentUpdate)
+	}
+
+	got, err := store.GetRuntimeState(ctx)
+	if err != nil {
+		t.Fatalf("GetRuntimeState() error = %v", err)
+	}
+	if got.Status != "degraded" {
+		t.Fatalf("GetRuntimeState().Status = %q, want %q", got.Status, "degraded")
+	}
+	if got.LastError != "dependency stale" {
+		t.Fatalf("GetRuntimeState().LastError = %q, want %q", got.LastError, "dependency stale")
+	}
+	if !got.UpdatedAt.Equal(degraded.UpdatedAt) {
+		t.Fatalf("GetRuntimeState().UpdatedAt = %v, want %v", got.UpdatedAt, degraded.UpdatedAt)
+	}
+
+	events, err := store.ListEvents(ctx, ListEventsParams{})
+	if err != nil {
+		t.Fatalf("ListEvents() error = %v", err)
+	}
+	var lifecycleCount int
+	for _, event := range events {
+		if event.Type == runtimeevents.EventServiceLifecycleChanged {
+			lifecycleCount++
+		}
+	}
+	if lifecycleCount != 2 {
+		t.Fatalf("lifecycle event count = %d, want %d", lifecycleCount, 2)
 	}
 }

@@ -16,6 +16,7 @@ import (
 
 var ErrWorktreeLeaseConflict = errors.New("worktree lease conflict")
 var ErrRuntimeStateBootMismatch = errors.New("runtime state boot mismatch")
+var ErrRuntimeStateConcurrentUpdate = errors.New("runtime state concurrent update")
 
 const (
 	runtimeStateSingletonKey = "primary"
@@ -2010,12 +2011,16 @@ func (store *Store) UpsertRuntimeState(ctx context.Context, params UpsertRuntime
 	}
 
 	err := store.withTx(ctx, func(tx *sql.Tx) error {
-		if options.ExpectedBootID != "" {
-			if _, err := getRuntimeStateForBootTx(ctx, tx, options.ExpectedBootID); err != nil {
+		if options.ExpectedBootID != "" || !options.ExpectedUpdatedAt.IsZero() {
+			current, err := getRuntimeStateForBootTx(ctx, tx, options.ExpectedBootID)
+			if err != nil {
 				return err
 			}
-			if params.BootID != "" && params.BootID != options.ExpectedBootID {
+			if params.BootID != "" && options.ExpectedBootID != "" && params.BootID != options.ExpectedBootID {
 				return ErrRuntimeStateBootMismatch
+			}
+			if !options.ExpectedUpdatedAt.IsZero() && !current.UpdatedAt.Equal(options.ExpectedUpdatedAt.UTC()) {
+				return ErrRuntimeStateConcurrentUpdate
 			}
 		}
 

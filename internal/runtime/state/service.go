@@ -145,8 +145,9 @@ func (service Service) transition(ctx context.Context, status string, input Tran
 	}
 
 	return service.Store.UpsertRuntimeState(ctx, params, sqlite.RuntimeStateWriteOptions{
-		ExpectedBootID: input.BootID,
-		EventReason:    transitionReason(input),
+		ExpectedBootID:    input.BootID,
+		ExpectedUpdatedAt: current.UpdatedAt,
+		EventReason:       transitionReason(input),
 	})
 }
 

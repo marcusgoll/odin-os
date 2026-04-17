@@ -272,8 +272,9 @@ type UpsertRuntimeStateParams struct {
 }
 
 type RuntimeStateWriteOptions struct {
-	ExpectedBootID string
-	EventReason    string
+	ExpectedBootID    string
+	ExpectedUpdatedAt time.Time
+	EventReason       string
 }
 
 type CreateWorktreeLeaseParams struct {
