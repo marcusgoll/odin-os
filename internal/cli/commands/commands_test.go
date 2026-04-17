@@ -17,6 +17,15 @@ func TestParseSlashCommand(t *testing.T) {
 	}
 }
 
+func TestParseSlashCommandWithSubargument(t *testing.T) {
+	t.Parallel()
+
+	command, ok := Parse("/doctor report")
+	if !ok || command.Name != "doctor" || len(command.Args) != 1 || command.Args[0] != "report" {
+		t.Fatalf("Parse(/doctor report) = %#v, %#v", command, ok)
+	}
+}
+
 func TestParseRejectsNonSlashInput(t *testing.T) {
 	t.Parallel()
 

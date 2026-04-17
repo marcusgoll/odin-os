@@ -153,19 +153,61 @@ func runRepl(ctx context.Context, app bootstrap.App, stdin io.Reader, stdout io.
 }
 
 func runDoctor(ctx context.Context, app bootstrap.App, args []string, stdout io.Writer) error {
+	format, err := parseDoctorFormat(args)
+	if err != nil {
+		return err
+	}
+
 	report, err := healthsvc.Service{DB: app.Store.DB()}.Doctor(ctx, len(app.RegistryDiagnostics) == 0)
 	if err != nil {
 		return err
 	}
 
-	if len(args) > 0 && args[0] == "--json" {
+	switch format {
+	case "json":
 		encoder := json.NewEncoder(stdout)
 		encoder.SetIndent("", "  ")
 		return encoder.Encode(report)
+	case "markdown":
+		operatorReport := healthsvc.BuildOperatorReport(report)
+		_, err = fmt.Fprint(stdout, healthsvc.RenderMarkdownReport(operatorReport))
+		return err
+	default:
+		_, err = fmt.Fprintf(stdout, "status=%s checks=%d\n", report.Status, len(report.Checks))
+		return err
+	}
+}
+
+func parseDoctorFormat(args []string) (string, error) {
+	if len(args) == 0 {
+		return "", nil
 	}
 
-	_, err = fmt.Fprintf(stdout, "status=%s checks=%d\n", report.Status, len(report.Checks))
-	return err
+	switch args[0] {
+	case "--json":
+		if len(args) != 1 {
+			return "", fmt.Errorf("doctor: unexpected arguments after --json")
+		}
+		return "json", nil
+	case "--report":
+		if len(args) != 1 {
+			return "", fmt.Errorf("doctor: unexpected arguments after --report")
+		}
+		return "markdown", nil
+	case "--format":
+		if len(args) < 2 {
+			return "", fmt.Errorf("doctor: --format requires a value")
+		}
+		if len(args) != 2 {
+			return "", fmt.Errorf("doctor: unexpected arguments after --format %s", args[1])
+		}
+		if args[1] != "markdown" {
+			return "", fmt.Errorf("doctor: unsupported format %q", args[1])
+		}
+		return "markdown", nil
+	default:
+		return "", fmt.Errorf("doctor: unknown flag %q", args[0])
+	}
 }
 
 func runProject(app bootstrap.App, args []string, stdout io.Writer) error {

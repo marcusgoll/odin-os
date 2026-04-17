@@ -739,8 +739,8 @@ func TestAlphaAcceptance(t *testing.T) {
 		runtimeRoot := t.TempDir()
 		store := openRuntimeStore(t, runtimeRoot)
 		defer store.Close()
-		observabilityNow := time.Now().UTC()
-		seedHealthyObservability(t, ctx, store, observabilityNow)
+		doctorNow := time.Now().UTC()
+		seedHealthyObservability(t, ctx, store, doctorNow)
 
 		report, err := healthsvc.Service{
 			DB:  store.DB(),
@@ -767,6 +767,22 @@ func TestAlphaAcceptance(t *testing.T) {
 		}
 		if !strings.Contains(output, "\"status\":") {
 			t.Fatalf("doctor output = %q, want JSON status field", output)
+		}
+
+		output, err = runOdinCommand(t, repoRoot, odinBinary, runtimeRoot, nil, "", "doctor", "--format", "markdown")
+		if err != nil {
+			t.Fatalf("runOdinCommand(doctor --format markdown) error = %v\n%s", err, output)
+		}
+		if !strings.Contains(output, "## Final Verdict") {
+			t.Fatalf("doctor markdown output = %q, want final verdict", output)
+		}
+
+		output, err = runOdinCommand(t, repoRoot, odinBinary, runtimeRoot, nil, "", "doctor", "--report")
+		if err != nil {
+			t.Fatalf("runOdinCommand(doctor --report) error = %v\n%s", err, output)
+		}
+		if !strings.Contains(output, "## Final Verdict") {
+			t.Fatalf("doctor report output = %q, want final verdict", output)
 		}
 	})
 

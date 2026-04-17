@@ -248,6 +248,75 @@ func TestDoctorCommandSupportsJSONOutput(t *testing.T) {
 	t.Parallel()
 
 	env := newTestEnvironment(t)
+	seedHealthyDoctorState(t, env)
+
+	shell, err := New(env)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	var output bytes.Buffer
+	if err := shell.HandleLine(context.Background(), "/doctor json", &output); err != nil {
+		t.Fatalf("HandleLine(/doctor json) error = %v", err)
+	}
+
+	var decoded map[string]any
+	if err := json.Unmarshal(output.Bytes(), &decoded); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	if decoded["status"] == nil {
+		t.Fatalf("decoded status missing: %#v", decoded)
+	}
+}
+
+func TestShellDoctorReportWritesMarkdownSummary(t *testing.T) {
+	t.Parallel()
+
+	env := newTestEnvironment(t)
+	seedHealthyDoctorState(t, env)
+
+	shell, err := New(env)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	var output bytes.Buffer
+	if err := shell.HandleLine(context.Background(), "/doctor report", &output); err != nil {
+		t.Fatalf("HandleLine(/doctor report) error = %v", err)
+	}
+
+	if !strings.Contains(output.String(), "## Current Health Snapshot") {
+		t.Fatalf("output = %q, want markdown doctor report", output.String())
+	}
+}
+
+func TestShellDoctorRejectsUnknownMode(t *testing.T) {
+	t.Parallel()
+
+	env := newTestEnvironment(t)
+	seedHealthyDoctorState(t, env)
+
+	shell, err := New(env)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	var output bytes.Buffer
+	if err := shell.HandleLine(context.Background(), "/doctor reporrt", &output); err != nil {
+		t.Fatalf("HandleLine(/doctor reporrt) error = %v", err)
+	}
+
+	if !strings.Contains(output.String(), `unsupported /doctor mode "reporrt"; expected json or report`) {
+		t.Fatalf("output = %q, want unsupported doctor mode message", output.String())
+	}
+	if strings.Contains(output.String(), "status=") {
+		t.Fatalf("output = %q, should not fall back to the compact doctor summary", output.String())
+	}
+}
+
+func seedHealthyDoctorState(t *testing.T, env Environment) {
+	t.Helper()
+
 	if _, err := env.Store.RecordExecutorHealth(context.Background(), sqlite.RecordExecutorHealthParams{
 		Executor:    "codex",
 		Status:      "healthy",
@@ -270,24 +339,6 @@ func TestDoctorCommandSupportsJSONOutput(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("RecordProjectionFreshness() error = %v", err)
 	}
-
-	shell, err := New(env)
-	if err != nil {
-		t.Fatalf("New() error = %v", err)
-	}
-
-	var output bytes.Buffer
-	if err := shell.HandleLine(context.Background(), "/doctor json", &output); err != nil {
-		t.Fatalf("HandleLine(/doctor json) error = %v", err)
-	}
-
-	var decoded map[string]any
-	if err := json.Unmarshal(output.Bytes(), &decoded); err != nil {
-		t.Fatalf("Unmarshal() error = %v", err)
-	}
-	if decoded["status"] == nil {
-		t.Fatalf("decoded status missing: %#v", decoded)
-	}
 }
 
 func TestShellHelpIncludesTransitionCommands(t *testing.T) {
@@ -304,7 +355,7 @@ func TestShellHelpIncludesTransitionCommands(t *testing.T) {
 		t.Fatalf("HandleLine(/help) error = %v", err)
 	}
 
-	for _, want := range []string{"/workspace", "/initiatives", "/companions", "/transition", "/observe", "/compare"} {
+	for _, want := range []string{"/workspace", "/initiatives", "/companions", "/transition", "/observe", "/compare", "/doctor json", "/doctor report"} {
 		if !strings.Contains(output.String(), want) {
 			t.Fatalf("help output = %q, want %q", output.String(), want)
 		}

@@ -232,10 +232,10 @@ func (shell *Shell) handleCommand(ctx context.Context, command commands.Command,
 		if _, err := fmt.Fprintln(output, "prefer explicit cli commands outside the repl: odin help | odin status --json | odin task run --project <key> --title <title> | odin repl"); err != nil {
 			return err
 		}
-		if _, err := fmt.Fprintln(output, "/help /mode /scope /workspace /initiatives /companions /project /transition /observe /compare /jobs /runs /approvals /logs /doctor /self"); err != nil {
+		if _, err := fmt.Fprintln(output, "/help /mode /scope /workspace /initiatives /companions /project /transition /observe /compare /jobs /runs /approvals /logs /doctor /doctor json /doctor report /self"); err != nil {
 			return err
 		}
-		if _, err := fmt.Fprintln(output, "repl compatibility commands: /help /mode /scope /project /transition /observe /compare /status /stat /capabilities /leases /jobs /runs /approvals /logs /doctor /self /quit"); err != nil {
+		if _, err := fmt.Fprintln(output, "repl compatibility commands: /help /mode /scope /project /transition /observe /compare /status /stat /capabilities /leases /jobs /runs /approvals /logs /doctor /doctor json /doctor report /self /quit"); err != nil {
 			return err
 		}
 		if _, err := fmt.Fprintf(output, "%s\n", transitionUsage); err != nil {
@@ -1026,9 +1026,24 @@ func (shell *Shell) handleDoctor(ctx context.Context, args []string, output io.W
 		return err
 	}
 
-	if len(args) > 0 && strings.EqualFold(args[0], "json") {
+	switch len(args) {
+	case 0:
+	case 1:
+	default:
+		_, err := fmt.Fprintln(output, "usage: /doctor [json|report]")
+		return err
+	}
+
+	switch {
+	case len(args) == 1 && strings.EqualFold(args[0], "json"):
 		encoder := json.NewEncoder(output)
 		return encoder.Encode(report)
+	case len(args) == 1 && strings.EqualFold(args[0], "report"):
+		_, err = fmt.Fprint(output, healthsvc.RenderMarkdownReport(healthsvc.BuildOperatorReport(report)))
+		return err
+	case len(args) == 1:
+		_, err := fmt.Fprintf(output, "unsupported /doctor mode %q; expected json or report\n", args[0])
+		return err
 	}
 
 	checks := make(map[string]string, len(report.Checks))
