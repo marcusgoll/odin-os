@@ -843,6 +843,12 @@ func TestRecordMemorySummaryPersistsWorkspaceInitiativeAndCompanionOwnership(t *
 	if got[0].WorkspaceID == nil || *got[0].WorkspaceID != workspace.ID {
 		t.Fatalf("listed summary.WorkspaceID = %v, want %d", got[0].WorkspaceID, workspace.ID)
 	}
+	if got[0].InitiativeID == nil || *got[0].InitiativeID != initiative.ID {
+		t.Fatalf("listed summary.InitiativeID = %v, want %d", got[0].InitiativeID, initiative.ID)
+	}
+	if got[0].CompanionID == nil || *got[0].CompanionID != companion.ID {
+		t.Fatalf("listed summary.CompanionID = %v, want %d", got[0].CompanionID, companion.ID)
+	}
 	if got[0].VisibilityScope != "workspace" {
 		t.Fatalf("listed summary.VisibilityScope = %q, want %q", got[0].VisibilityScope, "workspace")
 	}
@@ -906,9 +912,15 @@ func TestRecordConversationTranscriptPersistsScopedOwnership(t *testing.T) {
 	if got[0].WorkspaceID == nil || *got[0].WorkspaceID != workspace.ID {
 		t.Fatalf("listed transcript.WorkspaceID = %v, want %d", got[0].WorkspaceID, workspace.ID)
 	}
+	if got[0].InitiativeID == nil || *got[0].InitiativeID != initiative.ID {
+		t.Fatalf("listed transcript.InitiativeID = %v, want %d", got[0].InitiativeID, initiative.ID)
+	}
+	if got[0].CompanionID == nil || *got[0].CompanionID != companion.ID {
+		t.Fatalf("listed transcript.CompanionID = %v, want %d", got[0].CompanionID, companion.ID)
+	}
 }
 
-func TestRecordMemorySummaryRejectsCrossWorkspaceLineage(t *testing.T) {
+func TestRecordConversationTranscriptRejectsCrossWorkspaceLineage(t *testing.T) {
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "odin.db")
 
@@ -926,16 +938,18 @@ func TestRecordMemorySummaryRejectsCrossWorkspaceLineage(t *testing.T) {
 	workspaceB := mustCreateWorkspace(t, ctx, store, "workspace-d")
 	initiativeB := mustCreateInitiative(t, ctx, store, workspaceB.ID, "initiative-c", nil, nil)
 
-	if _, err := store.RecordMemorySummary(ctx, RecordMemorySummaryParams{
+	if _, err := store.RecordConversationTranscript(ctx, RecordConversationTranscriptParams{
 		WorkspaceID:  &workspaceA.ID,
 		InitiativeID: &initiativeB.ID,
 		Scope:        "workspace",
 		ScopeKey:     workspaceA.Key,
-		MemoryType:   "summary",
-		Summary:      "invalid",
-		DetailsJSON:  `{}`,
+		Mode:         "ask",
+		Prompt:       "invalid",
+		Response:     "invalid",
+		ToolSummary:  "",
+		Executor:     "codex",
 	}); err == nil {
-		t.Fatalf("RecordMemorySummary() error = nil, want cross-workspace lineage rejection")
+		t.Fatalf("RecordConversationTranscript() error = nil, want cross-workspace lineage rejection")
 	}
 }
 
