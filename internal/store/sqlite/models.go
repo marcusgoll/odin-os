@@ -498,6 +498,22 @@ type MemorySummary struct {
 	UpdatedAt          time.Time
 }
 
+type WorkspaceProfile struct {
+	ID                  int64
+	WorkspaceID         int64
+	PreferencesJSON     string
+	BoundariesJSON      string
+	CadenceDefaultsJSON string
+	CreatedAt           time.Time
+	UpdatedAt           time.Time
+}
+
+type UpsertWorkspaceProfileParams struct {
+	WorkspaceID         int64
+	PreferencesJSON     string
+	BoundariesJSON      string
+	CadenceDefaultsJSON string
+}
 type RecordMemorySummaryParams struct {
 	ProjectID          *int64
 	SourceTranscriptID *int64

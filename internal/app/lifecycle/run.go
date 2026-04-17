@@ -46,7 +46,7 @@ import (
 
 var errRuntimeNotReady = errors.New("runtime not ready")
 
-const rootUsageBanner = "Usage: odin <command> [args]\n\nCommands: help repl doctor healthcheck serve backup restore verify-backup status project scope jobs runs approvals logs task initiative companion transition skills"
+const rootUsageBanner = "Usage: odin <command> [args]\n\nCommands: help repl doctor healthcheck serve backup restore verify-backup status project scope jobs runs approvals logs task initiative companion profile transition skills"
 
 var (
 	serveTaskLoopInterval     = 1 * time.Second
@@ -125,6 +125,8 @@ func Run(ctx context.Context, root string, args []string, stdin io.Reader, stdou
 		return runInitiative(ctx, app, rootCommand.Args, stdout)
 	case "companion":
 		return runCompanion(ctx, app, rootCommand.Args, stdout)
+	case "profile":
+		return commands.RunProfile(ctx, app.Store, rootCommand.Args, stdout)
 	case "transition":
 		return runTransition(ctx, app, rootCommand.Args, stdout)
 	case "skills":
