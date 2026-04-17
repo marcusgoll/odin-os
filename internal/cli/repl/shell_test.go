@@ -556,7 +556,7 @@ func TestAskModeRendersWorkspaceMemoryWithoutCreatingTask(t *testing.T) {
 		t.Fatalf("output = %q, want workspace memory counts", output.String())
 	}
 
-	views, err := shell.jobs.List(context.Background(), shell.controlScope())
+	views, err := shell.jobs.List(context.Background(), shell.state.Scope)
 	if err != nil {
 		t.Fatalf("jobs.List() error = %v", err)
 	}
