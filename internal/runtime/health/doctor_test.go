@@ -33,4 +33,13 @@ func TestDoctorReportIsMachineParseable(t *testing.T) {
 	if decoded["status"] != string(StatusHealthy) {
 		t.Fatalf("status = %v, want %q", decoded["status"], StatusHealthy)
 	}
+	if _, ok := decoded["checks"]; !ok {
+		t.Fatalf("decoded report missing checks field")
+	}
+	if _, ok := decoded["generated_at"]; !ok {
+		t.Fatalf("decoded report missing generated_at field")
+	}
+	if len(decoded) != 3 {
+		t.Fatalf("decoded report top-level keys = %d, want 3", len(decoded))
+	}
 }
