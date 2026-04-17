@@ -127,10 +127,12 @@ func TestAlphaAcceptance(t *testing.T) {
 			Now:      func() time.Time { return now },
 		}
 
-		task, err := jobs.CreateTaskFromAct(ctx, scope.Resolution{
-			Kind:       scope.ScopeOdinCore,
-			ProjectKey: "odin-core",
-		}, "alpha acceptance runtime authority")
+		task, err := jobs.CreateTaskFromAct(ctx, scope.Resolve(scope.ResolveInput{
+			ExplicitTarget: &scope.Target{
+				ProjectKey:    "odin-core",
+				SystemProject: true,
+			},
+		}).ControlScope(), "alpha acceptance runtime authority")
 		if err != nil {
 			t.Fatalf("CreateTaskFromAct() error = %v", err)
 		}
@@ -540,15 +542,15 @@ func TestAlphaAcceptance(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Catalog(odin-core) error = %v", err)
 		}
-		if !hasCapability(odinCoreCards, "project_status") || !hasCapability(odinCoreCards, "triage-skill") {
+		if !hasCapability(odinCoreCards, "project_status") || !hasCapability(odinCoreCards, "triage-skill") || !hasCapability(odinCoreCards, "status-command") {
 			t.Fatalf("odin-core catalog missing expected capabilities: %+v", odinCoreCards)
 		}
 		projectCards, err := suiteBroker.Catalog("project")
 		if err != nil {
 			t.Fatalf("Catalog(project) error = %v", err)
 		}
-		if !hasCapability(projectCards, "triage-agent") {
-			t.Fatalf("project catalog missing triage-agent: %+v", projectCards)
+		if !hasCapability(projectCards, "triage-agent") || !hasCapability(projectCards, "project-intake") {
+			t.Fatalf("project catalog missing expected capabilities: %+v", projectCards)
 		}
 
 		toolExpansion, err := suiteBroker.Expand("project_status")
@@ -565,6 +567,22 @@ func TestAlphaAcceptance(t *testing.T) {
 		}
 		if skillExpansion.Skill == nil || skillExpansion.Skill.Sections[registry.SectionProcedure] == "" {
 			t.Fatalf("skill expansion = %+v, want procedure section", skillExpansion)
+		}
+
+		workflowExpansion, err := suiteBroker.Expand("project-intake")
+		if err != nil {
+			t.Fatalf("Expand(project-intake) error = %v", err)
+		}
+		if workflowExpansion.Workflow == nil || len(workflowExpansion.Workflow.Composes) == 0 {
+			t.Fatalf("workflow expansion = %+v, want composed workflow", workflowExpansion)
+		}
+
+		commandExpansion, err := suiteBroker.Expand("status-command")
+		if err != nil {
+			t.Fatalf("Expand(status-command) error = %v", err)
+		}
+		if commandExpansion.OperatorCommand == nil || commandExpansion.OperatorCommand.Command != "status" {
+			t.Fatalf("command expansion = %+v, want status command", commandExpansion)
 		}
 
 		result, err := suiteBroker.InvokeTool("project_status", map[string]string{"project_key": "odin-core"})

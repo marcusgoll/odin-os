@@ -15,6 +15,36 @@ type Project struct {
 	UpdatedAt     time.Time
 }
 
+type Initiative struct {
+	ID               int64
+	WorkspaceID      int64
+	Key              string
+	Title            string
+	Kind             string
+	Status           string
+	Summary          string
+	OwnerCompanionID *int64
+	LinkedProjectID  *int64
+	CreatedAt        time.Time
+	UpdatedAt        time.Time
+}
+
+type Companion struct {
+	ID                  int64
+	WorkspaceID         int64
+	Key                 string
+	Title               string
+	Kind                string
+	Charter             string
+	Status              string
+	InitiativeScopeJSON string
+	ToolPolicyJSON      string
+	MemoryPolicyJSON    string
+	PlanningPolicyJSON  string
+	CreatedAt           time.Time
+	UpdatedAt           time.Time
+}
+
 type CreateProjectParams struct {
 	Key           string
 	Name          string
@@ -23,6 +53,63 @@ type CreateProjectParams struct {
 	DefaultBranch string
 	GitHubRepo    string
 	ManifestPath  string
+}
+
+type UpsertProjectParams = CreateProjectParams
+
+type UpsertInitiativeParams struct {
+	WorkspaceID      int64
+	Key              string
+	Title            string
+	Kind             string
+	Status           string
+	Summary          string
+	OwnerCompanionID *int64
+	LinkedProjectID  *int64
+}
+
+type UpsertCompanionParams struct {
+	WorkspaceID         int64
+	Key                 string
+	Title               string
+	Kind                string
+	Charter             string
+	Status              string
+	InitiativeScopeJSON string
+	ToolPolicyJSON      string
+	MemoryPolicyJSON    string
+	PlanningPolicyJSON  string
+}
+
+type ManagedProjectRegistrationParams struct {
+	Workspace CreateWorkspaceParams
+	Project   UpsertProjectParams
+}
+
+type Workspace struct {
+	ID                  int64
+	Key                 string
+	Name                string
+	OwnerRef            string
+	DefaultCompanionKey string
+	Status              string
+	PolicyJSON          string
+	CreatedAt           time.Time
+	UpdatedAt           time.Time
+}
+
+type CreateWorkspaceParams struct {
+	Key                 string
+	Name                string
+	OwnerRef            string
+	DefaultCompanionKey string
+	Status              string
+	PolicyJSON          string
+}
+
+type UpdateWorkspacePolicyParams struct {
+	WorkspaceID int64
+	PolicyJSON  string
 }
 
 type Task struct {
@@ -34,6 +121,10 @@ type Task struct {
 	Status         string
 	Scope          string
 	RequestedBy    string
+	WorkspaceID    *int64
+	InitiativeID   *int64
+	CompanionID    *int64
+	WorkKind       string
 	Summary        string
 	TerminalReason string
 	ArtifactsJSON  string
@@ -43,21 +134,26 @@ type Task struct {
 }
 
 type CreateTaskParams struct {
-	ProjectID   int64
-	Key         string
-	Title       string
-	ActionKey   string
-	Status      string
-	Scope       string
-	RequestedBy string
+	ProjectID    int64
+	Key          string
+	Title        string
+	ActionKey    string
+	Status       string
+	Scope        string
+	RequestedBy  string
+	WorkspaceID  *int64
+	InitiativeID *int64
+	CompanionID  *int64
+	WorkKind     string
 }
 
 type UpdateTaskStatusParams struct {
-	TaskID         int64
-	Status         string
-	Summary        string
-	TerminalReason string
-	ArtifactsJSON  string
+	TaskID                 int64
+	Status                 string
+	Summary                string
+	TerminalReason         string
+	ArtifactsJSON          string
+	AllowedCurrentStatuses []string
 }
 
 type Run struct {
@@ -71,6 +167,49 @@ type Run struct {
 	Summary        string
 	TerminalReason string
 	ArtifactsJSON  string
+}
+
+type MemoryEntry struct {
+	ID              int64
+	WorkspaceID     int64
+	InitiativeID    *int64
+	CompanionID     *int64
+	TaskID          *int64
+	RunID           *int64
+	EntryType       string
+	VisibilityScope string
+	RetentionClass  string
+	Summary         string
+	Content         string
+	MetadataJSON    string
+	CreatedAt       time.Time
+	UpdatedAt       time.Time
+}
+
+type CreateMemoryEntryParams struct {
+	WorkspaceID     int64
+	InitiativeID    *int64
+	CompanionID     *int64
+	TaskID          *int64
+	RunID           *int64
+	EntryType       string
+	VisibilityScope string
+	RetentionClass  string
+	Summary         string
+	Content         string
+	MetadataJSON    string
+}
+
+type ListMemoryEntriesParams struct {
+	WorkspaceID     int64
+	InitiativeID    *int64
+	CompanionID     *int64
+	TaskID          *int64
+	RunID           *int64
+	EntryType       string
+	VisibilityScope string
+	RetentionClass  string
+	Limit           int
 }
 
 type StartRunParams struct {
@@ -139,6 +278,12 @@ type RequestApprovalParams struct {
 	TaskID      int64
 	RunID       *int64
 	Status      string
+	RequestedBy string
+}
+
+type BlockTaskAndRequestApprovalParams struct {
+	TaskID      int64
+	RunID       *int64
 	RequestedBy string
 }
 

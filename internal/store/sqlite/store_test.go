@@ -2,7 +2,6 @@ package sqlite
 
 import (
 	"context"
-	"errors"
 	"path/filepath"
 	"testing"
 
@@ -44,7 +43,6 @@ func TestStoreMigrateLifecycleAndReopen(t *testing.T) {
 		ProjectID:   project.ID,
 		Key:         "phase-03",
 		Title:       "Implement runtime store",
-		ActionKey:   "docs_audit_note",
 		Status:      "queued",
 		Scope:       "odin-core",
 		RequestedBy: "operator",
@@ -72,22 +70,17 @@ func TestStoreMigrateLifecycleAndReopen(t *testing.T) {
 	}
 
 	run, err = store.FinishRun(ctx, FinishRunParams{
-		RunID:          run.ID,
-		Status:         "completed",
-		Summary:        "store baseline complete",
-		TerminalReason: "completed",
-		ArtifactsJSON:  `["runs/artifacts/store-baseline.json"]`,
+		RunID:   run.ID,
+		Status:  "completed",
+		Summary: "store baseline complete",
 	})
 	if err != nil {
 		t.Fatalf("FinishRun() error = %v", err)
 	}
 
 	task, err = store.UpdateTaskStatus(ctx, UpdateTaskStatusParams{
-		TaskID:         task.ID,
-		Status:         "completed",
-		Summary:        "store baseline complete",
-		TerminalReason: "completed",
-		ArtifactsJSON:  `["runs/artifacts/store-baseline.json"]`,
+		TaskID: task.ID,
+		Status: "completed",
 	})
 	if err != nil {
 		t.Fatalf("UpdateTaskStatus(completed) error = %v", err)
@@ -184,14 +177,6 @@ func TestStoreMigrateLifecycleAndReopen(t *testing.T) {
 		t.Fatalf("first event type = %q, want %q", allEvents[0].Type, runtimeevents.EventProjectCreated)
 	}
 
-	taskEventPayload, err := runtimeevents.DecodePayload[runtimeevents.TaskCreatedPayload](allEvents[1].Payload)
-	if err != nil {
-		t.Fatalf("DecodePayload(TaskCreatedPayload) error = %v", err)
-	}
-	if taskEventPayload.ActionKey != "docs_audit_note" {
-		t.Fatalf("task created event action key = %q, want %q", taskEventPayload.ActionKey, "docs_audit_note")
-	}
-
 	packetEventPayload, err := runtimeevents.DecodePayload[runtimeevents.ContextPacketCreatedPayload](allEvents[len(allEvents)-1].Payload)
 	if err != nil {
 		t.Fatalf("DecodePayload(ContextPacketCreatedPayload) error = %v", err)
@@ -235,16 +220,16 @@ func TestStoreMigrateLifecycleAndReopen(t *testing.T) {
 		t.Fatalf("project views = %+v, want one project with one task", projectViews)
 	}
 
-	var migrationCount int
-	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM schema_migrations`).Scan(&migrationCount); err != nil {
-		t.Fatalf("schema_migrations count query error = %v", err)
+	var workspaceTableCount int
+	if err := store.db.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM sqlite_master
+		WHERE type = 'table' AND name IN ('workspaces', 'workspace_policies')
+	`).Scan(&workspaceTableCount); err != nil {
+		t.Fatalf("workspace table count query error = %v", err)
 	}
-	migrations, err := loadMigrations()
-	if err != nil {
-		t.Fatalf("loadMigrations() error = %v", err)
-	}
-	if migrationCount != len(migrations) {
-		t.Fatalf("schema_migrations count = %d, want %d", migrationCount, len(migrations))
+	if workspaceTableCount != 2 {
+		t.Fatalf("workspace table count = %d, want 2", workspaceTableCount)
 	}
 
 	if err := store.Close(); err != nil {
@@ -268,15 +253,6 @@ func TestStoreMigrateLifecycleAndReopen(t *testing.T) {
 	if gotTask.Status != "completed" {
 		t.Fatalf("GetTask().Status = %q, want %q", gotTask.Status, "completed")
 	}
-	if gotTask.Summary != "store baseline complete" {
-		t.Fatalf("GetTask().Summary = %q, want %q", gotTask.Summary, "store baseline complete")
-	}
-	if gotTask.TerminalReason != "completed" {
-		t.Fatalf("GetTask().TerminalReason = %q, want %q", gotTask.TerminalReason, "completed")
-	}
-	if gotTask.ArtifactsJSON != `["runs/artifacts/store-baseline.json"]` {
-		t.Fatalf("GetTask().ArtifactsJSON = %q, want persisted artifact pointer", gotTask.ArtifactsJSON)
-	}
 
 	gotRun, err := reopened.GetRun(ctx, run.ID)
 	if err != nil {
@@ -284,15 +260,6 @@ func TestStoreMigrateLifecycleAndReopen(t *testing.T) {
 	}
 	if gotRun.Status != "completed" {
 		t.Fatalf("GetRun().Status = %q, want %q", gotRun.Status, "completed")
-	}
-	if gotRun.Summary != "store baseline complete" {
-		t.Fatalf("GetRun().Summary = %q, want %q", gotRun.Summary, "store baseline complete")
-	}
-	if gotRun.TerminalReason != "completed" {
-		t.Fatalf("GetRun().TerminalReason = %q, want %q", gotRun.TerminalReason, "completed")
-	}
-	if gotRun.ArtifactsJSON != `["runs/artifacts/store-baseline.json"]` {
-		t.Fatalf("GetRun().ArtifactsJSON = %q, want persisted artifact pointer", gotRun.ArtifactsJSON)
 	}
 
 	gotApproval, err := reopened.GetApproval(ctx, approval.ID)
@@ -304,71 +271,7 @@ func TestStoreMigrateLifecycleAndReopen(t *testing.T) {
 	}
 }
 
-func TestStoreRecordSkillLifecycleEventAppendsRuntimeEvent(t *testing.T) {
-	ctx := context.Background()
-	store, err := Open(filepath.Join(t.TempDir(), "odin.db"))
-	if err != nil {
-		t.Fatalf("Open() error = %v", err)
-	}
-	if err := store.Migrate(ctx); err != nil {
-		t.Fatalf("Migrate() error = %v", err)
-	}
-	defer store.Close()
-
-	if err := store.RecordSkillLifecycleEvent(ctx, RecordSkillLifecycleEventParams{
-		SkillKey:         "echo-skill",
-		Operation:        "create",
-		Outcome:          "success",
-		Scope:            "project",
-		ExecutionProfile: "restricted_command_v1",
-		Version:          "1.0.0",
-		HandlerType:      "command",
-		HandlerRef:       "scripts/skills/echo-skill.sh",
-		Permissions:      []string{"repo.read"},
-		DurationMS:       17,
-	}); err != nil {
-		t.Fatalf("RecordSkillLifecycleEvent() error = %v", err)
-	}
-
-	events, err := store.ListEvents(ctx, ListEventsParams{})
-	if err != nil {
-		t.Fatalf("ListEvents() error = %v", err)
-	}
-	if len(events) != 1 {
-		t.Fatalf("ListEvents() len = %d, want 1", len(events))
-	}
-	if events[0].StreamType != runtimeevents.StreamSkill {
-		t.Fatalf("event.StreamType = %q, want %q", events[0].StreamType, runtimeevents.StreamSkill)
-	}
-	if events[0].Type != runtimeevents.EventSkillLifecycleRecorded {
-		t.Fatalf("event.Type = %q, want %q", events[0].Type, runtimeevents.EventSkillLifecycleRecorded)
-	}
-	if events[0].Scope != "project" {
-		t.Fatalf("event.Scope = %q, want project", events[0].Scope)
-	}
-
-	payload, err := runtimeevents.DecodePayload[runtimeevents.SkillLifecycleRecordedPayload](events[0].Payload)
-	if err != nil {
-		t.Fatalf("DecodePayload(SkillLifecycleRecordedPayload) error = %v", err)
-	}
-	if payload.SkillKey != "echo-skill" {
-		t.Fatalf("payload.SkillKey = %q, want echo-skill", payload.SkillKey)
-	}
-	if payload.Operation != "create" {
-		t.Fatalf("payload.Operation = %q, want create", payload.Operation)
-	}
-	if payload.Outcome != "success" {
-		t.Fatalf("payload.Outcome = %q, want success", payload.Outcome)
-	}
-	if payload.ExecutionProfile != "restricted_command_v1" {
-		t.Fatalf("payload.ExecutionProfile = %q, want restricted_command_v1", payload.ExecutionProfile)
-	}
-	if payload.DurationMS != 17 {
-		t.Fatalf("payload.DurationMS = %d, want 17", payload.DurationMS)
-	}
-}
-
-func TestStartRunAndUpdateTaskStatusRejectsAlreadyClaimedTask(t *testing.T) {
+func TestBlockTaskAndRequestApprovalRejectsSecondPendingApproval(t *testing.T) {
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "odin.db")
 
@@ -396,9 +299,9 @@ func TestStartRunAndUpdateTaskStatusRejectsAlreadyClaimedTask(t *testing.T) {
 
 	task, err := store.CreateTask(ctx, CreateTaskParams{
 		ProjectID:   project.ID,
-		Key:         "launch-once",
-		Title:       "Claim queued task",
-		Status:      "queued",
+		Key:         "approval-task",
+		Title:       "Await approval",
+		Status:      "running",
 		Scope:       "project",
 		RequestedBy: "operator",
 	})
@@ -406,50 +309,495 @@ func TestStartRunAndUpdateTaskStatusRejectsAlreadyClaimedTask(t *testing.T) {
 		t.Fatalf("CreateTask() error = %v", err)
 	}
 
-	firstRun, err := store.StartRunAndUpdateTaskStatus(ctx, StartRunAndUpdateTaskStatusParams{
-		TaskID:     task.ID,
-		Executor:   "codex",
-		Attempt:    1,
-		RunStatus:  "running",
-		TaskStatus: "running",
+	run, err := store.StartRun(ctx, StartRunParams{
+		TaskID:   task.ID,
+		Executor: "codex_headless",
+		Attempt:  1,
+		Status:   "running",
 	})
 	if err != nil {
-		t.Fatalf("StartRunAndUpdateTaskStatus(first) error = %v", err)
+		t.Fatalf("StartRun() error = %v", err)
 	}
 
-	_, err = store.StartRunAndUpdateTaskStatus(ctx, StartRunAndUpdateTaskStatusParams{
-		TaskID:     task.ID,
-		Executor:   "codex",
-		Attempt:    2,
-		RunStatus:  "running",
-		TaskStatus: "running",
+	blockedTask, approval, err := store.BlockTaskAndRequestApproval(ctx, BlockTaskAndRequestApprovalParams{
+		TaskID:      task.ID,
+		RunID:       &run.ID,
+		RequestedBy: "operator",
 	})
-	if !errors.Is(err, ErrTaskLaunchConflict) {
-		t.Fatalf("StartRunAndUpdateTaskStatus(second) error = %v, want ErrTaskLaunchConflict", err)
+	if err != nil {
+		t.Fatalf("BlockTaskAndRequestApproval() error = %v", err)
+	}
+	if blockedTask.Status != "blocked" {
+		t.Fatalf("blocked task status = %q, want blocked", blockedTask.Status)
 	}
 
-	updatedTask, err := store.GetTask(ctx, task.ID)
+	if _, _, err := store.BlockTaskAndRequestApproval(ctx, BlockTaskAndRequestApprovalParams{
+		TaskID:      task.ID,
+		RunID:       &run.ID,
+		RequestedBy: "operator",
+	}); err == nil {
+		t.Fatal("BlockTaskAndRequestApproval() error = nil, want blocked-task rejection")
+	}
+
+	gotTask, err := store.GetTask(ctx, task.ID)
 	if err != nil {
 		t.Fatalf("GetTask() error = %v", err)
 	}
-	if updatedTask.Status != "running" {
-		t.Fatalf("task.Status = %q, want running", updatedTask.Status)
-	}
-	if updatedTask.CurrentRunID == nil || *updatedTask.CurrentRunID != firstRun.ID {
-		t.Fatalf("task.CurrentRunID = %v, want %d", updatedTask.CurrentRunID, firstRun.ID)
+	if gotTask.Status != "blocked" {
+		t.Fatalf("GetTask().Status = %q, want blocked", gotTask.Status)
 	}
 
-	row := store.DB().QueryRowContext(ctx, `
+	var approvalCount int
+	if err := store.DB().QueryRowContext(ctx, `
 		SELECT COUNT(*)
-		FROM runs
-		WHERE task_id = ?
-	`, task.ID)
-	var runCount int
-	if err := row.Scan(&runCount); err != nil {
-		t.Fatalf("scan run count error = %v", err)
+		FROM approvals
+		WHERE task_id = ? AND status = 'pending'
+	`, task.ID).Scan(&approvalCount); err != nil {
+		t.Fatalf("count approvals error = %v", err)
 	}
-	if runCount != 1 {
-		t.Fatalf("run count = %d, want 1", runCount)
+	if approvalCount != 1 {
+		t.Fatalf("pending approval count = %d, want 1", approvalCount)
+	}
+
+	gotApproval, err := store.GetApproval(ctx, approval.ID)
+	if err != nil {
+		t.Fatalf("GetApproval() error = %v", err)
+	}
+	if gotApproval.Status != "pending" {
+		t.Fatalf("GetApproval().Status = %q, want pending", gotApproval.Status)
+	}
+}
+
+func TestResolveApprovalRejectsApprovedApprovalWhileRunStillRunning(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "odin.db")
+
+	store, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer store.Close()
+
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
+	}
+
+	project, err := store.CreateProject(ctx, CreateProjectParams{
+		Key:           "alpha",
+		Name:          "Alpha",
+		Scope:         "project",
+		GitRoot:       "/tmp/alpha",
+		DefaultBranch: "main",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+
+	task, err := store.CreateTask(ctx, CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "approval-task",
+		Title:       "Await approval",
+		Status:      "running",
+		Scope:       "project",
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+
+	run, err := store.StartRun(ctx, StartRunParams{
+		TaskID:   task.ID,
+		Executor: "codex_headless",
+		Attempt:  1,
+		Status:   "running",
+	})
+	if err != nil {
+		t.Fatalf("StartRun() error = %v", err)
+	}
+
+	blockedTask, approval, err := store.BlockTaskAndRequestApproval(ctx, BlockTaskAndRequestApprovalParams{
+		TaskID:      task.ID,
+		RunID:       &run.ID,
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("BlockTaskAndRequestApproval() error = %v", err)
+	}
+	if blockedTask.Status != "blocked" {
+		t.Fatalf("blocked task status = %q, want blocked", blockedTask.Status)
+	}
+
+	if _, err := store.ResolveApproval(ctx, ResolveApprovalParams{
+		ApprovalID: approval.ID,
+		Status:     "approved",
+		DecisionBy: "operator",
+		Reason:     "safe to proceed",
+	}); err == nil {
+		t.Fatal("ResolveApproval() error = nil, want live-run rejection")
+	}
+
+	gotTask, err := store.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
+	}
+	if gotTask.Status != "blocked" {
+		t.Fatalf("GetTask().Status = %q, want blocked", gotTask.Status)
+	}
+
+	gotApproval, err := store.GetApproval(ctx, approval.ID)
+	if err != nil {
+		t.Fatalf("GetApproval() error = %v", err)
+	}
+	if gotApproval.Status != "pending" {
+		t.Fatalf("GetApproval().Status = %q, want pending", gotApproval.Status)
+	}
+
+	gotRun, err := store.GetRun(ctx, run.ID)
+	if err != nil {
+		t.Fatalf("GetRun() error = %v", err)
+	}
+	if gotRun.Status != "running" {
+		t.Fatalf("GetRun().Status = %q, want running", gotRun.Status)
+	}
+}
+
+func TestResolveApprovalRequeuesBlockedTaskAfterRunFinishes(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "odin.db")
+
+	store, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer store.Close()
+
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
+	}
+
+	project, err := store.CreateProject(ctx, CreateProjectParams{
+		Key:           "alpha",
+		Name:          "Alpha",
+		Scope:         "project",
+		GitRoot:       "/tmp/alpha",
+		DefaultBranch: "main",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+
+	task, err := store.CreateTask(ctx, CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "approval-task",
+		Title:       "Await approval",
+		Status:      "running",
+		Scope:       "project",
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+
+	run, err := store.StartRun(ctx, StartRunParams{
+		TaskID:   task.ID,
+		Executor: "codex_headless",
+		Attempt:  1,
+		Status:   "running",
+	})
+	if err != nil {
+		t.Fatalf("StartRun() error = %v", err)
+	}
+
+	run, err = store.FinishRun(ctx, FinishRunParams{
+		RunID:   run.ID,
+		Status:  "completed",
+		Summary: "approval gate reached",
+	})
+	if err != nil {
+		t.Fatalf("FinishRun() error = %v", err)
+	}
+
+	blockedTask, approval, err := store.BlockTaskAndRequestApproval(ctx, BlockTaskAndRequestApprovalParams{
+		TaskID:      task.ID,
+		RunID:       &run.ID,
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("BlockTaskAndRequestApproval() error = %v", err)
+	}
+	if blockedTask.Status != "blocked" {
+		t.Fatalf("blocked task status = %q, want blocked", blockedTask.Status)
+	}
+
+	if _, err := store.ResolveApproval(ctx, ResolveApprovalParams{
+		ApprovalID: approval.ID,
+		Status:     "approved",
+		DecisionBy: "operator",
+		Reason:     "safe to proceed",
+	}); err != nil {
+		t.Fatalf("ResolveApproval() error = %v", err)
+	}
+
+	gotTask, err := store.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
+	}
+	if gotTask.Status != "queued" {
+		t.Fatalf("GetTask().Status = %q, want queued", gotTask.Status)
+	}
+
+	gotApproval, err := store.GetApproval(ctx, approval.ID)
+	if err != nil {
+		t.Fatalf("GetApproval() error = %v", err)
+	}
+	if gotApproval.Status != "approved" {
+		t.Fatalf("GetApproval().Status = %q, want approved", gotApproval.Status)
+	}
+
+	events, err := store.ListEvents(ctx, ListEventsParams{})
+	if err != nil {
+		t.Fatalf("ListEvents() error = %v", err)
+	}
+	replay, err := projections.ReplayLifecycle(events)
+	if err != nil {
+		t.Fatalf("ReplayLifecycle() error = %v", err)
+	}
+	if replay.Tasks[task.ID].Status != "queued" {
+		t.Fatalf("replay task status = %q, want queued", replay.Tasks[task.ID].Status)
+	}
+	if replay.Approvals[approval.ID].Status != "approved" {
+		t.Fatalf("replay approval status = %q, want approved", replay.Approvals[approval.ID].Status)
+	}
+}
+
+func TestResolveApprovalRejectsStaleApprovalWhenNewerRunIsRunning(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "odin.db")
+
+	store, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer store.Close()
+
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
+	}
+
+	project, err := store.CreateProject(ctx, CreateProjectParams{
+		Key:           "alpha",
+		Name:          "Alpha",
+		Scope:         "project",
+		GitRoot:       "/tmp/alpha",
+		DefaultBranch: "main",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+
+	task, err := store.CreateTask(ctx, CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "stale-approval-task",
+		Title:       "Await approval",
+		Status:      "running",
+		Scope:       "project",
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+
+	runOne, err := store.StartRun(ctx, StartRunParams{
+		TaskID:   task.ID,
+		Executor: "codex_headless",
+		Attempt:  1,
+		Status:   "running",
+	})
+	if err != nil {
+		t.Fatalf("StartRun(runOne) error = %v", err)
+	}
+	if _, err := store.FinishRun(ctx, FinishRunParams{
+		RunID:   runOne.ID,
+		Status:  "completed",
+		Summary: "approval gate reached",
+	}); err != nil {
+		t.Fatalf("FinishRun(runOne) error = %v", err)
+	}
+
+	blockedTask, approval, err := store.BlockTaskAndRequestApproval(ctx, BlockTaskAndRequestApprovalParams{
+		TaskID:      task.ID,
+		RunID:       &runOne.ID,
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("BlockTaskAndRequestApproval() error = %v", err)
+	}
+	if blockedTask.Status != "blocked" {
+		t.Fatalf("blocked task status = %q, want blocked", blockedTask.Status)
+	}
+
+	if _, err := store.UpdateTaskStatus(ctx, UpdateTaskStatusParams{
+		TaskID: task.ID,
+		Status: "running",
+	}); err != nil {
+		t.Fatalf("UpdateTaskStatus(running) error = %v", err)
+	}
+
+	runTwo, err := store.StartRun(ctx, StartRunParams{
+		TaskID:   task.ID,
+		Executor: "codex_headless",
+		Attempt:  2,
+		Status:   "running",
+	})
+	if err != nil {
+		t.Fatalf("StartRun(runTwo) error = %v", err)
+	}
+
+	if _, err := store.ResolveApproval(ctx, ResolveApprovalParams{
+		ApprovalID: approval.ID,
+		Status:     "approved",
+		DecisionBy: "operator",
+		Reason:     "stale approval",
+	}); err == nil {
+		t.Fatal("ResolveApproval() error = nil, want newer-run rejection")
+	}
+
+	gotTask, err := store.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
+	}
+	if gotTask.Status != "running" {
+		t.Fatalf("GetTask().Status = %q, want running", gotTask.Status)
+	}
+	if gotTask.CurrentRunID == nil || *gotTask.CurrentRunID != runTwo.ID {
+		t.Fatalf("GetTask().CurrentRunID = %v, want %d", gotTask.CurrentRunID, runTwo.ID)
+	}
+
+	gotApproval, err := store.GetApproval(ctx, approval.ID)
+	if err != nil {
+		t.Fatalf("GetApproval() error = %v", err)
+	}
+	if gotApproval.Status != "pending" {
+		t.Fatalf("GetApproval().Status = %q, want pending", gotApproval.Status)
+	}
+}
+
+func TestResolveApprovalRejectsReResolution(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "odin.db")
+
+	store, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer store.Close()
+
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
+	}
+
+	project, err := store.CreateProject(ctx, CreateProjectParams{
+		Key:           "alpha",
+		Name:          "Alpha",
+		Scope:         "project",
+		GitRoot:       "/tmp/alpha",
+		DefaultBranch: "main",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+
+	task, err := store.CreateTask(ctx, CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "approval-task",
+		Title:       "Await approval",
+		Status:      "running",
+		Scope:       "project",
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+
+	run, err := store.StartRun(ctx, StartRunParams{
+		TaskID:   task.ID,
+		Executor: "codex_headless",
+		Attempt:  1,
+		Status:   "running",
+	})
+	if err != nil {
+		t.Fatalf("StartRun() error = %v", err)
+	}
+
+	run, err = store.FinishRun(ctx, FinishRunParams{
+		RunID:   run.ID,
+		Status:  "completed",
+		Summary: "approval gate reached",
+	})
+	if err != nil {
+		t.Fatalf("FinishRun() error = %v", err)
+	}
+
+	blockedTask, approval, err := store.BlockTaskAndRequestApproval(ctx, BlockTaskAndRequestApprovalParams{
+		TaskID:      task.ID,
+		RunID:       &run.ID,
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("BlockTaskAndRequestApproval() error = %v", err)
+	}
+	if blockedTask.Status != "blocked" {
+		t.Fatalf("blocked task status = %q, want blocked", blockedTask.Status)
+	}
+
+	approved, err := store.ResolveApproval(ctx, ResolveApprovalParams{
+		ApprovalID: approval.ID,
+		Status:     "approved",
+		DecisionBy: "operator",
+		Reason:     "safe to proceed",
+	})
+	if err != nil {
+		t.Fatalf("ResolveApproval(first) error = %v", err)
+	}
+
+	beforeEvents, err := store.ListEvents(ctx, ListEventsParams{})
+	if err != nil {
+		t.Fatalf("ListEvents(before) error = %v", err)
+	}
+
+	if _, err := store.ResolveApproval(ctx, ResolveApprovalParams{
+		ApprovalID: approved.ID,
+		Status:     "rejected",
+		DecisionBy: "reviewer",
+		Reason:     "changed mind",
+	}); err == nil {
+		t.Fatal("ResolveApproval(second) error = nil, want re-resolution rejection")
+	}
+
+	afterApproval, err := store.GetApproval(ctx, approval.ID)
+	if err != nil {
+		t.Fatalf("GetApproval() error = %v", err)
+	}
+	if afterApproval.Status != "approved" {
+		t.Fatalf("GetApproval().Status = %q, want approved", afterApproval.Status)
+	}
+	if afterApproval.DecisionBy != "operator" {
+		t.Fatalf("GetApproval().DecisionBy = %q, want operator", afterApproval.DecisionBy)
+	}
+	if afterApproval.Reason != "safe to proceed" {
+		t.Fatalf("GetApproval().Reason = %q, want safe to proceed", afterApproval.Reason)
+	}
+
+	afterEvents, err := store.ListEvents(ctx, ListEventsParams{})
+	if err != nil {
+		t.Fatalf("ListEvents(after) error = %v", err)
+	}
+	if len(afterEvents) != len(beforeEvents) {
+		t.Fatalf("event count = %d, want %d", len(afterEvents), len(beforeEvents))
 	}
 }
 
@@ -544,86 +892,6 @@ func TestProjectTransitionStateLifecycle(t *testing.T) {
 	}
 	if transitionEvents != 2 {
 		t.Fatalf("transition event count = %d, want 2", transitionEvents)
-	}
-}
-
-func TestAwaitApprovalAtomicallyPersistsApprovalRunAndTaskState(t *testing.T) {
-	ctx := context.Background()
-	dbPath := filepath.Join(t.TempDir(), "odin.db")
-
-	store, err := Open(dbPath)
-	if err != nil {
-		t.Fatalf("Open() error = %v", err)
-	}
-	defer store.Close()
-
-	if err := store.Migrate(ctx); err != nil {
-		t.Fatalf("Migrate() error = %v", err)
-	}
-
-	project, err := store.CreateProject(ctx, CreateProjectParams{
-		Key:           "odin-core",
-		Name:          "Odin Core",
-		Scope:         "odin-core",
-		GitRoot:       "/home/orchestrator/odin-os",
-		DefaultBranch: "main",
-		ManifestPath:  "config/projects.yaml",
-	})
-	if err != nil {
-		t.Fatalf("CreateProject() error = %v", err)
-	}
-
-	task, err := store.CreateTask(ctx, CreateTaskParams{
-		ProjectID:   project.ID,
-		Key:         "phase-35",
-		Title:       "Require approval",
-		Status:      "running",
-		Scope:       "odin-core",
-		RequestedBy: "operator",
-	})
-	if err != nil {
-		t.Fatalf("CreateTask() error = %v", err)
-	}
-
-	run, err := store.StartRun(ctx, StartRunParams{
-		TaskID:   task.ID,
-		Executor: "codex_headless",
-		Attempt:  1,
-		Status:   "running",
-	})
-	if err != nil {
-		t.Fatalf("StartRun() error = %v", err)
-	}
-
-	approval, finishedRun, updatedTask, err := store.AwaitApproval(ctx, AwaitApprovalParams{
-		TaskID:         task.ID,
-		RunID:          run.ID,
-		RequestedBy:    "odin_os",
-		Summary:        "system project requires approval",
-		TerminalReason: "system project requires approval",
-		ArtifactsJSON:  `["runs/artifacts/approval.json"]`,
-	})
-	if err != nil {
-		t.Fatalf("AwaitApproval() error = %v", err)
-	}
-
-	if approval.Status != "pending" {
-		t.Fatalf("approval status = %q, want pending", approval.Status)
-	}
-	if finishedRun.Status != "awaiting_approval" {
-		t.Fatalf("run status = %q, want awaiting_approval", finishedRun.Status)
-	}
-	if finishedRun.ArtifactsJSON != `["runs/artifacts/approval.json"]` {
-		t.Fatalf("run artifacts = %q, want persisted artifact pointer", finishedRun.ArtifactsJSON)
-	}
-	if updatedTask.Status != "awaiting_approval" {
-		t.Fatalf("task status = %q, want awaiting_approval", updatedTask.Status)
-	}
-	if updatedTask.CurrentRunID != nil {
-		t.Fatalf("task current run = %v, want nil after awaiting approval", updatedTask.CurrentRunID)
-	}
-	if updatedTask.ArtifactsJSON != `["runs/artifacts/approval.json"]` {
-		t.Fatalf("task artifacts = %q, want persisted artifact pointer", updatedTask.ArtifactsJSON)
 	}
 }
 

@@ -110,6 +110,8 @@ func (broker *Broker) Expand(key string) (catalog.Expansion, error) {
 				Enabled:        item.Enabled,
 				Tags:           append([]string(nil), item.Tags...),
 				Scopes:         append([]string(nil), item.Scopes...),
+				AppliesTo:      append([]string(nil), item.AppliesTo...),
+				Composes:       append([]string(nil), item.Composes...),
 				Permissions:    append([]string(nil), item.Permissions...),
 				HandlerType:    item.HandlerType,
 				HandlerRef:     item.HandlerRef,
@@ -123,12 +125,14 @@ func (broker *Broker) Expand(key string) (catalog.Expansion, error) {
 	case registry.KindAgent:
 		return catalog.Expansion{
 			Card: card,
-			SubAgent: &catalog.SubAgentDefinition{
+			AgentRole: &catalog.AgentRoleDefinition{
 				Key:       item.Key,
 				Title:     item.Title,
 				Summary:   item.Summary,
 				Tags:      append([]string(nil), item.Tags...),
 				Scopes:    append([]string(nil), item.Scopes...),
+				AppliesTo: append([]string(nil), item.AppliesTo...),
+				Composes:  append([]string(nil), item.Composes...),
 				Tools:     append([]string(nil), item.Tools...),
 				Role:      item.Role,
 				Sections:  catalog.CloneSections(item.Sections),
@@ -145,11 +149,29 @@ func (broker *Broker) Expand(key string) (catalog.Expansion, error) {
 				Version:      item.Version,
 				Tags:         append([]string(nil), item.Tags...),
 				Scopes:       append([]string(nil), item.Scopes...),
+				AppliesTo:    append([]string(nil), item.AppliesTo...),
 				Entrypoint:   item.Entrypoint,
 				Composes:     append([]string(nil), item.Composes...),
 				Dependencies: append([]registry.DependencyRef(nil), item.Dependencies...),
 				Sections:     catalog.CloneSections(item.Sections),
 				SourceRef:    item.Source.RelativePath,
+			},
+		}, nil
+	case registry.KindCommand:
+		return catalog.Expansion{
+			Card: card,
+			OperatorCommand: &catalog.OperatorCommandDefinition{
+				Key:       item.Key,
+				Title:     item.Title,
+				Summary:   item.Summary,
+				Tags:      append([]string(nil), item.Tags...),
+				Scopes:    append([]string(nil), item.Scopes...),
+				AppliesTo: append([]string(nil), item.AppliesTo...),
+				Composes:  append([]string(nil), item.Composes...),
+				Command:   item.Command,
+				Aliases:   append([]string(nil), item.Aliases...),
+				Sections:  catalog.CloneSections(item.Sections),
+				SourceRef: item.Source.RelativePath,
 			},
 		}, nil
 	default:
@@ -168,7 +190,11 @@ func (broker *Broker) InvokeTool(key string, input map[string]string) (catalog.S
 	if definition.Invoke == nil {
 		return catalog.StructuredResult{}, fmt.Errorf("tool %q is not invokable", key)
 	}
-	return definition.Invoke(input)
+	result, err := definition.Invoke(input)
+	if err != nil {
+		return catalog.StructuredResult{}, err
+	}
+	return result, nil
 }
 
 func (broker *Broker) InvokeSkill(ctx context.Context, request skills.InvokeRequest) (catalog.StructuredResult, error) {

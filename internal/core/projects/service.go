@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 
+	"odin-os/internal/core/initiatives"
+	"odin-os/internal/core/workspaces"
 	"odin-os/internal/store/sqlite"
 )
 
@@ -35,6 +37,14 @@ type ReportInput struct {
 
 type ActionInput struct {
 	ProjectID   int64
+	Actor       TransitionController
+	ActionClass ActionClass
+	ActionKey   string
+}
+
+type ExecutionAuthorizationInput struct {
+	ProjectID   int64
+	Manifest    Manifest
 	Actor       TransitionController
 	ActionClass ActionClass
 	ActionKey   string
@@ -130,6 +140,54 @@ func (service Service) AuthorizeMutation(ctx context.Context, input ActionInput,
 		Allowed: false,
 		Reason:  requirement.Reason,
 	}, service.transitionDenied(ctx, input.ProjectID, string(input.ActionClass), requirement.Reason)
+}
+
+func (service Service) AuthorizeExecutionMutation(ctx context.Context, input ExecutionAuthorizationInput) error {
+	if err := ValidateSystemProjectMutation(input.Manifest); err != nil {
+		return err
+	}
+	_, err := service.AuthorizeMutation(ctx, ActionInput{
+		ProjectID:   input.ProjectID,
+		Actor:       input.Actor,
+		ActionClass: input.ActionClass,
+		ActionKey:   input.ActionKey,
+	}, input.Manifest)
+	return err
+}
+
+func (service Service) RegisterManagedProjectInitiative(ctx context.Context, workspaceID int64, project sqlite.Project, ownerCompanionID *int64) (initiatives.Initiative, error) {
+	return initiatives.Service{Store: service.Store}.ReconcileManagedProject(ctx, workspaceID, project, ownerCompanionID)
+}
+
+func (service Service) RegisterManagedProject(ctx context.Context, manifest Manifest) (sqlite.Project, error) {
+	if service.Store == nil {
+		return sqlite.Project{}, fmt.Errorf("project store is required")
+	}
+
+	scopeValue := "project"
+	if manifest.SystemProject {
+		scopeValue = "odin-core"
+	}
+
+	return service.Store.RegisterManagedProject(ctx, sqlite.ManagedProjectRegistrationParams{
+		Workspace: sqlite.CreateWorkspaceParams{
+			Key:                 workspaces.DefaultWorkspaceKey,
+			Name:                workspaces.DefaultWorkspaceName,
+			OwnerRef:            workspaces.DefaultWorkspaceOwnerRef,
+			DefaultCompanionKey: workspaces.DefaultWorkspaceCompanionKey,
+			Status:              workspaces.WorkspaceStatusActive,
+			PolicyJSON:          string(workspaces.DefaultWorkspacePolicy),
+		},
+		Project: sqlite.UpsertProjectParams{
+			Key:           manifest.Key,
+			Name:          manifest.Name,
+			Scope:         scopeValue,
+			GitRoot:       manifest.GitRoot,
+			DefaultBranch: manifest.DefaultBranch,
+			GitHubRepo:    manifest.GitHub.Repo,
+			ManifestPath:  manifest.SourcePath,
+		},
+	})
 }
 
 func (service Service) recordReport(ctx context.Context, input ReportInput, requiredState TransitionState, reportType string) (sqlite.ProjectTransitionReport, error) {

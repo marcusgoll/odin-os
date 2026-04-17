@@ -15,16 +15,19 @@ type RegistryCommand struct {
 type Intent string
 
 const (
-	IntentUnknown   Intent = "unknown"
-	IntentHelp      Intent = "help"
-	IntentMode      Intent = "mode"
-	IntentScope     Intent = "scope"
-	IntentProject   Intent = "project"
-	IntentJobs      Intent = "jobs"
-	IntentRuns      Intent = "runs"
-	IntentApprovals Intent = "approvals"
-	IntentLogs      Intent = "logs"
-	IntentDoctor    Intent = "doctor"
+	IntentUnknown     Intent = "unknown"
+	IntentHelp        Intent = "help"
+	IntentMode        Intent = "mode"
+	IntentScope       Intent = "scope"
+	IntentWorkspace   Intent = "workspace"
+	IntentInitiatives Intent = "initiatives"
+	IntentCompanions  Intent = "companions"
+	IntentProject     Intent = "project"
+	IntentJobs        Intent = "jobs"
+	IntentRuns        Intent = "runs"
+	IntentApprovals   Intent = "approvals"
+	IntentLogs        Intent = "logs"
+	IntentDoctor      Intent = "doctor"
 )
 
 // bootstrapRegistryCommands remains a bootstrap-only alias map until commands are
@@ -79,6 +82,12 @@ func RouteAskIntent(line string) Intent {
 		return IntentMode
 	case hasToken(tokens, "scope") && looksLikeStateQuestion(normalized):
 		return IntentScope
+	case strings.Contains(normalized, "workspace"):
+		return IntentWorkspace
+	case strings.Contains(normalized, "initiative"):
+		return IntentInitiatives
+	case strings.Contains(normalized, "companion") || strings.Contains(normalized, "assistant") || strings.Contains(normalized, "advisor"):
+		return IntentCompanions
 	case (hasToken(tokens, "project") || hasToken(tokens, "self")) && looksLikeStateQuestion(normalized):
 		return IntentProject
 	case looksLikeListing(normalized) && hasToken(tokens, "job", "jobs", "task", "tasks"):

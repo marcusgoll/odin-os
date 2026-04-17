@@ -52,6 +52,7 @@ type Requirements struct {
 	NeedsResume         bool            `json:"needs_resume"`
 	NeedsCancel         bool            `json:"needs_cancel"`
 	NeedsTools          bool            `json:"needs_tools"`
+	NeedsStreaming      bool            `json:"needs_streaming"`
 	NeedsCostEstimate   bool            `json:"needs_cost_estimate"`
 	NeedsHeadlessPlan   bool            `json:"needs_headless_plan"`
 	NeedsBrokerFallback bool            `json:"needs_broker_fallback"`
@@ -105,6 +106,7 @@ type Capabilities struct {
 	SupportsResume        bool
 	SupportsCancel        bool
 	SupportsTools         bool
+	SupportsStreaming     bool
 	SupportsCostEstimate  bool
 	SupportsHeadlessPlan  bool
 	SupportsBrokerRouting bool
@@ -129,6 +131,9 @@ func (capabilities Capabilities) Matches(spec TaskSpec) bool {
 		return false
 	}
 	if spec.Requirements.NeedsTools && !capabilities.SupportsTools {
+		return false
+	}
+	if spec.Requirements.NeedsStreaming && !capabilities.SupportsStreaming {
 		return false
 	}
 	if spec.Requirements.NeedsCostEstimate && !capabilities.SupportsCostEstimate {

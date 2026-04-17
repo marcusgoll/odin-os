@@ -4,7 +4,9 @@ import (
 	"context"
 	"path/filepath"
 	"testing"
+	"time"
 
+	runtimeevents "odin-os/internal/runtime/events"
 	"odin-os/internal/runtime/projections"
 	"odin-os/internal/store/sqlite"
 )
@@ -136,4 +138,81 @@ func TestReplayLifecycleBuildsCurrentStateFromEvents(t *testing.T) {
 	if replay.Approvals[approval.ID].Status != "approved" {
 		t.Fatalf("approval replay status = %q, want %q", replay.Approvals[approval.ID].Status, "approved")
 	}
+}
+
+func TestReplayLifecycleCollapsesLegacyDuplicatePendingApprovalsPerTask(t *testing.T) {
+	now := time.Date(2026, 4, 16, 0, 0, 0, 0, time.UTC)
+
+	taskCreatedPayload, err := runtimeevents.EncodePayload(runtimeevents.TaskCreatedPayload{
+		Key:         "alpha-task",
+		Title:       "Alpha task",
+		Status:      "blocked",
+		Scope:       "project",
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("EncodePayload(task.created) error = %v", err)
+	}
+	approvalOnePayload, err := runtimeevents.EncodePayload(runtimeevents.ApprovalRequestedPayload{
+		TaskID:      7,
+		Status:      "pending",
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("EncodePayload(approval.requested#1) error = %v", err)
+	}
+	approvalTwoPayload, err := runtimeevents.EncodePayload(runtimeevents.ApprovalRequestedPayload{
+		TaskID:      7,
+		Status:      "pending",
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("EncodePayload(approval.requested#2) error = %v", err)
+	}
+
+	replay, err := projections.ReplayLifecycle([]runtimeevents.Record{
+		{
+			StreamType: runtimeevents.StreamTask,
+			StreamID:   7,
+			Type:       runtimeevents.EventTaskCreated,
+			Scope:      "project",
+			Payload:    taskCreatedPayload,
+			OccurredAt: now,
+		},
+		{
+			StreamType: runtimeevents.StreamApproval,
+			StreamID:   101,
+			Type:       runtimeevents.EventApprovalRequested,
+			Scope:      "project",
+			TaskID:     int64Ptr(7),
+			Payload:    approvalOnePayload,
+			OccurredAt: now.Add(time.Second),
+		},
+		{
+			StreamType: runtimeevents.StreamApproval,
+			StreamID:   102,
+			Type:       runtimeevents.EventApprovalRequested,
+			Scope:      "project",
+			TaskID:     int64Ptr(7),
+			Payload:    approvalTwoPayload,
+			OccurredAt: now.Add(2 * time.Second),
+		},
+	})
+	if err != nil {
+		t.Fatalf("ReplayLifecycle() error = %v", err)
+	}
+
+	if _, ok := replay.Approvals[101]; ok {
+		t.Fatalf("replay.Approvals[101] still present, want collapsed duplicate removed")
+	}
+	if replay.Approvals[102].Status != "pending" {
+		t.Fatalf("replay.Approvals[102].Status = %q, want pending", replay.Approvals[102].Status)
+	}
+	if replay.Approvals[102].TaskID != 7 {
+		t.Fatalf("replay.Approvals[102].TaskID = %d, want 7", replay.Approvals[102].TaskID)
+	}
+}
+
+func int64Ptr(value int64) *int64 {
+	return &value
 }

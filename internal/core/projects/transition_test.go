@@ -99,3 +99,29 @@ func TestTransitionControlRequiresExplicitTargetState(t *testing.T) {
 		t.Fatalf("expected empty transition target to be denied")
 	}
 }
+
+func TestGovernanceValidateMutationAssignmentRequiresIsolatedWorktreeAndTaskBranch(t *testing.T) {
+	t.Parallel()
+
+	requireWorktree := true
+	requireTaskBranch := true
+	allowDefaultBranchMutation := false
+
+	manifest := Manifest{
+		Key: "alpha",
+		Policy: Policy{
+			BranchRules: BranchRules{
+				RequireWorktree:            &requireWorktree,
+				RequireTaskBranch:          &requireTaskBranch,
+				AllowDefaultBranchMutation: &allowDefaultBranchMutation,
+			},
+		},
+	}
+
+	if err := ValidateMutationAssignment(manifest, "/tmp/alpha", "main", MutationAssignment{
+		BranchName:   "",
+		WorktreePath: "/tmp/alpha",
+	}); err == nil {
+		t.Fatal("ValidateMutationAssignment() error = nil, want policy rejection")
+	}
+}

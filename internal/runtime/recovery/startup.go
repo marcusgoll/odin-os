@@ -34,6 +34,18 @@ func (service Service) RunStartupRecovery(ctx context.Context) (StartupResult, e
 		if err != nil {
 			return StartupResult{}, err
 		}
+		pendingApprovals, err := service.pendingApprovalCount(ctx, task.ID)
+		if err != nil {
+			return StartupResult{}, err
+		}
+		latestApprovalStatus, hasApproval, err := service.latestApprovalStatus(ctx, task.ID)
+		if err != nil {
+			return StartupResult{}, err
+		}
+		terminalTask := task.Status == "completed" || task.Status == "failed"
+		rejectedApprovalBlock := task.Status == "blocked" && pendingApprovals == 0 && hasApproval && latestApprovalStatus == "rejected"
+		requeueable := !terminalTask && pendingApprovals == 0 && !rejectedApprovalBlock
+		needsApprovalRepair := pendingApprovals > 0 && task.Status != "blocked"
 
 		resumeState, resumeErr := (checkpoints.Service{Store: service.Store}).LoadResumeState(ctx, task.ProjectID, task.ID)
 		if resumeErr != nil && !errors.Is(resumeErr, sql.ErrNoRows) {
@@ -50,19 +62,16 @@ func (service Service) RunStartupRecovery(ctx context.Context) (StartupResult, e
 			return StartupResult{}, err
 		}
 
-		if _, err := service.Store.FinishRun(ctx, sqlite.FinishRunParams{
-			RunID:   run.ID,
-			Status:  "interrupted",
-			Summary: "interrupted by startup recovery",
-		}); err != nil {
-			return StartupResult{}, err
-		}
-
-		if _, err := service.Store.UpdateTaskStatus(ctx, sqlite.UpdateTaskStatusParams{
-			TaskID: task.ID,
-			Status: "queued",
-		}); err != nil {
-			return StartupResult{}, err
+		if requeueable {
+			if _, err := service.workItemService().Requeue(ctx, task.ID); err != nil {
+				return StartupResult{}, err
+			}
+		} else if needsApprovalRepair {
+			// Repair legacy or partially written approval-gated state so blocked-task
+			// projections and resume state agree with the pending approval.
+			if _, err := service.workItemService().Block(ctx, task.ID); err != nil {
+				return StartupResult{}, err
+			}
 		}
 
 		objective := task.Title
@@ -83,6 +92,38 @@ func (service Service) RunStartupRecovery(ctx context.Context) (StartupResult, e
 		openTaskSummary := "task requeued after restart"
 		approvalSummary := "none"
 		var invocation *checkpoints.InvocationContext
+		recoveryDescription := "interrupted running run, requeued task, and created restart wake packet"
+
+		if terminalTask {
+			taskStatus = task.Status
+			blockingReason = "task was already terminal before startup recovery"
+			openTaskSummary = fmt.Sprintf("task remains %s", task.Status)
+			nextSteps = []string{
+				"Review why a terminal task still had a running run",
+				"Confirm no further task action is required",
+			}
+			recoveryDescription = "interrupted stale running run for terminal task and created restart wake packet"
+		} else if rejectedApprovalBlock {
+			taskStatus = "blocked"
+			blockingReason = "approval was rejected before restart"
+			openTaskSummary = "task remains blocked after rejected approval"
+			approvalSummary = "rejected"
+			nextSteps = []string{
+				"Review the rejected approval decision",
+				"Create a new work item if the task should be attempted again",
+			}
+			recoveryDescription = "interrupted running run and preserved blocked task after rejected approval"
+		} else if !requeueable {
+			taskStatus = "blocked"
+			blockingReason = "pending approval before restart"
+			openTaskSummary = "task remains blocked pending approval"
+			approvalSummary = pendingApprovalSummary(pendingApprovals)
+			nextSteps = []string{
+				"Review the pending approval",
+				"Resume the task after approval is resolved and the runtime is healthy",
+			}
+			recoveryDescription = "interrupted running run, preserved blocked task, and created restart wake packet"
+		}
 
 		if resumeErr == nil {
 			if resumeState.Objective != "" {
@@ -145,7 +186,15 @@ func (service Service) RunStartupRecovery(ctx context.Context) (StartupResult, e
 			ActionName:  "interrupt_run_and_checkpoint",
 			Attempt:     1,
 			Result:      "completed",
-			Description: "interrupted running run, requeued task, and created restart wake packet",
+			Description: recoveryDescription,
+		}); err != nil {
+			return StartupResult{}, err
+		}
+
+		if _, err := service.Store.FinishRun(ctx, sqlite.FinishRunParams{
+			RunID:   run.ID,
+			Status:  "interrupted",
+			Summary: "interrupted by startup recovery",
 		}); err != nil {
 			return StartupResult{}, err
 		}
@@ -165,4 +214,48 @@ func (service Service) RunStartupRecovery(ctx context.Context) (StartupResult, e
 	}
 
 	return result, nil
+}
+
+func (service Service) pendingApprovalCount(ctx context.Context, taskID int64) (int, error) {
+	row := service.Store.DB().QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM approvals
+		WHERE task_id = ? AND status = 'pending'
+	`, taskID)
+
+	var count int
+	if err := row.Scan(&count); err != nil {
+		return 0, err
+	}
+	return count, nil
+}
+
+func (service Service) latestApprovalStatus(ctx context.Context, taskID int64) (string, bool, error) {
+	row := service.Store.DB().QueryRowContext(ctx, `
+		SELECT status
+		FROM approvals
+		WHERE task_id = ?
+		ORDER BY id DESC
+		LIMIT 1
+	`, taskID)
+
+	var status string
+	if err := row.Scan(&status); err != nil {
+		if err == sql.ErrNoRows {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+	return status, true, nil
+}
+
+func pendingApprovalSummary(count int) string {
+	switch count {
+	case 0:
+		return "none"
+	case 1:
+		return "1 pending approval"
+	default:
+		return fmt.Sprintf("%d pending approvals", count)
+	}
 }

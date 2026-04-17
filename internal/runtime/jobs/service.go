@@ -11,7 +11,11 @@ import (
 
 	"odin-os/internal/cli/scope"
 	"odin-os/internal/core/capabilities"
+	"odin-os/internal/core/companions"
 	"odin-os/internal/core/projects"
+	corescope "odin-os/internal/core/scope"
+	"odin-os/internal/core/workitems"
+	"odin-os/internal/core/workspaces"
 	"odin-os/internal/executors/contract"
 	executorrouter "odin-os/internal/executors/router"
 	"odin-os/internal/runtime/checkpoints"
@@ -37,6 +41,7 @@ type Service struct {
 	RuntimeRoot              string
 	Transitions              projects.Service
 	Runs                     runsvc.Service
+	WorkItems                workitems.Service
 	Leases                   leases.Manager
 	Supervisor               supervision.Supervisor
 	MutableHeartbeatInterval time.Duration
@@ -48,7 +53,7 @@ type ExecutionOutcome struct {
 	Run  *sqlite.Run
 }
 
-func (service Service) List(ctx context.Context, resolved scope.Resolution) ([]projections.TaskStatusView, error) {
+func (service Service) List(ctx context.Context, resolved any) ([]projections.TaskStatusView, error) {
 	views, err := projections.ListTaskStatusViews(ctx, service.Store.DB())
 	if err != nil {
 		return nil, err
@@ -56,7 +61,7 @@ func (service Service) List(ctx context.Context, resolved scope.Resolution) ([]p
 
 	filtered := make([]projections.TaskStatusView, 0, len(views))
 	for _, view := range views {
-		if matchesTaskScope(view.ProjectKey, view.Scope, resolved) {
+		if matchesResolvedScope(view.ProjectKey, view.Scope, resolved) {
 			filtered = append(filtered, view)
 		}
 	}
@@ -64,17 +69,46 @@ func (service Service) List(ctx context.Context, resolved scope.Resolution) ([]p
 	return filtered, nil
 }
 
-func (service Service) CreateTaskFromAct(ctx context.Context, resolved scope.Resolution, title string) (sqlite.Task, error) {
-	if resolved.Kind == scope.ScopeGlobal {
+func (service Service) CreateTaskFromAct(ctx context.Context, resolved any, title string) (sqlite.Task, error) {
+	legacyResolved, controlResolved, err := normalizeScopeResolution(resolved)
+	if err != nil {
+		return sqlite.Task{}, err
+	}
+	if controlResolved.IsGlobal() {
 		return sqlite.Task{}, fmt.Errorf("act mode requires a non-global scope")
 	}
 
-	projectManifest, taskScope, err := service.taskOwnerForScope(resolved)
+	var projectManifest projects.Manifest
+	var taskScope string
+	switch typed := resolved.(type) {
+	case scope.Resolution:
+		projectManifest, taskScope, err = service.taskOwnerForScope(typed)
+	case corescope.ControlScope:
+		projectManifest, taskScope, err = service.taskOwnerForControlScope(typed)
+	default:
+		projectManifest, taskScope, err = service.taskOwnerForScope(legacyResolved)
+	}
 	if err != nil {
 		return sqlite.Task{}, err
 	}
 
 	project, err := service.ensureRuntimeProject(ctx, projectManifest)
+	if err != nil {
+		return sqlite.Task{}, err
+	}
+	if service.Transitions.Store == nil {
+		service.Transitions = projects.Service{Store: service.Store}
+	}
+
+	workspace, err := service.actWorkspace(ctx, controlResolved)
+	if err != nil {
+		return sqlite.Task{}, err
+	}
+	companion, err := service.actCompanion(ctx, workspace, controlResolved)
+	if err != nil {
+		return sqlite.Task{}, err
+	}
+	initiative, err := service.Transitions.RegisterManagedProjectInitiative(ctx, workspace.ID, project, &companion.ID)
 	if err != nil {
 		return sqlite.Task{}, err
 	}
@@ -89,14 +123,17 @@ func (service Service) CreateTaskFromAct(ctx context.Context, resolved scope.Res
 		now = service.Now().UTC()
 	}
 
-	return service.Store.CreateTask(ctx, sqlite.CreateTaskParams{
-		ProjectID:   project.ID,
-		Key:         fmt.Sprintf("%s-%s", slugify(title), now.Format("20060102-150405")),
-		Title:       title,
-		ActionKey:   actionKey,
-		Status:      "queued",
-		Scope:       taskScope,
-		RequestedBy: "operator",
+	return service.workItemService().Queue(ctx, sqlite.CreateTaskParams{
+		ProjectID:    project.ID,
+		Key:          fmt.Sprintf("%s-%s", slugify(title), now.Format("20060102-150405")),
+		Title:        title,
+		ActionKey:    actionKey,
+		Scope:        taskScope,
+		RequestedBy:  "operator",
+		WorkspaceID:  &workspace.ID,
+		InitiativeID: &initiative.ID,
+		CompanionID:  &companion.ID,
+		WorkKind:     taskScope,
 	})
 }
 
@@ -208,9 +245,6 @@ func (service Service) runQueuedTask(ctx context.Context, task sqlite.Task) (Exe
 
 	run, err := runsService.Start(ctx, task, decision.ExecutorKey)
 	if err != nil {
-		if errors.Is(err, sqlite.ErrTaskLaunchConflict) {
-			return ExecutionOutcome{}, nil
-		}
 		return ExecutionOutcome{}, err
 	}
 
@@ -552,10 +586,9 @@ func (service Service) resolveStalledRun(ctx context.Context, view projections.S
 	reason := "interrupted by stalled run recovery"
 	if scheduler.StalledRunRetryLimit > 0 && view.Attempt >= scheduler.StalledRunRetryLimit {
 		reason = "stalled run retry budget exhausted"
-		if err := service.Store.ResolveStalledRun(ctx, sqlite.ResolveStalledRunParams{
+		if _, err := service.Store.FinishRun(ctx, sqlite.FinishRunParams{
 			RunID:          view.RunID,
-			TaskID:         view.TaskID,
-			TaskStatus:     "dead_letter",
+			Status:         "interrupted",
 			Summary:        reason,
 			TerminalReason: reason,
 			ArtifactsJSON:  "[]",
@@ -565,16 +598,41 @@ func (service Service) resolveStalledRun(ctx context.Context, view projections.S
 			}
 			return err
 		}
+		if _, err := service.Store.UpdateTaskStatus(ctx, sqlite.UpdateTaskStatusParams{
+			TaskID:                 view.TaskID,
+			Status:                 "dead_letter",
+			Summary:                reason,
+			TerminalReason:         reason,
+			ArtifactsJSON:          "[]",
+			AllowedCurrentStatuses: []string{"running"},
+		}); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return nil
+			}
+			return err
+		}
 		return nil
 	}
 
-	if err := service.Store.ResolveStalledRun(ctx, sqlite.ResolveStalledRunParams{
+	if _, err := service.Store.FinishRun(ctx, sqlite.FinishRunParams{
 		RunID:          view.RunID,
-		TaskID:         view.TaskID,
-		TaskStatus:     "queued",
+		Status:         "interrupted",
 		Summary:        "",
 		TerminalReason: reason,
 		ArtifactsJSON:  "[]",
+	}); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		return err
+	}
+	if _, err := service.Store.UpdateTaskStatus(ctx, sqlite.UpdateTaskStatusParams{
+		TaskID:                 view.TaskID,
+		Status:                 "queued",
+		Summary:                "",
+		TerminalReason:         "",
+		ArtifactsJSON:          "[]",
+		AllowedCurrentStatuses: []string{"running"},
 	}); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil
@@ -696,6 +754,25 @@ func (service Service) taskOwnerForScope(resolved scope.Resolution) (projects.Ma
 	}
 }
 
+func (service Service) taskOwnerForControlScope(resolved corescope.ControlScope) (projects.Manifest, string, error) {
+	switch resolved.SubjectType {
+	case corescope.SubjectTypeNewProject:
+		project, ok := service.Registry.SystemProject()
+		if !ok {
+			return projects.Manifest{}, "", fmt.Errorf("new-project scope requires odin-core")
+		}
+		return project, resolved.TaskScope(), nil
+	case corescope.SubjectTypeInitiative, corescope.SubjectTypeCompanion:
+		project, ok := service.Registry.Lookup(resolved.ProjectKey)
+		if !ok {
+			return projects.Manifest{}, "", fmt.Errorf("unknown project %q", resolved.ProjectKey)
+		}
+		return project, resolved.TaskScope(), nil
+	default:
+		return projects.Manifest{}, "", fmt.Errorf("unsupported scope %q", resolved.SubjectType)
+	}
+}
+
 func matchesTaskScope(projectKey, taskScope string, resolved scope.Resolution) bool {
 	switch resolved.Kind {
 	case scope.ScopeGlobal:
@@ -706,6 +783,31 @@ func matchesTaskScope(projectKey, taskScope string, resolved scope.Resolution) b
 		return projectKey == resolved.ProjectKey
 	default:
 		return false
+	}
+}
+
+func matchesResolvedScope(projectKey, taskScope string, resolved any) bool {
+	switch typed := resolved.(type) {
+	case scope.Resolution:
+		return matchesTaskScope(projectKey, taskScope, typed)
+	case corescope.ControlScope:
+		return typed.MatchesTask(projectKey, taskScope)
+	default:
+		return false
+	}
+}
+
+func normalizeScopeResolution(resolved any) (scope.Resolution, corescope.ControlScope, error) {
+	switch typed := resolved.(type) {
+	case scope.Resolution:
+		return typed, corescope.ResolveLegacy(corescope.LegacyScope{
+			Kind:       string(typed.Kind),
+			ProjectKey: typed.ProjectKey,
+		}), nil
+	case corescope.ControlScope:
+		return scope.Resolution{}, typed, nil
+	default:
+		return scope.Resolution{}, corescope.ControlScope{}, fmt.Errorf("unsupported scope type %T", resolved)
 	}
 }
 
@@ -739,6 +841,29 @@ func (service Service) nextRunAttempt(ctx context.Context, taskID int64) (int, e
 	return attempt, nil
 }
 
+func (service Service) workItemService() workitems.Service {
+	if service.WorkItems.Store == nil {
+		service.WorkItems.Store = service.Store
+	}
+	return service.WorkItems
+}
+
+func (service Service) actWorkspace(ctx context.Context, resolved corescope.ControlScope) (workspaces.Workspace, error) {
+	workspaceService := workspaces.Service{Store: service.Store}
+	if resolved.WorkspaceKey == workspaces.DefaultWorkspaceKey {
+		return workspaceService.BootstrapDefaultWorkspace(ctx)
+	}
+	return workspaceService.GetWorkspaceByKey(ctx, resolved.WorkspaceKey)
+}
+
+func (service Service) actCompanion(ctx context.Context, workspace workspaces.Workspace, resolved corescope.ControlScope) (companions.Companion, error) {
+	companionKey := resolved.CompanionKey
+	if companionKey == "" {
+		companionKey = workspace.DefaultCompanionKey
+	}
+	return (companions.Service{Store: service.Store}).GetCompanionByKey(ctx, workspace.ID, companionKey)
+}
+
 func (service Service) executionOutcome(ctx context.Context, taskID int64, runID int64) (ExecutionOutcome, error) {
 	task, err := service.Store.GetTask(ctx, taskID)
 	if err != nil {
@@ -755,68 +880,12 @@ func (service Service) executionOutcome(ctx context.Context, taskID int64, runID
 }
 
 func (service Service) recordExecutionMemory(ctx context.Context, project sqlite.Project, task sqlite.Task, run *sqlite.Run, prompt string) error {
-	if run == nil {
-		return nil
-	}
-	responseText := strings.TrimSpace(run.Summary)
-	if responseText == "" {
-		responseText = fmt.Sprintf("Task %s finished with status %s.", task.Key, run.Status)
-	}
-
-	toolSummaryBytes, err := json.Marshal(map[string]string{
-		"executor":    run.Executor,
-		"run_status":  run.Status,
-		"task_status": task.Status,
-	})
-	if err != nil {
-		return err
-	}
-	transcript, err := service.Store.RecordConversationTranscript(ctx, sqlite.RecordConversationTranscriptParams{
-		ProjectID:   &project.ID,
-		TaskID:      &task.ID,
-		RunID:       &run.ID,
-		Scope:       task.Scope,
-		ScopeKey:    project.Key,
-		Mode:        "act",
-		Prompt:      strings.TrimSpace(prompt),
-		Response:    responseText,
-		ToolSummary: string(toolSummaryBytes),
-		Executor:    run.Executor,
-	})
-	if err != nil {
-		return err
-	}
-
-	detailsBytes, err := json.Marshal(map[string]string{
-		"task_key":    task.Key,
-		"task_status": task.Status,
-		"run_status":  run.Status,
-		"executor":    run.Executor,
-		"prompt":      strings.TrimSpace(prompt),
-	})
-	if err != nil {
-		return err
-	}
-
-	summaryText := strings.TrimSpace(run.Summary)
-	if summaryText == "" {
-		summaryText = fmt.Sprintf("Task %s finished with status %s.", task.Key, run.Status)
-	} else {
-		summaryText = fmt.Sprintf("Task %s %s via %s: %s", task.Key, run.Status, run.Executor, summaryText)
-	}
-
-	_, err = service.Store.RecordMemorySummary(ctx, sqlite.RecordMemorySummaryParams{
-		ProjectID:          &project.ID,
-		SourceTranscriptID: &transcript.ID,
-		TaskID:             &task.ID,
-		RunID:              &run.ID,
-		Scope:              task.Scope,
-		ScopeKey:           project.Key,
-		MemoryType:         "episode",
-		Summary:            summaryText,
-		DetailsJSON:        string(detailsBytes),
-	})
-	return err
+	_ = ctx
+	_ = project
+	_ = task
+	_ = run
+	_ = prompt
+	return nil
 }
 func (service Service) executionConfig(ctx context.Context) (executorrouter.Config, error) {
 	config := service.ExecutorConfig
@@ -1002,13 +1071,10 @@ func (service Service) requestApproval(ctx context.Context, task sqlite.Task, ru
 		reason = "approval required"
 	}
 
-	_, _, _, err := service.Store.AwaitApproval(ctx, sqlite.AwaitApprovalParams{
-		TaskID:         task.ID,
-		RunID:          run.ID,
-		RequestedBy:    string(projects.TransitionControllerOdinOS),
-		Summary:        reason,
-		TerminalReason: reason,
-		ArtifactsJSON:  "[]",
+	_, _, err := service.Store.BlockTaskAndRequestApproval(ctx, sqlite.BlockTaskAndRequestApprovalParams{
+		TaskID:      task.ID,
+		RunID:       &run.ID,
+		RequestedBy: string(projects.TransitionControllerOdinOS),
 	})
 	return err
 }
