@@ -38,16 +38,6 @@ func (service Service) RunStartupRecovery(ctx context.Context) (StartupResult, e
 			return StartupResult{}, err
 		}
 
-		recoveryRecord, err := service.Store.StartRecovery(ctx, sqlite.StartRecoveryParams{
-			RunID:       &run.ID,
-			Status:      "running",
-			Strategy:    "startup_recovery",
-			DetailsJSON: `{"trigger":"restart"}`,
-		})
-		if err != nil {
-			return StartupResult{}, err
-		}
-
 		if _, _, err := service.Store.InterruptRunAndRequeueTask(ctx, sqlite.InterruptRunAndRequeueTaskParams{
 			RunID:   run.ID,
 			Summary: "interrupted by startup recovery",
@@ -77,6 +67,16 @@ func (service Service) RunStartupRecovery(ctx context.Context) (StartupResult, e
 			PolicySummary:   "bounded startup recovery",
 			OpenTaskSummary: "task requeued after restart",
 			ApprovalSummary: "none",
+		})
+		if err != nil {
+			return StartupResult{}, err
+		}
+
+		recoveryRecord, err := service.Store.StartRecovery(ctx, sqlite.StartRecoveryParams{
+			RunID:       &run.ID,
+			Status:      "running",
+			Strategy:    "startup_recovery",
+			DetailsJSON: fmt.Sprintf(`{"trigger":"restart","wake_packet_id":%d}`, compaction.WakePacket.ID),
 		})
 		if err != nil {
 			return StartupResult{}, err

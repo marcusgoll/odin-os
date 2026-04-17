@@ -181,7 +181,6 @@ func (service Service) ExecuteNextQueued(ctx context.Context) error {
 	if leaseAdmission.Outcome != admissionDispatchable {
 		return service.finalizeOutcome(ctx, task, run, leaseAdmission, contract.ExecutionResult{}, nil)
 	}
-	defer releaseAssignment(ctx, service.Store, assignment)
 
 	if _, run, err = service.Store.UpdateRunAndTaskStatus(ctx, sqlite.UpdateRunAndTaskStatusParams{
 		RunID:      run.ID,
@@ -585,17 +584,6 @@ func validateAssignment(manifest projects.Manifest, project sqlite.Project, assi
 		return fmt.Errorf("project %q cannot mutate the default branch directly", manifest.Key)
 	}
 	return nil
-}
-
-func releaseAssignment(ctx context.Context, store *sqlite.Store, assignment leases.Assignment) error {
-	if assignment.LeaseID == nil {
-		return nil
-	}
-	_, err := store.ReleaseWorktreeLease(ctx, sqlite.ReleaseWorktreeLeaseParams{
-		LeaseID: *assignment.LeaseID,
-		State:   "released",
-	})
-	return err
 }
 
 func retryDelay(retryCount int) time.Duration {
