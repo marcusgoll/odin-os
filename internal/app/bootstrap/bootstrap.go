@@ -131,11 +131,9 @@ func load(ctx context.Context, repoRoot string, runtimeRoot string, options load
 		})
 	}
 
-	if len(diagnostics) == 0 {
-		if err := repairLegacyFollowUpTargets(ctx, store, registry); err != nil {
-			_ = store.Close()
-			return App{}, err
-		}
+	if err := repairLegacyFollowUpTargets(ctx, store, registryPaths); err != nil {
+		_ = store.Close()
+		return App{}, err
 	}
 
 	executorConfig, err := executorrouter.LoadConfig(filepath.Join(repoRoot, "config", "executors.yaml"))
@@ -505,37 +503,38 @@ func listProjectKeys(ctx context.Context, store *sqlite.Store) ([]string, error)
 	return keys, nil
 }
 
-func repairLegacyFollowUpTargets(ctx context.Context, store *sqlite.Store, registry projects.Registry) error {
+func repairLegacyFollowUpTargets(ctx context.Context, store *sqlite.Store, registryPaths []string) error {
 	if _, err := store.RepairFollowUpObligationLinkedTargets(ctx); err != nil {
 		return err
 	}
 
-	var remaining int64
-	if err := store.DB().QueryRowContext(ctx, `
-		SELECT COUNT(*)
-		FROM follow_up_obligations
-		WHERE target_project_id IS NULL
-	`).Scan(&remaining); err != nil {
+	if remaining, err := countFollowUpObligationsMissingTarget(ctx, store); err != nil {
 		return err
-	}
-	if remaining == 0 {
+	} else if remaining == 0 {
 		return nil
 	}
 
-	project, ok := registry.Lookup("odin-core")
-	if !ok {
-		return fmt.Errorf("default target project odin-core is not configured")
+	if project, err := store.GetProjectByKey(ctx, "odin-core"); err == nil {
+		if _, err := store.RepairFollowUpObligationTargets(ctx, project.ID); err != nil {
+			return err
+		}
+		return finalizeFollowUpTargetRepair(ctx, store)
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return err
 	}
 
-	scopeValue := "project"
-	if project.SystemProject {
-		scopeValue = "odin-core"
+	project, ok, err := loadDefaultFollowUpTargetProject(registryPaths)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf("default target project odin-core is not configured")
 	}
 
 	record, err := store.UpsertProject(ctx, sqlite.UpsertProjectParams{
 		Key:           project.Key,
 		Name:          project.Name,
-		Scope:         scopeValue,
+		Scope:         followUpProjectScope(project),
 		GitRoot:       project.GitRoot,
 		DefaultBranch: project.DefaultBranch,
 		GitHubRepo:    project.GitHub.Repo,
@@ -544,9 +543,57 @@ func repairLegacyFollowUpTargets(ctx context.Context, store *sqlite.Store, regis
 	if err != nil {
 		return err
 	}
+	if _, err := store.RepairFollowUpObligationTargets(ctx, record.ID); err != nil {
+		return err
+	}
+	return finalizeFollowUpTargetRepair(ctx, store)
+}
 
-	_, err = store.RepairFollowUpObligationTargets(ctx, record.ID)
-	return err
+func finalizeFollowUpTargetRepair(ctx context.Context, store *sqlite.Store) error {
+	remaining, err := countFollowUpObligationsMissingTarget(ctx, store)
+	if err != nil {
+		return err
+	}
+	if remaining > 0 {
+		return fmt.Errorf("follow-up obligations still missing target_project_id after bootstrap repair")
+	}
+	return nil
+}
+
+func countFollowUpObligationsMissingTarget(ctx context.Context, store *sqlite.Store) (int64, error) {
+	var remaining int64
+	if err := store.DB().QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM follow_up_obligations
+		WHERE target_project_id IS NULL
+	`).Scan(&remaining); err != nil {
+		return 0, err
+	}
+	return remaining, nil
+}
+
+func loadDefaultFollowUpTargetProject(registryPaths []string) (projects.Manifest, bool, error) {
+	cfg, err := projects.LoadManifestFiles(registryPaths...)
+	if err != nil {
+		return projects.Manifest{}, false, err
+	}
+
+	var project projects.Manifest
+	found := false
+	for _, candidate := range cfg.Projects {
+		if candidate.Key == "odin-core" {
+			project = candidate
+			found = true
+		}
+	}
+	return project, found, nil
+}
+
+func followUpProjectScope(project projects.Manifest) string {
+	if project.SystemProject {
+		return "odin-core"
+	}
+	return "project"
 }
 
 func bootstrapInitiativeOwner(ctx context.Context, store *sqlite.Store, workspaceID int64, projectKey string, defaultCompanionID int64) (*int64, error) {
