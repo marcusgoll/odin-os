@@ -24,7 +24,7 @@ func (maint Maintenance) HeartbeatActive(ctx context.Context) (HeartbeatResult, 
 		return HeartbeatResult{}, fmt.Errorf("lease maintenance store is required")
 	}
 
-	leases, err := maint.Store.ListActiveWorktreeLeases(ctx)
+	leases, err := maint.Store.ListHeartbeatEligibleWorktreeLeases(ctx)
 	if err != nil {
 		return HeartbeatResult{}, err
 	}

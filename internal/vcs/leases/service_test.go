@@ -2,6 +2,7 @@ package leases
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -187,11 +188,109 @@ func TestMaintenanceCleanupExpiredRemovesReleasedAndStaleLeases(t *testing.T) {
 	}
 }
 
+func TestMaintenanceHeartbeatActiveLeasesSkipsOrphanActiveLease(t *testing.T) {
+	ctx := context.Background()
+	store, project, task, run := openLeaseManagerStore(t)
+	defer store.Close()
+
+	liveLease, err := store.CreateWorktreeLease(ctx, sqlite.CreateWorktreeLeaseParams{
+		ProjectID:    project.ID,
+		TaskID:       task.ID,
+		RunID:        run.ID,
+		Mode:         "mutable",
+		BranchName:   "odin/cfipros/task-1/run-1/try-1",
+		WorktreePath: filepath.ToSlash(filepath.Join(t.TempDir(), "live")),
+		RepoRoot:     project.GitRoot,
+		State:        "active",
+	})
+	if err != nil {
+		t.Fatalf("CreateWorktreeLease(live) error = %v", err)
+	}
+
+	orphanTask, orphanRun := createTaskRun(t, ctx, store, project.ID, 99)
+	orphanLease, err := store.CreateWorktreeLease(ctx, sqlite.CreateWorktreeLeaseParams{
+		ProjectID:    project.ID,
+		TaskID:       orphanTask.ID,
+		RunID:        orphanRun.ID,
+		Mode:         "mutable",
+		BranchName:   "odin/cfipros/task-99/run-1/try-1",
+		WorktreePath: filepath.ToSlash(filepath.Join(t.TempDir(), "orphan")),
+		RepoRoot:     project.GitRoot,
+		State:        "active",
+	})
+	if err != nil {
+		t.Fatalf("CreateWorktreeLease(orphan) error = %v", err)
+	}
+
+	orphanedAt := liveLease.HeartbeatAt.Add(-2 * time.Minute)
+	if _, err := store.DB().ExecContext(ctx, `
+		UPDATE runs
+		SET status = 'completed', finished_at = ?, summary = ?
+		WHERE id = ?
+	`, orphanedAt.Format(time.RFC3339Nano), "orphaned", orphanRun.ID); err != nil {
+		t.Fatalf("mark orphan run completed error = %v", err)
+	}
+	if _, err := store.DB().ExecContext(ctx, `
+		UPDATE tasks
+		SET status = 'completed', current_run_id = NULL, updated_at = ?
+		WHERE id = ?
+	`, orphanedAt.Format(time.RFC3339Nano), orphanTask.ID); err != nil {
+		t.Fatalf("mark orphan task completed error = %v", err)
+	}
+	if _, err := store.DB().ExecContext(ctx, `
+		UPDATE worktree_leases
+		SET heartbeat_at = ?, updated_at = ?
+		WHERE id = ?
+	`, orphanedAt.Format(time.RFC3339Nano), orphanedAt.Format(time.RFC3339Nano), orphanLease.ID); err != nil {
+		t.Fatalf("mark orphan lease stale error = %v", err)
+	}
+
+	maint := Maintenance{
+		Store: store,
+		Now: func() time.Time {
+			return liveLease.HeartbeatAt.Add(30 * time.Second)
+		},
+	}
+	store.Now = maint.Now
+
+	result, err := maint.HeartbeatActive(ctx)
+	if err != nil {
+		t.Fatalf("HeartbeatActive() error = %v", err)
+	}
+	if result.Updated != 1 {
+		t.Fatalf("HeartbeatActive().Updated = %d, want 1", result.Updated)
+	}
+
+	liveUpdated, err := store.GetWorktreeLease(ctx, liveLease.ID)
+	if err != nil {
+		t.Fatalf("GetWorktreeLease(live) error = %v", err)
+	}
+	if !liveUpdated.HeartbeatAt.After(liveLease.HeartbeatAt) {
+		t.Fatalf("live HeartbeatAt = %v, want later than %v", liveUpdated.HeartbeatAt, liveLease.HeartbeatAt)
+	}
+
+	orphanUpdated, err := store.GetWorktreeLease(ctx, orphanLease.ID)
+	if err != nil {
+		t.Fatalf("GetWorktreeLease(orphan) error = %v", err)
+	}
+	if !orphanUpdated.HeartbeatAt.Equal(orphanedAt) {
+		t.Fatalf("orphan HeartbeatAt = %v, want unchanged %v", orphanUpdated.HeartbeatAt, orphanedAt)
+	}
+}
+
 type fakeCleanupGit struct {
 	removeCalls int
+	removeErr   error
 }
 
 func (git *fakeCleanupGit) RemoveWorktree(context.Context, string, string) error {
 	git.removeCalls++
-	return nil
+	return git.removeErr
+}
+
+func (git *fakeCleanupGit) err() error {
+	if git.removeErr != nil {
+		return git.removeErr
+	}
+	return fmt.Errorf("remove failed")
 }

@@ -19,6 +19,8 @@ import (
 	"odin-os/internal/runtime/checkpoints"
 	runtimeevents "odin-os/internal/runtime/events"
 	"odin-os/internal/store/sqlite"
+	"odin-os/internal/vcs/leases"
+	"odin-os/internal/vcs/worktrees"
 )
 
 func TestRunDoctorJSONWritesStructuredReport(t *testing.T) {
@@ -645,6 +647,136 @@ service:
 	if !updated.HeartbeatAt.After(staleAt) {
 		t.Fatalf("HeartbeatAt = %v, want later than %v", updated.HeartbeatAt, staleAt)
 	}
+}
+
+func TestRunLeaseMaintenanceCycleHeartbeatsLiveLeasesWhenCleanupFails(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlite.Open(filepath.Join(t.TempDir(), "odin.db"))
+	if err != nil {
+		t.Fatalf("sqlite.Open() error = %v", err)
+	}
+	defer store.Close()
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
+	}
+
+	project, err := store.CreateProject(ctx, sqlite.CreateProjectParams{
+		Key:           "cfipros",
+		Name:          "CFI Pros",
+		Scope:         "project",
+		GitRoot:       filepath.Join(t.TempDir(), "repo"),
+		DefaultBranch: "main",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+
+	releasedTask, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "released-cleanup",
+		Title:       "Released cleanup candidate",
+		Status:      "running",
+		Scope:       "project",
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask(released) error = %v", err)
+	}
+	releasedRun, err := store.StartRun(ctx, sqlite.StartRunParams{
+		TaskID:   releasedTask.ID,
+		Executor: "codex",
+		Attempt:  1,
+		Status:   "running",
+	})
+	if err != nil {
+		t.Fatalf("StartRun(released) error = %v", err)
+	}
+	releasedLease, err := store.CreateWorktreeLease(ctx, sqlite.CreateWorktreeLeaseParams{
+		ProjectID:    project.ID,
+		TaskID:       releasedTask.ID,
+		RunID:        releasedRun.ID,
+		Mode:         "mutable",
+		BranchName:   "odin/cfipros/task-1/run-1/try-1",
+		WorktreePath: filepath.ToSlash(filepath.Join(t.TempDir(), "released")),
+		RepoRoot:     project.GitRoot,
+		State:        "active",
+	})
+	if err != nil {
+		t.Fatalf("CreateWorktreeLease(released) error = %v", err)
+	}
+	if _, err := store.ReleaseWorktreeLease(ctx, sqlite.ReleaseWorktreeLeaseParams{
+		LeaseID: releasedLease.ID,
+		State:   "released",
+	}); err != nil {
+		t.Fatalf("ReleaseWorktreeLease() error = %v", err)
+	}
+
+	liveTask, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "live-heartbeat",
+		Title:       "Live lease heartbeat",
+		Status:      "running",
+		Scope:       "project",
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask(live) error = %v", err)
+	}
+	liveRun, err := store.StartRun(ctx, sqlite.StartRunParams{
+		TaskID:   liveTask.ID,
+		Executor: "codex",
+		Attempt:  2,
+		Status:   "running",
+	})
+	if err != nil {
+		t.Fatalf("StartRun(live) error = %v", err)
+	}
+	liveLease, err := store.CreateWorktreeLease(ctx, sqlite.CreateWorktreeLeaseParams{
+		ProjectID:    project.ID,
+		TaskID:       liveTask.ID,
+		RunID:        liveRun.ID,
+		Mode:         "mutable",
+		BranchName:   "odin/cfipros/task-2/run-2/try-1",
+		WorktreePath: filepath.ToSlash(filepath.Join(t.TempDir(), "live")),
+		RepoRoot:     project.GitRoot,
+		State:        "active",
+	})
+	if err != nil {
+		t.Fatalf("CreateWorktreeLease(live) error = %v", err)
+	}
+
+	maint := leases.Maintenance{
+		Store: store,
+		Cleanup: worktrees.Manager{
+			Store: store,
+			Git: &cleanupFailureGit{
+				err: errors.New("remove failed"),
+			},
+		},
+		Now: func() time.Time {
+			return liveLease.HeartbeatAt.Add(30 * time.Second)
+		},
+	}
+	store.Now = maint.Now
+
+	runLeaseMaintenanceCycle(ctx, maint, nil, 30*time.Minute)
+
+	updated, err := store.GetWorktreeLease(ctx, liveLease.ID)
+	if err != nil {
+		t.Fatalf("GetWorktreeLease(live) error = %v", err)
+	}
+	if !updated.HeartbeatAt.After(liveLease.HeartbeatAt) {
+		t.Fatalf("HeartbeatAt = %v, want later than %v", updated.HeartbeatAt, liveLease.HeartbeatAt)
+	}
+}
+
+type cleanupFailureGit struct {
+	err error
+}
+
+func (git *cleanupFailureGit) RemoveWorktree(context.Context, string, string) error {
+	return git.err
 }
 
 func createRuntimeRoot(t *testing.T) string {

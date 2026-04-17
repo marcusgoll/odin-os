@@ -2526,6 +2526,50 @@ func (store *Store) ListActiveWorktreeLeases(ctx context.Context) ([]WorktreeLea
 	return leases, rows.Err()
 }
 
+func (store *Store) ListHeartbeatEligibleWorktreeLeases(ctx context.Context) ([]WorktreeLease, error) {
+	rows, err := store.db.QueryContext(ctx, `
+		SELECT
+			wl.id,
+			wl.project_id,
+			wl.task_id,
+			wl.run_id,
+			wl.mode,
+			wl.branch_name,
+			wl.worktree_path,
+			wl.repo_root,
+			wl.state,
+			wl.heartbeat_at,
+			wl.released_at,
+			wl.cleaned_up_at,
+			wl.created_at,
+			wl.updated_at
+		FROM worktree_leases wl
+		JOIN tasks t ON t.id = wl.task_id
+		JOIN runs r ON r.id = wl.run_id
+		WHERE wl.state = 'active'
+		  AND wl.cleaned_up_at IS NULL
+		  AND t.current_run_id = wl.run_id
+		  AND t.status = 'running'
+		  AND r.status IN ('preparing', 'running')
+		ORDER BY wl.id ASC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var leases []WorktreeLease
+	for rows.Next() {
+		lease, err := scanWorktreeLease(rows)
+		if err != nil {
+			return nil, err
+		}
+		leases = append(leases, lease)
+	}
+
+	return leases, rows.Err()
+}
+
 func (store *Store) ListCleanupEligibleWorktreeLeases(ctx context.Context, staleBefore time.Time) ([]WorktreeLease, error) {
 	rows, err := store.db.QueryContext(ctx, `
 		SELECT

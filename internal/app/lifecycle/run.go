@@ -467,7 +467,6 @@ func runLeaseLoop(ctx context.Context, operationCtx context.Context, wg *sync.Wa
 func runLeaseMaintenanceCycle(ctx context.Context, service leases.Maintenance, logger *logs.Logger, staleAfter time.Duration) {
 	if _, err := service.CleanupExpired(ctx, staleAfter); err != nil {
 		logBackgroundError(logger, "worktree_lease_cleanup", err)
-		return
 	}
 	if _, err := service.HeartbeatActive(ctx); err != nil {
 		logBackgroundError(logger, "worktree_lease_heartbeat", err)
