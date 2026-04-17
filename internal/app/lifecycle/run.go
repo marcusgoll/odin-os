@@ -243,8 +243,9 @@ func runServe(ctx context.Context, app bootstrap.App, cfg appconfig.Config, stdo
 	var background sync.WaitGroup
 	background.Add(3)
 	loopCtx, stopLoops := context.WithCancel(context.Background())
-	go runSchedulerLoop(loopCtx, operationCtx, &background, schedulerService, logger, loopConfig.schedulerInterval)
-	go runTaskLoop(loopCtx, operationCtx, &background, jobService, logger, loopConfig.taskInterval)
+	dispatchNudges := make(chan struct{}, 32)
+	go runSchedulerLoop(loopCtx, operationCtx, &background, schedulerService, dispatchNudges, logger, loopConfig.schedulerInterval)
+	go runTaskLoop(loopCtx, operationCtx, &background, jobService, dispatchNudges, logger, loopConfig.taskInterval)
 	go runSelfHealLoop(loopCtx, operationCtx, &background, recoveryService, logger, loopConfig.selfHealInterval)
 	defer func() {
 		stopLoops()
@@ -351,7 +352,7 @@ func openServiceLogger(runtimeRoot string) (*logs.Logger, io.Closer, error) {
 	}, file, nil
 }
 
-func runTaskLoop(ctx context.Context, operationCtx context.Context, wg *sync.WaitGroup, service jobs.Service, logger *logs.Logger, interval time.Duration) {
+func runTaskLoop(ctx context.Context, operationCtx context.Context, wg *sync.WaitGroup, service jobs.Service, nudges <-chan struct{}, logger *logs.Logger, interval time.Duration) {
 	defer wg.Done()
 
 	ticker := time.NewTicker(interval)
@@ -361,6 +362,10 @@ func runTaskLoop(ctx context.Context, operationCtx context.Context, wg *sync.Wai
 		select {
 		case <-ctx.Done():
 			return
+		case <-nudges:
+			if err := service.ExecuteNextQueued(operationCtx); err != nil {
+				logBackgroundError(logger, "task_runner", err)
+			}
 		case <-ticker.C:
 			if err := service.ExecuteNextQueued(operationCtx); err != nil {
 				logBackgroundError(logger, "task_runner", err)
@@ -369,7 +374,7 @@ func runTaskLoop(ctx context.Context, operationCtx context.Context, wg *sync.Wai
 	}
 }
 
-func runSchedulerLoop(ctx context.Context, operationCtx context.Context, wg *sync.WaitGroup, service supervision.Service, logger *logs.Logger, interval time.Duration) {
+func runSchedulerLoop(ctx context.Context, operationCtx context.Context, wg *sync.WaitGroup, service supervision.Service, nudges chan<- struct{}, logger *logs.Logger, interval time.Duration) {
 	defer wg.Done()
 
 	ticker := time.NewTicker(interval)
@@ -383,10 +388,16 @@ func runSchedulerLoop(ctx context.Context, operationCtx context.Context, wg *syn
 			if result, err := service.Tick(operationCtx); err != nil {
 				logBackgroundError(logger, "scheduler", err)
 			} else if result.Promoted > 0 && logger != nil {
+				for promoted := 0; promoted < result.Promoted; promoted++ {
+					select {
+					case nudges <- struct{}{}:
+					default:
+					}
+				}
 				_ = logger.Log(logs.Record{
 					Level:         logs.LevelInfo,
 					Component:     "scheduler",
-					Message:       "scheduled delayed task promotion",
+					Message:       "scheduler dispatched delayed task candidates",
 					CorrelationID: "scheduler",
 					Scope:         "global",
 					Fields: map[string]any{

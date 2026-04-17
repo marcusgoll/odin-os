@@ -486,7 +486,7 @@ service:
 	}
 }
 
-func TestRunServeDispatchesDelayedTasksWhenTheyBecomeEligible(t *testing.T) {
+func TestRunServeSchedulerDispatchesDelayedTasksBeforeTaskLoopWakeup(t *testing.T) {
 	root := createRuntimeRoot(t)
 	writeRuntimeConfig(t, root, `
 version: 1
@@ -531,7 +531,7 @@ service:
 
 	ctx, cancel := context.WithCancel(context.Background())
 	ctx = withServeLoopConfig(ctx, serveLoopConfig{
-		taskInterval:      20 * time.Millisecond,
+		taskInterval:      5 * time.Second,
 		schedulerInterval: 20 * time.Millisecond,
 	})
 	time.AfterFunc(700*time.Millisecond, cancel)

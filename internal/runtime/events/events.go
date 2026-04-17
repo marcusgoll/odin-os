@@ -96,11 +96,17 @@ type ProjectCreatedPayload struct {
 }
 
 type TaskCreatedPayload struct {
-	Key         string `json:"key"`
-	Title       string `json:"title"`
-	Status      string `json:"status"`
-	Scope       string `json:"scope"`
-	RequestedBy string `json:"requested_by"`
+	Key            string `json:"key"`
+	Title          string `json:"title"`
+	Status         string `json:"status"`
+	Scope          string `json:"scope"`
+	RequestedBy    string `json:"requested_by"`
+	NextEligibleAt string `json:"next_eligible_at"`
+	Priority       int    `json:"priority"`
+	RetryCount     int    `json:"retry_count"`
+	MaxAttempts    int    `json:"max_attempts"`
+	LastError      string `json:"last_error,omitempty"`
+	BlockedReason  string `json:"blocked_reason,omitempty"`
 }
 
 type TaskStatusChangedPayload struct {

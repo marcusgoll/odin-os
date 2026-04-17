@@ -866,11 +866,17 @@ func ReplayLifecycle(records []runtimeevents.Record) (LifecycleReplay, error) {
 				return LifecycleReplay{}, fmt.Errorf("decode %s payload: %w", record.Type, err)
 			}
 			replay.Tasks[record.StreamID] = TaskReplay{
-				ID:     record.StreamID,
-				Key:    payload.Key,
-				Title:  payload.Title,
-				Status: payload.Status,
-				Scope:  payload.Scope,
+				ID:             record.StreamID,
+				Key:            payload.Key,
+				Title:          payload.Title,
+				Status:         payload.Status,
+				Scope:          payload.Scope,
+				NextEligibleAt: payload.NextEligibleAt,
+				Priority:       payload.Priority,
+				RetryCount:     payload.RetryCount,
+				MaxAttempts:    payload.MaxAttempts,
+				LastError:      payload.LastError,
+				BlockedReason:  payload.BlockedReason,
 			}
 		case runtimeevents.EventTaskStatusChanged:
 			payload, err := runtimeevents.DecodePayload[runtimeevents.TaskStatusChangedPayload](record.Payload)
