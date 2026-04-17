@@ -25,6 +25,8 @@ func TestRenderExportsMachineParseableMetrics(t *testing.T) {
 		StaleExecutors:     1,
 		StaleSources:       2,
 		StaleProjections:   1,
+		MediaOpenIncidents: 2,
+		MediaCandidates:    1,
 	})
 
 	for _, want := range []string{
@@ -38,10 +40,83 @@ func TestRenderExportsMachineParseableMetrics(t *testing.T) {
 		"odin_stale_executors 1",
 		"odin_stale_sources 2",
 		"odin_stale_projections 1",
+		"odin_media_open_incidents 2",
+		"odin_media_candidates 1",
 	} {
 		if !strings.Contains(exported, want) {
 			t.Fatalf("Render() = %q, want substring %q", exported, want)
 		}
+	}
+}
+
+func TestMediaMetricsCollectAndRenderExposeMediaCounters(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	now := time.Date(2026, 4, 17, 12, 0, 0, 0, time.UTC)
+
+	store, err := sqlite.Open(filepath.Join(t.TempDir(), "odin.db"))
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer store.Close()
+	store.Now = func() time.Time { return now }
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
+	}
+
+	project, err := store.CreateProject(ctx, sqlite.CreateProjectParams{
+		Key:           "odin-core",
+		Name:          "Odin Core",
+		Scope:         "odin-core",
+		GitRoot:       "/tmp/odin-os",
+		DefaultBranch: "main",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+
+	if _, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "media-maintenance-2026-week16",
+		Title:       "Media maintenance candidate",
+		Status:      "blocked",
+		Scope:       "odin-core",
+		RequestedBy: "media-supervisor",
+	}); err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+
+	if _, err := store.OpenIncident(ctx, sqlite.OpenIncidentParams{
+		Severity:    "critical",
+		Status:      "open",
+		Summary:     "mount mismatch detected",
+		DetailsJSON: `{"domain":"media","signal":"media.mounts"}`,
+	}); err != nil {
+		t.Fatalf("OpenIncident() error = %v", err)
+	}
+
+	snapshot, err := Service{
+		DB:  store.DB(),
+		Now: func() time.Time { return now },
+	}.Collect(ctx)
+	if err != nil {
+		t.Fatalf("Collect() error = %v", err)
+	}
+	if snapshot.MediaOpenIncidents != 1 {
+		t.Fatalf("MediaOpenIncidents = %d, want 1", snapshot.MediaOpenIncidents)
+	}
+	if snapshot.MediaCandidates != 1 {
+		t.Fatalf("MediaCandidates = %d, want 1", snapshot.MediaCandidates)
+	}
+
+	exported := Render(snapshot)
+	if !strings.Contains(exported, "odin_media_open_incidents 1") {
+		t.Fatalf("Render() = %q, want media incident count", exported)
+	}
+	if !strings.Contains(exported, "odin_media_candidates 1") {
+		t.Fatalf("Render() = %q, want media candidate count", exported)
 	}
 }
 

@@ -82,6 +82,7 @@ Before opening a pull request:
 - prefer `make ci` to mirror the local CI verification stack
 - run additional targeted commands when the change needs narrower iteration than `make ci`
 - if the change affects user-visible or orchestration-facing behavior, run the real repo-owned `odin` command path against a controlled `ODIN_ROOT`
+- if the change affects the bounded media profile, run `make test-media` and the real `odin doctor --json` or `odin healthcheck` media probe path against a controlled `ODIN_ROOT`
 
 Pull requests are expected to use the repo template and report:
 

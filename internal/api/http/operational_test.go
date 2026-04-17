@@ -7,12 +7,15 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 
 	httpapi "odin-os/internal/api/http"
+	coremedia "odin-os/internal/core/media"
 	"odin-os/internal/core/initiatives"
 	"odin-os/internal/core/workspaces"
 	healthsvc "odin-os/internal/runtime/health"
@@ -132,6 +135,64 @@ func TestReadyzIsUnavailableWhenDoctorIsDegraded(t *testing.T) {
 
 	assertReportStatus(t, server.URL+"/healthz", http.StatusOK, "degraded")
 	assertReportStatus(t, server.URL+"/readyz", http.StatusServiceUnavailable, "degraded")
+}
+
+func TestReadyzFailsClosedWhenMediaProfileFailsClosed(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openStore(t)
+	defer store.Close()
+
+	seedHealthyObservability(t, ctx, store)
+	seedRuntimeState(t, ctx, store, "ready")
+
+	server := httptest.NewServer(httpapi.NewOperationalHandler(httpapi.Dependencies{
+		Health: healthsvc.Service{
+			DB: store.DB(),
+			Media: &healthsvc.MediaChecks{
+				Config:       healthMediaConfig(),
+				ProbeCommand: fixtureMediaProbePath(t, "media-probe-mount-mismatch.sh"),
+			},
+		},
+		Metrics: metricsvc.Service{
+			DB: store.DB(),
+		},
+		RegistryHealthy: true,
+	}))
+	defer server.Close()
+
+	assertReportStatus(t, server.URL+"/healthz", http.StatusOK, "failed")
+	assertReportStatus(t, server.URL+"/readyz", http.StatusServiceUnavailable, "failed")
+}
+
+func TestReadyzFailsClosedWhenMediaProbeCommandFails(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openStore(t)
+	defer store.Close()
+
+	seedHealthyObservability(t, ctx, store)
+	seedRuntimeState(t, ctx, store, "ready")
+
+	server := httptest.NewServer(httpapi.NewOperationalHandler(httpapi.Dependencies{
+		Health: healthsvc.Service{
+			DB: store.DB(),
+			Media: &healthsvc.MediaChecks{
+				Config:       healthMediaConfig(),
+				ProbeCommand: "/definitely/missing/media-probe-command",
+			},
+		},
+		Metrics: metricsvc.Service{
+			DB: store.DB(),
+		},
+		RegistryHealthy: true,
+	}))
+	defer server.Close()
+
+	assertReportStatus(t, server.URL+"/healthz", http.StatusOK, "failed")
+	assertReportStatus(t, server.URL+"/readyz", http.StatusServiceUnavailable, "failed")
 }
 
 func TestOperationalHandlerExposesWorkspaceInitiativeCompanionAndBlockedReadModels(t *testing.T) {
@@ -626,4 +687,26 @@ func seedMemoryReadModelState(t *testing.T, ctx context.Context, store *sqlite.S
 	}); err != nil {
 		t.Fatalf("CreateMemoryEntry(secondary workspace) error = %v", err)
 	}
+}
+
+func healthMediaConfig() *coremedia.Config {
+	return &coremedia.Config{
+		Enabled: true,
+		Services: []coremedia.StackService{
+			{
+				Name: "plex",
+				Kind: coremedia.ServiceKindPlex,
+			},
+		},
+	}
+}
+
+func fixtureMediaProbePath(t *testing.T, name string) string {
+	t.Helper()
+
+	_, currentFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatalf("runtime.Caller() failed")
+	}
+	return filepath.Clean(path.Join(filepath.Dir(currentFile), "..", "..", "..", "scripts", "tests", "fixtures", name))
 }

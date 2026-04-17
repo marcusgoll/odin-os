@@ -212,6 +212,7 @@ func TestRunTaskCreateJSON(t *testing.T) {
 
 func TestRunTaskRunJSON(t *testing.T) {
 	configureLifecycleHarnessDriver(t)
+	t.Setenv("HOME", t.TempDir())
 	root := testRepoRoot(t)
 	cleanupTaskRunWorktree(t, testProjectKey)
 	if err := Run(context.Background(), root, []string{"project", "select", testProjectKey}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
