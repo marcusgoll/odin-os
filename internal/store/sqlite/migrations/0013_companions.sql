@@ -12,7 +12,8 @@ CREATE TABLE IF NOT EXISTS companions (
   tool_policy_json TEXT NOT NULL DEFAULT '{}',
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
-  UNIQUE(workspace_id, key)
+  UNIQUE(workspace_id, key),
+  UNIQUE(workspace_id, id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_companions_workspace_id ON companions(workspace_id, id);

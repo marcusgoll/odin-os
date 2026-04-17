@@ -137,6 +137,7 @@ func (store *Store) CreateWorkspace(ctx context.Context, params CreateWorkspaceP
 	if policyJSON == "" {
 		policyJSON = "{}"
 	}
+	defaultCompanionKey := strings.TrimSpace(params.DefaultCompanionKey)
 
 	err := store.withTx(ctx, func(tx *sql.Tx) error {
 		result, err := tx.ExecContext(ctx, `
@@ -147,7 +148,7 @@ func (store *Store) CreateWorkspace(ctx context.Context, params CreateWorkspaceP
 			params.Name,
 			params.OwnerRef,
 			params.Status,
-			nullIfEmpty(strings.TrimSpace(params.DefaultCompanionKey)),
+			nullIfEmpty(defaultCompanionKey),
 			policyJSON,
 			formatTime(now),
 			formatTime(now),
@@ -167,7 +168,7 @@ func (store *Store) CreateWorkspace(ctx context.Context, params CreateWorkspaceP
 			Name:                params.Name,
 			OwnerRef:            params.OwnerRef,
 			Status:              params.Status,
-			DefaultCompanionKey: params.DefaultCompanionKey,
+			DefaultCompanionKey: defaultCompanionKey,
 			PolicyJSON:          policyJSON,
 			CreatedAt:           now,
 			UpdatedAt:           now,

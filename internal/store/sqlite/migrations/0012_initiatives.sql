@@ -10,7 +10,8 @@ CREATE TABLE IF NOT EXISTS initiatives (
   owner_companion_id INTEGER,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
-  UNIQUE(workspace_id, key)
+  UNIQUE(workspace_id, key),
+  FOREIGN KEY(workspace_id, owner_companion_id) REFERENCES companions(workspace_id, id) ON DELETE RESTRICT
 );
 
 CREATE INDEX IF NOT EXISTS idx_initiatives_workspace_id ON initiatives(workspace_id, id);

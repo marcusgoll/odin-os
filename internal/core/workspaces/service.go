@@ -28,7 +28,7 @@ func (service Service) BootstrapDefaultWorkspace(ctx context.Context) (sqlite.Wo
 		return sqlite.Workspace{}, err
 	}
 
-	return service.Store.CreateWorkspace(ctx, sqlite.CreateWorkspaceParams{
+	workspace, err = service.Store.CreateWorkspace(ctx, sqlite.CreateWorkspaceParams{
 		Key:                 defaultWorkspaceKey,
 		Name:                "Marcus",
 		OwnerRef:            "marcus",
@@ -36,6 +36,15 @@ func (service Service) BootstrapDefaultWorkspace(ctx context.Context) (sqlite.Wo
 		DefaultCompanionKey: "",
 		PolicyJSON:          "{}",
 	})
+	if err == nil {
+		return workspace, nil
+	}
+
+	existing, getErr := service.Store.GetWorkspaceByKey(ctx, defaultWorkspaceKey)
+	if getErr == nil {
+		return existing, nil
+	}
+	return sqlite.Workspace{}, err
 }
 
 func (service Service) GetByKey(ctx context.Context, key string) (sqlite.Workspace, error) {
