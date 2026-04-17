@@ -17,6 +17,7 @@ import (
 	appbackup "odin-os/internal/app/backup"
 	"odin-os/internal/app/bootstrap"
 	appconfig "odin-os/internal/app/config"
+	"odin-os/internal/cli/commands"
 	"odin-os/internal/cli/repl"
 	"odin-os/internal/core/projects"
 	healthsvc "odin-os/internal/runtime/health"
@@ -68,6 +69,8 @@ func Run(ctx context.Context, root string, args []string, stdin io.Reader, stdou
 			return runRestore(ctx, appbackup.Service{RepoRoot: root, RuntimeRoot: cfg.RuntimeRoot}, args[1:], stdout)
 		case "verify-backup":
 			return runVerifyBackup(ctx, appbackup.Service{RepoRoot: root, RuntimeRoot: cfg.RuntimeRoot}, args[1:], stdout)
+		case "profile":
+			return commands.RunProfile(ctx, app.Store, args[1:], stdout)
 		default:
 			return fmt.Errorf("unknown command: %s", args[0])
 		}
@@ -78,6 +81,13 @@ func Run(ctx context.Context, root string, args []string, stdin io.Reader, stdou
 		Registry:            app.Registry,
 		RegistryDiagnostics: app.RegistryDiagnostics,
 		SessionStore:        app.SessionStore,
+		ExecutorConfig:      app.ExecutorConfig,
+		Executors:           app.Executors,
+		Leases: leases.Manager{
+			Store:        app.Store,
+			Git:          gitadapter.Adapter{},
+			WorktreeRoot: worktrees.DefaultRoot(),
+		},
 	})
 	if err != nil {
 		return err
