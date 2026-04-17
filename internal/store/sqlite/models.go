@@ -26,16 +26,22 @@ type CreateProjectParams struct {
 }
 
 type Task struct {
-	ID           int64
-	ProjectID    int64
-	Key          string
-	Title        string
-	Status       string
-	Scope        string
-	RequestedBy  string
-	CurrentRunID *int64
-	CreatedAt    time.Time
-	UpdatedAt    time.Time
+	ID             int64
+	ProjectID      int64
+	Key            string
+	Title          string
+	Status         string
+	Scope          string
+	RequestedBy    string
+	CurrentRunID   *int64
+	NextEligibleAt time.Time
+	Priority       int
+	LastError      string
+	RetryCount     int
+	MaxAttempts    int
+	BlockedReason  string
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
 }
 
 type CreateTaskParams struct {
@@ -50,6 +56,33 @@ type CreateTaskParams struct {
 type UpdateTaskStatusParams struct {
 	TaskID int64
 	Status string
+}
+
+type UpdateTaskQueueStateParams struct {
+	TaskID         int64
+	Status         string
+	NextEligibleAt time.Time
+	Priority       int
+	LastError      string
+	RetryCount     int
+	MaxAttempts    int
+	BlockedReason  string
+}
+
+type BlockTaskParams struct {
+	TaskID int64
+	Reason string
+}
+
+type RequeueTaskAtParams struct {
+	TaskID         int64
+	NextEligibleAt time.Time
+}
+
+type IncrementTaskRetryParams struct {
+	TaskID         int64
+	LastError      string
+	NextEligibleAt time.Time
 }
 
 type Run struct {

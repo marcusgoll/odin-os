@@ -222,6 +222,75 @@ func TestExecuteNextQueuedRejectsShadowModeMutation(t *testing.T) {
 	}
 }
 
+func TestRetryBackoffSkipsTaskUntilEligible(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openJobStore(t)
+	defer store.Close()
+
+	registry := writeRegistry(t)
+	now := time.Date(2026, 4, 17, 10, 0, 0, 0, time.UTC)
+	service := Service{
+		Store:    store,
+		Registry: registry,
+		Now: func() time.Time {
+			return now
+		},
+	}
+
+	project, err := store.CreateProject(ctx, sqlite.CreateProjectParams{
+		Key:           "alpha",
+		Name:          "Alpha",
+		Scope:         "project",
+		GitRoot:       "/tmp/alpha",
+		DefaultBranch: "main",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+
+	dueTask, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "due-task",
+		Title:       "Eligible now",
+		Status:      "queued",
+		Scope:       "project",
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask(due) error = %v", err)
+	}
+
+	delayedTask, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "delayed-task",
+		Title:       "Eligible later",
+		Status:      "queued",
+		Scope:       "project",
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask(delayed) error = %v", err)
+	}
+
+	if _, err := store.RequeueTaskAt(ctx, sqlite.RequeueTaskAtParams{
+		TaskID:         delayedTask.ID,
+		NextEligibleAt: now.Add(30 * time.Minute),
+	}); err != nil {
+		t.Fatalf("RequeueTaskAt() error = %v", err)
+	}
+
+	got, err := service.nextQueuedTask(ctx)
+	if err != nil {
+		t.Fatalf("nextQueuedTask() error = %v", err)
+	}
+	if got.ID != dueTask.ID {
+		t.Fatalf("nextQueuedTask().ID = %d, want %d", got.ID, dueTask.ID)
+	}
+}
+
 type jobTestGit struct{}
 
 func (jobTestGit) BranchExists(context.Context, string, string) (bool, error) { return false, nil }

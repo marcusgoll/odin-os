@@ -171,15 +171,21 @@ func (store *Store) CreateTask(ctx context.Context, params CreateTaskParams) (Ta
 		}
 
 		task = Task{
-			ID:          taskID,
-			ProjectID:   params.ProjectID,
-			Key:         params.Key,
-			Title:       params.Title,
-			Status:      params.Status,
-			Scope:       params.Scope,
-			RequestedBy: params.RequestedBy,
-			CreatedAt:   now,
-			UpdatedAt:   now,
+			ID:             taskID,
+			ProjectID:      params.ProjectID,
+			Key:            params.Key,
+			Title:          params.Title,
+			Status:         params.Status,
+			Scope:          params.Scope,
+			RequestedBy:    params.RequestedBy,
+			NextEligibleAt: time.Time{},
+			Priority:       100,
+			LastError:      "",
+			RetryCount:     0,
+			MaxAttempts:    3,
+			BlockedReason:  "",
+			CreatedAt:      now,
+			UpdatedAt:      now,
 		}
 
 		return appendEventTx(ctx, tx, eventInsert{
@@ -243,6 +249,103 @@ func (store *Store) UpdateTaskStatus(ctx context.Context, params UpdateTaskStatu
 	})
 
 	return task, err
+}
+
+func (store *Store) UpdateTaskQueueState(ctx context.Context, params UpdateTaskQueueStateParams) (Task, error) {
+	now := store.now()
+	var task Task
+
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		current, err := store.getTaskTx(ctx, tx, params.TaskID)
+		if err != nil {
+			return err
+		}
+
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE tasks
+			SET status = ?, next_eligible_at = ?, priority = ?, last_error = ?, retry_count = ?, max_attempts = ?, blocked_reason = ?, updated_at = ?
+			WHERE id = ?
+		`,
+			params.Status,
+			formatTime(params.NextEligibleAt),
+			params.Priority,
+			params.LastError,
+			params.RetryCount,
+			params.MaxAttempts,
+			params.BlockedReason,
+			formatTime(now),
+			params.TaskID,
+		); err != nil {
+			return err
+		}
+
+		current.Status = params.Status
+		current.NextEligibleAt = params.NextEligibleAt
+		current.Priority = params.Priority
+		current.LastError = params.LastError
+		current.RetryCount = params.RetryCount
+		current.MaxAttempts = params.MaxAttempts
+		current.BlockedReason = params.BlockedReason
+		current.UpdatedAt = now
+		task = current
+		return nil
+	})
+
+	return task, err
+}
+
+func (store *Store) BlockTask(ctx context.Context, params BlockTaskParams) (Task, error) {
+	current, err := store.GetTask(ctx, params.TaskID)
+	if err != nil {
+		return Task{}, err
+	}
+
+	return store.UpdateTaskQueueState(ctx, UpdateTaskQueueStateParams{
+		TaskID:         params.TaskID,
+		Status:         "blocked",
+		NextEligibleAt: time.Time{},
+		Priority:       current.Priority,
+		LastError:      current.LastError,
+		RetryCount:     current.RetryCount,
+		MaxAttempts:    current.MaxAttempts,
+		BlockedReason:  params.Reason,
+	})
+}
+
+func (store *Store) RequeueTaskAt(ctx context.Context, params RequeueTaskAtParams) (Task, error) {
+	current, err := store.GetTask(ctx, params.TaskID)
+	if err != nil {
+		return Task{}, err
+	}
+
+	return store.UpdateTaskQueueState(ctx, UpdateTaskQueueStateParams{
+		TaskID:         params.TaskID,
+		Status:         "queued",
+		NextEligibleAt: params.NextEligibleAt,
+		Priority:       current.Priority,
+		LastError:      current.LastError,
+		RetryCount:     current.RetryCount,
+		MaxAttempts:    current.MaxAttempts,
+		BlockedReason:  "",
+	})
+}
+
+func (store *Store) IncrementTaskRetry(ctx context.Context, params IncrementTaskRetryParams) (Task, error) {
+	current, err := store.GetTask(ctx, params.TaskID)
+	if err != nil {
+		return Task{}, err
+	}
+
+	return store.UpdateTaskQueueState(ctx, UpdateTaskQueueStateParams{
+		TaskID:         params.TaskID,
+		Status:         "queued",
+		NextEligibleAt: params.NextEligibleAt,
+		Priority:       current.Priority,
+		LastError:      params.LastError,
+		RetryCount:     current.RetryCount + 1,
+		MaxAttempts:    current.MaxAttempts,
+		BlockedReason:  "",
+	})
 }
 
 func (store *Store) StartRun(ctx context.Context, params StartRunParams) (Run, error) {
@@ -1548,6 +1651,31 @@ func (store *Store) GetTask(ctx context.Context, taskID int64) (Task, error) {
 	return store.getTaskQuery(ctx, store.db, taskID)
 }
 
+func (store *Store) ListEligibleQueuedTasks(ctx context.Context, now time.Time) ([]Task, error) {
+	rows, err := store.db.QueryContext(ctx, `
+		SELECT id, project_id, key, title, status, scope, requested_by, current_run_id, next_eligible_at, priority, last_error, retry_count, max_attempts, blocked_reason, created_at, updated_at
+		FROM tasks
+		WHERE status = 'queued'
+		  AND next_eligible_at <= ?
+		ORDER BY priority ASC, next_eligible_at ASC, id ASC
+	`, formatTime(now))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var tasks []Task
+	for rows.Next() {
+		task, err := scanTask(rows)
+		if err != nil {
+			return nil, err
+		}
+		tasks = append(tasks, task)
+	}
+
+	return tasks, rows.Err()
+}
+
 func (store *Store) GetProject(ctx context.Context, projectID int64) (Project, error) {
 	row := store.db.QueryRowContext(ctx, `
 		SELECT id, key, name, scope, git_root, default_branch, github_repo, manifest_path, created_at, updated_at
@@ -2225,7 +2353,7 @@ func (store *Store) getTaskTx(ctx context.Context, tx *sql.Tx, taskID int64) (Ta
 
 func (store *Store) getTaskQuery(ctx context.Context, queryer sqlQueryRow, taskID int64) (Task, error) {
 	row := queryer.QueryRowContext(ctx, `
-		SELECT id, project_id, key, title, status, scope, requested_by, current_run_id, created_at, updated_at
+		SELECT id, project_id, key, title, status, scope, requested_by, current_run_id, next_eligible_at, priority, last_error, retry_count, max_attempts, blocked_reason, created_at, updated_at
 		FROM tasks
 		WHERE id = ?
 	`, taskID)
@@ -2272,7 +2400,7 @@ func (store *Store) getRunWithTaskTx(ctx context.Context, tx *sql.Tx, runID int6
 	row := tx.QueryRowContext(ctx, `
 		SELECT
 			r.id, r.task_id, r.executor, r.status, r.attempt, r.started_at, r.finished_at, r.summary,
-			t.id, t.project_id, t.key, t.title, t.status, t.scope, t.requested_by, t.current_run_id, t.created_at, t.updated_at
+			t.id, t.project_id, t.key, t.title, t.status, t.scope, t.requested_by, t.current_run_id, t.next_eligible_at, t.priority, t.last_error, t.retry_count, t.max_attempts, t.blocked_reason, t.created_at, t.updated_at
 		FROM runs r
 		JOIN tasks t ON t.id = r.task_id
 		WHERE r.id = ?
@@ -2283,6 +2411,12 @@ func (store *Store) getRunWithTaskTx(ctx context.Context, tx *sql.Tx, runID int6
 	var finishedAt sql.NullString
 	var summary sql.NullString
 	var currentRunID sql.NullInt64
+	var nextEligibleAt string
+	var priority int
+	var lastError string
+	var retryCount int
+	var maxAttempts int
+	var blockedReason string
 	var startedAt string
 	var taskCreatedAt string
 	var taskUpdatedAt string
@@ -2304,6 +2438,12 @@ func (store *Store) getRunWithTaskTx(ctx context.Context, tx *sql.Tx, runID int6
 		&task.Scope,
 		&task.RequestedBy,
 		&currentRunID,
+		&nextEligibleAt,
+		&priority,
+		&lastError,
+		&retryCount,
+		&maxAttempts,
+		&blockedReason,
 		&taskCreatedAt,
 		&taskUpdatedAt,
 	); err != nil {
@@ -2322,6 +2462,15 @@ func (store *Store) getRunWithTaskTx(ctx context.Context, tx *sql.Tx, runID int6
 	run.Summary = summary.String
 
 	task.CurrentRunID = nullableInt64Ptr(currentRunID)
+	task.NextEligibleAt, err = parseTime(nextEligibleAt)
+	if err != nil {
+		return Run{}, Task{}, err
+	}
+	task.Priority = priority
+	task.LastError = lastError
+	task.RetryCount = retryCount
+	task.MaxAttempts = maxAttempts
+	task.BlockedReason = blockedReason
 	task.CreatedAt, err = parseTime(taskCreatedAt)
 	if err != nil {
 		return Run{}, Task{}, err
@@ -2338,7 +2487,7 @@ func (store *Store) getApprovalWithTaskTx(ctx context.Context, tx *sql.Tx, appro
 	row := tx.QueryRowContext(ctx, `
 		SELECT
 			a.id, a.task_id, a.run_id, a.status, a.requested_at, a.resolved_at, a.decision_by, a.reason,
-			t.id, t.project_id, t.key, t.title, t.status, t.scope, t.requested_by, t.current_run_id, t.created_at, t.updated_at
+			t.id, t.project_id, t.key, t.title, t.status, t.scope, t.requested_by, t.current_run_id, t.next_eligible_at, t.priority, t.last_error, t.retry_count, t.max_attempts, t.blocked_reason, t.created_at, t.updated_at
 		FROM approvals a
 		JOIN tasks t ON t.id = a.task_id
 		WHERE a.id = ?
@@ -2352,6 +2501,12 @@ func (store *Store) getApprovalWithTaskTx(ctx context.Context, tx *sql.Tx, appro
 	var reason sql.NullString
 	var requestedAt string
 	var currentRunID sql.NullInt64
+	var nextEligibleAt string
+	var priority int
+	var lastError string
+	var retryCount int
+	var maxAttempts int
+	var blockedReason string
 	var taskCreatedAt string
 	var taskUpdatedAt string
 
@@ -2372,6 +2527,12 @@ func (store *Store) getApprovalWithTaskTx(ctx context.Context, tx *sql.Tx, appro
 		&task.Scope,
 		&task.RequestedBy,
 		&currentRunID,
+		&nextEligibleAt,
+		&priority,
+		&lastError,
+		&retryCount,
+		&maxAttempts,
+		&blockedReason,
 		&taskCreatedAt,
 		&taskUpdatedAt,
 	); err != nil {
@@ -2392,6 +2553,15 @@ func (store *Store) getApprovalWithTaskTx(ctx context.Context, tx *sql.Tx, appro
 	approval.Reason = reason.String
 
 	task.CurrentRunID = nullableInt64Ptr(currentRunID)
+	task.NextEligibleAt, err = parseTime(nextEligibleAt)
+	if err != nil {
+		return Approval{}, Task{}, err
+	}
+	task.Priority = priority
+	task.LastError = lastError
+	task.RetryCount = retryCount
+	task.MaxAttempts = maxAttempts
+	task.BlockedReason = blockedReason
 	task.CreatedAt, err = parseTime(taskCreatedAt)
 	if err != nil {
 		return Approval{}, Task{}, err
@@ -2705,6 +2875,12 @@ func scanProject(row interface{ Scan(...any) error }) (Project, error) {
 func scanTask(row interface{ Scan(...any) error }) (Task, error) {
 	var task Task
 	var currentRunID sql.NullInt64
+	var nextEligibleAt string
+	var priority int
+	var lastError string
+	var retryCount int
+	var maxAttempts int
+	var blockedReason string
 	var createdAt string
 	var updatedAt string
 	if err := row.Scan(
@@ -2716,6 +2892,12 @@ func scanTask(row interface{ Scan(...any) error }) (Task, error) {
 		&task.Scope,
 		&task.RequestedBy,
 		&currentRunID,
+		&nextEligibleAt,
+		&priority,
+		&lastError,
+		&retryCount,
+		&maxAttempts,
+		&blockedReason,
 		&createdAt,
 		&updatedAt,
 	); err != nil {
@@ -2724,6 +2906,15 @@ func scanTask(row interface{ Scan(...any) error }) (Task, error) {
 
 	var err error
 	task.CurrentRunID = nullableInt64Ptr(currentRunID)
+	task.NextEligibleAt, err = parseTime(nextEligibleAt)
+	if err != nil {
+		return Task{}, err
+	}
+	task.Priority = priority
+	task.LastError = lastError
+	task.RetryCount = retryCount
+	task.MaxAttempts = maxAttempts
+	task.BlockedReason = blockedReason
 	task.CreatedAt, err = parseTime(createdAt)
 	if err != nil {
 		return Task{}, err

@@ -23,6 +23,12 @@ type TaskStatusView struct {
 	Scope            string
 	CurrentRunID     *int64
 	CurrentRunStatus string
+	NextEligibleAt   string
+	Priority         int
+	RetryCount       int
+	MaxAttempts      int
+	LastError        string
+	BlockedReason    string
 }
 
 type RunSummaryView struct {
@@ -149,7 +155,13 @@ func ListTaskStatusViews(ctx context.Context, queryer Queryer) ([]TaskStatusView
 			t.status,
 			t.scope,
 			t.current_run_id,
-			COALESCE(r.status, '')
+			COALESCE(r.status, ''),
+			t.next_eligible_at,
+			t.priority,
+			t.retry_count,
+			t.max_attempts,
+			t.last_error,
+			t.blocked_reason
 		FROM tasks t
 		JOIN projects p ON p.id = t.project_id
 		LEFT JOIN runs r ON r.id = t.current_run_id
@@ -174,6 +186,12 @@ func ListTaskStatusViews(ctx context.Context, queryer Queryer) ([]TaskStatusView
 			&view.Scope,
 			&currentRunID,
 			&view.CurrentRunStatus,
+			&view.NextEligibleAt,
+			&view.Priority,
+			&view.RetryCount,
+			&view.MaxAttempts,
+			&view.LastError,
+			&view.BlockedReason,
 		); err != nil {
 			return nil, err
 		}
@@ -477,6 +495,32 @@ func ListBlockedItemViews(ctx context.Context, queryer Queryer) ([]BlockedItemVi
 			Source:     "wake_packet",
 			Reason:     payload.BlockingReason,
 		})
+	}
+
+	blockedTaskRows, err := queryer.QueryContext(ctx, `
+		SELECT t.id, t.key, p.key, t.blocked_reason
+		FROM tasks t
+		JOIN projects p ON p.id = t.project_id
+		WHERE t.status = 'blocked'
+		  AND t.blocked_reason <> ''
+		ORDER BY t.id ASC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer blockedTaskRows.Close()
+
+	for blockedTaskRows.Next() {
+		var view BlockedItemView
+		if err := blockedTaskRows.Scan(&view.TaskID, &view.TaskKey, &view.ProjectKey, &view.Reason); err != nil {
+			return nil, err
+		}
+		view.Source = "task"
+		views = append(views, view)
+	}
+
+	if err := blockedTaskRows.Err(); err != nil {
+		return nil, err
 	}
 
 	return views, wakeRows.Err()

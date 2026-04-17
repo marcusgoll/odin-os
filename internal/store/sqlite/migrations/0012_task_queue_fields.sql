@@ -1,0 +1,8 @@
+ALTER TABLE tasks ADD COLUMN next_eligible_at TEXT NOT NULL DEFAULT '0001-01-01T00:00:00Z';
+ALTER TABLE tasks ADD COLUMN priority INTEGER NOT NULL DEFAULT 100;
+ALTER TABLE tasks ADD COLUMN last_error TEXT NOT NULL DEFAULT '';
+ALTER TABLE tasks ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE tasks ADD COLUMN max_attempts INTEGER NOT NULL DEFAULT 3;
+ALTER TABLE tasks ADD COLUMN blocked_reason TEXT NOT NULL DEFAULT '';
+
+CREATE INDEX IF NOT EXISTS idx_tasks_queue_schedule ON tasks(status, next_eligible_at, priority, id);

@@ -226,8 +226,8 @@ func TestStoreMigrateLifecycleAndReopen(t *testing.T) {
 	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM schema_migrations`).Scan(&migrationCount); err != nil {
 		t.Fatalf("schema_migrations count query error = %v", err)
 	}
-	if migrationCount != 7 {
-		t.Fatalf("schema_migrations count = %d, want 7", migrationCount)
+	if migrationCount != 8 {
+		t.Fatalf("schema_migrations count = %d, want 8", migrationCount)
 	}
 
 	if err := store.Close(); err != nil {
@@ -867,5 +867,204 @@ func TestRuntimeStateStoreRejectsStaleSameBootSnapshot(t *testing.T) {
 	}
 	if lifecycleCount != 2 {
 		t.Fatalf("lifecycle event count = %d, want %d", lifecycleCount, 2)
+	}
+}
+
+func TestTaskQueueDefaults(t *testing.T) {
+	ctx := context.Background()
+	store := openMigratedTestStore(t, "task-queue-defaults.db")
+	defer store.Close()
+
+	project, err := store.CreateProject(ctx, CreateProjectParams{
+		Key:           "queue-defaults",
+		Name:          "Queue Defaults",
+		Scope:         "project",
+		GitRoot:       "/tmp/queue-defaults",
+		DefaultBranch: "main",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+
+	task, err := store.CreateTask(ctx, CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "default-queue-task",
+		Title:       "Check queue defaults",
+		Status:      "queued",
+		Scope:       "project",
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+
+	if !task.NextEligibleAt.IsZero() {
+		t.Fatalf("NextEligibleAt = %v, want zero time", task.NextEligibleAt)
+	}
+	if task.Priority != 100 {
+		t.Fatalf("Priority = %d, want 100", task.Priority)
+	}
+	if task.LastError != "" {
+		t.Fatalf("LastError = %q, want empty", task.LastError)
+	}
+	if task.RetryCount != 0 {
+		t.Fatalf("RetryCount = %d, want 0", task.RetryCount)
+	}
+	if task.MaxAttempts != 3 {
+		t.Fatalf("MaxAttempts = %d, want 3", task.MaxAttempts)
+	}
+	if task.BlockedReason != "" {
+		t.Fatalf("BlockedReason = %q, want empty", task.BlockedReason)
+	}
+
+	views, err := projections.ListTaskStatusViews(ctx, store.DB())
+	if err != nil {
+		t.Fatalf("ListTaskStatusViews() error = %v", err)
+	}
+	if len(views) != 1 {
+		t.Fatalf("ListTaskStatusViews() len = %d, want 1", len(views))
+	}
+	if views[0].NextEligibleAt != "0001-01-01T00:00:00Z" {
+		t.Fatalf("NextEligibleAt view = %q, want zero RFC3339 time", views[0].NextEligibleAt)
+	}
+}
+
+func TestBlockedTaskRecordsReason(t *testing.T) {
+	ctx := context.Background()
+	store := openMigratedTestStore(t, "blocked-task.db")
+	defer store.Close()
+
+	project, err := store.CreateProject(ctx, CreateProjectParams{
+		Key:           "blocked-task",
+		Name:          "Blocked Task",
+		Scope:         "project",
+		GitRoot:       "/tmp/blocked-task",
+		DefaultBranch: "main",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+
+	task, err := store.CreateTask(ctx, CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "blocked-queue-task",
+		Title:       "Wait on approval",
+		Status:      "queued",
+		Scope:       "project",
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+
+	blocked, err := store.BlockTask(ctx, BlockTaskParams{
+		TaskID: task.ID,
+		Reason: "approval_required",
+	})
+	if err != nil {
+		t.Fatalf("BlockTask() error = %v", err)
+	}
+
+	if blocked.Status != "blocked" {
+		t.Fatalf("Status = %q, want blocked", blocked.Status)
+	}
+	if blocked.BlockedReason != "approval_required" {
+		t.Fatalf("BlockedReason = %q, want %q", blocked.BlockedReason, "approval_required")
+	}
+
+	views, err := projections.ListBlockedItemViews(ctx, store.DB())
+	if err != nil {
+		t.Fatalf("ListBlockedItemViews() error = %v", err)
+	}
+	if len(views) != 1 {
+		t.Fatalf("ListBlockedItemViews() len = %d, want 1", len(views))
+	}
+	if views[0].Source != "task" {
+		t.Fatalf("BlockedItemView.Source = %q, want %q", views[0].Source, "task")
+	}
+	if views[0].Reason != "approval_required" {
+		t.Fatalf("BlockedItemView.Reason = %q, want %q", views[0].Reason, "approval_required")
+	}
+}
+
+func TestRetryBackoffUpdatesQueueState(t *testing.T) {
+	ctx := context.Background()
+	store := openMigratedTestStore(t, "retry-backoff.db")
+	defer store.Close()
+
+	now := time.Date(2026, 4, 17, 10, 0, 0, 0, time.UTC)
+	store.Now = func() time.Time { return now }
+
+	project, err := store.CreateProject(ctx, CreateProjectParams{
+		Key:           "retry-backoff",
+		Name:          "Retry Backoff",
+		Scope:         "project",
+		GitRoot:       "/tmp/retry-backoff",
+		DefaultBranch: "main",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+
+	task, err := store.CreateTask(ctx, CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "retry-queue-task",
+		Title:       "Retry later",
+		Status:      "queued",
+		Scope:       "project",
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+
+	retryAt := now.Add(15 * time.Minute)
+	updated, err := store.IncrementTaskRetry(ctx, IncrementTaskRetryParams{
+		TaskID:         task.ID,
+		LastError:      "transient executor failure",
+		NextEligibleAt: retryAt,
+	})
+	if err != nil {
+		t.Fatalf("IncrementTaskRetry() error = %v", err)
+	}
+
+	if updated.RetryCount != 1 {
+		t.Fatalf("RetryCount = %d, want 1", updated.RetryCount)
+	}
+	if updated.NextEligibleAt != retryAt {
+		t.Fatalf("NextEligibleAt = %v, want %v", updated.NextEligibleAt, retryAt)
+	}
+	if updated.LastError != "transient executor failure" {
+		t.Fatalf("LastError = %q, want %q", updated.LastError, "transient executor failure")
+	}
+
+	requeued, err := store.RequeueTaskAt(ctx, RequeueTaskAtParams{
+		TaskID:         task.ID,
+		NextEligibleAt: retryAt,
+	})
+	if err != nil {
+		t.Fatalf("RequeueTaskAt() error = %v", err)
+	}
+	if requeued.NextEligibleAt != retryAt {
+		t.Fatalf("RequeueTaskAt().NextEligibleAt = %v, want %v", requeued.NextEligibleAt, retryAt)
+	}
+
+	eligible, err := store.ListEligibleQueuedTasks(ctx, now)
+	if err != nil {
+		t.Fatalf("ListEligibleQueuedTasks() error = %v", err)
+	}
+	if len(eligible) != 0 {
+		t.Fatalf("ListEligibleQueuedTasks() len = %d, want 0 before retry window", len(eligible))
+	}
+
+	eligible, err = store.ListEligibleQueuedTasks(ctx, retryAt)
+	if err != nil {
+		t.Fatalf("ListEligibleQueuedTasks(retryAt) error = %v", err)
+	}
+	if len(eligible) != 1 || eligible[0].ID != task.ID {
+		t.Fatalf("ListEligibleQueuedTasks(retryAt) = %+v, want task %d", eligible, task.ID)
 	}
 }

@@ -249,6 +249,13 @@ func (service Service) ExecuteNextQueued(ctx context.Context) error {
 	return nil
 }
 
+func (service Service) now() time.Time {
+	if service.Now != nil {
+		return service.Now().UTC()
+	}
+	return time.Now().UTC()
+}
+
 func (service Service) ensureRuntimeProject(ctx context.Context, manifest projects.Manifest) (sqlite.Project, error) {
 	project, err := service.Store.GetProjectByKey(ctx, manifest.Key)
 	if err == nil {
@@ -307,19 +314,14 @@ func matchesTaskScope(projectKey, taskScope string, resolved scope.Resolution) b
 }
 
 func (service Service) nextQueuedTask(ctx context.Context) (sqlite.Task, error) {
-	row := service.Store.DB().QueryRowContext(ctx, `
-		SELECT id
-		FROM tasks
-		WHERE status = 'queued'
-		ORDER BY id ASC
-		LIMIT 1
-	`)
-
-	var taskID int64
-	if err := row.Scan(&taskID); err != nil {
+	tasks, err := service.Store.ListEligibleQueuedTasks(ctx, service.now())
+	if err != nil {
 		return sqlite.Task{}, err
 	}
-	return service.Store.GetTask(ctx, taskID)
+	if len(tasks) == 0 {
+		return sqlite.Task{}, sql.ErrNoRows
+	}
+	return tasks[0], nil
 }
 
 func (service Service) nextRunAttempt(ctx context.Context, taskID int64) (int, error) {
