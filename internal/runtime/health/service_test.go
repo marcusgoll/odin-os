@@ -49,6 +49,44 @@ func TestDoctorReportIsHealthyWhenChecksAreFresh(t *testing.T) {
 		t.Fatalf("StartRun() error = %v", err)
 	}
 
+	runnableTask, err := store.CreateTask(context.Background(), sqlite.CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "runnable-task",
+		Title:       "Runnable task",
+		Status:      "queued",
+		Scope:       "project",
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask(runnable) error = %v", err)
+	}
+	if _, err := store.RequeueTaskAt(context.Background(), sqlite.RequeueTaskAtParams{
+		TaskID:         runnableTask.ID,
+		NextEligibleAt: now,
+	}); err != nil {
+		t.Fatalf("RequeueTaskAt(runnable) error = %v", err)
+	}
+
+	for index := 0; index < 3; index++ {
+		delayedTask, err := store.CreateTask(context.Background(), sqlite.CreateTaskParams{
+			ProjectID:   project.ID,
+			Key:         "delayed-task-" + string(rune('a'+index)),
+			Title:       "Delayed task",
+			Status:      "queued",
+			Scope:       "project",
+			RequestedBy: "operator",
+		})
+		if err != nil {
+			t.Fatalf("CreateTask(delayed %d) error = %v", index, err)
+		}
+		if _, err := store.RequeueTaskAt(context.Background(), sqlite.RequeueTaskAtParams{
+			TaskID:         delayedTask.ID,
+			NextEligibleAt: now.Add(time.Hour),
+		}); err != nil {
+			t.Fatalf("RequeueTaskAt(delayed %d) error = %v", index, err)
+		}
+	}
+
 	if _, err := store.RecordExecutorHealth(context.Background(), sqlite.RecordExecutorHealthParams{
 		Executor:    "codex",
 		Status:      "healthy",
@@ -94,6 +132,19 @@ func TestDoctorReportIsHealthyWhenChecksAreFresh(t *testing.T) {
 	}
 	if len(report.Checks) != 6 {
 		t.Fatalf("Checks len = %d, want 6", len(report.Checks))
+	}
+	var queueCheck *Check
+	for i := range report.Checks {
+		if report.Checks[i].Name == "queue" {
+			queueCheck = &report.Checks[i]
+			break
+		}
+	}
+	if queueCheck == nil {
+		t.Fatalf("queue check missing from report: %+v", report.Checks)
+	}
+	if queueCheck.Details["queued_tasks"] != "1" {
+		t.Fatalf("queue check queued_tasks = %q, want 1", queueCheck.Details["queued_tasks"])
 	}
 }
 

@@ -91,7 +91,7 @@ func (service Service) Collect(ctx context.Context) (Snapshot, error) {
 	}
 
 	var queuedTasks int
-	if err := service.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM tasks WHERE status = 'queued'`).Scan(&queuedTasks); err != nil {
+	if err := service.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM tasks WHERE status = 'queued' AND next_eligible_at <= ?`, now.Format(time.RFC3339Nano)).Scan(&queuedTasks); err != nil {
 		return Snapshot{}, err
 	}
 

@@ -252,10 +252,74 @@ func (store *Store) UpdateTaskStatus(ctx context.Context, params UpdateTaskStatu
 }
 
 func (store *Store) UpdateTaskQueueState(ctx context.Context, params UpdateTaskQueueStateParams) (Task, error) {
-	now := store.now()
 	var task Task
-
 	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		updated, err := store.updateTaskQueueStateTx(ctx, tx, params)
+		if err != nil {
+			return err
+		}
+		task = updated
+		return nil
+	})
+	return task, err
+}
+
+func (store *Store) updateTaskQueueStateTx(ctx context.Context, tx *sql.Tx, params UpdateTaskQueueStateParams) (Task, error) {
+	current, err := store.getTaskTx(ctx, tx, params.TaskID)
+	if err != nil {
+		return Task{}, err
+	}
+
+	now := store.now()
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE tasks
+		SET status = ?, next_eligible_at = ?, priority = ?, last_error = ?, retry_count = ?, max_attempts = ?, blocked_reason = ?, updated_at = ?
+		WHERE id = ?
+	`,
+		params.Status,
+		formatTime(params.NextEligibleAt),
+		params.Priority,
+		params.LastError,
+		params.RetryCount,
+		params.MaxAttempts,
+		params.BlockedReason,
+		formatTime(now),
+		params.TaskID,
+	); err != nil {
+		return Task{}, err
+	}
+
+	updated, err := store.getTaskTx(ctx, tx, params.TaskID)
+	if err != nil {
+		return Task{}, err
+	}
+
+	if current.Status != updated.Status {
+		projectID := updated.ProjectID
+		if err := appendEventTx(ctx, tx, eventInsert{
+			StreamType: runtimeevents.StreamTask,
+			StreamID:   updated.ID,
+			EventType:  runtimeevents.EventTaskStatusChanged,
+			Scope:      updated.Scope,
+			ProjectID:  &projectID,
+			TaskID:     &updated.ID,
+			Payload: runtimeevents.TaskStatusChangedPayload{
+				PreviousStatus: current.Status,
+				Status:         updated.Status,
+			},
+			OccurredAt: now,
+		}); err != nil {
+			return Task{}, err
+		}
+	}
+
+	return updated, nil
+}
+
+func (store *Store) BlockTask(ctx context.Context, params BlockTaskParams) (Task, error) {
+	var task Task
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		now := store.now()
 		current, err := store.getTaskTx(ctx, tx, params.TaskID)
 		if err != nil {
 			return err
@@ -263,89 +327,128 @@ func (store *Store) UpdateTaskQueueState(ctx context.Context, params UpdateTaskQ
 
 		if _, err := tx.ExecContext(ctx, `
 			UPDATE tasks
-			SET status = ?, next_eligible_at = ?, priority = ?, last_error = ?, retry_count = ?, max_attempts = ?, blocked_reason = ?, updated_at = ?
+			SET status = ?, blocked_reason = ?, updated_at = ?
 			WHERE id = ?
-		`,
-			params.Status,
-			formatTime(params.NextEligibleAt),
-			params.Priority,
-			params.LastError,
-			params.RetryCount,
-			params.MaxAttempts,
-			params.BlockedReason,
-			formatTime(now),
-			params.TaskID,
-		); err != nil {
+		`, "blocked", params.Reason, formatTime(now), params.TaskID); err != nil {
 			return err
 		}
 
-		current.Status = params.Status
-		current.NextEligibleAt = params.NextEligibleAt
-		current.Priority = params.Priority
-		current.LastError = params.LastError
-		current.RetryCount = params.RetryCount
-		current.MaxAttempts = params.MaxAttempts
-		current.BlockedReason = params.BlockedReason
-		current.UpdatedAt = now
-		task = current
+		updated, err := store.getTaskTx(ctx, tx, params.TaskID)
+		if err != nil {
+			return err
+		}
+		if current.Status != updated.Status {
+			projectID := updated.ProjectID
+			if err := appendEventTx(ctx, tx, eventInsert{
+				StreamType: runtimeevents.StreamTask,
+				StreamID:   updated.ID,
+				EventType:  runtimeevents.EventTaskStatusChanged,
+				Scope:      updated.Scope,
+				ProjectID:  &projectID,
+				TaskID:     &updated.ID,
+				Payload: runtimeevents.TaskStatusChangedPayload{
+					PreviousStatus: current.Status,
+					Status:         updated.Status,
+				},
+				OccurredAt: now,
+			}); err != nil {
+				return err
+			}
+		}
+		task = updated
 		return nil
 	})
-
 	return task, err
 }
 
-func (store *Store) BlockTask(ctx context.Context, params BlockTaskParams) (Task, error) {
-	current, err := store.GetTask(ctx, params.TaskID)
-	if err != nil {
-		return Task{}, err
-	}
-
-	return store.UpdateTaskQueueState(ctx, UpdateTaskQueueStateParams{
-		TaskID:         params.TaskID,
-		Status:         "blocked",
-		NextEligibleAt: time.Time{},
-		Priority:       current.Priority,
-		LastError:      current.LastError,
-		RetryCount:     current.RetryCount,
-		MaxAttempts:    current.MaxAttempts,
-		BlockedReason:  params.Reason,
-	})
-}
-
 func (store *Store) RequeueTaskAt(ctx context.Context, params RequeueTaskAtParams) (Task, error) {
-	current, err := store.GetTask(ctx, params.TaskID)
-	if err != nil {
-		return Task{}, err
-	}
+	var task Task
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		now := store.now()
+		current, err := store.getTaskTx(ctx, tx, params.TaskID)
+		if err != nil {
+			return err
+		}
 
-	return store.UpdateTaskQueueState(ctx, UpdateTaskQueueStateParams{
-		TaskID:         params.TaskID,
-		Status:         "queued",
-		NextEligibleAt: params.NextEligibleAt,
-		Priority:       current.Priority,
-		LastError:      current.LastError,
-		RetryCount:     current.RetryCount,
-		MaxAttempts:    current.MaxAttempts,
-		BlockedReason:  "",
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE tasks
+			SET status = ?, next_eligible_at = ?, blocked_reason = '', updated_at = ?
+			WHERE id = ?
+		`, "queued", formatTime(params.NextEligibleAt), formatTime(now), params.TaskID); err != nil {
+			return err
+		}
+
+		updated, err := store.getTaskTx(ctx, tx, params.TaskID)
+		if err != nil {
+			return err
+		}
+		if current.Status != updated.Status {
+			projectID := updated.ProjectID
+			if err := appendEventTx(ctx, tx, eventInsert{
+				StreamType: runtimeevents.StreamTask,
+				StreamID:   updated.ID,
+				EventType:  runtimeevents.EventTaskStatusChanged,
+				Scope:      updated.Scope,
+				ProjectID:  &projectID,
+				TaskID:     &updated.ID,
+				Payload: runtimeevents.TaskStatusChangedPayload{
+					PreviousStatus: current.Status,
+					Status:         updated.Status,
+				},
+				OccurredAt: now,
+			}); err != nil {
+				return err
+			}
+		}
+		task = updated
+		return nil
 	})
+	return task, err
 }
 
 func (store *Store) IncrementTaskRetry(ctx context.Context, params IncrementTaskRetryParams) (Task, error) {
-	current, err := store.GetTask(ctx, params.TaskID)
-	if err != nil {
-		return Task{}, err
-	}
+	var task Task
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		now := store.now()
+		current, err := store.getTaskTx(ctx, tx, params.TaskID)
+		if err != nil {
+			return err
+		}
 
-	return store.UpdateTaskQueueState(ctx, UpdateTaskQueueStateParams{
-		TaskID:         params.TaskID,
-		Status:         "queued",
-		NextEligibleAt: params.NextEligibleAt,
-		Priority:       current.Priority,
-		LastError:      params.LastError,
-		RetryCount:     current.RetryCount + 1,
-		MaxAttempts:    current.MaxAttempts,
-		BlockedReason:  "",
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE tasks
+			SET status = ?, next_eligible_at = ?, last_error = ?, retry_count = retry_count + 1, blocked_reason = '', updated_at = ?
+			WHERE id = ?
+		`, "queued", formatTime(params.NextEligibleAt), params.LastError, formatTime(now), params.TaskID); err != nil {
+			return err
+		}
+
+		updated, err := store.getTaskTx(ctx, tx, params.TaskID)
+		if err != nil {
+			return err
+		}
+		if current.Status != updated.Status {
+			projectID := updated.ProjectID
+			if err := appendEventTx(ctx, tx, eventInsert{
+				StreamType: runtimeevents.StreamTask,
+				StreamID:   updated.ID,
+				EventType:  runtimeevents.EventTaskStatusChanged,
+				Scope:      updated.Scope,
+				ProjectID:  &projectID,
+				TaskID:     &updated.ID,
+				Payload: runtimeevents.TaskStatusChangedPayload{
+					PreviousStatus: current.Status,
+					Status:         updated.Status,
+				},
+				OccurredAt: now,
+			}); err != nil {
+				return err
+			}
+		}
+		task = updated
+		return nil
 	})
+	return task, err
 }
 
 func (store *Store) StartRun(ctx context.Context, params StartRunParams) (Run, error) {

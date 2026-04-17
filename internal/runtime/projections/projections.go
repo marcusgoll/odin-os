@@ -397,6 +397,19 @@ func ListActiveRunViews(ctx context.Context, queryer Queryer) ([]ActiveRunView, 
 
 func ListBlockedItemViews(ctx context.Context, queryer Queryer) ([]BlockedItemView, error) {
 	var views []BlockedItemView
+	seen := make(map[int64]int)
+
+	addView := func(view BlockedItemView) {
+		if index, ok := seen[view.TaskID]; ok {
+			if views[index].Source == "task" || view.Source != "task" {
+				return
+			}
+			views[index] = view
+			return
+		}
+		seen[view.TaskID] = len(views)
+		views = append(views, view)
+	}
 
 	approvalRows, err := queryer.QueryContext(ctx, `
 		SELECT t.id, t.key, p.key, a.status
@@ -419,7 +432,7 @@ func ListBlockedItemViews(ctx context.Context, queryer Queryer) ([]BlockedItemVi
 		}
 		view.Source = "approval"
 		view.Reason = approvalStatus
-		views = append(views, view)
+		addView(view)
 	}
 	if err := approvalRows.Err(); err != nil {
 		return nil, err
@@ -445,7 +458,7 @@ func ListBlockedItemViews(ctx context.Context, queryer Queryer) ([]BlockedItemVi
 			return nil, err
 		}
 		view.Source = "incident"
-		views = append(views, view)
+		addView(view)
 	}
 	if err := incidentRows.Err(); err != nil {
 		return nil, err
@@ -488,7 +501,7 @@ func ListBlockedItemViews(ctx context.Context, queryer Queryer) ([]BlockedItemVi
 		if payload.BlockingReason == "" {
 			continue
 		}
-		views = append(views, BlockedItemView{
+		addView(BlockedItemView{
 			TaskID:     taskID,
 			TaskKey:    taskKey,
 			ProjectKey: projectKey,
@@ -516,7 +529,7 @@ func ListBlockedItemViews(ctx context.Context, queryer Queryer) ([]BlockedItemVi
 			return nil, err
 		}
 		view.Source = "task"
-		views = append(views, view)
+		addView(view)
 	}
 
 	if err := blockedTaskRows.Err(); err != nil {

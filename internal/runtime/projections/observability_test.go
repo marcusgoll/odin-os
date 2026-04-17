@@ -74,8 +74,8 @@ func TestObservabilityProjectionsExposeActiveRunsBlockedItemsIncidentsAndRecover
 	if err != nil {
 		t.Fatalf("ListBlockedItemViews() error = %v", err)
 	}
-	if len(blocked) < 2 {
-		t.Fatalf("blocked items len = %d, want >= 2", len(blocked))
+	if len(blocked) != 1 {
+		t.Fatalf("blocked items len = %d, want 1 after dedupe", len(blocked))
 	}
 
 	approvals, err := projections.ListPendingApprovalViews(ctx, store.DB())
@@ -100,6 +100,54 @@ func TestObservabilityProjectionsExposeActiveRunsBlockedItemsIncidentsAndRecover
 	}
 	if len(recoveries) != 1 || recoveries[0].RunID != run.ID {
 		t.Fatalf("recoveries = %+v, want run %d", recoveries, run.ID)
+	}
+
+	_ = project
+}
+
+func TestObservabilityProjectionsDeduplicateTaskBlockedItems(t *testing.T) {
+	ctx := context.Background()
+	store := openObservabilityStore(t)
+	defer store.Close()
+
+	project, task, run := seedObservabilityState(t, ctx, store)
+
+	if _, err := store.BlockTask(ctx, sqlite.BlockTaskParams{
+		TaskID: task.ID,
+		Reason: "approval_required",
+	}); err != nil {
+		t.Fatalf("BlockTask() error = %v", err)
+	}
+	if _, err := store.CreateContextPacket(ctx, sqlite.CreateContextPacketParams{
+		TaskID:        &task.ID,
+		RunID:         &run.ID,
+		PacketKind:    "wake",
+		PacketScope:   "task_wake_packet",
+		Trigger:       "approval_wait",
+		CheckpointKey: "wake-1",
+		Status:        "active",
+		Summary:       "waiting on approval",
+		PayloadJSON:   `{"blocking_reason":"approval_required"}`,
+	}); err != nil {
+		t.Fatalf("CreateContextPacket() error = %v", err)
+	}
+
+	blocked, err := projections.ListBlockedItemViews(ctx, store.DB())
+	if err != nil {
+		t.Fatalf("ListBlockedItemViews() error = %v", err)
+	}
+
+	var taskEntries int
+	for _, item := range blocked {
+		if item.TaskID == task.ID {
+			taskEntries++
+			if item.Source != "task" {
+				t.Fatalf("blocked item source = %q, want task", item.Source)
+			}
+		}
+	}
+	if taskEntries != 1 {
+		t.Fatalf("task blocked entries = %d, want 1; blocked=%+v", taskEntries, blocked)
 	}
 
 	_ = project

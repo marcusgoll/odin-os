@@ -82,6 +82,26 @@ func TestServiceCollectReflectsRuntimeConditions(t *testing.T) {
 		t.Fatalf("CreateTask(queued) error = %v", err)
 	}
 	_ = queuedTask
+
+	for index := 0; index < 3; index++ {
+		delayedTask, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
+			ProjectID:   project.ID,
+			Key:         "delayed-task-" + string(rune('a'+index)),
+			Title:       "Delayed task",
+			Status:      "queued",
+			Scope:       "project",
+			RequestedBy: "operator",
+		})
+		if err != nil {
+			t.Fatalf("CreateTask(delayed %d) error = %v", index, err)
+		}
+		if _, err := store.RequeueTaskAt(ctx, sqlite.RequeueTaskAtParams{
+			TaskID:         delayedTask.ID,
+			NextEligibleAt: now.Add(time.Hour),
+		}); err != nil {
+			t.Fatalf("RequeueTaskAt(delayed %d) error = %v", index, err)
+		}
+	}
 	runningTask, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
 		ProjectID:   project.ID,
 		Key:         "running-task",

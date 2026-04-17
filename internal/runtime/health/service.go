@@ -218,10 +218,10 @@ func (service Service) queueCheck(ctx context.Context, now time.Time, config Con
 	var running int
 	if err := service.DB.QueryRowContext(ctx, `
 		SELECT
-			COUNT(CASE WHEN status = 'queued' THEN 1 END),
+			COUNT(CASE WHEN status = 'queued' AND next_eligible_at <= ? THEN 1 END),
 			COUNT(CASE WHEN status = 'running' THEN 1 END)
 		FROM tasks
-	`).Scan(&queued, &running); err != nil {
+	`, now.Format(time.RFC3339Nano)).Scan(&queued, &running); err != nil {
 		return Check{}, err
 	}
 

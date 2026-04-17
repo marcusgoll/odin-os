@@ -989,6 +989,72 @@ func TestBlockedTaskRecordsReason(t *testing.T) {
 	}
 }
 
+func TestTaskQueueStatusChangesEmitReplayableEvents(t *testing.T) {
+	ctx := context.Background()
+	store := openMigratedTestStore(t, "task-queue-events.db")
+	defer store.Close()
+
+	project, err := store.CreateProject(ctx, CreateProjectParams{
+		Key:           "queue-events",
+		Name:          "Queue Events",
+		Scope:         "project",
+		GitRoot:       "/tmp/queue-events",
+		DefaultBranch: "main",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+
+	task, err := store.CreateTask(ctx, CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "queue-events-task",
+		Title:       "Track queue transitions",
+		Status:      "queued",
+		Scope:       "project",
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+
+	if _, err := store.BlockTask(ctx, BlockTaskParams{
+		TaskID: task.ID,
+		Reason: "approval_required",
+	}); err != nil {
+		t.Fatalf("BlockTask() error = %v", err)
+	}
+	if _, err := store.RequeueTaskAt(ctx, RequeueTaskAtParams{
+		TaskID:         task.ID,
+		NextEligibleAt: time.Date(2026, 4, 17, 11, 0, 0, 0, time.UTC),
+	}); err != nil {
+		t.Fatalf("RequeueTaskAt() error = %v", err)
+	}
+
+	events, err := store.ListEvents(ctx, ListEventsParams{TaskID: &task.ID})
+	if err != nil {
+		t.Fatalf("ListEvents(task) error = %v", err)
+	}
+
+	var statusChanged int
+	for _, event := range events {
+		if event.Type == runtimeevents.EventTaskStatusChanged {
+			statusChanged++
+		}
+	}
+	if statusChanged != 2 {
+		t.Fatalf("task status changed events = %d, want 2", statusChanged)
+	}
+
+	replay, err := projections.ReplayLifecycle(events)
+	if err != nil {
+		t.Fatalf("ReplayLifecycle() error = %v", err)
+	}
+	if replay.Tasks[task.ID].Status != "queued" {
+		t.Fatalf("ReplayLifecycle().Tasks[%d].Status = %q, want queued", task.ID, replay.Tasks[task.ID].Status)
+	}
+}
+
 func TestRetryBackoffUpdatesQueueState(t *testing.T) {
 	ctx := context.Background()
 	store := openMigratedTestStore(t, "retry-backoff.db")
