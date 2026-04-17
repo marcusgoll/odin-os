@@ -25,6 +25,89 @@ type CreateProjectParams struct {
 	ManifestPath  string
 }
 
+type Workspace struct {
+	ID                  int64
+	Key                 string
+	Name                string
+	OwnerRef            string
+	Status              string
+	DefaultCompanionKey string
+	PolicyJSON          string
+	CreatedAt           time.Time
+	UpdatedAt           time.Time
+}
+
+type CreateWorkspaceParams struct {
+	Key                 string
+	Name                string
+	OwnerRef            string
+	Status              string
+	DefaultCompanionKey string
+	PolicyJSON          string
+}
+
+type Initiative struct {
+	ID               int64
+	WorkspaceID      int64
+	Key              string
+	Title            string
+	Kind             string
+	Status           string
+	Summary          string
+	LinkedProjectID  *int64
+	OwnerCompanionID *int64
+	CreatedAt        time.Time
+	UpdatedAt        time.Time
+}
+
+type CreateInitiativeParams struct {
+	WorkspaceID      int64
+	Key              string
+	Title            string
+	Kind             string
+	Status           string
+	Summary          string
+	LinkedProjectID  *int64
+	OwnerCompanionID *int64
+}
+
+type ListInitiativesParams struct {
+	WorkspaceID int64
+}
+
+type Companion struct {
+	ID                  int64
+	WorkspaceID         int64
+	Key                 string
+	Title               string
+	Kind                string
+	Charter             string
+	Status              string
+	InitiativeScopeJSON string
+	MemoryPolicyJSON    string
+	PlanningPolicyJSON  string
+	ToolPolicyJSON      string
+	CreatedAt           time.Time
+	UpdatedAt           time.Time
+}
+
+type CreateCompanionParams struct {
+	WorkspaceID         int64
+	Key                 string
+	Title               string
+	Kind                string
+	Charter             string
+	Status              string
+	InitiativeScopeJSON string
+	MemoryPolicyJSON    string
+	PlanningPolicyJSON  string
+	ToolPolicyJSON      string
+}
+
+type ListCompanionsParams struct {
+	WorkspaceID int64
+}
+
 type Task struct {
 	ID             int64
 	ProjectID      int64
