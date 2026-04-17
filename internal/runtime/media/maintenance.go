@@ -38,9 +38,10 @@ type PreflightResult struct {
 }
 
 type PostflightRequest struct {
-	TaskID *int64
-	Action string
-	Checks []healthsvc.Check
+	TaskID               *int64
+	Action               string
+	Checks               []healthsvc.Check
+	KnownCriticalSignals []string
 }
 
 type PostflightResult struct {
@@ -113,9 +114,14 @@ func (service MaintenanceService) Postflight(ctx context.Context, request Postfl
 		return PostflightResult{}, fmt.Errorf("media maintenance store is required")
 	}
 
+	knownCritical := make(map[string]bool, len(request.KnownCriticalSignals))
+	for _, signal := range request.KnownCriticalSignals {
+		knownCritical[strings.TrimSpace(signal)] = true
+	}
+
 	var criticalChecks []healthsvc.Check
 	for _, check := range request.Checks {
-		if strings.HasPrefix(check.Name, "media.") && check.Status == healthsvc.StatusFailed {
+		if strings.HasPrefix(check.Name, "media.") && check.Status == healthsvc.StatusFailed && !knownCritical[check.Name] {
 			criticalChecks = append(criticalChecks, check)
 		}
 	}

@@ -88,6 +88,41 @@ func TestMediaMaintenancePostflightEmitsRollbackRecommendationForCriticalSignal(
 	}
 }
 
+func TestMediaMaintenancePostflightIgnoresAlreadyKnownCriticalSignals(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	now := time.Date(2026, 4, 17, 12, 0, 0, 0, time.UTC)
+	store := openMediaStore(t, now)
+	defer store.Close()
+	task := seedMaintenanceTask(t, ctx, store)
+
+	service := MaintenanceService{
+		Store:       store,
+		Config:      approvalMediaConfig(),
+		RuntimeRoot: t.TempDir(),
+		Now:         func() time.Time { return now },
+	}
+
+	result, err := service.Postflight(ctx, PostflightRequest{
+		TaskID:               &task.ID,
+		Action:               "restart_plex",
+		KnownCriticalSignals: []string{"media.mounts"},
+		Checks: []healthsvc.Check{
+			{Name: "media.mounts", Status: healthsvc.StatusFailed, Summary: "mount mismatch detected", ObservedAt: now},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Postflight() error = %v", err)
+	}
+	if result.RollbackRecommended {
+		t.Fatalf("RollbackRecommended = true, want false when the critical signal was already known")
+	}
+	if result.RecommendationPacketID != nil {
+		t.Fatalf("RecommendationPacketID = %v, want nil when the critical signal was already known", *result.RecommendationPacketID)
+	}
+}
+
 func approvalMediaConfig() *appmedia.Config {
 	return &appmedia.Config{
 		Enabled: true,
