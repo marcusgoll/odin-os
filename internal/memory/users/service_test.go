@@ -2,33 +2,22 @@ package users
 
 import (
 	"context"
-	"path/filepath"
 	"testing"
 
 	"odin-os/internal/store/sqlite"
 )
 
-func TestServiceListsOnlyGlobalMemory(t *testing.T) {
+func TestWorkspaceUserServiceListsOnlyWorkspaceMemory(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
 	store := openTestStore(t)
 	defer store.Close()
 
-	project := createProject(t, ctx, store, "alpha", "project")
-	if _, err := store.RecordMemorySummary(ctx, sqlite.RecordMemorySummaryParams{
-		ProjectID:   &project.ID,
-		Scope:       "project",
-		ScopeKey:    project.Key,
-		MemoryType:  "project_summary",
-		Summary:     "Alpha local convention",
-		DetailsJSON: `{"source":"test"}`,
-	}); err != nil {
-		t.Fatalf("RecordMemorySummary(project) error = %v", err)
-	}
+	workspace := createWorkspace(t, ctx, store, "workspace-a")
+	service := Service{Store: store, WorkspaceID: workspace.ID, WorkspaceKey: workspace.Key}
 
-	service := Service{Store: store}
-	globalEntry, err := service.Remember(ctx, "user_preference", "Prefer concise replies.", `{"source":"test"}`)
+	workspaceEntry, err := service.Remember(ctx, "user_preference", "Prefer concise replies.", `{"source":"test"}`)
 	if err != nil {
 		t.Fatalf("Remember() error = %v", err)
 	}
@@ -37,15 +26,21 @@ func TestServiceListsOnlyGlobalMemory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("List() error = %v", err)
 	}
-	if len(entries) != 1 || entries[0].ID != globalEntry.ID {
-		t.Fatalf("entries = %+v, want only global memory", entries)
+	if len(entries) != 1 || entries[0].ID != workspaceEntry.ID {
+		t.Fatalf("entries = %+v, want only workspace memory", entries)
+	}
+	if entries[0].WorkspaceID == nil || *entries[0].WorkspaceID != workspace.ID {
+		t.Fatalf("entries[0].WorkspaceID = %v, want %d", entries[0].WorkspaceID, workspace.ID)
+	}
+	if entries[0].Scope != "workspace" {
+		t.Fatalf("entries[0].Scope = %q, want %q", entries[0].Scope, "workspace")
 	}
 }
 
 func openTestStore(t *testing.T) *sqlite.Store {
 	t.Helper()
 
-	store, err := sqlite.Open(filepath.Join(t.TempDir(), "odin.db"))
+	store, err := sqlite.Open(t.TempDir() + "/odin.db")
 	if err != nil {
 		t.Fatalf("sqlite.Open() error = %v", err)
 	}
@@ -55,19 +50,18 @@ func openTestStore(t *testing.T) *sqlite.Store {
 	return store
 }
 
-func createProject(t *testing.T, ctx context.Context, store *sqlite.Store, key string, scope string) sqlite.Project {
+func createWorkspace(t *testing.T, ctx context.Context, store *sqlite.Store, key string) sqlite.Workspace {
 	t.Helper()
 
-	project, err := store.CreateProject(ctx, sqlite.CreateProjectParams{
-		Key:           key,
-		Name:          key,
-		Scope:         scope,
-		GitRoot:       filepath.Join(t.TempDir(), key),
-		DefaultBranch: "main",
-		ManifestPath:  "config/projects.yaml",
+	workspace, err := store.CreateWorkspace(ctx, sqlite.CreateWorkspaceParams{
+		Key:        key,
+		Name:       key,
+		OwnerRef:   key,
+		Status:     "active",
+		PolicyJSON: "{}",
 	})
 	if err != nil {
-		t.Fatalf("CreateProject(%s) error = %v", key, err)
+		t.Fatalf("CreateWorkspace(%s) error = %v", key, err)
 	}
-	return project
+	return workspace
 }

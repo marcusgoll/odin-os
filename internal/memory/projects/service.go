@@ -4,60 +4,78 @@ import (
 	"context"
 	"fmt"
 
+	memoryinitiatives "odin-os/internal/memory/initiatives"
+	memoryworkspaces "odin-os/internal/memory/workspaces"
 	"odin-os/internal/store/sqlite"
 )
 
 type Service struct {
-	Store      *sqlite.Store
-	ProjectID  int64
-	ProjectKey string
+	Store         *sqlite.Store
+	WorkspaceID   int64
+	WorkspaceKey  string
+	InitiativeID  int64
+	InitiativeKey string
+	ProjectID     int64
+	ProjectKey    string
 }
 
 func (service Service) Remember(ctx context.Context, memoryType string, summary string, detailsJSON string, sourceTranscriptID *int64) (sqlite.MemorySummary, error) {
-	if service.Store == nil {
-		return sqlite.MemorySummary{}, fmt.Errorf("memory store is required")
+	initiativeService, err := service.initiativeService()
+	if err != nil {
+		return sqlite.MemorySummary{}, err
 	}
-	if service.ProjectID == 0 || service.ProjectKey == "" {
-		return sqlite.MemorySummary{}, fmt.Errorf("project memory requires project identity")
-	}
-	return service.Store.RecordMemorySummary(ctx, sqlite.RecordMemorySummaryParams{
-		ProjectID:          &service.ProjectID,
-		SourceTranscriptID: sourceTranscriptID,
-		Scope:              "project",
-		ScopeKey:           service.ProjectKey,
-		MemoryType:         memoryType,
-		Summary:            summary,
-		DetailsJSON:        detailsJSON,
-	})
+	return initiativeService.Remember(ctx, memoryType, summary, detailsJSON, sourceTranscriptID)
 }
 
 func (service Service) List(ctx context.Context) ([]sqlite.MemorySummary, error) {
-	if service.Store == nil {
-		return nil, fmt.Errorf("memory store is required")
+	initiativeService, err := service.initiativeService()
+	if err != nil {
+		return nil, err
 	}
-	if service.ProjectID == 0 || service.ProjectKey == "" {
-		return nil, fmt.Errorf("project memory requires project identity")
+	projectEntries, err := initiativeService.List(ctx)
+	if err != nil {
+		return nil, err
 	}
-
-	projectEntries, err := service.Store.ListMemorySummaries(ctx, sqlite.ListMemorySummariesParams{
-		ProjectID: &service.ProjectID,
-		Scope:     "project",
-		ScopeKey:  service.ProjectKey,
-	})
+	workspaceService, err := service.workspaceService()
+	if err != nil {
+		return nil, err
+	}
+	workspaceEntries, err := workspaceService.List(ctx)
 	if err != nil {
 		return nil, err
 	}
 
-	globalEntries, err := service.Store.ListMemorySummaries(ctx, sqlite.ListMemorySummariesParams{
-		Scope:    "global",
-		ScopeKey: "global",
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	merged := make([]sqlite.MemorySummary, 0, len(projectEntries)+len(globalEntries))
+	merged := make([]sqlite.MemorySummary, 0, len(projectEntries)+len(workspaceEntries))
 	merged = append(merged, projectEntries...)
-	merged = append(merged, globalEntries...)
+	merged = append(merged, workspaceEntries...)
 	return merged, nil
+}
+
+func (service Service) initiativeService() (memoryinitiatives.Service, error) {
+	if service.Store == nil {
+		return memoryinitiatives.Service{}, fmt.Errorf("memory store is required")
+	}
+	if service.WorkspaceID == 0 || service.InitiativeID == 0 || service.InitiativeKey == "" || service.ProjectID == 0 || service.ProjectKey == "" {
+		return memoryinitiatives.Service{}, fmt.Errorf("project memory requires workspace, initiative, and project identity")
+	}
+	projectID := service.ProjectID
+	return memoryinitiatives.Service{
+		Store:         service.Store,
+		WorkspaceID:   service.WorkspaceID,
+		InitiativeID:  service.InitiativeID,
+		InitiativeKey: service.InitiativeKey,
+		ProjectID:     &projectID,
+		ProjectKey:    service.ProjectKey,
+	}, nil
+}
+
+func (service Service) workspaceService() (memoryworkspaces.Service, error) {
+	if service.Store == nil {
+		return memoryworkspaces.Service{}, fmt.Errorf("memory store is required")
+	}
+	return memoryworkspaces.Service{
+		Store:        service.Store,
+		WorkspaceID:  service.WorkspaceID,
+		WorkspaceKey: service.WorkspaceKey,
+	}, nil
 }

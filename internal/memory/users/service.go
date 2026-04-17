@@ -4,32 +4,39 @@ import (
 	"context"
 	"fmt"
 
+	memoryworkspaces "odin-os/internal/memory/workspaces"
 	"odin-os/internal/store/sqlite"
 )
 
 type Service struct {
-	Store *sqlite.Store
+	Store        *sqlite.Store
+	WorkspaceID  int64
+	WorkspaceKey string
 }
 
 func (service Service) Remember(ctx context.Context, memoryType string, summary string, detailsJSON string) (sqlite.MemorySummary, error) {
-	if service.Store == nil {
-		return sqlite.MemorySummary{}, fmt.Errorf("memory store is required")
+	workspaceService, err := service.workspaceService()
+	if err != nil {
+		return sqlite.MemorySummary{}, err
 	}
-	return service.Store.RecordMemorySummary(ctx, sqlite.RecordMemorySummaryParams{
-		Scope:       "global",
-		ScopeKey:    "global",
-		MemoryType:  memoryType,
-		Summary:     summary,
-		DetailsJSON: detailsJSON,
-	})
+	return workspaceService.Remember(ctx, memoryType, summary, detailsJSON)
 }
 
 func (service Service) List(ctx context.Context) ([]sqlite.MemorySummary, error) {
-	if service.Store == nil {
-		return nil, fmt.Errorf("memory store is required")
+	workspaceService, err := service.workspaceService()
+	if err != nil {
+		return nil, err
 	}
-	return service.Store.ListMemorySummaries(ctx, sqlite.ListMemorySummariesParams{
-		Scope:    "global",
-		ScopeKey: "global",
-	})
+	return workspaceService.List(ctx)
+}
+
+func (service Service) workspaceService() (memoryworkspaces.Service, error) {
+	if service.Store == nil {
+		return memoryworkspaces.Service{}, fmt.Errorf("memory store is required")
+	}
+	return memoryworkspaces.Service{
+		Store:        service.Store,
+		WorkspaceID:  service.WorkspaceID,
+		WorkspaceKey: service.WorkspaceKey,
+	}, nil
 }

@@ -8,20 +8,22 @@ import (
 	"odin-os/internal/store/sqlite"
 )
 
-func TestServiceRecordsRunLinkedTranscriptsAndEpisodes(t *testing.T) {
+func TestTranscriptRunServiceRecordsRunLinkedTranscriptsAndEpisodes(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
 	store := openTestStore(t)
 	defer store.Close()
 
-	project, task, run := createRunFixture(t, ctx, store)
+	workspace, project, initiative, task, run := createRunFixture(t, ctx, store)
 	service := Service{
-		Store:      store,
-		ProjectID:  project.ID,
-		ProjectKey: project.Key,
-		TaskID:     task.ID,
-		RunID:      run.ID,
+		Store:        store,
+		WorkspaceID:  workspace.ID,
+		InitiativeID: initiative.ID,
+		ProjectID:    project.ID,
+		ProjectKey:   project.Key,
+		TaskID:       task.ID,
+		RunID:        run.ID,
 	}
 
 	transcript, err := service.RecordTranscript(ctx, "act", "implement memory", "completed", `{"executor":"codex_headless"}`, "codex_headless")
@@ -40,19 +42,36 @@ func TestServiceRecordsRunLinkedTranscriptsAndEpisodes(t *testing.T) {
 	if len(episodes) != 1 || episodes[0].ID != episode.ID {
 		t.Fatalf("episodes = %+v, want recorded episode", episodes)
 	}
+	if episodes[0].WorkspaceID == nil || *episodes[0].WorkspaceID != workspace.ID {
+		t.Fatalf("episodes[0].WorkspaceID = %v, want %d", episodes[0].WorkspaceID, workspace.ID)
+	}
+	if episodes[0].InitiativeID == nil || *episodes[0].InitiativeID != initiative.ID {
+		t.Fatalf("episodes[0].InitiativeID = %v, want %d", episodes[0].InitiativeID, initiative.ID)
+	}
+	if episodes[0].Scope != "project" {
+		t.Fatalf("episodes[0].Scope = %q, want %q", episodes[0].Scope, "project")
+	}
 
 	transcripts, err := store.ListConversationTranscripts(ctx, sqlite.ListConversationTranscriptsParams{
-		ProjectID: &project.ID,
-		TaskID:    &task.ID,
-		RunID:     &run.ID,
-		Scope:     "project",
-		ScopeKey:  project.Key,
+		WorkspaceID:  &workspace.ID,
+		InitiativeID: &initiative.ID,
+		ProjectID:    &project.ID,
+		TaskID:       &task.ID,
+		RunID:        &run.ID,
+		Scope:        "project",
+		ScopeKey:     project.Key,
 	})
 	if err != nil {
 		t.Fatalf("ListConversationTranscripts() error = %v", err)
 	}
 	if len(transcripts) != 1 || transcripts[0].ID != transcript.ID {
 		t.Fatalf("transcripts = %+v, want recorded transcript", transcripts)
+	}
+	if transcripts[0].WorkspaceID == nil || *transcripts[0].WorkspaceID != workspace.ID {
+		t.Fatalf("transcripts[0].WorkspaceID = %v, want %d", transcripts[0].WorkspaceID, workspace.ID)
+	}
+	if transcripts[0].InitiativeID == nil || *transcripts[0].InitiativeID != initiative.ID {
+		t.Fatalf("transcripts[0].InitiativeID = %v, want %d", transcripts[0].InitiativeID, initiative.ID)
 	}
 }
 
@@ -69,9 +88,19 @@ func openTestStore(t *testing.T) *sqlite.Store {
 	return store
 }
 
-func createRunFixture(t *testing.T, ctx context.Context, store *sqlite.Store) (sqlite.Project, sqlite.Task, sqlite.Run) {
+func createRunFixture(t *testing.T, ctx context.Context, store *sqlite.Store) (sqlite.Workspace, sqlite.Project, sqlite.Initiative, sqlite.Task, sqlite.Run) {
 	t.Helper()
 
+	workspace, err := store.CreateWorkspace(ctx, sqlite.CreateWorkspaceParams{
+		Key:        "workspace-a",
+		Name:       "workspace-a",
+		OwnerRef:   "workspace-a",
+		Status:     "active",
+		PolicyJSON: "{}",
+	})
+	if err != nil {
+		t.Fatalf("CreateWorkspace() error = %v", err)
+	}
 	project, err := store.CreateProject(ctx, sqlite.CreateProjectParams{
 		Key:           "alpha",
 		Name:          "alpha",
@@ -82,6 +111,18 @@ func createRunFixture(t *testing.T, ctx context.Context, store *sqlite.Store) (s
 	})
 	if err != nil {
 		t.Fatalf("CreateProject() error = %v", err)
+	}
+	initiative, err := store.CreateInitiative(ctx, sqlite.CreateInitiativeParams{
+		WorkspaceID:     workspace.ID,
+		Key:             "initiative-a",
+		Title:           "initiative-a",
+		Kind:            "delivery",
+		Status:          "active",
+		Summary:         "initiative summary",
+		LinkedProjectID: &project.ID,
+	})
+	if err != nil {
+		t.Fatalf("CreateInitiative() error = %v", err)
 	}
 	task, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
 		ProjectID:   project.ID,
@@ -103,5 +144,5 @@ func createRunFixture(t *testing.T, ctx context.Context, store *sqlite.Store) (s
 	if err != nil {
 		t.Fatalf("StartRun() error = %v", err)
 	}
-	return project, task, run
+	return workspace, project, initiative, task, run
 }

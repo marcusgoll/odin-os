@@ -8,45 +8,62 @@ import (
 	"odin-os/internal/store/sqlite"
 )
 
-func TestServiceMergesProjectAndGlobalKnowledge(t *testing.T) {
+func TestMemoryKnowledgeServiceListsExactScopedKnowledge(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
 	store := openTestStore(t)
 	defer store.Close()
 
-	project := createProject(t, ctx, store, "alpha")
+	workspace := createWorkspace(t, ctx, store, "workspace-a")
+	initiative := createInitiative(t, ctx, store, workspace.ID, "initiative-a", nil)
 	service := Service{Store: store}
 
-	globalEntry, err := service.Record(ctx, Scope{Value: "global", Key: "global"}, "knowledge", "Global preference", `{"source":"test"}`, nil)
+	workspaceEntry, err := service.Record(ctx, Scope{
+		WorkspaceID:     &workspace.ID,
+		Value:           "workspace",
+		Key:             workspace.Key,
+		VisibilityScope: "workspace",
+		RetentionClass:  "durable",
+	}, "knowledge", "Workspace convention", `{"source":"test"}`, nil)
 	if err != nil {
-		t.Fatalf("Record(global) error = %v", err)
+		t.Fatalf("Record(workspace) error = %v", err)
 	}
-	projectEntry, err := service.Record(ctx, Scope{ProjectID: &project.ID, Value: "project", Key: project.Key}, "knowledge", "Project convention", `{"source":"test"}`, nil)
+	initiativeEntry, err := service.Record(ctx, Scope{
+		WorkspaceID:     &workspace.ID,
+		InitiativeID:    &initiative.ID,
+		Value:           "initiative",
+		Key:             initiative.Key,
+		VisibilityScope: "initiative",
+		RetentionClass:  "durable",
+	}, "knowledge", "Initiative convention", `{"source":"test"}`, nil)
 	if err != nil {
-		t.Fatalf("Record(project) error = %v", err)
+		t.Fatalf("Record(initiative) error = %v", err)
 	}
 
-	globalEntries, err := service.List(ctx, Scope{Value: "global", Key: "global"}, "knowledge")
+	workspaceEntries, err := service.List(ctx, Scope{
+		WorkspaceID: &workspace.ID,
+		Value:       "workspace",
+		Key:         workspace.Key,
+	}, "knowledge")
 	if err != nil {
-		t.Fatalf("List(global) error = %v", err)
+		t.Fatalf("List(workspace) error = %v", err)
 	}
-	if len(globalEntries) != 1 || globalEntries[0].ID != globalEntry.ID {
-		t.Fatalf("global entries = %+v, want only global knowledge", globalEntries)
+	if len(workspaceEntries) != 1 || workspaceEntries[0].ID != workspaceEntry.ID {
+		t.Fatalf("workspace entries = %+v, want only workspace knowledge", workspaceEntries)
 	}
 
-	projectEntries, err := service.List(ctx, Scope{ProjectID: &project.ID, Value: "project", Key: project.Key}, "knowledge")
+	initiativeEntries, err := service.List(ctx, Scope{
+		WorkspaceID:  &workspace.ID,
+		InitiativeID: &initiative.ID,
+		Value:        "initiative",
+		Key:          initiative.Key,
+	}, "knowledge")
 	if err != nil {
-		t.Fatalf("List(project) error = %v", err)
+		t.Fatalf("List(initiative) error = %v", err)
 	}
-	if len(projectEntries) != 2 {
-		t.Fatalf("project entries len = %d, want 2", len(projectEntries))
-	}
-	if projectEntries[0].ID != projectEntry.ID {
-		t.Fatalf("project entries[0] = %+v, want project knowledge first", projectEntries[0])
-	}
-	if projectEntries[1].ID != globalEntry.ID {
-		t.Fatalf("project entries[1] = %+v, want global knowledge fallback second", projectEntries[1])
+	if len(initiativeEntries) != 1 || initiativeEntries[0].ID != initiativeEntry.ID {
+		t.Fatalf("initiative entries = %+v, want only initiative knowledge", initiativeEntries)
 	}
 }
 
@@ -63,19 +80,36 @@ func openTestStore(t *testing.T) *sqlite.Store {
 	return store
 }
 
-func createProject(t *testing.T, ctx context.Context, store *sqlite.Store, key string) sqlite.Project {
+func createWorkspace(t *testing.T, ctx context.Context, store *sqlite.Store, key string) sqlite.Workspace {
 	t.Helper()
 
-	project, err := store.CreateProject(ctx, sqlite.CreateProjectParams{
-		Key:           key,
-		Name:          key,
-		Scope:         "project",
-		GitRoot:       filepath.Join(t.TempDir(), key),
-		DefaultBranch: "main",
-		ManifestPath:  "config/projects.yaml",
+	workspace, err := store.CreateWorkspace(ctx, sqlite.CreateWorkspaceParams{
+		Key:        key,
+		Name:       key,
+		OwnerRef:   key,
+		Status:     "active",
+		PolicyJSON: "{}",
 	})
 	if err != nil {
-		t.Fatalf("CreateProject(%s) error = %v", key, err)
+		t.Fatalf("CreateWorkspace(%s) error = %v", key, err)
 	}
-	return project
+	return workspace
+}
+
+func createInitiative(t *testing.T, ctx context.Context, store *sqlite.Store, workspaceID int64, key string, linkedProjectID *int64) sqlite.Initiative {
+	t.Helper()
+
+	initiative, err := store.CreateInitiative(ctx, sqlite.CreateInitiativeParams{
+		WorkspaceID:     workspaceID,
+		Key:             key,
+		Title:           key,
+		Kind:            "delivery",
+		Status:          "active",
+		Summary:         "initiative summary",
+		LinkedProjectID: linkedProjectID,
+	})
+	if err != nil {
+		t.Fatalf("CreateInitiative(%s) error = %v", key, err)
+	}
+	return initiative
 }

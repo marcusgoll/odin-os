@@ -1,73 +1,66 @@
-package projects
+package initiatives
 
 import (
 	"context"
 	"path/filepath"
 	"testing"
 
-	"odin-os/internal/memory/users"
 	"odin-os/internal/store/sqlite"
 )
 
-func TestMemoryProjectServiceListsProjectMemoryBeforeWorkspaceMemory(t *testing.T) {
+func TestInitiativeServiceRecordsInitiativeOwnedMemoryWithProjectLineage(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
-	store := openTestStore(t)
+	store := openMemoryTestStore(t, "initiatives-memory.db")
 	defer store.Close()
 
 	workspace := createWorkspace(t, ctx, store, "workspace-a")
 	project := createProject(t, ctx, store, "alpha")
-	initiative := createInitiative(t, ctx, store, workspace.ID, "initiative-a", &project.ID)
-
-	workspaceService := users.Service{Store: store, WorkspaceID: workspace.ID, WorkspaceKey: workspace.Key}
-	workspaceEntry, err := workspaceService.Remember(ctx, "user_preference", "Prefer concise replies.", `{"source":"test"}`)
-	if err != nil {
-		t.Fatalf("workspace Remember() error = %v", err)
-	}
+	initiative := createInitiative(t, ctx, store, workspace.ID, "alpha-initiative", &project.ID)
 
 	service := Service{
 		Store:         store,
 		WorkspaceID:   workspace.ID,
-		WorkspaceKey:  workspace.Key,
 		InitiativeID:  initiative.ID,
 		InitiativeKey: initiative.Key,
-		ProjectID:     project.ID,
+		ProjectID:     &project.ID,
 		ProjectKey:    project.Key,
 	}
-	projectEntry, err := service.Remember(ctx, "project_summary", "Alpha uses worktree isolation.", `{"source":"test"}`, nil)
+
+	summary, err := service.Remember(ctx, "initiative_summary", "Alpha keeps its scope tight.", `{"source":"test"}`, nil)
 	if err != nil {
 		t.Fatalf("Remember() error = %v", err)
 	}
-	if projectEntry.WorkspaceID == nil || *projectEntry.WorkspaceID != workspace.ID {
-		t.Fatalf("projectEntry.WorkspaceID = %v, want %d", projectEntry.WorkspaceID, workspace.ID)
+	if summary.WorkspaceID == nil || *summary.WorkspaceID != workspace.ID {
+		t.Fatalf("summary.WorkspaceID = %v, want %d", summary.WorkspaceID, workspace.ID)
 	}
-	if projectEntry.InitiativeID == nil || *projectEntry.InitiativeID != initiative.ID {
-		t.Fatalf("projectEntry.InitiativeID = %v, want %d", projectEntry.InitiativeID, initiative.ID)
+	if summary.InitiativeID == nil || *summary.InitiativeID != initiative.ID {
+		t.Fatalf("summary.InitiativeID = %v, want %d", summary.InitiativeID, initiative.ID)
 	}
-	if projectEntry.ProjectID == nil || *projectEntry.ProjectID != project.ID {
-		t.Fatalf("projectEntry.ProjectID = %v, want %d", projectEntry.ProjectID, project.ID)
+	if summary.ProjectID == nil || *summary.ProjectID != project.ID {
+		t.Fatalf("summary.ProjectID = %v, want %d", summary.ProjectID, project.ID)
 	}
-	if projectEntry.Scope != "project" {
-		t.Fatalf("projectEntry.Scope = %q, want %q", projectEntry.Scope, "project")
+	if summary.Scope != "project" {
+		t.Fatalf("summary.Scope = %q, want %q", summary.Scope, "project")
+	}
+	if summary.ScopeKey != project.Key {
+		t.Fatalf("summary.ScopeKey = %q, want %q", summary.ScopeKey, project.Key)
 	}
 
-	entries, err := service.List(ctx)
+	listed, err := service.List(ctx)
 	if err != nil {
 		t.Fatalf("List() error = %v", err)
 	}
-	if len(entries) != 2 {
-		t.Fatalf("entries len = %d, want 2", len(entries))
-	}
-	if entries[0].ID != projectEntry.ID || entries[1].ID != workspaceEntry.ID {
-		t.Fatalf("entries order = %+v, want project then workspace", entries)
+	if len(listed) != 1 || listed[0].ID != summary.ID {
+		t.Fatalf("List() = %+v, want recorded initiative memory", listed)
 	}
 }
 
-func openTestStore(t *testing.T) *sqlite.Store {
+func openMemoryTestStore(t *testing.T, name string) *sqlite.Store {
 	t.Helper()
 
-	store, err := sqlite.Open(filepath.Join(t.TempDir(), "odin.db"))
+	store, err := sqlite.Open(filepath.Join(t.TempDir(), name))
 	if err != nil {
 		t.Fatalf("sqlite.Open() error = %v", err)
 	}

@@ -8,9 +8,14 @@ import (
 )
 
 type Scope struct {
-	ProjectID *int64
-	Value     string
-	Key       string
+	WorkspaceID     *int64
+	InitiativeID    *int64
+	CompanionID     *int64
+	ProjectID       *int64
+	Value           string
+	Key             string
+	VisibilityScope string
+	RetentionClass  string
 }
 
 type Service struct {
@@ -25,10 +30,15 @@ func (service Service) Record(ctx context.Context, scope Scope, memoryType strin
 		return sqlite.MemorySummary{}, fmt.Errorf("knowledge memory scope is required")
 	}
 	return service.Store.RecordMemorySummary(ctx, sqlite.RecordMemorySummaryParams{
+		WorkspaceID:        scope.WorkspaceID,
+		InitiativeID:       scope.InitiativeID,
+		CompanionID:        scope.CompanionID,
 		ProjectID:          scope.ProjectID,
 		SourceTranscriptID: sourceTranscriptID,
 		Scope:              scope.Value,
 		ScopeKey:           scope.Key,
+		VisibilityScope:    scope.VisibilityScope,
+		RetentionClass:     scope.RetentionClass,
 		MemoryType:         memoryType,
 		Summary:            summary,
 		DetailsJSON:        detailsJSON,
@@ -43,29 +53,18 @@ func (service Service) List(ctx context.Context, scope Scope, memoryType string)
 		return nil, fmt.Errorf("knowledge memory scope is required")
 	}
 	exactEntries, err := service.Store.ListMemorySummaries(ctx, sqlite.ListMemorySummariesParams{
-		ProjectID:  scope.ProjectID,
-		Scope:      scope.Value,
-		ScopeKey:   scope.Key,
-		MemoryType: memoryType,
+		WorkspaceID:     scope.WorkspaceID,
+		InitiativeID:    scope.InitiativeID,
+		CompanionID:     scope.CompanionID,
+		ProjectID:       scope.ProjectID,
+		Scope:           scope.Value,
+		ScopeKey:        scope.Key,
+		VisibilityScope: scope.VisibilityScope,
+		RetentionClass:  scope.RetentionClass,
+		MemoryType:      memoryType,
 	})
 	if err != nil {
 		return nil, err
 	}
-	if scope.ProjectID == nil || scope.Value == "global" {
-		return exactEntries, nil
-	}
-
-	globalEntries, err := service.Store.ListMemorySummaries(ctx, sqlite.ListMemorySummariesParams{
-		Scope:      "global",
-		ScopeKey:   "global",
-		MemoryType: memoryType,
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	merged := make([]sqlite.MemorySummary, 0, len(exactEntries)+len(globalEntries))
-	merged = append(merged, exactEntries...)
-	merged = append(merged, globalEntries...)
-	return merged, nil
+	return exactEntries, nil
 }
