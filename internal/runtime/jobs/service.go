@@ -431,12 +431,13 @@ func (service Service) prepareLease(ctx context.Context, task sqlite.Task, proje
 		return leases.Assignment{}, admissionDecision{}, err
 	}
 	if err := validateAssignment(manifest, project, assignment); err != nil {
+		lastError := fmt.Sprintf("policy_denied: %v", err)
 		if cleanupErr := releaseAssignment(ctx, service.Store, assignment); cleanupErr != nil {
-			return leases.Assignment{}, admissionDecision{}, cleanupErr
+			lastError = fmt.Sprintf("%s (lease_release_failed: %v)", lastError, cleanupErr)
 		}
 		return leases.Assignment{}, admissionDecision{
 			Outcome:   admissionFailed,
-			LastError: fmt.Sprintf("policy_denied: %v", err),
+			LastError: lastError,
 		}, nil
 	}
 	return assignment, admissionDecision{Outcome: admissionDispatchable}, nil

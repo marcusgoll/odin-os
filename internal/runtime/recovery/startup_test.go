@@ -2,6 +2,8 @@ package recovery_test
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -61,6 +63,19 @@ func TestRunStartupRecoveryInterruptsRunsAndCreatesWakePackets(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("StartRun() error = %v", err)
+	}
+	lease, err := store.CreateWorktreeLease(ctx, sqlite.CreateWorktreeLeaseParams{
+		ProjectID:    project.ID,
+		TaskID:       task.ID,
+		RunID:        run.ID,
+		Mode:         "mutable",
+		BranchName:   "odin/alpha/task-1/run-1/try-1",
+		WorktreePath: "/tmp/alpha/.odin/task-1/run-1",
+		RepoRoot:     project.GitRoot,
+		State:        "active",
+	})
+	if err != nil {
+		t.Fatalf("CreateWorktreeLease() error = %v", err)
 	}
 
 	service := recovery.Service{
@@ -124,6 +139,16 @@ func TestRunStartupRecoveryInterruptsRunsAndCreatesWakePackets(t *testing.T) {
 	if len(recoveries) != 1 || recoveries[0].Status != "completed" {
 		t.Fatalf("recoveries = %+v, want one completed recovery", recoveries)
 	}
+	releasedLease, err := store.GetWorktreeLease(ctx, lease.ID)
+	if err != nil {
+		t.Fatalf("GetWorktreeLease() error = %v", err)
+	}
+	if releasedLease.State != "released" {
+		t.Fatalf("GetWorktreeLease().State = %q, want released", releasedLease.State)
+	}
+	if _, err := store.GetActiveWorktreeLeaseByTaskRun(ctx, task.ID, run.ID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("GetActiveWorktreeLeaseByTaskRun() error = %v, want sql.ErrNoRows", err)
+	}
 }
 
 func TestRunStartupRecoveryInterruptsPreparingRuns(t *testing.T) {
@@ -176,6 +201,19 @@ func TestRunStartupRecoveryInterruptsPreparingRuns(t *testing.T) {
 	if err != nil {
 		t.Fatalf("StartRun() error = %v", err)
 	}
+	lease, err := store.CreateWorktreeLease(ctx, sqlite.CreateWorktreeLeaseParams{
+		ProjectID:    project.ID,
+		TaskID:       task.ID,
+		RunID:        run.ID,
+		Mode:         "mutable",
+		BranchName:   "odin/alpha/task-1/run-1/try-1",
+		WorktreePath: "/tmp/alpha/.odin/task-1/run-1",
+		RepoRoot:     project.GitRoot,
+		State:        "active",
+	})
+	if err != nil {
+		t.Fatalf("CreateWorktreeLease() error = %v", err)
+	}
 
 	service := recovery.Service{
 		Store: store,
@@ -204,5 +242,15 @@ func TestRunStartupRecoveryInterruptsPreparingRuns(t *testing.T) {
 	}
 	if gotTask.Status != "queued" {
 		t.Fatalf("GetTask().Status = %q, want queued", gotTask.Status)
+	}
+	releasedLease, err := store.GetWorktreeLease(ctx, lease.ID)
+	if err != nil {
+		t.Fatalf("GetWorktreeLease() error = %v", err)
+	}
+	if releasedLease.State != "released" {
+		t.Fatalf("GetWorktreeLease().State = %q, want released", releasedLease.State)
+	}
+	if _, err := store.GetActiveWorktreeLeaseByTaskRun(ctx, task.ID, run.ID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("GetActiveWorktreeLeaseByTaskRun() error = %v, want sql.ErrNoRows", err)
 	}
 }
