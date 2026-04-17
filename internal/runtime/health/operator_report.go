@@ -2,7 +2,6 @@ package health
 
 import (
 	"sort"
-	"strings"
 	"time"
 )
 
@@ -60,6 +59,121 @@ type OperatorReport struct {
 	FinalVerdict     FinalVerdict          `json:"final_verdict"`
 }
 
+type reportRuleKey struct {
+	Status  Status
+	Summary string
+}
+
+type reportRule struct {
+	Severity          Severity
+	Confidence        string
+	WhyItMatters      string
+	Recommendation    string
+	RecommendationSet string
+	MissingTelemetry  string
+}
+
+var operatorReportRules = map[string]map[reportRuleKey]reportRule{
+	"database": {
+		{Status: StatusFailed, Summary: "database connectivity failed"}: {
+			Severity:          SeverityCritical,
+			Confidence:        "high",
+			WhyItMatters:      "database access is required for runtime health decisions",
+			Recommendation:    "restore database connectivity",
+			RecommendationSet: "immediate",
+		},
+		{Status: StatusFailed, Summary: "database handle is not configured"}: {
+			Severity:          SeverityCritical,
+			Confidence:        "high",
+			WhyItMatters:      "database access is required for runtime health decisions",
+			Recommendation:    "configure the database handle",
+			RecommendationSet: "immediate",
+		},
+	},
+	"registry": {
+		{Status: StatusDegraded, Summary: "registry diagnostics present"}: {
+			Severity:          SeverityMedium,
+			Confidence:        "high",
+			WhyItMatters:      "registry state affects command and report correctness",
+			Recommendation:    "reconcile registry diagnostics",
+			RecommendationSet: "near-term",
+		},
+	},
+	"executor": {
+		{Status: StatusDegraded, Summary: "no executor health samples recorded"}: {
+			Severity:          SeverityHigh,
+			Confidence:        "reduced",
+			WhyItMatters:      "executor samples determine whether work can be dispatched safely",
+			Recommendation:    "record executor health samples",
+			RecommendationSet: "immediate",
+			MissingTelemetry:  "executor health samples",
+		},
+		{Status: StatusDegraded, Summary: "executor health is unavailable or stale"}: {
+			Severity:          SeverityHigh,
+			Confidence:        "reduced",
+			WhyItMatters:      "executor samples determine whether work can be dispatched safely",
+			Recommendation:    "refresh executor health samples",
+			RecommendationSet: "immediate",
+		},
+		{Status: StatusHealthy, Summary: "executor health is fresh"}: {
+			Confidence: "high",
+		},
+	},
+	"queue": {
+		{Status: StatusDegraded, Summary: "queue pressure is above threshold"}: {
+			Severity:          SeverityMedium,
+			Confidence:        "high",
+			WhyItMatters:      "queue pressure affects throughput and latency",
+			Recommendation:    "reduce queue pressure",
+			RecommendationSet: "near-term",
+		},
+		{Status: StatusHealthy, Summary: "queue pressure is within threshold"}: {
+			Confidence: "high",
+		},
+	},
+	"projections": {
+		{Status: StatusDegraded, Summary: "projection freshness is missing or stale"}: {
+			Severity:          SeverityMedium,
+			Confidence:        "reduced",
+			WhyItMatters:      "stale projections can leave derived state out of sync",
+			Recommendation:    "refresh projection freshness data",
+			RecommendationSet: "near-term",
+			MissingTelemetry:  "projection freshness samples",
+		},
+		{Status: StatusHealthy, Summary: "projection freshness is current"}: {
+			Confidence: "high",
+		},
+	},
+	"source_freshness": {
+		{Status: StatusFailed, Summary: "source freshness is unavailable"}: {
+			Severity:          SeverityHigh,
+			Confidence:        "reduced",
+			WhyItMatters:      "stale sources can hide outdated registry state",
+			Recommendation:    "rebuild source freshness records",
+			RecommendationSet: "immediate",
+			MissingTelemetry:  "source freshness records",
+		},
+		{Status: StatusDegraded, Summary: "no registry compilation recorded"}: {
+			Severity:          SeverityHigh,
+			Confidence:        "reduced",
+			WhyItMatters:      "stale sources can hide outdated registry state",
+			Recommendation:    "rebuild source freshness records",
+			RecommendationSet: "immediate",
+			MissingTelemetry:  "registry compilation records",
+		},
+		{Status: StatusDegraded, Summary: "source freshness is stale"}: {
+			Severity:          SeverityHigh,
+			Confidence:        "reduced",
+			WhyItMatters:      "stale sources can hide outdated registry state",
+			Recommendation:    "rebuild source freshness records",
+			RecommendationSet: "immediate",
+		},
+		{Status: StatusHealthy, Summary: "source freshness is current"}: {
+			Confidence: "high",
+		},
+	},
+}
+
 func BuildOperatorReport(raw Report) OperatorReport {
 	report := OperatorReport{
 		CurrentHealth: CurrentHealthSnapshot{
@@ -74,7 +188,7 @@ func BuildOperatorReport(raw Report) OperatorReport {
 	}
 
 	for _, check := range raw.Checks {
-		finding, rootCause, recommendation, missingTelemetry := classifyCheck(check)
+		finding, rootCause, recommendation, recommendationSet, missingTelemetry := classifyCheck(check)
 		if finding != nil {
 			report.Findings = append(report.Findings, *finding)
 		}
@@ -82,7 +196,7 @@ func BuildOperatorReport(raw Report) OperatorReport {
 			report.RootCauses = append(report.RootCauses, *rootCause)
 		}
 		if recommendation != nil {
-			switch recommendationBucket(check.Status, finding) {
+			switch recommendationSet {
 			case "immediate":
 				report.Recommendations.Immediate = append(report.Recommendations.Immediate, *recommendation)
 			case "strategic":
@@ -119,148 +233,49 @@ func BuildOperatorReport(raw Report) OperatorReport {
 	return report
 }
 
-func classifyCheck(check Check) (*Finding, *RootCause, *Recommendation, string) {
-	area := check.Name
-	whyItMatters := whyItMattersForCheck(check.Name)
-	confidence := "high"
-	missingTelemetry := missingTelemetryForCheck(check)
-
-	switch check.Status {
-	case StatusFailed:
-		severity := SeverityHigh
-		if check.Name == "database" {
-			severity = SeverityCritical
-		}
-		finding := &Finding{
-			Area:         area,
-			Severity:     severity,
-			Observation:  check.Summary,
-			WhyItMatters: whyItMatters,
-			Confidence:   confidence,
-			SourceStatus: check.Status,
-		}
-		rootCause := &RootCause{
-			Area:       area,
-			Summary:    check.Summary,
-			Confidence: "high",
-		}
-		recommendation := &Recommendation{
-			Action: actionForCheck(check, true),
-			Reason: check.Summary,
-		}
-		return finding, rootCause, recommendation, missingTelemetry
-	case StatusDegraded:
-		severity := SeverityMedium
-		if check.Name == "executor" || check.Name == "source_freshness" {
-			severity = SeverityHigh
-		}
-		finding := &Finding{
-			Area:         area,
-			Severity:     severity,
-			Observation:  check.Summary,
-			WhyItMatters: whyItMatters,
-			Confidence:   confidenceForCheck(check),
-			SourceStatus: check.Status,
-		}
-		rootCause := &RootCause{
-			Area:       area,
-			Summary:    check.Summary,
-			Confidence: confidenceForCheck(check),
-		}
-		recommendation := &Recommendation{
-			Action: actionForCheck(check, false),
-			Reason: check.Summary,
-		}
-		return finding, rootCause, recommendation, missingTelemetry
-	default:
-		return nil, nil, nil, ""
+func classifyCheck(check Check) (*Finding, *RootCause, *Recommendation, string, string) {
+	rule, ok := lookupReportRule(check)
+	if !ok {
+		return nil, nil, nil, "", ""
 	}
+	if rule.Severity == "" {
+		return nil, nil, nil, "", ""
+	}
+	finding := &Finding{
+		Area:         check.Name,
+		Severity:     rule.Severity,
+		Observation:  check.Summary,
+		WhyItMatters: rule.WhyItMatters,
+		Confidence:   rule.Confidence,
+		SourceStatus: check.Status,
+	}
+	rootCause := &RootCause{
+		Area:       check.Name,
+		Summary:    check.Summary,
+		Confidence: rule.Confidence,
+	}
+	recommendation := &Recommendation{
+		Action: rule.Recommendation,
+		Reason: check.Summary,
+	}
+	return finding, rootCause, recommendation, rule.RecommendationSet, rule.MissingTelemetry
 }
 
-func recommendationBucket(status Status, finding *Finding) string {
-	if status == StatusFailed {
-		return "immediate"
+func lookupReportRule(check Check) (reportRule, bool) {
+	rules, ok := operatorReportRules[check.Name]
+	if !ok {
+		return defaultReportRule(check), check.Status == StatusFailed || check.Status == StatusDegraded
 	}
-	if finding != nil && finding.Severity == SeverityHigh {
-		return "immediate"
-	}
-	return "near-term"
-}
 
-func actionForCheck(check Check, failed bool) string {
-	switch check.Name {
-	case "database":
-		if failed {
-			return "restore database connectivity"
-		}
-		return "verify database reachability"
-	case "queue":
-		return "reduce queue pressure"
-	case "executor":
-		return "refresh executor health samples"
-	case "projections":
-		return "refresh projection freshness data"
-	case "source_freshness":
-		return "rebuild source freshness records"
-	case "registry":
-		return "reconcile registry diagnostics"
-	default:
-		return "inspect " + check.Name
+	rule, ok := rules[reportRuleKey{Status: check.Status, Summary: check.Summary}]
+	if ok {
+		return rule, true
 	}
-}
 
-func whyItMattersForCheck(name string) string {
-	switch name {
-	case "database":
-		return "database access is required for runtime health decisions"
-	case "registry":
-		return "registry state affects command and report correctness"
-	case "executor":
-		return "executor samples determine whether work can be dispatched safely"
-	case "queue":
-		return "queue pressure affects throughput and latency"
-	case "projections":
-		return "stale projections can leave derived state out of sync"
-	case "source_freshness":
-		return "stale sources can hide outdated registry state"
-	default:
-		return "this subsystem is part of the runtime health contract"
+	if check.Status == StatusFailed || check.Status == StatusDegraded {
+		return defaultReportRule(check), true
 	}
-}
-
-func confidenceForCheck(check Check) string {
-	if missingTelemetryForCheck(check) != "" {
-		return "reduced"
-	}
-	if strings.Contains(strings.ToLower(check.Summary), "stale") {
-		return "reduced"
-	}
-	return "high"
-}
-
-func missingTelemetryForCheck(check Check) string {
-	summary := strings.ToLower(check.Summary)
-	switch check.Name {
-	case "executor":
-		if strings.Contains(summary, "no executor health samples recorded") || strings.Contains(summary, "no ") && strings.Contains(summary, "recorded") {
-			return "executor health samples"
-		}
-	case "source_freshness":
-		if strings.Contains(summary, "no registry compilation recorded") || strings.Contains(summary, "missing") {
-			return "registry compilation records"
-		}
-	case "projections":
-		if strings.Contains(summary, "missing") {
-			return "projection freshness samples"
-		}
-	}
-	if strings.Contains(summary, "missing") && check.Name != "" {
-		return check.Name + " telemetry"
-	}
-	if strings.Contains(summary, "stale") && (check.Name == "executor" || check.Name == "source_freshness" || check.Name == "projections") {
-		return check.Name + " telemetry"
-	}
-	return ""
+	return reportRule{}, false
 }
 
 func verdictSummary(status Status) string {
@@ -272,6 +287,25 @@ func verdictSummary(status Status) string {
 	default:
 		return "all evaluated checks are healthy"
 	}
+}
+
+func defaultReportRule(check Check) reportRule {
+	rule := reportRule{
+		Confidence:     "high",
+		WhyItMatters:   "this subsystem is part of the runtime health contract",
+		Recommendation: "inspect " + check.Name,
+	}
+
+	switch check.Status {
+	case StatusFailed:
+		rule.Severity = SeverityHigh
+		rule.RecommendationSet = "immediate"
+	case StatusDegraded:
+		rule.Severity = SeverityMedium
+		rule.RecommendationSet = "near-term"
+	}
+
+	return rule
 }
 
 func severityOrder(severity Severity) int {

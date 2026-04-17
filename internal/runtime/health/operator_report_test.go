@@ -31,8 +31,11 @@ func TestBuildOperatorReportFlagsMissingTelemetry(t *testing.T) {
 
 	got := BuildOperatorReport(raw)
 
-	if len(got.MissingTelemetry) == 0 {
-		t.Fatalf("MissingTelemetry = 0, want executor gap")
+	if len(got.MissingTelemetry) != 1 {
+		t.Fatalf("MissingTelemetry len = %d, want 1", len(got.MissingTelemetry))
+	}
+	if got.MissingTelemetry[0] != "executor health samples" {
+		t.Fatalf("MissingTelemetry[0] = %q, want %q", got.MissingTelemetry[0], "executor health samples")
 	}
 }
 
@@ -55,5 +58,29 @@ func TestBuildOperatorReportRanksFailedFindingsBeforeDegradedWhenSeverityMatches
 	}
 	if got.Findings[1].Area != "executor" || got.Findings[1].SourceStatus != StatusDegraded {
 		t.Fatalf("second finding = %+v, want degraded executor finding", got.Findings[1])
+	}
+}
+
+func TestBuildOperatorReportUsesExplicitStaleMapping(t *testing.T) {
+	raw := Report{
+		Status: StatusDegraded,
+		Checks: []Check{
+			{Name: "source_freshness", Status: StatusDegraded, Summary: "source freshness is stale"},
+		},
+	}
+
+	got := BuildOperatorReport(raw)
+
+	if len(got.Findings) != 1 {
+		t.Fatalf("Findings len = %d, want 1", len(got.Findings))
+	}
+	if got.Findings[0].Confidence != "reduced" {
+		t.Fatalf("finding confidence = %q, want %q", got.Findings[0].Confidence, "reduced")
+	}
+	if len(got.MissingTelemetry) != 0 {
+		t.Fatalf("MissingTelemetry = %#v, want none for explicit stale mapping", got.MissingTelemetry)
+	}
+	if len(got.Recommendations.Immediate) != 1 || got.Recommendations.Immediate[0].Action != "rebuild source freshness records" {
+		t.Fatalf("Immediate recommendations = %#v, want rebuild source freshness records", got.Recommendations.Immediate)
 	}
 }
