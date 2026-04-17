@@ -415,13 +415,8 @@ service:
 		t.Fatalf("RecordProjectionFreshness() error = %v", err)
 	}
 
-	originalSelfHealInterval := serveSelfHealLoopInterval
-	serveSelfHealLoopInterval = 20 * time.Millisecond
-	defer func() {
-		serveSelfHealLoopInterval = originalSelfHealInterval
-	}()
-
 	ctx, cancel := context.WithCancel(context.Background())
+	ctx = withServeLoopConfig(ctx, serveLoopConfig{selfHealInterval: 20 * time.Millisecond})
 	actionObserved := make(chan struct{})
 	time.AfterFunc(30*time.Millisecond, func() {
 		staleAt := time.Now().Add(-2 * time.Hour).UTC().Format(time.RFC3339Nano)
@@ -529,21 +524,16 @@ service:
 		t.Fatalf("RequeueTaskAt() error = %v", err)
 	}
 
-	originalTaskInterval := serveTaskLoopInterval
-	originalSchedulerInterval := serveSchedulerLoopInterval
-	serveTaskLoopInterval = 20 * time.Millisecond
-	serveSchedulerLoopInterval = 20 * time.Millisecond
-	defer func() {
-		serveTaskLoopInterval = originalTaskInterval
-		serveSchedulerLoopInterval = originalSchedulerInterval
-	}()
-
 	if err := os.MkdirAll(filepath.Join(root, "home"), 0o755); err != nil {
 		t.Fatalf("mkdir home: %v", err)
 	}
 	t.Setenv("HOME", filepath.Join(root, "home"))
 
 	ctx, cancel := context.WithCancel(context.Background())
+	ctx = withServeLoopConfig(ctx, serveLoopConfig{
+		taskInterval:      20 * time.Millisecond,
+		schedulerInterval: 20 * time.Millisecond,
+	})
 	time.AfterFunc(700*time.Millisecond, cancel)
 
 	var stdout bytes.Buffer

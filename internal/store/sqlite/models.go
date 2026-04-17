@@ -109,6 +109,13 @@ type FinishRunParams struct {
 	Summary string
 }
 
+type FailRunAndRetryTaskParams struct {
+	RunID          int64
+	Summary        string
+	LastError      string
+	NextEligibleAt time.Time
+}
+
 type Approval struct {
 	ID          int64
 	TaskID      int64

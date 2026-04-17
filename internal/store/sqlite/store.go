@@ -575,6 +575,75 @@ func (store *Store) FinishRun(ctx context.Context, params FinishRunParams) (Run,
 	return run, err
 }
 
+func (store *Store) FailRunAndRetryTask(ctx context.Context, params FailRunAndRetryTaskParams) (Task, Run, error) {
+	now := store.now()
+	var (
+		task Task
+		run  Run
+	)
+
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		currentRun, currentTask, err := store.getRunWithTaskTx(ctx, tx, params.RunID)
+		if err != nil {
+			return err
+		}
+
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE runs
+			SET status = ?, finished_at = ?, summary = ?
+			WHERE id = ?
+		`, "failed", formatTime(now), params.Summary, params.RunID); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE tasks
+			SET status = ?, current_run_id = NULL, next_eligible_at = ?, last_error = ?, retry_count = retry_count + 1, blocked_reason = '', updated_at = ?
+			WHERE id = ?
+		`, "queued", formatTime(params.NextEligibleAt), params.LastError, formatTime(now), currentTask.ID); err != nil {
+			return err
+		}
+
+		updatedTask, err := store.getTaskTx(ctx, tx, currentTask.ID)
+		if err != nil {
+			return err
+		}
+
+		currentRun.Status = "failed"
+		currentRun.FinishedAt = &now
+		currentRun.Summary = params.Summary
+
+		projectID := currentTask.ProjectID
+		if err := appendEventTx(ctx, tx, eventInsert{
+			StreamType: runtimeevents.StreamRun,
+			StreamID:   currentRun.ID,
+			EventType:  runtimeevents.EventRunFinished,
+			Scope:      currentTask.Scope,
+			ProjectID:  &projectID,
+			TaskID:     &currentTask.ID,
+			RunID:      &currentRun.ID,
+			Payload: runtimeevents.RunFinishedPayload{
+				Status:  currentRun.Status,
+				Summary: currentRun.Summary,
+			},
+			OccurredAt: now,
+		}); err != nil {
+			return err
+		}
+		if err := appendTaskStatusChangedEventTx(ctx, tx, currentTask, updatedTask, now); err != nil {
+			return err
+		}
+		if err := appendTaskQueueStateChangedEventTx(ctx, tx, currentTask, updatedTask, now); err != nil {
+			return err
+		}
+
+		task = updatedTask
+		run = currentRun
+		return nil
+	})
+
+	return task, run, err
+}
+
 func (store *Store) RequestApproval(ctx context.Context, params RequestApprovalParams) (Approval, error) {
 	now := store.now()
 	var approval Approval

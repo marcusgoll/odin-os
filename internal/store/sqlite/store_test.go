@@ -1167,6 +1167,88 @@ func TestRetryBackoffUpdatesQueueState(t *testing.T) {
 	}
 }
 
+func TestFailRunAndRetryTaskUpdatesRunAndTaskTogether(t *testing.T) {
+	ctx := context.Background()
+	store := openMigratedTestStore(t, "retry-run-later.db")
+	defer store.Close()
+
+	now := time.Date(2026, 4, 17, 10, 0, 0, 0, time.UTC)
+	store.Now = func() time.Time { return now }
+
+	project, err := store.CreateProject(ctx, CreateProjectParams{
+		Key:           "retry-run-later",
+		Name:          "Retry Run Later",
+		Scope:         "project",
+		GitRoot:       "/tmp/retry-run-later",
+		DefaultBranch: "main",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+
+	task, err := store.CreateTask(ctx, CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "retry-run-later-task",
+		Title:       "Retry this run later",
+		Status:      "queued",
+		Scope:       "project",
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+	if _, err := store.UpdateTaskStatus(ctx, UpdateTaskStatusParams{
+		TaskID: task.ID,
+		Status: "running",
+	}); err != nil {
+		t.Fatalf("UpdateTaskStatus(running) error = %v", err)
+	}
+
+	run, err := store.StartRun(ctx, StartRunParams{
+		TaskID:   task.ID,
+		Executor: "codex_headless",
+		Attempt:  1,
+		Status:   "running",
+	})
+	if err != nil {
+		t.Fatalf("StartRun() error = %v", err)
+	}
+
+	retryAt := now.Add(2 * time.Second)
+	retriedTask, retriedRun, err := store.FailRunAndRetryTask(ctx, FailRunAndRetryTaskParams{
+		RunID:          run.ID,
+		Summary:        "temporary executor outage",
+		LastError:      "temporary executor outage",
+		NextEligibleAt: retryAt,
+	})
+	if err != nil {
+		t.Fatalf("FailRunAndRetryTask() error = %v", err)
+	}
+
+	if retriedRun.Status != "failed" {
+		t.Fatalf("Run.Status = %q, want failed", retriedRun.Status)
+	}
+	if retriedRun.Summary != "temporary executor outage" {
+		t.Fatalf("Run.Summary = %q, want temporary executor outage", retriedRun.Summary)
+	}
+	if retriedTask.Status != "queued" {
+		t.Fatalf("Task.Status = %q, want queued", retriedTask.Status)
+	}
+	if retriedTask.CurrentRunID != nil {
+		t.Fatalf("Task.CurrentRunID = %v, want nil", retriedTask.CurrentRunID)
+	}
+	if retriedTask.RetryCount != 1 {
+		t.Fatalf("Task.RetryCount = %d, want 1", retriedTask.RetryCount)
+	}
+	if retriedTask.LastError != "temporary executor outage" {
+		t.Fatalf("Task.LastError = %q, want temporary executor outage", retriedTask.LastError)
+	}
+	if !retriedTask.NextEligibleAt.Equal(retryAt) {
+		t.Fatalf("Task.NextEligibleAt = %v, want %v", retriedTask.NextEligibleAt, retryAt)
+	}
+}
+
 func TestFormatTimeUsesFixedWidthUTC(t *testing.T) {
 	got := formatTime(time.Date(2026, 4, 17, 10, 0, 0, 5*1000*1000, time.FixedZone("offset", 3*60*60)))
 	want := "2026-04-17T07:00:00.005000000Z"

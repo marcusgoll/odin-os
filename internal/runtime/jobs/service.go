@@ -181,18 +181,11 @@ func (service Service) ExecuteNextQueued(ctx context.Context) error {
 			return finishFailure(cause)
 		}
 
-		if _, err := service.Store.FinishRun(ctx, sqlite.FinishRunParams{
-			RunID:   run.ID,
-			Status:  "failed",
-			Summary: cause.Error(),
-		}); err != nil {
-			return err
-		}
-
 		nextRetryCount := task.RetryCount + 1
 		nextEligibleAt := service.now().Add(retryDelay(nextRetryCount))
-		if _, err := service.Store.IncrementTaskRetry(ctx, sqlite.IncrementTaskRetryParams{
-			TaskID:         task.ID,
+		if _, _, err := service.Store.FailRunAndRetryTask(ctx, sqlite.FailRunAndRetryTaskParams{
+			RunID:          run.ID,
+			Summary:        cause.Error(),
 			LastError:      cause.Error(),
 			NextEligibleAt: nextEligibleAt,
 		}); err != nil {

@@ -34,11 +34,37 @@ import (
 
 var errRuntimeNotReady = errors.New("runtime not ready")
 
-var (
-	serveTaskLoopInterval      = 1 * time.Second
-	serveSchedulerLoopInterval = 5 * time.Second
-	serveSelfHealLoopInterval  = 30 * time.Second
-)
+type serveLoopConfig struct {
+	taskInterval      time.Duration
+	schedulerInterval time.Duration
+	selfHealInterval  time.Duration
+}
+
+type serveLoopConfigKey struct{}
+
+var defaultServeLoopConfig = serveLoopConfig{
+	taskInterval:      1 * time.Second,
+	schedulerInterval: 5 * time.Second,
+	selfHealInterval:  30 * time.Second,
+}
+
+func withServeLoopConfig(ctx context.Context, cfg serveLoopConfig) context.Context {
+	return context.WithValue(ctx, serveLoopConfigKey{}, cfg)
+}
+
+func serveLoopConfigFromContext(ctx context.Context) serveLoopConfig {
+	cfg, _ := ctx.Value(serveLoopConfigKey{}).(serveLoopConfig)
+	if cfg.taskInterval <= 0 {
+		cfg.taskInterval = defaultServeLoopConfig.taskInterval
+	}
+	if cfg.schedulerInterval <= 0 {
+		cfg.schedulerInterval = defaultServeLoopConfig.schedulerInterval
+	}
+	if cfg.selfHealInterval <= 0 {
+		cfg.selfHealInterval = defaultServeLoopConfig.selfHealInterval
+	}
+	return cfg
+}
 
 // Run dispatches between the interactive shell and machine-oriented operational commands.
 func Run(ctx context.Context, root string, args []string, stdin io.Reader, stdout io.Writer) error {
@@ -194,6 +220,7 @@ func runServe(ctx context.Context, app bootstrap.App, cfg appconfig.Config, stdo
 		Store: app.Store,
 		Now:   time.Now,
 	}
+	loopConfig := serveLoopConfigFromContext(ctx)
 
 	listener, err := net.Listen("tcp", cfg.Service.HTTPAddr)
 	if err != nil {
@@ -216,9 +243,9 @@ func runServe(ctx context.Context, app bootstrap.App, cfg appconfig.Config, stdo
 	var background sync.WaitGroup
 	background.Add(3)
 	loopCtx, stopLoops := context.WithCancel(context.Background())
-	go runSchedulerLoop(loopCtx, operationCtx, &background, schedulerService, logger)
-	go runTaskLoop(loopCtx, operationCtx, &background, jobService, logger)
-	go runSelfHealLoop(loopCtx, operationCtx, &background, recoveryService, logger)
+	go runSchedulerLoop(loopCtx, operationCtx, &background, schedulerService, logger, loopConfig.schedulerInterval)
+	go runTaskLoop(loopCtx, operationCtx, &background, jobService, logger, loopConfig.taskInterval)
+	go runSelfHealLoop(loopCtx, operationCtx, &background, recoveryService, logger, loopConfig.selfHealInterval)
 	defer func() {
 		stopLoops()
 		background.Wait()
@@ -324,10 +351,10 @@ func openServiceLogger(runtimeRoot string) (*logs.Logger, io.Closer, error) {
 	}, file, nil
 }
 
-func runTaskLoop(ctx context.Context, operationCtx context.Context, wg *sync.WaitGroup, service jobs.Service, logger *logs.Logger) {
+func runTaskLoop(ctx context.Context, operationCtx context.Context, wg *sync.WaitGroup, service jobs.Service, logger *logs.Logger, interval time.Duration) {
 	defer wg.Done()
 
-	ticker := time.NewTicker(serveTaskLoopInterval)
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
 	for {
@@ -342,10 +369,10 @@ func runTaskLoop(ctx context.Context, operationCtx context.Context, wg *sync.Wai
 	}
 }
 
-func runSchedulerLoop(ctx context.Context, operationCtx context.Context, wg *sync.WaitGroup, service supervision.Service, logger *logs.Logger) {
+func runSchedulerLoop(ctx context.Context, operationCtx context.Context, wg *sync.WaitGroup, service supervision.Service, logger *logs.Logger, interval time.Duration) {
 	defer wg.Done()
 
-	ticker := time.NewTicker(serveSchedulerLoopInterval)
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
 	for {
@@ -371,10 +398,10 @@ func runSchedulerLoop(ctx context.Context, operationCtx context.Context, wg *syn
 	}
 }
 
-func runSelfHealLoop(ctx context.Context, operationCtx context.Context, wg *sync.WaitGroup, service recovery.Service, logger *logs.Logger) {
+func runSelfHealLoop(ctx context.Context, operationCtx context.Context, wg *sync.WaitGroup, service recovery.Service, logger *logs.Logger, interval time.Duration) {
 	defer wg.Done()
 
-	ticker := time.NewTicker(serveSelfHealLoopInterval)
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
 	for {
