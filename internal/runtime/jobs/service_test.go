@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -13,6 +14,7 @@ import (
 	"odin-os/internal/core/projects"
 	"odin-os/internal/executors/contract"
 	"odin-os/internal/executors/router"
+	runtimeevents "odin-os/internal/runtime/events"
 	"odin-os/internal/store/sqlite"
 	"odin-os/internal/vcs/leases"
 )
@@ -146,6 +148,7 @@ func TestExecuteNextQueuedCompletesCutoverProjectTask(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("SetTransitionState(cutover) error = %v", err)
 	}
+	recordHealthyExecutorSample(t, ctx, store)
 
 	if err := service.ExecuteNextQueued(ctx); err != nil {
 		t.Fatalf("ExecuteNextQueued() error = %v", err)
@@ -210,6 +213,7 @@ func TestExecuteNextQueuedRejectsShadowModeMutation(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("SetTransitionState(shadow) error = %v", err)
 	}
+	recordHealthyExecutorSample(t, ctx, store)
 
 	err = service.ExecuteNextQueued(ctx)
 	if err != nil {
@@ -300,6 +304,68 @@ func TestExecuteNextQueuedBlocksWhenExecutorHealthIsDegraded(t *testing.T) {
 	}
 }
 
+func TestExecuteNextQueuedBlocksWhenExecutorHealthSampleIsMissing(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openJobStore(t)
+	defer store.Close()
+
+	registry := writeRegistry(t)
+	service := Service{
+		Store:          store,
+		Registry:       registry,
+		Executors:      router.DefaultCatalog(),
+		ExecutorConfig: mustLoadExecutorConfig(t),
+		Transitions:    projects.Service{Store: store},
+		Leases: leases.Manager{
+			Store:        store,
+			Git:          &jobTestGit{},
+			WorktreeRoot: t.TempDir(),
+		},
+		Now: time.Now,
+	}
+
+	task, err := service.CreateTaskFromAct(ctx, scope.Resolution{
+		Kind:       scope.ScopeProject,
+		ProjectKey: "alpha",
+	}, "Blocked by missing executor health")
+	if err != nil {
+		t.Fatalf("CreateTaskFromAct() error = %v", err)
+	}
+
+	project, err := store.GetProjectByKey(ctx, "alpha")
+	if err != nil {
+		t.Fatalf("GetProjectByKey(alpha) error = %v", err)
+	}
+	if _, err := service.Transitions.SetTransitionState(ctx, projects.TransitionStateInput{
+		ProjectID:   project.ID,
+		Actor:       projects.TransitionControllerOdinOS,
+		TargetState: projects.TransitionStateCutover,
+		ChangedBy:   "test",
+	}); err != nil {
+		t.Fatalf("SetTransitionState(cutover) error = %v", err)
+	}
+
+	if err := service.ExecuteNextQueued(ctx); err != nil {
+		t.Fatalf("ExecuteNextQueued() error = %v, want nil blocked outcome", err)
+	}
+
+	gotTask, err := store.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
+	}
+	if gotTask.Status != "blocked" {
+		t.Fatalf("Task.Status = %q, want blocked", gotTask.Status)
+	}
+	if gotTask.BlockedReason != "executor_unavailable" {
+		t.Fatalf("BlockedReason = %q, want executor_unavailable", gotTask.BlockedReason)
+	}
+	if _, err := latestRunForTask(ctx, store, task.ID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("latestRunForTask() error = %v, want sql.ErrNoRows", err)
+	}
+}
+
 func TestExecuteNextQueuedBlocksWhenRequiredApprovalIsMissing(t *testing.T) {
 	t.Parallel()
 
@@ -367,6 +433,184 @@ func TestExecuteNextQueuedBlocksWhenRequiredApprovalIsMissing(t *testing.T) {
 	}
 	if _, err := latestRunForTask(ctx, store, task.ID); !errors.Is(err, sql.ErrNoRows) {
 		t.Fatalf("latestRunForTask() error = %v, want sql.ErrNoRows", err)
+	}
+}
+
+func TestExecuteNextQueuedResumesAfterApprovalIsApproved(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openJobStore(t)
+	defer store.Close()
+
+	registry := writeRegistry(t)
+	service := Service{
+		Store:          store,
+		Registry:       registry,
+		Executors:      router.DefaultCatalog(),
+		ExecutorConfig: mustLoadExecutorConfig(t),
+		Transitions:    projects.Service{Store: store},
+		Leases: leases.Manager{
+			Store:        store,
+			Git:          &jobTestGit{},
+			WorktreeRoot: t.TempDir(),
+		},
+		Now: time.Now,
+	}
+
+	task, err := service.CreateTaskFromAct(ctx, scope.Resolution{
+		Kind:       scope.ScopeOdinCore,
+		ProjectKey: "odin-core",
+	}, "Requires approval and resume")
+	if err != nil {
+		t.Fatalf("CreateTaskFromAct() error = %v", err)
+	}
+
+	project, err := store.GetProjectByKey(ctx, "odin-core")
+	if err != nil {
+		t.Fatalf("GetProjectByKey(odin-core) error = %v", err)
+	}
+	if _, err := service.Transitions.SetTransitionState(ctx, projects.TransitionStateInput{
+		ProjectID:   project.ID,
+		Actor:       projects.TransitionControllerOdinOS,
+		TargetState: projects.TransitionStateCutover,
+		ChangedBy:   "test",
+	}); err != nil {
+		t.Fatalf("SetTransitionState(cutover) error = %v", err)
+	}
+
+	if err := service.ExecuteNextQueued(ctx); err != nil {
+		t.Fatalf("ExecuteNextQueued(first) error = %v", err)
+	}
+
+	approval, err := store.GetLatestTaskApproval(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("GetLatestTaskApproval() error = %v", err)
+	}
+	if _, err := store.ResolveApproval(ctx, sqlite.ResolveApprovalParams{
+		ApprovalID: approval.ID,
+		Status:     "approved",
+		DecisionBy: "operator",
+		Reason:     "safe to resume",
+	}); err != nil {
+		t.Fatalf("ResolveApproval() error = %v", err)
+	}
+	recordHealthyExecutorSample(t, ctx, store)
+
+	unblockedTask, err := store.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("GetTask() after approval error = %v", err)
+	}
+	if unblockedTask.Status != "queued" {
+		t.Fatalf("Task.Status after approval = %q, want queued", unblockedTask.Status)
+	}
+	if unblockedTask.BlockedReason != "" {
+		t.Fatalf("BlockedReason after approval = %q, want empty", unblockedTask.BlockedReason)
+	}
+
+	if err := service.ExecuteNextQueued(ctx); err != nil {
+		t.Fatalf("ExecuteNextQueued(second) error = %v", err)
+	}
+
+	completedTask, err := store.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("GetTask() after resume error = %v", err)
+	}
+	if completedTask.Status != "completed" {
+		t.Fatalf("Task.Status after resume = %q, want completed", completedTask.Status)
+	}
+}
+
+func TestExecuteNextQueuedKeepsRunPreparingAndReleasesLeaseOnAdmissionFailure(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openJobStore(t)
+	defer store.Close()
+
+	registry := writeRegistryWithAlphaDefaultBranch(t, "odin/alpha/task-1/run-1/try-1")
+	service := Service{
+		Store:          store,
+		Registry:       registry,
+		Executors:      router.DefaultCatalog(),
+		ExecutorConfig: mustLoadExecutorConfig(t),
+		Transitions:    projects.Service{Store: store},
+		Leases: leases.Manager{
+			Store:        store,
+			Git:          &jobTestGit{},
+			WorktreeRoot: t.TempDir(),
+		},
+		Now: time.Now,
+	}
+
+	task, err := service.CreateTaskFromAct(ctx, scope.Resolution{
+		Kind:       scope.ScopeProject,
+		ProjectKey: "alpha",
+	}, "Admission fails after lease preparation")
+	if err != nil {
+		t.Fatalf("CreateTaskFromAct() error = %v", err)
+	}
+
+	project, err := store.GetProjectByKey(ctx, "alpha")
+	if err != nil {
+		t.Fatalf("GetProjectByKey(alpha) error = %v", err)
+	}
+	if _, err := service.Transitions.SetTransitionState(ctx, projects.TransitionStateInput{
+		ProjectID:   project.ID,
+		Actor:       projects.TransitionControllerOdinOS,
+		TargetState: projects.TransitionStateCutover,
+		ChangedBy:   "test",
+	}); err != nil {
+		t.Fatalf("SetTransitionState(cutover) error = %v", err)
+	}
+	if _, err := store.RecordExecutorHealth(ctx, sqlite.RecordExecutorHealthParams{
+		Executor:    "codex_headless",
+		Status:      "healthy",
+		LatencyMS:   0,
+		DetailsJSON: `{"source":"test"}`,
+	}); err != nil {
+		t.Fatalf("RecordExecutorHealth() error = %v", err)
+	}
+
+	if err := service.ExecuteNextQueued(ctx); err != nil {
+		t.Fatalf("ExecuteNextQueued() error = %v", err)
+	}
+
+	gotTask, err := store.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
+	}
+	if gotTask.Status != "failed" {
+		t.Fatalf("Task.Status = %q, want failed", gotTask.Status)
+	}
+
+	run, err := latestRunForTask(ctx, store, task.ID)
+	if err != nil {
+		t.Fatalf("latestRunForTask() error = %v", err)
+	}
+	events, err := store.ListEvents(ctx, sqlite.ListEventsParams{RunID: &run.ID})
+	if err != nil {
+		t.Fatalf("ListEvents(run) error = %v", err)
+	}
+
+	runStartStatus := ""
+	for _, event := range events {
+		if event.Type != runtimeevents.EventRunStarted {
+			continue
+		}
+		payload, err := runtimeevents.DecodePayload[runtimeevents.RunStartedPayload](event.Payload)
+		if err != nil {
+			t.Fatalf("DecodePayload(run.started) error = %v", err)
+		}
+		runStartStatus = payload.Status
+		break
+	}
+	if runStartStatus != "preparing" {
+		t.Fatalf("run.started status = %q, want preparing", runStartStatus)
+	}
+
+	if _, err := store.GetActiveWorktreeLeaseByTaskRun(ctx, task.ID, run.ID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("GetActiveWorktreeLeaseByTaskRun() error = %v, want sql.ErrNoRows", err)
 	}
 }
 
@@ -484,6 +728,7 @@ func TestExecuteNextQueuedRequeuesTransientExecutorFailureWithBackoff(t *testing
 	}); err != nil {
 		t.Fatalf("SetTransitionState(cutover) error = %v", err)
 	}
+	recordHealthyExecutorSample(t, ctx, store)
 
 	task, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
 		ProjectID:   project.ID,
@@ -552,6 +797,19 @@ func latestRunForTask(ctx context.Context, store *sqlite.Store, taskID int64) (s
 	return store.GetRun(ctx, runID)
 }
 
+func recordHealthyExecutorSample(t *testing.T, ctx context.Context, store *sqlite.Store) {
+	t.Helper()
+
+	if _, err := store.RecordExecutorHealth(ctx, sqlite.RecordExecutorHealthParams{
+		Executor:    "codex_headless",
+		Status:      "healthy",
+		LatencyMS:   0,
+		DetailsJSON: `{"source":"test"}`,
+	}); err != nil {
+		t.Fatalf("RecordExecutorHealth() error = %v", err)
+	}
+}
+
 func openJobStore(t *testing.T) *sqlite.Store {
 	t.Helper()
 
@@ -568,6 +826,12 @@ func openJobStore(t *testing.T) *sqlite.Store {
 func writeRegistry(t *testing.T) projects.Registry {
 	t.Helper()
 
+	return writeRegistryWithAlphaDefaultBranch(t, "main")
+}
+
+func writeRegistryWithAlphaDefaultBranch(t *testing.T, alphaDefaultBranch string) projects.Registry {
+	t.Helper()
+
 	root := t.TempDir()
 	configPath := filepath.Join(root, "projects.yaml")
 
@@ -578,7 +842,7 @@ func writeRegistry(t *testing.T) projects.Registry {
 		}
 	}
 
-	if err := os.WriteFile(configPath, []byte(`
+	configYAML := fmt.Sprintf(`
 version: 1
 projects:
   - key: odin-core
@@ -610,7 +874,7 @@ projects:
     name: Alpha
     project_class: github_backed_project
     git_root: alpha
-    default_branch: main
+    default_branch: %s
     github:
       repo: acme/alpha
     policy:
@@ -632,7 +896,9 @@ projects:
         allow_clean: false
         allow_force_push: false
         require_explicit_approval: true
-`), 0o644); err != nil {
+`, alphaDefaultBranch)
+
+	if err := os.WriteFile(configPath, []byte(configYAML), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
 

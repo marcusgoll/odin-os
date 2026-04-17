@@ -430,6 +430,28 @@ func appendTaskStatusChangedEventTx(ctx context.Context, tx *sql.Tx, previous Ta
 	})
 }
 
+func appendRunStatusChangedEventTx(ctx context.Context, tx *sql.Tx, task Task, previous Run, updated Run, occurredAt time.Time) error {
+	if previous.Status == updated.Status {
+		return nil
+	}
+
+	projectID := task.ProjectID
+	return appendEventTx(ctx, tx, eventInsert{
+		StreamType: runtimeevents.StreamRun,
+		StreamID:   updated.ID,
+		EventType:  runtimeevents.EventRunStatusChanged,
+		Scope:      task.Scope,
+		ProjectID:  &projectID,
+		TaskID:     &task.ID,
+		RunID:      &updated.ID,
+		Payload: runtimeevents.RunStatusChangedPayload{
+			PreviousStatus: previous.Status,
+			Status:         updated.Status,
+		},
+		OccurredAt: occurredAt,
+	})
+}
+
 func appendTaskQueueStateChangedEventTx(ctx context.Context, tx *sql.Tx, previous Task, updated Task, occurredAt time.Time) error {
 	if previous.Status == updated.Status &&
 		previous.NextEligibleAt.Equal(updated.NextEligibleAt) &&
@@ -468,7 +490,7 @@ func (store *Store) StartRun(ctx context.Context, params StartRunParams) (Run, e
 	var run Run
 
 	err := store.withTx(ctx, func(tx *sql.Tx) error {
-		task, err := store.getTaskTx(ctx, tx, params.TaskID)
+		currentTask, err := store.getTaskTx(ctx, tx, params.TaskID)
 		if err != nil {
 			return err
 		}
@@ -499,6 +521,15 @@ func (store *Store) StartRun(ctx context.Context, params StartRunParams) (Run, e
 		`, runID, formatTime(now), params.TaskID); err != nil {
 			return err
 		}
+		if params.TaskStatus != "" {
+			if _, err := tx.ExecContext(ctx, `
+				UPDATE tasks
+				SET status = ?, updated_at = ?
+				WHERE id = ?
+			`, params.TaskStatus, formatTime(now), params.TaskID); err != nil {
+				return err
+			}
+		}
 
 		run = Run{
 			ID:        runID,
@@ -509,26 +540,87 @@ func (store *Store) StartRun(ctx context.Context, params StartRunParams) (Run, e
 			StartedAt: now,
 		}
 
-		projectID := task.ProjectID
-		return appendEventTx(ctx, tx, eventInsert{
+		projectID := currentTask.ProjectID
+		if err := appendEventTx(ctx, tx, eventInsert{
 			StreamType: runtimeevents.StreamRun,
 			StreamID:   run.ID,
 			EventType:  runtimeevents.EventRunStarted,
-			Scope:      task.Scope,
+			Scope:      currentTask.Scope,
 			ProjectID:  &projectID,
-			TaskID:     &task.ID,
+			TaskID:     &currentTask.ID,
 			RunID:      &run.ID,
 			Payload: runtimeevents.RunStartedPayload{
-				TaskID:   task.ID,
+				TaskID:   currentTask.ID,
 				Executor: run.Executor,
 				Attempt:  run.Attempt,
 				Status:   run.Status,
 			},
 			OccurredAt: now,
-		})
+		}); err != nil {
+			return err
+		}
+		if params.TaskStatus == "" {
+			return nil
+		}
+
+		updatedTask, err := store.getTaskTx(ctx, tx, params.TaskID)
+		if err != nil {
+			return err
+		}
+		return appendTaskStatusChangedEventTx(ctx, tx, currentTask, updatedTask, now)
 	})
 
 	return run, err
+}
+
+func (store *Store) UpdateRunAndTaskStatus(ctx context.Context, params UpdateRunAndTaskStatusParams) (Task, Run, error) {
+	now := store.now()
+	var (
+		task Task
+		run  Run
+	)
+
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		currentRun, currentTask, err := store.getRunWithTaskTx(ctx, tx, params.RunID)
+		if err != nil {
+			return err
+		}
+		previousRun := currentRun
+
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE runs
+			SET status = ?
+			WHERE id = ?
+		`, params.RunStatus, params.RunID); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE tasks
+			SET status = ?, current_run_id = ?, updated_at = ?
+			WHERE id = ?
+		`, params.TaskStatus, params.RunID, formatTime(now), currentTask.ID); err != nil {
+			return err
+		}
+
+		updatedTask, err := store.getTaskTx(ctx, tx, currentTask.ID)
+		if err != nil {
+			return err
+		}
+
+		currentRun.Status = params.RunStatus
+		if err := appendRunStatusChangedEventTx(ctx, tx, currentTask, previousRun, currentRun, now); err != nil {
+			return err
+		}
+		if err := appendTaskStatusChangedEventTx(ctx, tx, currentTask, updatedTask, now); err != nil {
+			return err
+		}
+
+		task = updatedTask
+		run = currentRun
+		return nil
+	})
+
+	return task, run, err
 }
 
 func (store *Store) FinishRun(ctx context.Context, params FinishRunParams) (Run, error) {
@@ -805,7 +897,7 @@ func (store *Store) ResolveApproval(ctx context.Context, params ResolveApprovalP
 		approval = current
 
 		projectID := task.ProjectID
-		return appendEventTx(ctx, tx, eventInsert{
+		if err := appendEventTx(ctx, tx, eventInsert{
 			StreamType: runtimeevents.StreamApproval,
 			StreamID:   approval.ID,
 			EventType:  runtimeevents.EventApprovalResolved,
@@ -819,7 +911,25 @@ func (store *Store) ResolveApproval(ctx context.Context, params ResolveApprovalP
 				Reason:     approval.Reason,
 			},
 			OccurredAt: now,
+		}); err != nil {
+			return err
+		}
+
+		if approval.Status != "approved" || task.Status != "blocked" || task.BlockedReason != "approval_required" {
+			return nil
+		}
+
+		_, err = store.updateTaskQueueStateTx(ctx, tx, UpdateTaskQueueStateParams{
+			TaskID:         task.ID,
+			Status:         "queued",
+			NextEligibleAt: now,
+			Priority:       task.Priority,
+			LastError:      task.LastError,
+			RetryCount:     task.RetryCount,
+			MaxAttempts:    task.MaxAttempts,
+			BlockedReason:  "",
 		})
+		return err
 	})
 
 	return approval, err

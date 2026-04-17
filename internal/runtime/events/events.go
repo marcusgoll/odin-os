@@ -33,6 +33,7 @@ const (
 	EventTaskStatusChanged                Type = "task.status_changed"
 	EventTaskQueueStateChanged            Type = "task.queue_state_changed"
 	EventRunStarted                       Type = "run.started"
+	EventRunStatusChanged                 Type = "run.status_changed"
 	EventRunFinished                      Type = "run.finished"
 	EventApprovalRequested                Type = "approval.requested"
 	EventApprovalResolved                 Type = "approval.resolved"
@@ -130,6 +131,11 @@ type RunStartedPayload struct {
 	Executor string `json:"executor"`
 	Attempt  int    `json:"attempt"`
 	Status   string `json:"status"`
+}
+
+type RunStatusChangedPayload struct {
+	PreviousStatus string `json:"previous_status"`
+	Status         string `json:"status"`
 }
 
 type RunFinishedPayload struct {

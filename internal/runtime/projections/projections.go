@@ -929,6 +929,15 @@ func ReplayLifecycle(records []runtimeevents.Record) (LifecycleReplay, error) {
 			runID := record.StreamID
 			task.CurrentRunID = &runID
 			replay.Tasks[payload.TaskID] = task
+		case runtimeevents.EventRunStatusChanged:
+			payload, err := runtimeevents.DecodePayload[runtimeevents.RunStatusChangedPayload](record.Payload)
+			if err != nil {
+				return LifecycleReplay{}, fmt.Errorf("decode %s payload: %w", record.Type, err)
+			}
+			run := replay.Runs[record.StreamID]
+			run.ID = record.StreamID
+			run.Status = payload.Status
+			replay.Runs[record.StreamID] = run
 		case runtimeevents.EventRunFinished:
 			payload, err := runtimeevents.DecodePayload[runtimeevents.RunFinishedPayload](record.Payload)
 			if err != nil {

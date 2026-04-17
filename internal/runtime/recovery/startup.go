@@ -21,10 +21,15 @@ func (service Service) RunStartupRecovery(ctx context.Context) (StartupResult, e
 		return StartupResult{}, fmt.Errorf("self-heal store is required")
 	}
 
-	runs, err := service.Store.ListRunsByStatus(ctx, "running")
+	runningRuns, err := service.Store.ListRunsByStatus(ctx, "running")
 	if err != nil {
 		return StartupResult{}, err
 	}
+	preparingRuns, err := service.Store.ListRunsByStatus(ctx, "preparing")
+	if err != nil {
+		return StartupResult{}, err
+	}
+	runs := append(runningRuns, preparingRuns...)
 
 	result := StartupResult{}
 	for _, run := range runs {
@@ -74,7 +79,7 @@ func (service Service) RunStartupRecovery(ctx context.Context) (StartupResult, e
 			SelectedCapabilities: []string{"startup_recovery"},
 			Evidence: []checkpoints.Evidence{{
 				Kind:    "restart",
-				Summary: fmt.Sprintf("run %d was still marked running at startup", run.ID),
+				Summary: fmt.Sprintf("run %d was still marked %s at startup", run.ID, run.Status),
 			}},
 			ManifestSummary: "managed project",
 			PolicySummary:   "bounded startup recovery",

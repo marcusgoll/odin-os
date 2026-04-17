@@ -48,7 +48,9 @@ Phase 03 through Phase 14 event types are:
 - `project.created`
 - `task.created`
 - `task.status_changed`
+- `task.queue_state_changed`
 - `run.started`
+- `run.status_changed`
 - `run.finished`
 - `approval.requested`
 - `approval.resolved`
@@ -95,6 +97,7 @@ Phase 03 through Phase 14 event types are:
 Phase 03 replay support must be able to reconstruct:
 
 - task status state
+- task queue state
 - run status state
 - approval state
 

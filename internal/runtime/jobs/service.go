@@ -170,7 +170,7 @@ func (service Service) ExecuteNextQueued(ctx context.Context) error {
 		return err
 	}
 
-	run, err := service.launchRun(ctx, task, decision.ExecutorKey, attempt)
+	run, err := service.prepareRun(ctx, task, decision.ExecutorKey, attempt)
 	if err != nil {
 		return err
 	}
@@ -183,6 +183,14 @@ func (service Service) ExecuteNextQueued(ctx context.Context) error {
 		return service.finalizeOutcome(ctx, task, run, leaseAdmission, contract.ExecutionResult{}, nil)
 	}
 	defer releaseAssignment(ctx, service.Store, assignment)
+
+	if _, run, err = service.Store.UpdateRunAndTaskStatus(ctx, sqlite.UpdateRunAndTaskStatusParams{
+		RunID:      run.ID,
+		RunStatus:  "running",
+		TaskStatus: "running",
+	}); err != nil {
+		return err
+	}
 
 	spec.Metadata["branch_name"] = assignment.BranchName
 	spec.Metadata["repo_root"] = assignment.RepoRoot
@@ -347,7 +355,7 @@ func (service Service) admitTask(ctx context.Context, task sqlite.Task, project 
 		}
 	}
 
-	executorCheck, found, err := healthsvc.Service{
+	executorCheck, _, err := healthsvc.Service{
 		DB:     service.Store.DB(),
 		Config: healthsvc.DefaultConfig(),
 		Now:    service.now,
@@ -355,7 +363,7 @@ func (service Service) admitTask(ctx context.Context, task sqlite.Task, project 
 	if err != nil {
 		return admissionDecision{}, err
 	}
-	if found && executorCheck.Status != healthsvc.StatusHealthy {
+	if executorCheck.Status != healthsvc.StatusHealthy {
 		return admissionDecision{
 			Outcome:       admissionBlocked,
 			BlockedReason: "executor_unavailable",
@@ -378,20 +386,15 @@ func (service Service) admitTask(ctx context.Context, task sqlite.Task, project 
 	return admissionDecision{Outcome: admissionDispatchable}, nil
 }
 
-func (service Service) launchRun(ctx context.Context, task sqlite.Task, executorKey string, attempt int) (sqlite.Run, error) {
+func (service Service) prepareRun(ctx context.Context, task sqlite.Task, executorKey string, attempt int) (sqlite.Run, error) {
 	run, err := service.Store.StartRun(ctx, sqlite.StartRunParams{
-		TaskID:   task.ID,
-		Executor: executorKey,
-		Attempt:  attempt,
-		Status:   "running",
+		TaskID:     task.ID,
+		Executor:   executorKey,
+		Attempt:    attempt,
+		Status:     "preparing",
+		TaskStatus: "preparing",
 	})
 	if err != nil {
-		return sqlite.Run{}, err
-	}
-	if _, err := service.Store.UpdateTaskStatus(ctx, sqlite.UpdateTaskStatusParams{
-		TaskID: task.ID,
-		Status: "running",
-	}); err != nil {
 		return sqlite.Run{}, err
 	}
 	return run, nil
@@ -429,6 +432,7 @@ func (service Service) prepareLease(ctx context.Context, task sqlite.Task, proje
 		return leases.Assignment{}, admissionDecision{}, err
 	}
 	if err := validateAssignment(manifest, project, assignment); err != nil {
+		releaseAssignment(ctx, service.Store, assignment)
 		return leases.Assignment{}, admissionDecision{
 			Outcome:   admissionFailed,
 			LastError: fmt.Sprintf("policy_denied: %v", err),
