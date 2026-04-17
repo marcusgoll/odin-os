@@ -107,6 +107,22 @@ type Workspace struct {
 	UpdatedAt           time.Time
 }
 
+type FollowUpObligation struct {
+	ID                 int64
+	WorkspaceID        int64
+	InitiativeID       *int64
+	CompanionID        *int64
+	Title              string
+	Status             string
+	CadenceJSON        string
+	NextDueAt          time.Time
+	LastMaterializedAt *time.Time
+	LastCompletedAt    *time.Time
+	PolicyJSON         string
+	CreatedAt          time.Time
+	UpdatedAt          time.Time
+}
+
 type CreateWorkspaceParams struct {
 	Key                 string
 	Name                string
@@ -121,39 +137,66 @@ type UpdateWorkspacePolicyParams struct {
 	PolicyJSON  string
 }
 
+type CreateFollowUpObligationParams struct {
+	WorkspaceID  int64
+	InitiativeID *int64
+	CompanionID  *int64
+	Title        string
+	Status       string
+	CadenceJSON  string
+	NextDueAt    time.Time
+	PolicyJSON   string
+}
+
+type ListFollowUpObligationsParams struct {
+	WorkspaceID  int64
+	InitiativeID *int64
+	Status       string
+}
+
+type RecordFollowUpMaterializationParams struct {
+	ObligationID       int64
+	LastMaterializedAt time.Time
+	NextDueAt          *time.Time
+}
+
 type Task struct {
-	ID             int64
-	ProjectID      int64
-	Key            string
-	Title          string
-	ActionKey      string
-	Status         string
-	Scope          string
-	RequestedBy    string
-	WorkspaceID    *int64
-	InitiativeID   *int64
-	CompanionID    *int64
-	WorkKind       string
-	Summary        string
-	TerminalReason string
-	ArtifactsJSON  string
-	CurrentRunID   *int64
-	CreatedAt      time.Time
-	UpdatedAt      time.Time
+	ID                    int64
+	ProjectID             int64
+	Key                   string
+	Title                 string
+	ActionKey             string
+	Status                string
+	Scope                 string
+	RequestedBy           string
+	WorkspaceID           *int64
+	InitiativeID          *int64
+	CompanionID           *int64
+	FollowUpObligationID  *int64
+	FollowUpOccurrenceKey string
+	WorkKind              string
+	Summary               string
+	TerminalReason        string
+	ArtifactsJSON         string
+	CurrentRunID          *int64
+	CreatedAt             time.Time
+	UpdatedAt             time.Time
 }
 
 type CreateTaskParams struct {
-	ProjectID    int64
-	Key          string
-	Title        string
-	ActionKey    string
-	Status       string
-	Scope        string
-	RequestedBy  string
-	WorkspaceID  *int64
-	InitiativeID *int64
-	CompanionID  *int64
-	WorkKind     string
+	ProjectID             int64
+	Key                   string
+	Title                 string
+	ActionKey             string
+	Status                string
+	Scope                 string
+	RequestedBy           string
+	WorkspaceID           *int64
+	InitiativeID          *int64
+	CompanionID           *int64
+	FollowUpObligationID  *int64
+	FollowUpOccurrenceKey string
+	WorkKind              string
 }
 
 type UpdateTaskStatusParams struct {

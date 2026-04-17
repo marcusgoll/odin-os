@@ -472,8 +472,28 @@ func (store *Store) CreateTask(ctx context.Context, params CreateTaskParams) (Ta
 		}
 
 		result, err := tx.ExecContext(ctx, `
-			INSERT INTO tasks (project_id, key, title, action_key, status, scope, requested_by, workspace_id, initiative_id, companion_id, work_kind, current_run_id, summary, terminal_reason, artifacts_json, created_at, updated_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, '', '', '[]', ?, ?)
+			INSERT INTO tasks (
+				project_id,
+				key,
+				title,
+				action_key,
+				status,
+				scope,
+				requested_by,
+				workspace_id,
+				initiative_id,
+				companion_id,
+				follow_up_obligation_id,
+				follow_up_occurrence_key,
+				work_kind,
+				current_run_id,
+				summary,
+				terminal_reason,
+				artifacts_json,
+				created_at,
+				updated_at
+			)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, '', '', '[]', ?, ?)
 		`,
 			params.ProjectID,
 			params.Key,
@@ -485,10 +505,50 @@ func (store *Store) CreateTask(ctx context.Context, params CreateTaskParams) (Ta
 			nullInt64(params.WorkspaceID),
 			nullInt64(params.InitiativeID),
 			nullInt64(params.CompanionID),
+			nullInt64(params.FollowUpObligationID),
+			nullIfEmpty(params.FollowUpOccurrenceKey),
 			nullIfEmpty(params.WorkKind),
 			formatTime(now),
 			formatTime(now),
 		)
+		if err != nil && isMissingTaskFollowUpColumns(err) {
+			result, err = tx.ExecContext(ctx, `
+				INSERT INTO tasks (
+					project_id,
+					key,
+					title,
+					action_key,
+					status,
+					scope,
+					requested_by,
+					workspace_id,
+					initiative_id,
+					companion_id,
+					work_kind,
+					current_run_id,
+					summary,
+					terminal_reason,
+					artifacts_json,
+					created_at,
+					updated_at
+				)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, '', '', '[]', ?, ?)
+			`,
+				params.ProjectID,
+				params.Key,
+				params.Title,
+				params.ActionKey,
+				params.Status,
+				params.Scope,
+				params.RequestedBy,
+				nullInt64(params.WorkspaceID),
+				nullInt64(params.InitiativeID),
+				nullInt64(params.CompanionID),
+				nullIfEmpty(params.WorkKind),
+				formatTime(now),
+				formatTime(now),
+			)
+		}
 		if err != nil {
 			return err
 		}
@@ -499,21 +559,23 @@ func (store *Store) CreateTask(ctx context.Context, params CreateTaskParams) (Ta
 		}
 
 		task = Task{
-			ID:            taskID,
-			ProjectID:     params.ProjectID,
-			Key:           params.Key,
-			Title:         params.Title,
-			ActionKey:     params.ActionKey,
-			Status:        params.Status,
-			Scope:         params.Scope,
-			RequestedBy:   params.RequestedBy,
-			WorkspaceID:   params.WorkspaceID,
-			InitiativeID:  params.InitiativeID,
-			CompanionID:   params.CompanionID,
-			WorkKind:      params.WorkKind,
-			ArtifactsJSON: "[]",
-			CreatedAt:     now,
-			UpdatedAt:     now,
+			ID:                    taskID,
+			ProjectID:             params.ProjectID,
+			Key:                   params.Key,
+			Title:                 params.Title,
+			ActionKey:             params.ActionKey,
+			Status:                params.Status,
+			Scope:                 params.Scope,
+			RequestedBy:           params.RequestedBy,
+			WorkspaceID:           params.WorkspaceID,
+			InitiativeID:          params.InitiativeID,
+			CompanionID:           params.CompanionID,
+			FollowUpObligationID:  params.FollowUpObligationID,
+			FollowUpOccurrenceKey: params.FollowUpOccurrenceKey,
+			WorkKind:              params.WorkKind,
+			ArtifactsJSON:         "[]",
+			CreatedAt:             now,
+			UpdatedAt:             now,
 		}
 
 		return appendEventTx(ctx, tx, eventInsert{
@@ -2144,6 +2206,168 @@ func (store *Store) UpsertWorkspaceProfile(ctx context.Context, params UpsertWor
 	return profile, err
 }
 
+func (store *Store) CreateFollowUpObligation(ctx context.Context, params CreateFollowUpObligationParams) (FollowUpObligation, error) {
+	now := store.now()
+	var obligation FollowUpObligation
+
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		result, err := tx.ExecContext(ctx, `
+			INSERT INTO follow_up_obligations (
+				workspace_id,
+				initiative_id,
+				companion_id,
+				title,
+				status,
+				cadence_json,
+				next_due_at,
+				last_materialized_at,
+				last_completed_at,
+				policy_json,
+				created_at,
+				updated_at
+			)
+			VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?)
+		`,
+			params.WorkspaceID,
+			nullInt64(params.InitiativeID),
+			nullInt64(params.CompanionID),
+			params.Title,
+			params.Status,
+			params.CadenceJSON,
+			formatTime(params.NextDueAt),
+			params.PolicyJSON,
+			formatTime(now),
+			formatTime(now),
+		)
+		if err != nil {
+			return err
+		}
+
+		obligationID, err := result.LastInsertId()
+		if err != nil {
+			return err
+		}
+
+		obligation, err = store.getFollowUpObligationTx(ctx, tx, obligationID)
+		return err
+	})
+
+	return obligation, err
+}
+
+func (store *Store) GetFollowUpObligation(ctx context.Context, obligationID int64) (FollowUpObligation, error) {
+	return store.getFollowUpObligationQuery(ctx, store.db, obligationID)
+}
+
+func (store *Store) ListFollowUpObligations(ctx context.Context, params ListFollowUpObligationsParams) ([]FollowUpObligation, error) {
+	if params.WorkspaceID <= 0 {
+		return nil, fmt.Errorf("workspace ID is required")
+	}
+
+	query := `
+		SELECT
+			id,
+			workspace_id,
+			initiative_id,
+			companion_id,
+			title,
+			status,
+			cadence_json,
+			next_due_at,
+			last_materialized_at,
+			last_completed_at,
+			policy_json,
+			created_at,
+			updated_at
+		FROM follow_up_obligations
+		WHERE workspace_id = ?
+	`
+	args := []any{params.WorkspaceID}
+	if params.InitiativeID != nil {
+		query += ` AND initiative_id = ?`
+		args = append(args, *params.InitiativeID)
+	}
+	if status := strings.TrimSpace(params.Status); status != "" {
+		query += ` AND status = ?`
+		args = append(args, status)
+	}
+	query += ` ORDER BY next_due_at ASC, id ASC`
+
+	rows, err := store.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var obligations []FollowUpObligation
+	for rows.Next() {
+		obligation, err := scanFollowUpObligation(rows)
+		if err != nil {
+			return nil, err
+		}
+		obligations = append(obligations, obligation)
+	}
+	return obligations, rows.Err()
+}
+
+func (store *Store) RecordFollowUpMaterialization(ctx context.Context, params RecordFollowUpMaterializationParams) (FollowUpObligation, error) {
+	now := store.now()
+	var obligation FollowUpObligation
+
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		updates := []string{"last_materialized_at = ?", "updated_at = ?"}
+		args := []any{formatTime(params.LastMaterializedAt), formatTime(now)}
+		if params.NextDueAt != nil {
+			updates = append(updates, "next_due_at = ?")
+			args = append(args, formatTime(*params.NextDueAt))
+		}
+		args = append(args, params.ObligationID)
+
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE follow_up_obligations
+			SET `+strings.Join(updates, ", ")+`
+			WHERE id = ?
+		`, args...); err != nil {
+			return err
+		}
+
+		var err error
+		obligation, err = store.getFollowUpObligationTx(ctx, tx, params.ObligationID)
+		return err
+	})
+
+	return obligation, err
+}
+
+func (store *Store) GetTaskByFollowUpOccurrence(ctx context.Context, obligationID int64, occurrenceKey string) (Task, error) {
+	row := store.db.QueryRowContext(ctx, `
+		SELECT
+			id,
+			project_id,
+			key,
+			title,
+			action_key,
+			status,
+			scope,
+			requested_by,
+			workspace_id,
+			initiative_id,
+			companion_id,
+			follow_up_obligation_id,
+			follow_up_occurrence_key,
+			work_kind,
+			summary,
+			terminal_reason,
+			artifacts_json,
+			current_run_id,
+			created_at,
+			updated_at
+		FROM tasks
+		WHERE follow_up_obligation_id = ? AND follow_up_occurrence_key = ?
+	`, obligationID, occurrenceKey)
+	return scanTask(row)
+}
+
 func (store *Store) SetProjectTransition(ctx context.Context, params SetProjectTransitionParams) (ProjectTransition, error) {
 	now := store.now()
 	var transition ProjectTransition
@@ -3594,11 +3818,37 @@ func (store *Store) getWorkspaceByKeyTx(ctx context.Context, tx *sql.Tx, key str
 
 func (store *Store) getTaskQuery(ctx context.Context, queryer sqlQueryRow, taskID int64) (Task, error) {
 	row := queryer.QueryRowContext(ctx, `
-		SELECT id, project_id, key, title, action_key, status, scope, requested_by, workspace_id, initiative_id, companion_id, work_kind, summary, terminal_reason, artifacts_json, current_run_id, created_at, updated_at
+		SELECT id, project_id, key, title, action_key, status, scope, requested_by, workspace_id, initiative_id, companion_id, follow_up_obligation_id, follow_up_occurrence_key, work_kind, summary, terminal_reason, artifacts_json, current_run_id, created_at, updated_at
 		FROM tasks
 		WHERE id = ?
 	`, taskID)
 	return scanTask(row)
+}
+
+func (store *Store) getFollowUpObligationTx(ctx context.Context, tx *sql.Tx, obligationID int64) (FollowUpObligation, error) {
+	return store.getFollowUpObligationQuery(ctx, tx, obligationID)
+}
+
+func (store *Store) getFollowUpObligationQuery(ctx context.Context, queryer sqlQueryRow, obligationID int64) (FollowUpObligation, error) {
+	row := queryer.QueryRowContext(ctx, `
+		SELECT
+			id,
+			workspace_id,
+			initiative_id,
+			companion_id,
+			title,
+			status,
+			cadence_json,
+			next_due_at,
+			last_materialized_at,
+			last_completed_at,
+			policy_json,
+			created_at,
+			updated_at
+		FROM follow_up_obligations
+		WHERE id = ?
+	`, obligationID)
+	return scanFollowUpObligation(row)
 }
 
 func (store *Store) getProjectTx(ctx context.Context, tx *sql.Tx, projectID int64) (Project, error) {
@@ -4097,7 +4347,7 @@ func (store *Store) getRunWithTaskTx(ctx context.Context, tx *sql.Tx, runID int6
 	row := tx.QueryRowContext(ctx, `
 		SELECT
 			r.id, r.task_id, r.executor, r.status, r.attempt, r.started_at, r.finished_at, r.summary, r.terminal_reason, r.artifacts_json,
-			t.id, t.project_id, t.key, t.title, t.action_key, t.status, t.scope, t.requested_by, t.workspace_id, t.initiative_id, t.companion_id, t.work_kind, t.summary, t.terminal_reason, t.artifacts_json, t.current_run_id, t.created_at, t.updated_at
+			t.id, t.project_id, t.key, t.title, t.action_key, t.status, t.scope, t.requested_by, t.workspace_id, t.initiative_id, t.companion_id, t.follow_up_obligation_id, t.follow_up_occurrence_key, t.work_kind, t.summary, t.terminal_reason, t.artifacts_json, t.current_run_id, t.created_at, t.updated_at
 		FROM runs r
 		JOIN tasks t ON t.id = r.task_id
 		WHERE r.id = ?
@@ -4116,6 +4366,8 @@ func (store *Store) getRunWithTaskTx(ctx context.Context, tx *sql.Tx, runID int6
 	var workspaceID sql.NullInt64
 	var initiativeID sql.NullInt64
 	var companionID sql.NullInt64
+	var followUpObligationID sql.NullInt64
+	var followUpOccurrenceKey sql.NullString
 	var workKind sql.NullString
 	var startedAt string
 	var taskCreatedAt string
@@ -4143,6 +4395,8 @@ func (store *Store) getRunWithTaskTx(ctx context.Context, tx *sql.Tx, runID int6
 		&workspaceID,
 		&initiativeID,
 		&companionID,
+		&followUpObligationID,
+		&followUpOccurrenceKey,
 		&workKind,
 		&taskSummary,
 		&taskTerminalReason,
@@ -4170,6 +4424,8 @@ func (store *Store) getRunWithTaskTx(ctx context.Context, tx *sql.Tx, runID int6
 	task.WorkspaceID = nullableInt64Ptr(workspaceID)
 	task.InitiativeID = nullableInt64Ptr(initiativeID)
 	task.CompanionID = nullableInt64Ptr(companionID)
+	task.FollowUpObligationID = nullableInt64Ptr(followUpObligationID)
+	task.FollowUpOccurrenceKey = stringOrDefault(followUpOccurrenceKey, "")
 	task.WorkKind = stringOrDefault(workKind, "")
 	task.Summary = taskSummary.String
 	task.TerminalReason = taskTerminalReason.String
@@ -4191,7 +4447,7 @@ func (store *Store) getApprovalWithTaskTx(ctx context.Context, tx *sql.Tx, appro
 	row := tx.QueryRowContext(ctx, `
 		SELECT
 			a.id, a.task_id, a.run_id, a.status, a.requested_at, a.resolved_at, a.decision_by, a.reason,
-			t.id, t.project_id, t.key, t.title, t.action_key, t.status, t.scope, t.requested_by, t.workspace_id, t.initiative_id, t.companion_id, t.work_kind, t.summary, t.terminal_reason, t.artifacts_json, t.current_run_id, t.created_at, t.updated_at
+			t.id, t.project_id, t.key, t.title, t.action_key, t.status, t.scope, t.requested_by, t.workspace_id, t.initiative_id, t.companion_id, t.follow_up_obligation_id, t.follow_up_occurrence_key, t.work_kind, t.summary, t.terminal_reason, t.artifacts_json, t.current_run_id, t.created_at, t.updated_at
 		FROM approvals a
 		JOIN tasks t ON t.id = a.task_id
 		WHERE a.id = ?
@@ -4211,6 +4467,8 @@ func (store *Store) getApprovalWithTaskTx(ctx context.Context, tx *sql.Tx, appro
 	var workspaceID sql.NullInt64
 	var initiativeID sql.NullInt64
 	var companionID sql.NullInt64
+	var followUpObligationID sql.NullInt64
+	var followUpOccurrenceKey sql.NullString
 	var workKind sql.NullString
 	var taskCreatedAt string
 	var taskUpdatedAt string
@@ -4235,6 +4493,8 @@ func (store *Store) getApprovalWithTaskTx(ctx context.Context, tx *sql.Tx, appro
 		&workspaceID,
 		&initiativeID,
 		&companionID,
+		&followUpObligationID,
+		&followUpOccurrenceKey,
 		&workKind,
 		&taskSummary,
 		&taskTerminalReason,
@@ -4262,6 +4522,8 @@ func (store *Store) getApprovalWithTaskTx(ctx context.Context, tx *sql.Tx, appro
 	task.WorkspaceID = nullableInt64Ptr(workspaceID)
 	task.InitiativeID = nullableInt64Ptr(initiativeID)
 	task.CompanionID = nullableInt64Ptr(companionID)
+	task.FollowUpObligationID = nullableInt64Ptr(followUpObligationID)
+	task.FollowUpOccurrenceKey = stringOrDefault(followUpOccurrenceKey, "")
 	task.WorkKind = stringOrDefault(workKind, "")
 	task.Summary = taskSummary.String
 	task.TerminalReason = taskTerminalReason.String
@@ -4709,6 +4971,8 @@ func scanTask(row interface{ Scan(...any) error }) (Task, error) {
 	var workspaceID sql.NullInt64
 	var initiativeID sql.NullInt64
 	var companionID sql.NullInt64
+	var followUpObligationID sql.NullInt64
+	var followUpOccurrenceKey sql.NullString
 	var workKind sql.NullString
 	var createdAt string
 	var updatedAt string
@@ -4724,6 +4988,8 @@ func scanTask(row interface{ Scan(...any) error }) (Task, error) {
 		&workspaceID,
 		&initiativeID,
 		&companionID,
+		&followUpObligationID,
+		&followUpOccurrenceKey,
 		&workKind,
 		&summary,
 		&terminalReason,
@@ -4739,6 +5005,8 @@ func scanTask(row interface{ Scan(...any) error }) (Task, error) {
 	task.WorkspaceID = nullableInt64Ptr(workspaceID)
 	task.InitiativeID = nullableInt64Ptr(initiativeID)
 	task.CompanionID = nullableInt64Ptr(companionID)
+	task.FollowUpObligationID = nullableInt64Ptr(followUpObligationID)
+	task.FollowUpOccurrenceKey = stringOrDefault(followUpOccurrenceKey, "")
 	task.WorkKind = stringOrDefault(workKind, "")
 	task.Summary = summary.String
 	task.TerminalReason = terminalReason.String
@@ -4753,6 +5021,59 @@ func scanTask(row interface{ Scan(...any) error }) (Task, error) {
 		return Task{}, err
 	}
 	return task, nil
+}
+
+func scanFollowUpObligation(row interface{ Scan(...any) error }) (FollowUpObligation, error) {
+	var obligation FollowUpObligation
+	var initiativeID sql.NullInt64
+	var companionID sql.NullInt64
+	var lastMaterializedAt sql.NullString
+	var lastCompletedAt sql.NullString
+	var nextDueAt string
+	var createdAt string
+	var updatedAt string
+	if err := row.Scan(
+		&obligation.ID,
+		&obligation.WorkspaceID,
+		&initiativeID,
+		&companionID,
+		&obligation.Title,
+		&obligation.Status,
+		&obligation.CadenceJSON,
+		&nextDueAt,
+		&lastMaterializedAt,
+		&lastCompletedAt,
+		&obligation.PolicyJSON,
+		&createdAt,
+		&updatedAt,
+	); err != nil {
+		return FollowUpObligation{}, err
+	}
+
+	var err error
+	obligation.InitiativeID = nullableInt64Ptr(initiativeID)
+	obligation.CompanionID = nullableInt64Ptr(companionID)
+	obligation.NextDueAt, err = parseTime(nextDueAt)
+	if err != nil {
+		return FollowUpObligation{}, err
+	}
+	obligation.LastMaterializedAt, err = parseNullableTime(lastMaterializedAt)
+	if err != nil {
+		return FollowUpObligation{}, err
+	}
+	obligation.LastCompletedAt, err = parseNullableTime(lastCompletedAt)
+	if err != nil {
+		return FollowUpObligation{}, err
+	}
+	obligation.CreatedAt, err = parseTime(createdAt)
+	if err != nil {
+		return FollowUpObligation{}, err
+	}
+	obligation.UpdatedAt, err = parseTime(updatedAt)
+	if err != nil {
+		return FollowUpObligation{}, err
+	}
+	return obligation, nil
 }
 
 func scanRun(row interface{ Scan(...any) error }) (Run, error) {
@@ -5410,6 +5731,15 @@ func normalizeArtifactsJSON(value string) string {
 		return "[]"
 	}
 	return value
+}
+
+func isMissingTaskFollowUpColumns(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := err.Error()
+	return strings.Contains(message, "has no column named follow_up_obligation_id") ||
+		strings.Contains(message, "has no column named follow_up_occurrence_key")
 }
 
 func nullInt64(value *int64) any {

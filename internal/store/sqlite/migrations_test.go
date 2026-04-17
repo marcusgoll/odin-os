@@ -234,6 +234,47 @@ func TestProfileMigrationCreatesWorkspaceProfileTable(t *testing.T) {
 	}
 }
 
+func TestFollowUpMigrationCreatesObligationTableAndTaskProvenance(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store, err := Open(filepath.Join(t.TempDir(), "odin.db"))
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer store.Close()
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
+	}
+
+	var tableName string
+	if err := store.DB().QueryRowContext(ctx, `
+		SELECT name
+		FROM sqlite_master
+		WHERE type = 'table' AND name = 'follow_up_obligations'
+	`).Scan(&tableName); err != nil {
+		t.Fatalf("follow_up_obligations table query error = %v", err)
+	}
+
+	taskColumns, err := taskColumnNames(ctx, store)
+	if err != nil {
+		t.Fatalf("taskColumnNames() error = %v", err)
+	}
+	for _, want := range []string{"follow_up_obligation_id", "follow_up_occurrence_key"} {
+		if !containsTaskColumn(taskColumns, want) {
+			t.Fatalf("tasks columns = %v, want %q", taskColumns, want)
+		}
+	}
+
+	var migrationCount int
+	if err := store.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM schema_migrations WHERE version = 18`).Scan(&migrationCount); err != nil {
+		t.Fatalf("schema_migrations query error = %v", err)
+	}
+	if migrationCount != 1 {
+		t.Fatalf("schema_migrations version 18 count = %d, want 1", migrationCount)
+	}
+}
+
 func openMigrationBackfillStore(t *testing.T) *Store {
 	t.Helper()
 
@@ -262,4 +303,38 @@ func mustLoadMigrationByVersion(t *testing.T, version int) migration {
 		t.Fatalf("loadMigrationByVersion(%d) error = %v", version, err)
 	}
 	return migration
+}
+
+func taskColumnNames(ctx context.Context, store *Store) ([]string, error) {
+	rows, err := store.DB().QueryContext(ctx, `PRAGMA table_info(tasks)`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var columns []string
+	for rows.Next() {
+		var (
+			cid        int
+			name       string
+			typ        string
+			notNull    int
+			defaultVal any
+			pk         int
+		)
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultVal, &pk); err != nil {
+			return nil, err
+		}
+		columns = append(columns, name)
+	}
+	return columns, rows.Err()
+}
+
+func containsTaskColumn(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }

@@ -2,7 +2,10 @@ package workitems
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
+	"strings"
 
 	"odin-os/internal/core/workspaces"
 	"odin-os/internal/store/sqlite"
@@ -21,6 +24,12 @@ type Service struct {
 	Store *sqlite.Store
 }
 
+type QueueFollowUpParams struct {
+	CreateTask           sqlite.CreateTaskParams
+	FollowUpObligationID int64
+	OccurrenceKey        string
+}
+
 func (service Service) Queue(ctx context.Context, params sqlite.CreateTaskParams) (sqlite.Task, error) {
 	if service.Store == nil {
 		return sqlite.Task{}, fmt.Errorf("work item store is required")
@@ -36,6 +45,44 @@ func (service Service) Queue(ctx context.Context, params sqlite.CreateTaskParams
 		return sqlite.Task{}, err
 	}
 	return task, nil
+}
+
+func (service Service) QueueFollowUp(ctx context.Context, params QueueFollowUpParams) (sqlite.Task, bool, error) {
+	if service.Store == nil {
+		return sqlite.Task{}, false, fmt.Errorf("work item store is required")
+	}
+	if params.FollowUpObligationID <= 0 {
+		return sqlite.Task{}, false, fmt.Errorf("follow-up obligation ID is required")
+	}
+	occurrenceKey := strings.TrimSpace(params.OccurrenceKey)
+	if occurrenceKey == "" {
+		return sqlite.Task{}, false, fmt.Errorf("follow-up occurrence key is required")
+	}
+
+	if task, err := service.Store.GetTaskByFollowUpOccurrence(ctx, params.FollowUpObligationID, occurrenceKey); err == nil {
+		return task, true, nil
+	} else if !errorsIsNotFound(err) {
+		return sqlite.Task{}, false, err
+	}
+
+	createTask := params.CreateTask
+	createTask.FollowUpObligationID = int64Ptr(params.FollowUpObligationID)
+	createTask.FollowUpOccurrenceKey = occurrenceKey
+	if strings.TrimSpace(createTask.WorkKind) == "" {
+		createTask.WorkKind = "follow_up"
+	}
+
+	task, err := service.Queue(ctx, createTask)
+	if err != nil {
+		if isFollowUpOccurrenceConflict(err) {
+			existing, lookupErr := service.Store.GetTaskByFollowUpOccurrence(ctx, params.FollowUpObligationID, occurrenceKey)
+			if lookupErr == nil {
+				return existing, true, nil
+			}
+		}
+		return sqlite.Task{}, false, err
+	}
+	return task, false, nil
 }
 
 func (service Service) Get(ctx context.Context, taskID int64) (WorkItem, error) {
@@ -210,4 +257,22 @@ func (service Service) pendingApprovalCount(ctx context.Context, taskID int64) (
 		return 0, err
 	}
 	return count, nil
+}
+
+func errorsIsNotFound(err error) bool {
+	return errors.Is(err, sql.ErrNoRows)
+}
+
+func int64Ptr(value int64) *int64 {
+	return &value
+}
+
+func isFollowUpOccurrenceConflict(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := err.Error()
+	return strings.Contains(message, "UNIQUE constraint failed") &&
+		strings.Contains(message, "tasks.follow_up_obligation_id") &&
+		strings.Contains(message, "tasks.follow_up_occurrence_key")
 }
