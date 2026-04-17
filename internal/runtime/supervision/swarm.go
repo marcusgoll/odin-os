@@ -2,7 +2,6 @@ package supervision
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -20,18 +19,18 @@ const (
 )
 
 var (
-	ErrSwarmTriggerNotAdmitted = errors.New("no valid swarm trigger")
+	ErrSwarmTriggerNotAdmitted  = errors.New("no valid swarm trigger")
 	ErrSwarmRecursiveDelegation = errors.New("task is already a child delegation")
 )
 
 type PlanSwarmParams struct {
-	ParentTaskID     int64
-	ParentRunID      *int64
-	Trigger          string
-	ConvergenceMode  string
-	RequestedBudget  int
-	RetryBudget      int
-	DelegationPlans  []DelegationPlan
+	ParentTaskID    int64
+	ParentRunID     *int64
+	Trigger         string
+	ConvergenceMode string
+	RequestedBudget int
+	RetryBudget     int
+	DelegationPlans []DelegationPlan
 }
 
 type DelegationPlan struct {
@@ -48,11 +47,11 @@ type DelegationPlan struct {
 }
 
 type SwarmPlan struct {
-	ParentTask   sqlite.Task
-	ParentRunID  *int64
-	Trigger      string
-	MaxChildren  int
-	Delegations  []sqlite.Delegation
+	ParentTask  sqlite.Task
+	ParentRunID *int64
+	Trigger     string
+	MaxChildren int
+	Delegations []sqlite.Delegation
 }
 
 type planningPolicy struct {
@@ -286,8 +285,8 @@ func marshalDelegationDetails(parentTask sqlite.Task, parentRunID *int64, params
 		CompanionID  *int64 `json:"companion_id,omitempty"`
 	}
 	payload := map[string]any{
-		"objective":            strings.TrimSpace(plan.Objective),
-		"acceptance_criteria":  uniqueNonEmptyStrings(plan.AcceptanceCriteria),
+		"objective":           strings.TrimSpace(plan.Objective),
+		"acceptance_criteria": uniqueNonEmptyStrings(plan.AcceptanceCriteria),
 		"swarm": map[string]any{
 			"trigger":          strings.TrimSpace(params.Trigger),
 			"max_children":     maxChildren,
