@@ -1986,6 +1986,17 @@ func (store *Store) GetApproval(ctx context.Context, approvalID int64) (Approval
 	return scanApproval(row)
 }
 
+func (store *Store) GetLatestTaskApproval(ctx context.Context, taskID int64) (Approval, error) {
+	row := store.db.QueryRowContext(ctx, `
+		SELECT id, task_id, run_id, status, requested_at, resolved_at, decision_by, reason
+		FROM approvals
+		WHERE task_id = ?
+		ORDER BY id DESC
+		LIMIT 1
+	`, taskID)
+	return scanApproval(row)
+}
+
 func (store *Store) GetIncident(ctx context.Context, incidentID int64) (Incident, error) {
 	row := store.db.QueryRowContext(ctx, `
 		SELECT id, run_id, severity, status, summary, details_json, opened_at, updated_at

@@ -173,31 +173,67 @@ func (service Service) Summary(ctx context.Context, registryHealthy bool) (Summa
 	return summary, nil
 }
 
+func (service Service) ExecutorStatus(ctx context.Context, executor string) (Check, bool, error) {
+	now := time.Now().UTC()
+	if service.Now != nil {
+		now = service.Now().UTC()
+	}
+
+	config := service.Config
+	if config == (Config{}) {
+		config = DefaultConfig()
+	}
+
+	check, found, err := service.executorCheckFor(ctx, executor, now, config)
+	if err != nil {
+		return Check{}, false, err
+	}
+	return check, found, nil
+}
+
 func (service Service) executorCheck(ctx context.Context, now time.Time, config Config) (Check, error) {
-	var status string
-	var checkedAt string
-	err := service.DB.QueryRowContext(ctx, `
+	check, _, err := service.executorCheckFor(ctx, "", now, config)
+	return check, err
+}
+
+func (service Service) executorCheckFor(ctx context.Context, executor string, now time.Time, config Config) (Check, bool, error) {
+	query := `
 		SELECT status, checked_at
 		FROM executor_health
+	`
+	args := []any{}
+	if executor != "" {
+		query += ` WHERE executor = ?`
+		args = append(args, executor)
+	}
+	query += `
 		ORDER BY checked_at DESC, id DESC
 		LIMIT 1
-	`).Scan(&status, &checkedAt)
+	`
+
+	var status string
+	var checkedAt string
+	err := service.DB.QueryRowContext(ctx, query, args...).Scan(&status, &checkedAt)
 	switch err {
 	case sql.ErrNoRows:
-		return Check{
+		check := Check{
 			Name:       "executor",
 			Status:     StatusDegraded,
 			Summary:    "no executor health samples recorded",
 			ObservedAt: now,
-		}, nil
+		}
+		if executor != "" {
+			check.Details = map[string]string{"executor": executor}
+		}
+		return check, false, nil
 	case nil:
 	default:
-		return Check{}, err
+		return Check{}, false, err
 	}
 
 	parsed, err := time.Parse(time.RFC3339Nano, checkedAt)
 	if err != nil {
-		return Check{}, err
+		return Check{}, false, err
 	}
 
 	check := Check{
@@ -214,7 +250,10 @@ func (service Service) executorCheck(ctx context.Context, now time.Time, config 
 		check.Status = StatusDegraded
 		check.Summary = "executor health is unavailable or stale"
 	}
-	return check, nil
+	if executor != "" {
+		check.Details["executor"] = executor
+	}
+	return check, true, nil
 }
 
 func (service Service) queueCheck(ctx context.Context, now time.Time, config Config) (Check, error) {

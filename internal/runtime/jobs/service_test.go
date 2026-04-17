@@ -2,6 +2,8 @@ package jobs
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -210,8 +212,8 @@ func TestExecuteNextQueuedRejectsShadowModeMutation(t *testing.T) {
 	}
 
 	err = service.ExecuteNextQueued(ctx)
-	if err == nil {
-		t.Fatalf("ExecuteNextQueued() error = nil, want transition denial")
+	if err != nil {
+		t.Fatalf("ExecuteNextQueued() error = %v, want nil admission failure", err)
 	}
 
 	gotTask, err := store.GetTask(ctx, task.ID)
@@ -220,6 +222,151 @@ func TestExecuteNextQueuedRejectsShadowModeMutation(t *testing.T) {
 	}
 	if gotTask.Status != "failed" {
 		t.Fatalf("GetTask().Status = %q, want failed", gotTask.Status)
+	}
+
+	if _, err := latestRunForTask(ctx, store, task.ID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("latestRunForTask() error = %v, want sql.ErrNoRows", err)
+	}
+}
+
+func TestExecuteNextQueuedBlocksWhenExecutorHealthIsDegraded(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openJobStore(t)
+	defer store.Close()
+
+	registry := writeRegistry(t)
+	now := time.Date(2026, 4, 17, 10, 0, 0, 0, time.UTC)
+	service := Service{
+		Store:          store,
+		Registry:       registry,
+		Executors:      router.DefaultCatalog(),
+		ExecutorConfig: mustLoadExecutorConfig(t),
+		Transitions:    projects.Service{Store: store},
+		Leases: leases.Manager{
+			Store:        store,
+			Git:          &jobTestGit{},
+			WorktreeRoot: t.TempDir(),
+		},
+		Now: func() time.Time { return now },
+	}
+
+	task, err := service.CreateTaskFromAct(ctx, scope.Resolution{
+		Kind:       scope.ScopeProject,
+		ProjectKey: "alpha",
+	}, "Blocked by executor health")
+	if err != nil {
+		t.Fatalf("CreateTaskFromAct() error = %v", err)
+	}
+
+	project, err := store.GetProjectByKey(ctx, "alpha")
+	if err != nil {
+		t.Fatalf("GetProjectByKey(alpha) error = %v", err)
+	}
+	if _, err := service.Transitions.SetTransitionState(ctx, projects.TransitionStateInput{
+		ProjectID:   project.ID,
+		Actor:       projects.TransitionControllerOdinOS,
+		TargetState: projects.TransitionStateCutover,
+		ChangedBy:   "test",
+	}); err != nil {
+		t.Fatalf("SetTransitionState(cutover) error = %v", err)
+	}
+	if _, err := store.RecordExecutorHealth(ctx, sqlite.RecordExecutorHealthParams{
+		Executor:    "codex_headless",
+		Status:      "degraded",
+		LatencyMS:   0,
+		DetailsJSON: `{"source":"test"}`,
+	}); err != nil {
+		t.Fatalf("RecordExecutorHealth() error = %v", err)
+	}
+
+	if err := service.ExecuteNextQueued(ctx); err != nil {
+		t.Fatalf("ExecuteNextQueued() error = %v, want nil blocked outcome", err)
+	}
+
+	gotTask, err := store.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
+	}
+	if gotTask.Status != "blocked" {
+		t.Fatalf("Task.Status = %q, want blocked", gotTask.Status)
+	}
+	if gotTask.BlockedReason != "executor_unavailable" {
+		t.Fatalf("BlockedReason = %q, want executor_unavailable", gotTask.BlockedReason)
+	}
+	if _, err := latestRunForTask(ctx, store, task.ID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("latestRunForTask() error = %v, want sql.ErrNoRows", err)
+	}
+}
+
+func TestExecuteNextQueuedBlocksWhenRequiredApprovalIsMissing(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openJobStore(t)
+	defer store.Close()
+
+	registry := writeRegistry(t)
+	service := Service{
+		Store:          store,
+		Registry:       registry,
+		Executors:      router.DefaultCatalog(),
+		ExecutorConfig: mustLoadExecutorConfig(t),
+		Transitions:    projects.Service{Store: store},
+		Leases: leases.Manager{
+			Store:        store,
+			Git:          &jobTestGit{},
+			WorktreeRoot: t.TempDir(),
+		},
+		Now: time.Now,
+	}
+
+	task, err := service.CreateTaskFromAct(ctx, scope.Resolution{
+		Kind:       scope.ScopeOdinCore,
+		ProjectKey: "odin-core",
+	}, "Requires approval")
+	if err != nil {
+		t.Fatalf("CreateTaskFromAct() error = %v", err)
+	}
+
+	project, err := store.GetProjectByKey(ctx, "odin-core")
+	if err != nil {
+		t.Fatalf("GetProjectByKey(odin-core) error = %v", err)
+	}
+	if _, err := service.Transitions.SetTransitionState(ctx, projects.TransitionStateInput{
+		ProjectID:   project.ID,
+		Actor:       projects.TransitionControllerOdinOS,
+		TargetState: projects.TransitionStateCutover,
+		ChangedBy:   "test",
+	}); err != nil {
+		t.Fatalf("SetTransitionState(cutover) error = %v", err)
+	}
+
+	if err := service.ExecuteNextQueued(ctx); err != nil {
+		t.Fatalf("ExecuteNextQueued() error = %v, want nil blocked outcome", err)
+	}
+
+	gotTask, err := store.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
+	}
+	if gotTask.Status != "blocked" {
+		t.Fatalf("Task.Status = %q, want blocked", gotTask.Status)
+	}
+	if gotTask.BlockedReason != "approval_required" {
+		t.Fatalf("BlockedReason = %q, want approval_required", gotTask.BlockedReason)
+	}
+
+	approval, err := store.GetLatestTaskApproval(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("GetLatestTaskApproval() error = %v", err)
+	}
+	if approval.Status != "pending" {
+		t.Fatalf("Approval.Status = %q, want pending", approval.Status)
+	}
+	if _, err := latestRunForTask(ctx, store, task.ID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("latestRunForTask() error = %v, want sql.ErrNoRows", err)
 	}
 }
 
