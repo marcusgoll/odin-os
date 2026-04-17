@@ -262,6 +262,7 @@ func newMediaService(app bootstrap.App, cfg appconfig.Config) *mediasvc.Service 
 	return &mediasvc.Service{
 		Store:         app.Store,
 		Config:        cfg.Media,
+		RuntimeRoot:   cfg.RuntimeRoot,
 		SystemProject: systemProject,
 		Checker: healthsvc.MediaChecks{
 			Config:       cfg.Media,

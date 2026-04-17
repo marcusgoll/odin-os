@@ -105,6 +105,15 @@ func (service Service) RunCycle(ctx context.Context) (CycleResult, error) {
 	return result, nil
 }
 
+func (service Service) Maintenance() MaintenanceService {
+	return MaintenanceService{
+		Store:       service.Store,
+		Config:      service.Config,
+		RuntimeRoot: service.RuntimeRoot,
+		Now:         service.Now,
+	}
+}
+
 func (service Service) recordMaintenanceCandidate(ctx context.Context, now time.Time, healthy bool) (*int64, error) {
 	if !healthy {
 		return nil, nil

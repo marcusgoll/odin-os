@@ -17,6 +17,7 @@ type Checker interface {
 type Service struct {
 	Store         *sqlite.Store
 	Config        *coremedia.Config
+	RuntimeRoot   string
 	SystemProject projects.Manifest
 	Checker       Checker
 	Now           func() time.Time
