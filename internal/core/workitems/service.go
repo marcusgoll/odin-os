@@ -71,8 +71,24 @@ func (service Service) QueueFollowUp(ctx context.Context, params QueueFollowUpPa
 	if strings.TrimSpace(createTask.WorkKind) == "" {
 		createTask.WorkKind = "follow_up"
 	}
+	status := strings.TrimSpace(createTask.Status)
+	if status == "" {
+		status = statusQueued
+	}
+	createTask.Status = status
 
-	task, err := service.Queue(ctx, createTask)
+	var (
+		task sqlite.Task
+		err  error
+	)
+	if status == statusQueued {
+		task, err = service.Queue(ctx, createTask)
+	} else {
+		createTask, err = service.ensureCreateTaskWorkspace(ctx, createTask)
+		if err == nil {
+			task, err = service.Store.CreateTask(ctx, createTask)
+		}
+	}
 	if err != nil {
 		if existing, lookupErr := service.Store.GetTaskByFollowUpOccurrence(ctx, params.FollowUpObligationID, occurrenceKey); lookupErr == nil {
 			return existing, true, nil

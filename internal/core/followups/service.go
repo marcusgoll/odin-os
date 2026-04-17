@@ -168,6 +168,14 @@ func (service Service) Snooze(ctx context.Context, workspaceID int64, obligation
 }
 
 func (service Service) Pause(ctx context.Context, workspaceID int64, obligationID int64) (FollowUpObligation, error) {
+	return service.pause(ctx, workspaceID, obligationID, "")
+}
+
+func (service Service) PauseForInitiativeStatus(ctx context.Context, workspaceID int64, obligationID int64, initiativeStatus string) (FollowUpObligation, error) {
+	return service.pause(ctx, workspaceID, obligationID, initiativeStatus)
+}
+
+func (service Service) pause(ctx context.Context, workspaceID int64, obligationID int64, initiativeStatus string) (FollowUpObligation, error) {
 	if service.Store == nil {
 		return FollowUpObligation{}, fmt.Errorf("follow-up store is required")
 	}
@@ -200,7 +208,7 @@ func (service Service) Pause(ctx context.Context, workspaceID int64, obligationI
 	if err := service.recordRuntimeEvent(ctx, runtimeevents.EventFollowUpPaused, updated, 0, runtimeevents.FollowUpPausedPayload{
 		ObligationID:     updated.ID,
 		Status:           string(StatusPaused),
-		InitiativeStatus: "",
+		InitiativeStatus: strings.TrimSpace(initiativeStatus),
 	}); err != nil {
 		return FollowUpObligation{}, err
 	}
@@ -268,6 +276,7 @@ func (service Service) Materialize(ctx context.Context, params MaterializeParams
 			Key:          strings.TrimSpace(params.TaskKey),
 			Title:        title,
 			ActionKey:    strings.TrimSpace(params.ActionKey),
+			Status:       strings.TrimSpace(params.TaskStatus),
 			Scope:        scope,
 			RequestedBy:  requestedBy,
 			WorkspaceID:  int64Ptr(obligation.WorkspaceID),

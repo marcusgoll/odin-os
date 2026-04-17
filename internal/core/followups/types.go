@@ -85,6 +85,7 @@ type MaterializeParams struct {
 	ActionKey    string
 	Scope        string
 	RequestedBy  string
+	TaskStatus   string
 }
 
 type MaterializationResult struct {

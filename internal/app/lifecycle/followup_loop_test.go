@@ -3,6 +3,7 @@ package lifecycle
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"net"
 	"path/filepath"
 	"strings"
@@ -65,6 +66,30 @@ service:
 	if task.WorkspaceID == nil || *task.WorkspaceID != workspace.ID {
 		t.Fatalf("task.WorkspaceID = %v, want %d", task.WorkspaceID, workspace.ID)
 	}
+
+	events, err := reloaded.ListEvents(context.Background(), sqlite.ListEventsParams{})
+	if err != nil {
+		t.Fatalf("ListEvents() error = %v", err)
+	}
+	foundMaterialized := false
+	for _, event := range events {
+		if string(event.Type) != "follow_up.materialized" {
+			continue
+		}
+		foundMaterialized = true
+		var payload struct {
+			TaskStatus string `json:"task_status"`
+		}
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			t.Fatalf("json.Unmarshal(materialized event) error = %v", err)
+		}
+		if payload.TaskStatus != "blocked" {
+			t.Fatalf("follow_up.materialized task_status = %q, want blocked", payload.TaskStatus)
+		}
+	}
+	if !foundMaterialized {
+		t.Fatal("expected follow_up.materialized event")
+	}
 }
 
 func TestFollowUpLoopPausesLinkedObligationsForArchivedInitiative(t *testing.T) {
@@ -104,6 +129,30 @@ service:
 	}
 	if paused.Status != string(followups.StatusPaused) {
 		t.Fatalf("paused.Status = %q, want paused", paused.Status)
+	}
+
+	events, err := reloaded.ListEvents(context.Background(), sqlite.ListEventsParams{})
+	if err != nil {
+		t.Fatalf("ListEvents() error = %v", err)
+	}
+	foundPaused := false
+	for _, event := range events {
+		if string(event.Type) != "follow_up.paused" {
+			continue
+		}
+		foundPaused = true
+		var payload struct {
+			InitiativeStatus string `json:"initiative_status"`
+		}
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			t.Fatalf("json.Unmarshal(paused event) error = %v", err)
+		}
+		if payload.InitiativeStatus != "archived" {
+			t.Fatalf("follow_up.paused initiative_status = %q, want archived", payload.InitiativeStatus)
+		}
+	}
+	if !foundPaused {
+		t.Fatal("expected follow_up.paused event")
 	}
 
 	var taskCount int

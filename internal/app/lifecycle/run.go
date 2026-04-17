@@ -29,7 +29,6 @@ import (
 	"odin-os/internal/core/followups"
 	"odin-os/internal/core/initiatives"
 	"odin-os/internal/core/projects"
-	"odin-os/internal/core/workitems"
 	"odin-os/internal/core/workspaces"
 	conversationsvc "odin-os/internal/runtime/conversation"
 	runtimeevents "odin-os/internal/runtime/events"
@@ -1340,7 +1339,6 @@ func runServe(ctx context.Context, app bootstrap.App, cfg appconfig.Config, stdo
 
 	jobService := newJobService(app)
 	followUpService := followups.Service{Store: app.Store}
-	workItemService := workitems.Service{Store: app.Store}
 	recoveryService := recovery.Service{
 		Store:           app.Store,
 		RegistryRoot:    filepath.Join(app.RepoRoot, "registry"),
@@ -1356,7 +1354,7 @@ func runServe(ctx context.Context, app bootstrap.App, cfg appconfig.Config, stdo
 	defer cancelServe()
 
 	followUpCtx, cancel := serveOperationContext(serveCtx)
-	if _, err := runFollowUpCycle(followUpCtx, followUpService, workItemService, now()); err != nil {
+	if _, err := runFollowUpCycle(followUpCtx, followUpService, now()); err != nil {
 		cancel()
 		logBackgroundError(logger, "follow_up", err)
 	}
@@ -1380,7 +1378,7 @@ func runServe(ctx context.Context, app bootstrap.App, cfg appconfig.Config, stdo
 	background.Add(4)
 	go runTaskLoop(serveCtx, &background, jobService, logger)
 	go runSelfHealLoop(serveCtx, &background, recoveryService, logger)
-	go runFollowUpLoop(serveCtx, &background, followUpService, workItemService, logger, now)
+	go runFollowUpLoop(serveCtx, &background, followUpService, logger, now)
 	go runMetricsLoop(serveCtx, &background, metricsService, logger)
 
 	listener, err := serveListen("tcp", cfg.Service.HTTPAddr)
@@ -1734,7 +1732,7 @@ func runMetricsLoop(ctx context.Context, wg *sync.WaitGroup, service metricsvc.S
 	}
 }
 
-func runFollowUpLoop(ctx context.Context, wg *sync.WaitGroup, followUpService followups.Service, workItemService workitems.Service, logger *logs.Logger, now func() time.Time) {
+func runFollowUpLoop(ctx context.Context, wg *sync.WaitGroup, followUpService followups.Service, logger *logs.Logger, now func() time.Time) {
 	defer wg.Done()
 
 	logBackgroundEvent(logger, logs.LevelInfo, "follow_up", "follow-up loop started", map[string]any{
@@ -1750,7 +1748,7 @@ func runFollowUpLoop(ctx context.Context, wg *sync.WaitGroup, followUpService fo
 			return
 		case <-ticker.C:
 			followUpCtx, cancel := serveOperationContext(ctx)
-			if _, err := runFollowUpCycle(followUpCtx, followUpService, workItemService, now()); err != nil {
+			if _, err := runFollowUpCycle(followUpCtx, followUpService, now()); err != nil {
 				cancel()
 				logBackgroundError(logger, "follow_up", err)
 			}
@@ -1759,7 +1757,7 @@ func runFollowUpLoop(ctx context.Context, wg *sync.WaitGroup, followUpService fo
 	}
 }
 
-func runFollowUpCycle(ctx context.Context, followUpService followups.Service, workItemService workitems.Service, now time.Time) (int, error) {
+func runFollowUpCycle(ctx context.Context, followUpService followups.Service, now time.Time) (int, error) {
 	if followUpService.Store == nil {
 		return 0, fmt.Errorf("follow-up store is required")
 	}
@@ -1783,7 +1781,7 @@ func runFollowUpCycle(ctx context.Context, followUpService followups.Service, wo
 			}
 			if initiative.Status == "paused" || initiative.Status == "archived" {
 				if obligation.Status != followups.StatusPaused {
-					if _, err := followUpService.Pause(ctx, workspace.ID, obligation.ID); err != nil {
+					if _, err := followUpService.PauseForInitiativeStatus(ctx, workspace.ID, obligation.ID, initiative.Status); err != nil {
 						return mutated, err
 					}
 					mutated++
@@ -1797,28 +1795,18 @@ func runFollowUpCycle(ctx context.Context, followUpService followups.Service, wo
 		}
 
 		taskKey := followUpTaskKey(obligation)
-		materialization, err := followUpService.Materialize(ctx, followups.MaterializeParams{
+		_, err := followUpService.Materialize(ctx, followups.MaterializeParams{
 			ObligationID: obligation.ID,
 			TaskKey:      taskKey,
 			Title:        obligation.Title,
 			Scope:        "project",
 			RequestedBy:  "operator",
+			TaskStatus:   "blocked",
 		})
 		if err != nil {
 			return mutated, err
 		}
 		mutated++
-
-		task, err := workItemService.Get(ctx, materialization.TaskID)
-		if err != nil {
-			return mutated, err
-		}
-		if task.Status != "blocked" {
-			if _, err := workItemService.Block(ctx, task.ID); err != nil {
-				return mutated, err
-			}
-			mutated++
-		}
 	}
 
 	return mutated, nil
