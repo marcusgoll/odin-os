@@ -15,6 +15,7 @@ import (
 	executorrouter "odin-os/internal/executors/router"
 	"odin-os/internal/registry"
 	registryloader "odin-os/internal/registry/loader"
+	healthsvc "odin-os/internal/runtime/health"
 	runtimestate "odin-os/internal/runtime/state"
 	"odin-os/internal/store/sqlite"
 )
@@ -39,8 +40,24 @@ var migrateStoreFn = func(ctx context.Context, store *sqlite.Store) error {
 	return store.Migrate(ctx)
 }
 
+var serviceOwnedProjectionSurfaces = []string{
+	"doctor",
+	"metrics",
+	"active_runs",
+	"blocked_items",
+	"approvals_waiting",
+	"incidents",
+	"recoveries",
+	"freshness",
+	"project_portfolio",
+}
+
 func WithBootID(ctx context.Context, bootID string) context.Context {
 	return context.WithValue(ctx, bootIDKey, bootID)
+}
+
+func ServiceOwnedProjectionSurfaces() []string {
+	return append([]string(nil), serviceOwnedProjectionSurfaces...)
 }
 
 func Load(ctx context.Context, repoRoot string, runtimeRoot string) (App, error) {
@@ -119,7 +136,7 @@ func Load(ctx context.Context, repoRoot string, runtimeRoot string) (App, error)
 	}
 	executors := executorrouter.DefaultCatalog()
 
-	if err := initializeReadinessState(ctx, store, filepath.Join(repoRoot, "registry"), registrySnapshot, executors); err != nil {
+	if err := initializeReadinessState(ctx, store, filepath.Join(repoRoot, "registry"), registrySnapshot, executorConfig, executors); err != nil {
 		if failureErr := recordBootstrapFailure(ctx, store, runtimeState, bootID, err); failureErr != nil {
 			err = failureErr
 		}
@@ -212,7 +229,7 @@ func writeBootstrapFailureState(ctx context.Context, store *sqlite.Store, bootID
 	return err
 }
 
-func initializeReadinessState(ctx context.Context, store *sqlite.Store, registryRoot string, snapshot registry.Snapshot, executors map[string]contract.Executor) error {
+func initializeReadinessState(ctx context.Context, store *sqlite.Store, registryRoot string, snapshot registry.Snapshot, executorConfig executorrouter.Config, executors map[string]contract.Executor) error {
 	if len(snapshot.Diagnostics) == 0 {
 		versionHash, err := registryVersionHash(registryRoot)
 		if err != nil {
@@ -227,42 +244,12 @@ func initializeReadinessState(ctx context.Context, store *sqlite.Store, registry
 		}
 	}
 
-	for key, executor := range executors {
-		report, err := executor.Health(ctx)
-		if err != nil {
-			continue
-		}
-		if report.Status != contract.HealthStatusHealthy {
-			continue
-		}
-		if _, err := store.RecordExecutorHealth(ctx, sqlite.RecordExecutorHealthParams{
-			Executor:    key,
-			Status:      string(report.Status),
-			LatencyMS:   0,
-			DetailsJSON: `{"source":"bootstrap"}`,
-		}); err != nil {
-			return err
-		}
+	if err := (healthsvc.Service{}).SampleConfiguredExecutors(ctx, store, executorConfig, executors, "bootstrap"); err != nil {
+		return err
 	}
 
-	for _, surface := range []string{
-		"doctor",
-		"metrics",
-		"active_runs",
-		"blocked_items",
-		"approvals_waiting",
-		"incidents",
-		"recoveries",
-		"freshness",
-		"project_portfolio",
-	} {
-		if _, err := store.RecordProjectionFreshness(ctx, sqlite.RecordProjectionFreshnessParams{
-			Surface:     surface,
-			Status:      "current",
-			DetailsJSON: `{"source":"bootstrap"}`,
-		}); err != nil {
-			return err
-		}
+	if err := (healthsvc.Service{}).RefreshProjectionFreshness(ctx, store, ServiceOwnedProjectionSurfaces(), "bootstrap"); err != nil {
+		return err
 	}
 
 	return nil

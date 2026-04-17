@@ -297,3 +297,56 @@ func TestRuntimeStateServiceRejectsBootIdentityMismatch(t *testing.T) {
 		t.Fatalf("GetRuntimeState().Status = %q, want %q", got.Status, "booting")
 	}
 }
+
+func TestRuntimeStateServiceRejectsRevivingDrainingRuntime(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store, err := sqlite.Open(filepath.Join(t.TempDir(), "runtime-state-draining.db"))
+	if err != nil {
+		t.Fatalf("sqlite.Open() error = %v", err)
+	}
+	defer store.Close()
+
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
+	}
+
+	now := time.Date(2026, 4, 16, 15, 0, 0, 0, time.UTC)
+	service := Service{
+		Store: store,
+		Now: func() time.Time {
+			return now
+		},
+	}
+
+	if _, err := service.MarkBooting(ctx, BootInput{BootID: "boot-1", PID: 1234}); err != nil {
+		t.Fatalf("MarkBooting() error = %v", err)
+	}
+	now = now.Add(30 * time.Second)
+	if _, err := service.MarkDraining(ctx, TransitionInput{
+		BootID: "boot-1",
+		Reason: "shutdown requested",
+	}); err != nil {
+		t.Fatalf("MarkDraining() error = %v", err)
+	}
+
+	now = now.Add(15 * time.Second)
+	if _, err := service.MarkReady(ctx, TransitionInput{BootID: "boot-1"}); !errors.Is(err, ErrRuntimeStateDrainLatched) {
+		t.Fatalf("MarkReady(draining) error = %v, want %v", err, ErrRuntimeStateDrainLatched)
+	}
+	if _, err := service.MarkDegraded(ctx, TransitionInput{
+		BootID: "boot-1",
+		Reason: "health degraded during shutdown",
+	}); !errors.Is(err, ErrRuntimeStateDrainLatched) {
+		t.Fatalf("MarkDegraded(draining) error = %v, want %v", err, ErrRuntimeStateDrainLatched)
+	}
+
+	got, err := store.GetRuntimeState(ctx)
+	if err != nil {
+		t.Fatalf("GetRuntimeState() error = %v", err)
+	}
+	if got.Status != "draining" {
+		t.Fatalf("GetRuntimeState().Status = %q, want %q", got.Status, "draining")
+	}
+}

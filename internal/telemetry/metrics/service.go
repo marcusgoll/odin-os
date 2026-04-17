@@ -31,9 +31,10 @@ type Config struct {
 }
 
 type Service struct {
-	DB     *sql.DB
-	Config Config
-	Now    func() time.Time
+	DB           *sql.DB
+	Config       Config
+	Now          func() time.Time
+	ExecutorKeys []string
 }
 
 func formatSQLiteTime(value time.Time) string {
@@ -104,18 +105,47 @@ func (service Service) Collect(ctx context.Context) (Snapshot, error) {
 		return Snapshot{}, err
 	}
 
-	var staleExecutors int
-	if err := service.DB.QueryRowContext(ctx, `
+	query := `
 		SELECT COUNT(*)
 		FROM (
-			SELECT checked_at, status
-			FROM executor_health
-			ORDER BY checked_at DESC, id DESC
-			LIMIT 1
+			SELECT eh.checked_at, eh.status
+			FROM executor_health eh
+			JOIN (
+				SELECT executor, MAX(id) AS max_id
+				FROM executor_health
+				GROUP BY executor
+			) latest ON latest.max_id = eh.id
 		)
-		WHERE status != 'healthy' OR checked_at < ?
-	`, formatSQLiteTime(now.Add(-config.ExecutorFreshnessTTL))).Scan(&staleExecutors); err != nil {
-		return Snapshot{}, err
+	`
+	args := []any{}
+	var staleExecutors int
+	if service.ExecutorKeys != nil && len(service.ExecutorKeys) == 0 {
+		staleExecutors = 0
+	} else {
+		if service.ExecutorKeys != nil {
+			query = `
+			SELECT COUNT(*)
+			FROM (
+				SELECT eh.checked_at, eh.status
+				FROM executor_health eh
+				JOIN (
+					SELECT executor, MAX(id) AS max_id
+					FROM executor_health
+					GROUP BY executor
+				) latest ON latest.max_id = eh.id
+				WHERE eh.executor IN (` + placeholders(len(service.ExecutorKeys)) + `)
+			)
+		`
+			for _, key := range service.ExecutorKeys {
+				args = append(args, key)
+			}
+		}
+		query += ` WHERE status != 'healthy' OR checked_at < ?`
+		args = append(args, formatSQLiteTime(now.Add(-config.ExecutorFreshnessTTL)))
+
+		if err := service.DB.QueryRowContext(ctx, query, args...).Scan(&staleExecutors); err != nil {
+			return Snapshot{}, err
+		}
 	}
 
 	var staleSources int
@@ -164,4 +194,15 @@ func countActiveRecoveries(views []projections.RecoveryView) int {
 		}
 	}
 	return count
+}
+
+func placeholders(count int) string {
+	if count <= 0 {
+		return ""
+	}
+	values := make([]string, 0, count)
+	for i := 0; i < count; i++ {
+		values = append(values, "?")
+	}
+	return strings.Join(values, ", ")
 }

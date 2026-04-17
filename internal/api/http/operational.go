@@ -25,14 +25,14 @@ func NewOperationalHandler(deps Dependencies) http.Handler {
 		writeJSON(writer, http.StatusOK, report)
 	})
 	mux.HandleFunc("/readyz", func(writer http.ResponseWriter, request *http.Request) {
-		report, err := deps.Health.Doctor(request.Context(), deps.RegistryHealthy)
+		report, ready, err := deps.Health.Readiness(request.Context(), deps.RegistryHealthy)
 		if err != nil {
 			http.Error(writer, err.Error(), http.StatusServiceUnavailable)
 			return
 		}
 
 		statusCode := http.StatusOK
-		if report.Status != healthsvc.StatusHealthy {
+		if !ready {
 			statusCode = http.StatusServiceUnavailable
 		}
 		writeJSON(writer, statusCode, report)

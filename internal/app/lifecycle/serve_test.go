@@ -6,18 +6,24 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
 
+	"odin-os/internal/app/bootstrap"
 	"odin-os/internal/core/projects"
 	"odin-os/internal/runtime/checkpoints"
 	runtimeevents "odin-os/internal/runtime/events"
+	healthsvc "odin-os/internal/runtime/health"
+	runtimestate "odin-os/internal/runtime/state"
 	"odin-os/internal/store/sqlite"
 	"odin-os/internal/vcs/leases"
 	"odin-os/internal/vcs/worktrees"
@@ -49,6 +55,7 @@ func TestRunHealthcheckHealthyReturnsNil(t *testing.T) {
 
 	root := createRuntimeRoot(t)
 	seedHealthyRuntime(t, root)
+	seedRuntimeState(t, root, "ready", time.Now().UTC())
 
 	var stdout bytes.Buffer
 	if err := Run(context.Background(), root, []string{"healthcheck"}, strings.NewReader(""), &stdout); err != nil {
@@ -60,17 +67,38 @@ func TestRunHealthcheckHealthyReturnsNil(t *testing.T) {
 	}
 }
 
-func TestRunHealthcheckFreshRuntimeReturnsNil(t *testing.T) {
+func TestRunHealthcheckFreshRuntimeReturnsError(t *testing.T) {
 	t.Parallel()
 
 	root := createRuntimeRoot(t)
 
 	var stdout bytes.Buffer
-	if err := Run(context.Background(), root, []string{"healthcheck"}, strings.NewReader(""), &stdout); err != nil {
-		t.Fatalf("Run(healthcheck fresh runtime) error = %v", err)
+	err := Run(context.Background(), root, []string{"healthcheck"}, strings.NewReader(""), &stdout)
+	if err == nil {
+		t.Fatal("Run(healthcheck fresh runtime) error = nil, want readiness error")
 	}
-	if !strings.Contains(stdout.String(), "ready") {
-		t.Fatalf("healthcheck output = %q, want readiness message", stdout.String())
+	if !strings.Contains(stdout.String(), "runtime not ready") {
+		t.Fatalf("healthcheck output = %q, want runtime-not-ready message", stdout.String())
+	}
+}
+
+func TestRunHealthcheckFailsWhenReadinessFlagIsPresent(t *testing.T) {
+	t.Parallel()
+
+	root := createRuntimeRoot(t)
+	seedHealthyRuntime(t, root)
+	seedRuntimeState(t, root, "ready", time.Now().UTC())
+	if err := writeReadinessFlag(root, "runtime heartbeat failed"); err != nil {
+		t.Fatalf("writeReadinessFlag() error = %v", err)
+	}
+
+	var stdout bytes.Buffer
+	err := Run(context.Background(), root, []string{"healthcheck"}, strings.NewReader(""), &stdout)
+	if err == nil {
+		t.Fatal("Run(healthcheck) error = nil, want readiness error")
+	}
+	if !strings.Contains(stdout.String(), "runtime heartbeat failed") {
+		t.Fatalf("healthcheck output = %q, want readiness-flag reason", stdout.String())
 	}
 }
 
@@ -98,6 +126,29 @@ projects:
 	}
 	if !strings.Contains(stdout.String(), "not ready") {
 		t.Fatalf("healthcheck output = %q, want not ready message", stdout.String())
+	}
+}
+
+func TestRunDoctorScopesEnabledExecutors(t *testing.T) {
+	t.Parallel()
+
+	root := createRuntimeRoot(t)
+	writeUnavailableExecutorsConfig(t, root)
+	seedHealthyRuntime(t, root)
+
+	var stdout bytes.Buffer
+	if err := Run(context.Background(), root, []string{"doctor", "--json"}, strings.NewReader(""), &stdout); err != nil {
+		t.Fatalf("Run(doctor --json) error = %v", err)
+	}
+
+	var report struct {
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+		t.Fatalf("doctor output is not valid json: %v\n%s", err, stdout.String())
+	}
+	if report.Status != "degraded" {
+		t.Fatalf("doctor report status = %q, want %q", report.Status, "degraded")
 	}
 }
 
@@ -555,6 +606,151 @@ service:
 	}
 }
 
+func TestRunHealthCycleDoesNotPromoteDrainingRuntimeToReady(t *testing.T) {
+	t.Parallel()
+
+	root := createRuntimeRoot(t)
+	ctx := bootstrap.WithBootID(context.Background(), "boot-test")
+	app, err := bootstrap.Load(ctx, root, root)
+	if err != nil {
+		t.Fatalf("bootstrap.Load() error = %v", err)
+	}
+	defer app.Store.Close()
+
+	if _, err := app.RuntimeState.MarkDraining(context.Background(), runtimestate.TransitionInput{
+		BootID: "boot-test",
+		Reason: "shutdown requested",
+	}); err != nil {
+		t.Fatalf("MarkDraining() error = %v", err)
+	}
+
+	runHealthCycle(context.Background(), healthLoopDeps{
+		Store:              app.Store,
+		RuntimeState:       app.RuntimeState,
+		Health:             healthsvc.Service{DB: app.Store.DB(), Config: healthsvc.DefaultConfig(), ExecutorKeys: enabledExecutorKeys(app.ExecutorConfig)},
+		Executors:          app.Executors,
+		ExecutorConfig:     app.ExecutorConfig,
+		RegistryHealthy:    len(app.RegistryDiagnostics) == 0,
+		ProjectionSurfaces: bootstrap.ServiceOwnedProjectionSurfaces(),
+		BootID:             "boot-test",
+	}, nil)
+
+	state, err := app.Store.GetRuntimeState(context.Background())
+	if err != nil {
+		t.Fatalf("GetRuntimeState() error = %v", err)
+	}
+	if state.Status != "draining" {
+		t.Fatalf("RuntimeState.Status = %q, want %q", state.Status, "draining")
+	}
+}
+
+func TestRunHealthCycleKeepsRuntimeNotReadyWhenShutdownRequested(t *testing.T) {
+	t.Parallel()
+
+	root := createRuntimeRoot(t)
+	ctx := bootstrap.WithBootID(context.Background(), "boot-test")
+	app, err := bootstrap.Load(ctx, root, root)
+	if err != nil {
+		t.Fatalf("bootstrap.Load() error = %v", err)
+	}
+	defer app.Store.Close()
+
+	if _, err := app.RuntimeState.MarkReady(context.Background(), runtimestate.TransitionInput{
+		BootID: "boot-test",
+		Reason: "ready for shutdown guard test",
+	}); err != nil {
+		t.Fatalf("MarkReady() error = %v", err)
+	}
+	if err := writeReadinessFlag(root, "shutdown requested"); err != nil {
+		t.Fatalf("writeReadinessFlag() error = %v", err)
+	}
+
+	var immediateNotReady atomic.Bool
+	var shutdownRequested atomic.Bool
+	shutdownRequested.Store(true)
+
+	runHealthCycle(context.Background(), healthLoopDeps{
+		Store:        app.Store,
+		RuntimeState: app.RuntimeState,
+		Health: healthsvc.Service{
+			DB:                app.Store.DB(),
+			Config:            healthsvc.DefaultConfig(),
+			ExecutorKeys:      enabledExecutorKeys(app.ExecutorConfig),
+			ImmediateNotReady: &immediateNotReady,
+		},
+		Executors:          app.Executors,
+		ExecutorConfig:     app.ExecutorConfig,
+		RegistryHealthy:    len(app.RegistryDiagnostics) == 0,
+		ProjectionSurfaces: bootstrap.ServiceOwnedProjectionSurfaces(),
+		ShutdownRequested:  &shutdownRequested,
+		BootID:             "boot-test",
+		RuntimeRoot:        root,
+	}, nil)
+
+	if !immediateNotReady.Load() {
+		t.Fatal("ImmediateNotReady = false, want shutdown to keep readiness latched closed")
+	}
+	reason, active, err := readReadinessFlag(root)
+	if err != nil {
+		t.Fatalf("readReadinessFlag() error = %v", err)
+	}
+	if !active {
+		t.Fatal("readiness flag missing after shutdown-requested health cycle")
+	}
+	if !strings.Contains(reason, "shutdown requested") {
+		t.Fatalf("readiness flag reason = %q, want shutdown requested", reason)
+	}
+}
+
+func TestRunHealthCyclePreservesReadinessReasonWhileDraining(t *testing.T) {
+	t.Parallel()
+
+	root := createRuntimeRoot(t)
+	ctx := bootstrap.WithBootID(context.Background(), "boot-test")
+	app, err := bootstrap.Load(ctx, root, root)
+	if err != nil {
+		t.Fatalf("bootstrap.Load() error = %v", err)
+	}
+	defer app.Store.Close()
+
+	if _, err := app.RuntimeState.MarkDraining(context.Background(), runtimestate.TransitionInput{
+		BootID: "boot-test",
+		Reason: "operator requested shutdown",
+	}); err != nil {
+		t.Fatalf("MarkDraining() error = %v", err)
+	}
+	if err := writeReadinessFlag(root, "operator requested shutdown"); err != nil {
+		t.Fatalf("writeReadinessFlag() error = %v", err)
+	}
+
+	runHealthCycle(context.Background(), healthLoopDeps{
+		Store:        app.Store,
+		RuntimeState: app.RuntimeState,
+		Health: healthsvc.Service{
+			DB:           app.Store.DB(),
+			Config:       healthsvc.DefaultConfig(),
+			ExecutorKeys: enabledExecutorKeys(app.ExecutorConfig),
+		},
+		Executors:          app.Executors,
+		ExecutorConfig:     app.ExecutorConfig,
+		RegistryHealthy:    len(app.RegistryDiagnostics) == 0,
+		ProjectionSurfaces: bootstrap.ServiceOwnedProjectionSurfaces(),
+		BootID:             "boot-test",
+		RuntimeRoot:        root,
+	}, nil)
+
+	reason, active, err := readReadinessFlag(root)
+	if err != nil {
+		t.Fatalf("readReadinessFlag() error = %v", err)
+	}
+	if !active {
+		t.Fatal("readiness flag missing while draining")
+	}
+	if reason != "operator requested shutdown" {
+		t.Fatalf("readiness flag reason = %q, want operator requested shutdown", reason)
+	}
+}
+
 func TestRunServeHeartbeatsActiveWorktreeLeases(t *testing.T) {
 	root := createRuntimeRoot(t)
 	writeRuntimeConfig(t, root, `
@@ -646,6 +842,145 @@ service:
 	}
 	if !updated.HeartbeatAt.After(staleAt) {
 		t.Fatalf("HeartbeatAt = %v, want later than %v", updated.HeartbeatAt, staleAt)
+	}
+}
+
+func TestServeHealthLoopRefreshesExecutorHealthAndRuntimeHeartbeat(t *testing.T) {
+	root := createRuntimeRoot(t)
+	writeRuntimeConfig(t, root, `
+version: 1
+runtime:
+  root: .
+service:
+  http_addr: 127.0.0.1:0
+  startup_recovery: false
+`)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	ctx = withServeLoopConfig(ctx, serveLoopConfig{
+		healthInterval: 80 * time.Millisecond,
+	})
+	time.AfterFunc(300*time.Millisecond, cancel)
+
+	var stdout bytes.Buffer
+	err := Run(ctx, root, []string{"serve"}, strings.NewReader(""), &stdout)
+	if err != nil && !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run(serve) error = %v", err)
+	}
+
+	store, err := sqlite.Open(filepath.Join(root, "data", "odin.db"))
+	if err != nil {
+		t.Fatalf("sqlite.Open() error = %v", err)
+	}
+	defer store.Close()
+
+	state, err := store.GetRuntimeState(context.Background())
+	if err != nil {
+		t.Fatalf("GetRuntimeState() error = %v", err)
+	}
+	if state.ReadyAt == nil {
+		t.Fatal("RuntimeState.ReadyAt = nil, want ready transition before periodic heartbeat")
+	}
+	if !state.LastHeartbeatAt.After(*state.ReadyAt) {
+		t.Fatalf("RuntimeState.LastHeartbeatAt = %s, want later than ReadyAt = %s", state.LastHeartbeatAt.Format(time.RFC3339Nano), state.ReadyAt.Format(time.RFC3339Nano))
+	}
+
+	var samples int
+	if err := store.DB().QueryRowContext(context.Background(), `
+		SELECT COUNT(*)
+		FROM executor_health
+		WHERE executor = 'codex_headless'
+	`).Scan(&samples); err != nil {
+		t.Fatalf("count executor_health rows error = %v", err)
+	}
+	if samples < 3 {
+		t.Fatalf("codex_headless samples = %d, want at least 3 after bootstrap, initial health cycle, and periodic refresh", samples)
+	}
+}
+
+func TestServeDegradedRuntimePausesDispatch(t *testing.T) {
+	root := createRuntimeRoot(t)
+	addr := allocateHTTPAddr(t)
+	writeRuntimeConfig(t, root, `
+version: 1
+runtime:
+  root: .
+service:
+  http_addr: `+addr+`
+  startup_recovery: false
+`)
+	writeMutableProjectsConfig(t, root)
+	writeUnavailableExecutorsConfig(t, root)
+	initGitRepo(t, filepath.Join(root, "repos", "alpha"))
+	projectID, taskID := seedQueuedTask(t, root)
+
+	store, err := sqlite.Open(filepath.Join(root, "data", "odin.db"))
+	if err != nil {
+		t.Fatalf("sqlite.Open() error = %v", err)
+	}
+	defer store.Close()
+
+	if _, err := (projects.Service{Store: store}).SetTransitionState(context.Background(), projects.TransitionStateInput{
+		ProjectID:   projectID,
+		Actor:       projects.TransitionControllerOdinOS,
+		TargetState: projects.TransitionStateCutover,
+		ChangedBy:   "test",
+	}); err != nil {
+		t.Fatalf("SetTransitionState(cutover) error = %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	ctx = withServeLoopConfig(ctx, serveLoopConfig{
+		taskInterval:   20 * time.Millisecond,
+		healthInterval: 20 * time.Millisecond,
+	})
+	defer cancel()
+
+	runErr := make(chan error, 1)
+	go func() {
+		runErr <- Run(ctx, root, []string{"serve"}, strings.NewReader(""), io.Discard)
+	}()
+
+	if err := waitForServeHealthStatus(ctx, "http://"+addr, http.StatusOK, "degraded"); err != nil {
+		t.Fatal(err)
+	}
+	if err := waitForServeHealthStatus(ctx, "http://"+addr, http.StatusServiceUnavailable, "degraded", "/readyz"); err != nil {
+		t.Fatal(err)
+	}
+
+	cancel()
+
+	err = <-runErr
+	if err != nil && !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run(serve) error = %v", err)
+	}
+
+	task, err := store.GetTask(context.Background(), taskID)
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
+	}
+	if task.Status != "queued" {
+		t.Fatalf("Task.Status = %q, want %q while runtime is degraded", task.Status, "queued")
+	}
+
+	statuses, err := lifecycleStatuses(store)
+	if err != nil {
+		t.Fatalf("lifecycleStatuses() error = %v", err)
+	}
+	for _, status := range statuses {
+		if status == "ready" {
+			t.Fatalf("statuses = %v, want degraded runtime without ready transition", statuses)
+		}
+	}
+	foundDegraded := false
+	for _, status := range statuses {
+		if status == "degraded" {
+			foundDegraded = true
+			break
+		}
+	}
+	if !foundDegraded {
+		t.Fatalf("statuses = %v, want degraded transition", statuses)
 	}
 }
 
@@ -859,6 +1194,28 @@ routes:
 	return root
 }
 
+func writeUnavailableExecutorsConfig(t *testing.T, root string) {
+	t.Helper()
+
+	if err := os.WriteFile(filepath.Join(root, "config", "executors.yaml"), []byte(`
+version: 1
+executors:
+  - key: claude_code_headless
+    adapter: claude_code_headless
+    class: plan_backed_cli
+    enabled: true
+    priority: 10
+routes:
+  - name: default
+    match:
+      task_kinds: [general, plan, build, review, qa, research]
+      scopes: [global, odin-core, project, new-project]
+    preferred: [claude_code_headless]
+`), 0o644); err != nil {
+		t.Fatalf("write executors config: %v", err)
+	}
+}
+
 func writeMutableProjectsConfig(t *testing.T, root string) {
 	t.Helper()
 
@@ -991,6 +1348,40 @@ func seedHealthyRuntime(t *testing.T, root string) {
 	}
 }
 
+func seedRuntimeState(t *testing.T, root string, status string, heartbeatAt time.Time) {
+	t.Helper()
+
+	store, err := sqlite.Open(filepath.Join(root, "data", "odin.db"))
+	if err != nil {
+		t.Fatalf("sqlite.Open() error = %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
+	}
+
+	readyAt := (*time.Time)(nil)
+	if status == "ready" {
+		readyValue := heartbeatAt.UTC()
+		readyAt = &readyValue
+	}
+	if _, err := store.UpsertRuntimeState(ctx, sqlite.UpsertRuntimeStateParams{
+		BootID:             "boot-test",
+		Status:             status,
+		PID:                1234,
+		StartedAt:          heartbeatAt.UTC(),
+		ReadyAt:            readyAt,
+		LastHeartbeatAt:    heartbeatAt.UTC(),
+		LastShutdownReason: "",
+		LastError:          "",
+		UpdatedAt:          heartbeatAt.UTC(),
+	}, sqlite.RuntimeStateWriteOptions{}); err != nil {
+		t.Fatalf("UpsertRuntimeState() error = %v", err)
+	}
+}
+
 func seedQueuedTask(t *testing.T, root string) (int64, int64) {
 	t.Helper()
 
@@ -1082,6 +1473,18 @@ func holdServiceLock(t *testing.T, root string) {
 	})
 }
 
+func allocateHTTPAddr(t *testing.T) string {
+	t.Helper()
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("net.Listen() error = %v", err)
+	}
+	defer listener.Close()
+
+	return listener.Addr().String()
+}
+
 func seedRunningTask(t *testing.T, root string) (int64, int64, int64) {
 	t.Helper()
 
@@ -1161,6 +1564,45 @@ func lifecycleStatuses(store *sqlite.Store) ([]string, error) {
 		statuses = append(statuses, payload.Status)
 	}
 	return statuses, nil
+}
+
+func waitForServeHealthStatus(ctx context.Context, baseURL string, wantCode int, wantStatus string, pathOverride ...string) error {
+	path := "/healthz"
+	if len(pathOverride) > 0 && pathOverride[0] != "" {
+		path = pathOverride[0]
+	}
+
+	deadline := time.NewTimer(2 * time.Second)
+	defer deadline.Stop()
+
+	ticker := time.NewTicker(20 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("timed out waiting for %s%s readiness probe", baseURL, path)
+		case <-deadline.C:
+			return fmt.Errorf("timed out waiting for %s%s readiness probe", baseURL, path)
+		case <-ticker.C:
+			response, err := http.Get(baseURL + path)
+			if err != nil {
+				continue
+			}
+
+			var report struct {
+				Status string `json:"status"`
+			}
+			decodeErr := json.NewDecoder(response.Body).Decode(&report)
+			_ = response.Body.Close()
+			if decodeErr != nil {
+				continue
+			}
+			if response.StatusCode == wantCode && report.Status == wantStatus {
+				return nil
+			}
+		}
+	}
 }
 
 func assertLifecycleSequence(t *testing.T, statuses []string, want []string) {

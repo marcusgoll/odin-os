@@ -205,3 +205,40 @@ func TestServiceCollectReflectsRuntimeConditions(t *testing.T) {
 		t.Fatalf("blocked items = %d, want > 0", snapshot.BlockedItems)
 	}
 }
+
+func TestServiceCollectIgnoresHistoricalExecutorsWhenScopeIsExplicitlyEmpty(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	now := time.Now().UTC()
+	store, err := sqlite.Open(filepath.Join(t.TempDir(), "odin.db"))
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer store.Close()
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
+	}
+
+	if _, err := store.RecordExecutorHealth(ctx, sqlite.RecordExecutorHealthParams{
+		Executor:    "codex_headless",
+		Status:      "unavailable",
+		LatencyMS:   10,
+		DetailsJSON: `{"source":"test"}`,
+	}); err != nil {
+		t.Fatalf("RecordExecutorHealth() error = %v", err)
+	}
+
+	snapshot, err := Service{
+		DB:           store.DB(),
+		Config:       Config{ExecutorFreshnessTTL: time.Hour, SourceFreshnessTTL: time.Hour, ProjectionFreshnessTTL: time.Hour},
+		Now:          func() time.Time { return now },
+		ExecutorKeys: []string{},
+	}.Collect(ctx)
+	if err != nil {
+		t.Fatalf("Collect() error = %v", err)
+	}
+	if snapshot.StaleExecutors != 0 {
+		t.Fatalf("StaleExecutors = %d, want 0 when executor scope is explicitly empty", snapshot.StaleExecutors)
+	}
+}

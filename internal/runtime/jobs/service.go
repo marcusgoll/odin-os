@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"odin-os/internal/cli/scope"
@@ -21,13 +22,14 @@ import (
 )
 
 type Service struct {
-	Store          *sqlite.Store
-	Registry       projects.Registry
-	Executors      map[string]contract.Executor
-	ExecutorConfig executorrouter.Config
-	Transitions    projects.Service
-	Leases         leases.Manager
-	Now            func() time.Time
+	Store             *sqlite.Store
+	Registry          projects.Registry
+	Executors         map[string]contract.Executor
+	ExecutorConfig    executorrouter.Config
+	Transitions       projects.Service
+	Leases            leases.Manager
+	ShutdownRequested *atomic.Bool
+	Now               func() time.Time
 }
 
 type admissionOutcome string
@@ -95,6 +97,9 @@ func (service Service) CreateTaskFromAct(ctx context.Context, resolved scope.Res
 func (service Service) ExecuteNextQueued(ctx context.Context) error {
 	if service.Store == nil {
 		return fmt.Errorf("job store is required")
+	}
+	if !service.dispatchAllowed() {
+		return nil
 	}
 
 	task, err := service.nextQueuedTask(ctx)
@@ -168,10 +173,16 @@ func (service Service) ExecuteNextQueued(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	if !service.dispatchAllowed() {
+		return nil
+	}
 
 	run, err := service.prepareRun(ctx, task, decision.ExecutorKey, attempt)
 	if err != nil {
 		return err
+	}
+	if !service.dispatchAllowed() {
+		return service.interruptDispatch(ctx, run.ID)
 	}
 
 	assignment, leaseAdmission, err := service.prepareLease(ctx, task, project, manifest, run, attempt)
@@ -181,6 +192,9 @@ func (service Service) ExecuteNextQueued(ctx context.Context) error {
 	if leaseAdmission.Outcome != admissionDispatchable {
 		return service.finalizeOutcome(ctx, task, run, leaseAdmission, contract.ExecutionResult{}, nil)
 	}
+	if !service.dispatchAllowed() {
+		return service.interruptDispatch(ctx, run.ID)
+	}
 
 	if _, run, err = service.Store.UpdateRunAndTaskStatus(ctx, sqlite.UpdateRunAndTaskStatusParams{
 		RunID:      run.ID,
@@ -188,6 +202,9 @@ func (service Service) ExecuteNextQueued(ctx context.Context) error {
 		TaskStatus: "running",
 	}); err != nil {
 		return err
+	}
+	if !service.dispatchAllowed() {
+		return service.interruptDispatch(ctx, run.ID)
 	}
 
 	spec.Metadata["branch_name"] = assignment.BranchName
@@ -204,6 +221,21 @@ func (service Service) now() time.Time {
 		return service.Now().UTC()
 	}
 	return time.Now().UTC()
+}
+
+func (service Service) dispatchAllowed() bool {
+	return service.ShutdownRequested == nil || !service.ShutdownRequested.Load()
+}
+
+func (service Service) interruptDispatch(ctx context.Context, runID int64) error {
+	if service.Store == nil {
+		return nil
+	}
+	_, _, err := service.Store.InterruptRunAndRequeueTask(ctx, sqlite.InterruptRunAndRequeueTaskParams{
+		RunID:   runID,
+		Summary: "dispatch canceled: shutdown requested",
+	})
+	return err
 }
 
 func (service Service) ensureRuntimeProject(ctx context.Context, manifest projects.Manifest) (sqlite.Project, error) {

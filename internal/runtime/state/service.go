@@ -2,11 +2,14 @@ package state
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
 	"odin-os/internal/store/sqlite"
 )
+
+var ErrRuntimeStateDrainLatched = errors.New("runtime state is draining or stopped")
 
 type Service struct {
 	Store *sqlite.Store
@@ -127,6 +130,9 @@ func (service Service) transition(ctx context.Context, status string, input Tran
 	if err != nil {
 		return sqlite.RuntimeState{}, err
 	}
+	if transitionBlocked(current.Status, status) {
+		return sqlite.RuntimeState{}, ErrRuntimeStateDrainLatched
+	}
 
 	now := service.now()
 	params := sqlite.UpsertRuntimeStateParams{
@@ -149,6 +155,15 @@ func (service Service) transition(ctx context.Context, status string, input Tran
 		ExpectedUpdatedAt: current.UpdatedAt,
 		EventReason:       transitionReason(input),
 	})
+}
+
+func transitionBlocked(currentStatus, nextStatus string) bool {
+	switch currentStatus {
+	case "draining", "stopped":
+		return nextStatus != "stopped"
+	default:
+		return false
+	}
 }
 
 func transitionReason(input TransitionInput) string {

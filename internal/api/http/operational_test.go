@@ -14,9 +14,10 @@ import (
 	healthsvc "odin-os/internal/runtime/health"
 	"odin-os/internal/store/sqlite"
 	metricsvc "odin-os/internal/telemetry/metrics"
+	"time"
 )
 
-func TestOperationalHandlerExposesHealthReadyAndMetrics(t *testing.T) {
+func TestReadyzReturnsHealthyWhenRuntimeIsReady(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
@@ -24,6 +25,7 @@ func TestOperationalHandlerExposesHealthReadyAndMetrics(t *testing.T) {
 	defer store.Close()
 
 	seedHealthyObservability(t, ctx, store)
+	seedRuntimeState(t, ctx, store, "ready")
 
 	server := httptest.NewServer(httpapi.NewOperationalHandler(httpapi.Dependencies{
 		Health: healthsvc.Service{DB: store.DB()},
@@ -54,7 +56,60 @@ func TestOperationalHandlerExposesHealthReadyAndMetrics(t *testing.T) {
 	}
 }
 
-func TestOperationalHandlerDegradesReadyzWhenRuntimeIsNotReady(t *testing.T) {
+func TestReadyzFailsClosedWhenRuntimeIsNotReady(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openStore(t)
+	defer store.Close()
+
+	seedHealthyObservability(t, ctx, store)
+	seedRuntimeState(t, ctx, store, "booting")
+
+	server := httptest.NewServer(httpapi.NewOperationalHandler(httpapi.Dependencies{
+		Health: healthsvc.Service{DB: store.DB()},
+		Metrics: metricsvc.Service{
+			DB: store.DB(),
+		},
+		RegistryHealthy: true,
+	}))
+	defer server.Close()
+
+	assertReportStatus(t, server.URL+"/healthz", http.StatusOK, "healthy")
+	assertReportStatus(t, server.URL+"/readyz", http.StatusServiceUnavailable, "healthy")
+}
+
+func TestReadyzFailsClosedWhenRuntimeHeartbeatIsStale(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now().UTC()
+	ctx := context.Background()
+	store := openStore(t)
+	defer store.Close()
+
+	seedHealthyObservability(t, ctx, store)
+	seedRuntimeStateWithHeartbeat(t, ctx, store, "ready", now.Add(-2*time.Hour))
+
+	server := httptest.NewServer(httpapi.NewOperationalHandler(httpapi.Dependencies{
+		Health: healthsvc.Service{
+			DB: store.DB(),
+			Config: healthsvc.Config{
+				RuntimeHeartbeatTTL: 1 * time.Minute,
+			},
+			Now: func() time.Time { return now },
+		},
+		Metrics: metricsvc.Service{
+			DB: store.DB(),
+		},
+		RegistryHealthy: true,
+	}))
+	defer server.Close()
+
+	assertReportStatus(t, server.URL+"/healthz", http.StatusOK, "healthy")
+	assertReportStatus(t, server.URL+"/readyz", http.StatusServiceUnavailable, "healthy")
+}
+
+func TestReadyzIsUnavailableWhenDoctorIsDegraded(t *testing.T) {
 	t.Parallel()
 
 	store := openStore(t)
@@ -110,6 +165,35 @@ func seedHealthyObservability(t *testing.T, ctx context.Context, store *sqlite.S
 		DetailsJSON: `{"source":"test"}`,
 	}); err != nil {
 		t.Fatalf("RecordProjectionFreshness() error = %v", err)
+	}
+}
+
+func seedRuntimeState(t *testing.T, ctx context.Context, store *sqlite.Store, status string) {
+	t.Helper()
+
+	seedRuntimeStateWithHeartbeat(t, ctx, store, status, time.Now().UTC())
+}
+
+func seedRuntimeStateWithHeartbeat(t *testing.T, ctx context.Context, store *sqlite.Store, status string, heartbeatAt time.Time) {
+	t.Helper()
+
+	readyAt := (*time.Time)(nil)
+	if status == "ready" {
+		readyValue := heartbeatAt
+		readyAt = &readyValue
+	}
+	if _, err := store.UpsertRuntimeState(ctx, sqlite.UpsertRuntimeStateParams{
+		BootID:             "boot-test",
+		Status:             status,
+		PID:                1234,
+		StartedAt:          heartbeatAt,
+		ReadyAt:            readyAt,
+		LastHeartbeatAt:    heartbeatAt,
+		LastShutdownReason: "",
+		LastError:          "",
+		UpdatedAt:          heartbeatAt,
+	}, sqlite.RuntimeStateWriteOptions{}); err != nil {
+		t.Fatalf("UpsertRuntimeState() error = %v", err)
 	}
 }
 
