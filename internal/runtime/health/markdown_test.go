@@ -47,15 +47,25 @@ func TestRenderMarkdownReportOrdersFindingsBeforeRecommendations(t *testing.T) {
 
 	output := RenderMarkdownReport(report)
 
-	findingsIdx := strings.Index(output, "## Key Findings")
-	recommendationsIdx := strings.Index(output, "## Upgrade and Improvement Recommendations")
-	if findingsIdx == -1 || recommendationsIdx == -1 {
-		t.Fatalf("output missing required sections\n%s", output)
+	sections := []string{
+		"## Current Health Snapshot",
+		"## Key Findings",
+		"## Likely Root Causes",
+		"## Upgrade and Improvement Recommendations",
+		"## Missing Telemetry",
+		"## Final Verdict",
 	}
-	if findingsIdx > recommendationsIdx {
-		t.Fatalf("findings section appears after recommendations\n%s", output)
+	lastIdx := -1
+	for _, section := range sections {
+		idx := strings.Index(output, section)
+		if idx == -1 {
+			t.Fatalf("output missing required section %q\n%s", section, output)
+		}
+		if idx < lastIdx {
+			t.Fatalf("section %q appears out of order\n%s", section, output)
+		}
+		lastIdx = idx
 	}
-
 	if !strings.Contains(output, "| Area | Severity | Observation | Why It Matters | Confidence |") {
 		t.Fatalf("output missing findings table header\n%s", output)
 	}
