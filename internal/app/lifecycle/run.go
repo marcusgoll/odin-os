@@ -34,6 +34,7 @@ import (
 	runtimeevents "odin-os/internal/runtime/events"
 	healthsvc "odin-os/internal/runtime/health"
 	"odin-os/internal/runtime/jobs"
+	"odin-os/internal/runtime/projections"
 	"odin-os/internal/runtime/recovery"
 	"odin-os/internal/runtime/runs"
 	"odin-os/internal/runtime/supervision"
@@ -47,7 +48,7 @@ import (
 
 var errRuntimeNotReady = errors.New("runtime not ready")
 
-const rootUsageBanner = "Usage: odin <command> [args]\n\nCommands: help repl doctor healthcheck serve backup restore verify-backup status project scope jobs runs approvals logs task initiative companion profile followup transition skills"
+const rootUsageBanner = "Usage: odin <command> [args]\n\nCommands: help repl doctor healthcheck serve backup restore verify-backup status project scope jobs runs approvals agenda logs task initiative companion profile followup transition skills"
 
 var (
 	serveTaskLoopInterval     = 1 * time.Second
@@ -118,6 +119,8 @@ func Run(ctx context.Context, root string, args []string, stdin io.Reader, stdou
 		return runRuns(ctx, app, rootCommand.Args, stdout)
 	case "approvals":
 		return runApprovals(ctx, app, rootCommand.Args, stdout)
+	case "agenda":
+		return runAgenda(ctx, app, rootCommand.Args, stdout)
 	case "logs":
 		return runLogs(ctx, app, rootCommand.Args, stdout)
 	case "task":
@@ -378,6 +381,22 @@ func runApprovals(ctx context.Context, app bootstrap.App, args []string, stdout 
 		}
 	}
 	return nil
+}
+
+func runAgenda(ctx context.Context, app bootstrap.App, args []string, stdout io.Writer) error {
+	command, err := commands.ParseAgenda(args)
+	if err != nil {
+		return err
+	}
+
+	view, err := projections.GetAgendaView(ctx, app.Store.DB(), workspaces.DefaultWorkspaceKey, time.Now().UTC())
+	if err != nil {
+		return err
+	}
+	if command.JSON {
+		return commands.WriteJSON(stdout, view)
+	}
+	return commands.WriteAgendaText(stdout, view)
 }
 
 func runLogs(ctx context.Context, app bootstrap.App, args []string, stdout io.Writer) error {
@@ -979,33 +998,21 @@ func scopeLabel(resolved scope.Resolution) string {
 }
 
 func listPendingApprovals(ctx context.Context, store *sqlite.Store, resolved scope.Resolution) ([]commands.ApprovalView, error) {
-	rows, err := store.DB().QueryContext(ctx, `
-		SELECT t.key, a.status, t.scope, p.key
-		FROM approvals a
-		JOIN tasks t ON t.id = a.task_id
-		JOIN projects p ON p.id = t.project_id
-		WHERE a.status = 'pending'
-		ORDER BY a.id ASC
-	`)
+	views, err := projections.ListPendingApprovalViews(ctx, store.DB())
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 
-	var approvals []commands.ApprovalView
-	for rows.Next() {
-		var approval commands.ApprovalView
-		var projectKey string
-		var taskScope string
-		if err := rows.Scan(&approval.TaskKey, &approval.Status, &taskScope, &projectKey); err != nil {
-			return nil, err
-		}
-		if matchesTaskProjectionScope(projectKey, taskScope, resolved) {
-			approvals = append(approvals, approval)
+	approvals := make([]commands.ApprovalView, 0, len(views))
+	for _, view := range views {
+		if matchesTaskProjectionScope(view.ProjectKey, view.TaskScope, resolved) {
+			approvals = append(approvals, commands.ApprovalView{
+				TaskKey: view.TaskKey,
+				Status:  view.Status,
+			})
 		}
 	}
-
-	return approvals, rows.Err()
+	return approvals, nil
 }
 
 func listLogs(ctx context.Context, store *sqlite.Store, resolved scope.Resolution) ([]runtimeevents.Record, error) {

@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"net/http"
+	"time"
 
 	"odin-os/internal/core/workspaces"
 	healthsvc "odin-os/internal/runtime/health"
@@ -99,6 +100,22 @@ func NewOperationalHandler(deps Dependencies) http.Handler {
 			return
 		}
 		writeJSON(writer, http.StatusOK, views)
+	})
+	mux.HandleFunc("/agenda", func(writer http.ResponseWriter, request *http.Request) {
+		if deps.ReadModels == nil {
+			http.Error(writer, "read models unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		view, err := projections.GetAgendaView(request.Context(), deps.ReadModels, workspaces.DefaultWorkspaceKey, time.Now().UTC())
+		if err != nil {
+			if err == sql.ErrNoRows {
+				http.NotFound(writer, request)
+				return
+			}
+			http.Error(writer, err.Error(), http.StatusServiceUnavailable)
+			return
+		}
+		writeJSON(writer, http.StatusOK, view)
 	})
 	return mux
 }
