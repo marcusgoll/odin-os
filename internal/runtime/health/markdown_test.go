@@ -160,3 +160,24 @@ func TestRenderMarkdownReportRendersCoverageProvenanceAndRecommendationMetadata(
 		t.Fatalf("metadata sections out of order\n%s", output)
 	}
 }
+
+func TestRenderMarkdownReportRendersHealthyCoverageAsEvaluatedOnly(t *testing.T) {
+	report := OperatorReport{
+		Coverage: CoverageMetadata{
+			Evaluated: []string{"database", "registry"},
+		},
+		FinalVerdict: FinalVerdict{
+			Status:  StatusHealthy,
+			Summary: "all evaluated checks are healthy",
+		},
+	}
+
+	output := RenderMarkdownReport(report)
+
+	if !strings.Contains(output, "| database, registry | None |") {
+		t.Fatalf("output should render healthy coverage with no unknown areas\n%s", output)
+	}
+	if strings.Contains(output, "Unknown Areas |\n| --- | --- |\n| None | database") {
+		t.Fatalf("output incorrectly renders healthy areas as unknown\n%s", output)
+	}
+}

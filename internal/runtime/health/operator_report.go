@@ -246,9 +246,8 @@ func BuildOperatorReport(raw Report) OperatorReport {
 
 	for _, check := range raw.Checks {
 		match := lookupReportRule(check)
-		if match.explicit {
-			addUniqueString(&report.Coverage.Evaluated, evaluatedSeen, check.Name)
-		} else {
+		addUniqueString(&report.Coverage.Evaluated, evaluatedSeen, check.Name)
+		if shouldMarkCoverageUnknown(check, match) {
 			addUniqueString(&report.Coverage.Unknown, unknownSeen, check.Name)
 		}
 
@@ -402,6 +401,13 @@ func provenanceForMatch(match reportRuleMatch) string {
 		return "confirmed"
 	}
 	return "inferred"
+}
+
+func shouldMarkCoverageUnknown(check Check, match reportRuleMatch) bool {
+	if check.Status == StatusHealthy {
+		return false
+	}
+	return !match.explicit || match.rule.Confidence == "reduced"
 }
 
 func severityOrder(severity Severity) int {
