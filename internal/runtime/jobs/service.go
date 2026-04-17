@@ -10,7 +10,9 @@ import (
 	"time"
 
 	"odin-os/internal/cli/scope"
+	coreinitiatives "odin-os/internal/core/initiatives"
 	"odin-os/internal/core/projects"
+	coreworkspaces "odin-os/internal/core/workspaces"
 	"odin-os/internal/executors/contract"
 	executorrouter "odin-os/internal/executors/router"
 	"odin-os/internal/runtime/projections"
@@ -19,6 +21,8 @@ import (
 	"odin-os/internal/tools/budgets"
 	"odin-os/internal/vcs/leases"
 )
+
+const defaultWorkspaceKey = "marcus"
 
 type Service struct {
 	Store          *sqlite.Store
@@ -626,6 +630,10 @@ func (service Service) recordExecutionMemory(ctx context.Context, project sqlite
 	if run == nil {
 		return nil
 	}
+	workspaceID, initiativeID, err := service.memoryOwnersForProject(ctx, project.ID)
+	if err != nil {
+		return err
+	}
 	responseText := strings.TrimSpace(run.Summary)
 	if responseText == "" {
 		responseText = fmt.Sprintf("Task %s finished with status %s.", task.Key, run.Status)
@@ -640,16 +648,18 @@ func (service Service) recordExecutionMemory(ctx context.Context, project sqlite
 		return err
 	}
 	transcript, err := service.Store.RecordConversationTranscript(ctx, sqlite.RecordConversationTranscriptParams{
-		ProjectID:   &project.ID,
-		TaskID:      &task.ID,
-		RunID:       &run.ID,
-		Scope:       task.Scope,
-		ScopeKey:    project.Key,
-		Mode:        "act",
-		Prompt:      strings.TrimSpace(prompt),
-		Response:    responseText,
-		ToolSummary: string(toolSummaryBytes),
-		Executor:    run.Executor,
+		ProjectID:    &project.ID,
+		WorkspaceID:  workspaceID,
+		InitiativeID: initiativeID,
+		TaskID:       &task.ID,
+		RunID:        &run.ID,
+		Scope:        task.Scope,
+		ScopeKey:     project.Key,
+		Mode:         "act",
+		Prompt:       strings.TrimSpace(prompt),
+		Response:     responseText,
+		ToolSummary:  string(toolSummaryBytes),
+		Executor:     run.Executor,
 	})
 	if err != nil {
 		return err
@@ -675,16 +685,48 @@ func (service Service) recordExecutionMemory(ctx context.Context, project sqlite
 
 	_, err = service.Store.RecordMemorySummary(ctx, sqlite.RecordMemorySummaryParams{
 		ProjectID:          &project.ID,
+		WorkspaceID:        workspaceID,
+		InitiativeID:       initiativeID,
 		SourceTranscriptID: &transcript.ID,
 		TaskID:             &task.ID,
 		RunID:              &run.ID,
 		Scope:              task.Scope,
 		ScopeKey:           project.Key,
+		VisibilityScope:    "initiative",
+		RetentionClass:     "episodic",
 		MemoryType:         "episode",
 		Summary:            summaryText,
 		DetailsJSON:        string(detailsBytes),
 	})
 	return err
+}
+
+func (service Service) memoryOwnersForProject(ctx context.Context, projectID int64) (*int64, *int64, error) {
+	if service.Store == nil {
+		return nil, nil, nil
+	}
+
+	workspace, err := coreworkspaces.Service{Store: service.Store}.GetByKey(ctx, defaultWorkspaceKey)
+	switch {
+	case err == nil:
+	case err == sql.ErrNoRows:
+		return nil, nil, nil
+	default:
+		return nil, nil, err
+	}
+
+	workspaceID := workspace.ID
+	initiatives, err := coreinitiatives.Service{Store: service.Store}.ListByWorkspace(ctx, workspace.ID)
+	if err != nil {
+		return nil, nil, err
+	}
+	for _, initiative := range initiatives {
+		if initiative.LinkedProjectID != nil && *initiative.LinkedProjectID == projectID {
+			initiativeID := initiative.ID
+			return &workspaceID, &initiativeID, nil
+		}
+	}
+	return &workspaceID, nil, nil
 }
 func (service Service) executionConfig(ctx context.Context) (executorrouter.Config, error) {
 	config := service.ExecutorConfig

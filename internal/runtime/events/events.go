@@ -183,18 +183,24 @@ type ContextPacketCreatedPayload struct {
 }
 
 type ConversationTranscriptRecordedPayload struct {
-	Scope    string `json:"scope"`
-	ScopeKey string `json:"scope_key"`
-	Mode     string `json:"mode"`
-	Executor string `json:"executor,omitempty"`
-	TaskID   *int64 `json:"task_id,omitempty"`
-	RunID    *int64 `json:"run_id,omitempty"`
+	Scope        string `json:"scope"`
+	ScopeKey     string `json:"scope_key"`
+	Mode         string `json:"mode"`
+	Executor     string `json:"executor,omitempty"`
+	WorkspaceID  *int64 `json:"workspace_id,omitempty"`
+	InitiativeID *int64 `json:"initiative_id,omitempty"`
+	CompanionID  *int64 `json:"companion_id,omitempty"`
+	TaskID       *int64 `json:"task_id,omitempty"`
+	RunID        *int64 `json:"run_id,omitempty"`
 }
 
 type MemorySummaryRecordedPayload struct {
 	Scope              string `json:"scope"`
 	ScopeKey           string `json:"scope_key"`
 	MemoryType         string `json:"memory_type"`
+	WorkspaceID        *int64 `json:"workspace_id,omitempty"`
+	InitiativeID       *int64 `json:"initiative_id,omitempty"`
+	CompanionID        *int64 `json:"companion_id,omitempty"`
 	SourceTranscriptID *int64 `json:"source_transcript_id,omitempty"`
 	TaskID             *int64 `json:"task_id,omitempty"`
 	RunID              *int64 `json:"run_id,omitempty"`

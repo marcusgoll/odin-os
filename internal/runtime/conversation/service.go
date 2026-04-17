@@ -9,7 +9,9 @@ import (
 
 	"odin-os/internal/cli/commands"
 	"odin-os/internal/cli/scope"
+	coreinitiatives "odin-os/internal/core/initiatives"
 	"odin-os/internal/core/projects"
+	coreworkspaces "odin-os/internal/core/workspaces"
 	"odin-os/internal/executors/contract"
 	executorrouter "odin-os/internal/executors/router"
 	healthsvc "odin-os/internal/runtime/health"
@@ -18,6 +20,8 @@ import (
 	runsvc "odin-os/internal/runtime/runs"
 	"odin-os/internal/store/sqlite"
 )
+
+const defaultWorkspaceKey = "marcus"
 
 type Service struct {
 	Store               *sqlite.Store
@@ -470,6 +474,10 @@ func (service Service) recordTranscript(ctx context.Context, request Request, re
 	if err != nil {
 		return err
 	}
+	workspaceID, initiativeID, err := service.memoryOwnersForScope(ctx, projectID)
+	if err != nil {
+		return err
+	}
 
 	toolSummary := strings.TrimSpace(response.Intent)
 	if response.Warning != "" {
@@ -480,16 +488,50 @@ func (service Service) recordTranscript(ctx context.Context, request Request, re
 	}
 
 	_, err = service.Store.RecordConversationTranscript(ctx, sqlite.RecordConversationTranscriptParams{
-		ProjectID:   projectID,
-		Scope:       service.scopeKindLabel(request.Scope),
-		ScopeKey:    service.scopeLabel(request.Scope),
-		Mode:        service.modeLabel(request.Mode),
-		Prompt:      strings.TrimSpace(request.Prompt),
-		Response:    strings.TrimSpace(response.Answer),
-		ToolSummary: toolSummary,
-		Executor:    response.ExecutorKey,
+		ProjectID:    projectID,
+		WorkspaceID:  workspaceID,
+		InitiativeID: initiativeID,
+		Scope:        service.scopeKindLabel(request.Scope),
+		ScopeKey:     service.scopeLabel(request.Scope),
+		Mode:         service.modeLabel(request.Mode),
+		Prompt:       strings.TrimSpace(request.Prompt),
+		Response:     strings.TrimSpace(response.Answer),
+		ToolSummary:  toolSummary,
+		Executor:     response.ExecutorKey,
 	})
 	return err
+}
+
+func (service Service) memoryOwnersForScope(ctx context.Context, projectID *int64) (*int64, *int64, error) {
+	if service.Store == nil {
+		return nil, nil, nil
+	}
+
+	workspace, err := coreworkspaces.Service{Store: service.Store}.GetByKey(ctx, defaultWorkspaceKey)
+	switch {
+	case err == nil:
+	case err == sql.ErrNoRows:
+		return nil, nil, nil
+	default:
+		return nil, nil, err
+	}
+
+	workspaceID := workspace.ID
+	if projectID == nil {
+		return &workspaceID, nil, nil
+	}
+
+	initiatives, err := coreinitiatives.Service{Store: service.Store}.ListByWorkspace(ctx, workspace.ID)
+	if err != nil {
+		return nil, nil, err
+	}
+	for _, initiative := range initiatives {
+		if initiative.LinkedProjectID != nil && *initiative.LinkedProjectID == *projectID {
+			initiativeID := initiative.ID
+			return &workspaceID, &initiativeID, nil
+		}
+	}
+	return &workspaceID, nil, nil
 }
 
 func (service Service) projectIDForScope(ctx context.Context, resolved scope.Resolution) (*int64, error) {

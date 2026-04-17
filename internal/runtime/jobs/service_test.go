@@ -414,7 +414,7 @@ func TestExecuteNextQueuedRejectsExplicitBoundedActionOnPromotionLine(t *testing
 	}
 }
 
-func TestForegroundActExecutionPersistsTranscriptAndEpisode(t *testing.T) {
+func TestTranscriptForegroundActExecutionPersistsTranscriptAndEpisode(t *testing.T) {
 	configureHarnessDriver(t)
 
 	ctx := context.Background()
@@ -450,6 +450,8 @@ func TestForegroundActExecutionPersistsTranscriptAndEpisode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetProjectByKey(alpha) error = %v", err)
 	}
+	workspace := createJobWorkspace(t, ctx, store)
+	initiative := createJobInitiative(t, ctx, store, workspace.ID, "alpha-initiative", &project.ID)
 	if _, err := service.Transitions.SetTransitionState(ctx, projects.TransitionStateInput{
 		ProjectID:      project.ID,
 		Actor:          projects.TransitionControllerOdinOS,
@@ -470,12 +472,14 @@ func TestForegroundActExecutionPersistsTranscriptAndEpisode(t *testing.T) {
 	}
 
 	transcripts, err := store.ListConversationTranscripts(ctx, sqlite.ListConversationTranscriptsParams{
-		ProjectID: &project.ID,
-		TaskID:    &task.ID,
-		RunID:     &outcome.Run.ID,
-		Scope:     "project",
-		ScopeKey:  project.Key,
-		Mode:      "act",
+		ProjectID:    &project.ID,
+		WorkspaceID:  &workspace.ID,
+		InitiativeID: &initiative.ID,
+		TaskID:       &task.ID,
+		RunID:        &outcome.Run.ID,
+		Scope:        "project",
+		ScopeKey:     project.Key,
+		Mode:         "act",
 	})
 	if err != nil {
 		t.Fatalf("ListConversationTranscripts() error = %v", err)
@@ -483,14 +487,22 @@ func TestForegroundActExecutionPersistsTranscriptAndEpisode(t *testing.T) {
 	if len(transcripts) != 1 {
 		t.Fatalf("transcripts len = %d, want 1", len(transcripts))
 	}
+	if transcripts[0].WorkspaceID == nil || *transcripts[0].WorkspaceID != workspace.ID {
+		t.Fatalf("transcript.WorkspaceID = %v, want %d", transcripts[0].WorkspaceID, workspace.ID)
+	}
+	if transcripts[0].InitiativeID == nil || *transcripts[0].InitiativeID != initiative.ID {
+		t.Fatalf("transcript.InitiativeID = %v, want %d", transcripts[0].InitiativeID, initiative.ID)
+	}
 
 	summaries, err := store.ListMemorySummaries(ctx, sqlite.ListMemorySummariesParams{
-		ProjectID:  &project.ID,
-		TaskID:     &task.ID,
-		RunID:      &outcome.Run.ID,
-		Scope:      "project",
-		ScopeKey:   project.Key,
-		MemoryType: "episode",
+		ProjectID:    &project.ID,
+		WorkspaceID:  &workspace.ID,
+		InitiativeID: &initiative.ID,
+		TaskID:       &task.ID,
+		RunID:        &outcome.Run.ID,
+		Scope:        "project",
+		ScopeKey:     project.Key,
+		MemoryType:   "episode",
 	})
 	if err != nil {
 		t.Fatalf("ListMemorySummaries() error = %v", err)
@@ -498,9 +510,15 @@ func TestForegroundActExecutionPersistsTranscriptAndEpisode(t *testing.T) {
 	if len(summaries) != 1 {
 		t.Fatalf("summaries len = %d, want 1", len(summaries))
 	}
+	if summaries[0].WorkspaceID == nil || *summaries[0].WorkspaceID != workspace.ID {
+		t.Fatalf("summary.WorkspaceID = %v, want %d", summaries[0].WorkspaceID, workspace.ID)
+	}
+	if summaries[0].InitiativeID == nil || *summaries[0].InitiativeID != initiative.ID {
+		t.Fatalf("summary.InitiativeID = %v, want %d", summaries[0].InitiativeID, initiative.ID)
+	}
 }
 
-func TestForegroundActDenialPersistsTranscriptAndEpisode(t *testing.T) {
+func TestEpisodeForegroundActDenialPersistsTranscriptAndEpisode(t *testing.T) {
 	configureHarnessDriver(t)
 
 	ctx := context.Background()
@@ -534,6 +552,8 @@ func TestForegroundActDenialPersistsTranscriptAndEpisode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetProjectByKey(alpha) error = %v", err)
 	}
+	workspace := createJobWorkspace(t, ctx, store)
+	initiative := createJobInitiative(t, ctx, store, workspace.ID, "alpha-initiative", &project.ID)
 	if _, err := service.Transitions.SetTransitionState(ctx, projects.TransitionStateInput{
 		ProjectID:   project.ID,
 		Actor:       projects.TransitionControllerOdinOS,
@@ -552,12 +572,14 @@ func TestForegroundActDenialPersistsTranscriptAndEpisode(t *testing.T) {
 	}
 
 	transcripts, err := store.ListConversationTranscripts(ctx, sqlite.ListConversationTranscriptsParams{
-		ProjectID: &project.ID,
-		TaskID:    &task.ID,
-		RunID:     &outcome.Run.ID,
-		Scope:     "project",
-		ScopeKey:  project.Key,
-		Mode:      "act",
+		ProjectID:    &project.ID,
+		WorkspaceID:  &workspace.ID,
+		InitiativeID: &initiative.ID,
+		TaskID:       &task.ID,
+		RunID:        &outcome.Run.ID,
+		Scope:        "project",
+		ScopeKey:     project.Key,
+		Mode:         "act",
 	})
 	if err != nil {
 		t.Fatalf("ListConversationTranscripts() error = %v", err)
@@ -568,20 +590,34 @@ func TestForegroundActDenialPersistsTranscriptAndEpisode(t *testing.T) {
 	if transcripts[0].Response == "" {
 		t.Fatalf("Response = empty, want denial summary")
 	}
+	if transcripts[0].WorkspaceID == nil || *transcripts[0].WorkspaceID != workspace.ID {
+		t.Fatalf("transcript.WorkspaceID = %v, want %d", transcripts[0].WorkspaceID, workspace.ID)
+	}
+	if transcripts[0].InitiativeID == nil || *transcripts[0].InitiativeID != initiative.ID {
+		t.Fatalf("transcript.InitiativeID = %v, want %d", transcripts[0].InitiativeID, initiative.ID)
+	}
 
 	summaries, err := store.ListMemorySummaries(ctx, sqlite.ListMemorySummariesParams{
-		ProjectID:  &project.ID,
-		TaskID:     &task.ID,
-		RunID:      &outcome.Run.ID,
-		Scope:      "project",
-		ScopeKey:   project.Key,
-		MemoryType: "episode",
+		ProjectID:    &project.ID,
+		WorkspaceID:  &workspace.ID,
+		InitiativeID: &initiative.ID,
+		TaskID:       &task.ID,
+		RunID:        &outcome.Run.ID,
+		Scope:        "project",
+		ScopeKey:     project.Key,
+		MemoryType:   "episode",
 	})
 	if err != nil {
 		t.Fatalf("ListMemorySummaries() error = %v", err)
 	}
 	if len(summaries) != 1 {
 		t.Fatalf("summaries len = %d, want 1", len(summaries))
+	}
+	if summaries[0].WorkspaceID == nil || *summaries[0].WorkspaceID != workspace.ID {
+		t.Fatalf("summary.WorkspaceID = %v, want %d", summaries[0].WorkspaceID, workspace.ID)
+	}
+	if summaries[0].InitiativeID == nil || *summaries[0].InitiativeID != initiative.ID {
+		t.Fatalf("summary.InitiativeID = %v, want %d", summaries[0].InitiativeID, initiative.ID)
 	}
 }
 
@@ -1095,6 +1131,40 @@ func openJobStore(t *testing.T) *sqlite.Store {
 		t.Fatalf("Migrate() error = %v", err)
 	}
 	return store
+}
+
+func createJobWorkspace(t *testing.T, ctx context.Context, store *sqlite.Store) sqlite.Workspace {
+	t.Helper()
+
+	workspace, err := store.CreateWorkspace(ctx, sqlite.CreateWorkspaceParams{
+		Key:        "marcus",
+		Name:       "Marcus",
+		OwnerRef:   "marcus",
+		Status:     "active",
+		PolicyJSON: "{}",
+	})
+	if err != nil {
+		t.Fatalf("CreateWorkspace() error = %v", err)
+	}
+	return workspace
+}
+
+func createJobInitiative(t *testing.T, ctx context.Context, store *sqlite.Store, workspaceID int64, key string, linkedProjectID *int64) sqlite.Initiative {
+	t.Helper()
+
+	initiative, err := store.CreateInitiative(ctx, sqlite.CreateInitiativeParams{
+		WorkspaceID:     workspaceID,
+		Key:             key,
+		Title:           key,
+		Kind:            "managed_project",
+		Status:          "active",
+		Summary:         "runtime test initiative",
+		LinkedProjectID: linkedProjectID,
+	})
+	if err != nil {
+		t.Fatalf("CreateInitiative() error = %v", err)
+	}
+	return initiative
 }
 
 func writeRegistry(t *testing.T) projects.Registry {

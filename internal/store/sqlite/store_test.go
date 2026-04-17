@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"context"
+	"encoding/json"
 	"path/filepath"
 	"testing"
 
@@ -950,6 +951,108 @@ func TestRecordConversationTranscriptRejectsCrossWorkspaceLineage(t *testing.T) 
 		Executor:     "codex",
 	}); err == nil {
 		t.Fatalf("RecordConversationTranscript() error = nil, want cross-workspace lineage rejection")
+	}
+}
+
+func TestMemoryEventsIncludeScopedOwnershipPayloadFields(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "odin.db")
+
+	store, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer store.Close()
+
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
+	}
+
+	workspace := mustCreateWorkspace(t, ctx, store, "workspace-e")
+	initiative := mustCreateInitiative(t, ctx, store, workspace.ID, "initiative-e", nil, nil)
+	companion := mustCreateCompanion(t, ctx, store, workspace.ID, "companion-e")
+
+	transcript, err := store.RecordConversationTranscript(ctx, RecordConversationTranscriptParams{
+		WorkspaceID:  &workspace.ID,
+		InitiativeID: &initiative.ID,
+		CompanionID:  &companion.ID,
+		Scope:        "workspace",
+		ScopeKey:     workspace.Key,
+		Mode:         "ask",
+		Prompt:       "hello",
+		Response:     "world",
+		ToolSummary:  "none",
+		Executor:     "codex",
+	})
+	if err != nil {
+		t.Fatalf("RecordConversationTranscript() error = %v", err)
+	}
+
+	if _, err := store.RecordMemorySummary(ctx, RecordMemorySummaryParams{
+		WorkspaceID:        &workspace.ID,
+		InitiativeID:       &initiative.ID,
+		CompanionID:        &companion.ID,
+		SourceTranscriptID: &transcript.ID,
+		Scope:              "workspace",
+		ScopeKey:           workspace.Key,
+		VisibilityScope:    "workspace",
+		RetentionClass:     "durable",
+		MemoryType:         "summary",
+		Summary:            "scoped memory",
+		DetailsJSON:        `{}`,
+	}); err != nil {
+		t.Fatalf("RecordMemorySummary() error = %v", err)
+	}
+
+	events, err := store.ListEvents(ctx, ListEventsParams{})
+	if err != nil {
+		t.Fatalf("ListEvents() error = %v", err)
+	}
+
+	var (
+		foundTranscript bool
+		foundSummary    bool
+	)
+	for _, event := range events {
+		switch event.Type {
+		case runtimeevents.EventConversationTranscriptRecorded:
+			var payload runtimeevents.ConversationTranscriptRecordedPayload
+			if err := json.Unmarshal(event.Payload, &payload); err != nil {
+				t.Fatalf("json.Unmarshal(transcript payload) error = %v", err)
+			}
+			if payload.WorkspaceID == nil || *payload.WorkspaceID != workspace.ID {
+				t.Fatalf("payload.WorkspaceID = %v, want %d", payload.WorkspaceID, workspace.ID)
+			}
+			if payload.InitiativeID == nil || *payload.InitiativeID != initiative.ID {
+				t.Fatalf("payload.InitiativeID = %v, want %d", payload.InitiativeID, initiative.ID)
+			}
+			if payload.CompanionID == nil || *payload.CompanionID != companion.ID {
+				t.Fatalf("payload.CompanionID = %v, want %d", payload.CompanionID, companion.ID)
+			}
+			foundTranscript = true
+		case runtimeevents.EventMemorySummaryRecorded:
+			var payload runtimeevents.MemorySummaryRecordedPayload
+			if err := json.Unmarshal(event.Payload, &payload); err != nil {
+				t.Fatalf("json.Unmarshal(summary payload) error = %v", err)
+			}
+			if payload.WorkspaceID == nil || *payload.WorkspaceID != workspace.ID {
+				t.Fatalf("payload.WorkspaceID = %v, want %d", payload.WorkspaceID, workspace.ID)
+			}
+			if payload.InitiativeID == nil || *payload.InitiativeID != initiative.ID {
+				t.Fatalf("payload.InitiativeID = %v, want %d", payload.InitiativeID, initiative.ID)
+			}
+			if payload.CompanionID == nil || *payload.CompanionID != companion.ID {
+				t.Fatalf("payload.CompanionID = %v, want %d", payload.CompanionID, companion.ID)
+			}
+			foundSummary = true
+		}
+	}
+
+	if !foundTranscript {
+		t.Fatalf("conversation transcript event not found")
+	}
+	if !foundSummary {
+		t.Fatalf("memory summary event not found")
 	}
 }
 

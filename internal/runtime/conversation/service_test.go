@@ -109,6 +109,49 @@ func TestServiceRespondFallsBackWithoutExecutors(t *testing.T) {
 	}
 }
 
+func TestConversationRespondPersistsScopedTranscriptOwnership(t *testing.T) {
+	t.Parallel()
+
+	service, store := newTestService(t)
+	ctx := context.Background()
+
+	project, err := store.GetProjectByKey(ctx, "alpha")
+	if err != nil {
+		t.Fatalf("GetProjectByKey(alpha) error = %v", err)
+	}
+	workspace := createConversationWorkspace(t, ctx, store)
+	initiative := createConversationInitiative(t, ctx, store, workspace.ID, "alpha-initiative", &project.ID)
+
+	_, err = service.Respond(ctx, Request{
+		Scope:  scope.Resolution{Kind: scope.ScopeProject, ProjectKey: "alpha"},
+		Mode:   "ask",
+		Prompt: "what scope am i in?",
+	})
+	if err != nil {
+		t.Fatalf("Respond() error = %v", err)
+	}
+
+	transcripts, err := store.ListConversationTranscripts(ctx, sqlite.ListConversationTranscriptsParams{
+		ProjectID:    &project.ID,
+		WorkspaceID:  &workspace.ID,
+		InitiativeID: &initiative.ID,
+		Scope:        "project",
+		ScopeKey:     "alpha",
+	})
+	if err != nil {
+		t.Fatalf("ListConversationTranscripts() error = %v", err)
+	}
+	if len(transcripts) != 1 {
+		t.Fatalf("transcripts len = %d, want 1", len(transcripts))
+	}
+	if transcripts[0].WorkspaceID == nil || *transcripts[0].WorkspaceID != workspace.ID {
+		t.Fatalf("transcript.WorkspaceID = %v, want %d", transcripts[0].WorkspaceID, workspace.ID)
+	}
+	if transcripts[0].InitiativeID == nil || *transcripts[0].InitiativeID != initiative.ID {
+		t.Fatalf("transcript.InitiativeID = %v, want %d", transcripts[0].InitiativeID, initiative.ID)
+	}
+}
+
 func TestServiceRespondSurfacesExecutorFailure(t *testing.T) {
 	t.Parallel()
 
@@ -396,6 +439,40 @@ func newTestService(t *testing.T) (Service, *sqlite.Store) {
 		Executors:      router.DefaultCatalog(),
 		Registry:       registry,
 	}, store
+}
+
+func createConversationWorkspace(t *testing.T, ctx context.Context, store *sqlite.Store) sqlite.Workspace {
+	t.Helper()
+
+	workspace, err := store.CreateWorkspace(ctx, sqlite.CreateWorkspaceParams{
+		Key:        "marcus",
+		Name:       "Marcus",
+		OwnerRef:   "marcus",
+		Status:     "active",
+		PolicyJSON: "{}",
+	})
+	if err != nil {
+		t.Fatalf("CreateWorkspace() error = %v", err)
+	}
+	return workspace
+}
+
+func createConversationInitiative(t *testing.T, ctx context.Context, store *sqlite.Store, workspaceID int64, key string, linkedProjectID *int64) sqlite.Initiative {
+	t.Helper()
+
+	initiative, err := store.CreateInitiative(ctx, sqlite.CreateInitiativeParams{
+		WorkspaceID:     workspaceID,
+		Key:             key,
+		Title:           key,
+		Kind:            "managed_project",
+		Status:          "active",
+		Summary:         "runtime test initiative",
+		LinkedProjectID: linkedProjectID,
+	})
+	if err != nil {
+		t.Fatalf("CreateInitiative() error = %v", err)
+	}
+	return initiative
 }
 
 func configureConversationHarnessDriver(t *testing.T) {
