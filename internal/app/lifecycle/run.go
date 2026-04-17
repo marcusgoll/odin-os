@@ -58,9 +58,9 @@ func Run(ctx context.Context, root string, args []string, stdin io.Reader, stdou
 	if len(args) > 0 {
 		switch args[0] {
 		case "doctor":
-			return runDoctor(ctx, app, args[1:], stdout)
+			return runDoctor(ctx, app, cfg, args[1:], stdout)
 		case "healthcheck":
-			return runHealthcheck(ctx, app, stdout)
+			return runHealthcheck(ctx, app, cfg, stdout)
 		case "serve":
 			return runServe(ctx, app, cfg, stdout)
 		case "backup":
@@ -92,8 +92,8 @@ func Run(ctx context.Context, root string, args []string, stdin io.Reader, stdou
 	return nil
 }
 
-func runDoctor(ctx context.Context, app bootstrap.App, args []string, stdout io.Writer) error {
-	report, err := healthsvc.Service{DB: app.Store.DB()}.Doctor(ctx, len(app.RegistryDiagnostics) == 0)
+func runDoctor(ctx context.Context, app bootstrap.App, cfg appconfig.Config, args []string, stdout io.Writer) error {
+	report, err := newHealthService(app, cfg).Doctor(ctx, len(app.RegistryDiagnostics) == 0)
 	if err != nil {
 		return err
 	}
@@ -108,8 +108,8 @@ func runDoctor(ctx context.Context, app bootstrap.App, args []string, stdout io.
 	return err
 }
 
-func runHealthcheck(ctx context.Context, app bootstrap.App, stdout io.Writer) error {
-	report, err := healthsvc.Service{DB: app.Store.DB()}.Doctor(ctx, len(app.RegistryDiagnostics) == 0)
+func runHealthcheck(ctx context.Context, app bootstrap.App, cfg appconfig.Config, stdout io.Writer) error {
+	report, err := newHealthService(app, cfg).Doctor(ctx, len(app.RegistryDiagnostics) == 0)
 	if err != nil {
 		return err
 	}
@@ -125,8 +125,9 @@ func runHealthcheck(ctx context.Context, app bootstrap.App, stdout io.Writer) er
 
 func runtimeEnv() map[string]string {
 	return map[string]string{
-		"ODIN_ROOT":      os.Getenv("ODIN_ROOT"),
-		"ODIN_HTTP_ADDR": os.Getenv("ODIN_HTTP_ADDR"),
+		"ODIN_ROOT":         os.Getenv("ODIN_ROOT"),
+		"ODIN_HTTP_ADDR":    os.Getenv("ODIN_HTTP_ADDR"),
+		"ODIN_MEDIA_CONFIG": os.Getenv("ODIN_MEDIA_CONFIG"),
 	}
 }
 
@@ -194,9 +195,7 @@ func runServe(ctx context.Context, app bootstrap.App, cfg appconfig.Config, stdo
 
 	server := &stdhttp.Server{
 		Handler: apihttp.NewOperationalHandler(apihttp.Dependencies{
-			Health: healthsvc.Service{
-				DB: app.Store.DB(),
-			},
+			Health: newHealthService(app, cfg),
 			Metrics: metricsvc.Service{
 				DB: app.Store.DB(),
 			},
@@ -224,6 +223,19 @@ func runServe(ctx context.Context, app bootstrap.App, cfg appconfig.Config, stdo
 		return ctx.Err()
 	}
 	return err
+}
+
+func newHealthService(app bootstrap.App, cfg appconfig.Config) healthsvc.Service {
+	service := healthsvc.Service{
+		DB: app.Store.DB(),
+	}
+	if cfg.Media != nil {
+		service.Media = &healthsvc.MediaChecks{
+			Config:       cfg.Media,
+			ProbeCommand: os.Getenv("ODIN_MEDIA_PROBE_COMMAND"),
+		}
+	}
+	return service
 }
 
 func openServiceLogger(runtimeRoot string) (*logs.Logger, io.Closer, error) {

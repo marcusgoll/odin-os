@@ -6,11 +6,14 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
 	httpapi "odin-os/internal/api/http"
+	coremedia "odin-os/internal/core/media"
 	healthsvc "odin-os/internal/runtime/health"
 	"odin-os/internal/store/sqlite"
 	metricsvc "odin-os/internal/telemetry/metrics"
@@ -73,6 +76,33 @@ func TestOperationalHandlerDegradesReadyzWhenRuntimeIsNotReady(t *testing.T) {
 	assertReportStatus(t, server.URL+"/readyz", http.StatusServiceUnavailable, "degraded")
 }
 
+func TestOperationalHandlerFailsReadyzWhenMediaProfileFailsClosed(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openStore(t)
+	defer store.Close()
+	seedHealthyObservability(t, ctx, store)
+
+	server := httptest.NewServer(httpapi.NewOperationalHandler(httpapi.Dependencies{
+		Health: healthsvc.Service{
+			DB: store.DB(),
+			Media: &healthsvc.MediaChecks{
+				Config:       healthMediaConfig(),
+				ProbeCommand: fixtureMediaProbePath(t, "media-probe-mount-mismatch.sh"),
+			},
+		},
+		Metrics: metricsvc.Service{
+			DB: store.DB(),
+		},
+		RegistryHealthy: true,
+	}))
+	defer server.Close()
+
+	assertReportStatus(t, server.URL+"/healthz", http.StatusOK, "failed")
+	assertReportStatus(t, server.URL+"/readyz", http.StatusServiceUnavailable, "failed")
+}
+
 func openStore(t *testing.T) *sqlite.Store {
 	t.Helper()
 
@@ -133,4 +163,26 @@ func assertReportStatus(t *testing.T, url string, wantCode int, wantStatus strin
 	if report.Status != wantStatus {
 		t.Fatalf("%s report status = %q, want %q", url, report.Status, wantStatus)
 	}
+}
+
+func healthMediaConfig() *coremedia.Config {
+	return &coremedia.Config{
+		Enabled: true,
+		Services: []coremedia.StackService{
+			{
+				Name: "plex",
+				Kind: coremedia.ServiceKindPlex,
+			},
+		},
+	}
+}
+
+func fixtureMediaProbePath(t *testing.T, name string) string {
+	t.Helper()
+
+	_, currentFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatalf("runtime.Caller() failed")
+	}
+	return filepath.Clean(path.Join(filepath.Dir(currentFile), "..", "..", "..", "scripts", "tests", "fixtures", name))
 }

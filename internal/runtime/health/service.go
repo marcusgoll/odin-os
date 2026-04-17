@@ -47,6 +47,7 @@ type Service struct {
 	DB     *sql.DB
 	Config Config
 	Now    func() time.Time
+	Media  *MediaChecks
 }
 
 func DefaultConfig() Config {
@@ -144,6 +145,17 @@ func (service Service) Doctor(ctx context.Context, registryHealthy bool) (Report
 	}
 	report.Checks = append(report.Checks, sourceCheck)
 	report.Status = combineStatus(report.Status, sourceCheck.Status)
+
+	if service.Media != nil {
+		mediaChecks, err := service.Media.Checks(ctx, config, now)
+		if err != nil {
+			return Report{}, err
+		}
+		for _, mediaCheck := range mediaChecks {
+			report.Checks = append(report.Checks, mediaCheck)
+			report.Status = combineStatus(report.Status, mediaCheck.Status)
+		}
+	}
 
 	return report, nil
 }
