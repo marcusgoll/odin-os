@@ -2,9 +2,12 @@ package sqlite
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestContextPacketAppendOnlyAndLookup(t *testing.T) {
@@ -141,6 +144,125 @@ func TestMigrateExistingDatabaseAddsContextPacketEnvelope(t *testing.T) {
 	}
 	if packet.Trigger != "completion" {
 		t.Fatalf("CreateContextPacket().Trigger = %q, want %q", packet.Trigger, "completion")
+	}
+}
+
+func TestResolveApprovalSupersedesBlockedWakePacket(t *testing.T) {
+	ctx := context.Background()
+	store := openMigratedTestStore(t, "approval-supersedes-wake.db")
+	defer store.Close()
+
+	project, task, run := seedContextPacketTask(t, ctx, store)
+
+	blocked, err := store.BlockTask(ctx, BlockTaskParams{
+		TaskID: task.ID,
+		Reason: "approval_required",
+	})
+	if err != nil {
+		t.Fatalf("BlockTask() error = %v", err)
+	}
+	if blocked.Status != "blocked" {
+		t.Fatalf("BlockTask().Status = %q, want blocked", blocked.Status)
+	}
+
+	approval, err := store.RequestApproval(ctx, RequestApprovalParams{
+		TaskID:      task.ID,
+		RunID:       &run.ID,
+		Status:      "pending",
+		RequestedBy: "system",
+	})
+	if err != nil {
+		t.Fatalf("RequestApproval() error = %v", err)
+	}
+
+	packet, err := store.CreateContextPacket(ctx, CreateContextPacketParams{
+		TaskID:        &task.ID,
+		RunID:         &run.ID,
+		PacketKind:    "wake",
+		PacketScope:   "task_wake_packet",
+		Trigger:       "approval_wait",
+		CheckpointKey: "approval-wait-1",
+		Status:        "active",
+		Summary:       "waiting for approval",
+		PayloadJSON:   `{"objective":"resume after approval"}`,
+	})
+	if err != nil {
+		t.Fatalf("CreateContextPacket() error = %v", err)
+	}
+
+	if _, err := store.ResolveApproval(ctx, ResolveApprovalParams{
+		ApprovalID: approval.ID,
+		Status:     "approved",
+		DecisionBy: "operator",
+		Reason:     "resume",
+	}); err != nil {
+		t.Fatalf("ResolveApproval() error = %v", err)
+	}
+
+	if _, err := store.GetLatestTaskWakePacket(ctx, project.ID, task.ID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("GetLatestTaskWakePacket() error = %v, want sql.ErrNoRows", err)
+	}
+
+	superseded, err := store.GetContextPacket(ctx, packet.ID)
+	if err != nil {
+		t.Fatalf("GetContextPacket() error = %v", err)
+	}
+	if superseded.Status != "superseded" {
+		t.Fatalf("GetContextPacket().Status = %q, want superseded", superseded.Status)
+	}
+}
+
+func TestRequeueTaskAtSupersedesBlockedWakePacket(t *testing.T) {
+	ctx := context.Background()
+	store := openMigratedTestStore(t, "requeue-supersedes-wake.db")
+	defer store.Close()
+
+	project, task, run := seedContextPacketTask(t, ctx, store)
+
+	blocked, err := store.BlockTask(ctx, BlockTaskParams{
+		TaskID: task.ID,
+		Reason: "executor_unavailable",
+	})
+	if err != nil {
+		t.Fatalf("BlockTask() error = %v", err)
+	}
+	if blocked.Status != "blocked" {
+		t.Fatalf("BlockTask().Status = %q, want blocked", blocked.Status)
+	}
+
+	packet, err := store.CreateContextPacket(ctx, CreateContextPacketParams{
+		TaskID:        &task.ID,
+		RunID:         &run.ID,
+		PacketKind:    "wake",
+		PacketScope:   "task_wake_packet",
+		Trigger:       "idle_pause",
+		CheckpointKey: "idle-pause-1",
+		Status:        "active",
+		Summary:       "waiting for executor health",
+		PayloadJSON:   `{"objective":"resume after executor recovers"}`,
+	})
+	if err != nil {
+		t.Fatalf("CreateContextPacket() error = %v", err)
+	}
+
+	retryAt := time.Date(2026, 4, 17, 11, 0, 0, 0, time.UTC)
+	if _, err := store.RequeueTaskAt(ctx, RequeueTaskAtParams{
+		TaskID:         task.ID,
+		NextEligibleAt: retryAt,
+	}); err != nil {
+		t.Fatalf("RequeueTaskAt() error = %v", err)
+	}
+
+	if _, err := store.GetLatestTaskWakePacket(ctx, project.ID, task.ID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("GetLatestTaskWakePacket() error = %v, want sql.ErrNoRows", err)
+	}
+
+	superseded, err := store.GetContextPacket(ctx, packet.ID)
+	if err != nil {
+		t.Fatalf("GetContextPacket() error = %v", err)
+	}
+	if superseded.Status != "superseded" {
+		t.Fatalf("GetContextPacket().Status = %q, want superseded", superseded.Status)
 	}
 }
 

@@ -3,15 +3,16 @@ package integration_test
 import (
 	"bytes"
 	"context"
-	"errors"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
 	"odin-os/internal/app/backup"
 	"odin-os/internal/app/bootstrap"
-	"odin-os/internal/app/lifecycle"
 	"odin-os/internal/cli/scope"
 	"odin-os/internal/core/projects"
 	"odin-os/internal/executors/contract"
@@ -508,6 +509,110 @@ func TestAlphaAcceptance(t *testing.T) {
 		}
 	})
 
+	t.Run("blocked work and recoveries stay visible to operators", func(t *testing.T) {
+		store := openTempStore(t)
+		defer store.Close()
+		store.Now = func() time.Time { return now }
+
+		project, task, run := seedTaskRunFixture(t, ctx, store, "alpha", "project", "alpha-blocked-task", "Blocked alpha task", "codex_headless", now)
+		if _, err := store.BlockTask(ctx, sqlite.BlockTaskParams{
+			TaskID: task.ID,
+			Reason: "approval_required",
+		}); err != nil {
+			t.Fatalf("BlockTask() error = %v", err)
+		}
+		if _, err := store.RequestApproval(ctx, sqlite.RequestApprovalParams{
+			TaskID:      task.ID,
+			RunID:       &run.ID,
+			Status:      "pending",
+			RequestedBy: "system",
+		}); err != nil {
+			t.Fatalf("RequestApproval() error = %v", err)
+		}
+		if _, err := store.CreateContextPacket(ctx, sqlite.CreateContextPacketParams{
+			TaskID:        &task.ID,
+			RunID:         &run.ID,
+			PacketKind:    "wake",
+			PacketScope:   "task_wake_packet",
+			Trigger:       "approval_wait",
+			CheckpointKey: "blocked-approval-1",
+			Status:        "active",
+			Summary:       "waiting on approval",
+			PayloadJSON:   `{"blocking_reason":"approval_required","next_steps":["resume once approved"]}`,
+		}); err != nil {
+			t.Fatalf("CreateContextPacket() error = %v", err)
+		}
+
+		incident, err := store.OpenIncident(ctx, sqlite.OpenIncidentParams{
+			RunID:       &run.ID,
+			Severity:    "warning",
+			Status:      "open",
+			Summary:     "executor degraded",
+			DetailsJSON: `{"stage":"acceptance"}`,
+		})
+		if err != nil {
+			t.Fatalf("OpenIncident() error = %v", err)
+		}
+		recovery, err := store.StartRecovery(ctx, sqlite.StartRecoveryParams{
+			IncidentID:  &incident.ID,
+			RunID:       &run.ID,
+			Status:      "running",
+			Strategy:    "retry-once",
+			DetailsJSON: `{"attempt":1}`,
+		})
+		if err != nil {
+			t.Fatalf("StartRecovery() error = %v", err)
+		}
+
+		taskViews, err := projections.ListTaskStatusViews(ctx, store.DB())
+		if err != nil {
+			t.Fatalf("ListTaskStatusViews() error = %v", err)
+		}
+		var blockedTaskView *projections.TaskStatusView
+		for index := range taskViews {
+			if taskViews[index].TaskID == task.ID {
+				blockedTaskView = &taskViews[index]
+				break
+			}
+		}
+		if blockedTaskView == nil {
+			t.Fatalf("task status views missing task %d", task.ID)
+		}
+		if blockedTaskView.BlockedReason != "approval_required" {
+			t.Fatalf("BlockedReason = %q, want approval_required", blockedTaskView.BlockedReason)
+		}
+
+		blockedItems, err := projections.ListBlockedItemViews(ctx, store.DB())
+		if err != nil {
+			t.Fatalf("ListBlockedItemViews() error = %v", err)
+		}
+		var sawBlockedTask bool
+		for _, item := range blockedItems {
+			if item.TaskID == task.ID && item.ProjectKey == project.Key {
+				sawBlockedTask = true
+				break
+			}
+		}
+		if !sawBlockedTask {
+			t.Fatalf("blocked items missing task %d: %+v", task.ID, blockedItems)
+		}
+
+		recoveryViews, err := projections.ListRecoveryViews(ctx, store.DB())
+		if err != nil {
+			t.Fatalf("ListRecoveryViews() error = %v", err)
+		}
+		var sawRecovery bool
+		for _, view := range recoveryViews {
+			if view.RecoveryID == recovery.ID && view.RunID == run.ID {
+				sawRecovery = true
+				break
+			}
+		}
+		if !sawRecovery {
+			t.Fatalf("recovery views missing recovery %d for run %d: %+v", recovery.ID, run.ID, recoveryViews)
+		}
+	})
+
 	t.Run("self-heal playbooks run and are audited", func(t *testing.T) {
 		store := openTempStore(t)
 		defer store.Close()
@@ -709,12 +814,43 @@ func TestAlphaAcceptance(t *testing.T) {
 		t.Setenv("ODIN_ROOT", runtimeRoot)
 		t.Setenv("ODIN_HTTP_ADDR", "127.0.0.1:0")
 
-		ctxServe, cancel := context.WithCancel(ctx)
-		time.AfterFunc(150*time.Millisecond, cancel)
 		var serveOutput bytes.Buffer
-		err := lifecycle.Run(ctxServe, repoRoot, []string{"serve"}, strings.NewReader(""), &serveOutput)
-		if err != nil && !errors.Is(err, context.Canceled) {
-			t.Fatalf("lifecycle.Run(serve) error = %v", err)
+		cmd := exec.Command(odinBinary, "serve")
+		cmd.Dir = repoRoot
+		cmd.Env = append([]string{}, os.Environ()...)
+		cmd.Env = append(cmd.Env, "ODIN_ROOT="+runtimeRoot, "ODIN_HTTP_ADDR=127.0.0.1:0")
+		cmd.Stdout = &serveOutput
+		cmd.Stderr = &serveOutput
+		if err := cmd.Start(); err != nil {
+			t.Fatalf("cmd.Start(serve) error = %v", err)
+		}
+		t.Cleanup(func() {
+			if cmd.ProcessState != nil && cmd.ProcessState.Exited() {
+				return
+			}
+			if cmd.Process != nil {
+				_ = cmd.Process.Kill()
+				_ = cmd.Wait()
+			}
+		})
+
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			output, err := runOdinCommand(t, repoRoot, odinBinary, runtimeRoot, nil, "", "healthcheck")
+			if err == nil && strings.Contains(output, "ready") {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("serve never became ready\noutput:\n%s", serveOutput.String())
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+
+		if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
+			t.Fatalf("Signal(SIGTERM) error = %v", err)
+		}
+		if err := cmd.Wait(); err != nil {
+			t.Fatalf("cmd.Wait() error = %v\n%s", err, serveOutput.String())
 		}
 
 		gotRun, err := store.GetRun(ctx, run.ID)
@@ -733,12 +869,20 @@ func TestAlphaAcceptance(t *testing.T) {
 			t.Fatalf("WakePacket.Trigger = %q, want restart", packet.Trigger)
 		}
 
-		healthcheckOutput, err := runOdinCommand(t, repoRoot, odinBinary, runtimeRoot, nil, "", "healthcheck")
+		state, err := store.GetRuntimeState(ctx)
 		if err != nil {
-			t.Fatalf("runOdinCommand(healthcheck) error = %v\n%s", err, healthcheckOutput)
+			t.Fatalf("GetRuntimeState() error = %v", err)
 		}
-		if !strings.Contains(healthcheckOutput, "ready") {
-			t.Fatalf("healthcheck output = %q, want ready", healthcheckOutput)
+		if state.Status != "stopped" {
+			t.Fatalf("RuntimeState.Status = %q, want stopped", state.Status)
+		}
+
+		healthcheckOutput, err := runOdinCommand(t, repoRoot, odinBinary, runtimeRoot, nil, "", "healthcheck")
+		if err == nil {
+			t.Fatalf("runOdinCommand(healthcheck) error = nil, want readiness failure after daemon stop\n%s", healthcheckOutput)
+		}
+		if !strings.Contains(healthcheckOutput, "not ready:") {
+			t.Fatalf("healthcheck output = %q, want not ready message", healthcheckOutput)
 		}
 
 		archivePath := filepath.Join(t.TempDir(), "odin-alpha-backup.tar.gz")

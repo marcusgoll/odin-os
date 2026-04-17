@@ -299,6 +299,11 @@ func (store *Store) updateTaskQueueStateTx(ctx context.Context, tx *sql.Tx, para
 	if err != nil {
 		return Task{}, err
 	}
+	if current.Status == "blocked" && updated.Status != "blocked" {
+		if err := supersedeActiveTaskWakePacketsTx(ctx, tx, current.ID); err != nil {
+			return Task{}, err
+		}
+	}
 
 	if err := appendTaskStatusChangedEventTx(ctx, tx, current, updated, nil, now); err != nil {
 		return Task{}, err
@@ -330,6 +335,11 @@ func (store *Store) BlockTask(ctx context.Context, params BlockTaskParams) (Task
 		updated, err := store.getTaskTx(ctx, tx, params.TaskID)
 		if err != nil {
 			return err
+		}
+		if current.Status == "blocked" && updated.Status != "blocked" {
+			if err := supersedeActiveTaskWakePacketsTx(ctx, tx, current.ID); err != nil {
+				return err
+			}
 		}
 		if err := appendTaskStatusChangedEventTx(ctx, tx, current, updated, nil, now); err != nil {
 			return err
@@ -363,6 +373,11 @@ func (store *Store) RequeueTaskAt(ctx context.Context, params RequeueTaskAtParam
 		updated, err := store.getTaskTx(ctx, tx, params.TaskID)
 		if err != nil {
 			return err
+		}
+		if current.Status == "blocked" && updated.Status != "blocked" {
+			if err := supersedeActiveTaskWakePacketsTx(ctx, tx, current.ID); err != nil {
+				return err
+			}
 		}
 		if err := appendTaskStatusChangedEventTx(ctx, tx, current, updated, nil, now); err != nil {
 			return err
@@ -648,6 +663,17 @@ func releaseActiveWorktreeLeaseByTaskRunTx(ctx context.Context, tx *sql.Tx, task
 		SET state = ?, released_at = ?, updated_at = ?
 		WHERE id = ?
 	`, "released", formatTime(now), formatTime(now), leaseID)
+	return err
+}
+
+func supersedeActiveTaskWakePacketsTx(ctx context.Context, tx *sql.Tx, taskID int64) error {
+	_, err := tx.ExecContext(ctx, `
+		UPDATE context_packets
+		SET status = 'superseded'
+		WHERE task_id = ?
+		  AND packet_scope = 'task_wake_packet'
+		  AND status = 'active'
+	`, taskID)
 	return err
 }
 

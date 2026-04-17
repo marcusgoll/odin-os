@@ -16,7 +16,7 @@ Odin OS is ready for cautious alpha dogfooding when the checks below stay true i
 
 - `make test-alpha` passes.
 - `make test` and `make build` pass.
-- `odin healthcheck` fails closed on a fresh runtime root and succeeds only after `odin serve` has marked that runtime root `ready`.
+- `odin healthcheck` fails closed on a fresh runtime root, succeeds only while a live `odin serve` process has marked that runtime root `ready`, and fails closed again once the daemon drains or stops.
 - `odin doctor --json` returns structured output and shows healthy or honestly degraded state.
 - `odin serve` can restart cleanly and produce restart wake packets for interrupted work.
 - Backup, verify, and restore succeed against the current runtime root.

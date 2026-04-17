@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -15,6 +16,7 @@ import (
 	"odin-os/internal/core/projects"
 	"odin-os/internal/executors/contract"
 	"odin-os/internal/executors/router"
+	"odin-os/internal/runtime/checkpoints"
 	runtimeevents "odin-os/internal/runtime/events"
 	"odin-os/internal/store/sqlite"
 	"odin-os/internal/vcs/leases"
@@ -365,8 +367,99 @@ func TestExecuteNextQueuedBlocksWhenExecutorHealthIsDegraded(t *testing.T) {
 	if gotTask.BlockedReason != "executor_unavailable" {
 		t.Fatalf("BlockedReason = %q, want executor_unavailable", gotTask.BlockedReason)
 	}
+	packet, err := store.GetLatestTaskWakePacket(ctx, project.ID, task.ID)
+	if err != nil {
+		t.Fatalf("GetLatestTaskWakePacket() error = %v", err)
+	}
+	if packet.Trigger != string(checkpoints.TriggerIdlePause) {
+		t.Fatalf("WakePacket.Trigger = %q, want %q", packet.Trigger, checkpoints.TriggerIdlePause)
+	}
+	resumeState, err := checkpoints.Service{Store: store}.LoadResumeState(ctx, project.ID, task.ID)
+	if err != nil {
+		t.Fatalf("LoadResumeState() error = %v", err)
+	}
+	if resumeState.BlockingReason != "executor_unavailable" {
+		t.Fatalf("ResumeState.BlockingReason = %q, want %q", resumeState.BlockingReason, "executor_unavailable")
+	}
+	if len(resumeState.NextSteps) == 0 {
+		t.Fatalf("ResumeState.NextSteps = %v, want at least one step", resumeState.NextSteps)
+	}
 	if _, err := latestRunForTask(ctx, store, task.ID); !errors.Is(err, sql.ErrNoRows) {
 		t.Fatalf("latestRunForTask() error = %v, want sql.ErrNoRows", err)
+	}
+}
+
+func TestInterruptDispatchCreatesResumableWakePacket(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openJobStore(t)
+	defer store.Close()
+
+	registry := writeRegistry(t)
+	service := Service{
+		Store:    store,
+		Registry: registry,
+	}
+
+	project, err := store.CreateProject(ctx, sqlite.CreateProjectParams{
+		Key:           "alpha-runtime",
+		Name:          "Alpha Runtime",
+		Scope:         "project",
+		GitRoot:       "/tmp/alpha-runtime",
+		DefaultBranch: "main",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+
+	task, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "interrupted-dispatch",
+		Title:       "Interrupted dispatch",
+		Status:      "running",
+		Scope:       "project",
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+
+	run, err := store.StartRun(ctx, sqlite.StartRunParams{
+		TaskID:     task.ID,
+		Executor:   "codex_headless",
+		Attempt:    1,
+		Status:     "running",
+		TaskStatus: "running",
+	})
+	if err != nil {
+		t.Fatalf("StartRun() error = %v", err)
+	}
+
+	if err := service.interruptDispatch(ctx, run.ID); err != nil {
+		t.Fatalf("interruptDispatch() error = %v", err)
+	}
+
+	packet, err := store.GetLatestTaskWakePacket(ctx, project.ID, task.ID)
+	if err != nil {
+		t.Fatalf("GetLatestTaskWakePacket() error = %v", err)
+	}
+	if packet.Trigger != string(checkpoints.TriggerHandoff) {
+		t.Fatalf("WakePacket.Trigger = %q, want %q", packet.Trigger, checkpoints.TriggerHandoff)
+	}
+	resumeState, err := checkpoints.Service{Store: store}.LoadResumeState(ctx, project.ID, task.ID)
+	if err != nil {
+		t.Fatalf("LoadResumeState() error = %v", err)
+	}
+	if resumeState.Status != "queued" {
+		t.Fatalf("ResumeState.Status = %q, want queued", resumeState.Status)
+	}
+	if resumeState.RunContext == nil || resumeState.RunContext.RunID != run.ID {
+		t.Fatalf("ResumeState.RunContext = %+v, want run %d", resumeState.RunContext, run.ID)
+	}
+	if len(resumeState.NextSteps) == 0 {
+		t.Fatalf("ResumeState.NextSteps = %v, want at least one step", resumeState.NextSteps)
 	}
 }
 
@@ -566,8 +659,107 @@ func TestExecuteNextQueuedBlocksWhenRequiredApprovalIsMissing(t *testing.T) {
 	if approval.Status != "pending" {
 		t.Fatalf("Approval.Status = %q, want pending", approval.Status)
 	}
+	packet, err := store.GetLatestTaskWakePacket(ctx, project.ID, task.ID)
+	if err != nil {
+		t.Fatalf("GetLatestTaskWakePacket() error = %v", err)
+	}
+	if packet.Trigger != string(checkpoints.TriggerApprovalWait) {
+		t.Fatalf("WakePacket.Trigger = %q, want %q", packet.Trigger, checkpoints.TriggerApprovalWait)
+	}
+	resumeState, err := checkpoints.Service{Store: store}.LoadResumeState(ctx, project.ID, task.ID)
+	if err != nil {
+		t.Fatalf("LoadResumeState() error = %v", err)
+	}
+	if resumeState.BlockingReason != "approval_required" {
+		t.Fatalf("ResumeState.BlockingReason = %q, want %q", resumeState.BlockingReason, "approval_required")
+	}
+	if len(resumeState.NextSteps) == 0 {
+		t.Fatalf("ResumeState.NextSteps = %v, want at least one step", resumeState.NextSteps)
+	}
 	if _, err := latestRunForTask(ctx, store, task.ID); !errors.Is(err, sql.ErrNoRows) {
 		t.Fatalf("latestRunForTask() error = %v, want sql.ErrNoRows", err)
+	}
+}
+
+func TestExecuteNextQueuedRequeuesWhenBlockedWakePacketCompactionFails(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openJobStore(t)
+	defer store.Close()
+
+	registry := writeRegistry(t)
+	now := time.Date(2026, 4, 17, 10, 0, 0, 0, time.UTC)
+	compactErr := errors.New("checkpoint write failed")
+	service := Service{
+		Store:          store,
+		Registry:       registry,
+		Executors:      router.DefaultCatalog(),
+		ExecutorConfig: mustLoadExecutorConfig(t),
+		Transitions:    projects.Service{Store: store},
+		Leases: leases.Manager{
+			Store:        store,
+			Git:          &jobTestGit{},
+			WorktreeRoot: t.TempDir(),
+		},
+		CheckpointCompactor: func(context.Context, checkpoints.CompactParams) (checkpoints.CompactionResult, error) {
+			return checkpoints.CompactionResult{}, compactErr
+		},
+		Now: func() time.Time { return now },
+	}
+
+	task, err := service.CreateTaskFromAct(ctx, scope.Resolution{
+		Kind:       scope.ScopeOdinCore,
+		ProjectKey: "odin-core",
+	}, "Requires approval")
+	if err != nil {
+		t.Fatalf("CreateTaskFromAct() error = %v", err)
+	}
+
+	project, err := store.GetProjectByKey(ctx, "odin-core")
+	if err != nil {
+		t.Fatalf("GetProjectByKey(odin-core) error = %v", err)
+	}
+	if _, err := service.Transitions.SetTransitionState(ctx, projects.TransitionStateInput{
+		ProjectID:   project.ID,
+		Actor:       projects.TransitionControllerOdinOS,
+		TargetState: projects.TransitionStateCutover,
+		ChangedBy:   "test",
+	}); err != nil {
+		t.Fatalf("SetTransitionState(cutover) error = %v", err)
+	}
+
+	err = service.ExecuteNextQueued(ctx)
+	if !errors.Is(err, compactErr) {
+		t.Fatalf("ExecuteNextQueued() error = %v, want %v", err, compactErr)
+	}
+
+	gotTask, err := store.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
+	}
+	if gotTask.Status != "queued" {
+		t.Fatalf("Task.Status = %q, want queued", gotTask.Status)
+	}
+	if gotTask.BlockedReason != "" {
+		t.Fatalf("BlockedReason = %q, want empty", gotTask.BlockedReason)
+	}
+	if gotTask.NextEligibleAt != now.Add(time.Second) {
+		t.Fatalf("NextEligibleAt = %v, want %v", gotTask.NextEligibleAt, now.Add(time.Second))
+	}
+	if !strings.Contains(gotTask.LastError, compactErr.Error()) {
+		t.Fatalf("LastError = %q, want compaction failure", gotTask.LastError)
+	}
+
+	approval, err := store.GetLatestTaskApproval(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("GetLatestTaskApproval() error = %v", err)
+	}
+	if approval.Status != "pending" {
+		t.Fatalf("Approval.Status = %q, want pending", approval.Status)
+	}
+	if _, err := store.GetLatestTaskWakePacket(ctx, project.ID, task.ID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("GetLatestTaskWakePacket() error = %v, want sql.ErrNoRows", err)
 	}
 }
 
@@ -641,6 +833,9 @@ func TestExecuteNextQueuedResumesAfterApprovalIsApproved(t *testing.T) {
 	}
 	if unblockedTask.BlockedReason != "" {
 		t.Fatalf("BlockedReason after approval = %q, want empty", unblockedTask.BlockedReason)
+	}
+	if _, err := store.GetLatestTaskWakePacket(ctx, project.ID, task.ID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("GetLatestTaskWakePacket() after approval error = %v, want sql.ErrNoRows", err)
 	}
 
 	if err := service.ExecuteNextQueued(ctx); err != nil {
@@ -743,7 +938,117 @@ func TestExecuteNextQueuedKeepsRunPreparingAndReleasesLeaseOnAdmissionFailure(t 
 	if runStartStatus != "preparing" {
 		t.Fatalf("run.started status = %q, want preparing", runStartStatus)
 	}
+	packet, err := store.GetLatestTaskWakePacket(ctx, project.ID, task.ID)
+	if err != nil {
+		t.Fatalf("GetLatestTaskWakePacket() error = %v", err)
+	}
+	if packet.Trigger != string(checkpoints.TriggerHandoff) {
+		t.Fatalf("WakePacket.Trigger = %q, want %q", packet.Trigger, checkpoints.TriggerHandoff)
+	}
+	resumeState, err := checkpoints.Service{Store: store}.LoadResumeState(ctx, project.ID, task.ID)
+	if err != nil {
+		t.Fatalf("LoadResumeState() error = %v", err)
+	}
+	if resumeState.RunContext == nil || resumeState.RunContext.RunID != run.ID {
+		t.Fatalf("ResumeState.RunContext = %+v, want run %d", resumeState.RunContext, run.ID)
+	}
+	if len(resumeState.NextSteps) == 0 {
+		t.Fatalf("ResumeState.NextSteps = %v, want at least one step", resumeState.NextSteps)
+	}
 
+	if _, err := store.GetActiveWorktreeLeaseByTaskRun(ctx, task.ID, run.ID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("GetActiveWorktreeLeaseByTaskRun() error = %v, want sql.ErrNoRows", err)
+	}
+}
+
+func TestExecuteNextQueuedRequeuesWhenFailedDispatchWakePacketCompactionFails(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openJobStore(t)
+	defer store.Close()
+
+	registry := writeRegistryWithAlphaDefaultBranch(t, "odin/alpha/task-1/run-1/try-1")
+	now := time.Date(2026, 4, 17, 10, 0, 0, 0, time.UTC)
+	compactErr := errors.New("checkpoint write failed")
+	service := Service{
+		Store:          store,
+		Registry:       registry,
+		Executors:      router.DefaultCatalog(),
+		ExecutorConfig: mustLoadExecutorConfig(t),
+		Transitions:    projects.Service{Store: store},
+		Leases: leases.Manager{
+			Store:        store,
+			Git:          &jobTestGit{},
+			WorktreeRoot: t.TempDir(),
+		},
+		CheckpointCompactor: func(context.Context, checkpoints.CompactParams) (checkpoints.CompactionResult, error) {
+			return checkpoints.CompactionResult{}, compactErr
+		},
+		Now: func() time.Time { return now },
+	}
+
+	task, err := service.CreateTaskFromAct(ctx, scope.Resolution{
+		Kind:       scope.ScopeProject,
+		ProjectKey: "alpha",
+	}, "Admission fails after lease preparation")
+	if err != nil {
+		t.Fatalf("CreateTaskFromAct() error = %v", err)
+	}
+
+	project, err := store.GetProjectByKey(ctx, "alpha")
+	if err != nil {
+		t.Fatalf("GetProjectByKey(alpha) error = %v", err)
+	}
+	if _, err := service.Transitions.SetTransitionState(ctx, projects.TransitionStateInput{
+		ProjectID:   project.ID,
+		Actor:       projects.TransitionControllerOdinOS,
+		TargetState: projects.TransitionStateCutover,
+		ChangedBy:   "test",
+	}); err != nil {
+		t.Fatalf("SetTransitionState(cutover) error = %v", err)
+	}
+	if _, err := store.RecordExecutorHealth(ctx, sqlite.RecordExecutorHealthParams{
+		Executor:    "codex_headless",
+		Status:      "healthy",
+		LatencyMS:   0,
+		DetailsJSON: `{"source":"test"}`,
+	}); err != nil {
+		t.Fatalf("RecordExecutorHealth() error = %v", err)
+	}
+
+	err = service.ExecuteNextQueued(ctx)
+	if !errors.Is(err, compactErr) {
+		t.Fatalf("ExecuteNextQueued() error = %v, want %v", err, compactErr)
+	}
+
+	gotTask, err := store.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
+	}
+	if gotTask.Status != "queued" {
+		t.Fatalf("Task.Status = %q, want queued", gotTask.Status)
+	}
+	if gotTask.BlockedReason != "" {
+		t.Fatalf("BlockedReason = %q, want empty", gotTask.BlockedReason)
+	}
+	if gotTask.NextEligibleAt != now.Add(time.Second) {
+		t.Fatalf("NextEligibleAt = %v, want %v", gotTask.NextEligibleAt, now.Add(time.Second))
+	}
+	if !strings.Contains(gotTask.LastError, "dispatch preparation failed") || !strings.Contains(gotTask.LastError, compactErr.Error()) {
+		t.Fatalf("LastError = %q, want dispatch and compaction detail", gotTask.LastError)
+	}
+
+	run, err := latestRunForTask(ctx, store, task.ID)
+	if err != nil {
+		t.Fatalf("latestRunForTask() error = %v", err)
+	}
+	if run.Status != "failed" {
+		t.Fatalf("Run.Status = %q, want failed", run.Status)
+	}
+	if _, err := store.GetLatestTaskWakePacket(ctx, project.ID, task.ID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("GetLatestTaskWakePacket() error = %v, want sql.ErrNoRows", err)
+	}
 	if _, err := store.GetActiveWorktreeLeaseByTaskRun(ctx, task.ID, run.ID); !errors.Is(err, sql.ErrNoRows) {
 		t.Fatalf("GetActiveWorktreeLeaseByTaskRun() error = %v, want sql.ErrNoRows", err)
 	}

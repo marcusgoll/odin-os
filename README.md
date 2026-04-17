@@ -30,7 +30,7 @@ This repository is the runtime root. `odin-orchestrator` is a migration source o
 
 ## Current Status
 
-Phase 00 through Phase 15 are in place, and the Phase 17 alpha stabilization pass has closed the minimum trust blockers from the reality audit. Fresh runtime roots now bootstrap into an honest not-ready state until a live `odin serve` process marks them `ready`, queued work can execute through one live `codex_headless` lane, runtime mutation is gated by transition and system-project policy checks, mutable work is forced through leased task-owned worktrees, `odin serve` runs bounded self-heal and queue execution loops, routing promotions require explicit promotion approval before activation, and service logs are newline-delimited JSON again. Full provider-backed execution and broader unattended orchestration remain deferred; see `docs/operations/alpha-readiness.md` for the current alpha operating envelope.
+Phase 00 through Phase 15 are in place, and the Phase 17 alpha stabilization pass has closed the minimum trust blockers from the reality audit. Fresh runtime roots now bootstrap into an honest not-ready state until a live `odin serve` process marks them `ready`, and they fail closed again when that daemon drains or stops. Queued work can execute through one live `codex_headless` lane, runtime mutation is gated by transition and system-project policy checks, mutable work is forced through leased task-owned worktrees, `odin serve` runs bounded self-heal and queue execution loops, routing promotions require explicit promotion approval before activation, and service logs are newline-delimited JSON again. Full provider-backed execution and broader unattended orchestration remain deferred; see `docs/operations/alpha-readiness.md` for the current alpha operating envelope.
 
 ## Local Usage
 
@@ -43,3 +43,12 @@ odin
 ```
 
 This installs a symlink at `~/.local/bin/odin` pointing to this repo's built binary. Remove it with `make uninstall-local`.
+
+## Always-On Runtime
+
+For the single-daemon control plane:
+
+- run `odin serve` under a service manager such as `systemd`
+- use `odin healthcheck` for fail-closed readiness checks
+- use `odin doctor --json` for machine-readable health inspection
+- use `docs/operations/always-on-cutover-checklist.md` before treating a runtime root as always-on

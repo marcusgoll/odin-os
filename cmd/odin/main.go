@@ -2,14 +2,20 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"syscall"
 
 	"odin-os/internal/app/lifecycle"
 )
 
 func main() {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
 	cwd, err := os.Getwd()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -27,7 +33,11 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := lifecycle.Run(context.Background(), root, os.Args[1:], os.Stdin, os.Stdout); err != nil {
+	err = lifecycle.Run(ctx, root, os.Args[1:], os.Stdin, os.Stdout)
+	if errors.Is(err, context.Canceled) && len(os.Args) > 1 && os.Args[1] == "serve" {
+		return
+	}
+	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}

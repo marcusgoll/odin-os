@@ -32,7 +32,7 @@ These endpoints are narrow operational surfaces only. They are not the future Od
 
 - `/healthz` reports whether the process is up and can inspect local runtime state
 - `/readyz` reports whether Odin is safe to operate on managed projects
-- `odin healthcheck` uses the same readiness model and returns non-zero on degraded or failed readiness
+- `odin healthcheck` uses the same readiness model and returns non-zero on degraded or failed readiness, including when no live `odin serve` process currently owns the runtime root
 
 ## Startup recovery
 

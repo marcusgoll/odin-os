@@ -15,6 +15,7 @@ import (
 	"odin-os/internal/core/projects"
 	"odin-os/internal/executors/contract"
 	executorrouter "odin-os/internal/executors/router"
+	"odin-os/internal/runtime/checkpoints"
 	healthsvc "odin-os/internal/runtime/health"
 	"odin-os/internal/runtime/projections"
 	"odin-os/internal/store/sqlite"
@@ -22,23 +23,25 @@ import (
 )
 
 type Service struct {
-	Store             *sqlite.Store
-	Registry          projects.Registry
-	Executors         map[string]contract.Executor
-	ExecutorConfig    executorrouter.Config
-	Transitions       projects.Service
-	Leases            leases.Manager
-	ShutdownRequested *atomic.Bool
-	Now               func() time.Time
+	Store               *sqlite.Store
+	Registry            projects.Registry
+	Executors           map[string]contract.Executor
+	ExecutorConfig      executorrouter.Config
+	Transitions         projects.Service
+	Leases              leases.Manager
+	CheckpointCompactor func(context.Context, checkpoints.CompactParams) (checkpoints.CompactionResult, error)
+	ShutdownRequested   *atomic.Bool
+	Now                 func() time.Time
 }
 
 type admissionOutcome string
 
 const (
-	admissionDispatchable admissionOutcome = "dispatchable"
-	admissionBlocked      admissionOutcome = "blocked"
-	admissionFailed       admissionOutcome = "failed"
-	admissionRetryLater   admissionOutcome = "retry_later"
+	admissionDispatchable   admissionOutcome = "dispatchable"
+	admissionBlocked        admissionOutcome = "blocked"
+	admissionFailed         admissionOutcome = "failed"
+	admissionRetryLater     admissionOutcome = "retry_later"
+	checkpointRecoveryDelay                  = time.Second
 )
 
 type admissionDecision struct {
@@ -231,11 +234,17 @@ func (service Service) interruptDispatch(ctx context.Context, runID int64) error
 	if service.Store == nil {
 		return nil
 	}
-	_, _, err := service.Store.InterruptRunAndRequeueTask(ctx, sqlite.InterruptRunAndRequeueTaskParams{
+	task, run, err := service.Store.InterruptRunAndRequeueTask(ctx, sqlite.InterruptRunAndRequeueTaskParams{
 		RunID:   runID,
 		Summary: "dispatch canceled: shutdown requested",
 	})
-	return err
+	if err != nil {
+		return err
+	}
+	if err := service.compactInterruptedRun(ctx, task, run); err != nil {
+		return service.requeueAfterCheckpointFailure(ctx, task, time.Time{}, "dispatch handoff packet", err)
+	}
+	return nil
 }
 
 func (service Service) ensureRuntimeProject(ctx context.Context, manifest projects.Manifest) (sqlite.Project, error) {
@@ -474,13 +483,25 @@ func (service Service) finalizeOutcome(ctx context.Context, task sqlite.Task, ru
 	if admission.Outcome != "" && admission.Outcome != admissionDispatchable {
 		switch admission.Outcome {
 		case admissionFailed:
-			_, _, err := service.Store.FinishRunAndSetTaskStatus(ctx, sqlite.FinishRunAndSetTaskStatusParams{
+			updatedTask, updatedRun, err := service.Store.FinishRunAndSetTaskStatus(ctx, sqlite.FinishRunAndSetTaskStatusParams{
 				RunID:      run.ID,
 				RunStatus:  "failed",
 				Summary:    admission.LastError,
 				TaskStatus: "failed",
 			})
-			return err
+			if err != nil {
+				return err
+			}
+			if err := service.compactFailedDispatch(ctx, updatedTask, updatedRun, admission.LastError); err != nil {
+				return service.requeueAfterCheckpointFailure(
+					ctx,
+					updatedTask,
+					service.now().Add(checkpointRecoveryDelay),
+					fmt.Sprintf("dispatch preparation failed: %s", admission.LastError),
+					err,
+				)
+			}
+			return nil
 		case admissionRetryLater:
 			_, _, err := service.Store.FailRunAndRetryTask(ctx, sqlite.FailRunAndRetryTaskParams{
 				RunID:          run.ID,
@@ -552,11 +573,23 @@ func (service Service) finalizeOutcome(ctx context.Context, task sqlite.Task, ru
 func (service Service) applyAdmissionDecision(ctx context.Context, task sqlite.Task, decision admissionDecision) error {
 	switch decision.Outcome {
 	case admissionBlocked:
-		_, err := service.Store.BlockTask(ctx, sqlite.BlockTaskParams{
+		blockedTask, err := service.Store.BlockTask(ctx, sqlite.BlockTaskParams{
 			TaskID: task.ID,
 			Reason: decision.BlockedReason,
 		})
-		return err
+		if err != nil {
+			return err
+		}
+		if err := service.compactBlockedTask(ctx, blockedTask, decision); err != nil {
+			return service.requeueAfterCheckpointFailure(
+				ctx,
+				blockedTask,
+				service.now().Add(checkpointRecoveryDelay),
+				fmt.Sprintf("blocked task (%s)", decision.BlockedReason),
+				err,
+			)
+		}
+		return nil
 	case admissionFailed:
 		_, err := service.Store.UpdateTaskQueueState(ctx, sqlite.UpdateTaskQueueStateParams{
 			TaskID:         task.ID,
@@ -586,6 +619,221 @@ func (service Service) applyAdmissionDecision(ctx context.Context, task sqlite.T
 	default:
 		return fmt.Errorf("unsupported admission outcome %q", decision.Outcome)
 	}
+}
+
+func (service Service) compactBlockedTask(ctx context.Context, task sqlite.Task, decision admissionDecision) error {
+	if service.Store == nil {
+		return nil
+	}
+
+	project, err := service.Store.GetProject(ctx, task.ProjectID)
+	if err != nil {
+		return err
+	}
+
+	approvalSummary := "none"
+	if decision.BlockedReason == "approval_required" {
+		approval, err := service.latestTaskApproval(ctx, task.ID)
+		if err != nil {
+			return err
+		}
+		if approval.Status != "" {
+			approvalSummary = fmt.Sprintf("approval %s", approval.Status)
+		}
+	}
+
+	_, err = service.compactCheckpoint(ctx, checkpoints.CompactParams{
+		TaskID:               task.ID,
+		Trigger:              blockedCheckpointTrigger(decision.BlockedReason),
+		CheckpointKey:        fmt.Sprintf("task-%d-%s-%d", task.ID, decision.BlockedReason, service.now().UnixNano()),
+		Objective:            task.Title,
+		TaskStatus:           task.Status,
+		BlockingReason:       decision.BlockedReason,
+		NextSteps:            blockedNextSteps(decision.BlockedReason),
+		Constraints:          blockedConstraints(decision.BlockedReason),
+		SelectedCapabilities: blockedCapabilities(decision.BlockedReason),
+		Evidence:             blockedEvidence(decision),
+		ManifestSummary:      service.manifestSummary(project),
+		PolicySummary:        service.policySummary(project),
+		OpenTaskSummary:      fmt.Sprintf("task %s is blocked", task.Key),
+		ApprovalSummary:      approvalSummary,
+	})
+	return err
+}
+
+func (service Service) compactInterruptedRun(ctx context.Context, task sqlite.Task, run sqlite.Run) error {
+	if service.Store == nil {
+		return nil
+	}
+
+	project, err := service.Store.GetProject(ctx, task.ProjectID)
+	if err != nil {
+		return err
+	}
+
+	_, err = service.compactCheckpoint(ctx, checkpoints.CompactParams{
+		TaskID:            task.ID,
+		RunID:             &run.ID,
+		Trigger:           checkpoints.TriggerHandoff,
+		CheckpointKey:     fmt.Sprintf("run-%d-interrupted-%d", run.ID, service.now().UnixNano()),
+		Objective:         task.Title,
+		TaskStatus:        task.Status,
+		BlockingReason:    "shutdown_requested",
+		LastCompletedStep: "dispatch interrupted before completion",
+		NextSteps: []string{
+			"Review the latest handoff packet",
+			"Resume the queued task when the daemon is ready",
+		},
+		Constraints:          []string{"previous run was interrupted by shutdown"},
+		SelectedCapabilities: []string{"handoff_resume"},
+		Evidence: []checkpoints.Evidence{{
+			Kind:    "interrupt",
+			Summary: run.Summary,
+		}},
+		ManifestSummary: service.manifestSummary(project),
+		PolicySummary:   service.policySummary(project),
+		OpenTaskSummary: fmt.Sprintf("task %s was requeued after interruption", task.Key),
+		ApprovalSummary: "none",
+	})
+	return err
+}
+
+func (service Service) compactFailedDispatch(ctx context.Context, task sqlite.Task, run sqlite.Run, summary string) error {
+	if service.Store == nil {
+		return nil
+	}
+
+	project, err := service.Store.GetProject(ctx, task.ProjectID)
+	if err != nil {
+		return err
+	}
+
+	_, err = service.compactCheckpoint(ctx, checkpoints.CompactParams{
+		TaskID:            task.ID,
+		RunID:             &run.ID,
+		Trigger:           checkpoints.TriggerHandoff,
+		CheckpointKey:     fmt.Sprintf("run-%d-failed-dispatch-%d", run.ID, service.now().UnixNano()),
+		Objective:         task.Title,
+		TaskStatus:        task.Status,
+		BlockingReason:    summary,
+		LastCompletedStep: "dispatch failed during preparation",
+		NextSteps: []string{
+			"Review the failed dispatch context",
+			"Fix the policy or configuration issue before retrying the task",
+		},
+		Constraints:          []string{"dispatch failed after partial setup"},
+		SelectedCapabilities: []string{"handoff_resume"},
+		Evidence: []checkpoints.Evidence{{
+			Kind:    "dispatch_failure",
+			Summary: summary,
+		}},
+		ManifestSummary: service.manifestSummary(project),
+		PolicySummary:   service.policySummary(project),
+		OpenTaskSummary: fmt.Sprintf("task %s failed during dispatch preparation", task.Key),
+		ApprovalSummary: "none",
+	})
+	return err
+}
+
+func (service Service) compactCheckpoint(ctx context.Context, params checkpoints.CompactParams) (checkpoints.CompactionResult, error) {
+	if service.CheckpointCompactor != nil {
+		return service.CheckpointCompactor(ctx, params)
+	}
+	return checkpoints.Service{Store: service.Store}.Compact(ctx, params)
+}
+
+func (service Service) requeueAfterCheckpointFailure(ctx context.Context, task sqlite.Task, nextEligibleAt time.Time, summary string, compactErr error) error {
+	if service.Store == nil {
+		return compactErr
+	}
+
+	lastError := fmt.Sprintf("%s unavailable: %v", summary, compactErr)
+	_, err := service.Store.UpdateTaskQueueState(ctx, sqlite.UpdateTaskQueueStateParams{
+		TaskID:         task.ID,
+		Status:         "queued",
+		NextEligibleAt: nextEligibleAt,
+		Priority:       task.Priority,
+		LastError:      lastError,
+		RetryCount:     task.RetryCount,
+		MaxAttempts:    task.MaxAttempts,
+		BlockedReason:  "",
+	})
+	if err != nil {
+		return errors.Join(compactErr, err)
+	}
+	return compactErr
+}
+
+func (service Service) manifestSummary(project sqlite.Project) string {
+	if manifest, ok := service.Registry.Lookup(project.Key); ok {
+		if manifest.SystemProject {
+			return "managed system project"
+		}
+		return "managed project"
+	}
+	return fmt.Sprintf("%s project %s", project.Scope, project.Key)
+}
+
+func (service Service) policySummary(project sqlite.Project) string {
+	if manifest, ok := service.Registry.Lookup(project.Key); ok {
+		if manifest.SystemProject {
+			return "system project approval and branch rules apply"
+		}
+		return "project branch rules apply"
+	}
+	return "runtime-managed execution"
+}
+
+func blockedCheckpointTrigger(reason string) checkpoints.Trigger {
+	switch reason {
+	case "approval_required":
+		return checkpoints.TriggerApprovalWait
+	default:
+		return checkpoints.TriggerIdlePause
+	}
+}
+
+func blockedNextSteps(reason string) []string {
+	switch reason {
+	case "approval_required":
+		return []string{
+			"Review the pending approval request",
+			"Resume the queued task once approval is granted",
+		}
+	default:
+		return []string{
+			"Inspect executor health and restore availability",
+			"Resume the blocked task once a healthy executor is available",
+		}
+	}
+}
+
+func blockedConstraints(reason string) []string {
+	switch reason {
+	case "approval_required":
+		return []string{"task cannot continue without explicit approval"}
+	default:
+		return []string{"task is blocked until executor health recovers"}
+	}
+}
+
+func blockedCapabilities(reason string) []string {
+	switch reason {
+	case "approval_required":
+		return []string{"approval_resume"}
+	default:
+		return []string{"executor_recovery"}
+	}
+}
+
+func blockedEvidence(decision admissionDecision) []checkpoints.Evidence {
+	if decision.LastError == "" {
+		return nil
+	}
+	return []checkpoints.Evidence{{
+		Kind:    "health",
+		Summary: decision.LastError,
+	}}
 }
 
 func (service Service) latestTaskApproval(ctx context.Context, taskID int64) (sqlite.Approval, error) {
