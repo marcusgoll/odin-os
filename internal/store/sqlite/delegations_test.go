@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 )
 
@@ -211,7 +212,7 @@ func TestDelegationArtifactCRUD(t *testing.T) {
 		DelegationID: delegation.ID,
 		ArtifactType: "plan",
 		Summary:      "Delegation plan",
-		DetailsJSON:  `{"path":"docs/plan.md"}`,
+		DetailsJSON:  `{"status":"completed","confidence":"high","evidence_refs":["docs/plan.md"],"unresolved_risks":[],"proposed_next_actions":["publish plan"],"proposed_memory_candidates":["delegation-plan"]}`,
 	})
 	if err != nil {
 		t.Fatalf("CreateDelegationArtifact(plan) error = %v", err)
@@ -221,10 +222,30 @@ func TestDelegationArtifactCRUD(t *testing.T) {
 		DelegationID: delegation.ID,
 		ArtifactType: "result",
 		Summary:      "Delegation result",
-		DetailsJSON:  `{"path":"docs/result.md"}`,
+		DetailsJSON:  `{"status":"completed","confidence":0.82,"evidence_refs":["docs/result.md"],"unresolved_risks":["awaiting approval"],"proposed_next_actions":["request approval"],"proposed_memory_candidates":["delegation-result"]}`,
 	})
 	if err != nil {
 		t.Fatalf("CreateDelegationArtifact(result) error = %v", err)
+	}
+	var envelope struct {
+		Status                   string   `json:"status"`
+		Confidence               string   `json:"confidence"`
+		EvidenceRefs             []string `json:"evidence_refs"`
+		UnresolvedRisks          []string `json:"unresolved_risks"`
+		ProposedNextActions      []string `json:"proposed_next_actions"`
+		ProposedMemoryCandidates []string `json:"proposed_memory_candidates"`
+	}
+	if err := json.Unmarshal([]byte(planArtifact.DetailsJSON), &envelope); err != nil {
+		t.Fatalf("json.Unmarshal(plan artifact details) error = %v", err)
+	}
+	if envelope.Status != "completed" || envelope.Confidence != "high" {
+		t.Fatalf("plan artifact envelope = %+v, want completed/high", envelope)
+	}
+	if len(envelope.EvidenceRefs) != 1 || envelope.EvidenceRefs[0] != "docs/plan.md" {
+		t.Fatalf("plan artifact evidence refs = %#v, want [docs/plan.md]", envelope.EvidenceRefs)
+	}
+	if len(envelope.ProposedNextActions) != 1 || envelope.ProposedNextActions[0] != "publish plan" {
+		t.Fatalf("plan artifact next actions = %#v, want [publish plan]", envelope.ProposedNextActions)
 	}
 
 	artifacts, err := store.ListDelegationArtifacts(ctx, ListDelegationArtifactsParams{
@@ -252,6 +273,26 @@ func TestDelegationArtifactCRUD(t *testing.T) {
 	}
 	if len(resultArtifacts) != 1 || resultArtifacts[0].ID != resultArtifact.ID {
 		t.Fatalf("ListDelegationArtifacts(filtered) = %+v, want result artifact %d only", resultArtifacts, resultArtifact.ID)
+	}
+	var resultEnvelope struct {
+		Status                   string   `json:"status"`
+		Confidence               float64  `json:"confidence"`
+		EvidenceRefs             []string `json:"evidence_refs"`
+		UnresolvedRisks          []string `json:"unresolved_risks"`
+		ProposedNextActions      []string `json:"proposed_next_actions"`
+		ProposedMemoryCandidates []string `json:"proposed_memory_candidates"`
+	}
+	if err := json.Unmarshal([]byte(resultArtifacts[0].DetailsJSON), &resultEnvelope); err != nil {
+		t.Fatalf("json.Unmarshal(result artifact details) error = %v", err)
+	}
+	if resultEnvelope.Status != "completed" || resultEnvelope.Confidence != 0.82 {
+		t.Fatalf("result artifact envelope = %+v, want completed/0.82", resultEnvelope)
+	}
+	if len(resultEnvelope.UnresolvedRisks) != 1 || resultEnvelope.UnresolvedRisks[0] != "awaiting approval" {
+		t.Fatalf("result artifact unresolved risks = %#v, want [awaiting approval]", resultEnvelope.UnresolvedRisks)
+	}
+	if len(resultEnvelope.ProposedMemoryCandidates) != 1 || resultEnvelope.ProposedMemoryCandidates[0] != "delegation-result" {
+		t.Fatalf("result artifact memory candidates = %#v, want [delegation-result]", resultEnvelope.ProposedMemoryCandidates)
 	}
 }
 

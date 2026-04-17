@@ -2,6 +2,8 @@ package integration_test
 
 import (
 	"context"
+	"encoding/json"
+	"strings"
 	"testing"
 
 	companionsvc "odin-os/internal/core/companions"
@@ -114,6 +116,21 @@ func TestCompanionSwarmCreatesChildWorkItems(t *testing.T) {
 	if len(materialized.Delegations) != 2 {
 		t.Fatalf("materialized delegations len = %d, want 2", len(materialized.Delegations))
 	}
+	var details struct {
+		Objective string `json:"objective"`
+		Swarm     struct {
+			ConvergenceMode string `json:"convergence_mode"`
+		} `json:"swarm"`
+	}
+	if err := json.Unmarshal([]byte(materialized.Delegations[0].DetailsJSON), &details); err != nil {
+		t.Fatalf("json.Unmarshal(delegation details) error = %v", err)
+	}
+	if details.Swarm.ConvergenceMode != "review_gate" {
+		t.Fatalf("delegation convergence mode = %q, want review_gate", details.Swarm.ConvergenceMode)
+	}
+	if details.Objective == "" {
+		t.Fatalf("delegation objective = empty, want preserved objective")
+	}
 
 	childKeys := make(map[string]struct{}, len(materialized.Delegations))
 	for _, delegation := range materialized.Delegations {
@@ -158,6 +175,68 @@ func TestCompanionSwarmCreatesChildWorkItems(t *testing.T) {
 	if foundViews != len(childKeys) {
 		t.Fatalf("child task views found = %d, want %d", foundViews, len(childKeys))
 	}
+
+	for _, delegation := range materialized.Delegations {
+		detailsJSON := mustMarshalJSON(t, map[string]any{
+			"status":                     "completed",
+			"confidence":                 0.84,
+			"evidence_refs":              []string{"swarm/" + delegation.DelegationKey},
+			"unresolved_risks":           []string{},
+			"proposed_next_actions":      []string{"continue"},
+			"proposed_memory_candidates": []string{"swarm-" + delegation.DelegationKey},
+		})
+		summary := "Implementation ready"
+		if delegation.DelegationKey == "review" {
+			summary = "Review approved"
+		}
+		if _, err := store.CreateDelegationArtifact(ctx, sqlite.CreateDelegationArtifactParams{
+			DelegationID: delegation.ID,
+			ArtifactType: "result",
+			Summary:      summary,
+			DetailsJSON:  detailsJSON,
+		}); err != nil {
+			t.Fatalf("CreateDelegationArtifact(%s) error = %v", delegation.DelegationKey, err)
+		}
+	}
+
+	aggregation, err := service.AggregateSwarm(ctx, parentTask.ID)
+	if err != nil {
+		t.Fatalf("AggregateSwarm() error = %v", err)
+	}
+	if aggregation.Status != "completed" {
+		t.Fatalf("AggregateSwarm().Status = %q, want completed", aggregation.Status)
+	}
+	if aggregation.ParentTask.Status != "completed" {
+		t.Fatalf("AggregateSwarm().ParentTask.Status = %q, want completed", aggregation.ParentTask.Status)
+	}
+	if aggregation.VerifierDelegationID == nil {
+		t.Fatalf("AggregateSwarm().VerifierDelegationID = nil, want reviewer delegation ID")
+	}
+	if !strings.Contains(aggregation.Summary, "Implementation ready") {
+		t.Fatalf("AggregateSwarm().Summary = %q, want implementation summary", aggregation.Summary)
+	}
+
+	persistedParent, err := store.GetTask(ctx, parentTask.ID)
+	if err != nil {
+		t.Fatalf("GetTask(parent) error = %v", err)
+	}
+	if persistedParent.Status != "completed" {
+		t.Fatalf("GetTask(parent).Status = %q, want completed", persistedParent.Status)
+	}
+
+	var parentArtifacts []map[string]any
+	if err := json.Unmarshal([]byte(persistedParent.ArtifactsJSON), &parentArtifacts); err != nil {
+		t.Fatalf("json.Unmarshal(parent artifacts) error = %v", err)
+	}
+	if len(parentArtifacts) != 1 {
+		t.Fatalf("parent artifacts len = %d, want 1", len(parentArtifacts))
+	}
+	if got := parentArtifacts[0]["convergence_mode"]; got != "review_gate" {
+		t.Fatalf("parent artifacts convergence_mode = %#v, want review_gate", got)
+	}
+	if _, ok := parentArtifacts[0]["verifier_delegation_id"]; !ok {
+		t.Fatalf("parent artifacts missing verifier_delegation_id: %#v", parentArtifacts[0])
+	}
 }
 
 func companionsWorkspace(ctx context.Context, store *sqlite.Store) (sqlite.Workspace, error) {
@@ -169,4 +248,14 @@ func companionsWorkspace(ctx context.Context, store *sqlite.Store) (sqlite.Works
 		Status:              "active",
 		PolicyJSON:          `{}`,
 	})
+}
+
+func mustMarshalJSON(t *testing.T, value any) string {
+	t.Helper()
+
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+	return string(encoded)
 }

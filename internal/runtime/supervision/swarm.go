@@ -453,3 +453,24 @@ func delegationObjective(detailsJSON string) string {
 	}
 	return strings.TrimSpace(decoded.Objective)
 }
+
+func (service Service) AggregateDelegationArtifacts(ctx context.Context, delegationID int64) (AggregationResult, error) {
+	if service.Store == nil {
+		return AggregationResult{}, fmt.Errorf("supervision store is required")
+	}
+	if delegationID <= 0 {
+		return AggregationResult{}, fmt.Errorf("delegation is required")
+	}
+
+	delegation, err := service.Store.GetDelegation(ctx, delegationID)
+	if err != nil {
+		return AggregationResult{}, err
+	}
+	artifacts, err := service.Store.ListDelegationArtifacts(ctx, sqlite.ListDelegationArtifactsParams{
+		DelegationID: delegation.ID,
+	})
+	if err != nil {
+		return AggregationResult{}, err
+	}
+	return AggregateConvergence(delegation.ConvergenceMode, artifacts)
+}
