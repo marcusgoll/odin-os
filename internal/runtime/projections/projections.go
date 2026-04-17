@@ -39,6 +39,7 @@ type RunSummaryView struct {
 type PendingApprovalView struct {
 	ApprovalID  int64
 	TaskID      int64
+	ProjectKey  string
 	TaskKey     string
 	Status      string
 	RequestedAt string
@@ -239,11 +240,13 @@ func ListPendingApprovalViews(ctx context.Context, queryer Queryer) ([]PendingAp
 		SELECT
 			a.id,
 			a.task_id,
+			p.key,
 			t.key,
 			a.status,
 			a.requested_at
 		FROM approvals a
 		JOIN tasks t ON t.id = a.task_id
+		JOIN projects p ON p.id = t.project_id
 		WHERE a.status = 'pending'
 		ORDER BY a.id ASC
 	`)
@@ -258,6 +261,7 @@ func ListPendingApprovalViews(ctx context.Context, queryer Queryer) ([]PendingAp
 		if err := rows.Scan(
 			&view.ApprovalID,
 			&view.TaskID,
+			&view.ProjectKey,
 			&view.TaskKey,
 			&view.Status,
 			&view.RequestedAt,

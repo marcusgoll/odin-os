@@ -15,6 +15,8 @@ const (
 	IntentMode      Intent = "mode"
 	IntentScope     Intent = "scope"
 	IntentProject   Intent = "project"
+	IntentWorkspace Intent = "workspace"
+	IntentInitiatives Intent = "initiatives"
 	IntentJobs      Intent = "jobs"
 	IntentRuns      Intent = "runs"
 	IntentApprovals Intent = "approvals"
@@ -47,6 +49,10 @@ func RouteAskIntent(line string) Intent {
 		return IntentHelp
 	case strings.Contains(normalized, "mode"):
 		return IntentMode
+	case strings.Contains(normalized, "workspace") || strings.Contains(normalized, "home"):
+		return IntentWorkspace
+	case strings.Contains(normalized, "initiative") || strings.Contains(normalized, "portfolio"):
+		return IntentInitiatives
 	case strings.Contains(normalized, "scope"):
 		return IntentScope
 	case strings.Contains(normalized, "project") || strings.Contains(normalized, "self"):

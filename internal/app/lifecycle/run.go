@@ -191,6 +191,7 @@ func runServe(ctx context.Context, app bootstrap.App, cfg appconfig.Config, stdo
 
 	server := &stdhttp.Server{
 		Handler: apihttp.NewOperationalHandler(apihttp.Dependencies{
+			Store: app.Store,
 			Health: healthsvc.Service{
 				DB: app.Store.DB(),
 			},

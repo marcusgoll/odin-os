@@ -3,12 +3,16 @@ package integration_test
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	httpapi "odin-os/internal/api/http"
 	"odin-os/internal/app/backup"
 	"odin-os/internal/app/bootstrap"
 	"odin-os/internal/app/lifecycle"
@@ -238,6 +242,94 @@ func TestAlphaAcceptance(t *testing.T) {
 		}
 		if len(views) == 0 {
 			t.Fatalf("task views = 0, want created task from act mode")
+		}
+	})
+
+	t.Run("workspace operating model surfaces through cli and api", func(t *testing.T) {
+		runtimeRoot := t.TempDir()
+		store := openRuntimeStore(t, runtimeRoot)
+		defer store.Close()
+
+		fixture := seedWorkspaceOperatingModelFixture(t, ctx, store, now)
+
+		output, err := runOdinCommand(t, repoRoot, odinBinary, runtimeRoot, nil, "/workspace\n/initiatives\n/jobs initiative "+fixture.Initiative.Key+"\n/quit\n")
+		if err != nil {
+			t.Fatalf("runOdinCommand(workspace views) error = %v\n%s", err, output)
+		}
+		if !strings.Contains(output, "workspace="+fixture.Workspace.Key+" initiatives=1 companions=1 approvals=1 blocked=1") {
+			t.Fatalf("workspace output = %q, want workspace summary", output)
+		}
+		if !strings.Contains(output, "blocked odin-core/"+fixture.Task.Key+" reason=awaiting operator approval next=resume once approved") {
+			t.Fatalf("workspace output = %q, want blocked follow-up line", output)
+		}
+		if !strings.Contains(output, "approval odin-core/"+fixture.Task.Key+" pending") {
+			t.Fatalf("workspace output = %q, want pending approval line", output)
+		}
+		if !strings.Contains(output, fixture.Initiative.Key+" owner="+fixture.Companion.Key) {
+			t.Fatalf("workspace output = %q, want initiative companion assignment", output)
+		}
+		if !strings.Contains(output, fixture.Task.Key) {
+			t.Fatalf("workspace output = %q, want initiative-scoped work item", output)
+		}
+
+		server := httptest.NewServer(httpapi.NewOperationalHandler(*newWorkspaceAPIHandler(store)))
+		defer server.Close()
+
+		response, err := http.Get(server.URL + "/workspace")
+		if err != nil {
+			t.Fatalf("GET /workspace error = %v", err)
+		}
+		defer response.Body.Close()
+		if response.StatusCode != http.StatusOK {
+			t.Fatalf("/workspace status = %d, want %d", response.StatusCode, http.StatusOK)
+		}
+
+		var payload struct {
+			Workspace struct {
+				Key                  string `json:"key"`
+				InitiativeCount      int    `json:"initiative_count"`
+				CompanionCount       int    `json:"companion_count"`
+				PendingApprovalCount int    `json:"pending_approval_count"`
+				BlockedItemCount     int    `json:"blocked_item_count"`
+			} `json:"workspace"`
+			Initiatives []struct {
+				Key               string `json:"key"`
+				OwnerCompanionKey string `json:"owner_companion_key"`
+			} `json:"initiatives"`
+			InitiativeWorkItems []struct {
+				InitiativeKey string `json:"initiative_key"`
+				TaskKey       string `json:"task_key"`
+				Status        string `json:"status"`
+			} `json:"initiative_work_items"`
+			BlockedItems []struct {
+				TaskKey       string `json:"task_key"`
+				InitiativeKey string `json:"initiative_key"`
+				CompanionKey  string `json:"companion_key"`
+				NextStep      string `json:"next_step"`
+			} `json:"blocked_items"`
+			PendingApprovals []struct {
+				ProjectKey string `json:"project_key"`
+				TaskKey    string `json:"task_key"`
+				Status     string `json:"status"`
+			} `json:"pending_approvals"`
+		}
+		if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+			t.Fatalf("Decode(/workspace) error = %v", err)
+		}
+		if payload.Workspace.Key != fixture.Workspace.Key || payload.Workspace.BlockedItemCount != 1 || payload.Workspace.PendingApprovalCount != 1 {
+			t.Fatalf("/workspace payload = %+v, want workspace home counts", payload.Workspace)
+		}
+		if len(payload.Initiatives) != 1 || payload.Initiatives[0].OwnerCompanionKey != fixture.Companion.Key {
+			t.Fatalf("/workspace initiatives = %+v, want initiative owned by %s", payload.Initiatives, fixture.Companion.Key)
+		}
+		if len(payload.InitiativeWorkItems) != 1 || payload.InitiativeWorkItems[0].InitiativeKey != fixture.Initiative.Key || payload.InitiativeWorkItems[0].TaskKey != fixture.Task.Key || payload.InitiativeWorkItems[0].Status != "blocked" {
+			t.Fatalf("/workspace initiative work items = %+v, want blocked initiative-scoped work item", payload.InitiativeWorkItems)
+		}
+		if len(payload.BlockedItems) != 1 || payload.BlockedItems[0].TaskKey != fixture.Task.Key || payload.BlockedItems[0].NextStep != "resume once approved" {
+			t.Fatalf("/workspace blocked items = %+v, want blocked follow-up", payload.BlockedItems)
+		}
+		if len(payload.PendingApprovals) != 1 || payload.PendingApprovals[0].ProjectKey != "odin-core" || payload.PendingApprovals[0].Status != "pending" {
+			t.Fatalf("/workspace approvals = %+v, want pending approval", payload.PendingApprovals)
 		}
 	})
 

@@ -16,6 +16,7 @@ import (
 	"odin-os/internal/core/projects"
 	healthsvc "odin-os/internal/runtime/health"
 	jobsvc "odin-os/internal/runtime/jobs"
+	"odin-os/internal/runtime/projections"
 	runsvc "odin-os/internal/runtime/runs"
 	"odin-os/internal/store/sqlite"
 )
@@ -152,7 +153,7 @@ func (shell *Shell) renderPrompt(ctx context.Context, output io.Writer) error {
 func (shell *Shell) handleCommand(ctx context.Context, command commands.Command, output io.Writer) error {
 	switch command.Name {
 	case "help":
-		if _, err := fmt.Fprintln(output, "/help /mode /scope /project /transition /observe /compare /jobs /runs /approvals /logs /doctor /self"); err != nil {
+		if _, err := fmt.Fprintln(output, "/help /mode /scope /workspace /initiatives /project /transition /observe /compare /jobs /runs /approvals /logs /doctor /self"); err != nil {
 			return err
 		}
 		_, err := fmt.Fprintf(output, "%s\n", transitionUsage)
@@ -161,6 +162,10 @@ func (shell *Shell) handleCommand(ctx context.Context, command commands.Command,
 		return shell.handleMode(command.Args, output)
 	case "scope":
 		return shell.handleScope(command.Args, output)
+	case "workspace":
+		return shell.handleWorkspace(ctx, output)
+	case "initiatives":
+		return shell.handleInitiatives(ctx, output)
 	case "project":
 		return shell.handleProject(command.Args, output)
 	case "transition":
@@ -170,7 +175,7 @@ func (shell *Shell) handleCommand(ctx context.Context, command commands.Command,
 	case "compare":
 		return shell.handleCompare(ctx, command.Args, output)
 	case "jobs":
-		return shell.handleJobs(ctx, output)
+		return shell.handleJobs(ctx, command.Args, output)
 	case "runs":
 		return shell.handleRuns(ctx, output)
 	case "approvals":
@@ -195,6 +200,10 @@ func (shell *Shell) handleAsk(ctx context.Context, line string, output io.Writer
 		return shell.handleCommand(ctx, commands.Command{Name: "help"}, output)
 	case commands.IntentMode:
 		return shell.handleCommand(ctx, commands.Command{Name: "mode"}, output)
+	case commands.IntentWorkspace:
+		return shell.handleCommand(ctx, commands.Command{Name: "workspace"}, output)
+	case commands.IntentInitiatives:
+		return shell.handleCommand(ctx, commands.Command{Name: "initiatives"}, output)
 	case commands.IntentScope:
 		return shell.handleCommand(ctx, commands.Command{Name: "scope"}, output)
 	case commands.IntentProject:
@@ -210,7 +219,7 @@ func (shell *Shell) handleAsk(ctx context.Context, line string, output io.Writer
 	case commands.IntentDoctor:
 		return shell.handleCommand(ctx, commands.Command{Name: "doctor"}, output)
 	default:
-		_, err := fmt.Fprintln(output, "local ask is limited in Phase 05. Try /help, /scope, /project, /jobs, /runs, /approvals, /logs, or /doctor.")
+		_, err := fmt.Fprintln(output, "local ask is limited in Phase 05. Try /help, /scope, /workspace, /initiatives, /project, /jobs, /runs, /approvals, /logs, or /doctor.")
 		return err
 	}
 }
@@ -431,7 +440,105 @@ func (shell *Shell) handleTransitionReport(ctx context.Context, args []string, o
 	return err
 }
 
-func (shell *Shell) handleJobs(ctx context.Context, output io.Writer) error {
+func (shell *Shell) handleWorkspace(ctx context.Context, output io.Writer) error {
+	workspaceKey, err := shell.currentWorkspaceKey(ctx)
+	if err != nil {
+		_, writeErr := fmt.Fprintln(output, err.Error())
+		return writeErr
+	}
+
+	homes, err := projections.ListWorkspaceHomeViews(ctx, shell.env.Store.DB())
+	if err != nil {
+		return err
+	}
+	for _, home := range homes {
+		if home.WorkspaceKey == workspaceKey {
+			if _, err := fmt.Fprintf(
+				output,
+				"workspace=%s initiatives=%d companions=%d approvals=%d blocked=%d\n",
+				home.WorkspaceKey,
+				home.InitiativeCount,
+				home.CompanionCount,
+				home.PendingApprovalCount,
+				home.BlockedItemCount,
+			); err != nil {
+				return err
+			}
+
+			blocked, err := projections.ListWorkspaceBlockedItemViews(ctx, shell.env.Store.DB(), workspaceKey)
+			if err != nil {
+				return err
+			}
+			for _, item := range blocked {
+				if _, err := fmt.Fprintf(output, "blocked %s/%s reason=%s next=%s\n", valueOrDefault(item.ProjectKey, "unknown"), item.TaskKey, valueOrDefault(item.Reason, "unknown"), valueOrDefault(item.NextStep, "none")); err != nil {
+					return err
+				}
+			}
+
+			approvals, err := projections.ListWorkspacePendingApprovalViews(ctx, shell.env.Store.DB(), workspaceKey)
+			if err != nil {
+				return err
+			}
+			for _, approval := range approvals {
+				if _, err := fmt.Fprintf(output, "approval %s/%s %s\n", valueOrDefault(approval.ProjectKey, "unknown"), approval.TaskKey, approval.Status); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
+	}
+
+	_, err = fmt.Fprintf(output, "workspace=%s not found\n", workspaceKey)
+	return err
+}
+
+func (shell *Shell) handleInitiatives(ctx context.Context, output io.Writer) error {
+	workspaceKey, err := shell.currentWorkspaceKey(ctx)
+	if err != nil {
+		_, writeErr := fmt.Fprintln(output, err.Error())
+		return writeErr
+	}
+
+	views, err := projections.ListInitiativePortfolioViews(ctx, shell.env.Store.DB(), workspaceKey)
+	if err != nil {
+		return err
+	}
+	if len(views) == 0 {
+		_, err := fmt.Fprintln(output, "no initiatives")
+		return err
+	}
+	for _, view := range views {
+		_, err := fmt.Fprintf(output, "%s owner=%s status=%s work_items=%d\n", view.InitiativeKey, valueOrDefault(view.OwnerCompanionKey, "unassigned"), view.Status, view.OpenWorkItemCount)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (shell *Shell) handleJobs(ctx context.Context, args []string, output io.Writer) error {
+	if len(args) == 2 && strings.EqualFold(args[0], "initiative") {
+		workspaceKey, err := shell.currentWorkspaceKey(ctx)
+		if err != nil {
+			_, writeErr := fmt.Fprintln(output, err.Error())
+			return writeErr
+		}
+		views, err := projections.ListInitiativeWorkItemViews(ctx, shell.env.Store.DB(), workspaceKey, args[1])
+		if err != nil {
+			return err
+		}
+		if len(views) == 0 {
+			_, err := fmt.Fprintln(output, "no jobs")
+			return err
+		}
+		for _, view := range views {
+			if _, err := fmt.Fprintf(output, "%s %s %s\n", view.ProjectKey, view.TaskKey, view.Status); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
 	views, err := shell.jobs.List(ctx, shell.state.Scope)
 	if err != nil {
 		return err
@@ -627,6 +734,37 @@ func (shell *Shell) pendingApprovals(ctx context.Context) ([]pendingApproval, er
 	}
 
 	return approvals, rows.Err()
+}
+
+func (shell *Shell) currentWorkspaceKey(ctx context.Context) (string, error) {
+	if shell.state.Scope.Kind == scope.ScopeProject || shell.state.Scope.Kind == scope.ScopeOdinCore {
+		project, err := shell.env.Store.GetProjectByKey(ctx, shell.state.Scope.ProjectKey)
+		if err == nil {
+			initiative, err := shell.env.Store.GetInitiativeByProjectID(ctx, project.ID)
+			if err == nil {
+				workspace, err := shell.env.Store.GetWorkspace(ctx, initiative.WorkspaceID)
+				if err == nil {
+					return workspace.Key, nil
+				}
+			}
+		}
+	}
+
+	homes, err := projections.ListWorkspaceHomeViews(ctx, shell.env.Store.DB())
+	if err != nil {
+		return "", err
+	}
+	if len(homes) == 0 {
+		return "", fmt.Errorf("no workspace found")
+	}
+	return homes[0].WorkspaceKey, nil
+}
+
+func valueOrDefault(value, fallback string) string {
+	if strings.TrimSpace(value) == "" {
+		return fallback
+	}
+	return value
 }
 
 type pendingApproval struct {
