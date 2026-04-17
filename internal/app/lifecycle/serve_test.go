@@ -193,7 +193,8 @@ func TestRunServeStopsWithoutReadyWhenListenerBindingFails(t *testing.T) {
 	t.Parallel()
 
 	root := createRuntimeRoot(t)
-	seedHealthyRuntime(t, root)
+	_, taskID := seedQueuedTask(t, root)
+	seedStaleProjection(t, root)
 
 	occupied, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -207,7 +208,7 @@ runtime:
   root: .
 service:
   http_addr: `+occupied.Addr().String()+`
-  startup_recovery: true
+  startup_recovery: false
 `)
 
 	var stdout bytes.Buffer
@@ -233,11 +234,29 @@ service:
 		t.Fatal("RuntimeState.LastError = empty, want listener binding error")
 	}
 
+	task, err := store.GetTask(context.Background(), taskID)
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
+	}
+	if task.Status != "queued" {
+		t.Fatalf("Task.Status = %q, want %q", task.Status, "queued")
+	}
+
+	events, err := store.ListEvents(context.Background(), sqlite.ListEventsParams{})
+	if err != nil {
+		t.Fatalf("ListEvents() error = %v", err)
+	}
+	for _, event := range events {
+		if event.Type == runtimeevents.EventRecoveryActionExecuted {
+			t.Fatalf("events = %+v, want no recovery action on listener failure", events)
+		}
+	}
+
 	statuses, err := lifecycleStatuses(store)
 	if err != nil {
 		t.Fatalf("lifecycleStatuses() error = %v", err)
 	}
-	assertLifecycleSequence(t, statuses, []string{"booting", "recovering", "stopped"})
+	assertLifecycleSequence(t, statuses, []string{"booting", "stopped"})
 }
 
 func TestRunServeExecutesStartupRecoveryWhenContextAlreadyCanceled(t *testing.T) {
@@ -285,6 +304,49 @@ service:
 	if packet.Trigger != string(checkpoints.TriggerRestart) {
 		t.Fatalf("WakePacket.Trigger = %q, want %q", packet.Trigger, checkpoints.TriggerRestart)
 	}
+
+	statuses, err := lifecycleStatuses(store)
+	if err != nil {
+		t.Fatalf("lifecycleStatuses() error = %v", err)
+	}
+	assertLifecycleSequence(t, statuses, []string{"booting", "recovering", "ready", "draining", "stopped"})
+}
+
+func TestRunServeSkipsRecoveringWhenStartupRecoveryDisabled(t *testing.T) {
+	t.Parallel()
+
+	root := createRuntimeRoot(t)
+	writeRuntimeConfig(t, root, `
+version: 1
+runtime:
+  root: .
+service:
+  http_addr: 127.0.0.1:0
+  startup_recovery: false
+`)
+	seedHealthyRuntime(t, root)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	time.AfterFunc(100*time.Millisecond, cancel)
+
+	var stdout bytes.Buffer
+	err := Run(ctx, root, []string{"serve"}, strings.NewReader(""), &stdout)
+	if err != nil && !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run(serve) error = %v", err)
+	}
+
+	store, err := sqlite.Open(filepath.Join(root, "data", "odin.db"))
+	if err != nil {
+		t.Fatalf("sqlite.Open() error = %v", err)
+	}
+	defer store.Close()
+
+	statuses, err := lifecycleStatuses(store)
+	if err != nil {
+		t.Fatalf("lifecycleStatuses() error = %v", err)
+	}
+	assertNoLifecycleStatus(t, statuses, "recovering")
+	assertLifecycleSequence(t, statuses, []string{"booting", "ready", "draining", "stopped"})
 }
 
 func TestRunServeRunsSelfHealCycleBeforeShutdown(t *testing.T) {
@@ -515,6 +577,77 @@ func seedHealthyRuntime(t *testing.T, root string) {
 	}
 }
 
+func seedQueuedTask(t *testing.T, root string) (int64, int64) {
+	t.Helper()
+
+	if err := os.MkdirAll(filepath.Join(root, "data"), 0o755); err != nil {
+		t.Fatalf("mkdir data: %v", err)
+	}
+
+	store, err := sqlite.Open(filepath.Join(root, "data", "odin.db"))
+	if err != nil {
+		t.Fatalf("sqlite.Open() error = %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
+	}
+
+	project, err := store.CreateProject(ctx, sqlite.CreateProjectParams{
+		Key:           "alpha",
+		Name:          "Alpha",
+		Scope:         "project",
+		GitRoot:       filepath.Join(root, "repos", "alpha"),
+		DefaultBranch: "main",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+	task, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "alpha-task",
+		Title:       "Queued alpha work",
+		Status:      "queued",
+		Scope:       "project",
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+
+	return project.ID, task.ID
+}
+
+func seedStaleProjection(t *testing.T, root string) {
+	t.Helper()
+
+	if err := os.MkdirAll(filepath.Join(root, "data"), 0o755); err != nil {
+		t.Fatalf("mkdir data: %v", err)
+	}
+
+	store, err := sqlite.Open(filepath.Join(root, "data", "odin.db"))
+	if err != nil {
+		t.Fatalf("sqlite.Open() error = %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
+	}
+
+	if _, err := store.RecordProjectionFreshness(ctx, sqlite.RecordProjectionFreshnessParams{
+		Surface:     "doctor",
+		Status:      "stale",
+		DetailsJSON: `{"source":"serve-test"}`,
+	}); err != nil {
+		t.Fatalf("RecordProjectionFreshness() error = %v", err)
+	}
+}
+
 func seedRunningTask(t *testing.T, root string) (int64, int64, int64) {
 	t.Helper()
 
@@ -616,6 +749,16 @@ func assertLifecycleSequence(t *testing.T, statuses []string, want []string) {
 		}
 		if !found {
 			t.Fatalf("lifecycle statuses = %v, missing %q in order %v", statuses, status, want)
+		}
+	}
+}
+
+func assertNoLifecycleStatus(t *testing.T, statuses []string, forbidden string) {
+	t.Helper()
+
+	for _, status := range statuses {
+		if status == forbidden {
+			t.Fatalf("lifecycle statuses = %v, want no %q", statuses, forbidden)
 		}
 	}
 }

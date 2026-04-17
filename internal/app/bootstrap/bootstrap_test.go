@@ -32,11 +32,47 @@ func TestLoadInitializesFreshRuntimeReadinessState(t *testing.T) {
 	assertCountAtLeast(t, app.Store.DB().QueryRowContext(context.Background(), "SELECT COUNT(*) FROM projection_freshness"), 1)
 }
 
+func TestLoadRecordsStoppedWithLastErrorWhenMigrationFailsDuringServeBootstrap(t *testing.T) {
+	repoRoot := createBootstrapRepoRoot(t, true)
+	runtimeRoot := t.TempDir()
+
+	originalMigrate := migrateStoreFn
+	migrateStoreFn = func(ctx context.Context, store *sqlite.Store) error {
+		return errors.New("migrate failed")
+	}
+	t.Cleanup(func() {
+		migrateStoreFn = originalMigrate
+	})
+
+	ctx := bootstrapContextWithBootID(context.Background(), "boot-1")
+	_, err := Load(ctx, repoRoot, runtimeRoot)
+	if err == nil {
+		t.Fatal("Load() error = nil, want migration failure")
+	}
+
+	store, openErr := sqlite.Open(filepath.Join(runtimeRoot, "data", "odin.db"))
+	if openErr != nil {
+		t.Fatalf("sqlite.Open() error = %v", openErr)
+	}
+	defer store.Close()
+
+	got, err := store.GetRuntimeState(context.Background())
+	if err != nil {
+		t.Fatalf("GetRuntimeState() error = %v", err)
+	}
+	if got.Status != "stopped" {
+		t.Fatalf("RuntimeState.Status = %q, want %q", got.Status, "stopped")
+	}
+	if got.LastError != "migrate failed" {
+		t.Fatalf("RuntimeState.LastError = %q, want %q", got.LastError, "migrate failed")
+	}
+}
+
 func TestLoadRecordsBootingWhenServeBootIDIsPresent(t *testing.T) {
 	repoRoot := createBootstrapRepoRoot(t, true)
 	runtimeRoot := t.TempDir()
 
-	ctx := context.WithValue(context.Background(), "odin.boot_id", "boot-1")
+	ctx := bootstrapContextWithBootID(context.Background(), "boot-1")
 	app, err := Load(ctx, repoRoot, runtimeRoot)
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
@@ -81,7 +117,7 @@ func TestLoadRecordsStoppedWithLastErrorWhenBootstrapFailsAfterBooting(t *testin
 	repoRoot := createBootstrapRepoRoot(t, false)
 	runtimeRoot := t.TempDir()
 
-	ctx := context.WithValue(context.Background(), "odin.boot_id", "boot-1")
+	ctx := bootstrapContextWithBootID(context.Background(), "boot-1")
 	_, err := Load(ctx, repoRoot, runtimeRoot)
 	if err == nil {
 		t.Fatal("Load() error = nil, want bootstrap failure")
@@ -284,4 +320,8 @@ routes:
 	}
 
 	return root
+}
+
+func bootstrapContextWithBootID(ctx context.Context, bootID string) context.Context {
+	return WithBootID(ctx, bootID)
 }

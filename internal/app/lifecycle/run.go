@@ -47,7 +47,7 @@ func Run(ctx context.Context, root string, args []string, stdin io.Reader, stdou
 
 	loadCtx := ctx
 	if len(args) > 0 && args[0] == "serve" {
-		loadCtx = context.WithValue(context.WithoutCancel(ctx), "odin.boot_id", "boot-"+uuid.NewString())
+		loadCtx = bootstrap.WithBootID(context.WithoutCancel(ctx), "boot-"+uuid.NewString())
 	}
 
 	app, err := bootstrap.Load(loadCtx, root, cfg.RuntimeRoot)
@@ -147,13 +147,12 @@ func runServe(ctx context.Context, app bootstrap.App, cfg appconfig.Config, stdo
 				return recordServeStopped(operationCtx, stateService, bootID, "startup recovery output failed", err)
 			}
 		}
-	}
-
-	if _, err := stateService.MarkRecovering(operationCtx, runtimestate.TransitionInput{
-		BootID: bootID,
-		Reason: "startup recovery complete",
-	}); err != nil {
-		return recordServeStopped(operationCtx, stateService, bootID, "recovering state write failed", err)
+		if _, err := stateService.MarkRecovering(operationCtx, runtimestate.TransitionInput{
+			BootID: bootID,
+			Reason: "startup recovery complete",
+		}); err != nil {
+			return recordServeStopped(operationCtx, stateService, bootID, "recovering state write failed", err)
+		}
 	}
 
 	logger, logCloser, err := openServiceLogger(cfg.RuntimeRoot)
@@ -185,13 +184,6 @@ func runServe(ctx context.Context, app bootstrap.App, cfg appconfig.Config, stdo
 		Logger:          logger,
 	}
 
-	if err := jobService.ExecuteNextQueued(operationCtx); err != nil {
-		logBackgroundError(logger, "task_runner", err)
-	}
-	if _, err := recoveryService.RunCycle(operationCtx); err != nil {
-		logBackgroundError(logger, "self_heal", err)
-	}
-
 	listener, err := net.Listen("tcp", cfg.Service.HTTPAddr)
 	if err != nil {
 		return recordServeStopped(operationCtx, stateService, bootID, "listener binding failed", err)
@@ -215,48 +207,57 @@ func runServe(ctx context.Context, app bootstrap.App, cfg appconfig.Config, stdo
 	loopCtx, stopLoops := context.WithCancel(context.Background())
 	go runTaskLoop(loopCtx, operationCtx, &background, jobService, logger)
 	go runSelfHealLoop(loopCtx, operationCtx, &background, recoveryService, logger)
-
-	shutdownStop := make(chan struct{})
-	shutdownDone := make(chan struct{})
-	go func() {
-		defer close(shutdownDone)
-		select {
-		case <-ctx.Done():
-			if _, err := stateService.MarkDraining(operationCtx, runtimestate.TransitionInput{
-				BootID: bootID,
-				Reason: ctx.Err().Error(),
-			}); err != nil {
-				logBackgroundError(logger, "runtime_state", err)
-			}
-			shutdownCtx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-			_ = server.Shutdown(shutdownCtx)
-		case <-shutdownStop:
-		}
-	}()
-
-	cleanupLiveServe := func() {
-		close(shutdownStop)
-		<-shutdownDone
+	defer func() {
 		stopLoops()
 		background.Wait()
+	}()
+
+	if err := jobService.ExecuteNextQueued(operationCtx); err != nil {
+		logBackgroundError(logger, "task_runner", err)
+	}
+	if _, err := recoveryService.RunCycle(operationCtx); err != nil {
+		logBackgroundError(logger, "self_heal", err)
 	}
 
 	if _, err := stateService.MarkReady(operationCtx, runtimestate.TransitionInput{
 		BootID: bootID,
 		Reason: "listener and loops initialized",
 	}); err != nil {
-		cleanupLiveServe()
 		return recordServeStopped(operationCtx, stateService, bootID, "ready state write failed", err)
 	}
 
+	shutdownControlCtx, cancelShutdown := context.WithCancel(context.Background())
+	shutdownDone := make(chan struct{})
+	go func() {
+		defer close(shutdownDone)
+		select {
+		case <-ctx.Done():
+			reason := "shutdown requested"
+			if ctx.Err() != nil {
+				reason = ctx.Err().Error()
+			}
+			if _, err := stateService.MarkDraining(operationCtx, runtimestate.TransitionInput{
+				BootID: bootID,
+				Reason: reason,
+			}); err != nil {
+				logBackgroundError(logger, "runtime_state", err)
+			}
+			shutdownCtx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			_ = server.Shutdown(shutdownCtx)
+		case <-shutdownControlCtx.Done():
+		}
+	}()
+	defer func() {
+		cancelShutdown()
+		<-shutdownDone
+	}()
+
 	if _, err := fmt.Fprintf(stdout, "serving on %s\n", listener.Addr().String()); err != nil {
-		cleanupLiveServe()
 		return recordServeStopped(operationCtx, stateService, bootID, "stdout write failed", err)
 	}
 
 	err = server.Serve(listener)
-	cleanupLiveServe()
 	if errors.Is(err, stdhttp.ErrServerClosed) {
 		reason := "shutdown complete"
 		if ctxErr := ctx.Err(); ctxErr != nil {
