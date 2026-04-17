@@ -130,6 +130,11 @@ type FailRunAndRetryTaskParams struct {
 	NextEligibleAt time.Time
 }
 
+type InterruptRunAndRequeueTaskParams struct {
+	RunID   int64
+	Summary string
+}
+
 type Approval struct {
 	ID          int64
 	TaskID      int64

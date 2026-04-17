@@ -1279,6 +1279,19 @@ func TestFailRunAndRetryTaskUpdatesRunAndTaskTogether(t *testing.T) {
 	if err != nil {
 		t.Fatalf("StartRun() error = %v", err)
 	}
+	lease, err := store.CreateWorktreeLease(ctx, CreateWorktreeLeaseParams{
+		ProjectID:    project.ID,
+		TaskID:       task.ID,
+		RunID:        run.ID,
+		Mode:         "mutable",
+		BranchName:   "odin/retry-run-later/task-1/run-1/try-1",
+		WorktreePath: "/tmp/retry-run-later/.odin/task-1/run-1",
+		RepoRoot:     project.GitRoot,
+		State:        "active",
+	})
+	if err != nil {
+		t.Fatalf("CreateWorktreeLease() error = %v", err)
+	}
 
 	retryAt := now.Add(2 * time.Second)
 	retriedTask, retriedRun, err := store.FailRunAndRetryTask(ctx, FailRunAndRetryTaskParams{
@@ -1311,6 +1324,13 @@ func TestFailRunAndRetryTaskUpdatesRunAndTaskTogether(t *testing.T) {
 	}
 	if !retriedTask.NextEligibleAt.Equal(retryAt) {
 		t.Fatalf("Task.NextEligibleAt = %v, want %v", retriedTask.NextEligibleAt, retryAt)
+	}
+	releasedLease, err := store.GetWorktreeLease(ctx, lease.ID)
+	if err != nil {
+		t.Fatalf("GetWorktreeLease() error = %v", err)
+	}
+	if releasedLease.State != "released" {
+		t.Fatalf("GetWorktreeLease().State = %q, want released", releasedLease.State)
 	}
 }
 
@@ -1358,6 +1378,19 @@ func TestFinishRunAndSetTaskStatusUpdatesRunAndTaskTogether(t *testing.T) {
 	if err != nil {
 		t.Fatalf("StartRun() error = %v", err)
 	}
+	lease, err := store.CreateWorktreeLease(ctx, CreateWorktreeLeaseParams{
+		ProjectID:    project.ID,
+		TaskID:       task.ID,
+		RunID:        run.ID,
+		Mode:         "mutable",
+		BranchName:   "odin/finish-run-status/task-1/run-1/try-1",
+		WorktreePath: "/tmp/finish-run-status/.odin/task-1/run-1",
+		RepoRoot:     project.GitRoot,
+		State:        "active",
+	})
+	if err != nil {
+		t.Fatalf("CreateWorktreeLease() error = %v", err)
+	}
 
 	finishedTask, finishedRun, err := store.FinishRunAndSetTaskStatus(ctx, FinishRunAndSetTaskStatusParams{
 		RunID:      run.ID,
@@ -1380,6 +1413,13 @@ func TestFinishRunAndSetTaskStatusUpdatesRunAndTaskTogether(t *testing.T) {
 	}
 	if finishedTask.CurrentRunID != nil {
 		t.Fatalf("Task.CurrentRunID = %v, want nil", finishedTask.CurrentRunID)
+	}
+	releasedLease, err := store.GetWorktreeLease(ctx, lease.ID)
+	if err != nil {
+		t.Fatalf("GetWorktreeLease() error = %v", err)
+	}
+	if releasedLease.State != "released" {
+		t.Fatalf("GetWorktreeLease().State = %q, want released", releasedLease.State)
 	}
 }
 

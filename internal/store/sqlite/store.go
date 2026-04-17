@@ -624,6 +624,33 @@ func (store *Store) UpdateRunAndTaskStatus(ctx context.Context, params UpdateRun
 	return task, run, err
 }
 
+func releaseActiveWorktreeLeaseByTaskRunTx(ctx context.Context, tx *sql.Tx, taskID int64, runID int64, now time.Time) error {
+	row := tx.QueryRowContext(ctx, `
+		SELECT id
+		FROM worktree_leases
+		WHERE task_id = ?
+		  AND run_id = ?
+		  AND state = 'active'
+		ORDER BY id DESC
+		LIMIT 1
+	`, taskID, runID)
+
+	var leaseID int64
+	if err := row.Scan(&leaseID); err != nil {
+		if err == sql.ErrNoRows {
+			return nil
+		}
+		return err
+	}
+
+	_, err := tx.ExecContext(ctx, `
+		UPDATE worktree_leases
+		SET state = ?, released_at = ?, updated_at = ?
+		WHERE id = ?
+	`, "released", formatTime(now), formatTime(now), leaseID)
+	return err
+}
+
 func (store *Store) FinishRun(ctx context.Context, params FinishRunParams) (Run, error) {
 	now := store.now()
 	var run Run
@@ -701,6 +728,9 @@ func (store *Store) FinishRunAndSetTaskStatus(ctx context.Context, params Finish
 		`, params.TaskStatus, formatTime(now), currentTask.ID); err != nil {
 			return err
 		}
+		if err := releaseActiveWorktreeLeaseByTaskRunTx(ctx, tx, currentTask.ID, currentRun.ID, now); err != nil {
+			return err
+		}
 
 		updatedTask, err := store.getTaskTx(ctx, tx, currentTask.ID)
 		if err != nil {
@@ -767,6 +797,9 @@ func (store *Store) FailRunAndRetryTask(ctx context.Context, params FailRunAndRe
 		`, "queued", formatTime(params.NextEligibleAt), params.LastError, formatTime(now), currentTask.ID); err != nil {
 			return err
 		}
+		if err := releaseActiveWorktreeLeaseByTaskRunTx(ctx, tx, currentTask.ID, currentRun.ID, now); err != nil {
+			return err
+		}
 
 		updatedTask, err := store.getTaskTx(ctx, tx, currentTask.ID)
 		if err != nil {
@@ -774,6 +807,78 @@ func (store *Store) FailRunAndRetryTask(ctx context.Context, params FailRunAndRe
 		}
 
 		currentRun.Status = "failed"
+		currentRun.FinishedAt = &now
+		currentRun.Summary = params.Summary
+
+		projectID := currentTask.ProjectID
+		if err := appendEventTx(ctx, tx, eventInsert{
+			StreamType: runtimeevents.StreamRun,
+			StreamID:   currentRun.ID,
+			EventType:  runtimeevents.EventRunFinished,
+			Scope:      currentTask.Scope,
+			ProjectID:  &projectID,
+			TaskID:     &currentTask.ID,
+			RunID:      &currentRun.ID,
+			Payload: runtimeevents.RunFinishedPayload{
+				Status:  currentRun.Status,
+				Summary: currentRun.Summary,
+			},
+			OccurredAt: now,
+		}); err != nil {
+			return err
+		}
+		if err := appendTaskStatusChangedEventTx(ctx, tx, currentTask, updatedTask, nil, now); err != nil {
+			return err
+		}
+		if err := appendTaskQueueStateChangedEventTx(ctx, tx, currentTask, updatedTask, now); err != nil {
+			return err
+		}
+
+		task = updatedTask
+		run = currentRun
+		return nil
+	})
+
+	return task, run, err
+}
+
+func (store *Store) InterruptRunAndRequeueTask(ctx context.Context, params InterruptRunAndRequeueTaskParams) (Task, Run, error) {
+	now := store.now()
+	var (
+		task Task
+		run  Run
+	)
+
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		currentRun, currentTask, err := store.getRunWithTaskTx(ctx, tx, params.RunID)
+		if err != nil {
+			return err
+		}
+
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE runs
+			SET status = ?, finished_at = ?, summary = ?
+			WHERE id = ?
+		`, "interrupted", formatTime(now), params.Summary, params.RunID); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE tasks
+			SET status = ?, current_run_id = NULL, next_eligible_at = ?, blocked_reason = '', updated_at = ?
+			WHERE id = ?
+		`, "queued", formatTime(time.Time{}), formatTime(now), currentTask.ID); err != nil {
+			return err
+		}
+		if err := releaseActiveWorktreeLeaseByTaskRunTx(ctx, tx, currentTask.ID, currentRun.ID, now); err != nil {
+			return err
+		}
+
+		updatedTask, err := store.getTaskTx(ctx, tx, currentTask.ID)
+		if err != nil {
+			return err
+		}
+
+		currentRun.Status = "interrupted"
 		currentRun.FinishedAt = &now
 		currentRun.Summary = params.Summary
 

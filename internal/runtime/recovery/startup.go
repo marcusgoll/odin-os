@@ -2,7 +2,6 @@ package recovery
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 
 	"odin-os/internal/runtime/checkpoints"
@@ -49,29 +48,9 @@ func (service Service) RunStartupRecovery(ctx context.Context) (StartupResult, e
 			return StartupResult{}, err
 		}
 
-		if _, err := service.Store.FinishRun(ctx, sqlite.FinishRunParams{
+		if _, _, err := service.Store.InterruptRunAndRequeueTask(ctx, sqlite.InterruptRunAndRequeueTaskParams{
 			RunID:   run.ID,
-			Status:  "interrupted",
 			Summary: "interrupted by startup recovery",
-		}); err != nil {
-			return StartupResult{}, err
-		}
-		lease, err := service.Store.GetActiveWorktreeLeaseByTaskRun(ctx, task.ID, run.ID)
-		if err != nil && err != sql.ErrNoRows {
-			return StartupResult{}, err
-		}
-		if err == nil {
-			if _, err := service.Store.ReleaseWorktreeLease(ctx, sqlite.ReleaseWorktreeLeaseParams{
-				LeaseID: lease.ID,
-				State:   "released",
-			}); err != nil {
-				return StartupResult{}, err
-			}
-		}
-
-		if _, err := service.Store.UpdateTaskStatus(ctx, sqlite.UpdateTaskStatusParams{
-			TaskID: task.ID,
-			Status: "queued",
 		}); err != nil {
 			return StartupResult{}, err
 		}
