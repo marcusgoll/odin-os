@@ -92,15 +92,20 @@ func Run(ctx context.Context, root string, args []string, stdin io.Reader, stdou
 	}
 	defer app.Store.Close()
 
+	now, err := runtimeNow()
+	if err != nil {
+		return err
+	}
+
 	switch rootCommand.Name {
 	case "repl":
-		return runRepl(ctx, app, stdin, stdout)
+		return runRepl(ctx, app, stdin, stdout, now)
 	case "doctor":
 		return runDoctor(ctx, app, rootCommand.Args, stdout)
 	case "healthcheck":
 		return runHealthcheck(ctx, app, stdout)
 	case "serve":
-		return runServe(ctx, app, cfg, stdout)
+		return runServe(ctx, app, cfg, stdout, now)
 	case "backup":
 		return runBackup(ctx, appbackup.Service{RepoRoot: root, RuntimeRoot: cfg.RuntimeRoot}, rootCommand.Args, stdout)
 	case "restore":
@@ -120,7 +125,7 @@ func Run(ctx context.Context, root string, args []string, stdin io.Reader, stdou
 	case "approvals":
 		return runApprovals(ctx, app, rootCommand.Args, stdout)
 	case "agenda":
-		return runAgenda(ctx, app, rootCommand.Args, stdout)
+		return runAgenda(ctx, app, rootCommand.Args, stdout, now)
 	case "logs":
 		return runLogs(ctx, app, rootCommand.Args, stdout)
 	case "task":
@@ -142,7 +147,7 @@ func Run(ctx context.Context, root string, args []string, stdin io.Reader, stdou
 	}
 }
 
-func runRepl(ctx context.Context, app bootstrap.App, stdin io.Reader, stdout io.Writer) error {
+func runRepl(ctx context.Context, app bootstrap.App, stdin io.Reader, stdout io.Writer, now func() time.Time) error {
 	shell, err := repl.New(repl.Environment{
 		Store:               app.Store,
 		Registry:            app.Registry,
@@ -156,6 +161,7 @@ func runRepl(ctx context.Context, app bootstrap.App, stdin io.Reader, stdout io.
 			Git:          gitadapter.Adapter{},
 			WorktreeRoot: worktrees.DefaultRoot(),
 		},
+		Now: now,
 	})
 	if err != nil {
 		return err
@@ -383,13 +389,13 @@ func runApprovals(ctx context.Context, app bootstrap.App, args []string, stdout 
 	return nil
 }
 
-func runAgenda(ctx context.Context, app bootstrap.App, args []string, stdout io.Writer) error {
+func runAgenda(ctx context.Context, app bootstrap.App, args []string, stdout io.Writer, now func() time.Time) error {
 	command, err := commands.ParseAgenda(args)
 	if err != nil {
 		return err
 	}
 
-	view, err := projections.GetAgendaView(ctx, app.Store.DB(), workspaces.DefaultWorkspaceKey, time.Now().UTC())
+	view, err := projections.GetAgendaView(ctx, app.Store.DB(), workspaces.DefaultWorkspaceKey, now().UTC())
 	if err != nil {
 		return err
 	}
@@ -951,7 +957,26 @@ func runtimeEnv() map[string]string {
 	return map[string]string{
 		"ODIN_ROOT":      os.Getenv("ODIN_ROOT"),
 		"ODIN_HTTP_ADDR": os.Getenv("ODIN_HTTP_ADDR"),
+		"ODIN_NOW":       os.Getenv("ODIN_NOW"),
 	}
+}
+
+func runtimeNow() (func() time.Time, error) {
+	raw := strings.TrimSpace(os.Getenv("ODIN_NOW"))
+	if raw == "" {
+		return func() time.Time {
+			return time.Now().UTC()
+		}, nil
+	}
+
+	fixed, err := time.Parse(time.RFC3339Nano, raw)
+	if err != nil {
+		return nil, fmt.Errorf("invalid ODIN_NOW %q: %w", raw, err)
+	}
+	fixed = fixed.UTC()
+	return func() time.Time {
+		return fixed
+	}, nil
 }
 
 func loadCLIState(app bootstrap.App) (clistate.State, error) {
@@ -1281,7 +1306,7 @@ func serveLoadContext(parent context.Context) (context.Context, context.CancelFu
 	return context.WithCancel(context.Background())
 }
 
-func runServe(ctx context.Context, app bootstrap.App, cfg appconfig.Config, stdout io.Writer) error {
+func runServe(ctx context.Context, app bootstrap.App, cfg appconfig.Config, stdout io.Writer, now func() time.Time) error {
 	if cfg.Service.StartupRecovery {
 		startupCtx, cancel := serveStartupContext(ctx)
 		result, err := recovery.Service{Store: app.Store}.RunStartupRecovery(startupCtx)
@@ -1357,6 +1382,7 @@ func runServe(ctx context.Context, app bootstrap.App, cfg appconfig.Config, stdo
 				},
 				ReadModels:      app.Store.DB(),
 				RegistryHealthy: len(app.RegistryDiagnostics) == 0,
+				Now:             now,
 			}),
 		}),
 	}

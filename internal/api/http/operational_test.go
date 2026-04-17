@@ -131,12 +131,13 @@ func TestOperationalHandlerExposesAgendaReadModel(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
+	now := time.Date(2026, 4, 17, 9, 0, 0, 0, time.UTC)
 	store := openStore(t)
 	defer store.Close()
 
 	seedHealthyObservability(t, ctx, store)
 	seedOperatorReadModels(t, ctx, store)
-	seedAgendaReadModels(t, ctx, store)
+	seedAgendaReadModels(t, ctx, store, now)
 
 	server := httptest.NewServer(httpapi.NewOperationalHandler(httpapi.Dependencies{
 		Health: healthsvc.Service{DB: store.DB()},
@@ -145,6 +146,9 @@ func TestOperationalHandlerExposesAgendaReadModel(t *testing.T) {
 		},
 		ReadModels:      store.DB(),
 		RegistryHealthy: true,
+		Now: func() time.Time {
+			return now
+		},
 	}))
 	defer server.Close()
 
@@ -315,7 +319,7 @@ func seedOperatorReadModels(t *testing.T, ctx context.Context, store *sqlite.Sto
 	}
 }
 
-func seedAgendaReadModels(t *testing.T, ctx context.Context, store *sqlite.Store) {
+func seedAgendaReadModels(t *testing.T, ctx context.Context, store *sqlite.Store, now time.Time) {
 	t.Helper()
 
 	project, err := store.GetProjectByKey(ctx, "alpha")
@@ -335,7 +339,6 @@ func seedAgendaReadModels(t *testing.T, ctx context.Context, store *sqlite.Store
 		t.Fatalf("GetInitiativeByKey(alpha) error = %v", err)
 	}
 
-	now := time.Date(2026, 4, 17, 9, 0, 0, 0, time.UTC)
 	createAgendaFollowUpObligation(t, ctx, store, project.ID, workspace.ID, initiative.ID, companion.ID, "Review mail", now)
 	createAgendaFollowUpObligation(t, ctx, store, project.ID, workspace.ID, initiative.ID, companion.ID, "File taxes", now.Add(-48*time.Hour))
 

@@ -235,6 +235,31 @@ func TestFollowUpDueStatusUsesCadenceAndTimestamps(t *testing.T) {
 	}
 }
 
+func TestFollowUpScheduleStateUsesSharedDueAndOverdueGrace(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 4, 17, 10, 0, 0, 0, time.UTC)
+
+	obligation := FollowUpObligation{
+		Status:    StatusActive,
+		Cadence:   Cadence{Mode: CadenceModeOnce},
+		NextDueAt: now.Add(-23*time.Hour - 59*time.Minute),
+	}
+	if got := obligation.ScheduleState(now, DefaultOverdueGrace); got != ScheduleStateDue {
+		t.Fatalf("ScheduleState(<24h late) = %q, want due", got)
+	}
+
+	obligation.NextDueAt = now.Add(-24 * time.Hour)
+	if got := obligation.ScheduleState(now, DefaultOverdueGrace); got != ScheduleStateDue {
+		t.Fatalf("ScheduleState(exactly 24h late) = %q, want due", got)
+	}
+
+	obligation.NextDueAt = now.Add(-24*time.Hour - time.Second)
+	if got := obligation.ScheduleState(now, DefaultOverdueGrace); got != ScheduleStateOverdue {
+		t.Fatalf("ScheduleState(>24h late) = %q, want overdue", got)
+	}
+}
+
 func TestFollowUpMaterializeReusesSameOccurrenceTask(t *testing.T) {
 	t.Parallel()
 

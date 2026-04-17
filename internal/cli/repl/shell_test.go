@@ -414,7 +414,11 @@ func TestAgendaCommandRendersDueWorkBlockedWorkAndApprovals(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
+	now := time.Date(2026, 4, 17, 9, 0, 0, 0, time.UTC)
 	env := newTestEnvironment(t)
+	env.Now = func() time.Time {
+		return now
+	}
 	project, err := env.Store.CreateProject(ctx, sqlite.CreateProjectParams{
 		Key:           "alpha",
 		Name:          "Alpha",
@@ -481,7 +485,6 @@ func TestAgendaCommandRendersDueWorkBlockedWorkAndApprovals(t *testing.T) {
 		t.Fatalf("RequestApproval() error = %v", err)
 	}
 
-	now := time.Date(2026, 4, 17, 9, 0, 0, 0, time.UTC)
 	createShellFollowUpObligation(t, ctx, env.Store, project.ID, workspace.ID, initiative.ID, companion.ID, "Review mail", now)
 	createShellFollowUpObligation(t, ctx, env.Store, project.ID, workspace.ID, initiative.ID, companion.ID, "File taxes", now.Add(-48*time.Hour))
 

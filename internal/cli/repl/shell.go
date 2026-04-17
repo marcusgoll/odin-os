@@ -44,6 +44,7 @@ type Environment struct {
 	ExecutorConfig      executorrouter.Config
 	Executors           map[string]contract.Executor
 	Leases              leases.Manager
+	Now                 func() time.Time
 }
 
 type CommandExecutor interface {
@@ -61,6 +62,7 @@ type Shell struct {
 	transitions    projects.Service
 	conversation   convsvc.Service
 	worktrees      worktrees.Manager
+	now            func() time.Time
 }
 
 const transitionUsage = "/transition [status] | /transition set <state> [allow=<csv>] [confirm] because <reason...>"
@@ -80,6 +82,12 @@ func New(env Environment) (*Shell, error) {
 	worktreeManager := worktrees.Manager{
 		Store: leaseManager.Store,
 		Git:   leaseManager.Git,
+	}
+	now := env.Now
+	if now == nil {
+		now = func() time.Time {
+			return time.Now().UTC()
+		}
 	}
 	shell := &Shell{
 		env:   env,
@@ -111,6 +119,7 @@ func New(env Environment) (*Shell, error) {
 			Executors:           env.Executors,
 		},
 		worktrees: worktreeManager,
+		now:       now,
 	}
 	if env.CommandService != nil {
 		shell.commandService = env.CommandService
@@ -966,7 +975,7 @@ func (shell *Shell) handleCompanions(ctx context.Context, output io.Writer) erro
 }
 
 func (shell *Shell) handleAgenda(ctx context.Context, output io.Writer) error {
-	view, err := projections.GetAgendaView(ctx, shell.env.Store.DB(), workspaces.DefaultWorkspaceKey, time.Now().UTC())
+	view, err := projections.GetAgendaView(ctx, shell.env.Store.DB(), workspaces.DefaultWorkspaceKey, shell.now().UTC())
 	if err != nil {
 		if err == sql.ErrNoRows {
 			_, writeErr := fmt.Fprintln(output, "no agenda items")

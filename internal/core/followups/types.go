@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	followupschedule "odin-os/internal/core/followups/schedule"
 )
 
 type Status string
@@ -16,6 +18,15 @@ const (
 	StatusSkipped   Status = "skipped"
 	StatusArchived  Status = "archived"
 	StatusDue       Status = "due"
+)
+
+type ScheduleState = followupschedule.State
+
+const (
+	ScheduleStateActive  = followupschedule.StateActive
+	ScheduleStateDue     = followupschedule.StateDue
+	ScheduleStateOverdue = followupschedule.StateOverdue
+	DefaultOverdueGrace  = followupschedule.DefaultOverdueGrace
 )
 
 type CadenceMode string
@@ -130,14 +141,26 @@ func (cadence Cadence) NextDueAfter(base time.Time) (time.Time, error) {
 }
 
 func (obligation FollowUpObligation) DueStatus(now time.Time) Status {
-	switch obligation.Status {
-	case StatusPaused, StatusBlocked, StatusCompleted, StatusSkipped, StatusArchived:
-		return obligation.Status
-	}
-	if !obligation.NextDueAt.After(now) {
+	summary := followupschedule.SummaryStatus(string(obligation.Status), obligation.NextDueAt, now, DefaultOverdueGrace)
+	switch summary {
+	case string(ScheduleStateActive):
+		return StatusActive
+	case string(ScheduleStateDue), string(ScheduleStateOverdue):
 		return StatusDue
+	default:
+		return Status(summary)
 	}
-	return StatusActive
+}
+
+func (obligation FollowUpObligation) ScheduleState(now time.Time, overdueGrace time.Duration) ScheduleState {
+	if obligation.DueStatus(now) != StatusDue {
+		return ScheduleStateActive
+	}
+	return followupschedule.Classify(obligation.NextDueAt, now, overdueGrace)
+}
+
+func DueSummaryStatus(status Status, nextDueAt, now time.Time, overdueGrace time.Duration) string {
+	return followupschedule.SummaryStatus(string(status), nextDueAt, now, overdueGrace)
 }
 
 func (obligation FollowUpObligation) OccurrenceKey() string {

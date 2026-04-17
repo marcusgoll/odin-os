@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"time"
 
+	followupschedule "odin-os/internal/core/followups/schedule"
 	runtimeevents "odin-os/internal/runtime/events"
 )
 
@@ -417,7 +418,12 @@ func ListFollowUpSummaryViews(ctx context.Context, queryer Queryer, workspaceKey
 		view.InitiativeKey = nullableStringPtr(initiativeKey)
 		view.CompanionKey = nullableStringPtr(companionKey)
 		view.NextDueAt = parsedNextDueAt.UTC()
-		view.DueStatus = followUpDueStatus(view.Status, view.NextDueAt, now)
+		view.DueStatus = followupschedule.SummaryStatus(
+			view.Status,
+			view.NextDueAt,
+			now,
+			followupschedule.DefaultOverdueGrace,
+		)
 		if lastCompletedAt.Valid {
 			parsedLastCompletedAt, err := time.Parse(time.RFC3339Nano, lastCompletedAt.String)
 			if err != nil {
@@ -1477,23 +1483,6 @@ func scanOptionalSingleString(queryer Queryer, query string, value *string) erro
 		}
 	}
 	return rows.Err()
-}
-
-func followUpDueStatus(status string, nextDueAt, now time.Time) string {
-	switch status {
-	case "paused", "blocked", "completed", "skipped", "archived":
-		return status
-	}
-
-	nextDueAt = nextDueAt.UTC()
-	now = now.UTC()
-	if nextDueAt.After(now) {
-		return "active"
-	}
-	if nextDueAt.Before(now.Add(-24 * time.Hour)) {
-		return "overdue"
-	}
-	return "due"
 }
 
 func filterBlockedItemsByWorkspace(views []BlockedItemView, workspaceKey string) []BlockedItemView {

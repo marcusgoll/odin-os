@@ -17,9 +17,17 @@ type Dependencies struct {
 	Metrics         metricsvc.Service
 	ReadModels      projections.Queryer
 	RegistryHealthy bool
+	Now             func() time.Time
 }
 
 func NewOperationalHandler(deps Dependencies) http.Handler {
+	now := deps.Now
+	if now == nil {
+		now = func() time.Time {
+			return time.Now().UTC()
+		}
+	}
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(writer http.ResponseWriter, request *http.Request) {
 		report, err := deps.Health.Doctor(request.Context(), deps.RegistryHealthy)
@@ -106,7 +114,7 @@ func NewOperationalHandler(deps Dependencies) http.Handler {
 			http.Error(writer, "read models unavailable", http.StatusServiceUnavailable)
 			return
 		}
-		view, err := projections.GetAgendaView(request.Context(), deps.ReadModels, workspaces.DefaultWorkspaceKey, time.Now().UTC())
+		view, err := projections.GetAgendaView(request.Context(), deps.ReadModels, workspaces.DefaultWorkspaceKey, now().UTC())
 		if err != nil {
 			if err == sql.ErrNoRows {
 				http.NotFound(writer, request)
