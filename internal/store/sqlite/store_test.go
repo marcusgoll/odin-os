@@ -781,3 +781,216 @@ func TestLearningProposalLifecycleSupportsEvaluationPromotionAndRollback(t *test
 		t.Fatalf("learning.promotion_rolled_back count = %d, want 1", counts[runtimeevents.EventLearningPromotionRolledBack])
 	}
 }
+
+func TestRecordMemorySummaryPersistsWorkspaceInitiativeAndCompanionOwnership(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "odin.db")
+
+	store, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer store.Close()
+
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
+	}
+
+	workspace := mustCreateWorkspace(t, ctx, store, "workspace-a")
+	initiative := mustCreateInitiative(t, ctx, store, workspace.ID, "initiative-a", nil, nil)
+	companion := mustCreateCompanion(t, ctx, store, workspace.ID, "companion-a")
+
+	summary, err := store.RecordMemorySummary(ctx, RecordMemorySummaryParams{
+		WorkspaceID:     &workspace.ID,
+		InitiativeID:    &initiative.ID,
+		CompanionID:     &companion.ID,
+		ProjectID:       nil,
+		Scope:           "workspace",
+		ScopeKey:        workspace.Key,
+		VisibilityScope: "workspace",
+		RetentionClass:  "durable",
+		MemoryType:      "summary",
+		Summary:         "workspace scoped memory",
+		DetailsJSON:     `{"kind":"summary"}`,
+	})
+	if err != nil {
+		t.Fatalf("RecordMemorySummary() error = %v", err)
+	}
+
+	if summary.WorkspaceID == nil || *summary.WorkspaceID != workspace.ID {
+		t.Fatalf("summary.WorkspaceID = %v, want %d", summary.WorkspaceID, workspace.ID)
+	}
+	if summary.InitiativeID == nil || *summary.InitiativeID != initiative.ID {
+		t.Fatalf("summary.InitiativeID = %v, want %d", summary.InitiativeID, initiative.ID)
+	}
+	if summary.CompanionID == nil || *summary.CompanionID != companion.ID {
+		t.Fatalf("summary.CompanionID = %v, want %d", summary.CompanionID, companion.ID)
+	}
+	if summary.VisibilityScope != "workspace" {
+		t.Fatalf("summary.VisibilityScope = %q, want %q", summary.VisibilityScope, "workspace")
+	}
+	if summary.RetentionClass != "durable" {
+		t.Fatalf("summary.RetentionClass = %q, want %q", summary.RetentionClass, "durable")
+	}
+
+	got, err := store.ListMemorySummaries(ctx, ListMemorySummariesParams{Scope: "workspace", ScopeKey: workspace.Key})
+	if err != nil {
+		t.Fatalf("ListMemorySummaries() error = %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("ListMemorySummaries() len = %d, want 1", len(got))
+	}
+	if got[0].WorkspaceID == nil || *got[0].WorkspaceID != workspace.ID {
+		t.Fatalf("listed summary.WorkspaceID = %v, want %d", got[0].WorkspaceID, workspace.ID)
+	}
+	if got[0].VisibilityScope != "workspace" {
+		t.Fatalf("listed summary.VisibilityScope = %q, want %q", got[0].VisibilityScope, "workspace")
+	}
+	if got[0].RetentionClass != "durable" {
+		t.Fatalf("listed summary.RetentionClass = %q, want %q", got[0].RetentionClass, "durable")
+	}
+}
+
+func TestRecordConversationTranscriptPersistsScopedOwnership(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "odin.db")
+
+	store, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer store.Close()
+
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
+	}
+
+	workspace := mustCreateWorkspace(t, ctx, store, "workspace-b")
+	initiative := mustCreateInitiative(t, ctx, store, workspace.ID, "initiative-b", nil, nil)
+	companion := mustCreateCompanion(t, ctx, store, workspace.ID, "companion-b")
+
+	transcript, err := store.RecordConversationTranscript(ctx, RecordConversationTranscriptParams{
+		WorkspaceID:  &workspace.ID,
+		InitiativeID: &initiative.ID,
+		CompanionID:  &companion.ID,
+		ProjectID:    nil,
+		Scope:        "workspace",
+		ScopeKey:     workspace.Key,
+		Mode:         "ask",
+		Prompt:       "hello",
+		Response:     "world",
+		ToolSummary:  "none",
+		Executor:     "codex",
+	})
+	if err != nil {
+		t.Fatalf("RecordConversationTranscript() error = %v", err)
+	}
+
+	if transcript.WorkspaceID == nil || *transcript.WorkspaceID != workspace.ID {
+		t.Fatalf("transcript.WorkspaceID = %v, want %d", transcript.WorkspaceID, workspace.ID)
+	}
+	if transcript.InitiativeID == nil || *transcript.InitiativeID != initiative.ID {
+		t.Fatalf("transcript.InitiativeID = %v, want %d", transcript.InitiativeID, initiative.ID)
+	}
+	if transcript.CompanionID == nil || *transcript.CompanionID != companion.ID {
+		t.Fatalf("transcript.CompanionID = %v, want %d", transcript.CompanionID, companion.ID)
+	}
+
+	got, err := store.ListConversationTranscripts(ctx, ListConversationTranscriptsParams{Scope: "workspace", ScopeKey: workspace.Key})
+	if err != nil {
+		t.Fatalf("ListConversationTranscripts() error = %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("ListConversationTranscripts() len = %d, want 1", len(got))
+	}
+	if got[0].WorkspaceID == nil || *got[0].WorkspaceID != workspace.ID {
+		t.Fatalf("listed transcript.WorkspaceID = %v, want %d", got[0].WorkspaceID, workspace.ID)
+	}
+}
+
+func TestRecordMemorySummaryRejectsCrossWorkspaceLineage(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "odin.db")
+
+	store, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer store.Close()
+
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
+	}
+
+	workspaceA := mustCreateWorkspace(t, ctx, store, "workspace-c")
+	workspaceB := mustCreateWorkspace(t, ctx, store, "workspace-d")
+	initiativeB := mustCreateInitiative(t, ctx, store, workspaceB.ID, "initiative-c", nil, nil)
+
+	if _, err := store.RecordMemorySummary(ctx, RecordMemorySummaryParams{
+		WorkspaceID:  &workspaceA.ID,
+		InitiativeID: &initiativeB.ID,
+		Scope:        "workspace",
+		ScopeKey:     workspaceA.Key,
+		MemoryType:   "summary",
+		Summary:      "invalid",
+		DetailsJSON:  `{}`,
+	}); err == nil {
+		t.Fatalf("RecordMemorySummary() error = nil, want cross-workspace lineage rejection")
+	}
+}
+
+func mustCreateWorkspace(t *testing.T, ctx context.Context, store *Store, key string) Workspace {
+	t.Helper()
+
+	workspace, err := store.CreateWorkspace(ctx, CreateWorkspaceParams{
+		Key:        key,
+		Name:       key,
+		OwnerRef:   "operator",
+		Status:     "active",
+		PolicyJSON: "{}",
+	})
+	if err != nil {
+		t.Fatalf("CreateWorkspace(%s) error = %v", key, err)
+	}
+	return workspace
+}
+
+func mustCreateInitiative(t *testing.T, ctx context.Context, store *Store, workspaceID int64, key string, linkedProjectID *int64, ownerCompanionID *int64) Initiative {
+	t.Helper()
+
+	initiative, err := store.CreateInitiative(ctx, CreateInitiativeParams{
+		WorkspaceID:      workspaceID,
+		Key:              key,
+		Title:            key,
+		Kind:             "memory",
+		Status:           "active",
+		Summary:          "",
+		LinkedProjectID:  linkedProjectID,
+		OwnerCompanionID: ownerCompanionID,
+	})
+	if err != nil {
+		t.Fatalf("CreateInitiative(%s) error = %v", key, err)
+	}
+	return initiative
+}
+
+func mustCreateCompanion(t *testing.T, ctx context.Context, store *Store, workspaceID int64, key string) Companion {
+	t.Helper()
+
+	companion, err := store.CreateCompanion(ctx, CreateCompanionParams{
+		WorkspaceID:         workspaceID,
+		Key:                 key,
+		Title:               key,
+		Kind:                "assistant",
+		Charter:             "",
+		Status:              "active",
+		InitiativeScopeJSON: "{}",
+		MemoryPolicyJSON:    "{}",
+		PlanningPolicyJSON:  "{}",
+		ToolPolicyJSON:      "{}",
+	})
+	if err != nil {
+		t.Fatalf("CreateCompanion(%s) error = %v", key, err)
+	}
+	return companion
+}

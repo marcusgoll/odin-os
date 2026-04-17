@@ -1430,10 +1430,27 @@ func (store *Store) RecordConversationTranscript(ctx context.Context, params Rec
 		if _, _, _, err := store.validateProjectTaskRunLineageTx(ctx, tx, params.ProjectID, params.TaskID, params.RunID, params.Scope, params.ScopeKey, "conversation transcript"); err != nil {
 			return err
 		}
+		workspace, initiative, companion, err := store.validateScopedOwnershipLineageTx(ctx, tx, params.WorkspaceID, params.InitiativeID, params.CompanionID, "conversation transcript")
+		if err != nil {
+			return err
+		}
+		if params.WorkspaceID == nil {
+			switch {
+			case params.InitiativeID != nil:
+				params.WorkspaceID = int64Ptr(initiative.WorkspaceID)
+			case params.CompanionID != nil:
+				params.WorkspaceID = int64Ptr(companion.WorkspaceID)
+			case workspace.ID != 0:
+				params.WorkspaceID = int64Ptr(workspace.ID)
+			}
+		}
 
 		result, err := tx.ExecContext(ctx, `
 			INSERT INTO conversation_transcripts (
 				project_id,
+				workspace_id,
+				initiative_id,
+				companion_id,
 				task_id,
 				run_id,
 				scope,
@@ -1445,9 +1462,12 @@ func (store *Store) RecordConversationTranscript(ctx context.Context, params Rec
 				executor,
 				created_at
 			)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		`,
 			nullInt64(params.ProjectID),
+			nullInt64(params.WorkspaceID),
+			nullInt64(params.InitiativeID),
+			nullInt64(params.CompanionID),
 			nullInt64(params.TaskID),
 			nullInt64(params.RunID),
 			params.Scope,
@@ -1469,18 +1489,21 @@ func (store *Store) RecordConversationTranscript(ctx context.Context, params Rec
 		}
 
 		transcript = ConversationTranscript{
-			ID:          transcriptID,
-			ProjectID:   params.ProjectID,
-			TaskID:      params.TaskID,
-			RunID:       params.RunID,
-			Scope:       params.Scope,
-			ScopeKey:    params.ScopeKey,
-			Mode:        params.Mode,
-			Prompt:      params.Prompt,
-			Response:    params.Response,
-			ToolSummary: params.ToolSummary,
-			Executor:    params.Executor,
-			CreatedAt:   now,
+			ID:           transcriptID,
+			ProjectID:    params.ProjectID,
+			WorkspaceID:  params.WorkspaceID,
+			InitiativeID: params.InitiativeID,
+			CompanionID:  params.CompanionID,
+			TaskID:       params.TaskID,
+			RunID:        params.RunID,
+			Scope:        params.Scope,
+			ScopeKey:     params.ScopeKey,
+			Mode:         params.Mode,
+			Prompt:       params.Prompt,
+			Response:     params.Response,
+			ToolSummary:  params.ToolSummary,
+			Executor:     params.Executor,
+			CreatedAt:    now,
 		}
 
 		return appendEventTx(ctx, tx, eventInsert{
@@ -1511,6 +1534,9 @@ func (store *Store) ListConversationTranscripts(ctx context.Context, params List
 		SELECT
 			id,
 			project_id,
+			workspace_id,
+			initiative_id,
+			companion_id,
 			task_id,
 			run_id,
 			scope,
@@ -1528,6 +1554,18 @@ func (store *Store) ListConversationTranscripts(ctx context.Context, params List
 	if params.ProjectID != nil {
 		query += ` AND project_id = ?`
 		args = append(args, *params.ProjectID)
+	}
+	if params.WorkspaceID != nil {
+		query += ` AND workspace_id = ?`
+		args = append(args, *params.WorkspaceID)
+	}
+	if params.InitiativeID != nil {
+		query += ` AND initiative_id = ?`
+		args = append(args, *params.InitiativeID)
+	}
+	if params.CompanionID != nil {
+		query += ` AND companion_id = ?`
+		args = append(args, *params.CompanionID)
 	}
 	if params.TaskID != nil {
 		query += ` AND task_id = ?`
@@ -1575,6 +1613,8 @@ func (store *Store) RecordMemorySummary(ctx context.Context, params RecordMemory
 
 	params.Scope = strings.TrimSpace(params.Scope)
 	params.ScopeKey = strings.TrimSpace(params.ScopeKey)
+	params.VisibilityScope = normalizeVisibilityScope(params.VisibilityScope)
+	params.RetentionClass = normalizeRetentionClass(params.RetentionClass)
 	params.MemoryType = strings.TrimSpace(params.MemoryType)
 	if params.Scope == "" {
 		return MemorySummary{}, fmt.Errorf("memory summary scope is required")
@@ -1588,6 +1628,10 @@ func (store *Store) RecordMemorySummary(ctx context.Context, params RecordMemory
 
 	err := store.withTx(ctx, func(tx *sql.Tx) error {
 		if _, _, _, err := store.validateProjectTaskRunLineageTx(ctx, tx, params.ProjectID, params.TaskID, params.RunID, params.Scope, params.ScopeKey, "memory summary"); err != nil {
+			return err
+		}
+		workspace, initiative, companion, err := store.validateScopedOwnershipLineageTx(ctx, tx, params.WorkspaceID, params.InitiativeID, params.CompanionID, "memory summary")
+		if err != nil {
 			return err
 		}
 		if params.SourceTranscriptID != nil {
@@ -1606,6 +1650,24 @@ func (store *Store) RecordMemorySummary(ctx context.Context, params RecordMemory
 			case transcript.ProjectID != nil && params.ProjectID != nil && *transcript.ProjectID != *params.ProjectID:
 				return fmt.Errorf("memory summary project %d does not match source transcript project %d", *params.ProjectID, *transcript.ProjectID)
 			}
+			if params.WorkspaceID != nil && transcript.WorkspaceID != nil && *params.WorkspaceID != *transcript.WorkspaceID {
+				return fmt.Errorf("memory summary workspace %d does not match source transcript workspace %d", *params.WorkspaceID, *transcript.WorkspaceID)
+			}
+			if params.InitiativeID != nil && transcript.InitiativeID != nil && *params.InitiativeID != *transcript.InitiativeID {
+				return fmt.Errorf("memory summary initiative %d does not match source transcript initiative %d", *params.InitiativeID, *transcript.InitiativeID)
+			}
+			if params.CompanionID != nil && transcript.CompanionID != nil && *params.CompanionID != *transcript.CompanionID {
+				return fmt.Errorf("memory summary companion %d does not match source transcript companion %d", *params.CompanionID, *transcript.CompanionID)
+			}
+			if params.WorkspaceID == nil {
+				params.WorkspaceID = transcript.WorkspaceID
+			}
+			if params.InitiativeID == nil {
+				params.InitiativeID = transcript.InitiativeID
+			}
+			if params.CompanionID == nil {
+				params.CompanionID = transcript.CompanionID
+			}
 			if params.TaskID != nil {
 				if transcript.TaskID == nil || *transcript.TaskID != *params.TaskID {
 					return fmt.Errorf("memory summary task %d does not match source transcript task", *params.TaskID)
@@ -1617,29 +1679,49 @@ func (store *Store) RecordMemorySummary(ctx context.Context, params RecordMemory
 				}
 			}
 		}
+		if params.WorkspaceID == nil {
+			switch {
+			case params.InitiativeID != nil:
+				params.WorkspaceID = int64Ptr(initiative.WorkspaceID)
+			case params.CompanionID != nil:
+				params.WorkspaceID = int64Ptr(companion.WorkspaceID)
+			case workspace.ID != 0:
+				params.WorkspaceID = int64Ptr(workspace.ID)
+			}
+		}
 
 		result, err := tx.ExecContext(ctx, `
 			INSERT INTO memory_summaries (
 				project_id,
+				workspace_id,
+				initiative_id,
+				companion_id,
 				source_transcript_id,
 				task_id,
 				run_id,
 				scope,
 				scope_key,
+				visibility_scope,
+				retention_class,
 				memory_type,
 				summary,
 				details_json,
 				created_at,
 				updated_at
 			)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		`,
 			nullInt64(params.ProjectID),
+			nullInt64(params.WorkspaceID),
+			nullInt64(params.InitiativeID),
+			nullInt64(params.CompanionID),
 			nullInt64(params.SourceTranscriptID),
 			nullInt64(params.TaskID),
 			nullInt64(params.RunID),
 			params.Scope,
 			params.ScopeKey,
+			params.VisibilityScope,
+			params.RetentionClass,
 			params.MemoryType,
 			params.Summary,
 			params.DetailsJSON,
@@ -1658,11 +1740,16 @@ func (store *Store) RecordMemorySummary(ctx context.Context, params RecordMemory
 		summary = MemorySummary{
 			ID:                 summaryID,
 			ProjectID:          params.ProjectID,
+			WorkspaceID:        params.WorkspaceID,
+			InitiativeID:       params.InitiativeID,
+			CompanionID:        params.CompanionID,
 			SourceTranscriptID: params.SourceTranscriptID,
 			TaskID:             params.TaskID,
 			RunID:              params.RunID,
 			Scope:              params.Scope,
 			ScopeKey:           params.ScopeKey,
+			VisibilityScope:    params.VisibilityScope,
+			RetentionClass:     params.RetentionClass,
 			MemoryType:         params.MemoryType,
 			Summary:            params.Summary,
 			DetailsJSON:        params.DetailsJSON,
@@ -1698,11 +1785,16 @@ func (store *Store) ListMemorySummaries(ctx context.Context, params ListMemorySu
 		SELECT
 			id,
 			project_id,
+			workspace_id,
+			initiative_id,
+			companion_id,
 			source_transcript_id,
 			task_id,
 			run_id,
 			scope,
 			scope_key,
+			visibility_scope,
+			retention_class,
 			memory_type,
 			summary,
 			details_json,
@@ -1715,6 +1807,18 @@ func (store *Store) ListMemorySummaries(ctx context.Context, params ListMemorySu
 	if params.ProjectID != nil {
 		query += ` AND project_id = ?`
 		args = append(args, *params.ProjectID)
+	}
+	if params.WorkspaceID != nil {
+		query += ` AND workspace_id = ?`
+		args = append(args, *params.WorkspaceID)
+	}
+	if params.InitiativeID != nil {
+		query += ` AND initiative_id = ?`
+		args = append(args, *params.InitiativeID)
+	}
+	if params.CompanionID != nil {
+		query += ` AND companion_id = ?`
+		args = append(args, *params.CompanionID)
 	}
 	if params.SourceTranscriptID != nil {
 		query += ` AND source_transcript_id = ?`
@@ -1735,6 +1839,14 @@ func (store *Store) ListMemorySummaries(ctx context.Context, params ListMemorySu
 	if params.ScopeKey != "" {
 		query += ` AND scope_key = ?`
 		args = append(args, params.ScopeKey)
+	}
+	if params.VisibilityScope != "" {
+		query += ` AND visibility_scope = ?`
+		args = append(args, normalizeVisibilityScope(params.VisibilityScope))
+	}
+	if params.RetentionClass != "" {
+		query += ` AND retention_class = ?`
+		args = append(args, normalizeRetentionClass(params.RetentionClass))
 	}
 	if params.MemoryType != "" {
 		query += ` AND memory_type = ?`
@@ -2981,6 +3093,15 @@ func (store *Store) getWorkspaceTx(ctx context.Context, tx *sql.Tx, workspaceID 
 	return scanWorkspace(row)
 }
 
+func (store *Store) getInitiativeTx(ctx context.Context, tx *sql.Tx, initiativeID int64) (Initiative, error) {
+	row := tx.QueryRowContext(ctx, `
+		SELECT id, workspace_id, key, title, kind, status, summary, linked_project_id, owner_companion_id, created_at, updated_at
+		FROM initiatives
+		WHERE id = ?
+	`, initiativeID)
+	return scanInitiative(row)
+}
+
 func (store *Store) getCompanionTx(ctx context.Context, tx *sql.Tx, companionID int64) (Companion, error) {
 	row := tx.QueryRowContext(ctx, `
 		SELECT id, workspace_id, key, title, kind, charter, status, initiative_scope_json, memory_policy_json, planning_policy_json, tool_policy_json, created_at, updated_at
@@ -3004,6 +3125,9 @@ func (store *Store) getConversationTranscriptTx(ctx context.Context, tx *sql.Tx,
 		SELECT
 			id,
 			project_id,
+			workspace_id,
+			initiative_id,
+			companion_id,
 			task_id,
 			run_id,
 			scope,
@@ -3065,6 +3189,48 @@ func (store *Store) validateProjectTaskRunLineageTx(ctx context.Context, tx *sql
 	}
 
 	return project, task, run, nil
+}
+
+func (store *Store) validateScopedOwnershipLineageTx(ctx context.Context, tx *sql.Tx, workspaceID *int64, initiativeID *int64, companionID *int64, recordLabel string) (Workspace, Initiative, Companion, error) {
+	var (
+		workspace  Workspace
+		initiative Initiative
+		companion  Companion
+		err        error
+	)
+
+	if workspaceID != nil {
+		workspace, err = store.getWorkspaceTx(ctx, tx, *workspaceID)
+		if err != nil {
+			return Workspace{}, Initiative{}, Companion{}, err
+		}
+	}
+
+	if initiativeID != nil {
+		initiative, err = store.getInitiativeTx(ctx, tx, *initiativeID)
+		if err != nil {
+			return Workspace{}, Initiative{}, Companion{}, err
+		}
+		if workspaceID != nil && initiative.WorkspaceID != *workspaceID {
+			return Workspace{}, Initiative{}, Companion{}, fmt.Errorf("%s initiative %d does not belong to workspace %d", recordLabel, initiative.ID, *workspaceID)
+		}
+	}
+
+	if companionID != nil {
+		companion, err = store.getCompanionTx(ctx, tx, *companionID)
+		if err != nil {
+			return Workspace{}, Initiative{}, Companion{}, err
+		}
+		if workspaceID != nil && companion.WorkspaceID != *workspaceID {
+			return Workspace{}, Initiative{}, Companion{}, fmt.Errorf("%s companion %d does not belong to workspace %d", recordLabel, companion.ID, *workspaceID)
+		}
+	}
+
+	if workspaceID == nil && initiativeID != nil && companionID != nil && initiative.WorkspaceID != companion.WorkspaceID {
+		return Workspace{}, Initiative{}, Companion{}, fmt.Errorf("%s initiative %d does not belong to companion workspace %d", recordLabel, initiative.ID, companion.WorkspaceID)
+	}
+
+	return workspace, initiative, companion, nil
 }
 
 func (store *Store) getLearningProposalTx(ctx context.Context, tx *sql.Tx, proposalID int64) (LearningProposal, error) {
@@ -3878,12 +4044,18 @@ func scanCompanion(row interface{ Scan(...any) error }) (Companion, error) {
 func scanConversationTranscript(row interface{ Scan(...any) error }) (ConversationTranscript, error) {
 	var transcript ConversationTranscript
 	var projectID sql.NullInt64
+	var workspaceID sql.NullInt64
+	var initiativeID sql.NullInt64
+	var companionID sql.NullInt64
 	var taskID sql.NullInt64
 	var runID sql.NullInt64
 	var createdAt string
 	if err := row.Scan(
 		&transcript.ID,
 		&projectID,
+		&workspaceID,
+		&initiativeID,
+		&companionID,
 		&taskID,
 		&runID,
 		&transcript.Scope,
@@ -3900,6 +4072,9 @@ func scanConversationTranscript(row interface{ Scan(...any) error }) (Conversati
 
 	var err error
 	transcript.ProjectID = nullableInt64Ptr(projectID)
+	transcript.WorkspaceID = nullableInt64Ptr(workspaceID)
+	transcript.InitiativeID = nullableInt64Ptr(initiativeID)
+	transcript.CompanionID = nullableInt64Ptr(companionID)
 	transcript.TaskID = nullableInt64Ptr(taskID)
 	transcript.RunID = nullableInt64Ptr(runID)
 	transcript.CreatedAt, err = parseTime(createdAt)
@@ -3912,6 +4087,9 @@ func scanConversationTranscript(row interface{ Scan(...any) error }) (Conversati
 func scanMemorySummary(row interface{ Scan(...any) error }) (MemorySummary, error) {
 	var summary MemorySummary
 	var projectID sql.NullInt64
+	var workspaceID sql.NullInt64
+	var initiativeID sql.NullInt64
+	var companionID sql.NullInt64
 	var sourceTranscriptID sql.NullInt64
 	var taskID sql.NullInt64
 	var runID sql.NullInt64
@@ -3920,11 +4098,16 @@ func scanMemorySummary(row interface{ Scan(...any) error }) (MemorySummary, erro
 	if err := row.Scan(
 		&summary.ID,
 		&projectID,
+		&workspaceID,
+		&initiativeID,
+		&companionID,
 		&sourceTranscriptID,
 		&taskID,
 		&runID,
 		&summary.Scope,
 		&summary.ScopeKey,
+		&summary.VisibilityScope,
+		&summary.RetentionClass,
 		&summary.MemoryType,
 		&summary.Summary,
 		&summary.DetailsJSON,
@@ -3936,9 +4119,14 @@ func scanMemorySummary(row interface{ Scan(...any) error }) (MemorySummary, erro
 
 	var err error
 	summary.ProjectID = nullableInt64Ptr(projectID)
+	summary.WorkspaceID = nullableInt64Ptr(workspaceID)
+	summary.InitiativeID = nullableInt64Ptr(initiativeID)
+	summary.CompanionID = nullableInt64Ptr(companionID)
 	summary.SourceTranscriptID = nullableInt64Ptr(sourceTranscriptID)
 	summary.TaskID = nullableInt64Ptr(taskID)
 	summary.RunID = nullableInt64Ptr(runID)
+	summary.VisibilityScope = normalizeVisibilityScope(summary.VisibilityScope)
+	summary.RetentionClass = normalizeRetentionClass(summary.RetentionClass)
 	summary.CreatedAt, err = parseTime(createdAt)
 	if err != nil {
 		return MemorySummary{}, err
@@ -4269,6 +4457,12 @@ func nullableInt64Ptr(value sql.NullInt64) *int64 {
 	return ptr
 }
 
+func int64Ptr(value int64) *int64 {
+	ptr := new(int64)
+	*ptr = value
+	return ptr
+}
+
 func normalizeArtifactsJSON(value string) string {
 	value = strings.TrimSpace(value)
 	if value == "" {
@@ -4283,6 +4477,14 @@ func normalizeJSONValue(value string) string {
 		return "{}"
 	}
 	return value
+}
+
+func normalizeVisibilityScope(value string) string {
+	return strings.ToLower(strings.TrimSpace(value))
+}
+
+func normalizeRetentionClass(value string) string {
+	return strings.ToLower(strings.TrimSpace(value))
 }
 
 func nullInt64(value *int64) any {

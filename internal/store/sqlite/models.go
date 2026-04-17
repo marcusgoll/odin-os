@@ -343,50 +343,64 @@ type ListContextPacketsParams struct {
 }
 
 type ConversationTranscript struct {
-	ID          int64
-	ProjectID   *int64
-	TaskID      *int64
-	RunID       *int64
-	Scope       string
-	ScopeKey    string
-	Mode        string
-	Prompt      string
-	Response    string
-	ToolSummary string
-	Executor    string
-	CreatedAt   time.Time
+	ID           int64
+	ProjectID    *int64
+	WorkspaceID  *int64
+	InitiativeID *int64
+	CompanionID  *int64
+	TaskID       *int64
+	RunID        *int64
+	Scope        string
+	ScopeKey     string
+	Mode         string
+	Prompt       string
+	Response     string
+	ToolSummary  string
+	Executor     string
+	CreatedAt    time.Time
 }
 
 type RecordConversationTranscriptParams struct {
-	ProjectID   *int64
-	TaskID      *int64
-	RunID       *int64
-	Scope       string
-	ScopeKey    string
-	Mode        string
-	Prompt      string
-	Response    string
-	ToolSummary string
-	Executor    string
+	ProjectID    *int64
+	WorkspaceID  *int64
+	InitiativeID *int64
+	CompanionID  *int64
+	TaskID       *int64
+	RunID        *int64
+	Scope        string
+	ScopeKey     string
+	Mode         string
+	Prompt       string
+	Response     string
+	ToolSummary  string
+	Executor     string
 }
 
 type ListConversationTranscriptsParams struct {
-	ProjectID *int64
-	TaskID    *int64
-	RunID     *int64
-	Scope     string
-	ScopeKey  string
-	Mode      string
+	ProjectID    *int64
+	WorkspaceID  *int64
+	InitiativeID *int64
+	CompanionID  *int64
+	TaskID       *int64
+	RunID        *int64
+	Scope        string
+	ScopeKey     string
+	Mode         string
 }
 
 type MemorySummary struct {
 	ID                 int64
 	ProjectID          *int64
+	WorkspaceID        *int64
+	InitiativeID       *int64
+	CompanionID        *int64
 	SourceTranscriptID *int64
 	TaskID             *int64
 	RunID              *int64
 	Scope              string
 	ScopeKey           string
+	VisibilityScope    string
+	RetentionClass     string
 	MemoryType         string
 	Summary            string
 	DetailsJSON        string
@@ -396,11 +410,16 @@ type MemorySummary struct {
 
 type RecordMemorySummaryParams struct {
 	ProjectID          *int64
+	WorkspaceID        *int64
+	InitiativeID       *int64
+	CompanionID        *int64
 	SourceTranscriptID *int64
 	TaskID             *int64
 	RunID              *int64
 	Scope              string
 	ScopeKey           string
+	VisibilityScope    string
+	RetentionClass     string
 	MemoryType         string
 	Summary            string
 	DetailsJSON        string
@@ -408,11 +427,16 @@ type RecordMemorySummaryParams struct {
 
 type ListMemorySummariesParams struct {
 	ProjectID          *int64
+	WorkspaceID        *int64
+	InitiativeID       *int64
+	CompanionID        *int64
 	SourceTranscriptID *int64
 	TaskID             *int64
 	RunID              *int64
 	Scope              string
 	ScopeKey           string
+	VisibilityScope    string
+	RetentionClass     string
 	MemoryType         string
 }
 
