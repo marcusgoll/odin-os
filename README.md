@@ -36,6 +36,7 @@ See `docs/contracts/ubiquitous-language.md` for the frozen vocabulary and `docs/
 - `docs/adr/0002-migration-policy.md` defines how legacy assets from `odin-orchestrator` are classified and moved into this repo.
 - `docs/contracts/repo-layout.md` defines package and folder responsibilities.
 - `docs/contracts/phase-exit-criteria.md` defines the acceptance gate for Phase 00 and the baseline gate every later phase must satisfy.
+- `docs/operations/workspace-bootstrap.md` explains fresh-runtime workspace bootstrap and legacy runtime repair.
 
 ## Current Status
 
@@ -52,3 +53,13 @@ odin
 ```
 
 This installs a symlink at `~/.local/bin/odin` pointing to this repo's built binary. Remove it with `make uninstall-local`.
+
+## Workspace Migration Helper
+
+If you need to repair an older runtime so existing projects and tasks are linked into the workspace model, run:
+
+```bash
+go run ./scripts/migrate/bootstrap_workspace -runtime-root /path/to/odin-root
+```
+
+The helper is additive and idempotent. It bootstraps the default workspace and companion, reconciles managed-project initiatives, and binds legacy tasks into the workspace model without renaming the underlying `tasks` table.

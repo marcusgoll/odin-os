@@ -495,7 +495,10 @@ func TestAlphaAcceptance(t *testing.T) {
 		defer store.Close()
 		seedHealthyObservability(t, ctx, store, now)
 
-		report, err := healthsvc.Service{DB: store.DB()}.Doctor(ctx, true)
+		report, err := healthsvc.Service{
+			DB:  store.DB(),
+			Now: func() time.Time { return now },
+		}.Doctor(ctx, true)
 		if err != nil {
 			t.Fatalf("Doctor() error = %v", err)
 		}
