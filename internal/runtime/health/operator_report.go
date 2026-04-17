@@ -26,6 +26,7 @@ type Finding struct {
 	Observation  string   `json:"observation"`
 	WhyItMatters string   `json:"why_it_matters"`
 	Confidence   string   `json:"confidence"`
+	SourceStatus Status   `json:"-"`
 }
 
 type RootCause struct {
@@ -98,8 +99,8 @@ func BuildOperatorReport(raw Report) OperatorReport {
 	sort.SliceStable(report.Findings, func(i, j int) bool {
 		left := report.Findings[i]
 		right := report.Findings[j]
-		if findingOrder(left) != findingOrder(right) {
-			return findingOrder(left) < findingOrder(right)
+		if statusOrder(left.SourceStatus) != statusOrder(right.SourceStatus) {
+			return statusOrder(left.SourceStatus) < statusOrder(right.SourceStatus)
 		}
 		if left.Severity != right.Severity {
 			return severityOrder(left.Severity) < severityOrder(right.Severity)
@@ -136,6 +137,7 @@ func classifyCheck(check Check) (*Finding, *RootCause, *Recommendation, string) 
 			Observation:  check.Summary,
 			WhyItMatters: whyItMatters,
 			Confidence:   confidence,
+			SourceStatus: check.Status,
 		}
 		rootCause := &RootCause{
 			Area:       area,
@@ -158,6 +160,7 @@ func classifyCheck(check Check) (*Finding, *RootCause, *Recommendation, string) 
 			Observation:  check.Summary,
 			WhyItMatters: whyItMatters,
 			Confidence:   confidenceForCheck(check),
+			SourceStatus: check.Status,
 		}
 		rootCause := &RootCause{
 			Area:       area,
@@ -271,8 +274,8 @@ func verdictSummary(status Status) string {
 	}
 }
 
-func findingOrder(finding Finding) int {
-	switch finding.Severity {
+func severityOrder(severity Severity) int {
+	switch severity {
 	case SeverityCritical:
 		return 0
 	case SeverityHigh:
@@ -282,11 +285,11 @@ func findingOrder(finding Finding) int {
 	}
 }
 
-func severityOrder(severity Severity) int {
-	switch severity {
-	case SeverityCritical:
+func statusOrder(status Status) int {
+	switch status {
+	case StatusFailed:
 		return 0
-	case SeverityHigh:
+	case StatusDegraded:
 		return 1
 	default:
 		return 2
