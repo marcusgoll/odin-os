@@ -14,7 +14,7 @@ import (
 )
 
 func TestLoadInitializesFreshRuntimeReadinessState(t *testing.T) {
-	repoRoot := filepath.Clean(filepath.Join("..", "..", ".."))
+	repoRoot := bootstrapTestRepoRoot(t)
 	runtimeRoot := t.TempDir()
 
 	app, err := Load(context.Background(), repoRoot, runtimeRoot)
@@ -33,7 +33,7 @@ func TestLoadInitializesFreshRuntimeReadinessState(t *testing.T) {
 }
 
 func TestLoadBootstrapsDefaultWorkspaceAndCompanion(t *testing.T) {
-	repoRoot := filepath.Clean(filepath.Join("..", "..", ".."))
+	repoRoot := bootstrapTestRepoRoot(t)
 	runtimeRoot := t.TempDir()
 
 	app, err := Load(context.Background(), repoRoot, runtimeRoot)
@@ -61,7 +61,7 @@ func TestLoadBootstrapsDefaultWorkspaceAndCompanion(t *testing.T) {
 
 func TestLoadRepairsLegacyProjectsAndTasksIntoWorkspaceModel(t *testing.T) {
 	ctx := context.Background()
-	repoRoot := filepath.Clean(filepath.Join("..", "..", ".."))
+	repoRoot := bootstrapTestRepoRoot(t)
 	runtimeRoot := t.TempDir()
 
 	if err := os.MkdirAll(filepath.Join(runtimeRoot, "data"), 0o755); err != nil {
@@ -137,7 +137,7 @@ func TestLoadRepairsLegacyProjectsAndTasksIntoWorkspaceModel(t *testing.T) {
 }
 
 func TestLoadSerializesConcurrentBootstrapForFreshRuntime(t *testing.T) {
-	repoRoot := filepath.Clean(filepath.Join("..", "..", ".."))
+	repoRoot := bootstrapTestRepoRoot(t)
 	runtimeRoot := t.TempDir()
 
 	var entered int32
@@ -199,7 +199,7 @@ func TestLoadSerializesConcurrentBootstrapForFreshRuntime(t *testing.T) {
 }
 
 func TestLoadReturnsBootstrapTimeoutWhenLockWaitExceedsConfiguredLimit(t *testing.T) {
-	repoRoot := filepath.Clean(filepath.Join("..", "..", ".."))
+	repoRoot := bootstrapTestRepoRoot(t)
 	runtimeRoot := t.TempDir()
 	t.Setenv("ODIN_BOOTSTRAP_TIMEOUT", "50ms")
 
@@ -243,6 +243,74 @@ func TestLoadReturnsBootstrapTimeoutWhenLockWaitExceedsConfiguredLimit(t *testin
 	if firstErr := <-firstResult; firstErr != nil {
 		t.Fatalf("first Load() error = %v", firstErr)
 	}
+}
+
+func bootstrapTestRepoRoot(t *testing.T) string {
+	t.Helper()
+
+	sourceRoot := filepath.Clean(filepath.Join("..", "..", ".."))
+	root := t.TempDir()
+
+	for _, dir := range []string{
+		filepath.Join(root, "config"),
+		filepath.Join(root, "registry"),
+		filepath.Join(root, "odin-core", ".git"),
+	} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("MkdirAll(%s) error = %v", dir, err)
+		}
+	}
+
+	for _, name := range []string{"odin.yaml", "executors.yaml", "models.yaml", "telemetry.yaml"} {
+		sourcePath := filepath.Join(sourceRoot, "config", name)
+		content, err := os.ReadFile(sourcePath)
+		if err != nil {
+			t.Fatalf("ReadFile(%s) error = %v", sourcePath, err)
+		}
+		if err := os.WriteFile(filepath.Join(root, "config", name), content, 0o644); err != nil {
+			t.Fatalf("WriteFile(%s) error = %v", name, err)
+		}
+	}
+
+	projectsYAML := []byte(`version: 1
+projects:
+  - key: odin-core
+    name: Odin Core
+    project_class: system_project
+    system_project: true
+    git_root: ` + filepath.Join(root, "odin-core") + `
+    default_branch: main
+    policy:
+      allowed_commands: [status]
+      branch_rules:
+        protected_branches: [main]
+        require_worktree: true
+        require_task_branch: true
+        allow_default_branch_mutation: false
+      approval_gates:
+        require_for_governance_changes: true
+        require_for_destructive_operations: true
+        require_for_system_project_changes: true
+      merge_policy:
+        mode: squash
+        allow_direct_to_default_branch: false
+      destructive_operations:
+        allow_reset: false
+        allow_clean: false
+        allow_force_push: false
+        require_explicit_approval: true
+`)
+	if err := os.WriteFile(filepath.Join(root, "config", "projects.yaml"), projectsYAML, 0o644); err != nil {
+		t.Fatalf("WriteFile(projects.yaml) error = %v", err)
+	}
+
+	registryLink := filepath.Join(root, "registry")
+	_ = os.RemoveAll(registryLink)
+	if err := os.Symlink(filepath.Join(sourceRoot, "registry"), registryLink); err != nil {
+		t.Fatalf("Symlink(registry) error = %v", err)
+	}
+
+	return root
 }
 
 func assertCountAtLeast(t *testing.T, row rowScanner, minimum int) {
