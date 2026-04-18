@@ -273,6 +273,70 @@ func TestStoreMigrateLifecycleAndReopen(t *testing.T) {
 	}
 }
 
+func TestUpdateTaskStatusUpdatesFieldsWhenStatusUnchanged(t *testing.T) {
+	ctx := context.Background()
+	store := openMigratedTestStore(t, "update-task-status-unchanged.db")
+	defer store.Close()
+
+	project, err := store.CreateProject(ctx, CreateProjectParams{
+		Key:           "update-task-status-unchanged",
+		Name:          "Update Task Status Unchanged",
+		Scope:         "project",
+		GitRoot:       "/tmp/update-task-status-unchanged",
+		DefaultBranch: "main",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+
+	task, err := store.CreateTask(ctx, CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "status-unchanged-task",
+		Title:       "Refresh task state",
+		Status:      "blocked",
+		Scope:       "project",
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+
+	task, err = store.UpdateTaskStatus(ctx, UpdateTaskStatusParams{
+		TaskID:         task.ID,
+		Status:         "blocked",
+		Summary:        "first rerun summary",
+		TerminalReason: "swarm_results_pending",
+		ArtifactsJSON:  `[{"type":"swarm_aggregation","summary":"first rerun summary","confidence":0.42}]`,
+	})
+	if err != nil {
+		t.Fatalf("UpdateTaskStatus(first rerun) error = %v", err)
+	}
+	if task.Summary != "first rerun summary" {
+		t.Fatalf("first update summary = %q, want first rerun summary", task.Summary)
+	}
+
+	task, err = store.UpdateTaskStatus(ctx, UpdateTaskStatusParams{
+		TaskID:         task.ID,
+		Status:         "blocked",
+		Summary:        "second rerun summary",
+		TerminalReason: "swarm_review_gate_pending_verifier",
+		ArtifactsJSON:  `[{"type":"swarm_aggregation","summary":"second rerun summary","confidence":0.87}]`,
+	})
+	if err != nil {
+		t.Fatalf("UpdateTaskStatus(second rerun) error = %v", err)
+	}
+	if task.Summary != "second rerun summary" {
+		t.Fatalf("second update summary = %q, want second rerun summary", task.Summary)
+	}
+	if task.TerminalReason != "swarm_review_gate_pending_verifier" {
+		t.Fatalf("second update terminal reason = %q, want swarm_review_gate_pending_verifier", task.TerminalReason)
+	}
+	if task.ArtifactsJSON != `[{"type":"swarm_aggregation","summary":"second rerun summary","confidence":0.87}]` {
+		t.Fatalf("second update artifacts JSON = %q, want updated envelope", task.ArtifactsJSON)
+	}
+}
+
 func TestProjectTransitionStateLifecycle(t *testing.T) {
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "odin.db")

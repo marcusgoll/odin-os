@@ -93,6 +93,31 @@ func TestConvergenceReviewGateRequiresVerifierArtifact(t *testing.T) {
 	}
 }
 
+func TestConvergenceReviewGateRequiresProducerOutput(t *testing.T) {
+	t.Parallel()
+
+	artifacts := []sqlite.DelegationArtifact{
+		{
+			ID:           1,
+			DelegationID: 1,
+			ArtifactType: "verifier_result",
+			Summary:      "Verifier approved",
+			DetailsJSON:  resultEnvelopeJSON(t, "completed", 0.91, []string{"doc-a"}, nil, []string{"publish"}, []string{"memory-a"}),
+		},
+	}
+
+	result, err := AggregateConvergence("review_gate", artifacts)
+	if err != nil {
+		t.Fatalf("AggregateConvergence(review_gate) error = %v", err)
+	}
+	if result.Status != "blocked" {
+		t.Fatalf("AggregateConvergence(review_gate).Status = %q, want blocked", result.Status)
+	}
+	if result.TerminalReason != "swarm_results_pending" {
+		t.Fatalf("AggregateConvergence(review_gate).TerminalReason = %q, want swarm_results_pending", result.TerminalReason)
+	}
+}
+
 func TestConvergenceReviewGateServiceRequiresVerifierArtifact(t *testing.T) {
 	t.Parallel()
 
@@ -149,6 +174,193 @@ func TestConvergenceReviewGateServiceRequiresVerifierArtifact(t *testing.T) {
 	}
 	if result.ParentTask.Status != "blocked" {
 		t.Fatalf("AggregateSwarm().ParentTask.Status = %q, want blocked", result.ParentTask.Status)
+	}
+}
+
+func TestConvergenceReviewGateServiceRequiresProducerOutput(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openSupervisionStore(t)
+	defer store.Close()
+
+	_, parentTask, parentRun, _ := mustCreateSwarmParentContext(t, ctx, store, `{"allow":["repo_read","branch_proposal"]}`, `{"mode":"initiative"}`, `{"swarm":{"max_children":2}}`)
+	service := Service{Store: store, Jobs: runtimejobs.Service{Store: store}}
+
+	plan, err := service.PlanSwarm(ctx, PlanSwarmParams{
+		ParentTaskID:    parentTask.ID,
+		ParentRunID:     &parentRun.ID,
+		Trigger:         TriggerBuildPlusReview,
+		ConvergenceMode: "review_gate",
+		RequestedBudget: 2,
+		DelegationPlans: []DelegationPlan{
+			{
+				DelegationKey:  "implement",
+				Role:           "builder",
+				ActionClass:    "mutation",
+				ActionKey:      "implement",
+				MutationMode:   "isolated_worktree",
+				ArtifactTarget: "branch",
+				Objective:      "Implement the change",
+			},
+			{
+				DelegationKey:  "review",
+				Role:           "reviewer",
+				ActionClass:    "analysis",
+				ActionKey:      "review",
+				MutationMode:   "read_only",
+				ArtifactTarget: "report",
+				Objective:      "Verify the implementation",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("PlanSwarm() error = %v", err)
+	}
+
+	mustCreateDelegationResultArtifact(t, ctx, store, plan.Delegations[1], "Review approved", resultEnvelopeJSON(t, "completed", 0.93, []string{"branch:review"}, nil, []string{"publish"}, []string{"review notes"}))
+
+	result, err := service.AggregateSwarm(ctx, parentTask.ID)
+	if err != nil {
+		t.Fatalf("AggregateSwarm() error = %v", err)
+	}
+
+	if result.Status != "blocked" {
+		t.Fatalf("AggregateSwarm().Status = %q, want blocked", result.Status)
+	}
+	if result.TerminalReason != "swarm_results_pending" {
+		t.Fatalf("AggregateSwarm().TerminalReason = %q, want swarm_results_pending", result.TerminalReason)
+	}
+	if result.ParentTask.Status != "blocked" {
+		t.Fatalf("AggregateSwarm().ParentTask.Status = %q, want blocked", result.ParentTask.Status)
+	}
+}
+
+func TestAggregateSwarmBlocksPartialResultsForMergeRankAndQuorum(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	modes := []string{"merge", "rank", "quorum"}
+
+	for _, mode := range modes {
+		mode := mode
+		t.Run(mode, func(t *testing.T) {
+			t.Parallel()
+
+			store := openSupervisionStore(t)
+			defer store.Close()
+
+			_, parentTask, parentRun, _ := mustCreateSwarmParentContext(t, ctx, store, `{"allow":["repo_read","branch_proposal"]}`, `{"mode":"initiative"}`, `{"swarm":{"max_children":2}}`)
+			service := Service{Store: store, Jobs: runtimejobs.Service{Store: store}}
+
+			plan, err := service.PlanSwarm(ctx, PlanSwarmParams{
+				ParentTaskID:    parentTask.ID,
+				ParentRunID:     &parentRun.ID,
+				Trigger:         TriggerParallelResearch,
+				ConvergenceMode: mode,
+				RequestedBudget: 2,
+				DelegationPlans: []DelegationPlan{
+					{
+						DelegationKey:  "child-a",
+						Role:           "researcher",
+						ActionClass:    "analysis",
+						ActionKey:      "option",
+						MutationMode:   "read_only",
+						ArtifactTarget: "proposal-a",
+						Objective:      "Produce option A",
+					},
+					{
+						DelegationKey:  "child-b",
+						Role:           "researcher",
+						ActionClass:    "analysis",
+						ActionKey:      "option",
+						MutationMode:   "read_only",
+						ArtifactTarget: "proposal-b",
+						Objective:      "Produce option B",
+					},
+				},
+			})
+			if err != nil {
+				t.Fatalf("PlanSwarm() error = %v", err)
+			}
+
+			mustCreateDelegationResultArtifact(t, ctx, store, plan.Delegations[0], "Option A", resultEnvelopeJSON(t, "completed", 0.51, []string{"proposal-a"}, nil, []string{"review A"}, []string{"memory-a"}))
+
+			result, err := service.AggregateSwarm(ctx, parentTask.ID)
+			if err != nil {
+				t.Fatalf("AggregateSwarm() error = %v", err)
+			}
+			if result.Status != "blocked" {
+				t.Fatalf("AggregateSwarm().Status = %q, want blocked", result.Status)
+			}
+			if result.TerminalReason != "swarm_results_pending" {
+				t.Fatalf("AggregateSwarm().TerminalReason = %q, want swarm_results_pending", result.TerminalReason)
+			}
+		})
+	}
+}
+
+func TestAggregateDelegationArtifactsIgnoresPlanArtifacts(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openSupervisionStore(t)
+	defer store.Close()
+
+	_, parentTask, parentRun, _ := mustCreateSwarmParentContext(t, ctx, store, `{"allow":["repo_read","branch_proposal"]}`, `{"mode":"initiative"}`, `{"swarm":{"max_children":2}}`)
+	service := Service{Store: store, Jobs: runtimejobs.Service{Store: store}}
+
+	plan, err := service.PlanSwarm(ctx, PlanSwarmParams{
+		ParentTaskID:    parentTask.ID,
+		ParentRunID:     &parentRun.ID,
+		Trigger:         TriggerParallelResearch,
+		ConvergenceMode: "merge",
+		RequestedBudget: 2,
+		DelegationPlans: []DelegationPlan{
+			{
+				DelegationKey:  "child-a",
+				Role:           "researcher",
+				ActionClass:    "analysis",
+				ActionKey:      "option",
+				MutationMode:   "read_only",
+				ArtifactTarget: "proposal-a",
+				Objective:      "Produce option A",
+			},
+			{
+				DelegationKey:  "child-b",
+				Role:           "researcher",
+				ActionClass:    "analysis",
+				ActionKey:      "option",
+				MutationMode:   "read_only",
+				ArtifactTarget: "proposal-b",
+				Objective:      "Produce option B",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("PlanSwarm() error = %v", err)
+	}
+
+	delegation := plan.Delegations[0]
+	if _, err := store.CreateDelegationArtifact(ctx, sqlite.CreateDelegationArtifactParams{
+		DelegationID: delegation.ID,
+		ArtifactType: "plan",
+		Summary:      "Draft plan",
+		DetailsJSON:  resultEnvelopeJSON(t, "completed", 0.12, []string{"proposal-a"}, nil, []string{"draft"}, []string{"memory-plan"}),
+	}); err != nil {
+		t.Fatalf("CreateDelegationArtifact(plan) error = %v", err)
+	}
+	mustCreateDelegationResultArtifact(t, ctx, store, delegation, "Final result", resultEnvelopeJSON(t, "completed", 0.88, []string{"proposal-a"}, nil, []string{"publish"}, []string{"memory-result"}))
+
+	result, err := service.AggregateDelegationArtifacts(ctx, delegation.ID)
+	if err != nil {
+		t.Fatalf("AggregateDelegationArtifacts() error = %v", err)
+	}
+	if result.Status != "completed" {
+		t.Fatalf("AggregateDelegationArtifacts().Status = %q, want completed", result.Status)
+	}
+	if result.Summary != "Final result" {
+		t.Fatalf("AggregateDelegationArtifacts().Summary = %q, want Final result", result.Summary)
 	}
 }
 

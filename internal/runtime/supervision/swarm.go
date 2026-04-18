@@ -468,6 +468,7 @@ func (service Service) AggregateDelegationArtifacts(ctx context.Context, delegat
 	}
 	artifacts, err := service.Store.ListDelegationArtifacts(ctx, sqlite.ListDelegationArtifactsParams{
 		DelegationID: delegation.ID,
+		ArtifactType: "result",
 	})
 	if err != nil {
 		return AggregationResult{}, err

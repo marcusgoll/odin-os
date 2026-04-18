@@ -630,7 +630,10 @@ func (store *Store) UpdateTaskStatus(ctx context.Context, params UpdateTaskStatu
 		if err != nil {
 			return err
 		}
-		if current.Status == params.Status {
+		if current.Status == params.Status &&
+			current.Summary == params.Summary &&
+			current.TerminalReason == params.TerminalReason &&
+			current.ArtifactsJSON == artifactsJSON {
 			task = current
 			return nil
 		}

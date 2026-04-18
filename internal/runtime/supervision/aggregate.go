@@ -52,6 +52,9 @@ func AggregateConvergence(mode string, artifacts []sqlite.DelegationArtifact) (A
 
 	results := make([]delegationResult, 0, len(artifacts))
 	for _, artifact := range artifacts {
+		if !isAggregationOutcomeArtifactType(artifact.ArtifactType) {
+			continue
+		}
 		envelope, err := decodeDelegationResultEnvelope(artifact.DetailsJSON)
 		if err != nil {
 			return AggregationResult{}, fmt.Errorf("decode delegation artifact %d: %w", artifact.ID, err)
@@ -81,8 +84,22 @@ func AggregateConvergence(mode string, artifacts []sqlite.DelegationArtifact) (A
 		if verifierIndex < 0 {
 			return AggregationResult{}, ErrVerifierArtifactRequired
 		}
+		aggregation.VerifierDelegationID = &results[verifierIndex].Delegation.ID
+		producerSummaries := make([]string, 0, len(results))
+		for i, outcome := range results {
+			if i == verifierIndex {
+				continue
+			}
+			producerSummaries = append(producerSummaries, outcome.Artifact.Summary)
+		}
+		if len(producerSummaries) == 0 {
+			aggregation.Status = "blocked"
+			aggregation.TerminalReason = "swarm_results_pending"
+			aggregation.Summary = "Awaiting producer result artifacts"
+			break
+		}
 		aggregation.Status = "completed"
-		aggregation.Summary = results[verifierIndex].Artifact.Summary
+		aggregation.Summary = strings.Join(uniqueNonEmptyStrings(producerSummaries), " + ")
 		aggregation.Confidence = results[verifierIndex].Confidence
 	case "rank":
 		helper.applyRankConvergence(&aggregation, results)
@@ -90,7 +107,7 @@ func AggregateConvergence(mode string, artifacts []sqlite.DelegationArtifact) (A
 		helper.applyQuorumConvergence(&aggregation, results)
 	}
 
-	if len(aggregation.UnresolvedRisks) > 0 {
+	if aggregation.Status == "completed" && len(aggregation.UnresolvedRisks) > 0 {
 		aggregation.Status = "blocked"
 		aggregation.TerminalReason = "swarm_unresolved_risks"
 		aggregation.Summary = fmt.Sprintf("Swarm blocked by unresolved risks: %s", strings.Join(aggregation.UnresolvedRisks, "; "))
@@ -145,20 +162,26 @@ func (service Service) AggregateSwarm(ctx context.Context, parentTaskID int64) (
 		ProposedMemoryCandidates: collectMemoryCandidates(results),
 	}
 
-	switch mode {
-	case "merge":
-		service.applyMergeConvergence(&aggregation, results)
-	case "review_gate":
-		service.applyReviewGateConvergence(&aggregation, results)
-	case "rank":
-		service.applyRankConvergence(&aggregation, results)
-	case "quorum":
-		service.applyQuorumConvergence(&aggregation, results)
-	default:
-		return AggregationResult{}, fmt.Errorf("%w: %s", ErrUnsupportedConvergenceMode, mode)
+	if mode != "review_gate" && len(results) < len(delegations) {
+		aggregation.Status = "blocked"
+		aggregation.TerminalReason = "swarm_results_pending"
+		aggregation.Summary = "Awaiting child result artifacts"
+	} else {
+		switch mode {
+		case "merge":
+			service.applyMergeConvergence(&aggregation, results)
+		case "review_gate":
+			service.applyReviewGateConvergence(&aggregation, results)
+		case "rank":
+			service.applyRankConvergence(&aggregation, results)
+		case "quorum":
+			service.applyQuorumConvergence(&aggregation, results)
+		default:
+			return AggregationResult{}, fmt.Errorf("%w: %s", ErrUnsupportedConvergenceMode, mode)
+		}
 	}
 
-	if len(aggregation.UnresolvedRisks) > 0 {
+	if aggregation.Status == "completed" && len(aggregation.UnresolvedRisks) > 0 {
 		aggregation.Status = "blocked"
 		aggregation.TerminalReason = "swarm_unresolved_risks"
 		aggregation.Summary = fmt.Sprintf("Swarm blocked by unresolved risks: %s", strings.Join(aggregation.UnresolvedRisks, "; "))
@@ -279,7 +302,10 @@ func (service Service) applyReviewGateConvergence(result *AggregationResult, out
 
 	result.VerifierDelegationID = &verifier.Delegation.ID
 	if len(producerSummaries) == 0 {
-		producerSummaries = append(producerSummaries, verifier.Artifact.Summary)
+		result.Status = "blocked"
+		result.TerminalReason = "swarm_results_pending"
+		result.Summary = "Awaiting producer result artifacts"
+		return
 	}
 	result.Status = "completed"
 	result.Summary = strings.Join(uniqueNonEmptyStrings(producerSummaries), " + ")
@@ -416,6 +442,17 @@ func collectMemoryCandidates(outcomes []delegationResult) []string {
 		collected = append(collected, outcome.Envelope.ProposedMemoryCandidates...)
 	}
 	return uniqueNonEmptyStrings(collected)
+}
+
+func isAggregationOutcomeArtifactType(artifactType string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(artifactType))
+	if normalized == "" {
+		return true
+	}
+	if strings.Contains(normalized, "plan") || strings.Contains(normalized, "progress") {
+		return false
+	}
+	return true
 }
 
 func bestConfidence(outcomes []delegationResult) float64 {
