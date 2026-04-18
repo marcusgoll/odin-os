@@ -146,6 +146,204 @@ func TestRunStatusJSON(t *testing.T) {
 	}
 }
 
+func TestRunCompanionGetJSON(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	root := testRepoRoot(t)
+	runtimeRoot := t.TempDir()
+
+	app, err := bootstrap.Load(ctx, root, runtimeRoot)
+	if err != nil {
+		t.Fatalf("bootstrap.Load() error = %v", err)
+	}
+	defer app.Store.Close()
+
+	if err := runCompanion(ctx, app, []string{"create", "--kind", "advisor", "--key", "finance", "--title", "Finance Advisor"}, &bytes.Buffer{}); err != nil {
+		t.Fatalf("runCompanion(create) error = %v", err)
+	}
+
+	var stdout bytes.Buffer
+	if err := runCompanion(ctx, app, []string{"get", "finance", "--json"}, &stdout); err != nil {
+		t.Fatalf("runCompanion(get --json) error = %v", err)
+	}
+
+	var payload struct {
+		Key                string `json:"key"`
+		Title              string `json:"title"`
+		Kind               string `json:"kind"`
+		Status             string `json:"status"`
+		ToolPolicyJSON     string `json:"tool_policy_json"`
+		MemoryPolicyJSON   string `json:"memory_policy_json"`
+		PlanningPolicyJSON string `json:"planning_policy_json"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("json.Unmarshal(get output) error = %v\n%s", err, stdout.String())
+	}
+	if payload.Key != "finance" {
+		t.Fatalf("Key = %q, want finance", payload.Key)
+	}
+	if payload.Title != "Finance Advisor" {
+		t.Fatalf("Title = %q, want Finance Advisor", payload.Title)
+	}
+	if payload.Kind != "advisor" {
+		t.Fatalf("Kind = %q, want advisor", payload.Kind)
+	}
+	if payload.Status != "active" {
+		t.Fatalf("Status = %q, want active", payload.Status)
+	}
+	if payload.ToolPolicyJSON != "{}" {
+		t.Fatalf("ToolPolicyJSON = %q, want {}", payload.ToolPolicyJSON)
+	}
+	if payload.MemoryPolicyJSON != "{}" {
+		t.Fatalf("MemoryPolicyJSON = %q, want {}", payload.MemoryPolicyJSON)
+	}
+	if payload.PlanningPolicyJSON != "{}" {
+		t.Fatalf("PlanningPolicyJSON = %q, want {}", payload.PlanningPolicyJSON)
+	}
+}
+
+func TestRunCompanionStateJSON(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	root := testRepoRoot(t)
+	runtimeRoot := t.TempDir()
+
+	app, err := bootstrap.Load(ctx, root, runtimeRoot)
+	if err != nil {
+		t.Fatalf("bootstrap.Load() error = %v", err)
+	}
+	defer app.Store.Close()
+
+	if err := runCompanion(ctx, app, []string{"create", "--kind", "advisor", "--key", "finance", "--title", "Finance Advisor"}, &bytes.Buffer{}); err != nil {
+		t.Fatalf("runCompanion(create) error = %v", err)
+	}
+
+	var stdout bytes.Buffer
+	if err := runCompanion(ctx, app, []string{"state", "finance", "--json"}, &stdout); err != nil {
+		t.Fatalf("runCompanion(state --json) error = %v", err)
+	}
+
+	var payload struct {
+		Key       string `json:"key"`
+		Title     string `json:"title"`
+		Kind      string `json:"kind"`
+		Status    string `json:"status"`
+		TaskState struct {
+			CompanionKey         string `json:"companion_key"`
+			OwnedInitiativeCount int    `json:"owned_initiative_count"`
+			OpenWorkItemCount    int    `json:"open_work_item_count"`
+			ActiveRunCount       int    `json:"active_run_count"`
+			PendingApprovalCount int    `json:"pending_approval_count"`
+			BlockedWorkItemCount int    `json:"blocked_work_item_count"`
+			OverdueFollowUpCount int    `json:"overdue_follow_up_count"`
+		} `json:"task_state"`
+		Swarms []struct {
+			ParentTaskKey string `json:"parent_task_key"`
+			Status        string `json:"status"`
+		} `json:"swarms"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("json.Unmarshal(state output) error = %v\n%s", err, stdout.String())
+	}
+	if payload.Key != "finance" {
+		t.Fatalf("Key = %q, want finance", payload.Key)
+	}
+	if payload.TaskState.CompanionKey != "finance" {
+		t.Fatalf("TaskState.CompanionKey = %q, want finance", payload.TaskState.CompanionKey)
+	}
+	if payload.TaskState.OwnedInitiativeCount != 0 || payload.TaskState.OpenWorkItemCount != 0 || payload.TaskState.ActiveRunCount != 0 || payload.TaskState.PendingApprovalCount != 0 || payload.TaskState.BlockedWorkItemCount != 0 || payload.TaskState.OverdueFollowUpCount != 0 {
+		t.Fatalf("TaskState counts = %+v, want zeros for a fresh companion", payload.TaskState)
+	}
+	if len(payload.Swarms) != 0 {
+		t.Fatalf("Swarms len = %d, want 0 for a fresh companion", len(payload.Swarms))
+	}
+}
+
+func TestRunCompanionCapabilitiesJSON(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	root := testRepoRoot(t)
+	runtimeRoot := t.TempDir()
+
+	app, err := bootstrap.Load(ctx, root, runtimeRoot)
+	if err != nil {
+		t.Fatalf("bootstrap.Load() error = %v", err)
+	}
+	defer app.Store.Close()
+
+	if err := runCompanion(ctx, app, []string{"create", "--kind", "advisor", "--key", "finance", "--title", "Finance Advisor"}, &bytes.Buffer{}); err != nil {
+		t.Fatalf("runCompanion(create) error = %v", err)
+	}
+
+	workspace, err := app.Store.GetWorkspaceByKey(ctx, "default")
+	if err != nil {
+		t.Fatalf("GetWorkspaceByKey(default) error = %v", err)
+	}
+	if _, err := app.Store.DB().ExecContext(ctx, `
+		UPDATE companions
+		SET tool_policy_json = ?, memory_policy_json = ?, planning_policy_json = ?
+		WHERE workspace_id = ? AND key = ?
+	`, `{"allow":["branch_proposal","repo_read"]}`, `{"mode":"initiative"}`, `{"swarm":{"max_children":2}}`, workspace.ID, "finance"); err != nil {
+		t.Fatalf("seed companion policy update error = %v", err)
+	}
+
+	var stdout bytes.Buffer
+	if err := runCompanion(ctx, app, []string{"capabilities", "finance", "--json"}, &stdout); err != nil {
+		t.Fatalf("runCompanion(capabilities --json) error = %v", err)
+	}
+
+	var payload struct {
+		Key        string `json:"key"`
+		ToolPolicy struct {
+			Allow []string `json:"allow"`
+		} `json:"tool_policy"`
+		MemoryPolicy struct {
+			Mode string `json:"mode"`
+		} `json:"memory_policy"`
+		PlanningPolicy struct {
+			Swarm struct {
+				MaxChildren int `json:"max_children"`
+			} `json:"swarm"`
+		} `json:"planning_policy"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("json.Unmarshal(capabilities output) error = %v\n%s", err, stdout.String())
+	}
+	if payload.Key != "finance" {
+		t.Fatalf("Key = %q, want finance", payload.Key)
+	}
+	if len(payload.ToolPolicy.Allow) != 2 || payload.ToolPolicy.Allow[0] != "branch_proposal" || payload.ToolPolicy.Allow[1] != "repo_read" {
+		t.Fatalf("ToolPolicy.Allow = %+v, want branch_proposal and repo_read", payload.ToolPolicy.Allow)
+	}
+	if payload.MemoryPolicy.Mode != "initiative" {
+		t.Fatalf("MemoryPolicy.Mode = %q, want initiative", payload.MemoryPolicy.Mode)
+	}
+	if payload.PlanningPolicy.Swarm.MaxChildren != 2 {
+		t.Fatalf("PlanningPolicy.Swarm.MaxChildren = %d, want 2", payload.PlanningPolicy.Swarm.MaxChildren)
+	}
+}
+
+func TestRunCompanionRejectsUnsupportedSubcommand(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	root := testRepoRoot(t)
+	runtimeRoot := t.TempDir()
+
+	app, err := bootstrap.Load(ctx, root, runtimeRoot)
+	if err != nil {
+		t.Fatalf("bootstrap.Load() error = %v", err)
+	}
+	defer app.Store.Close()
+
+	if err := runCompanion(ctx, app, []string{"delete", "finance"}, &bytes.Buffer{}); err == nil {
+		t.Fatal("runCompanion(delete) error = nil, want unsupported companion subcommand error")
+	}
+}
+
 func TestRunDoctorIgnoresInvalidOdinNowForNonAgendaCommands(t *testing.T) {
 	root := testRepoRoot(t)
 	t.Setenv("ODIN_NOW", "definitely-not-a-timestamp")

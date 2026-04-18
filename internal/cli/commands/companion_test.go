@@ -41,10 +41,72 @@ func TestParseCompanionListJSON(t *testing.T) {
 	}
 }
 
+func TestParseCompanionReadCommands(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		args     []string
+		wantName string
+		wantKey  string
+		wantJSON bool
+	}{
+		{
+			name:     "get text",
+			args:     []string{"get", "finance"},
+			wantName: "get",
+			wantKey:  "finance",
+		},
+		{
+			name:     "state json",
+			args:     []string{"state", "finance", "--json"},
+			wantName: "state",
+			wantKey:  "finance",
+			wantJSON: true,
+		},
+		{
+			name:     "capabilities json",
+			args:     []string{"capabilities", "finance", "--json"},
+			wantName: "capabilities",
+			wantKey:  "finance",
+			wantJSON: true,
+		},
+	}
+
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			command, err := ParseCompanion(test.args)
+			if err != nil {
+				t.Fatalf("ParseCompanion() error = %v", err)
+			}
+			if command.Name != test.wantName {
+				t.Fatalf("Name = %q, want %q", command.Name, test.wantName)
+			}
+			if command.Key != test.wantKey {
+				t.Fatalf("Key = %q, want %q", command.Key, test.wantKey)
+			}
+			if command.JSON != test.wantJSON {
+				t.Fatalf("JSON = %t, want %t", command.JSON, test.wantJSON)
+			}
+		})
+	}
+}
+
 func TestParseCompanionRejectsUnsupportedKind(t *testing.T) {
 	t.Parallel()
 
 	if _, err := ParseCompanion([]string{"create", "--kind", "banana", "--key", "finance", "--title", "Finance Advisor"}); err == nil {
 		t.Fatal("ParseCompanion() error = nil, want unsupported kind error")
+	}
+}
+
+func TestParseCompanionRejectsUnsupportedSubcommand(t *testing.T) {
+	t.Parallel()
+
+	if _, err := ParseCompanion([]string{"delete", "finance"}); err == nil {
+		t.Fatal("ParseCompanion() error = nil, want unsupported subcommand error")
 	}
 }
