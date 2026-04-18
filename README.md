@@ -30,7 +30,7 @@ See `docs/contracts/ubiquitous-language.md` for the frozen vocabulary, `docs/con
 - Mutating work is isolated through task-owned worktrees and branches.
 - Self-heal is deterministic, bounded, and auditable; self-improvement is proposal-driven, replay-tested, promotion-gated, and reversible.
 - The root command surface includes `odin initiative`, `odin companion`, `odin profile`, `odin followup`, and `odin agenda` alongside the broader lifecycle commands.
-- Companion lifecycle commands are implemented today; companion execution and swarm inspection should continue to extend that same command family rather than introducing a second CLI.
+- Companion lifecycle and execution commands are implemented today through `odin companion create|list|get|state|capabilities|run`; swarm inspection continues to extend that same command family rather than introducing a second CLI.
 
 ## Canonical Documents
 
@@ -75,6 +75,19 @@ go run ./scripts/migrate/bootstrap_workspace -runtime-root /path/to/odin-root
 ```
 
 The helper is additive and idempotent. It bootstraps the default workspace and companion, reconciles managed-project initiatives, and binds legacy tasks into the workspace model without renaming the underlying `tasks` table.
+
+## Companion Workflow
+
+After bootstrap, use the existing `odin companion` command family as the only user-facing entrypoint for companion-owned work:
+
+- `odin companion get <key>` reads the durable companion row.
+- `odin companion capabilities <key> --json` shows the tool, memory, and planning policy that will constrain governed work.
+- `odin companion run <key> --objective "..."`
+  creates a normal queued work item owned by the workspace and companion. It does not create a second queue or an unmanaged worker path.
+- `odin companion state <key> --json` shows companion-owned work counts plus any active or blocked swarm state.
+- `odin status --json` and `odin agenda --json` remain the operator views for cross-companion work, approvals, blocked items, and supervised swarm visibility.
+
+If a companion-owned objective is decomposed, child work still runs through the same task, run, approval, and delegation records already used elsewhere in Odin OS.
 
 ## Contribution Workflow
 
