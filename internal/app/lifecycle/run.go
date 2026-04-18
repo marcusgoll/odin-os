@@ -651,9 +651,95 @@ func runCompanion(ctx context.Context, app bootstrap.App, args []string, stdout 
 			maxChildren,
 		)
 		return err
+	case "run":
+		resolved, err := companionRunScope(app)
+		if err != nil {
+			return err
+		}
+
+		companion, err := service.GetCompanionByKey(ctx, workspace.ID, command.Key)
+		if err != nil {
+			return err
+		}
+
+		task, err := jobs.Service{
+			Store:       app.Store,
+			Registry:    app.Registry,
+			Transitions: projects.Service{Store: app.Store},
+		}.CreateTaskFromCompanionRun(ctx, resolved, sqlite.Companion{
+			ID:                  companion.ID,
+			WorkspaceID:         companion.WorkspaceID,
+			Key:                 companion.Key,
+			Title:               companion.Title,
+			Kind:                string(companion.Kind),
+			Charter:             companion.Charter,
+			Status:              companion.Status,
+			InitiativeScopeJSON: companion.InitiativeScopeJSON,
+			ToolPolicyJSON:      companion.ToolPolicyJSON,
+			MemoryPolicyJSON:    companion.MemoryPolicyJSON,
+			PlanningPolicyJSON:  companion.PlanningPolicyJSON,
+			CreatedAt:           companion.CreatedAt,
+			UpdatedAt:           companion.UpdatedAt,
+		}, command.Objective, command.Trigger)
+		if err != nil {
+			return err
+		}
+
+		view := commands.CompanionRunView{
+			CompanionKey:          companion.Key,
+			Objective:             command.Objective,
+			RequestedSwarmTrigger: task.ActionKey,
+			Task: commands.TaskCreateView{
+				ID:     task.ID,
+				Key:    task.Key,
+				Status: task.Status,
+				Scope:  task.Scope,
+			},
+		}
+		if command.JSON {
+			return commands.WriteJSON(stdout, view)
+		}
+		if view.RequestedSwarmTrigger != "" {
+			_, err = fmt.Fprintf(stdout, "created companion task key=%s companion=%s status=%s scope=%s trigger=%s\n",
+				view.Task.Key,
+				view.CompanionKey,
+				view.Task.Status,
+				view.Task.Scope,
+				view.RequestedSwarmTrigger,
+			)
+			return err
+		}
+		_, err = fmt.Fprintf(stdout, "created companion task key=%s companion=%s status=%s scope=%s\n",
+			view.Task.Key,
+			view.CompanionKey,
+			view.Task.Status,
+			view.Task.Scope,
+		)
+		return err
 	default:
 		return fmt.Errorf("unsupported companion subcommand: %s", command.Name)
 	}
+}
+
+func companionRunScope(app bootstrap.App) (cliscope.Resolution, error) {
+	state, err := loadCLIState(app)
+	if err != nil {
+		return cliscope.Resolution{}, err
+	}
+	if state.Scope.Kind != cliscope.ScopeGlobal {
+		return state.Scope, nil
+	}
+
+	manifest, ok := app.Registry.SystemProject()
+	if !ok {
+		return cliscope.Resolution{}, fmt.Errorf("odin-core scope is required")
+	}
+	return cliscope.Resolve(cliscope.ResolveInput{
+		ExplicitTarget: &cliscope.Target{
+			ProjectKey:    manifest.Key,
+			SystemProject: manifest.SystemProject,
+		},
+	}), nil
 }
 
 func renderCompanionGetView(companion companions.Companion) commands.CompanionGetView {

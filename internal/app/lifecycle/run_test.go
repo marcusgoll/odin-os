@@ -348,6 +348,84 @@ func TestRunCompanionRejectsUnsupportedSubcommand(t *testing.T) {
 	}
 }
 
+func TestCompanionRunCreatesOwnedTaskInDefaultScope(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	root := testRepoRoot(t)
+	runtimeRoot := t.TempDir()
+
+	app, err := bootstrap.Load(ctx, root, runtimeRoot)
+	if err != nil {
+		t.Fatalf("bootstrap.Load() error = %v", err)
+	}
+	defer app.Store.Close()
+
+	if err := runCompanion(ctx, app, []string{"create", "--kind", "advisor", "--key", "finance", "--title", "Finance Advisor"}, &bytes.Buffer{}); err != nil {
+		t.Fatalf("runCompanion(create) error = %v", err)
+	}
+
+	var stdout bytes.Buffer
+	if err := runCompanion(ctx, app, []string{"run", "finance", "--objective", "review April budget", "--json"}, &stdout); err != nil {
+		t.Fatalf("runCompanion(run --json) error = %v\n%s", err, stdout.String())
+	}
+
+	var payload struct {
+		CompanionKey          string `json:"companion_key"`
+		Objective             string `json:"objective"`
+		RequestedSwarmTrigger string `json:"requested_swarm_trigger,omitempty"`
+		Task                  struct {
+			ID     int64  `json:"id"`
+			Key    string `json:"key"`
+			Status string `json:"status"`
+			Scope  string `json:"scope"`
+		} `json:"task"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("json.Unmarshal(runCompanion output) error = %v\n%s", err, stdout.String())
+	}
+	if payload.CompanionKey != "finance" {
+		t.Fatalf("CompanionKey = %q, want finance", payload.CompanionKey)
+	}
+	if payload.Objective != "review April budget" {
+		t.Fatalf("Objective = %q, want review April budget", payload.Objective)
+	}
+	if payload.RequestedSwarmTrigger != "" {
+		t.Fatalf("RequestedSwarmTrigger = %q, want empty", payload.RequestedSwarmTrigger)
+	}
+	if payload.Task.Status != "queued" {
+		t.Fatalf("Task.Status = %q, want queued", payload.Task.Status)
+	}
+
+	task, err := app.Store.GetTask(ctx, payload.Task.ID)
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
+	}
+	if task.CompanionID == nil {
+		t.Fatal("Task.CompanionID = nil, want companion ownership")
+	}
+	if task.RequestedBy != "companion" {
+		t.Fatalf("Task.RequestedBy = %q, want companion", task.RequestedBy)
+	}
+	if task.ActionKey != "" {
+		t.Fatalf("Task.ActionKey = %q, want empty without trigger", task.ActionKey)
+	}
+
+	project, err := app.Store.GetProjectByKey(ctx, "odin-core")
+	if err != nil {
+		t.Fatalf("GetProjectByKey(odin-core) error = %v", err)
+	}
+	if task.ProjectID != project.ID {
+		t.Fatalf("Task.ProjectID = %d, want odin-core project %d", task.ProjectID, project.ID)
+	}
+	if task.WorkspaceID == nil {
+		t.Fatal("Task.WorkspaceID = nil, want workspace ownership")
+	}
+	if task.InitiativeID == nil {
+		t.Fatal("Task.InitiativeID = nil, want initiative ownership")
+	}
+}
+
 func TestRunDoctorIgnoresInvalidOdinNowForNonAgendaCommands(t *testing.T) {
 	root := testRepoRoot(t)
 	t.Setenv("ODIN_NOW", "definitely-not-a-timestamp")

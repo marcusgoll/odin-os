@@ -127,6 +127,28 @@ func (service Service) List(ctx context.Context, resolved scope.Resolution) ([]p
 }
 
 func (service Service) CreateTaskFromAct(ctx context.Context, resolved scope.Resolution, title string) (sqlite.Task, error) {
+	return service.createManagedTask(ctx, resolved, title, createManagedTaskInput{
+		requestedBy:           "operator",
+		taskCompanionID:       0,
+		requestedSwarmTrigger: "",
+	})
+}
+
+func (service Service) CreateTaskFromCompanionRun(ctx context.Context, resolved scope.Resolution, companion sqlite.Companion, title string, requestedSwarmTrigger string) (sqlite.Task, error) {
+	return service.createManagedTask(ctx, resolved, title, createManagedTaskInput{
+		requestedBy:           "companion",
+		taskCompanionID:       companion.ID,
+		requestedSwarmTrigger: requestedSwarmTrigger,
+	})
+}
+
+type createManagedTaskInput struct {
+	requestedBy           string
+	taskCompanionID       int64
+	requestedSwarmTrigger string
+}
+
+func (service Service) createManagedTask(ctx context.Context, resolved scope.Resolution, title string, input createManagedTaskInput) (sqlite.Task, error) {
 	if resolved.Kind == scope.ScopeGlobal {
 		return sqlite.Task{}, fmt.Errorf("act mode requires a non-global scope")
 	}
@@ -149,11 +171,17 @@ func (service Service) CreateTaskFromAct(ctx context.Context, resolved scope.Res
 	if err != nil {
 		return sqlite.Task{}, err
 	}
-	companion, err := companions.Service{Store: service.Store}.GetCompanionByKey(ctx, workspace.ID, workspace.DefaultCompanionKey)
+	defaultCompanion, err := companions.Service{Store: service.Store}.GetCompanionByKey(ctx, workspace.ID, workspace.DefaultCompanionKey)
 	if err != nil {
 		return sqlite.Task{}, err
 	}
-	ownerCompanionID, err := service.initiativeOwnerCompanionID(ctx, workspace.ID, project.Key, companion.ID)
+
+	taskCompanionID := input.taskCompanionID
+	if taskCompanionID <= 0 {
+		taskCompanionID = defaultCompanion.ID
+	}
+
+	ownerCompanionID, err := service.initiativeOwnerCompanionID(ctx, workspace.ID, project.Key, defaultCompanion.ID)
 	if err != nil {
 		return sqlite.Task{}, err
 	}
@@ -167,21 +195,28 @@ func (service Service) CreateTaskFromAct(ctx context.Context, resolved scope.Res
 		now = service.Now().UTC()
 	}
 
-	taskCompanionID := initiative.OwnerCompanionID
-	workKind := taskScope
-
 	return service.Store.CreateTask(ctx, sqlite.CreateTaskParams{
 		ProjectID:    project.ID,
 		Key:          fmt.Sprintf("%s-%s", slugify(title), now.Format("20060102-150405")),
 		Title:        title,
+		ActionKey:    supportedSwarmTrigger(input.requestedSwarmTrigger),
 		Status:       "queued",
 		Scope:        taskScope,
-		RequestedBy:  "operator",
+		RequestedBy:  input.requestedBy,
 		WorkspaceID:  &workspace.ID,
 		InitiativeID: &initiative.ID,
-		CompanionID:  taskCompanionID,
-		WorkKind:     workKind,
+		CompanionID:  &taskCompanionID,
+		WorkKind:     taskScope,
 	})
+}
+
+func supportedSwarmTrigger(trigger string) string {
+	switch strings.ToLower(strings.TrimSpace(trigger)) {
+	case "parallel_research", "build_plus_review", "multi_artifact", "monitor_triage":
+		return strings.ToLower(strings.TrimSpace(trigger))
+	default:
+		return ""
+	}
 }
 
 func (service Service) ExecuteNextQueued(ctx context.Context) error {

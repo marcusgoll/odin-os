@@ -10,11 +10,13 @@ import (
 )
 
 type CompanionCommand struct {
-	Name  string
-	Kind  string
-	Key   string
-	Title string
-	JSON  bool
+	Name      string
+	Kind      string
+	Key       string
+	Title     string
+	Objective string
+	Trigger   string
+	JSON      bool
 }
 
 type CompanionView struct {
@@ -95,14 +97,21 @@ type CompanionListView struct {
 	Companions []CompanionView `json:"companions"`
 }
 
+type CompanionRunView struct {
+	CompanionKey          string         `json:"companion_key"`
+	Objective             string         `json:"objective"`
+	RequestedSwarmTrigger string         `json:"requested_swarm_trigger,omitempty"`
+	Task                  TaskCreateView `json:"task"`
+}
+
 func ParseCompanion(args []string) (CompanionCommand, error) {
 	if len(args) == 0 {
-		return CompanionCommand{}, fmt.Errorf("usage: odin companion <create|list> [--kind <kind>] [--key <key>] [--title <title>] [--json] | odin companion <get|state|capabilities> <key> [--json]")
+		return CompanionCommand{}, fmt.Errorf("usage: odin companion <create|list> [--kind <kind>] [--key <key>] [--title <title>] [--json] | odin companion <get|state|capabilities> <key> [--json] | odin companion run <key> --objective <objective> [--trigger <trigger>] [--json]")
 	}
 
 	command := CompanionCommand{Name: strings.ToLower(args[0])}
 	switch command.Name {
-	case "create", "list", "get", "state", "capabilities":
+	case "create", "list", "get", "state", "capabilities", "run":
 	default:
 		return CompanionCommand{}, fmt.Errorf("unsupported companion subcommand: %s", args[0])
 	}
@@ -128,6 +137,18 @@ func ParseCompanion(args []string) (CompanionCommand, error) {
 			}
 			index++
 			command.Title = strings.TrimSpace(args[index])
+		case "--objective":
+			if index+1 >= len(args) {
+				return CompanionCommand{}, fmt.Errorf("--objective requires a value")
+			}
+			index++
+			command.Objective = strings.TrimSpace(args[index])
+		case "--trigger":
+			if index+1 >= len(args) {
+				return CompanionCommand{}, fmt.Errorf("--trigger requires a value")
+			}
+			index++
+			command.Trigger = strings.ToLower(strings.TrimSpace(args[index]))
 		case "--json":
 			if command.JSON {
 				return CompanionCommand{}, fmt.Errorf("duplicate --json flag")
@@ -172,8 +193,8 @@ func ParseCompanion(args []string) (CompanionCommand, error) {
 		if command.Kind != "" {
 			return CompanionCommand{}, fmt.Errorf("--kind is only valid for companion create")
 		}
-		if command.Key != "" || command.Title != "" {
-			return CompanionCommand{}, fmt.Errorf("companion list does not accept --key or --title")
+		if command.Key != "" || command.Title != "" || command.Objective != "" || command.Trigger != "" {
+			return CompanionCommand{}, fmt.Errorf("companion list does not accept run or create flags")
 		}
 	case "get", "state", "capabilities":
 		if command.Kind != "" {
@@ -181,6 +202,19 @@ func ParseCompanion(args []string) (CompanionCommand, error) {
 		}
 		if command.Title != "" {
 			return CompanionCommand{}, fmt.Errorf("companion %s does not accept --title", command.Name)
+		}
+		if command.Objective != "" || command.Trigger != "" {
+			return CompanionCommand{}, fmt.Errorf("companion %s does not accept run flags", command.Name)
+		}
+	case "run":
+		if command.Kind != "" {
+			return CompanionCommand{}, fmt.Errorf("companion run does not accept --kind")
+		}
+		if command.Title != "" {
+			return CompanionCommand{}, fmt.Errorf("companion run does not accept --title")
+		}
+		if command.Objective == "" {
+			return CompanionCommand{}, fmt.Errorf("--objective is required")
 		}
 	}
 

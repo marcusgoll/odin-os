@@ -95,6 +95,38 @@ func TestParseCompanionReadCommands(t *testing.T) {
 	}
 }
 
+func TestParseCompanionRunJSON(t *testing.T) {
+	t.Parallel()
+
+	command, err := ParseCompanion([]string{"run", "finance", "--objective", "review April budget", "--trigger", "build_plus_review", "--json"})
+	if err != nil {
+		t.Fatalf("ParseCompanion() error = %v", err)
+	}
+	if command.Name != "run" {
+		t.Fatalf("Name = %q, want run", command.Name)
+	}
+	if command.Key != "finance" {
+		t.Fatalf("Key = %q, want finance", command.Key)
+	}
+	if command.Objective != "review April budget" {
+		t.Fatalf("Objective = %q, want review April budget", command.Objective)
+	}
+	if command.Trigger != "build_plus_review" {
+		t.Fatalf("Trigger = %q, want build_plus_review", command.Trigger)
+	}
+	if !command.JSON {
+		t.Fatal("JSON = false, want true")
+	}
+}
+
+func TestParseCompanionRunRejectsMissingObjective(t *testing.T) {
+	t.Parallel()
+
+	if _, err := ParseCompanion([]string{"run", "finance"}); err == nil {
+		t.Fatal("ParseCompanion() error = nil, want missing objective error")
+	}
+}
+
 func TestParseCompanionRejectsUnsupportedKind(t *testing.T) {
 	t.Parallel()
 
