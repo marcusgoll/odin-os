@@ -104,7 +104,7 @@ func AggregateConvergence(mode string, artifacts []sqlite.DelegationArtifact) (A
 	case "rank":
 		helper.applyRankConvergence(&aggregation, results)
 	case "quorum":
-		helper.applyQuorumConvergence(&aggregation, results)
+		helper.applyQuorumConvergence(&aggregation, results, len(results))
 	}
 
 	if aggregation.Status == "completed" && len(aggregation.UnresolvedRisks) > 0 {
@@ -152,6 +152,7 @@ func (service Service) AggregateSwarm(ctx context.Context, parentTaskID int64) (
 	if err != nil {
 		return AggregationResult{}, err
 	}
+	coverage := delegationCoverageSummary(delegations, results)
 
 	aggregation := AggregationResult{
 		ConvergenceMode:          mode,
@@ -162,11 +163,32 @@ func (service Service) AggregateSwarm(ctx context.Context, parentTaskID int64) (
 		ProposedMemoryCandidates: collectMemoryCandidates(results),
 	}
 
-	if mode != "review_gate" && len(results) < len(delegations) {
-		aggregation.Status = "blocked"
-		aggregation.TerminalReason = "swarm_results_pending"
-		aggregation.Summary = "Awaiting child result artifacts"
-	} else {
+	if mode == "merge" || mode == "rank" {
+		if coverage.coveredDelegations < coverage.expectedDelegations {
+			aggregation.Status = "blocked"
+			aggregation.TerminalReason = "swarm_results_pending"
+			aggregation.Summary = "Awaiting child result artifacts"
+		}
+	} else if mode == "review_gate" {
+		if coverage.coveredVerifierDelegations == 0 {
+			aggregation.Status = "blocked"
+			aggregation.TerminalReason = "swarm_review_gate_pending_verifier"
+			aggregation.Summary = "Swarm review gate is waiting for verifier output"
+		} else if coverage.coveredProducerDelegations < coverage.expectedProducerDelegations {
+			aggregation.Status = "blocked"
+			aggregation.TerminalReason = "swarm_results_pending"
+			aggregation.Summary = "Awaiting child result artifacts"
+		}
+	}
+	if mode == "quorum" {
+		switch {
+		case coverage.coveredDelegations == 0:
+			aggregation.Status = "blocked"
+			aggregation.TerminalReason = "swarm_results_pending"
+			aggregation.Summary = "Awaiting child result artifacts"
+		}
+	}
+	if strings.TrimSpace(aggregation.Status) == "" {
 		switch mode {
 		case "merge":
 			service.applyMergeConvergence(&aggregation, results)
@@ -175,7 +197,7 @@ func (service Service) AggregateSwarm(ctx context.Context, parentTaskID int64) (
 		case "rank":
 			service.applyRankConvergence(&aggregation, results)
 		case "quorum":
-			service.applyQuorumConvergence(&aggregation, results)
+			service.applyQuorumConvergence(&aggregation, results, coverage.expectedDelegations)
 		default:
 			return AggregationResult{}, fmt.Errorf("%w: %s", ErrUnsupportedConvergenceMode, mode)
 		}
@@ -224,18 +246,21 @@ func (service Service) loadDelegationResults(ctx context.Context, delegations []
 			return nil, err
 		}
 
-		for _, artifact := range artifacts {
-			envelope, err := decodeDelegationResultEnvelope(artifact.DetailsJSON)
-			if err != nil {
-				return nil, fmt.Errorf("decode delegation artifact %d: %w", artifact.ID, err)
-			}
-			results = append(results, delegationResult{
-				Delegation: delegation,
-				Artifact:   artifact,
-				Envelope:   envelope,
-				Confidence: confidenceScore(envelope.Confidence),
-			})
+		if len(artifacts) == 0 {
+			continue
 		}
+
+		artifact := artifacts[len(artifacts)-1]
+		envelope, err := decodeDelegationResultEnvelope(artifact.DetailsJSON)
+		if err != nil {
+			return nil, fmt.Errorf("decode delegation artifact %d: %w", artifact.ID, err)
+		}
+		results = append(results, delegationResult{
+			Delegation: delegation,
+			Artifact:   artifact,
+			Envelope:   envelope,
+			Confidence: confidenceScore(envelope.Confidence),
+		})
 	}
 	return results, nil
 }
@@ -333,7 +358,7 @@ func (service Service) applyRankConvergence(result *AggregationResult, outcomes 
 	result.Confidence = winner.Confidence
 }
 
-func (service Service) applyQuorumConvergence(result *AggregationResult, outcomes []delegationResult) {
+func (service Service) applyQuorumConvergence(result *AggregationResult, outcomes []delegationResult, expectedDelegations int) {
 	if len(outcomes) == 0 {
 		result.Status = "blocked"
 		result.TerminalReason = "swarm_results_pending"
@@ -341,7 +366,7 @@ func (service Service) applyQuorumConvergence(result *AggregationResult, outcome
 		return
 	}
 
-	threshold := len(outcomes)/2 + 1
+	threshold := expectedDelegations/2 + 1
 	type quorumBucket struct {
 		count  int
 		result delegationResult
@@ -442,6 +467,44 @@ func collectMemoryCandidates(outcomes []delegationResult) []string {
 		collected = append(collected, outcome.Envelope.ProposedMemoryCandidates...)
 	}
 	return uniqueNonEmptyStrings(collected)
+}
+
+type delegationCoverage struct {
+	expectedDelegations         int
+	coveredDelegations          int
+	expectedProducerDelegations int
+	coveredProducerDelegations  int
+	expectedVerifierDelegations int
+	coveredVerifierDelegations  int
+}
+
+func delegationCoverageSummary(delegations []sqlite.Delegation, outcomes []delegationResult) delegationCoverage {
+	coverage := delegationCoverage{
+		expectedDelegations: len(delegations),
+	}
+	outcomesByDelegation := make(map[int64]delegationResult, len(outcomes))
+	for _, outcome := range outcomes {
+		outcomesByDelegation[outcome.Delegation.ID] = outcome
+	}
+
+	for _, delegation := range delegations {
+		if isVerifierDelegation(delegation) {
+			coverage.expectedVerifierDelegations++
+		} else {
+			coverage.expectedProducerDelegations++
+		}
+		if _, ok := outcomesByDelegation[delegation.ID]; !ok {
+			continue
+		}
+		coverage.coveredDelegations++
+		if isVerifierDelegation(delegation) {
+			coverage.coveredVerifierDelegations++
+		} else {
+			coverage.coveredProducerDelegations++
+		}
+	}
+
+	return coverage
 }
 
 func isAggregationOutcomeArtifactType(artifactType string) bool {
