@@ -286,7 +286,7 @@ func TestRunCompanionCapabilitiesJSON(t *testing.T) {
 		UPDATE companions
 		SET tool_policy_json = ?, memory_policy_json = ?, planning_policy_json = ?
 		WHERE workspace_id = ? AND key = ?
-	`, `{"allow":["branch_proposal","repo_read"]}`, `{"mode":"initiative"}`, `{"swarm":{"max_children":2}}`, workspace.ID, "finance"); err != nil {
+	`, `{"allow":["branch_proposal","repo_read"]}`, `{"mode":"initiative"}`, `{"mode":"planning","swarm":{"max_children":2}}`, workspace.ID, "finance"); err != nil {
 		t.Fatalf("seed companion policy update error = %v", err)
 	}
 
@@ -304,6 +304,7 @@ func TestRunCompanionCapabilitiesJSON(t *testing.T) {
 			Mode string `json:"mode"`
 		} `json:"memory_policy"`
 		PlanningPolicy struct {
+			Mode  string `json:"mode"`
 			Swarm struct {
 				MaxChildren int `json:"max_children"`
 			} `json:"swarm"`
@@ -320,6 +321,9 @@ func TestRunCompanionCapabilitiesJSON(t *testing.T) {
 	}
 	if payload.MemoryPolicy.Mode != "initiative" {
 		t.Fatalf("MemoryPolicy.Mode = %q, want initiative", payload.MemoryPolicy.Mode)
+	}
+	if payload.PlanningPolicy.Mode != "planning" {
+		t.Fatalf("PlanningPolicy.Mode = %q, want planning", payload.PlanningPolicy.Mode)
 	}
 	if payload.PlanningPolicy.Swarm.MaxChildren != 2 {
 		t.Fatalf("PlanningPolicy.Swarm.MaxChildren = %d, want 2", payload.PlanningPolicy.Swarm.MaxChildren)

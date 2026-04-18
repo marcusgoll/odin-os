@@ -72,6 +72,7 @@ type CompanionMemoryPolicyView struct {
 }
 
 type CompanionPlanningPolicyView struct {
+	Mode  string                      `json:"mode,omitempty"`
 	Swarm *CompanionPlanningSwarmView `json:"swarm,omitempty"`
 }
 
@@ -96,7 +97,7 @@ type CompanionListView struct {
 
 func ParseCompanion(args []string) (CompanionCommand, error) {
 	if len(args) == 0 {
-		return CompanionCommand{}, fmt.Errorf("usage: odin companion <create|list|get|state|capabilities> [--kind <kind>] [--key <key>] [--title <title>] [--json]")
+		return CompanionCommand{}, fmt.Errorf("usage: odin companion <create|list> [--kind <kind>] [--key <key>] [--title <title>] [--json] | odin companion <get|state|capabilities> <key> [--json]")
 	}
 
 	command := CompanionCommand{Name: strings.ToLower(args[0])}

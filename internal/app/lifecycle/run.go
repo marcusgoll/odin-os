@@ -736,6 +736,7 @@ func renderCompanionCapabilitiesView(companion companions.Companion) commands.Co
 			Mode: parseMemoryPolicyMode(companion.MemoryPolicyJSON),
 		},
 		PlanningPolicy: commands.CompanionPlanningPolicyView{
+			Mode:  parsePlanningPolicyMode(companion.PlanningPolicyJSON),
 			Swarm: parsePlanningPolicySwarm(companion.PlanningPolicyJSON),
 		},
 	}
@@ -793,8 +794,29 @@ func parseMemoryPolicyMode(raw string) string {
 	return policy.Mode
 }
 
+func parsePlanningPolicyMode(raw string) string {
+	type planningPolicy struct {
+		Mode  string `json:"mode"`
+		Swarm struct {
+			MaxChildren int `json:"max_children"`
+		} `json:"swarm"`
+	}
+
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" || trimmed == "{}" {
+		return ""
+	}
+
+	var policy planningPolicy
+	if err := json.Unmarshal([]byte(trimmed), &policy); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(policy.Mode)
+}
+
 func parsePlanningPolicySwarm(raw string) *commands.CompanionPlanningSwarmView {
 	type planningPolicy struct {
+		Mode  string `json:"mode"`
 		Swarm struct {
 			MaxChildren int `json:"max_children"`
 		} `json:"swarm"`

@@ -340,7 +340,7 @@ projects:
 			UPDATE companions
 			SET tool_policy_json = ?, memory_policy_json = ?, planning_policy_json = ?
 			WHERE workspace_id = ? AND key = ?
-		`, `{"allow":["branch_proposal","repo_read"]}`, `{"mode":"initiative"}`, `{"swarm":{"max_children":2}}`, workspace.ID, "finance"); err != nil {
+		`, `{"allow":["branch_proposal","repo_read"]}`, `{"mode":"initiative"}`, `{"mode":"planning","swarm":{"max_children":2}}`, workspace.ID, "finance"); err != nil {
 			t.Fatalf("seed companion policy update error = %v", err)
 		}
 
@@ -388,6 +388,7 @@ projects:
 				Mode string `json:"mode"`
 			} `json:"memory_policy"`
 			PlanningPolicy struct {
+				Mode  string `json:"mode"`
 				Swarm struct {
 					MaxChildren int `json:"max_children"`
 				} `json:"swarm"`
@@ -404,6 +405,9 @@ projects:
 		}
 		if capabilities.MemoryPolicy.Mode != "initiative" {
 			t.Fatalf("companion capabilities memory policy = %q, want initiative", capabilities.MemoryPolicy.Mode)
+		}
+		if capabilities.PlanningPolicy.Mode != "planning" {
+			t.Fatalf("companion capabilities planning mode = %q, want planning", capabilities.PlanningPolicy.Mode)
 		}
 		if capabilities.PlanningPolicy.Swarm.MaxChildren != 2 {
 			t.Fatalf("companion capabilities planning policy = %+v, want max_children=2", capabilities.PlanningPolicy)
