@@ -1809,16 +1809,18 @@ func runServe(ctx context.Context, app bootstrap.App, cfg appconfig.Config, stdo
 	}
 	followUpService := followups.Service{Store: app.Store, Now: now}
 	recoveryService := recovery.Service{
-		Store:           app.Store,
-		RegistryRoot:    filepath.Join(app.RepoRoot, "registry"),
-		ExecutorCatalog: app.Executors,
-		HealthConfig:    healthsvc.DefaultConfig(),
-		Logger:          logger,
+		Store:             app.Store,
+		RegistryRoot:      filepath.Join(app.RepoRoot, "registry"),
+		ExecutorCatalog:   app.Executors,
+		HealthConfig:      healthsvc.DefaultConfig(),
+		Logger:            logger,
+		ShutdownRequested: &shutdownRequested,
 	}
 	mediaService := newMediaService(app, cfg)
 	schedulerService := supervision.Service{
-		Store: app.Store,
-		Now:   time.Now,
+		Store:             app.Store,
+		Now:               now,
+		ShutdownRequested: &shutdownRequested,
 	}
 	leaseService := leases.Maintenance{
 		Store: app.Store,
@@ -2038,7 +2040,7 @@ func runSchedulerLoop(ctx context.Context, operationCtx context.Context, wg *syn
 		case <-ticker.C:
 			if result, err := service.Tick(operationCtx); err != nil {
 				logBackgroundError(logger, "scheduler", err)
-			} else if result.Promoted > 0 && logger != nil {
+			} else if (result.Promoted > 0 || result.Reconciled > 0) && logger != nil {
 				for promoted := 0; promoted < result.Promoted; promoted++ {
 					select {
 					case nudges <- struct{}{}:
@@ -2052,7 +2054,8 @@ func runSchedulerLoop(ctx context.Context, operationCtx context.Context, wg *syn
 					CorrelationID: "scheduler",
 					Scope:         "global",
 					Fields: map[string]any{
-						"promoted": result.Promoted,
+						"promoted":   result.Promoted,
+						"reconciled": result.Reconciled,
 					},
 				})
 			}

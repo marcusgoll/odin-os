@@ -1135,6 +1135,75 @@ func TestAlphaAcceptance(t *testing.T) {
 			t.Fatalf("agenda budget swarm blocked_reason = %q, want budget_exhausted", agendaByTaskKey["alpha-budget-swarm"].BlockedReason)
 		}
 	})
+
+	t.Run("scheduler reconciliation applies swarm stop conditions to child work", func(t *testing.T) {
+		runtimeRoot := t.TempDir()
+		store := openRuntimeStore(t, runtimeRoot)
+		store.Now = func() time.Time { return now }
+		seedAlphaAcceptanceCompanionSwarms(t, ctx, store, now)
+		defer store.Close()
+
+		scheduler := supervisionsvc.Service{
+			Store: store,
+			Jobs:  jobsvc.Service{Store: store, Now: func() time.Time { return now }},
+			Now:   func() time.Time { return now },
+		}
+		result, err := scheduler.Tick(ctx)
+		if err != nil {
+			t.Fatalf("Tick() error = %v", err)
+		}
+		if result.Reconciled < 2 {
+			t.Fatalf("Tick().Reconciled = %d, want at least 2 stop-condition updates", result.Reconciled)
+		}
+
+		lookupTaskID := func(taskKey string) int64 {
+			t.Helper()
+			var taskID int64
+			if err := store.DB().QueryRowContext(ctx, `SELECT id FROM tasks WHERE key = ?`, taskKey).Scan(&taskID); err != nil {
+				t.Fatalf("lookup task %s error = %v", taskKey, err)
+			}
+			return taskID
+		}
+
+		assertDelegatedChildren := func(parentTaskKey, wantStatus, wantReason string) {
+			t.Helper()
+			parentTaskID := lookupTaskID(parentTaskKey)
+			delegations, err := store.ListDelegations(ctx, sqlite.ListDelegationsParams{
+				ParentTaskID: &parentTaskID,
+			})
+			if err != nil {
+				t.Fatalf("ListDelegations(%s) error = %v", parentTaskKey, err)
+			}
+			if len(delegations) == 0 {
+				t.Fatalf("delegations for %s = 0, want child work", parentTaskKey)
+			}
+			for _, delegation := range delegations {
+				if delegation.ChildTaskID == nil {
+					t.Fatalf("delegation %d child_task_id = nil, want child task", delegation.ID)
+				}
+				childTask, err := store.GetTask(ctx, *delegation.ChildTaskID)
+				if err != nil {
+					t.Fatalf("GetTask(child %d) error = %v", *delegation.ChildTaskID, err)
+				}
+				if childTask.Status != wantStatus {
+					t.Fatalf("%s child task %d status = %q, want %q", parentTaskKey, childTask.ID, childTask.Status, wantStatus)
+				}
+				switch wantStatus {
+				case "blocked":
+					if childTask.BlockedReason != wantReason {
+						t.Fatalf("%s child task %d blocked_reason = %q, want %q", parentTaskKey, childTask.ID, childTask.BlockedReason, wantReason)
+					}
+				case "failed":
+					if childTask.TerminalReason != wantReason {
+						t.Fatalf("%s child task %d terminal_reason = %q, want %q", parentTaskKey, childTask.ID, childTask.TerminalReason, wantReason)
+					}
+				}
+			}
+		}
+
+		assertDelegatedChildren("alpha-approval-swarm", "blocked", "approval_required")
+		assertDelegatedChildren("alpha-budget-swarm", "failed", "swarm_budget_exhausted")
+	})
 }
 
 func seedAlphaAcceptanceCompanionSwarms(t *testing.T, ctx context.Context, store *sqlite.Store, now time.Time) {

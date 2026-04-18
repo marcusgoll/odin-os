@@ -3,6 +3,7 @@ package recovery
 import (
 	"context"
 	"fmt"
+	"sync/atomic"
 	"time"
 
 	"odin-os/internal/core/workitems"
@@ -13,16 +14,17 @@ import (
 )
 
 type Service struct {
-	Store           *sqlite.Store
-	RegistryRoot    string
-	ExecutorCatalog map[string]contract.Executor
-	HealthConfig    health.Config
-	Logger          *logs.Logger
-	Monitor         Monitor
-	Diagnoser       Diagnoser
-	Executor        Executor
-	WorkItems       workitems.Service
-	Now             func() time.Time
+	Store             *sqlite.Store
+	RegistryRoot      string
+	ExecutorCatalog   map[string]contract.Executor
+	HealthConfig      health.Config
+	Logger            *logs.Logger
+	Monitor           Monitor
+	Diagnoser         Diagnoser
+	Executor          Executor
+	WorkItems         workitems.Service
+	Now               func() time.Time
+	ShutdownRequested *atomic.Bool
 }
 
 type CycleResult struct {
@@ -32,6 +34,9 @@ type CycleResult struct {
 }
 
 func (service Service) RunCycle(ctx context.Context) (CycleResult, error) {
+	if service.ShutdownRequested != nil && service.ShutdownRequested.Load() {
+		return CycleResult{}, nil
+	}
 	if service.Store == nil {
 		return CycleResult{}, fmt.Errorf("self-heal store is required")
 	}
