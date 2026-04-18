@@ -15,8 +15,8 @@ import (
 	"time"
 
 	httpapi "odin-os/internal/api/http"
-	coremedia "odin-os/internal/core/media"
 	"odin-os/internal/core/initiatives"
+	coremedia "odin-os/internal/core/media"
 	"odin-os/internal/core/workspaces"
 	healthsvc "odin-os/internal/runtime/health"
 	"odin-os/internal/runtime/projections"
@@ -281,6 +281,24 @@ func TestOperationalHandlerExposesAgendaReadModel(t *testing.T) {
 	}
 	if len(agenda.Approvals) != 1 || agenda.Approvals[0].TaskKey != "alpha-task" {
 		t.Fatalf("/agenda approvals = %+v, want alpha-task approval", agenda.Approvals)
+	}
+	if len(agenda.CompanionSwarms) != 3 {
+		t.Fatalf("/agenda companion swarms = %+v, want 3 entries", agenda.CompanionSwarms)
+	}
+	var hasApprovalBlocked, hasBudgetBlocked bool
+	for _, swarm := range agenda.CompanionSwarms {
+		switch swarm.BlockedReason {
+		case "approval_required":
+			hasApprovalBlocked = true
+		case "budget_exhausted":
+			hasBudgetBlocked = true
+		}
+	}
+	if !hasApprovalBlocked {
+		t.Fatalf("/agenda companion swarms = %+v, want approval-blocked swarm", agenda.CompanionSwarms)
+	}
+	if !hasBudgetBlocked {
+		t.Fatalf("/agenda companion swarms = %+v, want budget-blocked swarm", agenda.CompanionSwarms)
 	}
 }
 
@@ -573,6 +591,183 @@ func seedAgendaReadModels(t *testing.T, ctx context.Context, store *sqlite.Store
 		PayloadJSON:   fmt.Sprintf(`{"task_id":%d,"task_key":"%s","scope":"project","objective":"Resume wake work","status":"waiting","trigger":"follow_up_wait","blocking_reason":"waiting on supporting context"}`, wakeTask.ID, wakeTask.Key),
 	}); err != nil {
 		t.Fatalf("CreateContextPacket() error = %v", err)
+	}
+
+	activeSwarmTask, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:    project.ID,
+		Key:          "alpha-swarm-active",
+		Title:        "Active companion swarm",
+		Status:       "running",
+		Scope:        "project",
+		RequestedBy:  "operator",
+		WorkspaceID:  &workspace.ID,
+		InitiativeID: &initiative.ID,
+		CompanionID:  &companion.ID,
+		WorkKind:     "delivery",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask(alpha-swarm-active) error = %v", err)
+	}
+	activeDelegation, err := store.CreateDelegation(ctx, sqlite.CreateDelegationParams{
+		ParentTaskID:    activeSwarmTask.ID,
+		ProjectID:       project.ID,
+		Scope:           activeSwarmTask.Scope,
+		DelegationKey:   "alpha-swarm-active-child",
+		Role:            "builder",
+		ActionClass:     "mutation",
+		ActionKey:       "implement",
+		MutationMode:    "read_only",
+		Status:          "queued",
+		ConvergenceMode: "merge",
+		ArtifactTarget:  "branch",
+		Executor:        "codex",
+		DetailsJSON:     `{"objective":"active swarm","swarm":{"requested_budget":2,"max_children":2}}`,
+	})
+	if err != nil {
+		t.Fatalf("CreateDelegation(active swarm) error = %v", err)
+	}
+	activeChild, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "alpha-swarm-active-child",
+		Title:       "Active child task",
+		Status:      "running",
+		Scope:       "project",
+		RequestedBy: "supervisor",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask(alpha-swarm-active-child) error = %v", err)
+	}
+	activeRun, err := store.StartRun(ctx, sqlite.StartRunParams{
+		TaskID:     activeChild.ID,
+		Executor:   "codex",
+		Attempt:    1,
+		Status:     "running",
+		TaskStatus: "running",
+	})
+	if err != nil {
+		t.Fatalf("StartRun(alpha-swarm-active-child) error = %v", err)
+	}
+	if _, err := store.AttachDelegationChildTask(ctx, sqlite.AttachDelegationChildTaskParams{
+		DelegationID: activeDelegation.ID,
+		ChildTaskID:  activeChild.ID,
+		ChildRunID:   &activeRun.ID,
+	}); err != nil {
+		t.Fatalf("AttachDelegationChildTask(alpha-swarm-active) error = %v", err)
+	}
+
+	approvalSwarmTask, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:    project.ID,
+		Key:          "alpha-swarm-approval",
+		Title:        "Approval blocked swarm",
+		Status:       "running",
+		Scope:        "project",
+		RequestedBy:  "operator",
+		WorkspaceID:  &workspace.ID,
+		InitiativeID: &initiative.ID,
+		CompanionID:  &companion.ID,
+		WorkKind:     "delivery",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask(alpha-swarm-approval) error = %v", err)
+	}
+	approvalDelegation, err := store.CreateDelegation(ctx, sqlite.CreateDelegationParams{
+		ParentTaskID:    approvalSwarmTask.ID,
+		ProjectID:       project.ID,
+		Scope:           approvalSwarmTask.Scope,
+		DelegationKey:   "alpha-swarm-approval-child",
+		Role:            "builder",
+		ActionClass:     "mutation",
+		ActionKey:       "implement",
+		MutationMode:    "read_only",
+		Status:          "queued",
+		ConvergenceMode: "review_gate",
+		ArtifactTarget:  "branch",
+		Executor:        "codex",
+		DetailsJSON:     `{"objective":"approval blocked","swarm":{"requested_budget":1,"max_children":1}}`,
+	})
+	if err != nil {
+		t.Fatalf("CreateDelegation(alpha-swarm-approval) error = %v", err)
+	}
+	approvalChild, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "alpha-swarm-approval-child",
+		Title:       "Approval child task",
+		Status:      "running",
+		Scope:       "project",
+		RequestedBy: "supervisor",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask(alpha-swarm-approval-child) error = %v", err)
+	}
+	if _, _, err := store.BlockTaskAndRequestApproval(ctx, sqlite.BlockTaskAndRequestApprovalParams{
+		TaskID:      approvalChild.ID,
+		RunID:       nil,
+		RequestedBy: "system",
+	}); err != nil {
+		t.Fatalf("BlockTaskAndRequestApproval(alpha-swarm-approval-child) error = %v", err)
+	}
+	if _, err := store.AttachDelegationChildTask(ctx, sqlite.AttachDelegationChildTaskParams{
+		DelegationID: approvalDelegation.ID,
+		ChildTaskID:  approvalChild.ID,
+	}); err != nil {
+		t.Fatalf("AttachDelegationChildTask(alpha-swarm-approval) error = %v", err)
+	}
+
+	budgetSwarmTask, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:    project.ID,
+		Key:          "alpha-swarm-budget",
+		Title:        "Budget blocked swarm",
+		Status:       "blocked",
+		Scope:        "project",
+		RequestedBy:  "operator",
+		WorkspaceID:  &workspace.ID,
+		InitiativeID: &initiative.ID,
+		CompanionID:  &companion.ID,
+		WorkKind:     "delivery",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask(alpha-swarm-budget) error = %v", err)
+	}
+	if _, err := store.BlockTask(ctx, sqlite.BlockTaskParams{
+		TaskID: budgetSwarmTask.ID,
+		Reason: "budget_exhausted",
+	}); err != nil {
+		t.Fatalf("BlockTask(alpha-swarm-budget) error = %v", err)
+	}
+	budgetDelegation, err := store.CreateDelegation(ctx, sqlite.CreateDelegationParams{
+		ParentTaskID:    budgetSwarmTask.ID,
+		ProjectID:       project.ID,
+		Scope:           budgetSwarmTask.Scope,
+		DelegationKey:   "alpha-swarm-budget-child",
+		Role:            "reviewer",
+		ActionClass:     "analysis",
+		ActionKey:       "review",
+		MutationMode:    "read_only",
+		Status:          "queued",
+		ConvergenceMode: "merge",
+		ArtifactTarget:  "report",
+		Executor:        "codex",
+		DetailsJSON:     `{"objective":"budget blocked","swarm":{"requested_budget":3,"max_children":1}}`,
+	})
+	if err != nil {
+		t.Fatalf("CreateDelegation(alpha-swarm-budget) error = %v", err)
+	}
+	budgetChild, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "alpha-swarm-budget-child",
+		Title:       "Budget child task",
+		Status:      "queued",
+		Scope:       "project",
+		RequestedBy: "supervisor",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask(alpha-swarm-budget-child) error = %v", err)
+	}
+	if _, err := store.AttachDelegationChildTask(ctx, sqlite.AttachDelegationChildTaskParams{
+		DelegationID: budgetDelegation.ID,
+		ChildTaskID:  budgetChild.ID,
+	}); err != nil {
+		t.Fatalf("AttachDelegationChildTask(alpha-swarm-budget) error = %v", err)
 	}
 }
 

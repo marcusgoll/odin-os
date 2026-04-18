@@ -786,6 +786,19 @@ func runStatus(ctx context.Context, app bootstrap.App, cfg appconfig.Config, arg
 	}
 
 	if jsonOutput {
+		companionSwarmCounts := struct {
+			Active  int `json:"active"`
+			Blocked int `json:"blocked"`
+			Backlog int `json:"backlog"`
+		}{}
+		for _, swarm := range snapshot.CompanionSwarms {
+			if strings.EqualFold(swarm.Status, "blocked") {
+				companionSwarmCounts.Blocked++
+			} else if swarm.BacklogCount > 0 || swarm.BudgetBacklogCount > 0 {
+				companionSwarmCounts.Active++
+			}
+			companionSwarmCounts.Backlog += swarm.BacklogCount + swarm.BudgetBacklogCount
+		}
 		encoder := json.NewEncoder(stdout)
 		encoder.SetIndent("", "  ")
 		return encoder.Encode(map[string]any{
@@ -798,15 +811,19 @@ func runStatus(ctx context.Context, app bootstrap.App, cfg appconfig.Config, arg
 			"active_runs":                  snapshot.ActiveRuns,
 			"project_transitions":          snapshot.ProjectTransitions,
 			"project_transition_ownership": snapshot.ProjectTransitionOwnership,
+			"companion_swarm_counts":       companionSwarmCounts,
+			"companion_swarms":             snapshot.CompanionSwarms,
 		})
 	}
 
-	_, err = fmt.Fprintf(stdout, "health=%s pending_approvals=%d stalled_runs=%d active_runs=%d project_transitions=%d registry_healthy=%t\n",
+	companionSwarmCount := len(snapshot.CompanionSwarms)
+	_, err = fmt.Fprintf(stdout, "health=%s pending_approvals=%d stalled_runs=%d active_runs=%d project_transitions=%d companion_swarms=%d registry_healthy=%t\n",
 		summary.Status,
 		len(snapshot.ApprovalsWaiting),
 		len(snapshot.StalledRuns),
 		len(snapshot.ActiveRuns),
 		len(snapshot.ProjectTransitions),
+		companionSwarmCount,
 		summary.RegistryHealthy,
 	)
 	return err
