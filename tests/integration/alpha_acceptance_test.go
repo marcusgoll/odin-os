@@ -1077,11 +1077,11 @@ func TestAlphaAcceptance(t *testing.T) {
 		if err := json.Unmarshal([]byte(statusOutput), &statusReport); err != nil {
 			t.Fatalf("json.Unmarshal(status output) error = %v\n%s", err, statusOutput)
 		}
-		if len(statusReport.CompanionSwarms) != 3 {
-			t.Fatalf("status companion_swarms len = %d, want 3", len(statusReport.CompanionSwarms))
+		if len(statusReport.CompanionSwarms) != 4 {
+			t.Fatalf("status companion_swarms len = %d, want 4", len(statusReport.CompanionSwarms))
 		}
-		if statusReport.CompanionSwarmCounts.Active != 1 || statusReport.CompanionSwarmCounts.Blocked != 2 || statusReport.CompanionSwarmCounts.Backlog != 7 {
-			t.Fatalf("status companion_swarm_counts = %+v, want active=1 blocked=2 backlog=7", statusReport.CompanionSwarmCounts)
+		if statusReport.CompanionSwarmCounts.Active != 2 || statusReport.CompanionSwarmCounts.Blocked != 2 || statusReport.CompanionSwarmCounts.Backlog != 7 {
+			t.Fatalf("status companion_swarm_counts = %+v, want active=2 blocked=2 backlog=7", statusReport.CompanionSwarmCounts)
 		}
 
 		gotByTaskKey := make(map[string]projections.CompanionSwarmView, len(statusReport.CompanionSwarms))
@@ -1090,6 +1090,12 @@ func TestAlphaAcceptance(t *testing.T) {
 		}
 		if gotByTaskKey["alpha-active-swarm"].Status != "queued" {
 			t.Fatalf("active swarm status = %q, want queued", gotByTaskKey["alpha-active-swarm"].Status)
+		}
+		if gotByTaskKey["alpha-completed-running-swarm"].Status != "running" {
+			t.Fatalf("completed-running swarm status = %q, want running", gotByTaskKey["alpha-completed-running-swarm"].Status)
+		}
+		if gotByTaskKey["alpha-completed-running-swarm"].ActiveChildRunCount != 1 {
+			t.Fatalf("completed-running swarm active_child_run_count = %d, want 1", gotByTaskKey["alpha-completed-running-swarm"].ActiveChildRunCount)
 		}
 		if gotByTaskKey["alpha-approval-swarm"].BlockedReason != "approval_required" {
 			t.Fatalf("approval swarm blocked_reason = %q, want approval_required", gotByTaskKey["alpha-approval-swarm"].BlockedReason)
@@ -1109,8 +1115,8 @@ func TestAlphaAcceptance(t *testing.T) {
 		if err := json.Unmarshal([]byte(agendaOutput), &agenda); err != nil {
 			t.Fatalf("json.Unmarshal(agenda output) error = %v\n%s", err, agendaOutput)
 		}
-		if len(agenda.CompanionSwarms) != 3 {
-			t.Fatalf("agenda companion_swarms len = %d, want 3", len(agenda.CompanionSwarms))
+		if len(agenda.CompanionSwarms) != 4 {
+			t.Fatalf("agenda companion_swarms len = %d, want 4", len(agenda.CompanionSwarms))
 		}
 		agendaByTaskKey := make(map[string]projections.CompanionSwarmView, len(agenda.CompanionSwarms))
 		for _, swarm := range agenda.CompanionSwarms {
@@ -1118,6 +1124,9 @@ func TestAlphaAcceptance(t *testing.T) {
 		}
 		if agendaByTaskKey["alpha-active-swarm"].Status != "queued" {
 			t.Fatalf("agenda active swarm status = %q, want queued", agendaByTaskKey["alpha-active-swarm"].Status)
+		}
+		if agendaByTaskKey["alpha-completed-running-swarm"].Status != "running" {
+			t.Fatalf("agenda completed-running swarm status = %q, want running", agendaByTaskKey["alpha-completed-running-swarm"].Status)
 		}
 		if agendaByTaskKey["alpha-approval-swarm"].BlockedReason != "approval_required" {
 			t.Fatalf("agenda approval swarm blocked_reason = %q, want approval_required", agendaByTaskKey["alpha-approval-swarm"].BlockedReason)
@@ -1234,6 +1243,44 @@ func seedAlphaAcceptanceCompanionSwarms(t *testing.T, ctx context.Context, store
 	}
 
 	planAndMaterialize(createParentTask("alpha-active-swarm"), 2)
+
+	completedRunningParent := createParentTask("alpha-completed-running-swarm")
+	completedRunning, err := swarmService.PlanSwarm(ctx, supervisionsvc.PlanSwarmParams{
+		ParentTaskID:    completedRunningParent.ID,
+		Trigger:         supervisionsvc.TriggerBuildPlusReview,
+		ConvergenceMode: "review_gate",
+		RequestedBudget: 2,
+		DelegationPlans: createDelegationPlans(),
+	})
+	if err != nil {
+		t.Fatalf("PlanSwarm(alpha-completed-running-swarm) error = %v", err)
+	}
+	materializedCompletedRunning, err := swarmService.MaterializeSwarm(ctx, completedRunning)
+	if err != nil {
+		t.Fatalf("MaterializeSwarm(alpha-completed-running-swarm) error = %v", err)
+	}
+	if len(materializedCompletedRunning.Tasks) == 0 {
+		t.Fatal("MaterializeSwarm(alpha-completed-running-swarm) returned no child tasks")
+	}
+	if _, err := store.StartRun(ctx, sqlite.StartRunParams{
+		TaskID:     materializedCompletedRunning.Tasks[0].ID,
+		Executor:   "codex",
+		Attempt:    1,
+		Status:     "running",
+		TaskStatus: "running",
+	}); err != nil {
+		t.Fatalf("StartRun(alpha-completed-running-swarm) error = %v", err)
+	}
+	for _, delegation := range materializedCompletedRunning.Delegations {
+		if _, err := store.CreateDelegationArtifact(ctx, sqlite.CreateDelegationArtifactParams{
+			DelegationID: delegation.ID,
+			ArtifactType: "result",
+			Summary:      "Completed while child run is active",
+			DetailsJSON:  `{"status":"completed","confidence":0.9,"evidence_refs":["alpha/completed-running"],"unresolved_risks":[],"proposed_next_actions":[],"proposed_memory_candidates":[]}`,
+		}); err != nil {
+			t.Fatalf("CreateDelegationArtifact(alpha-completed-running-swarm) error = %v", err)
+		}
+	}
 
 	approvalParent := createParentTask("alpha-approval-swarm")
 	planAndMaterialize(approvalParent, 2)

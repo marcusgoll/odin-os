@@ -794,7 +794,7 @@ func runStatus(ctx context.Context, app bootstrap.App, cfg appconfig.Config, arg
 		for _, swarm := range snapshot.CompanionSwarms {
 			if strings.EqualFold(swarm.Status, "blocked") {
 				companionSwarmCounts.Blocked++
-			} else if swarm.BacklogCount > 0 || swarm.BudgetBacklogCount > 0 {
+			} else if strings.EqualFold(swarm.Status, "running") || swarm.ActiveChildRunCount > 0 || swarm.BacklogCount > 0 || swarm.BudgetBacklogCount > 0 {
 				companionSwarmCounts.Active++
 			}
 			companionSwarmCounts.Backlog += swarm.BacklogCount + swarm.BudgetBacklogCount

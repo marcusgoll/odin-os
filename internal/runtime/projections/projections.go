@@ -100,6 +100,13 @@ type CompanionSwarmView struct {
 	BudgetBacklogCount       int     `json:"budget_backlog_count"`
 }
 
+type swarmContractDetails struct {
+	Swarm struct {
+		RequestedBudget int    `json:"requested_budget"`
+		ConvergenceMode string `json:"convergence_mode"`
+	} `json:"swarm"`
+}
+
 type ProjectTransitionView struct {
 	ProjectID       int64
 	ProjectKey      string
@@ -643,18 +650,11 @@ func ListCompanionSwarmViews(ctx context.Context, queryer Queryer, workspaceKey 
 	}
 	defer rows.Close()
 
-	type swarmDetails struct {
-		Swarm struct {
-			RequestedBudget int    `json:"requested_budget"`
-			ConvergenceMode string `json:"convergence_mode"`
-		} `json:"swarm"`
-	}
-
 	type swarmAccumulator struct {
-		view                  CompanionSwarmView
-		seen                  bool
-		childBlockedReason    string
-		requestedBudgetLoaded bool
+		view               CompanionSwarmView
+		seen               bool
+		childBlockedReason string
+		metadataLoaded     bool
 	}
 
 	byParentTaskID := make(map[int64]*swarmAccumulator)
@@ -735,15 +735,12 @@ func ListCompanionSwarmViews(ctx context.Context, queryer Queryer, workspaceKey 
 		if strings.TrimSpace(parentBlockedReason) == "" && strings.EqualFold(childTaskStatus, "blocked") && acc.childBlockedReason == "" {
 			acc.childBlockedReason = "approval_required"
 		}
-		if strings.TrimSpace(detailsJSON) != "" && !acc.requestedBudgetLoaded {
-			var decoded swarmDetails
-			if err := json.Unmarshal([]byte(detailsJSON), &decoded); err == nil {
-				acc.view.RequestedBudget = decoded.Swarm.RequestedBudget
-				if strings.TrimSpace(decoded.Swarm.ConvergenceMode) != "" {
-					acc.view.ConvergenceMode = decoded.Swarm.ConvergenceMode
-				}
+		if !acc.metadataLoaded {
+			if requestedBudget, convergenceMode, ok := parseSwarmContractMetadata(detailsJSON); ok {
+				acc.view.RequestedBudget = requestedBudget
+				acc.view.ConvergenceMode = convergenceMode
+				acc.metadataLoaded = true
 			}
-			acc.requestedBudgetLoaded = true
 		}
 	}
 	if err := rows.Err(); err != nil {
@@ -768,12 +765,13 @@ func ListCompanionSwarmViews(ctx context.Context, queryer Queryer, workspaceKey 
 		}
 		if strings.TrimSpace(acc.view.BlockedReason) != "" {
 			acc.view.Status = "blocked"
+		} else if acc.view.ActiveChildRunCount > 0 {
+			acc.view.Status = "running"
+		} else if acc.view.CompletedDelegationCount == acc.view.DelegationCount && acc.view.DelegationCount > 0 {
+			acc.view.Status = "completed"
 		}
 		if acc.view.Status == "" {
 			acc.view.Status = "queued"
-		}
-		if acc.view.CompletedDelegationCount == acc.view.DelegationCount && acc.view.DelegationCount > 0 && strings.TrimSpace(acc.view.BlockedReason) == "" {
-			acc.view.Status = "completed"
 		}
 		views = append(views, acc.view)
 	}
@@ -2105,11 +2103,30 @@ func filterApprovalsByWorkspace(views []PendingApprovalView, workspaceKey string
 func filterCompanionSwarmsForAgenda(views []CompanionSwarmView) []CompanionSwarmView {
 	filtered := make([]CompanionSwarmView, 0, len(views))
 	for _, view := range views {
-		if strings.EqualFold(view.Status, "blocked") || view.BacklogCount > 0 || view.BudgetBacklogCount > 0 {
+		if strings.EqualFold(view.Status, "blocked") || strings.EqualFold(view.Status, "running") || view.ActiveChildRunCount > 0 || view.BacklogCount > 0 || view.BudgetBacklogCount > 0 {
 			filtered = append(filtered, view)
 		}
 	}
 	return filtered
+}
+
+func parseSwarmContractMetadata(detailsJSON string) (int, string, bool) {
+	trimmed := strings.TrimSpace(detailsJSON)
+	if trimmed == "" {
+		return 0, "", false
+	}
+
+	var decoded swarmContractDetails
+	if err := json.Unmarshal([]byte(trimmed), &decoded); err != nil {
+		return 0, "", false
+	}
+
+	requestedBudget := decoded.Swarm.RequestedBudget
+	convergenceMode := strings.TrimSpace(decoded.Swarm.ConvergenceMode)
+	if requestedBudget <= 0 && convergenceMode == "" {
+		return 0, "", false
+	}
+	return requestedBudget, convergenceMode, true
 }
 
 func nullableInt64Ptr(value sql.NullInt64) *int64 {

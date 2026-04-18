@@ -91,10 +91,11 @@ func TestRunStatusJSON(t *testing.T) {
 		PendingApprovals int    `json:"pending_approvals"`
 		RegistryHealthy  bool   `json:"registry_healthy"`
 		CompanionSwarms  []struct {
-			ParentTaskKey string `json:"parent_task_key"`
-			Status        string `json:"status"`
-			BlockedReason string `json:"blocked_reason"`
-			BacklogCount  int    `json:"backlog_count"`
+			ParentTaskKey       string `json:"parent_task_key"`
+			Status              string `json:"status"`
+			BlockedReason       string `json:"blocked_reason"`
+			BacklogCount        int    `json:"backlog_count"`
+			ActiveChildRunCount int    `json:"active_child_run_count"`
 		} `json:"companion_swarms"`
 		CompanionSwarmCounts struct {
 			Active  int `json:"active"`
@@ -122,6 +123,26 @@ func TestRunStatusJSON(t *testing.T) {
 	}
 	if payload.CompanionSwarmCounts.Backlog < 1 {
 		t.Fatalf("CompanionSwarmCounts.Backlog = %d, want backlog", payload.CompanionSwarmCounts.Backlog)
+	}
+
+	activeFound := false
+	for _, swarm := range payload.CompanionSwarms {
+		if swarm.ParentTaskKey != "status-swarm-active" {
+			continue
+		}
+		activeFound = true
+		if swarm.Status != "running" {
+			t.Fatalf("active swarm status = %q, want running", swarm.Status)
+		}
+		if swarm.ActiveChildRunCount != 1 {
+			t.Fatalf("active swarm active_child_run_count = %d, want 1", swarm.ActiveChildRunCount)
+		}
+		if swarm.BacklogCount != 0 {
+			t.Fatalf("active swarm backlog_count = %d, want 0", swarm.BacklogCount)
+		}
+	}
+	if !activeFound {
+		t.Fatal("status-swarm-active missing from companion_swarms")
 	}
 }
 
@@ -799,6 +820,14 @@ func seedStatusCompanionSwarms(t *testing.T, ctx context.Context, store *sqlite.
 		ChildRunID:   &activeRun.ID,
 	}); err != nil {
 		t.Fatalf("AttachDelegationChildTask(active) error = %v", err)
+	}
+	if _, err := store.CreateDelegationArtifact(ctx, sqlite.CreateDelegationArtifactParams{
+		DelegationID: activeDelegation.ID,
+		ArtifactType: "result",
+		Summary:      "Active child completed",
+		DetailsJSON:  `{"status":"completed","confidence":0.9,"evidence_refs":["status/active"],"unresolved_risks":[],"proposed_next_actions":[],"proposed_memory_candidates":[]}`,
+	}); err != nil {
+		t.Fatalf("CreateDelegationArtifact(active) error = %v", err)
 	}
 
 	approvalTask, err := store.CreateTask(ctx, sqlite.CreateTaskParams{

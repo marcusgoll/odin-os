@@ -476,6 +476,282 @@ func TestAgendaViewIncludesCompanionOwnedSwarms(t *testing.T) {
 	}
 }
 
+func TestCompanionSwarmViewsKeepRunningChildRunsVisibleWhenDelegationsComplete(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openObservabilityStore(t)
+	defer store.Close()
+
+	workspace, project, initiative, companion := seedCompanionSwarmState(t, ctx, store)
+
+	parentTask, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:    project.ID,
+		Key:          "completed-running-swarm",
+		Title:        "Completed but still running swarm",
+		ActionKey:    "execute",
+		Status:       "queued",
+		Scope:        "project",
+		RequestedBy:  "operator",
+		WorkspaceID:  &workspace.ID,
+		InitiativeID: &initiative.ID,
+		CompanionID:  &companion.ID,
+		WorkKind:     "delivery",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask(parent) error = %v", err)
+	}
+
+	firstDelegation, err := store.CreateDelegation(ctx, sqlite.CreateDelegationParams{
+		ParentTaskID:    parentTask.ID,
+		ProjectID:       project.ID,
+		Scope:           parentTask.Scope,
+		DelegationKey:   "completed-running-a",
+		Role:            "builder",
+		ActionClass:     "mutation",
+		ActionKey:       "implement",
+		MutationMode:    "read_only",
+		Status:          "queued",
+		ConvergenceMode: "review_gate",
+		ArtifactTarget:  "branch",
+		Executor:        "codex",
+		DetailsJSON:     `{"objective":"complete but keep active","swarm":{"requested_budget":2,"max_children":2,"convergence_mode":"review_gate"}}`,
+	})
+	if err != nil {
+		t.Fatalf("CreateDelegation(first) error = %v", err)
+	}
+	firstChild, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "completed-running-a-child",
+		Title:       "Completed running child",
+		ActionKey:   "implement",
+		Status:      "running",
+		Scope:       parentTask.Scope,
+		RequestedBy: "supervisor",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask(first child) error = %v", err)
+	}
+	firstRun, err := store.StartRun(ctx, sqlite.StartRunParams{
+		TaskID:     firstChild.ID,
+		Executor:   "codex",
+		Attempt:    1,
+		Status:     "running",
+		TaskStatus: "running",
+	})
+	if err != nil {
+		t.Fatalf("StartRun(first child) error = %v", err)
+	}
+	if _, err := store.AttachDelegationChildTask(ctx, sqlite.AttachDelegationChildTaskParams{
+		DelegationID: firstDelegation.ID,
+		ChildTaskID:  firstChild.ID,
+		ChildRunID:   &firstRun.ID,
+	}); err != nil {
+		t.Fatalf("AttachDelegationChildTask(first) error = %v", err)
+	}
+	if _, err := store.CreateDelegationArtifact(ctx, sqlite.CreateDelegationArtifactParams{
+		DelegationID: firstDelegation.ID,
+		ArtifactType: "result",
+		Summary:      "First child completed",
+		DetailsJSON:  `{"status":"completed","confidence":0.9,"evidence_refs":["completed-running/a"],"unresolved_risks":[],"proposed_next_actions":[],"proposed_memory_candidates":[]}`,
+	}); err != nil {
+		t.Fatalf("CreateDelegationArtifact(first) error = %v", err)
+	}
+
+	secondDelegation, err := store.CreateDelegation(ctx, sqlite.CreateDelegationParams{
+		ParentTaskID:    parentTask.ID,
+		ProjectID:       project.ID,
+		Scope:           parentTask.Scope,
+		DelegationKey:   "completed-running-b",
+		Role:            "reviewer",
+		ActionClass:     "analysis",
+		ActionKey:       "review",
+		MutationMode:    "read_only",
+		Status:          "queued",
+		ConvergenceMode: "review_gate",
+		ArtifactTarget:  "report",
+		Executor:        "codex",
+		DetailsJSON:     `{"objective":"keep active child running","swarm":{"requested_budget":2,"max_children":2,"convergence_mode":"review_gate"}}`,
+	})
+	if err != nil {
+		t.Fatalf("CreateDelegation(second) error = %v", err)
+	}
+	secondChild, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "completed-running-b-child",
+		Title:       "Completed running child B",
+		ActionKey:   "review",
+		Status:      "queued",
+		Scope:       parentTask.Scope,
+		RequestedBy: "supervisor",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask(second child) error = %v", err)
+	}
+	if _, err := store.AttachDelegationChildTask(ctx, sqlite.AttachDelegationChildTaskParams{
+		DelegationID: secondDelegation.ID,
+		ChildTaskID:  secondChild.ID,
+	}); err != nil {
+		t.Fatalf("AttachDelegationChildTask(second) error = %v", err)
+	}
+	if _, err := store.CreateDelegationArtifact(ctx, sqlite.CreateDelegationArtifactParams{
+		DelegationID: secondDelegation.ID,
+		ArtifactType: "result",
+		Summary:      "Second child completed",
+		DetailsJSON:  `{"status":"completed","confidence":0.9,"evidence_refs":["completed-running/b"],"unresolved_risks":[],"proposed_next_actions":[],"proposed_memory_candidates":[]}`,
+	}); err != nil {
+		t.Fatalf("CreateDelegationArtifact(second) error = %v", err)
+	}
+
+	views, err := projections.ListCompanionSwarmViews(ctx, store.DB(), workspace.Key)
+	if err != nil {
+		t.Fatalf("ListCompanionSwarmViews() error = %v", err)
+	}
+	if len(views) != 1 {
+		t.Fatalf("swarm views len = %d, want 1", len(views))
+	}
+	view := views[0]
+	if view.Status != "running" {
+		t.Fatalf("swarm status = %q, want running", view.Status)
+	}
+	if view.CompletedDelegationCount != 2 {
+		t.Fatalf("completed delegation count = %d, want 2", view.CompletedDelegationCount)
+	}
+	if view.ActiveChildRunCount != 1 {
+		t.Fatalf("active child run count = %d, want 1", view.ActiveChildRunCount)
+	}
+	if view.BacklogCount != 0 {
+		t.Fatalf("backlog count = %d, want 0", view.BacklogCount)
+	}
+
+	agenda, err := projections.GetAgendaView(ctx, store.DB(), workspace.Key, time.Now().UTC())
+	if err != nil {
+		t.Fatalf("GetAgendaView() error = %v", err)
+	}
+	if len(agenda.CompanionSwarms) != 1 {
+		t.Fatalf("agenda companion swarms len = %d, want 1", len(agenda.CompanionSwarms))
+	}
+	if agenda.CompanionSwarms[0].ParentTaskKey != parentTask.Key {
+		t.Fatalf("agenda companion swarms = %+v, want running swarm included", agenda.CompanionSwarms)
+	}
+}
+
+func TestCompanionSwarmViewsLoadMetadataFromLaterRows(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openObservabilityStore(t)
+	defer store.Close()
+
+	workspace, project, initiative, companion := seedCompanionSwarmState(t, ctx, store)
+
+	parentTask, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:    project.ID,
+		Key:          "metadata-fallback-swarm",
+		Title:        "Metadata fallback swarm",
+		ActionKey:    "execute",
+		Status:       "queued",
+		Scope:        "project",
+		RequestedBy:  "operator",
+		WorkspaceID:  &workspace.ID,
+		InitiativeID: &initiative.ID,
+		CompanionID:  &companion.ID,
+		WorkKind:     "delivery",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask(parent) error = %v", err)
+	}
+
+	firstDelegation, err := store.CreateDelegation(ctx, sqlite.CreateDelegationParams{
+		ParentTaskID:    parentTask.ID,
+		ProjectID:       project.ID,
+		Scope:           parentTask.Scope,
+		DelegationKey:   "metadata-fallback-a",
+		Role:            "builder",
+		ActionClass:     "mutation",
+		ActionKey:       "implement",
+		MutationMode:    "read_only",
+		Status:          "queued",
+		ConvergenceMode: "merge",
+		ArtifactTarget:  "branch",
+		Executor:        "codex",
+		DetailsJSON:     `{"objective":"legacy row"}`,
+	})
+	if err != nil {
+		t.Fatalf("CreateDelegation(first) error = %v", err)
+	}
+	firstChild, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "metadata-fallback-a-child",
+		Title:       "Metadata fallback child A",
+		ActionKey:   "implement",
+		Status:      "queued",
+		Scope:       parentTask.Scope,
+		RequestedBy: "supervisor",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask(first child) error = %v", err)
+	}
+	if _, err := store.AttachDelegationChildTask(ctx, sqlite.AttachDelegationChildTaskParams{
+		DelegationID: firstDelegation.ID,
+		ChildTaskID:  firstChild.ID,
+	}); err != nil {
+		t.Fatalf("AttachDelegationChildTask(first) error = %v", err)
+	}
+
+	secondDelegation, err := store.CreateDelegation(ctx, sqlite.CreateDelegationParams{
+		ParentTaskID:    parentTask.ID,
+		ProjectID:       project.ID,
+		Scope:           parentTask.Scope,
+		DelegationKey:   "metadata-fallback-b",
+		Role:            "reviewer",
+		ActionClass:     "analysis",
+		ActionKey:       "review",
+		MutationMode:    "read_only",
+		Status:          "queued",
+		ConvergenceMode: "review_gate",
+		ArtifactTarget:  "report",
+		Executor:        "codex",
+		DetailsJSON:     `{"objective":"later row","swarm":{"requested_budget":4,"convergence_mode":"review_gate","max_children":2}}`,
+	})
+	if err != nil {
+		t.Fatalf("CreateDelegation(second) error = %v", err)
+	}
+	secondChild, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "metadata-fallback-b-child",
+		Title:       "Metadata fallback child B",
+		ActionKey:   "review",
+		Status:      "queued",
+		Scope:       parentTask.Scope,
+		RequestedBy: "supervisor",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask(second child) error = %v", err)
+	}
+	if _, err := store.AttachDelegationChildTask(ctx, sqlite.AttachDelegationChildTaskParams{
+		DelegationID: secondDelegation.ID,
+		ChildTaskID:  secondChild.ID,
+	}); err != nil {
+		t.Fatalf("AttachDelegationChildTask(second) error = %v", err)
+	}
+
+	views, err := projections.ListCompanionSwarmViews(ctx, store.DB(), workspace.Key)
+	if err != nil {
+		t.Fatalf("ListCompanionSwarmViews() error = %v", err)
+	}
+	if len(views) != 1 {
+		t.Fatalf("swarm views len = %d, want 1", len(views))
+	}
+	view := views[0]
+	if view.RequestedBudget != 4 {
+		t.Fatalf("requested budget = %d, want 4", view.RequestedBudget)
+	}
+	if view.ConvergenceMode != "review_gate" {
+		t.Fatalf("convergence mode = %q, want review_gate", view.ConvergenceMode)
+	}
+}
+
 func seedCompanionSwarmState(t *testing.T, ctx context.Context, store *sqlite.Store) (sqlite.Workspace, sqlite.Project, sqlite.Initiative, sqlite.Companion) {
 	t.Helper()
 
