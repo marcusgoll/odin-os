@@ -37,7 +37,6 @@ func TestRegistryIncludesN8NTargetProjects(t *testing.T) {
 
 	for _, tc := range []struct {
 		key               string
-		gitRoot           string
 		defaultBranch     string
 		githubRepo        string
 		runtimeOwner      string
@@ -46,7 +45,6 @@ func TestRegistryIncludesN8NTargetProjects(t *testing.T) {
 	}{
 		{
 			key:               "cfipros",
-			gitRoot:           "/home/orchestrator/cfipros",
 			defaultBranch:     "main",
 			githubRepo:        "marcusgoll/cfipros",
 			runtimeOwner:      "legacy_odin",
@@ -55,7 +53,6 @@ func TestRegistryIncludesN8NTargetProjects(t *testing.T) {
 		},
 		{
 			key:               "marcusgoll",
-			gitRoot:           "/home/orchestrator/marcusgoll",
 			defaultBranch:     "main",
 			githubRepo:        "marcusgoll/marcusgoll",
 			runtimeOwner:      "legacy_odin",
@@ -67,8 +64,8 @@ func TestRegistryIncludesN8NTargetProjects(t *testing.T) {
 		if !ok {
 			t.Fatalf("expected %s project in registry", tc.key)
 		}
-		if manifest.GitRoot != tc.gitRoot {
-			t.Fatalf("%s git root = %q, want %q", tc.key, manifest.GitRoot, tc.gitRoot)
+		if want := projectGitRootFromManifest(t, repoRoot, tc.key); manifest.GitRoot != want {
+			t.Fatalf("%s git root = %q, want %q", tc.key, manifest.GitRoot, want)
 		}
 		if manifest.DefaultBranch != tc.defaultBranch {
 			t.Fatalf("%s default branch = %q, want %q", tc.key, manifest.DefaultBranch, tc.defaultBranch)
