@@ -1,10 +1,20 @@
 package projects
 
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+
+	"gopkg.in/yaml.v3"
+)
+
 type Registry struct {
 	projects      []Manifest
 	projectsByKey map[string]Manifest
 	systemProject *Manifest
 	cutover       CutoverConfig
+	configPath    string
 }
 
 func Register(path string) (Registry, []Diagnostic, error) {
@@ -18,14 +28,13 @@ func RegisterPaths(paths ...string) (Registry, []Diagnostic, error) {
 	}
 
 	diagnostics := Validate(cfg)
-	if len(diagnostics) != 0 {
-		return Registry{}, diagnostics, nil
-	}
-
 	registry := Registry{
 		projects:      make([]Manifest, len(cfg.Projects)),
 		projectsByKey: make(map[string]Manifest, len(cfg.Projects)),
 		cutover:       cfg.Cutover,
+	}
+	if len(paths) == 1 {
+		registry.configPath = paths[0]
 	}
 	copy(registry.projects, cfg.Projects)
 
@@ -37,6 +46,9 @@ func RegisterPaths(paths ...string) (Registry, []Diagnostic, error) {
 		}
 	}
 
+	if len(diagnostics) != 0 {
+		return registry, diagnostics, nil
+	}
 	return registry, nil, nil
 }
 
@@ -60,4 +72,112 @@ func (registry Registry) Projects() []Manifest {
 
 func (registry Registry) CutoverPilotProject(key string) (CutoverPilotProject, bool) {
 	return registry.cutover.PilotProject(key)
+}
+
+func (registry Registry) ConfigPath() string {
+	return registry.configPath
+}
+
+func AppendProject(path string, manifest Manifest) (Registry, []Diagnostic, error) {
+	if path == "" {
+		return Registry{}, nil, fmt.Errorf("project manifest path is required")
+	}
+
+	rawConfig, err := loadRawConfig(path)
+	if err != nil {
+		return Registry{}, nil, err
+	}
+
+	manifest.SourcePath = path
+	rawConfig.Projects = append(rawConfig.Projects, manifest)
+
+	validated := resolveConfig(path, rawConfig)
+	diagnostics := Validate(validated)
+	if len(diagnostics) != 0 {
+		return Registry{}, diagnostics, nil
+	}
+
+	content, err := yaml.Marshal(rawConfig)
+	if err != nil {
+		return Registry{}, nil, err
+	}
+	if err := os.WriteFile(path, content, 0o644); err != nil {
+		return Registry{}, nil, err
+	}
+
+	return Register(path)
+}
+
+func UpdateProject(path string, key string, mutate func(*Manifest) error) (Registry, []Diagnostic, error) {
+	if path == "" {
+		return Registry{}, nil, fmt.Errorf("project manifest path is required")
+	}
+	if strings.TrimSpace(key) == "" {
+		return Registry{}, nil, fmt.Errorf("project key is required")
+	}
+	if mutate == nil {
+		return Registry{}, nil, fmt.Errorf("project update function is required")
+	}
+
+	rawConfig, err := loadRawConfig(path)
+	if err != nil {
+		return Registry{}, nil, err
+	}
+
+	found := false
+	for index := range rawConfig.Projects {
+		if rawConfig.Projects[index].Key != key {
+			continue
+		}
+
+		project := rawConfig.Projects[index]
+		project.SourcePath = path
+		if err := mutate(&project); err != nil {
+			return Registry{}, nil, err
+		}
+		rawConfig.Projects[index] = project
+		found = true
+		break
+	}
+	if !found {
+		return Registry{}, nil, fmt.Errorf("unknown project: %s", key)
+	}
+
+	validated := resolveConfig(path, rawConfig)
+	diagnostics := Validate(validated)
+	if len(diagnostics) != 0 {
+		return Registry{}, diagnostics, nil
+	}
+
+	content, err := yaml.Marshal(rawConfig)
+	if err != nil {
+		return Registry{}, nil, err
+	}
+	if err := os.WriteFile(path, content, 0o644); err != nil {
+		return Registry{}, nil, err
+	}
+
+	return Register(path)
+}
+
+func loadRawConfig(path string) (Config, error) {
+	var cfg Config
+
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return Config{}, err
+	}
+	if err := yaml.Unmarshal(content, &cfg); err != nil {
+		return Config{}, err
+	}
+	return cfg, nil
+}
+
+func resolveConfig(path string, cfg Config) Config {
+	baseDir := filepath.Dir(path)
+	for index := range cfg.Projects {
+		cfg.Projects[index].SourcePath = path
+		cfg.Projects[index].GitRoot = resolveGitRoot(baseDir, cfg.Projects[index].GitRoot)
+	}
+	return cfg
 }

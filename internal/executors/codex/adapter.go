@@ -48,10 +48,16 @@ type driverResponse struct {
 	Handle   *contract.TaskHandle `json:"handle,omitempty"`
 }
 
-type headlessExecutor struct{}
+type headlessExecutor struct {
+	repoRoot string
+}
 
 func NewHeadless() contract.Executor {
 	return headlessExecutor{}
+}
+
+func NewHeadlessWithRepoRoot(repoRoot string) contract.Executor {
+	return headlessExecutor{repoRoot: strings.TrimSpace(repoRoot)}
 }
 
 func (headlessExecutor) Key() string {
@@ -62,16 +68,16 @@ func (headlessExecutor) Class() contract.ExecutorClass {
 	return contract.ExecutorClassPlanBackedCLI
 }
 
-func (headlessExecutor) Health(ctx context.Context) (contract.HealthReport, error) {
-	if _, ok := driverPath(); !ok {
+func (executor headlessExecutor) Health(ctx context.Context) (contract.HealthReport, error) {
+	if _, ok := executor.driverPath(); !ok {
 		return contract.HealthReport{
 			Status:    contract.HealthStatusUnavailable,
-			Details:   "ODIN_CODEX_DRIVER is unset",
+			Details:   "codex driver is unavailable",
 			CheckedAt: time.Now().UTC(),
 		}, nil
 	}
 
-	response, _, err := invokeDriver(ctx, driverRequest{
+	response, _, err := executor.invokeDriver(ctx, driverRequest{
 		Action: "health",
 		Mode:   "headless",
 	})
@@ -114,7 +120,7 @@ func (headlessExecutor) Capabilities(context.Context) (contract.Capabilities, er
 	}, nil
 }
 
-func (headlessExecutor) RunTask(ctx context.Context, spec contract.TaskSpec) (contract.ExecutionResult, error) {
+func (executor headlessExecutor) RunTask(ctx context.Context, spec contract.TaskSpec) (contract.ExecutionResult, error) {
 	request := driverRequest{
 		Action: "run",
 		Task: &driverTask{
@@ -134,7 +140,7 @@ func (headlessExecutor) RunTask(ctx context.Context, spec contract.TaskSpec) (co
 		request.Meta[key] = value
 	}
 
-	response, payload, err := invokeDriver(ctx, request)
+	response, payload, err := executor.invokeDriver(ctx, request)
 	if err != nil {
 		return contract.ExecutionResult{}, err
 	}
@@ -192,10 +198,10 @@ func validateRunStatus(status string) (string, error) {
 	}
 }
 
-func invokeDriver(ctx context.Context, request driverRequest) (driverResponse, []byte, error) {
-	driver, ok := driverPath()
+func (executor headlessExecutor) invokeDriver(ctx context.Context, request driverRequest) (driverResponse, []byte, error) {
+	driver, ok := executor.driverPath()
 	if !ok {
-		return driverResponse{}, nil, fmt.Errorf("codex driver unavailable: ODIN_CODEX_DRIVER is unset")
+		return driverResponse{}, nil, fmt.Errorf("codex driver unavailable")
 	}
 	if err := validateDriverPath(driver); err != nil {
 		return driverResponse{}, nil, fmt.Errorf("codex driver unavailable: %w", err)
@@ -267,11 +273,16 @@ func (headlessExecutor) EstimateCost(context.Context, contract.TaskSpec) (contra
 	return contract.CostEstimate{}, contract.ErrNotImplemented
 }
 
-func driverPath() (string, bool) {
+func (executor headlessExecutor) driverPath() (string, bool) {
 	driver := strings.TrimSpace(os.Getenv("ODIN_CODEX_DRIVER"))
-	if driver == "" {
+	if driver != "" {
+		return filepath.Clean(driver), true
+	}
+	if strings.TrimSpace(executor.repoRoot) == "" {
 		return "", false
 	}
+
+	driver = filepath.Join(executor.repoRoot, "scripts", "drivers", "codex-headless.sh")
 	return filepath.Clean(driver), true
 }
 

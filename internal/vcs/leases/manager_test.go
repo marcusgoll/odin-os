@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -16,10 +17,11 @@ func TestManagerPrepareMutableAllocatesBranchAndWorktree(t *testing.T) {
 	defer store.Close()
 
 	git := &fakeGit{}
+	worktreeRoot := t.TempDir()
 	manager := Manager{
 		Store:        store,
 		Git:          git,
-		WorktreeRoot: "/var/tmp/odin-worktrees",
+		WorktreeRoot: worktreeRoot,
 	}
 
 	assignment, err := manager.Prepare(ctx, Request{
@@ -43,7 +45,7 @@ func TestManagerPrepareMutableAllocatesBranchAndWorktree(t *testing.T) {
 	if assignment.BranchName != wantBranch {
 		t.Fatalf("Prepare(mutable).BranchName = %q", assignment.BranchName)
 	}
-	wantPath := filepath.ToSlash(fmt.Sprintf("/var/tmp/odin-worktrees/%s/task-%d/run-%d/try-1", project.Key, task.ID, run.ID))
+	wantPath := filepath.ToSlash(filepath.Join(worktreeRoot, project.Key, fmt.Sprintf("task-%d", task.ID), fmt.Sprintf("run-%d", run.ID), "try-1"))
 	if assignment.WorktreePath != wantPath {
 		t.Fatalf("Prepare(mutable).WorktreePath = %q", assignment.WorktreePath)
 	}
@@ -57,7 +59,7 @@ func TestManagerPrepareReadOnlySkipsMutableAllocation(t *testing.T) {
 
 	manager := Manager{
 		Git:          &fakeGit{},
-		WorktreeRoot: "/var/tmp/odin-worktrees",
+		WorktreeRoot: t.TempDir(),
 	}
 
 	assignment, err := manager.Prepare(context.Background(), Request{
@@ -84,7 +86,7 @@ func TestManagerPrepareMutableReusesActiveLeaseForSameTaskRun(t *testing.T) {
 	manager := Manager{
 		Store:        store,
 		Git:          git,
-		WorktreeRoot: "/var/tmp/odin-worktrees",
+		WorktreeRoot: t.TempDir(),
 	}
 
 	first, err := manager.Prepare(ctx, Request{
@@ -157,7 +159,7 @@ func TestManagerPrepareMutablePropagatesLeaseConflict(t *testing.T) {
 	manager := Manager{
 		Store:        store,
 		Git:          &fakeGit{},
-		WorktreeRoot: "/var/tmp/odin-worktrees",
+		WorktreeRoot: t.TempDir(),
 	}
 
 	_, err = manager.Prepare(ctx, Request{
@@ -175,6 +177,51 @@ func TestManagerPrepareMutablePropagatesLeaseConflict(t *testing.T) {
 	}
 	if !errors.Is(err, sqlite.ErrWorktreeLeaseConflict) {
 		t.Fatalf("Prepare(conflict) error = %v, want ErrWorktreeLeaseConflict", err)
+	}
+}
+
+func TestManagerPrepareMutableSkipsExistingFilesystemPathByAdvancingTry(t *testing.T) {
+	ctx := context.Background()
+	store, project, task, run := openLeaseManagerStore(t)
+	defer store.Close()
+
+	worktreeRoot := t.TempDir()
+	stalePath := filepath.Join(worktreeRoot, project.Key, fmt.Sprintf("task-%d", task.ID), fmt.Sprintf("run-%d", run.ID), "try-1")
+	if err := os.MkdirAll(stalePath, 0o755); err != nil {
+		t.Fatalf("MkdirAll(stalePath) error = %v", err)
+	}
+
+	git := &fakeGit{}
+	manager := Manager{
+		Store:        store,
+		Git:          git,
+		WorktreeRoot: worktreeRoot,
+	}
+
+	assignment, err := manager.Prepare(ctx, Request{
+		Mutating:      true,
+		ProjectID:     project.ID,
+		ProjectKey:    project.Key,
+		TaskID:        task.ID,
+		RunID:         run.ID,
+		RepoRoot:      project.GitRoot,
+		DefaultBranch: project.DefaultBranch,
+		Try:           1,
+	})
+	if err != nil {
+		t.Fatalf("Prepare(existing path) error = %v", err)
+	}
+
+	wantBranch := fmt.Sprintf("odin/%s/task-%d/run-%d/try-2", project.Key, task.ID, run.ID)
+	if assignment.BranchName != wantBranch {
+		t.Fatalf("Prepare(existing path).BranchName = %q, want %q", assignment.BranchName, wantBranch)
+	}
+	wantPath := filepath.ToSlash(filepath.Join(worktreeRoot, project.Key, fmt.Sprintf("task-%d", task.ID), fmt.Sprintf("run-%d", run.ID), "try-2"))
+	if assignment.WorktreePath != wantPath {
+		t.Fatalf("Prepare(existing path).WorktreePath = %q, want %q", assignment.WorktreePath, wantPath)
+	}
+	if git.addWorktreeCalls != 1 {
+		t.Fatalf("git add worktree calls = %d, want 1", git.addWorktreeCalls)
 	}
 }
 

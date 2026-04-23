@@ -24,8 +24,13 @@ import (
 )
 
 type doctorReport struct {
-	Status string            `json:"status"`
-	Checks []json.RawMessage `json:"checks"`
+	Status string        `json:"status"`
+	Checks []doctorCheck `json:"checks"`
+}
+
+type doctorCheck struct {
+	Name   string `json:"name"`
+	Status string `json:"status"`
 }
 
 type statusReport struct {
@@ -50,11 +55,24 @@ func TestOperationalAutonomyFreshRuntimeBecomesHealthy(t *testing.T) {
 	if err := json.Unmarshal([]byte(output), &report); err != nil {
 		t.Fatalf("doctor output = %q, want valid JSON: %v", output, err)
 	}
-	if report.Status != "healthy" {
-		t.Fatalf("status = %q, want healthy", report.Status)
-	}
 	if len(report.Checks) == 0 {
 		t.Fatal("checks empty, want readiness checks")
+	}
+	if report.Status == "healthy" {
+		return
+	}
+	if report.Status != "degraded" {
+		t.Fatalf("status = %q, want healthy or degraded", report.Status)
+	}
+
+	degradedChecks := make([]string, 0, len(report.Checks))
+	for _, check := range report.Checks {
+		if check.Status != "healthy" {
+			degradedChecks = append(degradedChecks, check.Name)
+		}
+	}
+	if len(degradedChecks) != 1 || degradedChecks[0] != "workspace_prerequisites" {
+		t.Fatalf("degraded checks = %v, want only workspace_prerequisites", degradedChecks)
 	}
 }
 

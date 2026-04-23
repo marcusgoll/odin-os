@@ -1255,6 +1255,86 @@ func (store *Store) FinishRun(ctx context.Context, params FinishRunParams) (Run,
 	return run, err
 }
 
+func (store *Store) FinishRunIfRunning(ctx context.Context, params FinishRunParams) (Run, bool, error) {
+	now := store.now()
+	var run Run
+	finished := false
+
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		current, task, err := store.getRunWithTaskTx(ctx, tx, params.RunID)
+		if err != nil {
+			return err
+		}
+		run = current
+		if current.Status != "running" || current.FinishedAt != nil {
+			return nil
+		}
+
+		result, err := tx.ExecContext(ctx, `
+			UPDATE runs
+			SET status = ?, finished_at = ?, summary = ?, terminal_reason = ?, artifacts_json = ?
+			WHERE id = ?
+			  AND status = 'running'
+			  AND finished_at IS NULL
+		`,
+			params.Status,
+			formatTime(now),
+			params.Summary,
+			strings.TrimSpace(params.TerminalReason),
+			normalizeArtifactsJSON(params.ArtifactsJSON),
+			params.RunID,
+		)
+		if err != nil {
+			return err
+		}
+		affected, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if affected == 0 {
+			run, _, err = store.getRunWithTaskTx(ctx, tx, params.RunID)
+			return err
+		}
+
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE tasks
+			SET current_run_id = NULL, updated_at = ?
+			WHERE id = ?
+			  AND current_run_id = ?
+		`, formatTime(now), task.ID, params.RunID); err != nil {
+			return err
+		}
+
+		current.Status = params.Status
+		current.FinishedAt = &now
+		current.Summary = params.Summary
+		current.TerminalReason = strings.TrimSpace(params.TerminalReason)
+		current.ArtifactsJSON = normalizeArtifactsJSON(params.ArtifactsJSON)
+		run = current
+		finished = true
+
+		projectID := task.ProjectID
+		return appendEventTx(ctx, tx, eventInsert{
+			StreamType: runtimeevents.StreamRun,
+			StreamID:   run.ID,
+			EventType:  runtimeevents.EventRunFinished,
+			Scope:      task.Scope,
+			ProjectID:  &projectID,
+			TaskID:     &task.ID,
+			RunID:      &run.ID,
+			Payload: runtimeevents.RunFinishedPayload{
+				Status:         run.Status,
+				Summary:        run.Summary,
+				TerminalReason: run.TerminalReason,
+				ArtifactsJSON:  run.ArtifactsJSON,
+			},
+			OccurredAt: now,
+		})
+	})
+
+	return run, finished, err
+}
+
 func (store *Store) FinishRunAndSetTaskStatus(ctx context.Context, params FinishRunAndSetTaskStatusParams) (Task, Run, error) {
 	now := store.now()
 	var (
@@ -3846,6 +3926,15 @@ func (store *Store) RollbackLearningPromotion(ctx context.Context, params Rollba
 
 func (store *Store) GetTask(ctx context.Context, taskID int64) (Task, error) {
 	return store.getTaskQuery(ctx, store.db, taskID)
+}
+
+func (store *Store) GetTaskByProjectAndKey(ctx context.Context, projectID int64, key string) (Task, error) {
+	row := store.db.QueryRowContext(ctx, `
+		SELECT id, project_id, key, title, action_key, status, scope, requested_by, workspace_id, initiative_id, companion_id, follow_up_obligation_id, follow_up_occurrence_key, work_kind, summary, terminal_reason, artifacts_json, current_run_id, next_eligible_at, priority, last_error, retry_count, max_attempts, blocked_reason, created_at, updated_at
+		FROM tasks
+		WHERE project_id = ? AND key = ?
+	`, projectID, key)
+	return scanTask(row)
 }
 
 func (store *Store) ListEligibleQueuedTasks(ctx context.Context, now time.Time) ([]Task, error) {

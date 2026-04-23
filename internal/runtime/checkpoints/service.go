@@ -41,6 +41,8 @@ type CompactParams struct {
 	ApprovalSummary        string
 	Invocation             *InvocationContext
 	ToolResults            []ToolResult
+	ProjectFacts           map[string]string
+	RunFacts               map[string]string
 	SupersedesWakePacketID *int64
 }
 
@@ -79,6 +81,7 @@ func (service Service) Compact(ctx context.Context, params CompactParams) (Compa
 		ManifestSummary: params.ManifestSummary,
 		PolicySummary:   params.PolicySummary,
 		OpenTaskSummary: params.OpenTaskSummary,
+		Facts:           cloneFacts(params.ProjectFacts),
 	}
 
 	projectPayload, err := marshalPayload(projectContext)
@@ -118,6 +121,7 @@ func (service Service) Compact(ctx context.Context, params CompactParams) (Compa
 			ApprovalSummary: params.ApprovalSummary,
 			Invocation:      params.Invocation,
 			ToolResults:     append([]ToolResult(nil), params.ToolResults...),
+			Facts:           cloneFacts(params.RunFacts),
 		}
 
 		runPayload, err := marshalPayload(assembledRun)
@@ -203,6 +207,17 @@ func (service Service) Compact(ctx context.Context, params CompactParams) (Compa
 		Run:           runContext,
 		Wake:          wake,
 	}, nil
+}
+
+func cloneFacts(input map[string]string) map[string]string {
+	if len(input) == 0 {
+		return nil
+	}
+	cloned := make(map[string]string, len(input))
+	for key, value := range input {
+		cloned[key] = value
+	}
+	return cloned
 }
 
 func (service Service) LoadResumeState(ctx context.Context, projectID int64, taskID int64) (ResumeState, error) {

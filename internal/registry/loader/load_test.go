@@ -70,15 +70,30 @@ func TestLoadDirLoadsRepositoryExamples(t *testing.T) {
 		t.Fatalf("snapshot.Diagnostics = %v, want none", snapshot.Diagnostics)
 	}
 
-	for _, key := range []string{
-		"karpathy-guidelines",
-		"status-command",
-		"triage-agent",
-		"triage-skill",
-		"project-intake",
+	if len(snapshot.Items) < 6 {
+		t.Fatalf("snapshot.Items = %d, want at least 6 representative examples", len(snapshot.Items))
+	}
+
+	byKey := make(map[string]registry.Item, len(snapshot.Items))
+	for _, item := range snapshot.Items {
+		byKey[item.Key] = item
+	}
+
+	for key, wantKind := range map[string]registry.Kind{
+		"portal-delivery-agent":        registry.KindAgent,
+		"triage-agent":                 registry.KindAgent,
+		"status-command":               registry.KindCommand,
+		"triage-skill":                 registry.KindSkill,
+		"karpathy-guidelines":          registry.KindSkill,
+		"project-intake":               registry.KindWorkflow,
+		"pixel-perfect-ui-ux-designer": registry.KindSkill,
 	} {
-		if _, ok := snapshot.ByKey[key]; !ok {
+		item, ok := byKey[key]
+		if !ok {
 			t.Fatalf("snapshot missing %q", key)
+		}
+		if item.Kind != wantKind {
+			t.Fatalf("snapshot item %q kind = %q, want %q", key, item.Kind, wantKind)
 		}
 	}
 }

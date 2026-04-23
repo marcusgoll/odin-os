@@ -1,4 +1,5 @@
 /bin/
+/.worktrees/
 /odin
 /data/*.db
 /runs/logs/*

@@ -1,6 +1,9 @@
 package commands
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestParseSlashCommand(t *testing.T) {
 	t.Parallel()
@@ -108,5 +111,14 @@ func TestRouteAskIntent(t *testing.T) {
 				t.Fatalf("RouteAskIntent(%q) = %q, want %q", testCase.input, got, testCase.want)
 			}
 		})
+	}
+}
+
+func TestMemoryUsageIncludesNativeXPublishMode(t *testing.T) {
+	t.Parallel()
+
+	want := "publish <id> [url=<value> [published_at=<rfc3339>]|via=huginn_x]"
+	if got := MemoryUsage; got == "" || !strings.Contains(got, want) {
+		t.Fatalf("MemoryUsage = %q, want substring %q", got, want)
 	}
 }

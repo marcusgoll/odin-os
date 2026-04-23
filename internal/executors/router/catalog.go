@@ -25,8 +25,12 @@ func BootstrapCatalogEntries() map[string]CatalogEntry {
 }
 
 func DefaultCatalog() map[string]contract.Executor {
+	return DefaultCatalogForRepo("")
+}
+
+func DefaultCatalogForRepo(repoRoot string) map[string]contract.Executor {
 	return map[string]contract.Executor{
-		"codex_headless":       codex.NewHeadless(),
+		"codex_headless":       codex.NewHeadlessWithRepoRoot(repoRoot),
 		"claude_code_headless": claude_code.NewHeadless(),
 		"gemini_cli_headless":  gemini_cli.NewHeadless(),
 		"openai_api":           openai_api.New(),

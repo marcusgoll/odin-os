@@ -37,9 +37,20 @@ type Service struct {
 	Now                 func() time.Time
 }
 
+type CreateTaskParams struct {
+	Resolved    scope.Resolution
+	Title       string
+	RequestedBy string
+}
+
 type ExecutionOutcome struct {
 	Task sqlite.Task
 	Run  *sqlite.Run
+}
+
+type ExecutionRequest struct {
+	PromptOverride string
+	Metadata       map[string]string
 }
 
 type DelegationAdmissionInput struct {
@@ -134,6 +145,18 @@ func (service Service) List(ctx context.Context, resolved scope.Resolution) ([]p
 func (service Service) CreateTaskFromAct(ctx context.Context, resolved scope.Resolution, title string) (sqlite.Task, error) {
 	return service.createManagedTask(ctx, resolved, title, createManagedTaskInput{
 		requestedBy:           "operator",
+		taskCompanionID:       0,
+		requestedSwarmTrigger: "",
+	})
+}
+
+func (service Service) CreateTask(ctx context.Context, params CreateTaskParams) (sqlite.Task, error) {
+	requestedBy := strings.TrimSpace(params.RequestedBy)
+	if requestedBy == "" {
+		requestedBy = "operator"
+	}
+	return service.createManagedTask(ctx, params.Resolved, params.Title, createManagedTaskInput{
+		requestedBy:           requestedBy,
 		taskCompanionID:       0,
 		requestedSwarmTrigger: "",
 	})
@@ -361,6 +384,10 @@ func (service Service) ExecuteNextQueued(ctx context.Context) error {
 }
 
 func (service Service) ExecuteTask(ctx context.Context, taskID int64) (ExecutionOutcome, error) {
+	return service.ExecuteTaskWithRequest(ctx, taskID, ExecutionRequest{})
+}
+
+func (service Service) ExecuteTaskWithRequest(ctx context.Context, taskID int64, request ExecutionRequest) (ExecutionOutcome, error) {
 	if service.Store == nil {
 		return ExecutionOutcome{}, fmt.Errorf("job store is required")
 	}
@@ -369,7 +396,6 @@ func (service Service) ExecuteTask(ctx context.Context, taskID int64) (Execution
 	if err != nil {
 		return ExecutionOutcome{}, err
 	}
-
 	project, err := service.Store.GetProject(ctx, task.ProjectID)
 	if err != nil {
 		return ExecutionOutcome{}, err
@@ -400,11 +426,15 @@ func (service Service) ExecuteTask(ctx context.Context, taskID int64) (Execution
 		Config:    config,
 		Executors: executors,
 	}
+	prompt := strings.TrimSpace(request.PromptOverride)
+	if prompt == "" {
+		prompt = task.Title
+	}
 	spec := contract.TaskSpec{
 		ID:     task.Key,
 		Kind:   contract.TaskKindGeneral,
 		Scope:  task.Scope,
-		Prompt: task.Title,
+		Prompt: prompt,
 		Requirements: contract.Requirements{
 			AllowedClasses:    []contract.ExecutorClass{contract.ExecutorClassPlanBackedCLI},
 			NeedsHeadlessPlan: true,
@@ -420,6 +450,14 @@ func (service Service) ExecuteTask(ctx context.Context, taskID int64) (Execution
 		spec.Metadata["intake_type"] = intake.IntakeType
 		spec.Metadata["intake_payload_json"] = intake.PayloadJSON
 		intakeSummary = compactIntakeSummary(intake)
+	}
+	for key, value := range request.Metadata {
+		key = strings.TrimSpace(key)
+		value = strings.TrimSpace(value)
+		if key == "" || value == "" {
+			continue
+		}
+		spec.Metadata[key] = value
 	}
 
 	decision, err := selector.Select(ctx, spec)
@@ -442,7 +480,6 @@ func (service Service) ExecuteTask(ctx context.Context, taskID int64) (Execution
 	if err != nil {
 		return ExecutionOutcome{}, err
 	}
-
 	run, err := service.prepareRun(ctx, task, decision.ExecutorKey, attempt)
 	if err != nil {
 		return ExecutionOutcome{}, err
@@ -497,6 +534,9 @@ func (service Service) ExecuteTask(ctx context.Context, taskID int64) (Execution
 	}
 	if loadErr != nil {
 		return ExecutionOutcome{}, loadErr
+	}
+	if err := service.recordExecutionMemory(ctx, project, outcome.Task, outcome.Run, prompt, request.Metadata); err != nil {
+		return ExecutionOutcome{}, err
 	}
 	return outcome, nil
 }
@@ -610,6 +650,115 @@ func (service Service) nextQueuedTask(ctx context.Context) (sqlite.Task, error) 
 		return sqlite.Task{}, sql.ErrNoRows
 	}
 	return tasks[0], nil
+}
+
+func (service Service) executionOutcome(ctx context.Context, taskID int64, runID int64) (ExecutionOutcome, error) {
+	task, err := service.Store.GetTask(ctx, taskID)
+	if err != nil {
+		return ExecutionOutcome{}, err
+	}
+	run, err := service.Store.GetRun(ctx, runID)
+	if err != nil {
+		return ExecutionOutcome{}, err
+	}
+	return ExecutionOutcome{
+		Task: task,
+		Run:  &run,
+	}, nil
+}
+
+func (service Service) recordExecutionMemory(ctx context.Context, project sqlite.Project, task sqlite.Task, run *sqlite.Run, prompt string, metadata map[string]string) error {
+	if run == nil {
+		return nil
+	}
+	responseText := strings.TrimSpace(run.Summary)
+	if responseText == "" {
+		responseText = fmt.Sprintf("Task %s finished with status %s.", task.Key, run.Status)
+	}
+
+	toolSummary := map[string]string{
+		"executor":    run.Executor,
+		"run_status":  run.Status,
+		"task_status": task.Status,
+	}
+	for key, value := range normalizeExecutionMetadata(metadata) {
+		toolSummary[key] = value
+	}
+
+	toolSummaryBytes, err := json.Marshal(toolSummary)
+	if err != nil {
+		return err
+	}
+	transcript, err := service.Store.RecordConversationTranscript(ctx, sqlite.RecordConversationTranscriptParams{
+		ProjectID:   &project.ID,
+		TaskID:      &task.ID,
+		RunID:       &run.ID,
+		Scope:       task.Scope,
+		ScopeKey:    project.Key,
+		Mode:        "act",
+		Prompt:      strings.TrimSpace(prompt),
+		Response:    responseText,
+		ToolSummary: string(toolSummaryBytes),
+		Executor:    run.Executor,
+	})
+	if err != nil {
+		return err
+	}
+
+	details := map[string]any{
+		"task_key":    task.Key,
+		"task_status": task.Status,
+		"run_status":  run.Status,
+		"executor":    run.Executor,
+		"prompt":      strings.TrimSpace(prompt),
+	}
+	if executionMetadata := normalizeExecutionMetadata(metadata); len(executionMetadata) != 0 {
+		details["execution_metadata"] = executionMetadata
+	}
+	detailsBytes, err := json.Marshal(details)
+	if err != nil {
+		return err
+	}
+
+	summaryText := strings.TrimSpace(run.Summary)
+	if summaryText == "" {
+		summaryText = fmt.Sprintf("Task %s finished with status %s.", task.Key, run.Status)
+	} else {
+		summaryText = fmt.Sprintf("Task %s %s via %s: %s", task.Key, run.Status, run.Executor, summaryText)
+	}
+
+	_, err = service.Store.RecordMemorySummary(ctx, sqlite.RecordMemorySummaryParams{
+		ProjectID:          &project.ID,
+		SourceTranscriptID: &transcript.ID,
+		TaskID:             &task.ID,
+		RunID:              &run.ID,
+		Scope:              task.Scope,
+		ScopeKey:           project.Key,
+		MemoryType:         "episode",
+		Summary:            summaryText,
+		DetailsJSON:        string(detailsBytes),
+	})
+	return err
+}
+
+func normalizeExecutionMetadata(metadata map[string]string) map[string]string {
+	if len(metadata) == 0 {
+		return nil
+	}
+
+	normalized := make(map[string]string, len(metadata))
+	for key, value := range metadata {
+		key = strings.TrimSpace(key)
+		value = strings.TrimSpace(value)
+		if key == "" || value == "" {
+			continue
+		}
+		normalized[key] = value
+	}
+	if len(normalized) == 0 {
+		return nil
+	}
+	return normalized
 }
 
 func (service Service) nextRunAttempt(ctx context.Context, taskID int64) (int, error) {

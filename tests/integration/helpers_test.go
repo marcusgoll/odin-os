@@ -207,20 +207,35 @@ func buildOdinBinary(t *testing.T, repoRoot string) string {
 	t.Helper()
 
 	binaryPath := filepath.Join(t.TempDir(), "odin")
+	buildOdinBinaryAt(t, repoRoot, binaryPath)
+	return binaryPath
+}
+
+func buildOdinBinaryAt(t *testing.T, repoRoot string, binaryPath string) {
+	t.Helper()
+
+	if err := os.MkdirAll(filepath.Dir(binaryPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll(binary dir) error = %v", err)
+	}
 	cmd := exec.Command("go", "build", "-o", binaryPath, "./cmd/odin")
 	cmd.Dir = repoRoot
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("go build ./cmd/odin error = %v\n%s", err, string(output))
 	}
-	return binaryPath
 }
 
 func runOdinCommand(t *testing.T, repoRoot string, binaryPath string, runtimeRoot string, extraEnv map[string]string, stdin string, args ...string) (string, error) {
 	t.Helper()
 
+	return runOdinCommandInDir(t, repoRoot, binaryPath, runtimeRoot, extraEnv, stdin, args...)
+}
+
+func runOdinCommandInDir(t *testing.T, workDir string, binaryPath string, runtimeRoot string, extraEnv map[string]string, stdin string, args ...string) (string, error) {
+	t.Helper()
+
 	cmd := exec.Command(binaryPath, args...)
-	cmd.Dir = repoRoot
+	cmd.Dir = workDir
 	if runtimeRoot != "" {
 		if err := os.MkdirAll(runtimeRoot, 0o755); err != nil {
 			t.Fatalf("MkdirAll(runtimeRoot) error = %v", err)
@@ -239,6 +254,45 @@ func runOdinCommand(t *testing.T, repoRoot string, binaryPath string, runtimeRoo
 
 	output, err := cmd.CombinedOutput()
 	return string(output), err
+}
+
+func runOdinPTYCommandInDir(t *testing.T, workDir string, binaryPath string, runtimeRoot string, extraEnv map[string]string, stdin string, args ...string) (string, error) {
+	t.Helper()
+
+	commandParts := make([]string, 0, len(args)+1)
+	commandParts = append(commandParts, shellSingleQuote(binaryPath))
+	for _, arg := range args {
+		commandParts = append(commandParts, shellSingleQuote(arg))
+	}
+
+	cmd := exec.Command("script", "-qec", strings.Join(commandParts, " "), "/dev/null")
+	cmd.Dir = workDir
+	if runtimeRoot != "" {
+		if err := os.MkdirAll(runtimeRoot, 0o755); err != nil {
+			t.Fatalf("MkdirAll(runtimeRoot) error = %v", err)
+		}
+	}
+
+	env := append([]string{}, os.Environ()...)
+	if runtimeRoot != "" {
+		env = append(env, "ODIN_ROOT="+runtimeRoot)
+	}
+	for key, value := range extraEnv {
+		env = append(env, key+"="+value)
+	}
+	cmd.Env = env
+	cmd.Stdin = bytes.NewBufferString(stdin)
+
+	output, err := cmd.CombinedOutput()
+	normalized := strings.ReplaceAll(string(output), "\r\n", "\n")
+	return normalized, err
+}
+
+func shellSingleQuote(value string) string {
+	if value == "" {
+		return "''"
+	}
+	return "'" + strings.ReplaceAll(value, "'", `'"'"'`) + "'"
 }
 
 func acceptanceHarnessDriverEnv(t *testing.T) map[string]string {

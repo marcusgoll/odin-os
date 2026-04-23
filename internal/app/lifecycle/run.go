@@ -10,6 +10,7 @@ import (
 	"net"
 	stdhttp "net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -33,6 +34,7 @@ import (
 	"odin-os/internal/core/followups"
 	"odin-os/internal/core/initiatives"
 	"odin-os/internal/core/projects"
+	coreworkspace "odin-os/internal/core/workspace"
 	"odin-os/internal/core/workspaces"
 	"odin-os/internal/executors/contract"
 	executorrouter "odin-os/internal/executors/router"
@@ -57,7 +59,7 @@ import (
 
 var errRuntimeNotReady = errors.New("runtime not ready")
 
-const rootUsageBanner = "Usage: odin <command> [args]\n\nCommands: help repl doctor healthcheck serve backup restore verify-backup status project scope jobs runs approvals intake agenda logs task initiative companion profile followup transition skills"
+const rootUsageBanner = "Usage: odin <command> [args]\n\nCommands: help repl doctor healthcheck serve backup restore verify-backup status project workspace scope jobs runs approvals intake agenda logs task initiative companion profile followup transition skills"
 
 var (
 	serveTaskLoopInterval     = 1 * time.Second
@@ -154,7 +156,7 @@ func Run(ctx context.Context, root string, args []string, stdin io.Reader, stdou
 	defer app.Store.Close()
 
 	if len(args) == 0 {
-		_, err := fmt.Fprintln(stdout, "Usage: odin <repl|status|project|transition|task|skills|doctor|healthcheck|serve|backup|restore|verify-backup> ...")
+		_, err := fmt.Fprintln(stdout, "Usage: odin <repl|status|project|workspace|transition|task|skills|doctor|healthcheck|serve|backup|restore|verify-backup> ...")
 		return err
 	}
 
@@ -172,6 +174,8 @@ func Run(ctx context.Context, root string, args []string, stdin io.Reader, stdou
 		return runStatus(ctx, app, cfg, args[1:], stdout)
 	case "project":
 		return runProject(ctx, app, args[1:], stdout)
+	case "workspace":
+		return commands.RunWorkspace(ctx, app.Store, app.Registry, args[1:], stdout)
 	case "scope":
 		return runScope(app, args[1:], stdout)
 	case "jobs":
@@ -311,6 +315,10 @@ func runDoctor(ctx context.Context, app bootstrap.App, cfg appconfig.Config, arg
 		return err
 	}
 
+	workspaceCheck := coreworkspace.DoctorCheck(ctx, app.Registry, os.Getenv, exec.LookPath)
+	report.Checks = append(report.Checks, workspaceCheck)
+	report.Status = combineDoctorStatus(report.Status, workspaceCheck.Status)
+
 	if len(args) > 0 && args[0] == "--json" {
 		encoder := json.NewEncoder(stdout)
 		encoder.SetIndent("", "  ")
@@ -319,6 +327,16 @@ func runDoctor(ctx context.Context, app bootstrap.App, cfg appconfig.Config, arg
 
 	_, err = fmt.Fprintf(stdout, "status=%s checks=%d\n", report.Status, len(report.Checks))
 	return err
+}
+
+func combineDoctorStatus(current healthsvc.Status, next healthsvc.Status) healthsvc.Status {
+	if current == healthsvc.StatusFailed || next == healthsvc.StatusFailed {
+		return healthsvc.StatusFailed
+	}
+	if current == healthsvc.StatusDegraded || next == healthsvc.StatusDegraded {
+		return healthsvc.StatusDegraded
+	}
+	return healthsvc.StatusHealthy
 }
 
 func runRuns(ctx context.Context, app bootstrap.App, args []string, stdout io.Writer) error {
@@ -1353,16 +1371,12 @@ func runProject(ctx context.Context, app bootstrap.App, args []string, stdout io
 	switch len(args) {
 	case 0:
 		return runShellCommand(ctx, app, "/project", stdout)
-	case 1:
-		if strings.EqualFold(args[0], "list") {
-			return runShellCommand(ctx, app, "/project", stdout)
-		}
 	case 2:
 		if strings.EqualFold(args[0], "select") {
 			return runShellCommand(ctx, app, "/project "+args[1], stdout)
 		}
 	}
-	return fmt.Errorf("usage: odin project [list|select <key>]")
+	return commands.RunProject(ctx, app.Store, app.Registry, args, stdout)
 }
 
 func runTransition(ctx context.Context, app bootstrap.App, args []string, stdout io.Writer) error {

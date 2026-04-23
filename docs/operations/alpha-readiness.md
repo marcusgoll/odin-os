@@ -20,6 +20,7 @@ Proof expectations follow [docs/contracts/verification-model.md](/home/orchestra
 - `make test` and `make build` pass.
 - `odin healthcheck` fails closed on a fresh runtime root, succeeds only while a live `odin serve` process has marked that runtime root `ready`, and fails closed again once the daemon drains or stops.
 - `odin doctor --json` returns structured output and shows healthy or honestly degraded state.
+- `odin project enroll`, `odin workspace start`, and `odin workspace handoff` succeed against a copied repo root plus a controlled runtime root for any external project being dogfooded through the project-first workspace path.
 - `odin serve` can restart cleanly and produce restart wake packets for interrupted work.
 - Backup, verify, and restore succeed against the current runtime root.
 - Alpha verification notes clearly distinguish what was proven by real `odin` commands versus what remains unproven.
@@ -44,3 +45,18 @@ Use Odin OS alpha in two ways only:
 - onboard one external project in `shadow` mode and confirm observability, migration context, and read-only governance before any cutover
 
 Do not treat this alpha as a general unattended multi-project mutation controller yet.
+
+## Project Workspace Fast Path
+
+For direct repo work during alpha, use the top-level project/workspace surface first:
+
+```bash
+odin project enroll
+odin workspace start
+odin workspace status --json
+odin workspace handoff objective="Continue inside Odin-managed execution"
+```
+
+That keeps the live Codex session in the real repo while Odin remains the thin control plane for durable tracking and handoff.
+
+For disposable proof, copy the Odin repo root first if you need `odin project enroll`. `ODIN_ROOT` isolates runtime state, but top-level project enrollment still mutates the repo-owned `config/projects.yaml`.

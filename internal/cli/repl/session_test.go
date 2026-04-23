@@ -16,8 +16,9 @@ func TestSessionStoreSaveAndLoad(t *testing.T) {
 	store := SessionStore{Path: path}
 
 	want := Cache{
-		ProjectKey: "alpha",
-		Mode:       ModeAct,
+		ProjectKey:          "alpha",
+		Mode:                ModeAct,
+		SelectedWorkflowKey: "marcus-social-growth-workflow",
 	}
 
 	if err := store.Save(want); err != nil {
@@ -43,8 +44,9 @@ func TestResolveStartupStateRestoresValidProjectAndMode(t *testing.T) {
 	})
 
 	state := ResolveStartupState(Cache{
-		ProjectKey: "alpha",
-		Mode:       ModeAct,
+		ProjectKey:          "alpha",
+		Mode:                ModeAct,
+		SelectedWorkflowKey: "marcus-social-growth-workflow",
 	}, registry)
 
 	if state.Mode != ModeAct {
@@ -52,6 +54,9 @@ func TestResolveStartupStateRestoresValidProjectAndMode(t *testing.T) {
 	}
 	if state.Scope.Kind != scope.ScopeProject || state.Scope.ProjectKey != "alpha" {
 		t.Fatalf("Scope = %+v, want project alpha", state.Scope)
+	}
+	if state.SelectedWorkflowKey != "marcus-social-growth-workflow" {
+		t.Fatalf("SelectedWorkflowKey = %q, want marcus-social-growth-workflow", state.SelectedWorkflowKey)
 	}
 }
 

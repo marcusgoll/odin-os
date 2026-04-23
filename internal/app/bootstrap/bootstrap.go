@@ -28,6 +28,7 @@ type App struct {
 	Store               *sqlite.Store
 	RepoRoot            string
 	Registry            projects.Registry
+	RegistrySnapshot    registry.Snapshot
 	RegistryDiagnostics []projects.Diagnostic
 	SessionStore        clistate.SessionStore
 	ExecutorConfig      executorrouter.Config
@@ -164,7 +165,7 @@ func Load(ctx context.Context, repoRoot string, runtimeRoot string) (App, error)
 		_ = store.Close()
 		return App{}, err
 	}
-	executors := executorrouter.DefaultCatalog()
+	executors := executorrouter.DefaultCatalogForRepo(repoRoot)
 
 	if bootID != "" {
 		if err := initializeReadinessState(ctx, store, filepath.Join(repoRoot, "registry"), registrySnapshot, executorConfig, executors); err != nil {
@@ -180,6 +181,7 @@ func Load(ctx context.Context, repoRoot string, runtimeRoot string) (App, error)
 		Store:               store,
 		RepoRoot:            repoRoot,
 		Registry:            registry,
+		RegistrySnapshot:    registrySnapshot,
 		RegistryDiagnostics: diagnostics,
 		SessionStore: clistate.SessionStore{
 			Path: filepath.Join(runtimeRoot, "state", "cache", "cli-session.json"),
