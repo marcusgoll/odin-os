@@ -154,6 +154,42 @@ func TestLoadResumeStateRehydratesLatestWakePacket(t *testing.T) {
 	}
 }
 
+func TestCompactIncludesProjectAndRunFactsWhenProvided(t *testing.T) {
+	ctx := context.Background()
+	store := openCheckpointTestStore(t, "facts.db")
+	defer store.Close()
+
+	_, task, run := seedCheckpointTask(t, ctx, store)
+	service := Service{Store: store}
+
+	result, err := service.Compact(ctx, CompactParams{
+		TaskID:        task.ID,
+		RunID:         &run.ID,
+		Trigger:       TriggerHandoff,
+		CheckpointKey: "handoff-1",
+		Objective:     "Hand off workspace progress",
+		TaskStatus:    "queued",
+		ProjectFacts: map[string]string{
+			"branch":      "main",
+			"head":        "abc123",
+			"current_cwd": "/tmp/repo/docs",
+		},
+		RunFacts: map[string]string{
+			"session_name": "odin-workspace-alpha",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Compact() error = %v", err)
+	}
+
+	if result.Project.Facts["branch"] != "main" {
+		t.Fatalf("Project.Facts = %#v, want branch=main", result.Project.Facts)
+	}
+	if result.Run == nil || result.Run.Facts["session_name"] != "odin-workspace-alpha" {
+		t.Fatalf("Run.Facts = %#v, want session_name", result.Run)
+	}
+}
+
 func openCheckpointTestStore(t *testing.T, name string) *sqlite.Store {
 	t.Helper()
 

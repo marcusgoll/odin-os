@@ -28,6 +28,9 @@ func (broker *Broker) Catalog(scope string) []catalog.Card {
 	cards := make([]catalog.Card, 0, len(broker.builtins)+len(broker.snapshot.Items))
 
 	for _, definition := range broker.builtins {
+		if definition.Hidden {
+			continue
+		}
 		if catalog.MatchesScope(definition.Scopes, scope) {
 			cards = append(cards, definition.Card())
 		}
@@ -48,7 +51,7 @@ func (broker *Broker) Catalog(scope string) []catalog.Card {
 }
 
 func (broker *Broker) Expand(key string) (catalog.Expansion, error) {
-	if definition, ok := broker.builtins[key]; ok {
+	if definition, ok := broker.resolveBuiltinDefinition(key); ok {
 		if err := broker.tracker.RecordSelection(definition.BudgetCost); err != nil {
 			return catalog.Expansion{}, err
 		}
@@ -113,7 +116,7 @@ func (broker *Broker) Expand(key string) (catalog.Expansion, error) {
 }
 
 func (broker *Broker) InvokeTool(key string, input map[string]string) (catalog.StructuredResult, error) {
-	definition, ok := broker.builtins[key]
+	definition, ok := broker.resolveBuiltinDefinition(key)
 	if !ok {
 		return catalog.StructuredResult{}, fmt.Errorf("unknown tool %q", key)
 	}
@@ -143,6 +146,24 @@ func (broker *Broker) Compact(result catalog.StructuredResult) (catalog.Compacte
 
 func (broker *Broker) Usage() budgets.Usage {
 	return broker.tracker.Usage()
+}
+
+// resolveBuiltinDefinition accepts either a canonical tool key or a hidden alias
+// and always returns the canonical builtin definition that should back broker
+// expansion and invocation.
+func (broker *Broker) resolveBuiltinDefinition(key string) (catalog.ToolDefinition, bool) {
+	definition, ok := broker.builtins[key]
+	if !ok {
+		return catalog.ToolDefinition{}, false
+	}
+	if definition.CanonicalKey == "" || definition.CanonicalKey == definition.Key {
+		return definition, true
+	}
+	canonical, ok := broker.builtins[definition.CanonicalKey]
+	if !ok {
+		return catalog.ToolDefinition{}, false
+	}
+	return canonical, true
 }
 
 func cloneStringMap(values map[string]string) map[string]string {

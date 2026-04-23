@@ -13,6 +13,8 @@ func TestRenderHeaderIncludesScopeModeHealthApprovalsAndActiveTask(t *testing.T)
 		Mode:             "ask",
 		Health:           "ok",
 		PendingApprovals: 2,
+		SelectedSkill:    "pixel-perfect-ui-ux-designer",
+		SelectedWorkflow: "marcus-social-growth-workflow",
 		ActiveTask:       "task-12",
 	}
 
@@ -23,6 +25,8 @@ func TestRenderHeaderIncludesScopeModeHealthApprovalsAndActiveTask(t *testing.T)
 		"mode=ask",
 		"health=ok",
 		"approvals=2",
+		"skill=pixel-perfect-ui-ux-designer",
+		"workflow=marcus-social-growth-workflow",
 		"task=task-12",
 	} {
 		if !strings.Contains(rendered, want) {

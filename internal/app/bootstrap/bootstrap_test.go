@@ -3,6 +3,7 @@ package bootstrap
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"sync/atomic"
 	"testing"
@@ -137,6 +138,31 @@ func TestLoadReturnsBootstrapTimeoutWhenLockWaitExceedsConfiguredLimit(t *testin
 	}
 }
 
+func TestLoadUsesRepoRootForAuthoredConfigAndRuntimeRootForState(t *testing.T) {
+	repoRoot := t.TempDir()
+	runtimeRoot := t.TempDir()
+	writeBootstrapRepoFixture(t, repoRoot)
+
+	app, err := Load(context.Background(), repoRoot, runtimeRoot)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	defer app.Store.Close()
+
+	if app.RepoRoot != repoRoot {
+		t.Fatalf("RepoRoot = %q, want %q", app.RepoRoot, repoRoot)
+	}
+	if app.Registry.ConfigPath() != filepath.Join(repoRoot, "config", "projects.yaml") {
+		t.Fatalf("Registry.ConfigPath() = %q, want repo-root projects.yaml", app.Registry.ConfigPath())
+	}
+	if app.SessionStore.Path != filepath.Join(runtimeRoot, "state", "cache", "cli-session.json") {
+		t.Fatalf("SessionStore.Path = %q, want runtime-root session cache", app.SessionStore.Path)
+	}
+	if _, err := os.Stat(filepath.Join(runtimeRoot, "data", "odin.db")); err != nil {
+		t.Fatalf("runtime database missing under runtime root: %v", err)
+	}
+}
+
 func assertCountAtLeast(t *testing.T, row rowScanner, minimum int) {
 	t.Helper()
 
@@ -151,4 +177,79 @@ func assertCountAtLeast(t *testing.T, row rowScanner, minimum int) {
 
 type rowScanner interface {
 	Scan(...any) error
+}
+
+func writeBootstrapRepoFixture(t *testing.T, root string) {
+	t.Helper()
+
+	for _, dir := range []string{
+		filepath.Join(root, "config"),
+		filepath.Join(root, "registry"),
+		filepath.Join(root, ".git"),
+	} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("MkdirAll(%s) error = %v", dir, err)
+		}
+	}
+
+	if err := os.WriteFile(filepath.Join(root, "config", "projects.yaml"), []byte(`
+version: 1
+projects:
+  - key: odin-core
+    name: Odin Core
+    project_class: system_project
+    system_project: true
+    git_root: ..
+    default_branch: main
+    policy:
+      allowed_commands: [status]
+      branch_rules:
+        protected_branches: [main]
+        require_worktree: true
+        require_task_branch: true
+        allow_default_branch_mutation: false
+      approval_gates:
+        require_for_governance_changes: true
+        require_for_destructive_operations: true
+        require_for_system_project_changes: true
+      merge_policy:
+        mode: squash
+        allow_direct_to_default_branch: false
+      destructive_operations:
+        allow_reset: false
+        allow_clean: false
+        allow_force_push: false
+        require_explicit_approval: true
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile(projects.yaml) error = %v", err)
+	}
+
+	if err := os.WriteFile(filepath.Join(root, "config", "executors.yaml"), []byte(`
+version: 1
+executors:
+  - key: codex_headless
+    adapter: codex_headless
+    class: plan_backed_cli
+    enabled: true
+    priority: 10
+routes:
+  - name: default
+    match:
+      task_kinds: [general, plan, build, review, qa, research]
+      scopes: [global, odin-core, project, new-project]
+    preferred: [codex_headless]
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile(executors.yaml) error = %v", err)
+	}
+
+	if err := os.WriteFile(filepath.Join(root, "config", "odin.yaml"), []byte(`
+version: 1
+runtime:
+  root: .
+service:
+  http_addr: 127.0.0.1:9443
+  startup_recovery: true
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile(odin.yaml) error = %v", err)
+	}
 }

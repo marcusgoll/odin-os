@@ -2,12 +2,577 @@ package sqlite
 
 import (
 	"context"
+	"encoding/json"
 	"path/filepath"
 	"testing"
 
 	runtimeevents "odin-os/internal/runtime/events"
 	"odin-os/internal/runtime/projections"
 )
+
+func TestConversationTranscriptsRecordAndListByScope(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	globalProject, project, task, run := seedMemoryFixture(t, ctx, store)
+
+	globalTranscript, err := store.RecordConversationTranscript(ctx, RecordConversationTranscriptParams{
+		Scope:       "global",
+		ScopeKey:    "global",
+		Mode:        "ask",
+		Prompt:      "hello there",
+		Response:    "hi",
+		ToolSummary: `{"tools":[]}`,
+	})
+	if err != nil {
+		t.Fatalf("RecordConversationTranscript(global) error = %v", err)
+	}
+	if globalTranscript.ProjectID != nil {
+		t.Fatalf("global transcript ProjectID = %v, want nil", *globalTranscript.ProjectID)
+	}
+
+	projectTranscript, err := store.RecordConversationTranscript(ctx, RecordConversationTranscriptParams{
+		ProjectID:   &project.ID,
+		TaskID:      &task.ID,
+		RunID:       &run.ID,
+		Scope:       "project",
+		ScopeKey:    project.Key,
+		Mode:        "act",
+		Prompt:      "implement memory",
+		Response:    "completed",
+		ToolSummary: `{"executor":"codex_headless"}`,
+	})
+	if err != nil {
+		t.Fatalf("RecordConversationTranscript(project) error = %v", err)
+	}
+	if projectTranscript.ProjectID == nil || *projectTranscript.ProjectID != project.ID {
+		t.Fatalf("project transcript ProjectID = %v, want %d", projectTranscript.ProjectID, project.ID)
+	}
+
+	globalOnly, err := store.ListConversationTranscripts(ctx, ListConversationTranscriptsParams{
+		Scope:    "global",
+		ScopeKey: "global",
+	})
+	if err != nil {
+		t.Fatalf("ListConversationTranscripts(global) error = %v", err)
+	}
+	if len(globalOnly) != 1 || globalOnly[0].ID != globalTranscript.ID {
+		t.Fatalf("global transcripts = %+v, want only global transcript", globalOnly)
+	}
+
+	projectOnly, err := store.ListConversationTranscripts(ctx, ListConversationTranscriptsParams{
+		ProjectID: &project.ID,
+		Scope:     "project",
+		ScopeKey:  project.Key,
+	})
+	if err != nil {
+		t.Fatalf("ListConversationTranscripts(project) error = %v", err)
+	}
+	if len(projectOnly) != 1 || projectOnly[0].ID != projectTranscript.ID {
+		t.Fatalf("project transcripts = %+v, want only project transcript", projectOnly)
+	}
+
+	coreOnly, err := store.ListConversationTranscripts(ctx, ListConversationTranscriptsParams{
+		ProjectID: &globalProject.ID,
+		Scope:     "odin-core",
+		ScopeKey:  globalProject.Key,
+	})
+	if err != nil {
+		t.Fatalf("ListConversationTranscripts(odin-core) error = %v", err)
+	}
+	if len(coreOnly) != 0 {
+		t.Fatalf("odin-core transcripts = %+v, want none", coreOnly)
+	}
+}
+
+func TestMemorySummariesRecordSeparatelyFromTranscripts(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	_, project, _, _ := seedMemoryFixture(t, ctx, store)
+
+	transcript, err := store.RecordConversationTranscript(ctx, RecordConversationTranscriptParams{
+		ProjectID:   &project.ID,
+		Scope:       "project",
+		ScopeKey:    project.Key,
+		Mode:        "ask",
+		Prompt:      "remember this convention",
+		Response:    "noted",
+		ToolSummary: `{"tools":[]}`,
+	})
+	if err != nil {
+		t.Fatalf("RecordConversationTranscript() error = %v", err)
+	}
+
+	summary, err := store.RecordMemorySummary(ctx, RecordMemorySummaryParams{
+		ProjectID:          &project.ID,
+		SourceTranscriptID: &transcript.ID,
+		Scope:              "project",
+		ScopeKey:           project.Key,
+		MemoryType:         "project_summary",
+		Summary:            "Alpha uses worktree isolation for mutating tasks.",
+		DetailsJSON:        `{"source":"compaction"}`,
+	})
+	if err != nil {
+		t.Fatalf("RecordMemorySummary() error = %v", err)
+	}
+	if summary.SourceTranscriptID == nil || *summary.SourceTranscriptID != transcript.ID {
+		t.Fatalf("summary.SourceTranscriptID = %v, want %d", summary.SourceTranscriptID, transcript.ID)
+	}
+
+	transcripts, err := store.ListConversationTranscripts(ctx, ListConversationTranscriptsParams{
+		ProjectID: &project.ID,
+		Scope:     "project",
+		ScopeKey:  project.Key,
+	})
+	if err != nil {
+		t.Fatalf("ListConversationTranscripts() error = %v", err)
+	}
+	if len(transcripts) != 1 {
+		t.Fatalf("transcripts len = %d, want 1", len(transcripts))
+	}
+
+	summaries, err := store.ListMemorySummaries(ctx, ListMemorySummariesParams{
+		ProjectID: &project.ID,
+		Scope:     "project",
+		ScopeKey:  project.Key,
+	})
+	if err != nil {
+		t.Fatalf("ListMemorySummaries() error = %v", err)
+	}
+	if len(summaries) != 1 || summaries[0].ID != summary.ID {
+		t.Fatalf("summaries = %+v, want only recorded summary", summaries)
+	}
+}
+
+func TestUpdateMemorySummaryDetails(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	_, project, _, _ := seedMemoryFixture(t, ctx, store)
+
+	summary, err := store.RecordMemorySummary(ctx, RecordMemorySummaryParams{
+		ProjectID:   &project.ID,
+		Scope:       "project",
+		ScopeKey:    project.Key,
+		MemoryType:  "social_draft",
+		Summary:     "Draft awaiting approval",
+		DetailsJSON: `{"source":"cli","scope":"project","scope_key":"alpha","fields":{"approval":"pending","channel":"x","content_kind":"post"}}`,
+	})
+	if err != nil {
+		t.Fatalf("RecordMemorySummary() error = %v", err)
+	}
+
+	updated, err := store.UpdateMemorySummaryDetails(ctx, UpdateMemorySummaryDetailsParams{
+		MemoryID:    summary.ID,
+		DetailsJSON: `{"source":"cli","scope":"project","scope_key":"alpha","fields":{"approval":"approved","channel":"x","content_kind":"post"}}`,
+	})
+	if err != nil {
+		t.Fatalf("UpdateMemorySummaryDetails() error = %v", err)
+	}
+	if updated.ID != summary.ID {
+		t.Fatalf("updated.ID = %d, want %d", updated.ID, summary.ID)
+	}
+	if updated.DetailsJSON != `{"source":"cli","scope":"project","scope_key":"alpha","fields":{"approval":"approved","channel":"x","content_kind":"post"}}` {
+		t.Fatalf("updated.DetailsJSON = %q, want updated details", updated.DetailsJSON)
+	}
+	if !updated.UpdatedAt.After(updated.CreatedAt) && !updated.UpdatedAt.Equal(updated.CreatedAt) {
+		t.Fatalf("updated timestamps invalid: created=%s updated=%s", updated.CreatedAt, updated.UpdatedAt)
+	}
+
+	summaries, err := store.ListMemorySummaries(ctx, ListMemorySummariesParams{
+		ProjectID: &project.ID,
+		Scope:     "project",
+		ScopeKey:  project.Key,
+	})
+	if err != nil {
+		t.Fatalf("ListMemorySummaries() error = %v", err)
+	}
+	if len(summaries) != 1 {
+		t.Fatalf("summaries len = %d, want 1", len(summaries))
+	}
+	if summaries[0].DetailsJSON != updated.DetailsJSON {
+		t.Fatalf("stored details = %q, want %q", summaries[0].DetailsJSON, updated.DetailsJSON)
+	}
+
+	events, err := store.ListEvents(ctx, ListEventsParams{})
+	if err != nil {
+		t.Fatalf("ListEvents() error = %v", err)
+	}
+	var updatedEventFound bool
+	for _, event := range events {
+		if event.Type != runtimeevents.EventMemorySummaryUpdated {
+			continue
+		}
+		if event.StreamType != runtimeevents.StreamMemorySummary {
+			t.Fatalf("memory update event stream type = %q, want %q", event.StreamType, runtimeevents.StreamMemorySummary)
+		}
+		var payload runtimeevents.MemorySummaryUpdatedPayload
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			t.Fatalf("json.Unmarshal(memory update payload) error = %v", err)
+		}
+		if payload.Scope != "project" || payload.ScopeKey != project.Key || payload.MemoryType != "social_draft" {
+			t.Fatalf("memory update payload = %+v, want project social_draft payload", payload)
+		}
+		updatedEventFound = true
+	}
+	if !updatedEventFound {
+		t.Fatal("memory summary updated event not found")
+	}
+}
+
+func TestConversationAndMemoryWritesEmitEvents(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	_, project, _, _ := seedMemoryFixture(t, ctx, store)
+
+	globalTranscript, err := store.RecordConversationTranscript(ctx, RecordConversationTranscriptParams{
+		Scope:       "global",
+		ScopeKey:    "global",
+		Mode:        "ask",
+		Prompt:      "remember preference",
+		Response:    "stored",
+		ToolSummary: `{"tools":[]}`,
+	})
+	if err != nil {
+		t.Fatalf("RecordConversationTranscript(global) error = %v", err)
+	}
+
+	transcript, err := store.RecordConversationTranscript(ctx, RecordConversationTranscriptParams{
+		ProjectID:   &project.ID,
+		Scope:       "project",
+		ScopeKey:    project.Key,
+		Mode:        "ask",
+		Prompt:      "hello",
+		Response:    "hi",
+		ToolSummary: `{"tools":[]}`,
+	})
+	if err != nil {
+		t.Fatalf("RecordConversationTranscript() error = %v", err)
+	}
+	if _, err := store.RecordMemorySummary(ctx, RecordMemorySummaryParams{
+		ProjectID:          &project.ID,
+		SourceTranscriptID: &transcript.ID,
+		Scope:              "project",
+		ScopeKey:           project.Key,
+		MemoryType:         "project_summary",
+		Summary:            "Alpha conversations can be compacted into memory.",
+		DetailsJSON:        `{"source":"test"}`,
+	}); err != nil {
+		t.Fatalf("RecordMemorySummary() error = %v", err)
+	}
+
+	events, err := store.ListEvents(ctx, ListEventsParams{})
+	if err != nil {
+		t.Fatalf("ListEvents() error = %v", err)
+	}
+
+	var globalTranscriptFound bool
+	var projectTranscriptFound bool
+	var summaryEvents int
+	for _, event := range events {
+		switch event.Type {
+		case runtimeevents.EventConversationTranscriptRecorded:
+			if event.StreamType != runtimeevents.StreamConversation {
+				t.Fatalf("conversation event stream type = %q, want %q", event.StreamType, runtimeevents.StreamConversation)
+			}
+			var payload runtimeevents.ConversationTranscriptRecordedPayload
+			if err := json.Unmarshal(event.Payload, &payload); err != nil {
+				t.Fatalf("json.Unmarshal(conversation payload) error = %v", err)
+			}
+			switch {
+			case event.StreamID == globalTranscript.ID:
+				if payload.Scope != "global" || payload.ScopeKey != "global" || payload.Mode != "ask" {
+					t.Fatalf("global transcript payload = %+v, want global ask payload", payload)
+				}
+				globalTranscriptFound = true
+			case event.StreamID == transcript.ID:
+				if payload.Scope != "project" || payload.ScopeKey != project.Key || payload.Mode != "ask" {
+					t.Fatalf("project transcript payload = %+v, want project ask payload", payload)
+				}
+				projectTranscriptFound = true
+			}
+		case runtimeevents.EventMemorySummaryRecorded:
+			summaryEvents++
+			if event.StreamType != runtimeevents.StreamMemorySummary {
+				t.Fatalf("memory summary event stream type = %q, want %q", event.StreamType, runtimeevents.StreamMemorySummary)
+			}
+			var payload runtimeevents.MemorySummaryRecordedPayload
+			if err := json.Unmarshal(event.Payload, &payload); err != nil {
+				t.Fatalf("json.Unmarshal(memory payload) error = %v", err)
+			}
+			if payload.Scope != "project" || payload.ScopeKey != project.Key || payload.MemoryType != "project_summary" {
+				t.Fatalf("memory summary payload = %+v, want project summary payload", payload)
+			}
+			if payload.SourceTranscriptID == nil || *payload.SourceTranscriptID != transcript.ID {
+				t.Fatalf("payload.SourceTranscriptID = %v, want %d", payload.SourceTranscriptID, transcript.ID)
+			}
+		}
+	}
+	if !globalTranscriptFound {
+		t.Fatalf("global transcript event not found")
+	}
+	if !projectTranscriptFound {
+		t.Fatalf("project transcript event not found")
+	}
+	if summaryEvents != 1 {
+		t.Fatalf("memory summary event count = %d, want 1", summaryEvents)
+	}
+}
+
+func TestFinishRunIfRunningPreservesCancelledRun(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	project, err := store.CreateProject(ctx, CreateProjectParams{
+		Key:           "alpha",
+		Name:          "Alpha",
+		Scope:         "project",
+		GitRoot:       "/tmp/alpha",
+		DefaultBranch: "main",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+	task, err := store.CreateTask(ctx, CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "alpha-task",
+		Title:       "Alpha task",
+		Status:      "running",
+		Scope:       "project",
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+	run, err := store.StartRun(ctx, StartRunParams{
+		TaskID:   task.ID,
+		Executor: "codex",
+		Attempt:  1,
+		Status:   "running",
+	})
+	if err != nil {
+		t.Fatalf("StartRun() error = %v", err)
+	}
+	run, err = store.FinishRun(ctx, FinishRunParams{
+		RunID:   run.ID,
+		Status:  "cancelled",
+		Summary: "cancelled by operator",
+	})
+	if err != nil {
+		t.Fatalf("FinishRun(cancelled) error = %v", err)
+	}
+
+	preserved, finished, err := store.FinishRunIfRunning(ctx, FinishRunParams{
+		RunID:   run.ID,
+		Status:  "failed",
+		Summary: "executor failed after cancellation",
+	})
+	if err != nil {
+		t.Fatalf("FinishRunIfRunning() error = %v", err)
+	}
+	if finished {
+		t.Fatal("FinishRunIfRunning() finished = true, want false for preserved cancelled run")
+	}
+	if preserved.Status != "cancelled" {
+		t.Fatalf("preserved.Status = %q, want cancelled", preserved.Status)
+	}
+	if preserved.Summary != "cancelled by operator" {
+		t.Fatalf("preserved.Summary = %q, want original cancellation summary", preserved.Summary)
+	}
+}
+
+func TestConversationTranscriptRejectsMismatchedLineage(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	_, project, task, _ := seedMemoryFixture(t, ctx, store)
+
+	otherProject, err := store.CreateProject(ctx, CreateProjectParams{
+		Key:           "beta",
+		Name:          "Beta",
+		Scope:         "project",
+		GitRoot:       "/tmp/beta",
+		DefaultBranch: "main",
+		GitHubRepo:    "acme/beta",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject(beta) error = %v", err)
+	}
+	otherTask, err := store.CreateTask(ctx, CreateTaskParams{
+		ProjectID:   otherProject.ID,
+		Key:         "beta-memory",
+		Title:       "beta memory fixture",
+		Status:      "running",
+		Scope:       "project",
+		RequestedBy: "test",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask(beta) error = %v", err)
+	}
+	otherRun, err := store.StartRun(ctx, StartRunParams{
+		TaskID:   otherTask.ID,
+		Executor: "codex_headless",
+		Attempt:  1,
+		Status:   "running",
+	})
+	if err != nil {
+		t.Fatalf("StartRun(beta) error = %v", err)
+	}
+
+	for _, tc := range []struct {
+		name   string
+		params RecordConversationTranscriptParams
+	}{
+		{
+			name: "task belongs to different project",
+			params: RecordConversationTranscriptParams{
+				ProjectID: &project.ID,
+				TaskID:    &otherTask.ID,
+				Scope:     "project",
+				ScopeKey:  project.Key,
+				Mode:      "act",
+				Prompt:    "bad lineage",
+				Response:  "bad lineage",
+			},
+		},
+		{
+			name: "run belongs to different task",
+			params: RecordConversationTranscriptParams{
+				ProjectID: &project.ID,
+				TaskID:    &task.ID,
+				RunID:     &otherRun.ID,
+				Scope:     "project",
+				ScopeKey:  project.Key,
+				Mode:      "act",
+				Prompt:    "bad lineage",
+				Response:  "bad lineage",
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := store.RecordConversationTranscript(ctx, tc.params); err == nil {
+				t.Fatalf("RecordConversationTranscript() error = nil, want lineage validation failure")
+			}
+		})
+	}
+}
+
+func TestMemorySummaryRejectsMismatchedSourceLineage(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	_, project, task, run := seedMemoryFixture(t, ctx, store)
+
+	transcript, err := store.RecordConversationTranscript(ctx, RecordConversationTranscriptParams{
+		ProjectID:   &project.ID,
+		TaskID:      &task.ID,
+		RunID:       &run.ID,
+		Scope:       "project",
+		ScopeKey:    project.Key,
+		Mode:        "act",
+		Prompt:      "persist episode",
+		Response:    "completed",
+		ToolSummary: `{"executor":"codex_headless"}`,
+		Executor:    "codex_headless",
+	})
+	if err != nil {
+		t.Fatalf("RecordConversationTranscript() error = %v", err)
+	}
+
+	otherProject, err := store.CreateProject(ctx, CreateProjectParams{
+		Key:           "beta",
+		Name:          "Beta",
+		Scope:         "project",
+		GitRoot:       "/tmp/beta",
+		DefaultBranch: "main",
+		GitHubRepo:    "acme/beta",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject(beta) error = %v", err)
+	}
+	otherTask, err := store.CreateTask(ctx, CreateTaskParams{
+		ProjectID:   otherProject.ID,
+		Key:         "beta-memory",
+		Title:       "beta memory fixture",
+		Status:      "running",
+		Scope:       "project",
+		RequestedBy: "test",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask(beta) error = %v", err)
+	}
+	otherRun, err := store.StartRun(ctx, StartRunParams{
+		TaskID:   otherTask.ID,
+		Executor: "codex_headless",
+		Attempt:  1,
+		Status:   "running",
+	})
+	if err != nil {
+		t.Fatalf("StartRun(beta) error = %v", err)
+	}
+
+	for _, tc := range []struct {
+		name   string
+		params RecordMemorySummaryParams
+	}{
+		{
+			name: "project-scoped source requires matching project",
+			params: RecordMemorySummaryParams{
+				SourceTranscriptID: &transcript.ID,
+				Scope:              "project",
+				ScopeKey:           project.Key,
+				MemoryType:         "episode",
+				Summary:            "mismatch",
+				DetailsJSON:        `{"source":"test"}`,
+			},
+		},
+		{
+			name: "source transcript project mismatch",
+			params: RecordMemorySummaryParams{
+				ProjectID:          &otherProject.ID,
+				SourceTranscriptID: &transcript.ID,
+				TaskID:             &otherTask.ID,
+				Scope:              "project",
+				ScopeKey:           otherProject.Key,
+				MemoryType:         "episode",
+				Summary:            "mismatch",
+				DetailsJSON:        `{"source":"test"}`,
+			},
+		},
+		{
+			name: "source transcript run mismatch",
+			params: RecordMemorySummaryParams{
+				ProjectID:          &project.ID,
+				SourceTranscriptID: &transcript.ID,
+				TaskID:             &task.ID,
+				RunID:              &otherRun.ID,
+				Scope:              "project",
+				ScopeKey:           project.Key,
+				MemoryType:         "episode",
+				Summary:            "mismatch",
+				DetailsJSON:        `{"source":"test"}`,
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := store.RecordMemorySummary(ctx, tc.params); err == nil {
+				t.Fatalf("RecordMemorySummary() error = nil, want lineage validation failure")
+			}
+		})
+	}
+}
 
 func TestStoreMigrateLifecycleAndReopen(t *testing.T) {
 	ctx := context.Background()
@@ -224,8 +789,12 @@ func TestStoreMigrateLifecycleAndReopen(t *testing.T) {
 	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM schema_migrations`).Scan(&migrationCount); err != nil {
 		t.Fatalf("schema_migrations count query error = %v", err)
 	}
-	if migrationCount != 6 {
-		t.Fatalf("schema_migrations count = %d, want 6", migrationCount)
+	migrations, err := loadMigrations()
+	if err != nil {
+		t.Fatalf("loadMigrations() error = %v", err)
+	}
+	if migrationCount != len(migrations) {
+		t.Fatalf("schema_migrations count = %d, want %d", migrationCount, len(migrations))
 	}
 
 	if err := store.Close(); err != nil {
@@ -265,6 +834,73 @@ func TestStoreMigrateLifecycleAndReopen(t *testing.T) {
 	if gotApproval.Status != "approved" {
 		t.Fatalf("GetApproval().Status = %q, want %q", gotApproval.Status, "approved")
 	}
+}
+
+func openTestStore(t *testing.T) *Store {
+	t.Helper()
+
+	store, err := Open(filepath.Join(t.TempDir(), "odin.db"))
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	if err := store.Migrate(context.Background()); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
+	}
+	return store
+}
+
+func seedMemoryFixture(t *testing.T, ctx context.Context, store *Store) (Project, Project, Task, Run) {
+	t.Helper()
+
+	coreProject, err := store.CreateProject(ctx, CreateProjectParams{
+		Key:           "odin-core",
+		Name:          "Odin Core",
+		Scope:         "odin-core",
+		GitRoot:       "/home/orchestrator/odin-os",
+		DefaultBranch: "main",
+		GitHubRepo:    "example/odin-os",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject(odin-core) error = %v", err)
+	}
+
+	project, err := store.CreateProject(ctx, CreateProjectParams{
+		Key:           "alpha",
+		Name:          "Alpha",
+		Scope:         "project",
+		GitRoot:       "/tmp/alpha",
+		DefaultBranch: "main",
+		GitHubRepo:    "acme/alpha",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject(alpha) error = %v", err)
+	}
+
+	task, err := store.CreateTask(ctx, CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "alpha-memory",
+		Title:       "memory fixture",
+		Status:      "running",
+		Scope:       "project",
+		RequestedBy: "test",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+
+	run, err := store.StartRun(ctx, StartRunParams{
+		TaskID:   task.ID,
+		Executor: "codex_headless",
+		Attempt:  1,
+		Status:   "running",
+	})
+	if err != nil {
+		t.Fatalf("StartRun() error = %v", err)
+	}
+
+	return coreProject, project, task, run
 }
 
 func TestProjectTransitionStateLifecycle(t *testing.T) {

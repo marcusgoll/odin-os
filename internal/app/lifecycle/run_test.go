@@ -103,3 +103,19 @@ service:
 		t.Fatalf("Run() output = %q, want help", output)
 	}
 }
+
+func TestRunHelpDoesNotRequireBootstrapState(t *testing.T) {
+	t.Parallel()
+
+	var stdout bytes.Buffer
+	if err := Run(context.Background(), t.TempDir(), []string{"help"}, strings.NewReader(""), &stdout); err != nil {
+		t.Fatalf("Run(help) error = %v", err)
+	}
+
+	output := stdout.String()
+	for _, want := range []string{"Usage:", "odin help", "odin workspace", "odin project enroll", "odin workspace handoff", "/skill", "/tool"} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("Run(help) output = %q, want substring %q", output, want)
+		}
+	}
+}

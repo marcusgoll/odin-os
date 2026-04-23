@@ -165,3 +165,7 @@ func isGitRepository(root string) bool {
 	}
 	return info.Mode().IsRegular() || info.IsDir()
 }
+
+func IsGitRepository(root string) bool {
+	return isGitRepository(root)
+}

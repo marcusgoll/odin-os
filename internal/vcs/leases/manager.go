@@ -3,7 +3,10 @@ package leases
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
+	"os"
+	"strings"
 
 	"odin-os/internal/store/sqlite"
 	"odin-os/internal/vcs/branches"
@@ -70,53 +73,78 @@ func (manager Manager) Prepare(ctx context.Context, request Request) (Assignment
 		return Assignment{}, err
 	}
 
-	branchName := branches.Name(branches.NameParams{
-		ProjectKey: request.ProjectKey,
-		TaskID:     request.TaskID,
-		RunID:      request.RunID,
-		Try:        request.Try,
-	})
-	worktreePath := worktrees.ResolvePath(worktrees.PathParams{
-		Root:       manager.WorktreeRoot,
-		ProjectKey: request.ProjectKey,
-		TaskID:     request.TaskID,
-		RunID:      request.RunID,
-		Try:        request.Try,
-	})
-
-	exists, err := manager.Git.BranchExists(ctx, request.RepoRoot, branchName)
-	if err != nil {
-		return Assignment{}, err
+	baseTry := request.Try
+	if baseTry <= 0 {
+		baseTry = 1
 	}
-	if !exists {
-		if err := manager.Git.CreateBranch(ctx, request.RepoRoot, branchName, request.DefaultBranch); err != nil {
+
+	const maxPrepareTries = 20
+	for try := baseTry; try < baseTry+maxPrepareTries; try++ {
+		branchName := branches.Name(branches.NameParams{
+			ProjectKey: request.ProjectKey,
+			TaskID:     request.TaskID,
+			RunID:      request.RunID,
+			Try:        try,
+		})
+		worktreePath := worktrees.ResolvePath(worktrees.PathParams{
+			Root:       manager.WorktreeRoot,
+			ProjectKey: request.ProjectKey,
+			TaskID:     request.TaskID,
+			RunID:      request.RunID,
+			Try:        try,
+		})
+
+		if _, statErr := os.Stat(worktreePath); statErr == nil {
+			continue
+		} else if !os.IsNotExist(statErr) {
+			return Assignment{}, statErr
+		}
+
+		exists, err := manager.Git.BranchExists(ctx, request.RepoRoot, branchName)
+		if err != nil {
 			return Assignment{}, err
 		}
-	}
+		if !exists {
+			if err := manager.Git.CreateBranch(ctx, request.RepoRoot, branchName, request.DefaultBranch); err != nil {
+				return Assignment{}, err
+			}
+		}
 
-	lease, err := manager.Store.CreateWorktreeLease(ctx, sqlite.CreateWorktreeLeaseParams{
-		ProjectID:    request.ProjectID,
-		TaskID:       request.TaskID,
-		RunID:        request.RunID,
-		Mode:         "mutable",
-		BranchName:   branchName,
-		WorktreePath: worktreePath,
-		RepoRoot:     request.RepoRoot,
-		State:        "active",
-	})
-	if err != nil {
-		return Assignment{}, err
-	}
-
-	if err := manager.Git.AddWorktree(ctx, request.RepoRoot, worktreePath, branchName); err != nil {
-		_, _ = manager.Store.ReleaseWorktreeLease(ctx, sqlite.ReleaseWorktreeLeaseParams{
-			LeaseID: lease.ID,
-			State:   "released",
+		lease, err := manager.Store.CreateWorktreeLease(ctx, sqlite.CreateWorktreeLeaseParams{
+			ProjectID:    request.ProjectID,
+			TaskID:       request.TaskID,
+			RunID:        request.RunID,
+			Mode:         "mutable",
+			BranchName:   branchName,
+			WorktreePath: worktreePath,
+			RepoRoot:     request.RepoRoot,
+			State:        "active",
 		})
-		return Assignment{}, err
+		if err != nil {
+			if errors.Is(err, sqlite.ErrWorktreeLeaseConflict) {
+				if isTaskLeaseConflictError(err) {
+					return Assignment{}, err
+				}
+				continue
+			}
+			return Assignment{}, err
+		}
+
+		if err := manager.Git.AddWorktree(ctx, request.RepoRoot, worktreePath, branchName); err != nil {
+			_, _ = manager.Store.ReleaseWorktreeLease(ctx, sqlite.ReleaseWorktreeLeaseParams{
+				LeaseID: lease.ID,
+				State:   "released",
+			})
+			if isExistingWorktreePathError(err) {
+				continue
+			}
+			return Assignment{}, err
+		}
+
+		return assignmentFromLease(lease, false), nil
 	}
 
-	return assignmentFromLease(lease, false), nil
+	return Assignment{}, fmt.Errorf("unable to allocate worktree for task %d run %d after %d tries", request.TaskID, request.RunID, maxPrepareTries)
 }
 
 func assignmentFromLease(lease sqlite.WorktreeLease, reused bool) Assignment {
@@ -132,4 +160,20 @@ func assignmentFromLease(lease sqlite.WorktreeLease, reused bool) Assignment {
 
 func int64Ptr(value int64) *int64 {
 	return &value
+}
+
+func isExistingWorktreePathError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(err.Error(), "already exists")
+}
+
+func isTaskLeaseConflictError(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := err.Error()
+	return strings.Contains(message, "idx_worktree_leases_active_task") ||
+		strings.Contains(message, "worktree_leases.project_id, worktree_leases.task_id")
 }

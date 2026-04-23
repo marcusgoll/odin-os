@@ -34,6 +34,38 @@ func TestToolDefinitionCardIsThin(t *testing.T) {
 	if card.SourceRef != "builtin://task_list" {
 		t.Fatalf("SourceRef = %q, want builtin://task_list", card.SourceRef)
 	}
+	if card.CanonicalKey != "task_list" {
+		t.Fatalf("CanonicalKey = %q, want task_list", card.CanonicalKey)
+	}
+	if card.Hidden {
+		t.Fatal("Hidden = true, want false")
+	}
+}
+
+func TestToolDefinitionCardPreservesCanonicalAliasMetadata(t *testing.T) {
+	t.Parallel()
+
+	definition := ToolDefinition{
+		Key:          "huginn_visual_audit",
+		CanonicalKey: "browser_visual_audit",
+		Title:        "Browser Visual Audit",
+		Summary:      "Captures a live browser snapshot and screenshot for a visual review target.",
+		Hidden:       true,
+		Scopes:       []string{"global"},
+		Tags:         []string{"browser", "visual", "live"},
+		CostHint:     CostHintMedium,
+		BudgetCost:   2,
+		SourceRef:    "builtin://browser_visual_audit",
+	}
+
+	card := definition.Card()
+
+	if card.CanonicalKey != "browser_visual_audit" {
+		t.Fatalf("CanonicalKey = %q, want browser_visual_audit", card.CanonicalKey)
+	}
+	if !card.Hidden {
+		t.Fatal("Hidden = false, want true")
+	}
 }
 
 func TestCardFromRegistryMapsSkillsAndSubAgents(t *testing.T) {

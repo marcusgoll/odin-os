@@ -9,6 +9,7 @@ import (
 	"net"
 	stdhttp "net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sync"
 	"time"
@@ -20,6 +21,7 @@ import (
 	"odin-os/internal/cli/commands"
 	"odin-os/internal/cli/repl"
 	"odin-os/internal/core/projects"
+	coreworkspace "odin-os/internal/core/workspace"
 	healthsvc "odin-os/internal/runtime/health"
 	"odin-os/internal/runtime/jobs"
 	"odin-os/internal/runtime/recovery"
@@ -39,6 +41,10 @@ var (
 
 // Run dispatches between the interactive shell and machine-oriented operational commands.
 func Run(ctx context.Context, root string, args []string, stdin io.Reader, stdout io.Writer) error {
+	if len(args) > 0 && isHelpCommand(args[0]) {
+		return runHelp(stdout)
+	}
+
 	cfg, err := appconfig.Load(filepath.Join(root, "config", "odin.yaml"), root, runtimeEnv())
 	if err != nil {
 		return err
@@ -71,6 +77,10 @@ func Run(ctx context.Context, root string, args []string, stdin io.Reader, stdou
 			return runVerifyBackup(ctx, appbackup.Service{RepoRoot: root, RuntimeRoot: cfg.RuntimeRoot}, args[1:], stdout)
 		case "profile":
 			return commands.RunProfile(ctx, app.Store, args[1:], stdout)
+		case "project":
+			return commands.RunProject(ctx, app.Store, app.Registry, args[1:], stdout)
+		case "workspace":
+			return commands.RunWorkspace(ctx, app.Store, app.Registry, args[1:], stdout)
 		default:
 			return fmt.Errorf("unknown command: %s", args[0])
 		}
@@ -79,6 +89,7 @@ func Run(ctx context.Context, root string, args []string, stdin io.Reader, stdou
 	shell, err := repl.New(repl.Environment{
 		Store:               app.Store,
 		Registry:            app.Registry,
+		RegistrySnapshot:    app.RegistrySnapshot,
 		RegistryDiagnostics: app.RegistryDiagnostics,
 		SessionStore:        app.SessionStore,
 		ExecutorConfig:      app.ExecutorConfig,
@@ -105,6 +116,10 @@ func runDoctor(ctx context.Context, app bootstrap.App, args []string, stdout io.
 		return err
 	}
 
+	workspaceCheck := coreworkspace.DoctorCheck(ctx, app.Registry, os.Getenv, exec.LookPath)
+	report.Checks = append(report.Checks, workspaceCheck)
+	report.Status = combineDoctorStatus(report.Status, workspaceCheck.Status)
+
 	if len(args) > 0 && args[0] == "--json" {
 		encoder := json.NewEncoder(stdout)
 		encoder.SetIndent("", "  ")
@@ -112,6 +127,30 @@ func runDoctor(ctx context.Context, app bootstrap.App, args []string, stdout io.
 	}
 
 	_, err = fmt.Fprintf(stdout, "status=%s checks=%d\n", report.Status, len(report.Checks))
+	return err
+}
+
+func combineDoctorStatus(current healthsvc.Status, next healthsvc.Status) healthsvc.Status {
+	if current == healthsvc.StatusFailed || next == healthsvc.StatusFailed {
+		return healthsvc.StatusFailed
+	}
+	if current == healthsvc.StatusDegraded || next == healthsvc.StatusDegraded {
+		return healthsvc.StatusDegraded
+	}
+	return healthsvc.StatusHealthy
+}
+
+func isHelpCommand(arg string) bool {
+	switch arg {
+	case "help", "-h", "--help":
+		return true
+	default:
+		return false
+	}
+}
+
+func runHelp(stdout io.Writer) error {
+	_, err := fmt.Fprint(stdout, commands.OperatorHelp("odin"))
 	return err
 }
 

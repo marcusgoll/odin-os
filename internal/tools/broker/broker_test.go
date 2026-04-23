@@ -13,7 +13,7 @@ func TestCatalogReturnsThinCardsOnly(t *testing.T) {
 
 	broker := New(
 		testSnapshot(),
-		catalog.BuiltinDefinitions(),
+		testBuiltins(),
 		budgets.Limits{
 			Tool:    budgets.Tool{MaxSelections: 10, MaxInvocations: 10, MaxCostUnits: 20},
 			Context: budgets.Context{MaxExpandedDefinitions: 10, MaxCompactedResults: 10, MaxCompactedBytes: 1000},
@@ -29,6 +29,9 @@ func TestCatalogReturnsThinCardsOnly(t *testing.T) {
 		if card.Key == "" || card.Title == "" || card.Summary == "" {
 			t.Fatalf("thin card missing required fields: %+v", card)
 		}
+		if card.Key == "huginn_visual_audit" {
+			t.Fatalf("Catalog() exposed hidden legacy alias card: %+v", card)
+		}
 	}
 }
 
@@ -37,7 +40,7 @@ func TestExpandReturnsFullSelectedDefinitionOnly(t *testing.T) {
 
 	broker := New(
 		testSnapshot(),
-		catalog.BuiltinDefinitions(),
+		testBuiltins(),
 		budgets.Limits{
 			Tool:    budgets.Tool{MaxSelections: 10, MaxInvocations: 10, MaxCostUnits: 20},
 			Context: budgets.Context{MaxExpandedDefinitions: 10, MaxCompactedResults: 10, MaxCompactedBytes: 1000},
@@ -59,12 +62,39 @@ func TestExpandReturnsFullSelectedDefinitionOnly(t *testing.T) {
 	}
 }
 
+func TestExpandReturnsCanonicalBuiltinDefinitionForAlias(t *testing.T) {
+	t.Parallel()
+
+	broker := New(
+		testSnapshot(),
+		testBuiltins(),
+		budgets.Limits{
+			Tool:    budgets.Tool{MaxSelections: 10, MaxInvocations: 10, MaxCostUnits: 20},
+			Context: budgets.Context{MaxExpandedDefinitions: 10, MaxCompactedResults: 10, MaxCompactedBytes: 1000},
+		},
+	)
+
+	expansion, err := broker.Expand("huginn_visual_audit")
+	if err != nil {
+		t.Fatalf("Expand(huginn_visual_audit) error = %v", err)
+	}
+	if expansion.Tool == nil {
+		t.Fatal("Tool expansion = nil, want value")
+	}
+	if expansion.Tool.Key != "browser_visual_audit" {
+		t.Fatalf("Tool.Key = %q, want browser_visual_audit", expansion.Tool.Key)
+	}
+	if expansion.Card.Key != "browser_visual_audit" {
+		t.Fatalf("Card.Key = %q, want browser_visual_audit", expansion.Card.Key)
+	}
+}
+
 func TestInvokeAndCompactRespectBudgets(t *testing.T) {
 	t.Parallel()
 
 	broker := New(
 		testSnapshot(),
-		catalog.BuiltinDefinitions(),
+		testBuiltins(),
 		budgets.Limits{
 			Tool:    budgets.Tool{MaxSelections: 10, MaxInvocations: 1, MaxCostUnits: 10},
 			Context: budgets.Context{MaxExpandedDefinitions: 10, MaxCompactedResults: 1, MaxCompactedBytes: 200},
@@ -117,6 +147,65 @@ func testSnapshot() registry.Snapshot {
 					registry.SectionPurpose: "Route work deterministically.",
 				},
 				Source: registry.SourceInfo{RelativePath: "agents/triage-agent.md"},
+			},
+		},
+	}
+}
+
+func testBuiltins() map[string]catalog.ToolDefinition {
+	return map[string]catalog.ToolDefinition{
+		"task_list": {
+			Key:        "task_list",
+			Title:      "Task List",
+			Summary:    "Lists task projections.",
+			Scopes:     []string{"project"},
+			Tags:       []string{"runtime"},
+			CostHint:   catalog.CostHintLow,
+			BudgetCost: 1,
+			SourceRef:  "builtin://task_list",
+			Invoke: func(map[string]string) (catalog.StructuredResult, error) {
+				return catalog.StructuredResult{
+					CapabilityKey: "task_list",
+					Summary:       "Task list prepared.",
+					RawRef:        "builtin://task_list/result",
+				}, nil
+			},
+		},
+		"browser_visual_audit": {
+			Key:          "browser_visual_audit",
+			CanonicalKey: "browser_visual_audit",
+			Title:        "Browser Visual Audit",
+			Summary:      "Captures a live browser snapshot and screenshot for a visual review target.",
+			Scopes:       []string{"global", "project"},
+			Tags:         []string{"browser", "visual", "live"},
+			CostHint:     catalog.CostHintMedium,
+			BudgetCost:   2,
+			SourceRef:    "builtin://browser_visual_audit",
+			Invoke: func(map[string]string) (catalog.StructuredResult, error) {
+				return catalog.StructuredResult{
+					CapabilityKey: "browser_visual_audit",
+					Summary:       "Captured browser visual audit evidence.",
+					RawRef:        "builtin://browser_visual_audit/result",
+				}, nil
+			},
+		},
+		"huginn_visual_audit": {
+			Key:          "huginn_visual_audit",
+			CanonicalKey: "browser_visual_audit",
+			Title:        "Browser Visual Audit",
+			Summary:      "Captures a live browser snapshot and screenshot for a visual review target.",
+			Hidden:       true,
+			Scopes:       []string{"global", "project"},
+			Tags:         []string{"browser", "visual", "live"},
+			CostHint:     catalog.CostHintMedium,
+			BudgetCost:   2,
+			SourceRef:    "builtin://browser_visual_audit",
+			Invoke: func(map[string]string) (catalog.StructuredResult, error) {
+				return catalog.StructuredResult{
+					CapabilityKey: "browser_visual_audit",
+					Summary:       "Captured browser visual audit evidence.",
+					RawRef:        "builtin://browser_visual_audit/result",
+				}, nil
 			},
 		},
 	}

@@ -355,6 +355,75 @@ func (store *Store) FinishRun(ctx context.Context, params FinishRunParams) (Run,
 	return run, err
 }
 
+func (store *Store) FinishRunIfRunning(ctx context.Context, params FinishRunParams) (Run, bool, error) {
+	now := store.now()
+	var run Run
+	finished := false
+
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		current, task, err := store.getRunWithTaskTx(ctx, tx, params.RunID)
+		if err != nil {
+			return err
+		}
+		run = current
+		if current.Status != "running" || current.FinishedAt != nil {
+			return nil
+		}
+
+		result, err := tx.ExecContext(ctx, `
+			UPDATE runs
+			SET status = ?, finished_at = ?, summary = ?
+			WHERE id = ?
+			  AND status = 'running'
+			  AND finished_at IS NULL
+		`, params.Status, formatTime(now), params.Summary, params.RunID)
+		if err != nil {
+			return err
+		}
+		affected, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if affected == 0 {
+			run, _, err = store.getRunWithTaskTx(ctx, tx, params.RunID)
+			return err
+		}
+
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE tasks
+			SET current_run_id = NULL, updated_at = ?
+			WHERE id = ?
+			  AND current_run_id = ?
+		`, formatTime(now), task.ID, params.RunID); err != nil {
+			return err
+		}
+
+		current.Status = params.Status
+		current.FinishedAt = &now
+		current.Summary = params.Summary
+		run = current
+		finished = true
+
+		projectID := task.ProjectID
+		return appendEventTx(ctx, tx, eventInsert{
+			StreamType: runtimeevents.StreamRun,
+			StreamID:   run.ID,
+			EventType:  runtimeevents.EventRunFinished,
+			Scope:      task.Scope,
+			ProjectID:  &projectID,
+			TaskID:     &task.ID,
+			RunID:      &run.ID,
+			Payload: runtimeevents.RunFinishedPayload{
+				Status:  run.Status,
+				Summary: run.Summary,
+			},
+			OccurredAt: now,
+		})
+	})
+
+	return run, finished, err
+}
+
 func (store *Store) RequestApproval(ctx context.Context, params RequestApprovalParams) (Approval, error) {
 	now := store.now()
 	var approval Approval
@@ -1244,6 +1313,547 @@ func (store *Store) ListMemorySummaries(ctx context.Context, params ListMemorySu
 	return summaries, rows.Err()
 }
 
+func (store *Store) UpdateMemorySummaryDetails(ctx context.Context, params UpdateMemorySummaryDetailsParams) (MemorySummary, error) {
+	now := store.now()
+	var summary MemorySummary
+
+	params.DetailsJSON = strings.TrimSpace(params.DetailsJSON)
+	if params.MemoryID <= 0 {
+		return MemorySummary{}, fmt.Errorf("memory summary id must be positive")
+	}
+	if params.DetailsJSON == "" {
+		return MemorySummary{}, fmt.Errorf("memory summary details are required")
+	}
+
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		current, err := store.getMemorySummaryTx(ctx, tx, params.MemoryID)
+		if err != nil {
+			return err
+		}
+
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE memory_summaries
+			SET details_json = ?, updated_at = ?
+			WHERE id = ?
+		`, params.DetailsJSON, formatTime(now), params.MemoryID); err != nil {
+			return err
+		}
+
+		current.DetailsJSON = params.DetailsJSON
+		current.UpdatedAt = now
+		summary = current
+
+		return appendEventTx(ctx, tx, eventInsert{
+			StreamType: runtimeevents.StreamMemorySummary,
+			StreamID:   summary.ID,
+			EventType:  runtimeevents.EventMemorySummaryUpdated,
+			Scope:      summary.Scope,
+			ProjectID:  summary.ProjectID,
+			TaskID:     summary.TaskID,
+			RunID:      summary.RunID,
+			Payload: runtimeevents.MemorySummaryUpdatedPayload{
+				Scope:              summary.Scope,
+				ScopeKey:           summary.ScopeKey,
+				MemoryType:         summary.MemoryType,
+				SourceTranscriptID: summary.SourceTranscriptID,
+				TaskID:             summary.TaskID,
+				RunID:              summary.RunID,
+			},
+			OccurredAt: now,
+		})
+	})
+
+	return summary, err
+}
+
+// Delegations do not emit runtime events yet because the runtime event catalog
+// does not currently define delegation stream or event types.
+func (store *Store) CreateDelegation(ctx context.Context, params CreateDelegationParams) (Delegation, error) {
+	now := store.now()
+	var delegation Delegation
+	var childTaskID *int64
+	var childRunID *int64
+
+	params.Scope = strings.TrimSpace(params.Scope)
+	params.DelegationKey = strings.TrimSpace(params.DelegationKey)
+	params.Role = strings.TrimSpace(params.Role)
+	params.ActionClass = strings.TrimSpace(params.ActionClass)
+	params.ActionKey = strings.TrimSpace(params.ActionKey)
+	params.MutationMode = strings.TrimSpace(params.MutationMode)
+	params.Status = strings.TrimSpace(params.Status)
+	params.ConvergenceMode = strings.TrimSpace(params.ConvergenceMode)
+	params.ArtifactTarget = strings.TrimSpace(params.ArtifactTarget)
+	params.Executor = strings.TrimSpace(params.Executor)
+	params.BranchName = strings.TrimSpace(params.BranchName)
+	params.DetailsJSON = strings.TrimSpace(params.DetailsJSON)
+
+	if params.Scope == "" {
+		return Delegation{}, fmt.Errorf("delegation scope is required")
+	}
+	if params.DelegationKey == "" {
+		return Delegation{}, fmt.Errorf("delegation key is required")
+	}
+	if params.Role == "" {
+		return Delegation{}, fmt.Errorf("delegation role is required")
+	}
+	if params.ActionClass == "" {
+		return Delegation{}, fmt.Errorf("delegation action class is required")
+	}
+	if params.ActionKey == "" {
+		return Delegation{}, fmt.Errorf("delegation action key is required")
+	}
+	if params.MutationMode == "" {
+		return Delegation{}, fmt.Errorf("delegation mutation mode is required")
+	}
+	if params.ConvergenceMode == "" {
+		return Delegation{}, fmt.Errorf("delegation convergence mode is required")
+	}
+	if params.Executor == "" {
+		return Delegation{}, fmt.Errorf("delegation executor is required")
+	}
+	if params.Status == "" {
+		params.Status = "queued"
+	}
+	if params.DetailsJSON == "" {
+		params.DetailsJSON = "{}"
+	}
+
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		if _, _, _, err := store.validateProjectTaskRunLineageTx(ctx, tx, &params.ProjectID, &params.ParentTaskID, params.ParentRunID, params.Scope, "", "delegation"); err != nil {
+			return err
+		}
+		if params.WorktreeLeaseID != nil {
+			lease, err := store.getWorktreeLeaseTx(ctx, tx, *params.WorktreeLeaseID)
+			if err != nil {
+				return err
+			}
+			if lease.ProjectID != params.ProjectID {
+				return fmt.Errorf("delegation worktree lease %d does not belong to project %d", lease.ID, params.ProjectID)
+			}
+			if params.BranchName == "" {
+				params.BranchName = lease.BranchName
+			}
+			childTaskID = &lease.TaskID
+			childRunID = &lease.RunID
+		}
+
+		result, err := tx.ExecContext(ctx, `
+			INSERT INTO delegations (
+				parent_task_id,
+				parent_run_id,
+				project_id,
+				scope,
+				delegation_key,
+				role,
+				action_class,
+				action_key,
+				mutation_mode,
+				status,
+				convergence_mode,
+				artifact_target,
+				executor,
+				child_task_id,
+				child_run_id,
+				worktree_lease_id,
+				branch_name,
+				details_json,
+				created_at,
+				updated_at
+			)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`,
+			params.ParentTaskID,
+			nullInt64(params.ParentRunID),
+			params.ProjectID,
+			params.Scope,
+			params.DelegationKey,
+			params.Role,
+			params.ActionClass,
+			params.ActionKey,
+			params.MutationMode,
+			params.Status,
+			params.ConvergenceMode,
+			params.ArtifactTarget,
+			params.Executor,
+			nullInt64(childTaskID),
+			nullInt64(childRunID),
+			nullInt64(params.WorktreeLeaseID),
+			params.BranchName,
+			params.DetailsJSON,
+			formatTime(now),
+			formatTime(now),
+		)
+		if err != nil {
+			return err
+		}
+
+		delegationID, err := result.LastInsertId()
+		if err != nil {
+			return err
+		}
+
+		delegation = Delegation{
+			ID:              delegationID,
+			ParentTaskID:    params.ParentTaskID,
+			ParentRunID:     params.ParentRunID,
+			ProjectID:       params.ProjectID,
+			Scope:           params.Scope,
+			DelegationKey:   params.DelegationKey,
+			Role:            params.Role,
+			ActionClass:     params.ActionClass,
+			ActionKey:       params.ActionKey,
+			MutationMode:    params.MutationMode,
+			Status:          params.Status,
+			ConvergenceMode: params.ConvergenceMode,
+			ArtifactTarget:  params.ArtifactTarget,
+			Executor:        params.Executor,
+			ChildTaskID:     childTaskID,
+			ChildRunID:      childRunID,
+			WorktreeLeaseID: params.WorktreeLeaseID,
+			BranchName:      params.BranchName,
+			DetailsJSON:     params.DetailsJSON,
+			CreatedAt:       now,
+			UpdatedAt:       now,
+		}
+		return nil
+	})
+
+	return delegation, err
+}
+
+func (store *Store) UpdateDelegationStatus(ctx context.Context, params UpdateDelegationStatusParams) (Delegation, error) {
+	now := store.now()
+	status := strings.TrimSpace(params.Status)
+	if status == "" {
+		return Delegation{}, fmt.Errorf("delegation status is required")
+	}
+
+	if err := store.withTx(ctx, func(tx *sql.Tx) error {
+		if _, err := store.getDelegationTx(ctx, tx, params.DelegationID); err != nil {
+			return err
+		}
+		_, err := tx.ExecContext(ctx, `
+			UPDATE delegations
+			SET status = ?, updated_at = ?
+			WHERE id = ?
+		`, status, formatTime(now), params.DelegationID)
+		return err
+	}); err != nil {
+		return Delegation{}, err
+	}
+
+	return store.GetDelegation(ctx, params.DelegationID)
+}
+
+func (store *Store) AttachDelegationChildTask(ctx context.Context, params AttachDelegationChildTaskParams) (Delegation, error) {
+	now := store.now()
+
+	if err := store.withTx(ctx, func(tx *sql.Tx) error {
+		delegation, err := store.getDelegationTx(ctx, tx, params.DelegationID)
+		if err != nil {
+			return err
+		}
+		childTask, err := store.getTaskTx(ctx, tx, params.ChildTaskID)
+		if err != nil {
+			return err
+		}
+		if childTask.ProjectID != delegation.ProjectID {
+			return fmt.Errorf("delegation child task %d does not belong to project %d", childTask.ID, delegation.ProjectID)
+		}
+		if params.ChildRunID != nil {
+			run, err := store.getRunTx(ctx, tx, *params.ChildRunID)
+			if err != nil {
+				return err
+			}
+			if run.TaskID != params.ChildTaskID {
+				return fmt.Errorf("delegation child run %d does not belong to task %d", run.ID, params.ChildTaskID)
+			}
+		}
+		if delegation.WorktreeLeaseID != nil {
+			lease, err := store.getWorktreeLeaseTx(ctx, tx, *delegation.WorktreeLeaseID)
+			if err != nil {
+				return err
+			}
+			if lease.TaskID != params.ChildTaskID {
+				return fmt.Errorf("delegation worktree lease %d does not belong to child task %d", lease.ID, params.ChildTaskID)
+			}
+			if params.ChildRunID != nil && lease.RunID != *params.ChildRunID {
+				return fmt.Errorf("delegation worktree lease %d does not belong to child run %d", lease.ID, *params.ChildRunID)
+			}
+		}
+
+		_, err = tx.ExecContext(ctx, `
+			UPDATE delegations
+			SET child_task_id = ?, child_run_id = ?, updated_at = ?
+			WHERE id = ?
+		`, params.ChildTaskID, nullInt64(params.ChildRunID), formatTime(now), params.DelegationID)
+		return err
+	}); err != nil {
+		return Delegation{}, err
+	}
+
+	return store.GetDelegation(ctx, params.DelegationID)
+}
+
+func (store *Store) AttachDelegationWorktree(ctx context.Context, params AttachDelegationWorktreeParams) (Delegation, error) {
+	now := store.now()
+	branchName := strings.TrimSpace(params.BranchName)
+
+	if err := store.withTx(ctx, func(tx *sql.Tx) error {
+		delegation, err := store.getDelegationTx(ctx, tx, params.DelegationID)
+		if err != nil {
+			return err
+		}
+
+		if params.WorktreeLeaseID != nil {
+			lease, err := store.getWorktreeLeaseTx(ctx, tx, *params.WorktreeLeaseID)
+			if err != nil {
+				return err
+			}
+			if lease.ProjectID != delegation.ProjectID {
+				return fmt.Errorf("delegation worktree lease %d does not belong to project %d", lease.ID, delegation.ProjectID)
+			}
+			if delegation.ChildTaskID != nil && lease.TaskID != *delegation.ChildTaskID {
+				return fmt.Errorf("delegation worktree lease %d does not belong to child task %d", lease.ID, *delegation.ChildTaskID)
+			}
+			if delegation.ChildRunID != nil && lease.RunID != *delegation.ChildRunID {
+				return fmt.Errorf("delegation worktree lease %d does not belong to child run %d", lease.ID, *delegation.ChildRunID)
+			}
+			if delegation.ChildTaskID == nil {
+				delegation.ChildTaskID = &lease.TaskID
+			}
+			if delegation.ChildRunID == nil {
+				delegation.ChildRunID = &lease.RunID
+			}
+			if branchName == "" {
+				branchName = lease.BranchName
+			}
+		}
+
+		_, err = tx.ExecContext(ctx, `
+			UPDATE delegations
+			SET child_task_id = ?, child_run_id = ?, worktree_lease_id = ?, branch_name = ?, updated_at = ?
+			WHERE id = ?
+		`, nullInt64(delegation.ChildTaskID), nullInt64(delegation.ChildRunID), nullInt64(params.WorktreeLeaseID), branchName, formatTime(now), params.DelegationID)
+		return err
+	}); err != nil {
+		return Delegation{}, err
+	}
+
+	return store.GetDelegation(ctx, params.DelegationID)
+}
+
+func (store *Store) GetDelegation(ctx context.Context, delegationID int64) (Delegation, error) {
+	row := store.db.QueryRowContext(ctx, `
+		SELECT
+			id,
+			parent_task_id,
+			parent_run_id,
+			project_id,
+			scope,
+			delegation_key,
+			role,
+			action_class,
+			action_key,
+			mutation_mode,
+			status,
+			convergence_mode,
+			artifact_target,
+			executor,
+			child_task_id,
+			child_run_id,
+			worktree_lease_id,
+			branch_name,
+			details_json,
+			created_at,
+			updated_at
+		FROM delegations
+		WHERE id = ?
+	`, delegationID)
+	return scanDelegation(row)
+}
+
+func (store *Store) ListDelegations(ctx context.Context, params ListDelegationsParams) ([]Delegation, error) {
+	params.Status = strings.TrimSpace(params.Status)
+	params.DelegationKey = strings.TrimSpace(params.DelegationKey)
+	query := `
+		SELECT
+			id,
+			parent_task_id,
+			parent_run_id,
+			project_id,
+			scope,
+			delegation_key,
+			role,
+			action_class,
+			action_key,
+			mutation_mode,
+			status,
+			convergence_mode,
+			artifact_target,
+			executor,
+			child_task_id,
+			child_run_id,
+			worktree_lease_id,
+			branch_name,
+			details_json,
+			created_at,
+			updated_at
+		FROM delegations
+		WHERE 1 = 1
+	`
+	var args []any
+	if params.ProjectID != nil {
+		query += ` AND project_id = ?`
+		args = append(args, *params.ProjectID)
+	}
+	if params.ParentTaskID != nil {
+		query += ` AND parent_task_id = ?`
+		args = append(args, *params.ParentTaskID)
+	}
+	if params.ParentRunID != nil {
+		query += ` AND parent_run_id = ?`
+		args = append(args, *params.ParentRunID)
+	}
+	if params.ChildTaskID != nil {
+		query += ` AND child_task_id = ?`
+		args = append(args, *params.ChildTaskID)
+	}
+	if params.ChildRunID != nil {
+		query += ` AND child_run_id = ?`
+		args = append(args, *params.ChildRunID)
+	}
+	if params.WorktreeLeaseID != nil {
+		query += ` AND worktree_lease_id = ?`
+		args = append(args, *params.WorktreeLeaseID)
+	}
+	if params.Status != "" {
+		query += ` AND status = ?`
+		args = append(args, params.Status)
+	}
+	if params.DelegationKey != "" {
+		query += ` AND delegation_key = ?`
+		args = append(args, params.DelegationKey)
+	}
+	query += ` ORDER BY id ASC`
+
+	rows, err := store.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var delegations []Delegation
+	for rows.Next() {
+		delegation, err := scanDelegation(rows)
+		if err != nil {
+			return nil, err
+		}
+		delegations = append(delegations, delegation)
+	}
+
+	return delegations, rows.Err()
+}
+
+func (store *Store) CreateDelegationArtifact(ctx context.Context, params CreateDelegationArtifactParams) (DelegationArtifact, error) {
+	now := store.now()
+	var artifact DelegationArtifact
+
+	params.ArtifactType = strings.TrimSpace(params.ArtifactType)
+	params.Summary = strings.TrimSpace(params.Summary)
+	params.DetailsJSON = strings.TrimSpace(params.DetailsJSON)
+	if params.ArtifactType == "" {
+		return DelegationArtifact{}, fmt.Errorf("delegation artifact type is required")
+	}
+	if params.Summary == "" {
+		return DelegationArtifact{}, fmt.Errorf("delegation artifact summary is required")
+	}
+	if params.DetailsJSON == "" {
+		params.DetailsJSON = "{}"
+	}
+
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		if _, err := store.getDelegationTx(ctx, tx, params.DelegationID); err != nil {
+			return err
+		}
+
+		result, err := tx.ExecContext(ctx, `
+			INSERT INTO delegation_artifacts (
+				delegation_id,
+				artifact_type,
+				summary,
+				details_json,
+				created_at
+			)
+			VALUES (?, ?, ?, ?, ?)
+		`,
+			params.DelegationID,
+			params.ArtifactType,
+			params.Summary,
+			params.DetailsJSON,
+			formatTime(now),
+		)
+		if err != nil {
+			return err
+		}
+
+		artifactID, err := result.LastInsertId()
+		if err != nil {
+			return err
+		}
+
+		artifact = DelegationArtifact{
+			ID:           artifactID,
+			DelegationID: params.DelegationID,
+			ArtifactType: params.ArtifactType,
+			Summary:      params.Summary,
+			DetailsJSON:  params.DetailsJSON,
+			CreatedAt:    now,
+		}
+		return nil
+	})
+
+	return artifact, err
+}
+
+func (store *Store) ListDelegationArtifacts(ctx context.Context, params ListDelegationArtifactsParams) ([]DelegationArtifact, error) {
+	params.ArtifactType = strings.TrimSpace(params.ArtifactType)
+	query := `
+		SELECT
+			id,
+			delegation_id,
+			artifact_type,
+			summary,
+			details_json,
+			created_at
+		FROM delegation_artifacts
+		WHERE delegation_id = ?
+	`
+	args := []any{params.DelegationID}
+	if params.ArtifactType != "" {
+		query += ` AND artifact_type = ?`
+		args = append(args, params.ArtifactType)
+	}
+	query += ` ORDER BY id ASC`
+
+	rows, err := store.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var artifacts []DelegationArtifact
+	for rows.Next() {
+		artifact, err := scanDelegationArtifact(rows)
+		if err != nil {
+			return nil, err
+		}
+		artifacts = append(artifacts, artifact)
+	}
+
+	return artifacts, rows.Err()
+}
+
 func (store *Store) GetWorkspaceProfile(ctx context.Context, workspaceID string) (WorkspaceProfile, error) {
 	return scanWorkspaceProfile(store.db.QueryRowContext(ctx, `
 		SELECT
@@ -1977,6 +2587,15 @@ func (store *Store) GetProjectByKey(ctx context.Context, key string) (Project, e
 	return scanProject(row)
 }
 
+func (store *Store) GetTaskByProjectAndKey(ctx context.Context, projectID int64, key string) (Task, error) {
+	row := store.db.QueryRowContext(ctx, `
+		SELECT id, project_id, key, title, status, scope, requested_by, current_run_id, created_at, updated_at
+		FROM tasks
+		WHERE project_id = ? AND key = ?
+	`, projectID, key)
+	return scanTask(row)
+}
+
 func (store *Store) GetRun(ctx context.Context, runID int64) (Run, error) {
 	row := store.db.QueryRowContext(ctx, `
 		SELECT id, task_id, executor, status, attempt, started_at, finished_at, summary
@@ -2496,6 +3115,59 @@ func (store *Store) getRunTx(ctx context.Context, tx *sql.Tx, runID int64) (Run,
 	return scanRun(row)
 }
 
+func (store *Store) getDelegationTx(ctx context.Context, tx *sql.Tx, delegationID int64) (Delegation, error) {
+	row := tx.QueryRowContext(ctx, `
+		SELECT
+			id,
+			parent_task_id,
+			parent_run_id,
+			project_id,
+			scope,
+			delegation_key,
+			role,
+			action_class,
+			action_key,
+			mutation_mode,
+			status,
+			convergence_mode,
+			artifact_target,
+			executor,
+			child_task_id,
+			child_run_id,
+			worktree_lease_id,
+			branch_name,
+			details_json,
+			created_at,
+			updated_at
+		FROM delegations
+		WHERE id = ?
+	`, delegationID)
+	return scanDelegation(row)
+}
+
+func (store *Store) getWorktreeLeaseTx(ctx context.Context, tx *sql.Tx, leaseID int64) (WorktreeLease, error) {
+	row := tx.QueryRowContext(ctx, `
+		SELECT
+			id,
+			project_id,
+			task_id,
+			run_id,
+			mode,
+			branch_name,
+			worktree_path,
+			repo_root,
+			state,
+			heartbeat_at,
+			released_at,
+			cleaned_up_at,
+			created_at,
+			updated_at
+		FROM worktree_leases
+		WHERE id = ?
+	`, leaseID)
+	return scanWorktreeLease(row)
+}
+
 func (store *Store) getConversationTranscriptTx(ctx context.Context, tx *sql.Tx, transcriptID int64) (ConversationTranscript, error) {
 	row := tx.QueryRowContext(ctx, `
 		SELECT
@@ -2515,6 +3187,27 @@ func (store *Store) getConversationTranscriptTx(ctx context.Context, tx *sql.Tx,
 		WHERE id = ?
 	`, transcriptID)
 	return scanConversationTranscript(row)
+}
+
+func (store *Store) getMemorySummaryTx(ctx context.Context, tx *sql.Tx, memoryID int64) (MemorySummary, error) {
+	row := tx.QueryRowContext(ctx, `
+		SELECT
+			id,
+			project_id,
+			source_transcript_id,
+			task_id,
+			run_id,
+			scope,
+			scope_key,
+			memory_type,
+			summary,
+			details_json,
+			created_at,
+			updated_at
+		FROM memory_summaries
+		WHERE id = ?
+	`, memoryID)
+	return scanMemorySummary(row)
 }
 
 func (store *Store) validateProjectTaskRunLineageTx(ctx context.Context, tx *sql.Tx, projectID *int64, taskID *int64, runID *int64, scope string, scopeKey string, recordLabel string) (Project, Task, Run, error) {
@@ -3301,6 +3994,78 @@ func scanMemorySummary(row interface{ Scan(...any) error }) (MemorySummary, erro
 		return MemorySummary{}, err
 	}
 	return summary, nil
+}
+
+func scanDelegation(row interface{ Scan(...any) error }) (Delegation, error) {
+	var delegation Delegation
+	var parentRunID sql.NullInt64
+	var childTaskID sql.NullInt64
+	var childRunID sql.NullInt64
+	var worktreeLeaseID sql.NullInt64
+	var createdAt string
+	var updatedAt string
+	if err := row.Scan(
+		&delegation.ID,
+		&delegation.ParentTaskID,
+		&parentRunID,
+		&delegation.ProjectID,
+		&delegation.Scope,
+		&delegation.DelegationKey,
+		&delegation.Role,
+		&delegation.ActionClass,
+		&delegation.ActionKey,
+		&delegation.MutationMode,
+		&delegation.Status,
+		&delegation.ConvergenceMode,
+		&delegation.ArtifactTarget,
+		&delegation.Executor,
+		&childTaskID,
+		&childRunID,
+		&worktreeLeaseID,
+		&delegation.BranchName,
+		&delegation.DetailsJSON,
+		&createdAt,
+		&updatedAt,
+	); err != nil {
+		return Delegation{}, err
+	}
+
+	var err error
+	delegation.ParentRunID = nullableInt64Ptr(parentRunID)
+	delegation.ChildTaskID = nullableInt64Ptr(childTaskID)
+	delegation.ChildRunID = nullableInt64Ptr(childRunID)
+	delegation.WorktreeLeaseID = nullableInt64Ptr(worktreeLeaseID)
+	delegation.CreatedAt, err = parseTime(createdAt)
+	if err != nil {
+		return Delegation{}, err
+	}
+	delegation.UpdatedAt, err = parseTime(updatedAt)
+	if err != nil {
+		return Delegation{}, err
+	}
+	return delegation, nil
+}
+
+func scanDelegationArtifact(row interface{ Scan(...any) error }) (DelegationArtifact, error) {
+	var artifact DelegationArtifact
+	var createdAt string
+	if err := row.Scan(
+		&artifact.ID,
+		&artifact.DelegationID,
+		&artifact.ArtifactType,
+		&artifact.Summary,
+		&artifact.DetailsJSON,
+		&createdAt,
+	); err != nil {
+		return DelegationArtifact{}, err
+	}
+
+	var err error
+	artifact.CreatedAt, err = parseTime(createdAt)
+	if err != nil {
+		return DelegationArtifact{}, err
+	}
+	return artifact, nil
 }
 
 func scanWorkspaceProfile(row interface{ Scan(...any) error }) (WorkspaceProfile, error) {

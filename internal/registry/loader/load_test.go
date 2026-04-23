@@ -67,8 +67,21 @@ func TestLoadDirLoadsRepositoryExamples(t *testing.T) {
 		t.Fatalf("snapshot.Diagnostics = %v, want none", snapshot.Diagnostics)
 	}
 
-	if len(snapshot.Items) != 4 {
-		t.Fatalf("snapshot.Items = %d, want 4", len(snapshot.Items))
+	for _, key := range []string{
+		"triage-agent",
+		"triage-skill",
+		"project-intake",
+		"status-command",
+		"marcus-social-content-strategist",
+		"marcus-social-growth-workflow",
+	} {
+		if _, ok := snapshot.ByKey[key]; !ok {
+			t.Fatalf("snapshot missing registry key %q", key)
+		}
+	}
+
+	if len(snapshot.Items) < 6 {
+		t.Fatalf("snapshot.Items = %d, want at least 6", len(snapshot.Items))
 	}
 }
 

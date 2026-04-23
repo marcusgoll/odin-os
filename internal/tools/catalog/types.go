@@ -24,28 +24,33 @@ const (
 )
 
 type Card struct {
-	Kind       Kind
-	Key        string
-	Title      string
-	Summary    string
-	Scopes     []string
-	Tags       []string
-	CostHint   CostHint
-	BudgetCost int
-	SourceRef  string
+	Kind         Kind
+	Key          string
+	CanonicalKey string
+	Title        string
+	Summary      string
+	Hidden       bool
+	Scopes       []string
+	Tags         []string
+	CostHint     CostHint
+	BudgetCost   int
+	SourceRef    string
 }
 
 type ToolDefinition struct {
-	Key        string
-	Title      string
-	Summary    string
-	Scopes     []string
-	Tags       []string
-	CostHint   CostHint
-	BudgetCost int
-	SourceRef  string
-	Schema     map[string]any
-	Invoke     func(map[string]string) (StructuredResult, error)
+	Key          string
+	CanonicalKey string
+	Aliases      []string
+	Title        string
+	Summary      string
+	Hidden       bool
+	Scopes       []string
+	Tags         []string
+	CostHint     CostHint
+	BudgetCost   int
+	SourceRef    string
+	Schema       map[string]any
+	Invoke       func(map[string]string) (StructuredResult, error)
 }
 
 type SkillDefinition struct {
@@ -83,8 +88,15 @@ type StructuredResult struct {
 	Artifacts       []string
 	KeyFacts        map[string]string
 	FollowOnOptions []string
+	MemoryRecords   []MemoryRecord
 	RawRef          string
 	RawOutput       string
+}
+
+type MemoryRecord struct {
+	MemoryType string
+	Summary    string
+	Fields     map[string]string
 }
 
 type CompactedResult struct {
@@ -97,16 +109,23 @@ type CompactedResult struct {
 }
 
 func (definition ToolDefinition) Card() Card {
+	canonicalKey := definition.CanonicalKey
+	if canonicalKey == "" {
+		canonicalKey = definition.Key
+	}
+
 	return Card{
-		Kind:       KindTool,
-		Key:        definition.Key,
-		Title:      definition.Title,
-		Summary:    definition.Summary,
-		Scopes:     append([]string(nil), definition.Scopes...),
-		Tags:       append([]string(nil), definition.Tags...),
-		CostHint:   definition.CostHint,
-		BudgetCost: definition.BudgetCost,
-		SourceRef:  definition.SourceRef,
+		Kind:         KindTool,
+		Key:          definition.Key,
+		CanonicalKey: canonicalKey,
+		Title:        definition.Title,
+		Summary:      definition.Summary,
+		Hidden:       definition.Hidden,
+		Scopes:       append([]string(nil), definition.Scopes...),
+		Tags:         append([]string(nil), definition.Tags...),
+		CostHint:     definition.CostHint,
+		BudgetCost:   definition.BudgetCost,
+		SourceRef:    definition.SourceRef,
 	}
 }
 

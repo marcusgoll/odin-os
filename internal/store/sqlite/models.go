@@ -310,6 +310,11 @@ type RecordMemorySummaryParams struct {
 	DetailsJSON        string
 }
 
+type UpdateMemorySummaryDetailsParams struct {
+	MemoryID    int64
+	DetailsJSON string
+}
+
 type ListMemorySummariesParams struct {
 	ProjectID          *int64
 	SourceTranscriptID *int64
@@ -554,7 +559,9 @@ type AttachDelegationWorktreeParams struct {
 type ListDelegationsParams struct {
 	ProjectID       *int64
 	ParentTaskID    *int64
+	ParentRunID     *int64
 	ChildTaskID     *int64
+	ChildRunID      *int64
 	WorktreeLeaseID *int64
 	Status          string
 	DelegationKey   string

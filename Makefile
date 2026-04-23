@@ -17,7 +17,7 @@ test:
 	$(GO) test ./...
 
 test-alpha:
-	$(GO) test ./tests/integration -run TestAlphaAcceptance -count=1 -v
+	$(GO) test ./tests/integration -run 'TestAlphaAcceptance|TestProject(Workspace)?CLIIntegration' -count=1 -v
 
 ci: fmtcheck lint test
 	bash scripts/tests/make-ci-target-test.sh

@@ -2,7 +2,7 @@
 title: Odin OS
 phase: "17"
 status: active
-updated: 2026-04-17
+updated: 2026-04-23
 ---
 
 # Odin OS
@@ -26,6 +26,7 @@ This repository is the runtime root. `odin-orchestrator` is a migration source o
 - `docs/adr/0001-canonical-authority.md` defines the system's source-of-truth model, scope model, and governance rules.
 - `docs/adr/0002-migration-policy.md` defines how legacy assets from `odin-orchestrator` are classified and moved into this repo.
 - `docs/contracts/repo-layout.md` defines package and folder responsibilities.
+- `docs/contracts/tui-overview.md` defines the canonical TUI hierarchy, primary lanes, and compatibility-alias rules for operator-surface work.
 - `docs/contracts/phase-exit-criteria.md` defines the acceptance gate for Phase 00 and the baseline gate every later phase must satisfy.
 - `docs/contracts/verification-model.md` defines how Odin proves behavior across unit, contract, integration, and real `odin` command execution.
 
@@ -40,10 +41,21 @@ To make `odin` available as a repeatable local command:
 ```bash
 make build
 make install-local
-odin
+odin help
 ```
 
 This installs a symlink at `~/.local/bin/odin` pointing to this repo's built binary. Remove it with `make uninstall-local`.
+
+For project-first daily work, prefer the top-level workspace flow over treating the shell as the only entrypoint:
+
+```bash
+odin project enroll
+odin workspace start
+odin workspace status --json
+odin workspace handoff objective="Summarize current repo state"
+```
+
+That path keeps Codex attached to the real managed repo or worktree while Odin stays the thin control plane for enrollment, inspection, and durable handoff.
 
 ## Contribution Workflow
 
@@ -53,6 +65,7 @@ Before opening a pull request:
 - prefer `make ci` to mirror the local CI verification stack
 - run additional targeted commands when the change needs narrower iteration than `make ci`
 - if the change affects user-visible or orchestration-facing behavior, run the real repo-owned `odin` command path against a controlled `ODIN_ROOT`
+- if the command mutates repo-authored config such as `odin project enroll`, use a copied repo root as well; `ODIN_ROOT` isolates runtime state, not the repo's authored config files
 
 Pull requests are expected to use the repo template and report:
 

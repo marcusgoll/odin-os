@@ -1,17 +1,31 @@
 package codex
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"odin-os/internal/executors/contract"
 )
 
-type headlessExecutor struct{}
+type headlessExecutor struct {
+	repoRoot string
+}
+
+const driverEnvVar = "ODIN_CODEX_DRIVER"
 
 func NewHeadless() contract.Executor {
 	return headlessExecutor{}
+}
+
+func NewHeadlessWithRepoRoot(repoRoot string) contract.Executor {
+	return headlessExecutor{repoRoot: strings.TrimSpace(repoRoot)}
 }
 
 func (headlessExecutor) Key() string {
@@ -22,7 +36,21 @@ func (headlessExecutor) Class() contract.ExecutorClass {
 	return contract.ExecutorClassPlanBackedCLI
 }
 
-func (headlessExecutor) Health(context.Context) (contract.HealthReport, error) {
+func (executor headlessExecutor) Health(context.Context) (contract.HealthReport, error) {
+	switch {
+	case strings.TrimSpace(os.Getenv(driverEnvVar)) != "":
+		return contract.HealthReport{
+			Status:    contract.HealthStatusHealthy,
+			Details:   "external codex driver configured",
+			CheckedAt: time.Now().UTC(),
+		}, nil
+	case executor.driverPath() != "":
+		return contract.HealthReport{
+			Status:    contract.HealthStatusHealthy,
+			Details:   "repo-local codex driver available",
+			CheckedAt: time.Now().UTC(),
+		}, nil
+	}
 	return contract.HealthReport{
 		Status:    contract.HealthStatusHealthy,
 		Details:   "local deterministic alpha lane",
@@ -50,7 +78,13 @@ func (headlessExecutor) Capabilities(context.Context) (contract.Capabilities, er
 	}, nil
 }
 
-func (headlessExecutor) RunTask(_ context.Context, spec contract.TaskSpec) (contract.ExecutionResult, error) {
+func (executor headlessExecutor) RunTask(ctx context.Context, spec contract.TaskSpec) (contract.ExecutionResult, error) {
+	if driver := executor.driverPath(); driver != "" {
+		return runDriver(ctx, driverRequest{
+			Operation: "run_task",
+			Task:      &spec,
+		}, driver)
+	}
 	return contract.ExecutionResult{
 		Handle: contract.TaskHandle{
 			ExecutorKey: "codex_headless",
@@ -66,7 +100,14 @@ func (headlessExecutor) RunTask(_ context.Context, spec contract.TaskSpec) (cont
 	}, nil
 }
 
-func (headlessExecutor) ResumeTask(ctx context.Context, handle contract.TaskHandle, packet contract.ResumePacket) (contract.ExecutionResult, error) {
+func (executor headlessExecutor) ResumeTask(ctx context.Context, handle contract.TaskHandle, packet contract.ResumePacket) (contract.ExecutionResult, error) {
+	if driver := executor.driverPath(); driver != "" {
+		return runDriver(ctx, driverRequest{
+			Operation: "resume_task",
+			Handle:    &handle,
+			Packet:    &packet,
+		}, driver)
+	}
 	return contract.ExecutionResult{
 		Handle: contract.TaskHandle{
 			ExecutorKey: "codex_headless",
@@ -91,5 +132,85 @@ func (headlessExecutor) EstimateCost(context.Context, contract.TaskSpec) (contra
 		OutputTokens: 0,
 		EstimatedUSD: 0,
 		Currency:     "USD",
+	}, nil
+}
+
+type driverRequest struct {
+	Operation string                 `json:"operation"`
+	Task      *contract.TaskSpec     `json:"task,omitempty"`
+	Handle    *contract.TaskHandle   `json:"handle,omitempty"`
+	Packet    *contract.ResumePacket `json:"packet,omitempty"`
+}
+
+type driverResponse struct {
+	Status     string            `json:"status"`
+	Output     string            `json:"output"`
+	ExternalID string            `json:"external_id"`
+	Metadata   map[string]string `json:"metadata"`
+}
+
+func (executor headlessExecutor) driverPath() string {
+	if driver := strings.TrimSpace(os.Getenv(driverEnvVar)); driver != "" {
+		return driver
+	}
+	if executor.repoRoot == "" {
+		return ""
+	}
+
+	driver := filepath.Join(executor.repoRoot, "scripts", "drivers", "codex-headless.sh")
+	info, err := os.Stat(driver)
+	if err != nil || info.IsDir() {
+		return ""
+	}
+	return driver
+}
+
+func runDriver(ctx context.Context, request driverRequest, driver string) (contract.ExecutionResult, error) {
+	if strings.TrimSpace(driver) == "" {
+		return contract.ExecutionResult{}, fmt.Errorf("codex driver is not configured")
+	}
+
+	payload, err := json.Marshal(request)
+	if err != nil {
+		return contract.ExecutionResult{}, err
+	}
+
+	cmd := exec.CommandContext(ctx, driver)
+	cmd.Stdin = bytes.NewReader(payload)
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		return contract.ExecutionResult{}, fmt.Errorf("codex driver failed: %w: %s", err, strings.TrimSpace(stderr.String()))
+	}
+
+	var response driverResponse
+	if err := json.Unmarshal(stdout.Bytes(), &response); err != nil {
+		return contract.ExecutionResult{}, fmt.Errorf("decode codex driver response: %w", err)
+	}
+	if response.Status == "" {
+		return contract.ExecutionResult{}, fmt.Errorf("codex driver response missing status")
+	}
+	externalID := response.ExternalID
+	if externalID == "" {
+		switch {
+		case request.Task != nil:
+			externalID = request.Task.ID
+		case request.Handle != nil:
+			externalID = request.Handle.ExternalID
+		}
+	}
+
+	return contract.ExecutionResult{
+		Handle: contract.TaskHandle{
+			ExecutorKey: "codex_headless",
+			ExternalID:  externalID,
+			Status:      response.Status,
+		},
+		Status:   response.Status,
+		Output:   response.Output,
+		Metadata: response.Metadata,
 	}, nil
 }

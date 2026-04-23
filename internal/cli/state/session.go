@@ -17,8 +17,10 @@ const (
 )
 
 type Cache struct {
-	ProjectKey string `json:"project_key,omitempty"`
-	Mode       Mode   `json:"mode,omitempty"`
+	ProjectKey          string `json:"project_key,omitempty"`
+	Mode                Mode   `json:"mode,omitempty"`
+	SelectedSkillKey    string `json:"selected_skill_key,omitempty"`
+	SelectedWorkflowKey string `json:"selected_workflow_key,omitempty"`
 }
 
 type SessionStore struct {
@@ -26,10 +28,12 @@ type SessionStore struct {
 }
 
 type State struct {
-	Mode       Mode
-	Scope      scope.Resolution
-	ActiveTask string
-	ActiveRun  string
+	Mode                Mode
+	Scope               scope.Resolution
+	SelectedSkillKey    string
+	SelectedWorkflowKey string
+	ActiveTask          string
+	ActiveRun           string
 }
 
 func (store SessionStore) Load() (Cache, error) {
@@ -80,6 +84,8 @@ func ResolveStartupState(cache Cache, registry projects.Registry) State {
 	}
 
 	state.Mode = SanitizeMode(cache.Mode, state.Scope)
+	state.SelectedSkillKey = cache.SelectedSkillKey
+	state.SelectedWorkflowKey = cache.SelectedWorkflowKey
 	return state
 }
 
