@@ -74,9 +74,30 @@ func validateCutover(cfg Config, registeredKeys map[string]struct{}) []Diagnosti
 				Message:    fmt.Sprintf("cutover pilot key %q must match a registered project in the same manifest", pilot.Key),
 			})
 		}
+		if pilot.Stage != "" && !isKnownCutoverPilotStage(pilot.Stage) {
+			diagnostics = append(diagnostics, Diagnostic{
+				ProjectKey: pilot.Key,
+				Code:       "invalid_cutover_pilot_stage",
+				Message:    fmt.Sprintf("cutover pilot %q has unsupported stage %q", pilot.Key, pilot.Stage),
+			})
+		}
 	}
 
 	return diagnostics
+}
+
+func isKnownCutoverPilotStage(stage TransitionState) bool {
+	switch stage {
+	case TransitionStateInventory,
+		TransitionStateShadow,
+		TransitionStateCompare,
+		TransitionStateLimitedAction,
+		TransitionStateCutover,
+		TransitionStateDecommissioned:
+		return true
+	default:
+		return false
+	}
 }
 
 func validateProject(project Manifest, seenKeys map[string]struct{}) []Diagnostic {

@@ -70,6 +70,7 @@ type TaskWakePacket struct {
 	TaskKey                string     `json:"task_key"`
 	Scope                  string     `json:"scope"`
 	Objective              string     `json:"objective"`
+	IntakeSummary          string     `json:"intake_summary,omitempty"`
 	Status                 string     `json:"status"`
 	Trigger                Trigger    `json:"trigger"`
 	BlockingReason         string     `json:"blocking_reason,omitempty"`

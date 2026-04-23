@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 
 	"odin-os/internal/store/sqlite"
 )
@@ -26,6 +27,7 @@ type CompactParams struct {
 	Trigger                Trigger
 	CheckpointKey          string
 	Objective              string
+	IntakeSummary          string
 	TaskStatus             string
 	BlockingReason         string
 	LastCompletedStep      string
@@ -157,6 +159,7 @@ func (service Service) Compact(ctx context.Context, params CompactParams) (Compa
 		TaskKey:                task.Key,
 		Scope:                  task.Scope,
 		Objective:              stringOrFallback(params.Objective, task.Title),
+		IntakeSummary:          strings.TrimSpace(params.IntakeSummary),
 		Status:                 stringOrFallback(params.TaskStatus, task.Status),
 		Trigger:                params.Trigger,
 		BlockingReason:         params.BlockingReason,
@@ -326,6 +329,15 @@ func compactRunSummary(run sqlite.Run, approvalSummary string) string {
 }
 
 func compactWakeSummary(wake TaskWakePacket) string {
+	if wake.IntakeSummary != "" {
+		if wake.BlockingReason != "" {
+			return fmt.Sprintf("%s: %s: %s", wake.Objective, wake.BlockingReason, wake.IntakeSummary)
+		}
+		if wake.Objective == "" {
+			return wake.IntakeSummary
+		}
+		return fmt.Sprintf("%s: %s", wake.Objective, wake.IntakeSummary)
+	}
 	if wake.BlockingReason != "" {
 		return fmt.Sprintf("%s: %s", wake.Objective, wake.BlockingReason)
 	}

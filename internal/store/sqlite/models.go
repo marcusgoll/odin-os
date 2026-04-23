@@ -199,6 +199,17 @@ type Task struct {
 	UpdatedAt             time.Time
 }
 
+type TaskIntake struct {
+	ID          int64
+	TaskID      int64
+	Source      string
+	IntakeType  string
+	DedupKey    string
+	RequestedBy string
+	PayloadJSON string
+	CreatedAt   time.Time
+}
+
 type CreateTaskParams struct {
 	ProjectID             int64
 	Key                   string
@@ -213,6 +224,15 @@ type CreateTaskParams struct {
 	FollowUpObligationID  *int64
 	FollowUpOccurrenceKey string
 	WorkKind              string
+}
+
+type CreateTaskIntakeParams struct {
+	TaskID      int64
+	Source      string
+	IntakeType  string
+	DedupKey    string
+	RequestedBy string
+	PayloadJSON string
 }
 
 type UpdateTaskStatusParams struct {
