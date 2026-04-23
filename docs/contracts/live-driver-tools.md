@@ -1,12 +1,12 @@
 ---
 title: Live Driver Tool Wiring
 status: active
-date: 2026-04-10
+date: 2026-04-23
 ---
 
 # Live Driver Tool Wiring
 
-`odin-os` invokes live external tools for the PBS bid workflow through JSON-over-stdin/stdout driver commands.
+`odin-os` invokes live external tools for browser-backed and calendar-backed workflows through JSON-over-stdin/stdout driver commands.
 
 ## Environment variables
 
@@ -15,6 +15,7 @@ date: 2026-04-10
 - `ODIN_HUGINN_VISUAL_DRIVER`
 - `ODIN_HUGINN_X_POST_DRIVER`
 - `ODIN_HUGINN_X_PUBLISH_DRIVER`
+- `ODIN_HUGINN_ROBINHOOD_TRANSFER_DRIVER`
 
 These env vars should point to executable commands. The repo-local driver scripts are:
 
@@ -23,6 +24,7 @@ These env vars should point to executable commands. The repo-local driver script
 - `scripts/drivers/huginn-visual-audit.sh`
 - `scripts/drivers/huginn-x-post-evidence.sh`
 - `scripts/drivers/huginn-x-post-publish.sh`
+- `scripts/drivers/robinhood-transfer-flow.sh`
 
 Example:
 
@@ -32,6 +34,7 @@ export ODIN_HUGINN_DRIVER="/home/orchestrator/odin-os/scripts/drivers/huginn-pbs
 export ODIN_HUGINN_VISUAL_DRIVER="/home/orchestrator/odin-os/scripts/drivers/huginn-visual-audit.sh"
 export ODIN_HUGINN_X_POST_DRIVER="/home/orchestrator/odin-os/scripts/drivers/huginn-x-post-evidence.sh"
 export ODIN_HUGINN_X_PUBLISH_DRIVER="/home/orchestrator/odin-os/scripts/drivers/huginn-x-post-publish.sh"
+export ODIN_HUGINN_ROBINHOOD_TRANSFER_DRIVER="/home/orchestrator/odin-os/scripts/drivers/robinhood-transfer-flow.sh"
 ```
 
 ## Repo-local library reuse
@@ -42,6 +45,7 @@ The repo-local scripts reuse shell libraries inside `odin-os`.
 - `huginn-visual-audit.sh` sources `scripts/browser/browser-access.sh`
 - `huginn-x-post-evidence.sh` sources `scripts/browser/browser-access.sh`
 - `huginn-x-post-publish.sh` sources `scripts/browser/browser-access.sh`
+- `robinhood-transfer-flow.sh` sources `scripts/browser/browser-access.sh`
 
 Override paths when needed:
 
@@ -107,14 +111,14 @@ X post visible evidence driver request:
 
 Weekly X evidence bundles do not introduce a new driver env var. The builtin tool `browser_x_weekly_evidence_bundle` reuses `ODIN_HUGINN_X_POST_DRIVER` once per explicit X post URL and aggregates the results inside Odin.
 
-Current operator docs and examples use canonical `browser_*` tool keys. Legacy `huginn_*` keys remain accepted on `/tool` only as hidden compatibility aliases during transition.
-
 All live drivers return one JSON response on stdout with:
 
 - `status`
 - `tool_key`
 - `summary`
 - `artifacts`
+
+Current operator docs and examples use canonical `browser_*` tool keys. Legacy `huginn_*` keys remain accepted on `/tool` only as hidden compatibility aliases during transition.
 
 ## Social evidence boundary
 
@@ -124,3 +128,24 @@ All live drivers return one JSON response on stdout with:
 - `browser_x_weekly_evidence_bundle` is an Odin-side orchestration layer over that same explicit-post driver, not a broader crawler.
 - LinkedIn browser evidence capture is not part of this live driver surface.
 - Unofficial API replay or hidden network-call harvesting is not part of this contract.
+
+## Robinhood transfer proof boundary
+
+The Robinhood transfer lane has two separate proof modes:
+
+- deterministic shell proof for CI and local verification
+- principal-attended live Robinhood use for real Marcus transfers
+
+Deterministic shell proof uses `ODIN_HUGINN_ROBINHOOD_TRANSFER_DRIVER` with a fixture command and runs through the real repo-owned `./bin/odin repl` surface. The focused proof target is:
+
+```bash
+go test ./tests/integration -run 'TestRobinhoodTransferShellFlowDeterministic|TestRobinhoodTransferFlowScript' -count=1
+```
+
+Attended live Robinhood use should point `ODIN_HUGINN_ROBINHOOD_TRANSFER_DRIVER` at the repo-local script:
+
+```bash
+export ODIN_HUGINN_ROBINHOOD_TRANSFER_DRIVER="/home/orchestrator/odin-os/scripts/drivers/robinhood-transfer-flow.sh"
+```
+
+Use [Marcus Robinhood Live Transfer Runbook](../operations/marcus-robinhood-live-transfer-runbook.md) for the operator-attended command sequence and the current `family-ops` registry-alignment caveat.
