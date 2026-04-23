@@ -444,7 +444,7 @@ func TestAlphaAcceptance(t *testing.T) {
 		})
 
 		odinCoreCards := suiteBroker.Catalog("odin-core")
-		if !hasCapability(odinCoreCards, "status-command") || !hasCapability(odinCoreCards, "triage-skill") {
+		if !hasCapability(odinCoreCards, "task_list") || !hasCapability(odinCoreCards, "triage-skill") {
 			t.Fatalf("odin-core catalog missing expected capabilities: %+v", odinCoreCards)
 		}
 		projectCards := suiteBroker.Catalog("project")

@@ -15,9 +15,8 @@ func TestPrepareStartsFromThinCatalogOnly(t *testing.T) {
 
 	service := Service{
 		Broker: broker.New(
-			broker.StaticSource(testSnapshot()),
+			testSnapshot(),
 			catalog.BuiltinDefinitions(),
-			nil,
 			budgets.Limits{
 				Tool:    budgets.Tool{MaxSelections: 10, MaxInvocations: 10, MaxCostUnits: 20},
 				Context: budgets.Context{MaxExpandedDefinitions: 10, MaxCompactedResults: 10, MaxCompactedBytes: 1000},
@@ -66,9 +65,8 @@ func TestMaterializeExpandsOnlySelectedCapability(t *testing.T) {
 
 	service := Service{
 		Broker: broker.New(
-			broker.StaticSource(testSnapshot()),
+			testSnapshot(),
 			catalog.BuiltinDefinitions(),
-			nil,
 			budgets.Limits{
 				Tool:    budgets.Tool{MaxSelections: 10, MaxInvocations: 10, MaxCostUnits: 20},
 				Context: budgets.Context{MaxExpandedDefinitions: 10, MaxCompactedResults: 10, MaxCompactedBytes: 1000},
@@ -114,9 +112,8 @@ func TestMaterializeRejectsAgentRoleWithoutPlanOptIn(t *testing.T) {
 
 	service := Service{
 		Broker: broker.New(
-			broker.StaticSource(testSnapshot()),
+			testSnapshot(),
 			catalog.BuiltinDefinitions(),
-			nil,
 			budgets.Limits{
 				Tool:    budgets.Tool{MaxSelections: 10, MaxInvocations: 10, MaxCostUnits: 20},
 				Context: budgets.Context{MaxExpandedDefinitions: 10, MaxCompactedResults: 10, MaxCompactedBytes: 1000},
