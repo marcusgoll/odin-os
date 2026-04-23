@@ -378,7 +378,27 @@ func (service Service) Build(ctx context.Context, resolved scope.Resolution) (Vi
 			StartedAt:   run.StartedAt,
 		}
 		view.Observability.ActiveRuns = append(view.Observability.ActiveRuns, summary)
-		runAttemptsByTaskID[run.TaskID] = append(runAttemptsByTaskID[run.TaskID], summary)
+	}
+
+	runSummaryViews, err := projections.ListRunSummaryViews(ctx, service.Store.DB())
+	if err != nil {
+		return View{}, err
+	}
+	for _, run := range runSummaryViews {
+		projectKey := taskProjectIndex[run.TaskID]
+		if !matchesProjectScope(projectKey, resolved) {
+			continue
+		}
+		runAttemptsByTaskID[run.TaskID] = append(runAttemptsByTaskID[run.TaskID], RunAttemptSummary{
+			RunID:       run.RunID,
+			TaskID:      run.TaskID,
+			WorkItemKey: run.TaskKey,
+			ProjectKey:  projectKey,
+			Executor:    run.Executor,
+			Status:      run.Status,
+			Attempt:     run.Attempt,
+			StartedAt:   run.StartedAt,
+		})
 	}
 
 	visibleCompanionKeys := make(map[string]struct{})
@@ -439,7 +459,9 @@ func (service Service) Build(ctx context.Context, resolved scope.Resolution) (Vi
 	if err != nil {
 		return View{}, err
 	}
+	incidentProjectIndex := make(map[int64]string)
 	for _, incident := range incidentViews {
+		incidentProjectIndex[incident.IncidentID] = incident.ProjectKey
 		if !matchesProjectScope(incident.ProjectKey, resolved) {
 			continue
 		}
@@ -485,6 +507,7 @@ func (service Service) Build(ctx context.Context, resolved scope.Resolution) (Vi
 	}
 	runTaskIDCache := make(map[int64]int64)
 	for _, recovery := range recoveryViews {
+		recoveryProjectKey := ""
 		if recovery.RunID != 0 {
 			taskID, ok := runTaskIDCache[recovery.RunID]
 			if !ok {
@@ -502,9 +525,22 @@ func (service Service) Build(ctx context.Context, resolved scope.Resolution) (Vi
 			if err != nil {
 				return View{}, err
 			}
-			if !matchesProjectScope(taskContext.projectKey, resolved) {
+			recoveryProjectKey = taskContext.projectKey
+		} else {
+			recoveryRecord, err := service.Store.GetRecovery(ctx, recovery.RecoveryID)
+			if err != nil {
+				if err == sql.ErrNoRows {
+					continue
+				}
+				return View{}, err
+			}
+			if recoveryRecord.IncidentID == nil {
 				continue
 			}
+			recoveryProjectKey = incidentProjectIndex[*recoveryRecord.IncidentID]
+		}
+		if !matchesProjectScope(recoveryProjectKey, resolved) {
+			continue
 		}
 		view.Observability.Recoveries = append(view.Observability.Recoveries, RecoverySummary{
 			RecoveryID: recovery.RecoveryID,

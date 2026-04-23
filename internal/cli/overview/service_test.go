@@ -144,13 +144,23 @@ func TestBuildNarrowsProjectScopedOverview(t *testing.T) {
 	if err != nil {
 		t.Fatalf("StartRun(beta-task) error = %v", err)
 	}
-	if _, err := env.store.StartRecovery(ctx, sqlite.StartRecoveryParams{
+	betaIncident, err := env.store.OpenIncident(ctx, sqlite.OpenIncidentParams{
 		RunID:       &betaRun.ID,
+		Severity:    "warning",
+		Status:      "open",
+		Summary:     "beta incident",
+		DetailsJSON: "{}",
+	})
+	if err != nil {
+		t.Fatalf("OpenIncident(beta) error = %v", err)
+	}
+	if _, err := env.store.StartRecovery(ctx, sqlite.StartRecoveryParams{
+		IncidentID:  &betaIncident.ID,
 		Status:      "running",
 		Strategy:    "self_heal",
 		DetailsJSON: "{}",
 	}); err != nil {
-		t.Fatalf("StartRecovery(beta) error = %v", err)
+		t.Fatalf("StartRecovery(beta incident) error = %v", err)
 	}
 
 	view, err := Service{
@@ -172,6 +182,46 @@ func TestBuildNarrowsProjectScopedOverview(t *testing.T) {
 	}
 	if len(view.Observability.Recoveries) != 0 {
 		t.Fatalf("Recoveries = %+v, want none in alpha scope", view.Observability.Recoveries)
+	}
+}
+
+func TestBuildWorkItemRunAttemptsIncludeHistory(t *testing.T) {
+	ctx := context.Background()
+	env := newOverviewTestEnvironment(t)
+
+	if _, _, err := env.store.FinishRunAndSetTaskStatus(ctx, sqlite.FinishRunAndSetTaskStatusParams{
+		RunID:      env.runID,
+		RunStatus:  "completed",
+		Summary:    "first attempt completed",
+		TaskStatus: "queued",
+	}); err != nil {
+		t.Fatalf("FinishRunAndSetTaskStatus() error = %v", err)
+	}
+	if _, err := env.store.StartRun(ctx, sqlite.StartRunParams{
+		TaskID:   env.taskID,
+		Executor: "codex",
+		Attempt:  2,
+		Status:   "running",
+	}); err != nil {
+		t.Fatalf("StartRun(attempt 2) error = %v", err)
+	}
+
+	view, err := Service{
+		Store:            env.store,
+		RegistrySnapshot: env.snapshot,
+	}.Build(ctx, scope.Resolution{Kind: scope.ScopeGlobal})
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+
+	if len(view.WorkItems) != 1 {
+		t.Fatalf("Work items len = %d, want 1", len(view.WorkItems))
+	}
+	if len(view.WorkItems[0].RunAttempts) != 2 {
+		t.Fatalf("Run attempts len = %d, want 2", len(view.WorkItems[0].RunAttempts))
+	}
+	if view.WorkItems[0].RunAttempts[0].Status != "completed" || view.WorkItems[0].RunAttempts[1].Status != "running" {
+		t.Fatalf("Run attempts = %+v, want completed then running", view.WorkItems[0].RunAttempts)
 	}
 }
 
@@ -224,6 +274,8 @@ func TestBuildUsesOdinCoreMemoryScope(t *testing.T) {
 type overviewTestEnvironment struct {
 	store    *sqlite.Store
 	snapshot registry.Snapshot
+	taskID   int64
+	runID    int64
 }
 
 func newOverviewTestEnvironment(t *testing.T) overviewTestEnvironment {
@@ -336,5 +388,7 @@ func newOverviewTestEnvironment(t *testing.T) overviewTestEnvironment {
 	return overviewTestEnvironment{
 		store:    store,
 		snapshot: snapshot,
+		taskID:   task.ID,
+		runID:    run.ID,
 	}
 }
