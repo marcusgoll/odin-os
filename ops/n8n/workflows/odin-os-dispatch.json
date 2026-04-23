@@ -1,0 +1,57 @@
+{
+  "name": "Odin OS Dispatch",
+  "active": false,
+  "versionId": "58f9a92b-7194-49e9-90cc-b0d14d3923c4",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "dispatch-trigger",
+      "name": "Execute Workflow Trigger",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1,
+      "position": [240, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "const input = $input.first().json || {};\nconst sshBase = 'ssh -i /home/node/.ssh/odin_os_ingress -o StrictHostKeyChecking=no -o ConnectTimeout=5 orchestrator@172.17.0.1';\n\nfunction shellSingleQuote(value) {\n  return \"'\" + String(value).replace(/'/g, \"'\\\"'\\\"'\") + \"'\";\n}\n\nfunction machineValue(value, field) {\n  const normalized = String(value || '').trim();\n  if (!normalized) {\n    throw new Error(field + ' is required');\n  }\n  if (/\\s/.test(normalized)) {\n    throw new Error(field + ' must not contain whitespace');\n  }\n  return normalized;\n}\n\nconst routerMode = String(input.router_mode || 'intake').trim();\nif (routerMode === 'approval_resolve') {\n  const approvalId = String(input.approval_id || '').trim();\n  const decisionRaw = String(input.approval_decision || '').trim().toLowerCase();\n  const decision = decisionRaw === 'deny' ? 'reject' : decisionRaw;\n  const reason = String(input.approval_reason || 'telegram-callback').trim() || 'telegram-callback';\n  const by = machineValue(input.approval_by || 'telegram', 'approval_by');\n\n  if (!/^[0-9]+$/.test(approvalId)) {\n    throw new Error('approval_id must be numeric');\n  }\n  if (!['approve', 'reject'].includes(decision)) {\n    throw new Error('approval_decision must be approve or reject');\n  }\n\n  const routerCommand = 'approval-resolve ' + approvalId + ' ' + decision + ' ' + shellSingleQuote(reason);\n  return [{ json: {\n    router_mode: 'approval_resolve',\n    approval_resolve: 'approval-resolve',\n    approval_id: approvalId,\n    approval_decision: decision,\n    approval_reason: reason,\n    approval_by: by,\n    command: sshBase + ' ' + shellSingleQuote(routerCommand)\n  } }];\n}\n\nconst schemaVersion = Number(input.schema_version || 0);\nif (schemaVersion !== 1) {\n  throw new Error('schema_version must be 1');\n}\n\nconst envelope = {\n  schema_version: 1,\n  source: machineValue(input.source, 'source'),\n  type: machineValue(input.type, 'type'),\n  project_key: machineValue(input.project_key, 'project_key'),\n  title: String(input.title || '').trim(),\n  action_key: String(input.action_key || '').trim(),\n  dedup_key: String(input.dedup_key || '').trim(),\n  requested_by: machineValue(input.requested_by || input.source, 'requested_by'),\n  payload: input.payload || {}\n};\n\nif (!envelope.title) {\n  throw new Error('title is required');\n}\nif (typeof envelope.payload !== 'object' || envelope.payload === null || Array.isArray(envelope.payload)) {\n  throw new Error('payload must be a JSON object');\n}\n\nconst envelopeB64 = Buffer.from(JSON.stringify(envelope)).toString('base64');\n// Empty SSH_ORIGINAL_COMMAND routes stdin to odin intake enqueue through the forced command.\nreturn [{ json: {\n  ...envelope,\n  router_mode: 'intake',\n  envelope_b64: envelopeB64,\n  command: 'printf %s ' + shellSingleQuote(envelopeB64) + ' | base64 -d | ' + sshBase\n} }];"
+      },
+      "id": "build-router-command",
+      "name": "Build Router Command",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [500, 300],
+      "notes": "Receives either a normalized odin intake enqueue envelope or an approval-resolve request, and is the only workflow that knows the pilot SSH target. It intentionally uses a dedicated odin_os_ingress key so non-cutover legacy workflows can keep using odin_ingress."
+    },
+    {
+      "parameters": {
+        "command": "={{ $json.command }}"
+      },
+      "id": "ssh-dispatch",
+      "name": "SSH to Odin OS Router",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [780, 300],
+      "notes": "Empty SSH_ORIGINAL_COMMAND streams the normalized intake envelope to odin intake enqueue. approval-resolve requests become forced-command SSH invocations over the dedicated odin_os_ingress pilot key."
+    }
+  ],
+  "connections": {
+    "Execute Workflow Trigger": {
+      "main": [
+        [{ "node": "Build Router Command", "type": "main", "index": 0 }]
+      ]
+    },
+    "Build Router Command": {
+      "main": [
+        [{ "node": "SSH to Odin OS Router", "type": "main", "index": 0 }]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "callerPolicy": "workflowsFromSameOwner",
+    "availableInMCP": false
+  },
+  "meta": {
+    "description": "Shared Odin OS transport. Normalizes stdin routing to odin intake enqueue and translates approval-resolve requests for the SSH forced-command router. This workflow uses a dedicated odin_os_ingress pilot key so legacy workflows can keep their existing shared ingress key during staged cutover."
+  }
+}

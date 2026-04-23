@@ -174,6 +174,16 @@ type createManagedTaskInput struct {
 	requestedBy           string
 	taskCompanionID       int64
 	requestedSwarmTrigger string
+	actionKey             string
+}
+
+func (service Service) CreateTaskFromActWithAction(ctx context.Context, resolved scope.Resolution, title string, actionKey string) (sqlite.Task, error) {
+	return service.createManagedTask(ctx, resolved, title, createManagedTaskInput{
+		requestedBy:           "operator",
+		taskCompanionID:       0,
+		requestedSwarmTrigger: "",
+		actionKey:             strings.TrimSpace(actionKey),
+	})
 }
 
 func (service Service) createManagedTask(ctx context.Context, resolved scope.Resolution, title string, input createManagedTaskInput) (sqlite.Task, error) {
@@ -222,12 +232,16 @@ func (service Service) createManagedTask(ctx context.Context, resolved scope.Res
 	if service.Now != nil {
 		now = service.Now().UTC()
 	}
+	actionKey := strings.TrimSpace(input.actionKey)
+	if actionKey == "" {
+		actionKey = supportedSwarmTrigger(input.requestedSwarmTrigger)
+	}
 
 	return service.Store.CreateTask(ctx, sqlite.CreateTaskParams{
 		ProjectID:    project.ID,
-		Key:          fmt.Sprintf("%s-%s", slugify(title), now.Format("20060102-150405")),
+		Key:          fmt.Sprintf("%s-%s-%09d", slugify(title), now.Format("20060102-150405"), now.Nanosecond()),
 		Title:        title,
-		ActionKey:    supportedSwarmTrigger(input.requestedSwarmTrigger),
+		ActionKey:    actionKey,
 		Status:       "queued",
 		Scope:        taskScope,
 		RequestedBy:  input.requestedBy,
@@ -388,7 +402,12 @@ func (service Service) ExecuteTaskWithRequest(ctx context.Context, taskID int64,
 	}
 	manifest, ok := service.Registry.Lookup(project.Key)
 	if !ok {
-		return ExecutionOutcome{}, fmt.Errorf("unknown manifest for project %q", project.Key)
+		return service.failTaskBeforeRun(ctx, task, fmt.Errorf("unknown manifest for project %q", project.Key))
+	}
+
+	intake, hasIntake, err := service.latestTaskIntake(ctx, task.ID)
+	if err != nil {
+		return ExecutionOutcome{}, err
 	}
 
 	executors := service.Executors
@@ -407,7 +426,6 @@ func (service Service) ExecuteTaskWithRequest(ctx context.Context, taskID int64,
 		Config:    config,
 		Executors: executors,
 	}
-
 	prompt := strings.TrimSpace(request.PromptOverride)
 	if prompt == "" {
 		prompt = task.Title
@@ -426,6 +444,13 @@ func (service Service) ExecuteTaskWithRequest(ctx context.Context, taskID int64,
 			"task_id":     fmt.Sprintf("%d", task.ID),
 		},
 	}
+	intakeSummary := ""
+	if hasIntake {
+		spec.Metadata["intake_source"] = intake.Source
+		spec.Metadata["intake_type"] = intake.IntakeType
+		spec.Metadata["intake_payload_json"] = intake.PayloadJSON
+		intakeSummary = compactIntakeSummary(intake)
+	}
 	for key, value := range request.Metadata {
 		key = strings.TrimSpace(key)
 		value = strings.TrimSpace(value)
@@ -437,9 +462,10 @@ func (service Service) ExecuteTaskWithRequest(ctx context.Context, taskID int64,
 
 	decision, err := selector.Select(ctx, spec)
 	if err != nil {
-		return ExecutionOutcome{}, err
+		return service.failTaskBeforeRun(ctx, task, err)
 	}
-	admission, err := service.admitTask(ctx, task, project, manifest, decision.ExecutorKey)
+
+	admission, err := service.admitDirectTask(ctx, task, project, manifest)
 	if err != nil {
 		return ExecutionOutcome{}, err
 	}
@@ -447,11 +473,7 @@ func (service Service) ExecuteTaskWithRequest(ctx context.Context, taskID int64,
 		if err := service.applyAdmissionDecision(ctx, task, admission); err != nil {
 			return ExecutionOutcome{}, err
 		}
-		updatedTask, loadErr := service.Store.GetTask(ctx, task.ID)
-		if loadErr != nil {
-			return ExecutionOutcome{}, loadErr
-		}
-		return ExecutionOutcome{Task: updatedTask}, nil
+		return service.loadExecutionOutcome(ctx, task.ID, nil)
 	}
 
 	attempt, err := service.nextRunAttempt(ctx, task.ID)
@@ -468,32 +490,50 @@ func (service Service) ExecuteTaskWithRequest(ctx context.Context, taskID int64,
 		return ExecutionOutcome{}, err
 	}
 	if leaseAdmission.Outcome != admissionDispatchable {
-		if err := service.finalizeOutcome(ctx, task, run, leaseAdmission, contract.ExecutionResult{}, nil); err != nil {
-			return ExecutionOutcome{}, err
+		finalizeErr := service.finalizeOutcome(ctx, task, run, leaseAdmission, contract.ExecutionResult{}, nil)
+		outcome, loadErr := service.loadExecutionOutcome(ctx, task.ID, &run.ID)
+		if finalizeErr != nil {
+			if loadErr == nil {
+				return outcome, finalizeErr
+			}
+			return ExecutionOutcome{}, finalizeErr
 		}
-		return service.executionOutcome(ctx, task.ID, run.ID)
+		return outcome, loadErr
 	}
 
-	if _, run, err = service.Store.UpdateRunAndTaskStatus(ctx, sqlite.UpdateRunAndTaskStatusParams{
+	updatedTask, updatedRun, err := service.Store.UpdateRunAndTaskStatus(ctx, sqlite.UpdateRunAndTaskStatusParams{
 		RunID:      run.ID,
 		RunStatus:  "running",
 		TaskStatus: "running",
-	}); err != nil {
+	})
+	if err != nil {
 		return ExecutionOutcome{}, err
 	}
+	task = updatedTask
+	run = updatedRun
 
 	spec.Metadata["branch_name"] = assignment.BranchName
 	spec.Metadata["repo_root"] = assignment.RepoRoot
 	spec.Metadata["worktree_path"] = assignment.WorktreePath
 
+	if intakeSummary != "" {
+		if err := service.compactExecutionContext(ctx, project, task, run, intakeSummary); err != nil {
+			return ExecutionOutcome{}, err
+		}
+	}
+
 	executor := executors[decision.ExecutorKey]
 	result, execErr := executor.RunTask(ctx, spec)
-	if err := service.finalizeOutcome(ctx, task, run, admissionDecision{}, result, execErr); err != nil {
-		return ExecutionOutcome{}, err
+	finalizeErr := service.finalizeOutcome(ctx, task, run, admissionDecision{}, result, execErr)
+	outcome, loadErr := service.loadExecutionOutcome(ctx, task.ID, &run.ID)
+	if finalizeErr != nil {
+		if loadErr == nil {
+			return outcome, finalizeErr
+		}
+		return ExecutionOutcome{}, finalizeErr
 	}
-	outcome, err := service.executionOutcome(ctx, task.ID, run.ID)
-	if err != nil {
-		return ExecutionOutcome{}, err
+	if loadErr != nil {
+		return ExecutionOutcome{}, loadErr
 	}
 	if err := service.recordExecutionMemory(ctx, project, outcome.Task, outcome.Run, prompt, request.Metadata); err != nil {
 		return ExecutionOutcome{}, err
@@ -732,6 +772,83 @@ func (service Service) nextRunAttempt(ctx context.Context, taskID int64) (int, e
 		return 0, err
 	}
 	return attempt, nil
+}
+
+func (service Service) latestTaskIntake(ctx context.Context, taskID int64) (sqlite.TaskIntake, bool, error) {
+	row := service.Store.DB().QueryRowContext(ctx, `
+		SELECT id, task_id, source, intake_type, dedup_key, requested_by, payload_json, created_at
+		FROM task_intakes
+		WHERE task_id = ?
+		ORDER BY id DESC
+		LIMIT 1
+	`, taskID)
+
+	var intake sqlite.TaskIntake
+	var createdAt string
+	if err := row.Scan(
+		&intake.ID,
+		&intake.TaskID,
+		&intake.Source,
+		&intake.IntakeType,
+		&intake.DedupKey,
+		&intake.RequestedBy,
+		&intake.PayloadJSON,
+		&createdAt,
+	); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return sqlite.TaskIntake{}, false, nil
+		}
+		return sqlite.TaskIntake{}, false, err
+	}
+
+	parsedCreatedAt, err := time.Parse(time.RFC3339Nano, createdAt)
+	if err != nil {
+		return sqlite.TaskIntake{}, false, err
+	}
+	intake.CreatedAt = parsedCreatedAt
+	return intake, true, nil
+}
+
+func (service Service) loadExecutionOutcome(ctx context.Context, taskID int64, runID *int64) (ExecutionOutcome, error) {
+	task, err := service.Store.GetTask(ctx, taskID)
+	if err != nil {
+		return ExecutionOutcome{}, err
+	}
+	if runID == nil {
+		return ExecutionOutcome{Task: task}, nil
+	}
+
+	run, err := service.Store.GetRun(ctx, *runID)
+	if err != nil {
+		return ExecutionOutcome{}, err
+	}
+	return ExecutionOutcome{
+		Task: task,
+		Run:  &run,
+	}, nil
+}
+
+func (service Service) failTaskBeforeRun(ctx context.Context, task sqlite.Task, cause error) (ExecutionOutcome, error) {
+	message := strings.TrimSpace(cause.Error())
+	if message == "" {
+		message = "failed"
+	}
+
+	if _, err := service.Store.UpdateTaskStatus(ctx, sqlite.UpdateTaskStatusParams{
+		TaskID:         task.ID,
+		Status:         "failed",
+		Summary:        message,
+		TerminalReason: message,
+		ArtifactsJSON:  "[]",
+	}); err != nil {
+		return ExecutionOutcome{}, err
+	}
+
+	outcome, err := service.loadExecutionOutcome(ctx, task.ID, nil)
+	if err != nil {
+		return ExecutionOutcome{}, err
+	}
+	return outcome, cause
 }
 
 func (service Service) executionConfig(ctx context.Context) (executorrouter.Config, error) {
@@ -978,6 +1095,48 @@ func (service Service) admitTask(ctx context.Context, task sqlite.Task, project 
 			BlockedReason: "executor_unavailable",
 			LastError:     executorCheck.Summary,
 		}, nil
+	}
+
+	if _, err := service.Transitions.AuthorizeAction(ctx, projects.ActionInput{
+		ProjectID:   project.ID,
+		Actor:       projects.TransitionControllerOdinOS,
+		ActionClass: projects.ActionClassIsolatedMutation,
+		ActionKey:   "run_task",
+	}); err != nil {
+		return admissionDecision{
+			Outcome:   admissionFailed,
+			LastError: fmt.Sprintf("transition_denied: %v", err),
+		}, nil
+	}
+
+	return admissionDecision{Outcome: admissionDispatchable}, nil
+}
+
+func (service Service) admitDirectTask(ctx context.Context, task sqlite.Task, project sqlite.Project, manifest projects.Manifest) (admissionDecision, error) {
+	if requiresExplicitApproval(manifest) {
+		approval, err := service.latestTaskApproval(ctx, task.ID)
+		if err != nil {
+			return admissionDecision{}, err
+		}
+		switch approval.Status {
+		case "approved":
+		case "pending":
+			return admissionDecision{Outcome: admissionBlocked, BlockedReason: "approval_required"}, nil
+		case "":
+			if _, err := service.Store.RequestApproval(ctx, sqlite.RequestApprovalParams{
+				TaskID:      task.ID,
+				Status:      "pending",
+				RequestedBy: "system",
+			}); err != nil {
+				return admissionDecision{}, err
+			}
+			return admissionDecision{Outcome: admissionBlocked, BlockedReason: "approval_required"}, nil
+		default:
+			return admissionDecision{
+				Outcome:   admissionFailed,
+				LastError: fmt.Sprintf("approval for task %d is %s", task.ID, approval.Status),
+			}, nil
+		}
 	}
 
 	if _, err := service.Transitions.AuthorizeAction(ctx, projects.ActionInput{
@@ -1305,6 +1464,32 @@ func (service Service) compactFailedDispatch(ctx context.Context, task sqlite.Ta
 	return err
 }
 
+func (service Service) compactExecutionContext(ctx context.Context, project sqlite.Project, task sqlite.Task, run sqlite.Run, intakeSummary string) error {
+	intakeSummary = strings.TrimSpace(intakeSummary)
+	if intakeSummary == "" {
+		return nil
+	}
+
+	_, err := service.compactCheckpoint(ctx, checkpoints.CompactParams{
+		TaskID:          task.ID,
+		RunID:           &run.ID,
+		Trigger:         checkpoints.TriggerHandoff,
+		CheckpointKey:   fmt.Sprintf("task-execution-%d", run.ID),
+		Objective:       task.Title,
+		TaskStatus:      task.Status,
+		IntakeSummary:   intakeSummary,
+		ManifestSummary: service.manifestSummary(project),
+		PolicySummary:   "task execution intake compaction",
+		OpenTaskSummary: "task queued for execution",
+		ApprovalSummary: "none",
+		Evidence: []checkpoints.Evidence{{
+			Kind:    "intake",
+			Summary: intakeSummary,
+		}},
+	})
+	return err
+}
+
 func (service Service) compactCheckpoint(ctx context.Context, params checkpoints.CompactParams) (checkpoints.CompactionResult, error) {
 	if service.CheckpointCompactor != nil {
 		return service.CheckpointCompactor(ctx, params)
@@ -1499,4 +1684,15 @@ func slugify(input string) string {
 		return "task"
 	}
 	return result
+}
+
+func compactIntakeSummary(intake sqlite.TaskIntake) string {
+	parts := []string{strings.TrimSpace(intake.Source), strings.TrimSpace(intake.IntakeType), "intake"}
+	filtered := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if part != "" {
+			filtered = append(filtered, part)
+		}
+	}
+	return strings.Join(filtered, " ")
 }

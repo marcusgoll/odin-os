@@ -68,3 +68,19 @@ Do not retire the next duty until the current one has proven stable for the pilo
 - `config/projects.yaml` lists the pilot cohort and runtime ownership expectations.
 - `docs/operations/odin-os-rollback.md` records the rollback triggers and recovery sequence.
 - `docs/operations/cutover-readiness.md` stays as the broader operational readiness checklist.
+- `docs/operations/n8n-cutover.md` records the `pbs` n8n intake cutover steps and the no-legacy-inbox validation checks.
+
+## PBS n8n pilot cutover
+
+For the first `pbs` pilot, the intake cutover is part of the proof that Odin OS can own the normal queue path without `/var/odin` inbox handoff.
+
+Operator sequence:
+
+1. import `odin-os` workflow exports into n8n
+2. activate only `pbs` workflows first
+3. install a dedicated odin-os pilot ingress key on the host
+4. trigger manual smoke events
+5. verify `odin status --json`, `odin jobs --json`, `odin runs --json`
+6. verify no new `/var/odin/inbox/*.json` files appear for `pbs`
+
+Do not widen the pilot until the `pbs` n8n path and the project transition state both stay stable under normal queued work.

@@ -6,7 +6,7 @@ date: 2026-04-23
 
 # Live Driver Tool Wiring
 
-`odin-os` invokes live external tools for browser-backed and calendar-backed workflows through JSON-over-stdin/stdout driver commands.
+`odin-os` invokes live external tools for bounded browser-backed and calendar-backed workflow lanes through JSON-over-stdin/stdout driver commands.
 
 ## Environment variables
 
@@ -52,6 +52,13 @@ Override paths when needed:
 - `ODIN_GOOGLE_LIB_PATH`
 - `ODIN_BROWSER_ACCESS_LIB_PATH`
 
+These overrides are for explicit local customization only. `odin-os` no longer requires `/home/orchestrator/odin-orchestrator` to run the live drivers.
+
+## Runtime prerequisites
+
+- `google.sh` requires `curl` and `python3`, plus Google OAuth refresh-token credentials in the environment or `~/.odin-env`.
+- `browser-access.sh` can reuse an already running compatible browser server via `ODIN_BROWSER_SERVER_URL`.
+- If `ODIN_BROWSER_SERVER_URL` is unset, `browser-access.sh` starts the repo-local compatible browser server itself and therefore requires `node`.
 ## Request contract
 
 Calendar driver request:
@@ -146,6 +153,12 @@ Attended live Robinhood use should point `ODIN_HUGINN_ROBINHOOD_TRANSFER_DRIVER`
 
 ```bash
 export ODIN_HUGINN_ROBINHOOD_TRANSFER_DRIVER="/home/orchestrator/odin-os/scripts/drivers/robinhood-transfer-flow.sh"
+```
+
+On headless hosts, attended Robinhood use should also point `ODIN_BROWSER_SERVER_URL` at a compatible headed browser server that Marcus can see and operate:
+
+```bash
+export ODIN_BROWSER_SERVER_URL="http://<headed-browser-host>:<port>"
 ```
 
 Use [Marcus Robinhood Live Transfer Runbook](../operations/marcus-robinhood-live-transfer-runbook.md) for the operator-attended command sequence and the current `family-ops` registry-alignment caveat.

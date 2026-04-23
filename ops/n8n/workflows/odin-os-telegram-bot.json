@@ -1,0 +1,178 @@
+{
+  "name": "Odin OS Telegram Bot",
+  "active": false,
+  "versionId": "61b61015-41ca-4d81-a691-ec597c175a26",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "odin-telegram-bot",
+        "authentication": "none",
+        "options": {
+          "rawBody": true
+        }
+      },
+      "id": "telegram-webhook",
+      "name": "Telegram Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [240, 320],
+      "webhookId": "odin-telegram-bot"
+    },
+    {
+      "parameters": {
+        "jsCode": "const headers = $input.first().json.headers || {};\nconst expectedToken = $env.TELEGRAM_WEBHOOK_SECRET;\nif (!expectedToken) {\n  throw new Error('TELEGRAM_WEBHOOK_SECRET is required');\n}\nconst receivedToken = headers['x-telegram-bot-api-secret-token'] || headers['X-Telegram-Bot-Api-Secret-Token'] || '';\nif (receivedToken && receivedToken === expectedToken) {\n  return $input.all();\n}\nthrow new Error('Invalid secret_token');"
+      },
+      "id": "validate-secret",
+      "name": "Validate Secret Token",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [480, 320]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "is-callback",
+              "leftValue": "={{ !!$json.body.callback_query }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "route-type",
+      "name": "Message or Callback?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [720, 320]
+    },
+    {
+      "parameters": {
+        "jsCode": "const body = $input.first().json.body || {};\nconst callback = body.callback_query || {};\nconst callbackMessage = callback.message || {};\nconst callbackChat = callbackMessage.chat || {};\nconst chatId = callbackChat.id ? String(callbackChat.id) : '';\nconst allowedChatId = $env.TELEGRAM_CHAT_ID || '';\nif (!chatId || chatId !== allowedChatId) {\n  throw new Error('Unauthorized chat_id: ' + chatId);\n}\n\nconst data = String(callback.data || '').trim();\nif (!data) {\n  throw new Error('callback data is required');\n}\n\nif (data.startsWith('approval-resolve:')) {\n  const parts = data.split(':');\n  const approvalId = String(parts[1] || '').trim();\n  const decisionRaw = String(parts[2] || '').trim().toLowerCase();\n  const decision = decisionRaw === 'deny' ? 'reject' : decisionRaw;\n  const reason = String(parts.slice(3).join(':') || 'telegram-callback').trim() || 'telegram-callback';\n  return [{ json: {\n    router_mode: 'approval_resolve',\n    approval_action: 'approval-resolve',\n    approval_id: approvalId,\n    approval_decision: decision,\n    approval_reason: reason,\n    approval_by: 'telegram',\n    schema_version: 1,\n    source: 'n8n',\n    type: 'telegram_approval',\n    project_key: 'odin-core',\n    title: 'Resolve Odin approval from Telegram',\n    action_key: '',\n    dedup_key: 'telegram_approval:' + approvalId + ':' + decision,\n    requested_by: 'telegram',\n    payload: {\n      callback_query_id: String(callback.id || ''),\n      chat_id: chatId,\n      approval_id: approvalId,\n      decision,\n      reason,\n      callback_data: data\n    }\n  } }];\n}\n\nreturn [{ json: {\n  router_mode: 'intake',\n  schema_version: 1,\n  source: 'n8n',\n  type: 'telegram_callback',\n  project_key: 'odin-core',\n  title: 'Handle Telegram callback: ' + data,\n  action_key: '',\n  dedup_key: 'telegram_callback:' + String(callback.id || Date.now()),\n  requested_by: 'telegram',\n  payload: {\n    callback_query_id: String(callback.id || ''),\n    chat_id: chatId,\n    callback_data: data,\n    message_id: String(callbackMessage.message_id || '')\n  }\n} }];"
+      },
+      "id": "build-callback-request",
+      "name": "Build Callback Router Request",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [980, 180],
+      "notes": "Approval callbacks must use approval-resolve:<approval_id>:<decision>[:reason]. Legacy nonce-token state is intentionally unsupported."
+    },
+    {
+      "parameters": {
+        "jsCode": "const body = $input.first().json.body || {};\nconst message = body.message || {};\nconst chat = message.chat || {};\nconst chatId = chat.id ? String(chat.id) : '';\nconst allowedChatId = $env.TELEGRAM_CHAT_ID || '';\nif (!chatId || chatId !== allowedChatId) {\n  throw new Error('Unauthorized chat_id: ' + chatId);\n}\n\nconst text = String(message.text || '').trim();\nif (!text.startsWith('/')) {\n  return [];\n}\n\nconst parts = text.split(/\\s+/).filter(Boolean);\nconst command = (parts[0] || '').replace(/^\\//, '');\nconst args = parts.slice(1);\nreturn [{ json: {\n  router_mode: 'intake',\n  schema_version: 1,\n  source: 'n8n',\n  type: 'telegram_command',\n  project_key: 'odin-core',\n  title: 'Handle Telegram command: ' + command,\n  action_key: '',\n  dedup_key: 'telegram_command:' + String(message.message_id || Date.now()),\n  requested_by: 'telegram',\n  payload: {\n    command,\n    args,\n    chat_id: chatId,\n    message_id: String(message.message_id || ''),\n    raw_message: body\n  }\n} }];"
+      },
+      "id": "build-command-intake",
+      "name": "Build Command Intake",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [980, 460]
+    },
+    {
+      "parameters": {
+        "source": "database",
+        "workflowId": "__ODIN_OS_DISPATCH_WORKFLOW_ID__",
+        "options": {}
+      },
+      "id": "dispatch-callback",
+      "name": "Dispatch Callback to Odin OS",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1,
+      "position": [1260, 180]
+    },
+    {
+      "parameters": {
+        "source": "database",
+        "workflowId": "__ODIN_OS_DISPATCH_WORKFLOW_ID__",
+        "options": {}
+      },
+      "id": "dispatch-command",
+      "name": "Dispatch Command to Odin OS",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1,
+      "position": [1260, 460]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ 'https://api.telegram.org/bot' + $env.TELEGRAM_BOT_TOKEN + '/answerCallbackQuery' }}",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "callback_query_id",
+              "value": "={{ $('Build Callback Router Request').first().json.payload.callback_query_id }}"
+            },
+            {
+              "name": "text",
+              "value": "={{ $('Build Callback Router Request').first().json.router_mode === 'approval_resolve' ? ($('Build Callback Router Request').first().json.approval_decision === 'reject' ? 'Rejected' : 'Approved') : 'Received' }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "answer-callback",
+      "name": "Answer Callback Query",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [1260, 40],
+      "onError": "continueRegularOutput"
+    }
+  ],
+  "connections": {
+    "Telegram Webhook": {
+      "main": [
+        [{ "node": "Validate Secret Token", "type": "main", "index": 0 }]
+      ]
+    },
+    "Validate Secret Token": {
+      "main": [
+        [{ "node": "Message or Callback?", "type": "main", "index": 0 }]
+      ]
+    },
+    "Message or Callback?": {
+      "main": [
+        [{ "node": "Build Callback Router Request", "type": "main", "index": 0 }],
+        [{ "node": "Build Command Intake", "type": "main", "index": 0 }]
+      ]
+    },
+    "Build Callback Router Request": {
+      "main": [
+        [
+          { "node": "Dispatch Callback to Odin OS", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Dispatch Callback to Odin OS": {
+      "main": [
+        [
+          { "node": "Answer Callback Query", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Build Command Intake": {
+      "main": [
+        [{ "node": "Dispatch Command to Odin OS", "type": "main", "index": 0 }]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "callerPolicy": "workflowsFromSameOwner",
+    "availableInMCP": false
+  },
+  "meta": {
+    "description": "Receives Telegram webhook events, requires TELEGRAM_WEBHOOK_SECRET, builds normalized odin intake enqueue envelopes for odin-core, and routes approval-resolve callbacks through the shared Odin OS dispatch workflow. Approval callback data carries approval_id and decision instead of any legacy nonce token."
+  }
+}

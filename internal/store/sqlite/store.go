@@ -17,6 +17,7 @@ import (
 )
 
 var ErrWorktreeLeaseConflict = errors.New("worktree lease conflict")
+var ErrTaskIntakeConflict = errors.New("task intake conflict")
 var ErrRuntimeStateBootMismatch = errors.New("runtime state boot mismatch")
 var ErrRuntimeStateConcurrentUpdate = errors.New("runtime state concurrent update")
 
@@ -309,6 +310,62 @@ func (store *Store) CreateWorkspace(ctx context.Context, params CreateWorkspaceP
 	})
 
 	return workspace, err
+}
+
+func (store *Store) CreateTaskIntake(ctx context.Context, params CreateTaskIntakeParams) (TaskIntake, error) {
+	now := store.now()
+	var intake TaskIntake
+
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		if _, err := store.getTaskTx(ctx, tx, params.TaskID); err != nil {
+			return err
+		}
+
+		result, err := tx.ExecContext(ctx, `
+			INSERT INTO task_intakes (task_id, source, intake_type, dedup_key, requested_by, payload_json, created_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?)
+		`,
+			params.TaskID,
+			params.Source,
+			params.IntakeType,
+			params.DedupKey,
+			params.RequestedBy,
+			params.PayloadJSON,
+			formatTime(now),
+		)
+		if err != nil {
+			return mapTaskIntakeError(err)
+		}
+
+		intakeID, err := result.LastInsertId()
+		if err != nil {
+			return err
+		}
+
+		intake = TaskIntake{
+			ID:          intakeID,
+			TaskID:      params.TaskID,
+			Source:      params.Source,
+			IntakeType:  params.IntakeType,
+			DedupKey:    params.DedupKey,
+			RequestedBy: params.RequestedBy,
+			PayloadJSON: params.PayloadJSON,
+			CreatedAt:   now,
+		}
+
+		return nil
+	})
+
+	return intake, err
+}
+
+func (store *Store) GetTaskIntake(ctx context.Context, intakeID int64) (TaskIntake, error) {
+	row := store.db.QueryRowContext(ctx, `
+		SELECT id, task_id, source, intake_type, dedup_key, requested_by, payload_json, created_at
+		FROM task_intakes
+		WHERE id = ?
+	`, intakeID)
+	return scanTaskIntake(row)
 }
 
 func (store *Store) CreateMemoryEntry(ctx context.Context, params CreateMemoryEntryParams) (MemoryEntry, error) {
@@ -6878,6 +6935,30 @@ func scanTask(row interface{ Scan(...any) error }) (Task, error) {
 	return task, nil
 }
 
+func scanTaskIntake(row interface{ Scan(...any) error }) (TaskIntake, error) {
+	var intake TaskIntake
+	var createdAt string
+	if err := row.Scan(
+		&intake.ID,
+		&intake.TaskID,
+		&intake.Source,
+		&intake.IntakeType,
+		&intake.DedupKey,
+		&intake.RequestedBy,
+		&intake.PayloadJSON,
+		&createdAt,
+	); err != nil {
+		return TaskIntake{}, err
+	}
+
+	var err error
+	intake.CreatedAt, err = parseTime(createdAt)
+	if err != nil {
+		return TaskIntake{}, err
+	}
+	return intake, nil
+}
+
 func scanFollowUpObligation(row interface{ Scan(...any) error }) (FollowUpObligation, error) {
 	var obligation FollowUpObligation
 	var initiativeID sql.NullInt64
@@ -7664,6 +7745,14 @@ func mapWorktreeLeaseError(err error) error {
 		strings.Contains(err.Error(), "UNIQUE constraint failed: worktree_leases.branch_name") ||
 		strings.Contains(err.Error(), "UNIQUE constraint failed: worktree_leases.worktree_path") {
 		return fmt.Errorf("%w: %v", ErrWorktreeLeaseConflict, err)
+	}
+	return err
+}
+
+func mapTaskIntakeError(err error) error {
+	if strings.Contains(err.Error(), "idx_task_intakes_source_dedup") ||
+		strings.Contains(err.Error(), "UNIQUE constraint failed: task_intakes.source, task_intakes.dedup_key") {
+		return fmt.Errorf("%w: %v", ErrTaskIntakeConflict, err)
 	}
 	return err
 }

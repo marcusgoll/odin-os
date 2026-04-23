@@ -59,7 +59,7 @@ import (
 
 var errRuntimeNotReady = errors.New("runtime not ready")
 
-const rootUsageBanner = "Usage: odin <command> [args]\n\nCommands: help repl doctor healthcheck serve backup restore verify-backup status project workspace scope jobs runs approvals agenda logs task initiative companion profile followup transition skills"
+const rootUsageBanner = "Usage: odin <command> [args]\n\nCommands: help repl doctor healthcheck serve backup restore verify-backup status project workspace scope jobs runs approvals intake agenda logs task initiative companion profile followup transition skills"
 
 var (
 	serveTaskLoopInterval     = 1 * time.Second
@@ -184,6 +184,8 @@ func Run(ctx context.Context, root string, args []string, stdin io.Reader, stdou
 		return runRuns(ctx, app, args[1:], stdout)
 	case "approvals":
 		return runApprovals(ctx, app, args[1:], stdout)
+	case "intake":
+		return runIntake(ctx, app, stdin, args[1:], stdout)
 	case "agenda":
 		now, err := runtimeNow()
 		if err != nil {
@@ -384,26 +386,48 @@ func runApprovals(ctx context.Context, app bootstrap.App, args []string, stdout 
 		return err
 	}
 	if len(remaining) > 0 && strings.EqualFold(remaining[0], "resolve") {
-		if jsonOutput {
-			return fmt.Errorf("usage: odin approvals resolve <approval-id> <approve|deny> <reason...>")
+		command := commands.ApprovalResolveCommand{Name: "resolve"}
+		if len(remaining) > 1 && !strings.HasPrefix(remaining[1], "--") {
+			if len(remaining) < 4 {
+				return fmt.Errorf("usage: odin approvals resolve <approval-id> <approve|deny> <reason...>")
+			}
+			approvalID, err := strconv.ParseInt(remaining[1], 10, 64)
+			if err != nil || approvalID <= 0 {
+				return fmt.Errorf("approval id must be a positive integer")
+			}
+			command.ApprovalID = approvalID
+			command.Decision = strings.ToLower(strings.TrimSpace(remaining[2]))
+			command.Reason = strings.Join(remaining[3:], " ")
+			command.By = "operator"
+		} else {
+			parsed, err := commands.ParseApprovalResolve(remaining)
+			if err != nil {
+				return err
+			}
+			command = parsed
 		}
-		if len(remaining) < 4 {
-			return fmt.Errorf("usage: odin approvals resolve <approval-id> <approve|deny> <reason...>")
-		}
-
-		approvalID, err := strconv.ParseInt(remaining[1], 10, 64)
-		if err != nil || approvalID <= 0 {
-			return fmt.Errorf("approval id must be a positive integer")
-		}
-
+		action := approvalResolveAction(command.Decision)
 		result, err := approvalsvc.Service{Store: app.Store}.Resolve(ctx, approvalsvc.ResolveParams{
-			ApprovalID: approvalID,
-			Action:     strings.ToLower(strings.TrimSpace(remaining[2])),
-			DecisionBy: "operator",
-			Reason:     strings.Join(remaining[3:], " "),
+			ApprovalID: command.ApprovalID,
+			Action:     action,
+			DecisionBy: command.By,
+			Reason:     command.Reason,
 		})
 		if err != nil {
 			return err
+		}
+		if jsonOutput || command.JSON {
+			return commands.WriteJSON(stdout, struct {
+				ID         int64  `json:"id"`
+				Status     string `json:"status"`
+				DecisionBy string `json:"decision_by"`
+				Reason     string `json:"reason"`
+			}{
+				ID:         result.Approval.ID,
+				Status:     result.Approval.Status,
+				DecisionBy: result.Approval.DecisionBy,
+				Reason:     result.Approval.Reason,
+			})
 		}
 		receipt, err := approvalsvc.FormatReceipt(result)
 		if err != nil {
@@ -441,6 +465,144 @@ func runApprovals(ctx context.Context, app bootstrap.App, args []string, stdout 
 		}
 	}
 	return nil
+}
+
+func runIntake(ctx context.Context, app bootstrap.App, stdin io.Reader, args []string, stdout io.Writer) error {
+	jsonOutput, remaining, err := consumeJSONFlag(args)
+	if err != nil {
+		return err
+	}
+
+	command, err := commands.ParseIntake(remaining)
+	if err != nil {
+		return err
+	}
+
+	payloadJSON, err := loadIntakePayloadJSON(command.PayloadFile, stdin)
+	if err != nil {
+		return err
+	}
+
+	manifest, ok := app.Registry.Lookup(command.ProjectKey)
+	if !ok {
+		return fmt.Errorf("unknown project %q", command.ProjectKey)
+	}
+
+	resolved := scope.Resolve(scope.ResolveInput{
+		ExplicitTarget: &scope.Target{
+			ProjectKey:    manifest.Key,
+			SystemProject: manifest.SystemProject,
+		},
+	})
+
+	jobService := jobs.Service{
+		Store:       app.Store,
+		Registry:    app.Registry,
+		Transitions: projects.Service{Store: app.Store},
+		Now:         time.Now,
+	}
+	task, err := jobService.CreateTaskFromActWithAction(ctx, resolved, command.Title, command.ActionKey)
+	if err != nil {
+		return err
+	}
+
+	intake, intakeErr := app.Store.CreateTaskIntake(ctx, sqlite.CreateTaskIntakeParams{
+		TaskID:      task.ID,
+		Source:      command.Source,
+		IntakeType:  command.Type,
+		DedupKey:    command.DedupKey,
+		RequestedBy: command.RequestedBy,
+		PayloadJSON: payloadJSON,
+	})
+	if intakeErr != nil {
+		if errors.Is(intakeErr, sqlite.ErrTaskIntakeConflict) {
+			if _, err := app.Store.UpdateTaskStatus(ctx, sqlite.UpdateTaskStatusParams{
+				TaskID:         task.ID,
+				Status:         "failed",
+				Summary:        intakeErr.Error(),
+				TerminalReason: "intake_dedup_conflict",
+				ArtifactsJSON:  "[]",
+			}); err != nil {
+				return errors.Join(intakeErr, err)
+			}
+		}
+		return intakeErr
+	}
+
+	view := struct {
+		Task struct {
+			ID     int64  `json:"id"`
+			Key    string `json:"key"`
+			Status string `json:"status"`
+		} `json:"task"`
+		Intake struct {
+			Source   string `json:"source"`
+			Type     string `json:"type"`
+			DedupKey string `json:"dedup_key"`
+		} `json:"intake"`
+	}{}
+	view.Task.ID = task.ID
+	view.Task.Key = task.Key
+	view.Task.Status = task.Status
+	view.Intake.Source = intake.Source
+	view.Intake.Type = intake.IntakeType
+	view.Intake.DedupKey = intake.DedupKey
+
+	if jsonOutput || command.JSON {
+		return commands.WriteJSON(stdout, view)
+	}
+
+	_, err = fmt.Fprintf(stdout, "queued intake task id=%d key=%s source=%s type=%s\n", task.ID, task.Key, intake.Source, intake.IntakeType)
+	return err
+}
+
+func loadIntakePayloadJSON(payloadFile string, stdin io.Reader) (string, error) {
+	if payloadFile == "" {
+		return "{}", nil
+	}
+
+	var content []byte
+	var err error
+	if payloadFile == "-" {
+		content, err = io.ReadAll(stdin)
+		if err != nil {
+			return "", fmt.Errorf("read stdin payload: %w", err)
+		}
+	} else {
+		content, err = os.ReadFile(payloadFile)
+		if err != nil {
+			return "", fmt.Errorf("read --payload-file: %w", err)
+		}
+	}
+
+	trimmed := strings.TrimSpace(string(content))
+	if trimmed == "" {
+		return "", fmt.Errorf("payload must contain a JSON object")
+	}
+	if !json.Valid([]byte(trimmed)) {
+		return "", fmt.Errorf("payload must contain valid JSON")
+	}
+
+	var payload any
+	if err := json.Unmarshal([]byte(trimmed), &payload); err != nil {
+		return "", fmt.Errorf("payload must contain valid JSON: %w", err)
+	}
+	if _, ok := payload.(map[string]any); !ok {
+		return "", fmt.Errorf("payload must contain a JSON object")
+	}
+
+	return trimmed, nil
+}
+
+func approvalResolveAction(decision string) string {
+	switch strings.ToLower(strings.TrimSpace(decision)) {
+	case "approve", "approved":
+		return "approve"
+	case "reject", "rejected", "deny", "denied":
+		return "deny"
+	default:
+		return strings.ToLower(strings.TrimSpace(decision))
+	}
 }
 
 func runAgenda(ctx context.Context, app bootstrap.App, args []string, stdout io.Writer, now func() time.Time) error {

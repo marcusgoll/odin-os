@@ -1,0 +1,63 @@
+{
+  "name": "Odin OS PBS GitHub Alert",
+  "active": false,
+  "versionId": "a9134ddb-7493-4042-ba70-1a900493e892",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "pbs-github-alert",
+        "responseMode": "onReceived",
+        "options": {}
+      },
+      "id": "pbs-github-webhook",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [240, 300],
+      "webhookId": "pbs-github-alert"
+    },
+    {
+      "parameters": {
+        "jsCode": "const raw = $input.first().json || {};\nconst body = raw.body || raw;\nconst headers = raw.headers || {};\nconst eventType = String(headers['x-github-event'] || headers['X-GitHub-Event'] || body.event_type || 'github').trim();\nconst action = String(body.action || 'event').trim();\nconst sender = body.sender || {};\nconst repo = body.repository || {};\nconst issue = body.issue || {};\nconst pullRequest = body.pull_request || {};\nconst review = body.review || {};\nconst htmlUrl = String(pullRequest.html_url || issue.html_url || review.html_url || repo.html_url || '');\nconst entityID = String(pullRequest.number || issue.number || review.id || headers['x-github-delivery'] || headers['X-GitHub-Delivery'] || 'event').trim();\n\nreturn [{ json: {\n  router_mode: 'intake',\n  schema_version: 1,\n  source: 'n8n',\n  type: 'github_alert',\n  project_key: 'pbs',\n  title: 'Review PBS GitHub event: ' + eventType + ' ' + action,\n  action_key: '',\n  dedup_key: 'github_alert:pbs:' + eventType + ':' + action + ':' + entityID,\n  requested_by: 'github',\n  payload: {\n    event_type: eventType,\n    action,\n    entity_id: entityID,\n    repository: String(repo.full_name || ''),\n    sender: String(sender.login || ''),\n    html_url: htmlUrl,\n    raw_event: body\n  }\n} }];"
+      },
+      "id": "build-intake",
+      "name": "Build PBS GitHub Intake",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [520, 300]
+    },
+    {
+      "parameters": {
+        "source": "database",
+        "workflowId": "__ODIN_OS_DISPATCH_WORKFLOW_ID__",
+        "options": {}
+      },
+      "id": "dispatch-intake",
+      "name": "Dispatch to Odin OS",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1,
+      "position": [800, 300]
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [
+        [{ "node": "Build PBS GitHub Intake", "type": "main", "index": 0 }]
+      ]
+    },
+    "Build PBS GitHub Intake": {
+      "main": [
+        [{ "node": "Dispatch to Odin OS", "type": "main", "index": 0 }]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "callerPolicy": "workflowsFromSameOwner",
+    "availableInMCP": false
+  },
+  "meta": {
+    "description": "Receives PBS GitHub webhooks, builds a normalized odin intake enqueue envelope with a deterministic github_alert dedup_key, and hands it to the shared Odin OS dispatch workflow."
+  }
+}

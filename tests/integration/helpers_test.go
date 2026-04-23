@@ -64,42 +64,34 @@ func createPortableProjectRoot(sourceRoot string) (string, error) {
 		return "", err
 	}
 
-	pbsRoot, err := os.MkdirTemp("", "odin-os-pbs-fixture-")
-	if err != nil {
-		return "", err
-	}
-	if err := os.WriteFile(filepath.Join(pbsRoot, "README.md"), []byte("# PBS fixture\n"), 0o644); err != nil {
-		return "", err
-	}
-	if err := initializeGitRepoBranchPath(pbsRoot, "master"); err != nil {
-		return "", err
-	}
-
-	familyOpsRoot, err := os.MkdirTemp("", "odin-os-family-ops-fixture-")
-	if err != nil {
-		return "", err
-	}
-	if err := os.WriteFile(filepath.Join(familyOpsRoot, "README.md"), []byte("# Family-Ops fixture\n"), 0o644); err != nil {
-		return "", err
-	}
-	if err := initializeGitRepoBranchPath(familyOpsRoot, "main"); err != nil {
-		return "", err
-	}
-
 	configPath := filepath.Join(root, "config", "projects.yaml")
+	cfg, err := projects.LoadManifestFile(configPath)
+	if err != nil {
+		return "", err
+	}
 	configBytes, err := os.ReadFile(configPath)
 	if err != nil {
 		return "", err
 	}
-	configText := string(configBytes)
-	if !strings.Contains(configText, "/home/orchestrator/pbs") {
-		return "", fmt.Errorf("projects.yaml did not contain expected pbs path")
+	updatedConfig := string(configBytes)
+	fixtureRoots := make(map[string]string)
+	for _, project := range cfg.Projects {
+		if !strings.HasPrefix(filepath.ToSlash(project.GitRoot), "/home/orchestrator/") {
+			continue
+		}
+		if !strings.Contains(updatedConfig, project.GitRoot) {
+			return "", fmt.Errorf("projects.yaml did not contain expected git root for %s", project.Key)
+		}
+		fixtureRoot, ok := fixtureRoots[project.GitRoot]
+		if !ok {
+			fixtureRoot, err = createPortableGitFixture(project.Key, project.DefaultBranch)
+			if err != nil {
+				return "", err
+			}
+			fixtureRoots[project.GitRoot] = fixtureRoot
+		}
+		updatedConfig = strings.ReplaceAll(updatedConfig, project.GitRoot, filepath.ToSlash(fixtureRoot))
 	}
-	if !strings.Contains(configText, "/home/orchestrator/family-ops") {
-		return "", fmt.Errorf("projects.yaml did not contain expected family-ops path")
-	}
-	updatedConfig := strings.ReplaceAll(configText, "/home/orchestrator/pbs", filepath.ToSlash(pbsRoot))
-	updatedConfig = strings.ReplaceAll(updatedConfig, "/home/orchestrator/family-ops", filepath.ToSlash(familyOpsRoot))
 	if err := os.WriteFile(configPath, []byte(updatedConfig), 0o644); err != nil {
 		return "", err
 	}
@@ -108,6 +100,23 @@ func createPortableProjectRoot(sourceRoot string) (string, error) {
 		return "", err
 	}
 	return root, nil
+}
+
+func createPortableGitFixture(projectKey string, defaultBranch string) (string, error) {
+	fixtureRoot, err := os.MkdirTemp("", "odin-os-"+projectKey+"-fixture-")
+	if err != nil {
+		return "", err
+	}
+	if err := os.WriteFile(filepath.Join(fixtureRoot, "README.md"), []byte("# "+projectKey+" fixture\n"), 0o644); err != nil {
+		return "", err
+	}
+	if defaultBranch == "" {
+		defaultBranch = "main"
+	}
+	if err := initializeGitRepoBranchPath(fixtureRoot, defaultBranch); err != nil {
+		return "", err
+	}
+	return fixtureRoot, nil
 }
 
 func copyPortableRepoTree(sourceRoot string, destRoot string) error {

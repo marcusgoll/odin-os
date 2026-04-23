@@ -11,6 +11,7 @@ owners:
   - odin-core
 entrypoint: command:status
 composes:
+  - karpathy-guidelines
   - triage-skill
   - triage-agent
 ---
