@@ -9,7 +9,7 @@ import net from 'node:net';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const REPO_ROOT = join(__dirname, '..', '..');
-const ODIN_DIR = process.env.ODIN_DIR || join(REPO_ROOT, '.odin-browser');
+const ODIN_DIR = process.env.ODIN_DIR || process.env.ODIN_ROOT || join(REPO_ROOT, '.odin-browser');
 const BROWSER_STATE_DIR = join(ODIN_DIR, 'browser-state');
 const LOG_DIR = join(ODIN_DIR, 'logs', new Date().toISOString().slice(0, 10));
 const PORT = Number.parseInt(process.env.ODIN_BROWSER_PORT || '19227', 10);
@@ -21,6 +21,7 @@ mkdirSync(LOG_DIR, { recursive: true });
 
 let browserProcess = null;
 let debugPort = null;
+let debugBaseUrl = null;
 let cdp = null;
 let currentUrl = null;
 let currentTitle = null;
@@ -338,7 +339,8 @@ function createCdp(wsUrl) {
 }
 
 async function connectPage(url) {
-  const versionRes = await fetch('http://' + HOST + ':' + debugPort + '/json/version');
+  const baseUrl = debugBaseUrl || ('http://' + HOST + ':' + debugPort);
+  const versionRes = await fetch(baseUrl + '/json/version');
   if (!versionRes.ok) throw new Error('Failed to query browser version');
   const version = await versionRes.json();
   if (!version.webSocketDebuggerUrl) throw new Error('Missing browser websocket debugger url');
@@ -352,7 +354,7 @@ async function connectPage(url) {
   const deadline = Date.now() + 10000;
   let pageWsUrl = null;
   while (Date.now() < deadline) {
-    const listRes = await fetch('http://' + HOST + ':' + debugPort + '/json/list');
+    const listRes = await fetch(baseUrl + '/json/list');
     if (listRes.ok) {
       const targets = await listRes.json();
       const match = targets.find((target) => target.id === targetId || target.targetId === targetId);
@@ -412,6 +414,7 @@ async function launchBrowser(body) {
   if (!chrome) throw new Error('Chromium binary not found');
 
   debugPort = await freePort();
+  debugBaseUrl = 'http://' + HOST + ':' + debugPort;
   const profileDir = join(BROWSER_STATE_DIR, 'chromium-profile');
   mkdirSync(profileDir, { recursive: true });
 
@@ -468,6 +471,19 @@ async function launchBrowser(body) {
   }
 }
 
+async function connectBrowser(body) {
+  const cdpUrl = String(body?.cdpUrl || '').trim().replace(/\/+$/, '');
+  if (!cdpUrl) {
+    throw new Error('cdpUrl is required');
+  }
+
+  await stopBrowser();
+  debugBaseUrl = cdpUrl;
+  await waitForHttp(debugBaseUrl + '/json/version');
+  await connectPage(body.url || 'about:blank');
+  return { ok: true, engine: ENGINE, url: currentUrl };
+}
+
 async function snapshotPage() {
   if (!cdp) throw new Error('No page open');
   let bodyText = '';
@@ -501,11 +517,172 @@ async function screenshotPage(body) {
   return { ok: true, screenshot_path: screenshotPath, url: currentUrl, title: currentTitle };
 }
 
+async function evaluatePage(body) {
+  if (!cdp) throw new Error('No page open');
+  const fn = String(body?.fn || '').trim();
+  if (!fn) {
+    throw new Error('fn is required');
+  }
+
+  const result = await cdp.call('Runtime.evaluate', {
+    expression: fn,
+    awaitPromise: true,
+    returnByValue: true,
+  });
+
+  let value = null;
+  if (Object.prototype.hasOwnProperty.call(result?.result || {}, 'value')) {
+    value = result.result.value;
+  } else if (result?.result?.description) {
+    value = result.result.description;
+  }
+
+  try {
+    const state = await cdp.call('Runtime.evaluate', {
+      expression: '({ url: location.href, title: document.title })',
+      returnByValue: true,
+    });
+    currentUrl = state?.result?.value?.url || currentUrl;
+    currentTitle = state?.result?.value?.title || currentTitle;
+  } catch {
+    // best effort only
+  }
+
+  return { ok: true, result: value, url: currentUrl, title: currentTitle };
+}
+
+async function typeIntoSelector(selector, text, submit) {
+  if (!cdp) throw new Error('No page open');
+  const selectorExpr = JSON.stringify(String(selector || ''));
+  const focusResult = await cdp.call('Runtime.evaluate', {
+    expression: `(() => {
+      const el = document.querySelector(${selectorExpr});
+      if (!el) return { ok: false, reason: 'selector_not_found' };
+      el.focus();
+      if (typeof el.select === 'function') {
+        try { el.select(); } catch {}
+      } else if (typeof el.setSelectionRange === 'function') {
+        try {
+          const length = typeof el.value === 'string' ? el.value.length : 0;
+          el.setSelectionRange(0, length);
+        } catch {}
+      }
+      return { ok: true };
+    })()`,
+    awaitPromise: true,
+    returnByValue: true,
+  });
+  const focusValue = focusResult?.result?.value || {};
+  if (!focusValue?.ok) {
+    throw new Error(focusValue?.reason || 'selector_not_found');
+  }
+
+  await cdp.call('Input.insertText', { text: String(text || '') });
+
+  if (submit) {
+    const enterParams = {
+      key: 'Enter',
+      code: 'Enter',
+      windowsVirtualKeyCode: 13,
+      nativeVirtualKeyCode: 13,
+    };
+    await cdp.call('Input.dispatchKeyEvent', { type: 'rawKeyDown', ...enterParams });
+    await cdp.call('Input.dispatchKeyEvent', { type: 'keyUp', ...enterParams });
+  }
+
+  try {
+    const state = await cdp.call('Runtime.evaluate', {
+      expression: '({ url: location.href, title: document.title })',
+      returnByValue: true,
+    });
+    currentUrl = state?.result?.value?.url || currentUrl;
+    currentTitle = state?.result?.value?.title || currentTitle;
+  } catch {
+    // best effort only
+  }
+
+  return { ok: true, url: currentUrl, title: currentTitle };
+}
+
+async function clickSelector(selector) {
+  if (!cdp) throw new Error('No page open');
+  const selectorExpr = JSON.stringify(String(selector || ''));
+  const targetResult = await cdp.call('Runtime.evaluate', {
+    expression: `(() => {
+      const el = document.querySelector(${selectorExpr});
+      if (!el) return { ok: false, reason: 'selector_not_found' };
+      el.scrollIntoView({ block: 'center', inline: 'center' });
+      const rect = el.getBoundingClientRect();
+      if (!rect || rect.width <= 0 || rect.height <= 0) {
+        return { ok: false, reason: 'selector_not_interactable' };
+      }
+      return {
+        ok: true,
+        x: rect.left + (rect.width / 2),
+        y: rect.top + (rect.height / 2),
+      };
+    })()`,
+    awaitPromise: true,
+    returnByValue: true,
+  });
+  const targetValue = targetResult?.result?.value || {};
+  if (!targetValue?.ok) {
+    throw new Error(targetValue?.reason || 'selector_not_found');
+  }
+
+  const x = Number(targetValue.x);
+  const y = Number(targetValue.y);
+  if (!Number.isFinite(x) || !Number.isFinite(y)) {
+    throw new Error('selector_not_interactable');
+  }
+
+  const clickParams = { x, y, button: 'left', clickCount: 1 };
+  await cdp.call('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y, button: 'none' });
+  await cdp.call('Input.dispatchMouseEvent', { type: 'mousePressed', ...clickParams });
+  await cdp.call('Input.dispatchMouseEvent', { type: 'mouseReleased', ...clickParams });
+
+  try {
+    const state = await cdp.call('Runtime.evaluate', {
+      expression: '({ url: location.href, title: document.title })',
+      returnByValue: true,
+    });
+    currentUrl = state?.result?.value?.url || currentUrl;
+    currentTitle = state?.result?.value?.title || currentTitle;
+  } catch {
+    // best effort only
+  }
+
+  return { ok: true, url: currentUrl, title: currentTitle };
+}
+
+async function handleAct(body) {
+  if (!cdp) throw new Error('No page open');
+  const kind = String(body?.kind || '');
+  if (!kind) throw new Error('kind is required');
+
+  if (kind === 'type') {
+    const selector = String(body?.selector || '').trim();
+    if (!selector) throw new Error('selector is required for type');
+    const submit = body?.submit === true;
+    const text = String(body?.text || '');
+    return await typeIntoSelector(selector, text, submit);
+  }
+
+  if (kind === 'click') {
+    const selector = String(body?.selector || '').trim();
+    if (!selector) throw new Error('selector is required for click');
+    return await clickSelector(selector);
+  }
+
+  throw new Error('unsupported action');
+}
+
 async function stopBrowser() {
   if (cdp) {
     try { cdp.close(); } catch {}
     cdp = null;
   }
+  debugBaseUrl = null;
   if (browserProcess) {
     const proc = browserProcess;
     browserProcess = null;
@@ -534,6 +711,13 @@ const server = createServer(async (req, res) => {
       return;
     }
 
+    if (req.method === 'POST' && req.url === '/connect') {
+      const body = await readBody(req);
+      const result = await connectBrowser(body);
+      json(res, 200, result);
+      return;
+    }
+
     if (req.method === 'POST' && req.url === '/navigate') {
       const body = await readBody(req);
       if (body.action === 'reload') {
@@ -557,6 +741,20 @@ const server = createServer(async (req, res) => {
     if (req.method === 'POST' && req.url === '/screenshot') {
       const body = await readBody(req);
       const result = await screenshotPage(body);
+      json(res, 200, result);
+      return;
+    }
+
+    if (req.method === 'POST' && req.url === '/evaluate') {
+      const body = await readBody(req);
+      const result = await evaluatePage(body);
+      json(res, 200, result);
+      return;
+    }
+
+    if (req.method === 'POST' && req.url === '/act') {
+      const body = await readBody(req);
+      const result = await handleAct(body);
       json(res, 200, result);
       return;
     }

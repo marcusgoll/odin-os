@@ -34,9 +34,41 @@ func TestToolDefinitionCardIsThin(t *testing.T) {
 	if card.SourceRef != "builtin://task_list" {
 		t.Fatalf("SourceRef = %q, want builtin://task_list", card.SourceRef)
 	}
+	if card.CanonicalKey != "task_list" {
+		t.Fatalf("CanonicalKey = %q, want task_list", card.CanonicalKey)
+	}
+	if card.Hidden {
+		t.Fatal("Hidden = true, want false")
+	}
 }
 
-func TestCardFromRegistryMapsTypedRegistryCapabilities(t *testing.T) {
+func TestToolDefinitionCardPreservesCanonicalAliasMetadata(t *testing.T) {
+	t.Parallel()
+
+	definition := ToolDefinition{
+		Key:          "huginn_visual_audit",
+		CanonicalKey: "browser_visual_audit",
+		Title:        "Browser Visual Audit",
+		Summary:      "Captures a live browser snapshot and screenshot for a visual review target.",
+		Hidden:       true,
+		Scopes:       []string{"global"},
+		Tags:         []string{"browser", "visual", "live"},
+		CostHint:     CostHintMedium,
+		BudgetCost:   2,
+		SourceRef:    "builtin://browser_visual_audit",
+	}
+
+	card := definition.Card()
+
+	if card.CanonicalKey != "browser_visual_audit" {
+		t.Fatalf("CanonicalKey = %q, want browser_visual_audit", card.CanonicalKey)
+	}
+	if !card.Hidden {
+		t.Fatal("Hidden = false, want true")
+	}
+}
+
+func TestCardFromRegistryMapsSkillsAndSubAgents(t *testing.T) {
 	t.Parallel()
 
 	skillCard, ok := CardFromRegistry(registry.Item{
@@ -45,10 +77,6 @@ func TestCardFromRegistryMapsTypedRegistryCapabilities(t *testing.T) {
 		Title:   "Triage Skill",
 		Summary: "Classifies requests.",
 		Tags:    []string{"intake"},
-		AppliesTo: []string{
-			"intake",
-			"planning",
-		},
 		Source: registry.SourceInfo{
 			RelativePath: "skills/triage-skill.md",
 		},
@@ -58,9 +86,6 @@ func TestCardFromRegistryMapsTypedRegistryCapabilities(t *testing.T) {
 	}
 	if skillCard.Kind != KindSkill {
 		t.Fatalf("skill kind = %q, want %q", skillCard.Kind, KindSkill)
-	}
-	if len(skillCard.AppliesTo) != 2 {
-		t.Fatalf("skill applies_to len = %d, want 2", len(skillCard.AppliesTo))
 	}
 
 	agentCard, ok := CardFromRegistry(registry.Item{
@@ -77,48 +102,7 @@ func TestCardFromRegistryMapsTypedRegistryCapabilities(t *testing.T) {
 	if !ok {
 		t.Fatalf("CardFromRegistry(agent) ok = false, want true")
 	}
-	if agentCard.Kind != KindAgentRole {
-		t.Fatalf("agent kind = %q, want %q", agentCard.Kind, KindAgentRole)
-	}
-
-	workflowCard, ok := CardFromRegistry(registry.Item{
-		Kind:    registry.KindWorkflow,
-		Key:     "project-intake",
-		Title:   "Project Intake Workflow",
-		Summary: "Normalizes project intake.",
-		Composes: []string{
-			"triage-skill",
-			"triage-agent",
-		},
-		Source: registry.SourceInfo{
-			RelativePath: "workflows/project-intake.md",
-		},
-	})
-	if !ok {
-		t.Fatalf("CardFromRegistry(workflow) ok = false, want true")
-	}
-	if workflowCard.Kind != KindWorkflow {
-		t.Fatalf("workflow kind = %q, want %q", workflowCard.Kind, KindWorkflow)
-	}
-	if len(workflowCard.Composes) != 2 {
-		t.Fatalf("workflow composes len = %d, want 2", len(workflowCard.Composes))
-	}
-
-	commandCard, ok := CardFromRegistry(registry.Item{
-		Kind:    registry.KindCommand,
-		Key:     "status-command",
-		Title:   "Status Command",
-		Summary: "Shows current runtime scope.",
-		Aliases: []string{"stat"},
-		Command: "status",
-		Source: registry.SourceInfo{
-			RelativePath: "commands/status.md",
-		},
-	})
-	if !ok {
-		t.Fatalf("CardFromRegistry(command) ok = false, want true")
-	}
-	if commandCard.Kind != KindOperatorCommand {
-		t.Fatalf("command kind = %q, want %q", commandCard.Kind, KindOperatorCommand)
+	if agentCard.Kind != KindSubAgent {
+		t.Fatalf("agent kind = %q, want %q", agentCard.Kind, KindSubAgent)
 	}
 }

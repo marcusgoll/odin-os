@@ -7,10 +7,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
 
+	webdriver "odin-os/internal/adapters/web"
 	"odin-os/internal/cli/commands"
 	"odin-os/internal/cli/render"
 	"odin-os/internal/cli/scope"
@@ -22,6 +25,7 @@ import (
 	"odin-os/internal/core/workspaces"
 	"odin-os/internal/executors/contract"
 	executorrouter "odin-os/internal/executors/router"
+	knowledgememory "odin-os/internal/memory/knowledge"
 	"odin-os/internal/registry"
 	convsvc "odin-os/internal/runtime/conversation"
 	healthsvc "odin-os/internal/runtime/health"
@@ -29,6 +33,10 @@ import (
 	"odin-os/internal/runtime/projections"
 	runsvc "odin-os/internal/runtime/runs"
 	"odin-os/internal/store/sqlite"
+	"odin-os/internal/tools/broker"
+	"odin-os/internal/tools/budgets"
+	"odin-os/internal/tools/catalog"
+	"odin-os/internal/tools/invocation"
 	"odin-os/internal/vcs/leases"
 	"odin-os/internal/vcs/worktrees"
 )
@@ -67,6 +75,8 @@ type Shell struct {
 
 const transitionUsage = "/transition [status] | /transition set <state> [allow=<csv>] [confirm] because <reason...>"
 const leaseUsage = "/leases [active|released|all] | /leases inspect <lease-id> | /leases cleanup confirm"
+const toolUsage = "/tool [list|show <tool-key>|run <tool-key> key=value]"
+const memoryUsage = "/memory [workspace|initiatives|companions|list|publish <id> [url=<value>|via=huginn_x]]"
 
 func New(env Environment) (*Shell, error) {
 	cache, err := env.SessionStore.Load()
@@ -230,13 +240,16 @@ func (shell *Shell) handleCommand(ctx context.Context, command commands.Command,
 		if _, err := fmt.Fprintln(output, "prefer explicit cli commands outside the repl: odin help | odin status --json | odin task run --project <key> --title <title> | odin repl"); err != nil {
 			return err
 		}
-		if _, err := fmt.Fprintln(output, "/help /mode /scope /memory /workspace /initiatives /companions /agenda /project /transition /observe /compare /jobs /runs /approvals /logs /doctor /doctor json /doctor report /self"); err != nil {
+		if _, err := fmt.Fprintln(output, "/help /mode /scope /memory /workspace /initiatives /companions /agenda /project /tool /transition /observe /compare /jobs /runs /approvals /logs /doctor /doctor json /doctor report /self"); err != nil {
 			return err
 		}
-		if _, err := fmt.Fprintln(output, "repl compatibility commands: /help /mode /scope /memory /project /transition /observe /compare /status /stat /capabilities /leases /jobs /runs /approvals /agenda /logs /doctor /doctor json /doctor report /self /quit"); err != nil {
+		if _, err := fmt.Fprintln(output, "repl compatibility commands: /help /mode /scope /memory /project /tool /transition /observe /compare /status /stat /capabilities /leases /jobs /runs /approvals /agenda /logs /doctor /doctor json /doctor report /self /quit"); err != nil {
 			return err
 		}
 		if _, err := fmt.Fprintf(output, "%s\n", transitionUsage); err != nil {
+			return err
+		}
+		if _, err := fmt.Fprintf(output, "%s\n", toolUsage); err != nil {
 			return err
 		}
 		_, err := fmt.Fprintf(output, "%s\n", leaseUsage)
@@ -257,6 +270,8 @@ func (shell *Shell) handleCommand(ctx context.Context, command commands.Command,
 		return shell.handleAgenda(ctx, output)
 	case "project":
 		return shell.handleProject(command.Args, output)
+	case "tool":
+		return shell.handleTool(ctx, command.Args, output)
 	case "transition":
 		return shell.handleTransition(ctx, command.Args, output)
 	case "observe":
@@ -330,6 +345,136 @@ func (shell *Shell) handleAsk(ctx context.Context, line string, output io.Writer
 		_, err := fmt.Fprintln(output, "local ask is limited in Phase 05. Try /help, /scope, /memory, /workspace, /initiatives, /companions, /agenda, /project, /jobs, /runs, /approvals, /logs, or /doctor.")
 		return err
 	}
+}
+
+func (shell *Shell) handleTool(ctx context.Context, args []string, output io.Writer) error {
+	_ = ctx
+
+	if len(args) == 0 {
+		_, err := fmt.Fprintf(output, "usage: %s\n", toolUsage)
+		return err
+	}
+
+	switch strings.ToLower(args[0]) {
+	case "list":
+		cards := shell.newBroker().Catalog(shell.catalogScope())
+		count := 0
+		for _, card := range cards {
+			if card.Kind != catalog.KindTool {
+				continue
+			}
+			if _, err := fmt.Fprintf(output, "%s %s\n", card.Key, card.Summary); err != nil {
+				return err
+			}
+			count++
+		}
+		if count == 0 {
+			_, err := fmt.Fprintln(output, "no tools")
+			return err
+		}
+		return nil
+	case "show":
+		if len(args) != 2 {
+			_, err := fmt.Fprintf(output, "usage: %s\n", toolUsage)
+			return err
+		}
+		toolBroker := shell.newBroker()
+		expansion, err := toolBroker.Expand(args[1])
+		if err != nil {
+			_, writeErr := fmt.Fprintf(output, "unknown tool: %s\n", args[1])
+			return writeErr
+		}
+		if expansion.Tool == nil {
+			_, err := fmt.Fprintf(output, "capability %s is not a tool\n", args[1])
+			return err
+		}
+		if !catalog.MatchesScope(expansion.Card.Scopes, shell.catalogScope()) {
+			_, err := fmt.Fprintf(output, "tool %s is not available in %s scope\n", args[1], shell.catalogScope())
+			return err
+		}
+		return renderToolDetail(output, *expansion.Tool)
+	case "run":
+		if len(args) < 2 {
+			_, err := fmt.Fprintf(output, "usage: %s\n", toolUsage)
+			return err
+		}
+		input, err := parseCommandInput(args[2:])
+		if err != nil {
+			_, writeErr := fmt.Fprintf(output, "%v\nusage: %s\n", err, toolUsage)
+			return writeErr
+		}
+
+		toolBroker := shell.newBroker()
+		expansion, err := toolBroker.Expand(args[1])
+		if err != nil {
+			_, writeErr := fmt.Fprintf(output, "unknown tool: %s\n", args[1])
+			return writeErr
+		}
+		if expansion.Tool == nil {
+			_, err := fmt.Fprintf(output, "capability %s is not a tool\n", args[1])
+			return err
+		}
+		if !catalog.MatchesScope(expansion.Card.Scopes, shell.catalogScope()) {
+			_, err := fmt.Fprintf(output, "tool %s is not available in %s scope\n", args[1], shell.catalogScope())
+			return err
+		}
+
+		result, err := toolBroker.InvokeTool(args[1], input)
+		if err != nil {
+			_, writeErr := fmt.Fprintf(output, "tool %s failed: %v\n", args[1], err)
+			return writeErr
+		}
+		if err := renderToolResult(output, result); err != nil {
+			return err
+		}
+		return shell.recordToolMemory(ctx, output, result)
+	default:
+		_, err := fmt.Fprintf(output, "usage: %s\n", toolUsage)
+		return err
+	}
+}
+
+func (shell *Shell) recordToolMemory(ctx context.Context, output io.Writer, result catalog.StructuredResult) error {
+	if len(result.MemoryRecords) == 0 {
+		return nil
+	}
+
+	scope, err := shell.memoryScope(ctx)
+	if err != nil {
+		return err
+	}
+	for _, memoryRecord := range result.MemoryRecords {
+		details, err := shell.memoryDetailsJSON(scope, memoryRecord.Fields)
+		if err != nil {
+			return err
+		}
+
+		summary := strings.TrimSpace(memoryRecord.Summary)
+		if summary == "" {
+			summary = strings.TrimSpace(result.Summary)
+		}
+
+		recorded, err := knowledgememory.Service{Store: shell.env.Store}.Record(ctx, scope, memoryRecord.MemoryType, summary, details, nil)
+		if err != nil {
+			return err
+		}
+
+		if _, err := fmt.Fprintf(output, "tool_memory=%d type=%s scope=%s/%s status=recorded\nsummary=%s\n", recorded.ID, recorded.MemoryType, recorded.Scope, recorded.ScopeKey, strings.TrimSpace(recorded.Summary)); err != nil {
+			return err
+		}
+		if details, err := parseMemoryDetails(recorded.DetailsJSON); err == nil {
+			if renderedFields := formatMemoryFields(details.Fields); renderedFields != "" {
+				if _, err := fmt.Fprintf(output, "fields=%s\n", renderedFields); err != nil {
+					return err
+				}
+			}
+		}
+		if _, err := fmt.Fprintf(output, "details_json=%s\n", strings.TrimSpace(recorded.DetailsJSON)); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 func (shell *Shell) handleRegistryCommand(ctx context.Context, command commands.Command, output io.Writer) error {
@@ -887,7 +1032,7 @@ func (shell *Shell) handleMemory(ctx context.Context, args []string, output io.W
 	switch len(args) {
 	case 0:
 		return shell.handleWorkspaceMemory(ctx, output)
-	case 1:
+	default:
 		switch strings.ToLower(strings.TrimSpace(args[0])) {
 		case "workspace":
 			return shell.handleWorkspaceMemory(ctx, output)
@@ -895,10 +1040,36 @@ func (shell *Shell) handleMemory(ctx context.Context, args []string, output io.W
 			return shell.handleInitiativeMemory(ctx, output)
 		case "companions":
 			return shell.handleCompanionMemory(ctx, output)
+		case "list":
+			return shell.handleMemoryList(ctx, output)
+		case "publish":
+			return shell.handleMemoryPublish(ctx, args[1:], output)
 		}
 	}
-	_, err := fmt.Fprintln(output, "usage: /memory [workspace|initiatives|companions]")
+	_, err := fmt.Fprintln(output, "usage: "+memoryUsage)
 	return err
+}
+
+func (shell *Shell) handleMemoryList(ctx context.Context, output io.Writer) error {
+	scope, err := shell.memoryScope(ctx)
+	if err != nil {
+		return err
+	}
+
+	summaries, err := knowledgememory.Service{Store: shell.env.Store}.List(ctx, scope, "")
+	if err != nil {
+		return err
+	}
+	if len(summaries) == 0 {
+		_, err := fmt.Fprintln(output, "no memory")
+		return err
+	}
+	for _, summary := range summaries {
+		if err := renderMemorySummary(output, summary); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (shell *Shell) handleWorkspaceMemory(ctx context.Context, output io.Writer) error {
@@ -974,6 +1145,388 @@ func (shell *Shell) handleCompanionMemory(ctx context.Context, output io.Writer)
 		}
 	}
 	return nil
+}
+
+func (shell *Shell) handleMemoryPublish(ctx context.Context, args []string, output io.Writer) error {
+	request, err := parseMemoryPublishArgs(args)
+	if err != nil {
+		_, writeErr := fmt.Fprintf(output, "%v\nusage: %s\n", err, memoryUsage)
+		return writeErr
+	}
+
+	summary, ok, err := shell.visibleMemorySummaryByID(ctx, request.MemoryID)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		_, err := fmt.Fprintf(output, "unknown memory: %d\n", request.MemoryID)
+		return err
+	}
+	if summary.MemoryType != "social_outcome" {
+		_, err := fmt.Fprintf(output, "only social_outcome memories can be published\nusage: %s\n", memoryUsage)
+		return err
+	}
+
+	details, err := parseMemoryDetails(summary.DetailsJSON)
+	if err != nil {
+		_, writeErr := fmt.Fprintf(output, "memory details are invalid: %v\n", err)
+		return writeErr
+	}
+	details = normalizeMemoryDetailsPayload(summary, details)
+	if strings.TrimSpace(details.Fields["result"]) != "approved" {
+		_, err := fmt.Fprintf(output, "only approved social_outcome memories can be published\nusage: %s\n", memoryUsage)
+		return err
+	}
+	if strings.TrimSpace(details.Fields["publish_status"]) == "published" {
+		_, err := fmt.Fprintf(output, "social_outcome is already marked published\nusage: %s\n", memoryUsage)
+		return err
+	}
+
+	if request.Via == "huginn_x" {
+		contentKind := strings.TrimSpace(details.Fields["content_kind"])
+		if strings.TrimSpace(details.Fields["channel"]) != "x" || (contentKind != "post" && contentKind != "reply") {
+			_, err := fmt.Fprintf(output, "native X publish requires channel=x and content_kind=post or reply\nusage: %s\n", memoryUsage)
+			return err
+		}
+		if contentKind == "reply" {
+			replyTarget := strings.TrimSpace(details.Fields["in_reply_to_url"])
+			if replyTarget == "" {
+				_, err := fmt.Fprintf(output, "native X reply publish requires in_reply_to_url\nusage: %s\n", memoryUsage)
+				return err
+			}
+			if !isAllowedXStatusURL(replyTarget) {
+				_, err := fmt.Fprintf(output, "native X reply publish requires in_reply_to_url to be a valid X status URL\nusage: %s\n", memoryUsage)
+				return err
+			}
+		}
+
+		artifacts, err := shell.publishApprovedXOutcomeWithHuginn(ctx, summary)
+		if err != nil {
+			_, writeErr := fmt.Fprintf(output, "native X publish failed: %v\nusage: %s\n", err, memoryUsage)
+			return writeErr
+		}
+
+		publishURL := strings.TrimSpace(stringMapValue(artifacts, "publish_url"))
+		if publishURL == "" {
+			_, err := fmt.Fprintf(output, "native X publish failed: publish_url missing\nusage: %s\n", memoryUsage)
+			return err
+		}
+
+		publishedAt := strings.TrimSpace(stringMapValue(artifacts, "published_at"))
+		if publishedAt == "" {
+			publishedAt = request.PublishedAt.Format(time.RFC3339)
+		}
+
+		details.Fields["publish_status"] = "published"
+		details.Fields["publish_mode"] = "huginn_x"
+		details.Fields["publish_url"] = publishURL
+		details.Fields["published_at"] = publishedAt
+		if screenshotPath := strings.TrimSpace(stringMapValue(artifacts, "screenshot_path")); screenshotPath != "" {
+			details.Fields["publish_screenshot_path"] = screenshotPath
+		}
+	} else {
+		details.Fields["publish_status"] = "published"
+		details.Fields["publish_url"] = request.URL
+		details.Fields["published_at"] = request.PublishedAt.Format(time.RFC3339)
+	}
+
+	updatedDetailsJSON, err := marshalMemoryDetailsPayload(details)
+	if err != nil {
+		return err
+	}
+	updatedSummary, err := shell.env.Store.UpdateMemorySummaryDetails(ctx, sqlite.UpdateMemorySummaryDetailsParams{
+		MemoryID:    summary.ID,
+		DetailsJSON: updatedDetailsJSON,
+	})
+	if err != nil {
+		return err
+	}
+
+	if _, err := fmt.Fprintf(output, "memory=%d type=%s scope=%s/%s status=published\nsummary=%s\n", updatedSummary.ID, updatedSummary.MemoryType, updatedSummary.Scope, updatedSummary.ScopeKey, strings.TrimSpace(updatedSummary.Summary)); err != nil {
+		return err
+	}
+	if details, err := parseMemoryDetails(updatedSummary.DetailsJSON); err == nil {
+		if renderedFields := formatMemoryFields(details.Fields); renderedFields != "" {
+			if _, err := fmt.Fprintf(output, "fields=%s\n", renderedFields); err != nil {
+				return err
+			}
+		}
+	}
+	_, err = fmt.Fprintf(output, "details_json=%s\n", strings.TrimSpace(updatedSummary.DetailsJSON))
+	return err
+}
+
+func (shell *Shell) memoryScope(ctx context.Context) (knowledgememory.Scope, error) {
+	switch shell.state.Scope.Kind {
+	case scope.ScopeGlobal:
+		return knowledgememory.Scope{Value: "global", Key: "global"}, nil
+	case scope.ScopeProject, scope.ScopeOdinCore:
+		if strings.TrimSpace(shell.state.Scope.ProjectKey) == "" {
+			return knowledgememory.Scope{}, fmt.Errorf("memory scope requires a selected project")
+		}
+		project, err := shell.env.Store.GetProjectByKey(ctx, shell.state.Scope.ProjectKey)
+		if err != nil {
+			return knowledgememory.Scope{}, err
+		}
+		return knowledgememory.Scope{
+			ProjectID: &project.ID,
+			Value:     string(shell.state.Scope.Kind),
+			Key:       shell.state.Scope.ProjectKey,
+		}, nil
+	default:
+		if strings.TrimSpace(shell.state.Scope.ProjectKey) == "" {
+			return knowledgememory.Scope{}, fmt.Errorf("memory scope requires a selected project")
+		}
+		return knowledgememory.Scope{
+			Value: string(shell.state.Scope.Kind),
+			Key:   shell.state.Scope.ProjectKey,
+		}, nil
+	}
+}
+
+func (shell *Shell) visibleMemorySummaryByID(ctx context.Context, memoryID int64) (sqlite.MemorySummary, bool, error) {
+	scope, err := shell.memoryScope(ctx)
+	if err != nil {
+		return sqlite.MemorySummary{}, false, err
+	}
+	summaries, err := knowledgememory.Service{Store: shell.env.Store}.List(ctx, scope, "")
+	if err != nil {
+		return sqlite.MemorySummary{}, false, err
+	}
+	for _, summary := range summaries {
+		if summary.ID == memoryID {
+			return summary, true, nil
+		}
+	}
+	return sqlite.MemorySummary{}, false, nil
+}
+
+func (shell *Shell) publishApprovedXOutcomeWithHuginn(ctx context.Context, summary sqlite.MemorySummary) (map[string]any, error) {
+	details, err := parseMemoryDetails(summary.DetailsJSON)
+	if err != nil {
+		return nil, err
+	}
+	details = normalizeMemoryDetailsPayload(summary, details)
+
+	result, err := invocation.Service{}.HuginnXPostPublish(ctx, webdriver.XPublishRequest{
+		ToolKey: "browser_x_post_publish",
+		Input: webdriver.XPublishInput{
+			PostText: approvedOutcomePublishText(summary.Summary),
+			ContentKind: func() string {
+				if value := strings.TrimSpace(details.Fields["content_kind"]); value != "" {
+					return value
+				}
+				return "post"
+			}(),
+			InReplyToURL: strings.TrimSpace(details.Fields["in_reply_to_url"]),
+			Label:        fmt.Sprintf("social-outcome-%d", summary.ID),
+			WaitMS:       "4000",
+			Headless:     "false",
+		},
+	})
+	if err != nil {
+		return nil, err
+	}
+	return result.Artifacts, nil
+}
+
+func (shell *Shell) memoryDetailsJSON(scope knowledgememory.Scope, fields map[string]string) (string, error) {
+	_ = scope
+	payload := memoryDetailsPayload{Fields: fields}
+	return marshalMemoryDetailsPayload(payload)
+}
+
+func approvedOutcomePublishText(summary string) string {
+	trimmed := strings.TrimSpace(summary)
+	if trimmed == "" {
+		return ""
+	}
+
+	lower := strings.ToLower(trimmed)
+	for _, marker := range []string{
+		"\n\napproval checklist:",
+		"\napproval checklist:",
+		"approval checklist:",
+	} {
+		if idx := strings.Index(lower, marker); idx >= 0 {
+			return strings.TrimSpace(trimmed[:idx])
+		}
+	}
+
+	return trimmed
+}
+
+func isAllowedXStatusURL(raw string) bool {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return false
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return false
+	}
+	host := strings.ToLower(strings.TrimSpace(parsed.Hostname()))
+	switch host {
+	case "x.com", "www.x.com", "twitter.com", "www.twitter.com":
+	default:
+		return false
+	}
+
+	parts := strings.Split(strings.Trim(parsed.Path, "/"), "/")
+	if len(parts) < 3 {
+		return false
+	}
+	if parts[len(parts)-2] != "status" {
+		return false
+	}
+	if parts[len(parts)-3] == "" {
+		return false
+	}
+	if _, err := strconv.ParseInt(parts[len(parts)-1], 10, 64); err != nil {
+		return false
+	}
+	return true
+}
+
+func parseMemoryPublishArgs(args []string) (memoryPublishRequest, error) {
+	if len(args) == 0 {
+		return memoryPublishRequest{}, fmt.Errorf("memory id is required")
+	}
+
+	memoryID, err := strconv.ParseInt(strings.TrimSpace(args[0]), 10, 64)
+	if err != nil || memoryID <= 0 {
+		return memoryPublishRequest{}, fmt.Errorf("memory id must be a positive integer")
+	}
+
+	request := memoryPublishRequest{
+		MemoryID:    memoryID,
+		PublishedAt: time.Now().UTC(),
+	}
+	for _, token := range args[1:] {
+		key, value, ok := strings.Cut(strings.TrimSpace(token), "=")
+		if !ok {
+			return memoryPublishRequest{}, fmt.Errorf("unknown memory publish option: %s", token)
+		}
+		switch strings.ToLower(strings.TrimSpace(key)) {
+		case "url":
+			request.URL = strings.TrimSpace(value)
+		case "via":
+			request.Via = strings.TrimSpace(strings.ToLower(value))
+		case "published_at":
+			parsed, err := time.Parse(time.RFC3339, strings.TrimSpace(value))
+			if err != nil {
+				return memoryPublishRequest{}, fmt.Errorf("published_at must be RFC3339")
+			}
+			request.PublishedAt = parsed.UTC()
+		default:
+			return memoryPublishRequest{}, fmt.Errorf("unknown memory publish option: %s", token)
+		}
+	}
+
+	if request.Via != "" {
+		if request.Via != "huginn_x" {
+			return memoryPublishRequest{}, fmt.Errorf("memory publish requires via=huginn_x when native publish is requested")
+		}
+		if strings.TrimSpace(request.URL) != "" {
+			return memoryPublishRequest{}, fmt.Errorf("memory publish accepts either url=<value> or via=huginn_x")
+		}
+		return request, nil
+	}
+
+	if strings.TrimSpace(request.URL) == "" {
+		return memoryPublishRequest{}, fmt.Errorf("memory publish requires url=<value>")
+	}
+
+	return request, nil
+}
+
+func stringMapValue(values map[string]any, key string) string {
+	raw, ok := values[key]
+	if !ok {
+		return ""
+	}
+	if value, ok := raw.(string); ok {
+		return value
+	}
+	return fmt.Sprint(raw)
+}
+
+type memoryPublishRequest struct {
+	MemoryID    int64
+	URL         string
+	Via         string
+	PublishedAt time.Time
+}
+
+type memoryDetailsPayload struct {
+	Fields map[string]string `json:"fields,omitempty"`
+}
+
+func parseMemoryDetails(detailsJSON string) (memoryDetailsPayload, error) {
+	var payload memoryDetailsPayload
+	if strings.TrimSpace(detailsJSON) == "" {
+		return payload, nil
+	}
+	if err := json.Unmarshal([]byte(detailsJSON), &payload); err != nil {
+		return memoryDetailsPayload{}, err
+	}
+	if payload.Fields == nil {
+		payload.Fields = map[string]string{}
+	}
+	return payload, nil
+}
+
+func marshalMemoryDetailsPayload(payload memoryDetailsPayload) (string, error) {
+	if payload.Fields == nil {
+		payload.Fields = map[string]string{}
+	}
+	bytes, err := json.Marshal(payload)
+	if err != nil {
+		return "", err
+	}
+	return string(bytes), nil
+}
+
+func normalizeMemoryDetailsPayload(summary sqlite.MemorySummary, payload memoryDetailsPayload) memoryDetailsPayload {
+	if payload.Fields == nil {
+		payload.Fields = map[string]string{}
+	}
+	return payload
+}
+
+func renderMemorySummary(output io.Writer, summary sqlite.MemorySummary) error {
+	if _, err := fmt.Fprintf(output, "memory=%d type=%s scope=%s/%s created_at=%s\nsummary=%s\n", summary.ID, summary.MemoryType, summary.Scope, summary.ScopeKey, summary.CreatedAt.Format(time.RFC3339), strings.TrimSpace(summary.Summary)); err != nil {
+		return err
+	}
+	if details, err := parseMemoryDetails(summary.DetailsJSON); err == nil {
+		if renderedFields := formatMemoryFields(details.Fields); renderedFields != "" {
+			if _, err := fmt.Fprintf(output, "fields=%s\n", renderedFields); err != nil {
+				return err
+			}
+		}
+	}
+	_, err := fmt.Fprintf(output, "details_json=%s\n", strings.TrimSpace(summary.DetailsJSON))
+	return err
+}
+
+func formatMemoryFields(fields map[string]string) string {
+	if len(fields) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(fields))
+	for key := range fields {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	parts := make([]string, 0, len(keys))
+	for _, key := range keys {
+		value := strings.TrimSpace(fields[key])
+		if value == "" {
+			continue
+		}
+		parts = append(parts, fmt.Sprintf("%s=%s", key, value))
+	}
+	return strings.Join(parts, " ")
 }
 
 func (shell *Shell) handleInitiatives(ctx context.Context, output io.Writer) error {
@@ -1462,4 +2015,120 @@ func decodeCSVOrJSON(raw string) []string {
 		}
 	}
 	return values
+}
+
+func parseCommandInput(args []string) (map[string]string, error) {
+	input := make(map[string]string, len(args))
+	for _, token := range args {
+		key, value, ok := strings.Cut(token, "=")
+		if !ok {
+			return nil, fmt.Errorf("expected key=value input, got %s", token)
+		}
+		key = strings.TrimSpace(key)
+		value = strings.TrimSpace(value)
+		if key == "" {
+			return nil, fmt.Errorf("input key cannot be empty")
+		}
+		input[key] = value
+	}
+	return input, nil
+}
+
+func (shell *Shell) newBroker() *broker.Broker {
+	return broker.New(registry.Snapshot{}, catalog.BuiltinDefinitions(), budgets.Limits{
+		Tool: budgets.Tool{
+			MaxSelections:  20,
+			MaxInvocations: 20,
+			MaxCostUnits:   40,
+		},
+		Context: budgets.Context{
+			MaxExpandedDefinitions: 20,
+			MaxCompactedResults:    20,
+			MaxCompactedBytes:      32_000,
+		},
+	})
+}
+
+func (shell *Shell) catalogScope() string {
+	switch shell.state.Scope.Kind {
+	case scope.ScopeProject:
+		return "project"
+	case scope.ScopeOdinCore:
+		return "odin-core"
+	case scope.ScopeNewProject:
+		return "new-project"
+	default:
+		return "global"
+	}
+}
+
+func renderToolDetail(output io.Writer, definition catalog.ToolDefinition) error {
+	if _, err := fmt.Fprintf(output, "tool=%s title=%s\nsummary=%s\nsource=%s\n", definition.Key, definition.Title, definition.Summary, definition.SourceRef); err != nil {
+		return err
+	}
+	if len(definition.Scopes) > 0 {
+		if _, err := fmt.Fprintf(output, "scopes=%s\n", strings.Join(definition.Scopes, ",")); err != nil {
+			return err
+		}
+	}
+	if len(definition.Tags) > 0 {
+		if _, err := fmt.Fprintf(output, "tags=%s\n", strings.Join(definition.Tags, ",")); err != nil {
+			return err
+		}
+	}
+	if inputs := schemaPropertyKeys(definition.Schema); len(inputs) > 0 {
+		if _, err := fmt.Fprintf(output, "inputs=%s\n", strings.Join(inputs, ",")); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func renderToolResult(output io.Writer, result catalog.StructuredResult) error {
+	if _, err := fmt.Fprintf(output, "tool=%s\nsummary=%s\n", result.CapabilityKey, result.Summary); err != nil {
+		return err
+	}
+	if len(result.KeyFacts) > 0 {
+		keys := make([]string, 0, len(result.KeyFacts))
+		for key := range result.KeyFacts {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			if _, err := fmt.Fprintf(output, "fact %s=%s\n", key, result.KeyFacts[key]); err != nil {
+				return err
+			}
+		}
+	}
+	for _, artifact := range result.Artifacts {
+		if _, err := fmt.Fprintf(output, "artifact %s\n", artifact); err != nil {
+			return err
+		}
+	}
+	if result.RawRef != "" {
+		if _, err := fmt.Fprintf(output, "raw_ref=%s\n", result.RawRef); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func schemaPropertyKeys(schema map[string]any) []string {
+	if len(schema) == 0 {
+		return nil
+	}
+	rawProperties, ok := schema["properties"]
+	if !ok {
+		return nil
+	}
+	properties, ok := rawProperties.(map[string]any)
+	if !ok {
+		return nil
+	}
+	keys := make([]string, 0, len(properties))
+	for key := range properties {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
 }

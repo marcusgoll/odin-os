@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"path/filepath"
 	"testing"
@@ -1508,5 +1509,97 @@ func TestParseTimeAcceptsVariableWidthRFC3339Nano(t *testing.T) {
 	want := time.Date(2026, 4, 17, 7, 0, 0, 500*1000*1000, time.UTC)
 	if !got.Equal(want) {
 		t.Fatalf("parseTime() = %v, want %v", got, want)
+	}
+}
+
+func TestUpdateMemorySummaryDetails(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(filepath.Join(t.TempDir(), "odin.db"))
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer store.Close()
+
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
+	}
+
+	project, err := store.CreateProject(ctx, CreateProjectParams{
+		Key:           "odin-core",
+		Name:          "Odin Core",
+		Scope:         "odin-core",
+		GitRoot:       "/home/orchestrator/odin-os",
+		DefaultBranch: "main",
+		GitHubRepo:    "example/odin-os",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+
+	summary, err := store.RecordMemorySummary(ctx, RecordMemorySummaryParams{
+		ProjectID:   &project.ID,
+		Scope:       "project",
+		ScopeKey:    project.Key,
+		MemoryType:  "social_draft",
+		Summary:     "Draft awaiting approval",
+		DetailsJSON: `{"source":"cli","approval":"pending"}`,
+	})
+	if err != nil {
+		t.Fatalf("RecordMemorySummary() error = %v", err)
+	}
+
+	updated, err := store.UpdateMemorySummaryDetails(ctx, UpdateMemorySummaryDetailsParams{
+		MemoryID:    summary.ID,
+		DetailsJSON: `{"source":"cli","approval":"approved"}`,
+	})
+	if err != nil {
+		t.Fatalf("UpdateMemorySummaryDetails() error = %v", err)
+	}
+	if updated.ID != summary.ID {
+		t.Fatalf("updated.ID = %d, want %d", updated.ID, summary.ID)
+	}
+	if updated.DetailsJSON != `{"source":"cli","approval":"approved"}` {
+		t.Fatalf("updated.DetailsJSON = %q, want updated details", updated.DetailsJSON)
+	}
+
+	summaries, err := store.ListMemorySummaries(ctx, ListMemorySummariesParams{
+		ProjectID: &project.ID,
+		Scope:     "project",
+		ScopeKey:  project.Key,
+	})
+	if err != nil {
+		t.Fatalf("ListMemorySummaries() error = %v", err)
+	}
+	if len(summaries) != 1 {
+		t.Fatalf("summaries len = %d, want 1", len(summaries))
+	}
+	if summaries[0].DetailsJSON != updated.DetailsJSON {
+		t.Fatalf("stored details = %q, want %q", summaries[0].DetailsJSON, updated.DetailsJSON)
+	}
+
+	events, err := store.ListEvents(ctx, ListEventsParams{})
+	if err != nil {
+		t.Fatalf("ListEvents() error = %v", err)
+	}
+	var updatedEventFound bool
+	for _, event := range events {
+		if event.Type != runtimeevents.EventMemorySummaryUpdated {
+			continue
+		}
+		if event.StreamType != runtimeevents.StreamMemorySummary {
+			t.Fatalf("memory update event stream type = %q, want %q", event.StreamType, runtimeevents.StreamMemorySummary)
+		}
+		var payload runtimeevents.MemorySummaryUpdatedPayload
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			t.Fatalf("json.Unmarshal(memory update payload) error = %v", err)
+		}
+		if payload.Scope != "project" || payload.ScopeKey != project.Key || payload.MemoryType != "social_draft" {
+			t.Fatalf("memory update payload = %+v, want project social_draft payload", payload)
+		}
+		updatedEventFound = true
+	}
+	if !updatedEventFound {
+		t.Fatal("memory summary updated event not found")
 	}
 }

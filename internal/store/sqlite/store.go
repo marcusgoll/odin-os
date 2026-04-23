@@ -2658,6 +2658,59 @@ func (store *Store) RecordMemorySummary(ctx context.Context, params RecordMemory
 	return summary, err
 }
 
+func (store *Store) UpdateMemorySummaryDetails(ctx context.Context, params UpdateMemorySummaryDetailsParams) (MemorySummary, error) {
+	now := store.now()
+	var summary MemorySummary
+
+	params.DetailsJSON = strings.TrimSpace(params.DetailsJSON)
+	if params.MemoryID <= 0 {
+		return MemorySummary{}, fmt.Errorf("memory summary id must be positive")
+	}
+	if params.DetailsJSON == "" {
+		return MemorySummary{}, fmt.Errorf("memory summary details are required")
+	}
+
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		current, err := store.getMemorySummaryTx(ctx, tx, params.MemoryID)
+		if err != nil {
+			return err
+		}
+
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE memory_summaries
+			SET details_json = ?, updated_at = ?
+			WHERE id = ?
+		`, params.DetailsJSON, formatTime(now), params.MemoryID); err != nil {
+			return err
+		}
+
+		current.DetailsJSON = params.DetailsJSON
+		current.UpdatedAt = now
+		summary = current
+
+		return appendEventTx(ctx, tx, eventInsert{
+			StreamType: runtimeevents.StreamMemorySummary,
+			StreamID:   summary.ID,
+			EventType:  runtimeevents.EventMemorySummaryUpdated,
+			Scope:      summary.Scope,
+			ProjectID:  summary.ProjectID,
+			TaskID:     summary.TaskID,
+			RunID:      summary.RunID,
+			Payload: runtimeevents.MemorySummaryUpdatedPayload{
+				Scope:              summary.Scope,
+				ScopeKey:           summary.ScopeKey,
+				MemoryType:         summary.MemoryType,
+				SourceTranscriptID: summary.SourceTranscriptID,
+				TaskID:             summary.TaskID,
+				RunID:              summary.RunID,
+			},
+			OccurredAt: now,
+		})
+	})
+
+	return summary, err
+}
+
 func (store *Store) ListMemorySummaries(ctx context.Context, params ListMemorySummariesParams) ([]MemorySummary, error) {
 	query := `
 		SELECT
@@ -5642,6 +5695,27 @@ func (store *Store) getConversationTranscriptTx(ctx context.Context, tx *sql.Tx,
 		WHERE id = ?
 	`, transcriptID)
 	return scanConversationTranscript(row)
+}
+
+func (store *Store) getMemorySummaryTx(ctx context.Context, tx *sql.Tx, memoryID int64) (MemorySummary, error) {
+	row := tx.QueryRowContext(ctx, `
+		SELECT
+			id,
+			project_id,
+			source_transcript_id,
+			task_id,
+			run_id,
+			scope,
+			scope_key,
+			memory_type,
+			summary,
+			details_json,
+			created_at,
+			updated_at
+		FROM memory_summaries
+		WHERE id = ?
+	`, memoryID)
+	return scanMemorySummary(row)
 }
 
 func (store *Store) validateProjectTaskRunLineageTx(ctx context.Context, tx *sql.Tx, projectID *int64, taskID *int64, runID *int64, scope string, scopeKey string, recordLabel string) (Project, Task, Run, error) {

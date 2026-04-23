@@ -81,3 +81,42 @@ func TestMemorySummaryRecordedContract(t *testing.T) {
 		t.Fatalf("decoded payload = %#v, want %#v", decoded, want)
 	}
 }
+
+func TestMemorySummaryUpdatedContract(t *testing.T) {
+	t.Parallel()
+
+	if got := StreamMemorySummary; got != StreamType("memory_summary") {
+		t.Fatalf("StreamMemorySummary = %q, want %q", got, StreamType("memory_summary"))
+	}
+	if got := EventMemorySummaryUpdated; got != Type("memory.summary_updated") {
+		t.Fatalf("EventMemorySummaryUpdated = %q, want %q", got, Type("memory.summary_updated"))
+	}
+
+	sourceTranscriptID := int64(12)
+	taskID := int64(41)
+	runID := int64(99)
+	want := MemorySummaryUpdatedPayload{
+		Scope:              "project",
+		ScopeKey:           "odin-core",
+		MemoryType:         "decision",
+		SourceTranscriptID: &sourceTranscriptID,
+		TaskID:             &taskID,
+		RunID:              &runID,
+	}
+
+	payload, err := EncodePayload(want)
+	if err != nil {
+		t.Fatalf("EncodePayload(MemorySummaryUpdatedPayload) error = %v", err)
+	}
+	if got := string(payload); got != `{"scope":"project","scope_key":"odin-core","memory_type":"decision","source_transcript_id":12,"task_id":41,"run_id":99}` {
+		t.Fatalf("encoded payload = %s", got)
+	}
+
+	decoded, err := DecodePayload[MemorySummaryUpdatedPayload](payload)
+	if err != nil {
+		t.Fatalf("DecodePayload(MemorySummaryUpdatedPayload) error = %v", err)
+	}
+	if !reflect.DeepEqual(decoded, want) {
+		t.Fatalf("decoded payload = %#v, want %#v", decoded, want)
+	}
+}

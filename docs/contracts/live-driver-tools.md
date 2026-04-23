@@ -1,7 +1,7 @@
 ---
 title: Live Driver Tool Wiring
 status: active
-date: 2026-04-16
+date: 2026-04-10
 ---
 
 # Live Driver Tool Wiring
@@ -12,37 +12,41 @@ date: 2026-04-16
 
 - `ODIN_GOOGLE_CALENDAR_DRIVER`
 - `ODIN_HUGINN_DRIVER`
+- `ODIN_HUGINN_VISUAL_DRIVER`
+- `ODIN_HUGINN_X_POST_DRIVER`
+- `ODIN_HUGINN_X_PUBLISH_DRIVER`
 
 These env vars should point to executable commands. The repo-local driver scripts are:
 
 - `scripts/drivers/google-calendar-off-dates.sh`
 - `scripts/drivers/huginn-pbs-session.sh`
+- `scripts/drivers/huginn-visual-audit.sh`
+- `scripts/drivers/huginn-x-post-evidence.sh`
+- `scripts/drivers/huginn-x-post-publish.sh`
 
 Example:
 
 ```bash
 export ODIN_GOOGLE_CALENDAR_DRIVER="/home/orchestrator/odin-os/scripts/drivers/google-calendar-off-dates.sh"
 export ODIN_HUGINN_DRIVER="/home/orchestrator/odin-os/scripts/drivers/huginn-pbs-session.sh"
+export ODIN_HUGINN_VISUAL_DRIVER="/home/orchestrator/odin-os/scripts/drivers/huginn-visual-audit.sh"
+export ODIN_HUGINN_X_POST_DRIVER="/home/orchestrator/odin-os/scripts/drivers/huginn-x-post-evidence.sh"
+export ODIN_HUGINN_X_PUBLISH_DRIVER="/home/orchestrator/odin-os/scripts/drivers/huginn-x-post-publish.sh"
 ```
 
-## Repo-local libraries
+## Repo-local library reuse
 
-The driver scripts resolve their helper libraries from this repo by default:
+The repo-local scripts reuse shell libraries inside `odin-os`.
 
-- `scripts/drivers/lib/google.sh`
-- `scripts/drivers/lib/browser-access.sh`
+- `huginn-pbs-session.sh` sources `scripts/browser/browser-access.sh`
+- `huginn-visual-audit.sh` sources `scripts/browser/browser-access.sh`
+- `huginn-x-post-evidence.sh` sources `scripts/browser/browser-access.sh`
+- `huginn-x-post-publish.sh` sources `scripts/browser/browser-access.sh`
 
-Optional overrides:
+Override paths when needed:
 
 - `ODIN_GOOGLE_LIB_PATH`
 - `ODIN_BROWSER_ACCESS_LIB_PATH`
-
-These overrides are for explicit local customization only. `odin-os` no longer requires `/home/orchestrator/odin-orchestrator` to run the live drivers.
-
-## Runtime prerequisites
-
-- `google.sh` requires `curl` and `python3`, plus Google OAuth refresh-token credentials in the environment or `~/.odin-env`.
-- `browser-access.sh` can reuse an already running browser server via `ODIN_BROWSER_SERVER_URL`, or start one when `ODIN_BROWSER_SERVER_SCRIPT` is explicitly set to a compatible server script and `node` is available.
 
 ## Request contract
 
@@ -72,9 +76,51 @@ Huginn driver request:
 }
 ```
 
-Both drivers return one JSON response on stdout with:
+Visual audit driver request:
+
+```json
+{
+  "tool_key": "browser_visual_audit",
+  "input": {
+    "target_url": "https://example.com/dashboard",
+    "label": "cfipros-dashboard-baseline",
+    "wait_ms": "2000",
+    "allow_private_host": "false",
+    "headless": "true"
+  }
+}
+```
+
+X post visible evidence driver request:
+
+```json
+{
+  "tool_key": "browser_x_post_visible_evidence",
+  "input": {
+    "target_url": "https://x.com/marcus/status/123",
+    "label": "marcus-crosswind",
+    "wait_ms": "2000",
+    "headless": "true"
+  }
+}
+```
+
+Weekly X evidence bundles do not introduce a new driver env var. The builtin tool `browser_x_weekly_evidence_bundle` reuses `ODIN_HUGINN_X_POST_DRIVER` once per explicit X post URL and aggregates the results inside Odin.
+
+Current operator docs and examples use canonical `browser_*` tool keys. Legacy `huginn_*` keys remain accepted on `/tool` only as hidden compatibility aliases during transition.
+
+All live drivers return one JSON response on stdout with:
 
 - `status`
 - `tool_key`
 - `summary`
 - `artifacts`
+
+## Social evidence boundary
+
+- `browser_x_post_publish` is an operator-attended single-item action for approved X content, including approved replies when an explicit reply target is provided.
+- `browser_x_post_visible_evidence` is read-only and visible-page only.
+- It is intended for explicit X post URLs, not full-profile scraping.
+- `browser_x_weekly_evidence_bundle` is an Odin-side orchestration layer over that same explicit-post driver, not a broader crawler.
+- LinkedIn browser evidence capture is not part of this live driver surface.
+- Unofficial API replay or hidden network-call harvesting is not part of this contract.

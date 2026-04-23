@@ -1,54 +1,42 @@
 package broker
 
 import (
-	"context"
 	"fmt"
 
 	"odin-os/internal/registry"
-	"odin-os/internal/skills"
 	"odin-os/internal/tools/budgets"
 	"odin-os/internal/tools/catalog"
 )
 
 type Broker struct {
-	source       SnapshotSource
-	builtins     map[string]catalog.ToolDefinition
-	skillInvoker SkillInvoker
-	tracker      *budgets.Tracker
+	snapshot registry.Snapshot
+	builtins map[string]catalog.ToolDefinition
+	tracker  *budgets.Tracker
 }
 
-type SkillInvoker interface {
-	Invoke(context.Context, skills.InvokeRequest) (skills.InvokeResponse, error)
-}
-
-func New(source SnapshotSource, builtins map[string]catalog.ToolDefinition, skillInvoker SkillInvoker, limits budgets.Limits) *Broker {
-	if source == nil {
-		source = StaticSource(registry.Snapshot{})
-	}
+func New(snapshot registry.Snapshot, builtins map[string]catalog.ToolDefinition, limits budgets.Limits) *Broker {
+	snapshot = normalizeSnapshot(snapshot)
 	return &Broker{
-		source:       source,
-		builtins:     builtins,
-		skillInvoker: skillInvoker,
-		tracker:      budgets.NewTracker(limits),
+		snapshot: snapshot,
+		builtins: builtins,
+		tracker:  budgets.NewTracker(limits),
 	}
 }
 
-func (broker *Broker) Catalog(scope string) ([]catalog.Card, error) {
-	snapshot, err := broker.currentSnapshot()
-	if err != nil {
-		return nil, err
-	}
-
+func (broker *Broker) Catalog(scope string) []catalog.Card {
 	scope = catalog.NormalizeScope(scope)
-	cards := make([]catalog.Card, 0, len(broker.builtins)+len(snapshot.Items))
+	cards := make([]catalog.Card, 0, len(broker.builtins)+len(broker.snapshot.Items))
 
 	for _, definition := range broker.builtins {
+		if definition.Hidden {
+			continue
+		}
 		if catalog.MatchesScope(definition.Scopes, scope) {
 			cards = append(cards, definition.Card())
 		}
 	}
 
-	for _, item := range snapshot.Items {
+	for _, item := range broker.snapshot.Items {
 		card, ok := catalog.CardFromRegistry(item)
 		if !ok {
 			continue
@@ -59,11 +47,11 @@ func (broker *Broker) Catalog(scope string) ([]catalog.Card, error) {
 	}
 
 	catalog.SortCards(cards)
-	return cards, nil
+	return cards
 }
 
 func (broker *Broker) Expand(key string) (catalog.Expansion, error) {
-	if definition, ok := broker.builtins[key]; ok {
+	if definition, ok := broker.resolveBuiltinDefinition(key); ok {
 		if err := broker.tracker.RecordSelection(definition.BudgetCost); err != nil {
 			return catalog.Expansion{}, err
 		}
@@ -77,12 +65,7 @@ func (broker *Broker) Expand(key string) (catalog.Expansion, error) {
 		}, nil
 	}
 
-	snapshot, err := broker.currentSnapshot()
-	if err != nil {
-		return catalog.Expansion{}, err
-	}
-
-	item, ok := snapshot.ByKey[key]
+	item, ok := broker.snapshot.ByKey[key]
 	if !ok {
 		return catalog.Expansion{}, fmt.Errorf("unknown capability %q", key)
 	}
@@ -103,73 +86,26 @@ func (broker *Broker) Expand(key string) (catalog.Expansion, error) {
 		return catalog.Expansion{
 			Card: card,
 			Skill: &catalog.SkillDefinition{
-				Key:            item.Key,
-				Title:          item.Title,
-				Summary:        item.Summary,
-				Version:        item.Version,
-				Enabled:        item.Enabled,
-				Tags:           append([]string(nil), item.Tags...),
-				Scopes:         append([]string(nil), item.Scopes...),
-				AppliesTo:      append([]string(nil), item.AppliesTo...),
-				Composes:       append([]string(nil), item.Composes...),
-				Permissions:    append([]string(nil), item.Permissions...),
-				HandlerType:    item.HandlerType,
-				HandlerRef:     item.HandlerRef,
-				TimeoutSeconds: item.TimeoutSeconds,
-				InputSchema:    catalog.CloneAnyMap(item.LegacyInputSchema),
-				OutputSchema:   catalog.CloneAnyMap(item.LegacyOutputSchema),
-				Sections:       catalog.CloneSections(item.Sections),
-				SourceRef:      item.Source.RelativePath,
+				Key:       item.Key,
+				Title:     item.Title,
+				Summary:   item.Summary,
+				Tags:      append([]string(nil), item.Tags...),
+				Scopes:    append([]string(nil), item.Scopes...),
+				Sections:  catalog.CloneSections(item.Sections),
+				SourceRef: item.Source.RelativePath,
 			},
 		}, nil
 	case registry.KindAgent:
 		return catalog.Expansion{
 			Card: card,
-			AgentRole: &catalog.AgentRoleDefinition{
+			SubAgent: &catalog.SubAgentDefinition{
 				Key:       item.Key,
 				Title:     item.Title,
 				Summary:   item.Summary,
 				Tags:      append([]string(nil), item.Tags...),
 				Scopes:    append([]string(nil), item.Scopes...),
-				AppliesTo: append([]string(nil), item.AppliesTo...),
-				Composes:  append([]string(nil), item.Composes...),
 				Tools:     append([]string(nil), item.Tools...),
 				Role:      item.Role,
-				Sections:  catalog.CloneSections(item.Sections),
-				SourceRef: item.Source.RelativePath,
-			},
-		}, nil
-	case registry.KindWorkflow:
-		return catalog.Expansion{
-			Card: card,
-			Workflow: &catalog.WorkflowDefinition{
-				Key:          item.Key,
-				Title:        item.Title,
-				Summary:      item.Summary,
-				Version:      item.Version,
-				Tags:         append([]string(nil), item.Tags...),
-				Scopes:       append([]string(nil), item.Scopes...),
-				AppliesTo:    append([]string(nil), item.AppliesTo...),
-				Entrypoint:   item.Entrypoint,
-				Composes:     append([]string(nil), item.Composes...),
-				Dependencies: append([]registry.DependencyRef(nil), item.Dependencies...),
-				Sections:     catalog.CloneSections(item.Sections),
-				SourceRef:    item.Source.RelativePath,
-			},
-		}, nil
-	case registry.KindCommand:
-		return catalog.Expansion{
-			Card: card,
-			OperatorCommand: &catalog.OperatorCommandDefinition{
-				Key:       item.Key,
-				Title:     item.Title,
-				Summary:   item.Summary,
-				Tags:      append([]string(nil), item.Tags...),
-				Scopes:    append([]string(nil), item.Scopes...),
-				AppliesTo: append([]string(nil), item.AppliesTo...),
-				Composes:  append([]string(nil), item.Composes...),
-				Command:   item.Command,
-				Aliases:   append([]string(nil), item.Aliases...),
 				Sections:  catalog.CloneSections(item.Sections),
 				SourceRef: item.Source.RelativePath,
 			},
@@ -180,7 +116,7 @@ func (broker *Broker) Expand(key string) (catalog.Expansion, error) {
 }
 
 func (broker *Broker) InvokeTool(key string, input map[string]string) (catalog.StructuredResult, error) {
-	definition, ok := broker.builtins[key]
+	definition, ok := broker.resolveBuiltinDefinition(key)
 	if !ok {
 		return catalog.StructuredResult{}, fmt.Errorf("unknown tool %q", key)
 	}
@@ -190,48 +126,12 @@ func (broker *Broker) InvokeTool(key string, input map[string]string) (catalog.S
 	if definition.Invoke == nil {
 		return catalog.StructuredResult{}, fmt.Errorf("tool %q is not invokable", key)
 	}
-	result, err := definition.Invoke(input)
-	if err != nil {
-		return catalog.StructuredResult{}, err
-	}
-	return result, nil
-}
-
-func (broker *Broker) InvokeSkill(ctx context.Context, request skills.InvokeRequest) (catalog.StructuredResult, error) {
-	if broker.skillInvoker == nil {
-		return catalog.StructuredResult{}, fmt.Errorf("skill %q is not invokable", request.Key)
-	}
-
-	snapshot, err := broker.currentSnapshot()
-	if err != nil {
-		return catalog.StructuredResult{}, err
-	}
-	item, ok := snapshot.ByKey[request.Key]
-	if !ok || item.Kind != registry.KindSkill {
-		return catalog.StructuredResult{}, fmt.Errorf("unknown skill %q", request.Key)
-	}
-
-	card, ok := catalog.CardFromRegistry(item)
-	if !ok {
-		return catalog.StructuredResult{}, fmt.Errorf("capability %q is not invokable", request.Key)
-	}
-	if err := broker.tracker.RecordInvocation(card.BudgetCost); err != nil {
-		return catalog.StructuredResult{}, err
-	}
-
-	request.Input = catalog.CloneAnyMap(request.Input)
-	response, err := broker.skillInvoker.Invoke(ctx, request)
-	if err != nil {
-		return catalog.StructuredResult{}, err
-	}
-
-	return structuredResultFromSkillInvocation(response), nil
+	return definition.Invoke(input)
 }
 
 func (broker *Broker) Compact(result catalog.StructuredResult) (catalog.CompactedResult, error) {
 	compacted := catalog.CompactedResult{
 		CapabilityKey:   result.CapabilityKey,
-		Source:          result.Source,
 		Summary:         result.Summary,
 		KeyFacts:        cloneStringMap(result.KeyFacts),
 		FollowOnOptions: append([]string(nil), result.FollowOnOptions...),
@@ -246,6 +146,24 @@ func (broker *Broker) Compact(result catalog.StructuredResult) (catalog.Compacte
 
 func (broker *Broker) Usage() budgets.Usage {
 	return broker.tracker.Usage()
+}
+
+// resolveBuiltinDefinition accepts either a canonical tool key or a hidden alias
+// and always returns the canonical builtin definition that should back broker
+// expansion and invocation.
+func (broker *Broker) resolveBuiltinDefinition(key string) (catalog.ToolDefinition, bool) {
+	definition, ok := broker.builtins[key]
+	if !ok {
+		return catalog.ToolDefinition{}, false
+	}
+	if definition.CanonicalKey == "" || definition.CanonicalKey == definition.Key {
+		return definition, true
+	}
+	canonical, ok := broker.builtins[definition.CanonicalKey]
+	if !ok {
+		return catalog.ToolDefinition{}, false
+	}
+	return canonical, true
 }
 
 func cloneStringMap(values map[string]string) map[string]string {
@@ -272,46 +190,4 @@ func normalizeSnapshot(snapshot registry.Snapshot) registry.Snapshot {
 	}
 
 	return snapshot
-}
-
-func (broker *Broker) currentSnapshot() (registry.Snapshot, error) {
-	snapshot, err := broker.source.LoadSnapshot()
-	if err != nil {
-		return registry.Snapshot{}, err
-	}
-	return normalizeSnapshot(snapshot), nil
-}
-
-func structuredResultFromSkillInvocation(response skills.InvokeResponse) catalog.StructuredResult {
-	return catalog.StructuredResult{
-		CapabilityKey: response.SkillKey,
-		Source:        "skill",
-		Summary:       response.Summary,
-		Artifacts:     append([]string(nil), response.Artifacts...),
-		KeyFacts:      stringFacts(response.Output),
-		RawRef:        response.RawRef,
-		RawOutput:     response.RawOutput,
-	}
-}
-
-func stringFacts(values map[string]any) map[string]string {
-	if len(values) == 0 {
-		return nil
-	}
-
-	facts := make(map[string]string)
-	for key, value := range values {
-		switch typed := value.(type) {
-		case string:
-			facts[key] = typed
-		case fmt.Stringer:
-			facts[key] = typed.String()
-		case int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64, bool, float32, float64:
-			facts[key] = fmt.Sprint(typed)
-		}
-	}
-	if len(facts) == 0 {
-		return nil
-	}
-	return facts
 }

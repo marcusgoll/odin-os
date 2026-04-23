@@ -53,6 +53,7 @@ const (
 	EventContextPacketCreated             Type = "context_packet.created"
 	EventConversationTranscriptRecorded   Type = "conversation.transcript_recorded"
 	EventMemorySummaryRecorded            Type = "memory.summary_recorded"
+	EventMemorySummaryUpdated             Type = "memory.summary_updated"
 	EventProjectTransitionChanged         Type = "project.transition_changed"
 	EventProjectShadowObservationRecorded Type = "project.shadow_observation_recorded"
 	EventProjectCompareReportRecorded     Type = "project.compare_report_recorded"
@@ -261,6 +262,15 @@ type ConversationTranscriptRecordedPayload struct {
 }
 
 type MemorySummaryRecordedPayload struct {
+	Scope              string `json:"scope"`
+	ScopeKey           string `json:"scope_key"`
+	MemoryType         string `json:"memory_type"`
+	SourceTranscriptID *int64 `json:"source_transcript_id,omitempty"`
+	TaskID             *int64 `json:"task_id,omitempty"`
+	RunID              *int64 `json:"run_id,omitempty"`
+}
+
+type MemorySummaryUpdatedPayload struct {
 	Scope              string `json:"scope"`
 	ScopeKey           string `json:"scope_key"`
 	MemoryType         string `json:"memory_type"`
