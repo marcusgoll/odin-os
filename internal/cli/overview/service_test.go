@@ -51,6 +51,12 @@ func TestBuildReturnsCanonicalOverviewFromCurrentAuthority(t *testing.T) {
 	if len(view.WorkItems) != 1 {
 		t.Fatalf("Work items len = %d, want 1", len(view.WorkItems))
 	}
+	if view.WorkItems[0].InitiativeKey == nil || *view.WorkItems[0].InitiativeKey != "alpha" {
+		t.Fatalf("Work item initiative = %v, want alpha", view.WorkItems[0].InitiativeKey)
+	}
+	if len(view.WorkItems[0].RunAttempts) != 1 {
+		t.Fatalf("Work item run attempts len = %d, want 1", len(view.WorkItems[0].RunAttempts))
+	}
 	if len(view.Approvals) != 1 {
 		t.Fatalf("Approvals len = %d, want 1", len(view.Approvals))
 	}
@@ -65,6 +71,153 @@ func TestBuildReturnsCanonicalOverviewFromCurrentAuthority(t *testing.T) {
 	}
 	if view.AutomationTriggers.Wiring != WiringNotYetWired {
 		t.Fatalf("Automation wiring = %q, want %q", view.AutomationTriggers.Wiring, WiringNotYetWired)
+	}
+}
+
+func TestBuildNarrowsProjectScopedOverview(t *testing.T) {
+	ctx := context.Background()
+	env := newOverviewTestEnvironment(t)
+
+	workspace, err := env.store.GetWorkspaceByKey(ctx, "default")
+	if err != nil {
+		t.Fatalf("GetWorkspaceByKey(default) error = %v", err)
+	}
+	secondaryCompanion, err := env.store.UpsertCompanion(ctx, sqlite.UpsertCompanionParams{
+		WorkspaceID:         workspace.ID,
+		Key:                 "ops",
+		Title:               "Ops Companion",
+		Kind:                "operator",
+		Status:              "active",
+		InitiativeScopeJSON: "[]",
+		ToolPolicyJSON:      "{}",
+		MemoryPolicyJSON:    "{}",
+		PlanningPolicyJSON:  "{}",
+	})
+	if err != nil {
+		t.Fatalf("UpsertCompanion(ops) error = %v", err)
+	}
+	betaProject, err := env.store.CreateProject(ctx, sqlite.CreateProjectParams{
+		Key:           "beta",
+		Name:          "Beta",
+		Scope:         "project",
+		GitRoot:       "/tmp/beta",
+		DefaultBranch: "main",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject(beta) error = %v", err)
+	}
+	betaInitiative, err := env.store.UpsertInitiative(ctx, sqlite.UpsertInitiativeParams{
+		WorkspaceID:      workspace.ID,
+		Key:              betaProject.Key,
+		Title:            betaProject.Name,
+		Kind:             string(initiatives.KindManagedProject),
+		Status:           "active",
+		Summary:          "Beta initiative",
+		OwnerCompanionID: &secondaryCompanion.ID,
+		LinkedProjectID:  &betaProject.ID,
+	})
+	if err != nil {
+		t.Fatalf("UpsertInitiative(beta) error = %v", err)
+	}
+	betaTask, err := env.store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:    betaProject.ID,
+		Key:          "beta-task",
+		Title:        "Beta task",
+		Status:       "blocked",
+		Scope:        "project",
+		RequestedBy:  "operator",
+		WorkspaceID:  &workspace.ID,
+		InitiativeID: &betaInitiative.ID,
+		CompanionID:  &secondaryCompanion.ID,
+		WorkKind:     "automation",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask(beta-task) error = %v", err)
+	}
+	betaRun, err := env.store.StartRun(ctx, sqlite.StartRunParams{
+		TaskID:   betaTask.ID,
+		Executor: "codex",
+		Attempt:  1,
+		Status:   "running",
+	})
+	if err != nil {
+		t.Fatalf("StartRun(beta-task) error = %v", err)
+	}
+	if _, err := env.store.StartRecovery(ctx, sqlite.StartRecoveryParams{
+		RunID:       &betaRun.ID,
+		Status:      "running",
+		Strategy:    "self_heal",
+		DetailsJSON: "{}",
+	}); err != nil {
+		t.Fatalf("StartRecovery(beta) error = %v", err)
+	}
+
+	view, err := Service{
+		Store:            env.store,
+		RegistrySnapshot: env.snapshot,
+	}.Build(ctx, scope.Resolution{Kind: scope.ScopeProject, ProjectKey: "alpha"})
+	if err != nil {
+		t.Fatalf("Build(alpha) error = %v", err)
+	}
+
+	if len(view.Initiatives) != 1 || view.Initiatives[0].InitiativeKey != "alpha" {
+		t.Fatalf("Initiatives = %+v, want only alpha", view.Initiatives)
+	}
+	if len(view.Companions.Items) != 1 || view.Companions.Items[0].CompanionKey != "primary" {
+		t.Fatalf("Companions = %+v, want only primary", view.Companions.Items)
+	}
+	if len(view.WorkItems) != 1 || view.WorkItems[0].WorkItemKey != "alpha-task" {
+		t.Fatalf("Work items = %+v, want only alpha-task", view.WorkItems)
+	}
+	if len(view.Observability.Recoveries) != 0 {
+		t.Fatalf("Recoveries = %+v, want none in alpha scope", view.Observability.Recoveries)
+	}
+}
+
+func TestBuildUsesOdinCoreMemoryScope(t *testing.T) {
+	ctx := context.Background()
+	env := newOverviewTestEnvironment(t)
+
+	odinCoreProject, err := env.store.CreateProject(ctx, sqlite.CreateProjectParams{
+		Key:           "odin-core",
+		Name:          "Odin Core",
+		Scope:         "project",
+		GitRoot:       "/tmp/odin-core",
+		DefaultBranch: "main",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject(odin-core) error = %v", err)
+	}
+	if _, err := (knowledgememory.Service{Store: env.store}).Record(ctx, knowledgememory.Scope{
+		ProjectID: &odinCoreProject.ID,
+		Value:     "odin-core",
+		Key:       "odin-core",
+	}, "system_note", "Remember odin-core state", `{"source":"test"}`, nil); err != nil {
+		t.Fatalf("Record(odin-core) error = %v", err)
+	}
+
+	view, err := Service{
+		Store:            env.store,
+		RegistrySnapshot: env.snapshot,
+	}.Build(ctx, scope.Resolution{Kind: scope.ScopeOdinCore, ProjectKey: "odin-core"})
+	if err != nil {
+		t.Fatalf("Build(odin-core) error = %v", err)
+	}
+
+	if view.Memory.Count != 2 {
+		t.Fatalf("Memory count = %d, want 2 including global memory", view.Memory.Count)
+	}
+	sawOdinCore := false
+	for _, memory := range view.Memory.Recent {
+		if memory.Scope == "odin-core" && memory.ScopeKey == "odin-core" {
+			sawOdinCore = true
+			break
+		}
+	}
+	if !sawOdinCore {
+		t.Fatalf("Memory recent = %+v, want odin-core memory", view.Memory.Recent)
 	}
 }
 

@@ -17,6 +17,8 @@ func TestRenderOverviewUsesCanonicalLanes(t *testing.T) {
 		"Initiatives",
 		"Work Items",
 		"Run Attempts",
+		"initiative=alpha",
+		"run=7 executor=codex status=running attempt=1",
 		"Companions",
 		"Capability Catalog",
 		"Approvals",
@@ -71,12 +73,23 @@ func sampleOverview() overview.View {
 		WorkItems: []overview.WorkItemSummary{
 			{
 				ProjectKey:       "alpha",
+				InitiativeKey:    &project,
 				WorkItemKey:      "alpha-task",
 				Title:            "Alpha task",
 				Status:           "blocked",
 				Scope:            "project",
 				CurrentRunID:     &runID,
 				CurrentRunStatus: "running",
+				RunAttempts: []overview.RunAttemptSummary{
+					{
+						RunID:       7,
+						WorkItemKey: "alpha-task",
+						ProjectKey:  "alpha",
+						Executor:    "codex",
+						Status:      "running",
+						Attempt:     1,
+					},
+				},
 			},
 		},
 		Companions: overview.CompanionLane{

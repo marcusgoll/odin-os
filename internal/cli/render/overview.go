@@ -58,15 +58,30 @@ func RenderOverview(view overview.View) string {
 	} else {
 		for _, item := range view.WorkItems {
 			lines = append(lines, fmt.Sprintf(
-				"  %s title=%s project=%s status=%s scope=%s current_run=%s run_status=%s",
+				"  %s title=%s initiative=%s status=%s scope=%s project=%s current_run=%s run_status=%s",
 				valueOrNone(item.WorkItemKey),
 				valueOrNone(item.Title),
-				valueOrNone(item.ProjectKey),
+				valueOrNone(ptrValue(item.InitiativeKey)),
 				valueOrNone(item.Status),
 				valueOrNone(item.Scope),
+				valueOrNone(item.ProjectKey),
 				nullableInt64(item.CurrentRunID),
 				valueOrNone(item.CurrentRunStatus),
 			))
+			lines = append(lines, "    Run Attempts")
+			if len(item.RunAttempts) == 0 {
+				lines = append(lines, "      none")
+				continue
+			}
+			for _, run := range item.RunAttempts {
+				lines = append(lines, fmt.Sprintf(
+					"      run=%d executor=%s status=%s attempt=%d",
+					run.RunID,
+					valueOrNone(run.Executor),
+					valueOrNone(run.Status),
+					run.Attempt,
+				))
+			}
 		}
 	}
 

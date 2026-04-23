@@ -76,12 +76,14 @@ type InitiativeSummary struct {
 
 type WorkItemSummary struct {
 	ProjectKey       string
+	InitiativeKey    *string
 	WorkItemKey      string
 	Title            string
 	Status           string
 	Scope            string
 	CurrentRunID     *int64
 	CurrentRunStatus string
+	RunAttempts      []RunAttemptSummary
 }
 
 type CompanionLane struct {
@@ -262,6 +264,9 @@ func (service Service) Build(ctx context.Context, resolved scope.Resolution) (Vi
 	}
 	view.Initiatives = make([]InitiativeSummary, 0, len(initiativeViews))
 	for _, initiative := range initiativeViews {
+		if !matchesInitiativeScope(initiative, resolved) {
+			continue
+		}
 		view.Initiatives = append(view.Initiatives, InitiativeSummary{
 			InitiativeKey:        initiative.InitiativeKey,
 			Title:                initiative.Title,
@@ -278,45 +283,10 @@ func (service Service) Build(ctx context.Context, resolved scope.Resolution) (Vi
 		})
 	}
 
-	companionViews, err := projections.ListCompanionAssignmentViews(ctx, service.Store.DB(), workspaces.DefaultWorkspaceKey)
-	if err != nil && err != sql.ErrNoRows {
-		return View{}, err
-	}
-	view.Companions.Wiring = WiringLive
-	view.Companions.Items = make([]CompanionSummary, 0, len(companionViews))
-	for _, companion := range companionViews {
-		view.Companions.Items = append(view.Companions.Items, CompanionSummary{
-			CompanionKey:         companion.CompanionKey,
-			Title:                companion.Title,
-			Kind:                 companion.Kind,
-			Status:               companion.Status,
-			OwnedInitiativeCount: companion.OwnedInitiativeCount,
-			OpenWorkItemCount:    companion.OpenWorkItemCount,
-			ActiveRunCount:       companion.ActiveRunCount,
-			PendingApprovalCount: companion.PendingApprovalCount,
-			BlockedWorkItemCount: companion.BlockedWorkItemCount,
-		})
-	}
-
 	taskViews, err := projections.ListTaskStatusViews(ctx, service.Store.DB())
 	if err != nil {
 		return View{}, err
 	}
-	for _, task := range taskViews {
-		if !matchesProjectScope(task.ProjectKey, resolved) || isClosedWorkItemStatus(task.Status) {
-			continue
-		}
-		view.WorkItems = append(view.WorkItems, WorkItemSummary{
-			ProjectKey:       task.ProjectKey,
-			WorkItemKey:      task.TaskKey,
-			Title:            task.Title,
-			Status:           task.Status,
-			Scope:            task.Scope,
-			CurrentRunID:     task.CurrentRunID,
-			CurrentRunStatus: task.CurrentRunStatus,
-		})
-	}
-
 	approvalViews, err := projections.ListPendingApprovalViews(ctx, service.Store.DB())
 	if err != nil {
 		return View{}, err
@@ -325,6 +295,56 @@ func (service Service) Build(ctx context.Context, resolved scope.Resolution) (Vi
 	for _, task := range taskViews {
 		taskProjectIndex[task.TaskID] = task.ProjectKey
 	}
+	type taskScopeContext struct {
+		projectKey    string
+		initiativeKey *string
+		companionKey  *string
+	}
+	taskContextCache := make(map[int64]taskScopeContext, len(taskViews))
+	initiativeKeyCache := make(map[int64]string)
+	companionKeyCache := make(map[int64]string)
+	resolveTaskContext := func(taskID int64) (taskScopeContext, error) {
+		if cached, ok := taskContextCache[taskID]; ok {
+			return cached, nil
+		}
+
+		record, err := service.Store.GetTask(ctx, taskID)
+		if err != nil {
+			return taskScopeContext{}, err
+		}
+
+		resolvedContext := taskScopeContext{
+			projectKey: taskProjectIndex[taskID],
+		}
+		if record.InitiativeID != nil {
+			if key, ok := initiativeKeyCache[*record.InitiativeID]; ok {
+				resolvedContext.initiativeKey = stringPtr(key)
+			} else {
+				initiative, err := service.Store.GetInitiativeByID(ctx, *record.InitiativeID)
+				if err != nil {
+					return taskScopeContext{}, err
+				}
+				initiativeKeyCache[*record.InitiativeID] = initiative.Key
+				resolvedContext.initiativeKey = stringPtr(initiative.Key)
+			}
+		}
+		if record.CompanionID != nil {
+			if key, ok := companionKeyCache[*record.CompanionID]; ok {
+				resolvedContext.companionKey = stringPtr(key)
+			} else {
+				companion, err := service.Store.GetCompanionByID(ctx, *record.CompanionID)
+				if err != nil {
+					return taskScopeContext{}, err
+				}
+				companionKeyCache[*record.CompanionID] = companion.Key
+				resolvedContext.companionKey = stringPtr(companion.Key)
+			}
+		}
+
+		taskContextCache[taskID] = resolvedContext
+		return resolvedContext, nil
+	}
+
 	for _, approval := range approvalViews {
 		if !matchesProjectScope(taskProjectIndex[approval.TaskID], resolved) {
 			continue
@@ -342,11 +362,12 @@ func (service Service) Build(ctx context.Context, resolved scope.Resolution) (Vi
 	if err != nil {
 		return View{}, err
 	}
+	runAttemptsByTaskID := make(map[int64][]RunAttemptSummary)
 	for _, run := range activeRunViews {
 		if !matchesProjectScope(run.ProjectKey, resolved) {
 			continue
 		}
-		view.Observability.ActiveRuns = append(view.Observability.ActiveRuns, RunAttemptSummary{
+		summary := RunAttemptSummary{
 			RunID:       run.RunID,
 			TaskID:      run.TaskID,
 			WorkItemKey: run.TaskKey,
@@ -355,6 +376,38 @@ func (service Service) Build(ctx context.Context, resolved scope.Resolution) (Vi
 			Status:      run.Status,
 			Attempt:     run.Attempt,
 			StartedAt:   run.StartedAt,
+		}
+		view.Observability.ActiveRuns = append(view.Observability.ActiveRuns, summary)
+		runAttemptsByTaskID[run.TaskID] = append(runAttemptsByTaskID[run.TaskID], summary)
+	}
+
+	visibleCompanionKeys := make(map[string]struct{})
+	for _, initiative := range view.Initiatives {
+		if initiative.OwnerCompanionKey != nil {
+			visibleCompanionKeys[*initiative.OwnerCompanionKey] = struct{}{}
+		}
+	}
+	for _, task := range taskViews {
+		if !matchesProjectScope(task.ProjectKey, resolved) || isClosedWorkItemStatus(task.Status) {
+			continue
+		}
+		taskContext, err := resolveTaskContext(task.TaskID)
+		if err != nil {
+			return View{}, err
+		}
+		if taskContext.companionKey != nil {
+			visibleCompanionKeys[*taskContext.companionKey] = struct{}{}
+		}
+		view.WorkItems = append(view.WorkItems, WorkItemSummary{
+			ProjectKey:       task.ProjectKey,
+			InitiativeKey:    taskContext.initiativeKey,
+			WorkItemKey:      task.TaskKey,
+			Title:            task.Title,
+			Status:           task.Status,
+			Scope:            task.Scope,
+			CurrentRunID:     task.CurrentRunID,
+			CurrentRunStatus: task.CurrentRunStatus,
+			RunAttempts:      append([]RunAttemptSummary(nil), runAttemptsByTaskID[task.TaskID]...),
 		})
 	}
 
@@ -365,6 +418,9 @@ func (service Service) Build(ctx context.Context, resolved scope.Resolution) (Vi
 	for _, blocked := range blockedViews {
 		if !matchesProjectScope(blocked.ProjectKey, resolved) {
 			continue
+		}
+		if blocked.CompanionKey != nil {
+			visibleCompanionKeys[*blocked.CompanionKey] = struct{}{}
 		}
 		view.Observability.BlockedWork = append(view.Observability.BlockedWork, BlockedWorkSummary{
 			TaskID:        blocked.TaskID,
@@ -400,11 +456,56 @@ func (service Service) Build(ctx context.Context, resolved scope.Resolution) (Vi
 		})
 	}
 
+	companionViews, err := projections.ListCompanionAssignmentViews(ctx, service.Store.DB(), workspaces.DefaultWorkspaceKey)
+	if err != nil && err != sql.ErrNoRows {
+		return View{}, err
+	}
+	view.Companions.Wiring = WiringLive
+	view.Companions.Items = make([]CompanionSummary, 0, len(companionViews))
+	for _, companion := range companionViews {
+		if !matchesCompanionScope(companion.CompanionKey, resolved, visibleCompanionKeys) {
+			continue
+		}
+		view.Companions.Items = append(view.Companions.Items, CompanionSummary{
+			CompanionKey:         companion.CompanionKey,
+			Title:                companion.Title,
+			Kind:                 companion.Kind,
+			Status:               companion.Status,
+			OwnedInitiativeCount: companion.OwnedInitiativeCount,
+			OpenWorkItemCount:    companion.OpenWorkItemCount,
+			ActiveRunCount:       companion.ActiveRunCount,
+			PendingApprovalCount: companion.PendingApprovalCount,
+			BlockedWorkItemCount: companion.BlockedWorkItemCount,
+		})
+	}
+
 	recoveryViews, err := projections.ListRecoveryViews(ctx, service.Store.DB())
 	if err != nil {
 		return View{}, err
 	}
+	runTaskIDCache := make(map[int64]int64)
 	for _, recovery := range recoveryViews {
+		if recovery.RunID != 0 {
+			taskID, ok := runTaskIDCache[recovery.RunID]
+			if !ok {
+				runRecord, err := service.Store.GetRun(ctx, recovery.RunID)
+				if err != nil {
+					if err == sql.ErrNoRows {
+						continue
+					}
+					return View{}, err
+				}
+				taskID = runRecord.TaskID
+				runTaskIDCache[recovery.RunID] = taskID
+			}
+			taskContext, err := resolveTaskContext(taskID)
+			if err != nil {
+				return View{}, err
+			}
+			if !matchesProjectScope(taskContext.projectKey, resolved) {
+				continue
+			}
+		}
 		view.Observability.Recoveries = append(view.Observability.Recoveries, RecoverySummary{
 			RecoveryID: recovery.RecoveryID,
 			RunID:      recovery.RunID,
@@ -482,7 +583,7 @@ func (service Service) memoryScope(ctx context.Context, resolved scope.Resolutio
 		}
 		return knowledgememory.Scope{
 			ProjectID: &project.ID,
-			Value:     "project",
+			Value:     string(resolved.Kind),
 			Key:       project.Key,
 		}, nil
 	case scope.ScopeNewProject:
@@ -511,6 +612,36 @@ func matchesProjectScope(projectKey string, resolved scope.Resolution) bool {
 	default:
 		return true
 	}
+}
+
+func matchesInitiativeScope(initiative projections.InitiativePortfolioView, resolved scope.Resolution) bool {
+	switch resolved.Kind {
+	case scope.ScopeProject, scope.ScopeOdinCore:
+		if initiative.LinkedProjectKey != nil && *initiative.LinkedProjectKey == resolved.ProjectKey {
+			return true
+		}
+		return initiative.InitiativeKey == resolved.ProjectKey
+	case scope.ScopeNewProject:
+		return false
+	default:
+		return true
+	}
+}
+
+func matchesCompanionScope(companionKey string, resolved scope.Resolution, visible map[string]struct{}) bool {
+	switch resolved.Kind {
+	case scope.ScopeProject, scope.ScopeOdinCore:
+		_, ok := visible[companionKey]
+		return ok
+	case scope.ScopeNewProject:
+		return false
+	default:
+		return true
+	}
+}
+
+func stringPtr(value string) *string {
+	return &value
 }
 
 func isClosedWorkItemStatus(status string) bool {
