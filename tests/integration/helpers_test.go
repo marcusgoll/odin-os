@@ -152,6 +152,34 @@ func createGitRepository(t *testing.T) string {
 	return root
 }
 
+func createLegacyOrchestratorFixture(t *testing.T) string {
+	t.Helper()
+
+	root := t.TempDir()
+	files := map[string]string{
+		".claude/skills/social-copy/SKILL.md":         "# Social Copy\n\nLegacy skill body.\n",
+		".agents/skills/runtime-auditor/SKILL.md":     "# Runtime Auditor\n\nLegacy mirror body.\n",
+		"docs/adr/orchestration-model.md":             "# Orchestration Model\n\nLegacy architecture notes.\n",
+		"docs/process/release-checklist.md":           "# Release Checklist\n\nLegacy operator checklist.\n",
+		"ops/github-runner/README.md":                 "# Runner\n\nLegacy runner notes.\n",
+		"prompts/triage-prompt.md":                    "# Triage Prompt\n\nLegacy prompt content.\n",
+		"specs/marcus-social-growth-workflow.md":      "# Marcus Social Growth Workflow\n\nLegacy workflow draft.\n",
+		"tmp/ignored/generated.md":                    "# Ignored\n\nThis should stay ignored.\n",
+		".git/should-not-exist-but-is-ignored/config": "[core]\n\trepositoryformatversion = 0\n",
+	}
+	for relativePath, content := range files {
+		fullPath := filepath.Join(root, relativePath)
+		if err := os.MkdirAll(filepath.Dir(fullPath), 0o755); err != nil {
+			t.Fatalf("MkdirAll(%s) error = %v", filepath.Dir(fullPath), err)
+		}
+		if err := os.WriteFile(fullPath, []byte(content), 0o644); err != nil {
+			t.Fatalf("WriteFile(%s) error = %v", relativePath, err)
+		}
+	}
+
+	return root
+}
+
 func runGit(t *testing.T, dir string, args ...string) {
 	t.Helper()
 
