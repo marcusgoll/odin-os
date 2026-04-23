@@ -314,6 +314,11 @@ browser_server_health() {
     esac
 }
 
+browser_current_url() {
+    printf 'current_url:%s\n' "$*" >> "${ODIN_BROWSER_STUB_CALLS_LOG}"
+    printf '%s' "${ODIN_BROWSER_STUB_CURRENT_URL:-}"
+}
+
 browser_request_domain_access() {
     local target="${1:-}"
     if [[ ! "${target}" =~ ^https?:// ]]; then
@@ -532,6 +537,22 @@ func assertJSONArtifactString(t *testing.T, stdout, key, want string) {
 	}
 	if got := stringValue(artifacts[key]); got != want {
 		t.Fatalf("artifacts[%s] = %q, want %q", key, got, want)
+	}
+}
+
+func assertJSONArtifactAbsent(t *testing.T, stdout, key string) {
+	t.Helper()
+
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(stdout), &payload); err != nil {
+		t.Fatalf("driver output is not valid json: %v\nstdout=%s", err, stdout)
+	}
+	artifacts, ok := payload["artifacts"].(map[string]any)
+	if !ok {
+		t.Fatalf("artifacts = %#v, want object", payload["artifacts"])
+	}
+	if value, ok := artifacts[key]; ok {
+		t.Fatalf("artifacts[%s] = %#v, want absent", key, value)
 	}
 }
 

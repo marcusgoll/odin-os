@@ -11,6 +11,7 @@ This runbook separates deterministic proof from attended live Robinhood use. The
 - The workflow is principal-attended. Marcus is the current **Finance Principal** and must also be the acting operator for live session reuse, auth, prepare, and final approval.
 - Live auth, login, and MFA remain explicit operator checkpoints in the headed session.
 - `docs/operations/browser-human.md` preflight should be green before any attended browser work.
+- On this headless host, set `ODIN_BROWSER_SERVER_URL` to a compatible headed browser server before running the live commands.
 - If Odin prints `unknown project: family-ops`, stop and fix registry alignment before claiming Family-Ops live proof.
 
 ## Deterministic Proof
@@ -36,6 +37,8 @@ The current deterministic integration fixture still uses the checked-in `pbs` pr
 Only run these after deterministic proof is green and the project registry resolves `family-ops`:
 
 ```bash
+export ODIN_HUGINN_ROBINHOOD_TRANSFER_DRIVER="/home/orchestrator/odin-os/scripts/drivers/robinhood-transfer-flow.sh"
+export ODIN_BROWSER_SERVER_URL="http://<headed-browser-host>:<port>"
 ./bin/odin repl
 /project family-ops
 /transfer prepare direction=deposit amount_usd=1.00 source_account=checking destination_account=brokerage memo=attended-smoke
@@ -43,6 +46,8 @@ Only run these after deterministic proof is green and the project registry resol
 /approvals resolve <approval-id> approve because attended live confirmation
 /runs show <submit-run-id>
 ```
+
+While Odin is polling the live browser state, Marcus completes any required login, MFA, transfer-form, review, or final-submit actions in the headed session until Odin observes the expected transfer state.
 
 ## Expected Outcomes
 
@@ -57,4 +62,5 @@ Only run these after deterministic proof is green and the project registry resol
 
 - Deterministic proof and attended live proof are separate claims. Passing tests do not prove live Robinhood readiness.
 - If live auth or MFA appears, Marcus completes it in the headed session; Odin must not background or auto-complete it.
+- The current live seam is principal-attended and evidence-driven. Odin waits for `review_ready` during prepare and `submitted` during submit; it does not yet fill fields or click Robinhood controls itself.
 - If continuity cannot be re-proven after approval, the old approval remains historical `approved`, the task becomes blocked with stale context, and the next attempt starts with a fresh prepare.
