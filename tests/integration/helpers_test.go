@@ -75,15 +75,31 @@ func createPortableProjectRoot(sourceRoot string) (string, error) {
 		return "", err
 	}
 
+	familyOpsRoot, err := os.MkdirTemp("", "odin-os-family-ops-fixture-")
+	if err != nil {
+		return "", err
+	}
+	if err := os.WriteFile(filepath.Join(familyOpsRoot, "README.md"), []byte("# Family-Ops fixture\n"), 0o644); err != nil {
+		return "", err
+	}
+	if err := initializeGitRepoBranchPath(familyOpsRoot, "main"); err != nil {
+		return "", err
+	}
+
 	configPath := filepath.Join(root, "config", "projects.yaml")
 	configBytes, err := os.ReadFile(configPath)
 	if err != nil {
 		return "", err
 	}
-	updatedConfig := strings.ReplaceAll(string(configBytes), "/home/orchestrator/pbs", filepath.ToSlash(pbsRoot))
-	if updatedConfig == string(configBytes) {
+	configText := string(configBytes)
+	if !strings.Contains(configText, "/home/orchestrator/pbs") {
 		return "", fmt.Errorf("projects.yaml did not contain expected pbs path")
 	}
+	if !strings.Contains(configText, "/home/orchestrator/family-ops") {
+		return "", fmt.Errorf("projects.yaml did not contain expected family-ops path")
+	}
+	updatedConfig := strings.ReplaceAll(configText, "/home/orchestrator/pbs", filepath.ToSlash(pbsRoot))
+	updatedConfig = strings.ReplaceAll(updatedConfig, "/home/orchestrator/family-ops", filepath.ToSlash(familyOpsRoot))
 	if err := os.WriteFile(configPath, []byte(updatedConfig), 0o644); err != nil {
 		return "", err
 	}
@@ -111,8 +127,11 @@ func copyPortableRepoTree(sourceRoot string, destRoot string) error {
 		if rel == "." {
 			return nil
 		}
-		if entry.IsDir() && ignoredDirs[entry.Name()] {
-			return filepath.SkipDir
+		if ignoredDirs[entry.Name()] {
+			if entry.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
 		}
 
 		targetPath := filepath.Join(destRoot, rel)

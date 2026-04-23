@@ -34,7 +34,10 @@ See `docs/contracts/ubiquitous-language.md` for the frozen vocabulary, `docs/con
 
 ## Canonical Documents
 
-- `docs/adr/0001-canonical-authority.md` defines the system's source-of-truth model, scope model, and governance rules.
+- `docs/contracts/ubiquitous-language.md` freezes the canonical workspace vocabulary.
+- `docs/contracts/workspace-context-map.md` defines the target bounded-context dependency direction.
+- `docs/contracts/tui-overview.md` defines the canonical workspace-first operator overview and lane semantics.
+- `docs/adr/0001-canonical-authority.md` defines the system's source-of-truth model, control-scope model, and governance rules.
 - `docs/adr/0002-migration-policy.md` defines how legacy assets from `odin-orchestrator` are classified and moved into this repo.
 - `docs/contracts/repo-layout.md` defines package and folder responsibilities.
 - `docs/contracts/phase-exit-criteria.md` defines the acceptance gate for Phase 00 and the baseline gate every later phase must satisfy.

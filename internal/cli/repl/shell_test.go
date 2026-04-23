@@ -810,7 +810,7 @@ func TestShellHelpIncludesTransitionCommands(t *testing.T) {
 		t.Fatalf("HandleLine(/help) error = %v", err)
 	}
 
-	for _, want := range []string{"/workspace", "/initiatives", "/companions", "/tool", "/transition", "/observe", "/compare", "/doctor json", "/doctor report"} {
+	for _, want := range []string{"/overview", "/workspace", "/initiatives", "/companions", "/tool", "/transition", "/observe", "/compare", "/doctor json", "/doctor report"} {
 		if !strings.Contains(output.String(), want) {
 			t.Fatalf("help output = %q, want %q", output.String(), want)
 		}
@@ -1157,6 +1157,88 @@ func TestShellOperatorViewsRenderWorkspaceInitiativesAndCompanions(t *testing.T)
 	}
 }
 
+func TestShellOverviewRendersCanonicalBoard(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	env := newTestEnvironment(t)
+	project, err := env.Store.CreateProject(ctx, sqlite.CreateProjectParams{
+		Key:           "alpha",
+		Name:          "Alpha",
+		Scope:         "project",
+		GitRoot:       "/tmp/alpha",
+		DefaultBranch: "main",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+	workspace, err := workspaces.Service{Store: env.Store}.BootstrapDefaultWorkspace(ctx)
+	if err != nil {
+		t.Fatalf("BootstrapDefaultWorkspace() error = %v", err)
+	}
+	companion, err := env.Store.GetCompanionByKey(ctx, workspace.ID, workspace.DefaultCompanionKey)
+	if err != nil {
+		t.Fatalf("GetCompanionByKey(default) error = %v", err)
+	}
+	initiative, err := env.Store.UpsertInitiative(ctx, sqlite.UpsertInitiativeParams{
+		WorkspaceID:      workspace.ID,
+		Key:              project.Key,
+		Title:            project.Name,
+		Kind:             string(initiatives.KindManagedProject),
+		Status:           "active",
+		Summary:          "Alpha initiative",
+		OwnerCompanionID: &companion.ID,
+		LinkedProjectID:  &project.ID,
+	})
+	if err != nil {
+		t.Fatalf("UpsertInitiative(alpha) error = %v", err)
+	}
+
+	task, err := env.Store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:    project.ID,
+		Key:          "alpha-task",
+		Title:        "Alpha task",
+		Status:       "blocked",
+		Scope:        "project",
+		RequestedBy:  "operator",
+		WorkspaceID:  &workspace.ID,
+		InitiativeID: &initiative.ID,
+		CompanionID:  &companion.ID,
+		WorkKind:     "automation",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask(alpha-task) error = %v", err)
+	}
+	if _, err := env.Store.StartRun(ctx, sqlite.StartRunParams{
+		TaskID:   task.ID,
+		Executor: "codex",
+		Attempt:  1,
+		Status:   "running",
+	}); err != nil {
+		t.Fatalf("StartRun(alpha-task) error = %v", err)
+	}
+
+	shell, err := New(env)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	var output bytes.Buffer
+	if err := shell.HandleLine(ctx, "/overview", &output); err != nil {
+		t.Fatalf("HandleLine(/overview) error = %v", err)
+	}
+
+	for _, want := range []string{"Workspace", "Initiatives", "Work Items", "Run Attempts", "Companions", "Capability Catalog", "Intake Inbox", "Automation Triggers"} {
+		if !strings.Contains(output.String(), want) {
+			t.Fatalf("overview output = %q, want %q", output.String(), want)
+		}
+	}
+	if strings.Contains(output.String(), "Processes") {
+		t.Fatalf("overview output = %q, must not introduce Processes lane", output.String())
+	}
+}
+
 func TestAgendaCommandRendersDueWorkBlockedWorkAndApprovals(t *testing.T) {
 	t.Parallel()
 
@@ -1388,6 +1470,7 @@ func TestAskModeRendersWorkspaceMemoryWithoutCreatingTask(t *testing.T) {
 		t.Fatalf("jobs len = %d, want 0", len(views))
 	}
 }
+
 func TestShellTransitionStatusShowsDefaultInventoryAuthority(t *testing.T) {
 	t.Parallel()
 

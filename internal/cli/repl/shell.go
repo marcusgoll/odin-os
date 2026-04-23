@@ -15,6 +15,7 @@ import (
 
 	webdriver "odin-os/internal/adapters/web"
 	"odin-os/internal/cli/commands"
+	clioverview "odin-os/internal/cli/overview"
 	"odin-os/internal/cli/render"
 	"odin-os/internal/cli/scope"
 	clistate "odin-os/internal/cli/state"
@@ -256,10 +257,10 @@ func (shell *Shell) handleCommand(ctx context.Context, command commands.Command,
 		if _, err := fmt.Fprintln(output, "prefer explicit cli commands outside the repl: odin help | odin status --json | odin task run --project <key> --title <title> | odin repl"); err != nil {
 			return err
 		}
-		if _, err := fmt.Fprintln(output, "/help /mode /scope /memory /workspace /initiatives /companions /agenda /project /tool /transition /observe /compare /jobs /runs /approvals /transfer /logs /doctor /doctor json /doctor report /self"); err != nil {
+		if _, err := fmt.Fprintln(output, "/help /mode /scope /memory /overview /workspace /initiatives /companions /agenda /project /tool /transition /observe /compare /jobs /runs /approvals /transfer /logs /doctor /doctor json /doctor report /self"); err != nil {
 			return err
 		}
-		if _, err := fmt.Fprintln(output, "repl compatibility commands: /help /mode /scope /memory /project /tool /transition /observe /compare /status /stat /capabilities /leases /jobs /runs /approvals /agenda /transfer /logs /doctor /doctor json /doctor report /self /quit"); err != nil {
+		if _, err := fmt.Fprintln(output, "repl compatibility commands: /help /mode /scope /memory /overview /project /tool /transition /observe /compare /status /stat /capabilities /leases /jobs /runs /approvals /agenda /transfer /logs /doctor /doctor json /doctor report /self /quit"); err != nil {
 			return err
 		}
 		if _, err := fmt.Fprintf(output, "%s\n", transitionUsage); err != nil {
@@ -276,6 +277,8 @@ func (shell *Shell) handleCommand(ctx context.Context, command commands.Command,
 		return shell.handleScope(command.Args, output)
 	case "memory":
 		return shell.handleMemory(ctx, command.Args, output)
+	case "overview":
+		return shell.handleOverview(ctx, output)
 	case "workspace":
 		return shell.handleWorkspace(ctx, output)
 	case "initiatives":
@@ -328,6 +331,8 @@ func (shell *Shell) handleAsk(ctx context.Context, line string, output io.Writer
 		return shell.handleCommand(ctx, commands.Command{Name: "scope"}, output)
 	case commands.IntentMemory:
 		return shell.handleCommand(ctx, commands.Command{Name: "memory"}, output)
+	case commands.IntentOverview:
+		return shell.handleCommand(ctx, commands.Command{Name: "overview"}, output)
 	case commands.IntentWorkspace:
 		return shell.handleCommand(ctx, commands.Command{Name: "workspace"}, output)
 	case commands.IntentInitiatives:
@@ -360,7 +365,7 @@ func (shell *Shell) handleAsk(ctx context.Context, line string, output io.Writer
 			_, err = fmt.Fprintln(output, result.Answer)
 			return err
 		}
-		_, err := fmt.Fprintln(output, "local ask is limited in Phase 05. Try /help, /scope, /memory, /workspace, /initiatives, /companions, /agenda, /project, /jobs, /runs, /approvals, /transfer, /logs, or /doctor.")
+		_, err := fmt.Fprintln(output, "local ask is limited in Phase 05. Try /help, /scope, /memory, /overview, /workspace, /initiatives, /companions, /agenda, /project, /jobs, /runs, /approvals, /transfer, /logs, or /doctor.")
 		return err
 	}
 }
@@ -999,6 +1004,19 @@ func (shell *Shell) handleJobs(ctx context.Context, output io.Writer) error {
 		}
 	}
 	return nil
+}
+
+func (shell *Shell) handleOverview(ctx context.Context, output io.Writer) error {
+	view, err := clioverview.Service{
+		Store:            shell.env.Store,
+		RegistrySnapshot: shell.registrySnapshot(),
+	}.Build(ctx, shell.state.Scope)
+	if err != nil {
+		return err
+	}
+
+	_, err = fmt.Fprintln(output, render.RenderOverview(view))
+	return err
 }
 
 func (shell *Shell) handleRuns(ctx context.Context, args []string, output io.Writer) error {
@@ -1904,6 +1922,27 @@ func (shell *Shell) handleDoctor(ctx context.Context, args []string, output io.W
 		checks["sources"],
 	)
 	return err
+}
+
+func (shell *Shell) registrySnapshot() registry.Snapshot {
+	if shell.env.CapabilityService == nil {
+		return registry.Snapshot{}
+	}
+
+	active := shell.env.CapabilityService.Active()
+	snapshot := registry.Snapshot{
+		Items:       make([]registry.Item, 0, len(active.Capabilities)),
+		ByKey:       make(map[string]registry.Item, len(active.Capabilities)),
+		ByKind:      make(map[registry.Kind][]registry.Item),
+		Diagnostics: append([]registry.Diagnostic(nil), active.Diagnostics...),
+	}
+	for _, descriptor := range active.Capabilities {
+		item := descriptor
+		snapshot.Items = append(snapshot.Items, item)
+		snapshot.ByKey[item.Key] = item
+		snapshot.ByKind[item.Kind] = append(snapshot.ByKind[item.Kind], item)
+	}
+	return snapshot
 }
 
 func (shell *Shell) handleSelf(output io.Writer) error {
