@@ -1,0 +1,63 @@
+{
+  "name": "Odin OS Sentry Alert",
+  "active": false,
+  "versionId": "16832ba9-c0cb-4ed8-885c-f2d8e5c0d457",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "odin-os-sentry-alert",
+        "responseMode": "onReceived",
+        "options": {}
+      },
+      "id": "sentry-webhook",
+      "name": "Sentry Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [240, 300],
+      "webhookId": "odin-os-sentry-alert"
+    },
+    {
+      "parameters": {
+        "jsCode": "const raw = $input.first().json || {};\nconst body = raw.body || raw;\nif (String(body.action || '').toLowerCase() !== 'triggered') {\n  return [];\n}\n\nconst data = body.data || {};\nconst issue = data.issue || {};\nconst event = data.event || {};\nconst level = String(issue.level || event.level || 'error').toLowerCase();\nif (level === 'info' || level === 'warning') {\n  return [];\n}\n\nconst projectSlug = String(body.project_slug || issue.project?.slug || '').trim();\nconst routing = {\n  'cfipros-backend': 'cfipros',\n  'cfipros-frontend': 'cfipros'\n};\nconst projectKey = routing[projectSlug];\nif (!projectKey) {\n  return [];\n}\n\nconst issueId = String(issue.id || '').trim();\nconst eventId = String(event.event_id || '').trim();\nconst titleSource = String(issue.title || event.title || 'Sentry issue').trim();\nconst dedupSeed = issueId || eventId || 'unknown';\nconst tags = event.tags || [];\nconst repoTag = tags.find(tag => (Array.isArray(tag) ? tag[0] : tag.key) === 'repo');\nconst repoName = repoTag ? (Array.isArray(repoTag) ? repoTag[1] : repoTag.value) : 'marcusgoll/cfipros';\n\nreturn [{ json: {\n  router_mode: 'intake',\n  schema_version: 1,\n  source: 'n8n',\n  type: 'sentry_issue',\n  project_key: projectKey,\n  title: 'Investigate ' + projectKey + ' Sentry issue: ' + titleSource,\n  action_key: '',\n  dedup_key: 'sentry_issue:' + projectKey + ':' + dedupSeed,\n  requested_by: 'sentry',\n  payload: {\n    issue_id: issueId,\n    event_id: eventId,\n    project_slug: projectSlug,\n    level,\n    title: titleSource,\n    culprit: String(issue.culprit || event.culprit || ''),\n    web_url: String(issue.web_url || ''),\n    repo: String(repoName || ''),\n    sentry_payload: body\n  }\n} }];"
+      },
+      "id": "build-intake",
+      "name": "Build Sentry Intake",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [520, 300]
+    },
+    {
+      "parameters": {
+        "source": "database",
+        "workflowId": "__ODIN_OS_DISPATCH_WORKFLOW_ID__",
+        "options": {}
+      },
+      "id": "dispatch-intake",
+      "name": "Dispatch to Odin OS",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1,
+      "position": [800, 300]
+    }
+  ],
+  "connections": {
+    "Sentry Webhook": {
+      "main": [
+        [{ "node": "Build Sentry Intake", "type": "main", "index": 0 }]
+      ]
+    },
+    "Build Sentry Intake": {
+      "main": [
+        [{ "node": "Dispatch to Odin OS", "type": "main", "index": 0 }]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "callerPolicy": "workflowsFromSameOwner",
+    "availableInMCP": false
+  },
+  "meta": {
+    "description": "Receives Sentry alerts, builds a normalized odin intake enqueue envelope for cfipros, and hands it to the shared Odin OS dispatch workflow."
+  }
+}

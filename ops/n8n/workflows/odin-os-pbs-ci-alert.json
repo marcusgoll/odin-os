@@ -1,0 +1,63 @@
+{
+  "name": "Odin OS PBS CI Alert",
+  "active": false,
+  "versionId": "161e575a-bb86-4643-9683-ae9a332b0288",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "pbs-ci-alert",
+        "responseMode": "onReceived",
+        "options": {}
+      },
+      "id": "pbs-ci-webhook",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [240, 300],
+      "webhookId": "pbs-ci-alert"
+    },
+    {
+      "parameters": {
+        "jsCode": "const raw = $input.first().json || {};\nconst body = raw.body || raw;\nconst workflowRun = body.workflow_run || body;\nconst conclusion = String(workflowRun.conclusion || body.conclusion || 'unknown').toLowerCase();\nif (['success', 'skipped', 'cancelled'].includes(conclusion)) {\n  return [];\n}\n\nconst runId = String(workflowRun.id || body.run_id || '').trim();\nconst workflowName = String(workflowRun.name || body.workflow_name || 'GitHub Actions').trim();\nconst branch = String(workflowRun.head_branch || body.branch || '').trim();\nconst commitSHA = String(workflowRun.head_sha || body.commit_sha || '').trim();\nconst dedupSeed = runId || commitSHA || workflowName.toLowerCase().replace(/\\s+/g, '-');\n\nreturn [{ json: {\n  router_mode: 'intake',\n  schema_version: 1,\n  source: 'n8n',\n  type: 'ci_failure',\n  project_key: 'pbs',\n  title: 'Investigate PBS CI failure: ' + workflowName,\n  action_key: '',\n  dedup_key: 'ci_failure:pbs:' + dedupSeed,\n  requested_by: 'github-actions',\n  payload: {\n    run_id: runId,\n    workflow_name: workflowName,\n    conclusion,\n    branch,\n    commit_sha: commitSHA,\n    html_url: String(workflowRun.html_url || body.html_url || ''),\n    raw_event: body\n  }\n} }];"
+      },
+      "id": "build-intake",
+      "name": "Build PBS CI Intake",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [520, 300]
+    },
+    {
+      "parameters": {
+        "source": "database",
+        "workflowId": "__ODIN_OS_DISPATCH_WORKFLOW_ID__",
+        "options": {}
+      },
+      "id": "dispatch-intake",
+      "name": "Dispatch to Odin OS",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1,
+      "position": [800, 300]
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [
+        [{ "node": "Build PBS CI Intake", "type": "main", "index": 0 }]
+      ]
+    },
+    "Build PBS CI Intake": {
+      "main": [
+        [{ "node": "Dispatch to Odin OS", "type": "main", "index": 0 }]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "callerPolicy": "workflowsFromSameOwner",
+    "availableInMCP": false
+  },
+  "meta": {
+    "description": "Receives PBS GitHub Actions webhooks, builds a normalized odin intake enqueue envelope with a deterministic ci_failure dedup_key, and hands it to the shared Odin OS dispatch workflow."
+  }
+}

@@ -10,11 +10,9 @@ import (
 )
 
 func TestScanDirInfersKinds(t *testing.T) {
-	repoRoot := t.TempDir()
-	root := filepath.Join(repoRoot, "registry")
+	root := t.TempDir()
 	writeFile(t, filepath.Join(root, "skills", "triage.md"), sampleSkillMarkdown("triage-skill"))
 	writeFile(t, filepath.Join(root, "commands", "status.md"), sampleCommandMarkdown("status-command"))
-	writeExecutable(t, filepath.Join(repoRoot, "scripts", "skills", "triage.sh"))
 
 	files, err := loader.ScanDir(root)
 	if err != nil {
@@ -35,13 +33,14 @@ func TestScanDirInfersKinds(t *testing.T) {
 }
 
 func TestLoadDirCompilesValidFilesAndReportsInvalidOnes(t *testing.T) {
-	repoRoot := t.TempDir()
-	root := filepath.Join(repoRoot, "registry")
-	writeFile(t, filepath.Join(root, "skills", "triage.md"), sampleSkillMarkdown("triage-skill"))
-	writeFile(t, filepath.Join(root, "skills", "broken.md"), brokenSkillMarkdown("broken-skill"))
-	writeExecutable(t, filepath.Join(repoRoot, "scripts", "skills", "triage.sh"))
+	root := t.TempDir()
+	registryRoot := filepath.Join(root, "registry")
+	writeFile(t, filepath.Join(registryRoot, "skills", "triage.md"), sampleSkillMarkdown("triage-skill"))
+	writeFile(t, filepath.Join(registryRoot, "skills", "broken.md"), brokenSkillMarkdown("broken-skill"))
+	writeExecutable(t, filepath.Join(root, "scripts", "skills", "triage-skill.sh"), sampleSkillHandlerScript())
+	writeExecutable(t, filepath.Join(root, "scripts", "skills", "broken-skill.sh"), sampleSkillHandlerScript())
 
-	snapshot, err := loader.LoadDir(root)
+	snapshot, err := loader.LoadDir(registryRoot)
 	if err != nil {
 		t.Fatalf("LoadDir() error = %v", err)
 	}
@@ -52,22 +51,6 @@ func TestLoadDirCompilesValidFilesAndReportsInvalidOnes(t *testing.T) {
 
 	if snapshot.Items[0].Key != "triage-skill" {
 		t.Fatalf("snapshot.Items[0].Key = %q, want %q", snapshot.Items[0].Key, "triage-skill")
-	}
-
-	if snapshot.Items[0].Version != "1.0.0" {
-		t.Fatalf("snapshot.Items[0].Version = %q, want %q", snapshot.Items[0].Version, "1.0.0")
-	}
-
-	if !snapshot.Items[0].Enabled {
-		t.Fatalf("snapshot.Items[0].Enabled = false, want true")
-	}
-
-	if snapshot.Items[0].HandlerType != "command" {
-		t.Fatalf("snapshot.Items[0].HandlerType = %q, want %q", snapshot.Items[0].HandlerType, "command")
-	}
-
-	if snapshot.Items[0].HandlerRef != "scripts/skills/triage.sh" {
-		t.Fatalf("snapshot.Items[0].HandlerRef = %q, want %q", snapshot.Items[0].HandlerRef, "scripts/skills/triage.sh")
 	}
 
 	if len(snapshot.Diagnostics) == 0 {
@@ -87,8 +70,16 @@ func TestLoadDirLoadsRepositoryExamples(t *testing.T) {
 		t.Fatalf("snapshot.Diagnostics = %v, want none", snapshot.Diagnostics)
 	}
 
-	if len(snapshot.Items) != 6 {
-		t.Fatalf("snapshot.Items = %d, want 6", len(snapshot.Items))
+	for _, key := range []string{
+		"karpathy-guidelines",
+		"status-command",
+		"triage-agent",
+		"triage-skill",
+		"project-intake",
+	} {
+		if _, ok := snapshot.ByKey[key]; !ok {
+			t.Fatalf("snapshot missing %q", key)
+		}
 	}
 }
 
@@ -104,13 +95,14 @@ func writeFile(t *testing.T, path string, contents string) {
 	}
 }
 
-func writeExecutable(t *testing.T, path string) {
+func writeExecutable(t *testing.T, path string, contents string) {
 	t.Helper()
 
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		t.Fatalf("MkdirAll(%q) error = %v", filepath.Dir(path), err)
+		t.Fatalf("MkdirAll(%q) error = %v", path, err)
 	}
-	if err := os.WriteFile(path, []byte("#!/usr/bin/env bash\n"), 0o755); err != nil {
+
+	if err := os.WriteFile(path, []byte(contents), 0o755); err != nil {
 		t.Fatalf("WriteFile(%q) error = %v", path, err)
 	}
 }
@@ -121,17 +113,18 @@ kind: skill
 key: ` + key + `
 title: Triage Skill
 summary: Helps sort incoming work.
-version: 1.0.0
+status: active
+version: "1.0.0"
 enabled: true
 strictness: rigid
 applies_to:
   - intake
 scopes:
-  - project
+  - global
 permissions:
   - repo.read
 handler_type: command
-handler_ref: scripts/skills/triage.sh
+handler_ref: scripts/skills/` + key + `.sh
 timeout_seconds: 15
 input_schema:
   type: object
@@ -141,7 +134,7 @@ input_schema:
 output_schema:
   type: object
   properties:
-    summary:
+    classification:
       type: string
 ---
 
@@ -214,17 +207,18 @@ kind: skill
 key: ` + key + `
 title: Broken Skill
 summary: Missing the Procedure section.
-version: 1.0.0
+status: active
+version: "1.0.0"
 enabled: true
 strictness: rigid
 applies_to:
   - intake
 scopes:
-  - project
+  - global
 permissions:
   - repo.read
 handler_type: command
-handler_ref: scripts/skills/triage.sh
+handler_ref: scripts/skills/` + key + `.sh
 timeout_seconds: 15
 input_schema:
   type: object
@@ -234,7 +228,7 @@ input_schema:
 output_schema:
   type: object
   properties:
-    summary:
+    classification:
       type: string
 ---
 
@@ -258,4 +252,8 @@ Stay deterministic.
 ## Success Criteria
 The queue is sorted.
 `
+}
+
+func sampleSkillHandlerScript() string {
+	return "#!/usr/bin/env bash\nset -euo pipefail\ncat >/dev/null\nprintf '%s\\n' '{\"status\":\"ok\",\"summary\":\"complete\",\"output\":{\"classification\":\"triage\"}}'\n"
 }

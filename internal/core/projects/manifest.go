@@ -107,6 +107,7 @@ type CutoverPilotProject struct {
 	Key                       string   `yaml:"key"`
 	RuntimeOwner              string   `yaml:"runtime_owner"`
 	PrimaryController         string   `yaml:"primary_controller"`
+	Stage                     TransitionState `yaml:"stage"`
 	ComparisonContext         string   `yaml:"comparison_context"`
 	LegacyPrimaryRequired     bool     `yaml:"legacy_primary_required"`
 	ShadowGraduation          []string `yaml:"shadow_graduation"`

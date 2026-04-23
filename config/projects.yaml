@@ -68,13 +68,13 @@ projects:
         allow_clean: false
         allow_force_push: false
         require_explicit_approval: true
-  - key: family-ops
-    name: Family-Ops
-    project_class: local_git_project
-    git_root: /home/orchestrator/family-ops
-    default_branch: wip/main-dirty-2026-03-26
+  - key: cfipros
+    name: CFIPros
+    project_class: github_backed_project
+    git_root: /home/orchestrator/cfipros
+    default_branch: main
     github:
-      repo: ""
+      repo: marcusgoll/cfipros
     scheduler:
       max_concurrent_runs: 1
       max_starts_per_cycle: 1
@@ -83,6 +83,41 @@ projects:
       allowed_commands:
         - status
         - test
+        - build
+      branch_rules:
+        protected_branches:
+          - main
+        require_worktree: true
+        require_task_branch: true
+        allow_default_branch_mutation: false
+      approval_gates:
+        require_for_governance_changes: true
+        require_for_destructive_operations: true
+        require_for_system_project_changes: false
+      merge_policy:
+        mode: squash
+        allow_direct_to_default_branch: false
+      destructive_operations:
+        allow_reset: false
+        allow_clean: false
+        allow_force_push: false
+        require_explicit_approval: true
+  - key: marcusgoll
+    name: Marcusgoll
+    project_class: github_backed_project
+    git_root: /home/orchestrator/marcusgoll
+    default_branch: main
+    github:
+      repo: marcusgoll/marcusgoll
+    scheduler:
+      max_concurrent_runs: 1
+      max_starts_per_cycle: 1
+      stalled_run_retry_limit: 2
+    policy:
+      allowed_commands:
+        - status
+        - test
+        - build
       branch_rules:
         protected_branches:
           - main
@@ -107,6 +142,7 @@ cutover:
     - key: pbs
       runtime_owner: odin_os
       primary_controller: odin_os
+      stage: cutover
       comparison_context: odin-orchestrator
       legacy_primary_required: false
       shadow_graduation:
@@ -120,6 +156,54 @@ cutover:
       cutover_graduation:
         - routine queued work completes under Odin OS ownership
         - normal project mutations no longer need legacy-primary intervention
+        - rollback remains available and rehearsed
+      legacy_duties_to_retire_in_order:
+        - read-only observation and compare reporting
+        - limited-action handling for allowlisted low-risk mutations
+        - routine queue intake and run selection
+        - normal project mutation and merge authority
+        - legacy-primary fallback for routine completion
+    - key: cfipros
+      runtime_owner: legacy_odin
+      primary_controller: legacy_odin
+      stage: shadow
+      comparison_context: odin-orchestrator
+      legacy_primary_required: true
+      shadow_graduation:
+        - shadow readouts agree on repository scope and ownership
+        - n8n payloads map cleanly to project-scoped Odin tasks
+        - operator review confirms the project stays read-only while legacy is primary
+      limited_action_graduation:
+        - allowlisted isolated mutations complete successfully without legacy drift
+        - limited-action work stays bounded to task-owned branches and worktrees
+        - operator review confirms rollback remains trivial
+      cutover_graduation:
+        - routine queued work completes under Odin OS ownership
+        - legacy-primary intervention is no longer needed for normal completion
+        - rollback remains available and rehearsed
+      legacy_duties_to_retire_in_order:
+        - read-only observation and compare reporting
+        - limited-action handling for allowlisted low-risk mutations
+        - routine queue intake and run selection
+        - normal project mutation and merge authority
+        - legacy-primary fallback for routine completion
+    - key: marcusgoll
+      runtime_owner: legacy_odin
+      primary_controller: legacy_odin
+      stage: shadow
+      comparison_context: odin-orchestrator
+      legacy_primary_required: true
+      shadow_graduation:
+        - shadow readouts agree on repository scope and ownership
+        - n8n payloads map cleanly to project-scoped Odin tasks
+        - operator review confirms the project stays read-only while legacy is primary
+      limited_action_graduation:
+        - allowlisted isolated mutations complete successfully without legacy drift
+        - limited-action work stays bounded to task-owned branches and worktrees
+        - operator review confirms rollback remains trivial
+      cutover_graduation:
+        - routine queued work completes under Odin OS ownership
+        - legacy-primary intervention is no longer needed for normal completion
         - rollback remains available and rehearsed
       legacy_duties_to_retire_in_order:
         - read-only observation and compare reporting

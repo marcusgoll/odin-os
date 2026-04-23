@@ -391,3 +391,81 @@ func TestValidateRejectsInvalidCutoverPilotProjects(t *testing.T) {
 		}
 	}
 }
+
+func TestValidateRejectsInvalidCutoverPilotStage(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	projectRoot := filepath.Join(root, "cfipros")
+	if err := os.MkdirAll(filepath.Join(projectRoot, ".git"), 0o755); err != nil {
+		t.Fatalf("mkdir git root: %v", err)
+	}
+
+	trueValue := true
+	falseValue := false
+
+	cfg := Config{
+		Version: 1,
+		Projects: []Manifest{
+			{
+				Key:           "cfipros",
+				Name:          "CFIPros",
+				ProjectClass:  ProjectClassGitHubBacked,
+				GitRoot:       projectRoot,
+				DefaultBranch: "main",
+				GitHub: GitHub{
+					Repo: "marcusgoll/cfipros",
+				},
+				Policy: Policy{
+					AllowedCommands: []string{"status", "test", "build"},
+					BranchRules: BranchRules{
+						ProtectedBranches:          []string{"main"},
+						RequireWorktree:            &trueValue,
+						RequireTaskBranch:          &trueValue,
+						AllowDefaultBranchMutation: &falseValue,
+					},
+					ApprovalGates: ApprovalGates{
+						RequireForGovernanceChanges:     &trueValue,
+						RequireForDestructiveOperations: &trueValue,
+						RequireForSystemProjectChanges:  &falseValue,
+					},
+					MergePolicy: MergePolicy{
+						Mode:                       "squash",
+						AllowDirectToDefaultBranch: &falseValue,
+					},
+					DestructiveOperations: DestructiveOperations{
+						AllowReset:              &falseValue,
+						AllowClean:              &falseValue,
+						AllowForcePush:          &falseValue,
+						RequireExplicitApproval: &trueValue,
+					},
+				},
+			},
+		},
+		Cutover: CutoverConfig{
+			PilotProjects: []CutoverPilotProject{
+				{
+					Key:         "cfipros",
+					RuntimeOwner: "legacy_odin",
+					Stage:       "shdaow",
+				},
+			},
+		},
+	}
+
+	diagnostics := Validate(cfg)
+	if len(diagnostics) == 0 {
+		t.Fatal("expected diagnostics")
+	}
+
+	found := false
+	for _, diagnostic := range diagnostics {
+		if diagnostic.Code == "invalid_cutover_pilot_stage" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected invalid_cutover_pilot_stage diagnostic, got %#v", diagnostics)
+	}
+}
