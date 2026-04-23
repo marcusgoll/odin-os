@@ -54,6 +54,9 @@ func TestBuildReturnsCanonicalOverviewFromCurrentAuthority(t *testing.T) {
 	if view.WorkItems[0].InitiativeKey == nil || *view.WorkItems[0].InitiativeKey != "alpha" {
 		t.Fatalf("Work item initiative = %v, want alpha", view.WorkItems[0].InitiativeKey)
 	}
+	if view.WorkItems[0].CompanionKey == nil || *view.WorkItems[0].CompanionKey != "primary" {
+		t.Fatalf("Work item companion = %v, want primary", view.WorkItems[0].CompanionKey)
+	}
 	if len(view.WorkItems[0].RunAttempts) != 1 {
 		t.Fatalf("Work item run attempts len = %d, want 1", len(view.WorkItems[0].RunAttempts))
 	}
@@ -62,6 +65,9 @@ func TestBuildReturnsCanonicalOverviewFromCurrentAuthority(t *testing.T) {
 	}
 	if len(view.Observability.ActiveRuns) != 1 {
 		t.Fatalf("Active runs len = %d, want 1", len(view.Observability.ActiveRuns))
+	}
+	if view.Observability.ActiveRuns[0].CompanionKey == nil || *view.Observability.ActiveRuns[0].CompanionKey != "primary" {
+		t.Fatalf("Active run companion = %v, want primary", view.Observability.ActiveRuns[0].CompanionKey)
 	}
 	if len(view.Memory.Recent) != 1 || view.Memory.Count != 1 {
 		t.Fatalf("Memory = %+v, want one recent entry", view.Memory)
@@ -271,11 +277,117 @@ func TestBuildUsesOdinCoreMemoryScope(t *testing.T) {
 	}
 }
 
+func TestBuildIncludesCompanionSwarmAndIncidentAttention(t *testing.T) {
+	ctx := context.Background()
+	env := newOverviewTestEnvironment(t)
+
+	incident, err := env.store.OpenIncident(ctx, sqlite.OpenIncidentParams{
+		RunID:       &env.runID,
+		Severity:    "warning",
+		Status:      "open",
+		Summary:     "Browser verification paused",
+		DetailsJSON: "{}",
+	})
+	if err != nil {
+		t.Fatalf("OpenIncident() error = %v", err)
+	}
+	if _, err := env.store.StartRecovery(ctx, sqlite.StartRecoveryParams{
+		IncidentID:  &incident.ID,
+		Status:      "running",
+		Strategy:    "self_heal",
+		DetailsJSON: "{}",
+	}); err != nil {
+		t.Fatalf("StartRecovery() error = %v", err)
+	}
+
+	delegation, err := env.store.CreateDelegation(ctx, sqlite.CreateDelegationParams{
+		ParentTaskID:    env.taskID,
+		ParentRunID:     &env.runID,
+		ProjectID:       env.projectID,
+		Scope:           "project",
+		DelegationKey:   "review",
+		Role:            "reviewer",
+		ActionClass:     "analysis",
+		ActionKey:       "review",
+		MutationMode:    "read_only",
+		Status:          "queued",
+		ConvergenceMode: "review_gate",
+		ArtifactTarget:  "report",
+		Executor:        "codex",
+		DetailsJSON:     `{"objective":"Review bid diff","swarm":{"requested_budget":1,"max_children":1}}`,
+	})
+	if err != nil {
+		t.Fatalf("CreateDelegation() error = %v", err)
+	}
+	childTask, err := env.store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:    env.projectID,
+		Key:          "alpha-review-child",
+		Title:        "Review child task",
+		Status:       "running",
+		Scope:        "project",
+		RequestedBy:  "supervisor",
+		WorkspaceID:  &env.workspaceID,
+		InitiativeID: &env.initiativeID,
+		CompanionID:  &env.companionID,
+		WorkKind:     "swarm_child",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask(child) error = %v", err)
+	}
+	childRun, err := env.store.StartRun(ctx, sqlite.StartRunParams{
+		TaskID:   childTask.ID,
+		Executor: "codex",
+		Attempt:  1,
+		Status:   "running",
+	})
+	if err != nil {
+		t.Fatalf("StartRun(child) error = %v", err)
+	}
+	if _, err := env.store.AttachDelegationChildTask(ctx, sqlite.AttachDelegationChildTaskParams{
+		DelegationID: delegation.ID,
+		ChildTaskID:  childTask.ID,
+		ChildRunID:   &childRun.ID,
+	}); err != nil {
+		t.Fatalf("AttachDelegationChildTask() error = %v", err)
+	}
+
+	view, err := Service{
+		Store:            env.store,
+		RegistrySnapshot: env.snapshot,
+	}.Build(ctx, scope.Resolution{Kind: scope.ScopeGlobal})
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+
+	if len(view.Observability.Incidents) != 1 {
+		t.Fatalf("Incidents len = %d, want 1", len(view.Observability.Incidents))
+	}
+	if len(view.Observability.Recoveries) != 1 {
+		t.Fatalf("Recoveries len = %d, want 1", len(view.Observability.Recoveries))
+	}
+	if len(view.CompanionSwarms) != 1 {
+		t.Fatalf("Companion swarms len = %d, want 1", len(view.CompanionSwarms))
+	}
+	if view.CompanionSwarms[0].ParentTaskKey != "alpha-task" {
+		t.Fatalf("Companion swarm parent task = %q, want alpha-task", view.CompanionSwarms[0].ParentTaskKey)
+	}
+	if view.CompanionSwarms[0].CompanionKey == nil || *view.CompanionSwarms[0].CompanionKey != "primary" {
+		t.Fatalf("Companion swarm companion = %v, want primary", view.CompanionSwarms[0].CompanionKey)
+	}
+	if view.CompanionSwarms[0].ActiveChildRunCount != 1 {
+		t.Fatalf("Companion swarm active child runs = %d, want 1", view.CompanionSwarms[0].ActiveChildRunCount)
+	}
+}
+
 type overviewTestEnvironment struct {
-	store    *sqlite.Store
-	snapshot registry.Snapshot
-	taskID   int64
-	runID    int64
+	store        *sqlite.Store
+	snapshot     registry.Snapshot
+	workspaceID  int64
+	projectID    int64
+	initiativeID int64
+	companionID  int64
+	taskID       int64
+	runID        int64
 }
 
 func newOverviewTestEnvironment(t *testing.T) overviewTestEnvironment {
@@ -386,9 +498,13 @@ func newOverviewTestEnvironment(t *testing.T) overviewTestEnvironment {
 	}
 
 	return overviewTestEnvironment{
-		store:    store,
-		snapshot: snapshot,
-		taskID:   task.ID,
-		runID:    run.ID,
+		store:        store,
+		snapshot:     snapshot,
+		workspaceID:  workspace.ID,
+		projectID:    project.ID,
+		initiativeID: initiative.ID,
+		companionID:  companion.ID,
+		taskID:       task.ID,
+		runID:        run.ID,
 	}
 }

@@ -29,6 +29,111 @@ func RenderOverview(view overview.View) string {
 	))
 
 	lines = append(lines, "")
+	lines = append(lines, "Attention")
+	lines = append(lines, fmt.Sprintf(
+		"  approvals=%d incidents=%d blocked_work=%d recoveries=%d blocked_swarms=%d",
+		len(view.Approvals),
+		len(view.Observability.Incidents),
+		len(view.Observability.BlockedWork),
+		len(view.Observability.Recoveries),
+		countBlockedSwarms(view.CompanionSwarms),
+	))
+	if len(view.Approvals) == 0 && len(view.Observability.Incidents) == 0 && len(view.Observability.BlockedWork) == 0 && len(view.Observability.Recoveries) == 0 && countBlockedSwarms(view.CompanionSwarms) == 0 {
+		lines = append(lines, "  none")
+	} else {
+		for _, approval := range view.Approvals {
+			lines = append(lines, fmt.Sprintf(
+				"  approval work_item=%s project=%s companion=%s status=%s requested_at=%s",
+				valueOrNone(approval.WorkItemKey),
+				valueOrNone(approval.ProjectKey),
+				valueOrNone(ptrValue(approval.CompanionKey)),
+				valueOrNone(approval.Status),
+				valueOrNone(approval.RequestedAt),
+			))
+		}
+		for _, incident := range view.Observability.Incidents {
+			lines = append(lines, fmt.Sprintf(
+				"  incident work_item=%s project=%s companion=%s severity=%s status=%s summary=%s",
+				valueOrNone(incident.WorkItemKey),
+				valueOrNone(incident.ProjectKey),
+				valueOrNone(ptrValue(incident.CompanionKey)),
+				valueOrNone(incident.Severity),
+				valueOrNone(incident.Status),
+				valueOrNone(incident.Summary),
+			))
+		}
+		for _, blocked := range view.Observability.BlockedWork {
+			lines = append(lines, fmt.Sprintf(
+				"  blocked work_item=%s project=%s companion=%s source=%s reason=%s",
+				valueOrNone(blocked.WorkItemKey),
+				valueOrNone(blocked.ProjectKey),
+				valueOrNone(ptrValue(blocked.CompanionKey)),
+				valueOrNone(blocked.Source),
+				valueOrNone(blocked.Reason),
+			))
+		}
+		for _, recovery := range view.Observability.Recoveries {
+			lines = append(lines, fmt.Sprintf(
+				"  recovery run=%d status=%s strategy=%s started_at=%s",
+				recovery.RunID,
+				valueOrNone(recovery.Status),
+				valueOrNone(recovery.Strategy),
+				valueOrNone(recovery.StartedAt),
+			))
+		}
+		for _, swarm := range view.CompanionSwarms {
+			if strings.TrimSpace(swarm.BlockedReason) == "" {
+				continue
+			}
+			lines = append(lines, fmt.Sprintf(
+				"  blocked_swarm=%s project=%s companion=%s reason=%s backlog=%d",
+				valueOrNone(swarm.ParentTaskKey),
+				valueOrNone(swarm.ProjectKey),
+				valueOrNone(ptrValue(swarm.CompanionKey)),
+				valueOrNone(swarm.BlockedReason),
+				swarm.BacklogCount,
+			))
+		}
+	}
+
+	lines = append(lines, "")
+	lines = append(lines, "Active Execution")
+	lines = append(lines, fmt.Sprintf(
+		"  runs=%d swarms=%d",
+		len(view.Observability.ActiveRuns),
+		len(view.CompanionSwarms),
+	))
+	if len(view.Observability.ActiveRuns) == 0 && len(view.CompanionSwarms) == 0 {
+		lines = append(lines, "  none")
+	} else {
+		for _, run := range view.Observability.ActiveRuns {
+			lines = append(lines, fmt.Sprintf(
+				"  run=%d work_item=%s project=%s initiative=%s companion=%s executor=%s status=%s attempt=%d",
+				run.RunID,
+				valueOrNone(run.WorkItemKey),
+				valueOrNone(run.ProjectKey),
+				valueOrNone(ptrValue(run.InitiativeKey)),
+				valueOrNone(ptrValue(run.CompanionKey)),
+				valueOrNone(run.Executor),
+				valueOrNone(run.Status),
+				run.Attempt,
+			))
+		}
+		for _, swarm := range view.CompanionSwarms {
+			lines = append(lines, fmt.Sprintf(
+				"  swarm=%s project=%s companion=%s status=%s active_children=%d backlog=%d blocked_reason=%s",
+				valueOrNone(swarm.ParentTaskKey),
+				valueOrNone(swarm.ProjectKey),
+				valueOrNone(ptrValue(swarm.CompanionKey)),
+				valueOrNone(swarm.Status),
+				swarm.ActiveChildRunCount,
+				swarm.BacklogCount,
+				valueOrNone(swarm.BlockedReason),
+			))
+		}
+	}
+
+	lines = append(lines, "")
 	lines = append(lines, "Initiatives")
 	if len(view.Initiatives) == 0 {
 		lines = append(lines, "  none")
@@ -58,10 +163,11 @@ func RenderOverview(view overview.View) string {
 	} else {
 		for _, item := range view.WorkItems {
 			lines = append(lines, fmt.Sprintf(
-				"  %s title=%s initiative=%s status=%s scope=%s project=%s current_run=%s run_status=%s",
+				"  %s title=%s initiative=%s companion=%s status=%s scope=%s project=%s current_run=%s run_status=%s",
 				valueOrNone(item.WorkItemKey),
 				valueOrNone(item.Title),
 				valueOrNone(ptrValue(item.InitiativeKey)),
+				valueOrNone(ptrValue(item.CompanionKey)),
 				valueOrNone(item.Status),
 				valueOrNone(item.Scope),
 				valueOrNone(item.ProjectKey),
@@ -75,8 +181,9 @@ func RenderOverview(view overview.View) string {
 			}
 			for _, run := range item.RunAttempts {
 				lines = append(lines, fmt.Sprintf(
-					"      run=%d executor=%s status=%s attempt=%d",
+					"      run=%d companion=%s executor=%s status=%s attempt=%d",
 					run.RunID,
+					valueOrNone(ptrValue(run.CompanionKey)),
 					valueOrNone(run.Executor),
 					valueOrNone(run.Status),
 					run.Attempt,
@@ -126,9 +233,11 @@ func RenderOverview(view overview.View) string {
 	} else {
 		for _, approval := range view.Approvals {
 			lines = append(lines, fmt.Sprintf(
-				"  approval=%d work_item=%s status=%s requested_at=%s",
+				"  approval=%d work_item=%s project=%s companion=%s status=%s requested_at=%s",
 				approval.ApprovalID,
 				valueOrNone(approval.WorkItemKey),
+				valueOrNone(approval.ProjectKey),
+				valueOrNone(ptrValue(approval.CompanionKey)),
 				valueOrNone(approval.Status),
 				valueOrNone(approval.RequestedAt),
 			))
@@ -152,10 +261,12 @@ func RenderOverview(view overview.View) string {
 	}
 	for _, run := range view.Observability.ActiveRuns {
 		lines = append(lines, fmt.Sprintf(
-			"    run=%d work_item=%s project=%s executor=%s status=%s attempt=%d",
+			"    run=%d work_item=%s project=%s initiative=%s companion=%s executor=%s status=%s attempt=%d",
 			run.RunID,
 			valueOrNone(run.WorkItemKey),
 			valueOrNone(run.ProjectKey),
+			valueOrNone(ptrValue(run.InitiativeKey)),
+			valueOrNone(ptrValue(run.CompanionKey)),
 			valueOrNone(run.Executor),
 			valueOrNone(run.Status),
 			run.Attempt,
@@ -167,11 +278,42 @@ func RenderOverview(view overview.View) string {
 	}
 	for _, blocked := range view.Observability.BlockedWork {
 		lines = append(lines, fmt.Sprintf(
-			"    blocked=%s project=%s source=%s reason=%s",
+			"    blocked=%s project=%s companion=%s source=%s reason=%s",
 			valueOrNone(blocked.WorkItemKey),
 			valueOrNone(blocked.ProjectKey),
+			valueOrNone(ptrValue(blocked.CompanionKey)),
 			valueOrNone(blocked.Source),
 			valueOrNone(blocked.Reason),
+		))
+	}
+	lines = append(lines, "  Incidents")
+	if len(view.Observability.Incidents) == 0 {
+		lines = append(lines, "    none")
+	}
+	for _, incident := range view.Observability.Incidents {
+		lines = append(lines, fmt.Sprintf(
+			"    incident=%d work_item=%s project=%s companion=%s severity=%s status=%s summary=%s",
+			incident.IncidentID,
+			valueOrNone(incident.WorkItemKey),
+			valueOrNone(incident.ProjectKey),
+			valueOrNone(ptrValue(incident.CompanionKey)),
+			valueOrNone(incident.Severity),
+			valueOrNone(incident.Status),
+			valueOrNone(incident.Summary),
+		))
+	}
+	lines = append(lines, "  Recoveries")
+	if len(view.Observability.Recoveries) == 0 {
+		lines = append(lines, "    none")
+	}
+	for _, recovery := range view.Observability.Recoveries {
+		lines = append(lines, fmt.Sprintf(
+			"    recovery=%d run=%d status=%s strategy=%s started_at=%s",
+			recovery.RecoveryID,
+			recovery.RunID,
+			valueOrNone(recovery.Status),
+			valueOrNone(recovery.Strategy),
+			valueOrNone(recovery.StartedAt),
 		))
 	}
 
@@ -219,6 +361,16 @@ func RenderOverview(view overview.View) string {
 	lines = append(lines, "  agent -> agent definition or worker alias")
 
 	return strings.Join(lines, "\n")
+}
+
+func countBlockedSwarms(swarms []overview.CompanionSwarmSummary) int {
+	count := 0
+	for _, swarm := range swarms {
+		if strings.TrimSpace(swarm.BlockedReason) != "" {
+			count++
+		}
+	}
+	return count
 }
 
 func ptrValue(value *string) string {
