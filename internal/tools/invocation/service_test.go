@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"odin-os/internal/adapters/browserhuman"
+	"odin-os/internal/adapters/web"
 	"odin-os/internal/store/sqlite"
 )
 
@@ -83,6 +84,42 @@ printf '{"status":"completed","tool_key":"huginn_browser_session","summary":"ok"
 	}
 	if got := result.Artifacts["session_state"]; got != "ready" {
 		t.Fatalf("Artifacts.session_state = %#v, want ready", got)
+	}
+}
+
+func TestServiceRobinhoodTransferPreservesStructuredArtifacts(t *testing.T) {
+	script := writeFixtureDriver(t, `#!/usr/bin/env bash
+printf '{"status":"completed","tool_key":"robinhood_transfer_flow","summary":"Robinhood continuity check failed","artifacts":{"session_state":"resume_verification_failed","prior_session_state":"session_expired","evidence":["driver invoked"]}}'
+`)
+	t.Setenv("ODIN_HUGINN_ROBINHOOD_TRANSFER_DRIVER", script)
+
+	service := Service{}
+	result, err := service.RobinhoodTransfer(context.Background(), web.RobinhoodTransferRequest{
+		Input: web.RobinhoodTransferInput{
+			Mode:               "submit",
+			Direction:          "deposit",
+			AmountUSD:          "25.00",
+			SourceAccount:      "checking",
+			DestinationAccount: "brokerage",
+			ResumeFacts: map[string]string{
+				"expected_review_state": "review_ready",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("RobinhoodTransfer() error = %v", err)
+	}
+	if result.ToolKey != "robinhood_transfer_flow" {
+		t.Fatalf("ToolKey = %q, want robinhood_transfer_flow", result.ToolKey)
+	}
+	if result.RawOutput != `{"status":"completed","tool_key":"robinhood_transfer_flow","summary":"Robinhood continuity check failed","artifacts":{"session_state":"resume_verification_failed","prior_session_state":"session_expired","evidence":["driver invoked"]}}` {
+		t.Fatalf("RawOutput = %q, want exact driver stdout", result.RawOutput)
+	}
+	if got := result.Artifacts["session_state"]; got != "resume_verification_failed" {
+		t.Fatalf("Artifacts.session_state = %#v, want resume_verification_failed", got)
+	}
+	if got := result.Artifacts["prior_session_state"]; got != "session_expired" {
+		t.Fatalf("Artifacts.prior_session_state = %#v, want session_expired", got)
 	}
 }
 

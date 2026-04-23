@@ -28,6 +28,18 @@ type RunRecord struct {
 	FinishedAt *string
 }
 
+type Detail struct {
+	RunID      int64
+	TaskID     int64
+	TaskKey    string
+	ProjectKey string
+	Executor   string
+	Status     string
+	Attempt    int
+	Summary    string
+	Artifacts  []sqlite.RunArtifact
+}
+
 func (service Service) List(ctx context.Context, resolved scope.Resolution) ([]projections.RunSummaryView, error) {
 	db := service.DB
 	if db == nil && service.Store != nil {
@@ -120,6 +132,61 @@ func (service Service) GetRun(ctx context.Context, runID int64) (RunRecord, erro
 		record.FinishedAt = &finishedAt.String
 	}
 	return record, nil
+}
+
+func (service Service) Show(ctx context.Context, resolved scope.Resolution, runID int64) (Detail, error) {
+	db := service.DB
+	if db == nil && service.Store != nil {
+		db = service.Store.DB()
+	}
+	if db == nil {
+		return Detail{}, fmt.Errorf("run store is required")
+	}
+
+	row := db.QueryRowContext(ctx, `
+		SELECT
+			r.id,
+			r.task_id,
+			t.key,
+			p.key,
+			r.executor,
+			r.status,
+			r.attempt,
+			r.summary,
+			t.scope
+		FROM runs r
+		JOIN tasks t ON t.id = r.task_id
+		JOIN projects p ON p.id = t.project_id
+		WHERE r.id = ?
+	`, runID)
+
+	var detail Detail
+	var taskScope string
+	if err := row.Scan(
+		&detail.RunID,
+		&detail.TaskID,
+		&detail.TaskKey,
+		&detail.ProjectKey,
+		&detail.Executor,
+		&detail.Status,
+		&detail.Attempt,
+		&detail.Summary,
+		&taskScope,
+	); err != nil {
+		return Detail{}, err
+	}
+	if !matchesRunScope(detail.ProjectKey, taskScope, resolved) {
+		return Detail{}, fmt.Errorf("run %d is outside the current scope", runID)
+	}
+	if service.Store != nil {
+		artifacts, err := service.Store.ListRunArtifacts(ctx, sqlite.ListRunArtifactsParams{RunID: runID})
+		if err != nil {
+			return Detail{}, err
+		}
+		detail.Artifacts = artifacts
+	}
+
+	return detail, nil
 }
 
 func (service Service) GetRunEnvelope(ctx context.Context, runID int64) (capabilities.RunEnvelope, error) {

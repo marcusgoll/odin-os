@@ -11,6 +11,7 @@ import (
 	stdhttp "net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -32,6 +33,7 @@ import (
 	"odin-os/internal/core/followups"
 	"odin-os/internal/core/initiatives"
 	"odin-os/internal/core/projects"
+	approvalsvc "odin-os/internal/runtime/approvals"
 	"odin-os/internal/core/workspaces"
 	"odin-os/internal/executors/contract"
 	executorrouter "odin-os/internal/executors/router"
@@ -363,8 +365,40 @@ func runApprovals(ctx context.Context, app bootstrap.App, args []string, stdout 
 	if err != nil {
 		return err
 	}
+	if len(remaining) > 0 && strings.EqualFold(remaining[0], "resolve") {
+		if jsonOutput {
+			return fmt.Errorf("usage: odin approvals resolve <approval-id> <approve|deny> <reason...>")
+		}
+		if len(remaining) < 4 {
+			return fmt.Errorf("usage: odin approvals resolve <approval-id> <approve|deny> <reason...>")
+		}
+
+		approvalID, err := strconv.ParseInt(remaining[1], 10, 64)
+		if err != nil || approvalID <= 0 {
+			return fmt.Errorf("approval id must be a positive integer")
+		}
+
+		result, err := approvalsvc.Service{Store: app.Store}.Resolve(ctx, approvalsvc.ResolveParams{
+			ApprovalID: approvalID,
+			Action:     strings.ToLower(strings.TrimSpace(remaining[2])),
+			DecisionBy: "operator",
+			Reason:     strings.Join(remaining[3:], " "),
+		})
+		if err != nil {
+			return err
+		}
+		receipt, err := approvalsvc.FormatReceipt(result)
+		if err != nil {
+			return err
+		}
+		if _, err := fmt.Fprintln(stdout, receipt.Line); err != nil {
+			return err
+		}
+		_, err = fmt.Fprintln(stdout, receipt.Summary)
+		return err
+	}
 	if len(remaining) != 0 {
-		return fmt.Errorf("usage: odin approvals [--json]")
+		return fmt.Errorf("usage: odin approvals [resolve <approval-id> <approve|deny> <reason...>] [--json]")
 	}
 
 	state, err := loadCLIState(app)

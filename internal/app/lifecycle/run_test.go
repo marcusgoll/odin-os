@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,6 +14,7 @@ import (
 	"odin-os/internal/app/bootstrap"
 	"odin-os/internal/core/capabilities"
 	"odin-os/internal/runtime/supervision"
+	"odin-os/internal/store/sqlite"
 	"odin-os/internal/vcs/worktrees"
 )
 
@@ -144,6 +146,121 @@ func TestRunProjectSelectPersistsSession(t *testing.T) {
 	}
 	if !strings.Contains(string(sessionBytes), "\"project_key\": \""+testProjectKey+"\"") {
 		t.Fatalf("session = %q, want alpha project selection", string(sessionBytes))
+	}
+}
+
+func TestRunApprovalsResolveApproveStartsContinuationRun(t *testing.T) {
+	t.Parallel()
+
+	root := createRuntimeRoot(t)
+	approvalID, taskID, prepareRunID := seedPendingApprovalRuntime(t, root)
+
+	var stdout bytes.Buffer
+	args := []string{"approvals", "resolve", fmt.Sprintf("%d", approvalID), "approve", "final", "confirmation"}
+	if err := Run(context.Background(), root, args, strings.NewReader(""), &stdout); err != nil {
+		t.Fatalf("Run(%v) error = %v", args, err)
+	}
+
+	output := stdout.String()
+	for _, want := range []string{
+		fmt.Sprintf("approval=%d", approvalID),
+		"status=resolved",
+		"result=approved",
+		"run=",
+		"summary=approval granted; submit continuation started",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("output = %q, want substring %q", output, want)
+		}
+	}
+	if strings.Contains(output, "final confirmation") {
+		t.Fatalf("output = %q, want compact output without echoed reason", output)
+	}
+
+	store, err := sqlite.Open(filepath.Join(root, "data", "odin.db"))
+	if err != nil {
+		t.Fatalf("sqlite.Open() error = %v", err)
+	}
+	defer store.Close()
+
+	approval, err := store.GetApproval(context.Background(), approvalID)
+	if err != nil {
+		t.Fatalf("GetApproval() error = %v", err)
+	}
+	if approval.Status != "approved" {
+		t.Fatalf("approval.Status = %q, want %q", approval.Status, "approved")
+	}
+
+	runIDs := listRuntimeTaskRunIDs(t, root, taskID)
+	if len(runIDs) != 2 {
+		t.Fatalf("task run count = %d, want 2", len(runIDs))
+	}
+	if runIDs[1] == prepareRunID {
+		t.Fatalf("continuation run reused prepare run id %d", runIDs[1])
+	}
+	if !strings.Contains(output, fmt.Sprintf("run=%d", runIDs[1])) {
+		t.Fatalf("output = %q, want continuation run id %d", output, runIDs[1])
+	}
+}
+
+func TestRunApprovalsResolveDenyKeepsReceiptCompact(t *testing.T) {
+	t.Parallel()
+
+	root := createRuntimeRoot(t)
+	approvalID, taskID, prepareRunID := seedPendingApprovalRuntime(t, root)
+
+	var stdout bytes.Buffer
+	args := []string{"approvals", "resolve", fmt.Sprintf("%d", approvalID), "deny", "amount", "is", "wrong"}
+	if err := Run(context.Background(), root, args, strings.NewReader(""), &stdout); err != nil {
+		t.Fatalf("Run(%v) error = %v", args, err)
+	}
+
+	output := stdout.String()
+	for _, want := range []string{
+		fmt.Sprintf("approval=%d", approvalID),
+		"status=resolved",
+		"result=denied",
+		"summary=approval denied; later retry requires fresh prepare",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("output = %q, want substring %q", output, want)
+		}
+	}
+	if strings.Contains(output, "run=") {
+		t.Fatalf("output = %q, want no run handle on deny", output)
+	}
+	if strings.Contains(output, "amount is wrong") {
+		t.Fatalf("output = %q, want compact output without echoed reason", output)
+	}
+
+	store, err := sqlite.Open(filepath.Join(root, "data", "odin.db"))
+	if err != nil {
+		t.Fatalf("sqlite.Open() error = %v", err)
+	}
+	defer store.Close()
+
+	approval, err := store.GetApproval(context.Background(), approvalID)
+	if err != nil {
+		t.Fatalf("GetApproval() error = %v", err)
+	}
+	if approval.Status != "denied" {
+		t.Fatalf("approval.Status = %q, want %q", approval.Status, "denied")
+	}
+
+	task, err := store.GetTask(context.Background(), taskID)
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
+	}
+	if task.TerminalReason != "operator_denied" {
+		t.Fatalf("task.TerminalReason = %q, want %q", task.TerminalReason, "operator_denied")
+	}
+
+	runIDs := listRuntimeTaskRunIDs(t, root, taskID)
+	if len(runIDs) != 1 {
+		t.Fatalf("task run count = %d, want 1", len(runIDs))
+	}
+	if runIDs[0] != prepareRunID {
+		t.Fatalf("remaining run id = %d, want %d", runIDs[0], prepareRunID)
 	}
 }
 
@@ -648,6 +765,98 @@ service:
 	runGitIn(filepath.Join(root, "alpha"), "commit", "-m", "alpha fixture")
 
 	return root
+}
+
+func seedPendingApprovalRuntime(t *testing.T, root string) (int64, int64, int64) {
+	t.Helper()
+
+	if err := os.MkdirAll(filepath.Join(root, "data"), 0o755); err != nil {
+		t.Fatalf("mkdir data: %v", err)
+	}
+
+	store, err := sqlite.Open(filepath.Join(root, "data", "odin.db"))
+	if err != nil {
+		t.Fatalf("sqlite.Open() error = %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
+	}
+
+	project, err := store.CreateProject(ctx, sqlite.CreateProjectParams{
+		Key:           "alpha",
+		Name:          "Alpha",
+		Scope:         "project",
+		GitRoot:       filepath.Join(root, "repos", "alpha"),
+		DefaultBranch: "main",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+	task, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "finance-transfer-review",
+		Title:       "Prepare Robinhood transfer review",
+		Status:      "blocked",
+		Scope:       "project",
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+	run, err := store.StartRun(ctx, sqlite.StartRunParams{
+		TaskID:   task.ID,
+		Executor: "codex_headless",
+		Attempt:  1,
+		Status:   "blocked",
+	})
+	if err != nil {
+		t.Fatalf("StartRun() error = %v", err)
+	}
+	approval, err := store.RequestApproval(ctx, sqlite.RequestApprovalParams{
+		TaskID:      task.ID,
+		RunID:       &run.ID,
+		Status:      "pending",
+		RequestedBy: "system",
+	})
+	if err != nil {
+		t.Fatalf("RequestApproval() error = %v", err)
+	}
+
+	return approval.ID, task.ID, run.ID
+}
+
+func listRuntimeTaskRunIDs(t *testing.T, root string, taskID int64) []int64 {
+	t.Helper()
+
+	store, err := sqlite.Open(filepath.Join(root, "data", "odin.db"))
+	if err != nil {
+		t.Fatalf("sqlite.Open() error = %v", err)
+	}
+	defer store.Close()
+
+	rows, err := store.DB().QueryContext(context.Background(), `SELECT id FROM runs WHERE task_id = ? ORDER BY id ASC`, taskID)
+	if err != nil {
+		t.Fatalf("QueryContext(runs) error = %v", err)
+	}
+	defer rows.Close()
+
+	var runIDs []int64
+	for rows.Next() {
+		var runID int64
+		if err := rows.Scan(&runID); err != nil {
+			t.Fatalf("rows.Scan() error = %v", err)
+		}
+		runIDs = append(runIDs, runID)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("rows.Err() error = %v", err)
+	}
+
+	return runIDs
 }
 
 func cleanupTaskRunWorktree(t *testing.T, projectKey string) {

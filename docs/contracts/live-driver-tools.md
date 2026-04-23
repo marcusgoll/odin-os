@@ -12,17 +12,20 @@ date: 2026-04-16
 
 - `ODIN_GOOGLE_CALENDAR_DRIVER`
 - `ODIN_HUGINN_DRIVER`
+- `ODIN_HUGINN_ROBINHOOD_TRANSFER_DRIVER`
 
 These env vars should point to executable commands. The repo-local driver scripts are:
 
 - `scripts/drivers/google-calendar-off-dates.sh`
 - `scripts/drivers/huginn-pbs-session.sh`
+- `scripts/drivers/robinhood-transfer-flow.sh`
 
 Example:
 
 ```bash
 export ODIN_GOOGLE_CALENDAR_DRIVER="/home/orchestrator/odin-os/scripts/drivers/google-calendar-off-dates.sh"
 export ODIN_HUGINN_DRIVER="/home/orchestrator/odin-os/scripts/drivers/huginn-pbs-session.sh"
+export ODIN_HUGINN_ROBINHOOD_TRANSFER_DRIVER="/home/orchestrator/odin-os/scripts/drivers/robinhood-transfer-flow.sh"
 ```
 
 ## Repo-local libraries
@@ -78,3 +81,24 @@ Both drivers return one JSON response on stdout with:
 - `tool_key`
 - `summary`
 - `artifacts`
+
+## Robinhood transfer proof boundary
+
+The Robinhood transfer lane has two separate proof modes:
+
+- deterministic shell proof for CI and local verification
+- principal-attended live Robinhood use for real Marcus transfers
+
+Deterministic shell proof uses `ODIN_HUGINN_ROBINHOOD_TRANSFER_DRIVER` with a fixture command and runs through the real repo-owned `./bin/odin repl` surface. The focused proof target is:
+
+```bash
+go test ./tests/integration -run 'TestRobinhoodTransferShellFlowDeterministic|TestRobinhoodTransferFlowScript' -count=1
+```
+
+Attended live Robinhood use should point `ODIN_HUGINN_ROBINHOOD_TRANSFER_DRIVER` at the repo-local script:
+
+```bash
+export ODIN_HUGINN_ROBINHOOD_TRANSFER_DRIVER="/home/orchestrator/odin-os/scripts/drivers/robinhood-transfer-flow.sh"
+```
+
+Use [Marcus Robinhood Live Transfer Runbook](../operations/marcus-robinhood-live-transfer-runbook.md) for the operator-attended command sequence and the current `family-ops` registry-alignment caveat.

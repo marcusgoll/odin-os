@@ -205,7 +205,7 @@ projects:
 			t.Fatalf("runOdinCommand(followup list one-time) error = %v\n%s", err, snoozeListOutput)
 		}
 		snoozeID := followUpIDFromJSON(t, snoozeListOutput, "Archive receipts")
-		until := time.Date(2026, 4, 20, 9, 0, 0, 0, time.UTC).Format(time.RFC3339)
+		until := time.Now().UTC().Add(24 * time.Hour).Format(time.RFC3339)
 		snoozeOutput, err := runOdinCommand(t, repoRoot, odinBinary, runtimeRoot, nil, "", "followup", "snooze", strconv.FormatInt(snoozeID, 10), "--until", until)
 		if err != nil {
 			t.Fatalf("runOdinCommand(followup snooze) error = %v\n%s", err, snoozeOutput)

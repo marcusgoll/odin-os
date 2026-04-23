@@ -23,12 +23,16 @@ import (
 	"odin-os/internal/executors/contract"
 	executorrouter "odin-os/internal/executors/router"
 	"odin-os/internal/registry"
+	approvalsvc "odin-os/internal/runtime/approvals"
+	checkpointsvc "odin-os/internal/runtime/checkpoints"
 	convsvc "odin-os/internal/runtime/conversation"
 	healthsvc "odin-os/internal/runtime/health"
 	jobsvc "odin-os/internal/runtime/jobs"
 	"odin-os/internal/runtime/projections"
 	runsvc "odin-os/internal/runtime/runs"
+	transfersvc "odin-os/internal/runtime/transfers"
 	"odin-os/internal/store/sqlite"
+	"odin-os/internal/tools/invocation"
 	"odin-os/internal/vcs/leases"
 	"odin-os/internal/vcs/worktrees"
 )
@@ -43,6 +47,7 @@ type Environment struct {
 	CommandService      CommandExecutor
 	ExecutorConfig      executorrouter.Config
 	Executors           map[string]contract.Executor
+	TransferInvocation  invocation.Service
 	Leases              leases.Manager
 	Now                 func() time.Time
 }
@@ -56,9 +61,11 @@ type Shell struct {
 	state          State
 	capabilities   capabilityGateway
 	commandService CommandExecutor
+	approvals      approvalsvc.Service
 	health         healthsvc.Service
 	jobs           jobsvc.Service
 	runs           runsvc.Service
+	transfers      transfersvc.Service
 	transitions    projects.Service
 	conversation   convsvc.Service
 	worktrees      worktrees.Manager
@@ -92,6 +99,10 @@ func New(env Environment) (*Shell, error) {
 	shell := &Shell{
 		env:   env,
 		state: state,
+		approvals: approvalsvc.Service{
+			Store:      env.Store,
+			Invocation: env.TransferInvocation,
+		},
 		health: healthsvc.Service{
 			DB: env.Store.DB(),
 		},
@@ -107,6 +118,12 @@ func New(env Environment) (*Shell, error) {
 		runs: runsvc.Service{
 			DB:    env.Store.DB(),
 			Store: env.Store,
+		},
+		transfers: transfersvc.Service{
+			Store:       env.Store,
+			Registry:    env.Registry,
+			Checkpoints: checkpointsvc.Service{Store: env.Store},
+			Invocation:  env.TransferInvocation,
 		},
 		transitions: projects.Service{
 			Store: env.Store,
@@ -230,10 +247,10 @@ func (shell *Shell) handleCommand(ctx context.Context, command commands.Command,
 		if _, err := fmt.Fprintln(output, "prefer explicit cli commands outside the repl: odin help | odin status --json | odin task run --project <key> --title <title> | odin repl"); err != nil {
 			return err
 		}
-		if _, err := fmt.Fprintln(output, "/help /mode /scope /memory /workspace /initiatives /companions /agenda /project /transition /observe /compare /jobs /runs /approvals /logs /doctor /doctor json /doctor report /self"); err != nil {
+		if _, err := fmt.Fprintln(output, "/help /mode /scope /memory /workspace /initiatives /companions /agenda /project /transition /observe /compare /jobs /runs /approvals /transfer /logs /doctor /doctor json /doctor report /self"); err != nil {
 			return err
 		}
-		if _, err := fmt.Fprintln(output, "repl compatibility commands: /help /mode /scope /memory /project /transition /observe /compare /status /stat /capabilities /leases /jobs /runs /approvals /agenda /logs /doctor /doctor json /doctor report /self /quit"); err != nil {
+		if _, err := fmt.Fprintln(output, "repl compatibility commands: /help /mode /scope /memory /project /transition /observe /compare /status /stat /capabilities /leases /jobs /runs /approvals /agenda /transfer /logs /doctor /doctor json /doctor report /self /quit"); err != nil {
 			return err
 		}
 		if _, err := fmt.Fprintf(output, "%s\n", transitionUsage); err != nil {
@@ -268,9 +285,11 @@ func (shell *Shell) handleCommand(ctx context.Context, command commands.Command,
 	case "jobs":
 		return shell.handleJobs(ctx, output)
 	case "runs":
-		return shell.handleRuns(ctx, output)
+		return shell.handleRuns(ctx, command.Args, output)
 	case "approvals":
-		return shell.handleApprovals(ctx, output)
+		return shell.handleApprovals(ctx, command.Args, output)
+	case "transfer":
+		return shell.handleTransfer(ctx, command.Args, output)
 	case "logs":
 		return shell.handleLogs(ctx, output)
 	case "doctor":
@@ -327,7 +346,7 @@ func (shell *Shell) handleAsk(ctx context.Context, line string, output io.Writer
 			_, err = fmt.Fprintln(output, result.Answer)
 			return err
 		}
-		_, err := fmt.Fprintln(output, "local ask is limited in Phase 05. Try /help, /scope, /memory, /workspace, /initiatives, /companions, /agenda, /project, /jobs, /runs, /approvals, /logs, or /doctor.")
+		_, err := fmt.Fprintln(output, "local ask is limited in Phase 05. Try /help, /scope, /memory, /workspace, /initiatives, /companions, /agenda, /project, /jobs, /runs, /approvals, /transfer, /logs, or /doctor.")
 		return err
 	}
 }
@@ -838,7 +857,15 @@ func (shell *Shell) handleJobs(ctx context.Context, output io.Writer) error {
 	return nil
 }
 
-func (shell *Shell) handleRuns(ctx context.Context, output io.Writer) error {
+func (shell *Shell) handleRuns(ctx context.Context, args []string, output io.Writer) error {
+	if len(args) > 0 {
+		if strings.EqualFold(args[0], "show") {
+			return shell.handleRunShow(ctx, args[1:], output)
+		}
+		_, err := fmt.Fprintln(output, "usage: /runs | /runs show <run-id|active>")
+		return err
+	}
+
 	views, err := shell.runs.List(ctx, shell.state.Scope)
 	if err != nil {
 		return err
@@ -850,6 +877,60 @@ func (shell *Shell) handleRuns(ctx context.Context, output io.Writer) error {
 	for _, view := range views {
 		if _, err := fmt.Fprintf(output, "%s %s %s\n", view.TaskKey, view.Executor, view.Status); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+func (shell *Shell) handleRunShow(ctx context.Context, args []string, output io.Writer) error {
+	if len(args) != 1 {
+		_, err := fmt.Fprintln(output, "usage: /runs show <run-id|active>")
+		return err
+	}
+
+	var runID int64
+	if strings.EqualFold(args[0], "active") {
+		if strings.TrimSpace(shell.state.ActiveRun) == "" {
+			_, err := fmt.Fprintln(output, "no active run")
+			return err
+		}
+		parsed, err := strconv.ParseInt(shell.state.ActiveRun, 10, 64)
+		if err != nil || parsed <= 0 {
+			_, writeErr := fmt.Fprintln(output, "active run is invalid")
+			return writeErr
+		}
+		runID = parsed
+	} else {
+		parsed, err := strconv.ParseInt(args[0], 10, 64)
+		if err != nil || parsed <= 0 {
+			_, writeErr := fmt.Fprintln(output, "run id must be a positive integer")
+			return writeErr
+		}
+		runID = parsed
+	}
+
+	detail, err := shell.runs.Show(ctx, shell.state.Scope, runID)
+	if err != nil {
+		_, writeErr := fmt.Fprintf(output, "unable to show run: %v\n", err)
+		return writeErr
+	}
+
+	if _, err := fmt.Fprintf(output, "run=%d task=%s status=%s executor=%s\n", detail.RunID, detail.TaskKey, detail.Status, detail.Executor); err != nil {
+		return err
+	}
+	if strings.TrimSpace(detail.Summary) != "" {
+		if _, err := fmt.Fprintf(output, "summary=%s\n", detail.Summary); err != nil {
+			return err
+		}
+	}
+	for _, artifact := range detail.Artifacts {
+		if _, err := fmt.Fprintf(output, "artifact=%s summary=%s\n", artifact.ArtifactType, artifact.Summary); err != nil {
+			return err
+		}
+		if details := strings.TrimSpace(artifact.DetailsJSON); details != "" && details != "{}" {
+			if _, err := fmt.Fprintf(output, "details=%s\n", details); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
@@ -1044,19 +1125,16 @@ func (shell *Shell) handleCompanions(ctx context.Context, output io.Writer) erro
 	return nil
 }
 
-func (shell *Shell) handleAgenda(ctx context.Context, output io.Writer) error {
-	view, err := projections.GetAgendaView(ctx, shell.env.Store.DB(), workspaces.DefaultWorkspaceKey, shell.now().UTC())
-	if err != nil {
-		if err == sql.ErrNoRows {
-			_, writeErr := fmt.Fprintln(output, "no agenda items")
-			return writeErr
+func (shell *Shell) handleApprovals(ctx context.Context, args []string, output io.Writer) error {
+	if len(args) > 0 {
+		switch strings.ToLower(args[0]) {
+		case "resolve":
+			return shell.handleApprovalResolve(ctx, args[1:], output)
+		default:
+			_, err := fmt.Fprintln(output, "usage: /approvals | /approvals resolve <approval-id> <approve|deny> because <reason...>")
+			return err
 		}
-		return err
 	}
-	return commands.WriteAgendaText(output, view)
-}
-
-func (shell *Shell) handleApprovals(ctx context.Context, output io.Writer) error {
 	approvals, err := shell.pendingApprovals(ctx)
 	if err != nil {
 		return err
@@ -1071,6 +1149,120 @@ func (shell *Shell) handleApprovals(ctx context.Context, output io.Writer) error
 		}
 	}
 	return nil
+}
+
+func (shell *Shell) handleAgenda(ctx context.Context, output io.Writer) error {
+	view, err := projections.GetAgendaView(ctx, shell.env.Store.DB(), workspaces.DefaultWorkspaceKey, shell.now().UTC())
+	if err != nil {
+		if err == sql.ErrNoRows {
+			_, writeErr := fmt.Fprintln(output, "no agenda items")
+			return writeErr
+		}
+		return err
+	}
+	return commands.WriteAgendaText(output, view)
+}
+
+func (shell *Shell) handleApprovalResolve(ctx context.Context, args []string, output io.Writer) error {
+	if len(args) < 4 || !strings.EqualFold(args[2], "because") {
+		_, err := fmt.Fprintln(output, "usage: /approvals resolve <approval-id> <approve|deny> because <reason...>")
+		return err
+	}
+
+	approvalID, err := strconv.ParseInt(args[0], 10, 64)
+	if err != nil || approvalID <= 0 {
+		_, writeErr := fmt.Fprintln(output, "approval id must be a positive integer")
+		return writeErr
+	}
+
+	result, err := shell.approvals.Resolve(ctx, approvalsvc.ResolveParams{
+		ApprovalID: approvalID,
+		Action:     strings.ToLower(strings.TrimSpace(args[1])),
+		DecisionBy: "operator",
+		Reason:     strings.Join(args[3:], " "),
+	})
+	if err != nil {
+		_, writeErr := fmt.Fprintf(output, "unable to resolve approval: %v\n", err)
+		return writeErr
+	}
+	if result.SubmitRun != nil {
+		shell.state.ActiveRun = strconv.FormatInt(result.SubmitRun.ID, 10)
+		if err := shell.persistState(); err != nil {
+			return err
+		}
+	}
+
+	receipt, err := approvalsvc.FormatReceipt(result)
+	if err != nil {
+		_, writeErr := fmt.Fprintf(output, "unable to render approval receipt: %v\n", err)
+		return writeErr
+	}
+	if _, err := fmt.Fprintln(output, receipt.Line); err != nil {
+		return err
+	}
+	_, err = fmt.Fprintln(output, receipt.Summary)
+	return err
+}
+
+func (shell *Shell) handleTransfer(ctx context.Context, args []string, output io.Writer) error {
+	if len(args) == 0 || !strings.EqualFold(args[0], "prepare") {
+		_, err := fmt.Fprintln(output, "usage: /transfer prepare direction=<deposit|withdraw> amount_usd=<amount> source_account=<name> destination_account=<name> [memo=<text>]")
+		return err
+	}
+	if shell.state.Scope.Kind != scope.ScopeProject {
+		_, err := fmt.Fprintln(output, "select an initiative first with /project <initiative-key>")
+		return err
+	}
+
+	assignments, err := parseAssignments(args[1:])
+	if err != nil {
+		_, writeErr := fmt.Fprintf(output, "unable to parse transfer arguments: %v\n", err)
+		return writeErr
+	}
+
+	result, err := shell.transfers.Prepare(ctx, transfersvc.PrepareParams{
+		ProjectKey:         shell.state.Scope.ProjectKey,
+		Direction:          assignments["direction"],
+		AmountUSD:          assignments["amount_usd"],
+		SourceAccount:      assignments["source_account"],
+		DestinationAccount: assignments["destination_account"],
+		Memo:               assignments["memo"],
+	})
+	if err != nil {
+		_, writeErr := fmt.Fprintf(output, "unable to prepare transfer: %v\n", err)
+		return writeErr
+	}
+	shell.state.ActiveTask = result.Task.Key
+	shell.state.ActiveRun = strconv.FormatInt(result.Run.ID, 10)
+	if err := shell.persistState(); err != nil {
+		return err
+	}
+
+	if _, err := fmt.Fprintf(output, "task=%s run=%d approval=%d\n", result.Task.Key, result.Run.ID, result.Approval.ID); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(output, "summary=%s\n", result.Summary); err != nil {
+		return err
+	}
+	_, err = fmt.Fprintf(
+		output,
+		"next=/runs show %d; /approvals resolve %d <approve|deny> because <reason...>; then /runs show <submit-run-id from resolve output>\n",
+		result.Run.ID,
+		result.Approval.ID,
+	)
+	return err
+}
+
+func parseAssignments(args []string) (map[string]string, error) {
+	assignments := make(map[string]string, len(args))
+	for _, arg := range args {
+		key, value, ok := strings.Cut(arg, "=")
+		if !ok || strings.TrimSpace(key) == "" {
+			return nil, fmt.Errorf("arguments must be key=value")
+		}
+		assignments[strings.ToLower(strings.TrimSpace(key))] = strings.TrimSpace(value)
+	}
+	return assignments, nil
 }
 
 func (shell *Shell) handleLogs(ctx context.Context, output io.Writer) error {

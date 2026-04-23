@@ -159,6 +159,141 @@ func TestGetRunReturnsRunRecord(t *testing.T) {
 	}
 }
 
+func TestShowReturnsRunDetailWithinScope(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openRunStore(t)
+	defer store.Close()
+
+	project, err := store.CreateProject(ctx, sqlite.CreateProjectParams{
+		Key:           "alpha",
+		Name:          "Alpha",
+		Scope:         "project",
+		GitRoot:       "/tmp/alpha",
+		DefaultBranch: "main",
+		GitHubRepo:    "acme/alpha",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+
+	task, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "alpha-task",
+		Title:       "Alpha task",
+		Status:      "running",
+		Scope:       "project",
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+
+	run, err := store.StartRun(ctx, sqlite.StartRunParams{
+		TaskID:   task.ID,
+		Executor: "codex",
+		Attempt:  1,
+		Status:   "running",
+	})
+	if err != nil {
+		t.Fatalf("StartRun() error = %v", err)
+	}
+
+	service := Service{DB: store.DB()}
+	detail, err := service.Show(ctx, scope.Resolution{
+		Kind:       scope.ScopeProject,
+		ProjectKey: "alpha",
+	}, run.ID)
+	if err != nil {
+		t.Fatalf("Show() error = %v", err)
+	}
+	if detail.RunID != run.ID {
+		t.Fatalf("Show().RunID = %d, want %d", detail.RunID, run.ID)
+	}
+	if detail.TaskKey != task.Key {
+		t.Fatalf("Show().TaskKey = %q, want %q", detail.TaskKey, task.Key)
+	}
+	if detail.Executor != "codex" {
+		t.Fatalf("Show().Executor = %q, want %q", detail.Executor, "codex")
+	}
+}
+
+func TestRunsDetailIncludesRunArtifacts(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openRunStore(t)
+	defer store.Close()
+
+	project, err := store.CreateProject(ctx, sqlite.CreateProjectParams{
+		Key:           "alpha",
+		Name:          "Alpha",
+		Scope:         "project",
+		GitRoot:       "/tmp/alpha",
+		DefaultBranch: "main",
+		GitHubRepo:    "acme/alpha",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+
+	task, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "alpha-task",
+		Title:       "Alpha task",
+		Status:      "running",
+		Scope:       "project",
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+
+	run, err := store.StartRun(ctx, sqlite.StartRunParams{
+		TaskID:   task.ID,
+		Executor: "codex",
+		Attempt:  1,
+		Status:   "running",
+	})
+	if err != nil {
+		t.Fatalf("StartRun() error = %v", err)
+	}
+
+	if _, err := store.RecordRunArtifact(ctx, sqlite.RecordRunArtifactParams{
+		RunID:        run.ID,
+		ArtifactType: "driver_result",
+		Summary:      "Robinhood review ready",
+		DetailsJSON:  `{"session_state":"review_ready"}`,
+	}); err != nil {
+		t.Fatalf("RecordRunArtifact() error = %v", err)
+	}
+
+	service := Service{DB: store.DB(), Store: store}
+	detail, err := service.Show(ctx, scope.Resolution{
+		Kind:       scope.ScopeProject,
+		ProjectKey: "alpha",
+	}, run.ID)
+	if err != nil {
+		t.Fatalf("Show() error = %v", err)
+	}
+
+	if len(detail.Artifacts) != 1 {
+		t.Fatalf("Show().Artifacts len = %d, want 1", len(detail.Artifacts))
+	}
+	if detail.Artifacts[0].ArtifactType != "driver_result" {
+		t.Fatalf("Show().Artifacts[0].ArtifactType = %q, want %q", detail.Artifacts[0].ArtifactType, "driver_result")
+	}
+	if detail.Artifacts[0].Summary != "Robinhood review ready" {
+		t.Fatalf("Show().Artifacts[0].Summary = %q, want %q", detail.Artifacts[0].Summary, "Robinhood review ready")
+	}
+	if detail.Artifacts[0].DetailsJSON != `{"session_state":"review_ready"}` {
+		t.Fatalf("Show().Artifacts[0].DetailsJSON = %q, want %q", detail.Artifacts[0].DetailsJSON, `{"session_state":"review_ready"}`)
+	}
+}
+
 func TestGetRunEnvelopeReturnsEmptyArtifactsByDefault(t *testing.T) {
 	t.Parallel()
 

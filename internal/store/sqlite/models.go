@@ -264,6 +264,27 @@ type Run struct {
 	ArtifactsJSON  string
 }
 
+type RunArtifact struct {
+	ID           int64
+	RunID        int64
+	ArtifactType string
+	Summary      string
+	DetailsJSON  string
+	CreatedAt    time.Time
+}
+
+type RecordRunArtifactParams struct {
+	RunID        int64
+	ArtifactType string
+	Summary      string
+	DetailsJSON  string
+}
+
+type ListRunArtifactsParams struct {
+	RunID        int64
+	ArtifactType string
+}
+
 type MemoryEntry struct {
 	ID              int64
 	WorkspaceID     int64
@@ -556,6 +577,13 @@ type ListContextPacketsParams struct {
 	PacketKind  string
 	PacketScope string
 	Status      string
+}
+
+type UpdateContextPacketStatusParams struct {
+	PacketID    int64
+	Status      string
+	Summary     string
+	PayloadJSON string
 }
 
 type ConversationTranscript struct {
