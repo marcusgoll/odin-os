@@ -1855,6 +1855,22 @@ func (store *Store) CreateContextPacket(ctx context.Context, params CreateContex
 			return err
 		}
 
+		if params.SupersedesPacketID != nil {
+			supersededPacket, err := store.getContextPacketTx(ctx, tx, *params.SupersedesPacketID)
+			if err != nil {
+				return err
+			}
+			if supersededPacket.Status == "active" {
+				if _, err := tx.ExecContext(ctx, `
+					UPDATE context_packets
+					SET status = ?
+					WHERE id = ?
+				`, "superseded", supersededPacket.ID); err != nil {
+					return err
+				}
+			}
+		}
+
 		result, err := tx.ExecContext(ctx, `
 			INSERT INTO context_packets (
 				task_id,
@@ -2729,6 +2745,82 @@ func (store *Store) GetRun(ctx context.Context, runID int64) (Run, error) {
 	return scanRun(row)
 }
 
+func (store *Store) RecordRunArtifact(ctx context.Context, params RecordRunArtifactParams) (RunArtifact, error) {
+	now := store.now()
+	params.ArtifactType = strings.TrimSpace(params.ArtifactType)
+	params.Summary = strings.TrimSpace(params.Summary)
+	params.DetailsJSON = normalizeDetailsJSON(params.DetailsJSON)
+
+	var artifact RunArtifact
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		if _, _, err := store.getRunWithTaskTx(ctx, tx, params.RunID); err != nil {
+			return err
+		}
+
+		result, err := tx.ExecContext(ctx, `
+			INSERT INTO run_artifacts (run_id, artifact_type, summary, details_json, created_at)
+			VALUES (?, ?, ?, ?, ?)
+		`,
+			params.RunID,
+			params.ArtifactType,
+			params.Summary,
+			params.DetailsJSON,
+			formatTime(now),
+		)
+		if err != nil {
+			return err
+		}
+
+		artifactID, err := result.LastInsertId()
+		if err != nil {
+			return err
+		}
+
+		artifact = RunArtifact{
+			ID:           artifactID,
+			RunID:        params.RunID,
+			ArtifactType: params.ArtifactType,
+			Summary:      params.Summary,
+			DetailsJSON:  params.DetailsJSON,
+			CreatedAt:    now,
+		}
+		return nil
+	})
+
+	return artifact, err
+}
+
+func (store *Store) ListRunArtifacts(ctx context.Context, params ListRunArtifactsParams) ([]RunArtifact, error) {
+	query := `
+		SELECT id, run_id, artifact_type, summary, details_json, created_at
+		FROM run_artifacts
+		WHERE run_id = ?
+	`
+	args := []any{params.RunID}
+	if strings.TrimSpace(params.ArtifactType) != "" {
+		query += ` AND artifact_type = ?`
+		args = append(args, strings.TrimSpace(params.ArtifactType))
+	}
+	query += ` ORDER BY id ASC`
+
+	rows, err := store.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var artifacts []RunArtifact
+	for rows.Next() {
+		artifact, err := scanRunArtifact(rows)
+		if err != nil {
+			return nil, err
+		}
+		artifacts = append(artifacts, artifact)
+	}
+
+	return artifacts, rows.Err()
+}
+
 func (store *Store) ListRunsByStatus(ctx context.Context, status string) ([]Run, error) {
 	rows, err := store.db.QueryContext(ctx, `
 		SELECT id, task_id, executor, status, attempt, started_at, finished_at, summary, terminal_reason, artifacts_json
@@ -2885,6 +2977,72 @@ func (store *Store) GetLatestTaskWakePacket(ctx context.Context, projectID int64
 		LIMIT 1
 	`, projectID, taskID)
 	return scanContextPacket(row)
+}
+
+func (store *Store) GetLatestActiveTaskWakePacket(ctx context.Context, projectID int64, taskID int64) (ContextPacket, error) {
+	row := store.db.QueryRowContext(ctx, `
+		SELECT
+			cp.id,
+			cp.task_id,
+			cp.run_id,
+			cp.packet_kind,
+			cp.packet_scope,
+			cp.trigger,
+			cp.checkpoint_key,
+			cp.supersedes_packet_id,
+			cp.status,
+			cp.summary,
+			cp.payload_json,
+			cp.created_at
+		FROM context_packets cp
+		JOIN tasks t ON t.id = cp.task_id
+		WHERE t.project_id = ?
+		  AND cp.task_id = ?
+		  AND cp.packet_scope = 'task_wake_packet'
+		  AND cp.status = 'active'
+		ORDER BY cp.id DESC
+		LIMIT 1
+	`, projectID, taskID)
+	return scanContextPacket(row)
+}
+
+func (store *Store) UpdateContextPacketStatus(ctx context.Context, params UpdateContextPacketStatusParams) (ContextPacket, error) {
+	var packet ContextPacket
+
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		current, err := store.getContextPacketTx(ctx, tx, params.PacketID)
+		if err != nil {
+			return err
+		}
+		if current.Status == params.Status {
+			packet = current
+			return nil
+		}
+		summary := current.Summary
+		if params.Summary != "" {
+			summary = params.Summary
+		}
+		payloadJSON := current.PayloadJSON
+		if params.PayloadJSON != "" {
+			payloadJSON = params.PayloadJSON
+		}
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE context_packets
+			SET status = ?, summary = ?, payload_json = ?
+			WHERE id = ?
+		`, params.Status, summary, payloadJSON, params.PacketID); err != nil {
+			return err
+		}
+		current.Status = params.Status
+		current.Summary = summary
+		current.PayloadJSON = payloadJSON
+		packet = current
+		return nil
+	})
+	if err != nil {
+		return ContextPacket{}, err
+	}
+	return packet, nil
 }
 
 func (store *Store) CreateWorktreeLease(ctx context.Context, params CreateWorktreeLeaseParams) (WorktreeLease, error) {
@@ -4410,6 +4568,30 @@ func scanRun(row interface{ Scan(...any) error }) (Run, error) {
 	return run, nil
 }
 
+func scanRunArtifact(row interface{ Scan(...any) error }) (RunArtifact, error) {
+	var artifact RunArtifact
+	var detailsJSON sql.NullString
+	var createdAt string
+	if err := row.Scan(
+		&artifact.ID,
+		&artifact.RunID,
+		&artifact.ArtifactType,
+		&artifact.Summary,
+		&detailsJSON,
+		&createdAt,
+	); err != nil {
+		return RunArtifact{}, err
+	}
+
+	var err error
+	artifact.DetailsJSON = stringOrDefault(detailsJSON, "{}")
+	artifact.CreatedAt, err = parseTime(createdAt)
+	if err != nil {
+		return RunArtifact{}, err
+	}
+	return artifact, nil
+}
+
 func scanMemoryEntry(row interface{ Scan(...any) error }) (MemoryEntry, error) {
 	var entry MemoryEntry
 	var initiativeID sql.NullInt64
@@ -4590,6 +4772,27 @@ func scanContextPacket(row interface{ Scan(...any) error }) (ContextPacket, erro
 		return ContextPacket{}, err
 	}
 	return packet, nil
+}
+
+func (store *Store) getContextPacketTx(ctx context.Context, tx *sql.Tx, packetID int64) (ContextPacket, error) {
+	row := tx.QueryRowContext(ctx, `
+		SELECT
+			id,
+			task_id,
+			run_id,
+			packet_kind,
+			packet_scope,
+			trigger,
+			checkpoint_key,
+			supersedes_packet_id,
+			status,
+			summary,
+			payload_json,
+			created_at
+		FROM context_packets
+		WHERE id = ?
+	`, packetID)
+	return scanContextPacket(row)
 }
 
 func scanConversationTranscript(row interface{ Scan(...any) error }) (ConversationTranscript, error) {
@@ -4999,6 +5202,14 @@ func normalizeArtifactsJSON(value string) string {
 	value = strings.TrimSpace(value)
 	if value == "" {
 		return "[]"
+	}
+	return value
+}
+
+func normalizeDetailsJSON(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "{}"
 	}
 	return value
 }

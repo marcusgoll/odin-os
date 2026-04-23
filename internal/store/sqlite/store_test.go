@@ -271,6 +271,86 @@ func TestStoreMigrateLifecycleAndReopen(t *testing.T) {
 	}
 }
 
+func TestRunArtifactsRecordAndListByRun(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "odin.db")
+
+	store, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer store.Close()
+
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
+	}
+
+	project, err := store.CreateProject(ctx, CreateProjectParams{
+		Key:           "alpha",
+		Name:          "Alpha",
+		Scope:         "project",
+		GitRoot:       "/tmp/alpha",
+		DefaultBranch: "main",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+
+	task, err := store.CreateTask(ctx, CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "alpha-task",
+		Title:       "Alpha task",
+		Status:      "running",
+		Scope:       "project",
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+
+	run, err := store.StartRun(ctx, StartRunParams{
+		TaskID:   task.ID,
+		Executor: "codex",
+		Attempt:  1,
+		Status:   "running",
+	})
+	if err != nil {
+		t.Fatalf("StartRun() error = %v", err)
+	}
+
+	artifact, err := store.RecordRunArtifact(ctx, RecordRunArtifactParams{
+		RunID:        run.ID,
+		ArtifactType: "driver_result",
+		Summary:      "Robinhood review ready",
+		DetailsJSON:  `{"session_state":"review_ready"}`,
+	})
+	if err != nil {
+		t.Fatalf("RecordRunArtifact() error = %v", err)
+	}
+
+	artifacts, err := store.ListRunArtifacts(ctx, ListRunArtifactsParams{RunID: run.ID})
+	if err != nil {
+		t.Fatalf("ListRunArtifacts() error = %v", err)
+	}
+
+	if len(artifacts) != 1 {
+		t.Fatalf("ListRunArtifacts() len = %d, want 1", len(artifacts))
+	}
+	if artifacts[0].ID != artifact.ID {
+		t.Fatalf("ListRunArtifacts()[0].ID = %d, want %d", artifacts[0].ID, artifact.ID)
+	}
+	if artifacts[0].ArtifactType != "driver_result" {
+		t.Fatalf("ListRunArtifacts()[0].ArtifactType = %q, want %q", artifacts[0].ArtifactType, "driver_result")
+	}
+	if artifacts[0].Summary != "Robinhood review ready" {
+		t.Fatalf("ListRunArtifacts()[0].Summary = %q, want %q", artifacts[0].Summary, "Robinhood review ready")
+	}
+	if artifacts[0].DetailsJSON != `{"session_state":"review_ready"}` {
+		t.Fatalf("ListRunArtifacts()[0].DetailsJSON = %q, want %q", artifacts[0].DetailsJSON, `{"session_state":"review_ready"}`)
+	}
+}
+
 func TestBlockTaskAndRequestApprovalRejectsSecondPendingApproval(t *testing.T) {
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "odin.db")

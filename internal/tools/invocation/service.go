@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"odin-os/internal/adapters/browserhuman"
+	"odin-os/internal/adapters/web"
 )
 
 type Request struct {
@@ -39,9 +40,10 @@ type Invoker interface {
 }
 
 type Service struct {
-	RuntimeRoot string
-	DriverPath  string
-	Driver      browserhuman.Driver
+	RuntimeRoot             string
+	DriverPath              string
+	Driver                  browserhuman.Driver
+	RobinhoodTransferDriver web.RobinhoodTransferDriver
 }
 
 func (service Service) Invoke(ctx context.Context, key string, request Request) (Result, error) {
@@ -100,6 +102,19 @@ func (service Service) Invoke(ctx context.Context, key string, request Request) 
 
 func (service Service) BrowserHuman(ctx context.Context, request browserhuman.Request) (BrowserResult, error) {
 	driver := service.Driver.WithDefaults()
+
+	response, err := driver.Invoke(ctx, request)
+	if err != nil {
+		return BrowserResult{}, err
+	}
+	return toBrowserResult(response.ToolKey, response.Summary, response.Artifacts, response.RawOutput), nil
+}
+
+func (service Service) RobinhoodTransfer(ctx context.Context, request web.RobinhoodTransferRequest) (BrowserResult, error) {
+	driver := service.RobinhoodTransferDriver
+	if driver.InvokeFunc == nil && strings.TrimSpace(driver.Driver.EnvVar) == "" && strings.TrimSpace(driver.Driver.DefaultToolKey) == "" {
+		driver = web.NewRobinhoodTransferDriver()
+	}
 
 	response, err := driver.Invoke(ctx, request)
 	if err != nil {

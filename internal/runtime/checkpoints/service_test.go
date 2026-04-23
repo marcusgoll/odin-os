@@ -2,6 +2,8 @@ package checkpoints
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"path/filepath"
 	"testing"
 
@@ -102,6 +104,14 @@ func TestCompactRestartSupersedesPriorWakePacket(t *testing.T) {
 	if second.WakePacket.SupersedesPacketID == nil || *second.WakePacket.SupersedesPacketID != first.WakePacket.ID {
 		t.Fatalf("WakePacket.SupersedesPacketID = %v, want %d", second.WakePacket.SupersedesPacketID, first.WakePacket.ID)
 	}
+
+	firstWake, err := store.GetContextPacket(ctx, first.WakePacket.ID)
+	if err != nil {
+		t.Fatalf("GetContextPacket(first) error = %v", err)
+	}
+	if firstWake.Status != "superseded" {
+		t.Fatalf("first wake status = %q, want %q", firstWake.Status, "superseded")
+	}
 }
 
 func TestLoadResumeStateRehydratesLatestWakePacket(t *testing.T) {
@@ -151,6 +161,37 @@ func TestLoadResumeStateRehydratesLatestWakePacket(t *testing.T) {
 	}
 	if state.BlockingReason != "awaiting operator approval" {
 		t.Fatalf("LoadResumeState().BlockingReason = %q, want %q", state.BlockingReason, "awaiting operator approval")
+	}
+}
+
+func TestLoadResumeStateIgnoresSealedWakePacketWithoutActiveReplacement(t *testing.T) {
+	ctx := context.Background()
+	store := openCheckpointTestStore(t, "sealed-resume.db")
+	defer store.Close()
+
+	project, task, run := seedCheckpointTask(t, ctx, store)
+	service := Service{Store: store}
+
+	result, err := service.Compact(ctx, CompactParams{
+		TaskID:         task.ID,
+		RunID:          &run.ID,
+		Trigger:        TriggerApprovalWait,
+		CheckpointKey:  "approval-1",
+		Objective:      "Resume after approval",
+		TaskStatus:     "blocked",
+		BlockingReason: "approval_required",
+	})
+	if err != nil {
+		t.Fatalf("Compact() error = %v", err)
+	}
+
+	if _, err := store.DB().ExecContext(ctx, `UPDATE context_packets SET status = 'sealed' WHERE id = ?`, result.WakePacket.ID); err != nil {
+		t.Fatalf("ExecContext(seal wake) error = %v", err)
+	}
+
+	_, err = service.LoadResumeState(ctx, project.ID, task.ID)
+	if !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("LoadResumeState() error = %v, want sql.ErrNoRows", err)
 	}
 }
 

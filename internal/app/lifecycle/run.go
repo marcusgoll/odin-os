@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -26,6 +27,7 @@ import (
 	clistate "odin-os/internal/cli/state"
 	"odin-os/internal/core/capabilities"
 	"odin-os/internal/core/projects"
+	approvalsvc "odin-os/internal/runtime/approvals"
 	conversationsvc "odin-os/internal/runtime/conversation"
 	runtimeevents "odin-os/internal/runtime/events"
 	healthsvc "odin-os/internal/runtime/health"
@@ -340,8 +342,40 @@ func runApprovals(ctx context.Context, app bootstrap.App, args []string, stdout 
 	if err != nil {
 		return err
 	}
+	if len(remaining) > 0 && strings.EqualFold(remaining[0], "resolve") {
+		if jsonOutput {
+			return fmt.Errorf("usage: odin approvals resolve <approval-id> <approve|deny> <reason...>")
+		}
+		if len(remaining) < 4 {
+			return fmt.Errorf("usage: odin approvals resolve <approval-id> <approve|deny> <reason...>")
+		}
+
+		approvalID, err := strconv.ParseInt(remaining[1], 10, 64)
+		if err != nil || approvalID <= 0 {
+			return fmt.Errorf("approval id must be a positive integer")
+		}
+
+		result, err := approvalsvc.Service{Store: app.Store}.Resolve(ctx, approvalsvc.ResolveParams{
+			ApprovalID: approvalID,
+			Action:     strings.ToLower(strings.TrimSpace(remaining[2])),
+			DecisionBy: "operator",
+			Reason:     strings.Join(remaining[3:], " "),
+		})
+		if err != nil {
+			return err
+		}
+		receipt, err := approvalsvc.FormatReceipt(result)
+		if err != nil {
+			return err
+		}
+		if _, err := fmt.Fprintln(stdout, receipt.Line); err != nil {
+			return err
+		}
+		_, err = fmt.Fprintln(stdout, receipt.Summary)
+		return err
+	}
 	if len(remaining) != 0 {
-		return fmt.Errorf("usage: odin approvals [--json]")
+		return fmt.Errorf("usage: odin approvals [resolve <approval-id> <approve|deny> <reason...>] [--json]")
 	}
 
 	state, err := loadCLIState(app)
