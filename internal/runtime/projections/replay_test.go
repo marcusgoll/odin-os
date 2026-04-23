@@ -4,9 +4,7 @@ import (
 	"context"
 	"path/filepath"
 	"testing"
-	"time"
 
-	runtimeevents "odin-os/internal/runtime/events"
 	"odin-os/internal/runtime/projections"
 	"odin-os/internal/store/sqlite"
 )
@@ -67,21 +65,16 @@ func TestReplayLifecycleBuildsCurrentStateFromEvents(t *testing.T) {
 	}
 
 	if _, err := store.FinishRun(ctx, sqlite.FinishRunParams{
-		RunID:          run.ID,
-		Status:         "completed",
-		Summary:        "all done",
-		TerminalReason: "completed",
-		ArtifactsJSON:  `["runs/artifacts/replay.json"]`,
+		RunID:   run.ID,
+		Status:  "completed",
+		Summary: "all done",
 	}); err != nil {
 		t.Fatalf("FinishRun() error = %v", err)
 	}
 
 	if _, err := store.UpdateTaskStatus(ctx, sqlite.UpdateTaskStatusParams{
-		TaskID:         task.ID,
-		Status:         "completed",
-		Summary:        "all done",
-		TerminalReason: "completed",
-		ArtifactsJSON:  `["runs/artifacts/replay.json"]`,
+		TaskID: task.ID,
+		Status: "completed",
 	}); err != nil {
 		t.Fatalf("UpdateTaskStatus(completed) error = %v", err)
 	}
@@ -118,21 +111,9 @@ func TestReplayLifecycleBuildsCurrentStateFromEvents(t *testing.T) {
 	if replay.Tasks[task.ID].Status != "completed" {
 		t.Fatalf("task replay status = %q, want %q", replay.Tasks[task.ID].Status, "completed")
 	}
-	if replay.Tasks[task.ID].TerminalReason != "completed" {
-		t.Fatalf("task replay terminal reason = %q, want %q", replay.Tasks[task.ID].TerminalReason, "completed")
-	}
-	if replay.Tasks[task.ID].ArtifactsJSON != `["runs/artifacts/replay.json"]` {
-		t.Fatalf("task replay artifacts = %q, want persisted artifact pointer", replay.Tasks[task.ID].ArtifactsJSON)
-	}
 
 	if replay.Runs[run.ID].Status != "completed" {
 		t.Fatalf("run replay status = %q, want %q", replay.Runs[run.ID].Status, "completed")
-	}
-	if replay.Runs[run.ID].TerminalReason != "completed" {
-		t.Fatalf("run replay terminal reason = %q, want %q", replay.Runs[run.ID].TerminalReason, "completed")
-	}
-	if replay.Runs[run.ID].ArtifactsJSON != `["runs/artifacts/replay.json"]` {
-		t.Fatalf("run replay artifacts = %q, want persisted artifact pointer", replay.Runs[run.ID].ArtifactsJSON)
 	}
 
 	if replay.Approvals[approval.ID].Status != "approved" {
@@ -140,79 +121,71 @@ func TestReplayLifecycleBuildsCurrentStateFromEvents(t *testing.T) {
 	}
 }
 
-func TestReplayLifecycleCollapsesLegacyDuplicatePendingApprovalsPerTask(t *testing.T) {
-	now := time.Date(2026, 4, 16, 0, 0, 0, 0, time.UTC)
+func TestReplayLifecycleIncludesDefaultQueueStateFromTaskCreated(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "odin.db")
 
-	taskCreatedPayload, err := runtimeevents.EncodePayload(runtimeevents.TaskCreatedPayload{
+	store, err := sqlite.Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer store.Close()
+
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
+	}
+
+	project, err := store.CreateProject(ctx, sqlite.CreateProjectParams{
+		Key:           "alpha",
+		Name:          "Alpha",
+		Scope:         "project",
+		GitRoot:       "/tmp/alpha",
+		DefaultBranch: "main",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+
+	task, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:   project.ID,
 		Key:         "alpha-task",
-		Title:       "Alpha task",
-		Status:      "blocked",
+		Title:       "Alpha Task",
+		Status:      "queued",
 		Scope:       "project",
 		RequestedBy: "operator",
 	})
 	if err != nil {
-		t.Fatalf("EncodePayload(task.created) error = %v", err)
-	}
-	approvalOnePayload, err := runtimeevents.EncodePayload(runtimeevents.ApprovalRequestedPayload{
-		TaskID:      7,
-		Status:      "pending",
-		RequestedBy: "operator",
-	})
-	if err != nil {
-		t.Fatalf("EncodePayload(approval.requested#1) error = %v", err)
-	}
-	approvalTwoPayload, err := runtimeevents.EncodePayload(runtimeevents.ApprovalRequestedPayload{
-		TaskID:      7,
-		Status:      "pending",
-		RequestedBy: "operator",
-	})
-	if err != nil {
-		t.Fatalf("EncodePayload(approval.requested#2) error = %v", err)
+		t.Fatalf("CreateTask() error = %v", err)
 	}
 
-	replay, err := projections.ReplayLifecycle([]runtimeevents.Record{
-		{
-			StreamType: runtimeevents.StreamTask,
-			StreamID:   7,
-			Type:       runtimeevents.EventTaskCreated,
-			Scope:      "project",
-			Payload:    taskCreatedPayload,
-			OccurredAt: now,
-		},
-		{
-			StreamType: runtimeevents.StreamApproval,
-			StreamID:   101,
-			Type:       runtimeevents.EventApprovalRequested,
-			Scope:      "project",
-			TaskID:     int64Ptr(7),
-			Payload:    approvalOnePayload,
-			OccurredAt: now.Add(time.Second),
-		},
-		{
-			StreamType: runtimeevents.StreamApproval,
-			StreamID:   102,
-			Type:       runtimeevents.EventApprovalRequested,
-			Scope:      "project",
-			TaskID:     int64Ptr(7),
-			Payload:    approvalTwoPayload,
-			OccurredAt: now.Add(2 * time.Second),
-		},
-	})
+	records, err := store.ListEvents(ctx, sqlite.ListEventsParams{TaskID: &task.ID})
+	if err != nil {
+		t.Fatalf("ListEvents() error = %v", err)
+	}
+
+	replay, err := projections.ReplayLifecycle(records)
 	if err != nil {
 		t.Fatalf("ReplayLifecycle() error = %v", err)
 	}
 
-	if _, ok := replay.Approvals[101]; ok {
-		t.Fatalf("replay.Approvals[101] still present, want collapsed duplicate removed")
+	got := replay.Tasks[task.ID]
+	if got.NextEligibleAt != "0001-01-01T00:00:00.000000000Z" {
+		t.Fatalf("task replay next_eligible_at = %q, want zero timestamp", got.NextEligibleAt)
 	}
-	if replay.Approvals[102].Status != "pending" {
-		t.Fatalf("replay.Approvals[102].Status = %q, want pending", replay.Approvals[102].Status)
+	if got.Priority != 100 {
+		t.Fatalf("task replay priority = %d, want 100", got.Priority)
 	}
-	if replay.Approvals[102].TaskID != 7 {
-		t.Fatalf("replay.Approvals[102].TaskID = %d, want 7", replay.Approvals[102].TaskID)
+	if got.RetryCount != 0 {
+		t.Fatalf("task replay retry_count = %d, want 0", got.RetryCount)
 	}
-}
-
-func int64Ptr(value int64) *int64 {
-	return &value
+	if got.MaxAttempts != 3 {
+		t.Fatalf("task replay max_attempts = %d, want 3", got.MaxAttempts)
+	}
+	if got.LastError != "" {
+		t.Fatalf("task replay last_error = %q, want empty", got.LastError)
+	}
+	if got.BlockedReason != "" {
+		t.Fatalf("task replay blocked_reason = %q, want empty", got.BlockedReason)
+	}
 }

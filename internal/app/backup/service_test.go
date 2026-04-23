@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"odin-os/internal/app/backup"
 	"odin-os/internal/store/sqlite"
@@ -76,6 +77,43 @@ func TestServiceVerifyArchiveFailsWhenDatabaseMissing(t *testing.T) {
 	service := backup.Service{}
 	if err := service.VerifyArchive(context.Background(), archivePath); err == nil {
 		t.Fatalf("VerifyArchive() error = nil, want failure for missing database")
+	}
+}
+
+func TestMediaBackupVerificationStatusReflectsFreshArchive(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	now := time.Date(2026, 4, 17, 12, 0, 0, 0, time.UTC)
+	repoRoot := filepath.Join(t.TempDir(), "repo")
+	runtimeRoot := filepath.Join(t.TempDir(), "runtime")
+	archivePath := filepath.Join(t.TempDir(), "odin-backup.tar.gz")
+
+	prepareBackupFixture(t, repoRoot, runtimeRoot)
+
+	service := backup.Service{
+		RepoRoot:    repoRoot,
+		RuntimeRoot: runtimeRoot,
+	}
+	if err := service.CreateArchive(ctx, archivePath); err != nil {
+		t.Fatalf("CreateArchive() error = %v", err)
+	}
+	if err := service.VerifyArchive(ctx, archivePath); err != nil {
+		t.Fatalf("VerifyArchive() error = %v", err)
+	}
+
+	status, err := service.VerificationStatus(24*time.Hour, now)
+	if err != nil {
+		t.Fatalf("VerificationStatus() error = %v", err)
+	}
+	if !status.Present {
+		t.Fatalf("Present = false, want true")
+	}
+	if !status.Fresh {
+		t.Fatalf("Fresh = false, want true")
+	}
+	if status.ArchivePath != archivePath {
+		t.Fatalf("ArchivePath = %q, want %q", status.ArchivePath, archivePath)
 	}
 }
 

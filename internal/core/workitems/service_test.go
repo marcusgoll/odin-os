@@ -4,6 +4,7 @@ import (
 	"context"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"odin-os/internal/core/initiatives"
 	"odin-os/internal/core/workspaces"
@@ -408,6 +409,81 @@ func TestWorkItemServiceQueuesTasksWithSemanticLinks(t *testing.T) {
 	}
 	if item.Status != "queued" {
 		t.Fatalf("Get().Status = %q, want queued", item.Status)
+	}
+}
+
+func TestWorkItemServiceQueueFollowUpReusesExistingOccurrence(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openWorkItemServiceStore(t)
+	defer store.Close()
+
+	workspaceID, projectID, initiativeID, companionID := seedWorkItemLinks(t, ctx, store)
+	service := Service{Store: store}
+
+	obligation, err := store.CreateFollowUpObligation(ctx, sqlite.CreateFollowUpObligationParams{
+		WorkspaceID:     workspaceID,
+		InitiativeID:    &initiativeID,
+		CompanionID:     &companionID,
+		TargetProjectID: projectID,
+		Title:           "Review mail",
+		Status:          "active",
+		CadenceJSON:     `{"mode":"once"}`,
+		NextDueAt:       time.Date(2026, 4, 18, 9, 0, 0, 0, time.UTC),
+		PolicyJSON:      `{}`,
+	})
+	if err != nil {
+		t.Fatalf("CreateFollowUpObligation() error = %v", err)
+	}
+
+	first, reused, err := service.QueueFollowUp(ctx, QueueFollowUpParams{
+		CreateTask: sqlite.CreateTaskParams{
+			ProjectID:    projectID,
+			Key:          "follow-up-review-mail-a",
+			Title:        "Review mail",
+			Scope:        "project",
+			RequestedBy:  "operator",
+			WorkspaceID:  &workspaceID,
+			InitiativeID: &initiativeID,
+			CompanionID:  &companionID,
+		},
+		FollowUpObligationID: obligation.ID,
+		OccurrenceKey:        "2026-04-18T09:00:00Z",
+	})
+	if err != nil {
+		t.Fatalf("QueueFollowUp(first) error = %v", err)
+	}
+	if reused {
+		t.Fatalf("QueueFollowUp(first) reused = true, want false")
+	}
+
+	second, reused, err := service.QueueFollowUp(ctx, QueueFollowUpParams{
+		CreateTask: sqlite.CreateTaskParams{
+			ProjectID:   projectID,
+			Key:         "follow-up-review-mail-b",
+			Title:       "Review mail again",
+			Scope:       "project",
+			RequestedBy: "operator",
+			WorkspaceID: &workspaceID,
+		},
+		FollowUpObligationID: obligation.ID,
+		OccurrenceKey:        "2026-04-18T09:00:00Z",
+	})
+	if err != nil {
+		t.Fatalf("QueueFollowUp(second) error = %v", err)
+	}
+	if !reused {
+		t.Fatalf("QueueFollowUp(second) reused = false, want true")
+	}
+	if second.ID != first.ID {
+		t.Fatalf("QueueFollowUp(second).ID = %d, want %d", second.ID, first.ID)
+	}
+	if second.FollowUpObligationID == nil || *second.FollowUpObligationID != obligation.ID {
+		t.Fatalf("FollowUpObligationID = %v, want %d", second.FollowUpObligationID, obligation.ID)
+	}
+	if second.FollowUpOccurrenceKey != "2026-04-18T09:00:00Z" {
+		t.Fatalf("FollowUpOccurrenceKey = %q, want occurrence key", second.FollowUpOccurrenceKey)
 	}
 }
 

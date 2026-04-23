@@ -9,6 +9,8 @@ phase: "15"
 
 Phase 15 defines the minimum operational contract for running Odin OS as a long-lived homelab service.
 
+An optional media supervision profile may extend this contract for self-hosted media services. That optional media supervision profile must remain bounded, approval-aware, and layered on top of the existing homelab substrate rather than introducing a second control plane.
+
 ## Runtime modes
 
 The `odin` binary supports:
@@ -32,7 +34,7 @@ These endpoints are narrow operational surfaces only. They are not the future Od
 
 - `/healthz` reports whether the process is up and can inspect local runtime state
 - `/readyz` reports whether Odin is safe to operate on managed projects
-- `odin healthcheck` uses the same readiness model and returns non-zero on degraded or failed readiness
+- `odin healthcheck` uses the same readiness model and returns non-zero on degraded or failed readiness, including when no live `odin serve` process currently owns the runtime root
 
 ## Startup recovery
 
@@ -94,3 +96,12 @@ Phase 15 operational actions must remain inspectable:
 - health and readiness are machine-readable
 - backup verification is explicit rather than assumed
 - cutover readiness is documented as a checklist, not tribal knowledge
+
+## Optional media supervision profile
+
+When enabled, the media supervision profile:
+
+- reuses the existing incident, recovery, approval, health, and backup surfaces
+- treats mounts and path safety as fail-closed prerequisites
+- keeps risky media maintenance approval-required
+- keeps destructive media actions forbidden unless a future contract explicitly changes that policy

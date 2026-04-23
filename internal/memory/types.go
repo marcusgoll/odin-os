@@ -41,6 +41,12 @@ type WriteInput struct {
 	MetadataJSON    string
 }
 
+const (
+	MemoryTypeOperatingProfileUpdate = "operating_profile_update"
+	MemoryTypeFollowUpCompletion     = "follow_up_completion"
+	MemoryTypeFollowUpOverdue        = "follow_up_overdue"
+)
+
 func NormalizeWriteInput(input WriteInput) (WriteInput, error) {
 	input.EntryType = EntryType(strings.ToLower(strings.TrimSpace(string(input.EntryType))))
 	input.VisibilityScope = VisibilityScope(strings.ToLower(strings.TrimSpace(string(input.VisibilityScope))))

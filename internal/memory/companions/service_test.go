@@ -4,8 +4,11 @@ import (
 	"context"
 	"path/filepath"
 	"testing"
+	"time"
 
+	"odin-os/internal/core/initiatives"
 	memoryroot "odin-os/internal/memory"
+	memoryprojects "odin-os/internal/memory/projects"
 	memoryworkspaces "odin-os/internal/memory/workspaces"
 	"odin-os/internal/store/sqlite"
 )
@@ -60,6 +63,69 @@ func TestMemoryCompanionServiceRecallsCompanionThenWorkspaceEntries(t *testing.T
 	}
 	if entries[0].ID != companionEntry.ID {
 		t.Fatalf("Recall()[0].ID = %d, want companion entry %d first", entries[0].ID, companionEntry.ID)
+	}
+}
+
+func TestMemoryCompanionServiceRemembersFollowUpCompletionWithoutLeakingInitiativeEntries(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openCompanionMemoryStore(t)
+	defer store.Close()
+
+	workspace, err := store.GetWorkspaceByKey(ctx, "default")
+	if err != nil {
+		t.Fatalf("GetWorkspaceByKey(default) error = %v", err)
+	}
+	companion, err := store.GetCompanionByKey(ctx, workspace.ID, workspace.DefaultCompanionKey)
+	if err != nil {
+		t.Fatalf("GetCompanionByKey(default) error = %v", err)
+	}
+	initiative, err := store.UpsertInitiative(ctx, sqlite.UpsertInitiativeParams{
+		WorkspaceID:      workspace.ID,
+		Key:              "life-admin",
+		Title:            "Life Admin",
+		Kind:             string(initiatives.KindRoutine),
+		Status:           "active",
+		Summary:          "Recurring life admin",
+		OwnerCompanionID: &companion.ID,
+	})
+	if err != nil {
+		t.Fatalf("UpsertInitiative() error = %v", err)
+	}
+
+	service := Service{Store: store}
+	summary, err := service.RememberFollowUpCompletion(ctx, workspace.ID, companion.ID, "Review mail", time.Date(2026, 4, 17, 9, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatalf("RememberFollowUpCompletion() error = %v", err)
+	}
+	if summary.Scope != "companion" {
+		t.Fatalf("summary.Scope = %q, want companion", summary.Scope)
+	}
+	if summary.ScopeKey != companion.Key {
+		t.Fatalf("summary.ScopeKey = %q, want %q", summary.ScopeKey, companion.Key)
+	}
+
+	projectMemory := memoryprojects.Service{Store: store}
+	if _, err := projectMemory.Record(ctx, workspace.ID, initiative.ID, memoryroot.WriteInput{
+		EntryType:       memoryroot.EntryTypeNote,
+		VisibilityScope: memoryroot.VisibilityInitiative,
+		RetentionClass:  memoryroot.RetentionDurable,
+		Summary:         "Initiative only",
+		Content:         "File tax documents next.",
+		MetadataJSON:    `{"source":"initiative"}`,
+	}); err != nil {
+		t.Fatalf("projectMemory.Record() error = %v", err)
+	}
+
+	entries, err := service.Recall(ctx, workspace.ID, companion.ID, 10)
+	if err != nil {
+		t.Fatalf("Recall() error = %v", err)
+	}
+	for _, entry := range entries {
+		if entry.VisibilityScope == string(memoryroot.VisibilityInitiative) {
+			t.Fatalf("Recall() leaked initiative memory entry: %+v", entry)
+		}
 	}
 }
 

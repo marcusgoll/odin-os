@@ -64,6 +64,21 @@ func (service Service) Resolve(ctx context.Context, params ResolveParams) (Resol
 		return ResolveResult{}, fmt.Errorf("approval %d is %s, want pending", params.ApprovalID, current.Status)
 	}
 
+	var (
+		task        sqlite.Task
+		resumeState *checkpoints.ResumeState
+	)
+	if action == "approve" {
+		task, err = service.Store.GetTask(ctx, current.TaskID)
+		if err != nil {
+			return ResolveResult{}, err
+		}
+		resumeState, err = service.resumeState(ctx, task.ProjectID, task.ID)
+		if err != nil {
+			return ResolveResult{}, err
+		}
+	}
+
 	approval, err := service.Store.ResolveApproval(ctx, sqlite.ResolveApprovalParams{
 		ApprovalID: params.ApprovalID,
 		Status:     status,
@@ -104,14 +119,6 @@ func (service Service) Resolve(ctx context.Context, params ResolveParams) (Resol
 		return result, nil
 	}
 
-	task, err := service.Store.GetTask(ctx, approval.TaskID)
-	if err != nil {
-		return ResolveResult{}, err
-	}
-	resumeState, err := service.resumeState(ctx, task.ProjectID, task.ID)
-	if err != nil {
-		return ResolveResult{}, err
-	}
 	if resumeState != nil && isPreparedTransfer(*resumeState) {
 		return service.resumePreparedTransfer(ctx, task, approval, *resumeState)
 	}

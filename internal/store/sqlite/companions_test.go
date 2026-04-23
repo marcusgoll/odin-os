@@ -190,6 +190,80 @@ func TestCompanionStoreDefaultsEmptyPolicyJSON(t *testing.T) {
 	}
 }
 
+func TestCompanionStoreListsCompanionsByWorkspace(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store, err := Open(filepath.Join(t.TempDir(), "odin.db"))
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer store.Close()
+
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
+	}
+
+	workspace, err := store.GetWorkspaceByKey(ctx, "default")
+	if err != nil {
+		t.Fatalf("GetWorkspaceByKey(default) error = %v", err)
+	}
+
+	first, err := store.UpsertCompanion(ctx, UpsertCompanionParams{
+		WorkspaceID:         workspace.ID,
+		Key:                 "finance",
+		Title:               "Finance Advisor",
+		Kind:                "advisor",
+		Charter:             "Keep finance decisions clear.",
+		Status:              "active",
+		InitiativeScopeJSON: `{"initiatives":["finance"]}`,
+		ToolPolicyJSON:      `{}`,
+		MemoryPolicyJSON:    `{}`,
+		PlanningPolicyJSON:  `{}`,
+	})
+	if err != nil {
+		t.Fatalf("UpsertCompanion(finance) error = %v", err)
+	}
+
+	second, err := store.UpsertCompanion(ctx, UpsertCompanionParams{
+		WorkspaceID:         workspace.ID,
+		Key:                 "ops",
+		Title:               "Operations Specialist",
+		Kind:                "specialist",
+		Charter:             "Keep operations moving.",
+		Status:              "active",
+		InitiativeScopeJSON: `{"initiatives":["ops"]}`,
+		ToolPolicyJSON:      `{}`,
+		MemoryPolicyJSON:    `{}`,
+		PlanningPolicyJSON:  `{}`,
+	})
+	if err != nil {
+		t.Fatalf("UpsertCompanion(ops) error = %v", err)
+	}
+
+	companionList, err := store.ListCompanionsByWorkspace(ctx, ListCompanionsParams{WorkspaceID: workspace.ID})
+	if err != nil {
+		t.Fatalf("ListCompanionsByWorkspace() error = %v", err)
+	}
+	if len(companionList) < 2 {
+		t.Fatalf("ListCompanionsByWorkspace() len = %d, want at least 2", len(companionList))
+	}
+
+	foundFirst := false
+	foundSecond := false
+	for _, companion := range companionList {
+		switch companion.ID {
+		case first.ID:
+			foundFirst = true
+		case second.ID:
+			foundSecond = true
+		}
+	}
+	if !foundFirst || !foundSecond {
+		t.Fatalf("ListCompanionsByWorkspace() = %+v, want finance and ops companions", companionList)
+	}
+}
+
 func TestRegisterManagedProjectPreservesExistingDefaultCompanion(t *testing.T) {
 	t.Parallel()
 

@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	memoryroot "odin-os/internal/memory"
+	memoryusers "odin-os/internal/memory/users"
 	"odin-os/internal/store/sqlite"
 )
 
@@ -44,6 +45,47 @@ func TestMemoryWorkspaceServiceRecordsWorkspaceEntries(t *testing.T) {
 	}
 	if len(entries) != 1 || entries[0].ID != entry.ID {
 		t.Fatalf("Recall() = %+v, want entry %d", entries, entry.ID)
+	}
+}
+
+func TestMemoryWorkspaceServiceRemembersProfileUpdatesWithWorkspaceOwnership(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openWorkspaceMemoryStore(t)
+	defer store.Close()
+
+	workspace, err := store.GetWorkspaceByKey(ctx, "default")
+	if err != nil {
+		t.Fatalf("GetWorkspaceByKey(default) error = %v", err)
+	}
+
+	service := Service{Store: store}
+	entry, err := service.RememberProfileUpdate(ctx, workspace.ID, "Quiet hours updated", `{"quiet_hours":"22:00-07:00"}`)
+	if err != nil {
+		t.Fatalf("RememberProfileUpdate() error = %v", err)
+	}
+	if entry.Scope != "workspace" {
+		t.Fatalf("entry.Scope = %q, want workspace", entry.Scope)
+	}
+	if entry.ScopeKey != workspace.Key {
+		t.Fatalf("entry.ScopeKey = %q, want %q", entry.ScopeKey, workspace.Key)
+	}
+	if entry.MemoryType != memoryusers.MemoryTypeOperatingProfileUpdate {
+		t.Fatalf("entry.MemoryType = %q, want %q", entry.MemoryType, memoryusers.MemoryTypeOperatingProfileUpdate)
+	}
+
+	userMemory := memoryusers.Service{
+		Store:          store,
+		WorkspaceScope: "workspace",
+		WorkspaceKey:   workspace.Key,
+	}
+	entries, err := userMemory.List(ctx)
+	if err != nil {
+		t.Fatalf("userMemory.List() error = %v", err)
+	}
+	if len(entries) == 0 || entries[0].ID != entry.ID {
+		t.Fatalf("userMemory.List() = %+v, want workspace profile update first", entries)
 	}
 }
 

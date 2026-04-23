@@ -89,6 +89,27 @@ func TestRunStatusJSON(t *testing.T) {
 	}
 }
 
+func TestRunDoctorIgnoresInvalidOdinNowForNonAgendaCommands(t *testing.T) {
+	root := testRepoRoot(t)
+	t.Setenv("ODIN_NOW", "definitely-not-a-timestamp")
+
+	var stdout bytes.Buffer
+	err := Run(context.Background(), root, []string{"doctor", "--json"}, strings.NewReader(""), &stdout)
+	if err != nil {
+		t.Fatalf("Run(doctor --json) error = %v", err)
+	}
+
+	var payload struct {
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("doctor json = %v\n%s", err, stdout.String())
+	}
+	if payload.Status == "" {
+		t.Fatalf("Status = %q, want non-empty", payload.Status)
+	}
+}
+
 func TestRunProjectListText(t *testing.T) {
 	t.Parallel()
 
@@ -308,6 +329,7 @@ func TestRunTaskCreateJSON(t *testing.T) {
 
 func TestRunTaskRunJSON(t *testing.T) {
 	configureLifecycleHarnessDriver(t)
+	t.Setenv("HOME", t.TempDir())
 	root := testRepoRoot(t)
 	cleanupTaskRunWorktree(t, testProjectKey)
 	if err := Run(context.Background(), root, []string{"project", "select", testProjectKey}, strings.NewReader(""), &bytes.Buffer{}); err != nil {

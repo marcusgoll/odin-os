@@ -15,6 +15,8 @@ This document freezes the canonical language for Odin OS. New design, planning, 
 | `Workspace` | The top-level operating environment for a human or organization in Odin. It is the semantic root for all durable work, memory, and execution. | Every initiative, companion, and execution lane belongs to exactly one workspace. |
 | `Initiative` | A durable responsibility stream inside a workspace. Initiatives can represent work, life, or ongoing operational commitments. | Managed projects are one specialized initiative type. |
 | `Companion` | A durable AI role attached to a workspace, optionally scoped further to one or more initiatives. Companions include assistants, advisors, operators, and specialists. | Companion is the user-facing term for a persistent AI role. |
+| `OperatingProfile` | The workspace-owned control object that stores durable user-operating defaults such as communication preferences, quiet hours, approval posture, follow-up cadence, privacy boundaries, and escalation defaults. | The operating profile is control-plane state, not a persona. |
+| `FollowUpObligation` | The durable promise layer for a next action, reminder, recurring check-in, or other bounded commitment owned by Odin on behalf of a workspace. | Follow-up obligations materialize into work items when due. |
 | `Managed Project` | A governed initiative subtype with explicit policy, reviewability, and Git-backed mutation rules. | Use this term when the initiative is project-shaped and subject to project governance. |
 | `Work Item` | The durable unit of governed work. A work item is what gets planned, routed, executed, and completed. | This is the preferred unit for product semantics and operator-facing language. |
 | `Run Attempt` | One execution attempt for a work item inside an execution lane. | Run attempts are disposable records of execution, not the durable work itself. |
@@ -33,8 +35,10 @@ The following terms still appear in implementation and migration surfaces, but t
 ## Canonical relationships
 
 - A workspace contains initiatives.
+- A workspace owns the operating profile and follow-up obligations.
 - An initiative may contain work items and companions.
 - A managed project is a governed initiative, not a separate top-level concept.
+- A follow-up obligation may materialize one or more work items over time.
 - A work item may produce multiple run attempts over time.
 - A run attempt occurs inside exactly one execution lane.
 - Control scope determines what can be seen or changed at each step.

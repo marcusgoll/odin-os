@@ -2,7 +2,7 @@ GO ?= go
 GOFMT ?= gofmt
 GOFILES := $(shell find . -type f -name '*.go' -not -path './.git/*')
 
-.PHONY: format fmtcheck lint test test-alpha test-skills build install-local uninstall-local
+.PHONY: format fmtcheck lint test test-alpha test-media test-skills ci build install-local uninstall-local
 
 format:
 	$(GOFMT) -w $(GOFILES)
@@ -19,8 +19,17 @@ test:
 test-alpha:
 	$(GO) test ./tests/integration -run TestAlphaAcceptance -count=1 -v
 
+test-media:
+	$(GO) test ./tests/integration -run TestMediaStackAcceptance -count=1 -v
+
 test-skills:
 	$(GO) test ./tests/integration -run TestSkillLifecycleCrudAndInvocation -count=1 -v
+
+ci: fmtcheck lint test
+	bash scripts/tests/make-ci-target-test.sh
+	bash scripts/tests/verify-pr-template-test.sh
+	$(MAKE) test-alpha
+	$(MAKE) build
 
 build:
 	mkdir -p bin

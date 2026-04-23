@@ -9,8 +9,8 @@ import (
 	"odin-os/internal/app/bootstrap"
 	"odin-os/internal/cli/commands"
 	"odin-os/internal/cli/scope"
+	clistate "odin-os/internal/cli/state"
 	"odin-os/internal/core/projects"
-	"odin-os/internal/runtime/jobs"
 	"odin-os/internal/skills"
 	"odin-os/internal/store/sqlite"
 	"odin-os/internal/telemetry/logs"
@@ -186,10 +186,7 @@ func runSkills(ctx context.Context, app bootstrap.App, args []string, stdout io.
 				return fmt.Errorf("unknown project: %s", state.Scope.ProjectKey)
 			}
 
-			project, err := jobs.Service{
-				Store:    app.Store,
-				Registry: app.Registry,
-			}.EnsureRuntimeProject(ctx, manifest)
+			project, err := projects.Service{Store: app.Store}.RegisterManagedProject(ctx, manifest)
 			if err != nil {
 				return err
 			}
@@ -246,4 +243,28 @@ func optionalFlagValue(args []string, flag string) (string, error) {
 		index++
 	}
 	return value, nil
+}
+
+func consumeJSONFlag(args []string) (bool, []string, error) {
+	jsonOutput := false
+	remaining := make([]string, 0, len(args))
+	for _, arg := range args {
+		if arg != "--json" {
+			remaining = append(remaining, arg)
+			continue
+		}
+		if jsonOutput {
+			return false, nil, fmt.Errorf("duplicate --json flag")
+		}
+		jsonOutput = true
+	}
+	return jsonOutput, remaining, nil
+}
+
+func loadCLIState(app bootstrap.App) (clistate.State, error) {
+	cache, err := app.SessionStore.Load()
+	if err != nil {
+		return clistate.State{}, err
+	}
+	return clistate.ResolveStartupState(cache, app.Registry), nil
 }

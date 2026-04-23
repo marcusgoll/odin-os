@@ -7,6 +7,10 @@ import (
 	"time"
 )
 
+func formatSQLiteTime(value time.Time) string {
+	return value.UTC().Format("2006-01-02T15:04:05.000000000Z")
+}
+
 func (monitor Monitor) Observe(ctx context.Context) ([]Observation, error) {
 	if monitor.DB == nil {
 		return nil, fmt.Errorf("recovery monitor database is not configured")
@@ -42,7 +46,7 @@ func (monitor Monitor) Observe(ctx context.Context) ([]Observation, error) {
 		observations = append(observations, *sourceObservation)
 	}
 
-	queueObservation, err := monitor.queuePressureObservation(ctx, config)
+	queueObservation, err := monitor.queuePressureObservation(ctx, now, config)
 	if err != nil {
 		return nil, err
 	}
@@ -106,7 +110,7 @@ func (monitor Monitor) projectionObservations(ctx context.Context, now time.Time
 		FROM projection_freshness
 		WHERE refreshed_at < ?
 		ORDER BY surface ASC
-	`, now.Add(-config.ProjectionFreshnessTTL).Format(time.RFC3339Nano))
+	`, formatSQLiteTime(now.Add(-config.ProjectionFreshnessTTL)))
 	if err != nil {
 		return nil, err
 	}
@@ -189,9 +193,9 @@ func (monitor Monitor) sourceFreshnessObservation(ctx context.Context, now time.
 	}, nil
 }
 
-func (monitor Monitor) queuePressureObservation(ctx context.Context, config Config) (*Observation, error) {
+func (monitor Monitor) queuePressureObservation(ctx context.Context, now time.Time, config Config) (*Observation, error) {
 	var queued int
-	if err := monitor.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM tasks WHERE status = 'queued'`).Scan(&queued); err != nil {
+	if err := monitor.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM tasks WHERE status = 'queued' AND next_eligible_at <= ?`, formatSQLiteTime(now)).Scan(&queued); err != nil {
 		return nil, err
 	}
 	if queued <= config.QueuePressureThreshold {
