@@ -271,6 +271,73 @@ func TestStoreMigrateLifecycleAndReopen(t *testing.T) {
 	}
 }
 
+func TestUpdateTaskStatusUpdatesMetadataWithoutStatusTransition(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "odin.db")
+
+	store, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer store.Close()
+
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
+	}
+
+	project, err := store.CreateProject(ctx, CreateProjectParams{
+		Key:           "family-ops",
+		Name:          "Family-Ops",
+		Scope:         "project",
+		GitRoot:       "/home/orchestrator/family-ops",
+		DefaultBranch: "main",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+
+	task, err := store.CreateTask(ctx, CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "finance-transfer-review",
+		Title:       "Prepare Robinhood transfer review",
+		Status:      "blocked",
+		Scope:       "project",
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+
+	task, err = store.UpdateTaskStatus(ctx, UpdateTaskStatusParams{
+		TaskID:         task.ID,
+		Status:         "blocked",
+		Summary:        "approval denied",
+		TerminalReason: "operator_denied",
+	})
+	if err != nil {
+		t.Fatalf("UpdateTaskStatus(blocked metadata) error = %v", err)
+	}
+
+	if task.Status != "blocked" {
+		t.Fatalf("task.Status = %q, want %q", task.Status, "blocked")
+	}
+	if task.Summary != "approval denied" {
+		t.Fatalf("task.Summary = %q, want %q", task.Summary, "approval denied")
+	}
+	if task.TerminalReason != "operator_denied" {
+		t.Fatalf("task.TerminalReason = %q, want %q", task.TerminalReason, "operator_denied")
+	}
+
+	gotTask, err := store.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
+	}
+	if gotTask.TerminalReason != "operator_denied" {
+		t.Fatalf("GetTask().TerminalReason = %q, want %q", gotTask.TerminalReason, "operator_denied")
+	}
+}
+
 func TestRunArtifactsRecordAndListByRun(t *testing.T) {
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "odin.db")

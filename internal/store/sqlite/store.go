@@ -753,6 +753,21 @@ func (store *Store) UpdateTaskStatus(ctx context.Context, params UpdateTaskStatu
 			return err
 		}
 		if current.Status == params.Status {
+			if current.Summary == params.Summary && current.TerminalReason == params.TerminalReason && current.ArtifactsJSON == artifactsJSON {
+				task = current
+				return nil
+			}
+			if _, err := tx.ExecContext(ctx, `
+				UPDATE tasks
+				SET summary = ?, terminal_reason = ?, artifacts_json = ?, updated_at = ?
+				WHERE id = ?
+			`, params.Summary, params.TerminalReason, artifactsJSON, formatTime(now), params.TaskID); err != nil {
+				return err
+			}
+			current.Summary = params.Summary
+			current.TerminalReason = params.TerminalReason
+			current.ArtifactsJSON = artifactsJSON
+			current.UpdatedAt = now
 			task = current
 			return nil
 		}

@@ -415,6 +415,14 @@ func TestShellApprovalsResolveDenyKeepsReceiptCompact(t *testing.T) {
 	if runIDs[0] != fixture.PrepareRun.ID {
 		t.Fatalf("remaining run id = %d, want prepare run id %d", runIDs[0], fixture.PrepareRun.ID)
 	}
+
+	task, err := env.Store.GetTask(ctx, fixture.Task.ID)
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
+	}
+	if task.TerminalReason != "operator_denied" {
+		t.Fatalf("task.TerminalReason = %q, want %q", task.TerminalReason, "operator_denied")
+	}
 }
 
 func TestShellTransferPrepareRequiresSelectedInitiative(t *testing.T) {
@@ -495,6 +503,85 @@ func TestShellTransferPreparePrintsReceiptAndCreatesApprovalWait(t *testing.T) {
 	}
 	if wakePacket.Trigger != "approval_wait" {
 		t.Fatalf("wakePacket.Trigger = %q, want %q", wakePacket.Trigger, "approval_wait")
+	}
+}
+
+func TestShellTransferDenySealsApprovalWaitAndMarksOperatorDenied(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	env := newTestEnvironment(t)
+	shell, err := New(env)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	fixed := time.Date(2026, 4, 22, 3, 4, 5, 0, time.UTC)
+	shell.transfers.Now = func() time.Time { return fixed }
+
+	var output bytes.Buffer
+	if err := shell.HandleLine(ctx, "/project family-ops", &output); err != nil {
+		t.Fatalf("HandleLine(/project family-ops) error = %v", err)
+	}
+	output.Reset()
+	if err := shell.HandleLine(ctx, "/transfer prepare direction=deposit amount_usd=25.00 source_account=checking destination_account=brokerage memo=household-test", &output); err != nil {
+		t.Fatalf("HandleLine(/transfer prepare) error = %v", err)
+	}
+	output.Reset()
+	if err := shell.HandleLine(ctx, "/approvals resolve 1 deny because amount is wrong", &output); err != nil {
+		t.Fatalf("HandleLine(/approvals resolve deny) error = %v", err)
+	}
+
+	receipt := output.String()
+	for _, want := range []string{
+		"approval=1",
+		"status=resolved",
+		"result=denied",
+		"summary=approval denied; later retry requires fresh prepare",
+	} {
+		if !strings.Contains(receipt, want) {
+			t.Fatalf("receipt = %q, want substring %q", receipt, want)
+		}
+	}
+	if strings.Contains(receipt, "run=") {
+		t.Fatalf("receipt = %q, want no run handle on deny", receipt)
+	}
+
+	task, err := env.Store.GetTask(ctx, 1)
+	if err != nil {
+		t.Fatalf("GetTask(1) error = %v", err)
+	}
+	if task.Status != "blocked" {
+		t.Fatalf("task.Status = %q, want %q", task.Status, "blocked")
+	}
+	if task.TerminalReason != "operator_denied" {
+		t.Fatalf("task.TerminalReason = %q, want %q", task.TerminalReason, "operator_denied")
+	}
+
+	project, err := env.Store.GetProjectByKey(ctx, "family-ops")
+	if err != nil {
+		t.Fatalf("GetProjectByKey(family-ops) error = %v", err)
+	}
+	activePackets, err := env.Store.ListContextPackets(ctx, sqlite.ListContextPacketsParams{
+		TaskID:      &task.ID,
+		PacketScope: "task_wake_packet",
+		Status:      "active",
+	})
+	if err != nil {
+		t.Fatalf("ListContextPackets(active) error = %v", err)
+	}
+	if len(activePackets) != 0 {
+		t.Fatalf("active wake packets = %d, want 0", len(activePackets))
+	}
+
+	wakePacket, err := env.Store.GetLatestTaskWakePacket(ctx, project.ID, task.ID)
+	if err != nil {
+		t.Fatalf("GetLatestTaskWakePacket() error = %v", err)
+	}
+	if wakePacket.Status != "sealed" {
+		t.Fatalf("wakePacket.Status = %q, want %q", wakePacket.Status, "sealed")
+	}
+	if !strings.Contains(wakePacket.PayloadJSON, `"blocking_reason":"operator_denied"`) {
+		t.Fatalf("wakePacket.PayloadJSON = %q, want blocking_reason operator_denied", wakePacket.PayloadJSON)
 	}
 }
 

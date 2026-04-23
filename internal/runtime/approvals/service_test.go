@@ -82,6 +82,17 @@ func TestResolveDenyDoesNotStartContinuationRun(t *testing.T) {
 	if len(runIDs) != 1 {
 		t.Fatalf("task run count = %d, want 1", len(runIDs))
 	}
+
+	task, err := store.GetTask(ctx, fixture.Task.ID)
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
+	}
+	if task.Status != "blocked" {
+		t.Fatalf("task.Status = %q, want %q", task.Status, "blocked")
+	}
+	if task.TerminalReason != "operator_denied" {
+		t.Fatalf("task.TerminalReason = %q, want %q", task.TerminalReason, "operator_denied")
+	}
 }
 
 func TestResolveApprovePreparedTransferStartsSubmitContinuation(t *testing.T) {
@@ -398,6 +409,89 @@ printf '{"status":"completed","tool_key":"robinhood_transfer_flow","summary":"Ro
 	}
 	if !strings.Contains(wakePacket.PayloadJSON, `"blocking_reason":"stale_context"`) {
 		t.Fatalf("wakePacket.PayloadJSON = %q, want blocking_reason stale_context", wakePacket.PayloadJSON)
+	}
+
+	if _, err := (checkpoints.Service{Store: store}).LoadResumeState(ctx, project.ID, prepare.Task.ID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("LoadResumeState() error = %v, want sql.ErrNoRows", err)
+	}
+}
+
+func TestResolveDenyPreparedTransferSealsApprovalWakeAndClearsResumeState(t *testing.T) {
+	ctx := context.Background()
+	store := openApprovalTestStore(t)
+	registry := writeApprovalRegistry(t)
+
+	prepare, err := transfers.Service{
+		Store:       store,
+		Registry:    registry,
+		Checkpoints: checkpoints.Service{Store: store},
+		Invocation:  approvalTransferInvocation(),
+	}.Prepare(ctx, transfers.PrepareParams{
+		ProjectKey:         "family-ops",
+		Direction:          "deposit",
+		AmountUSD:          "25.00",
+		SourceAccount:      "checking",
+		DestinationAccount: "brokerage",
+		Memo:               "household-test",
+	})
+	if err != nil {
+		t.Fatalf("Prepare() error = %v", err)
+	}
+
+	project, err := store.GetProjectByKey(ctx, "family-ops")
+	if err != nil {
+		t.Fatalf("GetProjectByKey() error = %v", err)
+	}
+
+	result, err := Service{
+		Store:       store,
+		Checkpoints: checkpoints.Service{Store: store},
+	}.Resolve(ctx, ResolveParams{
+		ApprovalID: prepare.Approval.ID,
+		Action:     "deny",
+		DecisionBy: "operator",
+		Reason:     "amount is wrong",
+	})
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+
+	if result.SubmitRun != nil {
+		t.Fatalf("SubmitRun = %+v, want nil on deny", result.SubmitRun)
+	}
+
+	task, err := store.GetTask(ctx, prepare.Task.ID)
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
+	}
+	if task.Status != "blocked" {
+		t.Fatalf("task.Status = %q, want %q", task.Status, "blocked")
+	}
+	if task.TerminalReason != "operator_denied" {
+		t.Fatalf("task.TerminalReason = %q, want %q", task.TerminalReason, "operator_denied")
+	}
+
+	activePackets, err := store.ListContextPackets(ctx, sqlite.ListContextPacketsParams{
+		TaskID:      &prepare.Task.ID,
+		PacketScope: "task_wake_packet",
+		Status:      "active",
+	})
+	if err != nil {
+		t.Fatalf("ListContextPackets(active) error = %v", err)
+	}
+	if len(activePackets) != 0 {
+		t.Fatalf("active wake packets = %d, want 0", len(activePackets))
+	}
+
+	wakePacket, err := store.GetContextPacket(ctx, prepare.WakePacket.ID)
+	if err != nil {
+		t.Fatalf("GetContextPacket() error = %v", err)
+	}
+	if wakePacket.Status != "sealed" {
+		t.Fatalf("wakePacket.Status = %q, want %q", wakePacket.Status, "sealed")
+	}
+	if !strings.Contains(wakePacket.PayloadJSON, `"blocking_reason":"operator_denied"`) {
+		t.Fatalf("wakePacket.PayloadJSON = %q, want blocking_reason operator_denied", wakePacket.PayloadJSON)
 	}
 
 	if _, err := (checkpoints.Service{Store: store}).LoadResumeState(ctx, project.ID, prepare.Task.ID); !errors.Is(err, sql.ErrNoRows) {

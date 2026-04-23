@@ -226,6 +226,14 @@ func TestRunApprovalsResolveDenyKeepsReceiptCompact(t *testing.T) {
 		t.Fatalf("approval.Status = %q, want %q", approval.Status, "denied")
 	}
 
+	task, err := store.GetTask(context.Background(), taskID)
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
+	}
+	if task.TerminalReason != "operator_denied" {
+		t.Fatalf("task.TerminalReason = %q, want %q", task.TerminalReason, "operator_denied")
+	}
+
 	runIDs := listRuntimeTaskRunIDs(t, root, taskID)
 	if len(runIDs) != 1 {
 		t.Fatalf("task run count = %d, want 1", len(runIDs))

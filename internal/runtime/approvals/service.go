@@ -76,6 +76,31 @@ func (service Service) Resolve(ctx context.Context, params ResolveParams) (Resol
 
 	result := ResolveResult{Approval: approval}
 	if action != "approve" {
+		task, err := service.Store.GetTask(ctx, approval.TaskID)
+		if err != nil {
+			return ResolveResult{}, err
+		}
+		if _, err := service.Store.UpdateTaskStatus(ctx, sqlite.UpdateTaskStatusParams{
+			TaskID:         task.ID,
+			Status:         "blocked",
+			Summary:        "approval denied",
+			TerminalReason: "operator_denied",
+		}); err != nil {
+			return ResolveResult{}, err
+		}
+		resumeState, err := service.resumeState(ctx, task.ProjectID, task.ID)
+		if err != nil {
+			return ResolveResult{}, err
+		}
+		if resumeState != nil && resumeState.Trigger == checkpoints.TriggerApprovalWait {
+			if _, err := service.checkpointService().SealWakePacket(ctx, checkpoints.SealWakePacketParams{
+				PacketID:          resumeState.WakePacketID,
+				BlockingReason:    "operator_denied",
+				LastCompletedStep: "approval denied",
+			}); err != nil {
+				return ResolveResult{}, err
+			}
+		}
 		return result, nil
 	}
 
