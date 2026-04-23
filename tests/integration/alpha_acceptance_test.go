@@ -430,7 +430,7 @@ func TestAlphaAcceptance(t *testing.T) {
 		if err != nil {
 			t.Fatalf("LoadDir(registry) error = %v", err)
 		}
-		suiteBroker := broker.New(broker.StaticSource(snapshot), catalog.BuiltinDefinitions(), nil, budgets.Limits{
+		suiteBroker := broker.New(snapshot, catalog.BuiltinDefinitions(), budgets.Limits{
 			Tool: budgets.Tool{
 				MaxSelections:  6,
 				MaxInvocations: 4,
@@ -443,17 +443,11 @@ func TestAlphaAcceptance(t *testing.T) {
 			},
 		})
 
-		odinCoreCards, err := suiteBroker.Catalog("odin-core")
-		if err != nil {
-			t.Fatalf("Catalog(odin-core) error = %v", err)
-		}
+		odinCoreCards := suiteBroker.Catalog("odin-core")
 		if !hasCapability(odinCoreCards, "status-command") || !hasCapability(odinCoreCards, "triage-skill") {
 			t.Fatalf("odin-core catalog missing expected capabilities: %+v", odinCoreCards)
 		}
-		projectCards, err := suiteBroker.Catalog("project")
-		if err != nil {
-			t.Fatalf("Catalog(project) error = %v", err)
-		}
+		projectCards := suiteBroker.Catalog("project")
 		if !hasCapability(projectCards, "triage-agent") {
 			t.Fatalf("project catalog missing triage-agent: %+v", projectCards)
 		}

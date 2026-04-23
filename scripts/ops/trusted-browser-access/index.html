@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <link rel="icon" href="data:,">
+  <title>Odin Trusted Browser Session</title>
+  <style>
+    html, body {
+      margin: 0;
+      height: 100%;
+      background: #111827;
+      color: #e5e7eb;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    body {
+      display: flex;
+      flex-direction: column;
+    }
+    .toolbar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 16px;
+      padding: 10px 14px;
+      border-bottom: 1px solid #374151;
+      background: rgba(17, 24, 39, 0.98);
+      font-size: 14px;
+    }
+    .status {
+      color: #93c5fd;
+      font-weight: 600;
+    }
+    #screen {
+      flex: 1;
+      min-height: 0;
+    }
+    #screen canvas {
+      width: 100% !important;
+      height: 100% !important;
+    }
+  </style>
+</head>
+<body>
+  <div class="toolbar">
+    <div>Odin trusted browser session</div>
+    <div id="status" class="status">Connecting...</div>
+  </div>
+  <div id="screen"></div>
+  <script type="module">
+    import RFB from "./noVNC-src/core/rfb.js";
+
+    const status = document.getElementById("status");
+    const target = document.getElementById("screen");
+    const protocol = window.location.protocol === "https:" ? "wss" : "ws";
+    const rfb = new RFB(target, `${protocol}://${window.location.host}`);
+    rfb.scaleViewport = true;
+    rfb.resizeSession = true;
+    rfb.background = "#111827";
+
+    rfb.addEventListener("connect", () => {
+      status.textContent = "Connected";
+      status.style.color = "#86efac";
+    });
+    rfb.addEventListener("disconnect", (event) => {
+      status.textContent = event.detail.clean ? "Disconnected" : "Connection lost";
+      status.style.color = "#fca5a5";
+    });
+    rfb.addEventListener("credentialsrequired", () => {
+      status.textContent = "Credentials required";
+      status.style.color = "#fbbf24";
+    });
+  </script>
+</body>
+</html>
