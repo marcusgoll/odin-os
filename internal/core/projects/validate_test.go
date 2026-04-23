@@ -445,9 +445,9 @@ func TestValidateRejectsInvalidCutoverPilotStage(t *testing.T) {
 		Cutover: CutoverConfig{
 			PilotProjects: []CutoverPilotProject{
 				{
-					Key:         "cfipros",
+					Key:          "cfipros",
 					RuntimeOwner: "legacy_odin",
-					Stage:       "shdaow",
+					Stage:        "shdaow",
 				},
 			},
 		},

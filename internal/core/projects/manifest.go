@@ -104,16 +104,16 @@ type CutoverConfig struct {
 }
 
 type CutoverPilotProject struct {
-	Key                       string   `yaml:"key"`
-	RuntimeOwner              string   `yaml:"runtime_owner"`
-	PrimaryController         string   `yaml:"primary_controller"`
+	Key                       string          `yaml:"key"`
+	RuntimeOwner              string          `yaml:"runtime_owner"`
+	PrimaryController         string          `yaml:"primary_controller"`
 	Stage                     TransitionState `yaml:"stage"`
-	ComparisonContext         string   `yaml:"comparison_context"`
-	LegacyPrimaryRequired     bool     `yaml:"legacy_primary_required"`
-	ShadowGraduation          []string `yaml:"shadow_graduation"`
-	LimitedActionGraduation   []string `yaml:"limited_action_graduation"`
-	CutoverGraduation         []string `yaml:"cutover_graduation"`
-	LegacyDutiesToRetireOrder []string `yaml:"legacy_duties_to_retire_in_order"`
+	ComparisonContext         string          `yaml:"comparison_context"`
+	LegacyPrimaryRequired     bool            `yaml:"legacy_primary_required"`
+	ShadowGraduation          []string        `yaml:"shadow_graduation"`
+	LimitedActionGraduation   []string        `yaml:"limited_action_graduation"`
+	CutoverGraduation         []string        `yaml:"cutover_graduation"`
+	LegacyDutiesToRetireOrder []string        `yaml:"legacy_duties_to_retire_in_order"`
 }
 
 func LoadManifestFile(path string) (Config, error) {
