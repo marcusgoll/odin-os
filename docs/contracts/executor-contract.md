@@ -7,13 +7,15 @@ phase: "06"
 
 # Executor Contract
 
-The executor layer provides one portable task contract across plan-backed CLI runners, direct APIs, and broker routes.
+The executor layer provides one portable task contract across harness-driver-backed headless CLIs, direct APIs, and broker routes.
 
 ## Executor classes
 
 - `plan_backed_cli`
 - `api_executor`
 - `broker_executor`
+
+In the current alpha cutover, `plan_backed_cli` means a durable headless lane that delegates to an external harness driver such as Codex or Claude Code. Odin prepares the `TaskSpec`, selects the route, and records runtime state; the harness driver owns the interactive agent session.
 
 ## Portable task spec
 
@@ -29,6 +31,8 @@ Required intent fields:
 - budget hints
 - tool policy
 - capability requirements
+
+Harness-driver executors receive that task spec as structured input on stdin and must return structured status, output, and external id data on stdout.
 
 ## Required methods
 
@@ -52,6 +56,12 @@ Requirements may express:
 - cost estimate support
 - headless plan support
 - broker fallback support
+
+## Harness-driver rules
+
+- headless CLI executors are unavailable until their driver command environment variable is configured
+- route selection may prefer headless lanes, but runtime execution must fail explicitly when no configured headless driver satisfies the route
+- API and broker executors remain distinct classes; they are not substitutes for a required harness-driver lane
 
 ## Important rule
 

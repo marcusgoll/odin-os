@@ -363,7 +363,7 @@ type delegationEnv struct {
 
 func openDelegationEnv(t *testing.T) delegationEnv {
 	t.Helper()
-	return openDelegationEnvWithExecutors(t, router.DefaultCatalog())
+	return openDelegationEnvWithExecutors(t, defaultDelegationExecutors())
 }
 
 func openDelegationEnvWithExecutors(t *testing.T, executors map[string]contract.Executor) delegationEnv {
@@ -420,6 +420,7 @@ func openDelegationEnvWithExecutors(t *testing.T, executors map[string]contract.
 	}); err != nil {
 		t.Fatalf("SetTransitionState(limited_action) error = %v", err)
 	}
+	recordHealthyDelegationExecutor(t, ctx, store, "codex_headless")
 
 	delegationService := Service{
 		Store:            store,
@@ -435,6 +436,36 @@ func openDelegationEnvWithExecutors(t *testing.T, executors map[string]contract.
 	}
 }
 
+func defaultDelegationExecutors() map[string]contract.Executor {
+	return map[string]contract.Executor{
+		"codex_headless": successfulDelegationExecutor{
+			StaticExecutor: contract.NewStaticExecutor(
+				"codex_headless",
+				contract.ExecutorClassPlanBackedCLI,
+				contract.HealthReport{Status: contract.HealthStatusHealthy},
+				contract.Capabilities{
+					SupportsHeadlessPlan: true,
+					TaskKinds:            []contract.TaskKind{contract.TaskKindGeneral},
+					Scopes:               []string{"project", "odin-core", "new-project"},
+				},
+			),
+		},
+	}
+}
+
+func recordHealthyDelegationExecutor(t *testing.T, ctx context.Context, store *sqlite.Store, executorKey string) {
+	t.Helper()
+
+	if _, err := store.RecordExecutorHealth(ctx, sqlite.RecordExecutorHealthParams{
+		Executor:    executorKey,
+		Status:      "healthy",
+		LatencyMS:   0,
+		DetailsJSON: `{"source":"test"}`,
+	}); err != nil {
+		t.Fatalf("RecordExecutorHealth(%s) error = %v", executorKey, err)
+	}
+}
+
 type waveTestExecutor struct {
 	*contract.StaticExecutor
 
@@ -442,6 +473,29 @@ type waveTestExecutor struct {
 	stageRoles   map[int]map[string]bool
 	stageStarted map[int]chan struct{}
 	stageRelease map[int]chan struct{}
+}
+
+type successfulDelegationExecutor struct {
+	*contract.StaticExecutor
+}
+
+func (executor successfulDelegationExecutor) RunTask(_ context.Context, spec contract.TaskSpec) (contract.ExecutionResult, error) {
+	return contract.ExecutionResult{
+		Status: "completed",
+		Output: fmt.Sprintf("%s completed delegated task", spec.Metadata["child_role"]),
+	}, nil
+}
+
+func (successfulDelegationExecutor) ResumeTask(context.Context, contract.TaskHandle, contract.ResumePacket) (contract.ExecutionResult, error) {
+	return contract.ExecutionResult{}, contract.ErrNotImplemented
+}
+
+func (successfulDelegationExecutor) CancelTask(context.Context, contract.TaskHandle) error {
+	return contract.ErrNotImplemented
+}
+
+func (successfulDelegationExecutor) EstimateCost(context.Context, contract.TaskSpec) (contract.CostEstimate, error) {
+	return contract.CostEstimate{}, contract.ErrNotImplemented
 }
 
 func newWaveTestExecutor() *waveTestExecutor {

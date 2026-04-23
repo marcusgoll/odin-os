@@ -67,3 +67,14 @@ Before a later phase is closed, it should be able to answer these questions dire
 - What legacy concept was replaced, and where was that migration recorded?
 
 If a phase cannot answer those questions cleanly, it is not ready to exit.
+
+## Operational autonomy exit criteria
+
+No phase, service mode, or cutover plan may claim operational readiness or primary controller status unless all of the following are true:
+
+- fresh bootstrap reaches healthy state without manual seeding
+- at least one real executor lane completes durable work end to end
+- high-risk work is blocked behind explicit approval records
+- mutable work uses leased task-owned worktrees and branches
+- interrupted work can be recovered after restart
+- multi-project queue control exists and prevents starvation or uncontrolled backlog growth

@@ -73,14 +73,14 @@ func (service Service) RunAgent(ctx context.Context, input RunInput) (sqlite.Tas
 		RequestedBy: requestedBy,
 	})
 	if err != nil {
-		return sqlite.Task{}, nil, RunResult{}, err
+		return sqlite.Task{}, nil, RunResult{}, fmt.Errorf("create parent task: %w", err)
 	}
 
 	parentRun, err := service.startParentRun(ctx, parentTask, input)
 	if err != nil {
 		return parentTask, nil, RunResult{
 			ParentTask: parentTask,
-		}, err
+		}, fmt.Errorf("start parent run: %w", err)
 	}
 	result := RunResult{
 		ParentTask:       parentTask,
@@ -110,7 +110,7 @@ func (service Service) RunAgent(ctx context.Context, input RunInput) (sqlite.Tas
 			}
 			result.ParentTask = parentTask
 			result.ParentRun = &parentRun
-			return parentTask, &parentRun, result, firstErr
+			return parentTask, &parentRun, result, fmt.Errorf("child wave failed: %w", firstErr)
 		}
 	}
 	result.ChildDelegations = compactDelegations(result.ChildDelegations)
@@ -193,7 +193,7 @@ func (service Service) runChildDelegation(ctx context.Context, parentTask sqlite
 		"role":         spec.Role,
 	})
 	if err != nil {
-		return sqlite.Delegation{}, err
+		return sqlite.Delegation{}, fmt.Errorf("create delegation: %w", err)
 	}
 
 	delegation, err := service.Store.CreateDelegation(ctx, sqlite.CreateDelegationParams{
@@ -212,7 +212,7 @@ func (service Service) runChildDelegation(ctx context.Context, parentTask sqlite
 		DetailsJSON:     string(detailsJSON),
 	})
 	if err != nil {
-		return sqlite.Delegation{}, err
+		return sqlite.Delegation{}, fmt.Errorf("create child task: %w", err)
 	}
 
 	childTask, err := service.Jobs.CreateTask(ctx, jobsvc.CreateTaskParams{
@@ -229,11 +229,11 @@ func (service Service) runChildDelegation(ctx context.Context, parentTask sqlite
 		ChildTaskID:  childTask.ID,
 	})
 	if err != nil {
-		return sqlite.Delegation{}, err
+		return sqlite.Delegation{}, fmt.Errorf("attach child task: %w", err)
 	}
 
 	if err := service.recordChildCheckpoint(ctx, childTask, input, delegation, spec); err != nil {
-		return sqlite.Delegation{}, err
+		return sqlite.Delegation{}, fmt.Errorf("record child checkpoint: %w", err)
 	}
 
 	delegation, err = service.Store.UpdateDelegationStatus(ctx, sqlite.UpdateDelegationStatusParams{
@@ -241,7 +241,7 @@ func (service Service) runChildDelegation(ctx context.Context, parentTask sqlite
 		Status:       "running",
 	})
 	if err != nil {
-		return sqlite.Delegation{}, err
+		return sqlite.Delegation{}, fmt.Errorf("mark delegation running: %w", err)
 	}
 
 	requestMetadata := map[string]string{
@@ -259,7 +259,7 @@ func (service Service) runChildDelegation(ctx context.Context, parentTask sqlite
 
 	promptOverride, err := service.childPrompt(spec, input.Inputs)
 	if err != nil {
-		return sqlite.Delegation{}, err
+		return sqlite.Delegation{}, fmt.Errorf("build child prompt: %w", err)
 	}
 
 	outcome, execErr := service.Jobs.ExecuteTaskWithRequest(ctx, childTask.ID, jobsvc.ExecutionRequest{
@@ -278,7 +278,7 @@ func (service Service) runChildDelegation(ctx context.Context, parentTask sqlite
 			ChildRunID:   &outcome.Run.ID,
 		})
 		if err != nil {
-			return sqlite.Delegation{}, err
+			return sqlite.Delegation{}, fmt.Errorf("attach child run: %w", err)
 		}
 	}
 	delegation, err = service.Store.UpdateDelegationStatus(ctx, sqlite.UpdateDelegationStatusParams{
@@ -286,14 +286,14 @@ func (service Service) runChildDelegation(ctx context.Context, parentTask sqlite
 		Status:       childStatus,
 	})
 	if err != nil {
-		return sqlite.Delegation{}, err
+		return sqlite.Delegation{}, fmt.Errorf("mark delegation %s: %w", childStatus, err)
 	}
 
 	if artifactErr := service.recordDelegationArtifacts(ctx, delegation, childTask, outcome, requestMetadata); artifactErr != nil {
-		return sqlite.Delegation{}, artifactErr
+		return sqlite.Delegation{}, fmt.Errorf("record delegation artifacts: %w", artifactErr)
 	}
 	if execErr != nil {
-		return delegation, execErr
+		return delegation, fmt.Errorf("execute child task: %w", execErr)
 	}
 	return delegation, nil
 }
@@ -467,25 +467,25 @@ func (service Service) completeParentRun(ctx context.Context, parentTask sqlite.
 		Status:  status,
 		Summary: summary,
 	}); err != nil {
-		return sqlite.Task{}, sqlite.Run{}, err
+		return sqlite.Task{}, sqlite.Run{}, fmt.Errorf("finish parent run: %w", err)
 	}
 	if _, err := service.Store.UpdateTaskStatus(ctx, sqlite.UpdateTaskStatusParams{
 		TaskID: parentTask.ID,
 		Status: taskStatus,
 	}); err != nil {
-		return sqlite.Task{}, sqlite.Run{}, err
+		return sqlite.Task{}, sqlite.Run{}, fmt.Errorf("update parent task status: %w", err)
 	}
 
 	updatedTask, err := service.Store.GetTask(ctx, parentTask.ID)
 	if err != nil {
-		return sqlite.Task{}, sqlite.Run{}, err
+		return sqlite.Task{}, sqlite.Run{}, fmt.Errorf("reload parent task: %w", err)
 	}
 	updatedRun, err := service.Store.GetRun(ctx, parentRun.ID)
 	if err != nil {
-		return sqlite.Task{}, sqlite.Run{}, err
+		return sqlite.Task{}, sqlite.Run{}, fmt.Errorf("reload parent run: %w", err)
 	}
 	if err := service.recordParentEvidence(ctx, updatedTask, updatedRun, input, result, summary); err != nil {
-		return sqlite.Task{}, sqlite.Run{}, err
+		return sqlite.Task{}, sqlite.Run{}, fmt.Errorf("record parent evidence: %w", err)
 	}
 	return updatedTask, updatedRun, nil
 }
@@ -493,7 +493,7 @@ func (service Service) completeParentRun(ctx context.Context, parentTask sqlite.
 func (service Service) recordParentEvidence(ctx context.Context, parentTask sqlite.Task, parentRun sqlite.Run, input RunInput, result RunResult, summary string) error {
 	project, err := service.Store.GetProject(ctx, parentTask.ProjectID)
 	if err != nil {
-		return err
+		return fmt.Errorf("load parent project: %w", err)
 	}
 
 	toolSummaryBytes, err := json.Marshal(map[string]string{
@@ -521,7 +521,7 @@ func (service Service) recordParentEvidence(ctx context.Context, parentTask sqli
 		Executor:    parentRun.Executor,
 	})
 	if err != nil {
-		return err
+		return fmt.Errorf("record parent transcript: %w", err)
 	}
 
 	detailsBytes, err := json.Marshal(map[string]any{
@@ -548,7 +548,10 @@ func (service Service) recordParentEvidence(ctx context.Context, parentTask sqli
 		Summary:            summary,
 		DetailsJSON:        string(detailsBytes),
 	})
-	return err
+	if err != nil {
+		return fmt.Errorf("record parent memory summary: %w", err)
+	}
+	return nil
 }
 
 func parentTaskTitle(agentKey string, inputs map[string]string) string {

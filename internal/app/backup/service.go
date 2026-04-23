@@ -5,12 +5,14 @@ import (
 	"compress/gzip"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	_ "modernc.org/sqlite"
 )
@@ -18,6 +20,14 @@ import (
 type Service struct {
 	RepoRoot    string
 	RuntimeRoot string
+}
+
+type VerificationStatus struct {
+	Present     bool
+	Fresh       bool
+	ArchivePath string
+	VerifiedAt  time.Time
+	MaxAge      time.Duration
 }
 
 func (service Service) CreateArchive(_ context.Context, archivePath string) error {
@@ -156,7 +166,50 @@ func (service Service) VerifyArchive(ctx context.Context, archivePath string) er
 	}
 	defer db.Close()
 
-	return db.PingContext(ctx)
+	if err := db.PingContext(ctx); err != nil {
+		return err
+	}
+
+	return service.writeVerificationReceipt(archivePath, time.Now().UTC())
+}
+
+func (service Service) VerificationStatus(maxAge time.Duration, now time.Time) (VerificationStatus, error) {
+	runtimeRoot := service.runtimeRoot()
+	if runtimeRoot == "" {
+		return VerificationStatus{}, fmt.Errorf("runtime root is required")
+	}
+	if maxAge <= 0 {
+		maxAge = 24 * time.Hour
+	}
+
+	receiptPath := filepath.Join(runtimeRoot, "state", "backup", "latest-verification.json")
+	content, err := os.ReadFile(receiptPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return VerificationStatus{MaxAge: maxAge}, nil
+		}
+		return VerificationStatus{}, err
+	}
+
+	var receipt struct {
+		ArchivePath string `json:"archive_path"`
+		VerifiedAt  string `json:"verified_at"`
+	}
+	if err := json.Unmarshal(content, &receipt); err != nil {
+		return VerificationStatus{}, err
+	}
+	verifiedAt, err := time.Parse(time.RFC3339Nano, receipt.VerifiedAt)
+	if err != nil {
+		return VerificationStatus{}, err
+	}
+
+	return VerificationStatus{
+		Present:     true,
+		Fresh:       now.UTC().Sub(verifiedAt.UTC()) <= maxAge,
+		ArchivePath: receipt.ArchivePath,
+		VerifiedAt:  verifiedAt.UTC(),
+		MaxAge:      maxAge,
+	}, nil
 }
 
 func sqliteSnapshot(path string) (string, error) {
@@ -256,4 +309,36 @@ func archiveTargetPath(destinationRoot string, archiveName string) (string, erro
 		return "", fmt.Errorf("archive path %q escapes restore root", archiveName)
 	}
 	return targetPath, nil
+}
+
+func (service Service) runtimeRoot() string {
+	if service.RuntimeRoot != "" {
+		return service.RuntimeRoot
+	}
+	return service.RepoRoot
+}
+
+func (service Service) writeVerificationReceipt(archivePath string, verifiedAt time.Time) error {
+	runtimeRoot := service.runtimeRoot()
+	if runtimeRoot == "" {
+		return nil
+	}
+
+	receiptPath := filepath.Join(runtimeRoot, "state", "backup", "latest-verification.json")
+	if err := os.MkdirAll(filepath.Dir(receiptPath), 0o755); err != nil {
+		return err
+	}
+
+	content, err := json.Marshal(struct {
+		ArchivePath string `json:"archive_path"`
+		VerifiedAt  string `json:"verified_at"`
+	}{
+		ArchivePath: archivePath,
+		VerifiedAt:  verifiedAt.UTC().Format(time.RFC3339Nano),
+	})
+	if err != nil {
+		return err
+	}
+
+	return os.WriteFile(receiptPath, content, 0o644)
 }

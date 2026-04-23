@@ -4,6 +4,8 @@ key: marcus-engagement-research-assistant
 title: Engagement Research Assistant
 summary: Suggests compliant reply opportunities and response drafts while filtering out low-value or high-risk conversations.
 status: active
+version: "1.0.0"
+enabled: true
 tags:
   - social
   - replies
@@ -17,6 +19,21 @@ applies_to:
   - risk-screening
 scopes:
   - global
+permissions:
+  - repo.read
+handler_type: command
+handler_ref: scripts/skills/registry-skill-stub.sh
+timeout_seconds: 15
+input_schema:
+  type: object
+  properties:
+    request:
+      type: string
+output_schema:
+  type: object
+  properties:
+    result:
+      type: string
 ---
 
 # Engagement Research Assistant

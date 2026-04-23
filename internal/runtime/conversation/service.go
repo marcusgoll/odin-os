@@ -14,23 +14,26 @@ import (
 	executorrouter "odin-os/internal/executors/router"
 	healthsvc "odin-os/internal/runtime/health"
 	jobsvc "odin-os/internal/runtime/jobs"
+	"odin-os/internal/runtime/projections"
 	runsvc "odin-os/internal/runtime/runs"
 	"odin-os/internal/store/sqlite"
 )
 
 type Service struct {
 	Store               *sqlite.Store
+	DB                  *sql.DB
 	Registry            projects.Registry
 	RegistryDiagnostics []projects.Diagnostic
 	ExecutorConfig      executorrouter.Config
 	Executors           map[string]contract.Executor
+	Now                 func() time.Time
+	StalledTimeout      time.Duration
 }
 
 type Request struct {
-	Scope          scope.Resolution
-	Mode           string
-	Prompt         string
-	ExecutorPrompt string
+	Scope  scope.Resolution
+	Mode   string
+	Prompt string
 }
 
 type Response struct {
@@ -41,6 +44,66 @@ type Response struct {
 	Warning     string
 }
 
+type Snapshot struct {
+	GeneratedAt                time.Time                        `json:"generated_at"`
+	ApprovalsWaiting           []ApprovalWaitingView            `json:"approvals_waiting"`
+	StalledRuns                []StalledRunView                 `json:"stalled_runs"`
+	ActiveRuns                 []ActiveRunView                  `json:"active_runs"`
+	ProjectTransitions         []ProjectTransitionView          `json:"project_transitions"`
+	ProjectTransitionOwnership ProjectTransitionOwnership       `json:"project_transition_ownership"`
+	CompanionSwarms            []projections.CompanionSwarmView `json:"companion_swarms"`
+}
+
+type ApprovalWaitingView struct {
+	ApprovalID  int64  `json:"approval_id"`
+	TaskID      int64  `json:"task_id"`
+	TaskKey     string `json:"task_key"`
+	Status      string `json:"status"`
+	RequestedAt string `json:"requested_at"`
+}
+
+type ActiveRunView struct {
+	RunID      int64  `json:"run_id"`
+	TaskID     int64  `json:"task_id"`
+	TaskKey    string `json:"task_key"`
+	ProjectKey string `json:"project_key"`
+	Executor   string `json:"executor"`
+	Status     string `json:"status"`
+	Attempt    int    `json:"attempt"`
+	StartedAt  string `json:"started_at"`
+}
+
+type StalledRunView struct {
+	RunID      int64  `json:"run_id"`
+	TaskID     int64  `json:"task_id"`
+	TaskKey    string `json:"task_key"`
+	ProjectKey string `json:"project_key"`
+	Executor   string `json:"executor"`
+	Status     string `json:"status"`
+	Attempt    int    `json:"attempt"`
+	StartedAt  string `json:"started_at"`
+}
+
+type ProjectTransitionView struct {
+	ProjectID       int64   `json:"project_id"`
+	ProjectKey      string  `json:"project_key"`
+	Name            string  `json:"name"`
+	Scope           string  `json:"scope"`
+	TaskCount       int     `json:"task_count"`
+	OpenTaskCount   int     `json:"open_task_count"`
+	LastEventAt     *string `json:"last_event_at,omitempty"`
+	TransitionState string  `json:"transition_state"`
+	Controller      string  `json:"controller"`
+	LastReportType  string  `json:"last_report_type"`
+	LastReportAt    *string `json:"last_report_at,omitempty"`
+}
+
+type ProjectTransitionOwnership struct {
+	LegacyOdin int `json:"legacy_odin"`
+	OdinOS     int `json:"odin_os"`
+	Unknown    int `json:"unknown"`
+}
+
 func (service Service) Respond(ctx context.Context, request Request) (Response, error) {
 	if service.Store == nil {
 		return Response{}, fmt.Errorf("conversation store is required")
@@ -49,10 +112,6 @@ func (service Service) Respond(ctx context.Context, request Request) (Response, 
 	prompt := strings.TrimSpace(request.Prompt)
 	if prompt == "" {
 		return Response{}, fmt.Errorf("prompt is required")
-	}
-	executorPrompt := prompt
-	if override := strings.TrimSpace(request.ExecutorPrompt); override != "" {
-		executorPrompt = override
 	}
 
 	scopeLabel := service.scopeLabel(request.Scope)
@@ -134,7 +193,7 @@ func (service Service) Respond(ctx context.Context, request Request) (Response, 
 			ScopeLabel: scopeLabel,
 		}
 	default:
-		answer, executorKey, warning, err := service.executorAnswer(ctx, request, executorPrompt, scopeLabel)
+		answer, executorKey, warning, err := service.executorAnswer(ctx, request, prompt, scopeLabel)
 		if err != nil {
 			return Response{}, err
 		}
@@ -154,8 +213,67 @@ func (service Service) Respond(ctx context.Context, request Request) (Response, 
 	return response, nil
 }
 
+func (service Service) Snapshot(ctx context.Context) (Snapshot, error) {
+	db := service.DB
+	if db == nil && service.Store != nil {
+		db = service.Store.DB()
+	}
+	if db == nil {
+		return Snapshot{}, fmt.Errorf("status store is required")
+	}
+
+	now := time.Now().UTC()
+	if service.Now != nil {
+		now = service.Now().UTC()
+	}
+	stalledTimeout := service.StalledTimeout
+	if stalledTimeout <= 0 {
+		stalledTimeout = 30 * time.Minute
+	}
+
+	tx, err := db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return Snapshot{}, err
+	}
+	defer tx.Rollback()
+
+	approvals, err := projections.ListPendingApprovalViews(ctx, tx)
+	if err != nil {
+		return Snapshot{}, err
+	}
+	activeRuns, err := projections.ListActiveRunViews(ctx, tx)
+	if err != nil {
+		return Snapshot{}, err
+	}
+	stalledRuns, err := projections.ListStalledRunViews(ctx, tx, now.Add(-stalledTimeout))
+	if err != nil {
+		return Snapshot{}, err
+	}
+	transitions, err := projections.ListProjectTransitionViews(ctx, tx)
+	if err != nil {
+		return Snapshot{}, err
+	}
+	companionSwarms, err := projections.ListCompanionSwarmViews(ctx, tx, "")
+	if err != nil {
+		return Snapshot{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return Snapshot{}, err
+	}
+
+	return Snapshot{
+		GeneratedAt:                now,
+		ApprovalsWaiting:           toApprovalWaitingViews(approvals),
+		StalledRuns:                toStalledRunViews(stalledRuns),
+		ActiveRuns:                 toActiveRunViews(activeRuns),
+		ProjectTransitions:         toProjectTransitionViews(transitions),
+		ProjectTransitionOwnership: summarizeProjectTransitions(transitions),
+		CompanionSwarms:            companionSwarms,
+	}, nil
+}
+
 func helpAnswer() string {
-	return "Available commands: " + commands.ShellCommandSummary + ". Use " + commands.SkillUsage + " to select a working skill, " + commands.ToolUsage + " to run live tools, and switch to /mode act to execute durable work."
+	return "Available commands: /help /mode /scope /project /transition /observe /compare /jobs /runs /approvals /logs /doctor /self. Switch to /mode act to execute durable work."
 }
 
 func (service Service) modeLabel(mode string) string {
@@ -221,6 +339,9 @@ func (service Service) jobsAnswer(ctx context.Context, resolved scope.Resolution
 }
 
 func (service Service) runsAnswer(ctx context.Context, resolved scope.Resolution) (string, error) {
+	if service.Store == nil {
+		return "", fmt.Errorf("conversation store is required")
+	}
 	views, err := runsvc.Service{DB: service.Store.DB()}.List(ctx, resolved)
 	if err != nil {
 		return "", err
@@ -251,6 +372,10 @@ func (service Service) approvalsAnswer(ctx context.Context, resolved scope.Resol
 }
 
 func (service Service) logsAnswer(ctx context.Context, resolved scope.Resolution) (string, error) {
+	if service.Store == nil {
+		return "", fmt.Errorf("conversation store is required")
+	}
+
 	params := sqlite.ListEventsParams{}
 	if resolved.Kind == scope.ScopeProject || resolved.Kind == scope.ScopeOdinCore {
 		project, err := service.Store.GetProjectByKey(ctx, resolved.ProjectKey)
@@ -286,6 +411,9 @@ func (service Service) logsAnswer(ctx context.Context, resolved scope.Resolution
 }
 
 func (service Service) doctorAnswer(ctx context.Context) (string, error) {
+	if service.Store == nil {
+		return "", fmt.Errorf("conversation store is required")
+	}
 	summary, err := healthsvc.Service{DB: service.Store.DB()}.Summary(ctx, len(service.RegistryDiagnostics) == 0)
 	if err != nil {
 		return "", err
@@ -371,6 +499,9 @@ func (service Service) recordTranscript(ctx context.Context, request Request, re
 }
 
 func (service Service) projectIDForScope(ctx context.Context, resolved scope.Resolution) (*int64, error) {
+	if service.Store == nil {
+		return nil, nil
+	}
 	if strings.TrimSpace(resolved.ProjectKey) == "" {
 		return nil, nil
 	}
@@ -400,6 +531,10 @@ type pendingApprovalView struct {
 }
 
 func (service Service) pendingApprovals(ctx context.Context) ([]pendingApprovalView, error) {
+	if service.Store == nil {
+		return nil, fmt.Errorf("conversation store is required")
+	}
+
 	rows, err := service.Store.DB().QueryContext(ctx, `
 		SELECT t.key, a.status, t.scope, p.key
 		FROM approvals a
@@ -451,4 +586,87 @@ func matchesEventScope(eventScope string, resolved scope.Resolution) bool {
 	default:
 		return false
 	}
+}
+
+func toApprovalWaitingViews(views []projections.PendingApprovalView) []ApprovalWaitingView {
+	result := make([]ApprovalWaitingView, 0, len(views))
+	for _, view := range views {
+		result = append(result, ApprovalWaitingView{
+			ApprovalID:  view.ApprovalID,
+			TaskID:      view.TaskID,
+			TaskKey:     view.TaskKey,
+			Status:      view.Status,
+			RequestedAt: view.RequestedAt,
+		})
+	}
+	return result
+}
+
+func toActiveRunViews(views []projections.ActiveRunView) []ActiveRunView {
+	result := make([]ActiveRunView, 0, len(views))
+	for _, view := range views {
+		result = append(result, ActiveRunView{
+			RunID:      view.RunID,
+			TaskID:     view.TaskID,
+			TaskKey:    view.TaskKey,
+			ProjectKey: view.ProjectKey,
+			Executor:   view.Executor,
+			Status:     view.Status,
+			Attempt:    view.Attempt,
+			StartedAt:  view.StartedAt,
+		})
+	}
+	return result
+}
+
+func toStalledRunViews(views []projections.StalledRunView) []StalledRunView {
+	result := make([]StalledRunView, 0, len(views))
+	for _, view := range views {
+		result = append(result, StalledRunView{
+			RunID:      view.RunID,
+			TaskID:     view.TaskID,
+			TaskKey:    view.TaskKey,
+			ProjectKey: view.ProjectKey,
+			Executor:   view.Executor,
+			Status:     view.Status,
+			Attempt:    view.Attempt,
+			StartedAt:  view.StartedAt,
+		})
+	}
+	return result
+}
+
+func toProjectTransitionViews(views []projections.ProjectTransitionView) []ProjectTransitionView {
+	result := make([]ProjectTransitionView, 0, len(views))
+	for _, view := range views {
+		result = append(result, ProjectTransitionView{
+			ProjectID:       view.ProjectID,
+			ProjectKey:      view.ProjectKey,
+			Name:            view.Name,
+			Scope:           view.Scope,
+			TaskCount:       view.TaskCount,
+			OpenTaskCount:   view.OpenTaskCount,
+			LastEventAt:     view.LastEventAt,
+			TransitionState: view.TransitionState,
+			Controller:      view.Controller,
+			LastReportType:  view.LastReportType,
+			LastReportAt:    view.LastReportAt,
+		})
+	}
+	return result
+}
+
+func summarizeProjectTransitions(views []projections.ProjectTransitionView) ProjectTransitionOwnership {
+	var summary ProjectTransitionOwnership
+	for _, view := range views {
+		switch view.Controller {
+		case "legacy_odin":
+			summary.LegacyOdin++
+		case "odin_os":
+			summary.OdinOS++
+		default:
+			summary.Unknown++
+		}
+	}
+	return summary
 }

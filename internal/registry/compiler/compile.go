@@ -1,6 +1,8 @@
 package compiler
 
 import (
+	"strings"
+
 	"odin-os/internal/registry"
 	"odin-os/internal/registry/validator"
 )
@@ -29,30 +31,7 @@ func Compile(documents []registry.ParsedDocument, parserDiagnostics []registry.D
 			continue
 		}
 
-		item := registry.Item{
-			Kind:       document.Frontmatter.Kind,
-			Key:        document.Frontmatter.Key,
-			Title:      document.Frontmatter.Title,
-			Summary:    document.Frontmatter.Summary,
-			Status:     document.Frontmatter.Status,
-			Tags:       append([]string(nil), document.Frontmatter.Tags...),
-			Owners:     append([]string(nil), document.Frontmatter.Owners...),
-			Role:       document.Frontmatter.Role,
-			Scopes:     append([]string(nil), document.Frontmatter.Scopes...),
-			Tools:      append([]string(nil), document.Frontmatter.Tools...),
-			Strictness: document.Frontmatter.Strictness,
-			AppliesTo:  append([]string(nil), document.Frontmatter.AppliesTo...),
-			Entrypoint: document.Frontmatter.Entrypoint,
-			Composes:   append([]string(nil), document.Frontmatter.Composes...),
-			Command:    document.Frontmatter.Command,
-			Aliases:    append([]string(nil), document.Frontmatter.Aliases...),
-			Sections:   cloneSections(document.Sections),
-			Source: registry.SourceInfo{
-				Path:         document.Source.Path,
-				RelativePath: document.Source.RelativePath,
-			},
-		}
-
+		item := compileItem(document)
 		snapshot.Items = append(snapshot.Items, item)
 		snapshot.ByKey[item.Key] = item
 		snapshot.ByKind[item.Kind] = append(snapshot.ByKind[item.Kind], item)
@@ -67,4 +46,137 @@ func cloneSections(sections map[string]string) map[string]string {
 		cloned[key] = value
 	}
 	return cloned
+}
+
+func cloneAnyMap(values map[string]any) map[string]any {
+	if len(values) == 0 {
+		return nil
+	}
+
+	cloned := make(map[string]any, len(values))
+	for key, value := range values {
+		cloned[key] = cloneAnyValue(value)
+	}
+	return cloned
+}
+
+func cloneAnyValue(value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		return cloneAnyMap(typed)
+	case []any:
+		cloned := make([]any, len(typed))
+		for i := range typed {
+			cloned[i] = cloneAnyValue(typed[i])
+		}
+		return cloned
+	default:
+		return typed
+	}
+}
+
+func compileItem(document registry.ParsedDocument) registry.Item {
+	frontmatter := document.Frontmatter
+	name := strings.TrimSpace(frontmatter.Name)
+	if name == "" {
+		name = strings.TrimSpace(frontmatter.Key)
+	}
+	key := strings.TrimSpace(frontmatter.Key)
+	if frontmatter.UsesNormalizedManifest() {
+		key = name
+	} else if key == "" {
+		key = name
+	}
+
+	availability := frontmatter.Availability
+	if strings.TrimSpace(availability.Scope) == "" && len(frontmatter.Scopes) > 0 {
+		availability.Scope = frontmatter.Scopes[0]
+	}
+	scopes := append([]string(nil), frontmatter.Scopes...)
+	if frontmatter.UsesNormalizedManifest() && len(scopes) == 0 && strings.TrimSpace(availability.Scope) != "" {
+		scopes = []string{strings.TrimSpace(availability.Scope)}
+	}
+
+	permissions := append([]string(nil), frontmatter.Permissions...)
+	if len(permissions) == 0 {
+		permissions = append([]string(nil), frontmatter.Tools...)
+	}
+
+	dependencies := append([]registry.DependencyRef(nil), frontmatter.Dependencies...)
+	if len(dependencies) == 0 && len(frontmatter.Composes) > 0 {
+		dependencies = make([]registry.DependencyRef, 0, len(frontmatter.Composes))
+		for _, compose := range frontmatter.Composes {
+			dependencies = append(dependencies, registry.DependencyRef{Name: compose})
+		}
+	}
+
+	execution := frontmatter.Execution
+	if strings.TrimSpace(execution.Mode) == "" {
+		switch frontmatter.Kind {
+		case registry.KindCommand:
+			execution.Mode = "command"
+		case registry.KindWorkflow:
+			execution.Mode = "workflow"
+		case registry.KindSkill:
+			execution.Mode = "skill"
+		case registry.KindAgent:
+			execution.Mode = "agent"
+		}
+	}
+
+	implementation := frontmatter.Implementation
+	if strings.TrimSpace(implementation.Kind) == "" {
+		implementation.Kind = "markdown"
+	}
+	if !frontmatter.UsesNormalizedManifest() && strings.TrimSpace(implementation.Path) == "" {
+		implementation.Path = document.Source.RelativePath
+	}
+
+	return registry.Item{
+		APIVersion:     frontmatter.APIVersion,
+		Kind:           frontmatter.Kind,
+		Name:           name,
+		Version:        frontmatter.Version,
+		Availability:   availability,
+		Permissions:    permissions,
+		InputSchema:    frontmatter.InputSchema,
+		OutputSchema:   frontmatter.OutputSchema,
+		Dependencies:   dependencies,
+		Execution:      execution,
+		Implementation: implementation,
+
+		Key:                key,
+		Title:              fallbackString(frontmatter.Title, name),
+		Summary:            frontmatter.Summary,
+		Status:             frontmatter.Status,
+		Enabled:            frontmatter.Enabled != nil && *frontmatter.Enabled,
+		Tags:               append([]string(nil), frontmatter.Tags...),
+		Owners:             append([]string(nil), frontmatter.Owners...),
+		Role:               frontmatter.Role,
+		Scopes:             scopes,
+		Tools:              append([]string(nil), frontmatter.Tools...),
+		Strictness:         frontmatter.Strictness,
+		AppliesTo:          append([]string(nil), frontmatter.AppliesTo...),
+		LegacyInputSchema:  cloneAnyMap(frontmatter.LegacyInputSchema),
+		LegacyOutputSchema: cloneAnyMap(frontmatter.LegacyOutputSchema),
+		HandlerType:        frontmatter.HandlerType,
+		HandlerRef:         frontmatter.HandlerRef,
+		TimeoutSeconds:     frontmatter.TimeoutSeconds,
+		Entrypoint:         frontmatter.Entrypoint,
+		Composes:           append([]string(nil), frontmatter.Composes...),
+		Command:            frontmatter.Command,
+		Aliases:            append([]string(nil), frontmatter.Aliases...),
+		Sections:           cloneSections(document.Sections),
+		Source: registry.SourceInfo{
+			Path:         document.Source.Path,
+			RelativePath: document.Source.RelativePath,
+		},
+	}
+}
+
+func fallbackString(value string, fallback string) string {
+	if strings.TrimSpace(value) == "" {
+		return fallback
+	}
+	return value
 }

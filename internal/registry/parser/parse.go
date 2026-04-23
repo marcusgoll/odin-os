@@ -30,6 +30,10 @@ func ParseSource(source registry.SourceFile, content []byte) (registry.ParsedDoc
 		}
 	}
 
+	if strings.TrimSpace(frontmatter.Key) == "" {
+		frontmatter.Key = strings.TrimSpace(frontmatter.Name)
+	}
+
 	sections, order, diagnostics := extractSections(source.Path, body)
 
 	document.Frontmatter = frontmatter

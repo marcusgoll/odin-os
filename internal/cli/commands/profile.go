@@ -52,8 +52,8 @@ func RunProfile(ctx context.Context, store *sqlite.Store, args []string, stdout 
 	}
 
 	service := coreprofile.Service{
-		Store:       store,
-		WorkspaceID: coreprofile.DefaultWorkspaceID,
+		Store:        store,
+		WorkspaceKey: coreprofile.DefaultWorkspaceKey,
 	}
 
 	switch command.Action {
@@ -83,7 +83,7 @@ func renderProfile(stdout io.Writer, profile coreprofile.OperatingProfile) error
 	}
 
 	_, err := fmt.Fprintf(stdout, "workspace=%s quiet_hours=%s approval_required=%t\n",
-		profile.WorkspaceID,
+		profile.WorkspaceKey,
 		quietHours,
 		profile.Boundaries.ApprovalDefaults.RequireHumanApprovalForExternalEffects,
 	)

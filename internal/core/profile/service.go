@@ -7,12 +7,14 @@ import (
 	"errors"
 	"fmt"
 
+	coreworkspaces "odin-os/internal/core/workspaces"
+	memoryworkspaces "odin-os/internal/memory/workspaces"
 	"odin-os/internal/store/sqlite"
 )
 
 type Service struct {
-	Store       *sqlite.Store
-	WorkspaceID string
+	Store        *sqlite.Store
+	WorkspaceKey string
 }
 
 func (service Service) Bootstrap(ctx context.Context) (OperatingProfile, error) {
@@ -24,24 +26,29 @@ func (service Service) Get(ctx context.Context) (OperatingProfile, error) {
 		return OperatingProfile{}, fmt.Errorf("profile store is required")
 	}
 
-	workspaceID := service.workspaceID()
-	record, err := service.Store.GetWorkspaceProfile(ctx, workspaceID)
+	workspace, err := service.workspace(ctx)
+	if err != nil {
+		return OperatingProfile{}, err
+	}
+
+	record, err := service.Store.GetWorkspaceProfile(ctx, workspace.ID)
 	if err == nil {
-		return decodeWorkspaceProfile(record)
+		return decodeWorkspaceProfile(workspace, record)
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
 		return OperatingProfile{}, err
 	}
 
 	profile := OperatingProfile{
-		WorkspaceID: workspaceID,
+		WorkspaceID:  workspace.ID,
+		WorkspaceKey: workspace.Key,
 		Boundaries: Boundaries{
 			ApprovalDefaults: ApprovalDefaults{
 				RequireHumanApprovalForExternalEffects: true,
 			},
 		},
 	}
-	return service.save(ctx, profile)
+	return service.save(ctx, workspace, profile)
 }
 
 func (service Service) Update(ctx context.Context, params UpdateParams) (OperatingProfile, error) {
@@ -60,10 +67,29 @@ func (service Service) Update(ctx context.Context, params UpdateParams) (Operati
 		current.CadenceDefaults.ReviewCadence = *params.ReviewCadence
 	}
 
-	return service.save(ctx, current)
+	workspace, err := service.workspace(ctx)
+	if err != nil {
+		return OperatingProfile{}, err
+	}
+
+	updated, err := service.save(ctx, workspace, current)
+	if err != nil {
+		return OperatingProfile{}, err
+	}
+
+	summary, detailsJSON, changed, err := describeProfileUpdate(params)
+	if err != nil {
+		return OperatingProfile{}, err
+	}
+	if changed {
+		// Profile persistence is the primary mutation; memory summaries are best-effort.
+		_, _ = (memoryworkspaces.Service{Store: service.Store}).RememberProfileUpdate(ctx, workspace.ID, summary, detailsJSON)
+	}
+
+	return updated, nil
 }
 
-func (service Service) save(ctx context.Context, profile OperatingProfile) (OperatingProfile, error) {
+func (service Service) save(ctx context.Context, workspace coreworkspaces.Workspace, profile OperatingProfile) (OperatingProfile, error) {
 	if service.Store == nil {
 		return OperatingProfile{}, fmt.Errorf("profile store is required")
 	}
@@ -82,7 +108,7 @@ func (service Service) save(ctx context.Context, profile OperatingProfile) (Oper
 	}
 
 	record, err := service.Store.UpsertWorkspaceProfile(ctx, sqlite.UpsertWorkspaceProfileParams{
-		WorkspaceID:         service.workspaceID(),
+		WorkspaceID:         workspace.ID,
 		PreferencesJSON:     string(preferencesJSON),
 		BoundariesJSON:      string(boundariesJSON),
 		CadenceDefaultsJSON: string(cadenceDefaultsJSON),
@@ -91,12 +117,13 @@ func (service Service) save(ctx context.Context, profile OperatingProfile) (Oper
 		return OperatingProfile{}, err
 	}
 
-	return decodeWorkspaceProfile(record)
+	return decodeWorkspaceProfile(workspace, record)
 }
 
-func decodeWorkspaceProfile(record sqlite.WorkspaceProfile) (OperatingProfile, error) {
+func decodeWorkspaceProfile(workspace coreworkspaces.Workspace, record sqlite.WorkspaceProfile) (OperatingProfile, error) {
 	var profile OperatingProfile
 	profile.WorkspaceID = record.WorkspaceID
+	profile.WorkspaceKey = workspace.Key
 
 	if err := json.Unmarshal([]byte(record.PreferencesJSON), &profile.Preferences); err != nil {
 		return OperatingProfile{}, err
@@ -112,9 +139,38 @@ func decodeWorkspaceProfile(record sqlite.WorkspaceProfile) (OperatingProfile, e
 	return profile, nil
 }
 
-func (service Service) workspaceID() string {
-	if service.WorkspaceID != "" {
-		return service.WorkspaceID
+func (service Service) workspace(ctx context.Context) (coreworkspaces.Workspace, error) {
+	workspaceService := coreworkspaces.Service{Store: service.Store}
+	if service.workspaceKey() == coreworkspaces.DefaultWorkspaceKey {
+		return workspaceService.BootstrapDefaultWorkspace(ctx)
 	}
-	return DefaultWorkspaceID
+	return workspaceService.GetWorkspaceByKey(ctx, service.workspaceKey())
+}
+
+func (service Service) workspaceKey() string {
+	if service.WorkspaceKey != "" {
+		return service.WorkspaceKey
+	}
+	return DefaultWorkspaceKey
+}
+
+func describeProfileUpdate(params UpdateParams) (string, string, bool, error) {
+	details := map[string]any{}
+	if params.QuietHours != nil {
+		details["quiet_hours"] = *params.QuietHours
+	}
+	if params.RequireHumanApprovalForExternalEffects != nil {
+		details["require_human_approval_for_external_effects"] = *params.RequireHumanApprovalForExternalEffects
+	}
+	if params.ReviewCadence != nil {
+		details["review_cadence"] = *params.ReviewCadence
+	}
+	if len(details) == 0 {
+		return "", "", false, nil
+	}
+	payload, err := json.Marshal(details)
+	if err != nil {
+		return "", "", false, err
+	}
+	return "Updated operating profile", string(payload), true, nil
 }

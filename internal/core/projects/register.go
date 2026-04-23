@@ -13,19 +13,28 @@ type Registry struct {
 	projects      []Manifest
 	projectsByKey map[string]Manifest
 	systemProject *Manifest
+	cutover       CutoverConfig
 	configPath    string
 }
 
 func Register(path string) (Registry, []Diagnostic, error) {
-	cfg, err := LoadManifestFile(path)
+	return RegisterPaths(path)
+}
+
+func RegisterPaths(paths ...string) (Registry, []Diagnostic, error) {
+	cfg, err := LoadManifestFiles(paths...)
 	if err != nil {
 		return Registry{}, nil, err
 	}
 
+	diagnostics := Validate(cfg)
 	registry := Registry{
 		projects:      make([]Manifest, len(cfg.Projects)),
 		projectsByKey: make(map[string]Manifest, len(cfg.Projects)),
-		configPath:    path,
+		cutover:       cfg.Cutover,
+	}
+	if len(paths) == 1 {
+		registry.configPath = paths[0]
 	}
 	copy(registry.projects, cfg.Projects)
 
@@ -37,11 +46,36 @@ func Register(path string) (Registry, []Diagnostic, error) {
 		}
 	}
 
-	diagnostics := Validate(cfg)
 	if len(diagnostics) != 0 {
 		return registry, diagnostics, nil
 	}
 	return registry, nil, nil
+}
+
+func (registry Registry) Lookup(key string) (Manifest, bool) {
+	project, ok := registry.projectsByKey[key]
+	return project, ok
+}
+
+func (registry Registry) SystemProject() (Manifest, bool) {
+	if registry.systemProject == nil {
+		return Manifest{}, false
+	}
+	return *registry.systemProject, true
+}
+
+func (registry Registry) Projects() []Manifest {
+	projects := make([]Manifest, len(registry.projects))
+	copy(projects, registry.projects)
+	return projects
+}
+
+func (registry Registry) CutoverPilotProject(key string) (CutoverPilotProject, bool) {
+	return registry.cutover.PilotProject(key)
+}
+
+func (registry Registry) ConfigPath() string {
+	return registry.configPath
 }
 
 func AppendProject(path string, manifest Manifest) (Registry, []Diagnostic, error) {
@@ -124,28 +158,6 @@ func UpdateProject(path string, key string, mutate func(*Manifest) error) (Regis
 	}
 
 	return Register(path)
-}
-
-func (registry Registry) Lookup(key string) (Manifest, bool) {
-	project, ok := registry.projectsByKey[key]
-	return project, ok
-}
-
-func (registry Registry) SystemProject() (Manifest, bool) {
-	if registry.systemProject == nil {
-		return Manifest{}, false
-	}
-	return *registry.systemProject, true
-}
-
-func (registry Registry) Projects() []Manifest {
-	projects := make([]Manifest, len(registry.projects))
-	copy(projects, registry.projects)
-	return projects
-}
-
-func (registry Registry) ConfigPath() string {
-	return registry.configPath
 }
 
 func loadRawConfig(path string) (Config, error) {

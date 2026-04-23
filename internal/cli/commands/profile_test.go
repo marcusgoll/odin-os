@@ -24,7 +24,7 @@ func TestRunProfileShowsDefaultProfileState(t *testing.T) {
 	}
 
 	output := stdout.String()
-	if !strings.Contains(output, coreprofile.DefaultWorkspaceID) {
+	if !strings.Contains(output, coreprofile.DefaultWorkspaceKey) {
 		t.Fatalf("show output = %q, want workspace id", output)
 	}
 	if !strings.Contains(output, "quiet_hours") {

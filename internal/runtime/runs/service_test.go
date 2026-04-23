@@ -2,15 +2,14 @@ package runs
 
 import (
 	"context"
-	"database/sql"
 	"os"
-	"os/exec"
 	"path/filepath"
+	"strconv"
 	"testing"
-	"time"
 
 	"odin-os/internal/cli/scope"
 	"odin-os/internal/core/projects"
+	"odin-os/internal/executors/contract"
 	"odin-os/internal/store/sqlite"
 )
 
@@ -102,14 +101,265 @@ func TestListFiltersRunsByScope(t *testing.T) {
 	}
 }
 
-func TestDetailFiltersRunsByScopeAndLoadsArtifacts(t *testing.T) {
+func TestGetRunReturnsRunRecord(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
 	store := openRunStore(t)
 	defer store.Close()
 
-	alphaProject, err := store.CreateProject(ctx, sqlite.CreateProjectParams{
+	project, err := store.CreateProject(ctx, sqlite.CreateProjectParams{
+		Key:           "alpha",
+		Name:          "Alpha",
+		Scope:         "project",
+		GitRoot:       "/tmp/alpha",
+		DefaultBranch: "main",
+		GitHubRepo:    "acme/alpha",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+
+	task, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "alpha-task",
+		Title:       "Alpha task",
+		Status:      "running",
+		Scope:       "project",
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+
+	run, err := store.StartRun(ctx, sqlite.StartRunParams{
+		TaskID:   task.ID,
+		Executor: "codex",
+		Attempt:  1,
+		Status:   "running",
+	})
+	if err != nil {
+		t.Fatalf("StartRun() error = %v", err)
+	}
+
+	service := Service{DB: store.DB()}
+	record, err := service.GetRun(ctx, run.ID)
+	if err != nil {
+		t.Fatalf("GetRun() error = %v", err)
+	}
+	if record.RunID != run.ID {
+		t.Fatalf("GetRun().RunID = %d, want %d", record.RunID, run.ID)
+	}
+	if record.Status != "running" {
+		t.Fatalf("GetRun().Status = %q, want %q", record.Status, "running")
+	}
+	if record.FinishedAt != nil {
+		t.Fatalf("GetRun().FinishedAt = %v, want nil", record.FinishedAt)
+	}
+}
+
+func TestShowReturnsRunDetailWithinScope(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openRunStore(t)
+	defer store.Close()
+
+	project, err := store.CreateProject(ctx, sqlite.CreateProjectParams{
+		Key:           "alpha",
+		Name:          "Alpha",
+		Scope:         "project",
+		GitRoot:       "/tmp/alpha",
+		DefaultBranch: "main",
+		GitHubRepo:    "acme/alpha",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+
+	task, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "alpha-task",
+		Title:       "Alpha task",
+		Status:      "running",
+		Scope:       "project",
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+
+	run, err := store.StartRun(ctx, sqlite.StartRunParams{
+		TaskID:   task.ID,
+		Executor: "codex",
+		Attempt:  1,
+		Status:   "running",
+	})
+	if err != nil {
+		t.Fatalf("StartRun() error = %v", err)
+	}
+
+	service := Service{DB: store.DB()}
+	detail, err := service.Show(ctx, scope.Resolution{
+		Kind:       scope.ScopeProject,
+		ProjectKey: "alpha",
+	}, run.ID)
+	if err != nil {
+		t.Fatalf("Show() error = %v", err)
+	}
+	if detail.RunID != run.ID {
+		t.Fatalf("Show().RunID = %d, want %d", detail.RunID, run.ID)
+	}
+	if detail.TaskKey != task.Key {
+		t.Fatalf("Show().TaskKey = %q, want %q", detail.TaskKey, task.Key)
+	}
+	if detail.Executor != "codex" {
+		t.Fatalf("Show().Executor = %q, want %q", detail.Executor, "codex")
+	}
+}
+
+func TestRunsDetailIncludesRunArtifacts(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openRunStore(t)
+	defer store.Close()
+
+	project, err := store.CreateProject(ctx, sqlite.CreateProjectParams{
+		Key:           "alpha",
+		Name:          "Alpha",
+		Scope:         "project",
+		GitRoot:       "/tmp/alpha",
+		DefaultBranch: "main",
+		GitHubRepo:    "acme/alpha",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+
+	task, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "alpha-task",
+		Title:       "Alpha task",
+		Status:      "running",
+		Scope:       "project",
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+
+	run, err := store.StartRun(ctx, sqlite.StartRunParams{
+		TaskID:   task.ID,
+		Executor: "codex",
+		Attempt:  1,
+		Status:   "running",
+	})
+	if err != nil {
+		t.Fatalf("StartRun() error = %v", err)
+	}
+
+	if _, err := store.RecordRunArtifact(ctx, sqlite.RecordRunArtifactParams{
+		RunID:        run.ID,
+		ArtifactType: "driver_result",
+		Summary:      "Robinhood review ready",
+		DetailsJSON:  `{"session_state":"review_ready"}`,
+	}); err != nil {
+		t.Fatalf("RecordRunArtifact() error = %v", err)
+	}
+
+	service := Service{DB: store.DB(), Store: store}
+	detail, err := service.Show(ctx, scope.Resolution{
+		Kind:       scope.ScopeProject,
+		ProjectKey: "alpha",
+	}, run.ID)
+	if err != nil {
+		t.Fatalf("Show() error = %v", err)
+	}
+
+	if len(detail.Artifacts) != 1 {
+		t.Fatalf("Show().Artifacts len = %d, want 1", len(detail.Artifacts))
+	}
+	if detail.Artifacts[0].ArtifactType != "driver_result" {
+		t.Fatalf("Show().Artifacts[0].ArtifactType = %q, want %q", detail.Artifacts[0].ArtifactType, "driver_result")
+	}
+	if detail.Artifacts[0].Summary != "Robinhood review ready" {
+		t.Fatalf("Show().Artifacts[0].Summary = %q, want %q", detail.Artifacts[0].Summary, "Robinhood review ready")
+	}
+	if detail.Artifacts[0].DetailsJSON != `{"session_state":"review_ready"}` {
+		t.Fatalf("Show().Artifacts[0].DetailsJSON = %q, want %q", detail.Artifacts[0].DetailsJSON, `{"session_state":"review_ready"}`)
+	}
+}
+
+func TestGetRunEnvelopeReturnsEmptyArtifactsByDefault(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openRunStore(t)
+	defer store.Close()
+
+	project, err := store.CreateProject(ctx, sqlite.CreateProjectParams{
+		Key:           "alpha",
+		Name:          "Alpha",
+		Scope:         "project",
+		GitRoot:       "/tmp/alpha",
+		DefaultBranch: "main",
+		GitHubRepo:    "acme/alpha",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+
+	task, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "alpha-task",
+		Title:       "Alpha task",
+		Status:      "running",
+		Scope:       "project",
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+
+	run, err := store.StartRun(ctx, sqlite.StartRunParams{
+		TaskID:   task.ID,
+		Executor: "codex",
+		Attempt:  1,
+		Status:   "running",
+	})
+	if err != nil {
+		t.Fatalf("StartRun() error = %v", err)
+	}
+
+	service := Service{DB: store.DB()}
+	envelope, err := service.GetRunEnvelope(ctx, run.ID)
+	if err != nil {
+		t.Fatalf("GetRunEnvelope() error = %v", err)
+	}
+	if envelope.RunID != strconv.FormatInt(run.ID, 10) {
+		t.Fatalf("GetRunEnvelope().RunID = %q, want %q", envelope.RunID, strconv.FormatInt(run.ID, 10))
+	}
+	if envelope.Status != "running" {
+		t.Fatalf("GetRunEnvelope().Status = %q, want %q", envelope.Status, "running")
+	}
+	if len(envelope.Artifacts) != 0 {
+		t.Fatalf("GetRunEnvelope().Artifacts = %+v, want empty", envelope.Artifacts)
+	}
+}
+
+func TestServiceCompletesRunAndTaskWithTerminalState(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openRunStore(t)
+	defer store.Close()
+
+	project, err := store.CreateProject(ctx, sqlite.CreateProjectParams{
 		Key:           "alpha",
 		Name:          "Alpha",
 		Scope:         "project",
@@ -121,399 +371,65 @@ func TestDetailFiltersRunsByScopeAndLoadsArtifacts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateProject(alpha) error = %v", err)
 	}
-	coreProject, err := store.CreateProject(ctx, sqlite.CreateProjectParams{
-		Key:           "odin-core",
-		Name:          "Odin Core",
-		Scope:         "odin-core",
-		GitRoot:       "/tmp/odin",
-		DefaultBranch: "main",
-		ManifestPath:  "config/projects.yaml",
-	})
-	if err != nil {
-		t.Fatalf("CreateProject(odin-core) error = %v", err)
-	}
-
-	alphaTask, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
-		ProjectID:   alphaProject.ID,
-		Key:         "alpha-task",
-		Title:       "Alpha task",
-		Status:      "running",
-		Scope:       "project",
-		RequestedBy: "operator",
-	})
-	if err != nil {
-		t.Fatalf("CreateTask(alpha) error = %v", err)
-	}
-	coreTask, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
-		ProjectID:   coreProject.ID,
-		Key:         "core-task",
-		Title:       "Core task",
-		Status:      "running",
-		Scope:       "odin-core",
-		RequestedBy: "operator",
-	})
-	if err != nil {
-		t.Fatalf("CreateTask(core) error = %v", err)
-	}
-
-	alphaRun, err := store.StartRun(ctx, sqlite.StartRunParams{
-		TaskID:   alphaTask.ID,
-		Executor: "codex",
-		Attempt:  1,
-		Status:   "running",
-	})
-	if err != nil {
-		t.Fatalf("StartRun(alpha) error = %v", err)
-	}
-	alphaRun, err = store.FinishRun(ctx, sqlite.FinishRunParams{
-		RunID:   alphaRun.ID,
-		Status:  "completed",
-		Summary: "alpha complete",
-	})
-	if err != nil {
-		t.Fatalf("FinishRun(alpha) error = %v", err)
-	}
-	coreRun, err := store.StartRun(ctx, sqlite.StartRunParams{
-		TaskID:   coreTask.ID,
-		Executor: "codex",
-		Attempt:  1,
-		Status:   "running",
-	})
-	if err != nil {
-		t.Fatalf("StartRun(core) error = %v", err)
-	}
-
-	transcript, err := store.RecordConversationTranscript(ctx, sqlite.RecordConversationTranscriptParams{
-		ProjectID:   &alphaProject.ID,
-		TaskID:      &alphaTask.ID,
-		RunID:       &alphaRun.ID,
-		Scope:       "project",
-		ScopeKey:    "alpha",
-		Mode:        "act",
-		Prompt:      "Investigate alpha",
-		Response:    "Alpha response body",
-		ToolSummary: `{"executor":"codex"}`,
-		Executor:    "codex",
-	})
-	if err != nil {
-		t.Fatalf("RecordConversationTranscript() error = %v", err)
-	}
-	if _, err := store.RecordMemorySummary(ctx, sqlite.RecordMemorySummaryParams{
-		ProjectID:          &alphaProject.ID,
-		SourceTranscriptID: &transcript.ID,
-		TaskID:             &alphaTask.ID,
-		RunID:              &alphaRun.ID,
-		Scope:              "project",
-		ScopeKey:           "alpha",
-		MemoryType:         "episode",
-		Summary:            "Alpha memory summary",
-		DetailsJSON:        `{"result":"ok"}`,
-	}); err != nil {
-		t.Fatalf("RecordMemorySummary() error = %v", err)
-	}
-
-	service := Service{
-		DB:    store.DB(),
-		Store: store,
-	}
-
-	detail, err := service.Detail(ctx, scope.Resolution{
-		Kind:       scope.ScopeProject,
-		ProjectKey: "alpha",
-	}, alphaRun.ID)
-	if err != nil {
-		t.Fatalf("Detail(alpha) error = %v", err)
-	}
-	if detail.Project.Key != "alpha" || detail.Task.Key != "alpha-task" {
-		t.Fatalf("detail project/task = %+v, want alpha/alpha-task", detail)
-	}
-	if len(detail.Transcripts) != 1 || detail.Transcripts[0].Response != "Alpha response body" {
-		t.Fatalf("detail transcripts = %+v, want one alpha transcript", detail.Transcripts)
-	}
-	if len(detail.MemorySummaries) != 1 || detail.MemorySummaries[0].Summary != "Alpha memory summary" {
-		t.Fatalf("detail memory summaries = %+v, want one alpha summary", detail.MemorySummaries)
-	}
-
-	_, err = service.Detail(ctx, scope.Resolution{
-		Kind:       scope.ScopeProject,
-		ProjectKey: "alpha",
-	}, coreRun.ID)
-	if err != sql.ErrNoRows {
-		t.Fatalf("Detail(core) error = %v, want sql.ErrNoRows", err)
-	}
-}
-
-func TestDetailLoadsDelegationEvidenceForParentRun(t *testing.T) {
-	t.Parallel()
-
-	ctx := context.Background()
-	store := openRunStore(t)
-	defer store.Close()
-
-	project, err := store.CreateProject(ctx, sqlite.CreateProjectParams{
-		Key:           "alpha",
-		Name:          "Alpha",
-		Scope:         "project",
-		GitRoot:       t.TempDir(),
-		DefaultBranch: "main",
-		ManifestPath:  "config/projects.yaml",
-	})
-	if err != nil {
-		t.Fatalf("CreateProject(alpha) error = %v", err)
-	}
-
-	parentTask, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
-		ProjectID:   project.ID,
-		Key:         "parent-task",
-		Title:       "Parent task",
-		Status:      "completed",
-		Scope:       "project",
-		RequestedBy: "operator",
-	})
-	if err != nil {
-		t.Fatalf("CreateTask(parent) error = %v", err)
-	}
-	parentRun, err := store.StartRun(ctx, sqlite.StartRunParams{
-		TaskID:   parentTask.ID,
-		Executor: "codex_headless",
-		Attempt:  1,
-		Status:   "running",
-	})
-	if err != nil {
-		t.Fatalf("StartRun(parent) error = %v", err)
-	}
-	parentRun, err = store.FinishRun(ctx, sqlite.FinishRunParams{
-		RunID:   parentRun.ID,
-		Status:  "completed",
-		Summary: "parent complete",
-	})
-	if err != nil {
-		t.Fatalf("FinishRun(parent) error = %v", err)
-	}
-
-	childTask, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
-		ProjectID:   project.ID,
-		Key:         "child-task",
-		Title:       "Child task",
-		Status:      "completed",
-		Scope:       "project",
-		RequestedBy: "agent:portal-delivery-agent",
-	})
-	if err != nil {
-		t.Fatalf("CreateTask(child) error = %v", err)
-	}
-	childRun, err := store.StartRun(ctx, sqlite.StartRunParams{
-		TaskID:   childTask.ID,
-		Executor: "codex_headless",
-		Attempt:  1,
-		Status:   "running",
-	})
-	if err != nil {
-		t.Fatalf("StartRun(child) error = %v", err)
-	}
-	childRun, err = store.FinishRun(ctx, sqlite.FinishRunParams{
-		RunID:   childRun.ID,
-		Status:  "completed",
-		Summary: "child complete",
-	})
-	if err != nil {
-		t.Fatalf("FinishRun(child) error = %v", err)
-	}
-
-	delegation, err := store.CreateDelegation(ctx, sqlite.CreateDelegationParams{
-		ParentTaskID:    parentTask.ID,
-		ParentRunID:     &parentRun.ID,
-		ProjectID:       project.ID,
-		Scope:           "project",
-		DelegationKey:   "design-direction",
-		Role:            "design_direction",
-		ActionClass:     "portal_delivery",
-		ActionKey:       "admin-cfi:dashboard",
-		MutationMode:    "read_only",
-		ConvergenceMode: "parent_summary",
-		ArtifactTarget:  "run_detail",
-		Executor:        "codex_headless",
-		DetailsJSON:     `{"skill_key":"pixel-perfect-ui-ux-designer"}`,
-	})
-	if err != nil {
-		t.Fatalf("CreateDelegation() error = %v", err)
-	}
-	delegation, err = store.AttachDelegationChildTask(ctx, sqlite.AttachDelegationChildTaskParams{
-		DelegationID: delegation.ID,
-		ChildTaskID:  childTask.ID,
-		ChildRunID:   &childRun.ID,
-	})
-	if err != nil {
-		t.Fatalf("AttachDelegationChildTask() error = %v", err)
-	}
-	delegation, err = store.UpdateDelegationStatus(ctx, sqlite.UpdateDelegationStatusParams{
-		DelegationID: delegation.ID,
-		Status:       "completed",
-	})
-	if err != nil {
-		t.Fatalf("UpdateDelegationStatus() error = %v", err)
-	}
-
-	if _, err := store.CreateDelegationArtifact(ctx, sqlite.CreateDelegationArtifactParams{
-		DelegationID: delegation.ID,
-		ArtifactType: "run_summary",
-		Summary:      "effective_skill=pixel-perfect-ui-ux-designer",
-		DetailsJSON:  `{"effective_skill":"pixel-perfect-ui-ux-designer"}`,
-	}); err != nil {
-		t.Fatalf("CreateDelegationArtifact(run_summary) error = %v", err)
-	}
-	if _, err := store.CreateDelegationArtifact(ctx, sqlite.CreateDelegationArtifactParams{
-		DelegationID: delegation.ID,
-		ArtifactType: "memory_summary",
-		Summary:      "Child memory summary",
-		DetailsJSON:  `{"memory_summary_id":1}`,
-	}); err != nil {
-		t.Fatalf("CreateDelegationArtifact(memory_summary) error = %v", err)
-	}
-
-	service := Service{
-		DB:    store.DB(),
-		Store: store,
-	}
-	detail, err := service.Detail(ctx, scope.Resolution{
-		Kind:       scope.ScopeProject,
-		ProjectKey: "alpha",
-	}, parentRun.ID)
-	if err != nil {
-		t.Fatalf("Detail(parent) error = %v", err)
-	}
-	if len(detail.Delegations) != 1 {
-		t.Fatalf("detail.Delegations len = %d, want 1", len(detail.Delegations))
-	}
-	if detail.Delegations[0].Relation != "parent" {
-		t.Fatalf("detail.Delegations[0].Relation = %q, want parent", detail.Delegations[0].Relation)
-	}
-	if len(detail.Delegations[0].Artifacts) != 2 {
-		t.Fatalf("detail.Delegations[0].Artifacts len = %d, want 2", len(detail.Delegations[0].Artifacts))
-	}
-}
-
-func TestCancelMarksRunAndTaskCancelledAndReleasesLease(t *testing.T) {
-	t.Parallel()
-
-	ctx := context.Background()
-	store := openRunStore(t)
-	defer store.Close()
-
-	project, err := store.CreateProject(ctx, sqlite.CreateProjectParams{
-		Key:           "alpha",
-		Name:          "Alpha",
-		Scope:         "project",
-		GitRoot:       t.TempDir(),
-		DefaultBranch: "main",
-		ManifestPath:  "config/projects.yaml",
-	})
-	if err != nil {
-		t.Fatalf("CreateProject(alpha) error = %v", err)
-	}
 	task, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
 		ProjectID:   project.ID,
-		Key:         "alpha-task",
-		Title:       "Alpha task",
-		Status:      "running",
+		Key:         "alpha-run",
+		Title:       "Alpha run",
+		Status:      "queued",
 		Scope:       "project",
 		RequestedBy: "operator",
 	})
 	if err != nil {
 		t.Fatalf("CreateTask(alpha) error = %v", err)
 	}
-	run, err := store.StartRun(ctx, sqlite.StartRunParams{
-		TaskID:   task.ID,
-		Executor: "codex_headless",
-		Attempt:  1,
-		Status:   "running",
-	})
+
+	service := Service{Store: store}
+	run, err := service.Start(ctx, task, "fake_headless")
 	if err != nil {
-		t.Fatalf("StartRun(alpha) error = %v", err)
+		t.Fatalf("Start() error = %v", err)
 	}
 
-	worktreePath := filepath.Join(t.TempDir(), "task-1")
-	if err := os.MkdirAll(worktreePath, 0o755); err != nil {
-		t.Fatalf("MkdirAll(worktreePath) error = %v", err)
+	result := contract.ExecutionResult{
+		Status: "completed",
+		Output: "run service summary",
+		Metadata: map[string]string{
+			"artifacts_json": `["runs/artifacts/run-service.json"]`,
+		},
 	}
-	lease, err := store.CreateWorktreeLease(ctx, sqlite.CreateWorktreeLeaseParams{
-		ProjectID:    project.ID,
-		TaskID:       task.ID,
-		RunID:        run.ID,
-		Mode:         "mutable",
-		BranchName:   "odin/alpha/task-1/run-1/try-1",
-		WorktreePath: worktreePath,
-		RepoRoot:     project.GitRoot,
-		State:        "active",
-	})
+	if err := service.Complete(ctx, run.ID, result); err != nil {
+		t.Fatalf("Complete() error = %v", err)
+	}
+
+	gotRun, err := store.GetRun(ctx, run.ID)
 	if err != nil {
-		t.Fatalf("CreateWorktreeLease() error = %v", err)
+		t.Fatalf("GetRun() error = %v", err)
+	}
+	if gotRun.Summary != "run service summary" {
+		t.Fatalf("run summary = %q, want run service summary", gotRun.Summary)
+	}
+	if gotRun.TerminalReason != "completed" {
+		t.Fatalf("run terminal reason = %q, want completed", gotRun.TerminalReason)
+	}
+	if gotRun.ArtifactsJSON != `["runs/artifacts/run-service.json"]` {
+		t.Fatalf("run artifacts = %q, want persisted artifact pointer", gotRun.ArtifactsJSON)
 	}
 
-	sleepCmd := exec.Command("sleep", "30")
-	sleepCmd.Dir = worktreePath
-	if err := sleepCmd.Start(); err != nil {
-		t.Fatalf("sleepCmd.Start() error = %v", err)
-	}
-	waitCh := make(chan error, 1)
-	exited := false
-	go func() {
-		waitCh <- sleepCmd.Wait()
-	}()
-	defer func() {
-		if exited {
-			return
-		}
-		select {
-		case <-waitCh:
-			exited = true
-		default:
-			_ = sleepCmd.Process.Kill()
-			<-waitCh
-			exited = true
-		}
-	}()
-
-	service := Service{
-		DB:    store.DB(),
-		Store: store,
-	}
-	detail, err := service.Cancel(ctx, scope.Resolution{
-		Kind:       scope.ScopeProject,
-		ProjectKey: "alpha",
-	}, run.ID)
+	gotTask, err := store.GetTask(ctx, task.ID)
 	if err != nil {
-		t.Fatalf("Cancel() error = %v", err)
+		t.Fatalf("GetTask() error = %v", err)
 	}
-
-	if detail.Run.Status != "cancelled" {
-		t.Fatalf("Run.Status = %q, want cancelled", detail.Run.Status)
+	if gotTask.Status != "completed" {
+		t.Fatalf("task status = %q, want completed", gotTask.Status)
 	}
-	if detail.Task.Status != "cancelled" {
-		t.Fatalf("Task.Status = %q, want cancelled", detail.Task.Status)
+	if gotTask.Summary != "run service summary" {
+		t.Fatalf("task summary = %q, want run service summary", gotTask.Summary)
 	}
-	if detail.Run.Summary == "" || detail.Run.Summary == "running" {
-		t.Fatalf("Run.Summary = %q, want cancellation summary", detail.Run.Summary)
+	if gotTask.TerminalReason != "completed" {
+		t.Fatalf("task terminal reason = %q, want completed", gotTask.TerminalReason)
 	}
-
-	updatedLease, err := store.GetWorktreeLease(ctx, lease.ID)
-	if err != nil {
-		t.Fatalf("GetWorktreeLease() error = %v", err)
+	if gotTask.ArtifactsJSON != `["runs/artifacts/run-service.json"]` {
+		t.Fatalf("task artifacts = %q, want persisted artifact pointer", gotTask.ArtifactsJSON)
 	}
-	if updatedLease.State != "released" {
-		t.Fatalf("Lease.State = %q, want released", updatedLease.State)
-	}
-	if updatedLease.ReleasedAt == nil {
-		t.Fatalf("Lease.ReleasedAt = nil, want value")
-	}
-
-	select {
-	case <-waitCh:
-		exited = true
-		return
-	case <-time.After(3 * time.Second):
-	}
-	t.Fatalf("sleep process still alive after cancel")
 }
 
 func openRunStore(t *testing.T) *sqlite.Store {

@@ -48,3 +48,7 @@ When a route matches:
 - `config/models.yaml` stores model metadata referenced by executors
 - routing remains declarative where possible
 - provider-specific hardcoding in the selector is not allowed
+- provider adapters must stay thin and translate native calls into the canonical capability gateway envelope
+- provider-specific prompt shaping belongs at the provider edge, not in manifests or the capability gateway
+- MCP surfaces should expose capabilities as typed tools backed by the canonical capability descriptors
+- provider bridges are transport-layer helpers and are not registered in the executor selector catalog

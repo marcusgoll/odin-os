@@ -7,6 +7,10 @@ projects:
     system_project: true
     git_root: ..
     default_branch: main
+    scheduler:
+      max_concurrent_runs: 1
+      max_starts_per_cycle: 1
+      stalled_run_retry_limit: 2
     policy:
       allowed_commands:
         - status
@@ -30,3 +34,96 @@ projects:
         allow_clean: false
         allow_force_push: false
         require_explicit_approval: true
+  - key: pbs
+    name: PBS
+    project_class: github_backed_project
+    git_root: /home/orchestrator/pbs
+    default_branch: master
+    github:
+      repo: marcusgoll/pbs
+    scheduler:
+      max_concurrent_runs: 1
+      max_starts_per_cycle: 1
+      stalled_run_retry_limit: 2
+    policy:
+      allowed_commands:
+        - status
+        - test
+        - build
+      branch_rules:
+        protected_branches:
+          - master
+        require_worktree: true
+        require_task_branch: true
+        allow_default_branch_mutation: false
+      approval_gates:
+        require_for_governance_changes: true
+        require_for_destructive_operations: true
+        require_for_system_project_changes: false
+      merge_policy:
+        mode: squash
+        allow_direct_to_default_branch: false
+      destructive_operations:
+        allow_reset: false
+        allow_clean: false
+        allow_force_push: false
+        require_explicit_approval: true
+  - key: family-ops
+    name: Family-Ops
+    project_class: local_git_project
+    git_root: /home/orchestrator/family-ops
+    default_branch: wip/main-dirty-2026-03-26
+    github:
+      repo: ""
+    scheduler:
+      max_concurrent_runs: 1
+      max_starts_per_cycle: 1
+      stalled_run_retry_limit: 2
+    policy:
+      allowed_commands:
+        - status
+        - test
+      branch_rules:
+        protected_branches:
+          - main
+        require_worktree: true
+        require_task_branch: true
+        allow_default_branch_mutation: false
+      approval_gates:
+        require_for_governance_changes: true
+        require_for_destructive_operations: true
+        require_for_system_project_changes: false
+      merge_policy:
+        mode: squash
+        allow_direct_to_default_branch: false
+      destructive_operations:
+        allow_reset: false
+        allow_clean: false
+        allow_force_push: false
+        require_explicit_approval: true
+
+cutover:
+  pilot_projects:
+    - key: pbs
+      runtime_owner: odin_os
+      primary_controller: odin_os
+      comparison_context: odin-orchestrator
+      legacy_primary_required: false
+      shadow_graduation:
+        - legacy and Odin readouts agree on project scope and ownership
+        - no mutation attempt requires an allowed action
+        - operator review confirms the project can stay read-only
+      limited_action_graduation:
+        - allowlisted isolated mutations complete successfully under Odin ownership
+        - limited-action work never depends on legacy primary completion
+        - operator review shows no unbounded approval or recovery drift
+      cutover_graduation:
+        - routine queued work completes under Odin OS ownership
+        - normal project mutations no longer need legacy-primary intervention
+        - rollback remains available and rehearsed
+      legacy_duties_to_retire_in_order:
+        - read-only observation and compare reporting
+        - limited-action handling for allowlisted low-risk mutations
+        - routine queue intake and run selection
+        - normal project mutation and merge authority
+        - legacy-primary fallback for routine completion

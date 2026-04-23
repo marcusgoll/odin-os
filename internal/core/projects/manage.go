@@ -3,6 +3,7 @@ package projects
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -112,6 +113,21 @@ func InferCurrentBranch(ctx context.Context, gitRoot string) (string, error) {
 		return "", fmt.Errorf("empty branch name")
 	}
 	return branch, nil
+}
+
+func IsGitRepository(gitRoot string) bool {
+	root := strings.TrimSpace(gitRoot)
+	if root == "" {
+		return false
+	}
+	info, err := os.Stat(filepath.Join(root, ".git"))
+	if err == nil {
+		return true
+	}
+	if os.IsNotExist(err) {
+		return false
+	}
+	return info != nil
 }
 
 func runGit(ctx context.Context, dir string, args ...string) (string, error) {

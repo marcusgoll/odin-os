@@ -4,6 +4,8 @@ key: marcus-linkedin-drafting-assistant
 title: LinkedIn Drafting Assistant
 summary: Drafts professional LinkedIn posts for Marcus with practical aviation teaching insight and stronger narrative structure.
 status: active
+version: "1.0.0"
+enabled: true
 tags:
   - social
   - aviation
@@ -17,6 +19,21 @@ applies_to:
   - article-seeds
 scopes:
   - global
+permissions:
+  - repo.read
+handler_type: command
+handler_ref: scripts/skills/registry-skill-stub.sh
+timeout_seconds: 15
+input_schema:
+  type: object
+  properties:
+    request:
+      type: string
+output_schema:
+  type: object
+  properties:
+    result:
+      type: string
 ---
 
 # LinkedIn Drafting Assistant

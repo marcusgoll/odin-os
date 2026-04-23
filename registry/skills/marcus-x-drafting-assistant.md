@@ -4,6 +4,8 @@ key: marcus-x-drafting-assistant
 title: X Drafting Assistant
 summary: Drafts concise, useful X posts for Marcus about aviation, training, and pilot development.
 status: active
+version: "1.0.0"
+enabled: true
 tags:
   - social
   - aviation
@@ -17,6 +19,21 @@ applies_to:
   - thread-seeds
 scopes:
   - global
+permissions:
+  - repo.read
+handler_type: command
+handler_ref: scripts/skills/registry-skill-stub.sh
+timeout_seconds: 15
+input_schema:
+  type: object
+  properties:
+    request:
+      type: string
+output_schema:
+  type: object
+  properties:
+    result:
+      type: string
 ---
 
 # X Drafting Assistant

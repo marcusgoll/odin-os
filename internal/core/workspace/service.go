@@ -405,11 +405,7 @@ func (service Service) resolveOrCreateHandoffTask(ctx context.Context, manifest 
 		return (jobs.Service{
 			Store:    service.Store,
 			Registry: service.Registry,
-		}).CreateTask(ctx, jobs.CreateTaskParams{
-			Resolved:    resolvedScope,
-			Title:       request.Objective,
-			RequestedBy: "operator",
-		})
+		}).CreateTaskFromAct(ctx, resolvedScope, request.Objective)
 	}
 
 	project, err := service.Store.GetProjectByKey(ctx, manifest.Key)

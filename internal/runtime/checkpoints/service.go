@@ -14,6 +14,12 @@ type Service struct {
 	Store *sqlite.Store
 }
 
+type SealWakePacketParams struct {
+	PacketID          int64
+	BlockingReason    string
+	LastCompletedStep string
+}
+
 type CompactParams struct {
 	TaskID                 int64
 	RunID                  *int64
@@ -31,6 +37,7 @@ type CompactParams struct {
 	PolicySummary          string
 	OpenTaskSummary        string
 	ApprovalSummary        string
+	Invocation             *InvocationContext
 	ToolResults            []ToolResult
 	ProjectFacts           map[string]string
 	RunFacts               map[string]string
@@ -110,6 +117,7 @@ func (service Service) Compact(ctx context.Context, params CompactParams) (Compa
 			Attempt:         run.Attempt,
 			Status:          run.Status,
 			ApprovalSummary: params.ApprovalSummary,
+			Invocation:      params.Invocation,
 			ToolResults:     append([]ToolResult(nil), params.ToolResults...),
 			Facts:           cloneFacts(params.RunFacts),
 		}
@@ -214,7 +222,7 @@ func (service Service) LoadResumeState(ctx context.Context, projectID int64, tas
 		return ResumeState{}, fmt.Errorf("checkpoint store is required")
 	}
 
-	packet, err := service.Store.GetLatestTaskWakePacket(ctx, projectID, taskID)
+	packet, err := service.Store.GetLatestActiveTaskWakePacket(ctx, projectID, taskID)
 	if err != nil {
 		return ResumeState{}, err
 	}
@@ -265,6 +273,36 @@ func (service Service) LoadResumeState(ctx context.Context, projectID int64, tas
 	}
 
 	return state, nil
+}
+
+func (service Service) SealWakePacket(ctx context.Context, params SealWakePacketParams) (sqlite.ContextPacket, error) {
+	if service.Store == nil {
+		return sqlite.ContextPacket{}, fmt.Errorf("checkpoint store is required")
+	}
+	packet, err := service.Store.GetContextPacket(ctx, params.PacketID)
+	if err != nil {
+		return sqlite.ContextPacket{}, err
+	}
+	wake, err := unmarshalPayload[TaskWakePacket](packet.PayloadJSON)
+	if err != nil {
+		return sqlite.ContextPacket{}, err
+	}
+	if params.BlockingReason != "" {
+		wake.BlockingReason = params.BlockingReason
+	}
+	if params.LastCompletedStep != "" {
+		wake.LastCompletedStep = params.LastCompletedStep
+	}
+	payloadJSON, err := marshalPayload(wake)
+	if err != nil {
+		return sqlite.ContextPacket{}, err
+	}
+	return service.Store.UpdateContextPacketStatus(ctx, sqlite.UpdateContextPacketStatusParams{
+		PacketID:    params.PacketID,
+		Status:      string(PacketStatusSealed),
+		Summary:     compactWakeSummary(wake),
+		PayloadJSON: payloadJSON,
+	})
 }
 
 func marshalPayload(payload any) (string, error) {

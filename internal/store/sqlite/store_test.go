@@ -3,576 +3,14 @@ package sqlite
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"path/filepath"
 	"testing"
+	"time"
 
 	runtimeevents "odin-os/internal/runtime/events"
 	"odin-os/internal/runtime/projections"
 )
-
-func TestConversationTranscriptsRecordAndListByScope(t *testing.T) {
-	ctx := context.Background()
-	store := openTestStore(t)
-	defer store.Close()
-
-	globalProject, project, task, run := seedMemoryFixture(t, ctx, store)
-
-	globalTranscript, err := store.RecordConversationTranscript(ctx, RecordConversationTranscriptParams{
-		Scope:       "global",
-		ScopeKey:    "global",
-		Mode:        "ask",
-		Prompt:      "hello there",
-		Response:    "hi",
-		ToolSummary: `{"tools":[]}`,
-	})
-	if err != nil {
-		t.Fatalf("RecordConversationTranscript(global) error = %v", err)
-	}
-	if globalTranscript.ProjectID != nil {
-		t.Fatalf("global transcript ProjectID = %v, want nil", *globalTranscript.ProjectID)
-	}
-
-	projectTranscript, err := store.RecordConversationTranscript(ctx, RecordConversationTranscriptParams{
-		ProjectID:   &project.ID,
-		TaskID:      &task.ID,
-		RunID:       &run.ID,
-		Scope:       "project",
-		ScopeKey:    project.Key,
-		Mode:        "act",
-		Prompt:      "implement memory",
-		Response:    "completed",
-		ToolSummary: `{"executor":"codex_headless"}`,
-	})
-	if err != nil {
-		t.Fatalf("RecordConversationTranscript(project) error = %v", err)
-	}
-	if projectTranscript.ProjectID == nil || *projectTranscript.ProjectID != project.ID {
-		t.Fatalf("project transcript ProjectID = %v, want %d", projectTranscript.ProjectID, project.ID)
-	}
-
-	globalOnly, err := store.ListConversationTranscripts(ctx, ListConversationTranscriptsParams{
-		Scope:    "global",
-		ScopeKey: "global",
-	})
-	if err != nil {
-		t.Fatalf("ListConversationTranscripts(global) error = %v", err)
-	}
-	if len(globalOnly) != 1 || globalOnly[0].ID != globalTranscript.ID {
-		t.Fatalf("global transcripts = %+v, want only global transcript", globalOnly)
-	}
-
-	projectOnly, err := store.ListConversationTranscripts(ctx, ListConversationTranscriptsParams{
-		ProjectID: &project.ID,
-		Scope:     "project",
-		ScopeKey:  project.Key,
-	})
-	if err != nil {
-		t.Fatalf("ListConversationTranscripts(project) error = %v", err)
-	}
-	if len(projectOnly) != 1 || projectOnly[0].ID != projectTranscript.ID {
-		t.Fatalf("project transcripts = %+v, want only project transcript", projectOnly)
-	}
-
-	coreOnly, err := store.ListConversationTranscripts(ctx, ListConversationTranscriptsParams{
-		ProjectID: &globalProject.ID,
-		Scope:     "odin-core",
-		ScopeKey:  globalProject.Key,
-	})
-	if err != nil {
-		t.Fatalf("ListConversationTranscripts(odin-core) error = %v", err)
-	}
-	if len(coreOnly) != 0 {
-		t.Fatalf("odin-core transcripts = %+v, want none", coreOnly)
-	}
-}
-
-func TestMemorySummariesRecordSeparatelyFromTranscripts(t *testing.T) {
-	ctx := context.Background()
-	store := openTestStore(t)
-	defer store.Close()
-
-	_, project, _, _ := seedMemoryFixture(t, ctx, store)
-
-	transcript, err := store.RecordConversationTranscript(ctx, RecordConversationTranscriptParams{
-		ProjectID:   &project.ID,
-		Scope:       "project",
-		ScopeKey:    project.Key,
-		Mode:        "ask",
-		Prompt:      "remember this convention",
-		Response:    "noted",
-		ToolSummary: `{"tools":[]}`,
-	})
-	if err != nil {
-		t.Fatalf("RecordConversationTranscript() error = %v", err)
-	}
-
-	summary, err := store.RecordMemorySummary(ctx, RecordMemorySummaryParams{
-		ProjectID:          &project.ID,
-		SourceTranscriptID: &transcript.ID,
-		Scope:              "project",
-		ScopeKey:           project.Key,
-		MemoryType:         "project_summary",
-		Summary:            "Alpha uses worktree isolation for mutating tasks.",
-		DetailsJSON:        `{"source":"compaction"}`,
-	})
-	if err != nil {
-		t.Fatalf("RecordMemorySummary() error = %v", err)
-	}
-	if summary.SourceTranscriptID == nil || *summary.SourceTranscriptID != transcript.ID {
-		t.Fatalf("summary.SourceTranscriptID = %v, want %d", summary.SourceTranscriptID, transcript.ID)
-	}
-
-	transcripts, err := store.ListConversationTranscripts(ctx, ListConversationTranscriptsParams{
-		ProjectID: &project.ID,
-		Scope:     "project",
-		ScopeKey:  project.Key,
-	})
-	if err != nil {
-		t.Fatalf("ListConversationTranscripts() error = %v", err)
-	}
-	if len(transcripts) != 1 {
-		t.Fatalf("transcripts len = %d, want 1", len(transcripts))
-	}
-
-	summaries, err := store.ListMemorySummaries(ctx, ListMemorySummariesParams{
-		ProjectID: &project.ID,
-		Scope:     "project",
-		ScopeKey:  project.Key,
-	})
-	if err != nil {
-		t.Fatalf("ListMemorySummaries() error = %v", err)
-	}
-	if len(summaries) != 1 || summaries[0].ID != summary.ID {
-		t.Fatalf("summaries = %+v, want only recorded summary", summaries)
-	}
-}
-
-func TestUpdateMemorySummaryDetails(t *testing.T) {
-	ctx := context.Background()
-	store := openTestStore(t)
-	defer store.Close()
-
-	_, project, _, _ := seedMemoryFixture(t, ctx, store)
-
-	summary, err := store.RecordMemorySummary(ctx, RecordMemorySummaryParams{
-		ProjectID:   &project.ID,
-		Scope:       "project",
-		ScopeKey:    project.Key,
-		MemoryType:  "social_draft",
-		Summary:     "Draft awaiting approval",
-		DetailsJSON: `{"source":"cli","scope":"project","scope_key":"alpha","fields":{"approval":"pending","channel":"x","content_kind":"post"}}`,
-	})
-	if err != nil {
-		t.Fatalf("RecordMemorySummary() error = %v", err)
-	}
-
-	updated, err := store.UpdateMemorySummaryDetails(ctx, UpdateMemorySummaryDetailsParams{
-		MemoryID:    summary.ID,
-		DetailsJSON: `{"source":"cli","scope":"project","scope_key":"alpha","fields":{"approval":"approved","channel":"x","content_kind":"post"}}`,
-	})
-	if err != nil {
-		t.Fatalf("UpdateMemorySummaryDetails() error = %v", err)
-	}
-	if updated.ID != summary.ID {
-		t.Fatalf("updated.ID = %d, want %d", updated.ID, summary.ID)
-	}
-	if updated.DetailsJSON != `{"source":"cli","scope":"project","scope_key":"alpha","fields":{"approval":"approved","channel":"x","content_kind":"post"}}` {
-		t.Fatalf("updated.DetailsJSON = %q, want updated details", updated.DetailsJSON)
-	}
-	if !updated.UpdatedAt.After(updated.CreatedAt) && !updated.UpdatedAt.Equal(updated.CreatedAt) {
-		t.Fatalf("updated timestamps invalid: created=%s updated=%s", updated.CreatedAt, updated.UpdatedAt)
-	}
-
-	summaries, err := store.ListMemorySummaries(ctx, ListMemorySummariesParams{
-		ProjectID: &project.ID,
-		Scope:     "project",
-		ScopeKey:  project.Key,
-	})
-	if err != nil {
-		t.Fatalf("ListMemorySummaries() error = %v", err)
-	}
-	if len(summaries) != 1 {
-		t.Fatalf("summaries len = %d, want 1", len(summaries))
-	}
-	if summaries[0].DetailsJSON != updated.DetailsJSON {
-		t.Fatalf("stored details = %q, want %q", summaries[0].DetailsJSON, updated.DetailsJSON)
-	}
-
-	events, err := store.ListEvents(ctx, ListEventsParams{})
-	if err != nil {
-		t.Fatalf("ListEvents() error = %v", err)
-	}
-	var updatedEventFound bool
-	for _, event := range events {
-		if event.Type != runtimeevents.EventMemorySummaryUpdated {
-			continue
-		}
-		if event.StreamType != runtimeevents.StreamMemorySummary {
-			t.Fatalf("memory update event stream type = %q, want %q", event.StreamType, runtimeevents.StreamMemorySummary)
-		}
-		var payload runtimeevents.MemorySummaryUpdatedPayload
-		if err := json.Unmarshal(event.Payload, &payload); err != nil {
-			t.Fatalf("json.Unmarshal(memory update payload) error = %v", err)
-		}
-		if payload.Scope != "project" || payload.ScopeKey != project.Key || payload.MemoryType != "social_draft" {
-			t.Fatalf("memory update payload = %+v, want project social_draft payload", payload)
-		}
-		updatedEventFound = true
-	}
-	if !updatedEventFound {
-		t.Fatal("memory summary updated event not found")
-	}
-}
-
-func TestConversationAndMemoryWritesEmitEvents(t *testing.T) {
-	ctx := context.Background()
-	store := openTestStore(t)
-	defer store.Close()
-
-	_, project, _, _ := seedMemoryFixture(t, ctx, store)
-
-	globalTranscript, err := store.RecordConversationTranscript(ctx, RecordConversationTranscriptParams{
-		Scope:       "global",
-		ScopeKey:    "global",
-		Mode:        "ask",
-		Prompt:      "remember preference",
-		Response:    "stored",
-		ToolSummary: `{"tools":[]}`,
-	})
-	if err != nil {
-		t.Fatalf("RecordConversationTranscript(global) error = %v", err)
-	}
-
-	transcript, err := store.RecordConversationTranscript(ctx, RecordConversationTranscriptParams{
-		ProjectID:   &project.ID,
-		Scope:       "project",
-		ScopeKey:    project.Key,
-		Mode:        "ask",
-		Prompt:      "hello",
-		Response:    "hi",
-		ToolSummary: `{"tools":[]}`,
-	})
-	if err != nil {
-		t.Fatalf("RecordConversationTranscript() error = %v", err)
-	}
-	if _, err := store.RecordMemorySummary(ctx, RecordMemorySummaryParams{
-		ProjectID:          &project.ID,
-		SourceTranscriptID: &transcript.ID,
-		Scope:              "project",
-		ScopeKey:           project.Key,
-		MemoryType:         "project_summary",
-		Summary:            "Alpha conversations can be compacted into memory.",
-		DetailsJSON:        `{"source":"test"}`,
-	}); err != nil {
-		t.Fatalf("RecordMemorySummary() error = %v", err)
-	}
-
-	events, err := store.ListEvents(ctx, ListEventsParams{})
-	if err != nil {
-		t.Fatalf("ListEvents() error = %v", err)
-	}
-
-	var globalTranscriptFound bool
-	var projectTranscriptFound bool
-	var summaryEvents int
-	for _, event := range events {
-		switch event.Type {
-		case runtimeevents.EventConversationTranscriptRecorded:
-			if event.StreamType != runtimeevents.StreamConversation {
-				t.Fatalf("conversation event stream type = %q, want %q", event.StreamType, runtimeevents.StreamConversation)
-			}
-			var payload runtimeevents.ConversationTranscriptRecordedPayload
-			if err := json.Unmarshal(event.Payload, &payload); err != nil {
-				t.Fatalf("json.Unmarshal(conversation payload) error = %v", err)
-			}
-			switch {
-			case event.StreamID == globalTranscript.ID:
-				if payload.Scope != "global" || payload.ScopeKey != "global" || payload.Mode != "ask" {
-					t.Fatalf("global transcript payload = %+v, want global ask payload", payload)
-				}
-				globalTranscriptFound = true
-			case event.StreamID == transcript.ID:
-				if payload.Scope != "project" || payload.ScopeKey != project.Key || payload.Mode != "ask" {
-					t.Fatalf("project transcript payload = %+v, want project ask payload", payload)
-				}
-				projectTranscriptFound = true
-			}
-		case runtimeevents.EventMemorySummaryRecorded:
-			summaryEvents++
-			if event.StreamType != runtimeevents.StreamMemorySummary {
-				t.Fatalf("memory summary event stream type = %q, want %q", event.StreamType, runtimeevents.StreamMemorySummary)
-			}
-			var payload runtimeevents.MemorySummaryRecordedPayload
-			if err := json.Unmarshal(event.Payload, &payload); err != nil {
-				t.Fatalf("json.Unmarshal(memory payload) error = %v", err)
-			}
-			if payload.Scope != "project" || payload.ScopeKey != project.Key || payload.MemoryType != "project_summary" {
-				t.Fatalf("memory summary payload = %+v, want project summary payload", payload)
-			}
-			if payload.SourceTranscriptID == nil || *payload.SourceTranscriptID != transcript.ID {
-				t.Fatalf("payload.SourceTranscriptID = %v, want %d", payload.SourceTranscriptID, transcript.ID)
-			}
-		}
-	}
-	if !globalTranscriptFound {
-		t.Fatalf("global transcript event not found")
-	}
-	if !projectTranscriptFound {
-		t.Fatalf("project transcript event not found")
-	}
-	if summaryEvents != 1 {
-		t.Fatalf("memory summary event count = %d, want 1", summaryEvents)
-	}
-}
-
-func TestFinishRunIfRunningPreservesCancelledRun(t *testing.T) {
-	ctx := context.Background()
-	store := openTestStore(t)
-	defer store.Close()
-
-	project, err := store.CreateProject(ctx, CreateProjectParams{
-		Key:           "alpha",
-		Name:          "Alpha",
-		Scope:         "project",
-		GitRoot:       "/tmp/alpha",
-		DefaultBranch: "main",
-		ManifestPath:  "config/projects.yaml",
-	})
-	if err != nil {
-		t.Fatalf("CreateProject() error = %v", err)
-	}
-	task, err := store.CreateTask(ctx, CreateTaskParams{
-		ProjectID:   project.ID,
-		Key:         "alpha-task",
-		Title:       "Alpha task",
-		Status:      "running",
-		Scope:       "project",
-		RequestedBy: "operator",
-	})
-	if err != nil {
-		t.Fatalf("CreateTask() error = %v", err)
-	}
-	run, err := store.StartRun(ctx, StartRunParams{
-		TaskID:   task.ID,
-		Executor: "codex",
-		Attempt:  1,
-		Status:   "running",
-	})
-	if err != nil {
-		t.Fatalf("StartRun() error = %v", err)
-	}
-	run, err = store.FinishRun(ctx, FinishRunParams{
-		RunID:   run.ID,
-		Status:  "cancelled",
-		Summary: "cancelled by operator",
-	})
-	if err != nil {
-		t.Fatalf("FinishRun(cancelled) error = %v", err)
-	}
-
-	preserved, finished, err := store.FinishRunIfRunning(ctx, FinishRunParams{
-		RunID:   run.ID,
-		Status:  "failed",
-		Summary: "executor failed after cancellation",
-	})
-	if err != nil {
-		t.Fatalf("FinishRunIfRunning() error = %v", err)
-	}
-	if finished {
-		t.Fatal("FinishRunIfRunning() finished = true, want false for preserved cancelled run")
-	}
-	if preserved.Status != "cancelled" {
-		t.Fatalf("preserved.Status = %q, want cancelled", preserved.Status)
-	}
-	if preserved.Summary != "cancelled by operator" {
-		t.Fatalf("preserved.Summary = %q, want original cancellation summary", preserved.Summary)
-	}
-}
-
-func TestConversationTranscriptRejectsMismatchedLineage(t *testing.T) {
-	ctx := context.Background()
-	store := openTestStore(t)
-	defer store.Close()
-
-	_, project, task, _ := seedMemoryFixture(t, ctx, store)
-
-	otherProject, err := store.CreateProject(ctx, CreateProjectParams{
-		Key:           "beta",
-		Name:          "Beta",
-		Scope:         "project",
-		GitRoot:       "/tmp/beta",
-		DefaultBranch: "main",
-		GitHubRepo:    "acme/beta",
-		ManifestPath:  "config/projects.yaml",
-	})
-	if err != nil {
-		t.Fatalf("CreateProject(beta) error = %v", err)
-	}
-	otherTask, err := store.CreateTask(ctx, CreateTaskParams{
-		ProjectID:   otherProject.ID,
-		Key:         "beta-memory",
-		Title:       "beta memory fixture",
-		Status:      "running",
-		Scope:       "project",
-		RequestedBy: "test",
-	})
-	if err != nil {
-		t.Fatalf("CreateTask(beta) error = %v", err)
-	}
-	otherRun, err := store.StartRun(ctx, StartRunParams{
-		TaskID:   otherTask.ID,
-		Executor: "codex_headless",
-		Attempt:  1,
-		Status:   "running",
-	})
-	if err != nil {
-		t.Fatalf("StartRun(beta) error = %v", err)
-	}
-
-	for _, tc := range []struct {
-		name   string
-		params RecordConversationTranscriptParams
-	}{
-		{
-			name: "task belongs to different project",
-			params: RecordConversationTranscriptParams{
-				ProjectID: &project.ID,
-				TaskID:    &otherTask.ID,
-				Scope:     "project",
-				ScopeKey:  project.Key,
-				Mode:      "act",
-				Prompt:    "bad lineage",
-				Response:  "bad lineage",
-			},
-		},
-		{
-			name: "run belongs to different task",
-			params: RecordConversationTranscriptParams{
-				ProjectID: &project.ID,
-				TaskID:    &task.ID,
-				RunID:     &otherRun.ID,
-				Scope:     "project",
-				ScopeKey:  project.Key,
-				Mode:      "act",
-				Prompt:    "bad lineage",
-				Response:  "bad lineage",
-			},
-		},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			if _, err := store.RecordConversationTranscript(ctx, tc.params); err == nil {
-				t.Fatalf("RecordConversationTranscript() error = nil, want lineage validation failure")
-			}
-		})
-	}
-}
-
-func TestMemorySummaryRejectsMismatchedSourceLineage(t *testing.T) {
-	ctx := context.Background()
-	store := openTestStore(t)
-	defer store.Close()
-
-	_, project, task, run := seedMemoryFixture(t, ctx, store)
-
-	transcript, err := store.RecordConversationTranscript(ctx, RecordConversationTranscriptParams{
-		ProjectID:   &project.ID,
-		TaskID:      &task.ID,
-		RunID:       &run.ID,
-		Scope:       "project",
-		ScopeKey:    project.Key,
-		Mode:        "act",
-		Prompt:      "persist episode",
-		Response:    "completed",
-		ToolSummary: `{"executor":"codex_headless"}`,
-		Executor:    "codex_headless",
-	})
-	if err != nil {
-		t.Fatalf("RecordConversationTranscript() error = %v", err)
-	}
-
-	otherProject, err := store.CreateProject(ctx, CreateProjectParams{
-		Key:           "beta",
-		Name:          "Beta",
-		Scope:         "project",
-		GitRoot:       "/tmp/beta",
-		DefaultBranch: "main",
-		GitHubRepo:    "acme/beta",
-		ManifestPath:  "config/projects.yaml",
-	})
-	if err != nil {
-		t.Fatalf("CreateProject(beta) error = %v", err)
-	}
-	otherTask, err := store.CreateTask(ctx, CreateTaskParams{
-		ProjectID:   otherProject.ID,
-		Key:         "beta-memory",
-		Title:       "beta memory fixture",
-		Status:      "running",
-		Scope:       "project",
-		RequestedBy: "test",
-	})
-	if err != nil {
-		t.Fatalf("CreateTask(beta) error = %v", err)
-	}
-	otherRun, err := store.StartRun(ctx, StartRunParams{
-		TaskID:   otherTask.ID,
-		Executor: "codex_headless",
-		Attempt:  1,
-		Status:   "running",
-	})
-	if err != nil {
-		t.Fatalf("StartRun(beta) error = %v", err)
-	}
-
-	for _, tc := range []struct {
-		name   string
-		params RecordMemorySummaryParams
-	}{
-		{
-			name: "project-scoped source requires matching project",
-			params: RecordMemorySummaryParams{
-				SourceTranscriptID: &transcript.ID,
-				Scope:              "project",
-				ScopeKey:           project.Key,
-				MemoryType:         "episode",
-				Summary:            "mismatch",
-				DetailsJSON:        `{"source":"test"}`,
-			},
-		},
-		{
-			name: "source transcript project mismatch",
-			params: RecordMemorySummaryParams{
-				ProjectID:          &otherProject.ID,
-				SourceTranscriptID: &transcript.ID,
-				TaskID:             &otherTask.ID,
-				Scope:              "project",
-				ScopeKey:           otherProject.Key,
-				MemoryType:         "episode",
-				Summary:            "mismatch",
-				DetailsJSON:        `{"source":"test"}`,
-			},
-		},
-		{
-			name: "source transcript run mismatch",
-			params: RecordMemorySummaryParams{
-				ProjectID:          &project.ID,
-				SourceTranscriptID: &transcript.ID,
-				TaskID:             &task.ID,
-				RunID:              &otherRun.ID,
-				Scope:              "project",
-				ScopeKey:           project.Key,
-				MemoryType:         "episode",
-				Summary:            "mismatch",
-				DetailsJSON:        `{"source":"test"}`,
-			},
-		},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			if _, err := store.RecordMemorySummary(ctx, tc.params); err == nil {
-				t.Fatalf("RecordMemorySummary() error = nil, want lineage validation failure")
-			}
-		})
-	}
-}
 
 func TestStoreMigrateLifecycleAndReopen(t *testing.T) {
 	ctx := context.Background()
@@ -785,16 +223,16 @@ func TestStoreMigrateLifecycleAndReopen(t *testing.T) {
 		t.Fatalf("project views = %+v, want one project with one task", projectViews)
 	}
 
-	var migrationCount int
-	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM schema_migrations`).Scan(&migrationCount); err != nil {
-		t.Fatalf("schema_migrations count query error = %v", err)
+	var workspaceTableCount int
+	if err := store.db.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM sqlite_master
+		WHERE type = 'table' AND name IN ('workspaces', 'workspace_policies')
+	`).Scan(&workspaceTableCount); err != nil {
+		t.Fatalf("workspace table count query error = %v", err)
 	}
-	migrations, err := loadMigrations()
-	if err != nil {
-		t.Fatalf("loadMigrations() error = %v", err)
-	}
-	if migrationCount != len(migrations) {
-		t.Fatalf("schema_migrations count = %d, want %d", migrationCount, len(migrations))
+	if workspaceTableCount != 2 {
+		t.Fatalf("workspace table count = %d, want 2", workspaceTableCount)
 	}
 
 	if err := store.Close(); err != nil {
@@ -836,33 +274,149 @@ func TestStoreMigrateLifecycleAndReopen(t *testing.T) {
 	}
 }
 
-func openTestStore(t *testing.T) *Store {
-	t.Helper()
+func TestUpdateTaskStatusUpdatesFieldsWhenStatusUnchanged(t *testing.T) {
+	ctx := context.Background()
+	store := openMigratedTestStore(t, "update-task-status-unchanged.db")
+	defer store.Close()
 
-	store, err := Open(filepath.Join(t.TempDir(), "odin.db"))
-	if err != nil {
-		t.Fatalf("Open() error = %v", err)
-	}
-	if err := store.Migrate(context.Background()); err != nil {
-		t.Fatalf("Migrate() error = %v", err)
-	}
-	return store
-}
-
-func seedMemoryFixture(t *testing.T, ctx context.Context, store *Store) (Project, Project, Task, Run) {
-	t.Helper()
-
-	coreProject, err := store.CreateProject(ctx, CreateProjectParams{
-		Key:           "odin-core",
-		Name:          "Odin Core",
-		Scope:         "odin-core",
-		GitRoot:       "/home/orchestrator/odin-os",
+	project, err := store.CreateProject(ctx, CreateProjectParams{
+		Key:           "update-task-status-unchanged",
+		Name:          "Update Task Status Unchanged",
+		Scope:         "project",
+		GitRoot:       "/tmp/update-task-status-unchanged",
 		DefaultBranch: "main",
-		GitHubRepo:    "example/odin-os",
 		ManifestPath:  "config/projects.yaml",
 	})
 	if err != nil {
-		t.Fatalf("CreateProject(odin-core) error = %v", err)
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+
+	task, err := store.CreateTask(ctx, CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "status-unchanged-task",
+		Title:       "Refresh task state",
+		Status:      "blocked",
+		Scope:       "project",
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+
+	task, err = store.UpdateTaskStatus(ctx, UpdateTaskStatusParams{
+		TaskID:         task.ID,
+		Status:         "blocked",
+		Summary:        "first rerun summary",
+		TerminalReason: "swarm_results_pending",
+		ArtifactsJSON:  `[{"type":"swarm_aggregation","summary":"first rerun summary","confidence":0.42}]`,
+	})
+	if err != nil {
+		t.Fatalf("UpdateTaskStatus(first rerun) error = %v", err)
+	}
+	if task.Summary != "first rerun summary" {
+		t.Fatalf("first update summary = %q, want first rerun summary", task.Summary)
+	}
+
+	task, err = store.UpdateTaskStatus(ctx, UpdateTaskStatusParams{
+		TaskID:         task.ID,
+		Status:         "blocked",
+		Summary:        "second rerun summary",
+		TerminalReason: "swarm_review_gate_pending_verifier",
+		ArtifactsJSON:  `[{"type":"swarm_aggregation","summary":"second rerun summary","confidence":0.87}]`,
+	})
+	if err != nil {
+		t.Fatalf("UpdateTaskStatus(second rerun) error = %v", err)
+	}
+	if task.Summary != "second rerun summary" {
+		t.Fatalf("second update summary = %q, want second rerun summary", task.Summary)
+	}
+	if task.TerminalReason != "swarm_review_gate_pending_verifier" {
+		t.Fatalf("second update terminal reason = %q, want swarm_review_gate_pending_verifier", task.TerminalReason)
+	}
+	if task.ArtifactsJSON != `[{"type":"swarm_aggregation","summary":"second rerun summary","confidence":0.87}]` {
+		t.Fatalf("second update artifacts JSON = %q, want updated envelope", task.ArtifactsJSON)
+	}
+}
+
+func TestUpdateTaskStatusUpdatesMetadataWithoutStatusTransition(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "odin.db")
+
+	store, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer store.Close()
+
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
+	}
+
+	project, err := store.CreateProject(ctx, CreateProjectParams{
+		Key:           "family-ops",
+		Name:          "Family-Ops",
+		Scope:         "project",
+		GitRoot:       "/home/orchestrator/family-ops",
+		DefaultBranch: "main",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+
+	task, err := store.CreateTask(ctx, CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "finance-transfer-review",
+		Title:       "Prepare Robinhood transfer review",
+		Status:      "blocked",
+		Scope:       "project",
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+
+	task, err = store.UpdateTaskStatus(ctx, UpdateTaskStatusParams{
+		TaskID:         task.ID,
+		Status:         "blocked",
+		Summary:        "approval denied",
+		TerminalReason: "operator_denied",
+	})
+	if err != nil {
+		t.Fatalf("UpdateTaskStatus(blocked metadata) error = %v", err)
+	}
+
+	if task.Status != "blocked" {
+		t.Fatalf("task.Status = %q, want %q", task.Status, "blocked")
+	}
+	if task.Summary != "approval denied" {
+		t.Fatalf("task.Summary = %q, want %q", task.Summary, "approval denied")
+	}
+	if task.TerminalReason != "operator_denied" {
+		t.Fatalf("task.TerminalReason = %q, want %q", task.TerminalReason, "operator_denied")
+	}
+
+	gotTask, err := store.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
+	}
+	if gotTask.TerminalReason != "operator_denied" {
+		t.Fatalf("GetTask().TerminalReason = %q, want %q", gotTask.TerminalReason, "operator_denied")
+	}
+}
+
+func TestRunArtifactsRecordAndListByRun(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "odin.db")
+
+	store, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer store.Close()
+
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
 	}
 
 	project, err := store.CreateProject(ctx, CreateProjectParams{
@@ -871,20 +425,99 @@ func seedMemoryFixture(t *testing.T, ctx context.Context, store *Store) (Project
 		Scope:         "project",
 		GitRoot:       "/tmp/alpha",
 		DefaultBranch: "main",
-		GitHubRepo:    "acme/alpha",
 		ManifestPath:  "config/projects.yaml",
 	})
 	if err != nil {
-		t.Fatalf("CreateProject(alpha) error = %v", err)
+		t.Fatalf("CreateProject() error = %v", err)
 	}
 
 	task, err := store.CreateTask(ctx, CreateTaskParams{
 		ProjectID:   project.ID,
-		Key:         "alpha-memory",
-		Title:       "memory fixture",
+		Key:         "alpha-task",
+		Title:       "Alpha task",
 		Status:      "running",
 		Scope:       "project",
-		RequestedBy: "test",
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+
+	run, err := store.StartRun(ctx, StartRunParams{
+		TaskID:   task.ID,
+		Executor: "codex",
+		Attempt:  1,
+		Status:   "running",
+	})
+	if err != nil {
+		t.Fatalf("StartRun() error = %v", err)
+	}
+
+	artifact, err := store.RecordRunArtifact(ctx, RecordRunArtifactParams{
+		RunID:        run.ID,
+		ArtifactType: "driver_result",
+		Summary:      "Robinhood review ready",
+		DetailsJSON:  `{"session_state":"review_ready"}`,
+	})
+	if err != nil {
+		t.Fatalf("RecordRunArtifact() error = %v", err)
+	}
+
+	artifacts, err := store.ListRunArtifacts(ctx, ListRunArtifactsParams{RunID: run.ID})
+	if err != nil {
+		t.Fatalf("ListRunArtifacts() error = %v", err)
+	}
+
+	if len(artifacts) != 1 {
+		t.Fatalf("ListRunArtifacts() len = %d, want 1", len(artifacts))
+	}
+	if artifacts[0].ID != artifact.ID {
+		t.Fatalf("ListRunArtifacts()[0].ID = %d, want %d", artifacts[0].ID, artifact.ID)
+	}
+	if artifacts[0].ArtifactType != "driver_result" {
+		t.Fatalf("ListRunArtifacts()[0].ArtifactType = %q, want %q", artifacts[0].ArtifactType, "driver_result")
+	}
+	if artifacts[0].Summary != "Robinhood review ready" {
+		t.Fatalf("ListRunArtifacts()[0].Summary = %q, want %q", artifacts[0].Summary, "Robinhood review ready")
+	}
+	if artifacts[0].DetailsJSON != `{"session_state":"review_ready"}` {
+		t.Fatalf("ListRunArtifacts()[0].DetailsJSON = %q, want %q", artifacts[0].DetailsJSON, `{"session_state":"review_ready"}`)
+	}
+}
+
+func TestBlockTaskAndRequestApprovalRejectsSecondPendingApproval(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "odin.db")
+
+	store, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer store.Close()
+
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
+	}
+
+	project, err := store.CreateProject(ctx, CreateProjectParams{
+		Key:           "alpha",
+		Name:          "Alpha",
+		Scope:         "project",
+		GitRoot:       "/tmp/alpha",
+		DefaultBranch: "main",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+
+	task, err := store.CreateTask(ctx, CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "approval-task",
+		Title:       "Await approval",
+		Status:      "running",
+		Scope:       "project",
+		RequestedBy: "operator",
 	})
 	if err != nil {
 		t.Fatalf("CreateTask() error = %v", err)
@@ -900,9 +533,487 @@ func seedMemoryFixture(t *testing.T, ctx context.Context, store *Store) (Project
 		t.Fatalf("StartRun() error = %v", err)
 	}
 
-	return coreProject, project, task, run
+	blockedTask, approval, err := store.BlockTaskAndRequestApproval(ctx, BlockTaskAndRequestApprovalParams{
+		TaskID:      task.ID,
+		RunID:       &run.ID,
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("BlockTaskAndRequestApproval() error = %v", err)
+	}
+	if blockedTask.Status != "blocked" {
+		t.Fatalf("blocked task status = %q, want blocked", blockedTask.Status)
+	}
+
+	if _, _, err := store.BlockTaskAndRequestApproval(ctx, BlockTaskAndRequestApprovalParams{
+		TaskID:      task.ID,
+		RunID:       &run.ID,
+		RequestedBy: "operator",
+	}); err == nil {
+		t.Fatal("BlockTaskAndRequestApproval() error = nil, want blocked-task rejection")
+	}
+
+	gotTask, err := store.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
+	}
+	if gotTask.Status != "blocked" {
+		t.Fatalf("GetTask().Status = %q, want blocked", gotTask.Status)
+	}
+
+	var approvalCount int
+	if err := store.DB().QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM approvals
+		WHERE task_id = ? AND status = 'pending'
+	`, task.ID).Scan(&approvalCount); err != nil {
+		t.Fatalf("count approvals error = %v", err)
+	}
+	if approvalCount != 1 {
+		t.Fatalf("pending approval count = %d, want 1", approvalCount)
+	}
+
+	gotApproval, err := store.GetApproval(ctx, approval.ID)
+	if err != nil {
+		t.Fatalf("GetApproval() error = %v", err)
+	}
+	if gotApproval.Status != "pending" {
+		t.Fatalf("GetApproval().Status = %q, want pending", gotApproval.Status)
+	}
 }
 
+func TestResolveApprovalRejectsApprovedApprovalWhileRunStillRunning(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "odin.db")
+
+	store, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer store.Close()
+
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
+	}
+
+	project, err := store.CreateProject(ctx, CreateProjectParams{
+		Key:           "alpha",
+		Name:          "Alpha",
+		Scope:         "project",
+		GitRoot:       "/tmp/alpha",
+		DefaultBranch: "main",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+
+	task, err := store.CreateTask(ctx, CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "approval-task",
+		Title:       "Await approval",
+		Status:      "running",
+		Scope:       "project",
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+
+	run, err := store.StartRun(ctx, StartRunParams{
+		TaskID:   task.ID,
+		Executor: "codex_headless",
+		Attempt:  1,
+		Status:   "running",
+	})
+	if err != nil {
+		t.Fatalf("StartRun() error = %v", err)
+	}
+
+	blockedTask, approval, err := store.BlockTaskAndRequestApproval(ctx, BlockTaskAndRequestApprovalParams{
+		TaskID:      task.ID,
+		RunID:       &run.ID,
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("BlockTaskAndRequestApproval() error = %v", err)
+	}
+	if blockedTask.Status != "blocked" {
+		t.Fatalf("blocked task status = %q, want blocked", blockedTask.Status)
+	}
+
+	if _, err := store.ResolveApproval(ctx, ResolveApprovalParams{
+		ApprovalID: approval.ID,
+		Status:     "approved",
+		DecisionBy: "operator",
+		Reason:     "safe to proceed",
+	}); err == nil {
+		t.Fatal("ResolveApproval() error = nil, want live-run rejection")
+	}
+
+	gotTask, err := store.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
+	}
+	if gotTask.Status != "blocked" {
+		t.Fatalf("GetTask().Status = %q, want blocked", gotTask.Status)
+	}
+
+	gotApproval, err := store.GetApproval(ctx, approval.ID)
+	if err != nil {
+		t.Fatalf("GetApproval() error = %v", err)
+	}
+	if gotApproval.Status != "pending" {
+		t.Fatalf("GetApproval().Status = %q, want pending", gotApproval.Status)
+	}
+
+	gotRun, err := store.GetRun(ctx, run.ID)
+	if err != nil {
+		t.Fatalf("GetRun() error = %v", err)
+	}
+	if gotRun.Status != "running" {
+		t.Fatalf("GetRun().Status = %q, want running", gotRun.Status)
+	}
+}
+
+func TestResolveApprovalRequeuesBlockedTaskAfterRunFinishes(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "odin.db")
+
+	store, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer store.Close()
+
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
+	}
+
+	project, err := store.CreateProject(ctx, CreateProjectParams{
+		Key:           "alpha",
+		Name:          "Alpha",
+		Scope:         "project",
+		GitRoot:       "/tmp/alpha",
+		DefaultBranch: "main",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+
+	task, err := store.CreateTask(ctx, CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "approval-task",
+		Title:       "Await approval",
+		Status:      "running",
+		Scope:       "project",
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+
+	run, err := store.StartRun(ctx, StartRunParams{
+		TaskID:   task.ID,
+		Executor: "codex_headless",
+		Attempt:  1,
+		Status:   "running",
+	})
+	if err != nil {
+		t.Fatalf("StartRun() error = %v", err)
+	}
+
+	run, err = store.FinishRun(ctx, FinishRunParams{
+		RunID:   run.ID,
+		Status:  "completed",
+		Summary: "approval gate reached",
+	})
+	if err != nil {
+		t.Fatalf("FinishRun() error = %v", err)
+	}
+
+	blockedTask, approval, err := store.BlockTaskAndRequestApproval(ctx, BlockTaskAndRequestApprovalParams{
+		TaskID:      task.ID,
+		RunID:       &run.ID,
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("BlockTaskAndRequestApproval() error = %v", err)
+	}
+	if blockedTask.Status != "blocked" {
+		t.Fatalf("blocked task status = %q, want blocked", blockedTask.Status)
+	}
+
+	if _, err := store.ResolveApproval(ctx, ResolveApprovalParams{
+		ApprovalID: approval.ID,
+		Status:     "approved",
+		DecisionBy: "operator",
+		Reason:     "safe to proceed",
+	}); err != nil {
+		t.Fatalf("ResolveApproval() error = %v", err)
+	}
+
+	gotTask, err := store.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
+	}
+	if gotTask.Status != "queued" {
+		t.Fatalf("GetTask().Status = %q, want queued", gotTask.Status)
+	}
+
+	gotApproval, err := store.GetApproval(ctx, approval.ID)
+	if err != nil {
+		t.Fatalf("GetApproval() error = %v", err)
+	}
+	if gotApproval.Status != "approved" {
+		t.Fatalf("GetApproval().Status = %q, want approved", gotApproval.Status)
+	}
+
+	events, err := store.ListEvents(ctx, ListEventsParams{})
+	if err != nil {
+		t.Fatalf("ListEvents() error = %v", err)
+	}
+	replay, err := projections.ReplayLifecycle(events)
+	if err != nil {
+		t.Fatalf("ReplayLifecycle() error = %v", err)
+	}
+	if replay.Tasks[task.ID].Status != "queued" {
+		t.Fatalf("replay task status = %q, want queued", replay.Tasks[task.ID].Status)
+	}
+	if replay.Approvals[approval.ID].Status != "approved" {
+		t.Fatalf("replay approval status = %q, want approved", replay.Approvals[approval.ID].Status)
+	}
+}
+
+func TestResolveApprovalRejectsStaleApprovalWhenNewerRunIsRunning(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "odin.db")
+
+	store, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer store.Close()
+
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
+	}
+
+	project, err := store.CreateProject(ctx, CreateProjectParams{
+		Key:           "alpha",
+		Name:          "Alpha",
+		Scope:         "project",
+		GitRoot:       "/tmp/alpha",
+		DefaultBranch: "main",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+
+	task, err := store.CreateTask(ctx, CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "stale-approval-task",
+		Title:       "Await approval",
+		Status:      "running",
+		Scope:       "project",
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+
+	runOne, err := store.StartRun(ctx, StartRunParams{
+		TaskID:   task.ID,
+		Executor: "codex_headless",
+		Attempt:  1,
+		Status:   "running",
+	})
+	if err != nil {
+		t.Fatalf("StartRun(runOne) error = %v", err)
+	}
+	if _, err := store.FinishRun(ctx, FinishRunParams{
+		RunID:   runOne.ID,
+		Status:  "completed",
+		Summary: "approval gate reached",
+	}); err != nil {
+		t.Fatalf("FinishRun(runOne) error = %v", err)
+	}
+
+	blockedTask, approval, err := store.BlockTaskAndRequestApproval(ctx, BlockTaskAndRequestApprovalParams{
+		TaskID:      task.ID,
+		RunID:       &runOne.ID,
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("BlockTaskAndRequestApproval() error = %v", err)
+	}
+	if blockedTask.Status != "blocked" {
+		t.Fatalf("blocked task status = %q, want blocked", blockedTask.Status)
+	}
+
+	if _, err := store.UpdateTaskStatus(ctx, UpdateTaskStatusParams{
+		TaskID: task.ID,
+		Status: "running",
+	}); err != nil {
+		t.Fatalf("UpdateTaskStatus(running) error = %v", err)
+	}
+
+	runTwo, err := store.StartRun(ctx, StartRunParams{
+		TaskID:   task.ID,
+		Executor: "codex_headless",
+		Attempt:  2,
+		Status:   "running",
+	})
+	if err != nil {
+		t.Fatalf("StartRun(runTwo) error = %v", err)
+	}
+
+	if _, err := store.ResolveApproval(ctx, ResolveApprovalParams{
+		ApprovalID: approval.ID,
+		Status:     "approved",
+		DecisionBy: "operator",
+		Reason:     "stale approval",
+	}); err == nil {
+		t.Fatal("ResolveApproval() error = nil, want newer-run rejection")
+	}
+
+	gotTask, err := store.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
+	}
+	if gotTask.Status != "running" {
+		t.Fatalf("GetTask().Status = %q, want running", gotTask.Status)
+	}
+	if gotTask.CurrentRunID == nil || *gotTask.CurrentRunID != runTwo.ID {
+		t.Fatalf("GetTask().CurrentRunID = %v, want %d", gotTask.CurrentRunID, runTwo.ID)
+	}
+
+	gotApproval, err := store.GetApproval(ctx, approval.ID)
+	if err != nil {
+		t.Fatalf("GetApproval() error = %v", err)
+	}
+	if gotApproval.Status != "pending" {
+		t.Fatalf("GetApproval().Status = %q, want pending", gotApproval.Status)
+	}
+}
+
+func TestResolveApprovalRejectsReResolution(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "odin.db")
+
+	store, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer store.Close()
+
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
+	}
+
+	project, err := store.CreateProject(ctx, CreateProjectParams{
+		Key:           "alpha",
+		Name:          "Alpha",
+		Scope:         "project",
+		GitRoot:       "/tmp/alpha",
+		DefaultBranch: "main",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+
+	task, err := store.CreateTask(ctx, CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "approval-task",
+		Title:       "Await approval",
+		Status:      "running",
+		Scope:       "project",
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+
+	run, err := store.StartRun(ctx, StartRunParams{
+		TaskID:   task.ID,
+		Executor: "codex_headless",
+		Attempt:  1,
+		Status:   "running",
+	})
+	if err != nil {
+		t.Fatalf("StartRun() error = %v", err)
+	}
+
+	run, err = store.FinishRun(ctx, FinishRunParams{
+		RunID:   run.ID,
+		Status:  "completed",
+		Summary: "approval gate reached",
+	})
+	if err != nil {
+		t.Fatalf("FinishRun() error = %v", err)
+	}
+
+	blockedTask, approval, err := store.BlockTaskAndRequestApproval(ctx, BlockTaskAndRequestApprovalParams{
+		TaskID:      task.ID,
+		RunID:       &run.ID,
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("BlockTaskAndRequestApproval() error = %v", err)
+	}
+	if blockedTask.Status != "blocked" {
+		t.Fatalf("blocked task status = %q, want blocked", blockedTask.Status)
+	}
+
+	approved, err := store.ResolveApproval(ctx, ResolveApprovalParams{
+		ApprovalID: approval.ID,
+		Status:     "approved",
+		DecisionBy: "operator",
+		Reason:     "safe to proceed",
+	})
+	if err != nil {
+		t.Fatalf("ResolveApproval(first) error = %v", err)
+	}
+
+	beforeEvents, err := store.ListEvents(ctx, ListEventsParams{})
+	if err != nil {
+		t.Fatalf("ListEvents(before) error = %v", err)
+	}
+
+	if _, err := store.ResolveApproval(ctx, ResolveApprovalParams{
+		ApprovalID: approved.ID,
+		Status:     "rejected",
+		DecisionBy: "reviewer",
+		Reason:     "changed mind",
+	}); err == nil {
+		t.Fatal("ResolveApproval(second) error = nil, want re-resolution rejection")
+	}
+
+	afterApproval, err := store.GetApproval(ctx, approval.ID)
+	if err != nil {
+		t.Fatalf("GetApproval() error = %v", err)
+	}
+	if afterApproval.Status != "approved" {
+		t.Fatalf("GetApproval().Status = %q, want approved", afterApproval.Status)
+	}
+	if afterApproval.DecisionBy != "operator" {
+		t.Fatalf("GetApproval().DecisionBy = %q, want operator", afterApproval.DecisionBy)
+	}
+	if afterApproval.Reason != "safe to proceed" {
+		t.Fatalf("GetApproval().Reason = %q, want safe to proceed", afterApproval.Reason)
+	}
+
+	afterEvents, err := store.ListEvents(ctx, ListEventsParams{})
+	if err != nil {
+		t.Fatalf("ListEvents(after) error = %v", err)
+	}
+	if len(afterEvents) != len(beforeEvents) {
+		t.Fatalf("event count = %d, want %d", len(afterEvents), len(beforeEvents))
+	}
+}
 func TestProjectTransitionStateLifecycle(t *testing.T) {
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "odin.db")
@@ -1299,5 +1410,872 @@ func TestLearningProposalLifecycleSupportsEvaluationPromotionAndRollback(t *test
 	}
 	if counts[runtimeevents.EventLearningPromotionRolledBack] != 1 {
 		t.Fatalf("learning.promotion_rolled_back count = %d, want 1", counts[runtimeevents.EventLearningPromotionRolledBack])
+	}
+}
+
+func TestRuntimeStateStoreLifecycleAndHeartbeat(t *testing.T) {
+	ctx := context.Background()
+	store := openMigratedTestStore(t, "runtime-state.db")
+	defer store.Close()
+
+	bootAt := time.Date(2026, 4, 16, 9, 0, 0, 0, time.UTC)
+	readyAt := bootAt.Add(90 * time.Second)
+	heartbeatAt := readyAt.Add(45 * time.Second)
+	stoppedAt := heartbeatAt.Add(30 * time.Second)
+
+	state, err := store.UpsertRuntimeState(ctx, UpsertRuntimeStateParams{
+		BootID:          "boot-1",
+		Status:          "booting",
+		PID:             1234,
+		StartedAt:       bootAt,
+		LastHeartbeatAt: bootAt,
+	}, RuntimeStateWriteOptions{})
+	if err != nil {
+		t.Fatalf("UpsertRuntimeState(booting) error = %v", err)
+	}
+	if state.SingletonKey != "primary" {
+		t.Fatalf("SingletonKey = %q, want %q", state.SingletonKey, "primary")
+	}
+	if state.Status != "booting" {
+		t.Fatalf("Status = %q, want %q", state.Status, "booting")
+	}
+
+	state, err = store.UpsertRuntimeState(ctx, UpsertRuntimeStateParams{
+		BootID:          "boot-1",
+		Status:          "ready",
+		PID:             1234,
+		StartedAt:       bootAt,
+		ReadyAt:         &readyAt,
+		LastHeartbeatAt: readyAt,
+		UpdatedAt:       readyAt,
+	}, RuntimeStateWriteOptions{ExpectedBootID: "boot-1"})
+	if err != nil {
+		t.Fatalf("UpsertRuntimeState(ready) error = %v", err)
+	}
+	if state.ReadyAt == nil || !state.ReadyAt.Equal(readyAt) {
+		t.Fatalf("ReadyAt = %v, want %v", state.ReadyAt, readyAt)
+	}
+
+	store.Now = func() time.Time { return heartbeatAt }
+	state, err = store.UpdateRuntimeHeartbeat(ctx, "boot-1")
+	if err != nil {
+		t.Fatalf("UpdateRuntimeHeartbeat() error = %v", err)
+	}
+	if !state.LastHeartbeatAt.Equal(heartbeatAt) {
+		t.Fatalf("LastHeartbeatAt = %v, want %v", state.LastHeartbeatAt, heartbeatAt)
+	}
+
+	state, err = store.UpsertRuntimeState(ctx, UpsertRuntimeStateParams{
+		BootID:             "boot-1",
+		Status:             "stopped",
+		PID:                1234,
+		StartedAt:          bootAt,
+		ReadyAt:            &readyAt,
+		LastHeartbeatAt:    heartbeatAt,
+		LastShutdownReason: "operator requested shutdown",
+		UpdatedAt:          stoppedAt,
+	}, RuntimeStateWriteOptions{
+		ExpectedBootID: "boot-1",
+		EventReason:    "operator requested shutdown",
+	})
+	if err != nil {
+		t.Fatalf("UpsertRuntimeState(stopped) error = %v", err)
+	}
+	if state.LastShutdownReason != "operator requested shutdown" {
+		t.Fatalf("LastShutdownReason = %q, want %q", state.LastShutdownReason, "operator requested shutdown")
+	}
+
+	got, err := store.GetRuntimeState(ctx)
+	if err != nil {
+		t.Fatalf("GetRuntimeState() error = %v", err)
+	}
+	if got.Status != "stopped" {
+		t.Fatalf("GetRuntimeState().Status = %q, want %q", got.Status, "stopped")
+	}
+	if !got.LastHeartbeatAt.Equal(heartbeatAt) {
+		t.Fatalf("GetRuntimeState().LastHeartbeatAt = %v, want %v", got.LastHeartbeatAt, heartbeatAt)
+	}
+
+	events, err := store.ListEvents(ctx, ListEventsParams{})
+	if err != nil {
+		t.Fatalf("ListEvents() error = %v", err)
+	}
+
+	var lifecycleStatuses []string
+	var sawHeartbeat bool
+	for _, event := range events {
+		switch event.Type {
+		case runtimeevents.EventServiceLifecycleChanged:
+			payload, err := runtimeevents.DecodePayload[runtimeevents.ServiceLifecyclePayload](event.Payload)
+			if err != nil {
+				t.Fatalf("DecodePayload(ServiceLifecyclePayload) error = %v", err)
+			}
+			lifecycleStatuses = append(lifecycleStatuses, payload.Status)
+		case runtimeevents.EventServiceHeartbeatRecorded:
+			sawHeartbeat = true
+		}
+	}
+
+	if len(lifecycleStatuses) != 3 {
+		t.Fatalf("lifecycle event count = %d, want %d", len(lifecycleStatuses), 3)
+	}
+	if lifecycleStatuses[0] != "booting" || lifecycleStatuses[1] != "ready" || lifecycleStatuses[2] != "stopped" {
+		t.Fatalf("lifecycle statuses = %v, want [booting ready stopped]", lifecycleStatuses)
+	}
+	if !sawHeartbeat {
+		t.Fatalf("expected service heartbeat event, got %+v", events)
+	}
+}
+
+func TestRuntimeStateStoreRejectsStaleSameBootSnapshot(t *testing.T) {
+	ctx := context.Background()
+	store := openMigratedTestStore(t, "runtime-state-stale-snapshot.db")
+	defer store.Close()
+
+	bootAt := time.Date(2026, 4, 17, 9, 0, 0, 0, time.UTC)
+	degradedAt := bootAt.Add(1 * time.Minute)
+	staleWriteAt := degradedAt.Add(1 * time.Minute)
+
+	booting, err := store.UpsertRuntimeState(ctx, UpsertRuntimeStateParams{
+		BootID:          "boot-1",
+		Status:          "booting",
+		PID:             1234,
+		StartedAt:       bootAt,
+		LastHeartbeatAt: bootAt,
+	}, RuntimeStateWriteOptions{})
+	if err != nil {
+		t.Fatalf("UpsertRuntimeState(booting) error = %v", err)
+	}
+
+	snapshot, err := store.GetRuntimeState(ctx)
+	if err != nil {
+		t.Fatalf("GetRuntimeState(snapshot) error = %v", err)
+	}
+
+	degraded, err := store.UpsertRuntimeState(ctx, UpsertRuntimeStateParams{
+		BootID:          "boot-1",
+		Status:          "degraded",
+		PID:             booting.PID,
+		StartedAt:       booting.StartedAt,
+		LastHeartbeatAt: degradedAt,
+		LastError:       "dependency stale",
+		UpdatedAt:       degradedAt,
+	}, RuntimeStateWriteOptions{
+		ExpectedBootID:    "boot-1",
+		ExpectedUpdatedAt: snapshot.UpdatedAt,
+		EventReason:       "dependency stale",
+	})
+	if err != nil {
+		t.Fatalf("UpsertRuntimeState(degraded) error = %v", err)
+	}
+
+	_, err = store.UpsertRuntimeState(ctx, UpsertRuntimeStateParams{
+		BootID:          "boot-1",
+		Status:          "ready",
+		PID:             snapshot.PID,
+		StartedAt:       snapshot.StartedAt,
+		ReadyAt:         &staleWriteAt,
+		LastHeartbeatAt: staleWriteAt,
+		LastError:       snapshot.LastError,
+		UpdatedAt:       staleWriteAt,
+	}, RuntimeStateWriteOptions{
+		ExpectedBootID:    "boot-1",
+		ExpectedUpdatedAt: snapshot.UpdatedAt,
+	})
+	if !errors.Is(err, ErrRuntimeStateConcurrentUpdate) {
+		t.Fatalf("UpsertRuntimeState(stale snapshot) error = %v, want %v", err, ErrRuntimeStateConcurrentUpdate)
+	}
+
+	got, err := store.GetRuntimeState(ctx)
+	if err != nil {
+		t.Fatalf("GetRuntimeState() error = %v", err)
+	}
+	if got.Status != "degraded" {
+		t.Fatalf("GetRuntimeState().Status = %q, want %q", got.Status, "degraded")
+	}
+	if got.LastError != "dependency stale" {
+		t.Fatalf("GetRuntimeState().LastError = %q, want %q", got.LastError, "dependency stale")
+	}
+	if !got.UpdatedAt.Equal(degraded.UpdatedAt) {
+		t.Fatalf("GetRuntimeState().UpdatedAt = %v, want %v", got.UpdatedAt, degraded.UpdatedAt)
+	}
+
+	events, err := store.ListEvents(ctx, ListEventsParams{})
+	if err != nil {
+		t.Fatalf("ListEvents() error = %v", err)
+	}
+	var lifecycleCount int
+	for _, event := range events {
+		if event.Type == runtimeevents.EventServiceLifecycleChanged {
+			lifecycleCount++
+		}
+	}
+	if lifecycleCount != 2 {
+		t.Fatalf("lifecycle event count = %d, want %d", lifecycleCount, 2)
+	}
+}
+
+func TestTaskQueueDefaults(t *testing.T) {
+	ctx := context.Background()
+	store := openMigratedTestStore(t, "task-queue-defaults.db")
+	defer store.Close()
+
+	project, err := store.CreateProject(ctx, CreateProjectParams{
+		Key:           "queue-defaults",
+		Name:          "Queue Defaults",
+		Scope:         "project",
+		GitRoot:       "/tmp/queue-defaults",
+		DefaultBranch: "main",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+
+	task, err := store.CreateTask(ctx, CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "default-queue-task",
+		Title:       "Check queue defaults",
+		Status:      "queued",
+		Scope:       "project",
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+
+	if !task.NextEligibleAt.IsZero() {
+		t.Fatalf("NextEligibleAt = %v, want zero time", task.NextEligibleAt)
+	}
+	if task.Priority != 100 {
+		t.Fatalf("Priority = %d, want 100", task.Priority)
+	}
+	if task.LastError != "" {
+		t.Fatalf("LastError = %q, want empty", task.LastError)
+	}
+	if task.RetryCount != 0 {
+		t.Fatalf("RetryCount = %d, want 0", task.RetryCount)
+	}
+	if task.MaxAttempts != 3 {
+		t.Fatalf("MaxAttempts = %d, want 3", task.MaxAttempts)
+	}
+	if task.BlockedReason != "" {
+		t.Fatalf("BlockedReason = %q, want empty", task.BlockedReason)
+	}
+
+	views, err := projections.ListTaskStatusViews(ctx, store.DB())
+	if err != nil {
+		t.Fatalf("ListTaskStatusViews() error = %v", err)
+	}
+	if len(views) != 1 {
+		t.Fatalf("ListTaskStatusViews() len = %d, want 1", len(views))
+	}
+	if views[0].NextEligibleAt != "0001-01-01T00:00:00Z" {
+		t.Fatalf("NextEligibleAt view = %q, want zero RFC3339 time", views[0].NextEligibleAt)
+	}
+}
+
+func TestBlockedTaskRecordsReason(t *testing.T) {
+	ctx := context.Background()
+	store := openMigratedTestStore(t, "blocked-task.db")
+	defer store.Close()
+
+	project, err := store.CreateProject(ctx, CreateProjectParams{
+		Key:           "blocked-task",
+		Name:          "Blocked Task",
+		Scope:         "project",
+		GitRoot:       "/tmp/blocked-task",
+		DefaultBranch: "main",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+
+	task, err := store.CreateTask(ctx, CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "blocked-queue-task",
+		Title:       "Wait on approval",
+		Status:      "queued",
+		Scope:       "project",
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+
+	blocked, err := store.BlockTask(ctx, BlockTaskParams{
+		TaskID: task.ID,
+		Reason: "approval_required",
+	})
+	if err != nil {
+		t.Fatalf("BlockTask() error = %v", err)
+	}
+
+	if blocked.Status != "blocked" {
+		t.Fatalf("Status = %q, want blocked", blocked.Status)
+	}
+	if blocked.BlockedReason != "approval_required" {
+		t.Fatalf("BlockedReason = %q, want %q", blocked.BlockedReason, "approval_required")
+	}
+
+	views, err := projections.ListBlockedItemViews(ctx, store.DB())
+	if err != nil {
+		t.Fatalf("ListBlockedItemViews() error = %v", err)
+	}
+	if len(views) != 1 {
+		t.Fatalf("ListBlockedItemViews() len = %d, want 1", len(views))
+	}
+	if views[0].Source != "task" {
+		t.Fatalf("BlockedItemView.Source = %q, want %q", views[0].Source, "task")
+	}
+	if views[0].Reason != "approval_required" {
+		t.Fatalf("BlockedItemView.Reason = %q, want %q", views[0].Reason, "approval_required")
+	}
+}
+
+func TestTaskQueueStatusChangesEmitReplayableEvents(t *testing.T) {
+	ctx := context.Background()
+	store := openMigratedTestStore(t, "task-queue-events.db")
+	defer store.Close()
+
+	project, err := store.CreateProject(ctx, CreateProjectParams{
+		Key:           "queue-events",
+		Name:          "Queue Events",
+		Scope:         "project",
+		GitRoot:       "/tmp/queue-events",
+		DefaultBranch: "main",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+
+	task, err := store.CreateTask(ctx, CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "queue-events-task",
+		Title:       "Track queue transitions",
+		Status:      "queued",
+		Scope:       "project",
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+
+	if _, err := store.BlockTask(ctx, BlockTaskParams{
+		TaskID: task.ID,
+		Reason: "approval_required",
+	}); err != nil {
+		t.Fatalf("BlockTask() error = %v", err)
+	}
+	if _, err := store.RequeueTaskAt(ctx, RequeueTaskAtParams{
+		TaskID:         task.ID,
+		NextEligibleAt: time.Date(2026, 4, 17, 11, 0, 0, 0, time.UTC),
+	}); err != nil {
+		t.Fatalf("RequeueTaskAt() error = %v", err)
+	}
+
+	events, err := store.ListEvents(ctx, ListEventsParams{TaskID: &task.ID})
+	if err != nil {
+		t.Fatalf("ListEvents(task) error = %v", err)
+	}
+
+	var statusChanged int
+	var queueStateChanged int
+	for _, event := range events {
+		if event.Type == runtimeevents.EventTaskStatusChanged {
+			statusChanged++
+		}
+		if event.Type == runtimeevents.EventTaskQueueStateChanged {
+			queueStateChanged++
+		}
+	}
+	if statusChanged != 2 {
+		t.Fatalf("task status changed events = %d, want 2", statusChanged)
+	}
+	if queueStateChanged != 2 {
+		t.Fatalf("task queue state changed events = %d, want 2", queueStateChanged)
+	}
+
+	replay, err := projections.ReplayLifecycle(events)
+	if err != nil {
+		t.Fatalf("ReplayLifecycle() error = %v", err)
+	}
+	if replay.Tasks[task.ID].Status != "queued" {
+		t.Fatalf("ReplayLifecycle().Tasks[%d].Status = %q, want queued", task.ID, replay.Tasks[task.ID].Status)
+	}
+	if replay.Tasks[task.ID].BlockedReason != "" {
+		t.Fatalf("ReplayLifecycle().Tasks[%d].BlockedReason = %q, want cleared", task.ID, replay.Tasks[task.ID].BlockedReason)
+	}
+	if replay.Tasks[task.ID].NextEligibleAt != "2026-04-17T11:00:00.000000000Z" {
+		t.Fatalf("ReplayLifecycle().Tasks[%d].NextEligibleAt = %q, want retry time", task.ID, replay.Tasks[task.ID].NextEligibleAt)
+	}
+}
+
+func TestRunLifecycleEventsReplayCurrentRunDuringPreparing(t *testing.T) {
+	ctx := context.Background()
+	store := openMigratedTestStore(t, "run-lifecycle-events.db")
+	defer store.Close()
+
+	project, err := store.CreateProject(ctx, CreateProjectParams{
+		Key:           "run-events",
+		Name:          "Run Events",
+		Scope:         "project",
+		GitRoot:       "/tmp/run-events",
+		DefaultBranch: "main",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+
+	task, err := store.CreateTask(ctx, CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "run-events-task",
+		Title:       "Track run lifecycle",
+		Status:      "queued",
+		Scope:       "project",
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+
+	run, err := store.StartRun(ctx, StartRunParams{
+		TaskID:     task.ID,
+		Executor:   "codex",
+		Attempt:    1,
+		Status:     "preparing",
+		TaskStatus: "preparing",
+	})
+	if err != nil {
+		t.Fatalf("StartRun() error = %v", err)
+	}
+	if _, _, err := store.UpdateRunAndTaskStatus(ctx, UpdateRunAndTaskStatusParams{
+		RunID:      run.ID,
+		RunStatus:  "running",
+		TaskStatus: "running",
+	}); err != nil {
+		t.Fatalf("UpdateRunAndTaskStatus() error = %v", err)
+	}
+
+	events, err := store.ListEvents(ctx, ListEventsParams{TaskID: &task.ID})
+	if err != nil {
+		t.Fatalf("ListEvents() error = %v", err)
+	}
+	replay, err := projections.ReplayLifecycle(events)
+	if err != nil {
+		t.Fatalf("ReplayLifecycle() error = %v", err)
+	}
+
+	replayedTask := replay.Tasks[task.ID]
+	if replayedTask.CurrentRunID == nil || *replayedTask.CurrentRunID != run.ID {
+		t.Fatalf("ReplayLifecycle().Tasks[%d].CurrentRunID = %v, want %d", task.ID, replayedTask.CurrentRunID, run.ID)
+	}
+	if replay.Runs[run.ID].Status != "running" {
+		t.Fatalf("ReplayLifecycle().Runs[%d].Status = %q, want running", run.ID, replay.Runs[run.ID].Status)
+	}
+}
+
+func TestRetryBackoffUpdatesQueueState(t *testing.T) {
+	ctx := context.Background()
+	store := openMigratedTestStore(t, "retry-backoff.db")
+	defer store.Close()
+
+	now := time.Date(2026, 4, 17, 10, 0, 0, 0, time.UTC)
+	store.Now = func() time.Time { return now }
+
+	project, err := store.CreateProject(ctx, CreateProjectParams{
+		Key:           "retry-backoff",
+		Name:          "Retry Backoff",
+		Scope:         "project",
+		GitRoot:       "/tmp/retry-backoff",
+		DefaultBranch: "main",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+
+	task, err := store.CreateTask(ctx, CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "retry-queue-task",
+		Title:       "Retry later",
+		Status:      "queued",
+		Scope:       "project",
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+
+	retryAt := now.Add(500 * time.Millisecond)
+	updated, err := store.IncrementTaskRetry(ctx, IncrementTaskRetryParams{
+		TaskID:         task.ID,
+		LastError:      "transient executor failure",
+		NextEligibleAt: retryAt,
+	})
+	if err != nil {
+		t.Fatalf("IncrementTaskRetry() error = %v", err)
+	}
+
+	if updated.RetryCount != 1 {
+		t.Fatalf("RetryCount = %d, want 1", updated.RetryCount)
+	}
+	if updated.NextEligibleAt != retryAt {
+		t.Fatalf("NextEligibleAt = %v, want %v", updated.NextEligibleAt, retryAt)
+	}
+	if updated.LastError != "transient executor failure" {
+		t.Fatalf("LastError = %q, want %q", updated.LastError, "transient executor failure")
+	}
+
+	requeued, err := store.RequeueTaskAt(ctx, RequeueTaskAtParams{
+		TaskID:         task.ID,
+		NextEligibleAt: retryAt,
+	})
+	if err != nil {
+		t.Fatalf("RequeueTaskAt() error = %v", err)
+	}
+	if requeued.NextEligibleAt != retryAt {
+		t.Fatalf("RequeueTaskAt().NextEligibleAt = %v, want %v", requeued.NextEligibleAt, retryAt)
+	}
+
+	eligible, err := store.ListEligibleQueuedTasks(ctx, now)
+	if err != nil {
+		t.Fatalf("ListEligibleQueuedTasks() error = %v", err)
+	}
+	if len(eligible) != 0 {
+		t.Fatalf("ListEligibleQueuedTasks() len = %d, want 0 before retry window", len(eligible))
+	}
+
+	eligible, err = store.ListEligibleQueuedTasks(ctx, retryAt)
+	if err != nil {
+		t.Fatalf("ListEligibleQueuedTasks(retryAt) error = %v", err)
+	}
+	if len(eligible) != 1 || eligible[0].ID != task.ID {
+		t.Fatalf("ListEligibleQueuedTasks(retryAt) = %+v, want task %d", eligible, task.ID)
+	}
+
+	events, err := store.ListEvents(ctx, ListEventsParams{TaskID: &task.ID})
+	if err != nil {
+		t.Fatalf("ListEvents(task) error = %v", err)
+	}
+
+	replay, err := projections.ReplayLifecycle(events)
+	if err != nil {
+		t.Fatalf("ReplayLifecycle() error = %v", err)
+	}
+	if replay.Tasks[task.ID].RetryCount != 1 {
+		t.Fatalf("ReplayLifecycle().Tasks[%d].RetryCount = %d, want 1", task.ID, replay.Tasks[task.ID].RetryCount)
+	}
+	if replay.Tasks[task.ID].LastError != "transient executor failure" {
+		t.Fatalf("ReplayLifecycle().Tasks[%d].LastError = %q, want transient executor failure", task.ID, replay.Tasks[task.ID].LastError)
+	}
+	if replay.Tasks[task.ID].NextEligibleAt != "2026-04-17T10:00:00.500000000Z" {
+		t.Fatalf("ReplayLifecycle().Tasks[%d].NextEligibleAt = %q, want retry window", task.ID, replay.Tasks[task.ID].NextEligibleAt)
+	}
+}
+
+func TestFailRunAndRetryTaskUpdatesRunAndTaskTogether(t *testing.T) {
+	ctx := context.Background()
+	store := openMigratedTestStore(t, "retry-run-later.db")
+	defer store.Close()
+
+	now := time.Date(2026, 4, 17, 10, 0, 0, 0, time.UTC)
+	store.Now = func() time.Time { return now }
+
+	project, err := store.CreateProject(ctx, CreateProjectParams{
+		Key:           "retry-run-later",
+		Name:          "Retry Run Later",
+		Scope:         "project",
+		GitRoot:       "/tmp/retry-run-later",
+		DefaultBranch: "main",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+
+	task, err := store.CreateTask(ctx, CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "retry-run-later-task",
+		Title:       "Retry this run later",
+		Status:      "queued",
+		Scope:       "project",
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+	if _, err := store.UpdateTaskStatus(ctx, UpdateTaskStatusParams{
+		TaskID: task.ID,
+		Status: "running",
+	}); err != nil {
+		t.Fatalf("UpdateTaskStatus(running) error = %v", err)
+	}
+
+	run, err := store.StartRun(ctx, StartRunParams{
+		TaskID:   task.ID,
+		Executor: "codex_headless",
+		Attempt:  1,
+		Status:   "running",
+	})
+	if err != nil {
+		t.Fatalf("StartRun() error = %v", err)
+	}
+	lease, err := store.CreateWorktreeLease(ctx, CreateWorktreeLeaseParams{
+		ProjectID:    project.ID,
+		TaskID:       task.ID,
+		RunID:        run.ID,
+		Mode:         "mutable",
+		BranchName:   "odin/retry-run-later/task-1/run-1/try-1",
+		WorktreePath: "/tmp/retry-run-later/.odin/task-1/run-1",
+		RepoRoot:     project.GitRoot,
+		State:        "active",
+	})
+	if err != nil {
+		t.Fatalf("CreateWorktreeLease() error = %v", err)
+	}
+
+	retryAt := now.Add(2 * time.Second)
+	retriedTask, retriedRun, err := store.FailRunAndRetryTask(ctx, FailRunAndRetryTaskParams{
+		RunID:          run.ID,
+		Summary:        "temporary executor outage",
+		LastError:      "temporary executor outage",
+		NextEligibleAt: retryAt,
+	})
+	if err != nil {
+		t.Fatalf("FailRunAndRetryTask() error = %v", err)
+	}
+
+	if retriedRun.Status != "failed" {
+		t.Fatalf("Run.Status = %q, want failed", retriedRun.Status)
+	}
+	if retriedRun.Summary != "temporary executor outage" {
+		t.Fatalf("Run.Summary = %q, want temporary executor outage", retriedRun.Summary)
+	}
+	if retriedTask.Status != "queued" {
+		t.Fatalf("Task.Status = %q, want queued", retriedTask.Status)
+	}
+	if retriedTask.CurrentRunID != nil {
+		t.Fatalf("Task.CurrentRunID = %v, want nil", retriedTask.CurrentRunID)
+	}
+	if retriedTask.RetryCount != 1 {
+		t.Fatalf("Task.RetryCount = %d, want 1", retriedTask.RetryCount)
+	}
+	if retriedTask.LastError != "temporary executor outage" {
+		t.Fatalf("Task.LastError = %q, want temporary executor outage", retriedTask.LastError)
+	}
+	if !retriedTask.NextEligibleAt.Equal(retryAt) {
+		t.Fatalf("Task.NextEligibleAt = %v, want %v", retriedTask.NextEligibleAt, retryAt)
+	}
+	releasedLease, err := store.GetWorktreeLease(ctx, lease.ID)
+	if err != nil {
+		t.Fatalf("GetWorktreeLease() error = %v", err)
+	}
+	if releasedLease.State != "released" {
+		t.Fatalf("GetWorktreeLease().State = %q, want released", releasedLease.State)
+	}
+}
+
+func TestFinishRunAndSetTaskStatusUpdatesRunAndTaskTogether(t *testing.T) {
+	ctx := context.Background()
+	store := openMigratedTestStore(t, "finish-run-status.db")
+	defer store.Close()
+
+	project, err := store.CreateProject(ctx, CreateProjectParams{
+		Key:           "finish-run-status",
+		Name:          "Finish Run Status",
+		Scope:         "project",
+		GitRoot:       "/tmp/finish-run-status",
+		DefaultBranch: "main",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+
+	task, err := store.CreateTask(ctx, CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "finish-run-status-task",
+		Title:       "Finish this run",
+		Status:      "queued",
+		Scope:       "project",
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+	if _, err := store.UpdateTaskStatus(ctx, UpdateTaskStatusParams{
+		TaskID: task.ID,
+		Status: "running",
+	}); err != nil {
+		t.Fatalf("UpdateTaskStatus(running) error = %v", err)
+	}
+
+	run, err := store.StartRun(ctx, StartRunParams{
+		TaskID:   task.ID,
+		Executor: "codex_headless",
+		Attempt:  1,
+		Status:   "running",
+	})
+	if err != nil {
+		t.Fatalf("StartRun() error = %v", err)
+	}
+	lease, err := store.CreateWorktreeLease(ctx, CreateWorktreeLeaseParams{
+		ProjectID:    project.ID,
+		TaskID:       task.ID,
+		RunID:        run.ID,
+		Mode:         "mutable",
+		BranchName:   "odin/finish-run-status/task-1/run-1/try-1",
+		WorktreePath: "/tmp/finish-run-status/.odin/task-1/run-1",
+		RepoRoot:     project.GitRoot,
+		State:        "active",
+	})
+	if err != nil {
+		t.Fatalf("CreateWorktreeLease() error = %v", err)
+	}
+
+	finishedTask, finishedRun, err := store.FinishRunAndSetTaskStatus(ctx, FinishRunAndSetTaskStatusParams{
+		RunID:      run.ID,
+		RunStatus:  "failed",
+		Summary:    "exhausted retries",
+		TaskStatus: "failed",
+	})
+	if err != nil {
+		t.Fatalf("FinishRunAndSetTaskStatus() error = %v", err)
+	}
+
+	if finishedRun.Status != "failed" {
+		t.Fatalf("Run.Status = %q, want failed", finishedRun.Status)
+	}
+	if finishedRun.Summary != "exhausted retries" {
+		t.Fatalf("Run.Summary = %q, want exhausted retries", finishedRun.Summary)
+	}
+	if finishedTask.Status != "failed" {
+		t.Fatalf("Task.Status = %q, want failed", finishedTask.Status)
+	}
+	if finishedTask.CurrentRunID != nil {
+		t.Fatalf("Task.CurrentRunID = %v, want nil", finishedTask.CurrentRunID)
+	}
+	releasedLease, err := store.GetWorktreeLease(ctx, lease.ID)
+	if err != nil {
+		t.Fatalf("GetWorktreeLease() error = %v", err)
+	}
+	if releasedLease.State != "released" {
+		t.Fatalf("GetWorktreeLease().State = %q, want released", releasedLease.State)
+	}
+}
+
+func TestFormatTimeUsesFixedWidthUTC(t *testing.T) {
+	got := formatTime(time.Date(2026, 4, 17, 10, 0, 0, 5*1000*1000, time.FixedZone("offset", 3*60*60)))
+	want := "2026-04-17T07:00:00.005000000Z"
+	if got != want {
+		t.Fatalf("formatTime() = %q, want %q", got, want)
+	}
+}
+
+func TestParseTimeAcceptsVariableWidthRFC3339Nano(t *testing.T) {
+	got, err := parseTime("2026-04-17T07:00:00.5Z")
+	if err != nil {
+		t.Fatalf("parseTime() error = %v", err)
+	}
+
+	want := time.Date(2026, 4, 17, 7, 0, 0, 500*1000*1000, time.UTC)
+	if !got.Equal(want) {
+		t.Fatalf("parseTime() = %v, want %v", got, want)
+	}
+}
+
+func TestUpdateMemorySummaryDetails(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(filepath.Join(t.TempDir(), "odin.db"))
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer store.Close()
+
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
+	}
+
+	project, err := store.CreateProject(ctx, CreateProjectParams{
+		Key:           "odin-core",
+		Name:          "Odin Core",
+		Scope:         "odin-core",
+		GitRoot:       "/home/orchestrator/odin-os",
+		DefaultBranch: "main",
+		GitHubRepo:    "example/odin-os",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+
+	summary, err := store.RecordMemorySummary(ctx, RecordMemorySummaryParams{
+		ProjectID:   &project.ID,
+		Scope:       "project",
+		ScopeKey:    project.Key,
+		MemoryType:  "social_draft",
+		Summary:     "Draft awaiting approval",
+		DetailsJSON: `{"source":"cli","approval":"pending"}`,
+	})
+	if err != nil {
+		t.Fatalf("RecordMemorySummary() error = %v", err)
+	}
+
+	updated, err := store.UpdateMemorySummaryDetails(ctx, UpdateMemorySummaryDetailsParams{
+		MemoryID:    summary.ID,
+		DetailsJSON: `{"source":"cli","approval":"approved"}`,
+	})
+	if err != nil {
+		t.Fatalf("UpdateMemorySummaryDetails() error = %v", err)
+	}
+	if updated.ID != summary.ID {
+		t.Fatalf("updated.ID = %d, want %d", updated.ID, summary.ID)
+	}
+	if updated.DetailsJSON != `{"source":"cli","approval":"approved"}` {
+		t.Fatalf("updated.DetailsJSON = %q, want updated details", updated.DetailsJSON)
+	}
+
+	summaries, err := store.ListMemorySummaries(ctx, ListMemorySummariesParams{
+		ProjectID: &project.ID,
+		Scope:     "project",
+		ScopeKey:  project.Key,
+	})
+	if err != nil {
+		t.Fatalf("ListMemorySummaries() error = %v", err)
+	}
+	if len(summaries) != 1 {
+		t.Fatalf("summaries len = %d, want 1", len(summaries))
+	}
+	if summaries[0].DetailsJSON != updated.DetailsJSON {
+		t.Fatalf("stored details = %q, want %q", summaries[0].DetailsJSON, updated.DetailsJSON)
+	}
+
+	events, err := store.ListEvents(ctx, ListEventsParams{})
+	if err != nil {
+		t.Fatalf("ListEvents() error = %v", err)
+	}
+	var updatedEventFound bool
+	for _, event := range events {
+		if event.Type != runtimeevents.EventMemorySummaryUpdated {
+			continue
+		}
+		if event.StreamType != runtimeevents.StreamMemorySummary {
+			t.Fatalf("memory update event stream type = %q, want %q", event.StreamType, runtimeevents.StreamMemorySummary)
+		}
+		var payload runtimeevents.MemorySummaryUpdatedPayload
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			t.Fatalf("json.Unmarshal(memory update payload) error = %v", err)
+		}
+		if payload.Scope != "project" || payload.ScopeKey != project.Key || payload.MemoryType != "social_draft" {
+			t.Fatalf("memory update payload = %+v, want project social_draft payload", payload)
+		}
+		updatedEventFound = true
+	}
+	if !updatedEventFound {
+		t.Fatal("memory summary updated event not found")
 	}
 }

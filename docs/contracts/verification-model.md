@@ -103,7 +103,6 @@ The minimum command-level proof is:
 
 1. build or use the repo-owned `odin` binary
 2. execute the real command against a controlled runtime root
-   If the command mutates repo-authored config or registry content, use a copied repo root as well; `ODIN_ROOT` only isolates runtime state.
 3. assert the visible result and the relevant runtime side effects
 
 Examples:

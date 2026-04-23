@@ -4,6 +4,8 @@ key: pixel-perfect-ui-ux-designer
 title: Pixel Perfect UI/UX Designer
 summary: Audits product UI by deciding what belongs on screen, building project-specific taste, extracting principles from strong references, and validating visually with Huginn.
 status: active
+version: "1.0.0"
+enabled: true
 tags:
   - design
   - ux
@@ -21,6 +23,25 @@ applies_to:
   - dashboard_review
   - visual_validation
   - implementation_guidance
+scopes:
+  - global
+  - odin-core
+  - project
+permissions:
+  - repo.read
+handler_type: command
+handler_ref: scripts/skills/registry-skill-stub.sh
+timeout_seconds: 15
+input_schema:
+  type: object
+  properties:
+    request:
+      type: string
+output_schema:
+  type: object
+  properties:
+    result:
+      type: string
 ---
 
 # Pixel Perfect UI/UX Designer

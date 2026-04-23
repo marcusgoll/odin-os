@@ -2,10 +2,13 @@ package jobs
 
 import (
 	"context"
-	"encoding/json"
+	"database/sql"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
-	"sync"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -13,7 +16,8 @@ import (
 	"odin-os/internal/core/projects"
 	"odin-os/internal/executors/contract"
 	"odin-os/internal/executors/router"
-	runsvc "odin-os/internal/runtime/runs"
+	"odin-os/internal/runtime/checkpoints"
+	runtimeevents "odin-os/internal/runtime/events"
 	"odin-os/internal/store/sqlite"
 	"odin-os/internal/vcs/leases"
 )
@@ -63,7 +67,7 @@ func TestCreateTaskFromActEnsuresRuntimeProjectAndCreatesQueuedTask(t *testing.T
 	}
 }
 
-func TestCreateTaskHonorsRequestedBy(t *testing.T) {
+func TestCompanionRunCreatesOwnedTaskAndMarksOnlySupportedTriggers(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
@@ -71,70 +75,60 @@ func TestCreateTaskHonorsRequestedBy(t *testing.T) {
 	defer store.Close()
 
 	registry := writeRegistry(t)
-	service := Service{
-		Store:    store,
-		Registry: registry,
-		Now:      time.Now,
-	}
-
-	task, err := service.CreateTask(ctx, CreateTaskParams{
-		Resolved: scope.Resolution{
-			Kind:       scope.ScopeProject,
-			ProjectKey: "alpha",
-		},
-		Title:       "Delegated dashboard audit",
-		RequestedBy: "agent:portal-delivery-agent",
-	})
-	if err != nil {
-		t.Fatalf("CreateTask() error = %v", err)
-	}
-	if task.RequestedBy != "agent:portal-delivery-agent" {
-		t.Fatalf("task.RequestedBy = %q, want agent:portal-delivery-agent", task.RequestedBy)
-	}
-}
-
-func TestCreateTaskAvoidsKeyCollisionsWithinSameSecond(t *testing.T) {
-	t.Parallel()
-
-	ctx := context.Background()
-	store := openJobStore(t)
-	defer store.Close()
-
-	registry := writeRegistry(t)
-	fixedNow := time.Date(2026, 4, 20, 3, 0, 0, 0, time.UTC)
 	service := Service{
 		Store:    store,
 		Registry: registry,
 		Now: func() time.Time {
-			return fixedNow
+			return time.Date(2026, 4, 9, 12, 0, 0, 0, time.UTC)
 		},
 	}
 
-	first, err := service.CreateTask(ctx, CreateTaskParams{
-		Resolved: scope.Resolution{
+	workspace, err := store.GetWorkspaceByKey(ctx, "default")
+	if err != nil {
+		t.Fatalf("GetWorkspaceByKey(default) error = %v", err)
+	}
+	companion, err := store.GetCompanionByKey(ctx, workspace.ID, workspace.DefaultCompanionKey)
+	if err != nil {
+		t.Fatalf("GetCompanionByKey(default) error = %v", err)
+	}
+
+	t.Run("supported trigger", func(t *testing.T) {
+		task, err := service.CreateTaskFromCompanionRun(ctx, scope.Resolution{
 			Kind:       scope.ScopeProject,
 			ProjectKey: "alpha",
-		},
-		Title:       "Delegated dashboard audit",
-		RequestedBy: "agent:portal-delivery-agent",
+		}, companion, "review April budget", "build_plus_review")
+		if err != nil {
+			t.Fatalf("CreateTaskFromCompanionRun() error = %v", err)
+		}
+		if task.Status != "queued" {
+			t.Fatalf("Status = %q, want queued", task.Status)
+		}
+		if task.WorkspaceID == nil || *task.WorkspaceID != workspace.ID {
+			t.Fatalf("WorkspaceID = %v, want %d", task.WorkspaceID, workspace.ID)
+		}
+		if task.InitiativeID == nil {
+			t.Fatal("InitiativeID = nil, want initiative ownership")
+		}
+		if task.CompanionID == nil || *task.CompanionID != companion.ID {
+			t.Fatalf("CompanionID = %v, want %d", task.CompanionID, companion.ID)
+		}
+		if task.ActionKey != "build_plus_review" {
+			t.Fatalf("ActionKey = %q, want build_plus_review", task.ActionKey)
+		}
 	})
-	if err != nil {
-		t.Fatalf("CreateTask(first) error = %v", err)
-	}
-	second, err := service.CreateTask(ctx, CreateTaskParams{
-		Resolved: scope.Resolution{
+
+	t.Run("unsupported trigger", func(t *testing.T) {
+		task, err := service.CreateTaskFromCompanionRun(ctx, scope.Resolution{
 			Kind:       scope.ScopeProject,
 			ProjectKey: "alpha",
-		},
-		Title:       "Delegated dashboard audit",
-		RequestedBy: "agent:portal-delivery-agent",
+		}, companion, "review April budget fallback", "single_agent")
+		if err != nil {
+			t.Fatalf("CreateTaskFromCompanionRun() error = %v", err)
+		}
+		if task.ActionKey != "" {
+			t.Fatalf("ActionKey = %q, want empty when trigger is unsupported", task.ActionKey)
+		}
 	})
-	if err != nil {
-		t.Fatalf("CreateTask(second) error = %v", err)
-	}
-	if first.Key == second.Key {
-		t.Fatalf("task keys collided: %q", first.Key)
-	}
 }
 
 func TestListFiltersJobsByScope(t *testing.T) {
@@ -177,48 +171,6 @@ func TestListFiltersJobsByScope(t *testing.T) {
 	}
 }
 
-func TestCancelTaskByKeyCancelsQueuedTask(t *testing.T) {
-	t.Parallel()
-
-	ctx := context.Background()
-	store := openJobStore(t)
-	defer store.Close()
-
-	registry := writeRegistry(t)
-	service := Service{
-		Store:    store,
-		Registry: registry,
-		Now:      time.Now,
-	}
-
-	task, err := service.CreateTaskFromAct(ctx, scope.Resolution{
-		Kind:       scope.ScopeProject,
-		ProjectKey: "alpha",
-	}, "Queued task")
-	if err != nil {
-		t.Fatalf("CreateTaskFromAct() error = %v", err)
-	}
-
-	view, err := service.CancelTaskByKey(ctx, scope.Resolution{
-		Kind:       scope.ScopeProject,
-		ProjectKey: "alpha",
-	}, task.Key)
-	if err != nil {
-		t.Fatalf("CancelTaskByKey() error = %v", err)
-	}
-	if view.Status != "cancelled" {
-		t.Fatalf("view.Status = %q, want cancelled", view.Status)
-	}
-
-	gotTask, err := store.GetTask(ctx, task.ID)
-	if err != nil {
-		t.Fatalf("GetTask() error = %v", err)
-	}
-	if gotTask.Status != "cancelled" {
-		t.Fatalf("GetTask().Status = %q, want cancelled", gotTask.Status)
-	}
-}
-
 func TestExecuteNextQueuedCompletesCutoverProjectTask(t *testing.T) {
 	t.Parallel()
 
@@ -230,7 +182,7 @@ func TestExecuteNextQueuedCompletesCutoverProjectTask(t *testing.T) {
 	service := Service{
 		Store:          store,
 		Registry:       registry,
-		Executors:      router.DefaultCatalog(),
+		Executors:      testJobExecutors(),
 		ExecutorConfig: mustLoadExecutorConfig(t),
 		Transitions:    projects.Service{Store: store},
 		Leases: leases.Manager{
@@ -263,6 +215,7 @@ func TestExecuteNextQueuedCompletesCutoverProjectTask(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("SetTransitionState(cutover) error = %v", err)
 	}
+	recordHealthyExecutorSample(t, ctx, store)
 
 	if err := service.ExecuteNextQueued(ctx); err != nil {
 		t.Fatalf("ExecuteNextQueued() error = %v", err)
@@ -285,26 +238,20 @@ func TestExecuteNextQueuedCompletesCutoverProjectTask(t *testing.T) {
 	}
 }
 
-func TestExecuteNextQueuedUsesConfiguredCodexDriver(t *testing.T) {
+func TestExecuteNextQueuedSkipsDispatchWhenShutdownRequested(t *testing.T) {
+	t.Parallel()
+
 	ctx := context.Background()
 	store := openJobStore(t)
 	defer store.Close()
 
-	driverPath := filepath.Join(t.TempDir(), "driver.sh")
-	if err := os.WriteFile(driverPath, []byte(`#!/usr/bin/env bash
-set -euo pipefail
-cat >/dev/null
-printf '{"status":"completed","output":"family-ops triage summary","external_id":"driver-run-1","metadata":{"lane":"driver"}}'
-`), 0o755); err != nil {
-		t.Fatalf("WriteFile(driver) error = %v", err)
-	}
-	t.Setenv("ODIN_CODEX_DRIVER", driverPath)
-
 	registry := writeRegistry(t)
+	var shutdownRequested atomic.Bool
+	shutdownRequested.Store(true)
 	service := Service{
 		Store:          store,
 		Registry:       registry,
-		Executors:      router.DefaultCatalog(),
+		Executors:      testJobExecutors(),
 		ExecutorConfig: mustLoadExecutorConfig(t),
 		Transitions:    projects.Service{Store: store},
 		Leases: leases.Manager{
@@ -312,13 +259,16 @@ printf '{"status":"completed","output":"family-ops triage summary","external_id"
 			Git:          &jobTestGit{},
 			WorktreeRoot: t.TempDir(),
 		},
-		Now: time.Now,
+		ShutdownRequested: &shutdownRequested,
+		Now: func() time.Time {
+			return time.Date(2026, 4, 9, 12, 0, 0, 0, time.UTC)
+		},
 	}
 
 	task, err := service.CreateTaskFromAct(ctx, scope.Resolution{
 		Kind:       scope.ScopeProject,
 		ProjectKey: "alpha",
-	}, "Driver-backed task")
+	}, "Dispatch should not start during shutdown")
 	if err != nil {
 		t.Fatalf("CreateTaskFromAct() error = %v", err)
 	}
@@ -328,162 +278,28 @@ printf '{"status":"completed","output":"family-ops triage summary","external_id"
 		t.Fatalf("GetProjectByKey(alpha) error = %v", err)
 	}
 	if _, err := service.Transitions.SetTransitionState(ctx, projects.TransitionStateInput{
-		ProjectID:      project.ID,
-		Actor:          projects.TransitionControllerOdinOS,
-		TargetState:    projects.TransitionStateLimitedAction,
-		LimitedActions: []string{"run_task"},
-		ChangedBy:      "test",
-		Notes:          "allow driver-backed execution",
+		ProjectID:   project.ID,
+		Actor:       projects.TransitionControllerOdinOS,
+		TargetState: projects.TransitionStateCutover,
+		ChangedBy:   "test",
 	}); err != nil {
-		t.Fatalf("SetTransitionState(limited_action) error = %v", err)
+		t.Fatalf("SetTransitionState(cutover) error = %v", err)
+	}
+	recordHealthyExecutorSample(t, ctx, store)
+
+	if err := service.ExecuteNextQueued(ctx); err != nil {
+		t.Fatalf("ExecuteNextQueued() error = %v", err)
 	}
 
-	outcome, err := service.ExecuteTask(ctx, task.ID)
+	gotTask, err := store.GetTask(ctx, task.ID)
 	if err != nil {
-		t.Fatalf("ExecuteTask() error = %v", err)
+		t.Fatalf("GetTask() error = %v", err)
 	}
-	if outcome.Run == nil {
-		t.Fatal("Run = nil, want driver-backed run")
+	if gotTask.Status != "queued" {
+		t.Fatalf("GetTask().Status = %q, want queued", gotTask.Status)
 	}
-	if outcome.Run.Summary != "family-ops triage summary" {
-		t.Fatalf("Run.Summary = %q, want driver-backed summary", outcome.Run.Summary)
-	}
-	if outcome.Run.Executor != "codex_headless" {
-		t.Fatalf("Run.Executor = %q, want codex_headless", outcome.Run.Executor)
-	}
-}
-
-func TestExecuteTaskWithRequestPersistsSkillTelemetry(t *testing.T) {
-	t.Parallel()
-
-	ctx := context.Background()
-	store := openJobStore(t)
-	defer store.Close()
-
-	registry := writeRegistry(t)
-	service := Service{
-		Store:          store,
-		Registry:       registry,
-		Executors:      router.DefaultCatalog(),
-		ExecutorConfig: mustLoadExecutorConfig(t),
-		Transitions:    projects.Service{Store: store},
-		Leases: leases.Manager{
-			Store:        store,
-			Git:          &jobTestGit{},
-			WorktreeRoot: t.TempDir(),
-		},
-		Now: time.Now,
-	}
-
-	task, err := service.CreateTask(ctx, CreateTaskParams{
-		Resolved: scope.Resolution{
-			Kind:       scope.ScopeProject,
-			ProjectKey: "alpha",
-		},
-		Title:       "Portal design child",
-		RequestedBy: "agent:portal-delivery-agent",
-	})
-	if err != nil {
-		t.Fatalf("CreateTask() error = %v", err)
-	}
-
-	project, err := store.GetProjectByKey(ctx, "alpha")
-	if err != nil {
-		t.Fatalf("GetProjectByKey(alpha) error = %v", err)
-	}
-	if _, err := service.Transitions.SetTransitionState(ctx, projects.TransitionStateInput{
-		ProjectID:      project.ID,
-		Actor:          projects.TransitionControllerOdinOS,
-		TargetState:    projects.TransitionStateLimitedAction,
-		LimitedActions: []string{"run_task"},
-		ChangedBy:      "test",
-		Notes:          "allow foreground execution",
-	}); err != nil {
-		t.Fatalf("SetTransitionState(limited_action) error = %v", err)
-	}
-
-	outcome, err := service.ExecuteTaskWithRequest(ctx, task.ID, ExecutionRequest{
-		PromptOverride: "Produce a dashboard design direction.",
-		Metadata: map[string]string{
-			"agent_key":       "portal-delivery-agent",
-			"delegation_id":   "42",
-			"portal_track":    "admin-cfi",
-			"requested_skill": "pixel-perfect-ui-ux-designer",
-			"effective_skill": "pixel-perfect-ui-ux-designer",
-			"skill_source":    "agent_template",
-		},
-	})
-	if err != nil {
-		t.Fatalf("ExecuteTaskWithRequest() error = %v", err)
-	}
-	if outcome.Run == nil {
-		t.Fatal("Run = nil, want completed run")
-	}
-
-	transcripts, err := store.ListConversationTranscripts(ctx, sqlite.ListConversationTranscriptsParams{
-		ProjectID: &project.ID,
-		TaskID:    &task.ID,
-		RunID:     &outcome.Run.ID,
-		Scope:     "project",
-		ScopeKey:  project.Key,
-		Mode:      "act",
-	})
-	if err != nil {
-		t.Fatalf("ListConversationTranscripts() error = %v", err)
-	}
-	if len(transcripts) != 1 {
-		t.Fatalf("transcripts len = %d, want 1", len(transcripts))
-	}
-	var toolSummary map[string]string
-	if err := json.Unmarshal([]byte(transcripts[0].ToolSummary), &toolSummary); err != nil {
-		t.Fatalf("json.Unmarshal(tool summary) error = %v", err)
-	}
-	for key, want := range map[string]string{
-		"agent_key":       "portal-delivery-agent",
-		"delegation_id":   "42",
-		"portal_track":    "admin-cfi",
-		"requested_skill": "pixel-perfect-ui-ux-designer",
-		"effective_skill": "pixel-perfect-ui-ux-designer",
-		"skill_source":    "agent_template",
-	} {
-		if got := toolSummary[key]; got != want {
-			t.Fatalf("toolSummary[%q] = %q, want %q", key, got, want)
-		}
-	}
-
-	summaries, err := store.ListMemorySummaries(ctx, sqlite.ListMemorySummariesParams{
-		ProjectID:  &project.ID,
-		TaskID:     &task.ID,
-		RunID:      &outcome.Run.ID,
-		Scope:      "project",
-		ScopeKey:   project.Key,
-		MemoryType: "episode",
-	})
-	if err != nil {
-		t.Fatalf("ListMemorySummaries() error = %v", err)
-	}
-	if len(summaries) != 1 {
-		t.Fatalf("summaries len = %d, want 1", len(summaries))
-	}
-	var details map[string]any
-	if err := json.Unmarshal([]byte(summaries[0].DetailsJSON), &details); err != nil {
-		t.Fatalf("json.Unmarshal(details) error = %v", err)
-	}
-	executionMetadata, ok := details["execution_metadata"].(map[string]any)
-	if !ok {
-		t.Fatalf("execution_metadata = %#v, want object", details["execution_metadata"])
-	}
-	for key, want := range map[string]string{
-		"agent_key":       "portal-delivery-agent",
-		"delegation_id":   "42",
-		"portal_track":    "admin-cfi",
-		"requested_skill": "pixel-perfect-ui-ux-designer",
-		"effective_skill": "pixel-perfect-ui-ux-designer",
-		"skill_source":    "agent_template",
-	} {
-		if got, _ := executionMetadata[key].(string); got != want {
-			t.Fatalf("execution_metadata[%q] = %q, want %q", key, got, want)
-		}
+	if _, err := latestRunForTask(ctx, store, task.ID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("latestRunForTask() error = %v, want sql.ErrNoRows", err)
 	}
 }
 
@@ -498,7 +314,7 @@ func TestExecuteNextQueuedRejectsShadowModeMutation(t *testing.T) {
 	service := Service{
 		Store:          store,
 		Registry:       registry,
-		Executors:      router.DefaultCatalog(),
+		Executors:      testJobExecutors(),
 		ExecutorConfig: mustLoadExecutorConfig(t),
 		Transitions:    projects.Service{Store: store},
 		Leases: leases.Manager{
@@ -529,10 +345,11 @@ func TestExecuteNextQueuedRejectsShadowModeMutation(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("SetTransitionState(shadow) error = %v", err)
 	}
+	recordHealthyExecutorSample(t, ctx, store)
 
 	err = service.ExecuteNextQueued(ctx)
-	if err == nil {
-		t.Fatalf("ExecuteNextQueued() error = nil, want transition denial")
+	if err != nil {
+		t.Fatalf("ExecuteNextQueued() error = %v, want nil admission failure", err)
 	}
 
 	gotTask, err := store.GetTask(ctx, task.ID)
@@ -542,9 +359,13 @@ func TestExecuteNextQueuedRejectsShadowModeMutation(t *testing.T) {
 	if gotTask.Status != "failed" {
 		t.Fatalf("GetTask().Status = %q, want failed", gotTask.Status)
 	}
+
+	if _, err := latestRunForTask(ctx, store, task.ID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("latestRunForTask() error = %v, want sql.ErrNoRows", err)
+	}
 }
 
-func TestForegroundActExecutionPersistsTranscriptAndEpisode(t *testing.T) {
+func TestExecuteNextQueuedBlocksWhenExecutorHealthIsDegraded(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
@@ -552,10 +373,11 @@ func TestForegroundActExecutionPersistsTranscriptAndEpisode(t *testing.T) {
 	defer store.Close()
 
 	registry := writeRegistry(t)
+	now := time.Date(2026, 4, 17, 10, 0, 0, 0, time.UTC)
 	service := Service{
 		Store:          store,
 		Registry:       registry,
-		Executors:      router.DefaultCatalog(),
+		Executors:      testJobExecutors(),
 		ExecutorConfig: mustLoadExecutorConfig(t),
 		Transitions:    projects.Service{Store: store},
 		Leases: leases.Manager{
@@ -563,99 +385,13 @@ func TestForegroundActExecutionPersistsTranscriptAndEpisode(t *testing.T) {
 			Git:          &jobTestGit{},
 			WorktreeRoot: t.TempDir(),
 		},
-		Now: func() time.Time {
-			return time.Date(2026, 4, 9, 12, 0, 0, 0, time.UTC)
-		},
+		Now: func() time.Time { return now },
 	}
 
 	task, err := service.CreateTaskFromAct(ctx, scope.Resolution{
 		Kind:       scope.ScopeProject,
 		ProjectKey: "alpha",
-	}, "Persist act transcript")
-	if err != nil {
-		t.Fatalf("CreateTaskFromAct() error = %v", err)
-	}
-
-	project, err := store.GetProjectByKey(ctx, "alpha")
-	if err != nil {
-		t.Fatalf("GetProjectByKey(alpha) error = %v", err)
-	}
-	if _, err := service.Transitions.SetTransitionState(ctx, projects.TransitionStateInput{
-		ProjectID:      project.ID,
-		Actor:          projects.TransitionControllerOdinOS,
-		TargetState:    projects.TransitionStateLimitedAction,
-		LimitedActions: []string{"run_task"},
-		ChangedBy:      "test",
-		Notes:          "allow foreground execution",
-	}); err != nil {
-		t.Fatalf("SetTransitionState(limited_action) error = %v", err)
-	}
-
-	outcome, err := service.ExecuteTask(ctx, task.ID)
-	if err != nil {
-		t.Fatalf("ExecuteTask() error = %v", err)
-	}
-	if outcome.Run == nil {
-		t.Fatal("Run = nil, want completed run")
-	}
-
-	transcripts, err := store.ListConversationTranscripts(ctx, sqlite.ListConversationTranscriptsParams{
-		ProjectID: &project.ID,
-		TaskID:    &task.ID,
-		RunID:     &outcome.Run.ID,
-		Scope:     "project",
-		ScopeKey:  project.Key,
-		Mode:      "act",
-	})
-	if err != nil {
-		t.Fatalf("ListConversationTranscripts() error = %v", err)
-	}
-	if len(transcripts) != 1 {
-		t.Fatalf("transcripts len = %d, want 1", len(transcripts))
-	}
-
-	summaries, err := store.ListMemorySummaries(ctx, sqlite.ListMemorySummariesParams{
-		ProjectID:  &project.ID,
-		TaskID:     &task.ID,
-		RunID:      &outcome.Run.ID,
-		Scope:      "project",
-		ScopeKey:   project.Key,
-		MemoryType: "episode",
-	})
-	if err != nil {
-		t.Fatalf("ListMemorySummaries() error = %v", err)
-	}
-	if len(summaries) != 1 {
-		t.Fatalf("summaries len = %d, want 1", len(summaries))
-	}
-}
-
-func TestForegroundActDenialPersistsTranscriptAndEpisode(t *testing.T) {
-	t.Parallel()
-
-	ctx := context.Background()
-	store := openJobStore(t)
-	defer store.Close()
-
-	registry := writeRegistry(t)
-	service := Service{
-		Store:          store,
-		Registry:       registry,
-		Executors:      router.DefaultCatalog(),
-		ExecutorConfig: mustLoadExecutorConfig(t),
-		Transitions:    projects.Service{Store: store},
-		Leases: leases.Manager{
-			Store:        store,
-			Git:          &jobTestGit{},
-			WorktreeRoot: t.TempDir(),
-		},
-		Now: time.Now,
-	}
-
-	task, err := service.CreateTaskFromAct(ctx, scope.Resolution{
-		Kind:       scope.ScopeProject,
-		ProjectKey: "alpha",
-	}, "Persist denied act transcript")
+	}, "Blocked by executor health")
 	if err != nil {
 		t.Fatalf("CreateTaskFromAct() error = %v", err)
 	}
@@ -667,85 +403,275 @@ func TestForegroundActDenialPersistsTranscriptAndEpisode(t *testing.T) {
 	if _, err := service.Transitions.SetTransitionState(ctx, projects.TransitionStateInput{
 		ProjectID:   project.ID,
 		Actor:       projects.TransitionControllerOdinOS,
-		TargetState: projects.TransitionStateShadow,
+		TargetState: projects.TransitionStateCutover,
 		ChangedBy:   "test",
 	}); err != nil {
-		t.Fatalf("SetTransitionState(shadow) error = %v", err)
+		t.Fatalf("SetTransitionState(cutover) error = %v", err)
+	}
+	if _, err := store.RecordExecutorHealth(ctx, sqlite.RecordExecutorHealthParams{
+		Executor:    "codex_headless",
+		Status:      "degraded",
+		LatencyMS:   0,
+		DetailsJSON: `{"source":"test"}`,
+	}); err != nil {
+		t.Fatalf("RecordExecutorHealth() error = %v", err)
 	}
 
-	outcome, err := service.ExecuteTask(ctx, task.ID)
-	if err == nil {
-		t.Fatalf("ExecuteTask() error = nil, want transition denial")
-	}
-	if outcome.Run == nil {
-		t.Fatal("Run = nil, want failed run record")
+	if err := service.ExecuteNextQueued(ctx); err != nil {
+		t.Fatalf("ExecuteNextQueued() error = %v, want nil blocked outcome", err)
 	}
 
-	transcripts, err := store.ListConversationTranscripts(ctx, sqlite.ListConversationTranscriptsParams{
-		ProjectID: &project.ID,
-		TaskID:    &task.ID,
-		RunID:     &outcome.Run.ID,
-		Scope:     "project",
-		ScopeKey:  project.Key,
-		Mode:      "act",
-	})
+	gotTask, err := store.GetTask(ctx, task.ID)
 	if err != nil {
-		t.Fatalf("ListConversationTranscripts() error = %v", err)
+		t.Fatalf("GetTask() error = %v", err)
 	}
-	if len(transcripts) != 1 {
-		t.Fatalf("transcripts len = %d, want 1", len(transcripts))
+	if gotTask.Status != "blocked" {
+		t.Fatalf("Task.Status = %q, want blocked", gotTask.Status)
 	}
-	if transcripts[0].Response == "" {
-		t.Fatalf("Response = empty, want denial summary")
+	if gotTask.BlockedReason != "executor_unavailable" {
+		t.Fatalf("BlockedReason = %q, want executor_unavailable", gotTask.BlockedReason)
 	}
-
-	summaries, err := store.ListMemorySummaries(ctx, sqlite.ListMemorySummariesParams{
-		ProjectID:  &project.ID,
-		TaskID:     &task.ID,
-		RunID:      &outcome.Run.ID,
-		Scope:      "project",
-		ScopeKey:   project.Key,
-		MemoryType: "episode",
-	})
+	packet, err := store.GetLatestTaskWakePacket(ctx, project.ID, task.ID)
 	if err != nil {
-		t.Fatalf("ListMemorySummaries() error = %v", err)
+		t.Fatalf("GetLatestTaskWakePacket() error = %v", err)
 	}
-	if len(summaries) != 1 {
-		t.Fatalf("summaries len = %d, want 1", len(summaries))
+	if packet.Trigger != string(checkpoints.TriggerIdlePause) {
+		t.Fatalf("WakePacket.Trigger = %q, want %q", packet.Trigger, checkpoints.TriggerIdlePause)
+	}
+	resumeState, err := checkpoints.Service{Store: store}.LoadResumeState(ctx, project.ID, task.ID)
+	if err != nil {
+		t.Fatalf("LoadResumeState() error = %v", err)
+	}
+	if resumeState.BlockingReason != "executor_unavailable" {
+		t.Fatalf("ResumeState.BlockingReason = %q, want %q", resumeState.BlockingReason, "executor_unavailable")
+	}
+	if len(resumeState.NextSteps) == 0 {
+		t.Fatalf("ResumeState.NextSteps = %v, want at least one step", resumeState.NextSteps)
+	}
+	if _, err := latestRunForTask(ctx, store, task.ID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("latestRunForTask() error = %v, want sql.ErrNoRows", err)
 	}
 }
 
-func TestExecuteTaskPreservesCancelledRunStatus(t *testing.T) {
+func TestDelegationAdmissionNarrowsChildPermissionsRelativeToParentAndCompanion(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openJobStore(t)
+	defer store.Close()
+
+	workspace, err := store.CreateWorkspace(ctx, sqlite.CreateWorkspaceParams{
+		Key:                 "jobs-workspace",
+		Name:                "Jobs Workspace",
+		OwnerRef:            "marcus",
+		DefaultCompanionKey: "primary",
+		Status:              "active",
+		PolicyJSON:          `{}`,
+	})
+	if err != nil {
+		t.Fatalf("CreateWorkspace() error = %v", err)
+	}
+	initiative, err := store.UpsertInitiative(ctx, sqlite.UpsertInitiativeParams{
+		WorkspaceID: workspace.ID,
+		Key:         "jobs-initiative",
+		Title:       "Jobs Initiative",
+		Kind:        "delivery",
+		Status:      "active",
+	})
+	if err != nil {
+		t.Fatalf("UpsertInitiative() error = %v", err)
+	}
+	companion, err := store.UpsertCompanion(ctx, sqlite.UpsertCompanionParams{
+		WorkspaceID:         workspace.ID,
+		Key:                 "builder",
+		Title:               "Builder",
+		Kind:                "assistant",
+		Charter:             "Coordinates child work",
+		Status:              "active",
+		InitiativeScopeJSON: `{"allow":["jobs-initiative"]}`,
+		ToolPolicyJSON:      `{"allow":["repo_read","branch_proposal"]}`,
+		MemoryPolicyJSON:    `{"mode":"initiative"}`,
+		PlanningPolicyJSON:  `{"swarm":{"max_children":2}}`,
+	})
+	if err != nil {
+		t.Fatalf("UpsertCompanion() error = %v", err)
+	}
+
+	project, err := store.CreateProject(ctx, sqlite.CreateProjectParams{
+		Key:           "jobs-project",
+		Name:          "Jobs Project",
+		Scope:         "project",
+		GitRoot:       "/tmp/jobs-project",
+		DefaultBranch: "main",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+
+	task, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:    project.ID,
+		Key:          "parent-task",
+		Title:        "Parent task",
+		ActionKey:    "execute",
+		Status:       "queued",
+		Scope:        "project",
+		RequestedBy:  "operator",
+		WorkspaceID:  &workspace.ID,
+		InitiativeID: &initiative.ID,
+		CompanionID:  &companion.ID,
+		WorkKind:     "project",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+
+	run, err := store.StartRun(ctx, sqlite.StartRunParams{
+		TaskID:     task.ID,
+		Executor:   "codex_headless",
+		Attempt:    1,
+		Status:     "running",
+		TaskStatus: "running",
+	})
+	if err != nil {
+		t.Fatalf("StartRun() error = %v", err)
+	}
+
+	service := Service{
+		Store:          store,
+		Executors:      testJobExecutors(),
+		ExecutorConfig: mustLoadExecutorConfig(t),
+	}
+
+	profile, err := service.NarrowDelegationAdmission(DelegationAdmissionInput{
+		ParentTask:            task,
+		ParentRunID:           &run.ID,
+		Companion:             companion,
+		RequestedTools:        []string{"repo_read", "merge_to_main", "branch_proposal"},
+		RequestedMemoryScopes: []string{"workspace", "initiative", "global", "companion", "run"},
+		PreferredExecutor:     "",
+	})
+	if err != nil {
+		t.Fatalf("NarrowDelegationAdmission() error = %v", err)
+	}
+
+	if profile.Executor != "codex_headless" {
+		t.Fatalf("Executor = %q, want codex_headless", profile.Executor)
+	}
+	wantTools := []string{"repo_read", "branch_proposal"}
+	if len(profile.AllowedTools) != len(wantTools) {
+		t.Fatalf("AllowedTools len = %d, want %d", len(profile.AllowedTools), len(wantTools))
+	}
+	for i, want := range wantTools {
+		if profile.AllowedTools[i] != want {
+			t.Fatalf("AllowedTools[%d] = %q, want %q", i, profile.AllowedTools[i], want)
+		}
+	}
+	if profile.MemoryView.Mode != "initiative" {
+		t.Fatalf("MemoryView.Mode = %q, want initiative", profile.MemoryView.Mode)
+	}
+	wantScopes := []string{"workspace", "initiative", "companion", "run"}
+	if len(profile.MemoryView.Scopes) != len(wantScopes) {
+		t.Fatalf("MemoryView.Scopes len = %d, want %d", len(profile.MemoryView.Scopes), len(wantScopes))
+	}
+	for i, want := range wantScopes {
+		if profile.MemoryView.Scopes[i] != want {
+			t.Fatalf("MemoryView.Scopes[%d] = %q, want %q", i, profile.MemoryView.Scopes[i], want)
+		}
+	}
+	if profile.MemoryView.ParentRunID == nil || *profile.MemoryView.ParentRunID != run.ID {
+		t.Fatalf("MemoryView.ParentRunID = %v, want %d", profile.MemoryView.ParentRunID, run.ID)
+	}
+}
+
+func TestInterruptDispatchCreatesResumableWakePacket(t *testing.T) {
+	t.Parallel()
+
 	ctx := context.Background()
 	store := openJobStore(t)
 	defer store.Close()
 
 	registry := writeRegistry(t)
-	blocking := newBlockingExecutor("blocking")
 	service := Service{
 		Store:    store,
 		Registry: registry,
-		Executors: map[string]contract.Executor{
-			"blocking": blocking,
-		},
-		ExecutorConfig: router.Config{
-			Version: 1,
-			Executors: []router.ExecutorConfig{{
-				Key:     "blocking",
-				Adapter: "blocking",
-				Class:   contract.ExecutorClassPlanBackedCLI,
-				Enabled: true,
-			}},
-			Routes: []router.RouteConfig{{
-				Name:      "default",
-				Preferred: []string{"blocking"},
-				Match: router.RouteMatch{
-					TaskKinds: []contract.TaskKind{contract.TaskKindGeneral},
-					Scopes:    []string{"project"},
-				},
-			}},
-		},
-		Transitions: projects.Service{Store: store},
+	}
+
+	project, err := store.CreateProject(ctx, sqlite.CreateProjectParams{
+		Key:           "alpha-runtime",
+		Name:          "Alpha Runtime",
+		Scope:         "project",
+		GitRoot:       "/tmp/alpha-runtime",
+		DefaultBranch: "main",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+
+	task, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "interrupted-dispatch",
+		Title:       "Interrupted dispatch",
+		Status:      "running",
+		Scope:       "project",
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+
+	run, err := store.StartRun(ctx, sqlite.StartRunParams{
+		TaskID:     task.ID,
+		Executor:   "codex_headless",
+		Attempt:    1,
+		Status:     "running",
+		TaskStatus: "running",
+	})
+	if err != nil {
+		t.Fatalf("StartRun() error = %v", err)
+	}
+
+	if err := service.interruptDispatch(ctx, run.ID); err != nil {
+		t.Fatalf("interruptDispatch() error = %v", err)
+	}
+
+	packet, err := store.GetLatestTaskWakePacket(ctx, project.ID, task.ID)
+	if err != nil {
+		t.Fatalf("GetLatestTaskWakePacket() error = %v", err)
+	}
+	if packet.Trigger != string(checkpoints.TriggerHandoff) {
+		t.Fatalf("WakePacket.Trigger = %q, want %q", packet.Trigger, checkpoints.TriggerHandoff)
+	}
+	resumeState, err := checkpoints.Service{Store: store}.LoadResumeState(ctx, project.ID, task.ID)
+	if err != nil {
+		t.Fatalf("LoadResumeState() error = %v", err)
+	}
+	if resumeState.Status != "queued" {
+		t.Fatalf("ResumeState.Status = %q, want queued", resumeState.Status)
+	}
+	if resumeState.RunContext == nil || resumeState.RunContext.RunID != run.ID {
+		t.Fatalf("ResumeState.RunContext = %+v, want run %d", resumeState.RunContext, run.ID)
+	}
+	if len(resumeState.NextSteps) == 0 {
+		t.Fatalf("ResumeState.NextSteps = %v, want at least one step", resumeState.NextSteps)
+	}
+}
+
+func TestExecuteNextQueuedBlocksWhenExecutorHealthSampleIsMissing(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openJobStore(t)
+	defer store.Close()
+
+	registry := writeRegistry(t)
+	service := Service{
+		Store:          store,
+		Registry:       registry,
+		Executors:      testJobExecutors(),
+		ExecutorConfig: mustLoadExecutorConfig(t),
+		Transitions:    projects.Service{Store: store},
 		Leases: leases.Manager{
 			Store:        store,
 			Git:          &jobTestGit{},
@@ -757,7 +683,7 @@ func TestExecuteTaskPreservesCancelledRunStatus(t *testing.T) {
 	task, err := service.CreateTaskFromAct(ctx, scope.Resolution{
 		Kind:       scope.ScopeProject,
 		ProjectKey: "alpha",
-	}, "Blocking task")
+	}, "Blocked by missing executor health")
 	if err != nil {
 		t.Fatalf("CreateTaskFromAct() error = %v", err)
 	}
@@ -767,99 +693,709 @@ func TestExecuteTaskPreservesCancelledRunStatus(t *testing.T) {
 		t.Fatalf("GetProjectByKey(alpha) error = %v", err)
 	}
 	if _, err := service.Transitions.SetTransitionState(ctx, projects.TransitionStateInput{
-		ProjectID:      project.ID,
-		Actor:          projects.TransitionControllerOdinOS,
-		TargetState:    projects.TransitionStateLimitedAction,
-		LimitedActions: []string{"run_task"},
-		ChangedBy:      "test",
-		Notes:          "allow blocking execution",
+		ProjectID:   project.ID,
+		Actor:       projects.TransitionControllerOdinOS,
+		TargetState: projects.TransitionStateCutover,
+		ChangedBy:   "test",
 	}); err != nil {
-		t.Fatalf("SetTransitionState(limited_action) error = %v", err)
+		t.Fatalf("SetTransitionState(cutover) error = %v", err)
 	}
 
-	outcomeCh := make(chan ExecutionOutcome, 1)
-	errCh := make(chan error, 1)
-	go func() {
-		outcome, execErr := service.ExecuteTask(ctx, task.ID)
-		outcomeCh <- outcome
-		errCh <- execErr
-	}()
-
-	runID := waitForRunningTaskRun(t, ctx, store, task.ID)
-	cancelDetail, err := runsvc.Service{
-		DB:    store.DB(),
-		Store: store,
-	}.Cancel(ctx, scope.Resolution{
-		Kind:       scope.ScopeProject,
-		ProjectKey: "alpha",
-	}, runID)
-	if err != nil {
-		t.Fatalf("Cancel() error = %v", err)
-	}
-	if cancelDetail.Run.Status != "cancelled" {
-		t.Fatalf("cancel detail run status = %q, want cancelled", cancelDetail.Run.Status)
+	if err := service.ExecuteNextQueued(ctx); err != nil {
+		t.Fatalf("ExecuteNextQueued() error = %v, want nil blocked outcome", err)
 	}
 
-	blocking.Unblock(contract.ExecutionResult{
-		Status: "completed",
-		Output: "executor completed after cancellation",
-	}, nil)
-
-	outcome := <-outcomeCh
-	execErr := <-errCh
-	if execErr != nil {
-		t.Fatalf("ExecuteTask() error = %v", execErr)
-	}
-	if outcome.Run == nil {
-		t.Fatal("Run = nil, want cancelled run")
-	}
-	if outcome.Run.Status != "cancelled" {
-		t.Fatalf("Run.Status = %q, want cancelled", outcome.Run.Status)
-	}
-
-	gotRun, err := store.GetRun(ctx, runID)
-	if err != nil {
-		t.Fatalf("GetRun() error = %v", err)
-	}
-	if gotRun.Status != "cancelled" {
-		t.Fatalf("GetRun().Status = %q, want cancelled", gotRun.Status)
-	}
 	gotTask, err := store.GetTask(ctx, task.ID)
 	if err != nil {
 		t.Fatalf("GetTask() error = %v", err)
 	}
-	if gotTask.Status != "cancelled" {
-		t.Fatalf("GetTask().Status = %q, want cancelled", gotTask.Status)
+	if gotTask.Status != "blocked" {
+		t.Fatalf("Task.Status = %q, want blocked", gotTask.Status)
+	}
+	if gotTask.BlockedReason != "executor_unavailable" {
+		t.Fatalf("BlockedReason = %q, want executor_unavailable", gotTask.BlockedReason)
+	}
+	if _, err := latestRunForTask(ctx, store, task.ID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("latestRunForTask() error = %v, want sql.ErrNoRows", err)
+	}
+}
+
+func TestExecuteNextQueuedFailsWhenExecutorSelectionHasNoRoute(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openJobStore(t)
+	defer store.Close()
+
+	registry := writeRegistry(t)
+	alpha, ok := registry.Lookup("alpha")
+	if !ok {
+		t.Fatalf("expected alpha project")
+	}
+	service := Service{
+		Store:          store,
+		Registry:       registry,
+		Executors:      testJobExecutors(),
+		ExecutorConfig: mustLoadExecutorConfig(t),
+		Transitions:    projects.Service{Store: store},
+		Leases: leases.Manager{
+			Store:        store,
+			Git:          &jobTestGit{},
+			WorktreeRoot: t.TempDir(),
+		},
+		Now: time.Now,
 	}
 
-	transcripts, err := store.ListConversationTranscripts(ctx, sqlite.ListConversationTranscriptsParams{
-		ProjectID: &project.ID,
-		TaskID:    &task.ID,
-		RunID:     &runID,
-		Scope:     "project",
-		ScopeKey:  project.Key,
-		Mode:      "act",
+	project, err := store.CreateProject(ctx, sqlite.CreateProjectParams{
+		Key:           alpha.Key,
+		Name:          alpha.Name,
+		Scope:         "project",
+		GitRoot:       alpha.GitRoot,
+		DefaultBranch: alpha.DefaultBranch,
+		GitHubRepo:    alpha.GitHub.Repo,
+		ManifestPath:  alpha.SourcePath,
 	})
 	if err != nil {
-		t.Fatalf("ListConversationTranscripts() error = %v", err)
+		t.Fatalf("CreateProject() error = %v", err)
 	}
-	if len(transcripts) != 0 {
-		t.Fatalf("transcripts = %+v, want none for cancelled run", transcripts)
+	task, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "no-route-task",
+		Title:       "No route available",
+		Status:      "queued",
+		Scope:       "unsupported-scope",
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
 	}
 
-	summaries, err := store.ListMemorySummaries(ctx, sqlite.ListMemorySummariesParams{
-		ProjectID:  &project.ID,
-		TaskID:     &task.ID,
-		RunID:      &runID,
-		Scope:      "project",
-		ScopeKey:   project.Key,
-		MemoryType: "episode",
+	if err := service.ExecuteNextQueued(ctx); err != nil {
+		t.Fatalf("ExecuteNextQueued() error = %v", err)
+	}
+
+	gotTask, err := store.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
+	}
+	if gotTask.Status != "failed" {
+		t.Fatalf("Task.Status = %q, want failed", gotTask.Status)
+	}
+	if gotTask.LastError == "" {
+		t.Fatalf("LastError = empty, want selector failure detail")
+	}
+	if _, err := latestRunForTask(ctx, store, task.ID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("latestRunForTask() error = %v, want sql.ErrNoRows", err)
+	}
+}
+
+func TestExecuteNextQueuedBlocksWhenRequiredApprovalIsMissing(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openJobStore(t)
+	defer store.Close()
+
+	registry := writeRegistry(t)
+	service := Service{
+		Store:          store,
+		Registry:       registry,
+		Executors:      testJobExecutors(),
+		ExecutorConfig: mustLoadExecutorConfig(t),
+		Transitions:    projects.Service{Store: store},
+		Leases: leases.Manager{
+			Store:        store,
+			Git:          &jobTestGit{},
+			WorktreeRoot: t.TempDir(),
+		},
+		Now: time.Now,
+	}
+
+	task, err := service.CreateTaskFromAct(ctx, scope.Resolution{
+		Kind:       scope.ScopeOdinCore,
+		ProjectKey: "odin-core",
+	}, "Requires approval")
+	if err != nil {
+		t.Fatalf("CreateTaskFromAct() error = %v", err)
+	}
+
+	project, err := store.GetProjectByKey(ctx, "odin-core")
+	if err != nil {
+		t.Fatalf("GetProjectByKey(odin-core) error = %v", err)
+	}
+	if _, err := service.Transitions.SetTransitionState(ctx, projects.TransitionStateInput{
+		ProjectID:   project.ID,
+		Actor:       projects.TransitionControllerOdinOS,
+		TargetState: projects.TransitionStateCutover,
+		ChangedBy:   "test",
+	}); err != nil {
+		t.Fatalf("SetTransitionState(cutover) error = %v", err)
+	}
+
+	if err := service.ExecuteNextQueued(ctx); err != nil {
+		t.Fatalf("ExecuteNextQueued() error = %v, want nil blocked outcome", err)
+	}
+
+	gotTask, err := store.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
+	}
+	if gotTask.Status != "blocked" {
+		t.Fatalf("Task.Status = %q, want blocked", gotTask.Status)
+	}
+	if gotTask.BlockedReason != "approval_required" {
+		t.Fatalf("BlockedReason = %q, want approval_required", gotTask.BlockedReason)
+	}
+
+	approval, err := store.GetLatestTaskApproval(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("GetLatestTaskApproval() error = %v", err)
+	}
+	if approval.Status != "pending" {
+		t.Fatalf("Approval.Status = %q, want pending", approval.Status)
+	}
+	packet, err := store.GetLatestTaskWakePacket(ctx, project.ID, task.ID)
+	if err != nil {
+		t.Fatalf("GetLatestTaskWakePacket() error = %v", err)
+	}
+	if packet.Trigger != string(checkpoints.TriggerApprovalWait) {
+		t.Fatalf("WakePacket.Trigger = %q, want %q", packet.Trigger, checkpoints.TriggerApprovalWait)
+	}
+	resumeState, err := checkpoints.Service{Store: store}.LoadResumeState(ctx, project.ID, task.ID)
+	if err != nil {
+		t.Fatalf("LoadResumeState() error = %v", err)
+	}
+	if resumeState.BlockingReason != "approval_required" {
+		t.Fatalf("ResumeState.BlockingReason = %q, want %q", resumeState.BlockingReason, "approval_required")
+	}
+	if len(resumeState.NextSteps) == 0 {
+		t.Fatalf("ResumeState.NextSteps = %v, want at least one step", resumeState.NextSteps)
+	}
+	if _, err := latestRunForTask(ctx, store, task.ID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("latestRunForTask() error = %v, want sql.ErrNoRows", err)
+	}
+}
+
+func TestExecuteNextQueuedRequeuesWhenBlockedWakePacketCompactionFails(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openJobStore(t)
+	defer store.Close()
+
+	registry := writeRegistry(t)
+	now := time.Date(2026, 4, 17, 10, 0, 0, 0, time.UTC)
+	compactErr := errors.New("checkpoint write failed")
+	service := Service{
+		Store:          store,
+		Registry:       registry,
+		Executors:      testJobExecutors(),
+		ExecutorConfig: mustLoadExecutorConfig(t),
+		Transitions:    projects.Service{Store: store},
+		Leases: leases.Manager{
+			Store:        store,
+			Git:          &jobTestGit{},
+			WorktreeRoot: t.TempDir(),
+		},
+		CheckpointCompactor: func(context.Context, checkpoints.CompactParams) (checkpoints.CompactionResult, error) {
+			return checkpoints.CompactionResult{}, compactErr
+		},
+		Now: func() time.Time { return now },
+	}
+
+	task, err := service.CreateTaskFromAct(ctx, scope.Resolution{
+		Kind:       scope.ScopeOdinCore,
+		ProjectKey: "odin-core",
+	}, "Requires approval")
+	if err != nil {
+		t.Fatalf("CreateTaskFromAct() error = %v", err)
+	}
+
+	project, err := store.GetProjectByKey(ctx, "odin-core")
+	if err != nil {
+		t.Fatalf("GetProjectByKey(odin-core) error = %v", err)
+	}
+	if _, err := service.Transitions.SetTransitionState(ctx, projects.TransitionStateInput{
+		ProjectID:   project.ID,
+		Actor:       projects.TransitionControllerOdinOS,
+		TargetState: projects.TransitionStateCutover,
+		ChangedBy:   "test",
+	}); err != nil {
+		t.Fatalf("SetTransitionState(cutover) error = %v", err)
+	}
+
+	err = service.ExecuteNextQueued(ctx)
+	if !errors.Is(err, compactErr) {
+		t.Fatalf("ExecuteNextQueued() error = %v, want %v", err, compactErr)
+	}
+
+	gotTask, err := store.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
+	}
+	if gotTask.Status != "queued" {
+		t.Fatalf("Task.Status = %q, want queued", gotTask.Status)
+	}
+	if gotTask.BlockedReason != "" {
+		t.Fatalf("BlockedReason = %q, want empty", gotTask.BlockedReason)
+	}
+	if gotTask.NextEligibleAt != now.Add(time.Second) {
+		t.Fatalf("NextEligibleAt = %v, want %v", gotTask.NextEligibleAt, now.Add(time.Second))
+	}
+	if !strings.Contains(gotTask.LastError, compactErr.Error()) {
+		t.Fatalf("LastError = %q, want compaction failure", gotTask.LastError)
+	}
+
+	approval, err := store.GetLatestTaskApproval(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("GetLatestTaskApproval() error = %v", err)
+	}
+	if approval.Status != "pending" {
+		t.Fatalf("Approval.Status = %q, want pending", approval.Status)
+	}
+	if _, err := store.GetLatestTaskWakePacket(ctx, project.ID, task.ID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("GetLatestTaskWakePacket() error = %v, want sql.ErrNoRows", err)
+	}
+}
+
+func TestExecuteNextQueuedResumesAfterApprovalIsApproved(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openJobStore(t)
+	defer store.Close()
+
+	registry := writeRegistry(t)
+	service := Service{
+		Store:          store,
+		Registry:       registry,
+		Executors:      testJobExecutors(),
+		ExecutorConfig: mustLoadExecutorConfig(t),
+		Transitions:    projects.Service{Store: store},
+		Leases: leases.Manager{
+			Store:        store,
+			Git:          &jobTestGit{},
+			WorktreeRoot: t.TempDir(),
+		},
+		Now: time.Now,
+	}
+
+	task, err := service.CreateTaskFromAct(ctx, scope.Resolution{
+		Kind:       scope.ScopeOdinCore,
+		ProjectKey: "odin-core",
+	}, "Requires approval and resume")
+	if err != nil {
+		t.Fatalf("CreateTaskFromAct() error = %v", err)
+	}
+
+	project, err := store.GetProjectByKey(ctx, "odin-core")
+	if err != nil {
+		t.Fatalf("GetProjectByKey(odin-core) error = %v", err)
+	}
+	if _, err := service.Transitions.SetTransitionState(ctx, projects.TransitionStateInput{
+		ProjectID:   project.ID,
+		Actor:       projects.TransitionControllerOdinOS,
+		TargetState: projects.TransitionStateCutover,
+		ChangedBy:   "test",
+	}); err != nil {
+		t.Fatalf("SetTransitionState(cutover) error = %v", err)
+	}
+
+	if err := service.ExecuteNextQueued(ctx); err != nil {
+		t.Fatalf("ExecuteNextQueued(first) error = %v", err)
+	}
+
+	approval, err := store.GetLatestTaskApproval(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("GetLatestTaskApproval() error = %v", err)
+	}
+	if _, err := store.ResolveApproval(ctx, sqlite.ResolveApprovalParams{
+		ApprovalID: approval.ID,
+		Status:     "approved",
+		DecisionBy: "operator",
+		Reason:     "safe to resume",
+	}); err != nil {
+		t.Fatalf("ResolveApproval() error = %v", err)
+	}
+	recordHealthyExecutorSample(t, ctx, store)
+
+	unblockedTask, err := store.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("GetTask() after approval error = %v", err)
+	}
+	if unblockedTask.Status != "queued" {
+		t.Fatalf("Task.Status after approval = %q, want queued", unblockedTask.Status)
+	}
+	if unblockedTask.BlockedReason != "" {
+		t.Fatalf("BlockedReason after approval = %q, want empty", unblockedTask.BlockedReason)
+	}
+	if _, err := store.GetLatestTaskWakePacket(ctx, project.ID, task.ID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("GetLatestTaskWakePacket() after approval error = %v, want sql.ErrNoRows", err)
+	}
+
+	if err := service.ExecuteNextQueued(ctx); err != nil {
+		t.Fatalf("ExecuteNextQueued(second) error = %v", err)
+	}
+
+	completedTask, err := store.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("GetTask() after resume error = %v", err)
+	}
+	if completedTask.Status != "completed" {
+		t.Fatalf("Task.Status after resume = %q, want completed", completedTask.Status)
+	}
+}
+
+func TestExecuteNextQueuedKeepsRunPreparingAndReleasesLeaseOnAdmissionFailure(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openJobStore(t)
+	defer store.Close()
+
+	registry := writeRegistryWithAlphaDefaultBranch(t, "odin/alpha/task-1/run-1/try-1")
+	service := Service{
+		Store:          store,
+		Registry:       registry,
+		Executors:      testJobExecutors(),
+		ExecutorConfig: mustLoadExecutorConfig(t),
+		Transitions:    projects.Service{Store: store},
+		Leases: leases.Manager{
+			Store:        store,
+			Git:          &jobTestGit{},
+			WorktreeRoot: t.TempDir(),
+		},
+		Now: time.Now,
+	}
+
+	task, err := service.CreateTaskFromAct(ctx, scope.Resolution{
+		Kind:       scope.ScopeProject,
+		ProjectKey: "alpha",
+	}, "Admission fails after lease preparation")
+	if err != nil {
+		t.Fatalf("CreateTaskFromAct() error = %v", err)
+	}
+
+	project, err := store.GetProjectByKey(ctx, "alpha")
+	if err != nil {
+		t.Fatalf("GetProjectByKey(alpha) error = %v", err)
+	}
+	if _, err := service.Transitions.SetTransitionState(ctx, projects.TransitionStateInput{
+		ProjectID:   project.ID,
+		Actor:       projects.TransitionControllerOdinOS,
+		TargetState: projects.TransitionStateCutover,
+		ChangedBy:   "test",
+	}); err != nil {
+		t.Fatalf("SetTransitionState(cutover) error = %v", err)
+	}
+	if _, err := store.RecordExecutorHealth(ctx, sqlite.RecordExecutorHealthParams{
+		Executor:    "codex_headless",
+		Status:      "healthy",
+		LatencyMS:   0,
+		DetailsJSON: `{"source":"test"}`,
+	}); err != nil {
+		t.Fatalf("RecordExecutorHealth() error = %v", err)
+	}
+
+	if err := service.ExecuteNextQueued(ctx); err != nil {
+		t.Fatalf("ExecuteNextQueued() error = %v", err)
+	}
+
+	gotTask, err := store.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
+	}
+	if gotTask.Status != "failed" {
+		t.Fatalf("Task.Status = %q, want failed", gotTask.Status)
+	}
+
+	run, err := latestRunForTask(ctx, store, task.ID)
+	if err != nil {
+		t.Fatalf("latestRunForTask() error = %v", err)
+	}
+	events, err := store.ListEvents(ctx, sqlite.ListEventsParams{RunID: &run.ID})
+	if err != nil {
+		t.Fatalf("ListEvents(run) error = %v", err)
+	}
+
+	runStartStatus := ""
+	for _, event := range events {
+		if event.Type != runtimeevents.EventRunStarted {
+			continue
+		}
+		payload, err := runtimeevents.DecodePayload[runtimeevents.RunStartedPayload](event.Payload)
+		if err != nil {
+			t.Fatalf("DecodePayload(run.started) error = %v", err)
+		}
+		runStartStatus = payload.Status
+		break
+	}
+	if runStartStatus != "preparing" {
+		t.Fatalf("run.started status = %q, want preparing", runStartStatus)
+	}
+	packet, err := store.GetLatestTaskWakePacket(ctx, project.ID, task.ID)
+	if err != nil {
+		t.Fatalf("GetLatestTaskWakePacket() error = %v", err)
+	}
+	if packet.Trigger != string(checkpoints.TriggerHandoff) {
+		t.Fatalf("WakePacket.Trigger = %q, want %q", packet.Trigger, checkpoints.TriggerHandoff)
+	}
+	resumeState, err := checkpoints.Service{Store: store}.LoadResumeState(ctx, project.ID, task.ID)
+	if err != nil {
+		t.Fatalf("LoadResumeState() error = %v", err)
+	}
+	if resumeState.RunContext == nil || resumeState.RunContext.RunID != run.ID {
+		t.Fatalf("ResumeState.RunContext = %+v, want run %d", resumeState.RunContext, run.ID)
+	}
+	if len(resumeState.NextSteps) == 0 {
+		t.Fatalf("ResumeState.NextSteps = %v, want at least one step", resumeState.NextSteps)
+	}
+
+	if _, err := store.GetActiveWorktreeLeaseByTaskRun(ctx, task.ID, run.ID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("GetActiveWorktreeLeaseByTaskRun() error = %v, want sql.ErrNoRows", err)
+	}
+}
+
+func TestExecuteNextQueuedRequeuesWhenFailedDispatchWakePacketCompactionFails(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openJobStore(t)
+	defer store.Close()
+
+	registry := writeRegistryWithAlphaDefaultBranch(t, "odin/alpha/task-1/run-1/try-1")
+	now := time.Date(2026, 4, 17, 10, 0, 0, 0, time.UTC)
+	compactErr := errors.New("checkpoint write failed")
+	service := Service{
+		Store:          store,
+		Registry:       registry,
+		Executors:      testJobExecutors(),
+		ExecutorConfig: mustLoadExecutorConfig(t),
+		Transitions:    projects.Service{Store: store},
+		Leases: leases.Manager{
+			Store:        store,
+			Git:          &jobTestGit{},
+			WorktreeRoot: t.TempDir(),
+		},
+		CheckpointCompactor: func(context.Context, checkpoints.CompactParams) (checkpoints.CompactionResult, error) {
+			return checkpoints.CompactionResult{}, compactErr
+		},
+		Now: func() time.Time { return now },
+	}
+
+	task, err := service.CreateTaskFromAct(ctx, scope.Resolution{
+		Kind:       scope.ScopeProject,
+		ProjectKey: "alpha",
+	}, "Admission fails after lease preparation")
+	if err != nil {
+		t.Fatalf("CreateTaskFromAct() error = %v", err)
+	}
+
+	project, err := store.GetProjectByKey(ctx, "alpha")
+	if err != nil {
+		t.Fatalf("GetProjectByKey(alpha) error = %v", err)
+	}
+	if _, err := service.Transitions.SetTransitionState(ctx, projects.TransitionStateInput{
+		ProjectID:   project.ID,
+		Actor:       projects.TransitionControllerOdinOS,
+		TargetState: projects.TransitionStateCutover,
+		ChangedBy:   "test",
+	}); err != nil {
+		t.Fatalf("SetTransitionState(cutover) error = %v", err)
+	}
+	if _, err := store.RecordExecutorHealth(ctx, sqlite.RecordExecutorHealthParams{
+		Executor:    "codex_headless",
+		Status:      "healthy",
+		LatencyMS:   0,
+		DetailsJSON: `{"source":"test"}`,
+	}); err != nil {
+		t.Fatalf("RecordExecutorHealth() error = %v", err)
+	}
+
+	err = service.ExecuteNextQueued(ctx)
+	if !errors.Is(err, compactErr) {
+		t.Fatalf("ExecuteNextQueued() error = %v, want %v", err, compactErr)
+	}
+
+	gotTask, err := store.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
+	}
+	if gotTask.Status != "queued" {
+		t.Fatalf("Task.Status = %q, want queued", gotTask.Status)
+	}
+	if gotTask.BlockedReason != "" {
+		t.Fatalf("BlockedReason = %q, want empty", gotTask.BlockedReason)
+	}
+	if gotTask.NextEligibleAt != now.Add(time.Second) {
+		t.Fatalf("NextEligibleAt = %v, want %v", gotTask.NextEligibleAt, now.Add(time.Second))
+	}
+	if !strings.Contains(gotTask.LastError, "dispatch preparation failed") || !strings.Contains(gotTask.LastError, compactErr.Error()) {
+		t.Fatalf("LastError = %q, want dispatch and compaction detail", gotTask.LastError)
+	}
+
+	run, err := latestRunForTask(ctx, store, task.ID)
+	if err != nil {
+		t.Fatalf("latestRunForTask() error = %v", err)
+	}
+	if run.Status != "failed" {
+		t.Fatalf("Run.Status = %q, want failed", run.Status)
+	}
+	if _, err := store.GetLatestTaskWakePacket(ctx, project.ID, task.ID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("GetLatestTaskWakePacket() error = %v, want sql.ErrNoRows", err)
+	}
+	if _, err := store.GetActiveWorktreeLeaseByTaskRun(ctx, task.ID, run.ID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("GetActiveWorktreeLeaseByTaskRun() error = %v, want sql.ErrNoRows", err)
+	}
+}
+
+func TestRetryBackoffSkipsTaskUntilEligible(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openJobStore(t)
+	defer store.Close()
+
+	registry := writeRegistry(t)
+	now := time.Date(2026, 4, 17, 10, 0, 0, 0, time.UTC)
+	service := Service{
+		Store:    store,
+		Registry: registry,
+		Now: func() time.Time {
+			return now
+		},
+	}
+
+	project, err := store.CreateProject(ctx, sqlite.CreateProjectParams{
+		Key:           "alpha",
+		Name:          "Alpha",
+		Scope:         "project",
+		GitRoot:       "/tmp/alpha",
+		DefaultBranch: "main",
+		ManifestPath:  "config/projects.yaml",
 	})
 	if err != nil {
-		t.Fatalf("ListMemorySummaries() error = %v", err)
+		t.Fatalf("CreateProject() error = %v", err)
 	}
-	if len(summaries) != 0 {
-		t.Fatalf("summaries = %+v, want none for cancelled run", summaries)
+
+	dueTask, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "due-task",
+		Title:       "Eligible now",
+		Status:      "queued",
+		Scope:       "project",
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask(due) error = %v", err)
+	}
+
+	delayedTask, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "delayed-task",
+		Title:       "Eligible later",
+		Status:      "queued",
+		Scope:       "project",
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask(delayed) error = %v", err)
+	}
+
+	if _, err := store.RequeueTaskAt(ctx, sqlite.RequeueTaskAtParams{
+		TaskID:         delayedTask.ID,
+		NextEligibleAt: now.Add(500 * time.Millisecond),
+	}); err != nil {
+		t.Fatalf("RequeueTaskAt() error = %v", err)
+	}
+
+	got, err := service.nextQueuedTask(ctx)
+	if err != nil {
+		t.Fatalf("nextQueuedTask() error = %v", err)
+	}
+	if got.ID != dueTask.ID {
+		t.Fatalf("nextQueuedTask().ID = %d, want %d", got.ID, dueTask.ID)
+	}
+}
+
+func TestExecuteNextQueuedRequeuesTransientExecutorFailureWithBackoff(t *testing.T) {
+	ctx := context.Background()
+	store := openJobStore(t)
+	defer store.Close()
+
+	registry := writeRegistry(t)
+	now := time.Date(2026, 4, 17, 10, 0, 0, 0, time.UTC)
+	store.Now = func() time.Time { return now }
+
+	service := Service{
+		Store:    store,
+		Registry: registry,
+		Executors: map[string]contract.Executor{
+			"codex_headless": transientFailureExecutor{},
+		},
+		ExecutorConfig: mustLoadExecutorConfig(t),
+		Transitions:    projects.Service{Store: store},
+		Leases: leases.Manager{
+			Store:        store,
+			Git:          &jobTestGit{},
+			WorktreeRoot: t.TempDir(),
+		},
+		Now: func() time.Time { return now },
+	}
+
+	project, err := store.CreateProject(ctx, sqlite.CreateProjectParams{
+		Key:           "alpha",
+		Name:          "Alpha",
+		Scope:         "project",
+		GitRoot:       "/tmp/alpha",
+		DefaultBranch: "main",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+
+	if _, err := (projects.Service{Store: store}).SetTransitionState(ctx, projects.TransitionStateInput{
+		ProjectID:   project.ID,
+		Actor:       projects.TransitionControllerOdinOS,
+		TargetState: projects.TransitionStateCutover,
+		ChangedBy:   "test",
+	}); err != nil {
+		t.Fatalf("SetTransitionState(cutover) error = %v", err)
+	}
+	recordHealthyExecutorSample(t, ctx, store)
+
+	task, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "transient-failure",
+		Title:       "Retry me",
+		Status:      "queued",
+		Scope:       "project",
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+
+	if err := service.ExecuteNextQueued(ctx); err != nil {
+		t.Fatalf("ExecuteNextQueued() error = %v", err)
+	}
+
+	gotTask, err := store.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
+	}
+	if gotTask.Status != "queued" {
+		t.Fatalf("Task.Status = %q, want queued", gotTask.Status)
+	}
+	if gotTask.RetryCount != 1 {
+		t.Fatalf("RetryCount = %d, want 1", gotTask.RetryCount)
+	}
+	if gotTask.LastError != "temporary executor outage" {
+		t.Fatalf("LastError = %q, want temporary executor outage", gotTask.LastError)
+	}
+	if gotTask.NextEligibleAt != now.Add(time.Second) {
+		t.Fatalf("NextEligibleAt = %v, want %v", gotTask.NextEligibleAt, now.Add(time.Second))
 	}
 }
 
@@ -896,28 +1432,17 @@ func latestRunForTask(ctx context.Context, store *sqlite.Store, taskID int64) (s
 	return store.GetRun(ctx, runID)
 }
 
-func waitForRunningTaskRun(t *testing.T, ctx context.Context, store *sqlite.Store, taskID int64) int64 {
+func recordHealthyExecutorSample(t *testing.T, ctx context.Context, store *sqlite.Store) {
 	t.Helper()
 
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		task, err := store.GetTask(ctx, taskID)
-		if err != nil {
-			t.Fatalf("GetTask() error = %v", err)
-		}
-		if task.CurrentRunID != nil {
-			run, err := store.GetRun(ctx, *task.CurrentRunID)
-			if err != nil {
-				t.Fatalf("GetRun() error = %v", err)
-			}
-			if run.Status == "running" {
-				return run.ID
-			}
-		}
-		time.Sleep(25 * time.Millisecond)
+	if _, err := store.RecordExecutorHealth(ctx, sqlite.RecordExecutorHealthParams{
+		Executor:    "codex_headless",
+		Status:      "healthy",
+		LatencyMS:   0,
+		DetailsJSON: `{"source":"test"}`,
+	}); err != nil {
+		t.Fatalf("RecordExecutorHealth() error = %v", err)
 	}
-	t.Fatal("timed out waiting for running task run")
-	return 0
 }
 
 func openJobStore(t *testing.T) *sqlite.Store {
@@ -933,68 +1458,13 @@ func openJobStore(t *testing.T) *sqlite.Store {
 	return store
 }
 
-type blockingExecutor struct {
-	key     string
-	entered chan struct{}
-	done    chan blockingResult
-	once    sync.Once
-}
-
-type blockingResult struct {
-	result contract.ExecutionResult
-	err    error
-}
-
-func newBlockingExecutor(key string) *blockingExecutor {
-	return &blockingExecutor{
-		key:     key,
-		entered: make(chan struct{}),
-		done:    make(chan blockingResult, 1),
-	}
-}
-
-func (executor *blockingExecutor) Key() string { return executor.key }
-
-func (executor *blockingExecutor) Class() contract.ExecutorClass {
-	return contract.ExecutorClassPlanBackedCLI
-}
-
-func (executor *blockingExecutor) Health(context.Context) (contract.HealthReport, error) {
-	return contract.HealthReport{Status: contract.HealthStatusHealthy}, nil
-}
-
-func (executor *blockingExecutor) Capabilities(context.Context) (contract.Capabilities, error) {
-	return contract.Capabilities{
-		ExecutorClass:        contract.ExecutorClassPlanBackedCLI,
-		SupportsHeadlessPlan: true,
-		TaskKinds:            []contract.TaskKind{contract.TaskKindGeneral},
-		Scopes:               []string{"project"},
-	}, nil
-}
-
-func (executor *blockingExecutor) RunTask(context.Context, contract.TaskSpec) (contract.ExecutionResult, error) {
-	executor.once.Do(func() { close(executor.entered) })
-	result := <-executor.done
-	return result.result, result.err
-}
-
-func (executor *blockingExecutor) ResumeTask(context.Context, contract.TaskHandle, contract.ResumePacket) (contract.ExecutionResult, error) {
-	return contract.ExecutionResult{}, contract.ErrNotImplemented
-}
-
-func (executor *blockingExecutor) CancelTask(context.Context, contract.TaskHandle) error {
-	return contract.ErrNotImplemented
-}
-
-func (executor *blockingExecutor) EstimateCost(context.Context, contract.TaskSpec) (contract.CostEstimate, error) {
-	return contract.CostEstimate{}, contract.ErrNotImplemented
-}
-
-func (executor *blockingExecutor) Unblock(result contract.ExecutionResult, err error) {
-	executor.done <- blockingResult{result: result, err: err}
-}
-
 func writeRegistry(t *testing.T) projects.Registry {
+	t.Helper()
+
+	return writeRegistryWithAlphaDefaultBranch(t, "main")
+}
+
+func writeRegistryWithAlphaDefaultBranch(t *testing.T, alphaDefaultBranch string) projects.Registry {
 	t.Helper()
 
 	root := t.TempDir()
@@ -1007,7 +1477,7 @@ func writeRegistry(t *testing.T) projects.Registry {
 		}
 	}
 
-	if err := os.WriteFile(configPath, []byte(`
+	configYAML := fmt.Sprintf(`
 version: 1
 projects:
   - key: odin-core
@@ -1039,7 +1509,7 @@ projects:
     name: Alpha
     project_class: github_backed_project
     git_root: alpha
-    default_branch: main
+    default_branch: %s
     github:
       repo: acme/alpha
     policy:
@@ -1061,7 +1531,9 @@ projects:
         allow_clean: false
         allow_force_push: false
         require_explicit_approval: true
-`), 0o644); err != nil {
+`, alphaDefaultBranch)
+
+	if err := os.WriteFile(configPath, []byte(configYAML), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
 
@@ -1075,3 +1547,113 @@ projects:
 
 	return registry
 }
+
+func testJobExecutors() map[string]contract.Executor {
+	return map[string]contract.Executor{
+		"codex_headless": jobTestExecutor{
+			key: "codex_headless",
+			result: contract.ExecutionResult{
+				Status: "completed",
+				Output: "task complete",
+			},
+		},
+	}
+}
+
+type jobTestExecutor struct {
+	key    string
+	result contract.ExecutionResult
+}
+
+func (executor jobTestExecutor) Key() string { return executor.key }
+
+func (jobTestExecutor) Class() contract.ExecutorClass {
+	return contract.ExecutorClassPlanBackedCLI
+}
+
+func (jobTestExecutor) Health(context.Context) (contract.HealthReport, error) {
+	return contract.HealthReport{
+		Status:    contract.HealthStatusHealthy,
+		CheckedAt: time.Now().UTC(),
+	}, nil
+}
+
+func (jobTestExecutor) Capabilities(context.Context) (contract.Capabilities, error) {
+	return contract.Capabilities{
+		ExecutorClass:        contract.ExecutorClassPlanBackedCLI,
+		SupportsHeadlessPlan: true,
+		TaskKinds: []contract.TaskKind{
+			contract.TaskKindGeneral,
+			contract.TaskKindPlan,
+			contract.TaskKindBuild,
+			contract.TaskKindReview,
+			contract.TaskKindQA,
+			contract.TaskKindResearch,
+		},
+		Scopes: []string{"global", "odin-core", "project", "new-project"},
+	}, nil
+}
+
+func (executor jobTestExecutor) RunTask(context.Context, contract.TaskSpec) (contract.ExecutionResult, error) {
+	return executor.result, nil
+}
+
+func (jobTestExecutor) ResumeTask(context.Context, contract.TaskHandle, contract.ResumePacket) (contract.ExecutionResult, error) {
+	return contract.ExecutionResult{}, contract.ErrNotImplemented
+}
+
+func (jobTestExecutor) CancelTask(context.Context, contract.TaskHandle) error {
+	return contract.ErrNotImplemented
+}
+
+func (jobTestExecutor) EstimateCost(context.Context, contract.TaskSpec) (contract.CostEstimate, error) {
+	return contract.CostEstimate{}, contract.ErrNotImplemented
+}
+
+type transientFailureExecutor struct{}
+
+func (transientFailureExecutor) Key() string { return "codex_headless" }
+
+func (transientFailureExecutor) Class() contract.ExecutorClass {
+	return contract.ExecutorClassPlanBackedCLI
+}
+
+func (transientFailureExecutor) Health(context.Context) (contract.HealthReport, error) {
+	return contract.HealthReport{
+		Status:    contract.HealthStatusHealthy,
+		CheckedAt: time.Now().UTC(),
+	}, nil
+}
+
+func (transientFailureExecutor) Capabilities(context.Context) (contract.Capabilities, error) {
+	return contract.Capabilities{
+		ExecutorClass:        contract.ExecutorClassPlanBackedCLI,
+		SupportsHeadlessPlan: true,
+		TaskKinds: []contract.TaskKind{
+			contract.TaskKindGeneral,
+		},
+		Scopes: []string{"project"},
+	}, nil
+}
+
+func (transientFailureExecutor) RunTask(context.Context, contract.TaskSpec) (contract.ExecutionResult, error) {
+	return contract.ExecutionResult{}, transientExecutorError{}
+}
+
+func (transientFailureExecutor) ResumeTask(context.Context, contract.TaskHandle, contract.ResumePacket) (contract.ExecutionResult, error) {
+	return contract.ExecutionResult{}, contract.ErrNotImplemented
+}
+
+func (transientFailureExecutor) CancelTask(context.Context, contract.TaskHandle) error {
+	return nil
+}
+
+func (transientFailureExecutor) EstimateCost(context.Context, contract.TaskSpec) (contract.CostEstimate, error) {
+	return contract.CostEstimate{}, nil
+}
+
+type transientExecutorError struct{}
+
+func (transientExecutorError) Error() string   { return "temporary executor outage" }
+func (transientExecutorError) Timeout() bool   { return true }
+func (transientExecutorError) Temporary() bool { return true }

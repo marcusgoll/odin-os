@@ -3,7 +3,9 @@ package projects
 import (
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
+	"strings"
 )
 
 const odinCoreKey = "odin-core"
@@ -18,6 +20,7 @@ type Diagnostic struct {
 func Validate(cfg Config) []Diagnostic {
 	diagnostics := make([]Diagnostic, 0)
 	seenKeys := make(map[string]struct{}, len(cfg.Projects))
+	registeredKeys := make(map[string]struct{}, len(cfg.Projects))
 
 	if cfg.Version <= 0 {
 		diagnostics = append(diagnostics, Diagnostic{
@@ -27,7 +30,50 @@ func Validate(cfg Config) []Diagnostic {
 	}
 
 	for _, project := range cfg.Projects {
+		if project.Key != "" {
+			registeredKeys[project.Key] = struct{}{}
+		}
 		diagnostics = append(diagnostics, validateProject(project, seenKeys)...)
+	}
+
+	diagnostics = append(diagnostics, validateCutover(cfg, registeredKeys)...)
+
+	return diagnostics
+}
+
+func validateCutover(cfg Config, registeredKeys map[string]struct{}) []Diagnostic {
+	if len(cfg.Cutover.PilotProjects) == 0 {
+		return nil
+	}
+
+	diagnostics := make([]Diagnostic, 0)
+	seenPilotKeys := make(map[string]struct{}, len(cfg.Cutover.PilotProjects))
+
+	for _, pilot := range cfg.Cutover.PilotProjects {
+		if pilot.Key == "" {
+			diagnostics = append(diagnostics, Diagnostic{
+				Code:    "missing_field",
+				Message: "cutover.pilot_projects[].key is required",
+			})
+			continue
+		}
+		if _, exists := seenPilotKeys[pilot.Key]; exists {
+			diagnostics = append(diagnostics, Diagnostic{
+				ProjectKey: pilot.Key,
+				Code:       "duplicate_cutover_pilot_key",
+				Message:    fmt.Sprintf("cutover pilot key %q is duplicated", pilot.Key),
+			})
+			continue
+		}
+		seenPilotKeys[pilot.Key] = struct{}{}
+
+		if _, exists := registeredKeys[pilot.Key]; !exists {
+			diagnostics = append(diagnostics, Diagnostic{
+				ProjectKey: pilot.Key,
+				Code:       "unknown_cutover_pilot_project",
+				Message:    fmt.Sprintf("cutover pilot key %q must match a registered project in the same manifest", pilot.Key),
+			})
+		}
 	}
 
 	return diagnostics
@@ -108,6 +154,63 @@ func validateProject(project Manifest, seenKeys map[string]struct{}) []Diagnosti
 }
 
 func validatePolicy(project Manifest, addDiagnostic func(code string, format string, args ...any)) []Diagnostic {
+	knownLimitedActions := KnownLimitedActionKeys()
+	for key, rule := range project.Policy.LimitedActions {
+		if key == "" {
+			addDiagnostic("invalid_limited_action", "policy.limited_actions contains an empty key for %q", project.Key)
+			continue
+		}
+		if _, ok := knownLimitedActions[key]; !ok {
+			addDiagnostic("invalid_limited_action", "policy.limited_actions.%s is not a known bounded action for %q", key, project.Key)
+		}
+		if rule.Description == "" {
+			addDiagnostic("invalid_limited_action", "policy.limited_actions.%s.description is required for %q", key, project.Key)
+		}
+		if len(rule.PathPrefixes) == 0 {
+			addDiagnostic("invalid_limited_action", "policy.limited_actions.%s.path_prefixes is required for %q", key, project.Key)
+		}
+		normalizedPrefixes := make([]string, 0, len(rule.PathPrefixes))
+		for index, prefix := range rule.PathPrefixes {
+			normalizedPrefix, err := normalizeRepoRelativePath(prefix)
+			if err != nil {
+				addDiagnostic("invalid_limited_action", "policy.limited_actions.%s.path_prefixes[%d] %q is invalid for %q: %v", key, index, prefix, project.Key, err)
+				continue
+			}
+			normalizedPrefixes = append(normalizedPrefixes, normalizedPrefix)
+		}
+		if rule.ContentMode == "" {
+			addDiagnostic("invalid_limited_action", "policy.limited_actions.%s.content_mode is required for %q", key, project.Key)
+		}
+
+		normalizedTarget := ""
+		if rule.TargetPath != "" {
+			targetPath, err := normalizeRepoRelativePath(rule.TargetPath)
+			if err != nil {
+				addDiagnostic("invalid_limited_action", "policy.limited_actions.%s.target_path %q is invalid for %q: %v", key, rule.TargetPath, project.Key, err)
+			} else {
+				normalizedTarget = targetPath
+			}
+		}
+
+		switch key {
+		case string(LimitedActionDocsAuditNote), string(LimitedActionRepoHygieneNote):
+			if rule.ContentMode != string(LimitedActionContentModeCreateMarkdownNote) {
+				addDiagnostic("invalid_limited_action", "policy.limited_actions.%s.content_mode must be %q for %q", key, LimitedActionContentModeCreateMarkdownNote, project.Key)
+			}
+		case string(LimitedActionDocsUpdate):
+			if rule.ContentMode != string(LimitedActionContentModeAppendMarkdownNote) {
+				addDiagnostic("invalid_limited_action", "policy.limited_actions.%s.content_mode must be %q for %q", key, LimitedActionContentModeAppendMarkdownNote, project.Key)
+			}
+			if rule.TargetPath == "" {
+				addDiagnostic("invalid_limited_action", "policy.limited_actions.%s.target_path is required for %q", key, project.Key)
+			}
+		}
+
+		if normalizedTarget != "" && !pathAllowedByPrefixes(normalizedTarget, normalizedPrefixes) {
+			addDiagnostic("invalid_limited_action", "policy.limited_actions.%s.target_path %q must be covered by path_prefixes for %q", key, rule.TargetPath, project.Key)
+		}
+	}
+
 	if project.Policy.BranchRules.RequireWorktree == nil {
 		addDiagnostic("missing_policy_field", "policy.branch_rules.require_worktree is required for %q", project.Key)
 	}
@@ -166,6 +269,35 @@ func isGitRepository(root string) bool {
 	return info.Mode().IsRegular() || info.IsDir()
 }
 
-func IsGitRepository(root string) bool {
-	return isGitRepository(root)
+func pathAllowedByPrefixes(target string, prefixes []string) bool {
+	for _, prefix := range prefixes {
+		if target == prefix || strings.HasPrefix(target, prefix+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+func normalizeRepoRelativePath(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", fmt.Errorf("must not be empty")
+	}
+	if strings.Contains(raw, "\\") {
+		return "", fmt.Errorf("must use forward slashes")
+	}
+	if path.IsAbs(raw) {
+		return "", fmt.Errorf("must be repo-relative")
+	}
+	for _, segment := range strings.Split(raw, "/") {
+		if segment == ".." {
+			return "", fmt.Errorf("must not contain parent-directory traversal")
+		}
+	}
+
+	cleaned := path.Clean(raw)
+	if cleaned == "." || cleaned == ".." || strings.HasPrefix(cleaned, "../") {
+		return "", fmt.Errorf("must resolve inside the repository")
+	}
+	return cleaned, nil
 }

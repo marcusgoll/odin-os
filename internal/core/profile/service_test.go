@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	memoryroot "odin-os/internal/memory"
 	"odin-os/internal/store/sqlite"
 )
 
@@ -15,15 +16,15 @@ func TestProfileBootstrapsDefaultWorkspaceProfile(t *testing.T) {
 	store := openTestStore(t)
 	defer store.Close()
 
-	service := Service{Store: store, WorkspaceID: DefaultWorkspaceID}
+	service := Service{Store: store, WorkspaceKey: DefaultWorkspaceKey}
 
 	got, err := service.Get(ctx)
 	if err != nil {
 		t.Fatalf("Get() error = %v", err)
 	}
 
-	if got.WorkspaceID != DefaultWorkspaceID {
-		t.Fatalf("WorkspaceID = %q, want %q", got.WorkspaceID, DefaultWorkspaceID)
+	if got.WorkspaceKey != DefaultWorkspaceKey {
+		t.Fatalf("WorkspaceKey = %q, want %q", got.WorkspaceKey, DefaultWorkspaceKey)
 	}
 	if got.Preferences.QuietHours != "" {
 		t.Fatalf("QuietHours = %q, want empty", got.Preferences.QuietHours)
@@ -43,7 +44,7 @@ func TestProfileUpdatesQuietHoursAndApprovalDefaults(t *testing.T) {
 	store := openTestStore(t)
 	defer store.Close()
 
-	service := Service{Store: store, WorkspaceID: DefaultWorkspaceID}
+	service := Service{Store: store, WorkspaceKey: DefaultWorkspaceKey}
 
 	quietHours := "22:00-07:00"
 	requireApproval := false
@@ -71,7 +72,7 @@ func TestProfileReadsProfileStateBackThroughService(t *testing.T) {
 	store := openTestStore(t)
 	defer store.Close()
 
-	service := Service{Store: store, WorkspaceID: DefaultWorkspaceID}
+	service := Service{Store: store, WorkspaceKey: DefaultWorkspaceKey}
 
 	quietHours := "22:00-07:00"
 	requireApproval := true
@@ -82,7 +83,7 @@ func TestProfileReadsProfileStateBackThroughService(t *testing.T) {
 		t.Fatalf("Update() error = %v", err)
 	}
 
-	reloaded := Service{Store: store, WorkspaceID: DefaultWorkspaceID}
+	reloaded := Service{Store: store, WorkspaceKey: DefaultWorkspaceKey}
 	got, err := reloaded.Get(ctx)
 	if err != nil {
 		t.Fatalf("Get() error = %v", err)
@@ -93,6 +94,37 @@ func TestProfileReadsProfileStateBackThroughService(t *testing.T) {
 	}
 	if got.Boundaries.ApprovalDefaults.RequireHumanApprovalForExternalEffects != requireApproval {
 		t.Fatalf("RequireHumanApprovalForExternalEffects = %v, want %v", got.Boundaries.ApprovalDefaults.RequireHumanApprovalForExternalEffects, requireApproval)
+	}
+}
+
+func TestProfileUpdateRecordsWorkspaceOwnedMemory(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	service := Service{Store: store, WorkspaceKey: DefaultWorkspaceKey}
+	quietHours := "22:00-07:00"
+
+	profile, err := service.Update(ctx, UpdateParams{QuietHours: &quietHours})
+	if err != nil {
+		t.Fatalf("Update() error = %v", err)
+	}
+
+	entries, err := store.ListMemorySummaries(ctx, sqlite.ListMemorySummariesParams{
+		Scope:      "workspace",
+		ScopeKey:   profile.WorkspaceKey,
+		MemoryType: memoryroot.MemoryTypeOperatingProfileUpdate,
+	})
+	if err != nil {
+		t.Fatalf("ListMemorySummaries() error = %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("workspace memory len = %d, want 1", len(entries))
+	}
+	if entries[0].Summary == "" {
+		t.Fatalf("memory summary empty, want profile update note")
 	}
 }
 

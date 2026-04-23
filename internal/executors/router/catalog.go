@@ -12,6 +12,18 @@ import (
 	"odin-os/internal/executors/xai_api"
 )
 
+type CatalogEntry struct {
+	Class contract.ExecutorClass
+}
+
+func BootstrapCatalogEntries() map[string]CatalogEntry {
+	entries := make(map[string]CatalogEntry)
+	for key, executor := range DefaultCatalog() {
+		entries[key] = CatalogEntry{Class: executor.Class()}
+	}
+	return entries
+}
+
 func DefaultCatalog() map[string]contract.Executor {
 	return DefaultCatalogForRepo("")
 }

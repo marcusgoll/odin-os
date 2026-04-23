@@ -7,6 +7,7 @@ import (
 	"fmt"
 
 	"odin-os/internal/executors/contract"
+	integrationproviders "odin-os/internal/integrations/providers"
 )
 
 var (
@@ -37,6 +38,8 @@ func (selector Selector) Select(ctx context.Context, spec contract.TaskSpec) (De
 		return Decision{}, ErrNoRouteMatch
 	}
 
+	providerService := integrationproviders.Service{Executors: selector.Executors}
+
 	order := append([]string{}, route.Preferred...)
 	order = append(order, route.Fallback...)
 
@@ -56,17 +59,22 @@ func (selector Selector) Select(ctx context.Context, spec contract.TaskSpec) (De
 			continue
 		}
 
-		executor, ok := selector.Executors[key]
-		if !ok {
-			decision.Considered = append(decision.Considered, CandidateDecision{ExecutorKey: key, Reason: "not_registered"})
+		profile, err := providerService.CapabilityProfile(ctx, key)
+		if err != nil {
+			var providerErr integrationproviders.ProviderError
+			if errors.As(err, &providerErr) && providerErr.Code == "provider_not_registered" {
+				decision.Considered = append(decision.Considered, CandidateDecision{ExecutorKey: key, Reason: "not_registered"})
+				continue
+			}
+			decision.Considered = append(decision.Considered, CandidateDecision{ExecutorKey: key, Reason: "capabilities_error"})
 			continue
 		}
-		if executor.Class() != executorConfig.Class {
+		if profile.ExecutorClass != executorConfig.Class {
 			decision.Considered = append(decision.Considered, CandidateDecision{ExecutorKey: key, Reason: "class_mismatch"})
 			continue
 		}
 
-		health, err := executor.Health(ctx)
+		health, err := providerService.Health(ctx, key)
 		if err != nil {
 			decision.Considered = append(decision.Considered, CandidateDecision{ExecutorKey: key, Reason: "health_error"})
 			continue
@@ -76,12 +84,7 @@ func (selector Selector) Select(ctx context.Context, spec contract.TaskSpec) (De
 			continue
 		}
 
-		capabilities, err := executor.Capabilities(ctx)
-		if err != nil {
-			decision.Considered = append(decision.Considered, CandidateDecision{ExecutorKey: key, Reason: "capabilities_error"})
-			continue
-		}
-		if !capabilities.Matches(spec) {
+		if !profile.Matches(spec) {
 			decision.Considered = append(decision.Considered, CandidateDecision{ExecutorKey: key, Reason: "capability_mismatch"})
 			continue
 		}

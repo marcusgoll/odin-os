@@ -8,6 +8,7 @@ import (
 type StreamType string
 
 const (
+	StreamService            StreamType = "service"
 	StreamProject            StreamType = "project"
 	StreamTask               StreamType = "task"
 	StreamRun                StreamType = "run"
@@ -22,15 +23,22 @@ const (
 	StreamLearningProposal   StreamType = "learning_proposal"
 	StreamLearningEvaluation StreamType = "learning_evaluation"
 	StreamLearningPromotion  StreamType = "learning_promotion"
+	StreamSkill              StreamType = "skill"
+	StreamCapability         StreamType = "capability"
+	StreamFollowUp           StreamType = "follow_up"
 )
 
 type Type string
 
 const (
+	EventServiceLifecycleChanged          Type = "service.lifecycle_changed"
+	EventServiceHeartbeatRecorded         Type = "service.heartbeat_recorded"
 	EventProjectCreated                   Type = "project.created"
 	EventTaskCreated                      Type = "task.created"
 	EventTaskStatusChanged                Type = "task.status_changed"
+	EventTaskQueueStateChanged            Type = "task.queue_state_changed"
 	EventRunStarted                       Type = "run.started"
+	EventRunStatusChanged                 Type = "run.status_changed"
 	EventRunFinished                      Type = "run.finished"
 	EventApprovalRequested                Type = "approval.requested"
 	EventApprovalResolved                 Type = "approval.resolved"
@@ -57,6 +65,18 @@ const (
 	EventLearningEvaluationRecorded       Type = "learning.evaluation_recorded"
 	EventLearningPromotionApplied         Type = "learning.promotion_applied"
 	EventLearningPromotionRolledBack      Type = "learning.promotion_rolled_back"
+	EventSkillLifecycleRecorded           Type = "skill.lifecycle_recorded"
+	EventCapabilitySnapshotPublished      Type = "capability.snapshot_published"
+	EventCapabilitySnapshotRejected       Type = "capability.snapshot_rejected"
+	EventFollowUpMaterialized             Type = "follow_up.materialized"
+	EventFollowUpPaused                   Type = "follow_up.paused"
+)
+
+const (
+	SkillLifecycleErrorUnknownPermission            = "unknown_permission"
+	SkillLifecycleErrorMutationRequiresProjectScope = "mutation_requires_project_scope"
+	SkillLifecycleErrorTransitionDenied             = "transition_denied"
+	SkillLifecycleErrorApprovalRequired             = "approval_required"
 )
 
 type Record struct {
@@ -73,6 +93,19 @@ type Record struct {
 	OccurredAt time.Time
 }
 
+type ServiceLifecyclePayload struct {
+	BootID string `json:"boot_id"`
+	Status string `json:"status"`
+	Reason string `json:"reason,omitempty"`
+	PID    int    `json:"pid"`
+}
+
+type ServiceHeartbeatPayload struct {
+	BootID string `json:"boot_id"`
+	Status string `json:"status"`
+	PID    int    `json:"pid"`
+}
+
 type ProjectCreatedPayload struct {
 	Key           string `json:"key"`
 	Name          string `json:"name"`
@@ -84,16 +117,51 @@ type ProjectCreatedPayload struct {
 }
 
 type TaskCreatedPayload struct {
-	Key         string `json:"key"`
-	Title       string `json:"title"`
-	Status      string `json:"status"`
-	Scope       string `json:"scope"`
-	RequestedBy string `json:"requested_by"`
+	Key            string `json:"key"`
+	Title          string `json:"title"`
+	ActionKey      string `json:"action_key,omitempty"`
+	Status         string `json:"status"`
+	Scope          string `json:"scope"`
+	RequestedBy    string `json:"requested_by"`
+	NextEligibleAt string `json:"next_eligible_at,omitempty"`
+	Priority       int    `json:"priority,omitempty"`
+	RetryCount     int    `json:"retry_count,omitempty"`
+	MaxAttempts    int    `json:"max_attempts,omitempty"`
+	LastError      string `json:"last_error,omitempty"`
+	BlockedReason  string `json:"blocked_reason,omitempty"`
 }
 
 type TaskStatusChangedPayload struct {
 	PreviousStatus string `json:"previous_status"`
 	Status         string `json:"status"`
+	Summary        string `json:"summary,omitempty"`
+	TerminalReason string `json:"terminal_reason,omitempty"`
+	ArtifactsJSON  string `json:"artifacts_json,omitempty"`
+}
+
+type TaskQueueStateChangedPayload struct {
+	PreviousStatus string `json:"previous_status"`
+	Status         string `json:"status"`
+	NextEligibleAt string `json:"next_eligible_at"`
+	Priority       int    `json:"priority"`
+	RetryCount     int    `json:"retry_count"`
+	MaxAttempts    int    `json:"max_attempts"`
+	LastError      string `json:"last_error,omitempty"`
+	BlockedReason  string `json:"blocked_reason,omitempty"`
+}
+
+type FollowUpMaterializedPayload struct {
+	ObligationID  int64  `json:"obligation_id"`
+	TaskID        int64  `json:"task_id"`
+	OccurrenceKey string `json:"occurrence_key"`
+	TaskStatus    string `json:"task_status"`
+	Reused        bool   `json:"reused"`
+}
+
+type FollowUpPausedPayload struct {
+	ObligationID     int64  `json:"obligation_id"`
+	Status           string `json:"status"`
+	InitiativeStatus string `json:"initiative_status,omitempty"`
 }
 
 type RunStartedPayload struct {
@@ -103,9 +171,16 @@ type RunStartedPayload struct {
 	Status   string `json:"status"`
 }
 
+type RunStatusChangedPayload struct {
+	PreviousStatus string `json:"previous_status"`
+	Status         string `json:"status"`
+}
+
 type RunFinishedPayload struct {
-	Status  string `json:"status"`
-	Summary string `json:"summary"`
+	Status         string `json:"status"`
+	Summary        string `json:"summary"`
+	TerminalReason string `json:"terminal_reason,omitempty"`
+	ArtifactsJSON  string `json:"artifacts_json,omitempty"`
 }
 
 type ApprovalRequestedPayload struct {
@@ -256,6 +331,33 @@ type LearningPromotionRolledBackPayload struct {
 	RolledBackBy        string `json:"rolled_back_by"`
 	RollbackReason      string `json:"rollback_reason"`
 	RestoredPromotionID *int64 `json:"restored_promotion_id,omitempty"`
+}
+
+type SkillLifecycleRecordedPayload struct {
+	SkillKey         string   `json:"skill_key"`
+	Operation        string   `json:"operation"`
+	Outcome          string   `json:"outcome"`
+	ExecutionProfile string   `json:"execution_profile,omitempty"`
+	Version          string   `json:"version,omitempty"`
+	HandlerType      string   `json:"handler_type,omitempty"`
+	HandlerRef       string   `json:"handler_ref,omitempty"`
+	Permissions      []string `json:"permissions,omitempty"`
+	DurationMS       int64    `json:"duration_ms"`
+	ErrorCode        string   `json:"error_code,omitempty"`
+	ErrorText        string   `json:"error_text,omitempty"`
+}
+
+type CapabilitySnapshotPublishedPayload struct {
+	PreviousDigest  string `json:"previous_digest,omitempty"`
+	Digest          string `json:"digest"`
+	CapabilityCount int    `json:"capability_count"`
+}
+
+type CapabilitySnapshotRejectedPayload struct {
+	PreviousDigest  string `json:"previous_digest,omitempty"`
+	Digest          string `json:"digest,omitempty"`
+	CapabilityCount int    `json:"capability_count"`
+	Reason          string `json:"reason"`
 }
 
 func EncodePayload(payload any) (json.RawMessage, error) {

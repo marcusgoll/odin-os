@@ -1,8 +1,12 @@
 package scope
 
-import "testing"
+import (
+	"testing"
 
-func TestResolveScope(t *testing.T) {
+	corescope "odin-os/internal/core/scope"
+)
+
+func TestResolutionResolveScope(t *testing.T) {
 	t.Parallel()
 
 	testCases := []struct {
@@ -64,5 +68,29 @@ func TestResolveScope(t *testing.T) {
 				t.Fatalf("scope kind = %q, want %q", got.Kind, testCase.want)
 			}
 		})
+	}
+}
+
+func TestResolutionControlScope(t *testing.T) {
+	t.Parallel()
+
+	got := Resolve(ResolveInput{
+		ExplicitTarget: &Target{
+			ProjectKey:    "alpha",
+			SystemProject: false,
+		},
+	}).ControlScope()
+
+	want := corescope.ControlScope{
+		SubjectType:   corescope.SubjectTypeInitiative,
+		SubjectKey:    "alpha",
+		WorkspaceKey:  "default",
+		InitiativeKey: "alpha",
+		ProjectKey:    "alpha",
+		CompanionKey:  "primary",
+	}
+
+	if got != want {
+		t.Fatalf("ControlScope() = %+v, want %+v", got, want)
 	}
 }

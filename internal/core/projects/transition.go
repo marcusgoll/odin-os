@@ -13,6 +13,20 @@ const (
 	TransitionStateDecommissioned TransitionState = "decommissioned"
 )
 
+func (state TransitionState) Valid() bool {
+	switch state {
+	case TransitionStateInventory,
+		TransitionStateShadow,
+		TransitionStateCompare,
+		TransitionStateLimitedAction,
+		TransitionStateCutover,
+		TransitionStateDecommissioned:
+		return true
+	default:
+		return false
+	}
+}
+
 type TransitionController string
 
 const (
@@ -52,6 +66,11 @@ type TransitionChangeRequest struct {
 type TransitionDecision struct {
 	Allowed bool
 	Reason  string
+}
+
+type ApprovalRequirement struct {
+	Required bool
+	Reason   string
 }
 
 func AuthorizeTransitionAction(request TransitionAuthRequest) TransitionDecision {
@@ -118,6 +137,28 @@ func ValidateTransitionChange(current RuntimeTransition, request TransitionChang
 	return TransitionDecision{Allowed: true}
 }
 
+func ApprovalRequiredForAction(manifest Manifest, actionClass ActionClass) ApprovalRequirement {
+	if actionClass == ActionClassGovernanceMutation && boolEnabled(manifest.Policy.ApprovalGates.RequireForGovernanceChanges) {
+		return ApprovalRequirement{
+			Required: true,
+			Reason:   fmt.Sprintf("project %q requires approval for governance changes", manifest.Key),
+		}
+	}
+	if actionClass == ActionClassDestructiveMutation && boolEnabled(manifest.Policy.ApprovalGates.RequireForDestructiveOperations) {
+		return ApprovalRequirement{
+			Required: true,
+			Reason:   fmt.Sprintf("project %q requires approval for destructive operations", manifest.Key),
+		}
+	}
+	if manifest.SystemProject && actionClass != ActionClassReadOnly && boolEnabled(manifest.Policy.ApprovalGates.RequireForSystemProjectChanges) {
+		return ApprovalRequirement{
+			Required: true,
+			Reason:   fmt.Sprintf("system project %q requires explicit approval for mutations", manifest.Key),
+		}
+	}
+	return ApprovalRequirement{}
+}
+
 func containsString(values []string, target string) bool {
 	for _, value := range values {
 		if value == target {
@@ -125,4 +166,33 @@ func containsString(values []string, target string) bool {
 		}
 	}
 	return false
+}
+
+type MutationAssignment struct {
+	BranchName   string
+	WorktreePath string
+}
+
+func ValidateSystemProjectMutation(manifest Manifest) error {
+	if manifest.SystemProject && manifest.Policy.ApprovalGates.RequireForSystemProjectChanges != nil && *manifest.Policy.ApprovalGates.RequireForSystemProjectChanges {
+		return fmt.Errorf("system project %q requires explicit approval for mutations", manifest.Key)
+	}
+	return nil
+}
+
+func ValidateMutationAssignment(manifest Manifest, gitRoot string, defaultBranch string, assignment MutationAssignment) error {
+	if manifest.Policy.BranchRules.RequireWorktree != nil && *manifest.Policy.BranchRules.RequireWorktree && assignment.WorktreePath == gitRoot {
+		return fmt.Errorf("project %q requires an isolated worktree", manifest.Key)
+	}
+	if manifest.Policy.BranchRules.RequireTaskBranch != nil && *manifest.Policy.BranchRules.RequireTaskBranch && assignment.BranchName == "" {
+		return fmt.Errorf("project %q requires a task-owned branch", manifest.Key)
+	}
+	if manifest.Policy.BranchRules.AllowDefaultBranchMutation != nil && !*manifest.Policy.BranchRules.AllowDefaultBranchMutation && assignment.BranchName == defaultBranch {
+		return fmt.Errorf("project %q cannot mutate the default branch directly", manifest.Key)
+	}
+	return nil
+}
+
+func boolEnabled(value *bool) bool {
+	return value != nil && *value
 }

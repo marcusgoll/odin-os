@@ -6,26 +6,35 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
+	"os"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"odin-os/internal/cli/scope"
+	"odin-os/internal/core/companions"
 	"odin-os/internal/core/projects"
+	"odin-os/internal/core/workspaces"
 	"odin-os/internal/executors/contract"
 	executorrouter "odin-os/internal/executors/router"
+	"odin-os/internal/runtime/checkpoints"
+	healthsvc "odin-os/internal/runtime/health"
 	"odin-os/internal/runtime/projections"
 	"odin-os/internal/store/sqlite"
 	"odin-os/internal/vcs/leases"
 )
 
 type Service struct {
-	Store          *sqlite.Store
-	Registry       projects.Registry
-	Executors      map[string]contract.Executor
-	ExecutorConfig executorrouter.Config
-	Transitions    projects.Service
-	Leases         leases.Manager
-	Now            func() time.Time
+	Store               *sqlite.Store
+	Registry            projects.Registry
+	Executors           map[string]contract.Executor
+	ExecutorConfig      executorrouter.Config
+	Transitions         projects.Service
+	Leases              leases.Manager
+	CheckpointCompactor func(context.Context, checkpoints.CompactParams) (checkpoints.CompactionResult, error)
+	ShutdownRequested   *atomic.Bool
+	Now                 func() time.Time
 }
 
 type CreateTaskParams struct {
@@ -44,7 +53,78 @@ type ExecutionRequest struct {
 	Metadata       map[string]string
 }
 
-var ErrTaskRunning = errors.New("task is running")
+type DelegationAdmissionInput struct {
+	ParentTask            sqlite.Task
+	ParentRunID           *int64
+	Companion             sqlite.Companion
+	RequestedTools        []string
+	RequestedMemoryScopes []string
+	PreferredExecutor     string
+}
+
+type DelegationMemoryView struct {
+	Mode         string   `json:"mode"`
+	Scopes       []string `json:"scopes"`
+	WorkspaceID  *int64   `json:"workspace_id,omitempty"`
+	InitiativeID *int64   `json:"initiative_id,omitempty"`
+	CompanionID  *int64   `json:"companion_id,omitempty"`
+	ParentRunID  *int64   `json:"parent_run_id,omitempty"`
+}
+
+type DelegationAdmissionProfile struct {
+	Executor     string               `json:"executor"`
+	AllowedTools []string             `json:"allowed_tools"`
+	MemoryView   DelegationMemoryView `json:"memory_view"`
+}
+
+type admissionOutcome string
+
+const (
+	admissionDispatchable   admissionOutcome = "dispatchable"
+	admissionBlocked        admissionOutcome = "blocked"
+	admissionFailed         admissionOutcome = "failed"
+	admissionRetryLater     admissionOutcome = "retry_later"
+	checkpointRecoveryDelay                  = time.Second
+)
+
+type admissionDecision struct {
+	Outcome        admissionOutcome
+	BlockedReason  string
+	LastError      string
+	NextEligibleAt time.Time
+}
+
+func (service Service) NarrowDelegationAdmission(input DelegationAdmissionInput) (DelegationAdmissionProfile, error) {
+	if input.ParentTask.ID <= 0 {
+		return DelegationAdmissionProfile{}, fmt.Errorf("parent task is required")
+	}
+
+	allowedTools, err := intersectAllowedTools(input.Companion.ToolPolicyJSON, input.RequestedTools)
+	if err != nil {
+		return DelegationAdmissionProfile{}, err
+	}
+
+	memoryMode, err := delegationMemoryMode(input.Companion.MemoryPolicyJSON)
+	if err != nil {
+		return DelegationAdmissionProfile{}, err
+	}
+
+	scopes := intersectMemoryScopes(input.ParentTask, input.ParentRunID, input.RequestedMemoryScopes)
+	memoryView := DelegationMemoryView{
+		Mode:         memoryMode,
+		Scopes:       scopes,
+		WorkspaceID:  pointerIfScope(scopes, "workspace", input.ParentTask.WorkspaceID),
+		InitiativeID: pointerIfScope(scopes, "initiative", input.ParentTask.InitiativeID),
+		CompanionID:  pointerIfScope(scopes, "companion", input.ParentTask.CompanionID),
+		ParentRunID:  pointerIfScope(scopes, "run", input.ParentRunID),
+	}
+
+	return DelegationAdmissionProfile{
+		Executor:     service.defaultDelegationExecutor(input.PreferredExecutor),
+		AllowedTools: allowedTools,
+		MemoryView:   memoryView,
+	}, nil
+}
 
 func (service Service) List(ctx context.Context, resolved scope.Resolution) ([]projections.TaskStatusView, error) {
 	views, err := projections.ListTaskStatusViews(ctx, service.Store.DB())
@@ -62,61 +142,78 @@ func (service Service) List(ctx context.Context, resolved scope.Resolution) ([]p
 	return filtered, nil
 }
 
-func (service Service) CancelTaskByKey(ctx context.Context, resolved scope.Resolution, taskKey string) (projections.TaskStatusView, error) {
-	if service.Store == nil {
-		return projections.TaskStatusView{}, fmt.Errorf("job store is required")
-	}
-
-	taskKey = strings.TrimSpace(taskKey)
-	if taskKey == "" {
-		return projections.TaskStatusView{}, fmt.Errorf("task key is required")
-	}
-
-	view, err := service.taskViewByKey(ctx, resolved, taskKey)
-	if err != nil {
-		return projections.TaskStatusView{}, err
-	}
-	if view.Status == "running" {
-		return view, ErrTaskRunning
-	}
-	if view.Status != "queued" {
-		return view, nil
-	}
-
-	if _, err := service.Store.UpdateTaskStatus(ctx, sqlite.UpdateTaskStatusParams{
-		TaskID: view.TaskID,
-		Status: "cancelled",
-	}); err != nil {
-		return projections.TaskStatusView{}, err
-	}
-
-	return service.taskViewByKey(ctx, resolved, taskKey)
-}
-
 func (service Service) CreateTaskFromAct(ctx context.Context, resolved scope.Resolution, title string) (sqlite.Task, error) {
-	return service.CreateTask(ctx, CreateTaskParams{
-		Resolved:    resolved,
-		Title:       title,
-		RequestedBy: "operator",
+	return service.createManagedTask(ctx, resolved, title, createManagedTaskInput{
+		requestedBy:           "operator",
+		taskCompanionID:       0,
+		requestedSwarmTrigger: "",
 	})
 }
 
 func (service Service) CreateTask(ctx context.Context, params CreateTaskParams) (sqlite.Task, error) {
-	if params.Resolved.Kind == scope.ScopeGlobal {
-		return sqlite.Task{}, fmt.Errorf("task creation requires a non-global scope")
+	requestedBy := strings.TrimSpace(params.RequestedBy)
+	if requestedBy == "" {
+		requestedBy = "operator"
+	}
+	return service.createManagedTask(ctx, params.Resolved, params.Title, createManagedTaskInput{
+		requestedBy:           requestedBy,
+		taskCompanionID:       0,
+		requestedSwarmTrigger: "",
+	})
+}
+
+func (service Service) CreateTaskFromCompanionRun(ctx context.Context, resolved scope.Resolution, companion sqlite.Companion, title string, requestedSwarmTrigger string) (sqlite.Task, error) {
+	return service.createManagedTask(ctx, resolved, title, createManagedTaskInput{
+		requestedBy:           "companion",
+		taskCompanionID:       companion.ID,
+		requestedSwarmTrigger: requestedSwarmTrigger,
+	})
+}
+
+type createManagedTaskInput struct {
+	requestedBy           string
+	taskCompanionID       int64
+	requestedSwarmTrigger string
+}
+
+func (service Service) createManagedTask(ctx context.Context, resolved scope.Resolution, title string, input createManagedTaskInput) (sqlite.Task, error) {
+	if resolved.Kind == scope.ScopeGlobal {
+		return sqlite.Task{}, fmt.Errorf("act mode requires a non-global scope")
 	}
 
-	title := strings.TrimSpace(params.Title)
-	if title == "" {
-		return sqlite.Task{}, fmt.Errorf("task title is required")
-	}
-
-	projectManifest, taskScope, err := service.taskOwnerForScope(params.Resolved)
+	projectManifest, taskScope, err := service.taskOwnerForScope(resolved)
 	if err != nil {
 		return sqlite.Task{}, err
 	}
 
-	project, err := service.ensureRuntimeProject(ctx, projectManifest)
+	transitions := service.Transitions
+	if transitions.Store == nil {
+		transitions = projects.Service{Store: service.Store}
+	}
+
+	project, err := transitions.RegisterManagedProject(ctx, projectManifest)
+	if err != nil {
+		return sqlite.Task{}, err
+	}
+	workspace, err := workspaces.Service{Store: service.Store}.BootstrapDefaultWorkspace(ctx)
+	if err != nil {
+		return sqlite.Task{}, err
+	}
+	defaultCompanion, err := companions.Service{Store: service.Store}.GetCompanionByKey(ctx, workspace.ID, workspace.DefaultCompanionKey)
+	if err != nil {
+		return sqlite.Task{}, err
+	}
+
+	taskCompanionID := input.taskCompanionID
+	if taskCompanionID <= 0 {
+		taskCompanionID = defaultCompanion.ID
+	}
+
+	ownerCompanionID, err := service.initiativeOwnerCompanionID(ctx, workspace.ID, project.Key, defaultCompanion.ID)
+	if err != nil {
+		return sqlite.Task{}, err
+	}
+	initiative, err := transitions.RegisterManagedProjectInitiative(ctx, workspace.ID, project, ownerCompanionID)
 	if err != nil {
 		return sqlite.Task{}, err
 	}
@@ -126,35 +223,36 @@ func (service Service) CreateTask(ctx context.Context, params CreateTaskParams) 
 		now = service.Now().UTC()
 	}
 
-	requestedBy := strings.TrimSpace(params.RequestedBy)
-	if requestedBy == "" {
-		requestedBy = "operator"
-	}
+	return service.Store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:    project.ID,
+		Key:          fmt.Sprintf("%s-%s", slugify(title), now.Format("20060102-150405")),
+		Title:        title,
+		ActionKey:    supportedSwarmTrigger(input.requestedSwarmTrigger),
+		Status:       "queued",
+		Scope:        taskScope,
+		RequestedBy:  input.requestedBy,
+		WorkspaceID:  &workspace.ID,
+		InitiativeID: &initiative.ID,
+		CompanionID:  &taskCompanionID,
+		WorkKind:     taskScope,
+	})
+}
 
-	var lastErr error
-	for attempt := 0; attempt < 8; attempt++ {
-		created, err := service.Store.CreateTask(ctx, sqlite.CreateTaskParams{
-			ProjectID:   project.ID,
-			Key:         taskKeyForTitle(title, now, attempt),
-			Title:       title,
-			Status:      "queued",
-			Scope:       taskScope,
-			RequestedBy: requestedBy,
-		})
-		if err == nil {
-			return created, nil
-		}
-		lastErr = err
-		if !strings.Contains(err.Error(), "UNIQUE constraint failed: tasks.project_id, tasks.key") {
-			return sqlite.Task{}, err
-		}
+func supportedSwarmTrigger(trigger string) string {
+	switch strings.ToLower(strings.TrimSpace(trigger)) {
+	case "parallel_research", "build_plus_review", "multi_artifact", "monitor_triage":
+		return strings.ToLower(strings.TrimSpace(trigger))
+	default:
+		return ""
 	}
-	return sqlite.Task{}, lastErr
 }
 
 func (service Service) ExecuteNextQueued(ctx context.Context) error {
 	if service.Store == nil {
 		return fmt.Errorf("job store is required")
+	}
+	if !service.dispatchAllowed() {
+		return nil
 	}
 
 	task, err := service.nextQueuedTask(ctx)
@@ -165,19 +263,117 @@ func (service Service) ExecuteNextQueued(ctx context.Context) error {
 		return err
 	}
 
-	_, err = service.ExecuteTask(ctx, task.ID)
-	return err
+	project, err := service.Store.GetProject(ctx, task.ProjectID)
+	if err != nil {
+		return err
+	}
+	manifest, ok := service.Registry.Lookup(project.Key)
+	if !ok {
+		return service.applyAdmissionDecision(ctx, task, admissionDecision{
+			Outcome:   admissionFailed,
+			LastError: fmt.Sprintf("unknown manifest for project %q", project.Key),
+		})
+	}
+
+	executors := service.Executors
+	if len(executors) == 0 {
+		executors = executorrouter.DefaultCatalog()
+	}
+	if service.Transitions.Store == nil {
+		service.Transitions = projects.Service{Store: service.Store}
+	}
+
+	config, err := service.executionConfig(ctx)
+	if err != nil {
+		return err
+	}
+	selector := executorrouter.Selector{
+		Config:    config,
+		Executors: executors,
+	}
+	spec := contract.TaskSpec{
+		ID:     task.Key,
+		Kind:   contract.TaskKindGeneral,
+		Scope:  task.Scope,
+		Prompt: task.Title,
+		Requirements: contract.Requirements{
+			AllowedClasses:    []contract.ExecutorClass{contract.ExecutorClassPlanBackedCLI},
+			NeedsHeadlessPlan: true,
+		},
+		Metadata: map[string]string{
+			"project_key": project.Key,
+			"task_id":     fmt.Sprintf("%d", task.ID),
+		},
+	}
+
+	decision, err := selector.Select(ctx, spec)
+	if err != nil {
+		return service.applyAdmissionDecision(ctx, task, admissionDecision{
+			Outcome:   admissionFailed,
+			LastError: err.Error(),
+		})
+	}
+
+	admission, err := service.admitTask(ctx, task, project, manifest, decision.ExecutorKey)
+	if err != nil {
+		return err
+	}
+	if admission.Outcome != admissionDispatchable {
+		return service.applyAdmissionDecision(ctx, task, admission)
+	}
+
+	attempt, err := service.nextRunAttempt(ctx, task.ID)
+	if err != nil {
+		return err
+	}
+	if !service.dispatchAllowed() {
+		return nil
+	}
+
+	run, err := service.prepareRun(ctx, task, decision.ExecutorKey, attempt)
+	if err != nil {
+		return err
+	}
+	if !service.dispatchAllowed() {
+		return service.interruptDispatch(ctx, run.ID)
+	}
+
+	assignment, leaseAdmission, err := service.prepareLease(ctx, task, project, manifest, run, attempt)
+	if err != nil {
+		return err
+	}
+	if leaseAdmission.Outcome != admissionDispatchable {
+		return service.finalizeOutcome(ctx, task, run, leaseAdmission, contract.ExecutionResult{}, nil)
+	}
+	if !service.dispatchAllowed() {
+		return service.interruptDispatch(ctx, run.ID)
+	}
+
+	if _, run, err = service.Store.UpdateRunAndTaskStatus(ctx, sqlite.UpdateRunAndTaskStatusParams{
+		RunID:      run.ID,
+		RunStatus:  "running",
+		TaskStatus: "running",
+	}); err != nil {
+		return err
+	}
+	if !service.dispatchAllowed() {
+		return service.interruptDispatch(ctx, run.ID)
+	}
+
+	spec.Metadata["branch_name"] = assignment.BranchName
+	spec.Metadata["repo_root"] = assignment.RepoRoot
+	spec.Metadata["worktree_path"] = assignment.WorktreePath
+
+	executor := executors[decision.ExecutorKey]
+	result, err := executor.RunTask(ctx, spec)
+	return service.finalizeOutcome(ctx, task, run, admissionDecision{}, result, err)
 }
 
 func (service Service) ExecuteTask(ctx context.Context, taskID int64) (ExecutionOutcome, error) {
-	return service.executeTask(ctx, taskID, ExecutionRequest{})
+	return service.ExecuteTaskWithRequest(ctx, taskID, ExecutionRequest{})
 }
 
 func (service Service) ExecuteTaskWithRequest(ctx context.Context, taskID int64, request ExecutionRequest) (ExecutionOutcome, error) {
-	return service.executeTask(ctx, taskID, request)
-}
-
-func (service Service) executeTask(ctx context.Context, taskID int64, request ExecutionRequest) (ExecutionOutcome, error) {
 	if service.Store == nil {
 		return ExecutionOutcome{}, fmt.Errorf("job store is required")
 	}
@@ -186,21 +382,12 @@ func (service Service) executeTask(ctx context.Context, taskID int64, request Ex
 	if err != nil {
 		return ExecutionOutcome{}, err
 	}
-
 	project, err := service.Store.GetProject(ctx, task.ProjectID)
 	if err != nil {
 		return ExecutionOutcome{}, err
 	}
 	manifest, ok := service.Registry.Lookup(project.Key)
 	if !ok {
-		_, _ = service.Store.UpdateTaskStatus(ctx, sqlite.UpdateTaskStatusParams{
-			TaskID: task.ID,
-			Status: "failed",
-		})
-		failedTask, loadErr := service.Store.GetTask(ctx, task.ID)
-		if loadErr == nil {
-			return ExecutionOutcome{Task: failedTask}, fmt.Errorf("unknown manifest for project %q", project.Key)
-		}
 		return ExecutionOutcome{}, fmt.Errorf("unknown manifest for project %q", project.Key)
 	}
 
@@ -220,11 +407,11 @@ func (service Service) executeTask(ctx context.Context, taskID int64, request Ex
 		Config:    config,
 		Executors: executors,
 	}
+
 	prompt := strings.TrimSpace(request.PromptOverride)
 	if prompt == "" {
 		prompt = task.Title
 	}
-
 	spec := contract.TaskSpec{
 		ID:     task.Key,
 		Kind:   contract.TaskKindGeneral,
@@ -250,157 +437,60 @@ func (service Service) executeTask(ctx context.Context, taskID int64, request Ex
 
 	decision, err := selector.Select(ctx, spec)
 	if err != nil {
-		_, _ = service.Store.UpdateTaskStatus(ctx, sqlite.UpdateTaskStatusParams{
-			TaskID: task.ID,
-			Status: "failed",
-		})
-		failedTask, loadErr := service.Store.GetTask(ctx, task.ID)
-		if loadErr == nil {
-			return ExecutionOutcome{Task: failedTask}, err
-		}
 		return ExecutionOutcome{}, err
+	}
+	admission, err := service.admitTask(ctx, task, project, manifest, decision.ExecutorKey)
+	if err != nil {
+		return ExecutionOutcome{}, err
+	}
+	if admission.Outcome != admissionDispatchable {
+		if err := service.applyAdmissionDecision(ctx, task, admission); err != nil {
+			return ExecutionOutcome{}, err
+		}
+		updatedTask, loadErr := service.Store.GetTask(ctx, task.ID)
+		if loadErr != nil {
+			return ExecutionOutcome{}, loadErr
+		}
+		return ExecutionOutcome{Task: updatedTask}, nil
 	}
 
 	attempt, err := service.nextRunAttempt(ctx, task.ID)
 	if err != nil {
 		return ExecutionOutcome{}, err
 	}
-
-	run, err := service.Store.StartRun(ctx, sqlite.StartRunParams{
-		TaskID:   task.ID,
-		Executor: decision.ExecutorKey,
-		Attempt:  attempt,
-		Status:   "running",
-	})
+	run, err := service.prepareRun(ctx, task, decision.ExecutorKey, attempt)
 	if err != nil {
 		return ExecutionOutcome{}, err
 	}
 
-	if _, err := service.Store.UpdateTaskStatus(ctx, sqlite.UpdateTaskStatusParams{
-		TaskID: task.ID,
-		Status: "running",
+	assignment, leaseAdmission, err := service.prepareLease(ctx, task, project, manifest, run, attempt)
+	if err != nil {
+		return ExecutionOutcome{}, err
+	}
+	if leaseAdmission.Outcome != admissionDispatchable {
+		if err := service.finalizeOutcome(ctx, task, run, leaseAdmission, contract.ExecutionResult{}, nil); err != nil {
+			return ExecutionOutcome{}, err
+		}
+		return service.executionOutcome(ctx, task.ID, run.ID)
+	}
+
+	if _, run, err = service.Store.UpdateRunAndTaskStatus(ctx, sqlite.UpdateRunAndTaskStatusParams{
+		RunID:      run.ID,
+		RunStatus:  "running",
+		TaskStatus: "running",
 	}); err != nil {
 		return ExecutionOutcome{}, err
 	}
-
-	finishFailure := func(cause error) (ExecutionOutcome, error) {
-		_, finished, finishErr := service.Store.FinishRunIfRunning(ctx, sqlite.FinishRunParams{
-			RunID:   run.ID,
-			Status:  "failed",
-			Summary: cause.Error(),
-		})
-		if finishErr != nil {
-			return ExecutionOutcome{}, finishErr
-		}
-		if !finished {
-			outcome, loadErr := service.executionOutcome(ctx, task.ID, run.ID)
-			if loadErr != nil {
-				return ExecutionOutcome{}, loadErr
-			}
-			return outcome, nil
-		}
-		_, _ = service.Store.UpdateTaskStatus(ctx, sqlite.UpdateTaskStatusParams{
-			TaskID: task.ID,
-			Status: "failed",
-		})
-		outcome, loadErr := service.executionOutcome(ctx, task.ID, run.ID)
-		if loadErr == nil {
-			if persistErr := service.recordExecutionMemory(ctx, project, outcome.Task, outcome.Run, prompt, request.Metadata); persistErr != nil {
-				return outcome, persistErr
-			}
-			return outcome, cause
-		}
-		failedRun := run
-		failedRun.Status = "failed"
-		failedRun.Summary = cause.Error()
-		return ExecutionOutcome{
-			Task: sqlite.Task{
-				ID:        task.ID,
-				ProjectID: task.ProjectID,
-				Key:       task.Key,
-				Title:     task.Title,
-				Status:    "failed",
-				Scope:     task.Scope,
-			},
-			Run: &failedRun,
-		}, cause
-	}
-
-	assignment := leases.Assignment{
-		Mode:         "read_only",
-		RepoRoot:     project.GitRoot,
-		WorktreePath: project.GitRoot,
-	}
-
-	if err := authorizeMutation(manifest); err != nil {
-		return finishFailure(err)
-	}
-	if _, err := service.Transitions.AuthorizeAction(ctx, projects.ActionInput{
-		ProjectID:   project.ID,
-		Actor:       projects.TransitionControllerOdinOS,
-		ActionClass: projects.ActionClassIsolatedMutation,
-		ActionKey:   "run_task",
-	}); err != nil {
-		return finishFailure(err)
-	}
-
-	leaseManager := service.Leases
-	if leaseManager.Store == nil {
-		leaseManager.Store = service.Store
-	}
-	assignment, err = leaseManager.Prepare(ctx, leases.Request{
-		Mutating:      true,
-		ProjectID:     project.ID,
-		ProjectKey:    project.Key,
-		TaskID:        task.ID,
-		RunID:         run.ID,
-		RepoRoot:      project.GitRoot,
-		DefaultBranch: project.DefaultBranch,
-		Try:           attempt,
-	})
-	if err != nil {
-		return finishFailure(err)
-	}
-	if err := validateAssignment(manifest, project, assignment); err != nil {
-		return finishFailure(err)
-	}
-	defer releaseAssignment(ctx, service.Store, assignment)
 
 	spec.Metadata["branch_name"] = assignment.BranchName
 	spec.Metadata["repo_root"] = assignment.RepoRoot
 	spec.Metadata["worktree_path"] = assignment.WorktreePath
 
 	executor := executors[decision.ExecutorKey]
-	result, err := executor.RunTask(ctx, spec)
-	if err != nil {
-		return finishFailure(err)
-	}
-
-	runStatus := result.Status
-	if runStatus == "" {
-		runStatus = "completed"
-	}
-	taskStatus := "completed"
-	if runStatus != "completed" {
-		taskStatus = "failed"
-	}
-
-	if _, finished, err := service.Store.FinishRunIfRunning(ctx, sqlite.FinishRunParams{
-		RunID:   run.ID,
-		Status:  runStatus,
-		Summary: result.Output,
-	}); err != nil {
-		return ExecutionOutcome{}, err
-	} else if !finished {
-		return service.executionOutcome(ctx, task.ID, run.ID)
-	}
-	if _, err := service.Store.UpdateTaskStatus(ctx, sqlite.UpdateTaskStatusParams{
-		TaskID: task.ID,
-		Status: taskStatus,
-	}); err != nil {
+	result, execErr := executor.RunTask(ctx, spec)
+	if err := service.finalizeOutcome(ctx, task, run, admissionDecision{}, result, execErr); err != nil {
 		return ExecutionOutcome{}, err
 	}
-
 	outcome, err := service.executionOutcome(ctx, task.ID, run.ID)
 	if err != nil {
 		return ExecutionOutcome{}, err
@@ -409,6 +499,34 @@ func (service Service) executeTask(ctx context.Context, taskID int64, request Ex
 		return ExecutionOutcome{}, err
 	}
 	return outcome, nil
+}
+
+func (service Service) now() time.Time {
+	if service.Now != nil {
+		return service.Now().UTC()
+	}
+	return time.Now().UTC()
+}
+
+func (service Service) dispatchAllowed() bool {
+	return service.ShutdownRequested == nil || !service.ShutdownRequested.Load()
+}
+
+func (service Service) interruptDispatch(ctx context.Context, runID int64) error {
+	if service.Store == nil {
+		return nil
+	}
+	task, run, err := service.Store.InterruptRunAndRequeueTask(ctx, sqlite.InterruptRunAndRequeueTaskParams{
+		RunID:   runID,
+		Summary: "dispatch canceled: shutdown requested",
+	})
+	if err != nil {
+		return err
+	}
+	if err := service.compactInterruptedRun(ctx, task, run); err != nil {
+		return service.requeueAfterCheckpointFailure(ctx, task, time.Time{}, "dispatch handoff packet", err)
+	}
+	return nil
 }
 
 func (service Service) ensureRuntimeProject(ctx context.Context, manifest projects.Manifest) (sqlite.Project, error) {
@@ -434,6 +552,21 @@ func (service Service) ensureRuntimeProject(ctx context.Context, manifest projec
 		GitHubRepo:    manifest.GitHub.Repo,
 		ManifestPath:  manifest.SourcePath,
 	})
+}
+
+func (service Service) initiativeOwnerCompanionID(ctx context.Context, workspaceID int64, initiativeKey string, defaultCompanionID int64) (*int64, error) {
+	initiative, err := service.Store.GetInitiativeByKey(ctx, workspaceID, initiativeKey)
+	switch {
+	case err == nil:
+		if initiative.OwnerCompanionID != nil {
+			return initiative.OwnerCompanionID, nil
+		}
+	case err == sql.ErrNoRows:
+	default:
+		return nil, err
+	}
+
+	return &defaultCompanionID, nil
 }
 
 func (service Service) taskOwnerForScope(resolved scope.Resolution) (projects.Manifest, string, error) {
@@ -468,46 +601,15 @@ func matchesTaskScope(projectKey, taskScope string, resolved scope.Resolution) b
 	}
 }
 
-func (service Service) taskViewByKey(ctx context.Context, resolved scope.Resolution, taskKey string) (projections.TaskStatusView, error) {
-	views, err := service.List(ctx, resolved)
-	if err != nil {
-		return projections.TaskStatusView{}, err
-	}
-	for _, view := range views {
-		if view.TaskKey == taskKey {
-			return view, nil
-		}
-	}
-	return projections.TaskStatusView{}, sql.ErrNoRows
-}
-
 func (service Service) nextQueuedTask(ctx context.Context) (sqlite.Task, error) {
-	row := service.Store.DB().QueryRowContext(ctx, `
-		SELECT id
-		FROM tasks
-		WHERE status = 'queued'
-		ORDER BY id ASC
-		LIMIT 1
-	`)
-
-	var taskID int64
-	if err := row.Scan(&taskID); err != nil {
+	tasks, err := service.Store.ListEligibleQueuedTasks(ctx, service.now())
+	if err != nil {
 		return sqlite.Task{}, err
 	}
-	return service.Store.GetTask(ctx, taskID)
-}
-
-func (service Service) nextRunAttempt(ctx context.Context, taskID int64) (int, error) {
-	row := service.Store.DB().QueryRowContext(ctx, `
-		SELECT COALESCE(MAX(attempt), 0) + 1
-		FROM runs
-		WHERE task_id = ?
-	`, taskID)
-	var attempt int
-	if err := row.Scan(&attempt); err != nil {
-		return 0, err
+	if len(tasks) == 0 {
+		return sqlite.Task{}, sql.ErrNoRows
 	}
-	return attempt, nil
+	return tasks[0], nil
 }
 
 func (service Service) executionOutcome(ctx context.Context, taskID int64, runID int64) (ExecutionOutcome, error) {
@@ -619,12 +721,17 @@ func normalizeExecutionMetadata(metadata map[string]string) map[string]string {
 	return normalized
 }
 
-func taskKeyForTitle(title string, now time.Time, attempt int) string {
-	base := fmt.Sprintf("%s-%s-%09d", slugify(title), now.Format("20060102-150405"), now.UTC().Nanosecond())
-	if attempt <= 0 {
-		return base
+func (service Service) nextRunAttempt(ctx context.Context, taskID int64) (int, error) {
+	row := service.Store.DB().QueryRowContext(ctx, `
+		SELECT COALESCE(MAX(attempt), 0) + 1
+		FROM runs
+		WHERE task_id = ?
+	`, taskID)
+	var attempt int
+	if err := row.Scan(&attempt); err != nil {
+		return 0, err
 	}
-	return fmt.Sprintf("%s-r%d", base, attempt)
+	return attempt, nil
 }
 
 func (service Service) executionConfig(ctx context.Context) (executorrouter.Config, error) {
@@ -666,11 +773,654 @@ func normalizeRouteName(targetKey string) string {
 	return targetKey
 }
 
-func authorizeMutation(manifest projects.Manifest) error {
-	if manifest.SystemProject && manifest.Policy.ApprovalGates.RequireForSystemProjectChanges != nil && *manifest.Policy.ApprovalGates.RequireForSystemProjectChanges {
-		return fmt.Errorf("system project %q requires explicit approval for mutations", manifest.Key)
+func (service Service) defaultDelegationExecutor(preferred string) string {
+	preferred = strings.TrimSpace(preferred)
+	if preferred != "" {
+		return preferred
+	}
+	if _, ok := service.Executors["codex_headless"]; ok {
+		return "codex_headless"
+	}
+	if len(service.ExecutorConfig.Executors) > 0 {
+		for _, executor := range service.ExecutorConfig.Executors {
+			if strings.TrimSpace(executor.Key) != "" {
+				return executor.Key
+			}
+		}
+	}
+	return "codex_headless"
+}
+
+func intersectAllowedTools(rawPolicy string, requested []string) ([]string, error) {
+	type toolPolicy struct {
+		Allow []string `json:"allow"`
+	}
+
+	policy := toolPolicy{}
+	trimmed := strings.TrimSpace(rawPolicy)
+	if trimmed != "" && trimmed != "{}" {
+		if err := json.Unmarshal([]byte(trimmed), &policy); err != nil {
+			return nil, fmt.Errorf("invalid companion tool policy JSON: %w", err)
+		}
+	}
+
+	allowed := uniqueStrings(policy.Allow)
+	if len(requested) == 0 {
+		return allowed, nil
+	}
+	if len(allowed) == 0 {
+		return uniqueStrings(requested), nil
+	}
+
+	allowedSet := make(map[string]struct{}, len(allowed))
+	for _, tool := range allowed {
+		allowedSet[tool] = struct{}{}
+	}
+
+	filtered := make([]string, 0, len(requested))
+	seen := make(map[string]struct{}, len(requested))
+	for _, tool := range requested {
+		tool = strings.TrimSpace(tool)
+		if tool == "" {
+			continue
+		}
+		if _, ok := allowedSet[tool]; !ok {
+			continue
+		}
+		if _, ok := seen[tool]; ok {
+			continue
+		}
+		seen[tool] = struct{}{}
+		filtered = append(filtered, tool)
+	}
+	return filtered, nil
+}
+
+func delegationMemoryMode(rawPolicy string) (string, error) {
+	type memoryPolicy struct {
+		Mode string `json:"mode"`
+	}
+
+	policy := memoryPolicy{Mode: "companion"}
+	trimmed := strings.TrimSpace(rawPolicy)
+	if trimmed == "" || trimmed == "{}" {
+		return policy.Mode, nil
+	}
+	if err := json.Unmarshal([]byte(trimmed), &policy); err != nil {
+		return "", fmt.Errorf("invalid companion memory policy JSON: %w", err)
+	}
+	policy.Mode = strings.TrimSpace(policy.Mode)
+	if policy.Mode == "" {
+		policy.Mode = "companion"
+	}
+	return policy.Mode, nil
+}
+
+func intersectMemoryScopes(parentTask sqlite.Task, parentRunID *int64, requested []string) []string {
+	available := availableMemoryScopes(parentTask, parentRunID)
+	if len(requested) == 0 {
+		return available
+	}
+
+	availableSet := make(map[string]struct{}, len(available))
+	for _, scope := range available {
+		availableSet[scope] = struct{}{}
+	}
+
+	filtered := make([]string, 0, len(requested))
+	seen := make(map[string]struct{}, len(requested))
+	for _, scope := range requested {
+		scope = strings.TrimSpace(scope)
+		if scope == "" {
+			continue
+		}
+		if _, ok := availableSet[scope]; !ok {
+			continue
+		}
+		if _, ok := seen[scope]; ok {
+			continue
+		}
+		seen[scope] = struct{}{}
+		filtered = append(filtered, scope)
+	}
+	return filtered
+}
+
+func availableMemoryScopes(parentTask sqlite.Task, parentRunID *int64) []string {
+	scopes := make([]string, 0, 4)
+	if parentTask.WorkspaceID != nil {
+		scopes = append(scopes, "workspace")
+	}
+	if parentTask.InitiativeID != nil {
+		scopes = append(scopes, "initiative")
+	}
+	if parentTask.CompanionID != nil {
+		scopes = append(scopes, "companion")
+	}
+	if parentRunID != nil {
+		scopes = append(scopes, "run")
+	}
+	return scopes
+}
+
+func uniqueStrings(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	filtered := make([]string, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		filtered = append(filtered, value)
+	}
+	return filtered
+}
+
+func pointerIfScope(scopes []string, required string, value *int64) *int64 {
+	if value == nil {
+		return nil
+	}
+	for _, scope := range scopes {
+		if scope != required {
+			continue
+		}
+		copied := *value
+		return &copied
 	}
 	return nil
+}
+
+func (service Service) admitTask(ctx context.Context, task sqlite.Task, project sqlite.Project, manifest projects.Manifest, executorKey string) (admissionDecision, error) {
+	if requiresExplicitApproval(manifest) {
+		approval, err := service.latestTaskApproval(ctx, task.ID)
+		if err != nil {
+			return admissionDecision{}, err
+		}
+		switch approval.Status {
+		case "approved":
+		case "pending":
+			return admissionDecision{Outcome: admissionBlocked, BlockedReason: "approval_required"}, nil
+		case "":
+			if _, err := service.Store.RequestApproval(ctx, sqlite.RequestApprovalParams{
+				TaskID:      task.ID,
+				Status:      "pending",
+				RequestedBy: "system",
+			}); err != nil {
+				return admissionDecision{}, err
+			}
+			return admissionDecision{Outcome: admissionBlocked, BlockedReason: "approval_required"}, nil
+		default:
+			return admissionDecision{
+				Outcome:   admissionFailed,
+				LastError: fmt.Sprintf("approval for task %d is %s", task.ID, approval.Status),
+			}, nil
+		}
+	}
+
+	executorCheck, _, err := healthsvc.Service{
+		DB:     service.Store.DB(),
+		Config: healthsvc.DefaultConfig(),
+		Now:    service.now,
+	}.ExecutorStatus(ctx, executorKey)
+	if err != nil {
+		return admissionDecision{}, err
+	}
+	if executorCheck.Status != healthsvc.StatusHealthy {
+		return admissionDecision{
+			Outcome:       admissionBlocked,
+			BlockedReason: "executor_unavailable",
+			LastError:     executorCheck.Summary,
+		}, nil
+	}
+
+	if _, err := service.Transitions.AuthorizeAction(ctx, projects.ActionInput{
+		ProjectID:   project.ID,
+		Actor:       projects.TransitionControllerOdinOS,
+		ActionClass: projects.ActionClassIsolatedMutation,
+		ActionKey:   "run_task",
+	}); err != nil {
+		return admissionDecision{
+			Outcome:   admissionFailed,
+			LastError: fmt.Sprintf("transition_denied: %v", err),
+		}, nil
+	}
+
+	return admissionDecision{Outcome: admissionDispatchable}, nil
+}
+
+func (service Service) prepareRun(ctx context.Context, task sqlite.Task, executorKey string, attempt int) (sqlite.Run, error) {
+	run, err := service.Store.StartRun(ctx, sqlite.StartRunParams{
+		TaskID:     task.ID,
+		Executor:   executorKey,
+		Attempt:    attempt,
+		Status:     "preparing",
+		TaskStatus: "preparing",
+	})
+	if err != nil {
+		return sqlite.Run{}, err
+	}
+	return run, nil
+}
+
+func (service Service) prepareLease(ctx context.Context, task sqlite.Task, project sqlite.Project, manifest projects.Manifest, run sqlite.Run, attempt int) (leases.Assignment, admissionDecision, error) {
+	assignment := leases.Assignment{
+		Mode:         "read_only",
+		RepoRoot:     project.GitRoot,
+		WorktreePath: project.GitRoot,
+	}
+
+	leaseManager := service.Leases
+	if leaseManager.Store == nil {
+		leaseManager.Store = service.Store
+	}
+	assignment, err := leaseManager.Prepare(ctx, leases.Request{
+		Mutating:      true,
+		ProjectID:     project.ID,
+		ProjectKey:    project.Key,
+		TaskID:        task.ID,
+		RunID:         run.ID,
+		RepoRoot:      project.GitRoot,
+		DefaultBranch: project.DefaultBranch,
+		Try:           attempt,
+	})
+	if err != nil {
+		if errors.Is(err, sqlite.ErrWorktreeLeaseConflict) {
+			return leases.Assignment{}, admissionDecision{
+				Outcome:        admissionRetryLater,
+				LastError:      err.Error(),
+				NextEligibleAt: service.now().Add(time.Second),
+			}, nil
+		}
+		return leases.Assignment{}, admissionDecision{}, err
+	}
+	if err := validateAssignment(manifest, project, assignment); err != nil {
+		return leases.Assignment{}, admissionDecision{
+			Outcome:   admissionFailed,
+			LastError: fmt.Sprintf("policy_denied: %v", err),
+		}, nil
+	}
+	return assignment, admissionDecision{Outcome: admissionDispatchable}, nil
+}
+
+func (service Service) finalizeOutcome(ctx context.Context, task sqlite.Task, run sqlite.Run, admission admissionDecision, result contract.ExecutionResult, execErr error) error {
+	if admission.Outcome != "" && admission.Outcome != admissionDispatchable {
+		switch admission.Outcome {
+		case admissionFailed:
+			updatedTask, updatedRun, err := service.Store.FinishRunAndSetTaskStatus(ctx, sqlite.FinishRunAndSetTaskStatusParams{
+				RunID:      run.ID,
+				RunStatus:  "failed",
+				Summary:    admission.LastError,
+				TaskStatus: "failed",
+			})
+			if err != nil {
+				return err
+			}
+			if err := service.compactFailedDispatch(ctx, updatedTask, updatedRun, admission.LastError); err != nil {
+				return service.requeueAfterCheckpointFailure(
+					ctx,
+					updatedTask,
+					service.now().Add(checkpointRecoveryDelay),
+					fmt.Sprintf("dispatch preparation failed: %s", admission.LastError),
+					err,
+				)
+			}
+			return nil
+		case admissionRetryLater:
+			_, _, err := service.Store.FailRunAndRetryTask(ctx, sqlite.FailRunAndRetryTaskParams{
+				RunID:          run.ID,
+				Summary:        admission.LastError,
+				LastError:      admission.LastError,
+				NextEligibleAt: admission.NextEligibleAt,
+			})
+			return err
+		default:
+			return fmt.Errorf("unsupported admission outcome %q", admission.Outcome)
+		}
+	}
+
+	if execErr != nil {
+		if isTransientFailure(execErr) {
+			if task.RetryCount+1 >= task.MaxAttempts {
+				_, _, err := service.Store.FinishRunAndSetTaskStatus(ctx, sqlite.FinishRunAndSetTaskStatusParams{
+					RunID:      run.ID,
+					RunStatus:  "failed",
+					Summary:    execErr.Error(),
+					TaskStatus: "failed",
+				})
+				if err != nil {
+					return err
+				}
+				return execErr
+			}
+			nextRetryCount := task.RetryCount + 1
+			nextEligibleAt := service.now().Add(retryDelay(nextRetryCount))
+			_, _, err := service.Store.FailRunAndRetryTask(ctx, sqlite.FailRunAndRetryTaskParams{
+				RunID:          run.ID,
+				Summary:        execErr.Error(),
+				LastError:      execErr.Error(),
+				NextEligibleAt: nextEligibleAt,
+			})
+			return err
+		}
+
+		_, _, err := service.Store.FinishRunAndSetTaskStatus(ctx, sqlite.FinishRunAndSetTaskStatusParams{
+			RunID:      run.ID,
+			RunStatus:  "failed",
+			Summary:    execErr.Error(),
+			TaskStatus: "failed",
+		})
+		if err != nil {
+			return err
+		}
+		return execErr
+	}
+
+	runStatus := result.Status
+	if runStatus == "" {
+		runStatus = "completed"
+	}
+	taskStatus := "completed"
+	if runStatus != "completed" {
+		taskStatus = "failed"
+	}
+
+	_, _, err := service.Store.FinishRunAndSetTaskStatus(ctx, sqlite.FinishRunAndSetTaskStatusParams{
+		RunID:      run.ID,
+		RunStatus:  runStatus,
+		Summary:    result.Output,
+		TaskStatus: taskStatus,
+	})
+	return err
+}
+
+func (service Service) applyAdmissionDecision(ctx context.Context, task sqlite.Task, decision admissionDecision) error {
+	switch decision.Outcome {
+	case admissionBlocked:
+		blockedTask, err := service.Store.BlockTask(ctx, sqlite.BlockTaskParams{
+			TaskID: task.ID,
+			Reason: decision.BlockedReason,
+		})
+		if err != nil {
+			return err
+		}
+		if err := service.compactBlockedTask(ctx, blockedTask, decision); err != nil {
+			return service.requeueAfterCheckpointFailure(
+				ctx,
+				blockedTask,
+				service.now().Add(checkpointRecoveryDelay),
+				fmt.Sprintf("blocked task (%s)", decision.BlockedReason),
+				err,
+			)
+		}
+		return nil
+	case admissionFailed:
+		_, err := service.Store.UpdateTaskQueueState(ctx, sqlite.UpdateTaskQueueStateParams{
+			TaskID:         task.ID,
+			Status:         "failed",
+			NextEligibleAt: time.Time{},
+			Priority:       task.Priority,
+			LastError:      decision.LastError,
+			RetryCount:     task.RetryCount,
+			MaxAttempts:    task.MaxAttempts,
+			BlockedReason:  "",
+		})
+		return err
+	case admissionRetryLater:
+		_, err := service.Store.UpdateTaskQueueState(ctx, sqlite.UpdateTaskQueueStateParams{
+			TaskID:         task.ID,
+			Status:         "queued",
+			NextEligibleAt: decision.NextEligibleAt,
+			Priority:       task.Priority,
+			LastError:      decision.LastError,
+			RetryCount:     task.RetryCount,
+			MaxAttempts:    task.MaxAttempts,
+			BlockedReason:  "",
+		})
+		return err
+	case admissionDispatchable:
+		return nil
+	default:
+		return fmt.Errorf("unsupported admission outcome %q", decision.Outcome)
+	}
+}
+
+func (service Service) compactBlockedTask(ctx context.Context, task sqlite.Task, decision admissionDecision) error {
+	if service.Store == nil {
+		return nil
+	}
+
+	project, err := service.Store.GetProject(ctx, task.ProjectID)
+	if err != nil {
+		return err
+	}
+
+	approvalSummary := "none"
+	if decision.BlockedReason == "approval_required" {
+		approval, err := service.latestTaskApproval(ctx, task.ID)
+		if err != nil {
+			return err
+		}
+		if approval.Status != "" {
+			approvalSummary = fmt.Sprintf("approval %s", approval.Status)
+		}
+	}
+
+	_, err = service.compactCheckpoint(ctx, checkpoints.CompactParams{
+		TaskID:               task.ID,
+		Trigger:              blockedCheckpointTrigger(decision.BlockedReason),
+		CheckpointKey:        fmt.Sprintf("task-%d-%s-%d", task.ID, decision.BlockedReason, service.now().UnixNano()),
+		Objective:            task.Title,
+		TaskStatus:           task.Status,
+		BlockingReason:       decision.BlockedReason,
+		NextSteps:            blockedNextSteps(decision.BlockedReason),
+		Constraints:          blockedConstraints(decision.BlockedReason),
+		SelectedCapabilities: blockedCapabilities(decision.BlockedReason),
+		Evidence:             blockedEvidence(decision),
+		ManifestSummary:      service.manifestSummary(project),
+		PolicySummary:        service.policySummary(project),
+		OpenTaskSummary:      fmt.Sprintf("task %s is blocked", task.Key),
+		ApprovalSummary:      approvalSummary,
+	})
+	return err
+}
+
+func (service Service) compactInterruptedRun(ctx context.Context, task sqlite.Task, run sqlite.Run) error {
+	if service.Store == nil {
+		return nil
+	}
+
+	project, err := service.Store.GetProject(ctx, task.ProjectID)
+	if err != nil {
+		return err
+	}
+
+	_, err = service.compactCheckpoint(ctx, checkpoints.CompactParams{
+		TaskID:            task.ID,
+		RunID:             &run.ID,
+		Trigger:           checkpoints.TriggerHandoff,
+		CheckpointKey:     fmt.Sprintf("run-%d-interrupted-%d", run.ID, service.now().UnixNano()),
+		Objective:         task.Title,
+		TaskStatus:        task.Status,
+		BlockingReason:    "shutdown_requested",
+		LastCompletedStep: "dispatch interrupted before completion",
+		NextSteps: []string{
+			"Review the latest handoff packet",
+			"Resume the queued task when the daemon is ready",
+		},
+		Constraints:          []string{"previous run was interrupted by shutdown"},
+		SelectedCapabilities: []string{"handoff_resume"},
+		Evidence: []checkpoints.Evidence{{
+			Kind:    "interrupt",
+			Summary: run.Summary,
+		}},
+		ManifestSummary: service.manifestSummary(project),
+		PolicySummary:   service.policySummary(project),
+		OpenTaskSummary: fmt.Sprintf("task %s was requeued after interruption", task.Key),
+		ApprovalSummary: "none",
+	})
+	return err
+}
+
+func (service Service) compactFailedDispatch(ctx context.Context, task sqlite.Task, run sqlite.Run, summary string) error {
+	if service.Store == nil {
+		return nil
+	}
+
+	project, err := service.Store.GetProject(ctx, task.ProjectID)
+	if err != nil {
+		return err
+	}
+
+	_, err = service.compactCheckpoint(ctx, checkpoints.CompactParams{
+		TaskID:            task.ID,
+		RunID:             &run.ID,
+		Trigger:           checkpoints.TriggerHandoff,
+		CheckpointKey:     fmt.Sprintf("run-%d-failed-dispatch-%d", run.ID, service.now().UnixNano()),
+		Objective:         task.Title,
+		TaskStatus:        task.Status,
+		BlockingReason:    summary,
+		LastCompletedStep: "dispatch failed during preparation",
+		NextSteps: []string{
+			"Review the failed dispatch context",
+			"Fix the policy or configuration issue before retrying the task",
+		},
+		Constraints:          []string{"dispatch failed after partial setup"},
+		SelectedCapabilities: []string{"handoff_resume"},
+		Evidence: []checkpoints.Evidence{{
+			Kind:    "dispatch_failure",
+			Summary: summary,
+		}},
+		ManifestSummary: service.manifestSummary(project),
+		PolicySummary:   service.policySummary(project),
+		OpenTaskSummary: fmt.Sprintf("task %s failed during dispatch preparation", task.Key),
+		ApprovalSummary: "none",
+	})
+	return err
+}
+
+func (service Service) compactCheckpoint(ctx context.Context, params checkpoints.CompactParams) (checkpoints.CompactionResult, error) {
+	if service.CheckpointCompactor != nil {
+		return service.CheckpointCompactor(ctx, params)
+	}
+	return checkpoints.Service{Store: service.Store}.Compact(ctx, params)
+}
+
+func (service Service) requeueAfterCheckpointFailure(ctx context.Context, task sqlite.Task, nextEligibleAt time.Time, summary string, compactErr error) error {
+	if service.Store == nil {
+		return compactErr
+	}
+
+	lastError := fmt.Sprintf("%s unavailable: %v", summary, compactErr)
+	_, err := service.Store.UpdateTaskQueueState(ctx, sqlite.UpdateTaskQueueStateParams{
+		TaskID:         task.ID,
+		Status:         "queued",
+		NextEligibleAt: nextEligibleAt,
+		Priority:       task.Priority,
+		LastError:      lastError,
+		RetryCount:     task.RetryCount,
+		MaxAttempts:    task.MaxAttempts,
+		BlockedReason:  "",
+	})
+	if err != nil {
+		return errors.Join(compactErr, err)
+	}
+	return compactErr
+}
+
+func (service Service) manifestSummary(project sqlite.Project) string {
+	if manifest, ok := service.Registry.Lookup(project.Key); ok {
+		if manifest.SystemProject {
+			return "managed system project"
+		}
+		return "managed project"
+	}
+	return fmt.Sprintf("%s project %s", project.Scope, project.Key)
+}
+
+func (service Service) policySummary(project sqlite.Project) string {
+	if manifest, ok := service.Registry.Lookup(project.Key); ok {
+		if manifest.SystemProject {
+			return "system project approval and branch rules apply"
+		}
+		return "project branch rules apply"
+	}
+	return "runtime-managed execution"
+}
+
+func blockedCheckpointTrigger(reason string) checkpoints.Trigger {
+	switch reason {
+	case "approval_required":
+		return checkpoints.TriggerApprovalWait
+	default:
+		return checkpoints.TriggerIdlePause
+	}
+}
+
+func blockedNextSteps(reason string) []string {
+	switch reason {
+	case "approval_required":
+		return []string{
+			"Review the pending approval request",
+			"Resume the queued task once approval is granted",
+		}
+	default:
+		return []string{
+			"Inspect executor health and restore availability",
+			"Resume the blocked task once a healthy executor is available",
+		}
+	}
+}
+
+func blockedConstraints(reason string) []string {
+	switch reason {
+	case "approval_required":
+		return []string{"task cannot continue without explicit approval"}
+	default:
+		return []string{"task is blocked until executor health recovers"}
+	}
+}
+
+func blockedCapabilities(reason string) []string {
+	switch reason {
+	case "approval_required":
+		return []string{"approval_resume"}
+	default:
+		return []string{"executor_recovery"}
+	}
+}
+
+func blockedEvidence(decision admissionDecision) []checkpoints.Evidence {
+	if decision.LastError == "" {
+		return nil
+	}
+	return []checkpoints.Evidence{{
+		Kind:    "health",
+		Summary: decision.LastError,
+	}}
+}
+
+func (service Service) latestTaskApproval(ctx context.Context, taskID int64) (sqlite.Approval, error) {
+	approval, err := service.Store.GetLatestTaskApproval(ctx, taskID)
+	if err == nil {
+		return approval, nil
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		return sqlite.Approval{}, nil
+	}
+	return sqlite.Approval{}, err
+}
+
+func requiresExplicitApproval(manifest projects.Manifest) bool {
+	return manifest.SystemProject &&
+		manifest.Policy.ApprovalGates.RequireForSystemProjectChanges != nil &&
+		*manifest.Policy.ApprovalGates.RequireForSystemProjectChanges
 }
 
 func validateAssignment(manifest projects.Manifest, project sqlite.Project, assignment leases.Assignment) error {
@@ -686,14 +1436,41 @@ func validateAssignment(manifest projects.Manifest, project sqlite.Project, assi
 	return nil
 }
 
-func releaseAssignment(ctx context.Context, store *sqlite.Store, assignment leases.Assignment) {
-	if assignment.LeaseID == nil {
-		return
+func retryDelay(retryCount int) time.Duration {
+	if retryCount <= 1 {
+		return time.Second
 	}
-	_, _ = store.ReleaseWorktreeLease(ctx, sqlite.ReleaseWorktreeLeaseParams{
-		LeaseID: *assignment.LeaseID,
-		State:   "released",
-	})
+
+	delay := time.Second
+	for attempt := 1; attempt < retryCount; attempt++ {
+		if delay >= time.Minute {
+			return time.Minute
+		}
+		delay *= 2
+	}
+	if delay > time.Minute {
+		return time.Minute
+	}
+	return delay
+}
+
+func isTransientFailure(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) || os.IsTimeout(err) {
+		return true
+	}
+
+	var netErr net.Error
+	if errors.As(err, &netErr) && (netErr.Timeout() || netErr.Temporary()) {
+		return true
+	}
+
+	return false
 }
 
 func slugify(input string) string {

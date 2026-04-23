@@ -1,0 +1,122 @@
+package events
+
+import (
+	"reflect"
+	"testing"
+)
+
+func TestConversationTranscriptRecordedContract(t *testing.T) {
+	t.Parallel()
+
+	if got := StreamConversation; got != StreamType("conversation_transcript") {
+		t.Fatalf("StreamConversation = %q, want %q", got, StreamType("conversation_transcript"))
+	}
+	if got := EventConversationTranscriptRecorded; got != Type("conversation.transcript_recorded") {
+		t.Fatalf("EventConversationTranscriptRecorded = %q, want %q", got, Type("conversation.transcript_recorded"))
+	}
+
+	taskID := int64(41)
+	runID := int64(99)
+	want := ConversationTranscriptRecordedPayload{
+		Scope:    "project",
+		ScopeKey: "odin-core",
+		Mode:     "chat",
+		Executor: "codex",
+		TaskID:   &taskID,
+		RunID:    &runID,
+	}
+
+	payload, err := EncodePayload(want)
+	if err != nil {
+		t.Fatalf("EncodePayload(ConversationTranscriptRecordedPayload) error = %v", err)
+	}
+	if got := string(payload); got != `{"scope":"project","scope_key":"odin-core","mode":"chat","executor":"codex","task_id":41,"run_id":99}` {
+		t.Fatalf("encoded payload = %s", got)
+	}
+
+	decoded, err := DecodePayload[ConversationTranscriptRecordedPayload](payload)
+	if err != nil {
+		t.Fatalf("DecodePayload(ConversationTranscriptRecordedPayload) error = %v", err)
+	}
+	if !reflect.DeepEqual(decoded, want) {
+		t.Fatalf("decoded payload = %#v, want %#v", decoded, want)
+	}
+}
+
+func TestMemorySummaryRecordedContract(t *testing.T) {
+	t.Parallel()
+
+	if got := StreamMemorySummary; got != StreamType("memory_summary") {
+		t.Fatalf("StreamMemorySummary = %q, want %q", got, StreamType("memory_summary"))
+	}
+	if got := EventMemorySummaryRecorded; got != Type("memory.summary_recorded") {
+		t.Fatalf("EventMemorySummaryRecorded = %q, want %q", got, Type("memory.summary_recorded"))
+	}
+
+	sourceTranscriptID := int64(12)
+	taskID := int64(41)
+	runID := int64(99)
+	want := MemorySummaryRecordedPayload{
+		Scope:              "project",
+		ScopeKey:           "odin-core",
+		MemoryType:         "decision",
+		SourceTranscriptID: &sourceTranscriptID,
+		TaskID:             &taskID,
+		RunID:              &runID,
+	}
+
+	payload, err := EncodePayload(want)
+	if err != nil {
+		t.Fatalf("EncodePayload(MemorySummaryRecordedPayload) error = %v", err)
+	}
+	if got := string(payload); got != `{"scope":"project","scope_key":"odin-core","memory_type":"decision","source_transcript_id":12,"task_id":41,"run_id":99}` {
+		t.Fatalf("encoded payload = %s", got)
+	}
+
+	decoded, err := DecodePayload[MemorySummaryRecordedPayload](payload)
+	if err != nil {
+		t.Fatalf("DecodePayload(MemorySummaryRecordedPayload) error = %v", err)
+	}
+	if !reflect.DeepEqual(decoded, want) {
+		t.Fatalf("decoded payload = %#v, want %#v", decoded, want)
+	}
+}
+
+func TestMemorySummaryUpdatedContract(t *testing.T) {
+	t.Parallel()
+
+	if got := StreamMemorySummary; got != StreamType("memory_summary") {
+		t.Fatalf("StreamMemorySummary = %q, want %q", got, StreamType("memory_summary"))
+	}
+	if got := EventMemorySummaryUpdated; got != Type("memory.summary_updated") {
+		t.Fatalf("EventMemorySummaryUpdated = %q, want %q", got, Type("memory.summary_updated"))
+	}
+
+	sourceTranscriptID := int64(12)
+	taskID := int64(41)
+	runID := int64(99)
+	want := MemorySummaryUpdatedPayload{
+		Scope:              "project",
+		ScopeKey:           "odin-core",
+		MemoryType:         "decision",
+		SourceTranscriptID: &sourceTranscriptID,
+		TaskID:             &taskID,
+		RunID:              &runID,
+	}
+
+	payload, err := EncodePayload(want)
+	if err != nil {
+		t.Fatalf("EncodePayload(MemorySummaryUpdatedPayload) error = %v", err)
+	}
+	if got := string(payload); got != `{"scope":"project","scope_key":"odin-core","memory_type":"decision","source_transcript_id":12,"task_id":41,"run_id":99}` {
+		t.Fatalf("encoded payload = %s", got)
+	}
+
+	decoded, err := DecodePayload[MemorySummaryUpdatedPayload](payload)
+	if err != nil {
+		t.Fatalf("DecodePayload(MemorySummaryUpdatedPayload) error = %v", err)
+	}
+	if !reflect.DeepEqual(decoded, want) {
+		t.Fatalf("decoded payload = %#v, want %#v", decoded, want)
+	}
+}

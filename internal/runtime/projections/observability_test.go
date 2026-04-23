@@ -6,9 +6,47 @@ import (
 	"path/filepath"
 	"testing"
 
+	runtimeevents "odin-os/internal/runtime/events"
 	"odin-os/internal/runtime/projections"
 	"odin-os/internal/store/sqlite"
 )
+
+func TestObservabilityProjectionRoundTripsCapabilitySnapshotEvents(t *testing.T) {
+	published := runtimeevents.CapabilitySnapshotPublishedPayload{
+		PreviousDigest:  "digest-a",
+		Digest:          "digest-b",
+		CapabilityCount: 2,
+	}
+	publishedPayload, err := runtimeevents.EncodePayload(published)
+	if err != nil {
+		t.Fatalf("EncodePayload(CapabilitySnapshotPublishedPayload) error = %v", err)
+	}
+	decodedPublished, err := runtimeevents.DecodePayload[runtimeevents.CapabilitySnapshotPublishedPayload](publishedPayload)
+	if err != nil {
+		t.Fatalf("DecodePayload(CapabilitySnapshotPublishedPayload) error = %v", err)
+	}
+	if decodedPublished != published {
+		t.Fatalf("published payload round-trip = %+v, want %+v", decodedPublished, published)
+	}
+
+	rejected := runtimeevents.CapabilitySnapshotRejectedPayload{
+		PreviousDigest:  "digest-b",
+		Digest:          "digest-c",
+		CapabilityCount: 1,
+		Reason:          "capabilities snapshot digest is required",
+	}
+	rejectedPayload, err := runtimeevents.EncodePayload(rejected)
+	if err != nil {
+		t.Fatalf("EncodePayload(CapabilitySnapshotRejectedPayload) error = %v", err)
+	}
+	decodedRejected, err := runtimeevents.DecodePayload[runtimeevents.CapabilitySnapshotRejectedPayload](rejectedPayload)
+	if err != nil {
+		t.Fatalf("DecodePayload(CapabilitySnapshotRejectedPayload) error = %v", err)
+	}
+	if decodedRejected != rejected {
+		t.Fatalf("rejected payload round-trip = %+v, want %+v", decodedRejected, rejected)
+	}
+}
 
 func TestObservabilityProjectionsExposeActiveRunsBlockedItemsIncidentsAndRecoveries(t *testing.T) {
 	ctx := context.Background()
@@ -74,8 +112,8 @@ func TestObservabilityProjectionsExposeActiveRunsBlockedItemsIncidentsAndRecover
 	if err != nil {
 		t.Fatalf("ListBlockedItemViews() error = %v", err)
 	}
-	if len(blocked) < 2 {
-		t.Fatalf("blocked items len = %d, want >= 2", len(blocked))
+	if len(blocked) != 1 {
+		t.Fatalf("blocked items len = %d, want 1 after dedupe", len(blocked))
 	}
 
 	approvals, err := projections.ListPendingApprovalViews(ctx, store.DB())
@@ -100,6 +138,54 @@ func TestObservabilityProjectionsExposeActiveRunsBlockedItemsIncidentsAndRecover
 	}
 	if len(recoveries) != 1 || recoveries[0].RunID != run.ID {
 		t.Fatalf("recoveries = %+v, want run %d", recoveries, run.ID)
+	}
+
+	_ = project
+}
+
+func TestObservabilityProjectionsDeduplicateTaskBlockedItems(t *testing.T) {
+	ctx := context.Background()
+	store := openObservabilityStore(t)
+	defer store.Close()
+
+	project, task, run := seedObservabilityState(t, ctx, store)
+
+	if _, err := store.BlockTask(ctx, sqlite.BlockTaskParams{
+		TaskID: task.ID,
+		Reason: "approval_required",
+	}); err != nil {
+		t.Fatalf("BlockTask() error = %v", err)
+	}
+	if _, err := store.CreateContextPacket(ctx, sqlite.CreateContextPacketParams{
+		TaskID:        &task.ID,
+		RunID:         &run.ID,
+		PacketKind:    "wake",
+		PacketScope:   "task_wake_packet",
+		Trigger:       "approval_wait",
+		CheckpointKey: "wake-1",
+		Status:        "active",
+		Summary:       "waiting on approval",
+		PayloadJSON:   `{"blocking_reason":"approval_required"}`,
+	}); err != nil {
+		t.Fatalf("CreateContextPacket() error = %v", err)
+	}
+
+	blocked, err := projections.ListBlockedItemViews(ctx, store.DB())
+	if err != nil {
+		t.Fatalf("ListBlockedItemViews() error = %v", err)
+	}
+
+	var taskEntries int
+	for _, item := range blocked {
+		if item.TaskID == task.ID {
+			taskEntries++
+			if item.Source != "task" {
+				t.Fatalf("blocked item source = %q, want task", item.Source)
+			}
+		}
+	}
+	if taskEntries != 1 {
+		t.Fatalf("task blocked entries = %d, want 1; blocked=%+v", taskEntries, blocked)
 	}
 
 	_ = project
@@ -149,6 +235,186 @@ func TestObservabilityProjectionsExposeFreshnessAndPortfolioViews(t *testing.T) 
 	}
 	if len(portfolio) != 1 || portfolio[0].ProjectKey != project.Key {
 		t.Fatalf("portfolio = %+v, want project %q", portfolio, project.Key)
+	}
+}
+
+func TestProjectPortfolioTreatsAwaitingApprovalAsBlockedNotActive(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openObservabilityStore(t)
+	defer store.Close()
+
+	project, task, run := seedObservabilityState(t, ctx, store)
+	if _, _, _, err := store.AwaitApproval(ctx, sqlite.AwaitApprovalParams{
+		TaskID:         task.ID,
+		RunID:          run.ID,
+		RequestedBy:    "odin_os",
+		Summary:        "awaiting operator approval",
+		TerminalReason: "awaiting operator approval",
+		ArtifactsJSON:  `["runs/artifacts/approval.json"]`,
+	}); err != nil {
+		t.Fatalf("AwaitApproval() error = %v", err)
+	}
+
+	portfolio, err := projections.ListProjectPortfolioViews(ctx, store.DB())
+	if err != nil {
+		t.Fatalf("ListProjectPortfolioViews() error = %v", err)
+	}
+	if len(portfolio) != 1 || portfolio[0].ProjectKey != project.Key {
+		t.Fatalf("portfolio = %+v, want project %q", portfolio, project.Key)
+	}
+	if portfolio[0].ActiveRunCount != 0 {
+		t.Fatalf("active run count = %d, want 0 for awaiting approval", portfolio[0].ActiveRunCount)
+	}
+	if portfolio[0].PendingApprovalCount != 1 {
+		t.Fatalf("pending approval count = %d, want 1", portfolio[0].PendingApprovalCount)
+	}
+
+	activeRuns, err := projections.ListActiveRunViews(ctx, store.DB())
+	if err != nil {
+		t.Fatalf("ListActiveRunViews() error = %v", err)
+	}
+	if len(activeRuns) != 0 {
+		t.Fatalf("active runs = %+v, want 0 for awaiting approval", activeRuns)
+	}
+}
+
+func TestObservabilityProjectionsTreatTimeoutAsTerminal(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openObservabilityStore(t)
+	defer store.Close()
+
+	project, err := store.CreateProject(ctx, sqlite.CreateProjectParams{
+		Key:           "alpha",
+		Name:          "Alpha",
+		Scope:         "project",
+		GitRoot:       "/tmp/alpha",
+		DefaultBranch: "main",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+
+	task, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "alpha-timeout",
+		Title:       "Timed out task",
+		Status:      "running",
+		Scope:       "project",
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+
+	run, err := store.StartRun(ctx, sqlite.StartRunParams{
+		TaskID:   task.ID,
+		Executor: "codex_headless",
+		Attempt:  1,
+		Status:   "running",
+	})
+	if err != nil {
+		t.Fatalf("StartRun() error = %v", err)
+	}
+
+	if _, err := store.FinishRun(ctx, sqlite.FinishRunParams{
+		RunID:   run.ID,
+		Status:  "timeout",
+		Summary: "execution exceeded the invocation deadline",
+	}); err != nil {
+		t.Fatalf("FinishRun(timeout) error = %v", err)
+	}
+	if _, err := store.UpdateTaskStatus(ctx, sqlite.UpdateTaskStatusParams{
+		TaskID: task.ID,
+		Status: "timeout",
+	}); err != nil {
+		t.Fatalf("UpdateTaskStatus(timeout) error = %v", err)
+	}
+
+	portfolio, err := projections.ListProjectPortfolioViews(ctx, store.DB())
+	if err != nil {
+		t.Fatalf("ListProjectPortfolioViews() error = %v", err)
+	}
+	if len(portfolio) != 1 {
+		t.Fatalf("portfolio = %+v, want one project", portfolio)
+	}
+	if portfolio[0].OpenTaskCount != 0 {
+		t.Fatalf("OpenTaskCount = %d, want 0 for timeout task", portfolio[0].OpenTaskCount)
+	}
+	if portfolio[0].ActiveRunCount != 0 {
+		t.Fatalf("ActiveRunCount = %d, want 0 for timeout run", portfolio[0].ActiveRunCount)
+	}
+
+	activeRuns, err := projections.ListActiveRunViews(ctx, store.DB())
+	if err != nil {
+		t.Fatalf("ListActiveRunViews() error = %v", err)
+	}
+	if len(activeRuns) != 0 {
+		t.Fatalf("active runs = %+v, want none for timeout", activeRuns)
+	}
+}
+
+func TestProjectViewsTreatInterruptedDeadLetterRecoveryAsTerminalWork(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openObservabilityStore(t)
+	defer store.Close()
+
+	project, task, run := seedObservabilityState(t, ctx, store)
+
+	if _, err := store.FinishRun(ctx, sqlite.FinishRunParams{
+		RunID:          run.ID,
+		Status:         "interrupted",
+		Summary:        "stalled run retry budget exhausted",
+		TerminalReason: "stalled run retry budget exhausted",
+	}); err != nil {
+		t.Fatalf("FinishRun() error = %v", err)
+	}
+	if _, err := store.UpdateTaskStatus(ctx, sqlite.UpdateTaskStatusParams{
+		TaskID:         task.ID,
+		Status:         "dead_letter",
+		Summary:        "retry budget exhausted",
+		TerminalReason: "retry budget exhausted",
+	}); err != nil {
+		t.Fatalf("UpdateTaskStatus(dead_letter) error = %v", err)
+	}
+
+	transition, err := projections.ListProjectTransitionViews(ctx, store.DB())
+	if err != nil {
+		t.Fatalf("ListProjectTransitionViews() error = %v", err)
+	}
+	if len(transition) != 1 || transition[0].ProjectKey != project.Key {
+		t.Fatalf("transition = %+v, want project %q", transition, project.Key)
+	}
+	if transition[0].OpenTaskCount != 0 {
+		t.Fatalf("transition open task count = %d, want 0 for dead-lettered task", transition[0].OpenTaskCount)
+	}
+
+	portfolio, err := projections.ListProjectPortfolioViews(ctx, store.DB())
+	if err != nil {
+		t.Fatalf("ListProjectPortfolioViews() error = %v", err)
+	}
+	if len(portfolio) != 1 || portfolio[0].ProjectKey != project.Key {
+		t.Fatalf("portfolio = %+v, want project %q", portfolio, project.Key)
+	}
+	if portfolio[0].OpenTaskCount != 0 {
+		t.Fatalf("portfolio open task count = %d, want 0 for dead-lettered task", portfolio[0].OpenTaskCount)
+	}
+	if portfolio[0].ActiveRunCount != 0 {
+		t.Fatalf("portfolio active run count = %d, want 0 for interrupted dead-letter recovery", portfolio[0].ActiveRunCount)
+	}
+
+	activeRuns, err := projections.ListActiveRunViews(ctx, store.DB())
+	if err != nil {
+		t.Fatalf("ListActiveRunViews() error = %v", err)
+	}
+	if len(activeRuns) != 0 {
+		t.Fatalf("active runs = %+v, want 0 for interrupted dead-letter recovery", activeRuns)
 	}
 }
 

@@ -4,6 +4,8 @@ key: marcus-social-analytics-advisor
 title: Analytics and Retrospective Advisor
 summary: Reviews recent social performance and approval patterns to improve Marcus's next content cycle.
 status: active
+version: "1.0.0"
+enabled: true
 tags:
   - social
   - analytics
@@ -17,6 +19,21 @@ applies_to:
   - planning-feedback
 scopes:
   - global
+permissions:
+  - repo.read
+handler_type: command
+handler_ref: scripts/skills/registry-skill-stub.sh
+timeout_seconds: 15
+input_schema:
+  type: object
+  properties:
+    request:
+      type: string
+output_schema:
+  type: object
+  properties:
+    result:
+      type: string
 ---
 
 # Analytics and Retrospective Advisor

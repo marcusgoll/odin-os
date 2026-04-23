@@ -7,20 +7,43 @@ type Command struct {
 	Args []string
 }
 
+type RegistryCommand struct {
+	CapabilityID      string
+	CapabilityVersion string
+}
+
 type Intent string
 
 const (
-	IntentUnknown   Intent = "unknown"
-	IntentHelp      Intent = "help"
-	IntentMode      Intent = "mode"
-	IntentScope     Intent = "scope"
-	IntentProject   Intent = "project"
-	IntentJobs      Intent = "jobs"
-	IntentRuns      Intent = "runs"
-	IntentApprovals Intent = "approvals"
-	IntentLogs      Intent = "logs"
-	IntentDoctor    Intent = "doctor"
+	IntentUnknown     Intent = "unknown"
+	IntentHelp        Intent = "help"
+	IntentMode        Intent = "mode"
+	IntentScope       Intent = "scope"
+	IntentMemory      Intent = "memory"
+	IntentOverview    Intent = "overview"
+	IntentWorkspace   Intent = "workspace"
+	IntentInitiatives Intent = "initiatives"
+	IntentCompanions  Intent = "companions"
+	IntentProject     Intent = "project"
+	IntentJobs        Intent = "jobs"
+	IntentRuns        Intent = "runs"
+	IntentApprovals   Intent = "approvals"
+	IntentLogs        Intent = "logs"
+	IntentDoctor      Intent = "doctor"
 )
+
+// bootstrapRegistryCommands remains a bootstrap-only alias map until commands are
+// discovered directly from the live capability registry.
+var bootstrapRegistryCommands = map[string]RegistryCommand{
+	"status": {
+		CapabilityID:      "project.status",
+		CapabilityVersion: "1.0.0",
+	},
+	"stat": {
+		CapabilityID:      "project.status",
+		CapabilityVersion: "1.0.0",
+	},
+}
 
 func Parse(line string) (Command, bool) {
 	line = strings.TrimSpace(line)
@@ -39,6 +62,14 @@ func Parse(line string) (Command, bool) {
 	}, true
 }
 
+func ResolveRegistryCommand(command Command) (RegistryCommand, bool) {
+	resolved, ok := bootstrapRegistryCommands[command.Name]
+	if !ok {
+		return RegistryCommand{}, false
+	}
+	return resolved, true
+}
+
 func RouteAskIntent(line string) Intent {
 	normalized := strings.ToLower(strings.TrimSpace(line))
 	if normalized == "" {
@@ -53,6 +84,16 @@ func RouteAskIntent(line string) Intent {
 		return IntentMode
 	case hasToken(tokens, "scope") && looksLikeStateQuestion(normalized):
 		return IntentScope
+	case hasToken(tokens, "memory") && (looksLikeStateQuestion(normalized) || looksLikeListing(normalized)):
+		return IntentMemory
+	case strings.Contains(normalized, "overview"):
+		return IntentOverview
+	case strings.Contains(normalized, "workspace"):
+		return IntentWorkspace
+	case strings.Contains(normalized, "initiative"):
+		return IntentInitiatives
+	case strings.Contains(normalized, "companion") || strings.Contains(normalized, "assistant") || strings.Contains(normalized, "advisor"):
+		return IntentCompanions
 	case (hasToken(tokens, "project") || hasToken(tokens, "self")) && looksLikeStateQuestion(normalized):
 		return IntentProject
 	case looksLikeListing(normalized) && hasToken(tokens, "job", "jobs", "task", "tasks"):

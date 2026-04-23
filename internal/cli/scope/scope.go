@@ -1,5 +1,7 @@
 package scope
 
+import corescope "odin-os/internal/core/scope"
+
 type Kind string
 
 const (
@@ -23,6 +25,13 @@ type ResolveInput struct {
 type Resolution struct {
 	Kind       Kind
 	ProjectKey string
+}
+
+func (resolution Resolution) ControlScope() corescope.ControlScope {
+	return corescope.ResolveLegacy(corescope.LegacyScope{
+		Kind:       string(resolution.Kind),
+		ProjectKey: resolution.ProjectKey,
+	})
 }
 
 func Resolve(input ResolveInput) Resolution {

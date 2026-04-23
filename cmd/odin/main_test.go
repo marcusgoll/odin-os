@@ -1,8 +1,12 @@
 package main
 
 import (
+	"bytes"
+	"context"
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -64,5 +68,25 @@ func TestResolveRepoRootPrefersCurrentWorkingDirectoryWhenAlreadyInRepo(t *testi
 	}
 	if got != cwd {
 		t.Fatalf("resolveRepoRoot() = %q, want %q", got, cwd)
+	}
+}
+
+func TestRunReturnsCleanExitOnCanceledLifecycle(t *testing.T) {
+	originalRunLifecycle := runLifecycle
+	runLifecycle = func(context.Context, string, []string, io.Reader, io.Writer) error {
+		return context.Canceled
+	}
+	defer func() {
+		runLifecycle = originalRunLifecycle
+	}()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := run(context.Background(), t.TempDir(), nil, strings.NewReader(""), &stdout, &stderr)
+	if exitCode != 0 {
+		t.Fatalf("run() exit code = %d, want 0", exitCode)
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty for clean cancellation", stderr.String())
 	}
 }

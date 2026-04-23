@@ -2,10 +2,12 @@ package projects
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"path/filepath"
 	"testing"
 
+	"odin-os/internal/core/initiatives"
 	runtimeevents "odin-os/internal/runtime/events"
 	"odin-os/internal/store/sqlite"
 )
@@ -154,6 +156,226 @@ func TestTransitionServiceLimitedActionAllowsOnlyConfiguredLowRiskAction(t *test
 	}
 }
 
+func TestGovernanceAuthorizeExecutionMutationRejectsSystemProjectWithoutExplicitApproval(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openTransitionServiceStore(t)
+	defer store.Close()
+
+	project := createTransitionServiceProject(t, ctx, store, "odin-core")
+	service := Service{Store: store}
+
+	if _, err := service.SetTransitionState(ctx, TransitionStateInput{
+		ProjectID:   project.ID,
+		Actor:       TransitionControllerOdinOS,
+		TargetState: TransitionStateCutover,
+		ChangedBy:   "operator",
+	}); err != nil {
+		t.Fatalf("SetTransitionState(cutover) error = %v", err)
+	}
+
+	manifest := Manifest{
+		Key:           "odin-core",
+		Name:          "Odin Core",
+		SystemProject: true,
+		Policy: Policy{
+			ApprovalGates: ApprovalGates{
+				RequireForSystemProjectChanges: boolPtr(true),
+			},
+		},
+	}
+
+	err := service.AuthorizeExecutionMutation(ctx, ExecutionAuthorizationInput{
+		ProjectID:   project.ID,
+		Manifest:    manifest,
+		Actor:       TransitionControllerOdinOS,
+		ActionClass: ActionClassIsolatedMutation,
+		ActionKey:   "run_task",
+	})
+	if err == nil {
+		t.Fatal("AuthorizeExecutionMutation() error = nil, want system-project rejection")
+	}
+}
+
+func TestProjectServiceRegistersManagedProjectInitiative(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openTransitionServiceStore(t)
+	defer store.Close()
+
+	manifest := Manifest{
+		Key:           "alpha",
+		Name:          "Alpha",
+		ProjectClass:  ProjectClassGitHubBacked,
+		GitRoot:       filepath.Join(t.TempDir(), "alpha"),
+		DefaultBranch: "main",
+		GitHub:        GitHub{Repo: "acme/alpha"},
+		SourcePath:    "config/projects.yaml",
+	}
+
+	project, err := Service{Store: store}.RegisterManagedProject(ctx, manifest)
+	if err != nil {
+		t.Fatalf("RegisterManagedProject() error = %v", err)
+	}
+
+	workspace, err := store.GetWorkspaceByKey(ctx, "default")
+	if err != nil {
+		t.Fatalf("GetWorkspaceByKey(default) error = %v", err)
+	}
+
+	initiative, err := store.GetInitiativeByKey(ctx, workspace.ID, manifest.Key)
+	if err != nil {
+		t.Fatalf("GetInitiativeByKey(alpha) error = %v", err)
+	}
+	if initiative.Kind != string(initiatives.KindManagedProject) {
+		t.Fatalf("initiative.Kind = %q, want %q", initiative.Kind, initiatives.KindManagedProject)
+	}
+	if initiative.LinkedProjectID == nil || *initiative.LinkedProjectID != project.ID {
+		t.Fatalf("initiative.LinkedProjectID = %v, want %d", initiative.LinkedProjectID, project.ID)
+	}
+	if initiative.Title != manifest.Name {
+		t.Fatalf("initiative.Title = %q, want %q", initiative.Title, manifest.Name)
+	}
+}
+
+func TestProjectServiceRegisterManagedProjectReconcilesExistingProjectBeforeInitiativeUpsert(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openTransitionServiceStore(t)
+	defer store.Close()
+
+	existing, err := store.CreateProject(ctx, sqlite.CreateProjectParams{
+		Key:           "alpha",
+		Name:          "Old Alpha",
+		Scope:         "project",
+		GitRoot:       filepath.Join(t.TempDir(), "old-alpha"),
+		DefaultBranch: "develop",
+		GitHubRepo:    "old/acme-alpha",
+		ManifestPath:  "old/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+
+	manifest := Manifest{
+		Key:           "alpha",
+		Name:          "Alpha",
+		ProjectClass:  ProjectClassGitHubBacked,
+		GitRoot:       filepath.Join(t.TempDir(), "alpha"),
+		DefaultBranch: "main",
+		GitHub:        GitHub{Repo: "acme/alpha"},
+		SourcePath:    "config/projects.yaml",
+	}
+
+	project, err := Service{Store: store}.RegisterManagedProject(ctx, manifest)
+	if err != nil {
+		t.Fatalf("RegisterManagedProject() error = %v", err)
+	}
+
+	if project.ID != existing.ID {
+		t.Fatalf("RegisterManagedProject() returned project ID %d, want %d", project.ID, existing.ID)
+	}
+	if project.Name != manifest.Name {
+		t.Fatalf("RegisterManagedProject().Name = %q, want %q", project.Name, manifest.Name)
+	}
+	if project.GitRoot != manifest.GitRoot {
+		t.Fatalf("RegisterManagedProject().GitRoot = %q, want %q", project.GitRoot, manifest.GitRoot)
+	}
+	if project.DefaultBranch != manifest.DefaultBranch {
+		t.Fatalf("RegisterManagedProject().DefaultBranch = %q, want %q", project.DefaultBranch, manifest.DefaultBranch)
+	}
+	if project.GitHubRepo != manifest.GitHub.Repo {
+		t.Fatalf("RegisterManagedProject().GitHubRepo = %q, want %q", project.GitHubRepo, manifest.GitHub.Repo)
+	}
+	if project.ManifestPath != manifest.SourcePath {
+		t.Fatalf("RegisterManagedProject().ManifestPath = %q, want %q", project.ManifestPath, manifest.SourcePath)
+	}
+
+	storedProject, err := store.GetProjectByKey(ctx, manifest.Key)
+	if err != nil {
+		t.Fatalf("GetProjectByKey(alpha) error = %v", err)
+	}
+	if storedProject.Name != manifest.Name {
+		t.Fatalf("stored project Name = %q, want %q", storedProject.Name, manifest.Name)
+	}
+	if storedProject.GitRoot != manifest.GitRoot {
+		t.Fatalf("stored project GitRoot = %q, want %q", storedProject.GitRoot, manifest.GitRoot)
+	}
+	if storedProject.DefaultBranch != manifest.DefaultBranch {
+		t.Fatalf("stored project DefaultBranch = %q, want %q", storedProject.DefaultBranch, manifest.DefaultBranch)
+	}
+	if storedProject.GitHubRepo != manifest.GitHub.Repo {
+		t.Fatalf("stored project GitHubRepo = %q, want %q", storedProject.GitHubRepo, manifest.GitHub.Repo)
+	}
+	if storedProject.ManifestPath != manifest.SourcePath {
+		t.Fatalf("stored project ManifestPath = %q, want %q", storedProject.ManifestPath, manifest.SourcePath)
+	}
+
+	workspace, err := store.GetWorkspaceByKey(ctx, "default")
+	if err != nil {
+		t.Fatalf("GetWorkspaceByKey(default) error = %v", err)
+	}
+
+	initiative, err := store.GetInitiativeByKey(ctx, workspace.ID, manifest.Key)
+	if err != nil {
+		t.Fatalf("GetInitiativeByKey(alpha) error = %v", err)
+	}
+	if initiative.Title != manifest.Name {
+		t.Fatalf("initiative.Title = %q, want %q", initiative.Title, manifest.Name)
+	}
+	if initiative.LinkedProjectID == nil || *initiative.LinkedProjectID != project.ID {
+		t.Fatalf("initiative.LinkedProjectID = %v, want %d", initiative.LinkedProjectID, project.ID)
+	}
+}
+
+func TestProjectServiceRegisterManagedProjectRollsBackProjectOnInitiativeFailure(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openTransitionServiceStore(t)
+	defer store.Close()
+
+	if _, err := store.DB().ExecContext(ctx, `
+		CREATE TRIGGER abort_managed_project_initiatives
+		BEFORE INSERT ON initiatives
+		BEGIN
+			SELECT RAISE(ABORT, 'initiative insert blocked');
+		END;
+	`); err != nil {
+		t.Fatalf("create trigger error = %v", err)
+	}
+
+	manifest := Manifest{
+		Key:           "alpha",
+		Name:          "Alpha",
+		ProjectClass:  ProjectClassGitHubBacked,
+		GitRoot:       filepath.Join(t.TempDir(), "alpha"),
+		DefaultBranch: "main",
+		GitHub:        GitHub{Repo: "acme/alpha"},
+		SourcePath:    "config/projects.yaml",
+	}
+
+	_, err := Service{Store: store}.RegisterManagedProject(ctx, manifest)
+	if err == nil {
+		t.Fatalf("RegisterManagedProject() error = nil, want error")
+	}
+
+	if _, err := store.GetProjectByKey(ctx, manifest.Key); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("GetProjectByKey(alpha) error = %v, want sql.ErrNoRows", err)
+	}
+
+	workspace, err := store.GetWorkspaceByKey(ctx, "default")
+	if err != nil {
+		t.Fatalf("GetWorkspaceByKey(default) error = %v", err)
+	}
+	if _, err := store.GetInitiativeByKey(ctx, workspace.ID, manifest.Key); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("GetInitiativeByKey(alpha) error = %v, want sql.ErrNoRows", err)
+	}
+}
+
 func openTransitionServiceStore(t *testing.T) *sqlite.Store {
 	t.Helper()
 
@@ -182,4 +404,8 @@ func createTransitionServiceProject(t *testing.T, ctx context.Context, store *sq
 		t.Fatalf("CreateProject() error = %v", err)
 	}
 	return project
+}
+
+func boolPtr(value bool) *bool {
+	return &value
 }

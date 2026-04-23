@@ -1,8 +1,11 @@
 package config
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
+
+	coremedia "odin-os/internal/core/media"
 
 	"gopkg.in/yaml.v3"
 )
@@ -23,19 +26,16 @@ type ServiceSettings struct {
 }
 
 type Config struct {
-	Version     int
-	RuntimeRoot string
-	Service     ServiceSettings
+	Version         int
+	RuntimeRoot     string
+	Service         ServiceSettings
+	MediaConfigPath string
+	Media           *coremedia.Config
 }
 
 func Load(path string, repoRoot string, env map[string]string) (Config, error) {
-	content, err := os.ReadFile(path)
-	if err != nil {
-		return Config{}, err
-	}
-
 	var raw File
-	if err := yaml.Unmarshal(content, &raw); err != nil {
+	if err := decodeYAMLFile(path, &raw); err != nil {
 		return Config{}, err
 	}
 
@@ -63,6 +63,13 @@ func Load(path string, repoRoot string, env map[string]string) (Config, error) {
 		cfg.Service.HTTPAddr = value
 	}
 
+	mediaPath, mediaConfig, err := loadMediaConfig(repoRoot, env)
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.MediaConfigPath = mediaPath
+	cfg.Media = mediaConfig
+
 	return cfg, nil
 }
 
@@ -74,4 +81,15 @@ func resolveRuntimeRoot(repoRoot string, configured string) string {
 		return configured
 	}
 	return filepath.Clean(filepath.Join(repoRoot, configured))
+}
+
+func decodeYAMLFile(path string, target any) error {
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+
+	decoder := yaml.NewDecoder(bytes.NewReader(content))
+	decoder.KnownFields(true)
+	return decoder.Decode(target)
 }

@@ -1,11 +1,16 @@
 package profile
 
-import "time"
+import (
+	"time"
 
-const DefaultWorkspaceID = "primary"
+	coreworkspaces "odin-os/internal/core/workspaces"
+)
+
+const DefaultWorkspaceKey = coreworkspaces.DefaultWorkspaceKey
 
 type OperatingProfile struct {
-	WorkspaceID     string
+	WorkspaceID     int64
+	WorkspaceKey    string
 	Preferences     Preferences
 	Boundaries      Boundaries
 	CadenceDefaults CadenceDefaults

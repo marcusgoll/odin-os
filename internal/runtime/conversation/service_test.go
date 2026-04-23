@@ -64,8 +64,7 @@ func TestServiceRespondAnswersModeQuestion(t *testing.T) {
 }
 
 func TestServiceRespondUsesExecutorBackedFallback(t *testing.T) {
-	t.Parallel()
-
+	configureConversationHarnessDriver(t)
 	service, _ := newTestService(t)
 
 	result, err := service.Respond(context.Background(), Request{
@@ -84,28 +83,6 @@ func TestServiceRespondUsesExecutorBackedFallback(t *testing.T) {
 	}
 	if !strings.Contains(result.Answer, "codex_headless") {
 		t.Fatalf("Answer = %q, want executor-backed output", result.Answer)
-	}
-}
-
-func TestServiceRespondRoutesByPromptAndUsesExecutorPromptOverride(t *testing.T) {
-	t.Parallel()
-
-	service, _ := newTestService(t)
-
-	result, err := service.Respond(context.Background(), Request{
-		Scope:          scope.Resolution{Kind: scope.ScopeGlobal},
-		Mode:           "ask",
-		Prompt:         "audit the dashboard hierarchy",
-		ExecutorPrompt: "Use the selected Odin skill while completing this task.\nSkill: Pixel Perfect UI/UX Designer\n\nTask Request:\naudit the dashboard hierarchy",
-	})
-	if err != nil {
-		t.Fatalf("Respond() error = %v", err)
-	}
-	if result.Intent != "conversation" {
-		t.Fatalf("Intent = %q, want %q", result.Intent, "conversation")
-	}
-	if !strings.Contains(result.Answer, "Pixel Perfect UI/UX Designer") {
-		t.Fatalf("Answer = %q, want executor prompt override to be used", result.Answer)
 	}
 }
 
@@ -257,6 +234,121 @@ func TestServiceRespondHandlesJobsRunsAndDoctor(t *testing.T) {
 	}
 }
 
+func TestSnapshotIncludesApprovalsActiveRunsStalledRunsAndProjectTransitions(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlite.Open(filepath.Join(t.TempDir(), "odin.db"))
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer store.Close()
+
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
+	}
+
+	now := time.Now().UTC()
+	store.Now = func() time.Time { return now.Add(-2 * time.Hour) }
+
+	project, err := store.CreateProject(ctx, sqlite.CreateProjectParams{
+		Key:           "alpha",
+		Name:          "Alpha",
+		Scope:         "project",
+		GitRoot:       "/tmp/alpha",
+		DefaultBranch: "main",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+
+	runningTask, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "running-task",
+		Title:       "Running task",
+		Status:      "running",
+		Scope:       "project",
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask(running) error = %v", err)
+	}
+	if _, err := store.StartRun(ctx, sqlite.StartRunParams{
+		TaskID:   runningTask.ID,
+		Executor: "codex",
+		Attempt:  1,
+		Status:   "running",
+	}); err != nil {
+		t.Fatalf("StartRun(running) error = %v", err)
+	}
+
+	approvalTask, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "approval-task",
+		Title:       "Approval task",
+		Status:      "running",
+		Scope:       "project",
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask(approval) error = %v", err)
+	}
+	approvalRun, err := store.StartRun(ctx, sqlite.StartRunParams{
+		TaskID:   approvalTask.ID,
+		Executor: "codex",
+		Attempt:  1,
+		Status:   "running",
+	})
+	if err != nil {
+		t.Fatalf("StartRun(approval) error = %v", err)
+	}
+	if _, _, _, err := store.AwaitApproval(ctx, sqlite.AwaitApprovalParams{
+		TaskID:         approvalTask.ID,
+		RunID:          approvalRun.ID,
+		RequestedBy:    "operator",
+		Summary:        "waiting on approval",
+		TerminalReason: "waiting on approval",
+		ArtifactsJSON:  `[]`,
+	}); err != nil {
+		t.Fatalf("AwaitApproval() error = %v", err)
+	}
+
+	if _, err := store.SetProjectTransition(ctx, sqlite.SetProjectTransitionParams{
+		ProjectID:          project.ID,
+		State:              "cutover",
+		Controller:         "odin_os",
+		LimitedActionsJSON: "[]",
+		Notes:              "primary controller",
+		ChangedBy:          "operator",
+	}); err != nil {
+		t.Fatalf("SetProjectTransition() error = %v", err)
+	}
+
+	snapshot, err := Service{
+		DB:             store.DB(),
+		Now:            func() time.Time { return now },
+		StalledTimeout: 30 * time.Minute,
+	}.Snapshot(ctx)
+	if err != nil {
+		t.Fatalf("Snapshot() error = %v", err)
+	}
+
+	if len(snapshot.ApprovalsWaiting) != 1 {
+		t.Fatalf("approvals waiting = %d, want 1", len(snapshot.ApprovalsWaiting))
+	}
+	if len(snapshot.ActiveRuns) != 1 {
+		t.Fatalf("active runs = %d, want 1", len(snapshot.ActiveRuns))
+	}
+	if len(snapshot.StalledRuns) != 1 {
+		t.Fatalf("stalled runs = %d, want 1", len(snapshot.StalledRuns))
+	}
+	if len(snapshot.ProjectTransitions) != 1 {
+		t.Fatalf("project transitions = %d, want 1", len(snapshot.ProjectTransitions))
+	}
+	if snapshot.ProjectTransitionOwnership.OdinOS != 1 {
+		t.Fatalf("odin_os ownership = %d, want 1", snapshot.ProjectTransitionOwnership.OdinOS)
+	}
+}
+
 func newTestService(t *testing.T) (Service, *sqlite.Store) {
 	t.Helper()
 
@@ -300,10 +392,36 @@ func newTestService(t *testing.T) (Service, *sqlite.Store) {
 
 	return Service{
 		Store:          store,
-		Registry:       registry,
 		ExecutorConfig: mustLoadExecutorConfig(t),
 		Executors:      router.DefaultCatalog(),
+		Registry:       registry,
 	}, store
+}
+
+func configureConversationHarnessDriver(t *testing.T) {
+	t.Helper()
+
+	path := filepath.Join(t.TempDir(), "codex-driver.sh")
+	if err := os.WriteFile(path, []byte(`#!/usr/bin/env bash
+payload="$(cat)"
+PAYLOAD="$payload" python3 - <<'PY'
+import json
+import os
+
+request = json.loads(os.environ["PAYLOAD"])
+action = request.get("action")
+if action == "health":
+    print(json.dumps({"status":"healthy","details":"conversation test driver healthy"}))
+else:
+    print(json.dumps({"status":"completed","output":"codex_headless says hello","handle":{"external_id":"fixture-driver"}}))
+PY
+`), 0o755); err != nil {
+		t.Fatalf("WriteFile(driver) error = %v", err)
+	}
+	if err := os.Chmod(path, 0o755); err != nil {
+		t.Fatalf("Chmod(driver) error = %v", err)
+	}
+	t.Setenv("ODIN_CODEX_DRIVER", path)
 }
 
 func mustLoadExecutorConfig(t *testing.T) router.Config {

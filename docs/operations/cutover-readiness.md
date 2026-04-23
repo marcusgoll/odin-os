@@ -43,6 +43,15 @@ Use this checklist before treating Odin OS as the active homelab controller.
 - queue pressure, projection freshness, source freshness, and executor health are visible in doctor output
 - self-heal escalation paths are visible instead of looping silently
 
+## Media profile
+
+- media supervision is enabled only through the bounded media profile contract
+- `make test-media` passes against the current repo state before cutover
+- mount audit passes before any approved media maintenance
+- safe automatic actions, approval-required actions, and forbidden actions have been reviewed for the media profile
+- operator has reviewed explicit safe vs unsafe media automation boundaries
+- media-specific backup freshness and rollback expectations are documented for approved maintenance
+
 ## Final cutover review
 
 - the active project portfolio view has been reviewed

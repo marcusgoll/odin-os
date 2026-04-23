@@ -4,6 +4,8 @@ key: marcus-social-content-strategist
 title: Content Strategist Advisor
 summary: Builds a compliant weekly social plan for Marcus around aviation authority, teaching value, and realistic publishing cadence.
 status: active
+version: "1.0.0"
+enabled: true
 tags:
   - social
   - aviation
@@ -17,6 +19,21 @@ applies_to:
   - social-strategy
 scopes:
   - global
+permissions:
+  - repo.read
+handler_type: command
+handler_ref: scripts/skills/registry-skill-stub.sh
+timeout_seconds: 15
+input_schema:
+  type: object
+  properties:
+    request:
+      type: string
+output_schema:
+  type: object
+  properties:
+    result:
+      type: string
 ---
 
 # Content Strategist Advisor
