@@ -40,7 +40,7 @@ printf '{"status":"completed","tool_key":"robinhood_transfer_flow","summary":"Ro
 		t.Fatalf("ReadFile(request) error = %v", err)
 	}
 	var request struct {
-		ToolKey string                `json:"tool_key"`
+		ToolKey string                 `json:"tool_key"`
 		Input   RobinhoodTransferInput `json:"input"`
 	}
 	if err := json.Unmarshal(requestBytes, &request); err != nil {
@@ -85,19 +85,6 @@ printf '{"status":"completed","tool_key":"robinhood_transfer_flow","summary":"Ro
 	if got := stringArtifactValue(response.Artifacts, "prior_session_state"); got != "session_expired" {
 		t.Fatalf("artifacts.prior_session_state = %q, want session_expired", got)
 	}
-}
-
-func writeFixtureDriver(t *testing.T, content string) string {
-	t.Helper()
-
-	path := filepath.Join(t.TempDir(), "driver.sh")
-	if err := os.WriteFile(path, []byte(content), 0o755); err != nil {
-		t.Fatalf("WriteFile(driver) error = %v", err)
-	}
-	if err := os.Chmod(path, 0o755); err != nil {
-		t.Fatalf("Chmod(driver) error = %v", err)
-	}
-	return path
 }
 
 func stringArtifactValue(artifacts map[string]any, key string) string {

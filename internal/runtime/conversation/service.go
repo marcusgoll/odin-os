@@ -45,12 +45,13 @@ type Response struct {
 }
 
 type Snapshot struct {
-	GeneratedAt                time.Time                  `json:"generated_at"`
-	ApprovalsWaiting           []ApprovalWaitingView      `json:"approvals_waiting"`
-	StalledRuns                []StalledRunView           `json:"stalled_runs"`
-	ActiveRuns                 []ActiveRunView            `json:"active_runs"`
-	ProjectTransitions         []ProjectTransitionView    `json:"project_transitions"`
-	ProjectTransitionOwnership ProjectTransitionOwnership `json:"project_transition_ownership"`
+	GeneratedAt                time.Time                        `json:"generated_at"`
+	ApprovalsWaiting           []ApprovalWaitingView            `json:"approvals_waiting"`
+	StalledRuns                []StalledRunView                 `json:"stalled_runs"`
+	ActiveRuns                 []ActiveRunView                  `json:"active_runs"`
+	ProjectTransitions         []ProjectTransitionView          `json:"project_transitions"`
+	ProjectTransitionOwnership ProjectTransitionOwnership       `json:"project_transition_ownership"`
+	CompanionSwarms            []projections.CompanionSwarmView `json:"companion_swarms"`
 }
 
 type ApprovalWaitingView struct {
@@ -252,6 +253,10 @@ func (service Service) Snapshot(ctx context.Context) (Snapshot, error) {
 	if err != nil {
 		return Snapshot{}, err
 	}
+	companionSwarms, err := projections.ListCompanionSwarmViews(ctx, tx, "")
+	if err != nil {
+		return Snapshot{}, err
+	}
 	if err := tx.Commit(); err != nil {
 		return Snapshot{}, err
 	}
@@ -263,6 +268,7 @@ func (service Service) Snapshot(ctx context.Context) (Snapshot, error) {
 		ActiveRuns:                 toActiveRunViews(activeRuns),
 		ProjectTransitions:         toProjectTransitionViews(transitions),
 		ProjectTransitionOwnership: summarizeProjectTransitions(transitions),
+		CompanionSwarms:            companionSwarms,
 	}, nil
 }
 

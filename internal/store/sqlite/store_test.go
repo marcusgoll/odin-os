@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"path/filepath"
 	"testing"
@@ -270,6 +271,70 @@ func TestStoreMigrateLifecycleAndReopen(t *testing.T) {
 	}
 	if gotApproval.Status != "approved" {
 		t.Fatalf("GetApproval().Status = %q, want %q", gotApproval.Status, "approved")
+	}
+}
+
+func TestUpdateTaskStatusUpdatesFieldsWhenStatusUnchanged(t *testing.T) {
+	ctx := context.Background()
+	store := openMigratedTestStore(t, "update-task-status-unchanged.db")
+	defer store.Close()
+
+	project, err := store.CreateProject(ctx, CreateProjectParams{
+		Key:           "update-task-status-unchanged",
+		Name:          "Update Task Status Unchanged",
+		Scope:         "project",
+		GitRoot:       "/tmp/update-task-status-unchanged",
+		DefaultBranch: "main",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+
+	task, err := store.CreateTask(ctx, CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "status-unchanged-task",
+		Title:       "Refresh task state",
+		Status:      "blocked",
+		Scope:       "project",
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+
+	task, err = store.UpdateTaskStatus(ctx, UpdateTaskStatusParams{
+		TaskID:         task.ID,
+		Status:         "blocked",
+		Summary:        "first rerun summary",
+		TerminalReason: "swarm_results_pending",
+		ArtifactsJSON:  `[{"type":"swarm_aggregation","summary":"first rerun summary","confidence":0.42}]`,
+	})
+	if err != nil {
+		t.Fatalf("UpdateTaskStatus(first rerun) error = %v", err)
+	}
+	if task.Summary != "first rerun summary" {
+		t.Fatalf("first update summary = %q, want first rerun summary", task.Summary)
+	}
+
+	task, err = store.UpdateTaskStatus(ctx, UpdateTaskStatusParams{
+		TaskID:         task.ID,
+		Status:         "blocked",
+		Summary:        "second rerun summary",
+		TerminalReason: "swarm_review_gate_pending_verifier",
+		ArtifactsJSON:  `[{"type":"swarm_aggregation","summary":"second rerun summary","confidence":0.87}]`,
+	})
+	if err != nil {
+		t.Fatalf("UpdateTaskStatus(second rerun) error = %v", err)
+	}
+	if task.Summary != "second rerun summary" {
+		t.Fatalf("second update summary = %q, want second rerun summary", task.Summary)
+	}
+	if task.TerminalReason != "swarm_review_gate_pending_verifier" {
+		t.Fatalf("second update terminal reason = %q, want swarm_review_gate_pending_verifier", task.TerminalReason)
+	}
+	if task.ArtifactsJSON != `[{"type":"swarm_aggregation","summary":"second rerun summary","confidence":0.87}]` {
+		t.Fatalf("second update artifacts JSON = %q, want updated envelope", task.ArtifactsJSON)
 	}
 }
 
@@ -2120,5 +2185,97 @@ func TestParseTimeAcceptsVariableWidthRFC3339Nano(t *testing.T) {
 	want := time.Date(2026, 4, 17, 7, 0, 0, 500*1000*1000, time.UTC)
 	if !got.Equal(want) {
 		t.Fatalf("parseTime() = %v, want %v", got, want)
+	}
+}
+
+func TestUpdateMemorySummaryDetails(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(filepath.Join(t.TempDir(), "odin.db"))
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer store.Close()
+
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
+	}
+
+	project, err := store.CreateProject(ctx, CreateProjectParams{
+		Key:           "odin-core",
+		Name:          "Odin Core",
+		Scope:         "odin-core",
+		GitRoot:       "/home/orchestrator/odin-os",
+		DefaultBranch: "main",
+		GitHubRepo:    "example/odin-os",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+
+	summary, err := store.RecordMemorySummary(ctx, RecordMemorySummaryParams{
+		ProjectID:   &project.ID,
+		Scope:       "project",
+		ScopeKey:    project.Key,
+		MemoryType:  "social_draft",
+		Summary:     "Draft awaiting approval",
+		DetailsJSON: `{"source":"cli","approval":"pending"}`,
+	})
+	if err != nil {
+		t.Fatalf("RecordMemorySummary() error = %v", err)
+	}
+
+	updated, err := store.UpdateMemorySummaryDetails(ctx, UpdateMemorySummaryDetailsParams{
+		MemoryID:    summary.ID,
+		DetailsJSON: `{"source":"cli","approval":"approved"}`,
+	})
+	if err != nil {
+		t.Fatalf("UpdateMemorySummaryDetails() error = %v", err)
+	}
+	if updated.ID != summary.ID {
+		t.Fatalf("updated.ID = %d, want %d", updated.ID, summary.ID)
+	}
+	if updated.DetailsJSON != `{"source":"cli","approval":"approved"}` {
+		t.Fatalf("updated.DetailsJSON = %q, want updated details", updated.DetailsJSON)
+	}
+
+	summaries, err := store.ListMemorySummaries(ctx, ListMemorySummariesParams{
+		ProjectID: &project.ID,
+		Scope:     "project",
+		ScopeKey:  project.Key,
+	})
+	if err != nil {
+		t.Fatalf("ListMemorySummaries() error = %v", err)
+	}
+	if len(summaries) != 1 {
+		t.Fatalf("summaries len = %d, want 1", len(summaries))
+	}
+	if summaries[0].DetailsJSON != updated.DetailsJSON {
+		t.Fatalf("stored details = %q, want %q", summaries[0].DetailsJSON, updated.DetailsJSON)
+	}
+
+	events, err := store.ListEvents(ctx, ListEventsParams{})
+	if err != nil {
+		t.Fatalf("ListEvents() error = %v", err)
+	}
+	var updatedEventFound bool
+	for _, event := range events {
+		if event.Type != runtimeevents.EventMemorySummaryUpdated {
+			continue
+		}
+		if event.StreamType != runtimeevents.StreamMemorySummary {
+			t.Fatalf("memory update event stream type = %q, want %q", event.StreamType, runtimeevents.StreamMemorySummary)
+		}
+		var payload runtimeevents.MemorySummaryUpdatedPayload
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			t.Fatalf("json.Unmarshal(memory update payload) error = %v", err)
+		}
+		if payload.Scope != "project" || payload.ScopeKey != project.Key || payload.MemoryType != "social_draft" {
+			t.Fatalf("memory update payload = %+v, want project social_draft payload", payload)
+		}
+		updatedEventFound = true
+	}
+	if !updatedEventFound {
+		t.Fatal("memory summary updated event not found")
 	}
 }

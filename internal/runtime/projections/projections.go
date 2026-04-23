@@ -72,10 +72,39 @@ type FollowUpSummaryView struct {
 }
 
 type AgendaView struct {
-	WorkspaceKey string                `json:"workspace_key"`
-	DueWork      []FollowUpSummaryView `json:"due_work"`
-	BlockedWork  []BlockedItemView     `json:"blocked_work"`
-	Approvals    []PendingApprovalView `json:"approvals"`
+	WorkspaceKey    string                `json:"workspace_key"`
+	DueWork         []FollowUpSummaryView `json:"due_work"`
+	BlockedWork     []BlockedItemView     `json:"blocked_work"`
+	Approvals       []PendingApprovalView `json:"approvals"`
+	CompanionSwarms []CompanionSwarmView  `json:"companion_swarms"`
+}
+
+type CompanionSwarmView struct {
+	ParentTaskID             int64   `json:"parent_task_id"`
+	ParentTaskKey            string  `json:"parent_task_key"`
+	ProjectKey               string  `json:"project_key"`
+	WorkspaceKey             string  `json:"workspace_key"`
+	InitiativeKey            *string `json:"initiative_key,omitempty"`
+	CompanionKey             *string `json:"companion_key,omitempty"`
+	Title                    string  `json:"title"`
+	Summary                  string  `json:"summary"`
+	Status                   string  `json:"status"`
+	BlockedReason            string  `json:"blocked_reason,omitempty"`
+	TerminalReason           string  `json:"terminal_reason,omitempty"`
+	ConvergenceMode          string  `json:"convergence_mode,omitempty"`
+	RequestedBudget          int     `json:"requested_budget,omitempty"`
+	DelegationCount          int     `json:"delegation_count"`
+	CompletedDelegationCount int     `json:"completed_delegation_count"`
+	ActiveChildRunCount      int     `json:"active_child_run_count"`
+	BacklogCount             int     `json:"backlog_count"`
+	BudgetBacklogCount       int     `json:"budget_backlog_count"`
+}
+
+type swarmContractDetails struct {
+	Swarm struct {
+		RequestedBudget int    `json:"requested_budget"`
+		ConvergenceMode string `json:"convergence_mode"`
+	} `json:"swarm"`
 }
 
 type ProjectTransitionView struct {
@@ -560,13 +589,193 @@ func GetAgendaView(ctx context.Context, queryer Queryer, workspaceKey string, no
 	if err != nil {
 		return AgendaView{}, err
 	}
+	swarmViews, err := ListCompanionSwarmViews(ctx, queryer, workspace.WorkspaceKey)
+	if err != nil {
+		return AgendaView{}, err
+	}
 
 	return AgendaView{
-		WorkspaceKey: workspace.WorkspaceKey,
-		DueWork:      dueWork,
-		BlockedWork:  filterBlockedItemsByWorkspace(blockedItems, workspace.WorkspaceKey),
-		Approvals:    filterApprovalsByWorkspace(approvals, workspace.WorkspaceKey),
+		WorkspaceKey:    workspace.WorkspaceKey,
+		DueWork:         dueWork,
+		BlockedWork:     filterBlockedItemsByWorkspace(blockedItems, workspace.WorkspaceKey),
+		Approvals:       filterApprovalsByWorkspace(approvals, workspace.WorkspaceKey),
+		CompanionSwarms: filterCompanionSwarmsForAgenda(swarmViews),
 	}, nil
+}
+
+func ListCompanionSwarmViews(ctx context.Context, queryer Queryer, workspaceKey string) ([]CompanionSwarmView, error) {
+	query := `
+		SELECT
+			t.id,
+			t.key,
+			p.key,
+			COALESCE(w.key, ''),
+			i.key,
+			c.key,
+			t.title,
+			t.summary,
+			t.status,
+			t.blocked_reason,
+			t.terminal_reason,
+			d.id,
+			d.status,
+			d.details_json,
+			COALESCE(ct.status, ''),
+			COALESCE(ct.blocked_reason, ''),
+			COALESCE(cr.status, ''),
+			(SELECT COUNT(*)
+			 FROM delegation_artifacts da
+			 WHERE da.delegation_id = d.id
+			   AND da.artifact_type = 'result')
+		FROM tasks t
+		JOIN projects p ON p.id = t.project_id
+		LEFT JOIN workspaces w ON w.id = t.workspace_id
+		LEFT JOIN initiatives i ON i.id = t.initiative_id
+		LEFT JOIN companions c ON c.id = t.companion_id
+		JOIN delegations d ON d.parent_task_id = t.id
+		LEFT JOIN tasks ct ON ct.id = d.child_task_id
+		LEFT JOIN runs cr ON cr.id = ct.current_run_id
+		WHERE t.companion_id IS NOT NULL
+	`
+	args := make([]any, 0, 1)
+	if key := strings.TrimSpace(workspaceKey); key != "" {
+		query += ` AND w.key = ?`
+		args = append(args, key)
+	}
+	query += ` ORDER BY t.id ASC, d.id ASC`
+
+	rows, err := queryer.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	type swarmAccumulator struct {
+		view               CompanionSwarmView
+		seen               bool
+		childBlockedReason string
+		metadataLoaded     bool
+	}
+
+	byParentTaskID := make(map[int64]*swarmAccumulator)
+	order := make([]int64, 0)
+
+	for rows.Next() {
+		var (
+			parentTaskID         int64
+			parentTaskKey        string
+			projectKey           string
+			workspaceKeyValue    string
+			initiativeKey        sql.NullString
+			companionKey         sql.NullString
+			title                string
+			summary              string
+			parentStatus         string
+			parentBlockedReason  string
+			parentTerminalReason string
+			delegationID         int64
+			delegationStatus     string
+			detailsJSON          string
+			childTaskStatus      string
+			childBlockedReason   string
+			childRunStatus       string
+			resultArtifactCount  int
+		)
+		if err := rows.Scan(
+			&parentTaskID,
+			&parentTaskKey,
+			&projectKey,
+			&workspaceKeyValue,
+			&initiativeKey,
+			&companionKey,
+			&title,
+			&summary,
+			&parentStatus,
+			&parentBlockedReason,
+			&parentTerminalReason,
+			&delegationID,
+			&delegationStatus,
+			&detailsJSON,
+			&childTaskStatus,
+			&childBlockedReason,
+			&childRunStatus,
+			&resultArtifactCount,
+		); err != nil {
+			return nil, err
+		}
+
+		acc, ok := byParentTaskID[parentTaskID]
+		if !ok {
+			acc = &swarmAccumulator{}
+			acc.view.ParentTaskID = parentTaskID
+			acc.view.ParentTaskKey = parentTaskKey
+			acc.view.ProjectKey = projectKey
+			acc.view.WorkspaceKey = workspaceKeyValue
+			acc.view.InitiativeKey = nullableStringPtr(initiativeKey)
+			acc.view.CompanionKey = nullableStringPtr(companionKey)
+			acc.view.Title = title
+			acc.view.Summary = summary
+			acc.view.Status = parentStatus
+			acc.view.BlockedReason = strings.TrimSpace(parentBlockedReason)
+			acc.view.TerminalReason = strings.TrimSpace(parentTerminalReason)
+			byParentTaskID[parentTaskID] = acc
+			order = append(order, parentTaskID)
+		}
+
+		acc.view.DelegationCount++
+		if resultArtifactCount > 0 {
+			acc.view.CompletedDelegationCount++
+		}
+		if strings.EqualFold(childRunStatus, "running") {
+			acc.view.ActiveChildRunCount++
+		}
+		if strings.TrimSpace(childBlockedReason) != "" && acc.childBlockedReason == "" {
+			acc.childBlockedReason = strings.TrimSpace(childBlockedReason)
+		}
+		if strings.TrimSpace(parentBlockedReason) == "" && strings.EqualFold(childTaskStatus, "blocked") && acc.childBlockedReason == "" {
+			acc.childBlockedReason = "approval_required"
+		}
+		if !acc.metadataLoaded {
+			if requestedBudget, convergenceMode, ok := parseSwarmContractMetadata(detailsJSON); ok {
+				acc.view.RequestedBudget = requestedBudget
+				acc.view.ConvergenceMode = convergenceMode
+				acc.metadataLoaded = true
+			}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	views := make([]CompanionSwarmView, 0, len(order))
+	for _, parentTaskID := range order {
+		acc := byParentTaskID[parentTaskID]
+		if acc == nil {
+			continue
+		}
+		acc.view.BacklogCount = acc.view.DelegationCount - acc.view.CompletedDelegationCount
+		if acc.view.BacklogCount < 0 {
+			acc.view.BacklogCount = 0
+		}
+		if acc.view.RequestedBudget > acc.view.DelegationCount {
+			acc.view.BudgetBacklogCount = acc.view.RequestedBudget - acc.view.DelegationCount
+		}
+		if strings.TrimSpace(acc.view.BlockedReason) == "" && strings.TrimSpace(acc.childBlockedReason) != "" {
+			acc.view.BlockedReason = acc.childBlockedReason
+		}
+		if strings.TrimSpace(acc.view.BlockedReason) != "" {
+			acc.view.Status = "blocked"
+		} else if acc.view.ActiveChildRunCount > 0 {
+			acc.view.Status = "running"
+		} else if acc.view.CompletedDelegationCount == acc.view.DelegationCount && acc.view.DelegationCount > 0 {
+			acc.view.Status = "completed"
+		}
+		if acc.view.Status == "" {
+			acc.view.Status = "queued"
+		}
+		views = append(views, acc.view)
+	}
+	return views, nil
 }
 
 func ListWorkspaceMemoryViews(ctx context.Context, queryer Queryer, query WorkspaceMemoryQuery) ([]WorkspaceMemoryView, error) {
@@ -1889,6 +2098,35 @@ func filterApprovalsByWorkspace(views []PendingApprovalView, workspaceKey string
 		}
 	}
 	return filtered
+}
+
+func filterCompanionSwarmsForAgenda(views []CompanionSwarmView) []CompanionSwarmView {
+	filtered := make([]CompanionSwarmView, 0, len(views))
+	for _, view := range views {
+		if strings.EqualFold(view.Status, "blocked") || strings.EqualFold(view.Status, "running") || view.ActiveChildRunCount > 0 || view.BacklogCount > 0 || view.BudgetBacklogCount > 0 {
+			filtered = append(filtered, view)
+		}
+	}
+	return filtered
+}
+
+func parseSwarmContractMetadata(detailsJSON string) (int, string, bool) {
+	trimmed := strings.TrimSpace(detailsJSON)
+	if trimmed == "" {
+		return 0, "", false
+	}
+
+	var decoded swarmContractDetails
+	if err := json.Unmarshal([]byte(trimmed), &decoded); err != nil {
+		return 0, "", false
+	}
+
+	requestedBudget := decoded.Swarm.RequestedBudget
+	convergenceMode := strings.TrimSpace(decoded.Swarm.ConvergenceMode)
+	if requestedBudget <= 0 && convergenceMode == "" {
+		return 0, "", false
+	}
+	return requestedBudget, convergenceMode, true
 }
 
 func nullableInt64Ptr(value sql.NullInt64) *int64 {

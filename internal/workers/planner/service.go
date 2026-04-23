@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 
-	"odin-os/internal/skills"
 	"odin-os/internal/tools/broker"
 	"odin-os/internal/tools/catalog"
 )
@@ -62,13 +61,12 @@ type Selection struct {
 }
 
 type MaterializeInput struct {
-	Scope             string
-	Workspace         WorkspaceContext
-	Initiative        *InitiativeContext
-	Companion         *CompanionContext
-	MemoryReferences  []MemoryReference
-	InvocationContext skills.InvocationContext
-	Selections        []Selection
+	Scope            string
+	Workspace        WorkspaceContext
+	Initiative       *InitiativeContext
+	Companion        *CompanionContext
+	MemoryReferences []MemoryReference
+	Selections       []Selection
 }
 
 type ExecutionContext struct {
@@ -87,10 +85,7 @@ func (service Service) Prepare(input PrepareInput) (PlanContext, error) {
 		return PlanContext{}, fmt.Errorf("planner broker is required")
 	}
 
-	cards, err := service.Broker.Catalog(input.Scope)
-	if err != nil {
-		return PlanContext{}, err
-	}
+	cards := service.Broker.Catalog(input.Scope)
 	return PlanContext{
 		Scope:            input.Scope,
 		Workspace:        input.Workspace,
@@ -106,10 +101,7 @@ func (service Service) Materialize(ctx context.Context, input MaterializeInput) 
 		return ExecutionContext{}, fmt.Errorf("planner broker is required")
 	}
 
-	cards, err := service.Broker.Catalog(input.Scope)
-	if err != nil {
-		return ExecutionContext{}, err
-	}
+	cards := service.Broker.Catalog(input.Scope)
 	result := ExecutionContext{
 		Scope:            input.Scope,
 		Workspace:        input.Workspace,
@@ -124,8 +116,8 @@ func (service Service) Materialize(ctx context.Context, input MaterializeInput) 
 		if err != nil {
 			return ExecutionContext{}, err
 		}
-		if expansion.AgentRole != nil && !selection.AllowAgentRoleUse {
-			return ExecutionContext{}, fmt.Errorf("agent-role expansion requires explicit plan opt-in")
+		if expansion.SubAgent != nil && !selection.AllowAgentRoleUse {
+			return ExecutionContext{}, fmt.Errorf("sub-agent expansion requires explicit plan opt-in")
 		}
 
 		result.Expansions = append(result.Expansions, expansion)
@@ -149,19 +141,7 @@ func (service Service) Materialize(ctx context.Context, input MaterializeInput) 
 			if expansion.Skill == nil {
 				return ExecutionContext{}, fmt.Errorf("capability %q is not a skill", selection.Key)
 			}
-			structured, err := service.Broker.InvokeSkill(ctx, skills.InvokeRequest{
-				Key:     selection.Key,
-				Input:   selection.SkillInput,
-				Context: input.InvocationContext,
-			})
-			if err != nil {
-				return ExecutionContext{}, err
-			}
-			compacted, err := service.Broker.Compact(structured)
-			if err != nil {
-				return ExecutionContext{}, err
-			}
-			result.Compacted = append(result.Compacted, compacted)
+			return ExecutionContext{}, fmt.Errorf("skill invocation is not supported by planner broker")
 		}
 	}
 

@@ -21,6 +21,27 @@ This means a fresh runtime can start from an empty `data/odin.db` and still expo
 
 Once bootstrap is in place, routine follow-through flows can be managed through the normal operator commands documented in [followup-routines.md](followup-routines.md).
 
+## Inspecting companion-owned work
+
+Bootstrap only guarantees the default workspace and companion exist. After that, use the normal companion and operator commands to inspect or create governed work:
+
+```bash
+odin companion list --json
+odin companion get primary
+odin companion capabilities primary --json
+odin companion run primary --objective "review April budget" --json
+odin companion state primary --json
+odin status --json
+odin agenda --json
+```
+
+Operationally:
+
+- `companion run` creates a normal queued work item owned by the workspace and companion.
+- any later swarm decomposition stays behind that parent work item through delegations and normal run attempts.
+- `companion state` is the companion-local read model for owned work and swarm state.
+- `status` and `agenda` remain the cross-workspace operator views for blocked work, approvals, due work, and visible companion swarms.
+
 ## Repairing existing runtimes
 
 For older runtimes that already contain `projects` and `tasks`, run:

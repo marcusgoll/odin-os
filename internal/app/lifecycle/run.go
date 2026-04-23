@@ -33,10 +33,10 @@ import (
 	"odin-os/internal/core/followups"
 	"odin-os/internal/core/initiatives"
 	"odin-os/internal/core/projects"
-	approvalsvc "odin-os/internal/runtime/approvals"
 	"odin-os/internal/core/workspaces"
 	"odin-os/internal/executors/contract"
 	executorrouter "odin-os/internal/executors/router"
+	approvalsvc "odin-os/internal/runtime/approvals"
 	conversationsvc "odin-os/internal/runtime/conversation"
 	runtimeevents "odin-os/internal/runtime/events"
 	healthsvc "odin-os/internal/runtime/health"
@@ -628,9 +628,333 @@ func runCompanion(ctx context.Context, app bootstrap.App, args []string, stdout 
 			}
 		}
 		return nil
+	case "get":
+		companion, err := service.GetCompanionByKey(ctx, workspace.ID, command.Key)
+		if err != nil {
+			return err
+		}
+
+		view := renderCompanionGetView(companion)
+		if command.JSON {
+			return commands.WriteJSON(stdout, view)
+		}
+		_, err = fmt.Fprintf(stdout, "companion key=%s kind=%s status=%s title=%s\n", view.Key, view.Kind, view.Status, view.Title)
+		return err
+	case "state":
+		companion, err := service.GetCompanionByKey(ctx, workspace.ID, command.Key)
+		if err != nil {
+			return err
+		}
+
+		view, err := renderCompanionStateView(ctx, app, workspace.Key, companion, command.Key)
+		if err != nil {
+			return err
+		}
+		if command.JSON {
+			return commands.WriteJSON(stdout, view)
+		}
+		_, err = fmt.Fprintf(stdout, "companion key=%s kind=%s status=%s open_work_items=%d active_runs=%d swarms=%d\n",
+			view.Key,
+			view.Kind,
+			view.Status,
+			view.TaskState.OpenWorkItemCount,
+			view.TaskState.ActiveRunCount,
+			len(view.Swarms),
+		)
+		return err
+	case "capabilities":
+		companion, err := service.GetCompanionByKey(ctx, workspace.ID, command.Key)
+		if err != nil {
+			return err
+		}
+
+		view := renderCompanionCapabilitiesView(companion)
+		if command.JSON {
+			return commands.WriteJSON(stdout, view)
+		}
+		maxChildren := 0
+		if view.PlanningPolicy.Swarm != nil {
+			maxChildren = view.PlanningPolicy.Swarm.MaxChildren
+		}
+		_, err = fmt.Fprintf(stdout, "companion key=%s kind=%s status=%s tool_allow=%d memory_mode=%s max_children=%d\n",
+			view.Key,
+			view.Kind,
+			view.Status,
+			len(view.ToolPolicy.Allow),
+			view.MemoryPolicy.Mode,
+			maxChildren,
+		)
+		return err
+	case "run":
+		resolved, err := companionRunScope(app)
+		if err != nil {
+			return err
+		}
+
+		companion, err := service.GetCompanionByKey(ctx, workspace.ID, command.Key)
+		if err != nil {
+			return err
+		}
+
+		task, err := jobs.Service{
+			Store:       app.Store,
+			Registry:    app.Registry,
+			Transitions: projects.Service{Store: app.Store},
+		}.CreateTaskFromCompanionRun(ctx, resolved, sqlite.Companion{
+			ID:                  companion.ID,
+			WorkspaceID:         companion.WorkspaceID,
+			Key:                 companion.Key,
+			Title:               companion.Title,
+			Kind:                string(companion.Kind),
+			Charter:             companion.Charter,
+			Status:              companion.Status,
+			InitiativeScopeJSON: companion.InitiativeScopeJSON,
+			ToolPolicyJSON:      companion.ToolPolicyJSON,
+			MemoryPolicyJSON:    companion.MemoryPolicyJSON,
+			PlanningPolicyJSON:  companion.PlanningPolicyJSON,
+			CreatedAt:           companion.CreatedAt,
+			UpdatedAt:           companion.UpdatedAt,
+		}, command.Objective, command.Trigger)
+		if err != nil {
+			return err
+		}
+
+		view := commands.CompanionRunView{
+			CompanionKey:          companion.Key,
+			Objective:             command.Objective,
+			RequestedSwarmTrigger: task.ActionKey,
+			Task: commands.TaskCreateView{
+				ID:     task.ID,
+				Key:    task.Key,
+				Status: task.Status,
+				Scope:  task.Scope,
+			},
+		}
+		if command.JSON {
+			return commands.WriteJSON(stdout, view)
+		}
+		if view.RequestedSwarmTrigger != "" {
+			_, err = fmt.Fprintf(stdout, "created companion task key=%s companion=%s status=%s scope=%s trigger=%s\n",
+				view.Task.Key,
+				view.CompanionKey,
+				view.Task.Status,
+				view.Task.Scope,
+				view.RequestedSwarmTrigger,
+			)
+			return err
+		}
+		_, err = fmt.Fprintf(stdout, "created companion task key=%s companion=%s status=%s scope=%s\n",
+			view.Task.Key,
+			view.CompanionKey,
+			view.Task.Status,
+			view.Task.Scope,
+		)
+		return err
 	default:
 		return fmt.Errorf("unsupported companion subcommand: %s", command.Name)
 	}
+}
+
+func companionRunScope(app bootstrap.App) (cliscope.Resolution, error) {
+	state, err := loadCLIState(app)
+	if err != nil {
+		return cliscope.Resolution{}, err
+	}
+	if state.Scope.Kind != cliscope.ScopeGlobal {
+		return state.Scope, nil
+	}
+
+	manifest, ok := app.Registry.SystemProject()
+	if !ok {
+		return cliscope.Resolution{}, fmt.Errorf("odin-core scope is required")
+	}
+	return cliscope.Resolve(cliscope.ResolveInput{
+		ExplicitTarget: &cliscope.Target{
+			ProjectKey:    manifest.Key,
+			SystemProject: manifest.SystemProject,
+		},
+	}), nil
+}
+
+func renderCompanionGetView(companion companions.Companion) commands.CompanionGetView {
+	return commands.CompanionGetView{
+		ID:                  companion.ID,
+		WorkspaceID:         companion.WorkspaceID,
+		Key:                 companion.Key,
+		Title:               companion.Title,
+		Kind:                string(companion.Kind),
+		Charter:             companion.Charter,
+		Status:              companion.Status,
+		InitiativeScopeJSON: companion.InitiativeScopeJSON,
+		ToolPolicyJSON:      companion.ToolPolicyJSON,
+		MemoryPolicyJSON:    companion.MemoryPolicyJSON,
+		PlanningPolicyJSON:  companion.PlanningPolicyJSON,
+		CreatedAt:           companion.CreatedAt,
+		UpdatedAt:           companion.UpdatedAt,
+	}
+}
+
+func renderCompanionStateView(ctx context.Context, app bootstrap.App, workspaceKey string, companion companions.Companion, companionKey string) (commands.CompanionStateView, error) {
+	assignmentViews, err := projections.ListCompanionAssignmentViews(ctx, app.Store.DB(), workspaceKey)
+	if err != nil {
+		return commands.CompanionStateView{}, err
+	}
+	var assignment *projections.CompanionAssignmentView
+	for index := range assignmentViews {
+		if assignmentViews[index].CompanionKey == companionKey {
+			assignment = &assignmentViews[index]
+			break
+		}
+	}
+	if assignment == nil {
+		return commands.CompanionStateView{}, fmt.Errorf("companion assignment projection missing for %s", companionKey)
+	}
+
+	swarmViews, err := projections.ListCompanionSwarmViews(ctx, app.Store.DB(), workspaceKey)
+	if err != nil {
+		return commands.CompanionStateView{}, err
+	}
+	filteredSwarms := make([]projections.CompanionSwarmView, 0)
+	for _, swarm := range swarmViews {
+		if swarm.CompanionKey != nil && *swarm.CompanionKey == companionKey {
+			filteredSwarms = append(filteredSwarms, swarm)
+		}
+	}
+
+	return commands.CompanionStateView{
+		ID:     companion.ID,
+		Key:    companion.Key,
+		Title:  companion.Title,
+		Kind:   string(companion.Kind),
+		Status: companion.Status,
+		TaskState: commands.CompanionTaskStateView{
+			WorkspaceID:          assignment.WorkspaceID,
+			WorkspaceKey:         assignment.WorkspaceKey,
+			CompanionKey:         assignment.CompanionKey,
+			OwnedInitiativeCount: assignment.OwnedInitiativeCount,
+			OpenWorkItemCount:    assignment.OpenWorkItemCount,
+			ActiveRunCount:       assignment.ActiveRunCount,
+			PendingApprovalCount: assignment.PendingApprovalCount,
+			BlockedWorkItemCount: assignment.BlockedWorkItemCount,
+			OverdueFollowUpCount: assignment.OverdueFollowUpCount,
+		},
+		Swarms: filteredSwarms,
+	}, nil
+}
+
+func renderCompanionCapabilitiesView(companion companions.Companion) commands.CompanionCapabilitiesView {
+	return commands.CompanionCapabilitiesView{
+		ID:     companion.ID,
+		Key:    companion.Key,
+		Title:  companion.Title,
+		Kind:   string(companion.Kind),
+		Status: companion.Status,
+		ToolPolicy: commands.CompanionToolPolicyView{
+			Allow: parseToolPolicyAllow(companion.ToolPolicyJSON),
+		},
+		MemoryPolicy: commands.CompanionMemoryPolicyView{
+			Mode: parseMemoryPolicyMode(companion.MemoryPolicyJSON),
+		},
+		PlanningPolicy: commands.CompanionPlanningPolicyView{
+			Mode:  parsePlanningPolicyMode(companion.PlanningPolicyJSON),
+			Swarm: parsePlanningPolicySwarm(companion.PlanningPolicyJSON),
+		},
+	}
+}
+
+func parseToolPolicyAllow(raw string) []string {
+	type toolPolicy struct {
+		Allow []string `json:"allow"`
+	}
+
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" || trimmed == "{}" {
+		return []string{}
+	}
+
+	var policy toolPolicy
+	if err := json.Unmarshal([]byte(trimmed), &policy); err != nil {
+		return []string{}
+	}
+
+	allowed := make([]string, 0, len(policy.Allow))
+	seen := make(map[string]struct{}, len(policy.Allow))
+	for _, tool := range policy.Allow {
+		tool = strings.TrimSpace(tool)
+		if tool == "" {
+			continue
+		}
+		if _, ok := seen[tool]; ok {
+			continue
+		}
+		seen[tool] = struct{}{}
+		allowed = append(allowed, tool)
+	}
+	return allowed
+}
+
+func parseMemoryPolicyMode(raw string) string {
+	type memoryPolicy struct {
+		Mode string `json:"mode"`
+	}
+
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" || trimmed == "{}" {
+		return "companion"
+	}
+
+	var policy memoryPolicy
+	if err := json.Unmarshal([]byte(trimmed), &policy); err != nil {
+		return "companion"
+	}
+	policy.Mode = strings.TrimSpace(policy.Mode)
+	if policy.Mode == "" {
+		return "companion"
+	}
+	return policy.Mode
+}
+
+func parsePlanningPolicyMode(raw string) string {
+	type planningPolicy struct {
+		Mode  string `json:"mode"`
+		Swarm struct {
+			MaxChildren int `json:"max_children"`
+		} `json:"swarm"`
+	}
+
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" || trimmed == "{}" {
+		return ""
+	}
+
+	var policy planningPolicy
+	if err := json.Unmarshal([]byte(trimmed), &policy); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(policy.Mode)
+}
+
+func parsePlanningPolicySwarm(raw string) *commands.CompanionPlanningSwarmView {
+	type planningPolicy struct {
+		Mode  string `json:"mode"`
+		Swarm struct {
+			MaxChildren int `json:"max_children"`
+		} `json:"swarm"`
+	}
+
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" || trimmed == "{}" {
+		return nil
+	}
+
+	var policy planningPolicy
+	if err := json.Unmarshal([]byte(trimmed), &policy); err != nil {
+		return nil
+	}
+	if policy.Swarm.MaxChildren <= 0 {
+		return nil
+	}
+	return &commands.CompanionPlanningSwarmView{MaxChildren: policy.Swarm.MaxChildren}
 }
 
 func parseFollowUpCadence(value string) (followups.Cadence, error) {
@@ -820,6 +1144,19 @@ func runStatus(ctx context.Context, app bootstrap.App, cfg appconfig.Config, arg
 	}
 
 	if jsonOutput {
+		companionSwarmCounts := struct {
+			Active  int `json:"active"`
+			Blocked int `json:"blocked"`
+			Backlog int `json:"backlog"`
+		}{}
+		for _, swarm := range snapshot.CompanionSwarms {
+			if strings.EqualFold(swarm.Status, "blocked") {
+				companionSwarmCounts.Blocked++
+			} else if strings.EqualFold(swarm.Status, "running") || swarm.ActiveChildRunCount > 0 || swarm.BacklogCount > 0 || swarm.BudgetBacklogCount > 0 {
+				companionSwarmCounts.Active++
+			}
+			companionSwarmCounts.Backlog += swarm.BacklogCount + swarm.BudgetBacklogCount
+		}
 		encoder := json.NewEncoder(stdout)
 		encoder.SetIndent("", "  ")
 		return encoder.Encode(map[string]any{
@@ -832,15 +1169,19 @@ func runStatus(ctx context.Context, app bootstrap.App, cfg appconfig.Config, arg
 			"active_runs":                  snapshot.ActiveRuns,
 			"project_transitions":          snapshot.ProjectTransitions,
 			"project_transition_ownership": snapshot.ProjectTransitionOwnership,
+			"companion_swarm_counts":       companionSwarmCounts,
+			"companion_swarms":             snapshot.CompanionSwarms,
 		})
 	}
 
-	_, err = fmt.Fprintf(stdout, "health=%s pending_approvals=%d stalled_runs=%d active_runs=%d project_transitions=%d registry_healthy=%t\n",
+	companionSwarmCount := len(snapshot.CompanionSwarms)
+	_, err = fmt.Fprintf(stdout, "health=%s pending_approvals=%d stalled_runs=%d active_runs=%d project_transitions=%d companion_swarms=%d registry_healthy=%t\n",
 		summary.Status,
 		len(snapshot.ApprovalsWaiting),
 		len(snapshot.StalledRuns),
 		len(snapshot.ActiveRuns),
 		len(snapshot.ProjectTransitions),
+		companionSwarmCount,
 		summary.RegistryHealthy,
 	)
 	return err
@@ -1502,16 +1843,18 @@ func runServe(ctx context.Context, app bootstrap.App, cfg appconfig.Config, stdo
 	}
 	followUpService := followups.Service{Store: app.Store, Now: now}
 	recoveryService := recovery.Service{
-		Store:           app.Store,
-		RegistryRoot:    filepath.Join(app.RepoRoot, "registry"),
-		ExecutorCatalog: app.Executors,
-		HealthConfig:    healthsvc.DefaultConfig(),
-		Logger:          logger,
+		Store:             app.Store,
+		RegistryRoot:      filepath.Join(app.RepoRoot, "registry"),
+		ExecutorCatalog:   app.Executors,
+		HealthConfig:      healthsvc.DefaultConfig(),
+		Logger:            logger,
+		ShutdownRequested: &shutdownRequested,
 	}
 	mediaService := newMediaService(app, cfg)
 	schedulerService := supervision.Service{
-		Store: app.Store,
-		Now:   time.Now,
+		Store:             app.Store,
+		Now:               now,
+		ShutdownRequested: &shutdownRequested,
 	}
 	leaseService := leases.Maintenance{
 		Store: app.Store,
@@ -1731,7 +2074,7 @@ func runSchedulerLoop(ctx context.Context, operationCtx context.Context, wg *syn
 		case <-ticker.C:
 			if result, err := service.Tick(operationCtx); err != nil {
 				logBackgroundError(logger, "scheduler", err)
-			} else if result.Promoted > 0 && logger != nil {
+			} else if (result.Promoted > 0 || result.Reconciled > 0) && logger != nil {
 				for promoted := 0; promoted < result.Promoted; promoted++ {
 					select {
 					case nudges <- struct{}{}:
@@ -1745,7 +2088,8 @@ func runSchedulerLoop(ctx context.Context, operationCtx context.Context, wg *syn
 					CorrelationID: "scheduler",
 					Scope:         "global",
 					Fields: map[string]any{
-						"promoted": result.Promoted,
+						"promoted":   result.Promoted,
+						"reconciled": result.Reconciled,
 					},
 				})
 			}

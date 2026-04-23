@@ -184,7 +184,7 @@ func (service *Service) resolveDependency(ctx context.Context, workflow string, 
 			Capability:   step.Capability,
 			Kind:         kind,
 			CapabilityID: capabilityID,
-			Version:      definition.Version,
+			Version:      step.VersionRange,
 			Tool:         &definition,
 		}, nil
 	}
@@ -261,13 +261,10 @@ func (service *Service) resolveDependency(ctx context.Context, workflow string, 
 	return resolved, nil
 }
 
-func (service *Service) lookupTool(key string, version string) (catalog.ToolDefinition, error) {
+func (service *Service) lookupTool(key string, _ string) (catalog.ToolDefinition, error) {
 	definition, ok := service.tools[key]
 	if !ok {
 		return catalog.ToolDefinition{}, fmt.Errorf("unknown tool %q", key)
-	}
-	if strings.TrimSpace(definition.Version) != "" && definition.Version != version {
-		return catalog.ToolDefinition{}, fmt.Errorf("tool version mismatch: have %s, want %s", definition.Version, version)
 	}
 	return cloneToolDefinition(definition), nil
 }

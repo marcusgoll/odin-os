@@ -31,10 +31,10 @@ func TestRobinhoodTransferFlowScript(t *testing.T) {
 	t.Run("submit resume verification failed with prior session state", func(t *testing.T) {
 		screenshotPath := filepath.Join(t.TempDir(), "robinhood-submit.png")
 		stdout, callsLog, markerPath := runBrowserDriverScript(t, repoRoot, scriptPath, "robinhood-transfer-flow.sh", `{"tool_key":"robinhood_transfer_flow","input":{"mode":"submit","direction":"deposit","amount_usd":"25.00","source_account":"checking","destination_account":"brokerage","resume_facts":{"expected_review_state":"review_ready"}}}`, map[string]string{
-			"ODIN_BROWSER_STUB_SNAPSHOT":                   "Robinhood transfer review recovered",
-			"ODIN_BROWSER_STUB_SCREENSHOT_PATH":            screenshotPath,
-			"ODIN_ROBINHOOD_TRANSFER_FIXTURE_STATE":        "resume_verification_failed",
-			"ODIN_ROBINHOOD_TRANSFER_PRIOR_SESSION_STATE":  "session_expired",
+			"ODIN_BROWSER_STUB_SNAPSHOT":                  "Robinhood transfer review recovered",
+			"ODIN_BROWSER_STUB_SCREENSHOT_PATH":           screenshotPath,
+			"ODIN_ROBINHOOD_TRANSFER_FIXTURE_STATE":       "resume_verification_failed",
+			"ODIN_ROBINHOOD_TRANSFER_PRIOR_SESSION_STATE": "session_expired",
 		})
 		assertStructuredDriverOutput(t, stdout, "robinhood_transfer_flow", "completed")
 		assertJSONArtifactString(t, stdout, "session_state", "resume_verification_failed")

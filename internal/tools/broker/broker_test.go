@@ -12,19 +12,15 @@ func TestCatalogReturnsThinCardsOnly(t *testing.T) {
 	t.Parallel()
 
 	broker := New(
-		StaticSource(testSnapshot()),
-		catalog.BuiltinDefinitions(),
-		nil,
+		testSnapshot(),
+		testBuiltins(),
 		budgets.Limits{
 			Tool:    budgets.Tool{MaxSelections: 10, MaxInvocations: 10, MaxCostUnits: 20},
 			Context: budgets.Context{MaxExpandedDefinitions: 10, MaxCompactedResults: 10, MaxCompactedBytes: 1000},
 		},
 	)
 
-	cards, err := broker.Catalog("project")
-	if err != nil {
-		t.Fatalf("Catalog() error = %v", err)
-	}
+	cards := broker.Catalog("project")
 	if len(cards) == 0 {
 		t.Fatalf("Catalog() len = 0, want > 0")
 	}
@@ -33,6 +29,9 @@ func TestCatalogReturnsThinCardsOnly(t *testing.T) {
 		if card.Key == "" || card.Title == "" || card.Summary == "" {
 			t.Fatalf("thin card missing required fields: %+v", card)
 		}
+		if card.Key == "huginn_visual_audit" {
+			t.Fatalf("Catalog() exposed hidden legacy alias card: %+v", card)
+		}
 	}
 }
 
@@ -40,9 +39,8 @@ func TestExpandReturnsFullSelectedDefinitionOnly(t *testing.T) {
 	t.Parallel()
 
 	broker := New(
-		StaticSource(testSnapshot()),
-		catalog.BuiltinDefinitions(),
-		nil,
+		testSnapshot(),
+		testBuiltins(),
 		budgets.Limits{
 			Tool:    budgets.Tool{MaxSelections: 10, MaxInvocations: 10, MaxCostUnits: 20},
 			Context: budgets.Context{MaxExpandedDefinitions: 10, MaxCompactedResults: 10, MaxCompactedBytes: 1000},
@@ -56,7 +54,7 @@ func TestExpandReturnsFullSelectedDefinitionOnly(t *testing.T) {
 	if expansion.Skill == nil {
 		t.Fatalf("Skill expansion = nil, want value")
 	}
-	if expansion.Tool != nil || expansion.AgentRole != nil {
+	if expansion.Tool != nil || expansion.SubAgent != nil {
 		t.Fatalf("unexpected expansion types: %+v", expansion)
 	}
 	if expansion.Skill.Sections[registry.SectionPurpose] == "" {
@@ -64,50 +62,30 @@ func TestExpandReturnsFullSelectedDefinitionOnly(t *testing.T) {
 	}
 }
 
-func TestExpandReturnsWorkflowAgentRoleAndOperatorCommandDefinitions(t *testing.T) {
+func TestExpandReturnsCanonicalBuiltinDefinitionForAlias(t *testing.T) {
 	t.Parallel()
 
 	broker := New(
-		StaticSource(testSnapshot()),
-		catalog.BuiltinDefinitions(),
-		nil,
+		testSnapshot(),
+		testBuiltins(),
 		budgets.Limits{
 			Tool:    budgets.Tool{MaxSelections: 10, MaxInvocations: 10, MaxCostUnits: 20},
 			Context: budgets.Context{MaxExpandedDefinitions: 10, MaxCompactedResults: 10, MaxCompactedBytes: 1000},
 		},
 	)
 
-	workflowExpansion, err := broker.Expand("project-intake")
+	expansion, err := broker.Expand("huginn_visual_audit")
 	if err != nil {
-		t.Fatalf("Expand(project-intake) error = %v", err)
+		t.Fatalf("Expand(huginn_visual_audit) error = %v", err)
 	}
-	if workflowExpansion.Workflow == nil {
-		t.Fatalf("workflow expansion = nil, want value")
+	if expansion.Tool == nil {
+		t.Fatal("Tool expansion = nil, want value")
 	}
-	if len(workflowExpansion.Workflow.Composes) != 2 {
-		t.Fatalf("workflow composes len = %d, want 2", len(workflowExpansion.Workflow.Composes))
+	if expansion.Tool.Key != "browser_visual_audit" {
+		t.Fatalf("Tool.Key = %q, want browser_visual_audit", expansion.Tool.Key)
 	}
-
-	agentRoleExpansion, err := broker.Expand("triage-agent")
-	if err != nil {
-		t.Fatalf("Expand(triage-agent) error = %v", err)
-	}
-	if agentRoleExpansion.AgentRole == nil {
-		t.Fatalf("agent role expansion = nil, want value")
-	}
-	if agentRoleExpansion.AgentRole.Role == "" {
-		t.Fatalf("agent role = %+v, want role", agentRoleExpansion.AgentRole)
-	}
-
-	commandExpansion, err := broker.Expand("status-command")
-	if err != nil {
-		t.Fatalf("Expand(status-command) error = %v", err)
-	}
-	if commandExpansion.OperatorCommand == nil {
-		t.Fatalf("operator command expansion = nil, want value")
-	}
-	if commandExpansion.OperatorCommand.Command != "status" {
-		t.Fatalf("operator command = %q, want status", commandExpansion.OperatorCommand.Command)
+	if expansion.Card.Key != "browser_visual_audit" {
+		t.Fatalf("Card.Key = %q, want browser_visual_audit", expansion.Card.Key)
 	}
 }
 
@@ -115,9 +93,8 @@ func TestInvokeAndCompactRespectBudgets(t *testing.T) {
 	t.Parallel()
 
 	broker := New(
-		StaticSource(testSnapshot()),
-		catalog.BuiltinDefinitions(),
-		nil,
+		testSnapshot(),
+		testBuiltins(),
 		budgets.Limits{
 			Tool:    budgets.Tool{MaxSelections: 10, MaxInvocations: 1, MaxCostUnits: 10},
 			Context: budgets.Context{MaxExpandedDefinitions: 10, MaxCompactedResults: 1, MaxCompactedBytes: 200},
@@ -166,35 +143,69 @@ func testSnapshot() registry.Snapshot {
 				Summary: "Routes work.",
 				Scopes:  []string{"project"},
 				Tags:    []string{"routing"},
-				Role:    "intake-triager",
-				Tools:   []string{"filesystem"},
 				Sections: map[string]string{
 					registry.SectionPurpose: "Route work deterministically.",
 				},
 				Source: registry.SourceInfo{RelativePath: "agents/triage-agent.md"},
 			},
-			{
-				Kind:     registry.KindWorkflow,
-				Key:      "project-intake",
-				Title:    "Project Intake Workflow",
-				Summary:  "Turns raw project work into bounded intake output.",
-				Composes: []string{"triage-skill", "triage-agent"},
-				Sections: map[string]string{
-					registry.SectionPurpose: "Normalize project intake.",
-				},
-				Source: registry.SourceInfo{RelativePath: "workflows/project-intake.md"},
+		},
+	}
+}
+
+func testBuiltins() map[string]catalog.ToolDefinition {
+	return map[string]catalog.ToolDefinition{
+		"task_list": {
+			Key:        "task_list",
+			Title:      "Task List",
+			Summary:    "Lists task projections.",
+			Scopes:     []string{"project"},
+			Tags:       []string{"runtime"},
+			CostHint:   catalog.CostHintLow,
+			BudgetCost: 1,
+			SourceRef:  "builtin://task_list",
+			Invoke: func(map[string]string) (catalog.StructuredResult, error) {
+				return catalog.StructuredResult{
+					CapabilityKey: "task_list",
+					Summary:       "Task list prepared.",
+					RawRef:        "builtin://task_list/result",
+				}, nil
 			},
-			{
-				Kind:    registry.KindCommand,
-				Key:     "status-command",
-				Title:   "Status Command",
-				Summary: "Shows current runtime scope.",
-				Command: "status",
-				Aliases: []string{"stat"},
-				Sections: map[string]string{
-					registry.SectionPurpose: "Render runtime status.",
-				},
-				Source: registry.SourceInfo{RelativePath: "commands/status.md"},
+		},
+		"browser_visual_audit": {
+			Key:          "browser_visual_audit",
+			CanonicalKey: "browser_visual_audit",
+			Title:        "Browser Visual Audit",
+			Summary:      "Captures a live browser snapshot and screenshot for a visual review target.",
+			Scopes:       []string{"global", "project"},
+			Tags:         []string{"browser", "visual", "live"},
+			CostHint:     catalog.CostHintMedium,
+			BudgetCost:   2,
+			SourceRef:    "builtin://browser_visual_audit",
+			Invoke: func(map[string]string) (catalog.StructuredResult, error) {
+				return catalog.StructuredResult{
+					CapabilityKey: "browser_visual_audit",
+					Summary:       "Captured browser visual audit evidence.",
+					RawRef:        "builtin://browser_visual_audit/result",
+				}, nil
+			},
+		},
+		"huginn_visual_audit": {
+			Key:          "huginn_visual_audit",
+			CanonicalKey: "browser_visual_audit",
+			Title:        "Browser Visual Audit",
+			Summary:      "Captures a live browser snapshot and screenshot for a visual review target.",
+			Hidden:       true,
+			Scopes:       []string{"global", "project"},
+			Tags:         []string{"browser", "visual", "live"},
+			CostHint:     catalog.CostHintMedium,
+			BudgetCost:   2,
+			SourceRef:    "builtin://browser_visual_audit",
+			Invoke: func(map[string]string) (catalog.StructuredResult, error) {
+				return catalog.StructuredResult{
+					CapabilityKey: "browser_visual_audit",
+					Summary:       "Captured browser visual audit evidence.",
+					RawRef:        "builtin://browser_visual_audit/result",
+				}, nil
 			},
 		},
 	}

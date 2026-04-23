@@ -666,6 +666,11 @@ type RecordMemorySummaryParams struct {
 	DetailsJSON        string
 }
 
+type UpdateMemorySummaryDetailsParams struct {
+	MemoryID    int64
+	DetailsJSON string
+}
+
 type ListMemorySummariesParams struct {
 	ProjectID          *int64
 	SourceTranscriptID *int64

@@ -321,6 +321,99 @@ projects:
 		}
 	})
 
+	t.Run("companion lifecycle read commands surface durable and derived state", func(t *testing.T) {
+		runtimeRoot := t.TempDir()
+
+		createOutput, err := runOdinCommand(t, repoRoot, odinBinary, runtimeRoot, nil, "", "companion", "create", "--kind", "advisor", "--key", "finance", "--title", "Finance Advisor")
+		if err != nil {
+			t.Fatalf("runOdinCommand(companion create) error = %v\n%s", err, createOutput)
+		}
+
+		store := openRuntimeStore(t, runtimeRoot)
+		defer store.Close()
+
+		workspace, err := store.GetWorkspaceByKey(ctx, workspaces.DefaultWorkspaceKey)
+		if err != nil {
+			t.Fatalf("GetWorkspaceByKey(default) error = %v", err)
+		}
+		if _, err := store.DB().ExecContext(ctx, `
+			UPDATE companions
+			SET tool_policy_json = ?, memory_policy_json = ?, planning_policy_json = ?
+			WHERE workspace_id = ? AND key = ?
+		`, `{"allow":["branch_proposal","repo_read"]}`, `{"mode":"initiative"}`, `{"mode":"planning","swarm":{"max_children":2}}`, workspace.ID, "finance"); err != nil {
+			t.Fatalf("seed companion policy update error = %v", err)
+		}
+
+		getOutput, err := runOdinCommand(t, repoRoot, odinBinary, runtimeRoot, nil, "", "companion", "get", "finance")
+		if err != nil {
+			t.Fatalf("runOdinCommand(companion get) error = %v\n%s", err, getOutput)
+		}
+		if !strings.Contains(getOutput, "Finance Advisor") || !strings.Contains(getOutput, "advisor") || !strings.Contains(getOutput, "finance") {
+			t.Fatalf("companion get output = %q, want durable companion row", getOutput)
+		}
+
+		stateOutput, err := runOdinCommand(t, repoRoot, odinBinary, runtimeRoot, nil, "", "companion", "state", "finance", "--json")
+		if err != nil {
+			t.Fatalf("runOdinCommand(companion state --json) error = %v\n%s", err, stateOutput)
+		}
+		var state struct {
+			Key       string `json:"key"`
+			TaskState struct {
+				CompanionKey string `json:"companion_key"`
+			} `json:"task_state"`
+			Swarms []struct {
+				ParentTaskKey string `json:"parent_task_key"`
+			} `json:"swarms"`
+		}
+		if err := json.Unmarshal([]byte(stateOutput), &state); err != nil {
+			t.Fatalf("json.Unmarshal(companion state) error = %v\n%s", err, stateOutput)
+		}
+		if state.Key != "finance" || state.TaskState.CompanionKey != "finance" {
+			t.Fatalf("companion state output = %+v, want finance companion state", state)
+		}
+		if len(state.Swarms) != 0 {
+			t.Fatalf("companion state output = %+v, want no swarms for a fresh companion", state)
+		}
+
+		capabilitiesOutput, err := runOdinCommand(t, repoRoot, odinBinary, runtimeRoot, nil, "", "companion", "capabilities", "finance", "--json")
+		if err != nil {
+			t.Fatalf("runOdinCommand(companion capabilities --json) error = %v\n%s", err, capabilitiesOutput)
+		}
+		var capabilities struct {
+			Key        string `json:"key"`
+			ToolPolicy struct {
+				Allow []string `json:"allow"`
+			} `json:"tool_policy"`
+			MemoryPolicy struct {
+				Mode string `json:"mode"`
+			} `json:"memory_policy"`
+			PlanningPolicy struct {
+				Mode  string `json:"mode"`
+				Swarm struct {
+					MaxChildren int `json:"max_children"`
+				} `json:"swarm"`
+			} `json:"planning_policy"`
+		}
+		if err := json.Unmarshal([]byte(capabilitiesOutput), &capabilities); err != nil {
+			t.Fatalf("json.Unmarshal(companion capabilities) error = %v\n%s", err, capabilitiesOutput)
+		}
+		if capabilities.Key != "finance" {
+			t.Fatalf("companion capabilities key = %q, want finance", capabilities.Key)
+		}
+		if len(capabilities.ToolPolicy.Allow) != 2 || capabilities.ToolPolicy.Allow[0] != "branch_proposal" || capabilities.ToolPolicy.Allow[1] != "repo_read" {
+			t.Fatalf("companion capabilities tool policy = %+v, want branch_proposal and repo_read", capabilities.ToolPolicy.Allow)
+		}
+		if capabilities.MemoryPolicy.Mode != "initiative" {
+			t.Fatalf("companion capabilities memory policy = %q, want initiative", capabilities.MemoryPolicy.Mode)
+		}
+		if capabilities.PlanningPolicy.Mode != "planning" {
+			t.Fatalf("companion capabilities planning mode = %q, want planning", capabilities.PlanningPolicy.Mode)
+		}
+		if capabilities.PlanningPolicy.Swarm.MaxChildren != 2 {
+			t.Fatalf("companion capabilities planning policy = %+v, want max_children=2", capabilities.PlanningPolicy)
+		}
+	})
+
 	t.Run("companion create does not wipe durable companion fields on rerun", func(t *testing.T) {
 		runtimeRoot := t.TempDir()
 

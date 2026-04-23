@@ -3,9 +3,11 @@ package supervision
 import (
 	"context"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	runtimejobs "odin-os/internal/runtime/jobs"
 	"odin-os/internal/store/sqlite"
 )
 
@@ -192,6 +194,221 @@ func TestSchedulerPreservesDueOrderForMultipleDelayedTasks(t *testing.T) {
 	}
 	if afterTick[0].ID != earlierDue.ID || afterTick[1].ID != laterDue.ID {
 		t.Fatalf("after tick order = [%d %d], want [%d %d]", afterTick[0].ID, afterTick[1].ID, earlierDue.ID, laterDue.ID)
+	}
+}
+
+func TestSwarmTickAggregatesReadyResults(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openSupervisionStore(t)
+	defer store.Close()
+
+	_, parentTask, parentRun, _ := mustCreateSwarmParentContext(t, ctx, store, `{"allow":["repo_read","branch_proposal"]}`, `{"mode":"initiative"}`, `{"swarm":{"max_children":2}}`)
+	service := Service{
+		Store: store,
+		Jobs:  runtimejobs.Service{Store: store},
+		Now: func() time.Time {
+			return time.Date(2026, 4, 17, 12, 0, 0, 0, time.UTC)
+		},
+	}
+
+	plan, err := service.PlanSwarm(ctx, PlanSwarmParams{
+		ParentTaskID:    parentTask.ID,
+		ParentRunID:     &parentRun.ID,
+		Trigger:         TriggerParallelResearch,
+		ConvergenceMode: "merge",
+		RequestedBudget: 2,
+		DelegationPlans: []DelegationPlan{
+			{DelegationKey: "docs", Role: "writer", ActionClass: "mutation", ActionKey: "document", MutationMode: "read_only", ArtifactTarget: "docs", Objective: "Document the change"},
+			{DelegationKey: "tests", Role: "tester", ActionClass: "mutation", ActionKey: "test", MutationMode: "read_only", ArtifactTarget: "tests", Objective: "Add regression coverage"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("PlanSwarm() error = %v", err)
+	}
+
+	mustCreateDelegationResultArtifact(t, ctx, store, plan.Delegations[0], "Updated docs", resultEnvelopeJSON(t, "completed", 0.72, []string{"docs/companion.md"}, nil, []string{"merge docs"}, []string{"docs updated"}))
+	mustCreateDelegationResultArtifact(t, ctx, store, plan.Delegations[1], "Added tests", resultEnvelopeJSON(t, "completed", 0.81, []string{"tests/companion_test.go"}, nil, []string{"run regression suite"}, []string{"test coverage updated"}))
+
+	result, err := service.Tick(ctx)
+	if err != nil {
+		t.Fatalf("Tick() error = %v", err)
+	}
+	if result.Reconciled != 1 {
+		t.Fatalf("Reconciled = %d, want 1", result.Reconciled)
+	}
+
+	updatedParent, err := store.GetTask(ctx, parentTask.ID)
+	if err != nil {
+		t.Fatalf("GetTask(parent) error = %v", err)
+	}
+	if updatedParent.Status != "completed" {
+		t.Fatalf("parent status = %q, want completed", updatedParent.Status)
+	}
+}
+
+func TestSwarmTickBlocksQueuedChildrenWhenApprovalIsPending(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openSupervisionStore(t)
+	defer store.Close()
+
+	_, parentTask, parentRun, _ := mustCreateSwarmParentContext(t, ctx, store, `{"allow":["repo_read","branch_proposal"]}`, `{"mode":"initiative"}`, `{"swarm":{"max_children":2}}`)
+	service := Service{
+		Store: store,
+		Jobs:  runtimejobs.Service{Store: store},
+	}
+
+	plan, err := service.PlanSwarm(ctx, PlanSwarmParams{
+		ParentTaskID:    parentTask.ID,
+		ParentRunID:     &parentRun.ID,
+		Trigger:         TriggerBuildPlusReview,
+		ConvergenceMode: "review_gate",
+		RequestedBudget: 2,
+		DelegationPlans: []DelegationPlan{
+			{DelegationKey: "implement", Role: "builder", ActionClass: "mutation", ActionKey: "implement", MutationMode: "isolated_worktree", ArtifactTarget: "branch", Objective: "Implement the change"},
+			{DelegationKey: "review", Role: "reviewer", ActionClass: "analysis", ActionKey: "review", MutationMode: "read_only", ArtifactTarget: "report", Objective: "Review the change"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("PlanSwarm() error = %v", err)
+	}
+	materialized, err := service.MaterializeSwarm(ctx, plan)
+	if err != nil {
+		t.Fatalf("MaterializeSwarm() error = %v", err)
+	}
+	if _, err := store.BlockTask(ctx, sqlite.BlockTaskParams{
+		TaskID: parentTask.ID,
+		Reason: "approval_required",
+	}); err != nil {
+		t.Fatalf("BlockTask(parent) error = %v", err)
+	}
+
+	result, err := service.Tick(ctx)
+	if err != nil {
+		t.Fatalf("Tick() error = %v", err)
+	}
+	if result.Reconciled != 1 {
+		t.Fatalf("Reconciled = %d, want 1", result.Reconciled)
+	}
+	for _, childTask := range materialized.Tasks {
+		updated, err := store.GetTask(ctx, childTask.ID)
+		if err != nil {
+			t.Fatalf("GetTask(child %d) error = %v", childTask.ID, err)
+		}
+		if updated.Status != "blocked" {
+			t.Fatalf("child task %d status = %q, want blocked", childTask.ID, updated.Status)
+		}
+		if updated.BlockedReason != "approval_required" {
+			t.Fatalf("child task %d blocked_reason = %q, want approval_required", childTask.ID, updated.BlockedReason)
+		}
+	}
+	for _, delegation := range materialized.Delegations {
+		updated, err := store.GetDelegation(ctx, delegation.ID)
+		if err != nil {
+			t.Fatalf("GetDelegation(%d) error = %v", delegation.ID, err)
+		}
+		if updated.Status != "blocked" {
+			t.Fatalf("delegation %d status = %q, want blocked", delegation.ID, updated.Status)
+		}
+	}
+}
+
+func TestSwarmTickFailsQueuedChildrenWhenBudgetIsExhausted(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openSupervisionStore(t)
+	defer store.Close()
+
+	_, parentTask, parentRun, _ := mustCreateSwarmParentContext(t, ctx, store, `{"allow":["repo_read","branch_proposal"]}`, `{"mode":"initiative"}`, `{"swarm":{"max_children":2}}`)
+	service := Service{
+		Store: store,
+		Jobs:  runtimejobs.Service{Store: store},
+	}
+
+	plan, err := service.PlanSwarm(ctx, PlanSwarmParams{
+		ParentTaskID:    parentTask.ID,
+		ParentRunID:     &parentRun.ID,
+		Trigger:         TriggerBuildPlusReview,
+		ConvergenceMode: "review_gate",
+		RequestedBudget: 2,
+		DelegationPlans: []DelegationPlan{
+			{DelegationKey: "implement", Role: "builder", ActionClass: "mutation", ActionKey: "implement", MutationMode: "isolated_worktree", ArtifactTarget: "branch", Objective: "Implement the change"},
+			{DelegationKey: "review", Role: "reviewer", ActionClass: "analysis", ActionKey: "review", MutationMode: "read_only", ArtifactTarget: "report", Objective: "Review the change"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("PlanSwarm() error = %v", err)
+	}
+	materialized, err := service.MaterializeSwarm(ctx, plan)
+	if err != nil {
+		t.Fatalf("MaterializeSwarm() error = %v", err)
+	}
+	if _, err := store.BlockTask(ctx, sqlite.BlockTaskParams{
+		TaskID: parentTask.ID,
+		Reason: "budget_exhausted",
+	}); err != nil {
+		t.Fatalf("BlockTask(parent) error = %v", err)
+	}
+
+	result, err := service.Tick(ctx)
+	if err != nil {
+		t.Fatalf("Tick() error = %v", err)
+	}
+	if result.Reconciled != 1 {
+		t.Fatalf("Reconciled = %d, want 1", result.Reconciled)
+	}
+	for _, childTask := range materialized.Tasks {
+		updated, err := store.GetTask(ctx, childTask.ID)
+		if err != nil {
+			t.Fatalf("GetTask(child %d) error = %v", childTask.ID, err)
+		}
+		if updated.Status != "failed" {
+			t.Fatalf("child task %d status = %q, want failed", childTask.ID, updated.Status)
+		}
+		if updated.TerminalReason != "swarm_budget_exhausted" {
+			t.Fatalf("child task %d terminal_reason = %q, want swarm_budget_exhausted", childTask.ID, updated.TerminalReason)
+		}
+	}
+	for _, delegation := range materialized.Delegations {
+		updated, err := store.GetDelegation(ctx, delegation.ID)
+		if err != nil {
+			t.Fatalf("GetDelegation(%d) error = %v", delegation.ID, err)
+		}
+		if updated.Status != "failed" {
+			t.Fatalf("delegation %d status = %q, want failed", delegation.ID, updated.Status)
+		}
+	}
+}
+
+func TestShutdownRequestedSkipsSwarmTick(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openSupervisionStore(t)
+	defer store.Close()
+
+	now := time.Date(2026, 4, 17, 12, 0, 0, 0, time.UTC)
+	project := mustCreateSupervisionProject(t, ctx, store)
+	_ = mustCreateQueuedTaskAt(t, ctx, store, project.ID, "due-task", now.Add(-time.Minute))
+	var shutdownRequested atomic.Bool
+	shutdownRequested.Store(true)
+
+	service := Service{
+		Store:             store,
+		Now:               func() time.Time { return now },
+		ShutdownRequested: &shutdownRequested,
+	}
+
+	result, err := service.Tick(ctx)
+	if err != nil {
+		t.Fatalf("Tick() error = %v", err)
+	}
+	if result.Promoted != 0 || result.Reconciled != 0 {
+		t.Fatalf("Tick() = %+v, want no work while shutdown is requested", result)
 	}
 }
 

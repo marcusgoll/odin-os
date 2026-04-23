@@ -49,6 +49,8 @@ Workers do not own durable truth. They do not define policy. They do not become 
 
 The stable ownership rule is: Odin owns state and decisions; workers own bounded effort and outputs.
 
+When decomposition is necessary, Odin may supervise a bounded swarm of specialist children behind a parent work item. Those children still execute through Odin-owned tasks, runs, approvals, and delegation contracts. Swarms do not introduce a second execution authority.
+
 ## Durable product objects
 
 ### Workspace
@@ -64,6 +66,8 @@ A durable unit of responsibility. Initiatives are the main container for meaning
 ### Companion
 
 A durable role contract such as Daily Assistant, Project Operator, Finance Advisor, or Research Analyst. A companion defines charter, allowed tools, memory rules, planning defaults, tone, and escalation posture. A companion is not a fake autonomous persona.
+
+Companions may request bounded delegation through Odin's supervision layer, but they do not directly spawn unmanaged workers.
 
 ### Policy
 
@@ -89,14 +93,19 @@ Follow-up obligations are not execution records. They remain durable until the f
 
 One execution attempt against a work item. Run attempts are disposable execution records that capture what happened in the execution plane. They do not replace the durable work item.
 
+### Delegation
+
+A durable child-assignment contract attached to a parent work item and optional parent run. Delegations let Odin supervise bounded specialist labor behind one companion-owned objective without turning child workers into first-class product objects.
+
 ## Work flow
 
 1. Marcus captures intent in the workspace directly or through a companion.
 2. Odin resolves workspace, initiative, and policy context.
 3. Odin creates or updates a work item.
 4. Odin decides whether to ask for approval, queue work, or dispatch a worker.
-5. A worker executes one bounded run attempt and returns outputs plus evidence.
-6. Odin records the result, updates memory and work state if allowed, and schedules the next obligation.
+5. If decomposition is justified, Odin may first persist bounded child delegations and supervise their execution through the same task and run system.
+6. A worker executes one bounded run attempt and returns outputs plus evidence.
+7. Odin records the result, updates memory and work state if allowed, and schedules the next obligation.
 
 Follow-up obligations extend this flow by making the next obligation visible in the agenda and, when due, materializing the next governed work item.
 
@@ -104,5 +113,6 @@ Follow-up obligations extend this flow by making the next obligation visible in 
 
 - Managed projects are governed initiative types, not a second product architecture.
 - Companions are durable operating roles, not continuously running pseudo-persons.
+- Swarms are supervised execution patterns over existing work items, not a new product object or second runtime stack.
 - Workers and executors remain replaceable as long as they satisfy Odin's execution contracts.
 - Background capability must surface as explicit work state, policy, or follow-up owned by Odin.

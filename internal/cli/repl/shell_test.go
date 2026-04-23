@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -809,9 +810,252 @@ func TestShellHelpIncludesTransitionCommands(t *testing.T) {
 		t.Fatalf("HandleLine(/help) error = %v", err)
 	}
 
-	for _, want := range []string{"/workspace", "/initiatives", "/companions", "/transition", "/observe", "/compare", "/doctor json", "/doctor report"} {
+	for _, want := range []string{"/workspace", "/initiatives", "/companions", "/tool", "/transition", "/observe", "/compare", "/doctor json", "/doctor report"} {
 		if !strings.Contains(output.String(), want) {
 			t.Fatalf("help output = %q, want %q", output.String(), want)
+		}
+	}
+}
+
+func TestShellToolListShowsBuiltinTools(t *testing.T) {
+	t.Parallel()
+
+	env := newTestEnvironment(t)
+	shell, err := New(env)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	var output bytes.Buffer
+	if err := shell.HandleLine(context.Background(), "/tool list", &output); err != nil {
+		t.Fatalf("HandleLine(/tool list) error = %v", err)
+	}
+
+	for _, want := range []string{"task_list Lists task projections", "event_log Retrieves recent audit event summaries"} {
+		if !strings.Contains(output.String(), want) {
+			t.Fatalf("tool list output = %q, want %q", output.String(), want)
+		}
+	}
+}
+
+func TestShellToolShowDisplaysBuiltinDefinition(t *testing.T) {
+	t.Parallel()
+
+	env := newTestEnvironment(t)
+	shell, err := New(env)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	var output bytes.Buffer
+	if err := shell.HandleLine(context.Background(), "/tool show task_list", &output); err != nil {
+		t.Fatalf("HandleLine(/tool show) error = %v", err)
+	}
+
+	for _, want := range []string{"tool=task_list", "summary=Lists task projections for the requested scope.", "inputs=scope"} {
+		if !strings.Contains(output.String(), want) {
+			t.Fatalf("tool show output = %q, want %q", output.String(), want)
+		}
+	}
+}
+
+func TestShellToolRunInvokesBuiltinTool(t *testing.T) {
+	t.Parallel()
+
+	env := newTestEnvironment(t)
+	shell, err := New(env)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	var output bytes.Buffer
+	if err := shell.HandleLine(context.Background(), "/tool run task_list scope=project", &output); err != nil {
+		t.Fatalf("HandleLine(/tool run) error = %v", err)
+	}
+
+	for _, want := range []string{"tool=task_list", "summary=Task list prepared for project scope.", "fact scope=project", "raw_ref=builtin://task_list/result"} {
+		if !strings.Contains(output.String(), want) {
+			t.Fatalf("tool run output = %q, want %q", output.String(), want)
+		}
+	}
+}
+
+func TestShellToolRunRecordsBrowserMemoryEntries(t *testing.T) {
+	ctx := context.Background()
+	env := newTestEnvironment(t)
+	if _, err := env.Store.CreateProject(ctx, sqlite.CreateProjectParams{
+		Key:           "alpha",
+		Name:          "Alpha",
+		Scope:         "project",
+		GitRoot:       t.TempDir(),
+		DefaultBranch: "main",
+		ManifestPath:  "config/projects.yaml",
+	}); err != nil {
+		t.Fatalf("CreateProject(alpha) error = %v", err)
+	}
+	shell, err := New(env)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	if err := shell.HandleLine(ctx, "/project alpha", &bytes.Buffer{}); err != nil {
+		t.Fatalf("HandleLine(/project alpha) error = %v", err)
+	}
+
+	driverPath := filepath.Join(t.TempDir(), "huginn-x-post-driver.sh")
+	requestPath := filepath.Join(t.TempDir(), "request.json")
+	script := `#!/usr/bin/env bash
+set -euo pipefail
+cat >"$ODIN_DRIVER_REQUEST_PATH"
+printf '{"status":"completed","tool_key":"browser_x_post_visible_evidence","summary":"Captured visible X post evidence for a browser tool run.","artifacts":{"target_url":"https://x.com/marcus/status/123","final_url":"https://x.com/marcus/status/123","label":"restack-browser-tool","title":"X","screenshot_path":"/tmp/restack-browser-tool.png","snapshot_path":"/tmp/restack-browser-tool.txt","snapshot_excerpt":"Students do not need more motivation","post_text":"Students do not need more motivation","author_display_name":"Marcus","author_handle":"@marcus","reply_count":"4","repost_count":"2","like_count":"18","bookmark_count":"1","view_count":"1400"}}'
+`
+	if err := os.WriteFile(driverPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("WriteFile(driver) error = %v", err)
+	}
+	t.Setenv("ODIN_HUGINN_X_POST_DRIVER", driverPath)
+	t.Setenv("ODIN_DRIVER_REQUEST_PATH", requestPath)
+
+	var output bytes.Buffer
+	if err := shell.HandleLine(ctx, "/tool run browser_x_post_visible_evidence target_url=https://x.com/marcus/status/123 label=restack-browser-tool wait_ms=0 headless=false", &output); err != nil {
+		t.Fatalf("HandleLine(/tool run browser_x_post_visible_evidence) error = %v", err)
+	}
+	for _, want := range []string{"tool_memory=", "type=social_evidence", "scope=project/alpha"} {
+		if !strings.Contains(output.String(), want) {
+			t.Fatalf("tool run output = %q, want %q", output.String(), want)
+		}
+	}
+
+	output.Reset()
+	if err := shell.HandleLine(ctx, "/memory list", &output); err != nil {
+		t.Fatalf("HandleLine(/memory list) error = %v", err)
+	}
+	for _, want := range []string{"social_evidence", "restack-browser-tool", "Students do not need more motivation"} {
+		if !strings.Contains(output.String(), want) {
+			t.Fatalf("memory list output = %q, want %q", output.String(), want)
+		}
+	}
+
+	summaries, err := env.Store.ListMemorySummaries(ctx, sqlite.ListMemorySummariesParams{
+		Scope:      "project",
+		ScopeKey:   "alpha",
+		MemoryType: "social_evidence",
+	})
+	if err != nil {
+		t.Fatalf("ListMemorySummaries(social_evidence) error = %v", err)
+	}
+	if len(summaries) != 1 {
+		t.Fatalf("social_evidence len = %d, want 1", len(summaries))
+	}
+	details, err := parseMemoryDetails(summaries[0].DetailsJSON)
+	if err != nil {
+		t.Fatalf("parseMemoryDetails(evidence) error = %v", err)
+	}
+	if details.Fields["channel"] != "x" {
+		t.Fatalf("channel = %q, want x", details.Fields["channel"])
+	}
+	if details.Fields["bookmark_count"] != "1" {
+		t.Fatalf("bookmark_count = %q, want 1", details.Fields["bookmark_count"])
+	}
+}
+
+func TestShellMemoryPublishViaHuginnXUsesCanonicalBrowserPublishTool(t *testing.T) {
+	ctx := context.Background()
+	env := newTestEnvironment(t)
+	project, err := env.Store.CreateProject(ctx, sqlite.CreateProjectParams{
+		Key:           "alpha",
+		Name:          "Alpha",
+		Scope:         "project",
+		GitRoot:       t.TempDir(),
+		DefaultBranch: "main",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject(alpha) error = %v", err)
+	}
+	shell, err := New(env)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	if err := shell.HandleLine(ctx, "/project alpha", &bytes.Buffer{}); err != nil {
+		t.Fatalf("HandleLine(/project alpha) error = %v", err)
+	}
+
+	recorded, err := env.Store.RecordMemorySummary(ctx, sqlite.RecordMemorySummaryParams{
+		ProjectID:   &project.ID,
+		Scope:       "project",
+		ScopeKey:    "alpha",
+		MemoryType:  "social_outcome",
+		Summary:     "Approved X post ready to publish natively.",
+		DetailsJSON: `{"fields":{"result":"approved","channel":"x","content_kind":"post"}}`,
+	})
+	if err != nil {
+		t.Fatalf("RecordMemorySummary() error = %v", err)
+	}
+
+	driverPath := filepath.Join(t.TempDir(), "huginn-x-post-publish-driver.sh")
+	requestPath := filepath.Join(t.TempDir(), "request.json")
+	script := `#!/usr/bin/env bash
+set -euo pipefail
+cat >"$ODIN_DRIVER_REQUEST_PATH"
+printf '{"status":"completed","tool_key":"browser_x_post_publish","summary":"Published approved X post through Browser Control.","artifacts":{"publish_url":"https://x.com/marcus/status/999999999","final_url":"https://x.com/marcus/status/999999999","label":"social-outcome-2","title":"X","screenshot_path":"/tmp/marcus-native-post.png","published_at":"2026-04-20T12:34:56Z","posted_text":"Approved X post ready to publish natively."}}'
+`
+	if err := os.WriteFile(driverPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("WriteFile(driver) error = %v", err)
+	}
+	t.Setenv("ODIN_HUGINN_X_PUBLISH_DRIVER", driverPath)
+	t.Setenv("ODIN_DRIVER_REQUEST_PATH", requestPath)
+
+	var output bytes.Buffer
+	if err := shell.HandleLine(ctx, "/memory list", &output); err != nil {
+		t.Fatalf("HandleLine(/memory list) error = %v", err)
+	}
+	if !strings.Contains(output.String(), strconv.FormatInt(recorded.ID, 10)) {
+		t.Fatalf("memory list output = %q, want recorded memory id", output.String())
+	}
+
+	output.Reset()
+	command := "/memory publish " + strconv.FormatInt(recorded.ID, 10) + " via=huginn_x"
+	if err := shell.HandleLine(ctx, command, &output); err != nil {
+		t.Fatalf("HandleLine(%s) error = %v", command, err)
+	}
+	for _, want := range []string{"status=published", "publish_mode=huginn_x", "publish_url=https://x.com/marcus/status/999999999", "published_at=2026-04-20T12:34:56Z"} {
+		if !strings.Contains(output.String(), want) {
+			t.Fatalf("publish output = %q, want %q", output.String(), want)
+		}
+	}
+	requestBytes, err := os.ReadFile(requestPath)
+	if err != nil {
+		t.Fatalf("ReadFile(requestPath) error = %v", err)
+	}
+	if !strings.Contains(string(requestBytes), `"tool_key":"browser_x_post_publish"`) {
+		t.Fatalf("request = %q, want canonical browser_x_post_publish tool_key", string(requestBytes))
+	}
+
+	summaries, err := env.Store.ListMemorySummaries(ctx, sqlite.ListMemorySummariesParams{
+		Scope:      "project",
+		ScopeKey:   "alpha",
+		MemoryType: "social_outcome",
+	})
+	if err != nil {
+		t.Fatalf("ListMemorySummaries(updated outcome) error = %v", err)
+	}
+	if len(summaries) != 1 {
+		t.Fatalf("updated outcome len = %d, want 1", len(summaries))
+	}
+	details, err := parseMemoryDetails(summaries[0].DetailsJSON)
+	if err != nil {
+		t.Fatalf("parseMemoryDetails(outcome) error = %v", err)
+	}
+	for key, want := range map[string]string{
+		"publish_status":          "published",
+		"publish_mode":            "huginn_x",
+		"publish_url":             "https://x.com/marcus/status/999999999",
+		"published_at":            "2026-04-20T12:34:56Z",
+		"publish_screenshot_path": "/tmp/marcus-native-post.png",
+	} {
+		if got := details.Fields[key]; got != want {
+			t.Fatalf("field %s = %q, want %q", key, got, want)
 		}
 	}
 }

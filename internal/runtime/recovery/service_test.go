@@ -5,6 +5,7 @@ import (
 	"context"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -240,5 +241,20 @@ func TestServiceEscalatesRepeatedRunFailuresIntoProjectionsAndMetrics(t *testing
 	}
 	if snapshot.EscalatedIncidents != 1 {
 		t.Fatalf("EscalatedIncidents = %d, want 1", snapshot.EscalatedIncidents)
+	}
+}
+
+func TestShutdownRequestedSkipsRecoveryCycle(t *testing.T) {
+	var shutdownRequested atomic.Bool
+	shutdownRequested.Store(true)
+
+	result, err := (recovery.Service{
+		ShutdownRequested: &shutdownRequested,
+	}).RunCycle(context.Background())
+	if err != nil {
+		t.Fatalf("RunCycle() error = %v", err)
+	}
+	if len(result.Observations) != 0 || len(result.Decisions) != 0 || len(result.Outcomes) != 0 {
+		t.Fatalf("RunCycle() = %+v, want empty result while shutdown is requested", result)
 	}
 }

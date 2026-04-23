@@ -3,6 +3,7 @@ package integration_test
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -17,6 +18,7 @@ import (
 	approvals "odin-os/internal/core/approvals"
 	coremedia "odin-os/internal/core/media"
 	"odin-os/internal/core/projects"
+	"odin-os/internal/core/workspaces"
 	"odin-os/internal/executors/contract"
 	executorrouter "odin-os/internal/executors/router"
 	"odin-os/internal/learning/evaluator"
@@ -32,6 +34,7 @@ import (
 	mediasvc "odin-os/internal/runtime/media"
 	"odin-os/internal/runtime/projections"
 	recoverysvc "odin-os/internal/runtime/recovery"
+	supervisionsvc "odin-os/internal/runtime/supervision"
 	"odin-os/internal/store/sqlite"
 	"odin-os/internal/telemetry/metrics"
 	"odin-os/internal/tools/broker"
@@ -427,7 +430,7 @@ func TestAlphaAcceptance(t *testing.T) {
 		if err != nil {
 			t.Fatalf("LoadDir(registry) error = %v", err)
 		}
-		suiteBroker := broker.New(broker.StaticSource(snapshot), catalog.BuiltinDefinitions(), nil, budgets.Limits{
+		suiteBroker := broker.New(snapshot, catalog.BuiltinDefinitions(), budgets.Limits{
 			Tool: budgets.Tool{
 				MaxSelections:  6,
 				MaxInvocations: 4,
@@ -440,17 +443,11 @@ func TestAlphaAcceptance(t *testing.T) {
 			},
 		})
 
-		odinCoreCards, err := suiteBroker.Catalog("odin-core")
-		if err != nil {
-			t.Fatalf("Catalog(odin-core) error = %v", err)
-		}
-		if !hasCapability(odinCoreCards, "status-command") || !hasCapability(odinCoreCards, "triage-skill") {
+		odinCoreCards := suiteBroker.Catalog("odin-core")
+		if !hasCapability(odinCoreCards, "task_list") || !hasCapability(odinCoreCards, "triage-skill") {
 			t.Fatalf("odin-core catalog missing expected capabilities: %+v", odinCoreCards)
 		}
-		projectCards, err := suiteBroker.Catalog("project")
-		if err != nil {
-			t.Fatalf("Catalog(project) error = %v", err)
-		}
+		projectCards := suiteBroker.Catalog("project")
 		if !hasCapability(projectCards, "triage-agent") {
 			t.Fatalf("project catalog missing triage-agent: %+v", projectCards)
 		}
@@ -1046,4 +1043,323 @@ func TestAlphaAcceptance(t *testing.T) {
 		}
 		requirePathExists(t, filepath.Join(restoreRoot, "data", "odin.db"))
 	})
+
+	t.Run("real binary surfaces companion swarm state in status and agenda", func(t *testing.T) {
+		runtimeRoot := t.TempDir()
+		store := openRuntimeStore(t, runtimeRoot)
+		store.Now = func() time.Time { return now }
+		seedAlphaAcceptanceCompanionSwarms(t, ctx, store, now)
+		if err := store.Close(); err != nil {
+			t.Fatalf("Close() error = %v", err)
+		}
+
+		statusOutput, err := runOdinCommand(t, repoRoot, odinBinary, runtimeRoot, map[string]string{
+			"ODIN_NOW": now.Format(time.RFC3339Nano),
+		}, "", "status", "--json")
+		if err != nil {
+			t.Fatalf("runOdinCommand(status --json) error = %v\n%s", err, statusOutput)
+		}
+
+		var statusReport struct {
+			CompanionSwarmCounts struct {
+				Active  int `json:"active"`
+				Blocked int `json:"blocked"`
+				Backlog int `json:"backlog"`
+			} `json:"companion_swarm_counts"`
+			CompanionSwarms []projections.CompanionSwarmView `json:"companion_swarms"`
+		}
+		if err := json.Unmarshal([]byte(statusOutput), &statusReport); err != nil {
+			t.Fatalf("json.Unmarshal(status output) error = %v\n%s", err, statusOutput)
+		}
+		if len(statusReport.CompanionSwarms) != 4 {
+			t.Fatalf("status companion_swarms len = %d, want 4", len(statusReport.CompanionSwarms))
+		}
+		if statusReport.CompanionSwarmCounts.Active != 2 || statusReport.CompanionSwarmCounts.Blocked != 2 || statusReport.CompanionSwarmCounts.Backlog != 7 {
+			t.Fatalf("status companion_swarm_counts = %+v, want active=2 blocked=2 backlog=7", statusReport.CompanionSwarmCounts)
+		}
+
+		gotByTaskKey := make(map[string]projections.CompanionSwarmView, len(statusReport.CompanionSwarms))
+		for _, swarm := range statusReport.CompanionSwarms {
+			gotByTaskKey[swarm.ParentTaskKey] = swarm
+		}
+		if gotByTaskKey["alpha-active-swarm"].Status != "queued" {
+			t.Fatalf("active swarm status = %q, want queued", gotByTaskKey["alpha-active-swarm"].Status)
+		}
+		if gotByTaskKey["alpha-completed-running-swarm"].Status != "running" {
+			t.Fatalf("completed-running swarm status = %q, want running", gotByTaskKey["alpha-completed-running-swarm"].Status)
+		}
+		if gotByTaskKey["alpha-completed-running-swarm"].ActiveChildRunCount != 1 {
+			t.Fatalf("completed-running swarm active_child_run_count = %d, want 1", gotByTaskKey["alpha-completed-running-swarm"].ActiveChildRunCount)
+		}
+		if gotByTaskKey["alpha-approval-swarm"].BlockedReason != "approval_required" {
+			t.Fatalf("approval swarm blocked_reason = %q, want approval_required", gotByTaskKey["alpha-approval-swarm"].BlockedReason)
+		}
+		if gotByTaskKey["alpha-budget-swarm"].BlockedReason != "budget_exhausted" {
+			t.Fatalf("budget swarm blocked_reason = %q, want budget_exhausted", gotByTaskKey["alpha-budget-swarm"].BlockedReason)
+		}
+
+		agendaOutput, err := runOdinCommand(t, repoRoot, odinBinary, runtimeRoot, map[string]string{
+			"ODIN_NOW": now.Format(time.RFC3339Nano),
+		}, "", "agenda", "--json")
+		if err != nil {
+			t.Fatalf("runOdinCommand(agenda --json) error = %v\n%s", err, agendaOutput)
+		}
+
+		var agenda projections.AgendaView
+		if err := json.Unmarshal([]byte(agendaOutput), &agenda); err != nil {
+			t.Fatalf("json.Unmarshal(agenda output) error = %v\n%s", err, agendaOutput)
+		}
+		if len(agenda.CompanionSwarms) != 4 {
+			t.Fatalf("agenda companion_swarms len = %d, want 4", len(agenda.CompanionSwarms))
+		}
+		agendaByTaskKey := make(map[string]projections.CompanionSwarmView, len(agenda.CompanionSwarms))
+		for _, swarm := range agenda.CompanionSwarms {
+			agendaByTaskKey[swarm.ParentTaskKey] = swarm
+		}
+		if agendaByTaskKey["alpha-active-swarm"].Status != "queued" {
+			t.Fatalf("agenda active swarm status = %q, want queued", agendaByTaskKey["alpha-active-swarm"].Status)
+		}
+		if agendaByTaskKey["alpha-completed-running-swarm"].Status != "running" {
+			t.Fatalf("agenda completed-running swarm status = %q, want running", agendaByTaskKey["alpha-completed-running-swarm"].Status)
+		}
+		if agendaByTaskKey["alpha-approval-swarm"].BlockedReason != "approval_required" {
+			t.Fatalf("agenda approval swarm blocked_reason = %q, want approval_required", agendaByTaskKey["alpha-approval-swarm"].BlockedReason)
+		}
+		if agendaByTaskKey["alpha-budget-swarm"].BlockedReason != "budget_exhausted" {
+			t.Fatalf("agenda budget swarm blocked_reason = %q, want budget_exhausted", agendaByTaskKey["alpha-budget-swarm"].BlockedReason)
+		}
+	})
+
+	t.Run("scheduler reconciliation applies swarm stop conditions to child work", func(t *testing.T) {
+		runtimeRoot := t.TempDir()
+		store := openRuntimeStore(t, runtimeRoot)
+		store.Now = func() time.Time { return now }
+		seedAlphaAcceptanceCompanionSwarms(t, ctx, store, now)
+		defer store.Close()
+
+		scheduler := supervisionsvc.Service{
+			Store: store,
+			Jobs:  jobsvc.Service{Store: store, Now: func() time.Time { return now }},
+			Now:   func() time.Time { return now },
+		}
+		result, err := scheduler.Tick(ctx)
+		if err != nil {
+			t.Fatalf("Tick() error = %v", err)
+		}
+		if result.Reconciled < 2 {
+			t.Fatalf("Tick().Reconciled = %d, want at least 2 stop-condition updates", result.Reconciled)
+		}
+
+		lookupTaskID := func(taskKey string) int64 {
+			t.Helper()
+			var taskID int64
+			if err := store.DB().QueryRowContext(ctx, `SELECT id FROM tasks WHERE key = ?`, taskKey).Scan(&taskID); err != nil {
+				t.Fatalf("lookup task %s error = %v", taskKey, err)
+			}
+			return taskID
+		}
+
+		assertDelegatedChildren := func(parentTaskKey, wantStatus, wantReason string) {
+			t.Helper()
+			parentTaskID := lookupTaskID(parentTaskKey)
+			delegations, err := store.ListDelegations(ctx, sqlite.ListDelegationsParams{
+				ParentTaskID: &parentTaskID,
+			})
+			if err != nil {
+				t.Fatalf("ListDelegations(%s) error = %v", parentTaskKey, err)
+			}
+			if len(delegations) == 0 {
+				t.Fatalf("delegations for %s = 0, want child work", parentTaskKey)
+			}
+			for _, delegation := range delegations {
+				if delegation.ChildTaskID == nil {
+					t.Fatalf("delegation %d child_task_id = nil, want child task", delegation.ID)
+				}
+				childTask, err := store.GetTask(ctx, *delegation.ChildTaskID)
+				if err != nil {
+					t.Fatalf("GetTask(child %d) error = %v", *delegation.ChildTaskID, err)
+				}
+				if childTask.Status != wantStatus {
+					t.Fatalf("%s child task %d status = %q, want %q", parentTaskKey, childTask.ID, childTask.Status, wantStatus)
+				}
+				switch wantStatus {
+				case "blocked":
+					if childTask.BlockedReason != wantReason {
+						t.Fatalf("%s child task %d blocked_reason = %q, want %q", parentTaskKey, childTask.ID, childTask.BlockedReason, wantReason)
+					}
+				case "failed":
+					if childTask.TerminalReason != wantReason {
+						t.Fatalf("%s child task %d terminal_reason = %q, want %q", parentTaskKey, childTask.ID, childTask.TerminalReason, wantReason)
+					}
+				}
+			}
+		}
+
+		assertDelegatedChildren("alpha-approval-swarm", "blocked", "approval_required")
+		assertDelegatedChildren("alpha-budget-swarm", "failed", "swarm_budget_exhausted")
+	})
+}
+
+func seedAlphaAcceptanceCompanionSwarms(t *testing.T, ctx context.Context, store *sqlite.Store, now time.Time) {
+	t.Helper()
+
+	workspace, err := workspaces.Service{Store: store}.BootstrapDefaultWorkspace(ctx)
+	if err != nil {
+		t.Fatalf("BootstrapDefaultWorkspace() error = %v", err)
+	}
+	companion, err := store.GetCompanionByKey(ctx, workspace.ID, workspace.DefaultCompanionKey)
+	if err != nil {
+		t.Fatalf("GetCompanionByKey(default) error = %v", err)
+	}
+	projectRoot := filepath.Join(t.TempDir(), "alpha-swarm-project")
+	if err := os.MkdirAll(projectRoot, 0o755); err != nil {
+		t.Fatalf("MkdirAll(projectRoot) error = %v", err)
+	}
+	project, err := store.CreateProject(ctx, sqlite.CreateProjectParams{
+		Key:           "alpha-swarm-project",
+		Name:          "Alpha Swarm Project",
+		Scope:         "project",
+		GitRoot:       projectRoot,
+		DefaultBranch: "main",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject(alpha-swarm-project) error = %v", err)
+	}
+	initiative, err := store.UpsertInitiative(ctx, sqlite.UpsertInitiativeParams{
+		WorkspaceID:      workspace.ID,
+		Key:              "alpha-swarm-initiative",
+		Title:            "Alpha Swarm Initiative",
+		Kind:             "delivery",
+		Status:           "active",
+		Summary:          "Acceptance fixture for companion swarm status",
+		OwnerCompanionID: &companion.ID,
+	})
+	if err != nil {
+		t.Fatalf("UpsertInitiative(alpha-swarm-initiative) error = %v", err)
+	}
+
+	swarmService := supervisionsvc.Service{
+		Store: store,
+		Jobs:  jobsvc.Service{Store: store, Now: func() time.Time { return now }},
+	}
+
+	createParentTask := func(key string) sqlite.Task {
+		task, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
+			ProjectID:    project.ID,
+			Key:          key,
+			Title:        strings.ReplaceAll(key, "-", " "),
+			ActionKey:    "execute",
+			Status:       "queued",
+			Scope:        "project",
+			RequestedBy:  "operator",
+			WorkspaceID:  &workspace.ID,
+			InitiativeID: &initiative.ID,
+			CompanionID:  &companion.ID,
+			WorkKind:     "delivery",
+		})
+		if err != nil {
+			t.Fatalf("CreateTask(%s) error = %v", key, err)
+		}
+		return task
+	}
+	createDelegationPlans := func() []supervisionsvc.DelegationPlan {
+		return []supervisionsvc.DelegationPlan{
+			{
+				DelegationKey:         "implement",
+				Role:                  "builder",
+				ActionClass:           "mutation",
+				ActionKey:             "implement",
+				MutationMode:          "isolated_worktree",
+				ArtifactTarget:        "branch",
+				Objective:             "Implement the requested change",
+				RequestedTools:        []string{"repo_read", "branch_proposal"},
+				RequestedMemoryScopes: []string{"workspace", "initiative", "companion"},
+			},
+			{
+				DelegationKey:         "review",
+				Role:                  "reviewer",
+				ActionClass:           "analysis",
+				ActionKey:             "review",
+				MutationMode:          "read_only",
+				ArtifactTarget:        "report",
+				Objective:             "Review the implementation",
+				RequestedTools:        []string{"repo_read"},
+				RequestedMemoryScopes: []string{"workspace", "initiative", "companion"},
+			},
+		}
+	}
+	planAndMaterialize := func(parent sqlite.Task, requestedBudget int) {
+		plan, err := swarmService.PlanSwarm(ctx, supervisionsvc.PlanSwarmParams{
+			ParentTaskID:    parent.ID,
+			Trigger:         supervisionsvc.TriggerBuildPlusReview,
+			ConvergenceMode: "review_gate",
+			RequestedBudget: requestedBudget,
+			DelegationPlans: createDelegationPlans(),
+		})
+		if err != nil {
+			t.Fatalf("PlanSwarm(%s) error = %v", parent.Key, err)
+		}
+		if _, err := swarmService.MaterializeSwarm(ctx, plan); err != nil {
+			t.Fatalf("MaterializeSwarm(%s) error = %v", parent.Key, err)
+		}
+	}
+
+	planAndMaterialize(createParentTask("alpha-active-swarm"), 2)
+
+	completedRunningParent := createParentTask("alpha-completed-running-swarm")
+	completedRunning, err := swarmService.PlanSwarm(ctx, supervisionsvc.PlanSwarmParams{
+		ParentTaskID:    completedRunningParent.ID,
+		Trigger:         supervisionsvc.TriggerBuildPlusReview,
+		ConvergenceMode: "review_gate",
+		RequestedBudget: 2,
+		DelegationPlans: createDelegationPlans(),
+	})
+	if err != nil {
+		t.Fatalf("PlanSwarm(alpha-completed-running-swarm) error = %v", err)
+	}
+	materializedCompletedRunning, err := swarmService.MaterializeSwarm(ctx, completedRunning)
+	if err != nil {
+		t.Fatalf("MaterializeSwarm(alpha-completed-running-swarm) error = %v", err)
+	}
+	if len(materializedCompletedRunning.Tasks) == 0 {
+		t.Fatal("MaterializeSwarm(alpha-completed-running-swarm) returned no child tasks")
+	}
+	if _, err := store.StartRun(ctx, sqlite.StartRunParams{
+		TaskID:     materializedCompletedRunning.Tasks[0].ID,
+		Executor:   "codex",
+		Attempt:    1,
+		Status:     "running",
+		TaskStatus: "running",
+	}); err != nil {
+		t.Fatalf("StartRun(alpha-completed-running-swarm) error = %v", err)
+	}
+	for _, delegation := range materializedCompletedRunning.Delegations {
+		if _, err := store.CreateDelegationArtifact(ctx, sqlite.CreateDelegationArtifactParams{
+			DelegationID: delegation.ID,
+			ArtifactType: "result",
+			Summary:      "Completed while child run is active",
+			DetailsJSON:  `{"status":"completed","confidence":0.9,"evidence_refs":["alpha/completed-running"],"unresolved_risks":[],"proposed_next_actions":[],"proposed_memory_candidates":[]}`,
+		}); err != nil {
+			t.Fatalf("CreateDelegationArtifact(alpha-completed-running-swarm) error = %v", err)
+		}
+	}
+
+	approvalParent := createParentTask("alpha-approval-swarm")
+	planAndMaterialize(approvalParent, 2)
+	if _, err := store.BlockTask(ctx, sqlite.BlockTaskParams{
+		TaskID: approvalParent.ID,
+		Reason: "approval_required",
+	}); err != nil {
+		t.Fatalf("BlockTask(alpha-approval-swarm) error = %v", err)
+	}
+
+	budgetParent := createParentTask("alpha-budget-swarm")
+	planAndMaterialize(budgetParent, 3)
+	if _, err := store.BlockTask(ctx, sqlite.BlockTaskParams{
+		TaskID: budgetParent.ID,
+		Reason: "budget_exhausted",
+	}); err != nil {
+		t.Fatalf("BlockTask(alpha-budget-swarm) error = %v", err)
+	}
 }

@@ -198,7 +198,7 @@ func writeRobinhoodShellFixtureDriver(t *testing.T, submitJSON string) string {
 	t.Helper()
 
 	path := filepath.Join(t.TempDir(), "robinhood-transfer-driver.sh")
-script := fmt.Sprintf(`#!/usr/bin/env bash
+	script := fmt.Sprintf(`#!/usr/bin/env bash
 set -euo pipefail
 request_json="$(cat)"
 mode="$(jq -r '.input.mode // "prepare"' <<<"$request_json")"

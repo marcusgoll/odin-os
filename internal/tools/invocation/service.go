@@ -12,7 +12,8 @@ import (
 	"strings"
 
 	"odin-os/internal/adapters/browserhuman"
-	"odin-os/internal/adapters/web"
+	caldriver "odin-os/internal/adapters/calendar"
+	webdriver "odin-os/internal/adapters/web"
 )
 
 type Request struct {
@@ -43,7 +44,7 @@ type Service struct {
 	RuntimeRoot             string
 	DriverPath              string
 	Driver                  browserhuman.Driver
-	RobinhoodTransferDriver web.RobinhoodTransferDriver
+	RobinhoodTransferDriver webdriver.RobinhoodTransferDriver
 }
 
 func (service Service) Invoke(ctx context.Context, key string, request Request) (Result, error) {
@@ -100,6 +101,46 @@ func (service Service) Invoke(ctx context.Context, key string, request Request) 
 	return result, nil
 }
 
+func (service Service) GoogleCalendarOffDates(ctx context.Context, request caldriver.Request) (BrowserResult, error) {
+	response, err := caldriver.NewDriver().Invoke(ctx, request)
+	if err != nil {
+		return BrowserResult{}, err
+	}
+	return browserResultFromResponse(response.ToolKey, response.Summary, response.Artifacts, response)
+}
+
+func (service Service) HuginnPBSSession(ctx context.Context, request webdriver.Request) (BrowserResult, error) {
+	response, err := webdriver.NewDriver().Invoke(ctx, request)
+	if err != nil {
+		return BrowserResult{}, err
+	}
+	return browserResultFromResponse(response.ToolKey, response.Summary, response.Artifacts, response)
+}
+
+func (service Service) HuginnVisualAudit(ctx context.Context, request webdriver.VisualRequest) (BrowserResult, error) {
+	response, err := webdriver.NewVisualDriver().Invoke(ctx, request)
+	if err != nil {
+		return BrowserResult{}, err
+	}
+	return browserResultFromResponse(response.ToolKey, response.Summary, response.Artifacts, response)
+}
+
+func (service Service) HuginnXPostVisibleEvidence(ctx context.Context, request webdriver.XPostRequest) (BrowserResult, error) {
+	response, err := webdriver.NewXPostDriver().Invoke(ctx, request)
+	if err != nil {
+		return BrowserResult{}, err
+	}
+	return browserResultFromResponse(response.ToolKey, response.Summary, response.Artifacts, response)
+}
+
+func (service Service) HuginnXPostPublish(ctx context.Context, request webdriver.XPublishRequest) (BrowserResult, error) {
+	response, err := webdriver.NewXPublishDriver().Invoke(ctx, request)
+	if err != nil {
+		return BrowserResult{}, err
+	}
+	return browserResultFromResponse(response.ToolKey, response.Summary, response.Artifacts, response)
+}
+
 func (service Service) BrowserHuman(ctx context.Context, request browserhuman.Request) (BrowserResult, error) {
 	driver := service.Driver.WithDefaults()
 
@@ -110,10 +151,10 @@ func (service Service) BrowserHuman(ctx context.Context, request browserhuman.Re
 	return toBrowserResult(response.ToolKey, response.Summary, response.Artifacts, response.RawOutput), nil
 }
 
-func (service Service) RobinhoodTransfer(ctx context.Context, request web.RobinhoodTransferRequest) (BrowserResult, error) {
+func (service Service) RobinhoodTransfer(ctx context.Context, request webdriver.RobinhoodTransferRequest) (BrowserResult, error) {
 	driver := service.RobinhoodTransferDriver
 	if driver.InvokeFunc == nil && strings.TrimSpace(driver.Driver.EnvVar) == "" && strings.TrimSpace(driver.Driver.DefaultToolKey) == "" {
-		driver = web.NewRobinhoodTransferDriver()
+		driver = webdriver.NewRobinhoodTransferDriver()
 	}
 
 	response, err := driver.Invoke(ctx, request)
@@ -121,6 +162,14 @@ func (service Service) RobinhoodTransfer(ctx context.Context, request web.Robinh
 		return BrowserResult{}, err
 	}
 	return toBrowserResult(response.ToolKey, response.Summary, response.Artifacts, response.RawOutput), nil
+}
+
+func browserResultFromResponse(toolKey string, summary string, artifacts map[string]any, response any) (BrowserResult, error) {
+	rawOutput, err := json.Marshal(response)
+	if err != nil {
+		return BrowserResult{}, err
+	}
+	return toBrowserResult(toolKey, summary, artifacts, string(rawOutput)), nil
 }
 
 func toBrowserResult(toolKey string, summary string, artifacts map[string]any, rawOutput string) BrowserResult {

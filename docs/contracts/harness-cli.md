@@ -19,10 +19,11 @@ The binary does not start an interactive session when invoked without a subcomma
 - `odin repl` starts the compatibility REPL.
 - `odin status --json` exposes runtime readiness and approval state for harness polling.
 - `odin task run --project <key> --title <title>` is the legacy compatibility path for durable task execution relative to the newer follow-through vocabulary.
+- `odin initiative`, `odin companion`, `odin profile`, `odin followup`, and `odin agenda` are real root command families in the current dispatcher.
 
-## Intended root command families
+## Current root command families
 
-The current root command dispatcher lives in `internal/app/lifecycle/run.go`. That surface still exposes the existing command set, but the intended product-facing root families are:
+The current root command dispatcher lives in `internal/app/lifecycle/run.go`. The product-facing root families now include:
 
 - `odin initiative`
 - `odin companion`
@@ -30,7 +31,7 @@ The current root command dispatcher lives in `internal/app/lifecycle/run.go`. Th
 - `odin followup`
 - `odin agenda`
 
-These are the command families the docs should name for the follow-through model. They are not yet claimed as implemented CLI subcommands by this contract.
+Today, companion lifecycle is limited to explicit create and list operations. Deeper companion execution and swarm read surfaces should be added by extending this same root command family rather than creating a second CLI.
 
 ## Command boundary rules
 
@@ -38,7 +39,8 @@ These are the command families the docs should name for the follow-through model
 - machine-readable output must be available on operational commands through `--json`
 - the REPL is optional compatibility surface, not the default operator entry point
 - harnesses own the conversational loop and invoke `odin` commands as needed
-- the root command surface should remain stable enough for a harness to select `initiative`, `companion`, `profile`, `followup`, or `agenda` when those command families land
+- the root command surface should remain stable enough for a harness to select `initiative`, `companion`, `profile`, `followup`, or `agenda` directly
+- companion swarm behavior must extend the existing `odin companion`, `odin status`, and `odin agenda` paths instead of adding a parallel swarm CLI
 
 ## Execution rules
 
