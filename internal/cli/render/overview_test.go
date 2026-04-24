@@ -41,6 +41,10 @@ func TestRenderOverviewUsesCanonicalLanes(t *testing.T) {
 	if strings.Contains(rendered, "Processes") {
 		t.Fatalf("RenderOverview() = %q, must not introduce Processes lane", rendered)
 	}
+	approvalRow := "approval=1 work_item=alpha-task project=alpha companion=primary run=7 status=pending resolver=unsupported"
+	if got := strings.Count(rendered, approvalRow); got != 2 {
+		t.Fatalf("approval row count = %d, want 2 in Attention and Approvals lanes\n%s", got, rendered)
+	}
 }
 
 func sampleOverview() overview.View {
