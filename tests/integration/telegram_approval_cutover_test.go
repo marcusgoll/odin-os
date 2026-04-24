@@ -104,10 +104,13 @@ func TestTelegramApprovalCutover(t *testing.T) {
 	}
 
 	var payload struct {
-		ID         int64  `json:"id"`
-		Status     string `json:"status"`
-		DecisionBy string `json:"decision_by"`
-		Reason     string `json:"reason"`
+		ID              int64  `json:"id"`
+		Status          string `json:"status"`
+		DecisionBy      string `json:"decision_by"`
+		Reason          string `json:"reason"`
+		ResolverSupport string `json:"resolver_support"`
+		Result          string `json:"result"`
+		Summary         string `json:"summary"`
 	}
 	if err := json.Unmarshal(outputBytes, &payload); err != nil {
 		t.Fatalf("unmarshal approval resolve output = %v\n%s", err, string(outputBytes))
@@ -115,22 +118,31 @@ func TestTelegramApprovalCutover(t *testing.T) {
 	if payload.ID != approval.ID {
 		t.Fatalf("approval id = %d, want %d", payload.ID, approval.ID)
 	}
-	if payload.Status != "approved" {
-		t.Fatalf("approval status = %q, want approved", payload.Status)
+	if payload.Status != "pending" {
+		t.Fatalf("approval status = %q, want pending", payload.Status)
 	}
-	if payload.DecisionBy != "telegram" {
-		t.Fatalf("decision_by = %q, want telegram", payload.DecisionBy)
+	if payload.ResolverSupport != "unsupported" {
+		t.Fatalf("resolver_support = %q, want unsupported", payload.ResolverSupport)
+	}
+	if payload.Result != "not_resolved" {
+		t.Fatalf("result = %q, want not_resolved", payload.Result)
+	}
+	if payload.Summary != "approval has no registered resolver; inspect only" {
+		t.Fatalf("summary = %q, want unsupported summary", payload.Summary)
+	}
+	if payload.DecisionBy != "" {
+		t.Fatalf("decision_by = %q, want empty unsupported decision maker", payload.DecisionBy)
 	}
 
 	resolved, err := store.GetApproval(ctx, approval.ID)
 	if err != nil {
 		t.Fatalf("GetApproval() error = %v", err)
 	}
-	if resolved.Status != "approved" {
-		t.Fatalf("approval row status = %q, want approved", resolved.Status)
+	if resolved.Status != "pending" {
+		t.Fatalf("approval row status = %q, want pending", resolved.Status)
 	}
-	if resolved.DecisionBy != "telegram" {
-		t.Fatalf("approval row decision_by = %q, want telegram", resolved.DecisionBy)
+	if resolved.DecisionBy != "" {
+		t.Fatalf("approval row decision_by = %q, want empty unsupported decision maker", resolved.DecisionBy)
 	}
 
 	assertNoNonceState(t, runtimeRoot)

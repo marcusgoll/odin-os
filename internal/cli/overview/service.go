@@ -11,6 +11,7 @@ import (
 	"odin-os/internal/core/workspaces"
 	knowledgememory "odin-os/internal/memory/knowledge"
 	"odin-os/internal/registry"
+	approvalsvc "odin-os/internal/runtime/approvals"
 	"odin-os/internal/runtime/projections"
 	"odin-os/internal/store/sqlite"
 	toolcatalog "odin-os/internal/tools/catalog"
@@ -115,13 +116,15 @@ type CapabilityCatalogLane struct {
 }
 
 type ApprovalSummary struct {
-	ApprovalID   int64
-	TaskID       int64
-	ProjectKey   string
-	CompanionKey *string
-	WorkItemKey  string
-	Status       string
-	RequestedAt  string
+	ApprovalID      int64
+	TaskID          int64
+	RunID           *int64
+	ProjectKey      string
+	CompanionKey    *string
+	WorkItemKey     string
+	Status          string
+	RequestedAt     string
+	ResolverSupport string
 }
 
 type ObservabilityLane struct {
@@ -381,14 +384,20 @@ func (service Service) Build(ctx context.Context, resolved scope.Resolution) (Vi
 		if err != nil {
 			return View{}, err
 		}
+		detail, err := approvalsvc.Service{Store: service.Store}.Detail(ctx, approval.ApprovalID)
+		if err != nil {
+			return View{}, err
+		}
 		view.Approvals = append(view.Approvals, ApprovalSummary{
-			ApprovalID:   approval.ApprovalID,
-			TaskID:       approval.TaskID,
-			ProjectKey:   taskProjectIndex[approval.TaskID],
-			CompanionKey: taskContext.companionKey,
-			WorkItemKey:  approval.TaskKey,
-			Status:       approval.Status,
-			RequestedAt:  approval.RequestedAt,
+			ApprovalID:      approval.ApprovalID,
+			TaskID:          approval.TaskID,
+			RunID:           detail.Approval.RunID,
+			ProjectKey:      taskProjectIndex[approval.TaskID],
+			CompanionKey:    taskContext.companionKey,
+			WorkItemKey:     approval.TaskKey,
+			Status:          approval.Status,
+			RequestedAt:     approval.RequestedAt,
+			ResolverSupport: string(detail.ResolverSupport),
 		})
 	}
 

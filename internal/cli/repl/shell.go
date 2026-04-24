@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/url"
@@ -1700,8 +1701,10 @@ func (shell *Shell) handleApprovals(ctx context.Context, args []string, output i
 		switch strings.ToLower(args[0]) {
 		case "resolve":
 			return shell.handleApprovalResolve(ctx, args[1:], output)
+		case "show":
+			return shell.handleApprovalShow(ctx, args[1:], output)
 		default:
-			_, err := fmt.Fprintln(output, "usage: /approvals | /approvals resolve <approval-id> <approve|deny> because <reason...>")
+			_, err := fmt.Fprintln(output, "usage: /approvals | /approvals show <approval-id> | /approvals resolve <approval-id> <approve|deny> because <reason...>")
 			return err
 		}
 	}
@@ -1714,7 +1717,19 @@ func (shell *Shell) handleApprovals(ctx context.Context, args []string, output i
 		return err
 	}
 	for _, approval := range approvals {
-		if _, err := fmt.Fprintf(output, "%s %s\n", approval.TaskKey, approval.Status); err != nil {
+		detail, err := shell.approvals.Detail(ctx, approval.ApprovalID)
+		if err != nil {
+			return err
+		}
+		if _, err := fmt.Fprintf(
+			output,
+			"approval=%d task=%s run=%s status=%s resolver=%s\n",
+			approval.ApprovalID,
+			approval.TaskKey,
+			formatNullableInt64(detail.Approval.RunID),
+			approval.Status,
+			detail.ResolverSupport,
+		); err != nil {
 			return err
 		}
 	}
@@ -1752,6 +1767,18 @@ func (shell *Shell) handleApprovalResolve(ctx context.Context, args []string, ou
 		Reason:     strings.Join(args[3:], " "),
 	})
 	if err != nil {
+		if errors.Is(err, approvalsvc.ErrUnsupportedResolver) {
+			receipt, receiptErr := approvalsvc.FormatReceipt(result)
+			if receiptErr != nil {
+				_, writeErr := fmt.Fprintf(output, "unable to render approval receipt: %v\n", receiptErr)
+				return writeErr
+			}
+			if _, writeErr := fmt.Fprintln(output, receipt.Line); writeErr != nil {
+				return writeErr
+			}
+			_, writeErr := fmt.Fprintln(output, receipt.Summary)
+			return writeErr
+		}
 		_, writeErr := fmt.Fprintf(output, "unable to resolve approval: %v\n", err)
 		return writeErr
 	}
@@ -1772,6 +1799,78 @@ func (shell *Shell) handleApprovalResolve(ctx context.Context, args []string, ou
 	}
 	_, err = fmt.Fprintln(output, receipt.Summary)
 	return err
+}
+
+func (shell *Shell) handleApprovalShow(ctx context.Context, args []string, output io.Writer) error {
+	if len(args) != 1 {
+		_, err := fmt.Fprintln(output, "usage: /approvals show <approval-id>")
+		return err
+	}
+
+	approvalID, err := strconv.ParseInt(args[0], 10, 64)
+	if err != nil || approvalID <= 0 {
+		_, writeErr := fmt.Fprintln(output, "approval id must be a positive integer")
+		return writeErr
+	}
+
+	detail, err := shell.approvals.Detail(ctx, approvalID)
+	if err != nil {
+		_, writeErr := fmt.Fprintf(output, "unable to show approval: %v\n", err)
+		return writeErr
+	}
+	project, err := shell.env.Store.GetProject(ctx, detail.Task.ProjectID)
+	if err != nil {
+		return err
+	}
+	if !matchesTaskProjectionScope(project.Key, detail.Task.Scope, shell.state.Scope) {
+		_, writeErr := fmt.Fprintln(output, "approval not found in current scope")
+		return writeErr
+	}
+
+	if _, err := fmt.Fprintf(
+		output,
+		"approval=%d status=%s task=%s run=%s resolver=%s requested_at=%s\n",
+		detail.Approval.ID,
+		detail.Approval.Status,
+		detail.Task.Key,
+		formatNullableInt64(detail.Approval.RunID),
+		detail.ResolverSupport,
+		detail.Approval.RequestedAt.Format(time.RFC3339),
+	); err != nil {
+		return err
+	}
+	if detail.Approval.ResolvedAt != nil {
+		if _, err := fmt.Fprintf(
+			output,
+			"resolved_at=%s decision_by=%s reason=%s\n",
+			detail.Approval.ResolvedAt.Format(time.RFC3339),
+			approvalValueOrNone(detail.Approval.DecisionBy),
+			approvalValueOrNone(detail.Approval.Reason),
+		); err != nil {
+			return err
+		}
+	}
+	if detail.Approval.RunID != nil {
+		_, err = fmt.Fprintf(output, "evidence=/runs show %d\n", *detail.Approval.RunID)
+		return err
+	}
+	_, err = fmt.Fprintln(output, "evidence=none")
+	return err
+}
+
+func approvalValueOrNone(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "none"
+	}
+	return value
+}
+
+func formatNullableInt64(value *int64) string {
+	if value == nil {
+		return "none"
+	}
+	return strconv.FormatInt(*value, 10)
 }
 
 func (shell *Shell) handleTransfer(ctx context.Context, args []string, output io.Writer) error {

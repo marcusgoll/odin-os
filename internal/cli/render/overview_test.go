@@ -15,7 +15,8 @@ func TestRenderOverviewUsesCanonicalLanes(t *testing.T) {
 	for _, want := range []string{
 		"Attention",
 		"Active Execution",
-		"approval work_item=alpha-task",
+		"approval=1 work_item=alpha-task",
+		"run=7 status=pending resolver=unsupported",
 		"incident work_item=alpha-task",
 		"Workspace",
 		"Initiatives",
@@ -39,6 +40,10 @@ func TestRenderOverviewUsesCanonicalLanes(t *testing.T) {
 	}
 	if strings.Contains(rendered, "Processes") {
 		t.Fatalf("RenderOverview() = %q, must not introduce Processes lane", rendered)
+	}
+	approvalRow := "approval=1 work_item=alpha-task project=alpha companion=primary run=7 status=pending resolver=unsupported"
+	if got := strings.Count(rendered, approvalRow); got != 2 {
+		t.Fatalf("approval row count = %d, want 2 in Attention and Approvals lanes\n%s", got, rendered)
 	}
 }
 
@@ -126,12 +131,14 @@ func sampleOverview() overview.View {
 		},
 		Approvals: []overview.ApprovalSummary{
 			{
-				ApprovalID:   1,
-				ProjectKey:   "alpha",
-				CompanionKey: &owner,
-				WorkItemKey:  "alpha-task",
-				Status:       "pending",
-				RequestedAt:  "2026-04-23T00:00:00Z",
+				ApprovalID:      1,
+				RunID:           &runID,
+				ProjectKey:      "alpha",
+				CompanionKey:    &owner,
+				WorkItemKey:     "alpha-task",
+				Status:          "pending",
+				RequestedAt:     "2026-04-23T00:00:00Z",
+				ResolverSupport: "unsupported",
 			},
 		},
 		Observability: overview.ObservabilityLane{

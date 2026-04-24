@@ -414,19 +414,37 @@ func runApprovals(ctx context.Context, app bootstrap.App, args []string, stdout 
 			Reason:     command.Reason,
 		})
 		if err != nil {
-			return err
+			if !errors.Is(err, approvalsvc.ErrUnsupportedResolver) {
+				return err
+			}
 		}
 		if jsonOutput || command.JSON {
+			receipt, receiptErr := approvalsvc.FormatReceipt(result)
+			if receiptErr != nil {
+				return receiptErr
+			}
+			var submitRunID *int64
+			if result.SubmitRun != nil {
+				submitRunID = &result.SubmitRun.ID
+			}
 			return commands.WriteJSON(stdout, struct {
-				ID         int64  `json:"id"`
-				Status     string `json:"status"`
-				DecisionBy string `json:"decision_by"`
-				Reason     string `json:"reason"`
+				ID              int64  `json:"id"`
+				Status          string `json:"status"`
+				DecisionBy      string `json:"decision_by"`
+				Reason          string `json:"reason"`
+				ResolverSupport string `json:"resolver_support"`
+				Result          string `json:"result"`
+				SubmitRunID     *int64 `json:"submit_run_id,omitempty"`
+				Summary         string `json:"summary"`
 			}{
-				ID:         result.Approval.ID,
-				Status:     result.Approval.Status,
-				DecisionBy: result.Approval.DecisionBy,
-				Reason:     result.Approval.Reason,
+				ID:              result.Approval.ID,
+				Status:          result.Approval.Status,
+				DecisionBy:      result.Approval.DecisionBy,
+				Reason:          result.Approval.Reason,
+				ResolverSupport: string(result.ResolverSupport),
+				Result:          approvalResolveResultLabel(result),
+				SubmitRunID:     submitRunID,
+				Summary:         strings.TrimPrefix(receipt.Summary, "summary="),
 			})
 		}
 		receipt, err := approvalsvc.FormatReceipt(result)
@@ -602,6 +620,20 @@ func approvalResolveAction(decision string) string {
 		return "deny"
 	default:
 		return strings.ToLower(strings.TrimSpace(decision))
+	}
+}
+
+func approvalResolveResultLabel(result approvalsvc.ResolveResult) string {
+	if result.ResolverSupport == approvalsvc.ResolverUnsupported {
+		return "not_resolved"
+	}
+	switch result.Approval.Status {
+	case "approved":
+		return "approved"
+	case "denied":
+		return "denied"
+	default:
+		return result.Approval.Status
 	}
 }
 
