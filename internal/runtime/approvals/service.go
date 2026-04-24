@@ -19,6 +19,27 @@ type Service struct {
 	Invocation  invocation.Service
 }
 
+type ResolverSupport string
+
+const (
+	ResolverSupported   ResolverSupport = "supported"
+	ResolverUnsupported ResolverSupport = "unsupported"
+)
+
+var ErrUnsupportedResolver = errors.New("unsupported approval resolver")
+
+type UnsupportedResolverError struct {
+	ApprovalID int64
+}
+
+func (err UnsupportedResolverError) Error() string {
+	return fmt.Sprintf("approval %d has no supported resolver/continuation contract", err.ApprovalID)
+}
+
+func (err UnsupportedResolverError) Unwrap() error {
+	return ErrUnsupportedResolver
+}
+
 type ResolveParams struct {
 	ApprovalID int64
 	Action     string
@@ -26,14 +47,57 @@ type ResolveParams struct {
 	Reason     string
 }
 
+type Detail struct {
+	Approval        sqlite.Approval
+	Task            sqlite.Task
+	ResumeState     *checkpoints.ResumeState
+	ResolverSupport ResolverSupport
+}
+
 type ResolveResult struct {
-	Approval  sqlite.Approval
-	SubmitRun *sqlite.Run
+	Approval        sqlite.Approval
+	SubmitRun       *sqlite.Run
+	ResolverSupport ResolverSupport
 }
 
 type Receipt struct {
 	Line    string
 	Summary string
+}
+
+func (service Service) Detail(ctx context.Context, approvalID int64) (Detail, error) {
+	if service.Store == nil {
+		return Detail{}, fmt.Errorf("approval store is required")
+	}
+	if approvalID <= 0 {
+		return Detail{}, fmt.Errorf("approval id must be positive")
+	}
+
+	approval, err := service.Store.GetApproval(ctx, approvalID)
+	if err != nil {
+		return Detail{}, err
+	}
+	task, err := service.Store.GetTask(ctx, approval.TaskID)
+	if err != nil {
+		return Detail{}, err
+	}
+
+	resumeState, err := service.resumeState(ctx, task.ProjectID, task.ID)
+	if err != nil {
+		return Detail{}, err
+	}
+
+	support := ResolverUnsupported
+	if resumeState != nil && isPreparedTransfer(*resumeState) {
+		support = ResolverSupported
+	}
+
+	return Detail{
+		Approval:        approval,
+		Task:            task,
+		ResumeState:     resumeState,
+		ResolverSupport: support,
+	}, nil
 }
 
 func (service Service) Resolve(ctx context.Context, params ResolveParams) (ResolveResult, error) {
@@ -56,27 +120,19 @@ func (service Service) Resolve(ctx context.Context, params ResolveParams) (Resol
 		return ResolveResult{}, err
 	}
 
-	current, err := service.Store.GetApproval(ctx, params.ApprovalID)
+	detail, err := service.Detail(ctx, params.ApprovalID)
 	if err != nil {
 		return ResolveResult{}, err
 	}
+	current := detail.Approval
 	if current.Status != "pending" {
 		return ResolveResult{}, fmt.Errorf("approval %d is %s, want pending", params.ApprovalID, current.Status)
 	}
-
-	var (
-		task        sqlite.Task
-		resumeState *checkpoints.ResumeState
-	)
-	if action == "approve" {
-		task, err = service.Store.GetTask(ctx, current.TaskID)
-		if err != nil {
-			return ResolveResult{}, err
-		}
-		resumeState, err = service.resumeState(ctx, task.ProjectID, task.ID)
-		if err != nil {
-			return ResolveResult{}, err
-		}
+	if detail.ResolverSupport != ResolverSupported {
+		return ResolveResult{
+			Approval:        current,
+			ResolverSupport: detail.ResolverSupport,
+		}, UnsupportedResolverError{ApprovalID: current.ID}
 	}
 
 	approval, err := service.Store.ResolveApproval(ctx, sqlite.ResolveApprovalParams{
@@ -89,27 +145,22 @@ func (service Service) Resolve(ctx context.Context, params ResolveParams) (Resol
 		return ResolveResult{}, err
 	}
 
-	result := ResolveResult{Approval: approval}
+	result := ResolveResult{
+		Approval:        approval,
+		ResolverSupport: detail.ResolverSupport,
+	}
 	if action != "approve" {
-		task, err := service.Store.GetTask(ctx, approval.TaskID)
-		if err != nil {
-			return ResolveResult{}, err
-		}
 		if _, err := service.Store.UpdateTaskStatus(ctx, sqlite.UpdateTaskStatusParams{
-			TaskID:         task.ID,
+			TaskID:         detail.Task.ID,
 			Status:         "blocked",
 			Summary:        "approval denied",
 			TerminalReason: "operator_denied",
 		}); err != nil {
 			return ResolveResult{}, err
 		}
-		resumeState, err := service.resumeState(ctx, task.ProjectID, task.ID)
-		if err != nil {
-			return ResolveResult{}, err
-		}
-		if resumeState != nil && resumeState.Trigger == checkpoints.TriggerApprovalWait {
+		if detail.ResumeState != nil && detail.ResumeState.Trigger == checkpoints.TriggerApprovalWait {
 			if _, err := service.checkpointService().SealWakePacket(ctx, checkpoints.SealWakePacketParams{
-				PacketID:          resumeState.WakePacketID,
+				PacketID:          detail.ResumeState.WakePacketID,
 				BlockingReason:    "operator_denied",
 				LastCompletedStep: "approval denied",
 			}); err != nil {
@@ -119,36 +170,17 @@ func (service Service) Resolve(ctx context.Context, params ResolveParams) (Resol
 		return result, nil
 	}
 
-	if resumeState != nil && isPreparedTransfer(*resumeState) {
-		return service.resumePreparedTransfer(ctx, task, approval, *resumeState)
+	if detail.ResumeState == nil || !isPreparedTransfer(*detail.ResumeState) {
+		return ResolveResult{
+			Approval:        current,
+			ResolverSupport: ResolverUnsupported,
+		}, UnsupportedResolverError{ApprovalID: current.ID}
 	}
-
-	executor, err := service.executorForContinuation(ctx, approval)
+	result, err = service.resumePreparedTransfer(ctx, detail.Task, approval, *detail.ResumeState)
 	if err != nil {
 		return ResolveResult{}, err
 	}
-	attempt, err := service.nextRunAttempt(ctx, approval.TaskID)
-	if err != nil {
-		return ResolveResult{}, err
-	}
-
-	submitRun, err := service.Store.StartRun(ctx, sqlite.StartRunParams{
-		TaskID:   approval.TaskID,
-		Executor: executor,
-		Attempt:  attempt,
-		Status:   "running",
-	})
-	if err != nil {
-		return ResolveResult{}, err
-	}
-	if _, err := service.Store.UpdateTaskStatus(ctx, sqlite.UpdateTaskStatusParams{
-		TaskID: approval.TaskID,
-		Status: "running",
-	}); err != nil {
-		return ResolveResult{}, err
-	}
-
-	result.SubmitRun = &submitRun
+	result.ResolverSupport = detail.ResolverSupport
 	return result, nil
 }
 
@@ -412,25 +444,6 @@ func resolutionStatusForAction(action string) (string, error) {
 	}
 }
 
-func (service Service) executorForContinuation(ctx context.Context, approval sqlite.Approval) (string, error) {
-	if approval.RunID == nil {
-		return "approval-submit", nil
-	}
-
-	var executor string
-	err := service.Store.DB().QueryRowContext(ctx, `SELECT executor FROM runs WHERE id = ?`, *approval.RunID).Scan(&executor)
-	if err != nil {
-		if err == sql.ErrNoRows {
-			return "approval-submit", nil
-		}
-		return "", err
-	}
-	if strings.TrimSpace(executor) == "" {
-		return "approval-submit", nil
-	}
-	return executor, nil
-}
-
 func (service Service) nextRunAttempt(ctx context.Context, taskID int64) (int, error) {
 	var attempt int
 	err := service.Store.DB().QueryRowContext(ctx, `SELECT COALESCE(MAX(attempt), 0) + 1 FROM runs WHERE task_id = ?`, taskID).Scan(&attempt)
@@ -441,6 +454,13 @@ func (service Service) nextRunAttempt(ctx context.Context, taskID int64) (int, e
 }
 
 func FormatReceipt(result ResolveResult) (Receipt, error) {
+	if result.ResolverSupport == ResolverUnsupported {
+		return Receipt{
+			Line:    fmt.Sprintf("approval=%d status=unsupported result=not_resolved", result.Approval.ID),
+			Summary: "summary=approval has no registered resolver; inspect only",
+		}, nil
+	}
+
 	switch result.Approval.Status {
 	case "approved":
 		line := fmt.Sprintf("approval=%d status=resolved result=approved", result.Approval.ID)

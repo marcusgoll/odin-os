@@ -487,7 +487,7 @@ func TestRunProjectSelectPersistsSession(t *testing.T) {
 	}
 }
 
-func TestRunApprovalsResolveApproveStartsContinuationRun(t *testing.T) {
+func TestRunApprovalsResolveUnsupportedApproveDoesNotMutate(t *testing.T) {
 	t.Parallel()
 
 	root := createRuntimeRoot(t)
@@ -502,10 +502,9 @@ func TestRunApprovalsResolveApproveStartsContinuationRun(t *testing.T) {
 	output := stdout.String()
 	for _, want := range []string{
 		fmt.Sprintf("approval=%d", approvalID),
-		"status=resolved",
-		"result=approved",
-		"run=",
-		"summary=approval granted; submit continuation started",
+		"status=unsupported",
+		"result=not_resolved",
+		"summary=approval has no registered resolver; inspect only",
 	} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("output = %q, want substring %q", output, want)
@@ -513,6 +512,9 @@ func TestRunApprovalsResolveApproveStartsContinuationRun(t *testing.T) {
 	}
 	if strings.Contains(output, "final confirmation") {
 		t.Fatalf("output = %q, want compact output without echoed reason", output)
+	}
+	if strings.Contains(output, "run=") {
+		t.Fatalf("output = %q, want no run handle for unsupported approval", output)
 	}
 
 	store, err := sqlite.Open(filepath.Join(root, "data", "odin.db"))
@@ -525,23 +527,17 @@ func TestRunApprovalsResolveApproveStartsContinuationRun(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetApproval() error = %v", err)
 	}
-	if approval.Status != "approved" {
-		t.Fatalf("approval.Status = %q, want %q", approval.Status, "approved")
+	if approval.Status != "pending" {
+		t.Fatalf("approval.Status = %q, want %q", approval.Status, "pending")
 	}
 
 	runIDs := listRuntimeTaskRunIDs(t, root, taskID)
-	if len(runIDs) != 2 {
-		t.Fatalf("task run count = %d, want 2", len(runIDs))
-	}
-	if runIDs[1] == prepareRunID {
-		t.Fatalf("continuation run reused prepare run id %d", runIDs[1])
-	}
-	if !strings.Contains(output, fmt.Sprintf("run=%d", runIDs[1])) {
-		t.Fatalf("output = %q, want continuation run id %d", output, runIDs[1])
+	if len(runIDs) != 1 || runIDs[0] != prepareRunID {
+		t.Fatalf("task run ids = %v, want only prepare run %d", runIDs, prepareRunID)
 	}
 }
 
-func TestRunApprovalsResolveDenyKeepsReceiptCompact(t *testing.T) {
+func TestRunApprovalsResolveUnsupportedDenyDoesNotMutate(t *testing.T) {
 	t.Parallel()
 
 	root := createRuntimeRoot(t)
@@ -556,9 +552,9 @@ func TestRunApprovalsResolveDenyKeepsReceiptCompact(t *testing.T) {
 	output := stdout.String()
 	for _, want := range []string{
 		fmt.Sprintf("approval=%d", approvalID),
-		"status=resolved",
-		"result=denied",
-		"summary=approval denied; later retry requires fresh prepare",
+		"status=unsupported",
+		"result=not_resolved",
+		"summary=approval has no registered resolver; inspect only",
 	} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("output = %q, want substring %q", output, want)
@@ -581,24 +577,13 @@ func TestRunApprovalsResolveDenyKeepsReceiptCompact(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetApproval() error = %v", err)
 	}
-	if approval.Status != "denied" {
-		t.Fatalf("approval.Status = %q, want %q", approval.Status, "denied")
-	}
-
-	task, err := store.GetTask(context.Background(), taskID)
-	if err != nil {
-		t.Fatalf("GetTask() error = %v", err)
-	}
-	if task.TerminalReason != "operator_denied" {
-		t.Fatalf("task.TerminalReason = %q, want %q", task.TerminalReason, "operator_denied")
+	if approval.Status != "pending" {
+		t.Fatalf("approval.Status = %q, want %q", approval.Status, "pending")
 	}
 
 	runIDs := listRuntimeTaskRunIDs(t, root, taskID)
-	if len(runIDs) != 1 {
-		t.Fatalf("task run count = %d, want 1", len(runIDs))
-	}
-	if runIDs[0] != prepareRunID {
-		t.Fatalf("remaining run id = %d, want %d", runIDs[0], prepareRunID)
+	if len(runIDs) != 1 || runIDs[0] != prepareRunID {
+		t.Fatalf("task run ids = %v, want only prepare run %d", runIDs, prepareRunID)
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/url"
@@ -1752,6 +1753,18 @@ func (shell *Shell) handleApprovalResolve(ctx context.Context, args []string, ou
 		Reason:     strings.Join(args[3:], " "),
 	})
 	if err != nil {
+		if errors.Is(err, approvalsvc.ErrUnsupportedResolver) {
+			receipt, receiptErr := approvalsvc.FormatReceipt(result)
+			if receiptErr != nil {
+				_, writeErr := fmt.Fprintf(output, "unable to render approval receipt: %v\n", receiptErr)
+				return writeErr
+			}
+			if _, writeErr := fmt.Fprintln(output, receipt.Line); writeErr != nil {
+				return writeErr
+			}
+			_, writeErr := fmt.Fprintln(output, receipt.Summary)
+			return writeErr
+		}
 		_, writeErr := fmt.Fprintf(output, "unable to resolve approval: %v\n", err)
 		return writeErr
 	}

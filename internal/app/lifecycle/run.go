@@ -414,7 +414,9 @@ func runApprovals(ctx context.Context, app bootstrap.App, args []string, stdout 
 			Reason:     command.Reason,
 		})
 		if err != nil {
-			return err
+			if !errors.Is(err, approvalsvc.ErrUnsupportedResolver) {
+				return err
+			}
 		}
 		if jsonOutput || command.JSON {
 			return commands.WriteJSON(stdout, struct {

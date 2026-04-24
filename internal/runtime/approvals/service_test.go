@@ -18,7 +18,29 @@ import (
 	"odin-os/internal/tools/invocation"
 )
 
-func TestResolveApproveStartsContinuationRun(t *testing.T) {
+func TestDetailMarksUnsupportedApproval(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openApprovalTestStore(t)
+	fixture := seedPendingApproval(t, ctx, store)
+
+	detail, err := Service{Store: store}.Detail(ctx, fixture.Approval.ID)
+	if err != nil {
+		t.Fatalf("Detail() error = %v", err)
+	}
+	if detail.Approval.ID != fixture.Approval.ID {
+		t.Fatalf("detail.Approval.ID = %d, want %d", detail.Approval.ID, fixture.Approval.ID)
+	}
+	if detail.Task.ID != fixture.Task.ID {
+		t.Fatalf("detail.Task.ID = %d, want %d", detail.Task.ID, fixture.Task.ID)
+	}
+	if detail.ResolverSupport != ResolverUnsupported {
+		t.Fatalf("detail.ResolverSupport = %q, want %q", detail.ResolverSupport, ResolverUnsupported)
+	}
+}
+
+func TestResolveApproveUnsupportedApprovalLeavesPending(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
@@ -31,30 +53,37 @@ func TestResolveApproveStartsContinuationRun(t *testing.T) {
 		DecisionBy: "operator",
 		Reason:     "final confirmation",
 	})
-	if err != nil {
-		t.Fatalf("Resolve() error = %v", err)
+	if !errors.Is(err, ErrUnsupportedResolver) {
+		t.Fatalf("Resolve() error = %v, want ErrUnsupportedResolver", err)
 	}
 
-	if result.Approval.Status != "approved" {
-		t.Fatalf("result.Approval.Status = %q, want %q", result.Approval.Status, "approved")
+	if result.ResolverSupport != ResolverUnsupported {
+		t.Fatalf("result.ResolverSupport = %q, want %q", result.ResolverSupport, ResolverUnsupported)
 	}
-	if result.SubmitRun == nil {
-		t.Fatalf("SubmitRun = nil, want continuation run")
+	if result.SubmitRun != nil {
+		t.Fatalf("SubmitRun = %+v, want nil for unsupported approval", result.SubmitRun)
 	}
-	if result.SubmitRun.ID == fixture.PrepareRun.ID {
-		t.Fatalf("SubmitRun.ID = %d, want new continuation run", result.SubmitRun.ID)
+	persisted, err := store.GetApproval(ctx, fixture.Approval.ID)
+	if err != nil {
+		t.Fatalf("GetApproval() error = %v", err)
 	}
-	if result.SubmitRun.Attempt != 2 {
-		t.Fatalf("SubmitRun.Attempt = %d, want %d", result.SubmitRun.Attempt, 2)
+	if persisted.Status != "pending" {
+		t.Fatalf("persisted.Status = %q, want %q", persisted.Status, "pending")
+	}
+	if persisted.DecisionBy != "" {
+		t.Fatalf("persisted.DecisionBy = %q, want empty", persisted.DecisionBy)
+	}
+	if persisted.Reason != "" {
+		t.Fatalf("persisted.Reason = %q, want empty", persisted.Reason)
 	}
 
 	runIDs := listTaskRunIDs(t, ctx, store, fixture.Task.ID)
-	if len(runIDs) != 2 {
-		t.Fatalf("task run count = %d, want 2", len(runIDs))
+	if len(runIDs) != 1 {
+		t.Fatalf("task run count = %d, want 1", len(runIDs))
 	}
 }
 
-func TestResolveDenyDoesNotStartContinuationRun(t *testing.T) {
+func TestResolveDenyUnsupportedApprovalLeavesPending(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
@@ -67,15 +96,28 @@ func TestResolveDenyDoesNotStartContinuationRun(t *testing.T) {
 		DecisionBy: "operator",
 		Reason:     "amount is wrong",
 	})
-	if err != nil {
-		t.Fatalf("Resolve() error = %v", err)
+	if !errors.Is(err, ErrUnsupportedResolver) {
+		t.Fatalf("Resolve() error = %v, want ErrUnsupportedResolver", err)
 	}
 
-	if result.Approval.Status != "denied" {
-		t.Fatalf("result.Approval.Status = %q, want %q", result.Approval.Status, "denied")
+	if result.ResolverSupport != ResolverUnsupported {
+		t.Fatalf("result.ResolverSupport = %q, want %q", result.ResolverSupport, ResolverUnsupported)
 	}
 	if result.SubmitRun != nil {
-		t.Fatalf("SubmitRun = %+v, want nil on deny", result.SubmitRun)
+		t.Fatalf("SubmitRun = %+v, want nil for unsupported approval", result.SubmitRun)
+	}
+	persisted, err := store.GetApproval(ctx, fixture.Approval.ID)
+	if err != nil {
+		t.Fatalf("GetApproval() error = %v", err)
+	}
+	if persisted.Status != "pending" {
+		t.Fatalf("persisted.Status = %q, want %q", persisted.Status, "pending")
+	}
+	if persisted.DecisionBy != "" {
+		t.Fatalf("persisted.DecisionBy = %q, want empty", persisted.DecisionBy)
+	}
+	if persisted.Reason != "" {
+		t.Fatalf("persisted.Reason = %q, want empty", persisted.Reason)
 	}
 
 	runIDs := listTaskRunIDs(t, ctx, store, fixture.Task.ID)
@@ -90,8 +132,56 @@ func TestResolveDenyDoesNotStartContinuationRun(t *testing.T) {
 	if task.Status != "blocked" {
 		t.Fatalf("task.Status = %q, want %q", task.Status, "blocked")
 	}
-	if task.TerminalReason != "operator_denied" {
-		t.Fatalf("task.TerminalReason = %q, want %q", task.TerminalReason, "operator_denied")
+	if task.TerminalReason != "" {
+		t.Fatalf("task.TerminalReason = %q, want empty", task.TerminalReason)
+	}
+}
+
+func TestResolveNonPendingApprovalRefusesReresolution(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openApprovalTestStore(t)
+	fixture := seedPendingApproval(t, ctx, store)
+
+	approved, err := store.ResolveApproval(ctx, sqlite.ResolveApprovalParams{
+		ApprovalID: fixture.Approval.ID,
+		Status:     "approved",
+		DecisionBy: "operator",
+		Reason:     "safe to proceed",
+	})
+	if err != nil {
+		t.Fatalf("ResolveApproval(setup) error = %v", err)
+	}
+
+	if _, err := (Service{Store: store}).Resolve(ctx, ResolveParams{
+		ApprovalID: approved.ID,
+		Action:     "deny",
+		DecisionBy: "reviewer",
+		Reason:     "changed mind",
+	}); err == nil {
+		t.Fatal("Resolve() error = nil, want re-resolution rejection")
+	} else if errors.Is(err, ErrUnsupportedResolver) {
+		t.Fatalf("Resolve() error = %v, want non-pending rejection before resolver support", err)
+	}
+
+	persisted, err := store.GetApproval(ctx, fixture.Approval.ID)
+	if err != nil {
+		t.Fatalf("GetApproval() error = %v", err)
+	}
+	if persisted.Status != "approved" {
+		t.Fatalf("persisted.Status = %q, want %q", persisted.Status, "approved")
+	}
+	if persisted.DecisionBy != "operator" {
+		t.Fatalf("persisted.DecisionBy = %q, want %q", persisted.DecisionBy, "operator")
+	}
+	if persisted.Reason != "safe to proceed" {
+		t.Fatalf("persisted.Reason = %q, want %q", persisted.Reason, "safe to proceed")
+	}
+
+	runIDs := listTaskRunIDs(t, ctx, store, fixture.Task.ID)
+	if len(runIDs) != 1 {
+		t.Fatalf("task run count = %d, want 1", len(runIDs))
 	}
 }
 

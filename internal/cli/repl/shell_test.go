@@ -346,7 +346,7 @@ func seedHealthyDoctorState(t *testing.T, env Environment) {
 	}
 }
 
-func TestShellApprovalsResolveApproveStartsContinuationRun(t *testing.T) {
+func TestShellApprovalsResolveUnsupportedApproveDoesNotMutate(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
@@ -366,10 +366,9 @@ func TestShellApprovalsResolveApproveStartsContinuationRun(t *testing.T) {
 	receipt := output.String()
 	for _, want := range []string{
 		fmt.Sprintf("approval=%d", fixture.Approval.ID),
-		"status=resolved",
-		"result=approved",
-		"run=",
-		"summary=approval granted; submit continuation started",
+		"status=unsupported",
+		"result=not_resolved",
+		"summary=approval has no registered resolver; inspect only",
 	} {
 		if !strings.Contains(receipt, want) {
 			t.Fatalf("receipt = %q, want substring %q", receipt, want)
@@ -381,34 +380,31 @@ func TestShellApprovalsResolveApproveStartsContinuationRun(t *testing.T) {
 	if strings.Contains(receipt, "next=") {
 		t.Fatalf("receipt = %q, want no next hint on approval resolution", receipt)
 	}
+	if strings.Contains(receipt, "run=") {
+		t.Fatalf("receipt = %q, want no run handle for unsupported approval", receipt)
+	}
 
 	approval, err := env.Store.GetApproval(ctx, fixture.Approval.ID)
 	if err != nil {
 		t.Fatalf("GetApproval() error = %v", err)
 	}
-	if approval.Status != "approved" {
-		t.Fatalf("approval.Status = %q, want %q", approval.Status, "approved")
+	if approval.Status != "pending" {
+		t.Fatalf("approval.Status = %q, want %q", approval.Status, "pending")
 	}
-	if approval.DecisionBy != "operator" {
-		t.Fatalf("approval.DecisionBy = %q, want %q", approval.DecisionBy, "operator")
+	if approval.DecisionBy != "" {
+		t.Fatalf("approval.DecisionBy = %q, want empty", approval.DecisionBy)
 	}
-	if approval.Reason != "final confirmation" {
-		t.Fatalf("approval.Reason = %q, want %q", approval.Reason, "final confirmation")
+	if approval.Reason != "" {
+		t.Fatalf("approval.Reason = %q, want empty", approval.Reason)
 	}
 
 	runIDs := listShellTaskRunIDs(t, ctx, env.Store, fixture.Task.ID)
-	if len(runIDs) != 2 {
-		t.Fatalf("task run count = %d, want 2 after approve continuation", len(runIDs))
-	}
-	if runIDs[1] == fixture.PrepareRun.ID {
-		t.Fatalf("continuation run reused prepare run id %d", runIDs[1])
-	}
-	if !strings.Contains(receipt, fmt.Sprintf("run=%d", runIDs[1])) {
-		t.Fatalf("receipt = %q, want continuation run id %d", receipt, runIDs[1])
+	if len(runIDs) != 1 || runIDs[0] != fixture.PrepareRun.ID {
+		t.Fatalf("task run ids = %v, want only prepare run %d", runIDs, fixture.PrepareRun.ID)
 	}
 }
 
-func TestShellApprovalsResolveDenyKeepsReceiptCompact(t *testing.T) {
+func TestShellApprovalsResolveUnsupportedDenyDoesNotMutate(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
@@ -428,9 +424,9 @@ func TestShellApprovalsResolveDenyKeepsReceiptCompact(t *testing.T) {
 	receipt := output.String()
 	for _, want := range []string{
 		fmt.Sprintf("approval=%d", fixture.Approval.ID),
-		"status=resolved",
-		"result=denied",
-		"summary=approval denied; later retry requires fresh prepare",
+		"status=unsupported",
+		"result=not_resolved",
+		"summary=approval has no registered resolver; inspect only",
 	} {
 		if !strings.Contains(receipt, want) {
 			t.Fatalf("receipt = %q, want substring %q", receipt, want)
@@ -450,30 +446,19 @@ func TestShellApprovalsResolveDenyKeepsReceiptCompact(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetApproval() error = %v", err)
 	}
-	if approval.Status != "denied" {
-		t.Fatalf("approval.Status = %q, want %q", approval.Status, "denied")
+	if approval.Status != "pending" {
+		t.Fatalf("approval.Status = %q, want %q", approval.Status, "pending")
 	}
-	if approval.DecisionBy != "operator" {
-		t.Fatalf("approval.DecisionBy = %q, want %q", approval.DecisionBy, "operator")
+	if approval.DecisionBy != "" {
+		t.Fatalf("approval.DecisionBy = %q, want empty", approval.DecisionBy)
 	}
-	if approval.Reason != "amount is wrong" {
-		t.Fatalf("approval.Reason = %q, want %q", approval.Reason, "amount is wrong")
+	if approval.Reason != "" {
+		t.Fatalf("approval.Reason = %q, want empty", approval.Reason)
 	}
 
 	runIDs := listShellTaskRunIDs(t, ctx, env.Store, fixture.Task.ID)
-	if len(runIDs) != 1 {
-		t.Fatalf("task run count = %d, want 1 after deny", len(runIDs))
-	}
-	if runIDs[0] != fixture.PrepareRun.ID {
-		t.Fatalf("remaining run id = %d, want prepare run id %d", runIDs[0], fixture.PrepareRun.ID)
-	}
-
-	task, err := env.Store.GetTask(ctx, fixture.Task.ID)
-	if err != nil {
-		t.Fatalf("GetTask() error = %v", err)
-	}
-	if task.TerminalReason != "operator_denied" {
-		t.Fatalf("task.TerminalReason = %q, want %q", task.TerminalReason, "operator_denied")
+	if len(runIDs) != 1 || runIDs[0] != fixture.PrepareRun.ID {
+		t.Fatalf("task run ids = %v, want only prepare run %d", runIDs, fixture.PrepareRun.ID)
 	}
 }
 
