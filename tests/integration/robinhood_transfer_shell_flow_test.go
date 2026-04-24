@@ -20,7 +20,7 @@ func TestRobinhoodTransferShellFlowDeterministic(t *testing.T) {
 		driverPath := writeRobinhoodShellFixtureDriver(t, `{"status":"completed","tool_key":"robinhood_transfer_flow","summary":"Robinhood transfer submitted","artifacts":{"session_state":"submitted","current_url":"https://robinhood.com/transfers","next_action":"verify transfer status"}}`)
 		output, err := runOdinCommand(t, repoRoot, binaryPath, runtimeRoot, map[string]string{
 			"ODIN_HUGINN_ROBINHOOD_TRANSFER_DRIVER": driverPath,
-		}, "/project pbs\n/transfer prepare direction=deposit amount_usd=25.00 source_account=checking destination_account=brokerage memo=test\n/runs show 1\n/approvals resolve 1 approve because final confirmation\n/runs show active\n", "repl")
+		}, "/project pbs\n/transfer prepare direction=deposit amount_usd=25.00 source_account=checking destination_account=brokerage memo=test\n/overview\n/approvals\n/approvals show 1\n/runs show 1\n/approvals resolve 1 approve because final confirmation\n/runs show active\n/overview\n", "repl")
 		if err != nil {
 			t.Fatalf("runOdinCommand(repl) error = %v\n%s", err, output)
 		}
@@ -29,12 +29,20 @@ func TestRobinhoodTransferShellFlowDeterministic(t *testing.T) {
 			"task=robinhood-transfer-",
 			"run=1 approval=1",
 			"summary=review prepared and awaiting approval",
+			"Attention",
+			"Approvals",
+			"resolver=supported",
+			"approval=1 task=robinhood-transfer-",
+			"approval=1 status=pending task=robinhood-transfer-",
+			"evidence=/runs show 1",
 			"run=1 task=robinhood-transfer-",
 			"artifact=driver_result summary=Robinhood transfer review ready",
 			"approval=1 status=resolved result=approved run=2",
 			"run=2 task=robinhood-transfer-",
 			"status=completed executor=robinhood_transfer_submit",
 			"summary=Robinhood transfer submitted",
+			"approvals=0 incidents=0 blocked_work=0",
+			"Approvals\n  none",
 			`"session_state":"submitted"`,
 		} {
 			if !strings.Contains(output, want) {
