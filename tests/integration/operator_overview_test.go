@@ -16,7 +16,7 @@ func TestOperatorOverviewUsesCanonicalBoard(t *testing.T) {
 		odinBinary,
 		runtimeRoot,
 		nil,
-		"/project pbs\n/overview\n/quit\n",
+		"/project pbs\n/overview\nshow workspace overview\n/quit\n",
 		"repl",
 	)
 	if err != nil {
@@ -29,6 +29,7 @@ func TestOperatorOverviewUsesCanonicalBoard(t *testing.T) {
 		"Active Execution",
 		"Workspace",
 		"Initiatives",
+		"pbs title=PBS",
 		"Work Items",
 		"Run Attempts",
 		"Companions",
@@ -45,5 +46,8 @@ func TestOperatorOverviewUsesCanonicalBoard(t *testing.T) {
 	}
 	if strings.Contains(output, "Processes") {
 		t.Fatalf("overview output = %q, must not introduce Processes lane", output)
+	}
+	if strings.Contains(output, "created task") {
+		t.Fatalf("ask-mode overview should not create durable work:\n%s", output)
 	}
 }
