@@ -6,7 +6,7 @@ import (
 )
 
 const (
-	ShellCommandSummary = "/help /mode /scope /project /agent /workflow /memory /skill /tool /transition /observe /compare /jobs /runs /approvals /logs /doctor /self"
+	ShellCommandSummary = "/help /mode /scope /overview /project /agent /workflow /memory /skill /tool /transition /observe /compare /jobs /runs /approvals /logs /doctor /self"
 	TransitionUsage     = "/transition [status] | /transition set <state> [allow=<csv>] [confirm] because <reason...>"
 	ProjectAddUsage     = "/project add <key> <git-root> [name=<value>] [class=local_git_project|github_backed_project] [default_branch=<value>] [github_repo=<owner/name>]"
 	AgentUsage          = "/agent [list|show <key>|validate <key>|run <key> [input=value...]]"
@@ -41,6 +41,7 @@ func OperatorHelp(binary string) string {
 	return fmt.Sprintf(`Usage:
   %[1]s                  Start the interactive operator shell
   %[1]s help             Show this help
+  %[1]s overview [--json] Show the canonical operator overview
   %[1]s doctor [--json]  Show runtime readiness
   %[1]s healthcheck      Exit successfully only when the runtime is ready
   %[1]s serve            Run background service loops and the operational HTTP surface

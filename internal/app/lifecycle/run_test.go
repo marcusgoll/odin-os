@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"odin-os/internal/app/bootstrap"
+	clioverview "odin-os/internal/cli/overview"
 	"odin-os/internal/core/capabilities"
 	"odin-os/internal/core/initiatives"
 	"odin-os/internal/runtime/supervision"
@@ -144,6 +145,135 @@ func TestRunStatusJSON(t *testing.T) {
 	}
 	if !activeFound {
 		t.Fatal("status-swarm-active missing from companion_swarms")
+	}
+}
+
+func TestRunOverviewTextUsesCanonicalBoard(t *testing.T) {
+	t.Parallel()
+
+	root := testRepoRoot(t)
+	var stdout bytes.Buffer
+
+	err := Run(context.Background(), root, []string{"overview"}, strings.NewReader(""), &stdout)
+	if err != nil {
+		t.Fatalf("Run(overview) error = %v", err)
+	}
+
+	output := stdout.String()
+	for _, want := range []string{
+		"Attention",
+		"Active Execution",
+		"Workspace",
+		"Initiatives",
+		"alpha-cli title=Alpha",
+		"odin-core title=Odin Core",
+		"Work Items",
+		"Run Attempts",
+		"Companions",
+		"Capability Catalog",
+		"Approvals",
+		"Observability",
+		"Memory",
+		"Intake Inbox",
+		"Automation Triggers",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("overview output = %q, want %q", output, want)
+		}
+	}
+	if strings.Contains(output, "Processes") {
+		t.Fatalf("overview output = %q, must not introduce Processes lane", output)
+	}
+}
+
+func TestRunOverviewJSONUsesCanonicalView(t *testing.T) {
+	t.Parallel()
+
+	root := testRepoRoot(t)
+	var stdout bytes.Buffer
+
+	err := Run(context.Background(), root, []string{"overview", "--json"}, strings.NewReader(""), &stdout)
+	if err != nil {
+		t.Fatalf("Run(overview --json) error = %v", err)
+	}
+
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(stdout.Bytes(), &raw); err != nil {
+		t.Fatalf("overview json = %v\n%s", err, stdout.String())
+	}
+	for _, key := range []string{"workspace", "initiatives", "capability_catalog", "intake_inbox", "automation_triggers"} {
+		if _, ok := raw[key]; !ok {
+			t.Fatalf("overview json keys = %v, want %q", raw, key)
+		}
+	}
+	if _, ok := raw["Workspace"]; ok {
+		t.Fatalf("overview json keys = %v, must use lower/snake keys", raw)
+	}
+
+	var payload struct {
+		Workspace struct {
+			Wiring          clioverview.Wiring `json:"wiring"`
+			WorkspaceKey    string             `json:"workspace_key"`
+			ControlScope    string             `json:"control_scope"`
+			InitiativeCount int                `json:"initiative_count"`
+		} `json:"workspace"`
+		Initiatives []struct {
+			InitiativeKey    string  `json:"initiative_key"`
+			Title            string  `json:"title"`
+			LinkedProjectKey *string `json:"linked_project_key"`
+		} `json:"initiatives"`
+		CapabilityCatalog struct {
+			Wiring       clioverview.Wiring `json:"wiring"`
+			CommandCount int                `json:"command_count"`
+			ToolCount    int                `json:"tool_count"`
+		} `json:"capability_catalog"`
+		IntakeInbox struct {
+			Wiring clioverview.Wiring `json:"wiring"`
+		} `json:"intake_inbox"`
+		AutomationTriggers struct {
+			Wiring clioverview.Wiring `json:"wiring"`
+		} `json:"automation_triggers"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("json.Unmarshal(overview output) error = %v\n%s", err, stdout.String())
+	}
+	if payload.Workspace.Wiring != clioverview.WiringLive {
+		t.Fatalf("Workspace.Wiring = %q, want %q", payload.Workspace.Wiring, clioverview.WiringLive)
+	}
+	if payload.Workspace.WorkspaceKey != "default" {
+		t.Fatalf("Workspace.WorkspaceKey = %q, want default", payload.Workspace.WorkspaceKey)
+	}
+	if payload.Workspace.ControlScope != "global" {
+		t.Fatalf("Workspace.ControlScope = %q, want global", payload.Workspace.ControlScope)
+	}
+	if payload.Workspace.InitiativeCount != 2 || len(payload.Initiatives) != 2 {
+		t.Fatalf("overview initiatives = %d/%d, want registry-backed alpha-cli and odin-core", payload.Workspace.InitiativeCount, len(payload.Initiatives))
+	}
+	if payload.CapabilityCatalog.Wiring != clioverview.WiringCatalogBacked {
+		t.Fatalf("CapabilityCatalog.Wiring = %q, want %q", payload.CapabilityCatalog.Wiring, clioverview.WiringCatalogBacked)
+	}
+	if payload.CapabilityCatalog.ToolCount == 0 {
+		t.Fatalf("CapabilityCatalog = %+v, want populated builtin tool count", payload.CapabilityCatalog)
+	}
+	if payload.IntakeInbox.Wiring != clioverview.WiringNotYetWired {
+		t.Fatalf("IntakeInbox.Wiring = %q, want %q", payload.IntakeInbox.Wiring, clioverview.WiringNotYetWired)
+	}
+	if payload.AutomationTriggers.Wiring != clioverview.WiringNotYetWired {
+		t.Fatalf("AutomationTriggers.Wiring = %q, want %q", payload.AutomationTriggers.Wiring, clioverview.WiringNotYetWired)
+	}
+}
+
+func TestRunHelpIncludesOverviewCommand(t *testing.T) {
+	t.Parallel()
+
+	root := testRepoRoot(t)
+	var stdout bytes.Buffer
+
+	if err := Run(context.Background(), root, []string{"help"}, strings.NewReader(""), &stdout); err != nil {
+		t.Fatalf("Run(help) error = %v", err)
+	}
+	if !strings.Contains(stdout.String(), "overview") {
+		t.Fatalf("help output = %q, want overview command", stdout.String())
 	}
 }
 

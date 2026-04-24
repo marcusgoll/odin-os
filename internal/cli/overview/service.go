@@ -34,203 +34,203 @@ type Service struct {
 }
 
 type View struct {
-	Workspace          WorkspaceLane
-	Initiatives        []InitiativeSummary
-	WorkItems          []WorkItemSummary
-	CompanionSwarms    []CompanionSwarmSummary
-	Companions         CompanionLane
-	CapabilityCatalog  CapabilityCatalogLane
-	Approvals          []ApprovalSummary
-	Observability      ObservabilityLane
-	Memory             MemoryLane
-	IntakeInbox        PlaceholderLane
-	AutomationTriggers PlaceholderLane
+	Workspace          WorkspaceLane           `json:"workspace"`
+	Initiatives        []InitiativeSummary     `json:"initiatives"`
+	WorkItems          []WorkItemSummary       `json:"work_items"`
+	CompanionSwarms    []CompanionSwarmSummary `json:"companion_swarms"`
+	Companions         CompanionLane           `json:"companions"`
+	CapabilityCatalog  CapabilityCatalogLane   `json:"capability_catalog"`
+	Approvals          []ApprovalSummary       `json:"approvals"`
+	Observability      ObservabilityLane       `json:"observability"`
+	Memory             MemoryLane              `json:"memory"`
+	IntakeInbox        PlaceholderLane         `json:"intake_inbox"`
+	AutomationTriggers PlaceholderLane         `json:"automation_triggers"`
 }
 
 type WorkspaceLane struct {
-	Wiring               Wiring
-	WorkspaceKey         string
-	Name                 string
-	Status               string
-	OwnerRef             string
-	ControlScope         string
-	DefaultCompanionKey  string
-	InitiativeCount      int
-	CompanionCount       int
-	OpenWorkItemCount    int
-	ActiveRunCount       int
-	PendingApprovalCount int
-	OpenIncidentCount    int
-	BlockedWorkItemCount int
+	Wiring               Wiring `json:"wiring"`
+	WorkspaceKey         string `json:"workspace_key"`
+	Name                 string `json:"name"`
+	Status               string `json:"status"`
+	OwnerRef             string `json:"owner_ref"`
+	ControlScope         string `json:"control_scope"`
+	DefaultCompanionKey  string `json:"default_companion_key"`
+	InitiativeCount      int    `json:"initiative_count"`
+	CompanionCount       int    `json:"companion_count"`
+	OpenWorkItemCount    int    `json:"open_work_item_count"`
+	ActiveRunCount       int    `json:"active_run_count"`
+	PendingApprovalCount int    `json:"pending_approval_count"`
+	OpenIncidentCount    int    `json:"open_incident_count"`
+	BlockedWorkItemCount int    `json:"blocked_work_item_count"`
 }
 
 type InitiativeSummary struct {
-	InitiativeKey        string
-	Title                string
-	Kind                 string
-	Status               string
-	Summary              string
-	OwnerCompanionKey    *string
-	LinkedProjectKey     *string
-	OpenWorkItemCount    int
-	ActiveRunCount       int
-	PendingApprovalCount int
-	OpenIncidentCount    int
-	BlockedWorkItemCount int
+	InitiativeKey        string  `json:"initiative_key"`
+	Title                string  `json:"title"`
+	Kind                 string  `json:"kind"`
+	Status               string  `json:"status"`
+	Summary              string  `json:"summary"`
+	OwnerCompanionKey    *string `json:"owner_companion_key"`
+	LinkedProjectKey     *string `json:"linked_project_key"`
+	OpenWorkItemCount    int     `json:"open_work_item_count"`
+	ActiveRunCount       int     `json:"active_run_count"`
+	PendingApprovalCount int     `json:"pending_approval_count"`
+	OpenIncidentCount    int     `json:"open_incident_count"`
+	BlockedWorkItemCount int     `json:"blocked_work_item_count"`
 }
 
 type WorkItemSummary struct {
-	ProjectKey       string
-	InitiativeKey    *string
-	CompanionKey     *string
-	WorkItemKey      string
-	Title            string
-	Status           string
-	Scope            string
-	CurrentRunID     *int64
-	CurrentRunStatus string
-	RunAttempts      []RunAttemptSummary
+	ProjectKey       string              `json:"project_key"`
+	InitiativeKey    *string             `json:"initiative_key"`
+	CompanionKey     *string             `json:"companion_key"`
+	WorkItemKey      string              `json:"work_item_key"`
+	Title            string              `json:"title"`
+	Status           string              `json:"status"`
+	Scope            string              `json:"scope"`
+	CurrentRunID     *int64              `json:"current_run_id"`
+	CurrentRunStatus string              `json:"current_run_status"`
+	RunAttempts      []RunAttemptSummary `json:"run_attempts"`
 }
 
 type CompanionLane struct {
-	Wiring Wiring
-	Items  []CompanionSummary
+	Wiring Wiring             `json:"wiring"`
+	Items  []CompanionSummary `json:"items"`
 }
 
 type CompanionSummary struct {
-	CompanionKey         string
-	Title                string
-	Kind                 string
-	Status               string
-	OwnedInitiativeCount int
-	OpenWorkItemCount    int
-	ActiveRunCount       int
-	PendingApprovalCount int
-	BlockedWorkItemCount int
+	CompanionKey         string `json:"companion_key"`
+	Title                string `json:"title"`
+	Kind                 string `json:"kind"`
+	Status               string `json:"status"`
+	OwnedInitiativeCount int    `json:"owned_initiative_count"`
+	OpenWorkItemCount    int    `json:"open_work_item_count"`
+	ActiveRunCount       int    `json:"active_run_count"`
+	PendingApprovalCount int    `json:"pending_approval_count"`
+	BlockedWorkItemCount int    `json:"blocked_work_item_count"`
 }
 
 type CapabilityCatalogLane struct {
-	Wiring               Wiring
-	AgentDefinitionCount int
-	SkillCount           int
-	WorkflowCount        int
-	CommandCount         int
-	ToolCount            int
+	Wiring               Wiring `json:"wiring"`
+	AgentDefinitionCount int    `json:"agent_definition_count"`
+	SkillCount           int    `json:"skill_count"`
+	WorkflowCount        int    `json:"workflow_count"`
+	CommandCount         int    `json:"command_count"`
+	ToolCount            int    `json:"tool_count"`
 }
 
 type ApprovalSummary struct {
-	ApprovalID      int64
-	TaskID          int64
-	RunID           *int64
-	ProjectKey      string
-	CompanionKey    *string
-	WorkItemKey     string
-	Status          string
-	RequestedAt     string
-	ResolverSupport string
+	ApprovalID      int64   `json:"approval_id"`
+	TaskID          int64   `json:"task_id"`
+	RunID           *int64  `json:"run_id"`
+	ProjectKey      string  `json:"project_key"`
+	CompanionKey    *string `json:"companion_key"`
+	WorkItemKey     string  `json:"work_item_key"`
+	Status          string  `json:"status"`
+	RequestedAt     string  `json:"requested_at"`
+	ResolverSupport string  `json:"resolver_support"`
 }
 
 type ObservabilityLane struct {
-	Wiring      Wiring
-	ActiveRuns  []RunAttemptSummary
-	BlockedWork []BlockedWorkSummary
-	Incidents   []IncidentSummary
-	Recoveries  []RecoverySummary
-	Freshness   []FreshnessSummary
+	Wiring      Wiring               `json:"wiring"`
+	ActiveRuns  []RunAttemptSummary  `json:"active_runs"`
+	BlockedWork []BlockedWorkSummary `json:"blocked_work"`
+	Incidents   []IncidentSummary    `json:"incidents"`
+	Recoveries  []RecoverySummary    `json:"recoveries"`
+	Freshness   []FreshnessSummary   `json:"freshness"`
 }
 
 type RunAttemptSummary struct {
-	RunID         int64
-	TaskID        int64
-	WorkItemKey   string
-	ProjectKey    string
-	InitiativeKey *string
-	CompanionKey  *string
-	Executor      string
-	Status        string
-	Attempt       int
-	StartedAt     string
+	RunID         int64   `json:"run_id"`
+	TaskID        int64   `json:"task_id"`
+	WorkItemKey   string  `json:"work_item_key"`
+	ProjectKey    string  `json:"project_key"`
+	InitiativeKey *string `json:"initiative_key"`
+	CompanionKey  *string `json:"companion_key"`
+	Executor      string  `json:"executor"`
+	Status        string  `json:"status"`
+	Attempt       int     `json:"attempt"`
+	StartedAt     string  `json:"started_at"`
 }
 
 type BlockedWorkSummary struct {
-	TaskID        int64
-	WorkItemKey   string
-	ProjectKey    string
-	WorkspaceKey  string
-	InitiativeKey *string
-	CompanionKey  *string
-	WorkKind      string
-	Source        string
-	Reason        string
+	TaskID        int64   `json:"task_id"`
+	WorkItemKey   string  `json:"work_item_key"`
+	ProjectKey    string  `json:"project_key"`
+	WorkspaceKey  string  `json:"workspace_key"`
+	InitiativeKey *string `json:"initiative_key"`
+	CompanionKey  *string `json:"companion_key"`
+	WorkKind      string  `json:"work_kind"`
+	Source        string  `json:"source"`
+	Reason        string  `json:"reason"`
 }
 
 type IncidentSummary struct {
-	IncidentID   int64
-	RunID        int64
-	TaskID       int64
-	WorkItemKey  string
-	ProjectKey   string
-	CompanionKey *string
-	Severity     string
-	Status       string
-	Summary      string
-	OpenedAt     string
+	IncidentID   int64   `json:"incident_id"`
+	RunID        int64   `json:"run_id"`
+	TaskID       int64   `json:"task_id"`
+	WorkItemKey  string  `json:"work_item_key"`
+	ProjectKey   string  `json:"project_key"`
+	CompanionKey *string `json:"companion_key"`
+	Severity     string  `json:"severity"`
+	Status       string  `json:"status"`
+	Summary      string  `json:"summary"`
+	OpenedAt     string  `json:"opened_at"`
 }
 
 type CompanionSwarmSummary struct {
-	ParentTaskID             int64
-	ParentTaskKey            string
-	ProjectKey               string
-	WorkspaceKey             string
-	InitiativeKey            *string
-	CompanionKey             *string
-	Title                    string
-	Summary                  string
-	Status                   string
-	BlockedReason            string
-	TerminalReason           string
-	ConvergenceMode          string
-	RequestedBudget          int
-	DelegationCount          int
-	CompletedDelegationCount int
-	ActiveChildRunCount      int
-	BacklogCount             int
-	BudgetBacklogCount       int
+	ParentTaskID             int64   `json:"parent_task_id"`
+	ParentTaskKey            string  `json:"parent_task_key"`
+	ProjectKey               string  `json:"project_key"`
+	WorkspaceKey             string  `json:"workspace_key"`
+	InitiativeKey            *string `json:"initiative_key"`
+	CompanionKey             *string `json:"companion_key"`
+	Title                    string  `json:"title"`
+	Summary                  string  `json:"summary"`
+	Status                   string  `json:"status"`
+	BlockedReason            string  `json:"blocked_reason"`
+	TerminalReason           string  `json:"terminal_reason"`
+	ConvergenceMode          string  `json:"convergence_mode"`
+	RequestedBudget          int     `json:"requested_budget"`
+	DelegationCount          int     `json:"delegation_count"`
+	CompletedDelegationCount int     `json:"completed_delegation_count"`
+	ActiveChildRunCount      int     `json:"active_child_run_count"`
+	BacklogCount             int     `json:"backlog_count"`
+	BudgetBacklogCount       int     `json:"budget_backlog_count"`
 }
 
 type RecoverySummary struct {
-	RecoveryID int64
-	RunID      int64
-	Status     string
-	Strategy   string
-	StartedAt  string
+	RecoveryID int64  `json:"recovery_id"`
+	RunID      int64  `json:"run_id"`
+	Status     string `json:"status"`
+	Strategy   string `json:"strategy"`
+	StartedAt  string `json:"started_at"`
 }
 
 type FreshnessSummary struct {
-	Surface     string
-	Status      string
-	RefreshedAt string
+	Surface     string `json:"surface"`
+	Status      string `json:"status"`
+	RefreshedAt string `json:"refreshed_at"`
 }
 
 type MemoryLane struct {
-	Wiring Wiring
-	Count  int
-	Recent []MemorySummary
+	Wiring Wiring          `json:"wiring"`
+	Count  int             `json:"count"`
+	Recent []MemorySummary `json:"recent"`
 }
 
 type MemorySummary struct {
-	ID         int64
-	MemoryType string
-	Scope      string
-	ScopeKey   string
-	Summary    string
-	CreatedAt  string
+	ID         int64  `json:"id"`
+	MemoryType string `json:"memory_type"`
+	Scope      string `json:"scope"`
+	ScopeKey   string `json:"scope_key"`
+	Summary    string `json:"summary"`
+	CreatedAt  string `json:"created_at"`
 }
 
 type PlaceholderLane struct {
-	Wiring Wiring
-	Status string
-	Note   string
+	Wiring Wiring `json:"wiring"`
+	Status string `json:"status"`
+	Note   string `json:"note"`
 }
 
 func (service Service) Build(ctx context.Context, resolved scope.Resolution) (View, error) {

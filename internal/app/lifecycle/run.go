@@ -25,6 +25,8 @@ import (
 	appconfig "odin-os/internal/app/config"
 	clicommands "odin-os/internal/cli/commands"
 	commands "odin-os/internal/cli/commands"
+	clioverview "odin-os/internal/cli/overview"
+	clirender "odin-os/internal/cli/render"
 	"odin-os/internal/cli/repl"
 	cliscope "odin-os/internal/cli/scope"
 	scope "odin-os/internal/cli/scope"
@@ -59,7 +61,7 @@ import (
 
 var errRuntimeNotReady = errors.New("runtime not ready")
 
-const rootUsageBanner = "Usage: odin <command> [args]\n\nCommands: help repl doctor healthcheck serve backup restore verify-backup status project workspace scope jobs runs approvals intake agenda logs task initiative companion profile followup transition skills"
+const rootUsageBanner = "Usage: odin <command> [args]\n\nCommands: help repl overview doctor healthcheck serve backup restore verify-backup status project workspace scope jobs runs approvals intake agenda logs task initiative companion profile followup transition skills"
 
 var (
 	serveTaskLoopInterval     = 1 * time.Second
@@ -156,7 +158,7 @@ func Run(ctx context.Context, root string, args []string, stdin io.Reader, stdou
 	defer app.Store.Close()
 
 	if len(args) == 0 {
-		_, err := fmt.Fprintln(stdout, "Usage: odin <repl|status|project|workspace|transition|task|skills|doctor|healthcheck|serve|backup|restore|verify-backup> ...")
+		_, err := fmt.Fprintln(stdout, rootUsageBanner)
 		return err
 	}
 
@@ -170,6 +172,8 @@ func Run(ctx context.Context, root string, args []string, stdin io.Reader, stdou
 			return err
 		}
 		return runRepl(ctx, app, stdin, stdout, now)
+	case "overview":
+		return runOverview(ctx, app, args[1:], stdout)
 	case "status":
 		return runStatus(ctx, app, cfg, args[1:], stdout)
 	case "project":
@@ -238,6 +242,35 @@ func runRepl(ctx context.Context, app bootstrap.App, stdin io.Reader, stdout io.
 		return err
 	}
 	return nil
+}
+
+func runOverview(ctx context.Context, app bootstrap.App, args []string, stdout io.Writer) error {
+	jsonOutput, remaining, err := consumeJSONFlag(args)
+	if err != nil {
+		return err
+	}
+	if len(remaining) != 0 {
+		return fmt.Errorf("usage: odin overview [--json]")
+	}
+
+	state, err := loadCLIState(app)
+	if err != nil {
+		return err
+	}
+
+	view, err := clioverview.Service{
+		Store:            app.Store,
+		Registry:         app.Registry,
+		RegistrySnapshot: app.RegistrySnapshot,
+	}.Build(ctx, state.Scope)
+	if err != nil {
+		return err
+	}
+	if jsonOutput {
+		return commands.WriteJSON(stdout, view)
+	}
+	_, err = fmt.Fprintln(stdout, clirender.RenderOverview(view))
+	return err
 }
 
 func runScope(app bootstrap.App, args []string, stdout io.Writer) error {
