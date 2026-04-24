@@ -77,6 +77,58 @@ func TestRunProjectShowJSON(t *testing.T) {
 	}
 }
 
+func TestRunProjectShowIncludesSpecFlowProfileEvidence(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openProjectTestStore(t)
+	defer store.Close()
+
+	registry := writeProjectRegistry(t, map[string]string{"alpha": "main"})
+	alpha := registry.Projects()[0]
+	mustMkdir(t, filepath.Join(alpha.GitRoot, ".spec-flow"))
+	mustMkdir(t, filepath.Join(alpha.GitRoot, ".claude", "commands"))
+	mustWrite(t, filepath.Join(alpha.GitRoot, "CLAUDE.md"), []byte("# Alpha\n"))
+
+	var stdout bytes.Buffer
+	if err := RunProject(ctx, store, registry, []string{"show", "alpha", "--json"}, &stdout); err != nil {
+		t.Fatalf("RunProject(show --json) error = %v", err)
+	}
+
+	output := stdout.String()
+	for _, want := range []string{`"spec_flow_compatible": true`, `".spec-flow/"`, `".claude/commands/"`, `"CLAUDE.md"`} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("show output = %q, want substring %q", output, want)
+		}
+	}
+}
+
+func TestRunProjectShowTextIncludesSpecFlowProfileEvidence(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openProjectTestStore(t)
+	defer store.Close()
+
+	registry := writeProjectRegistry(t, map[string]string{"alpha": "main"})
+	alpha := registry.Projects()[0]
+	mustMkdir(t, filepath.Join(alpha.GitRoot, ".spec-flow"))
+	mustMkdir(t, filepath.Join(alpha.GitRoot, ".claude", "commands"))
+	mustWrite(t, filepath.Join(alpha.GitRoot, "CLAUDE.md"), []byte("# Alpha\n"))
+
+	var stdout bytes.Buffer
+	if err := RunProject(ctx, store, registry, []string{"show", "alpha"}, &stdout); err != nil {
+		t.Fatalf("RunProject(show) error = %v", err)
+	}
+
+	output := stdout.String()
+	for _, want := range []string{"spec_flow_compatible=true", "spec_flow_evidence=.spec-flow/,.claude/commands/,CLAUDE.md"} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("show output = %q, want substring %q", output, want)
+		}
+	}
+}
+
 func TestRunProjectEnrollExplicitArgs(t *testing.T) {
 	ctx := context.Background()
 	store := openProjectTestStore(t)
@@ -254,5 +306,24 @@ func runGitCommand(t *testing.T, dir string, args ...string) {
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("git %v error = %v\n%s", args, err, output)
+	}
+}
+
+func mustMkdir(t *testing.T, path string) {
+	t.Helper()
+
+	if err := os.MkdirAll(path, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%q) error = %v", path, err)
+	}
+}
+
+func mustWrite(t *testing.T, path string, content []byte) {
+	t.Helper()
+
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("MkdirAll(%q) error = %v", filepath.Dir(path), err)
+	}
+	if err := os.WriteFile(path, content, 0o644); err != nil {
+		t.Fatalf("WriteFile(%q) error = %v", path, err)
 	}
 }
