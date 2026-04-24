@@ -8,6 +8,8 @@ import (
 	"strings"
 
 	"odin-os/internal/cli/scope"
+	"odin-os/internal/core/initiatives"
+	coreprojects "odin-os/internal/core/projects"
 	"odin-os/internal/core/workspaces"
 	knowledgememory "odin-os/internal/memory/knowledge"
 	"odin-os/internal/registry"
@@ -26,6 +28,7 @@ const (
 
 type Service struct {
 	Store            *sqlite.Store
+	Registry         coreprojects.Registry
 	RegistrySnapshot registry.Snapshot
 }
 
@@ -309,6 +312,10 @@ func (service Service) Build(ctx context.Context, resolved scope.Resolution) (Vi
 			OpenIncidentCount:    initiative.OpenIncidentCount,
 			BlockedWorkItemCount: initiative.BlockedWorkItemCount,
 		})
+	}
+	view.Initiatives = service.mergeRegistryInitiatives(view.Initiatives, resolved, view.Workspace.DefaultCompanionKey)
+	if len(view.Initiatives) > view.Workspace.InitiativeCount {
+		view.Workspace.InitiativeCount = len(view.Initiatives)
 	}
 
 	taskViews, err := projections.ListTaskStatusViews(ctx, service.Store.DB())
@@ -742,6 +749,58 @@ func matchesInitiativeScope(initiative projections.InitiativePortfolioView, reso
 			return true
 		}
 		return initiative.InitiativeKey == resolved.ProjectKey
+	case scope.ScopeNewProject:
+		return false
+	default:
+		return true
+	}
+}
+
+func (service Service) mergeRegistryInitiatives(existing []InitiativeSummary, resolved scope.Resolution, defaultCompanionKey string) []InitiativeSummary {
+	projects := service.Registry.Projects()
+	if len(projects) == 0 {
+		return existing
+	}
+
+	seen := make(map[string]struct{}, len(existing)*2)
+	for _, initiative := range existing {
+		seen[initiative.InitiativeKey] = struct{}{}
+		if initiative.LinkedProjectKey != nil {
+			seen[*initiative.LinkedProjectKey] = struct{}{}
+		}
+	}
+
+	merged := append([]InitiativeSummary(nil), existing...)
+	for _, project := range projects {
+		if !matchesRegistryProjectScope(project.Key, resolved) {
+			continue
+		}
+		if _, ok := seen[project.Key]; ok {
+			continue
+		}
+
+		linkedProjectKey := project.Key
+		var ownerCompanionKey *string
+		if strings.TrimSpace(defaultCompanionKey) != "" {
+			ownerCompanionKey = stringPtr(defaultCompanionKey)
+		}
+		merged = append(merged, InitiativeSummary{
+			InitiativeKey:     project.Key,
+			Title:             project.Name,
+			Kind:              string(initiatives.KindManagedProject),
+			Status:            "active",
+			OwnerCompanionKey: ownerCompanionKey,
+			LinkedProjectKey:  &linkedProjectKey,
+		})
+		seen[project.Key] = struct{}{}
+	}
+	return merged
+}
+
+func matchesRegistryProjectScope(projectKey string, resolved scope.Resolution) bool {
+	switch resolved.Kind {
+	case scope.ScopeProject, scope.ScopeOdinCore:
+		return projectKey == resolved.ProjectKey
 	case scope.ScopeNewProject:
 		return false
 	default:

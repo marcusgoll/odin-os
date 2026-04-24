@@ -2,11 +2,13 @@ package overview
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"testing"
 
 	"odin-os/internal/cli/scope"
 	"odin-os/internal/core/initiatives"
+	coreprojects "odin-os/internal/core/projects"
 	knowledgememory "odin-os/internal/memory/knowledge"
 	"odin-os/internal/registry"
 	"odin-os/internal/store/sqlite"
@@ -77,6 +79,42 @@ func TestBuildReturnsCanonicalOverviewFromCurrentAuthority(t *testing.T) {
 	}
 	if view.AutomationTriggers.Wiring != WiringNotYetWired {
 		t.Fatalf("Automation wiring = %q, want %q", view.AutomationTriggers.Wiring, WiringNotYetWired)
+	}
+}
+
+func TestBuildIncludesRegistryInitiativesWithoutRuntimeRows(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlite.Open(filepath.Join(t.TempDir(), "odin.db"))
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
+	}
+	t.Cleanup(func() {
+		store.Close()
+	})
+
+	registry := writeOverviewProjectRegistry(t, map[string]string{"alpha": t.TempDir()})
+	view, err := Service{
+		Store:    store,
+		Registry: registry,
+	}.Build(ctx, scope.Resolution{Kind: scope.ScopeGlobal})
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+
+	if len(view.Initiatives) != 1 {
+		t.Fatalf("Initiatives len = %d, want registry-backed initiative", len(view.Initiatives))
+	}
+	if view.Initiatives[0].InitiativeKey != "alpha" {
+		t.Fatalf("Initiatives[0].InitiativeKey = %q, want alpha", view.Initiatives[0].InitiativeKey)
+	}
+	if view.Initiatives[0].LinkedProjectKey == nil || *view.Initiatives[0].LinkedProjectKey != "alpha" {
+		t.Fatalf("Initiatives[0].LinkedProjectKey = %v, want alpha", view.Initiatives[0].LinkedProjectKey)
+	}
+	if view.Workspace.InitiativeCount != 1 {
+		t.Fatalf("Workspace.InitiativeCount = %d, want registry-backed count", view.Workspace.InitiativeCount)
 	}
 }
 
@@ -188,6 +226,62 @@ func TestBuildNarrowsProjectScopedOverview(t *testing.T) {
 	}
 	if len(view.Observability.Recoveries) != 0 {
 		t.Fatalf("Recoveries = %+v, want none in alpha scope", view.Observability.Recoveries)
+	}
+}
+
+func writeOverviewProjectRegistry(t *testing.T, projects map[string]string) coreprojects.Registry {
+	t.Helper()
+
+	configPath := filepath.Join(t.TempDir(), "projects.yaml")
+	content := "version: 1\nprojects:\n"
+	for key, gitRoot := range projects {
+		ensureOverviewGitRoot(t, gitRoot)
+		content += "  - key: " + key + "\n"
+		content += "    name: " + key + "\n"
+		content += "    project_class: local_git_project\n"
+		content += "    git_root: " + gitRoot + "\n"
+		content += "    default_branch: main\n"
+		content += "    policy:\n"
+		content += "      allowed_commands: [status]\n"
+		content += "      branch_rules:\n"
+		content += "        protected_branches: [main]\n"
+		content += "        require_worktree: true\n"
+		content += "        require_task_branch: true\n"
+		content += "        allow_default_branch_mutation: false\n"
+		content += "      approval_gates:\n"
+		content += "        require_for_governance_changes: true\n"
+		content += "        require_for_destructive_operations: true\n"
+		content += "        require_for_system_project_changes: false\n"
+		content += "      merge_policy:\n"
+		content += "        mode: squash\n"
+		content += "        allow_direct_to_default_branch: false\n"
+		content += "      destructive_operations:\n"
+		content += "        allow_reset: false\n"
+		content += "        allow_clean: false\n"
+		content += "        allow_force_push: false\n"
+		content += "        require_explicit_approval: true\n"
+	}
+	if err := os.WriteFile(configPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("WriteFile(projects.yaml) error = %v", err)
+	}
+	registry, diagnostics, err := coreprojects.Register(configPath)
+	if err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+	if len(diagnostics) != 0 {
+		t.Fatalf("Register() diagnostics = %#v", diagnostics)
+	}
+	return registry
+}
+
+func ensureOverviewGitRoot(t *testing.T, gitRoot string) {
+	t.Helper()
+
+	if _, err := os.Stat(filepath.Join(gitRoot, ".git")); err == nil {
+		return
+	}
+	if err := os.MkdirAll(filepath.Join(gitRoot, ".git"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.git) error = %v", err)
 	}
 }
 
