@@ -43,11 +43,14 @@ func RenderOverview(view overview.View) string {
 	} else {
 		for _, approval := range view.Approvals {
 			lines = append(lines, fmt.Sprintf(
-				"  approval work_item=%s project=%s companion=%s status=%s requested_at=%s",
+				"  approval=%d work_item=%s project=%s companion=%s run=%s status=%s resolver=%s requested_at=%s",
+				approval.ApprovalID,
 				valueOrNone(approval.WorkItemKey),
 				valueOrNone(approval.ProjectKey),
 				valueOrNone(ptrValue(approval.CompanionKey)),
+				nullableInt64(approval.RunID),
 				valueOrNone(approval.Status),
+				valueOrNone(approval.ResolverSupport),
 				valueOrNone(approval.RequestedAt),
 			))
 		}

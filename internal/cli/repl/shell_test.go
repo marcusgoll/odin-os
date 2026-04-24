@@ -462,6 +462,66 @@ func TestShellApprovalsResolveUnsupportedDenyDoesNotMutate(t *testing.T) {
 	}
 }
 
+func TestShellApprovalsListsHandlesAndResolverSupport(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	env := newTestEnvironment(t)
+	fixture := seedPendingApprovalFixture(t, ctx, env)
+	shell, err := New(env)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	var output bytes.Buffer
+	if err := shell.HandleLine(ctx, "/approvals", &output); err != nil {
+		t.Fatalf("HandleLine(/approvals) error = %v", err)
+	}
+
+	for _, want := range []string{
+		fmt.Sprintf("approval=%d", fixture.Approval.ID),
+		"task=finance-transfer-review",
+		fmt.Sprintf("run=%d", fixture.PrepareRun.ID),
+		"status=pending",
+		"resolver=unsupported",
+	} {
+		if !strings.Contains(output.String(), want) {
+			t.Fatalf("output = %q, want substring %q", output.String(), want)
+		}
+	}
+}
+
+func TestShellApprovalsShowIncludesEvidencePointerAndResolverSupport(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	env := newTestEnvironment(t)
+	fixture := seedPendingApprovalFixture(t, ctx, env)
+	shell, err := New(env)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	var output bytes.Buffer
+	command := fmt.Sprintf("/approvals show %d", fixture.Approval.ID)
+	if err := shell.HandleLine(ctx, command, &output); err != nil {
+		t.Fatalf("HandleLine(%q) error = %v", command, err)
+	}
+
+	for _, want := range []string{
+		fmt.Sprintf("approval=%d", fixture.Approval.ID),
+		"status=pending",
+		"task=finance-transfer-review",
+		fmt.Sprintf("run=%d", fixture.PrepareRun.ID),
+		"resolver=unsupported",
+		fmt.Sprintf("evidence=/runs show %d", fixture.PrepareRun.ID),
+	} {
+		if !strings.Contains(output.String(), want) {
+			t.Fatalf("output = %q, want substring %q", output.String(), want)
+		}
+	}
+}
+
 func TestShellTransferPrepareRequiresSelectedInitiative(t *testing.T) {
 	t.Parallel()
 

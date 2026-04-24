@@ -63,6 +63,12 @@ func TestBuildReturnsCanonicalOverviewFromCurrentAuthority(t *testing.T) {
 	if len(view.Approvals) != 1 {
 		t.Fatalf("Approvals len = %d, want 1", len(view.Approvals))
 	}
+	if view.Approvals[0].RunID == nil {
+		t.Fatalf("Approval RunID = nil, want linked run")
+	}
+	if view.Approvals[0].ResolverSupport != "unsupported" {
+		t.Fatalf("Approval resolver support = %q, want unsupported", view.Approvals[0].ResolverSupport)
+	}
 	if len(view.Observability.ActiveRuns) != 1 {
 		t.Fatalf("Active runs len = %d, want 1", len(view.Observability.ActiveRuns))
 	}
