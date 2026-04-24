@@ -25,6 +25,8 @@ func TestOperatorOverviewUsesCanonicalBoard(t *testing.T) {
 
 	for _, want := range []string{
 		"project=pbs scope=pbs",
+		"Attention",
+		"Active Execution",
 		"Workspace",
 		"Initiatives",
 		"Work Items",

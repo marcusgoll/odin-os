@@ -29,6 +29,17 @@ The default operator path is:
 
 This hierarchy is the primary business navigation. Future TUI work must not replace it with a run monitor, queue board, or generic process dashboard.
 
+## Dashboard order
+
+`/overview` is a dashboard-first projection over the canonical hierarchy, not a second operator model.
+
+Rules:
+
+- render `Attention` first for approvals, incidents, blocked work, recoveries, and other items that need operator intervention
+- render `Active Execution` second for live `Run Attempts` and active companion-swarm execution so operators can see who is working on what
+- keep the canonical lanes below those sections so dashboard triage does not replace `Workspace -> Initiative -> Work Item`
+- do not introduce a separate generic `Agents` or `Processes` dashboard to answer runtime triage questions already covered by `Companions`, `Run Attempts`, `Approvals`, and `Observability`
+
 ## Primary lanes
 
 ### Workspace

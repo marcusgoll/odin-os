@@ -33,6 +33,7 @@ type View struct {
 	Workspace          WorkspaceLane
 	Initiatives        []InitiativeSummary
 	WorkItems          []WorkItemSummary
+	CompanionSwarms    []CompanionSwarmSummary
 	Companions         CompanionLane
 	CapabilityCatalog  CapabilityCatalogLane
 	Approvals          []ApprovalSummary
@@ -77,6 +78,7 @@ type InitiativeSummary struct {
 type WorkItemSummary struct {
 	ProjectKey       string
 	InitiativeKey    *string
+	CompanionKey     *string
 	WorkItemKey      string
 	Title            string
 	Status           string
@@ -113,11 +115,13 @@ type CapabilityCatalogLane struct {
 }
 
 type ApprovalSummary struct {
-	ApprovalID  int64
-	TaskID      int64
-	WorkItemKey string
-	Status      string
-	RequestedAt string
+	ApprovalID   int64
+	TaskID       int64
+	ProjectKey   string
+	CompanionKey *string
+	WorkItemKey  string
+	Status       string
+	RequestedAt  string
 }
 
 type ObservabilityLane struct {
@@ -130,14 +134,16 @@ type ObservabilityLane struct {
 }
 
 type RunAttemptSummary struct {
-	RunID       int64
-	TaskID      int64
-	WorkItemKey string
-	ProjectKey  string
-	Executor    string
-	Status      string
-	Attempt     int
-	StartedAt   string
+	RunID         int64
+	TaskID        int64
+	WorkItemKey   string
+	ProjectKey    string
+	InitiativeKey *string
+	CompanionKey  *string
+	Executor      string
+	Status        string
+	Attempt       int
+	StartedAt     string
 }
 
 type BlockedWorkSummary struct {
@@ -153,15 +159,37 @@ type BlockedWorkSummary struct {
 }
 
 type IncidentSummary struct {
-	IncidentID  int64
-	RunID       int64
-	TaskID      int64
-	WorkItemKey string
-	ProjectKey  string
-	Severity    string
-	Status      string
-	Summary     string
-	OpenedAt    string
+	IncidentID   int64
+	RunID        int64
+	TaskID       int64
+	WorkItemKey  string
+	ProjectKey   string
+	CompanionKey *string
+	Severity     string
+	Status       string
+	Summary      string
+	OpenedAt     string
+}
+
+type CompanionSwarmSummary struct {
+	ParentTaskID             int64
+	ParentTaskKey            string
+	ProjectKey               string
+	WorkspaceKey             string
+	InitiativeKey            *string
+	CompanionKey             *string
+	Title                    string
+	Summary                  string
+	Status                   string
+	BlockedReason            string
+	TerminalReason           string
+	ConvergenceMode          string
+	RequestedBudget          int
+	DelegationCount          int
+	CompletedDelegationCount int
+	ActiveChildRunCount      int
+	BacklogCount             int
+	BudgetBacklogCount       int
 }
 
 type RecoverySummary struct {
@@ -349,12 +377,18 @@ func (service Service) Build(ctx context.Context, resolved scope.Resolution) (Vi
 		if !matchesProjectScope(taskProjectIndex[approval.TaskID], resolved) {
 			continue
 		}
+		taskContext, err := resolveTaskContext(approval.TaskID)
+		if err != nil {
+			return View{}, err
+		}
 		view.Approvals = append(view.Approvals, ApprovalSummary{
-			ApprovalID:  approval.ApprovalID,
-			TaskID:      approval.TaskID,
-			WorkItemKey: approval.TaskKey,
-			Status:      approval.Status,
-			RequestedAt: approval.RequestedAt,
+			ApprovalID:   approval.ApprovalID,
+			TaskID:       approval.TaskID,
+			ProjectKey:   taskProjectIndex[approval.TaskID],
+			CompanionKey: taskContext.companionKey,
+			WorkItemKey:  approval.TaskKey,
+			Status:       approval.Status,
+			RequestedAt:  approval.RequestedAt,
 		})
 	}
 
@@ -367,15 +401,21 @@ func (service Service) Build(ctx context.Context, resolved scope.Resolution) (Vi
 		if !matchesProjectScope(run.ProjectKey, resolved) {
 			continue
 		}
+		taskContext, err := resolveTaskContext(run.TaskID)
+		if err != nil {
+			return View{}, err
+		}
 		summary := RunAttemptSummary{
-			RunID:       run.RunID,
-			TaskID:      run.TaskID,
-			WorkItemKey: run.TaskKey,
-			ProjectKey:  run.ProjectKey,
-			Executor:    run.Executor,
-			Status:      run.Status,
-			Attempt:     run.Attempt,
-			StartedAt:   run.StartedAt,
+			RunID:         run.RunID,
+			TaskID:        run.TaskID,
+			WorkItemKey:   run.TaskKey,
+			ProjectKey:    run.ProjectKey,
+			InitiativeKey: taskContext.initiativeKey,
+			CompanionKey:  taskContext.companionKey,
+			Executor:      run.Executor,
+			Status:        run.Status,
+			Attempt:       run.Attempt,
+			StartedAt:     run.StartedAt,
 		}
 		view.Observability.ActiveRuns = append(view.Observability.ActiveRuns, summary)
 	}
@@ -389,15 +429,21 @@ func (service Service) Build(ctx context.Context, resolved scope.Resolution) (Vi
 		if !matchesProjectScope(projectKey, resolved) {
 			continue
 		}
+		taskContext, err := resolveTaskContext(run.TaskID)
+		if err != nil {
+			return View{}, err
+		}
 		runAttemptsByTaskID[run.TaskID] = append(runAttemptsByTaskID[run.TaskID], RunAttemptSummary{
-			RunID:       run.RunID,
-			TaskID:      run.TaskID,
-			WorkItemKey: run.TaskKey,
-			ProjectKey:  projectKey,
-			Executor:    run.Executor,
-			Status:      run.Status,
-			Attempt:     run.Attempt,
-			StartedAt:   run.StartedAt,
+			RunID:         run.RunID,
+			TaskID:        run.TaskID,
+			WorkItemKey:   run.TaskKey,
+			ProjectKey:    projectKey,
+			InitiativeKey: taskContext.initiativeKey,
+			CompanionKey:  taskContext.companionKey,
+			Executor:      run.Executor,
+			Status:        run.Status,
+			Attempt:       run.Attempt,
+			StartedAt:     run.StartedAt,
 		})
 	}
 
@@ -421,6 +467,7 @@ func (service Service) Build(ctx context.Context, resolved scope.Resolution) (Vi
 		view.WorkItems = append(view.WorkItems, WorkItemSummary{
 			ProjectKey:       task.ProjectKey,
 			InitiativeKey:    taskContext.initiativeKey,
+			CompanionKey:     taskContext.companionKey,
 			WorkItemKey:      task.TaskKey,
 			Title:            task.Title,
 			Status:           task.Status,
@@ -465,16 +512,54 @@ func (service Service) Build(ctx context.Context, resolved scope.Resolution) (Vi
 		if !matchesProjectScope(incident.ProjectKey, resolved) {
 			continue
 		}
+		taskContext, err := resolveTaskContext(incident.TaskID)
+		if err != nil {
+			return View{}, err
+		}
 		view.Observability.Incidents = append(view.Observability.Incidents, IncidentSummary{
-			IncidentID:  incident.IncidentID,
-			RunID:       incident.RunID,
-			TaskID:      incident.TaskID,
-			WorkItemKey: incident.TaskKey,
-			ProjectKey:  incident.ProjectKey,
-			Severity:    incident.Severity,
-			Status:      incident.Status,
-			Summary:     incident.Summary,
-			OpenedAt:    incident.OpenedAt,
+			IncidentID:   incident.IncidentID,
+			RunID:        incident.RunID,
+			TaskID:       incident.TaskID,
+			WorkItemKey:  incident.TaskKey,
+			ProjectKey:   incident.ProjectKey,
+			CompanionKey: taskContext.companionKey,
+			Severity:     incident.Severity,
+			Status:       incident.Status,
+			Summary:      incident.Summary,
+			OpenedAt:     incident.OpenedAt,
+		})
+	}
+
+	companionSwarmViews, err := projections.ListCompanionSwarmViews(ctx, service.Store.DB(), workspaces.DefaultWorkspaceKey)
+	if err != nil && err != sql.ErrNoRows {
+		return View{}, err
+	}
+	for _, swarm := range companionSwarmViews {
+		if !matchesProjectScope(swarm.ProjectKey, resolved) {
+			continue
+		}
+		if swarm.CompanionKey != nil {
+			visibleCompanionKeys[*swarm.CompanionKey] = struct{}{}
+		}
+		view.CompanionSwarms = append(view.CompanionSwarms, CompanionSwarmSummary{
+			ParentTaskID:             swarm.ParentTaskID,
+			ParentTaskKey:            swarm.ParentTaskKey,
+			ProjectKey:               swarm.ProjectKey,
+			WorkspaceKey:             swarm.WorkspaceKey,
+			InitiativeKey:            swarm.InitiativeKey,
+			CompanionKey:             swarm.CompanionKey,
+			Title:                    swarm.Title,
+			Summary:                  swarm.Summary,
+			Status:                   swarm.Status,
+			BlockedReason:            swarm.BlockedReason,
+			TerminalReason:           swarm.TerminalReason,
+			ConvergenceMode:          swarm.ConvergenceMode,
+			RequestedBudget:          swarm.RequestedBudget,
+			DelegationCount:          swarm.DelegationCount,
+			CompletedDelegationCount: swarm.CompletedDelegationCount,
+			ActiveChildRunCount:      swarm.ActiveChildRunCount,
+			BacklogCount:             swarm.BacklogCount,
+			BudgetBacklogCount:       swarm.BudgetBacklogCount,
 		})
 	}
 
