@@ -28,17 +28,18 @@ type ProjectCommand struct {
 }
 
 type projectView struct {
-	Key                  string                    `json:"key"`
-	Name                 string                    `json:"name"`
-	ProjectClass         coreprojects.ProjectClass `json:"project_class"`
-	GitRoot              string                    `json:"git_root"`
-	DefaultBranch        string                    `json:"default_branch"`
-	GitHubRepo           string                    `json:"github_repo,omitempty"`
-	ManifestPath         string                    `json:"manifest_path"`
-	TransitionState      string                    `json:"transition_state"`
-	TransitionController string                    `json:"transition_controller"`
-	WorkspaceEligible    bool                      `json:"workspace_eligible"`
-	WorkspaceReason      string                    `json:"workspace_reason,omitempty"`
+	Key                  string                      `json:"key"`
+	Name                 string                      `json:"name"`
+	ProjectClass         coreprojects.ProjectClass   `json:"project_class"`
+	GitRoot              string                      `json:"git_root"`
+	DefaultBranch        string                      `json:"default_branch"`
+	GitHubRepo           string                      `json:"github_repo,omitempty"`
+	ManifestPath         string                      `json:"manifest_path"`
+	TransitionState      string                      `json:"transition_state"`
+	TransitionController string                      `json:"transition_controller"`
+	WorkspaceEligible    bool                        `json:"workspace_eligible"`
+	WorkspaceReason      string                      `json:"workspace_reason,omitempty"`
+	Profile              coreprojects.ProjectProfile `json:"profile"`
 }
 
 func ParseProject(args []string) (ProjectCommand, error) {
@@ -310,6 +311,7 @@ func buildProjectView(ctx context.Context, store *sqlite.Store, manifest corepro
 		TransitionController: controller,
 		WorkspaceEligible:    eligible,
 		WorkspaceReason:      reason,
+		Profile:              coreprojects.DetectProjectProfile(manifest.GitRoot),
 	}, nil
 }
 
@@ -374,6 +376,11 @@ func renderProjectList(stdout io.Writer, views []projectView) error {
 		if _, err := fmt.Fprintf(stdout, "project=%s class=%s transition=%s workspace=%s\n", view.Key, view.ProjectClass, view.TransitionState, workspace); err != nil {
 			return err
 		}
+		if view.Profile.SpecFlowCompatible {
+			if _, err := fmt.Fprintln(stdout, "profile=spec_flow_compatible"); err != nil {
+				return err
+			}
+		}
 		if !view.WorkspaceEligible {
 			if _, err := fmt.Fprintf(stdout, "workspace_reason=%s\n", view.WorkspaceReason); err != nil {
 				return err
@@ -394,6 +401,12 @@ func renderProjectShow(stdout io.Writer, view projectView) error {
 		"transition_state=" + view.TransitionState,
 		"transition_controller=" + view.TransitionController,
 		fmt.Sprintf("workspace_eligible=%t", view.WorkspaceEligible),
+	}
+	if view.Profile.SpecFlowCompatible {
+		lines = append(lines, "spec_flow_compatible=true")
+		if len(view.Profile.Evidence) > 0 {
+			lines = append(lines, "spec_flow_evidence="+strings.Join(view.Profile.Evidence, ","))
+		}
 	}
 	if view.GitHubRepo != "" {
 		lines = append(lines, "github_repo="+view.GitHubRepo)
