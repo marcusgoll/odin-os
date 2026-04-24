@@ -64,6 +64,10 @@ _Avoid_: wrapper script, hidden admin flow, playbook
 A schedule-based or event-based rule that creates or updates a governed Work Item instead of launching execution directly.
 _Avoid_: cron job, direct worker spawn
 
+**Follow-Up Obligation**:
+The v1 schedule-backed Automation Trigger that records a promised next action, reminder, recurring check-in, or recurring obligation and materializes due occurrences into governed Work Items.
+_Avoid_: cron entry, reminder task, background job
+
 **Approval Request**:
 A durable governance object linked to a Work Item and optionally to the triggering Run Attempt when human review or explicit authorization is required before proceeding.
 _Avoid_: approval flag, prompt confirmation
@@ -185,6 +189,9 @@ _Avoid_: analytics scrape, crawler result
 - A **Work Queue** belongs to one **Scope** and contains triaged **Work Items**
 - A **Work Item** may produce one or more **Run Attempts**
 - An **Automation Trigger** creates or updates **Work Items** before any **Worker** is dispatched
+- A **Follow-Up Obligation** is an **Automation Trigger**, not a **Work Item**; its due occurrence may materialize a **Work Item** through the normal governed queue path
+- A **Follow-Up Obligation** belongs to one **Workspace** and may narrow to one owning **Initiative** and one responsible **Companion**
+- A materialized **Work Item** from a **Follow-Up Obligation** should keep explicit follow-up provenance so `/overview`, agenda, and audit surfaces can distinguish the trigger definition from the executable work it created
 - A **Work Item** may create one or more **Approval Requests** across its lifecycle
 - An **Approval Request** belongs to one **Work Item** and may reference the **Run Attempt** that produced the blocked state or evidence bundle
 - **Browser Control** belongs to the **Workspace** integration/tooling layer and may be invoked from an **Operator Surface** or by a **Companion** on behalf of a **Work Item**
@@ -375,6 +382,7 @@ _Avoid_: analytics scrape, crawler result
 - **Work Item** operator status should be one of: `queued`, `running`, `blocked`, `completed`, `failed`, `canceled`
 - **Run Attempt** execution status should be one of: `running`, `completed`, `failed`, `cancelled`, `interrupted`
 - **Approval Request** governance status should be one of: `pending`, `approved`, `denied`, `expired`
+- **Follow-Up Obligation** trigger status should be one of: `active`, `paused`, `blocked`, `completed`, `skipped`, `archived`; due or overdue state is a derived schedule view, not the trigger's stored lifecycle status
 - **Transfer Status View** may expose a derived summary status for operator readability, but it does not own canonical lifecycle truth
 - `initialized` and `ready` should remain system-readiness or dispatch-readiness terms, not the primary operator-visible lifecycle for governed work
 
@@ -899,6 +907,9 @@ _Avoid_: analytics scrape, crawler result
 > **Dev:** "Does the nightly schedule just spawn a worker?"
 > **Domain expert:** "No. The schedule is an **Automation Trigger**. It first creates or updates a **Work Item** and only later dispatches a worker through normal policy checks."
 >
+> **Dev:** "Can `/overview` show follow-up routines as Automation Triggers?"
+> **Domain expert:** "Yes. In v1, a **Follow-Up Obligation** is the schedule-backed Automation Trigger surface. The lane should show the trigger definition and due state separately from any Work Item the trigger has materialized."
+>
 > **Dev:** "Should the mobile UI open as a run monitor?"
 > **Domain expert:** "No. The operator surface should start at **Workspace**, narrow to **Initiative**, and then show **Work Item** detail with **Run Attempts** nested underneath."
 >
@@ -1058,6 +1069,8 @@ _Avoid_: analytics scrape, crawler result
 - duplicate handling was at risk of unstable canonical references inside one active window. Resolved: the canonical **Intake Item** remains stable for the active dedupe window, while newer duplicates contribute evidence without taking over canonical ownership.
 - duplicate handling was at risk of suppressing materially new evidence until cooldown expiry. Resolved: duplicates inside the active window may reopen or re-triage the canonical **Intake Item** when the handling decision should change, without changing canonical identity.
 - duplicate handling was at risk of creating redundant follow-up work for the same obligation. Resolved: material-change retriage reuses or requeues an existing **Work Item** when the obligation is unchanged, and creates new work only for distinct obligations.
+- the current `task_intakes` persistence path was at risk of being treated as full **Intake Item** authority. Resolved: it is a task-linked intake record for the current CLI path; a fully live **Intake Inbox** still requires raw Workspace-first **Intake Item** authority before triage, while `/overview` may only label `task_intakes` as linked or triaged intake evidence.
+- follow-up schedules were at risk of staying hidden under agenda or work-item views instead of fulfilling the already named **Automation Trigger** lane. Resolved: v1 should surface **Follow-Up Obligations** as schedule-backed **Automation Triggers** while keeping materialized Work Items in the Work Items lane.
 - material-change retriage was at risk of leaving a stale pending approval attached to reused work. Resolved: when the approval basis changes materially, the old **Approval Request** expires and Odin creates a fresh one instead of mutating approval history in place.
 - material-change retriage and approval handling were at risk of matching approvals to resume state through latest-packet heuristics. Resolved: each pending **Approval Request** explicitly references its active `approval_wait` wake packet.
 - approval resolution was at risk of authorizing a moving resume target. Resolved: approval resumes the `approval_wait` wake packet explicitly linked to the approved **Approval Request**, not whichever packet is latest later.

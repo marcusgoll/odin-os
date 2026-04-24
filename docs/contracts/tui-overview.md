@@ -81,6 +81,8 @@ Rules:
 - raw intake lives here as `Intake Items`
 - intake may be suppressed, answered directly, enriched, re-triaged, or linked to work
 - intake must not be collapsed into the work queue or work-item lane
+- current `task_intakes` rows are task-linked intake evidence, not full raw `Intake Item` authority
+- `/overview` may surface task-linked intake evidence only if it labels it as linked or triaged intake; a fully live `Intake Inbox` lane requires Workspace-first raw intake persistence and projection
 
 ### Companions
 
@@ -159,6 +161,8 @@ Rules:
 - surface them under workspace or initiative controls
 - do not add a top-level `Processes` lane
 - triggers create or update `Work Items` before any worker dispatch
+- v1 schedule-backed triggers are `Follow-Up Obligations`; they should appear as trigger definitions with derived due or overdue state
+- materialized follow-up occurrences remain `Work Items` with follow-up provenance and should not be duplicated as trigger definitions
 
 ### Nested runtime and governance surfaces
 
