@@ -1010,6 +1010,7 @@ func (shell *Shell) handleJobs(ctx context.Context, output io.Writer) error {
 func (shell *Shell) handleOverview(ctx context.Context, output io.Writer) error {
 	view, err := clioverview.Service{
 		Store:            shell.env.Store,
+		Registry:         shell.env.Registry,
 		RegistrySnapshot: shell.registrySnapshot(),
 	}.Build(ctx, shell.state.Scope)
 	if err != nil {
