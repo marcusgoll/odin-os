@@ -710,10 +710,7 @@ func (service Service) Build(ctx context.Context, resolved scope.Resolution) (Vi
 	if err != nil {
 		return View{}, err
 	}
-	view.IntakeInbox.Wiring = WiringLive
 	view.IntakeInbox.Source = "task_intakes"
-	view.IntakeInbox.Status = "linked_task_evidence"
-	view.IntakeInbox.Note = ""
 	view.IntakeInbox.Items = make([]IntakeEvidenceSummary, 0, len(intakeViews))
 	for _, intake := range intakeViews {
 		if !matchesIntakeScope(intake, resolved) {
@@ -734,6 +731,10 @@ func (service Service) Build(ctx context.Context, resolved scope.Resolution) (Vi
 			RequestedBy:    intake.RequestedBy,
 			CreatedAt:      intake.CreatedAt,
 		})
+	}
+	if len(view.IntakeInbox.Items) > 0 {
+		view.IntakeInbox.Status = "linked_evidence"
+		view.IntakeInbox.Note = "task_intakes are linked intake evidence; raw Intake Item authority not implemented"
 	}
 
 	followUpViews, err := projections.ListFollowUpSummaryViews(ctx, service.Store.DB(), workspaces.DefaultWorkspaceKey, service.now())
