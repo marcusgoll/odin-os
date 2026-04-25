@@ -352,11 +352,26 @@ func RenderOverview(view overview.View) string {
 	lines = append(lines, "")
 	lines = append(lines, "Automation Triggers")
 	lines = append(lines, fmt.Sprintf(
-		"  wiring=%s status=%s note=%s",
+		"  wiring=%s count=%d",
 		valueOrNone(string(view.AutomationTriggers.Wiring)),
-		valueOrNone(view.AutomationTriggers.Status),
-		valueOrNone(view.AutomationTriggers.Note),
+		len(view.AutomationTriggers.Items),
 	))
+	if len(view.AutomationTriggers.Items) == 0 {
+		lines = append(lines, "  none")
+	}
+	for _, trigger := range view.AutomationTriggers.Items {
+		lines = append(lines, fmt.Sprintf(
+			"  trigger=%d title=%s status=%s due_status=%s initiative=%s companion=%s target_project=%s next_due_at=%s",
+			trigger.TriggerID,
+			valueOrNone(trigger.Title),
+			valueOrNone(trigger.Status),
+			valueOrNone(trigger.DueStatus),
+			valueOrNone(ptrValue(trigger.InitiativeKey)),
+			valueOrNone(ptrValue(trigger.CompanionKey)),
+			valueOrNone(trigger.TargetProjectKey),
+			valueOrNone(trigger.NextDueAt),
+		))
+	}
 
 	lines = append(lines, "")
 	lines = append(lines, "Compatibility")

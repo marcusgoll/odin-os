@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"odin-os/internal/cli/scope"
 	"odin-os/internal/core/initiatives"
@@ -17,10 +18,27 @@ import (
 func TestBuildReturnsCanonicalOverviewFromCurrentAuthority(t *testing.T) {
 	ctx := context.Background()
 	env := newOverviewTestEnvironment(t)
+	nextDueAt := time.Date(2026, 4, 25, 9, 0, 0, 0, time.UTC)
+	if _, err := env.store.CreateFollowUpObligation(ctx, sqlite.CreateFollowUpObligationParams{
+		WorkspaceID:     env.workspaceID,
+		InitiativeID:    &env.initiativeID,
+		CompanionID:     &env.companionID,
+		TargetProjectID: env.projectID,
+		Title:           "Review automation trigger lane",
+		Status:          "active",
+		CadenceJSON:     `{"mode":"once"}`,
+		NextDueAt:       nextDueAt,
+		PolicyJSON:      `{}`,
+	}); err != nil {
+		t.Fatalf("CreateFollowUpObligation() error = %v", err)
+	}
 
 	view, err := Service{
 		Store:            env.store,
 		RegistrySnapshot: env.snapshot,
+		Now: func() time.Time {
+			return nextDueAt.Add(time.Hour)
+		},
 	}.Build(ctx, scope.Resolution{Kind: scope.ScopeGlobal})
 	if err != nil {
 		t.Fatalf("Build() error = %v", err)
@@ -83,8 +101,33 @@ func TestBuildReturnsCanonicalOverviewFromCurrentAuthority(t *testing.T) {
 	if view.IntakeInbox.Wiring != WiringNotYetWired {
 		t.Fatalf("Intake wiring = %q, want %q", view.IntakeInbox.Wiring, WiringNotYetWired)
 	}
-	if view.AutomationTriggers.Wiring != WiringNotYetWired {
-		t.Fatalf("Automation wiring = %q, want %q", view.AutomationTriggers.Wiring, WiringNotYetWired)
+	if view.AutomationTriggers.Wiring != WiringLive {
+		t.Fatalf("Automation wiring = %q, want %q", view.AutomationTriggers.Wiring, WiringLive)
+	}
+	if len(view.AutomationTriggers.Items) != 1 {
+		t.Fatalf("Automation trigger items len = %d, want 1", len(view.AutomationTriggers.Items))
+	}
+	trigger := view.AutomationTriggers.Items[0]
+	if trigger.Title != "Review automation trigger lane" {
+		t.Fatalf("Automation trigger title = %q, want Review automation trigger lane", trigger.Title)
+	}
+	if trigger.InitiativeKey == nil || *trigger.InitiativeKey != "alpha" {
+		t.Fatalf("Automation trigger initiative = %v, want alpha", trigger.InitiativeKey)
+	}
+	if trigger.CompanionKey == nil || *trigger.CompanionKey != "primary" {
+		t.Fatalf("Automation trigger companion = %v, want primary", trigger.CompanionKey)
+	}
+	if trigger.TargetProjectKey != "alpha" {
+		t.Fatalf("Automation trigger target project = %q, want alpha", trigger.TargetProjectKey)
+	}
+	if trigger.Status != "active" {
+		t.Fatalf("Automation trigger status = %q, want active", trigger.Status)
+	}
+	if trigger.DueStatus != "due" {
+		t.Fatalf("Automation trigger due status = %q, want due", trigger.DueStatus)
+	}
+	if trigger.NextDueAt != "2026-04-25T09:00:00Z" {
+		t.Fatalf("Automation trigger next due = %q, want 2026-04-25T09:00:00Z", trigger.NextDueAt)
 	}
 }
 
