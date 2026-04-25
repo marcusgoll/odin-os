@@ -491,6 +491,71 @@ func TestShellApprovalsListsHandlesAndResolverSupport(t *testing.T) {
 	}
 }
 
+func TestShellApprovalsSupportFiltersNarrowVisibleApprovals(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	env := newTestEnvironment(t)
+	unsupported := seedPendingApprovalFixture(t, ctx, env)
+	shell, err := New(env)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	fixed := time.Date(2026, 4, 22, 3, 4, 5, 0, time.UTC)
+	shell.transfers.Now = func() time.Time { return fixed }
+
+	var output bytes.Buffer
+	if err := shell.HandleLine(ctx, "/project family-ops", &output); err != nil {
+		t.Fatalf("HandleLine(/project family-ops) error = %v", err)
+	}
+	output.Reset()
+	if err := shell.HandleLine(ctx, "/transfer prepare direction=deposit amount_usd=25.00 source_account=checking destination_account=brokerage memo=household-test", &output); err != nil {
+		t.Fatalf("HandleLine(/transfer prepare) error = %v", err)
+	}
+	output.Reset()
+	if err := shell.HandleLine(ctx, "/scope global", &output); err != nil {
+		t.Fatalf("HandleLine(/scope global) error = %v", err)
+	}
+
+	output.Reset()
+	if err := shell.HandleLine(ctx, "/approvals supported", &output); err != nil {
+		t.Fatalf("HandleLine(/approvals supported) error = %v", err)
+	}
+	supportedOutput := output.String()
+	for _, want := range []string{
+		"task=robinhood-transfer-20260422-030405",
+		"status=pending",
+		"resolver=supported",
+	} {
+		if !strings.Contains(supportedOutput, want) {
+			t.Fatalf("supported output = %q, want %q", supportedOutput, want)
+		}
+	}
+	if strings.Contains(supportedOutput, "task="+unsupported.Task.Key) || strings.Contains(supportedOutput, "resolver=unsupported") {
+		t.Fatalf("supported output = %q, should not include unsupported approval", supportedOutput)
+	}
+
+	output.Reset()
+	if err := shell.HandleLine(ctx, "/approvals unsupported", &output); err != nil {
+		t.Fatalf("HandleLine(/approvals unsupported) error = %v", err)
+	}
+	unsupportedOutput := output.String()
+	for _, want := range []string{
+		fmt.Sprintf("approval=%d", unsupported.Approval.ID),
+		"task=finance-transfer-review",
+		fmt.Sprintf("run=%d", unsupported.PrepareRun.ID),
+		"status=pending",
+		"resolver=unsupported",
+	} {
+		if !strings.Contains(unsupportedOutput, want) {
+			t.Fatalf("unsupported output = %q, want %q", unsupportedOutput, want)
+		}
+	}
+	if strings.Contains(unsupportedOutput, "task=robinhood-transfer-20260422-030405") || strings.Contains(unsupportedOutput, " resolver=supported\n") {
+		t.Fatalf("unsupported output = %q, should not include supported approval", unsupportedOutput)
+	}
+}
+
 func TestShellApprovalsShowIncludesEvidencePointerAndResolverSupport(t *testing.T) {
 	t.Parallel()
 

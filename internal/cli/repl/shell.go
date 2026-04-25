@@ -1704,12 +1704,14 @@ func (shell *Shell) handleApprovals(ctx context.Context, args []string, output i
 			return shell.handleApprovalResolve(ctx, args[1:], output)
 		case "show":
 			return shell.handleApprovalShow(ctx, args[1:], output)
-		default:
-			_, err := fmt.Fprintln(output, "usage: /approvals | /approvals show <approval-id> | /approvals resolve <approval-id> <approve|deny> because <reason...>")
-			return err
 		}
 	}
-	approvals, err := shell.pendingApprovals(ctx)
+	filter, err := commands.ParseApprovalSupportFilter(args)
+	if err != nil {
+		_, err := fmt.Fprintln(output, "usage: /approvals [all|supported|unsupported] | /approvals show <approval-id> | /approvals resolve <approval-id> <approve|deny> because <reason...>")
+		return err
+	}
+	approvals, err := shell.pendingApprovalRows(ctx, filter)
 	if err != nil {
 		return err
 	}
@@ -1718,18 +1720,14 @@ func (shell *Shell) handleApprovals(ctx context.Context, args []string, output i
 		return err
 	}
 	for _, approval := range approvals {
-		detail, err := shell.approvals.Detail(ctx, approval.ApprovalID)
-		if err != nil {
-			return err
-		}
 		if _, err := fmt.Fprintf(
 			output,
 			"approval=%d task=%s run=%s status=%s resolver=%s\n",
 			approval.ApprovalID,
 			approval.TaskKey,
-			formatNullableInt64(detail.Approval.RunID),
+			formatNullableInt64(approval.RunID),
 			approval.Status,
-			detail.ResolverSupport,
+			approval.ResolverSupport,
 		); err != nil {
 			return err
 		}
@@ -2098,6 +2096,33 @@ func (shell *Shell) pendingApprovals(ctx context.Context) ([]projections.Pending
 		if matchesTaskProjectionScope(view.ProjectKey, view.TaskScope, shell.state.Scope) {
 			approvals = append(approvals, view)
 		}
+	}
+	return approvals, nil
+}
+
+func (shell *Shell) pendingApprovalRows(ctx context.Context, filter commands.ApprovalSupportFilter) ([]commands.ApprovalView, error) {
+	views, err := shell.pendingApprovals(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	approvals := make([]commands.ApprovalView, 0, len(views))
+	for _, view := range views {
+		detail, err := shell.approvals.Detail(ctx, view.ApprovalID)
+		if err != nil {
+			return nil, err
+		}
+		resolverSupport := string(detail.ResolverSupport)
+		if !filter.Matches(resolverSupport) {
+			continue
+		}
+		approvals = append(approvals, commands.ApprovalView{
+			ApprovalID:      view.ApprovalID,
+			TaskKey:         view.TaskKey,
+			RunID:           detail.Approval.RunID,
+			Status:          view.Status,
+			ResolverSupport: resolverSupport,
+		})
 	}
 	return approvals, nil
 }
