@@ -33,6 +33,8 @@ func TestRenderOverviewUsesCanonicalLanes(t *testing.T) {
 		"Memory",
 		"Intake Inbox",
 		"Automation Triggers",
+		"wiring=live count=1",
+		"trigger=42 title=Review automation trigger lane status=active due_status=due initiative=alpha companion=primary target_project=alpha next_due_at=2026-04-25T09:00:00Z",
 	} {
 		if !strings.Contains(rendered, want) {
 			t.Fatalf("RenderOverview() = %q, want substring %q", rendered, want)
@@ -211,10 +213,20 @@ func sampleOverview() overview.View {
 			Status: "unavailable",
 			Note:   "intake overview projection not implemented",
 		},
-		AutomationTriggers: overview.PlaceholderLane{
-			Wiring: overview.WiringNotYetWired,
-			Status: "unavailable",
-			Note:   "automation trigger overview projection not implemented",
+		AutomationTriggers: overview.AutomationTriggerLane{
+			Wiring: overview.WiringLive,
+			Items: []overview.AutomationTriggerSummary{
+				{
+					TriggerID:        42,
+					InitiativeKey:    &project,
+					CompanionKey:     &owner,
+					TargetProjectKey: "alpha",
+					Title:            "Review automation trigger lane",
+					Status:           "active",
+					DueStatus:        "due",
+					NextDueAt:        "2026-04-25T09:00:00Z",
+				},
+			},
 		},
 	}
 }

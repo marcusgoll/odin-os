@@ -1012,6 +1012,7 @@ func (shell *Shell) handleOverview(ctx context.Context, output io.Writer) error 
 		Store:            shell.env.Store,
 		Registry:         shell.env.Registry,
 		RegistrySnapshot: shell.registrySnapshot(),
+		Now:              shell.now,
 	}.Build(ctx, shell.state.Scope)
 	if err != nil {
 		return err
