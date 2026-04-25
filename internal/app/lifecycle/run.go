@@ -457,8 +457,9 @@ func runApprovals(ctx context.Context, app bootstrap.App, args []string, stdout 
 		_, err = fmt.Fprintln(stdout, receipt.Summary)
 		return err
 	}
-	if len(remaining) != 0 {
-		return fmt.Errorf("usage: odin approvals [resolve <approval-id> <approve|deny> <reason...>] [--json]")
+	filter, err := commands.ParseApprovalSupportFilter(remaining)
+	if err != nil {
+		return fmt.Errorf("usage: odin approvals [all|supported|unsupported] [--json] | odin approvals resolve <approval-id> <approve|deny> <reason...> [--json]")
 	}
 
 	state, err := loadCLIState(app)
@@ -466,7 +467,7 @@ func runApprovals(ctx context.Context, app bootstrap.App, args []string, stdout 
 		return err
 	}
 
-	approvals, err := listPendingApprovals(ctx, app.Store, state.Scope)
+	approvals, err := listPendingApprovals(ctx, app.Store, state.Scope, filter)
 	if err != nil {
 		return err
 	}
@@ -478,7 +479,15 @@ func runApprovals(ctx context.Context, app bootstrap.App, args []string, stdout 
 		return err
 	}
 	for _, approval := range approvals {
-		if _, err := fmt.Fprintf(stdout, "%s %s\n", approval.TaskKey, approval.Status); err != nil {
+		if _, err := fmt.Fprintf(
+			stdout,
+			"approval=%d task=%s run=%s status=%s resolver=%s\n",
+			approval.ApprovalID,
+			approval.TaskKey,
+			approvalRunIDLabel(approval.RunID),
+			approval.Status,
+			approval.ResolverSupport,
+		); err != nil {
 			return err
 		}
 	}
@@ -1716,22 +1725,42 @@ func scopeLabel(resolved scope.Resolution) string {
 	}
 }
 
-func listPendingApprovals(ctx context.Context, store *sqlite.Store, resolved scope.Resolution) ([]commands.ApprovalView, error) {
+func listPendingApprovals(ctx context.Context, store *sqlite.Store, resolved scope.Resolution, filter commands.ApprovalSupportFilter) ([]commands.ApprovalView, error) {
 	views, err := projections.ListPendingApprovalViews(ctx, store.DB())
 	if err != nil {
 		return nil, err
 	}
 
+	approvalService := approvalsvc.Service{Store: store}
 	approvals := make([]commands.ApprovalView, 0, len(views))
 	for _, view := range views {
-		if matchesTaskProjectionScope(view.ProjectKey, view.TaskScope, resolved) {
-			approvals = append(approvals, commands.ApprovalView{
-				TaskKey: view.TaskKey,
-				Status:  view.Status,
-			})
+		if !matchesTaskProjectionScope(view.ProjectKey, view.TaskScope, resolved) {
+			continue
 		}
+		detail, err := approvalService.Detail(ctx, view.ApprovalID)
+		if err != nil {
+			return nil, err
+		}
+		resolverSupport := string(detail.ResolverSupport)
+		if !filter.Matches(resolverSupport) {
+			continue
+		}
+		approvals = append(approvals, commands.ApprovalView{
+			ApprovalID:      view.ApprovalID,
+			TaskKey:         view.TaskKey,
+			RunID:           detail.Approval.RunID,
+			Status:          view.Status,
+			ResolverSupport: resolverSupport,
+		})
 	}
 	return approvals, nil
+}
+
+func approvalRunIDLabel(runID *int64) string {
+	if runID == nil {
+		return "none"
+	}
+	return fmt.Sprintf("%d", *runID)
 }
 
 func listLogs(ctx context.Context, store *sqlite.Store, resolved scope.Resolution) ([]runtimeevents.Record, error) {

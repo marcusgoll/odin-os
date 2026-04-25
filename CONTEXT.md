@@ -204,6 +204,7 @@ _Avoid_: analytics scrape, crawler result
 - A materialized **Work Item** from a **Follow-Up Obligation** should keep explicit follow-up provenance so `/overview`, agenda, and audit surfaces can distinguish the trigger definition from the executable work it created
 - A **Work Item** may create one or more **Approval Requests** across its lifecycle
 - An **Approval Request** belongs to one **Work Item** and may reference the **Run Attempt** that produced the blocked state or evidence bundle
+- Approval-support filters on an **Operator Surface** may narrow which pending **Approval Requests** are listed by workflow resolver support, but they are derived inspection filters only; they do not authorize batch mutation, bypass workflow-owned resolver support, or change the lifecycle of any **Approval Request**
 - **Browser Control** belongs to the **Workspace** integration/tooling layer and may be invoked from an **Operator Surface** or by a **Companion** on behalf of a **Work Item**
 - A **Trusted Browser Session** may be reused across multiple **Run Attempts**, but it does not become a domain-owned workflow aggregate
 - A **Browser Intervention** pauses **Browser Control** so a human can complete a live blocker in the shared session before execution resumes
@@ -1170,6 +1171,7 @@ _Avoid_: analytics scrape, crawler result
 - denial was at risk of breaking governance lineage across replanning. Resolved: a post-denial **Approval Request** explicitly references the denied approval it follows.
 - material-change retriage was at risk of leaving approval replacement implicit and reconstructable only by timestamps. Resolved: a replacement **Approval Request** explicitly references the expired approval it supersedes.
 - material-change retriage was at risk of leaving stale approval resume state active after approval expiry. Resolved: expiring a pending **Approval Request** also supersedes the old `approval_wait` wake packet and writes a fresh packet for the new approval context.
+- approval-support filters were at risk of being treated as batch approval controls. Resolved: `supported` and `unsupported` filters are **Operator Surface** inspection filters only; every mutation still targets one explicit **Approval Request** and must pass workflow-owned resolver support.
 - "run" was being treated like the main managed object. Resolved: the durable control-plane object is the **Work Item** and execution happens through one or more **Run Attempts**.
 - "pause", "resume", "abort", and "reset" were drifting toward process control language. Resolved: operator controls act on **Work Items**, while **Run Attempts** remain execution history and outcomes.
 - "cron" or event hooks were drifting toward direct worker launching. Resolved: schedules and event hooks are **Automation Triggers** that materialize governed **Work Items** first.

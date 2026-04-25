@@ -41,8 +41,11 @@ type RunsView struct {
 }
 
 type ApprovalView struct {
-	TaskKey string `json:"task_key"`
-	Status  string `json:"status"`
+	ApprovalID      int64  `json:"approval_id"`
+	TaskKey         string `json:"task_key"`
+	RunID           *int64 `json:"run_id,omitempty"`
+	Status          string `json:"status"`
+	ResolverSupport string `json:"resolver_support"`
 }
 
 type ApprovalsView struct {
