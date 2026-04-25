@@ -2,6 +2,8 @@ package integration_test
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -49,6 +51,41 @@ func TestOperatorOverviewUsesCanonicalBoard(t *testing.T) {
 	}
 	if !strings.Contains(addOutput, "created follow-up") {
 		t.Fatalf("followup add output = %q, want created follow-up", addOutput)
+	}
+
+	payloadPath := filepath.Join(t.TempDir(), "intake-payload.json")
+	if err := os.WriteFile(payloadPath, []byte(`{"workflow_id":"pbs-ci","run_id":"42"}`), 0o644); err != nil {
+		t.Fatalf("WriteFile(intake payload) error = %v", err)
+	}
+	intakeOutput, err := runOdinCommand(
+		t,
+		repoRoot,
+		odinBinary,
+		runtimeRoot,
+		nil,
+		"",
+		"intake",
+		"enqueue",
+		"--source",
+		"n8n",
+		"--project",
+		"pbs",
+		"--title",
+		"Review intake overview lane",
+		"--type",
+		"ci_failure",
+		"--dedup-key",
+		"ci_failure:pbs:overview",
+		"--requested-by",
+		"n8n",
+		"--payload-file",
+		payloadPath,
+	)
+	if err != nil {
+		t.Fatalf("runOdinCommand(intake enqueue) error = %v\n%s", err, intakeOutput)
+	}
+	if !strings.Contains(intakeOutput, "queued intake task") {
+		t.Fatalf("intake enqueue output = %q, want queued intake task", intakeOutput)
 	}
 
 	listOutput, err := runOdinCommand(
@@ -106,6 +143,9 @@ func TestOperatorOverviewUsesCanonicalBoard(t *testing.T) {
 		"Observability",
 		"Memory",
 		"Intake Inbox",
+		"wiring=live source=task_intakes status=linked_task_evidence count=1",
+		"intake=1 source=n8n type=ci_failure dedup=ci_failure:pbs:overview requested_by=n8n",
+		"status=queued initiative=pbs",
 		"Automation Triggers",
 		"wiring=live count=1",
 		"trigger=1 title=Review automation trigger lane status=active",
@@ -125,5 +165,8 @@ func TestOperatorOverviewUsesCanonicalBoard(t *testing.T) {
 	}
 	if strings.Contains(output, "automation trigger overview projection not implemented") {
 		t.Fatalf("overview output still contains placeholder automation trigger note:\n%s", output)
+	}
+	if strings.Contains(output, "intake overview projection not implemented") {
+		t.Fatalf("overview output still contains placeholder intake note:\n%s", output)
 	}
 }

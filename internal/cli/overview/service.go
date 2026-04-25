@@ -45,7 +45,7 @@ type View struct {
 	Approvals          []ApprovalSummary
 	Observability      ObservabilityLane
 	Memory             MemoryLane
-	IntakeInbox        PlaceholderLane
+	IntakeInbox        IntakeInboxLane
 	AutomationTriggers AutomationTriggerLane
 }
 
@@ -235,6 +235,30 @@ type PlaceholderLane struct {
 	Note   string
 }
 
+type IntakeInboxLane struct {
+	Wiring Wiring
+	Source string
+	Status string
+	Note   string
+	Items  []IntakeEvidenceSummary
+}
+
+type IntakeEvidenceSummary struct {
+	IntakeID       int64
+	TaskID         int64
+	WorkspaceKey   string
+	ProjectKey     string
+	InitiativeKey  *string
+	CompanionKey   *string
+	WorkItemKey    string
+	WorkItemStatus string
+	Source         string
+	IntakeType     string
+	DedupKey       string
+	RequestedBy    string
+	CreatedAt      string
+}
+
 type AutomationTriggerLane struct {
 	Wiring Wiring
 	Items  []AutomationTriggerSummary
@@ -276,7 +300,7 @@ func (service Service) Build(ctx context.Context, resolved scope.Resolution) (Vi
 		Memory: MemoryLane{
 			Wiring: WiringLive,
 		},
-		IntakeInbox: PlaceholderLane{
+		IntakeInbox: IntakeInboxLane{
 			Wiring: WiringNotYetWired,
 			Status: "unavailable",
 			Note:   "intake overview projection not implemented",
@@ -682,6 +706,36 @@ func (service Service) Build(ctx context.Context, resolved scope.Resolution) (Vi
 		})
 	}
 
+	intakeViews, err := projections.ListTaskIntakeEvidenceViews(ctx, service.Store.DB(), workspaces.DefaultWorkspaceKey)
+	if err != nil {
+		return View{}, err
+	}
+	view.IntakeInbox.Wiring = WiringLive
+	view.IntakeInbox.Source = "task_intakes"
+	view.IntakeInbox.Status = "linked_task_evidence"
+	view.IntakeInbox.Note = ""
+	view.IntakeInbox.Items = make([]IntakeEvidenceSummary, 0, len(intakeViews))
+	for _, intake := range intakeViews {
+		if !matchesIntakeScope(intake, resolved) {
+			continue
+		}
+		view.IntakeInbox.Items = append(view.IntakeInbox.Items, IntakeEvidenceSummary{
+			IntakeID:       intake.IntakeID,
+			TaskID:         intake.TaskID,
+			WorkspaceKey:   intake.WorkspaceKey,
+			ProjectKey:     intake.ProjectKey,
+			InitiativeKey:  intake.InitiativeKey,
+			CompanionKey:   intake.CompanionKey,
+			WorkItemKey:    intake.WorkItemKey,
+			WorkItemStatus: intake.WorkItemStatus,
+			Source:         intake.Source,
+			IntakeType:     intake.IntakeType,
+			DedupKey:       intake.DedupKey,
+			RequestedBy:    intake.RequestedBy,
+			CreatedAt:      intake.CreatedAt,
+		})
+	}
+
 	followUpViews, err := projections.ListFollowUpSummaryViews(ctx, service.Store.DB(), workspaces.DefaultWorkspaceKey, service.now())
 	if err != nil {
 		return View{}, err
@@ -825,6 +879,23 @@ func matchesFollowUpScope(followUp projections.FollowUpSummaryView, resolved sco
 			return true
 		}
 		if followUp.InitiativeKey != nil && *followUp.InitiativeKey == resolved.ProjectKey {
+			return true
+		}
+		return false
+	case scope.ScopeNewProject:
+		return false
+	default:
+		return true
+	}
+}
+
+func matchesIntakeScope(intake projections.TaskIntakeEvidenceView, resolved scope.Resolution) bool {
+	switch resolved.Kind {
+	case scope.ScopeProject, scope.ScopeOdinCore:
+		if intake.ProjectKey == resolved.ProjectKey {
+			return true
+		}
+		if intake.InitiativeKey != nil && *intake.InitiativeKey == resolved.ProjectKey {
 			return true
 		}
 		return false

@@ -32,6 +32,16 @@ func TestBuildReturnsCanonicalOverviewFromCurrentAuthority(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("CreateFollowUpObligation() error = %v", err)
 	}
+	if _, err := env.store.CreateTaskIntake(ctx, sqlite.CreateTaskIntakeParams{
+		TaskID:      env.taskID,
+		Source:      "n8n",
+		IntakeType:  "ci_failure",
+		DedupKey:    "ci_failure:alpha:42",
+		RequestedBy: "n8n",
+		PayloadJSON: `{"workflow_id":"alpha-ci","run_id":"42"}`,
+	}); err != nil {
+		t.Fatalf("CreateTaskIntake() error = %v", err)
+	}
 
 	view, err := Service{
 		Store:            env.store,
@@ -98,8 +108,30 @@ func TestBuildReturnsCanonicalOverviewFromCurrentAuthority(t *testing.T) {
 	if len(view.Memory.Recent) != 1 || view.Memory.Count != 1 {
 		t.Fatalf("Memory = %+v, want one recent entry", view.Memory)
 	}
-	if view.IntakeInbox.Wiring != WiringNotYetWired {
-		t.Fatalf("Intake wiring = %q, want %q", view.IntakeInbox.Wiring, WiringNotYetWired)
+	if view.IntakeInbox.Wiring != WiringLive {
+		t.Fatalf("Intake wiring = %q, want %q", view.IntakeInbox.Wiring, WiringLive)
+	}
+	if view.IntakeInbox.Source != "task_intakes" {
+		t.Fatalf("Intake source = %q, want task_intakes", view.IntakeInbox.Source)
+	}
+	if view.IntakeInbox.Status != "linked_task_evidence" {
+		t.Fatalf("Intake status = %q, want linked_task_evidence", view.IntakeInbox.Status)
+	}
+	if len(view.IntakeInbox.Items) != 1 {
+		t.Fatalf("Intake items len = %d, want 1", len(view.IntakeInbox.Items))
+	}
+	intake := view.IntakeInbox.Items[0]
+	if intake.Source != "n8n" || intake.IntakeType != "ci_failure" || intake.DedupKey != "ci_failure:alpha:42" {
+		t.Fatalf("Intake identity = %+v, want n8n ci_failure ci_failure:alpha:42", intake)
+	}
+	if intake.WorkItemKey != "alpha-task" || intake.WorkItemStatus != "blocked" || intake.ProjectKey != "alpha" {
+		t.Fatalf("Intake linked work = %+v, want alpha-task blocked alpha", intake)
+	}
+	if intake.InitiativeKey == nil || *intake.InitiativeKey != "alpha" {
+		t.Fatalf("Intake initiative = %v, want alpha", intake.InitiativeKey)
+	}
+	if intake.CompanionKey == nil || *intake.CompanionKey != "primary" {
+		t.Fatalf("Intake companion = %v, want primary", intake.CompanionKey)
 	}
 	if view.AutomationTriggers.Wiring != WiringLive {
 		t.Fatalf("Automation wiring = %q, want %q", view.AutomationTriggers.Wiring, WiringLive)

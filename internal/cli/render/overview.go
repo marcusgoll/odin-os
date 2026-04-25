@@ -343,11 +343,30 @@ func RenderOverview(view overview.View) string {
 	lines = append(lines, "")
 	lines = append(lines, "Intake Inbox")
 	lines = append(lines, fmt.Sprintf(
-		"  wiring=%s status=%s note=%s",
+		"  wiring=%s source=%s status=%s count=%d",
 		valueOrNone(string(view.IntakeInbox.Wiring)),
+		valueOrNone(view.IntakeInbox.Source),
 		valueOrNone(view.IntakeInbox.Status),
-		valueOrNone(view.IntakeInbox.Note),
+		len(view.IntakeInbox.Items),
 	))
+	if len(view.IntakeInbox.Items) == 0 {
+		lines = append(lines, "  none")
+	}
+	for _, intake := range view.IntakeInbox.Items {
+		lines = append(lines, fmt.Sprintf(
+			"  intake=%d source=%s type=%s dedup=%s requested_by=%s work_item=%s status=%s initiative=%s companion=%s project=%s",
+			intake.IntakeID,
+			valueOrNone(intake.Source),
+			valueOrNone(intake.IntakeType),
+			valueOrNone(intake.DedupKey),
+			valueOrNone(intake.RequestedBy),
+			valueOrNone(intake.WorkItemKey),
+			valueOrNone(intake.WorkItemStatus),
+			valueOrNone(ptrValue(intake.InitiativeKey)),
+			valueOrNone(ptrValue(intake.CompanionKey)),
+			valueOrNone(intake.ProjectKey),
+		))
+	}
 
 	lines = append(lines, "")
 	lines = append(lines, "Automation Triggers")

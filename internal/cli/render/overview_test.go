@@ -32,6 +32,8 @@ func TestRenderOverviewUsesCanonicalLanes(t *testing.T) {
 		"Observability",
 		"Memory",
 		"Intake Inbox",
+		"wiring=live source=task_intakes status=linked_task_evidence count=1",
+		"intake=3 source=n8n type=ci_failure dedup=ci_failure:alpha:42 requested_by=n8n work_item=alpha-task status=blocked initiative=alpha companion=primary project=alpha",
 		"Automation Triggers",
 		"wiring=live count=1",
 		"trigger=42 title=Review automation trigger lane status=active due_status=due initiative=alpha companion=primary target_project=alpha next_due_at=2026-04-25T09:00:00Z",
@@ -208,10 +210,24 @@ func sampleOverview() overview.View {
 				},
 			},
 		},
-		IntakeInbox: overview.PlaceholderLane{
-			Wiring: overview.WiringNotYetWired,
-			Status: "unavailable",
-			Note:   "intake overview projection not implemented",
+		IntakeInbox: overview.IntakeInboxLane{
+			Wiring: overview.WiringLive,
+			Source: "task_intakes",
+			Status: "linked_task_evidence",
+			Items: []overview.IntakeEvidenceSummary{
+				{
+					IntakeID:       3,
+					Source:         "n8n",
+					IntakeType:     "ci_failure",
+					DedupKey:       "ci_failure:alpha:42",
+					RequestedBy:    "n8n",
+					ProjectKey:     "alpha",
+					InitiativeKey:  &project,
+					CompanionKey:   &owner,
+					WorkItemKey:    "alpha-task",
+					WorkItemStatus: "blocked",
+				},
+			},
 		},
 		AutomationTriggers: overview.AutomationTriggerLane{
 			Wiring: overview.WiringLive,
