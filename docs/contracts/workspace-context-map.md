@@ -25,6 +25,7 @@ Dependencies should point inward toward the smallest context that owns the rule.
 | `work execution` | Execution lanes, run attempts, supervised delegations, orchestration of governed work, and retry handling. | `planning`, `project governance`, `companion`, `memory`, `integrations` | `internal/runtime`, `internal/executors`, `internal/workers` | Planning policy, catalog ownership, or workspace identity rules. |
 | `memory` | Durable project, initiative, companion, work item, and run-attempt memory access and projection. | `workspace`, `initiative` | `internal/memory`, `internal/store` | Planning logic, execution routing, or adapter-specific policy. |
 | `integrations` | Boundary adapters for GitHub, Git, shell, files, calendar, mail, and other external systems. | `workspace`, `project governance` | `internal/adapters`, `internal/vcs` | Domain rules, planning logic, or canonical state ownership. |
+| `observability` | Read-only logs, health, metrics, incidents, recoveries, projection freshness, and cross-scope runtime readbacks. | `workspace`, `work execution`, `integrations` as read-model inputs. | `internal/runtime/health`, `internal/runtime/projections`, `internal/runtime/recovery`, `internal/telemetry`, `internal/api`, `internal/cli` | Business lifecycle authority, readiness mutation, planning, or work execution decisions. |
 
 ## Dependency direction
 
@@ -39,6 +40,7 @@ The intended dependency graph is:
 - `work execution` -> `planning`, `project governance`, `companion`, `memory`, `integrations`
 - `memory` -> `workspace`, `initiative`
 - `integrations` -> `workspace`, `project governance`
+- `observability` -> `workspace`, `work execution`, `integrations` as read-model inputs only
 
 ## Practical reading
 
@@ -50,3 +52,4 @@ The intended dependency graph is:
 - Planning decides what should happen; work execution carries it out; memory preserves what matters; integrations connect Odin to external systems.
 - Capability catalog data should stay lightweight and be loaded only when a consumer needs it.
 - Integrations are one-way boundaries into external systems; work execution depends on them, but they do not depend back on execution.
+- Observability is a read-only projection context. It may feed `/overview`, `doctor`, logs, reports, metrics, and health inspection, but it must not become a second source of lifecycle truth or readiness mutation.

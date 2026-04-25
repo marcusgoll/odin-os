@@ -60,6 +60,14 @@ _Avoid_: work item, session
 The human-facing control path Odin exposes for governed commands, approvals, status, and state transitions.
 _Avoid_: wrapper script, hidden admin flow, playbook
 
+**Observability**:
+The read-only operator understanding layer for logs, health, metrics, incidents, recoveries, projection freshness, and cross-scope runtime readbacks.
+_Avoid_: control plane, source of truth, execution lane
+
+**Runtime Readiness**:
+The machine-oriented safety state that says whether a runtime root is safe to operate, exposed by readiness endpoints and `healthcheck`; `doctor` explains the underlying health evidence.
+_Avoid_: dashboard status, work status
+
 **Automation Trigger**:
 A schedule-based or event-based rule that creates or updates a governed Work Item instead of launching execution directly.
 _Avoid_: cron job, direct worker spawn
@@ -188,6 +196,8 @@ _Avoid_: analytics scrape, crawler result
 - When material-change re-triage reaches already linked follow-up work, Odin should reuse or requeue the existing **Work Item** when it represents the same durable obligation, and create a new **Work Item** only when the new evidence creates a distinct obligation
 - A **Work Queue** belongs to one **Scope** and contains triaged **Work Items**
 - A **Work Item** may produce one or more **Run Attempts**
+- **Observability** consumes runtime truth and exposes read-only health, metrics, incidents, recoveries, projection freshness, and cross-scope readbacks; it must not become a second authority for work, readiness, or execution state
+- **Runtime Readiness** belongs to the runtime/operations boundary and is surfaced through `healthcheck` and readiness endpoints; `/overview` and `doctor` may display readiness evidence but do not own readiness transitions
 - An **Automation Trigger** creates or updates **Work Items** before any **Worker** is dispatched
 - A **Follow-Up Obligation** is an **Automation Trigger**, not a **Work Item**; its due occurrence may materialize a **Work Item** through the normal governed queue path
 - A **Follow-Up Obligation** belongs to one **Workspace** and may narrow to one owning **Initiative** and one responsible **Companion**
@@ -385,6 +395,7 @@ _Avoid_: analytics scrape, crawler result
 - **Follow-Up Obligation** trigger status should be one of: `active`, `paused`, `blocked`, `completed`, `skipped`, `archived`; due or overdue state is a derived schedule view, not the trigger's stored lifecycle status
 - **Transfer Status View** may expose a derived summary status for operator readability, but it does not own canonical lifecycle truth
 - `initialized` and `ready` should remain system-readiness or dispatch-readiness terms, not the primary operator-visible lifecycle for governed work
+- `healthy`, `degraded`, and `failed` belong to health and **Observability** reporting, while `ready` and `not ready` belong to **Runtime Readiness**; `/overview` may summarize those cues but must not reuse them as **Work Item**, **Run Attempt**, **Approval Request**, or **Follow-Up Obligation** lifecycle states
 
 ## Example dialogue
 

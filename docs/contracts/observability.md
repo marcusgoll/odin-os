@@ -25,6 +25,8 @@ Doctor reports are structured and machine-parseable. They must distinguish:
 - `degraded`
 - `failed`
 
+Doctor is diagnostic reporting, not the readiness gate itself. `odin healthcheck` and `/readyz` own fail-closed Runtime Readiness decisions. `/overview` may summarize health and freshness cues through its Observability lane, but it must not become a second readiness authority.
+
 ## Metrics
 
 Metrics are derived from canonical runtime state and exported in machine-readable text form.
@@ -44,3 +46,5 @@ Required metrics include:
 ## Projections
 
 Operator projections remain read-only and must not mutate runtime state.
+
+Projection consumers may render derived status for readability, but canonical lifecycle ownership stays with the underlying domain object. Observability must not mint new Work Item, Run Attempt, Approval Request, or Follow-Up Obligation states.
