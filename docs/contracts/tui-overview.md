@@ -117,6 +117,8 @@ Rules:
 - show cross-scope pending and recent `Approval Requests`
 - keep linked approvals visible inside `Work Item` detail too
 - do not let this become the primary business landing surface
+- support filters such as `supported` and `unsupported` may narrow the visible approval list, but they are inspection filters only
+- approval filters must not create batch approve or deny actions; every approval mutation must still target one explicit `Approval Request` and pass workflow-owned resolver support
 
 ### Observability
 

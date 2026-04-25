@@ -38,6 +38,7 @@ Odin should not copy OpenSwarm's agent-dashboard authority. Odin already has a s
 - Approval mutation is `scoped resolve`, not generic resolve.
 - `/approvals resolve` must refuse to mutate any pending approval that has no registered safe resolver or continuation contract.
 - Unsupported approvals remain inspectable in `/overview` and `/approvals`.
+- Approval support filters are list/inspection filters only; they never imply batch approve or deny authority.
 
 ## Design
 
@@ -86,6 +87,15 @@ approval=<id> task=<work-item-key> run=<id|none> status=pending resolver=<suppor
 ```
 
 This remains a list surface, not a transcript or evidence dump.
+
+Support filters may narrow the list to resolver-backed or unsupported pending approvals:
+
+```text
+/approvals supported
+/approvals unsupported
+```
+
+These filters are intentionally batch-safe: they change visibility only. They must not add batch approve or deny behavior, and they must not make `supported` approvals mutable without the normal explicit `/approvals resolve <id> approve|deny because <reason...>` path.
 
 ### `/approvals show <id>`
 
@@ -160,6 +170,7 @@ The storage-level `ResolveApproval` function remains an implementation primitive
 - `/overview` is read-only.
 - `/approvals resolve` never calls storage-level `ResolveApproval` directly for unsupported approvals.
 - Unsupported approvals are visible but immutable through the shell resolve path.
+- Support filters do not mutate approval state and do not authorize batch action.
 - Approval resolution must be idempotence-safe: a non-pending approval cannot be resolved again.
 - Approval resolution must preserve workflow-specific continuation semantics.
 - Denial must not create a continuation run handle.
@@ -184,13 +195,13 @@ Rejected for v1 because approvals are a governance lane, not Odin's primary busi
 
 Context: `internal/cli` operator surface over the existing runtime, approval, projection, memory, registry, and shell services.
 
-Owns: `/overview` presentation, approval lane presentation, `/approvals` list/detail/resolve routing, resolver-support display.
+Owns: `/overview` presentation, approval lane presentation, `/approvals` list/detail/resolve routing, resolver-support display, read-only approval support filters.
 
 Does not own: approval storage authority, workflow continuation semantics, transfer-specific submit behavior, social draft approval, browser-control evidence, or physical table renames.
 
 Canonical terms: `Workspace`, `Initiative`, `Work Item`, `Run Attempt`, `Approval Request`, `Operator Surface`, `Capability Catalog`, `Automation Trigger`.
 
-Avoid terms: generic `process` lane, top-level `agent dashboard`, generic `approval queue` as the primary landing object, `approval_id` in shell receipts.
+Avoid terms: generic `process` lane, top-level `agent dashboard`, generic `approval queue` as the primary landing object, `approval_id` in shell receipts, batch approval actions.
 
 Boundary crossings: CLI routes to runtime approval resolver contracts; runtime resolvers call storage and workflow services; overview reads projections and registry snapshots.
 
