@@ -71,6 +71,22 @@ type FollowUpSummaryView struct {
 	LastCompletedAt  *time.Time `json:"last_completed_at,omitempty"`
 }
 
+type TaskIntakeEvidenceView struct {
+	IntakeID       int64   `json:"intake_id"`
+	TaskID         int64   `json:"task_id"`
+	WorkspaceKey   string  `json:"workspace_key"`
+	ProjectKey     string  `json:"project_key"`
+	InitiativeKey  *string `json:"initiative_key,omitempty"`
+	CompanionKey   *string `json:"companion_key,omitempty"`
+	WorkItemKey    string  `json:"work_item_key"`
+	WorkItemStatus string  `json:"work_item_status"`
+	Source         string  `json:"source"`
+	IntakeType     string  `json:"intake_type"`
+	DedupKey       string  `json:"dedup_key"`
+	RequestedBy    string  `json:"requested_by"`
+	CreatedAt      string  `json:"created_at"`
+}
+
 type AgendaView struct {
 	WorkspaceKey    string                `json:"workspace_key"`
 	DueWork         []FollowUpSummaryView `json:"due_work"`
@@ -554,6 +570,66 @@ func ListDueFollowUpSummaryViews(ctx context.Context, queryer Queryer, workspace
 		}
 	}
 	return due, nil
+}
+
+func ListTaskIntakeEvidenceViews(ctx context.Context, queryer Queryer, workspaceKey string) ([]TaskIntakeEvidenceView, error) {
+	rows, err := queryer.QueryContext(ctx, `
+		SELECT
+			ti.id,
+			ti.task_id,
+			w.key,
+			p.key,
+			i.key,
+			c.key,
+			t.key,
+			t.status,
+			ti.source,
+			ti.intake_type,
+			ti.dedup_key,
+			ti.requested_by,
+			ti.created_at
+		FROM task_intakes ti
+		JOIN tasks t ON t.id = ti.task_id
+		JOIN projects p ON p.id = t.project_id
+		JOIN workspaces w ON w.id = t.workspace_id
+		LEFT JOIN initiatives i ON i.id = t.initiative_id
+		LEFT JOIN companions c ON c.id = t.companion_id
+		WHERE w.key = ?
+		ORDER BY ti.created_at DESC, ti.id DESC
+	`, workspaceKey)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	views := make([]TaskIntakeEvidenceView, 0)
+	for rows.Next() {
+		var view TaskIntakeEvidenceView
+		var initiativeKey sql.NullString
+		var companionKey sql.NullString
+		if err := rows.Scan(
+			&view.IntakeID,
+			&view.TaskID,
+			&view.WorkspaceKey,
+			&view.ProjectKey,
+			&initiativeKey,
+			&companionKey,
+			&view.WorkItemKey,
+			&view.WorkItemStatus,
+			&view.Source,
+			&view.IntakeType,
+			&view.DedupKey,
+			&view.RequestedBy,
+			&view.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		view.InitiativeKey = nullableStringPtr(initiativeKey)
+		view.CompanionKey = nullableStringPtr(companionKey)
+		views = append(views, view)
+	}
+
+	return views, rows.Err()
 }
 
 func ListOverdueFollowUpSummaryViews(ctx context.Context, queryer Queryer, workspaceKey string, now time.Time) ([]FollowUpSummaryView, error) {
