@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"odin-os/internal/cli/scope"
 	"odin-os/internal/core/initiatives"
@@ -31,6 +32,7 @@ type Service struct {
 	Store            *sqlite.Store
 	Registry         coreprojects.Registry
 	RegistrySnapshot registry.Snapshot
+	Now              func() time.Time
 }
 
 type View struct {
@@ -43,8 +45,8 @@ type View struct {
 	Approvals          []ApprovalSummary       `json:"approvals"`
 	Observability      ObservabilityLane       `json:"observability"`
 	Memory             MemoryLane              `json:"memory"`
-	IntakeInbox        PlaceholderLane         `json:"intake_inbox"`
-	AutomationTriggers PlaceholderLane         `json:"automation_triggers"`
+	IntakeInbox        IntakeInboxLane         `json:"intake_inbox"`
+	AutomationTriggers AutomationTriggerLane   `json:"automation_triggers"`
 }
 
 type WorkspaceLane struct {
@@ -233,6 +235,48 @@ type PlaceholderLane struct {
 	Note   string `json:"note"`
 }
 
+type IntakeInboxLane struct {
+	Wiring Wiring                  `json:"wiring"`
+	Source string                  `json:"source"`
+	Status string                  `json:"status"`
+	Note   string                  `json:"note"`
+	Items  []IntakeEvidenceSummary `json:"items"`
+}
+
+type IntakeEvidenceSummary struct {
+	IntakeID       int64   `json:"intake_id"`
+	TaskID         int64   `json:"task_id"`
+	WorkspaceKey   string  `json:"workspace_key"`
+	ProjectKey     string  `json:"project_key"`
+	InitiativeKey  *string `json:"initiative_key"`
+	CompanionKey   *string `json:"companion_key"`
+	WorkItemKey    string  `json:"work_item_key"`
+	WorkItemStatus string  `json:"work_item_status"`
+	Source         string  `json:"source"`
+	IntakeType     string  `json:"intake_type"`
+	DedupKey       string  `json:"dedup_key"`
+	RequestedBy    string  `json:"requested_by"`
+	CreatedAt      string  `json:"created_at"`
+}
+
+type AutomationTriggerLane struct {
+	Wiring Wiring                     `json:"wiring"`
+	Items  []AutomationTriggerSummary `json:"items"`
+}
+
+type AutomationTriggerSummary struct {
+	TriggerID        int64   `json:"trigger_id"`
+	WorkspaceKey     string  `json:"workspace_key"`
+	InitiativeKey    *string `json:"initiative_key"`
+	CompanionKey     *string `json:"companion_key"`
+	TargetProjectKey string  `json:"target_project_key"`
+	Title            string  `json:"title"`
+	Status           string  `json:"status"`
+	DueStatus        string  `json:"due_status"`
+	NextDueAt        string  `json:"next_due_at"`
+	LastCompletedAt  *string `json:"last_completed_at"`
+}
+
 func (service Service) Build(ctx context.Context, resolved scope.Resolution) (View, error) {
 	if service.Store == nil {
 		return View{}, fmt.Errorf("overview store is required")
@@ -256,15 +300,13 @@ func (service Service) Build(ctx context.Context, resolved scope.Resolution) (Vi
 		Memory: MemoryLane{
 			Wiring: WiringLive,
 		},
-		IntakeInbox: PlaceholderLane{
+		IntakeInbox: IntakeInboxLane{
 			Wiring: WiringNotYetWired,
 			Status: "unavailable",
 			Note:   "intake overview projection not implemented",
 		},
-		AutomationTriggers: PlaceholderLane{
+		AutomationTriggers: AutomationTriggerLane{
 			Wiring: WiringNotYetWired,
-			Status: "unavailable",
-			Note:   "automation trigger overview projection not implemented",
 		},
 	}
 
@@ -664,6 +706,64 @@ func (service Service) Build(ctx context.Context, resolved scope.Resolution) (Vi
 		})
 	}
 
+	intakeViews, err := projections.ListTaskIntakeEvidenceViews(ctx, service.Store.DB(), workspaces.DefaultWorkspaceKey)
+	if err != nil {
+		return View{}, err
+	}
+	view.IntakeInbox.Wiring = WiringLive
+	view.IntakeInbox.Source = "task_intakes"
+	view.IntakeInbox.Status = "linked_task_evidence"
+	view.IntakeInbox.Note = ""
+	view.IntakeInbox.Items = make([]IntakeEvidenceSummary, 0, len(intakeViews))
+	for _, intake := range intakeViews {
+		if !matchesIntakeScope(intake, resolved) {
+			continue
+		}
+		view.IntakeInbox.Items = append(view.IntakeInbox.Items, IntakeEvidenceSummary{
+			IntakeID:       intake.IntakeID,
+			TaskID:         intake.TaskID,
+			WorkspaceKey:   intake.WorkspaceKey,
+			ProjectKey:     intake.ProjectKey,
+			InitiativeKey:  intake.InitiativeKey,
+			CompanionKey:   intake.CompanionKey,
+			WorkItemKey:    intake.WorkItemKey,
+			WorkItemStatus: intake.WorkItemStatus,
+			Source:         intake.Source,
+			IntakeType:     intake.IntakeType,
+			DedupKey:       intake.DedupKey,
+			RequestedBy:    intake.RequestedBy,
+			CreatedAt:      intake.CreatedAt,
+		})
+	}
+
+	followUpViews, err := projections.ListFollowUpSummaryViews(ctx, service.Store.DB(), workspaces.DefaultWorkspaceKey, service.now())
+	if err != nil {
+		return View{}, err
+	}
+	view.AutomationTriggers.Wiring = WiringLive
+	view.AutomationTriggers.Items = make([]AutomationTriggerSummary, 0, len(followUpViews))
+	for _, followUp := range followUpViews {
+		if !matchesFollowUpScope(followUp, resolved) {
+			continue
+		}
+		var lastCompletedAt *string
+		if followUp.LastCompletedAt != nil {
+			lastCompletedAt = stringPtr(followUp.LastCompletedAt.UTC().Format(time.RFC3339))
+		}
+		view.AutomationTriggers.Items = append(view.AutomationTriggers.Items, AutomationTriggerSummary{
+			TriggerID:        followUp.ObligationID,
+			WorkspaceKey:     followUp.WorkspaceKey,
+			InitiativeKey:    followUp.InitiativeKey,
+			CompanionKey:     followUp.CompanionKey,
+			TargetProjectKey: followUp.TargetProjectKey,
+			Title:            followUp.Title,
+			Status:           followUp.Status,
+			DueStatus:        followUp.DueStatus,
+			NextDueAt:        followUp.NextDueAt.UTC().Format(time.RFC3339),
+			LastCompletedAt:  lastCompletedAt,
+		})
+	}
+
 	memoryScope, err := service.memoryScope(ctx, resolved)
 	if err != nil {
 		return View{}, err
@@ -706,6 +806,13 @@ func (service Service) Build(ctx context.Context, resolved scope.Resolution) (Vi
 	}
 
 	return view, nil
+}
+
+func (service Service) now() time.Time {
+	if service.Now != nil {
+		return service.Now().UTC()
+	}
+	return time.Now().UTC()
 }
 
 func (service Service) memoryScope(ctx context.Context, resolved scope.Resolution) (knowledgememory.Scope, error) {
@@ -758,6 +865,40 @@ func matchesInitiativeScope(initiative projections.InitiativePortfolioView, reso
 			return true
 		}
 		return initiative.InitiativeKey == resolved.ProjectKey
+	case scope.ScopeNewProject:
+		return false
+	default:
+		return true
+	}
+}
+
+func matchesFollowUpScope(followUp projections.FollowUpSummaryView, resolved scope.Resolution) bool {
+	switch resolved.Kind {
+	case scope.ScopeProject, scope.ScopeOdinCore:
+		if followUp.TargetProjectKey == resolved.ProjectKey {
+			return true
+		}
+		if followUp.InitiativeKey != nil && *followUp.InitiativeKey == resolved.ProjectKey {
+			return true
+		}
+		return false
+	case scope.ScopeNewProject:
+		return false
+	default:
+		return true
+	}
+}
+
+func matchesIntakeScope(intake projections.TaskIntakeEvidenceView, resolved scope.Resolution) bool {
+	switch resolved.Kind {
+	case scope.ScopeProject, scope.ScopeOdinCore:
+		if intake.ProjectKey == resolved.ProjectKey {
+			return true
+		}
+		if intake.InitiativeKey != nil && *intake.InitiativeKey == resolved.ProjectKey {
+			return true
+		}
+		return false
 	case scope.ScopeNewProject:
 		return false
 	default:

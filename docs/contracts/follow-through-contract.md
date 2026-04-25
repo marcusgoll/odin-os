@@ -44,10 +44,12 @@ Contract rules:
 
 - an obligation preserves the promise even when the execution instance changes
 - an obligation can represent one-time, scheduled, or recurring follow-through
-- an obligation carries due information, cadence rules, status, and history
+- an obligation carries due information, cadence rules, stored lifecycle status, and history
 - an obligation does not become a work item until it is due or otherwise materialized by the follow-through loop
 
-Lifecycle states include active, paused, due, blocked, completed, and skipped. Implementations may store these differently, but they must preserve visibility into the same control-plane facts.
+Stored lifecycle states are `active`, `paused`, `blocked`, `completed`, `skipped`, and `archived`.
+
+Due and overdue are derived schedule states, not stored lifecycle states. They are computed from stored status plus `next_due_at` and surfaced through agenda, `/overview`, and other read models as due-state visibility.
 
 ## Obligation To Work Item Materialization
 
@@ -80,7 +82,7 @@ Allowed proactive behavior:
 - evaluate due obligations
 - surface agenda visibility
 - materialize work items for due obligations
-- mark obligations overdue, blocked, or completed as the state model requires
+- surface derived overdue state, mark obligations blocked or completed as the state model requires, and record overdue evidence when appropriate
 - record projections and history for later operator review
 
 Disallowed proactive behavior:

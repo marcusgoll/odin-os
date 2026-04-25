@@ -15,6 +15,7 @@ import (
 	clioverview "odin-os/internal/cli/overview"
 	"odin-os/internal/core/capabilities"
 	"odin-os/internal/core/initiatives"
+	"odin-os/internal/runtime/checkpoints"
 	"odin-os/internal/runtime/supervision"
 	"odin-os/internal/store/sqlite"
 	"odin-os/internal/vcs/worktrees"
@@ -255,11 +256,11 @@ func TestRunOverviewJSONUsesCanonicalView(t *testing.T) {
 	if payload.CapabilityCatalog.ToolCount == 0 {
 		t.Fatalf("CapabilityCatalog = %+v, want populated builtin tool count", payload.CapabilityCatalog)
 	}
-	if payload.IntakeInbox.Wiring != clioverview.WiringNotYetWired {
-		t.Fatalf("IntakeInbox.Wiring = %q, want %q", payload.IntakeInbox.Wiring, clioverview.WiringNotYetWired)
+	if payload.IntakeInbox.Wiring != clioverview.WiringLive {
+		t.Fatalf("IntakeInbox.Wiring = %q, want %q", payload.IntakeInbox.Wiring, clioverview.WiringLive)
 	}
-	if payload.AutomationTriggers.Wiring != clioverview.WiringNotYetWired {
-		t.Fatalf("AutomationTriggers.Wiring = %q, want %q", payload.AutomationTriggers.Wiring, clioverview.WiringNotYetWired)
+	if payload.AutomationTriggers.Wiring != clioverview.WiringLive {
+		t.Fatalf("AutomationTriggers.Wiring = %q, want %q", payload.AutomationTriggers.Wiring, clioverview.WiringLive)
 	}
 }
 
@@ -714,6 +715,81 @@ func TestRunApprovalsResolveUnsupportedDenyDoesNotMutate(t *testing.T) {
 	runIDs := listRuntimeTaskRunIDs(t, root, taskID)
 	if len(runIDs) != 1 || runIDs[0] != prepareRunID {
 		t.Fatalf("task run ids = %v, want only prepare run %d", runIDs, prepareRunID)
+	}
+}
+
+func TestRunApprovalsSupportFiltersAreReadOnly(t *testing.T) {
+	t.Parallel()
+
+	root := createRuntimeRoot(t)
+	fixture := seedApprovalSupportFilterRuntime(t, root)
+
+	var supportedOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"approvals", "supported", "--json"}, strings.NewReader(""), &supportedOutput); err != nil {
+		t.Fatalf("Run(approvals supported --json) error = %v", err)
+	}
+
+	var supportedPayload struct {
+		Approvals []struct {
+			ApprovalID      int64  `json:"approval_id"`
+			TaskKey         string `json:"task_key"`
+			Status          string `json:"status"`
+			ResolverSupport string `json:"resolver_support"`
+			RunID           *int64 `json:"run_id,omitempty"`
+		} `json:"approvals"`
+	}
+	if err := json.Unmarshal(supportedOutput.Bytes(), &supportedPayload); err != nil {
+		t.Fatalf("supported approvals json = %v\n%s", err, supportedOutput.String())
+	}
+	if len(supportedPayload.Approvals) != 1 {
+		t.Fatalf("supported approvals len = %d, want 1\n%s", len(supportedPayload.Approvals), supportedOutput.String())
+	}
+	if supportedPayload.Approvals[0].ApprovalID != fixture.SupportedApprovalID {
+		t.Fatalf("supported approval id = %d, want %d", supportedPayload.Approvals[0].ApprovalID, fixture.SupportedApprovalID)
+	}
+	if supportedPayload.Approvals[0].TaskKey != "supported-approval-review" {
+		t.Fatalf("supported task key = %q, want supported-approval-review", supportedPayload.Approvals[0].TaskKey)
+	}
+	if supportedPayload.Approvals[0].ResolverSupport != "supported" {
+		t.Fatalf("supported resolver = %q, want supported", supportedPayload.Approvals[0].ResolverSupport)
+	}
+	if supportedPayload.Approvals[0].RunID == nil || *supportedPayload.Approvals[0].RunID != fixture.SupportedRunID {
+		t.Fatalf("supported run id = %v, want %d", supportedPayload.Approvals[0].RunID, fixture.SupportedRunID)
+	}
+
+	var unsupportedOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"approvals", "unsupported"}, strings.NewReader(""), &unsupportedOutput); err != nil {
+		t.Fatalf("Run(approvals unsupported) error = %v", err)
+	}
+	unsupportedText := unsupportedOutput.String()
+	for _, want := range []string{
+		fmt.Sprintf("approval=%d", fixture.UnsupportedApprovalID),
+		"task=unsupported-approval-review",
+		fmt.Sprintf("run=%d", fixture.UnsupportedRunID),
+		"status=pending",
+		"resolver=unsupported",
+	} {
+		if !strings.Contains(unsupportedText, want) {
+			t.Fatalf("unsupported output = %q, want %q", unsupportedText, want)
+		}
+	}
+	if strings.Contains(unsupportedText, "task=supported-approval-review") || strings.Contains(unsupportedText, " resolver=supported\n") {
+		t.Fatalf("unsupported output = %q, should not include supported approval", unsupportedText)
+	}
+
+	store, err := sqlite.Open(filepath.Join(root, "data", "odin.db"))
+	if err != nil {
+		t.Fatalf("sqlite.Open() error = %v", err)
+	}
+	defer store.Close()
+	for _, approvalID := range []int64{fixture.SupportedApprovalID, fixture.UnsupportedApprovalID} {
+		approval, err := store.GetApproval(context.Background(), approvalID)
+		if err != nil {
+			t.Fatalf("GetApproval(%d) error = %v", approvalID, err)
+		}
+		if approval.Status != "pending" {
+			t.Fatalf("approval %d status = %q, want pending after list filters", approvalID, approval.Status)
+		}
 	}
 }
 
@@ -1280,6 +1356,111 @@ func seedPendingApprovalRuntime(t *testing.T, root string) (int64, int64, int64)
 	}
 
 	return approval.ID, task.ID, run.ID
+}
+
+type approvalSupportFilterFixture struct {
+	SupportedApprovalID   int64
+	SupportedRunID        int64
+	UnsupportedApprovalID int64
+	UnsupportedRunID      int64
+}
+
+func seedApprovalSupportFilterRuntime(t *testing.T, root string) approvalSupportFilterFixture {
+	t.Helper()
+
+	if err := os.MkdirAll(filepath.Join(root, "data"), 0o755); err != nil {
+		t.Fatalf("mkdir data: %v", err)
+	}
+
+	store, err := sqlite.Open(filepath.Join(root, "data", "odin.db"))
+	if err != nil {
+		t.Fatalf("sqlite.Open() error = %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
+	}
+
+	unsupportedApproval, unsupportedRun := seedApprovalSupportFilterRecord(t, ctx, store, "approval-unsupported", "unsupported-approval-review")
+	supportedApproval, supportedRun := seedApprovalSupportFilterRecord(t, ctx, store, "approval-supported", "supported-approval-review")
+
+	if _, err := (checkpoints.Service{Store: store}).Compact(ctx, checkpoints.CompactParams{
+		TaskID:            supportedApproval.TaskID,
+		RunID:             &supportedRun.ID,
+		Trigger:           checkpoints.TriggerApprovalWait,
+		CheckpointKey:     "supported-approval-review",
+		Objective:         "Supported approval review",
+		TaskStatus:        "blocked",
+		BlockingReason:    "approval_required",
+		LastCompletedStep: "review prepared",
+		ApprovalSummary:   "approval pending",
+		ToolResults: []checkpoints.ToolResult{
+			{
+				Key:     "robinhood_transfer_prepare",
+				Summary: "review prepared",
+				Facts: map[string]string{
+					"session_state": "review_ready",
+				},
+			},
+		},
+	}); err != nil {
+		t.Fatalf("Compact(supported approval wait) error = %v", err)
+	}
+
+	return approvalSupportFilterFixture{
+		SupportedApprovalID:   supportedApproval.ID,
+		SupportedRunID:        supportedRun.ID,
+		UnsupportedApprovalID: unsupportedApproval.ID,
+		UnsupportedRunID:      unsupportedRun.ID,
+	}
+}
+
+func seedApprovalSupportFilterRecord(t *testing.T, ctx context.Context, store *sqlite.Store, projectKey string, taskKey string) (sqlite.Approval, sqlite.Run) {
+	t.Helper()
+
+	project, err := store.CreateProject(ctx, sqlite.CreateProjectParams{
+		Key:           projectKey,
+		Name:          projectKey,
+		Scope:         "project",
+		GitRoot:       filepath.Join(t.TempDir(), projectKey),
+		DefaultBranch: "main",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject(%s) error = %v", projectKey, err)
+	}
+	task, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         taskKey,
+		Title:       taskKey,
+		Status:      "blocked",
+		Scope:       "project",
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask(%s) error = %v", taskKey, err)
+	}
+	run, err := store.StartRun(ctx, sqlite.StartRunParams{
+		TaskID:   task.ID,
+		Executor: "codex_headless",
+		Attempt:  1,
+		Status:   "blocked",
+	})
+	if err != nil {
+		t.Fatalf("StartRun(%s) error = %v", taskKey, err)
+	}
+	approval, err := store.RequestApproval(ctx, sqlite.RequestApprovalParams{
+		TaskID:      task.ID,
+		RunID:       &run.ID,
+		Status:      "pending",
+		RequestedBy: "system",
+	})
+	if err != nil {
+		t.Fatalf("RequestApproval(%s) error = %v", taskKey, err)
+	}
+	return approval, run
 }
 
 func listRuntimeTaskRunIDs(t *testing.T, root string, taskID int64) []int64 {

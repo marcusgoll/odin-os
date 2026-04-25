@@ -343,20 +343,54 @@ func RenderOverview(view overview.View) string {
 	lines = append(lines, "")
 	lines = append(lines, "Intake Inbox")
 	lines = append(lines, fmt.Sprintf(
-		"  wiring=%s status=%s note=%s",
+		"  wiring=%s source=%s status=%s count=%d",
 		valueOrNone(string(view.IntakeInbox.Wiring)),
+		valueOrNone(view.IntakeInbox.Source),
 		valueOrNone(view.IntakeInbox.Status),
-		valueOrNone(view.IntakeInbox.Note),
+		len(view.IntakeInbox.Items),
 	))
+	if len(view.IntakeInbox.Items) == 0 {
+		lines = append(lines, "  none")
+	}
+	for _, intake := range view.IntakeInbox.Items {
+		lines = append(lines, fmt.Sprintf(
+			"  intake=%d source=%s type=%s dedup=%s requested_by=%s work_item=%s status=%s initiative=%s companion=%s project=%s",
+			intake.IntakeID,
+			valueOrNone(intake.Source),
+			valueOrNone(intake.IntakeType),
+			valueOrNone(intake.DedupKey),
+			valueOrNone(intake.RequestedBy),
+			valueOrNone(intake.WorkItemKey),
+			valueOrNone(intake.WorkItemStatus),
+			valueOrNone(ptrValue(intake.InitiativeKey)),
+			valueOrNone(ptrValue(intake.CompanionKey)),
+			valueOrNone(intake.ProjectKey),
+		))
+	}
 
 	lines = append(lines, "")
 	lines = append(lines, "Automation Triggers")
 	lines = append(lines, fmt.Sprintf(
-		"  wiring=%s status=%s note=%s",
+		"  wiring=%s count=%d",
 		valueOrNone(string(view.AutomationTriggers.Wiring)),
-		valueOrNone(view.AutomationTriggers.Status),
-		valueOrNone(view.AutomationTriggers.Note),
+		len(view.AutomationTriggers.Items),
 	))
+	if len(view.AutomationTriggers.Items) == 0 {
+		lines = append(lines, "  none")
+	}
+	for _, trigger := range view.AutomationTriggers.Items {
+		lines = append(lines, fmt.Sprintf(
+			"  trigger=%d title=%s status=%s due_status=%s initiative=%s companion=%s target_project=%s next_due_at=%s",
+			trigger.TriggerID,
+			valueOrNone(trigger.Title),
+			valueOrNone(trigger.Status),
+			valueOrNone(trigger.DueStatus),
+			valueOrNone(ptrValue(trigger.InitiativeKey)),
+			valueOrNone(ptrValue(trigger.CompanionKey)),
+			valueOrNone(trigger.TargetProjectKey),
+			valueOrNone(trigger.NextDueAt),
+		))
+	}
 
 	lines = append(lines, "")
 	lines = append(lines, "Compatibility")
