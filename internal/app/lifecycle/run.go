@@ -1633,6 +1633,7 @@ func newShell(app bootstrap.App, nowOverride ...func() time.Time) (*repl.Shell, 
 	return repl.New(repl.Environment{
 		Store:               app.Store,
 		Registry:            app.Registry,
+		RegistrySnapshot:    app.RegistrySnapshot,
 		RegistryDiagnostics: app.RegistryDiagnostics,
 		SessionStore:        app.SessionStore,
 		CommandService:      servedCommandService{app: app},
