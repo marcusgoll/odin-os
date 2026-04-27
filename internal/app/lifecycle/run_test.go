@@ -256,8 +256,8 @@ func TestRunOverviewJSONUsesCanonicalView(t *testing.T) {
 	if payload.CapabilityCatalog.ToolCount == 0 {
 		t.Fatalf("CapabilityCatalog = %+v, want populated builtin tool count", payload.CapabilityCatalog)
 	}
-	if payload.IntakeInbox.Wiring != clioverview.WiringLive {
-		t.Fatalf("IntakeInbox.Wiring = %q, want %q", payload.IntakeInbox.Wiring, clioverview.WiringLive)
+	if payload.IntakeInbox.Wiring != clioverview.WiringNotYetWired {
+		t.Fatalf("IntakeInbox.Wiring = %q, want %q", payload.IntakeInbox.Wiring, clioverview.WiringNotYetWired)
 	}
 	if payload.AutomationTriggers.Wiring != clioverview.WiringLive {
 		t.Fatalf("AutomationTriggers.Wiring = %q, want %q", payload.AutomationTriggers.Wiring, clioverview.WiringLive)
