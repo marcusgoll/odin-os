@@ -143,6 +143,61 @@ func TestLoadRecordsStoppedWithLastErrorWhenBootstrapFailsAfterBooting(t *testin
 	}
 }
 
+func TestLoadRegistersProjectOverlayFromEnvironment(t *testing.T) {
+	repoRoot := createBootstrapRepoRoot(t, true)
+	runtimeRoot := t.TempDir()
+	overlayRoot := filepath.Join(repoRoot, "family-ops")
+	if err := os.MkdirAll(filepath.Join(overlayRoot, ".git"), 0o755); err != nil {
+		t.Fatalf("mkdir overlay git root: %v", err)
+	}
+	overlayPath := filepath.Join(repoRoot, "config", "projects.overlay.yaml")
+	if err := os.WriteFile(overlayPath, []byte(`
+version: 1
+projects:
+  - key: family-ops
+    name: Family Ops
+    project_class: local_git_project
+    git_root: `+overlayRoot+`
+    default_branch: main
+    policy:
+      allowed_commands:
+        - status
+      branch_rules:
+        protected_branches: [main]
+        require_worktree: true
+        require_task_branch: true
+        allow_default_branch_mutation: false
+      approval_gates:
+        require_for_governance_changes: true
+        require_for_destructive_operations: true
+        require_for_system_project_changes: false
+      merge_policy:
+        mode: squash
+        allow_direct_to_default_branch: false
+      destructive_operations:
+        allow_reset: false
+        allow_clean: false
+        allow_force_push: false
+        require_explicit_approval: true
+`), 0o644); err != nil {
+		t.Fatalf("write overlay projects config: %v", err)
+	}
+	t.Setenv("ODIN_PROJECTS_OVERLAY", overlayPath)
+
+	app, err := Load(context.Background(), repoRoot, runtimeRoot)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	defer app.Store.Close()
+
+	if _, ok := app.Registry.Lookup("family-ops"); !ok {
+		t.Fatal("Registry.Lookup(family-ops) = false, want overlay project registered")
+	}
+	if len(app.RegistryDiagnostics) != 0 {
+		t.Fatalf("RegistryDiagnostics = %+v, want none", app.RegistryDiagnostics)
+	}
+}
+
 func TestLoadRepairsLegacyFollowUpObligationTargetsBeforeMaterialization(t *testing.T) {
 	ctx := context.Background()
 	repoRoot := createBootstrapRepoRoot(t, true)

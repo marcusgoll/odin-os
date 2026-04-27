@@ -1,10 +1,12 @@
 package codex
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -67,6 +69,24 @@ func (headlessExecutor) Class() contract.ExecutorClass {
 }
 
 func (executor headlessExecutor) Health(ctx context.Context) (contract.HealthReport, error) {
+	if driver, ok := explicitDriverPath(); ok {
+		if report, ok := executor.jsonDriverHealth(ctx, driver); ok {
+			return report, nil
+		}
+		if err := validateDriverPath(driver); err != nil {
+			return contract.HealthReport{
+				Status:    contract.HealthStatusUnavailable,
+				Details:   fmt.Sprintf("codex legacy driver is unavailable: %v", err),
+				CheckedAt: time.Now().UTC(),
+			}, nil
+		}
+		return contract.HealthReport{
+			Status:    contract.HealthStatusHealthy,
+			Details:   fmt.Sprintf("codex legacy driver ready at %s", driver),
+			CheckedAt: time.Now().UTC(),
+		}, nil
+	}
+
 	if _, ok := executor.driverPath(); !ok {
 		return contract.HealthReport{
 			Status:    contract.HealthStatusUnavailable,
@@ -119,6 +139,17 @@ func (headlessExecutor) Capabilities(context.Context) (contract.Capabilities, er
 }
 
 func (executor headlessExecutor) RunTask(ctx context.Context, spec contract.TaskSpec) (contract.ExecutionResult, error) {
+	if driver, ok := explicitDriverPath(); ok {
+		if _, ok := executor.jsonDriverHealth(ctx, driver); ok {
+			return executor.runJSONDriver(ctx, spec)
+		}
+		return executor.runLegacyDriver(ctx, driver, spec)
+	}
+
+	return executor.runJSONDriver(ctx, spec)
+}
+
+func (executor headlessExecutor) runJSONDriver(ctx context.Context, spec contract.TaskSpec) (contract.ExecutionResult, error) {
 	request := driverRequest{
 		Action: "run",
 		Task: &driverTask{
@@ -177,6 +208,96 @@ func (executor headlessExecutor) RunTask(ctx context.Context, spec contract.Task
 	}, nil
 }
 
+func (executor headlessExecutor) jsonDriverHealth(ctx context.Context, driver string) (contract.HealthReport, bool) {
+	response, _, err := executor.invokeDriverPath(ctx, driver, driverRequest{
+		Action: "health",
+		Mode:   "headless",
+	})
+	if err != nil {
+		return contract.HealthReport{}, false
+	}
+
+	status, ok := validateHealthStatus(response.Status)
+	if !ok {
+		return contract.HealthReport{}, false
+	}
+	return contract.HealthReport{
+		Status:    status,
+		Details:   response.Details,
+		CheckedAt: time.Now().UTC(),
+	}, true
+}
+
+func (executor headlessExecutor) runLegacyDriver(ctx context.Context, driver string, spec contract.TaskSpec) (contract.ExecutionResult, error) {
+	if err := validateDriverPath(driver); err != nil {
+		return contract.ExecutionResult{}, fmt.Errorf("codex legacy driver unavailable: %w", err)
+	}
+
+	payload, err := json.Marshal(spec)
+	if err != nil {
+		return contract.ExecutionResult{}, err
+	}
+
+	driverCtx, cancel := context.WithTimeout(ctx, runDriverTimeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(driverCtx, driver)
+	cmd.Env = append(os.Environ(), "ODIN_CODEX_DRIVER_ACTION=run")
+	cmd.Stdin = bytes.NewReader(payload)
+
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	output, err := cmd.Output()
+	if err != nil {
+		details := strings.TrimSpace(stderr.String())
+		if details == "" {
+			details = strings.TrimSpace(string(output))
+		}
+		if details != "" {
+			return contract.ExecutionResult{}, fmt.Errorf("codex legacy driver failed: %w: %s", err, details)
+		}
+		return contract.ExecutionResult{}, fmt.Errorf("codex legacy driver failed: %w", err)
+	}
+
+	var response driverResponse
+	if err := json.Unmarshal(output, &response); err != nil {
+		return contract.ExecutionResult{}, fmt.Errorf("codex legacy driver returned invalid JSON: %w", err)
+	}
+	runStatus, err := validateRunStatus(response.Status)
+	if err != nil {
+		return contract.ExecutionResult{}, err
+	}
+
+	metadata := response.Metadata
+	if metadata == nil {
+		metadata = map[string]string{}
+	}
+	if err := ensureArtifactMetadata(spec, output, metadata); err != nil {
+		return contract.ExecutionResult{}, err
+	}
+
+	handle := contract.TaskHandle{
+		ExecutorKey: executorKey,
+		ExternalID:  spec.ID,
+		Status:      runStatus,
+	}
+	if response.Handle != nil {
+		if response.Handle.ExecutorKey != "" {
+			handle.ExecutorKey = response.Handle.ExecutorKey
+		}
+		if response.Handle.ExternalID != "" {
+			handle.ExternalID = response.Handle.ExternalID
+		}
+	}
+
+	return contract.ExecutionResult{
+		Handle:   handle,
+		Status:   runStatus,
+		Output:   response.Output,
+		Metadata: metadata,
+	}, nil
+}
+
 func validateHealthStatus(status string) (contract.HealthStatus, bool) {
 	switch contract.HealthStatus(status) {
 	case contract.HealthStatusHealthy, contract.HealthStatusDegraded, contract.HealthStatusUnavailable, contract.HealthStatusUnknown:
@@ -201,7 +322,10 @@ func (executor headlessExecutor) invokeDriver(ctx context.Context, request drive
 	if !ok {
 		return driverResponse{}, nil, fmt.Errorf("codex driver unavailable")
 	}
+	return executor.invokeDriverPath(ctx, driver, request)
+}
 
+func (executor headlessExecutor) invokeDriverPath(ctx context.Context, driver string, request driverRequest) (driverResponse, []byte, error) {
 	var response driverResponse
 	payload, err := drivers.Invoke(ctx, drivers.Options{
 		DriverPath: driver,
@@ -234,16 +358,37 @@ func (headlessExecutor) EstimateCost(context.Context, contract.TaskSpec) (contra
 }
 
 func (executor headlessExecutor) driverPath() (string, bool) {
-	driver := strings.TrimSpace(os.Getenv("ODIN_CODEX_DRIVER"))
-	if driver != "" {
-		return filepath.Clean(driver), true
+	if driver, ok := explicitDriverPath(); ok {
+		return driver, true
 	}
 	if strings.TrimSpace(executor.repoRoot) == "" {
 		return "", false
 	}
 
-	driver = filepath.Join(executor.repoRoot, "scripts", "drivers", "codex-headless.sh")
+	driver := filepath.Join(executor.repoRoot, "scripts", "drivers", "codex-headless.sh")
 	return filepath.Clean(driver), true
+}
+
+func explicitDriverPath() (string, bool) {
+	driver := strings.TrimSpace(os.Getenv("ODIN_CODEX_DRIVER"))
+	if driver == "" {
+		return "", false
+	}
+	return filepath.Clean(driver), true
+}
+
+func validateDriverPath(driverPath string) error {
+	info, err := os.Stat(driverPath)
+	if err != nil {
+		return err
+	}
+	if info.IsDir() {
+		return fmt.Errorf("%s is a directory", driverPath)
+	}
+	if info.Mode()&0o111 == 0 {
+		return fmt.Errorf("%s is not executable", driverPath)
+	}
+	return nil
 }
 
 func ensureArtifactMetadata(spec contract.TaskSpec, payload []byte, metadata map[string]string) error {
