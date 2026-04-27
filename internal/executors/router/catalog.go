@@ -9,6 +9,7 @@ import (
 	"odin-os/internal/executors/google_api"
 	"odin-os/internal/executors/openai_api"
 	"odin-os/internal/executors/openrouter_api"
+	"odin-os/internal/executors/sandcastle"
 	"odin-os/internal/executors/xai_api"
 )
 
@@ -33,6 +34,7 @@ func DefaultCatalogForRepo(repoRoot string) map[string]contract.Executor {
 		"codex_headless":       codex.NewHeadlessWithRepoRoot(repoRoot),
 		"claude_code_headless": claude_code.NewHeadless(),
 		"gemini_cli_headless":  gemini_cli.NewHeadless(),
+		"sandcastle_headless":  sandcastle.NewHeadlessWithRepoRoot(repoRoot),
 		"openai_api":           openai_api.New(),
 		"anthropic_api":        anthropic_api.New(),
 		"google_api":           google_api.New(),

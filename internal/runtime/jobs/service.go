@@ -379,8 +379,15 @@ func (service Service) ExecuteNextQueued(ctx context.Context) error {
 	spec.Metadata["worktree_path"] = assignment.WorktreePath
 
 	executor := executors[decision.ExecutorKey]
-	result, err := executor.RunTask(ctx, spec)
-	return service.finalizeOutcome(ctx, task, run, admissionDecision{}, result, err)
+	result, execErr := executor.RunTask(ctx, spec)
+	executionMetadata := executionMetadataForResult(spec.Metadata, result.Metadata, assignment, decision.ExecutorKey, result.Handle.ExternalID)
+	if err := service.finalizeOutcome(ctx, task, run, admissionDecision{}, result, execErr); err != nil {
+		return err
+	}
+	if execErr == nil {
+		return service.recordExecutionEvidenceArtifact(ctx, run.ID, executionMetadata)
+	}
+	return nil
 }
 
 func (service Service) ExecuteTask(ctx context.Context, taskID int64) (ExecutionOutcome, error) {
@@ -524,6 +531,7 @@ func (service Service) ExecuteTaskWithRequest(ctx context.Context, taskID int64,
 
 	executor := executors[decision.ExecutorKey]
 	result, execErr := executor.RunTask(ctx, spec)
+	executionMetadata := executionMetadataForResult(spec.Metadata, result.Metadata, assignment, decision.ExecutorKey, result.Handle.ExternalID)
 	finalizeErr := service.finalizeOutcome(ctx, task, run, admissionDecision{}, result, execErr)
 	outcome, loadErr := service.loadExecutionOutcome(ctx, task.ID, &run.ID)
 	if finalizeErr != nil {
@@ -535,7 +543,12 @@ func (service Service) ExecuteTaskWithRequest(ctx context.Context, taskID int64,
 	if loadErr != nil {
 		return ExecutionOutcome{}, loadErr
 	}
-	if err := service.recordExecutionMemory(ctx, project, outcome.Task, outcome.Run, prompt, request.Metadata); err != nil {
+	if outcome.Run != nil && execErr == nil {
+		if err := service.recordExecutionEvidenceArtifact(ctx, outcome.Run.ID, executionMetadata); err != nil {
+			return ExecutionOutcome{}, err
+		}
+	}
+	if err := service.recordExecutionMemory(ctx, project, outcome.Task, outcome.Run, prompt, executionMetadata); err != nil {
 		return ExecutionOutcome{}, err
 	}
 	return outcome, nil
@@ -759,6 +772,69 @@ func normalizeExecutionMetadata(metadata map[string]string) map[string]string {
 		return nil
 	}
 	return normalized
+}
+
+func executionMetadataForResult(requestMetadata map[string]string, resultMetadata map[string]string, assignment leases.Assignment, executorLane string, externalID string) map[string]string {
+	merged := make(map[string]string)
+	for key, value := range normalizeExecutionMetadata(requestMetadata) {
+		merged[key] = value
+	}
+	for key, value := range normalizeExecutionMetadata(resultMetadata) {
+		if executorResultMetadataAllowed(key) {
+			merged[key] = value
+		}
+	}
+	if strings.TrimSpace(externalID) != "" {
+		merged["external_id"] = strings.TrimSpace(externalID)
+	}
+	if strings.TrimSpace(merged["operation"]) == "" {
+		merged["operation"] = "run"
+	}
+
+	if strings.TrimSpace(executorLane) != "" {
+		merged["executor_lane"] = strings.TrimSpace(executorLane)
+	}
+	if strings.TrimSpace(assignment.WorktreePath) != "" {
+		merged["worktree_path"] = strings.TrimSpace(assignment.WorktreePath)
+	}
+	if strings.TrimSpace(assignment.BranchName) != "" {
+		merged["branch_name"] = strings.TrimSpace(assignment.BranchName)
+	}
+	if strings.TrimSpace(assignment.RepoRoot) != "" {
+		merged["repo_root"] = strings.TrimSpace(assignment.RepoRoot)
+	}
+
+	if len(merged) == 0 {
+		return nil
+	}
+	return merged
+}
+
+func executorResultMetadataAllowed(key string) bool {
+	switch strings.TrimSpace(key) {
+	case "driver_kind", "operation", "external_id", "driver_cwd", "branch_observed", "marker_path", "marker_written", "artifact_path", "artifacts_json":
+		return true
+	default:
+		return false
+	}
+}
+
+func (service Service) recordExecutionEvidenceArtifact(ctx context.Context, runID int64, metadata map[string]string) error {
+	normalized := normalizeExecutionMetadata(metadata)
+	if len(normalized) == 0 {
+		return nil
+	}
+	detailsBytes, err := json.Marshal(normalized)
+	if err != nil {
+		return err
+	}
+	_, err = service.Store.RecordRunArtifact(ctx, sqlite.RecordRunArtifactParams{
+		RunID:        runID,
+		ArtifactType: "executor_evidence",
+		Summary:      "executor evidence",
+		DetailsJSON:  string(detailsBytes),
+	})
+	return err
 }
 
 func (service Service) nextRunAttempt(ctx context.Context, taskID int64) (int, error) {

@@ -1399,6 +1399,54 @@ func TestExecuteNextQueuedRequeuesTransientExecutorFailureWithBackoff(t *testing
 	}
 }
 
+func TestExecutionMetadataForResultKeepsOdinReservedFieldsAuthoritative(t *testing.T) {
+	t.Parallel()
+
+	metadata := executionMetadataForResult(
+		map[string]string{
+			"operator_note": "keep",
+			"executor_lane": "request_lane",
+			"repo_root":     "/request/repo",
+			"worktree_path": "/request/worktree",
+			"branch_name":   "request-branch",
+		},
+		map[string]string{
+			"driver_kind":    "fixture",
+			"external_id":    "driver-id",
+			"marker_written": "true",
+			"repo_root":      "/driver/repo",
+			"worktree_path":  "/driver/worktree",
+			"branch_name":    "driver-branch",
+			"unallowlisted":  "drop",
+		},
+		leases.Assignment{
+			RepoRoot:     "/odin/repo",
+			WorktreePath: "/odin/worktree",
+			BranchName:   "odin/task-1",
+		},
+		"sandcastle_headless",
+		"handle-id",
+	)
+
+	for key, want := range map[string]string{
+		"operator_note":  "keep",
+		"driver_kind":    "fixture",
+		"external_id":    "handle-id",
+		"marker_written": "true",
+		"executor_lane":  "sandcastle_headless",
+		"repo_root":      "/odin/repo",
+		"worktree_path":  "/odin/worktree",
+		"branch_name":    "odin/task-1",
+	} {
+		if got := metadata[key]; got != want {
+			t.Fatalf("metadata[%s] = %q, want %q in %#v", key, got, want, metadata)
+		}
+	}
+	if _, ok := metadata["unallowlisted"]; ok {
+		t.Fatalf("metadata included unallowlisted driver field: %#v", metadata)
+	}
+}
+
 type jobTestGit struct{}
 
 func (jobTestGit) BranchExists(context.Context, string, string) (bool, error) { return false, nil }

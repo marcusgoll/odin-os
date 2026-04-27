@@ -1096,9 +1096,54 @@ func (shell *Shell) handleRunShow(ctx context.Context, args []string, output io.
 			if _, err := fmt.Fprintf(output, "details=%s\n", details); err != nil {
 				return err
 			}
+			if err := renderRunEvidenceFields(output, details); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
+}
+
+func renderRunEvidenceFields(output io.Writer, raw string) error {
+	fields := runEvidenceFields(raw)
+	for _, key := range []string{
+		"executor_lane",
+		"driver_kind",
+		"operation",
+		"external_id",
+		"repo_root",
+		"worktree_path",
+		"branch_name",
+		"driver_cwd",
+		"branch_observed",
+		"marker_path",
+		"marker_written",
+		"artifact_path",
+	} {
+		if value := strings.TrimSpace(fields[key]); value != "" {
+			if _, err := fmt.Fprintf(output, "%s=%s\n", key, value); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func runEvidenceFields(raw string) map[string]string {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal([]byte(raw), &decoded); err != nil {
+		return nil
+	}
+	fields := make(map[string]string)
+	for key, value := range decoded {
+		if stringValue, ok := value.(string); ok {
+			fields[key] = stringValue
+		}
+	}
+	return fields
 }
 
 func (shell *Shell) handleWorkspace(ctx context.Context, output io.Writer) error {
