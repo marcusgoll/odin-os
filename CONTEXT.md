@@ -184,6 +184,8 @@ _Avoid_: analytics scrape, crawler result
 - An **Intake Item** should persist its **Source Facts** alongside the derived **Dedupe Key** so duplicate and routing decisions remain auditable and recomputable
 - An **Intake Item** should persist the **Dedupe Recipe Version** used to derive its **Dedupe Key** so later recomputation remains honest when Odin changes normalization or fingerprinting logic
 - A **Social Copilot** creates and revises **Social Drafts**
+- The **Social Copilot** operator path is a workflow-scoped **Operator Surface** over `/workflow social ...`; it delegates to the Social Copilot runtime service and must not own a separate social queue or runtime state model
+- The **Social Copilot** polling loop is owned by one workflow task per environment, with watch scope, checkpoint, cooldown, and `account_actions=none` evidence recorded in existing task, run, context-packet, and memory records
 - The engagement lane creates **Reply Suggestions** for candidate conversations before any publish decision exists
 - Marcus approval or rejection turns a **Social Draft** into a **Social Outcome**
 - A published **Social Outcome** may carry one or more **Social Evidence** records
@@ -1181,6 +1183,8 @@ _Avoid_: analytics scrape, crawler result
 - "resume" after approval was at risk of sounding like live session continuation. Resolved: approval returns the **Work Item** to `queued` and resumes through a fresh **Run Attempt** built from persisted wake state.
 - status labels were at risk of collapsing into one mixed dashboard vocabulary. Resolved: **Work Item**, **Run Attempt**, and **Approval Request** each own separate operator-visible statuses.
 - "social media manager" was being used as shorthand for Marcus's governed social lane. Resolved: the canonical term is **Social Copilot**, carried by the existing workflow, memory, and tool surfaces rather than a new first-class manager object.
+- The Social Copilot loop was at risk of splitting between the documented `/workflow social` lane and a new top-level social command. Resolved: `/workflow social` is the canonical recovery target because it is the workflow-scoped **Operator Surface** for this loop; a top-level alias may exist later only as a thin adapter over the same runtime service and persisted state.
+- The current checkout may advertise workflow, skill, or social shell examples that are not fully wired. Resolved: missing `/workflow social` shell plumbing is implementation drift to repair against the existing Social Copilot runtime service, not evidence for a new manager, queue, registry, or non-shell operator path.
 - "reply" was overloaded between research output and live publishing. Resolved: the research output is a **Reply Suggestion**, and the current live publish surface does not publish replies.
 - "up and running for Marcus" was ambiguous between proof-safe validation and real account readiness. Resolved: fixture-backed real `odin` proof is required first, but the target state is Marcus-live operator readiness on the actual X account.
 - "playbook", "runbook", and "surface" were drifting together. Resolved: the canonical Odin term for the human-facing path is **Operator Surface**; `playbook` stays reserved for recovery semantics, while a runbook is only documentation for using an operator surface.
