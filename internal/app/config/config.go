@@ -21,8 +21,15 @@ type RuntimeFile struct {
 }
 
 type ServiceSettings struct {
-	HTTPAddr        string `yaml:"http_addr"`
-	StartupRecovery bool   `yaml:"startup_recovery"`
+	HTTPAddr        string                `yaml:"http_addr"`
+	StartupRecovery bool                  `yaml:"startup_recovery"`
+	SocialCopilot   SocialCopilotSettings `yaml:"social_copilot"`
+}
+
+type SocialCopilotSettings struct {
+	Enabled        bool   `yaml:"enabled"`
+	WorkflowKey    string `yaml:"workflow_key"`
+	CadenceSeconds int64  `yaml:"cadence_seconds"`
 }
 
 type Config struct {
@@ -53,6 +60,12 @@ func Load(path string, repoRoot string, env map[string]string) (Config, error) {
 		cfg.Service.StartupRecovery = false
 	} else {
 		cfg.Service.StartupRecovery = true
+	}
+	if cfg.Service.SocialCopilot.WorkflowKey == "" {
+		cfg.Service.SocialCopilot.WorkflowKey = "marcus-social-growth-workflow"
+	}
+	if cfg.Service.SocialCopilot.CadenceSeconds <= 0 {
+		cfg.Service.SocialCopilot.CadenceSeconds = 1800
 	}
 
 	cfg.RuntimeRoot = resolveRuntimeRoot(repoRoot, raw.Runtime.Root)

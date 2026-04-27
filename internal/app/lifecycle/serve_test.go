@@ -672,6 +672,75 @@ service:
 	}
 }
 
+func TestServeEnsuresSocialCopilotJobWhenEnabled(t *testing.T) {
+	root := createRuntimeRoot(t)
+	writeRuntimeConfig(t, root, `
+version: 1
+runtime:
+  root: .
+service:
+  http_addr: 127.0.0.1:0
+  startup_recovery: false
+  social_copilot:
+    enabled: true
+    workflow_key: marcus-social-growth-workflow
+    cadence_seconds: 1800
+`)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	time.AfterFunc(500*time.Millisecond, cancel)
+
+	var stdout bytes.Buffer
+	err := Run(ctx, root, []string{"serve"}, strings.NewReader(""), &stdout)
+	if err != nil && !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run(serve) error = %v", err)
+	}
+
+	store, err := sqlite.Open(filepath.Join(root, "data", "odin.db"))
+	if err != nil {
+		t.Fatalf("sqlite.Open() error = %v", err)
+	}
+	defer store.Close()
+
+	project, err := store.GetProjectByKey(context.Background(), "odin-core")
+	if err != nil {
+		t.Fatalf("GetProjectByKey(odin-core) error = %v", err)
+	}
+	task, err := store.GetTaskByProjectAndKey(context.Background(), project.ID, "workflow-marcus-social-growth-workflow-social-copilot-loop")
+	if err != nil {
+		t.Fatalf("GetTaskByProjectAndKey(social copilot) error = %v", err)
+	}
+	if task.Status != "scheduled" {
+		t.Fatalf("Task.Status = %q, want scheduled", task.Status)
+	}
+
+	var completedRuns int
+	if err := store.DB().QueryRowContext(context.Background(), `
+		SELECT COUNT(*)
+		FROM runs
+		WHERE task_id = ? AND executor = 'social_copilot' AND status = 'completed'
+	`, task.ID).Scan(&completedRuns); err != nil {
+		t.Fatalf("count social copilot runs: %v", err)
+	}
+	if completedRuns == 0 {
+		t.Fatal("social copilot completed run count = 0, want startup due check")
+	}
+
+	packets, err := store.ListContextPackets(context.Background(), sqlite.ListContextPacketsParams{
+		TaskID:      &task.ID,
+		PacketScope: "workflow_job_metadata",
+	})
+	if err != nil {
+		t.Fatalf("ListContextPackets() error = %v", err)
+	}
+	if len(packets) == 0 {
+		t.Fatal("metadata packet count = 0, want account action metadata")
+	}
+	if latest := packets[len(packets)-1]; !strings.Contains(latest.PayloadJSON, `"account_actions":"none"`) {
+		t.Fatalf("latest metadata payload = %s, want account_actions none", latest.PayloadJSON)
+	}
+}
+
 func TestRunHealthCycleDoesNotPromoteDrainingRuntimeToReady(t *testing.T) {
 	t.Parallel()
 

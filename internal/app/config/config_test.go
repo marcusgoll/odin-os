@@ -73,6 +73,40 @@ service:
 	}
 }
 
+func TestLoadAcceptsSocialCopilotServiceSettings(t *testing.T) {
+	t.Parallel()
+
+	repoRoot := t.TempDir()
+	path := filepath.Join(repoRoot, "config", "odin.yaml")
+	mustWriteConfig(t, path, `
+version: 1
+runtime:
+  root: /srv/odin
+service:
+  http_addr: 127.0.0.1:9443
+  startup_recovery: false
+  social_copilot:
+    enabled: true
+    workflow_key: marcus-social-growth-workflow
+    cadence_seconds: 1800
+`)
+
+	cfg, err := Load(path, repoRoot, map[string]string{})
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+
+	if !cfg.Service.SocialCopilot.Enabled {
+		t.Fatal("Service.SocialCopilot.Enabled = false, want true")
+	}
+	if cfg.Service.SocialCopilot.WorkflowKey != "marcus-social-growth-workflow" {
+		t.Fatalf("Service.SocialCopilot.WorkflowKey = %q", cfg.Service.SocialCopilot.WorkflowKey)
+	}
+	if cfg.Service.SocialCopilot.CadenceSeconds != 1800 {
+		t.Fatalf("Service.SocialCopilot.CadenceSeconds = %d, want 1800", cfg.Service.SocialCopilot.CadenceSeconds)
+	}
+}
+
 func TestValidateRepoRejectsUnknownAuxiliaryConfigFields(t *testing.T) {
 	t.Parallel()
 
