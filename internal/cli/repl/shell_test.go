@@ -18,6 +18,7 @@ import (
 	"odin-os/internal/core/projects"
 	corescope "odin-os/internal/core/scope"
 	"odin-os/internal/core/workspaces"
+	"odin-os/internal/registry"
 	runtimeevents "odin-os/internal/runtime/events"
 	"odin-os/internal/store/sqlite"
 	"odin-os/internal/tools/invocation"
@@ -95,6 +96,127 @@ func TestAskModeHandlesFreeTextWithoutCreatingTask(t *testing.T) {
 	}
 	if len(views) != 0 {
 		t.Fatalf("jobs len = %d, want 0", len(views))
+	}
+}
+
+func TestShellWorkflowSocialStatusReportsNotConfigured(t *testing.T) {
+	t.Parallel()
+
+	env := newTestEnvironment(t)
+	shell, err := New(env)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	var output bytes.Buffer
+	if err := shell.HandleLine(context.Background(), "/workflow social status", &output); err != nil {
+		t.Fatalf("HandleLine(/workflow social status) error = %v", err)
+	}
+
+	for _, want := range []string{
+		"workflow=marcus-social-growth-workflow",
+		"status=not_configured",
+		"task=none",
+		"account_actions=none",
+	} {
+		if !strings.Contains(output.String(), want) {
+			t.Fatalf("output = %q, want %q", output.String(), want)
+		}
+	}
+	if strings.Contains(output.String(), "unknown command") {
+		t.Fatalf("output = %q, must not route /workflow to unknown command", output.String())
+	}
+}
+
+func TestShellWorkflowSocialScopeReplaceAndWakeUseRuntimeService(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	env := newTestEnvironment(t)
+	shell, err := New(env)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	var output bytes.Buffer
+	if err := shell.HandleLine(ctx, "/workflow social scope replace marcus_own=timeline,mentions target=https://x.com/Example/status/12345 account=@AviationDaily", &output); err != nil {
+		t.Fatalf("HandleLine(/workflow social scope replace) error = %v", err)
+	}
+	for _, want := range []string{
+		"workflow=marcus-social-growth-workflow",
+		"status=scope_replaced",
+		"task=workflow-marcus-social-growth-workflow-social-copilot-loop",
+		"targets=4",
+		"account_actions=none",
+	} {
+		if !strings.Contains(output.String(), want) {
+			t.Fatalf("scope output = %q, want %q", output.String(), want)
+		}
+	}
+
+	output.Reset()
+	if err := shell.HandleLine(ctx, "/workflow social wake reason=manual-check", &output); err != nil {
+		t.Fatalf("HandleLine(/workflow social wake) error = %v", err)
+	}
+	for _, want := range []string{
+		"wake=manual",
+		"status=completed",
+		"executor=social_copilot",
+		"account_actions=none",
+		"memory_created=0",
+	} {
+		if !strings.Contains(output.String(), want) {
+			t.Fatalf("wake output = %q, want %q", output.String(), want)
+		}
+	}
+
+	output.Reset()
+	if err := shell.HandleLine(ctx, "/runs", &output); err != nil {
+		t.Fatalf("HandleLine(/runs) error = %v", err)
+	}
+	for _, want := range []string{
+		"workflow-marcus-social-growth-workflow-social-copilot-loop",
+		"social_copilot",
+		"completed",
+	} {
+		if !strings.Contains(output.String(), want) {
+			t.Fatalf("runs output = %q, want %q", output.String(), want)
+		}
+	}
+}
+
+func TestShellWorkflowValidateAndUsePersistRegistryWorkflow(t *testing.T) {
+	t.Parallel()
+
+	env := newTestEnvironment(t)
+	env.RegistrySnapshot = socialWorkflowRegistrySnapshot()
+	shell, err := New(env)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	var output bytes.Buffer
+	if err := shell.HandleLine(context.Background(), "/workflow validate marcus-social-growth-workflow", &output); err != nil {
+		t.Fatalf("HandleLine(/workflow validate) error = %v", err)
+	}
+	if !strings.Contains(output.String(), "workflow=marcus-social-growth-workflow status=ready") {
+		t.Fatalf("validate output = %q, want ready workflow", output.String())
+	}
+
+	output.Reset()
+	if err := shell.HandleLine(context.Background(), "/workflow use marcus-social-growth-workflow", &output); err != nil {
+		t.Fatalf("HandleLine(/workflow use) error = %v", err)
+	}
+	if !strings.Contains(output.String(), "workflow=marcus-social-growth-workflow selected=true status=ready") {
+		t.Fatalf("use output = %q, want selected workflow", output.String())
+	}
+
+	cache, err := env.SessionStore.Load()
+	if err != nil {
+		t.Fatalf("SessionStore.Load() error = %v", err)
+	}
+	if cache.SelectedWorkflowKey != "marcus-social-growth-workflow" {
+		t.Fatalf("SelectedWorkflowKey = %q, want marcus-social-growth-workflow", cache.SelectedWorkflowKey)
 	}
 }
 
@@ -1844,6 +1966,22 @@ func newTestEnvironment(t *testing.T) Environment {
 		Registry:           registry,
 		SessionStore:       SessionStore{Path: filepath.Join(stateDir, "cli-session.json")},
 		TransferInvocation: testTransferInvocation(),
+	}
+}
+
+func socialWorkflowRegistrySnapshot() registry.Snapshot {
+	workflow := registry.Item{
+		Kind:       registry.KindWorkflow,
+		Key:        "marcus-social-growth-workflow",
+		Title:      "Marcus Social Growth Workflow",
+		Summary:    "Coordinates compliant social copilot work.",
+		Status:     "active",
+		Entrypoint: "skill:marcus-social-content-strategist",
+	}
+	return registry.Snapshot{
+		Items:  []registry.Item{workflow},
+		ByKey:  map[string]registry.Item{workflow.Key: workflow},
+		ByKind: map[registry.Kind][]registry.Item{registry.KindWorkflow: []registry.Item{workflow}},
 	}
 }
 

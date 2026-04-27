@@ -15,7 +15,7 @@ Default service state: `service.social_copilot.enabled=false` unless an operator
 From `/home/orchestrator/odin-os`:
 
 ```bash
-./bin/odin
+./bin/odin repl
 ```
 
 Then run:

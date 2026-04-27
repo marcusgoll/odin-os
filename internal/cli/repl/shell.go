@@ -36,6 +36,7 @@ import (
 	jobsvc "odin-os/internal/runtime/jobs"
 	"odin-os/internal/runtime/projections"
 	runsvc "odin-os/internal/runtime/runs"
+	"odin-os/internal/runtime/socialcopilot"
 	transfersvc "odin-os/internal/runtime/transfers"
 	"odin-os/internal/store/sqlite"
 	"odin-os/internal/tools/broker"
@@ -49,6 +50,7 @@ import (
 type Environment struct {
 	Store               *sqlite.Store
 	Registry            projects.Registry
+	RegistrySnapshot    registry.Snapshot
 	RegistryDiagnostics []projects.Diagnostic
 	SessionStore        SessionStore
 	CapabilityGateway   capabilityGateway
@@ -74,6 +76,7 @@ type Shell struct {
 	health         healthsvc.Service
 	jobs           jobsvc.Service
 	runs           runsvc.Service
+	social         socialcopilot.Service
 	transfers      transfersvc.Service
 	transitions    projects.Service
 	conversation   convsvc.Service
@@ -129,6 +132,11 @@ func New(env Environment) (*Shell, error) {
 		runs: runsvc.Service{
 			DB:    env.Store.DB(),
 			Store: env.Store,
+		},
+		social: socialcopilot.Service{
+			Store:    env.Store,
+			Registry: env.Registry,
+			Now:      now,
 		},
 		transfers: transfersvc.Service{
 			Store:       env.Store,
@@ -258,10 +266,13 @@ func (shell *Shell) handleCommand(ctx context.Context, command commands.Command,
 		if _, err := fmt.Fprintln(output, "prefer explicit cli commands outside the repl: odin help | odin status --json | odin task run --project <key> --title <title> | odin repl"); err != nil {
 			return err
 		}
-		if _, err := fmt.Fprintln(output, "/help /mode /scope /memory /overview /workspace /initiatives /companions /agenda /project /tool /transition /observe /compare /jobs /runs /approvals /transfer /logs /doctor /doctor json /doctor report /self"); err != nil {
+		if _, err := fmt.Fprintln(output, "/help /mode /scope /memory /overview /workspace /initiatives /companions /agenda /project /workflow /tool /transition /observe /compare /jobs /runs /approvals /transfer /logs /doctor /doctor json /doctor report /self"); err != nil {
 			return err
 		}
-		if _, err := fmt.Fprintln(output, "repl compatibility commands: /help /mode /scope /memory /overview /project /tool /transition /observe /compare /status /stat /capabilities /leases /jobs /runs /approvals /agenda /transfer /logs /doctor /doctor json /doctor report /self /quit"); err != nil {
+		if _, err := fmt.Fprintln(output, "repl compatibility commands: /help /mode /scope /memory /overview /project /workflow /tool /transition /observe /compare /status /stat /capabilities /leases /jobs /runs /approvals /agenda /transfer /logs /doctor /doctor json /doctor report /self /quit"); err != nil {
+			return err
+		}
+		if _, err := fmt.Fprintf(output, "%s\n", commands.WorkflowUsage); err != nil {
 			return err
 		}
 		if _, err := fmt.Fprintf(output, "%s\n", transitionUsage); err != nil {
@@ -290,6 +301,8 @@ func (shell *Shell) handleCommand(ctx context.Context, command commands.Command,
 		return shell.handleAgenda(ctx, output)
 	case "project":
 		return shell.handleProject(command.Args, output)
+	case "workflow":
+		return shell.handleWorkflow(ctx, command.Args, output)
 	case "tool":
 		return shell.handleTool(ctx, command.Args, output)
 	case "transition":
@@ -366,7 +379,7 @@ func (shell *Shell) handleAsk(ctx context.Context, line string, output io.Writer
 			_, err = fmt.Fprintln(output, result.Answer)
 			return err
 		}
-		_, err := fmt.Fprintln(output, "local ask is limited in Phase 05. Try /help, /scope, /memory, /overview, /workspace, /initiatives, /companions, /agenda, /project, /jobs, /runs, /approvals, /transfer, /logs, or /doctor.")
+		_, err := fmt.Fprintln(output, "local ask is limited in Phase 05. Try /help, /scope, /memory, /overview, /workspace, /initiatives, /companions, /agenda, /project, /workflow, /jobs, /runs, /approvals, /transfer, /logs, or /doctor.")
 		return err
 	}
 }
@@ -704,6 +717,337 @@ func (shell *Shell) handleProject(args []string, output io.Writer) error {
 	}
 	_, err := fmt.Fprintf(output, "project=%s scope=%s\n", project.Key, shell.scopeLabel())
 	return err
+}
+
+func (shell *Shell) handleWorkflow(ctx context.Context, args []string, output io.Writer) error {
+	if len(args) == 0 {
+		_, err := fmt.Fprintf(output, "usage: %s\n", commands.WorkflowUsage)
+		return err
+	}
+
+	switch strings.ToLower(strings.TrimSpace(args[0])) {
+	case "list":
+		return shell.handleWorkflowList(output)
+	case "show":
+		if len(args) != 2 {
+			_, err := fmt.Fprintf(output, "usage: %s\n", commands.WorkflowUsage)
+			return err
+		}
+		return shell.handleWorkflowShow(args[1], output)
+	case "validate":
+		if len(args) != 2 {
+			_, err := fmt.Fprintf(output, "usage: %s\n", commands.WorkflowUsage)
+			return err
+		}
+		return shell.handleWorkflowValidate(args[1], output)
+	case "use":
+		if len(args) != 2 {
+			_, err := fmt.Fprintf(output, "usage: %s\n", commands.WorkflowUsage)
+			return err
+		}
+		return shell.handleWorkflowUse(args[1], output)
+	case "clear":
+		if len(args) != 1 {
+			_, err := fmt.Fprintf(output, "usage: %s\n", commands.WorkflowUsage)
+			return err
+		}
+		shell.state.SelectedWorkflowKey = ""
+		if err := shell.persistState(); err != nil {
+			return err
+		}
+		_, err := fmt.Fprintln(output, "workflow=none selected=false")
+		return err
+	case "social":
+		return shell.handleWorkflowSocial(ctx, args[1:], output)
+	default:
+		_, err := fmt.Fprintf(output, "usage: %s\n", commands.WorkflowUsage)
+		return err
+	}
+}
+
+func (shell *Shell) handleWorkflowList(output io.Writer) error {
+	workflows := shell.workflowItems()
+	if len(workflows) == 0 {
+		_, err := fmt.Fprintln(output, "no workflows")
+		return err
+	}
+
+	for _, workflow := range workflows {
+		status := strings.TrimSpace(workflow.Status)
+		if status == "" {
+			status = "unknown"
+		}
+		if _, err := fmt.Fprintf(output, "workflow=%s status=%s title=%s\n", workflow.Key, status, strings.TrimSpace(workflow.Title)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (shell *Shell) handleWorkflowShow(key string, output io.Writer) error {
+	workflow, ok := shell.workflowByKey(key)
+	if !ok {
+		_, err := fmt.Fprintf(output, "workflow=%s status=missing\n", strings.TrimSpace(key))
+		return err
+	}
+
+	status := strings.TrimSpace(workflow.Status)
+	if status == "" {
+		status = "unknown"
+	}
+	_, err := fmt.Fprintf(
+		output,
+		"workflow=%s status=%s title=%s entrypoint=%s\nsummary=%s\n",
+		workflow.Key,
+		status,
+		strings.TrimSpace(workflow.Title),
+		strings.TrimSpace(workflow.Entrypoint),
+		strings.TrimSpace(workflow.Summary),
+	)
+	return err
+}
+
+func (shell *Shell) handleWorkflowValidate(key string, output io.Writer) error {
+	workflow, ok := shell.workflowByKey(key)
+	if !ok {
+		_, err := fmt.Fprintf(output, "workflow=%s status=missing\n", strings.TrimSpace(key))
+		return err
+	}
+
+	status := "ready"
+	if strings.TrimSpace(workflow.Status) != "" && !strings.EqualFold(workflow.Status, "active") {
+		status = strings.TrimSpace(workflow.Status)
+	}
+	_, err := fmt.Fprintf(output, "workflow=%s status=%s\n", workflow.Key, status)
+	return err
+}
+
+func (shell *Shell) handleWorkflowUse(key string, output io.Writer) error {
+	workflow, ok := shell.workflowByKey(key)
+	if !ok {
+		_, err := fmt.Fprintf(output, "workflow=%s status=missing\n", strings.TrimSpace(key))
+		return err
+	}
+
+	shell.state.SelectedWorkflowKey = workflow.Key
+	if err := shell.persistState(); err != nil {
+		return err
+	}
+	_, err := fmt.Fprintf(output, "workflow=%s selected=true status=ready\n", workflow.Key)
+	return err
+}
+
+func (shell *Shell) handleWorkflowSocial(ctx context.Context, args []string, output io.Writer) error {
+	if len(args) == 0 {
+		_, err := fmt.Fprintf(output, "usage: %s\n", commands.WorkflowUsage)
+		return err
+	}
+
+	workflowKey := shell.selectedSocialWorkflowKey()
+	switch strings.ToLower(strings.TrimSpace(args[0])) {
+	case "status":
+		if len(args) != 1 {
+			_, err := fmt.Fprintf(output, "usage: %s\n", commands.WorkflowUsage)
+			return err
+		}
+		return shell.renderSocialStatus(ctx, workflowKey, output)
+	case "scope":
+		return shell.handleWorkflowSocialScope(ctx, workflowKey, args[1:], output)
+	case "wake":
+		return shell.handleWorkflowSocialWake(ctx, workflowKey, args[1:], output)
+	default:
+		_, err := fmt.Fprintf(output, "usage: %s\n", commands.WorkflowUsage)
+		return err
+	}
+}
+
+func (shell *Shell) renderSocialStatus(ctx context.Context, workflowKey string, output io.Writer) error {
+	status, err := shell.social.Status(ctx, workflowKey)
+	if errors.Is(err, sql.ErrNoRows) {
+		_, writeErr := fmt.Fprintf(output, "workflow=%s status=not_configured task=none account_actions=none\n", workflowKey)
+		return writeErr
+	}
+	if err != nil {
+		return err
+	}
+
+	_, err = fmt.Fprintf(
+		output,
+		"workflow=%s status=%s task=%s targets=%d account_actions=none\n",
+		workflowKey,
+		status.Task.Status,
+		status.Task.Key,
+		len(status.WatchScope.Targets),
+	)
+	return err
+}
+
+func (shell *Shell) handleWorkflowSocialScope(ctx context.Context, workflowKey string, args []string, output io.Writer) error {
+	if len(args) == 0 || !strings.EqualFold(args[0], "replace") {
+		_, err := fmt.Fprintln(output, "usage: /workflow social scope replace marcus_own=timeline,mentions [target=<x-status-url> ...] [account=<handle> ...] [thread=<x-status-url> ...]")
+		return err
+	}
+
+	input, err := parseSocialScopeReplaceArgs(args[1:])
+	if err != nil {
+		_, writeErr := fmt.Fprintf(output, "unable to replace social scope: %v\n", err)
+		return writeErr
+	}
+	status, err := shell.social.ReplaceWatchScope(ctx, workflowKey, input)
+	if err != nil {
+		_, writeErr := fmt.Fprintf(output, "unable to replace social scope: %v\n", err)
+		return writeErr
+	}
+
+	_, err = fmt.Fprintf(
+		output,
+		"workflow=%s status=scope_replaced task=%s targets=%d account_actions=none\n",
+		workflowKey,
+		status.Task.Key,
+		len(status.WatchScope.Targets),
+	)
+	return err
+}
+
+func (shell *Shell) handleWorkflowSocialWake(ctx context.Context, workflowKey string, args []string, output io.Writer) error {
+	reason, err := parseSocialWakeReason(args)
+	if err != nil {
+		_, writeErr := fmt.Fprintf(output, "unable to wake social copilot: %v\n", err)
+		return writeErr
+	}
+
+	result, err := shell.social.Wake(ctx, socialcopilot.WakeParams{
+		WorkflowKey: workflowKey,
+		Trigger:     "manual",
+		Reason:      reason,
+	})
+	if errors.Is(err, sql.ErrNoRows) {
+		_, writeErr := fmt.Fprintf(output, "workflow=%s status=not_configured task=none account_actions=none\n", workflowKey)
+		return writeErr
+	}
+	if err != nil {
+		_, writeErr := fmt.Fprintf(output, "unable to wake social copilot: %v\n", err)
+		return writeErr
+	}
+
+	shell.state.ActiveRun = strconv.FormatInt(result.Run.ID, 10)
+	if err := shell.persistState(); err != nil {
+		return err
+	}
+	_, err = fmt.Fprintf(
+		output,
+		"wake=manual status=%s workflow=%s run=%d executor=%s account_actions=%s memory_created=%d suppressed=%d\n",
+		result.Run.Status,
+		workflowKey,
+		result.Run.ID,
+		result.Run.Executor,
+		result.AccountActions,
+		result.CreatedMemoryCount,
+		len(result.SuppressedTargets),
+	)
+	return err
+}
+
+func (shell *Shell) selectedSocialWorkflowKey() string {
+	if strings.TrimSpace(shell.state.SelectedWorkflowKey) != "" {
+		return strings.TrimSpace(shell.state.SelectedWorkflowKey)
+	}
+	return "marcus-social-growth-workflow"
+}
+
+func (shell *Shell) workflowItems() []registry.Item {
+	snapshot := shell.registrySnapshot()
+	workflows := append([]registry.Item(nil), snapshot.ByKind[registry.KindWorkflow]...)
+	if len(workflows) == 0 {
+		for _, item := range snapshot.Items {
+			if item.Kind == registry.KindWorkflow {
+				workflows = append(workflows, item)
+			}
+		}
+	}
+	sort.Slice(workflows, func(i, j int) bool {
+		return workflows[i].Key < workflows[j].Key
+	})
+	return workflows
+}
+
+func (shell *Shell) workflowByKey(key string) (registry.Item, bool) {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return registry.Item{}, false
+	}
+	snapshot := shell.registrySnapshot()
+	if item, ok := snapshot.ByKey[key]; ok && item.Kind == registry.KindWorkflow {
+		return item, true
+	}
+	for _, item := range shell.workflowItems() {
+		if item.Key == key {
+			return item, true
+		}
+	}
+	return registry.Item{}, false
+}
+
+func parseSocialScopeReplaceArgs(args []string) (socialcopilot.WatchScopeInput, error) {
+	var input socialcopilot.WatchScopeInput
+	for _, arg := range args {
+		key, value, ok := strings.Cut(strings.TrimSpace(arg), "=")
+		if !ok {
+			return socialcopilot.WatchScopeInput{}, fmt.Errorf("arguments must be key=value")
+		}
+		key = strings.ToLower(strings.TrimSpace(key))
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return socialcopilot.WatchScopeInput{}, fmt.Errorf("%s must not be empty", key)
+		}
+		switch key {
+		case "marcus_own":
+			for _, surface := range strings.Split(value, ",") {
+				surface = strings.TrimSpace(surface)
+				if surface != "" {
+					input.MarcusOwnedSurfaces = append(input.MarcusOwnedSurfaces, surface)
+				}
+			}
+		case "target":
+			input.ExplicitTargetURLs = append(input.ExplicitTargetURLs, value)
+		case "account":
+			input.WatchlistEntries = append(input.WatchlistEntries, socialcopilot.WatchlistEntryInput{
+				Kind:   "account",
+				Target: value,
+			})
+		case "thread":
+			input.WatchlistEntries = append(input.WatchlistEntries, socialcopilot.WatchlistEntryInput{
+				Kind:   "thread",
+				Target: value,
+			})
+		default:
+			return socialcopilot.WatchScopeInput{}, fmt.Errorf("unsupported social scope option %q", key)
+		}
+	}
+	if len(input.MarcusOwnedSurfaces) == 0 && len(input.ExplicitTargetURLs) == 0 && len(input.WatchlistEntries) == 0 {
+		return socialcopilot.WatchScopeInput{}, fmt.Errorf("at least one watched target is required")
+	}
+	return input, nil
+}
+
+func parseSocialWakeReason(args []string) (string, error) {
+	reason := "manual"
+	for _, arg := range args {
+		key, value, ok := strings.Cut(strings.TrimSpace(arg), "=")
+		if !ok {
+			return "", fmt.Errorf("usage: /workflow social wake reason=<short-token>")
+		}
+		switch strings.ToLower(strings.TrimSpace(key)) {
+		case "reason":
+			reason = strings.TrimSpace(value)
+		default:
+			return "", fmt.Errorf("unsupported wake option %q", strings.TrimSpace(key))
+		}
+	}
+	if reason == "" {
+		return "", fmt.Errorf("wake reason is required")
+	}
+	return reason, nil
 }
 
 func (shell *Shell) handleTransition(ctx context.Context, args []string, output io.Writer) error {
@@ -2069,6 +2413,9 @@ func (shell *Shell) handleDoctor(ctx context.Context, args []string, output io.W
 }
 
 func (shell *Shell) registrySnapshot() registry.Snapshot {
+	if len(shell.env.RegistrySnapshot.Items) != 0 || shell.env.RegistrySnapshot.ByKey != nil || shell.env.RegistrySnapshot.ByKind != nil {
+		return shell.env.RegistrySnapshot
+	}
 	if shell.env.CapabilityService == nil {
 		return registry.Snapshot{}
 	}
@@ -2114,7 +2461,9 @@ func (shell *Shell) handleSelf(output io.Writer) error {
 
 func (shell *Shell) persistState() error {
 	cache := Cache{
-		Mode: shell.state.Mode,
+		Mode:                shell.state.Mode,
+		SelectedSkillKey:    shell.state.SelectedSkillKey,
+		SelectedWorkflowKey: shell.state.SelectedWorkflowKey,
 	}
 	if shell.state.Scope.Kind == scope.ScopeProject || shell.state.Scope.Kind == scope.ScopeOdinCore {
 		cache.ProjectKey = shell.state.Scope.ProjectKey

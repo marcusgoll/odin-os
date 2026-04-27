@@ -14,7 +14,7 @@ const (
 	MemoryUsage         = "/memory [list [type=<memory_type>] [contains=<text>] [field.<name>=<value> ...] [limit=<n>] [order=asc|desc]|show <id>|remember <memory_type> [field=value ...] -- <summary...>|resolve <id> result=approved|rejected [reason=<value>]|publish <id> [url=<value> [published_at=<rfc3339>]|via=huginn_x]]"
 	RunsUsage           = "/runs | /runs show [run-id|active] | /runs cancel [run-id|active]"
 	LegacyUsage         = "legacy [status|capabilities] [--json]"
-	WorkflowUsage       = "/workflow [list|show <key>|validate <key>|use <key>|clear]"
+	WorkflowUsage       = "/workflow [list|show <key>|validate <key>|use <key>|clear|social <status|wake reason=<token>|scope replace ...>]"
 	SkillUsage          = "/skill [list|show <key>|use <key>|validate <key>|clear]"
 	ToolUsage           = "/tool [list|show <key>|run <key> [input=value...]]"
 )
