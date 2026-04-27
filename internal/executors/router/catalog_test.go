@@ -18,6 +18,7 @@ func TestDefaultCatalogRegistersSkeletonAdapters(t *testing.T) {
 		"codex_headless":       contract.ExecutorClassPlanBackedCLI,
 		"claude_code_headless": contract.ExecutorClassPlanBackedCLI,
 		"gemini_cli_headless":  contract.ExecutorClassPlanBackedCLI,
+		"sandcastle_headless":  contract.ExecutorClassPlanBackedCLI,
 		"openai_api":           contract.ExecutorClassAPI,
 		"anthropic_api":        contract.ExecutorClassAPI,
 		"google_api":           contract.ExecutorClassAPI,

@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -373,6 +374,141 @@ func TestAlphaAcceptance(t *testing.T) {
 		}
 		if len(views) == 0 {
 			t.Fatalf("task views = 0, want created task from act mode")
+		}
+	})
+
+	t.Run("sandcastle headless fixture runs through task run and shell readback", func(t *testing.T) {
+		runtimeRoot := t.TempDir()
+		commandHome := t.TempDir()
+		projectRepo := createGitRepository(t)
+		odinRoot := writeSandcastleSpikeOdinRoot(t, repoRoot, projectRepo)
+		driverPath := filepath.Join(repoRoot, "scripts", "drivers", "sandcastle-headless-fixture.sh")
+		env := map[string]string{
+			"HOME":                   commandHome,
+			"ODIN_SANDCASTLE_DRIVER": driverPath,
+		}
+
+		output, err := runOdinCommandInDir(t, odinRoot, odinBinary, runtimeRoot, env, "", "project", "select", "sandcastle-demo")
+		if err != nil {
+			t.Fatalf("runOdinCommand(project select) error = %v\n%s", err, output)
+		}
+		if !strings.Contains(output, "project=sandcastle-demo scope=sandcastle-demo") {
+			t.Fatalf("project select output = %q, want sandcastle project scope", output)
+		}
+
+		output, err = runOdinCommandInDir(t, odinRoot, odinBinary, runtimeRoot, env, "", "transition", "set", "limited_action", "allow=run_task", "confirm", "because", "sandcastle", "fixture", "e2e")
+		if err != nil {
+			t.Fatalf("runOdinCommand(transition set) error = %v\n%s", err, output)
+		}
+		if !strings.Contains(output, "project=sandcastle-demo state=limited_action") {
+			t.Fatalf("transition output = %q, want limited_action state", output)
+		}
+
+		runOutput, err := runOdinCommandInDir(t, odinRoot, odinBinary, runtimeRoot, env, "", "task", "run", "--project", "sandcastle-demo", "--title", "sandcastle fixture task", "--json")
+		if err != nil {
+			t.Fatalf("runOdinCommand(task run) error = %v\n%s", err, runOutput)
+		}
+		var runView struct {
+			Task struct {
+				ID     int64  `json:"id"`
+				Key    string `json:"key"`
+				Status string `json:"status"`
+			} `json:"task"`
+			Run *struct {
+				ID       int64  `json:"id"`
+				Executor string `json:"executor"`
+				Status   string `json:"status"`
+				Summary  string `json:"summary"`
+			} `json:"run"`
+		}
+		if err := json.Unmarshal([]byte(runOutput), &runView); err != nil {
+			t.Fatalf("task run JSON decode error = %v\n%s", err, runOutput)
+		}
+		if runView.Run == nil {
+			t.Fatalf("task run JSON = %+v, want run result", runView)
+		}
+		if runView.Task.Status != "completed" || runView.Run.Status != "completed" || runView.Run.Executor != "sandcastle_headless" {
+			t.Fatalf("task run JSON = %+v, want completed sandcastle_headless run", runView)
+		}
+
+		readbackInput := "/project sandcastle-demo\n/runs\n/runs show " + strconv.FormatInt(runView.Run.ID, 10) + "\n/quit\n"
+		readback, err := runOdinCommandInDir(t, odinRoot, odinBinary, runtimeRoot, env, readbackInput, "repl")
+		if err != nil {
+			t.Fatalf("runOdinCommand(repl readback) error = %v\n%s", err, readback)
+		}
+		for _, want := range []string{
+			"project=sandcastle-demo scope=sandcastle-demo",
+			runView.Task.Key + " sandcastle_headless completed",
+			"status=completed executor=sandcastle_headless",
+			"artifact=executor_evidence summary=executor evidence",
+			"executor_lane=sandcastle_headless",
+			"driver_kind=fixture",
+			"operation=run",
+			"external_id=sandcastle-fixture:",
+			"repo_root=" + projectRepo,
+			"marker_path=.odin/sandcastle-fixture-marker.json",
+			"marker_written=true",
+		} {
+			if !strings.Contains(readback, want) {
+				t.Fatalf("readback missing %q:\n%s", want, readback)
+			}
+		}
+
+		worktreePath := firstLineValue(readback, "worktree_path")
+		branchName := firstLineValue(readback, "branch_name")
+		driverCWD := firstLineValue(readback, "driver_cwd")
+		branchObserved := firstLineValue(readback, "branch_observed")
+		if worktreePath == "" || branchName == "" || driverCWD == "" || branchObserved == "" {
+			t.Fatalf("readback missing worktree or branch evidence:\n%s", readback)
+		}
+		if filepath.Clean(driverCWD) != filepath.Clean(worktreePath) {
+			t.Fatalf("driver_cwd = %q, want worktree_path %q", driverCWD, worktreePath)
+		}
+		if branchObserved != branchName {
+			t.Fatalf("branch_observed = %q, want branch_name %q", branchObserved, branchName)
+		}
+
+		markerPath := filepath.Join(worktreePath, ".odin", "sandcastle-fixture-marker.json")
+		if _, err := os.Stat(markerPath); err != nil {
+			t.Fatalf("marker path %s missing: %v", markerPath, err)
+		}
+		if _, err := os.Stat(filepath.Join(projectRepo, ".odin", "sandcastle-fixture-marker.json")); err == nil {
+			t.Fatalf("marker was written to source repo root %s, want leased worktree only", projectRepo)
+		} else if !os.IsNotExist(err) {
+			t.Fatalf("source repo marker stat error = %v", err)
+		}
+
+		statusCmd := exec.Command("git", "-C", worktreePath, "status", "--porcelain=v1", "--", ".odin/sandcastle-fixture-marker.json")
+		statusOutput, err := statusCmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git status marker error = %v\n%s", err, string(statusOutput))
+		}
+		if !strings.Contains(string(statusOutput), "?? ") {
+			t.Fatalf("git status marker output = %q, want uncommitted marker evidence", string(statusOutput))
+		}
+
+		store := openRuntimeStore(t, runtimeRoot)
+		defer store.Close()
+		task, err := store.GetTask(ctx, runView.Task.ID)
+		if err != nil {
+			t.Fatalf("GetTask(%d) error = %v", runView.Task.ID, err)
+		}
+		if task.Status != "completed" {
+			t.Fatalf("task status = %q, want completed", task.Status)
+		}
+		run, err := store.GetRun(ctx, runView.Run.ID)
+		if err != nil {
+			t.Fatalf("GetRun(%d) error = %v", runView.Run.ID, err)
+		}
+		if run.Executor != "sandcastle_headless" || run.Status != "completed" {
+			t.Fatalf("run = %+v, want completed sandcastle_headless", run)
+		}
+		artifacts, err := store.ListRunArtifacts(ctx, sqlite.ListRunArtifactsParams{RunID: run.ID})
+		if err != nil {
+			t.Fatalf("ListRunArtifacts(%d) error = %v", run.ID, err)
+		}
+		if len(artifacts) != 1 || artifacts[0].ArtifactType != "executor_evidence" {
+			t.Fatalf("artifacts = %+v, want one executor_evidence artifact", artifacts)
 		}
 	})
 
@@ -1362,4 +1498,88 @@ func seedAlphaAcceptanceCompanionSwarms(t *testing.T, ctx context.Context, store
 	}); err != nil {
 		t.Fatalf("BlockTask(alpha-budget-swarm) error = %v", err)
 	}
+}
+
+func writeSandcastleSpikeOdinRoot(t *testing.T, repoRoot string, projectRepo string) string {
+	t.Helper()
+
+	root := t.TempDir()
+	for _, dir := range []string{
+		filepath.Join(root, "config"),
+		filepath.Join(root, "data"),
+		filepath.Join(root, "registry"),
+		filepath.Join(root, "state", "cache"),
+	} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("MkdirAll(%s) error = %v", dir, err)
+		}
+	}
+
+	copyWorkspaceIntegrationTree(t, filepath.Join(repoRoot, "registry"), filepath.Join(root, "registry"))
+	writeTextFile(t, filepath.Join(root, "config", "odin.yaml"), `
+version: 1
+runtime:
+  root: .
+service:
+  http_addr: 127.0.0.1:9443
+  startup_recovery: true
+`)
+	writeTextFile(t, filepath.Join(root, "config", "projects.yaml"), `
+version: 1
+projects:
+  - key: sandcastle-demo
+    name: Sandcastle Demo
+    project_class: local_git_project
+    git_root: `+projectRepo+`
+    default_branch: main
+    policy:
+      allowed_commands: [status, test, build]
+      branch_rules:
+        protected_branches: [main]
+        require_worktree: true
+        require_task_branch: true
+        allow_default_branch_mutation: false
+      approval_gates:
+        require_for_governance_changes: true
+        require_for_destructive_operations: true
+        require_for_system_project_changes: false
+      merge_policy:
+        mode: squash
+        allow_direct_to_default_branch: false
+      destructive_operations:
+        allow_reset: false
+        allow_clean: false
+        allow_force_push: false
+        require_explicit_approval: true
+`)
+	writeTextFile(t, filepath.Join(root, "config", "executors.yaml"), `
+version: 1
+
+executors:
+  - key: sandcastle_headless
+    adapter: sandcastle_headless
+    class: plan_backed_cli
+    enabled: true
+    priority: 10
+    model_ref: sandcastle-fixture
+
+routes:
+  - name: sandcastle-fixture
+    match:
+      task_kinds: [general, plan, build, review, qa]
+      scopes: [project]
+    preferred: [sandcastle_headless]
+    fallback: []
+`)
+	return root
+}
+
+func firstLineValue(output string, key string) string {
+	prefix := key + "="
+	for _, line := range strings.Split(output, "\n") {
+		if strings.HasPrefix(line, prefix) {
+			return strings.TrimSpace(strings.TrimPrefix(line, prefix))
+		}
+	}
+	return ""
 }

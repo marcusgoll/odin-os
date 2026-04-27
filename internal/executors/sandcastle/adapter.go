@@ -1,4 +1,4 @@
-package codex
+package sandcastle
 
 import (
 	"context"
@@ -13,7 +13,7 @@ import (
 	"odin-os/internal/executors/drivers"
 )
 
-const executorKey = "codex_headless"
+const executorKey = "sandcastle_headless"
 
 var (
 	healthDriverTimeout = 5 * time.Second
@@ -70,7 +70,7 @@ func (executor headlessExecutor) Health(ctx context.Context) (contract.HealthRep
 	if _, ok := executor.driverPath(); !ok {
 		return contract.HealthReport{
 			Status:    contract.HealthStatusUnavailable,
-			Details:   "codex driver is unavailable",
+			Details:   "sandcastle driver is unavailable",
 			CheckedAt: time.Now().UTC(),
 		}, nil
 	}
@@ -199,14 +199,15 @@ func validateRunStatus(status string) (string, error) {
 func (executor headlessExecutor) invokeDriver(ctx context.Context, request driverRequest) (driverResponse, []byte, error) {
 	driver, ok := executor.driverPath()
 	if !ok {
-		return driverResponse{}, nil, fmt.Errorf("codex driver unavailable")
+		return driverResponse{}, nil, fmt.Errorf("sandcastle driver unavailable")
 	}
 
 	var response driverResponse
 	payload, err := drivers.Invoke(ctx, drivers.Options{
 		DriverPath: driver,
-		Label:      "codex",
+		Label:      "sandcastle",
 		Timeout:    driverTimeout(request.Action),
+		WorkDir:    request.Meta["worktree_path"],
 	}, request, &response)
 	if err != nil {
 		return driverResponse{}, nil, err
@@ -234,16 +235,11 @@ func (headlessExecutor) EstimateCost(context.Context, contract.TaskSpec) (contra
 }
 
 func (executor headlessExecutor) driverPath() (string, bool) {
-	driver := strings.TrimSpace(os.Getenv("ODIN_CODEX_DRIVER"))
+	driver := strings.TrimSpace(os.Getenv("ODIN_SANDCASTLE_DRIVER"))
 	if driver != "" {
 		return filepath.Clean(driver), true
 	}
-	if strings.TrimSpace(executor.repoRoot) == "" {
-		return "", false
-	}
-
-	driver = filepath.Join(executor.repoRoot, "scripts", "drivers", "codex-headless.sh")
-	return filepath.Clean(driver), true
+	return "", false
 }
 
 func ensureArtifactMetadata(spec contract.TaskSpec, payload []byte, metadata map[string]string) error {
@@ -292,7 +288,7 @@ func writeDriverArtifact(baseDir, artifactKey string, payload []byte) (string, e
 func artifactFileKey(spec contract.TaskSpec) string {
 	taskID := spec.ID
 	if taskID == "" {
-		taskID = "codex-headless-run"
+		taskID = "sandcastle-headless-run"
 	}
 	return taskID
 }
@@ -300,7 +296,7 @@ func artifactFileKey(spec contract.TaskSpec) string {
 func sanitizeArtifactName(value string) string {
 	value = strings.TrimSpace(value)
 	if value == "" {
-		return "codex-headless-run"
+		return "sandcastle-headless-run"
 	}
 
 	var builder strings.Builder
@@ -321,7 +317,7 @@ func sanitizeArtifactName(value string) string {
 
 	result := strings.Trim(builder.String(), "-_")
 	if result == "" {
-		return "codex-headless-run"
+		return "sandcastle-headless-run"
 	}
 	return result
 }
