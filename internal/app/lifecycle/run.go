@@ -49,6 +49,7 @@ import (
 	"odin-os/internal/runtime/projections"
 	"odin-os/internal/runtime/recovery"
 	"odin-os/internal/runtime/runs"
+	"odin-os/internal/runtime/socialcopilot"
 	runtimestate "odin-os/internal/runtime/state"
 	"odin-os/internal/runtime/supervision"
 	"odin-os/internal/store/sqlite"
@@ -2129,6 +2130,11 @@ func runServe(ctx context.Context, app bootstrap.App, cfg appconfig.Config, stdo
 		Now:               now,
 		ShutdownRequested: &shutdownRequested,
 	}
+	socialService := socialcopilot.Service{
+		Store:    app.Store,
+		Registry: app.Registry,
+		Now:      now,
+	}
 	leaseService := leases.Maintenance{
 		Store: app.Store,
 		Cleanup: worktrees.Manager{
@@ -2157,6 +2163,14 @@ func runServe(ctx context.Context, app bootstrap.App, cfg appconfig.Config, stdo
 		BootID:             bootID,
 		RuntimeRoot:        cfg.RuntimeRoot,
 	}
+	if cfg.Service.SocialCopilot.Enabled {
+		socialCtx, cancel := serveOperationContext(operationCtx)
+		if err := runSocialCopilotStartupCheck(socialCtx, socialService, cfg.Service.SocialCopilot); err != nil {
+			cancel()
+			return recordServeStopped(operationCtx, stateService, bootID, "social copilot startup failed", err)
+		}
+		cancel()
+	}
 	listener, err := serveListen("tcp", cfg.Service.HTTPAddr)
 	if err != nil {
 		return recordServeStopped(operationCtx, stateService, bootID, "listener binding failed", err)
@@ -2183,6 +2197,9 @@ func runServe(ctx context.Context, app bootstrap.App, cfg appconfig.Config, stdo
 	if mediaService != nil {
 		loopCount++
 	}
+	if cfg.Service.SocialCopilot.Enabled {
+		loopCount++
+	}
 	background.Add(loopCount)
 	loopCtx, stopLoops := context.WithCancel(context.Background())
 	dispatchNudges := make(chan struct{}, 32)
@@ -2194,6 +2211,9 @@ func runServe(ctx context.Context, app bootstrap.App, cfg appconfig.Config, stdo
 	go runFollowUpLoop(loopCtx, &background, followUpService, logger, now)
 	if mediaService != nil {
 		go runMediaLoop(loopCtx, operationCtx, &background, *mediaService, logger)
+	}
+	if cfg.Service.SocialCopilot.Enabled {
+		go runSocialCopilotLoop(loopCtx, operationCtx, &background, socialService, cfg.Service.SocialCopilot, logger)
 	}
 	defer func() {
 		stopLoops()
@@ -2624,6 +2644,50 @@ func runFollowUpCycle(ctx context.Context, followUpService followups.Service, no
 
 func followUpTaskKey(obligation followups.FollowUpObligation) string {
 	return fmt.Sprintf("followup-%d-%s", obligation.ID, obligation.NextDueAt.UTC().Format("20060102-150405Z0700"))
+}
+
+func runSocialCopilotStartupCheck(ctx context.Context, service socialcopilot.Service, cfg appconfig.SocialCopilotSettings) error {
+	cadence := time.Duration(cfg.CadenceSeconds) * time.Second
+	if _, err := service.EnsurePollingJob(ctx, socialcopilot.EnsureJobParams{
+		WorkflowKey: cfg.WorkflowKey,
+		Cadence:     cadence,
+	}); err != nil {
+		return err
+	}
+	_, err := service.Wake(ctx, socialcopilot.WakeParams{
+		WorkflowKey: cfg.WorkflowKey,
+		Trigger:     "serve",
+		Reason:      "startup-due-check",
+	})
+	return err
+}
+
+func runSocialCopilotLoop(ctx context.Context, operationCtx context.Context, wg *sync.WaitGroup, service socialcopilot.Service, cfg appconfig.SocialCopilotSettings, logger *logs.Logger) {
+	defer wg.Done()
+
+	interval := time.Duration(cfg.CadenceSeconds) * time.Second
+	if interval <= 0 {
+		interval = 30 * time.Minute
+	}
+	logBackgroundEvent(logger, logs.LevelInfo, "social_copilot", "social copilot loop started", map[string]any{
+		"interval_ms": interval.Milliseconds(),
+	})
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			socialCtx, cancel := serveOperationContext(operationCtx)
+			if err := runSocialCopilotStartupCheck(socialCtx, service, cfg); err != nil {
+				logBackgroundError(logger, "social_copilot", err)
+			}
+			cancel()
+		}
+	}
 }
 
 func serveOperationContext(parent context.Context) (context.Context, context.CancelFunc) {
