@@ -37,11 +37,18 @@ func (store *Store) Migrate(ctx context.Context) error {
 		return err
 	}
 
-	applied, err := store.appliedMigrations(ctx)
+	appliedNames, err := store.appliedMigrationNames(ctx)
 	if err != nil {
 		return err
 	}
+	if err := store.repairLegacyMigrationCollisions(ctx, migrations, appliedNames); err != nil {
+		return err
+	}
 
+	applied := make(map[int]bool, len(appliedNames))
+	for version := range appliedNames {
+		applied[version] = true
+	}
 	for _, migration := range migrations {
 		if applied[migration.Version] {
 			continue
@@ -103,22 +110,96 @@ func migrationVersion(filename string) (int, error) {
 }
 
 func (store *Store) appliedMigrations(ctx context.Context) (map[int]bool, error) {
-	rows, err := store.db.QueryContext(ctx, `SELECT version FROM schema_migrations`)
+	names, err := store.appliedMigrationNames(ctx)
+	if err != nil {
+		return nil, err
+	}
+	applied := make(map[int]bool, len(names))
+	for version := range names {
+		applied[version] = true
+	}
+	return applied, nil
+}
+
+func (store *Store) appliedMigrationNames(ctx context.Context) (map[int]string, error) {
+	rows, err := store.db.QueryContext(ctx, `SELECT version, name FROM schema_migrations`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
-	applied := make(map[int]bool)
+	applied := make(map[int]string)
 	for rows.Next() {
-		var version int
-		if err := rows.Scan(&version); err != nil {
+		var (
+			version int
+			name    string
+		)
+		if err := rows.Scan(&version, &name); err != nil {
 			return nil, err
 		}
-		applied[version] = true
+		applied[version] = name
 	}
 
 	return applied, rows.Err()
+}
+
+func (store *Store) repairLegacyMigrationCollisions(ctx context.Context, migrations []migration, applied map[int]string) error {
+	// Early live databases used versions 11 and 12 for different migration files.
+	// Apply the skipped current SQL idempotently so later workspace migrations can run.
+	repairs := []struct {
+		version     int
+		currentName string
+		markerTable string
+	}{
+		{version: 11, currentName: "0011_workspaces.sql", markerTable: "workspace_policies"},
+		{version: 12, currentName: "0012_initiatives.sql", markerTable: "initiatives"},
+	}
+
+	for _, repair := range repairs {
+		appliedName, ok := applied[repair.version]
+		if !ok || appliedName == repair.currentName {
+			continue
+		}
+		exists, err := store.HasTable(ctx, repair.markerTable)
+		if err != nil {
+			return err
+		}
+		if exists {
+			continue
+		}
+		migration, ok := migrationByVersion(migrations, repair.version)
+		if !ok {
+			return fmt.Errorf("migration version %d not found for legacy repair", repair.version)
+		}
+		if err := store.applyMigrationSQL(ctx, migration); err != nil {
+			return fmt.Errorf("repair legacy migration collision %d (%s already recorded): %w", repair.version, appliedName, err)
+		}
+	}
+
+	return nil
+}
+
+func migrationByVersion(migrations []migration, version int) (migration, bool) {
+	for _, migration := range migrations {
+		if migration.Version == version {
+			return migration, true
+		}
+	}
+	return migration{}, false
+}
+
+func (store *Store) applyMigrationSQL(ctx context.Context, migration migration) error {
+	tx, err := store.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer rollbackOnError(tx)
+
+	if _, err := tx.ExecContext(ctx, migration.SQL); err != nil {
+		return err
+	}
+
+	return tx.Commit()
 }
 
 func (store *Store) applyMigration(ctx context.Context, migration migration) error {
