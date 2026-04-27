@@ -13,6 +13,7 @@ const (
 	JobsUsage           = "/jobs | /jobs cancel <task-key>"
 	MemoryUsage         = "/memory [list [type=<memory_type>] [contains=<text>] [field.<name>=<value> ...] [limit=<n>] [order=asc|desc]|show <id>|remember <memory_type> [field=value ...] -- <summary...>|resolve <id> result=approved|rejected [reason=<value>]|publish <id> [url=<value> [published_at=<rfc3339>]|via=huginn_x]]"
 	RunsUsage           = "/runs | /runs show [run-id|active] | /runs cancel [run-id|active]"
+	LegacyUsage         = "legacy [status|capabilities] [--json]"
 	WorkflowUsage       = "/workflow [list|show <key>|validate <key>|use <key>|clear]"
 	SkillUsage          = "/skill [list|show <key>|use <key>|validate <key>|clear]"
 	ToolUsage           = "/tool [list|show <key>|run <key> [input=value...]]"
@@ -43,6 +44,7 @@ func OperatorHelp(binary string) string {
   %[1]s help             Show this help
   %[1]s overview [--json] Show the canonical operator overview
   %[1]s doctor [--json]  Show runtime readiness
+  %[1]s legacy           Show read-only legacy Odin status and capability inventory
   %[1]s healthcheck      Exit successfully only when the runtime is ready
   %[1]s serve            Run background service loops and the operational HTTP surface
   %[1]s backup           Create a runtime backup
