@@ -132,7 +132,15 @@ func Load(ctx context.Context, repoRoot string, runtimeRoot string) (App, error)
 		return App{}, err
 	}
 
-	registry, diagnostics, err := projects.Register(filepath.Join(repoRoot, "config", "projects.yaml"))
+	registryPaths, err := projectManifestPaths(repoRoot)
+	if err != nil {
+		if failureErr := recordBootstrapFailure(ctx, store, runtimeState, bootID, err); failureErr != nil {
+			err = failureErr
+		}
+		_ = store.Close()
+		return App{}, err
+	}
+	registry, diagnostics, err := projects.RegisterPaths(registryPaths...)
 	if err != nil {
 		if failureErr := recordBootstrapFailure(ctx, store, runtimeState, bootID, err); failureErr != nil {
 			err = failureErr
