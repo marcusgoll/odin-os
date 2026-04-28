@@ -20,6 +20,7 @@ const (
 	StreamContextPacket      StreamType = "context_packet"
 	StreamConversation       StreamType = "conversation_transcript"
 	StreamMemorySummary      StreamType = "memory_summary"
+	StreamIntakeItem         StreamType = "intake_item"
 	StreamLearningProposal   StreamType = "learning_proposal"
 	StreamLearningEvaluation StreamType = "learning_evaluation"
 	StreamLearningPromotion  StreamType = "learning_promotion"
@@ -54,6 +55,7 @@ const (
 	EventConversationTranscriptRecorded   Type = "conversation.transcript_recorded"
 	EventMemorySummaryRecorded            Type = "memory.summary_recorded"
 	EventMemorySummaryUpdated             Type = "memory.summary_updated"
+	EventIntakeItemCreated                Type = "intake.item_created"
 	EventProjectTransitionChanged         Type = "project.transition_changed"
 	EventProjectShadowObservationRecorded Type = "project.shadow_observation_recorded"
 	EventProjectCompareReportRecorded     Type = "project.compare_report_recorded"
@@ -277,6 +279,19 @@ type MemorySummaryUpdatedPayload struct {
 	SourceTranscriptID *int64 `json:"source_transcript_id,omitempty"`
 	TaskID             *int64 `json:"task_id,omitempty"`
 	RunID              *int64 `json:"run_id,omitempty"`
+}
+
+type IntakeItemCreatedPayload struct {
+	WorkspaceID         string `json:"workspace_id"`
+	SourceFamily        string `json:"source_family"`
+	ExternalObjectID    string `json:"external_object_id,omitempty"`
+	EventKind           string `json:"event_kind"`
+	Subject             string `json:"subject"`
+	DedupeKey           string `json:"dedupe_key"`
+	DedupeRecipeVersion string `json:"dedupe_recipe_version"`
+	Status              string `json:"status"`
+	Scope               string `json:"scope,omitempty"`
+	ScopeKey            string `json:"scope_key,omitempty"`
 }
 
 type ProjectTransitionChangedPayload struct {
