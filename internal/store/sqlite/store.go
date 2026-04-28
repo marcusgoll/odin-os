@@ -368,6 +368,167 @@ func (store *Store) GetTaskIntake(ctx context.Context, intakeID int64) (TaskInta
 	return scanTaskIntake(row)
 }
 
+func (store *Store) CreateIntakeItem(ctx context.Context, params CreateIntakeItemParams) (IntakeItem, error) {
+	now := store.now()
+	receivedAt := params.ReceivedAt
+	if receivedAt.IsZero() {
+		receivedAt = now
+	}
+	sourceFactsJSON := params.SourceFactsJSON
+	if strings.TrimSpace(sourceFactsJSON) == "" {
+		sourceFactsJSON = "{}"
+	}
+	if !json.Valid([]byte(sourceFactsJSON)) {
+		return IntakeItem{}, fmt.Errorf("source facts json must be valid JSON")
+	}
+
+	var item IntakeItem
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		result, err := tx.ExecContext(ctx, `
+			INSERT INTO intake_items (
+				workspace_id,
+				source_family,
+				external_object_id,
+				event_kind,
+				subject,
+				dedupe_key,
+				dedupe_recipe_version,
+				source_facts_json,
+				status,
+				scope,
+				scope_key,
+				summary,
+				conversation_transcript_id,
+				canonical_intake_item_id,
+				suppression_reason,
+				routing_notes,
+				received_at,
+				created_at,
+				updated_at
+			)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`,
+			params.WorkspaceID,
+			params.SourceFamily,
+			params.ExternalObjectID,
+			params.EventKind,
+			params.Subject,
+			params.DedupeKey,
+			params.DedupeRecipeVersion,
+			sourceFactsJSON,
+			params.Status,
+			params.Scope,
+			params.ScopeKey,
+			params.Summary,
+			nullInt64(params.ConversationTranscriptID),
+			nullInt64(params.CanonicalIntakeItemID),
+			params.SuppressionReason,
+			params.RoutingNotes,
+			formatTime(receivedAt),
+			formatTime(now),
+			formatTime(now),
+		)
+		if err != nil {
+			return err
+		}
+
+		itemID, err := result.LastInsertId()
+		if err != nil {
+			return err
+		}
+
+		item = IntakeItem{
+			ID:                       itemID,
+			WorkspaceID:              params.WorkspaceID,
+			SourceFamily:             params.SourceFamily,
+			ExternalObjectID:         params.ExternalObjectID,
+			EventKind:                params.EventKind,
+			Subject:                  params.Subject,
+			DedupeKey:                params.DedupeKey,
+			DedupeRecipeVersion:      params.DedupeRecipeVersion,
+			SourceFactsJSON:          sourceFactsJSON,
+			Status:                   params.Status,
+			Scope:                    params.Scope,
+			ScopeKey:                 params.ScopeKey,
+			Summary:                  params.Summary,
+			ConversationTranscriptID: params.ConversationTranscriptID,
+			CanonicalIntakeItemID:    params.CanonicalIntakeItemID,
+			SuppressionReason:        params.SuppressionReason,
+			RoutingNotes:             params.RoutingNotes,
+			ReceivedAt:               receivedAt,
+			CreatedAt:                now,
+			UpdatedAt:                now,
+		}
+
+		return appendEventTx(ctx, tx, eventInsert{
+			StreamType: runtimeevents.StreamIntakeItem,
+			StreamID:   itemID,
+			EventType:  runtimeevents.EventIntakeItemCreated,
+			Scope:      params.Scope,
+			Payload: runtimeevents.IntakeItemCreatedPayload{
+				WorkspaceID:         params.WorkspaceID,
+				SourceFamily:        params.SourceFamily,
+				ExternalObjectID:    params.ExternalObjectID,
+				EventKind:           params.EventKind,
+				Subject:             params.Subject,
+				DedupeKey:           params.DedupeKey,
+				DedupeRecipeVersion: params.DedupeRecipeVersion,
+				Status:              params.Status,
+				Scope:               params.Scope,
+				ScopeKey:            params.ScopeKey,
+			},
+			OccurredAt: now,
+		})
+	})
+
+	return item, err
+}
+
+func (store *Store) ListIntakeItems(ctx context.Context, params ListIntakeItemsParams) ([]IntakeItem, error) {
+	query := `
+		SELECT id, workspace_id, source_family, external_object_id, event_kind, subject, dedupe_key,
+			dedupe_recipe_version, source_facts_json, status, scope, scope_key, summary,
+			conversation_transcript_id, canonical_intake_item_id, suppression_reason, routing_notes,
+			received_at, created_at, updated_at
+		FROM intake_items
+		WHERE 1 = 1
+	`
+	var args []any
+	if params.WorkspaceID != "" {
+		query += ` AND workspace_id = ?`
+		args = append(args, params.WorkspaceID)
+	}
+	if params.Status != "" {
+		query += ` AND status = ?`
+		args = append(args, params.Status)
+	}
+	if params.Scope != "" {
+		query += ` AND scope = ?`
+		args = append(args, params.Scope)
+	}
+	if params.ScopeKey != "" {
+		query += ` AND scope_key = ?`
+		args = append(args, params.ScopeKey)
+	}
+	query += ` ORDER BY id ASC`
+
+	rows, err := store.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	items := make([]IntakeItem, 0)
+	for rows.Next() {
+		item, err := scanIntakeItem(rows)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
 func (store *Store) CreateMemoryEntry(ctx context.Context, params CreateMemoryEntryParams) (MemoryEntry, error) {
 	now := store.now()
 	params, err := normalizeCreateMemoryEntryParams(params)
@@ -6957,6 +7118,56 @@ func scanTaskIntake(row interface{ Scan(...any) error }) (TaskIntake, error) {
 		return TaskIntake{}, err
 	}
 	return intake, nil
+}
+
+func scanIntakeItem(row interface{ Scan(...any) error }) (IntakeItem, error) {
+	var item IntakeItem
+	var conversationTranscriptID sql.NullInt64
+	var canonicalIntakeItemID sql.NullInt64
+	var receivedAt string
+	var createdAt string
+	var updatedAt string
+	if err := row.Scan(
+		&item.ID,
+		&item.WorkspaceID,
+		&item.SourceFamily,
+		&item.ExternalObjectID,
+		&item.EventKind,
+		&item.Subject,
+		&item.DedupeKey,
+		&item.DedupeRecipeVersion,
+		&item.SourceFactsJSON,
+		&item.Status,
+		&item.Scope,
+		&item.ScopeKey,
+		&item.Summary,
+		&conversationTranscriptID,
+		&canonicalIntakeItemID,
+		&item.SuppressionReason,
+		&item.RoutingNotes,
+		&receivedAt,
+		&createdAt,
+		&updatedAt,
+	); err != nil {
+		return IntakeItem{}, err
+	}
+
+	item.ConversationTranscriptID = nullableInt64Ptr(conversationTranscriptID)
+	item.CanonicalIntakeItemID = nullableInt64Ptr(canonicalIntakeItemID)
+	var err error
+	item.ReceivedAt, err = parseTime(receivedAt)
+	if err != nil {
+		return IntakeItem{}, err
+	}
+	item.CreatedAt, err = parseTime(createdAt)
+	if err != nil {
+		return IntakeItem{}, err
+	}
+	item.UpdatedAt, err = parseTime(updatedAt)
+	if err != nil {
+		return IntakeItem{}, err
+	}
+	return item, nil
 }
 
 func scanFollowUpObligation(row interface{ Scan(...any) error }) (FollowUpObligation, error) {

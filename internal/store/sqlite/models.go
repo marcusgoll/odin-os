@@ -210,6 +210,29 @@ type TaskIntake struct {
 	CreatedAt   time.Time
 }
 
+type IntakeItem struct {
+	ID                       int64
+	WorkspaceID              string
+	SourceFamily             string
+	ExternalObjectID         string
+	EventKind                string
+	Subject                  string
+	DedupeKey                string
+	DedupeRecipeVersion      string
+	SourceFactsJSON          string
+	Status                   string
+	Scope                    string
+	ScopeKey                 string
+	Summary                  string
+	ConversationTranscriptID *int64
+	CanonicalIntakeItemID    *int64
+	SuppressionReason        string
+	RoutingNotes             string
+	ReceivedAt               time.Time
+	CreatedAt                time.Time
+	UpdatedAt                time.Time
+}
+
 type CreateTaskParams struct {
 	ProjectID             int64
 	Key                   string
@@ -233,6 +256,33 @@ type CreateTaskIntakeParams struct {
 	DedupKey    string
 	RequestedBy string
 	PayloadJSON string
+}
+
+type CreateIntakeItemParams struct {
+	WorkspaceID              string
+	SourceFamily             string
+	ExternalObjectID         string
+	EventKind                string
+	Subject                  string
+	DedupeKey                string
+	DedupeRecipeVersion      string
+	SourceFactsJSON          string
+	Status                   string
+	Scope                    string
+	ScopeKey                 string
+	Summary                  string
+	ConversationTranscriptID *int64
+	CanonicalIntakeItemID    *int64
+	SuppressionReason        string
+	RoutingNotes             string
+	ReceivedAt               time.Time
+}
+
+type ListIntakeItemsParams struct {
+	WorkspaceID string
+	Status      string
+	Scope       string
+	ScopeKey    string
 }
 
 type UpdateTaskStatusParams struct {
