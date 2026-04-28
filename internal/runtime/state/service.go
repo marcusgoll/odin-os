@@ -126,35 +126,47 @@ func (service Service) transition(ctx context.Context, status string, input Tran
 		return sqlite.RuntimeState{}, fmt.Errorf("boot_id is required")
 	}
 
-	current, err := service.Store.GetRuntimeState(ctx)
-	if err != nil {
-		return sqlite.RuntimeState{}, err
-	}
-	if transitionBlocked(current.Status, status) {
-		return sqlite.RuntimeState{}, ErrRuntimeStateDrainLatched
+	var lastErr error
+	for attempt := 0; attempt < 5; attempt++ {
+		current, err := service.Store.GetRuntimeState(ctx)
+		if err != nil {
+			return sqlite.RuntimeState{}, err
+		}
+		if transitionBlocked(current.Status, status) {
+			return sqlite.RuntimeState{}, ErrRuntimeStateDrainLatched
+		}
+
+		now := service.now()
+		params := sqlite.UpsertRuntimeStateParams{
+			BootID:             input.BootID,
+			Status:             status,
+			PID:                current.PID,
+			StartedAt:          current.StartedAt,
+			ReadyAt:            current.ReadyAt,
+			LastHeartbeatAt:    current.LastHeartbeatAt,
+			LastShutdownReason: current.LastShutdownReason,
+			LastError:          current.LastError,
+			UpdatedAt:          now,
+		}
+		if mutate != nil {
+			mutate(&params, now)
+		}
+
+		state, err := service.Store.UpsertRuntimeState(ctx, params, sqlite.RuntimeStateWriteOptions{
+			ExpectedBootID:    input.BootID,
+			ExpectedUpdatedAt: current.UpdatedAt,
+			EventReason:       transitionReason(input),
+		})
+		if err == nil {
+			return state, nil
+		}
+		if !errors.Is(err, sqlite.ErrRuntimeStateConcurrentUpdate) {
+			return sqlite.RuntimeState{}, err
+		}
+		lastErr = err
 	}
 
-	now := service.now()
-	params := sqlite.UpsertRuntimeStateParams{
-		BootID:             input.BootID,
-		Status:             status,
-		PID:                current.PID,
-		StartedAt:          current.StartedAt,
-		ReadyAt:            current.ReadyAt,
-		LastHeartbeatAt:    current.LastHeartbeatAt,
-		LastShutdownReason: current.LastShutdownReason,
-		LastError:          current.LastError,
-		UpdatedAt:          now,
-	}
-	if mutate != nil {
-		mutate(&params, now)
-	}
-
-	return service.Store.UpsertRuntimeState(ctx, params, sqlite.RuntimeStateWriteOptions{
-		ExpectedBootID:    input.BootID,
-		ExpectedUpdatedAt: current.UpdatedAt,
-		EventReason:       transitionReason(input),
-	})
+	return sqlite.RuntimeState{}, lastErr
 }
 
 func transitionBlocked(currentStatus, nextStatus string) bool {
