@@ -14,6 +14,7 @@ const (
 	StateSubmitted          LifecycleState = "submitted"
 	StateInternallyRecorded LifecycleState = "internally_recorded"
 	StateExternallyReadBack LifecycleState = "externally_read_back"
+	StateProofSatisfied     LifecycleState = "proof_satisfied"
 	StateCompleted          LifecycleState = "completed"
 	StateFailed             LifecycleState = "failed"
 	StateAbandoned          LifecycleState = "abandoned"

@@ -88,6 +88,48 @@ func TestLifecycleAllowsSubstituteProofCompletionWithEvidence(t *testing.T) {
 	}
 }
 
+func TestLifecycleAllowsSubstituteProofSequenceToComplete(t *testing.T) {
+	events := []actions.EvidenceSummary{
+		{Type: actions.EventSubmitted},
+	}
+
+	if err := actions.ValidateTransition(actions.TransitionInput{
+		CurrentState: actions.StateSubmitted,
+		EventType:    actions.EventSubstituteProof,
+	}); err != nil {
+		t.Fatalf("ValidateTransition(substitute proof) error = %v", err)
+	}
+	events = append(events, actions.EvidenceSummary{Type: actions.EventSubstituteProof})
+
+	if err := actions.ValidateCompletion(actions.CompletionInput{
+		ProofRequirement: actions.ProofSubstitute,
+		Events:           events,
+	}); err != nil {
+		t.Fatalf("ValidateCompletion(substitute proof) error = %v", err)
+	}
+
+	if err := actions.ValidateTransition(actions.TransitionInput{
+		CurrentState: actions.StateProofSatisfied,
+		EventType:    actions.EventCompleted,
+	}); err != nil {
+		t.Fatalf("ValidateTransition(completed) error = %v", err)
+	}
+}
+
+func TestLifecycleExternalReadbackStillRequiresReadbackEvidence(t *testing.T) {
+	events := []actions.EvidenceSummary{
+		{Type: actions.EventSubmitted},
+		{Type: actions.EventSubstituteProof},
+	}
+
+	if err := actions.ValidateCompletion(actions.CompletionInput{
+		ProofRequirement: actions.ProofExternalReadback,
+		Events:           events,
+	}); !errors.Is(err, actions.ErrExternalReadbackMissing) {
+		t.Fatalf("err = %v, want ErrExternalReadbackMissing", err)
+	}
+}
+
 func TestPreparedPayloadHashCanonicalizesJSONObjectOrder(t *testing.T) {
 	service := actions.Service{}
 	first, err := service.HashPreparedPayload(actions.PreparedPayload{

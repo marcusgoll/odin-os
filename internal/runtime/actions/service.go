@@ -155,11 +155,11 @@ func allowedCurrentStates(eventType EventType) ([]LifecycleState, bool) {
 	case EventSubstituteProof:
 		return []LifecycleState{StateSubmitted, StateInternallyRecorded}, true
 	case EventCompleted:
-		return []LifecycleState{StateInternallyRecorded, StateExternallyReadBack}, true
+		return []LifecycleState{StateInternallyRecorded, StateExternallyReadBack, StateProofSatisfied}, true
 	case EventFailed:
-		return []LifecycleState{"", StatePrepared, StatePreflighted, StateApproved, StateSubmitted, StateInternallyRecorded, StateExternallyReadBack}, true
+		return []LifecycleState{"", StatePrepared, StatePreflighted, StateApproved, StateSubmitted, StateInternallyRecorded, StateExternallyReadBack, StateProofSatisfied}, true
 	case EventAbandoned:
-		return []LifecycleState{"", StatePrepared, StatePreflighted, StateApproved, StateSubmitted, StateInternallyRecorded, StateExternallyReadBack}, true
+		return []LifecycleState{"", StatePrepared, StatePreflighted, StateApproved, StateSubmitted, StateInternallyRecorded, StateExternallyReadBack, StateProofSatisfied}, true
 	default:
 		return nil, false
 	}
