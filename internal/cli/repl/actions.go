@@ -83,12 +83,13 @@ func (shell *Shell) handleActionDetail(ctx context.Context, actionID int64, outp
 	}
 	if _, err := fmt.Fprintf(
 		output,
-		"payload_schema=%s version=%d submit_path=%s readback_path=%s proof_requirement=%s\n",
+		"payload_schema=%s version=%d submit_path=%s readback_path=%s proof_requirement=%s payload_json=%s\n",
 		payload.PayloadSchema,
 		payload.PayloadSchemaVersion,
 		payload.SubmitPath,
 		payload.ReadbackPath,
 		payload.ProofRequirement,
+		payload.PayloadJSON,
 	); err != nil {
 		return err
 	}

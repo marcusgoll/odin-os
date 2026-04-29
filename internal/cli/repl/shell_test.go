@@ -386,6 +386,7 @@ func TestShellActionsShowsActionDetail(t *testing.T) {
 		"submit_path=command:/tradeboard post",
 		"readback_path=huginn:flica-my-requests",
 		"proof_requirement=external_readback",
+		`payload_json={"pairing":"W7084C"}`,
 		"approval_id=" + strconv.FormatInt(approval.ID, 10),
 		"status=pending",
 	} {
