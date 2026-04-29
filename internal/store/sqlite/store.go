@@ -365,7 +365,7 @@ func (store *Store) RequestApproval(ctx context.Context, params RequestApprovalP
 		if err != nil {
 			return err
 		}
-		if err := validateActionApprovalBinding(ctx, tx, params.ActionID, params.PayloadHash); err != nil {
+		if err := validateActionApprovalBinding(ctx, tx, params.TaskID, params.RunID, params.ActionID, params.PayloadHash); err != nil {
 			return err
 		}
 
@@ -3215,7 +3215,7 @@ func appendEventTx(ctx context.Context, tx *sql.Tx, params eventInsert) error {
 	return err
 }
 
-func validateActionApprovalBinding(ctx context.Context, tx *sql.Tx, actionID *int64, payloadHash string) error {
+func validateActionApprovalBinding(ctx context.Context, tx *sql.Tx, taskID int64, runID *int64, actionID *int64, payloadHash string) error {
 	if actionID == nil {
 		if strings.TrimSpace(payloadHash) != "" {
 			return fmt.Errorf("%w: payload_hash requires action_id", ErrInvalidActionApprovalBinding)
@@ -3225,19 +3225,29 @@ func validateActionApprovalBinding(ctx context.Context, tx *sql.Tx, actionID *in
 	if strings.TrimSpace(payloadHash) == "" {
 		return fmt.Errorf("%w: action_id requires payload_hash", ErrInvalidActionApprovalBinding)
 	}
+	if runID == nil {
+		return fmt.Errorf("%w: action_id requires run_id", ErrInvalidActionApprovalBinding)
+	}
 
-	var exists int
+	var workflowRunID int64
+	var workflowTaskID int64
 	if err := tx.QueryRowContext(ctx, `
-		SELECT EXISTS(
-			SELECT 1
-			FROM action_payloads
-			WHERE action_id = ? AND payload_hash = ?
-		)
-	`, *actionID, payloadHash).Scan(&exists); err != nil {
+		SELECT a.workflow_run_id, r.task_id
+		FROM action_payloads ap
+		JOIN actions a ON a.id = ap.action_id
+		JOIN runs r ON r.id = a.workflow_run_id
+		WHERE ap.action_id = ? AND ap.payload_hash = ?
+	`, *actionID, payloadHash).Scan(&workflowRunID, &workflowTaskID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("%w: payload_hash does not belong to action_id", ErrInvalidActionApprovalBinding)
+		}
 		return err
 	}
-	if exists != 1 {
-		return fmt.Errorf("%w: payload_hash does not belong to action_id", ErrInvalidActionApprovalBinding)
+	if *runID != workflowRunID {
+		return fmt.Errorf("%w: run_id does not match action workflow_run_id", ErrInvalidActionApprovalBinding)
+	}
+	if taskID != workflowTaskID {
+		return fmt.Errorf("%w: task_id does not match action workflow run task_id", ErrInvalidActionApprovalBinding)
 	}
 	return nil
 }

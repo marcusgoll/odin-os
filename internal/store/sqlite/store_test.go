@@ -196,6 +196,78 @@ func TestStoreRejectsInvalidActionApprovalBinding(t *testing.T) {
 	}
 }
 
+func TestStoreRejectsActionApprovalBindingForMismatchedRun(t *testing.T) {
+	ctx := context.Background()
+	store := openMigratedTestStore(t, "mismatched-action-approval-run.db")
+	defer store.Close()
+	project, _, run := createProjectTaskRunFixture(t, ctx, store)
+	_, otherRun := createTaskRunForProject(t, ctx, store, project.ID, "other-run")
+
+	action, _, err := store.CreateActionWithPayload(ctx, CreateActionWithPayloadParams{
+		WorkflowKey:          "flica-tradeboard",
+		WorkflowRunID:        run.ID,
+		ActionType:           "tradeboard_action",
+		PayloadSchema:        "flica.tradeboard_action.v1",
+		PayloadSchemaVersion: 1,
+		PayloadHash:          "sha256:valid",
+		PayloadJSON:          `{"pairing":"W7084C"}`,
+		SubmitPath:           "command:/tradeboard post",
+		ReadbackPath:         "huginn:flica-my-requests",
+		ProofRequirement:     "external_readback",
+	})
+	if err != nil {
+		t.Fatalf("CreateActionWithPayload() error = %v", err)
+	}
+
+	otherRunID := otherRun.ID
+	if _, err := store.RequestApproval(ctx, RequestApprovalParams{
+		TaskID:      run.TaskID,
+		RunID:       &otherRunID,
+		ActionID:    &action.ID,
+		PayloadHash: "sha256:valid",
+		Status:      "pending",
+		RequestedBy: "system",
+	}); err == nil || !strings.Contains(err.Error(), "invalid action approval binding") {
+		t.Fatalf("RequestApproval() error = %v, want invalid action approval binding", err)
+	}
+}
+
+func TestStoreRejectsActionApprovalBindingForMismatchedTask(t *testing.T) {
+	ctx := context.Background()
+	store := openMigratedTestStore(t, "mismatched-action-approval-task.db")
+	defer store.Close()
+	project, _, run := createProjectTaskRunFixture(t, ctx, store)
+	otherTask, _ := createTaskRunForProject(t, ctx, store, project.ID, "other-task")
+
+	action, _, err := store.CreateActionWithPayload(ctx, CreateActionWithPayloadParams{
+		WorkflowKey:          "flica-tradeboard",
+		WorkflowRunID:        run.ID,
+		ActionType:           "tradeboard_action",
+		PayloadSchema:        "flica.tradeboard_action.v1",
+		PayloadSchemaVersion: 1,
+		PayloadHash:          "sha256:valid",
+		PayloadJSON:          `{"pairing":"W7084C"}`,
+		SubmitPath:           "command:/tradeboard post",
+		ReadbackPath:         "huginn:flica-my-requests",
+		ProofRequirement:     "external_readback",
+	})
+	if err != nil {
+		t.Fatalf("CreateActionWithPayload() error = %v", err)
+	}
+
+	runID := run.ID
+	if _, err := store.RequestApproval(ctx, RequestApprovalParams{
+		TaskID:      otherTask.ID,
+		RunID:       &runID,
+		ActionID:    &action.ID,
+		PayloadHash: "sha256:valid",
+		Status:      "pending",
+		RequestedBy: "system",
+	}); err == nil || !strings.Contains(err.Error(), "invalid action approval binding") {
+		t.Fatalf("RequestApproval() error = %v, want invalid action approval binding", err)
+	}
+}
+
 func openTestStore(t *testing.T) *Store {
 	t.Helper()
 	return openMigratedTestStore(t, "odin.db")
@@ -240,6 +312,34 @@ func createProjectTaskRunFixture(t *testing.T, ctx context.Context, store *Store
 	}
 
 	return project, task, run
+}
+
+func createTaskRunForProject(t *testing.T, ctx context.Context, store *Store, projectID int64, key string) (Task, Run) {
+	t.Helper()
+
+	task, err := store.CreateTask(ctx, CreateTaskParams{
+		ProjectID:   projectID,
+		Key:         key,
+		Title:       "Prepare action evidence",
+		Status:      "running",
+		Scope:       "odin-core",
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask(%s) error = %v", key, err)
+	}
+
+	run, err := store.StartRun(ctx, StartRunParams{
+		TaskID:   task.ID,
+		Executor: "codex",
+		Attempt:  1,
+		Status:   "running",
+	})
+	if err != nil {
+		t.Fatalf("StartRun(%s) error = %v", key, err)
+	}
+
+	return task, run
 }
 
 func TestStoreMigrateLifecycleAndReopen(t *testing.T) {
