@@ -398,6 +398,7 @@ type KnowledgeArtifact struct {
 	MimeType     string
 	ArtifactPath string
 	OriginalPath string
+	OCRRequired  bool
 	RecordedAt   time.Time
 }
 
@@ -408,6 +409,7 @@ type RecordKnowledgeArtifactParams struct {
 	MimeType     string
 	ArtifactPath string
 	OriginalPath string
+	OCRRequired  bool
 }
 
 type KnowledgeSource struct {

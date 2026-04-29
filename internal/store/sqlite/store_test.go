@@ -145,6 +145,67 @@ func TestResolveActionApprovalRejectsPayloadMismatch(t *testing.T) {
 	}
 }
 
+func TestResolveActionApprovalRecordsActionBindingEvent(t *testing.T) {
+	ctx := context.Background()
+	store := openMigratedTestStore(t, "resolved-action-approval-event.db")
+	defer store.Close()
+	_, _, run := createProjectTaskRunFixture(t, ctx, store)
+
+	action, payload, err := store.CreateActionWithPayload(ctx, CreateActionWithPayloadParams{
+		WorkflowKey:          "flica-tradeboard",
+		WorkflowRunID:        run.ID,
+		ActionType:           "tradeboard_action",
+		PayloadSchema:        "flica.tradeboard_action.v1",
+		PayloadSchemaVersion: 1,
+		PayloadHash:          "sha256:resolved",
+		PayloadJSON:          `{"pairing":"W7084C"}`,
+		SubmitPath:           "command:/tradeboard post",
+		ReadbackPath:         "huginn:flica-my-requests",
+		ProofRequirement:     "external_readback",
+	})
+	if err != nil {
+		t.Fatalf("CreateActionWithPayload() error = %v", err)
+	}
+
+	runID := run.ID
+	approval, err := store.RequestApproval(ctx, RequestApprovalParams{
+		TaskID:      run.TaskID,
+		RunID:       &runID,
+		ActionID:    &action.ID,
+		PayloadHash: payload.PayloadHash,
+		Status:      "pending",
+		RequestedBy: "system",
+	})
+	if err != nil {
+		t.Fatalf("RequestApproval() error = %v", err)
+	}
+
+	if _, err := store.ResolveApproval(ctx, ResolveApprovalParams{
+		ApprovalID: approval.ID,
+		Status:     "approved",
+		DecisionBy: "operator",
+		Reason:     "approved exact payload",
+	}); err != nil {
+		t.Fatalf("ResolveApproval() error = %v", err)
+	}
+
+	events, err := store.ListEvents(ctx, ListEventsParams{RunID: &runID})
+	if err != nil {
+		t.Fatalf("ListEvents() error = %v", err)
+	}
+	var got runtimeevents.ApprovalResolvedPayload
+	for _, event := range events {
+		if event.Type == runtimeevents.EventApprovalResolved {
+			if err := json.Unmarshal(event.Payload, &got); err != nil {
+				t.Fatalf("Unmarshal approval.resolved payload: %v", err)
+			}
+		}
+	}
+	if got.ActionID == nil || *got.ActionID != action.ID || got.PayloadHash != payload.PayloadHash {
+		t.Fatalf("approval.resolved payload = %+v, want action_id=%d payload_hash=%q", got, action.ID, payload.PayloadHash)
+	}
+}
+
 func TestStorePersistsActionPayloadAndEvidence(t *testing.T) {
 	ctx := context.Background()
 	store := openMigratedTestStore(t, "actions.db")
@@ -449,6 +510,7 @@ func TestStoreRejectsKnowledgeDomainPolicyViolations(t *testing.T) {
 		MimeType:     "text/plain",
 		ArtifactPath: "knowledge/artifacts/po/policy/source.txt",
 		OriginalPath: "/tmp/policy.txt",
+		OCRRequired:  true,
 	})
 	if err != nil {
 		t.Fatalf("RecordKnowledgeArtifact() error = %v", err)
@@ -493,7 +555,7 @@ func TestStoreRejectsKnowledgeDomainPolicyViolations(t *testing.T) {
 		ScopeKey:          "global",
 		Restricted:        true,
 		SourceKind:        "book",
-		SourceClass:       "ocr_required",
+		SourceClass:       "machine_readable_pdf",
 		Lifecycle:         "artifact_available",
 		ManifestPath:      "memory/knowledge/scanned-book.md",
 		CurrentArtifactID: &artifact.ID,
@@ -509,7 +571,7 @@ func TestStoreRejectsKnowledgeDomainPolicyViolations(t *testing.T) {
 		ScopeKey:          "global",
 		Restricted:        true,
 		SourceKind:        "book",
-		SourceClass:       "ocr_required",
+		SourceClass:       "machine_readable_pdf",
 		Lifecycle:         "ready",
 		ManifestPath:      "memory/knowledge/scanned-book.md",
 		CurrentArtifactID: &artifact.ID,

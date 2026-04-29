@@ -1525,9 +1525,10 @@ func (store *Store) RecordKnowledgeArtifact(ctx context.Context, params RecordKn
 				mime_type,
 				artifact_path,
 				original_path,
+				ocr_required,
 				recorded_at
 			)
-			VALUES (?, ?, ?, ?, ?, ?, ?)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 			ON CONFLICT(sha256) DO NOTHING
 		`,
 			params.SHA256,
@@ -1536,13 +1537,14 @@ func (store *Store) RecordKnowledgeArtifact(ctx context.Context, params RecordKn
 			params.MimeType,
 			params.ArtifactPath,
 			params.OriginalPath,
+			boolToInt(params.OCRRequired),
 			formatTime(now),
 		); err != nil {
 			return err
 		}
 
 		record, err := scanKnowledgeArtifact(tx.QueryRowContext(ctx, `
-			SELECT id, sha256, size_bytes, source_type, mime_type, artifact_path, original_path, recorded_at
+			SELECT id, sha256, size_bytes, source_type, mime_type, artifact_path, original_path, ocr_required, recorded_at
 			FROM knowledge_artifacts
 			WHERE sha256 = ?
 		`, params.SHA256))
@@ -1596,7 +1598,7 @@ func (store *Store) UpsertKnowledgeSource(ctx context.Context, params UpsertKnow
 	if err := validateKnowledgeSourceClass(params.SourceClass); err != nil {
 		return KnowledgeSource{}, err
 	}
-	if err := validateKnowledgeLifecycleForSourceClass(params.SourceClass, params.Lifecycle); err != nil {
+	if err := validateKnowledgeLifecycle(params.Lifecycle); err != nil {
 		return KnowledgeSource{}, err
 	}
 
@@ -1616,6 +1618,9 @@ func (store *Store) UpsertKnowledgeSource(ctx context.Context, params UpsertKnow
 			}
 			if currentExtractionID == nil {
 				currentExtractionID = existing.CurrentExtractionID
+			}
+			if err := store.validateKnowledgeArtifactLifecycleTx(ctx, tx, currentArtifactID, params.Lifecycle); err != nil {
+				return err
 			}
 			if _, err := tx.ExecContext(ctx, `
 				UPDATE knowledge_sources
@@ -1648,6 +1653,9 @@ func (store *Store) UpsertKnowledgeSource(ctx context.Context, params UpsertKnow
 				return err
 			}
 		} else {
+			if err := store.validateKnowledgeArtifactLifecycleTx(ctx, tx, currentArtifactID, params.Lifecycle); err != nil {
+				return err
+			}
 			if _, err := tx.ExecContext(ctx, `
 				INSERT INTO knowledge_sources (
 					key,
@@ -1820,7 +1828,10 @@ func (store *Store) RecordKnowledgeExtraction(ctx context.Context, params Record
 		if err != nil {
 			return err
 		}
-		if err := validateKnowledgeLifecycleForSourceClass(source.SourceClass, lifecycle); err != nil {
+		if err := validateKnowledgeLifecycle(lifecycle); err != nil {
+			return err
+		}
+		if err := store.validateKnowledgeArtifactLifecycleTx(ctx, tx, &params.ArtifactID, lifecycle); err != nil {
 			return err
 		}
 
@@ -2010,6 +2021,7 @@ func (store *Store) SearchKnowledgeChunks(ctx context.Context, params SearchKnow
 			kc.extraction_id,
 			ke.artifact_id,
 			ka.sha256,
+			ka.ocr_required,
 			ke.extractor_name,
 			ke.extractor_version,
 			ke.extracted_text_hash,
@@ -2043,6 +2055,7 @@ func (store *Store) SearchKnowledgeChunks(ctx context.Context, params SearchKnow
 		var pageNumber sql.NullInt64
 		var extractionFinishedAt sql.NullString
 		var restricted int
+		var ocrRequired int
 		if err := rows.Scan(
 			&result.SourceID,
 			&result.SourceKey,
@@ -2052,6 +2065,7 @@ func (store *Store) SearchKnowledgeChunks(ctx context.Context, params SearchKnow
 			&result.ExtractionID,
 			&result.ArtifactID,
 			&result.ArtifactSHA256,
+			&ocrRequired,
 			&result.ExtractorName,
 			&result.ExtractorVersion,
 			&result.ExtractedTextHash,
@@ -2243,26 +2257,20 @@ func validateKnowledgeManifestPath(manifestPath string) error {
 
 func validateKnowledgeSourceClass(sourceClass string) error {
 	switch sourceClass {
-	case "markdown", "text", "machine_readable_pdf", "ocr_required":
+	case "markdown", "text", "machine_readable_pdf":
 		return nil
 	default:
 		return fmt.Errorf("knowledge source class %q is not supported", sourceClass)
 	}
 }
 
-func validateKnowledgeLifecycleForSourceClass(sourceClass string, lifecycle string) error {
+func validateKnowledgeLifecycle(lifecycle string) error {
 	switch lifecycle {
 	case "declared", "artifact_available", "extracted", "indexed", "ready", "stale", "failed":
+		return nil
 	default:
 		return fmt.Errorf("knowledge source lifecycle %q is not supported", lifecycle)
 	}
-	if sourceClass == "ocr_required" {
-		switch lifecycle {
-		case "extracted", "indexed", "ready":
-			return fmt.Errorf("ocr-required knowledge source cannot enter lifecycle %q", lifecycle)
-		}
-	}
-	return nil
 }
 
 func validateRestrictedKnowledgeUseType(useType string) error {
@@ -2272,6 +2280,30 @@ func validateRestrictedKnowledgeUseType(useType string) error {
 	default:
 		return fmt.Errorf("restricted knowledge use type %q is not supported", useType)
 	}
+}
+
+func (store *Store) validateKnowledgeArtifactLifecycleTx(ctx context.Context, tx *sql.Tx, artifactID *int64, lifecycle string) error {
+	if artifactID == nil {
+		return nil
+	}
+	switch lifecycle {
+	case "extracted", "indexed", "ready":
+	default:
+		return nil
+	}
+
+	var ocrRequired int
+	if err := tx.QueryRowContext(ctx, `
+		SELECT ocr_required
+		FROM knowledge_artifacts
+		WHERE id = ?
+	`, *artifactID).Scan(&ocrRequired); err != nil {
+		return err
+	}
+	if ocrRequired != 0 {
+		return fmt.Errorf("ocr-required knowledge artifact cannot enter lifecycle %q", lifecycle)
+	}
+	return nil
 }
 
 func (store *Store) indexKnowledgeChunkTx(ctx context.Context, tx *sql.Tx, params IndexKnowledgeChunkParams) error {
@@ -4636,6 +4668,7 @@ func scanMemorySummary(row interface{ Scan(...any) error }) (MemorySummary, erro
 
 func scanKnowledgeArtifact(row interface{ Scan(...any) error }) (KnowledgeArtifact, error) {
 	var artifact KnowledgeArtifact
+	var ocrRequired int
 	var recordedAt string
 	if err := row.Scan(
 		&artifact.ID,
@@ -4645,6 +4678,7 @@ func scanKnowledgeArtifact(row interface{ Scan(...any) error }) (KnowledgeArtifa
 		&artifact.MimeType,
 		&artifact.ArtifactPath,
 		&artifact.OriginalPath,
+		&ocrRequired,
 		&recordedAt,
 	); err != nil {
 		return KnowledgeArtifact{}, err
@@ -4655,6 +4689,7 @@ func scanKnowledgeArtifact(row interface{ Scan(...any) error }) (KnowledgeArtifa
 	if err != nil {
 		return KnowledgeArtifact{}, err
 	}
+	artifact.OCRRequired = ocrRequired != 0
 	return artifact, nil
 }
 

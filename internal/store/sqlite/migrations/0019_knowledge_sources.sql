@@ -6,6 +6,7 @@ CREATE TABLE IF NOT EXISTS knowledge_artifacts (
   mime_type TEXT NOT NULL,
   artifact_path TEXT NOT NULL,
   original_path TEXT NOT NULL,
+  ocr_required INTEGER NOT NULL DEFAULT 0 CHECK (ocr_required IN (0, 1)),
   recorded_at TEXT NOT NULL
 );
 
@@ -17,14 +18,14 @@ CREATE TABLE IF NOT EXISTS knowledge_sources (
   scope_key TEXT NOT NULL,
   restricted INTEGER NOT NULL CHECK (restricted IN (0, 1)),
   source_kind TEXT NOT NULL,
-  source_class TEXT NOT NULL CHECK (source_class IN ('markdown', 'text', 'machine_readable_pdf', 'ocr_required')),
+  source_class TEXT NOT NULL CHECK (source_class IN ('markdown', 'text', 'machine_readable_pdf')),
   lifecycle TEXT NOT NULL CHECK (lifecycle IN ('declared', 'artifact_available', 'extracted', 'indexed', 'ready', 'stale', 'failed')),
   manifest_path TEXT NOT NULL UNIQUE CHECK (manifest_path GLOB 'memory/knowledge/*.md'),
   current_artifact_id INTEGER REFERENCES knowledge_artifacts(id) ON DELETE SET NULL,
   current_extraction_id INTEGER REFERENCES knowledge_extractions(id) ON DELETE SET NULL,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
-  CHECK (NOT (source_class = 'ocr_required' AND lifecycle IN ('extracted', 'indexed', 'ready')))
+  CHECK (source_class IN ('markdown', 'text', 'machine_readable_pdf'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_knowledge_sources_scope ON knowledge_sources(scope, scope_key, key);
@@ -72,9 +73,11 @@ CREATE VIRTUAL TABLE IF NOT EXISTS knowledge_fts USING fts5(
   tokenize='unicode61'
 );
 
+-- Derived from Knowledge Source Manifest metadata; not an authoritative registry.
 CREATE TABLE IF NOT EXISTS knowledge_related_sources (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   source_id INTEGER NOT NULL REFERENCES knowledge_sources(id) ON DELETE CASCADE,
+  declared_by_manifest_path TEXT NOT NULL CHECK (declared_by_manifest_path GLOB 'memory/knowledge/*.md'),
   related_source_key TEXT NOT NULL,
   relationship TEXT NOT NULL,
   created_at TEXT NOT NULL,
