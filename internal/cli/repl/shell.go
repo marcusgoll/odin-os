@@ -476,7 +476,11 @@ func (shell *Shell) handleApprovals(ctx context.Context, output io.Writer) error
 		return err
 	}
 	for _, approval := range approvals {
-		if _, err := fmt.Fprintf(output, "%s %s\n", approval.TaskKey, approval.Status); err != nil {
+		line := fmt.Sprintf("%s %s", approval.TaskKey, approval.Status)
+		if approval.ActionID != nil {
+			line = fmt.Sprintf("%s action_id=%d payload_hash=%s", line, *approval.ActionID, approval.PayloadHash)
+		}
+		if _, err := fmt.Fprintln(output, line); err != nil {
 			return err
 		}
 	}
@@ -601,7 +605,7 @@ func (shell *Shell) scopeLabel() string {
 
 func (shell *Shell) pendingApprovals(ctx context.Context) ([]pendingApproval, error) {
 	rows, err := shell.env.Store.DB().QueryContext(ctx, `
-		SELECT t.key, a.status, t.scope, p.key
+		SELECT t.key, a.status, a.action_id, a.payload_hash, t.scope, p.key
 		FROM approvals a
 		JOIN tasks t ON t.id = a.task_id
 		JOIN projects p ON p.id = t.project_id
@@ -618,8 +622,15 @@ func (shell *Shell) pendingApprovals(ctx context.Context) ([]pendingApproval, er
 		var approval pendingApproval
 		var projectKey string
 		var taskScope string
-		if err := rows.Scan(&approval.TaskKey, &approval.Status, &taskScope, &projectKey); err != nil {
+		var actionID sql.NullInt64
+		var payloadHash sql.NullString
+		if err := rows.Scan(&approval.TaskKey, &approval.Status, &actionID, &payloadHash, &taskScope, &projectKey); err != nil {
 			return nil, err
+		}
+		if actionID.Valid {
+			id := actionID.Int64
+			approval.ActionID = &id
+			approval.PayloadHash = payloadHash.String
 		}
 		if matchesTaskProjectionScope(projectKey, taskScope, shell.state.Scope) {
 			approvals = append(approvals, approval)
@@ -630,8 +641,10 @@ func (shell *Shell) pendingApprovals(ctx context.Context) ([]pendingApproval, er
 }
 
 type pendingApproval struct {
-	TaskKey string
-	Status  string
+	TaskKey     string
+	Status      string
+	ActionID    *int64
+	PayloadHash string
 }
 
 func matchesTaskProjectionScope(projectKey, taskScope string, resolved scope.Resolution) bool {

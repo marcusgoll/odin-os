@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"path/filepath"
 	"strings"
@@ -10,6 +11,139 @@ import (
 	runtimeevents "odin-os/internal/runtime/events"
 	"odin-os/internal/runtime/projections"
 )
+
+func TestRequestApprovalCanBindActionPayload(t *testing.T) {
+	ctx := context.Background()
+	store := openMigratedTestStore(t, "action-bound-approval.db")
+	defer store.Close()
+	_, _, run := createProjectTaskRunFixture(t, ctx, store)
+
+	action, payload, err := store.CreateActionWithPayload(ctx, CreateActionWithPayloadParams{
+		WorkflowKey:          "flica-tradeboard",
+		WorkflowRunID:        run.ID,
+		ActionType:           "tradeboard_action",
+		PayloadSchema:        "flica.tradeboard_action.v1",
+		PayloadSchemaVersion: 1,
+		PayloadHash:          "sha256:approved",
+		PayloadJSON:          `{"pairing":"W7084C"}`,
+		SubmitPath:           "command:/tradeboard post",
+		ReadbackPath:         "huginn:flica-my-requests",
+		ProofRequirement:     "external_readback",
+	})
+	if err != nil {
+		t.Fatalf("CreateActionWithPayload() error = %v", err)
+	}
+
+	runID := run.ID
+	approval, err := store.RequestApproval(ctx, RequestApprovalParams{
+		TaskID:      run.TaskID,
+		RunID:       &runID,
+		ActionID:    &action.ID,
+		PayloadHash: payload.PayloadHash,
+		Status:      "pending",
+		RequestedBy: "system",
+	})
+	if err != nil {
+		t.Fatalf("RequestApproval() error = %v", err)
+	}
+	if approval.ActionID == nil || *approval.ActionID != action.ID || approval.PayloadHash != payload.PayloadHash {
+		t.Fatalf("approval = %+v, want action payload binding", approval)
+	}
+
+	events, err := store.ListEvents(ctx, ListEventsParams{RunID: &runID})
+	if err != nil {
+		t.Fatalf("ListEvents() error = %v", err)
+	}
+	var got runtimeevents.ApprovalRequestedPayload
+	for _, event := range events {
+		if event.Type == runtimeevents.EventApprovalRequested {
+			if err := json.Unmarshal(event.Payload, &got); err != nil {
+				t.Fatalf("Unmarshal approval.requested payload: %v", err)
+			}
+		}
+	}
+	if got.ActionID == nil || *got.ActionID != action.ID || got.PayloadHash != payload.PayloadHash {
+		t.Fatalf("approval.requested payload = %+v, want action_id=%d payload_hash=%q", got, action.ID, payload.PayloadHash)
+	}
+}
+
+func TestResolveActionApprovalRejectsPayloadMismatch(t *testing.T) {
+	ctx := context.Background()
+	store := openMigratedTestStore(t, "stale-action-approval.db")
+	defer store.Close()
+	_, _, run := createProjectTaskRunFixture(t, ctx, store)
+
+	action, payload, err := store.CreateActionWithPayload(ctx, CreateActionWithPayloadParams{
+		WorkflowKey:          "flica-tradeboard",
+		WorkflowRunID:        run.ID,
+		ActionType:           "tradeboard_action",
+		PayloadSchema:        "flica.tradeboard_action.v1",
+		PayloadSchemaVersion: 1,
+		PayloadHash:          "sha256:old",
+		PayloadJSON:          `{"pairing":"W7084C"}`,
+		SubmitPath:           "command:/tradeboard post",
+		ReadbackPath:         "huginn:flica-my-requests",
+		ProofRequirement:     "external_readback",
+	})
+	if err != nil {
+		t.Fatalf("CreateActionWithPayload() error = %v", err)
+	}
+
+	runID := run.ID
+	approval, err := store.RequestApproval(ctx, RequestApprovalParams{
+		TaskID:      run.TaskID,
+		RunID:       &runID,
+		ActionID:    &action.ID,
+		PayloadHash: payload.PayloadHash,
+		Status:      "pending",
+		RequestedBy: "system",
+	})
+	if err != nil {
+		t.Fatalf("RequestApproval() error = %v", err)
+	}
+
+	if _, err := store.DB().ExecContext(ctx, `
+		INSERT INTO action_payloads (
+			action_id,
+			payload_schema,
+			payload_schema_version,
+			payload_hash,
+			payload_json,
+			submit_path,
+			readback_path,
+			proof_requirement,
+			created_at
+		)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+	`, action.ID, "flica.tradeboard_action.v1", 1, "sha256:new", `{"pairing":"W9999"}`, "command:/tradeboard post", "huginn:flica-my-requests", "external_readback"); err != nil {
+		t.Fatalf("insert replacement payload: %v", err)
+	}
+	if _, err := store.DB().ExecContext(ctx, `
+		UPDATE actions
+		SET current_payload_hash = ?, updated_at = datetime('now')
+		WHERE id = ?
+	`, "sha256:new", action.ID); err != nil {
+		t.Fatalf("update current payload hash: %v", err)
+	}
+
+	_, err = store.ResolveApproval(ctx, ResolveApprovalParams{
+		ApprovalID: approval.ID,
+		Status:     "approved",
+		DecisionBy: "operator",
+		Reason:     "approve stale payload",
+	})
+	if err == nil || !errors.Is(err, ErrApprovalPayloadMismatch) || !strings.Contains(err.Error(), "approval_payload_mismatch") {
+		t.Fatalf("ResolveApproval() error = %v, want approval_payload_mismatch", err)
+	}
+
+	gotApproval, err := store.GetApproval(ctx, approval.ID)
+	if err != nil {
+		t.Fatalf("GetApproval() error = %v", err)
+	}
+	if gotApproval.Status != "pending" {
+		t.Fatalf("approval status = %q, want pending after mismatch", gotApproval.Status)
+	}
+}
 
 func TestStorePersistsActionPayloadAndEvidence(t *testing.T) {
 	ctx := context.Background()

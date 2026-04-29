@@ -17,6 +17,7 @@ import (
 var ErrWorktreeLeaseConflict = errors.New("worktree lease conflict")
 var ErrInvalidActionApprovalBinding = errors.New("invalid action approval binding")
 var ErrInvalidActionEvidenceLink = errors.New("invalid action evidence link")
+var ErrApprovalPayloadMismatch = errors.New("approval_payload_mismatch")
 
 type Store struct {
 	db        *sql.DB
@@ -412,6 +413,8 @@ func (store *Store) RequestApproval(ctx context.Context, params RequestApprovalP
 			Payload: runtimeevents.ApprovalRequestedPayload{
 				TaskID:      task.ID,
 				RunID:       params.RunID,
+				ActionID:    approval.ActionID,
+				PayloadHash: approval.PayloadHash,
 				Status:      approval.Status,
 				RequestedBy: params.RequestedBy,
 			},
@@ -429,6 +432,9 @@ func (store *Store) ResolveApproval(ctx context.Context, params ResolveApprovalP
 	err := store.withTx(ctx, func(tx *sql.Tx) error {
 		current, task, err := store.getApprovalWithTaskTx(ctx, tx, params.ApprovalID)
 		if err != nil {
+			return err
+		}
+		if err := validateApprovalPayloadCurrent(ctx, tx, current); err != nil {
 			return err
 		}
 
@@ -462,9 +468,11 @@ func (store *Store) ResolveApproval(ctx context.Context, params ResolveApprovalP
 			TaskID:     &task.ID,
 			RunID:      approval.RunID,
 			Payload: runtimeevents.ApprovalResolvedPayload{
-				Status:     approval.Status,
-				DecisionBy: approval.DecisionBy,
-				Reason:     approval.Reason,
+				Status:      approval.Status,
+				DecisionBy:  approval.DecisionBy,
+				Reason:      approval.Reason,
+				ActionID:    approval.ActionID,
+				PayloadHash: approval.PayloadHash,
 			},
 			OccurredAt: now,
 		})
@@ -4038,6 +4046,25 @@ func validateActionApprovalBinding(ctx context.Context, tx *sql.Tx, taskID int64
 	}
 	if taskID != workflowTaskID {
 		return fmt.Errorf("%w: task_id does not match action workflow run task_id", ErrInvalidActionApprovalBinding)
+	}
+	return nil
+}
+
+func validateApprovalPayloadCurrent(ctx context.Context, tx *sql.Tx, approval Approval) error {
+	if approval.ActionID == nil {
+		return nil
+	}
+
+	var currentPayloadHash string
+	if err := tx.QueryRowContext(ctx, `
+		SELECT current_payload_hash
+		FROM actions
+		WHERE id = ?
+	`, *approval.ActionID).Scan(&currentPayloadHash); err != nil {
+		return err
+	}
+	if approval.PayloadHash != currentPayloadHash {
+		return fmt.Errorf("%w: action_id=%d approval_payload_hash=%s current_payload_hash=%s", ErrApprovalPayloadMismatch, *approval.ActionID, approval.PayloadHash, currentPayloadHash)
 	}
 	return nil
 }

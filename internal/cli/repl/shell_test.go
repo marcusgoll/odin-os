@@ -237,6 +237,85 @@ func TestShellHelpIncludesTransitionCommands(t *testing.T) {
 	}
 }
 
+func TestShellApprovalsShowsActionBinding(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	env := newTestEnvironment(t)
+	project, err := env.Store.CreateProject(ctx, sqlite.CreateProjectParams{
+		Key:           "action-approvals",
+		Name:          "Action Approvals",
+		Scope:         "project",
+		GitRoot:       "/home/orchestrator/odin-os",
+		DefaultBranch: "main",
+		GitHubRepo:    "example/action-approvals",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+	task, err := env.Store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "approve-flica-action",
+		Title:       "Approve FLICA action",
+		Status:      "running",
+		Scope:       "project",
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+	run, err := env.Store.StartRun(ctx, sqlite.StartRunParams{
+		TaskID:   task.ID,
+		Executor: "codex",
+		Attempt:  1,
+		Status:   "running",
+	})
+	if err != nil {
+		t.Fatalf("StartRun() error = %v", err)
+	}
+	action, payload, err := env.Store.CreateActionWithPayload(ctx, sqlite.CreateActionWithPayloadParams{
+		WorkflowKey:          "flica-tradeboard",
+		WorkflowRunID:        run.ID,
+		ActionType:           "tradeboard_action",
+		PayloadSchema:        "flica.tradeboard_action.v1",
+		PayloadSchemaVersion: 1,
+		PayloadHash:          "sha256:pending",
+		PayloadJSON:          `{"pairing":"W7084C"}`,
+		SubmitPath:           "command:/tradeboard post",
+		ReadbackPath:         "huginn:flica-my-requests",
+		ProofRequirement:     "external_readback",
+	})
+	if err != nil {
+		t.Fatalf("CreateActionWithPayload() error = %v", err)
+	}
+	if _, err := env.Store.RequestApproval(ctx, sqlite.RequestApprovalParams{
+		TaskID:      task.ID,
+		RunID:       &run.ID,
+		ActionID:    &action.ID,
+		PayloadHash: payload.PayloadHash,
+		Status:      "pending",
+		RequestedBy: "system",
+	}); err != nil {
+		t.Fatalf("RequestApproval() error = %v", err)
+	}
+
+	shell, err := New(env)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	var output bytes.Buffer
+	if err := shell.HandleLine(ctx, "/approvals", &output); err != nil {
+		t.Fatalf("HandleLine(/approvals) error = %v", err)
+	}
+
+	for _, want := range []string{"approve-flica-action pending", "action_id=", "payload_hash=sha256:pending"} {
+		if !strings.Contains(output.String(), want) {
+			t.Fatalf("approvals output = %q, want %q", output.String(), want)
+		}
+	}
+}
 func TestShellTransitionStatusShowsDefaultInventoryAuthority(t *testing.T) {
 	t.Parallel()
 

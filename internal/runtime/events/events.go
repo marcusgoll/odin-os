@@ -115,14 +115,18 @@ type RunFinishedPayload struct {
 type ApprovalRequestedPayload struct {
 	TaskID      int64  `json:"task_id"`
 	RunID       *int64 `json:"run_id,omitempty"`
+	ActionID    *int64 `json:"action_id,omitempty"`
+	PayloadHash string `json:"payload_hash,omitempty"`
 	Status      string `json:"status"`
 	RequestedBy string `json:"requested_by"`
 }
 
 type ApprovalResolvedPayload struct {
-	Status     string `json:"status"`
-	DecisionBy string `json:"decision_by"`
-	Reason     string `json:"reason"`
+	Status      string `json:"status"`
+	DecisionBy  string `json:"decision_by"`
+	Reason      string `json:"reason"`
+	ActionID    *int64 `json:"action_id,omitempty"`
+	PayloadHash string `json:"payload_hash,omitempty"`
 }
 
 type IncidentOpenedPayload struct {
