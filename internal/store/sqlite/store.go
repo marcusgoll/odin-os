@@ -3274,6 +3274,9 @@ func validateActionEvidenceLinks(ctx context.Context, tx *sql.Tx, params AppendA
 	}
 
 	payloadHash := strings.TrimSpace(params.PayloadHash)
+	if params.PayloadHash != payloadHash {
+		return fmt.Errorf("%w: payload_hash must not include surrounding whitespace", ErrInvalidActionEvidenceLink)
+	}
 	if payloadHash != "" {
 		var exists int
 		if err := tx.QueryRowContext(ctx, `
