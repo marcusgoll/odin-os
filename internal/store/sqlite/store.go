@@ -2408,6 +2408,10 @@ func validateKnowledgeCurrentExtractionRequired(lifecycle string, extractionID *
 		if extractionID == nil {
 			return fmt.Errorf("knowledge source lifecycle %q requires current extraction", lifecycle)
 		}
+	case "declared", "artifact_available":
+		if extractionID != nil {
+			return fmt.Errorf("knowledge source lifecycle %q cannot retain current extraction", lifecycle)
+		}
 	}
 	return nil
 }
@@ -2440,9 +2444,13 @@ func (store *Store) validateKnowledgeCurrentExtractionTx(ctx context.Context, tx
 		return fmt.Errorf("knowledge source current extraction %d artifact %d does not match current artifact %d", *extractionID, extractionArtifactID, *artifactID)
 	}
 	switch lifecycle {
-	case "extracted", "indexed", "ready":
+	case "extracted", "indexed", "ready", "stale":
 		if status != "succeeded" {
 			return fmt.Errorf("knowledge source lifecycle %q requires succeeded current extraction", lifecycle)
+		}
+	case "failed":
+		if status != "failed" {
+			return fmt.Errorf("knowledge source lifecycle %q requires failed current extraction", lifecycle)
 		}
 	}
 	return nil

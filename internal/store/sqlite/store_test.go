@@ -1005,6 +1005,38 @@ func TestStoreRejectsInvalidKnowledgeCurrentExtractionLineage(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "requires succeeded current extraction") {
 		t.Fatalf("UpsertKnowledgeSource(failed extraction) error = %v, want succeeded extraction failure", err)
 	}
+
+	_, err = store.UpsertKnowledgeSource(ctx, UpsertKnowledgeSourceParams{
+		Key:          "lineage-a",
+		Title:        "Lineage A",
+		Scope:        "global",
+		ScopeKey:     "global",
+		Restricted:   true,
+		SourceKind:   "manual",
+		SourceClass:  "text",
+		Lifecycle:    "artifact_available",
+		ManifestPath: "memory/knowledge/lineage-a.md",
+	})
+	if err == nil || !strings.Contains(err.Error(), "cannot retain current extraction") {
+		t.Fatalf("UpsertKnowledgeSource(retain extraction while artifact_available) error = %v, want retained extraction failure", err)
+	}
+
+	_, err = store.UpsertKnowledgeSource(ctx, UpsertKnowledgeSourceParams{
+		Key:                 "lineage-a",
+		Title:               "Lineage A",
+		Scope:               "global",
+		ScopeKey:            "global",
+		Restricted:          true,
+		SourceKind:          "manual",
+		SourceClass:         "text",
+		Lifecycle:           "failed",
+		ManifestPath:        "memory/knowledge/lineage-a.md",
+		CurrentArtifactID:   &artifactA.ID,
+		CurrentExtractionID: &extractionA.ID,
+	})
+	if err == nil || !strings.Contains(err.Error(), "requires failed current extraction") {
+		t.Fatalf("UpsertKnowledgeSource(retain succeeded extraction while failed) error = %v, want failed extraction failure", err)
+	}
 }
 
 func TestStoreSearchOnlyReturnsCurrentKnowledgeExtractionChunks(t *testing.T) {
