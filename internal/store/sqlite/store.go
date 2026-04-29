@@ -1652,6 +1652,11 @@ func (store *Store) UpsertKnowledgeSource(ctx context.Context, params UpsertKnow
 			); err != nil {
 				return err
 			}
+			if existing.Title != params.Title {
+				if err := store.reindexKnowledgeSourceChunksTx(ctx, tx, existing.ID); err != nil {
+					return err
+				}
+			}
 		} else {
 			if err := store.validateKnowledgeArtifactLifecycleTx(ctx, tx, currentArtifactID, params.Lifecycle); err != nil {
 				return err
@@ -1821,6 +1826,9 @@ func (store *Store) RecordKnowledgeExtraction(ctx context.Context, params Record
 	if lifecycle == "" {
 		lifecycle = lifecycleForKnowledgeExtractionStatus(params.Status)
 	}
+	if err := validateKnowledgeExtractionStatusLifecycle(params.Status, lifecycle); err != nil {
+		return KnowledgeExtraction{}, err
+	}
 
 	var extraction KnowledgeExtraction
 	err := store.withTx(ctx, func(tx *sql.Tx) error {
@@ -1884,13 +1892,14 @@ func (store *Store) RecordKnowledgeExtraction(ctx context.Context, params Record
 
 		if _, err := tx.ExecContext(ctx, `
 			UPDATE knowledge_sources
-			SET current_extraction_id = ?, lifecycle = ?, updated_at = ?
+			SET current_artifact_id = ?, current_extraction_id = ?, lifecycle = ?, updated_at = ?
 			WHERE id = ?
-		`, extraction.ID, lifecycle, formatTime(now), params.SourceID); err != nil {
+		`, params.ArtifactID, extraction.ID, lifecycle, formatTime(now), params.SourceID); err != nil {
 			return err
 		}
 
 		updatedSource := source
+		updatedSource.CurrentArtifactID = &params.ArtifactID
 		updatedSource.CurrentExtractionID = &extraction.ID
 		updatedSource.Lifecycle = lifecycle
 		updatedSource.UpdatedAt = now
@@ -2273,6 +2282,28 @@ func validateKnowledgeLifecycle(lifecycle string) error {
 	}
 }
 
+func validateKnowledgeExtractionStatusLifecycle(status string, lifecycle string) error {
+	switch status {
+	case "pending", "running":
+		if lifecycle != "artifact_available" {
+			return fmt.Errorf("knowledge extraction status %q requires lifecycle %q", status, "artifact_available")
+		}
+	case "succeeded":
+		switch lifecycle {
+		case "extracted", "indexed", "ready":
+		default:
+			return fmt.Errorf("knowledge extraction status %q cannot enter lifecycle %q", status, lifecycle)
+		}
+	case "failed":
+		if lifecycle != "failed" {
+			return fmt.Errorf("knowledge extraction status %q requires lifecycle %q", status, "failed")
+		}
+	default:
+		return fmt.Errorf("knowledge extraction status %q is not supported", status)
+	}
+	return nil
+}
+
 func validateRestrictedKnowledgeUseType(useType string) error {
 	switch useType {
 	case "bulk_export", "broad_extraction", "sharing", "executor_context_injection":
@@ -2280,6 +2311,37 @@ func validateRestrictedKnowledgeUseType(useType string) error {
 	default:
 		return fmt.Errorf("restricted knowledge use type %q is not supported", useType)
 	}
+}
+
+func (store *Store) reindexKnowledgeSourceChunksTx(ctx context.Context, tx *sql.Tx, sourceID int64) error {
+	rows, err := tx.QueryContext(ctx, `
+		SELECT id
+		FROM knowledge_chunks
+		WHERE source_id = ?
+	`, sourceID)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	var chunkIDs []int64
+	for rows.Next() {
+		var chunkID int64
+		if err := rows.Scan(&chunkID); err != nil {
+			return err
+		}
+		chunkIDs = append(chunkIDs, chunkID)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	for _, chunkID := range chunkIDs {
+		if err := store.indexKnowledgeChunkTx(ctx, tx, IndexKnowledgeChunkParams{ChunkID: chunkID}); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (store *Store) validateKnowledgeArtifactLifecycleTx(ctx context.Context, tx *sql.Tx, artifactID *int64, lifecycle string) error {

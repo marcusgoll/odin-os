@@ -37,7 +37,7 @@ CREATE TABLE IF NOT EXISTS knowledge_extractions (
   artifact_id INTEGER NOT NULL REFERENCES knowledge_artifacts(id) ON DELETE CASCADE,
   extractor_name TEXT NOT NULL,
   extractor_version TEXT NOT NULL,
-  status TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('pending', 'running', 'succeeded', 'failed')),
   failure_code TEXT NOT NULL DEFAULT '',
   failure_summary TEXT NOT NULL DEFAULT '',
   extracted_text_hash TEXT NOT NULL DEFAULT '',

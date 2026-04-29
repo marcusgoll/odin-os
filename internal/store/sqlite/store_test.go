@@ -498,6 +498,174 @@ func TestStorePersistsKnowledgeSourceArtifactExtractionAndChunks(t *testing.T) {
 	}
 }
 
+func TestStoreKnowledgeExtractionPromotesArtifactAndLifecycleEventProvenance(t *testing.T) {
+	ctx := context.Background()
+	store := openMigratedTestStore(t, "knowledge-extraction-artifact-promotion.db")
+	defer store.Close()
+
+	firstArtifact, err := store.RecordKnowledgeArtifact(ctx, RecordKnowledgeArtifactParams{
+		SHA256:       "sha256:first",
+		SizeBytes:    42,
+		SourceType:   "text",
+		MimeType:     "text/plain",
+		ArtifactPath: "knowledge/artifacts/fi/first/source.txt",
+		OriginalPath: "/tmp/first-source.txt",
+	})
+	if err != nil {
+		t.Fatalf("RecordKnowledgeArtifact(first) error = %v", err)
+	}
+	secondArtifact, err := store.RecordKnowledgeArtifact(ctx, RecordKnowledgeArtifactParams{
+		SHA256:       "sha256:second",
+		SizeBytes:    84,
+		SourceType:   "text",
+		MimeType:     "text/plain",
+		ArtifactPath: "knowledge/artifacts/se/second/source.txt",
+		OriginalPath: "/tmp/second-source.txt",
+	})
+	if err != nil {
+		t.Fatalf("RecordKnowledgeArtifact(second) error = %v", err)
+	}
+
+	source, err := store.UpsertKnowledgeSource(ctx, UpsertKnowledgeSourceParams{
+		Key:               "artifact-refresh",
+		Title:             "Artifact Refresh",
+		Scope:             "global",
+		ScopeKey:          "global",
+		Restricted:        true,
+		SourceKind:        "manual",
+		SourceClass:       "text",
+		Lifecycle:         "artifact_available",
+		ManifestPath:      "memory/knowledge/artifact-refresh.md",
+		CurrentArtifactID: &firstArtifact.ID,
+	})
+	if err != nil {
+		t.Fatalf("UpsertKnowledgeSource() error = %v", err)
+	}
+
+	extraction, err := store.RecordKnowledgeExtraction(ctx, RecordKnowledgeExtractionParams{
+		SourceID:          source.ID,
+		ArtifactID:        secondArtifact.ID,
+		ExtractorName:     "plain_text",
+		ExtractorVersion:  "v1",
+		Status:            "succeeded",
+		Lifecycle:         "ready",
+		ExtractedTextHash: "sha256:refreshed",
+	})
+	if err != nil {
+		t.Fatalf("RecordKnowledgeExtraction() error = %v", err)
+	}
+
+	reloadedSource, err := store.GetKnowledgeSourceByKey(ctx, "artifact-refresh")
+	if err != nil {
+		t.Fatalf("GetKnowledgeSourceByKey() error = %v", err)
+	}
+	if reloadedSource.CurrentArtifactID == nil || *reloadedSource.CurrentArtifactID != secondArtifact.ID {
+		t.Fatalf("CurrentArtifactID = %v, want promoted artifact %d", reloadedSource.CurrentArtifactID, secondArtifact.ID)
+	}
+
+	events, err := store.ListEvents(ctx, ListEventsParams{})
+	if err != nil {
+		t.Fatalf("ListEvents() error = %v", err)
+	}
+	var got runtimeevents.KnowledgeSourceLifecycleChangedPayload
+	for _, event := range events {
+		if event.Type != runtimeevents.EventKnowledgeSourceLifecycleChanged || event.StreamID != source.ID {
+			continue
+		}
+		if err := json.Unmarshal(event.Payload, &got); err != nil {
+			t.Fatalf("Unmarshal lifecycle payload: %v", err)
+		}
+	}
+	if got.ArtifactID == nil || *got.ArtifactID != secondArtifact.ID || got.ExtractionID == nil || *got.ExtractionID != extraction.ID {
+		t.Fatalf("lifecycle payload = %+v, want promoted artifact %d and extraction %d", got, secondArtifact.ID, extraction.ID)
+	}
+}
+
+func TestStoreReindexesKnowledgeChunksWhenSourceTitleChanges(t *testing.T) {
+	ctx := context.Background()
+	store := openMigratedTestStore(t, "knowledge-title-reindex.db")
+	defer store.Close()
+
+	artifact, err := store.RecordKnowledgeArtifact(ctx, RecordKnowledgeArtifactParams{
+		SHA256:       "sha256:title",
+		SizeBytes:    42,
+		SourceType:   "text",
+		MimeType:     "text/plain",
+		ArtifactPath: "knowledge/artifacts/ti/title/source.txt",
+		OriginalPath: "/tmp/title-source.txt",
+	})
+	if err != nil {
+		t.Fatalf("RecordKnowledgeArtifact() error = %v", err)
+	}
+	source, err := store.UpsertKnowledgeSource(ctx, UpsertKnowledgeSourceParams{
+		Key:               "title-refresh",
+		Title:             "Legacy Handbook",
+		Scope:             "global",
+		ScopeKey:          "global",
+		Restricted:        true,
+		SourceKind:        "manual",
+		SourceClass:       "text",
+		Lifecycle:         "artifact_available",
+		ManifestPath:      "memory/knowledge/title-refresh.md",
+		CurrentArtifactID: &artifact.ID,
+	})
+	if err != nil {
+		t.Fatalf("UpsertKnowledgeSource() error = %v", err)
+	}
+	extraction, err := store.RecordKnowledgeExtraction(ctx, RecordKnowledgeExtractionParams{
+		SourceID:          source.ID,
+		ArtifactID:        artifact.ID,
+		ExtractorName:     "plain_text",
+		ExtractorVersion:  "v1",
+		Status:            "succeeded",
+		Lifecycle:         "ready",
+		ExtractedTextHash: "sha256:title-text",
+	})
+	if err != nil {
+		t.Fatalf("RecordKnowledgeExtraction() error = %v", err)
+	}
+	chunk, err := store.RecordKnowledgeChunk(ctx, RecordKnowledgeChunkParams{
+		SourceID:     source.ID,
+		ExtractionID: extraction.ID,
+		Ordinal:      1,
+		Text:         "Neutral section body.",
+		Restricted:   true,
+	})
+	if err != nil {
+		t.Fatalf("RecordKnowledgeChunk() error = %v", err)
+	}
+
+	_, err = store.UpsertKnowledgeSource(ctx, UpsertKnowledgeSourceParams{
+		Key:          "title-refresh",
+		Title:        "Updated Handbook",
+		Scope:        "global",
+		ScopeKey:     "global",
+		Restricted:   true,
+		SourceKind:   "manual",
+		SourceClass:  "text",
+		Lifecycle:    "ready",
+		ManifestPath: "memory/knowledge/title-refresh.md",
+	})
+	if err != nil {
+		t.Fatalf("UpsertKnowledgeSource(update title) error = %v", err)
+	}
+
+	results, err := store.SearchKnowledgeChunks(ctx, SearchKnowledgeChunksParams{Query: "Updated", Scope: "global", ScopeKey: "global"})
+	if err != nil {
+		t.Fatalf("SearchKnowledgeChunks(new title) error = %v", err)
+	}
+	if len(results) != 1 || results[0].ChunkID != chunk.ID || results[0].Title != "Updated Handbook" {
+		t.Fatalf("new title results = %+v, want reindexed chunk %d", results, chunk.ID)
+	}
+	oldResults, err := store.SearchKnowledgeChunks(ctx, SearchKnowledgeChunksParams{Query: "Legacy", Scope: "global", ScopeKey: "global"})
+	if err != nil {
+		t.Fatalf("SearchKnowledgeChunks(old title) error = %v", err)
+	}
+	if len(oldResults) != 0 {
+		t.Fatalf("old title results = %+v, want stale title removed from FTS", oldResults)
+	}
+}
+
 func TestStoreRejectsKnowledgeDomainPolicyViolations(t *testing.T) {
 	ctx := context.Background()
 	store := openMigratedTestStore(t, "knowledge-domain-policy.db")
@@ -591,6 +759,30 @@ func TestStoreRejectsKnowledgeDomainPolicyViolations(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "ocr-required") {
 		t.Fatalf("RecordKnowledgeExtraction() OCR extracted error = %v, want OCR lifecycle failure", err)
+	}
+
+	_, err = store.RecordKnowledgeExtraction(ctx, RecordKnowledgeExtractionParams{
+		SourceID:         ocrSource.ID,
+		ArtifactID:       artifact.ID,
+		ExtractorName:    "plain_text",
+		ExtractorVersion: "v1",
+		Status:           "typo",
+		Lifecycle:        "artifact_available",
+	})
+	if err == nil || !strings.Contains(err.Error(), "not supported") {
+		t.Fatalf("RecordKnowledgeExtraction() invalid status error = %v, want unsupported status failure", err)
+	}
+
+	_, err = store.RecordKnowledgeExtraction(ctx, RecordKnowledgeExtractionParams{
+		SourceID:         ocrSource.ID,
+		ArtifactID:       artifact.ID,
+		ExtractorName:    "plain_text",
+		ExtractorVersion: "v1",
+		Status:           "failed",
+		Lifecycle:        "ready",
+	})
+	if err == nil || !strings.Contains(err.Error(), "requires lifecycle") {
+		t.Fatalf("RecordKnowledgeExtraction() status/lifecycle error = %v, want status lifecycle failure", err)
 	}
 }
 
