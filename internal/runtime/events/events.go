@@ -20,6 +20,8 @@ const (
 	StreamLearningProposal   StreamType = "learning_proposal"
 	StreamLearningEvaluation StreamType = "learning_evaluation"
 	StreamLearningPromotion  StreamType = "learning_promotion"
+	StreamConversation       StreamType = "conversation"
+	StreamMemorySummary      StreamType = "memory_summary"
 )
 
 type Type string
@@ -52,6 +54,8 @@ const (
 	EventLearningEvaluationRecorded       Type = "learning.evaluation_recorded"
 	EventLearningPromotionApplied         Type = "learning.promotion_applied"
 	EventLearningPromotionRolledBack      Type = "learning.promotion_rolled_back"
+	EventConversationTranscriptRecorded   Type = "conversation.transcript_recorded"
+	EventMemorySummaryRecorded            Type = "memory_summary.recorded"
 )
 
 type Record struct {
@@ -224,6 +228,24 @@ type LearningPromotionRolledBackPayload struct {
 	RolledBackBy        string `json:"rolled_back_by"`
 	RollbackReason      string `json:"rollback_reason"`
 	RestoredPromotionID *int64 `json:"restored_promotion_id,omitempty"`
+}
+
+type ConversationTranscriptRecordedPayload struct {
+	Scope    string `json:"scope"`
+	ScopeKey string `json:"scope_key"`
+	Mode     string `json:"mode"`
+	Executor string `json:"executor"`
+	TaskID   *int64 `json:"task_id"`
+	RunID    *int64 `json:"run_id"`
+}
+
+type MemorySummaryRecordedPayload struct {
+	Scope              string `json:"scope"`
+	ScopeKey           string `json:"scope_key"`
+	MemoryType         string `json:"memory_type"`
+	SourceTranscriptID *int64 `json:"source_transcript_id"`
+	TaskID             *int64 `json:"task_id"`
+	RunID              *int64 `json:"run_id"`
 }
 
 func EncodePayload(payload any) (json.RawMessage, error) {

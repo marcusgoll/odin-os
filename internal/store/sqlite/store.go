@@ -15,6 +15,7 @@ import (
 )
 
 var ErrWorktreeLeaseConflict = errors.New("worktree lease conflict")
+var ErrInvalidActionApprovalBinding = errors.New("invalid action approval binding")
 
 type Store struct {
 	db        *sql.DB
@@ -362,6 +363,9 @@ func (store *Store) RequestApproval(ctx context.Context, params RequestApprovalP
 	err := store.withTx(ctx, func(tx *sql.Tx) error {
 		task, err := store.getTaskTx(ctx, tx, params.TaskID)
 		if err != nil {
+			return err
+		}
+		if err := validateActionApprovalBinding(ctx, tx, params.ActionID, params.PayloadHash); err != nil {
 			return err
 		}
 
@@ -3209,6 +3213,33 @@ func appendEventTx(ctx context.Context, tx *sql.Tx, params eventInsert) error {
 		formatTime(params.OccurredAt),
 	)
 	return err
+}
+
+func validateActionApprovalBinding(ctx context.Context, tx *sql.Tx, actionID *int64, payloadHash string) error {
+	if actionID == nil {
+		if strings.TrimSpace(payloadHash) != "" {
+			return fmt.Errorf("%w: payload_hash requires action_id", ErrInvalidActionApprovalBinding)
+		}
+		return nil
+	}
+	if strings.TrimSpace(payloadHash) == "" {
+		return fmt.Errorf("%w: action_id requires payload_hash", ErrInvalidActionApprovalBinding)
+	}
+
+	var exists int
+	if err := tx.QueryRowContext(ctx, `
+		SELECT EXISTS(
+			SELECT 1
+			FROM action_payloads
+			WHERE action_id = ? AND payload_hash = ?
+		)
+	`, *actionID, payloadHash).Scan(&exists); err != nil {
+		return err
+	}
+	if exists != 1 {
+		return fmt.Errorf("%w: payload_hash does not belong to action_id", ErrInvalidActionApprovalBinding)
+	}
+	return nil
 }
 
 func normalizeCreateContextPacketParams(params CreateContextPacketParams) CreateContextPacketParams {
