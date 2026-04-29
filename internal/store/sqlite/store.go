@@ -1590,6 +1590,15 @@ func (store *Store) UpsertKnowledgeSource(ctx context.Context, params UpsertKnow
 	if params.ManifestPath == "" {
 		return KnowledgeSource{}, fmt.Errorf("knowledge source manifest path is required")
 	}
+	if err := validateKnowledgeManifestPath(params.ManifestPath); err != nil {
+		return KnowledgeSource{}, err
+	}
+	if err := validateKnowledgeSourceClass(params.SourceClass); err != nil {
+		return KnowledgeSource{}, err
+	}
+	if err := validateKnowledgeLifecycleForSourceClass(params.SourceClass, params.Lifecycle); err != nil {
+		return KnowledgeSource{}, err
+	}
 
 	now := store.now()
 	var source KnowledgeSource
@@ -1811,6 +1820,9 @@ func (store *Store) RecordKnowledgeExtraction(ctx context.Context, params Record
 		if err != nil {
 			return err
 		}
+		if err := validateKnowledgeLifecycleForSourceClass(source.SourceClass, lifecycle); err != nil {
+			return err
+		}
 
 		result, err := tx.ExecContext(ctx, `
 			INSERT INTO knowledge_extractions (
@@ -1993,7 +2005,16 @@ func (store *Store) SearchKnowledgeChunks(ctx context.Context, params SearchKnow
 			ks.id,
 			ks.key,
 			ks.title,
+			ks.manifest_path,
 			kc.id,
+			kc.extraction_id,
+			ke.artifact_id,
+			ka.sha256,
+			ke.extractor_name,
+			ke.extractor_version,
+			ke.extracted_text_hash,
+			ke.normalized_markdown_path,
+			ke.finished_at,
 			kc.text,
 			kc.anchor,
 			kc.page_number,
@@ -2002,6 +2023,8 @@ func (store *Store) SearchKnowledgeChunks(ctx context.Context, params SearchKnow
 		FROM knowledge_fts
 		JOIN knowledge_chunks kc ON kc.id = knowledge_fts.rowid
 		JOIN knowledge_sources ks ON ks.id = kc.source_id
+		JOIN knowledge_extractions ke ON ke.id = kc.extraction_id
+		JOIN knowledge_artifacts ka ON ka.id = ke.artifact_id
 		WHERE knowledge_fts MATCH ?
 			AND ks.lifecycle = 'ready'
 			AND (? = '' OR ks.scope = ?)
@@ -2018,12 +2041,22 @@ func (store *Store) SearchKnowledgeChunks(ctx context.Context, params SearchKnow
 	for rows.Next() {
 		var result KnowledgeSearchResult
 		var pageNumber sql.NullInt64
+		var extractionFinishedAt sql.NullString
 		var restricted int
 		if err := rows.Scan(
 			&result.SourceID,
 			&result.SourceKey,
 			&result.Title,
+			&result.ManifestPath,
 			&result.ChunkID,
+			&result.ExtractionID,
+			&result.ArtifactID,
+			&result.ArtifactSHA256,
+			&result.ExtractorName,
+			&result.ExtractorVersion,
+			&result.ExtractedTextHash,
+			&result.NormalizedMarkdownPath,
+			&extractionFinishedAt,
 			&result.Text,
 			&result.Anchor,
 			&pageNumber,
@@ -2033,6 +2066,10 @@ func (store *Store) SearchKnowledgeChunks(ctx context.Context, params SearchKnow
 			return nil, err
 		}
 		result.PageNumber = nullableInt64Ptr(pageNumber)
+		result.ExtractionFinishedAt, err = parseNullableTime(extractionFinishedAt)
+		if err != nil {
+			return nil, err
+		}
 		result.Restricted = restricted != 0
 		results = append(results, result)
 	}
@@ -2052,6 +2089,9 @@ func (store *Store) RecordRestrictedKnowledgeUseApproval(ctx context.Context, pa
 	}
 	if params.UseType == "" {
 		return RestrictedKnowledgeUseApproval{}, fmt.Errorf("restricted knowledge use approval use type is required")
+	}
+	if err := validateRestrictedKnowledgeUseType(params.UseType); err != nil {
+		return RestrictedKnowledgeUseApproval{}, err
 	}
 	if params.Reason == "" {
 		return RestrictedKnowledgeUseApproval{}, fmt.Errorf("restricted knowledge use approval reason is required")
@@ -2192,6 +2232,46 @@ func validateKnowledgeExtractionLineageTx(ctx context.Context, tx *sql.Tx, sourc
 		return fmt.Errorf("knowledge chunk extraction %d does not belong to source %d", extractionID, sourceID)
 	}
 	return nil
+}
+
+func validateKnowledgeManifestPath(manifestPath string) error {
+	if !strings.HasPrefix(manifestPath, "memory/knowledge/") || !strings.HasSuffix(manifestPath, ".md") {
+		return fmt.Errorf("knowledge source manifest path %q must be under memory/knowledge/ and end in .md", manifestPath)
+	}
+	return nil
+}
+
+func validateKnowledgeSourceClass(sourceClass string) error {
+	switch sourceClass {
+	case "markdown", "text", "machine_readable_pdf", "ocr_required":
+		return nil
+	default:
+		return fmt.Errorf("knowledge source class %q is not supported", sourceClass)
+	}
+}
+
+func validateKnowledgeLifecycleForSourceClass(sourceClass string, lifecycle string) error {
+	switch lifecycle {
+	case "declared", "artifact_available", "extracted", "indexed", "ready", "stale", "failed":
+	default:
+		return fmt.Errorf("knowledge source lifecycle %q is not supported", lifecycle)
+	}
+	if sourceClass == "ocr_required" {
+		switch lifecycle {
+		case "extracted", "indexed", "ready":
+			return fmt.Errorf("ocr-required knowledge source cannot enter lifecycle %q", lifecycle)
+		}
+	}
+	return nil
+}
+
+func validateRestrictedKnowledgeUseType(useType string) error {
+	switch useType {
+	case "bulk_export", "broad_extraction", "sharing", "executor_context_injection":
+		return nil
+	default:
+		return fmt.Errorf("restricted knowledge use type %q is not supported", useType)
+	}
 }
 
 func (store *Store) indexKnowledgeChunkTx(ctx context.Context, tx *sql.Tx, params IndexKnowledgeChunkParams) error {

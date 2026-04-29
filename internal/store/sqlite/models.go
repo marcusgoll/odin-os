@@ -514,15 +514,24 @@ type SearchKnowledgeChunksParams struct {
 }
 
 type KnowledgeSearchResult struct {
-	SourceID   int64
-	SourceKey  string
-	Title      string
-	ChunkID    int64
-	Text       string
-	Anchor     string
-	PageNumber *int64
-	Restricted bool
-	Rank       float64
+	SourceID               int64
+	SourceKey              string
+	Title                  string
+	ManifestPath           string
+	ChunkID                int64
+	ExtractionID           int64
+	ArtifactID             int64
+	ArtifactSHA256         string
+	ExtractorName          string
+	ExtractorVersion       string
+	ExtractedTextHash      string
+	NormalizedMarkdownPath string
+	ExtractionFinishedAt   *time.Time
+	Text                   string
+	Anchor                 string
+	PageNumber             *int64
+	Restricted             bool
+	Rank                   float64
 }
 
 type RestrictedKnowledgeUseApproval struct {

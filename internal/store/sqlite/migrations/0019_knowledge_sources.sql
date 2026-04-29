@@ -17,14 +17,14 @@ CREATE TABLE IF NOT EXISTS knowledge_sources (
   scope_key TEXT NOT NULL,
   restricted INTEGER NOT NULL CHECK (restricted IN (0, 1)),
   source_kind TEXT NOT NULL,
-  source_class TEXT NOT NULL,
+  source_class TEXT NOT NULL CHECK (source_class IN ('markdown', 'text', 'machine_readable_pdf', 'ocr_required')),
   lifecycle TEXT NOT NULL CHECK (lifecycle IN ('declared', 'artifact_available', 'extracted', 'indexed', 'ready', 'stale', 'failed')),
-  manifest_path TEXT NOT NULL UNIQUE,
+  manifest_path TEXT NOT NULL UNIQUE CHECK (manifest_path GLOB 'memory/knowledge/*.md'),
   current_artifact_id INTEGER REFERENCES knowledge_artifacts(id) ON DELETE SET NULL,
   current_extraction_id INTEGER REFERENCES knowledge_extractions(id) ON DELETE SET NULL,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
-  CHECK (NOT (source_class IN ('ocr_required', 'ocr_required_pdf') AND lifecycle = 'ready'))
+  CHECK (NOT (source_class = 'ocr_required' AND lifecycle IN ('extracted', 'indexed', 'ready')))
 );
 
 CREATE INDEX IF NOT EXISTS idx_knowledge_sources_scope ON knowledge_sources(scope, scope_key, key);
@@ -84,7 +84,7 @@ CREATE TABLE IF NOT EXISTS knowledge_related_sources (
 CREATE TABLE IF NOT EXISTS restricted_knowledge_use_approvals (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   source_id INTEGER NOT NULL REFERENCES knowledge_sources(id) ON DELETE CASCADE,
-  use_type TEXT NOT NULL,
+  use_type TEXT NOT NULL CHECK (use_type IN ('bulk_export', 'broad_extraction', 'sharing', 'executor_context_injection')),
   reason TEXT NOT NULL,
   decision TEXT NOT NULL,
   evidence_json TEXT NOT NULL,

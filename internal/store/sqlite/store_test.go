@@ -426,6 +426,110 @@ func TestStorePersistsKnowledgeSourceArtifactExtractionAndChunks(t *testing.T) {
 	if !results[0].Restricted || results[0].Anchor != "section:vacation" {
 		t.Fatalf("result = %+v, want restricted result with citation anchor", results[0])
 	}
+	if results[0].ManifestPath != "memory/knowledge/pilot-contract.md" || results[0].ExtractionID != extraction.ID || results[0].ArtifactID != artifact.ID {
+		t.Fatalf("result = %+v, want citation provenance for manifest/extraction/artifact", results[0])
+	}
+	if results[0].ArtifactSHA256 != "sha256:abc" || results[0].ExtractorName != "plain_text" || results[0].ExtractorVersion != "v1" {
+		t.Fatalf("result = %+v, want artifact and extractor provenance", results[0])
+	}
+	if results[0].ExtractedTextHash != "sha256:text" || results[0].NormalizedMarkdownPath != "state/knowledge/normalized/pilot-contract.md" || results[0].ExtractionFinishedAt == nil {
+		t.Fatalf("result = %+v, want extraction output provenance", results[0])
+	}
+}
+
+func TestStoreRejectsKnowledgeDomainPolicyViolations(t *testing.T) {
+	ctx := context.Background()
+	store := openMigratedTestStore(t, "knowledge-domain-policy.db")
+	defer store.Close()
+
+	artifact, err := store.RecordKnowledgeArtifact(ctx, RecordKnowledgeArtifactParams{
+		SHA256:       "sha256:policy",
+		SizeBytes:    64,
+		SourceType:   "text",
+		MimeType:     "text/plain",
+		ArtifactPath: "knowledge/artifacts/po/policy/source.txt",
+		OriginalPath: "/tmp/policy.txt",
+	})
+	if err != nil {
+		t.Fatalf("RecordKnowledgeArtifact() error = %v", err)
+	}
+
+	_, err = store.UpsertKnowledgeSource(ctx, UpsertKnowledgeSourceParams{
+		Key:               "bad-manifest",
+		Title:             "Bad Manifest",
+		Scope:             "global",
+		ScopeKey:          "global",
+		Restricted:        true,
+		SourceKind:        "manual",
+		SourceClass:       "text",
+		Lifecycle:         "artifact_available",
+		ManifestPath:      "memory/bad-manifest.md",
+		CurrentArtifactID: &artifact.ID,
+	})
+	if err == nil || !strings.Contains(err.Error(), "memory/knowledge") {
+		t.Fatalf("UpsertKnowledgeSource() manifest error = %v, want canonical manifest path failure", err)
+	}
+
+	_, err = store.UpsertKnowledgeSource(ctx, UpsertKnowledgeSourceParams{
+		Key:               "bad-class",
+		Title:             "Bad Class",
+		Scope:             "global",
+		ScopeKey:          "global",
+		Restricted:        true,
+		SourceKind:        "manual",
+		SourceClass:       "spreadsheet",
+		Lifecycle:         "artifact_available",
+		ManifestPath:      "memory/knowledge/bad-class.md",
+		CurrentArtifactID: &artifact.ID,
+	})
+	if err == nil || !strings.Contains(err.Error(), "not supported") {
+		t.Fatalf("UpsertKnowledgeSource() class error = %v, want unsupported class failure", err)
+	}
+
+	ocrSource, err := store.UpsertKnowledgeSource(ctx, UpsertKnowledgeSourceParams{
+		Key:               "scanned-book",
+		Title:             "Scanned Book",
+		Scope:             "global",
+		ScopeKey:          "global",
+		Restricted:        true,
+		SourceKind:        "book",
+		SourceClass:       "ocr_required",
+		Lifecycle:         "artifact_available",
+		ManifestPath:      "memory/knowledge/scanned-book.md",
+		CurrentArtifactID: &artifact.ID,
+	})
+	if err != nil {
+		t.Fatalf("UpsertKnowledgeSource() OCR source error = %v", err)
+	}
+
+	_, err = store.UpsertKnowledgeSource(ctx, UpsertKnowledgeSourceParams{
+		Key:               "scanned-book",
+		Title:             "Scanned Book",
+		Scope:             "global",
+		ScopeKey:          "global",
+		Restricted:        true,
+		SourceKind:        "book",
+		SourceClass:       "ocr_required",
+		Lifecycle:         "ready",
+		ManifestPath:      "memory/knowledge/scanned-book.md",
+		CurrentArtifactID: &artifact.ID,
+	})
+	if err == nil || !strings.Contains(err.Error(), "ocr-required") {
+		t.Fatalf("UpsertKnowledgeSource() OCR ready error = %v, want OCR lifecycle failure", err)
+	}
+
+	_, err = store.RecordKnowledgeExtraction(ctx, RecordKnowledgeExtractionParams{
+		SourceID:          ocrSource.ID,
+		ArtifactID:        artifact.ID,
+		ExtractorName:     "pdf_text",
+		ExtractorVersion:  "v1",
+		Status:            "succeeded",
+		Lifecycle:         "extracted",
+		ExtractedTextHash: "sha256:ocr",
+	})
+	if err == nil || !strings.Contains(err.Error(), "ocr-required") {
+		t.Fatalf("RecordKnowledgeExtraction() OCR extracted error = %v, want OCR lifecycle failure", err)
+	}
 }
 
 func TestStoreRecordsRestrictedKnowledgeUseApprovalWithoutChangingLifecycle(t *testing.T) {
@@ -482,6 +586,18 @@ func TestStoreRecordsRestrictedKnowledgeUseApprovalWithoutChangingLifecycle(t *t
 	}
 	if reloadedSource.Lifecycle != "ready" {
 		t.Fatalf("Lifecycle = %q, want ready", reloadedSource.Lifecycle)
+	}
+
+	_, err = store.RecordRestrictedKnowledgeUseApproval(ctx, RecordRestrictedKnowledgeUseApprovalParams{
+		SourceID:     source.ID,
+		UseType:      "general_context_dump",
+		Reason:       "Should be rejected.",
+		Decision:     "approved",
+		EvidenceJSON: `{"approved_by":"operator"}`,
+		DecidedBy:    "operator",
+	})
+	if err == nil || !strings.Contains(err.Error(), "not supported") {
+		t.Fatalf("RecordRestrictedKnowledgeUseApproval() use type error = %v, want unsupported use type failure", err)
 	}
 }
 
