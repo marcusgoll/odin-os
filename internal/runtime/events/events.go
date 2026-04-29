@@ -12,6 +12,7 @@ const (
 	StreamTask               StreamType = "task"
 	StreamRun                StreamType = "run"
 	StreamApproval           StreamType = "approval"
+	StreamAction             StreamType = "action"
 	StreamIncident           StreamType = "incident"
 	StreamRecovery           StreamType = "recovery"
 	StreamRegistryVersion    StreamType = "registry_version"
@@ -35,6 +36,16 @@ const (
 	EventRunFinished                      Type = "run.finished"
 	EventApprovalRequested                Type = "approval.requested"
 	EventApprovalResolved                 Type = "approval.resolved"
+	EventActionPrepared                   Type = "action.prepared"
+	EventActionPreflighted                Type = "action.preflighted"
+	EventActionApproved                   Type = "action.approved"
+	EventActionSubmitted                  Type = "action.submitted"
+	EventActionInternallyRecorded         Type = "action.internally_recorded"
+	EventActionExternallyReadBack         Type = "action.externally_read_back"
+	EventActionCompleted                  Type = "action.completed"
+	EventActionFailed                     Type = "action.failed"
+	EventActionAbandoned                  Type = "action.abandoned"
+	EventActionCorrected                  Type = "action.corrected"
 	EventIncidentOpened                   Type = "incident.opened"
 	EventIncidentResolved                 Type = "incident.resolved"
 	EventIncidentEscalated                Type = "incident.escalated"
@@ -127,6 +138,15 @@ type ApprovalResolvedPayload struct {
 	Reason      string `json:"reason"`
 	ActionID    *int64 `json:"action_id,omitempty"`
 	PayloadHash string `json:"payload_hash,omitempty"`
+}
+
+type ActionEvidenceMirroredPayload struct {
+	EvidenceID  int64  `json:"evidence_id"`
+	ActionID    int64  `json:"action_id"`
+	PayloadHash string `json:"payload_hash,omitempty"`
+	ApprovalID  *int64 `json:"approval_id,omitempty"`
+	RunID       *int64 `json:"run_id,omitempty"`
+	Source      string `json:"source"`
 }
 
 type IncidentOpenedPayload struct {

@@ -627,7 +627,41 @@ func (store *Store) AppendActionEvidence(ctx context.Context, params AppendActio
 			EvidenceJSON: params.EvidenceJSON,
 			OccurredAt:   now,
 		}
-		return nil
+
+		var (
+			scope     string
+			projectID *int64
+			taskID    *int64
+		)
+		if params.RunID != nil {
+			_, task, err := store.getRunWithTaskTx(ctx, tx, *params.RunID)
+			if err != nil {
+				return err
+			}
+			scope = task.Scope
+			projectID = &task.ProjectID
+			taskID = &task.ID
+		}
+
+		return appendEventTx(ctx, tx, eventInsert{
+			StreamType: runtimeevents.StreamAction,
+			StreamID:   params.ActionID,
+			EventType:  runtimeevents.Type(params.EventType),
+			Scope:      scope,
+			ProjectID:  projectID,
+			TaskID:     taskID,
+			RunID:      params.RunID,
+			Payload: runtimeevents.ActionEvidenceMirroredPayload{
+				EvidenceID:  eventID,
+				ActionID:    params.ActionID,
+				PayloadHash: params.PayloadHash,
+				ApprovalID:  params.ApprovalID,
+				RunID:       params.RunID,
+				Source:      params.Source,
+			},
+			OccurredAt: now,
+			Version:    params.EventVersion,
+		})
 	})
 	return event, err
 }

@@ -32,6 +32,7 @@ Phase 03 through Phase 14 stream types are:
 - `task`
 - `run`
 - `approval`
+- `action`
 - `incident`
 - `recovery`
 - `registry_version`
@@ -52,6 +53,16 @@ Phase 03 through Phase 14 event types are:
 - `run.finished`
 - `approval.requested`
 - `approval.resolved`
+- `action.prepared`
+- `action.preflighted`
+- `action.approved`
+- `action.submitted`
+- `action.internally_recorded`
+- `action.externally_read_back`
+- `action.completed`
+- `action.failed`
+- `action.abandoned`
+- `action.corrected`
 - `incident.opened`
 - `incident.resolved`
 - `incident.escalated`
@@ -79,6 +90,29 @@ Phase 03 through Phase 14 event types are:
 - Events are append-only. Corrections happen through later events, not in-place event mutation.
 - Operator projections are derived and read-only.
 - Event history must be sufficient to replay basic lifecycle state for tasks, runs, and approvals.
+
+## Action evidence expectation
+
+Action evidence extends the runtime event stream with an `action` stream. Every row appended to `action_evidence_events` must mirror a generic runtime event in the same SQL transaction.
+
+The mirrored event envelope must use:
+
+- `stream_type`: `action`
+- `stream_id`: the `actions.id` value
+- `event_type`: the stable action evidence event type, such as `action.prepared`, `action.submitted`, or `action.externally_read_back`
+- `event_version`: the action evidence event version
+- `run_id`: the `run_id` supplied to the action evidence append, when present
+
+The mirrored payload must include linkage fields:
+
+- `evidence_id`
+- `action_id`
+- `payload_hash`
+- `approval_id`, when present
+- `run_id`, when present
+- `source`
+
+The generic runtime event is an audit mirror of the action evidence row. The `action_evidence_events` table remains the action-specific evidence source, and corrections must be represented by later action events such as `action.corrected`, not by mutating prior evidence or event rows.
 
 ## Context packet payload
 
