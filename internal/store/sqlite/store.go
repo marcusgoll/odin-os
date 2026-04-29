@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"path"
 	"strings"
 	"sync"
 	"time"
@@ -2097,6 +2098,7 @@ func (store *Store) SearchKnowledgeChunks(ctx context.Context, params SearchKnow
 		JOIN knowledge_artifacts ka ON ka.id = ke.artifact_id
 		WHERE knowledge_fts MATCH ?
 			AND ks.lifecycle = 'ready'
+			AND kc.extraction_id = ks.current_extraction_id
 			AND (? = '' OR ks.scope = ?)
 			AND (? = '' OR ks.scope_key = ?)
 		ORDER BY rank ASC, kc.id ASC
@@ -2307,8 +2309,15 @@ func validateKnowledgeExtractionLineageTx(ctx context.Context, tx *sql.Tx, sourc
 }
 
 func validateKnowledgeManifestPath(manifestPath string) error {
+	if path.Clean(manifestPath) != manifestPath || strings.Contains(manifestPath, "\\") {
+		return fmt.Errorf("knowledge source manifest path %q must be canonical", manifestPath)
+	}
 	if !strings.HasPrefix(manifestPath, "memory/knowledge/") || !strings.HasSuffix(manifestPath, ".md") {
 		return fmt.Errorf("knowledge source manifest path %q must be under memory/knowledge/ and end in .md", manifestPath)
+	}
+	manifestName := strings.TrimPrefix(manifestPath, "memory/knowledge/")
+	if manifestName == "" || strings.Contains(manifestName, "/") || strings.Contains(manifestName, "..") {
+		return fmt.Errorf("knowledge source manifest path %q must name one markdown file under memory/knowledge", manifestPath)
 	}
 	return nil
 }
@@ -2413,11 +2422,12 @@ func (store *Store) validateKnowledgeCurrentExtractionTx(ctx context.Context, tx
 
 	var extractionSourceID int64
 	var extractionArtifactID int64
+	var status string
 	if err := tx.QueryRowContext(ctx, `
-		SELECT source_id, artifact_id
+		SELECT source_id, artifact_id, status
 		FROM knowledge_extractions
 		WHERE id = ?
-	`, *extractionID).Scan(&extractionSourceID, &extractionArtifactID); err != nil {
+	`, *extractionID).Scan(&extractionSourceID, &extractionArtifactID, &status); err != nil {
 		return err
 	}
 	if extractionSourceID != sourceID {
@@ -2428,6 +2438,12 @@ func (store *Store) validateKnowledgeCurrentExtractionTx(ctx context.Context, tx
 	}
 	if extractionArtifactID != *artifactID {
 		return fmt.Errorf("knowledge source current extraction %d artifact %d does not match current artifact %d", *extractionID, extractionArtifactID, *artifactID)
+	}
+	switch lifecycle {
+	case "extracted", "indexed", "ready":
+		if status != "succeeded" {
+			return fmt.Errorf("knowledge source lifecycle %q requires succeeded current extraction", lifecycle)
+		}
 	}
 	return nil
 }

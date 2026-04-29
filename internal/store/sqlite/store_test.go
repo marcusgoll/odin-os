@@ -975,6 +975,139 @@ func TestStoreRejectsInvalidKnowledgeCurrentExtractionLineage(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "does not match current artifact") {
 		t.Fatalf("UpsertKnowledgeSource(artifact mismatch) error = %v, want artifact lineage failure", err)
 	}
+
+	failedExtraction, err := store.RecordKnowledgeExtraction(ctx, RecordKnowledgeExtractionParams{
+		SourceID:         sourceA.ID,
+		ArtifactID:       artifactA.ID,
+		ExtractorName:    "plain_text",
+		ExtractorVersion: "v1",
+		Status:           "failed",
+		Lifecycle:        "failed",
+		FailureCode:      "parse_failed",
+		FailureSummary:   "fixture failure",
+	})
+	if err != nil {
+		t.Fatalf("RecordKnowledgeExtraction(failed) error = %v", err)
+	}
+	_, err = store.UpsertKnowledgeSource(ctx, UpsertKnowledgeSourceParams{
+		Key:                 "lineage-a",
+		Title:               "Lineage A",
+		Scope:               "global",
+		ScopeKey:            "global",
+		Restricted:          true,
+		SourceKind:          "manual",
+		SourceClass:         "text",
+		Lifecycle:           "ready",
+		ManifestPath:        "memory/knowledge/lineage-a.md",
+		CurrentArtifactID:   &artifactA.ID,
+		CurrentExtractionID: &failedExtraction.ID,
+	})
+	if err == nil || !strings.Contains(err.Error(), "requires succeeded current extraction") {
+		t.Fatalf("UpsertKnowledgeSource(failed extraction) error = %v, want succeeded extraction failure", err)
+	}
+}
+
+func TestStoreSearchOnlyReturnsCurrentKnowledgeExtractionChunks(t *testing.T) {
+	ctx := context.Background()
+	store := openMigratedTestStore(t, "knowledge-current-extraction-search.db")
+	defer store.Close()
+
+	firstArtifact, err := store.RecordKnowledgeArtifact(ctx, RecordKnowledgeArtifactParams{
+		SHA256:       "sha256:current-first",
+		SizeBytes:    42,
+		SourceType:   "text",
+		MimeType:     "text/plain",
+		ArtifactPath: "knowledge/artifacts/cu/current-first/source.txt",
+		OriginalPath: "/tmp/current-first.txt",
+	})
+	if err != nil {
+		t.Fatalf("RecordKnowledgeArtifact(first) error = %v", err)
+	}
+	secondArtifact, err := store.RecordKnowledgeArtifact(ctx, RecordKnowledgeArtifactParams{
+		SHA256:       "sha256:current-second",
+		SizeBytes:    42,
+		SourceType:   "text",
+		MimeType:     "text/plain",
+		ArtifactPath: "knowledge/artifacts/cu/current-second/source.txt",
+		OriginalPath: "/tmp/current-second.txt",
+	})
+	if err != nil {
+		t.Fatalf("RecordKnowledgeArtifact(second) error = %v", err)
+	}
+	source, err := store.UpsertKnowledgeSource(ctx, UpsertKnowledgeSourceParams{
+		Key:               "current-extraction-search",
+		Title:             "Current Extraction Search",
+		Scope:             "global",
+		ScopeKey:          "global",
+		Restricted:        true,
+		SourceKind:        "manual",
+		SourceClass:       "text",
+		Lifecycle:         "artifact_available",
+		ManifestPath:      "memory/knowledge/current-extraction-search.md",
+		CurrentArtifactID: &firstArtifact.ID,
+	})
+	if err != nil {
+		t.Fatalf("UpsertKnowledgeSource() error = %v", err)
+	}
+	firstExtraction, err := store.RecordKnowledgeExtraction(ctx, RecordKnowledgeExtractionParams{
+		SourceID:          source.ID,
+		ArtifactID:        firstArtifact.ID,
+		ExtractorName:     "plain_text",
+		ExtractorVersion:  "v1",
+		Status:            "succeeded",
+		Lifecycle:         "ready",
+		ExtractedTextHash: "sha256:current-first-text",
+	})
+	if err != nil {
+		t.Fatalf("RecordKnowledgeExtraction(first) error = %v", err)
+	}
+	if _, err := store.RecordKnowledgeChunk(ctx, RecordKnowledgeChunkParams{
+		SourceID:     source.ID,
+		ExtractionID: firstExtraction.ID,
+		Ordinal:      1,
+		Text:         "Legacy-only clause.",
+		Restricted:   true,
+	}); err != nil {
+		t.Fatalf("RecordKnowledgeChunk(first) error = %v", err)
+	}
+
+	secondExtraction, err := store.RecordKnowledgeExtraction(ctx, RecordKnowledgeExtractionParams{
+		SourceID:          source.ID,
+		ArtifactID:        secondArtifact.ID,
+		ExtractorName:     "plain_text",
+		ExtractorVersion:  "v1",
+		Status:            "succeeded",
+		Lifecycle:         "ready",
+		ExtractedTextHash: "sha256:current-second-text",
+	})
+	if err != nil {
+		t.Fatalf("RecordKnowledgeExtraction(second) error = %v", err)
+	}
+	secondChunk, err := store.RecordKnowledgeChunk(ctx, RecordKnowledgeChunkParams{
+		SourceID:     source.ID,
+		ExtractionID: secondExtraction.ID,
+		Ordinal:      1,
+		Text:         "Current-only clause.",
+		Restricted:   true,
+	})
+	if err != nil {
+		t.Fatalf("RecordKnowledgeChunk(second) error = %v", err)
+	}
+
+	oldResults, err := store.SearchKnowledgeChunks(ctx, SearchKnowledgeChunksParams{Query: "Legacy-only", Scope: "global", ScopeKey: "global"})
+	if err != nil {
+		t.Fatalf("SearchKnowledgeChunks(old) error = %v", err)
+	}
+	if len(oldResults) != 0 {
+		t.Fatalf("old results = %+v, want stale extraction chunks hidden", oldResults)
+	}
+	currentResults, err := store.SearchKnowledgeChunks(ctx, SearchKnowledgeChunksParams{Query: "Current-only", Scope: "global", ScopeKey: "global"})
+	if err != nil {
+		t.Fatalf("SearchKnowledgeChunks(current) error = %v", err)
+	}
+	if len(currentResults) != 1 || currentResults[0].ChunkID != secondChunk.ID || currentResults[0].ExtractionID != secondExtraction.ID {
+		t.Fatalf("current results = %+v, want current extraction chunk %d", currentResults, secondChunk.ID)
+	}
 }
 
 func TestStoreRejectsKnowledgeDomainPolicyViolations(t *testing.T) {
@@ -1009,6 +1142,28 @@ func TestStoreRejectsKnowledgeDomainPolicyViolations(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "memory/knowledge") {
 		t.Fatalf("UpsertKnowledgeSource() manifest error = %v, want canonical manifest path failure", err)
+	}
+
+	for _, manifestPath := range []string{
+		"memory/knowledge/../bad.md",
+		"memory/knowledge//bad.md",
+		"memory/knowledge/nested/bad.md",
+	} {
+		_, err = store.UpsertKnowledgeSource(ctx, UpsertKnowledgeSourceParams{
+			Key:               "bad-manifest-" + strings.ReplaceAll(strings.TrimPrefix(manifestPath, "memory/knowledge/"), "/", "-"),
+			Title:             "Bad Manifest",
+			Scope:             "global",
+			ScopeKey:          "global",
+			Restricted:        true,
+			SourceKind:        "manual",
+			SourceClass:       "text",
+			Lifecycle:         "artifact_available",
+			ManifestPath:      manifestPath,
+			CurrentArtifactID: &artifact.ID,
+		})
+		if err == nil || !strings.Contains(err.Error(), "manifest path") {
+			t.Fatalf("UpsertKnowledgeSource(%q) error = %v, want canonical manifest failure", manifestPath, err)
+		}
 	}
 
 	_, err = store.UpsertKnowledgeSource(ctx, UpsertKnowledgeSourceParams{

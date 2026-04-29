@@ -20,7 +20,12 @@ CREATE TABLE IF NOT EXISTS knowledge_sources (
   source_kind TEXT NOT NULL,
   source_class TEXT NOT NULL CHECK (source_class IN ('markdown', 'text', 'machine_readable_pdf')),
   lifecycle TEXT NOT NULL CHECK (lifecycle IN ('declared', 'artifact_available', 'extracted', 'indexed', 'ready', 'stale', 'failed')),
-  manifest_path TEXT NOT NULL UNIQUE CHECK (manifest_path GLOB 'memory/knowledge/*.md'),
+  manifest_path TEXT NOT NULL UNIQUE CHECK (
+    substr(manifest_path, 1, 17) = 'memory/knowledge/'
+    AND substr(manifest_path, -3) = '.md'
+    AND instr(substr(manifest_path, 18), '/') = 0
+    AND instr(manifest_path, '..') = 0
+  ),
   current_artifact_id INTEGER REFERENCES knowledge_artifacts(id) ON DELETE SET NULL,
   current_extraction_id INTEGER REFERENCES knowledge_extractions(id) ON DELETE SET NULL,
   created_at TEXT NOT NULL,
@@ -77,7 +82,12 @@ CREATE VIRTUAL TABLE IF NOT EXISTS knowledge_fts USING fts5(
 CREATE TABLE IF NOT EXISTS knowledge_related_sources (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   source_id INTEGER NOT NULL REFERENCES knowledge_sources(id) ON DELETE CASCADE,
-  declared_by_manifest_path TEXT NOT NULL CHECK (declared_by_manifest_path GLOB 'memory/knowledge/*.md'),
+  declared_by_manifest_path TEXT NOT NULL CHECK (
+    substr(declared_by_manifest_path, 1, 17) = 'memory/knowledge/'
+    AND substr(declared_by_manifest_path, -3) = '.md'
+    AND instr(substr(declared_by_manifest_path, 18), '/') = 0
+    AND instr(declared_by_manifest_path, '..') = 0
+  ),
   related_source_key TEXT NOT NULL,
   relationship TEXT NOT NULL,
   created_at TEXT NOT NULL,
