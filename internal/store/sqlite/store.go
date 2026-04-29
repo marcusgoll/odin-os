@@ -366,11 +366,13 @@ func (store *Store) RequestApproval(ctx context.Context, params RequestApprovalP
 		}
 
 		result, err := tx.ExecContext(ctx, `
-			INSERT INTO approvals (task_id, run_id, status, requested_at, resolved_at, decision_by, reason)
-			VALUES (?, ?, ?, ?, NULL, '', '')
+			INSERT INTO approvals (task_id, run_id, action_id, payload_hash, status, requested_at, resolved_at, decision_by, reason)
+			VALUES (?, ?, ?, ?, ?, ?, NULL, '', '')
 		`,
 			params.TaskID,
 			nullInt64(params.RunID),
+			nullInt64(params.ActionID),
+			nullIfEmpty(params.PayloadHash),
 			params.Status,
 			formatTime(now),
 		)
@@ -387,6 +389,8 @@ func (store *Store) RequestApproval(ctx context.Context, params RequestApprovalP
 			ID:          approvalID,
 			TaskID:      params.TaskID,
 			RunID:       params.RunID,
+			ActionID:    params.ActionID,
+			PayloadHash: params.PayloadHash,
 			Status:      params.Status,
 			RequestedAt: now,
 		}
@@ -462,6 +466,226 @@ func (store *Store) ResolveApproval(ctx context.Context, params ResolveApprovalP
 	})
 
 	return approval, err
+}
+
+func (store *Store) CreateActionWithPayload(ctx context.Context, params CreateActionWithPayloadParams) (Action, ActionPayload, error) {
+	now := store.now()
+	var action Action
+	var payload ActionPayload
+
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		if _, err := store.getRunTx(ctx, tx, params.WorkflowRunID); err != nil {
+			return err
+		}
+
+		result, err := tx.ExecContext(ctx, `
+			INSERT INTO actions (workflow_key, workflow_run_id, action_type, lifecycle_state, current_payload_hash, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?)
+		`,
+			params.WorkflowKey,
+			params.WorkflowRunID,
+			params.ActionType,
+			"prepared",
+			params.PayloadHash,
+			formatTime(now),
+			formatTime(now),
+		)
+		if err != nil {
+			return err
+		}
+
+		actionID, err := result.LastInsertId()
+		if err != nil {
+			return err
+		}
+
+		payloadResult, err := tx.ExecContext(ctx, `
+			INSERT INTO action_payloads (
+				action_id,
+				payload_schema,
+				payload_schema_version,
+				payload_hash,
+				payload_json,
+				submit_path,
+				readback_path,
+				proof_requirement,
+				created_at
+			)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`,
+			actionID,
+			params.PayloadSchema,
+			params.PayloadSchemaVersion,
+			params.PayloadHash,
+			params.PayloadJSON,
+			params.SubmitPath,
+			params.ReadbackPath,
+			params.ProofRequirement,
+			formatTime(now),
+		)
+		if err != nil {
+			return err
+		}
+
+		payloadID, err := payloadResult.LastInsertId()
+		if err != nil {
+			return err
+		}
+
+		action = Action{
+			ID:                 actionID,
+			WorkflowKey:        params.WorkflowKey,
+			WorkflowRunID:      params.WorkflowRunID,
+			ActionType:         params.ActionType,
+			LifecycleState:     "prepared",
+			CurrentPayloadHash: params.PayloadHash,
+			CreatedAt:          now,
+			UpdatedAt:          now,
+		}
+		payload = ActionPayload{
+			ID:                   payloadID,
+			ActionID:             actionID,
+			PayloadSchema:        params.PayloadSchema,
+			PayloadSchemaVersion: params.PayloadSchemaVersion,
+			PayloadHash:          params.PayloadHash,
+			PayloadJSON:          params.PayloadJSON,
+			SubmitPath:           params.SubmitPath,
+			ReadbackPath:         params.ReadbackPath,
+			ProofRequirement:     params.ProofRequirement,
+			CreatedAt:            now,
+		}
+		return nil
+	})
+
+	return action, payload, err
+}
+
+func (store *Store) AppendActionEvidence(ctx context.Context, params AppendActionEvidenceParams) (ActionEvidenceEvent, error) {
+	now := store.now()
+	var event ActionEvidenceEvent
+
+	result, err := store.db.ExecContext(ctx, `
+		INSERT INTO action_evidence_events (
+			action_id,
+			event_type,
+			event_version,
+			payload_hash,
+			approval_id,
+			run_id,
+			source,
+			evidence_json,
+			occurred_at
+		)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`,
+		params.ActionID,
+		params.EventType,
+		params.EventVersion,
+		nullIfEmpty(params.PayloadHash),
+		nullInt64(params.ApprovalID),
+		nullInt64(params.RunID),
+		params.Source,
+		params.EvidenceJSON,
+		formatTime(now),
+	)
+	if err != nil {
+		return ActionEvidenceEvent{}, err
+	}
+
+	eventID, err := result.LastInsertId()
+	if err != nil {
+		return ActionEvidenceEvent{}, err
+	}
+
+	event = ActionEvidenceEvent{
+		ID:           eventID,
+		ActionID:     params.ActionID,
+		EventType:    params.EventType,
+		EventVersion: params.EventVersion,
+		PayloadHash:  stringPtrIfNotEmpty(params.PayloadHash),
+		ApprovalID:   params.ApprovalID,
+		RunID:        params.RunID,
+		Source:       params.Source,
+		EvidenceJSON: params.EvidenceJSON,
+		OccurredAt:   now,
+	}
+	return event, nil
+}
+
+func (store *Store) GetAction(ctx context.Context, actionID int64) (Action, ActionPayload, error) {
+	action, err := store.getAction(ctx, actionID)
+	if err != nil {
+		return Action{}, ActionPayload{}, err
+	}
+
+	row := store.db.QueryRowContext(ctx, `
+		SELECT id, action_id, payload_schema, payload_schema_version, payload_hash, payload_json, submit_path, readback_path, proof_requirement, created_at
+		FROM action_payloads
+		WHERE action_id = ? AND payload_hash = ?
+	`, action.ID, action.CurrentPayloadHash)
+	payload, err := scanActionPayload(row)
+	if err != nil {
+		return Action{}, ActionPayload{}, err
+	}
+
+	return action, payload, nil
+}
+
+func (store *Store) ListActions(ctx context.Context, params ListActionsParams) ([]Action, error) {
+	query := `
+		SELECT id, workflow_key, workflow_run_id, action_type, lifecycle_state, current_payload_hash, created_at, updated_at
+		FROM actions
+		WHERE 1 = 1
+	`
+	var args []any
+	if params.WorkflowKey != "" {
+		query += ` AND workflow_key = ?`
+		args = append(args, params.WorkflowKey)
+	}
+	if params.WorkflowRunID != nil {
+		query += ` AND workflow_run_id = ?`
+		args = append(args, *params.WorkflowRunID)
+	}
+	query += ` ORDER BY created_at DESC, id DESC`
+
+	rows, err := store.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var actions []Action
+	for rows.Next() {
+		action, err := scanAction(rows)
+		if err != nil {
+			return nil, err
+		}
+		actions = append(actions, action)
+	}
+	return actions, rows.Err()
+}
+
+func (store *Store) ListActionEvidence(ctx context.Context, actionID int64) ([]ActionEvidenceEvent, error) {
+	rows, err := store.db.QueryContext(ctx, `
+		SELECT id, action_id, event_type, event_version, payload_hash, approval_id, run_id, source, evidence_json, occurred_at
+		FROM action_evidence_events
+		WHERE action_id = ?
+		ORDER BY id ASC
+	`, actionID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var events []ActionEvidenceEvent
+	for rows.Next() {
+		event, err := scanActionEvidenceEvent(rows)
+		if err != nil {
+			return nil, err
+		}
+		events = append(events, event)
+	}
+	return events, rows.Err()
 }
 
 func (store *Store) OpenIncident(ctx context.Context, params OpenIncidentParams) (Incident, error) {
@@ -2012,7 +2236,7 @@ func (store *Store) ListRunsByStatus(ctx context.Context, status string) ([]Run,
 
 func (store *Store) GetApproval(ctx context.Context, approvalID int64) (Approval, error) {
 	row := store.db.QueryRowContext(ctx, `
-		SELECT id, task_id, run_id, status, requested_at, resolved_at, decision_by, reason
+		SELECT id, task_id, run_id, action_id, payload_hash, status, requested_at, resolved_at, decision_by, reason
 		FROM approvals
 		WHERE id = ?
 	`, approvalID)
@@ -2496,6 +2720,15 @@ func (store *Store) getRunTx(ctx context.Context, tx *sql.Tx, runID int64) (Run,
 	return scanRun(row)
 }
 
+func (store *Store) getAction(ctx context.Context, actionID int64) (Action, error) {
+	row := store.db.QueryRowContext(ctx, `
+		SELECT id, workflow_key, workflow_run_id, action_type, lifecycle_state, current_payload_hash, created_at, updated_at
+		FROM actions
+		WHERE id = ?
+	`, actionID)
+	return scanAction(row)
+}
+
 func (store *Store) getConversationTranscriptTx(ctx context.Context, tx *sql.Tx, transcriptID int64) (ConversationTranscript, error) {
 	row := tx.QueryRowContext(ctx, `
 		SELECT
@@ -2660,7 +2893,7 @@ func (store *Store) getRunWithTaskTx(ctx context.Context, tx *sql.Tx, runID int6
 func (store *Store) getApprovalWithTaskTx(ctx context.Context, tx *sql.Tx, approvalID int64) (Approval, Task, error) {
 	row := tx.QueryRowContext(ctx, `
 		SELECT
-			a.id, a.task_id, a.run_id, a.status, a.requested_at, a.resolved_at, a.decision_by, a.reason,
+			a.id, a.task_id, a.run_id, a.action_id, a.payload_hash, a.status, a.requested_at, a.resolved_at, a.decision_by, a.reason,
 			t.id, t.project_id, t.key, t.title, t.status, t.scope, t.requested_by, t.current_run_id, t.created_at, t.updated_at
 		FROM approvals a
 		JOIN tasks t ON t.id = a.task_id
@@ -2670,6 +2903,8 @@ func (store *Store) getApprovalWithTaskTx(ctx context.Context, tx *sql.Tx, appro
 	var approval Approval
 	var task Task
 	var runID sql.NullInt64
+	var actionID sql.NullInt64
+	var payloadHash sql.NullString
 	var resolvedAt sql.NullString
 	var decisionBy sql.NullString
 	var reason sql.NullString
@@ -2682,6 +2917,8 @@ func (store *Store) getApprovalWithTaskTx(ctx context.Context, tx *sql.Tx, appro
 		&approval.ID,
 		&approval.TaskID,
 		&runID,
+		&actionID,
+		&payloadHash,
 		&approval.Status,
 		&requestedAt,
 		&resolvedAt,
@@ -2703,6 +2940,8 @@ func (store *Store) getApprovalWithTaskTx(ctx context.Context, tx *sql.Tx, appro
 
 	var err error
 	approval.RunID = nullableInt64Ptr(runID)
+	approval.ActionID = nullableInt64Ptr(actionID)
+	approval.PayloadHash = payloadHash.String
 	approval.RequestedAt, err = parseTime(requestedAt)
 	if err != nil {
 		return Approval{}, Task{}, err
@@ -3092,6 +3331,8 @@ func scanRun(row interface{ Scan(...any) error }) (Run, error) {
 func scanApproval(row interface{ Scan(...any) error }) (Approval, error) {
 	var approval Approval
 	var runID sql.NullInt64
+	var actionID sql.NullInt64
+	var payloadHash sql.NullString
 	var resolvedAt sql.NullString
 	var decisionBy sql.NullString
 	var reason sql.NullString
@@ -3100,6 +3341,8 @@ func scanApproval(row interface{ Scan(...any) error }) (Approval, error) {
 		&approval.ID,
 		&approval.TaskID,
 		&runID,
+		&actionID,
+		&payloadHash,
 		&approval.Status,
 		&requestedAt,
 		&resolvedAt,
@@ -3111,6 +3354,8 @@ func scanApproval(row interface{ Scan(...any) error }) (Approval, error) {
 
 	var err error
 	approval.RunID = nullableInt64Ptr(runID)
+	approval.ActionID = nullableInt64Ptr(actionID)
+	approval.PayloadHash = payloadHash.String
 	approval.RequestedAt, err = parseTime(requestedAt)
 	if err != nil {
 		return Approval{}, err
@@ -3122,6 +3367,93 @@ func scanApproval(row interface{ Scan(...any) error }) (Approval, error) {
 	approval.DecisionBy = decisionBy.String
 	approval.Reason = reason.String
 	return approval, nil
+}
+
+func scanAction(row interface{ Scan(...any) error }) (Action, error) {
+	var action Action
+	var createdAt string
+	var updatedAt string
+	if err := row.Scan(
+		&action.ID,
+		&action.WorkflowKey,
+		&action.WorkflowRunID,
+		&action.ActionType,
+		&action.LifecycleState,
+		&action.CurrentPayloadHash,
+		&createdAt,
+		&updatedAt,
+	); err != nil {
+		return Action{}, err
+	}
+
+	var err error
+	action.CreatedAt, err = parseTime(createdAt)
+	if err != nil {
+		return Action{}, err
+	}
+	action.UpdatedAt, err = parseTime(updatedAt)
+	if err != nil {
+		return Action{}, err
+	}
+	return action, nil
+}
+
+func scanActionPayload(row interface{ Scan(...any) error }) (ActionPayload, error) {
+	var payload ActionPayload
+	var createdAt string
+	if err := row.Scan(
+		&payload.ID,
+		&payload.ActionID,
+		&payload.PayloadSchema,
+		&payload.PayloadSchemaVersion,
+		&payload.PayloadHash,
+		&payload.PayloadJSON,
+		&payload.SubmitPath,
+		&payload.ReadbackPath,
+		&payload.ProofRequirement,
+		&createdAt,
+	); err != nil {
+		return ActionPayload{}, err
+	}
+
+	var err error
+	payload.CreatedAt, err = parseTime(createdAt)
+	if err != nil {
+		return ActionPayload{}, err
+	}
+	return payload, nil
+}
+
+func scanActionEvidenceEvent(row interface{ Scan(...any) error }) (ActionEvidenceEvent, error) {
+	var event ActionEvidenceEvent
+	var payloadHash sql.NullString
+	var approvalID sql.NullInt64
+	var runID sql.NullInt64
+	var occurredAt string
+	if err := row.Scan(
+		&event.ID,
+		&event.ActionID,
+		&event.EventType,
+		&event.EventVersion,
+		&payloadHash,
+		&approvalID,
+		&runID,
+		&event.Source,
+		&event.EvidenceJSON,
+		&occurredAt,
+	); err != nil {
+		return ActionEvidenceEvent{}, err
+	}
+
+	var err error
+	event.PayloadHash = nullableStringPtr(payloadHash)
+	event.ApprovalID = nullableInt64Ptr(approvalID)
+	event.RunID = nullableInt64Ptr(runID)
+	event.OccurredAt, err = parseTime(occurredAt)
+	if err != nil {
+		return ActionEvidenceEvent{}, err
+	}
+	return event, nil
 }
 
 func scanIncident(row interface{ Scan(...any) error }) (Incident, error) {
@@ -3647,6 +3979,24 @@ func nullableInt64Ptr(value sql.NullInt64) *int64 {
 	}
 	ptr := new(int64)
 	*ptr = value.Int64
+	return ptr
+}
+
+func nullableStringPtr(value sql.NullString) *string {
+	if !value.Valid {
+		return nil
+	}
+	ptr := new(string)
+	*ptr = value.String
+	return ptr
+}
+
+func stringPtrIfNotEmpty(value string) *string {
+	if value == "" {
+		return nil
+	}
+	ptr := new(string)
+	*ptr = value
 	return ptr
 }
 

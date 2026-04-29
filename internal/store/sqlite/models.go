@@ -80,6 +80,8 @@ type Approval struct {
 	ID          int64
 	TaskID      int64
 	RunID       *int64
+	ActionID    *int64
+	PayloadHash string
 	Status      string
 	RequestedAt time.Time
 	ResolvedAt  *time.Time
@@ -90,6 +92,8 @@ type Approval struct {
 type RequestApprovalParams struct {
 	TaskID      int64
 	RunID       *int64
+	ActionID    *int64
+	PayloadHash string
 	Status      string
 	RequestedBy string
 }
@@ -99,6 +103,72 @@ type ResolveApprovalParams struct {
 	Status     string
 	DecisionBy string
 	Reason     string
+}
+
+type Action struct {
+	ID                 int64
+	WorkflowKey        string
+	WorkflowRunID      int64
+	ActionType         string
+	LifecycleState     string
+	CurrentPayloadHash string
+	CreatedAt          time.Time
+	UpdatedAt          time.Time
+}
+
+type ActionPayload struct {
+	ID                   int64
+	ActionID             int64
+	PayloadSchema        string
+	PayloadSchemaVersion int
+	PayloadHash          string
+	PayloadJSON          string
+	SubmitPath           string
+	ReadbackPath         string
+	ProofRequirement     string
+	CreatedAt            time.Time
+}
+
+type ActionEvidenceEvent struct {
+	ID           int64
+	ActionID     int64
+	EventType    string
+	EventVersion int
+	PayloadHash  *string
+	ApprovalID   *int64
+	RunID        *int64
+	Source       string
+	EvidenceJSON string
+	OccurredAt   time.Time
+}
+
+type CreateActionWithPayloadParams struct {
+	WorkflowKey          string
+	WorkflowRunID        int64
+	ActionType           string
+	PayloadSchema        string
+	PayloadSchemaVersion int
+	PayloadHash          string
+	PayloadJSON          string
+	SubmitPath           string
+	ReadbackPath         string
+	ProofRequirement     string
+}
+
+type AppendActionEvidenceParams struct {
+	ActionID     int64
+	EventType    string
+	EventVersion int
+	PayloadHash  string
+	ApprovalID   *int64
+	RunID        *int64
+	Source       string
+	EvidenceJSON string
+}
+
+type ListActionsParams struct {
+	WorkflowKey   string
+	WorkflowRunID *int64
 }
 
 type Incident struct {

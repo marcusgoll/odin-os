@@ -3,11 +3,209 @@ package sqlite
 import (
 	"context"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	runtimeevents "odin-os/internal/runtime/events"
 	"odin-os/internal/runtime/projections"
 )
+
+func TestStorePersistsActionPayloadAndEvidence(t *testing.T) {
+	ctx := context.Background()
+	store := openMigratedTestStore(t, "actions.db")
+	defer store.Close()
+	_, _, run := createProjectTaskRunFixture(t, ctx, store)
+
+	action, payload, err := store.CreateActionWithPayload(ctx, CreateActionWithPayloadParams{
+		WorkflowKey:          "flica-tradeboard",
+		WorkflowRunID:        run.ID,
+		ActionType:           "tradeboard_action",
+		PayloadSchema:        "flica.tradeboard_action.v1",
+		PayloadSchemaVersion: 1,
+		PayloadHash:          "sha256:test",
+		PayloadJSON:          `{"pairing":"W7084C"}`,
+		SubmitPath:           "command:/tradeboard post",
+		ReadbackPath:         "huginn:flica-my-requests",
+		ProofRequirement:     "external_readback",
+	})
+	if err != nil {
+		t.Fatalf("CreateActionWithPayload() error = %v", err)
+	}
+
+	if action.WorkflowKey != "flica-tradeboard" || payload.PayloadHash != "sha256:test" {
+		t.Fatalf("action=%+v payload=%+v", action, payload)
+	}
+	if action.WorkflowRunID != run.ID {
+		t.Fatalf("action.WorkflowRunID = %d, want %d", action.WorkflowRunID, run.ID)
+	}
+	if action.CurrentPayloadHash != payload.PayloadHash {
+		t.Fatalf("action.CurrentPayloadHash = %q, want %q", action.CurrentPayloadHash, payload.PayloadHash)
+	}
+
+	runID := run.ID
+	approval, err := store.RequestApproval(ctx, RequestApprovalParams{
+		TaskID:      run.TaskID,
+		RunID:       &runID,
+		ActionID:    &action.ID,
+		PayloadHash: payload.PayloadHash,
+		Status:      "pending",
+		RequestedBy: "system",
+	})
+	if err != nil {
+		t.Fatalf("RequestApproval() error = %v", err)
+	}
+	gotApproval, err := store.GetApproval(ctx, approval.ID)
+	if err != nil {
+		t.Fatalf("GetApproval() error = %v", err)
+	}
+	if gotApproval.ActionID == nil || *gotApproval.ActionID != action.ID || gotApproval.PayloadHash != payload.PayloadHash {
+		t.Fatalf("GetApproval() = %+v, want action approval binding", gotApproval)
+	}
+
+	event, err := store.AppendActionEvidence(ctx, AppendActionEvidenceParams{
+		ActionID:     action.ID,
+		EventType:    "action.prepared",
+		EventVersion: 1,
+		PayloadHash:  "sha256:test",
+		ApprovalID:   &approval.ID,
+		RunID:        &runID,
+		Source:       "test",
+		EvidenceJSON: `{"status":"prepared"}`,
+	})
+	if err != nil {
+		t.Fatalf("AppendActionEvidence() error = %v", err)
+	}
+	if event.ActionID != action.ID || event.PayloadHash == nil || *event.PayloadHash != "sha256:test" {
+		t.Fatalf("event=%+v, want action payload evidence", event)
+	}
+	if event.ApprovalID == nil || *event.ApprovalID != approval.ID {
+		t.Fatalf("event.ApprovalID = %v, want %d", event.ApprovalID, approval.ID)
+	}
+
+	gotAction, gotPayload, err := store.GetAction(ctx, action.ID)
+	if err != nil {
+		t.Fatalf("GetAction() error = %v", err)
+	}
+	if gotAction.ID != action.ID || gotPayload.ID != payload.ID {
+		t.Fatalf("GetAction() = %+v %+v, want action %d payload %d", gotAction, gotPayload, action.ID, payload.ID)
+	}
+
+	actions, err := store.ListActions(ctx, ListActionsParams{WorkflowRunID: &runID})
+	if err != nil {
+		t.Fatalf("ListActions() error = %v", err)
+	}
+	if len(actions) != 1 || actions[0].ID != action.ID {
+		t.Fatalf("ListActions() = %+v, want action %d", actions, action.ID)
+	}
+
+	events, err := store.ListActionEvidence(ctx, action.ID)
+	if err != nil {
+		t.Fatalf("ListActionEvidence() error = %v", err)
+	}
+	if len(events) != 1 || events[0].ID != event.ID {
+		t.Fatalf("ListActionEvidence() = %+v, want event %d", events, event.ID)
+	}
+}
+
+func TestStoreRejectsDuplicateActionPayloadHash(t *testing.T) {
+	ctx := context.Background()
+	store := openMigratedTestStore(t, "duplicate-action-payload.db")
+	defer store.Close()
+	_, _, run := createProjectTaskRunFixture(t, ctx, store)
+
+	action, payload, err := store.CreateActionWithPayload(ctx, CreateActionWithPayloadParams{
+		WorkflowKey:          "flica-tradeboard",
+		WorkflowRunID:        run.ID,
+		ActionType:           "tradeboard_action",
+		PayloadSchema:        "flica.tradeboard_action.v1",
+		PayloadSchemaVersion: 1,
+		PayloadHash:          "sha256:duplicate",
+		PayloadJSON:          `{"pairing":"W7084C"}`,
+		SubmitPath:           "command:/tradeboard post",
+		ReadbackPath:         "huginn:flica-my-requests",
+		ProofRequirement:     "external_readback",
+	})
+	if err != nil {
+		t.Fatalf("CreateActionWithPayload() error = %v", err)
+	}
+
+	_, err = store.DB().ExecContext(ctx, `
+		INSERT INTO action_payloads (
+			action_id,
+			payload_schema,
+			payload_schema_version,
+			payload_hash,
+			payload_json,
+			submit_path,
+			readback_path,
+			proof_requirement,
+			created_at
+		)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`,
+		action.ID,
+		payload.PayloadSchema,
+		payload.PayloadSchemaVersion,
+		payload.PayloadHash,
+		payload.PayloadJSON,
+		payload.SubmitPath,
+		payload.ReadbackPath,
+		payload.ProofRequirement,
+		formatTime(store.now()),
+	)
+	if err == nil {
+		t.Fatal("duplicate action payload insert succeeded, want unique constraint failure")
+	}
+	if !strings.Contains(err.Error(), "UNIQUE") {
+		t.Fatalf("duplicate action payload error = %v, want unique constraint failure", err)
+	}
+}
+
+func openTestStore(t *testing.T) *Store {
+	t.Helper()
+	return openMigratedTestStore(t, "odin.db")
+}
+
+func createProjectTaskRunFixture(t *testing.T, ctx context.Context, store *Store) (Project, Task, Run) {
+	t.Helper()
+
+	project, err := store.CreateProject(ctx, CreateProjectParams{
+		Key:           "odin-core",
+		Name:          "Odin Core",
+		Scope:         "odin-core",
+		GitRoot:       "/home/orchestrator/odin-os",
+		DefaultBranch: "main",
+		GitHubRepo:    "example/odin-os",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+
+	task, err := store.CreateTask(ctx, CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "action-evidence",
+		Title:       "Prepare action evidence",
+		Status:      "running",
+		Scope:       "odin-core",
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+
+	run, err := store.StartRun(ctx, StartRunParams{
+		TaskID:   task.ID,
+		Executor: "codex",
+		Attempt:  1,
+		Status:   "running",
+	})
+	if err != nil {
+		t.Fatalf("StartRun() error = %v", err)
+	}
+
+	return project, task, run
+}
 
 func TestStoreMigrateLifecycleAndReopen(t *testing.T) {
 	ctx := context.Background()
@@ -224,8 +422,12 @@ func TestStoreMigrateLifecycleAndReopen(t *testing.T) {
 	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM schema_migrations`).Scan(&migrationCount); err != nil {
 		t.Fatalf("schema_migrations count query error = %v", err)
 	}
-	if migrationCount != 6 {
-		t.Fatalf("schema_migrations count = %d, want 6", migrationCount)
+	migrations, err := loadMigrations()
+	if err != nil {
+		t.Fatalf("loadMigrations() error = %v", err)
+	}
+	if migrationCount != len(migrations) {
+		t.Fatalf("schema_migrations count = %d, want %d", migrationCount, len(migrations))
 	}
 
 	if err := store.Close(); err != nil {
