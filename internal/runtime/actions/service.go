@@ -28,6 +28,9 @@ func (Service) HashPreparedPayload(payload PreparedPayload) (string, error) {
 	if payload.ProofRequirement == "" {
 		return "", ErrSubstituteProofNotDeclared
 	}
+	if !knownProofRequirement(payload.ProofRequirement) {
+		return "", ErrProofRequirementUnknown
+	}
 	if payload.ProofRequirement == ProofExternalReadback && payload.ReadbackPath == "" {
 		return "", ErrReadbackPathMissing
 	}
@@ -149,6 +152,8 @@ func allowedCurrentStates(eventType EventType) ([]LifecycleState, bool) {
 		return []LifecycleState{StateSubmitted}, true
 	case EventExternallyReadBack:
 		return []LifecycleState{StateSubmitted, StateInternallyRecorded}, true
+	case EventSubstituteProof:
+		return []LifecycleState{StateSubmitted, StateInternallyRecorded}, true
 	case EventCompleted:
 		return []LifecycleState{StateInternallyRecorded, StateExternallyReadBack}, true
 	case EventFailed:
@@ -167,6 +172,15 @@ func hasEvent(events []EvidenceSummary, eventType EventType) bool {
 		}
 	}
 	return false
+}
+
+func knownProofRequirement(requirement ProofRequirement) bool {
+	switch requirement {
+	case ProofExternalReadback, ProofSubstitute, ProofInternalRecord:
+		return true
+	default:
+		return false
+	}
 }
 
 func isTerminal(state LifecycleState) bool {

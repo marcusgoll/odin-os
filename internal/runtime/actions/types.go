@@ -54,6 +54,7 @@ var (
 	ErrReadbackPathMissing         = errors.New("readback_path_missing")
 	ErrExternalReadbackMissing     = errors.New("external_readback_missing")
 	ErrSubstituteProofNotDeclared  = errors.New("substitute_proof_not_declared")
+	ErrProofRequirementUnknown     = errors.New("proof_requirement_unknown")
 	ErrTerminalActionClosed        = errors.New("terminal_action_closed")
 )
 

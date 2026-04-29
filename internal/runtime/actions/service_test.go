@@ -117,6 +117,18 @@ func TestPreparedPayloadHashCanonicalizesJSONObjectOrder(t *testing.T) {
 	}
 }
 
+func TestPreparedPayloadHashRejectsUnknownProofRequirement(t *testing.T) {
+	_, err := actions.Service{}.HashPreparedPayload(actions.PreparedPayload{
+		PayloadJSON:      json.RawMessage(`{"action":"prepare"}`),
+		SubmitPath:       "command:/actions prepare",
+		ReadbackPath:     "command:/actions readback",
+		ProofRequirement: actions.ProofRequirement("unknown_proof"),
+	})
+	if !errors.Is(err, actions.ErrProofRequirementUnknown) {
+		t.Fatalf("err = %v, want ErrProofRequirementUnknown", err)
+	}
+}
+
 func TestLifecycleRejectsUnsafeTerminalMutation(t *testing.T) {
 	err := actions.ValidateTransition(actions.TransitionInput{
 		CurrentState: actions.StateCompleted,
@@ -124,6 +136,26 @@ func TestLifecycleRejectsUnsafeTerminalMutation(t *testing.T) {
 	})
 	if !errors.Is(err, actions.ErrTerminalActionClosed) {
 		t.Fatalf("err = %v, want ErrTerminalActionClosed", err)
+	}
+}
+
+func TestLifecycleAllowsSubstituteProofAfterSubmission(t *testing.T) {
+	err := actions.ValidateTransition(actions.TransitionInput{
+		CurrentState: actions.StateSubmitted,
+		EventType:    actions.EventSubstituteProof,
+	})
+	if err != nil {
+		t.Fatalf("ValidateTransition() error = %v", err)
+	}
+}
+
+func TestLifecycleRejectsSubstituteProofBeforeSubmission(t *testing.T) {
+	err := actions.ValidateTransition(actions.TransitionInput{
+		CurrentState: actions.StateApproved,
+		EventType:    actions.EventSubstituteProof,
+	})
+	if !errors.Is(err, actions.ErrInvalidLifecycleTransition) {
+		t.Fatalf("err = %v, want ErrInvalidLifecycleTransition", err)
 	}
 }
 
