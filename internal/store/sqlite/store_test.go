@@ -303,6 +303,94 @@ func TestStorePersistsActionPayloadAndEvidence(t *testing.T) {
 	}
 }
 
+func TestAppendActionEvidenceMirrorsRuntimeEvent(t *testing.T) {
+	ctx := context.Background()
+	store := openMigratedTestStore(t, "action-evidence-runtime-event.db")
+	defer store.Close()
+	_, _, run := createProjectTaskRunFixture(t, ctx, store)
+
+	action, payload, err := store.CreateActionWithPayload(ctx, CreateActionWithPayloadParams{
+		WorkflowKey:          "flica-tradeboard",
+		WorkflowRunID:        run.ID,
+		ActionType:           "tradeboard_action",
+		PayloadSchema:        "flica.tradeboard_action.v1",
+		PayloadSchemaVersion: 1,
+		PayloadHash:          "sha256:mirror",
+		PayloadJSON:          `{"pairing":"W7084C"}`,
+		SubmitPath:           "command:/tradeboard post",
+		ReadbackPath:         "huginn:flica-my-requests",
+		ProofRequirement:     "external_readback",
+	})
+	if err != nil {
+		t.Fatalf("CreateActionWithPayload() error = %v", err)
+	}
+
+	runID := run.ID
+	approval, err := store.RequestApproval(ctx, RequestApprovalParams{
+		TaskID:      run.TaskID,
+		RunID:       &runID,
+		ActionID:    &action.ID,
+		PayloadHash: payload.PayloadHash,
+		Status:      "pending",
+		RequestedBy: "system",
+	})
+	if err != nil {
+		t.Fatalf("RequestApproval() error = %v", err)
+	}
+
+	evidence, err := store.AppendActionEvidence(ctx, AppendActionEvidenceParams{
+		ActionID:     action.ID,
+		EventType:    string(runtimeevents.EventActionPrepared),
+		EventVersion: 1,
+		PayloadHash:  payload.PayloadHash,
+		ApprovalID:   &approval.ID,
+		RunID:        &runID,
+		Source:       "test",
+		EvidenceJSON: `{"status":"prepared"}`,
+	})
+	if err != nil {
+		t.Fatalf("AppendActionEvidence() error = %v", err)
+	}
+
+	events, err := store.ListEvents(ctx, ListEventsParams{RunID: &runID})
+	if err != nil {
+		t.Fatalf("ListEvents() error = %v", err)
+	}
+
+	var got *runtimeevents.Record
+	for i := range events {
+		if events[i].Type == runtimeevents.EventActionPrepared {
+			got = &events[i]
+			break
+		}
+	}
+	if got == nil {
+		t.Fatalf("ListEvents() missing %s event in %+v", runtimeevents.EventActionPrepared, events)
+	}
+	if got.StreamType != runtimeevents.StreamAction {
+		t.Fatalf("event.StreamType = %q, want %q", got.StreamType, runtimeevents.StreamAction)
+	}
+	if got.StreamID != action.ID {
+		t.Fatalf("event.StreamID = %d, want %d", got.StreamID, action.ID)
+	}
+	if got.RunID == nil || *got.RunID != runID {
+		t.Fatalf("event.RunID = %v, want %d", got.RunID, runID)
+	}
+
+	var payloadGot runtimeevents.ActionEvidenceMirroredPayload
+	if err := json.Unmarshal(got.Payload, &payloadGot); err != nil {
+		t.Fatalf("Unmarshal action event payload: %v", err)
+	}
+	if payloadGot.EvidenceID != evidence.ID ||
+		payloadGot.ActionID != action.ID ||
+		payloadGot.PayloadHash != payload.PayloadHash ||
+		payloadGot.ApprovalID == nil ||
+		*payloadGot.ApprovalID != approval.ID ||
+		payloadGot.Source != "test" {
+		t.Fatalf("action event payload = %+v, want evidence/action/payload/approval/source linkage", payloadGot)
+	}
+}
+
 func TestStoreRejectsDuplicateActionPayloadHash(t *testing.T) {
 	ctx := context.Background()
 	store := openMigratedTestStore(t, "duplicate-action-payload.db")
@@ -634,6 +722,13 @@ func TestStoreReindexesKnowledgeChunksWhenSourceTitleChanges(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RecordKnowledgeChunk() error = %v", err)
 	}
+	if err := store.IndexKnowledgeChunk(ctx, IndexKnowledgeChunkParams{
+		ChunkID:  chunk.ID,
+		Topics:   []string{"benefits"},
+		Entities: []string{"contractual"},
+	}); err != nil {
+		t.Fatalf("IndexKnowledgeChunk() error = %v", err)
+	}
 
 	_, err = store.UpsertKnowledgeSource(ctx, UpsertKnowledgeSourceParams{
 		Key:          "title-refresh",
@@ -663,6 +758,170 @@ func TestStoreReindexesKnowledgeChunksWhenSourceTitleChanges(t *testing.T) {
 	}
 	if len(oldResults) != 0 {
 		t.Fatalf("old title results = %+v, want stale title removed from FTS", oldResults)
+	}
+	topicResults, err := store.SearchKnowledgeChunks(ctx, SearchKnowledgeChunksParams{Query: "benefits", Scope: "global", ScopeKey: "global"})
+	if err != nil {
+		t.Fatalf("SearchKnowledgeChunks(topic) error = %v", err)
+	}
+	if len(topicResults) != 1 || topicResults[0].ChunkID != chunk.ID {
+		t.Fatalf("topic results = %+v, want preserved topic index for chunk %d", topicResults, chunk.ID)
+	}
+	entityResults, err := store.SearchKnowledgeChunks(ctx, SearchKnowledgeChunksParams{Query: "contractual", Scope: "global", ScopeKey: "global"})
+	if err != nil {
+		t.Fatalf("SearchKnowledgeChunks(entity) error = %v", err)
+	}
+	if len(entityResults) != 1 || entityResults[0].ChunkID != chunk.ID {
+		t.Fatalf("entity results = %+v, want preserved entity index for chunk %d", entityResults, chunk.ID)
+	}
+}
+
+func TestStoreRejectsInvalidKnowledgeCurrentExtractionLineage(t *testing.T) {
+	ctx := context.Background()
+	store := openMigratedTestStore(t, "knowledge-current-extraction-lineage.db")
+	defer store.Close()
+
+	artifactA, err := store.RecordKnowledgeArtifact(ctx, RecordKnowledgeArtifactParams{
+		SHA256:       "sha256:lineage-a",
+		SizeBytes:    42,
+		SourceType:   "text",
+		MimeType:     "text/plain",
+		ArtifactPath: "knowledge/artifacts/li/lineage-a/source.txt",
+		OriginalPath: "/tmp/lineage-a.txt",
+	})
+	if err != nil {
+		t.Fatalf("RecordKnowledgeArtifact(a) error = %v", err)
+	}
+	artifactB, err := store.RecordKnowledgeArtifact(ctx, RecordKnowledgeArtifactParams{
+		SHA256:       "sha256:lineage-b",
+		SizeBytes:    42,
+		SourceType:   "text",
+		MimeType:     "text/plain",
+		ArtifactPath: "knowledge/artifacts/li/lineage-b/source.txt",
+		OriginalPath: "/tmp/lineage-b.txt",
+	})
+	if err != nil {
+		t.Fatalf("RecordKnowledgeArtifact(b) error = %v", err)
+	}
+	artifactC, err := store.RecordKnowledgeArtifact(ctx, RecordKnowledgeArtifactParams{
+		SHA256:       "sha256:lineage-c",
+		SizeBytes:    42,
+		SourceType:   "text",
+		MimeType:     "text/plain",
+		ArtifactPath: "knowledge/artifacts/li/lineage-c/source.txt",
+		OriginalPath: "/tmp/lineage-c.txt",
+	})
+	if err != nil {
+		t.Fatalf("RecordKnowledgeArtifact(c) error = %v", err)
+	}
+
+	_, err = store.UpsertKnowledgeSource(ctx, UpsertKnowledgeSourceParams{
+		Key:               "missing-current-extraction",
+		Title:             "Missing Current Extraction",
+		Scope:             "global",
+		ScopeKey:          "global",
+		Restricted:        true,
+		SourceKind:        "manual",
+		SourceClass:       "text",
+		Lifecycle:         "ready",
+		ManifestPath:      "memory/knowledge/missing-current-extraction.md",
+		CurrentArtifactID: &artifactA.ID,
+	})
+	if err == nil || !strings.Contains(err.Error(), "requires current extraction") {
+		t.Fatalf("UpsertKnowledgeSource(missing extraction) error = %v, want current extraction failure", err)
+	}
+
+	sourceA, err := store.UpsertKnowledgeSource(ctx, UpsertKnowledgeSourceParams{
+		Key:               "lineage-a",
+		Title:             "Lineage A",
+		Scope:             "global",
+		ScopeKey:          "global",
+		Restricted:        true,
+		SourceKind:        "manual",
+		SourceClass:       "text",
+		Lifecycle:         "artifact_available",
+		ManifestPath:      "memory/knowledge/lineage-a.md",
+		CurrentArtifactID: &artifactA.ID,
+	})
+	if err != nil {
+		t.Fatalf("UpsertKnowledgeSource(a) error = %v", err)
+	}
+	extractionA, err := store.RecordKnowledgeExtraction(ctx, RecordKnowledgeExtractionParams{
+		SourceID:          sourceA.ID,
+		ArtifactID:        artifactA.ID,
+		ExtractorName:     "plain_text",
+		ExtractorVersion:  "v1",
+		Status:            "succeeded",
+		Lifecycle:         "ready",
+		ExtractedTextHash: "sha256:lineage-a-text",
+	})
+	if err != nil {
+		t.Fatalf("RecordKnowledgeExtraction(a) error = %v", err)
+	}
+
+	_, err = store.UpsertKnowledgeSource(ctx, UpsertKnowledgeSourceParams{
+		Key:                 "lineage-b",
+		Title:               "Lineage B",
+		Scope:               "global",
+		ScopeKey:            "global",
+		Restricted:          true,
+		SourceKind:          "manual",
+		SourceClass:         "text",
+		Lifecycle:           "ready",
+		ManifestPath:        "memory/knowledge/lineage-b.md",
+		CurrentArtifactID:   &artifactB.ID,
+		CurrentExtractionID: &extractionA.ID,
+	})
+	if err == nil || !strings.Contains(err.Error(), "cannot be set before source exists") {
+		t.Fatalf("UpsertKnowledgeSource(insert extraction) error = %v, want insert current extraction failure", err)
+	}
+
+	sourceB, err := store.UpsertKnowledgeSource(ctx, UpsertKnowledgeSourceParams{
+		Key:               "lineage-b",
+		Title:             "Lineage B",
+		Scope:             "global",
+		ScopeKey:          "global",
+		Restricted:        true,
+		SourceKind:        "manual",
+		SourceClass:       "text",
+		Lifecycle:         "artifact_available",
+		ManifestPath:      "memory/knowledge/lineage-b.md",
+		CurrentArtifactID: &artifactB.ID,
+	})
+	if err != nil {
+		t.Fatalf("UpsertKnowledgeSource(b) error = %v", err)
+	}
+	_, err = store.UpsertKnowledgeSource(ctx, UpsertKnowledgeSourceParams{
+		Key:                 sourceB.Key,
+		Title:               sourceB.Title,
+		Scope:               sourceB.Scope,
+		ScopeKey:            sourceB.ScopeKey,
+		Restricted:          sourceB.Restricted,
+		SourceKind:          sourceB.SourceKind,
+		SourceClass:         sourceB.SourceClass,
+		Lifecycle:           "ready",
+		ManifestPath:        sourceB.ManifestPath,
+		CurrentArtifactID:   &artifactB.ID,
+		CurrentExtractionID: &extractionA.ID,
+	})
+	if err == nil || !strings.Contains(err.Error(), "does not belong to source") {
+		t.Fatalf("UpsertKnowledgeSource(cross-source extraction) error = %v, want source lineage failure", err)
+	}
+
+	_, err = store.UpsertKnowledgeSource(ctx, UpsertKnowledgeSourceParams{
+		Key:                 "lineage-a",
+		Title:               "Lineage A",
+		Scope:               "global",
+		ScopeKey:            "global",
+		Restricted:          true,
+		SourceKind:          "manual",
+		SourceClass:         "text",
+		Lifecycle:           "ready",
+		ManifestPath:        "memory/knowledge/lineage-a.md",
+		CurrentArtifactID:   &artifactC.ID,
+		CurrentExtractionID: &extractionA.ID,
+	})
+	if err == nil || !strings.Contains(err.Error(), "does not match current artifact") {
+		t.Fatalf("UpsertKnowledgeSource(artifact mismatch) error = %v, want artifact lineage failure", err)
 	}
 }
 
@@ -811,12 +1070,23 @@ func TestStoreRecordsRestrictedKnowledgeUseApprovalWithoutChangingLifecycle(t *t
 		Restricted:        true,
 		SourceKind:        "manual",
 		SourceClass:       "text",
-		Lifecycle:         "ready",
+		Lifecycle:         "artifact_available",
 		ManifestPath:      "memory/knowledge/restricted-manual.md",
 		CurrentArtifactID: &artifact.ID,
 	})
 	if err != nil {
 		t.Fatalf("UpsertKnowledgeSource() error = %v", err)
+	}
+	if _, err := store.RecordKnowledgeExtraction(ctx, RecordKnowledgeExtractionParams{
+		SourceID:          source.ID,
+		ArtifactID:        artifact.ID,
+		ExtractorName:     "plain_text",
+		ExtractorVersion:  "v1",
+		Status:            "succeeded",
+		Lifecycle:         "ready",
+		ExtractedTextHash: "sha256:restricted-text",
+	}); err != nil {
+		t.Fatalf("RecordKnowledgeExtraction() error = %v", err)
 	}
 
 	approval, err := store.RecordRestrictedKnowledgeUseApproval(ctx, RecordRestrictedKnowledgeUseApprovalParams{

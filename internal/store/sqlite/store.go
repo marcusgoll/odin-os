@@ -1622,6 +1622,9 @@ func (store *Store) UpsertKnowledgeSource(ctx context.Context, params UpsertKnow
 			if err := store.validateKnowledgeArtifactLifecycleTx(ctx, tx, currentArtifactID, params.Lifecycle); err != nil {
 				return err
 			}
+			if err := store.validateKnowledgeCurrentExtractionTx(ctx, tx, existing.ID, currentArtifactID, currentExtractionID, params.Lifecycle); err != nil {
+				return err
+			}
 			if _, err := tx.ExecContext(ctx, `
 				UPDATE knowledge_sources
 				SET title = ?,
@@ -1658,7 +1661,13 @@ func (store *Store) UpsertKnowledgeSource(ctx context.Context, params UpsertKnow
 				}
 			}
 		} else {
+			if currentExtractionID != nil {
+				return fmt.Errorf("knowledge source current extraction cannot be set before source exists")
+			}
 			if err := store.validateKnowledgeArtifactLifecycleTx(ctx, tx, currentArtifactID, params.Lifecycle); err != nil {
+				return err
+			}
+			if err := validateKnowledgeCurrentExtractionRequired(params.Lifecycle, currentExtractionID); err != nil {
 				return err
 			}
 			if _, err := tx.ExecContext(ctx, `
@@ -2344,6 +2353,45 @@ func (store *Store) reindexKnowledgeSourceChunksTx(ctx context.Context, tx *sql.
 	return nil
 }
 
+func validateKnowledgeCurrentExtractionRequired(lifecycle string, extractionID *int64) error {
+	switch lifecycle {
+	case "extracted", "indexed", "ready":
+		if extractionID == nil {
+			return fmt.Errorf("knowledge source lifecycle %q requires current extraction", lifecycle)
+		}
+	}
+	return nil
+}
+
+func (store *Store) validateKnowledgeCurrentExtractionTx(ctx context.Context, tx *sql.Tx, sourceID int64, artifactID *int64, extractionID *int64, lifecycle string) error {
+	if err := validateKnowledgeCurrentExtractionRequired(lifecycle, extractionID); err != nil {
+		return err
+	}
+	if extractionID == nil {
+		return nil
+	}
+
+	var extractionSourceID int64
+	var extractionArtifactID int64
+	if err := tx.QueryRowContext(ctx, `
+		SELECT source_id, artifact_id
+		FROM knowledge_extractions
+		WHERE id = ?
+	`, *extractionID).Scan(&extractionSourceID, &extractionArtifactID); err != nil {
+		return err
+	}
+	if extractionSourceID != sourceID {
+		return fmt.Errorf("knowledge source current extraction %d does not belong to source %d", *extractionID, sourceID)
+	}
+	if artifactID == nil {
+		return fmt.Errorf("knowledge source current extraction %d requires current artifact", *extractionID)
+	}
+	if extractionArtifactID != *artifactID {
+		return fmt.Errorf("knowledge source current extraction %d artifact %d does not match current artifact %d", *extractionID, extractionArtifactID, *artifactID)
+	}
+	return nil
+}
+
 func (store *Store) validateKnowledgeArtifactLifecycleTx(ctx context.Context, tx *sql.Tx, artifactID *int64, lifecycle string) error {
 	if artifactID == nil {
 		return nil
@@ -2376,6 +2424,26 @@ func (store *Store) indexKnowledgeChunkTx(ctx context.Context, tx *sql.Tx, param
 	var sourceKey string
 	var title string
 	var text string
+	topicsText := strings.Join(params.Topics, " ")
+	entitiesText := strings.Join(params.Entities, " ")
+	if params.Topics == nil || params.Entities == nil {
+		var existingTopics sql.NullString
+		var existingEntities sql.NullString
+		if err := tx.QueryRowContext(ctx, `
+			SELECT topics, entities
+			FROM knowledge_fts
+			WHERE rowid = ?
+		`, params.ChunkID).Scan(&existingTopics, &existingEntities); err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return err
+		} else if err == nil {
+			if params.Topics == nil {
+				topicsText = existingTopics.String
+			}
+			if params.Entities == nil {
+				entitiesText = existingEntities.String
+			}
+		}
+	}
 	if err := tx.QueryRowContext(ctx, `
 		SELECT ks.key, ks.title, kc.text
 		FROM knowledge_chunks kc
@@ -2395,8 +2463,8 @@ func (store *Store) indexKnowledgeChunkTx(ctx context.Context, tx *sql.Tx, param
 		params.ChunkID,
 		sourceKey,
 		title,
-		strings.Join(params.Topics, " "),
-		strings.Join(params.Entities, " "),
+		topicsText,
+		entitiesText,
 		text,
 	)
 	return err
