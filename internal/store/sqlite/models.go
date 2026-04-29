@@ -233,6 +233,38 @@ type IntakeItem struct {
 	UpdatedAt                time.Time
 }
 
+type AutomationTrigger struct {
+	ID                     int64
+	WorkspaceID            string
+	Key                    string
+	ProjectID              int64
+	InitiativeKey          string
+	Kind                   string
+	Status                 string
+	RuleJSON               string
+	RuleSummary            string
+	WorkItemTitle          string
+	NextEligibleAt         *time.Time
+	LastEvaluatedAt        *time.Time
+	LastMaterializedAt     *time.Time
+	LastMaterializationKey string
+	LastWorkItemID         *int64
+	LastWorkItemKey        string
+	CreatedAt              time.Time
+	UpdatedAt              time.Time
+}
+
+type AutomationTriggerMaterialization struct {
+	ID                 int64
+	TriggerID          int64
+	MaterializationKey string
+	TaskID             int64
+	Reason             string
+	RequestedBy        string
+	CreatedAt          time.Time
+	UpdatedAt          time.Time
+}
+
 type CreateTaskParams struct {
 	ProjectID             int64
 	Key                   string
@@ -283,6 +315,48 @@ type ListIntakeItemsParams struct {
 	Status      string
 	Scope       string
 	ScopeKey    string
+}
+
+type UpsertAutomationTriggerParams struct {
+	WorkspaceID    string
+	Key            string
+	ProjectID      int64
+	InitiativeKey  string
+	Kind           string
+	Status         string
+	RuleJSON       string
+	RuleSummary    string
+	WorkItemTitle  string
+	NextEligibleAt *time.Time
+}
+
+type ListAutomationTriggersParams struct {
+	WorkspaceID string
+	Status      string
+}
+
+type FireAutomationTriggerParams struct {
+	WorkspaceID       string
+	Key               string
+	Source            string
+	Reason            string
+	RequestedBy       string
+	SetNextEligibleAt bool
+	NextEligibleAt    *time.Time
+}
+
+type FireAutomationTriggerResult struct {
+	Trigger         AutomationTrigger
+	Materialization AutomationTriggerMaterialization
+	WorkItem        Task
+	CreatedWorkItem bool
+}
+
+type MarkAutomationTriggerErroredParams struct {
+	WorkspaceID string
+	Key         string
+	Reason      string
+	Error       string
 }
 
 type UpdateTaskStatusParams struct {

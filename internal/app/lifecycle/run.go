@@ -52,6 +52,7 @@ import (
 	"odin-os/internal/runtime/socialcopilot"
 	runtimestate "odin-os/internal/runtime/state"
 	"odin-os/internal/runtime/supervision"
+	"odin-os/internal/runtime/triggers"
 	"odin-os/internal/store/sqlite"
 	"odin-os/internal/telemetry/logs"
 	metricsvc "odin-os/internal/telemetry/metrics"
@@ -62,7 +63,7 @@ import (
 
 var errRuntimeNotReady = errors.New("runtime not ready")
 
-const rootUsageBanner = "Usage: odin <command> [args]\n\nCommands: help repl overview doctor healthcheck serve backup restore verify-backup status legacy project workspace scope jobs runs approvals intake agenda logs task initiative companion profile followup transition skills"
+const rootUsageBanner = "Usage: odin <command> [args]\n\nCommands: help repl overview doctor healthcheck serve backup restore verify-backup status legacy project workspace scope jobs runs approvals intake agenda logs task initiative companion profile followup trigger transition skills"
 
 var (
 	serveTaskLoopInterval     = 1 * time.Second
@@ -213,6 +214,8 @@ func Run(ctx context.Context, root string, args []string, stdin io.Reader, stdou
 		return commands.RunProfile(ctx, app.Store, args[1:], stdout)
 	case "followup":
 		return runFollowup(ctx, app, args[1:], stdout)
+	case "trigger":
+		return commands.RunTrigger(ctx, triggers.Service{Store: app.Store, Registry: app.Registry}, args[1:], stdout)
 	case "skills":
 		return runSkills(ctx, app, args[1:], stdout)
 	case "doctor":

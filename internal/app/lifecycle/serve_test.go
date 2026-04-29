@@ -993,9 +993,9 @@ service:
 
 	ctx, cancel := context.WithCancel(context.Background())
 	ctx = withServeLoopConfig(ctx, serveLoopConfig{
-		healthInterval: 80 * time.Millisecond,
+		healthInterval: 50 * time.Millisecond,
 	})
-	time.AfterFunc(300*time.Millisecond, cancel)
+	time.AfterFunc(600*time.Millisecond, cancel)
 
 	var stdout bytes.Buffer
 	err := Run(ctx, root, []string{"serve"}, strings.NewReader(""), &stdout)

@@ -529,6 +529,295 @@ func (store *Store) ListIntakeItems(ctx context.Context, params ListIntakeItemsP
 	return items, rows.Err()
 }
 
+func (store *Store) UpsertAutomationTrigger(ctx context.Context, params UpsertAutomationTriggerParams) (AutomationTrigger, error) {
+	now := store.now()
+	params = normalizeAutomationTriggerParams(params)
+	if !json.Valid([]byte(params.RuleJSON)) {
+		return AutomationTrigger{}, fmt.Errorf("automation trigger rule json must be valid JSON")
+	}
+
+	var trigger AutomationTrigger
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		existing, err := store.getAutomationTriggerByWorkspaceKeyQuery(ctx, tx, params.WorkspaceID, params.Key)
+		switch {
+		case err == sql.ErrNoRows:
+			result, err := tx.ExecContext(ctx, `
+				INSERT INTO automation_triggers (
+					workspace_id, key, project_id, initiative_key, kind, status, rule_json, rule_summary,
+					work_item_title, next_eligible_at, created_at, updated_at
+				)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			`,
+				params.WorkspaceID,
+				params.Key,
+				params.ProjectID,
+				params.InitiativeKey,
+				params.Kind,
+				params.Status,
+				params.RuleJSON,
+				params.RuleSummary,
+				params.WorkItemTitle,
+				nullTime(params.NextEligibleAt),
+				formatTime(now),
+				formatTime(now),
+			)
+			if err != nil {
+				return err
+			}
+			triggerID, err := result.LastInsertId()
+			if err != nil {
+				return err
+			}
+			trigger, err = store.getAutomationTriggerByIDQuery(ctx, tx, triggerID)
+			if err != nil {
+				return err
+			}
+			return appendEventTx(ctx, tx, eventInsert{
+				StreamType: runtimeevents.StreamAutomationTrigger,
+				StreamID:   trigger.ID,
+				EventType:  runtimeevents.EventAutomationTriggerCreated,
+				Scope:      trigger.Kind,
+				ProjectID:  &trigger.ProjectID,
+				Payload: runtimeevents.AutomationTriggerCreatedPayload{
+					WorkspaceID:   trigger.WorkspaceID,
+					Key:           trigger.Key,
+					InitiativeKey: trigger.InitiativeKey,
+					Kind:          trigger.Kind,
+					Status:        trigger.Status,
+				},
+				OccurredAt: now,
+			})
+		case err != nil:
+			return err
+		default:
+			if _, err := tx.ExecContext(ctx, `
+				UPDATE automation_triggers
+				SET project_id = ?, initiative_key = ?, kind = ?, status = ?, rule_json = ?, rule_summary = ?,
+					work_item_title = ?, next_eligible_at = ?, updated_at = ?
+				WHERE id = ?
+			`,
+				params.ProjectID,
+				params.InitiativeKey,
+				params.Kind,
+				params.Status,
+				params.RuleJSON,
+				params.RuleSummary,
+				params.WorkItemTitle,
+				nullTime(params.NextEligibleAt),
+				formatTime(now),
+				existing.ID,
+			); err != nil {
+				return err
+			}
+			trigger, err = store.getAutomationTriggerByIDQuery(ctx, tx, existing.ID)
+			return err
+		}
+	})
+	return trigger, err
+}
+
+func (store *Store) GetAutomationTriggerByWorkspaceKey(ctx context.Context, workspaceID string, key string) (AutomationTrigger, error) {
+	return store.getAutomationTriggerByWorkspaceKeyQuery(ctx, store.db, defaultString(workspaceID, "default"), strings.TrimSpace(key))
+}
+
+func (store *Store) ListAutomationTriggers(ctx context.Context, params ListAutomationTriggersParams) ([]AutomationTrigger, error) {
+	query := automationTriggerSelectSQL() + ` WHERE 1 = 1`
+	var args []any
+	if params.WorkspaceID != "" {
+		query += ` AND at.workspace_id = ?`
+		args = append(args, params.WorkspaceID)
+	}
+	if params.Status != "" {
+		query += ` AND at.status = ?`
+		args = append(args, params.Status)
+	}
+	query += ` ORDER BY at.id ASC`
+	return store.listAutomationTriggersQuery(ctx, query, args...)
+}
+
+func (store *Store) ListDueAutomationTriggers(ctx context.Context, now time.Time) ([]AutomationTrigger, error) {
+	query := automationTriggerSelectSQL() + `
+		WHERE at.status = 'enabled'
+		  AND at.next_eligible_at IS NOT NULL
+		  AND at.next_eligible_at <= ?
+		ORDER BY at.next_eligible_at ASC, at.id ASC
+	`
+	return store.listAutomationTriggersQuery(ctx, query, formatTime(now.UTC()))
+}
+
+func (store *Store) FireAutomationTrigger(ctx context.Context, params FireAutomationTriggerParams) (FireAutomationTriggerResult, error) {
+	now := store.now()
+	workspaceID := defaultString(params.WorkspaceID, "default")
+	key := strings.TrimSpace(params.Key)
+	source := defaultString(params.Source, "manual")
+	reason := defaultString(params.Reason, "manual")
+	requestedBy := defaultString(params.RequestedBy, "operator")
+	materializationKey := strings.Join([]string{workspaceID, key, source, reason}, ":")
+
+	var result FireAutomationTriggerResult
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		trigger, err := store.getAutomationTriggerByWorkspaceKeyQuery(ctx, tx, workspaceID, key)
+		if err != nil {
+			return err
+		}
+		if trigger.Status != "enabled" {
+			return fmt.Errorf("automation trigger %s is %s", trigger.Key, trigger.Status)
+		}
+
+		if err := appendEventTx(ctx, tx, eventInsert{
+			StreamType: runtimeevents.StreamAutomationTrigger,
+			StreamID:   trigger.ID,
+			EventType:  runtimeevents.EventAutomationTriggerFireRequested,
+			Scope:      trigger.Kind,
+			ProjectID:  &trigger.ProjectID,
+			Payload: runtimeevents.AutomationTriggerFireRequestedPayload{
+				WorkspaceID:        trigger.WorkspaceID,
+				Key:                trigger.Key,
+				MaterializationKey: materializationKey,
+				Reason:             reason,
+				RequestedBy:        requestedBy,
+			},
+			OccurredAt: now,
+		}); err != nil {
+			return err
+		}
+
+		existing, err := store.getAutomationTriggerMaterializationTx(ctx, tx, trigger.ID, materializationKey)
+		if err == nil {
+			task, err := store.getTaskTx(ctx, tx, existing.TaskID)
+			if err != nil {
+				return err
+			}
+			if err := store.updateAutomationTriggerEvaluationTx(ctx, tx, trigger.ID, now, params.SetNextEligibleAt, params.NextEligibleAt); err != nil {
+				return err
+			}
+			updated, err := store.getAutomationTriggerByIDQuery(ctx, tx, trigger.ID)
+			if err != nil {
+				return err
+			}
+			if err := appendAutomationTriggerEvaluatedEvent(ctx, tx, updated, materializationKey, false, now); err != nil {
+				return err
+			}
+			result = FireAutomationTriggerResult{
+				Trigger:         updated,
+				Materialization: existing,
+				WorkItem:        task,
+				CreatedWorkItem: false,
+			}
+			return nil
+		}
+		if err != sql.ErrNoRows {
+			return err
+		}
+
+		project, err := store.getProjectTx(ctx, tx, trigger.ProjectID)
+		if err != nil {
+			return err
+		}
+		task, err := store.createAutomationTriggerTaskTx(ctx, tx, trigger, project, materializationKey, now)
+		if err != nil {
+			return err
+		}
+		materialization, err := store.createAutomationTriggerMaterializationTx(ctx, tx, trigger.ID, materializationKey, task.ID, reason, requestedBy, now)
+		if err != nil {
+			return err
+		}
+		if err := store.updateAutomationTriggerMaterializedTx(ctx, tx, trigger.ID, materializationKey, task.ID, now, params.SetNextEligibleAt, params.NextEligibleAt); err != nil {
+			return err
+		}
+		updated, err := store.getAutomationTriggerByIDQuery(ctx, tx, trigger.ID)
+		if err != nil {
+			return err
+		}
+		if err := appendAutomationTriggerEvaluatedEvent(ctx, tx, updated, materializationKey, true, now); err != nil {
+			return err
+		}
+		if err := appendEventTx(ctx, tx, eventInsert{
+			StreamType: runtimeevents.StreamAutomationTrigger,
+			StreamID:   updated.ID,
+			EventType:  runtimeevents.EventAutomationTriggerMaterialized,
+			Scope:      updated.Kind,
+			ProjectID:  &updated.ProjectID,
+			TaskID:     &task.ID,
+			Payload: runtimeevents.AutomationTriggerMaterializedPayload{
+				WorkspaceID:        updated.WorkspaceID,
+				Key:                updated.Key,
+				MaterializationKey: materializationKey,
+				TaskID:             task.ID,
+				TaskKey:            task.Key,
+				RequestedBy:        requestedBy,
+			},
+			OccurredAt: now,
+		}); err != nil {
+			return err
+		}
+		result = FireAutomationTriggerResult{
+			Trigger:         updated,
+			Materialization: materialization,
+			WorkItem:        task,
+			CreatedWorkItem: true,
+		}
+		return nil
+	})
+	return result, err
+}
+
+func (store *Store) MarkAutomationTriggerErrored(ctx context.Context, params MarkAutomationTriggerErroredParams) (AutomationTrigger, error) {
+	now := store.now()
+	var updated AutomationTrigger
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		trigger, err := store.getAutomationTriggerByWorkspaceKeyQuery(ctx, tx, defaultString(params.WorkspaceID, "default"), strings.TrimSpace(params.Key))
+		if err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE automation_triggers
+			SET status = 'errored', last_evaluated_at = ?, updated_at = ?
+			WHERE id = ?
+		`, formatTime(now), formatTime(now), trigger.ID); err != nil {
+			return err
+		}
+		updated, err = store.getAutomationTriggerByIDQuery(ctx, tx, trigger.ID)
+		if err != nil {
+			return err
+		}
+		if trigger.Status != updated.Status {
+			if err := appendEventTx(ctx, tx, eventInsert{
+				StreamType: runtimeevents.StreamAutomationTrigger,
+				StreamID:   updated.ID,
+				EventType:  runtimeevents.EventAutomationTriggerStatusChanged,
+				Scope:      updated.Kind,
+				ProjectID:  &updated.ProjectID,
+				Payload: runtimeevents.AutomationTriggerStatusChangedPayload{
+					WorkspaceID:    updated.WorkspaceID,
+					Key:            updated.Key,
+					PreviousStatus: trigger.Status,
+					Status:         updated.Status,
+					Reason:         params.Reason,
+				},
+				OccurredAt: now,
+			}); err != nil {
+				return err
+			}
+		}
+		return appendEventTx(ctx, tx, eventInsert{
+			StreamType: runtimeevents.StreamAutomationTrigger,
+			StreamID:   updated.ID,
+			EventType:  runtimeevents.EventAutomationTriggerErrored,
+			Scope:      updated.Kind,
+			ProjectID:  &updated.ProjectID,
+			Payload: runtimeevents.AutomationTriggerErroredPayload{
+				WorkspaceID: updated.WorkspaceID,
+				Key:         updated.Key,
+				Reason:      params.Reason,
+				Error:       params.Error,
+			},
+			OccurredAt: now,
+		})
+	})
+	return updated, err
+}
+
 func (store *Store) CreateMemoryEntry(ctx context.Context, params CreateMemoryEntryParams) (MemoryEntry, error) {
 	now := store.now()
 	params, err := normalizeCreateMemoryEntryParams(params)
@@ -6814,6 +7103,236 @@ func skillEventStreamID(skillKey string) int64 {
 	return int64(hasher.Sum64() & 0x7fffffffffffffff)
 }
 
+func normalizeAutomationTriggerParams(params UpsertAutomationTriggerParams) UpsertAutomationTriggerParams {
+	params.WorkspaceID = defaultString(params.WorkspaceID, "default")
+	params.Key = strings.TrimSpace(params.Key)
+	params.InitiativeKey = strings.TrimSpace(params.InitiativeKey)
+	params.Kind = strings.ToLower(defaultString(params.Kind, "schedule"))
+	params.Status = strings.ToLower(defaultString(params.Status, "enabled"))
+	params.RuleJSON = strings.TrimSpace(params.RuleJSON)
+	if params.RuleJSON == "" {
+		params.RuleJSON = "{}"
+	}
+	params.RuleSummary = strings.TrimSpace(params.RuleSummary)
+	params.WorkItemTitle = strings.TrimSpace(params.WorkItemTitle)
+	return params
+}
+
+func automationTriggerSelectSQL() string {
+	return `
+		SELECT at.id, at.workspace_id, at.key, at.project_id, at.initiative_key, at.kind, at.status,
+			at.rule_json, at.rule_summary, at.work_item_title, at.next_eligible_at, at.last_evaluated_at,
+			at.last_materialized_at, at.last_materialization_key, at.last_work_item_id, COALESCE(t.key, ''),
+			at.created_at, at.updated_at
+		FROM automation_triggers at
+		LEFT JOIN tasks t ON t.id = at.last_work_item_id
+	`
+}
+
+func (store *Store) getAutomationTriggerByIDQuery(ctx context.Context, queryer sqlQueryRow, id int64) (AutomationTrigger, error) {
+	row := queryer.QueryRowContext(ctx, automationTriggerSelectSQL()+` WHERE at.id = ?`, id)
+	return scanAutomationTrigger(row)
+}
+
+func (store *Store) getAutomationTriggerByWorkspaceKeyQuery(ctx context.Context, queryer sqlQueryRow, workspaceID string, key string) (AutomationTrigger, error) {
+	row := queryer.QueryRowContext(ctx, automationTriggerSelectSQL()+` WHERE at.workspace_id = ? AND at.key = ?`, workspaceID, key)
+	return scanAutomationTrigger(row)
+}
+
+func (store *Store) listAutomationTriggersQuery(ctx context.Context, query string, args ...any) ([]AutomationTrigger, error) {
+	rows, err := store.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	triggers := make([]AutomationTrigger, 0)
+	for rows.Next() {
+		trigger, err := scanAutomationTrigger(rows)
+		if err != nil {
+			return nil, err
+		}
+		triggers = append(triggers, trigger)
+	}
+	return triggers, rows.Err()
+}
+
+func (store *Store) getAutomationTriggerMaterializationTx(ctx context.Context, tx *sql.Tx, triggerID int64, materializationKey string) (AutomationTriggerMaterialization, error) {
+	row := tx.QueryRowContext(ctx, `
+		SELECT id, trigger_id, materialization_key, task_id, reason, requested_by, created_at, updated_at
+		FROM automation_trigger_materializations
+		WHERE trigger_id = ? AND materialization_key = ?
+	`, triggerID, materializationKey)
+	return scanAutomationTriggerMaterialization(row)
+}
+
+func (store *Store) createAutomationTriggerTaskTx(ctx context.Context, tx *sql.Tx, trigger AutomationTrigger, project Project, materializationKey string, now time.Time) (Task, error) {
+	taskKey := automationTriggerTaskKey(trigger.Key, materializationKey)
+	title := trigger.WorkItemTitle
+	if title == "" {
+		title = "Automation trigger " + trigger.Key
+	}
+	requestedBy := "automation_trigger:" + trigger.Key
+	result, err := tx.ExecContext(ctx, `
+		INSERT INTO tasks (
+			project_id, key, title, action_key, status, scope, requested_by, workspace_id, initiative_id,
+			companion_id, follow_up_obligation_id, follow_up_occurrence_key, work_kind, current_run_id,
+			summary, terminal_reason, artifacts_json, created_at, updated_at
+		)
+		VALUES (?, ?, ?, '', 'queued', ?, ?, NULL, NULL, NULL, NULL, NULL, 'automation_trigger', NULL, '', '', '[]', ?, ?)
+	`,
+		trigger.ProjectID,
+		taskKey,
+		title,
+		project.Scope,
+		requestedBy,
+		formatTime(now),
+		formatTime(now),
+	)
+	if err != nil {
+		return Task{}, err
+	}
+	taskID, err := result.LastInsertId()
+	if err != nil {
+		return Task{}, err
+	}
+	task := Task{
+		ID:             taskID,
+		ProjectID:      trigger.ProjectID,
+		Key:            taskKey,
+		Title:          title,
+		Status:         "queued",
+		Scope:          project.Scope,
+		RequestedBy:    requestedBy,
+		WorkKind:       "automation_trigger",
+		ArtifactsJSON:  "[]",
+		NextEligibleAt: time.Time{},
+		Priority:       100,
+		MaxAttempts:    3,
+		CreatedAt:      now,
+		UpdatedAt:      now,
+	}
+	if err := appendEventTx(ctx, tx, eventInsert{
+		StreamType: runtimeevents.StreamTask,
+		StreamID:   task.ID,
+		EventType:  runtimeevents.EventTaskCreated,
+		Scope:      task.Scope,
+		ProjectID:  &project.ID,
+		TaskID:     &task.ID,
+		Payload: runtimeevents.TaskCreatedPayload{
+			Key:            task.Key,
+			Title:          task.Title,
+			Status:         task.Status,
+			Scope:          task.Scope,
+			RequestedBy:    task.RequestedBy,
+			NextEligibleAt: formatTime(task.NextEligibleAt),
+			Priority:       task.Priority,
+			MaxAttempts:    task.MaxAttempts,
+		},
+		OccurredAt: now,
+	}); err != nil {
+		return Task{}, err
+	}
+	return task, nil
+}
+
+func (store *Store) createAutomationTriggerMaterializationTx(ctx context.Context, tx *sql.Tx, triggerID int64, materializationKey string, taskID int64, reason string, requestedBy string, now time.Time) (AutomationTriggerMaterialization, error) {
+	result, err := tx.ExecContext(ctx, `
+		INSERT INTO automation_trigger_materializations (
+			trigger_id, materialization_key, task_id, reason, requested_by, created_at, updated_at
+		)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+	`, triggerID, materializationKey, taskID, reason, requestedBy, formatTime(now), formatTime(now))
+	if err != nil {
+		return AutomationTriggerMaterialization{}, err
+	}
+	materializationID, err := result.LastInsertId()
+	if err != nil {
+		return AutomationTriggerMaterialization{}, err
+	}
+	return AutomationTriggerMaterialization{
+		ID:                 materializationID,
+		TriggerID:          triggerID,
+		MaterializationKey: materializationKey,
+		TaskID:             taskID,
+		Reason:             reason,
+		RequestedBy:        requestedBy,
+		CreatedAt:          now,
+		UpdatedAt:          now,
+	}, nil
+}
+
+func (store *Store) updateAutomationTriggerEvaluationTx(ctx context.Context, tx *sql.Tx, triggerID int64, now time.Time, setNext bool, next *time.Time) error {
+	if setNext {
+		_, err := tx.ExecContext(ctx, `
+			UPDATE automation_triggers
+			SET last_evaluated_at = ?, next_eligible_at = ?, updated_at = ?
+			WHERE id = ?
+		`, formatTime(now), nullTime(next), formatTime(now), triggerID)
+		return err
+	}
+	_, err := tx.ExecContext(ctx, `
+		UPDATE automation_triggers
+		SET last_evaluated_at = ?, updated_at = ?
+		WHERE id = ?
+	`, formatTime(now), formatTime(now), triggerID)
+	return err
+}
+
+func (store *Store) updateAutomationTriggerMaterializedTx(ctx context.Context, tx *sql.Tx, triggerID int64, materializationKey string, taskID int64, now time.Time, setNext bool, next *time.Time) error {
+	if setNext {
+		_, err := tx.ExecContext(ctx, `
+			UPDATE automation_triggers
+			SET last_evaluated_at = ?, last_materialized_at = ?, last_materialization_key = ?,
+				last_work_item_id = ?, next_eligible_at = ?, updated_at = ?
+			WHERE id = ?
+		`, formatTime(now), formatTime(now), materializationKey, taskID, nullTime(next), formatTime(now), triggerID)
+		return err
+	}
+	_, err := tx.ExecContext(ctx, `
+		UPDATE automation_triggers
+		SET last_evaluated_at = ?, last_materialized_at = ?, last_materialization_key = ?,
+			last_work_item_id = ?, updated_at = ?
+		WHERE id = ?
+	`, formatTime(now), formatTime(now), materializationKey, taskID, formatTime(now), triggerID)
+	return err
+}
+
+func appendAutomationTriggerEvaluatedEvent(ctx context.Context, tx *sql.Tx, trigger AutomationTrigger, materializationKey string, createdWorkItem bool, now time.Time) error {
+	return appendEventTx(ctx, tx, eventInsert{
+		StreamType: runtimeevents.StreamAutomationTrigger,
+		StreamID:   trigger.ID,
+		EventType:  runtimeevents.EventAutomationTriggerEvaluated,
+		Scope:      trigger.Kind,
+		ProjectID:  &trigger.ProjectID,
+		Payload: runtimeevents.AutomationTriggerEvaluatedPayload{
+			WorkspaceID:        trigger.WorkspaceID,
+			Key:                trigger.Key,
+			MaterializationKey: materializationKey,
+			Status:             trigger.Status,
+			CreatedWorkItem:    createdWorkItem,
+		},
+		OccurredAt: now,
+	})
+}
+
+func automationTriggerTaskKey(triggerKey string, materializationKey string) string {
+	base := strings.ToLower(strings.TrimSpace(triggerKey))
+	base = strings.Map(func(r rune) rune {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' {
+			return r
+		}
+		return '-'
+	}, base)
+	base = strings.Trim(base, "-")
+	if base == "" {
+		base = "trigger"
+	}
+	hasher := fnv.New64a()
+	_, _ = hasher.Write([]byte(materializationKey))
+	return fmt.Sprintf("automation-%s-%x", base, hasher.Sum64())
+}
+
 func scanProject(row interface{ Scan(...any) error }) (Project, error) {
 	var project Project
 	var githubRepo sql.NullString
@@ -7168,6 +7687,93 @@ func scanIntakeItem(row interface{ Scan(...any) error }) (IntakeItem, error) {
 		return IntakeItem{}, err
 	}
 	return item, nil
+}
+
+func scanAutomationTrigger(row interface{ Scan(...any) error }) (AutomationTrigger, error) {
+	var trigger AutomationTrigger
+	var projectID sql.NullInt64
+	var nextEligibleAt sql.NullString
+	var lastEvaluatedAt sql.NullString
+	var lastMaterializedAt sql.NullString
+	var lastWorkItemID sql.NullInt64
+	var createdAt string
+	var updatedAt string
+	if err := row.Scan(
+		&trigger.ID,
+		&trigger.WorkspaceID,
+		&trigger.Key,
+		&projectID,
+		&trigger.InitiativeKey,
+		&trigger.Kind,
+		&trigger.Status,
+		&trigger.RuleJSON,
+		&trigger.RuleSummary,
+		&trigger.WorkItemTitle,
+		&nextEligibleAt,
+		&lastEvaluatedAt,
+		&lastMaterializedAt,
+		&trigger.LastMaterializationKey,
+		&lastWorkItemID,
+		&trigger.LastWorkItemKey,
+		&createdAt,
+		&updatedAt,
+	); err != nil {
+		return AutomationTrigger{}, err
+	}
+	if projectID.Valid {
+		trigger.ProjectID = projectID.Int64
+	}
+	var err error
+	trigger.NextEligibleAt, err = parseNullableTime(nextEligibleAt)
+	if err != nil {
+		return AutomationTrigger{}, err
+	}
+	trigger.LastEvaluatedAt, err = parseNullableTime(lastEvaluatedAt)
+	if err != nil {
+		return AutomationTrigger{}, err
+	}
+	trigger.LastMaterializedAt, err = parseNullableTime(lastMaterializedAt)
+	if err != nil {
+		return AutomationTrigger{}, err
+	}
+	trigger.LastWorkItemID = nullableInt64Ptr(lastWorkItemID)
+	trigger.CreatedAt, err = parseTime(createdAt)
+	if err != nil {
+		return AutomationTrigger{}, err
+	}
+	trigger.UpdatedAt, err = parseTime(updatedAt)
+	if err != nil {
+		return AutomationTrigger{}, err
+	}
+	return trigger, nil
+}
+
+func scanAutomationTriggerMaterialization(row interface{ Scan(...any) error }) (AutomationTriggerMaterialization, error) {
+	var materialization AutomationTriggerMaterialization
+	var createdAt string
+	var updatedAt string
+	if err := row.Scan(
+		&materialization.ID,
+		&materialization.TriggerID,
+		&materialization.MaterializationKey,
+		&materialization.TaskID,
+		&materialization.Reason,
+		&materialization.RequestedBy,
+		&createdAt,
+		&updatedAt,
+	); err != nil {
+		return AutomationTriggerMaterialization{}, err
+	}
+	var err error
+	materialization.CreatedAt, err = parseTime(createdAt)
+	if err != nil {
+		return AutomationTriggerMaterialization{}, err
+	}
+	materialization.UpdatedAt, err = parseTime(updatedAt)
+	if err != nil {
+		return AutomationTriggerMaterialization{}, err
+	}
+	return materialization, nil
 }
 
 func scanFollowUpObligation(row interface{ Scan(...any) error }) (FollowUpObligation, error) {
@@ -8044,6 +8650,21 @@ func nullInt64(value *int64) any {
 func nullIfEmpty(value string) any {
 	if value == "" {
 		return nil
+	}
+	return value
+}
+
+func nullTime(value *time.Time) any {
+	if value == nil {
+		return nil
+	}
+	return formatTime(*value)
+}
+
+func defaultString(value string, fallback string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return fallback
 	}
 	return value
 }

@@ -21,6 +21,7 @@ const (
 	StreamConversation       StreamType = "conversation_transcript"
 	StreamMemorySummary      StreamType = "memory_summary"
 	StreamIntakeItem         StreamType = "intake_item"
+	StreamAutomationTrigger  StreamType = "automation_trigger"
 	StreamLearningProposal   StreamType = "learning_proposal"
 	StreamLearningEvaluation StreamType = "learning_evaluation"
 	StreamLearningPromotion  StreamType = "learning_promotion"
@@ -56,6 +57,12 @@ const (
 	EventMemorySummaryRecorded            Type = "memory.summary_recorded"
 	EventMemorySummaryUpdated             Type = "memory.summary_updated"
 	EventIntakeItemCreated                Type = "intake.item_created"
+	EventAutomationTriggerCreated         Type = "automation_trigger.created"
+	EventAutomationTriggerFireRequested   Type = "automation_trigger.fire_requested"
+	EventAutomationTriggerEvaluated       Type = "automation_trigger.evaluated"
+	EventAutomationTriggerMaterialized    Type = "automation_trigger.materialized"
+	EventAutomationTriggerErrored         Type = "automation_trigger.errored"
+	EventAutomationTriggerStatusChanged   Type = "automation_trigger.status_changed"
 	EventProjectTransitionChanged         Type = "project.transition_changed"
 	EventProjectShadowObservationRecorded Type = "project.shadow_observation_recorded"
 	EventProjectCompareReportRecorded     Type = "project.compare_report_recorded"
@@ -292,6 +299,54 @@ type IntakeItemCreatedPayload struct {
 	Status              string `json:"status"`
 	Scope               string `json:"scope,omitempty"`
 	ScopeKey            string `json:"scope_key,omitempty"`
+}
+
+type AutomationTriggerCreatedPayload struct {
+	WorkspaceID   string `json:"workspace_id"`
+	Key           string `json:"key"`
+	InitiativeKey string `json:"initiative_key,omitempty"`
+	Kind          string `json:"kind"`
+	Status        string `json:"status"`
+}
+
+type AutomationTriggerFireRequestedPayload struct {
+	WorkspaceID        string `json:"workspace_id"`
+	Key                string `json:"key"`
+	MaterializationKey string `json:"materialization_key"`
+	Reason             string `json:"reason,omitempty"`
+	RequestedBy        string `json:"requested_by,omitempty"`
+}
+
+type AutomationTriggerEvaluatedPayload struct {
+	WorkspaceID        string `json:"workspace_id"`
+	Key                string `json:"key"`
+	MaterializationKey string `json:"materialization_key"`
+	Status             string `json:"status"`
+	CreatedWorkItem    bool   `json:"created_work_item"`
+}
+
+type AutomationTriggerMaterializedPayload struct {
+	WorkspaceID        string `json:"workspace_id"`
+	Key                string `json:"key"`
+	MaterializationKey string `json:"materialization_key"`
+	TaskID             int64  `json:"task_id"`
+	TaskKey            string `json:"task_key"`
+	RequestedBy        string `json:"requested_by,omitempty"`
+}
+
+type AutomationTriggerErroredPayload struct {
+	WorkspaceID string `json:"workspace_id"`
+	Key         string `json:"key"`
+	Reason      string `json:"reason,omitempty"`
+	Error       string `json:"error"`
+}
+
+type AutomationTriggerStatusChangedPayload struct {
+	WorkspaceID    string `json:"workspace_id"`
+	Key            string `json:"key"`
+	PreviousStatus string `json:"previous_status"`
+	Status         string `json:"status"`
+	Reason         string `json:"reason,omitempty"`
 }
 
 type ProjectTransitionChangedPayload struct {
