@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -316,6 +317,133 @@ func TestShellApprovalsShowsActionBinding(t *testing.T) {
 		}
 	}
 }
+func TestShellActionsListsRecentActions(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	env := newTestEnvironment(t)
+	action, payload, _, _ := seedShellAction(t, ctx, env, "sha256:test")
+
+	shell, err := New(env)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	var output bytes.Buffer
+	if err := shell.HandleLine(ctx, "/actions", &output); err != nil {
+		t.Fatalf("HandleLine(/actions) error = %v", err)
+	}
+
+	for _, want := range []string{
+		"action_id=" + strconv.FormatInt(action.ID, 10),
+		"workflow=flica-tradeboard",
+		"type=tradeboard_action",
+		"lifecycle=prepared",
+		"payload_hash=" + payload.PayloadHash,
+	} {
+		if !strings.Contains(output.String(), want) {
+			t.Fatalf("actions output = %q, want %q", output.String(), want)
+		}
+	}
+}
+
+func TestShellActionsShowsActionDetail(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	env := newTestEnvironment(t)
+	action, payload, approval, run := seedShellAction(t, ctx, env, "sha256:detail")
+
+	if _, err := env.Store.AppendActionEvidence(ctx, sqlite.AppendActionEvidenceParams{
+		ActionID:     action.ID,
+		EventType:    "action.prepared",
+		EventVersion: 1,
+		PayloadHash:  payload.PayloadHash,
+		ApprovalID:   &approval.ID,
+		RunID:        &run.ID,
+		Source:       "test",
+		EvidenceJSON: `{"status":"prepared"}`,
+	}); err != nil {
+		t.Fatalf("AppendActionEvidence() error = %v", err)
+	}
+
+	shell, err := New(env)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	var output bytes.Buffer
+	if err := shell.HandleLine(ctx, "/actions "+strconv.FormatInt(action.ID, 10), &output); err != nil {
+		t.Fatalf("HandleLine(/actions id) error = %v", err)
+	}
+
+	for _, want := range []string{
+		"action_id=" + strconv.FormatInt(action.ID, 10),
+		"workflow=flica-tradeboard",
+		"workflow_run_id=" + strconv.FormatInt(run.ID, 10),
+		"payload_hash=" + payload.PayloadHash,
+		"payload_schema=flica.tradeboard_action.v1",
+		"submit_path=command:/tradeboard post",
+		"readback_path=huginn:flica-my-requests",
+		"proof_requirement=external_readback",
+		"approval_id=" + strconv.FormatInt(approval.ID, 10),
+		"status=pending",
+	} {
+		if !strings.Contains(output.String(), want) {
+			t.Fatalf("action detail output = %q, want %q", output.String(), want)
+		}
+	}
+}
+
+func TestShellActionsShowsEvidenceTimeline(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	env := newTestEnvironment(t)
+	action, payload, approval, run := seedShellAction(t, ctx, env, "sha256:evidence")
+
+	for _, eventType := range []string{"action.prepared", "action.submitted"} {
+		if _, err := env.Store.AppendActionEvidence(ctx, sqlite.AppendActionEvidenceParams{
+			ActionID:     action.ID,
+			EventType:    eventType,
+			EventVersion: 1,
+			PayloadHash:  payload.PayloadHash,
+			ApprovalID:   &approval.ID,
+			RunID:        &run.ID,
+			Source:       "test",
+			EvidenceJSON: `{"status":"recorded"}`,
+		}); err != nil {
+			t.Fatalf("AppendActionEvidence(%s) error = %v", eventType, err)
+		}
+	}
+
+	shell, err := New(env)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	var output bytes.Buffer
+	if err := shell.HandleLine(ctx, "/actions "+strconv.FormatInt(action.ID, 10)+" evidence", &output); err != nil {
+		t.Fatalf("HandleLine(/actions id evidence) error = %v", err)
+	}
+
+	first := strings.Index(output.String(), "type=action.prepared")
+	second := strings.Index(output.String(), "type=action.submitted")
+	if first < 0 || second < 0 || first > second {
+		t.Fatalf("evidence output = %q, want ordered prepared before submitted", output.String())
+	}
+	for _, want := range []string{
+		"payload_hash=" + payload.PayloadHash,
+		"approval_id=" + strconv.FormatInt(approval.ID, 10),
+		"run_id=" + strconv.FormatInt(run.ID, 10),
+		"source=test",
+	} {
+		if !strings.Contains(output.String(), want) {
+			t.Fatalf("evidence output = %q, want %q", output.String(), want)
+		}
+	}
+}
+
 func TestShellTransitionStatusShowsDefaultInventoryAuthority(t *testing.T) {
 	t.Parallel()
 
@@ -538,6 +666,70 @@ func TestShellTransitionRejectedInGlobalScope(t *testing.T) {
 	if !strings.Contains(output.String(), "project scope") {
 		t.Fatalf("output = %q, want project-scope rejection", output.String())
 	}
+}
+
+func seedShellAction(t *testing.T, ctx context.Context, env Environment, payloadHash string) (sqlite.Action, sqlite.ActionPayload, sqlite.Approval, sqlite.Run) {
+	t.Helper()
+
+	project, err := env.Store.CreateProject(ctx, sqlite.CreateProjectParams{
+		Key:           "shell-actions",
+		Name:          "Shell Actions",
+		Scope:         "project",
+		GitRoot:       "/home/orchestrator/odin-os",
+		DefaultBranch: "main",
+		GitHubRepo:    "example/shell-actions",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+	task, err := env.Store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "inspect-flica-action",
+		Title:       "Inspect FLICA action",
+		Status:      "running",
+		Scope:       "project",
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+	run, err := env.Store.StartRun(ctx, sqlite.StartRunParams{
+		TaskID:   task.ID,
+		Executor: "codex",
+		Attempt:  1,
+		Status:   "running",
+	})
+	if err != nil {
+		t.Fatalf("StartRun() error = %v", err)
+	}
+	action, payload, err := env.Store.CreateActionWithPayload(ctx, sqlite.CreateActionWithPayloadParams{
+		WorkflowKey:          "flica-tradeboard",
+		WorkflowRunID:        run.ID,
+		ActionType:           "tradeboard_action",
+		PayloadSchema:        "flica.tradeboard_action.v1",
+		PayloadSchemaVersion: 1,
+		PayloadHash:          payloadHash,
+		PayloadJSON:          `{"pairing":"W7084C"}`,
+		SubmitPath:           "command:/tradeboard post",
+		ReadbackPath:         "huginn:flica-my-requests",
+		ProofRequirement:     "external_readback",
+	})
+	if err != nil {
+		t.Fatalf("CreateActionWithPayload() error = %v", err)
+	}
+	approval, err := env.Store.RequestApproval(ctx, sqlite.RequestApprovalParams{
+		TaskID:      task.ID,
+		RunID:       &run.ID,
+		ActionID:    &action.ID,
+		PayloadHash: payload.PayloadHash,
+		Status:      "pending",
+		RequestedBy: "system",
+	})
+	if err != nil {
+		t.Fatalf("RequestApproval() error = %v", err)
+	}
+	return action, payload, approval, run
 }
 
 func newTestEnvironment(t *testing.T) Environment {
