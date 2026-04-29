@@ -11,7 +11,7 @@ import (
 	"odin-os/internal/store/sqlite"
 )
 
-const TriggerUsage = "trigger [list|show <key>|upsert <key>|fire <key>] [key=value ...]"
+const TriggerUsage = "trigger [list|show <key>|upsert <key>|fire <key>|evaluate] [key=value ...]"
 
 func RunTrigger(ctx context.Context, service triggers.Service, args []string, stdout io.Writer) error {
 	if len(args) == 0 || args[0] == "list" {
@@ -91,6 +91,25 @@ func RunTrigger(ctx context.Context, service triggers.Service, args []string, st
 			result.Materialization.MaterializationKey,
 			result.WorkItem.Key,
 			result.CreatedWorkItem,
+		)
+		return err
+	case "evaluate":
+		options, err := parseOptionTokens(args[1:])
+		if err != nil {
+			return err
+		}
+		evaluateAt, err := parseTriggerEvaluateAt(options["now"])
+		if err != nil {
+			return err
+		}
+		result, err := service.EvaluateDue(ctx, evaluateAt)
+		if err != nil {
+			return err
+		}
+		_, err = fmt.Fprintf(stdout, "automation_trigger_evaluation evaluated=%d materialized=%d errored=%d\n",
+			result.Evaluated,
+			result.Materialized,
+			result.Errored,
 		)
 		return err
 	default:
@@ -197,6 +216,18 @@ func parseTriggerNextEligibleAt(value string) (*time.Time, error) {
 	}
 	parsed = parsed.UTC()
 	return &parsed, nil
+}
+
+func parseTriggerEvaluateAt(value string) (time.Time, error) {
+	value = strings.TrimSpace(value)
+	if value == "" || strings.EqualFold(value, "now") {
+		return time.Now().UTC(), nil
+	}
+	parsed, err := time.Parse(time.RFC3339Nano, value)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("invalid trigger evaluate now value %q: use now or RFC3339", value)
+	}
+	return parsed.UTC(), nil
 }
 
 func noneIfEmpty(value string) string {
