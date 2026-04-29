@@ -162,6 +162,195 @@ func TestStoreRejectsDuplicateActionPayloadHash(t *testing.T) {
 	}
 }
 
+func TestStorePersistsKnowledgeSourceArtifactExtractionAndChunks(t *testing.T) {
+	ctx := context.Background()
+	store := openMigratedTestStore(t, "knowledge-source.db")
+	defer store.Close()
+
+	artifact, err := store.RecordKnowledgeArtifact(ctx, RecordKnowledgeArtifactParams{
+		SHA256:       "sha256:abc",
+		SizeBytes:    42,
+		SourceType:   "text",
+		MimeType:     "text/plain",
+		ArtifactPath: "knowledge/artifacts/ab/abc/source.txt",
+		OriginalPath: "/tmp/source.txt",
+	})
+	if err != nil {
+		t.Fatalf("RecordKnowledgeArtifact() error = %v", err)
+	}
+	if artifact.SHA256 != "sha256:abc" || artifact.SizeBytes != 42 || artifact.SourceType != "text" || artifact.MimeType != "text/plain" {
+		t.Fatalf("artifact = %+v, want persisted hash, size, type, and mime type", artifact)
+	}
+	if artifact.ArtifactPath != "knowledge/artifacts/ab/abc/source.txt" || artifact.OriginalPath != "/tmp/source.txt" {
+		t.Fatalf("artifact = %+v, want persisted artifact and original paths", artifact)
+	}
+
+	duplicateArtifact, err := store.RecordKnowledgeArtifact(ctx, RecordKnowledgeArtifactParams{
+		SHA256:       "sha256:abc",
+		SizeBytes:    42,
+		SourceType:   "text",
+		MimeType:     "text/plain",
+		ArtifactPath: "knowledge/artifacts/ab/abc/source.txt",
+		OriginalPath: "/tmp/source.txt",
+	})
+	if err != nil {
+		t.Fatalf("RecordKnowledgeArtifact() duplicate error = %v", err)
+	}
+	if duplicateArtifact.ID != artifact.ID {
+		t.Fatalf("duplicate artifact ID = %d, want %d", duplicateArtifact.ID, artifact.ID)
+	}
+
+	source, err := store.UpsertKnowledgeSource(ctx, UpsertKnowledgeSourceParams{
+		Key:               "pilot-contract",
+		Title:             "Pilot Contract",
+		Scope:             "global",
+		ScopeKey:          "global",
+		Restricted:        true,
+		SourceKind:        "pilot_contract",
+		SourceClass:       "text",
+		Lifecycle:         "artifact_available",
+		ManifestPath:      "memory/knowledge/pilot-contract.md",
+		CurrentArtifactID: &artifact.ID,
+	})
+	if err != nil {
+		t.Fatalf("UpsertKnowledgeSource() error = %v", err)
+	}
+	if source.Key != "pilot-contract" || source.Title != "Pilot Contract" || source.Scope != "global" || source.ScopeKey != "global" {
+		t.Fatalf("source = %+v, want persisted key/title/scope", source)
+	}
+	if !source.Restricted || source.SourceKind != "pilot_contract" || source.SourceClass != "text" || source.Lifecycle != "artifact_available" {
+		t.Fatalf("source = %+v, want persisted kind/class/lifecycle/restricted flag", source)
+	}
+	if source.ManifestPath != "memory/knowledge/pilot-contract.md" || source.CurrentArtifactID == nil || *source.CurrentArtifactID != artifact.ID {
+		t.Fatalf("source = %+v, want manifest and current artifact", source)
+	}
+
+	extraction, err := store.RecordKnowledgeExtraction(ctx, RecordKnowledgeExtractionParams{
+		SourceID:               source.ID,
+		ArtifactID:             artifact.ID,
+		ExtractorName:          "plain_text",
+		ExtractorVersion:       "v1",
+		Status:                 "succeeded",
+		Lifecycle:              "ready",
+		ExtractedTextHash:      "sha256:text",
+		NormalizedMarkdownPath: "state/knowledge/normalized/pilot-contract.md",
+	})
+	if err != nil {
+		t.Fatalf("RecordKnowledgeExtraction() error = %v", err)
+	}
+	if extraction.SourceID != source.ID || extraction.ArtifactID != artifact.ID || extraction.ExtractorName != "plain_text" || extraction.ExtractorVersion != "v1" {
+		t.Fatalf("extraction = %+v, want persisted extraction provenance", extraction)
+	}
+	if extraction.Status != "succeeded" || extraction.ExtractedTextHash != "sha256:text" || extraction.NormalizedMarkdownPath != "state/knowledge/normalized/pilot-contract.md" {
+		t.Fatalf("extraction = %+v, want persisted extraction status and outputs", extraction)
+	}
+
+	reloadedSource, err := store.GetKnowledgeSourceByKey(ctx, "pilot-contract")
+	if err != nil {
+		t.Fatalf("GetKnowledgeSourceByKey() error = %v", err)
+	}
+	if reloadedSource.CurrentExtractionID == nil || *reloadedSource.CurrentExtractionID != extraction.ID {
+		t.Fatalf("source.CurrentExtractionID = %v, want %d", reloadedSource.CurrentExtractionID, extraction.ID)
+	}
+	if reloadedSource.Lifecycle != "ready" {
+		t.Fatalf("source.Lifecycle = %q, want ready", reloadedSource.Lifecycle)
+	}
+
+	chunk, err := store.RecordKnowledgeChunk(ctx, RecordKnowledgeChunkParams{
+		SourceID:     source.ID,
+		ExtractionID: extraction.ID,
+		Ordinal:      1,
+		Text:         "Vacation accrual section.",
+		Anchor:       "section:vacation",
+		Restricted:   true,
+	})
+	if err != nil {
+		t.Fatalf("RecordKnowledgeChunk() error = %v", err)
+	}
+	if chunk.SourceID != source.ID || chunk.ExtractionID != extraction.ID || chunk.Ordinal != 1 || chunk.Text != "Vacation accrual section." {
+		t.Fatalf("chunk = %+v, want persisted restricted chunk", chunk)
+	}
+	if !chunk.Restricted || chunk.Anchor != "section:vacation" {
+		t.Fatalf("chunk = %+v, want restricted chunk anchor", chunk)
+	}
+
+	results, err := store.SearchKnowledgeChunks(ctx, SearchKnowledgeChunksParams{
+		Query:    "vacation",
+		Scope:    "global",
+		ScopeKey: "global",
+		Limit:    10,
+	})
+	if err != nil {
+		t.Fatalf("SearchKnowledgeChunks() error = %v", err)
+	}
+	if len(results) != 1 || results[0].ChunkID != chunk.ID {
+		t.Fatalf("results = %+v, want chunk %d", results, chunk.ID)
+	}
+	if results[0].SourceKey != "pilot-contract" || results[0].Title != "Pilot Contract" || results[0].Text != chunk.Text {
+		t.Fatalf("result = %+v, want source and chunk text", results[0])
+	}
+	if !results[0].Restricted || results[0].Anchor != "section:vacation" {
+		t.Fatalf("result = %+v, want restricted result with citation anchor", results[0])
+	}
+}
+
+func TestStoreRecordsRestrictedKnowledgeUseApprovalWithoutChangingLifecycle(t *testing.T) {
+	ctx := context.Background()
+	store := openMigratedTestStore(t, "restricted-knowledge-use-approval.db")
+	defer store.Close()
+
+	artifact, err := store.RecordKnowledgeArtifact(ctx, RecordKnowledgeArtifactParams{
+		SHA256:       "sha256:restricted",
+		SizeBytes:    128,
+		SourceType:   "text",
+		MimeType:     "text/plain",
+		ArtifactPath: "knowledge/artifacts/re/restricted/source.txt",
+		OriginalPath: "/tmp/restricted-source.txt",
+	})
+	if err != nil {
+		t.Fatalf("RecordKnowledgeArtifact() error = %v", err)
+	}
+
+	source, err := store.UpsertKnowledgeSource(ctx, UpsertKnowledgeSourceParams{
+		Key:               "restricted-manual",
+		Title:             "Restricted Manual",
+		Scope:             "global",
+		ScopeKey:          "global",
+		Restricted:        true,
+		SourceKind:        "manual",
+		SourceClass:       "text",
+		Lifecycle:         "ready",
+		ManifestPath:      "memory/knowledge/restricted-manual.md",
+		CurrentArtifactID: &artifact.ID,
+	})
+	if err != nil {
+		t.Fatalf("UpsertKnowledgeSource() error = %v", err)
+	}
+
+	approval, err := store.RecordRestrictedKnowledgeUseApproval(ctx, RecordRestrictedKnowledgeUseApprovalParams{
+		SourceID:     source.ID,
+		UseType:      "executor_context_injection",
+		Reason:       "Operator approved a narrow task-scoped context injection.",
+		Decision:     "approved",
+		EvidenceJSON: `{"approved_by":"operator"}`,
+		DecidedBy:    "operator",
+	})
+	if err != nil {
+		t.Fatalf("RecordRestrictedKnowledgeUseApproval() error = %v", err)
+	}
+	if approval.SourceID != source.ID || approval.UseType != "executor_context_injection" || approval.Decision != "approved" {
+		t.Fatalf("approval = %+v, want persisted restricted use approval", approval)
+	}
+
+	reloadedSource, err := store.GetKnowledgeSourceByKey(ctx, "restricted-manual")
+	if err != nil {
+		t.Fatalf("GetKnowledgeSourceByKey() error = %v", err)
+	}
+	if reloadedSource.Lifecycle != "ready" {
+		t.Fatalf("Lifecycle = %q, want ready", reloadedSource.Lifecycle)
+	}
+}
+
 func TestStoreRejectsInvalidActionApprovalBinding(t *testing.T) {
 	ctx := context.Background()
 	store := openMigratedTestStore(t, "invalid-action-approval-binding.db")

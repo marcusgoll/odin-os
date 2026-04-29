@@ -22,6 +22,7 @@ const (
 	StreamLearningPromotion  StreamType = "learning_promotion"
 	StreamConversation       StreamType = "conversation"
 	StreamMemorySummary      StreamType = "memory_summary"
+	StreamKnowledgeSource    StreamType = "knowledge_source"
 )
 
 type Type string
@@ -56,6 +57,10 @@ const (
 	EventLearningPromotionRolledBack      Type = "learning.promotion_rolled_back"
 	EventConversationTranscriptRecorded   Type = "conversation.transcript_recorded"
 	EventMemorySummaryRecorded            Type = "memory_summary.recorded"
+	EventKnowledgeSourceIngested          Type = "knowledge.source_ingested"
+	EventKnowledgeSourceLifecycleChanged  Type = "knowledge.lifecycle_changed"
+	EventKnowledgeExtractionRecorded      Type = "knowledge.extraction_recorded"
+	EventRestrictedKnowledgeUseApproved   Type = "knowledge.restricted_use_approved"
 )
 
 type Record struct {
@@ -246,6 +251,42 @@ type MemorySummaryRecordedPayload struct {
 	SourceTranscriptID *int64 `json:"source_transcript_id"`
 	TaskID             *int64 `json:"task_id"`
 	RunID              *int64 `json:"run_id"`
+}
+
+type KnowledgeSourceIngestedPayload struct {
+	SourceID     int64  `json:"source_id"`
+	SourceKey    string `json:"source_key"`
+	Scope        string `json:"scope"`
+	ScopeKey     string `json:"scope_key"`
+	ArtifactID   *int64 `json:"artifact_id,omitempty"`
+	ManifestPath string `json:"manifest_path"`
+	Lifecycle    string `json:"lifecycle"`
+}
+
+type KnowledgeSourceLifecycleChangedPayload struct {
+	SourceID          int64  `json:"source_id"`
+	SourceKey         string `json:"source_key"`
+	PreviousLifecycle string `json:"previous_lifecycle"`
+	Lifecycle         string `json:"lifecycle"`
+	ArtifactID        *int64 `json:"artifact_id,omitempty"`
+	ExtractionID      *int64 `json:"extraction_id,omitempty"`
+}
+
+type KnowledgeExtractionRecordedPayload struct {
+	SourceID     int64  `json:"source_id"`
+	SourceKey    string `json:"source_key"`
+	ArtifactID   int64  `json:"artifact_id"`
+	ExtractionID int64  `json:"extraction_id"`
+	Status       string `json:"status"`
+	Extractor    string `json:"extractor"`
+}
+
+type RestrictedKnowledgeUseApprovedPayload struct {
+	SourceID  int64  `json:"source_id"`
+	SourceKey string `json:"source_key"`
+	UseType   string `json:"use_type"`
+	Reason    string `json:"reason"`
+	Decision  string `json:"decision"`
 }
 
 func EncodePayload(payload any) (json.RawMessage, error) {

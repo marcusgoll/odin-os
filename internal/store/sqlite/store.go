@@ -1480,6 +1480,788 @@ func (store *Store) ListMemorySummaries(ctx context.Context, params ListMemorySu
 	return summaries, rows.Err()
 }
 
+func (store *Store) RecordKnowledgeArtifact(ctx context.Context, params RecordKnowledgeArtifactParams) (KnowledgeArtifact, error) {
+	params.SHA256 = strings.TrimSpace(params.SHA256)
+	params.SourceType = strings.TrimSpace(params.SourceType)
+	params.MimeType = strings.TrimSpace(params.MimeType)
+	params.ArtifactPath = strings.TrimSpace(params.ArtifactPath)
+	params.OriginalPath = strings.TrimSpace(params.OriginalPath)
+
+	if params.SHA256 == "" {
+		return KnowledgeArtifact{}, fmt.Errorf("knowledge artifact sha256 is required")
+	}
+	if params.SizeBytes < 0 {
+		return KnowledgeArtifact{}, fmt.Errorf("knowledge artifact size must be non-negative")
+	}
+	if params.SourceType == "" {
+		return KnowledgeArtifact{}, fmt.Errorf("knowledge artifact source type is required")
+	}
+	if params.MimeType == "" {
+		return KnowledgeArtifact{}, fmt.Errorf("knowledge artifact mime type is required")
+	}
+	if params.ArtifactPath == "" {
+		return KnowledgeArtifact{}, fmt.Errorf("knowledge artifact path is required")
+	}
+	if params.OriginalPath == "" {
+		return KnowledgeArtifact{}, fmt.Errorf("knowledge artifact original path is required")
+	}
+
+	now := store.now()
+	var artifact KnowledgeArtifact
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO knowledge_artifacts (
+				sha256,
+				size_bytes,
+				source_type,
+				mime_type,
+				artifact_path,
+				original_path,
+				recorded_at
+			)
+			VALUES (?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT(sha256) DO NOTHING
+		`,
+			params.SHA256,
+			params.SizeBytes,
+			params.SourceType,
+			params.MimeType,
+			params.ArtifactPath,
+			params.OriginalPath,
+			formatTime(now),
+		); err != nil {
+			return err
+		}
+
+		record, err := scanKnowledgeArtifact(tx.QueryRowContext(ctx, `
+			SELECT id, sha256, size_bytes, source_type, mime_type, artifact_path, original_path, recorded_at
+			FROM knowledge_artifacts
+			WHERE sha256 = ?
+		`, params.SHA256))
+		if err != nil {
+			return err
+		}
+		artifact = record
+		return nil
+	})
+
+	return artifact, err
+}
+
+func (store *Store) UpsertKnowledgeSource(ctx context.Context, params UpsertKnowledgeSourceParams) (KnowledgeSource, error) {
+	params.Key = strings.TrimSpace(params.Key)
+	params.Title = strings.TrimSpace(params.Title)
+	params.Scope = strings.TrimSpace(params.Scope)
+	params.ScopeKey = strings.TrimSpace(params.ScopeKey)
+	params.SourceKind = strings.TrimSpace(params.SourceKind)
+	params.SourceClass = strings.TrimSpace(params.SourceClass)
+	params.Lifecycle = strings.TrimSpace(params.Lifecycle)
+	params.ManifestPath = strings.TrimSpace(params.ManifestPath)
+
+	if params.Key == "" {
+		return KnowledgeSource{}, fmt.Errorf("knowledge source key is required")
+	}
+	if params.Title == "" {
+		return KnowledgeSource{}, fmt.Errorf("knowledge source title is required")
+	}
+	if params.Scope == "" {
+		return KnowledgeSource{}, fmt.Errorf("knowledge source scope is required")
+	}
+	if params.ScopeKey == "" {
+		return KnowledgeSource{}, fmt.Errorf("knowledge source scope key is required")
+	}
+	if params.SourceKind == "" {
+		return KnowledgeSource{}, fmt.Errorf("knowledge source kind is required")
+	}
+	if params.SourceClass == "" {
+		return KnowledgeSource{}, fmt.Errorf("knowledge source class is required")
+	}
+	if params.Lifecycle == "" {
+		return KnowledgeSource{}, fmt.Errorf("knowledge source lifecycle is required")
+	}
+	if params.ManifestPath == "" {
+		return KnowledgeSource{}, fmt.Errorf("knowledge source manifest path is required")
+	}
+
+	now := store.now()
+	var source KnowledgeSource
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		existing, exists, err := store.getKnowledgeSourceByKeyTx(ctx, tx, params.Key)
+		if err != nil {
+			return err
+		}
+
+		currentArtifactID := params.CurrentArtifactID
+		currentExtractionID := params.CurrentExtractionID
+		if exists {
+			if currentArtifactID == nil {
+				currentArtifactID = existing.CurrentArtifactID
+			}
+			if currentExtractionID == nil {
+				currentExtractionID = existing.CurrentExtractionID
+			}
+			if _, err := tx.ExecContext(ctx, `
+				UPDATE knowledge_sources
+				SET title = ?,
+					scope = ?,
+					scope_key = ?,
+					restricted = ?,
+					source_kind = ?,
+					source_class = ?,
+					lifecycle = ?,
+					manifest_path = ?,
+					current_artifact_id = ?,
+					current_extraction_id = ?,
+					updated_at = ?
+				WHERE id = ?
+			`,
+				params.Title,
+				params.Scope,
+				params.ScopeKey,
+				boolToInt(params.Restricted),
+				params.SourceKind,
+				params.SourceClass,
+				params.Lifecycle,
+				params.ManifestPath,
+				nullInt64(currentArtifactID),
+				nullInt64(currentExtractionID),
+				formatTime(now),
+				existing.ID,
+			); err != nil {
+				return err
+			}
+		} else {
+			if _, err := tx.ExecContext(ctx, `
+				INSERT INTO knowledge_sources (
+					key,
+					title,
+					scope,
+					scope_key,
+					restricted,
+					source_kind,
+					source_class,
+					lifecycle,
+					manifest_path,
+					current_artifact_id,
+					current_extraction_id,
+					created_at,
+					updated_at
+				)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			`,
+				params.Key,
+				params.Title,
+				params.Scope,
+				params.ScopeKey,
+				boolToInt(params.Restricted),
+				params.SourceKind,
+				params.SourceClass,
+				params.Lifecycle,
+				params.ManifestPath,
+				nullInt64(currentArtifactID),
+				nullInt64(currentExtractionID),
+				formatTime(now),
+				formatTime(now),
+			); err != nil {
+				return err
+			}
+		}
+
+		record, err := scanKnowledgeSource(tx.QueryRowContext(ctx, `
+			SELECT id, key, title, scope, scope_key, restricted, source_kind, source_class, lifecycle, manifest_path, current_artifact_id, current_extraction_id, created_at, updated_at
+			FROM knowledge_sources
+			WHERE key = ?
+		`, params.Key))
+		if err != nil {
+			return err
+		}
+		source = record
+
+		if !exists {
+			return appendEventTx(ctx, tx, eventInsert{
+				StreamType: runtimeevents.StreamKnowledgeSource,
+				StreamID:   source.ID,
+				EventType:  runtimeevents.EventKnowledgeSourceIngested,
+				Scope:      source.Scope,
+				Payload: runtimeevents.KnowledgeSourceIngestedPayload{
+					SourceID:     source.ID,
+					SourceKey:    source.Key,
+					Scope:        source.Scope,
+					ScopeKey:     source.ScopeKey,
+					ArtifactID:   source.CurrentArtifactID,
+					ManifestPath: source.ManifestPath,
+					Lifecycle:    source.Lifecycle,
+				},
+				OccurredAt: now,
+			})
+		}
+		if existing.Lifecycle != source.Lifecycle {
+			return appendKnowledgeLifecycleChangedTx(ctx, tx, existing, source, now)
+		}
+		return nil
+	})
+
+	return source, err
+}
+
+func (store *Store) GetKnowledgeSourceByKey(ctx context.Context, key string) (KnowledgeSource, error) {
+	source, exists, err := store.getKnowledgeSourceByKeyTx(ctx, nil, strings.TrimSpace(key))
+	if err != nil {
+		return KnowledgeSource{}, err
+	}
+	if !exists {
+		return KnowledgeSource{}, sql.ErrNoRows
+	}
+	return source, nil
+}
+
+func (store *Store) ListKnowledgeSources(ctx context.Context, params ListKnowledgeSourcesParams) ([]KnowledgeSource, error) {
+	query := `
+		SELECT id, key, title, scope, scope_key, restricted, source_kind, source_class, lifecycle, manifest_path, current_artifact_id, current_extraction_id, created_at, updated_at
+		FROM knowledge_sources
+		WHERE 1 = 1
+	`
+	var args []any
+	if params.Scope != "" {
+		query += ` AND scope = ?`
+		args = append(args, params.Scope)
+	}
+	if params.ScopeKey != "" {
+		query += ` AND scope_key = ?`
+		args = append(args, params.ScopeKey)
+	}
+	if params.Lifecycle != "" {
+		query += ` AND lifecycle = ?`
+		args = append(args, params.Lifecycle)
+	}
+	if params.Restricted != nil {
+		query += ` AND restricted = ?`
+		args = append(args, boolToInt(*params.Restricted))
+	}
+	query += ` ORDER BY key ASC`
+
+	rows, err := store.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var sources []KnowledgeSource
+	for rows.Next() {
+		source, err := scanKnowledgeSource(rows)
+		if err != nil {
+			return nil, err
+		}
+		sources = append(sources, source)
+	}
+	return sources, rows.Err()
+}
+
+func (store *Store) RecordKnowledgeExtraction(ctx context.Context, params RecordKnowledgeExtractionParams) (KnowledgeExtraction, error) {
+	params.ExtractorName = strings.TrimSpace(params.ExtractorName)
+	params.ExtractorVersion = strings.TrimSpace(params.ExtractorVersion)
+	params.Status = strings.TrimSpace(params.Status)
+	params.Lifecycle = strings.TrimSpace(params.Lifecycle)
+	params.FailureCode = strings.TrimSpace(params.FailureCode)
+	params.FailureSummary = strings.TrimSpace(params.FailureSummary)
+	params.ExtractedTextHash = strings.TrimSpace(params.ExtractedTextHash)
+	params.NormalizedMarkdownPath = strings.TrimSpace(params.NormalizedMarkdownPath)
+
+	if params.SourceID == 0 {
+		return KnowledgeExtraction{}, fmt.Errorf("knowledge extraction source id is required")
+	}
+	if params.ArtifactID == 0 {
+		return KnowledgeExtraction{}, fmt.Errorf("knowledge extraction artifact id is required")
+	}
+	if params.ExtractorName == "" {
+		return KnowledgeExtraction{}, fmt.Errorf("knowledge extraction extractor name is required")
+	}
+	if params.ExtractorVersion == "" {
+		return KnowledgeExtraction{}, fmt.Errorf("knowledge extraction extractor version is required")
+	}
+	if params.Status == "" {
+		return KnowledgeExtraction{}, fmt.Errorf("knowledge extraction status is required")
+	}
+
+	now := store.now()
+	startedAt := now
+	if params.StartedAt != nil {
+		startedAt = params.StartedAt.UTC()
+	}
+	finishedAt := params.FinishedAt
+	if finishedAt == nil && (params.Status == "succeeded" || params.Status == "failed") {
+		finishedAt = &now
+	}
+	lifecycle := params.Lifecycle
+	if lifecycle == "" {
+		lifecycle = lifecycleForKnowledgeExtractionStatus(params.Status)
+	}
+
+	var extraction KnowledgeExtraction
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		source, err := store.getKnowledgeSourceTx(ctx, tx, params.SourceID)
+		if err != nil {
+			return err
+		}
+
+		result, err := tx.ExecContext(ctx, `
+			INSERT INTO knowledge_extractions (
+				source_id,
+				artifact_id,
+				extractor_name,
+				extractor_version,
+				status,
+				failure_code,
+				failure_summary,
+				extracted_text_hash,
+				normalized_markdown_path,
+				started_at,
+				finished_at
+			)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`,
+			params.SourceID,
+			params.ArtifactID,
+			params.ExtractorName,
+			params.ExtractorVersion,
+			params.Status,
+			params.FailureCode,
+			params.FailureSummary,
+			params.ExtractedTextHash,
+			params.NormalizedMarkdownPath,
+			formatTime(startedAt),
+			nullTime(finishedAt),
+		)
+		if err != nil {
+			return err
+		}
+
+		extractionID, err := result.LastInsertId()
+		if err != nil {
+			return err
+		}
+
+		record, err := scanKnowledgeExtraction(tx.QueryRowContext(ctx, `
+			SELECT id, source_id, artifact_id, extractor_name, extractor_version, status, failure_code, failure_summary, extracted_text_hash, normalized_markdown_path, started_at, finished_at
+			FROM knowledge_extractions
+			WHERE id = ?
+		`, extractionID))
+		if err != nil {
+			return err
+		}
+		extraction = record
+
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE knowledge_sources
+			SET current_extraction_id = ?, lifecycle = ?, updated_at = ?
+			WHERE id = ?
+		`, extraction.ID, lifecycle, formatTime(now), params.SourceID); err != nil {
+			return err
+		}
+
+		updatedSource := source
+		updatedSource.CurrentExtractionID = &extraction.ID
+		updatedSource.Lifecycle = lifecycle
+		updatedSource.UpdatedAt = now
+
+		if err := appendEventTx(ctx, tx, eventInsert{
+			StreamType: runtimeevents.StreamKnowledgeSource,
+			StreamID:   source.ID,
+			EventType:  runtimeevents.EventKnowledgeExtractionRecorded,
+			Scope:      source.Scope,
+			Payload: runtimeevents.KnowledgeExtractionRecordedPayload{
+				SourceID:     source.ID,
+				SourceKey:    source.Key,
+				ArtifactID:   params.ArtifactID,
+				ExtractionID: extraction.ID,
+				Status:       extraction.Status,
+				Extractor:    extraction.ExtractorName + ":" + extraction.ExtractorVersion,
+			},
+			OccurredAt: now,
+		}); err != nil {
+			return err
+		}
+		if source.Lifecycle != updatedSource.Lifecycle {
+			return appendKnowledgeLifecycleChangedTx(ctx, tx, source, updatedSource, now)
+		}
+		return nil
+	})
+
+	return extraction, err
+}
+
+func (store *Store) RecordKnowledgeChunk(ctx context.Context, params RecordKnowledgeChunkParams) (KnowledgeChunk, error) {
+	params.Text = strings.TrimSpace(params.Text)
+	params.Anchor = strings.TrimSpace(params.Anchor)
+
+	if params.SourceID == 0 {
+		return KnowledgeChunk{}, fmt.Errorf("knowledge chunk source id is required")
+	}
+	if params.ExtractionID == 0 {
+		return KnowledgeChunk{}, fmt.Errorf("knowledge chunk extraction id is required")
+	}
+	if params.Ordinal < 0 {
+		return KnowledgeChunk{}, fmt.Errorf("knowledge chunk ordinal must be non-negative")
+	}
+	if params.Text == "" {
+		return KnowledgeChunk{}, fmt.Errorf("knowledge chunk text is required")
+	}
+
+	now := store.now()
+	var chunk KnowledgeChunk
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		if err := validateKnowledgeExtractionLineageTx(ctx, tx, params.SourceID, params.ExtractionID); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO knowledge_chunks (
+				source_id,
+				extraction_id,
+				ordinal,
+				text,
+				anchor,
+				page_number,
+				restricted,
+				created_at
+			)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT(extraction_id, ordinal) DO UPDATE SET
+				source_id = excluded.source_id,
+				text = excluded.text,
+				anchor = excluded.anchor,
+				page_number = excluded.page_number,
+				restricted = excluded.restricted
+		`,
+			params.SourceID,
+			params.ExtractionID,
+			params.Ordinal,
+			params.Text,
+			params.Anchor,
+			nullInt64(params.PageNumber),
+			boolToInt(params.Restricted),
+			formatTime(now),
+		); err != nil {
+			return err
+		}
+
+		record, err := scanKnowledgeChunk(tx.QueryRowContext(ctx, `
+			SELECT id, source_id, extraction_id, ordinal, text, anchor, page_number, restricted, created_at
+			FROM knowledge_chunks
+			WHERE extraction_id = ? AND ordinal = ?
+		`, params.ExtractionID, params.Ordinal))
+		if err != nil {
+			return err
+		}
+		chunk = record
+
+		return store.indexKnowledgeChunkTx(ctx, tx, IndexKnowledgeChunkParams{ChunkID: chunk.ID})
+	})
+
+	return chunk, err
+}
+
+func (store *Store) IndexKnowledgeChunk(ctx context.Context, params IndexKnowledgeChunkParams) error {
+	if params.ChunkID == 0 {
+		return fmt.Errorf("knowledge chunk id is required")
+	}
+	return store.withTx(ctx, func(tx *sql.Tx) error {
+		return store.indexKnowledgeChunkTx(ctx, tx, params)
+	})
+}
+
+func (store *Store) SearchKnowledgeChunks(ctx context.Context, params SearchKnowledgeChunksParams) ([]KnowledgeSearchResult, error) {
+	query := strings.TrimSpace(params.Query)
+	if query == "" {
+		return nil, fmt.Errorf("knowledge search query is required")
+	}
+	limit := params.Limit
+	if limit <= 0 {
+		limit = 20
+	}
+
+	matchQuery := knowledgeFTSMatchQuery(query)
+	rows, err := store.db.QueryContext(ctx, `
+		SELECT
+			ks.id,
+			ks.key,
+			ks.title,
+			kc.id,
+			kc.text,
+			kc.anchor,
+			kc.page_number,
+			kc.restricted,
+			bm25(knowledge_fts) AS rank
+		FROM knowledge_fts
+		JOIN knowledge_chunks kc ON kc.id = knowledge_fts.rowid
+		JOIN knowledge_sources ks ON ks.id = kc.source_id
+		WHERE knowledge_fts MATCH ?
+			AND ks.lifecycle = 'ready'
+			AND (? = '' OR ks.scope = ?)
+			AND (? = '' OR ks.scope_key = ?)
+		ORDER BY rank ASC, kc.id ASC
+		LIMIT ?
+	`, matchQuery, params.Scope, params.Scope, params.ScopeKey, params.ScopeKey, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var results []KnowledgeSearchResult
+	for rows.Next() {
+		var result KnowledgeSearchResult
+		var pageNumber sql.NullInt64
+		var restricted int
+		if err := rows.Scan(
+			&result.SourceID,
+			&result.SourceKey,
+			&result.Title,
+			&result.ChunkID,
+			&result.Text,
+			&result.Anchor,
+			&pageNumber,
+			&restricted,
+			&result.Rank,
+		); err != nil {
+			return nil, err
+		}
+		result.PageNumber = nullableInt64Ptr(pageNumber)
+		result.Restricted = restricted != 0
+		results = append(results, result)
+	}
+
+	return results, rows.Err()
+}
+
+func (store *Store) RecordRestrictedKnowledgeUseApproval(ctx context.Context, params RecordRestrictedKnowledgeUseApprovalParams) (RestrictedKnowledgeUseApproval, error) {
+	params.UseType = strings.TrimSpace(params.UseType)
+	params.Reason = strings.TrimSpace(params.Reason)
+	params.Decision = strings.TrimSpace(params.Decision)
+	params.EvidenceJSON = strings.TrimSpace(params.EvidenceJSON)
+	params.DecidedBy = strings.TrimSpace(params.DecidedBy)
+
+	if params.SourceID == 0 {
+		return RestrictedKnowledgeUseApproval{}, fmt.Errorf("restricted knowledge use approval source id is required")
+	}
+	if params.UseType == "" {
+		return RestrictedKnowledgeUseApproval{}, fmt.Errorf("restricted knowledge use approval use type is required")
+	}
+	if params.Reason == "" {
+		return RestrictedKnowledgeUseApproval{}, fmt.Errorf("restricted knowledge use approval reason is required")
+	}
+	if params.Decision == "" {
+		return RestrictedKnowledgeUseApproval{}, fmt.Errorf("restricted knowledge use approval decision is required")
+	}
+	if params.EvidenceJSON == "" {
+		return RestrictedKnowledgeUseApproval{}, fmt.Errorf("restricted knowledge use approval evidence json is required")
+	}
+	if params.DecidedBy == "" {
+		return RestrictedKnowledgeUseApproval{}, fmt.Errorf("restricted knowledge use approval decided by is required")
+	}
+
+	decidedAt := store.now()
+	if params.DecidedAt != nil {
+		decidedAt = params.DecidedAt.UTC()
+	}
+
+	var approval RestrictedKnowledgeUseApproval
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		source, err := store.getKnowledgeSourceTx(ctx, tx, params.SourceID)
+		if err != nil {
+			return err
+		}
+
+		result, err := tx.ExecContext(ctx, `
+			INSERT INTO restricted_knowledge_use_approvals (
+				source_id,
+				use_type,
+				reason,
+				decision,
+				evidence_json,
+				decided_by,
+				decided_at
+			)
+			VALUES (?, ?, ?, ?, ?, ?, ?)
+		`,
+			params.SourceID,
+			params.UseType,
+			params.Reason,
+			params.Decision,
+			params.EvidenceJSON,
+			params.DecidedBy,
+			formatTime(decidedAt),
+		)
+		if err != nil {
+			return err
+		}
+
+		approvalID, err := result.LastInsertId()
+		if err != nil {
+			return err
+		}
+
+		record, err := scanRestrictedKnowledgeUseApproval(tx.QueryRowContext(ctx, `
+			SELECT id, source_id, use_type, reason, decision, evidence_json, decided_by, decided_at
+			FROM restricted_knowledge_use_approvals
+			WHERE id = ?
+		`, approvalID))
+		if err != nil {
+			return err
+		}
+		approval = record
+
+		if approval.Decision != "approved" {
+			return nil
+		}
+		return appendEventTx(ctx, tx, eventInsert{
+			StreamType: runtimeevents.StreamKnowledgeSource,
+			StreamID:   source.ID,
+			EventType:  runtimeevents.EventRestrictedKnowledgeUseApproved,
+			Scope:      source.Scope,
+			Payload: runtimeevents.RestrictedKnowledgeUseApprovedPayload{
+				SourceID:  source.ID,
+				SourceKey: source.Key,
+				UseType:   approval.UseType,
+				Reason:    approval.Reason,
+				Decision:  approval.Decision,
+			},
+			OccurredAt: decidedAt,
+		})
+	})
+
+	return approval, err
+}
+
+type queryRower interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+func (store *Store) getKnowledgeSourceTx(ctx context.Context, tx *sql.Tx, sourceID int64) (KnowledgeSource, error) {
+	var q queryRower = store.db
+	if tx != nil {
+		q = tx
+	}
+	return scanKnowledgeSource(q.QueryRowContext(ctx, `
+		SELECT id, key, title, scope, scope_key, restricted, source_kind, source_class, lifecycle, manifest_path, current_artifact_id, current_extraction_id, created_at, updated_at
+		FROM knowledge_sources
+		WHERE id = ?
+	`, sourceID))
+}
+
+func (store *Store) getKnowledgeSourceByKeyTx(ctx context.Context, tx *sql.Tx, key string) (KnowledgeSource, bool, error) {
+	if key == "" {
+		return KnowledgeSource{}, false, nil
+	}
+	var q queryRower = store.db
+	if tx != nil {
+		q = tx
+	}
+	source, err := scanKnowledgeSource(q.QueryRowContext(ctx, `
+		SELECT id, key, title, scope, scope_key, restricted, source_kind, source_class, lifecycle, manifest_path, current_artifact_id, current_extraction_id, created_at, updated_at
+		FROM knowledge_sources
+		WHERE key = ?
+	`, key))
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return KnowledgeSource{}, false, nil
+		}
+		return KnowledgeSource{}, false, err
+	}
+	return source, true, nil
+}
+
+func validateKnowledgeExtractionLineageTx(ctx context.Context, tx *sql.Tx, sourceID int64, extractionID int64) error {
+	var exists int
+	if err := tx.QueryRowContext(ctx, `
+		SELECT EXISTS(
+			SELECT 1
+			FROM knowledge_extractions
+			WHERE id = ? AND source_id = ?
+		)
+	`, extractionID, sourceID).Scan(&exists); err != nil {
+		return err
+	}
+	if exists != 1 {
+		return fmt.Errorf("knowledge chunk extraction %d does not belong to source %d", extractionID, sourceID)
+	}
+	return nil
+}
+
+func (store *Store) indexKnowledgeChunkTx(ctx context.Context, tx *sql.Tx, params IndexKnowledgeChunkParams) error {
+	if params.ChunkID == 0 {
+		return fmt.Errorf("knowledge chunk id is required")
+	}
+
+	var sourceKey string
+	var title string
+	var text string
+	if err := tx.QueryRowContext(ctx, `
+		SELECT ks.key, ks.title, kc.text
+		FROM knowledge_chunks kc
+		JOIN knowledge_sources ks ON ks.id = kc.source_id
+		WHERE kc.id = ?
+	`, params.ChunkID).Scan(&sourceKey, &title, &text); err != nil {
+		return err
+	}
+
+	if _, err := tx.ExecContext(ctx, `DELETE FROM knowledge_fts WHERE rowid = ?`, params.ChunkID); err != nil {
+		return err
+	}
+	_, err := tx.ExecContext(ctx, `
+		INSERT INTO knowledge_fts(rowid, source_key, title, topics, entities, chunk_text)
+		VALUES (?, ?, ?, ?, ?, ?)
+	`,
+		params.ChunkID,
+		sourceKey,
+		title,
+		strings.Join(params.Topics, " "),
+		strings.Join(params.Entities, " "),
+		text,
+	)
+	return err
+}
+
+func appendKnowledgeLifecycleChangedTx(ctx context.Context, tx *sql.Tx, previous KnowledgeSource, next KnowledgeSource, occurredAt time.Time) error {
+	return appendEventTx(ctx, tx, eventInsert{
+		StreamType: runtimeevents.StreamKnowledgeSource,
+		StreamID:   next.ID,
+		EventType:  runtimeevents.EventKnowledgeSourceLifecycleChanged,
+		Scope:      next.Scope,
+		Payload: runtimeevents.KnowledgeSourceLifecycleChangedPayload{
+			SourceID:          next.ID,
+			SourceKey:         next.Key,
+			PreviousLifecycle: previous.Lifecycle,
+			Lifecycle:         next.Lifecycle,
+			ArtifactID:        next.CurrentArtifactID,
+			ExtractionID:      next.CurrentExtractionID,
+		},
+		OccurredAt: occurredAt,
+	})
+}
+
+func lifecycleForKnowledgeExtractionStatus(status string) string {
+	switch status {
+	case "succeeded":
+		return "extracted"
+	case "failed":
+		return "failed"
+	default:
+		return "artifact_available"
+	}
+}
+
+func knowledgeFTSMatchQuery(query string) string {
+	terms := strings.Fields(query)
+	if len(terms) == 0 {
+		return `""`
+	}
+	quoted := make([]string, 0, len(terms))
+	for _, term := range terms {
+		term = strings.ReplaceAll(term, `"`, `""`)
+		quoted = append(quoted, `"`+term+`"`)
+	}
+	return strings.Join(quoted, " AND ")
+}
+
 func (store *Store) GetWorkspaceProfile(ctx context.Context, workspaceID string) (WorkspaceProfile, error) {
 	return scanWorkspaceProfile(store.db.QueryRowContext(ctx, `
 		SELECT
@@ -3745,6 +4527,157 @@ func scanMemorySummary(row interface{ Scan(...any) error }) (MemorySummary, erro
 	return summary, nil
 }
 
+func scanKnowledgeArtifact(row interface{ Scan(...any) error }) (KnowledgeArtifact, error) {
+	var artifact KnowledgeArtifact
+	var recordedAt string
+	if err := row.Scan(
+		&artifact.ID,
+		&artifact.SHA256,
+		&artifact.SizeBytes,
+		&artifact.SourceType,
+		&artifact.MimeType,
+		&artifact.ArtifactPath,
+		&artifact.OriginalPath,
+		&recordedAt,
+	); err != nil {
+		return KnowledgeArtifact{}, err
+	}
+
+	var err error
+	artifact.RecordedAt, err = parseTime(recordedAt)
+	if err != nil {
+		return KnowledgeArtifact{}, err
+	}
+	return artifact, nil
+}
+
+func scanKnowledgeSource(row interface{ Scan(...any) error }) (KnowledgeSource, error) {
+	var source KnowledgeSource
+	var restricted int
+	var currentArtifactID sql.NullInt64
+	var currentExtractionID sql.NullInt64
+	var createdAt string
+	var updatedAt string
+	if err := row.Scan(
+		&source.ID,
+		&source.Key,
+		&source.Title,
+		&source.Scope,
+		&source.ScopeKey,
+		&restricted,
+		&source.SourceKind,
+		&source.SourceClass,
+		&source.Lifecycle,
+		&source.ManifestPath,
+		&currentArtifactID,
+		&currentExtractionID,
+		&createdAt,
+		&updatedAt,
+	); err != nil {
+		return KnowledgeSource{}, err
+	}
+
+	var err error
+	source.Restricted = restricted != 0
+	source.CurrentArtifactID = nullableInt64Ptr(currentArtifactID)
+	source.CurrentExtractionID = nullableInt64Ptr(currentExtractionID)
+	source.CreatedAt, err = parseTime(createdAt)
+	if err != nil {
+		return KnowledgeSource{}, err
+	}
+	source.UpdatedAt, err = parseTime(updatedAt)
+	if err != nil {
+		return KnowledgeSource{}, err
+	}
+	return source, nil
+}
+
+func scanKnowledgeExtraction(row interface{ Scan(...any) error }) (KnowledgeExtraction, error) {
+	var extraction KnowledgeExtraction
+	var startedAt string
+	var finishedAt sql.NullString
+	if err := row.Scan(
+		&extraction.ID,
+		&extraction.SourceID,
+		&extraction.ArtifactID,
+		&extraction.ExtractorName,
+		&extraction.ExtractorVersion,
+		&extraction.Status,
+		&extraction.FailureCode,
+		&extraction.FailureSummary,
+		&extraction.ExtractedTextHash,
+		&extraction.NormalizedMarkdownPath,
+		&startedAt,
+		&finishedAt,
+	); err != nil {
+		return KnowledgeExtraction{}, err
+	}
+
+	var err error
+	extraction.StartedAt, err = parseTime(startedAt)
+	if err != nil {
+		return KnowledgeExtraction{}, err
+	}
+	extraction.FinishedAt, err = parseNullableTime(finishedAt)
+	if err != nil {
+		return KnowledgeExtraction{}, err
+	}
+	return extraction, nil
+}
+
+func scanKnowledgeChunk(row interface{ Scan(...any) error }) (KnowledgeChunk, error) {
+	var chunk KnowledgeChunk
+	var pageNumber sql.NullInt64
+	var restricted int
+	var createdAt string
+	if err := row.Scan(
+		&chunk.ID,
+		&chunk.SourceID,
+		&chunk.ExtractionID,
+		&chunk.Ordinal,
+		&chunk.Text,
+		&chunk.Anchor,
+		&pageNumber,
+		&restricted,
+		&createdAt,
+	); err != nil {
+		return KnowledgeChunk{}, err
+	}
+
+	var err error
+	chunk.PageNumber = nullableInt64Ptr(pageNumber)
+	chunk.Restricted = restricted != 0
+	chunk.CreatedAt, err = parseTime(createdAt)
+	if err != nil {
+		return KnowledgeChunk{}, err
+	}
+	return chunk, nil
+}
+
+func scanRestrictedKnowledgeUseApproval(row interface{ Scan(...any) error }) (RestrictedKnowledgeUseApproval, error) {
+	var approval RestrictedKnowledgeUseApproval
+	var decidedAt string
+	if err := row.Scan(
+		&approval.ID,
+		&approval.SourceID,
+		&approval.UseType,
+		&approval.Reason,
+		&approval.Decision,
+		&approval.EvidenceJSON,
+		&approval.DecidedBy,
+		&decidedAt,
+	); err != nil {
+		return RestrictedKnowledgeUseApproval{}, err
+	}
+
+	var err error
+	approval.DecidedAt, err = parseTime(decidedAt)
+	if err != nil {
+		return RestrictedKnowledgeUseApproval{}, err
+	}
+	return approval, nil
+}
+
 func scanWorkspaceProfile(row interface{ Scan(...any) error }) (WorkspaceProfile, error) {
 	var profile WorkspaceProfile
 	var createdAt string
@@ -4117,11 +5050,25 @@ func nullInt64(value *int64) any {
 	return *value
 }
 
+func nullTime(value *time.Time) any {
+	if value == nil {
+		return nil
+	}
+	return formatTime(*value)
+}
+
 func nullIfEmpty(value string) any {
 	if value == "" {
 		return nil
 	}
 	return value
+}
+
+func boolToInt(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
 }
 
 func stringOrDefault(value sql.NullString, fallback string) string {

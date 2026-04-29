@@ -390,6 +390,162 @@ type ListMemorySummariesParams struct {
 	MemoryType         string
 }
 
+type KnowledgeArtifact struct {
+	ID           int64
+	SHA256       string
+	SizeBytes    int64
+	SourceType   string
+	MimeType     string
+	ArtifactPath string
+	OriginalPath string
+	RecordedAt   time.Time
+}
+
+type RecordKnowledgeArtifactParams struct {
+	SHA256       string
+	SizeBytes    int64
+	SourceType   string
+	MimeType     string
+	ArtifactPath string
+	OriginalPath string
+}
+
+type KnowledgeSource struct {
+	ID                  int64
+	Key                 string
+	Title               string
+	Scope               string
+	ScopeKey            string
+	Restricted          bool
+	SourceKind          string
+	SourceClass         string
+	Lifecycle           string
+	ManifestPath        string
+	CurrentArtifactID   *int64
+	CurrentExtractionID *int64
+	CreatedAt           time.Time
+	UpdatedAt           time.Time
+}
+
+type UpsertKnowledgeSourceParams struct {
+	Key                 string
+	Title               string
+	Scope               string
+	ScopeKey            string
+	Restricted          bool
+	SourceKind          string
+	SourceClass         string
+	Lifecycle           string
+	ManifestPath        string
+	CurrentArtifactID   *int64
+	CurrentExtractionID *int64
+}
+
+type ListKnowledgeSourcesParams struct {
+	Scope      string
+	ScopeKey   string
+	Lifecycle  string
+	Restricted *bool
+}
+
+type KnowledgeExtraction struct {
+	ID                     int64
+	SourceID               int64
+	ArtifactID             int64
+	ExtractorName          string
+	ExtractorVersion       string
+	Status                 string
+	FailureCode            string
+	FailureSummary         string
+	ExtractedTextHash      string
+	NormalizedMarkdownPath string
+	StartedAt              time.Time
+	FinishedAt             *time.Time
+}
+
+type RecordKnowledgeExtractionParams struct {
+	SourceID               int64
+	ArtifactID             int64
+	ExtractorName          string
+	ExtractorVersion       string
+	Status                 string
+	Lifecycle              string
+	FailureCode            string
+	FailureSummary         string
+	ExtractedTextHash      string
+	NormalizedMarkdownPath string
+	StartedAt              *time.Time
+	FinishedAt             *time.Time
+}
+
+type KnowledgeChunk struct {
+	ID           int64
+	SourceID     int64
+	ExtractionID int64
+	Ordinal      int
+	Text         string
+	Anchor       string
+	PageNumber   *int64
+	Restricted   bool
+	CreatedAt    time.Time
+}
+
+type RecordKnowledgeChunkParams struct {
+	SourceID     int64
+	ExtractionID int64
+	Ordinal      int
+	Text         string
+	Anchor       string
+	PageNumber   *int64
+	Restricted   bool
+}
+
+type IndexKnowledgeChunkParams struct {
+	ChunkID  int64
+	Topics   []string
+	Entities []string
+}
+
+type SearchKnowledgeChunksParams struct {
+	Query    string
+	Scope    string
+	ScopeKey string
+	Limit    int
+}
+
+type KnowledgeSearchResult struct {
+	SourceID   int64
+	SourceKey  string
+	Title      string
+	ChunkID    int64
+	Text       string
+	Anchor     string
+	PageNumber *int64
+	Restricted bool
+	Rank       float64
+}
+
+type RestrictedKnowledgeUseApproval struct {
+	ID           int64
+	SourceID     int64
+	UseType      string
+	Reason       string
+	Decision     string
+	EvidenceJSON string
+	DecidedBy    string
+	DecidedAt    time.Time
+}
+
+type RecordRestrictedKnowledgeUseApprovalParams struct {
+	SourceID     int64
+	UseType      string
+	Reason       string
+	Decision     string
+	EvidenceJSON string
+	DecidedBy    string
+	DecidedAt    *time.Time
+}
+
 type WorktreeLease struct {
 	ID           int64
 	ProjectID    int64
