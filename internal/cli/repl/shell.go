@@ -14,10 +14,13 @@ import (
 	"odin-os/internal/cli/render"
 	"odin-os/internal/cli/scope"
 	"odin-os/internal/core/projects"
+	"odin-os/internal/executors/contract"
+	executorrouter "odin-os/internal/executors/router"
 	healthsvc "odin-os/internal/runtime/health"
 	jobsvc "odin-os/internal/runtime/jobs"
 	runsvc "odin-os/internal/runtime/runs"
 	"odin-os/internal/store/sqlite"
+	"odin-os/internal/vcs/leases"
 )
 
 type Environment struct {
@@ -25,6 +28,9 @@ type Environment struct {
 	Registry            projects.Registry
 	RegistryDiagnostics []projects.Diagnostic
 	SessionStore        SessionStore
+	ExecutorConfig      executorrouter.Config
+	Executors           map[string]contract.Executor
+	Leases              leases.Manager
 }
 
 type Shell struct {
