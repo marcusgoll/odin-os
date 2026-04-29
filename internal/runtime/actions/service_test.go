@@ -46,6 +46,48 @@ func TestLifecycleRejectsCompletionWithoutReadback(t *testing.T) {
 	}
 }
 
+func TestLifecycleRejectsInternalRecordCompletionWithoutEvidence(t *testing.T) {
+	err := actions.ValidateCompletion(actions.CompletionInput{
+		ProofRequirement: actions.ProofInternalRecord,
+	})
+	if !errors.Is(err, actions.ErrExternalReadbackMissing) {
+		t.Fatalf("err = %v, want ErrExternalReadbackMissing", err)
+	}
+}
+
+func TestLifecycleAllowsInternalRecordCompletionWithEvidence(t *testing.T) {
+	err := actions.ValidateCompletion(actions.CompletionInput{
+		ProofRequirement: actions.ProofInternalRecord,
+		Events: []actions.EvidenceSummary{
+			{Type: actions.EventInternallyRecorded},
+		},
+	})
+	if err != nil {
+		t.Fatalf("ValidateCompletion() error = %v", err)
+	}
+}
+
+func TestLifecycleRejectsSubstituteProofCompletionWithoutEvidence(t *testing.T) {
+	err := actions.ValidateCompletion(actions.CompletionInput{
+		ProofRequirement: actions.ProofSubstitute,
+	})
+	if !errors.Is(err, actions.ErrSubstituteProofNotDeclared) {
+		t.Fatalf("err = %v, want ErrSubstituteProofNotDeclared", err)
+	}
+}
+
+func TestLifecycleAllowsSubstituteProofCompletionWithEvidence(t *testing.T) {
+	err := actions.ValidateCompletion(actions.CompletionInput{
+		ProofRequirement: actions.ProofSubstitute,
+		Events: []actions.EvidenceSummary{
+			{Type: actions.EventSubstituteProof},
+		},
+	})
+	if err != nil {
+		t.Fatalf("ValidateCompletion() error = %v", err)
+	}
+}
+
 func TestPreparedPayloadHashCanonicalizesJSONObjectOrder(t *testing.T) {
 	service := actions.Service{}
 	first, err := service.HashPreparedPayload(actions.PreparedPayload{

@@ -95,8 +95,14 @@ func ValidateCompletion(input CompletionInput) error {
 		if !hasEvent(input.Events, EventExternallyReadBack) {
 			return ErrExternalReadbackMissing
 		}
-	case ProofSubstitute, ProofInternalRecord:
-		return nil
+	case ProofInternalRecord:
+		if !hasEvent(input.Events, EventInternallyRecorded) {
+			return ErrExternalReadbackMissing
+		}
+	case ProofSubstitute:
+		if !hasEvent(input.Events, EventSubstituteProof) {
+			return ErrSubstituteProofNotDeclared
+		}
 	default:
 		return ErrSubstituteProofNotDeclared
 	}
