@@ -16,6 +16,7 @@ import (
 
 var ErrWorktreeLeaseConflict = errors.New("worktree lease conflict")
 var ErrInvalidActionApprovalBinding = errors.New("invalid action approval binding")
+var ErrInvalidActionEvidenceLink = errors.New("invalid action evidence link")
 
 type Store struct {
 	db        *sql.DB
@@ -568,52 +569,59 @@ func (store *Store) AppendActionEvidence(ctx context.Context, params AppendActio
 	now := store.now()
 	var event ActionEvidenceEvent
 
-	result, err := store.db.ExecContext(ctx, `
-		INSERT INTO action_evidence_events (
-			action_id,
-			event_type,
-			event_version,
-			payload_hash,
-			approval_id,
-			run_id,
-			source,
-			evidence_json,
-			occurred_at
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		if err := validateActionEvidenceLinks(ctx, tx, params); err != nil {
+			return err
+		}
+
+		result, err := tx.ExecContext(ctx, `
+			INSERT INTO action_evidence_events (
+				action_id,
+				event_type,
+				event_version,
+				payload_hash,
+				approval_id,
+				run_id,
+				source,
+				evidence_json,
+				occurred_at
+			)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`,
+			params.ActionID,
+			params.EventType,
+			params.EventVersion,
+			nullIfEmpty(params.PayloadHash),
+			nullInt64(params.ApprovalID),
+			nullInt64(params.RunID),
+			params.Source,
+			params.EvidenceJSON,
+			formatTime(now),
 		)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`,
-		params.ActionID,
-		params.EventType,
-		params.EventVersion,
-		nullIfEmpty(params.PayloadHash),
-		nullInt64(params.ApprovalID),
-		nullInt64(params.RunID),
-		params.Source,
-		params.EvidenceJSON,
-		formatTime(now),
-	)
-	if err != nil {
-		return ActionEvidenceEvent{}, err
-	}
+		if err != nil {
+			return err
+		}
 
-	eventID, err := result.LastInsertId()
-	if err != nil {
-		return ActionEvidenceEvent{}, err
-	}
+		eventID, err := result.LastInsertId()
+		if err != nil {
+			return err
+		}
 
-	event = ActionEvidenceEvent{
-		ID:           eventID,
-		ActionID:     params.ActionID,
-		EventType:    params.EventType,
-		EventVersion: params.EventVersion,
-		PayloadHash:  stringPtrIfNotEmpty(params.PayloadHash),
-		ApprovalID:   params.ApprovalID,
-		RunID:        params.RunID,
-		Source:       params.Source,
-		EvidenceJSON: params.EvidenceJSON,
-		OccurredAt:   now,
-	}
-	return event, nil
+		event = ActionEvidenceEvent{
+			ID:           eventID,
+			ActionID:     params.ActionID,
+			EventType:    params.EventType,
+			EventVersion: params.EventVersion,
+			PayloadHash:  stringPtrIfNotEmpty(params.PayloadHash),
+			ApprovalID:   params.ApprovalID,
+			RunID:        params.RunID,
+			Source:       params.Source,
+			EvidenceJSON: params.EvidenceJSON,
+			OccurredAt:   now,
+		}
+		return nil
+	})
+	return event, err
 }
 
 func (store *Store) GetAction(ctx context.Context, actionID int64) (Action, ActionPayload, error) {
@@ -3249,6 +3257,64 @@ func validateActionApprovalBinding(ctx context.Context, tx *sql.Tx, taskID int64
 	if taskID != workflowTaskID {
 		return fmt.Errorf("%w: task_id does not match action workflow run task_id", ErrInvalidActionApprovalBinding)
 	}
+	return nil
+}
+
+func validateActionEvidenceLinks(ctx context.Context, tx *sql.Tx, params AppendActionEvidenceParams) error {
+	var workflowRunID int64
+	if err := tx.QueryRowContext(ctx, `
+		SELECT workflow_run_id
+		FROM actions
+		WHERE id = ?
+	`, params.ActionID).Scan(&workflowRunID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("%w: action_id not found", ErrInvalidActionEvidenceLink)
+		}
+		return err
+	}
+
+	payloadHash := strings.TrimSpace(params.PayloadHash)
+	if payloadHash != "" {
+		var exists int
+		if err := tx.QueryRowContext(ctx, `
+			SELECT EXISTS(
+				SELECT 1
+				FROM action_payloads
+				WHERE action_id = ? AND payload_hash = ?
+			)
+		`, params.ActionID, payloadHash).Scan(&exists); err != nil {
+			return err
+		}
+		if exists != 1 {
+			return fmt.Errorf("%w: payload_hash does not belong to action_id", ErrInvalidActionEvidenceLink)
+		}
+	}
+
+	if params.RunID != nil && *params.RunID != workflowRunID {
+		return fmt.Errorf("%w: run_id does not match action workflow_run_id", ErrInvalidActionEvidenceLink)
+	}
+
+	if params.ApprovalID != nil {
+		var approvalActionID sql.NullInt64
+		var approvalPayloadHash sql.NullString
+		if err := tx.QueryRowContext(ctx, `
+			SELECT action_id, payload_hash
+			FROM approvals
+			WHERE id = ?
+		`, *params.ApprovalID).Scan(&approvalActionID, &approvalPayloadHash); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return fmt.Errorf("%w: approval_id not found", ErrInvalidActionEvidenceLink)
+			}
+			return err
+		}
+		if !approvalActionID.Valid || approvalActionID.Int64 != params.ActionID {
+			return fmt.Errorf("%w: approval_id does not belong to action_id", ErrInvalidActionEvidenceLink)
+		}
+		if payloadHash != "" && (!approvalPayloadHash.Valid || approvalPayloadHash.String != payloadHash) {
+			return fmt.Errorf("%w: approval payload_hash does not match evidence payload_hash", ErrInvalidActionEvidenceLink)
+		}
+	}
+
 	return nil
 }
 

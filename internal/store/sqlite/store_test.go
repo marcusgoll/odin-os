@@ -268,6 +268,144 @@ func TestStoreRejectsActionApprovalBindingForMismatchedTask(t *testing.T) {
 	}
 }
 
+func TestStoreRejectsActionEvidenceWithWrongPayloadHash(t *testing.T) {
+	ctx := context.Background()
+	store := openMigratedTestStore(t, "invalid-action-evidence-payload.db")
+	defer store.Close()
+	_, _, run := createProjectTaskRunFixture(t, ctx, store)
+
+	action, _, err := store.CreateActionWithPayload(ctx, CreateActionWithPayloadParams{
+		WorkflowKey:          "flica-tradeboard",
+		WorkflowRunID:        run.ID,
+		ActionType:           "tradeboard_action",
+		PayloadSchema:        "flica.tradeboard_action.v1",
+		PayloadSchemaVersion: 1,
+		PayloadHash:          "sha256:valid",
+		PayloadJSON:          `{"pairing":"W7084C"}`,
+		SubmitPath:           "command:/tradeboard post",
+		ReadbackPath:         "huginn:flica-my-requests",
+		ProofRequirement:     "external_readback",
+	})
+	if err != nil {
+		t.Fatalf("CreateActionWithPayload() error = %v", err)
+	}
+
+	runID := run.ID
+	if _, err := store.AppendActionEvidence(ctx, AppendActionEvidenceParams{
+		ActionID:     action.ID,
+		EventType:    "action.prepared",
+		EventVersion: 1,
+		PayloadHash:  "sha256:wrong",
+		RunID:        &runID,
+		Source:       "test",
+		EvidenceJSON: `{"status":"prepared"}`,
+	}); err == nil || !strings.Contains(err.Error(), "invalid action evidence link") {
+		t.Fatalf("AppendActionEvidence() error = %v, want invalid action evidence link", err)
+	}
+}
+
+func TestStoreRejectsActionEvidenceWithMismatchedRun(t *testing.T) {
+	ctx := context.Background()
+	store := openMigratedTestStore(t, "invalid-action-evidence-run.db")
+	defer store.Close()
+	project, _, run := createProjectTaskRunFixture(t, ctx, store)
+	_, otherRun := createTaskRunForProject(t, ctx, store, project.ID, "other-evidence-run")
+
+	action, _, err := store.CreateActionWithPayload(ctx, CreateActionWithPayloadParams{
+		WorkflowKey:          "flica-tradeboard",
+		WorkflowRunID:        run.ID,
+		ActionType:           "tradeboard_action",
+		PayloadSchema:        "flica.tradeboard_action.v1",
+		PayloadSchemaVersion: 1,
+		PayloadHash:          "sha256:valid",
+		PayloadJSON:          `{"pairing":"W7084C"}`,
+		SubmitPath:           "command:/tradeboard post",
+		ReadbackPath:         "huginn:flica-my-requests",
+		ProofRequirement:     "external_readback",
+	})
+	if err != nil {
+		t.Fatalf("CreateActionWithPayload() error = %v", err)
+	}
+
+	otherRunID := otherRun.ID
+	if _, err := store.AppendActionEvidence(ctx, AppendActionEvidenceParams{
+		ActionID:     action.ID,
+		EventType:    "action.prepared",
+		EventVersion: 1,
+		RunID:        &otherRunID,
+		Source:       "test",
+		EvidenceJSON: `{"status":"prepared"}`,
+	}); err == nil || !strings.Contains(err.Error(), "invalid action evidence link") {
+		t.Fatalf("AppendActionEvidence() error = %v, want invalid action evidence link", err)
+	}
+}
+
+func TestStoreRejectsActionEvidenceWithMismatchedApproval(t *testing.T) {
+	ctx := context.Background()
+	store := openMigratedTestStore(t, "invalid-action-evidence-approval.db")
+	defer store.Close()
+	project, _, run := createProjectTaskRunFixture(t, ctx, store)
+	otherTask, otherRun := createTaskRunForProject(t, ctx, store, project.ID, "other-evidence-approval")
+
+	action, _, err := store.CreateActionWithPayload(ctx, CreateActionWithPayloadParams{
+		WorkflowKey:          "flica-tradeboard",
+		WorkflowRunID:        run.ID,
+		ActionType:           "tradeboard_action",
+		PayloadSchema:        "flica.tradeboard_action.v1",
+		PayloadSchemaVersion: 1,
+		PayloadHash:          "sha256:valid",
+		PayloadJSON:          `{"pairing":"W7084C"}`,
+		SubmitPath:           "command:/tradeboard post",
+		ReadbackPath:         "huginn:flica-my-requests",
+		ProofRequirement:     "external_readback",
+	})
+	if err != nil {
+		t.Fatalf("CreateActionWithPayload() error = %v", err)
+	}
+	otherAction, _, err := store.CreateActionWithPayload(ctx, CreateActionWithPayloadParams{
+		WorkflowKey:          "flica-tradeboard",
+		WorkflowRunID:        otherRun.ID,
+		ActionType:           "tradeboard_action",
+		PayloadSchema:        "flica.tradeboard_action.v1",
+		PayloadSchemaVersion: 1,
+		PayloadHash:          "sha256:other",
+		PayloadJSON:          `{"pairing":"W7085C"}`,
+		SubmitPath:           "command:/tradeboard post",
+		ReadbackPath:         "huginn:flica-my-requests",
+		ProofRequirement:     "external_readback",
+	})
+	if err != nil {
+		t.Fatalf("CreateActionWithPayload(other) error = %v", err)
+	}
+
+	otherRunID := otherRun.ID
+	approval, err := store.RequestApproval(ctx, RequestApprovalParams{
+		TaskID:      otherTask.ID,
+		RunID:       &otherRunID,
+		ActionID:    &otherAction.ID,
+		PayloadHash: "sha256:other",
+		Status:      "pending",
+		RequestedBy: "system",
+	})
+	if err != nil {
+		t.Fatalf("RequestApproval(other) error = %v", err)
+	}
+
+	runID := run.ID
+	if _, err := store.AppendActionEvidence(ctx, AppendActionEvidenceParams{
+		ActionID:     action.ID,
+		EventType:    "action.prepared",
+		EventVersion: 1,
+		PayloadHash:  "sha256:valid",
+		ApprovalID:   &approval.ID,
+		RunID:        &runID,
+		Source:       "test",
+		EvidenceJSON: `{"status":"prepared"}`,
+	}); err == nil || !strings.Contains(err.Error(), "invalid action evidence link") {
+		t.Fatalf("AppendActionEvidence() error = %v, want invalid action evidence link", err)
+	}
+}
+
 func openTestStore(t *testing.T) *Store {
 	t.Helper()
 	return openMigratedTestStore(t, "odin.db")
