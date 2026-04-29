@@ -391,6 +391,58 @@ func TestAppendActionEvidenceMirrorsRuntimeEvent(t *testing.T) {
 	}
 }
 
+func TestAppendActionEvidenceMirrorUsesActionRunScopeWithoutRunID(t *testing.T) {
+	ctx := context.Background()
+	store := openMigratedTestStore(t, "action-evidence-runtime-event-scope.db")
+	defer store.Close()
+	project, _, run := createProjectTaskRunFixture(t, ctx, store)
+
+	action, payload, err := store.CreateActionWithPayload(ctx, CreateActionWithPayloadParams{
+		WorkflowKey:          "flica-tradeboard",
+		WorkflowRunID:        run.ID,
+		ActionType:           "tradeboard_action",
+		PayloadSchema:        "flica.tradeboard_action.v1",
+		PayloadSchemaVersion: 1,
+		PayloadHash:          "sha256:mirror-scope",
+		PayloadJSON:          `{"pairing":"W7084C"}`,
+		SubmitPath:           "command:/tradeboard post",
+		ReadbackPath:         "huginn:flica-my-requests",
+		ProofRequirement:     "external_readback",
+	})
+	if err != nil {
+		t.Fatalf("CreateActionWithPayload() error = %v", err)
+	}
+
+	if _, err := store.AppendActionEvidence(ctx, AppendActionEvidenceParams{
+		ActionID:     action.ID,
+		EventType:    string(runtimeevents.EventActionSubstituteProof),
+		EventVersion: 1,
+		PayloadHash:  payload.PayloadHash,
+		Source:       "test",
+		EvidenceJSON: `{"status":"substitute_proof"}`,
+	}); err != nil {
+		t.Fatalf("AppendActionEvidence() error = %v", err)
+	}
+
+	events, err := store.ListEvents(ctx, ListEventsParams{ProjectID: &project.ID})
+	if err != nil {
+		t.Fatalf("ListEvents() error = %v", err)
+	}
+	var got *runtimeevents.Record
+	for i := range events {
+		if events[i].Type == runtimeevents.EventActionSubstituteProof {
+			got = &events[i]
+			break
+		}
+	}
+	if got == nil {
+		t.Fatalf("ListEvents() missing %s event in %+v", runtimeevents.EventActionSubstituteProof, events)
+	}
+	if got.Scope != project.Scope || got.ProjectID == nil || *got.ProjectID != project.ID || got.TaskID == nil || got.RunID != nil {
+		t.Fatalf("event scope/project/task/run = %q/%v/%v/%v, want action workflow context with nil run_id", got.Scope, got.ProjectID, got.TaskID, got.RunID)
+	}
+}
+
 func TestStoreRejectsDuplicateActionPayloadHash(t *testing.T) {
 	ctx := context.Background()
 	store := openMigratedTestStore(t, "duplicate-action-payload.db")

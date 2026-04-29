@@ -629,19 +629,25 @@ func (store *Store) AppendActionEvidence(ctx context.Context, params AppendActio
 		}
 
 		var (
-			scope     string
-			projectID *int64
-			taskID    *int64
+			workflowRunID int64
+			scope         string
+			projectID     *int64
+			taskID        *int64
 		)
-		if params.RunID != nil {
-			_, task, err := store.getRunWithTaskTx(ctx, tx, *params.RunID)
-			if err != nil {
-				return err
-			}
-			scope = task.Scope
-			projectID = &task.ProjectID
-			taskID = &task.ID
+		if err := tx.QueryRowContext(ctx, `
+				SELECT workflow_run_id
+				FROM actions
+				WHERE id = ?
+			`, params.ActionID).Scan(&workflowRunID); err != nil {
+			return err
 		}
+		_, task, err := store.getRunWithTaskTx(ctx, tx, workflowRunID)
+		if err != nil {
+			return err
+		}
+		scope = task.Scope
+		projectID = &task.ProjectID
+		taskID = &task.ID
 
 		return appendEventTx(ctx, tx, eventInsert{
 			StreamType: runtimeevents.StreamAction,

@@ -59,6 +59,7 @@ Phase 03 through Phase 14 event types are:
 - `action.submitted`
 - `action.internally_recorded`
 - `action.externally_read_back`
+- `action.substitute_proof`
 - `action.completed`
 - `action.failed`
 - `action.abandoned`
@@ -99,7 +100,7 @@ The mirrored event envelope must use:
 
 - `stream_type`: `action`
 - `stream_id`: the `actions.id` value
-- `event_type`: the stable action evidence event type, such as `action.prepared`, `action.submitted`, or `action.externally_read_back`
+- `event_type`: the stable action evidence event type, such as `action.prepared`, `action.submitted`, `action.externally_read_back`, or `action.substitute_proof`
 - `event_version`: the action evidence event version
 - `run_id`: the `run_id` supplied to the action evidence append, when present
 

@@ -42,6 +42,7 @@ const (
 	EventActionSubmitted                  Type = "action.submitted"
 	EventActionInternallyRecorded         Type = "action.internally_recorded"
 	EventActionExternallyReadBack         Type = "action.externally_read_back"
+	EventActionSubstituteProof            Type = "action.substitute_proof"
 	EventActionCompleted                  Type = "action.completed"
 	EventActionFailed                     Type = "action.failed"
 	EventActionAbandoned                  Type = "action.abandoned"
