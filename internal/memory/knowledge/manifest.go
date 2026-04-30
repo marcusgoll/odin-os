@@ -73,6 +73,68 @@ func (s Service) writeManifest(params IngestParams, artifact artifactRecord, ext
 	return manifestPath, nil
 }
 
+func (s Service) readManifest(manifestPath string) (manifestFrontmatter, error) {
+	repoRoot, err := cleanAbsPath(s.RepoRoot, "repo root")
+	if err != nil {
+		return manifestFrontmatter{}, err
+	}
+	if !strings.HasPrefix(manifestPath, "memory/knowledge/") || !strings.HasSuffix(manifestPath, ".md") {
+		return manifestFrontmatter{}, fmt.Errorf("knowledge manifest path %q is not canonical", manifestPath)
+	}
+	fullPath := filepath.Join(repoRoot, filepath.FromSlash(manifestPath))
+	bytes, err := os.ReadFile(fullPath)
+	if err != nil {
+		return manifestFrontmatter{}, err
+	}
+	content := string(bytes)
+	if !strings.HasPrefix(content, "---\n") {
+		return manifestFrontmatter{}, fmt.Errorf("knowledge manifest %q missing frontmatter", manifestPath)
+	}
+	end := strings.Index(content[len("---\n"):], "\n---")
+	if end < 0 {
+		return manifestFrontmatter{}, fmt.Errorf("knowledge manifest %q has unterminated frontmatter", manifestPath)
+	}
+	var frontmatter manifestFrontmatter
+	if err := yaml.Unmarshal([]byte(content[len("---\n"):len("---\n")+end]), &frontmatter); err != nil {
+		return manifestFrontmatter{}, err
+	}
+	if err := validateManifest(frontmatter, manifestPath); err != nil {
+		return manifestFrontmatter{}, err
+	}
+	return frontmatter, nil
+}
+
+func validateManifest(frontmatter manifestFrontmatter, manifestPath string) error {
+	if frontmatter.Kind != "knowledge_source" {
+		return fmt.Errorf("knowledge manifest %q kind = %q, want knowledge_source", manifestPath, frontmatter.Kind)
+	}
+	if canonicalManifestPath(frontmatter.Key) != manifestPath {
+		return fmt.Errorf("knowledge manifest %q key %q is not canonical", manifestPath, frontmatter.Key)
+	}
+	if strings.TrimSpace(frontmatter.Title) == "" {
+		return fmt.Errorf("knowledge manifest %q title is required", manifestPath)
+	}
+	if strings.TrimSpace(frontmatter.Scope) == "" || strings.TrimSpace(frontmatter.ScopeKey) == "" {
+		return fmt.Errorf("knowledge manifest %q scope and scope_key are required", manifestPath)
+	}
+	if strings.TrimSpace(frontmatter.SourceKind) == "" {
+		return fmt.Errorf("knowledge manifest %q source_kind is required", manifestPath)
+	}
+	if err := validateTask2SourceClass(SourceClass(frontmatter.SourceClass)); err != nil {
+		return err
+	}
+	if strings.TrimSpace(frontmatter.ArtifactSHA256) == "" || strings.TrimSpace(frontmatter.ArtifactRef) == "" {
+		return fmt.Errorf("knowledge manifest %q artifact_sha256 and artifact_ref are required", manifestPath)
+	}
+	if strings.TrimSpace(frontmatter.Extractor) == "" {
+		return fmt.Errorf("knowledge manifest %q extractor is required", manifestPath)
+	}
+	if strings.TrimSpace(frontmatter.CitationPolicy) == "" {
+		return fmt.Errorf("knowledge manifest %q citation_policy is required", manifestPath)
+	}
+	return nil
+}
+
 func canonicalManifestPath(key string) string {
 	return "memory/knowledge/" + key + ".md"
 }

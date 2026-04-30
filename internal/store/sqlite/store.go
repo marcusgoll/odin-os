@@ -1599,6 +1599,29 @@ func (store *Store) RecordKnowledgeArtifact(ctx context.Context, params RecordKn
 	return artifact, err
 }
 
+func (store *Store) GetKnowledgeArtifact(ctx context.Context, artifactID int64) (KnowledgeArtifact, error) {
+	if artifactID == 0 {
+		return KnowledgeArtifact{}, fmt.Errorf("knowledge artifact id is required")
+	}
+	return scanKnowledgeArtifact(store.db.QueryRowContext(ctx, `
+		SELECT id, sha256, size_bytes, source_type, mime_type, artifact_path, original_path, ocr_required, recorded_at
+		FROM knowledge_artifacts
+		WHERE id = ?
+	`, artifactID))
+}
+
+func (store *Store) GetKnowledgeArtifactBySHA(ctx context.Context, sha256 string) (KnowledgeArtifact, error) {
+	sha256 = strings.TrimSpace(sha256)
+	if sha256 == "" {
+		return KnowledgeArtifact{}, fmt.Errorf("knowledge artifact sha256 is required")
+	}
+	return scanKnowledgeArtifact(store.db.QueryRowContext(ctx, `
+		SELECT id, sha256, size_bytes, source_type, mime_type, artifact_path, original_path, ocr_required, recorded_at
+		FROM knowledge_artifacts
+		WHERE sha256 = ?
+	`, sha256))
+}
+
 func (store *Store) UpsertKnowledgeSource(ctx context.Context, params UpsertKnowledgeSourceParams) (KnowledgeSource, error) {
 	params.Key = strings.TrimSpace(params.Key)
 	params.Title = strings.TrimSpace(params.Title)

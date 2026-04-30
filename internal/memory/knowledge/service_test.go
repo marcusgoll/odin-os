@@ -119,6 +119,146 @@ func TestServiceRejectsUnsupportedSourceClass(t *testing.T) {
 	}
 }
 
+func TestServiceDefaultsPilotContractToRestrictedManifestAndChunks(t *testing.T) {
+	ctx := context.Background()
+	service, repoRoot, _ := newTestService(t)
+
+	result, err := service.Ingest(ctx, IngestParams{
+		Path:       filepath.Join("testdata", "pilot-contract.txt"),
+		Key:        "pilot-contract-default",
+		Title:      "Pilot Contract Default",
+		Scope:      "global",
+		ScopeKey:   "global",
+		SourceKind: "pilot_contract",
+	})
+	if err != nil {
+		t.Fatalf("Ingest() error = %v", err)
+	}
+	if !result.Source.Restricted {
+		t.Fatalf("Restricted = false, want default restricted")
+	}
+
+	manifest, err := os.ReadFile(filepath.Join(repoRoot, "memory", "knowledge", "pilot-contract-default.md"))
+	if err != nil {
+		t.Fatalf("ReadFile(manifest) error = %v", err)
+	}
+	if !strings.Contains(string(manifest), "restricted: true") {
+		t.Fatalf("manifest = %s, want restricted: true", string(manifest))
+	}
+
+	results, err := service.Store.SearchKnowledgeChunks(ctx, sqlite.SearchKnowledgeChunksParams{
+		Query:    "vacation",
+		Scope:    "global",
+		ScopeKey: "global",
+		Limit:    10,
+	})
+	if err != nil {
+		t.Fatalf("SearchKnowledgeChunks() error = %v", err)
+	}
+	if len(results) != 1 || !results[0].Restricted {
+		t.Fatalf("results = %+v, want one restricted chunk", results)
+	}
+}
+
+func TestServiceReusesIdenticalArtifactBytesAcrossDifferentFilenames(t *testing.T) {
+	ctx := context.Background()
+	service, _, runtimeRoot := newTestService(t)
+	sourceDir := t.TempDir()
+	firstPath := filepath.Join(sourceDir, "first.txt")
+	secondPath := filepath.Join(sourceDir, "second.txt")
+	bytes, err := os.ReadFile(filepath.Join("testdata", "pilot-contract.txt"))
+	if err != nil {
+		t.Fatalf("ReadFile(testdata) error = %v", err)
+	}
+	if err := os.WriteFile(firstPath, bytes, 0o644); err != nil {
+		t.Fatalf("WriteFile(first) error = %v", err)
+	}
+	if err := os.WriteFile(secondPath, bytes, 0o644); err != nil {
+		t.Fatalf("WriteFile(second) error = %v", err)
+	}
+
+	first, err := service.Ingest(ctx, IngestParams{
+		Path:       firstPath,
+		Key:        "first-contract",
+		Title:      "First Contract",
+		Scope:      "global",
+		ScopeKey:   "global",
+		SourceKind: "pilot_contract",
+	})
+	if err != nil {
+		t.Fatalf("Ingest(first) error = %v", err)
+	}
+	second, err := service.Ingest(ctx, IngestParams{
+		Path:       secondPath,
+		Key:        "second-contract",
+		Title:      "Second Contract",
+		Scope:      "global",
+		ScopeKey:   "global",
+		SourceKind: "pilot_contract",
+	})
+	if err != nil {
+		t.Fatalf("Ingest(second) error = %v", err)
+	}
+
+	if second.Artifact.ID != first.Artifact.ID || second.Artifact.ArtifactPath != first.Artifact.ArtifactPath {
+		t.Fatalf("second artifact = %+v, want reused first artifact %+v", second.Artifact, first.Artifact)
+	}
+	if count := countFiles(t, filepath.Join(runtimeRoot, "knowledge", "artifacts")); count != 1 {
+		t.Fatalf("artifact file count = %d, want 1", count)
+	}
+}
+
+func TestServiceReingestPreservesPriorNormalizedSnapshot(t *testing.T) {
+	ctx := context.Background()
+	service, _, _ := newTestService(t)
+	sourcePath := filepath.Join(t.TempDir(), "manual.md")
+	if err := os.WriteFile(sourcePath, []byte("# First\n\nInitial content.\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(first) error = %v", err)
+	}
+
+	first, err := service.Ingest(ctx, IngestParams{
+		Path:       sourcePath,
+		Key:        "mutable-manual",
+		Title:      "Mutable Manual",
+		Scope:      "global",
+		ScopeKey:   "global",
+		SourceKind: "manual",
+	})
+	if err != nil {
+		t.Fatalf("Ingest(first) error = %v", err)
+	}
+	firstSnapshot, err := os.ReadFile(first.NormalizedMarkdownPath)
+	if err != nil {
+		t.Fatalf("ReadFile(first snapshot) error = %v", err)
+	}
+
+	if err := os.WriteFile(sourcePath, []byte("# Second\n\nUpdated content.\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(second) error = %v", err)
+	}
+	second, err := service.Ingest(ctx, IngestParams{
+		Path:       sourcePath,
+		Key:        "mutable-manual",
+		Title:      "Mutable Manual",
+		Scope:      "global",
+		ScopeKey:   "global",
+		SourceKind: "manual",
+	})
+	if err != nil {
+		t.Fatalf("Ingest(second) error = %v", err)
+	}
+
+	if second.NormalizedMarkdownPath == first.NormalizedMarkdownPath {
+		t.Fatalf("normalized path did not change: %s", second.NormalizedMarkdownPath)
+	}
+	reloadedFirstSnapshot, err := os.ReadFile(first.NormalizedMarkdownPath)
+	if err != nil {
+		t.Fatalf("ReadFile(first snapshot again) error = %v", err)
+	}
+	if string(reloadedFirstSnapshot) != string(firstSnapshot) {
+		t.Fatalf("first snapshot changed from %q to %q", string(firstSnapshot), string(reloadedFirstSnapshot))
+	}
+}
+
 func newTestService(t *testing.T) (Service, string, string) {
 	t.Helper()
 
@@ -149,4 +289,22 @@ func newTestService(t *testing.T) (Service, string, string) {
 		RuntimeRoot: runtimeRoot,
 		Now:         store.Now,
 	}, repoRoot, runtimeRoot
+}
+
+func countFiles(t *testing.T, root string) int {
+	t.Helper()
+
+	count := 0
+	if err := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !entry.IsDir() {
+			count++
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("WalkDir(%s) error = %v", root, err)
+	}
+	return count
 }

@@ -3,7 +3,9 @@ package knowledge
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -22,11 +24,11 @@ func (s Service) Ingest(ctx context.Context, params IngestParams) (IngestResult,
 		return IngestResult{}, err
 	}
 
-	extraction, err := extractSource(sourcePath, params.SourceClass)
+	artifact, artifactRecord, err := s.storeArtifact(ctx, sourcePath, params.SourceClass)
 	if err != nil {
 		return IngestResult{}, err
 	}
-	artifact, artifactRecord, err := s.storeArtifact(ctx, sourcePath, params.SourceClass)
+	extraction, err := extractSource(artifact.ArtifactPath, params.SourceClass)
 	if err != nil {
 		return IngestResult{}, err
 	}
@@ -34,24 +36,37 @@ func (s Service) Ingest(ctx context.Context, params IngestParams) (IngestResult,
 	if err != nil {
 		return IngestResult{}, err
 	}
+	manifest, err := s.readManifest(manifestPath)
+	if err != nil {
+		return IngestResult{}, err
+	}
+	if manifest.ArtifactSHA256 != artifact.SHA256 {
+		return IngestResult{}, fmt.Errorf("knowledge manifest artifact_sha256 = %q, want %q", manifest.ArtifactSHA256, artifact.SHA256)
+	}
+	if manifest.Extractor != extraction.Extractor() {
+		return IngestResult{}, fmt.Errorf("knowledge manifest extractor = %q, want %q", manifest.Extractor, extraction.Extractor())
+	}
 
-	source, err := s.Store.UpsertKnowledgeSource(ctx, sqlite.UpsertKnowledgeSourceParams{
-		Key:               params.Key,
-		Title:             params.Title,
-		Scope:             params.Scope,
-		ScopeKey:          params.ScopeKey,
-		Restricted:        params.Restricted,
-		SourceKind:        params.SourceKind,
-		SourceClass:       string(params.SourceClass),
-		Lifecycle:         string(LifecycleArtifactAvailable),
-		ManifestPath:      manifestPath,
-		CurrentArtifactID: &artifact.ID,
-	})
+	source, err := s.Store.GetKnowledgeSourceByKey(ctx, manifest.Key)
+	if errors.Is(err, sql.ErrNoRows) {
+		source, err = s.Store.UpsertKnowledgeSource(ctx, sqlite.UpsertKnowledgeSourceParams{
+			Key:               manifest.Key,
+			Title:             manifest.Title,
+			Scope:             manifest.Scope,
+			ScopeKey:          manifest.ScopeKey,
+			Restricted:        manifest.Restricted,
+			SourceKind:        manifest.SourceKind,
+			SourceClass:       manifest.SourceClass,
+			Lifecycle:         string(LifecycleArtifactAvailable),
+			ManifestPath:      manifestPath,
+			CurrentArtifactID: &artifact.ID,
+		})
+	}
 	if err != nil {
 		return IngestResult{}, err
 	}
 
-	normalizedPath, err := s.writeNormalizedMarkdown(params.Key, extraction.NormalizedMarkdown)
+	normalizedPath, err := s.writeNormalizedMarkdown(manifest.Key, extraction.NormalizedMarkdown)
 	if err != nil {
 		return IngestResult{}, err
 	}
@@ -63,7 +78,7 @@ func (s Service) Ingest(ctx context.Context, params IngestParams) (IngestResult,
 		ExtractorName:          extraction.ExtractorName,
 		ExtractorVersion:       extraction.ExtractorVersion,
 		Status:                 "succeeded",
-		Lifecycle:              string(LifecycleReady),
+		Lifecycle:              string(LifecycleExtracted),
 		ExtractedTextHash:      "sha256:" + hex.EncodeToString(textHash[:]),
 		NormalizedMarkdownPath: normalizedPath,
 		StartedAt:              &now,
@@ -85,18 +100,30 @@ func (s Service) Ingest(ctx context.Context, params IngestParams) (IngestResult,
 			Ordinal:      0,
 			Text:         chunkText,
 			Anchor:       anchor,
-			Restricted:   params.Restricted,
+			Restricted:   manifest.Restricted,
 		}); err != nil {
 			return IngestResult{}, err
 		}
 	}
 
-	reloadedSource, err := s.Store.GetKnowledgeSourceByKey(ctx, params.Key)
+	readySource, err := s.Store.UpsertKnowledgeSource(ctx, sqlite.UpsertKnowledgeSourceParams{
+		Key:                 manifest.Key,
+		Title:               manifest.Title,
+		Scope:               manifest.Scope,
+		ScopeKey:            manifest.ScopeKey,
+		Restricted:          manifest.Restricted,
+		SourceKind:          manifest.SourceKind,
+		SourceClass:         manifest.SourceClass,
+		Lifecycle:           string(LifecycleReady),
+		ManifestPath:        manifestPath,
+		CurrentArtifactID:   &artifact.ID,
+		CurrentExtractionID: &recordedExtraction.ID,
+	})
 	if err != nil {
 		return IngestResult{}, err
 	}
 	return IngestResult{
-		Source:                 sourceFromStore(reloadedSource),
+		Source:                 sourceFromStore(readySource),
 		Artifact:               artifact,
 		Extraction:             recordedExtraction,
 		ManifestPath:           manifestPath,
@@ -146,7 +173,7 @@ func (s Service) Refresh(ctx context.Context, key string) (RefreshResult, error)
 	if source.CurrentArtifactID == nil {
 		return RefreshResult{}, fmt.Errorf("knowledge source %q has no current artifact", source.Key)
 	}
-	artifact, err := s.getArtifact(ctx, *source.CurrentArtifactID)
+	artifact, err := s.Store.GetKnowledgeArtifact(ctx, *source.CurrentArtifactID)
 	if err != nil {
 		return RefreshResult{}, err
 	}
@@ -170,7 +197,7 @@ func (s Service) Refresh(ctx context.Context, key string) (RefreshResult, error)
 		ExtractorName:          extraction.ExtractorName,
 		ExtractorVersion:       extraction.ExtractorVersion,
 		Status:                 "succeeded",
-		Lifecycle:              string(LifecycleReady),
+		Lifecycle:              string(LifecycleExtracted),
 		ExtractedTextHash:      "sha256:" + hex.EncodeToString(textHash[:]),
 		NormalizedMarkdownPath: normalizedPath,
 		StartedAt:              &now,
@@ -195,12 +222,25 @@ func (s Service) Refresh(ctx context.Context, key string) (RefreshResult, error)
 			return RefreshResult{}, err
 		}
 	}
-	reloadedSource, err := s.Store.GetKnowledgeSourceByKey(ctx, source.Key)
+
+	readySource, err := s.Store.UpsertKnowledgeSource(ctx, sqlite.UpsertKnowledgeSourceParams{
+		Key:                 source.Key,
+		Title:               source.Title,
+		Scope:               source.Scope,
+		ScopeKey:            source.ScopeKey,
+		Restricted:          source.Restricted,
+		SourceKind:          source.SourceKind,
+		SourceClass:         source.SourceClass,
+		Lifecycle:           string(LifecycleReady),
+		ManifestPath:        source.ManifestPath,
+		CurrentArtifactID:   &artifact.ID,
+		CurrentExtractionID: &recordedExtraction.ID,
+	})
 	if err != nil {
 		return RefreshResult{}, err
 	}
 	return RefreshResult{
-		Source:                 sourceFromStore(reloadedSource),
+		Source:                 sourceFromStore(readySource),
 		Artifact:               artifact,
 		Extraction:             recordedExtraction,
 		NormalizedMarkdownPath: normalizedPath,
@@ -236,6 +276,9 @@ func (s Service) normalizeIngestParams(params IngestParams) (IngestParams, strin
 	if params.SourceKind == "" {
 		return IngestParams{}, "", fmt.Errorf("knowledge source kind is required")
 	}
+	if !params.Restricted && restrictedByDefault(params.SourceKind) {
+		params.Restricted = true
+	}
 	sourcePath, err := cleanAbsPath(params.Path, "source path")
 	if err != nil {
 		return IngestParams{}, "", err
@@ -261,48 +304,52 @@ func (s Service) writeNormalizedMarkdown(key string, normalized string) (string,
 	if err != nil {
 		return "", err
 	}
-	path := filepath.Join(runtimeRoot, "knowledge", "normalized", key+".md")
+	sum := sha256.Sum256([]byte(normalized))
+	hexHash := hex.EncodeToString(sum[:])
+	path := filepath.Join(runtimeRoot, "knowledge", "normalized", hexHash[:2], hexHash, key+".md")
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return "", err
 	}
-	if err := os.WriteFile(path, []byte(normalized), 0o644); err != nil {
+	if existing, err := os.ReadFile(path); err == nil {
+		if string(existing) != normalized {
+			return "", fmt.Errorf("knowledge normalized markdown %s content hash mismatch", path)
+		}
+		return path, nil
+	} else if !os.IsNotExist(err) {
 		return "", err
 	}
-	return path, nil
-}
-
-func (s Service) getArtifact(ctx context.Context, artifactID int64) (sqlite.KnowledgeArtifact, error) {
-	row := s.Store.DB().QueryRowContext(ctx, `
-		SELECT id, sha256, size_bytes, source_type, mime_type, artifact_path, original_path, ocr_required, recorded_at
-		FROM knowledge_artifacts
-		WHERE id = ?
-	`, artifactID)
-	var artifact sqlite.KnowledgeArtifact
-	var ocrRequired int
-	var recordedAt string
-	if err := row.Scan(
-		&artifact.ID,
-		&artifact.SHA256,
-		&artifact.SizeBytes,
-		&artifact.SourceType,
-		&artifact.MimeType,
-		&artifact.ArtifactPath,
-		&artifact.OriginalPath,
-		&ocrRequired,
-		&recordedAt,
-	); err != nil {
-		return sqlite.KnowledgeArtifact{}, err
-	}
-	parsedRecordedAt, err := time.Parse(time.RFC3339Nano, recordedAt)
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".normalized-*")
 	if err != nil {
-		parsedRecordedAt, err = time.Parse(time.RFC3339, recordedAt)
-		if err != nil {
-			return sqlite.KnowledgeArtifact{}, err
-		}
+		return "", err
 	}
-	artifact.RecordedAt = parsedRecordedAt.UTC()
-	artifact.OCRRequired = ocrRequired != 0
-	return artifact, nil
+	tmpName := tmp.Name()
+	removeTmp := true
+	defer func() {
+		if removeTmp {
+			_ = os.Remove(tmpName)
+		}
+	}()
+	if _, err := tmp.WriteString(normalized); err != nil {
+		_ = tmp.Close()
+		return "", err
+	}
+	if err := tmp.Close(); err != nil {
+		return "", err
+	}
+	if err := os.Link(tmpName, path); err != nil {
+		if os.IsExist(err) {
+			if existing, readErr := os.ReadFile(path); readErr != nil {
+				return "", readErr
+			} else if string(existing) != normalized {
+				return "", fmt.Errorf("knowledge normalized markdown %s content hash mismatch", path)
+			}
+			return path, nil
+		}
+		return "", err
+	}
+	_ = os.Remove(tmpName)
+	removeTmp = false
+	return path, nil
 }
 
 func (s Service) now() time.Time {
@@ -310,4 +357,13 @@ func (s Service) now() time.Time {
 		return s.Now().UTC()
 	}
 	return time.Now().UTC()
+}
+
+func restrictedByDefault(sourceKind string) bool {
+	switch strings.TrimSpace(sourceKind) {
+	case "pilot_contract", "contract", "book", "manual", "pilot_manual":
+		return true
+	default:
+		return false
+	}
 }

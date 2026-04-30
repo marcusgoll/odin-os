@@ -535,6 +535,22 @@ func TestStorePersistsKnowledgeSourceArtifactExtractionAndChunks(t *testing.T) {
 		t.Fatalf("duplicate artifact ID = %d, want %d", duplicateArtifact.ID, artifact.ID)
 	}
 
+	artifactByID, err := store.GetKnowledgeArtifact(ctx, artifact.ID)
+	if err != nil {
+		t.Fatalf("GetKnowledgeArtifact() error = %v", err)
+	}
+	if artifactByID.ID != artifact.ID || artifactByID.SHA256 != artifact.SHA256 {
+		t.Fatalf("GetKnowledgeArtifact() = %+v, want artifact %+v", artifactByID, artifact)
+	}
+
+	artifactBySHA, err := store.GetKnowledgeArtifactBySHA(ctx, artifact.SHA256)
+	if err != nil {
+		t.Fatalf("GetKnowledgeArtifactBySHA() error = %v", err)
+	}
+	if artifactBySHA.ID != artifact.ID || artifactBySHA.ArtifactPath != artifact.ArtifactPath {
+		t.Fatalf("GetKnowledgeArtifactBySHA() = %+v, want artifact %+v", artifactBySHA, artifact)
+	}
+
 	source, err := store.UpsertKnowledgeSource(ctx, UpsertKnowledgeSourceParams{
 		Key:               "pilot-contract",
 		Title:             "Pilot Contract",
