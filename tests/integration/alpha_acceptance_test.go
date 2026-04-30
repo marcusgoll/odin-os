@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"net"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -695,6 +696,8 @@ func TestAlphaAcceptance(t *testing.T) {
 	})
 
 	t.Run("system runs on the homelab with restart safety and backups", func(t *testing.T) {
+		skipIfLoopbackListenUnavailable(t)
+
 		runtimeRoot := t.TempDir()
 		store := openRuntimeStore(t, runtimeRoot)
 		store.Now = func() time.Time { return now }
@@ -753,4 +756,19 @@ func TestAlphaAcceptance(t *testing.T) {
 		}
 		requirePathExists(t, filepath.Join(restoreRoot, "data", "odin.db"))
 	})
+}
+
+func skipIfLoopbackListenUnavailable(t *testing.T) {
+	t.Helper()
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		if strings.Contains(err.Error(), "operation not permitted") {
+			t.Skipf("loopback listener unavailable in this environment: %v", err)
+		}
+		t.Fatalf("loopback listener preflight failed: %v", err)
+	}
+	if err := listener.Close(); err != nil {
+		t.Fatalf("close loopback listener: %v", err)
+	}
 }

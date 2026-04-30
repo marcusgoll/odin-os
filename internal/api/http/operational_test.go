@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -18,6 +19,7 @@ import (
 
 func TestOperationalHandlerExposesHealthReadyAndMetrics(t *testing.T) {
 	t.Parallel()
+	skipIfLoopbackListenUnavailable(t)
 
 	ctx := context.Background()
 	store := openStore(t)
@@ -56,6 +58,7 @@ func TestOperationalHandlerExposesHealthReadyAndMetrics(t *testing.T) {
 
 func TestOperationalHandlerDegradesReadyzWhenRuntimeIsNotReady(t *testing.T) {
 	t.Parallel()
+	skipIfLoopbackListenUnavailable(t)
 
 	store := openStore(t)
 	defer store.Close()
@@ -110,6 +113,21 @@ func seedHealthyObservability(t *testing.T, ctx context.Context, store *sqlite.S
 		DetailsJSON: `{"source":"test"}`,
 	}); err != nil {
 		t.Fatalf("RecordProjectionFreshness() error = %v", err)
+	}
+}
+
+func skipIfLoopbackListenUnavailable(t *testing.T) {
+	t.Helper()
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		if strings.Contains(err.Error(), "operation not permitted") {
+			t.Skipf("loopback listener unavailable in this environment: %v", err)
+		}
+		t.Fatalf("loopback listener preflight failed: %v", err)
+	}
+	if err := listener.Close(); err != nil {
+		t.Fatalf("close loopback listener: %v", err)
 	}
 }
 

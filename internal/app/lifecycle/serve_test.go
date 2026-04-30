@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -95,6 +96,7 @@ projects:
 
 func TestRunServeExecutesStartupRecoveryBeforeShutdown(t *testing.T) {
 	t.Parallel()
+	skipIfLoopbackListenUnavailable(t)
 
 	root := createRuntimeRoot(t)
 	writeRuntimeConfig(t, root, `
@@ -142,6 +144,7 @@ service:
 
 func TestRunServeExecutesStartupRecoveryWhenContextAlreadyCanceled(t *testing.T) {
 	t.Parallel()
+	skipIfLoopbackListenUnavailable(t)
 
 	root := createRuntimeRoot(t)
 	writeRuntimeConfig(t, root, `
@@ -189,6 +192,7 @@ service:
 
 func TestRunServeRunsSelfHealCycleBeforeShutdown(t *testing.T) {
 	t.Parallel()
+	skipIfLoopbackListenUnavailable(t)
 
 	root := createRuntimeRoot(t)
 	writeRuntimeConfig(t, root, `
@@ -288,6 +292,21 @@ service:
 	}
 	if !found {
 		t.Fatalf("events = %+v, want recovery.action_executed from background self-heal cycle", events)
+	}
+}
+
+func skipIfLoopbackListenUnavailable(t *testing.T) {
+	t.Helper()
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		if strings.Contains(err.Error(), "operation not permitted") {
+			t.Skipf("loopback listener unavailable in this environment: %v", err)
+		}
+		t.Fatalf("loopback listener preflight failed: %v", err)
+	}
+	if err := listener.Close(); err != nil {
+		t.Fatalf("close loopback listener: %v", err)
 	}
 }
 

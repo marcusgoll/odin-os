@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -788,6 +789,8 @@ func TestShellTradeboardPickupRequiresConfirm(t *testing.T) {
 }
 
 func TestShellTradeboardSyncStatusShowsFlicaSyncState(t *testing.T) {
+	skipIfLoopbackListenUnavailable(t)
+
 	env := newTestEnvironment(t)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/ops/flica/status" {
@@ -821,6 +824,8 @@ func TestShellTradeboardSyncStatusShowsFlicaSyncState(t *testing.T) {
 }
 
 func TestShellTradeboardPickupRequiresSuccessfulFlicaSync(t *testing.T) {
+	skipIfLoopbackListenUnavailable(t)
+
 	env := newTestEnvironment(t)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/ops/flica/status" {
@@ -867,6 +872,21 @@ func TestTradeboardHTTPTimeoutDefaultsForBrowserLatency(t *testing.T) {
 	t.Setenv("ODIN_TRADEBOARD_API_TIMEOUT_SECONDS", "999")
 	if got := tradeboardHTTPTimeout(); got != 600*time.Second {
 		t.Fatalf("tradeboardHTTPTimeout() = %v, want 600s maximum", got)
+	}
+}
+
+func skipIfLoopbackListenUnavailable(t *testing.T) {
+	t.Helper()
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		if strings.Contains(err.Error(), "operation not permitted") {
+			t.Skipf("loopback listener unavailable in this environment: %v", err)
+		}
+		t.Fatalf("loopback listener preflight failed: %v", err)
+	}
+	if err := listener.Close(); err != nil {
+		t.Fatalf("close loopback listener: %v", err)
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -42,6 +43,7 @@ func TestClientImplementsTrackerInterface(t *testing.T) {
 
 func TestFetchEligibleIssuesFiltersReadyOpenIssuesAndSkipsBlockedAndPullRequests(t *testing.T) {
 	t.Parallel()
+	skipIfLoopbackListenUnavailable(t)
 
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		if request.Method != http.MethodGet {
@@ -87,6 +89,7 @@ func TestFetchEligibleIssuesFiltersReadyOpenIssuesAndSkipsBlockedAndPullRequests
 
 func TestDryRunTrackerMutationsDoNotWriteToGitHub(t *testing.T) {
 	t.Parallel()
+	skipIfLoopbackListenUnavailable(t)
 
 	requests := 0
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
@@ -128,6 +131,7 @@ func TestDryRunTrackerMutationsDoNotWriteToGitHub(t *testing.T) {
 
 func TestGitHubErrorsRedactTokenLikeStrings(t *testing.T) {
 	t.Parallel()
+	skipIfLoopbackListenUnavailable(t)
 
 	const token = "ghp_1234567890abcdefghijklmnopqrstuvwx"
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
@@ -157,6 +161,7 @@ func TestGitHubErrorsRedactTokenLikeStrings(t *testing.T) {
 
 func TestLifecycleMarkersUseCanonicalOdinLabelsAndIssueEndpoints(t *testing.T) {
 	t.Parallel()
+	skipIfLoopbackListenUnavailable(t)
 
 	var requests []string
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
@@ -205,6 +210,21 @@ func TestLifecycleMarkersUseCanonicalOdinLabelsAndIssueEndpoints(t *testing.T) {
 		if !containsString(requests, want) {
 			t.Fatalf("requests = %#v, want fragment %q", requests, want)
 		}
+	}
+}
+
+func skipIfLoopbackListenUnavailable(t *testing.T) {
+	t.Helper()
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		if strings.Contains(err.Error(), "operation not permitted") {
+			t.Skipf("loopback listener unavailable in this environment: %v", err)
+		}
+		t.Fatalf("loopback listener preflight failed: %v", err)
+	}
+	if err := listener.Close(); err != nil {
+		t.Fatalf("close loopback listener: %v", err)
 	}
 }
 
