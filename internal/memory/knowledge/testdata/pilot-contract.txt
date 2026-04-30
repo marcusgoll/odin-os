@@ -1,0 +1,3 @@
+Vacation accrual section.
+
+Restricted pilot contract text fixture for Knowledge Source ingestion.
