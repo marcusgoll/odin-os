@@ -1,0 +1,19 @@
+name: workspace-safe-creation
+description: Worktree paths are sanitized and cannot escape workspace root.
+github:
+  mode: fixture
+codex:
+  mode: disabled
+steps:
+  - name: create_workspace
+    issue_number: 42
+    issue_title: "AKTR upload endpoint"
+    agent_role: "go-orchestrator"
+    expect:
+      branch_prefix: "odin/"
+      inside_workspace_root: true
+
+  - name: reject_path_traversal
+    issue_title: "../../evil"
+    expect:
+      rejected: true

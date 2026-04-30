@@ -20,6 +20,7 @@ import (
 	"odin-os/internal/cli/commands"
 	"odin-os/internal/cli/repl"
 	"odin-os/internal/core/projects"
+	"odin-os/internal/e2e"
 	healthsvc "odin-os/internal/runtime/health"
 	"odin-os/internal/runtime/jobs"
 	"odin-os/internal/runtime/recovery"
@@ -39,6 +40,10 @@ var (
 
 // Run dispatches between the interactive shell and machine-oriented operational commands.
 func Run(ctx context.Context, root string, args []string, stdin io.Reader, stdout io.Writer) error {
+	if len(args) > 0 && args[0] == "e2e" {
+		return e2e.Run(ctx, root, args[1:], stdout)
+	}
+
 	cfg, err := appconfig.Load(filepath.Join(root, "config", "odin.yaml"), root, runtimeEnv())
 	if err != nil {
 		return err

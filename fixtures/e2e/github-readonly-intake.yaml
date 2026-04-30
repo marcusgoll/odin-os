@@ -1,0 +1,29 @@
+name: github-readonly-intake
+description: Fixture-backed GitHub issue intake without mutation.
+github:
+  mode: fixture
+codex:
+  mode: disabled
+steps:
+  - name: load_config
+    expect: pass
+
+  - name: load_fixture_issues
+    fixture: fixtures/github/issues/eligible-and-ineligible.json
+    expect: pass
+
+  - name: filter_eligible_issues
+    expect:
+      eligible_count: 1
+      required_label: odin:ready
+      excluded_labels:
+        - odin:paused
+        - odin:blocked
+
+  - name: persist_external_issues
+    expect:
+      idempotent: true
+
+  - name: assert_no_github_mutation
+    expect:
+      writes: 0

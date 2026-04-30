@@ -3,6 +3,7 @@ package lifecycle
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -157,6 +158,125 @@ func TestRunWorkStartCreatesQueuedWorkItem(t *testing.T) {
 		if !strings.Contains(statusOutput.String(), want) {
 			t.Fatalf("Run(work status) output = %q, want %q", statusOutput.String(), want)
 		}
+	}
+}
+
+func TestRunE2EHelpDoesNotRequireRuntimeConfig(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+
+	var stdout bytes.Buffer
+	err := Run(context.Background(), root, []string{"e2e", "--help"}, strings.NewReader(""), &stdout)
+	if err != nil {
+		t.Fatalf("Run(e2e --help) error = %v", err)
+	}
+
+	output := stdout.String()
+	if !strings.Contains(output, "usage: odin e2e") {
+		t.Fatalf("Run(e2e --help) output = %q, want usage", output)
+	}
+	if strings.Contains(output, root) {
+		t.Fatalf("Run(e2e --help) output = %q, should not expose/load runtime root %s", output, root)
+	}
+}
+
+func TestRunE2EGitHubReadonlyFixtureScenarioJSON(t *testing.T) {
+	t.Parallel()
+
+	root := filepath.Clean(filepath.Join("..", "..", ".."))
+	scenarioPath := filepath.Join("fixtures", "e2e", "github-readonly-intake.yaml")
+
+	var stdout bytes.Buffer
+	err := Run(context.Background(), root, []string{"e2e", "--scenario", scenarioPath, "--json"}, strings.NewReader(""), &stdout)
+	if err != nil {
+		t.Fatalf("Run(e2e) error = %v\noutput:\n%s", err, stdout.String())
+	}
+
+	var report struct {
+		Status   string `json:"status"`
+		Scenario string `json:"scenario"`
+		OdinRoot string `json:"odin_root"`
+		Stages   []struct {
+			Name   string `json:"name"`
+			Status string `json:"status"`
+		} `json:"stages"`
+		GitHub struct {
+			Mode    string `json:"mode"`
+			Mutated bool   `json:"mutated"`
+		} `json:"github"`
+		Codex struct {
+			Mode    string `json:"mode"`
+			Invoked bool   `json:"invoked"`
+		} `json:"codex"`
+		Intake struct {
+			Project   string `json:"project"`
+			Repo      string `json:"repo"`
+			Fetched   int    `json:"fetched"`
+			Persisted int    `json:"persisted"`
+		} `json:"intake"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v\noutput:\n%s", err, stdout.String())
+	}
+
+	if report.Status != "passed" || report.Scenario != "github-readonly-intake" {
+		t.Fatalf("report status/scenario = %q/%q, want passed/github-readonly-intake", report.Status, report.Scenario)
+	}
+	if report.OdinRoot == "" || filepath.Clean(report.OdinRoot) == root {
+		t.Fatalf("odin_root = %q, want temporary root distinct from repo root %q", report.OdinRoot, root)
+	}
+	if report.GitHub.Mode != "fixture" || report.GitHub.Mutated {
+		t.Fatalf("github guard = %+v, want fixture and not mutated", report.GitHub)
+	}
+	if report.Codex.Mode != "disabled" || report.Codex.Invoked {
+		t.Fatalf("codex guard = %+v, want disabled and not invoked", report.Codex)
+	}
+	if report.Intake.Project != "alpha" || report.Intake.Repo != "acme/alpha" || report.Intake.Fetched != 1 || report.Intake.Persisted != 1 {
+		t.Fatalf("intake = %+v, want alpha acme/alpha fetched=1 persisted=1", report.Intake)
+	}
+	if len(report.Stages) == 0 {
+		t.Fatal("stages empty, want pass/fail status for each stage")
+	}
+	for _, stage := range report.Stages {
+		if stage.Name == "" || stage.Status != "passed" {
+			t.Fatalf("stage = %+v, want named passed stage", stage)
+		}
+	}
+}
+
+func TestRunE2EReportsFailureAsError(t *testing.T) {
+	t.Parallel()
+
+	root := filepath.Clean(filepath.Join("..", "..", ".."))
+
+	var stdout bytes.Buffer
+	err := Run(context.Background(), root, []string{"e2e", "--scenario", "fixtures/e2e/missing.yaml", "--json"}, strings.NewReader(""), &stdout)
+	if err == nil {
+		t.Fatalf("Run(e2e missing scenario) error = nil\noutput:\n%s", stdout.String())
+	}
+
+	var report struct {
+		Status string `json:"status"`
+		Stages []struct {
+			Name   string `json:"name"`
+			Status string `json:"status"`
+		} `json:"stages"`
+	}
+	if jsonErr := json.Unmarshal(stdout.Bytes(), &report); jsonErr != nil {
+		t.Fatalf("json.Unmarshal() error = %v\noutput:\n%s", jsonErr, stdout.String())
+	}
+	if report.Status != "failed" {
+		t.Fatalf("report.Status = %q, want failed", report.Status)
+	}
+	foundFailedStage := false
+	for _, stage := range report.Stages {
+		if stage.Status == "failed" {
+			foundFailedStage = true
+		}
+	}
+	if !foundFailedStage {
+		t.Fatalf("stages = %+v, want failed stage", report.Stages)
 	}
 }
 

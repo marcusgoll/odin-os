@@ -1,0 +1,9 @@
+{
+  "title": "Worker dispatch blocked without acceptance criteria",
+  "summary": "The run failed before dispatch because the implementation prompt had no acceptance criteria.",
+  "category": "missing acceptance criteria",
+  "signals": [
+    "template requires acceptance criteria before dispatch",
+    "no acceptance criteria were provided"
+  ]
+}
