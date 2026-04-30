@@ -882,6 +882,22 @@ func TestStoreRejectsInvalidKnowledgeCurrentExtractionLineage(t *testing.T) {
 		t.Fatalf("UpsertKnowledgeSource(missing extraction) error = %v, want current extraction failure", err)
 	}
 
+	_, err = store.UpsertKnowledgeSource(ctx, UpsertKnowledgeSourceParams{
+		Key:               "missing-stale-extraction",
+		Title:             "Missing Stale Extraction",
+		Scope:             "global",
+		ScopeKey:          "global",
+		Restricted:        true,
+		SourceKind:        "manual",
+		SourceClass:       "text",
+		Lifecycle:         "stale",
+		ManifestPath:      "memory/knowledge/missing-stale-extraction.md",
+		CurrentArtifactID: &artifactA.ID,
+	})
+	if err == nil || !strings.Contains(err.Error(), "requires current extraction") {
+		t.Fatalf("UpsertKnowledgeSource(missing stale extraction) error = %v, want current extraction failure", err)
+	}
+
 	sourceA, err := store.UpsertKnowledgeSource(ctx, UpsertKnowledgeSourceParams{
 		Key:               "lineage-a",
 		Title:             "Lineage A",
@@ -1036,6 +1052,58 @@ func TestStoreRejectsInvalidKnowledgeCurrentExtractionLineage(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "requires failed current extraction") {
 		t.Fatalf("UpsertKnowledgeSource(retain succeeded extraction while failed) error = %v, want failed extraction failure", err)
+	}
+}
+
+func TestStorePendingKnowledgeExtractionDoesNotBecomeCurrent(t *testing.T) {
+	ctx := context.Background()
+	store := openMigratedTestStore(t, "knowledge-pending-extraction-current.db")
+	defer store.Close()
+
+	artifact, err := store.RecordKnowledgeArtifact(ctx, RecordKnowledgeArtifactParams{
+		SHA256:       "sha256:pending",
+		SizeBytes:    42,
+		SourceType:   "text",
+		MimeType:     "text/plain",
+		ArtifactPath: "knowledge/artifacts/pe/pending/source.txt",
+		OriginalPath: "/tmp/pending.txt",
+	})
+	if err != nil {
+		t.Fatalf("RecordKnowledgeArtifact() error = %v", err)
+	}
+	source, err := store.UpsertKnowledgeSource(ctx, UpsertKnowledgeSourceParams{
+		Key:               "pending-extraction",
+		Title:             "Pending Extraction",
+		Scope:             "global",
+		ScopeKey:          "global",
+		Restricted:        true,
+		SourceKind:        "manual",
+		SourceClass:       "text",
+		Lifecycle:         "artifact_available",
+		ManifestPath:      "memory/knowledge/pending-extraction.md",
+		CurrentArtifactID: &artifact.ID,
+	})
+	if err != nil {
+		t.Fatalf("UpsertKnowledgeSource() error = %v", err)
+	}
+	if _, err := store.RecordKnowledgeExtraction(ctx, RecordKnowledgeExtractionParams{
+		SourceID:         source.ID,
+		ArtifactID:       artifact.ID,
+		ExtractorName:    "plain_text",
+		ExtractorVersion: "v1",
+		Status:           "pending",
+	}); err != nil {
+		t.Fatalf("RecordKnowledgeExtraction(pending) error = %v", err)
+	}
+	reloadedSource, err := store.GetKnowledgeSourceByKey(ctx, "pending-extraction")
+	if err != nil {
+		t.Fatalf("GetKnowledgeSourceByKey() error = %v", err)
+	}
+	if reloadedSource.Lifecycle != "artifact_available" {
+		t.Fatalf("Lifecycle = %q, want artifact_available", reloadedSource.Lifecycle)
+	}
+	if reloadedSource.CurrentExtractionID != nil {
+		t.Fatalf("CurrentExtractionID = %v, want nil for pending extraction", reloadedSource.CurrentExtractionID)
 	}
 }
 

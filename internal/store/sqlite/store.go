@@ -1940,17 +1940,22 @@ func (store *Store) RecordKnowledgeExtraction(ctx context.Context, params Record
 		}
 		extraction = record
 
+		currentExtractionID := &extraction.ID
+		if lifecycle == "artifact_available" {
+			currentExtractionID = nil
+		}
+
 		if _, err := tx.ExecContext(ctx, `
 			UPDATE knowledge_sources
 			SET current_artifact_id = ?, current_extraction_id = ?, lifecycle = ?, updated_at = ?
 			WHERE id = ?
-		`, params.ArtifactID, extraction.ID, lifecycle, formatTime(now), params.SourceID); err != nil {
+		`, params.ArtifactID, nullInt64(currentExtractionID), lifecycle, formatTime(now), params.SourceID); err != nil {
 			return err
 		}
 
 		updatedSource := source
 		updatedSource.CurrentArtifactID = &params.ArtifactID
-		updatedSource.CurrentExtractionID = &extraction.ID
+		updatedSource.CurrentExtractionID = currentExtractionID
 		updatedSource.Lifecycle = lifecycle
 		updatedSource.UpdatedAt = now
 
@@ -2404,7 +2409,7 @@ func (store *Store) reindexKnowledgeSourceChunksTx(ctx context.Context, tx *sql.
 
 func validateKnowledgeCurrentExtractionRequired(lifecycle string, extractionID *int64) error {
 	switch lifecycle {
-	case "extracted", "indexed", "ready":
+	case "extracted", "indexed", "ready", "stale":
 		if extractionID == nil {
 			return fmt.Errorf("knowledge source lifecycle %q requires current extraction", lifecycle)
 		}
