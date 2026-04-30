@@ -520,6 +520,8 @@ type RecordReadyKnowledgeExtractionParams struct {
 	StartedAt              *time.Time
 	FinishedAt             *time.Time
 	Chunks                 []RecordKnowledgeChunkParams
+	Topics                 []string
+	Entities               []string
 }
 
 type ReadyKnowledgeExtraction struct {

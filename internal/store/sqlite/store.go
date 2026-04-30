@@ -2263,7 +2263,11 @@ func (store *Store) RecordReadyKnowledgeExtraction(ctx context.Context, params R
 			return err
 		}
 		for _, chunk := range chunks {
-			if err := store.indexKnowledgeChunkTx(ctx, tx, IndexKnowledgeChunkParams{ChunkID: chunk.ID}); err != nil {
+			if err := store.indexKnowledgeChunkTx(ctx, tx, IndexKnowledgeChunkParams{
+				ChunkID:  chunk.ID,
+				Topics:   params.Topics,
+				Entities: params.Entities,
+			}); err != nil {
 				return err
 			}
 		}

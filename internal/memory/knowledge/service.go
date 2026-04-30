@@ -96,11 +96,10 @@ func (s Service) Ingest(ctx context.Context, params IngestParams) (IngestResult,
 		StartedAt:              &now,
 		FinishedAt:             &now,
 		Chunks:                 extractionChunks(source.ID, 0, extraction, manifest.Restricted),
+		Topics:                 manifest.Topics,
+		Entities:               manifest.Entities,
 	})
 	if err != nil {
-		return IngestResult{}, err
-	}
-	if err := s.indexReadyKnowledgeMetadata(ctx, ready.Chunks, manifest.Topics, manifest.Entities); err != nil {
 		return IngestResult{}, err
 	}
 	return IngestResult{
@@ -201,11 +200,10 @@ func (s Service) Refresh(ctx context.Context, key string) (RefreshResult, error)
 		StartedAt:              &now,
 		FinishedAt:             &now,
 		Chunks:                 extractionChunks(source.ID, 0, extraction, manifest.Restricted),
+		Topics:                 manifest.Topics,
+		Entities:               manifest.Entities,
 	})
 	if err != nil {
-		return RefreshResult{}, err
-	}
-	if err := s.indexReadyKnowledgeMetadata(ctx, ready.Chunks, manifest.Topics, manifest.Entities); err != nil {
 		return RefreshResult{}, err
 	}
 	return RefreshResult{
@@ -253,7 +251,7 @@ func (s Service) Search(ctx context.Context, params SearchParams) ([]SearchResul
 			ExtractedTextHash:      result.ExtractedTextHash,
 			NormalizedMarkdownPath: result.NormalizedMarkdownPath,
 			ExtractionFinishedAt:   result.ExtractionFinishedAt,
-			Snippet:                knowledgeSnippet(result.Text, result.Restricted),
+			Snippet:                knowledgeSnippet(result.Text, params.Query, result.Restricted),
 			Anchor:                 result.Anchor,
 			PageNumber:             result.PageNumber,
 			Restricted:             result.Restricted,
@@ -366,22 +364,6 @@ func (s Service) writeNormalizedMarkdown(key string, normalized string) (string,
 	_ = os.Remove(tmpName)
 	removeTmp = false
 	return path, nil
-}
-
-func (s Service) indexReadyKnowledgeMetadata(ctx context.Context, chunks []sqlite.KnowledgeChunk, topics []string, entities []string) error {
-	if len(chunks) == 0 || (len(topics) == 0 && len(entities) == 0) {
-		return nil
-	}
-	for _, chunk := range chunks {
-		if err := s.Store.IndexKnowledgeChunk(ctx, sqlite.IndexKnowledgeChunkParams{
-			ChunkID:  chunk.ID,
-			Topics:   topics,
-			Entities: entities,
-		}); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 func (s Service) now() time.Time {
@@ -542,11 +524,19 @@ func splitLongText(text string, limit int) []string {
 	var parts []string
 	current := ""
 	for _, word := range words {
+		if runeLen(word) > limit {
+			if current != "" {
+				parts = append(parts, current)
+				current = ""
+			}
+			parts = append(parts, splitLongToken(word, limit)...)
+			continue
+		}
 		if current == "" {
 			current = word
 			continue
 		}
-		if len(current)+1+len(word) > limit {
+		if runeLen(current)+1+runeLen(word) > limit {
 			parts = append(parts, current)
 			current = word
 			continue
@@ -557,6 +547,26 @@ func splitLongText(text string, limit int) []string {
 		parts = append(parts, current)
 	}
 	return parts
+}
+
+func splitLongToken(token string, limit int) []string {
+	runes := []rune(token)
+	if len(runes) <= limit {
+		return []string{token}
+	}
+	var parts []string
+	for start := 0; start < len(runes); start += limit {
+		end := start + limit
+		if end > len(runes) {
+			end = len(runes)
+		}
+		parts = append(parts, string(runes[start:end]))
+	}
+	return parts
+}
+
+func runeLen(value string) int {
+	return len([]rune(value))
 }
 
 func anchorForChunkPart(anchor string, index int) string {
@@ -585,13 +595,76 @@ func slugifyKnowledgeAnchor(value string) string {
 	return slug
 }
 
-func knowledgeSnippet(text string, restricted bool) string {
+func knowledgeSnippet(text string, query string, restricted bool) string {
 	text = strings.TrimSpace(text)
 	if text == "" {
 		return ""
 	}
-	if len(text) <= maxRestrictedSnippetChars {
+	limit := maxKnowledgeChunkChars
+	if restricted {
+		limit = maxRestrictedSnippetChars
+	}
+	runes := []rune(text)
+	if len(runes) <= limit {
 		return text
 	}
-	return strings.TrimSpace(text[:maxRestrictedSnippetChars])
+	start, end, ok := firstQueryMatchRuneRange(runes, query)
+	if !ok {
+		return strings.TrimSpace(string(runes[:limit]))
+	}
+	windowStart := start - limit/2
+	if windowStart < 0 {
+		windowStart = 0
+	}
+	windowEnd := windowStart + limit
+	if windowEnd < end {
+		windowEnd = end
+		windowStart = windowEnd - limit
+		if windowStart < 0 {
+			windowStart = 0
+		}
+	}
+	if windowEnd > len(runes) {
+		windowEnd = len(runes)
+		windowStart = windowEnd - limit
+		if windowStart < 0 {
+			windowStart = 0
+		}
+	}
+	return strings.TrimSpace(string(runes[windowStart:windowEnd]))
+}
+
+func firstQueryMatchRuneRange(text []rune, query string) (int, int, bool) {
+	lowerText := []rune(strings.ToLower(string(text)))
+	for _, term := range queryTerms(query) {
+		termRunes := []rune(strings.ToLower(term))
+		if len(termRunes) == 0 {
+			continue
+		}
+		for start := 0; start <= len(lowerText)-len(termRunes); start++ {
+			matched := true
+			for offset, termRune := range termRunes {
+				if lowerText[start+offset] != termRune {
+					matched = false
+					break
+				}
+			}
+			if matched {
+				return start, start + len(termRunes), true
+			}
+		}
+	}
+	return 0, 0, false
+}
+
+func queryTerms(query string) []string {
+	rawTerms := strings.Fields(query)
+	terms := make([]string, 0, len(rawTerms))
+	for _, term := range rawTerms {
+		term = strings.Trim(term, `"':*()[]{}.,;!?`)
+		if term != "" {
+			terms = append(terms, term)
+		}
+	}
+	return terms
 }

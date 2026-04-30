@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"odin-os/internal/store/sqlite"
 )
@@ -216,6 +217,66 @@ func TestServiceSearchReturnsRestrictedSnippetAndCitation(t *testing.T) {
 	}
 	if result.ExtractionFinishedAt == nil {
 		t.Fatalf("ExtractionFinishedAt is nil")
+	}
+}
+
+func TestServiceSearchSnippetCentersLateUnicodeMatch(t *testing.T) {
+	ctx := context.Background()
+	service, _, _ := newTestService(t)
+	sourcePath := filepath.Join(t.TempDir(), "contract.txt")
+	prefix := strings.Repeat("intro 😀 context ", 45)
+	if err := os.WriteFile(sourcePath, []byte(prefix+" vacation marker appears near the end of this restricted source."), 0o644); err != nil {
+		t.Fatalf("WriteFile(source) error = %v", err)
+	}
+
+	_, err := service.Ingest(ctx, IngestParams{
+		Path:       sourcePath,
+		Key:        "unicode-contract",
+		Title:      "Unicode Contract",
+		Scope:      "global",
+		ScopeKey:   "global",
+		Restricted: true,
+		SourceKind: "pilot_contract",
+	})
+	if err != nil {
+		t.Fatalf("Ingest() error = %v", err)
+	}
+
+	results, err := service.Search(ctx, SearchParams{Query: "vacation"})
+	if err != nil {
+		t.Fatalf("Search() error = %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("results = %+v, want one result", results)
+	}
+	if !strings.Contains(results[0].Snippet, "vacation") {
+		t.Fatalf("snippet = %q, want query term", results[0].Snippet)
+	}
+	if !utf8.ValidString(results[0].Snippet) {
+		t.Fatalf("snippet is invalid UTF-8: %q", results[0].Snippet)
+	}
+	if len([]rune(results[0].Snippet)) > 500 {
+		t.Fatalf("snippet rune length = %d, want <= 500", len([]rune(results[0].Snippet)))
+	}
+}
+
+func TestServiceIngestSplitsUnbrokenLongTextIntoCappedChunks(t *testing.T) {
+	longToken := strings.Repeat("航", maxKnowledgeChunkChars+25)
+	chunks := chunkExtraction(extractionResult{
+		Text:               longToken,
+		NormalizedMarkdown: textToMarkdown(longToken),
+	})
+
+	if len(chunks) < 2 {
+		t.Fatalf("chunks len = %d, want split chunks", len(chunks))
+	}
+	for _, chunk := range chunks {
+		if len([]rune(chunk.Text)) > maxKnowledgeChunkChars {
+			t.Fatalf("chunk rune length = %d, want <= %d", len([]rune(chunk.Text)), maxKnowledgeChunkChars)
+		}
+		if !utf8.ValidString(chunk.Text) {
+			t.Fatalf("chunk is invalid UTF-8: %q", chunk.Text)
+		}
 	}
 }
 
