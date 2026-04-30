@@ -567,15 +567,19 @@ type FinishRunAndUpdateTaskStatusParams struct {
 }
 
 type FinishRunAndSetTaskStatusParams struct {
-	RunID      int64
-	RunStatus  string
-	Summary    string
-	TaskStatus string
+	RunID          int64
+	RunStatus      string
+	Summary        string
+	TerminalReason string
+	ArtifactsJSON  string
+	TaskStatus     string
 }
 
 type FailRunAndRetryTaskParams struct {
 	RunID          int64
 	Summary        string
+	TerminalReason string
+	ArtifactsJSON  string
 	LastError      string
 	NextEligibleAt time.Time
 }

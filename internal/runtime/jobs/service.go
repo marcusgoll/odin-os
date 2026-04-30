@@ -22,6 +22,7 @@ import (
 	"odin-os/internal/runtime/checkpoints"
 	healthsvc "odin-os/internal/runtime/health"
 	"odin-os/internal/runtime/projections"
+	"odin-os/internal/runtime/recovery"
 	"odin-os/internal/store/sqlite"
 	"odin-os/internal/vcs/leases"
 )
@@ -1350,11 +1351,13 @@ func (service Service) finalizeOutcome(ctx context.Context, task sqlite.Task, ru
 	if admission.Outcome != "" && admission.Outcome != admissionDispatchable {
 		switch admission.Outcome {
 		case admissionFailed:
+			artifactsJSON := service.failureAnalysisArtifact(task, "dispatch", admission.LastError, task.RetryCount)
 			updatedTask, updatedRun, err := service.Store.FinishRunAndSetTaskStatus(ctx, sqlite.FinishRunAndSetTaskStatusParams{
-				RunID:      run.ID,
-				RunStatus:  "failed",
-				Summary:    admission.LastError,
-				TaskStatus: "failed",
+				RunID:         run.ID,
+				RunStatus:     "failed",
+				Summary:       admission.LastError,
+				ArtifactsJSON: artifactsJSON,
+				TaskStatus:    "failed",
 			})
 			if err != nil {
 				return err
@@ -1370,9 +1373,11 @@ func (service Service) finalizeOutcome(ctx context.Context, task sqlite.Task, ru
 			}
 			return nil
 		case admissionRetryLater:
+			artifactsJSON := service.failureAnalysisArtifact(task, "dispatch", admission.LastError, task.RetryCount)
 			_, _, err := service.Store.FailRunAndRetryTask(ctx, sqlite.FailRunAndRetryTaskParams{
 				RunID:          run.ID,
 				Summary:        admission.LastError,
+				ArtifactsJSON:  artifactsJSON,
 				LastError:      admission.LastError,
 				NextEligibleAt: admission.NextEligibleAt,
 			})
@@ -1384,12 +1389,14 @@ func (service Service) finalizeOutcome(ctx context.Context, task sqlite.Task, ru
 
 	if execErr != nil {
 		if isTransientFailure(execErr) {
+			artifactsJSON := service.failureAnalysisArtifact(task, "codex_run", execErr.Error(), task.RetryCount+1)
 			if task.RetryCount+1 >= task.MaxAttempts {
 				_, _, err := service.Store.FinishRunAndSetTaskStatus(ctx, sqlite.FinishRunAndSetTaskStatusParams{
-					RunID:      run.ID,
-					RunStatus:  "failed",
-					Summary:    execErr.Error(),
-					TaskStatus: "failed",
+					RunID:         run.ID,
+					RunStatus:     "failed",
+					Summary:       execErr.Error(),
+					ArtifactsJSON: artifactsJSON,
+					TaskStatus:    "failed",
 				})
 				if err != nil {
 					return err
@@ -1401,17 +1408,20 @@ func (service Service) finalizeOutcome(ctx context.Context, task sqlite.Task, ru
 			_, _, err := service.Store.FailRunAndRetryTask(ctx, sqlite.FailRunAndRetryTaskParams{
 				RunID:          run.ID,
 				Summary:        execErr.Error(),
+				ArtifactsJSON:  artifactsJSON,
 				LastError:      execErr.Error(),
 				NextEligibleAt: nextEligibleAt,
 			})
 			return err
 		}
 
+		artifactsJSON := service.failureAnalysisArtifact(task, "codex_run", execErr.Error(), task.RetryCount)
 		_, _, err := service.Store.FinishRunAndSetTaskStatus(ctx, sqlite.FinishRunAndSetTaskStatusParams{
-			RunID:      run.ID,
-			RunStatus:  "failed",
-			Summary:    execErr.Error(),
-			TaskStatus: "failed",
+			RunID:         run.ID,
+			RunStatus:     "failed",
+			Summary:       execErr.Error(),
+			ArtifactsJSON: artifactsJSON,
+			TaskStatus:    "failed",
 		})
 		if err != nil {
 			return err
@@ -1424,17 +1434,37 @@ func (service Service) finalizeOutcome(ctx context.Context, task sqlite.Task, ru
 		runStatus = "completed"
 	}
 	taskStatus := "completed"
+	artifactsJSON := ""
 	if runStatus != "completed" {
 		taskStatus = "failed"
+		artifactsJSON = service.failureAnalysisArtifact(task, "codex_run", result.Output, task.RetryCount)
 	}
 
 	_, _, err := service.Store.FinishRunAndSetTaskStatus(ctx, sqlite.FinishRunAndSetTaskStatusParams{
-		RunID:      run.ID,
-		RunStatus:  runStatus,
-		Summary:    result.Output,
-		TaskStatus: taskStatus,
+		RunID:         run.ID,
+		RunStatus:     runStatus,
+		Summary:       result.Output,
+		ArtifactsJSON: artifactsJSON,
+		TaskStatus:    taskStatus,
 	})
 	return err
+}
+
+func (service Service) failureAnalysisArtifact(task sqlite.Task, step string, summary string, retryCount int) string {
+	analysis := recovery.AnalyzeFailure(recovery.FailureInput{
+		Step:                  step,
+		TicketTitle:           task.Title,
+		ExistingBehaviorKnown: true,
+		ErrorText:             summary,
+		Summary:               summary,
+		RetryCount:            retryCount,
+		MaxAttempts:           task.MaxAttempts,
+	})
+	payload, err := recovery.MarshalFailureAnalysisArtifact(analysis)
+	if err != nil {
+		return ""
+	}
+	return payload
 }
 
 func (service Service) applyAdmissionDecision(ctx context.Context, task sqlite.Task, decision admissionDecision) error {
