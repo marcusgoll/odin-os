@@ -98,6 +98,117 @@ func TestServiceIngestsMarkdownAndWritesNormalizedSnapshot(t *testing.T) {
 	}
 }
 
+func TestServiceIngestsMachineReadablePDF(t *testing.T) {
+	ctx := context.Background()
+	service, repoRoot, _ := newTestService(t)
+
+	result, err := service.Ingest(ctx, IngestParams{
+		Path:       filepath.Join("testdata", "machine-readable.pdf"),
+		Key:        "machine-readable-pdf",
+		Title:      "Machine Readable PDF",
+		Scope:      "global",
+		ScopeKey:   "global",
+		Restricted: true,
+		SourceKind: "pilot_contract",
+	})
+	if err != nil {
+		t.Fatalf("Ingest() error = %v", err)
+	}
+
+	if result.Source.SourceClass != SourceClass("machine_readable_pdf") {
+		t.Fatalf("SourceClass = %q, want machine_readable_pdf", result.Source.SourceClass)
+	}
+	if result.Source.Lifecycle != LifecycleReady {
+		t.Fatalf("Lifecycle = %q, want %q", result.Source.Lifecycle, LifecycleReady)
+	}
+	if result.Extraction.ExtractorName != "ledongthuc_pdf" {
+		t.Fatalf("ExtractorName = %q, want ledongthuc_pdf", result.Extraction.ExtractorName)
+	}
+	if result.Extraction.ExtractorVersion == "" {
+		t.Fatalf("ExtractorVersion is empty")
+	}
+	normalized, err := os.ReadFile(result.NormalizedMarkdownPath)
+	if err != nil {
+		t.Fatalf("ReadFile(normalized) error = %v", err)
+	}
+	if !strings.Contains(string(normalized), "Vacation accrual rules") {
+		t.Fatalf("normalized markdown = %q, want PDF text", string(normalized))
+	}
+	manifest, err := os.ReadFile(filepath.Join(repoRoot, "memory", "knowledge", "machine-readable-pdf.md"))
+	if err != nil {
+		t.Fatalf("ReadFile(manifest) error = %v", err)
+	}
+	for _, want := range []string{
+		"source_class: machine_readable_pdf",
+		"extractor: ledongthuc_pdf:",
+	} {
+		if !strings.Contains(string(manifest), want) {
+			t.Fatalf("manifest missing %q:\n%s", want, string(manifest))
+		}
+	}
+
+	results, err := service.Search(ctx, SearchParams{Query: "Vacation"})
+	if err != nil {
+		t.Fatalf("Search() error = %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("results = %+v, want one PDF result", results)
+	}
+	if results[0].Anchor != "page:1" {
+		t.Fatalf("Anchor = %q, want page:1", results[0].Anchor)
+	}
+	if results[0].PageNumber == nil || *results[0].PageNumber != 1 {
+		t.Fatalf("PageNumber = %v, want 1", results[0].PageNumber)
+	}
+	if results[0].ExtractorName != "ledongthuc_pdf" {
+		t.Fatalf("search result extractor = %q, want ledongthuc_pdf", results[0].ExtractorName)
+	}
+}
+
+func TestServiceDoesNotReadyOCRRequiredPDF(t *testing.T) {
+	ctx := context.Background()
+	service, _, _ := newTestService(t)
+
+	result, err := service.Ingest(ctx, IngestParams{
+		Path:       filepath.Join("testdata", "ocr-required.pdf"),
+		Key:        "ocr-required-pdf",
+		Title:      "OCR Required PDF",
+		Scope:      "global",
+		ScopeKey:   "global",
+		Restricted: true,
+		SourceKind: "pilot_contract",
+	})
+	if err != nil {
+		t.Fatalf("Ingest() error = %v", err)
+	}
+
+	if result.Source.SourceClass != SourceClass("machine_readable_pdf") {
+		t.Fatalf("SourceClass = %q, want machine_readable_pdf", result.Source.SourceClass)
+	}
+	if result.Source.Lifecycle == LifecycleReady {
+		t.Fatalf("OCR-required artifact became ready")
+	}
+	if result.Source.Lifecycle != LifecycleFailed {
+		t.Fatalf("Lifecycle = %q, want %q", result.Source.Lifecycle, LifecycleFailed)
+	}
+	if result.Extraction.Status != "failed" {
+		t.Fatalf("Extraction.Status = %q, want failed", result.Extraction.Status)
+	}
+	if result.Extraction.FailureCode != "ocr_required" {
+		t.Fatalf("FailureCode = %q, want ocr_required", result.Extraction.FailureCode)
+	}
+	if result.Source.CurrentExtractionID == nil || *result.Source.CurrentExtractionID != result.Extraction.ID {
+		t.Fatalf("CurrentExtractionID = %v, want failed extraction %d", result.Source.CurrentExtractionID, result.Extraction.ID)
+	}
+	results, err := service.Search(ctx, SearchParams{Query: "Vacation"})
+	if err != nil {
+		t.Fatalf("Search() error = %v", err)
+	}
+	if len(results) != 0 {
+		t.Fatalf("results = %+v, want OCR-required source excluded from search", results)
+	}
+}
+
 func TestServiceRejectsUnsupportedSourceClass(t *testing.T) {
 	ctx := context.Background()
 	service, _, _ := newTestService(t)

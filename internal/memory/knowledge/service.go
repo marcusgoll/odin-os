@@ -72,6 +72,19 @@ func (s Service) Ingest(ctx context.Context, params IngestParams) (IngestResult,
 		return IngestResult{}, err
 	}
 
+	if extraction.FailureCode != "" {
+		failed, err := s.recordFailedExtraction(ctx, source, artifact, extraction)
+		if err != nil {
+			return IngestResult{}, err
+		}
+		return IngestResult{
+			Source:       sourceFromStore(failed.Source),
+			Artifact:     artifact,
+			Extraction:   failed.Extraction,
+			ManifestPath: manifestPath,
+		}, nil
+	}
+
 	normalizedPath, err := s.writeNormalizedMarkdown(manifest.Key, extraction.NormalizedMarkdown)
 	if err != nil {
 		return IngestResult{}, err
@@ -175,6 +188,17 @@ func (s Service) Refresh(ctx context.Context, key string) (RefreshResult, error)
 	}
 	if manifest.Extractor != extraction.Extractor() {
 		return RefreshResult{}, fmt.Errorf("knowledge manifest extractor = %q, want %q", manifest.Extractor, extraction.Extractor())
+	}
+	if extraction.FailureCode != "" {
+		failed, err := s.recordFailedExtraction(ctx, source, artifact, extraction)
+		if err != nil {
+			return RefreshResult{}, err
+		}
+		return RefreshResult{
+			Source:     sourceFromStore(failed.Source),
+			Artifact:   artifact,
+			Extraction: failed.Extraction,
+		}, nil
 	}
 	normalizedPath, err := s.writeNormalizedMarkdown(manifest.Key, extraction.NormalizedMarkdown)
 	if err != nil {
@@ -313,6 +337,35 @@ func (s Service) normalizeIngestParams(params IngestParams) (IngestParams, strin
 	return params, sourcePath, nil
 }
 
+type failedKnowledgeExtraction struct {
+	Source     sqlite.KnowledgeSource
+	Extraction sqlite.KnowledgeExtraction
+}
+
+func (s Service) recordFailedExtraction(ctx context.Context, source sqlite.KnowledgeSource, artifact sqlite.KnowledgeArtifact, extraction extractionResult) (failedKnowledgeExtraction, error) {
+	now := s.now()
+	recorded, err := s.Store.RecordKnowledgeExtraction(ctx, sqlite.RecordKnowledgeExtractionParams{
+		SourceID:         source.ID,
+		ArtifactID:       artifact.ID,
+		ExtractorName:    extraction.ExtractorName,
+		ExtractorVersion: extraction.ExtractorVersion,
+		Status:           "failed",
+		Lifecycle:        string(LifecycleFailed),
+		FailureCode:      extraction.FailureCode,
+		FailureSummary:   extraction.FailureSummary,
+		StartedAt:        &now,
+		FinishedAt:       &now,
+	})
+	if err != nil {
+		return failedKnowledgeExtraction{}, err
+	}
+	updated, err := s.Store.GetKnowledgeSourceByKey(ctx, source.Key)
+	if err != nil {
+		return failedKnowledgeExtraction{}, err
+	}
+	return failedKnowledgeExtraction{Source: updated, Extraction: recorded}, nil
+}
+
 func (s Service) writeNormalizedMarkdown(key string, normalized string) (string, error) {
 	runtimeRoot, err := cleanAbsPath(s.RuntimeRoot, "runtime root")
 	if err != nil {
@@ -395,6 +448,7 @@ func extractionChunks(sourceID int64, extractionID int64, extraction extractionR
 			Ordinal:      ordinal,
 			Text:         chunk.Text,
 			Anchor:       chunk.Anchor,
+			PageNumber:   chunk.PageNumber,
 			Restricted:   restricted,
 		})
 	}
@@ -402,16 +456,34 @@ func extractionChunks(sourceID int64, extractionID int64, extraction extractionR
 }
 
 type extractionChunk struct {
-	Text   string
-	Anchor string
+	Text       string
+	Anchor     string
+	PageNumber *int64
 }
 
 func chunkExtraction(extraction extractionResult) []extractionChunk {
+	if len(extraction.Pages) > 0 {
+		return chunkPDFPages(extraction.Pages)
+	}
 	normalized := strings.TrimSpace(extraction.NormalizedMarkdown)
 	if hasMarkdownHeading(normalized) {
 		return chunkMarkdownSections(normalized)
 	}
 	return chunkPlainText(extraction.Text)
+}
+
+func chunkPDFPages(pages []extractedPage) []extractionChunk {
+	var chunks []extractionChunk
+	for _, page := range pages {
+		anchor := fmt.Sprintf("page:%d", page.Number)
+		before := len(chunks)
+		chunks = appendCappedKnowledgeChunks(chunks, page.Text, anchor)
+		for i := before; i < len(chunks); i++ {
+			pageNumber := page.Number
+			chunks[i].PageNumber = &pageNumber
+		}
+	}
+	return chunks
 }
 
 func hasMarkdownHeading(markdown string) bool {

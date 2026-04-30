@@ -220,6 +220,8 @@ func mimeTypeForSourceClass(sourceClass SourceClass) string {
 	switch sourceClass {
 	case SourceClassMarkdown:
 		return "text/markdown; charset=utf-8"
+	case SourceClassMachineReadablePDF:
+		return "application/pdf"
 	default:
 		return "text/plain; charset=utf-8"
 	}

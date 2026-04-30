@@ -21,8 +21,9 @@ const (
 type SourceClass string
 
 const (
-	SourceClassMarkdown SourceClass = "markdown"
-	SourceClassText     SourceClass = "text"
+	SourceClassMarkdown           SourceClass = "markdown"
+	SourceClassText               SourceClass = "text"
+	SourceClassMachineReadablePDF SourceClass = "machine_readable_pdf"
 )
 
 const (
