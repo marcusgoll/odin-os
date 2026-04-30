@@ -2,16 +2,20 @@ GO ?= go
 GOFMT ?= gofmt
 GOFILES := $(shell find . -type f -name '*.go' -not -path './.git/*')
 
-.PHONY: format fmtcheck lint test test-alpha test-media test-skills ci build install-local uninstall-local
+.PHONY: format fmt fmtcheck lint vet test test-alpha test-media test-skills ci build run clean install-local uninstall-local
 
 format:
 	$(GOFMT) -w $(GOFILES)
+
+fmt: format
 
 fmtcheck:
 	@test -z "$$($(GOFMT) -l $(GOFILES))"
 
 lint:
 	$(GO) vet ./...
+
+vet: lint
 
 test:
 	$(GO) test ./...
@@ -34,6 +38,13 @@ ci: fmtcheck lint test
 build:
 	mkdir -p bin
 	$(GO) build -o bin/odin ./cmd/odin
+	$(GO) build -o bin/odin-os ./cmd/odin-os
+
+run:
+	$(GO) run ./cmd/odin-os
+
+clean:
+	rm -rf bin/odin bin/odin-os
 
 install-local: build
 	./scripts/dev/install-local.sh

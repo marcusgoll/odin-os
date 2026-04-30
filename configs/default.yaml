@@ -1,0 +1,12 @@
+version: 1
+runtime:
+  dry_run: true
+  kill_switch: false
+  workspace_root: workspaces
+  log_dir: logs
+github:
+  token_env: GITHUB_TOKEN
+runners:
+  codex_exec:
+    command: codex
+    sandbox_mode: workspace-write

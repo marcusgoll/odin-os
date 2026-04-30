@@ -59,6 +59,7 @@ func TestMaintenanceCleanupExpiredRemovesReleasedAndStaleLeases(t *testing.T) {
 	ctx := context.Background()
 	store, project, task, run := openLeaseManagerStore(t)
 	defer store.Close()
+	worktreeRoot := t.TempDir()
 
 	released, err := store.CreateWorktreeLease(ctx, sqlite.CreateWorktreeLeaseParams{
 		ProjectID:    project.ID,
@@ -66,7 +67,7 @@ func TestMaintenanceCleanupExpiredRemovesReleasedAndStaleLeases(t *testing.T) {
 		RunID:        run.ID,
 		Mode:         "mutable",
 		BranchName:   "odin/cfipros/task-1/run-1/try-1",
-		WorktreePath: filepath.ToSlash(filepath.Join(t.TempDir(), "released")),
+		WorktreePath: filepath.ToSlash(filepath.Join(worktreeRoot, "released")),
 		RepoRoot:     project.GitRoot,
 		State:        "active",
 	})
@@ -106,7 +107,7 @@ func TestMaintenanceCleanupExpiredRemovesReleasedAndStaleLeases(t *testing.T) {
 		RunID:        staleRun.ID,
 		Mode:         "mutable",
 		BranchName:   "odin/cfipros/task-2/run-2/try-1",
-		WorktreePath: filepath.ToSlash(filepath.Join(t.TempDir(), "stale")),
+		WorktreePath: filepath.ToSlash(filepath.Join(worktreeRoot, "stale")),
 		RepoRoot:     project.GitRoot,
 		State:        "active",
 	})
@@ -162,7 +163,7 @@ func TestMaintenanceCleanupExpiredRemovesReleasedAndStaleLeases(t *testing.T) {
 		RunID:        activeRun.ID,
 		Mode:         "mutable",
 		BranchName:   "odin/cfipros/task-3/run-3/try-1",
-		WorktreePath: filepath.ToSlash(filepath.Join(t.TempDir(), "active")),
+		WorktreePath: filepath.ToSlash(filepath.Join(worktreeRoot, "active")),
 		RepoRoot:     project.GitRoot,
 		State:        "active",
 	})
@@ -174,8 +175,9 @@ func TestMaintenanceCleanupExpiredRemovesReleasedAndStaleLeases(t *testing.T) {
 	maint := Maintenance{
 		Store: store,
 		Cleanup: worktrees.Manager{
-			Store: store,
-			Git:   git,
+			Store:        store,
+			Git:          git,
+			WorktreeRoot: worktreeRoot,
 		},
 		Now: func() time.Time {
 			return staleAt.Add(2 * time.Hour)

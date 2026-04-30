@@ -24,6 +24,8 @@ type Preparer interface {
 	Prepare(context.Context, Request) (Assignment, error)
 }
 
+type WorkspaceManager = Preparer
+
 type Manager struct {
 	Store        *sqlite.Store
 	Git          Git

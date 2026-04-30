@@ -101,8 +101,9 @@ func New(env Environment) (*Shell, error) {
 		leaseManager.Store = env.Store
 	}
 	worktreeManager := worktrees.Manager{
-		Store: leaseManager.Store,
-		Git:   leaseManager.Git,
+		Store:        leaseManager.Store,
+		Git:          leaseManager.Git,
+		WorktreeRoot: leaseManager.WorktreeRoot,
 	}
 	now := env.Now
 	if now == nil {

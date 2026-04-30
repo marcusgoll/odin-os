@@ -99,6 +99,32 @@ func TestAdapterRemoveWorktreeTimesOutWithoutCallerDeadline(t *testing.T) {
 	}
 }
 
+func TestAdapterWorktreeDirtyDetectsTrackedAndUntrackedChanges(t *testing.T) {
+	ctx := context.Background()
+	repoRoot := initTempRepo(t)
+	adapter := Adapter{}
+
+	dirty, err := adapter.WorktreeDirty(ctx, repoRoot)
+	if err != nil {
+		t.Fatalf("WorktreeDirty(clean) error = %v", err)
+	}
+	if dirty {
+		t.Fatal("WorktreeDirty(clean) = true, want false")
+	}
+
+	if err := os.WriteFile(filepath.Join(repoRoot, "new.txt"), []byte("pending\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(new.txt) error = %v", err)
+	}
+
+	dirty, err = adapter.WorktreeDirty(ctx, repoRoot)
+	if err != nil {
+		t.Fatalf("WorktreeDirty(dirty) error = %v", err)
+	}
+	if !dirty {
+		t.Fatal("WorktreeDirty(dirty) = false, want true")
+	}
+}
+
 func initTempRepo(t *testing.T) string {
 	t.Helper()
 	ctx := context.Background()

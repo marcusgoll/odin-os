@@ -63,7 +63,7 @@ import (
 
 var errRuntimeNotReady = errors.New("runtime not ready")
 
-const rootUsageBanner = "Usage: odin <command> [args]\n\nCommands: help repl overview doctor healthcheck serve backup restore verify-backup status legacy project workspace scope jobs runs approvals intake agenda logs task initiative companion profile followup trigger transition skills"
+const rootUsageBanner = "Usage: odin <command> [args]\n\nCommands: help repl overview doctor healthcheck serve backup restore verify-backup status legacy project workspace work scope jobs runs approvals intake agenda logs task initiative companion profile followup trigger transition skills"
 
 var (
 	serveTaskLoopInterval     = 1 * time.Second
@@ -184,6 +184,8 @@ func Run(ctx context.Context, root string, args []string, stdin io.Reader, stdou
 		return runProject(ctx, app, args[1:], stdout)
 	case "workspace":
 		return commands.RunWorkspace(ctx, app.Store, app.Registry, args[1:], stdout)
+	case "work":
+		return commands.RunWork(ctx, app.Store, app.Registry, app.RegistrySnapshot, args[1:], stdout)
 	case "scope":
 		return runScope(app, args[1:], stdout)
 	case "jobs":
@@ -2141,8 +2143,9 @@ func runServe(ctx context.Context, app bootstrap.App, cfg appconfig.Config, stdo
 	leaseService := leases.Maintenance{
 		Store: app.Store,
 		Cleanup: worktrees.Manager{
-			Store: app.Store,
-			Git:   gitadapter.Adapter{},
+			Store:        app.Store,
+			Git:          gitadapter.Adapter{},
+			WorktreeRoot: worktrees.DefaultRoot(),
 		},
 		Now: time.Now,
 	}

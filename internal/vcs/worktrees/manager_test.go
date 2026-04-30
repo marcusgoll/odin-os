@@ -36,7 +36,7 @@ func TestManagerCleanupRemovesReleasedLeaseDeterministically(t *testing.T) {
 	}
 
 	git := &cleanupGit{}
-	manager := Manager{Store: store, Git: git}
+	manager := Manager{Store: store, Git: git, WorktreeRoot: "/var/tmp/odin-worktrees"}
 
 	result, err := manager.Cleanup(ctx, time.Now().UTC().Add(-30*time.Minute))
 	if err != nil {
@@ -81,7 +81,7 @@ func TestManagerCleanupPreservesActiveLease(t *testing.T) {
 	}
 
 	git := &cleanupGit{}
-	manager := Manager{Store: store, Git: git}
+	manager := Manager{Store: store, Git: git, WorktreeRoot: "/var/tmp/odin-worktrees"}
 
 	result, err := manager.Cleanup(ctx, time.Now().UTC().Add(-30*time.Minute))
 	if err != nil {
@@ -151,7 +151,7 @@ func TestManagerCleanupLeasesRemovesSelectedReleasedLeases(t *testing.T) {
 	}
 
 	git := &cleanupGit{}
-	manager := Manager{Store: store, Git: git}
+	manager := Manager{Store: store, Git: git, WorktreeRoot: "/var/tmp/odin-worktrees"}
 
 	result, err := manager.CleanupLeases(ctx, []sqlite.WorktreeLease{released})
 	if err != nil {
@@ -178,6 +178,40 @@ func TestManagerCleanupLeasesRemovesSelectedReleasedLeases(t *testing.T) {
 	}
 	if untouched.CleanedUpAt != nil || untouched.State != "released" {
 		t.Fatalf("untouched lease = %+v, want released and not cleaned", untouched)
+	}
+}
+
+func TestManagerCleanupLeasesRejectsPathOutsideWorkspaceRoot(t *testing.T) {
+	ctx := context.Background()
+	store, project, task, run := openCleanupStore(t)
+	defer store.Close()
+
+	released, err := store.CreateWorktreeLease(ctx, sqlite.CreateWorktreeLeaseParams{
+		ProjectID:    project.ID,
+		TaskID:       task.ID,
+		RunID:        run.ID,
+		Mode:         "mutable",
+		BranchName:   "odin/cfipros/task-1/run-1/try-1",
+		WorktreePath: "/tmp/outside",
+		RepoRoot:     project.GitRoot,
+		State:        "released",
+	})
+	if err != nil {
+		t.Fatalf("CreateWorktreeLease() error = %v", err)
+	}
+
+	git := &cleanupGit{}
+	manager := Manager{Store: store, Git: git, WorktreeRoot: "/var/tmp/odin-worktrees"}
+
+	result, err := manager.CleanupLeases(ctx, []sqlite.WorktreeLease{released})
+	if err == nil {
+		t.Fatalf("CleanupLeases() error = nil, want path boundary error")
+	}
+	if len(result.Removed) != 0 {
+		t.Fatalf("CleanupLeases().Removed len = %d, want 0", len(result.Removed))
+	}
+	if git.removeCalls != 0 {
+		t.Fatalf("git remove calls = %d, want 0", git.removeCalls)
 	}
 }
 

@@ -54,6 +54,12 @@ func TestManagerPrepareMutableAllocatesBranchAndWorktree(t *testing.T) {
 	}
 }
 
+func TestManagerIsCanonicalWorkspaceManager(t *testing.T) {
+	t.Parallel()
+
+	var _ WorkspaceManager = Manager{}
+}
+
 func TestManagerPrepareReadOnlySkipsMutableAllocation(t *testing.T) {
 	t.Parallel()
 

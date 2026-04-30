@@ -64,6 +64,33 @@ func TestLoggerWritesStructuredJSONWithCorrelationIdentifiers(t *testing.T) {
 	}
 }
 
+func TestLoggerCurrentlyWritesSensitiveFieldValuesVerbatim(t *testing.T) {
+	t.Parallel()
+
+	var output bytes.Buffer
+	logger := Logger{
+		Writer: &output,
+		Now: func() time.Time {
+			return time.Date(2026, 4, 9, 18, 30, 0, 0, time.UTC)
+		},
+	}
+
+	if err := logger.Log(Record{
+		Level:     LevelWarn,
+		Component: "github",
+		Message:   "request failed",
+		Fields: map[string]any{
+			"github_token": "ghp_fake_characterization_token",
+		},
+	}); err != nil {
+		t.Fatalf("Log() error = %v", err)
+	}
+
+	if !bytes.Contains(output.Bytes(), []byte("ghp_fake_characterization_token")) {
+		t.Fatalf("Log() output = %q, want current verbatim field behavior", output.String())
+	}
+}
+
 func int64Ptr(value int64) *int64 {
 	return &value
 }

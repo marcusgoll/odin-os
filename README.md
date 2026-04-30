@@ -60,6 +60,34 @@ odin
 
 This installs a symlink at `~/.local/bin/odin` pointing to this repo's built binary. Remove it with `make uninstall-local`.
 
+## Agency Orchestrator Scaffold
+
+The Odin-OS agency scaffold is Go-native and preserves `cmd/odin` as the canonical operator surface. The transitional daemon entrypoint is `cmd/odin-os/main.go`; it exists for agency-orchestrator slices while runtime behavior continues to route through the existing Odin packages.
+
+Prerequisites:
+
+- Go matching `go.mod`
+- Git
+- Codex CLI available on `PATH` before enabling real worker dispatch
+
+Useful local checks:
+
+```bash
+go mod tidy
+make fmt
+make vet
+make test
+make build
+```
+
+Run the scaffold entrypoint:
+
+```bash
+make run
+```
+
+The example configs keep worker dispatch conservative: dry-run is enabled in development examples, production examples keep the kill switch on, and runtime output paths such as `.codex-runs/`, `logs/`, and `workspaces/` are ignored by Git.
+
 ## Always-On Runtime
 
 For the single-daemon control plane:

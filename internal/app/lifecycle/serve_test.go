@@ -1219,7 +1219,8 @@ func TestRunLeaseMaintenanceCycleHeartbeatsLiveLeasesWhenCleanupFails(t *testing
 	maint := leases.Maintenance{
 		Store: store,
 		Cleanup: worktrees.Manager{
-			Store: store,
+			Store:        store,
+			WorktreeRoot: filepath.Dir(releasedLease.WorktreePath),
 			Git: &cleanupFailureGit{
 				err: errors.New("remove failed"),
 			},

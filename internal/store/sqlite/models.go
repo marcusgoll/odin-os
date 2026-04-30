@@ -15,6 +15,23 @@ type Project struct {
 	UpdatedAt     time.Time
 }
 
+type ExternalIssue struct {
+	ID           int64
+	ProjectID    int64
+	Provider     string
+	Repo         string
+	Number       int
+	Title        string
+	BodyHash     string
+	URL          string
+	State        string
+	LabelsJSON   string
+	SyncStatus   string
+	LastSyncedAt time.Time
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
+}
+
 type Initiative struct {
 	ID               int64
 	WorkspaceID      int64
@@ -56,6 +73,25 @@ type CreateProjectParams struct {
 }
 
 type UpsertProjectParams = CreateProjectParams
+
+type UpsertExternalIssueParams struct {
+	ProjectID  int64
+	Provider   string
+	Repo       string
+	Number     int
+	Title      string
+	BodyHash   string
+	URL        string
+	State      string
+	LabelsJSON string
+	SyncStatus string
+}
+
+type ListExternalIssuesParams struct {
+	Repo       string
+	SyncStatus string
+	ProjectID  *int64
+}
 
 type UpsertInitiativeParams struct {
 	WorkspaceID      int64

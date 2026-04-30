@@ -18,6 +18,7 @@ import (
 	"odin-os/internal/core/workspaces"
 	"odin-os/internal/executors/contract"
 	executorrouter "odin-os/internal/executors/router"
+	"odin-os/internal/prompts"
 	"odin-os/internal/runtime/checkpoints"
 	healthsvc "odin-os/internal/runtime/health"
 	"odin-os/internal/runtime/projections"
@@ -30,6 +31,8 @@ type Service struct {
 	Registry            projects.Registry
 	Executors           map[string]contract.Executor
 	ExecutorConfig      executorrouter.Config
+	PromptRenderer      prompts.Renderer
+	PromptTemplateName  string
 	Transitions         projects.Service
 	Leases              leases.Manager
 	CheckpointCompactor func(context.Context, checkpoints.CompactParams) (checkpoints.CompactionResult, error)
@@ -377,6 +380,17 @@ func (service Service) ExecuteNextQueued(ctx context.Context) error {
 	spec.Metadata["branch_name"] = assignment.BranchName
 	spec.Metadata["repo_root"] = assignment.RepoRoot
 	spec.Metadata["worktree_path"] = assignment.WorktreePath
+	if service.PromptRenderer != nil {
+		renderedPrompt, err := service.renderPrompt(ctx, spec, task)
+		if err != nil {
+			return service.finalizeOutcome(ctx, task, run, admissionDecision{
+				Outcome:   admissionFailed,
+				LastError: err.Error(),
+			}, contract.ExecutionResult{}, nil)
+		}
+		spec.Prompt = renderedPrompt
+		spec.Metadata["prompt_size_bytes"] = fmt.Sprintf("%d", prompts.PromptSizeBytes(renderedPrompt))
+	}
 
 	executor := executors[decision.ExecutorKey]
 	result, execErr := executor.RunTask(ctx, spec)
@@ -522,6 +536,14 @@ func (service Service) ExecuteTaskWithRequest(ctx context.Context, taskID int64,
 	spec.Metadata["branch_name"] = assignment.BranchName
 	spec.Metadata["repo_root"] = assignment.RepoRoot
 	spec.Metadata["worktree_path"] = assignment.WorktreePath
+	if service.PromptRenderer != nil && strings.TrimSpace(request.PromptOverride) == "" {
+		renderedPrompt, err := service.renderPrompt(ctx, spec, task)
+		if err != nil {
+			return ExecutionOutcome{}, err
+		}
+		spec.Prompt = renderedPrompt
+		spec.Metadata["prompt_size_bytes"] = fmt.Sprintf("%d", prompts.PromptSizeBytes(renderedPrompt))
+	}
 
 	if intakeSummary != "" {
 		if err := service.compactExecutionContext(ctx, project, task, run, intakeSummary); err != nil {
@@ -982,6 +1004,36 @@ func (service Service) defaultDelegationExecutor(preferred string) string {
 		}
 	}
 	return "codex_headless"
+}
+
+func (service Service) renderPrompt(ctx context.Context, spec contract.TaskSpec, task sqlite.Task) (string, error) {
+	templateName := strings.TrimSpace(service.PromptTemplateName)
+	if templateName == "" {
+		templateName = string(spec.Kind)
+	}
+	return service.PromptRenderer.Render(ctx, templateName, prompts.TemplateData{
+		WorkItemID:         task.Key,
+		Role:               templateName,
+		Title:              task.Title,
+		AcceptanceCriteria: acceptanceCriteriaFromMetadata(spec.Metadata["acceptance_criteria"]),
+		Metadata:           spec.Metadata,
+	})
+}
+
+func acceptanceCriteriaFromMetadata(raw string) []string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	parts := strings.Split(raw, "\n")
+	criteria := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(strings.TrimPrefix(part, "-"))
+		if part != "" {
+			criteria = append(criteria, part)
+		}
+	}
+	return criteria
 }
 
 func intersectAllowedTools(rawPolicy string, requested []string) ([]string, error) {

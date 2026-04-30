@@ -1,0 +1,14 @@
+version: 1
+runtime:
+  dry_run: true
+  kill_switch: false
+  workspace_root: workspaces
+github:
+  # Use environment variables for tokens. Do not commit secrets here.
+  token_env: GITHUB_TOKEN
+  default_issue_query: "label:odin:ready state:open"
+runners:
+  codex_exec:
+    command: codex
+logging:
+  level: info

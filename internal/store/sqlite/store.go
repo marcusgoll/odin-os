@@ -167,6 +167,71 @@ func (store *Store) UpsertProject(ctx context.Context, params UpsertProjectParam
 	return project, err
 }
 
+func (store *Store) UpsertExternalIssue(ctx context.Context, params UpsertExternalIssueParams) (ExternalIssue, error) {
+	now := store.now()
+	var issue ExternalIssue
+
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO external_issues (
+				project_id,
+				provider,
+				repo,
+				number,
+				title,
+				body_hash,
+				url,
+				state,
+				labels_json,
+				sync_status,
+				last_synced_at,
+				created_at,
+				updated_at
+			)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT(provider, repo, number) DO UPDATE SET
+				project_id = excluded.project_id,
+				title = excluded.title,
+				body_hash = excluded.body_hash,
+				url = excluded.url,
+				state = excluded.state,
+				labels_json = excluded.labels_json,
+				sync_status = excluded.sync_status,
+				last_synced_at = excluded.last_synced_at,
+				updated_at = excluded.updated_at
+		`,
+			params.ProjectID,
+			params.Provider,
+			params.Repo,
+			params.Number,
+			params.Title,
+			params.BodyHash,
+			params.URL,
+			params.State,
+			params.LabelsJSON,
+			params.SyncStatus,
+			formatTime(now),
+			formatTime(now),
+			formatTime(now),
+		); err != nil {
+			return err
+		}
+
+		record, err := scanExternalIssue(tx.QueryRowContext(ctx, `
+			SELECT id, project_id, provider, repo, number, title, body_hash, url, state, labels_json, sync_status, last_synced_at, created_at, updated_at
+			FROM external_issues
+			WHERE provider = ? AND repo = ? AND number = ?
+		`, params.Provider, params.Repo, params.Number))
+		if err != nil {
+			return err
+		}
+		issue = record
+		return nil
+	})
+
+	return issue, err
+}
+
 func (store *Store) UpsertInitiative(ctx context.Context, params UpsertInitiativeParams) (Initiative, error) {
 	now := store.now()
 	var initiative Initiative
@@ -4525,6 +4590,44 @@ func (store *Store) GetProjectByKey(ctx context.Context, key string) (Project, e
 	return scanProject(row)
 }
 
+func (store *Store) ListExternalIssues(ctx context.Context, params ListExternalIssuesParams) ([]ExternalIssue, error) {
+	query := `
+		SELECT id, project_id, provider, repo, number, title, body_hash, url, state, labels_json, sync_status, last_synced_at, created_at, updated_at
+		FROM external_issues
+		WHERE 1 = 1
+	`
+	args := make([]any, 0, 3)
+	if params.ProjectID != nil {
+		query += " AND project_id = ?"
+		args = append(args, *params.ProjectID)
+	}
+	if params.Repo != "" {
+		query += " AND repo = ?"
+		args = append(args, params.Repo)
+	}
+	if params.SyncStatus != "" {
+		query += " AND sync_status = ?"
+		args = append(args, params.SyncStatus)
+	}
+	query += " ORDER BY repo ASC, number ASC, id ASC"
+
+	rows, err := store.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	issues := make([]ExternalIssue, 0)
+	for rows.Next() {
+		issue, err := scanExternalIssue(rows)
+		if err != nil {
+			return nil, err
+		}
+		issues = append(issues, issue)
+	}
+	return issues, rows.Err()
+}
+
 func (store *Store) GetInitiativeByKey(ctx context.Context, workspaceID int64, key string) (Initiative, error) {
 	row := store.db.QueryRowContext(ctx, `
 		SELECT id, workspace_id, key, title, kind, status, summary, owner_companion_id, linked_project_id, created_at, updated_at
@@ -7364,6 +7467,46 @@ func scanProject(row interface{ Scan(...any) error }) (Project, error) {
 		return Project{}, err
 	}
 	return project, nil
+}
+
+func scanExternalIssue(row interface{ Scan(...any) error }) (ExternalIssue, error) {
+	var issue ExternalIssue
+	var lastSyncedAt string
+	var createdAt string
+	var updatedAt string
+	if err := row.Scan(
+		&issue.ID,
+		&issue.ProjectID,
+		&issue.Provider,
+		&issue.Repo,
+		&issue.Number,
+		&issue.Title,
+		&issue.BodyHash,
+		&issue.URL,
+		&issue.State,
+		&issue.LabelsJSON,
+		&issue.SyncStatus,
+		&lastSyncedAt,
+		&createdAt,
+		&updatedAt,
+	); err != nil {
+		return ExternalIssue{}, err
+	}
+
+	var err error
+	issue.LastSyncedAt, err = parseTime(lastSyncedAt)
+	if err != nil {
+		return ExternalIssue{}, err
+	}
+	issue.CreatedAt, err = parseTime(createdAt)
+	if err != nil {
+		return ExternalIssue{}, err
+	}
+	issue.UpdatedAt, err = parseTime(updatedAt)
+	if err != nil {
+		return ExternalIssue{}, err
+	}
+	return issue, nil
 }
 
 func scanInitiative(row interface{ Scan(...any) error }) (Initiative, error) {
