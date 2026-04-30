@@ -79,7 +79,7 @@ func (s Service) Ingest(ctx context.Context, params IngestParams) (IngestResult,
 		}
 		return IngestResult{
 			Source:       sourceFromStore(failed.Source),
-			Artifact:     artifact,
+			Artifact:     failed.Artifact,
 			Extraction:   failed.Extraction,
 			ManifestPath: manifestPath,
 		}, nil
@@ -196,7 +196,7 @@ func (s Service) Refresh(ctx context.Context, key string) (RefreshResult, error)
 		}
 		return RefreshResult{
 			Source:     sourceFromStore(failed.Source),
-			Artifact:   artifact,
+			Artifact:   failed.Artifact,
 			Extraction: failed.Extraction,
 		}, nil
 	}
@@ -339,10 +339,21 @@ func (s Service) normalizeIngestParams(params IngestParams) (IngestParams, strin
 
 type failedKnowledgeExtraction struct {
 	Source     sqlite.KnowledgeSource
+	Artifact   sqlite.KnowledgeArtifact
 	Extraction sqlite.KnowledgeExtraction
 }
 
 func (s Service) recordFailedExtraction(ctx context.Context, source sqlite.KnowledgeSource, artifact sqlite.KnowledgeArtifact, extraction extractionResult) (failedKnowledgeExtraction, error) {
+	if extraction.FailureCode == "ocr_required" {
+		marked, err := s.Store.MarkKnowledgeArtifactOCRRequired(ctx, sqlite.MarkKnowledgeArtifactOCRRequiredParams{
+			ArtifactID: artifact.ID,
+		})
+		if err != nil {
+			return failedKnowledgeExtraction{}, err
+		}
+		artifact = marked
+	}
+
 	now := s.now()
 	recorded, err := s.Store.RecordKnowledgeExtraction(ctx, sqlite.RecordKnowledgeExtractionParams{
 		SourceID:         source.ID,
@@ -363,7 +374,7 @@ func (s Service) recordFailedExtraction(ctx context.Context, source sqlite.Knowl
 	if err != nil {
 		return failedKnowledgeExtraction{}, err
 	}
-	return failedKnowledgeExtraction{Source: updated, Extraction: recorded}, nil
+	return failedKnowledgeExtraction{Source: updated, Artifact: artifact, Extraction: recorded}, nil
 }
 
 func (s Service) writeNormalizedMarkdown(key string, normalized string) (string, error) {

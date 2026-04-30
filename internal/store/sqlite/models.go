@@ -412,6 +412,10 @@ type RecordKnowledgeArtifactParams struct {
 	OCRRequired  bool
 }
 
+type MarkKnowledgeArtifactOCRRequiredParams struct {
+	ArtifactID int64
+}
+
 type KnowledgeSource struct {
 	ID                  int64
 	Key                 string

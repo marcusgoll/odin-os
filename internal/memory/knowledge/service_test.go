@@ -197,8 +197,36 @@ func TestServiceDoesNotReadyOCRRequiredPDF(t *testing.T) {
 	if result.Extraction.FailureCode != "ocr_required" {
 		t.Fatalf("FailureCode = %q, want ocr_required", result.Extraction.FailureCode)
 	}
+	if !result.Artifact.OCRRequired {
+		t.Fatalf("Artifact.OCRRequired = false, want true")
+	}
 	if result.Source.CurrentExtractionID == nil || *result.Source.CurrentExtractionID != result.Extraction.ID {
 		t.Fatalf("CurrentExtractionID = %v, want failed extraction %d", result.Source.CurrentExtractionID, result.Extraction.ID)
+	}
+	_, err = service.Store.RecordReadyKnowledgeExtraction(ctx, sqlite.RecordReadyKnowledgeExtractionParams{
+		SourceID:               result.Source.ID,
+		ArtifactID:             result.Artifact.ID,
+		Key:                    result.Source.Key,
+		Title:                  result.Source.Title,
+		Scope:                  result.Source.Scope,
+		ScopeKey:               result.Source.ScopeKey,
+		Restricted:             result.Source.Restricted,
+		SourceKind:             result.Source.SourceKind,
+		SourceClass:            string(result.Source.SourceClass),
+		ManifestPath:           result.Source.ManifestPath,
+		ExtractorName:          "test_pdf",
+		ExtractorVersion:       "v1",
+		ExtractedTextHash:      "sha256:ready-footgun",
+		NormalizedMarkdownPath: filepath.Join(t.TempDir(), "ready.md"),
+		Chunks: []sqlite.RecordKnowledgeChunkParams{{
+			Ordinal:    0,
+			Text:       "This OCR-required artifact must not become ready.",
+			Anchor:     "page-1",
+			Restricted: true,
+		}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "ocr-required") {
+		t.Fatalf("RecordReadyKnowledgeExtraction() error = %v, want OCR-required lifecycle failure", err)
 	}
 	results, err := service.Search(ctx, SearchParams{Query: "Vacation"})
 	if err != nil {
