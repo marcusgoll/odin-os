@@ -576,19 +576,7 @@ func TestStorePersistsKnowledgeSourceArtifactExtractionAndChunks(t *testing.T) {
 		t.Fatalf("source = %+v, want manifest and current artifact", source)
 	}
 
-	extraction, err := store.RecordKnowledgeExtraction(ctx, RecordKnowledgeExtractionParams{
-		SourceID:               source.ID,
-		ArtifactID:             artifact.ID,
-		ExtractorName:          "plain_text",
-		ExtractorVersion:       "v1",
-		Status:                 "succeeded",
-		Lifecycle:              "ready",
-		ExtractedTextHash:      "sha256:text",
-		NormalizedMarkdownPath: "state/knowledge/normalized/pilot-contract.md",
-	})
-	if err != nil {
-		t.Fatalf("RecordKnowledgeExtraction() error = %v", err)
-	}
+	extraction, chunk := recordReadyKnowledgeExtractionForTest(t, ctx, store, source, artifact, "sha256:text", "Vacation accrual section.")
 	if extraction.SourceID != source.ID || extraction.ArtifactID != artifact.ID || extraction.ExtractorName != "plain_text" || extraction.ExtractorVersion != "v1" {
 		t.Fatalf("extraction = %+v, want persisted extraction provenance", extraction)
 	}
@@ -606,22 +594,10 @@ func TestStorePersistsKnowledgeSourceArtifactExtractionAndChunks(t *testing.T) {
 	if reloadedSource.Lifecycle != "ready" {
 		t.Fatalf("source.Lifecycle = %q, want ready", reloadedSource.Lifecycle)
 	}
-
-	chunk, err := store.RecordKnowledgeChunk(ctx, RecordKnowledgeChunkParams{
-		SourceID:     source.ID,
-		ExtractionID: extraction.ID,
-		Ordinal:      1,
-		Text:         "Vacation accrual section.",
-		Anchor:       "section:vacation",
-		Restricted:   true,
-	})
-	if err != nil {
-		t.Fatalf("RecordKnowledgeChunk() error = %v", err)
-	}
 	if chunk.SourceID != source.ID || chunk.ExtractionID != extraction.ID || chunk.Ordinal != 1 || chunk.Text != "Vacation accrual section." {
 		t.Fatalf("chunk = %+v, want persisted restricted chunk", chunk)
 	}
-	if !chunk.Restricted || chunk.Anchor != "section:vacation" {
+	if !chunk.Restricted || chunk.Anchor != "section:ready" {
 		t.Fatalf("chunk = %+v, want restricted chunk anchor", chunk)
 	}
 
@@ -640,7 +616,7 @@ func TestStorePersistsKnowledgeSourceArtifactExtractionAndChunks(t *testing.T) {
 	if results[0].SourceKey != "pilot-contract" || results[0].Title != "Pilot Contract" || results[0].Text != chunk.Text {
 		t.Fatalf("result = %+v, want source and chunk text", results[0])
 	}
-	if !results[0].Restricted || results[0].Anchor != "section:vacation" {
+	if !results[0].Restricted || results[0].Anchor != "section:ready" {
 		t.Fatalf("result = %+v, want restricted result with citation anchor", results[0])
 	}
 	if results[0].ManifestPath != "memory/knowledge/pilot-contract.md" || results[0].ExtractionID != extraction.ID || results[0].ArtifactID != artifact.ID {
@@ -698,18 +674,7 @@ func TestStoreKnowledgeExtractionPromotesArtifactAndLifecycleEventProvenance(t *
 		t.Fatalf("UpsertKnowledgeSource() error = %v", err)
 	}
 
-	extraction, err := store.RecordKnowledgeExtraction(ctx, RecordKnowledgeExtractionParams{
-		SourceID:          source.ID,
-		ArtifactID:        secondArtifact.ID,
-		ExtractorName:     "plain_text",
-		ExtractorVersion:  "v1",
-		Status:            "succeeded",
-		Lifecycle:         "ready",
-		ExtractedTextHash: "sha256:refreshed",
-	})
-	if err != nil {
-		t.Fatalf("RecordKnowledgeExtraction() error = %v", err)
-	}
+	extraction, _ := recordReadyKnowledgeExtractionForTest(t, ctx, store, source, secondArtifact, "sha256:refreshed", "Refreshed artifact body.")
 
 	reloadedSource, err := store.GetKnowledgeSourceByKey(ctx, "artifact-refresh")
 	if err != nil {
@@ -768,28 +733,7 @@ func TestStoreReindexesKnowledgeChunksWhenSourceTitleChanges(t *testing.T) {
 	if err != nil {
 		t.Fatalf("UpsertKnowledgeSource() error = %v", err)
 	}
-	extraction, err := store.RecordKnowledgeExtraction(ctx, RecordKnowledgeExtractionParams{
-		SourceID:          source.ID,
-		ArtifactID:        artifact.ID,
-		ExtractorName:     "plain_text",
-		ExtractorVersion:  "v1",
-		Status:            "succeeded",
-		Lifecycle:         "ready",
-		ExtractedTextHash: "sha256:title-text",
-	})
-	if err != nil {
-		t.Fatalf("RecordKnowledgeExtraction() error = %v", err)
-	}
-	chunk, err := store.RecordKnowledgeChunk(ctx, RecordKnowledgeChunkParams{
-		SourceID:     source.ID,
-		ExtractionID: extraction.ID,
-		Ordinal:      1,
-		Text:         "Neutral section body.",
-		Restricted:   true,
-	})
-	if err != nil {
-		t.Fatalf("RecordKnowledgeChunk() error = %v", err)
-	}
+	_, chunk := recordReadyKnowledgeExtractionForTest(t, ctx, store, source, artifact, "sha256:title-text", "Neutral section body.")
 	if err := store.IndexKnowledgeChunk(ctx, IndexKnowledgeChunkParams{
 		ChunkID:  chunk.ID,
 		Topics:   []string{"benefits"},
@@ -929,18 +873,7 @@ func TestStoreRejectsInvalidKnowledgeCurrentExtractionLineage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("UpsertKnowledgeSource(a) error = %v", err)
 	}
-	extractionA, err := store.RecordKnowledgeExtraction(ctx, RecordKnowledgeExtractionParams{
-		SourceID:          sourceA.ID,
-		ArtifactID:        artifactA.ID,
-		ExtractorName:     "plain_text",
-		ExtractorVersion:  "v1",
-		Status:            "succeeded",
-		Lifecycle:         "ready",
-		ExtractedTextHash: "sha256:lineage-a-text",
-	})
-	if err != nil {
-		t.Fatalf("RecordKnowledgeExtraction(a) error = %v", err)
-	}
+	extractionA, _ := recordReadyKnowledgeExtractionForTest(t, ctx, store, sourceA, artifactA, "sha256:lineage-a-text", "Lineage A body.")
 
 	_, err = store.UpsertKnowledgeSource(ctx, UpsertKnowledgeSourceParams{
 		Key:                 "lineage-b",
@@ -1154,28 +1087,7 @@ func TestStorePendingKnowledgeRefreshPreservesCurrentExtraction(t *testing.T) {
 	if err != nil {
 		t.Fatalf("UpsertKnowledgeSource() error = %v", err)
 	}
-	currentExtraction, err := store.RecordKnowledgeExtraction(ctx, RecordKnowledgeExtractionParams{
-		SourceID:          source.ID,
-		ArtifactID:        artifact.ID,
-		ExtractorName:     "plain_text",
-		ExtractorVersion:  "v1",
-		Status:            "succeeded",
-		Lifecycle:         "ready",
-		ExtractedTextHash: "sha256:pending-refresh-current",
-	})
-	if err != nil {
-		t.Fatalf("RecordKnowledgeExtraction(current) error = %v", err)
-	}
-	currentChunk, err := store.RecordKnowledgeChunk(ctx, RecordKnowledgeChunkParams{
-		SourceID:     source.ID,
-		ExtractionID: currentExtraction.ID,
-		Ordinal:      1,
-		Text:         "Current refresh baseline.",
-		Restricted:   true,
-	})
-	if err != nil {
-		t.Fatalf("RecordKnowledgeChunk(current) error = %v", err)
-	}
+	currentExtraction, currentChunk := recordReadyKnowledgeExtractionForTest(t, ctx, store, source, artifact, "sha256:pending-refresh-current", "Current refresh baseline.")
 
 	if _, err := store.RecordKnowledgeExtraction(ctx, RecordKnowledgeExtractionParams{
 		SourceID:         source.ID,
@@ -1249,50 +1161,9 @@ func TestStoreSearchOnlyReturnsCurrentKnowledgeExtractionChunks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("UpsertKnowledgeSource() error = %v", err)
 	}
-	firstExtraction, err := store.RecordKnowledgeExtraction(ctx, RecordKnowledgeExtractionParams{
-		SourceID:          source.ID,
-		ArtifactID:        firstArtifact.ID,
-		ExtractorName:     "plain_text",
-		ExtractorVersion:  "v1",
-		Status:            "succeeded",
-		Lifecycle:         "ready",
-		ExtractedTextHash: "sha256:current-first-text",
-	})
-	if err != nil {
-		t.Fatalf("RecordKnowledgeExtraction(first) error = %v", err)
-	}
-	if _, err := store.RecordKnowledgeChunk(ctx, RecordKnowledgeChunkParams{
-		SourceID:     source.ID,
-		ExtractionID: firstExtraction.ID,
-		Ordinal:      1,
-		Text:         "Legacy-only clause.",
-		Restricted:   true,
-	}); err != nil {
-		t.Fatalf("RecordKnowledgeChunk(first) error = %v", err)
-	}
+	_, _ = recordReadyKnowledgeExtractionForTest(t, ctx, store, source, firstArtifact, "sha256:current-first-text", "Legacy-only clause.")
 
-	secondExtraction, err := store.RecordKnowledgeExtraction(ctx, RecordKnowledgeExtractionParams{
-		SourceID:          source.ID,
-		ArtifactID:        secondArtifact.ID,
-		ExtractorName:     "plain_text",
-		ExtractorVersion:  "v1",
-		Status:            "succeeded",
-		Lifecycle:         "ready",
-		ExtractedTextHash: "sha256:current-second-text",
-	})
-	if err != nil {
-		t.Fatalf("RecordKnowledgeExtraction(second) error = %v", err)
-	}
-	secondChunk, err := store.RecordKnowledgeChunk(ctx, RecordKnowledgeChunkParams{
-		SourceID:     source.ID,
-		ExtractionID: secondExtraction.ID,
-		Ordinal:      1,
-		Text:         "Current-only clause.",
-		Restricted:   true,
-	})
-	if err != nil {
-		t.Fatalf("RecordKnowledgeChunk(second) error = %v", err)
-	}
+	secondExtraction, secondChunk := recordReadyKnowledgeExtractionForTest(t, ctx, store, source, secondArtifact, "sha256:current-second-text", "Current-only clause.")
 
 	oldResults, err := store.SearchKnowledgeChunks(ctx, SearchKnowledgeChunksParams{Query: "Legacy-only", Scope: "global", ScopeKey: "global"})
 	if err != nil {
@@ -1365,6 +1236,22 @@ func TestStoreRejectsKnowledgeDomainPolicyViolations(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), "manifest path") {
 			t.Fatalf("UpsertKnowledgeSource(%q) error = %v, want canonical manifest failure", manifestPath, err)
 		}
+	}
+
+	_, err = store.UpsertKnowledgeSource(ctx, UpsertKnowledgeSourceParams{
+		Key:               "manifest-key",
+		Title:             "Manifest Key",
+		Scope:             "global",
+		ScopeKey:          "global",
+		Restricted:        true,
+		SourceKind:        "manual",
+		SourceClass:       "text",
+		Lifecycle:         "artifact_available",
+		ManifestPath:      "memory/knowledge/different-key.md",
+		CurrentArtifactID: &artifact.ID,
+	})
+	if err == nil || !strings.Contains(err.Error(), "must match key") {
+		t.Fatalf("UpsertKnowledgeSource() key/manifest error = %v, want key path match failure", err)
 	}
 
 	_, err = store.UpsertKnowledgeSource(ctx, UpsertKnowledgeSourceParams{
@@ -1451,6 +1338,19 @@ func TestStoreRejectsKnowledgeDomainPolicyViolations(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "requires lifecycle") {
 		t.Fatalf("RecordKnowledgeExtraction() status/lifecycle error = %v, want status lifecycle failure", err)
 	}
+
+	_, err = store.RecordKnowledgeExtraction(ctx, RecordKnowledgeExtractionParams{
+		SourceID:          ocrSource.ID,
+		ArtifactID:        artifact.ID,
+		ExtractorName:     "plain_text",
+		ExtractorVersion:  "v1",
+		Status:            "succeeded",
+		Lifecycle:         "ready",
+		ExtractedTextHash: "sha256:ready-footgun",
+	})
+	if err == nil || !strings.Contains(err.Error(), "ready extraction promotion") {
+		t.Fatalf("RecordKnowledgeExtraction() ready lifecycle error = %v, want ready promotion failure", err)
+	}
 }
 
 func TestStoreRecordsRestrictedKnowledgeUseApprovalWithoutChangingLifecycle(t *testing.T) {
@@ -1485,17 +1385,7 @@ func TestStoreRecordsRestrictedKnowledgeUseApprovalWithoutChangingLifecycle(t *t
 	if err != nil {
 		t.Fatalf("UpsertKnowledgeSource() error = %v", err)
 	}
-	if _, err := store.RecordKnowledgeExtraction(ctx, RecordKnowledgeExtractionParams{
-		SourceID:          source.ID,
-		ArtifactID:        artifact.ID,
-		ExtractorName:     "plain_text",
-		ExtractorVersion:  "v1",
-		Status:            "succeeded",
-		Lifecycle:         "ready",
-		ExtractedTextHash: "sha256:restricted-text",
-	}); err != nil {
-		t.Fatalf("RecordKnowledgeExtraction() error = %v", err)
-	}
+	recordReadyKnowledgeExtractionForTest(t, ctx, store, source, artifact, "sha256:restricted-text", "Restricted manual body.")
 
 	approval, err := store.RecordRestrictedKnowledgeUseApproval(ctx, RecordRestrictedKnowledgeUseApprovalParams{
 		SourceID:     source.ID,
@@ -1531,6 +1421,40 @@ func TestStoreRecordsRestrictedKnowledgeUseApprovalWithoutChangingLifecycle(t *t
 	if err == nil || !strings.Contains(err.Error(), "not supported") {
 		t.Fatalf("RecordRestrictedKnowledgeUseApproval() use type error = %v, want unsupported use type failure", err)
 	}
+}
+
+func recordReadyKnowledgeExtractionForTest(t *testing.T, ctx context.Context, store *Store, source KnowledgeSource, artifact KnowledgeArtifact, textHash string, chunkText string) (KnowledgeExtraction, KnowledgeChunk) {
+	t.Helper()
+
+	ready, err := store.RecordReadyKnowledgeExtraction(ctx, RecordReadyKnowledgeExtractionParams{
+		SourceID:               source.ID,
+		ArtifactID:             artifact.ID,
+		Key:                    source.Key,
+		Title:                  source.Title,
+		Scope:                  source.Scope,
+		ScopeKey:               source.ScopeKey,
+		Restricted:             source.Restricted,
+		SourceKind:             source.SourceKind,
+		SourceClass:            source.SourceClass,
+		ManifestPath:           source.ManifestPath,
+		ExtractorName:          "plain_text",
+		ExtractorVersion:       "v1",
+		ExtractedTextHash:      textHash,
+		NormalizedMarkdownPath: "state/knowledge/normalized/" + source.Key + ".md",
+		Chunks: []RecordKnowledgeChunkParams{{
+			Ordinal:    1,
+			Text:       chunkText,
+			Anchor:     "section:ready",
+			Restricted: source.Restricted,
+		}},
+	})
+	if err != nil {
+		t.Fatalf("RecordReadyKnowledgeExtraction() error = %v", err)
+	}
+	if len(ready.Chunks) != 1 {
+		t.Fatalf("ready chunks = %+v, want one chunk", ready.Chunks)
+	}
+	return ready.Extraction, ready.Chunks[0]
 }
 
 func TestStoreRejectsInvalidActionApprovalBinding(t *testing.T) {

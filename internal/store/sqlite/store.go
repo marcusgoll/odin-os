@@ -1656,7 +1656,7 @@ func (store *Store) UpsertKnowledgeSource(ctx context.Context, params UpsertKnow
 	if params.ManifestPath == "" {
 		return KnowledgeSource{}, fmt.Errorf("knowledge source manifest path is required")
 	}
-	if err := validateKnowledgeManifestPath(params.ManifestPath); err != nil {
+	if err := validateKnowledgeManifestPathForKey(params.Key, params.ManifestPath); err != nil {
 		return KnowledgeSource{}, err
 	}
 	if err := validateKnowledgeSourceClass(params.SourceClass); err != nil {
@@ -2143,7 +2143,7 @@ func (store *Store) RecordReadyKnowledgeExtraction(ctx context.Context, params R
 	if len(params.Chunks) == 0 {
 		return ReadyKnowledgeExtraction{}, fmt.Errorf("ready knowledge extraction requires at least one chunk")
 	}
-	if err := validateKnowledgeManifestPath(params.ManifestPath); err != nil {
+	if err := validateKnowledgeManifestPathForKey(params.Key, params.ManifestPath); err != nil {
 		return ReadyKnowledgeExtraction{}, err
 	}
 	if err := validateKnowledgeSourceClass(params.SourceClass); err != nil {
@@ -2574,6 +2574,17 @@ func validateKnowledgeManifestPath(manifestPath string) error {
 	return nil
 }
 
+func validateKnowledgeManifestPathForKey(key string, manifestPath string) error {
+	if err := validateKnowledgeManifestPath(manifestPath); err != nil {
+		return err
+	}
+	expected := "memory/knowledge/" + strings.TrimSpace(key) + ".md"
+	if manifestPath != expected {
+		return fmt.Errorf("knowledge source manifest path %q must match key %q as %q", manifestPath, key, expected)
+	}
+	return nil
+}
+
 func validateKnowledgeSourceClass(sourceClass string) error {
 	switch sourceClass {
 	case "markdown", "text", "machine_readable_pdf":
@@ -2600,9 +2611,9 @@ func validateKnowledgeExtractionStatusLifecycle(status string, lifecycle string)
 		}
 	case "succeeded":
 		switch lifecycle {
-		case "extracted", "indexed", "ready":
+		case "extracted":
 		default:
-			return fmt.Errorf("knowledge extraction status %q cannot enter lifecycle %q", status, lifecycle)
+			return fmt.Errorf("knowledge extraction status %q cannot enter lifecycle %q; use ready extraction promotion for ready sources", status, lifecycle)
 		}
 	case "failed":
 		if lifecycle != "failed" {
