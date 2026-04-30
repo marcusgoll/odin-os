@@ -26,14 +26,14 @@ No skill, agent, prompt, shim, or script should be removed until a separate clea
 | `state/migration/drafts/skills/agent-workflow-designer.md` | Review-only | `feature-spec`, `architecture-plan`, existing workflow registry | Preserve workflow authoring guidance only if it matches `docs/contracts/registry-format.md`. |
 | `state/migration/drafts/skills/api-design-reviewer.md` | Review-only | `pr-review`, `security-review` | Fold API findings into reviewer/security behavior if needed. |
 | `state/migration/drafts/skills/api-test-suite-builder.md` | Review-only | `qa-review` | Extract test strategy only when tied to Odin verification proof. |
-| `state/migration/drafts/skills/blog-writer.md` | Deprecated | None for Odin core | Archive unless a governed content workflow is explicitly added. |
-| `state/migration/drafts/skills/brand-ad-generator.md` | Deprecated | None for Odin core | Archive; not part of the orchestration mission. |
+| `state/migration/archive/skills/blog-writer.md` | Archived | None for Odin core | Archived from `state/migration/drafts/skills/blog-writer.md`; restore only if a governed content workflow is explicitly added. |
+| `state/migration/archive/skills/brand-ad-generator.md` | Archived | None for Odin core | Archived from `state/migration/drafts/skills/brand-ad-generator.md`; not part of the orchestration mission. |
 | `state/migration/drafts/skills/changelog-generator.md` | Review-only | `release-checklist`, `pr-review` | Preserve release-note guidance only as release handoff support. |
 | `state/migration/drafts/skills/ci-cd-pipeline-builder.md` | Review-only | `release-checklist`, `security-review` | Keep CI/CD advice advisory and approval-gated. |
 | `state/migration/drafts/skills/claude-api.md` | Deprecated | Executor/provider docs if needed | Replace with provider-neutral executor documentation. |
 | `state/migration/drafts/skills/cloudflare.md` | Review-only | `release-checklist`, managed-project ops docs | Promote only for a project that actually uses Cloudflare. |
 | `state/migration/drafts/skills/odin-control-plane-contract-checks.md` | Review-only, high value | `brownfield-audit`, `architecture-plan`, `pr-review` | Rewrite selected contract checks into current docs/contracts or tests. |
-| `state/migration/drafts/skills/slack-gif-creator.md` | Deprecated | None for Odin core | Archive; not part of Odin-OS orchestration. |
+| `state/migration/archive/skills/slack-gif-creator.md` | Archived | None for Odin core | Archived from `state/migration/drafts/skills/slack-gif-creator.md`; not part of Odin-OS orchestration. |
 | `prompts/templates/agency-builder.md` | Deprecated duplicate | `prompts/workers/agency-builder.md` until prompt contract exists | Keep for provenance; choose one prompt layout in a future ticket. |
 | `internal/agents/roles.go` | Deprecated duplicate role authority | Registry role docs, worker directories, executor `TaskKind` | Reconcile in role-vocabulary ticket before removing. |
 | `src/agents/index.ts` | Deprecated scaffold | Go registry and Go runtime | Remove with TypeScript scaffold cleanup after approval. |
@@ -64,3 +64,15 @@ No skill, agent, prompt, shim, or script should be removed until a separate clea
 4. Reconcile role vocabulary before adding new worker implementations.
 5. Clean TypeScript scaffold only after explicit cleanup approval.
 6. Promote migration drafts one at a time by rewrite, not copy.
+
+## Archived Items
+
+The first cleanup slice archived the non-core content/media migration draft
+group:
+
+- `state/migration/archive/skills/blog-writer.md`
+- `state/migration/archive/skills/brand-ad-generator.md`
+- `state/migration/archive/skills/slack-gif-creator.md`
+
+Rollback path: move the file back to `state/migration/drafts/skills/` and
+restore its previous table entry before promoting or reviewing it.

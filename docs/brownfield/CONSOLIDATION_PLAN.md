@@ -56,7 +56,7 @@ Odin-OS has one active registry skill, one active registry agent, several active
 ### Remove
 
 - TypeScript scaffold under `src/`, `package.json`, `package-lock.json`, `tsconfig.json`, `eslint.config.js`, and TS tests after explicit cleanup approval.
-- Migration drafts that are not relevant to Odin's agency/runtime mission, such as `blog-writer`, `brand-ad-generator`, and `slack-gif-creator`, after approval.
+- Migration drafts that are not relevant to Odin's agency/runtime mission, after approval. The first cleanup slice archived `blog-writer`, `brand-ad-generator`, and `slack-gif-creator` under `state/migration/archive/skills/`.
 - Duplicate legacy backup candidates already marked `archive` in `state/migration/inventory.json`.
 
 ## Target Role Model
