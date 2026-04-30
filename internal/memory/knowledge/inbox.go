@@ -88,11 +88,11 @@ func (s Service) IngestInbox(ctx context.Context, params IngestInboxParams) (Ing
 		return IngestResult{}, err
 	}
 	sourcePath := filepath.Join(inboxPath, name)
-	info, err := os.Stat(sourcePath)
+	info, err := os.Lstat(sourcePath)
 	if err != nil {
 		return IngestResult{}, err
 	}
-	if info.IsDir() {
+	if info.Mode()&os.ModeType != 0 || !info.Mode().IsRegular() {
 		return IngestResult{}, fmt.Errorf("knowledge inbox entry %q is not a regular file", name)
 	}
 

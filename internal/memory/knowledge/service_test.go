@@ -366,6 +366,44 @@ func TestServiceLeavesUnsupportedInboxFileRejectedWithReason(t *testing.T) {
 	}
 }
 
+func TestServiceRejectsSymlinkInboxFile(t *testing.T) {
+	ctx := context.Background()
+	service, _, _ := newTestService(t)
+	inboxPath := service.InboxPath()
+	outsidePath := filepath.Join(t.TempDir(), "outside.txt")
+	if err := os.WriteFile(outsidePath, []byte("outside inbox text\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(outside) error = %v", err)
+	}
+	linkPath := filepath.Join(inboxPath, "outside.txt")
+	if err := os.Symlink(outsidePath, linkPath); err != nil {
+		t.Fatalf("Symlink() error = %v", err)
+	}
+
+	entries, err := service.ListInbox(ctx)
+	if err != nil {
+		t.Fatalf("ListInbox() error = %v", err)
+	}
+	for _, entry := range entries {
+		if entry.Name == "outside.txt" {
+			t.Fatalf("ListInbox() included symlink entry: %+v", entry)
+		}
+	}
+
+	_, err = service.IngestInbox(ctx, IngestInboxParams{
+		Name:       "outside.txt",
+		Scope:      "global",
+		ScopeKey:   "global",
+		Restricted: true,
+		SourceKind: "manual",
+	})
+	if err == nil || !strings.Contains(err.Error(), "not a regular file") {
+		t.Fatalf("IngestInbox() error = %v, want non-regular file rejection", err)
+	}
+	if _, err := os.Stat(outsidePath); err != nil {
+		t.Fatalf("outside target was not preserved: %v", err)
+	}
+}
+
 func TestServiceIngestInboxMovesOCRRequiredPDFToRejectedWithReason(t *testing.T) {
 	ctx := context.Background()
 	service, _, runtimeRoot := newTestService(t)
