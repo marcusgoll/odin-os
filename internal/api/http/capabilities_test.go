@@ -168,6 +168,37 @@ func TestHTTPCapabilityEndpoints(t *testing.T) {
 	}
 }
 
+func TestCapabilitiesHandlerFallsBackForRunsWhenGatewayIsUnavailable(t *testing.T) {
+	t.Parallel()
+
+	fallback := http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodGet || request.URL.Path != "/runs/42" {
+			t.Fatalf("fallback received %s %s, want GET /runs/42", request.Method, request.URL.Path)
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		writer.WriteHeader(http.StatusOK)
+		_, _ = writer.Write([]byte(`{"id":42,"status":"running"}`))
+	})
+	server := httptest.NewServer(httpapi.NewCapabilitiesHandler(httpapi.CapabilitiesDependencies{
+		Fallback: fallback,
+	}))
+	defer server.Close()
+
+	res := mustRequest(t, server, http.MethodGet, "/runs/42", nil)
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("GET /runs/42 status = %d, want %d", res.StatusCode, http.StatusOK)
+	}
+	var response struct {
+		ID     int64  `json:"id"`
+		Status string `json:"status"`
+	}
+	decodeJSON(t, res.Body, &response)
+	if response.ID != 42 || response.Status != "running" {
+		t.Fatalf("fallback run response = %+v, want running run 42", response)
+	}
+}
+
 func TestHTTPCapabilityEndpointsRequireVersionForAmbiguousCapability(t *testing.T) {
 	t.Parallel()
 

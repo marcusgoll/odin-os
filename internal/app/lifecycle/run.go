@@ -136,6 +136,66 @@ type healthLoopDeps struct {
 	RuntimeRoot        string
 }
 
+type serveDashboardAdmin struct {
+	ImmediateNotReady *atomic.Bool
+	RuntimeState      runtimestate.Service
+	BootID            string
+	RuntimeRoot       string
+	Logger            *logs.Logger
+}
+
+func (admin serveDashboardAdmin) KillSwitchOn(ctx context.Context) error {
+	if admin.ImmediateNotReady != nil {
+		admin.ImmediateNotReady.Store(true)
+	}
+	if err := writeReadinessFlag(admin.RuntimeRoot, "dashboard kill switch enabled"); err != nil {
+		logBackgroundError(admin.Logger, "dashboard_admin", err)
+		return err
+	}
+	logBackgroundEvent(admin.Logger, logs.LevelWarn, "dashboard_admin", "kill switch enabled", map[string]any{
+		"source": "dashboard",
+	})
+	if admin.RuntimeState.Store == nil || admin.BootID == "" {
+		return nil
+	}
+	_, err := admin.RuntimeState.MarkDegraded(ctx, runtimestate.TransitionInput{
+		BootID: admin.BootID,
+		Reason: "dashboard kill switch enabled",
+	})
+	if errors.Is(err, runtimestate.ErrRuntimeStateDrainLatched) {
+		return nil
+	}
+	return err
+}
+
+func (admin serveDashboardAdmin) KillSwitchOff(context.Context) error {
+	if admin.ImmediateNotReady != nil {
+		admin.ImmediateNotReady.Store(false)
+	}
+	if err := clearReadinessFlag(admin.RuntimeRoot); err != nil {
+		logBackgroundError(admin.Logger, "dashboard_admin", err)
+		return err
+	}
+	logBackgroundEvent(admin.Logger, logs.LevelInfo, "dashboard_admin", "kill switch disabled", map[string]any{
+		"source": "dashboard",
+	})
+	return nil
+}
+
+func (admin serveDashboardAdmin) PauseIssue(_ context.Context, issueID int64) error {
+	logBackgroundEvent(admin.Logger, logs.LevelWarn, "dashboard_admin", "issue pause requested but not implemented", map[string]any{
+		"external_issue_id": issueID,
+	})
+	return apihttp.ErrAdminActionNotImplemented
+}
+
+func (admin serveDashboardAdmin) ResumeIssue(_ context.Context, issueID int64) error {
+	logBackgroundEvent(admin.Logger, logs.LevelWarn, "dashboard_admin", "issue resume requested but not implemented", map[string]any{
+		"external_issue_id": issueID,
+	})
+	return apihttp.ErrAdminActionNotImplemented
+}
+
 // Run dispatches between the interactive shell and machine-oriented operational commands.
 func Run(ctx context.Context, root string, args []string, stdin io.Reader, stdout io.Writer) error {
 	cfg, err := appconfig.Load(filepath.Join(root, "config", "odin.yaml"), root, runtimeEnv())
@@ -1725,6 +1785,7 @@ func runtimeEnv() map[string]string {
 	return map[string]string{
 		"ODIN_ROOT":         os.Getenv("ODIN_ROOT"),
 		"ODIN_HTTP_ADDR":    os.Getenv("ODIN_HTTP_ADDR"),
+		"ODIN_ADMIN_TOKEN":  os.Getenv("ODIN_ADMIN_TOKEN"),
 		"ODIN_NOW":          os.Getenv("ODIN_NOW"),
 		"ODIN_MEDIA_CONFIG": os.Getenv("ODIN_MEDIA_CONFIG"),
 	}
@@ -2192,6 +2253,14 @@ func runServe(ctx context.Context, app bootstrap.App, cfg appconfig.Config, stdo
 				ReadModels:      app.Store.DB(),
 				RegistryHealthy: healthDeps.RegistryHealthy,
 				Now:             now,
+				AdminToken:      cfg.AdminToken,
+				Admin: serveDashboardAdmin{
+					ImmediateNotReady: &immediateNotReady,
+					RuntimeState:      stateService,
+					BootID:            bootID,
+					RuntimeRoot:       cfg.RuntimeRoot,
+					Logger:            logger,
+				},
 			}),
 		}),
 	}

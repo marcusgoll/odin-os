@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"odin-os/internal/app/bootstrap"
@@ -16,12 +17,78 @@ import (
 	"odin-os/internal/core/capabilities"
 	"odin-os/internal/core/initiatives"
 	"odin-os/internal/runtime/checkpoints"
+	runtimestate "odin-os/internal/runtime/state"
 	"odin-os/internal/runtime/supervision"
 	"odin-os/internal/store/sqlite"
+	"odin-os/internal/telemetry/logs"
 	"odin-os/internal/vcs/worktrees"
 )
 
 const testProjectKey = "alpha-cli"
+
+func TestServeDashboardAdminKillSwitchUpdatesReadinessAndRuntimeState(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	runtimeRoot := t.TempDir()
+	store, err := sqlite.Open(filepath.Join(t.TempDir(), "odin.db"))
+	if err != nil {
+		t.Fatalf("sqlite.Open() error = %v", err)
+	}
+	defer store.Close()
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
+	}
+
+	stateService := runtimestate.Service{Store: store}
+	if _, err := stateService.MarkBooting(ctx, runtimestate.BootInput{BootID: "boot-admin", PID: 1234}); err != nil {
+		t.Fatalf("MarkBooting() error = %v", err)
+	}
+
+	var immediate atomic.Bool
+	var logBuffer bytes.Buffer
+	admin := serveDashboardAdmin{
+		ImmediateNotReady: &immediate,
+		RuntimeState:      stateService,
+		BootID:            "boot-admin",
+		RuntimeRoot:       runtimeRoot,
+		Logger:            &logs.Logger{Writer: &logBuffer},
+	}
+
+	if err := admin.KillSwitchOn(ctx); err != nil {
+		t.Fatalf("KillSwitchOn() error = %v", err)
+	}
+	if !immediate.Load() {
+		t.Fatal("ImmediateNotReady = false, want true after kill switch on")
+	}
+	reason, active, err := readReadinessFlag(runtimeRoot)
+	if err != nil {
+		t.Fatalf("readReadinessFlag() error = %v", err)
+	}
+	if !active || reason != "dashboard kill switch enabled" {
+		t.Fatalf("readiness flag active=%v reason=%q, want dashboard kill switch enabled", active, reason)
+	}
+	runtimeState, err := store.GetRuntimeState(ctx)
+	if err != nil {
+		t.Fatalf("GetRuntimeState() error = %v", err)
+	}
+	if runtimeState.Status != "degraded" || runtimeState.LastError != "dashboard kill switch enabled" {
+		t.Fatalf("runtime state = %+v, want degraded kill switch state", runtimeState)
+	}
+	if !strings.Contains(logBuffer.String(), "kill switch enabled") {
+		t.Fatalf("log output = %q, want kill switch enabled event", logBuffer.String())
+	}
+
+	if err := admin.KillSwitchOff(ctx); err != nil {
+		t.Fatalf("KillSwitchOff() error = %v", err)
+	}
+	if immediate.Load() {
+		t.Fatal("ImmediateNotReady = true, want false after kill switch off")
+	}
+	if _, active, err := readReadinessFlag(runtimeRoot); err != nil || active {
+		t.Fatalf("readiness flag after off active=%v err=%v, want inactive", active, err)
+	}
+}
 
 func TestRunReplStartsInteractiveShell(t *testing.T) {
 	t.Parallel()

@@ -44,6 +44,7 @@ func TestReadyzReturnsHealthyWhenRuntimeIsReady(t *testing.T) {
 	}))
 	defer server.Close()
 
+	assertReportStatus(t, server.URL+"/health", http.StatusOK, "healthy")
 	assertReportStatus(t, server.URL+"/healthz", http.StatusOK, "healthy")
 	assertReportStatus(t, server.URL+"/readyz", http.StatusOK, "healthy")
 
@@ -193,6 +194,172 @@ func TestReadyzFailsClosedWhenMediaProbeCommandFails(t *testing.T) {
 
 	assertReportStatus(t, server.URL+"/healthz", http.StatusOK, "failed")
 	assertReportStatus(t, server.URL+"/readyz", http.StatusServiceUnavailable, "failed")
+}
+
+func TestOperationalHandlerExposesDashboardStatusWithoutSecretsOrTmuxDependency(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openStore(t)
+	defer store.Close()
+
+	seedHealthyObservability(t, ctx, store)
+	seedRuntimeState(t, ctx, store, "ready")
+	seedOperatorReadModels(t, ctx, store)
+
+	const adminToken = "ghp_dashboard_secret_token"
+	server := httptest.NewServer(httpapi.NewOperationalHandler(httpapi.Dependencies{
+		Health: healthsvc.Service{DB: store.DB()},
+		Metrics: metricsvc.Service{
+			DB: store.DB(),
+		},
+		ReadModels:      store.DB(),
+		RegistryHealthy: true,
+		AdminToken:      adminToken,
+	}))
+	defer server.Close()
+
+	response, err := http.Get(server.URL + "/status")
+	if err != nil {
+		t.Fatalf("GET /status error = %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("/status status = %d, want %d", response.StatusCode, http.StatusOK)
+	}
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatalf("ReadAll(/status) error = %v", err)
+	}
+	if strings.Contains(string(body), adminToken) {
+		t.Fatalf("/status leaked admin token in body: %s", string(body))
+	}
+
+	var status struct {
+		HealthStatus string `json:"health_status"`
+		Ready        bool   `json:"ready"`
+		Runtime      struct {
+			Status string `json:"status"`
+		} `json:"runtime"`
+		Counts struct {
+			WorkItems         int `json:"work_items"`
+			ActiveRunAttempts int `json:"active_run_attempts"`
+			PendingApprovals  int `json:"pending_approvals"`
+		} `json:"counts"`
+		Tmux struct {
+			Available bool   `json:"available"`
+			Source    string `json:"source"`
+		} `json:"tmux"`
+	}
+	if err := json.Unmarshal(body, &status); err != nil {
+		t.Fatalf("Unmarshal(/status) error = %v", err)
+	}
+	if status.HealthStatus != "healthy" || !status.Ready || status.Runtime.Status != "ready" {
+		t.Fatalf("/status = %+v, want healthy ready runtime", status)
+	}
+	if status.Counts.WorkItems == 0 || status.Counts.ActiveRunAttempts == 0 || status.Counts.PendingApprovals == 0 {
+		t.Fatalf("/status counts = %+v, want runtime-state-backed counts", status.Counts)
+	}
+	if status.Tmux.Available || status.Tmux.Source != "not_configured" {
+		t.Fatalf("/status tmux = %+v, want absence reported without daemon failure", status.Tmux)
+	}
+}
+
+func TestOperationalHandlerExposesIssuesAndRunsFromRuntimeState(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openStore(t)
+	defer store.Close()
+
+	seedHealthyObservability(t, ctx, store)
+	seedRuntimeState(t, ctx, store, "ready")
+	seedOperatorReadModels(t, ctx, store)
+	seedExternalIssue(t, ctx, store)
+
+	server := httptest.NewServer(httpapi.NewOperationalHandler(httpapi.Dependencies{
+		Health: healthsvc.Service{DB: store.DB()},
+		Metrics: metricsvc.Service{
+			DB: store.DB(),
+		},
+		ReadModels:      store.DB(),
+		RegistryHealthy: true,
+	}))
+	defer server.Close()
+
+	var issues []struct {
+		Provider   string   `json:"provider"`
+		Repo       string   `json:"repo"`
+		Number     int      `json:"number"`
+		Title      string   `json:"title"`
+		Labels     []string `json:"labels"`
+		SyncStatus string   `json:"sync_status"`
+	}
+	decodeURLJSON(t, server.URL+"/issues", &issues)
+	if len(issues) != 1 || issues[0].Repo != "owner/alpha" || issues[0].Number != 42 || issues[0].Labels[0] != "odin:ready" {
+		t.Fatalf("/issues = %+v, want persisted external issue", issues)
+	}
+
+	var runs []projections.RunSummaryView
+	decodeURLJSON(t, server.URL+"/runs", &runs)
+	if len(runs) != 1 || runs[0].Status != "running" {
+		t.Fatalf("/runs = %+v, want one running run", runs)
+	}
+
+	var runDetail struct {
+		ID       int64  `json:"id"`
+		TaskID   int64  `json:"task_id"`
+		Executor string `json:"executor"`
+		Status   string `json:"status"`
+		Attempt  int    `json:"attempt"`
+	}
+	decodeURLJSON(t, fmt.Sprintf("%s/runs/%d", server.URL, runs[0].RunID), &runDetail)
+	if runDetail.ID != runs[0].RunID || runDetail.Executor != "codex" || runDetail.Status != "running" {
+		t.Fatalf("/runs/{id} = %+v, want codex running run", runDetail)
+	}
+}
+
+func TestOperationalHandlerProtectsAdminActions(t *testing.T) {
+	t.Parallel()
+
+	admin := &recordingAdminActions{}
+	server := httptest.NewServer(httpapi.NewOperationalHandler(httpapi.Dependencies{
+		Health:          healthsvc.Service{},
+		RegistryHealthy: true,
+		AdminToken:      "dashboard-secret",
+		Admin:           admin,
+	}))
+	defer server.Close()
+
+	res := mustPost(t, server.URL+"/kill-switch/on", "")
+	if res.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("POST /kill-switch/on without token status = %d, want %d", res.StatusCode, http.StatusUnauthorized)
+	}
+	res.Body.Close()
+
+	res = mustPost(t, server.URL+"/kill-switch/on", "wrong-token")
+	if res.StatusCode != http.StatusForbidden {
+		t.Fatalf("POST /kill-switch/on wrong token status = %d, want %d", res.StatusCode, http.StatusForbidden)
+	}
+	res.Body.Close()
+
+	res = mustPost(t, server.URL+"/kill-switch/on", "dashboard-secret")
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("POST /kill-switch/on status = %d, want %d", res.StatusCode, http.StatusOK)
+	}
+	res.Body.Close()
+	if admin.killSwitchOnCalls != 1 {
+		t.Fatalf("KillSwitchOn calls = %d, want 1", admin.killSwitchOnCalls)
+	}
+
+	res = mustPost(t, server.URL+"/issues/42/pause", "dashboard-secret")
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("POST /issues/42/pause status = %d, want %d", res.StatusCode, http.StatusOK)
+	}
+	res.Body.Close()
+	if admin.pauseIssueID != 42 {
+		t.Fatalf("PauseIssue issue id = %d, want 42", admin.pauseIssueID)
+	}
 }
 
 func TestOperationalHandlerExposesWorkspaceInitiativeCompanionAndBlockedReadModels(t *testing.T) {
@@ -362,6 +529,46 @@ func TestOperationalHandlerExposesDefaultWorkspaceMemoryReadModels(t *testing.T)
 	}
 }
 
+type recordingAdminActions struct {
+	killSwitchOnCalls int
+	pauseIssueID      int64
+}
+
+func (admin *recordingAdminActions) KillSwitchOn(context.Context) error {
+	admin.killSwitchOnCalls++
+	return nil
+}
+
+func (admin *recordingAdminActions) KillSwitchOff(context.Context) error {
+	return nil
+}
+
+func (admin *recordingAdminActions) PauseIssue(_ context.Context, issueID int64) error {
+	admin.pauseIssueID = issueID
+	return nil
+}
+
+func (admin *recordingAdminActions) ResumeIssue(context.Context, int64) error {
+	return nil
+}
+
+func mustPost(t *testing.T, url string, token string) *http.Response {
+	t.Helper()
+
+	request, err := http.NewRequest(http.MethodPost, url, nil)
+	if err != nil {
+		t.Fatalf("NewRequest(%s) error = %v", url, err)
+	}
+	if token != "" {
+		request.Header.Set("Authorization", "Bearer "+token)
+	}
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatalf("POST %s error = %v", url, err)
+	}
+	return response
+}
+
 func openStore(t *testing.T) *sqlite.Store {
 	t.Helper()
 
@@ -373,6 +580,29 @@ func openStore(t *testing.T) *sqlite.Store {
 		t.Fatalf("Migrate() error = %v", err)
 	}
 	return store
+}
+
+func seedExternalIssue(t *testing.T, ctx context.Context, store *sqlite.Store) {
+	t.Helper()
+
+	project, err := store.GetProjectByKey(ctx, "alpha")
+	if err != nil {
+		t.Fatalf("GetProjectByKey(alpha) error = %v", err)
+	}
+	if _, err := store.UpsertExternalIssue(ctx, sqlite.UpsertExternalIssueParams{
+		ProjectID:  project.ID,
+		Provider:   "github",
+		Repo:       "owner/alpha",
+		Number:     42,
+		Title:      "Wire dashboard status",
+		BodyHash:   "sha256:test",
+		URL:        "https://github.com/owner/alpha/issues/42",
+		State:      "open",
+		LabelsJSON: `["odin:ready","agent:backend"]`,
+		SyncStatus: "eligible",
+	}); err != nil {
+		t.Fatalf("UpsertExternalIssue() error = %v", err)
+	}
 }
 
 func seedHealthyObservability(t *testing.T, ctx context.Context, store *sqlite.Store) {

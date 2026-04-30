@@ -35,6 +35,9 @@ service:
 	if cfg.Service.HTTPAddr != "127.0.0.1:9443" {
 		t.Fatalf("Service.HTTPAddr = %q, want %q", cfg.Service.HTTPAddr, "127.0.0.1:9443")
 	}
+	if cfg.Service.AdminTokenEnv != "ODIN_ADMIN_TOKEN" {
+		t.Fatalf("Service.AdminTokenEnv = %q, want ODIN_ADMIN_TOKEN", cfg.Service.AdminTokenEnv)
+	}
 	if !cfg.Service.StartupRecovery {
 		t.Fatalf("Service.StartupRecovery = false, want true")
 	}
@@ -55,8 +58,9 @@ service:
 `)
 
 	cfg, err := Load(path, repoRoot, map[string]string{
-		"ODIN_ROOT":      "/var/odin",
-		"ODIN_HTTP_ADDR": "0.0.0.0:9000",
+		"ODIN_ROOT":        "/var/odin",
+		"ODIN_HTTP_ADDR":   "0.0.0.0:9000",
+		"ODIN_ADMIN_TOKEN": "local-admin-token",
 	})
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
@@ -70,6 +74,9 @@ service:
 	}
 	if cfg.Service.StartupRecovery {
 		t.Fatalf("Service.StartupRecovery = true, want false")
+	}
+	if cfg.AdminToken != "local-admin-token" {
+		t.Fatalf("AdminToken = %q, want environment token", cfg.AdminToken)
 	}
 }
 

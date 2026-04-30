@@ -125,6 +125,10 @@ func NewCapabilitiesHandler(deps CapabilitiesDependencies) http.Handler {
 
 	mux.HandleFunc("GET /runs/{run_id}", func(writer http.ResponseWriter, request *http.Request) {
 		if deps.Gateway == nil {
+			if deps.Fallback != nil {
+				deps.Fallback.ServeHTTP(writer, request)
+				return
+			}
 			writeAPIError(writer, http.StatusServiceUnavailable, "gateway_unavailable", "capability gateway is unavailable")
 			return
 		}
