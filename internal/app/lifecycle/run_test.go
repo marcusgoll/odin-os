@@ -50,6 +50,7 @@ func TestRunWorkStatusShowsDeliveryWorkflowState(t *testing.T) {
 		"pending_approvals=0",
 		"delivery_profiles=0",
 		"dispatch=not_implemented",
+		"intake=manual_read_only",
 	} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("Run(work status) output = %q, want %q", output, want)

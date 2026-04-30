@@ -15,6 +15,23 @@ type Project struct {
 	UpdatedAt     time.Time
 }
 
+type ExternalIssue struct {
+	ID           int64
+	ProjectID    int64
+	Provider     string
+	Repo         string
+	Number       int
+	Title        string
+	BodyHash     string
+	URL          string
+	State        string
+	LabelsJSON   string
+	SyncStatus   string
+	LastSyncedAt time.Time
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
+}
+
 type CreateProjectParams struct {
 	Key           string
 	Name          string
@@ -23,6 +40,25 @@ type CreateProjectParams struct {
 	DefaultBranch string
 	GitHubRepo    string
 	ManifestPath  string
+}
+
+type UpsertExternalIssueParams struct {
+	ProjectID  int64
+	Provider   string
+	Repo       string
+	Number     int
+	Title      string
+	BodyHash   string
+	URL        string
+	State      string
+	LabelsJSON string
+	SyncStatus string
+}
+
+type ListExternalIssuesParams struct {
+	Repo       string
+	SyncStatus string
+	ProjectID  *int64
 }
 
 type Task struct {

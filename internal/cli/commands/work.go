@@ -13,9 +13,13 @@ import (
 	"odin-os/internal/runtime/jobs"
 	"odin-os/internal/runtime/projections"
 	"odin-os/internal/store/sqlite"
+	"odin-os/internal/tracker"
+	trackerintake "odin-os/internal/tracker/intake"
 )
 
-const workUsage = "usage: odin work status|profiles|start --project <key> --title <text>"
+const workUsage = "usage: odin work status|profiles|start --project <key> --title <text>|intake --project <key> [--dry-run]"
+
+var newIntakeTracker = trackerintake.NewGitHubTracker
 
 func RunWork(ctx context.Context, store *sqlite.Store, projectRegistry projects.Registry, snapshot registry.Snapshot, args []string, stdout io.Writer) error {
 	if len(args) == 0 || args[0] == "help" || args[0] == "--help" {
@@ -30,6 +34,8 @@ func RunWork(ctx context.Context, store *sqlite.Store, projectRegistry projects.
 		return runWorkProfiles(snapshot, stdout)
 	case "start":
 		return runWorkStart(ctx, store, projectRegistry, args[1:], stdout)
+	case "intake":
+		return runWorkIntake(ctx, store, projectRegistry, args[1:], stdout)
 	default:
 		_, err := fmt.Fprintf(stdout, "unknown work command: %s\n%s\n", args[0], workUsage)
 		return err
@@ -66,7 +72,7 @@ func runWorkStatus(ctx context.Context, store *sqlite.Store, snapshot registry.S
 
 	_, err = fmt.Fprintf(
 		stdout,
-		"work_items=%d open_work_items=%d active_run_attempts=%d pending_approvals=%d delivery_profiles=%d dispatch=not_implemented intake=not_implemented\n",
+		"work_items=%d open_work_items=%d active_run_attempts=%d pending_approvals=%d delivery_profiles=%d dispatch=not_implemented intake=manual_read_only\n",
 		len(taskViews),
 		openWorkItems,
 		activeRunAttempts,
@@ -124,12 +130,50 @@ func runWorkStart(ctx context.Context, store *sqlite.Store, projectRegistry proj
 	return err
 }
 
+func runWorkIntake(ctx context.Context, store *sqlite.Store, projectRegistry projects.Registry, args []string, stdout io.Writer) error {
+	params := parseWorkStartArgs(args)
+	projectKey := strings.TrimSpace(params["project"])
+	if projectKey == "" {
+		_, err := fmt.Fprintln(stdout, "usage: odin work intake --project <key> [--dry-run]")
+		return err
+	}
+
+	summary, err := trackerintake.Service{
+		Store:    store,
+		Registry: projectRegistry,
+		NewTracker: func(project projects.Manifest, options trackerintake.SyncOptions) (tracker.Tracker, error) {
+			return newIntakeTracker(project, options)
+		},
+	}.SyncProject(ctx, trackerintake.SyncOptions{
+		ProjectKey: projectKey,
+		DryRun:     parseBoolFlag(params, "dry-run"),
+	})
+	if err != nil {
+		return err
+	}
+
+	_, err = fmt.Fprintf(
+		stdout,
+		"project=%s repo=%s fetched=%d persisted=%d dry_run=%t dispatch=not_started prs=not_created\n",
+		summary.ProjectKey,
+		summary.Repo,
+		summary.Fetched,
+		summary.Persisted,
+		summary.DryRun,
+	)
+	return err
+}
+
 func parseWorkStartArgs(args []string) map[string]string {
 	values := make(map[string]string)
 	for index := 0; index < len(args); index++ {
 		arg := args[index]
 		if strings.HasPrefix(arg, "--") {
 			key := strings.TrimPrefix(arg, "--")
+			if next := index + 1; next >= len(args) || strings.HasPrefix(args[next], "--") {
+				values[key] = "true"
+				continue
+			}
 			if next := index + 1; next < len(args) {
 				values[key] = args[next]
 				index = next
@@ -141,6 +185,11 @@ func parseWorkStartArgs(args []string) map[string]string {
 		}
 	}
 	return values
+}
+
+func parseBoolFlag(values map[string]string, key string) bool {
+	value := strings.ToLower(strings.TrimSpace(values[key]))
+	return value == "true" || value == "1" || value == "yes"
 }
 
 func deliveryProfiles(snapshot registry.Snapshot) []registry.Item {

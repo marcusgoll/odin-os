@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
+	"strings"
 )
 
 type Adapter struct{}
@@ -29,6 +30,15 @@ func (Adapter) AddWorktree(ctx context.Context, repoRoot string, worktreePath st
 
 func (Adapter) RemoveWorktree(ctx context.Context, repoRoot string, worktreePath string) error {
 	return runGit(ctx, repoRoot, "worktree", "remove", "--force", worktreePath)
+}
+
+func (Adapter) WorktreeDirty(ctx context.Context, worktreePath string) (bool, error) {
+	cmd := exec.CommandContext(ctx, "git", "-C", worktreePath, "status", "--porcelain")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return false, fmt.Errorf("git status --porcelain: %w: %s", err, string(output))
+	}
+	return strings.TrimSpace(string(output)) != "", nil
 }
 
 func runGit(ctx context.Context, repoRoot string, args ...string) error {

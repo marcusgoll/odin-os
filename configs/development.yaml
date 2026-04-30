@@ -1,0 +1,10 @@
+version: 1
+runtime:
+  dry_run: true
+  kill_switch: false
+  workspace_root: workspaces
+  log_dir: logs
+logging:
+  level: debug
+github:
+  token_env: GITHUB_TOKEN

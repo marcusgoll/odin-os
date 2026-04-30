@@ -47,6 +47,31 @@ func TestNextTryIncrementsRetrySuffix(t *testing.T) {
 	}
 }
 
+func TestNameDefaultsEmptyProjectAndTryToStableValues(t *testing.T) {
+	t.Parallel()
+
+	name := Name(NameParams{
+		ProjectKey: " ??? ",
+		TaskID:     42,
+		RunID:      9,
+		Try:        0,
+	})
+
+	want := "odin/project/task-42/run-9/try-1"
+	if name != want {
+		t.Fatalf("Name() = %q, want %q", name, want)
+	}
+}
+
+func TestNextTryLeavesBranchesWithoutTrySuffixUnchanged(t *testing.T) {
+	t.Parallel()
+
+	branch := "odin/cfipros/task-42/run-9"
+	if next := NextTry(branch); next != branch {
+		t.Fatalf("NextTry() = %q, want unchanged %q", next, branch)
+	}
+}
+
 func contains(value string, needle string) bool {
 	return len(needle) > 0 && len(value) > 0 && stringIndex(value, needle) >= 0
 }

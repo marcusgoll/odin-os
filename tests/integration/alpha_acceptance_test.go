@@ -43,7 +43,7 @@ func TestAlphaAcceptance(t *testing.T) {
 	ctx := context.Background()
 	repoRoot := projectRoot(t)
 	odinBinary := buildOdinBinary(t, repoRoot)
-	now := time.Date(2026, 4, 9, 23, 0, 0, 0, time.UTC)
+	now := time.Now().UTC()
 
 	t.Run("repo structure matches canonical layout", func(t *testing.T) {
 		required := []string{
@@ -460,8 +460,9 @@ func TestAlphaAcceptance(t *testing.T) {
 		}
 
 		cleanupResult, err := worktreemgr.Manager{
-			Store: store,
-			Git:   gitadapter.Adapter{},
+			Store:        store,
+			Git:          gitadapter.Adapter{},
+			WorktreeRoot: leaseManager.WorktreeRoot,
 		}.Cleanup(ctx, time.Now().Add(time.Minute))
 		if err != nil {
 			t.Fatalf("Cleanup() error = %v", err)

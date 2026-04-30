@@ -1,6 +1,12 @@
 /bin/
 /.worktrees/
 /odin
+/odin-os
+/node_modules/
+/.codex-runs/
+/logs/
+/workspaces/
+/coverage/
 /data/*.db
 /runs/logs/*
 !/runs/logs/.gitkeep

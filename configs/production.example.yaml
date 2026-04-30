@@ -1,0 +1,15 @@
+version: 1
+runtime:
+  dry_run: true
+  kill_switch: true
+  workspace_root: /var/lib/odin-os/workspaces
+  log_dir: /var/log/odin-os
+logging:
+  level: info
+github:
+  # Set this in the service environment. Do not put tokens in this file.
+  token_env: GITHUB_TOKEN
+runners:
+  codex_exec:
+    command: codex
+    sandbox_mode: workspace-write

@@ -4,12 +4,14 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"odin-os/internal/cli/scope"
 	"odin-os/internal/core/projects"
 	"odin-os/internal/executors/router"
+	"odin-os/internal/prompts"
 	"odin-os/internal/store/sqlite"
 	"odin-os/internal/vcs/leases"
 )
@@ -219,6 +221,76 @@ func TestExecuteNextQueuedRejectsShadowModeMutation(t *testing.T) {
 	}
 	if gotTask.Status != "failed" {
 		t.Fatalf("GetTask().Status = %q, want failed", gotTask.Status)
+	}
+}
+
+func TestExecuteNextQueuedBlocksPromptDispatchWithoutAcceptanceCriteria(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openJobStore(t)
+	defer store.Close()
+
+	registry := writeRegistry(t)
+	service := Service{
+		Store:              store,
+		Registry:           registry,
+		Executors:          router.DefaultCatalog(),
+		ExecutorConfig:     mustLoadExecutorConfig(t),
+		PromptRenderer:     prompts.FileRenderer{Root: filepath.Join("..", "..", "..", "prompts", "workers")},
+		PromptTemplateName: "go-orchestrator",
+		Transitions:        projects.Service{Store: store},
+		Leases: leases.Manager{
+			Store:        store,
+			Git:          &jobTestGit{},
+			WorktreeRoot: t.TempDir(),
+		},
+		Now: time.Now,
+	}
+
+	task, err := service.CreateTaskFromAct(ctx, scope.Resolution{
+		Kind:       scope.ScopeProject,
+		ProjectKey: "alpha",
+	}, "Blocked missing acceptance criteria")
+	if err != nil {
+		t.Fatalf("CreateTaskFromAct() error = %v", err)
+	}
+
+	project, err := store.GetProjectByKey(ctx, "alpha")
+	if err != nil {
+		t.Fatalf("GetProjectByKey(alpha) error = %v", err)
+	}
+	if _, err := service.Transitions.SetTransitionState(ctx, projects.TransitionStateInput{
+		ProjectID:   project.ID,
+		Actor:       projects.TransitionControllerOdinOS,
+		TargetState: projects.TransitionStateCutover,
+		ChangedBy:   "test",
+	}); err != nil {
+		t.Fatalf("SetTransitionState(cutover) error = %v", err)
+	}
+
+	err = service.ExecuteNextQueued(ctx)
+	if err == nil {
+		t.Fatalf("ExecuteNextQueued() error = nil, want missing acceptance criteria")
+	}
+	if !strings.Contains(err.Error(), "acceptance criteria") {
+		t.Fatalf("ExecuteNextQueued() error = %v, want acceptance criteria blocker", err)
+	}
+
+	gotTask, err := store.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
+	}
+	if gotTask.Status != "failed" {
+		t.Fatalf("GetTask().Status = %q, want failed", gotTask.Status)
+	}
+
+	run, err := latestRunForTask(ctx, store, task.ID)
+	if err != nil {
+		t.Fatalf("latestRunForTask() error = %v", err)
+	}
+	if run.Status != "failed" || !strings.Contains(run.Summary, "acceptance criteria") {
+		t.Fatalf("run = %+v, want failed prompt readiness blocker", run)
 	}
 }
 

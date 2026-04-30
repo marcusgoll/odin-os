@@ -2,6 +2,7 @@ package worktrees
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -36,7 +37,7 @@ func TestManagerCleanupRemovesReleasedLeaseDeterministically(t *testing.T) {
 	}
 
 	git := &cleanupGit{}
-	manager := Manager{Store: store, Git: git}
+	manager := Manager{Store: store, Git: git, WorktreeRoot: "/var/tmp/odin-worktrees"}
 
 	result, err := manager.Cleanup(ctx, time.Now().UTC().Add(-30*time.Minute))
 	if err != nil {
@@ -81,7 +82,7 @@ func TestManagerCleanupPreservesActiveLease(t *testing.T) {
 	}
 
 	git := &cleanupGit{}
-	manager := Manager{Store: store, Git: git}
+	manager := Manager{Store: store, Git: git, WorktreeRoot: "/var/tmp/odin-worktrees"}
 
 	result, err := manager.Cleanup(ctx, time.Now().UTC().Add(-30*time.Minute))
 	if err != nil {
@@ -100,6 +101,159 @@ func TestManagerCleanupPreservesActiveLease(t *testing.T) {
 	}
 	if updated.CleanedUpAt != nil {
 		t.Fatalf("GetWorktreeLease().CleanedUpAt = %v, want nil", updated.CleanedUpAt)
+	}
+}
+
+func TestManagerCleanupRejectsLeaseOutsideWorkspaceRoot(t *testing.T) {
+	ctx := context.Background()
+	store, project, task, run := openCleanupStore(t)
+	defer store.Close()
+
+	lease, err := store.CreateWorktreeLease(ctx, sqlite.CreateWorktreeLeaseParams{
+		ProjectID:    project.ID,
+		TaskID:       task.ID,
+		RunID:        run.ID,
+		Mode:         "mutable",
+		BranchName:   "odin/cfipros/task-1/run-1/try-1",
+		WorktreePath: "/var/tmp/not-odin-worktrees/cfipros/task-1/run-1/try-1",
+		RepoRoot:     project.GitRoot,
+		State:        "active",
+	})
+	if err != nil {
+		t.Fatalf("CreateWorktreeLease() error = %v", err)
+	}
+	if _, err := store.ReleaseWorktreeLease(ctx, sqlite.ReleaseWorktreeLeaseParams{
+		LeaseID: lease.ID,
+		State:   "released",
+	}); err != nil {
+		t.Fatalf("ReleaseWorktreeLease() error = %v", err)
+	}
+
+	git := &cleanupGit{}
+	manager := Manager{Store: store, Git: git, WorktreeRoot: "/var/tmp/odin-worktrees"}
+
+	if _, err := manager.Cleanup(ctx, time.Now().UTC().Add(-30*time.Minute)); err == nil {
+		t.Fatalf("Cleanup() error = nil, want workspace boundary rejection")
+	}
+	if git.removeCalls != 0 {
+		t.Fatalf("git remove calls = %d, want 0", git.removeCalls)
+	}
+}
+
+func TestManagerCleanupRejectsTraversalOutsideWorkspaceRoot(t *testing.T) {
+	ctx := context.Background()
+	store, project, task, run := openCleanupStore(t)
+	defer store.Close()
+
+	root := "/var/tmp/odin-worktrees"
+	lease, err := store.CreateWorktreeLease(ctx, sqlite.CreateWorktreeLeaseParams{
+		ProjectID:    project.ID,
+		TaskID:       task.ID,
+		RunID:        run.ID,
+		Mode:         "mutable",
+		BranchName:   "odin/cfipros/task-1/run-1/try-1",
+		WorktreePath: "/var/tmp/odin-worktrees/../outside/task-1",
+		RepoRoot:     project.GitRoot,
+		State:        "active",
+	})
+	if err != nil {
+		t.Fatalf("CreateWorktreeLease() error = %v", err)
+	}
+	if _, err := store.ReleaseWorktreeLease(ctx, sqlite.ReleaseWorktreeLeaseParams{
+		LeaseID: lease.ID,
+		State:   "released",
+	}); err != nil {
+		t.Fatalf("ReleaseWorktreeLease() error = %v", err)
+	}
+
+	git := &cleanupGit{}
+	manager := Manager{Store: store, Git: git, WorktreeRoot: root}
+
+	if _, err := manager.Cleanup(ctx, time.Now().UTC().Add(-30*time.Minute)); err == nil {
+		t.Fatalf("Cleanup() error = nil, want traversal rejection")
+	}
+	if git.removeCalls != 0 {
+		t.Fatalf("git remove calls = %d, want 0", git.removeCalls)
+	}
+}
+
+func TestManagerCleanupRejectsSymlinkEscapeFromWorkspaceRoot(t *testing.T) {
+	ctx := context.Background()
+	store, project, task, run := openCleanupStore(t)
+	defer store.Close()
+
+	root := t.TempDir()
+	outside := t.TempDir()
+	linkPath := filepath.Join(root, "link-outside")
+	if err := os.Symlink(outside, linkPath); err != nil {
+		t.Fatalf("Symlink() error = %v", err)
+	}
+
+	lease, err := store.CreateWorktreeLease(ctx, sqlite.CreateWorktreeLeaseParams{
+		ProjectID:    project.ID,
+		TaskID:       task.ID,
+		RunID:        run.ID,
+		Mode:         "mutable",
+		BranchName:   "odin/cfipros/task-1/run-1/try-1",
+		WorktreePath: linkPath,
+		RepoRoot:     project.GitRoot,
+		State:        "active",
+	})
+	if err != nil {
+		t.Fatalf("CreateWorktreeLease() error = %v", err)
+	}
+	if _, err := store.ReleaseWorktreeLease(ctx, sqlite.ReleaseWorktreeLeaseParams{
+		LeaseID: lease.ID,
+		State:   "released",
+	}); err != nil {
+		t.Fatalf("ReleaseWorktreeLease() error = %v", err)
+	}
+
+	git := &cleanupGit{}
+	manager := Manager{Store: store, Git: git, WorktreeRoot: root}
+
+	if _, err := manager.Cleanup(ctx, time.Now().UTC().Add(-30*time.Minute)); err == nil {
+		t.Fatalf("Cleanup() error = nil, want symlink escape rejection")
+	}
+	if git.removeCalls != 0 {
+		t.Fatalf("git remove calls = %d, want 0", git.removeCalls)
+	}
+}
+
+func TestManagerCleanupRejectsWorkspaceRootItself(t *testing.T) {
+	ctx := context.Background()
+	store, project, task, run := openCleanupStore(t)
+	defer store.Close()
+
+	root := "/var/tmp/odin-worktrees"
+	lease, err := store.CreateWorktreeLease(ctx, sqlite.CreateWorktreeLeaseParams{
+		ProjectID:    project.ID,
+		TaskID:       task.ID,
+		RunID:        run.ID,
+		Mode:         "mutable",
+		BranchName:   "odin/cfipros/task-1/run-1/try-1",
+		WorktreePath: root,
+		RepoRoot:     project.GitRoot,
+		State:        "active",
+	})
+	if err != nil {
+		t.Fatalf("CreateWorktreeLease() error = %v", err)
+	}
+	if _, err := store.ReleaseWorktreeLease(ctx, sqlite.ReleaseWorktreeLeaseParams{
+		LeaseID: lease.ID,
+		State:   "released",
+	}); err != nil {
+		t.Fatalf("ReleaseWorktreeLease() error = %v", err)
+	}
+
+	git := &cleanupGit{}
+	manager := Manager{Store: store, Git: git, WorktreeRoot: root}
+
+	if _, err := manager.Cleanup(ctx, time.Now().UTC().Add(-30*time.Minute)); err == nil {
+		t.Fatalf("Cleanup() error = nil, want root deletion rejection")
+	}
+	if git.removeCalls != 0 {
+		t.Fatalf("git remove calls = %d, want 0", git.removeCalls)
 	}
 }
 

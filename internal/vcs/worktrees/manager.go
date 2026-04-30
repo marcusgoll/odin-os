@@ -3,6 +3,8 @@ package worktrees
 import (
 	"context"
 	"fmt"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"odin-os/internal/store/sqlite"
@@ -13,8 +15,9 @@ type Git interface {
 }
 
 type Manager struct {
-	Store *sqlite.Store
-	Git   Git
+	Store        *sqlite.Store
+	Git          Git
+	WorktreeRoot string
 }
 
 type CleanupResult struct {
@@ -28,6 +31,10 @@ func (manager Manager) Cleanup(ctx context.Context, staleBefore time.Time) (Clea
 	if manager.Git == nil {
 		return CleanupResult{}, fmt.Errorf("cleanup git adapter is required")
 	}
+	root, err := cleanupRoot(manager.WorktreeRoot)
+	if err != nil {
+		return CleanupResult{}, err
+	}
 
 	leases, err := manager.Store.ListCleanupEligibleWorktreeLeases(ctx, staleBefore)
 	if err != nil {
@@ -36,6 +43,9 @@ func (manager Manager) Cleanup(ctx context.Context, staleBefore time.Time) (Clea
 
 	result := CleanupResult{}
 	for _, lease := range leases {
+		if err := validateCleanupPath(root, lease.WorktreePath); err != nil {
+			return CleanupResult{}, err
+		}
 		if err := manager.Git.RemoveWorktree(ctx, lease.RepoRoot, lease.WorktreePath); err != nil {
 			return CleanupResult{}, err
 		}
@@ -47,4 +57,70 @@ func (manager Manager) Cleanup(ctx context.Context, staleBefore time.Time) (Clea
 	}
 
 	return result, nil
+}
+
+func cleanupRoot(root string) (string, error) {
+	root = strings.TrimSpace(expandHome(root))
+	if root == "" {
+		return "", fmt.Errorf("cleanup worktree root is required")
+	}
+	cleaned, err := absoluteCleanPath(root)
+	if err != nil {
+		return "", err
+	}
+	if !filepath.IsAbs(cleaned) {
+		return "", fmt.Errorf("cleanup worktree root must be absolute: %q", root)
+	}
+	if cleaned == string(filepath.Separator) {
+		return "", fmt.Errorf("cleanup worktree root cannot be filesystem root")
+	}
+	return cleaned, nil
+}
+
+func validateCleanupPath(root string, path string) error {
+	path = strings.TrimSpace(expandHome(path))
+	if path == "" {
+		return fmt.Errorf("cleanup worktree path is required")
+	}
+	cleaned, err := absoluteCleanPath(path)
+	if err != nil {
+		return err
+	}
+	if err := validatePathWithinRoot(root, cleaned); err != nil {
+		return err
+	}
+
+	resolvedRoot := resolveExistingPath(root)
+	resolvedPath := resolveExistingPath(cleaned)
+	return validatePathWithinRoot(resolvedRoot, resolvedPath)
+}
+
+func absoluteCleanPath(path string) (string, error) {
+	cleaned := filepath.Clean(path)
+	if filepath.IsAbs(cleaned) {
+		return cleaned, nil
+	}
+	return filepath.Abs(cleaned)
+}
+
+func resolveExistingPath(path string) string {
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return path
+	}
+	return filepath.Clean(resolved)
+}
+
+func validatePathWithinRoot(root string, path string) error {
+	relative, err := filepath.Rel(root, path)
+	if err != nil {
+		return err
+	}
+	if relative == "." {
+		return fmt.Errorf("refusing to cleanup workspace root %q", root)
+	}
+	if relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("refusing to cleanup worktree outside workspace root: %q", path)
+	}
+	return nil
 }

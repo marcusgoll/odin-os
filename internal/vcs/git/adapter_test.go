@@ -45,6 +45,40 @@ func TestAdapterCreatesAndRemovesWorktree(t *testing.T) {
 	}
 }
 
+func TestAdapterDetectsDirtyWorktree(t *testing.T) {
+	ctx := context.Background()
+	repoRoot := initTempRepo(t)
+	worktreePath := filepath.Join(t.TempDir(), "wt")
+	adapter := Adapter{}
+
+	if err := adapter.CreateBranch(ctx, repoRoot, "odin/test/task-1/run-1/try-1", "main"); err != nil {
+		t.Fatalf("CreateBranch() error = %v", err)
+	}
+	if err := adapter.AddWorktree(ctx, repoRoot, worktreePath, "odin/test/task-1/run-1/try-1"); err != nil {
+		t.Fatalf("AddWorktree() error = %v", err)
+	}
+
+	dirty, err := adapter.WorktreeDirty(ctx, worktreePath)
+	if err != nil {
+		t.Fatalf("WorktreeDirty(clean) error = %v", err)
+	}
+	if dirty {
+		t.Fatalf("WorktreeDirty(clean) = true, want false")
+	}
+
+	if err := os.WriteFile(filepath.Join(worktreePath, "untracked.txt"), []byte("dirty\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(untracked) error = %v", err)
+	}
+
+	dirty, err = adapter.WorktreeDirty(ctx, worktreePath)
+	if err != nil {
+		t.Fatalf("WorktreeDirty(dirty) error = %v", err)
+	}
+	if !dirty {
+		t.Fatalf("WorktreeDirty(dirty) = false, want true")
+	}
+}
+
 func initTempRepo(t *testing.T) string {
 	t.Helper()
 	ctx := context.Background()

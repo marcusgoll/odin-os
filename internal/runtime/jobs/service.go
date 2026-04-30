@@ -11,19 +11,22 @@ import (
 	"odin-os/internal/core/projects"
 	"odin-os/internal/executors/contract"
 	executorrouter "odin-os/internal/executors/router"
+	"odin-os/internal/prompts"
 	"odin-os/internal/runtime/projections"
 	"odin-os/internal/store/sqlite"
 	"odin-os/internal/vcs/leases"
 )
 
 type Service struct {
-	Store          *sqlite.Store
-	Registry       projects.Registry
-	Executors      map[string]contract.Executor
-	ExecutorConfig executorrouter.Config
-	Transitions    projects.Service
-	Leases         leases.Manager
-	Now            func() time.Time
+	Store              *sqlite.Store
+	Registry           projects.Registry
+	Executors          map[string]contract.Executor
+	ExecutorConfig     executorrouter.Config
+	PromptRenderer     prompts.Renderer
+	PromptTemplateName string
+	Transitions        projects.Service
+	Leases             leases.Manager
+	Now                func() time.Time
 }
 
 func (service Service) List(ctx context.Context, resolved scope.Resolution) ([]projections.TaskStatusView, error) {
@@ -216,6 +219,14 @@ func (service Service) ExecuteNextQueued(ctx context.Context) error {
 	spec.Metadata["branch_name"] = assignment.BranchName
 	spec.Metadata["repo_root"] = assignment.RepoRoot
 	spec.Metadata["worktree_path"] = assignment.WorktreePath
+	if service.PromptRenderer != nil {
+		renderedPrompt, err := service.renderPrompt(ctx, spec, task)
+		if err != nil {
+			return finishFailure(err)
+		}
+		spec.Prompt = renderedPrompt
+		spec.Metadata["prompt_size_bytes"] = fmt.Sprintf("%d", prompts.PromptSizeBytes(renderedPrompt))
+	}
 
 	executor := executors[decision.ExecutorKey]
 	result, err := executor.RunTask(ctx, spec)
@@ -247,6 +258,20 @@ func (service Service) ExecuteNextQueued(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+func (service Service) renderPrompt(ctx context.Context, spec contract.TaskSpec, task sqlite.Task) (string, error) {
+	templateName := strings.TrimSpace(service.PromptTemplateName)
+	if templateName == "" {
+		templateName = string(spec.Kind)
+	}
+	return service.PromptRenderer.Render(ctx, templateName, prompts.TemplateData{
+		WorkItemID:         task.Key,
+		Role:               templateName,
+		Title:              task.Title,
+		AcceptanceCriteria: acceptanceCriteriaFromMetadata(spec.Metadata["acceptance_criteria"]),
+		Metadata:           spec.Metadata,
+	})
 }
 
 func (service Service) ensureRuntimeProject(ctx context.Context, manifest projects.Manifest) (sqlite.Project, error) {
@@ -372,6 +397,22 @@ func normalizeRouteName(targetKey string) string {
 		return "default"
 	}
 	return targetKey
+}
+
+func acceptanceCriteriaFromMetadata(value string) []string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil
+	}
+	raw := strings.Split(value, "\n")
+	criteria := make([]string, 0, len(raw))
+	for _, criterion := range raw {
+		criterion = strings.TrimSpace(strings.TrimPrefix(criterion, "-"))
+		if criterion != "" {
+			criteria = append(criteria, criterion)
+		}
+	}
+	return criteria
 }
 
 func authorizeMutation(manifest projects.Manifest) error {

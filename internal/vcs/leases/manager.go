@@ -17,6 +17,10 @@ type Git interface {
 	RemoveWorktree(context.Context, string, string) error
 }
 
+type WorkspaceManager interface {
+	Prepare(context.Context, Request) (Assignment, error)
+}
+
 type Manager struct {
 	Store        *sqlite.Store
 	Git          Git
