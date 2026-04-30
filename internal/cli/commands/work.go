@@ -7,14 +7,17 @@ import (
 	"sort"
 	"strings"
 
+	"odin-os/internal/cli/scope"
+	"odin-os/internal/core/projects"
 	"odin-os/internal/registry"
+	"odin-os/internal/runtime/jobs"
 	"odin-os/internal/runtime/projections"
 	"odin-os/internal/store/sqlite"
 )
 
-const workUsage = "usage: odin work status|profiles"
+const workUsage = "usage: odin work status|profiles|start --project <key> --title <text>"
 
-func RunWork(ctx context.Context, store *sqlite.Store, snapshot registry.Snapshot, args []string, stdout io.Writer) error {
+func RunWork(ctx context.Context, store *sqlite.Store, projectRegistry projects.Registry, snapshot registry.Snapshot, args []string, stdout io.Writer) error {
 	if len(args) == 0 || args[0] == "help" || args[0] == "--help" {
 		_, err := fmt.Fprintln(stdout, workUsage)
 		return err
@@ -25,6 +28,8 @@ func RunWork(ctx context.Context, store *sqlite.Store, snapshot registry.Snapsho
 		return runWorkStatus(ctx, store, snapshot, stdout)
 	case "profiles":
 		return runWorkProfiles(snapshot, stdout)
+	case "start":
+		return runWorkStart(ctx, store, projectRegistry, args[1:], stdout)
 	default:
 		_, err := fmt.Fprintf(stdout, "unknown work command: %s\n%s\n", args[0], workUsage)
 		return err
@@ -88,6 +93,54 @@ func runWorkProfiles(snapshot registry.Snapshot, stdout io.Writer) error {
 		}
 	}
 	return nil
+}
+
+func runWorkStart(ctx context.Context, store *sqlite.Store, projectRegistry projects.Registry, args []string, stdout io.Writer) error {
+	params := parseWorkStartArgs(args)
+	projectKey := strings.TrimSpace(params["project"])
+	title := strings.TrimSpace(params["title"])
+	if projectKey == "" || title == "" {
+		_, err := fmt.Fprintln(stdout, "usage: odin work start --project <key> --title <text>")
+		return err
+	}
+
+	resolved := scope.Resolution{
+		Kind:       scope.ScopeProject,
+		ProjectKey: projectKey,
+	}
+	if projectKey == "odin-core" {
+		resolved.Kind = scope.ScopeOdinCore
+	}
+
+	task, err := jobs.Service{
+		Store:    store,
+		Registry: projectRegistry,
+	}.CreateTaskFromAct(ctx, resolved, title)
+	if err != nil {
+		return err
+	}
+
+	_, err = fmt.Fprintf(stdout, "work_item_id=%d project=%s key=%s status=%s\n", task.ID, projectKey, task.Key, task.Status)
+	return err
+}
+
+func parseWorkStartArgs(args []string) map[string]string {
+	values := make(map[string]string)
+	for index := 0; index < len(args); index++ {
+		arg := args[index]
+		if strings.HasPrefix(arg, "--") {
+			key := strings.TrimPrefix(arg, "--")
+			if next := index + 1; next < len(args) {
+				values[key] = args[next]
+				index = next
+			}
+			continue
+		}
+		if key, value, ok := strings.Cut(arg, "="); ok {
+			values[strings.TrimLeft(key, "-")] = value
+		}
+	}
+	return values
 }
 
 func deliveryProfiles(snapshot registry.Snapshot) []registry.Item {

@@ -123,6 +123,42 @@ The Work Item reaches verified handoff evidence.
 	}
 }
 
+func TestRunWorkStartCreatesQueuedWorkItem(t *testing.T) {
+	t.Parallel()
+
+	root := newLifecycleTestRoot(t)
+
+	var startOutput bytes.Buffer
+	err := Run(context.Background(), root, []string{"work", "start", "--project", "odin-core", "--title", "Implement delivery surface"}, strings.NewReader(""), &startOutput)
+	if err != nil {
+		t.Fatalf("Run(work start) error = %v", err)
+	}
+
+	for _, want := range []string{
+		"work_item_id=",
+		"project=odin-core",
+		"status=queued",
+	} {
+		if !strings.Contains(startOutput.String(), want) {
+			t.Fatalf("Run(work start) output = %q, want %q", startOutput.String(), want)
+		}
+	}
+
+	var statusOutput bytes.Buffer
+	err = Run(context.Background(), root, []string{"work", "status"}, strings.NewReader(""), &statusOutput)
+	if err != nil {
+		t.Fatalf("Run(work status) error = %v", err)
+	}
+	for _, want := range []string{
+		"work_items=1",
+		"open_work_items=1",
+	} {
+		if !strings.Contains(statusOutput.String(), want) {
+			t.Fatalf("Run(work status) output = %q, want %q", statusOutput.String(), want)
+		}
+	}
+}
+
 func newLifecycleTestRoot(t *testing.T) string {
 	t.Helper()
 
