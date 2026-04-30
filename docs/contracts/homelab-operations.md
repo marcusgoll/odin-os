@@ -86,6 +86,24 @@ Supporting artifacts include:
 - `deploy/systemd/odin.env.example`
 - `scripts/dev/install-systemd-service.sh`
 
+## FLICA Tradeboard integration
+
+Odin is the operator surface for FLICA Tradeboard actions, but PBS remains the browser and credential owner. The `/tradeboard` shell command calls the PBS/flight-api service configured by `ODIN_TRADEBOARD_API_BASE_URL`, `ODIN_TRADEBOARD_API_TOKEN`, and `ODIN_TRADEBOARD_API_TIMEOUT_SECONDS` (or the legacy `PBS_API_BASE_URL` and `FLIGHT_API_TOKEN` fallback variables).
+
+The broader Marcus/FLICA boundary is recorded in the root `CONTEXT.md`: Odin owns the Marcus FLICA Operations Workflow Suite as an operator workflow suite, while PBS owns the FLICA-backed airline bidding, TradeBoard, vacation, and schedule domain capabilities.
+
+AA credentials and FLICA browser session state stay in PBS:
+
+- `AA_ID`
+- `AA_PASSWORD`
+- `FLICA_PLAYWRIGHT_BROWSER`
+- `FLICA_DUO_WAIT_SECONDS`
+- `DATA_DIR/playwright/.auth.json`
+
+When AA SSO presents Duo, the PBS FLICA scanner should use the operator-selected Duo method, including `Call Me` when requested, and wait within `FLICA_DUO_WAIT_SECONDS`. If approval does not complete inside that window, the operation must fail as an operator-attended authentication timeout rather than as a credential failure.
+
+The repeatable operator procedure for partial-pairing TradeBoard posts is authored in `registry/workflows/flica-tradeboard-split-post.md`. That workflow is operator-invoked only, uses Huginn for live browser proof, and requires FLICA My Requests readback before the post is treated as complete.
+
 ## Audit expectations
 
 Phase 15 operational actions must remain inspectable:

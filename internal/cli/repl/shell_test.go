@@ -4,14 +4,18 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"odin-os/internal/cli/scope"
 	"odin-os/internal/core/projects"
+	"odin-os/internal/registry"
 	runtimeevents "odin-os/internal/runtime/events"
 	"odin-os/internal/store/sqlite"
 )
@@ -231,9 +235,88 @@ func TestShellHelpIncludesTransitionCommands(t *testing.T) {
 		t.Fatalf("HandleLine(/help) error = %v", err)
 	}
 
-	for _, want := range []string{"/transition", "/observe", "/compare"} {
+	for _, want := range []string{"/transition", "/observe", "/compare", "/workflows", "/tradeboard"} {
 		if !strings.Contains(output.String(), want) {
 			t.Fatalf("help output = %q, want %q", output.String(), want)
+		}
+	}
+}
+
+func TestShellWorkflowsListsRegistryWorkflows(t *testing.T) {
+	t.Parallel()
+
+	env := newTestEnvironment(t)
+	env.RegistrySnapshot = registry.Snapshot{
+		ByKind: map[registry.Kind][]registry.Item{
+			registry.KindWorkflow: {
+				{
+					Key:        "flica-tradeboard",
+					Title:      "Marcus FLICA TradeBoard Workflow",
+					Summary:    "Operator-invoked TradeBoard workflow.",
+					Status:     "active",
+					Entrypoint: "command:/tradeboard",
+				},
+			},
+		},
+	}
+	shell, err := New(env)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	var output bytes.Buffer
+	if err := shell.HandleLine(context.Background(), "/workflows", &output); err != nil {
+		t.Fatalf("HandleLine(/workflows) error = %v", err)
+	}
+
+	for _, want := range []string{"flica-tradeboard", "status=active", "entrypoint=command:/tradeboard"} {
+		if !strings.Contains(output.String(), want) {
+			t.Fatalf("workflows output = %q, want %q", output.String(), want)
+		}
+	}
+}
+
+func TestShellWorkflowsShowsRegistryWorkflow(t *testing.T) {
+	t.Parallel()
+
+	env := newTestEnvironment(t)
+	env.RegistrySnapshot = registry.Snapshot{
+		ByKind: map[registry.Kind][]registry.Item{
+			registry.KindWorkflow: {
+				{
+					Key:        "flica-schedule",
+					Title:      "Marcus FLICA Schedule Workflow",
+					Summary:    "Schedule workflow.",
+					Status:     "active",
+					Entrypoint: "command:/tradeboard sync-status",
+					Composes:   []string{"command:/tradeboard sync-status", "pbs-flight-api"},
+					Sections: map[string]string{
+						registry.SectionPurpose: "Produce or validate the canonical Schedule Snapshot.\n\nKeep this compact.",
+					},
+					Source: registry.SourceInfo{RelativePath: "workflows/flica-schedule.md"},
+				},
+			},
+		},
+	}
+	shell, err := New(env)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	var output bytes.Buffer
+	if err := shell.HandleLine(context.Background(), "/workflows flica-schedule", &output); err != nil {
+		t.Fatalf("HandleLine(/workflows flica-schedule) error = %v", err)
+	}
+
+	for _, want := range []string{
+		"key=flica-schedule",
+		"title=Marcus FLICA Schedule Workflow",
+		"entrypoint=command:/tradeboard sync-status",
+		"source=workflows/flica-schedule.md",
+		"purpose=Produce or validate the canonical Schedule Snapshot. Keep this compact.",
+	} {
+		if !strings.Contains(output.String(), want) {
+			t.Fatalf("workflow detail output = %q, want %q", output.String(), want)
 		}
 	}
 }
@@ -317,6 +400,7 @@ func TestShellApprovalsShowsActionBinding(t *testing.T) {
 		}
 	}
 }
+
 func TestShellActionsListsRecentActions(t *testing.T) {
 	t.Parallel()
 
@@ -666,6 +750,123 @@ func TestShellTransitionRejectedInGlobalScope(t *testing.T) {
 
 	if !strings.Contains(output.String(), "project scope") {
 		t.Fatalf("output = %q, want project-scope rejection", output.String())
+	}
+}
+
+func TestShellTradeboardUsageShowsCommandHelp(t *testing.T) {
+	t.Parallel()
+
+	env := newTestEnvironment(t)
+	shell, err := New(env)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	var output bytes.Buffer
+	if err := shell.HandleLine(context.Background(), "/tradeboard", &output); err != nil {
+		t.Fatalf("HandleLine(/tradeboard) error = %v", err)
+	}
+	if !strings.Contains(output.String(), "tradeboard") {
+		t.Fatalf("output = %q, want tradeboard usage", output.String())
+	}
+}
+
+func TestShellTradeboardPickupRequiresConfirm(t *testing.T) {
+	env := newTestEnvironment(t)
+	shell, err := New(env)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	var output bytes.Buffer
+	if err := shell.HandleLine(context.Background(), "/tradeboard pickup W123 bcid=123.456", &output); err != nil {
+		t.Fatalf("HandleLine(/tradeboard pickup) error = %v", err)
+	}
+	if !strings.Contains(output.String(), "requires confirm") {
+		t.Fatalf("output = %q, want confirm requirement", output.String())
+	}
+}
+
+func TestShellTradeboardSyncStatusShowsFlicaSyncState(t *testing.T) {
+	env := newTestEnvironment(t)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/ops/flica/status" {
+			w.WriteHeader(http.StatusNotFound)
+			_ = json.NewEncoder(w).Encode(map[string]any{"error": "unexpected path"})
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"last_sync":          "2026-04-28T00:00:00Z",
+			"last_sync_status":   "success",
+			"flica_sync_running": false,
+		})
+	}))
+	t.Cleanup(server.Close)
+
+	t.Setenv("ODIN_TRADEBOARD_API_BASE_URL", server.URL)
+
+	shell, err := New(env)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	var output bytes.Buffer
+	if err := shell.HandleLine(context.Background(), "/tradeboard sync-status", &output); err != nil {
+		t.Fatalf("HandleLine(/tradeboard sync-status) error = %v", err)
+	}
+	if !strings.Contains(output.String(), "last_sync=2026-04-28T00:00:00Z") {
+		t.Fatalf("output = %q, want sync status output", output.String())
+	}
+}
+
+func TestShellTradeboardPickupRequiresSuccessfulFlicaSync(t *testing.T) {
+	env := newTestEnvironment(t)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/ops/flica/status" {
+			w.WriteHeader(http.StatusNotFound)
+			_ = json.NewEncoder(w).Encode(map[string]any{"error": "unexpected path"})
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"last_sync":          "2026-04-20T00:00:00Z",
+			"last_sync_status":   "warn: stale",
+			"flica_sync_running": false,
+		})
+	}))
+	t.Cleanup(server.Close)
+	t.Setenv("ODIN_TRADEBOARD_API_BASE_URL", server.URL)
+
+	shell, err := New(env)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	var output bytes.Buffer
+	if err := shell.HandleLine(context.Background(), "/tradeboard pickup W123 bcid=123.456 confirm", &output); err == nil {
+		t.Fatalf("HandleLine(/tradeboard pickup) expected preflight failure")
+	}
+	if !strings.Contains(output.String(), "flica sync preflight failed") {
+		t.Fatalf("output = %q, want preflight failure", output.String())
+	}
+}
+
+func TestTradeboardHTTPTimeoutDefaultsForBrowserLatency(t *testing.T) {
+	t.Setenv("ODIN_TRADEBOARD_API_TIMEOUT_SECONDS", "")
+
+	if got := tradeboardHTTPTimeout(); got != 180*time.Second {
+		t.Fatalf("tradeboardHTTPTimeout() = %v, want 180s", got)
+	}
+
+	t.Setenv("ODIN_TRADEBOARD_API_TIMEOUT_SECONDS", "2")
+	if got := tradeboardHTTPTimeout(); got != 5*time.Second {
+		t.Fatalf("tradeboardHTTPTimeout() = %v, want 5s minimum", got)
+	}
+
+	t.Setenv("ODIN_TRADEBOARD_API_TIMEOUT_SECONDS", "999")
+	if got := tradeboardHTTPTimeout(); got != 600*time.Second {
+		t.Fatalf("tradeboardHTTPTimeout() = %v, want 600s maximum", got)
 	}
 }
 

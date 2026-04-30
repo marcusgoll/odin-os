@@ -16,6 +16,7 @@ import (
 	"odin-os/internal/core/projects"
 	"odin-os/internal/executors/contract"
 	executorrouter "odin-os/internal/executors/router"
+	"odin-os/internal/registry"
 	healthsvc "odin-os/internal/runtime/health"
 	jobsvc "odin-os/internal/runtime/jobs"
 	runsvc "odin-os/internal/runtime/runs"
@@ -26,6 +27,7 @@ import (
 type Environment struct {
 	Store               *sqlite.Store
 	Registry            projects.Registry
+	RegistrySnapshot    registry.Snapshot
 	RegistryDiagnostics []projects.Diagnostic
 	SessionStore        SessionStore
 	ExecutorConfig      executorrouter.Config
@@ -158,7 +160,7 @@ func (shell *Shell) renderPrompt(ctx context.Context, output io.Writer) error {
 func (shell *Shell) handleCommand(ctx context.Context, command commands.Command, output io.Writer) error {
 	switch command.Name {
 	case "help":
-		if _, err := fmt.Fprintln(output, "/help /mode /scope /project /transition /observe /compare /jobs /runs /approvals /actions /logs /doctor /self"); err != nil {
+		if _, err := fmt.Fprintln(output, "/help /mode /scope /project /transition /observe /compare /workflows /tradeboard /jobs /runs /approvals /actions /logs /doctor /self"); err != nil {
 			return err
 		}
 		_, err := fmt.Fprintf(output, "%s\n", transitionUsage)
@@ -175,6 +177,10 @@ func (shell *Shell) handleCommand(ctx context.Context, command commands.Command,
 		return shell.handleObserve(ctx, command.Args, output)
 	case "compare":
 		return shell.handleCompare(ctx, command.Args, output)
+	case "workflows":
+		return shell.handleWorkflows(command.Args, output)
+	case "tradeboard":
+		return shell.handleTradeboard(ctx, command.Args, output)
 	case "jobs":
 		return shell.handleJobs(ctx, output)
 	case "runs":

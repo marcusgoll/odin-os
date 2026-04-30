@@ -79,6 +79,7 @@ func Run(ctx context.Context, root string, args []string, stdin io.Reader, stdou
 	shell, err := repl.New(repl.Environment{
 		Store:               app.Store,
 		Registry:            app.Registry,
+		RegistrySnapshot:    app.RegistrySnapshot,
 		RegistryDiagnostics: app.RegistryDiagnostics,
 		SessionStore:        app.SessionStore,
 		ExecutorConfig:      app.ExecutorConfig,

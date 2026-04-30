@@ -67,8 +67,23 @@ func TestLoadDirLoadsRepositoryExamples(t *testing.T) {
 		t.Fatalf("snapshot.Diagnostics = %v, want none", snapshot.Diagnostics)
 	}
 
-	if len(snapshot.Items) != 4 {
-		t.Fatalf("snapshot.Items = %d, want 4", len(snapshot.Items))
+	wantKeys := []string{
+		"flica-annual-vacation",
+		"flica-fcfs-bid",
+		"flica-schedule",
+		"flica-seniority-bid",
+		"flica-tradeboard",
+		"flica-tradeboard-split-post",
+		"project-intake",
+	}
+	loadedKeys := make(map[string]bool, len(snapshot.Items))
+	for _, item := range snapshot.Items {
+		loadedKeys[item.Key] = true
+	}
+	for _, key := range wantKeys {
+		if !loadedKeys[key] {
+			t.Fatalf("snapshot.Items missing %q", key)
+		}
 	}
 }
 

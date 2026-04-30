@@ -20,6 +20,7 @@ type App struct {
 	Store               *sqlite.Store
 	RepoRoot            string
 	Registry            projects.Registry
+	RegistrySnapshot    registry.Snapshot
 	RegistryDiagnostics []projects.Diagnostic
 	SessionStore        clistate.SessionStore
 	ExecutorConfig      executorrouter.Config
@@ -86,6 +87,7 @@ func Load(ctx context.Context, repoRoot string, runtimeRoot string) (App, error)
 		Store:               store,
 		RepoRoot:            repoRoot,
 		Registry:            registry,
+		RegistrySnapshot:    registrySnapshot,
 		RegistryDiagnostics: diagnostics,
 		SessionStore: clistate.SessionStore{
 			Path: filepath.Join(runtimeRoot, "state", "cache", "cli-session.json"),
