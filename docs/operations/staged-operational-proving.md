@@ -90,7 +90,7 @@ Goal:
 Preconditions:
 
 - Stage 0 has passed from the current checkout.
-- The `odin-os` project is registered as a GitHub-backed intake source for this profile.
+- The `odin-core` system project is registered with GitHub intake metadata for this profile.
 - `ODIN_PROFILE=github-readonly` resolves to a profile that permits GitHub issue reads only.
 - `ODIN_DRY_RUN=true` is enforced as no external mutation.
 - The GitHub token has the minimum read permission needed for issue intake.
@@ -101,20 +101,39 @@ Command:
 ```bash
 ODIN_PROFILE=github-readonly \
 ODIN_DRY_RUN=true \
-./bin/odin intake github --project odin-os --json
+./bin/odin work intake --project odin-core --json
 ```
 
-Current implementation note:
+Compatibility decision:
 
-The current implemented intake surface is `odin work intake --project <key> [--dry-run]`. Stage 1 cannot be claimed complete until the target `odin intake github --project odin-os --json` command exists or an explicit compatibility decision maps that command to the existing intake service.
+Stage 1 uses the existing Delivery Workflow operator surface:
+`odin work intake --project <key> --json`. Do not add a parallel top-level
+`odin intake github` command for Stage 1. GitHub remains the provider selected
+by the enrolled GitHub-backed project manifest and `internal/tracker/intake`
+service, while `odin work ...` remains the canonical operator command family
+for Delivery Workflow intake.
 
-For this stage, dry-run means no GitHub or external-system mutation. It must still allow local Odin runtime persistence of fetched external issues so idempotence can be proven.
+Stage 1 targets the existing `odin-core` system project identity. Do not add a
+second `odin-os` managed project key for the same repository. The reserved
+system project may carry GitHub intake metadata for read-only issue sync
+without weakening its self-governance constraints.
+
+For this stage, dry-run means external-mutation dry-run, not local-runtime
+dry-run. `ODIN_DRY_RUN=true` must block GitHub writes, comments, labels, pull
+requests, scheduler dispatch, Codex execution, and other external-system
+mutation. It must still allow local Odin runtime persistence of fetched
+external issues into SQLite so idempotence can be proven.
 
 Exit criteria:
 
 - Eligible issues are fetched from live GitHub.
 - Labels are filtered correctly.
 - External issues are persisted idempotently in Odin runtime state.
+- The command performs two read-only sync passes in one Stage 1 JSON invocation.
+- The JSON output reports `first_pass`, `second_pass`, `stored_before`, `stored_after`, `idempotent=true`, and `github_writes=0`.
+- `github_writes=0` is proven by an Odin-owned GitHub HTTP method audit, not inferred from flags or operator observation.
+- The method audit reports read count, write count, and any forbidden method/path attempted without token values.
+- No Work Items, Run Attempts, approvals, worktree leases, pull request handoffs, scheduler jobs, or dispatch state were created.
 - No GitHub writes occurred.
 - No comments were created.
 - No labels were added, removed, or changed.
@@ -126,8 +145,8 @@ Required artifacts:
 
 - Command JSON output.
 - Runtime log excerpt with token redaction verified.
-- External issue persistence evidence from before and after repeated runs.
-- GitHub write counter or equivalent proof showing zero writes.
+- External issue persistence evidence from before and after the built-in repeated sync passes.
+- GitHub HTTP method audit showing zero POST, PATCH, PUT, or DELETE requests.
 - Operator note identifying the token scope used without recording the token value.
 
 Allowed activity:
@@ -144,6 +163,9 @@ Forbidden activity:
 - GitHub comments.
 - GitHub label mutation.
 - Pull request creation or update.
+- Work Item creation or reconciliation.
+- Run Attempt creation.
+- Approval, worktree lease, pull request handoff, scheduler job, or dispatch-state creation.
 - Codex execution.
 - Worker launch.
 - Scheduler dispatch.
@@ -151,7 +173,10 @@ Forbidden activity:
 
 Promotion rule:
 
-Stage 1 is complete only when the exact live read-only command proof is recorded and repeated runs show stable, idempotent local persistence with zero GitHub writes. Passing Stage 1 does not authorize Codex execution, pull request creation, scheduler dispatch, or unattended operation.
+Stage 1 is complete only when the exact live read-only command proof is
+recorded and the built-in repeated sync passes show stable, idempotent local
+persistence with zero GitHub writes. Passing Stage 1 does not authorize Codex
+execution, pull request creation, scheduler dispatch, or unattended operation.
 
 ## Stage 2: Dry-Run Lifecycle Mutation
 

@@ -74,7 +74,8 @@ ODIN_DRY_RUN=true ODIN_PROFILE=github-readonly ./bin/odin intake github --json
 
 Stage 0 is complete for this checkout.
 
-Stage 1 is not complete. The requested command surface is not available:
+Stage 1 is not complete. After Stage 0, the originally probed top-level command
+surface was not available:
 
 ```text
 unknown command: intake
@@ -86,4 +87,8 @@ Stage 2 is not complete. The requested command surface is not available:
 unknown command: tracker
 ```
 
-Do not proceed to live GitHub proof until the Stage 1 read-only command is implemented or explicitly mapped to an existing Odin-owned command path.
+Stage 1 has since been mapped to the existing Odin-owned Delivery Workflow
+command path: `odin work intake --project odin-core --json`. Do not proceed to
+live GitHub proof until that command supports the required Stage 1 JSON output,
+external-mutation dry-run semantics with local SQLite persistence, and
+zero-write proof artifacts.
