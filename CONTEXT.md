@@ -88,6 +88,22 @@ _Avoid_: Global freshness guess, stale schedule approval, implicit snapshot vali
 The user-facing Odin command, shell, TUI, or workflow entrypoint through which an operator invokes or reviews governed work.
 _Avoid_: Direct downstream script, hidden service call
 
+**CEO Briefing Workflow**:
+The Odin-owned operator-invoked workflow for producing a portfolio-wide briefing proposal and, after explicit approval, publishing one **Daily Priority Packet** for a business date. Its canonical operator surface is `odin brief ceo`; REPL aliases may assist but must not become proof authority.
+_Avoid_: Scheduled CEO sidecar, legacy executive_review authority, direct priorities file write
+
+**Briefing Proposal**:
+The draft output of a **CEO Briefing Workflow** before approval. It contains evidence-backed focus recommendations, blockers, queue recommendations, and proposed slot guidance, but it does not mutate queue state or publish priorities.
+_Avoid_: Daily Priority Packet, approved priority state, queue mutation
+
+**Daily Priority Packet**:
+The approved Odin runtime record for one business date's portfolio priorities. It may include focus weights, blockers, deferred or killed recommendations, and slot recommendations, but it is priority evidence only and does not directly defer, cancel, release, dispatch, or mutate queued work.
+_Avoid_: Queue action, scheduler directive, legacy priorities.json as authority
+
+**Priority Packet Supersession**:
+The append-only event relationship where a later approved **Daily Priority Packet** for the same business date replaces the prior active packet while preserving the earlier packet in audit history.
+_Avoid_: In-place priority edit, multiple active packets for one date, hidden overwrite
+
 **Initiative**:
 A durable Odin-owned unit of responsibility. A managed software project is one **Initiative** kind, not the whole Odin product model. Other initiative kinds may include goals, cases, routines, campaigns, and personal administration.
 _Avoid_: Treating project as the only durable work container, provider-specific project state
@@ -99,6 +115,18 @@ _Avoid_: Feature as a separate root aggregate, loose task note, executor-owned w
 **Run Attempt**:
 One execution attempt for a **Work Item** through an executor lane. A **Run Attempt** may use Codex, Claude, another CLI runner, or an API executor, but it does not own durable truth after it completes.
 _Avoid_: Work Item, durable feature state, provider-owned task record
+
+**Live Execution Session**:
+An ephemeral process or attachment handle for a running **Run Attempt**, such as a Codex tmux session. Odin may record its executor, host, process/session identifier, repo or worktree path, liveness, and handoff evidence, but the session is not durable workspace or project truth.
+_Avoid_: Workspace, Project, Work Item, tmux as source of truth, direct Codex session as delivery authority
+
+**Live Execution Session Key**:
+The generated stable Odin identifier for a **Live Execution Session**, derived from the owning **Run Attempt** identity. Operators may add aliases for convenience, but aliases must not replace the canonical session key in persisted evidence.
+_Avoid_: Provider process id as canonical key, ambiguous alias, human nickname as durable identity
+
+**Adopted Live Execution Session**:
+A **Live Execution Session** that was started outside Odin, such as an SSH-launched Codex session on the homelab server, and later bound to one **Run Attempt** by an explicit operator action. Adoption records the session handle and available handoff context; it does not make arbitrary external sessions Odin-governed automatically, and pre-adoption work is not proof until separately verified.
+_Avoid_: Auto-discovered worker, retroactive authority, unmanaged SSH session as proof
 
 **Delivery Workflow**:
 The Odin-owned workflow for taking a **Work Item** from intent to verified completion. The canonical delivery loop is domain lock, design, implementation plan, execution, verification, branch finish, and learning capture. Its canonical operator surface is the top-level `odin work ...` command family; REPL slash commands may alias that surface but must not become the proof authority.
@@ -236,12 +264,36 @@ Odin owns v1 **Delivery Profiles** through the existing `workflow` registry kind
 
 Odin owns v1 extraction only for **Supported Knowledge Source Classes**. OCR for scanned PDFs or image-only documents is a future capability that requires a separate locked decision before implementation.
 
+Odin owns the **CEO Briefing Workflow**, **Briefing Proposals**, **Daily Priority Packets**, and **Priority Packet Supersession** as governed portfolio-priority concepts. Legacy `/var/odin` or `odin-orchestrator` executive review artifacts may inform migration and audit, but they do not own current priority state or operator proof.
+
 ## Invariants
 
 - Odin must not duplicate PBS airline domain ownership when a PBS capability already owns the behavior.
 - **Initiative**, **Work Item**, and **Run Attempt** are the canonical delivery hierarchy for project, feature, and task work until a future locked decision changes it.
 - A feature request must be represented as a **Feature Work Item** or a grouped set of **Work Items**, not as a separate root aggregate.
 - A **Run Attempt** must remain execution evidence for a **Work Item**; it must not become the durable source of truth for feature state.
+- A **CEO Briefing Workflow** must be operator-invoked through `odin brief ceo`; scheduled or legacy sidecar execution cannot publish an Odin-owned **Daily Priority Packet**.
+- A **Briefing Proposal** must not mutate queue state, publish priorities, or change scheduler behavior before explicit operator approval.
+- A **Daily Priority Packet** may record focus weights, blockers, deferred or killed recommendations, and slot recommendations, but queue mutations require separate operator actions and evidence.
+- For one business date, only one approved **Daily Priority Packet** may be active at a time; approving a later packet must record **Priority Packet Supersession** instead of editing the earlier packet in place.
+- **Daily Priority Packets** must live in SQLite runtime state with append-only events and CLI projections; generated files, legacy `/var/odin/state/priorities.json`, or briefing emails are artifacts only.
+- A **Live Execution Session** must be attached to one **Run Attempt** when Odin records it; it must not become durable **Workspace**, **Project**, or **Work Item** state.
+- A **Live Execution Session** must have a generated stable **Live Execution Session Key** derived from the owning **Run Attempt**; operator aliases are optional conveniences and must resolve back to that canonical key.
+- **Live Execution Session** aliases must be unique among active sessions in the current operator workspace and must not be used as the only persisted identifier in evidence, handoff, stop, or proof records.
+- A **Run Attempt** may have at most one active **Live Execution Session**; simultaneous Codex, tmux, SSH, or shell sessions for the same **Work Item** must be represented as separate **Run Attempts**.
+- tmux and similar process supervisors may be treated as liveness truth for a **Live Execution Session**, but Odin-owned runtime evidence remains the proof authority for **Delivery Workflow** progress.
+- An **Adopted Live Execution Session** requires an explicit operator binding action; Odin must not auto-adopt arbitrary SSH, tmux, Codex, or shell sessions.
+- Adoption must record at least the **Run Attempt**, host, executor lane, mutation mode, process or session identifier, repo or worktree path, adoption time, and operator-provided handoff evidence.
+- A mutating **Live Execution Session** must use a distinct worktree path for its active **Run Attempt**; read-only live sessions may share the repo root when they do not claim mutation authority.
+- Parallel mutating **Live Execution Sessions** for the same **Work Item** must not share a worktree path, branch, or active worktree lease.
+- Pre-adoption work from an **Adopted Live Execution Session** is imported handoff context, not Delivery Gate proof; gates may advance only after Odin records explicit verification evidence.
+- List and overview surfaces for **Live Execution Sessions** should read cached liveness state with freshness metadata; `workspace status` and `workspace attach` style commands are the live tmux/SSH probe points.
+- `workspace attach` is bind-only: it attaches the operator to an existing **Live Execution Session** and must not create, adopt, resume, start, or stop a Codex, tmux, SSH, or shell session.
+- Live session lifecycle verbs must stay separate: `workspace start` creates an Odin-launched session, `workspace bind` or `workspace adopt` records an external session, `workspace status` probes liveness, `workspace attach` attaches to an existing session, `workspace handoff` records handoff context, and `workspace stop` marks the session stopped in Odin by default.
+- `workspace stop` must not terminate the underlying Codex, tmux, SSH, or shell process unless the operator supplies an explicit termination flag such as `--terminate`.
+- Terminating a **Live Execution Session** process is a destructive lifecycle action and must preserve or request handoff evidence before Odin treats the **Run Attempt** outcome as complete.
+- A mutating **Live Execution Session** requires `workspace handoff` before `workspace stop` or `workspace stop --terminate`, unless the operator explicitly marks the session abandoned.
+- `workspace handoff` for a mutating session must capture summary, changed paths or worktree reference, last known status, verification already run, and next recommended action.
 - A **Delivery Workflow** is incomplete until its required proof is recorded, including real `odin` command evidence when the operator surface is user-visible.
 - Skills, subagents, and executor lanes may help execute a **Delivery Workflow**, but they must not replace Odin's **Work Item**, approval, evidence, verification, or branch-finish authority.
 - Real E2E verification for **Delivery Workflow** behavior must exercise `odin work ...` once that command family exists; REPL aliases and direct executor sessions are insufficient proof.
@@ -340,6 +392,18 @@ Odin owns v1 extraction only for **Supported Knowledge Source Classes**. OCR for
 - An **Initiative** may contain many **Work Items**; each **Work Item** belongs to one owning **Initiative** when initiative context is known.
 - A **Feature Work Item** may decompose into smaller **Work Items** for planning, implementation, review, verification, or follow-up.
 - A **Work Item** may have many **Run Attempts**; each **Run Attempt** belongs to exactly one **Work Item**.
+- A **CEO Briefing Workflow** produces many **Briefing Proposals** over time.
+- A **Briefing Proposal** may publish zero or one **Daily Priority Packet** after approval.
+- A **Daily Priority Packet** belongs to exactly one business date and may supersede at most one prior active packet for that date.
+- A **Run Attempt** may have at most one active **Live Execution Session** handle for attachment and liveness, plus historical handoff or completion evidence after the process exits.
+- A **Live Execution Session Key** identifies the session across status, attach, handoff, stop, liveness projections, and evidence records; aliases are lookup aids only.
+- Parallel live sessions on the same **Work Item** are sibling **Run Attempts**, not multiple active sessions on one **Run Attempt**.
+- Mutating sibling **Run Attempts** require separate worktree paths; read-only sibling **Run Attempts** may share a repo root only while they remain read-only.
+- Cached **Live Execution Session** liveness belongs to read projections with freshness timestamps; live process probes update those projections only when an operator requests status or attachment.
+- Attachment is an operator presence action, not session creation, adoption, resumption, or proof advancement.
+- Stopping a **Live Execution Session** in Odin records lifecycle state; process termination is a separate explicit action.
+- Abandoning a mutating **Live Execution Session** is an explicit outcome that records why handoff is unavailable or intentionally skipped.
+- An **Adopted Live Execution Session** is the same relationship as a normal **Live Execution Session**, but its start event happened outside Odin and its Odin-governed proof begins only after adoption and explicit verification.
 - A **Delivery Workflow** coordinates one or more **Work Items** and records proof through Odin-owned runtime evidence, not through executor-local claims alone.
 - A **Delivery Workflow** contains an ordered sequence of **Delivery Gates**; each gate has evidence, status, and a next-action decision.
 - A **Feedback Loop** composes one or more skills, agents, and workflow registry entries around the current **Delivery Gate**.
@@ -366,6 +430,8 @@ Odin owns v1 extraction only for **Supported Knowledge Source Classes**. OCR for
 - Action Record persistence, append-only Action Evidence Events, Prepared Action Payload identity, and Workflow Run Outcome enforcement still need implementation alignment with the registry contracts.
 - The current code still exposes `task` and `run` in several runtime surfaces; implementation planning must decide where to keep those as storage/API compatibility terms and where to render canonical **Work Item** and **Run Attempt** language.
 - `odin work ...` is not implemented yet in the current binary; implementation work must add that canonical command family rather than relying on direct Codex sessions, REPL-only aliases, or sidecar scripts.
+- `odin brief ceo` is not implemented yet in the current binary; implementation work must add that canonical command family and must not rely on legacy `odin-orchestrator` executive_review launchers.
+- `odin workspace ...` is not implemented yet in the current binary; implementation work must add a canonical binding, adoption, and attachment surface before **Live Execution Sessions** can be managed as Odin-governed operator state.
 - A future ADR may promote **Delivery Profiles** to a separate registry kind only if specialized workflow entries prove insufficient for validation, UI behavior, or lifecycle semantics.
 - `odin knowledge` is not implemented yet in the current binary; implementation work must add that canonical command family rather than relying on direct file edits or REPL-only commands.
 - The exact `odin knowledge` flag spelling for creating **Restricted Knowledge Use Approval** events is still unresolved, but the single-use and use-type scoped approval model is locked.
