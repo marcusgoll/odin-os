@@ -21,4 +21,6 @@
 /state/compiled/*
 !/state/compiled/.gitkeep
 /config/projects.local.yaml
+/deploy/docker/*.env
+/deploy/docker/.env
 /registry/.skill-mutations.lock

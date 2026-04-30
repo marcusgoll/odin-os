@@ -32,6 +32,7 @@ test-skills:
 ci: fmtcheck lint test
 	bash scripts/tests/make-ci-target-test.sh
 	bash scripts/tests/verify-pr-template-test.sh
+	bash scripts/tests/install-service-test.sh
 	$(MAKE) test-alpha
 	$(MAKE) build
 

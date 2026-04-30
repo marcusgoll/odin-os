@@ -96,6 +96,7 @@ For the single-daemon control plane:
 - use `odin healthcheck` for fail-closed readiness checks
 - use `odin doctor --json` for machine-readable health inspection
 - use `docs/operations/always-on-cutover-checklist.md` before treating a runtime root as always-on
+- use `docs/DEPLOYMENT.md` for the hardened `odin-os.service` path, rollback, dry-run, and kill-switch operations
 
 ## Workspace Migration Helper
 
