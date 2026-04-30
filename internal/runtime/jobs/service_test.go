@@ -238,6 +238,84 @@ func TestExecuteNextQueuedCompletesCutoverProjectTask(t *testing.T) {
 	}
 }
 
+func TestExecuteNextQueuedRecordsWorkerPanicAsFailedRun(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openJobStore(t)
+	defer store.Close()
+
+	registry := writeRegistry(t)
+	service := Service{
+		Store:    store,
+		Registry: registry,
+		Executors: map[string]contract.Executor{
+			"codex_headless": panicExecutor{},
+		},
+		ExecutorConfig: mustLoadExecutorConfig(t),
+		Transitions:    projects.Service{Store: store},
+		Leases: leases.Manager{
+			Store:        store,
+			Git:          &jobTestGit{},
+			WorktreeRoot: t.TempDir(),
+		},
+		Now: time.Now,
+	}
+
+	task, err := service.CreateTaskFromAct(ctx, scope.Resolution{
+		Kind:       scope.ScopeProject,
+		ProjectKey: "alpha",
+	}, "Panic containment")
+	if err != nil {
+		t.Fatalf("CreateTaskFromAct() error = %v", err)
+	}
+
+	project, err := store.GetProjectByKey(ctx, "alpha")
+	if err != nil {
+		t.Fatalf("GetProjectByKey(alpha) error = %v", err)
+	}
+	if _, err := service.Transitions.SetTransitionState(ctx, projects.TransitionStateInput{
+		ProjectID:   project.ID,
+		Actor:       projects.TransitionControllerOdinOS,
+		TargetState: projects.TransitionStateCutover,
+		ChangedBy:   "test",
+	}); err != nil {
+		t.Fatalf("SetTransitionState(cutover) error = %v", err)
+	}
+	recordHealthyExecutorSample(t, ctx, store)
+
+	err = service.ExecuteNextQueued(ctx)
+	if err == nil {
+		t.Fatal("ExecuteNextQueued() error = nil, want recovered worker panic error")
+	}
+	if !strings.Contains(err.Error(), "worker panic") {
+		t.Fatalf("ExecuteNextQueued() error = %v, want worker panic context", err)
+	}
+
+	gotTask, err := store.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
+	}
+	if gotTask.Status != "failed" {
+		t.Fatalf("GetTask().Status = %q, want failed", gotTask.Status)
+	}
+
+	run, err := latestRunForTask(ctx, store, task.ID)
+	if err != nil {
+		t.Fatalf("latestRunForTask() error = %v", err)
+	}
+	if run.Status != "failed" {
+		t.Fatalf("run.Status = %q, want failed", run.Status)
+	}
+	if !strings.Contains(run.Summary, "worker panic") {
+		t.Fatalf("run.Summary = %q, want worker panic context", run.Summary)
+	}
+
+	if _, err := store.GetActiveWorktreeLeaseByTaskRun(ctx, task.ID, run.ID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("GetActiveWorktreeLeaseByTaskRun() error = %v, want sql.ErrNoRows", err)
+	}
+}
+
 func TestExecuteNextQueuedSkipsDispatchWhenShutdownRequested(t *testing.T) {
 	t.Parallel()
 
@@ -1656,6 +1734,48 @@ func (jobTestExecutor) CancelTask(context.Context, contract.TaskHandle) error {
 
 func (jobTestExecutor) EstimateCost(context.Context, contract.TaskSpec) (contract.CostEstimate, error) {
 	return contract.CostEstimate{}, contract.ErrNotImplemented
+}
+
+type panicExecutor struct{}
+
+func (panicExecutor) Key() string { return "codex_headless" }
+
+func (panicExecutor) Class() contract.ExecutorClass {
+	return contract.ExecutorClassPlanBackedCLI
+}
+
+func (panicExecutor) Health(context.Context) (contract.HealthReport, error) {
+	return contract.HealthReport{
+		Status:    contract.HealthStatusHealthy,
+		CheckedAt: time.Now().UTC(),
+	}, nil
+}
+
+func (panicExecutor) Capabilities(context.Context) (contract.Capabilities, error) {
+	return contract.Capabilities{
+		ExecutorClass:        contract.ExecutorClassPlanBackedCLI,
+		SupportsHeadlessPlan: true,
+		TaskKinds: []contract.TaskKind{
+			contract.TaskKindGeneral,
+		},
+		Scopes: []string{"project"},
+	}, nil
+}
+
+func (panicExecutor) RunTask(context.Context, contract.TaskSpec) (contract.ExecutionResult, error) {
+	panic("simulated worker panic")
+}
+
+func (panicExecutor) ResumeTask(context.Context, contract.TaskHandle, contract.ResumePacket) (contract.ExecutionResult, error) {
+	return contract.ExecutionResult{}, contract.ErrNotImplemented
+}
+
+func (panicExecutor) CancelTask(context.Context, contract.TaskHandle) error {
+	return nil
+}
+
+func (panicExecutor) EstimateCost(context.Context, contract.TaskSpec) (contract.CostEstimate, error) {
+	return contract.CostEstimate{}, nil
 }
 
 type transientFailureExecutor struct{}

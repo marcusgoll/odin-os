@@ -393,7 +393,7 @@ func (service Service) ExecuteNextQueued(ctx context.Context) error {
 	}
 
 	executor := executors[decision.ExecutorKey]
-	result, execErr := executor.RunTask(ctx, spec)
+	result, execErr := runExecutorTask(ctx, decision.ExecutorKey, executor, spec)
 	executionMetadata := executionMetadataForResult(spec.Metadata, result.Metadata, assignment, decision.ExecutorKey, result.Handle.ExternalID)
 	if err := service.finalizeOutcome(ctx, task, run, admissionDecision{}, result, execErr); err != nil {
 		return err
@@ -552,7 +552,7 @@ func (service Service) ExecuteTaskWithRequest(ctx context.Context, taskID int64,
 	}
 
 	executor := executors[decision.ExecutorKey]
-	result, execErr := executor.RunTask(ctx, spec)
+	result, execErr := runExecutorTask(ctx, decision.ExecutorKey, executor, spec)
 	executionMetadata := executionMetadataForResult(spec.Metadata, result.Metadata, assignment, decision.ExecutorKey, result.Handle.ExternalID)
 	finalizeErr := service.finalizeOutcome(ctx, task, run, admissionDecision{}, result, execErr)
 	outcome, loadErr := service.loadExecutionOutcome(ctx, task.ID, &run.ID)
@@ -581,6 +581,16 @@ func (service Service) now() time.Time {
 		return service.Now().UTC()
 	}
 	return time.Now().UTC()
+}
+
+func runExecutorTask(ctx context.Context, executorKey string, executor contract.Executor, spec contract.TaskSpec) (result contract.ExecutionResult, execErr error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			result = contract.ExecutionResult{}
+			execErr = fmt.Errorf("worker panic in executor %q", executorKey)
+		}
+	}()
+	return executor.RunTask(ctx, spec)
 }
 
 func (service Service) dispatchAllowed() bool {
