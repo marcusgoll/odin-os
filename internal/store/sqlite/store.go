@@ -2011,6 +2011,18 @@ func (store *Store) RecordKnowledgeExtraction(ctx context.Context, params Record
 }
 
 func (store *Store) RecordKnowledgeChunk(ctx context.Context, params RecordKnowledgeChunkParams) (KnowledgeChunk, error) {
+	now := store.now()
+	var chunk KnowledgeChunk
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		record, err := store.recordKnowledgeChunkTx(ctx, tx, params, now, true)
+		chunk = record
+		return err
+	})
+
+	return chunk, err
+}
+
+func (store *Store) recordKnowledgeChunkTx(ctx context.Context, tx *sql.Tx, params RecordKnowledgeChunkParams, now time.Time, index bool) (KnowledgeChunk, error) {
 	params.Text = strings.TrimSpace(params.Text)
 	params.Anchor = strings.TrimSpace(params.Anchor)
 
@@ -2026,58 +2038,267 @@ func (store *Store) RecordKnowledgeChunk(ctx context.Context, params RecordKnowl
 	if params.Text == "" {
 		return KnowledgeChunk{}, fmt.Errorf("knowledge chunk text is required")
 	}
+	if err := validateKnowledgeExtractionLineageTx(ctx, tx, params.SourceID, params.ExtractionID); err != nil {
+		return KnowledgeChunk{}, err
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO knowledge_chunks (
+			source_id,
+			extraction_id,
+			ordinal,
+			text,
+			anchor,
+			page_number,
+			restricted,
+			created_at
+		)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(extraction_id, ordinal) DO UPDATE SET
+			source_id = excluded.source_id,
+			text = excluded.text,
+			anchor = excluded.anchor,
+			page_number = excluded.page_number,
+			restricted = excluded.restricted
+	`,
+		params.SourceID,
+		params.ExtractionID,
+		params.Ordinal,
+		params.Text,
+		params.Anchor,
+		nullInt64(params.PageNumber),
+		boolToInt(params.Restricted),
+		formatTime(now),
+	); err != nil {
+		return KnowledgeChunk{}, err
+	}
+
+	chunk, err := scanKnowledgeChunk(tx.QueryRowContext(ctx, `
+		SELECT id, source_id, extraction_id, ordinal, text, anchor, page_number, restricted, created_at
+		FROM knowledge_chunks
+		WHERE extraction_id = ? AND ordinal = ?
+	`, params.ExtractionID, params.Ordinal))
+	if err != nil {
+		return KnowledgeChunk{}, err
+	}
+	if index {
+		if err := store.indexKnowledgeChunkTx(ctx, tx, IndexKnowledgeChunkParams{ChunkID: chunk.ID}); err != nil {
+			return KnowledgeChunk{}, err
+		}
+	}
+	return chunk, nil
+}
+
+func (store *Store) RecordReadyKnowledgeExtraction(ctx context.Context, params RecordReadyKnowledgeExtractionParams) (ReadyKnowledgeExtraction, error) {
+	params.Key = strings.TrimSpace(params.Key)
+	params.Title = strings.TrimSpace(params.Title)
+	params.Scope = strings.TrimSpace(params.Scope)
+	params.ScopeKey = strings.TrimSpace(params.ScopeKey)
+	params.SourceKind = strings.TrimSpace(params.SourceKind)
+	params.SourceClass = strings.TrimSpace(params.SourceClass)
+	params.ManifestPath = strings.TrimSpace(params.ManifestPath)
+	params.ExtractorName = strings.TrimSpace(params.ExtractorName)
+	params.ExtractorVersion = strings.TrimSpace(params.ExtractorVersion)
+	params.ExtractedTextHash = strings.TrimSpace(params.ExtractedTextHash)
+	params.NormalizedMarkdownPath = strings.TrimSpace(params.NormalizedMarkdownPath)
+
+	if params.SourceID == 0 {
+		return ReadyKnowledgeExtraction{}, fmt.Errorf("knowledge extraction source id is required")
+	}
+	if params.ArtifactID == 0 {
+		return ReadyKnowledgeExtraction{}, fmt.Errorf("knowledge extraction artifact id is required")
+	}
+	if params.Key == "" {
+		return ReadyKnowledgeExtraction{}, fmt.Errorf("knowledge source key is required")
+	}
+	if params.Title == "" {
+		return ReadyKnowledgeExtraction{}, fmt.Errorf("knowledge source title is required")
+	}
+	if params.Scope == "" {
+		return ReadyKnowledgeExtraction{}, fmt.Errorf("knowledge source scope is required")
+	}
+	if params.ScopeKey == "" {
+		return ReadyKnowledgeExtraction{}, fmt.Errorf("knowledge source scope key is required")
+	}
+	if params.SourceKind == "" {
+		return ReadyKnowledgeExtraction{}, fmt.Errorf("knowledge source kind is required")
+	}
+	if params.SourceClass == "" {
+		return ReadyKnowledgeExtraction{}, fmt.Errorf("knowledge source class is required")
+	}
+	if params.ManifestPath == "" {
+		return ReadyKnowledgeExtraction{}, fmt.Errorf("knowledge source manifest path is required")
+	}
+	if params.ExtractorName == "" {
+		return ReadyKnowledgeExtraction{}, fmt.Errorf("knowledge extraction extractor name is required")
+	}
+	if params.ExtractorVersion == "" {
+		return ReadyKnowledgeExtraction{}, fmt.Errorf("knowledge extraction extractor version is required")
+	}
+	if params.ExtractedTextHash == "" {
+		return ReadyKnowledgeExtraction{}, fmt.Errorf("knowledge extraction text hash is required")
+	}
+	if params.NormalizedMarkdownPath == "" {
+		return ReadyKnowledgeExtraction{}, fmt.Errorf("knowledge extraction normalized markdown path is required")
+	}
+	if len(params.Chunks) == 0 {
+		return ReadyKnowledgeExtraction{}, fmt.Errorf("ready knowledge extraction requires at least one chunk")
+	}
+	if err := validateKnowledgeManifestPath(params.ManifestPath); err != nil {
+		return ReadyKnowledgeExtraction{}, err
+	}
+	if err := validateKnowledgeSourceClass(params.SourceClass); err != nil {
+		return ReadyKnowledgeExtraction{}, err
+	}
 
 	now := store.now()
-	var chunk KnowledgeChunk
+	startedAt := now
+	if params.StartedAt != nil {
+		startedAt = params.StartedAt.UTC()
+	}
+	finishedAt := now
+	if params.FinishedAt != nil {
+		finishedAt = params.FinishedAt.UTC()
+	}
+
+	var ready ReadyKnowledgeExtraction
 	err := store.withTx(ctx, func(tx *sql.Tx) error {
-		if err := validateKnowledgeExtractionLineageTx(ctx, tx, params.SourceID, params.ExtractionID); err != nil {
+		previousSource, err := store.getKnowledgeSourceTx(ctx, tx, params.SourceID)
+		if err != nil {
 			return err
 		}
-		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO knowledge_chunks (
+		if previousSource.Key != params.Key {
+			return fmt.Errorf("knowledge source id %d key = %q, want %q", params.SourceID, previousSource.Key, params.Key)
+		}
+		if err := store.validateKnowledgeArtifactLifecycleTx(ctx, tx, &params.ArtifactID, "ready"); err != nil {
+			return err
+		}
+
+		result, err := tx.ExecContext(ctx, `
+			INSERT INTO knowledge_extractions (
 				source_id,
-				extraction_id,
-				ordinal,
-				text,
-				anchor,
-				page_number,
-				restricted,
-				created_at
+				artifact_id,
+				extractor_name,
+				extractor_version,
+				status,
+				failure_code,
+				failure_summary,
+				extracted_text_hash,
+				normalized_markdown_path,
+				started_at,
+				finished_at
 			)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-			ON CONFLICT(extraction_id, ordinal) DO UPDATE SET
-				source_id = excluded.source_id,
-				text = excluded.text,
-				anchor = excluded.anchor,
-				page_number = excluded.page_number,
-				restricted = excluded.restricted
+			VALUES (?, ?, ?, ?, 'succeeded', '', '', ?, ?, ?, ?)
 		`,
 			params.SourceID,
-			params.ExtractionID,
-			params.Ordinal,
-			params.Text,
-			params.Anchor,
-			nullInt64(params.PageNumber),
+			params.ArtifactID,
+			params.ExtractorName,
+			params.ExtractorVersion,
+			params.ExtractedTextHash,
+			params.NormalizedMarkdownPath,
+			formatTime(startedAt),
+			formatTime(finishedAt),
+		)
+		if err != nil {
+			return err
+		}
+		extractionID, err := result.LastInsertId()
+		if err != nil {
+			return err
+		}
+		extraction, err := scanKnowledgeExtraction(tx.QueryRowContext(ctx, `
+			SELECT id, source_id, artifact_id, extractor_name, extractor_version, status, failure_code, failure_summary, extracted_text_hash, normalized_markdown_path, started_at, finished_at
+			FROM knowledge_extractions
+			WHERE id = ?
+		`, extractionID))
+		if err != nil {
+			return err
+		}
+
+		chunks := make([]KnowledgeChunk, 0, len(params.Chunks))
+		for ordinal, chunkParams := range params.Chunks {
+			chunkParams.SourceID = params.SourceID
+			chunkParams.ExtractionID = extraction.ID
+			if chunkParams.Ordinal == 0 && ordinal > 0 {
+				chunkParams.Ordinal = ordinal
+			}
+			chunk, err := store.recordKnowledgeChunkTx(ctx, tx, chunkParams, now, false)
+			if err != nil {
+				return err
+			}
+			chunks = append(chunks, chunk)
+		}
+
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE knowledge_sources
+			SET title = ?,
+				scope = ?,
+				scope_key = ?,
+				restricted = ?,
+				source_kind = ?,
+				source_class = ?,
+				lifecycle = 'ready',
+				manifest_path = ?,
+				current_artifact_id = ?,
+				current_extraction_id = ?,
+				updated_at = ?
+			WHERE id = ?
+		`,
+			params.Title,
+			params.Scope,
+			params.ScopeKey,
 			boolToInt(params.Restricted),
+			params.SourceKind,
+			params.SourceClass,
+			params.ManifestPath,
+			params.ArtifactID,
+			extraction.ID,
 			formatTime(now),
+			params.SourceID,
 		); err != nil {
 			return err
 		}
 
-		record, err := scanKnowledgeChunk(tx.QueryRowContext(ctx, `
-			SELECT id, source_id, extraction_id, ordinal, text, anchor, page_number, restricted, created_at
-			FROM knowledge_chunks
-			WHERE extraction_id = ? AND ordinal = ?
-		`, params.ExtractionID, params.Ordinal))
+		source, err := store.getKnowledgeSourceTx(ctx, tx, params.SourceID)
 		if err != nil {
 			return err
 		}
-		chunk = record
+		for _, chunk := range chunks {
+			if err := store.indexKnowledgeChunkTx(ctx, tx, IndexKnowledgeChunkParams{ChunkID: chunk.ID}); err != nil {
+				return err
+			}
+		}
 
-		return store.indexKnowledgeChunkTx(ctx, tx, IndexKnowledgeChunkParams{ChunkID: chunk.ID})
+		if err := appendEventTx(ctx, tx, eventInsert{
+			StreamType: runtimeevents.StreamKnowledgeSource,
+			StreamID:   source.ID,
+			EventType:  runtimeevents.EventKnowledgeExtractionRecorded,
+			Scope:      source.Scope,
+			Payload: runtimeevents.KnowledgeExtractionRecordedPayload{
+				SourceID:     source.ID,
+				SourceKey:    source.Key,
+				ArtifactID:   params.ArtifactID,
+				ExtractionID: extraction.ID,
+				Status:       extraction.Status,
+				Extractor:    extraction.ExtractorName + ":" + extraction.ExtractorVersion,
+			},
+			OccurredAt: now,
+		}); err != nil {
+			return err
+		}
+		if previousSource.Lifecycle != source.Lifecycle {
+			if err := appendKnowledgeLifecycleChangedTx(ctx, tx, previousSource, source, now); err != nil {
+				return err
+			}
+		}
+
+		ready = ReadyKnowledgeExtraction{
+			Source:     source,
+			Extraction: extraction,
+			Chunks:     chunks,
+		}
+		return nil
 	})
-
-	return chunk, err
+	return ready, err
 }
 
 func (store *Store) IndexKnowledgeChunk(ctx context.Context, params IndexKnowledgeChunkParams) error {

@@ -502,6 +502,32 @@ type RecordKnowledgeChunkParams struct {
 	Restricted   bool
 }
 
+type RecordReadyKnowledgeExtractionParams struct {
+	SourceID               int64
+	ArtifactID             int64
+	Key                    string
+	Title                  string
+	Scope                  string
+	ScopeKey               string
+	Restricted             bool
+	SourceKind             string
+	SourceClass            string
+	ManifestPath           string
+	ExtractorName          string
+	ExtractorVersion       string
+	ExtractedTextHash      string
+	NormalizedMarkdownPath string
+	StartedAt              *time.Time
+	FinishedAt             *time.Time
+	Chunks                 []RecordKnowledgeChunkParams
+}
+
+type ReadyKnowledgeExtraction struct {
+	Source     KnowledgeSource
+	Extraction KnowledgeExtraction
+	Chunks     []KnowledgeChunk
+}
+
 type IndexKnowledgeChunkParams struct {
 	ChunkID  int64
 	Topics   []string

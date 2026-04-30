@@ -259,6 +259,103 @@ func TestServiceReingestPreservesPriorNormalizedSnapshot(t *testing.T) {
 	}
 }
 
+func TestServiceRefreshUsesManifestAsSourceDeclaration(t *testing.T) {
+	ctx := context.Background()
+	service, repoRoot, _ := newTestService(t)
+
+	result, err := service.Ingest(ctx, IngestParams{
+		Path:       filepath.Join("testdata", "manual.md"),
+		Key:        "refresh-manual",
+		Title:      "Manual",
+		Scope:      "global",
+		ScopeKey:   "global",
+		Restricted: true,
+		SourceKind: "manual",
+	})
+	if err != nil {
+		t.Fatalf("Ingest() error = %v", err)
+	}
+
+	manifestPath := filepath.Join(repoRoot, "memory", "knowledge", "refresh-manual.md")
+	manifest, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatalf("ReadFile(manifest) error = %v", err)
+	}
+	updatedManifest := strings.Replace(string(manifest), "title: Manual", "title: Refreshed Manual", 1)
+	if err := os.WriteFile(manifestPath, []byte(updatedManifest), 0o644); err != nil {
+		t.Fatalf("WriteFile(manifest) error = %v", err)
+	}
+
+	refreshed, err := service.Refresh(ctx, "refresh-manual")
+	if err != nil {
+		t.Fatalf("Refresh() error = %v", err)
+	}
+	if refreshed.Source.Title != "Refreshed Manual" {
+		t.Fatalf("refreshed title = %q, want manifest title", refreshed.Source.Title)
+	}
+	if result.Source.CurrentExtractionID == nil || refreshed.Source.CurrentExtractionID == nil || *result.Source.CurrentExtractionID == *refreshed.Source.CurrentExtractionID {
+		t.Fatalf("refresh did not promote a new extraction: before=%v after=%v", result.Source.CurrentExtractionID, refreshed.Source.CurrentExtractionID)
+	}
+}
+
+func TestServiceReadyPromotionIsAtomicWhenChunksFail(t *testing.T) {
+	ctx := context.Background()
+	service, _, _ := newTestService(t)
+
+	result, err := service.Ingest(ctx, IngestParams{
+		Path:       filepath.Join("testdata", "pilot-contract.txt"),
+		Key:        "atomic-contract",
+		Title:      "Atomic Contract",
+		Scope:      "global",
+		ScopeKey:   "global",
+		Restricted: true,
+		SourceKind: "pilot_contract",
+	})
+	if err != nil {
+		t.Fatalf("Ingest() error = %v", err)
+	}
+	if result.Source.CurrentExtractionID == nil {
+		t.Fatalf("CurrentExtractionID is nil")
+	}
+	beforeExtractionID := *result.Source.CurrentExtractionID
+
+	_, err = service.Store.RecordReadyKnowledgeExtraction(ctx, sqlite.RecordReadyKnowledgeExtractionParams{
+		SourceID:               result.Source.ID,
+		ArtifactID:             result.Artifact.ID,
+		Key:                    result.Source.Key,
+		Title:                  "Should Not Promote",
+		Scope:                  result.Source.Scope,
+		ScopeKey:               result.Source.ScopeKey,
+		Restricted:             result.Source.Restricted,
+		SourceKind:             result.Source.SourceKind,
+		SourceClass:            string(result.Source.SourceClass),
+		ManifestPath:           result.Source.ManifestPath,
+		ExtractorName:          result.Extraction.ExtractorName,
+		ExtractorVersion:       result.Extraction.ExtractorVersion,
+		ExtractedTextHash:      result.Extraction.ExtractedTextHash,
+		NormalizedMarkdownPath: result.Extraction.NormalizedMarkdownPath,
+		Chunks: []sqlite.RecordKnowledgeChunkParams{{
+			Ordinal:    0,
+			Text:       "   ",
+			Restricted: true,
+		}},
+	})
+	if err == nil {
+		t.Fatalf("RecordReadyKnowledgeExtraction() error = nil, want chunk failure")
+	}
+
+	after, err := service.Show(ctx, "atomic-contract")
+	if err != nil {
+		t.Fatalf("Show() error = %v", err)
+	}
+	if after.Source.Title != "Atomic Contract" {
+		t.Fatalf("title = %q, want prior ready source title", after.Source.Title)
+	}
+	if after.Source.CurrentExtractionID == nil || *after.Source.CurrentExtractionID != beforeExtractionID {
+		t.Fatalf("current extraction = %v, want %d", after.Source.CurrentExtractionID, beforeExtractionID)
+	}
+}
+
 func newTestService(t *testing.T) (Service, string, string) {
 	t.Helper()
 

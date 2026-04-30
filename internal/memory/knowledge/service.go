@@ -72,60 +72,32 @@ func (s Service) Ingest(ctx context.Context, params IngestParams) (IngestResult,
 	}
 	textHash := sha256.Sum256([]byte(extraction.Text))
 	now := s.now()
-	recordedExtraction, err := s.Store.RecordKnowledgeExtraction(ctx, sqlite.RecordKnowledgeExtractionParams{
+	ready, err := s.Store.RecordReadyKnowledgeExtraction(ctx, sqlite.RecordReadyKnowledgeExtractionParams{
 		SourceID:               source.ID,
 		ArtifactID:             artifact.ID,
+		Key:                    manifest.Key,
+		Title:                  manifest.Title,
+		Scope:                  manifest.Scope,
+		ScopeKey:               manifest.ScopeKey,
+		Restricted:             manifest.Restricted,
+		SourceKind:             manifest.SourceKind,
+		SourceClass:            manifest.SourceClass,
+		ManifestPath:           manifestPath,
 		ExtractorName:          extraction.ExtractorName,
 		ExtractorVersion:       extraction.ExtractorVersion,
-		Status:                 "succeeded",
-		Lifecycle:              string(LifecycleExtracted),
 		ExtractedTextHash:      "sha256:" + hex.EncodeToString(textHash[:]),
 		NormalizedMarkdownPath: normalizedPath,
 		StartedAt:              &now,
 		FinishedAt:             &now,
-	})
-	if err != nil {
-		return IngestResult{}, err
-	}
-
-	chunkText := strings.TrimSpace(extraction.Text)
-	if chunkText != "" {
-		anchor := ""
-		if len(extraction.Anchors) > 0 {
-			anchor = extraction.Anchors[0]
-		}
-		if _, err := s.Store.RecordKnowledgeChunk(ctx, sqlite.RecordKnowledgeChunkParams{
-			SourceID:     source.ID,
-			ExtractionID: recordedExtraction.ID,
-			Ordinal:      0,
-			Text:         chunkText,
-			Anchor:       anchor,
-			Restricted:   manifest.Restricted,
-		}); err != nil {
-			return IngestResult{}, err
-		}
-	}
-
-	readySource, err := s.Store.UpsertKnowledgeSource(ctx, sqlite.UpsertKnowledgeSourceParams{
-		Key:                 manifest.Key,
-		Title:               manifest.Title,
-		Scope:               manifest.Scope,
-		ScopeKey:            manifest.ScopeKey,
-		Restricted:          manifest.Restricted,
-		SourceKind:          manifest.SourceKind,
-		SourceClass:         manifest.SourceClass,
-		Lifecycle:           string(LifecycleReady),
-		ManifestPath:        manifestPath,
-		CurrentArtifactID:   &artifact.ID,
-		CurrentExtractionID: &recordedExtraction.ID,
+		Chunks:                 extractionChunks(source.ID, 0, extraction, manifest.Restricted),
 	})
 	if err != nil {
 		return IngestResult{}, err
 	}
 	return IngestResult{
-		Source:                 sourceFromStore(readySource),
+		Source:                 sourceFromStore(ready.Source),
 		Artifact:               artifact,
-		Extraction:             recordedExtraction,
+		Extraction:             ready.Extraction,
 		ManifestPath:           manifestPath,
 		NormalizedMarkdownPath: normalizedPath,
 	}, nil
@@ -173,11 +145,19 @@ func (s Service) Refresh(ctx context.Context, key string) (RefreshResult, error)
 	if source.CurrentArtifactID == nil {
 		return RefreshResult{}, fmt.Errorf("knowledge source %q has no current artifact", source.Key)
 	}
+	manifestPath := canonicalManifestPath(source.Key)
+	manifest, err := s.readManifest(manifestPath)
+	if err != nil {
+		return RefreshResult{}, err
+	}
 	artifact, err := s.Store.GetKnowledgeArtifact(ctx, *source.CurrentArtifactID)
 	if err != nil {
 		return RefreshResult{}, err
 	}
-	sourceClass := SourceClass(source.SourceClass)
+	if manifest.ArtifactSHA256 != artifact.SHA256 {
+		return RefreshResult{}, fmt.Errorf("knowledge manifest artifact_sha256 = %q, want %q", manifest.ArtifactSHA256, artifact.SHA256)
+	}
+	sourceClass := SourceClass(manifest.SourceClass)
 	if err := validateTask2SourceClass(sourceClass); err != nil {
 		return RefreshResult{}, err
 	}
@@ -185,64 +165,41 @@ func (s Service) Refresh(ctx context.Context, key string) (RefreshResult, error)
 	if err != nil {
 		return RefreshResult{}, err
 	}
-	normalizedPath, err := s.writeNormalizedMarkdown(source.Key, extraction.NormalizedMarkdown)
+	if manifest.Extractor != extraction.Extractor() {
+		return RefreshResult{}, fmt.Errorf("knowledge manifest extractor = %q, want %q", manifest.Extractor, extraction.Extractor())
+	}
+	normalizedPath, err := s.writeNormalizedMarkdown(manifest.Key, extraction.NormalizedMarkdown)
 	if err != nil {
 		return RefreshResult{}, err
 	}
 	textHash := sha256.Sum256([]byte(extraction.Text))
 	now := s.now()
-	recordedExtraction, err := s.Store.RecordKnowledgeExtraction(ctx, sqlite.RecordKnowledgeExtractionParams{
+	ready, err := s.Store.RecordReadyKnowledgeExtraction(ctx, sqlite.RecordReadyKnowledgeExtractionParams{
 		SourceID:               source.ID,
 		ArtifactID:             artifact.ID,
+		Key:                    manifest.Key,
+		Title:                  manifest.Title,
+		Scope:                  manifest.Scope,
+		ScopeKey:               manifest.ScopeKey,
+		Restricted:             manifest.Restricted,
+		SourceKind:             manifest.SourceKind,
+		SourceClass:            manifest.SourceClass,
+		ManifestPath:           manifestPath,
 		ExtractorName:          extraction.ExtractorName,
 		ExtractorVersion:       extraction.ExtractorVersion,
-		Status:                 "succeeded",
-		Lifecycle:              string(LifecycleExtracted),
 		ExtractedTextHash:      "sha256:" + hex.EncodeToString(textHash[:]),
 		NormalizedMarkdownPath: normalizedPath,
 		StartedAt:              &now,
 		FinishedAt:             &now,
-	})
-	if err != nil {
-		return RefreshResult{}, err
-	}
-	if strings.TrimSpace(extraction.Text) != "" {
-		anchor := ""
-		if len(extraction.Anchors) > 0 {
-			anchor = extraction.Anchors[0]
-		}
-		if _, err := s.Store.RecordKnowledgeChunk(ctx, sqlite.RecordKnowledgeChunkParams{
-			SourceID:     source.ID,
-			ExtractionID: recordedExtraction.ID,
-			Ordinal:      0,
-			Text:         strings.TrimSpace(extraction.Text),
-			Anchor:       anchor,
-			Restricted:   source.Restricted,
-		}); err != nil {
-			return RefreshResult{}, err
-		}
-	}
-
-	readySource, err := s.Store.UpsertKnowledgeSource(ctx, sqlite.UpsertKnowledgeSourceParams{
-		Key:                 source.Key,
-		Title:               source.Title,
-		Scope:               source.Scope,
-		ScopeKey:            source.ScopeKey,
-		Restricted:          source.Restricted,
-		SourceKind:          source.SourceKind,
-		SourceClass:         source.SourceClass,
-		Lifecycle:           string(LifecycleReady),
-		ManifestPath:        source.ManifestPath,
-		CurrentArtifactID:   &artifact.ID,
-		CurrentExtractionID: &recordedExtraction.ID,
+		Chunks:                 extractionChunks(source.ID, 0, extraction, manifest.Restricted),
 	})
 	if err != nil {
 		return RefreshResult{}, err
 	}
 	return RefreshResult{
-		Source:                 sourceFromStore(readySource),
+		Source:                 sourceFromStore(ready.Source),
 		Artifact:               artifact,
-		Extraction:             recordedExtraction,
+		Extraction:             ready.Extraction,
 		NormalizedMarkdownPath: normalizedPath,
 	}, nil
 }
@@ -366,4 +323,23 @@ func restrictedByDefault(sourceKind string) bool {
 	default:
 		return false
 	}
+}
+
+func extractionChunks(sourceID int64, extractionID int64, extraction extractionResult, restricted bool) []sqlite.RecordKnowledgeChunkParams {
+	chunkText := strings.TrimSpace(extraction.Text)
+	if chunkText == "" {
+		return nil
+	}
+	anchor := ""
+	if len(extraction.Anchors) > 0 {
+		anchor = extraction.Anchors[0]
+	}
+	return []sqlite.RecordKnowledgeChunkParams{{
+		SourceID:     sourceID,
+		ExtractionID: extractionID,
+		Ordinal:      0,
+		Text:         chunkText,
+		Anchor:       anchor,
+		Restricted:   restricted,
+	}}
 }
