@@ -110,7 +110,11 @@ func Run(ctx context.Context, root string, args []string, stdin io.Reader, stdou
 }
 
 func runDoctor(ctx context.Context, app bootstrap.App, args []string, stdout io.Writer) error {
-	report, err := healthsvc.Service{DB: app.Store.DB()}.Doctor(ctx, len(app.RegistryDiagnostics) == 0)
+	report, err := healthsvc.Service{
+		DB:       app.Store.DB(),
+		RepoRoot: app.RepoRoot,
+		Env:      doctorEnv(),
+	}.Doctor(ctx, len(app.RegistryDiagnostics) == 0)
 	if err != nil {
 		return err
 	}
@@ -144,6 +148,16 @@ func runtimeEnv() map[string]string {
 	return map[string]string{
 		"ODIN_ROOT":      os.Getenv("ODIN_ROOT"),
 		"ODIN_HTTP_ADDR": os.Getenv("ODIN_HTTP_ADDR"),
+	}
+}
+
+func doctorEnv() map[string]string {
+	return map[string]string{
+		"ODIN_DRY_RUN":     os.Getenv("ODIN_DRY_RUN"),
+		"ODIN_KILL_SWITCH": os.Getenv("ODIN_KILL_SWITCH"),
+		"ODIN_PROFILE":     os.Getenv("ODIN_PROFILE"),
+		"GITHUB_TOKEN":     os.Getenv("GITHUB_TOKEN"),
+		"GH_TOKEN":         os.Getenv("GH_TOKEN"),
 	}
 }
 

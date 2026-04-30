@@ -4,6 +4,11 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -19,6 +24,7 @@ type Check struct {
 	Name       string            `json:"name"`
 	Status     Status            `json:"status"`
 	Summary    string            `json:"summary"`
+	Detail     string            `json:"detail,omitempty"`
 	Details    map[string]string `json:"details,omitempty"`
 	ObservedAt time.Time         `json:"observed_at"`
 }
@@ -44,9 +50,13 @@ type Config struct {
 }
 
 type Service struct {
-	DB     *sql.DB
-	Config Config
-	Now    func() time.Time
+	DB         *sql.DB
+	RepoRoot   string
+	Config     Config
+	Env        map[string]string
+	LookPath   func(string) (string, error)
+	RunCommand func(context.Context, string, ...string) error
+	Now        func() time.Time
 }
 
 func DefaultConfig() Config {
@@ -144,6 +154,11 @@ func (service Service) Doctor(ctx context.Context, registryHealthy bool) (Report
 	}
 	report.Checks = append(report.Checks, sourceCheck)
 	report.Status = combineStatus(report.Status, sourceCheck.Status)
+
+	for _, check := range service.readinessChecks(ctx, now) {
+		report.Checks = append(report.Checks, check)
+		report.Status = combineStatus(report.Status, check.Status)
+	}
 
 	return report, nil
 }
@@ -311,6 +326,279 @@ func (service Service) sourceCheck(ctx context.Context, now time.Time, config Co
 		check.Summary = "source freshness is stale"
 	}
 	return check, nil
+}
+
+func (service Service) readinessChecks(ctx context.Context, now time.Time) []Check {
+	if strings.TrimSpace(service.RepoRoot) == "" {
+		return nil
+	}
+
+	var checks []Check
+	codexPath, codexErr := service.lookPath("codex")
+	if codexErr != nil {
+		checks = append(checks,
+			service.simpleCheck("codex_cli", StatusDegraded, "codex executable not found", now),
+			service.simpleCheck("codex_exec", StatusDegraded, "codex executable missing", now),
+		)
+	} else {
+		checks = append(checks, Check{
+			Name:       "codex_cli",
+			Status:     StatusHealthy,
+			Summary:    "codex executable found",
+			Detail:     "codex executable found",
+			Details:    map[string]string{"path": codexPath},
+			ObservedAt: now,
+		})
+		if err := service.runCommand(ctx, "codex", "exec", "--help"); err != nil {
+			checks = append(checks, Check{
+				Name:       "codex_exec",
+				Status:     StatusDegraded,
+				Summary:    "codex exec is not available",
+				Detail:     "codex exec is not available",
+				Details:    map[string]string{"error": redactTokenLike(err.Error())},
+				ObservedAt: now,
+			})
+		} else {
+			checks = append(checks, service.simpleCheck("codex_exec", StatusHealthy, "codex exec available", now))
+		}
+	}
+
+	checks = append(checks,
+		service.pathCheck("odin_e2e", "odin e2e fixtures available", []string{
+			"fixtures/e2e/github-readonly-intake.yaml",
+			"internal/e2e/run.go",
+		}, now),
+		service.makeE2ECheck(now),
+		service.fileContainsCheck("agents_e2e_rule", "AGENTS.md e2e rule present", "AGENTS.md", []string{
+			"Required verification for Odin-OS changes",
+			"make odin-e2e-local",
+		}, now),
+		service.fileContainsCheck("workflow_e2e_rule", "WORKFLOW.md e2e rule present", "WORKFLOW.md", []string{
+			"make odin-e2e-local",
+		}, now),
+		service.githubTokenCheck(now),
+		service.modeCheck("dry_run_mode", "dry-run mode", "ODIN_DRY_RUN", now),
+		service.killSwitchCheck(now),
+	)
+
+	return checks
+}
+
+func (service Service) pathCheck(name string, summary string, relativePaths []string, now time.Time) Check {
+	missing := make([]string, 0)
+	for _, relativePath := range relativePaths {
+		if _, err := os.Stat(filepath.Join(service.RepoRoot, filepath.FromSlash(relativePath))); err != nil {
+			missing = append(missing, relativePath)
+		}
+	}
+	if len(missing) > 0 {
+		return Check{
+			Name:       name,
+			Status:     StatusDegraded,
+			Summary:    "required files are missing",
+			Detail:     "required files are missing",
+			Details:    map[string]string{"missing": strings.Join(missing, ",")},
+			ObservedAt: now,
+		}
+	}
+	return service.simpleCheck(name, StatusHealthy, summary, now)
+}
+
+func (service Service) makeE2ECheck(now time.Time) Check {
+	makefile, err := os.ReadFile(filepath.Join(service.RepoRoot, "Makefile"))
+	if err != nil {
+		return Check{
+			Name:       "odin_e2e_command",
+			Status:     StatusDegraded,
+			Summary:    "Makefile not readable",
+			Detail:     "Makefile not readable",
+			Details:    map[string]string{"error": err.Error()},
+			ObservedAt: now,
+		}
+	}
+	hasTarget := strings.Contains(string(makefile), "odin-e2e-local:")
+	hasScript := fileExists(filepath.Join(service.RepoRoot, "scripts", "odin-e2e-local.sh"))
+	if !hasTarget || !hasScript {
+		return Check{
+			Name:    "odin_e2e_command",
+			Status:  StatusDegraded,
+			Summary: "make odin-e2e-local is not available",
+			Detail:  "make odin-e2e-local is not available",
+			Details: map[string]string{
+				"make_target": fmt.Sprintf("%t", hasTarget),
+				"script":      fmt.Sprintf("%t", hasScript),
+			},
+			ObservedAt: now,
+		}
+	}
+	return service.simpleCheck("odin_e2e_command", StatusHealthy, "make odin-e2e-local available", now)
+}
+
+func (service Service) fileContainsCheck(name string, summary string, relativePath string, required []string, now time.Time) Check {
+	content, err := os.ReadFile(filepath.Join(service.RepoRoot, filepath.FromSlash(relativePath)))
+	if err != nil {
+		return Check{
+			Name:       name,
+			Status:     StatusDegraded,
+			Summary:    relativePath + " not readable",
+			Detail:     relativePath + " not readable",
+			Details:    map[string]string{"error": err.Error()},
+			ObservedAt: now,
+		}
+	}
+	text := string(content)
+	missing := make([]string, 0)
+	for _, value := range required {
+		if !strings.Contains(text, value) {
+			missing = append(missing, value)
+		}
+	}
+	if len(missing) > 0 {
+		return Check{
+			Name:       name,
+			Status:     StatusDegraded,
+			Summary:    "required e2e rule text is missing",
+			Detail:     "required e2e rule text is missing",
+			Details:    map[string]string{"missing": strings.Join(missing, ",")},
+			ObservedAt: now,
+		}
+	}
+	return service.simpleCheck(name, StatusHealthy, summary, now)
+}
+
+func (service Service) githubTokenCheck(now time.Time) Check {
+	if parseBool(service.env("ODIN_DRY_RUN")) {
+		return Check{
+			Name:       "github_token",
+			Status:     StatusHealthy,
+			Summary:    "github token not required for dry-run",
+			Detail:     "github token not required for dry-run",
+			Details:    map[string]string{"required": "false"},
+			ObservedAt: now,
+		}
+	}
+	if service.env("GITHUB_TOKEN") != "" || service.env("GH_TOKEN") != "" {
+		return Check{
+			Name:       "github_token",
+			Status:     StatusHealthy,
+			Summary:    "github token present",
+			Detail:     "github token present",
+			Details:    map[string]string{"required": "true", "present": "true"},
+			ObservedAt: now,
+		}
+	}
+	if !strings.Contains(strings.ToLower(service.env("ODIN_PROFILE")), "github") {
+		return Check{
+			Name:       "github_token",
+			Status:     StatusHealthy,
+			Summary:    "github token not required for current mode",
+			Detail:     "github token not required for current mode",
+			Details:    map[string]string{"required": "false", "present": "false"},
+			ObservedAt: now,
+		}
+	}
+	return Check{
+		Name:       "github_token",
+		Status:     StatusDegraded,
+		Summary:    "github token missing outside dry-run",
+		Detail:     "github token missing outside dry-run",
+		Details:    map[string]string{"required": "true", "present": "false"},
+		ObservedAt: now,
+	}
+}
+
+func (service Service) modeCheck(name string, label string, envName string, now time.Time) Check {
+	enabled := parseBool(service.env(envName))
+	status := "disabled"
+	if enabled {
+		status = "enabled"
+	}
+	return Check{
+		Name:       name,
+		Status:     StatusHealthy,
+		Summary:    label + " " + status,
+		Detail:     label + " " + status,
+		Details:    map[string]string{"status": status},
+		ObservedAt: now,
+	}
+}
+
+func (service Service) killSwitchCheck(now time.Time) Check {
+	enabled := parseBool(service.env("ODIN_KILL_SWITCH"))
+	status := StatusHealthy
+	statusText := "disabled"
+	if enabled {
+		status = StatusDegraded
+		statusText = "enabled"
+	}
+	return Check{
+		Name:       "kill_switch",
+		Status:     status,
+		Summary:    "kill switch " + statusText,
+		Detail:     "kill switch " + statusText,
+		Details:    map[string]string{"status": statusText},
+		ObservedAt: now,
+	}
+}
+
+func (service Service) simpleCheck(name string, status Status, summary string, now time.Time) Check {
+	return Check{
+		Name:       name,
+		Status:     status,
+		Summary:    summary,
+		Detail:     summary,
+		ObservedAt: now,
+	}
+}
+
+func (service Service) env(name string) string {
+	if service.Env != nil {
+		return service.Env[name]
+	}
+	return os.Getenv(name)
+}
+
+func (service Service) lookPath(name string) (string, error) {
+	if service.LookPath != nil {
+		return service.LookPath(name)
+	}
+	return exec.LookPath(name)
+}
+
+func (service Service) runCommand(ctx context.Context, name string, args ...string) error {
+	if service.RunCommand != nil {
+		return service.RunCommand(ctx, name, args...)
+	}
+	commandCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	command := exec.CommandContext(commandCtx, name, args...)
+	command.Stdout = io.Discard
+	command.Stderr = io.Discard
+	return command.Run()
+}
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+func parseBool(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "1", "true", "yes", "on", "enabled":
+		return true
+	default:
+		return false
+	}
+}
+
+func redactTokenLike(value string) string {
+	redacted := value
+	for _, envName := range []string{"GITHUB_TOKEN", "GH_TOKEN", "API_TOKEN", "ODIN_TRADEBOARD_API_TOKEN"} {
+		if token := os.Getenv(envName); token != "" {
+			redacted = strings.ReplaceAll(redacted, token, "[REDACTED]")
+		}
+	}
+	return redacted
 }
 
 func combineStatus(current Status, next Status) Status {
