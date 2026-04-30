@@ -1107,6 +1107,90 @@ func TestStorePendingKnowledgeExtractionDoesNotBecomeCurrent(t *testing.T) {
 	}
 }
 
+func TestStorePendingKnowledgeRefreshPreservesCurrentExtraction(t *testing.T) {
+	ctx := context.Background()
+	store := openMigratedTestStore(t, "knowledge-pending-refresh-current.db")
+	defer store.Close()
+
+	artifact, err := store.RecordKnowledgeArtifact(ctx, RecordKnowledgeArtifactParams{
+		SHA256:       "sha256:pending-refresh",
+		SizeBytes:    42,
+		SourceType:   "text",
+		MimeType:     "text/plain",
+		ArtifactPath: "knowledge/artifacts/pr/pending-refresh/source.txt",
+		OriginalPath: "/tmp/pending-refresh.txt",
+	})
+	if err != nil {
+		t.Fatalf("RecordKnowledgeArtifact() error = %v", err)
+	}
+	source, err := store.UpsertKnowledgeSource(ctx, UpsertKnowledgeSourceParams{
+		Key:               "pending-refresh",
+		Title:             "Pending Refresh",
+		Scope:             "global",
+		ScopeKey:          "global",
+		Restricted:        true,
+		SourceKind:        "manual",
+		SourceClass:       "text",
+		Lifecycle:         "artifact_available",
+		ManifestPath:      "memory/knowledge/pending-refresh.md",
+		CurrentArtifactID: &artifact.ID,
+	})
+	if err != nil {
+		t.Fatalf("UpsertKnowledgeSource() error = %v", err)
+	}
+	currentExtraction, err := store.RecordKnowledgeExtraction(ctx, RecordKnowledgeExtractionParams{
+		SourceID:          source.ID,
+		ArtifactID:        artifact.ID,
+		ExtractorName:     "plain_text",
+		ExtractorVersion:  "v1",
+		Status:            "succeeded",
+		Lifecycle:         "ready",
+		ExtractedTextHash: "sha256:pending-refresh-current",
+	})
+	if err != nil {
+		t.Fatalf("RecordKnowledgeExtraction(current) error = %v", err)
+	}
+	currentChunk, err := store.RecordKnowledgeChunk(ctx, RecordKnowledgeChunkParams{
+		SourceID:     source.ID,
+		ExtractionID: currentExtraction.ID,
+		Ordinal:      1,
+		Text:         "Current refresh baseline.",
+		Restricted:   true,
+	})
+	if err != nil {
+		t.Fatalf("RecordKnowledgeChunk(current) error = %v", err)
+	}
+
+	if _, err := store.RecordKnowledgeExtraction(ctx, RecordKnowledgeExtractionParams{
+		SourceID:         source.ID,
+		ArtifactID:       artifact.ID,
+		ExtractorName:    "plain_text",
+		ExtractorVersion: "v1",
+		Status:           "running",
+	}); err != nil {
+		t.Fatalf("RecordKnowledgeExtraction(running refresh) error = %v", err)
+	}
+
+	reloadedSource, err := store.GetKnowledgeSourceByKey(ctx, "pending-refresh")
+	if err != nil {
+		t.Fatalf("GetKnowledgeSourceByKey() error = %v", err)
+	}
+	if reloadedSource.Lifecycle != "ready" {
+		t.Fatalf("Lifecycle = %q, want ready while refresh runs", reloadedSource.Lifecycle)
+	}
+	if reloadedSource.CurrentExtractionID == nil || *reloadedSource.CurrentExtractionID != currentExtraction.ID {
+		t.Fatalf("CurrentExtractionID = %v, want existing current extraction %d preserved", reloadedSource.CurrentExtractionID, currentExtraction.ID)
+	}
+
+	results, err := store.SearchKnowledgeChunks(ctx, SearchKnowledgeChunksParams{Query: "baseline", Scope: "global", ScopeKey: "global"})
+	if err != nil {
+		t.Fatalf("SearchKnowledgeChunks() error = %v", err)
+	}
+	if len(results) != 1 || results[0].ChunkID != currentChunk.ID {
+		t.Fatalf("results = %+v, want existing current chunk %d searchable", results, currentChunk.ID)
+	}
+}
+
 func TestStoreSearchOnlyReturnsCurrentKnowledgeExtractionChunks(t *testing.T) {
 	ctx := context.Background()
 	store := openMigratedTestStore(t, "knowledge-current-extraction-search.db")
@@ -1245,6 +1329,7 @@ func TestStoreRejectsKnowledgeDomainPolicyViolations(t *testing.T) {
 	}
 
 	for _, manifestPath := range []string{
+		"memory/knowledge/.md",
 		"memory/knowledge/../bad.md",
 		"memory/knowledge//bad.md",
 		"memory/knowledge/nested/bad.md",

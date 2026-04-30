@@ -1945,19 +1945,21 @@ func (store *Store) RecordKnowledgeExtraction(ctx context.Context, params Record
 			currentExtractionID = nil
 		}
 
-		if _, err := tx.ExecContext(ctx, `
-			UPDATE knowledge_sources
-			SET current_artifact_id = ?, current_extraction_id = ?, lifecycle = ?, updated_at = ?
-			WHERE id = ?
-		`, params.ArtifactID, nullInt64(currentExtractionID), lifecycle, formatTime(now), params.SourceID); err != nil {
-			return err
-		}
-
 		updatedSource := source
-		updatedSource.CurrentArtifactID = &params.ArtifactID
-		updatedSource.CurrentExtractionID = currentExtractionID
-		updatedSource.Lifecycle = lifecycle
-		updatedSource.UpdatedAt = now
+		if lifecycle != "artifact_available" {
+			if _, err := tx.ExecContext(ctx, `
+				UPDATE knowledge_sources
+				SET current_artifact_id = ?, current_extraction_id = ?, lifecycle = ?, updated_at = ?
+				WHERE id = ?
+			`, params.ArtifactID, nullInt64(currentExtractionID), lifecycle, formatTime(now), params.SourceID); err != nil {
+				return err
+			}
+
+			updatedSource.CurrentArtifactID = &params.ArtifactID
+			updatedSource.CurrentExtractionID = currentExtractionID
+			updatedSource.Lifecycle = lifecycle
+			updatedSource.UpdatedAt = now
+		}
 
 		if err := appendEventTx(ctx, tx, eventInsert{
 			StreamType: runtimeevents.StreamKnowledgeSource,
@@ -2321,7 +2323,8 @@ func validateKnowledgeManifestPath(manifestPath string) error {
 		return fmt.Errorf("knowledge source manifest path %q must be under memory/knowledge/ and end in .md", manifestPath)
 	}
 	manifestName := strings.TrimPrefix(manifestPath, "memory/knowledge/")
-	if manifestName == "" || strings.Contains(manifestName, "/") || strings.Contains(manifestName, "..") {
+	stem := strings.TrimSuffix(manifestName, ".md")
+	if stem == "" || manifestName == "" || strings.Contains(manifestName, "/") || strings.Contains(manifestName, "..") {
 		return fmt.Errorf("knowledge source manifest path %q must name one markdown file under memory/knowledge", manifestPath)
 	}
 	return nil

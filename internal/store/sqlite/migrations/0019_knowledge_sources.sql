@@ -23,6 +23,7 @@ CREATE TABLE IF NOT EXISTS knowledge_sources (
   manifest_path TEXT NOT NULL UNIQUE CHECK (
     substr(manifest_path, 1, 17) = 'memory/knowledge/'
     AND substr(manifest_path, -3) = '.md'
+    AND length(substr(manifest_path, 18)) > 3
     AND instr(substr(manifest_path, 18), '/') = 0
     AND instr(manifest_path, '..') = 0
   ),
@@ -85,6 +86,7 @@ CREATE TABLE IF NOT EXISTS knowledge_related_sources (
   declared_by_manifest_path TEXT NOT NULL CHECK (
     substr(declared_by_manifest_path, 1, 17) = 'memory/knowledge/'
     AND substr(declared_by_manifest_path, -3) = '.md'
+    AND length(substr(declared_by_manifest_path, 18)) > 3
     AND instr(substr(declared_by_manifest_path, 18), '/') = 0
     AND instr(declared_by_manifest_path, '..') = 0
   ),
