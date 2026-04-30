@@ -118,7 +118,7 @@ func markdownAnchors(markdown string) []string {
 		}
 		slug := strings.Trim(headingAnchorPattern.ReplaceAllString(strings.ToLower(title), "-"), "-")
 		if slug != "" {
-			anchors = append(anchors, "heading:"+slug)
+			anchors = append(anchors, "section:"+slug)
 		}
 	}
 	return anchors
@@ -128,5 +128,5 @@ func textAnchors(text string) []string {
 	if strings.TrimSpace(text) == "" {
 		return nil
 	}
-	return []string{"text:start"}
+	return []string{"section:start"}
 }

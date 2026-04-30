@@ -80,6 +80,34 @@ type RefreshResult struct {
 	NormalizedMarkdownPath string
 }
 
+type SearchParams struct {
+	Query    string
+	Scope    string
+	ScopeKey string
+	Limit    int
+}
+
+type SearchResult struct {
+	SourceID               int64
+	SourceKey              string
+	Title                  string
+	ManifestPath           string
+	ChunkID                int64
+	ExtractionID           int64
+	ArtifactID             int64
+	ArtifactSHA256         string
+	ExtractorName          string
+	ExtractorVersion       string
+	ExtractedTextHash      string
+	NormalizedMarkdownPath string
+	ExtractionFinishedAt   *time.Time
+	Snippet                string
+	Anchor                 string
+	PageNumber             *int64
+	Restricted             bool
+	Rank                   float64
+}
+
 type Source struct {
 	ID                  int64
 	Key                 string

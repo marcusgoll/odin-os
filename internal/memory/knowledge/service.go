@@ -18,6 +18,12 @@ import (
 
 var sourceKeyPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*[a-z0-9]$|^[a-z0-9]$`)
 
+const (
+	defaultSearchLimit        = 10
+	maxKnowledgeChunkChars    = 1800
+	maxRestrictedSnippetChars = 500
+)
+
 func (s Service) Ingest(ctx context.Context, params IngestParams) (IngestResult, error) {
 	params, sourcePath, err := s.normalizeIngestParams(params)
 	if err != nil {
@@ -92,6 +98,9 @@ func (s Service) Ingest(ctx context.Context, params IngestParams) (IngestResult,
 		Chunks:                 extractionChunks(source.ID, 0, extraction, manifest.Restricted),
 	})
 	if err != nil {
+		return IngestResult{}, err
+	}
+	if err := s.indexReadyKnowledgeMetadata(ctx, ready.Chunks, manifest.Topics, manifest.Entities); err != nil {
 		return IngestResult{}, err
 	}
 	return IngestResult{
@@ -196,12 +205,62 @@ func (s Service) Refresh(ctx context.Context, key string) (RefreshResult, error)
 	if err != nil {
 		return RefreshResult{}, err
 	}
+	if err := s.indexReadyKnowledgeMetadata(ctx, ready.Chunks, manifest.Topics, manifest.Entities); err != nil {
+		return RefreshResult{}, err
+	}
 	return RefreshResult{
 		Source:                 sourceFromStore(ready.Source),
 		Artifact:               artifact,
 		Extraction:             ready.Extraction,
 		NormalizedMarkdownPath: normalizedPath,
 	}, nil
+}
+
+func (s Service) Search(ctx context.Context, params SearchParams) ([]SearchResult, error) {
+	if s.Store == nil {
+		return nil, fmt.Errorf("knowledge service store is required")
+	}
+	params.Query = strings.TrimSpace(params.Query)
+	params.Scope = valueOrDefault(params.Scope, "global")
+	params.ScopeKey = valueOrDefault(params.ScopeKey, "global")
+	if params.Limit <= 0 {
+		params.Limit = defaultSearchLimit
+	}
+
+	results, err := s.Store.SearchKnowledgeChunks(ctx, sqlite.SearchKnowledgeChunksParams{
+		Query:    params.Query,
+		Scope:    params.Scope,
+		ScopeKey: params.ScopeKey,
+		Limit:    params.Limit,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	searchResults := make([]SearchResult, 0, len(results))
+	for _, result := range results {
+		searchResults = append(searchResults, SearchResult{
+			SourceID:               result.SourceID,
+			SourceKey:              result.SourceKey,
+			Title:                  result.Title,
+			ManifestPath:           result.ManifestPath,
+			ChunkID:                result.ChunkID,
+			ExtractionID:           result.ExtractionID,
+			ArtifactID:             result.ArtifactID,
+			ArtifactSHA256:         result.ArtifactSHA256,
+			ExtractorName:          result.ExtractorName,
+			ExtractorVersion:       result.ExtractorVersion,
+			ExtractedTextHash:      result.ExtractedTextHash,
+			NormalizedMarkdownPath: result.NormalizedMarkdownPath,
+			ExtractionFinishedAt:   result.ExtractionFinishedAt,
+			Snippet:                knowledgeSnippet(result.Text, result.Restricted),
+			Anchor:                 result.Anchor,
+			PageNumber:             result.PageNumber,
+			Restricted:             result.Restricted,
+			Rank:                   result.Rank,
+		})
+	}
+	return searchResults, nil
 }
 
 func (s Service) normalizeIngestParams(params IngestParams) (IngestParams, string, error) {
@@ -309,6 +368,22 @@ func (s Service) writeNormalizedMarkdown(key string, normalized string) (string,
 	return path, nil
 }
 
+func (s Service) indexReadyKnowledgeMetadata(ctx context.Context, chunks []sqlite.KnowledgeChunk, topics []string, entities []string) error {
+	if len(chunks) == 0 || (len(topics) == 0 && len(entities) == 0) {
+		return nil
+	}
+	for _, chunk := range chunks {
+		if err := s.Store.IndexKnowledgeChunk(ctx, sqlite.IndexKnowledgeChunkParams{
+			ChunkID:  chunk.ID,
+			Topics:   topics,
+			Entities: entities,
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (s Service) now() time.Time {
 	if s.Now != nil {
 		return s.Now().UTC()
@@ -326,20 +401,197 @@ func restrictedByDefault(sourceKind string) bool {
 }
 
 func extractionChunks(sourceID int64, extractionID int64, extraction extractionResult, restricted bool) []sqlite.RecordKnowledgeChunkParams {
-	chunkText := strings.TrimSpace(extraction.Text)
-	if chunkText == "" {
+	chunks := chunkExtraction(extraction)
+	if len(chunks) == 0 {
 		return nil
 	}
-	anchor := ""
-	if len(extraction.Anchors) > 0 {
-		anchor = extraction.Anchors[0]
+	params := make([]sqlite.RecordKnowledgeChunkParams, 0, len(chunks))
+	for ordinal, chunk := range chunks {
+		params = append(params, sqlite.RecordKnowledgeChunkParams{
+			SourceID:     sourceID,
+			ExtractionID: extractionID,
+			Ordinal:      ordinal,
+			Text:         chunk.Text,
+			Anchor:       chunk.Anchor,
+			Restricted:   restricted,
+		})
 	}
-	return []sqlite.RecordKnowledgeChunkParams{{
-		SourceID:     sourceID,
-		ExtractionID: extractionID,
-		Ordinal:      0,
-		Text:         chunkText,
-		Anchor:       anchor,
-		Restricted:   restricted,
-	}}
+	return params
+}
+
+type extractionChunk struct {
+	Text   string
+	Anchor string
+}
+
+func chunkExtraction(extraction extractionResult) []extractionChunk {
+	normalized := strings.TrimSpace(extraction.NormalizedMarkdown)
+	if hasMarkdownHeading(normalized) {
+		return chunkMarkdownSections(normalized)
+	}
+	return chunkPlainText(extraction.Text)
+}
+
+func hasMarkdownHeading(markdown string) bool {
+	for _, line := range strings.Split(markdown, "\n") {
+		if markdownHeadingTitle(line) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func chunkMarkdownSections(markdown string) []extractionChunk {
+	var chunks []extractionChunk
+	var sectionLines []string
+	anchor := "section:start"
+	flush := func() {
+		text := strings.TrimSpace(stripMarkdownMarkers(strings.Join(sectionLines, "\n")))
+		chunks = appendCappedKnowledgeChunks(chunks, text, anchor)
+		sectionLines = nil
+	}
+
+	for _, line := range strings.Split(markdown, "\n") {
+		if title := markdownHeadingTitle(line); title != "" {
+			flush()
+			anchor = "section:" + slugifyKnowledgeAnchor(title)
+		}
+		sectionLines = append(sectionLines, line)
+	}
+	flush()
+	return chunks
+}
+
+func markdownHeadingTitle(line string) string {
+	trimmed := strings.TrimSpace(line)
+	if !strings.HasPrefix(trimmed, "#") {
+		return ""
+	}
+	hashes := 0
+	for hashes < len(trimmed) && trimmed[hashes] == '#' {
+		hashes++
+	}
+	if hashes == len(trimmed) || trimmed[hashes] != ' ' {
+		return ""
+	}
+	return strings.TrimSpace(trimmed[hashes:])
+}
+
+func chunkPlainText(text string) []extractionChunk {
+	return appendCappedKnowledgeChunks(nil, strings.TrimSpace(text), "section:"+slugifyKnowledgeAnchor(firstWords(text, 8)))
+}
+
+func appendCappedKnowledgeChunks(chunks []extractionChunk, text string, anchor string) []extractionChunk {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return chunks
+	}
+	if anchor == "section:" {
+		anchor = "section:start"
+	}
+	paragraphs := splitParagraphs(text)
+	current := ""
+	partIndex := 0
+	for _, paragraph := range paragraphs {
+		if len(paragraph) > maxKnowledgeChunkChars {
+			chunks, partIndex = flushKnowledgeChunk(chunks, current, anchor, partIndex)
+			current = ""
+			for _, part := range splitLongText(paragraph, maxKnowledgeChunkChars) {
+				chunks = append(chunks, extractionChunk{Text: part, Anchor: anchorForChunkPart(anchor, partIndex)})
+				partIndex++
+			}
+			continue
+		}
+		next := paragraph
+		if current != "" {
+			next = current + "\n\n" + paragraph
+		}
+		if len(next) > maxKnowledgeChunkChars {
+			chunks, partIndex = flushKnowledgeChunk(chunks, current, anchor, partIndex)
+			current = paragraph
+			continue
+		}
+		current = next
+	}
+	chunks, _ = flushKnowledgeChunk(chunks, current, anchor, partIndex)
+	return chunks
+}
+
+func flushKnowledgeChunk(chunks []extractionChunk, text string, anchor string, partIndex int) ([]extractionChunk, int) {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return chunks, partIndex
+	}
+	return append(chunks, extractionChunk{Text: text, Anchor: anchorForChunkPart(anchor, partIndex)}), partIndex + 1
+}
+
+func splitParagraphs(text string) []string {
+	parts := regexp.MustCompile(`\n\s*\n`).Split(strings.TrimSpace(text), -1)
+	paragraphs := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			paragraphs = append(paragraphs, part)
+		}
+	}
+	return paragraphs
+}
+
+func splitLongText(text string, limit int) []string {
+	words := strings.Fields(text)
+	var parts []string
+	current := ""
+	for _, word := range words {
+		if current == "" {
+			current = word
+			continue
+		}
+		if len(current)+1+len(word) > limit {
+			parts = append(parts, current)
+			current = word
+			continue
+		}
+		current += " " + word
+	}
+	if current != "" {
+		parts = append(parts, current)
+	}
+	return parts
+}
+
+func anchorForChunkPart(anchor string, index int) string {
+	if index == 0 {
+		return anchor
+	}
+	return fmt.Sprintf("%s-%d", anchor, index+1)
+}
+
+func firstWords(text string, count int) string {
+	words := strings.Fields(text)
+	if len(words) == 0 {
+		return "start"
+	}
+	if len(words) > count {
+		words = words[:count]
+	}
+	return strings.Join(words, " ")
+}
+
+func slugifyKnowledgeAnchor(value string) string {
+	slug := strings.Trim(headingAnchorPattern.ReplaceAllString(strings.ToLower(strings.TrimSpace(value)), "-"), "-")
+	if slug == "" {
+		return "start"
+	}
+	return slug
+}
+
+func knowledgeSnippet(text string, restricted bool) string {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return ""
+	}
+	if len(text) <= maxRestrictedSnippetChars {
+		return text
+	}
+	return strings.TrimSpace(text[:maxRestrictedSnippetChars])
 }

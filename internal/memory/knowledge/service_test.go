@@ -160,6 +160,157 @@ func TestServiceDefaultsPilotContractToRestrictedManifestAndChunks(t *testing.T)
 	}
 }
 
+func TestServiceSearchReturnsRestrictedSnippetAndCitation(t *testing.T) {
+	ctx := context.Background()
+	service, _, _ := newTestService(t)
+	sourcePath := filepath.Join(t.TempDir(), "contract.md")
+	longSection := strings.Repeat("Vacation accrual rules apply to line pilots. ", 30)
+	if err := os.WriteFile(sourcePath, []byte("# Vacation Rules\n\n"+longSection+"\n\n## Scheduling\n\nReserve windows stay separate.\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(source) error = %v", err)
+	}
+
+	ingested, err := service.Ingest(ctx, IngestParams{
+		Path:       sourcePath,
+		Key:        "search-contract",
+		Title:      "Search Contract",
+		Scope:      "global",
+		ScopeKey:   "global",
+		Restricted: true,
+		SourceKind: "pilot_contract",
+	})
+	if err != nil {
+		t.Fatalf("Ingest() error = %v", err)
+	}
+
+	results, err := service.Search(ctx, SearchParams{Query: "vacation"})
+	if err != nil {
+		t.Fatalf("Search() error = %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("results = %+v, want one result", results)
+	}
+	result := results[0]
+	if result.SourceKey != "search-contract" || result.Title != "Search Contract" {
+		t.Fatalf("result = %+v, want source citation metadata", result)
+	}
+	if !result.Restricted {
+		t.Fatalf("Restricted = false, want restricted result")
+	}
+	if len(result.Snippet) > 500 {
+		t.Fatalf("Snippet length = %d, want <= 500", len(result.Snippet))
+	}
+	if !strings.Contains(strings.ToLower(result.Snippet), "vacation") {
+		t.Fatalf("Snippet = %q, want query text", result.Snippet)
+	}
+	if result.ManifestPath != "memory/knowledge/search-contract.md" || result.Anchor != "section:vacation-rules" {
+		t.Fatalf("result = %+v, want manifest path and section anchor", result)
+	}
+	if result.ArtifactID != ingested.Artifact.ID || result.ArtifactSHA256 != ingested.Artifact.SHA256 {
+		t.Fatalf("result = %+v, want artifact provenance", result)
+	}
+	if result.ExtractionID != ingested.Extraction.ID || result.ExtractorName != "markdown" || result.ExtractorVersion != "v1" {
+		t.Fatalf("result = %+v, want extraction provenance", result)
+	}
+	if result.ExtractedTextHash != ingested.Extraction.ExtractedTextHash || result.NormalizedMarkdownPath != ingested.NormalizedMarkdownPath {
+		t.Fatalf("result = %+v, want extracted output provenance", result)
+	}
+	if result.ExtractionFinishedAt == nil {
+		t.Fatalf("ExtractionFinishedAt is nil")
+	}
+}
+
+func TestServiceSearchExcludesNotReadySources(t *testing.T) {
+	ctx := context.Background()
+	service, _, _ := newTestService(t)
+
+	artifact, err := service.Store.RecordKnowledgeArtifact(ctx, sqlite.RecordKnowledgeArtifactParams{
+		SHA256:       "sha256:not-ready",
+		SizeBytes:    42,
+		SourceType:   "text",
+		MimeType:     "text/plain",
+		ArtifactPath: "knowledge/artifacts/no/not-ready/source.txt",
+		OriginalPath: "/tmp/not-ready.txt",
+	})
+	if err != nil {
+		t.Fatalf("RecordKnowledgeArtifact() error = %v", err)
+	}
+	source, err := service.Store.UpsertKnowledgeSource(ctx, sqlite.UpsertKnowledgeSourceParams{
+		Key:               "not-ready-contract",
+		Title:             "Not Ready Contract",
+		Scope:             "global",
+		ScopeKey:          "global",
+		Restricted:        true,
+		SourceKind:        "pilot_contract",
+		SourceClass:       "text",
+		Lifecycle:         "artifact_available",
+		ManifestPath:      "memory/knowledge/not-ready-contract.md",
+		CurrentArtifactID: &artifact.ID,
+	})
+	if err != nil {
+		t.Fatalf("UpsertKnowledgeSource() error = %v", err)
+	}
+	extraction, err := service.Store.RecordKnowledgeExtraction(ctx, sqlite.RecordKnowledgeExtractionParams{
+		SourceID:               source.ID,
+		ArtifactID:             artifact.ID,
+		ExtractorName:          "plain_text",
+		ExtractorVersion:       "v1",
+		Status:                 "succeeded",
+		ExtractedTextHash:      "sha256:not-ready-text",
+		NormalizedMarkdownPath: "state/knowledge/normalized/not-ready-contract.md",
+	})
+	if err != nil {
+		t.Fatalf("RecordKnowledgeExtraction() error = %v", err)
+	}
+	if _, err := service.Store.RecordKnowledgeChunk(ctx, sqlite.RecordKnowledgeChunkParams{
+		SourceID:     source.ID,
+		ExtractionID: extraction.ID,
+		Ordinal:      0,
+		Text:         "Vacation clause exists but source is not ready.",
+		Anchor:       "section:vacation",
+		Restricted:   true,
+	}); err != nil {
+		t.Fatalf("RecordKnowledgeChunk() error = %v", err)
+	}
+
+	results, err := service.Search(ctx, SearchParams{Query: "vacation"})
+	if err != nil {
+		t.Fatalf("Search() error = %v", err)
+	}
+	if len(results) != 0 {
+		t.Fatalf("results = %+v, want non-ready source excluded", results)
+	}
+}
+
+func TestServiceSearchIndexesTopicsAndEntities(t *testing.T) {
+	ctx := context.Background()
+	service, _, _ := newTestService(t)
+
+	_, err := service.Ingest(ctx, IngestParams{
+		Path:       filepath.Join("testdata", "pilot-contract.txt"),
+		Key:        "metadata-contract",
+		Title:      "Metadata Contract",
+		Scope:      "global",
+		ScopeKey:   "global",
+		Restricted: true,
+		SourceKind: "pilot_contract",
+		Topics:     []string{"vacation-bidding"},
+		Entities:   []string{"PSA"},
+	})
+	if err != nil {
+		t.Fatalf("Ingest() error = %v", err)
+	}
+
+	for _, query := range []string{"vacation-bidding", "PSA"} {
+		results, err := service.Search(ctx, SearchParams{Query: query})
+		if err != nil {
+			t.Fatalf("Search(%q) error = %v", query, err)
+		}
+		if len(results) != 1 || results[0].SourceKey != "metadata-contract" {
+			t.Fatalf("Search(%q) results = %+v, want metadata-contract", query, results)
+		}
+	}
+}
+
 func TestServiceReusesIdenticalArtifactBytesAcrossDifferentFilenames(t *testing.T) {
 	ctx := context.Background()
 	service, _, runtimeRoot := newTestService(t)
