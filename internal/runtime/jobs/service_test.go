@@ -3,6 +3,7 @@ package jobs
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -18,6 +19,7 @@ import (
 	"odin-os/internal/executors/router"
 	"odin-os/internal/runtime/checkpoints"
 	runtimeevents "odin-os/internal/runtime/events"
+	"odin-os/internal/runtime/recovery"
 	"odin-os/internal/store/sqlite"
 	"odin-os/internal/vcs/leases"
 )
@@ -309,6 +311,21 @@ func TestExecuteNextQueuedRecordsWorkerPanicAsFailedRun(t *testing.T) {
 	}
 	if !strings.Contains(run.Summary, "worker panic") {
 		t.Fatalf("run.Summary = %q, want worker panic context", run.Summary)
+	}
+	var artifact struct {
+		FailureAnalysis recovery.FailureAnalysis `json:"failure_analysis"`
+	}
+	if err := json.Unmarshal([]byte(run.ArtifactsJSON), &artifact); err != nil {
+		t.Fatalf("json.Unmarshal(run.ArtifactsJSON) error = %v\n%s", err, run.ArtifactsJSON)
+	}
+	if artifact.FailureAnalysis.Category != recovery.FailureUnknown {
+		t.Fatalf("failure category = %q, want unknown", artifact.FailureAnalysis.Category)
+	}
+	if !artifact.FailureAnalysis.FollowUp.Recommended {
+		t.Fatalf("follow-up recommendation = false, want true")
+	}
+	if artifact.FailureAnalysis.AutoApplyWorkflowChange {
+		t.Fatal("AutoApplyWorkflowChange = true, want false")
 	}
 
 	if _, err := store.GetActiveWorktreeLeaseByTaskRun(ctx, task.ID, run.ID); !errors.Is(err, sql.ErrNoRows) {

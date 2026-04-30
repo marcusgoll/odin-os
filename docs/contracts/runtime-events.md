@@ -130,6 +130,16 @@ Phase 11 extends the runtime event stream so deterministic self-heal actions are
 - every bounded recovery action attempt must append `recovery.action_executed`
 - escalation must appear in both recovery state and incident state, not only in logs
 
+## Failure analysis expectation
+
+Failed runs remain visible through `run.finished` events. When Odin can classify
+a failed Codex run, refactor, review, or migration step, the run artifacts may
+include a `failure_analysis` object following `docs/contracts/failure-analysis.md`.
+
+Failure analysis is advisory. It may recommend a follow-up issue, but it must
+not auto-apply prompt, skill, workflow, architecture, shim, or implementation
+changes.
+
 ## Skill lifecycle expectation
 
 Skill CRUD and invocation now append `skill.lifecycle_recorded` events when they run through Odin's runtime app path.

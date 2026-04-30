@@ -1856,6 +1856,8 @@ func (store *Store) FinishRunAndSetTaskStatus(ctx context.Context, params Finish
 		task Task
 		run  Run
 	)
+	artifactsJSON := normalizeArtifactsJSON(params.ArtifactsJSON)
+	terminalReason := strings.TrimSpace(params.TerminalReason)
 
 	err := store.withTx(ctx, func(tx *sql.Tx) error {
 		currentRun, currentTask, err := store.getRunWithTaskTx(ctx, tx, params.RunID)
@@ -1865,9 +1867,9 @@ func (store *Store) FinishRunAndSetTaskStatus(ctx context.Context, params Finish
 
 		if _, err := tx.ExecContext(ctx, `
 			UPDATE runs
-			SET status = ?, finished_at = ?, summary = ?
+			SET status = ?, finished_at = ?, summary = ?, terminal_reason = ?, artifacts_json = ?
 			WHERE id = ?
-		`, params.RunStatus, formatTime(now), params.Summary, params.RunID); err != nil {
+		`, params.RunStatus, formatTime(now), params.Summary, terminalReason, artifactsJSON, params.RunID); err != nil {
 			return err
 		}
 		if _, err := tx.ExecContext(ctx, `
@@ -1889,6 +1891,8 @@ func (store *Store) FinishRunAndSetTaskStatus(ctx context.Context, params Finish
 		currentRun.Status = params.RunStatus
 		currentRun.FinishedAt = &now
 		currentRun.Summary = params.Summary
+		currentRun.TerminalReason = terminalReason
+		currentRun.ArtifactsJSON = artifactsJSON
 
 		projectID := currentTask.ProjectID
 		if err := appendEventTx(ctx, tx, eventInsert{
@@ -1927,6 +1931,8 @@ func (store *Store) FailRunAndRetryTask(ctx context.Context, params FailRunAndRe
 		task Task
 		run  Run
 	)
+	artifactsJSON := normalizeArtifactsJSON(params.ArtifactsJSON)
+	terminalReason := strings.TrimSpace(params.TerminalReason)
 
 	err := store.withTx(ctx, func(tx *sql.Tx) error {
 		currentRun, currentTask, err := store.getRunWithTaskTx(ctx, tx, params.RunID)
@@ -1936,9 +1942,9 @@ func (store *Store) FailRunAndRetryTask(ctx context.Context, params FailRunAndRe
 
 		if _, err := tx.ExecContext(ctx, `
 			UPDATE runs
-			SET status = ?, finished_at = ?, summary = ?
+			SET status = ?, finished_at = ?, summary = ?, terminal_reason = ?, artifacts_json = ?
 			WHERE id = ?
-		`, "failed", formatTime(now), params.Summary, params.RunID); err != nil {
+		`, "failed", formatTime(now), params.Summary, terminalReason, artifactsJSON, params.RunID); err != nil {
 			return err
 		}
 		if _, err := tx.ExecContext(ctx, `
@@ -1960,6 +1966,8 @@ func (store *Store) FailRunAndRetryTask(ctx context.Context, params FailRunAndRe
 		currentRun.Status = "failed"
 		currentRun.FinishedAt = &now
 		currentRun.Summary = params.Summary
+		currentRun.TerminalReason = terminalReason
+		currentRun.ArtifactsJSON = artifactsJSON
 
 		projectID := currentTask.ProjectID
 		if err := appendEventTx(ctx, tx, eventInsert{
