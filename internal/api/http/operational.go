@@ -1,9 +1,14 @@
 package httpapi
 
 import (
+	"context"
+	"crypto/subtle"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"net/http"
+	"strconv"
+	"strings"
 	"time"
 
 	"odin-os/internal/core/workspaces"
@@ -18,7 +23,29 @@ type Dependencies struct {
 	ReadModels      projections.Queryer
 	RegistryHealthy bool
 	Now             func() time.Time
+	AdminToken      string
+	Admin           AdminActions
+	Tmux            TmuxStatusProvider
 }
+
+type AdminActions interface {
+	KillSwitchOn(context.Context) error
+	KillSwitchOff(context.Context) error
+	PauseIssue(context.Context, int64) error
+	ResumeIssue(context.Context, int64) error
+}
+
+type TmuxStatusProvider interface {
+	Status(context.Context) (TmuxStatus, error)
+}
+
+type TmuxStatus struct {
+	Available bool   `json:"available"`
+	Source    string `json:"source"`
+	Error     string `json:"error,omitempty"`
+}
+
+var ErrAdminActionNotImplemented = errors.New("admin action not implemented")
 
 func NewOperationalHandler(deps Dependencies) http.Handler {
 	now := deps.Now
@@ -29,14 +56,16 @@ func NewOperationalHandler(deps Dependencies) http.Handler {
 	}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/healthz", func(writer http.ResponseWriter, request *http.Request) {
+	healthHandler := func(writer http.ResponseWriter, request *http.Request) {
 		report, err := deps.Health.Doctor(request.Context(), deps.RegistryHealthy)
 		if err != nil {
 			http.Error(writer, err.Error(), http.StatusServiceUnavailable)
 			return
 		}
 		writeJSON(writer, http.StatusOK, report)
-	})
+	}
+	mux.HandleFunc("/health", healthHandler)
+	mux.HandleFunc("/healthz", healthHandler)
 	mux.HandleFunc("/readyz", func(writer http.ResponseWriter, request *http.Request) {
 		report, ready, err := deps.Health.Readiness(request.Context(), deps.RegistryHealthy)
 		if err != nil {
@@ -49,6 +78,89 @@ func NewOperationalHandler(deps Dependencies) http.Handler {
 			statusCode = http.StatusServiceUnavailable
 		}
 		writeJSON(writer, statusCode, report)
+	})
+	mux.HandleFunc("GET /status", func(writer http.ResponseWriter, request *http.Request) {
+		payload, err := buildStatusPayload(request.Context(), deps, now)
+		if err != nil {
+			writeAPIError(writer, http.StatusServiceUnavailable, "status_unavailable", err.Error())
+			return
+		}
+		writeJSON(writer, http.StatusOK, payload)
+	})
+	mux.HandleFunc("GET /issues", func(writer http.ResponseWriter, request *http.Request) {
+		if deps.ReadModels == nil {
+			writeAPIError(writer, http.StatusServiceUnavailable, "read_models_unavailable", "read models unavailable")
+			return
+		}
+		issues, err := listDashboardIssues(request.Context(), deps.ReadModels)
+		if err != nil {
+			writeAPIError(writer, http.StatusServiceUnavailable, "issues_unavailable", err.Error())
+			return
+		}
+		writeJSON(writer, http.StatusOK, issues)
+	})
+	mux.HandleFunc("GET /runs", func(writer http.ResponseWriter, request *http.Request) {
+		if deps.ReadModels == nil {
+			writeAPIError(writer, http.StatusServiceUnavailable, "read_models_unavailable", "read models unavailable")
+			return
+		}
+		views, err := projections.ListRunSummaryViews(request.Context(), deps.ReadModels)
+		if err != nil {
+			writeAPIError(writer, http.StatusServiceUnavailable, "runs_unavailable", err.Error())
+			return
+		}
+		writeJSON(writer, http.StatusOK, views)
+	})
+	mux.HandleFunc("GET /runs/{run_id}", func(writer http.ResponseWriter, request *http.Request) {
+		if deps.ReadModels == nil {
+			writeAPIError(writer, http.StatusServiceUnavailable, "read_models_unavailable", "read models unavailable")
+			return
+		}
+		runID, err := strconv.ParseInt(request.PathValue("run_id"), 10, 64)
+		if err != nil {
+			writeAPIError(writer, http.StatusBadRequest, "invalid_run_id", "run id must be an integer")
+			return
+		}
+		run, err := getDashboardRun(request.Context(), deps.ReadModels, runID)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				writeAPIError(writer, http.StatusNotFound, "run_not_found", "run not found")
+				return
+			}
+			writeAPIError(writer, http.StatusServiceUnavailable, "run_unavailable", err.Error())
+			return
+		}
+		writeJSON(writer, http.StatusOK, run)
+	})
+	mux.HandleFunc("POST /kill-switch/on", func(writer http.ResponseWriter, request *http.Request) {
+		handleAdminAction(writer, request, deps, "kill_switch_on", func(ctx context.Context, admin AdminActions) error {
+			return admin.KillSwitchOn(ctx)
+		})
+	})
+	mux.HandleFunc("POST /kill-switch/off", func(writer http.ResponseWriter, request *http.Request) {
+		handleAdminAction(writer, request, deps, "kill_switch_off", func(ctx context.Context, admin AdminActions) error {
+			return admin.KillSwitchOff(ctx)
+		})
+	})
+	mux.HandleFunc("POST /issues/{issue_id}/pause", func(writer http.ResponseWriter, request *http.Request) {
+		issueID, err := strconv.ParseInt(request.PathValue("issue_id"), 10, 64)
+		if err != nil {
+			writeAPIError(writer, http.StatusBadRequest, "invalid_issue_id", "issue id must be an integer")
+			return
+		}
+		handleAdminAction(writer, request, deps, "pause_issue", func(ctx context.Context, admin AdminActions) error {
+			return admin.PauseIssue(ctx, issueID)
+		})
+	})
+	mux.HandleFunc("POST /issues/{issue_id}/resume", func(writer http.ResponseWriter, request *http.Request) {
+		issueID, err := strconv.ParseInt(request.PathValue("issue_id"), 10, 64)
+		if err != nil {
+			writeAPIError(writer, http.StatusBadRequest, "invalid_issue_id", "issue id must be an integer")
+			return
+		}
+		handleAdminAction(writer, request, deps, "resume_issue", func(ctx context.Context, admin AdminActions) error {
+			return admin.ResumeIssue(ctx, issueID)
+		})
 	})
 	mux.HandleFunc("/metrics", func(writer http.ResponseWriter, request *http.Request) {
 		snapshot, err := deps.Metrics.Collect(request.Context())
@@ -165,6 +277,275 @@ func NewOperationalHandler(deps Dependencies) http.Handler {
 		writeJSON(writer, http.StatusOK, view)
 	})
 	return mux
+}
+
+type dashboardStatus struct {
+	GeneratedAt  string          `json:"generated_at"`
+	HealthStatus string          `json:"health_status"`
+	Ready        bool            `json:"ready"`
+	Runtime      runtimeStatus   `json:"runtime"`
+	Counts       dashboardCounts `json:"counts"`
+	Tmux         TmuxStatus      `json:"tmux"`
+}
+
+type runtimeStatus struct {
+	Status          string `json:"status"`
+	BootID          string `json:"boot_id,omitempty"`
+	LastHeartbeatAt string `json:"last_heartbeat_at,omitempty"`
+	LastError       string `json:"last_error,omitempty"`
+}
+
+type dashboardCounts struct {
+	WorkItems         int `json:"work_items"`
+	ActiveRunAttempts int `json:"active_run_attempts"`
+	PendingApprovals  int `json:"pending_approvals"`
+}
+
+type dashboardIssue struct {
+	ID           int64    `json:"id"`
+	ProjectID    int64    `json:"project_id"`
+	Provider     string   `json:"provider"`
+	Repo         string   `json:"repo"`
+	Number       int      `json:"number"`
+	Title        string   `json:"title"`
+	URL          string   `json:"url"`
+	State        string   `json:"state"`
+	Labels       []string `json:"labels"`
+	SyncStatus   string   `json:"sync_status"`
+	LastSyncedAt string   `json:"last_synced_at"`
+}
+
+type dashboardRun struct {
+	ID             int64   `json:"id"`
+	TaskID         int64   `json:"task_id"`
+	Executor       string  `json:"executor"`
+	Status         string  `json:"status"`
+	Attempt        int     `json:"attempt"`
+	StartedAt      string  `json:"started_at"`
+	FinishedAt     *string `json:"finished_at,omitempty"`
+	Summary        string  `json:"summary"`
+	TerminalReason string  `json:"terminal_reason"`
+	ArtifactsJSON  string  `json:"artifacts_json"`
+}
+
+func buildStatusPayload(ctx context.Context, deps Dependencies, now func() time.Time) (dashboardStatus, error) {
+	report, err := deps.Health.Doctor(ctx, deps.RegistryHealthy)
+	if err != nil {
+		return dashboardStatus{}, err
+	}
+	_, ready, err := deps.Health.Readiness(ctx, deps.RegistryHealthy)
+	if err != nil {
+		return dashboardStatus{}, err
+	}
+
+	status := dashboardStatus{
+		GeneratedAt:  now().UTC().Format(time.RFC3339),
+		HealthStatus: string(report.Status),
+		Ready:        ready,
+		Runtime:      runtimeStatus{Status: "unknown"},
+		Tmux:         TmuxStatus{Available: false, Source: "not_configured"},
+	}
+
+	if deps.ReadModels != nil {
+		runtimeState, err := getRuntimeStatus(ctx, deps.ReadModels)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return dashboardStatus{}, err
+		}
+		if err == nil {
+			status.Runtime = runtimeState
+		}
+
+		workItems, err := projections.ListTaskStatusViews(ctx, deps.ReadModels)
+		if err != nil {
+			return dashboardStatus{}, err
+		}
+		activeRuns, err := projections.ListActiveRunViews(ctx, deps.ReadModels)
+		if err != nil {
+			return dashboardStatus{}, err
+		}
+		pendingApprovals, err := projections.ListPendingApprovalViews(ctx, deps.ReadModels)
+		if err != nil {
+			return dashboardStatus{}, err
+		}
+		status.Counts = dashboardCounts{
+			WorkItems:         len(workItems),
+			ActiveRunAttempts: len(activeRuns),
+			PendingApprovals:  len(pendingApprovals),
+		}
+	}
+
+	if deps.Tmux != nil {
+		tmuxStatus, err := deps.Tmux.Status(ctx)
+		if err != nil {
+			status.Tmux = TmuxStatus{Available: false, Source: "tmux", Error: err.Error()}
+		} else {
+			status.Tmux = tmuxStatus
+		}
+	}
+
+	return status, nil
+}
+
+func getRuntimeStatus(ctx context.Context, queryer projections.Queryer) (runtimeStatus, error) {
+	rows, err := queryer.QueryContext(ctx, `
+		SELECT boot_id, status, last_heartbeat_at, last_error
+		FROM runtime_state
+		ORDER BY updated_at DESC
+		LIMIT 1
+	`)
+	if err != nil {
+		return runtimeStatus{}, err
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		return runtimeStatus{}, sql.ErrNoRows
+	}
+	var status runtimeStatus
+	var heartbeat sql.NullString
+	var lastError sql.NullString
+	if err := rows.Scan(&status.BootID, &status.Status, &heartbeat, &lastError); err != nil {
+		return runtimeStatus{}, err
+	}
+	if heartbeat.Valid {
+		status.LastHeartbeatAt = heartbeat.String
+	}
+	if lastError.Valid {
+		status.LastError = lastError.String
+	}
+	return status, rows.Err()
+}
+
+func listDashboardIssues(ctx context.Context, queryer projections.Queryer) ([]dashboardIssue, error) {
+	rows, err := queryer.QueryContext(ctx, `
+		SELECT id, project_id, provider, repo, number, title, url, state, labels_json, sync_status, last_synced_at
+		FROM external_issues
+		ORDER BY repo ASC, number ASC, id ASC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	issues := make([]dashboardIssue, 0)
+	for rows.Next() {
+		var issue dashboardIssue
+		var labelsJSON string
+		if err := rows.Scan(
+			&issue.ID,
+			&issue.ProjectID,
+			&issue.Provider,
+			&issue.Repo,
+			&issue.Number,
+			&issue.Title,
+			&issue.URL,
+			&issue.State,
+			&labelsJSON,
+			&issue.SyncStatus,
+			&issue.LastSyncedAt,
+		); err != nil {
+			return nil, err
+		}
+		issue.Labels = parseStringList(labelsJSON)
+		issues = append(issues, issue)
+	}
+	return issues, rows.Err()
+}
+
+func getDashboardRun(ctx context.Context, queryer projections.Queryer, runID int64) (dashboardRun, error) {
+	rows, err := queryer.QueryContext(ctx, `
+		SELECT id, task_id, executor, status, attempt, started_at, finished_at, summary, terminal_reason, artifacts_json
+		FROM runs
+		WHERE id = ?
+	`, runID)
+	if err != nil {
+		return dashboardRun{}, err
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		return dashboardRun{}, sql.ErrNoRows
+	}
+
+	var run dashboardRun
+	var finishedAt sql.NullString
+	if err := rows.Scan(
+		&run.ID,
+		&run.TaskID,
+		&run.Executor,
+		&run.Status,
+		&run.Attempt,
+		&run.StartedAt,
+		&finishedAt,
+		&run.Summary,
+		&run.TerminalReason,
+		&run.ArtifactsJSON,
+	); err != nil {
+		return dashboardRun{}, err
+	}
+	if finishedAt.Valid {
+		run.FinishedAt = &finishedAt.String
+	}
+	return run, rows.Err()
+}
+
+func parseStringList(raw string) []string {
+	var values []string
+	if err := json.Unmarshal([]byte(raw), &values); err != nil {
+		return nil
+	}
+	return values
+}
+
+func handleAdminAction(writer http.ResponseWriter, request *http.Request, deps Dependencies, action string, call func(context.Context, AdminActions) error) {
+	if statusCode, ok := authorizeAdmin(request, deps.AdminToken); !ok {
+		switch statusCode {
+		case http.StatusServiceUnavailable:
+			writeAPIError(writer, statusCode, "admin_disabled", "admin actions are disabled")
+		case http.StatusUnauthorized:
+			writeAPIError(writer, statusCode, "admin_auth_required", "admin authentication is required")
+		default:
+			writeAPIError(writer, statusCode, "admin_auth_failed", "admin authentication failed")
+		}
+		return
+	}
+	if deps.Admin == nil {
+		writeAPIError(writer, http.StatusServiceUnavailable, "admin_unavailable", "admin actions are unavailable")
+		return
+	}
+	if err := call(request.Context(), deps.Admin); err != nil {
+		if errors.Is(err, ErrAdminActionNotImplemented) {
+			writeAPIError(writer, http.StatusNotImplemented, "admin_action_not_implemented", err.Error())
+			return
+		}
+		writeAPIError(writer, http.StatusServiceUnavailable, "admin_action_failed", err.Error())
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]string{
+		"status": "accepted",
+		"action": action,
+	})
+}
+
+func authorizeAdmin(request *http.Request, adminToken string) (int, bool) {
+	adminToken = strings.TrimSpace(adminToken)
+	if adminToken == "" {
+		return http.StatusServiceUnavailable, false
+	}
+
+	token := strings.TrimSpace(request.Header.Get("X-Odin-Admin-Token"))
+	if token == "" {
+		const prefix = "Bearer "
+		authorization := strings.TrimSpace(request.Header.Get("Authorization"))
+		if strings.HasPrefix(authorization, prefix) {
+			token = strings.TrimSpace(strings.TrimPrefix(authorization, prefix))
+		}
+	}
+	if token == "" {
+		return http.StatusUnauthorized, false
+	}
+	if subtle.ConstantTimeCompare([]byte(token), []byte(adminToken)) != 1 {
+		return http.StatusForbidden, false
+	}
+	return http.StatusOK, true
 }
 
 func writeJSON(writer http.ResponseWriter, statusCode int, payload any) {

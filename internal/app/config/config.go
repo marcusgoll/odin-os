@@ -23,6 +23,7 @@ type RuntimeFile struct {
 type ServiceSettings struct {
 	HTTPAddr        string                `yaml:"http_addr"`
 	StartupRecovery bool                  `yaml:"startup_recovery"`
+	AdminTokenEnv   string                `yaml:"admin_token_env"`
 	SocialCopilot   SocialCopilotSettings `yaml:"social_copilot"`
 }
 
@@ -38,6 +39,7 @@ type Config struct {
 	Service         ServiceSettings
 	MediaConfigPath string
 	Media           *coremedia.Config
+	AdminToken      string
 }
 
 func Load(path string, repoRoot string, env map[string]string) (Config, error) {
@@ -55,6 +57,9 @@ func Load(path string, repoRoot string, env map[string]string) (Config, error) {
 	}
 	if cfg.Service.HTTPAddr == "" {
 		cfg.Service.HTTPAddr = "127.0.0.1:9443"
+	}
+	if cfg.Service.AdminTokenEnv == "" {
+		cfg.Service.AdminTokenEnv = "ODIN_ADMIN_TOKEN"
 	}
 	if !raw.Service.StartupRecovery {
 		cfg.Service.StartupRecovery = false
@@ -74,6 +79,9 @@ func Load(path string, repoRoot string, env map[string]string) (Config, error) {
 	}
 	if value := env["ODIN_HTTP_ADDR"]; value != "" {
 		cfg.Service.HTTPAddr = value
+	}
+	if value := env[cfg.Service.AdminTokenEnv]; value != "" {
+		cfg.AdminToken = value
 	}
 
 	mediaPath, mediaConfig, err := loadMediaConfig(repoRoot, env)
