@@ -289,6 +289,65 @@ func TestRunKnowledgeIngestListSearchAndApproveUse(t *testing.T) {
 	}
 }
 
+func TestRunKnowledgeInboxPathListAndIngestInbox(t *testing.T) {
+	t.Parallel()
+
+	root := newLifecycleTestRoot(t)
+
+	var pathOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"knowledge", "inbox-path"}, strings.NewReader(""), &pathOutput); err != nil {
+		t.Fatalf("Run(knowledge inbox-path) error = %v", err)
+	}
+	inboxPath := strings.TrimSpace(pathOutput.String())
+	if inboxPath != filepath.Join(root, "knowledge", "inbox") {
+		t.Fatalf("inbox path output = %q, want runtime knowledge inbox", pathOutput.String())
+	}
+	if err := os.WriteFile(filepath.Join(inboxPath, "pilot-contract.txt"), []byte("Vacation accrual rules copied by scp.\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(inbox source) error = %v", err)
+	}
+
+	var listOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"knowledge", "inbox"}, strings.NewReader(""), &listOutput); err != nil {
+		t.Fatalf("Run(knowledge inbox) error = %v", err)
+	}
+	for _, want := range []string{
+		"name=pilot-contract.txt",
+		"class=text",
+		"supported=true",
+	} {
+		if !strings.Contains(listOutput.String(), want) {
+			t.Fatalf("inbox output = %q, want %q", listOutput.String(), want)
+		}
+	}
+
+	var ingestOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{
+		"knowledge",
+		"ingest-inbox",
+		"pilot-contract.txt",
+		"--kind", "pilot_contract",
+		"--restricted",
+	}, strings.NewReader(""), &ingestOutput); err != nil {
+		t.Fatalf("Run(knowledge ingest-inbox) error = %v", err)
+	}
+	for _, want := range []string{
+		"source=pilot-contract",
+		"lifecycle=ready",
+		"restricted=true",
+		"manifest=memory/knowledge/pilot-contract.md",
+	} {
+		if !strings.Contains(ingestOutput.String(), want) {
+			t.Fatalf("ingest-inbox output = %q, want %q", ingestOutput.String(), want)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(root, "knowledge", "inbox", "pilot-contract.txt")); !os.IsNotExist(err) {
+		t.Fatalf("inbox file stat error = %v, want moved out of inbox", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "knowledge", "imported", "pilot-contract.txt")); err != nil {
+		t.Fatalf("imported file missing: %v", err)
+	}
+}
+
 func TestRunKnowledgeApproveUseRejectsUnrestrictedSource(t *testing.T) {
 	t.Parallel()
 

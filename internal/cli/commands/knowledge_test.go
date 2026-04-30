@@ -64,6 +64,61 @@ func TestParseKnowledgeSearchCommand(t *testing.T) {
 	}
 }
 
+func TestKnowledgeInboxPathCommand(t *testing.T) {
+	t.Parallel()
+
+	pathCommand, err := ParseKnowledge([]string{"inbox-path"})
+	if err != nil {
+		t.Fatalf("ParseKnowledge(inbox-path) error = %v", err)
+	}
+	if pathCommand.Action != "inbox-path" {
+		t.Fatalf("Action = %q, want inbox-path", pathCommand.Action)
+	}
+
+	listCommand, err := ParseKnowledge([]string{"inbox", "--json"})
+	if err != nil {
+		t.Fatalf("ParseKnowledge(inbox --json) error = %v", err)
+	}
+	if listCommand.Action != "inbox" || !listCommand.JSON {
+		t.Fatalf("command = %+v, want inbox JSON command", listCommand)
+	}
+}
+
+func TestKnowledgeIngestInboxCommand(t *testing.T) {
+	t.Parallel()
+
+	cmd, err := ParseKnowledge([]string{
+		"ingest-inbox",
+		"pilot-contract.txt",
+		"--key", "pilot-contract",
+		"--title", "Pilot Contract",
+		"--scope", "global",
+		"--scope-key", "global",
+		"--restricted",
+		"--kind", "pilot_contract",
+	})
+	if err != nil {
+		t.Fatalf("ParseKnowledge(ingest-inbox) error = %v", err)
+	}
+	if cmd.Action != "ingest-inbox" || cmd.Name != "pilot-contract.txt" {
+		t.Fatalf("command = %+v, want ingest-inbox pilot-contract.txt", cmd)
+	}
+	if cmd.Key != "pilot-contract" || cmd.Title != "Pilot Contract" || cmd.SourceKind != "pilot_contract" {
+		t.Fatalf("key/title/kind = %q/%q/%q", cmd.Key, cmd.Title, cmd.SourceKind)
+	}
+	if cmd.Scope != "global" || cmd.ScopeKey != "global" || !cmd.Restricted {
+		t.Fatalf("scope/scope_key/restricted = %q/%q/%t", cmd.Scope, cmd.ScopeKey, cmd.Restricted)
+	}
+
+	allCommand, err := ParseKnowledge([]string{"ingest-inbox", "--all", "--scope", "global", "--scope-key", "global", "--restricted"})
+	if err != nil {
+		t.Fatalf("ParseKnowledge(ingest-inbox --all) error = %v", err)
+	}
+	if allCommand.Action != "ingest-inbox" || !allCommand.All || allCommand.Name != "" {
+		t.Fatalf("all command = %+v, want --all ingest-inbox", allCommand)
+	}
+}
+
 func TestParseKnowledgeApproveUseCommand(t *testing.T) {
 	t.Parallel()
 

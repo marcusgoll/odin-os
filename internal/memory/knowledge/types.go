@@ -55,6 +55,24 @@ type IngestParams struct {
 	AppliesTo      []string
 }
 
+type IngestInboxParams struct {
+	Name           string
+	All            bool
+	Key            string
+	Title          string
+	Scope          string
+	ScopeKey       string
+	Restricted     bool
+	SourceKind     string
+	SourceClass    SourceClass
+	RefreshPolicy  string
+	CitationPolicy string
+	Topics         []string
+	Entities       []string
+	RelatedSources []string
+	AppliesTo      []string
+}
+
 type IngestResult struct {
 	Source                 Source
 	Artifact               sqlite.KnowledgeArtifact
@@ -68,6 +86,15 @@ type ListParams struct {
 	ScopeKey   string
 	Lifecycle  Lifecycle
 	Restricted *bool
+}
+
+type InboxEntry struct {
+	Name           string      `json:"name"`
+	Path           string      `json:"path"`
+	SizeBytes      int64       `json:"size_bytes"`
+	SourceClass    SourceClass `json:"source_class,omitempty"`
+	Supported      bool        `json:"supported"`
+	RejectedReason string      `json:"rejected_reason,omitempty"`
 }
 
 type SourceView struct {

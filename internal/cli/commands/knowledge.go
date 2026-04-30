@@ -14,11 +14,13 @@ import (
 	"odin-os/internal/store/sqlite"
 )
 
-const knowledgeUsage = "usage: odin knowledge ingest|list|show|search|refresh|approve-use"
+const knowledgeUsage = "usage: odin knowledge ingest|list|show|search|refresh|approve-use|inbox|inbox-path|ingest-inbox"
 
 type KnowledgeCommand struct {
 	Action        string
 	Path          string
+	Name          string
+	All           bool
 	Key           string
 	Title         string
 	Scope         string
@@ -35,6 +37,7 @@ type KnowledgeCommand struct {
 	DecidedBy     string
 	Decision      string
 	EvidenceJSON  string
+	JSON          bool
 }
 
 func ParseKnowledge(args []string) (KnowledgeCommand, error) {
@@ -45,6 +48,12 @@ func ParseKnowledge(args []string) (KnowledgeCommand, error) {
 	switch args[0] {
 	case "ingest":
 		return parseKnowledgeIngest(args[1:])
+	case "inbox":
+		return parseKnowledgeInbox(args[1:])
+	case "inbox-path":
+		return parseKnowledgeNoArgs("inbox-path", args[1:])
+	case "ingest-inbox":
+		return parseKnowledgeIngestInbox(args[1:])
 	case "list":
 		return parseKnowledgeList(args[1:])
 	case "show":
@@ -84,6 +93,31 @@ func RunKnowledge(ctx context.Context, store *sqlite.Store, repoRoot string, run
 	case "ingest":
 		result, err := service.Ingest(ctx, knowledge.IngestParams{
 			Path:        command.Path,
+			Key:         command.Key,
+			Title:       command.Title,
+			Scope:       command.Scope,
+			ScopeKey:    command.ScopeKey,
+			Restricted:  command.Restricted,
+			SourceKind:  command.SourceKind,
+			SourceClass: knowledge.SourceClass(command.SourceClass),
+		})
+		if err != nil {
+			return err
+		}
+		return renderKnowledgeIngest(stdout, result)
+	case "inbox":
+		results, err := service.ListInbox(ctx)
+		if err != nil {
+			return err
+		}
+		return renderKnowledgeInbox(stdout, results, command.JSON)
+	case "inbox-path":
+		_, err := fmt.Fprintln(stdout, service.InboxPath())
+		return err
+	case "ingest-inbox":
+		result, err := service.IngestInbox(ctx, knowledge.IngestInboxParams{
+			Name:        command.Name,
+			All:         command.All,
 			Key:         command.Key,
 			Title:       command.Title,
 			Scope:       command.Scope,
@@ -160,6 +194,26 @@ func RunKnowledge(ctx context.Context, store *sqlite.Store, repoRoot string, run
 	}
 }
 
+func parseKnowledgeNoArgs(action string, args []string) (KnowledgeCommand, error) {
+	if len(args) != 0 {
+		return KnowledgeCommand{}, fmt.Errorf("knowledge %s does not accept arguments", action)
+	}
+	return KnowledgeCommand{Action: action}, nil
+}
+
+func parseKnowledgeInbox(args []string) (KnowledgeCommand, error) {
+	cmd := KnowledgeCommand{Action: "inbox"}
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--json":
+			cmd.JSON = true
+		default:
+			return KnowledgeCommand{}, fmt.Errorf("unknown knowledge inbox flag: %s", args[i])
+		}
+	}
+	return cmd, nil
+}
+
 func parseKnowledgeIngest(args []string) (KnowledgeCommand, error) {
 	cmd := KnowledgeCommand{
 		Action:     "ingest",
@@ -227,6 +281,77 @@ func parseKnowledgeIngest(args []string) (KnowledgeCommand, error) {
 	}
 	if strings.TrimSpace(cmd.Title) == "" {
 		return KnowledgeCommand{}, fmt.Errorf("knowledge ingest requires --title")
+	}
+	return cmd, nil
+}
+
+func parseKnowledgeIngestInbox(args []string) (KnowledgeCommand, error) {
+	cmd := KnowledgeCommand{
+		Action:     "ingest-inbox",
+		Scope:      "global",
+		ScopeKey:   "global",
+		SourceKind: "manual",
+	}
+	if len(args) == 0 {
+		return KnowledgeCommand{}, fmt.Errorf("knowledge ingest-inbox requires a file name or --all")
+	}
+	start := 0
+	if args[0] == "--all" {
+		cmd.All = true
+		start = 1
+	} else {
+		if strings.HasPrefix(args[0], "--") {
+			return KnowledgeCommand{}, fmt.Errorf("knowledge ingest-inbox requires a file name or --all")
+		}
+		cmd.Name = args[0]
+		start = 1
+	}
+	for i := start; i < len(args); i++ {
+		switch args[i] {
+		case "--key":
+			value, next, err := requireKnowledgeFlagValue(args, i)
+			if err != nil {
+				return KnowledgeCommand{}, err
+			}
+			cmd.Key = value
+			i = next
+		case "--title":
+			value, next, err := requireKnowledgeFlagValue(args, i)
+			if err != nil {
+				return KnowledgeCommand{}, err
+			}
+			cmd.Title = value
+			i = next
+		case "--scope":
+			value, next, err := requireKnowledgeFlagValue(args, i)
+			if err != nil {
+				return KnowledgeCommand{}, err
+			}
+			cmd.Scope = value
+			i = next
+		case "--scope-key":
+			value, next, err := requireKnowledgeFlagValue(args, i)
+			if err != nil {
+				return KnowledgeCommand{}, err
+			}
+			cmd.ScopeKey = value
+			i = next
+		case "--kind":
+			value, next, err := requireKnowledgeFlagValue(args, i)
+			if err != nil {
+				return KnowledgeCommand{}, err
+			}
+			cmd.SourceKind = value
+			i = next
+		case "--restricted":
+			cmd.Restricted = true
+			cmd.RestrictedSet = true
+		default:
+			return KnowledgeCommand{}, fmt.Errorf("unknown knowledge ingest-inbox flag: %s", args[i])
+		}
+	}
+	if cmd.All && (strings.TrimSpace(cmd.Key) != "" || strings.TrimSpace(cmd.Title) != "") {
+		return KnowledgeCommand{}, fmt.Errorf("knowledge ingest-inbox --all cannot use --key or --title")
 	}
 	return cmd, nil
 }
@@ -453,6 +578,41 @@ func renderKnowledgeList(stdout io.Writer, results []knowledge.SourceView) error
 	}
 	for _, result := range results {
 		if err := renderKnowledgeSource(stdout, result.Source); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func renderKnowledgeInbox(stdout io.Writer, results []knowledge.InboxEntry, jsonOutput bool) error {
+	if jsonOutput {
+		encoder := json.NewEncoder(stdout)
+		encoder.SetIndent("", "  ")
+		return encoder.Encode(results)
+	}
+	if len(results) == 0 {
+		_, err := fmt.Fprintln(stdout, "no inbox files")
+		return err
+	}
+	for _, result := range results {
+		reason := result.RejectedReason
+		if reason == "" {
+			reason = "none"
+		}
+		sourceClass := string(result.SourceClass)
+		if sourceClass == "" {
+			sourceClass = "unknown"
+		}
+		if _, err := fmt.Fprintf(
+			stdout,
+			"name=%s size=%d supported=%t class=%s reason=%s path=%s\n",
+			result.Name,
+			result.SizeBytes,
+			result.Supported,
+			sourceClass,
+			oneLine(reason),
+			result.Path,
+		); err != nil {
 			return err
 		}
 	}

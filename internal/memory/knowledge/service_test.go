@@ -259,6 +259,155 @@ func TestServiceRejectsUnsupportedSourceClass(t *testing.T) {
 	}
 }
 
+func TestServiceListsKnowledgeInbox(t *testing.T) {
+	service, _, _ := newTestService(t)
+
+	inboxPath := service.InboxPath()
+	if err := os.WriteFile(filepath.Join(inboxPath, "pilot-contract.txt"), []byte("Inbox contract text.\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(supported inbox file) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(inboxPath, "scan.jpg"), []byte("image bytes"), 0o644); err != nil {
+		t.Fatalf("WriteFile(unsupported inbox file) error = %v", err)
+	}
+	if err := os.Mkdir(filepath.Join(inboxPath, "nested"), 0o755); err != nil {
+		t.Fatalf("Mkdir(nested inbox dir) error = %v", err)
+	}
+
+	entries, err := service.ListInbox(context.Background())
+	if err != nil {
+		t.Fatalf("ListInbox() error = %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("entries = %+v, want two regular files", entries)
+	}
+	supported := entries[0]
+	if supported.Name != "pilot-contract.txt" || supported.SourceClass != SourceClassText || !supported.Supported || supported.RejectedReason != "" {
+		t.Fatalf("supported entry = %+v, want text-supported pilot-contract.txt", supported)
+	}
+	if supported.Path != filepath.Join(inboxPath, "pilot-contract.txt") || supported.SizeBytes == 0 {
+		t.Fatalf("supported entry path/size = %+v", supported)
+	}
+	unsupported := entries[1]
+	if unsupported.Name != "scan.jpg" || unsupported.Supported || !strings.Contains(unsupported.RejectedReason, "unsupported source class") {
+		t.Fatalf("unsupported entry = %+v, want visible unsupported reason", unsupported)
+	}
+}
+
+func TestServiceIngestsInboxFileAndMovesImportedOriginal(t *testing.T) {
+	ctx := context.Background()
+	service, repoRoot, runtimeRoot := newTestService(t)
+	inboxPath := service.InboxPath()
+	sourcePath := filepath.Join(inboxPath, "pilot-contract.txt")
+	if err := os.WriteFile(sourcePath, []byte("Vacation accrual rules copied into the server inbox.\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(inbox source) error = %v", err)
+	}
+
+	result, err := service.IngestInbox(ctx, IngestInboxParams{
+		Name:       "pilot-contract.txt",
+		Scope:      "global",
+		ScopeKey:   "global",
+		Restricted: true,
+		SourceKind: "pilot_contract",
+	})
+	if err != nil {
+		t.Fatalf("IngestInbox() error = %v", err)
+	}
+
+	if result.Source.Key != "pilot-contract" || result.Source.Title != "Pilot Contract" || result.Source.Lifecycle != LifecycleReady {
+		t.Fatalf("source = %+v, want ready pilot-contract from inbox defaults", result.Source)
+	}
+	if result.Artifact.OriginalPath != sourcePath {
+		t.Fatalf("Artifact.OriginalPath = %q, want inbox source path %q", result.Artifact.OriginalPath, sourcePath)
+	}
+	if _, err := os.Stat(sourcePath); !os.IsNotExist(err) {
+		t.Fatalf("inbox source stat error = %v, want moved out of inbox", err)
+	}
+	importedPath := filepath.Join(runtimeRoot, "knowledge", "imported", "pilot-contract.txt")
+	if _, err := os.Stat(importedPath); err != nil {
+		t.Fatalf("imported source missing: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(repoRoot, "memory", "knowledge", "pilot-contract.md")); err != nil {
+		t.Fatalf("manifest missing: %v", err)
+	}
+}
+
+func TestServiceLeavesUnsupportedInboxFileRejectedWithReason(t *testing.T) {
+	ctx := context.Background()
+	service, _, runtimeRoot := newTestService(t)
+	inboxPath := service.InboxPath()
+	sourcePath := filepath.Join(inboxPath, "scan.jpg")
+	if err := os.WriteFile(sourcePath, []byte("image bytes"), 0o644); err != nil {
+		t.Fatalf("WriteFile(unsupported inbox source) error = %v", err)
+	}
+
+	_, err := service.IngestInbox(ctx, IngestInboxParams{
+		Name:       "scan.jpg",
+		Scope:      "global",
+		ScopeKey:   "global",
+		Restricted: true,
+		SourceKind: "manual",
+	})
+	if err == nil || !strings.Contains(err.Error(), "unsupported source class") {
+		t.Fatalf("IngestInbox() error = %v, want unsupported source class", err)
+	}
+	if _, statErr := os.Stat(sourcePath); !os.IsNotExist(statErr) {
+		t.Fatalf("inbox source stat error = %v, want moved out of inbox", statErr)
+	}
+	rejectedPath := filepath.Join(runtimeRoot, "knowledge", "rejected", "scan.jpg")
+	if _, statErr := os.Stat(rejectedPath); statErr != nil {
+		t.Fatalf("rejected source missing: %v", statErr)
+	}
+	reason, readErr := os.ReadFile(filepath.Join(runtimeRoot, "knowledge", "rejected", "scan.jpg.reason.txt"))
+	if readErr != nil {
+		t.Fatalf("ReadFile(reason) error = %v", readErr)
+	}
+	if !strings.Contains(string(reason), "unsupported source class") {
+		t.Fatalf("reason = %q, want unsupported source class evidence", string(reason))
+	}
+}
+
+func TestServiceIngestInboxMovesOCRRequiredPDFToRejectedWithReason(t *testing.T) {
+	ctx := context.Background()
+	service, _, runtimeRoot := newTestService(t)
+	inboxPath := service.InboxPath()
+	sourcePath := filepath.Join(inboxPath, "ocr-required.pdf")
+	bytes, err := os.ReadFile(filepath.Join("testdata", "ocr-required.pdf"))
+	if err != nil {
+		t.Fatalf("ReadFile(testdata OCR PDF) error = %v", err)
+	}
+	if err := os.WriteFile(sourcePath, bytes, 0o644); err != nil {
+		t.Fatalf("WriteFile(OCR inbox source) error = %v", err)
+	}
+
+	result, err := service.IngestInbox(ctx, IngestInboxParams{
+		Name:       "ocr-required.pdf",
+		Scope:      "global",
+		ScopeKey:   "global",
+		Restricted: true,
+		SourceKind: "pilot_contract",
+	})
+	if err != nil {
+		t.Fatalf("IngestInbox() error = %v", err)
+	}
+	if result.Source.Lifecycle != LifecycleFailed || result.Extraction.FailureCode != "ocr_required" || !result.Artifact.OCRRequired {
+		t.Fatalf("result = %+v artifact = %+v, want failed OCR-required source evidence", result, result.Artifact)
+	}
+	if _, statErr := os.Stat(sourcePath); !os.IsNotExist(statErr) {
+		t.Fatalf("inbox source stat error = %v, want moved out of inbox", statErr)
+	}
+	rejectedPath := filepath.Join(runtimeRoot, "knowledge", "rejected", "ocr-required.pdf")
+	if _, statErr := os.Stat(rejectedPath); statErr != nil {
+		t.Fatalf("rejected OCR source missing: %v", statErr)
+	}
+	reason, readErr := os.ReadFile(filepath.Join(runtimeRoot, "knowledge", "rejected", "ocr-required.pdf.reason.txt"))
+	if readErr != nil {
+		t.Fatalf("ReadFile(OCR reason) error = %v", readErr)
+	}
+	if !strings.Contains(string(reason), "ocr_required") {
+		t.Fatalf("reason = %q, want OCR-required evidence", string(reason))
+	}
+}
+
 func TestServiceDefaultsPilotContractToRestrictedManifestAndChunks(t *testing.T) {
 	ctx := context.Background()
 	service, repoRoot, _ := newTestService(t)
