@@ -39,6 +39,7 @@ go build ./cmd/odin-os
 ```
 
    - For user-visible or orchestration-facing behavior, also run a real `odin` command against a controlled runtime root.
+   - For Odin-OS orchestration, tracker, runner, prompt, skill, shim, workspace, dashboard, deployment, or security changes, run `make odin-e2e-local` and do not claim completion if it fails.
 
 6. **Document**
    - Update docs when behavior, contracts, security posture, or operator workflow changes.

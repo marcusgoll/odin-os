@@ -1,0 +1,37 @@
+name: Odin E2E
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  odin-e2e:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Run Odin E2E
+        run: |
+          make odin-e2e-local
+          make odin-e2e-contract
+
+      - name: Upload Odin E2E artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: odin-e2e
+          path: |
+            .odin/e2e/*.json
+            .odin/e2e/*.log

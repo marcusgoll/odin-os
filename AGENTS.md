@@ -100,6 +100,44 @@ For user-visible or orchestration-facing behavior, also build or use the repo-ow
 
 If a gate cannot be run, record why and what risk remains.
 
+## Required verification for Odin-OS changes
+
+For any change touching Go code, orchestration behavior, trackers, runners, prompts, skills, shims, workspace management, dashboard, deployment, or security:
+
+Run:
+
+```bash
+make odin-e2e-local
+```
+
+If `make odin-e2e-local` fails, do not claim the task is complete.
+
+If the command cannot be run, explain exactly why using this format:
+
+```text
+make odin-e2e-local: not run
+Reason:
+Impact:
+Follow-up required:
+```
+
+Final responses must include:
+
+- commands run
+- pass/fail result
+- path to E2E report if generated
+- behavior changes
+- remaining risks
+
+When `make odin-e2e-local` runs, final responses must include:
+
+```text
+E2E report:
+.odin/e2e/run-metadata.json
+.odin/e2e/latest.json
+.odin/e2e/latest.log
+```
+
 ## Required Report Format
 
 Every Odin implementation update must include:

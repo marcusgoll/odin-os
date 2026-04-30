@@ -2,6 +2,8 @@
 
 Use this checklist before treating Odin OS as the active homelab controller.
 
+For agency workflow rollout, complete the applicable stages in [Staged Operational Proving](staged-operational-proving.md) before using this cutover checklist as live-controller evidence.
+
 ## Deployment
 
 - `odin` binary is built and installed at the intended runtime path

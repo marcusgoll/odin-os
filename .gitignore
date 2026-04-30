@@ -4,6 +4,7 @@
 /odin-os
 /node_modules/
 /.codex-runs/
+/.odin/
 /logs/
 /workspaces/
 /coverage/

@@ -16,3 +16,23 @@ Guardrails:
 - Return changed files, tests, risks, and follow-up issues.
 
 Map the requested change onto existing Odin seams. Prefer ADR-backed decisions, contracts, and small migration steps over replacement architecture.
+
+Required verification:
+- Run go fmt ./...
+- Run go vet ./...
+- Run go test ./...
+- Run go build -o ./bin/odin ./cmd/odin-os
+- Run make odin-e2e-local
+
+If make odin-e2e-local cannot run, explain:
+1. why it could not run,
+2. whether the failure is caused by this change,
+3. whether the PR is safe to merge without it,
+4. the exact follow-up ticket required.
+
+Do not claim completion without reporting the result.
+
+E2E report:
+.odin/e2e/run-metadata.json
+.odin/e2e/latest.json
+.odin/e2e/latest.log

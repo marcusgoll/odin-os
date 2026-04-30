@@ -1,0 +1,462 @@
+---
+title: Staged Operational Proving
+status: active
+date: 2026-04-30
+---
+
+# Staged Operational Proving
+
+After all 20 Odin implementation prompts are merged, do not promote Odin OS straight into a full autonomous 24/7 agent system.
+
+This proving plan is the operator gate between merged implementation work and live agency operation. Each stage must preserve Odin's existing authority boundaries: no autonomous merge, no production deploy, no hidden scheduler authority, and no live external mutation unless the stage explicitly permits it and records the proof.
+
+## Operating Rules
+
+- Run stages in order.
+- Do not skip a stage because lower-level tests passed.
+- Do not infer live safety from fixture-only proof.
+- Do not start unattended scheduler dispatch until a later stage explicitly authorizes it.
+- Treat GitHub, Codex, PR creation, and scheduler dispatch as separate risk boundaries.
+- Record proof artifacts before promotion.
+- Promotion to the next stage requires an explicit human decision.
+
+## Stage 0: Local Fixture E2E
+
+Goal:
+
+- No live GitHub.
+- No live Codex.
+- No PR creation.
+- No scheduler dispatch.
+
+Checks:
+
+```bash
+make odin-e2e-local
+```
+
+Stage 0 also requires doctor proof before exit. If doctor is not yet included in the fixture E2E command, run it separately and record the result:
+
+```bash
+./bin/odin doctor --json
+```
+
+Exit criteria:
+
+- E2E scenarios pass.
+- Doctor passes.
+- Fixture-backed intake works.
+- Failure analysis works.
+- Prompt rendering includes brownfield guardrails.
+
+Required artifacts:
+
+- `.odin/e2e/run-metadata.json`
+- `.odin/e2e/latest.json`
+- `.odin/e2e/latest.log`
+
+Allowed activity:
+
+- Fixture-backed GitHub issue intake.
+- Temporary `ODIN_ROOT` runtime state.
+- Local prompt rendering checks.
+- Local failure classification checks.
+- Local workspace path safety checks.
+
+Forbidden activity:
+
+- Live GitHub reads or writes.
+- Live Codex execution.
+- Pull request creation.
+- Scheduler dispatch.
+- Long-running 24/7 service operation.
+- Production or external-system mutation.
+
+Promotion rule:
+
+Stage 0 is complete only when the latest E2E artifacts and doctor output show passing results from the current checkout. Passing Stage 0 does not authorize live GitHub intake, Codex execution, PR creation, scheduler dispatch, or unattended operation.
+
+## Stage 1: Live GitHub Read-Only Proof
+
+Goal:
+
+- Use a live GitHub token for read-only operations only.
+- No GitHub writes.
+- No GitHub comments.
+- No GitHub label mutation.
+- No pull request creation.
+- No scheduler dispatch.
+
+Preconditions:
+
+- Stage 0 has passed from the current checkout.
+- The `odin-os` project is registered as a GitHub-backed intake source for this profile.
+- `ODIN_PROFILE=github-readonly` resolves to a profile that permits GitHub issue reads only.
+- `ODIN_DRY_RUN=true` is enforced as no external mutation.
+- The GitHub token has the minimum read permission needed for issue intake.
+- Logs and errors redact token values before writing to stdout, stderr, files, events, or reports.
+
+Command:
+
+```bash
+ODIN_PROFILE=github-readonly \
+ODIN_DRY_RUN=true \
+./bin/odin intake github --project odin-os --json
+```
+
+Current implementation note:
+
+The current implemented intake surface is `odin work intake --project <key> [--dry-run]`. Stage 1 cannot be claimed complete until the target `odin intake github --project odin-os --json` command exists or an explicit compatibility decision maps that command to the existing intake service.
+
+For this stage, dry-run means no GitHub or external-system mutation. It must still allow local Odin runtime persistence of fetched external issues so idempotence can be proven.
+
+Exit criteria:
+
+- Eligible issues are fetched from live GitHub.
+- Labels are filtered correctly.
+- External issues are persisted idempotently in Odin runtime state.
+- No GitHub writes occurred.
+- No comments were created.
+- No labels were added, removed, or changed.
+- No pull requests were created or updated.
+- No scheduler dispatch occurred.
+- Tokens are redacted in logs, errors, reports, and events.
+
+Required artifacts:
+
+- Command JSON output.
+- Runtime log excerpt with token redaction verified.
+- External issue persistence evidence from before and after repeated runs.
+- GitHub write counter or equivalent proof showing zero writes.
+- Operator note identifying the token scope used without recording the token value.
+
+Allowed activity:
+
+- Live GitHub issue reads.
+- Local filtering of labels.
+- Local Odin SQLite persistence of external issue records.
+- Local idempotence verification.
+- Local log redaction verification.
+
+Forbidden activity:
+
+- GitHub POST, PATCH, PUT, or DELETE requests.
+- GitHub comments.
+- GitHub label mutation.
+- Pull request creation or update.
+- Codex execution.
+- Worker launch.
+- Scheduler dispatch.
+- Production or external-system mutation outside the GitHub read.
+
+Promotion rule:
+
+Stage 1 is complete only when the exact live read-only command proof is recorded and repeated runs show stable, idempotent local persistence with zero GitHub writes. Passing Stage 1 does not authorize Codex execution, pull request creation, scheduler dispatch, or unattended operation.
+
+## Stage 2: Dry-Run Lifecycle Mutation
+
+Goal:
+
+- Pretend to mark issues running, human-review, and failed without writing to GitHub.
+- Prove lifecycle state transition planning before live issue mutation.
+- Keep scheduler dispatch disabled.
+- Keep PR creation disabled.
+- Keep Codex worker execution disabled.
+
+Command:
+
+```bash
+ODIN_DRY_RUN=true \
+./bin/odin tracker simulate-lifecycle --issue 123 --json
+```
+
+Current implementation note:
+
+The current binary does not expose `odin tracker simulate-lifecycle`. Stage 2 cannot be claimed complete until that command exists or an explicit compatibility decision maps it to the existing tracker lifecycle methods.
+
+Exit criteria:
+
+- Planned writes are logged.
+- Actual writes are zero.
+- Token redaction is verified.
+- State transitions are valid.
+- No comments are created.
+- No labels are changed.
+- No PRs are created or updated.
+- No scheduler dispatch occurs.
+
+Required artifacts:
+
+- Command JSON output listing planned lifecycle writes.
+- Zero-write proof from the tracker adapter or request recorder.
+- Redaction proof showing no token value in output, logs, events, or reports.
+- State transition validation output.
+
+Promotion rule:
+
+Stage 2 is complete only when dry-run lifecycle planning proves the exact intended writes and zero actual GitHub mutation.
+
+## Stage 3: Live GitHub Controlled Mutation
+
+Goal:
+
+- Use one test issue.
+- Use one test repository.
+- Use known Odin labels.
+- Require manual approval before running.
+
+Allowed:
+
+- Add Odin labels on one test issue.
+- Remove Odin labels on one test issue.
+- Add one Odin comment.
+
+Forbidden:
+
+- Pull request creation.
+- Codex worker execution.
+- Scheduler dispatch.
+- Mutation of any issue other than the approved test issue.
+- Mutation of any repository other than the approved test repository.
+
+Exit criteria:
+
+- Labels update correctly.
+- Comment is correct.
+- Idempotency works.
+- Dry-run and live behavior match expectations.
+- Manual approval is recorded before mutation.
+- Token redaction is verified in logs, errors, reports, and events.
+
+Required artifacts:
+
+- Manual approval record.
+- Before and after issue label snapshots.
+- Comment body and comment URL.
+- Idempotency rerun output.
+- Dry-run versus live comparison output.
+- Zero PR and zero dispatch proof.
+
+Promotion rule:
+
+Stage 3 is complete only when a single approved live test issue is mutated exactly as planned and no other GitHub or Odin execution surface changes.
+
+## Stage 4: Local Codex Worker Dry-Run
+
+Goal:
+
+- Render the worker prompt.
+- Construct the Codex command in a safe workspace.
+- Prove worker setup without GitHub mutation.
+- Prove worker setup without PR creation.
+
+Command:
+
+```bash
+ODIN_DRY_RUN=true \
+./bin/odin worker run --issue-fixture fixtures/issues/simple-doc-change.json --json
+```
+
+Current implementation note:
+
+The current binary does not expose `odin worker run`. Stage 4 cannot be claimed complete until that command exists or an explicit compatibility decision maps it to the existing runner and worktree services.
+
+Exit criteria:
+
+- Worktree is created safely.
+- Prompt is rendered.
+- Codex command is constructed safely.
+- No token exposure occurs.
+- Timeout behavior works.
+- E2E command appears in worker final output.
+- No GitHub mutation occurs.
+- No PR is created or updated.
+
+Required artifacts:
+
+- Command JSON output.
+- Worktree path and inside-root proof.
+- Rendered prompt metadata or redacted prompt excerpt.
+- Redacted Codex command plan.
+- Timeout proof.
+- Worker final output containing the required E2E command.
+
+Promotion rule:
+
+Stage 4 is complete only when local worker dry-run proves prompt rendering, safe command construction, timeout handling, and zero external mutation.
+
+## Stage 5: PR Creation Dry-Run
+
+Goal:
+
+- Let a worker produce branch changes.
+- Let Odin plan PR creation.
+- Do not push.
+- Do not create or update a live PR.
+
+Exit criteria:
+
+- Diff summary is generated.
+- PR body is generated.
+- Human checklist is included.
+- No push happens in dry-run.
+- No live GitHub PR is created or updated.
+- Scheduler dispatch remains disabled.
+
+Required artifacts:
+
+- Diff summary.
+- PR body draft.
+- Human review checklist.
+- Git push zero-call proof.
+- PR API zero-write proof.
+
+Promotion rule:
+
+Stage 5 is complete only when Odin can plan a PR handoff from local branch changes without pushing or mutating GitHub.
+
+## Stage 6: Live PR Creation With Toy Issue
+
+Goal:
+
+- Use one low-risk docs-only issue.
+- Create one live PR.
+- Do not merge autonomously.
+- Require human approval before any merge.
+
+Allowed:
+
+- Push one task branch for the approved toy issue.
+- Create one PR for the approved toy issue.
+- Run review agents.
+- Run CI.
+
+Forbidden:
+
+- Autonomous merge.
+- Production deploy.
+- Scheduler dispatch beyond the approved toy issue.
+- Mutation of protected areas unless the approved toy issue explicitly includes them and a human approves.
+
+Exit criteria:
+
+- PR is created.
+- Review agents comment.
+- Human approval is required before merge.
+- CI runs `make odin-e2e-local`.
+- No merge occurs without human approval.
+- No deploy occurs.
+
+Required artifacts:
+
+- Issue URL.
+- Branch name.
+- PR URL.
+- Review agent comments.
+- CI run URL showing `make odin-e2e-local`.
+- Human approval gate evidence.
+
+Promotion rule:
+
+Stage 6 is complete only when a toy docs-only issue reaches live PR handoff with CI and review evidence while merge and deploy remain human-gated.
+
+## Stage 7: 24/7 Supervised Mode
+
+Goal:
+
+- Run Odin continuously.
+- Only process low-risk labeled issues.
+- Keep concurrency at one task.
+- Keep human approval required.
+- Preserve no autonomous merge or deploy.
+
+Config:
+
+```yaml
+orchestrator:
+  maxConcurrentTasks: 1
+  dryRun: false
+  requireHumanApproval: true
+
+scheduler:
+  allowedLabels:
+    - odin:ready
+    - safety:low-risk
+
+forbiddenAreas:
+  - deploy/
+  - internal/runner/
+  - internal/workspace/
+  - internal/security/
+  - .github/workflows/
+```
+
+Exit criteria:
+
+- Runs overnight without duplicate dispatch.
+- Kill switch works.
+- State recovers after restart.
+- CI catches failures.
+- No autonomous merge occurs.
+- No autonomous deploy occurs.
+- Forbidden areas remain untouched unless a later human-approved stage changes the policy.
+
+Required artifacts:
+
+- Runtime config snapshot with secrets redacted.
+- Overnight run log.
+- Duplicate-dispatch check.
+- Kill-switch proof.
+- Restart recovery proof.
+- CI failure-detection proof.
+- Merge and deploy zero-action proof.
+
+Promotion rule:
+
+Stage 7 is supervised operation, not full autonomy. Passing Stage 7 does not authorize autonomous merge, autonomous deploy, unrestricted labels, higher concurrency, or protected-area mutation.
+
+## Reserved Later Stages
+
+Later stages beyond Stage 7 must be added as explicit amendments to this document before use. Each later stage must define:
+
+- goal
+- allowed live surfaces
+- forbidden live surfaces
+- exact commands
+- proof artifacts
+- exit criteria
+- rollback condition
+- human approval required for promotion
+
+No later stage is implied by this Stage 0 through Stage 7 plan.
+
+## Stop Conditions
+
+Stop the proving process immediately if any of these occur:
+
+- `make odin-e2e-local` fails.
+- Doctor reports an unexplained unhealthy state.
+- Fixture-backed intake performs or attempts a live GitHub operation.
+- A local check invokes live Codex without an explicit later-stage configuration.
+- A workflow creates or mutates a pull request during Stage 0.
+- Scheduler dispatch starts during Stage 0.
+- E2E artifacts are missing or stale.
+- Stage 1 performs any GitHub write request.
+- Stage 1 persists a token value to logs, reports, runtime state, or artifacts.
+- Stage 2 performs any GitHub write request.
+- Stage 3 touches any issue or repository outside the approved test target.
+- Stage 4 exposes a token value to Codex, logs, reports, runtime state, or artifacts.
+- Stage 5 pushes a branch or creates a live pull request.
+- Stage 6 merges or deploys without explicit human approval.
+- Stage 7 dispatches duplicate work, ignores the kill switch, mutates a forbidden area, merges, or deploys autonomously.
+
+## Relationship To Existing Readiness Gates
+
+This document does not replace alpha readiness, cutover readiness, phase exit criteria, or the verification model. It adds the operational promotion order for proving the agency workflow after all 20 implementation prompts are merged.
+
+Use the existing gates as supporting evidence:
+
+- [Alpha Readiness](alpha-readiness.md)
+- [Cutover Readiness Checklist](cutover-readiness.md)
+- [Phase Exit Criteria](../contracts/phase-exit-criteria.md)
+- [Verification Model](../contracts/verification-model.md)

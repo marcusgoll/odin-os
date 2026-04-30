@@ -4,6 +4,8 @@ Odin OS is ready for cautious alpha dogfooding when the checks below stay true i
 
 Proof expectations follow [docs/contracts/verification-model.md](/home/orchestrator/odin-os/docs/contracts/verification-model.md). Passing internal tests alone is not sufficient evidence for operator-visible behavior.
 
+For agency workflow promotion after the implementation prompt suite is merged, follow [Staged Operational Proving](staged-operational-proving.md) before enabling any live or unattended behavior.
+
 ## Resolved blockers
 
 - Fresh runtimes no longer stay degraded by default. Bootstrap now records registry freshness, executor health, and baseline projection freshness so `odin healthcheck` can succeed on a clean `ODIN_ROOT`.
