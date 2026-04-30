@@ -159,6 +159,136 @@ func TestRunWorkStartCreatesQueuedWorkItem(t *testing.T) {
 	}
 }
 
+func TestRunKnowledgeIngestListSearchAndApproveUse(t *testing.T) {
+	t.Parallel()
+
+	root := newLifecycleTestRoot(t)
+	sourcePath := filepath.Join(root, "pilot-contract.txt")
+	if err := os.WriteFile(sourcePath, []byte("Vacation accrual rules require narrow cited snippets for executor use.\n"), 0o644); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+
+	var ingestOutput bytes.Buffer
+	err := Run(context.Background(), root, []string{
+		"knowledge",
+		"ingest",
+		sourcePath,
+		"--key", "pilot-contract",
+		"--title", "Pilot Contract",
+		"--kind", "pilot_contract",
+	}, strings.NewReader(""), &ingestOutput)
+	if err != nil {
+		t.Fatalf("Run(knowledge ingest) error = %v", err)
+	}
+	for _, want := range []string{
+		"source=pilot-contract",
+		"lifecycle=ready",
+		"restricted=true",
+		"artifact_sha256=sha256:",
+		"extractor=plain_text:v1",
+		"manifest=memory/knowledge/pilot-contract.md",
+	} {
+		if !strings.Contains(ingestOutput.String(), want) {
+			t.Fatalf("ingest output = %q, want %q", ingestOutput.String(), want)
+		}
+	}
+
+	var listOutput bytes.Buffer
+	err = Run(context.Background(), root, []string{"knowledge", "list", "--scope", "global", "--scope-key", "global", "--lifecycle", "ready", "--restricted", "true"}, strings.NewReader(""), &listOutput)
+	if err != nil {
+		t.Fatalf("Run(knowledge list) error = %v", err)
+	}
+	for _, want := range []string{
+		"source=pilot-contract",
+		"title=Pilot Contract",
+		"lifecycle=ready",
+		"restricted=true",
+		"class=text",
+		"manifest=memory/knowledge/pilot-contract.md",
+	} {
+		if !strings.Contains(listOutput.String(), want) {
+			t.Fatalf("list output = %q, want %q", listOutput.String(), want)
+		}
+	}
+
+	var showOutput bytes.Buffer
+	err = Run(context.Background(), root, []string{"knowledge", "show", "pilot-contract"}, strings.NewReader(""), &showOutput)
+	if err != nil {
+		t.Fatalf("Run(knowledge show) error = %v", err)
+	}
+	for _, want := range []string{
+		"source=pilot-contract",
+		"title=Pilot Contract",
+		"lifecycle=ready",
+		"restricted=true",
+		"class=text",
+		"manifest=memory/knowledge/pilot-contract.md",
+	} {
+		if !strings.Contains(showOutput.String(), want) {
+			t.Fatalf("show output = %q, want %q", showOutput.String(), want)
+		}
+	}
+
+	var searchOutput bytes.Buffer
+	err = Run(context.Background(), root, []string{"knowledge", "search", "Vacation", "--limit", "3"}, strings.NewReader(""), &searchOutput)
+	if err != nil {
+		t.Fatalf("Run(knowledge search) error = %v", err)
+	}
+	for _, want := range []string{
+		"source=pilot-contract",
+		"title=Pilot Contract",
+		"chunk_id=",
+		"restricted=true",
+		"anchor=",
+		"snippet=",
+	} {
+		if !strings.Contains(searchOutput.String(), want) {
+			t.Fatalf("search output = %q, want %q", searchOutput.String(), want)
+		}
+	}
+
+	var refreshOutput bytes.Buffer
+	err = Run(context.Background(), root, []string{"knowledge", "refresh", "pilot-contract"}, strings.NewReader(""), &refreshOutput)
+	if err != nil {
+		t.Fatalf("Run(knowledge refresh) error = %v", err)
+	}
+	for _, want := range []string{
+		"source=pilot-contract",
+		"lifecycle=ready",
+		"restricted=true",
+		"artifact_sha256=sha256:",
+		"extractor=plain_text:v1",
+		"manifest=memory/knowledge/pilot-contract.md",
+	} {
+		if !strings.Contains(refreshOutput.String(), want) {
+			t.Fatalf("refresh output = %q, want %q", refreshOutput.String(), want)
+		}
+	}
+
+	var approvalOutput bytes.Buffer
+	err = Run(context.Background(), root, []string{
+		"knowledge",
+		"approve-use",
+		"pilot-contract",
+		"--use-type", "executor_context_injection",
+		"--reason", "Need narrow cited context for current task",
+		"--decided-by", "marcus",
+	}, strings.NewReader(""), &approvalOutput)
+	if err != nil {
+		t.Fatalf("Run(knowledge approve-use) error = %v", err)
+	}
+	for _, want := range []string{
+		"approval_id=",
+		"source=pilot-contract",
+		"use_type=executor_context_injection",
+		"decision=approved",
+	} {
+		if !strings.Contains(approvalOutput.String(), want) {
+			t.Fatalf("approval output = %q, want %q", approvalOutput.String(), want)
+		}
+	}
+}
+
 func newLifecycleTestRoot(t *testing.T) string {
 	t.Helper()
 

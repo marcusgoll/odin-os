@@ -73,6 +73,8 @@ func Run(ctx context.Context, root string, args []string, stdin io.Reader, stdou
 			return commands.RunProfile(ctx, app.Store, args[1:], stdout)
 		case "work":
 			return commands.RunWork(ctx, app.Store, app.Registry, app.RegistrySnapshot, args[1:], stdout)
+		case "knowledge":
+			return commands.RunKnowledge(ctx, app.Store, root, cfg.RuntimeRoot, args[1:], stdout)
 		default:
 			return fmt.Errorf("unknown command: %s", args[0])
 		}
