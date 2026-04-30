@@ -12,6 +12,120 @@ import (
 func TestRunStartsInteractiveShell(t *testing.T) {
 	t.Parallel()
 
+	root := newLifecycleTestRoot(t)
+
+	stdin := strings.NewReader("/help\n")
+	var stdout bytes.Buffer
+
+	err := Run(context.Background(), root, nil, stdin, &stdout)
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	output := stdout.String()
+	if !strings.Contains(output, "scope=") {
+		t.Fatalf("Run() output = %q, want header", output)
+	}
+	if !strings.Contains(output, "/help") {
+		t.Fatalf("Run() output = %q, want help", output)
+	}
+}
+
+func TestRunWorkStatusShowsDeliveryWorkflowState(t *testing.T) {
+	t.Parallel()
+
+	root := newLifecycleTestRoot(t)
+
+	var stdout bytes.Buffer
+	err := Run(context.Background(), root, []string{"work", "status"}, strings.NewReader(""), &stdout)
+	if err != nil {
+		t.Fatalf("Run(work status) error = %v", err)
+	}
+
+	output := stdout.String()
+	for _, want := range []string{
+		"work_items=0",
+		"open_work_items=0",
+		"active_run_attempts=0",
+		"pending_approvals=0",
+		"delivery_profiles=0",
+		"dispatch=not_implemented",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("Run(work status) output = %q, want %q", output, want)
+		}
+	}
+}
+
+func TestRunWorkProfilesListsDeliveryProfileWorkflows(t *testing.T) {
+	t.Parallel()
+
+	root := newLifecycleTestRoot(t)
+	if err := os.MkdirAll(filepath.Join(root, "registry", "workflows"), 0o755); err != nil {
+		t.Fatalf("mkdir workflows: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "registry", "workflows", "delivery-small.md"), []byte(`---
+kind: workflow
+key: delivery-small
+title: Small Delivery Profile
+summary: Routes low-risk Work Items through a compact delivery loop.
+status: active
+tags:
+  - delivery_profile
+owners:
+  - odin-core
+entrypoint: command:odin work start --profile delivery-small
+composes:
+  - triage-skill
+---
+
+# Small Delivery Profile
+
+## Purpose
+Route low-risk Work Items through a compact delivery loop.
+
+## When to Use
+Use when the work is low-risk and scoped.
+
+## Inputs
+Work Item identity and acceptance criteria.
+
+## Procedure
+Plan, execute, verify, and hand off.
+
+## Outputs
+Verified Work Item evidence.
+
+## Constraints
+Do not skip verification or human handoff.
+
+## Success Criteria
+The Work Item reaches verified handoff evidence.
+`), 0o644); err != nil {
+		t.Fatalf("write delivery profile: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	err := Run(context.Background(), root, []string{"work", "profiles"}, strings.NewReader(""), &stdout)
+	if err != nil {
+		t.Fatalf("Run(work profiles) error = %v", err)
+	}
+
+	output := stdout.String()
+	for _, want := range []string{
+		"delivery-small",
+		"status=active",
+		"entrypoint=command:odin work start --profile delivery-small",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("Run(work profiles) output = %q, want %q", output, want)
+		}
+	}
+}
+
+func newLifecycleTestRoot(t *testing.T) string {
+	t.Helper()
+
 	root := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(root, "config"), 0o755); err != nil {
 		t.Fatalf("mkdir config: %v", err)
@@ -86,20 +200,5 @@ service:
 `), 0o644); err != nil {
 		t.Fatalf("write odin config: %v", err)
 	}
-
-	stdin := strings.NewReader("/help\n")
-	var stdout bytes.Buffer
-
-	err := Run(context.Background(), root, nil, stdin, &stdout)
-	if err != nil {
-		t.Fatalf("Run() error = %v", err)
-	}
-
-	output := stdout.String()
-	if !strings.Contains(output, "scope=") {
-		t.Fatalf("Run() output = %q, want header", output)
-	}
-	if !strings.Contains(output, "/help") {
-		t.Fatalf("Run() output = %q, want help", output)
-	}
+	return root
 }
