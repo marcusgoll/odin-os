@@ -144,6 +144,18 @@ _Avoid_: Noisy transcript, ambiguous next step, unreviewed agent output
 An authored registry concept that selects the skills, agents, workflow gates, proof requirements, and failure branches for a **Delivery Workflow** based on **Work Item** kind, risk, scope, and task shape. In v1, a **Delivery Profile** is represented as a specialized `workflow` registry entry tagged `delivery_profile`, not as a separate registry kind.
 _Avoid_: One-size-fits-all pipeline, hardcoded feature-only workflow, hidden routing rule
 
+**Agency Orchestrator**:
+The Odin-owned, multi-project Delivery Workflow capability that continuously turns eligible intake from enrolled projects into governed **Work Items**, isolated **Run Attempts**, draft pull requests, QA/review evidence, and human review handoff. It is not a separate product, repo, or cfipros-specific control plane.
+_Avoid_: cfipros-agency, project-specific agency app, GitHub-owned scheduler, parallel orchestrator
+
+**Issue Intake Source**:
+An upstream tracker record, such as a GitHub Issue, that can propose or update a **Work Item** for an enrolled managed project. The intake source is evidence and synchronization input; Odin-owned SQLite state remains the runtime authority.
+_Avoid_: GitHub as runtime truth, tracker-owned Work Item state, issue equals run
+
+**Human Review Handoff**:
+The Delivery Workflow state where Odin has recorded implementation, QA, review, and PR evidence and now waits for a human to decide merge, rejection, follow-up, or deployment. It is not approval to merge or deploy.
+_Avoid_: autonomous merge, auto-deploy, done without human decision
+
 **Feature Work Item**:
 A **Work Item** kind or grouping used for product or code feature delivery. It may decompose into smaller **Work Items** and **Run Attempts**, but it is not a separate top-level Odin aggregate unless a future locked decision promotes it.
 _Avoid_: Feature aggregate, project-owned feature registry, hidden implementation checklist
@@ -262,6 +274,10 @@ Odin owns **Delivery Profiles** as authored routing and proof contracts for flex
 
 Odin owns v1 **Delivery Profiles** through the existing `workflow` registry kind. A new registry kind for delivery profiles is deferred until profiles need separate validation, UI behavior, or lifecycle semantics that cannot be cleanly represented by workflow entries.
 
+Odin owns the **Agency Orchestrator** as a multi-project extension of the **Delivery Workflow**, not as a new project-specific product. `cfipros` may be an enrolled managed project and an early proving target, but it does not own the orchestrator, runtime state, gate model, or scheduler semantics.
+
+Odin treats GitHub Issues as an **Issue Intake Source** for GitHub-backed managed projects. GitHub labels, comments, issue state, and pull requests may mirror or request Odin state, but they must not outrank Odin-owned **Work Items**, **Run Attempts**, approvals, events, worktree leases, or proof records.
+
 Odin owns v1 extraction only for **Supported Knowledge Source Classes**. OCR for scanned PDFs or image-only documents is a future capability that requires a separate locked decision before implementation.
 
 Odin owns the **CEO Briefing Workflow**, **Briefing Proposals**, **Daily Priority Packets**, and **Priority Packet Supersession** as governed portfolio-priority concepts. Legacy `/var/odin` or `odin-orchestrator` executive review artifacts may inform migration and audit, but they do not own current priority state or operator proof.
@@ -307,6 +323,14 @@ Odin owns the **CEO Briefing Workflow**, **Briefing Proposals**, **Daily Priorit
 - A **Delivery Profile** must not remove verification or learning review for delivery work; it may satisfy them with lighter proof only when the profile declares why that proof is sufficient.
 - **Delivery Profiles** must remain authored and reviewable; hidden runtime heuristics may recommend a profile but must not silently rewrite profile requirements.
 - V1 **Delivery Profiles** must be authored as `workflow` registry entries tagged `delivery_profile`; implementation must not add a fifth registry kind unless a future locked decision proves workflow entries are insufficient.
+- The **Agency Orchestrator** must operate across enrolled managed projects; it must not hardcode `cfipros` or any other project as the product boundary.
+- An **Issue Intake Source** may create, refresh, or annotate a **Work Item**, but it must not become the canonical runtime state for dispatch, retries, approvals, verification, or branch finish.
+- Every mutating agency worker must map to one **Work Item**, one **Run Attempt**, one task-owned branch, and one active mutable worktree lease.
+- The **Agency Orchestrator** must not commit directly to a default branch, merge pull requests, or deploy production without a separate explicit human approval path.
+- Agency workers must not receive production secrets or unrestricted host credentials. Project enrollment and executor configuration must define the allowed development credentials and command surface.
+- A **Human Review Handoff** is required before merge or production deployment; passing QA and review agents is evidence for the human, not an autonomous approval.
+- Agency orchestration must support dry-run dispatch planning and a kill switch before unattended worker launch is considered complete.
+- A future Codex app-server runner must remain behind the shared executor contract; app-server thread, turn, and streaming-event details must not leak into the durable **Work Item** model.
 - A **Knowledge Source** must declare its scope before ingestion or retrieval.
 - Personal reference documents such as pilot contracts, books, and manuals default to global scope and restricted policy unless their **Knowledge Source Manifest** explicitly binds them to a managed-project scope.
 - Each **Knowledge Source** must have a **Knowledge Source Manifest** before Odin treats it as an approved retrieval input.
@@ -409,6 +433,9 @@ Odin owns the **CEO Briefing Workflow**, **Briefing Proposals**, **Daily Priorit
 - A **Feedback Loop** composes one or more skills, agents, and workflow registry entries around the current **Delivery Gate**.
 - A **Delivery Workflow** selects one **Delivery Profile** for the current **Work Item** before execution begins.
 - A **Delivery Profile** composes skills, agents, gates, proof requirements, and failure branches through a specialized workflow registry entry; it does not own **Work Item** state.
+- The **Agency Orchestrator** coordinates many **Work Items** across many managed projects through the existing **Delivery Workflow** model.
+- An **Issue Intake Source** may map to zero, one, or many **Work Items** over time when planning decomposes a large issue into smaller governed work.
+- A **Human Review Handoff** belongs to one **Work Item** or grouped delivery outcome and may reference one or more pull requests, QA artifacts, reviewer notes, and follow-up **Work Items**.
 - `systematic_debugging` may return a **Work Item** to an earlier gate when root-cause evidence changes the domain, design, plan, or implementation assumptions.
 - `writing_skills` may create a follow-up **Work Item** when learning_reviewed identifies a reusable skill gap, but it is not required for every completed delivery.
 - A **Knowledge Source** belongs to one explicit scope, such as global, odin-core, or a managed project.
@@ -430,6 +457,7 @@ Odin owns the **CEO Briefing Workflow**, **Briefing Proposals**, **Daily Priorit
 - Action Record persistence, append-only Action Evidence Events, Prepared Action Payload identity, and Workflow Run Outcome enforcement still need implementation alignment with the registry contracts.
 - The current code still exposes `task` and `run` in several runtime surfaces; implementation planning must decide where to keep those as storage/API compatibility terms and where to render canonical **Work Item** and **Run Attempt** language.
 - `odin work ...` is not implemented yet in the current binary; implementation work must add that canonical command family rather than relying on direct Codex sessions, REPL-only aliases, or sidecar scripts.
+- Always-on multi-project agency orchestration has no current canonical operator surface beyond the planned **Delivery Workflow** surface. Implementation planning must decide the exact `odin work ...` subcommands for intake, queue, dispatch, review handoff, dry-run, and kill-switch operations without creating a parallel top-level agency authority.
 - `odin brief ceo` is not implemented yet in the current binary; implementation work must add that canonical command family and must not rely on legacy `odin-orchestrator` executive_review launchers.
 - `odin workspace ...` is not implemented yet in the current binary; implementation work must add a canonical binding, adoption, and attachment surface before **Live Execution Sessions** can be managed as Odin-governed operator state.
 - A future ADR may promote **Delivery Profiles** to a separate registry kind only if specialized workflow entries prove insufficient for validation, UI behavior, or lifecycle semantics.
