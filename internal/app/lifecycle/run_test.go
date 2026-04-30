@@ -289,6 +289,44 @@ func TestRunKnowledgeIngestListSearchAndApproveUse(t *testing.T) {
 	}
 }
 
+func TestRunKnowledgeApproveUseRejectsUnrestrictedSource(t *testing.T) {
+	t.Parallel()
+
+	root := newLifecycleTestRoot(t)
+	sourcePath := filepath.Join(root, "note.txt")
+	if err := os.WriteFile(sourcePath, []byte("Public note for ordinary retrieval.\n"), 0o644); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+
+	var ingestOutput bytes.Buffer
+	err := Run(context.Background(), root, []string{
+		"knowledge",
+		"ingest",
+		sourcePath,
+		"--key", "public-note",
+		"--title", "Public Note",
+		"--kind", "note",
+	}, strings.NewReader(""), &ingestOutput)
+	if err != nil {
+		t.Fatalf("Run(knowledge ingest) error = %v", err)
+	}
+	if !strings.Contains(ingestOutput.String(), "restricted=false") {
+		t.Fatalf("ingest output = %q, want unrestricted source", ingestOutput.String())
+	}
+
+	var approvalOutput bytes.Buffer
+	err = Run(context.Background(), root, []string{
+		"knowledge",
+		"approve-use",
+		"public-note",
+		"--use-type", "executor_context_injection",
+		"--reason", "Should be rejected for unrestricted sources",
+	}, strings.NewReader(""), &approvalOutput)
+	if err == nil || !strings.Contains(err.Error(), "restricted knowledge source") {
+		t.Fatalf("Run(knowledge approve-use) error = %v, want restricted source failure", err)
+	}
+}
+
 func newLifecycleTestRoot(t *testing.T) string {
 	t.Helper()
 

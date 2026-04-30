@@ -2483,6 +2483,9 @@ func (store *Store) RecordRestrictedKnowledgeUseApproval(ctx context.Context, pa
 		if err != nil {
 			return err
 		}
+		if !source.Restricted {
+			return fmt.Errorf("restricted knowledge use approval requires a restricted knowledge source")
+		}
 
 		result, err := tx.ExecContext(ctx, `
 			INSERT INTO restricted_knowledge_use_approvals (

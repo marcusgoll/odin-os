@@ -1423,6 +1423,52 @@ func TestStoreRecordsRestrictedKnowledgeUseApprovalWithoutChangingLifecycle(t *t
 	}
 }
 
+func TestStoreRejectsRestrictedKnowledgeUseApprovalForUnrestrictedSource(t *testing.T) {
+	ctx := context.Background()
+	store := openMigratedTestStore(t, "unrestricted-knowledge-use-approval.db")
+	defer store.Close()
+
+	artifact, err := store.RecordKnowledgeArtifact(ctx, RecordKnowledgeArtifactParams{
+		SHA256:       "sha256:unrestricted",
+		SizeBytes:    128,
+		SourceType:   "text",
+		MimeType:     "text/plain",
+		ArtifactPath: "knowledge/artifacts/un/unrestricted/source.txt",
+		OriginalPath: "/tmp/unrestricted-source.txt",
+	})
+	if err != nil {
+		t.Fatalf("RecordKnowledgeArtifact() error = %v", err)
+	}
+
+	source, err := store.UpsertKnowledgeSource(ctx, UpsertKnowledgeSourceParams{
+		Key:               "unrestricted-note",
+		Title:             "Unrestricted Note",
+		Scope:             "global",
+		ScopeKey:          "global",
+		Restricted:        false,
+		SourceKind:        "note",
+		SourceClass:       "text",
+		Lifecycle:         "artifact_available",
+		ManifestPath:      "memory/knowledge/unrestricted-note.md",
+		CurrentArtifactID: &artifact.ID,
+	})
+	if err != nil {
+		t.Fatalf("UpsertKnowledgeSource() error = %v", err)
+	}
+
+	_, err = store.RecordRestrictedKnowledgeUseApproval(ctx, RecordRestrictedKnowledgeUseApprovalParams{
+		SourceID:     source.ID,
+		UseType:      "executor_context_injection",
+		Reason:       "Should be rejected for unrestricted sources.",
+		Decision:     "approved",
+		EvidenceJSON: `{"approved_by":"operator"}`,
+		DecidedBy:    "operator",
+	})
+	if err == nil || !strings.Contains(err.Error(), "restricted knowledge source") {
+		t.Fatalf("RecordRestrictedKnowledgeUseApproval() error = %v, want restricted source failure", err)
+	}
+}
+
 func recordReadyKnowledgeExtractionForTest(t *testing.T, ctx context.Context, store *Store, source KnowledgeSource, artifact KnowledgeArtifact, textHash string, chunkText string) (KnowledgeExtraction, KnowledgeChunk) {
 	t.Helper()
 
