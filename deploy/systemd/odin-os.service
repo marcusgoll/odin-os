@@ -1,0 +1,29 @@
+[Unit]
+Description=Odin OS sidecar runtime
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# This is a user unit. Install it with systemctl --user so the daemon does not run as root.
+WorkingDirectory=%h/odin-os-live
+EnvironmentFile=%h/.config/odin/odin-os.env
+ExecStart=%h/odin-os-live/bin/odin serve
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=15
+
+# Defense-in-depth hardening that preserves Odin's normal access to the operator-owned home tree.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectControlGroups=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=default.target

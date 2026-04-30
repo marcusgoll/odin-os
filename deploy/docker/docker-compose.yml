@@ -1,0 +1,28 @@
+services:
+  odin-os:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+    image: odin-os:local
+    init: true
+    user: "65532:65532"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    env_file:
+      - ${ODIN_COMPOSE_ENV_FILE:-../systemd/odin-os.env.example}
+    environment:
+      ODIN_ROOT: /var/lib/odin-os
+      ODIN_HTTP_ADDR: 0.0.0.0:9444
+    ports:
+      - "127.0.0.1:9444:9444"
+    volumes:
+      - odin-os-state:/var/lib/odin-os
+      - odin-os-cache:/tmp
+    restart: unless-stopped
+
+volumes:
+  odin-os-state:
+  odin-os-cache:
