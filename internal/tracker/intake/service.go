@@ -37,6 +37,7 @@ type SyncSummary struct {
 	Fetched    int
 	Persisted  int
 	DryRun     bool
+	Audit      tracker.RequestAudit
 }
 
 func (service Service) SyncProject(ctx context.Context, options SyncOptions) (SyncSummary, error) {
@@ -47,8 +48,8 @@ func (service Service) SyncProject(ctx context.Context, options SyncOptions) (Sy
 	if !ok {
 		return SyncSummary{}, fmt.Errorf("unknown project %q", options.ProjectKey)
 	}
-	if project.ProjectClass != projects.ProjectClassGitHubBacked || strings.TrimSpace(project.GitHub.Repo) == "" {
-		return SyncSummary{}, fmt.Errorf("project %q is not a GitHub-backed intake source", project.Key)
+	if !isGitHubIntakeSource(project) {
+		return SyncSummary{}, fmt.Errorf("project %q is not a GitHub intake source", project.Key)
 	}
 
 	factory := service.NewTracker
@@ -71,8 +72,8 @@ func (service Service) SyncProject(ctx context.Context, options SyncOptions) (Sy
 		Fetched:    len(issues),
 		DryRun:     options.DryRun,
 	}
-	if options.DryRun {
-		return summary, nil
+	if auditor, ok := source.(tracker.RequestAuditor); ok {
+		summary.Audit = auditor.RequestAudit()
 	}
 
 	runtimeProject, err := service.ensureRuntimeProject(ctx, project)
@@ -86,6 +87,13 @@ func (service Service) SyncProject(ctx context.Context, options SyncOptions) (Sy
 		summary.Persisted++
 	}
 	return summary, nil
+}
+
+func isGitHubIntakeSource(project projects.Manifest) bool {
+	if strings.TrimSpace(project.GitHub.Repo) == "" {
+		return false
+	}
+	return project.ProjectClass == projects.ProjectClassGitHubBacked || project.ProjectClass == projects.ProjectClassSystem || project.SystemProject
 }
 
 func NewGitHubTracker(project projects.Manifest, options SyncOptions) (tracker.Tracker, error) {

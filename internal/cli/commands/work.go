@@ -2,8 +2,10 @@ package commands
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"sort"
 	"strings"
 
@@ -134,20 +136,27 @@ func runWorkIntake(ctx context.Context, store *sqlite.Store, projectRegistry pro
 	params := parseWorkStartArgs(args)
 	projectKey := strings.TrimSpace(params["project"])
 	if projectKey == "" {
-		_, err := fmt.Fprintln(stdout, "usage: odin work intake --project <key> [--dry-run]")
+		_, err := fmt.Fprintln(stdout, "usage: odin work intake --project <key> [--dry-run] [--json]")
 		return err
 	}
 
-	summary, err := trackerintake.Service{
+	service := trackerintake.Service{
 		Store:    store,
 		Registry: projectRegistry,
 		NewTracker: func(project projects.Manifest, options trackerintake.SyncOptions) (tracker.Tracker, error) {
 			return newIntakeTracker(project, options)
 		},
-	}.SyncProject(ctx, trackerintake.SyncOptions{
+	}
+	options := trackerintake.SyncOptions{
 		ProjectKey: projectKey,
-		DryRun:     parseBoolFlag(params, "dry-run"),
-	})
+		DryRun:     parseBoolFlag(params, "dry-run") || parseEnvBool(os.Getenv("ODIN_DRY_RUN")),
+	}
+
+	if parseBoolFlag(params, "json") {
+		return runWorkIntakeJSON(ctx, store, service, options, stdout)
+	}
+
+	summary, err := service.SyncProject(ctx, options)
 	if err != nil {
 		return err
 	}
@@ -162,6 +171,111 @@ func runWorkIntake(ctx context.Context, store *sqlite.Store, projectRegistry pro
 		summary.DryRun,
 	)
 	return err
+}
+
+func runWorkIntakeJSON(ctx context.Context, store *sqlite.Store, service trackerintake.Service, options trackerintake.SyncOptions, stdout io.Writer) error {
+	project, ok := service.Registry.Lookup(strings.TrimSpace(options.ProjectKey))
+	if !ok {
+		return fmt.Errorf("unknown project %q", options.ProjectKey)
+	}
+	storedBefore, err := countExternalIssues(ctx, store, project.GitHub.Repo)
+	if err != nil {
+		return err
+	}
+
+	first, err := service.SyncProject(ctx, options)
+	if err != nil {
+		return err
+	}
+	storedAfterFirst, err := countExternalIssues(ctx, store, first.Repo)
+	if err != nil {
+		return err
+	}
+
+	second, err := service.SyncProject(ctx, options)
+	if err != nil {
+		return err
+	}
+	storedAfter, err := countExternalIssues(ctx, store, first.Repo)
+	if err != nil {
+		return err
+	}
+
+	audit := combineRequestAudits(first.Audit, second.Audit)
+	if audit.Writes > 0 {
+		forbidden := tracker.ForbiddenRequest{}
+		if len(audit.Forbidden) > 0 {
+			forbidden = audit.Forbidden[0]
+		}
+		return fmt.Errorf("forbidden GitHub write attempted during Stage 1 intake proof: method=%s path=%s", forbidden.Method, forbidden.Path)
+	}
+	report := workIntakeJSONReport{
+		Project:      first.ProjectKey,
+		Repo:         first.Repo,
+		StoredBefore: storedBefore,
+		StoredAfter:  storedAfter,
+		Idempotent:   storedAfterFirst == storedAfter,
+		GitHubWrites: audit.Writes,
+		FirstPass:    workIntakePassReport{Fetched: first.Fetched, Persisted: first.Persisted},
+		SecondPass:   workIntakePassReport{Fetched: second.Fetched, Persisted: second.Persisted},
+		MethodAudit: workIntakeAuditReport{
+			Reads:     audit.Reads,
+			Writes:    audit.Writes,
+			Forbidden: audit.Forbidden,
+		},
+		Dispatch: "not_started",
+		PRs:      "not_created",
+	}
+
+	encoder := json.NewEncoder(stdout)
+	encoder.SetIndent("", "  ")
+	return encoder.Encode(report)
+}
+
+type workIntakeJSONReport struct {
+	Project      string                `json:"project"`
+	Repo         string                `json:"repo"`
+	StoredBefore int                   `json:"stored_before"`
+	StoredAfter  int                   `json:"stored_after"`
+	Idempotent   bool                  `json:"idempotent"`
+	GitHubWrites int                   `json:"github_writes"`
+	FirstPass    workIntakePassReport  `json:"first_pass"`
+	SecondPass   workIntakePassReport  `json:"second_pass"`
+	MethodAudit  workIntakeAuditReport `json:"method_audit"`
+	Dispatch     string                `json:"dispatch"`
+	PRs          string                `json:"prs"`
+}
+
+type workIntakePassReport struct {
+	Fetched   int `json:"fetched"`
+	Persisted int `json:"persisted"`
+}
+
+type workIntakeAuditReport struct {
+	Reads     int                        `json:"reads"`
+	Writes    int                        `json:"writes"`
+	Forbidden []tracker.ForbiddenRequest `json:"forbidden,omitempty"`
+}
+
+func countExternalIssues(ctx context.Context, store *sqlite.Store, repo string) (int, error) {
+	issues, err := store.ListExternalIssues(ctx, sqlite.ListExternalIssuesParams{
+		Repo:       repo,
+		SyncStatus: "eligible",
+	})
+	if err != nil {
+		return 0, err
+	}
+	return len(issues), nil
+}
+
+func combineRequestAudits(audits ...tracker.RequestAudit) tracker.RequestAudit {
+	combined := tracker.RequestAudit{}
+	for _, audit := range audits {
+		combined.Reads += audit.Reads
+		combined.Writes += audit.Writes
+		combined.Forbidden = append(combined.Forbidden, audit.Forbidden...)
+	}
+	return combined
 }
 
 func parseWorkStartArgs(args []string) map[string]string {
@@ -189,7 +303,16 @@ func parseWorkStartArgs(args []string) map[string]string {
 
 func parseBoolFlag(values map[string]string, key string) bool {
 	value := strings.ToLower(strings.TrimSpace(values[key]))
-	return value == "true" || value == "1" || value == "yes"
+	return parseEnvBool(value)
+}
+
+func parseEnvBool(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "true", "1", "yes", "on", "enabled":
+		return true
+	default:
+		return false
+	}
 }
 
 func deliveryProfiles(snapshot registry.Snapshot) []registry.Item {

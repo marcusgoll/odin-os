@@ -85,6 +85,43 @@ func TestFetchEligibleIssuesFiltersReadyOpenIssuesAndSkipsBlockedAndPullRequests
 	if !containsLabel(issues[0].Labels, "backend") {
 		t.Fatalf("eligible issue labels = %#v, want backend preserved", issues[0].Labels)
 	}
+	audit := client.RequestAudit()
+	if audit.Reads != 1 || audit.Writes != 0 || len(audit.Forbidden) != 0 {
+		t.Fatalf("audit = %+v, want reads=1 writes=0 forbidden=0", audit)
+	}
+}
+
+func TestRequestAuditCountsForbiddenGitHubWriteMethodsWithoutTokenValues(t *testing.T) {
+	t.Parallel()
+	skipIfLoopbackListenUnavailable(t)
+
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		response.WriteHeader(http.StatusOK)
+		fmt.Fprint(response, `{}`)
+	}))
+	defer server.Close()
+
+	client := NewClientWithConfig(Config{
+		BaseURL: server.URL,
+		Owner:   "acme",
+		Repo:    "widgets",
+		Token:   "ghp_1234567890abcdefghijklmnopqrstuvwx",
+	})
+
+	if err := client.AddComment(context.Background(), tracker.IssueID{Provider: "github", Repo: "acme/widgets", Number: 7}, "comment"); err != nil {
+		t.Fatalf("AddComment() error = %v", err)
+	}
+
+	audit := client.RequestAudit()
+	if audit.Reads != 0 || audit.Writes != 1 || len(audit.Forbidden) != 1 {
+		t.Fatalf("audit = %+v, want reads=0 writes=1 forbidden=1", audit)
+	}
+	if audit.Forbidden[0].Method != http.MethodPost || audit.Forbidden[0].Path != "/repos/acme/widgets/issues/7/comments" {
+		t.Fatalf("forbidden = %+v, want POST comments path", audit.Forbidden[0])
+	}
+	if strings.Contains(fmt.Sprintf("%+v", audit), "ghp_1234567890abcdefghijklmnopqrstuvwx") {
+		t.Fatalf("audit leaked token: %+v", audit)
+	}
 }
 
 func TestDryRunTrackerMutationsDoNotWriteToGitHub(t *testing.T) {

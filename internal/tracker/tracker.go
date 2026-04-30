@@ -52,6 +52,24 @@ type FollowUpIssue struct {
 	Labels []string
 }
 
+// RequestAudit records tracker HTTP method usage for operator proof.
+type RequestAudit struct {
+	Reads     int
+	Writes    int
+	Forbidden []ForbiddenRequest
+}
+
+// ForbiddenRequest records a forbidden external mutation attempt without secrets.
+type ForbiddenRequest struct {
+	Method string `json:"method"`
+	Path   string `json:"path"`
+}
+
+// RequestAuditor is implemented by trackers that can prove read/write request counts.
+type RequestAuditor interface {
+	RequestAudit() RequestAudit
+}
+
 // Tracker wraps issue-tracker behavior without making the tracker Odin runtime authority.
 type Tracker interface {
 	FetchEligibleIssues(ctx context.Context) ([]Issue, error)

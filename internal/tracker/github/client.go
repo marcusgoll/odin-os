@@ -46,6 +46,7 @@ type HTTPDoer interface {
 type Client struct {
 	config Config
 	doer   HTTPDoer
+	audit  tracker.RequestAudit
 }
 
 func NewClient() *Client {
@@ -222,6 +223,12 @@ func (client *Client) CreateFollowUpIssue(ctx context.Context, issue tracker.Fol
 	return client.toTrackerIssue(decoded, labelNames(decoded.Labels)), nil
 }
 
+func (client *Client) RequestAudit() tracker.RequestAudit {
+	audit := client.audit
+	audit.Forbidden = append([]tracker.ForbiddenRequest(nil), client.audit.Forbidden...)
+	return audit
+}
+
 func (client *Client) addLabels(ctx context.Context, id tracker.IssueID, labels []string) error {
 	if client.config.DryRun {
 		return nil
@@ -268,6 +275,7 @@ func (client *Client) doJSON(ctx context.Context, method string, path string, qu
 		request.Header.Set("Authorization", "Bearer "+token)
 	}
 
+	client.recordRequest(method, endpoint.Path)
 	response, err := client.doer.Do(request)
 	if err != nil {
 		return nil, fmt.Errorf("call GitHub: %s", client.redact(err.Error()))
@@ -282,6 +290,21 @@ func (client *Client) doJSON(ctx context.Context, method string, path string, qu
 		return nil, fmt.Errorf("GitHub %s %s returned %d: %s", method, endpoint.Path, response.StatusCode, client.redact(string(responseBody)))
 	}
 	return responseBody, nil
+}
+
+func (client *Client) recordRequest(method string, path string) {
+	switch method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions:
+		client.audit.Reads++
+	case http.MethodPost, http.MethodPatch, http.MethodPut, http.MethodDelete:
+		client.audit.Writes++
+		client.audit.Forbidden = append(client.audit.Forbidden, tracker.ForbiddenRequest{
+			Method: method,
+			Path:   path,
+		})
+	default:
+		client.audit.Reads++
+	}
 }
 
 func (client *Client) configured() bool {

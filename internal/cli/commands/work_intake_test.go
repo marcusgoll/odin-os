@@ -2,6 +2,7 @@ package commands
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -70,6 +71,122 @@ func TestRunWorkIntakeSyncsEligibleIssuesWithoutStartingWork(t *testing.T) {
 	}
 	if taskCount != 0 {
 		t.Fatalf("task count = %d, want no scheduler dispatch/work item creation", taskCount)
+	}
+}
+
+func TestRunWorkIntakeJSONPerformsStage1TwoPassProofWithoutStartingWork(t *testing.T) {
+	ctx := context.Background()
+	store := openWorkCommandStore(t)
+	defer store.Close()
+	projectRegistry := commandProjectRegistry(t)
+	t.Setenv("ODIN_DRY_RUN", "true")
+
+	previousFactory := newIntakeTracker
+	t.Cleanup(func() { newIntakeTracker = previousFactory })
+	newIntakeTracker = func(project projects.Manifest, options trackerintake.SyncOptions) (tracker.Tracker, error) {
+		if !options.DryRun {
+			return nil, fmt.Errorf("options.DryRun = false, want true from ODIN_DRY_RUN")
+		}
+		return &commandAuditedFakeTracker{
+			issues: []tracker.Issue{{
+				Provider: "github",
+				Repo:     project.GitHub.Repo,
+				Number:   5,
+				Title:    "Wire intake",
+				Body:     "read-only",
+				State:    "open",
+				Labels:   []string{tracker.LabelReady},
+			}},
+			audit: tracker.RequestAudit{Reads: 1},
+		}, nil
+	}
+
+	var output strings.Builder
+	if err := RunWork(ctx, store, projectRegistry, registry.Snapshot{}, []string{"intake", "--project", "alpha", "--json"}, &output); err != nil {
+		t.Fatalf("RunWork(intake --json) error = %v", err)
+	}
+
+	var report struct {
+		Project      string `json:"project"`
+		Repo         string `json:"repo"`
+		StoredBefore int    `json:"stored_before"`
+		StoredAfter  int    `json:"stored_after"`
+		Idempotent   bool   `json:"idempotent"`
+		GitHubWrites int    `json:"github_writes"`
+		FirstPass    struct {
+			Fetched   int `json:"fetched"`
+			Persisted int `json:"persisted"`
+		} `json:"first_pass"`
+		SecondPass struct {
+			Fetched   int `json:"fetched"`
+			Persisted int `json:"persisted"`
+		} `json:"second_pass"`
+		MethodAudit struct {
+			Reads  int `json:"reads"`
+			Writes int `json:"writes"`
+		} `json:"method_audit"`
+	}
+	if err := json.Unmarshal([]byte(output.String()), &report); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v\noutput:\n%s", err, output.String())
+	}
+	if report.Project != "alpha" || report.Repo != "acme/alpha" {
+		t.Fatalf("report project/repo = %q/%q, want alpha/acme/alpha", report.Project, report.Repo)
+	}
+	if report.StoredBefore != 0 || report.StoredAfter != 1 || !report.Idempotent {
+		t.Fatalf("report storage = before %d after %d idempotent %t, want 0/1/true", report.StoredBefore, report.StoredAfter, report.Idempotent)
+	}
+	if report.FirstPass.Fetched != 1 || report.FirstPass.Persisted != 1 || report.SecondPass.Fetched != 1 || report.SecondPass.Persisted != 1 {
+		t.Fatalf("report passes = %+v/%+v, want fetched=1 persisted=1 for both", report.FirstPass, report.SecondPass)
+	}
+	if report.GitHubWrites != 0 || report.MethodAudit.Reads != 2 || report.MethodAudit.Writes != 0 {
+		t.Fatalf("report audit = writes %d method %+v, want writes=0 reads=2", report.GitHubWrites, report.MethodAudit)
+	}
+
+	var taskCount int
+	if err := store.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM tasks`).Scan(&taskCount); err != nil {
+		t.Fatalf("task count query: %v", err)
+	}
+	if taskCount != 0 {
+		t.Fatalf("task count = %d, want no work item creation", taskCount)
+	}
+}
+
+func TestRunWorkIntakeJSONFailsWhenStage1AuditObservesGitHubWrite(t *testing.T) {
+	ctx := context.Background()
+	store := openWorkCommandStore(t)
+	defer store.Close()
+	projectRegistry := commandProjectRegistry(t)
+	t.Setenv("ODIN_DRY_RUN", "true")
+
+	previousFactory := newIntakeTracker
+	t.Cleanup(func() { newIntakeTracker = previousFactory })
+	newIntakeTracker = func(project projects.Manifest, options trackerintake.SyncOptions) (tracker.Tracker, error) {
+		return &commandAuditedFakeTracker{
+			issues: []tracker.Issue{{
+				Provider: "github",
+				Repo:     project.GitHub.Repo,
+				Number:   5,
+				Title:    "Wire intake",
+				State:    "open",
+				Labels:   []string{tracker.LabelReady},
+			}},
+			audit: tracker.RequestAudit{
+				Writes: 1,
+				Forbidden: []tracker.ForbiddenRequest{{
+					Method: "POST",
+					Path:   "/repos/acme/alpha/issues/5/comments",
+				}},
+			},
+		}, nil
+	}
+
+	var output strings.Builder
+	err := RunWork(ctx, store, projectRegistry, registry.Snapshot{}, []string{"intake", "--project", "alpha", "--json"}, &output)
+	if err == nil {
+		t.Fatalf("RunWork(intake --json) error = nil, want forbidden GitHub write failure\noutput:\n%s", output.String())
+	}
+	if !strings.Contains(err.Error(), "forbidden GitHub write attempted") || strings.Contains(err.Error(), "GITHUB_TOKEN") {
+		t.Fatalf("error = %q, want safe forbidden-write message", err.Error())
 	}
 }
 
@@ -175,4 +292,18 @@ func (fake *commandFakeTracker) AddComment(context.Context, tracker.IssueID, str
 
 func (fake *commandFakeTracker) CreateFollowUpIssue(context.Context, tracker.FollowUpIssue) (tracker.Issue, error) {
 	return tracker.Issue{}, fmt.Errorf("unexpected mutation")
+}
+
+type commandAuditedFakeTracker struct {
+	commandFakeTracker
+	issues []tracker.Issue
+	audit  tracker.RequestAudit
+}
+
+func (fake *commandAuditedFakeTracker) FetchEligibleIssues(context.Context) ([]tracker.Issue, error) {
+	return fake.issues, nil
+}
+
+func (fake *commandAuditedFakeTracker) RequestAudit() tracker.RequestAudit {
+	return fake.audit
 }
