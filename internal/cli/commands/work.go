@@ -316,7 +316,7 @@ func looksLikeRelativePathHint(candidate string) bool {
 	if !strings.Contains(candidate, "/") {
 		return false
 	}
-	return strings.Contains(filepath.Base(candidate), ".")
+	return strings.Contains(filepath.Base(candidate), ".") || strings.HasSuffix(candidate, "/")
 }
 
 func looksLikeSensitivePathHint(candidate string) bool {

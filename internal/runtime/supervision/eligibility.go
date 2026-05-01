@@ -75,7 +75,7 @@ func isTestPath(path string) bool {
 
 func hasPrefix(path string, prefixes []string) bool {
 	for _, prefix := range prefixes {
-		if strings.HasPrefix(path, prefix) {
+		if strings.HasPrefix(path, prefix) || path == strings.TrimSuffix(prefix, "/") {
 			return true
 		}
 	}

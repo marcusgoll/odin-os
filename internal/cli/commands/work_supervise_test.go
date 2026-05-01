@@ -151,6 +151,16 @@ func TestRunWorkSuperviseQueueJSONEvaluatesTrackerIssuesWithoutGitHubWritesOrDis
 					State:    "open",
 					Labels:   []string{"odin:ready"},
 				},
+				{
+					Provider: "github",
+					Repo:     "acme/alpha",
+					Number:   27,
+					Title:    "Mixed docs and deploy directory",
+					Body:     "Planned scope: docs/example.md deploy/",
+					URL:      "https://github.example/acme/alpha/issues/27",
+					State:    "open",
+					Labels:   []string{"odin:ready", "safety:low-risk"},
+				},
 			},
 			audit: tracker.RequestAudit{Reads: 1},
 		}, nil
@@ -163,13 +173,14 @@ func TestRunWorkSuperviseQueueJSONEvaluatesTrackerIssuesWithoutGitHubWritesOrDis
 	if report.Source == "control_plane_fixture" {
 		t.Fatalf("source = %q, want tracker-backed queue source", report.Source)
 	}
-	if len(report.Queue) != 4 {
-		t.Fatalf("queue len = %d, want 4 decisions: %+v", len(report.Queue), report.Queue)
+	if len(report.Queue) != 5 {
+		t.Fatalf("queue len = %d, want 5 decisions: %+v", len(report.Queue), report.Queue)
 	}
 	assertSuperviseDecision(t, report.Queue[0], 21, supervision.DecisionEligible, "")
 	assertSuperviseDecision(t, report.Queue[1], 22, supervision.DecisionRefused, supervision.RefusalSensitiveTestScope)
 	assertSuperviseDecision(t, report.Queue[2], 23, supervision.DecisionRefused, supervision.RefusalUnknownScope)
 	assertSuperviseDecision(t, report.Queue[3], 24, supervision.DecisionRefused, supervision.RefusalMissingRequiredLabel)
+	assertSuperviseDecision(t, report.Queue[4], 27, supervision.DecisionRefused, supervision.RefusalForbiddenPath)
 
 	project, err := store.GetProjectByKey(ctx, "alpha")
 	if err != nil {
@@ -182,14 +193,15 @@ func TestRunWorkSuperviseQueueJSONEvaluatesTrackerIssuesWithoutGitHubWritesOrDis
 	if err != nil {
 		t.Fatalf("ListSupervisionQueueDecisions() error = %v", err)
 	}
-	if len(decisions) != 4 {
-		t.Fatalf("persisted decisions len = %d, want 4: %+v", len(decisions), decisions)
+	if len(decisions) != 5 {
+		t.Fatalf("persisted decisions len = %d, want 5: %+v", len(decisions), decisions)
 	}
 	wantReasons := map[int]string{
 		21: supervision.DecisionEligible,
 		22: supervision.RefusalSensitiveTestScope,
 		23: supervision.RefusalUnknownScope,
 		24: supervision.RefusalMissingRequiredLabel,
+		27: supervision.RefusalForbiddenPath,
 	}
 	for _, decision := range decisions {
 		if decision.Reason != wantReasons[decision.IssueNumber] {
@@ -200,6 +212,9 @@ func TestRunWorkSuperviseQueueJSONEvaluatesTrackerIssuesWithoutGitHubWritesOrDis
 	assertSuperviseTableCount(t, ctx, store, "runs", 0)
 	assertSuperviseTableCount(t, ctx, store, "approvals", 0)
 	assertSuperviseTableCount(t, ctx, store, "worktree_leases", 0)
+	if len(report.Claims) != 1 {
+		t.Fatalf("claims = %+v, want only eligible issue claim", report.Claims)
+	}
 	assertNoSuperviseSideEffects(t, ctx, store)
 }
 
