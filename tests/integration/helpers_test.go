@@ -71,6 +71,46 @@ func requirePathExists(t *testing.T, path string) {
 	}
 }
 
+func migrationAcceptanceSourceRoot(t *testing.T, preferredRoot string) string {
+	t.Helper()
+
+	if _, err := os.Stat(preferredRoot); err == nil {
+		return preferredRoot
+	} else if err != nil && !os.IsNotExist(err) {
+		t.Fatalf("stat migration source %s error = %v", preferredRoot, err)
+	}
+
+	sourceRoot := t.TempDir()
+	writeAcceptanceFile(t, filepath.Join(sourceRoot, ".agents", "skills", "fixture-skill", "SKILL.md"), "# Fixture Skill\n\nUse this skill for CI migration extraction proof.\n")
+	writeAcceptanceFile(t, filepath.Join(sourceRoot, ".claude", "skills", "fixture-skill", "SKILL.md"), "# Fixture Skill Mirror\n\nUse this skill for CI migration extraction proof.\n")
+	writeAcceptanceFile(t, filepath.Join(sourceRoot, "docs", "process", "ODIN_WORKFLOW_EVENT_MODEL.md"), "# Odin Workflow Event Model\n\nFixture process document.\n")
+	writeAcceptanceFile(t, filepath.Join(sourceRoot, "ops", "github-runner", "README.md"), "# GitHub Runner\n\nFixture operations runbook.\n")
+	return sourceRoot
+}
+
+func writeAcceptanceFile(t *testing.T, path string, content string) {
+	t.Helper()
+
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("MkdirAll(%s) error = %v", filepath.Dir(path), err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("WriteFile(%s) error = %v", path, err)
+	}
+}
+
+func TestMigrationAcceptanceSourceRootFallsBackWhenPreferredMissing(t *testing.T) {
+	missingRoot := filepath.Join(t.TempDir(), "missing-odin-orchestrator")
+
+	sourceRoot := migrationAcceptanceSourceRoot(t, missingRoot)
+
+	if sourceRoot == missingRoot {
+		t.Fatalf("migrationAcceptanceSourceRoot() = missing preferred root, want fixture fallback")
+	}
+	requirePathExists(t, filepath.Join(sourceRoot, ".agents", "skills", "fixture-skill", "SKILL.md"))
+	requirePathExists(t, filepath.Join(sourceRoot, "docs", "process", "ODIN_WORKFLOW_EVENT_MODEL.md"))
+}
+
 func createGitRepository(t *testing.T) string {
 	t.Helper()
 
