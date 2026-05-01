@@ -7,11 +7,10 @@ Stage 7 supervised E2E is implemented as a bounded
 disposable clone, local bare remote, fake Codex executable, fake GitHub API, and
 real `bin/odin` command execution.
 
-This proof includes a passing controlled fixture run and two controlled live
+This proof includes a passing controlled fixture run and three controlled live
 GitHub attempts. The live attempts proved issue intake, worker execution, branch
-push, draft PR creation, and evidence comments, but both failed closed waiting
-for Odin E2E CI because remote `main` does not currently contain
-`.github/workflows/odin-e2e.yml`.
+push, draft PR creation, and evidence comments, but all live attempts failed
+closed before Odin E2E CI success.
 
 This proof did not run an overnight 24/7 daemon.
 
@@ -30,7 +29,8 @@ This proof did not run an overnight 24/7 daemon.
 ## Gaps
 
 - Live GitHub PR creation was exercised, but live Odin E2E CI success was not
-  proven because the remote default branch lacks the Odin E2E workflow.
+  proven. The remote default branch lacks the Odin E2E workflow, and the
+  pre-merge feature-branch workflow is filtered to `main`.
 - Overnight 24/7 daemon operation was not exercised.
 - Real external review agents were not invoked; fixture-backed review evidence
   comments were created through the GitHub API seam.
@@ -262,6 +262,67 @@ Result: GitHub returned `404 Not Found`. Because `.github/workflows/` is a
 forbidden path for Stage 7 supervised mode, this proof did not add or modify the
 workflow live.
 
+Third live attempt:
+
+```text
+issue=https://github.com/marcusgoll/odin-os/issues/107
+run_id=1777661665928928564
+base=codex/serve-lifecycle-cancel-fix
+branch=odin/stage7-supervised-e2e/issue-107-1777661666278288408
+pr=https://github.com/marcusgoll/odin-os/pull/109
+status=failed_closed
+reason=GitHub Actions API returned 401 Bad credentials while polling workflow runs
+```
+
+Evidence comments:
+
+```text
+https://github.com/marcusgoll/odin-os/pull/109#issuecomment-4361069160
+https://github.com/marcusgoll/odin-os/pull/109#issuecomment-4361069198
+```
+
+This attempt used a temporary clone with local `config/projects.yaml` pointed at
+`codex/serve-lifecycle-cancel-fix` so the proof PR could target the branch that
+contains `.github/workflows/odin-e2e.yml`. The workflow still did not run,
+because the workflow itself is filtered to `pull_request.branches: [main]` and
+`push.branches: [main]`.
+
+PR #109 also exposed a separate live `ci` blocker:
+
+```text
+TestAlphaAcceptance/migration_extraction_from_odin-orchestrator_works
+path /home/orchestrator/odin-orchestrator missing
+```
+
+That CI failure is unrelated to the docs-only PR diff, but it means the live
+proof cannot be accepted as green. The final `run-once` report still recorded:
+
+```json
+{
+  "status": "failed_closed",
+  "prs": "draft_created",
+  "merge": "not_merged",
+  "deployment": "not_started",
+  "dispatch": "not_started",
+  "human_merge_required": true,
+  "pr": {
+    "number": 109,
+    "draft": true,
+    "created": true
+  }
+}
+```
+
+Corrective code change:
+
+```text
+e5a310f fix(stage7): audit deployments on ci timeout
+```
+
+This change preserves deployment-audit evidence when the CI wait path fails
+closed. The third live attempt ran before that fix was pushed to the temporary
+proof clone.
+
 ## Artifact Evidence
 
 The controlled fixture run wrote these handoff artifacts:
@@ -311,6 +372,13 @@ Stage 7 evidence comment markers as created.
 ## Unproven
 
 - Live Odin E2E CI success for Stage 7, blocked by the missing remote workflow.
+- Live feature-branch Odin E2E CI, blocked by the workflow's `main` branch
+  filter.
+- Green live `ci` for the proof branch, blocked by the
+  `/home/orchestrator/odin-orchestrator` integration fixture dependency on
+  GitHub-hosted runners.
+- Long-running GitHub Actions polling with the current bot token, blocked by a
+  `401 Bad credentials` response during the third live attempt.
 - Live external review-agent comments.
 - Overnight supervised 24/7 operation.
 - Any expansion beyond docs, prompts, fixtures, and non-sensitive tests.
