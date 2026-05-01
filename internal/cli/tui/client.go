@@ -1,0 +1,287 @@
+package tui
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"flag"
+	"fmt"
+	"io"
+	"math"
+	"net/http"
+	"net/url"
+	"strconv"
+	"time"
+)
+
+var ErrUnavailableTelemetry = errors.New("unavailable telemetry")
+
+var defaultHTTPClient = &http.Client{Timeout: 5 * time.Second}
+
+const recentLogsQuery = `{job="docker-containers"} |= "odin"`
+
+type Client struct {
+	PrometheusURL string
+	LokiURL       string
+	HTTPClient    *http.Client
+}
+
+func Run(ctx context.Context, args []string, stdout io.Writer) error {
+	flags := flag.NewFlagSet("tui", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	once := flags.Bool("once", false, "render once and exit")
+	prometheusURL := flags.String("prometheus-url", "http://127.0.0.1:9090", "Prometheus base URL")
+	lokiURL := flags.String("loki-url", "http://127.0.0.1:3100", "Loki base URL")
+	if err := flags.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			_, _ = fmt.Fprintln(stdout, "usage: odin tui --once [--prometheus-url URL] [--loki-url URL]")
+		}
+		return err
+	}
+	if !*once {
+		return errors.New("odin tui currently supports --once only; continuous mode is not implemented")
+	}
+	if flags.NArg() > 0 {
+		return fmt.Errorf("unexpected odin tui argument: %s", flags.Arg(0))
+	}
+
+	client := Client{
+		PrometheusURL: *prometheusURL,
+		LokiURL:       *lokiURL,
+	}
+	model, err := client.QueryOverview(ctx)
+	if err != nil {
+		return err
+	}
+	logs, err := client.QueryRecentLogs(ctx)
+	if err != nil {
+		model.LogsUnavailable = err.Error()
+	} else {
+		model.Logs = logs
+	}
+	_, err = io.WriteString(stdout, RenderOverview(model))
+	return err
+}
+
+func (c Client) QueryOverview(ctx context.Context) (Model, error) {
+	healthScore, err := c.queryPrometheusScalar(ctx, "odin_os_health_score")
+	if err != nil {
+		return Model{}, err
+	}
+	telemetryStale, err := c.queryPrometheusScalar(ctx, "odin_os_telemetry_stale")
+	if err != nil {
+		return Model{}, err
+	}
+	status, err := c.queryPrometheusActiveLabel(ctx, "odin_os_status", "status")
+	if err != nil {
+		return Model{}, err
+	}
+	lifecyclePhase, err := c.queryPrometheusActiveLabel(ctx, "odin_os_lifecycle_phase", "phase")
+	if err != nil {
+		return Model{}, err
+	}
+	activeRuns, err := c.queryPrometheusScalar(ctx, "odin_active_runs")
+	if err != nil {
+		return Model{}, err
+	}
+
+	stale := telemetryStale >= 1
+	score := int(math.Round(healthScore))
+	return Model{
+		TelemetryAvailable: true,
+		Status:             status,
+		HealthScore:        score,
+		TelemetryStale:     stale,
+		LifecyclePhase:     lifecyclePhase,
+		ActiveRuns:         int(math.Round(activeRuns)),
+	}, nil
+}
+
+func (c Client) QueryRecentLogs(ctx context.Context) ([]LogEntry, error) {
+	baseURL, err := url.Parse(c.LokiURL)
+	if err != nil {
+		return nil, fmt.Errorf("%w: invalid loki url: %v", ErrUnavailableTelemetry, err)
+	}
+	queryURL := baseURL.JoinPath("/loki/api/v1/query_range")
+	values := queryURL.Query()
+	values.Set("query", recentLogsQuery)
+	values.Set("limit", "10")
+	values.Set("direction", "BACKWARD")
+	values.Set("end", strconv.FormatInt(time.Now().UnixNano(), 10))
+	values.Set("start", strconv.FormatInt(time.Now().Add(-15*time.Minute).UnixNano(), 10))
+	queryURL.RawQuery = values.Encode()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, queryURL.String(), nil)
+	if err != nil {
+		return nil, fmt.Errorf("%w: loki request: %v", ErrUnavailableTelemetry, err)
+	}
+	resp, err := c.httpClient().Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("%w: loki query failed: %v", ErrUnavailableTelemetry, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("%w: loki query returned HTTP %d", ErrUnavailableTelemetry, resp.StatusCode)
+	}
+
+	var decoded lokiQueryResponse
+	if err := json.NewDecoder(resp.Body).Decode(&decoded); err != nil {
+		return nil, fmt.Errorf("%w: loki response decode failed: %v", ErrUnavailableTelemetry, err)
+	}
+	if decoded.Status != "success" {
+		if decoded.Error != "" {
+			return nil, fmt.Errorf("%w: loki query status=%s: %s", ErrUnavailableTelemetry, decoded.Status, decoded.Error)
+		}
+		return nil, fmt.Errorf("%w: loki query status=%s", ErrUnavailableTelemetry, decoded.Status)
+	}
+
+	var entries []LogEntry
+	for _, stream := range decoded.Data.Result {
+		for _, value := range stream.Values {
+			if len(value) != 2 {
+				continue
+			}
+			var ts string
+			var line string
+			if err := json.Unmarshal(value[0], &ts); err != nil {
+				continue
+			}
+			if err := json.Unmarshal(value[1], &line); err != nil {
+				continue
+			}
+			entries = append(entries, LogEntry{
+				Timestamp: ts,
+				Line:      line,
+				Labels:    stream.Stream,
+			})
+		}
+	}
+	return entries, nil
+}
+
+func (c Client) queryPrometheusScalar(ctx context.Context, query string) (float64, error) {
+	sample, err := c.queryPrometheusOne(ctx, query)
+	if err != nil {
+		return 0, err
+	}
+	return sample.floatValue(query)
+}
+
+func (c Client) queryPrometheusActiveLabel(ctx context.Context, query string, label string) (string, error) {
+	response, err := c.queryPrometheus(ctx, query)
+	if err != nil {
+		return "", err
+	}
+	for _, sample := range response.Data.Result {
+		value, err := sample.floatValue(query)
+		if err != nil {
+			return "", err
+		}
+		if value > 0 {
+			if got := sample.Metric[label]; got != "" {
+				return got, nil
+			}
+		}
+	}
+	return "", fmt.Errorf("%w: prometheus query %q returned no active %s label", ErrUnavailableTelemetry, query, label)
+}
+
+func (c Client) queryPrometheusOne(ctx context.Context, query string) (prometheusSample, error) {
+	response, err := c.queryPrometheus(ctx, query)
+	if err != nil {
+		return prometheusSample{}, err
+	}
+	if len(response.Data.Result) == 0 {
+		return prometheusSample{}, fmt.Errorf("%w: prometheus query %q returned no samples", ErrUnavailableTelemetry, query)
+	}
+	return response.Data.Result[0], nil
+}
+
+func (c Client) queryPrometheus(ctx context.Context, query string) (prometheusQueryResponse, error) {
+	baseURL, err := url.Parse(c.PrometheusURL)
+	if err != nil {
+		return prometheusQueryResponse{}, fmt.Errorf("%w: invalid prometheus url: %v", ErrUnavailableTelemetry, err)
+	}
+	queryURL := baseURL.JoinPath("/api/v1/query")
+	values := queryURL.Query()
+	values.Set("query", query)
+	queryURL.RawQuery = values.Encode()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, queryURL.String(), nil)
+	if err != nil {
+		return prometheusQueryResponse{}, fmt.Errorf("%w: prometheus request %q: %v", ErrUnavailableTelemetry, query, err)
+	}
+	resp, err := c.httpClient().Do(req)
+	if err != nil {
+		return prometheusQueryResponse{}, fmt.Errorf("%w: prometheus query %q failed: %v", ErrUnavailableTelemetry, query, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		if len(body) > 0 {
+			return prometheusQueryResponse{}, fmt.Errorf("%w: prometheus query %q returned HTTP %d: %s", ErrUnavailableTelemetry, query, resp.StatusCode, string(body))
+		}
+		return prometheusQueryResponse{}, fmt.Errorf("%w: prometheus query %q returned HTTP %d", ErrUnavailableTelemetry, query, resp.StatusCode)
+	}
+
+	var decoded prometheusQueryResponse
+	if err := json.NewDecoder(resp.Body).Decode(&decoded); err != nil {
+		return prometheusQueryResponse{}, fmt.Errorf("%w: prometheus query %q decode failed: %v", ErrUnavailableTelemetry, query, err)
+	}
+	if decoded.Status != "success" {
+		if decoded.Error != "" {
+			return prometheusQueryResponse{}, fmt.Errorf("%w: prometheus query %q status=%s: %s", ErrUnavailableTelemetry, query, decoded.Status, decoded.Error)
+		}
+		return prometheusQueryResponse{}, fmt.Errorf("%w: prometheus query %q status=%s", ErrUnavailableTelemetry, query, decoded.Status)
+	}
+	return decoded, nil
+}
+
+func (c Client) httpClient() *http.Client {
+	if c.HTTPClient != nil {
+		return c.HTTPClient
+	}
+	return defaultHTTPClient
+}
+
+type prometheusQueryResponse struct {
+	Status string `json:"status"`
+	Error  string `json:"error,omitempty"`
+	Data   struct {
+		ResultType string             `json:"resultType"`
+		Result     []prometheusSample `json:"result"`
+	} `json:"data"`
+}
+
+type prometheusSample struct {
+	Metric map[string]string `json:"metric"`
+	Value  []json.RawMessage `json:"value"`
+}
+
+func (s prometheusSample) floatValue(query string) (float64, error) {
+	if len(s.Value) != 2 {
+		return 0, fmt.Errorf("%w: prometheus query %q returned malformed value", ErrUnavailableTelemetry, query)
+	}
+	var value string
+	if err := json.Unmarshal(s.Value[1], &value); err != nil {
+		return 0, fmt.Errorf("%w: prometheus query %q returned non-string sample value: %v", ErrUnavailableTelemetry, query, err)
+	}
+	parsed, err := strconv.ParseFloat(value, 64)
+	if err != nil {
+		return 0, fmt.Errorf("%w: prometheus query %q returned non-numeric sample value %q", ErrUnavailableTelemetry, query, value)
+	}
+	return parsed, nil
+}
+
+type lokiQueryResponse struct {
+	Status string `json:"status"`
+	Error  string `json:"error,omitempty"`
+	Data   struct {
+		Result []lokiStream `json:"result"`
+	} `json:"data"`
+}
+
+type lokiStream struct {
+	Stream map[string]string   `json:"stream"`
+	Values [][]json.RawMessage `json:"values"`
+}

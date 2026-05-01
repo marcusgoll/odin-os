@@ -63,6 +63,9 @@ func TestReadyzReturnsHealthyWhenRuntimeIsReady(t *testing.T) {
 	if !strings.Contains(string(body), "odin_active_runs") {
 		t.Fatalf("/metrics body = %q, want odin_active_runs metric", string(body))
 	}
+	if !strings.Contains(string(body), "odin_os_health_score") {
+		t.Fatalf("/metrics body = %q, want odin_os_health_score metric", string(body))
+	}
 }
 
 func TestReadyzFailsClosedWhenRuntimeIsNotReady(t *testing.T) {

@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,6 +16,7 @@ import (
 
 	"odin-os/internal/app/bootstrap"
 	clioverview "odin-os/internal/cli/overview"
+	"odin-os/internal/cli/tui"
 	"odin-os/internal/core/capabilities"
 	"odin-os/internal/core/initiatives"
 	"odin-os/internal/runtime/checkpoints"
@@ -251,6 +254,54 @@ func TestRunOverviewTextUsesCanonicalBoard(t *testing.T) {
 	}
 	if strings.Contains(output, "Processes") {
 		t.Fatalf("overview output = %q, must not introduce Processes lane", output)
+	}
+}
+
+func TestRunTUIOnceInvokesRunner(t *testing.T) {
+	root := testRepoRoot(t)
+
+	original := runTUI
+	t.Cleanup(func() {
+		runTUI = original
+	})
+
+	called := false
+	runTUI = func(ctx context.Context, args []string, stdout io.Writer) error {
+		called = true
+		if len(args) != 1 || args[0] != "--once" {
+			t.Fatalf("tui args = %v, want [--once]", args)
+		}
+		_, err := stdout.Write([]byte("tui invoked\n"))
+		return err
+	}
+
+	var stdout bytes.Buffer
+	if err := Run(context.Background(), root, []string{"tui", "--once"}, strings.NewReader(""), &stdout); err != nil {
+		t.Fatalf("Run(tui --once) error = %v", err)
+	}
+	if !called {
+		t.Fatal("Run(tui --once) did not invoke TUI runner")
+	}
+	if !strings.Contains(stdout.String(), "tui invoked") {
+		t.Fatalf("stdout = %q, want TUI runner output", stdout.String())
+	}
+}
+
+func TestRunTUIMissingPrometheusReturnsControlledError(t *testing.T) {
+	root := testRepoRoot(t)
+
+	var stdout bytes.Buffer
+	err := Run(context.Background(), root, []string{
+		"tui",
+		"--once",
+		"--prometheus-url", "http://127.0.0.1:1",
+		"--loki-url", "http://127.0.0.1:1",
+	}, strings.NewReader(""), &stdout)
+	if !errors.Is(err, tui.ErrUnavailableTelemetry) {
+		t.Fatalf("Run(tui --once) error = %v, want ErrUnavailableTelemetry", err)
+	}
+	if strings.Contains(strings.ToUpper(stdout.String()), "HEALTHY") {
+		t.Fatalf("stdout = %q, must not report healthy when Prometheus is missing", stdout.String())
 	}
 }
 

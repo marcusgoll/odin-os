@@ -1,0 +1,160 @@
+groups:
+  - name: "odin-os"
+    rules:
+      - alert: "OdinHealthScoreLow"
+        expr: odin_os_health_score < 70
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Odin health score is below 70"
+          description: "odin serve reports a degraded Odin-OS health score."
+
+      - alert: "OdinTelemetryStale"
+        expr: odin_os_telemetry_stale == 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Odin telemetry is stale"
+          description: "odin serve reports stale or missing telemetry."
+
+      - alert: "OdinBackupOlderThan24Hours"
+        expr: odin_os_backup_age_seconds > 86400
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Odin backup is older than 24 hours"
+          description: "odin serve reports backup age over 24 hours."
+
+      - alert: "OdinBackupMetricAbsent"
+        expr: absent(odin_os_backup_age_seconds)
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Odin backup age metric is absent"
+          description: "odin serve is not exporting backup age; backup freshness cannot be judged from telemetry."
+
+      - alert: "OdinRestoreTestOlderThan30Days"
+        expr: odin_os_restore_test_age_seconds > 2592000
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Odin restore test is older than 30 days"
+          description: "odin serve reports restore-test age over 30 days."
+
+      - alert: "OdinRestoreTestMetricAbsent"
+        expr: absent(odin_os_restore_test_age_seconds)
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Odin restore-test age metric is absent"
+          description: "odin serve is not exporting restore-test age; restore readiness cannot be judged from telemetry."
+
+      - alert: "OdinCriticalServiceDown"
+        expr: odin_os_critical_service_up == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Odin critical service is down"
+          description: "A critical service exported by odin serve is down."
+
+      - alert: "OdinCriticalServiceMetricAbsent"
+        expr: absent(odin_os_critical_service_up)
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Odin critical service metric is absent"
+          description: "odin serve is not exporting critical service state; service readiness cannot be judged from telemetry."
+
+      - alert: "OdinCriticalContainerDown"
+        expr: odin_os_critical_container_up == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Odin critical container is down"
+          description: "A critical container exported by odin serve is down."
+
+      - alert: "OdinCriticalContainerMetricAbsent"
+        expr: absent(odin_os_critical_container_up)
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Odin critical container metric is absent"
+          description: "odin serve is not exporting critical container state; container readiness cannot be judged from telemetry."
+
+      - alert: "OdinRootFilesystemLow"
+        expr: |
+          (
+            node_filesystem_avail_bytes{mountpoint="/",fstype!~"tmpfs|overlay"}
+            /
+            node_filesystem_size_bytes{mountpoint="/",fstype!~"tmpfs|overlay"}
+          ) < 0.10
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Root filesystem has less than 10 percent free"
+          description: "Host-level node_exporter reports low root filesystem free space."
+
+      - alert: "OdinNodeExporterFilesystemMetricAbsent"
+        expr: absent(node_filesystem_size_bytes{mountpoint="/"})
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "node_exporter filesystem metric is absent"
+          description: "Prometheus is not receiving root filesystem metrics; host disk alerts cannot be evaluated."
+
+      - alert: "OdinSecurityUpdatesPendingOver7Days"
+        expr: odin_os_security_updates_pending_total > 0
+        for: 7d
+        labels:
+          severity: warning
+        annotations:
+          summary: "Security updates have been pending for over 7 days"
+          description: "odin serve reports pending security updates continuously for over 7 days."
+
+      - alert: "OdinSecurityUpdatesMetricAbsent"
+        expr: absent(odin_os_security_updates_pending_total)
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Odin security update metric is absent"
+          description: "odin serve is not exporting security update counts; update freshness cannot be judged from telemetry."
+
+      - alert: "OdinRebootRequiredOver7Days"
+        expr: odin_os_reboot_required == 1
+        for: 7d
+        labels:
+          severity: warning
+        annotations:
+          summary: "Reboot has been required for over 7 days"
+          description: "odin serve reports reboot required continuously for over 7 days."
+
+      - alert: "OdinRebootRequiredMetricAbsent"
+        expr: absent(odin_os_reboot_required)
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Odin reboot-required metric is absent"
+          description: "odin serve is not exporting reboot-required state; reboot freshness cannot be judged from telemetry."
+
+      - alert: "OdinEndpointProbeFailure"
+        expr: probe_success{job="blackbox"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Odin endpoint probe failed"
+          description: "blackbox_exporter cannot successfully probe an Odin endpoint."

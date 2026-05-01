@@ -64,6 +64,10 @@ _Avoid_: wrapper script, hidden admin flow, playbook
 The read-only operator understanding layer for logs, health, metrics, incidents, recoveries, projection freshness, and cross-scope runtime readbacks.
 _Avoid_: control plane, source of truth, execution lane
 
+**Odin Observer Role**:
+The Odin-owned observability role inside `odin serve` that exports runtime-derived health, readiness, metrics, and structured logs for external telemetry backends. It is not a separate runtime authority or a second observer service unless a future locked decision explicitly creates one.
+_Avoid_: parallel observer daemon, duplicated health derivation, dashboard-owned runtime truth
+
 **Runtime Readiness**:
 The machine-oriented safety state that says whether a runtime root is safe to operate, exposed by readiness endpoints and `healthcheck`; `doctor` explains the underlying health evidence.
 _Avoid_: dashboard status, work status

@@ -24,6 +24,38 @@ type Snapshot struct {
 	StaleProjections   int
 	MediaOpenIncidents int
 	MediaCandidates    int
+	OS                 OSSnapshot
+}
+
+type OSSnapshot struct {
+	HealthScore               int
+	Status                    string
+	LifecyclePhase            string
+	TelemetryStale            bool
+	BackupAgeSeconds          int64
+	BackupAgeSecondsSet       bool
+	RestoreTestAgeSeconds     int64
+	RestoreTestAgeSecondsSet  bool
+	UpdatesPending            int
+	UpdatesPendingSet         bool
+	SecurityUpdatesPending    int
+	SecurityUpdatesPendingSet bool
+	RebootRequired            bool
+	RebootRequiredSet         bool
+	SystemdFailedUnits        int
+	SystemdFailedUnitsSet     bool
+	CriticalServices          []CriticalServiceMetric
+	CriticalContainers        []CriticalContainerMetric
+}
+
+type CriticalServiceMetric struct {
+	Name string
+	Up   bool
+}
+
+type CriticalContainerMetric struct {
+	Name string
+	Up   bool
 }
 
 type Config struct {
@@ -58,7 +90,58 @@ func Render(snapshot Snapshot) string {
 		fmt.Sprintf("odin_media_open_incidents %d", snapshot.MediaOpenIncidents),
 		fmt.Sprintf("odin_media_candidates %d", snapshot.MediaCandidates),
 	}
-	return strings.Join(lines, "\n")
+	lines = append(lines, renderOSMetrics(snapshot.OS)...)
+	return strings.Join(lines, "\n") + "\n"
+}
+
+func renderOSMetrics(snapshot OSSnapshot) []string {
+	status := snapshot.Status
+	if status == "" {
+		status = "unknown"
+	}
+	phase := snapshot.LifecyclePhase
+	if phase == "" {
+		phase = "run"
+	}
+
+	lines := []string{
+		fmt.Sprintf("odin_os_health_score %d", snapshot.HealthScore),
+		fmt.Sprintf("odin_os_status{status=%q} 1", status),
+		fmt.Sprintf("odin_os_lifecycle_phase{phase=%q} 1", phase),
+		fmt.Sprintf("odin_os_telemetry_stale %d", boolMetric(snapshot.TelemetryStale)),
+	}
+	if snapshot.BackupAgeSecondsSet || snapshot.BackupAgeSeconds != 0 {
+		lines = append(lines, fmt.Sprintf("odin_os_backup_age_seconds %d", snapshot.BackupAgeSeconds))
+	}
+	if snapshot.RestoreTestAgeSecondsSet || snapshot.RestoreTestAgeSeconds != 0 {
+		lines = append(lines, fmt.Sprintf("odin_os_restore_test_age_seconds %d", snapshot.RestoreTestAgeSeconds))
+	}
+	if snapshot.UpdatesPendingSet || snapshot.UpdatesPending != 0 {
+		lines = append(lines, fmt.Sprintf("odin_os_updates_pending_total %d", snapshot.UpdatesPending))
+	}
+	if snapshot.SecurityUpdatesPendingSet || snapshot.SecurityUpdatesPending != 0 {
+		lines = append(lines, fmt.Sprintf("odin_os_security_updates_pending_total %d", snapshot.SecurityUpdatesPending))
+	}
+	if snapshot.RebootRequiredSet || snapshot.RebootRequired {
+		lines = append(lines, fmt.Sprintf("odin_os_reboot_required %d", boolMetric(snapshot.RebootRequired)))
+	}
+	if snapshot.SystemdFailedUnitsSet || snapshot.SystemdFailedUnits != 0 {
+		lines = append(lines, fmt.Sprintf("odin_os_systemd_failed_units_total %d", snapshot.SystemdFailedUnits))
+	}
+	for _, service := range snapshot.CriticalServices {
+		lines = append(lines, fmt.Sprintf("odin_os_critical_service_up{service=%q} %d", service.Name, boolMetric(service.Up)))
+	}
+	for _, container := range snapshot.CriticalContainers {
+		lines = append(lines, fmt.Sprintf("odin_os_critical_container_up{container=%q} %d", container.Name, boolMetric(container.Up)))
+	}
+	return lines
+}
+
+func boolMetric(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
 }
 
 func (service Service) Collect(ctx context.Context) (Snapshot, error) {
@@ -196,7 +279,12 @@ func (service Service) Collect(ctx context.Context) (Snapshot, error) {
 		return Snapshot{}, err
 	}
 
-	return Snapshot{
+	executorSamples, sourceSamples, projectionSamples, err := service.telemetrySampleCounts(ctx)
+	if err != nil {
+		return Snapshot{}, err
+	}
+
+	snapshot := Snapshot{
 		GeneratedAt:        now,
 		ActiveRuns:         len(activeRuns),
 		BlockedItems:       len(blocked),
@@ -210,7 +298,20 @@ func (service Service) Collect(ctx context.Context) (Snapshot, error) {
 		StaleProjections:   staleProjections,
 		MediaOpenIncidents: mediaOpenIncidents,
 		MediaCandidates:    mediaCandidates,
-	}, nil
+	}
+	snapshot.OS = deriveOSSnapshot(snapshot, executorSamples == 0 || sourceSamples == 0 || projectionSamples == 0, countActiveIncidents(incidents))
+	return snapshot, nil
+}
+
+func countActiveIncidents(views []projections.IncidentView) int {
+	count := 0
+	for _, view := range views {
+		switch view.Status {
+		case "open", "escalated":
+			count++
+		}
+	}
+	return count
 }
 
 func countActiveRecoveries(views []projections.RecoveryView) int {
@@ -232,4 +333,41 @@ func placeholders(count int) string {
 		values = append(values, "?")
 	}
 	return strings.Join(values, ", ")
+}
+
+func (service Service) telemetrySampleCounts(ctx context.Context) (int, int, int, error) {
+	var executorSamples int
+	var sourceSamples int
+	var projectionSamples int
+	if err := service.DB.QueryRowContext(ctx, `
+		SELECT
+			(SELECT COUNT(*) FROM executor_health),
+			(SELECT COUNT(*) FROM registry_versions),
+			(SELECT COUNT(*) FROM projection_freshness)
+	`).Scan(&executorSamples, &sourceSamples, &projectionSamples); err != nil {
+		return 0, 0, 0, err
+	}
+	return executorSamples, sourceSamples, projectionSamples, nil
+}
+
+func deriveOSSnapshot(snapshot Snapshot, telemetryMissing bool, activeIncidents int) OSSnapshot {
+	telemetryStale := telemetryMissing || snapshot.StaleExecutors > 0 || snapshot.StaleSources > 0 || snapshot.StaleProjections > 0
+	degraded := activeIncidents > 0 || snapshot.ActiveRecoveries > 0
+
+	osSnapshot := OSSnapshot{
+		HealthScore:    100,
+		Status:         "healthy",
+		LifecyclePhase: "run",
+		TelemetryStale: telemetryStale,
+	}
+	if telemetryStale {
+		osSnapshot.HealthScore = 80
+		osSnapshot.Status = "unknown"
+		return osSnapshot
+	}
+	if degraded {
+		osSnapshot.HealthScore = 80
+		osSnapshot.Status = "degraded"
+	}
+	return osSnapshot
 }
