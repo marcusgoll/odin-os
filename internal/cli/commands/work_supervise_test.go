@@ -2,6 +2,8 @@ package commands
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -201,6 +203,69 @@ func TestRunWorkSuperviseQueueJSONEvaluatesTrackerIssuesWithoutGitHubWritesOrDis
 	assertNoSuperviseSideEffects(t, ctx, store)
 }
 
+func TestRunWorkSuperviseQueueJSONPersistsIssueBodyHashWithoutRawBody(t *testing.T) {
+	ctx := context.Background()
+	store := openWorkCommandStore(t)
+	defer store.Close()
+	projectRegistry := commandProjectRegistry(t)
+
+	sensitiveBody := "Planned scope: docs/example.md\nFailure dump: ghp_123456789012345678901234567890123456"
+	previousFactory := newIntakeTracker
+	t.Cleanup(func() { newIntakeTracker = previousFactory })
+	newIntakeTracker = func(project projects.Manifest, options trackerintake.SyncOptions) (tracker.Tracker, error) {
+		return &commandAuditedFakeTracker{
+			issues: []tracker.Issue{{
+				Provider: "github",
+				Repo:     project.GitHub.Repo,
+				Number:   26,
+				Title:    "Hash sensitive body evidence",
+				Body:     sensitiveBody,
+				URL:      "https://github.example/acme/alpha/issues/26",
+				State:    "open",
+				Labels:   []string{"odin:ready", "safety:low-risk"},
+			}},
+			audit: tracker.RequestAudit{Reads: 1},
+		}, nil
+	}
+
+	_ = runWorkSuperviseJSON(t, ctx, store, []string{"supervise", "start", "--json"})
+	_ = runWorkSuperviseJSONWithRegistry(t, ctx, store, projectRegistry, []string{"supervise", "queue", "--project", "alpha", "--json"})
+
+	project, err := store.GetProjectByKey(ctx, "alpha")
+	if err != nil {
+		t.Fatalf("GetProjectByKey(alpha) error = %v", err)
+	}
+	decisions, err := store.ListSupervisionQueueDecisions(ctx, sqlite.ListSupervisionQueueDecisionsParams{
+		ProjectID: &project.ID,
+		Repo:      "acme/alpha",
+	})
+	if err != nil {
+		t.Fatalf("ListSupervisionQueueDecisions() error = %v", err)
+	}
+	if len(decisions) != 1 {
+		t.Fatalf("persisted decisions len = %d, want 1: %+v", len(decisions), decisions)
+	}
+
+	decisionJSON := decisions[0].DecisionJSON
+	if strings.Contains(decisionJSON, sensitiveBody) || strings.Contains(decisionJSON, "ghp_123456789012345678901234567890123456") {
+		t.Fatalf("decision_json leaked raw issue body/token-like content: %s", decisionJSON)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(decisionJSON), &payload); err != nil {
+		t.Fatalf("json.Unmarshal(decision_json) error = %v\njson: %s", err, decisionJSON)
+	}
+	if _, ok := payload["issue_body"]; ok {
+		t.Fatalf("decision_json contains raw issue_body field: %s", decisionJSON)
+	}
+	wantHash := "sha256:" + sha256HexForSuperviseTest(sensitiveBody)
+	if !strings.Contains(decisionJSON, `"issue_body_hash":"`+wantHash+`"`) {
+		t.Fatalf("decision_json = %s, want issue_body_hash %q", decisionJSON, wantHash)
+	}
+	if !strings.Contains(decisionJSON, `"changed_paths":["docs/example.md"]`) {
+		t.Fatalf("decision_json = %s, want derived changed path evidence", decisionJSON)
+	}
+}
+
 func TestRunWorkSuperviseQueueJSONFailsWhenTrackerAuditObservesGitHubWrite(t *testing.T) {
 	ctx := context.Background()
 	store := openWorkCommandStore(t)
@@ -377,6 +442,11 @@ func assertSuperviseDecision(t *testing.T, decision struct {
 	if decision.Eligible || decision.ClaimKey != "" {
 		t.Fatalf("decision = %+v, want refused decision without claim", decision)
 	}
+}
+
+func sha256HexForSuperviseTest(value string) string {
+	sum := sha256.Sum256([]byte(value))
+	return hex.EncodeToString(sum[:])
 }
 
 func assertSuperviseReportShape(t *testing.T, report superviseCommandReport) {

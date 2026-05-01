@@ -2,7 +2,9 @@ package supervision
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -275,17 +277,17 @@ func (service Service) activeClaims(ctx context.Context, projectID int64, repo s
 
 func (service Service) recordDecision(ctx context.Context, project Project, issue Issue, decision QueueDecision, eligibility Eligibility, configHash string) (time.Time, error) {
 	payload, err := json.Marshal(map[string]any{
-		"issue_provider": issue.Provider,
-		"issue_repo":     issue.Repo,
-		"issue_number":   issue.Number,
-		"issue_title":    issue.Title,
-		"issue_body":     issue.Body,
-		"issue_url":      issue.URL,
-		"issue_state":    issue.State,
-		"labels":         eligibility.Labels,
-		"changed_paths":  eligibility.ChangedPaths,
-		"claim_key":      decision.ClaimKey,
-		"side_effects":   notStartedSideEffects(),
+		"issue_provider":  issue.Provider,
+		"issue_repo":      issue.Repo,
+		"issue_number":    issue.Number,
+		"issue_title":     issue.Title,
+		"issue_body_hash": issueBodyHash(issue.Body),
+		"issue_url":       issue.URL,
+		"issue_state":     issue.State,
+		"labels":          eligibility.Labels,
+		"changed_paths":   eligibility.ChangedPaths,
+		"claim_key":       decision.ClaimKey,
+		"side_effects":    notStartedSideEffects(),
 	})
 	if err != nil {
 		return time.Time{}, err
@@ -303,6 +305,11 @@ func (service Service) recordDecision(ctx context.Context, project Project, issu
 		return time.Time{}, err
 	}
 	return record.DecidedAt, nil
+}
+
+func issueBodyHash(body string) string {
+	sum := sha256.Sum256([]byte(body))
+	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
 func decisionReason(decision QueueDecision) string {
