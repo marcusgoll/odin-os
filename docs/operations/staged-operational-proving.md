@@ -482,7 +482,7 @@ Command shape:
 Allowed:
 
 - Push one task branch for the approved toy issue.
-- Create one PR for the approved toy issue.
+- Create one draft PR for the approved toy issue.
 - Add Odin-authored Stage 6 review evidence comments on the live PR.
 - Run CI.
 
@@ -505,7 +505,7 @@ Forbidden:
 
 Exit criteria:
 
-- PR is created.
+- Draft PR is created.
 - Odin-authored Stage 6 review evidence comments exist on the PR.
 - Human approval is required before merge.
 - CI runs `make odin-e2e-local`.
@@ -517,7 +517,7 @@ Required artifacts:
 - Issue URL.
 - Branch name.
 - Existing docs-only diff summary.
-- PR URL.
+- Draft PR URL.
 - Odin-authored Stage 6 review evidence comments.
 - CI run URL showing `make odin-e2e-local`.
 - Human approval gate evidence.
