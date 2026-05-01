@@ -88,6 +88,10 @@ _Avoid_: Global freshness guess, stale schedule approval, implicit snapshot vali
 The user-facing Odin command, shell, TUI, or workflow entrypoint through which an operator invokes or reviews governed work.
 _Avoid_: Direct downstream script, hidden service call
 
+**Odin Observer Role**:
+The Odin-owned observability role inside `odin serve` that exports runtime-derived health, readiness, metrics, and structured logs for external telemetry backends. It is not a separate runtime authority or a second observer service unless a future locked decision explicitly creates one.
+_Avoid_: Parallel observer daemon, duplicated health derivation, dashboard-owned runtime truth
+
 **CEO Briefing Workflow**:
 The Odin-owned operator-invoked workflow for producing a portfolio-wide briefing proposal and, after explicit approval, publishing one **Daily Priority Packet** for a business date. Its canonical operator surface is `odin brief ceo`; REPL aliases may assist but must not become proof authority.
 _Avoid_: Scheduled CEO sidecar, legacy executive_review authority, direct priorities file write
@@ -319,6 +323,7 @@ Odin owns the **CEO Briefing Workflow**, **Briefing Proposals**, **Daily Priorit
 - Real E2E verification for **Delivery Workflow** behavior must exercise `odin work ...` once that command family exists; REPL aliases and direct executor sessions are insufficient proof.
 - A **Delivery Workflow** must advance through ordered **Delivery Gates**: domain_locked, design_approved, plan_ready, execution_selected, execution_complete, verified, branch_finished, and learning_reviewed.
 - A **Delivery Gate** must not be marked complete without current evidence recorded in Odin-owned state or an explicitly linked artifact.
+- The **Odin Observer Role** belongs inside `odin serve`; Prometheus, Loki, Grafana, and the TUI may query exported telemetry, but they must not become canonical Odin runtime authorities or duplicate Odin health derivation.
 - `systematic_debugging` is the failure branch for unexpected errors, test failures, build failures, or confusing behavior during the **Delivery Workflow**.
 - `writing_skills` is an optional learning action after learning_reviewed, used only when the review identifies a reusable process gap that merits skill work.
 - A **Feedback Loop** must produce clean output: current gate, evidence, decision, next action, and remaining risk. Noisy agent output must be summarized into Odin-owned evidence before it advances the workflow.
