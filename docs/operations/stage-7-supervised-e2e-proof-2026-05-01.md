@@ -7,8 +7,13 @@ Stage 7 supervised E2E is implemented as a bounded
 disposable clone, local bare remote, fake Codex executable, fake GitHub API, and
 real `bin/odin` command execution.
 
-This proof intentionally did not mutate live GitHub and did not run an overnight
-24/7 daemon.
+This proof includes a passing controlled fixture run and two controlled live
+GitHub attempts. The live attempts proved issue intake, worker execution, branch
+push, draft PR creation, and evidence comments, but both failed closed waiting
+for Odin E2E CI because remote `main` does not currently contain
+`.github/workflows/odin-e2e.yml`.
+
+This proof did not run an overnight 24/7 daemon.
 
 ## What Already Exists
 
@@ -24,7 +29,8 @@ This proof intentionally did not mutate live GitHub and did not run an overnight
 
 ## Gaps
 
-- Live GitHub PR creation was not exercised in this proof pass.
+- Live GitHub PR creation was exercised, but live Odin E2E CI success was not
+  proven because the remote default branch lacks the Odin E2E workflow.
 - Overnight 24/7 daemon operation was not exercised.
 - Real external review agents were not invoked; fixture-backed review evidence
   comments were created through the GitHub API seam.
@@ -192,14 +198,80 @@ The command output included the Stage 7 provenance marker and the
 `odin work supervise e2e run-once` command provenance. It did not include the
 old Stage 6 marker or the old `odin work pr-create` provenance.
 
+## Live GitHub Attempts
+
+Live issue created:
+
+```text
+https://github.com/marcusgoll/odin-os/issues/104
+```
+
+First live attempt:
+
+```text
+run_id=1777659483168948475
+branch=odin/stage7-supervised-e2e/issue-104-1777659483516495224
+pr=https://github.com/marcusgoll/odin-os/pull/105
+status=failed_closed
+reason=timed out waiting for Odin E2E CI after 15m0s
+```
+
+Evidence comments:
+
+```text
+https://github.com/marcusgoll/odin-os/pull/105#issuecomment-4360897407
+https://github.com/marcusgoll/odin-os/pull/105#issuecomment-4360897452
+```
+
+This attempt exposed that the branch had been based on a stale local `main`
+that did not include the Odin E2E workflow. The command still failed closed and
+reported `merge=not_merged`, `deployment=not_started`, and
+`dispatch=not_started`.
+
+Corrective code change:
+
+```text
+9945dea fix(stage7): base supervised branches on remote main
+```
+
+Second live attempt:
+
+```text
+run_id=1777660680152919026
+branch=odin/stage7-supervised-e2e/issue-104-1777660680480814998
+pr=https://github.com/marcusgoll/odin-os/pull/106
+status=failed_closed
+reason=timed out waiting for Odin E2E CI after 15m0s
+```
+
+Evidence comments:
+
+```text
+https://github.com/marcusgoll/odin-os/pull/106#issuecomment-4360998211
+https://github.com/marcusgoll/odin-os/pull/106#issuecomment-4360998263
+```
+
+PR #106 had normal `ci` checks pass, but no Odin E2E workflow run appeared.
+Direct remote verification showed:
+
+```bash
+gh api repos/marcusgoll/odin-os/contents/.github/workflows/odin-e2e.yml?ref=main
+```
+
+Result: GitHub returned `404 Not Found`. Because `.github/workflows/` is a
+forbidden path for Stage 7 supervised mode, this proof did not add or modify the
+workflow live.
+
 ## Artifact Evidence
 
-The run wrote these handoff artifacts:
+The controlled fixture run wrote these handoff artifacts:
 
 ```text
 queue-report.json
-worker-report.json
-diff-report.json
+worker-prompt.md
+worker-command.json
+worker-output.txt
+diff-summary.md
 pr-report.json
 ci-report.json
 review-evidence.json
@@ -229,15 +301,16 @@ Stage 7 evidence comment markers as created.
 - Codex receives no GitHub or app tokens in its environment.
 - A worker diff can be audited and pushed to a branch on a local bare remote.
 - A draft PR can be created through the GitHub client seam.
-- Stage 7 review evidence and human handoff comments can be posted.
-- Odin E2E CI can be identified and waited on by the Stage 7 path.
+- Live GitHub can create draft PRs and Stage 7 evidence comments.
+- Odin E2E CI can be identified and waited on by the Stage 7 path when the
+  workflow exists on the target branch.
 - Merge, deployment, and scheduler dispatch remain blocked by the command path.
 - Handoff artifacts preserve PR, CI, review evidence, final report, and boundary
   proof.
 
 ## Unproven
 
-- Live GitHub mutation for Stage 7.
+- Live Odin E2E CI success for Stage 7, blocked by the missing remote workflow.
 - Live external review-agent comments.
 - Overnight supervised 24/7 operation.
 - Any expansion beyond docs, prompts, fixtures, and non-sensitive tests.
@@ -246,6 +319,7 @@ Stage 7 evidence comment markers as created.
 
 ## Best Operating Rule Going Forward
 
-Run Stage 7 only as a supervised, human-gated, one-issue run-once flow until a
-separate live proof records one low-risk draft PR, successful Odin E2E CI, review
-evidence comments, and explicit no-merge/no-deploy evidence against real GitHub.
+Run Stage 7 only as a supervised, human-gated, one-issue run-once flow. Before
+the next live pass, promote `.github/workflows/odin-e2e.yml` to remote `main`
+through a separate human-reviewed path; do not let supervised mode edit workflow
+files to satisfy its own CI prerequisite.
