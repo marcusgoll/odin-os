@@ -497,6 +497,7 @@ Forbidden:
 - Autonomous merge.
 - Production deploy.
 - Release or deploy workflow dispatch.
+- Workflow run mutation, including rerun, approval, or cancellation.
 - Codex reviewer or QA worker execution.
 - Scheduler dispatch beyond the approved toy issue.
 - Durable Run Attempt creation.
@@ -510,7 +511,7 @@ Exit criteria:
 - Human approval is required before merge.
 - CI runs `make odin-e2e-local`.
 - No merge occurs without human approval.
-- No deploy occurs.
+- No deploy occurs, proven by zero Odin release/deploy dispatches and a read-only workflow-run audit showing no deployment-class workflow ran for the Stage 6 branch or PR.
 
 Required artifacts:
 
@@ -520,6 +521,7 @@ Required artifacts:
 - Draft PR URL.
 - Odin-authored Stage 6 review evidence comments.
 - CI run URL showing `make odin-e2e-local`.
+- Workflow-run audit showing no deployment-class workflow ran.
 - Human approval gate evidence.
 
 Promotion rule:
