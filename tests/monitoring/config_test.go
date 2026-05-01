@@ -1,6 +1,7 @@
 package monitoring_test
 
 import (
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -171,6 +172,147 @@ func TestAlloyConfigAndDocsExist(t *testing.T) {
 		if len(strings.TrimSpace(string(data))) == 0 {
 			t.Fatalf("%s must not be empty", path)
 		}
+	}
+}
+
+func TestGrafanaProvisioningAndDashboardsAreVersioned(t *testing.T) {
+	t.Parallel()
+
+	root := repoRoot(t)
+	for _, path := range []string{
+		"monitoring/grafana/provisioning/datasources/datasources.yml",
+		"monitoring/grafana/provisioning/dashboards/dashboards.yml",
+		"monitoring/grafana/provisioning/alerting/contact-points.yml",
+		"monitoring/grafana/dashboards/odin-overview.json",
+		"monitoring/grafana/dashboards/odin-host.json",
+		"monitoring/grafana/dashboards/odin-containers.json",
+		"monitoring/grafana/dashboards/odin-services.json",
+		"monitoring/grafana/dashboards/odin-backups.json",
+		"monitoring/grafana/dashboards/odin-logs.json",
+	} {
+		data, err := os.ReadFile(filepath.Join(root, path))
+		if err != nil {
+			t.Fatalf("%s missing: %v", path, err)
+		}
+		if strings.HasSuffix(path, ".json") && !json.Valid(data) {
+			t.Fatalf("%s is not valid JSON", path)
+		}
+		if strings.HasSuffix(path, ".yml") {
+			var parsed any
+			if err := yaml.Unmarshal(data, &parsed); err != nil {
+				t.Fatalf("%s yaml parse error: %v", path, err)
+			}
+		}
+	}
+}
+
+func TestGrafanaProvisioningUsesPrometheusAndLokiDataSources(t *testing.T) {
+	t.Parallel()
+
+	data, err := os.ReadFile(filepath.Join(repoRoot(t), "monitoring/grafana/provisioning/datasources/datasources.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	for _, want := range []string{
+		"uid: prometheus",
+		"type: prometheus",
+		"url: http://prometheus:9090",
+		"uid: loki",
+		"type: loki",
+		"url: http://loki:3100",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("grafana datasource provisioning missing %q", want)
+		}
+	}
+}
+
+func TestGrafanaDashboardProviderLoadsRepoManagedDashboards(t *testing.T) {
+	t.Parallel()
+
+	data, err := os.ReadFile(filepath.Join(repoRoot(t), "monitoring/grafana/provisioning/dashboards/dashboards.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	for _, want := range []string{
+		"path: /var/lib/grafana/dashboards",
+		"disableDeletion: false",
+		"allowUiUpdates: false",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("grafana dashboard provisioning missing %q", want)
+		}
+	}
+}
+
+func TestOdinOverviewDashboardUsesApprovedTelemetrySources(t *testing.T) {
+	t.Parallel()
+
+	data, err := os.ReadFile(filepath.Join(repoRoot(t), "monitoring/grafana/dashboards/odin-overview.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	for _, want := range []string{"odin_os_health_score", "odin_os_telemetry_stale", "odin_active_runs"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("overview dashboard missing %s", want)
+		}
+	}
+}
+
+func TestComposeMountsGrafanaProvisioningReadOnly(t *testing.T) {
+	t.Parallel()
+
+	data, err := os.ReadFile(filepath.Join(repoRoot(t), "monitoring/docker-compose.monitoring.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	for _, want := range []string{
+		"./grafana/provisioning:/etc/grafana/provisioning:ro",
+		"./grafana/dashboards:/var/lib/grafana/dashboards:ro",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("compose must mount grafana path %q", want)
+		}
+	}
+}
+
+func TestGrafanaDashboardScopeDocumentsOptionalCollectors(t *testing.T) {
+	t.Parallel()
+
+	root := repoRoot(t)
+	doc, err := os.ReadFile(filepath.Join(root, "docs/operations/observability-stack.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(doc)
+	for _, want := range []string{
+		"The host dashboard queries `node_*` metrics and will be empty until a host-level `node_exporter` is installed",
+		"The logs dashboards query Loki's `docker-containers` job",
+		"The provisioned `odin-local-loopback` Grafana contact point is a non-delivering placeholder",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("observability docs missing dashboard scope note %q", want)
+		}
+	}
+
+	hostDashboard, err := os.ReadFile(filepath.Join(root, "monitoring/grafana/dashboards/odin-host.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(hostDashboard), "node_cpu_seconds_total") {
+		t.Fatal("host dashboard should remain explicit about its node_exporter metric dependency")
+	}
+
+	logDashboard, err := os.ReadFile(filepath.Join(root, "monitoring/grafana/dashboards/odin-logs.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(logDashboard), "docker-containers") {
+		t.Fatal("logs dashboard should match the documented Docker log source")
 	}
 }
 

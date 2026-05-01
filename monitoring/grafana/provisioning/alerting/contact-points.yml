@@ -1,0 +1,11 @@
+apiVersion: 1
+
+contactPoints:
+  - orgId: 1
+    name: odin-local-loopback
+    receivers:
+      - uid: odin-local-loopback-webhook
+        type: webhook
+        disableResolveMessage: false
+        settings:
+          url: http://127.0.0.1:9/grafana-alerts

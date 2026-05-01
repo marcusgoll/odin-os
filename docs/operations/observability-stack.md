@@ -42,6 +42,17 @@ Default local endpoints:
 - Loki stores Docker logs for query and correlation. It does not replace Odin runtime events.
 - Grafana reads Prometheus and Loki as telemetry backends. Grafana dashboards are presentation, not runtime authority.
 
+## Grafana Dashboards
+
+Grafana is provisioned from files under `monitoring/grafana/`. Prometheus and Loki data sources use fixed UIDs so dashboards can be versioned and reviewed with the rest of the stack.
+
+The baseline dashboards are intentionally honest about the current collectors:
+
+- Odin overview, services, containers, and backups panels use Odin, Prometheus, cAdvisor, blackbox_exporter, and Loki signals from the repo-managed stack.
+- The host dashboard queries `node_*` metrics and will be empty until a host-level `node_exporter` is installed and a reviewed Prometheus scrape job is added.
+- The logs dashboards query Loki's `docker-containers` job. They do not show host-running `odin serve` logs or systemd journal logs until a later Alloy/journal collection change proves those sources.
+- The provisioned `odin-local-loopback` Grafana contact point is a non-delivering placeholder. Do not attach actionable alert policies to it; replace it with an operator-approved receiver before treating Grafana notifications as real alert delivery.
+
 ## Host-Level node_exporter
 
 `node_exporter` is intentionally not included in `monitoring/docker-compose.monitoring.yml` by default. Host filesystem, CPU, memory, and systemd-adjacent signals should be installed as a host-level systemd service so they describe the host directly rather than a container view.
