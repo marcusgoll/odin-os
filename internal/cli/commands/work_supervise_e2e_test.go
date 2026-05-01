@@ -24,6 +24,27 @@ func TestRunWorkSuperviseE2ERequiresJSON(t *testing.T) {
 	assertNoSuperviseSideEffects(t, ctx, store)
 }
 
+func TestRunWorkSuperviseE2EUsageShowsPrepareIssueJSON(t *testing.T) {
+	ctx := context.Background()
+	store := openWorkCommandStore(t)
+	defer store.Close()
+
+	var output strings.Builder
+	if err := RunWork(ctx, store, commandProjectRegistry(t), registry.Snapshot{}, []string{"supervise", "e2e", "prepare-issue"}, &output); err == nil {
+		t.Fatalf("RunWork(supervise e2e prepare-issue usage probe) error = nil, want required JSON error\noutput:\n%s", output.String())
+	} else if !strings.Contains(err.Error(), "e2e prepare-issue --project <key> --json") {
+		t.Fatalf("error = %q, want prepare-issue usage to include --json", err.Error())
+	}
+
+	var workOutput strings.Builder
+	if err := RunWork(ctx, store, commandProjectRegistry(t), registry.Snapshot{}, []string{"help"}, &workOutput); err != nil {
+		t.Fatalf("RunWork(help) error = %v", err)
+	}
+	if !strings.Contains(workOutput.String(), "e2e prepare-issue --project <key> --json") {
+		t.Fatalf("work usage = %q, want prepare-issue usage to include --json", workOutput.String())
+	}
+}
+
 func TestRunWorkSuperviseE2EPrepareIssueRequiresProject(t *testing.T) {
 	ctx := context.Background()
 	store := openWorkCommandStore(t)

@@ -36,9 +36,9 @@ const stage3LifecycleCommentMarker = "<!-- odin-stage3-lifecycle-proof -->"
 const stage6ReviewEvidenceMarker = "<!-- odin-stage6-review-evidence -->"
 const stage6HumanReviewHandoffMarker = "<!-- odin-stage6-human-review-handoff -->"
 
-const workUsage = "usage: odin work status|profiles|start --project <key> --title <text>|intake --project <key> [--dry-run]|simulate-lifecycle --issue <number> [--project <key>] [--dry-run] [--json]|apply-lifecycle --issue <number> --approved-target <repo>#<issue> [--project <key>] [--json]|worker-dry-run --issue-fixture <path> [--project <key>] [--keep-worktree] [--json]|pr-dry-run --worktree <path> --base <branch> [--json]|pr-create --issue <number> --approved-target <repo>#<issue> --worktree <path> --base <branch> --wait-ci [--json]|supervise status|start|stop|queue --project <key> [--fixture-issue <number>]|recover|e2e prepare-issue --project <key>|e2e run-once --project <key> --issue <number> --json"
+const workUsage = "usage: odin work status|profiles|start --project <key> --title <text>|intake --project <key> [--dry-run]|simulate-lifecycle --issue <number> [--project <key>] [--dry-run] [--json]|apply-lifecycle --issue <number> --approved-target <repo>#<issue> [--project <key>] [--json]|worker-dry-run --issue-fixture <path> [--project <key>] [--keep-worktree] [--json]|pr-dry-run --worktree <path> --base <branch> [--json]|pr-create --issue <number> --approved-target <repo>#<issue> --worktree <path> --base <branch> --wait-ci [--json]|supervise status|start|stop|queue --project <key> [--fixture-issue <number>]|recover|e2e prepare-issue --project <key> --json|e2e run-once --project <key> --issue <number> --json"
 
-const workSuperviseUsage = "usage: odin work supervise status|start|stop|queue --project <key> [--fixture-issue <number>]|recover|e2e prepare-issue --project <key>|e2e run-once --project <key> --issue <number> --json"
+const workSuperviseUsage = "usage: odin work supervise status|start|stop|queue --project <key> [--fixture-issue <number>]|recover|e2e prepare-issue --project <key> --json|e2e run-once --project <key> --issue <number> --json"
 
 const workSuperviseFixtureSource = "control_plane_fixture"
 const workSuperviseTrackerSource = "issue_intake_source"
