@@ -468,6 +468,17 @@ Goal:
 - Do not merge autonomously.
 - Require human approval before any merge.
 
+Command shape:
+
+```bash
+./bin/odin work pr-create \
+  --issue 123 \
+  --approved-target marcusgoll/odin-os#123 \
+  --worktree <path> \
+  --base main \
+  --json
+```
+
 Allowed:
 
 - Push one task branch for the approved toy issue.
@@ -479,6 +490,7 @@ Forbidden:
 
 - Issue creation.
 - Synthesizing or inventing the docs change inside the live Stage 6 command.
+- Extending `pr-dry-run` with a live mode.
 - Autonomous merge.
 - Production deploy.
 - Codex reviewer or QA worker execution.
@@ -507,7 +519,7 @@ Required artifacts:
 
 Promotion rule:
 
-Stage 6 is complete only when a toy docs-only issue reaches live PR handoff with CI and Odin-authored review evidence while merge and deploy remain human-gated. Stage 6 review evidence comments are not full autonomous reviewer or QA Run Attempts and do not approve merge or deployment.
+Stage 6 is complete only when a toy docs-only issue reaches live PR handoff with CI and Odin-authored review evidence while merge and deploy remain human-gated. Stage 6 review evidence comments are not full autonomous reviewer or QA Run Attempts and do not approve merge or deployment. The live proof must use `odin work pr-create`; `pr-dry-run` remains read-only.
 
 ## Stage 7: 24/7 Supervised Mode
 
