@@ -4,8 +4,12 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"sort"
 )
+
+var ErrInvalidConfig = errors.New("invalid_supervision_config")
 
 type Config struct {
 	ModeKey                 string   `json:"mode_key"`
@@ -60,6 +64,19 @@ func ConfigHash(config Config) (string, error) {
 	}
 	sum := sha256.Sum256(raw)
 	return "sha256:" + hex.EncodeToString(sum[:]), nil
+}
+
+func ValidateConfig(config Config) error {
+	if config.MaxConcurrentTasks != 1 {
+		return fmt.Errorf("%w: max_concurrent_tasks must be 1", ErrInvalidConfig)
+	}
+	if config.DryRun {
+		return fmt.Errorf("%w: dry_run must be false", ErrInvalidConfig)
+	}
+	if !config.RequireHumanApproval {
+		return fmt.Errorf("%w: require_human_approval must be true", ErrInvalidConfig)
+	}
+	return nil
 }
 
 func sortedCopy(values []string) []string {

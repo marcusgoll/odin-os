@@ -24,6 +24,9 @@ func NewService(store *sqlite.Store, config Config) Service {
 }
 
 func (service Service) Status(ctx context.Context) (Report, error) {
+	if err := service.validateConfig(); err != nil {
+		return Report{}, err
+	}
 	control, err := service.control(ctx)
 	if err != nil {
 		return Report{}, err
@@ -36,6 +39,9 @@ func (service Service) Status(ctx context.Context) (Report, error) {
 }
 
 func (service Service) Start(ctx context.Context, operator string) (Report, error) {
+	if err := service.validateConfig(); err != nil {
+		return Report{}, err
+	}
 	control, err := service.upsertControl(ctx, ControlStatusEnabled, false, operator)
 	if err != nil {
 		return Report{}, err
@@ -48,6 +54,9 @@ func (service Service) Start(ctx context.Context, operator string) (Report, erro
 }
 
 func (service Service) Stop(ctx context.Context, operator string) (Report, error) {
+	if err := service.validateConfig(); err != nil {
+		return Report{}, err
+	}
 	control, err := service.upsertControl(ctx, ControlStatusStopped, true, operator)
 	if err != nil {
 		return Report{}, err
@@ -60,6 +69,9 @@ func (service Service) Stop(ctx context.Context, operator string) (Report, error
 }
 
 func (service Service) Queue(ctx context.Context, project Project, issues []Issue) (Report, error) {
+	if err := service.validateConfig(); err != nil {
+		return Report{}, err
+	}
 	control, err := service.control(ctx)
 	if err != nil {
 		return Report{}, err
@@ -144,6 +156,9 @@ func (service Service) Queue(ctx context.Context, project Project, issues []Issu
 }
 
 func (service Service) Recover(ctx context.Context) (Report, error) {
+	if err := service.validateConfig(); err != nil {
+		return Report{}, err
+	}
 	control, err := service.control(ctx)
 	if err != nil {
 		return Report{}, err
@@ -206,6 +221,10 @@ func (service Service) control(ctx context.Context) (sqlite.SupervisionControl, 
 		return sqlite.SupervisionControl{}, err
 	}
 	return service.upsertControl(ctx, ControlStatusStopped, true, "system")
+}
+
+func (service Service) validateConfig() error {
+	return ValidateConfig(service.config)
 }
 
 func (service Service) upsertControl(ctx context.Context, status string, killSwitch bool, operator string) (sqlite.SupervisionControl, error) {

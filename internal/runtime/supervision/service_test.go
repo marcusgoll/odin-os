@@ -3,6 +3,7 @@ package supervision
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"testing"
 
 	"odin-os/internal/store/sqlite"
@@ -183,6 +184,82 @@ func TestServiceRecoverBlocksWhenConfigHashChangedAgainstActiveClaims(t *testing
 		t.Fatalf("Recover().Recovery = %+v, want blocked recovery", recovery.Recovery)
 	}
 	assertSideEffectsNotStarted(t, recovery.SideEffects)
+}
+
+func TestServiceRejectsInvalidSupervisedConfigBeforePersistingControl(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*Config)
+	}{
+		{
+			name: "max concurrent tasks above one",
+			mutate: func(config *Config) {
+				config.MaxConcurrentTasks = 2
+			},
+		},
+		{
+			name: "dry run true",
+			mutate: func(config *Config) {
+				config.DryRun = true
+			},
+		},
+		{
+			name: "human approval disabled",
+			mutate: func(config *Config) {
+				config.RequireHumanApproval = false
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			store := openServiceTestStore(t, "supervision-service-invalid-config.db")
+			defer store.Close()
+			config := DefaultConfig()
+			tt.mutate(&config)
+			service := NewService(store, config)
+
+			_, err := service.Start(ctx, "operator")
+			if !errors.Is(err, ErrInvalidConfig) {
+				t.Fatalf("Start() error = %v, want ErrInvalidConfig", err)
+			}
+
+			_, err = store.GetSupervisionControl(ctx, ModeKeyStage7SupervisedAgency)
+			if !errors.Is(err, sql.ErrNoRows) {
+				t.Fatalf("GetSupervisionControl() error = %v, want sql.ErrNoRows", err)
+			}
+		})
+	}
+}
+
+func TestServiceRejectsInvalidSupervisedConfigBeforeQueueOrRecoverUse(t *testing.T) {
+	ctx := context.Background()
+	store := openServiceTestStore(t, "supervision-service-invalid-config-use.db")
+	defer store.Close()
+	project := createServiceProject(t, ctx, store)
+	validService := NewService(store, DefaultConfig())
+	if _, err := validService.Start(ctx, "operator"); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+
+	invalidConfig := DefaultConfig()
+	invalidConfig.MaxConcurrentTasks = 2
+	invalidService := NewService(store, invalidConfig)
+
+	_, err := invalidService.Queue(ctx, Project{
+		ID:   project.ID,
+		Key:  project.Key,
+		Repo: project.GitHubRepo,
+	}, []Issue{eligibleIssue("docs/stage7.md")})
+	if !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("Queue() error = %v, want ErrInvalidConfig", err)
+	}
+
+	_, err = invalidService.Recover(ctx)
+	if !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("Recover() error = %v, want ErrInvalidConfig", err)
+	}
 }
 
 func openServiceTestStore(t *testing.T, name string) *sqlite.Store {
