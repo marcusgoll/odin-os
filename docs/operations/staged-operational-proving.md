@@ -509,6 +509,9 @@ Forbidden:
 Exit criteria:
 
 - Draft PR is created.
+- Reruns reuse the matching existing branch and draft PR instead of creating duplicates.
+- Stage 6 evidence comments use stable markers and are not duplicated on rerun.
+- Reruns fail if the docs-only diff changed after the prior proof unless a future explicitly approved rerun mechanism is locked.
 - Odin-authored Stage 6 review evidence comments exist on the PR.
 - Human approval is required before merge.
 - CI runs `make odin-e2e-local` and reaches a terminal conclusion before the bounded wait timeout.
@@ -522,6 +525,8 @@ Required artifacts:
 - Existing docs-only diff summary.
 - Draft PR URL.
 - Odin-authored Stage 6 review evidence comments.
+- Stable Stage 6 evidence comment markers.
+- Idempotency evidence for branch, draft PR, and comments.
 - CI run URL, conclusion, and timeout status showing `make odin-e2e-local`.
 - Workflow-run audit showing no deployment-class workflow ran.
 - Human approval gate evidence.
