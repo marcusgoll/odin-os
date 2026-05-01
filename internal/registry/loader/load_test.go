@@ -207,6 +207,51 @@ func TestLoadDirLoadsUniversalIntakeAgents(t *testing.T) {
 		}
 	}
 
+	classifier := snapshot.ByKey["classifier-agent"]
+	classifierContract := strings.Join([]string{
+		classifier.Title,
+		classifier.Summary,
+		classifier.Sections[registry.SectionPurpose],
+		classifier.Sections[registry.SectionWhenToUse],
+		classifier.Sections[registry.SectionInputs],
+		classifier.Sections[registry.SectionProcedure],
+		classifier.Sections[registry.SectionOutputs],
+		classifier.Sections[registry.SectionConstraints],
+		classifier.Sections[registry.SectionSuccessCriteria],
+	}, "\n")
+	requiredClassifierContract := []string{
+		"Task Classifier",
+		"{{raw_input}}",
+		"Use exactly one primary category",
+		"task",
+		"project",
+		"idea",
+		"bug",
+		"feature request",
+		"research",
+		"writing",
+		"personal admin",
+		"calendar",
+		"email",
+		"learning",
+		"household",
+		"finance",
+		"health",
+		"waiting-for",
+		"archive",
+		"unclear",
+		"confidence score from 0 to 100",
+		"secondary categories",
+		"reason for classification",
+		"recommended next agent",
+		"whether this needs clarification",
+	}
+	for _, required := range requiredClassifierContract {
+		if !strings.Contains(classifierContract, required) {
+			t.Fatalf("classifier agent body missing %q", required)
+		}
+	}
+
 	voiceNoteCleaner := snapshot.ByKey["voice-note-cleaner-agent"]
 	voiceNoteCleanerContract := strings.Join([]string{
 		voiceNoteCleaner.Title,
