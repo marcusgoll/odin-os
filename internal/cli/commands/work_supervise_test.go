@@ -65,15 +65,18 @@ func TestRunWorkSuperviseQueueProjectJSONRecordsDecisionsWithoutStartingWork(t *
 	defer store.Close()
 
 	_ = runWorkSuperviseJSON(t, ctx, store, []string{"supervise", "start", "--json"})
-	report := runWorkSuperviseJSON(t, ctx, store, []string{"supervise", "queue", "--project", "alpha", "--json"})
+	report := runWorkSuperviseJSON(t, ctx, store, []string{"supervise", "queue", "--project", "alpha", "--fixture-issue", "7", "--json"})
 
 	assertSuperviseReportShape(t, report)
+	if report.Source != "control_plane_fixture" {
+		t.Fatalf("source = %q, want control_plane_fixture", report.Source)
+	}
 	if len(report.Queue) != 1 {
 		t.Fatalf("queue len = %d, want 1 decision: %+v", len(report.Queue), report.Queue)
 	}
 	decision := report.Queue[0]
-	if decision.ProjectKey != "alpha" || decision.Repo != "acme/alpha" || decision.IssueNumber == 0 {
-		t.Fatalf("decision target = %+v, want alpha/acme/alpha issue", decision)
+	if decision.ProjectKey != "alpha" || decision.Repo != "acme/alpha" || decision.IssueNumber != 7 {
+		t.Fatalf("decision target = %+v, want alpha/acme/alpha fixture issue 7", decision)
 	}
 	if decision.Decision != supervision.DecisionEligible || !decision.Eligible || decision.ClaimKey == "" {
 		t.Fatalf("decision = %+v, want eligible reserved claim", decision)
@@ -94,6 +97,26 @@ func TestRunWorkSuperviseQueueProjectJSONRecordsDecisionsWithoutStartingWork(t *
 	assertNoSuperviseSideEffects(t, ctx, store)
 }
 
+func TestRunWorkSuperviseQueueWithoutFixtureIssueFailsWithoutCreatingClaims(t *testing.T) {
+	ctx := context.Background()
+	store := openWorkCommandStore(t)
+	defer store.Close()
+
+	_ = runWorkSuperviseJSON(t, ctx, store, []string{"supervise", "start", "--json"})
+
+	var output strings.Builder
+	err := RunWork(ctx, store, commandProjectRegistry(t), registry.Snapshot{}, []string{"supervise", "queue", "--project", "alpha", "--json"}, &output)
+	if err == nil {
+		t.Fatalf("RunWork(supervise queue without fixture) error = nil, want fixture boundary error\noutput:\n%s", output.String())
+	}
+	if !strings.Contains(err.Error(), "--fixture-issue is required for work supervise queue in this slice") {
+		t.Fatalf("error = %q, want required fixture issue error", err.Error())
+	}
+	assertSuperviseTableCount(t, ctx, store, "supervision_queue_decisions", 0)
+	assertSuperviseTableCount(t, ctx, store, "supervision_dispatch_claims", 0)
+	assertNoSuperviseSideEffects(t, ctx, store)
+}
+
 func TestRunWorkSuperviseRecoverJSONReportsNoSideEffects(t *testing.T) {
 	ctx := context.Background()
 	store := openWorkCommandStore(t)
@@ -108,6 +131,26 @@ func TestRunWorkSuperviseRecoverJSONReportsNoSideEffects(t *testing.T) {
 	assertNoSuperviseSideEffects(t, ctx, store)
 }
 
+func TestRunWorkSuperviseStartWithoutJSONFailsWithoutMutatingControlState(t *testing.T) {
+	ctx := context.Background()
+	store := openWorkCommandStore(t)
+	defer store.Close()
+
+	var output strings.Builder
+	err := RunWork(ctx, store, commandProjectRegistry(t), registry.Snapshot{}, []string{"supervise", "start"}, &output)
+	if err == nil {
+		t.Fatalf("RunWork(supervise start without --json) error = nil, want required JSON error\noutput:\n%s", output.String())
+	}
+	if !strings.Contains(err.Error(), "--json is required for work supervise in this slice") {
+		t.Fatalf("error = %q, want required JSON error", err.Error())
+	}
+
+	report := runWorkSuperviseJSON(t, ctx, store, []string{"supervise", "status", "--json"})
+	if report.Enabled || !report.KillSwitch {
+		t.Fatalf("control mutated after missing --json: enabled=%t kill_switch=%t", report.Enabled, report.KillSwitch)
+	}
+}
+
 func TestRunWorkSuperviseUnknownSubcommandShowsUsage(t *testing.T) {
 	ctx := context.Background()
 	store := openWorkCommandStore(t)
@@ -117,13 +160,14 @@ func TestRunWorkSuperviseUnknownSubcommandShowsUsage(t *testing.T) {
 	if err := RunWork(ctx, store, commandProjectRegistry(t), registry.Snapshot{}, []string{"supervise", "bogus"}, &output); err != nil {
 		t.Fatalf("RunWork(supervise bogus) error = %v", err)
 	}
-	if !strings.Contains(output.String(), "unknown work supervise command: bogus") || !strings.Contains(output.String(), "usage: odin work supervise status|start|stop|queue --project <key>|recover [--json]") {
+	if !strings.Contains(output.String(), "unknown work supervise command: bogus") || !strings.Contains(output.String(), "usage: odin work supervise status|start|stop|queue --project <key> --fixture-issue <number>|recover --json") {
 		t.Fatalf("output = %q, want unknown subcommand usage", output.String())
 	}
 }
 
 type superviseCommandReport struct {
 	Mode       string `json:"mode"`
+	Source     string `json:"source,omitempty"`
 	Enabled    bool   `json:"enabled"`
 	KillSwitch bool   `json:"kill_switch"`
 	ConfigHash string `json:"config_hash"`
@@ -195,12 +239,18 @@ func assertNoSuperviseSideEffects(t *testing.T, ctx context.Context, store *sqli
 	t.Helper()
 
 	for _, table := range []string{"runs", "approvals", "worktree_leases"} {
-		var count int
-		if err := store.DB().QueryRowContext(ctx, "SELECT COUNT(*) FROM "+table).Scan(&count); err != nil {
-			t.Fatalf("count %s: %v", table, err)
-		}
-		if count != 0 {
-			t.Fatalf("%s count = %d, want no supervise side-effect rows", table, count)
-		}
+		assertSuperviseTableCount(t, ctx, store, table, 0)
+	}
+}
+
+func assertSuperviseTableCount(t *testing.T, ctx context.Context, store *sqlite.Store, table string, want int) {
+	t.Helper()
+
+	var count int
+	if err := store.DB().QueryRowContext(ctx, "SELECT COUNT(*) FROM "+table).Scan(&count); err != nil {
+		t.Fatalf("count %s: %v", table, err)
+	}
+	if count != want {
+		t.Fatalf("%s count = %d, want %d", table, count, want)
 	}
 }

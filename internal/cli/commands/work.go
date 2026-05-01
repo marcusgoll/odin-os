@@ -36,9 +36,11 @@ const stage3LifecycleCommentMarker = "<!-- odin-stage3-lifecycle-proof -->"
 const stage6ReviewEvidenceMarker = "<!-- odin-stage6-review-evidence -->"
 const stage6HumanReviewHandoffMarker = "<!-- odin-stage6-human-review-handoff -->"
 
-const workUsage = "usage: odin work status|profiles|start --project <key> --title <text>|intake --project <key> [--dry-run]|simulate-lifecycle --issue <number> [--project <key>] [--dry-run] [--json]|apply-lifecycle --issue <number> --approved-target <repo>#<issue> [--project <key>] [--json]|worker-dry-run --issue-fixture <path> [--project <key>] [--keep-worktree] [--json]|pr-dry-run --worktree <path> --base <branch> [--json]|pr-create --issue <number> --approved-target <repo>#<issue> --worktree <path> --base <branch> --wait-ci [--json]|supervise status|start|stop|queue --project <key>|recover [--json]"
+const workUsage = "usage: odin work status|profiles|start --project <key> --title <text>|intake --project <key> [--dry-run]|simulate-lifecycle --issue <number> [--project <key>] [--dry-run] [--json]|apply-lifecycle --issue <number> --approved-target <repo>#<issue> [--project <key>] [--json]|worker-dry-run --issue-fixture <path> [--project <key>] [--keep-worktree] [--json]|pr-dry-run --worktree <path> --base <branch> [--json]|pr-create --issue <number> --approved-target <repo>#<issue> --worktree <path> --base <branch> --wait-ci [--json]|supervise status|start|stop|queue --project <key> --fixture-issue <number>|recover --json"
 
-const workSuperviseUsage = "usage: odin work supervise status|start|stop|queue --project <key>|recover [--json]"
+const workSuperviseUsage = "usage: odin work supervise status|start|stop|queue --project <key> --fixture-issue <number>|recover --json"
+
+const workSuperviseFixtureSource = "control_plane_fixture"
 
 var newIntakeTracker = trackerintake.NewGitHubTracker
 
@@ -77,6 +79,7 @@ func RunWork(ctx context.Context, store *sqlite.Store, projectRegistry projects.
 
 type workSuperviseReport struct {
 	Mode           string                      `json:"mode"`
+	Source         string                      `json:"source,omitempty"`
 	Enabled        bool                        `json:"enabled"`
 	KillSwitch     bool                        `json:"kill_switch"`
 	ConfigHash     string                      `json:"config_hash"`
@@ -103,8 +106,7 @@ func runWorkSupervise(ctx context.Context, store *sqlite.Store, projectRegistry 
 		return err
 	}
 	if !parseBoolFlag(params, "json") {
-		_, err := fmt.Fprintln(stdout, workSuperviseUsage)
-		return err
+		return fmt.Errorf("--json is required for work supervise in this slice\n%s", workSuperviseUsage)
 	}
 
 	service := supervision.NewService(store, supervision.DefaultConfig())
@@ -128,7 +130,7 @@ func runWorkSupervise(ctx context.Context, store *sqlite.Store, projectRegistry 
 
 	encoder := json.NewEncoder(stdout)
 	encoder.SetIndent("", "  ")
-	return encoder.Encode(flattenWorkSuperviseReport(report))
+	return encoder.Encode(flattenWorkSuperviseReport(report, args[0]))
 }
 
 func runWorkSuperviseQueue(ctx context.Context, store *sqlite.Store, projectRegistry projects.Registry, service supervision.Service, params map[string]string) (supervision.Report, error) {
@@ -145,13 +147,13 @@ func runWorkSuperviseQueue(ctx context.Context, store *sqlite.Store, projectRegi
 		return supervision.Report{}, err
 	}
 
-	issueNumber := 1
-	if rawIssue := strings.TrimSpace(params["issue"]); rawIssue != "" {
-		parsed, err := strconv.Atoi(rawIssue)
-		if err != nil || parsed <= 0 {
-			return supervision.Report{}, fmt.Errorf("invalid --issue %q", rawIssue)
-		}
-		issueNumber = parsed
+	rawFixtureIssue := strings.TrimSpace(params["fixture-issue"])
+	if rawFixtureIssue == "" {
+		return supervision.Report{}, fmt.Errorf("--fixture-issue is required for work supervise queue in this slice")
+	}
+	issueNumber, err := strconv.Atoi(rawFixtureIssue)
+	if err != nil || issueNumber <= 0 {
+		return supervision.Report{}, fmt.Errorf("invalid --fixture-issue %q", rawFixtureIssue)
 	}
 
 	return service.Queue(ctx, supervision.Project{
@@ -161,7 +163,7 @@ func runWorkSuperviseQueue(ctx context.Context, store *sqlite.Store, projectRegi
 	}, []supervision.Issue{{
 		Repo:         manifest.GitHub.Repo,
 		Number:       issueNumber,
-		Title:        "Stage 7 supervised agency control-plane proof",
+		Title:        "Stage 7 supervised agency control-plane fixture proof",
 		Labels:       []string{"odin:ready", "safety:low-risk"},
 		ChangedPaths: []string{"docs/stage-7-supervised-agency.md"},
 	}})
@@ -191,7 +193,7 @@ func ensureWorkSuperviseProject(ctx context.Context, store *sqlite.Store, manife
 	})
 }
 
-func flattenWorkSuperviseReport(report supervision.Report) workSuperviseReport {
+func flattenWorkSuperviseReport(report supervision.Report, command string) workSuperviseReport {
 	queue := append([]supervision.QueueDecision(nil), report.Decisions...)
 	if queue == nil {
 		queue = []supervision.QueueDecision{}
@@ -202,6 +204,7 @@ func flattenWorkSuperviseReport(report supervision.Report) workSuperviseReport {
 	}
 	return workSuperviseReport{
 		Mode:           report.ModeKey,
+		Source:         workSuperviseReportSource(command),
 		Enabled:        report.Control.Status == supervision.ControlStatusEnabled,
 		KillSwitch:     report.Control.KillSwitchActive,
 		ConfigHash:     report.Control.ConfigHash,
@@ -213,6 +216,13 @@ func flattenWorkSuperviseReport(report supervision.Report) workSuperviseReport {
 		Merge:          report.SideEffects.Merge,
 		Deployment:     report.SideEffects.Deployment,
 	}
+}
+
+func workSuperviseReportSource(command string) string {
+	if command == "queue" {
+		return workSuperviseFixtureSource
+	}
+	return ""
 }
 
 func runWorkStatus(ctx context.Context, store *sqlite.Store, snapshot registry.Snapshot, stdout io.Writer) error {
