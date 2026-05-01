@@ -84,7 +84,7 @@ The read-only terminal observability surface is:
 odin tui --prometheus-url http://127.0.0.1:9090 --loki-url http://127.0.0.1:3100
 ```
 
-`odin tui` refreshes continuously by default. Use `--once` for deterministic smoke checks and scripts, `--interval <duration>` to control the refresh interval, and `--no-clear` to render repeated frames without clearing the terminal. The command reads Prometheus instant query data for Odin status, health score, telemetry staleness, lifecycle phase, and active runs, and reads recent Odin-related entries from Loki's current `docker-containers` source when Loki is available. It must not shell out to host, systemd, Docker, node_exporter, or log files for canonical status.
+`odin tui` refreshes continuously by default. Use `--once` for deterministic smoke checks and scripts, `--interval <duration>` to control the refresh interval, and `--no-clear` to render repeated frames without clearing the terminal. The command renders a boxed terminal cockpit with separate overview and recent-log panels so live SSH use stays scannable. It reads Prometheus instant query data for Odin status, health score, telemetry staleness, lifecycle phase, and active runs, and reads recent Odin-related entries from Loki's current `docker-containers` source when Loki is available. It must not shell out to host, systemd, Docker, node_exporter, or log files for canonical status.
 
 Prometheus being unavailable, malformed, or missing any required Odin metric is controlled unavailable telemetry. The TUI must fail or render `UNKNOWN`; it must never silently report healthy. Loki being empty or unavailable is reported in the logs section without inventing host log data.
 

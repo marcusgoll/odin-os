@@ -14,7 +14,7 @@ func TestRenderOverviewShowsUnknownWhenTelemetryIsStale(t *testing.T) {
 		HealthScore:        99,
 		TelemetryStale:     true,
 	})
-	if !strings.Contains(output, "HEALTH: UNKNOWN") {
+	if !strings.Contains(output, "│ HEALTH        UNKNOWN") {
 		t.Fatalf("output = %q, want UNKNOWN", output)
 	}
 }
@@ -35,16 +35,47 @@ func TestRenderOverviewStableTextOutput(t *testing.T) {
 	})
 
 	for _, want := range []string{
-		"ODIN OBSERVABILITY",
-		"HEALTH: DEGRADED",
-		"HEALTH_SCORE: 87",
-		"TELEMETRY_STALE: false",
-		"LIFECYCLE_PHASE: run",
-		"ACTIVE_RUNS: 3",
+		"┌─ ODIN OBSERVABILITY ",
+		"│ HEALTH        DEGRADED",
+		"│ SCORE         87",
+		"│ TELEMETRY     fresh",
+		"│ PHASE         run",
+		"│ ACTIVE RUNS   3",
 		`{"level":"info","message":"ready"}`,
 	} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("output = %q, want %q", output, want)
+		}
+	}
+}
+
+func TestRenderOverviewUsesBoxedCockpitLayout(t *testing.T) {
+	t.Parallel()
+
+	output := RenderOverview(Model{
+		TelemetryAvailable: true,
+		Status:             "degraded",
+		HealthScore:        87,
+		TelemetryStale:     false,
+		LifecyclePhase:     "run",
+		ActiveRuns:         3,
+		Logs: []LogEntry{
+			{Timestamp: "1714521600000000000", Line: `{"level":"info","message":"ready"}`},
+		},
+	})
+
+	for _, want := range []string{
+		"┌─ ODIN OBSERVABILITY ",
+		"│ HEALTH        DEGRADED",
+		"│ SCORE         87",
+		"│ TELEMETRY     fresh",
+		"│ PHASE         run",
+		"┌─ RECENT LOGS ",
+		"│ 1714521600000000000  {\"level\":\"info\",\"message\":\"ready\"}",
+		"└",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("output = %q, want boxed cockpit fragment %q", output, want)
 		}
 	}
 }
@@ -59,7 +90,7 @@ func TestRenderOverviewShowsUnavailableLogs(t *testing.T) {
 		LifecyclePhase:     "run",
 		LogsUnavailable:    "loki query failed",
 	})
-	if !strings.Contains(output, "RECENT_LOGS:\n  unavailable: loki query failed") {
+	if !strings.Contains(output, "┌─ RECENT LOGS ") || !strings.Contains(output, "│ unavailable: loki query failed") {
 		t.Fatalf("output = %q, want unavailable logs", output)
 	}
 }

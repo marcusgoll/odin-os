@@ -68,7 +68,7 @@ Odin observability uses one telemetry truth:
 - Prometheus stores metrics.
 - Loki stores logs collected by Alloy.
 - Grafana is the repo-provisioned web frontend.
-- `odin tui` is the read-only terminal frontend over Prometheus and Loki; use `--once` for smoke checks and scripts.
+- `odin tui` is the read-only boxed terminal cockpit over Prometheus and Loki; use `--once` for smoke checks and scripts.
 
 Start with [docs/operations/observability-stack.md](docs/operations/observability-stack.md). The latest local proof is recorded in [docs/operations/observability-proof-2026-05-01.md](docs/operations/observability-proof-2026-05-01.md).
 
