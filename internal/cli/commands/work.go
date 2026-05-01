@@ -285,7 +285,7 @@ func extractIssuePathHints(text string) []string {
 func firstIssuePathHintField(text string) string {
 	for _, field := range strings.FieldsFunc(text, issuePathHintSeparator) {
 		candidate := strings.Trim(field, "<>.,!?")
-		if looksLikeRelativePathHint(candidate) {
+		if looksLikeRelativePathHint(candidate) && !looksLikeSensitivePathHint(candidate) {
 			return candidate
 		}
 	}
@@ -309,6 +309,27 @@ func looksLikeRelativePathHint(candidate string) bool {
 		return false
 	}
 	return strings.Contains(filepath.Base(candidate), ".")
+}
+
+func looksLikeSensitivePathHint(candidate string) bool {
+	lowered := strings.ToLower(candidate)
+	for _, marker := range []string{
+		"ghp_",
+		"github_pat_",
+		"gho_",
+		"ghu_",
+		"ghs_",
+		"ghr_",
+		"token",
+		"secret",
+		"password",
+		"credential",
+	} {
+		if strings.Contains(lowered, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func flattenWorkSuperviseReport(report supervision.Report, command string, params map[string]string) workSuperviseReport {

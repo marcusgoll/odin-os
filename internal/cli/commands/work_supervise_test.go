@@ -209,7 +209,11 @@ func TestRunWorkSuperviseQueueJSONPersistsIssueBodyHashWithoutRawBody(t *testing
 	defer store.Close()
 	projectRegistry := commandProjectRegistry(t)
 
-	sensitiveBody := "Planned scope: docs/example.md\nFailure dump: leaked/ghp_123456789012345678901234567890123456.txt"
+	sensitiveBody := strings.Join([]string{
+		"Planned scope: docs/example.md",
+		"Failure dump: leaked/ghp_123456789012345678901234567890123456.txt",
+		"Planned scope: leaked/ghp_123456789012345678901234567890123456.txt",
+	}, "\n")
 	previousFactory := newIntakeTracker
 	t.Cleanup(func() { newIntakeTracker = previousFactory })
 	newIntakeTracker = func(project projects.Manifest, options trackerintake.SyncOptions) (tracker.Tracker, error) {
