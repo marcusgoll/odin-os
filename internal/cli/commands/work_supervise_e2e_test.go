@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"odin-os/internal/core/projects"
 	"odin-os/internal/registry"
@@ -359,10 +360,16 @@ func TestRunWorkSuperviseE2ERunOnceQueuesExactIssueAndClaims(t *testing.T) {
 		case request.Method == http.MethodGet && request.URL.Path == "/repos/acme/alpha/pulls":
 			fmt.Fprint(response, `[]`)
 		case request.Method == http.MethodPost && request.URL.Path == "/repos/acme/alpha/pulls":
+			if !strings.Contains(string(body), "odin work supervise e2e run-once") {
+				t.Fatalf("create PR body = %s, want Stage 7 supervised run-once provenance", string(body))
+			}
 			fmt.Fprint(response, `{"number":76,"html_url":"https://github.example/acme/alpha/pull/76","state":"open","draft":true,"title":"Stage 7 supervised E2E handoff","head":{"ref":"stage7"},"base":{"ref":"main"}}`)
 		case request.Method == http.MethodGet && request.URL.Path == "/repos/acme/alpha/issues/76/comments":
 			fmt.Fprint(response, `[]`)
 		case request.Method == http.MethodPost && request.URL.Path == "/repos/acme/alpha/issues/76/comments":
+			if !strings.Contains(string(body), "odin-stage7-supervised-e2e") || !strings.Contains(string(body), "odin work supervise e2e run-once") {
+				t.Fatalf("comment body = %s, want Stage 7 supervised run-once evidence", string(body))
+			}
 			fmt.Fprint(response, `{"html_url":"https://github.example/acme/alpha/pull/76#issuecomment-1","body":"ok"}`)
 		case request.Method == http.MethodGet && request.URL.Path == "/repos/acme/alpha/actions/runs":
 			fmt.Fprint(response, `{"workflow_runs":[{"id":10,"name":"Odin E2E","path":".github/workflows/odin-e2e.yml","html_url":"https://github.example/acme/alpha/actions/runs/10","status":"completed","conclusion":"success","head_branch":"stage7","event":"pull_request"}]}`)
@@ -1005,15 +1012,15 @@ func TestRunWorkSuperviseE2ERunOnceWorkerEditsOnlyPlannedPath(t *testing.T) {
 		case request.Method == http.MethodGet && request.URL.Path == "/repos/acme/alpha/pulls":
 			fmt.Fprint(response, `[]`)
 		case request.Method == http.MethodPost && request.URL.Path == "/repos/acme/alpha/pulls":
-			if !strings.Contains(string(body), `"draft":true`) || !strings.Contains(string(body), `"base":"main"`) {
-				t.Fatalf("create PR body = %s, want draft PR against main", string(body))
+			if !strings.Contains(string(body), `"draft":true`) || !strings.Contains(string(body), `"base":"main"`) || !strings.Contains(string(body), "odin work supervise e2e run-once") {
+				t.Fatalf("create PR body = %s, want draft PR against main with Stage 7 provenance", string(body))
 			}
 			fmt.Fprint(response, `{"number":77,"html_url":"https://github.example/acme/alpha/pull/77","state":"open","draft":true,"title":"Stage 7 supervised E2E handoff","head":{"ref":"stage7"},"base":{"ref":"main"}}`)
 		case request.Method == http.MethodGet && request.URL.Path == "/repos/acme/alpha/issues/77/comments":
 			fmt.Fprint(response, `[]`)
 		case request.Method == http.MethodPost && request.URL.Path == "/repos/acme/alpha/issues/77/comments":
-			if !strings.Contains(string(body), "odin-stage6") || !strings.Contains(string(body), "human") {
-				t.Fatalf("comment body = %s, want evidence marker and human handoff", string(body))
+			if !strings.Contains(string(body), "odin-stage7-supervised-e2e") || !strings.Contains(string(body), "odin work supervise e2e run-once") || !strings.Contains(string(body), "human") {
+				t.Fatalf("comment body = %s, want Stage 7 evidence marker and human handoff", string(body))
 			}
 			fmt.Fprint(response, `{"html_url":"https://github.example/acme/alpha/pull/77#issuecomment-1","body":"ok"}`)
 		case request.Method == http.MethodGet && request.URL.Path == "/repos/acme/alpha/actions/runs":
@@ -1125,15 +1132,15 @@ func TestRunWorkSuperviseE2ERunOnceCreatesDraftPRAndHandoff(t *testing.T) {
 		case request.Method == http.MethodGet && request.URL.Path == "/repos/acme/alpha/pulls":
 			fmt.Fprint(response, `[]`)
 		case request.Method == http.MethodPost && request.URL.Path == "/repos/acme/alpha/pulls":
-			if !strings.Contains(string(body), `"draft":true`) || !strings.Contains(string(body), `"head":"`) {
-				t.Fatalf("create PR body = %s, want draft PR with supervised branch", string(body))
+			if !strings.Contains(string(body), `"draft":true`) || !strings.Contains(string(body), `"head":"`) || !strings.Contains(string(body), "odin work supervise e2e run-once") {
+				t.Fatalf("create PR body = %s, want draft PR with supervised branch and Stage 7 provenance", string(body))
 			}
 			fmt.Fprint(response, `{"number":88,"html_url":"https://github.example/acme/alpha/pull/88","state":"open","draft":true,"title":"Stage 7 supervised E2E handoff","head":{"ref":"stage7"},"base":{"ref":"main"}}`)
 		case request.Method == http.MethodGet && request.URL.Path == "/repos/acme/alpha/issues/88/comments":
 			fmt.Fprint(response, `[]`)
 		case request.Method == http.MethodPost && request.URL.Path == "/repos/acme/alpha/issues/88/comments":
-			if !strings.Contains(string(body), "diff_sha256=") || !strings.Contains(string(body), "human") {
-				t.Fatalf("comment body = %s, want diff hash and handoff evidence", string(body))
+			if !strings.Contains(string(body), "diff_sha256=") || !strings.Contains(string(body), "odin-stage7-supervised-e2e") || !strings.Contains(string(body), "odin work supervise e2e run-once") {
+				t.Fatalf("comment body = %s, want Stage 7 diff hash and handoff evidence", string(body))
 			}
 			fmt.Fprint(response, `{"html_url":"https://github.example/acme/alpha/pull/88#issuecomment-1","body":"ok"}`)
 		case request.Method == http.MethodGet && request.URL.Path == "/repos/acme/alpha/actions/runs":
@@ -1238,7 +1245,7 @@ func TestRunWorkSuperviseE2ERunOnceCITimeoutLeavesDraftUnmerged(t *testing.T) {
 	if err == nil {
 		t.Fatalf("RunWork(supervise e2e run-once CI timeout) error = nil, want fail-closed timeout\noutput:\n%s", output.String())
 	}
-	if !strings.Contains(err.Error(), "timed out waiting for Stage 6 CI") {
+	if !strings.Contains(err.Error(), "timed out waiting for Odin E2E CI") {
 		t.Fatalf("error = %q, want CI timeout", err.Error())
 	}
 	runID := newestSuperviseE2ERunID(t, odinRoot)
@@ -1330,6 +1337,317 @@ func TestRunWorkSuperviseE2ERunOnceDeploymentWorkflowFailsClosed(t *testing.T) {
 	assertFileContains(t, finalReportPath, `"no_deployment_workflows": false`)
 	assertFileContains(t, finalReportPath, `"deployment": "not_started"`)
 	assertNoForbiddenSuperviseE2EGitHubMutations(t, requests)
+}
+
+func TestRunWorkSuperviseE2ERunOnceCreatedNonDraftPRReportsSideEffect(t *testing.T) {
+	ctx := context.Background()
+	store := openWorkCommandStore(t)
+	defer store.Close()
+	odinRoot := t.TempDir()
+	repoRoot := initWorkerDryRunGitRepo(t)
+	initStage6Remote(t, repoRoot)
+	t.Setenv("ODIN_ROOT", odinRoot)
+	t.Setenv("ODIN_WORKTREE_ROOT", filepath.Join(t.TempDir(), "worktrees"))
+	t.Setenv("GITHUB_TOKEN", "github_pat_1234567890abcdefghijklmnopqrstuvwxyz")
+
+	plannedPath := "docs/operations/stage-7-non-draft-pr.md"
+	installSuperviseE2EFakeTracker(t, &superviseE2EFakeTracker{issue: tracker.Issue{
+		Provider: "github",
+		Repo:     "acme/alpha",
+		Number:   61,
+		Title:    "Worker non-draft PR",
+		Body:     "Planned scope: " + plannedPath,
+		URL:      "https://github.example/acme/alpha/issues/61",
+		State:    "open",
+		Labels:   []string{"odin:ready", "safety:low-risk"},
+	}})
+	installSuperviseE2EFakeWorker(t, func(_ context.Context, request supervisedE2EWorkerRequest) (supervisedE2EWorkerResult, error) {
+		path := filepath.Join(request.WorktreePath, filepath.FromSlash(plannedPath))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("MkdirAll(planned dir) error = %v", err)
+		}
+		if err := os.WriteFile(path, []byte("# Stage 7 non-draft PR\n\nRun make odin-e2e-local before handoff.\n"), 0o644); err != nil {
+			t.Fatalf("WriteFile(planned path) error = %v", err)
+		}
+		return supervisedE2EWorkerResult{Output: "worker complete: make odin-e2e-local"}, nil
+	})
+
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		body, err := io.ReadAll(request.Body)
+		if err != nil {
+			t.Fatalf("ReadAll() error = %v", err)
+		}
+		switch {
+		case request.Method == http.MethodGet && request.URL.Path == "/repos/acme/alpha/pulls":
+			fmt.Fprint(response, `[]`)
+		case request.Method == http.MethodPost && request.URL.Path == "/repos/acme/alpha/pulls":
+			fmt.Fprint(response, `{"number":91,"html_url":"https://github.example/acme/alpha/pull/91","state":"open","draft":false,"title":"Stage 7 supervised E2E handoff","head":{"ref":"stage7"},"base":{"ref":"main"}}`)
+		default:
+			t.Fatalf("unexpected request: %s %s?%s body=%s", request.Method, request.URL.Path, request.URL.RawQuery, string(body))
+		}
+	}))
+	defer server.Close()
+	t.Setenv("ODIN_GITHUB_API_BASE_URL", server.URL)
+
+	_ = runWorkSuperviseJSON(t, ctx, store, []string{"supervise", "start", "--json"})
+	var output strings.Builder
+	err := RunWork(ctx, store, superviseE2EProjectRegistry(t, repoRoot), registry.Snapshot{}, []string{
+		"supervise", "e2e", "run-once", "--project", "alpha", "--issue", "61", "--ci-timeout", "1s", "--json",
+	}, &output)
+	if err == nil {
+		t.Fatalf("RunWork(supervise e2e run-once non-draft PR) error = nil, want fail-closed non-draft\noutput:\n%s", output.String())
+	}
+	if !strings.Contains(err.Error(), "not a draft PR") {
+		t.Fatalf("error = %q, want non-draft PR failure", err.Error())
+	}
+	runID := newestSuperviseE2ERunID(t, odinRoot)
+	finalReportPath := filepath.Join(odinRoot, "runs", "supervised-e2e", runID, "final-report.json")
+	assertFileContains(t, finalReportPath, `"status": "failed_closed"`)
+	assertFileContains(t, finalReportPath, `"prs": "created_non_draft"`)
+	assertFileContains(t, finalReportPath, `"number": 91`)
+	assertFileContains(t, finalReportPath, `"created": true`)
+	assertFileContains(t, finalReportPath, `"draft": false`)
+	assertFileContains(t, finalReportPath, `"merge": "not_merged"`)
+	assertFileContains(t, finalReportPath, `"deployment": "not_started"`)
+}
+
+func TestRunWorkSuperviseE2ERunOncePartialCommentFailureReportsCreatedComment(t *testing.T) {
+	ctx := context.Background()
+	store := openWorkCommandStore(t)
+	defer store.Close()
+	odinRoot := t.TempDir()
+	repoRoot := initWorkerDryRunGitRepo(t)
+	initStage6Remote(t, repoRoot)
+	t.Setenv("ODIN_ROOT", odinRoot)
+	t.Setenv("ODIN_WORKTREE_ROOT", filepath.Join(t.TempDir(), "worktrees"))
+	t.Setenv("GITHUB_TOKEN", "github_pat_1234567890abcdefghijklmnopqrstuvwxyz")
+
+	plannedPath := "docs/operations/stage-7-partial-comment.md"
+	installSuperviseE2EFakeTracker(t, &superviseE2EFakeTracker{issue: tracker.Issue{
+		Provider: "github",
+		Repo:     "acme/alpha",
+		Number:   62,
+		Title:    "Worker partial comment",
+		Body:     "Planned scope: " + plannedPath,
+		URL:      "https://github.example/acme/alpha/issues/62",
+		State:    "open",
+		Labels:   []string{"odin:ready", "safety:low-risk"},
+	}})
+	installSuperviseE2EFakeWorker(t, func(_ context.Context, request supervisedE2EWorkerRequest) (supervisedE2EWorkerResult, error) {
+		path := filepath.Join(request.WorktreePath, filepath.FromSlash(plannedPath))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("MkdirAll(planned dir) error = %v", err)
+		}
+		if err := os.WriteFile(path, []byte("# Stage 7 partial comment\n\nRun make odin-e2e-local before handoff.\n"), 0o644); err != nil {
+			t.Fatalf("WriteFile(planned path) error = %v", err)
+		}
+		return supervisedE2EWorkerResult{Output: "worker complete: make odin-e2e-local"}, nil
+	})
+
+	commentPosts := 0
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		body, err := io.ReadAll(request.Body)
+		if err != nil {
+			t.Fatalf("ReadAll() error = %v", err)
+		}
+		switch {
+		case request.Method == http.MethodGet && request.URL.Path == "/repos/acme/alpha/pulls":
+			fmt.Fprint(response, `[]`)
+		case request.Method == http.MethodPost && request.URL.Path == "/repos/acme/alpha/pulls":
+			fmt.Fprint(response, `{"number":92,"html_url":"https://github.example/acme/alpha/pull/92","state":"open","draft":true,"title":"Stage 7 supervised E2E handoff","head":{"ref":"stage7"},"base":{"ref":"main"}}`)
+		case request.Method == http.MethodGet && request.URL.Path == "/repos/acme/alpha/issues/92/comments":
+			fmt.Fprint(response, `[]`)
+		case request.Method == http.MethodPost && request.URL.Path == "/repos/acme/alpha/issues/92/comments":
+			commentPosts++
+			if commentPosts == 1 {
+				fmt.Fprint(response, `{"html_url":"https://github.example/acme/alpha/pull/92#issuecomment-1","body":"ok"}`)
+				return
+			}
+			http.Error(response, `{"message":"comment failed"}`, http.StatusInternalServerError)
+		default:
+			t.Fatalf("unexpected request: %s %s?%s body=%s", request.Method, request.URL.Path, request.URL.RawQuery, string(body))
+		}
+	}))
+	defer server.Close()
+	t.Setenv("ODIN_GITHUB_API_BASE_URL", server.URL)
+
+	_ = runWorkSuperviseJSON(t, ctx, store, []string{"supervise", "start", "--json"})
+	var output strings.Builder
+	err := RunWork(ctx, store, superviseE2EProjectRegistry(t, repoRoot), registry.Snapshot{}, []string{
+		"supervise", "e2e", "run-once", "--project", "alpha", "--issue", "62", "--ci-timeout", "1s", "--json",
+	}, &output)
+	if err == nil {
+		t.Fatalf("RunWork(supervise e2e run-once partial comment failure) error = nil, want fail-closed comment error\noutput:\n%s", output.String())
+	}
+	runID := newestSuperviseE2ERunID(t, odinRoot)
+	finalReportPath := filepath.Join(odinRoot, "runs", "supervised-e2e", runID, "final-report.json")
+	assertFileContains(t, finalReportPath, `"status": "failed_closed"`)
+	assertFileContains(t, finalReportPath, `"prs": "draft_created"`)
+	assertFileContains(t, finalReportPath, `"marker": "\u003c!-- odin-stage7-supervised-e2e-review-evidence --\u003e"`)
+	assertFileContains(t, finalReportPath, `"url": "https://github.example/acme/alpha/pull/92#issuecomment-1"`)
+	assertFileContains(t, finalReportPath, `"created": true`)
+	assertFileContains(t, finalReportPath, `"merge": "not_merged"`)
+	assertFileContains(t, finalReportPath, `"deployment": "not_started"`)
+}
+
+func TestRunWorkSuperviseE2ERunOnceReusedPRRequiresValidTemplate(t *testing.T) {
+	ctx := context.Background()
+	store := openWorkCommandStore(t)
+	defer store.Close()
+	odinRoot := t.TempDir()
+	repoRoot := initWorkerDryRunGitRepo(t)
+	initStage6Remote(t, repoRoot)
+	t.Setenv("ODIN_ROOT", odinRoot)
+	t.Setenv("ODIN_WORKTREE_ROOT", filepath.Join(t.TempDir(), "worktrees"))
+	t.Setenv("GITHUB_TOKEN", "github_pat_1234567890abcdefghijklmnopqrstuvwxyz")
+
+	plannedPath := "docs/operations/stage-7-reused-pr-template.md"
+	installSuperviseE2EFakeTracker(t, &superviseE2EFakeTracker{issue: tracker.Issue{
+		Provider: "github",
+		Repo:     "acme/alpha",
+		Number:   63,
+		Title:    "Worker reused PR template",
+		Body:     "Planned scope: " + plannedPath,
+		URL:      "https://github.example/acme/alpha/issues/63",
+		State:    "open",
+		Labels:   []string{"odin:ready", "safety:low-risk"},
+	}})
+	installSuperviseE2EFakeWorker(t, func(_ context.Context, request supervisedE2EWorkerRequest) (supervisedE2EWorkerResult, error) {
+		path := filepath.Join(request.WorktreePath, filepath.FromSlash(plannedPath))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("MkdirAll(planned dir) error = %v", err)
+		}
+		if err := os.WriteFile(path, []byte("# Stage 7 reused PR template\n\nRun make odin-e2e-local before handoff.\n"), 0o644); err != nil {
+			t.Fatalf("WriteFile(planned path) error = %v", err)
+		}
+		return supervisedE2EWorkerResult{Output: "worker complete: make odin-e2e-local"}, nil
+	})
+
+	var requests []string
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		body, err := io.ReadAll(request.Body)
+		if err != nil {
+			t.Fatalf("ReadAll() error = %v", err)
+		}
+		requests = append(requests, request.Method+" "+request.URL.Path+"?"+request.URL.RawQuery+" "+string(body))
+		switch {
+		case request.Method == http.MethodGet && request.URL.Path == "/repos/acme/alpha/pulls":
+			_ = json.NewEncoder(response).Encode([]map[string]any{{
+				"number":   93,
+				"html_url": "https://github.example/acme/alpha/pull/93",
+				"state":    "open",
+				"draft":    true,
+				"title":    "Stage 7 supervised E2E handoff",
+				"body":     "missing required PR template headings",
+				"head":     map[string]string{"ref": "stage7"},
+				"base":     map[string]string{"ref": "main"},
+			}})
+		default:
+			t.Fatalf("unexpected request: %s %s?%s body=%s", request.Method, request.URL.Path, request.URL.RawQuery, string(body))
+		}
+	}))
+	defer server.Close()
+	t.Setenv("ODIN_GITHUB_API_BASE_URL", server.URL)
+
+	_ = runWorkSuperviseJSON(t, ctx, store, []string{"supervise", "start", "--json"})
+	var output strings.Builder
+	err := RunWork(ctx, store, superviseE2EProjectRegistry(t, repoRoot), registry.Snapshot{}, []string{
+		"supervise", "e2e", "run-once", "--project", "alpha", "--issue", "63", "--ci-timeout", "1s", "--json",
+	}, &output)
+	if err == nil {
+		t.Fatalf("RunWork(supervise e2e run-once reused invalid PR body) error = nil, want template failure\noutput:\n%s", output.String())
+	}
+	if !strings.Contains(err.Error(), "verify PR template") {
+		t.Fatalf("error = %q, want PR template validation failure", err.Error())
+	}
+	runID := newestSuperviseE2ERunID(t, odinRoot)
+	finalReportPath := filepath.Join(odinRoot, "runs", "supervised-e2e", runID, "final-report.json")
+	assertFileContains(t, finalReportPath, `"status": "failed_closed"`)
+	assertFileContains(t, finalReportPath, `"prs": "draft_reused"`)
+	assertFileContains(t, finalReportPath, `"number": 93`)
+	assertFileContains(t, finalReportPath, `"reused": true`)
+	for _, request := range requests {
+		if !strings.HasPrefix(request, "GET /repos/acme/alpha/pulls") {
+			t.Fatalf("request = %q, want no comments or CI after invalid reused PR body", request)
+		}
+	}
+}
+
+func TestRunWorkSuperviseE2ERunOnceCITimeoutCancelsSlowGitHubRequest(t *testing.T) {
+	ctx := context.Background()
+	store := openWorkCommandStore(t)
+	defer store.Close()
+	odinRoot := t.TempDir()
+	repoRoot := initWorkerDryRunGitRepo(t)
+	initStage6Remote(t, repoRoot)
+	t.Setenv("ODIN_ROOT", odinRoot)
+	t.Setenv("ODIN_WORKTREE_ROOT", filepath.Join(t.TempDir(), "worktrees"))
+	t.Setenv("GITHUB_TOKEN", "github_pat_1234567890abcdefghijklmnopqrstuvwxyz")
+
+	plannedPath := "docs/operations/stage-7-slow-ci.md"
+	installSuperviseE2EFakeTracker(t, &superviseE2EFakeTracker{issue: tracker.Issue{
+		Provider: "github",
+		Repo:     "acme/alpha",
+		Number:   64,
+		Title:    "Worker slow CI",
+		Body:     "Planned scope: " + plannedPath,
+		URL:      "https://github.example/acme/alpha/issues/64",
+		State:    "open",
+		Labels:   []string{"odin:ready", "safety:low-risk"},
+	}})
+	installSuperviseE2EFakeWorker(t, func(_ context.Context, request supervisedE2EWorkerRequest) (supervisedE2EWorkerResult, error) {
+		path := filepath.Join(request.WorktreePath, filepath.FromSlash(plannedPath))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("MkdirAll(planned dir) error = %v", err)
+		}
+		if err := os.WriteFile(path, []byte("# Stage 7 slow CI\n\nRun make odin-e2e-local before handoff.\n"), 0o644); err != nil {
+			t.Fatalf("WriteFile(planned path) error = %v", err)
+		}
+		return supervisedE2EWorkerResult{Output: "worker complete: make odin-e2e-local"}, nil
+	})
+
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		body, err := io.ReadAll(request.Body)
+		if err != nil {
+			t.Fatalf("ReadAll() error = %v", err)
+		}
+		switch {
+		case request.Method == http.MethodGet && request.URL.Path == "/repos/acme/alpha/pulls":
+			fmt.Fprint(response, `[]`)
+		case request.Method == http.MethodPost && request.URL.Path == "/repos/acme/alpha/pulls":
+			fmt.Fprint(response, `{"number":94,"html_url":"https://github.example/acme/alpha/pull/94","state":"open","draft":true,"title":"Stage 7 supervised E2E handoff","head":{"ref":"stage7"},"base":{"ref":"main"}}`)
+		case request.Method == http.MethodGet && request.URL.Path == "/repos/acme/alpha/issues/94/comments":
+			fmt.Fprint(response, `[]`)
+		case request.Method == http.MethodPost && request.URL.Path == "/repos/acme/alpha/issues/94/comments":
+			fmt.Fprint(response, `{"html_url":"https://github.example/acme/alpha/pull/94#issuecomment-1","body":"ok"}`)
+		case request.Method == http.MethodGet && request.URL.Path == "/repos/acme/alpha/actions/runs":
+			<-request.Context().Done()
+		default:
+			t.Fatalf("unexpected request: %s %s?%s body=%s", request.Method, request.URL.Path, request.URL.RawQuery, string(body))
+		}
+	}))
+	defer server.Close()
+	t.Setenv("ODIN_GITHUB_API_BASE_URL", server.URL)
+
+	_ = runWorkSuperviseJSON(t, ctx, store, []string{"supervise", "start", "--json"})
+	started := time.Now()
+	var output strings.Builder
+	err := RunWork(ctx, store, superviseE2EProjectRegistry(t, repoRoot), registry.Snapshot{}, []string{
+		"supervise", "e2e", "run-once", "--project", "alpha", "--issue", "64", "--ci-timeout", "10ms", "--json",
+	}, &output)
+	elapsed := time.Since(started)
+	if err == nil {
+		t.Fatalf("RunWork(supervise e2e run-once slow CI) error = nil, want timeout\noutput:\n%s", output.String())
+	}
+	if elapsed > time.Second {
+		t.Fatalf("slow CI timeout took %s, want hard timeout near --ci-timeout", elapsed)
+	}
+	runID := newestSuperviseE2ERunID(t, odinRoot)
+	finalReportPath := filepath.Join(odinRoot, "runs", "supervised-e2e", runID, "final-report.json")
+	assertFileContains(t, finalReportPath, `"status": "failed_closed"`)
+	assertFileContains(t, finalReportPath, `"timed_out": true`)
+	assertFileContains(t, finalReportPath, `"merge": "not_merged"`)
+	assertFileContains(t, finalReportPath, `"deployment": "not_started"`)
 }
 
 func TestRunWorkSuperviseE2ERunOnceForbiddenDiffBlocksPR(t *testing.T) {

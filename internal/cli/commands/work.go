@@ -36,6 +36,8 @@ import (
 const stage3LifecycleCommentMarker = "<!-- odin-stage3-lifecycle-proof -->"
 const stage6ReviewEvidenceMarker = "<!-- odin-stage6-review-evidence -->"
 const stage6HumanReviewHandoffMarker = "<!-- odin-stage6-human-review-handoff -->"
+const stage7ReviewEvidenceMarker = "<!-- odin-stage7-supervised-e2e-review-evidence -->"
+const stage7HumanReviewHandoffMarker = "<!-- odin-stage7-supervised-e2e-human-review-handoff -->"
 
 const workUsage = "usage: odin work status|profiles|start --project <key> --title <text>|intake --project <key> [--dry-run]|simulate-lifecycle --issue <number> [--project <key>] [--dry-run] [--json]|apply-lifecycle --issue <number> --approved-target <repo>#<issue> [--project <key>] [--json]|worker-dry-run --issue-fixture <path> [--project <key>] [--keep-worktree] [--json]|pr-dry-run --worktree <path> --base <branch> [--json]|pr-create --issue <number> --approved-target <repo>#<issue> --worktree <path> --base <branch> --wait-ci [--json]|supervise status|start|stop|queue --project <key> [--fixture-issue <number>]|recover|e2e prepare-issue --project <key> --json|e2e run-once --project <key> --issue <number> [--ci-timeout <duration>] --json"
 
@@ -873,16 +875,34 @@ func completeSupervisedE2EReviewHandoff(ctx context.Context, manifest projects.M
 	prCreated := false
 	prReused := false
 	var pr trackergithub.PullRequest
+	bodyPath := filepath.Join(filepath.Dir(report.Artifacts.FinalReport), "pr-body.md")
 	if len(prs) > 0 {
 		pr = prs[0]
 		if !pr.Draft {
+			report.PRs = "existing_non_draft"
+			report.PR = workPRCreatePullRequestReport{
+				Number: pr.Number,
+				URL:    pr.URL,
+				Draft:  pr.Draft,
+			}
 			return report, supervisedE2EReviewHandoffFail(report, fmt.Errorf("existing Stage 7 supervised e2e PR #%d is not a draft PR", pr.Number))
 		}
 		prReused = true
 		report.PRs = "draft_reused"
+		report.PR = workPRCreatePullRequestReport{
+			Number: pr.Number,
+			URL:    pr.URL,
+			Draft:  pr.Draft,
+			Reused: true,
+		}
+		if _, err := writeArtifact(bodyPath, pr.Body); err != nil {
+			return report, supervisedE2EReviewHandoffFail(report, err)
+		}
+		if err := verifyPRTemplate(ctx, worktreeAbs, bodyPath); err != nil {
+			return report, supervisedE2EReviewHandoffFail(report, err)
+		}
 	} else {
-		bodyContent := renderPRCreateBody(issue.Number, report.Diff.Files)
-		bodyPath := filepath.Join(filepath.Dir(report.Artifacts.FinalReport), "pr-body.md")
+		bodyContent := renderSupervisedE2EPRBody(manifest.Key, issue.Number, report.Diff.Files)
 		if _, err := writeArtifact(bodyPath, bodyContent); err != nil {
 			return report, supervisedE2EReviewHandoffFail(report, err)
 		}
@@ -899,9 +919,6 @@ func completeSupervisedE2EReviewHandoff(ctx context.Context, manifest projects.M
 		if err != nil {
 			return report, supervisedE2EReviewHandoffFail(report, err)
 		}
-		if !pr.Draft {
-			return report, supervisedE2EReviewHandoffFail(report, fmt.Errorf("created Stage 7 supervised e2e PR #%d is not a draft PR", pr.Number))
-		}
 		prCreated = true
 		report.PRs = "draft_created"
 	}
@@ -912,18 +929,24 @@ func completeSupervisedE2EReviewHandoff(ctx context.Context, manifest projects.M
 		Created: prCreated,
 		Reused:  prReused,
 	}
+	if prCreated && !pr.Draft {
+		report.PRs = "created_non_draft"
+		return report, supervisedE2EReviewHandoffFail(report, fmt.Errorf("created Stage 7 supervised e2e PR #%d is not a draft PR", pr.Number))
+	}
 
 	comments, err := client.FetchIssueComments(ctx, tracker.IssueID{Provider: "github", Repo: manifest.GitHub.Repo, Number: pr.Number})
 	if err != nil {
 		return report, supervisedE2EReviewHandoffFail(report, err)
 	}
-	evidenceComments, err := ensureStage6EvidenceComments(ctx, client, manifest.GitHub.Repo, pr.Number, issue.Number, report.Diff.SHA256, comments)
+	evidenceComments, err := ensureStage7SupervisedE2EEvidenceComments(ctx, client, manifest.GitHub.Repo, pr.Number, issue.Number, report.Diff.SHA256, comments)
+	report.EvidenceComments = evidenceComments
 	if err != nil {
 		return report, supervisedE2EReviewHandoffFail(report, err)
 	}
-	report.EvidenceComments = evidenceComments
 
-	ciResult, workflowRuns, err := waitForStage6CI(ctx, client, branchName, ciTimeout)
+	ciCtx, cancel := context.WithTimeout(ctx, ciTimeout)
+	defer cancel()
+	ciResult, workflowRuns, err := waitForStage6CI(ciCtx, client, branchName, ciTimeout)
 	report.CI = ciResult
 	if err != nil {
 		return report, supervisedE2EReviewHandoffFail(report, err)
@@ -2560,6 +2583,37 @@ func renderPRCreateBody(issueNumber int, files []string) string {
 	}, "\n")
 }
 
+func renderSupervisedE2EPRBody(projectKey string, issueNumber int, files []string) string {
+	summary := "- Stage 7 supervised E2E handoff for issue #" + strconv.Itoa(issueNumber) + "."
+	if len(files) > 0 {
+		summary = "- Stage 7 supervised E2E handoff for issue #" + strconv.Itoa(issueNumber) + " touching: " + strings.Join(files, ", ") + "."
+	}
+	return strings.Join([]string{
+		"## Summary",
+		summary,
+		"- This is a draft Human Review Handoff; human merge is required.",
+		"- Refs #" + strconv.Itoa(issueNumber) + ".",
+		"",
+		"## Proven",
+		"- Stage 7 `odin work supervise e2e run-once` claimed one exact issue and audited one exact planned diff.",
+		"- The Codex worker produced a docs-only change and final output mentioning `make odin-e2e-local`.",
+		"- Odin E2E CI proof is required before completion.",
+		"",
+		"## Unproven",
+		"- Human merge is intentionally unproven and remains required.",
+		"- Deployment is intentionally not triggered.",
+		"",
+		"- [x] this PR changes user-visible or orchestration-facing behavior",
+		"- [x] if the box above is checked, real `odin` command proof is included below",
+		"",
+		"## Commands Run",
+		"```bash",
+		"odin work supervise e2e run-once --project " + projectKey + " --issue " + strconv.Itoa(issueNumber) + " --ci-timeout <duration> --json",
+		"```",
+		"",
+	}, "\n")
+}
+
 func ensureStage6EvidenceComments(ctx context.Context, client *trackergithub.Client, repo string, prNumber int, issueNumber int, diffSHA string, existing []tracker.IssueComment) ([]workPRCreateEvidenceCommentReport, error) {
 	specs := []struct {
 		marker string
@@ -2588,7 +2642,7 @@ func ensureStage6EvidenceComments(ctx context.Context, client *trackergithub.Cli
 	}
 	reports := make([]workPRCreateEvidenceCommentReport, 0, len(specs))
 	for _, spec := range specs {
-		found, err := stage6CommentWithMarker(existing, spec.marker, diffSHA)
+		found, err := evidenceCommentWithMarker(existing, spec.marker, diffSHA)
 		if err != nil {
 			return nil, err
 		}
@@ -2601,7 +2655,7 @@ func ensureStage6EvidenceComments(ctx context.Context, client *trackergithub.Cli
 		}
 		comment, err := client.AddCommentWithResult(ctx, tracker.IssueID{Provider: "github", Repo: repo, Number: prNumber}, spec.body)
 		if err != nil {
-			return nil, err
+			return reports, err
 		}
 		report.Created = true
 		report.URL = comment.URL
@@ -2610,14 +2664,66 @@ func ensureStage6EvidenceComments(ctx context.Context, client *trackergithub.Cli
 	return reports, nil
 }
 
-func stage6CommentWithMarker(comments []tracker.IssueComment, marker string, diffSHA string) (*tracker.IssueComment, error) {
+func ensureStage7SupervisedE2EEvidenceComments(ctx context.Context, client *trackergithub.Client, repo string, prNumber int, issueNumber int, diffSHA string, existing []tracker.IssueComment) ([]workPRCreateEvidenceCommentReport, error) {
+	specs := []struct {
+		marker string
+		body   string
+	}{
+		{
+			marker: stage7ReviewEvidenceMarker,
+			body: strings.Join([]string{
+				stage7ReviewEvidenceMarker,
+				"Stage 7 supervised E2E review evidence for human review.",
+				"command=odin work supervise e2e run-once",
+				"diff_sha256=" + diffSHA,
+				"source_issue=#" + strconv.Itoa(issueNumber),
+				"This is not an autonomous review approval and does not authorize merge or deployment.",
+			}, "\n"),
+		},
+		{
+			marker: stage7HumanReviewHandoffMarker,
+			body: strings.Join([]string{
+				stage7HumanReviewHandoffMarker,
+				"Stage 7 supervised E2E Human Review Handoff evidence.",
+				"command=odin work supervise e2e run-once",
+				"diff_sha256=" + diffSHA,
+				"human_merge_required=true",
+				"No autonomous merge, deployment, scheduler dispatch, or label mutation was authorized.",
+			}, "\n"),
+		},
+	}
+	reports := make([]workPRCreateEvidenceCommentReport, 0, len(specs))
+	for _, spec := range specs {
+		found, err := evidenceCommentWithMarker(existing, spec.marker, diffSHA)
+		if err != nil {
+			return nil, err
+		}
+		report := workPRCreateEvidenceCommentReport{Marker: spec.marker}
+		if found != nil {
+			report.URL = found.URL
+			report.Reused = true
+			reports = append(reports, report)
+			continue
+		}
+		comment, err := client.AddCommentWithResult(ctx, tracker.IssueID{Provider: "github", Repo: repo, Number: prNumber}, spec.body)
+		if err != nil {
+			return reports, err
+		}
+		report.Created = true
+		report.URL = comment.URL
+		reports = append(reports, report)
+	}
+	return reports, nil
+}
+
+func evidenceCommentWithMarker(comments []tracker.IssueComment, marker string, diffSHA string) (*tracker.IssueComment, error) {
 	for index := range comments {
 		comment := comments[index]
 		if !strings.Contains(comment.Body, marker) {
 			continue
 		}
 		if !strings.Contains(comment.Body, "diff_sha256="+diffSHA) {
-			return nil, fmt.Errorf("existing Stage 6 evidence comment %s has a different diff hash", marker)
+			return nil, fmt.Errorf("existing evidence comment %s has a different diff hash", marker)
 		}
 		return &comment, nil
 	}
@@ -2626,11 +2732,19 @@ func stage6CommentWithMarker(comments []tracker.IssueComment, marker string, dif
 
 func waitForStage6CI(ctx context.Context, client *trackergithub.Client, branchName string, timeout time.Duration) (workPRCreateCIReport, []trackergithub.WorkflowRun, error) {
 	deadline := time.Now().Add(timeout)
+	var lastRuns []trackergithub.WorkflowRun
 	for {
+		if !time.Now().Before(deadline) {
+			return workPRCreateCIReport{Waited: true, TimedOut: true}, lastRuns, fmt.Errorf("timed out waiting for Odin E2E CI after %s", timeout)
+		}
 		runs, err := client.ListWorkflowRuns(ctx, branchName)
 		if err != nil {
+			if ctx.Err() == context.DeadlineExceeded {
+				return workPRCreateCIReport{Waited: true, TimedOut: true}, lastRuns, fmt.Errorf("timed out waiting for Odin E2E CI after %s", timeout)
+			}
 			return workPRCreateCIReport{}, nil, err
 		}
+		lastRuns = runs
 		if run, ok := findStage6E2ERun(runs); ok {
 			report := workPRCreateCIReport{
 				Waited:     true,
@@ -2642,11 +2756,11 @@ func waitForStage6CI(ctx context.Context, client *trackergithub.Client, branchNa
 				if strings.EqualFold(run.Conclusion, "success") {
 					return report, runs, nil
 				}
-				return report, runs, fmt.Errorf("Stage 6 CI concluded %q", run.Conclusion)
+				return report, runs, fmt.Errorf("Odin E2E CI concluded %q", run.Conclusion)
 			}
 		}
 		if time.Now().After(deadline) {
-			return workPRCreateCIReport{Waited: true, TimedOut: true}, runs, fmt.Errorf("timed out waiting for Stage 6 CI after %s", timeout)
+			return workPRCreateCIReport{Waited: true, TimedOut: true}, runs, fmt.Errorf("timed out waiting for Odin E2E CI after %s", timeout)
 		}
 		sleepFor := 2 * time.Second
 		if remaining := time.Until(deadline); remaining < sleepFor {
@@ -2657,6 +2771,9 @@ func waitForStage6CI(ctx context.Context, client *trackergithub.Client, branchNa
 		}
 		select {
 		case <-ctx.Done():
+			if ctx.Err() == context.DeadlineExceeded {
+				return workPRCreateCIReport{Waited: true, TimedOut: true}, runs, fmt.Errorf("timed out waiting for Stage 6 CI after %s", timeout)
+			}
 			return workPRCreateCIReport{}, runs, ctx.Err()
 		case <-time.After(sleepFor):
 		}
