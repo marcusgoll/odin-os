@@ -245,6 +245,9 @@ func TestSupervisionDispatchClaimRetryPreservesOriginalClaimedAt(t *testing.T) {
 	if retried.ID != first.ID {
 		t.Fatalf("retried.ID = %d, want same claim ID %d", retried.ID, first.ID)
 	}
+	if !first.Created || retried.Created {
+		t.Fatalf("claim Created flags = first %t retried %t, want true then false", first.Created, retried.Created)
+	}
 	if !retried.ClaimedAt.Equal(first.ClaimedAt) {
 		t.Fatalf("retried.ClaimedAt = %s, want original claimed_at %s", retried.ClaimedAt, first.ClaimedAt)
 	}

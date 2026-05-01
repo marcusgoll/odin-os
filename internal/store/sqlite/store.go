@@ -367,20 +367,7 @@ func (store *Store) UpsertSupervisionDispatchClaim(ctx context.Context, params U
 	var claim SupervisionDispatchClaim
 
 	err := store.withTx(ctx, func(tx *sql.Tx) error {
-		var existingStatus sql.NullString
-		var existingReleasedAt sql.NullString
-		if err := tx.QueryRowContext(ctx, `
-			SELECT status, released_at
-			FROM supervision_dispatch_claims
-			WHERE claim_key = ?
-		`, params.ClaimKey).Scan(&existingStatus, &existingReleasedAt); err != nil && !errors.Is(err, sql.ErrNoRows) {
-			return err
-		}
-		if existingReleasedAt.Valid || existingStatus.String == "released" {
-			return fmt.Errorf("%w: claim_key %q", ErrSupervisionDispatchClaimReleased, params.ClaimKey)
-		}
-
-		if _, err := tx.ExecContext(ctx, `
+		result, err := tx.ExecContext(ctx, `
 			INSERT INTO supervision_dispatch_claims (
 				project_id,
 				repo,
@@ -394,11 +381,7 @@ func (store *Store) UpsertSupervisionDispatchClaim(ctx context.Context, params U
 				updated_at
 			)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-			ON CONFLICT(claim_key) DO UPDATE SET
-				status = excluded.status,
-				config_hash = excluded.config_hash,
-				claimed_by = excluded.claimed_by,
-				updated_at = excluded.updated_at
+			ON CONFLICT(claim_key) DO NOTHING
 		`,
 			params.ProjectID,
 			params.Repo,
@@ -410,8 +393,41 @@ func (store *Store) UpsertSupervisionDispatchClaim(ctx context.Context, params U
 			formatTime(now),
 			formatTime(now),
 			formatTime(now),
-		); err != nil {
+		)
+		if err != nil {
 			return mapSupervisionDispatchClaimError(err)
+		}
+		rowsAffected, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		created := rowsAffected == 1
+		if !created {
+			var existingStatus sql.NullString
+			var existingReleasedAt sql.NullString
+			if err := tx.QueryRowContext(ctx, `
+				SELECT status, released_at
+				FROM supervision_dispatch_claims
+				WHERE claim_key = ?
+			`, params.ClaimKey).Scan(&existingStatus, &existingReleasedAt); err != nil {
+				return err
+			}
+			if existingReleasedAt.Valid || existingStatus.String == "released" {
+				return fmt.Errorf("%w: claim_key %q", ErrSupervisionDispatchClaimReleased, params.ClaimKey)
+			}
+			if _, err := tx.ExecContext(ctx, `
+				UPDATE supervision_dispatch_claims
+				SET status = ?, config_hash = ?, claimed_by = ?, updated_at = ?
+				WHERE claim_key = ?
+			`,
+				params.Status,
+				params.ConfigHash,
+				params.ClaimedBy,
+				formatTime(now),
+				params.ClaimKey,
+			); err != nil {
+				return mapSupervisionDispatchClaimError(err)
+			}
 		}
 
 		record, err := scanSupervisionDispatchClaim(tx.QueryRowContext(ctx, `
@@ -422,6 +438,7 @@ func (store *Store) UpsertSupervisionDispatchClaim(ctx context.Context, params U
 		if err != nil {
 			return err
 		}
+		record.Created = created
 		claim = record
 		return nil
 	})

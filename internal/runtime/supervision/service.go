@@ -131,7 +131,7 @@ func (service Service) Queue(ctx context.Context, project Project, issues []Issu
 				ClaimKey:     claim.ClaimKey,
 				Status:       claim.Status,
 				ClaimedAt:    claim.ClaimedAt,
-				NewlyCreated: claim.CreatedAt.Equal(claim.UpdatedAt),
+				NewlyCreated: claim.Created,
 			})
 		}
 

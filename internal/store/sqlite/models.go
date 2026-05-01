@@ -954,6 +954,7 @@ type SupervisionDispatchClaim struct {
 	ReleasedAt  *time.Time
 	CreatedAt   time.Time
 	UpdatedAt   time.Time
+	Created     bool
 }
 
 type UpsertSupervisionDispatchClaimParams struct {
