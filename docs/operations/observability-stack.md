@@ -116,3 +116,12 @@ curl -fsS 'http://127.0.0.1:3100/ready'
 ```
 
 Prometheus target health proves scrape reachability. It does not prove Odin runtime correctness by itself; runtime correctness still comes from the real `odin serve` endpoints and Odin-owned command paths.
+
+## Local Proof Notes
+
+Some homelab hosts already use ports `3000` or `8080`, or block Docker bridge traffic back to host-bound service ports. The default compose file stays conservative and reproducible, but a live proof may use a temporary override that:
+
+- remaps Grafana or cAdvisor host ports while preserving their internal service ports
+- runs the real `./bin/odin serve` binary as a compose service alias for `host.docker.internal` when Docker bridge traffic cannot reach the host gateway
+
+If an override is used, record the exact override behavior in the proof artifact. Do not treat the override as the default deployment contract unless it is promoted in a reviewed config change.

@@ -60,6 +60,18 @@ odin
 
 This installs a symlink at `~/.local/bin/odin` pointing to this repo's built binary. Remove it with `make uninstall-local`.
 
+## Observability
+
+Odin observability uses one telemetry truth:
+
+- `odin serve` exports Odin-owned health, readiness, and Prometheus metrics.
+- Prometheus stores metrics.
+- Loki stores logs collected by Alloy.
+- Grafana is the repo-provisioned web frontend.
+- `odin tui --once` is the read-only terminal frontend over Prometheus and Loki.
+
+Start with [docs/operations/observability-stack.md](docs/operations/observability-stack.md). The latest local proof is recorded in [docs/operations/observability-proof-2026-05-01.md](docs/operations/observability-proof-2026-05-01.md).
+
 ## Agency Orchestrator Scaffold
 
 The Odin-OS agency scaffold is Go-native and preserves `cmd/odin` as the canonical operator surface. The transitional daemon entrypoint is `cmd/odin-os/main.go`; it exists for agency-orchestrator slices while runtime behavior continues to route through the existing Odin packages.
