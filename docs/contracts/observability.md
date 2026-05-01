@@ -44,3 +44,5 @@ Required metrics include:
 ## Projections
 
 Operator projections remain read-only and must not mutate runtime state.
+
+`odin tui --once` is a non-interactive operator projection over current runtime state. It must read canonical Odin state and summarize Work Items, Run Attempts, Approvals, and Delivery Profiles without creating tasks, runs, approvals, worktree leases, or external mutations.

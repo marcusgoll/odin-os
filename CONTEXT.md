@@ -2,6 +2,17 @@
 
 Odin OS is the governed operator control plane for Marcus's work. It owns operator invocation, approvals, workflow registry entries, run evidence, memory, policy, dispatch decisions, and proof requirements. Domain-specific systems keep ownership of their own business language and external-system behavior unless explicitly promoted into Odin by a locked decision.
 
+## Long-Term Codex Goals
+
+**Product/domain north star**:
+Odin-OS becomes the governed operator control plane for Marcus's portfolio, owning work intake, approval, execution coordination, memory, evidence, and verification through canonical `odin` surfaces while domain systems retain their business authority.
+
+**Codex operating goal**:
+Codex should strengthen the canonical Odin operator surface by auditing existing structures first, reusing or repairing them, avoiding parallel tools or registries, and proving user-visible behavior through real `odin` command E2E checks whenever applicable.
+
+**Near-term Codex bias**:
+Bias near-term Odin-OS work toward consolidating `odin work ...`, `/overview`/TUI status, live service proof, memory/knowledge retrieval, and supervised execution handoff before adding new autonomous workflow families.
+
 ## Language
 
 **Operator Workflow Suite**:
@@ -509,7 +520,7 @@ Odin owns the **CEO Briefing Workflow**, **Briefing Proposals**, **Daily Priorit
 - `odin work ...` is the canonical Delivery Workflow operator command family. Intake for Stage 1 live GitHub read-only proof must use `odin work intake --project odin-core --json`, backed by the existing Issue Intake Source service, rather than a parallel top-level `odin intake github` command. Stage 2 dry-run lifecycle proof must use `odin work simulate-lifecycle --issue <number> --json`, reusing existing tracker lifecycle labels, rather than a parallel top-level `odin tracker ...` operator surface. Stage 3 live GitHub controlled mutation must use a separate `odin work apply-lifecycle --issue <number> --json` command so live writes are not hidden behind a command named `simulate`. Stage 4 local Codex worker dry-run must use `odin work worker-dry-run --issue-fixture <path> --json`, not a parallel top-level `odin worker ...` command. Stage 5 PR creation dry-run must use `odin work pr-dry-run --worktree <path> --base <branch> --json` as a read-only Human Review Handoff draft, not live PR creation. Stage 6 live docs-only PR proof must use `odin work pr-create --issue <number> --approved-target <repo>#<issue> --worktree <path> --base <branch> --json`, not `pr-dry-run --live`.
 - Stage 7 **Supervised Agency Mode** must implement `odin work supervise status`, `odin work supervise start`, `odin work supervise stop`, `odin work supervise queue`, and `odin work supervise recover` as the canonical operator controls. Later queue, dispatch, review handoff, dry-run, and kill-switch expansions must stay under `odin work ...` unless a future locked decision changes the Delivery Workflow surface.
 - `odin brief ceo` is not implemented yet in the current binary; implementation work must add that canonical command family and must not rely on legacy `odin-orchestrator` executive_review launchers.
-- `odin workspace ...` is not implemented yet in the current binary; implementation work must add a canonical binding, adoption, and attachment surface before **Live Execution Sessions** can be managed as Odin-governed operator state.
+- `odin workspace list` is a read-only projection of active **Worktree Lease** state through the canonical workspace operator surface. Binding, adoption, attachment, handoff, status probing, and stop/termination controls for **Live Execution Sessions** are still not implemented and must not be implied by the lease listing surface.
 - A future ADR may promote **Delivery Profiles** to a separate registry kind only if specialized workflow entries prove insufficient for validation, UI behavior, or lifecycle semantics.
 - `odin knowledge` is not implemented yet in the current binary; implementation work must add that canonical command family rather than relying on direct file edits or REPL-only commands.
 - The exact `odin knowledge` flag spelling for creating **Restricted Knowledge Use Approval** events is still unresolved, but the single-use and use-type scoped approval model is locked.

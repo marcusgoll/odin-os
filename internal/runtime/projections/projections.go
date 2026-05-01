@@ -138,6 +138,25 @@ type ActiveLearningPromotionView struct {
 	PromotedAt   string
 }
 
+type WorktreeLeaseView struct {
+	LeaseID      int64   `json:"lease_id"`
+	ProjectID    int64   `json:"project_id"`
+	ProjectKey   string  `json:"project_key"`
+	TaskID       int64   `json:"work_item_id"`
+	TaskKey      string  `json:"work_item_key"`
+	RunID        int64   `json:"run_attempt_id"`
+	Mode         string  `json:"mode"`
+	BranchName   string  `json:"branch_name"`
+	WorktreePath string  `json:"worktree_path"`
+	RepoRoot     string  `json:"repo_root"`
+	State        string  `json:"state"`
+	HeartbeatAt  string  `json:"heartbeat_at"`
+	ReleasedAt   *string `json:"released_at"`
+	CleanedUpAt  *string `json:"cleaned_up_at"`
+	CreatedAt    string  `json:"created_at"`
+	UpdatedAt    string  `json:"updated_at"`
+}
+
 func ListTaskStatusViews(ctx context.Context, queryer Queryer) ([]TaskStatusView, error) {
 	rows, err := queryer.QueryContext(ctx, `
 		SELECT
@@ -181,6 +200,68 @@ func ListTaskStatusViews(ctx context.Context, queryer Queryer) ([]TaskStatusView
 		views = append(views, view)
 	}
 
+	return views, rows.Err()
+}
+
+func ListActiveWorktreeLeaseViews(ctx context.Context, queryer Queryer) ([]WorktreeLeaseView, error) {
+	rows, err := queryer.QueryContext(ctx, `
+		SELECT
+			wl.id,
+			wl.project_id,
+			p.key,
+			wl.task_id,
+			t.key,
+			wl.run_id,
+			wl.mode,
+			wl.branch_name,
+			wl.worktree_path,
+			wl.repo_root,
+			wl.state,
+			wl.heartbeat_at,
+			wl.released_at,
+			wl.cleaned_up_at,
+			wl.created_at,
+			wl.updated_at
+		FROM worktree_leases wl
+		JOIN projects p ON p.id = wl.project_id
+		JOIN tasks t ON t.id = wl.task_id
+		WHERE wl.state = 'active'
+		ORDER BY wl.id ASC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var views []WorktreeLeaseView
+	for rows.Next() {
+		var view WorktreeLeaseView
+		var releasedAt sql.NullString
+		var cleanedUpAt sql.NullString
+		if err := rows.Scan(
+			&view.LeaseID,
+			&view.ProjectID,
+			&view.ProjectKey,
+			&view.TaskID,
+			&view.TaskKey,
+			&view.RunID,
+			&view.Mode,
+			&view.BranchName,
+			&view.WorktreePath,
+			&view.RepoRoot,
+			&view.State,
+			&view.HeartbeatAt,
+			&releasedAt,
+			&cleanedUpAt,
+			&view.CreatedAt,
+			&view.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		view.ReleasedAt = nullableStringPtr(releasedAt)
+		view.CleanedUpAt = nullableStringPtr(cleanedUpAt)
+		views = append(views, view)
+	}
 	return views, rows.Err()
 }
 
@@ -897,5 +978,14 @@ func nullableInt64Ptr(value sql.NullInt64) *int64 {
 	}
 	ptr := new(int64)
 	*ptr = value.Int64
+	return ptr
+}
+
+func nullableStringPtr(value sql.NullString) *string {
+	if !value.Valid {
+		return nil
+	}
+	ptr := new(string)
+	*ptr = value.String
 	return ptr
 }

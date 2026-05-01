@@ -160,7 +160,7 @@ func (shell *Shell) renderPrompt(ctx context.Context, output io.Writer) error {
 func (shell *Shell) handleCommand(ctx context.Context, command commands.Command, output io.Writer) error {
 	switch command.Name {
 	case "help":
-		if _, err := fmt.Fprintln(output, "/help /mode /scope /project /transition /observe /compare /workflows /tradeboard /jobs /runs /approvals /actions /logs /doctor /self"); err != nil {
+		if _, err := fmt.Fprintln(output, "/help /mode /scope /project /transition /observe /compare /workflows /tradeboard /overview /jobs /runs /approvals /actions /logs /doctor /self"); err != nil {
 			return err
 		}
 		_, err := fmt.Fprintf(output, "%s\n", transitionUsage)
@@ -181,6 +181,8 @@ func (shell *Shell) handleCommand(ctx context.Context, command commands.Command,
 		return shell.handleWorkflows(command.Args, output)
 	case "tradeboard":
 		return shell.handleTradeboard(ctx, command.Args, output)
+	case "overview":
+		return shell.handleOverview(ctx, output)
 	case "jobs":
 		return shell.handleJobs(ctx, output)
 	case "runs":
@@ -201,6 +203,77 @@ func (shell *Shell) handleCommand(ctx context.Context, command commands.Command,
 		_, err := fmt.Fprintf(output, "unknown command: /%s\n", command.Name)
 		return err
 	}
+}
+
+func (shell *Shell) handleOverview(ctx context.Context, output io.Writer) error {
+	jobs, err := shell.jobs.List(ctx, shell.state.Scope)
+	if err != nil {
+		return err
+	}
+	runs, err := shell.runs.List(ctx, shell.state.Scope)
+	if err != nil {
+		return err
+	}
+	approvals, err := shell.pendingApprovals(ctx)
+	if err != nil {
+		return err
+	}
+
+	if _, err := fmt.Fprintln(output, "Overview"); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintln(output, "Operator Surface: odin work ..."); err != nil {
+		return err
+	}
+
+	if _, err := fmt.Fprintf(output, "Work Items (%d)\n", len(jobs)); err != nil {
+		return err
+	}
+	if len(jobs) == 0 {
+		if _, err := fmt.Fprintln(output, "  none"); err != nil {
+			return err
+		}
+	}
+	for _, job := range jobs {
+		if _, err := fmt.Fprintf(output, "  %s %s project=%s\n", job.TaskKey, job.Status, job.ProjectKey); err != nil {
+			return err
+		}
+	}
+
+	if _, err := fmt.Fprintf(output, "Run Attempts (%d)\n", len(runs)); err != nil {
+		return err
+	}
+	if len(runs) == 0 {
+		if _, err := fmt.Fprintln(output, "  none"); err != nil {
+			return err
+		}
+	}
+	for _, run := range runs {
+		if _, err := fmt.Fprintf(output, "  %s %s %s attempt=%d\n", run.TaskKey, run.Executor, run.Status, run.Attempt); err != nil {
+			return err
+		}
+		if _, err := fmt.Fprintf(output, "  Active run: %d\n", run.RunID); err != nil {
+			return err
+		}
+	}
+
+	if _, err := fmt.Fprintf(output, "Approvals (%d)\n", len(approvals)); err != nil {
+		return err
+	}
+	if len(approvals) == 0 {
+		if _, err := fmt.Fprintln(output, "  none"); err != nil {
+			return err
+		}
+	}
+	for _, approval := range approvals {
+		if _, err := fmt.Fprintf(output, "  %s %s\n", approval.TaskKey, approval.Status); err != nil {
+			return err
+		}
+		if _, err := fmt.Fprintf(output, "  Pending approval: %d\n", approval.ApprovalID); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (shell *Shell) handleAsk(ctx context.Context, line string, output io.Writer) error {
@@ -619,7 +692,7 @@ func (shell *Shell) scopeLabel() string {
 
 func (shell *Shell) pendingApprovals(ctx context.Context) ([]pendingApproval, error) {
 	rows, err := shell.env.Store.DB().QueryContext(ctx, `
-		SELECT t.key, a.status, a.action_id, a.payload_hash, t.scope, p.key
+		SELECT a.id, t.key, a.status, a.action_id, a.payload_hash, t.scope, p.key
 		FROM approvals a
 		JOIN tasks t ON t.id = a.task_id
 		JOIN projects p ON p.id = t.project_id
@@ -638,7 +711,7 @@ func (shell *Shell) pendingApprovals(ctx context.Context) ([]pendingApproval, er
 		var taskScope string
 		var actionID sql.NullInt64
 		var payloadHash sql.NullString
-		if err := rows.Scan(&approval.TaskKey, &approval.Status, &actionID, &payloadHash, &taskScope, &projectKey); err != nil {
+		if err := rows.Scan(&approval.ApprovalID, &approval.TaskKey, &approval.Status, &actionID, &payloadHash, &taskScope, &projectKey); err != nil {
 			return nil, err
 		}
 		if actionID.Valid {
@@ -655,6 +728,7 @@ func (shell *Shell) pendingApprovals(ctx context.Context) ([]pendingApproval, er
 }
 
 type pendingApproval struct {
+	ApprovalID  int64
 	TaskKey     string
 	Status      string
 	ActionID    *int64

@@ -6,8 +6,11 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+
+	"odin-os/internal/store/sqlite"
 )
 
 func TestRunStartsInteractiveShell(t *testing.T) {
@@ -55,6 +58,69 @@ func TestRunWorkStatusShowsDeliveryWorkflowState(t *testing.T) {
 	} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("Run(work status) output = %q, want %q", output, want)
+		}
+	}
+}
+
+func TestRunTUIOnceRendersReadOnlyOperatorProjection(t *testing.T) {
+	t.Parallel()
+
+	root := newLifecycleTestRoot(t)
+
+	var startOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"work", "start", "--project", "odin-core", "--title", "Inspect operator projection"}, strings.NewReader(""), &startOutput); err != nil {
+		t.Fatalf("Run(work start) error = %v", err)
+	}
+
+	var stdout bytes.Buffer
+	err := Run(context.Background(), root, []string{"tui", "--once"}, strings.NewReader(""), &stdout)
+	if err != nil {
+		t.Fatalf("Run(tui --once) error = %v", err)
+	}
+
+	output := stdout.String()
+	for _, want := range []string{
+		"Odin TUI",
+		"Operator Surface: odin work ...",
+		"Work Items: total=1 open=1",
+		"Run Attempts: total=0 active=0",
+		"Approvals: pending=0",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("Run(tui --once) output = %q, want %q", output, want)
+		}
+	}
+}
+
+func TestRunWorkspaceListRendersActiveWorktreeLeases(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	root := newLifecycleTestRoot(t)
+	store := openLifecycleStore(t, root)
+	project, task, run := seedLifecycleWorktreeLease(t, ctx, store)
+	defer store.Close()
+
+	var stdout bytes.Buffer
+	err := Run(ctx, root, []string{"workspace", "list"}, strings.NewReader(""), &stdout)
+	if err != nil {
+		t.Fatalf("Run(workspace list) error = %v", err)
+	}
+
+	output := stdout.String()
+	for _, want := range []string{
+		"Workspace Leases",
+		"Operator Surface: odin workspace ...",
+		"lease=1 state=active mode=mutable",
+		"project=odin-core",
+		"project_id=" + strconv.FormatInt(project.ID, 10),
+		"work_item=" + task.Key,
+		"run_attempt=" + strconv.FormatInt(run.ID, 10),
+		"branch=odin/odin-core/task-1/run-1/try-1",
+		"worktree=/tmp/odin/worktrees/odin-core/task-1/run-1/try-1",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("Run(workspace list) output = %q, want %q", output, want)
 		}
 	}
 }
@@ -585,4 +651,68 @@ service:
 		t.Fatalf("write odin config: %v", err)
 	}
 	return root
+}
+
+func openLifecycleStore(t *testing.T, root string) *sqlite.Store {
+	t.Helper()
+
+	store, err := sqlite.Open(filepath.Join(root, "data", "odin.db"))
+	if err != nil {
+		t.Fatalf("Open(lifecycle store) error = %v", err)
+	}
+	if err := store.Migrate(context.Background()); err != nil {
+		_ = store.Close()
+		t.Fatalf("Migrate(lifecycle store) error = %v", err)
+	}
+	return store
+}
+
+func seedLifecycleWorktreeLease(t *testing.T, ctx context.Context, store *sqlite.Store) (sqlite.Project, sqlite.Task, sqlite.Run) {
+	t.Helper()
+
+	project, err := store.CreateProject(ctx, sqlite.CreateProjectParams{
+		Key:           "odin-core",
+		Name:          "Odin Core",
+		Scope:         "odin-core",
+		GitRoot:       "/home/orchestrator/odin-os",
+		DefaultBranch: "main",
+		GitHubRepo:    "marcusgoll/odin-os",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+	task, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "inspect-workspace-leases",
+		Title:       "Inspect workspace leases",
+		Status:      "running",
+		Scope:       "odin-core",
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+	run, err := store.StartRun(ctx, sqlite.StartRunParams{
+		TaskID:   task.ID,
+		Executor: "codex",
+		Attempt:  1,
+		Status:   "running",
+	})
+	if err != nil {
+		t.Fatalf("StartRun() error = %v", err)
+	}
+	if _, err := store.CreateWorktreeLease(ctx, sqlite.CreateWorktreeLeaseParams{
+		ProjectID:    project.ID,
+		TaskID:       task.ID,
+		RunID:        run.ID,
+		Mode:         "mutable",
+		BranchName:   "odin/odin-core/task-1/run-1/try-1",
+		WorktreePath: "/tmp/odin/worktrees/odin-core/task-1/run-1/try-1",
+		RepoRoot:     project.GitRoot,
+		State:        "active",
+	}); err != nil {
+		t.Fatalf("CreateWorktreeLease() error = %v", err)
+	}
+	return project, task, run
 }

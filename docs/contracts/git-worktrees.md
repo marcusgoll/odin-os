@@ -42,3 +42,7 @@ Read-only tasks do not allocate:
 - mutable branch
 - mutable worktree
 - mutable lease
+
+## Operator Projection
+
+`odin workspace list` is a read-only projection over active worktree leases. It must not allocate a branch, create or remove a worktree, mutate lease state, adopt a live process, attach to tmux/SSH/Codex, or imply that Live Execution Session lifecycle controls are implemented.

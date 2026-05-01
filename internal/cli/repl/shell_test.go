@@ -222,6 +222,40 @@ func TestDoctorCommandSupportsJSONOutput(t *testing.T) {
 	}
 }
 
+func TestOverviewCommandRendersWorkControlLanes(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	env := newTestEnvironment(t)
+	_, _, approval, run := seedShellAction(t, ctx, env, "payload-overview")
+	shell, err := New(env)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	var output bytes.Buffer
+	if err := shell.HandleLine(ctx, "/overview", &output); err != nil {
+		t.Fatalf("HandleLine(/overview) error = %v", err)
+	}
+
+	for _, want := range []string{
+		"Overview",
+		"Operator Surface: odin work ...",
+		"Work Items",
+		"inspect-flica-action running",
+		"Run Attempts",
+		"inspect-flica-action codex running",
+		"Approvals",
+		"inspect-flica-action pending",
+		"Active run: " + strconv.FormatInt(run.ID, 10),
+		"Pending approval: " + strconv.FormatInt(approval.ID, 10),
+	} {
+		if !strings.Contains(output.String(), want) {
+			t.Fatalf("overview output = %q, want %q", output.String(), want)
+		}
+	}
+}
+
 func TestShellHelpIncludesTransitionCommands(t *testing.T) {
 	t.Parallel()
 
