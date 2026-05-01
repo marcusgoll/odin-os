@@ -252,6 +252,42 @@ func TestLoadDirLoadsUniversalIntakeAgents(t *testing.T) {
 		}
 	}
 
+	priority := snapshot.ByKey["priority-agent"]
+	priorityContract := strings.Join([]string{
+		priority.Title,
+		priority.Summary,
+		priority.Sections[registry.SectionPurpose],
+		priority.Sections[registry.SectionWhenToUse],
+		priority.Sections[registry.SectionInputs],
+		priority.Sections[registry.SectionProcedure],
+		priority.Sections[registry.SectionOutputs],
+		priority.Sections[registry.SectionConstraints],
+		priority.Sections[registry.SectionSuccessCriteria],
+	}, "\n")
+	requiredPriorityContract := []string{
+		"Priority Scorer",
+		"{{raw_input}}",
+		"impact: 0 to 5",
+		"urgency: 0 to 5",
+		"effort: 0 to 5",
+		"strategic alignment: 0 to 5",
+		"risk if ignored: 0 to 5",
+		"energy required: 0 to 5",
+		"dependency value: 0 to 5",
+		"total priority score",
+		"recommended priority: low, medium, high, critical",
+		"recommended timing: today, this week, this month, later, delete",
+		"reasoning",
+		"warning if the item is emotionally loud but strategically weak",
+		"Do not rank everything as high priority",
+		"panic with bullet points",
+	}
+	for _, required := range requiredPriorityContract {
+		if !strings.Contains(priorityContract, required) {
+			t.Fatalf("priority agent body missing %q", required)
+		}
+	}
+
 	voiceNoteCleaner := snapshot.ByKey["voice-note-cleaner-agent"]
 	voiceNoteCleanerContract := strings.Join([]string{
 		voiceNoteCleaner.Title,
