@@ -106,6 +106,7 @@ func TestLoadDirLoadsUniversalIntakeAgents(t *testing.T) {
 		"classifier-agent",
 		"deduper-agent",
 		"priority-agent",
+		"urgency-importance-judge-agent",
 		"router-agent",
 		"spec-task-builder-agent",
 		"review-agent",
@@ -316,6 +317,38 @@ func TestLoadDirLoadsUniversalIntakeAgents(t *testing.T) {
 	for _, required := range requiredPriorityContract {
 		if !strings.Contains(priorityContract, required) {
 			t.Fatalf("priority agent body missing %q", required)
+		}
+	}
+
+	urgencyImportanceJudge := snapshot.ByKey["urgency-importance-judge-agent"]
+	urgencyImportanceJudgeContract := strings.Join([]string{
+		urgencyImportanceJudge.Title,
+		urgencyImportanceJudge.Summary,
+		urgencyImportanceJudge.Sections[registry.SectionPurpose],
+		urgencyImportanceJudge.Sections[registry.SectionWhenToUse],
+		urgencyImportanceJudge.Sections[registry.SectionInputs],
+		urgencyImportanceJudge.Sections[registry.SectionProcedure],
+		urgencyImportanceJudge.Sections[registry.SectionOutputs],
+		urgencyImportanceJudge.Sections[registry.SectionConstraints],
+		urgencyImportanceJudge.Sections[registry.SectionSuccessCriteria],
+	}, "\n")
+	requiredUrgencyImportanceJudgeContract := []string{
+		"Urgency vs Importance Judge",
+		"{{raw_input}}",
+		"urgent and important",
+		"important but not urgent",
+		"urgent but not important",
+		"neither urgent nor important",
+		"classification",
+		"reason",
+		"consequence of delaying",
+		"consequence of doing now",
+		"recommended next step",
+		"whether to schedule, delegate, defer, delete, or do immediately",
+	}
+	for _, required := range requiredUrgencyImportanceJudgeContract {
+		if !strings.Contains(urgencyImportanceJudgeContract, required) {
+			t.Fatalf("urgency importance judge agent body missing %q", required)
 		}
 	}
 
