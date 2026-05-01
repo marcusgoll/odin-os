@@ -112,6 +112,7 @@ func TestLoadDirLoadsUniversalIntakeAgents(t *testing.T) {
 		"chief-of-staff-agent",
 		"system-memory-curator-agent",
 		"voice-note-cleaner-agent",
+		"email-to-task-extractor-agent",
 	}
 	for _, key := range wantAgents {
 		item, ok := snapshot.ByKey[key]
@@ -237,6 +238,46 @@ func TestLoadDirLoadsUniversalIntakeAgents(t *testing.T) {
 	for _, required := range requiredVoiceNoteCleanerContract {
 		if !strings.Contains(voiceNoteCleanerContract, required) {
 			t.Fatalf("voice note cleaner agent body missing %q", required)
+		}
+	}
+
+	emailToTaskExtractor := snapshot.ByKey["email-to-task-extractor-agent"]
+	emailToTaskExtractorContract := strings.Join([]string{
+		emailToTaskExtractor.Title,
+		emailToTaskExtractor.Summary,
+		emailToTaskExtractor.Sections[registry.SectionPurpose],
+		emailToTaskExtractor.Sections[registry.SectionWhenToUse],
+		emailToTaskExtractor.Sections[registry.SectionInputs],
+		emailToTaskExtractor.Sections[registry.SectionProcedure],
+		emailToTaskExtractor.Sections[registry.SectionOutputs],
+		emailToTaskExtractor.Sections[registry.SectionConstraints],
+		emailToTaskExtractor.Sections[registry.SectionSuccessCriteria],
+	}, "\n")
+	requiredEmailToTaskExtractorContract := []string{
+		"Email-to-Task Extractor",
+		"{{raw_input}}",
+		"email or email thread",
+		"who sent it",
+		"what they want",
+		"what I owe them",
+		"what they owe me",
+		"deadlines",
+		"meetings or scheduling needs",
+		"attachments or links to review",
+		"reply required: yes/no",
+		"proposed reply summary",
+		"tasks to create",
+		"do now",
+		"schedule",
+		"delegate",
+		"waiting-for",
+		"archive",
+		"unclear",
+		"Do not draft or send a reply unless explicitly requested",
+	}
+	for _, required := range requiredEmailToTaskExtractorContract {
+		if !strings.Contains(emailToTaskExtractorContract, required) {
+			t.Fatalf("email-to-task extractor agent body missing %q", required)
 		}
 	}
 
