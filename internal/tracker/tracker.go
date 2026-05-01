@@ -37,6 +37,13 @@ type Issue struct {
 	Labels   []string
 }
 
+// IssueComment is the normalized comment shape used for idempotency checks and
+// live mutation reports.
+type IssueComment struct {
+	Body string
+	URL  string
+}
+
 // IssueID identifies one issue in an external tracker.
 type IssueID struct {
 	Provider string

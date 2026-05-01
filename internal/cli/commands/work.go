@@ -17,10 +17,13 @@ import (
 	"odin-os/internal/runtime/projections"
 	"odin-os/internal/store/sqlite"
 	"odin-os/internal/tracker"
+	trackergithub "odin-os/internal/tracker/github"
 	trackerintake "odin-os/internal/tracker/intake"
 )
 
-const workUsage = "usage: odin work status|profiles|start --project <key> --title <text>|intake --project <key> [--dry-run]|simulate-lifecycle --issue <number> [--project <key>] [--dry-run] [--json]"
+const stage3LifecycleCommentMarker = "<!-- odin-stage3-lifecycle-proof -->"
+
+const workUsage = "usage: odin work status|profiles|start --project <key> --title <text>|intake --project <key> [--dry-run]|simulate-lifecycle --issue <number> [--project <key>] [--dry-run] [--json]|apply-lifecycle --issue <number> --approved-target <repo>#<issue> [--project <key>] [--json]"
 
 var newIntakeTracker = trackerintake.NewGitHubTracker
 
@@ -41,6 +44,8 @@ func RunWork(ctx context.Context, store *sqlite.Store, projectRegistry projects.
 		return runWorkIntake(ctx, store, projectRegistry, args[1:], stdout)
 	case "simulate-lifecycle":
 		return runWorkSimulateLifecycle(projectRegistry, args[1:], stdout)
+	case "apply-lifecycle":
+		return runWorkApplyLifecycle(ctx, projectRegistry, args[1:], stdout)
 	default:
 		_, err := fmt.Fprintf(stdout, "unknown work command: %s\n%s\n", args[0], workUsage)
 		return err
@@ -274,6 +279,108 @@ func runWorkSimulateLifecycle(projectRegistry projects.Registry, args []string, 
 	return nil
 }
 
+func runWorkApplyLifecycle(ctx context.Context, projectRegistry projects.Registry, args []string, stdout io.Writer) error {
+	params := parseWorkStartArgs(args)
+	issueText := strings.TrimSpace(params["issue"])
+	approvedTarget := strings.TrimSpace(params["approved-target"])
+	if issueText == "" || approvedTarget == "" {
+		_, err := fmt.Fprintln(stdout, "usage: odin work apply-lifecycle --issue <number> --approved-target <repo>#<issue> [--project <key>] [--json]")
+		return err
+	}
+	issueNumber, err := strconv.Atoi(issueText)
+	if err != nil || issueNumber <= 0 {
+		return fmt.Errorf("invalid issue number %q", issueText)
+	}
+	if parseBoolFlag(params, "dry-run") || parseEnvBool(os.Getenv("ODIN_DRY_RUN")) {
+		return fmt.Errorf("apply-lifecycle is live-only; use simulate-lifecycle for dry-run proof")
+	}
+
+	project, err := resolveLifecycleProject(projectRegistry, strings.TrimSpace(params["project"]))
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(project.GitHub.Repo) == "" {
+		return fmt.Errorf("project %q has no GitHub repo for lifecycle application", project.Key)
+	}
+	approvedRepo, approvedIssue, err := parseApprovedTarget(approvedTarget)
+	if err != nil {
+		return err
+	}
+	if approvedRepo != project.GitHub.Repo || approvedIssue != issueNumber {
+		return fmt.Errorf("approved target %q does not match resolved target %s#%d", approvedTarget, project.GitHub.Repo, issueNumber)
+	}
+	owner, repoName, ok := strings.Cut(project.GitHub.Repo, "/")
+	if !ok || owner == "" || repoName == "" {
+		return fmt.Errorf("invalid GitHub repo %q", project.GitHub.Repo)
+	}
+
+	client := trackergithub.NewClientWithConfig(trackergithub.Config{
+		BaseURL:  os.Getenv("ODIN_GITHUB_API_BASE_URL"),
+		Owner:    owner,
+		Repo:     repoName,
+		TokenEnv: "GITHUB_TOKEN",
+	})
+	issueID := tracker.IssueID{Provider: "github", Repo: project.GitHub.Repo, Number: issueNumber}
+	issue, err := client.FetchIssueByID(ctx, issueID)
+	if err != nil {
+		return err
+	}
+	comments, err := client.FetchIssueComments(ctx, issueID)
+	if err != nil {
+		return err
+	}
+
+	report := buildWorkApplyLifecycleReport(project, issueNumber, approvedTarget, issue.Labels, comments)
+	projectedLabels := newLabelSet(issue.Labels)
+	for _, action := range report.AppliedActions {
+		switch action.Action {
+		case "add_label":
+			if action.Label == tracker.LabelRunning {
+				if err := client.MarkInProgress(ctx, issueID); err != nil {
+					return err
+				}
+			} else if action.Label == tracker.LabelHumanReview {
+				if err := client.MarkReadyForReview(ctx, issueID); err != nil {
+					return err
+				}
+			} else {
+				return fmt.Errorf("unsupported Stage 3 label %q", action.Label)
+			}
+			projectedLabels[action.Label] = true
+		case "remove_label":
+			if err := client.RemoveLabel(ctx, issueID, action.Label); err != nil {
+				return err
+			}
+			delete(projectedLabels, action.Label)
+		case "add_comment":
+			comment, err := client.AddCommentWithResult(ctx, issueID, action.Body)
+			if err != nil {
+				return err
+			}
+			report.Comment.Created = true
+			report.Comment.URL = comment.URL
+		default:
+			return fmt.Errorf("unsupported Stage 3 action %q", action.Action)
+		}
+	}
+	report.After.Labels = sortedLabelSet(projectedLabels)
+	audit := client.RequestAudit()
+	report.MethodAudit = workLifecycleAuditReport{Reads: audit.Reads, Writes: audit.Writes}
+	report.GitHubWrites = audit.Writes
+
+	if parseBoolFlag(params, "json") {
+		encoder := json.NewEncoder(stdout)
+		encoder.SetIndent("", "  ")
+		return encoder.Encode(report)
+	}
+	for _, action := range report.AppliedActions {
+		if _, err := fmt.Fprintf(stdout, "applied %s %s on %s#%d\n", action.Action, action.Label, project.GitHub.Repo, issueNumber); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func resolveLifecycleProject(projectRegistry projects.Registry, projectKey string) (projects.Manifest, error) {
 	if projectKey != "" {
 		project, ok := projectRegistry.Lookup(projectKey)
@@ -287,6 +394,62 @@ func resolveLifecycleProject(projectRegistry projects.Registry, projectKey strin
 		return projects.Manifest{}, fmt.Errorf("no system project registered for lifecycle simulation")
 	}
 	return project, nil
+}
+
+func buildWorkApplyLifecycleReport(project projects.Manifest, issueNumber int, approvedTarget string, labels []string, comments []tracker.IssueComment) workApplyLifecycleReport {
+	labelSet := newLabelSet(labels)
+	commentExists := false
+	commentURL := ""
+	for _, comment := range comments {
+		if strings.Contains(comment.Body, stage3LifecycleCommentMarker) {
+			commentExists = true
+			commentURL = comment.URL
+			break
+		}
+	}
+
+	actions := []workLifecyclePlannedAction{}
+	if !labelSet[tracker.LabelHumanReview] {
+		if !labelSet[tracker.LabelRunning] {
+			actions = append(actions, workLifecyclePlannedAction{Sequence: len(actions) + 1, Action: "add_label", Label: tracker.LabelRunning})
+			labelSet[tracker.LabelRunning] = true
+		}
+		if labelSet[tracker.LabelRunning] {
+			actions = append(actions, workLifecyclePlannedAction{Sequence: len(actions) + 1, Action: "remove_label", Label: tracker.LabelRunning})
+			delete(labelSet, tracker.LabelRunning)
+		}
+		actions = append(actions, workLifecyclePlannedAction{Sequence: len(actions) + 1, Action: "add_label", Label: tracker.LabelHumanReview})
+		labelSet[tracker.LabelHumanReview] = true
+	}
+	if !commentExists {
+		actions = append(actions, workLifecyclePlannedAction{
+			Sequence: len(actions) + 1,
+			Action:   "add_comment",
+			Body:     stage3LifecycleCommentMarker + "\nStage 3 controlled lifecycle proof.",
+		})
+	}
+
+	return workApplyLifecycleReport{
+		Project: project.Key,
+		Repo:    project.GitHub.Repo,
+		Issue:   issueNumber,
+		DryRun:  false,
+		Approval: workLifecycleApprovalReport{
+			ApprovedTarget: approvedTarget,
+			OperatorSource: "command_flag",
+		},
+		Before:         workLifecycleLabelsReport{Labels: sortedStrings(labels)},
+		After:          workLifecycleLabelsReport{Labels: sortedLabelSet(labelSet)},
+		AppliedActions: actions,
+		Comment: workLifecycleCommentReport{
+			Created: false,
+			URL:     commentURL,
+			Marker:  stage3LifecycleCommentMarker,
+		},
+		Dispatch:       "not_started",
+		PRs:            "not_created",
+		CodexExecution: "not_started",
+	}
 }
 
 func buildLifecycleSimulationReport(project projects.Manifest, issueNumber int, dryRun bool) workLifecycleSimulationReport {
@@ -379,6 +542,38 @@ type workLifecycleSimulationReport struct {
 	CodexExecution string                       `json:"codex_execution"`
 }
 
+type workApplyLifecycleReport struct {
+	Project        string                       `json:"project"`
+	Repo           string                       `json:"repo"`
+	Issue          int                          `json:"issue"`
+	DryRun         bool                         `json:"dry_run"`
+	GitHubWrites   int                          `json:"github_writes"`
+	Approval       workLifecycleApprovalReport  `json:"approval"`
+	Before         workLifecycleLabelsReport    `json:"before"`
+	After          workLifecycleLabelsReport    `json:"after"`
+	AppliedActions []workLifecyclePlannedAction `json:"applied_actions"`
+	Comment        workLifecycleCommentReport   `json:"comment"`
+	MethodAudit    workLifecycleAuditReport     `json:"method_audit"`
+	Dispatch       string                       `json:"dispatch"`
+	PRs            string                       `json:"prs"`
+	CodexExecution string                       `json:"codex_execution"`
+}
+
+type workLifecycleApprovalReport struct {
+	ApprovedTarget string `json:"approved_target"`
+	OperatorSource string `json:"operator_source"`
+}
+
+type workLifecycleLabelsReport struct {
+	Labels []string `json:"labels"`
+}
+
+type workLifecycleCommentReport struct {
+	Created bool   `json:"created"`
+	URL     string `json:"url,omitempty"`
+	Marker  string `json:"marker"`
+}
+
 type workLifecyclePlannedAction struct {
 	Sequence int    `json:"sequence"`
 	Action   string `json:"action"`
@@ -422,6 +617,42 @@ func combineRequestAudits(audits ...tracker.RequestAudit) tracker.RequestAudit {
 		combined.Forbidden = append(combined.Forbidden, audit.Forbidden...)
 	}
 	return combined
+}
+
+func parseApprovedTarget(value string) (string, int, error) {
+	repo, issueText, ok := strings.Cut(strings.TrimSpace(value), "#")
+	if !ok || strings.TrimSpace(repo) == "" || strings.TrimSpace(issueText) == "" {
+		return "", 0, fmt.Errorf("approved target must be <repo>#<issue>")
+	}
+	issue, err := strconv.Atoi(strings.TrimSpace(issueText))
+	if err != nil || issue <= 0 {
+		return "", 0, fmt.Errorf("invalid approved target issue %q", issueText)
+	}
+	return strings.TrimSpace(repo), issue, nil
+}
+
+func newLabelSet(labels []string) map[string]bool {
+	labelSet := make(map[string]bool, len(labels))
+	for _, label := range labels {
+		if strings.TrimSpace(label) != "" {
+			labelSet[label] = true
+		}
+	}
+	return labelSet
+}
+
+func sortedLabelSet(labelSet map[string]bool) []string {
+	labels := make([]string, 0, len(labelSet))
+	for label := range labelSet {
+		labels = append(labels, label)
+	}
+	return sortedStrings(labels)
+}
+
+func sortedStrings(values []string) []string {
+	sorted := append([]string(nil), values...)
+	sort.Strings(sorted)
+	return sorted
 }
 
 func parseWorkStartArgs(args []string) map[string]string {

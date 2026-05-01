@@ -128,6 +128,33 @@ func (client *Client) FetchIssueByID(ctx context.Context, id tracker.IssueID) (t
 	return client.toTrackerIssue(decoded, labelNames(decoded.Labels)), nil
 }
 
+func (client *Client) FetchIssueComments(ctx context.Context, id tracker.IssueID) ([]tracker.IssueComment, error) {
+	if !client.configured() {
+		return nil, tracker.ErrNotImplemented
+	}
+	owner, repo, err := client.resolveRepo(id.Repo)
+	if err != nil {
+		return nil, err
+	}
+	path := fmt.Sprintf("/repos/%s/%s/issues/%d/comments", url.PathEscape(owner), url.PathEscape(repo), id.Number)
+	rawComments, err := client.doJSON(ctx, http.MethodGet, path, nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	var decoded []githubComment
+	if err := json.Unmarshal(rawComments, &decoded); err != nil {
+		return nil, fmt.Errorf("decode GitHub issue comments: %w", err)
+	}
+	comments := make([]tracker.IssueComment, 0, len(decoded))
+	for _, comment := range decoded {
+		comments = append(comments, tracker.IssueComment{
+			Body: comment.Body,
+			URL:  comment.HTMLURL,
+		})
+	}
+	return comments, nil
+}
+
 func (client *Client) MarkInProgress(ctx context.Context, id tracker.IssueID) error {
 	return client.addLabels(ctx, id, []string{tracker.LabelRunning})
 }
@@ -156,6 +183,22 @@ func (client *Client) MarkReadyForReview(ctx context.Context, id tracker.IssueID
 	return client.addLabels(ctx, id, []string{tracker.LabelHumanReview})
 }
 
+func (client *Client) RemoveLabel(ctx context.Context, id tracker.IssueID, label string) error {
+	if client.config.DryRun {
+		return nil
+	}
+	if !client.configured() {
+		return tracker.ErrNotImplemented
+	}
+	owner, repo, err := client.resolveRepo(id.Repo)
+	if err != nil {
+		return err
+	}
+	path := fmt.Sprintf("/repos/%s/%s/issues/%d/labels/%s", url.PathEscape(owner), url.PathEscape(repo), id.Number, url.PathEscape(label))
+	_, err = client.doJSON(ctx, http.MethodDelete, path, nil, nil)
+	return err
+}
+
 func (client *Client) MarkDone(ctx context.Context, id tracker.IssueID) error {
 	if client.config.DryRun {
 		return nil
@@ -173,16 +216,28 @@ func (client *Client) MarkDone(ctx context.Context, id tracker.IssueID) error {
 }
 
 func (client *Client) AddComment(ctx context.Context, id tracker.IssueID, body string) error {
+	_, err := client.AddCommentWithResult(ctx, id, body)
+	return err
+}
+
+func (client *Client) AddCommentWithResult(ctx context.Context, id tracker.IssueID, body string) (tracker.IssueComment, error) {
 	if client.config.DryRun {
-		return nil
+		return tracker.IssueComment{Body: body}, nil
 	}
 	owner, repo, err := client.resolveRepo(id.Repo)
 	if err != nil {
-		return err
+		return tracker.IssueComment{}, err
 	}
 	path := fmt.Sprintf("/repos/%s/%s/issues/%d/comments", url.PathEscape(owner), url.PathEscape(repo), id.Number)
-	_, err = client.doJSON(ctx, http.MethodPost, path, nil, map[string]string{"body": body})
-	return err
+	rawComment, err := client.doJSON(ctx, http.MethodPost, path, nil, map[string]string{"body": body})
+	if err != nil {
+		return tracker.IssueComment{}, err
+	}
+	var decoded githubComment
+	if err := json.Unmarshal(rawComment, &decoded); err != nil {
+		return tracker.IssueComment{}, fmt.Errorf("decode GitHub issue comment: %w", err)
+	}
+	return tracker.IssueComment{Body: decoded.Body, URL: decoded.HTMLURL}, nil
 }
 
 func (client *Client) CreateFollowUpIssue(ctx context.Context, issue tracker.FollowUpIssue) (tracker.Issue, error) {
@@ -425,4 +480,9 @@ type githubIssue struct {
 
 type githubLabel struct {
 	Name string `json:"name"`
+}
+
+type githubComment struct {
+	Body    string `json:"body"`
+	HTMLURL string `json:"html_url"`
 }
