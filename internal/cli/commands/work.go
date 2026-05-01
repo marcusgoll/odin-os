@@ -901,8 +901,14 @@ func completeSupervisedE2EReviewHandoff(ctx context.Context, manifest projects.M
 		if err := verifyPRTemplate(ctx, worktreeAbs, bodyPath); err != nil {
 			return report, supervisedE2EReviewHandoffFail(report, err)
 		}
+		if err := validateSupervisedE2EPRBody(pr.Body, manifest.Key, issue.Number, report.Diff.Files); err != nil {
+			return report, supervisedE2EReviewHandoffFail(report, err)
+		}
 	} else {
 		bodyContent := renderSupervisedE2EPRBody(manifest.Key, issue.Number, report.Diff.Files)
+		if err := validateSupervisedE2EPRBody(bodyContent, manifest.Key, issue.Number, report.Diff.Files); err != nil {
+			return report, supervisedE2EReviewHandoffFail(report, err)
+		}
 		if _, err := writeArtifact(bodyPath, bodyContent); err != nil {
 			return report, supervisedE2EReviewHandoffFail(report, err)
 		}
@@ -2612,6 +2618,27 @@ func renderSupervisedE2EPRBody(projectKey string, issueNumber int, files []strin
 		"```",
 		"",
 	}, "\n")
+}
+
+func validateSupervisedE2EPRBody(body string, projectKey string, issueNumber int, files []string) error {
+	required := []string{
+		"Stage 7 supervised E2E",
+		"odin work supervise e2e run-once",
+		"--project " + projectKey,
+		"--issue " + strconv.Itoa(issueNumber),
+	}
+	for _, file := range files {
+		required = append(required, file)
+	}
+	for _, value := range required {
+		if !strings.Contains(body, value) {
+			return fmt.Errorf("supervised e2e PR body missing Stage 7 run-once provenance: %s", value)
+		}
+	}
+	if strings.Contains(body, "odin work pr-create") || strings.Contains(body, "odin-stage6") {
+		return fmt.Errorf("supervised e2e PR body contains stale Stage 6 provenance")
+	}
+	return nil
 }
 
 func ensureStage6EvidenceComments(ctx context.Context, client *trackergithub.Client, repo string, prNumber int, issueNumber int, diffSHA string, existing []tracker.IssueComment) ([]workPRCreateEvidenceCommentReport, error) {

@@ -1573,6 +1573,88 @@ func TestRunWorkSuperviseE2ERunOnceReusedPRRequiresValidTemplate(t *testing.T) {
 	}
 }
 
+func TestRunWorkSuperviseE2ERunOnceReusedPRRequiresStage7Provenance(t *testing.T) {
+	ctx := context.Background()
+	store := openWorkCommandStore(t)
+	defer store.Close()
+	odinRoot := t.TempDir()
+	repoRoot := initWorkerDryRunGitRepo(t)
+	initStage6Remote(t, repoRoot)
+	t.Setenv("ODIN_ROOT", odinRoot)
+	t.Setenv("ODIN_WORKTREE_ROOT", filepath.Join(t.TempDir(), "worktrees"))
+	t.Setenv("GITHUB_TOKEN", "github_pat_1234567890abcdefghijklmnopqrstuvwxyz")
+
+	plannedPath := "docs/operations/stage-7-reused-pr-provenance.md"
+	installSuperviseE2EFakeTracker(t, &superviseE2EFakeTracker{issue: tracker.Issue{
+		Provider: "github",
+		Repo:     "acme/alpha",
+		Number:   64,
+		Title:    "Worker reused PR provenance",
+		Body:     "Planned scope: " + plannedPath,
+		URL:      "https://github.example/acme/alpha/issues/64",
+		State:    "open",
+		Labels:   []string{"odin:ready", "safety:low-risk"},
+	}})
+	installSuperviseE2EFakeWorker(t, func(_ context.Context, request supervisedE2EWorkerRequest) (supervisedE2EWorkerResult, error) {
+		path := filepath.Join(request.WorktreePath, filepath.FromSlash(plannedPath))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("MkdirAll(planned dir) error = %v", err)
+		}
+		if err := os.WriteFile(path, []byte("# Stage 7 reused PR provenance\n\nRun make odin-e2e-local before handoff.\n"), 0o644); err != nil {
+			t.Fatalf("WriteFile(planned path) error = %v", err)
+		}
+		return supervisedE2EWorkerResult{Output: "worker complete: make odin-e2e-local"}, nil
+	})
+
+	var requests []string
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		body, err := io.ReadAll(request.Body)
+		if err != nil {
+			t.Fatalf("ReadAll() error = %v", err)
+		}
+		requests = append(requests, request.Method+" "+request.URL.Path+"?"+request.URL.RawQuery+" "+string(body))
+		switch {
+		case request.Method == http.MethodGet && request.URL.Path == "/repos/acme/alpha/pulls":
+			_ = json.NewEncoder(response).Encode([]map[string]any{{
+				"number":   94,
+				"html_url": "https://github.example/acme/alpha/pull/94",
+				"state":    "open",
+				"draft":    true,
+				"title":    "Stage 7 supervised E2E handoff",
+				"body":     renderPRCreateBody(64, []string{plannedPath}),
+				"head":     map[string]string{"ref": "stage7"},
+				"base":     map[string]string{"ref": "main"},
+			}})
+		default:
+			t.Fatalf("unexpected request: %s %s?%s body=%s", request.Method, request.URL.Path, request.URL.RawQuery, string(body))
+		}
+	}))
+	defer server.Close()
+	t.Setenv("ODIN_GITHUB_API_BASE_URL", server.URL)
+
+	_ = runWorkSuperviseJSON(t, ctx, store, []string{"supervise", "start", "--json"})
+	var output strings.Builder
+	err := RunWork(ctx, store, superviseE2EProjectRegistry(t, repoRoot), registry.Snapshot{}, []string{
+		"supervise", "e2e", "run-once", "--project", "alpha", "--issue", "64", "--ci-timeout", "1s", "--json",
+	}, &output)
+	if err == nil {
+		t.Fatalf("RunWork(supervise e2e run-once reused stale PR body) error = nil, want provenance failure\noutput:\n%s", output.String())
+	}
+	if !strings.Contains(err.Error(), "missing Stage 7 run-once provenance") && !strings.Contains(err.Error(), "stale Stage 6 provenance") {
+		t.Fatalf("error = %q, want Stage 7 provenance validation failure", err.Error())
+	}
+	runID := newestSuperviseE2ERunID(t, odinRoot)
+	finalReportPath := filepath.Join(odinRoot, "runs", "supervised-e2e", runID, "final-report.json")
+	assertFileContains(t, finalReportPath, `"status": "failed_closed"`)
+	assertFileContains(t, finalReportPath, `"prs": "draft_reused"`)
+	assertFileContains(t, finalReportPath, `"number": 94`)
+	for _, request := range requests {
+		if !strings.HasPrefix(request, "GET /repos/acme/alpha/pulls") {
+			t.Fatalf("request = %q, want no comments or CI after stale reused PR body", request)
+		}
+	}
+}
+
 func TestRunWorkSuperviseE2ERunOnceCITimeoutCancelsSlowGitHubRequest(t *testing.T) {
 	ctx := context.Background()
 	store := openWorkCommandStore(t)
