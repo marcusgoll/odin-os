@@ -383,16 +383,64 @@ Stage 4 is complete only when local worker dry-run proves prompt rendering, safe
 Goal:
 
 - Let a worker produce branch changes.
-- Let Odin plan PR creation.
+- Let Odin plan a Human Review Handoff draft.
 - Do not push.
 - Do not create or update a live PR.
+
+Command:
+
+```bash
+ODIN_DRY_RUN=true \
+./bin/odin work pr-dry-run --worktree <path> --base <branch> --json
+```
+
+Implementation note:
+
+Stage 5 plans a read-only Human Review Handoff draft from local branch changes; it is not live PR creation. The command must generate a diff summary, PR body draft, human checklist, zero-push proof, zero-merge proof, and zero GitHub PR API write proof without pushing, creating or updating a live pull request, merging, or persisting durable PR handoff state.
+
+The PR body draft must follow the repo PR body contract and include these headings exactly:
+
+```markdown
+## Summary
+## Proven
+## Unproven
+## Commands Run
+```
+
+Stage 5 must validate the generated PR body with `scripts/ci/verify-pr-template.sh` before reporting success.
+
+The human checklist must include at least:
+
+```markdown
+- [ ] Review diff summary
+- [ ] Confirm tests listed under Commands Run are sufficient
+- [ ] Confirm Unproven items are acceptable
+- [ ] Confirm no push occurred during dry-run
+- [ ] Confirm no live PR was created or updated
+- [ ] Confirm no merge occurred
+```
+
+Stage 5 may persist local disposable draft artifacts under the Odin runtime artifact area, for example:
+
+```text
+<ODIN_ROOT>/runs/pr-dry-run/<id>/pr-body.md
+<ODIN_ROOT>/runs/pr-dry-run/<id>/handoff-checklist.md
+<ODIN_ROOT>/runs/pr-dry-run/<id>/diff-summary.md
+```
+
+The JSON report must include artifact paths and SHA-256 hashes. Each artifact must be labeled "draft artifact, not durable PR handoff state" and must not be treated as a live pull request.
+
+Stage 5 consumes an existing local worktree and branch with changes against the requested base branch. The command must inspect that worktree, generate the diff summary and PR draft from its current diff, and fail clearly when there is no diff. Fixture-backed tests may create temporary changed worktrees, but `pr-dry-run` must not synthesize branch changes itself.
 
 Exit criteria:
 
 - Diff summary is generated.
 - PR body is generated.
 - Human checklist is included.
+- PR body passes `scripts/ci/verify-pr-template.sh`.
+- Local draft artifact paths and hashes are reported.
 - No push happens in dry-run.
+- No merge happens in dry-run.
 - No live GitHub PR is created or updated.
 - Scheduler dispatch remains disabled.
 
@@ -401,7 +449,9 @@ Required artifacts:
 - Diff summary.
 - PR body draft.
 - Human review checklist.
+- Local draft artifact paths and hashes.
 - Git push zero-call proof.
+- Merge zero-call proof.
 - PR API zero-write proof.
 
 Promotion rule:
