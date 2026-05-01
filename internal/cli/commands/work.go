@@ -692,11 +692,12 @@ func runWorkPRCreate(ctx context.Context, projectRegistry projects.Registry, arg
 	if branchName == baseBranch {
 		return fmt.Errorf("refusing to create Stage 6 PR from base branch %q", baseBranch)
 	}
-	stat, err := gitOutput(ctx, worktreeAbs, "diff", "--stat", baseBranch)
+	diffBase := resolvePRCreateDiffBase(ctx, worktreeAbs, baseBranch)
+	stat, err := gitOutput(ctx, worktreeAbs, "diff", "--stat", diffBase)
 	if err != nil {
 		return err
 	}
-	nameStatus, err := gitOutput(ctx, worktreeAbs, "diff", "--name-status", baseBranch)
+	nameStatus, err := gitOutput(ctx, worktreeAbs, "diff", "--name-status", diffBase)
 	if err != nil {
 		return err
 	}
@@ -811,7 +812,7 @@ func runWorkPRCreate(ctx context.Context, projectRegistry projects.Registry, arg
 			DocsOnly: true,
 			SHA256:   diffSHA,
 			Files:    files,
-			Summary:  renderPRDryRunDiffSummary(baseBranch, branchName, stat, nameStatus),
+			Summary:  renderPRDryRunDiffSummary(diffBase, branchName, stat, nameStatus),
 		},
 		Branch: workPRCreateBranchReport{
 			Name:   branchName,
@@ -1116,6 +1117,17 @@ func ensureWorkArtifactDir(worktreeAbs string, kind string) (string, error) {
 		return "", err
 	}
 	return artifactDir, nil
+}
+
+func resolvePRCreateDiffBase(ctx context.Context, worktreeAbs string, baseBranch string) string {
+	remoteBase := "origin/" + strings.TrimSpace(baseBranch)
+	if strings.TrimSpace(baseBranch) == "" {
+		return baseBranch
+	}
+	if _, err := gitOutput(ctx, worktreeAbs, "rev-parse", "--verify", remoteBase); err == nil {
+		return remoteBase
+	}
+	return baseBranch
 }
 
 func allDocsOnly(files []string) bool {
