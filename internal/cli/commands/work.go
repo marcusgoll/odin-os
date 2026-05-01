@@ -707,9 +707,10 @@ func runSupervisedE2EWorkerAndAudit(ctx context.Context, manifest projects.Manif
 	git := vcsgit.Adapter{}
 	baseBranch := strings.TrimSpace(manifest.DefaultBranch)
 	if baseBranch == "" {
-		baseBranch = "HEAD"
+		baseBranch = "main"
 	}
-	if err := git.CreateBranch(ctx, manifest.GitRoot, branchName, baseBranch); err != nil {
+	diffBase := resolveSupervisedE2EBaseRef(ctx, manifest.GitRoot, baseBranch)
+	if err := git.CreateBranch(ctx, manifest.GitRoot, branchName, diffBase); err != nil {
 		return report, supervisedE2EFailWithReport(artifacts.FinalReport, report, "worker_setup", err)
 	}
 	if err := git.AddWorktree(ctx, manifest.GitRoot, pathAbs, branchName); err != nil {
@@ -776,11 +777,11 @@ func runSupervisedE2EWorkerAndAudit(ctx context.Context, manifest projects.Manif
 	if _, err := gitOutput(ctx, pathAbs, "add", "-N", "."); err != nil {
 		return report, supervisedE2EFailWithReport(artifacts.FinalReport, report, "diff_audit", err)
 	}
-	nameStatus, err := gitOutput(ctx, pathAbs, "diff", "--name-status", baseBranch)
+	nameStatus, err := gitOutput(ctx, pathAbs, "diff", "--name-status", diffBase)
 	if err != nil {
 		return report, supervisedE2EFailWithReport(artifacts.FinalReport, report, "diff_audit", err)
 	}
-	fullDiff, err := gitOutput(ctx, pathAbs, "diff", baseBranch)
+	fullDiff, err := gitOutput(ctx, pathAbs, "diff", diffBase)
 	if err != nil {
 		return report, supervisedE2EFailWithReport(artifacts.FinalReport, report, "diff_audit", err)
 	}
@@ -788,7 +789,7 @@ func runSupervisedE2EWorkerAndAudit(ctx context.Context, manifest projects.Manif
 	sort.Strings(diffFiles)
 	diffSHA := sha256String(strings.TrimSpace(nameStatus) + "\n" + fullDiff)
 	report.Diff = workSuperviseE2EDiff{Files: diffFiles, SHA256: diffSHA}
-	diffSummary := renderSupervisedE2EDiffSummary(baseBranch, branchName, nameStatus, fullDiff, diffSHA)
+	diffSummary := renderSupervisedE2EDiffSummary(diffBase, branchName, nameStatus, fullDiff, diffSHA)
 	if err := writeRedactedTextArtifact(artifacts.DiffSummary, diffSummary, secrets); err != nil {
 		return report, supervisedE2EFailWithReport(artifacts.FinalReport, report, "diff_audit", err)
 	}
@@ -2552,6 +2553,18 @@ func resolvePRCreateDiffBase(ctx context.Context, worktreeAbs string, baseBranch
 		return baseBranch
 	}
 	if _, err := gitOutput(ctx, worktreeAbs, "rev-parse", "--verify", remoteBase); err == nil {
+		return remoteBase
+	}
+	return baseBranch
+}
+
+func resolveSupervisedE2EBaseRef(ctx context.Context, repoRoot string, baseBranch string) string {
+	baseBranch = strings.TrimSpace(baseBranch)
+	if baseBranch == "" {
+		return "HEAD"
+	}
+	remoteBase := "origin/" + baseBranch
+	if _, err := gitOutput(ctx, repoRoot, "rev-parse", "--verify", remoteBase); err == nil {
 		return remoteBase
 	}
 	return baseBranch
