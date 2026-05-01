@@ -2,6 +2,8 @@ package commands
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -30,7 +32,7 @@ import (
 
 const stage3LifecycleCommentMarker = "<!-- odin-stage3-lifecycle-proof -->"
 
-const workUsage = "usage: odin work status|profiles|start --project <key> --title <text>|intake --project <key> [--dry-run]|simulate-lifecycle --issue <number> [--project <key>] [--dry-run] [--json]|apply-lifecycle --issue <number> --approved-target <repo>#<issue> [--project <key>] [--json]|worker-dry-run --issue-fixture <path> [--project <key>] [--keep-worktree] [--json]"
+const workUsage = "usage: odin work status|profiles|start --project <key> --title <text>|intake --project <key> [--dry-run]|simulate-lifecycle --issue <number> [--project <key>] [--dry-run] [--json]|apply-lifecycle --issue <number> --approved-target <repo>#<issue> [--project <key>] [--json]|worker-dry-run --issue-fixture <path> [--project <key>] [--keep-worktree] [--json]|pr-dry-run --worktree <path> --base <branch> [--json]"
 
 var newIntakeTracker = trackerintake.NewGitHubTracker
 
@@ -55,6 +57,8 @@ func RunWork(ctx context.Context, store *sqlite.Store, projectRegistry projects.
 		return runWorkApplyLifecycle(ctx, projectRegistry, args[1:], stdout)
 	case "worker-dry-run":
 		return runWorkWorkerDryRun(ctx, projectRegistry, args[1:], stdout)
+	case "pr-dry-run":
+		return runWorkPRDryRun(ctx, args[1:], stdout)
 	default:
 		_, err := fmt.Fprintf(stdout, "unknown work command: %s\n%s\n", args[0], workUsage)
 		return err
@@ -534,6 +538,109 @@ func runWorkWorkerDryRun(ctx context.Context, projectRegistry projects.Registry,
 	return err
 }
 
+func runWorkPRDryRun(ctx context.Context, args []string, stdout io.Writer) error {
+	params := parseWorkStartArgs(args)
+	worktreePath := strings.TrimSpace(params["worktree"])
+	baseBranch := strings.TrimSpace(params["base"])
+	if worktreePath == "" || baseBranch == "" {
+		_, err := fmt.Fprintln(stdout, "usage: odin work pr-dry-run --worktree <path> --base <branch> [--json]")
+		return err
+	}
+	worktreeAbs, err := filepath.Abs(filepath.Clean(expandTilde(worktreePath)))
+	if err != nil {
+		return err
+	}
+	currentHead, err := gitOutput(ctx, worktreeAbs, "rev-parse", "--abbrev-ref", "HEAD")
+	if err != nil {
+		return err
+	}
+	diffSummary, err := gitOutput(ctx, worktreeAbs, "diff", "--stat", baseBranch)
+	if err != nil {
+		return err
+	}
+	nameStatus, err := gitOutput(ctx, worktreeAbs, "diff", "--name-status", baseBranch)
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(nameStatus) == "" {
+		return fmt.Errorf("no diff between worktree %q and base %q", worktreeAbs, baseBranch)
+	}
+	files := filesFromNameStatus(nameStatus)
+
+	odinRoot := strings.TrimSpace(os.Getenv("ODIN_ROOT"))
+	if odinRoot == "" {
+		odinRoot = filepath.Join(worktreeAbs, ".odin")
+	}
+	runID := fmt.Sprintf("%d", time.Now().UnixNano())
+	artifactDir := filepath.Join(expandTilde(odinRoot), "runs", "pr-dry-run", runID)
+	if err := os.MkdirAll(artifactDir, 0o755); err != nil {
+		return err
+	}
+
+	diffPath := filepath.Join(artifactDir, "diff-summary.md")
+	diffContent := renderPRDryRunDiffSummary(baseBranch, strings.TrimSpace(currentHead), diffSummary, nameStatus)
+	diffSHA, err := writeArtifact(diffPath, diffContent)
+	if err != nil {
+		return err
+	}
+	bodyPath := filepath.Join(artifactDir, "pr-body.md")
+	bodyContent := renderPRDryRunBody(files)
+	bodySHA, err := writeArtifact(bodyPath, bodyContent)
+	if err != nil {
+		return err
+	}
+	checklistPath := filepath.Join(artifactDir, "handoff-checklist.md")
+	checklistItems := prDryRunChecklistItems()
+	checklistSHA, err := writeArtifact(checklistPath, renderChecklist(checklistItems))
+	if err != nil {
+		return err
+	}
+	if err := verifyPRTemplate(ctx, worktreeAbs, bodyPath); err != nil {
+		return err
+	}
+
+	report := workPRDryRunReport{
+		Worktree:    worktreeAbs,
+		Base:        baseBranch,
+		CurrentHead: strings.TrimSpace(currentHead),
+		DiffSummary: workPRDryRunDiffSummaryReport{
+			Generated: true,
+			Files:     files,
+			Text:      diffContent,
+			Path:      diffPath,
+			SHA256:    diffSHA,
+		},
+		PRBody: workPRDryRunBodyReport{
+			Generated:        true,
+			Path:             bodyPath,
+			SHA256:           bodySHA,
+			TemplateVerified: true,
+		},
+		Checklist: workPRDryRunChecklistReport{
+			Path:   checklistPath,
+			SHA256: checklistSHA,
+			Items:  checklistItems,
+		},
+		Artifacts: []workPRDryRunArtifactReport{
+			{Path: bodyPath, SHA256: bodySHA, Kind: "pr_body", Label: "draft artifact, not durable PR handoff state"},
+			{Path: checklistPath, SHA256: checklistSHA, Kind: "human_checklist", Label: "draft artifact, not durable PR handoff state"},
+			{Path: diffPath, SHA256: diffSHA, Kind: "diff_summary", Label: "draft artifact, not durable PR handoff state"},
+		},
+		GitHubWrites: 0,
+		Push:         "not_pushed",
+		Merge:        "not_merged",
+		PRs:          "not_created_or_updated",
+		Dispatch:     "not_started",
+	}
+	if parseBoolFlag(params, "json") {
+		encoder := json.NewEncoder(stdout)
+		encoder.SetIndent("", "  ")
+		return encoder.Encode(report)
+	}
+	_, err = fmt.Fprintf(stdout, "pr_dry_run worktree=%s base=%s body=%s push=not_pushed merge=not_merged prs=not_created_or_updated\n", worktreeAbs, baseBranch, bodyPath)
+	return err
+}
+
 func resolveLifecycleProject(projectRegistry projects.Registry, projectKey string) (projects.Manifest, error) {
 	if projectKey != "" {
 		project, ok := projectRegistry.Lookup(projectKey)
@@ -655,6 +762,164 @@ func deleteGitBranch(ctx context.Context, repoRoot string, branchName string) er
 		return fmt.Errorf("git branch -D %s: %w: %s", branchName, err, string(output))
 	}
 	return nil
+}
+
+func gitOutput(ctx context.Context, worktreePath string, args ...string) (string, error) {
+	command := exec.CommandContext(ctx, "git", append([]string{"-C", worktreePath}, args...)...)
+	output, err := command.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("git %v: %w: %s", args, err, string(output))
+	}
+	return string(output), nil
+}
+
+func filesFromNameStatus(nameStatus string) []string {
+	seen := map[string]bool{}
+	for _, line := range strings.Split(nameStatus, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		for _, file := range fields[1:] {
+			if file != "" {
+				seen[file] = true
+			}
+		}
+	}
+	files := make([]string, 0, len(seen))
+	for file := range seen {
+		files = append(files, file)
+	}
+	sort.Strings(files)
+	return files
+}
+
+func renderPRDryRunDiffSummary(baseBranch string, currentHead string, stat string, nameStatus string) string {
+	return strings.Join([]string{
+		"# Diff Summary",
+		"",
+		fmt.Sprintf("- Base: %s", baseBranch),
+		fmt.Sprintf("- Current head: %s", currentHead),
+		"",
+		"## Stat",
+		"",
+		codeBlock(strings.TrimSpace(stat)),
+		"",
+		"## Files",
+		"",
+		codeBlock(strings.TrimSpace(nameStatus)),
+		"",
+	}, "\n")
+}
+
+func renderPRDryRunBody(files []string) string {
+	summary := "- Generated Stage 5 dry-run PR handoff draft."
+	if len(files) > 0 {
+		summary = "- Generated Stage 5 dry-run PR handoff draft for changed paths: " + strings.Join(files, ", ") + "."
+	}
+	return strings.Join([]string{
+		"## Summary",
+		summary,
+		"",
+		"## Proven",
+		"- Diff summary generated from the local worktree without pushing.",
+		"- PR body template validated by scripts/ci/verify-pr-template.sh.",
+		"- Human checklist generated as a local draft artifact.",
+		"",
+		"## Unproven",
+		"- Live GitHub PR creation, update, merge, and push behavior were intentionally not exercised.",
+		"",
+		"- [x] this PR changes user-visible or orchestration-facing behavior",
+		"- [x] if the box above is checked, real `odin` command proof is included below",
+		"",
+		"## Commands Run",
+		"```bash",
+		"odin work pr-dry-run --worktree <path> --base <branch> --json",
+		"scripts/ci/verify-pr-template.sh <generated-pr-body>",
+		"```",
+		"",
+	}, "\n")
+}
+
+func prDryRunChecklistItems() []string {
+	return []string{
+		"Review diff summary",
+		"Confirm tests listed under Commands Run are sufficient",
+		"Confirm Unproven items are acceptable",
+		"Confirm no push occurred during dry-run",
+		"Confirm no live PR was created or updated",
+		"Confirm no merge occurred",
+	}
+}
+
+func renderChecklist(items []string) string {
+	var builder strings.Builder
+	builder.WriteString("# Human Checklist\n\n")
+	for _, item := range items {
+		builder.WriteString("- [ ] ")
+		builder.WriteString(item)
+		builder.WriteString("\n")
+	}
+	return builder.String()
+}
+
+func codeBlock(value string) string {
+	if strings.TrimSpace(value) == "" {
+		value = "(empty)"
+	}
+	return "```text\n" + value + "\n```"
+}
+
+func writeArtifact(path string, content string) (string, error) {
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256([]byte(content))
+	return hex.EncodeToString(sum[:]), nil
+}
+
+func verifyPRTemplate(ctx context.Context, worktreePath string, bodyPath string) error {
+	repoRoot, err := gitOutput(ctx, worktreePath, "rev-parse", "--show-toplevel")
+	if err != nil {
+		return err
+	}
+	scriptPath := filepath.Join(strings.TrimSpace(repoRoot), "scripts", "ci", "verify-pr-template.sh")
+	if _, err := os.Stat(scriptPath); err != nil {
+		if !os.IsNotExist(err) {
+			return err
+		}
+		fallback, findErr := findUpward("scripts/ci/verify-pr-template.sh")
+		if findErr != nil {
+			return findErr
+		}
+		scriptPath = fallback
+	}
+	command := exec.CommandContext(ctx, "bash", scriptPath, bodyPath)
+	output, err := command.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("verify PR template: %w: %s", err, string(output))
+	}
+	return nil
+}
+
+func findUpward(relativePath string) (string, error) {
+	dir, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	for {
+		candidate := filepath.Join(dir, relativePath)
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate, nil
+		} else if !os.IsNotExist(err) {
+			return "", err
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return "", fmt.Errorf("could not find %s from %s", relativePath, dir)
+		}
+		dir = parent
+	}
 }
 
 func buildWorkApplyLifecycleReport(project projects.Manifest, issueNumber int, approvedTarget string, labels []string, comments []tracker.IssueComment) workApplyLifecycleReport {
@@ -873,6 +1138,49 @@ type workWorkerDryRunEnvironmentReport struct {
 type workWorkerDryRunTimeoutReport struct {
 	Simulated bool   `json:"simulated"`
 	Result    string `json:"result"`
+}
+
+type workPRDryRunReport struct {
+	Worktree     string                        `json:"worktree"`
+	Base         string                        `json:"base"`
+	CurrentHead  string                        `json:"current_head"`
+	DiffSummary  workPRDryRunDiffSummaryReport `json:"diff_summary"`
+	PRBody       workPRDryRunBodyReport        `json:"pr_body"`
+	Checklist    workPRDryRunChecklistReport   `json:"human_checklist"`
+	Artifacts    []workPRDryRunArtifactReport  `json:"artifacts"`
+	GitHubWrites int                           `json:"github_writes"`
+	Push         string                        `json:"push"`
+	Merge        string                        `json:"merge"`
+	PRs          string                        `json:"prs"`
+	Dispatch     string                        `json:"dispatch"`
+}
+
+type workPRDryRunDiffSummaryReport struct {
+	Generated bool     `json:"generated"`
+	Files     []string `json:"files"`
+	Text      string   `json:"text"`
+	Path      string   `json:"path"`
+	SHA256    string   `json:"sha256"`
+}
+
+type workPRDryRunBodyReport struct {
+	Generated        bool   `json:"generated"`
+	Path             string `json:"path"`
+	SHA256           string `json:"sha256"`
+	TemplateVerified bool   `json:"template_verified"`
+}
+
+type workPRDryRunChecklistReport struct {
+	Path   string   `json:"path"`
+	SHA256 string   `json:"sha256"`
+	Items  []string `json:"items"`
+}
+
+type workPRDryRunArtifactReport struct {
+	Path   string `json:"path"`
+	SHA256 string `json:"sha256"`
+	Kind   string `json:"kind"`
+	Label  string `json:"label"`
 }
 
 type workLifecycleApprovalReport struct {
