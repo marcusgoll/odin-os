@@ -476,6 +476,7 @@ Command shape:
   --approved-target marcusgoll/odin-os#123 \
   --worktree <path> \
   --base main \
+  --wait-ci \
   --json
 ```
 
@@ -510,7 +511,7 @@ Exit criteria:
 - Draft PR is created.
 - Odin-authored Stage 6 review evidence comments exist on the PR.
 - Human approval is required before merge.
-- CI runs `make odin-e2e-local`.
+- CI runs `make odin-e2e-local` and reaches a terminal conclusion before the bounded wait timeout.
 - No merge occurs without human approval.
 - No deploy occurs, proven by zero Odin release/deploy dispatches and a read-only workflow-run audit showing no deployment-class workflow ran for the Stage 6 branch or PR.
 
@@ -521,7 +522,7 @@ Required artifacts:
 - Existing docs-only diff summary.
 - Draft PR URL.
 - Odin-authored Stage 6 review evidence comments.
-- CI run URL showing `make odin-e2e-local`.
+- CI run URL, conclusion, and timeout status showing `make odin-e2e-local`.
 - Workflow-run audit showing no deployment-class workflow ran.
 - Human approval gate evidence.
 - JSON and local artifact evidence only; no durable Odin runtime handoff state.
