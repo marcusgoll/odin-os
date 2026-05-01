@@ -111,6 +111,7 @@ func TestLoadDirLoadsUniversalIntakeAgents(t *testing.T) {
 		"review-agent",
 		"chief-of-staff-agent",
 		"system-memory-curator-agent",
+		"voice-note-cleaner-agent",
 	}
 	for _, key := range wantAgents {
 		item, ok := snapshot.ByKey[key]
@@ -200,6 +201,42 @@ func TestLoadDirLoadsUniversalIntakeAgents(t *testing.T) {
 	for _, required := range requiredCaptureContract {
 		if !strings.Contains(captureContract, required) {
 			t.Fatalf("capture agent body missing %q", required)
+		}
+	}
+
+	voiceNoteCleaner := snapshot.ByKey["voice-note-cleaner-agent"]
+	voiceNoteCleanerContract := strings.Join([]string{
+		voiceNoteCleaner.Title,
+		voiceNoteCleaner.Summary,
+		voiceNoteCleaner.Sections[registry.SectionPurpose],
+		voiceNoteCleaner.Sections[registry.SectionWhenToUse],
+		voiceNoteCleaner.Sections[registry.SectionInputs],
+		voiceNoteCleaner.Sections[registry.SectionProcedure],
+		voiceNoteCleaner.Sections[registry.SectionOutputs],
+		voiceNoteCleaner.Sections[registry.SectionConstraints],
+		voiceNoteCleaner.Sections[registry.SectionSuccessCriteria],
+	}, "\n")
+	requiredVoiceNoteCleanerContract := []string{
+		"Voice Note Cleaner",
+		"{{raw_input}}",
+		"filler",
+		"repetition",
+		"half-ideas",
+		"corrections",
+		"unrelated thoughts",
+		"cleaned summary",
+		"separate ideas",
+		"possible tasks",
+		"possible projects",
+		"questions that need clarification",
+		"anything that should be archived as reference",
+		"anything emotionally important",
+		"recommended next action",
+		"Do not over-interpret unclear statements",
+	}
+	for _, required := range requiredVoiceNoteCleanerContract {
+		if !strings.Contains(voiceNoteCleanerContract, required) {
+			t.Fatalf("voice note cleaner agent body missing %q", required)
 		}
 	}
 
