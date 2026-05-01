@@ -36,9 +36,9 @@ const stage3LifecycleCommentMarker = "<!-- odin-stage3-lifecycle-proof -->"
 const stage6ReviewEvidenceMarker = "<!-- odin-stage6-review-evidence -->"
 const stage6HumanReviewHandoffMarker = "<!-- odin-stage6-human-review-handoff -->"
 
-const workUsage = "usage: odin work status|profiles|start --project <key> --title <text>|intake --project <key> [--dry-run]|simulate-lifecycle --issue <number> [--project <key>] [--dry-run] [--json]|apply-lifecycle --issue <number> --approved-target <repo>#<issue> [--project <key>] [--json]|worker-dry-run --issue-fixture <path> [--project <key>] [--keep-worktree] [--json]|pr-dry-run --worktree <path> --base <branch> [--json]|pr-create --issue <number> --approved-target <repo>#<issue> --worktree <path> --base <branch> --wait-ci [--json]|supervise status|start|stop|queue --project <key> [--fixture-issue <number>]|recover --json"
+const workUsage = "usage: odin work status|profiles|start --project <key> --title <text>|intake --project <key> [--dry-run]|simulate-lifecycle --issue <number> [--project <key>] [--dry-run] [--json]|apply-lifecycle --issue <number> --approved-target <repo>#<issue> [--project <key>] [--json]|worker-dry-run --issue-fixture <path> [--project <key>] [--keep-worktree] [--json]|pr-dry-run --worktree <path> --base <branch> [--json]|pr-create --issue <number> --approved-target <repo>#<issue> --worktree <path> --base <branch> --wait-ci [--json]|supervise status|start|stop|queue --project <key> [--fixture-issue <number>]|recover|e2e prepare-issue --project <key>|e2e run-once --project <key> --issue <number> --json"
 
-const workSuperviseUsage = "usage: odin work supervise status|start|stop|queue --project <key> [--fixture-issue <number>]|recover --json"
+const workSuperviseUsage = "usage: odin work supervise status|start|stop|queue --project <key> [--fixture-issue <number>]|recover|e2e prepare-issue --project <key>|e2e run-once --project <key> --issue <number> --json"
 
 const workSuperviseFixtureSource = "control_plane_fixture"
 const workSuperviseTrackerSource = "issue_intake_source"
@@ -102,13 +102,16 @@ func runWorkSupervise(ctx context.Context, store *sqlite.Store, projectRegistry 
 
 	params := parseWorkStartArgs(args[1:])
 	switch args[0] {
-	case "status", "start", "stop", "queue", "recover":
+	case "status", "start", "stop", "queue", "recover", "e2e":
 	default:
 		_, err := fmt.Fprintf(stdout, "unknown work supervise command: %s\n%s\n", args[0], workSuperviseUsage)
 		return err
 	}
 	if !parseBoolFlag(params, "json") {
 		return fmt.Errorf("--json is required for work supervise in this slice\n%s", workSuperviseUsage)
+	}
+	if args[0] == "e2e" {
+		return runWorkSuperviseE2E(projectRegistry, args[1:], params)
 	}
 
 	service := supervision.NewService(store, supervision.DefaultConfig())
@@ -133,6 +136,42 @@ func runWorkSupervise(ctx context.Context, store *sqlite.Store, projectRegistry 
 	encoder := json.NewEncoder(stdout)
 	encoder.SetIndent("", "  ")
 	return encoder.Encode(flattenWorkSuperviseReport(report, args[0], params))
+}
+
+func runWorkSuperviseE2E(projectRegistry projects.Registry, args []string, params map[string]string) error {
+	if len(args) == 0 || args[0] == "help" || args[0] == "--help" {
+		return fmt.Errorf("missing work supervise e2e command\n%s", workSuperviseUsage)
+	}
+
+	projectKey := strings.TrimSpace(params["project"])
+	switch args[0] {
+	case "prepare-issue":
+		if projectKey == "" {
+			return fmt.Errorf("missing --project for work supervise e2e prepare-issue")
+		}
+		if _, ok := projectRegistry.Lookup(projectKey); !ok {
+			return fmt.Errorf("unknown project %q", projectKey)
+		}
+		return fmt.Errorf("not_implemented: work supervise e2e prepare-issue")
+	case "run-once":
+		if projectKey == "" {
+			return fmt.Errorf("missing --project for work supervise e2e run-once")
+		}
+		if _, ok := projectRegistry.Lookup(projectKey); !ok {
+			return fmt.Errorf("unknown project %q", projectKey)
+		}
+		issueText := strings.TrimSpace(params["issue"])
+		if issueText == "" {
+			return fmt.Errorf("missing --issue for work supervise e2e run-once")
+		}
+		issueNumber, err := strconv.Atoi(issueText)
+		if err != nil || issueNumber <= 0 {
+			return fmt.Errorf("invalid --issue %q", issueText)
+		}
+		return fmt.Errorf("not_implemented: work supervise e2e run-once")
+	default:
+		return fmt.Errorf("unknown work supervise e2e command: %s\n%s", args[0], workSuperviseUsage)
+	}
 }
 
 func runWorkSuperviseQueue(ctx context.Context, store *sqlite.Store, projectRegistry projects.Registry, service supervision.Service, params map[string]string) (supervision.Report, error) {

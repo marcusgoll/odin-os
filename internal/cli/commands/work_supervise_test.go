@@ -385,7 +385,7 @@ func TestRunWorkSuperviseUnknownSubcommandShowsUsage(t *testing.T) {
 	if err := RunWork(ctx, store, commandProjectRegistry(t), registry.Snapshot{}, []string{"supervise", "bogus"}, &output); err != nil {
 		t.Fatalf("RunWork(supervise bogus) error = %v", err)
 	}
-	if !strings.Contains(output.String(), "unknown work supervise command: bogus") || !strings.Contains(output.String(), "usage: odin work supervise status|start|stop|queue --project <key> [--fixture-issue <number>]|recover --json") {
+	if !strings.Contains(output.String(), "unknown work supervise command: bogus") || !strings.Contains(output.String(), workSuperviseUsage) {
 		t.Fatalf("output = %q, want unknown subcommand usage", output.String())
 	}
 }
