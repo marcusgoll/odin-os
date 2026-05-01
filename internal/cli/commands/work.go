@@ -42,6 +42,7 @@ const workSuperviseUsage = "usage: odin work supervise status|start|stop|queue -
 
 const workSuperviseFixtureSource = "control_plane_fixture"
 const workSuperviseTrackerSource = "issue_intake_source"
+const workSuperviseRedactedSensitivePath = "internal/security/redacted-sensitive-path.txt"
 
 var newIntakeTracker = trackerintake.NewGitHubTracker
 
@@ -272,24 +273,31 @@ func extractIssuePathHints(text string) []string {
 		if markerIndex < 0 {
 			continue
 		}
-		candidate := firstIssuePathHintField(line[markerIndex+len("planned scope:"):])
-		if candidate == "" || seen[candidate] {
-			continue
+		for _, candidate := range issuePathHintFields(line[markerIndex+len("planned scope:"):]) {
+			if seen[candidate] {
+				continue
+			}
+			seen[candidate] = true
+			paths = append(paths, candidate)
 		}
-		seen[candidate] = true
-		paths = append(paths, candidate)
 	}
 	return paths
 }
 
-func firstIssuePathHintField(text string) string {
+func issuePathHintFields(text string) []string {
+	var paths []string
 	for _, field := range strings.FieldsFunc(text, issuePathHintSeparator) {
 		candidate := strings.Trim(field, "<>.,!?")
-		if looksLikeRelativePathHint(candidate) && !looksLikeSensitivePathHint(candidate) {
-			return candidate
+		if !looksLikeRelativePathHint(candidate) {
+			continue
 		}
+		if looksLikeSensitivePathHint(candidate) {
+			paths = append(paths, workSuperviseRedactedSensitivePath)
+			continue
+		}
+		paths = append(paths, candidate)
 	}
-	return ""
+	return paths
 }
 
 func issuePathHintSeparator(r rune) bool {

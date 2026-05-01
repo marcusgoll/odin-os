@@ -233,7 +233,14 @@ func TestRunWorkSuperviseQueueJSONPersistsIssueBodyHashWithoutRawBody(t *testing
 	}
 
 	_ = runWorkSuperviseJSON(t, ctx, store, []string{"supervise", "start", "--json"})
-	_ = runWorkSuperviseJSONWithRegistry(t, ctx, store, projectRegistry, []string{"supervise", "queue", "--project", "alpha", "--json"})
+	report := runWorkSuperviseJSONWithRegistry(t, ctx, store, projectRegistry, []string{"supervise", "queue", "--project", "alpha", "--json"})
+	if len(report.Queue) != 1 {
+		t.Fatalf("queue len = %d, want 1: %+v", len(report.Queue), report.Queue)
+	}
+	assertSuperviseDecision(t, report.Queue[0], 26, supervision.DecisionRefused, supervision.RefusalForbiddenPath)
+	if len(report.Claims) != 0 {
+		t.Fatalf("claims = %+v, want no claim for sensitive mixed scope", report.Claims)
+	}
 
 	project, err := store.GetProjectByKey(ctx, "alpha")
 	if err != nil {
@@ -265,8 +272,12 @@ func TestRunWorkSuperviseQueueJSONPersistsIssueBodyHashWithoutRawBody(t *testing
 	if !strings.Contains(decisionJSON, `"issue_body_hash":"`+wantHash+`"`) {
 		t.Fatalf("decision_json = %s, want issue_body_hash %q", decisionJSON, wantHash)
 	}
-	if !strings.Contains(decisionJSON, `"changed_paths":["docs/example.md"]`) {
-		t.Fatalf("decision_json = %s, want derived changed path evidence", decisionJSON)
+	changedPaths, ok := payload["changed_paths"].([]any)
+	if !ok {
+		t.Fatalf("decision_json = %s, want changed_paths array", decisionJSON)
+	}
+	if !containsJSONStrings(changedPaths, "docs/example.md", "internal/security/redacted-sensitive-path.txt") {
+		t.Fatalf("changed_paths = %+v, want allowed path and redacted refusal marker", changedPaths)
 	}
 }
 
@@ -451,6 +462,23 @@ func assertSuperviseDecision(t *testing.T, decision struct {
 func sha256HexForSuperviseTest(value string) string {
 	sum := sha256.Sum256([]byte(value))
 	return hex.EncodeToString(sum[:])
+}
+
+func containsJSONStrings(values []any, expected ...string) bool {
+	present := make(map[string]bool, len(values))
+	for _, value := range values {
+		text, ok := value.(string)
+		if !ok {
+			continue
+		}
+		present[text] = true
+	}
+	for _, value := range expected {
+		if !present[value] {
+			return false
+		}
+	}
+	return true
 }
 
 func assertSuperviseReportShape(t *testing.T, report superviseCommandReport) {
