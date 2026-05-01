@@ -166,6 +166,43 @@ func TestLoadDirLoadsUniversalIntakeAgents(t *testing.T) {
 		}
 	}
 
+	capture := snapshot.ByKey["capture-agent"]
+	captureContract := strings.Join([]string{
+		capture.Title,
+		capture.Summary,
+		capture.Sections[registry.SectionPurpose],
+		capture.Sections[registry.SectionWhenToUse],
+		capture.Sections[registry.SectionInputs],
+		capture.Sections[registry.SectionProcedure],
+		capture.Sections[registry.SectionOutputs],
+		capture.Sections[registry.SectionConstraints],
+		capture.Sections[registry.SectionSuccessCriteria],
+	}, "\n")
+	requiredCaptureContract := []string{
+		"Universal Inbox Capture Agent",
+		"{{raw_input}}",
+		"{{source}}",
+		"{{timestamp}}",
+		"structured capture record",
+		"title",
+		"one-sentence summary",
+		"original intent",
+		"possible project or life area",
+		"actionability: actionable, reference, someday, unclear",
+		"extracted deadlines",
+		"extracted people",
+		"extracted links or resources",
+		"emotional tone, if relevant",
+		"recommended next processing step",
+		"Do not create tasks yet",
+		"Do not assume missing details",
+	}
+	for _, required := range requiredCaptureContract {
+		if !strings.Contains(captureContract, required) {
+			t.Fatalf("capture agent body missing %q", required)
+		}
+	}
+
 	chiefOfStaff := snapshot.ByKey["chief-of-staff-agent"]
 	chiefOfStaffContract := strings.Join([]string{
 		chiefOfStaff.Sections[registry.SectionPurpose],
