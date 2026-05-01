@@ -403,6 +403,29 @@ func runWorkSuperviseE2ERunOnce(ctx context.Context, store *sqlite.Store, manife
 		}, fmt.Errorf("expected exactly one fetched issue, got %d", len(issues)))
 	}
 	issue := issues[0]
+	if err := validateSupervisedE2ERunOnceIssue(issue); err != nil {
+		return writeRunOnceFailureArtifactsAndError(queueReportPath, finalReportPath, map[string]any{
+			"mode":            "supervised_e2e",
+			"phase":           "validate_issue",
+			"status":          "failed_closed",
+			"project":         manifest.Key,
+			"repo":            repoID,
+			"run_id":          runID,
+			"requested_issue": issueNumber,
+			"issue": workSuperviseE2EIssueReport{
+				Number:      issue.Number,
+				URL:         issue.URL,
+				PlannedPath: firstString(issue.ChangedPaths),
+			},
+			"issue_state":     issue.State,
+			"pull_request":    issue.PullRequest,
+			"labels":          issue.Labels,
+			"codex_execution": supervision.SideEffectNotStarted,
+			"prs":             supervision.SideEffectNotCreated,
+			"merge":           supervision.SideEffectNotMerged,
+			"deployment":      supervision.SideEffectNotStarted,
+		}, err)
+	}
 	if err := validateSupervisedE2ERunOnceScope(issue.ChangedPaths); err != nil {
 		return writeRunOnceFailureArtifactsAndError(queueReportPath, finalReportPath, map[string]any{
 			"mode":            "supervised_e2e",
@@ -539,18 +562,50 @@ func writeRunOnceFailureArtifactsAndError(queueReportPath string, finalReportPat
 	return redactWorkSuperviseE2EError(err)
 }
 
+func validateSupervisedE2ERunOnceIssue(issue supervision.Issue) error {
+	if issue.PullRequest {
+		return fmt.Errorf("work supervise e2e run-once requires an issue, not a pull request: issue=%d", issue.Number)
+	}
+	if strings.TrimSpace(issue.State) != "open" {
+		return fmt.Errorf("work supervise e2e run-once requires an open issue: issue=%d state=%q", issue.Number, issue.State)
+	}
+	if hasSupervisedE2ELabel(issue.Labels, tracker.LabelBlocked) {
+		return fmt.Errorf("work supervise e2e run-once refuses blocked issue: issue=%d label=%s", issue.Number, tracker.LabelBlocked)
+	}
+	return nil
+}
+
 func validateSupervisedE2ERunOnceScope(paths []string) error {
 	switch len(paths) {
 	case 0:
 		return fmt.Errorf("work supervise e2e run-once requires exactly one Planned scope under docs/operations/: got zero")
 	case 1:
-		if !strings.HasPrefix(paths[0], "docs/operations/") {
+		cleaned := normalizeSupervisedE2ERunOncePath(paths[0])
+		if cleaned != paths[0] || !strings.HasPrefix(cleaned, "docs/operations/") {
 			return fmt.Errorf("work supervise e2e run-once requires Planned scope under docs/operations/: got %q", paths[0])
 		}
 		return nil
 	default:
 		return fmt.Errorf("work supervise e2e run-once requires exactly one Planned scope under docs/operations/: got %d", len(paths))
 	}
+}
+
+func normalizeSupervisedE2ERunOncePath(value string) string {
+	cleaned := filepath.ToSlash(filepath.Clean(strings.TrimSpace(value)))
+	cleaned = strings.TrimPrefix(cleaned, "./")
+	if cleaned == "." || cleaned == "/" {
+		return ""
+	}
+	return cleaned
+}
+
+func hasSupervisedE2ELabel(labels []string, want string) bool {
+	for _, label := range labels {
+		if label == want {
+			return true
+		}
+	}
+	return false
 }
 
 func firstString(values []string) string {
@@ -725,6 +780,7 @@ func supervisionIssuesFromTrackerIssues(issues []tracker.Issue, fallbackRepo str
 			Labels:       append([]string(nil), issue.Labels...),
 			URL:          issue.URL,
 			State:        issue.State,
+			PullRequest:  issue.PullRequest,
 			ChangedPaths: extractIssuePathHints(issue.Body),
 		})
 	}

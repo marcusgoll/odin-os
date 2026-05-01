@@ -518,7 +518,7 @@ func assertSuperviseReportShape(t *testing.T, report superviseCommandReport) {
 func assertNoSuperviseSideEffects(t *testing.T, ctx context.Context, store *sqlite.Store) {
 	t.Helper()
 
-	for _, table := range []string{"runs", "approvals", "worktree_leases"} {
+	for _, table := range []string{"tasks", "runs", "approvals", "worktree_leases"} {
 		assertSuperviseTableCount(t, ctx, store, table, 0)
 	}
 }

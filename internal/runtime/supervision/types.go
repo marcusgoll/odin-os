@@ -46,6 +46,7 @@ type Issue struct {
 	Labels       []string
 	URL          string
 	State        string
+	PullRequest  bool
 	ChangedPaths []string
 }
 

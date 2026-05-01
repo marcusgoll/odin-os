@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -522,6 +523,132 @@ func TestRunWorkSuperviseE2ERunOnceRejectsNonOperationsPathBeforeQueue(t *testin
 	assertFileContains(t, finalReportPath, `"changed_paths": [`)
 	assertFileContains(t, finalReportPath, `"docs/not-operations.md"`)
 	assertNoSuperviseSideEffects(t, ctx, store)
+}
+
+func TestRunWorkSuperviseE2ERunOnceRejectsEscapedOperationsPathBeforeQueue(t *testing.T) {
+	ctx := context.Background()
+	store := openWorkCommandStore(t)
+	defer store.Close()
+	odinRoot := t.TempDir()
+	t.Setenv("ODIN_ROOT", odinRoot)
+
+	fake := &superviseE2EFakeTracker{
+		issue: tracker.Issue{
+			Provider: "github",
+			Repo:     "acme/alpha",
+			Number:   48,
+			Title:    "Escaped docs path",
+			Body:     "Planned scope: docs/operations/../stage-7-escaped.md",
+			URL:      "https://github.example/acme/alpha/issues/48",
+			State:    "open",
+			Labels:   []string{"odin:ready", "safety:low-risk"},
+		},
+	}
+	installSuperviseE2EFakeTracker(t, fake)
+
+	_ = runWorkSuperviseJSON(t, ctx, store, []string{"supervise", "start", "--json"})
+	var output strings.Builder
+	err := RunWork(ctx, store, commandProjectRegistry(t), registry.Snapshot{}, []string{
+		"supervise", "e2e", "run-once", "--project", "alpha", "--issue", "48", "--json",
+	}, &output)
+	if err == nil {
+		t.Fatalf("RunWork(supervise e2e run-once with escaped operations path) error = nil, want fail-closed path gate\noutput:\n%s", output.String())
+	}
+	if !strings.Contains(err.Error(), "requires Planned scope under docs/operations/") {
+		t.Fatalf("error = %q, want docs/operations path gate", err.Error())
+	}
+	assertSuperviseTableCount(t, ctx, store, "supervision_queue_decisions", 0)
+	assertSuperviseTableCount(t, ctx, store, "supervision_dispatch_claims", 0)
+
+	runID := newestSuperviseE2ERunID(t, odinRoot)
+	finalReportPath := filepath.Join(odinRoot, "runs", "supervised-e2e", runID, "final-report.json")
+	assertFileContains(t, finalReportPath, `"status": "failed_closed"`)
+	assertFileContains(t, finalReportPath, `"docs/operations/../stage-7-escaped.md"`)
+	assertNoSuperviseSideEffects(t, ctx, store)
+}
+
+func TestRunWorkSuperviseE2ERunOnceRejectsClosedBlockedAndPullRequestBeforeQueue(t *testing.T) {
+	cases := []struct {
+		name        string
+		issue       tracker.Issue
+		wantMessage string
+	}{
+		{
+			name: "closed",
+			issue: tracker.Issue{
+				Provider: "github",
+				Repo:     "acme/alpha",
+				Number:   49,
+				Title:    "Closed issue",
+				Body:     "Planned scope: docs/operations/stage-7-closed.md",
+				URL:      "https://github.example/acme/alpha/issues/49",
+				State:    "closed",
+				Labels:   []string{"odin:ready", "safety:low-risk"},
+			},
+			wantMessage: "requires an open issue",
+		},
+		{
+			name: "blocked",
+			issue: tracker.Issue{
+				Provider: "github",
+				Repo:     "acme/alpha",
+				Number:   50,
+				Title:    "Blocked issue",
+				Body:     "Planned scope: docs/operations/stage-7-blocked.md",
+				URL:      "https://github.example/acme/alpha/issues/50",
+				State:    "open",
+				Labels:   []string{"odin:ready", "safety:low-risk", "odin:blocked"},
+			},
+			wantMessage: "refuses blocked issue",
+		},
+		{
+			name: "pull-request",
+			issue: tracker.Issue{
+				Provider:    "github",
+				Repo:        "acme/alpha",
+				Number:      51,
+				Title:       "Pull request",
+				Body:        "Planned scope: docs/operations/stage-7-pr.md",
+				URL:         "https://github.example/acme/alpha/pull/51",
+				State:       "open",
+				Labels:      []string{"odin:ready", "safety:low-risk"},
+				PullRequest: true,
+			},
+			wantMessage: "not a pull request",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			store := openWorkCommandStore(t)
+			defer store.Close()
+			odinRoot := t.TempDir()
+			t.Setenv("ODIN_ROOT", odinRoot)
+
+			fake := &superviseE2EFakeTracker{issue: tc.issue}
+			installSuperviseE2EFakeTracker(t, fake)
+
+			_ = runWorkSuperviseJSON(t, ctx, store, []string{"supervise", "start", "--json"})
+			var output strings.Builder
+			err := RunWork(ctx, store, commandProjectRegistry(t), registry.Snapshot{}, []string{
+				"supervise", "e2e", "run-once", "--project", "alpha", "--issue", strconv.Itoa(tc.issue.Number), "--json",
+			}, &output)
+			if err == nil {
+				t.Fatalf("RunWork(supervise e2e run-once %s) error = nil, want fail-closed issue gate\noutput:\n%s", tc.name, output.String())
+			}
+			if !strings.Contains(err.Error(), tc.wantMessage) {
+				t.Fatalf("error = %q, want %q", err.Error(), tc.wantMessage)
+			}
+			assertSuperviseTableCount(t, ctx, store, "supervision_queue_decisions", 0)
+			assertSuperviseTableCount(t, ctx, store, "supervision_dispatch_claims", 0)
+
+			runID := newestSuperviseE2ERunID(t, odinRoot)
+			finalReportPath := filepath.Join(odinRoot, "runs", "supervised-e2e", runID, "final-report.json")
+			assertFileContains(t, finalReportPath, `"status": "failed_closed"`)
+			assertNoSuperviseSideEffects(t, ctx, store)
+		})
+	}
 }
 
 func TestRunWorkSuperviseE2ERunOnceDuplicateActiveClaimPreservesExistingClaim(t *testing.T) {

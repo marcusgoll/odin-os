@@ -91,6 +91,36 @@ func TestFetchEligibleIssuesFiltersReadyOpenIssuesAndSkipsBlockedAndPullRequests
 	}
 }
 
+func TestFetchIssueByIDPreservesPullRequestMarker(t *testing.T) {
+	t.Parallel()
+	skipIfLoopbackListenUnavailable(t)
+
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodGet {
+			t.Fatalf("method = %s, want GET", request.Method)
+		}
+		if request.URL.Path != "/repos/acme/widgets/issues/4" {
+			t.Fatalf("path = %s, want /repos/acme/widgets/issues/4", request.URL.Path)
+		}
+		fmt.Fprint(response, `{"number":4,"title":"pull request","body":"Planned scope: docs/operations/pr.md","html_url":"https://github.example/acme/widgets/pull/4","state":"open","pull_request":{},"labels":[{"name":"odin:ready"},{"name":"safety:low-risk"}]}`)
+	}))
+	defer server.Close()
+
+	client := NewClientWithConfig(Config{
+		BaseURL: server.URL,
+		Owner:   "acme",
+		Repo:    "widgets",
+	})
+
+	issue, err := client.FetchIssueByID(context.Background(), tracker.IssueID{Provider: "github", Repo: "acme/widgets", Number: 4})
+	if err != nil {
+		t.Fatalf("FetchIssueByID() error = %v", err)
+	}
+	if !issue.PullRequest {
+		t.Fatalf("FetchIssueByID().PullRequest = false, want true: %#v", issue)
+	}
+}
+
 func TestRequestAuditCountsForbiddenGitHubWriteMethodsWithoutTokenValues(t *testing.T) {
 	t.Parallel()
 	skipIfLoopbackListenUnavailable(t)

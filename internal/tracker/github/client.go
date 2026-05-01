@@ -499,14 +499,15 @@ func (client *Client) redact(value string) string {
 
 func (client *Client) toTrackerIssue(issue githubIssue, labels []string) tracker.Issue {
 	return tracker.Issue{
-		Provider: provider,
-		Repo:     client.repoID(),
-		Number:   issue.Number,
-		Title:    issue.Title,
-		Body:     issue.Body,
-		URL:      issue.HTMLURL,
-		State:    issue.State,
-		Labels:   labels,
+		Provider:    provider,
+		Repo:        client.repoID(),
+		Number:      issue.Number,
+		Title:       issue.Title,
+		Body:        issue.Body,
+		URL:         issue.HTMLURL,
+		State:       issue.State,
+		Labels:      labels,
+		PullRequest: issue.PullRequest != nil,
 	}
 }
 

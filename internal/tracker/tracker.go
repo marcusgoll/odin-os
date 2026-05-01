@@ -27,14 +27,15 @@ const (
 
 // Issue is the normalized tracker intake shape used before persistence.
 type Issue struct {
-	Provider string
-	Repo     string
-	Number   int
-	Title    string
-	Body     string
-	URL      string
-	State    string
-	Labels   []string
+	Provider    string
+	Repo        string
+	Number      int
+	Title       string
+	Body        string
+	URL         string
+	State       string
+	Labels      []string
+	PullRequest bool
 }
 
 // IssueComment is the normalized comment shape used for idempotency checks and
