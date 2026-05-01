@@ -192,17 +192,17 @@ Command:
 
 ```bash
 ODIN_DRY_RUN=true \
-./bin/odin tracker simulate-lifecycle --issue 123 --json
+./bin/odin work simulate-lifecycle --issue 123 --json
 ```
 
-Current implementation note:
+Implementation note:
 
-The current binary does not expose `odin tracker simulate-lifecycle`. Stage 2 cannot be claimed complete until that command exists or an explicit compatibility decision maps it to the existing tracker lifecycle methods.
+The binary exposes `odin work simulate-lifecycle` as the canonical Stage 2 operator path. It plans lifecycle label/comment writes through Odin's Delivery Workflow surface and reuses tracker lifecycle labels without adding a parallel top-level `odin tracker ...` operator surface.
 
 Exit criteria:
 
 - Planned writes are logged.
-- Actual writes are zero.
+- Actual GitHub HTTP requests are zero: `reads=0`, `writes=0`.
 - Token redaction is verified.
 - State transitions are valid.
 - No comments are created.
@@ -213,7 +213,13 @@ Exit criteria:
 Required artifacts:
 
 - Command JSON output listing planned lifecycle writes.
-- Zero-write proof from the tracker adapter or request recorder.
+- Planned lifecycle writes must be exactly:
+  1. Add label `odin:running`.
+  2. Add label `odin:human-review`.
+  3. Add label `odin:failed`.
+  4. Add an issue comment with the failure reason.
+- Stage 2 must not plan or execute blocked, done, issue close, follow-up issue creation, PR creation/update, scheduler dispatch, or Codex execution behavior.
+- Zero-request proof from the tracker adapter or request recorder.
 - Redaction proof showing no token value in output, logs, events, or reports.
 - State transition validation output.
 

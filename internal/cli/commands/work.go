@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 
 	"odin-os/internal/cli/scope"
@@ -19,7 +20,7 @@ import (
 	trackerintake "odin-os/internal/tracker/intake"
 )
 
-const workUsage = "usage: odin work status|profiles|start --project <key> --title <text>|intake --project <key> [--dry-run]"
+const workUsage = "usage: odin work status|profiles|start --project <key> --title <text>|intake --project <key> [--dry-run]|simulate-lifecycle --issue <number> [--project <key>] [--dry-run] [--json]"
 
 var newIntakeTracker = trackerintake.NewGitHubTracker
 
@@ -38,6 +39,8 @@ func RunWork(ctx context.Context, store *sqlite.Store, projectRegistry projects.
 		return runWorkStart(ctx, store, projectRegistry, args[1:], stdout)
 	case "intake":
 		return runWorkIntake(ctx, store, projectRegistry, args[1:], stdout)
+	case "simulate-lifecycle":
+		return runWorkSimulateLifecycle(projectRegistry, args[1:], stdout)
 	default:
 		_, err := fmt.Fprintf(stdout, "unknown work command: %s\n%s\n", args[0], workUsage)
 		return err
@@ -232,6 +235,110 @@ func runWorkIntakeJSON(ctx context.Context, store *sqlite.Store, service tracker
 	return encoder.Encode(report)
 }
 
+func runWorkSimulateLifecycle(projectRegistry projects.Registry, args []string, stdout io.Writer) error {
+	params := parseWorkStartArgs(args)
+	issueText := strings.TrimSpace(params["issue"])
+	if issueText == "" {
+		_, err := fmt.Fprintln(stdout, "usage: odin work simulate-lifecycle --issue <number> [--project <key>] [--dry-run] [--json]")
+		return err
+	}
+	issueNumber, err := strconv.Atoi(issueText)
+	if err != nil || issueNumber <= 0 {
+		return fmt.Errorf("invalid issue number %q", issueText)
+	}
+	dryRun := parseBoolFlag(params, "dry-run") || parseEnvBool(os.Getenv("ODIN_DRY_RUN"))
+	if !dryRun {
+		return fmt.Errorf("simulate-lifecycle requires ODIN_DRY_RUN=true or --dry-run")
+	}
+
+	project, err := resolveLifecycleProject(projectRegistry, strings.TrimSpace(params["project"]))
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(project.GitHub.Repo) == "" {
+		return fmt.Errorf("project %q has no GitHub repo for lifecycle simulation", project.Key)
+	}
+
+	report := buildLifecycleSimulationReport(project, issueNumber, dryRun)
+	if parseBoolFlag(params, "json") {
+		encoder := json.NewEncoder(stdout)
+		encoder.SetIndent("", "  ")
+		return encoder.Encode(report)
+	}
+
+	for _, log := range report.Logs {
+		if _, err := fmt.Fprintln(stdout, log.Message); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func resolveLifecycleProject(projectRegistry projects.Registry, projectKey string) (projects.Manifest, error) {
+	if projectKey != "" {
+		project, ok := projectRegistry.Lookup(projectKey)
+		if !ok {
+			return projects.Manifest{}, fmt.Errorf("unknown project %q", projectKey)
+		}
+		return project, nil
+	}
+	project, ok := projectRegistry.SystemProject()
+	if !ok {
+		return projects.Manifest{}, fmt.Errorf("no system project registered for lifecycle simulation")
+	}
+	return project, nil
+}
+
+func buildLifecycleSimulationReport(project projects.Manifest, issueNumber int, dryRun bool) workLifecycleSimulationReport {
+	reason := "Stage 2 dry-run lifecycle proof: simulated failure path."
+	actions := []workLifecyclePlannedAction{
+		{Sequence: 1, Action: "add_label", Label: tracker.LabelRunning},
+		{Sequence: 2, Action: "add_label", Label: tracker.LabelHumanReview},
+		{Sequence: 3, Action: "add_label", Label: tracker.LabelFailed},
+		{Sequence: 4, Action: "add_comment", Body: reason},
+	}
+	logs := make([]workLifecycleLog, 0, len(actions))
+	for _, action := range actions {
+		switch action.Action {
+		case "add_label":
+			logs = append(logs, workLifecycleLog{
+				Level:   "info",
+				Message: fmt.Sprintf("planned add_label %s on %s#%d", action.Label, project.GitHub.Repo, issueNumber),
+			})
+		case "add_comment":
+			logs = append(logs, workLifecycleLog{
+				Level:   "info",
+				Message: fmt.Sprintf("planned add_comment on %s#%d", project.GitHub.Repo, issueNumber),
+			})
+		}
+	}
+
+	tokenPresent := os.Getenv("GITHUB_TOKEN") != ""
+	tokenValue := ""
+	if tokenPresent {
+		tokenValue = "[REDACTED]"
+	}
+	return workLifecycleSimulationReport{
+		Project:        project.Key,
+		Repo:           project.GitHub.Repo,
+		Issue:          issueNumber,
+		DryRun:         dryRun,
+		GitHubWrites:   0,
+		PlannedActions: actions,
+		Logs:           logs,
+		MethodAudit:    workLifecycleAuditReport{Reads: 0, Writes: 0},
+		Redaction: workLifecycleRedactionReport{
+			TokenEnv:      "GITHUB_TOKEN",
+			TokenPresent:  tokenPresent,
+			TokenRedacted: true,
+			TokenValue:    tokenValue,
+		},
+		Dispatch:       "not_started",
+		PRs:            "not_created",
+		CodexExecution: "not_started",
+	}
+}
+
 type workIntakeJSONReport struct {
 	Project      string                `json:"project"`
 	Repo         string                `json:"repo"`
@@ -255,6 +362,45 @@ type workIntakeAuditReport struct {
 	Reads     int                        `json:"reads"`
 	Writes    int                        `json:"writes"`
 	Forbidden []tracker.ForbiddenRequest `json:"forbidden,omitempty"`
+}
+
+type workLifecycleSimulationReport struct {
+	Project        string                       `json:"project"`
+	Repo           string                       `json:"repo"`
+	Issue          int                          `json:"issue"`
+	DryRun         bool                         `json:"dry_run"`
+	GitHubWrites   int                          `json:"github_writes"`
+	PlannedActions []workLifecyclePlannedAction `json:"planned_actions"`
+	Logs           []workLifecycleLog           `json:"logs"`
+	MethodAudit    workLifecycleAuditReport     `json:"method_audit"`
+	Redaction      workLifecycleRedactionReport `json:"redaction"`
+	Dispatch       string                       `json:"dispatch"`
+	PRs            string                       `json:"prs"`
+	CodexExecution string                       `json:"codex_execution"`
+}
+
+type workLifecyclePlannedAction struct {
+	Sequence int    `json:"sequence"`
+	Action   string `json:"action"`
+	Label    string `json:"label,omitempty"`
+	Body     string `json:"body,omitempty"`
+}
+
+type workLifecycleLog struct {
+	Level   string `json:"level"`
+	Message string `json:"message"`
+}
+
+type workLifecycleAuditReport struct {
+	Reads  int `json:"reads"`
+	Writes int `json:"writes"`
+}
+
+type workLifecycleRedactionReport struct {
+	TokenEnv      string `json:"token_env"`
+	TokenPresent  bool   `json:"token_present"`
+	TokenRedacted bool   `json:"token_redacted"`
+	TokenValue    string `json:"token_value,omitempty"`
 }
 
 func countExternalIssues(ctx context.Context, store *sqlite.Store, repo string) (int, error) {
