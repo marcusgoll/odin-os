@@ -3,6 +3,7 @@ package commands
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -22,6 +23,7 @@ import (
 	"odin-os/internal/runner/codexexec"
 	"odin-os/internal/runtime/jobs"
 	"odin-os/internal/runtime/projections"
+	"odin-os/internal/runtime/supervision"
 	"odin-os/internal/store/sqlite"
 	"odin-os/internal/tracker"
 	trackergithub "odin-os/internal/tracker/github"
@@ -34,7 +36,9 @@ const stage3LifecycleCommentMarker = "<!-- odin-stage3-lifecycle-proof -->"
 const stage6ReviewEvidenceMarker = "<!-- odin-stage6-review-evidence -->"
 const stage6HumanReviewHandoffMarker = "<!-- odin-stage6-human-review-handoff -->"
 
-const workUsage = "usage: odin work status|profiles|start --project <key> --title <text>|intake --project <key> [--dry-run]|simulate-lifecycle --issue <number> [--project <key>] [--dry-run] [--json]|apply-lifecycle --issue <number> --approved-target <repo>#<issue> [--project <key>] [--json]|worker-dry-run --issue-fixture <path> [--project <key>] [--keep-worktree] [--json]|pr-dry-run --worktree <path> --base <branch> [--json]|pr-create --issue <number> --approved-target <repo>#<issue> --worktree <path> --base <branch> --wait-ci [--json]"
+const workUsage = "usage: odin work status|profiles|start --project <key> --title <text>|intake --project <key> [--dry-run]|simulate-lifecycle --issue <number> [--project <key>] [--dry-run] [--json]|apply-lifecycle --issue <number> --approved-target <repo>#<issue> [--project <key>] [--json]|worker-dry-run --issue-fixture <path> [--project <key>] [--keep-worktree] [--json]|pr-dry-run --worktree <path> --base <branch> [--json]|pr-create --issue <number> --approved-target <repo>#<issue> --worktree <path> --base <branch> --wait-ci [--json]|supervise status|start|stop|queue --project <key>|recover [--json]"
+
+const workSuperviseUsage = "usage: odin work supervise status|start|stop|queue --project <key>|recover [--json]"
 
 var newIntakeTracker = trackerintake.NewGitHubTracker
 
@@ -63,9 +67,151 @@ func RunWork(ctx context.Context, store *sqlite.Store, projectRegistry projects.
 		return runWorkPRDryRun(ctx, args[1:], stdout)
 	case "pr-create":
 		return runWorkPRCreate(ctx, projectRegistry, args[1:], stdout)
+	case "supervise":
+		return runWorkSupervise(ctx, store, projectRegistry, args[1:], stdout)
 	default:
 		_, err := fmt.Fprintf(stdout, "unknown work command: %s\n%s\n", args[0], workUsage)
 		return err
+	}
+}
+
+type workSuperviseReport struct {
+	Mode           string                      `json:"mode"`
+	Enabled        bool                        `json:"enabled"`
+	KillSwitch     bool                        `json:"kill_switch"`
+	ConfigHash     string                      `json:"config_hash"`
+	Queue          []supervision.QueueDecision `json:"queue"`
+	Claims         []supervision.PlannedClaim  `json:"claims"`
+	Recovery       supervision.RecoveryReport  `json:"recovery"`
+	CodexExecution string                      `json:"codex_execution"`
+	PRs            string                      `json:"prs"`
+	Merge          string                      `json:"merge"`
+	Deployment     string                      `json:"deployment"`
+}
+
+func runWorkSupervise(ctx context.Context, store *sqlite.Store, projectRegistry projects.Registry, args []string, stdout io.Writer) error {
+	if len(args) == 0 || args[0] == "help" || args[0] == "--help" {
+		_, err := fmt.Fprintln(stdout, workSuperviseUsage)
+		return err
+	}
+
+	params := parseWorkStartArgs(args[1:])
+	switch args[0] {
+	case "status", "start", "stop", "queue", "recover":
+	default:
+		_, err := fmt.Fprintf(stdout, "unknown work supervise command: %s\n%s\n", args[0], workSuperviseUsage)
+		return err
+	}
+	if !parseBoolFlag(params, "json") {
+		_, err := fmt.Fprintln(stdout, workSuperviseUsage)
+		return err
+	}
+
+	service := supervision.NewService(store, supervision.DefaultConfig())
+	var report supervision.Report
+	var err error
+	switch args[0] {
+	case "status":
+		report, err = service.Status(ctx)
+	case "start":
+		report, err = service.Start(ctx, "odin-work-supervise")
+	case "stop":
+		report, err = service.Stop(ctx, "odin-work-supervise")
+	case "queue":
+		report, err = runWorkSuperviseQueue(ctx, store, projectRegistry, service, params)
+	case "recover":
+		report, err = service.Recover(ctx)
+	}
+	if err != nil {
+		return err
+	}
+
+	encoder := json.NewEncoder(stdout)
+	encoder.SetIndent("", "  ")
+	return encoder.Encode(flattenWorkSuperviseReport(report))
+}
+
+func runWorkSuperviseQueue(ctx context.Context, store *sqlite.Store, projectRegistry projects.Registry, service supervision.Service, params map[string]string) (supervision.Report, error) {
+	projectKey := strings.TrimSpace(params["project"])
+	if projectKey == "" {
+		return supervision.Report{}, fmt.Errorf("missing --project for work supervise queue")
+	}
+	manifest, ok := projectRegistry.Lookup(projectKey)
+	if !ok {
+		return supervision.Report{}, fmt.Errorf("unknown project %q", projectKey)
+	}
+	project, err := ensureWorkSuperviseProject(ctx, store, manifest)
+	if err != nil {
+		return supervision.Report{}, err
+	}
+
+	issueNumber := 1
+	if rawIssue := strings.TrimSpace(params["issue"]); rawIssue != "" {
+		parsed, err := strconv.Atoi(rawIssue)
+		if err != nil || parsed <= 0 {
+			return supervision.Report{}, fmt.Errorf("invalid --issue %q", rawIssue)
+		}
+		issueNumber = parsed
+	}
+
+	return service.Queue(ctx, supervision.Project{
+		ID:   project.ID,
+		Key:  manifest.Key,
+		Repo: manifest.GitHub.Repo,
+	}, []supervision.Issue{{
+		Repo:         manifest.GitHub.Repo,
+		Number:       issueNumber,
+		Title:        "Stage 7 supervised agency control-plane proof",
+		Labels:       []string{"odin:ready", "safety:low-risk"},
+		ChangedPaths: []string{"docs/stage-7-supervised-agency.md"},
+	}})
+}
+
+func ensureWorkSuperviseProject(ctx context.Context, store *sqlite.Store, manifest projects.Manifest) (sqlite.Project, error) {
+	project, err := store.GetProjectByKey(ctx, manifest.Key)
+	if err == nil {
+		return project, nil
+	}
+	if err != sql.ErrNoRows {
+		return sqlite.Project{}, err
+	}
+
+	scopeValue := "project"
+	if manifest.SystemProject {
+		scopeValue = "odin-core"
+	}
+	return store.CreateProject(ctx, sqlite.CreateProjectParams{
+		Key:           manifest.Key,
+		Name:          manifest.Name,
+		Scope:         scopeValue,
+		GitRoot:       manifest.GitRoot,
+		DefaultBranch: manifest.DefaultBranch,
+		GitHubRepo:    manifest.GitHub.Repo,
+		ManifestPath:  manifest.SourcePath,
+	})
+}
+
+func flattenWorkSuperviseReport(report supervision.Report) workSuperviseReport {
+	queue := append([]supervision.QueueDecision(nil), report.Decisions...)
+	if queue == nil {
+		queue = []supervision.QueueDecision{}
+	}
+	claims := append([]supervision.PlannedClaim(nil), report.Claims...)
+	if claims == nil {
+		claims = []supervision.PlannedClaim{}
+	}
+	return workSuperviseReport{
+		Mode:           report.ModeKey,
+		Enabled:        report.Control.Status == supervision.ControlStatusEnabled,
+		KillSwitch:     report.Control.KillSwitchActive,
+		ConfigHash:     report.Control.ConfigHash,
+		Queue:          queue,
+		Claims:         claims,
+		Recovery:       report.Recovery,
+		CodexExecution: report.SideEffects.CodexExecution,
+		PRs:            report.SideEffects.PRs,
+		Merge:          report.SideEffects.Merge,
+		Deployment:     report.SideEffects.Deployment,
 	}
 }
 
