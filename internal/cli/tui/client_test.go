@@ -1,26 +1,87 @@
 package tui
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 )
 
-func TestRunRejectsContinuousMode(t *testing.T) {
+func TestRunContinuousModeRefreshesUntilContextCanceled(t *testing.T) {
 	t.Parallel()
 
-	var stdout bytes.Buffer
-	err := Run(context.Background(), nil, &stdout)
-	if err == nil || !strings.Contains(err.Error(), "--once only") {
-		t.Fatalf("Run() error = %v, want --once only refusal", err)
+	prometheus := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writePrometheusQueryResponse(t, w, r.URL.Query().Get("query"))
+	}))
+	defer prometheus.Close()
+	loki := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"status": "success",
+			"data": map[string]any{
+				"result": []any{},
+			},
+		})
+	}))
+	defer loki.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	writer := &cancelAfterWritesWriter{cancel: cancel, after: 2}
+
+	err := Run(ctx, []string{
+		"--interval", "1ms",
+		"--no-clear",
+		"--prometheus-url", prometheus.URL,
+		"--loki-url", loki.URL,
+	}, writer)
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
 	}
-	if stdout.Len() != 0 {
-		t.Fatalf("stdout = %q, want no render for refused continuous mode", stdout.String())
+	output := writer.String()
+	if count := strings.Count(output, "ODIN OBSERVABILITY"); count < 2 {
+		t.Fatalf("Run() rendered %d frame(s), want at least 2:\n%s", count, output)
+	}
+	if strings.Contains(output, "\x1b[2J") {
+		t.Fatalf("Run() output contains clear-screen escape despite --no-clear:\n%q", output)
+	}
+}
+
+func TestRunContinuousModeClearsScreenByDefault(t *testing.T) {
+	t.Parallel()
+
+	prometheus := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writePrometheusQueryResponse(t, w, r.URL.Query().Get("query"))
+	}))
+	defer prometheus.Close()
+	loki := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"status": "success",
+			"data": map[string]any{
+				"result": []any{},
+			},
+		})
+	}))
+	defer loki.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	writer := &cancelAfterWritesWriter{cancel: cancel, after: 1}
+
+	err := Run(ctx, []string{
+		"--interval", "1ms",
+		"--prometheus-url", prometheus.URL,
+		"--loki-url", loki.URL,
+	}, writer)
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if output := writer.String(); !strings.HasPrefix(output, "\x1b[H\x1b[2J") {
+		t.Fatalf("Run() output = %q, want clear-screen prefix", output)
 	}
 }
 
@@ -235,3 +296,32 @@ func prometheusSampleFixture(labels map[string]string, value string) map[string]
 		"value":  []any{1714521600.0, value},
 	}
 }
+
+type cancelAfterWritesWriter struct {
+	mu     sync.Mutex
+	buffer strings.Builder
+	cancel context.CancelFunc
+	after  int
+	writes int
+}
+
+func (writer *cancelAfterWritesWriter) Write(data []byte) (int, error) {
+	writer.mu.Lock()
+	defer writer.mu.Unlock()
+	writer.writes++
+	if _, err := writer.buffer.Write(data); err != nil {
+		return 0, err
+	}
+	if writer.writes >= writer.after {
+		writer.cancel()
+	}
+	return len(data), nil
+}
+
+func (writer *cancelAfterWritesWriter) String() string {
+	writer.mu.Lock()
+	defer writer.mu.Unlock()
+	return writer.buffer.String()
+}
+
+var _ io.Writer = (*cancelAfterWritesWriter)(nil)

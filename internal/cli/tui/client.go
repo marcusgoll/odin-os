@@ -19,6 +19,7 @@ var ErrUnavailableTelemetry = errors.New("unavailable telemetry")
 var defaultHTTPClient = &http.Client{Timeout: 5 * time.Second}
 
 const recentLogsQuery = `{job="docker-containers"} |= "odin"`
+const clearScreen = "\x1b[H\x1b[2J"
 
 type Client struct {
 	PrometheusURL string
@@ -30,25 +31,55 @@ func Run(ctx context.Context, args []string, stdout io.Writer) error {
 	flags := flag.NewFlagSet("tui", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	once := flags.Bool("once", false, "render once and exit")
+	interval := flags.Duration("interval", 5*time.Second, "refresh interval for continuous mode")
+	noClear := flags.Bool("no-clear", false, "do not clear the terminal between continuous refresh frames")
 	prometheusURL := flags.String("prometheus-url", "http://127.0.0.1:9090", "Prometheus base URL")
 	lokiURL := flags.String("loki-url", "http://127.0.0.1:3100", "Loki base URL")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
-			_, _ = fmt.Fprintln(stdout, "usage: odin tui --once [--prometheus-url URL] [--loki-url URL]")
+			_, _ = fmt.Fprintln(stdout, "usage: odin tui [--once] [--interval 5s] [--no-clear] [--prometheus-url URL] [--loki-url URL]")
 		}
 		return err
 	}
-	if !*once {
-		return errors.New("odin tui currently supports --once only; continuous mode is not implemented")
-	}
 	if flags.NArg() > 0 {
 		return fmt.Errorf("unexpected odin tui argument: %s", flags.Arg(0))
+	}
+	if *interval <= 0 {
+		return errors.New("odin tui --interval must be greater than zero")
 	}
 
 	client := Client{
 		PrometheusURL: *prometheusURL,
 		LokiURL:       *lokiURL,
 	}
+	if *once {
+		return renderFrame(ctx, client, stdout, false)
+	}
+	return runContinuous(ctx, client, stdout, *interval, !*noClear)
+}
+
+func runContinuous(ctx context.Context, client Client, stdout io.Writer, interval time.Duration, clear bool) error {
+	for {
+		if err := renderFrame(ctx, client, stdout, clear); err != nil {
+			return err
+		}
+
+		timer := time.NewTimer(interval)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			return nil
+		case <-timer.C:
+		}
+	}
+}
+
+func renderFrame(ctx context.Context, client Client, stdout io.Writer, clear bool) error {
 	model, err := client.QueryOverview(ctx)
 	if err != nil {
 		return err
@@ -58,6 +89,11 @@ func Run(ctx context.Context, args []string, stdout io.Writer) error {
 		model.LogsUnavailable = err.Error()
 	} else {
 		model.Logs = logs
+	}
+	if clear {
+		if _, err := io.WriteString(stdout, clearScreen); err != nil {
+			return err
+		}
 	}
 	_, err = io.WriteString(stdout, RenderOverview(model))
 	return err
