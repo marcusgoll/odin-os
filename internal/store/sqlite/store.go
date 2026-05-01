@@ -384,7 +384,6 @@ func (store *Store) UpsertSupervisionDispatchClaim(ctx context.Context, params U
 				status = excluded.status,
 				config_hash = excluded.config_hash,
 				claimed_by = excluded.claimed_by,
-				claimed_at = excluded.claimed_at,
 				updated_at = excluded.updated_at
 		`,
 			params.ProjectID,
@@ -414,6 +413,29 @@ func (store *Store) UpsertSupervisionDispatchClaim(ctx context.Context, params U
 	})
 
 	return claim, err
+}
+
+func (store *Store) ReleaseSupervisionDispatchClaim(ctx context.Context, params ReleaseSupervisionDispatchClaimParams) (SupervisionDispatchClaim, error) {
+	now := store.now()
+	status := params.Status
+	if status == "" {
+		status = "released"
+	}
+
+	if _, err := store.db.ExecContext(ctx, `
+		UPDATE supervision_dispatch_claims
+		SET status = ?, released_at = ?, updated_at = ?
+		WHERE claim_key = ?
+	`, status, formatTime(now), formatTime(now), params.ClaimKey); err != nil {
+		return SupervisionDispatchClaim{}, err
+	}
+
+	row := store.db.QueryRowContext(ctx, `
+		SELECT id, project_id, repo, issue_number, claim_key, status, config_hash, claimed_by, claimed_at, released_at, created_at, updated_at
+		FROM supervision_dispatch_claims
+		WHERE claim_key = ?
+	`, params.ClaimKey)
+	return scanSupervisionDispatchClaim(row)
 }
 
 func (store *Store) ListSupervisionDispatchClaims(ctx context.Context, params ListSupervisionDispatchClaimsParams) ([]SupervisionDispatchClaim, error) {

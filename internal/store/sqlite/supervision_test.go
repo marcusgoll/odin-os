@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 )
 
 func TestSupervisionControlPersistsKillSwitchAndConfigHash(t *testing.T) {
@@ -159,6 +160,97 @@ func TestSupervisionDispatchClaimPreventsDuplicateActiveClaim(t *testing.T) {
 	}
 	if len(claims) != 1 || claims[0].ID != first.ID || claims[0].Status != "reserved" {
 		t.Fatalf("claims = %+v, want only first reserved claim", claims)
+	}
+}
+
+func TestSupervisionDispatchClaimRetryPreservesOriginalClaimedAt(t *testing.T) {
+	ctx := context.Background()
+	store := openMigratedTestStore(t, "supervision-dispatch-claim-retry.db")
+	defer store.Close()
+	project := createSupervisionProject(t, ctx, store)
+
+	firstTime := time.Date(2026, 5, 1, 10, 0, 0, 0, time.UTC)
+	store.Now = func() time.Time { return firstTime }
+	first, err := store.UpsertSupervisionDispatchClaim(ctx, UpsertSupervisionDispatchClaimParams{
+		ProjectID:   project.ID,
+		Repo:        "marcusgoll/odin-os",
+		IssueNumber: 89,
+		ClaimKey:    "stage7:odin-os:89:a",
+		Status:      "reserved",
+		ConfigHash:  "sha256:config-a",
+		ClaimedBy:   "supervision-service",
+	})
+	if err != nil {
+		t.Fatalf("UpsertSupervisionDispatchClaim(first) error = %v", err)
+	}
+
+	store.Now = func() time.Time { return firstTime.Add(10 * time.Minute) }
+	retried, err := store.UpsertSupervisionDispatchClaim(ctx, UpsertSupervisionDispatchClaimParams{
+		ProjectID:   project.ID,
+		Repo:        "marcusgoll/odin-os",
+		IssueNumber: 89,
+		ClaimKey:    "stage7:odin-os:89:a",
+		Status:      "reserved",
+		ConfigHash:  "sha256:config-b",
+		ClaimedBy:   "supervision-service",
+	})
+	if err != nil {
+		t.Fatalf("UpsertSupervisionDispatchClaim(retry) error = %v", err)
+	}
+
+	if retried.ID != first.ID {
+		t.Fatalf("retried.ID = %d, want same claim ID %d", retried.ID, first.ID)
+	}
+	if !retried.ClaimedAt.Equal(first.ClaimedAt) {
+		t.Fatalf("retried.ClaimedAt = %s, want original claimed_at %s", retried.ClaimedAt, first.ClaimedAt)
+	}
+	if !retried.UpdatedAt.Equal(firstTime.Add(10 * time.Minute)) {
+		t.Fatalf("retried.UpdatedAt = %s, want retry update time", retried.UpdatedAt)
+	}
+}
+
+func TestSupervisionDispatchClaimReleaseSetsReleasedAt(t *testing.T) {
+	ctx := context.Background()
+	store := openMigratedTestStore(t, "supervision-dispatch-claim-release.db")
+	defer store.Close()
+	project := createSupervisionProject(t, ctx, store)
+
+	claimedAt := time.Date(2026, 5, 1, 11, 0, 0, 0, time.UTC)
+	store.Now = func() time.Time { return claimedAt }
+	claim, err := store.UpsertSupervisionDispatchClaim(ctx, UpsertSupervisionDispatchClaimParams{
+		ProjectID:   project.ID,
+		Repo:        "marcusgoll/odin-os",
+		IssueNumber: 90,
+		ClaimKey:    "stage7:odin-os:90:a",
+		Status:      "reserved",
+		ConfigHash:  "sha256:config-a",
+		ClaimedBy:   "supervision-service",
+	})
+	if err != nil {
+		t.Fatalf("UpsertSupervisionDispatchClaim() error = %v", err)
+	}
+
+	releasedAt := claimedAt.Add(30 * time.Minute)
+	store.Now = func() time.Time { return releasedAt }
+	released, err := store.ReleaseSupervisionDispatchClaim(ctx, ReleaseSupervisionDispatchClaimParams{
+		ClaimKey: claim.ClaimKey,
+		Status:   "released",
+	})
+	if err != nil {
+		t.Fatalf("ReleaseSupervisionDispatchClaim() error = %v", err)
+	}
+
+	if released.Status != "released" {
+		t.Fatalf("released.Status = %q, want released", released.Status)
+	}
+	if released.ReleasedAt == nil {
+		t.Fatalf("released.ReleasedAt = nil, want release timestamp")
+	}
+	if !released.ReleasedAt.Equal(releasedAt) {
+		t.Fatalf("released.ReleasedAt = %s, want %s", *released.ReleasedAt, releasedAt)
+	}
+	if !released.ClaimedAt.Equal(claimedAt) {
+		t.Fatalf("released.ClaimedAt = %s, want original claim time %s", released.ClaimedAt, claimedAt)
 	}
 }
 

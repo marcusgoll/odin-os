@@ -966,6 +966,11 @@ type UpsertSupervisionDispatchClaimParams struct {
 	ClaimedBy   string
 }
 
+type ReleaseSupervisionDispatchClaimParams struct {
+	ClaimKey string
+	Status   string
+}
+
 type ListSupervisionDispatchClaimsParams struct {
 	ProjectID *int64
 	Repo      string
