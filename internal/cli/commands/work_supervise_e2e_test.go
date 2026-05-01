@@ -14,7 +14,10 @@ import (
 
 	"odin-os/internal/core/projects"
 	"odin-os/internal/registry"
+	"odin-os/internal/runtime/supervision"
 	"odin-os/internal/store/sqlite"
+	"odin-os/internal/tracker"
+	trackerintake "odin-os/internal/tracker/intake"
 )
 
 func TestRunWorkSuperviseE2ERequiresJSON(t *testing.T) {
@@ -271,10 +274,306 @@ func TestRunWorkSuperviseE2ERunOnceRequiresExplicitIssue(t *testing.T) {
 
 	err, output = runWorkSuperviseE2EForError(t, ctx, store, []string{"supervise", "e2e", "run-once", "--project", "alpha", "--issue", "42", "--json"})
 	if err == nil {
-		t.Fatalf("RunWork(supervise e2e run-once) error = nil, want not_implemented\noutput:\n%s", output)
+		t.Fatalf("RunWork(supervise e2e run-once) error = nil, want ODIN_ROOT error\noutput:\n%s", output)
 	}
-	if !strings.Contains(err.Error(), "not_implemented: work supervise e2e run-once") {
-		t.Fatalf("error = %q, want not_implemented after validation", err.Error())
+	if !strings.Contains(err.Error(), "ODIN_ROOT is required for work supervise e2e run-once") {
+		t.Fatalf("error = %q, want ODIN_ROOT required after validation", err.Error())
+	}
+	assertNoSuperviseSideEffects(t, ctx, store)
+}
+
+func TestRunWorkSuperviseE2ERunOnceQueuesExactIssueAndClaims(t *testing.T) {
+	ctx := context.Background()
+	store := openWorkCommandStore(t)
+	defer store.Close()
+	odinRoot := t.TempDir()
+	t.Setenv("ODIN_ROOT", odinRoot)
+
+	fake := &superviseE2EFakeTracker{
+		issue: tracker.Issue{
+			Provider: "github",
+			Repo:     "acme/alpha",
+			Number:   42,
+			Title:    "Supervised E2E exact issue",
+			Body:     "Planned scope: docs/operations/stage-7-task-3.md",
+			URL:      "https://github.example/acme/alpha/issues/42",
+			State:    "open",
+			Labels:   []string{"odin:ready", "safety:low-risk"},
+		},
+	}
+	installSuperviseE2EFakeTracker(t, fake)
+
+	_ = runWorkSuperviseJSON(t, ctx, store, []string{"supervise", "start", "--json"})
+	var output strings.Builder
+	if err := RunWork(ctx, store, commandProjectRegistry(t), registry.Snapshot{}, []string{
+		"supervise", "e2e", "run-once", "--project", "alpha", "--issue", "42", "--json",
+	}, &output); err != nil {
+		t.Fatalf("RunWork(supervise e2e run-once) error = %v\noutput:\n%s", err, output.String())
+	}
+	if fake.fetchByIDCalls != 1 {
+		t.Fatalf("FetchIssueByID calls = %d, want 1", fake.fetchByIDCalls)
+	}
+	if fake.fetchEligibleCalls != 0 {
+		t.Fatalf("FetchEligibleIssues calls = %d, want 0", fake.fetchEligibleCalls)
+	}
+	if fake.lastID != (tracker.IssueID{Provider: "github", Repo: "acme/alpha", Number: 42}) {
+		t.Fatalf("FetchIssueByID id = %+v, want github acme/alpha #42", fake.lastID)
+	}
+
+	report := decodeSuperviseE2ERunOnceReport(t, output.String())
+	if report.Phase != "queued" || report.Status != "claimed" || report.Project != "alpha" || report.Repo != "acme/alpha" {
+		t.Fatalf("report = %+v, want queued/claimed alpha acme/alpha", report)
+	}
+	if report.Issue.Number != 42 || report.Issue.PlannedPath != "docs/operations/stage-7-task-3.md" {
+		t.Fatalf("issue = %+v, want exact issue and planned docs/operations path", report.Issue)
+	}
+	if len(report.Queue) != 1 {
+		t.Fatalf("queue len = %d, want 1: %+v", len(report.Queue), report.Queue)
+	}
+	if report.Queue[0].Decision != supervision.DecisionEligible || !report.Queue[0].Eligible || report.Queue[0].ClaimKey == "" {
+		t.Fatalf("queue decision = %+v, want eligible with claim key", report.Queue[0])
+	}
+	if len(report.Claims) != 1 || report.Claims[0].IssueNumber != 42 || report.Claims[0].Status != supervision.ClaimStatusReserved {
+		t.Fatalf("claims = %+v, want one reserved claim for issue 42", report.Claims)
+	}
+	if report.CodexExecution != supervision.SideEffectNotStarted ||
+		report.PRs != supervision.SideEffectNotCreated ||
+		report.Merge != supervision.SideEffectNotMerged ||
+		report.Deployment != supervision.SideEffectNotStarted {
+		t.Fatalf("side effects = %+v, want no worker/PR/merge/deploy", report)
+	}
+
+	project, err := store.GetProjectByKey(ctx, "alpha")
+	if err != nil {
+		t.Fatalf("GetProjectByKey(alpha) error = %v", err)
+	}
+	decisions, err := store.ListSupervisionQueueDecisions(ctx, sqlite.ListSupervisionQueueDecisionsParams{
+		ProjectID: &project.ID,
+		Repo:      "acme/alpha",
+	})
+	if err != nil {
+		t.Fatalf("ListSupervisionQueueDecisions() error = %v", err)
+	}
+	if len(decisions) != 1 || decisions[0].IssueNumber != 42 || decisions[0].Decision != supervision.DecisionEligible {
+		t.Fatalf("persisted decisions = %+v, want one eligible decision for issue 42", decisions)
+	}
+	claims, err := store.ListSupervisionDispatchClaims(ctx, sqlite.ListSupervisionDispatchClaimsParams{
+		ProjectID: &project.ID,
+		Repo:      "acme/alpha",
+	})
+	if err != nil {
+		t.Fatalf("ListSupervisionDispatchClaims() error = %v", err)
+	}
+	if len(claims) != 1 || claims[0].IssueNumber != 42 || claims[0].Status != supervision.ClaimStatusReserved {
+		t.Fatalf("persisted claims = %+v, want one reserved claim for issue 42", claims)
+	}
+
+	queueReportPath := filepath.Join(odinRoot, "runs", "supervised-e2e", report.RunID, "queue-report.json")
+	finalReportPath := filepath.Join(odinRoot, "runs", "supervised-e2e", report.RunID, "final-report.json")
+	assertFileContains(t, queueReportPath, `"decision": "eligible"`)
+	assertFileContains(t, finalReportPath, `"status": "claimed"`)
+	assertNoSuperviseSideEffects(t, ctx, store)
+}
+
+func TestRunWorkSuperviseE2ERunOnceKillSwitchBlocksWorker(t *testing.T) {
+	ctx := context.Background()
+	store := openWorkCommandStore(t)
+	defer store.Close()
+	odinRoot := t.TempDir()
+	t.Setenv("ODIN_ROOT", odinRoot)
+
+	fake := &superviseE2EFakeTracker{
+		issue: tracker.Issue{
+			Provider: "github",
+			Repo:     "acme/alpha",
+			Number:   43,
+			Title:    "Kill switch exact issue",
+			Body:     "Planned scope: docs/operations/stage-7-kill-switch.md",
+			URL:      "https://github.example/acme/alpha/issues/43",
+			State:    "open",
+			Labels:   []string{"odin:ready", "safety:low-risk"},
+		},
+	}
+	installSuperviseE2EFakeTracker(t, fake)
+
+	var output strings.Builder
+	err := RunWork(ctx, store, commandProjectRegistry(t), registry.Snapshot{}, []string{
+		"supervise", "e2e", "run-once", "--project", "alpha", "--issue", "43", "--json",
+	}, &output)
+	if err == nil {
+		t.Fatalf("RunWork(supervise e2e run-once with kill switch) error = nil, want refused failure\noutput:\n%s", output.String())
+	}
+	if !strings.Contains(err.Error(), supervision.RefusalKillSwitchActive) {
+		t.Fatalf("error = %q, want kill switch refusal", err.Error())
+	}
+	if fake.fetchByIDCalls != 1 || fake.fetchEligibleCalls != 0 {
+		t.Fatalf("tracker calls = byID %d eligible %d, want exact issue fetch only", fake.fetchByIDCalls, fake.fetchEligibleCalls)
+	}
+
+	runID := newestSuperviseE2ERunID(t, odinRoot)
+	queueReportPath := filepath.Join(odinRoot, "runs", "supervised-e2e", runID, "queue-report.json")
+	finalReportPath := filepath.Join(odinRoot, "runs", "supervised-e2e", runID, "final-report.json")
+	assertFileContains(t, queueReportPath, `"decision": "refused"`)
+	assertFileContains(t, queueReportPath, `"refusal_reason": "kill_switch_active"`)
+	assertFileContains(t, finalReportPath, `"status": "refused"`)
+	assertFileContains(t, finalReportPath, `"codex_execution": "not_started"`)
+
+	project, err := store.GetProjectByKey(ctx, "alpha")
+	if err != nil {
+		t.Fatalf("GetProjectByKey(alpha) error = %v", err)
+	}
+	claims, err := store.ListSupervisionDispatchClaims(ctx, sqlite.ListSupervisionDispatchClaimsParams{
+		ProjectID: &project.ID,
+		Repo:      "acme/alpha",
+	})
+	if err != nil {
+		t.Fatalf("ListSupervisionDispatchClaims() error = %v", err)
+	}
+	if len(claims) != 0 {
+		t.Fatalf("claims = %+v, want none while kill switch is active", claims)
+	}
+	assertNoSuperviseSideEffects(t, ctx, store)
+}
+
+func TestRunWorkSuperviseE2ERunOnceMismatchedIssueFailsClosed(t *testing.T) {
+	ctx := context.Background()
+	store := openWorkCommandStore(t)
+	defer store.Close()
+	odinRoot := t.TempDir()
+	t.Setenv("ODIN_ROOT", odinRoot)
+
+	fake := &superviseE2EFakeTracker{
+		issue: tracker.Issue{
+			Provider: "github",
+			Repo:     "acme/alpha",
+			Number:   44,
+			Title:    "Mismatched issue",
+			Body:     "Planned scope: docs/operations/stage-7-mismatch.md",
+			URL:      "https://github.example/acme/alpha/issues/44",
+			State:    "open",
+			Labels:   []string{"odin:ready", "safety:low-risk"},
+		},
+	}
+	installSuperviseE2EFakeTracker(t, fake)
+
+	_ = runWorkSuperviseJSON(t, ctx, store, []string{"supervise", "start", "--json"})
+	var output strings.Builder
+	err := RunWork(ctx, store, commandProjectRegistry(t), registry.Snapshot{}, []string{
+		"supervise", "e2e", "run-once", "--project", "alpha", "--issue", "45", "--json",
+	}, &output)
+	if err == nil {
+		t.Fatalf("RunWork(supervise e2e run-once mismatched issue) error = nil, want fail-closed mismatch\noutput:\n%s", output.String())
+	}
+	if !strings.Contains(err.Error(), "fetched issue number 44 differs from requested --issue 45") {
+		t.Fatalf("error = %q, want mismatched issue failure", err.Error())
+	}
+	if fake.fetchByIDCalls != 1 || fake.fetchEligibleCalls != 0 {
+		t.Fatalf("tracker calls = byID %d eligible %d, want exact issue fetch only", fake.fetchByIDCalls, fake.fetchEligibleCalls)
+	}
+	assertSuperviseTableCount(t, ctx, store, "supervision_queue_decisions", 0)
+	assertSuperviseTableCount(t, ctx, store, "supervision_dispatch_claims", 0)
+
+	runID := newestSuperviseE2ERunID(t, odinRoot)
+	finalReportPath := filepath.Join(odinRoot, "runs", "supervised-e2e", runID, "final-report.json")
+	assertFileContains(t, finalReportPath, `"status": "failed_closed"`)
+	assertFileContains(t, finalReportPath, `"requested_issue": 45`)
+	assertFileContains(t, finalReportPath, `"fetched_issue": 44`)
+	assertNoSuperviseSideEffects(t, ctx, store)
+}
+
+func TestRunWorkSuperviseE2ERunOnceRejectsNonOperationsPathBeforeQueue(t *testing.T) {
+	ctx := context.Background()
+	store := openWorkCommandStore(t)
+	defer store.Close()
+	odinRoot := t.TempDir()
+	t.Setenv("ODIN_ROOT", odinRoot)
+
+	fake := &superviseE2EFakeTracker{
+		issue: tracker.Issue{
+			Provider: "github",
+			Repo:     "acme/alpha",
+			Number:   47,
+			Title:    "Wrong docs path",
+			Body:     "Planned scope: docs/not-operations.md",
+			URL:      "https://github.example/acme/alpha/issues/47",
+			State:    "open",
+			Labels:   []string{"odin:ready", "safety:low-risk"},
+		},
+	}
+	installSuperviseE2EFakeTracker(t, fake)
+
+	_ = runWorkSuperviseJSON(t, ctx, store, []string{"supervise", "start", "--json"})
+	var output strings.Builder
+	err := RunWork(ctx, store, commandProjectRegistry(t), registry.Snapshot{}, []string{
+		"supervise", "e2e", "run-once", "--project", "alpha", "--issue", "47", "--json",
+	}, &output)
+	if err == nil {
+		t.Fatalf("RunWork(supervise e2e run-once with non-operations path) error = nil, want fail-closed path gate\noutput:\n%s", output.String())
+	}
+	if !strings.Contains(err.Error(), "requires Planned scope under docs/operations/") {
+		t.Fatalf("error = %q, want docs/operations path gate", err.Error())
+	}
+	assertSuperviseTableCount(t, ctx, store, "supervision_queue_decisions", 0)
+	assertSuperviseTableCount(t, ctx, store, "supervision_dispatch_claims", 0)
+
+	runID := newestSuperviseE2ERunID(t, odinRoot)
+	finalReportPath := filepath.Join(odinRoot, "runs", "supervised-e2e", runID, "final-report.json")
+	assertFileContains(t, finalReportPath, `"status": "failed_closed"`)
+	assertFileContains(t, finalReportPath, `"changed_paths": [`)
+	assertFileContains(t, finalReportPath, `"docs/not-operations.md"`)
+	assertNoSuperviseSideEffects(t, ctx, store)
+}
+
+func TestRunWorkSuperviseE2ERunOnceDuplicateActiveClaimPreservesExistingClaim(t *testing.T) {
+	ctx := context.Background()
+	store := openWorkCommandStore(t)
+	defer store.Close()
+	odinRoot := t.TempDir()
+	t.Setenv("ODIN_ROOT", odinRoot)
+
+	fake := &superviseE2EFakeTracker{
+		issue: tracker.Issue{
+			Provider: "github",
+			Repo:     "acme/alpha",
+			Number:   46,
+			Title:    "Duplicate exact issue",
+			Body:     "Planned scope: docs/operations/stage-7-idempotent.md",
+			URL:      "https://github.example/acme/alpha/issues/46",
+			State:    "open",
+			Labels:   []string{"odin:ready", "safety:low-risk"},
+		},
+	}
+	installSuperviseE2EFakeTracker(t, fake)
+
+	_ = runWorkSuperviseJSON(t, ctx, store, []string{"supervise", "start", "--json"})
+	firstOutput := runWorkSuperviseE2ERunOnceOutput(t, ctx, store, []string{
+		"supervise", "e2e", "run-once", "--project", "alpha", "--issue", "46", "--json",
+	})
+	secondOutput := runWorkSuperviseE2ERunOnceOutput(t, ctx, store, []string{
+		"supervise", "e2e", "run-once", "--project", "alpha", "--issue", "46", "--json",
+	})
+	first := decodeSuperviseE2ERunOnceReport(t, firstOutput)
+	second := decodeSuperviseE2ERunOnceReport(t, secondOutput)
+	if len(first.Claims) != 1 || len(second.Claims) != 1 {
+		t.Fatalf("claims = first %+v second %+v, want one claim reported by each run", first.Claims, second.Claims)
+	}
+	if first.Claims[0].ClaimKey != second.Claims[0].ClaimKey {
+		t.Fatalf("claim keys = first %q second %q, want existing claim preserved", first.Claims[0].ClaimKey, second.Claims[0].ClaimKey)
+	}
+
+	project, err := store.GetProjectByKey(ctx, "alpha")
+	if err != nil {
+		t.Fatalf("GetProjectByKey(alpha) error = %v", err)
+	}
+	claims, err := store.ListSupervisionDispatchClaims(ctx, sqlite.ListSupervisionDispatchClaimsParams{
+		ProjectID: &project.ID,
+		Repo:      "acme/alpha",
+	})
+	if err != nil {
+		t.Fatalf("ListSupervisionDispatchClaims() error = %v", err)
+	}
+	if len(claims) != 1 || claims[0].ClaimKey != first.Claims[0].ClaimKey {
+		t.Fatalf("persisted claims = %+v, want one preserved claim", claims)
 	}
 	assertNoSuperviseSideEffects(t, ctx, store)
 }
@@ -303,6 +602,125 @@ type superviseE2EPrepareIssueReport struct {
 	Merge              string `json:"merge"`
 	Deployment         string `json:"deployment"`
 	HumanMergeRequired bool   `json:"human_merge_required"`
+}
+
+type superviseE2ERunOnceReport struct {
+	Mode           string                       `json:"mode"`
+	Phase          string                       `json:"phase"`
+	Status         string                       `json:"status"`
+	Project        string                       `json:"project"`
+	Repo           string                       `json:"repo"`
+	RunID          string                       `json:"run_id"`
+	Issue          workSuperviseE2EIssueReport  `json:"issue"`
+	Queue          []supervision.QueueDecision  `json:"queue"`
+	Claims         []supervision.PlannedClaim   `json:"claims"`
+	CodexExecution string                       `json:"codex_execution"`
+	PRs            string                       `json:"prs"`
+	Merge          string                       `json:"merge"`
+	Deployment     string                       `json:"deployment"`
+	Artifacts      workSuperviseE2EArtifactRefs `json:"artifacts"`
+}
+
+type superviseE2EFakeTracker struct {
+	issue              tracker.Issue
+	err                error
+	lastID             tracker.IssueID
+	fetchByIDCalls     int
+	fetchEligibleCalls int
+}
+
+func (fake *superviseE2EFakeTracker) FetchEligibleIssues(context.Context) ([]tracker.Issue, error) {
+	fake.fetchEligibleCalls++
+	return nil, fmt.Errorf("unexpected FetchEligibleIssues call")
+}
+
+func (fake *superviseE2EFakeTracker) FetchIssueByID(_ context.Context, id tracker.IssueID) (tracker.Issue, error) {
+	fake.fetchByIDCalls++
+	fake.lastID = id
+	if fake.err != nil {
+		return tracker.Issue{}, fake.err
+	}
+	return fake.issue, nil
+}
+
+func (fake *superviseE2EFakeTracker) MarkInProgress(context.Context, tracker.IssueID) error {
+	return fmt.Errorf("unexpected mutation")
+}
+
+func (fake *superviseE2EFakeTracker) MarkBlocked(context.Context, tracker.IssueID, string) error {
+	return fmt.Errorf("unexpected mutation")
+}
+
+func (fake *superviseE2EFakeTracker) MarkFailed(context.Context, tracker.IssueID, string) error {
+	return fmt.Errorf("unexpected mutation")
+}
+
+func (fake *superviseE2EFakeTracker) MarkReadyForReview(context.Context, tracker.IssueID) error {
+	return fmt.Errorf("unexpected mutation")
+}
+
+func (fake *superviseE2EFakeTracker) MarkDone(context.Context, tracker.IssueID) error {
+	return fmt.Errorf("unexpected mutation")
+}
+
+func (fake *superviseE2EFakeTracker) AddComment(context.Context, tracker.IssueID, string) error {
+	return fmt.Errorf("unexpected mutation")
+}
+
+func (fake *superviseE2EFakeTracker) CreateFollowUpIssue(context.Context, tracker.FollowUpIssue) (tracker.Issue, error) {
+	return tracker.Issue{}, fmt.Errorf("unexpected mutation")
+}
+
+func installSuperviseE2EFakeTracker(t *testing.T, fake *superviseE2EFakeTracker) {
+	t.Helper()
+
+	previousFactory := newIntakeTracker
+	t.Cleanup(func() { newIntakeTracker = previousFactory })
+	newIntakeTracker = func(project projects.Manifest, options trackerintake.SyncOptions) (tracker.Tracker, error) {
+		if project.GitHub.Repo != "acme/alpha" {
+			return nil, fmt.Errorf("repo = %q, want acme/alpha", project.GitHub.Repo)
+		}
+		return fake, nil
+	}
+}
+
+func runWorkSuperviseE2ERunOnceOutput(t *testing.T, ctx context.Context, store *sqlite.Store, args []string) string {
+	t.Helper()
+
+	var output strings.Builder
+	if err := RunWork(ctx, store, commandProjectRegistry(t), registry.Snapshot{}, args, &output); err != nil {
+		t.Fatalf("RunWork(%v) error = %v\noutput:\n%s", args, err, output.String())
+	}
+	return output.String()
+}
+
+func decodeSuperviseE2ERunOnceReport(t *testing.T, output string) superviseE2ERunOnceReport {
+	t.Helper()
+
+	var report superviseE2ERunOnceReport
+	if err := json.Unmarshal([]byte(output), &report); err != nil {
+		t.Fatalf("json.Unmarshal(run-once output) error = %v\noutput:\n%s", err, output)
+	}
+	return report
+}
+
+func newestSuperviseE2ERunID(t *testing.T, odinRoot string) string {
+	t.Helper()
+
+	entries, err := os.ReadDir(filepath.Join(odinRoot, "runs", "supervised-e2e"))
+	if err != nil {
+		t.Fatalf("ReadDir(supervised-e2e) error = %v", err)
+	}
+	if len(entries) == 0 {
+		t.Fatalf("supervised-e2e run dirs = 0, want at least one")
+	}
+	latest := entries[0].Name()
+	for _, entry := range entries[1:] {
+		if entry.Name() > latest {
+			latest = entry.Name()
+		}
+	}
+	return latest
 }
 
 func stage7E2EProjectRegistry(t *testing.T) projects.Registry {

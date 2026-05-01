@@ -111,7 +111,7 @@ func runWorkSupervise(ctx context.Context, store *sqlite.Store, projectRegistry 
 		return fmt.Errorf("--json is required for work supervise in this slice\n%s", workSuperviseUsage)
 	}
 	if args[0] == "e2e" {
-		return runWorkSuperviseE2E(ctx, projectRegistry, args[1:], params, stdout)
+		return runWorkSuperviseE2E(ctx, store, projectRegistry, args[1:], params, stdout)
 	}
 
 	service := supervision.NewService(store, supervision.DefaultConfig())
@@ -138,7 +138,7 @@ func runWorkSupervise(ctx context.Context, store *sqlite.Store, projectRegistry 
 	return encoder.Encode(flattenWorkSuperviseReport(report, args[0], params))
 }
 
-func runWorkSuperviseE2E(ctx context.Context, projectRegistry projects.Registry, args []string, params map[string]string, stdout io.Writer) error {
+func runWorkSuperviseE2E(ctx context.Context, store *sqlite.Store, projectRegistry projects.Registry, args []string, params map[string]string, stdout io.Writer) error {
 	if len(args) == 0 || args[0] == "help" || args[0] == "--help" {
 		return fmt.Errorf("missing work supervise e2e command\n%s", workSuperviseUsage)
 	}
@@ -158,7 +158,8 @@ func runWorkSuperviseE2E(ctx context.Context, projectRegistry projects.Registry,
 		if projectKey == "" {
 			return fmt.Errorf("missing --project for work supervise e2e run-once")
 		}
-		if _, ok := projectRegistry.Lookup(projectKey); !ok {
+		manifest, ok := projectRegistry.Lookup(projectKey)
+		if !ok {
 			return fmt.Errorf("unknown project %q", projectKey)
 		}
 		issueText := strings.TrimSpace(params["issue"])
@@ -169,7 +170,7 @@ func runWorkSuperviseE2E(ctx context.Context, projectRegistry projects.Registry,
 		if err != nil || issueNumber <= 0 {
 			return fmt.Errorf("invalid --issue %q", issueText)
 		}
-		return fmt.Errorf("not_implemented: work supervise e2e run-once")
+		return runWorkSuperviseE2ERunOnce(ctx, store, manifest, issueNumber, stdout)
 	default:
 		return fmt.Errorf("unknown work supervise e2e command: %s\n%s", args[0], workSuperviseUsage)
 	}
@@ -183,6 +184,9 @@ type workSuperviseE2EReport struct {
 	Repo               string                       `json:"repo"`
 	RunID              string                       `json:"run_id"`
 	Issue              workSuperviseE2EIssueReport  `json:"issue"`
+	Queue              []supervision.QueueDecision  `json:"queue,omitempty"`
+	Claims             []supervision.PlannedClaim   `json:"claims,omitempty"`
+	CodexExecution     string                       `json:"codex_execution,omitempty"`
 	PRs                string                       `json:"prs"`
 	Merge              string                       `json:"merge"`
 	Deployment         string                       `json:"deployment"`
@@ -198,6 +202,7 @@ type workSuperviseE2EIssueReport struct {
 
 type workSuperviseE2EArtifactRefs struct {
 	PreparedIssue string `json:"prepared_issue,omitempty"`
+	QueueReport   string `json:"queue_report,omitempty"`
 	FinalReport   string `json:"final_report,omitempty"`
 }
 
@@ -307,6 +312,175 @@ func runWorkSuperviseE2EPrepareIssue(ctx context.Context, manifest projects.Mani
 	return nil
 }
 
+func runWorkSuperviseE2ERunOnce(ctx context.Context, store *sqlite.Store, manifest projects.Manifest, issueNumber int, stdout io.Writer) error {
+	repoID := strings.TrimSpace(manifest.GitHub.Repo)
+	if repoID == "" {
+		return fmt.Errorf("project %q has no GitHub repo", manifest.Key)
+	}
+
+	runID := fmt.Sprintf("%d", time.Now().UTC().UnixNano())
+	_, queueReportPath, finalReportPath, err := prepareSupervisedE2ERunOnceArtifactTargets(runID)
+	if err != nil {
+		return redactWorkSuperviseE2EError(err)
+	}
+
+	source, err := newIntakeTracker(manifest, trackerintake.SyncOptions{})
+	if err != nil {
+		return redactWorkSuperviseE2EError(err)
+	}
+	fetched, err := source.FetchIssueByID(ctx, tracker.IssueID{Provider: "github", Repo: repoID, Number: issueNumber})
+	if err != nil {
+		return writeRunOnceFailureArtifactsAndError(queueReportPath, finalReportPath, map[string]any{
+			"mode":            "supervised_e2e",
+			"phase":           "fetch_issue",
+			"status":          "failed_closed",
+			"project":         manifest.Key,
+			"repo":            repoID,
+			"run_id":          runID,
+			"requested_issue": issueNumber,
+			"error":           err.Error(),
+			"codex_execution": supervision.SideEffectNotStarted,
+			"prs":             supervision.SideEffectNotCreated,
+			"merge":           supervision.SideEffectNotMerged,
+			"deployment":      supervision.SideEffectNotStarted,
+		}, fmt.Errorf("fetch issue %s#%d: %w", repoID, issueNumber, err))
+	}
+	if auditor, ok := source.(tracker.RequestAuditor); ok {
+		audit := auditor.RequestAudit()
+		if audit.Writes > 0 {
+			message := "forbidden GitHub write attempted during supervise e2e run-once intake"
+			if len(audit.Forbidden) > 0 {
+				forbidden := audit.Forbidden[0]
+				message = fmt.Sprintf("%s: method=%s path=%s", message, forbidden.Method, forbidden.Path)
+			}
+			return writeRunOnceFailureArtifactsAndError(queueReportPath, finalReportPath, map[string]any{
+				"mode":            "supervised_e2e",
+				"phase":           "fetch_issue",
+				"status":          "failed_closed",
+				"project":         manifest.Key,
+				"repo":            repoID,
+				"run_id":          runID,
+				"requested_issue": issueNumber,
+				"error":           message,
+				"codex_execution": supervision.SideEffectNotStarted,
+				"prs":             supervision.SideEffectNotCreated,
+				"merge":           supervision.SideEffectNotMerged,
+				"deployment":      supervision.SideEffectNotStarted,
+			}, fmt.Errorf("%s", message))
+		}
+	}
+	if fetched.Number != issueNumber {
+		return writeRunOnceFailureArtifactsAndError(queueReportPath, finalReportPath, map[string]any{
+			"mode":            "supervised_e2e",
+			"phase":           "fetch_issue",
+			"status":          "failed_closed",
+			"project":         manifest.Key,
+			"repo":            repoID,
+			"run_id":          runID,
+			"requested_issue": issueNumber,
+			"fetched_issue":   fetched.Number,
+			"codex_execution": supervision.SideEffectNotStarted,
+			"prs":             supervision.SideEffectNotCreated,
+			"merge":           supervision.SideEffectNotMerged,
+			"deployment":      supervision.SideEffectNotStarted,
+		}, fmt.Errorf("fetched issue number %d differs from requested --issue %d", fetched.Number, issueNumber))
+	}
+
+	issues := supervisionIssuesFromTrackerIssues([]tracker.Issue{fetched}, repoID)
+	if len(issues) != 1 {
+		return writeRunOnceFailureArtifactsAndError(queueReportPath, finalReportPath, map[string]any{
+			"mode":            "supervised_e2e",
+			"phase":           "validate_issue",
+			"status":          "failed_closed",
+			"project":         manifest.Key,
+			"repo":            repoID,
+			"run_id":          runID,
+			"requested_issue": issueNumber,
+			"codex_execution": supervision.SideEffectNotStarted,
+			"prs":             supervision.SideEffectNotCreated,
+			"merge":           supervision.SideEffectNotMerged,
+			"deployment":      supervision.SideEffectNotStarted,
+		}, fmt.Errorf("expected exactly one fetched issue, got %d", len(issues)))
+	}
+	issue := issues[0]
+	if err := validateSupervisedE2ERunOnceScope(issue.ChangedPaths); err != nil {
+		return writeRunOnceFailureArtifactsAndError(queueReportPath, finalReportPath, map[string]any{
+			"mode":            "supervised_e2e",
+			"phase":           "validate_issue",
+			"status":          "failed_closed",
+			"project":         manifest.Key,
+			"repo":            repoID,
+			"run_id":          runID,
+			"requested_issue": issueNumber,
+			"issue": workSuperviseE2EIssueReport{
+				Number:      issue.Number,
+				URL:         issue.URL,
+				PlannedPath: firstString(issue.ChangedPaths),
+			},
+			"changed_paths":   issue.ChangedPaths,
+			"codex_execution": supervision.SideEffectNotStarted,
+			"prs":             supervision.SideEffectNotCreated,
+			"merge":           supervision.SideEffectNotMerged,
+			"deployment":      supervision.SideEffectNotStarted,
+		}, err)
+	}
+
+	project, err := ensureWorkSuperviseProject(ctx, store, manifest)
+	if err != nil {
+		return redactWorkSuperviseE2EError(err)
+	}
+	service := supervision.NewService(store, supervision.DefaultConfig())
+	queueReport, err := service.Queue(ctx, supervision.Project{ID: project.ID, Key: project.Key, Repo: repoID}, []supervision.Issue{issue})
+	if err != nil {
+		return redactWorkSuperviseE2EError(err)
+	}
+	if err := writeRedactedJSONArtifact(queueReportPath, queueReport); err != nil {
+		return redactWorkSuperviseE2EError(err)
+	}
+
+	status := "claimed"
+	if len(queueReport.Decisions) != 1 || queueReport.Decisions[0].Decision != supervision.DecisionEligible || !queueReport.Decisions[0].Eligible {
+		status = "refused"
+	}
+	report := workSuperviseE2EReport{
+		Mode:    "supervised_e2e",
+		Phase:   "queued",
+		Status:  status,
+		Project: manifest.Key,
+		Repo:    repoID,
+		RunID:   runID,
+		Issue: workSuperviseE2EIssueReport{
+			Number:      issue.Number,
+			URL:         issue.URL,
+			PlannedPath: issue.ChangedPaths[0],
+		},
+		Queue:              queueReport.Decisions,
+		Claims:             queueReport.Claims,
+		CodexExecution:     queueReport.SideEffects.CodexExecution,
+		PRs:                queueReport.SideEffects.PRs,
+		Merge:              queueReport.SideEffects.Merge,
+		Deployment:         queueReport.SideEffects.Deployment,
+		HumanMergeRequired: true,
+		Artifacts: workSuperviseE2EArtifactRefs{
+			QueueReport: queueReportPath,
+			FinalReport: finalReportPath,
+		},
+	}
+	if err := writeRedactedJSONArtifact(finalReportPath, report); err != nil {
+		return redactWorkSuperviseE2EError(err)
+	}
+	if status != "claimed" || len(report.Claims) != 1 || report.Claims[0].ClaimKey == "" {
+		return redactWorkSuperviseE2EError(fmt.Errorf("work supervise e2e run-once refused before worker behavior: issue=%d status=%s", issueNumber, queueRefusalReason(report.Queue)))
+	}
+
+	encoder := json.NewEncoder(stdout)
+	encoder.SetIndent("", "  ")
+	if err := encoder.Encode(report); err != nil {
+		return redactWorkSuperviseE2EError(err)
+	}
+	return nil
+}
+
 func prepareSupervisedE2EArtifactTargets(runID string) (string, string, string, error) {
 	odinRoot := strings.TrimSpace(os.Getenv("ODIN_ROOT"))
 	if odinRoot == "" {
@@ -329,6 +503,71 @@ func prepareSupervisedE2EArtifactTargets(runID string) (string, string, string, 
 		}
 	}
 	return runDir, preparedIssuePath, finalReportPath, nil
+}
+
+func prepareSupervisedE2ERunOnceArtifactTargets(runID string) (string, string, string, error) {
+	odinRoot := strings.TrimSpace(os.Getenv("ODIN_ROOT"))
+	if odinRoot == "" {
+		return "", "", "", fmt.Errorf("ODIN_ROOT is required for work supervise e2e run-once")
+	}
+	odinRootAbs, err := filepath.Abs(filepath.Clean(expandTilde(odinRoot)))
+	if err != nil {
+		return "", "", "", fmt.Errorf("preflight supervised e2e artifacts: resolve ODIN_ROOT: %w", err)
+	}
+	runDir := filepath.Join(odinRootAbs, "runs", "supervised-e2e", runID)
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		return "", "", "", fmt.Errorf("preflight supervised e2e artifacts: create run directory: %w", err)
+	}
+	queueReportPath := filepath.Join(runDir, "queue-report.json")
+	finalReportPath := filepath.Join(runDir, "final-report.json")
+	for _, path := range []string{queueReportPath, finalReportPath} {
+		if err := preflightArtifactFile(path); err != nil {
+			_ = os.RemoveAll(runDir)
+			return "", "", "", fmt.Errorf("preflight supervised e2e artifacts: %w", err)
+		}
+	}
+	return runDir, queueReportPath, finalReportPath, nil
+}
+
+func writeRunOnceFailureArtifactsAndError(queueReportPath string, finalReportPath string, report map[string]any, err error) error {
+	if writeErr := writeRedactedJSONArtifact(queueReportPath, report); writeErr != nil {
+		return redactWorkSuperviseE2EError(writeErr)
+	}
+	if writeErr := writeRedactedJSONArtifact(finalReportPath, report); writeErr != nil {
+		return redactWorkSuperviseE2EError(writeErr)
+	}
+	return redactWorkSuperviseE2EError(err)
+}
+
+func validateSupervisedE2ERunOnceScope(paths []string) error {
+	switch len(paths) {
+	case 0:
+		return fmt.Errorf("work supervise e2e run-once requires exactly one Planned scope under docs/operations/: got zero")
+	case 1:
+		if !strings.HasPrefix(paths[0], "docs/operations/") {
+			return fmt.Errorf("work supervise e2e run-once requires Planned scope under docs/operations/: got %q", paths[0])
+		}
+		return nil
+	default:
+		return fmt.Errorf("work supervise e2e run-once requires exactly one Planned scope under docs/operations/: got %d", len(paths))
+	}
+}
+
+func firstString(values []string) string {
+	if len(values) == 0 {
+		return ""
+	}
+	return values[0]
+}
+
+func queueRefusalReason(decisions []supervision.QueueDecision) string {
+	if len(decisions) == 0 {
+		return "no_queue_decision"
+	}
+	if decisions[0].RefusalReason != "" {
+		return decisions[0].RefusalReason
+	}
+	return decisions[0].Decision
 }
 
 func preflightArtifactFile(path string) error {
