@@ -236,6 +236,45 @@ Goal:
 - Use known Odin labels.
 - Require manual approval before running.
 
+Commands:
+
+```bash
+ODIN_DRY_RUN=true \
+./bin/odin work simulate-lifecycle --issue 123 --json
+
+./bin/odin work apply-lifecycle --issue 123 --json
+```
+
+Implementation note:
+
+`simulate-lifecycle` remains dry-run only. `apply-lifecycle` is the live-only Stage 3 mutation path and must emit a report comparable to the dry-run report.
+
+Stage 3 uses a Stage 3-specific lifecycle plan for dry-run/live comparison:
+
+1. Add label `odin:running`.
+2. Remove label `odin:running`.
+3. Add label `odin:human-review`.
+4. Add one Odin comment.
+
+The Stage 3 plan must not include `odin:failed`. The Stage 2 proof artifact remains historical evidence for the broader failed-path dry-run planner.
+
+Stage 3 idempotency means a rerun performs zero additional GitHub mutation writes once the final label state and Odin comment already exist. The live command must read current issue labels and comments, compute only missing actions, and skip all label/comment writes on an already-complete issue. The Odin comment must include the stable marker `<!-- odin-stage3-lifecycle-proof -->` so reruns can detect the existing proof comment without creating duplicates.
+
+Stage 3 approval is command-local and target-bound. The live command must carry an explicit approved target, for example:
+
+```bash
+./bin/odin work apply-lifecycle \
+  --issue 123 \
+  --approved-target marcusgoll/odin-os#123 \
+  --json
+```
+
+The JSON report must include an `approval` object with the approved repo, issue, planned lifecycle payload, operator source `command_flag`, and timestamp. Stage 3 must not create durable `approvals`, Work Items, Run Attempts, scheduler state, PR handoff state, or dispatch state.
+
+Stage 3 targets the existing `odin-core` GitHub repo, `marcusgoll/odin-os`; do not add a second project key or separate test repository for this stage. The live command must fail before any write unless `--approved-target` exactly matches the resolved repo and issue number.
+
+Stage 3 must use a pre-existing manually selected test issue. Odin must not create a GitHub issue as part of this proof.
+
 Allowed:
 
 - Add Odin labels on one test issue.
@@ -244,6 +283,7 @@ Allowed:
 
 Forbidden:
 
+- GitHub issue creation.
 - Pull request creation.
 - Codex worker execution.
 - Scheduler dispatch.
@@ -252,9 +292,10 @@ Forbidden:
 
 Exit criteria:
 
-- Labels update correctly.
+- Labels update correctly: the issue first receives `odin:running`, then moves to `odin:human-review` by removing `odin:running` and adding `odin:human-review`.
+- The final issue retains `odin:human-review` and does not retain `odin:running`.
 - Comment is correct.
-- Idempotency works.
+- Idempotency works: first run writes only missing actions; second run performs zero label or comment mutation writes and creates no duplicate Odin comment.
 - Dry-run and live behavior match expectations.
 - Manual approval is recorded before mutation.
 - Token redaction is verified in logs, errors, reports, and events.
