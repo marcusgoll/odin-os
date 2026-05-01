@@ -199,6 +199,47 @@ func TestLoadDirLoadsUniversalIntakeAgents(t *testing.T) {
 			t.Fatalf("chief of staff agent body missing %q", required)
 		}
 	}
+
+	router := snapshot.ByKey["router-agent"]
+	routerContract := strings.Join([]string{
+		router.Sections[registry.SectionPurpose],
+		router.Sections[registry.SectionWhenToUse],
+		router.Sections[registry.SectionInputs],
+		router.Sections[registry.SectionProcedure],
+		router.Sections[registry.SectionOutputs],
+		router.Sections[registry.SectionConstraints],
+		router.Sections[registry.SectionSuccessCriteria],
+	}, "\n")
+	requiredRouterContract := []string{
+		"Project Manager Agent",
+		"Software Planner Agent",
+		"Coding Agent",
+		"Code Review Agent",
+		"Research Agent",
+		"Personal Admin Agent",
+		"Calendar Agent",
+		"Email Agent",
+		"Writing Agent",
+		"Learning Coach Agent",
+		"Finance Admin Agent",
+		"Household Agent",
+		"Health and Wellbeing Support Agent",
+		"Travel Agent",
+		"Document Summarizer Agent",
+		"Decision Support Agent",
+		"Archive Agent",
+		"selected agent",
+		"reason",
+		"required context",
+		"required tools",
+		"whether subagents are needed",
+		"whether approval is needed before action",
+	}
+	for _, required := range requiredRouterContract {
+		if !strings.Contains(routerContract, required) {
+			t.Fatalf("router agent body missing %q", required)
+		}
+	}
 }
 
 func containsString(values []string, want string) bool {
