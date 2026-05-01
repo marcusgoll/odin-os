@@ -501,6 +501,7 @@ Forbidden:
 - Codex reviewer or QA worker execution.
 - Scheduler dispatch beyond the approved toy issue.
 - Durable Run Attempt creation.
+- Durable Work Item, approval, worktree lease, scheduler job, or PR handoff row creation.
 - Mutation of unrelated GitHub resources.
 - Mutation of protected areas unless the approved toy issue explicitly includes them and a human approves.
 
@@ -523,6 +524,7 @@ Required artifacts:
 - CI run URL showing `make odin-e2e-local`.
 - Workflow-run audit showing no deployment-class workflow ran.
 - Human approval gate evidence.
+- JSON and local artifact evidence only; no durable Odin runtime handoff state.
 
 Promotion rule:
 
