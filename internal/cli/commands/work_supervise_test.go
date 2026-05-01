@@ -209,7 +209,7 @@ func TestRunWorkSuperviseQueueJSONPersistsIssueBodyHashWithoutRawBody(t *testing
 	defer store.Close()
 	projectRegistry := commandProjectRegistry(t)
 
-	sensitiveBody := "Planned scope: docs/example.md\nFailure dump: ghp_123456789012345678901234567890123456"
+	sensitiveBody := "Planned scope: docs/example.md\nFailure dump: leaked/ghp_123456789012345678901234567890123456.txt"
 	previousFactory := newIntakeTracker
 	t.Cleanup(func() { newIntakeTracker = previousFactory })
 	newIntakeTracker = func(project projects.Manifest, options trackerintake.SyncOptions) (tracker.Tracker, error) {
@@ -247,7 +247,7 @@ func TestRunWorkSuperviseQueueJSONPersistsIssueBodyHashWithoutRawBody(t *testing
 	}
 
 	decisionJSON := decisions[0].DecisionJSON
-	if strings.Contains(decisionJSON, sensitiveBody) || strings.Contains(decisionJSON, "ghp_123456789012345678901234567890123456") {
+	if strings.Contains(decisionJSON, sensitiveBody) || strings.Contains(decisionJSON, "ghp_123456789012345678901234567890123456") || strings.Contains(decisionJSON, "leaked/ghp_123456789012345678901234567890123456.txt") {
 		t.Fatalf("decision_json leaked raw issue body/token-like content: %s", decisionJSON)
 	}
 	var payload map[string]any

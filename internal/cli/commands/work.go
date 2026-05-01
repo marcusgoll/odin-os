@@ -258,7 +258,7 @@ func supervisionIssuesFromTrackerIssues(issues []tracker.Issue, fallbackRepo str
 			Labels:       append([]string(nil), issue.Labels...),
 			URL:          issue.URL,
 			State:        issue.State,
-			ChangedPaths: extractIssuePathHints(issue.Title + "\n" + issue.Body),
+			ChangedPaths: extractIssuePathHints(issue.Body),
 		})
 	}
 	return adapted
@@ -267,22 +267,38 @@ func supervisionIssuesFromTrackerIssues(issues []tracker.Issue, fallbackRepo str
 func extractIssuePathHints(text string) []string {
 	seen := map[string]bool{}
 	var paths []string
-	for _, field := range strings.FieldsFunc(text, func(r rune) bool {
-		switch r {
-		case ' ', '\n', '\r', '\t', ',', ';', ':', '(', ')', '[', ']', '{', '}', '"', '\'', '`':
-			return true
-		default:
-			return false
+	for _, line := range strings.Split(text, "\n") {
+		markerIndex := strings.Index(strings.ToLower(line), "planned scope:")
+		if markerIndex < 0 {
+			continue
 		}
-	}) {
-		candidate := strings.Trim(field, "<>.,!?")
-		if !looksLikeRelativePathHint(candidate) || seen[candidate] {
+		candidate := firstIssuePathHintField(line[markerIndex+len("planned scope:"):])
+		if candidate == "" || seen[candidate] {
 			continue
 		}
 		seen[candidate] = true
 		paths = append(paths, candidate)
 	}
 	return paths
+}
+
+func firstIssuePathHintField(text string) string {
+	for _, field := range strings.FieldsFunc(text, issuePathHintSeparator) {
+		candidate := strings.Trim(field, "<>.,!?")
+		if looksLikeRelativePathHint(candidate) {
+			return candidate
+		}
+	}
+	return ""
+}
+
+func issuePathHintSeparator(r rune) bool {
+	switch r {
+	case ' ', '\r', '\t', ',', ';', '(', ')', '[', ']', '{', '}', '"', '\'', '`':
+		return true
+	default:
+		return false
+	}
 }
 
 func looksLikeRelativePathHint(candidate string) bool {
