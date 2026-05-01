@@ -471,20 +471,22 @@ Allowed:
 
 - Push one task branch for the approved toy issue.
 - Create one PR for the approved toy issue.
-- Run review agents.
+- Add Odin-authored Stage 6 review evidence comments on the live PR.
 - Run CI.
 
 Forbidden:
 
 - Autonomous merge.
 - Production deploy.
+- Codex reviewer or QA worker execution.
 - Scheduler dispatch beyond the approved toy issue.
+- Durable Run Attempt creation.
 - Mutation of protected areas unless the approved toy issue explicitly includes them and a human approves.
 
 Exit criteria:
 
 - PR is created.
-- Review agents comment.
+- Odin-authored Stage 6 review evidence comments exist on the PR.
 - Human approval is required before merge.
 - CI runs `make odin-e2e-local`.
 - No merge occurs without human approval.
@@ -495,13 +497,13 @@ Required artifacts:
 - Issue URL.
 - Branch name.
 - PR URL.
-- Review agent comments.
+- Odin-authored Stage 6 review evidence comments.
 - CI run URL showing `make odin-e2e-local`.
 - Human approval gate evidence.
 
 Promotion rule:
 
-Stage 6 is complete only when a toy docs-only issue reaches live PR handoff with CI and review evidence while merge and deploy remain human-gated.
+Stage 6 is complete only when a toy docs-only issue reaches live PR handoff with CI and Odin-authored review evidence while merge and deploy remain human-gated. Stage 6 review evidence comments are not full autonomous reviewer or QA Run Attempts and do not approve merge or deployment.
 
 ## Stage 7: 24/7 Supervised Mode
 
