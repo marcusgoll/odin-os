@@ -81,7 +81,7 @@ func (service Service) Queue(ctx context.Context, project Project, issues []Issu
 		return Report{}, err
 	}
 
-	activeClaims, err := service.activeClaims(ctx, project.ID, project.Repo)
+	activeClaims, err := service.activeClaims(ctx, 0, "")
 	if err != nil {
 		return Report{}, err
 	}
@@ -231,6 +231,9 @@ func (service Service) validateConfig() error {
 }
 
 func validatePersistedControl(control sqlite.SupervisionControl) error {
+	if control.Status != ControlStatusEnabled && control.Status != ControlStatusStopped {
+		return fmt.Errorf("%w: persisted status must be enabled or stopped", ErrInvalidConfig)
+	}
 	if control.MaxConcurrentTasks != 1 {
 		return fmt.Errorf("%w: persisted max_concurrent_tasks must be 1", ErrInvalidConfig)
 	}

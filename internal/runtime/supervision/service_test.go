@@ -131,6 +131,60 @@ func TestServiceQueueRecordsDecisionsAndPlannedClaimsWithoutCreatingTasksOrRuns(
 	assertTableCount(t, store, "runs", 0)
 }
 
+func TestServiceQueueEnforcesGlobalStage7ConcurrencyAcrossProjects(t *testing.T) {
+	ctx := context.Background()
+	store := openServiceTestStore(t, "supervision-service-global-concurrency.db")
+	defer store.Close()
+	firstProject := createServiceProject(t, ctx, store)
+	secondProject := createSecondServiceProject(t, ctx, store)
+	service := NewService(store, DefaultConfig())
+	if _, err := service.Start(ctx, "operator"); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+
+	firstReport, err := service.Queue(ctx, Project{
+		ID:   firstProject.ID,
+		Key:  firstProject.Key,
+		Repo: firstProject.GitHubRepo,
+	}, []Issue{eligibleIssue("docs/stage7.md")})
+	if err != nil {
+		t.Fatalf("Queue(first project) error = %v", err)
+	}
+	if len(firstReport.Claims) != 1 {
+		t.Fatalf("Queue(first project).Claims len = %d, want 1", len(firstReport.Claims))
+	}
+
+	secondReport, err := service.Queue(ctx, Project{
+		ID:   secondProject.ID,
+		Key:  secondProject.Key,
+		Repo: secondProject.GitHubRepo,
+	}, []Issue{
+		{
+			Repo:         secondProject.GitHubRepo,
+			Number:       18,
+			Labels:       []string{"odin:ready", "safety:low-risk"},
+			ChangedPaths: []string{"docs/second-project.md"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Queue(second project) error = %v", err)
+	}
+	if len(secondReport.Decisions) != 1 {
+		t.Fatalf("Queue(second project).Decisions len = %d, want 1", len(secondReport.Decisions))
+	}
+	if secondReport.Decisions[0].Decision != DecisionRefused || secondReport.Decisions[0].RefusalReason != RefusalConcurrencyLimit {
+		t.Fatalf("Queue(second project).Decisions[0] = %+v, want concurrency_limit_reached refusal", secondReport.Decisions[0])
+	}
+
+	claims, err := store.ListSupervisionDispatchClaims(ctx, sqlite.ListSupervisionDispatchClaimsParams{})
+	if err != nil {
+		t.Fatalf("ListSupervisionDispatchClaims() error = %v", err)
+	}
+	if len(claims) != 1 {
+		t.Fatalf("global claims len = %d, want 1", len(claims))
+	}
+}
+
 func TestServiceRecoverReportsCleanWithNoStaleClaims(t *testing.T) {
 	ctx := context.Background()
 	store := openServiceTestStore(t, "supervision-service-recover-clean.db")
@@ -321,6 +375,45 @@ func TestServiceRejectsInvalidPersistedControlStateBeforeReportingOrUse(t *testi
 	}
 }
 
+func TestServiceRejectsUnknownPersistedControlStatusBeforeReportingOrUse(t *testing.T) {
+	ctx := context.Background()
+	store := openServiceTestStore(t, "supervision-service-invalid-persisted-status.db")
+	defer store.Close()
+	project := createServiceProject(t, ctx, store)
+	config := DefaultConfig()
+	configHash, err := ConfigHash(config)
+	if err != nil {
+		t.Fatalf("ConfigHash() error = %v", err)
+	}
+	if _, err := store.UpsertSupervisionControl(ctx, sqlite.UpsertSupervisionControlParams{
+		ModeKey:              ModeKeyStage7SupervisedAgency,
+		Status:               "bogus",
+		KillSwitchActive:     false,
+		ConfigHash:           configHash,
+		MaxConcurrentTasks:   1,
+		DryRun:               false,
+		RequireHumanApproval: true,
+		UpdatedBy:            "legacy-row",
+	}); err != nil {
+		t.Fatalf("UpsertSupervisionControl(invalid status) error = %v", err)
+	}
+	service := NewService(store, config)
+
+	if report, err := service.Status(ctx); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("Status() report = %+v error = %v, want ErrInvalidConfig", report, err)
+	}
+	if report, err := service.Queue(ctx, Project{
+		ID:   project.ID,
+		Key:  project.Key,
+		Repo: project.GitHubRepo,
+	}, []Issue{eligibleIssue("docs/stage7.md")}); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("Queue() report = %+v error = %v, want ErrInvalidConfig", report, err)
+	}
+	if report, err := service.Recover(ctx); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("Recover() report = %+v error = %v, want ErrInvalidConfig", report, err)
+	}
+}
+
 func openServiceTestStore(t *testing.T, name string) *sqlite.Store {
 	t.Helper()
 
@@ -349,6 +442,24 @@ func createServiceProject(t *testing.T, ctx context.Context, store *sqlite.Store
 	})
 	if err != nil {
 		t.Fatalf("CreateProject() error = %v", err)
+	}
+	return project
+}
+
+func createSecondServiceProject(t *testing.T, ctx context.Context, store *sqlite.Store) sqlite.Project {
+	t.Helper()
+
+	project, err := store.CreateProject(ctx, sqlite.CreateProjectParams{
+		Key:           "stage7-second",
+		Name:          "Stage 7 Second Project",
+		Scope:         "project",
+		GitRoot:       "/home/orchestrator/stage7-second",
+		DefaultBranch: "main",
+		GitHubRepo:    "marcusgoll/stage7-second",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject(second) error = %v", err)
 	}
 	return project
 }
