@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -45,6 +46,11 @@ const workSuperviseTrackerSource = "issue_intake_source"
 const workSuperviseRedactedSensitivePath = "internal/security/redacted-sensitive-path.txt"
 
 var newIntakeTracker = trackerintake.NewGitHubTracker
+var runSupervisedE2EWorker = defaultRunSupervisedE2EWorker
+
+const supervisedE2EWorkerTimeout = 30 * time.Minute
+
+var supervisedE2ETokenPattern = regexp.MustCompile(`(?i)(github_pat_[A-Za-z0-9_]{20,}|ghp_[A-Za-z0-9_]{20,}|gho_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9_-]{20,}|xox[baprs]-[A-Za-z0-9-]{20,})`)
 
 func RunWork(ctx context.Context, store *sqlite.Store, projectRegistry projects.Registry, snapshot registry.Snapshot, args []string, stdout io.Writer) error {
 	if len(args) == 0 || args[0] == "help" || args[0] == "--help" {
@@ -186,6 +192,8 @@ type workSuperviseE2EReport struct {
 	Issue              workSuperviseE2EIssueReport  `json:"issue"`
 	Queue              []supervision.QueueDecision  `json:"queue,omitempty"`
 	Claims             []supervision.PlannedClaim   `json:"claims,omitempty"`
+	Worktree           workSuperviseE2EWorktree     `json:"worktree,omitempty"`
+	Diff               workSuperviseE2EDiff         `json:"diff,omitempty"`
 	CodexExecution     string                       `json:"codex_execution,omitempty"`
 	PRs                string                       `json:"prs"`
 	Merge              string                       `json:"merge"`
@@ -204,6 +212,45 @@ type workSuperviseE2EArtifactRefs struct {
 	PreparedIssue string `json:"prepared_issue,omitempty"`
 	QueueReport   string `json:"queue_report,omitempty"`
 	FinalReport   string `json:"final_report,omitempty"`
+	WorkerPrompt  string `json:"worker_prompt,omitempty"`
+	WorkerCommand string `json:"worker_command,omitempty"`
+	WorkerOutput  string `json:"worker_output,omitempty"`
+	DiffSummary   string `json:"diff_summary,omitempty"`
+}
+
+type workSuperviseE2EWorktree struct {
+	Root       string `json:"root,omitempty"`
+	Path       string `json:"path,omitempty"`
+	Branch     string `json:"branch,omitempty"`
+	InsideRoot bool   `json:"inside_root,omitempty"`
+	Kept       bool   `json:"kept,omitempty"`
+}
+
+type workSuperviseE2EDiff struct {
+	Files  []string `json:"files,omitempty"`
+	SHA256 string   `json:"sha256,omitempty"`
+}
+
+type supervisedE2EWorkerRequest struct {
+	WorktreePath string
+	BranchName   string
+	PlannedPath  string
+	Prompt       string
+	Command      codexexec.Command
+	Secrets      []string
+}
+
+type supervisedE2EWorkerResult struct {
+	Output string
+}
+
+type workSuperviseE2EWorkerCommandArtifact struct {
+	Executable  string `json:"executable"`
+	Redacted    string `json:"redacted"`
+	Worktree    string `json:"worktree"`
+	SandboxMode string `json:"sandbox_mode"`
+	Timeout     string `json:"timeout"`
+	Launched    bool   `json:"launched"`
 }
 
 type workSuperviseE2EPreparedIssueArtifact struct {
@@ -319,10 +366,11 @@ func runWorkSuperviseE2ERunOnce(ctx context.Context, store *sqlite.Store, manife
 	}
 
 	runID := fmt.Sprintf("%d", time.Now().UTC().UnixNano())
-	_, queueReportPath, finalReportPath, err := prepareSupervisedE2ERunOnceArtifactTargets(runID)
+	runDir, queueReportPath, finalReportPath, err := prepareSupervisedE2ERunOnceArtifactTargets(runID)
 	if err != nil {
 		return redactWorkSuperviseE2EError(err)
 	}
+	artifactRefs := supervisedE2ERunOnceArtifactRefs(runDir, queueReportPath, finalReportPath)
 
 	source, err := newIntakeTracker(manifest, trackerintake.SyncOptions{})
 	if err != nil {
@@ -484,10 +532,7 @@ func runWorkSuperviseE2ERunOnce(ctx context.Context, store *sqlite.Store, manife
 		Merge:              queueReport.SideEffects.Merge,
 		Deployment:         queueReport.SideEffects.Deployment,
 		HumanMergeRequired: true,
-		Artifacts: workSuperviseE2EArtifactRefs{
-			QueueReport: queueReportPath,
-			FinalReport: finalReportPath,
-		},
+		Artifacts:          artifactRefs,
 	}
 	if err := writeRedactedJSONArtifact(finalReportPath, report); err != nil {
 		return redactWorkSuperviseE2EError(err)
@@ -495,6 +540,12 @@ func runWorkSuperviseE2ERunOnce(ctx context.Context, store *sqlite.Store, manife
 	if status != "claimed" || len(report.Claims) != 1 || report.Claims[0].ClaimKey == "" {
 		return redactWorkSuperviseE2EError(fmt.Errorf("work supervise e2e run-once refused before worker behavior: issue=%d status=%s", issueNumber, queueRefusalReason(report.Queue)))
 	}
+
+	workerReport, err := runSupervisedE2EWorkerAndAudit(ctx, manifest, issue, report, artifactRefs)
+	if err != nil {
+		return err
+	}
+	report = workerReport
 
 	encoder := json.NewEncoder(stdout)
 	encoder.SetIndent("", "  ")
@@ -552,6 +603,17 @@ func prepareSupervisedE2ERunOnceArtifactTargets(runID string) (string, string, s
 	return runDir, queueReportPath, finalReportPath, nil
 }
 
+func supervisedE2ERunOnceArtifactRefs(runDir string, queueReportPath string, finalReportPath string) workSuperviseE2EArtifactRefs {
+	return workSuperviseE2EArtifactRefs{
+		QueueReport:   queueReportPath,
+		FinalReport:   finalReportPath,
+		WorkerPrompt:  filepath.Join(runDir, "worker-prompt.md"),
+		WorkerCommand: filepath.Join(runDir, "worker-command.json"),
+		WorkerOutput:  filepath.Join(runDir, "worker-output.txt"),
+		DiffSummary:   filepath.Join(runDir, "diff-summary.md"),
+	}
+}
+
 func writeRunOnceFailureArtifactsAndError(queueReportPath string, finalReportPath string, report map[string]any, err error) error {
 	if writeErr := writeRedactedJSONArtifact(queueReportPath, report); writeErr != nil {
 		return redactWorkSuperviseE2EError(writeErr)
@@ -560,6 +622,250 @@ func writeRunOnceFailureArtifactsAndError(queueReportPath string, finalReportPat
 		return redactWorkSuperviseE2EError(writeErr)
 	}
 	return redactWorkSuperviseE2EError(err)
+}
+
+func runSupervisedE2EWorkerAndAudit(ctx context.Context, manifest projects.Manifest, issue supervision.Issue, report workSuperviseE2EReport, artifacts workSuperviseE2EArtifactRefs) (workSuperviseE2EReport, error) {
+	plannedPath := issue.ChangedPaths[0]
+	if strings.TrimSpace(manifest.GitRoot) == "" {
+		return report, fmt.Errorf("project %q has no git root for supervised e2e worker", manifest.Key)
+	}
+
+	worktreeRoot := strings.TrimSpace(os.Getenv("ODIN_WORKTREE_ROOT"))
+	if worktreeRoot == "" {
+		worktreeRoot = worktrees.DefaultRoot()
+	}
+	nonce := time.Now().UnixNano()
+	branchName := fmt.Sprintf("odin/stage7-supervised-e2e/issue-%d-%d", issue.Number, nonce)
+	worktreePath := worktrees.ResolvePath(worktrees.PathParams{
+		Root:       worktreeRoot,
+		ProjectKey: manifest.Key + "-stage7-supervised-e2e",
+		TaskID:     int64(issue.Number),
+		RunID:      nonce,
+		Try:        1,
+	})
+	rootAbs, pathAbs, insideRoot, err := provePathInsideRoot(worktreeRoot, worktreePath)
+	if err != nil {
+		return report, redactWorkSuperviseE2EError(err)
+	}
+	if !insideRoot {
+		return report, redactWorkSuperviseE2EError(fmt.Errorf("supervised e2e worktree path %q escaped root %q", worktreePath, worktreeRoot))
+	}
+	if err := os.MkdirAll(filepath.Dir(pathAbs), 0o755); err != nil {
+		return report, redactWorkSuperviseE2EError(err)
+	}
+
+	git := vcsgit.Adapter{}
+	baseBranch := strings.TrimSpace(manifest.DefaultBranch)
+	if baseBranch == "" {
+		baseBranch = "HEAD"
+	}
+	if err := git.CreateBranch(ctx, manifest.GitRoot, branchName, baseBranch); err != nil {
+		return report, redactWorkSuperviseE2EError(err)
+	}
+	if err := git.AddWorktree(ctx, manifest.GitRoot, pathAbs, branchName); err != nil {
+		_ = deleteGitBranch(context.Background(), manifest.GitRoot, branchName)
+		return report, redactWorkSuperviseE2EError(err)
+	}
+
+	report.Worktree = workSuperviseE2EWorktree{
+		Root:       rootAbs,
+		Path:       pathAbs,
+		Branch:     branchName,
+		InsideRoot: true,
+		Kept:       true,
+	}
+	report.CodexExecution = "attempted"
+
+	secrets := collectKnownSecretValues()
+	prompt := renderSupervisedE2EWorkerPrompt(manifest, issue, plannedPath)
+	command, err := codexexec.BuildCommand(codexexec.Config{
+		SecretValues: secrets,
+		Timeout:      supervisedE2EWorkerTimeout,
+	}, runner.Request{
+		WorkItemID:  fmt.Sprintf("issue-%d", issue.Number),
+		Role:        "builder",
+		Worktree:    pathAbs,
+		Prompt:      prompt,
+		SandboxMode: "workspace-write",
+		Timeout:     supervisedE2EWorkerTimeout,
+	})
+	if err != nil {
+		return report, supervisedE2EFailWithReport(artifacts.FinalReport, report, "worker_command", err)
+	}
+
+	if err := writeRedactedTextArtifact(artifacts.WorkerPrompt, prompt, secrets); err != nil {
+		return report, redactWorkSuperviseE2EError(err)
+	}
+	commandArtifact := workSuperviseE2EWorkerCommandArtifact{
+		Executable:  command.Path,
+		Redacted:    codexexec.RedactCommand(command, secrets),
+		Worktree:    pathAbs,
+		SandboxMode: "workspace-write",
+		Timeout:     supervisedE2EWorkerTimeout.String(),
+		Launched:    true,
+	}
+	if err := writeRedactedJSONArtifact(artifacts.WorkerCommand, commandArtifact); err != nil {
+		return report, redactWorkSuperviseE2EError(err)
+	}
+
+	result, err := runSupervisedE2EWorker(ctx, supervisedE2EWorkerRequest{
+		WorktreePath: pathAbs,
+		BranchName:   branchName,
+		PlannedPath:  plannedPath,
+		Prompt:       prompt,
+		Command:      command,
+		Secrets:      secrets,
+	})
+	if writeErr := writeRedactedTextArtifact(artifacts.WorkerOutput, result.Output, secrets); writeErr != nil {
+		return report, redactWorkSuperviseE2EError(writeErr)
+	}
+	if err != nil {
+		return report, supervisedE2EFailWithReport(artifacts.FinalReport, report, "worker_execution", err)
+	}
+
+	if _, err := gitOutput(ctx, pathAbs, "add", "-N", "."); err != nil {
+		return report, supervisedE2EFailWithReport(artifacts.FinalReport, report, "diff_audit", err)
+	}
+	nameStatus, err := gitOutput(ctx, pathAbs, "diff", "--name-status", baseBranch)
+	if err != nil {
+		return report, supervisedE2EFailWithReport(artifacts.FinalReport, report, "diff_audit", err)
+	}
+	fullDiff, err := gitOutput(ctx, pathAbs, "diff", baseBranch)
+	if err != nil {
+		return report, supervisedE2EFailWithReport(artifacts.FinalReport, report, "diff_audit", err)
+	}
+	diffFiles := filesFromNameStatus(nameStatus)
+	sort.Strings(diffFiles)
+	diffSHA := sha256String(strings.TrimSpace(nameStatus) + "\n" + fullDiff)
+	report.Diff = workSuperviseE2EDiff{Files: diffFiles, SHA256: diffSHA}
+	diffSummary := renderSupervisedE2EDiffSummary(baseBranch, branchName, nameStatus, fullDiff, diffSHA)
+	if err := writeRedactedTextArtifact(artifacts.DiffSummary, diffSummary, secrets); err != nil {
+		return report, redactWorkSuperviseE2EError(err)
+	}
+
+	if !supervisedE2EDiffMatchesPlannedPath(diffFiles, plannedPath) {
+		return report, supervisedE2EFailWithReport(artifacts.FinalReport, report, "diff_audit", fmt.Errorf("worker diff changed forbidden files: got %s want exactly %s", strings.Join(diffFiles, ", "), plannedPath))
+	}
+
+	rawAudit := strings.Join([]string{
+		prompt,
+		result.Output,
+		codexexec.RedactCommand(command, nil),
+		fullDiff,
+		mustReadString(artifacts.WorkerPrompt),
+		mustReadString(artifacts.WorkerCommand),
+		mustReadString(artifacts.WorkerOutput),
+		mustReadString(artifacts.DiffSummary),
+	}, "\n")
+	if supervisedE2ETokenPattern.MatchString(rawAudit) {
+		return report, supervisedE2EFailWithReport(artifacts.FinalReport, report, "token_audit", fmt.Errorf("token-shaped string detected in supervised e2e worker artifacts or diff"))
+	}
+
+	report.Phase = "worker_audited"
+	report.Status = "worker_completed"
+	report.CodexExecution = "completed"
+	report.PRs = supervision.SideEffectNotCreated
+	report.Merge = supervision.SideEffectNotMerged
+	report.Deployment = supervision.SideEffectNotStarted
+	report.HumanMergeRequired = true
+	if err := writeRedactedJSONArtifact(artifacts.FinalReport, report); err != nil {
+		return report, redactWorkSuperviseE2EError(err)
+	}
+	return report, nil
+}
+
+func defaultRunSupervisedE2EWorker(ctx context.Context, request supervisedE2EWorkerRequest) (supervisedE2EWorkerResult, error) {
+	adapter := codexexec.NewAgentRunner(codexexec.Config{
+		SecretValues: request.Secrets,
+		Timeout:      request.Command.Timeout,
+	})
+	result, err := adapter.Run(ctx, runner.Request{
+		WorkItemID:  fmt.Sprintf("supervised-e2e-%s", filepath.Base(request.BranchName)),
+		Role:        "builder",
+		Worktree:    request.WorktreePath,
+		Prompt:      request.Prompt,
+		SandboxMode: "workspace-write",
+		Timeout:     request.Command.Timeout,
+	})
+	return supervisedE2EWorkerResult{Output: result.Summary}, err
+}
+
+func renderSupervisedE2EWorkerPrompt(manifest projects.Manifest, issue supervision.Issue, plannedPath string) string {
+	return strings.Join([]string{
+		"Stage 7 supervised E2E worker task.",
+		"",
+		"Audit the existing repo before editing.",
+		"Reuse existing Odin commands, services, contracts, registries, schemas, docs, and tests.",
+		"Only edit this exact planned path: " + plannedPath,
+		"Do not change runner, security, workspace, token, deploy, CI, scheduler, PR, or merge behavior.",
+		"Do not expose tokens or secrets.",
+		"Do not create or update a pull request.",
+		"",
+		fmt.Sprintf("Project: %s", manifest.Key),
+		fmt.Sprintf("Repo: %s", manifest.GitHub.Repo),
+		fmt.Sprintf("Issue: #%d %s", issue.Number, issue.Title),
+		"",
+		"Final output must mention make odin-e2e-local.",
+	}, "\n")
+}
+
+func renderSupervisedE2EDiffSummary(baseBranch string, branchName string, nameStatus string, fullDiff string, sha string) string {
+	return strings.Join([]string{
+		"# Supervised E2E Diff Summary",
+		"",
+		"Base: " + baseBranch,
+		"Branch: " + branchName,
+		"SHA256: " + sha,
+		"",
+		"## Name Status",
+		"",
+		"```",
+		strings.TrimSpace(nameStatus),
+		"```",
+		"",
+		"## Diff",
+		"",
+		"```diff",
+		strings.TrimSpace(fullDiff),
+		"```",
+		"",
+	}, "\n")
+}
+
+func supervisedE2EDiffMatchesPlannedPath(files []string, plannedPath string) bool {
+	return len(files) == 1 && files[0] == plannedPath && normalizeSupervisedE2ERunOncePath(files[0]) == plannedPath
+}
+
+func supervisedE2EFailWithReport(finalReportPath string, report workSuperviseE2EReport, phase string, err error) error {
+	report.Phase = phase
+	report.Status = "failed_closed"
+	report.CodexExecution = "attempted"
+	report.PRs = supervision.SideEffectNotCreated
+	report.Merge = supervision.SideEffectNotMerged
+	report.Deployment = supervision.SideEffectNotStarted
+	if writeErr := writeRedactedJSONArtifact(finalReportPath, report); writeErr != nil {
+		return redactWorkSuperviseE2EError(writeErr)
+	}
+	return redactWorkSuperviseE2EError(err)
+}
+
+func writeRedactedTextArtifact(path string, content string, secrets []string) error {
+	redacted := codexexec.Redact(content, secrets)
+	redacted = supervisedE2ETokenPattern.ReplaceAllString(redacted, "[REDACTED]")
+	return os.WriteFile(path, []byte(redacted+"\n"), 0o644)
+}
+
+func mustReadString(path string) string {
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	return string(content)
+}
+
+func sha256String(value string) string {
+	sum := sha256.Sum256([]byte(value))
+	return hex.EncodeToString(sum[:])
 }
 
 func validateSupervisedE2ERunOnceIssue(issue supervision.Issue) error {
@@ -646,6 +952,7 @@ func writeRedactedJSONArtifact(path string, value any) error {
 		return err
 	}
 	redacted := codexexec.Redact(string(content), collectKnownSecretValues())
+	redacted = supervisedE2ETokenPattern.ReplaceAllString(redacted, "[REDACTED]")
 	return os.WriteFile(path, []byte(redacted+"\n"), 0o644)
 }
 

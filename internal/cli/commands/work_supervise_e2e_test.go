@@ -288,25 +288,37 @@ func TestRunWorkSuperviseE2ERunOnceQueuesExactIssueAndClaims(t *testing.T) {
 	store := openWorkCommandStore(t)
 	defer store.Close()
 	odinRoot := t.TempDir()
+	repoRoot := initWorkerDryRunGitRepo(t)
 	t.Setenv("ODIN_ROOT", odinRoot)
 
+	plannedPath := "docs/operations/stage-7-task-3.md"
 	fake := &superviseE2EFakeTracker{
 		issue: tracker.Issue{
 			Provider: "github",
 			Repo:     "acme/alpha",
 			Number:   42,
 			Title:    "Supervised E2E exact issue",
-			Body:     "Planned scope: docs/operations/stage-7-task-3.md",
+			Body:     "Planned scope: " + plannedPath,
 			URL:      "https://github.example/acme/alpha/issues/42",
 			State:    "open",
 			Labels:   []string{"odin:ready", "safety:low-risk"},
 		},
 	}
 	installSuperviseE2EFakeTracker(t, fake)
+	installSuperviseE2EFakeWorker(t, func(_ context.Context, request supervisedE2EWorkerRequest) (supervisedE2EWorkerResult, error) {
+		path := filepath.Join(request.WorktreePath, filepath.FromSlash(plannedPath))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("MkdirAll(planned dir) error = %v", err)
+		}
+		if err := os.WriteFile(path, []byte("# Stage 7 task 3\n\nRun make odin-e2e-local before handoff.\n"), 0o644); err != nil {
+			t.Fatalf("WriteFile(planned path) error = %v", err)
+		}
+		return supervisedE2EWorkerResult{Output: "worker complete: make odin-e2e-local"}, nil
+	})
 
 	_ = runWorkSuperviseJSON(t, ctx, store, []string{"supervise", "start", "--json"})
 	var output strings.Builder
-	if err := RunWork(ctx, store, commandProjectRegistry(t), registry.Snapshot{}, []string{
+	if err := RunWork(ctx, store, superviseE2EProjectRegistry(t, repoRoot), registry.Snapshot{}, []string{
 		"supervise", "e2e", "run-once", "--project", "alpha", "--issue", "42", "--json",
 	}, &output); err != nil {
 		t.Fatalf("RunWork(supervise e2e run-once) error = %v\noutput:\n%s", err, output.String())
@@ -322,10 +334,10 @@ func TestRunWorkSuperviseE2ERunOnceQueuesExactIssueAndClaims(t *testing.T) {
 	}
 
 	report := decodeSuperviseE2ERunOnceReport(t, output.String())
-	if report.Phase != "queued" || report.Status != "claimed" || report.Project != "alpha" || report.Repo != "acme/alpha" {
-		t.Fatalf("report = %+v, want queued/claimed alpha acme/alpha", report)
+	if report.Phase != "worker_audited" || report.Status != "worker_completed" || report.Project != "alpha" || report.Repo != "acme/alpha" {
+		t.Fatalf("report = %+v, want worker_audited/worker_completed alpha acme/alpha", report)
 	}
-	if report.Issue.Number != 42 || report.Issue.PlannedPath != "docs/operations/stage-7-task-3.md" {
+	if report.Issue.Number != 42 || report.Issue.PlannedPath != plannedPath {
 		t.Fatalf("issue = %+v, want exact issue and planned docs/operations path", report.Issue)
 	}
 	if len(report.Queue) != 1 {
@@ -337,11 +349,11 @@ func TestRunWorkSuperviseE2ERunOnceQueuesExactIssueAndClaims(t *testing.T) {
 	if len(report.Claims) != 1 || report.Claims[0].IssueNumber != 42 || report.Claims[0].Status != supervision.ClaimStatusReserved {
 		t.Fatalf("claims = %+v, want one reserved claim for issue 42", report.Claims)
 	}
-	if report.CodexExecution != supervision.SideEffectNotStarted ||
+	if report.CodexExecution != "completed" ||
 		report.PRs != supervision.SideEffectNotCreated ||
 		report.Merge != supervision.SideEffectNotMerged ||
 		report.Deployment != supervision.SideEffectNotStarted {
-		t.Fatalf("side effects = %+v, want no worker/PR/merge/deploy", report)
+		t.Fatalf("side effects = %+v, want worker completed and no PR/merge/deploy", report)
 	}
 
 	project, err := store.GetProjectByKey(ctx, "alpha")
@@ -372,7 +384,7 @@ func TestRunWorkSuperviseE2ERunOnceQueuesExactIssueAndClaims(t *testing.T) {
 	queueReportPath := filepath.Join(odinRoot, "runs", "supervised-e2e", report.RunID, "queue-report.json")
 	finalReportPath := filepath.Join(odinRoot, "runs", "supervised-e2e", report.RunID, "final-report.json")
 	assertFileContains(t, queueReportPath, `"decision": "eligible"`)
-	assertFileContains(t, finalReportPath, `"status": "claimed"`)
+	assertFileContains(t, finalReportPath, `"status": "worker_completed"`)
 	assertNoSuperviseSideEffects(t, ctx, store)
 }
 
@@ -656,27 +668,39 @@ func TestRunWorkSuperviseE2ERunOnceDuplicateActiveClaimPreservesExistingClaim(t 
 	store := openWorkCommandStore(t)
 	defer store.Close()
 	odinRoot := t.TempDir()
+	repoRoot := initWorkerDryRunGitRepo(t)
 	t.Setenv("ODIN_ROOT", odinRoot)
 
+	plannedPath := "docs/operations/stage-7-idempotent.md"
 	fake := &superviseE2EFakeTracker{
 		issue: tracker.Issue{
 			Provider: "github",
 			Repo:     "acme/alpha",
 			Number:   46,
 			Title:    "Duplicate exact issue",
-			Body:     "Planned scope: docs/operations/stage-7-idempotent.md",
+			Body:     "Planned scope: " + plannedPath,
 			URL:      "https://github.example/acme/alpha/issues/46",
 			State:    "open",
 			Labels:   []string{"odin:ready", "safety:low-risk"},
 		},
 	}
 	installSuperviseE2EFakeTracker(t, fake)
+	installSuperviseE2EFakeWorker(t, func(_ context.Context, request supervisedE2EWorkerRequest) (supervisedE2EWorkerResult, error) {
+		path := filepath.Join(request.WorktreePath, filepath.FromSlash(plannedPath))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("MkdirAll(planned dir) error = %v", err)
+		}
+		if err := os.WriteFile(path, []byte("# Stage 7 idempotent\n\nRun make odin-e2e-local before handoff.\n"), 0o644); err != nil {
+			t.Fatalf("WriteFile(planned path) error = %v", err)
+		}
+		return supervisedE2EWorkerResult{Output: "worker complete: make odin-e2e-local"}, nil
+	})
 
 	_ = runWorkSuperviseJSON(t, ctx, store, []string{"supervise", "start", "--json"})
-	firstOutput := runWorkSuperviseE2ERunOnceOutput(t, ctx, store, []string{
+	firstOutput := runWorkSuperviseE2ERunOnceOutputWithRegistry(t, ctx, store, superviseE2EProjectRegistry(t, repoRoot), []string{
 		"supervise", "e2e", "run-once", "--project", "alpha", "--issue", "46", "--json",
 	})
-	secondOutput := runWorkSuperviseE2ERunOnceOutput(t, ctx, store, []string{
+	secondOutput := runWorkSuperviseE2ERunOnceOutputWithRegistry(t, ctx, store, superviseE2EProjectRegistry(t, repoRoot), []string{
 		"supervise", "e2e", "run-once", "--project", "alpha", "--issue", "46", "--json",
 	})
 	first := decodeSuperviseE2ERunOnceReport(t, firstOutput)
@@ -703,6 +727,194 @@ func TestRunWorkSuperviseE2ERunOnceDuplicateActiveClaimPreservesExistingClaim(t 
 		t.Fatalf("persisted claims = %+v, want one preserved claim", claims)
 	}
 	assertNoSuperviseSideEffects(t, ctx, store)
+}
+
+func TestRunWorkSuperviseE2ERunOnceWorkerEditsOnlyPlannedPath(t *testing.T) {
+	ctx := context.Background()
+	store := openWorkCommandStore(t)
+	defer store.Close()
+	odinRoot := t.TempDir()
+	worktreeRoot := filepath.Join(t.TempDir(), "worktrees")
+	repoRoot := initWorkerDryRunGitRepo(t)
+	t.Setenv("ODIN_ROOT", odinRoot)
+	t.Setenv("ODIN_WORKTREE_ROOT", worktreeRoot)
+	t.Setenv("GITHUB_TOKEN", "github_pat_1234567890abcdefghijklmnopqrstuvwxyz")
+
+	plannedPath := "docs/operations/stage-7-worker-success.md"
+	fake := &superviseE2EFakeTracker{
+		issue: tracker.Issue{
+			Provider: "github",
+			Repo:     "acme/alpha",
+			Number:   52,
+			Title:    "Worker exact diff",
+			Body:     "Planned scope: " + plannedPath,
+			URL:      "https://github.example/acme/alpha/issues/52",
+			State:    "open",
+			Labels:   []string{"odin:ready", "safety:low-risk"},
+		},
+	}
+	installSuperviseE2EFakeTracker(t, fake)
+	installSuperviseE2EFakeWorker(t, func(_ context.Context, request supervisedE2EWorkerRequest) (supervisedE2EWorkerResult, error) {
+		if !strings.Contains(request.Prompt, "Audit the existing repo before editing.") ||
+			!strings.Contains(request.Prompt, "Only edit this exact planned path: "+plannedPath) ||
+			!strings.Contains(request.Prompt, "Do not change runner, security, workspace, token, deploy, CI, scheduler, PR, or merge behavior.") ||
+			!strings.Contains(request.Prompt, "make odin-e2e-local") {
+			t.Fatalf("worker prompt missing required guardrails:\n%s", request.Prompt)
+		}
+		if request.Command.Path != "codex" || !containsString(request.Command.Args, "exec") || !containsString(request.Command.Args, "workspace-write") {
+			t.Fatalf("command = %+v, want codex exec workspace-write", request.Command)
+		}
+		path := filepath.Join(request.WorktreePath, filepath.FromSlash(plannedPath))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("MkdirAll(planned dir) error = %v", err)
+		}
+		if err := os.WriteFile(path, []byte("# Stage 7 worker success\n\nRun make odin-e2e-local before handoff.\n"), 0o644); err != nil {
+			t.Fatalf("WriteFile(planned path) error = %v", err)
+		}
+		return supervisedE2EWorkerResult{Output: "worker complete: make odin-e2e-local"}, nil
+	})
+
+	_ = runWorkSuperviseJSON(t, ctx, store, []string{"supervise", "start", "--json"})
+	var output strings.Builder
+	if err := RunWork(ctx, store, superviseE2EProjectRegistry(t, repoRoot), registry.Snapshot{}, []string{
+		"supervise", "e2e", "run-once", "--project", "alpha", "--issue", "52", "--json",
+	}, &output); err != nil {
+		t.Fatalf("RunWork(supervise e2e run-once worker success) error = %v\noutput:\n%s", err, output.String())
+	}
+
+	report := decodeSuperviseE2ERunOnceReport(t, output.String())
+	if report.Phase != "worker_audited" || report.Status != "worker_completed" || report.CodexExecution != "completed" {
+		t.Fatalf("report phase/status/codex = %+v, want worker_audited/worker_completed/completed", report)
+	}
+	if report.PRs != supervision.SideEffectNotCreated || report.Merge != supervision.SideEffectNotMerged || report.Deployment != supervision.SideEffectNotStarted {
+		t.Fatalf("PR boundaries = %+v, want no PR/merge/deploy", report)
+	}
+	if report.Worktree.Path == "" || report.Worktree.Branch == "" || !strings.HasPrefix(report.Worktree.Path, worktreeRoot) {
+		t.Fatalf("worktree = %+v, want kept worktree under configured root", report.Worktree)
+	}
+	if report.Diff.Files == nil || len(report.Diff.Files) != 1 || report.Diff.Files[0] != plannedPath || report.Diff.SHA256 == "" {
+		t.Fatalf("diff = %+v, want only planned path with fingerprint", report.Diff)
+	}
+	runDir := filepath.Join(odinRoot, "runs", "supervised-e2e", report.RunID)
+	for _, name := range []string{"worker-prompt.md", "worker-command.json", "worker-output.txt", "diff-summary.md", "queue-report.json", "final-report.json"} {
+		if _, err := os.Stat(filepath.Join(runDir, name)); err != nil {
+			t.Fatalf("expected artifact %s: %v", name, err)
+		}
+	}
+	assertFileContains(t, filepath.Join(runDir, "worker-command.json"), `"sandbox_mode": "workspace-write"`)
+	assertFileContains(t, filepath.Join(runDir, "diff-summary.md"), plannedPath)
+	assertFileContains(t, filepath.Join(runDir, "final-report.json"), `"codex_execution": "completed"`)
+	assertFileNotContains(t, filepath.Join(runDir, "final-report.json"), "github_pat_1234567890abcdefghijklmnopqrstuvwxyz")
+}
+
+func TestRunWorkSuperviseE2ERunOnceForbiddenDiffBlocksPR(t *testing.T) {
+	ctx := context.Background()
+	store := openWorkCommandStore(t)
+	defer store.Close()
+	odinRoot := t.TempDir()
+	repoRoot := initWorkerDryRunGitRepo(t)
+	t.Setenv("ODIN_ROOT", odinRoot)
+	t.Setenv("ODIN_WORKTREE_ROOT", filepath.Join(t.TempDir(), "worktrees"))
+
+	plannedPath := "docs/operations/stage-7-worker-forbidden.md"
+	fake := &superviseE2EFakeTracker{
+		issue: tracker.Issue{
+			Provider: "github",
+			Repo:     "acme/alpha",
+			Number:   53,
+			Title:    "Worker forbidden diff",
+			Body:     "Planned scope: " + plannedPath,
+			URL:      "https://github.example/acme/alpha/issues/53",
+			State:    "open",
+			Labels:   []string{"odin:ready", "safety:low-risk"},
+		},
+	}
+	installSuperviseE2EFakeTracker(t, fake)
+	installSuperviseE2EFakeWorker(t, func(_ context.Context, request supervisedE2EWorkerRequest) (supervisedE2EWorkerResult, error) {
+		planned := filepath.Join(request.WorktreePath, filepath.FromSlash(plannedPath))
+		if err := os.MkdirAll(filepath.Dir(planned), 0o755); err != nil {
+			t.Fatalf("MkdirAll(planned dir) error = %v", err)
+		}
+		if err := os.WriteFile(planned, []byte("# Planned\n"), 0o644); err != nil {
+			t.Fatalf("WriteFile(planned) error = %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(request.WorktreePath, "README.md"), []byte("# Changed outside plan\n"), 0o644); err != nil {
+			t.Fatalf("WriteFile(forbidden) error = %v", err)
+		}
+		return supervisedE2EWorkerResult{Output: "worker touched forbidden diff"}, nil
+	})
+
+	_ = runWorkSuperviseJSON(t, ctx, store, []string{"supervise", "start", "--json"})
+	var output strings.Builder
+	err := RunWork(ctx, store, superviseE2EProjectRegistry(t, repoRoot), registry.Snapshot{}, []string{
+		"supervise", "e2e", "run-once", "--project", "alpha", "--issue", "53", "--json",
+	}, &output)
+	if err == nil {
+		t.Fatalf("RunWork(supervise e2e run-once forbidden diff) error = nil, want blocked PR\noutput:\n%s", output.String())
+	}
+	if !strings.Contains(err.Error(), "worker diff changed forbidden files") {
+		t.Fatalf("error = %q, want forbidden diff audit failure", err.Error())
+	}
+	runID := newestSuperviseE2ERunID(t, odinRoot)
+	finalReportPath := filepath.Join(odinRoot, "runs", "supervised-e2e", runID, "final-report.json")
+	assertFileContains(t, finalReportPath, `"status": "failed_closed"`)
+	assertFileContains(t, finalReportPath, `"phase": "diff_audit"`)
+	assertFileContains(t, finalReportPath, `"prs": "not_created"`)
+	assertFileContains(t, finalReportPath, `"README.md"`)
+}
+
+func TestRunWorkSuperviseE2ERunOnceTokenInDiffBlocksPR(t *testing.T) {
+	ctx := context.Background()
+	store := openWorkCommandStore(t)
+	defer store.Close()
+	odinRoot := t.TempDir()
+	repoRoot := initWorkerDryRunGitRepo(t)
+	t.Setenv("ODIN_ROOT", odinRoot)
+	t.Setenv("ODIN_WORKTREE_ROOT", filepath.Join(t.TempDir(), "worktrees"))
+
+	plannedPath := "docs/operations/stage-7-worker-leak.md"
+	fake := &superviseE2EFakeTracker{
+		issue: tracker.Issue{
+			Provider: "github",
+			Repo:     "acme/alpha",
+			Number:   54,
+			Title:    "Worker token diff",
+			Body:     "Planned scope: " + plannedPath,
+			URL:      "https://github.example/acme/alpha/issues/54",
+			State:    "open",
+			Labels:   []string{"odin:ready", "safety:low-risk"},
+		},
+	}
+	installSuperviseE2EFakeTracker(t, fake)
+	installSuperviseE2EFakeWorker(t, func(_ context.Context, request supervisedE2EWorkerRequest) (supervisedE2EWorkerResult, error) {
+		path := filepath.Join(request.WorktreePath, filepath.FromSlash(plannedPath))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("MkdirAll(planned dir) error = %v", err)
+		}
+		if err := os.WriteFile(path, []byte("leaked token ghp_1234567890abcdefghijklmnopqrst\n"), 0o644); err != nil {
+			t.Fatalf("WriteFile(planned path) error = %v", err)
+		}
+		return supervisedE2EWorkerResult{Output: "worker complete"}, nil
+	})
+
+	_ = runWorkSuperviseJSON(t, ctx, store, []string{"supervise", "start", "--json"})
+	var output strings.Builder
+	err := RunWork(ctx, store, superviseE2EProjectRegistry(t, repoRoot), registry.Snapshot{}, []string{
+		"supervise", "e2e", "run-once", "--project", "alpha", "--issue", "54", "--json",
+	}, &output)
+	if err == nil {
+		t.Fatalf("RunWork(supervise e2e run-once token diff) error = nil, want token audit failure\noutput:\n%s", output.String())
+	}
+	if !strings.Contains(err.Error(), "token-shaped string detected") {
+		t.Fatalf("error = %q, want token audit failure", err.Error())
+	}
+	runID := newestSuperviseE2ERunID(t, odinRoot)
+	runDir := filepath.Join(odinRoot, "runs", "supervised-e2e", runID)
+	assertFileContains(t, filepath.Join(runDir, "final-report.json"), `"status": "failed_closed"`)
+	assertFileContains(t, filepath.Join(runDir, "final-report.json"), `"phase": "token_audit"`)
+	assertFileContains(t, filepath.Join(runDir, "final-report.json"), `"prs": "not_created"`)
+	assertFileNotContains(t, filepath.Join(runDir, "final-report.json"), "ghp_1234567890abcdefghijklmnopqrst")
+	assertFileNotContains(t, filepath.Join(runDir, "diff-summary.md"), "ghp_1234567890abcdefghijklmnopqrst")
 }
 
 func runWorkSuperviseE2EForError(t *testing.T, ctx context.Context, store *sqlite.Store, args []string) (error, string) {
@@ -732,15 +944,23 @@ type superviseE2EPrepareIssueReport struct {
 }
 
 type superviseE2ERunOnceReport struct {
-	Mode           string                       `json:"mode"`
-	Phase          string                       `json:"phase"`
-	Status         string                       `json:"status"`
-	Project        string                       `json:"project"`
-	Repo           string                       `json:"repo"`
-	RunID          string                       `json:"run_id"`
-	Issue          workSuperviseE2EIssueReport  `json:"issue"`
-	Queue          []supervision.QueueDecision  `json:"queue"`
-	Claims         []supervision.PlannedClaim   `json:"claims"`
+	Mode     string                      `json:"mode"`
+	Phase    string                      `json:"phase"`
+	Status   string                      `json:"status"`
+	Project  string                      `json:"project"`
+	Repo     string                      `json:"repo"`
+	RunID    string                      `json:"run_id"`
+	Issue    workSuperviseE2EIssueReport `json:"issue"`
+	Queue    []supervision.QueueDecision `json:"queue"`
+	Claims   []supervision.PlannedClaim  `json:"claims"`
+	Worktree struct {
+		Path   string `json:"path"`
+		Branch string `json:"branch"`
+	} `json:"worktree"`
+	Diff struct {
+		Files  []string `json:"files"`
+		SHA256 string   `json:"sha256"`
+	} `json:"diff"`
 	CodexExecution string                       `json:"codex_execution"`
 	PRs            string                       `json:"prs"`
 	Merge          string                       `json:"merge"`
@@ -811,11 +1031,75 @@ func installSuperviseE2EFakeTracker(t *testing.T, fake *superviseE2EFakeTracker)
 	}
 }
 
+func installSuperviseE2EFakeWorker(t *testing.T, fake func(context.Context, supervisedE2EWorkerRequest) (supervisedE2EWorkerResult, error)) {
+	t.Helper()
+
+	previous := runSupervisedE2EWorker
+	t.Cleanup(func() { runSupervisedE2EWorker = previous })
+	runSupervisedE2EWorker = fake
+}
+
+func superviseE2EProjectRegistry(t *testing.T, repoRoot string) projects.Registry {
+	t.Helper()
+
+	path := filepath.Join(t.TempDir(), "projects.yaml")
+	if err := os.WriteFile(path, []byte(`
+version: 1
+projects:
+  - key: alpha
+    name: Alpha
+    project_class: github_backed_project
+    git_root: `+repoRoot+`
+    default_branch: main
+    github:
+      repo: acme/alpha
+    policy:
+      allowed_commands: [status]
+      branch_rules:
+        protected_branches: [main]
+        require_worktree: true
+        require_task_branch: true
+        allow_default_branch_mutation: false
+      approval_gates:
+        require_for_governance_changes: true
+        require_for_destructive_operations: true
+        require_for_system_project_changes: true
+      merge_policy:
+        mode: squash
+        allow_direct_to_default_branch: false
+      destructive_operations:
+        allow_reset: false
+        allow_clean: false
+        allow_force_push: false
+        require_explicit_approval: true
+`), 0o644); err != nil {
+		t.Fatalf("write projects: %v", err)
+	}
+	registry, diagnostics, err := projects.Register(path)
+	if err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+	if len(diagnostics) != 0 {
+		t.Fatalf("diagnostics = %+v, want none", diagnostics)
+	}
+	return registry
+}
+
 func runWorkSuperviseE2ERunOnceOutput(t *testing.T, ctx context.Context, store *sqlite.Store, args []string) string {
 	t.Helper()
 
 	var output strings.Builder
 	if err := RunWork(ctx, store, commandProjectRegistry(t), registry.Snapshot{}, args, &output); err != nil {
+		t.Fatalf("RunWork(%v) error = %v\noutput:\n%s", args, err, output.String())
+	}
+	return output.String()
+}
+
+func runWorkSuperviseE2ERunOnceOutputWithRegistry(t *testing.T, ctx context.Context, store *sqlite.Store, projectRegistry projects.Registry, args []string) string {
+	t.Helper()
+
+	var output strings.Builder
+	if err := RunWork(ctx, store, projectRegistry, registry.Snapshot{}, args, &output); err != nil {
 		t.Fatalf("RunWork(%v) error = %v\noutput:\n%s", args, err, output.String())
 	}
 	return output.String()
