@@ -59,7 +59,7 @@ func TestRunWorkSuperviseStopJSONReportsNoSideEffects(t *testing.T) {
 	assertNoSuperviseSideEffects(t, ctx, store)
 }
 
-func TestRunWorkSuperviseQueueProjectJSONRecordsDecisionsWithoutStartingWork(t *testing.T) {
+func TestRunWorkSuperviseQueueProjectFixtureJSONReportsDecisionWithoutDurableQueueState(t *testing.T) {
 	ctx := context.Background()
 	store := openWorkCommandStore(t)
 	defer store.Close()
@@ -78,22 +78,16 @@ func TestRunWorkSuperviseQueueProjectJSONRecordsDecisionsWithoutStartingWork(t *
 	if decision.ProjectKey != "alpha" || decision.Repo != "acme/alpha" || decision.IssueNumber != 7 {
 		t.Fatalf("decision target = %+v, want alpha/acme/alpha fixture issue 7", decision)
 	}
-	if decision.Decision != supervision.DecisionEligible || !decision.Eligible || decision.ClaimKey == "" {
-		t.Fatalf("decision = %+v, want eligible reserved claim", decision)
+	if decision.Decision != supervision.DecisionEligible || !decision.Eligible || decision.ClaimKey != "" {
+		t.Fatalf("decision = %+v, want eligible fixture decision without durable claim", decision)
 	}
-	if len(report.Claims) != 1 || report.Claims[0].Status != supervision.ClaimStatusReserved {
-		t.Fatalf("claims = %+v, want one reserved claim", report.Claims)
+	if len(report.Claims) != 0 {
+		t.Fatalf("claims = %+v, want no durable fixture claims", report.Claims)
 	}
 
-	decisions, err := store.ListSupervisionQueueDecisions(ctx, sqlite.ListSupervisionQueueDecisionsParams{
-		Repo: "acme/alpha",
-	})
-	if err != nil {
-		t.Fatalf("ListSupervisionQueueDecisions() error = %v", err)
-	}
-	if len(decisions) != 1 || decisions[0].Decision != supervision.DecisionEligible {
-		t.Fatalf("stored decisions = %+v, want one eligible decision", decisions)
-	}
+	assertSuperviseTableCount(t, ctx, store, "projects", 0)
+	assertSuperviseTableCount(t, ctx, store, "supervision_queue_decisions", 0)
+	assertSuperviseTableCount(t, ctx, store, "supervision_dispatch_claims", 0)
 	assertNoSuperviseSideEffects(t, ctx, store)
 }
 
@@ -112,6 +106,7 @@ func TestRunWorkSuperviseQueueWithoutFixtureIssueFailsWithoutCreatingClaims(t *t
 	if !strings.Contains(err.Error(), "--fixture-issue is required for work supervise queue in this slice") {
 		t.Fatalf("error = %q, want required fixture issue error", err.Error())
 	}
+	assertSuperviseTableCount(t, ctx, store, "projects", 0)
 	assertSuperviseTableCount(t, ctx, store, "supervision_queue_decisions", 0)
 	assertSuperviseTableCount(t, ctx, store, "supervision_dispatch_claims", 0)
 	assertNoSuperviseSideEffects(t, ctx, store)

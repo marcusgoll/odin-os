@@ -3,7 +3,6 @@ package commands
 import (
 	"context"
 	"crypto/sha256"
-	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -120,7 +119,7 @@ func runWorkSupervise(ctx context.Context, store *sqlite.Store, projectRegistry 
 	case "stop":
 		report, err = service.Stop(ctx, "odin-work-supervise")
 	case "queue":
-		report, err = runWorkSuperviseQueue(ctx, store, projectRegistry, service, params)
+		report, err = runWorkSuperviseQueue(ctx, projectRegistry, service, params)
 	case "recover":
 		report, err = service.Recover(ctx)
 	}
@@ -133,20 +132,11 @@ func runWorkSupervise(ctx context.Context, store *sqlite.Store, projectRegistry 
 	return encoder.Encode(flattenWorkSuperviseReport(report, args[0]))
 }
 
-func runWorkSuperviseQueue(ctx context.Context, store *sqlite.Store, projectRegistry projects.Registry, service supervision.Service, params map[string]string) (supervision.Report, error) {
+func runWorkSuperviseQueue(ctx context.Context, projectRegistry projects.Registry, service supervision.Service, params map[string]string) (supervision.Report, error) {
 	projectKey := strings.TrimSpace(params["project"])
 	if projectKey == "" {
 		return supervision.Report{}, fmt.Errorf("missing --project for work supervise queue")
 	}
-	manifest, ok := projectRegistry.Lookup(projectKey)
-	if !ok {
-		return supervision.Report{}, fmt.Errorf("unknown project %q", projectKey)
-	}
-	project, err := ensureWorkSuperviseProject(ctx, store, manifest)
-	if err != nil {
-		return supervision.Report{}, err
-	}
-
 	rawFixtureIssue := strings.TrimSpace(params["fixture-issue"])
 	if rawFixtureIssue == "" {
 		return supervision.Report{}, fmt.Errorf("--fixture-issue is required for work supervise queue in this slice")
@@ -155,42 +145,44 @@ func runWorkSuperviseQueue(ctx context.Context, store *sqlite.Store, projectRegi
 	if err != nil || issueNumber <= 0 {
 		return supervision.Report{}, fmt.Errorf("invalid --fixture-issue %q", rawFixtureIssue)
 	}
+	manifest, ok := projectRegistry.Lookup(projectKey)
+	if !ok {
+		return supervision.Report{}, fmt.Errorf("unknown project %q", projectKey)
+	}
 
-	return service.Queue(ctx, supervision.Project{
-		ID:   project.ID,
-		Key:  manifest.Key,
-		Repo: manifest.GitHub.Repo,
-	}, []supervision.Issue{{
+	report, err := service.Status(ctx)
+	if err != nil {
+		return supervision.Report{}, err
+	}
+	issue := supervision.Issue{
 		Repo:         manifest.GitHub.Repo,
 		Number:       issueNumber,
 		Title:        "Stage 7 supervised agency control-plane fixture proof",
 		Labels:       []string{"odin:ready", "safety:low-risk"},
 		ChangedPaths: []string{"docs/stage-7-supervised-agency.md"},
-	}})
-}
-
-func ensureWorkSuperviseProject(ctx context.Context, store *sqlite.Store, manifest projects.Manifest) (sqlite.Project, error) {
-	project, err := store.GetProjectByKey(ctx, manifest.Key)
-	if err == nil {
-		return project, nil
 	}
-	if err != sql.ErrNoRows {
-		return sqlite.Project{}, err
+	eligibility := supervision.EvaluateIssue(supervision.DefaultConfig(), issue)
+	decision := supervision.QueueDecision{
+		ProjectKey:  manifest.Key,
+		Repo:        manifest.GitHub.Repo,
+		IssueNumber: issueNumber,
+		Eligible:    eligibility.Eligible,
+		DecidedAt:   time.Now().UTC(),
 	}
-
-	scopeValue := "project"
-	if manifest.SystemProject {
-		scopeValue = "odin-core"
+	switch {
+	case report.Control.KillSwitchActive || report.Control.Status != supervision.ControlStatusEnabled:
+		decision.Decision = supervision.DecisionRefused
+		decision.Eligible = false
+		decision.RefusalReason = supervision.RefusalKillSwitchActive
+	case !eligibility.Eligible:
+		decision.Decision = supervision.DecisionRefused
+		decision.RefusalReason = eligibility.RefusalReason
+	default:
+		decision.Decision = supervision.DecisionEligible
 	}
-	return store.CreateProject(ctx, sqlite.CreateProjectParams{
-		Key:           manifest.Key,
-		Name:          manifest.Name,
-		Scope:         scopeValue,
-		GitRoot:       manifest.GitRoot,
-		DefaultBranch: manifest.DefaultBranch,
-		GitHubRepo:    manifest.GitHub.Repo,
-		ManifestPath:  manifest.SourcePath,
-	})
+	report.Decisions = []supervision.QueueDecision{decision}
+	report.Claims = []supervision.PlannedClaim{}
+	return report, nil
 }
 
 func flattenWorkSuperviseReport(report supervision.Report, command string) workSuperviseReport {
