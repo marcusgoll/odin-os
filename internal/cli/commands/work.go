@@ -433,6 +433,21 @@ func runWorkSuperviseE2ERunOnce(ctx context.Context, store *sqlite.Store, manife
 			"deployment":      supervision.SideEffectNotStarted,
 		}, fmt.Errorf("fetched issue number %d differs from requested --issue %d", fetched.Number, issueNumber))
 	}
+	if err := validateSupervisedE2ERawPlannedScope(fetched.Body); err != nil {
+		return writeRunOnceFailureArtifactsAndError(queueReportPath, finalReportPath, map[string]any{
+			"mode":            "supervised_e2e",
+			"phase":           "validate_issue",
+			"status":          "failed_closed",
+			"project":         manifest.Key,
+			"repo":            repoID,
+			"run_id":          runID,
+			"requested_issue": issueNumber,
+			"codex_execution": supervision.SideEffectNotStarted,
+			"prs":             supervision.SideEffectNotCreated,
+			"merge":           supervision.SideEffectNotMerged,
+			"deployment":      supervision.SideEffectNotStarted,
+		}, err)
+	}
 
 	issues := supervisionIssuesFromTrackerIssues([]tracker.Issue{fetched}, repoID)
 	if len(issues) != 1 {
@@ -500,6 +515,10 @@ func runWorkSuperviseE2ERunOnce(ctx context.Context, store *sqlite.Store, manife
 	if err != nil {
 		return redactWorkSuperviseE2EError(err)
 	}
+	preexistingClaim, err := existingSupervisedE2EClaim(ctx, store, project.ID, repoID, issue.Number)
+	if err != nil {
+		return redactWorkSuperviseE2EError(err)
+	}
 	service := supervision.NewService(store, supervision.DefaultConfig())
 	queueReport, err := service.Queue(ctx, supervision.Project{ID: project.ID, Key: project.Key, Repo: repoID}, []supervision.Issue{issue})
 	if err != nil {
@@ -539,6 +558,14 @@ func runWorkSuperviseE2ERunOnce(ctx context.Context, store *sqlite.Store, manife
 	}
 	if status != "claimed" || len(report.Claims) != 1 || report.Claims[0].ClaimKey == "" {
 		return redactWorkSuperviseE2EError(fmt.Errorf("work supervise e2e run-once refused before worker behavior: issue=%d status=%s", issueNumber, queueRefusalReason(report.Queue)))
+	}
+	if preexistingClaim != "" {
+		report.Status = "claim_exists"
+		report.CodexExecution = supervision.SideEffectNotStarted
+		if err := writeRedactedJSONArtifact(finalReportPath, report); err != nil {
+			return redactWorkSuperviseE2EError(err)
+		}
+		return redactWorkSuperviseE2EError(fmt.Errorf("work supervise e2e run-once preserved existing claim before worker behavior: issue=%d claim_key=%s", issueNumber, preexistingClaim))
 	}
 
 	workerReport, err := runSupervisedE2EWorkerAndAudit(ctx, manifest, issue, report, artifactRefs)
@@ -624,10 +651,29 @@ func writeRunOnceFailureArtifactsAndError(queueReportPath string, finalReportPat
 	return redactWorkSuperviseE2EError(err)
 }
 
+func existingSupervisedE2EClaim(ctx context.Context, store *sqlite.Store, projectID int64, repo string, issueNumber int) (string, error) {
+	for _, status := range []string{supervision.ClaimStatusReserved, supervision.ClaimStatusActive} {
+		claims, err := store.ListSupervisionDispatchClaims(ctx, sqlite.ListSupervisionDispatchClaimsParams{
+			ProjectID: &projectID,
+			Repo:      repo,
+			Status:    status,
+		})
+		if err != nil {
+			return "", err
+		}
+		for _, claim := range claims {
+			if claim.IssueNumber == issueNumber {
+				return claim.ClaimKey, nil
+			}
+		}
+	}
+	return "", nil
+}
+
 func runSupervisedE2EWorkerAndAudit(ctx context.Context, manifest projects.Manifest, issue supervision.Issue, report workSuperviseE2EReport, artifacts workSuperviseE2EArtifactRefs) (workSuperviseE2EReport, error) {
 	plannedPath := issue.ChangedPaths[0]
 	if strings.TrimSpace(manifest.GitRoot) == "" {
-		return report, fmt.Errorf("project %q has no git root for supervised e2e worker", manifest.Key)
+		return report, supervisedE2EFailWithReport(artifacts.FinalReport, report, "worker_setup", fmt.Errorf("project %q has no git root for supervised e2e worker", manifest.Key))
 	}
 
 	worktreeRoot := strings.TrimSpace(os.Getenv("ODIN_WORKTREE_ROOT"))
@@ -645,13 +691,13 @@ func runSupervisedE2EWorkerAndAudit(ctx context.Context, manifest projects.Manif
 	})
 	rootAbs, pathAbs, insideRoot, err := provePathInsideRoot(worktreeRoot, worktreePath)
 	if err != nil {
-		return report, redactWorkSuperviseE2EError(err)
+		return report, supervisedE2EFailWithReport(artifacts.FinalReport, report, "worker_setup", err)
 	}
 	if !insideRoot {
-		return report, redactWorkSuperviseE2EError(fmt.Errorf("supervised e2e worktree path %q escaped root %q", worktreePath, worktreeRoot))
+		return report, supervisedE2EFailWithReport(artifacts.FinalReport, report, "worker_setup", fmt.Errorf("supervised e2e worktree path %q escaped root %q", worktreePath, worktreeRoot))
 	}
 	if err := os.MkdirAll(filepath.Dir(pathAbs), 0o755); err != nil {
-		return report, redactWorkSuperviseE2EError(err)
+		return report, supervisedE2EFailWithReport(artifacts.FinalReport, report, "worker_setup", err)
 	}
 
 	git := vcsgit.Adapter{}
@@ -660,11 +706,11 @@ func runSupervisedE2EWorkerAndAudit(ctx context.Context, manifest projects.Manif
 		baseBranch = "HEAD"
 	}
 	if err := git.CreateBranch(ctx, manifest.GitRoot, branchName, baseBranch); err != nil {
-		return report, redactWorkSuperviseE2EError(err)
+		return report, supervisedE2EFailWithReport(artifacts.FinalReport, report, "worker_setup", err)
 	}
 	if err := git.AddWorktree(ctx, manifest.GitRoot, pathAbs, branchName); err != nil {
 		_ = deleteGitBranch(context.Background(), manifest.GitRoot, branchName)
-		return report, redactWorkSuperviseE2EError(err)
+		return report, supervisedE2EFailWithReport(artifacts.FinalReport, report, "worker_setup", err)
 	}
 
 	report.Worktree = workSuperviseE2EWorktree{
@@ -839,7 +885,11 @@ func supervisedE2EDiffMatchesPlannedPath(files []string, plannedPath string) boo
 func supervisedE2EFailWithReport(finalReportPath string, report workSuperviseE2EReport, phase string, err error) error {
 	report.Phase = phase
 	report.Status = "failed_closed"
-	report.CodexExecution = "attempted"
+	if phase == "worker_setup" || phase == "worker_command" {
+		report.CodexExecution = supervision.SideEffectNotStarted
+	} else {
+		report.CodexExecution = "attempted"
+	}
 	report.PRs = supervision.SideEffectNotCreated
 	report.Merge = supervision.SideEffectNotMerged
 	report.Deployment = supervision.SideEffectNotStarted
@@ -881,6 +931,24 @@ func validateSupervisedE2ERunOnceIssue(issue supervision.Issue) error {
 	return nil
 }
 
+func validateSupervisedE2ERawPlannedScope(body string) error {
+	var plannedFields []string
+	for _, line := range strings.Split(body, "\n") {
+		markerIndex := strings.Index(strings.ToLower(line), "planned scope:")
+		if markerIndex < 0 {
+			continue
+		}
+		rawScope := strings.TrimSpace(line[markerIndex+len("planned scope:"):])
+		for _, field := range strings.Fields(rawScope) {
+			plannedFields = append(plannedFields, strings.Trim(field, "<>.,!?"))
+		}
+	}
+	if len(plannedFields) != 1 {
+		return fmt.Errorf("work supervise e2e run-once requires exactly one raw Planned scope token for exact diff audit: got %d", len(plannedFields))
+	}
+	return nil
+}
+
 func validateSupervisedE2ERunOnceScope(paths []string) error {
 	switch len(paths) {
 	case 0:
@@ -889,6 +957,9 @@ func validateSupervisedE2ERunOnceScope(paths []string) error {
 		cleaned := normalizeSupervisedE2ERunOncePath(paths[0])
 		if cleaned != paths[0] || !strings.HasPrefix(cleaned, "docs/operations/") {
 			return fmt.Errorf("work supervise e2e run-once requires Planned scope under docs/operations/: got %q", paths[0])
+		}
+		if strings.ContainsAny(cleaned, " \t\r\n") {
+			return fmt.Errorf("work supervise e2e run-once requires Planned scope without whitespace for exact diff audit: got %q", paths[0])
 		}
 		return nil
 	default:

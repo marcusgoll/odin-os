@@ -305,7 +305,9 @@ func TestRunWorkSuperviseE2ERunOnceQueuesExactIssueAndClaims(t *testing.T) {
 		},
 	}
 	installSuperviseE2EFakeTracker(t, fake)
+	workerCalls := 0
 	installSuperviseE2EFakeWorker(t, func(_ context.Context, request supervisedE2EWorkerRequest) (supervisedE2EWorkerResult, error) {
+		workerCalls++
 		path := filepath.Join(request.WorktreePath, filepath.FromSlash(plannedPath))
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 			t.Fatalf("MkdirAll(planned dir) error = %v", err)
@@ -579,6 +581,47 @@ func TestRunWorkSuperviseE2ERunOnceRejectsEscapedOperationsPathBeforeQueue(t *te
 	assertNoSuperviseSideEffects(t, ctx, store)
 }
 
+func TestRunWorkSuperviseE2ERunOnceRejectsWhitespacePlannedPathBeforeQueue(t *testing.T) {
+	ctx := context.Background()
+	store := openWorkCommandStore(t)
+	defer store.Close()
+	odinRoot := t.TempDir()
+	t.Setenv("ODIN_ROOT", odinRoot)
+
+	fake := &superviseE2EFakeTracker{
+		issue: tracker.Issue{
+			Provider: "github",
+			Repo:     "acme/alpha",
+			Number:   55,
+			Title:    "Whitespace docs path",
+			Body:     "Planned scope: docs/operations/stage 7 whitespace.md",
+			URL:      "https://github.example/acme/alpha/issues/55",
+			State:    "open",
+			Labels:   []string{"odin:ready", "safety:low-risk"},
+		},
+	}
+	installSuperviseE2EFakeTracker(t, fake)
+
+	_ = runWorkSuperviseJSON(t, ctx, store, []string{"supervise", "start", "--json"})
+	var output strings.Builder
+	err := RunWork(ctx, store, commandProjectRegistry(t), registry.Snapshot{}, []string{
+		"supervise", "e2e", "run-once", "--project", "alpha", "--issue", "55", "--json",
+	}, &output)
+	if err == nil {
+		t.Fatalf("RunWork(supervise e2e run-once with whitespace planned path) error = nil, want fail-closed path gate\noutput:\n%s", output.String())
+	}
+	if !strings.Contains(err.Error(), "requires exactly one raw Planned scope token") {
+		t.Fatalf("error = %q, want raw path token gate before queue", err.Error())
+	}
+	assertSuperviseTableCount(t, ctx, store, "supervision_queue_decisions", 0)
+	assertSuperviseTableCount(t, ctx, store, "supervision_dispatch_claims", 0)
+
+	runID := newestSuperviseE2ERunID(t, odinRoot)
+	finalReportPath := filepath.Join(odinRoot, "runs", "supervised-e2e", runID, "final-report.json")
+	assertFileContains(t, finalReportPath, `"status": "failed_closed"`)
+	assertNoSuperviseSideEffects(t, ctx, store)
+}
+
 func TestRunWorkSuperviseE2ERunOnceRejectsClosedBlockedAndPullRequestBeforeQueue(t *testing.T) {
 	cases := []struct {
 		name        string
@@ -685,7 +728,9 @@ func TestRunWorkSuperviseE2ERunOnceDuplicateActiveClaimPreservesExistingClaim(t 
 		},
 	}
 	installSuperviseE2EFakeTracker(t, fake)
+	workerCalls := 0
 	installSuperviseE2EFakeWorker(t, func(_ context.Context, request supervisedE2EWorkerRequest) (supervisedE2EWorkerResult, error) {
+		workerCalls++
 		path := filepath.Join(request.WorktreePath, filepath.FromSlash(plannedPath))
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 			t.Fatalf("MkdirAll(planned dir) error = %v", err)
@@ -700,18 +745,27 @@ func TestRunWorkSuperviseE2ERunOnceDuplicateActiveClaimPreservesExistingClaim(t 
 	firstOutput := runWorkSuperviseE2ERunOnceOutputWithRegistry(t, ctx, store, superviseE2EProjectRegistry(t, repoRoot), []string{
 		"supervise", "e2e", "run-once", "--project", "alpha", "--issue", "46", "--json",
 	})
-	secondOutput := runWorkSuperviseE2ERunOnceOutputWithRegistry(t, ctx, store, superviseE2EProjectRegistry(t, repoRoot), []string{
+	var secondOutput strings.Builder
+	secondErr := RunWork(ctx, store, superviseE2EProjectRegistry(t, repoRoot), registry.Snapshot{}, []string{
 		"supervise", "e2e", "run-once", "--project", "alpha", "--issue", "46", "--json",
-	})
+	}, &secondOutput)
+	if secondErr == nil {
+		t.Fatalf("second RunWork(supervise e2e run-once) error = nil, want existing-claim refusal before worker\noutput:\n%s", secondOutput.String())
+	}
+	if !strings.Contains(secondErr.Error(), "preserved existing claim before worker behavior") {
+		t.Fatalf("second error = %q, want existing-claim refusal before worker", secondErr.Error())
+	}
+	if workerCalls != 1 {
+		t.Fatalf("worker calls = %d, want exactly one launch across duplicate run-once calls", workerCalls)
+	}
 	first := decodeSuperviseE2ERunOnceReport(t, firstOutput)
-	second := decodeSuperviseE2ERunOnceReport(t, secondOutput)
-	if len(first.Claims) != 1 || len(second.Claims) != 1 {
-		t.Fatalf("claims = first %+v second %+v, want one claim reported by each run", first.Claims, second.Claims)
+	secondRunID := newestSuperviseE2ERunID(t, odinRoot)
+	secondFinalReportPath := filepath.Join(odinRoot, "runs", "supervised-e2e", secondRunID, "final-report.json")
+	assertFileContains(t, secondFinalReportPath, `"status": "claim_exists"`)
+	assertFileContains(t, secondFinalReportPath, `"codex_execution": "not_started"`)
+	if len(first.Claims) != 1 {
+		t.Fatalf("claims = first %+v, want one claim reported by first run", first.Claims)
 	}
-	if first.Claims[0].ClaimKey != second.Claims[0].ClaimKey {
-		t.Fatalf("claim keys = first %q second %q, want existing claim preserved", first.Claims[0].ClaimKey, second.Claims[0].ClaimKey)
-	}
-
 	project, err := store.GetProjectByKey(ctx, "alpha")
 	if err != nil {
 		t.Fatalf("GetProjectByKey(alpha) error = %v", err)
@@ -915,6 +969,58 @@ func TestRunWorkSuperviseE2ERunOnceTokenInDiffBlocksPR(t *testing.T) {
 	assertFileContains(t, filepath.Join(runDir, "final-report.json"), `"prs": "not_created"`)
 	assertFileNotContains(t, filepath.Join(runDir, "final-report.json"), "ghp_1234567890abcdefghijklmnopqrst")
 	assertFileNotContains(t, filepath.Join(runDir, "diff-summary.md"), "ghp_1234567890abcdefghijklmnopqrst")
+}
+
+func TestRunWorkSuperviseE2ERunOnceWorkerSetupFailureRewritesFinalReport(t *testing.T) {
+	ctx := context.Background()
+	store := openWorkCommandStore(t)
+	defer store.Close()
+	odinRoot := t.TempDir()
+	repoRoot := initWorkerDryRunGitRepo(t)
+	blockedWorktreeRoot := filepath.Join(t.TempDir(), "worktree-root-file")
+	if err := os.WriteFile(blockedWorktreeRoot, []byte("not a directory"), 0o644); err != nil {
+		t.Fatalf("WriteFile(blocked worktree root) error = %v", err)
+	}
+	t.Setenv("ODIN_ROOT", odinRoot)
+	t.Setenv("ODIN_WORKTREE_ROOT", blockedWorktreeRoot)
+
+	plannedPath := "docs/operations/stage-7-worker-setup-failure.md"
+	fake := &superviseE2EFakeTracker{
+		issue: tracker.Issue{
+			Provider: "github",
+			Repo:     "acme/alpha",
+			Number:   56,
+			Title:    "Worker setup failure",
+			Body:     "Planned scope: " + plannedPath,
+			URL:      "https://github.example/acme/alpha/issues/56",
+			State:    "open",
+			Labels:   []string{"odin:ready", "safety:low-risk"},
+		},
+	}
+	installSuperviseE2EFakeTracker(t, fake)
+	workerCalls := 0
+	installSuperviseE2EFakeWorker(t, func(context.Context, supervisedE2EWorkerRequest) (supervisedE2EWorkerResult, error) {
+		workerCalls++
+		return supervisedE2EWorkerResult{}, nil
+	})
+
+	_ = runWorkSuperviseJSON(t, ctx, store, []string{"supervise", "start", "--json"})
+	var output strings.Builder
+	err := RunWork(ctx, store, superviseE2EProjectRegistry(t, repoRoot), registry.Snapshot{}, []string{
+		"supervise", "e2e", "run-once", "--project", "alpha", "--issue", "56", "--json",
+	}, &output)
+	if err == nil {
+		t.Fatalf("RunWork(supervise e2e run-once worker setup failure) error = nil, want fail-closed setup error\noutput:\n%s", output.String())
+	}
+	if workerCalls != 0 {
+		t.Fatalf("worker calls = %d, want none when worktree setup fails", workerCalls)
+	}
+	runID := newestSuperviseE2ERunID(t, odinRoot)
+	finalReportPath := filepath.Join(odinRoot, "runs", "supervised-e2e", runID, "final-report.json")
+	assertFileContains(t, finalReportPath, `"status": "failed_closed"`)
+	assertFileContains(t, finalReportPath, `"phase": "worker_setup"`)
+	assertFileContains(t, finalReportPath, `"codex_execution": "not_started"`)
+	assertFileContains(t, finalReportPath, `"prs": "not_created"`)
 }
 
 func runWorkSuperviseE2EForError(t *testing.T, ctx context.Context, store *sqlite.Store, args []string) (error, string) {
