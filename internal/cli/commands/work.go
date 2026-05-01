@@ -111,7 +111,7 @@ func runWorkSupervise(ctx context.Context, store *sqlite.Store, projectRegistry 
 		return fmt.Errorf("--json is required for work supervise in this slice\n%s", workSuperviseUsage)
 	}
 	if args[0] == "e2e" {
-		return runWorkSuperviseE2E(projectRegistry, args[1:], params)
+		return runWorkSuperviseE2E(ctx, projectRegistry, args[1:], params, stdout)
 	}
 
 	service := supervision.NewService(store, supervision.DefaultConfig())
@@ -138,7 +138,7 @@ func runWorkSupervise(ctx context.Context, store *sqlite.Store, projectRegistry 
 	return encoder.Encode(flattenWorkSuperviseReport(report, args[0], params))
 }
 
-func runWorkSuperviseE2E(projectRegistry projects.Registry, args []string, params map[string]string) error {
+func runWorkSuperviseE2E(ctx context.Context, projectRegistry projects.Registry, args []string, params map[string]string, stdout io.Writer) error {
 	if len(args) == 0 || args[0] == "help" || args[0] == "--help" {
 		return fmt.Errorf("missing work supervise e2e command\n%s", workSuperviseUsage)
 	}
@@ -149,10 +149,11 @@ func runWorkSuperviseE2E(projectRegistry projects.Registry, args []string, param
 		if projectKey == "" {
 			return fmt.Errorf("missing --project for work supervise e2e prepare-issue")
 		}
-		if _, ok := projectRegistry.Lookup(projectKey); !ok {
+		manifest, ok := projectRegistry.Lookup(projectKey)
+		if !ok {
 			return fmt.Errorf("unknown project %q", projectKey)
 		}
-		return fmt.Errorf("not_implemented: work supervise e2e prepare-issue")
+		return runWorkSuperviseE2EPrepareIssue(ctx, manifest, stdout)
 	case "run-once":
 		if projectKey == "" {
 			return fmt.Errorf("missing --project for work supervise e2e run-once")
@@ -172,6 +173,158 @@ func runWorkSuperviseE2E(projectRegistry projects.Registry, args []string, param
 	default:
 		return fmt.Errorf("unknown work supervise e2e command: %s\n%s", args[0], workSuperviseUsage)
 	}
+}
+
+type workSuperviseE2EReport struct {
+	Mode               string                       `json:"mode"`
+	Phase              string                       `json:"phase"`
+	Status             string                       `json:"status"`
+	Project            string                       `json:"project"`
+	Repo               string                       `json:"repo"`
+	RunID              string                       `json:"run_id"`
+	Issue              workSuperviseE2EIssueReport  `json:"issue"`
+	PRs                string                       `json:"prs"`
+	Merge              string                       `json:"merge"`
+	Deployment         string                       `json:"deployment"`
+	HumanMergeRequired bool                         `json:"human_merge_required"`
+	Artifacts          workSuperviseE2EArtifactRefs `json:"artifacts,omitempty"`
+}
+
+type workSuperviseE2EIssueReport struct {
+	Number      int    `json:"number"`
+	URL         string `json:"url"`
+	PlannedPath string `json:"planned_path"`
+}
+
+type workSuperviseE2EArtifactRefs struct {
+	PreparedIssue string `json:"prepared_issue,omitempty"`
+	FinalReport   string `json:"final_report,omitempty"`
+}
+
+type workSuperviseE2EPreparedIssueArtifact struct {
+	Project     string   `json:"project"`
+	Repo        string   `json:"repo"`
+	RunID       string   `json:"run_id"`
+	Title       string   `json:"title"`
+	Body        string   `json:"body"`
+	Labels      []string `json:"labels"`
+	Number      int      `json:"number"`
+	URL         string   `json:"url"`
+	PlannedPath string   `json:"planned_path"`
+}
+
+func runWorkSuperviseE2EPrepareIssue(ctx context.Context, manifest projects.Manifest, stdout io.Writer) error {
+	repoID := strings.TrimSpace(manifest.GitHub.Repo)
+	if repoID == "" {
+		return fmt.Errorf("project %q has no GitHub repo", manifest.Key)
+	}
+	owner, repoName, ok := strings.Cut(repoID, "/")
+	if !ok || owner == "" || repoName == "" {
+		return fmt.Errorf("invalid GitHub repo %q", repoID)
+	}
+
+	now := time.Now().UTC()
+	runID := fmt.Sprintf("%d", now.UnixNano())
+	plannedPath := fmt.Sprintf("docs/operations/stage-7-supervised-e2e-%s-%s.md", now.Format("2006-01-02"), runID)
+	title := fmt.Sprintf("Stage 7 supervised E2E docs proof %s", runID)
+	body := strings.Join([]string{
+		"Stage 7 supervised E2E docs proof.",
+		"",
+		"Planned scope: " + plannedPath,
+		"",
+		"Boundaries: docs-only setup issue; no PR, merge, deployment, worker execution, queue dispatch, claim creation, or scheduler behavior.",
+	}, "\n")
+	labels := []string{"odin:ready", "safety:low-risk"}
+
+	client := trackergithub.NewClientWithConfig(trackergithub.Config{
+		BaseURL:  os.Getenv("ODIN_GITHUB_API_BASE_URL"),
+		Owner:    owner,
+		Repo:     repoName,
+		TokenEnv: "GITHUB_TOKEN",
+	})
+	issue, err := client.CreateFollowUpIssue(ctx, tracker.FollowUpIssue{
+		Repo:   repoID,
+		Title:  title,
+		Body:   body,
+		Labels: labels,
+	})
+	if err != nil {
+		return redactWorkSuperviseE2EError(err)
+	}
+
+	report := workSuperviseE2EReport{
+		Mode:    "supervised_e2e",
+		Phase:   "prepared",
+		Status:  "prepared",
+		Project: manifest.Key,
+		Repo:    repoID,
+		RunID:   runID,
+		Issue: workSuperviseE2EIssueReport{
+			Number:      issue.Number,
+			URL:         issue.URL,
+			PlannedPath: plannedPath,
+		},
+		PRs:                "not_created",
+		Merge:              "not_performed",
+		Deployment:         "not_started",
+		HumanMergeRequired: true,
+	}
+
+	odinRoot := strings.TrimSpace(os.Getenv("ODIN_ROOT"))
+	if odinRoot == "" {
+		odinRoot = filepath.Join(manifest.GitRoot, ".odin")
+	}
+	runDir := filepath.Join(expandTilde(odinRoot), "runs", "supervised-e2e", runID)
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		return redactWorkSuperviseE2EError(err)
+	}
+	preparedIssuePath := filepath.Join(runDir, "prepared-issue.json")
+	finalReportPath := filepath.Join(runDir, "final-report.json")
+	report.Artifacts = workSuperviseE2EArtifactRefs{
+		PreparedIssue: preparedIssuePath,
+		FinalReport:   finalReportPath,
+	}
+
+	preparedIssue := workSuperviseE2EPreparedIssueArtifact{
+		Project:     manifest.Key,
+		Repo:        repoID,
+		RunID:       runID,
+		Title:       title,
+		Body:        body,
+		Labels:      labels,
+		Number:      issue.Number,
+		URL:         issue.URL,
+		PlannedPath: plannedPath,
+	}
+	if err := writeRedactedJSONArtifact(preparedIssuePath, preparedIssue); err != nil {
+		return redactWorkSuperviseE2EError(err)
+	}
+	if err := writeRedactedJSONArtifact(finalReportPath, report); err != nil {
+		return redactWorkSuperviseE2EError(err)
+	}
+
+	encoder := json.NewEncoder(stdout)
+	encoder.SetIndent("", "  ")
+	if err := encoder.Encode(report); err != nil {
+		return redactWorkSuperviseE2EError(err)
+	}
+	return nil
+}
+
+func writeRedactedJSONArtifact(path string, value any) error {
+	content, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		return err
+	}
+	redacted := codexexec.Redact(string(content), collectKnownSecretValues())
+	return os.WriteFile(path, []byte(redacted+"\n"), 0o644)
+}
+
+func redactWorkSuperviseE2EError(err error) error {
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("%s", codexexec.Redact(err.Error(), collectKnownSecretValues()))
 }
 
 func runWorkSuperviseQueue(ctx context.Context, store *sqlite.Store, projectRegistry projects.Registry, service supervision.Service, params map[string]string) (supervision.Report, error) {
