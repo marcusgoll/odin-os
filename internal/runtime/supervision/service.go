@@ -215,6 +215,9 @@ func (service Service) Recover(ctx context.Context) (Report, error) {
 func (service Service) control(ctx context.Context) (sqlite.SupervisionControl, error) {
 	control, err := service.store.GetSupervisionControl(ctx, service.config.ModeKey)
 	if err == nil {
+		if err := validatePersistedControl(control); err != nil {
+			return sqlite.SupervisionControl{}, err
+		}
 		return control, nil
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
@@ -225,6 +228,19 @@ func (service Service) control(ctx context.Context) (sqlite.SupervisionControl, 
 
 func (service Service) validateConfig() error {
 	return ValidateConfig(service.config)
+}
+
+func validatePersistedControl(control sqlite.SupervisionControl) error {
+	if control.MaxConcurrentTasks != 1 {
+		return fmt.Errorf("%w: persisted max_concurrent_tasks must be 1", ErrInvalidConfig)
+	}
+	if control.DryRun {
+		return fmt.Errorf("%w: persisted dry_run must be false", ErrInvalidConfig)
+	}
+	if !control.RequireHumanApproval {
+		return fmt.Errorf("%w: persisted require_human_approval must be true", ErrInvalidConfig)
+	}
+	return nil
 }
 
 func (service Service) upsertControl(ctx context.Context, status string, killSwitch bool, operator string) (sqlite.SupervisionControl, error) {

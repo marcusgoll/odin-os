@@ -262,6 +262,65 @@ func TestServiceRejectsInvalidSupervisedConfigBeforeQueueOrRecoverUse(t *testing
 	}
 }
 
+func TestServiceRejectsInvalidPersistedControlStateBeforeReportingOrUse(t *testing.T) {
+	ctx := context.Background()
+	store := openServiceTestStore(t, "supervision-service-invalid-persisted-control.db")
+	defer store.Close()
+	project := createServiceProject(t, ctx, store)
+	config := DefaultConfig()
+	configHash, err := ConfigHash(config)
+	if err != nil {
+		t.Fatalf("ConfigHash() error = %v", err)
+	}
+	if _, err := store.UpsertSupervisionControl(ctx, sqlite.UpsertSupervisionControlParams{
+		ModeKey:              ModeKeyStage7SupervisedAgency,
+		Status:               ControlStatusEnabled,
+		KillSwitchActive:     false,
+		ConfigHash:           configHash,
+		MaxConcurrentTasks:   2,
+		DryRun:               true,
+		RequireHumanApproval: true,
+		UpdatedBy:            "legacy-row",
+	}); err != nil {
+		t.Fatalf("UpsertSupervisionControl(invalid persisted row) error = %v", err)
+	}
+	service := NewService(store, config)
+
+	if report, err := service.Status(ctx); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("Status() report = %+v error = %v, want ErrInvalidConfig", report, err)
+	}
+	if report, err := service.Queue(ctx, Project{
+		ID:   project.ID,
+		Key:  project.Key,
+		Repo: project.GitHubRepo,
+	}, []Issue{eligibleIssue("docs/stage7.md")}); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("Queue() report = %+v error = %v, want ErrInvalidConfig", report, err)
+	}
+	if report, err := service.Recover(ctx); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("Recover() report = %+v error = %v, want ErrInvalidConfig", report, err)
+	}
+
+	decisions, err := store.ListSupervisionQueueDecisions(ctx, sqlite.ListSupervisionQueueDecisionsParams{
+		ProjectID: &project.ID,
+		Repo:      project.GitHubRepo,
+	})
+	if err != nil {
+		t.Fatalf("ListSupervisionQueueDecisions() error = %v", err)
+	}
+	if len(decisions) != 0 {
+		t.Fatalf("queue decisions len = %d, want 0 after invalid persisted control", len(decisions))
+	}
+	observations, err := store.ListSupervisionRecoveryObservations(ctx, sqlite.ListSupervisionRecoveryObservationsParams{
+		ModeKey: ModeKeyStage7SupervisedAgency,
+	})
+	if err != nil {
+		t.Fatalf("ListSupervisionRecoveryObservations() error = %v", err)
+	}
+	if len(observations) != 0 {
+		t.Fatalf("recovery observations len = %d, want 0 after invalid persisted control", len(observations))
+	}
+}
+
 func openServiceTestStore(t *testing.T, name string) *sqlite.Store {
 	t.Helper()
 
