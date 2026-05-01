@@ -462,7 +462,8 @@ Stage 5 is complete only when Odin can plan a PR handoff from local branch chang
 
 Goal:
 
-- Use one low-risk docs-only issue.
+- Use one pre-existing operator-approved low-risk docs-only issue.
+- Use one existing docs-only worktree or branch diff.
 - Create one live PR.
 - Do not merge autonomously.
 - Require human approval before any merge.
@@ -476,6 +477,8 @@ Allowed:
 
 Forbidden:
 
+- Issue creation.
+- Synthesizing or inventing the docs change inside the live Stage 6 command.
 - Autonomous merge.
 - Production deploy.
 - Codex reviewer or QA worker execution.
@@ -496,6 +499,7 @@ Required artifacts:
 
 - Issue URL.
 - Branch name.
+- Existing docs-only diff summary.
 - PR URL.
 - Odin-authored Stage 6 review evidence comments.
 - CI run URL showing `make odin-e2e-local`.
