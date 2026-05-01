@@ -114,6 +114,7 @@ func TestLoadDirLoadsUniversalIntakeAgents(t *testing.T) {
 		"voice-note-cleaner-agent",
 		"email-to-task-extractor-agent",
 		"visual-intake-agent",
+		"meeting-notes-intake-agent",
 	}
 	for _, key := range wantAgents {
 		item, ok := snapshot.ByKey[key]
@@ -310,6 +311,42 @@ func TestLoadDirLoadsUniversalIntakeAgents(t *testing.T) {
 	for _, required := range requiredVisualIntakeContract {
 		if !strings.Contains(visualIntakeContract, required) {
 			t.Fatalf("visual intake agent body missing %q", required)
+		}
+	}
+
+	meetingNotesIntake := snapshot.ByKey["meeting-notes-intake-agent"]
+	meetingNotesIntakeContract := strings.Join([]string{
+		meetingNotesIntake.Title,
+		meetingNotesIntake.Summary,
+		meetingNotesIntake.Sections[registry.SectionPurpose],
+		meetingNotesIntake.Sections[registry.SectionWhenToUse],
+		meetingNotesIntake.Sections[registry.SectionInputs],
+		meetingNotesIntake.Sections[registry.SectionProcedure],
+		meetingNotesIntake.Sections[registry.SectionOutputs],
+		meetingNotesIntake.Sections[registry.SectionConstraints],
+		meetingNotesIntake.Sections[registry.SectionSuccessCriteria],
+	}, "\n")
+	requiredMeetingNotesIntakeContract := []string{
+		"Meeting Notes Intake Agent",
+		"{{raw_input}}",
+		"meeting notes or transcript",
+		"meeting purpose",
+		"key decisions",
+		"action items",
+		"owners",
+		"deadlines",
+		"unresolved questions",
+		"risks",
+		"follow-up messages needed",
+		"calendar items needed",
+		"documents or tickets to create",
+		"someone should",
+		"we need to",
+		"Flag vague ownership",
+	}
+	for _, required := range requiredMeetingNotesIntakeContract {
+		if !strings.Contains(meetingNotesIntakeContract, required) {
+			t.Fatalf("meeting notes intake agent body missing %q", required)
 		}
 	}
 
