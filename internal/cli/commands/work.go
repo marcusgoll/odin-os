@@ -37,9 +37,9 @@ const stage3LifecycleCommentMarker = "<!-- odin-stage3-lifecycle-proof -->"
 const stage6ReviewEvidenceMarker = "<!-- odin-stage6-review-evidence -->"
 const stage6HumanReviewHandoffMarker = "<!-- odin-stage6-human-review-handoff -->"
 
-const workUsage = "usage: odin work status|profiles|start --project <key> --title <text>|intake --project <key> [--dry-run]|simulate-lifecycle --issue <number> [--project <key>] [--dry-run] [--json]|apply-lifecycle --issue <number> --approved-target <repo>#<issue> [--project <key>] [--json]|worker-dry-run --issue-fixture <path> [--project <key>] [--keep-worktree] [--json]|pr-dry-run --worktree <path> --base <branch> [--json]|pr-create --issue <number> --approved-target <repo>#<issue> --worktree <path> --base <branch> --wait-ci [--json]|supervise status|start|stop|queue --project <key> [--fixture-issue <number>]|recover|e2e prepare-issue --project <key> --json|e2e run-once --project <key> --issue <number> --json"
+const workUsage = "usage: odin work status|profiles|start --project <key> --title <text>|intake --project <key> [--dry-run]|simulate-lifecycle --issue <number> [--project <key>] [--dry-run] [--json]|apply-lifecycle --issue <number> --approved-target <repo>#<issue> [--project <key>] [--json]|worker-dry-run --issue-fixture <path> [--project <key>] [--keep-worktree] [--json]|pr-dry-run --worktree <path> --base <branch> [--json]|pr-create --issue <number> --approved-target <repo>#<issue> --worktree <path> --base <branch> --wait-ci [--json]|supervise status|start|stop|queue --project <key> [--fixture-issue <number>]|recover|e2e prepare-issue --project <key> --json|e2e run-once --project <key> --issue <number> [--ci-timeout <duration>] --json"
 
-const workSuperviseUsage = "usage: odin work supervise status|start|stop|queue --project <key> [--fixture-issue <number>]|recover|e2e prepare-issue --project <key> --json|e2e run-once --project <key> --issue <number> --json"
+const workSuperviseUsage = "usage: odin work supervise status|start|stop|queue --project <key> [--fixture-issue <number>]|recover|e2e prepare-issue --project <key> --json|e2e run-once --project <key> --issue <number> [--ci-timeout <duration>] --json"
 
 const workSuperviseFixtureSource = "control_plane_fixture"
 const workSuperviseTrackerSource = "issue_intake_source"
@@ -176,30 +176,44 @@ func runWorkSuperviseE2E(ctx context.Context, store *sqlite.Store, projectRegist
 		if err != nil || issueNumber <= 0 {
 			return fmt.Errorf("invalid --issue %q", issueText)
 		}
-		return runWorkSuperviseE2ERunOnce(ctx, store, manifest, issueNumber, stdout)
+		ciTimeout := 10 * time.Minute
+		if timeoutText := strings.TrimSpace(params["ci-timeout"]); timeoutText != "" {
+			parsed, err := time.ParseDuration(timeoutText)
+			if err != nil || parsed <= 0 {
+				return fmt.Errorf("invalid --ci-timeout %q", timeoutText)
+			}
+			ciTimeout = parsed
+		}
+		return runWorkSuperviseE2ERunOnce(ctx, store, manifest, issueNumber, ciTimeout, stdout)
 	default:
 		return fmt.Errorf("unknown work supervise e2e command: %s\n%s", args[0], workSuperviseUsage)
 	}
 }
 
 type workSuperviseE2EReport struct {
-	Mode               string                       `json:"mode"`
-	Phase              string                       `json:"phase"`
-	Status             string                       `json:"status"`
-	Project            string                       `json:"project"`
-	Repo               string                       `json:"repo"`
-	RunID              string                       `json:"run_id"`
-	Issue              workSuperviseE2EIssueReport  `json:"issue"`
-	Queue              []supervision.QueueDecision  `json:"queue,omitempty"`
-	Claims             []supervision.PlannedClaim   `json:"claims,omitempty"`
-	Worktree           workSuperviseE2EWorktree     `json:"worktree,omitempty"`
-	Diff               workSuperviseE2EDiff         `json:"diff,omitempty"`
-	CodexExecution     string                       `json:"codex_execution,omitempty"`
-	PRs                string                       `json:"prs"`
-	Merge              string                       `json:"merge"`
-	Deployment         string                       `json:"deployment"`
-	HumanMergeRequired bool                         `json:"human_merge_required"`
-	Artifacts          workSuperviseE2EArtifactRefs `json:"artifacts,omitempty"`
+	Mode               string                              `json:"mode"`
+	Phase              string                              `json:"phase"`
+	Status             string                              `json:"status"`
+	Project            string                              `json:"project"`
+	Repo               string                              `json:"repo"`
+	RunID              string                              `json:"run_id"`
+	Issue              workSuperviseE2EIssueReport         `json:"issue"`
+	Queue              []supervision.QueueDecision         `json:"queue,omitempty"`
+	Claims             []supervision.PlannedClaim          `json:"claims,omitempty"`
+	Worktree           workSuperviseE2EWorktree            `json:"worktree,omitempty"`
+	Diff               workSuperviseE2EDiff                `json:"diff,omitempty"`
+	Branch             workPRCreateBranchReport            `json:"branch,omitempty"`
+	PR                 workPRCreatePullRequestReport       `json:"pr,omitempty"`
+	EvidenceComments   []workPRCreateEvidenceCommentReport `json:"evidence_comments,omitempty"`
+	CI                 workPRCreateCIReport                `json:"ci,omitempty"`
+	DeploymentAudit    workPRCreateDeploymentAuditReport   `json:"deployment_audit,omitempty"`
+	CodexExecution     string                              `json:"codex_execution,omitempty"`
+	PRs                string                              `json:"prs"`
+	Merge              string                              `json:"merge"`
+	Deployment         string                              `json:"deployment"`
+	Dispatch           string                              `json:"dispatch,omitempty"`
+	HumanMergeRequired bool                                `json:"human_merge_required"`
+	Artifacts          workSuperviseE2EArtifactRefs        `json:"artifacts,omitempty"`
 }
 
 type workSuperviseE2EIssueReport struct {
@@ -359,7 +373,7 @@ func runWorkSuperviseE2EPrepareIssue(ctx context.Context, manifest projects.Mani
 	return nil
 }
 
-func runWorkSuperviseE2ERunOnce(ctx context.Context, store *sqlite.Store, manifest projects.Manifest, issueNumber int, stdout io.Writer) error {
+func runWorkSuperviseE2ERunOnce(ctx context.Context, store *sqlite.Store, manifest projects.Manifest, issueNumber int, ciTimeout time.Duration, stdout io.Writer) error {
 	repoID := strings.TrimSpace(manifest.GitHub.Repo)
 	if repoID == "" {
 		return fmt.Errorf("project %q has no GitHub repo", manifest.Key)
@@ -546,6 +560,7 @@ func runWorkSuperviseE2ERunOnce(ctx context.Context, store *sqlite.Store, manife
 		PRs:                queueReport.SideEffects.PRs,
 		Merge:              queueReport.SideEffects.Merge,
 		Deployment:         queueReport.SideEffects.Deployment,
+		Dispatch:           supervision.SideEffectNotStarted,
 		HumanMergeRequired: true,
 		Artifacts:          artifactRefs,
 	}
@@ -569,6 +584,10 @@ func runWorkSuperviseE2ERunOnce(ctx context.Context, store *sqlite.Store, manife
 		return err
 	}
 	report = workerReport
+	report, err = completeSupervisedE2EReviewHandoff(ctx, manifest, issue, report, ciTimeout)
+	if err != nil {
+		return err
+	}
 
 	encoder := json.NewEncoder(stdout)
 	encoder.SetIndent("", "  ")
@@ -790,11 +809,161 @@ func runSupervisedE2EWorkerAndAudit(ctx context.Context, manifest projects.Manif
 	report.PRs = supervision.SideEffectNotCreated
 	report.Merge = supervision.SideEffectNotMerged
 	report.Deployment = supervision.SideEffectNotStarted
+	report.Dispatch = supervision.SideEffectNotStarted
 	report.HumanMergeRequired = true
 	if err := writeRedactedJSONArtifact(artifacts.FinalReport, report); err != nil {
 		return report, redactWorkSuperviseE2EError(err)
 	}
 	return report, nil
+}
+
+func completeSupervisedE2EReviewHandoff(ctx context.Context, manifest projects.Manifest, issue supervision.Issue, report workSuperviseE2EReport, ciTimeout time.Duration) (workSuperviseE2EReport, error) {
+	report.Phase = "review_handoff"
+	report.Status = "in_progress"
+	report.PRs = supervision.SideEffectNotCreated
+	report.Merge = supervision.SideEffectNotMerged
+	report.Deployment = supervision.SideEffectNotStarted
+	report.Dispatch = supervision.SideEffectNotStarted
+	report.HumanMergeRequired = true
+
+	owner, repoName, ok := strings.Cut(manifest.GitHub.Repo, "/")
+	if !ok || owner == "" || repoName == "" {
+		return report, supervisedE2EReviewHandoffFail(report, fmt.Errorf("invalid GitHub repo %q", manifest.GitHub.Repo))
+	}
+	worktreeAbs := strings.TrimSpace(report.Worktree.Path)
+	branchName := strings.TrimSpace(report.Worktree.Branch)
+	if worktreeAbs == "" || branchName == "" {
+		return report, supervisedE2EReviewHandoffFail(report, fmt.Errorf("supervised e2e handoff requires audited worktree and branch"))
+	}
+	if len(report.Diff.Files) != 1 || report.Diff.Files[0] != issue.ChangedPaths[0] || strings.TrimSpace(report.Diff.SHA256) == "" {
+		return report, supervisedE2EReviewHandoffFail(report, fmt.Errorf("supervised e2e handoff requires exact audited diff for %s", issue.ChangedPaths[0]))
+	}
+
+	if _, err := gitOutput(ctx, worktreeAbs, "add", "--", issue.ChangedPaths[0]); err != nil {
+		return report, supervisedE2EReviewHandoffFail(report, err)
+	}
+	if _, err := gitOutput(ctx, worktreeAbs, "commit", "-m", fmt.Sprintf("docs(stage7): supervised e2e proof for #%d", issue.Number)); err != nil {
+		return report, supervisedE2EReviewHandoffFail(report, err)
+	}
+	headSHA, err := gitOutput(ctx, worktreeAbs, "rev-parse", "HEAD")
+	if err != nil {
+		return report, supervisedE2EReviewHandoffFail(report, err)
+	}
+	headSHA = strings.TrimSpace(headSHA)
+	branchResult, err := ensureRemoteBranch(ctx, worktreeAbs, branchName, headSHA)
+	if err != nil {
+		return report, supervisedE2EReviewHandoffFail(report, err)
+	}
+	report.Branch = branchResult
+
+	baseBranch := strings.TrimSpace(manifest.DefaultBranch)
+	if baseBranch == "" {
+		baseBranch = "main"
+	}
+	client := trackergithub.NewClientWithConfig(trackergithub.Config{
+		BaseURL:  os.Getenv("ODIN_GITHUB_API_BASE_URL"),
+		Owner:    owner,
+		Repo:     repoName,
+		TokenEnv: "GITHUB_TOKEN",
+	})
+	prs, err := client.ListPullRequests(ctx, branchName, baseBranch)
+	if err != nil {
+		return report, supervisedE2EReviewHandoffFail(report, err)
+	}
+	prCreated := false
+	prReused := false
+	var pr trackergithub.PullRequest
+	if len(prs) > 0 {
+		pr = prs[0]
+		if !pr.Draft {
+			return report, supervisedE2EReviewHandoffFail(report, fmt.Errorf("existing Stage 7 supervised e2e PR #%d is not a draft PR", pr.Number))
+		}
+		prReused = true
+		report.PRs = "draft_reused"
+	} else {
+		bodyContent := renderPRCreateBody(issue.Number, report.Diff.Files)
+		bodyPath := filepath.Join(filepath.Dir(report.Artifacts.FinalReport), "pr-body.md")
+		if _, err := writeArtifact(bodyPath, bodyContent); err != nil {
+			return report, supervisedE2EReviewHandoffFail(report, err)
+		}
+		if err := verifyPRTemplate(ctx, worktreeAbs, bodyPath); err != nil {
+			return report, supervisedE2EReviewHandoffFail(report, err)
+		}
+		pr, err = client.CreatePullRequest(ctx, trackergithub.PullRequestRequest{
+			Title: fmt.Sprintf("Stage 7 supervised E2E handoff for #%d", issue.Number),
+			Head:  branchName,
+			Base:  baseBranch,
+			Body:  bodyContent,
+			Draft: true,
+		})
+		if err != nil {
+			return report, supervisedE2EReviewHandoffFail(report, err)
+		}
+		if !pr.Draft {
+			return report, supervisedE2EReviewHandoffFail(report, fmt.Errorf("created Stage 7 supervised e2e PR #%d is not a draft PR", pr.Number))
+		}
+		prCreated = true
+		report.PRs = "draft_created"
+	}
+	report.PR = workPRCreatePullRequestReport{
+		Number:  pr.Number,
+		URL:     pr.URL,
+		Draft:   pr.Draft,
+		Created: prCreated,
+		Reused:  prReused,
+	}
+
+	comments, err := client.FetchIssueComments(ctx, tracker.IssueID{Provider: "github", Repo: manifest.GitHub.Repo, Number: pr.Number})
+	if err != nil {
+		return report, supervisedE2EReviewHandoffFail(report, err)
+	}
+	evidenceComments, err := ensureStage6EvidenceComments(ctx, client, manifest.GitHub.Repo, pr.Number, issue.Number, report.Diff.SHA256, comments)
+	if err != nil {
+		return report, supervisedE2EReviewHandoffFail(report, err)
+	}
+	report.EvidenceComments = evidenceComments
+
+	ciResult, workflowRuns, err := waitForStage6CI(ctx, client, branchName, ciTimeout)
+	report.CI = ciResult
+	if err != nil {
+		return report, supervisedE2EReviewHandoffFail(report, err)
+	}
+	deploymentAudit := auditStage6Deployment(workflowRuns)
+	report.DeploymentAudit = deploymentAudit
+	if !deploymentAudit.NoDeploymentWorkflows {
+		return report, supervisedE2EReviewHandoffFail(report, fmt.Errorf("deployment-class workflow ran during Stage 7 supervised e2e proof"))
+	}
+
+	report.Phase = "review_handoff"
+	report.Status = "passed"
+	report.CodexExecution = "completed"
+	report.Merge = supervision.SideEffectNotMerged
+	report.Deployment = supervision.SideEffectNotStarted
+	report.Dispatch = supervision.SideEffectNotStarted
+	report.HumanMergeRequired = true
+	if err := writeRedactedJSONArtifact(report.Artifacts.FinalReport, report); err != nil {
+		return report, redactWorkSuperviseE2EError(err)
+	}
+	return report, nil
+}
+
+func supervisedE2EReviewHandoffFail(report workSuperviseE2EReport, err error) error {
+	report.Phase = "review_handoff"
+	report.Status = "failed_closed"
+	if report.CodexExecution == "" {
+		report.CodexExecution = "completed"
+	}
+	if report.PRs == "" {
+		report.PRs = supervision.SideEffectNotCreated
+	}
+	report.Merge = supervision.SideEffectNotMerged
+	report.Deployment = supervision.SideEffectNotStarted
+	report.Dispatch = supervision.SideEffectNotStarted
+	report.HumanMergeRequired = true
+	if writeErr := writeRedactedJSONArtifact(report.Artifacts.FinalReport, report); writeErr != nil {
+		return redactWorkSuperviseE2EError(writeErr)
+	}
+	return redactWorkSuperviseE2EError(err)
 }
 
 func defaultRunSupervisedE2EWorker(ctx context.Context, request supervisedE2EWorkerRequest) (supervisedE2EWorkerResult, error) {
