@@ -515,10 +515,6 @@ func runWorkSuperviseE2ERunOnce(ctx context.Context, store *sqlite.Store, manife
 	if err != nil {
 		return redactWorkSuperviseE2EError(err)
 	}
-	preexistingClaim, err := existingSupervisedE2EClaim(ctx, store, project.ID, repoID, issue.Number)
-	if err != nil {
-		return redactWorkSuperviseE2EError(err)
-	}
 	service := supervision.NewService(store, supervision.DefaultConfig())
 	queueReport, err := service.Queue(ctx, supervision.Project{ID: project.ID, Key: project.Key, Repo: repoID}, []supervision.Issue{issue})
 	if err != nil {
@@ -559,13 +555,13 @@ func runWorkSuperviseE2ERunOnce(ctx context.Context, store *sqlite.Store, manife
 	if status != "claimed" || len(report.Claims) != 1 || report.Claims[0].ClaimKey == "" {
 		return redactWorkSuperviseE2EError(fmt.Errorf("work supervise e2e run-once refused before worker behavior: issue=%d status=%s", issueNumber, queueRefusalReason(report.Queue)))
 	}
-	if preexistingClaim != "" {
+	if !report.Claims[0].NewlyCreated {
 		report.Status = "claim_exists"
 		report.CodexExecution = supervision.SideEffectNotStarted
 		if err := writeRedactedJSONArtifact(finalReportPath, report); err != nil {
 			return redactWorkSuperviseE2EError(err)
 		}
-		return redactWorkSuperviseE2EError(fmt.Errorf("work supervise e2e run-once preserved existing claim before worker behavior: issue=%d claim_key=%s", issueNumber, preexistingClaim))
+		return redactWorkSuperviseE2EError(fmt.Errorf("work supervise e2e run-once preserved existing claim before worker behavior: issue=%d claim_key=%s", issueNumber, report.Claims[0].ClaimKey))
 	}
 
 	workerReport, err := runSupervisedE2EWorkerAndAudit(ctx, manifest, issue, report, artifactRefs)
@@ -649,25 +645,6 @@ func writeRunOnceFailureArtifactsAndError(queueReportPath string, finalReportPat
 		return redactWorkSuperviseE2EError(writeErr)
 	}
 	return redactWorkSuperviseE2EError(err)
-}
-
-func existingSupervisedE2EClaim(ctx context.Context, store *sqlite.Store, projectID int64, repo string, issueNumber int) (string, error) {
-	for _, status := range []string{supervision.ClaimStatusReserved, supervision.ClaimStatusActive} {
-		claims, err := store.ListSupervisionDispatchClaims(ctx, sqlite.ListSupervisionDispatchClaimsParams{
-			ProjectID: &projectID,
-			Repo:      repo,
-			Status:    status,
-		})
-		if err != nil {
-			return "", err
-		}
-		for _, claim := range claims {
-			if claim.IssueNumber == issueNumber {
-				return claim.ClaimKey, nil
-			}
-		}
-	}
-	return "", nil
 }
 
 func runSupervisedE2EWorkerAndAudit(ctx context.Context, manifest projects.Manifest, issue supervision.Issue, report workSuperviseE2EReport, artifacts workSuperviseE2EArtifactRefs) (workSuperviseE2EReport, error) {

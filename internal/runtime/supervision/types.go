@@ -86,12 +86,13 @@ type QueueDecision struct {
 }
 
 type PlannedClaim struct {
-	ProjectKey  string    `json:"project_key"`
-	Repo        string    `json:"repo"`
-	IssueNumber int       `json:"issue_number"`
-	ClaimKey    string    `json:"claim_key"`
-	Status      string    `json:"status"`
-	ClaimedAt   time.Time `json:"claimed_at,omitempty"`
+	ProjectKey   string    `json:"project_key"`
+	Repo         string    `json:"repo"`
+	IssueNumber  int       `json:"issue_number"`
+	ClaimKey     string    `json:"claim_key"`
+	Status       string    `json:"status"`
+	ClaimedAt    time.Time `json:"claimed_at,omitempty"`
+	NewlyCreated bool      `json:"newly_created,omitempty"`
 }
 
 type RecoveryReport struct {

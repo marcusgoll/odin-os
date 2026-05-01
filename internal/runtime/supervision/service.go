@@ -125,12 +125,13 @@ func (service Service) Queue(ctx context.Context, project Project, issues []Issu
 			decision.Decision = DecisionEligible
 			decision.ClaimKey = claim.ClaimKey
 			report.Claims = append(report.Claims, PlannedClaim{
-				ProjectKey:  project.Key,
-				Repo:        claim.Repo,
-				IssueNumber: claim.IssueNumber,
-				ClaimKey:    claim.ClaimKey,
-				Status:      claim.Status,
-				ClaimedAt:   claim.ClaimedAt,
+				ProjectKey:   project.Key,
+				Repo:         claim.Repo,
+				IssueNumber:  claim.IssueNumber,
+				ClaimKey:     claim.ClaimKey,
+				Status:       claim.Status,
+				ClaimedAt:    claim.ClaimedAt,
+				NewlyCreated: claim.CreatedAt.Equal(claim.UpdatedAt),
 			})
 		}
 
