@@ -7,10 +7,11 @@ Stage 7 supervised E2E is implemented as a bounded
 disposable clone, local bare remote, fake Codex executable, fake GitHub API, and
 real `bin/odin` command execution.
 
-This proof includes a passing controlled fixture run and three controlled live
-GitHub attempts. The live attempts proved issue intake, worker execution, branch
-push, draft PR creation, and evidence comments, but all live attempts failed
-closed before Odin E2E CI success.
+This proof includes a passing controlled fixture run, three failed-closed live
+GitHub attempts, and one passing live GitHub proof. The passing live proof
+created one issue, one docs-only branch, one draft PR, two Stage 7 evidence
+comments, and a successful Odin E2E CI run. It did not merge, deploy, or
+dispatch scheduler work.
 
 This proof did not run an overnight 24/7 daemon.
 
@@ -28,9 +29,9 @@ This proof did not run an overnight 24/7 daemon.
 
 ## Gaps
 
-- Live GitHub PR creation was exercised, but live Odin E2E CI success was not
-  proven. The remote default branch lacks the Odin E2E workflow, and the
-  pre-merge feature-branch workflow is filtered to `main`.
+- Remote `main` still lacks `.github/workflows/odin-e2e.yml`; the passing live
+  proof targeted `codex/serve-lifecycle-cancel-fix`, the human-reviewed Stage 7
+  implementation branch that contains the Odin E2E workflow.
 - Overnight 24/7 daemon operation was not exercised.
 - Real external review agents were not invoked; fixture-backed review evidence
   comments were created through the GitHub API seam.
@@ -323,6 +324,90 @@ This change preserves deployment-audit evidence when the CI wait path fails
 closed. The third live attempt ran before that fix was pushed to the temporary
 proof clone.
 
+Blocking fixes before the passing live attempt:
+
+```text
+8bfbfa7 test(ci): fixture missing migration source
+5d2b70d ci(stage7): run odin e2e on proof branches
+```
+
+The first fix removed GitHub-hosted runner dependence on the private
+`/home/orchestrator/odin-orchestrator` path. The second fix allowed Odin E2E to
+run on human-reviewed `codex/**` proof bases and `odin/**` proof branches.
+
+Fourth live attempt:
+
+```text
+issue=https://github.com/marcusgoll/odin-os/issues/111
+run_id=1777662922436564807
+base=codex/serve-lifecycle-cancel-fix
+branch=odin/stage7-supervised-e2e/issue-111-1777662922743297898
+branch_sha=83043a75925b69f5825c76cd220a345867fb69bc
+pr=https://github.com/marcusgoll/odin-os/pull/112
+status=passed
+```
+
+Evidence comments:
+
+```text
+https://github.com/marcusgoll/odin-os/pull/112#issuecomment-4361163327
+https://github.com/marcusgoll/odin-os/pull/112#issuecomment-4361163381
+```
+
+Audited diff:
+
+```text
+docs/operations/stage-7-supervised-e2e-2026-05-01-1777662913957985911.md
+diff_sha256=5d0c29bbfb5017e21b4a4d37643a1852a6af63ea2a59c9c381cdfc2c626b9902
+```
+
+Odin E2E CI proof:
+
+```text
+https://github.com/marcusgoll/odin-os/actions/runs/25229157935
+status=completed
+conclusion=success
+```
+
+Additional live checks on PR #112 were also green when read back:
+
+```text
+ci pull_request=https://github.com/marcusgoll/odin-os/actions/runs/25229157917 conclusion=success
+ci push=https://github.com/marcusgoll/odin-os/actions/runs/25229156892 conclusion=success
+Odin E2E push=https://github.com/marcusgoll/odin-os/actions/runs/25229156843 conclusion=success
+GitGuardian Security Checks=success
+```
+
+The final `run-once` report recorded:
+
+```json
+{
+  "status": "passed",
+  "prs": "draft_created",
+  "merge": "not_merged",
+  "deployment": "not_started",
+  "dispatch": "not_started",
+  "human_merge_required": true,
+  "ci": {
+    "waited": true,
+    "timed_out": false,
+    "url": "https://github.com/marcusgoll/odin-os/actions/runs/25229157935",
+    "status": "completed",
+    "conclusion": "success"
+  },
+  "deployment_audit": {
+    "no_deployment_workflows": true,
+    "dispatches": 0,
+    "mutations": 0
+  },
+  "pr": {
+    "number": 112,
+    "draft": true,
+    "created": true
+  }
+}
+```
+
 ## Artifact Evidence
 
 The controlled fixture run wrote these handoff artifacts:
@@ -363,6 +448,8 @@ Stage 7 evidence comment markers as created.
 - A worker diff can be audited and pushed to a branch on a local bare remote.
 - A draft PR can be created through the GitHub client seam.
 - Live GitHub can create draft PRs and Stage 7 evidence comments.
+- Live Stage 7 `run-once` can create a draft PR and wait for successful Odin E2E
+  CI on a human-reviewed Stage 7 proof base.
 - Odin E2E CI can be identified and waited on by the Stage 7 path when the
   workflow exists on the target branch.
 - Merge, deployment, and scheduler dispatch remain blocked by the command path.
@@ -371,14 +458,8 @@ Stage 7 evidence comment markers as created.
 
 ## Unproven
 
-- Live Odin E2E CI success for Stage 7, blocked by the missing remote workflow.
-- Live feature-branch Odin E2E CI, blocked by the workflow's `main` branch
-  filter.
-- Green live `ci` for the proof branch, blocked by the
-  `/home/orchestrator/odin-orchestrator` integration fixture dependency on
-  GitHub-hosted runners.
-- Long-running GitHub Actions polling with the current bot token, blocked by a
-  `401 Bad credentials` response during the third live attempt.
+- Live Odin E2E CI success for a PR targeting remote `main`; `main` still lacks
+  the Odin E2E workflow at the time of this proof.
 - Live external review-agent comments.
 - Overnight supervised 24/7 operation.
 - Any expansion beyond docs, prompts, fixtures, and non-sensitive tests.
@@ -387,7 +468,9 @@ Stage 7 evidence comment markers as created.
 
 ## Best Operating Rule Going Forward
 
-Run Stage 7 only as a supervised, human-gated, one-issue run-once flow. Before
-the next live pass, promote `.github/workflows/odin-e2e.yml` to remote `main`
-through a separate human-reviewed path; do not let supervised mode edit workflow
-files to satisfy its own CI prerequisite.
+Run Stage 7 only as a supervised, human-gated, one-issue run-once flow. Treat
+PR #112 as proof that bounded live supervised handoff works on the
+human-reviewed Stage 7 branch. Do not expand to overnight 24/7 operation or
+target `main` until the Odin E2E workflow reaches `main` through a separate
+human-reviewed path; supervised mode must not edit workflow files to satisfy its
+own CI prerequisite.
