@@ -1,0 +1,21 @@
+name: tracker-dry-run-lifecycle
+description: Tracker mutation commands should not write in dry-run mode.
+github:
+  mode: fixture
+codex:
+  mode: disabled
+steps:
+  - name: mark_running
+    dry_run: true
+    expect:
+      github_writes: 0
+
+  - name: mark_human_review
+    dry_run: true
+    expect:
+      github_writes: 0
+
+  - name: add_comment
+    dry_run: true
+    expect:
+      github_writes: 0

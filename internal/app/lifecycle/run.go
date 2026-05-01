@@ -39,6 +39,7 @@ import (
 	"odin-os/internal/core/projects"
 	coreworkspace "odin-os/internal/core/workspace"
 	"odin-os/internal/core/workspaces"
+	"odin-os/internal/e2e"
 	"odin-os/internal/executors/contract"
 	executorrouter "odin-os/internal/executors/router"
 	approvalsvc "odin-os/internal/runtime/approvals"
@@ -64,7 +65,7 @@ import (
 
 var errRuntimeNotReady = errors.New("runtime not ready")
 
-const rootUsageBanner = "Usage: odin <command> [args]\n\nCommands: help repl overview tui doctor healthcheck serve backup restore verify-backup status legacy project workspace work scope jobs runs approvals intake agenda logs task initiative companion profile followup trigger transition skills"
+const rootUsageBanner = "Usage: odin <command> [args]\n\nCommands: help repl overview tui doctor healthcheck serve backup restore verify-backup status legacy project workspace work scope jobs runs approvals intake agenda logs task initiative companion profile followup trigger transition skills e2e"
 
 var (
 	serveTaskLoopInterval     = 1 * time.Second
@@ -200,6 +201,10 @@ func (admin serveDashboardAdmin) ResumeIssue(_ context.Context, issueID int64) e
 
 // Run dispatches between the interactive shell and machine-oriented operational commands.
 func Run(ctx context.Context, root string, args []string, stdin io.Reader, stdout io.Writer) error {
+	if len(args) > 0 && args[0] == "e2e" {
+		return e2e.Run(ctx, root, args[1:], stdout)
+	}
+
 	cfg, err := appconfig.Load(filepath.Join(root, "config", "odin.yaml"), root, runtimeEnv())
 	if err != nil {
 		return err

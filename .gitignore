@@ -3,6 +3,7 @@
 /odin
 /odin-os
 /node_modules/
+/.odin/
 /.codex-runs/
 /logs/
 /workspaces/

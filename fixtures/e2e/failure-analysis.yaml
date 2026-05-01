@@ -1,0 +1,12 @@
+name: failure-analysis
+description: Failed runs produce categorized, actionable follow-up work.
+github:
+  mode: fixture
+codex:
+  mode: disabled
+steps:
+  - name: classify_missing_acceptance_criteria
+    input: fixtures/failures/missing-acceptance-criteria.json
+    expect:
+      category: missing acceptance criteria
+      creates_follow_up: true

@@ -1,0 +1,15 @@
+name: prompt-rendering-brownfield
+description: Implementation prompts include brownfield guardrails.
+github:
+  mode: fixture
+codex:
+  mode: disabled
+steps:
+  - name: render_go_orchestrator_prompt
+    issue_fixture: fixtures/issues/brownfield-refactor.md
+    expect_contains:
+      - "Inspect existing implementation before editing"
+      - "Do not create duplicate systems"
+      - "Run go fmt"
+      - "Run go vet ./..."
+      - "Run go test ./..."
