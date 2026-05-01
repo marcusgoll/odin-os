@@ -962,6 +962,7 @@ func completeSupervisedE2EReviewHandoff(ctx context.Context, manifest projects.M
 	ciResult, workflowRuns, err := waitForStage6CI(ciCtx, client, branchName, ciTimeout)
 	report.CI = ciResult
 	if err != nil {
+		report.DeploymentAudit = auditStage6Deployment(workflowRuns)
 		return report, supervisedE2EReviewHandoffFail(report, err)
 	}
 	deploymentAudit := auditStage6Deployment(workflowRuns)
