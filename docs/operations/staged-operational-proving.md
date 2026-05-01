@@ -326,12 +326,32 @@ Command:
 
 ```bash
 ODIN_DRY_RUN=true \
-./bin/odin worker run --issue-fixture fixtures/issues/simple-doc-change.json --json
+./bin/odin work worker-dry-run --issue-fixture fixtures/issues/simple-doc-change.json --json
 ```
 
-Current implementation note:
+Implementation note:
 
-The current binary does not expose `odin worker run`. Stage 4 cannot be claimed complete until that command exists or an explicit compatibility decision maps it to the existing runner and worktree services.
+The current binary does not expose `odin work worker-dry-run`. Stage 4 cannot be claimed complete until that command exists and maps to the existing prompt, worktree, and `codex_headless` worker primitives. Do not add a parallel top-level `odin worker ...` operator surface for Stage 4.
+
+Stage 4 must not launch a local Codex process. It constructs a redacted `codex exec` command plan, renders the worker prompt, creates an isolated worktree, simulates bounded timeout behavior, and emits deterministic worker output containing `make odin-e2e-local`.
+
+Stage 4 must create a real temporary Git worktree under the Odin worktree root using a dry-run branch name, prove the path is inside the root, and clean it up after the proof unless `--keep-worktree` is set. The JSON report must include worktree path, branch name, `inside_root=true`, creation status, and cleanup status.
+
+The rendered prompt must include brownfield guardrails requiring:
+
+- Audit existing repo state before editing.
+- Reuse existing Odin commands, services, contracts, registries, schemas, docs, and tests.
+- Do not create parallel command surfaces, registries, or sidecar tools.
+- Preserve `odin work ...` as the canonical Delivery Workflow operator surface.
+- Do not expose tokens, credentials, or live secrets.
+- Do not create or update PRs.
+- Run or report `make odin-e2e-local` before final output.
+
+The JSON report must include guardrail coverage booleans instead of dumping the full prompt.
+
+Stage 4 must both redact token-like values from JSON, logs, reports, and artifacts and construct a sanitized Codex environment plan that excludes token-bearing environment variables. The JSON report must include `redaction.token_values_exposed=false` and `environment.excluded_token_env=["GITHUB_TOKEN","GH_TOKEN","API_TOKEN","ODIN_TRADEBOARD_API_TOKEN"]`.
+
+Stage 4 is command-local proof. It must not persist Work Items, Run Attempts, approvals, scheduler jobs, PR handoff state, or durable worktree lease rows. Durable worker/dispatch state is deferred to a later stage.
 
 Exit criteria:
 
@@ -343,6 +363,7 @@ Exit criteria:
 - E2E command appears in worker final output.
 - No GitHub mutation occurs.
 - No PR is created or updated.
+- No Work Items, Run Attempts, approvals, scheduler jobs, PR handoff state, or durable worktree lease rows are created.
 
 Required artifacts:
 
