@@ -2772,7 +2772,7 @@ func waitForStage6CI(ctx context.Context, client *trackergithub.Client, branchNa
 		select {
 		case <-ctx.Done():
 			if ctx.Err() == context.DeadlineExceeded {
-				return workPRCreateCIReport{Waited: true, TimedOut: true}, runs, fmt.Errorf("timed out waiting for Stage 6 CI after %s", timeout)
+				return workPRCreateCIReport{Waited: true, TimedOut: true}, runs, fmt.Errorf("timed out waiting for Odin E2E CI after %s", timeout)
 			}
 			return workPRCreateCIReport{}, runs, ctx.Err()
 		case <-time.After(sleepFor):
