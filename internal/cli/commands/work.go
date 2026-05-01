@@ -2671,13 +2671,6 @@ func findStage6E2ERun(runs []trackergithub.WorkflowRun) (trackergithub.WorkflowR
 			return run, true
 		}
 	}
-	for _, run := range runs {
-		name := strings.ToLower(run.Name)
-		path := strings.ToLower(run.Path)
-		if name == "ci" || strings.HasSuffix(path, "/ci.yml") || strings.HasSuffix(path, "/ci.yaml") {
-			return run, true
-		}
-	}
 	return trackergithub.WorkflowRun{}, false
 }
 

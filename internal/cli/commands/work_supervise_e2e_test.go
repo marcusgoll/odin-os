@@ -18,6 +18,7 @@ import (
 	"odin-os/internal/runtime/supervision"
 	"odin-os/internal/store/sqlite"
 	"odin-os/internal/tracker"
+	trackergithub "odin-os/internal/tracker/github"
 	trackerintake "odin-os/internal/tracker/intake"
 )
 
@@ -34,6 +35,34 @@ func TestRunWorkSuperviseE2ERequiresJSON(t *testing.T) {
 		t.Fatalf("error = %q, want required JSON error", err.Error())
 	}
 	assertNoSuperviseSideEffects(t, ctx, store)
+}
+
+func TestFindStage6E2ERunRequiresOdinE2EWorkflow(t *testing.T) {
+	_, ok := findStage6E2ERun([]trackergithub.WorkflowRun{
+		{
+			Name:       "ci",
+			Path:       ".github/workflows/ci.yml",
+			URL:        "https://github.example/actions/runs/1",
+			Status:     "completed",
+			Conclusion: "success",
+		},
+	})
+	if ok {
+		t.Fatalf("findStage6E2ERun accepted generic CI, want Odin E2E workflow only")
+	}
+
+	run, ok := findStage6E2ERun([]trackergithub.WorkflowRun{
+		{
+			Name:       "Odin E2E",
+			Path:       ".github/workflows/odin-e2e.yml",
+			URL:        "https://github.example/actions/runs/2",
+			Status:     "completed",
+			Conclusion: "success",
+		},
+	})
+	if !ok || run.URL != "https://github.example/actions/runs/2" {
+		t.Fatalf("findStage6E2ERun = %+v, %v; want Odin E2E run", run, ok)
+	}
 }
 
 func TestRunWorkSuperviseE2EUsageShowsPrepareIssueJSON(t *testing.T) {
