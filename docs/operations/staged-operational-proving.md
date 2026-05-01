@@ -491,11 +491,16 @@ Forbidden:
 - Issue creation.
 - Synthesizing or inventing the docs change inside the live Stage 6 command.
 - Extending `pr-dry-run` with a live mode.
+- Issue label changes.
+- Issue state changes.
+- PR review approval events.
 - Autonomous merge.
 - Production deploy.
+- Release or deploy workflow dispatch.
 - Codex reviewer or QA worker execution.
 - Scheduler dispatch beyond the approved toy issue.
 - Durable Run Attempt creation.
+- Mutation of unrelated GitHub resources.
 - Mutation of protected areas unless the approved toy issue explicitly includes them and a human approves.
 
 Exit criteria:
