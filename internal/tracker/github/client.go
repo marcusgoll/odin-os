@@ -240,6 +240,98 @@ func (client *Client) AddCommentWithResult(ctx context.Context, id tracker.Issue
 	return tracker.IssueComment{Body: decoded.Body, URL: decoded.HTMLURL}, nil
 }
 
+func (client *Client) ListPullRequests(ctx context.Context, head string, base string) ([]PullRequest, error) {
+	if !client.configured() {
+		return nil, tracker.ErrNotImplemented
+	}
+	path := fmt.Sprintf("/repos/%s/%s/pulls", url.PathEscape(client.config.Owner), url.PathEscape(client.config.Repo))
+	query := url.Values{}
+	query.Set("state", "open")
+	if strings.TrimSpace(head) != "" {
+		query.Set("head", client.config.Owner+":"+strings.TrimSpace(head))
+	}
+	if strings.TrimSpace(base) != "" {
+		query.Set("base", strings.TrimSpace(base))
+	}
+	rawPRs, err := client.doJSON(ctx, http.MethodGet, path, query, nil)
+	if err != nil {
+		return nil, err
+	}
+	var decoded []githubPullRequest
+	if err := json.Unmarshal(rawPRs, &decoded); err != nil {
+		return nil, fmt.Errorf("decode GitHub pull requests: %w", err)
+	}
+	prs := make([]PullRequest, 0, len(decoded))
+	for _, pr := range decoded {
+		prs = append(prs, pullRequestFromGitHub(pr))
+	}
+	return prs, nil
+}
+
+func (client *Client) CreatePullRequest(ctx context.Context, request PullRequestRequest) (PullRequest, error) {
+	if client.config.DryRun {
+		return PullRequest{
+			Title:   request.Title,
+			Body:    request.Body,
+			HeadRef: request.Head,
+			BaseRef: request.Base,
+			Draft:   request.Draft,
+		}, nil
+	}
+	if !client.configured() {
+		return PullRequest{}, tracker.ErrNotImplemented
+	}
+	path := fmt.Sprintf("/repos/%s/%s/pulls", url.PathEscape(client.config.Owner), url.PathEscape(client.config.Repo))
+	rawPR, err := client.doJSON(ctx, http.MethodPost, path, nil, map[string]any{
+		"title": request.Title,
+		"head":  request.Head,
+		"base":  request.Base,
+		"body":  request.Body,
+		"draft": request.Draft,
+	})
+	if err != nil {
+		return PullRequest{}, err
+	}
+	var decoded githubPullRequest
+	if err := json.Unmarshal(rawPR, &decoded); err != nil {
+		return PullRequest{}, fmt.Errorf("decode GitHub pull request: %w", err)
+	}
+	return pullRequestFromGitHub(decoded), nil
+}
+
+func (client *Client) ListWorkflowRuns(ctx context.Context, branch string) ([]WorkflowRun, error) {
+	if !client.configured() {
+		return nil, tracker.ErrNotImplemented
+	}
+	path := fmt.Sprintf("/repos/%s/%s/actions/runs", url.PathEscape(client.config.Owner), url.PathEscape(client.config.Repo))
+	query := url.Values{}
+	if strings.TrimSpace(branch) != "" {
+		query.Set("branch", strings.TrimSpace(branch))
+	}
+	rawRuns, err := client.doJSON(ctx, http.MethodGet, path, query, nil)
+	if err != nil {
+		return nil, err
+	}
+	var decoded githubWorkflowRunsResponse
+	if err := json.Unmarshal(rawRuns, &decoded); err != nil {
+		return nil, fmt.Errorf("decode GitHub workflow runs: %w", err)
+	}
+	runs := make([]WorkflowRun, 0, len(decoded.WorkflowRuns))
+	for _, run := range decoded.WorkflowRuns {
+		runs = append(runs, WorkflowRun{
+			ID:         run.ID,
+			Name:       run.Name,
+			Path:       run.Path,
+			URL:        run.HTMLURL,
+			Status:     run.Status,
+			Conclusion: run.Conclusion,
+			HeadBranch: run.HeadBranch,
+			Event:      run.Event,
+		})
+	}
+	return runs, nil
+}
+
 func (client *Client) CreateFollowUpIssue(ctx context.Context, issue tracker.FollowUpIssue) (tracker.Issue, error) {
 	repoID := issue.Repo
 	if repoID == "" {
@@ -485,4 +577,77 @@ type githubLabel struct {
 type githubComment struct {
 	Body    string `json:"body"`
 	HTMLURL string `json:"html_url"`
+}
+
+type PullRequestRequest struct {
+	Title string
+	Head  string
+	Base  string
+	Body  string
+	Draft bool
+}
+
+type PullRequest struct {
+	Number  int
+	URL     string
+	State   string
+	Draft   bool
+	Title   string
+	Body    string
+	HeadRef string
+	BaseRef string
+}
+
+type WorkflowRun struct {
+	ID         int64
+	Name       string
+	Path       string
+	URL        string
+	Status     string
+	Conclusion string
+	HeadBranch string
+	Event      string
+}
+
+func pullRequestFromGitHub(pr githubPullRequest) PullRequest {
+	return PullRequest{
+		Number:  pr.Number,
+		URL:     pr.HTMLURL,
+		State:   pr.State,
+		Draft:   pr.Draft,
+		Title:   pr.Title,
+		Body:    pr.Body,
+		HeadRef: pr.Head.Ref,
+		BaseRef: pr.Base.Ref,
+	}
+}
+
+type githubPullRequest struct {
+	Number  int    `json:"number"`
+	HTMLURL string `json:"html_url"`
+	State   string `json:"state"`
+	Draft   bool   `json:"draft"`
+	Title   string `json:"title"`
+	Body    string `json:"body"`
+	Head    struct {
+		Ref string `json:"ref"`
+	} `json:"head"`
+	Base struct {
+		Ref string `json:"ref"`
+	} `json:"base"`
+}
+
+type githubWorkflowRunsResponse struct {
+	WorkflowRuns []githubWorkflowRun `json:"workflow_runs"`
+}
+
+type githubWorkflowRun struct {
+	ID         int64  `json:"id"`
+	Name       string `json:"name"`
+	Path       string `json:"path"`
+	HTMLURL    string `json:"html_url"`
+	Status     string `json:"status"`
+	Conclusion string `json:"conclusion"`
+	HeadBranch string `json:"head_branch"`
+	Event      string `json:"event"`
 }

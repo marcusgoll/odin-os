@@ -31,8 +31,10 @@ import (
 )
 
 const stage3LifecycleCommentMarker = "<!-- odin-stage3-lifecycle-proof -->"
+const stage6ReviewEvidenceMarker = "<!-- odin-stage6-review-evidence -->"
+const stage6HumanReviewHandoffMarker = "<!-- odin-stage6-human-review-handoff -->"
 
-const workUsage = "usage: odin work status|profiles|start --project <key> --title <text>|intake --project <key> [--dry-run]|simulate-lifecycle --issue <number> [--project <key>] [--dry-run] [--json]|apply-lifecycle --issue <number> --approved-target <repo>#<issue> [--project <key>] [--json]|worker-dry-run --issue-fixture <path> [--project <key>] [--keep-worktree] [--json]|pr-dry-run --worktree <path> --base <branch> [--json]"
+const workUsage = "usage: odin work status|profiles|start --project <key> --title <text>|intake --project <key> [--dry-run]|simulate-lifecycle --issue <number> [--project <key>] [--dry-run] [--json]|apply-lifecycle --issue <number> --approved-target <repo>#<issue> [--project <key>] [--json]|worker-dry-run --issue-fixture <path> [--project <key>] [--keep-worktree] [--json]|pr-dry-run --worktree <path> --base <branch> [--json]|pr-create --issue <number> --approved-target <repo>#<issue> --worktree <path> --base <branch> --wait-ci [--json]"
 
 var newIntakeTracker = trackerintake.NewGitHubTracker
 
@@ -59,6 +61,8 @@ func RunWork(ctx context.Context, store *sqlite.Store, projectRegistry projects.
 		return runWorkWorkerDryRun(ctx, projectRegistry, args[1:], stdout)
 	case "pr-dry-run":
 		return runWorkPRDryRun(ctx, args[1:], stdout)
+	case "pr-create":
+		return runWorkPRCreate(ctx, projectRegistry, args[1:], stdout)
 	default:
 		_, err := fmt.Fprintf(stdout, "unknown work command: %s\n%s\n", args[0], workUsage)
 		return err
@@ -641,6 +645,206 @@ func runWorkPRDryRun(ctx context.Context, args []string, stdout io.Writer) error
 	return err
 }
 
+func runWorkPRCreate(ctx context.Context, projectRegistry projects.Registry, args []string, stdout io.Writer) error {
+	params := parseWorkStartArgs(args)
+	issueText := strings.TrimSpace(params["issue"])
+	approvedTarget := strings.TrimSpace(params["approved-target"])
+	worktreePath := strings.TrimSpace(params["worktree"])
+	baseBranch := strings.TrimSpace(params["base"])
+	if issueText == "" || approvedTarget == "" || worktreePath == "" || baseBranch == "" || !parseBoolFlag(params, "wait-ci") {
+		_, err := fmt.Fprintln(stdout, "usage: odin work pr-create --issue <number> --approved-target <repo>#<issue> --worktree <path> --base <branch> --wait-ci [--json]")
+		return err
+	}
+	issueNumber, err := strconv.Atoi(issueText)
+	if err != nil || issueNumber <= 0 {
+		return fmt.Errorf("invalid issue number %q", issueText)
+	}
+	project, err := resolveLifecycleProject(projectRegistry, strings.TrimSpace(params["project"]))
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(project.GitHub.Repo) == "" {
+		return fmt.Errorf("project %q has no GitHub repo for PR creation", project.Key)
+	}
+	approvedRepo, approvedIssue, err := parseApprovedTarget(approvedTarget)
+	if err != nil {
+		return err
+	}
+	if approvedRepo != project.GitHub.Repo || approvedIssue != issueNumber {
+		return fmt.Errorf("approved target %q does not match resolved target %s#%d", approvedTarget, project.GitHub.Repo, issueNumber)
+	}
+	owner, repoName, ok := strings.Cut(project.GitHub.Repo, "/")
+	if !ok || owner == "" || repoName == "" {
+		return fmt.Errorf("invalid GitHub repo %q", project.GitHub.Repo)
+	}
+	worktreeAbs, err := filepath.Abs(filepath.Clean(expandTilde(worktreePath)))
+	if err != nil {
+		return err
+	}
+	currentHead, err := gitOutput(ctx, worktreeAbs, "rev-parse", "--abbrev-ref", "HEAD")
+	if err != nil {
+		return err
+	}
+	branchName := strings.TrimSpace(currentHead)
+	if branchName == "" || branchName == "HEAD" {
+		return fmt.Errorf("worktree must be on a named branch")
+	}
+	if branchName == baseBranch {
+		return fmt.Errorf("refusing to create Stage 6 PR from base branch %q", baseBranch)
+	}
+	stat, err := gitOutput(ctx, worktreeAbs, "diff", "--stat", baseBranch)
+	if err != nil {
+		return err
+	}
+	nameStatus, err := gitOutput(ctx, worktreeAbs, "diff", "--name-status", baseBranch)
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(nameStatus) == "" {
+		return fmt.Errorf("no diff between worktree %q and base %q", worktreeAbs, baseBranch)
+	}
+	files := filesFromNameStatus(nameStatus)
+	if !allDocsOnly(files) {
+		return fmt.Errorf("Stage 6 requires a docs-only diff; changed files: %s", strings.Join(files, ", "))
+	}
+	diffSHA := prCreateDiffFingerprint(strings.TrimSpace(stat), strings.TrimSpace(nameStatus))
+	headSHA, err := gitOutput(ctx, worktreeAbs, "rev-parse", "HEAD")
+	if err != nil {
+		return err
+	}
+	headSHA = strings.TrimSpace(headSHA)
+
+	client := trackergithub.NewClientWithConfig(trackergithub.Config{
+		BaseURL:  os.Getenv("ODIN_GITHUB_API_BASE_URL"),
+		Owner:    owner,
+		Repo:     repoName,
+		TokenEnv: "GITHUB_TOKEN",
+	})
+	issueID := tracker.IssueID{Provider: "github", Repo: project.GitHub.Repo, Number: issueNumber}
+	issue, err := client.FetchIssueByID(ctx, issueID)
+	if err != nil {
+		return err
+	}
+	if issue.Number != issueNumber {
+		return fmt.Errorf("GitHub returned issue #%d for approved issue #%d", issue.Number, issueNumber)
+	}
+
+	branchResult, err := ensureRemoteBranch(ctx, worktreeAbs, branchName, headSHA)
+	if err != nil {
+		return err
+	}
+
+	prs, err := client.ListPullRequests(ctx, branchName, baseBranch)
+	if err != nil {
+		return err
+	}
+	prCreated := false
+	prReused := false
+	var pr trackergithub.PullRequest
+	if len(prs) > 0 {
+		pr = prs[0]
+		if !pr.Draft {
+			return fmt.Errorf("existing Stage 6 PR #%d is not a draft PR", pr.Number)
+		}
+		prReused = true
+	} else {
+		bodyContent := renderPRCreateBody(issueNumber, files)
+		artifactDir, err := ensureWorkArtifactDir(worktreeAbs, "pr-create")
+		if err != nil {
+			return err
+		}
+		bodyPath := filepath.Join(artifactDir, "pr-body.md")
+		if _, err := writeArtifact(bodyPath, bodyContent); err != nil {
+			return err
+		}
+		if err := verifyPRTemplate(ctx, worktreeAbs, bodyPath); err != nil {
+			return err
+		}
+		pr, err = client.CreatePullRequest(ctx, trackergithub.PullRequestRequest{
+			Title: fmt.Sprintf("Stage 6 docs-only proof for #%d", issueNumber),
+			Head:  branchName,
+			Base:  baseBranch,
+			Body:  bodyContent,
+			Draft: true,
+		})
+		if err != nil {
+			return err
+		}
+		prCreated = true
+	}
+
+	comments, err := client.FetchIssueComments(ctx, tracker.IssueID{Provider: "github", Repo: project.GitHub.Repo, Number: pr.Number})
+	if err != nil {
+		return err
+	}
+	evidenceComments, err := ensureStage6EvidenceComments(ctx, client, project.GitHub.Repo, pr.Number, issueNumber, diffSHA, comments)
+	if err != nil {
+		return err
+	}
+
+	timeout := 10 * time.Minute
+	if timeoutText := strings.TrimSpace(params["ci-timeout"]); timeoutText != "" {
+		parsed, err := time.ParseDuration(timeoutText)
+		if err != nil || parsed <= 0 {
+			return fmt.Errorf("invalid ci-timeout %q", timeoutText)
+		}
+		timeout = parsed
+	}
+	ciResult, workflowRuns, err := waitForStage6CI(ctx, client, branchName, timeout)
+	if err != nil {
+		return err
+	}
+	deploymentAudit := auditStage6Deployment(workflowRuns)
+	if !deploymentAudit.NoDeploymentWorkflows {
+		return fmt.Errorf("deployment-class workflow ran during Stage 6 proof")
+	}
+
+	audit := client.RequestAudit()
+	report := workPRCreateReport{
+		Project:        project.Key,
+		Repo:           project.GitHub.Repo,
+		Issue:          issueNumber,
+		ApprovedTarget: approvedTarget,
+		Worktree:       worktreeAbs,
+		Base:           baseBranch,
+		Diff: workPRCreateDiffReport{
+			DocsOnly: true,
+			SHA256:   diffSHA,
+			Files:    files,
+			Summary:  renderPRDryRunDiffSummary(baseBranch, branchName, stat, nameStatus),
+		},
+		Branch: workPRCreateBranchReport{
+			Name:   branchName,
+			SHA:    headSHA,
+			Pushed: branchResult.Pushed,
+			Reused: branchResult.Reused,
+		},
+		PR: workPRCreatePullRequestReport{
+			Number:  pr.Number,
+			URL:     pr.URL,
+			Draft:   pr.Draft,
+			Created: prCreated,
+			Reused:  prReused,
+		},
+		EvidenceComments: evidenceComments,
+		CI:               ciResult,
+		DeploymentAudit:  deploymentAudit,
+		GitHubWrites:     audit.Writes,
+		Merge:            "not_merged",
+		Deployment:       "not_started",
+		Dispatch:         "not_started",
+		CodexExecution:   "not_started",
+		DurableState:     workPRCreateDurableStateReport{Created: false},
+	}
+	if parseBoolFlag(params, "json") {
+		encoder := json.NewEncoder(stdout)
+		encoder.SetIndent("", "  ")
+		return encoder.Encode(report)
+	}
+	_, err = fmt.Fprintf(stdout, "pr_create issue=%d branch=%s pr=%s draft=%t ci=%s merge=not_merged deployment=not_started\n", issueNumber, branchName, pr.URL, pr.Draft, ciResult.Conclusion)
+	return err
+}
+
 func resolveLifecycleProject(projectRegistry projects.Registry, projectKey string) (projects.Manifest, error) {
 	if projectKey != "" {
 		project, ok := projectRegistry.Lookup(projectKey)
@@ -902,6 +1106,228 @@ func verifyPRTemplate(ctx context.Context, worktreePath string, bodyPath string)
 	return nil
 }
 
+func ensureWorkArtifactDir(worktreeAbs string, kind string) (string, error) {
+	odinRoot := strings.TrimSpace(os.Getenv("ODIN_ROOT"))
+	if odinRoot == "" {
+		odinRoot = filepath.Join(worktreeAbs, ".odin")
+	}
+	artifactDir := filepath.Join(expandTilde(odinRoot), "runs", kind, fmt.Sprintf("%d", time.Now().UnixNano()))
+	if err := os.MkdirAll(artifactDir, 0o755); err != nil {
+		return "", err
+	}
+	return artifactDir, nil
+}
+
+func allDocsOnly(files []string) bool {
+	if len(files) == 0 {
+		return false
+	}
+	for _, file := range files {
+		cleaned := filepath.ToSlash(filepath.Clean(file))
+		if strings.HasPrefix(cleaned, "../") || strings.HasPrefix(cleaned, "/") {
+			return false
+		}
+		if strings.HasPrefix(cleaned, "docs/") && strings.HasSuffix(strings.ToLower(cleaned), ".md") {
+			continue
+		}
+		if !strings.Contains(cleaned, "/") && strings.HasSuffix(strings.ToLower(cleaned), ".md") {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func prCreateDiffFingerprint(stat string, nameStatus string) string {
+	sum := sha256.Sum256([]byte(strings.TrimSpace(stat) + "\n---\n" + strings.TrimSpace(nameStatus)))
+	return hex.EncodeToString(sum[:])
+}
+
+func ensureRemoteBranch(ctx context.Context, worktreeAbs string, branchName string, headSHA string) (workPRCreateBranchReport, error) {
+	remoteRef := "refs/heads/" + branchName
+	remoteOutput, err := gitOutput(ctx, worktreeAbs, "ls-remote", "--heads", "origin", remoteRef)
+	if err != nil {
+		return workPRCreateBranchReport{}, err
+	}
+	remoteOutput = strings.TrimSpace(remoteOutput)
+	if remoteOutput != "" {
+		fields := strings.Fields(remoteOutput)
+		if len(fields) > 0 && fields[0] == headSHA {
+			return workPRCreateBranchReport{Name: branchName, SHA: headSHA, Reused: true}, nil
+		}
+		return workPRCreateBranchReport{}, fmt.Errorf("remote branch %q already exists at a different commit", branchName)
+	}
+	command := exec.CommandContext(ctx, "git", "-C", worktreeAbs, "push", "origin", "HEAD:"+remoteRef)
+	output, err := command.CombinedOutput()
+	if err != nil {
+		return workPRCreateBranchReport{}, fmt.Errorf("git push Stage 6 branch: %w: %s", err, string(output))
+	}
+	return workPRCreateBranchReport{Name: branchName, SHA: headSHA, Pushed: true}, nil
+}
+
+func renderPRCreateBody(issueNumber int, files []string) string {
+	summary := "- Stage 6 live docs-only PR proof for approved issue #" + strconv.Itoa(issueNumber) + "."
+	if len(files) > 0 {
+		summary = "- Stage 6 live docs-only PR proof for approved issue #" + strconv.Itoa(issueNumber) + " touching: " + strings.Join(files, ", ") + "."
+	}
+	return strings.Join([]string{
+		"## Summary",
+		summary,
+		"- This is a draft Human Review Handoff; human merge is required.",
+		"- Refs #" + strconv.Itoa(issueNumber) + ".",
+		"",
+		"## Proven",
+		"- Docs-only diff validated before push and PR creation.",
+		"- Draft PR creation is gated by exact approved target.",
+		"- Odin-authored Stage 6 evidence comments and bounded CI proof are required before completion.",
+		"",
+		"## Unproven",
+		"- Human merge is intentionally unproven and remains required.",
+		"- Deployment is intentionally not triggered.",
+		"",
+		"- [x] this PR changes user-visible or orchestration-facing behavior",
+		"- [x] if the box above is checked, real `odin` command proof is included below",
+		"",
+		"## Commands Run",
+		"```bash",
+		"odin work pr-create --issue <number> --approved-target <repo>#<issue> --worktree <path> --base <branch> --wait-ci --json",
+		"```",
+		"",
+	}, "\n")
+}
+
+func ensureStage6EvidenceComments(ctx context.Context, client *trackergithub.Client, repo string, prNumber int, issueNumber int, diffSHA string, existing []tracker.IssueComment) ([]workPRCreateEvidenceCommentReport, error) {
+	specs := []struct {
+		marker string
+		body   string
+	}{
+		{
+			marker: stage6ReviewEvidenceMarker,
+			body: strings.Join([]string{
+				stage6ReviewEvidenceMarker,
+				"Stage 6 review evidence for human review.",
+				"diff_sha256=" + diffSHA,
+				"approved_issue=#" + strconv.Itoa(issueNumber),
+				"This is not an autonomous review approval and does not authorize merge or deployment.",
+			}, "\n"),
+		},
+		{
+			marker: stage6HumanReviewHandoffMarker,
+			body: strings.Join([]string{
+				stage6HumanReviewHandoffMarker,
+				"Stage 6 Human Review Handoff evidence.",
+				"diff_sha256=" + diffSHA,
+				"human_merge_required=true",
+				"No Codex reviewer/QA worker was launched for this stage.",
+			}, "\n"),
+		},
+	}
+	reports := make([]workPRCreateEvidenceCommentReport, 0, len(specs))
+	for _, spec := range specs {
+		found, err := stage6CommentWithMarker(existing, spec.marker, diffSHA)
+		if err != nil {
+			return nil, err
+		}
+		report := workPRCreateEvidenceCommentReport{Marker: spec.marker}
+		if found != nil {
+			report.URL = found.URL
+			report.Reused = true
+			reports = append(reports, report)
+			continue
+		}
+		comment, err := client.AddCommentWithResult(ctx, tracker.IssueID{Provider: "github", Repo: repo, Number: prNumber}, spec.body)
+		if err != nil {
+			return nil, err
+		}
+		report.Created = true
+		report.URL = comment.URL
+		reports = append(reports, report)
+	}
+	return reports, nil
+}
+
+func stage6CommentWithMarker(comments []tracker.IssueComment, marker string, diffSHA string) (*tracker.IssueComment, error) {
+	for index := range comments {
+		comment := comments[index]
+		if !strings.Contains(comment.Body, marker) {
+			continue
+		}
+		if !strings.Contains(comment.Body, "diff_sha256="+diffSHA) {
+			return nil, fmt.Errorf("existing Stage 6 evidence comment %s has a different diff hash", marker)
+		}
+		return &comment, nil
+	}
+	return nil, nil
+}
+
+func waitForStage6CI(ctx context.Context, client *trackergithub.Client, branchName string, timeout time.Duration) (workPRCreateCIReport, []trackergithub.WorkflowRun, error) {
+	deadline := time.Now().Add(timeout)
+	for {
+		runs, err := client.ListWorkflowRuns(ctx, branchName)
+		if err != nil {
+			return workPRCreateCIReport{}, nil, err
+		}
+		if run, ok := findStage6E2ERun(runs); ok {
+			report := workPRCreateCIReport{
+				Waited:     true,
+				URL:        run.URL,
+				Status:     run.Status,
+				Conclusion: run.Conclusion,
+			}
+			if strings.EqualFold(run.Status, "completed") {
+				if strings.EqualFold(run.Conclusion, "success") {
+					return report, runs, nil
+				}
+				return report, runs, fmt.Errorf("Stage 6 CI concluded %q", run.Conclusion)
+			}
+		}
+		if time.Now().After(deadline) {
+			return workPRCreateCIReport{Waited: true, TimedOut: true}, runs, fmt.Errorf("timed out waiting for Stage 6 CI after %s", timeout)
+		}
+		sleepFor := 2 * time.Second
+		if remaining := time.Until(deadline); remaining < sleepFor {
+			sleepFor = remaining
+		}
+		if sleepFor <= 0 {
+			sleepFor = 10 * time.Millisecond
+		}
+		select {
+		case <-ctx.Done():
+			return workPRCreateCIReport{}, runs, ctx.Err()
+		case <-time.After(sleepFor):
+		}
+	}
+}
+
+func findStage6E2ERun(runs []trackergithub.WorkflowRun) (trackergithub.WorkflowRun, bool) {
+	for _, run := range runs {
+		name := strings.ToLower(run.Name)
+		path := strings.ToLower(run.Path)
+		if strings.Contains(name, "odin e2e") || strings.Contains(path, "odin-e2e") {
+			return run, true
+		}
+	}
+	return trackergithub.WorkflowRun{}, false
+}
+
+func auditStage6Deployment(runs []trackergithub.WorkflowRun) workPRCreateDeploymentAuditReport {
+	audit := workPRCreateDeploymentAuditReport{
+		NoDeploymentWorkflows: true,
+		Dispatches:            0,
+		Mutations:             0,
+	}
+	for _, run := range runs {
+		name := strings.ToLower(run.Name)
+		path := strings.ToLower(run.Path)
+		if strings.Contains(name, "deploy") || strings.Contains(name, "deployment") || strings.Contains(name, "release") || strings.Contains(name, "production") ||
+			strings.Contains(path, "deploy") || strings.Contains(path, "deployment") || strings.Contains(path, "release") || strings.Contains(path, "production") {
+			audit.NoDeploymentWorkflows = false
+			audit.DeploymentRuns = append(audit.DeploymentRuns, run.URL)
+		}
+	}
+	return audit
+}
+
 func findUpward(relativePath string) (string, error) {
 	dir, err := os.Getwd()
 	if err != nil {
@@ -1153,6 +1579,75 @@ type workPRDryRunReport struct {
 	Merge        string                        `json:"merge"`
 	PRs          string                        `json:"prs"`
 	Dispatch     string                        `json:"dispatch"`
+}
+
+type workPRCreateReport struct {
+	Project          string                              `json:"project"`
+	Repo             string                              `json:"repo"`
+	Issue            int                                 `json:"issue"`
+	ApprovedTarget   string                              `json:"approved_target"`
+	Worktree         string                              `json:"worktree"`
+	Base             string                              `json:"base"`
+	Diff             workPRCreateDiffReport              `json:"diff"`
+	Branch           workPRCreateBranchReport            `json:"branch"`
+	PR               workPRCreatePullRequestReport       `json:"pr"`
+	EvidenceComments []workPRCreateEvidenceCommentReport `json:"evidence_comments"`
+	CI               workPRCreateCIReport                `json:"ci"`
+	DeploymentAudit  workPRCreateDeploymentAuditReport   `json:"deployment_audit"`
+	GitHubWrites     int                                 `json:"github_writes"`
+	Merge            string                              `json:"merge"`
+	Deployment       string                              `json:"deployment"`
+	Dispatch         string                              `json:"dispatch"`
+	CodexExecution   string                              `json:"codex_execution"`
+	DurableState     workPRCreateDurableStateReport      `json:"durable_state"`
+}
+
+type workPRCreateDiffReport struct {
+	DocsOnly bool     `json:"docs_only"`
+	SHA256   string   `json:"sha256"`
+	Files    []string `json:"files"`
+	Summary  string   `json:"summary"`
+}
+
+type workPRCreateBranchReport struct {
+	Name   string `json:"name"`
+	SHA    string `json:"sha,omitempty"`
+	Pushed bool   `json:"pushed"`
+	Reused bool   `json:"reused"`
+}
+
+type workPRCreatePullRequestReport struct {
+	Number  int    `json:"number"`
+	URL     string `json:"url"`
+	Draft   bool   `json:"draft"`
+	Created bool   `json:"created"`
+	Reused  bool   `json:"reused"`
+}
+
+type workPRCreateEvidenceCommentReport struct {
+	Marker  string `json:"marker"`
+	URL     string `json:"url,omitempty"`
+	Created bool   `json:"created"`
+	Reused  bool   `json:"reused"`
+}
+
+type workPRCreateCIReport struct {
+	Waited     bool   `json:"waited"`
+	TimedOut   bool   `json:"timed_out"`
+	URL        string `json:"url,omitempty"`
+	Status     string `json:"status,omitempty"`
+	Conclusion string `json:"conclusion,omitempty"`
+}
+
+type workPRCreateDeploymentAuditReport struct {
+	NoDeploymentWorkflows bool     `json:"no_deployment_workflows"`
+	Dispatches            int      `json:"dispatches"`
+	Mutations             int      `json:"mutations"`
+	DeploymentRuns        []string `json:"deployment_runs,omitempty"`
+}
+
+type workPRCreateDurableStateReport struct {
+	Created bool `json:"created"`
 }
 
 type workPRDryRunDiffSummaryReport struct {
