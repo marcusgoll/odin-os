@@ -885,3 +885,119 @@ type ListDelegationArtifactsParams struct {
 	DelegationID int64
 	ArtifactType string
 }
+
+type SupervisionControl struct {
+	ID                   int64
+	ModeKey              string
+	Status               string
+	KillSwitchActive     bool
+	ConfigHash           string
+	MaxConcurrentTasks   int
+	DryRun               bool
+	RequireHumanApproval bool
+	UpdatedBy            string
+	CreatedAt            time.Time
+	UpdatedAt            time.Time
+}
+
+type UpsertSupervisionControlParams struct {
+	ModeKey              string
+	Status               string
+	KillSwitchActive     bool
+	ConfigHash           string
+	MaxConcurrentTasks   int
+	DryRun               bool
+	RequireHumanApproval bool
+	UpdatedBy            string
+}
+
+type SupervisionQueueDecision struct {
+	ID           int64
+	ProjectID    int64
+	Repo         string
+	IssueNumber  int
+	Decision     string
+	Reason       string
+	ConfigHash   string
+	DecisionJSON string
+	DecidedAt    time.Time
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
+}
+
+type UpsertSupervisionQueueDecisionParams struct {
+	ProjectID    int64
+	Repo         string
+	IssueNumber  int
+	Decision     string
+	Reason       string
+	ConfigHash   string
+	DecisionJSON string
+}
+
+type ListSupervisionQueueDecisionsParams struct {
+	ProjectID *int64
+	Repo      string
+	Decision  string
+}
+
+type SupervisionDispatchClaim struct {
+	ID          int64
+	ProjectID   int64
+	Repo        string
+	IssueNumber int
+	ClaimKey    string
+	Status      string
+	ConfigHash  string
+	ClaimedBy   string
+	ClaimedAt   time.Time
+	ReleasedAt  *time.Time
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
+}
+
+type UpsertSupervisionDispatchClaimParams struct {
+	ProjectID   int64
+	Repo        string
+	IssueNumber int
+	ClaimKey    string
+	Status      string
+	ConfigHash  string
+	ClaimedBy   string
+}
+
+type ListSupervisionDispatchClaimsParams struct {
+	ProjectID *int64
+	Repo      string
+	Status    string
+}
+
+type SupervisionRecoveryObservation struct {
+	ID              int64
+	ProjectID       *int64
+	ModeKey         string
+	ObservationType string
+	Status          string
+	Reason          string
+	ConfigHash      string
+	DetailsJSON     string
+	ObservedAt      time.Time
+	CreatedAt       time.Time
+}
+
+type CreateSupervisionRecoveryObservationParams struct {
+	ProjectID       *int64
+	ModeKey         string
+	ObservationType string
+	Status          string
+	Reason          string
+	ConfigHash      string
+	DetailsJSON     string
+}
+
+type ListSupervisionRecoveryObservationsParams struct {
+	ProjectID *int64
+	ModeKey   string
+	Status    string
+	Limit     int
+}

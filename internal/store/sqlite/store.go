@@ -19,6 +19,7 @@ var ErrWorktreeLeaseConflict = errors.New("worktree lease conflict")
 var ErrInvalidActionApprovalBinding = errors.New("invalid action approval binding")
 var ErrInvalidActionEvidenceLink = errors.New("invalid action evidence link")
 var ErrApprovalPayloadMismatch = errors.New("approval_payload_mismatch")
+var ErrSupervisionDispatchClaimConflict = errors.New("supervision dispatch claim conflict")
 
 type Store struct {
 	db        *sql.DB
@@ -197,6 +198,313 @@ func (store *Store) UpsertExternalIssue(ctx context.Context, params UpsertExtern
 	})
 
 	return issue, err
+}
+
+func (store *Store) UpsertSupervisionControl(ctx context.Context, params UpsertSupervisionControlParams) (SupervisionControl, error) {
+	now := store.now()
+	var control SupervisionControl
+
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO supervision_controls (
+				mode_key,
+				status,
+				kill_switch_active,
+				config_hash,
+				max_concurrent_tasks,
+				dry_run,
+				require_human_approval,
+				updated_by,
+				created_at,
+				updated_at
+			)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT(mode_key) DO UPDATE SET
+				status = excluded.status,
+				kill_switch_active = excluded.kill_switch_active,
+				config_hash = excluded.config_hash,
+				max_concurrent_tasks = excluded.max_concurrent_tasks,
+				dry_run = excluded.dry_run,
+				require_human_approval = excluded.require_human_approval,
+				updated_by = excluded.updated_by,
+				updated_at = excluded.updated_at
+		`,
+			params.ModeKey,
+			params.Status,
+			boolToInt(params.KillSwitchActive),
+			params.ConfigHash,
+			params.MaxConcurrentTasks,
+			boolToInt(params.DryRun),
+			boolToInt(params.RequireHumanApproval),
+			params.UpdatedBy,
+			formatTime(now),
+			formatTime(now),
+		); err != nil {
+			return err
+		}
+
+		record, err := scanSupervisionControl(tx.QueryRowContext(ctx, `
+			SELECT id, mode_key, status, kill_switch_active, config_hash, max_concurrent_tasks, dry_run, require_human_approval, updated_by, created_at, updated_at
+			FROM supervision_controls
+			WHERE mode_key = ?
+		`, params.ModeKey))
+		if err != nil {
+			return err
+		}
+		control = record
+		return nil
+	})
+
+	return control, err
+}
+
+func (store *Store) GetSupervisionControl(ctx context.Context, modeKey string) (SupervisionControl, error) {
+	row := store.db.QueryRowContext(ctx, `
+		SELECT id, mode_key, status, kill_switch_active, config_hash, max_concurrent_tasks, dry_run, require_human_approval, updated_by, created_at, updated_at
+		FROM supervision_controls
+		WHERE mode_key = ?
+	`, modeKey)
+	return scanSupervisionControl(row)
+}
+
+func (store *Store) UpsertSupervisionQueueDecision(ctx context.Context, params UpsertSupervisionQueueDecisionParams) (SupervisionQueueDecision, error) {
+	now := store.now()
+	var decision SupervisionQueueDecision
+
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO supervision_queue_decisions (
+				project_id,
+				repo,
+				issue_number,
+				decision,
+				reason,
+				config_hash,
+				decision_json,
+				decided_at,
+				created_at,
+				updated_at
+			)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT(project_id, repo, issue_number) DO UPDATE SET
+				decision = excluded.decision,
+				reason = excluded.reason,
+				config_hash = excluded.config_hash,
+				decision_json = excluded.decision_json,
+				decided_at = excluded.decided_at,
+				updated_at = excluded.updated_at
+		`,
+			params.ProjectID,
+			params.Repo,
+			params.IssueNumber,
+			params.Decision,
+			params.Reason,
+			params.ConfigHash,
+			params.DecisionJSON,
+			formatTime(now),
+			formatTime(now),
+			formatTime(now),
+		); err != nil {
+			return err
+		}
+
+		record, err := scanSupervisionQueueDecision(tx.QueryRowContext(ctx, `
+			SELECT id, project_id, repo, issue_number, decision, reason, config_hash, decision_json, decided_at, created_at, updated_at
+			FROM supervision_queue_decisions
+			WHERE project_id = ? AND repo = ? AND issue_number = ?
+		`, params.ProjectID, params.Repo, params.IssueNumber))
+		if err != nil {
+			return err
+		}
+		decision = record
+		return nil
+	})
+
+	return decision, err
+}
+
+func (store *Store) ListSupervisionQueueDecisions(ctx context.Context, params ListSupervisionQueueDecisionsParams) ([]SupervisionQueueDecision, error) {
+	query := `
+		SELECT id, project_id, repo, issue_number, decision, reason, config_hash, decision_json, decided_at, created_at, updated_at
+		FROM supervision_queue_decisions
+		WHERE 1 = 1
+	`
+	var args []any
+	if params.ProjectID != nil {
+		query += " AND project_id = ?"
+		args = append(args, *params.ProjectID)
+	}
+	if params.Repo != "" {
+		query += " AND repo = ?"
+		args = append(args, params.Repo)
+	}
+	if params.Decision != "" {
+		query += " AND decision = ?"
+		args = append(args, params.Decision)
+	}
+	query += " ORDER BY repo ASC, issue_number ASC, id ASC"
+
+	rows, err := store.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var decisions []SupervisionQueueDecision
+	for rows.Next() {
+		decision, err := scanSupervisionQueueDecision(rows)
+		if err != nil {
+			return nil, err
+		}
+		decisions = append(decisions, decision)
+	}
+	return decisions, rows.Err()
+}
+
+func (store *Store) UpsertSupervisionDispatchClaim(ctx context.Context, params UpsertSupervisionDispatchClaimParams) (SupervisionDispatchClaim, error) {
+	now := store.now()
+	var claim SupervisionDispatchClaim
+
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO supervision_dispatch_claims (
+				project_id,
+				repo,
+				issue_number,
+				claim_key,
+				status,
+				config_hash,
+				claimed_by,
+				claimed_at,
+				created_at,
+				updated_at
+			)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT(claim_key) DO UPDATE SET
+				status = excluded.status,
+				config_hash = excluded.config_hash,
+				claimed_by = excluded.claimed_by,
+				claimed_at = excluded.claimed_at,
+				updated_at = excluded.updated_at
+		`,
+			params.ProjectID,
+			params.Repo,
+			params.IssueNumber,
+			params.ClaimKey,
+			params.Status,
+			params.ConfigHash,
+			params.ClaimedBy,
+			formatTime(now),
+			formatTime(now),
+			formatTime(now),
+		); err != nil {
+			return mapSupervisionDispatchClaimError(err)
+		}
+
+		record, err := scanSupervisionDispatchClaim(tx.QueryRowContext(ctx, `
+			SELECT id, project_id, repo, issue_number, claim_key, status, config_hash, claimed_by, claimed_at, released_at, created_at, updated_at
+			FROM supervision_dispatch_claims
+			WHERE claim_key = ?
+		`, params.ClaimKey))
+		if err != nil {
+			return err
+		}
+		claim = record
+		return nil
+	})
+
+	return claim, err
+}
+
+func (store *Store) ListSupervisionDispatchClaims(ctx context.Context, params ListSupervisionDispatchClaimsParams) ([]SupervisionDispatchClaim, error) {
+	query := `
+		SELECT id, project_id, repo, issue_number, claim_key, status, config_hash, claimed_by, claimed_at, released_at, created_at, updated_at
+		FROM supervision_dispatch_claims
+		WHERE 1 = 1
+	`
+	var args []any
+	if params.ProjectID != nil {
+		query += " AND project_id = ?"
+		args = append(args, *params.ProjectID)
+	}
+	if params.Repo != "" {
+		query += " AND repo = ?"
+		args = append(args, params.Repo)
+	}
+	if params.Status != "" {
+		query += " AND status = ?"
+		args = append(args, params.Status)
+	}
+	query += " ORDER BY claimed_at ASC, id ASC"
+
+	rows, err := store.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var claims []SupervisionDispatchClaim
+	for rows.Next() {
+		claim, err := scanSupervisionDispatchClaim(rows)
+		if err != nil {
+			return nil, err
+		}
+		claims = append(claims, claim)
+	}
+	return claims, rows.Err()
+}
+
+func (store *Store) CreateSupervisionRecoveryObservation(ctx context.Context, params CreateSupervisionRecoveryObservationParams) (SupervisionRecoveryObservation, error) {
+	now := store.now()
+	var observation SupervisionRecoveryObservation
+
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		result, err := tx.ExecContext(ctx, `
+			INSERT INTO supervision_recovery_observations (
+				project_id,
+				mode_key,
+				observation_type,
+				status,
+				reason,
+				config_hash,
+				details_json,
+				observed_at,
+				created_at
+			)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`,
+			nullInt64(params.ProjectID),
+			params.ModeKey,
+			params.ObservationType,
+			params.Status,
+			params.Reason,
+			params.ConfigHash,
+			params.DetailsJSON,
+			formatTime(now),
+			formatTime(now),
+		)
+		if err != nil {
+			return err
+		}
+
+		observationID, err := result.LastInsertId()
+		if err != nil {
+			return err
+		}
+
+		record, err := scanSupervisionRecoveryObservation(tx.QueryRowContext(ctx, `
+			SELECT id, project_id, mode_key, observation_type, status, reason, config_hash, details_json, observed_at, created_at
+			FROM supervision_recovery_observations
+			WHERE id = ?
+		`, observationID))
+		if err != nil {
+			return err
+		}
+		observation = record
+		return nil
+	})
+
+	return observation, err
 }
 
 func (store *Store) CreateTask(ctx context.Context, params CreateTaskParams) (Task, error) {
@@ -3719,6 +4027,48 @@ func (store *Store) ListExternalIssues(ctx context.Context, params ListExternalI
 	return issues, rows.Err()
 }
 
+func (store *Store) ListSupervisionRecoveryObservations(ctx context.Context, params ListSupervisionRecoveryObservationsParams) ([]SupervisionRecoveryObservation, error) {
+	query := `
+		SELECT id, project_id, mode_key, observation_type, status, reason, config_hash, details_json, observed_at, created_at
+		FROM supervision_recovery_observations
+		WHERE 1 = 1
+	`
+	var args []any
+	if params.ProjectID != nil {
+		query += " AND project_id = ?"
+		args = append(args, *params.ProjectID)
+	}
+	if params.ModeKey != "" {
+		query += " AND mode_key = ?"
+		args = append(args, params.ModeKey)
+	}
+	if params.Status != "" {
+		query += " AND status = ?"
+		args = append(args, params.Status)
+	}
+	query += " ORDER BY observed_at DESC, id DESC"
+	if params.Limit > 0 {
+		query += " LIMIT ?"
+		args = append(args, params.Limit)
+	}
+
+	rows, err := store.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var observations []SupervisionRecoveryObservation
+	for rows.Next() {
+		observation, err := scanSupervisionRecoveryObservation(rows)
+		if err != nil {
+			return nil, err
+		}
+		observations = append(observations, observation)
+	}
+	return observations, rows.Err()
+}
+
 func (store *Store) GetRun(ctx context.Context, runID int64) (Run, error) {
 	row := store.db.QueryRowContext(ctx, `
 		SELECT id, task_id, executor, status, attempt, started_at, finished_at, summary
@@ -4939,6 +5289,157 @@ func scanExternalIssue(row interface{ Scan(...any) error }) (ExternalIssue, erro
 	return issue, nil
 }
 
+func scanSupervisionControl(row interface{ Scan(...any) error }) (SupervisionControl, error) {
+	var control SupervisionControl
+	var killSwitchActive int
+	var dryRun int
+	var requireHumanApproval int
+	var createdAt string
+	var updatedAt string
+	if err := row.Scan(
+		&control.ID,
+		&control.ModeKey,
+		&control.Status,
+		&killSwitchActive,
+		&control.ConfigHash,
+		&control.MaxConcurrentTasks,
+		&dryRun,
+		&requireHumanApproval,
+		&control.UpdatedBy,
+		&createdAt,
+		&updatedAt,
+	); err != nil {
+		return SupervisionControl{}, err
+	}
+
+	var err error
+	control.KillSwitchActive = killSwitchActive == 1
+	control.DryRun = dryRun == 1
+	control.RequireHumanApproval = requireHumanApproval == 1
+	control.CreatedAt, err = parseTime(createdAt)
+	if err != nil {
+		return SupervisionControl{}, err
+	}
+	control.UpdatedAt, err = parseTime(updatedAt)
+	if err != nil {
+		return SupervisionControl{}, err
+	}
+	return control, nil
+}
+
+func scanSupervisionQueueDecision(row interface{ Scan(...any) error }) (SupervisionQueueDecision, error) {
+	var decision SupervisionQueueDecision
+	var decidedAt string
+	var createdAt string
+	var updatedAt string
+	if err := row.Scan(
+		&decision.ID,
+		&decision.ProjectID,
+		&decision.Repo,
+		&decision.IssueNumber,
+		&decision.Decision,
+		&decision.Reason,
+		&decision.ConfigHash,
+		&decision.DecisionJSON,
+		&decidedAt,
+		&createdAt,
+		&updatedAt,
+	); err != nil {
+		return SupervisionQueueDecision{}, err
+	}
+
+	var err error
+	decision.DecidedAt, err = parseTime(decidedAt)
+	if err != nil {
+		return SupervisionQueueDecision{}, err
+	}
+	decision.CreatedAt, err = parseTime(createdAt)
+	if err != nil {
+		return SupervisionQueueDecision{}, err
+	}
+	decision.UpdatedAt, err = parseTime(updatedAt)
+	if err != nil {
+		return SupervisionQueueDecision{}, err
+	}
+	return decision, nil
+}
+
+func scanSupervisionDispatchClaim(row interface{ Scan(...any) error }) (SupervisionDispatchClaim, error) {
+	var claim SupervisionDispatchClaim
+	var claimedAt string
+	var releasedAt sql.NullString
+	var createdAt string
+	var updatedAt string
+	if err := row.Scan(
+		&claim.ID,
+		&claim.ProjectID,
+		&claim.Repo,
+		&claim.IssueNumber,
+		&claim.ClaimKey,
+		&claim.Status,
+		&claim.ConfigHash,
+		&claim.ClaimedBy,
+		&claimedAt,
+		&releasedAt,
+		&createdAt,
+		&updatedAt,
+	); err != nil {
+		return SupervisionDispatchClaim{}, err
+	}
+
+	var err error
+	claim.ClaimedAt, err = parseTime(claimedAt)
+	if err != nil {
+		return SupervisionDispatchClaim{}, err
+	}
+	claim.ReleasedAt, err = parseNullableTime(releasedAt)
+	if err != nil {
+		return SupervisionDispatchClaim{}, err
+	}
+	claim.CreatedAt, err = parseTime(createdAt)
+	if err != nil {
+		return SupervisionDispatchClaim{}, err
+	}
+	claim.UpdatedAt, err = parseTime(updatedAt)
+	if err != nil {
+		return SupervisionDispatchClaim{}, err
+	}
+	return claim, nil
+}
+
+func scanSupervisionRecoveryObservation(row interface{ Scan(...any) error }) (SupervisionRecoveryObservation, error) {
+	var observation SupervisionRecoveryObservation
+	var projectID sql.NullInt64
+	var observedAt string
+	var createdAt string
+	if err := row.Scan(
+		&observation.ID,
+		&projectID,
+		&observation.ModeKey,
+		&observation.ObservationType,
+		&observation.Status,
+		&observation.Reason,
+		&observation.ConfigHash,
+		&observation.DetailsJSON,
+		&observedAt,
+		&createdAt,
+	); err != nil {
+		return SupervisionRecoveryObservation{}, err
+	}
+
+	var err error
+	observation.ProjectID = nullableInt64Ptr(projectID)
+	observation.ObservedAt, err = parseTime(observedAt)
+	if err != nil {
+		return SupervisionRecoveryObservation{}, err
+	}
+	observation.CreatedAt, err = parseTime(createdAt)
+	if err != nil {
+		return SupervisionRecoveryObservation{}, err
+	}
+	return observation, nil
+}
+
 func scanTask(row interface{ Scan(...any) error }) (Task, error) {
 	var task Task
 	var currentRunID sql.NullInt64
@@ -5779,6 +6280,14 @@ func mapWorktreeLeaseError(err error) error {
 		strings.Contains(err.Error(), "UNIQUE constraint failed: worktree_leases.branch_name") ||
 		strings.Contains(err.Error(), "UNIQUE constraint failed: worktree_leases.worktree_path") {
 		return fmt.Errorf("%w: %v", ErrWorktreeLeaseConflict, err)
+	}
+	return err
+}
+
+func mapSupervisionDispatchClaimError(err error) error {
+	if strings.Contains(err.Error(), "idx_supervision_dispatch_claims_active_issue") ||
+		strings.Contains(err.Error(), "UNIQUE constraint failed: supervision_dispatch_claims.project_id, supervision_dispatch_claims.repo, supervision_dispatch_claims.issue_number") {
+		return fmt.Errorf("%w: %v", ErrSupervisionDispatchClaimConflict, err)
 	}
 	return err
 }
