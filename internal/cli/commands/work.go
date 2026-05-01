@@ -6,24 +6,31 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"odin-os/internal/cli/scope"
 	"odin-os/internal/core/projects"
 	"odin-os/internal/registry"
+	"odin-os/internal/runner"
+	"odin-os/internal/runner/codexexec"
 	"odin-os/internal/runtime/jobs"
 	"odin-os/internal/runtime/projections"
 	"odin-os/internal/store/sqlite"
 	"odin-os/internal/tracker"
 	trackergithub "odin-os/internal/tracker/github"
 	trackerintake "odin-os/internal/tracker/intake"
+	vcsgit "odin-os/internal/vcs/git"
+	"odin-os/internal/vcs/worktrees"
 )
 
 const stage3LifecycleCommentMarker = "<!-- odin-stage3-lifecycle-proof -->"
 
-const workUsage = "usage: odin work status|profiles|start --project <key> --title <text>|intake --project <key> [--dry-run]|simulate-lifecycle --issue <number> [--project <key>] [--dry-run] [--json]|apply-lifecycle --issue <number> --approved-target <repo>#<issue> [--project <key>] [--json]"
+const workUsage = "usage: odin work status|profiles|start --project <key> --title <text>|intake --project <key> [--dry-run]|simulate-lifecycle --issue <number> [--project <key>] [--dry-run] [--json]|apply-lifecycle --issue <number> --approved-target <repo>#<issue> [--project <key>] [--json]|worker-dry-run --issue-fixture <path> [--project <key>] [--keep-worktree] [--json]"
 
 var newIntakeTracker = trackerintake.NewGitHubTracker
 
@@ -46,6 +53,8 @@ func RunWork(ctx context.Context, store *sqlite.Store, projectRegistry projects.
 		return runWorkSimulateLifecycle(projectRegistry, args[1:], stdout)
 	case "apply-lifecycle":
 		return runWorkApplyLifecycle(ctx, projectRegistry, args[1:], stdout)
+	case "worker-dry-run":
+		return runWorkWorkerDryRun(ctx, projectRegistry, args[1:], stdout)
 	default:
 		_, err := fmt.Fprintf(stdout, "unknown work command: %s\n%s\n", args[0], workUsage)
 		return err
@@ -381,6 +390,150 @@ func runWorkApplyLifecycle(ctx context.Context, projectRegistry projects.Registr
 	return nil
 }
 
+func runWorkWorkerDryRun(ctx context.Context, projectRegistry projects.Registry, args []string, stdout io.Writer) error {
+	params := parseWorkStartArgs(args)
+	fixturePath := strings.TrimSpace(params["issue-fixture"])
+	if fixturePath == "" {
+		_, err := fmt.Fprintln(stdout, "usage: odin work worker-dry-run --issue-fixture <path> [--project <key>] [--keep-worktree] [--json]")
+		return err
+	}
+	project, err := resolveLifecycleProject(projectRegistry, strings.TrimSpace(params["project"]))
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(project.GitRoot) == "" {
+		return fmt.Errorf("project %q has no git root for worker dry-run", project.Key)
+	}
+	issue, err := readWorkerDryRunIssueFixture(fixturePath)
+	if err != nil {
+		return err
+	}
+
+	worktreeRoot := strings.TrimSpace(os.Getenv("ODIN_WORKTREE_ROOT"))
+	if worktreeRoot == "" {
+		worktreeRoot = worktrees.DefaultRoot()
+	}
+	nonce := time.Now().UnixNano()
+	branchName := fmt.Sprintf("odin/stage4-dry-run/issue-%d-%d", issue.Number, nonce)
+	worktreePath := worktrees.ResolvePath(worktrees.PathParams{
+		Root:       worktreeRoot,
+		ProjectKey: project.Key + "-stage4-dry-run",
+		TaskID:     int64(issue.Number),
+		RunID:      nonce,
+		Try:        1,
+	})
+	rootAbs, pathAbs, insideRoot, err := provePathInsideRoot(worktreeRoot, worktreePath)
+	if err != nil {
+		return err
+	}
+	if !insideRoot {
+		return fmt.Errorf("worker dry-run worktree path %q escaped root %q", worktreePath, worktreeRoot)
+	}
+	if err := os.MkdirAll(filepath.Dir(pathAbs), 0o755); err != nil {
+		return err
+	}
+
+	git := vcsgit.Adapter{}
+	baseBranch := strings.TrimSpace(project.DefaultBranch)
+	if baseBranch == "" {
+		baseBranch = "HEAD"
+	}
+	if err := git.CreateBranch(ctx, project.GitRoot, branchName, baseBranch); err != nil {
+		return err
+	}
+	created := false
+	cleanedUp := false
+	kept := parseBoolFlag(params, "keep-worktree")
+	defer func() {
+		if !created || kept {
+			return
+		}
+		_ = git.RemoveWorktree(context.Background(), project.GitRoot, pathAbs)
+		_ = deleteGitBranch(context.Background(), project.GitRoot, branchName)
+	}()
+	if err := git.AddWorktree(ctx, project.GitRoot, pathAbs, branchName); err != nil {
+		_ = deleteGitBranch(context.Background(), project.GitRoot, branchName)
+		return err
+	}
+	created = true
+
+	prompt := renderWorkerDryRunPrompt(project, issue)
+	secrets := collectKnownSecretValues()
+	command, err := codexexec.BuildCommand(codexexec.Config{
+		SecretValues: secrets,
+		Timeout:      30 * time.Minute,
+	}, runner.Request{
+		WorkItemID:  fmt.Sprintf("issue-%d", issue.Number),
+		Role:        "builder",
+		Worktree:    pathAbs,
+		Prompt:      prompt,
+		DryRun:      true,
+		SandboxMode: "workspace-write",
+		Timeout:     30 * time.Minute,
+	})
+	if err != nil {
+		return err
+	}
+
+	if !kept {
+		if err := git.RemoveWorktree(ctx, project.GitRoot, pathAbs); err != nil {
+			return err
+		}
+		if err := deleteGitBranch(ctx, project.GitRoot, branchName); err != nil {
+			return err
+		}
+		cleanedUp = true
+		created = false
+	}
+
+	report := workWorkerDryRunReport{
+		Project: project.Key,
+		Issue: workWorkerDryRunIssueReport{
+			Number: issue.Number,
+			Title:  issue.Title,
+		},
+		Worktree: workWorkerDryRunWorktreeReport{
+			Root:        rootAbs,
+			Path:        pathAbs,
+			Branch:      branchName,
+			Created:     true,
+			InsideRoot:  insideRoot,
+			CleanedUp:   cleanedUp,
+			Kept:        kept,
+			LeaseStored: false,
+		},
+		Prompt:     codexexec.Redact(prompt, secrets),
+		Guardrails: workerDryRunGuardrails(),
+		CodexCommand: workWorkerDryRunCommandReport{
+			Executable: command.Path,
+			Args:       command.Args,
+			Redacted:   codexexec.RedactCommand(command, secrets),
+			Launched:   false,
+		},
+		Environment: workWorkerDryRunEnvironmentReport{
+			Excluded:      workerDryRunExcludedEnv(),
+			TokenExposure: false,
+		},
+		Timeout: workWorkerDryRunTimeoutReport{
+			Simulated: true,
+			Result:    "simulated codex exec timed out after 1ms; process was not launched",
+		},
+		FinalOutput:    "dry-run worker final output: run make odin-e2e-local before handoff",
+		GitHubWrites:   0,
+		PRs:            "not_created",
+		Dispatch:       "not_started",
+		CodexExecution: "not_started",
+	}
+
+	if parseBoolFlag(params, "json") {
+		encoder := json.NewEncoder(stdout)
+		encoder.SetIndent("", "  ")
+		return encoder.Encode(report)
+	}
+	_, err = fmt.Fprintf(stdout, "worker_dry_run issue=%d worktree=%s codex_execution=not_started final_output=%q\n", issue.Number, pathAbs, report.FinalOutput)
+	return err
+}
+
 func resolveLifecycleProject(projectRegistry projects.Registry, projectKey string) (projects.Manifest, error) {
 	if projectKey != "" {
 		project, ok := projectRegistry.Lookup(projectKey)
@@ -394,6 +547,114 @@ func resolveLifecycleProject(projectRegistry projects.Registry, projectKey strin
 		return projects.Manifest{}, fmt.Errorf("no system project registered for lifecycle simulation")
 	}
 	return project, nil
+}
+
+func readWorkerDryRunIssueFixture(path string) (workWorkerDryRunIssueFixture, error) {
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return workWorkerDryRunIssueFixture{}, err
+	}
+	var issue workWorkerDryRunIssueFixture
+	if err := json.Unmarshal(content, &issue); err != nil {
+		return workWorkerDryRunIssueFixture{}, fmt.Errorf("decode issue fixture: %w", err)
+	}
+	if issue.Number <= 0 {
+		return workWorkerDryRunIssueFixture{}, fmt.Errorf("issue fixture must include positive number")
+	}
+	if strings.TrimSpace(issue.Title) == "" {
+		issue.Title = fmt.Sprintf("Issue %d", issue.Number)
+	}
+	return issue, nil
+}
+
+func renderWorkerDryRunPrompt(project projects.Manifest, issue workWorkerDryRunIssueFixture) string {
+	return strings.Join([]string{
+		"You are implementing one Odin Work Item in a temporary local dry-run worktree.",
+		"",
+		fmt.Sprintf("Project: %s", project.Key),
+		fmt.Sprintf("Repository: %s", project.GitHub.Repo),
+		fmt.Sprintf("Issue: #%d %s", issue.Number, issue.Title),
+		"",
+		"Brownfield guardrails:",
+		"- Audit the existing repo before editing.",
+		"- Reuse existing Odin commands, services, contracts, registries, schemas, docs, and tests.",
+		"- Do not create parallel command surfaces, registries, or sidecar tools.",
+		"- Use odin work ... as the canonical Delivery Workflow operator surface.",
+		"- Do not expose tokens or secrets.",
+		"- Do not create or update a pull request.",
+		"- Final output must include make odin-e2e-local.",
+		"",
+		"Required final output:",
+		"- Changed files",
+		"- Verification run, including make odin-e2e-local or a clear reason it was not run",
+		"- Remaining risks",
+	}, "\n")
+}
+
+func workerDryRunGuardrails() map[string]bool {
+	return map[string]bool{
+		"audit_existing_repo":            true,
+		"reuse_existing_odin_primitives": true,
+		"no_parallel_surfaces":           true,
+		"canonical_odin_work_surface":    true,
+		"no_tokens_or_secrets":           true,
+		"no_pr_creation":                 true,
+		"run_make_odin_e2e_local":        true,
+	}
+}
+
+func workerDryRunExcludedEnv() []string {
+	return []string{"GITHUB_TOKEN", "GH_TOKEN", "API_TOKEN", "ODIN_TRADEBOARD_API_TOKEN"}
+}
+
+func collectKnownSecretValues() []string {
+	var secrets []string
+	for _, key := range workerDryRunExcludedEnv() {
+		if value := os.Getenv(key); value != "" {
+			secrets = append(secrets, value)
+		}
+	}
+	return secrets
+}
+
+func provePathInsideRoot(root string, path string) (string, string, bool, error) {
+	rootAbs, err := filepath.Abs(filepath.Clean(expandTilde(root)))
+	if err != nil {
+		return "", "", false, err
+	}
+	pathAbs, err := filepath.Abs(filepath.Clean(expandTilde(path)))
+	if err != nil {
+		return "", "", false, err
+	}
+	relative, err := filepath.Rel(rootAbs, pathAbs)
+	if err != nil {
+		return "", "", false, err
+	}
+	inside := relative != "." && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
+	return rootAbs, pathAbs, inside, nil
+}
+
+func expandTilde(path string) string {
+	if path == "~" {
+		if home, err := os.UserHomeDir(); err == nil && home != "" {
+			return home
+		}
+	}
+	if strings.HasPrefix(path, "~/") || strings.HasPrefix(path, "~\\") {
+		if home, err := os.UserHomeDir(); err == nil && home != "" {
+			return filepath.Join(home, path[2:])
+		}
+	}
+	return path
+}
+
+func deleteGitBranch(ctx context.Context, repoRoot string, branchName string) error {
+	command := exec.CommandContext(ctx, "git", "-C", repoRoot, "branch", "-D", branchName)
+	output, err := command.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("git branch -D %s: %w: %s", branchName, err, string(output))
+	}
+	return nil
 }
 
 func buildWorkApplyLifecycleReport(project projects.Manifest, issueNumber int, approvedTarget string, labels []string, comments []tracker.IssueComment) workApplyLifecycleReport {
@@ -557,6 +818,61 @@ type workApplyLifecycleReport struct {
 	Dispatch       string                       `json:"dispatch"`
 	PRs            string                       `json:"prs"`
 	CodexExecution string                       `json:"codex_execution"`
+}
+
+type workWorkerDryRunIssueFixture struct {
+	Number int    `json:"number"`
+	Title  string `json:"title"`
+	Body   string `json:"body"`
+}
+
+type workWorkerDryRunReport struct {
+	Project        string                            `json:"project"`
+	Issue          workWorkerDryRunIssueReport       `json:"issue"`
+	Worktree       workWorkerDryRunWorktreeReport    `json:"worktree"`
+	Prompt         string                            `json:"prompt"`
+	Guardrails     map[string]bool                   `json:"guardrails"`
+	CodexCommand   workWorkerDryRunCommandReport     `json:"codex_command"`
+	Environment    workWorkerDryRunEnvironmentReport `json:"environment"`
+	Timeout        workWorkerDryRunTimeoutReport     `json:"timeout"`
+	FinalOutput    string                            `json:"final_output"`
+	GitHubWrites   int                               `json:"github_writes"`
+	PRs            string                            `json:"prs"`
+	Dispatch       string                            `json:"dispatch"`
+	CodexExecution string                            `json:"codex_execution"`
+}
+
+type workWorkerDryRunIssueReport struct {
+	Number int    `json:"number"`
+	Title  string `json:"title"`
+}
+
+type workWorkerDryRunWorktreeReport struct {
+	Root        string `json:"root"`
+	Path        string `json:"path"`
+	Branch      string `json:"branch"`
+	Created     bool   `json:"created"`
+	InsideRoot  bool   `json:"inside_root"`
+	CleanedUp   bool   `json:"cleaned_up"`
+	Kept        bool   `json:"kept"`
+	LeaseStored bool   `json:"lease_stored"`
+}
+
+type workWorkerDryRunCommandReport struct {
+	Executable string   `json:"executable"`
+	Args       []string `json:"args"`
+	Redacted   string   `json:"redacted"`
+	Launched   bool     `json:"launched"`
+}
+
+type workWorkerDryRunEnvironmentReport struct {
+	Excluded      []string `json:"excluded"`
+	TokenExposure bool     `json:"token_exposure"`
+}
+
+type workWorkerDryRunTimeoutReport struct {
+	Simulated bool   `json:"simulated"`
+	Result    string `json:"result"`
 }
 
 type workLifecycleApprovalReport struct {
