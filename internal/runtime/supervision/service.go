@@ -81,16 +81,6 @@ func (service Service) Queue(ctx context.Context, project Project, issues []Issu
 		return Report{}, err
 	}
 
-	activeClaims, err := service.activeClaims(ctx, 0, "")
-	if err != nil {
-		return Report{}, err
-	}
-	activeCount := len(activeClaims)
-	activeClaimKeys := make(map[string]bool, len(activeClaims))
-	for _, claim := range activeClaims {
-		activeClaimKeys[claim.ClaimKey] = true
-	}
-
 	report := Report{
 		ModeKey:     service.config.ModeKey,
 		Control:     controlState(control),
@@ -113,11 +103,6 @@ func (service Service) Queue(ctx context.Context, project Project, issues []Issu
 			decision.RefusalReason = eligibility.RefusalReason
 		default:
 			claimKey := fmt.Sprintf("%s:%s:%d", service.config.ModeKey, project.Key, issue.Number)
-			if activeCount >= service.config.MaxConcurrentTasks && !activeClaimKeys[claimKey] {
-				decision.Decision = DecisionRefused
-				decision.RefusalReason = RefusalConcurrencyLimit
-				break
-			}
 			claim, err := service.store.UpsertSupervisionDispatchClaim(ctx, sqlite.UpsertSupervisionDispatchClaimParams{
 				ProjectID:   project.ID,
 				Repo:        project.Repo,
@@ -128,11 +113,12 @@ func (service Service) Queue(ctx context.Context, project Project, issues []Issu
 				ClaimedBy:   supervisionServiceClaimedBy,
 			})
 			if err != nil {
+				if errors.Is(err, sqlite.ErrSupervisionDispatchClaimConflict) {
+					decision.Decision = DecisionRefused
+					decision.RefusalReason = RefusalConcurrencyLimit
+					break
+				}
 				return Report{}, err
-			}
-			if !activeClaimKeys[claimKey] {
-				activeCount++
-				activeClaimKeys[claimKey] = true
 			}
 			decision.Decision = DecisionEligible
 			decision.ClaimKey = claim.ClaimKey

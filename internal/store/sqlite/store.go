@@ -6322,6 +6322,7 @@ func mapWorktreeLeaseError(err error) error {
 
 func mapSupervisionDispatchClaimError(err error) error {
 	if strings.Contains(err.Error(), "idx_supervision_dispatch_claims_active_issue") ||
+		strings.Contains(err.Error(), "idx_supervision_dispatch_claims_one_active_global") ||
 		strings.Contains(err.Error(), "UNIQUE constraint failed: supervision_dispatch_claims.project_id, supervision_dispatch_claims.repo, supervision_dispatch_claims.issue_number") {
 		return fmt.Errorf("%w: %v", ErrSupervisionDispatchClaimConflict, err)
 	}

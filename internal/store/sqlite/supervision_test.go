@@ -163,6 +163,50 @@ func TestSupervisionDispatchClaimPreventsDuplicateActiveClaim(t *testing.T) {
 	}
 }
 
+func TestSupervisionDispatchClaimPreventsSecondGlobalActiveClaim(t *testing.T) {
+	ctx := context.Background()
+	store := openMigratedTestStore(t, "supervision-dispatch-claim-global.db")
+	defer store.Close()
+	project := createSupervisionProject(t, ctx, store)
+
+	first, err := store.UpsertSupervisionDispatchClaim(ctx, UpsertSupervisionDispatchClaimParams{
+		ProjectID:   project.ID,
+		Repo:        "marcusgoll/odin-os",
+		IssueNumber: 92,
+		ClaimKey:    "stage7:odin-os:92:a",
+		Status:      "reserved",
+		ConfigHash:  "sha256:config-a",
+		ClaimedBy:   "supervision-service",
+	})
+	if err != nil {
+		t.Fatalf("UpsertSupervisionDispatchClaim(first) error = %v", err)
+	}
+
+	_, err = store.UpsertSupervisionDispatchClaim(ctx, UpsertSupervisionDispatchClaimParams{
+		ProjectID:   project.ID,
+		Repo:        "marcusgoll/odin-os",
+		IssueNumber: 93,
+		ClaimKey:    "stage7:odin-os:93:a",
+		Status:      "reserved",
+		ConfigHash:  "sha256:config-a",
+		ClaimedBy:   "supervision-service",
+	})
+	if err == nil {
+		t.Fatalf("UpsertSupervisionDispatchClaim(second global active) error = nil, want active claim conflict")
+	}
+	if !errors.Is(err, ErrSupervisionDispatchClaimConflict) {
+		t.Fatalf("UpsertSupervisionDispatchClaim(second global active) error = %v, want ErrSupervisionDispatchClaimConflict", err)
+	}
+
+	claims, err := store.ListSupervisionDispatchClaims(ctx, ListSupervisionDispatchClaimsParams{})
+	if err != nil {
+		t.Fatalf("ListSupervisionDispatchClaims() error = %v", err)
+	}
+	if len(claims) != 1 || claims[0].ID != first.ID {
+		t.Fatalf("claims = %+v, want only first global active claim", claims)
+	}
+}
+
 func TestSupervisionDispatchClaimRetryPreservesOriginalClaimedAt(t *testing.T) {
 	ctx := context.Background()
 	store := openMigratedTestStore(t, "supervision-dispatch-claim-retry.db")
