@@ -20,6 +20,7 @@ var ErrInvalidActionApprovalBinding = errors.New("invalid action approval bindin
 var ErrInvalidActionEvidenceLink = errors.New("invalid action evidence link")
 var ErrApprovalPayloadMismatch = errors.New("approval_payload_mismatch")
 var ErrSupervisionDispatchClaimConflict = errors.New("supervision dispatch claim conflict")
+var ErrSupervisionDispatchClaimReleased = errors.New("supervision dispatch claim released")
 
 type Store struct {
 	db        *sql.DB
@@ -366,6 +367,19 @@ func (store *Store) UpsertSupervisionDispatchClaim(ctx context.Context, params U
 	var claim SupervisionDispatchClaim
 
 	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		var existingStatus sql.NullString
+		var existingReleasedAt sql.NullString
+		if err := tx.QueryRowContext(ctx, `
+			SELECT status, released_at
+			FROM supervision_dispatch_claims
+			WHERE claim_key = ?
+		`, params.ClaimKey).Scan(&existingStatus, &existingReleasedAt); err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		if existingReleasedAt.Valid || existingStatus.String == "released" {
+			return fmt.Errorf("%w: claim_key %q", ErrSupervisionDispatchClaimReleased, params.ClaimKey)
+		}
+
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO supervision_dispatch_claims (
 				project_id,

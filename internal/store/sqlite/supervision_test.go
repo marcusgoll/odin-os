@@ -254,6 +254,66 @@ func TestSupervisionDispatchClaimReleaseSetsReleasedAt(t *testing.T) {
 	}
 }
 
+func TestSupervisionDispatchClaimReleasedClaimCannotBeResurrected(t *testing.T) {
+	ctx := context.Background()
+	store := openMigratedTestStore(t, "supervision-dispatch-claim-terminal-release.db")
+	defer store.Close()
+	project := createSupervisionProject(t, ctx, store)
+
+	claim, err := store.UpsertSupervisionDispatchClaim(ctx, UpsertSupervisionDispatchClaimParams{
+		ProjectID:   project.ID,
+		Repo:        "marcusgoll/odin-os",
+		IssueNumber: 91,
+		ClaimKey:    "stage7:odin-os:91:a",
+		Status:      "reserved",
+		ConfigHash:  "sha256:config-a",
+		ClaimedBy:   "supervision-service",
+	})
+	if err != nil {
+		t.Fatalf("UpsertSupervisionDispatchClaim() error = %v", err)
+	}
+	released, err := store.ReleaseSupervisionDispatchClaim(ctx, ReleaseSupervisionDispatchClaimParams{
+		ClaimKey: claim.ClaimKey,
+		Status:   "released",
+	})
+	if err != nil {
+		t.Fatalf("ReleaseSupervisionDispatchClaim() error = %v", err)
+	}
+
+	_, err = store.UpsertSupervisionDispatchClaim(ctx, UpsertSupervisionDispatchClaimParams{
+		ProjectID:   project.ID,
+		Repo:        "marcusgoll/odin-os",
+		IssueNumber: 91,
+		ClaimKey:    "stage7:odin-os:91:a",
+		Status:      "reserved",
+		ConfigHash:  "sha256:config-b",
+		ClaimedBy:   "supervision-service",
+	})
+	if err == nil {
+		t.Fatalf("UpsertSupervisionDispatchClaim(after release) error = nil, want terminal release error")
+	}
+	if !errors.Is(err, ErrSupervisionDispatchClaimReleased) {
+		t.Fatalf("UpsertSupervisionDispatchClaim(after release) error = %v, want ErrSupervisionDispatchClaimReleased", err)
+	}
+
+	claims, err := store.ListSupervisionDispatchClaims(ctx, ListSupervisionDispatchClaimsParams{
+		ProjectID: &project.ID,
+		Repo:      "marcusgoll/odin-os",
+	})
+	if err != nil {
+		t.Fatalf("ListSupervisionDispatchClaims() error = %v", err)
+	}
+	if len(claims) != 1 {
+		t.Fatalf("ListSupervisionDispatchClaims() len = %d, want 1", len(claims))
+	}
+	if claims[0].Status != "released" || claims[0].ReleasedAt == nil {
+		t.Fatalf("claim after rejected resurrection = %+v, want released terminal claim", claims[0])
+	}
+	if !claims[0].ReleasedAt.Equal(*released.ReleasedAt) {
+		t.Fatalf("claim ReleasedAt = %v, want original release time %v", claims[0].ReleasedAt, released.ReleasedAt)
+	}
+}
+
 func TestSupervisionRecoveryObservationRecordsBlockedRestart(t *testing.T) {
 	ctx := context.Background()
 	store := openMigratedTestStore(t, "supervision-recovery-observation.db")
