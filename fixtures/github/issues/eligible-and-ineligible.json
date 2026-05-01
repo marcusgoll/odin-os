@@ -1,0 +1,34 @@
+[
+  {
+    "number": 101,
+    "title": "Add fixture-backed E2E command",
+    "body": "Eligible local E2E issue.",
+    "url": "https://github.example/acme/alpha/issues/101",
+    "state": "open",
+    "labels": ["odin:ready", "agent:go-orchestrator"]
+  },
+  {
+    "number": 102,
+    "title": "Paused local E2E issue",
+    "body": "Paused issues must not be picked up.",
+    "url": "https://github.example/acme/alpha/issues/102",
+    "state": "open",
+    "labels": ["odin:ready", "odin:paused"]
+  },
+  {
+    "number": 103,
+    "title": "Blocked local E2E issue",
+    "body": "Blocked issues must not be picked up.",
+    "url": "https://github.example/acme/alpha/issues/103",
+    "state": "open",
+    "labels": ["odin:ready", "odin:blocked"]
+  },
+  {
+    "number": 104,
+    "title": "Unready local E2E issue",
+    "body": "Missing odin:ready.",
+    "url": "https://github.example/acme/alpha/issues/104",
+    "state": "open",
+    "labels": ["agent:go-orchestrator"]
+  }
+]
