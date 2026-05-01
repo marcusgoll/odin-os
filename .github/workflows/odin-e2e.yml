@@ -2,9 +2,9 @@ name: Odin E2E
 
 on:
   pull_request:
-    branches: [main]
+    branches: [main, codex/**]
   push:
-    branches: [main]
+    branches: [main, codex/**, odin/**]
 
 jobs:
   odin-e2e:
