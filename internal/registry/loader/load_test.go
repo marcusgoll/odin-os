@@ -110,6 +110,7 @@ func TestLoadDirLoadsUniversalIntakeAgents(t *testing.T) {
 		"spec-task-builder-agent",
 		"review-agent",
 		"chief-of-staff-agent",
+		"system-memory-curator-agent",
 	}
 	for _, key := range wantAgents {
 		item, ok := snapshot.ByKey[key]
@@ -238,6 +239,41 @@ func TestLoadDirLoadsUniversalIntakeAgents(t *testing.T) {
 	for _, required := range requiredRouterContract {
 		if !strings.Contains(routerContract, required) {
 			t.Fatalf("router agent body missing %q", required)
+		}
+	}
+
+	memoryCurator := snapshot.ByKey["system-memory-curator-agent"]
+	memoryCuratorContract := strings.Join([]string{
+		memoryCurator.Sections[registry.SectionPurpose],
+		memoryCurator.Sections[registry.SectionWhenToUse],
+		memoryCurator.Sections[registry.SectionInputs],
+		memoryCurator.Sections[registry.SectionProcedure],
+		memoryCurator.Sections[registry.SectionOutputs],
+		memoryCurator.Sections[registry.SectionConstraints],
+		memoryCurator.Sections[registry.SectionSuccessCriteria],
+	}, "\n")
+	requiredMemoryCuratorContract := []string{
+		"completed interaction",
+		"long-term memory",
+		"project memory",
+		"personal preference memory",
+		"archived reference",
+		"useful, stable, and likely to improve future decisions",
+		"temporary moods",
+		"one-off details",
+		"sensitive information unless explicitly approved",
+		"unverified facts",
+		"guesses",
+		"irrelevant chatter",
+		"save_to_memory: yes/no",
+		"memory_type",
+		"exact memory text",
+		"expiration or review date",
+		"reason",
+	}
+	for _, required := range requiredMemoryCuratorContract {
+		if !strings.Contains(memoryCuratorContract, required) {
+			t.Fatalf("system memory curator agent body missing %q", required)
 		}
 	}
 }
