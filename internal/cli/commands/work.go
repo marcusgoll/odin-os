@@ -225,13 +225,16 @@ type workSuperviseE2EIssueReport struct {
 }
 
 type workSuperviseE2EArtifactRefs struct {
-	PreparedIssue string `json:"prepared_issue,omitempty"`
-	QueueReport   string `json:"queue_report,omitempty"`
-	FinalReport   string `json:"final_report,omitempty"`
-	WorkerPrompt  string `json:"worker_prompt,omitempty"`
-	WorkerCommand string `json:"worker_command,omitempty"`
-	WorkerOutput  string `json:"worker_output,omitempty"`
-	DiffSummary   string `json:"diff_summary,omitempty"`
+	PreparedIssue  string `json:"prepared_issue,omitempty"`
+	QueueReport    string `json:"queue_report,omitempty"`
+	FinalReport    string `json:"final_report,omitempty"`
+	WorkerPrompt   string `json:"worker_prompt,omitempty"`
+	WorkerCommand  string `json:"worker_command,omitempty"`
+	WorkerOutput   string `json:"worker_output,omitempty"`
+	DiffSummary    string `json:"diff_summary,omitempty"`
+	PRReport       string `json:"pr_report,omitempty"`
+	CIReport       string `json:"ci_report,omitempty"`
+	ReviewEvidence string `json:"review_evidence,omitempty"`
 }
 
 type workSuperviseE2EWorktree struct {
@@ -649,12 +652,15 @@ func prepareSupervisedE2ERunOnceArtifactTargets(runID string) (string, string, s
 
 func supervisedE2ERunOnceArtifactRefs(runDir string, queueReportPath string, finalReportPath string) workSuperviseE2EArtifactRefs {
 	return workSuperviseE2EArtifactRefs{
-		QueueReport:   queueReportPath,
-		FinalReport:   finalReportPath,
-		WorkerPrompt:  filepath.Join(runDir, "worker-prompt.md"),
-		WorkerCommand: filepath.Join(runDir, "worker-command.json"),
-		WorkerOutput:  filepath.Join(runDir, "worker-output.txt"),
-		DiffSummary:   filepath.Join(runDir, "diff-summary.md"),
+		QueueReport:    queueReportPath,
+		FinalReport:    finalReportPath,
+		WorkerPrompt:   filepath.Join(runDir, "worker-prompt.md"),
+		WorkerCommand:  filepath.Join(runDir, "worker-command.json"),
+		WorkerOutput:   filepath.Join(runDir, "worker-output.txt"),
+		DiffSummary:    filepath.Join(runDir, "diff-summary.md"),
+		PRReport:       filepath.Join(runDir, "pr-report.json"),
+		CIReport:       filepath.Join(runDir, "ci-report.json"),
+		ReviewEvidence: filepath.Join(runDir, "review-evidence.json"),
 	}
 }
 
@@ -970,6 +976,9 @@ func completeSupervisedE2EReviewHandoff(ctx context.Context, manifest projects.M
 	report.Deployment = supervision.SideEffectNotStarted
 	report.Dispatch = supervision.SideEffectNotStarted
 	report.HumanMergeRequired = true
+	if err := writeSupervisedE2EHandoffArtifacts(report); err != nil {
+		return report, redactWorkSuperviseE2EError(err)
+	}
 	if err := writeRedactedJSONArtifact(report.Artifacts.FinalReport, report); err != nil {
 		return report, redactWorkSuperviseE2EError(err)
 	}
@@ -989,10 +998,32 @@ func supervisedE2EReviewHandoffFail(report workSuperviseE2EReport, err error) er
 	report.Deployment = supervision.SideEffectNotStarted
 	report.Dispatch = supervision.SideEffectNotStarted
 	report.HumanMergeRequired = true
+	if writeErr := writeSupervisedE2EHandoffArtifacts(report); writeErr != nil {
+		return redactWorkSuperviseE2EError(writeErr)
+	}
 	if writeErr := writeRedactedJSONArtifact(report.Artifacts.FinalReport, report); writeErr != nil {
 		return redactWorkSuperviseE2EError(writeErr)
 	}
 	return redactWorkSuperviseE2EError(err)
+}
+
+func writeSupervisedE2EHandoffArtifacts(report workSuperviseE2EReport) error {
+	if strings.TrimSpace(report.Artifacts.PRReport) != "" {
+		if err := writeRedactedJSONArtifact(report.Artifacts.PRReport, report.PR); err != nil {
+			return err
+		}
+	}
+	if strings.TrimSpace(report.Artifacts.CIReport) != "" {
+		if err := writeRedactedJSONArtifact(report.Artifacts.CIReport, report.CI); err != nil {
+			return err
+		}
+	}
+	if strings.TrimSpace(report.Artifacts.ReviewEvidence) != "" {
+		if err := writeRedactedJSONArtifact(report.Artifacts.ReviewEvidence, report.EvidenceComments); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func defaultRunSupervisedE2EWorker(ctx context.Context, request supervisedE2EWorkerRequest) (supervisedE2EWorkerResult, error) {

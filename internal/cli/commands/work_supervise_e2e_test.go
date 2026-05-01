@@ -1066,7 +1066,7 @@ func TestRunWorkSuperviseE2ERunOnceWorkerEditsOnlyPlannedPath(t *testing.T) {
 		t.Fatalf("deployment audit = %+v, want no deployment workflow", report.DeploymentAudit)
 	}
 	runDir := filepath.Join(odinRoot, "runs", "supervised-e2e", report.RunID)
-	for _, name := range []string{"worker-prompt.md", "worker-command.json", "worker-output.txt", "diff-summary.md", "queue-report.json", "final-report.json"} {
+	for _, name := range []string{"worker-prompt.md", "worker-command.json", "worker-output.txt", "diff-summary.md", "queue-report.json", "pr-report.json", "ci-report.json", "review-evidence.json", "final-report.json"} {
 		if _, err := os.Stat(filepath.Join(runDir, name)); err != nil {
 			t.Fatalf("expected artifact %s: %v", name, err)
 		}
@@ -1076,6 +1076,9 @@ func TestRunWorkSuperviseE2ERunOnceWorkerEditsOnlyPlannedPath(t *testing.T) {
 	assertFileContains(t, filepath.Join(runDir, "final-report.json"), `"codex_execution": "completed"`)
 	assertFileContains(t, filepath.Join(runDir, "final-report.json"), `"phase": "review_handoff"`)
 	assertFileContains(t, filepath.Join(runDir, "final-report.json"), `"human_merge_required": true`)
+	assertFileContains(t, filepath.Join(runDir, "pr-report.json"), `"draft": true`)
+	assertFileContains(t, filepath.Join(runDir, "ci-report.json"), `"conclusion": "success"`)
+	assertFileContains(t, filepath.Join(runDir, "review-evidence.json"), `odin-stage7-supervised-e2e-review-evidence`)
 	assertFileNotContains(t, filepath.Join(runDir, "final-report.json"), "github_pat_1234567890abcdefghijklmnopqrstuvwxyz")
 	assertNoForbiddenSuperviseE2EGitHubMutations(t, requests)
 }
