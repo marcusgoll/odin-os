@@ -297,6 +297,9 @@ func TestSupervisionDispatchClaimRetryPreservesActiveStatus(t *testing.T) {
 	if retried.Status != "active" {
 		t.Fatalf("retried.Status = %q, want active claim preserved", retried.Status)
 	}
+	if retried.ConfigHash != first.ConfigHash || retried.ClaimedBy != first.ClaimedBy || !retried.UpdatedAt.Equal(first.UpdatedAt) {
+		t.Fatalf("retried active claim = %+v, want active claim metadata preserved from %+v", retried, first)
+	}
 }
 
 func TestSupervisionDispatchClaimReleaseSetsReleasedAt(t *testing.T) {

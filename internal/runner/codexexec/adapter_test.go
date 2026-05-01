@@ -130,6 +130,36 @@ func TestBuildCommandUsesExplicitCodexExecArgs(t *testing.T) {
 	}
 }
 
+func TestBuildCommandSanitizesSensitiveTokenEnv(t *testing.T) {
+	t.Setenv("GITHUB_TOKEN", "ghp_secret")
+	t.Setenv("GH_TOKEN", "gh_secret")
+	t.Setenv("API_TOKEN", "api_secret")
+	t.Setenv("ODIN_TRADEBOARD_API_TOKEN", "tradeboard_secret")
+	t.Setenv("CODEX_SAFE_ENV", "preserved")
+
+	command, err := BuildCommand(Config{
+		Command:     "codex",
+		SandboxMode: "workspace-write",
+	}, runner.Request{
+		WorkItemID: "work-789",
+		Role:       "builder",
+		Worktree:   "/tmp/odin/worktrees/work-789",
+		Prompt:     "implement issue",
+	})
+	if err != nil {
+		t.Fatalf("BuildCommand() error = %v", err)
+	}
+
+	for _, key := range []string{"GITHUB_TOKEN", "GH_TOKEN", "API_TOKEN", "ODIN_TRADEBOARD_API_TOKEN"} {
+		if envContainsKey(command.Env, key) {
+			t.Fatalf("Command.Env contains %s, want token env stripped", key)
+		}
+	}
+	if !envContains(command.Env, "CODEX_SAFE_ENV=preserved") {
+		t.Fatalf("Command.Env missing preserved non-token env")
+	}
+}
+
 func TestRunDryRunReturnsRedactedCommandWithoutExecuting(t *testing.T) {
 	t.Parallel()
 
@@ -309,4 +339,23 @@ func contains(value string, substring string) bool {
 		}
 	}
 	return substring == ""
+}
+
+func envContains(env []string, want string) bool {
+	for _, entry := range env {
+		if entry == want {
+			return true
+		}
+	}
+	return false
+}
+
+func envContainsKey(env []string, key string) bool {
+	prefix := key + "="
+	for _, entry := range env {
+		if len(entry) >= len(prefix) && entry[:len(prefix)] == prefix {
+			return true
+		}
+	}
+	return false
 }

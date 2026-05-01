@@ -415,17 +415,19 @@ func (store *Store) UpsertSupervisionDispatchClaim(ctx context.Context, params U
 			if existingReleasedAt.Valid || existingStatus.String == "released" {
 				return fmt.Errorf("%w: claim_key %q", ErrSupervisionDispatchClaimReleased, params.ClaimKey)
 			}
-			if _, err := tx.ExecContext(ctx, `
-				UPDATE supervision_dispatch_claims
-				SET config_hash = ?, claimed_by = ?, updated_at = ?
-				WHERE claim_key = ?
-			`,
-				params.ConfigHash,
-				params.ClaimedBy,
-				formatTime(now),
-				params.ClaimKey,
-			); err != nil {
-				return mapSupervisionDispatchClaimError(err)
+			if existingStatus.String != "active" {
+				if _, err := tx.ExecContext(ctx, `
+					UPDATE supervision_dispatch_claims
+					SET config_hash = ?, claimed_by = ?, updated_at = ?
+					WHERE claim_key = ?
+				`,
+					params.ConfigHash,
+					params.ClaimedBy,
+					formatTime(now),
+					params.ClaimKey,
+				); err != nil {
+					return mapSupervisionDispatchClaimError(err)
+				}
 			}
 		}
 

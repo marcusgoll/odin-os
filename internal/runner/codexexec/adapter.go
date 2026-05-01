@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -32,6 +33,7 @@ type Command struct {
 	Path    string
 	Args    []string
 	Dir     string
+	Env     []string
 	Timeout time.Duration
 }
 
@@ -143,9 +145,35 @@ func BuildCommand(config Config, request runner.Request) (Command, error) {
 			"--sandbox", sandboxMode,
 			request.Prompt,
 		},
+		Env:     sanitizedCommandEnv(os.Environ()),
 		Dir:     request.Worktree,
 		Timeout: timeout,
 	}, nil
+}
+
+func sanitizedCommandEnv(env []string) []string {
+	if len(env) == 0 {
+		return nil
+	}
+	blocked := map[string]struct{}{
+		"GITHUB_TOKEN":              {},
+		"GH_TOKEN":                  {},
+		"API_TOKEN":                 {},
+		"ODIN_TRADEBOARD_API_TOKEN": {},
+	}
+	sanitized := make([]string, 0, len(env))
+	for _, entry := range env {
+		key, _, ok := strings.Cut(entry, "=")
+		if !ok {
+			sanitized = append(sanitized, entry)
+			continue
+		}
+		if _, blocked := blocked[key]; blocked {
+			continue
+		}
+		sanitized = append(sanitized, entry)
+	}
+	return sanitized
 }
 
 func RedactCommand(command Command, secrets []string) string {
@@ -211,6 +239,7 @@ func (osCommandExecutor) Run(ctx context.Context, command Command) (string, erro
 
 	cmd := exec.CommandContext(runCtx, command.Path, command.Args...)
 	cmd.Dir = command.Dir
+	cmd.Env = command.Env
 	output, err := cmd.CombinedOutput()
 	if errors.Is(runCtx.Err(), context.DeadlineExceeded) {
 		return string(output), fmt.Errorf("codex exec timed out after %s: %w", command.Timeout, runCtx.Err())
