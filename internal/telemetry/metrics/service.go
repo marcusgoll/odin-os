@@ -235,6 +235,11 @@ func (service Service) Collect(ctx context.Context) (Snapshot, error) {
 		}
 	}
 
+	staleExecutorTelemetry, err := service.executorTelemetryStaleCount(ctx, config, now)
+	if err != nil {
+		return Snapshot{}, err
+	}
+
 	var staleSources int
 	if err := service.DB.QueryRowContext(ctx, `
 		SELECT COUNT(*)
@@ -299,7 +304,7 @@ func (service Service) Collect(ctx context.Context) (Snapshot, error) {
 		MediaOpenIncidents: mediaOpenIncidents,
 		MediaCandidates:    mediaCandidates,
 	}
-	snapshot.OS = deriveOSSnapshot(snapshot, executorSamples == 0 || sourceSamples == 0 || projectionSamples == 0, countActiveIncidents(incidents))
+	snapshot.OS = deriveOSSnapshot(snapshot, executorSamples == 0 || sourceSamples == 0 || projectionSamples == 0 || staleExecutorTelemetry > 0, countActiveIncidents(incidents))
 	return snapshot, nil
 }
 
@@ -350,8 +355,54 @@ func (service Service) telemetrySampleCounts(ctx context.Context) (int, int, int
 	return executorSamples, sourceSamples, projectionSamples, nil
 }
 
+func (service Service) executorTelemetryStaleCount(ctx context.Context, config Config, now time.Time) (int, error) {
+	if service.ExecutorKeys != nil && len(service.ExecutorKeys) == 0 {
+		return 0, nil
+	}
+
+	query := `
+		SELECT COUNT(*)
+		FROM (
+			SELECT eh.checked_at
+			FROM executor_health eh
+			JOIN (
+				SELECT executor, MAX(id) AS max_id
+				FROM executor_health
+				GROUP BY executor
+			) latest ON latest.max_id = eh.id
+		)
+	`
+	args := []any{}
+	if service.ExecutorKeys != nil {
+		query = `
+			SELECT COUNT(*)
+			FROM (
+				SELECT eh.checked_at
+				FROM executor_health eh
+				JOIN (
+					SELECT executor, MAX(id) AS max_id
+					FROM executor_health
+					GROUP BY executor
+				) latest ON latest.max_id = eh.id
+				WHERE eh.executor IN (` + placeholders(len(service.ExecutorKeys)) + `)
+			)
+		`
+		for _, key := range service.ExecutorKeys {
+			args = append(args, key)
+		}
+	}
+	query += ` WHERE checked_at < ?`
+	args = append(args, formatSQLiteTime(now.Add(-config.ExecutorFreshnessTTL)))
+
+	var count int
+	if err := service.DB.QueryRowContext(ctx, query, args...).Scan(&count); err != nil {
+		return 0, err
+	}
+	return count, nil
+}
+
 func deriveOSSnapshot(snapshot Snapshot, telemetryMissing bool, activeIncidents int) OSSnapshot {
-	telemetryStale := telemetryMissing || snapshot.StaleExecutors > 0 || snapshot.StaleSources > 0 || snapshot.StaleProjections > 0
+	telemetryStale := telemetryMissing || snapshot.StaleSources > 0 || snapshot.StaleProjections > 0
 	degraded := activeIncidents > 0 || snapshot.ActiveRecoveries > 0
 
 	osSnapshot := OSSnapshot{

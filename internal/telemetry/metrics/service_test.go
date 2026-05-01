@@ -571,6 +571,56 @@ func TestServiceCollectSetsHealthyOdinOSDefaults(t *testing.T) {
 	}
 }
 
+func TestServiceCollectDoesNotTreatFreshOptionalUnavailableExecutorsAsStaleOdinOSTelemetry(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	now := time.Now().UTC()
+	store, err := sqlite.Open(filepath.Join(t.TempDir(), "odin.db"))
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer store.Close()
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
+	}
+	seedFreshTelemetry(t, ctx, store, now)
+	if _, err := store.RecordExecutorHealth(ctx, sqlite.RecordExecutorHealthParams{
+		Executor:    "optional_api",
+		Status:      "unknown",
+		LatencyMS:   0,
+		DetailsJSON: `{"required":false}`,
+	}); err != nil {
+		t.Fatalf("RecordExecutorHealth(optional) error = %v", err)
+	}
+	if _, err := store.DB().ExecContext(ctx, `
+		UPDATE executor_health
+		SET checked_at = ?
+		WHERE executor = 'optional_api'
+	`, now.Format(time.RFC3339Nano)); err != nil {
+		t.Fatalf("force fresh optional executor health error = %v", err)
+	}
+
+	snapshot, err := Service{
+		DB: store.DB(),
+		Config: Config{
+			ExecutorFreshnessTTL:   30 * time.Minute,
+			ProjectionFreshnessTTL: 30 * time.Minute,
+			SourceFreshnessTTL:     30 * time.Minute,
+		},
+		Now: func() time.Time { return now },
+	}.Collect(ctx)
+	if err != nil {
+		t.Fatalf("Collect() error = %v", err)
+	}
+	if snapshot.StaleExecutors != 1 {
+		t.Fatalf("compatibility stale executor count = %d, want 1 for non-healthy optional executor", snapshot.StaleExecutors)
+	}
+	if snapshot.OS.TelemetryStale || snapshot.OS.Status != "healthy" || snapshot.OS.HealthScore != 100 {
+		t.Fatalf("OS snapshot = %+v, want healthy telemetry despite fresh optional unavailable executor", snapshot.OS)
+	}
+}
+
 func assertMetricLine(t *testing.T, exported string, want string) {
 	t.Helper()
 
