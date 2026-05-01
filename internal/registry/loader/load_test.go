@@ -252,6 +252,37 @@ func TestLoadDirLoadsUniversalIntakeAgents(t *testing.T) {
 		}
 	}
 
+	deduper := snapshot.ByKey["deduper-agent"]
+	deduperContract := strings.Join([]string{
+		deduper.Title,
+		deduper.Summary,
+		deduper.Sections[registry.SectionPurpose],
+		deduper.Sections[registry.SectionWhenToUse],
+		deduper.Sections[registry.SectionInputs],
+		deduper.Sections[registry.SectionProcedure],
+		deduper.Sections[registry.SectionOutputs],
+		deduper.Sections[registry.SectionConstraints],
+		deduper.Sections[registry.SectionSuccessCriteria],
+	}, "\n")
+	requiredDeduperContract := []string{
+		"Duplicate Detector",
+		"{{raw_input}}",
+		"{{knowledge_base_context}}",
+		"existing tasks, projects, notes, and tickets",
+		"duplicate_found: yes/no",
+		"likely matching item",
+		"confidence score",
+		"whether to merge, update, link, or create new",
+		"suggested merged title",
+		"suggested merged summary",
+		"details unique to the new item",
+	}
+	for _, required := range requiredDeduperContract {
+		if !strings.Contains(deduperContract, required) {
+			t.Fatalf("deduper agent body missing %q", required)
+		}
+	}
+
 	priority := snapshot.ByKey["priority-agent"]
 	priorityContract := strings.Join([]string{
 		priority.Title,
