@@ -31,6 +31,7 @@ import (
 	cliscope "odin-os/internal/cli/scope"
 	scope "odin-os/internal/cli/scope"
 	clistate "odin-os/internal/cli/state"
+	"odin-os/internal/cli/tui"
 	"odin-os/internal/core/capabilities"
 	"odin-os/internal/core/companions"
 	"odin-os/internal/core/followups"
@@ -63,7 +64,7 @@ import (
 
 var errRuntimeNotReady = errors.New("runtime not ready")
 
-const rootUsageBanner = "Usage: odin <command> [args]\n\nCommands: help repl overview doctor healthcheck serve backup restore verify-backup status legacy project workspace work scope jobs runs approvals intake agenda logs task initiative companion profile followup trigger transition skills"
+const rootUsageBanner = "Usage: odin <command> [args]\n\nCommands: help repl overview tui doctor healthcheck serve backup restore verify-backup status legacy project workspace work scope jobs runs approvals intake agenda logs task initiative companion profile followup trigger transition skills"
 
 var (
 	serveTaskLoopInterval     = 1 * time.Second
@@ -74,6 +75,7 @@ var (
 	serveOperationTimeout     = 30 * time.Second
 	serveHealthConfig         = healthsvc.DefaultConfig()
 	serveListen               = net.Listen
+	runTUI                    = tui.Run
 )
 
 type serveLoopConfig struct {
@@ -236,6 +238,8 @@ func Run(ctx context.Context, root string, args []string, stdin io.Reader, stdou
 		return runRepl(ctx, app, stdin, stdout, now)
 	case "overview":
 		return runOverview(ctx, app, args[1:], stdout)
+	case "tui":
+		return runTUI(ctx, args[1:], stdout)
 	case "status":
 		return runStatus(ctx, app, cfg, args[1:], stdout)
 	case "legacy":
