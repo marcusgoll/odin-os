@@ -256,6 +256,49 @@ func TestSupervisionDispatchClaimRetryPreservesOriginalClaimedAt(t *testing.T) {
 	}
 }
 
+func TestSupervisionDispatchClaimRetryPreservesActiveStatus(t *testing.T) {
+	ctx := context.Background()
+	store := openMigratedTestStore(t, "supervision-dispatch-claim-active-retry.db")
+	defer store.Close()
+	project := createSupervisionProject(t, ctx, store)
+
+	first, err := store.UpsertSupervisionDispatchClaim(ctx, UpsertSupervisionDispatchClaimParams{
+		ProjectID:   project.ID,
+		Repo:        "marcusgoll/odin-os",
+		IssueNumber: 90,
+		ClaimKey:    "stage7:odin-os:90:a",
+		Status:      "active",
+		ConfigHash:  "sha256:config-a",
+		ClaimedBy:   "supervision-service",
+	})
+	if err != nil {
+		t.Fatalf("UpsertSupervisionDispatchClaim(first active) error = %v", err)
+	}
+
+	retried, err := store.UpsertSupervisionDispatchClaim(ctx, UpsertSupervisionDispatchClaimParams{
+		ProjectID:   project.ID,
+		Repo:        "marcusgoll/odin-os",
+		IssueNumber: 90,
+		ClaimKey:    "stage7:odin-os:90:a",
+		Status:      "reserved",
+		ConfigHash:  "sha256:config-b",
+		ClaimedBy:   "supervision-service",
+	})
+	if err != nil {
+		t.Fatalf("UpsertSupervisionDispatchClaim(retry reserved) error = %v", err)
+	}
+
+	if retried.ID != first.ID {
+		t.Fatalf("retried.ID = %d, want same active claim ID %d", retried.ID, first.ID)
+	}
+	if !first.Created || retried.Created {
+		t.Fatalf("claim Created flags = first %t retried %t, want true then false", first.Created, retried.Created)
+	}
+	if retried.Status != "active" {
+		t.Fatalf("retried.Status = %q, want active claim preserved", retried.Status)
+	}
+}
+
 func TestSupervisionDispatchClaimReleaseSetsReleasedAt(t *testing.T) {
 	ctx := context.Background()
 	store := openMigratedTestStore(t, "supervision-dispatch-claim-release.db")

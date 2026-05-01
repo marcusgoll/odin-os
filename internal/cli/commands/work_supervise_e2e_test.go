@@ -783,6 +783,89 @@ func TestRunWorkSuperviseE2ERunOnceDuplicateActiveClaimPreservesExistingClaim(t 
 	assertNoSuperviseSideEffects(t, ctx, store)
 }
 
+func TestRunWorkSuperviseE2ERunOncePreservesPreexistingActiveClaim(t *testing.T) {
+	ctx := context.Background()
+	store := openWorkCommandStore(t)
+	defer store.Close()
+	odinRoot := t.TempDir()
+	repoRoot := initWorkerDryRunGitRepo(t)
+	t.Setenv("ODIN_ROOT", odinRoot)
+
+	projectRegistry := superviseE2EProjectRegistry(t, repoRoot)
+	manifest, ok := projectRegistry.Lookup("alpha")
+	if !ok {
+		t.Fatalf("Lookup(alpha) = false")
+	}
+	project, err := ensureWorkSuperviseProject(ctx, store, manifest)
+	if err != nil {
+		t.Fatalf("ensureWorkSuperviseProject() error = %v", err)
+	}
+	if _, err := store.UpsertSupervisionDispatchClaim(ctx, sqlite.UpsertSupervisionDispatchClaimParams{
+		ProjectID:   project.ID,
+		Repo:        "acme/alpha",
+		IssueNumber: 47,
+		ClaimKey:    supervision.ModeKeyStage7SupervisedAgency + ":alpha:47",
+		Status:      supervision.ClaimStatusActive,
+		ConfigHash:  "sha256:active",
+		ClaimedBy:   "supervision-service",
+	}); err != nil {
+		t.Fatalf("UpsertSupervisionDispatchClaim(active) error = %v", err)
+	}
+
+	plannedPath := "docs/operations/stage-7-active-claim.md"
+	fake := &superviseE2EFakeTracker{
+		issue: tracker.Issue{
+			Provider: "github",
+			Repo:     "acme/alpha",
+			Number:   47,
+			Title:    "Active exact issue",
+			Body:     "Planned scope: " + plannedPath,
+			URL:      "https://github.example/acme/alpha/issues/47",
+			State:    "open",
+			Labels:   []string{"odin:ready", "safety:low-risk"},
+		},
+	}
+	installSuperviseE2EFakeTracker(t, fake)
+	workerCalls := 0
+	installSuperviseE2EFakeWorker(t, func(context.Context, supervisedE2EWorkerRequest) (supervisedE2EWorkerResult, error) {
+		workerCalls++
+		return supervisedE2EWorkerResult{}, fmt.Errorf("worker should not launch for preexisting active claim")
+	})
+
+	_ = runWorkSuperviseJSON(t, ctx, store, []string{"supervise", "start", "--json"})
+	var output strings.Builder
+	err = RunWork(ctx, store, projectRegistry, registry.Snapshot{}, []string{
+		"supervise", "e2e", "run-once", "--project", "alpha", "--issue", "47", "--json",
+	}, &output)
+	if err == nil {
+		t.Fatalf("RunWork(supervise e2e run-once) error = nil, want existing active claim refusal\noutput:\n%s", output.String())
+	}
+	if !strings.Contains(err.Error(), "preserved existing claim before worker behavior") {
+		t.Fatalf("error = %q, want existing-claim refusal before worker", err.Error())
+	}
+	if workerCalls != 0 {
+		t.Fatalf("worker calls = %d, want no launch for preexisting active claim", workerCalls)
+	}
+
+	runID := newestSuperviseE2ERunID(t, odinRoot)
+	finalReportPath := filepath.Join(odinRoot, "runs", "supervised-e2e", runID, "final-report.json")
+	assertFileContains(t, finalReportPath, `"status": "claim_exists"`)
+	assertFileContains(t, finalReportPath, `"codex_execution": "not_started"`)
+	assertFileContains(t, finalReportPath, `"status": "active"`)
+
+	claims, err := store.ListSupervisionDispatchClaims(ctx, sqlite.ListSupervisionDispatchClaimsParams{
+		ProjectID: &project.ID,
+		Repo:      "acme/alpha",
+	})
+	if err != nil {
+		t.Fatalf("ListSupervisionDispatchClaims() error = %v", err)
+	}
+	if len(claims) != 1 || claims[0].Status != supervision.ClaimStatusActive {
+		t.Fatalf("persisted claims = %+v, want one active claim preserved", claims)
+	}
+	assertNoSuperviseSideEffects(t, ctx, store)
+}
+
 func TestRunWorkSuperviseE2ERunOnceWorkerEditsOnlyPlannedPath(t *testing.T) {
 	ctx := context.Background()
 	store := openWorkCommandStore(t)
@@ -1021,6 +1104,129 @@ func TestRunWorkSuperviseE2ERunOnceWorkerSetupFailureRewritesFinalReport(t *test
 	assertFileContains(t, finalReportPath, `"phase": "worker_setup"`)
 	assertFileContains(t, finalReportPath, `"codex_execution": "not_started"`)
 	assertFileContains(t, finalReportPath, `"prs": "not_created"`)
+}
+
+func TestRunSupervisedE2EWorkerArtifactWriteFailuresRewriteFinalReport(t *testing.T) {
+	tests := []struct {
+		name           string
+		brokenArtifact string
+		wantPhase      string
+		wantExecution  string
+		wantWorkerCall bool
+	}{
+		{
+			name:           "worker prompt",
+			brokenArtifact: "worker_prompt",
+			wantPhase:      "worker_command",
+			wantExecution:  supervision.SideEffectNotStarted,
+			wantWorkerCall: false,
+		},
+		{
+			name:           "worker output",
+			brokenArtifact: "worker_output",
+			wantPhase:      "worker_execution",
+			wantExecution:  "attempted",
+			wantWorkerCall: true,
+		},
+		{
+			name:           "diff summary",
+			brokenArtifact: "diff_summary",
+			wantPhase:      "diff_audit",
+			wantExecution:  "attempted",
+			wantWorkerCall: true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			repoRoot := initWorkerDryRunGitRepo(t)
+			t.Setenv("ODIN_WORKTREE_ROOT", filepath.Join(t.TempDir(), "worktrees"))
+
+			plannedPath := "docs/operations/stage-7-artifact-failure.md"
+			artifactDir := t.TempDir()
+			brokenPath := filepath.Join(artifactDir, "broken-artifact")
+			if err := os.Mkdir(brokenPath, 0o755); err != nil {
+				t.Fatalf("Mkdir(broken artifact) error = %v", err)
+			}
+			artifacts := workSuperviseE2EArtifactRefs{
+				QueueReport:   filepath.Join(artifactDir, "queue-report.json"),
+				FinalReport:   filepath.Join(artifactDir, "final-report.json"),
+				WorkerPrompt:  filepath.Join(artifactDir, "worker-prompt.md"),
+				WorkerCommand: filepath.Join(artifactDir, "worker-command.json"),
+				WorkerOutput:  filepath.Join(artifactDir, "worker-output.txt"),
+				DiffSummary:   filepath.Join(artifactDir, "diff-summary.md"),
+			}
+			switch test.brokenArtifact {
+			case "worker_prompt":
+				artifacts.WorkerPrompt = brokenPath
+			case "worker_output":
+				artifacts.WorkerOutput = brokenPath
+			case "diff_summary":
+				artifacts.DiffSummary = brokenPath
+			}
+
+			workerCalls := 0
+			installSuperviseE2EFakeWorker(t, func(_ context.Context, request supervisedE2EWorkerRequest) (supervisedE2EWorkerResult, error) {
+				workerCalls++
+				path := filepath.Join(request.WorktreePath, filepath.FromSlash(plannedPath))
+				if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+					t.Fatalf("MkdirAll(planned dir) error = %v", err)
+				}
+				if err := os.WriteFile(path, []byte("# Stage 7 artifact failure\n"), 0o644); err != nil {
+					t.Fatalf("WriteFile(planned path) error = %v", err)
+				}
+				return supervisedE2EWorkerResult{Output: "worker complete"}, nil
+			})
+
+			report := workSuperviseE2EReport{
+				Mode:           "supervised_e2e",
+				Phase:          "queued",
+				Status:         "claimed",
+				Project:        "alpha",
+				Repo:           "acme/alpha",
+				RunID:          "artifact-failure",
+				CodexExecution: supervision.SideEffectNotStarted,
+				PRs:            supervision.SideEffectNotCreated,
+				Merge:          supervision.SideEffectNotMerged,
+				Deployment:     supervision.SideEffectNotStarted,
+				Artifacts:      artifacts,
+			}
+			issue := supervision.Issue{
+				Provider:     "github",
+				Repo:         "acme/alpha",
+				Number:       57,
+				Title:        "Artifact write failure",
+				Body:         "Planned scope: " + plannedPath,
+				URL:          "https://github.example/acme/alpha/issues/57",
+				State:        "open",
+				Labels:       []string{"odin:ready", "safety:low-risk"},
+				ChangedPaths: []string{plannedPath},
+			}
+			manifest := projects.Manifest{
+				Key:           "alpha",
+				Name:          "Alpha",
+				GitRoot:       repoRoot,
+				DefaultBranch: "main",
+				GitHub:        projects.GitHub{Repo: "acme/alpha"},
+			}
+
+			_, err := runSupervisedE2EWorkerAndAudit(ctx, manifest, issue, report, artifacts)
+			if err == nil {
+				t.Fatalf("runSupervisedE2EWorkerAndAudit() error = nil, want fail-closed artifact write error")
+			}
+			if test.wantWorkerCall && workerCalls != 1 {
+				t.Fatalf("worker calls = %d, want one launch before artifact failure", workerCalls)
+			}
+			if !test.wantWorkerCall && workerCalls != 0 {
+				t.Fatalf("worker calls = %d, want no launch before artifact failure", workerCalls)
+			}
+			assertFileContains(t, artifacts.FinalReport, `"status": "failed_closed"`)
+			assertFileContains(t, artifacts.FinalReport, `"phase": "`+test.wantPhase+`"`)
+			assertFileContains(t, artifacts.FinalReport, `"codex_execution": "`+test.wantExecution+`"`)
+			assertFileContains(t, artifacts.FinalReport, `"prs": "not_created"`)
+		})
+	}
 }
 
 func runWorkSuperviseE2EForError(t *testing.T, ctx context.Context, store *sqlite.Store, args []string) (error, string) {

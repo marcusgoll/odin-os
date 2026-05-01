@@ -417,10 +417,9 @@ func (store *Store) UpsertSupervisionDispatchClaim(ctx context.Context, params U
 			}
 			if _, err := tx.ExecContext(ctx, `
 				UPDATE supervision_dispatch_claims
-				SET status = ?, config_hash = ?, claimed_by = ?, updated_at = ?
+				SET config_hash = ?, claimed_by = ?, updated_at = ?
 				WHERE claim_key = ?
 			`,
-				params.Status,
 				params.ConfigHash,
 				params.ClaimedBy,
 				formatTime(now),

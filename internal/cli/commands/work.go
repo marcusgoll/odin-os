@@ -717,7 +717,7 @@ func runSupervisedE2EWorkerAndAudit(ctx context.Context, manifest projects.Manif
 	}
 
 	if err := writeRedactedTextArtifact(artifacts.WorkerPrompt, prompt, secrets); err != nil {
-		return report, redactWorkSuperviseE2EError(err)
+		return report, supervisedE2EFailWithReport(artifacts.FinalReport, report, "worker_command", err)
 	}
 	commandArtifact := workSuperviseE2EWorkerCommandArtifact{
 		Executable:  command.Path,
@@ -728,7 +728,7 @@ func runSupervisedE2EWorkerAndAudit(ctx context.Context, manifest projects.Manif
 		Launched:    true,
 	}
 	if err := writeRedactedJSONArtifact(artifacts.WorkerCommand, commandArtifact); err != nil {
-		return report, redactWorkSuperviseE2EError(err)
+		return report, supervisedE2EFailWithReport(artifacts.FinalReport, report, "worker_command", err)
 	}
 
 	result, err := runSupervisedE2EWorker(ctx, supervisedE2EWorkerRequest{
@@ -740,7 +740,7 @@ func runSupervisedE2EWorkerAndAudit(ctx context.Context, manifest projects.Manif
 		Secrets:      secrets,
 	})
 	if writeErr := writeRedactedTextArtifact(artifacts.WorkerOutput, result.Output, secrets); writeErr != nil {
-		return report, redactWorkSuperviseE2EError(writeErr)
+		return report, supervisedE2EFailWithReport(artifacts.FinalReport, report, "worker_execution", writeErr)
 	}
 	if err != nil {
 		return report, supervisedE2EFailWithReport(artifacts.FinalReport, report, "worker_execution", err)
@@ -763,7 +763,7 @@ func runSupervisedE2EWorkerAndAudit(ctx context.Context, manifest projects.Manif
 	report.Diff = workSuperviseE2EDiff{Files: diffFiles, SHA256: diffSHA}
 	diffSummary := renderSupervisedE2EDiffSummary(baseBranch, branchName, nameStatus, fullDiff, diffSHA)
 	if err := writeRedactedTextArtifact(artifacts.DiffSummary, diffSummary, secrets); err != nil {
-		return report, redactWorkSuperviseE2EError(err)
+		return report, supervisedE2EFailWithReport(artifacts.FinalReport, report, "diff_audit", err)
 	}
 
 	if !supervisedE2EDiffMatchesPlannedPath(diffFiles, plannedPath) {
