@@ -192,6 +192,70 @@ func TestRunWorkSuperviseE2EPrepareIssueRedactsToken(t *testing.T) {
 	}
 }
 
+func TestRunWorkSuperviseE2EPrepareIssueRequiresODINRootBeforeGitHubPost(t *testing.T) {
+	ctx := context.Background()
+	store := openWorkCommandStore(t)
+	defer store.Close()
+
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		requests++
+		fmt.Fprint(response, `{"number":321,"html_url":"https://github.example/marcusgoll/odin-os/issues/321","state":"open","labels":[]}`)
+	}))
+	defer server.Close()
+	t.Setenv("ODIN_GITHUB_API_BASE_URL", server.URL)
+	t.Setenv("GITHUB_TOKEN", "github_pat_1234567890abcdefghijklmnopqrstuvwxyz")
+
+	var output strings.Builder
+	err := RunWork(ctx, store, stage7E2EProjectRegistry(t), registry.Snapshot{}, []string{
+		"supervise", "e2e", "prepare-issue", "--project", "odin-core", "--json",
+	}, &output)
+	if err == nil {
+		t.Fatalf("RunWork(supervise e2e prepare-issue without ODIN_ROOT) error = nil, want explicit runtime root error\noutput:\n%s", output.String())
+	}
+	if !strings.Contains(err.Error(), "ODIN_ROOT is required for work supervise e2e prepare-issue") {
+		t.Fatalf("error = %q, want ODIN_ROOT required error", err.Error())
+	}
+	if requests != 0 {
+		t.Fatalf("GitHub requests = %d, want zero before artifact root is explicit", requests)
+	}
+}
+
+func TestRunWorkSuperviseE2EPrepareIssuePreflightsArtifactsBeforeGitHubPost(t *testing.T) {
+	ctx := context.Background()
+	store := openWorkCommandStore(t)
+	defer store.Close()
+
+	odinRootFile := filepath.Join(t.TempDir(), "odin-root-file")
+	if err := os.WriteFile(odinRootFile, []byte("not a directory"), 0o644); err != nil {
+		t.Fatalf("WriteFile(ODIN_ROOT file) error = %v", err)
+	}
+	t.Setenv("ODIN_ROOT", odinRootFile)
+	t.Setenv("GITHUB_TOKEN", "github_pat_1234567890abcdefghijklmnopqrstuvwxyz")
+
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		requests++
+		fmt.Fprint(response, `{"number":321,"html_url":"https://github.example/marcusgoll/odin-os/issues/321","state":"open","labels":[]}`)
+	}))
+	defer server.Close()
+	t.Setenv("ODIN_GITHUB_API_BASE_URL", server.URL)
+
+	var output strings.Builder
+	err := RunWork(ctx, store, stage7E2EProjectRegistry(t), registry.Snapshot{}, []string{
+		"supervise", "e2e", "prepare-issue", "--project", "odin-core", "--json",
+	}, &output)
+	if err == nil {
+		t.Fatalf("RunWork(supervise e2e prepare-issue with invalid ODIN_ROOT) error = nil, want artifact preflight error\noutput:\n%s", output.String())
+	}
+	if !strings.Contains(err.Error(), "preflight supervised e2e artifacts") {
+		t.Fatalf("error = %q, want artifact preflight error", err.Error())
+	}
+	if requests != 0 {
+		t.Fatalf("GitHub requests = %d, want zero before artifact preflight succeeds", requests)
+	}
+}
+
 func TestRunWorkSuperviseE2ERunOnceRequiresExplicitIssue(t *testing.T) {
 	ctx := context.Background()
 	store := openWorkCommandStore(t)

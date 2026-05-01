@@ -236,6 +236,11 @@ func runWorkSuperviseE2EPrepareIssue(ctx context.Context, manifest projects.Mani
 	}, "\n")
 	labels := []string{"odin:ready", "safety:low-risk"}
 
+	runDir, preparedIssuePath, finalReportPath, err := prepareSupervisedE2EArtifactTargets(runID)
+	if err != nil {
+		return redactWorkSuperviseE2EError(err)
+	}
+
 	client := trackergithub.NewClientWithConfig(trackergithub.Config{
 		BaseURL:  os.Getenv("ODIN_GITHUB_API_BASE_URL"),
 		Owner:    owner,
@@ -249,6 +254,7 @@ func runWorkSuperviseE2EPrepareIssue(ctx context.Context, manifest projects.Mani
 		Labels: labels,
 	})
 	if err != nil {
+		_ = os.RemoveAll(runDir)
 		return redactWorkSuperviseE2EError(err)
 	}
 
@@ -270,16 +276,6 @@ func runWorkSuperviseE2EPrepareIssue(ctx context.Context, manifest projects.Mani
 		HumanMergeRequired: true,
 	}
 
-	odinRoot := strings.TrimSpace(os.Getenv("ODIN_ROOT"))
-	if odinRoot == "" {
-		odinRoot = filepath.Join(manifest.GitRoot, ".odin")
-	}
-	runDir := filepath.Join(expandTilde(odinRoot), "runs", "supervised-e2e", runID)
-	if err := os.MkdirAll(runDir, 0o755); err != nil {
-		return redactWorkSuperviseE2EError(err)
-	}
-	preparedIssuePath := filepath.Join(runDir, "prepared-issue.json")
-	finalReportPath := filepath.Join(runDir, "final-report.json")
 	report.Artifacts = workSuperviseE2EArtifactRefs{
 		PreparedIssue: preparedIssuePath,
 		FinalReport:   finalReportPath,
@@ -307,6 +303,45 @@ func runWorkSuperviseE2EPrepareIssue(ctx context.Context, manifest projects.Mani
 	encoder.SetIndent("", "  ")
 	if err := encoder.Encode(report); err != nil {
 		return redactWorkSuperviseE2EError(err)
+	}
+	return nil
+}
+
+func prepareSupervisedE2EArtifactTargets(runID string) (string, string, string, error) {
+	odinRoot := strings.TrimSpace(os.Getenv("ODIN_ROOT"))
+	if odinRoot == "" {
+		return "", "", "", fmt.Errorf("ODIN_ROOT is required for work supervise e2e prepare-issue")
+	}
+	odinRootAbs, err := filepath.Abs(filepath.Clean(expandTilde(odinRoot)))
+	if err != nil {
+		return "", "", "", fmt.Errorf("preflight supervised e2e artifacts: resolve ODIN_ROOT: %w", err)
+	}
+	runDir := filepath.Join(odinRootAbs, "runs", "supervised-e2e", runID)
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		return "", "", "", fmt.Errorf("preflight supervised e2e artifacts: create run directory: %w", err)
+	}
+	preparedIssuePath := filepath.Join(runDir, "prepared-issue.json")
+	finalReportPath := filepath.Join(runDir, "final-report.json")
+	for _, path := range []string{preparedIssuePath, finalReportPath} {
+		if err := preflightArtifactFile(path); err != nil {
+			_ = os.RemoveAll(runDir)
+			return "", "", "", fmt.Errorf("preflight supervised e2e artifacts: %w", err)
+		}
+	}
+	return runDir, preparedIssuePath, finalReportPath, nil
+}
+
+func preflightArtifactFile(path string) error {
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+	if err != nil {
+		return fmt.Errorf("open %s: %w", path, err)
+	}
+	if _, err := file.WriteString("{}\n"); err != nil {
+		_ = file.Close()
+		return fmt.Errorf("write %s: %w", path, err)
+	}
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("close %s: %w", path, err)
 	}
 	return nil
 }
