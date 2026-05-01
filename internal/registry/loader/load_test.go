@@ -113,6 +113,7 @@ func TestLoadDirLoadsUniversalIntakeAgents(t *testing.T) {
 		"system-memory-curator-agent",
 		"voice-note-cleaner-agent",
 		"email-to-task-extractor-agent",
+		"visual-intake-agent",
 	}
 	for _, key := range wantAgents {
 		item, ok := snapshot.ByKey[key]
@@ -278,6 +279,37 @@ func TestLoadDirLoadsUniversalIntakeAgents(t *testing.T) {
 	for _, required := range requiredEmailToTaskExtractorContract {
 		if !strings.Contains(emailToTaskExtractorContract, required) {
 			t.Fatalf("email-to-task extractor agent body missing %q", required)
+		}
+	}
+
+	visualIntake := snapshot.ByKey["visual-intake-agent"]
+	visualIntakeContract := strings.Join([]string{
+		visualIntake.Title,
+		visualIntake.Summary,
+		visualIntake.Sections[registry.SectionPurpose],
+		visualIntake.Sections[registry.SectionWhenToUse],
+		visualIntake.Sections[registry.SectionInputs],
+		visualIntake.Sections[registry.SectionProcedure],
+		visualIntake.Sections[registry.SectionOutputs],
+		visualIntake.Sections[registry.SectionConstraints],
+		visualIntake.Sections[registry.SectionSuccessCriteria],
+	}, "\n")
+	requiredVisualIntakeContract := []string{
+		"Visual Intake Agent",
+		"provided image, screenshot, whiteboard, or handwritten note",
+		"visible content summary",
+		"extracted text",
+		"possible tasks",
+		"possible decisions",
+		"possible project links",
+		"risks or missing context",
+		"recommended next step",
+		"If the image is unclear, say exactly what is unreadable",
+		"Do not invent text or details",
+	}
+	for _, required := range requiredVisualIntakeContract {
+		if !strings.Contains(visualIntakeContract, required) {
+			t.Fatalf("visual intake agent body missing %q", required)
 		}
 	}
 
