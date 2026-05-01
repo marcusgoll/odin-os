@@ -977,7 +977,7 @@ func completeSupervisedE2EReviewHandoff(ctx context.Context, manifest projects.M
 	report.Dispatch = supervision.SideEffectNotStarted
 	report.HumanMergeRequired = true
 	if err := writeSupervisedE2EHandoffArtifacts(report); err != nil {
-		return report, redactWorkSuperviseE2EError(err)
+		return report, supervisedE2EReviewHandoffFail(report, err)
 	}
 	if err := writeRedactedJSONArtifact(report.Artifacts.FinalReport, report); err != nil {
 		return report, redactWorkSuperviseE2EError(err)
@@ -998,28 +998,43 @@ func supervisedE2EReviewHandoffFail(report workSuperviseE2EReport, err error) er
 	report.Deployment = supervision.SideEffectNotStarted
 	report.Dispatch = supervision.SideEffectNotStarted
 	report.HumanMergeRequired = true
-	if writeErr := writeSupervisedE2EHandoffArtifacts(report); writeErr != nil {
+	if writeErr := writeRedactedJSONArtifact(report.Artifacts.FinalReport, report); writeErr != nil {
 		return redactWorkSuperviseE2EError(writeErr)
 	}
-	if writeErr := writeRedactedJSONArtifact(report.Artifacts.FinalReport, report); writeErr != nil {
+	if writeErr := writeSupervisedE2EHandoffArtifacts(report); writeErr != nil {
 		return redactWorkSuperviseE2EError(writeErr)
 	}
 	return redactWorkSuperviseE2EError(err)
 }
 
 func writeSupervisedE2EHandoffArtifacts(report workSuperviseE2EReport) error {
+	boundary := map[string]any{
+		"merge":                report.Merge,
+		"deployment":           report.Deployment,
+		"dispatch":             report.Dispatch,
+		"human_merge_required": report.HumanMergeRequired,
+	}
 	if strings.TrimSpace(report.Artifacts.PRReport) != "" {
-		if err := writeRedactedJSONArtifact(report.Artifacts.PRReport, report.PR); err != nil {
+		if err := writeRedactedJSONArtifact(report.Artifacts.PRReport, map[string]any{
+			"pr":       report.PR,
+			"boundary": boundary,
+		}); err != nil {
 			return err
 		}
 	}
 	if strings.TrimSpace(report.Artifacts.CIReport) != "" {
-		if err := writeRedactedJSONArtifact(report.Artifacts.CIReport, report.CI); err != nil {
+		if err := writeRedactedJSONArtifact(report.Artifacts.CIReport, map[string]any{
+			"ci":       report.CI,
+			"boundary": boundary,
+		}); err != nil {
 			return err
 		}
 	}
 	if strings.TrimSpace(report.Artifacts.ReviewEvidence) != "" {
-		if err := writeRedactedJSONArtifact(report.Artifacts.ReviewEvidence, report.EvidenceComments); err != nil {
+		if err := writeRedactedJSONArtifact(report.Artifacts.ReviewEvidence, map[string]any{
+			"evidence_comments": report.EvidenceComments,
+			"boundary":          boundary,
+		}); err != nil {
 			return err
 		}
 	}

@@ -1077,8 +1077,14 @@ func TestRunWorkSuperviseE2ERunOnceWorkerEditsOnlyPlannedPath(t *testing.T) {
 	assertFileContains(t, filepath.Join(runDir, "final-report.json"), `"phase": "review_handoff"`)
 	assertFileContains(t, filepath.Join(runDir, "final-report.json"), `"human_merge_required": true`)
 	assertFileContains(t, filepath.Join(runDir, "pr-report.json"), `"draft": true`)
+	assertFileContains(t, filepath.Join(runDir, "pr-report.json"), `"merge": "not_merged"`)
+	assertFileContains(t, filepath.Join(runDir, "pr-report.json"), `"deployment": "not_started"`)
+	assertFileContains(t, filepath.Join(runDir, "pr-report.json"), `"dispatch": "not_started"`)
+	assertFileContains(t, filepath.Join(runDir, "pr-report.json"), `"human_merge_required": true`)
 	assertFileContains(t, filepath.Join(runDir, "ci-report.json"), `"conclusion": "success"`)
+	assertFileContains(t, filepath.Join(runDir, "ci-report.json"), `"merge": "not_merged"`)
 	assertFileContains(t, filepath.Join(runDir, "review-evidence.json"), `odin-stage7-supervised-e2e-review-evidence`)
+	assertFileContains(t, filepath.Join(runDir, "review-evidence.json"), `"deployment": "not_started"`)
 	assertFileNotContains(t, filepath.Join(runDir, "final-report.json"), "github_pat_1234567890abcdefghijklmnopqrstuvwxyz")
 	assertNoForbiddenSuperviseE2EGitHubMutations(t, requests)
 }
@@ -2018,6 +2024,44 @@ func TestRunSupervisedE2EWorkerArtifactWriteFailuresRewriteFinalReport(t *testin
 			assertFileContains(t, artifacts.FinalReport, `"prs": "not_created"`)
 		})
 	}
+}
+
+func TestSupervisedE2EReviewHandoffFailWritesFinalBeforeArtifactFailure(t *testing.T) {
+	artifactDir := t.TempDir()
+	brokenPRReport := filepath.Join(artifactDir, "pr-report.json")
+	if err := os.Mkdir(brokenPRReport, 0o755); err != nil {
+		t.Fatalf("Mkdir(broken pr-report path) error = %v", err)
+	}
+	finalReportPath := filepath.Join(artifactDir, "final-report.json")
+	report := workSuperviseE2EReport{
+		Mode:               "supervised_e2e",
+		Phase:              "review_handoff",
+		Status:             "in_progress",
+		Project:            "alpha",
+		Repo:               "acme/alpha",
+		RunID:              "artifact-failure",
+		CodexExecution:     "completed",
+		PRs:                "draft_created",
+		Merge:              supervision.SideEffectNotMerged,
+		Deployment:         supervision.SideEffectNotStarted,
+		Dispatch:           supervision.SideEffectNotStarted,
+		HumanMergeRequired: true,
+		Artifacts: workSuperviseE2EArtifactRefs{
+			FinalReport: finalReportPath,
+			PRReport:    brokenPRReport,
+			CIReport:    filepath.Join(artifactDir, "ci-report.json"),
+		},
+	}
+
+	err := supervisedE2EReviewHandoffFail(report, fmt.Errorf("handoff failed"))
+	if err == nil {
+		t.Fatalf("supervisedE2EReviewHandoffFail() error = nil, want artifact write error")
+	}
+	assertFileContains(t, finalReportPath, `"status": "failed_closed"`)
+	assertFileContains(t, finalReportPath, `"merge": "not_merged"`)
+	assertFileContains(t, finalReportPath, `"deployment": "not_started"`)
+	assertFileContains(t, finalReportPath, `"dispatch": "not_started"`)
+	assertFileContains(t, finalReportPath, `"human_merge_required": true`)
 }
 
 func runWorkSuperviseE2EForError(t *testing.T, ctx context.Context, store *sqlite.Store, args []string) (error, string) {
