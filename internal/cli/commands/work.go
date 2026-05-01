@@ -3,6 +3,7 @@ package commands
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -35,11 +36,12 @@ const stage3LifecycleCommentMarker = "<!-- odin-stage3-lifecycle-proof -->"
 const stage6ReviewEvidenceMarker = "<!-- odin-stage6-review-evidence -->"
 const stage6HumanReviewHandoffMarker = "<!-- odin-stage6-human-review-handoff -->"
 
-const workUsage = "usage: odin work status|profiles|start --project <key> --title <text>|intake --project <key> [--dry-run]|simulate-lifecycle --issue <number> [--project <key>] [--dry-run] [--json]|apply-lifecycle --issue <number> --approved-target <repo>#<issue> [--project <key>] [--json]|worker-dry-run --issue-fixture <path> [--project <key>] [--keep-worktree] [--json]|pr-dry-run --worktree <path> --base <branch> [--json]|pr-create --issue <number> --approved-target <repo>#<issue> --worktree <path> --base <branch> --wait-ci [--json]|supervise status|start|stop|queue --project <key> --fixture-issue <number>|recover --json"
+const workUsage = "usage: odin work status|profiles|start --project <key> --title <text>|intake --project <key> [--dry-run]|simulate-lifecycle --issue <number> [--project <key>] [--dry-run] [--json]|apply-lifecycle --issue <number> --approved-target <repo>#<issue> [--project <key>] [--json]|worker-dry-run --issue-fixture <path> [--project <key>] [--keep-worktree] [--json]|pr-dry-run --worktree <path> --base <branch> [--json]|pr-create --issue <number> --approved-target <repo>#<issue> --worktree <path> --base <branch> --wait-ci [--json]|supervise status|start|stop|queue --project <key> [--fixture-issue <number>]|recover --json"
 
-const workSuperviseUsage = "usage: odin work supervise status|start|stop|queue --project <key> --fixture-issue <number>|recover --json"
+const workSuperviseUsage = "usage: odin work supervise status|start|stop|queue --project <key> [--fixture-issue <number>]|recover --json"
 
 const workSuperviseFixtureSource = "control_plane_fixture"
+const workSuperviseTrackerSource = "issue_intake_source"
 
 var newIntakeTracker = trackerintake.NewGitHubTracker
 
@@ -119,7 +121,7 @@ func runWorkSupervise(ctx context.Context, store *sqlite.Store, projectRegistry 
 	case "stop":
 		report, err = service.Stop(ctx, "odin-work-supervise")
 	case "queue":
-		report, err = runWorkSuperviseQueue(ctx, projectRegistry, service, params)
+		report, err = runWorkSuperviseQueue(ctx, store, projectRegistry, service, params)
 	case "recover":
 		report, err = service.Recover(ctx)
 	}
@@ -129,25 +131,25 @@ func runWorkSupervise(ctx context.Context, store *sqlite.Store, projectRegistry 
 
 	encoder := json.NewEncoder(stdout)
 	encoder.SetIndent("", "  ")
-	return encoder.Encode(flattenWorkSuperviseReport(report, args[0]))
+	return encoder.Encode(flattenWorkSuperviseReport(report, args[0], params))
 }
 
-func runWorkSuperviseQueue(ctx context.Context, projectRegistry projects.Registry, service supervision.Service, params map[string]string) (supervision.Report, error) {
+func runWorkSuperviseQueue(ctx context.Context, store *sqlite.Store, projectRegistry projects.Registry, service supervision.Service, params map[string]string) (supervision.Report, error) {
 	projectKey := strings.TrimSpace(params["project"])
 	if projectKey == "" {
 		return supervision.Report{}, fmt.Errorf("missing --project for work supervise queue")
 	}
 	rawFixtureIssue := strings.TrimSpace(params["fixture-issue"])
+	manifest, ok := projectRegistry.Lookup(projectKey)
+	if !ok {
+		return supervision.Report{}, fmt.Errorf("unknown project %q", projectKey)
+	}
 	if rawFixtureIssue == "" {
-		return supervision.Report{}, fmt.Errorf("--fixture-issue is required for work supervise queue in this slice")
+		return runWorkSuperviseTrackerQueue(ctx, store, manifest, service)
 	}
 	issueNumber, err := strconv.Atoi(rawFixtureIssue)
 	if err != nil || issueNumber <= 0 {
 		return supervision.Report{}, fmt.Errorf("invalid --fixture-issue %q", rawFixtureIssue)
-	}
-	manifest, ok := projectRegistry.Lookup(projectKey)
-	if !ok {
-		return supervision.Report{}, fmt.Errorf("unknown project %q", projectKey)
 	}
 
 	report, err := service.Status(ctx)
@@ -185,7 +187,115 @@ func runWorkSuperviseQueue(ctx context.Context, projectRegistry projects.Registr
 	return report, nil
 }
 
-func flattenWorkSuperviseReport(report supervision.Report, command string) workSuperviseReport {
+func runWorkSuperviseTrackerQueue(ctx context.Context, store *sqlite.Store, manifest projects.Manifest, service supervision.Service) (supervision.Report, error) {
+	source, err := newIntakeTracker(manifest, trackerintake.SyncOptions{})
+	if err != nil {
+		return supervision.Report{}, err
+	}
+	issues, err := source.FetchEligibleIssues(ctx)
+	if err != nil {
+		return supervision.Report{}, err
+	}
+	if auditor, ok := source.(tracker.RequestAuditor); ok {
+		audit := auditor.RequestAudit()
+		if audit.Writes > 0 {
+			if len(audit.Forbidden) > 0 {
+				forbidden := audit.Forbidden[0]
+				return supervision.Report{}, fmt.Errorf("forbidden GitHub write attempted during supervise queue intake: method=%s path=%s", forbidden.Method, forbidden.Path)
+			}
+			return supervision.Report{}, fmt.Errorf("forbidden GitHub write attempted during supervise queue intake")
+		}
+	}
+
+	project, err := ensureWorkSuperviseProject(ctx, store, manifest)
+	if err != nil {
+		return supervision.Report{}, err
+	}
+	return service.Queue(ctx, supervision.Project{
+		ID:   project.ID,
+		Key:  project.Key,
+		Repo: manifest.GitHub.Repo,
+	}, supervisionIssuesFromTrackerIssues(issues, manifest.GitHub.Repo))
+}
+
+func ensureWorkSuperviseProject(ctx context.Context, store *sqlite.Store, manifest projects.Manifest) (sqlite.Project, error) {
+	project, err := store.GetProjectByKey(ctx, manifest.Key)
+	if err == nil {
+		return project, nil
+	}
+	if err != sql.ErrNoRows {
+		return sqlite.Project{}, err
+	}
+
+	scopeValue := "project"
+	if manifest.SystemProject {
+		scopeValue = "odin-core"
+	}
+	return store.CreateProject(ctx, sqlite.CreateProjectParams{
+		Key:           manifest.Key,
+		Name:          manifest.Name,
+		Scope:         scopeValue,
+		GitRoot:       manifest.GitRoot,
+		DefaultBranch: manifest.DefaultBranch,
+		GitHubRepo:    manifest.GitHub.Repo,
+		ManifestPath:  manifest.SourcePath,
+	})
+}
+
+func supervisionIssuesFromTrackerIssues(issues []tracker.Issue, fallbackRepo string) []supervision.Issue {
+	adapted := make([]supervision.Issue, 0, len(issues))
+	for _, issue := range issues {
+		repo := strings.TrimSpace(issue.Repo)
+		if repo == "" {
+			repo = fallbackRepo
+		}
+		adapted = append(adapted, supervision.Issue{
+			Provider:     strings.TrimSpace(issue.Provider),
+			Repo:         repo,
+			Number:       issue.Number,
+			Title:        issue.Title,
+			Body:         issue.Body,
+			Labels:       append([]string(nil), issue.Labels...),
+			URL:          issue.URL,
+			State:        issue.State,
+			ChangedPaths: extractIssuePathHints(issue.Title + "\n" + issue.Body),
+		})
+	}
+	return adapted
+}
+
+func extractIssuePathHints(text string) []string {
+	seen := map[string]bool{}
+	var paths []string
+	for _, field := range strings.FieldsFunc(text, func(r rune) bool {
+		switch r {
+		case ' ', '\n', '\r', '\t', ',', ';', ':', '(', ')', '[', ']', '{', '}', '"', '\'', '`':
+			return true
+		default:
+			return false
+		}
+	}) {
+		candidate := strings.Trim(field, "<>.,!?")
+		if !looksLikeRelativePathHint(candidate) || seen[candidate] {
+			continue
+		}
+		seen[candidate] = true
+		paths = append(paths, candidate)
+	}
+	return paths
+}
+
+func looksLikeRelativePathHint(candidate string) bool {
+	if candidate == "" || strings.Contains(candidate, "://") || strings.HasPrefix(candidate, "/") {
+		return false
+	}
+	if !strings.Contains(candidate, "/") {
+		return false
+	}
+	return strings.Contains(filepath.Base(candidate), ".")
+}
+
+func flattenWorkSuperviseReport(report supervision.Report, command string, params map[string]string) workSuperviseReport {
 	queue := append([]supervision.QueueDecision(nil), report.Decisions...)
 	if queue == nil {
 		queue = []supervision.QueueDecision{}
@@ -196,7 +306,7 @@ func flattenWorkSuperviseReport(report supervision.Report, command string) workS
 	}
 	return workSuperviseReport{
 		Mode:           report.ModeKey,
-		Source:         workSuperviseReportSource(command),
+		Source:         workSuperviseReportSource(command, params),
 		Enabled:        report.Control.Status == supervision.ControlStatusEnabled,
 		KillSwitch:     report.Control.KillSwitchActive,
 		ConfigHash:     report.Control.ConfigHash,
@@ -210,11 +320,14 @@ func flattenWorkSuperviseReport(report supervision.Report, command string) workS
 	}
 }
 
-func workSuperviseReportSource(command string) string {
-	if command == "queue" {
+func workSuperviseReportSource(command string, params map[string]string) string {
+	if command != "queue" {
+		return ""
+	}
+	if strings.TrimSpace(params["fixture-issue"]) != "" {
 		return workSuperviseFixtureSource
 	}
-	return ""
+	return workSuperviseTrackerSource
 }
 
 func runWorkStatus(ctx context.Context, store *sqlite.Store, snapshot registry.Snapshot, stdout io.Writer) error {

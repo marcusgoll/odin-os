@@ -3,12 +3,16 @@ package commands
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
+	"odin-os/internal/core/projects"
 	"odin-os/internal/registry"
 	"odin-os/internal/runtime/supervision"
 	"odin-os/internal/store/sqlite"
+	"odin-os/internal/tracker"
+	trackerintake "odin-os/internal/tracker/intake"
 )
 
 func TestRunWorkSuperviseStatusJSONReportsNoSideEffects(t *testing.T) {
@@ -91,20 +95,151 @@ func TestRunWorkSuperviseQueueProjectFixtureJSONReportsDecisionWithoutDurableQue
 	assertNoSuperviseSideEffects(t, ctx, store)
 }
 
-func TestRunWorkSuperviseQueueWithoutFixtureIssueFailsWithoutCreatingClaims(t *testing.T) {
+func TestRunWorkSuperviseQueueJSONEvaluatesTrackerIssuesWithoutGitHubWritesOrDispatch(t *testing.T) {
 	ctx := context.Background()
 	store := openWorkCommandStore(t)
 	defer store.Close()
+	projectRegistry := commandProjectRegistry(t)
+
+	previousFactory := newIntakeTracker
+	t.Cleanup(func() { newIntakeTracker = previousFactory })
+	newIntakeTracker = func(project projects.Manifest, options trackerintake.SyncOptions) (tracker.Tracker, error) {
+		if project.GitHub.Repo != "acme/alpha" {
+			return nil, fmt.Errorf("repo = %q, want acme/alpha", project.GitHub.Repo)
+		}
+		return &commandAuditedFakeTracker{
+			issues: []tracker.Issue{
+				{
+					Provider: "github",
+					Repo:     "acme/alpha",
+					Number:   21,
+					Title:    "Update supervised queue docs",
+					Body:     "Planned scope: docs/example.md",
+					URL:      "https://github.example/acme/alpha/issues/21",
+					State:    "open",
+					Labels:   []string{"odin:ready", "safety:low-risk"},
+				},
+				{
+					Provider: "github",
+					Repo:     "acme/alpha",
+					Number:   22,
+					Title:    "Touch sensitive policy test",
+					Body:     "Planned scope: internal/security/policy_test.go",
+					URL:      "https://github.example/acme/alpha/issues/22",
+					State:    "open",
+					Labels:   []string{"odin:ready", "safety:low-risk"},
+				},
+				{
+					Provider: "github",
+					Repo:     "acme/alpha",
+					Number:   23,
+					Title:    "Investigate unknown queue scope",
+					Body:     "Planned scope is unknown for this request.",
+					URL:      "https://github.example/acme/alpha/issues/23",
+					State:    "open",
+					Labels:   []string{"odin:ready", "safety:low-risk"},
+				},
+				{
+					Provider: "github",
+					Repo:     "acme/alpha",
+					Number:   24,
+					Title:    "Missing safety label",
+					Body:     "Planned scope: docs/missing-label.md",
+					URL:      "https://github.example/acme/alpha/issues/24",
+					State:    "open",
+					Labels:   []string{"odin:ready"},
+				},
+			},
+			audit: tracker.RequestAudit{Reads: 1},
+		}, nil
+	}
+
+	_ = runWorkSuperviseJSON(t, ctx, store, []string{"supervise", "start", "--json"})
+	report := runWorkSuperviseJSONWithRegistry(t, ctx, store, projectRegistry, []string{"supervise", "queue", "--project", "alpha", "--json"})
+
+	assertSuperviseReportShape(t, report)
+	if report.Source == "control_plane_fixture" {
+		t.Fatalf("source = %q, want tracker-backed queue source", report.Source)
+	}
+	if len(report.Queue) != 4 {
+		t.Fatalf("queue len = %d, want 4 decisions: %+v", len(report.Queue), report.Queue)
+	}
+	assertSuperviseDecision(t, report.Queue[0], 21, supervision.DecisionEligible, "")
+	assertSuperviseDecision(t, report.Queue[1], 22, supervision.DecisionRefused, supervision.RefusalSensitiveTestScope)
+	assertSuperviseDecision(t, report.Queue[2], 23, supervision.DecisionRefused, supervision.RefusalUnknownScope)
+	assertSuperviseDecision(t, report.Queue[3], 24, supervision.DecisionRefused, supervision.RefusalMissingRequiredLabel)
+
+	project, err := store.GetProjectByKey(ctx, "alpha")
+	if err != nil {
+		t.Fatalf("GetProjectByKey(alpha) error = %v", err)
+	}
+	decisions, err := store.ListSupervisionQueueDecisions(ctx, sqlite.ListSupervisionQueueDecisionsParams{
+		ProjectID: &project.ID,
+		Repo:      "acme/alpha",
+	})
+	if err != nil {
+		t.Fatalf("ListSupervisionQueueDecisions() error = %v", err)
+	}
+	if len(decisions) != 4 {
+		t.Fatalf("persisted decisions len = %d, want 4: %+v", len(decisions), decisions)
+	}
+	wantReasons := map[int]string{
+		21: supervision.DecisionEligible,
+		22: supervision.RefusalSensitiveTestScope,
+		23: supervision.RefusalUnknownScope,
+		24: supervision.RefusalMissingRequiredLabel,
+	}
+	for _, decision := range decisions {
+		if decision.Reason != wantReasons[decision.IssueNumber] {
+			t.Fatalf("persisted decision for issue %d reason = %q, want %q", decision.IssueNumber, decision.Reason, wantReasons[decision.IssueNumber])
+		}
+	}
+	assertSuperviseTableCount(t, ctx, store, "tasks", 0)
+	assertSuperviseTableCount(t, ctx, store, "runs", 0)
+	assertSuperviseTableCount(t, ctx, store, "approvals", 0)
+	assertSuperviseTableCount(t, ctx, store, "worktree_leases", 0)
+	assertNoSuperviseSideEffects(t, ctx, store)
+}
+
+func TestRunWorkSuperviseQueueJSONFailsWhenTrackerAuditObservesGitHubWrite(t *testing.T) {
+	ctx := context.Background()
+	store := openWorkCommandStore(t)
+	defer store.Close()
+	projectRegistry := commandProjectRegistry(t)
+
+	previousFactory := newIntakeTracker
+	t.Cleanup(func() { newIntakeTracker = previousFactory })
+	newIntakeTracker = func(project projects.Manifest, options trackerintake.SyncOptions) (tracker.Tracker, error) {
+		return &commandAuditedFakeTracker{
+			issues: []tracker.Issue{{
+				Provider: "github",
+				Repo:     project.GitHub.Repo,
+				Number:   25,
+				Title:    "Unexpected write audit",
+				Body:     "Planned scope: docs/write-audit.md",
+				State:    "open",
+				Labels:   []string{"odin:ready", "safety:low-risk"},
+			}},
+			audit: tracker.RequestAudit{
+				Reads:  1,
+				Writes: 1,
+				Forbidden: []tracker.ForbiddenRequest{{
+					Method: "POST",
+					Path:   "/repos/acme/alpha/issues/25/comments",
+				}},
+			},
+		}, nil
+	}
 
 	_ = runWorkSuperviseJSON(t, ctx, store, []string{"supervise", "start", "--json"})
 
 	var output strings.Builder
-	err := RunWork(ctx, store, commandProjectRegistry(t), registry.Snapshot{}, []string{"supervise", "queue", "--project", "alpha", "--json"}, &output)
+	err := RunWork(ctx, store, projectRegistry, registry.Snapshot{}, []string{"supervise", "queue", "--project", "alpha", "--json"}, &output)
 	if err == nil {
-		t.Fatalf("RunWork(supervise queue without fixture) error = nil, want fixture boundary error\noutput:\n%s", output.String())
+		t.Fatalf("RunWork(supervise queue with write audit) error = nil, want forbidden GitHub write failure\noutput:\n%s", output.String())
 	}
-	if !strings.Contains(err.Error(), "--fixture-issue is required for work supervise queue in this slice") {
-		t.Fatalf("error = %q, want required fixture issue error", err.Error())
+	if !strings.Contains(err.Error(), "forbidden GitHub write attempted during supervise queue intake") || strings.Contains(err.Error(), "GITHUB_TOKEN") {
+		t.Fatalf("error = %q, want safe forbidden-write message", err.Error())
 	}
 	assertSuperviseTableCount(t, ctx, store, "projects", 0)
 	assertSuperviseTableCount(t, ctx, store, "supervision_queue_decisions", 0)
@@ -155,7 +290,7 @@ func TestRunWorkSuperviseUnknownSubcommandShowsUsage(t *testing.T) {
 	if err := RunWork(ctx, store, commandProjectRegistry(t), registry.Snapshot{}, []string{"supervise", "bogus"}, &output); err != nil {
 		t.Fatalf("RunWork(supervise bogus) error = %v", err)
 	}
-	if !strings.Contains(output.String(), "unknown work supervise command: bogus") || !strings.Contains(output.String(), "usage: odin work supervise status|start|stop|queue --project <key> --fixture-issue <number>|recover --json") {
+	if !strings.Contains(output.String(), "unknown work supervise command: bogus") || !strings.Contains(output.String(), "usage: odin work supervise status|start|stop|queue --project <key> [--fixture-issue <number>]|recover --json") {
 		t.Fatalf("output = %q, want unknown subcommand usage", output.String())
 	}
 }
@@ -195,9 +330,14 @@ type superviseCommandReport struct {
 
 func runWorkSuperviseJSON(t *testing.T, ctx context.Context, store *sqlite.Store, args []string) superviseCommandReport {
 	t.Helper()
+	return runWorkSuperviseJSONWithRegistry(t, ctx, store, commandProjectRegistry(t), args)
+}
+
+func runWorkSuperviseJSONWithRegistry(t *testing.T, ctx context.Context, store *sqlite.Store, projectRegistry projects.Registry, args []string) superviseCommandReport {
+	t.Helper()
 
 	var output strings.Builder
-	if err := RunWork(ctx, store, commandProjectRegistry(t), registry.Snapshot{}, args, &output); err != nil {
+	if err := RunWork(ctx, store, projectRegistry, registry.Snapshot{}, args, &output); err != nil {
 		t.Fatalf("RunWork(%v) error = %v\noutput:\n%s", args, err, output.String())
 	}
 	if strings.Contains(output.String(), "github_writes") || strings.Contains(output.String(), "method_audit") {
@@ -209,6 +349,34 @@ func runWorkSuperviseJSON(t *testing.T, ctx context.Context, store *sqlite.Store
 		t.Fatalf("json.Unmarshal() error = %v\noutput:\n%s", err, output.String())
 	}
 	return report
+}
+
+func assertSuperviseDecision(t *testing.T, decision struct {
+	ProjectKey    string `json:"project_key"`
+	Repo          string `json:"repo"`
+	IssueNumber   int    `json:"issue_number"`
+	Decision      string `json:"decision"`
+	Eligible      bool   `json:"eligible"`
+	RefusalReason string `json:"refusal_reason,omitempty"`
+	ClaimKey      string `json:"claim_key,omitempty"`
+}, issueNumber int, decisionValue string, refusalReason string) {
+	t.Helper()
+
+	if decision.ProjectKey != "alpha" || decision.Repo != "acme/alpha" || decision.IssueNumber != issueNumber {
+		t.Fatalf("decision target = %+v, want alpha/acme/alpha issue %d", decision, issueNumber)
+	}
+	if decision.Decision != decisionValue || decision.RefusalReason != refusalReason {
+		t.Fatalf("decision = %+v, want decision %q refusal %q", decision, decisionValue, refusalReason)
+	}
+	if decisionValue == supervision.DecisionEligible {
+		if !decision.Eligible || decision.ClaimKey == "" {
+			t.Fatalf("decision = %+v, want eligible decision with planned claim", decision)
+		}
+		return
+	}
+	if decision.Eligible || decision.ClaimKey != "" {
+		t.Fatalf("decision = %+v, want refused decision without claim", decision)
+	}
 }
 
 func assertSuperviseReportShape(t *testing.T, report superviseCommandReport) {

@@ -38,10 +38,14 @@ type Project struct {
 }
 
 type Issue struct {
+	Provider     string
 	Repo         string
 	Number       int
 	Title        string
+	Body         string
 	Labels       []string
+	URL          string
+	State        string
 	ChangedPaths []string
 }
 
