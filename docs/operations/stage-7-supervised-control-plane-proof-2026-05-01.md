@@ -101,11 +101,11 @@ Result: passed. `./bin/odin` and `./bin/odin-os` were built.
 Real command proof with controlled runtime root:
 
 ```bash
-ODIN_ROOT="$(mktemp -d)/runtime" \
-ODIN_GITHUB_API_BASE_URL="http://127.0.0.1:<local-fake-github-port>" \
-GITHUB_TOKEN="<synthetic-token>" \
-./bin/odin work supervise status --json
+export ODIN_ROOT="$(mktemp -d)/runtime"
+export ODIN_GITHUB_API_BASE_URL="http://127.0.0.1:<local-fake-github-port>"
+export GITHUB_TOKEN="<synthetic-token>"
 
+./bin/odin work supervise status --json
 ./bin/odin work supervise start --json
 ./bin/odin work supervise queue --project odin-core --json
 ./bin/odin work supervise queue --project odin-core --json
