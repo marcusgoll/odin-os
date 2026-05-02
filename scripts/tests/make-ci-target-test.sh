@@ -9,6 +9,12 @@ fail() {
 }
 
 output="$(make -n -C "$repo_root" ci)"
+makefile="$(<"$repo_root/Makefile")"
+
+grep -Fq "git ls-files '*.go'" <<<"$makefile" || fail "GOFILES must use tracked files only"
+if grep -Fq "find . -type f -name '*.go'" <<<"$makefile"; then
+  fail "GOFILES must not recursively scan nested worktrees"
+fi
 
 grep -Fq 'test -z "$(gofmt -l ' <<<"$output" || fail "missing fmtcheck command"
 grep -Fqx 'go vet ./...' <<<"$output" || fail "missing lint command"

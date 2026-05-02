@@ -29,9 +29,10 @@ type TelemetryFile struct {
 }
 
 type PoliciesFile struct {
-	Version        int            `yaml:"version"`
-	WorkTaxonomy   WorkTaxonomy   `yaml:"work_taxonomy"`
-	ApprovalPolicy ApprovalPolicy `yaml:"approval_policy"`
+	Version         int             `yaml:"version"`
+	WorkTaxonomy    WorkTaxonomy    `yaml:"work_taxonomy"`
+	ApprovalPolicy  ApprovalPolicy  `yaml:"approval_policy"`
+	TriggerTaxonomy TriggerTaxonomy `yaml:"trigger_taxonomy"`
 }
 
 type WorkTaxonomy struct {
@@ -41,6 +42,14 @@ type WorkTaxonomy struct {
 
 type ApprovalPolicy struct {
 	RequireApprovalBefore []string `yaml:"require_approval_before"`
+}
+
+type TriggerTaxonomy struct {
+	TriggerTypes      []string `yaml:"trigger_types"`
+	TriggerSources    []string `yaml:"trigger_sources"`
+	ActionTypes       []string `yaml:"action_types"`
+	RiskLevels        []string `yaml:"risk_levels"`
+	HumanizationRules []string `yaml:"humanization_rules"`
 }
 
 func ValidateRepo(repoRoot string) error {

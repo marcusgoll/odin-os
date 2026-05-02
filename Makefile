@@ -1,6 +1,6 @@
 GO ?= go
 GOFMT ?= gofmt
-GOFILES := $(shell find . -type f -name '*.go' -not -path './.git/*')
+GOFILES := $(shell git ls-files '*.go')
 
 .PHONY: format fmt fmtcheck lint vet test test-alpha test-media test-skills ci build odin-e2e-local odin-e2e-contract run clean install-local uninstall-local
 

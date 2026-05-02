@@ -294,6 +294,107 @@ func TestRepositoryPoliciesDefineUniversalWorkTaxonomy(t *testing.T) {
 	}
 }
 
+func TestRepositoryPoliciesDefineMasterTriggerTaxonomy(t *testing.T) {
+	t.Parallel()
+
+	repoRoot := filepath.Clean(filepath.Join("..", "..", ".."))
+	path := filepath.Join(repoRoot, "config", "policies.yaml")
+
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile(%s) error = %v", path, err)
+	}
+
+	var policy struct {
+		TriggerTaxonomy struct {
+			TriggerTypes      []string `yaml:"trigger_types"`
+			TriggerSources    []string `yaml:"trigger_sources"`
+			ActionTypes       []string `yaml:"action_types"`
+			RiskLevels        []string `yaml:"risk_levels"`
+			HumanizationRules []string `yaml:"humanization_rules"`
+		} `yaml:"trigger_taxonomy"`
+	}
+	if err := yaml.Unmarshal(content, &policy); err != nil {
+		t.Fatalf("Unmarshal(policies.yaml) error = %v", err)
+	}
+
+	wantTriggerTypes := []string{
+		"event_based",
+		"cron_based",
+		"humanized",
+		"hybrid",
+	}
+	if !slices.Equal(policy.TriggerTaxonomy.TriggerTypes, wantTriggerTypes) {
+		t.Fatalf("trigger_taxonomy.trigger_types = %#v, want %#v", policy.TriggerTaxonomy.TriggerTypes, wantTriggerTypes)
+	}
+
+	wantTriggerSources := []string{
+		"inbox",
+		"email",
+		"calendar",
+		"task_system",
+		"logs",
+		"github",
+		"file_change",
+		"automation_result",
+		"habit_tracker",
+		"household",
+		"finance_admin",
+		"personal_note",
+		"external_webhook",
+		"manual_user_command",
+	}
+	if !slices.Equal(policy.TriggerTaxonomy.TriggerSources, wantTriggerSources) {
+		t.Fatalf("trigger_taxonomy.trigger_sources = %#v, want %#v", policy.TriggerTaxonomy.TriggerSources, wantTriggerSources)
+	}
+
+	wantActionTypes := []string{
+		"classify",
+		"summarize",
+		"create_ticket",
+		"create_task",
+		"schedule",
+		"defer",
+		"remind",
+		"route_to_agent",
+		"request_approval",
+		"run_workflow",
+		"archive",
+		"escalate",
+		"retry",
+		"self_heal",
+		"log_only",
+	}
+	if !slices.Equal(policy.TriggerTaxonomy.ActionTypes, wantActionTypes) {
+		t.Fatalf("trigger_taxonomy.action_types = %#v, want %#v", policy.TriggerTaxonomy.ActionTypes, wantActionTypes)
+	}
+
+	wantRiskLevels := []string{
+		"low",
+		"medium",
+		"high",
+		"critical",
+	}
+	if !slices.Equal(policy.TriggerTaxonomy.RiskLevels, wantRiskLevels) {
+		t.Fatalf("trigger_taxonomy.risk_levels = %#v, want %#v", policy.TriggerTaxonomy.RiskLevels, wantRiskLevels)
+	}
+
+	wantHumanizationRules := []string{
+		"quiet_hours",
+		"calendar_aware",
+		"energy_aware",
+		"batchable",
+		"defer_until_morning",
+		"avoid_weekends",
+		"prefer_weekends",
+		"urgency_override",
+		"manual_approval_required",
+	}
+	if !slices.Equal(policy.TriggerTaxonomy.HumanizationRules, wantHumanizationRules) {
+		t.Fatalf("trigger_taxonomy.humanization_rules = %#v, want %#v", policy.TriggerTaxonomy.HumanizationRules, wantHumanizationRules)
+	}
+}
+
 func mustWriteConfig(t *testing.T, path string, content string) {
 	t.Helper()
 
