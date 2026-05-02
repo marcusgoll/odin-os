@@ -27,11 +27,16 @@ func (service Service) RunStartupRecovery(ctx context.Context) (StartupResult, e
 	if err != nil {
 		return StartupResult{}, err
 	}
+	executingRuns, err := service.Store.ListRunsByStatus(ctx, "executing")
+	if err != nil {
+		return StartupResult{}, err
+	}
 	preparingRuns, err := service.Store.ListRunsByStatus(ctx, "preparing")
 	if err != nil {
 		return StartupResult{}, err
 	}
-	runs := append(runningRuns, preparingRuns...)
+	runs := append(runningRuns, executingRuns...)
+	runs = append(runs, preparingRuns...)
 
 	result := StartupResult{}
 	for _, run := range runs {

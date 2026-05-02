@@ -444,7 +444,7 @@ func isOpenWorkItemStatus(status string) bool {
 
 func isActiveRunAttemptStatus(status string) bool {
 	switch strings.ToLower(strings.TrimSpace(status)) {
-	case "running", "started":
+	case "running", "executing", "started":
 		return true
 	default:
 		return false

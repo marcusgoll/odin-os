@@ -566,6 +566,12 @@ type UpdateRunAndTaskStatusParams struct {
 	TaskStatus string
 }
 
+type ClaimRunExecutionParams struct {
+	TaskID int64
+	RunID  int64
+	Actor  string
+}
+
 type FinishRunParams struct {
 	RunID          int64
 	Status         string

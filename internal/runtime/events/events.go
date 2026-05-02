@@ -42,6 +42,7 @@ const (
 	EventTaskQueueStateChanged              Type = "task.queue_state_changed"
 	EventRunStarted                         Type = "run.started"
 	EventRunStatusChanged                   Type = "run.status_changed"
+	EventRunExecutionClaimed                Type = "run.execution_claimed"
 	EventRunFinished                        Type = "run.finished"
 	EventApprovalRequested                  Type = "approval.requested"
 	EventApprovalResolved                   Type = "approval.resolved"
@@ -206,6 +207,13 @@ type RunStartedPayload struct {
 type RunStatusChangedPayload struct {
 	PreviousStatus string `json:"previous_status"`
 	Status         string `json:"status"`
+}
+
+type RunExecutionClaimedPayload struct {
+	TaskID         int64  `json:"task_id"`
+	PreviousStatus string `json:"previous_status"`
+	Status         string `json:"status"`
+	Actor          string `json:"actor"`
 }
 
 type RunFinishedPayload struct {

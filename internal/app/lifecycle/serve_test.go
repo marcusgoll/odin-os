@@ -672,6 +672,106 @@ service:
 	}
 }
 
+func TestRunServeCompletesAlreadyDispatchedIntakeRun(t *testing.T) {
+	configureLifecycleHarnessDriver(t)
+	t.Setenv("HOME", t.TempDir())
+	root := testRepoRoot(t)
+	writeRuntimeConfig(t, root, `
+version: 1
+runtime:
+  root: .
+service:
+  http_addr: 127.0.0.1:0
+  startup_recovery: false
+`)
+	payloadPath := filepath.Join(t.TempDir(), "payload.json")
+	if err := os.WriteFile(payloadPath, []byte(`{"body":"prepare automatic execution proof"}`), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	if err := Run(context.Background(), root, []string{"project", "select", testProjectKey}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+		t.Fatalf("Run(project select) error = %v", err)
+	}
+	if err := Run(context.Background(), root, []string{"transition", "set", "cutover", "confirm", "because", "automatic execute test"}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+		t.Fatalf("Run(transition set) error = %v", err)
+	}
+	if err := Run(context.Background(), root, []string{
+		"intake", "raw", "create",
+		"--source", "operator",
+		"--project", "alpha-cli",
+		"--title", "Prepare automatic execution proof",
+		"--type", "request",
+		"--dedup-key", "serve-execute-intake",
+		"--requested-by", "codex",
+		"--payload-file", payloadPath,
+		"--json",
+	}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+		t.Fatalf("Run(intake raw create) error = %v", err)
+	}
+	if err := Run(context.Background(), root, []string{"intake", "process", "--id", "intake-1", "--json"}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+		t.Fatalf("Run(intake process) error = %v", err)
+	}
+	if err := Run(context.Background(), root, []string{"intake", "review", "accept", "intake-1", "--json"}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+		t.Fatalf("Run(intake review accept) error = %v", err)
+	}
+	if err := Run(context.Background(), root, []string{"work", "dispatch", "--task", "intake-review-1", "--json"}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+		t.Fatalf("Run(work dispatch) error = %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	ctx = withServeLoopConfig(ctx, serveLoopConfig{
+		taskInterval: 20 * time.Millisecond,
+	})
+	time.AfterFunc(700*time.Millisecond, cancel)
+
+	var stdout bytes.Buffer
+	err := Run(ctx, root, []string{"serve"}, strings.NewReader(""), &stdout)
+	if err != nil && !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run(serve) error = %v\n%s", err, stdout.String())
+	}
+
+	var runsOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"runs", "--json"}, strings.NewReader(""), &runsOutput); err != nil {
+		t.Fatalf("Run(runs --json) error = %v", err)
+	}
+	if output := runsOutput.String(); !strings.Contains(output, `"run_id": 1`) || !strings.Contains(output, `"status": "completed"`) {
+		t.Fatalf("runs output = %s, want automatically completed dispatched run", output)
+	}
+
+	var jobsOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"jobs", "--json"}, strings.NewReader(""), &jobsOutput); err != nil {
+		t.Fatalf("Run(jobs --json) error = %v", err)
+	}
+	if output := jobsOutput.String(); !strings.Contains(output, `"task_id": 1`) || !strings.Contains(output, `"status": "completed"`) || strings.Contains(output, `"current_run_id"`) {
+		t.Fatalf("jobs output = %s, want completed job without active run", output)
+	}
+
+	var logsOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"logs", "--json"}, strings.NewReader(""), &logsOutput); err != nil {
+		t.Fatalf("Run(logs --json) error = %v", err)
+	}
+	if output := logsOutput.String(); !strings.Contains(output, `"type": "run.execution_claimed"`) || !strings.Contains(output, `"actor": "serve.task_loop"`) || strings.Count(output, `"type": "run.finished"`) != 1 {
+		t.Fatalf("logs output = %s, want one automatic execution claim and one terminal run event", output)
+	}
+
+	var statusOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"work", "status"}, strings.NewReader(""), &statusOutput); err != nil {
+		t.Fatalf("Run(work status) error = %v", err)
+	}
+	for _, want := range []string{"work_items=1", "open_work_items=0", "active_run_attempts=0", "dispatch=work_dispatch"} {
+		if !strings.Contains(statusOutput.String(), want) {
+			t.Fatalf("work status output = %s, want %s", statusOutput.String(), want)
+		}
+	}
+
+	var manualOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"work", "execute", "--task", "intake-review-1", "--json"}, strings.NewReader(""), &manualOutput); err != nil {
+		t.Fatalf("Run(work execute terminal) error = %v\n%s", err, manualOutput.String())
+	}
+	if output := manualOutput.String(); !strings.Contains(output, `"executed": false`) || !strings.Contains(output, `"reason": "task_not_running"`) {
+		t.Fatalf("manual execute output = %s, want safe non-executing terminal response", output)
+	}
+}
+
 func TestServeEnsuresSocialCopilotJobWhenEnabled(t *testing.T) {
 	root := createRuntimeRoot(t)
 	writeRuntimeConfig(t, root, `

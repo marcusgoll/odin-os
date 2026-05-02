@@ -425,6 +425,18 @@ func (service Service) ExecuteNextQueued(ctx context.Context) error {
 	}); err != nil {
 		return err
 	}
+	claimedTask, claimedRun, claimed, err := service.Store.ClaimRunExecution(ctx, sqlite.ClaimRunExecutionParams{
+		TaskID: task.ID,
+		RunID:  run.ID,
+		Actor:  "serve.queue_executor",
+	})
+	if err != nil {
+		return err
+	}
+	if claimed {
+		task = claimedTask
+		run = claimedRun
+	}
 	if !service.dispatchAllowed() {
 		return service.interruptDispatch(ctx, run.ID)
 	}
@@ -592,10 +604,46 @@ func (service Service) DispatchTaskRunAttempt(ctx context.Context, taskID int64)
 }
 
 func (service Service) ExecuteDispatchedRun(ctx context.Context, taskID int64) (RunExecutionOutcome, error) {
+	return service.executeDispatchedRun(ctx, taskID, "operator")
+}
+
+func (service Service) ExecuteNextDispatchedRun(ctx context.Context) (RunExecutionOutcome, error) {
 	if service.Store == nil {
 		return RunExecutionOutcome{}, fmt.Errorf("job store is required")
 	}
+	executingRuns, err := service.Store.ListRunsByStatus(ctx, "executing")
+	if err != nil {
+		return RunExecutionOutcome{}, err
+	}
+	if len(executingRuns) > 0 {
+		run := executingRuns[0]
+		task, err := service.Store.GetTask(ctx, run.TaskID)
+		if err != nil {
+			return RunExecutionOutcome{}, err
+		}
+		return RunExecutionOutcome{Task: task, Run: &run, Reason: "run_already_executing"}, nil
+	}
+	runs, err := service.Store.ListRunsByStatus(ctx, "running")
+	if err != nil {
+		return RunExecutionOutcome{}, err
+	}
+	for _, run := range runs {
+		task, err := service.Store.GetTask(ctx, run.TaskID)
+		if err != nil {
+			return RunExecutionOutcome{}, err
+		}
+		if task.Status != "running" || task.CurrentRunID == nil || *task.CurrentRunID != run.ID {
+			continue
+		}
+		return service.executeDispatchedRun(ctx, task.ID, "serve.task_loop")
+	}
+	return RunExecutionOutcome{Reason: "no_running_dispatched_runs"}, nil
+}
 
+func (service Service) executeDispatchedRun(ctx context.Context, taskID int64, actor string) (RunExecutionOutcome, error) {
+	if service.Store == nil {
+		return RunExecutionOutcome{}, fmt.Errorf("job store is required")
+	}
 	task, err := service.Store.GetTask(ctx, taskID)
 	if err != nil {
 		return RunExecutionOutcome{}, err
@@ -612,10 +660,37 @@ func (service Service) ExecuteDispatchedRun(ctx context.Context, taskID int64) (
 		return RunExecutionOutcome{}, err
 	}
 	if run.Status != "running" {
+		reason := "run_not_running"
+		if run.Status == "executing" {
+			reason = "run_already_executing"
+		}
 		return RunExecutionOutcome{
 			Task:   task,
 			Run:    &run,
-			Reason: "run_not_running",
+			Reason: reason,
+		}, nil
+	}
+
+	task, run, claimed, err := service.Store.ClaimRunExecution(ctx, sqlite.ClaimRunExecutionParams{
+		TaskID: task.ID,
+		RunID:  run.ID,
+		Actor:  actor,
+	})
+	if err != nil {
+		return RunExecutionOutcome{}, err
+	}
+	if !claimed {
+		reason := "run_not_running"
+		if run.Status == "executing" {
+			reason = "run_already_executing"
+		}
+		if task.Status != "running" || task.CurrentRunID == nil {
+			reason = "task_not_running"
+		}
+		return RunExecutionOutcome{
+			Task:   task,
+			Run:    &run,
+			Reason: reason,
 		}, nil
 	}
 
@@ -819,6 +894,18 @@ func (service Service) ExecuteTaskWithRequest(ctx context.Context, taskID int64,
 	}
 	task = updatedTask
 	run = updatedRun
+	claimedTask, claimedRun, claimed, err := service.Store.ClaimRunExecution(ctx, sqlite.ClaimRunExecutionParams{
+		TaskID: task.ID,
+		RunID:  run.ID,
+		Actor:  "operator",
+	})
+	if err != nil {
+		return ExecutionOutcome{}, err
+	}
+	if claimed {
+		task = claimedTask
+		run = claimedRun
+	}
 
 	spec.Metadata["branch_name"] = assignment.BranchName
 	spec.Metadata["repo_root"] = assignment.RepoRoot

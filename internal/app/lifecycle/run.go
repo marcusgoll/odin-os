@@ -3777,6 +3777,13 @@ func attemptDispatchIfReady(ctx context.Context, healthService healthsvc.Service
 	if !ready {
 		return nil
 	}
+	outcome, err := service.ExecuteNextDispatchedRun(ctx)
+	if err != nil {
+		return err
+	}
+	if outcome.Executed || outcome.Reason == "run_already_executing" {
+		return nil
+	}
 	return service.ExecuteNextQueued(ctx)
 }
 

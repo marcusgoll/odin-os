@@ -1607,6 +1607,26 @@ func appendRunStatusChangedEventTx(ctx context.Context, tx *sql.Tx, task Task, p
 	})
 }
 
+func appendRunExecutionClaimedEventTx(ctx context.Context, tx *sql.Tx, task Task, previous Run, updated Run, actor string, occurredAt time.Time) error {
+	projectID := task.ProjectID
+	return appendEventTx(ctx, tx, eventInsert{
+		StreamType: runtimeevents.StreamRun,
+		StreamID:   updated.ID,
+		EventType:  runtimeevents.EventRunExecutionClaimed,
+		Scope:      task.Scope,
+		ProjectID:  &projectID,
+		TaskID:     &task.ID,
+		RunID:      &updated.ID,
+		Payload: runtimeevents.RunExecutionClaimedPayload{
+			TaskID:         task.ID,
+			PreviousStatus: previous.Status,
+			Status:         updated.Status,
+			Actor:          actor,
+		},
+		OccurredAt: occurredAt,
+	})
+}
+
 func appendTaskQueueStateChangedEventTx(ctx context.Context, tx *sql.Tx, previous Task, updated Task, occurredAt time.Time) error {
 	if previous.Status == updated.Status &&
 		previous.NextEligibleAt.Equal(updated.NextEligibleAt) &&
@@ -1809,6 +1829,59 @@ func (store *Store) UpdateRunAndTaskStatus(ctx context.Context, params UpdateRun
 	})
 
 	return task, run, err
+}
+
+func (store *Store) ClaimRunExecution(ctx context.Context, params ClaimRunExecutionParams) (Task, Run, bool, error) {
+	now := store.now()
+	actor := strings.TrimSpace(params.Actor)
+	if actor == "" {
+		actor = "operator"
+	}
+	var (
+		task    Task
+		run     Run
+		claimed bool
+	)
+
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		currentRun, currentTask, err := store.getRunWithTaskTx(ctx, tx, params.RunID)
+		if err != nil {
+			return err
+		}
+		if currentRun.TaskID != params.TaskID || currentTask.ID != params.TaskID {
+			return sql.ErrNoRows
+		}
+
+		task = currentTask
+		run = currentRun
+		if currentTask.Status != "running" || currentTask.CurrentRunID == nil || *currentTask.CurrentRunID != currentRun.ID || currentRun.Status != "running" {
+			return nil
+		}
+
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE runs
+			SET status = ?
+			WHERE id = ?
+			  AND status = ?
+		`, "executing", currentRun.ID, "running"); err != nil {
+			return err
+		}
+
+		updatedRun := currentRun
+		updatedRun.Status = "executing"
+		if err := appendRunStatusChangedEventTx(ctx, tx, currentTask, currentRun, updatedRun, now); err != nil {
+			return err
+		}
+		if err := appendRunExecutionClaimedEventTx(ctx, tx, currentTask, currentRun, updatedRun, actor, now); err != nil {
+			return err
+		}
+
+		run = updatedRun
+		claimed = true
+		return nil
+	})
+
+	return task, run, claimed, err
 }
 
 func releaseActiveWorktreeLeaseByTaskRunTx(ctx context.Context, tx *sql.Tx, taskID int64, runID int64, now time.Time) error {
