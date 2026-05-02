@@ -38,3 +38,56 @@ approval_policy:
     - modify production systems
     - share public content
     - change financial/legal/medical-related records
+
+trigger_taxonomy:
+  trigger_types:
+    - event_based
+    - cron_based
+    - humanized
+    - hybrid
+  trigger_sources:
+    - inbox
+    - email
+    - calendar
+    - task_system
+    - logs
+    - github
+    - file_change
+    - automation_result
+    - habit_tracker
+    - household
+    - finance_admin
+    - personal_note
+    - external_webhook
+    - manual_user_command
+  action_types:
+    - classify
+    - summarize
+    - create_ticket
+    - create_task
+    - schedule
+    - defer
+    - remind
+    - route_to_agent
+    - request_approval
+    - run_workflow
+    - archive
+    - escalate
+    - retry
+    - self_heal
+    - log_only
+  risk_levels:
+    - low
+    - medium
+    - high
+    - critical
+  humanization_rules:
+    - quiet_hours
+    - calendar_aware
+    - energy_aware
+    - batchable
+    - defer_until_morning
+    - avoid_weekends
+    - prefer_weekends
+    - urgency_override
+    - manual_approval_required
