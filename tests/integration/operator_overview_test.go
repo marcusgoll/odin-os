@@ -144,7 +144,7 @@ func TestOperatorOverviewUsesCanonicalBoard(t *testing.T) {
 		"Memory",
 		"Intake Inbox",
 		"wiring=not_yet_wired source=task_intakes status=linked_evidence count=1",
-		"raw Intake Item authority not implemented",
+		"raw Intake Items are available through odin intake raw",
 		"linked_intake=1 source=n8n type=ci_failure dedup_key=ci_failure:pbs:overview requested_by=n8n",
 		"work_status=queued initiative=pbs",
 		"Automation Triggers",

@@ -45,6 +45,12 @@ type CreateTaskParams struct {
 	Resolved    scope.Resolution
 	Title       string
 	RequestedBy string
+	Key         string
+}
+
+type CreateTaskResult struct {
+	Task    sqlite.Task
+	Created bool
 }
 
 type ExecutionOutcome struct {
@@ -155,14 +161,20 @@ func (service Service) CreateTaskFromAct(ctx context.Context, resolved scope.Res
 }
 
 func (service Service) CreateTask(ctx context.Context, params CreateTaskParams) (sqlite.Task, error) {
+	result, err := service.CreateTaskOnce(ctx, params)
+	return result.Task, err
+}
+
+func (service Service) CreateTaskOnce(ctx context.Context, params CreateTaskParams) (CreateTaskResult, error) {
 	requestedBy := strings.TrimSpace(params.RequestedBy)
 	if requestedBy == "" {
 		requestedBy = "operator"
 	}
-	return service.createManagedTask(ctx, params.Resolved, params.Title, createManagedTaskInput{
+	return service.createManagedTaskOnce(ctx, params.Resolved, params.Title, createManagedTaskInput{
 		requestedBy:           requestedBy,
 		taskCompanionID:       0,
 		requestedSwarmTrigger: "",
+		key:                   strings.TrimSpace(params.Key),
 	})
 }
 
@@ -179,6 +191,7 @@ type createManagedTaskInput struct {
 	taskCompanionID       int64
 	requestedSwarmTrigger string
 	actionKey             string
+	key                   string
 }
 
 func (service Service) CreateTaskFromActWithAction(ctx context.Context, resolved scope.Resolution, title string, actionKey string) (sqlite.Task, error) {
@@ -191,13 +204,18 @@ func (service Service) CreateTaskFromActWithAction(ctx context.Context, resolved
 }
 
 func (service Service) createManagedTask(ctx context.Context, resolved scope.Resolution, title string, input createManagedTaskInput) (sqlite.Task, error) {
+	result, err := service.createManagedTaskOnce(ctx, resolved, title, input)
+	return result.Task, err
+}
+
+func (service Service) createManagedTaskOnce(ctx context.Context, resolved scope.Resolution, title string, input createManagedTaskInput) (CreateTaskResult, error) {
 	if resolved.Kind == scope.ScopeGlobal {
-		return sqlite.Task{}, fmt.Errorf("act mode requires a non-global scope")
+		return CreateTaskResult{}, fmt.Errorf("act mode requires a non-global scope")
 	}
 
 	projectManifest, taskScope, err := service.taskOwnerForScope(resolved)
 	if err != nil {
-		return sqlite.Task{}, err
+		return CreateTaskResult{}, err
 	}
 
 	transitions := service.Transitions
@@ -207,15 +225,15 @@ func (service Service) createManagedTask(ctx context.Context, resolved scope.Res
 
 	project, err := transitions.RegisterManagedProject(ctx, projectManifest)
 	if err != nil {
-		return sqlite.Task{}, err
+		return CreateTaskResult{}, err
 	}
 	workspace, err := workspaces.Service{Store: service.Store}.BootstrapDefaultWorkspace(ctx)
 	if err != nil {
-		return sqlite.Task{}, err
+		return CreateTaskResult{}, err
 	}
 	defaultCompanion, err := companions.Service{Store: service.Store}.GetCompanionByKey(ctx, workspace.ID, workspace.DefaultCompanionKey)
 	if err != nil {
-		return sqlite.Task{}, err
+		return CreateTaskResult{}, err
 	}
 
 	taskCompanionID := input.taskCompanionID
@@ -225,11 +243,11 @@ func (service Service) createManagedTask(ctx context.Context, resolved scope.Res
 
 	ownerCompanionID, err := service.initiativeOwnerCompanionID(ctx, workspace.ID, project.Key, defaultCompanion.ID)
 	if err != nil {
-		return sqlite.Task{}, err
+		return CreateTaskResult{}, err
 	}
 	initiative, err := transitions.RegisterManagedProjectInitiative(ctx, workspace.ID, project, ownerCompanionID)
 	if err != nil {
-		return sqlite.Task{}, err
+		return CreateTaskResult{}, err
 	}
 
 	now := time.Now().UTC()
@@ -241,9 +259,16 @@ func (service Service) createManagedTask(ctx context.Context, resolved scope.Res
 		actionKey = supportedSwarmTrigger(input.requestedSwarmTrigger)
 	}
 
-	return service.Store.CreateTask(ctx, sqlite.CreateTaskParams{
+	key := strings.TrimSpace(input.key)
+	if key == "" {
+		key = fmt.Sprintf("%s-%s-%09d", slugify(title), now.Format("20060102-150405"), now.Nanosecond())
+	} else if existing, err := service.Store.GetTaskByProjectAndKey(ctx, project.ID, key); err == nil {
+		return CreateTaskResult{Task: existing, Created: false}, nil
+	}
+
+	task, err := service.Store.CreateTask(ctx, sqlite.CreateTaskParams{
 		ProjectID:    project.ID,
-		Key:          fmt.Sprintf("%s-%s-%09d", slugify(title), now.Format("20060102-150405"), now.Nanosecond()),
+		Key:          key,
 		Title:        title,
 		ActionKey:    actionKey,
 		Status:       "queued",
@@ -254,6 +279,18 @@ func (service Service) createManagedTask(ctx context.Context, resolved scope.Res
 		CompanionID:  &taskCompanionID,
 		WorkKind:     taskScope,
 	})
+	if err != nil && input.key != "" && isTaskKeyConflict(err) {
+		existing, getErr := service.Store.GetTaskByProjectAndKey(ctx, project.ID, key)
+		return CreateTaskResult{Task: existing, Created: false}, getErr
+	}
+	return CreateTaskResult{Task: task, Created: true}, err
+}
+
+func isTaskKeyConflict(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(err.Error(), "UNIQUE constraint failed: tasks.project_id, tasks.key")
 }
 
 func supportedSwarmTrigger(trigger string) string {

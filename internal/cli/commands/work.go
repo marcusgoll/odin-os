@@ -9,6 +9,7 @@ import (
 
 	"odin-os/internal/cli/scope"
 	"odin-os/internal/core/projects"
+	"odin-os/internal/core/workspaces"
 	"odin-os/internal/registry"
 	"odin-os/internal/runtime/jobs"
 	"odin-os/internal/runtime/projections"
@@ -55,6 +56,16 @@ func runWorkStatus(ctx context.Context, store *sqlite.Store, snapshot registry.S
 	if err != nil {
 		return err
 	}
+	rawIntakeItems, err := store.ListIntakeItems(ctx, sqlite.ListIntakeItemsParams{WorkspaceID: workspaces.DefaultWorkspaceKey})
+	if err != nil {
+		return err
+	}
+	intakeReviewItems := 0
+	for _, item := range rawIntakeItems {
+		if isReviewableIntakeStatus(item.Status) {
+			intakeReviewItems++
+		}
+	}
 
 	openWorkItems := 0
 	for _, view := range taskViews {
@@ -72,12 +83,14 @@ func runWorkStatus(ctx context.Context, store *sqlite.Store, snapshot registry.S
 
 	_, err = fmt.Fprintf(
 		stdout,
-		"work_items=%d open_work_items=%d active_run_attempts=%d pending_approvals=%d delivery_profiles=%d dispatch=not_implemented intake=manual_read_only\n",
+		"work_items=%d open_work_items=%d active_run_attempts=%d pending_approvals=%d delivery_profiles=%d raw_intake_items=%d intake_review_items=%d dispatch=not_implemented intake=raw_cli\n",
 		len(taskViews),
 		openWorkItems,
 		activeRunAttempts,
 		len(approvalViews),
 		len(deliveryProfiles(snapshot)),
+		len(rawIntakeItems),
+		intakeReviewItems,
 	)
 	return err
 }
@@ -220,6 +233,15 @@ func isOpenWorkItemStatus(status string) bool {
 func isActiveRunAttemptStatus(status string) bool {
 	switch strings.ToLower(strings.TrimSpace(status)) {
 	case "running", "started":
+		return true
+	default:
+		return false
+	}
+}
+
+func isReviewableIntakeStatus(status string) bool {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "review_required", "needs_clarification", "duplicate_linked_or_suppressed":
 		return true
 	default:
 		return false

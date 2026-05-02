@@ -118,8 +118,8 @@ func TestBuildReturnsCanonicalOverviewFromCurrentAuthority(t *testing.T) {
 	if view.IntakeInbox.Status != "linked_evidence" {
 		t.Fatalf("Intake status = %q, want linked_evidence", view.IntakeInbox.Status)
 	}
-	if !strings.Contains(view.IntakeInbox.Note, "raw Intake Item authority not implemented") {
-		t.Fatalf("Intake note = %q, want raw authority disclaimer", view.IntakeInbox.Note)
+	if !strings.Contains(view.IntakeInbox.Note, "raw Intake Items are available through odin intake raw") {
+		t.Fatalf("Intake note = %q, want raw intake operator surface note", view.IntakeInbox.Note)
 	}
 	if len(view.IntakeInbox.Items) != 1 {
 		t.Fatalf("Intake items len = %d, want 1", len(view.IntakeInbox.Items))

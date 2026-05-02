@@ -33,52 +33,64 @@ const (
 type Type string
 
 const (
-	EventServiceLifecycleChanged          Type = "service.lifecycle_changed"
-	EventServiceHeartbeatRecorded         Type = "service.heartbeat_recorded"
-	EventProjectCreated                   Type = "project.created"
-	EventTaskCreated                      Type = "task.created"
-	EventTaskStatusChanged                Type = "task.status_changed"
-	EventTaskQueueStateChanged            Type = "task.queue_state_changed"
-	EventRunStarted                       Type = "run.started"
-	EventRunStatusChanged                 Type = "run.status_changed"
-	EventRunFinished                      Type = "run.finished"
-	EventApprovalRequested                Type = "approval.requested"
-	EventApprovalResolved                 Type = "approval.resolved"
-	EventIncidentOpened                   Type = "incident.opened"
-	EventIncidentResolved                 Type = "incident.resolved"
-	EventIncidentEscalated                Type = "incident.escalated"
-	EventRecoveryStarted                  Type = "recovery.started"
-	EventRecoveryActionExecuted           Type = "recovery.action_executed"
-	EventRecoveryCompleted                Type = "recovery.completed"
-	EventRegistryVersionRecorded          Type = "registry_version.recorded"
-	EventExecutorHealthRecorded           Type = "executor_health.recorded"
-	EventContextPacketCreated             Type = "context_packet.created"
-	EventConversationTranscriptRecorded   Type = "conversation.transcript_recorded"
-	EventMemorySummaryRecorded            Type = "memory.summary_recorded"
-	EventMemorySummaryUpdated             Type = "memory.summary_updated"
-	EventIntakeItemCreated                Type = "intake.item_created"
-	EventAutomationTriggerCreated         Type = "automation_trigger.created"
-	EventAutomationTriggerFireRequested   Type = "automation_trigger.fire_requested"
-	EventAutomationTriggerEvaluated       Type = "automation_trigger.evaluated"
-	EventAutomationTriggerMaterialized    Type = "automation_trigger.materialized"
-	EventAutomationTriggerErrored         Type = "automation_trigger.errored"
-	EventAutomationTriggerStatusChanged   Type = "automation_trigger.status_changed"
-	EventProjectTransitionChanged         Type = "project.transition_changed"
-	EventProjectShadowObservationRecorded Type = "project.shadow_observation_recorded"
-	EventProjectCompareReportRecorded     Type = "project.compare_report_recorded"
-	EventProjectTransitionDenied          Type = "project.transition_denied"
-	EventLearningProposalCreated          Type = "learning.proposal_created"
-	EventLearningProposalSubmitted        Type = "learning.proposal_submitted"
-	EventLearningProposalPromotionReady   Type = "learning.proposal_promotion_ready"
-	EventLearningProposalRejected         Type = "learning.proposal_rejected"
-	EventLearningEvaluationRecorded       Type = "learning.evaluation_recorded"
-	EventLearningPromotionApplied         Type = "learning.promotion_applied"
-	EventLearningPromotionRolledBack      Type = "learning.promotion_rolled_back"
-	EventSkillLifecycleRecorded           Type = "skill.lifecycle_recorded"
-	EventCapabilitySnapshotPublished      Type = "capability.snapshot_published"
-	EventCapabilitySnapshotRejected       Type = "capability.snapshot_rejected"
-	EventFollowUpMaterialized             Type = "follow_up.materialized"
-	EventFollowUpPaused                   Type = "follow_up.paused"
+	EventServiceLifecycleChanged            Type = "service.lifecycle_changed"
+	EventServiceHeartbeatRecorded           Type = "service.heartbeat_recorded"
+	EventProjectCreated                     Type = "project.created"
+	EventTaskCreated                        Type = "task.created"
+	EventTaskStatusChanged                  Type = "task.status_changed"
+	EventTaskQueueStateChanged              Type = "task.queue_state_changed"
+	EventRunStarted                         Type = "run.started"
+	EventRunStatusChanged                   Type = "run.status_changed"
+	EventRunFinished                        Type = "run.finished"
+	EventApprovalRequested                  Type = "approval.requested"
+	EventApprovalResolved                   Type = "approval.resolved"
+	EventIncidentOpened                     Type = "incident.opened"
+	EventIncidentResolved                   Type = "incident.resolved"
+	EventIncidentEscalated                  Type = "incident.escalated"
+	EventRecoveryStarted                    Type = "recovery.started"
+	EventRecoveryActionExecuted             Type = "recovery.action_executed"
+	EventRecoveryCompleted                  Type = "recovery.completed"
+	EventRegistryVersionRecorded            Type = "registry_version.recorded"
+	EventExecutorHealthRecorded             Type = "executor_health.recorded"
+	EventContextPacketCreated               Type = "context_packet.created"
+	EventConversationTranscriptRecorded     Type = "conversation.transcript_recorded"
+	EventMemorySummaryRecorded              Type = "memory.summary_recorded"
+	EventMemorySummaryUpdated               Type = "memory.summary_updated"
+	EventIntakeItemCreated                  Type = "intake.item_created"
+	EventIntakeProcessingStarted            Type = "intake.processing_started"
+	EventIntakeClassified                   Type = "intake.classified"
+	EventIntakeDedupeReviewed               Type = "intake.dedupe_reviewed"
+	EventIntakeRouted                       Type = "intake.routed"
+	EventIntakeDraftArtifactCreated         Type = "intake.draft_artifact_created"
+	EventIntakeClarificationNeeded          Type = "intake.clarification_needed"
+	EventIntakeDuplicateLinkedOrSuppressed  Type = "intake.duplicate_linked_or_suppressed"
+	EventIntakeReviewAccepted               Type = "intake.review_accepted"
+	EventIntakeReviewRejected               Type = "intake.review_rejected"
+	EventIntakeReviewClarificationRequested Type = "intake.review_clarification_requested"
+	EventIntakeReviewArchived               Type = "intake.review_archived"
+	EventIntakeReviewDuplicateAcknowledged  Type = "intake.review_duplicate_acknowledged"
+	EventAutomationTriggerCreated           Type = "automation_trigger.created"
+	EventAutomationTriggerFireRequested     Type = "automation_trigger.fire_requested"
+	EventAutomationTriggerEvaluated         Type = "automation_trigger.evaluated"
+	EventAutomationTriggerMaterialized      Type = "automation_trigger.materialized"
+	EventAutomationTriggerErrored           Type = "automation_trigger.errored"
+	EventAutomationTriggerStatusChanged     Type = "automation_trigger.status_changed"
+	EventProjectTransitionChanged           Type = "project.transition_changed"
+	EventProjectShadowObservationRecorded   Type = "project.shadow_observation_recorded"
+	EventProjectCompareReportRecorded       Type = "project.compare_report_recorded"
+	EventProjectTransitionDenied            Type = "project.transition_denied"
+	EventLearningProposalCreated            Type = "learning.proposal_created"
+	EventLearningProposalSubmitted          Type = "learning.proposal_submitted"
+	EventLearningProposalPromotionReady     Type = "learning.proposal_promotion_ready"
+	EventLearningProposalRejected           Type = "learning.proposal_rejected"
+	EventLearningEvaluationRecorded         Type = "learning.evaluation_recorded"
+	EventLearningPromotionApplied           Type = "learning.promotion_applied"
+	EventLearningPromotionRolledBack        Type = "learning.promotion_rolled_back"
+	EventSkillLifecycleRecorded             Type = "skill.lifecycle_recorded"
+	EventCapabilitySnapshotPublished        Type = "capability.snapshot_published"
+	EventCapabilitySnapshotRejected         Type = "capability.snapshot_rejected"
+	EventFollowUpMaterialized               Type = "follow_up.materialized"
+	EventFollowUpPaused                     Type = "follow_up.paused"
 )
 
 const (
@@ -299,6 +311,28 @@ type IntakeItemCreatedPayload struct {
 	Status              string `json:"status"`
 	Scope               string `json:"scope,omitempty"`
 	ScopeKey            string `json:"scope_key,omitempty"`
+}
+
+type IntakeProcessingPayload struct {
+	IntakeItemID       int64  `json:"intake_item_id"`
+	Status             string `json:"status,omitempty"`
+	Stage              string `json:"stage"`
+	Result             string `json:"result,omitempty"`
+	RoutedOutcome      string `json:"routed_outcome,omitempty"`
+	CanonicalIntakeID  *int64 `json:"canonical_intake_id,omitempty"`
+	DraftArtifactKind  string `json:"draft_artifact_kind,omitempty"`
+	ClarificationState string `json:"clarification_state,omitempty"`
+}
+
+type IntakeReviewDecisionPayload struct {
+	IntakeItemID      int64  `json:"intake_item_id"`
+	Decision          string `json:"decision"`
+	Status            string `json:"status"`
+	PreviousStatus    string `json:"previous_status,omitempty"`
+	WorkCreated       bool   `json:"work_created"`
+	WorkItemID        *int64 `json:"work_item_id,omitempty"`
+	WorkItemKey       string `json:"work_item_key,omitempty"`
+	CanonicalIntakeID *int64 `json:"canonical_intake_id,omitempty"`
 }
 
 type AutomationTriggerCreatedPayload struct {

@@ -594,6 +594,116 @@ func (store *Store) ListIntakeItems(ctx context.Context, params ListIntakeItemsP
 	return items, rows.Err()
 }
 
+func (store *Store) GetIntakeItem(ctx context.Context, id int64) (IntakeItem, error) {
+	row := store.db.QueryRowContext(ctx, `
+		SELECT id, workspace_id, source_family, external_object_id, event_kind, subject, dedupe_key,
+			dedupe_recipe_version, source_facts_json, status, scope, scope_key, summary,
+			conversation_transcript_id, canonical_intake_item_id, suppression_reason, routing_notes,
+			received_at, created_at, updated_at
+		FROM intake_items
+		WHERE id = ?
+	`, id)
+	return scanIntakeItem(row)
+}
+
+func (store *Store) ProcessIntakeItem(ctx context.Context, params ProcessIntakeItemParams) (IntakeItem, error) {
+	now := store.now()
+	var item IntakeItem
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		existing, err := store.getIntakeItemTx(ctx, tx, params.ID)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE intake_items
+			SET status = ?, summary = ?, canonical_intake_item_id = ?, suppression_reason = ?, routing_notes = ?, updated_at = ?
+			WHERE id = ?
+		`,
+			params.Status,
+			params.Summary,
+			nullInt64(params.CanonicalIntakeItemID),
+			params.SuppressionReason,
+			params.RoutingNotes,
+			formatTime(now),
+			params.ID,
+		); err != nil {
+			return err
+		}
+		for _, processingEvent := range params.Events {
+			payload := processingEvent.Payload
+			if payload == nil {
+				payload = runtimeevents.IntakeProcessingPayload{
+					IntakeItemID:      params.ID,
+					Status:            params.Status,
+					Stage:             processingEvent.Stage,
+					Result:            processingEvent.Result,
+					CanonicalIntakeID: params.CanonicalIntakeItemID,
+				}
+			}
+			if err := appendEventTx(ctx, tx, eventInsert{
+				StreamType: runtimeevents.StreamIntakeItem,
+				StreamID:   params.ID,
+				EventType:  processingEvent.Type,
+				Scope:      existing.Scope,
+				Payload:    payload,
+				OccurredAt: now,
+			}); err != nil {
+				return err
+			}
+		}
+		item, err = store.getIntakeItemTx(ctx, tx, params.ID)
+		return err
+	})
+	return item, err
+}
+
+func (store *Store) ReviewIntakeItem(ctx context.Context, params ReviewIntakeItemParams) (IntakeItem, error) {
+	now := store.now()
+	var item IntakeItem
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		existing, err := store.getIntakeItemTx(ctx, tx, params.ID)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE intake_items
+			SET status = ?, summary = ?, routing_notes = ?, updated_at = ?
+			WHERE id = ?
+		`,
+			params.Status,
+			params.Summary,
+			params.RoutingNotes,
+			formatTime(now),
+			params.ID,
+		); err != nil {
+			return err
+		}
+		if err := appendEventTx(ctx, tx, eventInsert{
+			StreamType: runtimeevents.StreamIntakeItem,
+			StreamID:   params.ID,
+			EventType:  params.EventType,
+			Scope:      existing.Scope,
+			TaskID:     params.WorkItemID,
+			Payload: runtimeevents.IntakeReviewDecisionPayload{
+				IntakeItemID:      params.ID,
+				Decision:          params.Decision,
+				Status:            params.Status,
+				PreviousStatus:    existing.Status,
+				WorkCreated:       params.WorkCreated,
+				WorkItemID:        params.WorkItemID,
+				WorkItemKey:       params.WorkItemKey,
+				CanonicalIntakeID: existing.CanonicalIntakeItemID,
+			},
+			OccurredAt: now,
+		}); err != nil {
+			return err
+		}
+		item, err = store.getIntakeItemTx(ctx, tx, params.ID)
+		return err
+	})
+	return item, err
+}
+
 func (store *Store) UpsertAutomationTrigger(ctx context.Context, params UpsertAutomationTriggerParams) (AutomationTrigger, error) {
 	now := store.now()
 	params = normalizeAutomationTriggerParams(params)
@@ -7141,6 +7251,18 @@ func (store *Store) getInitiativeTx(ctx context.Context, tx *sql.Tx, workspaceID
 		WHERE workspace_id = ? AND key = ?
 	`, workspaceID, key)
 	return scanInitiative(row)
+}
+
+func (store *Store) getIntakeItemTx(ctx context.Context, tx *sql.Tx, id int64) (IntakeItem, error) {
+	row := tx.QueryRowContext(ctx, `
+		SELECT id, workspace_id, source_family, external_object_id, event_kind, subject, dedupe_key,
+			dedupe_recipe_version, source_facts_json, status, scope, scope_key, summary,
+			conversation_transcript_id, canonical_intake_item_id, suppression_reason, routing_notes,
+			received_at, created_at, updated_at
+		FROM intake_items
+		WHERE id = ?
+	`, id)
+	return scanIntakeItem(row)
 }
 
 type eventInsert struct {

@@ -615,6 +615,20 @@ func runIntake(ctx context.Context, app bootstrap.App, stdin io.Reader, args []s
 		return err
 	}
 
+	if command.Name == "help" {
+		_, err := fmt.Fprintln(stdout, commands.IntakeUsage)
+		return err
+	}
+	if command.Name == "raw" {
+		return runRawIntake(ctx, app, stdin, command, jsonOutput || command.JSON, stdout)
+	}
+	if command.Name == "process" {
+		return runProcessIntake(ctx, app, command, jsonOutput || command.JSON, stdout)
+	}
+	if command.Name == "review" {
+		return runReviewIntake(ctx, app, command, jsonOutput || command.JSON, stdout)
+	}
+
 	payloadJSON, err := loadIntakePayloadJSON(command.PayloadFile, stdin)
 	if err != nil {
 		return err
@@ -691,6 +705,825 @@ func runIntake(ctx context.Context, app bootstrap.App, stdin io.Reader, args []s
 
 	_, err = fmt.Fprintf(stdout, "queued intake task id=%d key=%s source=%s type=%s\n", task.ID, task.Key, intake.Source, intake.IntakeType)
 	return err
+}
+
+const rawIntakePayloadPolicy = "stored_in_source_facts_json"
+
+type rawIntakeItemView struct {
+	ID                     int64           `json:"id"`
+	Key                    string          `json:"key"`
+	Status                 string          `json:"status"`
+	Source                 string          `json:"source"`
+	IntakeType             string          `json:"intake_type"`
+	DedupKey               string          `json:"dedup_key"`
+	RequestedBy            string          `json:"requested_by"`
+	CreatedAt              string          `json:"created_at"`
+	PayloadPolicy          string          `json:"payload_policy"`
+	ProjectKey             string          `json:"project_key,omitempty"`
+	Title                  string          `json:"title,omitempty"`
+	Summary                string          `json:"summary,omitempty"`
+	CanonicalIntakeKey     string          `json:"canonical_intake_key,omitempty"`
+	SuppressionReason      string          `json:"suppression_reason,omitempty"`
+	AcceptedWorkItemID     int64           `json:"accepted_work_item_id,omitempty"`
+	AcceptedWorkItemKey    string          `json:"accepted_work_item_key,omitempty"`
+	AcceptedWorkItemStatus string          `json:"accepted_work_item_status,omitempty"`
+	Payload                json.RawMessage `json:"payload,omitempty"`
+	Processing             json.RawMessage `json:"processing,omitempty"`
+}
+
+type rawIntakeItemEnvelope struct {
+	IntakeItem rawIntakeItemView `json:"intake_item"`
+}
+
+type rawIntakeItemListView struct {
+	IntakeItems []rawIntakeItemView `json:"intake_items"`
+}
+
+type intakeProcessView struct {
+	IntakeItem     rawIntakeItemView `json:"intake_item"`
+	Outcome        string            `json:"outcome"`
+	Classification string            `json:"classification"`
+	DedupeResult   string            `json:"dedupe_result"`
+	RoutedOutcome  string            `json:"routed_outcome"`
+}
+
+type intakeReviewQueueView struct {
+	IntakeItems []rawIntakeItemView `json:"intake_items"`
+}
+
+type intakeReviewDecisionView struct {
+	IntakeItem  rawIntakeItemView   `json:"intake_item"`
+	Decision    string              `json:"decision"`
+	WorkCreated bool                `json:"work_created"`
+	WorkItem    *reviewWorkItemView `json:"work_item,omitempty"`
+}
+
+type reviewWorkItemView struct {
+	ID     int64  `json:"id"`
+	Key    string `json:"key"`
+	Status string `json:"status"`
+}
+
+type intakeProcessingNotes struct {
+	ProcessingStarted bool                  `json:"processing_started"`
+	Classification    intakeClassification  `json:"classification"`
+	Dedupe            intakeDedupeReview    `json:"dedupe"`
+	Routing           intakeRoutingResult   `json:"routing"`
+	DraftArtifact     *intakeDraftArtifact  `json:"draft_artifact,omitempty"`
+	Clarification     *intakeClarification  `json:"clarification,omitempty"`
+	Review            *intakeReviewDecision `json:"review,omitempty"`
+}
+
+type intakeClassification struct {
+	Result string `json:"result"`
+	Reason string `json:"reason"`
+}
+
+type intakeDedupeReview struct {
+	Result             string `json:"result"`
+	CanonicalIntakeKey string `json:"canonical_intake_key,omitempty"`
+}
+
+type intakeRoutingResult struct {
+	Outcome    string `json:"outcome"`
+	ProjectKey string `json:"project_key,omitempty"`
+}
+
+type intakeDraftArtifact struct {
+	Kind        string `json:"kind"`
+	Title       string `json:"title"`
+	ReviewState string `json:"review_state"`
+}
+
+type intakeClarification struct {
+	State   string   `json:"state"`
+	Prompts []string `json:"prompts"`
+}
+
+type intakeReviewDecision struct {
+	Decision    string            `json:"decision"`
+	WorkCreated bool              `json:"work_created"`
+	WorkItem    *intakeReviewWork `json:"work_item,omitempty"`
+}
+
+type intakeReviewWork struct {
+	ID     int64  `json:"id"`
+	Key    string `json:"key"`
+	Status string `json:"status"`
+}
+
+func runRawIntake(ctx context.Context, app bootstrap.App, stdin io.Reader, command commands.IntakeCommand, jsonOutput bool, stdout io.Writer) error {
+	switch command.RawAction {
+	case "create":
+		return runRawIntakeCreate(ctx, app, stdin, command, jsonOutput, stdout)
+	case "list":
+		return runRawIntakeList(ctx, app, command, jsonOutput, stdout)
+	case "show":
+		return runRawIntakeShow(ctx, app, command, jsonOutput, stdout)
+	default:
+		return errors.New(commands.IntakeUsage)
+	}
+}
+
+func runRawIntakeCreate(ctx context.Context, app bootstrap.App, stdin io.Reader, command commands.IntakeCommand, jsonOutput bool, stdout io.Writer) error {
+	payloadJSON, err := loadIntakePayloadJSON(command.PayloadFile, stdin)
+	if err != nil {
+		return err
+	}
+
+	scopeKind := ""
+	scopeKey := ""
+	if command.ProjectKey != "" {
+		if _, ok := app.Registry.Lookup(command.ProjectKey); !ok {
+			return fmt.Errorf("unknown project %q", command.ProjectKey)
+		}
+		scopeKind = "project"
+		scopeKey = command.ProjectKey
+	}
+
+	sourceFactsJSON, err := rawIntakeSourceFactsJSON(command, payloadJSON)
+	if err != nil {
+		return err
+	}
+
+	item, err := app.Store.CreateIntakeItem(ctx, sqlite.CreateIntakeItemParams{
+		WorkspaceID:         workspaces.DefaultWorkspaceKey,
+		SourceFamily:        command.Source,
+		ExternalObjectID:    command.ActionKey,
+		EventKind:           command.Type,
+		Subject:             command.Title,
+		DedupeKey:           command.DedupKey,
+		DedupeRecipeVersion: "raw-cli-v1",
+		SourceFactsJSON:     sourceFactsJSON,
+		Status:              "received",
+		Scope:               scopeKind,
+		ScopeKey:            scopeKey,
+		Summary:             command.Title,
+	})
+	if err != nil {
+		return err
+	}
+
+	view, err := rawIntakeView(item, true)
+	if err != nil {
+		return err
+	}
+	if jsonOutput {
+		return commands.WriteJSON(stdout, rawIntakeItemEnvelope{IntakeItem: view})
+	}
+	_, err = fmt.Fprintf(
+		stdout,
+		"raw_intake=%s status=%s source=%s type=%s dedup_key=%s requested_by=%s payload_policy=%s\n",
+		view.Key,
+		view.Status,
+		view.Source,
+		view.IntakeType,
+		view.DedupKey,
+		view.RequestedBy,
+		view.PayloadPolicy,
+	)
+	return err
+}
+
+func runRawIntakeList(ctx context.Context, app bootstrap.App, command commands.IntakeCommand, jsonOutput bool, stdout io.Writer) error {
+	params := sqlite.ListIntakeItemsParams{
+		WorkspaceID: workspaces.DefaultWorkspaceKey,
+		Status:      command.Type,
+	}
+	if command.ProjectKey != "" {
+		if _, ok := app.Registry.Lookup(command.ProjectKey); !ok {
+			return fmt.Errorf("unknown project %q", command.ProjectKey)
+		}
+		params.Scope = "project"
+		params.ScopeKey = command.ProjectKey
+	}
+	items, err := app.Store.ListIntakeItems(ctx, params)
+	if err != nil {
+		return err
+	}
+	views := make([]rawIntakeItemView, 0, len(items))
+	for _, item := range items {
+		view, err := rawIntakeView(item, false)
+		if err != nil {
+			return err
+		}
+		views = append(views, view)
+	}
+	if jsonOutput {
+		return commands.WriteJSON(stdout, rawIntakeItemListView{IntakeItems: views})
+	}
+	if len(views) == 0 {
+		_, err := fmt.Fprintln(stdout, "no raw intake items")
+		return err
+	}
+	for _, view := range views {
+		if _, err := fmt.Fprintf(stdout, "raw_intake=%s status=%s source=%s type=%s dedup_key=%s requested_by=%s created_at=%s payload_policy=%s\n", view.Key, view.Status, view.Source, view.IntakeType, view.DedupKey, view.RequestedBy, view.CreatedAt, view.PayloadPolicy); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func runRawIntakeShow(ctx context.Context, app bootstrap.App, command commands.IntakeCommand, jsonOutput bool, stdout io.Writer) error {
+	item, err := findRawIntakeItem(ctx, app.Store, command.ShowRef)
+	if err != nil {
+		return err
+	}
+	view, err := rawIntakeView(item, true)
+	if err != nil {
+		return err
+	}
+	if jsonOutput {
+		return commands.WriteJSON(stdout, rawIntakeItemEnvelope{IntakeItem: view})
+	}
+	_, err = fmt.Fprintf(stdout, "raw_intake=%s status=%s source=%s type=%s dedup_key=%s requested_by=%s created_at=%s payload_policy=%s\n", view.Key, view.Status, view.Source, view.IntakeType, view.DedupKey, view.RequestedBy, view.CreatedAt, view.PayloadPolicy)
+	return err
+}
+
+func runProcessIntake(ctx context.Context, app bootstrap.App, command commands.IntakeCommand, jsonOutput bool, stdout io.Writer) error {
+	item, err := findRawIntakeItem(ctx, app.Store, command.ShowRef)
+	if err != nil {
+		return err
+	}
+	outcome, err := buildIntakeProcessOutcome(ctx, app.Store, item)
+	if err != nil {
+		return err
+	}
+	notesJSON, err := json.Marshal(outcome.notes)
+	if err != nil {
+		return err
+	}
+	processed, err := app.Store.ProcessIntakeItem(ctx, sqlite.ProcessIntakeItemParams{
+		ID:                    item.ID,
+		Status:                outcome.status,
+		Summary:               outcome.summary,
+		CanonicalIntakeItemID: outcome.canonicalIntakeItemID,
+		SuppressionReason:     outcome.suppressionReason,
+		RoutingNotes:          string(notesJSON),
+		Events:                outcome.events,
+	})
+	if err != nil {
+		return err
+	}
+	view, err := rawIntakeView(processed, true)
+	if err != nil {
+		return err
+	}
+	processView := intakeProcessView{
+		IntakeItem:     view,
+		Outcome:        outcome.status,
+		Classification: outcome.notes.Classification.Result,
+		DedupeResult:   outcome.notes.Dedupe.Result,
+		RoutedOutcome:  outcome.notes.Routing.Outcome,
+	}
+	if jsonOutput {
+		return commands.WriteJSON(stdout, processView)
+	}
+	_, err = fmt.Fprintf(stdout, "raw_intake=%s status=%s classification=%s dedupe=%s routed_outcome=%s\n", view.Key, view.Status, processView.Classification, processView.DedupeResult, processView.RoutedOutcome)
+	return err
+}
+
+func runReviewIntake(ctx context.Context, app bootstrap.App, command commands.IntakeCommand, jsonOutput bool, stdout io.Writer) error {
+	switch command.ReviewAction {
+	case "list":
+		return runIntakeReviewList(ctx, app, jsonOutput, stdout)
+	case "show":
+		return runIntakeReviewShow(ctx, app, command, jsonOutput, stdout)
+	case "accept", "reject", "clarify", "archive":
+		return runIntakeReviewDecision(ctx, app, command, jsonOutput, stdout)
+	default:
+		return errors.New(commands.IntakeUsage)
+	}
+}
+
+func runIntakeReviewList(ctx context.Context, app bootstrap.App, jsonOutput bool, stdout io.Writer) error {
+	items, err := app.Store.ListIntakeItems(ctx, sqlite.ListIntakeItemsParams{WorkspaceID: workspaces.DefaultWorkspaceKey})
+	if err != nil {
+		return err
+	}
+	views := make([]rawIntakeItemView, 0)
+	for _, item := range items {
+		if !isReviewableIntakeStatus(item.Status) {
+			continue
+		}
+		view, err := rawIntakeView(item, false)
+		if err != nil {
+			return err
+		}
+		views = append(views, view)
+	}
+	if jsonOutput {
+		return commands.WriteJSON(stdout, intakeReviewQueueView{IntakeItems: views})
+	}
+	if len(views) == 0 {
+		_, err := fmt.Fprintln(stdout, "no intake review items")
+		return err
+	}
+	for _, view := range views {
+		if _, err := fmt.Fprintf(stdout, "review_intake=%s status=%s source=%s type=%s dedup_key=%s title=%s\n", view.Key, view.Status, view.Source, view.IntakeType, view.DedupKey, view.Title); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func runIntakeReviewShow(ctx context.Context, app bootstrap.App, command commands.IntakeCommand, jsonOutput bool, stdout io.Writer) error {
+	item, err := findRawIntakeItem(ctx, app.Store, command.ShowRef)
+	if err != nil {
+		return err
+	}
+	view, err := rawIntakeView(item, true)
+	if err != nil {
+		return err
+	}
+	if jsonOutput {
+		return commands.WriteJSON(stdout, rawIntakeItemEnvelope{IntakeItem: view})
+	}
+	_, err = fmt.Fprintf(stdout, "review_intake=%s status=%s source=%s type=%s dedup_key=%s title=%s\n", view.Key, view.Status, view.Source, view.IntakeType, view.DedupKey, view.Title)
+	return err
+}
+
+func runIntakeReviewDecision(ctx context.Context, app bootstrap.App, command commands.IntakeCommand, jsonOutput bool, stdout io.Writer) error {
+	item, err := findRawIntakeItem(ctx, app.Store, command.ShowRef)
+	if err != nil {
+		return err
+	}
+	notes, err := intakeNotesFromItem(item)
+	if err != nil {
+		return err
+	}
+
+	status := item.Status
+	summary := item.Summary
+	decision := ""
+	eventType := runtimeevents.EventIntakeReviewRejected
+	var task *sqlite.Task
+	workCreated := false
+
+	switch command.ReviewAction {
+	case "accept":
+		if item.Status == "accepted" && notes.Review != nil && notes.Review.WorkItem != nil {
+			existing := sqlite.Task{
+				ID:     notes.Review.WorkItem.ID,
+				Key:    notes.Review.WorkItem.Key,
+				Status: notes.Review.WorkItem.Status,
+			}
+			if existing.ID > 0 {
+				if loaded, err := app.Store.GetTask(ctx, existing.ID); err == nil {
+					existing = loaded
+				}
+			}
+			task = &existing
+			workCreated = false
+			decision = "accepted"
+			eventType = runtimeevents.EventIntakeReviewAccepted
+			status = "accepted"
+			summary = "Draft task accepted by operator and linked to existing work item"
+			break
+		}
+		if item.Status == "duplicate_linked_or_suppressed" {
+			decision = "duplicate_acknowledged"
+			eventType = runtimeevents.EventIntakeReviewDuplicateAcknowledged
+			status = "duplicate_linked_or_suppressed"
+			summary = "Duplicate raw intake acknowledged; no duplicate work item created"
+			break
+		}
+		if item.Status != "review_required" || notes.DraftArtifact == nil || notes.DraftArtifact.Kind != "draft_task" {
+			return fmt.Errorf("intake %s cannot be accepted into work from status %s", rawIntakeKey(item.ID), item.Status)
+		}
+		created, createdNow, err := createTaskFromReviewedIntake(ctx, app, item)
+		if err != nil {
+			return err
+		}
+		task = &created
+		workCreated = createdNow
+		decision = "accepted"
+		eventType = runtimeevents.EventIntakeReviewAccepted
+		status = "accepted"
+		summary = "Draft task accepted by operator and promoted to real work item"
+	case "reject":
+		decision = "rejected"
+		eventType = runtimeevents.EventIntakeReviewRejected
+		status = "rejected"
+		summary = "Intake review rejected by operator; no work item created"
+	case "clarify":
+		decision = "clarification_requested"
+		eventType = runtimeevents.EventIntakeReviewClarificationRequested
+		status = "needs_clarification"
+		summary = "Operator requested clarification before work promotion"
+		notes.Clarification = &intakeClarification{
+			State: "needs_clarification",
+			Prompts: []string{
+				"What exact outcome should Odin prepare?",
+				"Which acceptance criteria make this ready for work?",
+			},
+		}
+	case "archive":
+		decision = "archived"
+		eventType = runtimeevents.EventIntakeReviewArchived
+		status = "archived"
+		summary = "Intake archived by operator; no work item created"
+	default:
+		return errors.New(commands.IntakeUsage)
+	}
+
+	review := intakeReviewDecision{Decision: decision, WorkCreated: workCreated}
+	var workItemID *int64
+	workItemKey := ""
+	if task != nil {
+		id := task.ID
+		workItemID = &id
+		workItemKey = task.Key
+		review.WorkItem = &intakeReviewWork{ID: task.ID, Key: task.Key, Status: task.Status}
+	}
+	notes.Review = &review
+	notesJSON, err := json.Marshal(notes)
+	if err != nil {
+		return err
+	}
+	updated, err := app.Store.ReviewIntakeItem(ctx, sqlite.ReviewIntakeItemParams{
+		ID:           item.ID,
+		Status:       status,
+		Summary:      summary,
+		RoutingNotes: string(notesJSON),
+		EventType:    eventType,
+		Decision:     decision,
+		WorkCreated:  workCreated,
+		WorkItemID:   workItemID,
+		WorkItemKey:  workItemKey,
+	})
+	if err != nil {
+		return err
+	}
+	view, err := rawIntakeView(updated, true)
+	if err != nil {
+		return err
+	}
+	result := intakeReviewDecisionView{
+		IntakeItem:  view,
+		Decision:    decision,
+		WorkCreated: workCreated,
+	}
+	if task != nil {
+		result.WorkItem = &reviewWorkItemView{ID: task.ID, Key: task.Key, Status: task.Status}
+	}
+	if jsonOutput {
+		return commands.WriteJSON(stdout, result)
+	}
+	workKey := "none"
+	if task != nil {
+		workKey = task.Key
+	}
+	_, err = fmt.Fprintf(stdout, "review_intake=%s decision=%s status=%s work_created=%t work_item=%s\n", view.Key, decision, view.Status, workCreated, workKey)
+	return err
+}
+
+func createTaskFromReviewedIntake(ctx context.Context, app bootstrap.App, item sqlite.IntakeItem) (sqlite.Task, bool, error) {
+	if item.Scope != "project" || strings.TrimSpace(item.ScopeKey) == "" {
+		return sqlite.Task{}, false, fmt.Errorf("intake %s has no project scope for work promotion", rawIntakeKey(item.ID))
+	}
+	manifest, ok := app.Registry.Lookup(item.ScopeKey)
+	if !ok {
+		return sqlite.Task{}, false, fmt.Errorf("unknown project %q", item.ScopeKey)
+	}
+	resolved := scope.Resolve(scope.ResolveInput{
+		ExplicitTarget: &scope.Target{
+			ProjectKey:    manifest.Key,
+			SystemProject: manifest.SystemProject,
+		},
+	})
+	result, err := jobs.Service{
+		Store:       app.Store,
+		Registry:    app.Registry,
+		Transitions: projects.Service{Store: app.Store},
+		Now:         time.Now,
+	}.CreateTaskOnce(ctx, jobs.CreateTaskParams{
+		Resolved:    resolved,
+		Title:       item.Subject,
+		RequestedBy: "intake_review:" + rawIntakeKey(item.ID),
+		Key:         reviewedIntakeWorkItemKey(item.ID),
+	})
+	return result.Task, result.Created, err
+}
+
+func reviewedIntakeWorkItemKey(id int64) string {
+	return fmt.Sprintf("intake-review-%d", id)
+}
+
+func intakeNotesFromItem(item sqlite.IntakeItem) (intakeProcessingNotes, error) {
+	var notes intakeProcessingNotes
+	if strings.TrimSpace(item.RoutingNotes) == "" {
+		return notes, nil
+	}
+	if err := json.Unmarshal([]byte(item.RoutingNotes), &notes); err != nil {
+		return intakeProcessingNotes{}, fmt.Errorf("intake routing notes: %w", err)
+	}
+	return notes, nil
+}
+
+func isReviewableIntakeStatus(status string) bool {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "review_required", "needs_clarification", "duplicate_linked_or_suppressed":
+		return true
+	default:
+		return false
+	}
+}
+
+type intakeProcessOutcome struct {
+	status                string
+	summary               string
+	canonicalIntakeItemID *int64
+	suppressionReason     string
+	notes                 intakeProcessingNotes
+	events                []sqlite.IntakeItemProcessingEvent
+}
+
+func buildIntakeProcessOutcome(ctx context.Context, store *sqlite.Store, item sqlite.IntakeItem) (intakeProcessOutcome, error) {
+	notes := intakeProcessingNotes{ProcessingStarted: true}
+	notes.Classification = classifyIntakeItem(item)
+
+	duplicate, err := findCanonicalDuplicate(ctx, store, item)
+	if err != nil {
+		return intakeProcessOutcome{}, err
+	}
+	notes.Dedupe = intakeDedupeReview{Result: "unique"}
+	if duplicate != nil {
+		notes.Dedupe = intakeDedupeReview{
+			Result:             "duplicate_linked",
+			CanonicalIntakeKey: rawIntakeKey(*duplicate),
+		}
+		notes.Routing = intakeRoutingResult{Outcome: "duplicate_linked_or_suppressed", ProjectKey: item.ScopeKey}
+		outcome := intakeProcessOutcome{
+			status:                "duplicate_linked_or_suppressed",
+			summary:               "Duplicate raw intake linked to " + rawIntakeKey(*duplicate),
+			canonicalIntakeItemID: duplicate,
+			suppressionReason:     "duplicate_dedupe_key",
+			notes:                 notes,
+		}
+		outcome.events = intakeProcessingEvents(item.ID, outcome.status, notes, duplicate)
+		return outcome, nil
+	}
+
+	if notes.Classification.Result == "ambiguous" {
+		notes.Routing = intakeRoutingResult{Outcome: "needs_clarification", ProjectKey: item.ScopeKey}
+		notes.Clarification = &intakeClarification{
+			State: "needs_clarification",
+			Prompts: []string{
+				"What outcome should Odin prepare for review?",
+				"Which project or operator surface owns this intake?",
+			},
+		}
+		outcome := intakeProcessOutcome{
+			status:  "needs_clarification",
+			summary: "Raw intake needs operator clarification before drafting work",
+			notes:   notes,
+		}
+		outcome.events = intakeProcessingEvents(item.ID, outcome.status, notes, nil)
+		return outcome, nil
+	}
+
+	notes.Routing = intakeRoutingResult{Outcome: "draft_task", ProjectKey: item.ScopeKey}
+	notes.DraftArtifact = &intakeDraftArtifact{
+		Kind:        "draft_task",
+		Title:       item.Subject,
+		ReviewState: "review_required",
+	}
+	outcome := intakeProcessOutcome{
+		status:  "review_required",
+		summary: "Draft task prepared for human review; no work item created",
+		notes:   notes,
+	}
+	outcome.events = intakeProcessingEvents(item.ID, outcome.status, notes, nil)
+	return outcome, nil
+}
+
+func classifyIntakeItem(item sqlite.IntakeItem) intakeClassification {
+	title := strings.ToLower(strings.TrimSpace(item.Subject))
+	if title == "" || title == "help" || title == "help with this" || title == "fix this" || len(strings.Fields(title)) < 3 {
+		return intakeClassification{Result: "ambiguous", Reason: "intake title is too vague to draft reviewable work"}
+	}
+	return intakeClassification{Result: "actionable_request", Reason: "intake has enough subject detail for a draft review artifact"}
+}
+
+func findCanonicalDuplicate(ctx context.Context, store *sqlite.Store, item sqlite.IntakeItem) (*int64, error) {
+	if strings.TrimSpace(item.DedupeKey) == "" {
+		return nil, nil
+	}
+	items, err := store.ListIntakeItems(ctx, sqlite.ListIntakeItemsParams{WorkspaceID: item.WorkspaceID})
+	if err != nil {
+		return nil, err
+	}
+	for _, candidate := range items {
+		if candidate.ID >= item.ID {
+			continue
+		}
+		if candidate.DedupeKey == item.DedupeKey {
+			id := candidate.ID
+			return &id, nil
+		}
+	}
+	return nil, nil
+}
+
+func intakeProcessingEvents(itemID int64, status string, notes intakeProcessingNotes, canonical *int64) []sqlite.IntakeItemProcessingEvent {
+	events := []sqlite.IntakeItemProcessingEvent{
+		{
+			Type:   runtimeevents.EventIntakeProcessingStarted,
+			Stage:  "processing_started",
+			Result: "started",
+		},
+		{
+			Type:   runtimeevents.EventIntakeClassified,
+			Stage:  "classification",
+			Result: notes.Classification.Result,
+		},
+		{
+			Type:   runtimeevents.EventIntakeDedupeReviewed,
+			Stage:  "dedupe",
+			Result: notes.Dedupe.Result,
+		},
+		{
+			Type:   runtimeevents.EventIntakeRouted,
+			Stage:  "routing",
+			Result: notes.Routing.Outcome,
+			Payload: runtimeevents.IntakeProcessingPayload{
+				IntakeItemID:  itemID,
+				Status:        status,
+				Stage:         "routing",
+				RoutedOutcome: notes.Routing.Outcome,
+			},
+		},
+	}
+	switch {
+	case notes.DraftArtifact != nil:
+		events = append(events, sqlite.IntakeItemProcessingEvent{
+			Type:   runtimeevents.EventIntakeDraftArtifactCreated,
+			Stage:  "draft_artifact",
+			Result: notes.DraftArtifact.Kind,
+			Payload: runtimeevents.IntakeProcessingPayload{
+				IntakeItemID:      itemID,
+				Status:            status,
+				Stage:             "draft_artifact",
+				RoutedOutcome:     notes.Routing.Outcome,
+				DraftArtifactKind: notes.DraftArtifact.Kind,
+			},
+		})
+	case notes.Clarification != nil:
+		events = append(events, sqlite.IntakeItemProcessingEvent{
+			Type:   runtimeevents.EventIntakeClarificationNeeded,
+			Stage:  "clarification",
+			Result: notes.Clarification.State,
+			Payload: runtimeevents.IntakeProcessingPayload{
+				IntakeItemID:       itemID,
+				Status:             status,
+				Stage:              "clarification",
+				RoutedOutcome:      notes.Routing.Outcome,
+				ClarificationState: notes.Clarification.State,
+			},
+		})
+	case canonical != nil:
+		events = append(events, sqlite.IntakeItemProcessingEvent{
+			Type:   runtimeevents.EventIntakeDuplicateLinkedOrSuppressed,
+			Stage:  "duplicate",
+			Result: notes.Dedupe.Result,
+			Payload: runtimeevents.IntakeProcessingPayload{
+				IntakeItemID:      itemID,
+				Status:            status,
+				Stage:             "duplicate",
+				RoutedOutcome:     notes.Routing.Outcome,
+				CanonicalIntakeID: canonical,
+			},
+		})
+	}
+	return events
+}
+
+func rawIntakeSourceFactsJSON(command commands.IntakeCommand, payloadJSON string) (string, error) {
+	var payload json.RawMessage
+	if strings.TrimSpace(payloadJSON) == "" {
+		payloadJSON = "{}"
+	}
+	if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
+		return "", fmt.Errorf("raw intake payload json: %w", err)
+	}
+	facts := map[string]any{
+		"source":         command.Source,
+		"intake_type":    command.Type,
+		"dedup_key":      command.DedupKey,
+		"requested_by":   command.RequestedBy,
+		"payload_policy": rawIntakePayloadPolicy,
+		"payload":        payload,
+	}
+	if command.ProjectKey != "" {
+		facts["project_key"] = command.ProjectKey
+	}
+	if command.ActionKey != "" {
+		facts["external_object_id"] = command.ActionKey
+	}
+	encoded, err := json.Marshal(facts)
+	if err != nil {
+		return "", err
+	}
+	return string(encoded), nil
+}
+
+func rawIntakeView(item sqlite.IntakeItem, includePayload bool) (rawIntakeItemView, error) {
+	var facts map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(item.SourceFactsJSON), &facts); err != nil {
+		return rawIntakeItemView{}, fmt.Errorf("raw intake source facts json: %w", err)
+	}
+	view := rawIntakeItemView{
+		ID:            item.ID,
+		Key:           rawIntakeKey(item.ID),
+		Status:        item.Status,
+		Source:        item.SourceFamily,
+		IntakeType:    item.EventKind,
+		DedupKey:      item.DedupeKey,
+		CreatedAt:     item.CreatedAt.UTC().Format(time.RFC3339Nano),
+		PayloadPolicy: rawIntakePayloadPolicy,
+		Title:         item.Subject,
+		Summary:       item.Summary,
+	}
+	if item.Scope == "project" {
+		view.ProjectKey = item.ScopeKey
+	}
+	if item.CanonicalIntakeItemID != nil {
+		view.CanonicalIntakeKey = rawIntakeKey(*item.CanonicalIntakeItemID)
+	}
+	view.SuppressionReason = item.SuppressionReason
+	if strings.TrimSpace(item.RoutingNotes) != "" && json.Valid([]byte(item.RoutingNotes)) {
+		view.Processing = json.RawMessage(item.RoutingNotes)
+		var notes intakeProcessingNotes
+		if err := json.Unmarshal([]byte(item.RoutingNotes), &notes); err == nil && notes.Review != nil && notes.Review.WorkItem != nil {
+			view.AcceptedWorkItemID = notes.Review.WorkItem.ID
+			view.AcceptedWorkItemKey = notes.Review.WorkItem.Key
+			view.AcceptedWorkItemStatus = notes.Review.WorkItem.Status
+		}
+	}
+	view.RequestedBy = rawStringFact(facts, "requested_by")
+	if view.RequestedBy == "" {
+		view.RequestedBy = item.SourceFamily
+	}
+	if policy := rawStringFact(facts, "payload_policy"); policy != "" {
+		view.PayloadPolicy = policy
+	}
+	if includePayload {
+		if payload, ok := facts["payload"]; ok {
+			view.Payload = payload
+		}
+	}
+	return view, nil
+}
+
+func rawStringFact(facts map[string]json.RawMessage, key string) string {
+	raw, ok := facts[key]
+	if !ok {
+		return ""
+	}
+	var value string
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return ""
+	}
+	return value
+}
+
+func findRawIntakeItem(ctx context.Context, store *sqlite.Store, ref string) (sqlite.IntakeItem, error) {
+	ref = strings.TrimSpace(ref)
+	idRef := strings.TrimPrefix(ref, "intake-")
+	if id, err := strconv.ParseInt(idRef, 10, 64); err == nil && id > 0 {
+		items, err := store.ListIntakeItems(ctx, sqlite.ListIntakeItemsParams{WorkspaceID: workspaces.DefaultWorkspaceKey})
+		if err != nil {
+			return sqlite.IntakeItem{}, err
+		}
+		for _, item := range items {
+			if item.ID == id {
+				return item, nil
+			}
+		}
+		return sqlite.IntakeItem{}, fmt.Errorf("raw intake item %q not found", ref)
+	}
+	items, err := store.ListIntakeItems(ctx, sqlite.ListIntakeItemsParams{WorkspaceID: workspaces.DefaultWorkspaceKey})
+	if err != nil {
+		return sqlite.IntakeItem{}, err
+	}
+	var matches []sqlite.IntakeItem
+	for _, item := range items {
+		if item.DedupeKey == ref {
+			matches = append(matches, item)
+		}
+	}
+	if len(matches) == 1 {
+		return matches[0], nil
+	}
+	if len(matches) > 1 {
+		return sqlite.IntakeItem{}, fmt.Errorf("raw intake key %q matched %d items; use intake-<id>", ref, len(matches))
+	}
+	return sqlite.IntakeItem{}, fmt.Errorf("raw intake item %q not found", ref)
+}
+
+func rawIntakeKey(id int64) string {
+	return fmt.Sprintf("intake-%d", id)
 }
 
 func loadIntakePayloadJSON(payloadFile string, stdin io.Reader) (string, error) {
@@ -794,9 +1627,10 @@ func runLogs(ctx context.Context, app bootstrap.App, args []string, stdout io.Wr
 		logViews := make([]commands.LogView, 0, len(records))
 		for _, record := range records {
 			logViews = append(logViews, commands.LogView{
-				ID:    record.ID,
-				Type:  string(record.Type),
-				Scope: record.Scope,
+				ID:      record.ID,
+				Type:    string(record.Type),
+				Scope:   record.Scope,
+				Payload: record.Payload,
 			})
 		}
 		return commands.WriteJSON(stdout, commands.LogsView{Logs: logViews})
@@ -1894,13 +2728,13 @@ func listLogs(ctx context.Context, store *sqlite.Store, resolved scope.Resolutio
 		return nil, err
 	}
 
-	filtered := make([]runtimeevents.Record, 0, 10)
+	filtered := make([]runtimeevents.Record, 0, 50)
 	for _, record := range records {
 		if !matchesEventScope(record.Scope, resolved) {
 			continue
 		}
 		filtered = append(filtered, record)
-		if len(filtered) == 10 {
+		if len(filtered) == 50 {
 			break
 		}
 	}

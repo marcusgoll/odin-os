@@ -382,6 +382,388 @@ func TestRunOverviewJSONUsesCanonicalView(t *testing.T) {
 	}
 }
 
+func TestRunIntakeRawCreateListShowDoesNotCreateTask(t *testing.T) {
+	t.Parallel()
+
+	root := testRepoRoot(t)
+	payloadPath := filepath.Join(t.TempDir(), "payload.json")
+	if err := os.WriteFile(payloadPath, []byte(`{"body":"capture this raw request"}`), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	var createOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{
+		"intake", "raw", "create",
+		"--source", "operator",
+		"--project", "odin-core",
+		"--title", "Capture governed intake",
+		"--type", "request",
+		"--dedup-key", "governed-intake:1",
+		"--requested-by", "codex",
+		"--payload-file", payloadPath,
+		"--json",
+	}, strings.NewReader(""), &createOutput); err != nil {
+		t.Fatalf("Run(intake raw create) error = %v", err)
+	}
+	if output := createOutput.String(); !strings.Contains(output, `"status": "received"`) || !strings.Contains(output, `"key": "intake-1"`) {
+		t.Fatalf("create output = %s, want received intake-1", output)
+	}
+
+	var duplicateOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{
+		"intake", "raw", "create",
+		"--source", "operator",
+		"--project", "odin-core",
+		"--title", "Capture governed intake duplicate arrival",
+		"--type", "request",
+		"--dedup-key", "governed-intake:1",
+		"--requested-by", "codex",
+		"--payload-file", payloadPath,
+		"--json",
+	}, strings.NewReader(""), &duplicateOutput); err != nil {
+		t.Fatalf("Run(duplicate intake raw create) error = %v", err)
+	}
+	if output := duplicateOutput.String(); !strings.Contains(output, `"status": "received"`) || !strings.Contains(output, `"key": "intake-2"`) {
+		t.Fatalf("duplicate output = %s, want received intake-2", output)
+	}
+
+	var listOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"intake", "raw", "list", "--json"}, strings.NewReader(""), &listOutput); err != nil {
+		t.Fatalf("Run(intake raw list) error = %v", err)
+	}
+	if output := listOutput.String(); !strings.Contains(output, `"requested_by": "codex"`) || !strings.Contains(output, `"payload_policy": "stored_in_source_facts_json"`) {
+		t.Fatalf("list output = %s, want provenance and payload policy", output)
+	}
+	if output := listOutput.String(); strings.Count(output, `"dedup_key": "governed-intake:1"`) != 2 {
+		t.Fatalf("list output = %s, want two raw duplicate arrivals", output)
+	}
+
+	var showOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"intake", "raw", "show", "intake-1", "--json"}, strings.NewReader(""), &showOutput); err != nil {
+		t.Fatalf("Run(intake raw show) error = %v", err)
+	}
+	if output := showOutput.String(); !strings.Contains(output, `"dedup_key": "governed-intake:1"`) || !strings.Contains(output, `"payload"`) {
+		t.Fatalf("show output = %s, want dedupe and payload visibility", output)
+	}
+
+	var jobsOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"jobs", "--json"}, strings.NewReader(""), &jobsOutput); err != nil {
+		t.Fatalf("Run(jobs --json) error = %v", err)
+	}
+	if output := jobsOutput.String(); !strings.Contains(output, `"jobs": []`) {
+		t.Fatalf("jobs output = %s, want no jobs", output)
+	}
+
+	var workStatusOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"work", "status"}, strings.NewReader(""), &workStatusOutput); err != nil {
+		t.Fatalf("Run(work status) error = %v", err)
+	}
+	if output := workStatusOutput.String(); !strings.Contains(output, "work_items=0") || !strings.Contains(output, "raw_intake_items=2") || !strings.Contains(output, "intake=raw_cli") {
+		t.Fatalf("work status output = %s, want raw intake status without work items", output)
+	}
+
+	var logsOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"logs", "--json"}, strings.NewReader(""), &logsOutput); err != nil {
+		t.Fatalf("Run(logs --json) error = %v", err)
+	}
+	if output := logsOutput.String(); strings.Count(output, `"type": "intake.item_created"`) != 2 || strings.Contains(output, `"type": "task.created"`) {
+		t.Fatalf("logs output = %s, want intake event and no task event", output)
+	}
+}
+
+func TestRunIntakeProcessCreatesReviewStatesWithoutExecution(t *testing.T) {
+	t.Parallel()
+
+	root := testRepoRoot(t)
+	payloadPath := filepath.Join(t.TempDir(), "payload.json")
+	if err := os.WriteFile(payloadPath, []byte(`{"body":"prepare a careful ticket for review"}`), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	createRaw := func(title, dedup string) {
+		t.Helper()
+		if err := Run(context.Background(), root, []string{
+			"intake", "raw", "create",
+			"--source", "operator",
+			"--project", "odin-core",
+			"--title", title,
+			"--type", "request",
+			"--dedup-key", dedup,
+			"--requested-by", "codex",
+			"--payload-file", payloadPath,
+			"--json",
+		}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+			t.Fatalf("Run(intake raw create %q) error = %v", title, err)
+		}
+	}
+	createRaw("Build governed intake process review", "process-clear")
+	createRaw("Help with this", "process-vague")
+	createRaw("Build governed intake process review duplicate", "process-clear")
+
+	var clearOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"intake", "process", "--id", "intake-1", "--json"}, strings.NewReader(""), &clearOutput); err != nil {
+		t.Fatalf("Run(intake process clear) error = %v", err)
+	}
+	if output := clearOutput.String(); !strings.Contains(output, `"status": "review_required"`) || !strings.Contains(output, `"routed_outcome": "draft_task"`) {
+		t.Fatalf("clear process output = %s, want review_required draft_task", output)
+	}
+
+	var vagueOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"intake", "process", "--id", "intake-2", "--json"}, strings.NewReader(""), &vagueOutput); err != nil {
+		t.Fatalf("Run(intake process vague) error = %v", err)
+	}
+	if output := vagueOutput.String(); !strings.Contains(output, `"status": "needs_clarification"`) || !strings.Contains(output, `"routed_outcome": "needs_clarification"`) {
+		t.Fatalf("vague process output = %s, want needs_clarification", output)
+	}
+
+	var duplicateOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"intake", "process", "--id", "intake-3", "--json"}, strings.NewReader(""), &duplicateOutput); err != nil {
+		t.Fatalf("Run(intake process duplicate) error = %v", err)
+	}
+	if output := duplicateOutput.String(); !strings.Contains(output, `"status": "duplicate_linked_or_suppressed"`) || !strings.Contains(output, `"canonical_intake_key": "intake-1"`) {
+		t.Fatalf("duplicate process output = %s, want duplicate linked to intake-1", output)
+	}
+
+	var showOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"intake", "raw", "show", "intake-1", "--json"}, strings.NewReader(""), &showOutput); err != nil {
+		t.Fatalf("Run(intake raw show processed) error = %v", err)
+	}
+	if output := showOutput.String(); !strings.Contains(output, `"processing"`) || !strings.Contains(output, `"draft_artifact"`) {
+		t.Fatalf("show output = %s, want persisted processing artifact", output)
+	}
+
+	var overviewOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"overview", "--json"}, strings.NewReader(""), &overviewOutput); err != nil {
+		t.Fatalf("Run(overview --json) error = %v", err)
+	}
+	if output := overviewOutput.String(); !strings.Contains(output, `"raw_item_count": 3`) || !strings.Contains(output, `"raw_processed_count": 3`) || !strings.Contains(output, `"open_work_item_count": 0`) {
+		t.Fatalf("overview output = %s, want processed raw intake counts without work items", output)
+	}
+
+	var logsOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"logs", "--json"}, strings.NewReader(""), &logsOutput); err != nil {
+		t.Fatalf("Run(logs --json) error = %v", err)
+	}
+	for _, want := range []string{
+		`"type": "intake.processing_started"`,
+		`"type": "intake.classified"`,
+		`"type": "intake.dedupe_reviewed"`,
+		`"type": "intake.routed"`,
+		`"type": "intake.draft_artifact_created"`,
+		`"type": "intake.clarification_needed"`,
+		`"type": "intake.duplicate_linked_or_suppressed"`,
+	} {
+		if !strings.Contains(logsOutput.String(), want) {
+			t.Fatalf("logs output = %s, want %s", logsOutput.String(), want)
+		}
+	}
+	if strings.Contains(logsOutput.String(), `"type": "task.created"`) {
+		t.Fatalf("logs output = %s, must not create task events", logsOutput.String())
+	}
+
+	for _, args := range [][]string{{"jobs", "--json"}, {"runs", "--json"}, {"approvals", "all", "--json"}} {
+		var output bytes.Buffer
+		if err := Run(context.Background(), root, args, strings.NewReader(""), &output); err != nil {
+			t.Fatalf("Run(%v) error = %v", args, err)
+		}
+		if !strings.Contains(output.String(), `[]`) {
+			t.Fatalf("Run(%v) output = %s, want empty list", args, output.String())
+		}
+	}
+}
+
+func TestRunIntakeReviewPromotesOnlyOnOperatorAccept(t *testing.T) {
+	t.Parallel()
+
+	root := testRepoRoot(t)
+	payloadPath := filepath.Join(t.TempDir(), "payload.json")
+	if err := os.WriteFile(payloadPath, []byte(`{"body":"prepare a careful ticket for review"}`), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	createRaw := func(title, dedup string) {
+		t.Helper()
+		if err := Run(context.Background(), root, []string{
+			"intake", "raw", "create",
+			"--source", "operator",
+			"--project", "odin-core",
+			"--title", title,
+			"--type", "request",
+			"--dedup-key", dedup,
+			"--requested-by", "codex",
+			"--payload-file", payloadPath,
+			"--json",
+		}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+			t.Fatalf("Run(intake raw create %q) error = %v", title, err)
+		}
+	}
+	createRaw("Build governed intake review queue", "review-clear")
+	createRaw("Help with this", "review-vague")
+	createRaw("Build governed intake review queue duplicate", "review-clear")
+	createRaw("Archive governed intake review queue item", "review-archive")
+
+	for _, id := range []string{"intake-1", "intake-2", "intake-3", "intake-4"} {
+		if err := Run(context.Background(), root, []string{"intake", "process", "--id", id, "--json"}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+			t.Fatalf("Run(intake process %s) error = %v", id, err)
+		}
+	}
+
+	var listOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"intake", "review", "list", "--json"}, strings.NewReader(""), &listOutput); err != nil {
+		t.Fatalf("Run(intake review list) error = %v", err)
+	}
+	if output := listOutput.String(); !strings.Contains(output, `"status": "review_required"`) || !strings.Contains(output, `"status": "needs_clarification"`) || !strings.Contains(output, `"status": "duplicate_linked_or_suppressed"`) {
+		t.Fatalf("review list output = %s, want all reviewable states", output)
+	}
+
+	var showOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"intake", "review", "show", "intake-1", "--json"}, strings.NewReader(""), &showOutput); err != nil {
+		t.Fatalf("Run(intake review show) error = %v", err)
+	}
+	if output := showOutput.String(); !strings.Contains(output, `"draft_artifact"`) || !strings.Contains(output, `"review_state": "review_required"`) {
+		t.Fatalf("review show output = %s, want draft artifact", output)
+	}
+
+	var acceptOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"intake", "review", "accept", "intake-1", "--json"}, strings.NewReader(""), &acceptOutput); err != nil {
+		t.Fatalf("Run(intake review accept) error = %v", err)
+	}
+	if output := acceptOutput.String(); !strings.Contains(output, `"decision": "accepted"`) || !strings.Contains(output, `"work_created": true`) || !strings.Contains(output, `"work_item"`) {
+		t.Fatalf("accept output = %s, want accepted work item", output)
+	}
+	var firstAccept struct {
+		WorkItem struct {
+			ID  int64  `json:"id"`
+			Key string `json:"key"`
+		} `json:"work_item"`
+	}
+	if err := json.Unmarshal(acceptOutput.Bytes(), &firstAccept); err != nil {
+		t.Fatalf("json.Unmarshal(first accept) error = %v", err)
+	}
+	if firstAccept.WorkItem.ID == 0 || firstAccept.WorkItem.Key == "" {
+		t.Fatalf("first accept work item = %+v, want durable work identity", firstAccept.WorkItem)
+	}
+
+	var repeatAcceptOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"intake", "review", "accept", "intake-1", "--json"}, strings.NewReader(""), &repeatAcceptOutput); err != nil {
+		t.Fatalf("Run(intake review accept repeat) error = %v", err)
+	}
+	var repeatAccept struct {
+		Decision    string `json:"decision"`
+		WorkCreated bool   `json:"work_created"`
+		WorkItem    struct {
+			ID  int64  `json:"id"`
+			Key string `json:"key"`
+		} `json:"work_item"`
+	}
+	if err := json.Unmarshal(repeatAcceptOutput.Bytes(), &repeatAccept); err != nil {
+		t.Fatalf("json.Unmarshal(repeat accept) error = %v", err)
+	}
+	if repeatAccept.Decision != "accepted" || repeatAccept.WorkCreated {
+		t.Fatalf("repeat accept = %+v, want accepted with existing work item", repeatAccept)
+	}
+	if repeatAccept.WorkItem.ID != firstAccept.WorkItem.ID || repeatAccept.WorkItem.Key != firstAccept.WorkItem.Key {
+		t.Fatalf("repeat accept work item = %+v, want original %+v", repeatAccept.WorkItem, firstAccept.WorkItem)
+	}
+
+	var acceptedShowOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"intake", "review", "show", "intake-1", "--json"}, strings.NewReader(""), &acceptedShowOutput); err != nil {
+		t.Fatalf("Run(intake review show accepted) error = %v", err)
+	}
+	if output := acceptedShowOutput.String(); !strings.Contains(output, `"accepted_work_item_id":`) || !strings.Contains(output, `"accepted_work_item_key":`) {
+		t.Fatalf("accepted show output = %s, want durable accepted work link", output)
+	}
+
+	var rejectOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"intake", "review", "reject", "intake-2", "--json"}, strings.NewReader(""), &rejectOutput); err != nil {
+		t.Fatalf("Run(intake review reject) error = %v", err)
+	}
+	if output := rejectOutput.String(); !strings.Contains(output, `"decision": "rejected"`) || !strings.Contains(output, `"work_created": false`) {
+		t.Fatalf("reject output = %s, want rejected without work", output)
+	}
+
+	var clarifyOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"intake", "review", "clarify", "intake-2", "--json"}, strings.NewReader(""), &clarifyOutput); err != nil {
+		t.Fatalf("Run(intake review clarify) error = %v", err)
+	}
+	if output := clarifyOutput.String(); !strings.Contains(output, `"decision": "clarification_requested"`) || !strings.Contains(output, `"status": "needs_clarification"`) {
+		t.Fatalf("clarify output = %s, want clarification state", output)
+	}
+
+	var duplicateAcceptOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"intake", "review", "accept", "intake-3", "--json"}, strings.NewReader(""), &duplicateAcceptOutput); err != nil {
+		t.Fatalf("Run(intake review accept duplicate) error = %v", err)
+	}
+	if output := duplicateAcceptOutput.String(); !strings.Contains(output, `"decision": "duplicate_acknowledged"`) || !strings.Contains(output, `"work_created": false`) {
+		t.Fatalf("duplicate accept output = %s, want duplicate acknowledged without work", output)
+	}
+
+	var archiveOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"intake", "review", "archive", "intake-4", "--json"}, strings.NewReader(""), &archiveOutput); err != nil {
+		t.Fatalf("Run(intake review archive) error = %v", err)
+	}
+	if output := archiveOutput.String(); !strings.Contains(output, `"decision": "archived"`) || !strings.Contains(output, `"work_created": false`) {
+		t.Fatalf("archive output = %s, want archived without work", output)
+	}
+
+	var workStatusOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"work", "status"}, strings.NewReader(""), &workStatusOutput); err != nil {
+		t.Fatalf("Run(work status) error = %v", err)
+	}
+	if output := workStatusOutput.String(); !strings.Contains(output, "work_items=1") || !strings.Contains(output, "intake_review_items=") {
+		t.Fatalf("work status output = %s, want one work item and review queue count", output)
+	}
+
+	var overviewOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"overview", "--json"}, strings.NewReader(""), &overviewOutput); err != nil {
+		t.Fatalf("Run(overview --json) error = %v", err)
+	}
+	if output := overviewOutput.String(); !strings.Contains(output, `"open_work_item_count": 1`) || !strings.Contains(output, `"review_queue_count":`) {
+		t.Fatalf("overview output = %s, want promoted work item and review queue count", output)
+	}
+
+	var logsOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"logs", "--json"}, strings.NewReader(""), &logsOutput); err != nil {
+		t.Fatalf("Run(logs --json) error = %v", err)
+	}
+	for _, want := range []string{
+		`"type": "intake.review_accepted"`,
+		`"type": "intake.review_rejected"`,
+		`"type": "intake.review_clarification_requested"`,
+		`"type": "intake.review_duplicate_acknowledged"`,
+		`"type": "intake.review_archived"`,
+		`"type": "task.created"`,
+	} {
+		if !strings.Contains(logsOutput.String(), want) {
+			t.Fatalf("logs output = %s, want %s", logsOutput.String(), want)
+		}
+	}
+	if output := logsOutput.String(); !strings.Contains(output, `"work_item_id":`) || !strings.Contains(output, `"work_item_key":`) {
+		t.Fatalf("logs output = %s, want accepted audit payload with linked work identity", output)
+	}
+
+	var jobsOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"jobs", "--json"}, strings.NewReader(""), &jobsOutput); err != nil {
+		t.Fatalf("Run(jobs --json) error = %v", err)
+	}
+	if output := jobsOutput.String(); !strings.Contains(output, `"jobs"`) || !strings.Contains(output, `"status": "queued"`) {
+		t.Fatalf("jobs output = %s, want accepted work item visible as queued job", output)
+	}
+	if count := strings.Count(jobsOutput.String(), `"status": "queued"`); count != 1 {
+		t.Fatalf("jobs output = %s, want exactly one queued job after repeat accept", jobsOutput.String())
+	}
+
+	for _, args := range [][]string{{"runs", "--json"}, {"approvals", "all", "--json"}} {
+		var output bytes.Buffer
+		if err := Run(context.Background(), root, args, strings.NewReader(""), &output); err != nil {
+			t.Fatalf("Run(%v) error = %v", args, err)
+		}
+		if !strings.Contains(output.String(), `[]`) {
+			t.Fatalf("Run(%v) output = %s, want empty list", args, output.String())
+		}
+	}
+}
+
 func TestRunHelpIncludesOverviewCommand(t *testing.T) {
 	t.Parallel()
 
@@ -393,6 +775,27 @@ func TestRunHelpIncludesOverviewCommand(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "overview") {
 		t.Fatalf("help output = %q, want overview command", stdout.String())
+	}
+	if strings.Contains(stdout.String(), "scheduler") {
+		t.Fatalf("help output = %q, should not claim scheduler command", stdout.String())
+	}
+}
+
+func TestRunSchedulerCommandIsNotClaimedSurface(t *testing.T) {
+	t.Parallel()
+
+	root := testRepoRoot(t)
+	var stdout bytes.Buffer
+
+	err := Run(context.Background(), root, []string{"scheduler", "--help"}, strings.NewReader(""), &stdout)
+	if err == nil {
+		t.Fatal("Run(scheduler --help) error = nil, want unknown command")
+	}
+	if got := err.Error(); got != "unknown command: scheduler" {
+		t.Fatalf("Run(scheduler --help) error = %q, want unknown command: scheduler", got)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout = %q, want empty output", stdout.String())
 	}
 }
 

@@ -32,8 +32,8 @@ func TestRenderOverviewUsesCanonicalLanes(t *testing.T) {
 		"Observability",
 		"Memory",
 		"Intake Inbox",
-		"wiring=not_yet_wired source=task_intakes status=linked_evidence count=1",
-		"raw Intake Item authority not implemented",
+		"wiring=not_yet_wired source=task_intakes status=linked_evidence count=1 raw_items=0 raw_processed=0",
+		"raw Intake Items are available through odin intake raw",
 		"linked_intake=3 source=n8n type=ci_failure dedup_key=ci_failure:alpha:42 requested_by=n8n work_item=alpha-task work_status=blocked initiative=alpha companion=primary project=alpha",
 		"Automation Triggers",
 		"wiring=live count=1",
@@ -215,7 +215,7 @@ func sampleOverview() overview.View {
 			Wiring: overview.WiringNotYetWired,
 			Source: "task_intakes",
 			Status: "linked_evidence",
-			Note:   "task_intakes are linked intake evidence; raw Intake Item authority not implemented",
+			Note:   "task_intakes are linked intake evidence; raw Intake Items are available through odin intake raw",
 			Items: []overview.IntakeEvidenceSummary{
 				{
 					IntakeID:       3,

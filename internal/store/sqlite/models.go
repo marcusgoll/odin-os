@@ -1,6 +1,10 @@
 package sqlite
 
-import "time"
+import (
+	"time"
+
+	runtimeevents "odin-os/internal/runtime/events"
+)
 
 type Project struct {
 	ID            int64
@@ -351,6 +355,35 @@ type ListIntakeItemsParams struct {
 	Status      string
 	Scope       string
 	ScopeKey    string
+}
+
+type ProcessIntakeItemParams struct {
+	ID                    int64
+	Status                string
+	Summary               string
+	CanonicalIntakeItemID *int64
+	SuppressionReason     string
+	RoutingNotes          string
+	Events                []IntakeItemProcessingEvent
+}
+
+type ReviewIntakeItemParams struct {
+	ID           int64
+	Status       string
+	Summary      string
+	RoutingNotes string
+	EventType    runtimeevents.Type
+	Decision     string
+	WorkCreated  bool
+	WorkItemID   *int64
+	WorkItemKey  string
+}
+
+type IntakeItemProcessingEvent struct {
+	Type    runtimeevents.Type
+	Stage   string
+	Result  string
+	Payload any
 }
 
 type UpsertAutomationTriggerParams struct {

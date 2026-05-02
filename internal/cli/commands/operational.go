@@ -53,9 +53,10 @@ type ApprovalsView struct {
 }
 
 type LogView struct {
-	ID    int64  `json:"id"`
-	Type  string `json:"type"`
-	Scope string `json:"scope"`
+	ID      int64           `json:"id"`
+	Type    string          `json:"type"`
+	Scope   string          `json:"scope"`
+	Payload json.RawMessage `json:"payload,omitempty"`
 }
 
 type LogsView struct {

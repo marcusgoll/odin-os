@@ -236,11 +236,14 @@ type PlaceholderLane struct {
 }
 
 type IntakeInboxLane struct {
-	Wiring Wiring                  `json:"wiring"`
-	Source string                  `json:"source"`
-	Status string                  `json:"status"`
-	Note   string                  `json:"note"`
-	Items  []IntakeEvidenceSummary `json:"items"`
+	Wiring            Wiring                  `json:"wiring"`
+	Source            string                  `json:"source"`
+	Status            string                  `json:"status"`
+	Note              string                  `json:"note"`
+	RawItemCount      int                     `json:"raw_item_count"`
+	RawProcessedCount int                     `json:"raw_processed_count"`
+	ReviewQueueCount  int                     `json:"review_queue_count"`
+	Items             []IntakeEvidenceSummary `json:"items"`
 }
 
 type IntakeEvidenceSummary struct {
@@ -303,7 +306,7 @@ func (service Service) Build(ctx context.Context, resolved scope.Resolution) (Vi
 		IntakeInbox: IntakeInboxLane{
 			Wiring: WiringNotYetWired,
 			Status: "unavailable",
-			Note:   "intake overview projection not implemented",
+			Note:   "raw Intake Items are available through odin intake raw; overview shows linked task intake evidence only",
 		},
 		AutomationTriggers: AutomationTriggerLane{
 			Wiring: WiringNotYetWired,
@@ -734,7 +737,23 @@ func (service Service) Build(ctx context.Context, resolved scope.Resolution) (Vi
 	}
 	if len(view.IntakeInbox.Items) > 0 {
 		view.IntakeInbox.Status = "linked_evidence"
-		view.IntakeInbox.Note = "task_intakes are linked intake evidence; raw Intake Item authority not implemented"
+		view.IntakeInbox.Note = "task_intakes are linked intake evidence; raw Intake Items are available through odin intake raw"
+	}
+	rawIntakeItems, err := service.Store.ListIntakeItems(ctx, sqlite.ListIntakeItemsParams{WorkspaceID: workspaces.DefaultWorkspaceKey})
+	if err != nil {
+		return View{}, err
+	}
+	view.IntakeInbox.RawItemCount = len(rawIntakeItems)
+	for _, item := range rawIntakeItems {
+		if item.Status != "received" {
+			view.IntakeInbox.RawProcessedCount++
+		}
+		if isReviewableIntakeStatus(item.Status) {
+			view.IntakeInbox.ReviewQueueCount++
+		}
+	}
+	if len(rawIntakeItems) > 0 && len(view.IntakeInbox.Items) == 0 {
+		view.IntakeInbox.Status = "raw_review"
 	}
 
 	followUpViews, err := projections.ListFollowUpSummaryViews(ctx, service.Store.DB(), workspaces.DefaultWorkspaceKey, service.now())
@@ -978,6 +997,15 @@ func stringPtr(value string) *string {
 func isClosedWorkItemStatus(status string) bool {
 	switch strings.TrimSpace(status) {
 	case "completed", "cancelled", "failed":
+		return true
+	default:
+		return false
+	}
+}
+
+func isReviewableIntakeStatus(status string) bool {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "review_required", "needs_clarification", "duplicate_linked_or_suppressed":
 		return true
 	default:
 		return false
