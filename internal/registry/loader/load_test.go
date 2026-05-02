@@ -127,6 +127,7 @@ func TestLoadDirLoadsUniversalIntakeAgents(t *testing.T) {
 		"project-spec-builder-agent",
 		"personal-project-builder-agent",
 		"personal-admin-agent",
+		"household-task-agent",
 		"calendar-planning-agent",
 		"review-agent",
 		"final-review-agent",
@@ -1002,6 +1003,38 @@ func TestLoadDirLoadsUniversalIntakeAgents(t *testing.T) {
 	for _, required := range requiredPersonalAdminContract {
 		if !strings.Contains(personalAdminContract, required) {
 			t.Fatalf("personal admin agent body missing %q", required)
+		}
+	}
+
+	householdTask := snapshot.ByKey["household-task-agent"]
+	householdTaskContract := strings.Join([]string{
+		householdTask.Title,
+		householdTask.Summary,
+		householdTask.Sections[registry.SectionPurpose],
+		householdTask.Sections[registry.SectionWhenToUse],
+		householdTask.Sections[registry.SectionInputs],
+		householdTask.Sections[registry.SectionProcedure],
+		householdTask.Sections[registry.SectionOutputs],
+		householdTask.Sections[registry.SectionConstraints],
+		householdTask.Sections[registry.SectionSuccessCriteria],
+	}, "\n")
+	requiredHouseholdTaskContract := []string{
+		"Household Task Agent",
+		"{{raw_input}}",
+		"Analyze this household-related input",
+		"task summary",
+		"category: repair, cleaning, maintenance, shopping, appointment, project, other",
+		"urgency",
+		"supplies needed",
+		"estimated time",
+		"whether professional help is needed",
+		"next action",
+		"recurring schedule, if applicable",
+		"risk if ignored",
+	}
+	for _, required := range requiredHouseholdTaskContract {
+		if !strings.Contains(householdTaskContract, required) {
+			t.Fatalf("household task agent body missing %q", required)
 		}
 	}
 
