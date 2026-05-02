@@ -124,6 +124,7 @@ func TestLoadDirLoadsUniversalIntakeAgents(t *testing.T) {
 		"personal-project-builder-agent",
 		"review-agent",
 		"final-review-agent",
+		"scope-creep-detector-agent",
 		"chief-of-staff-agent",
 		"system-memory-curator-agent",
 		"voice-note-cleaner-agent",
@@ -852,6 +853,36 @@ func TestLoadDirLoadsUniversalIntakeAgents(t *testing.T) {
 	for _, required := range requiredFinalReviewAgentContract {
 		if !strings.Contains(finalReviewAgentContract, required) {
 			t.Fatalf("final review agent body missing %q", required)
+		}
+	}
+
+	scopeCreepDetector := snapshot.ByKey["scope-creep-detector-agent"]
+	scopeCreepDetectorContract := strings.Join([]string{
+		scopeCreepDetector.Title,
+		scopeCreepDetector.Summary,
+		scopeCreepDetector.Sections[registry.SectionPurpose],
+		scopeCreepDetector.Sections[registry.SectionWhenToUse],
+		scopeCreepDetector.Sections[registry.SectionInputs],
+		scopeCreepDetector.Sections[registry.SectionProcedure],
+		scopeCreepDetector.Sections[registry.SectionOutputs],
+		scopeCreepDetector.Sections[registry.SectionConstraints],
+		scopeCreepDetector.Sections[registry.SectionSuccessCriteria],
+	}, "\n")
+	requiredScopeCreepDetectorContract := []string{
+		"Scope Creep Detector",
+		"{{raw_input}}",
+		"{{knowledge_base_context}}",
+		"Compare the original task with the current work",
+		"scope creep detected: yes/no",
+		"added work not in original scope",
+		"risks from added scope",
+		"what should be removed",
+		"what should become a separate ticket",
+		"recommended action",
+	}
+	for _, required := range requiredScopeCreepDetectorContract {
+		if !strings.Contains(scopeCreepDetectorContract, required) {
+			t.Fatalf("scope creep detector agent body missing %q", required)
 		}
 	}
 
