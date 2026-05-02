@@ -118,6 +118,7 @@ func TestLoadDirLoadsUniversalIntakeAgents(t *testing.T) {
 		"subagent-delegation-planner-agent",
 		"task-splitter-agent",
 		"definition-of-done-generator-agent",
+		"next-action-finder-agent",
 		"project-spec-builder-agent",
 		"personal-project-builder-agent",
 		"review-agent",
@@ -684,6 +685,37 @@ func TestLoadDirLoadsUniversalIntakeAgents(t *testing.T) {
 	for _, required := range requiredDefinitionOfDoneGeneratorContract {
 		if !strings.Contains(definitionOfDoneGeneratorContract, required) {
 			t.Fatalf("definition of done generator agent body missing %q", required)
+		}
+	}
+
+	nextActionFinder := snapshot.ByKey["next-action-finder-agent"]
+	nextActionFinderContract := strings.Join([]string{
+		nextActionFinder.Title,
+		nextActionFinder.Summary,
+		nextActionFinder.Sections[registry.SectionPurpose],
+		nextActionFinder.Sections[registry.SectionWhenToUse],
+		nextActionFinder.Sections[registry.SectionInputs],
+		nextActionFinder.Sections[registry.SectionProcedure],
+		nextActionFinder.Sections[registry.SectionOutputs],
+		nextActionFinder.Sections[registry.SectionConstraints],
+		nextActionFinder.Sections[registry.SectionSuccessCriteria],
+	}, "\n")
+	requiredNextActionFinderContract := []string{
+		"Next Action Finder",
+		"{{raw_input}}",
+		"Analyze this item",
+		"very next action",
+		"action type: call, email, write, research, decide, schedule, code, buy, review, ask",
+		"time required",
+		"required context",
+		"location or tool needed",
+		"whether it can be done now",
+		"blocker, if any",
+		"The next action must be concrete enough that a human could start it immediately",
+	}
+	for _, required := range requiredNextActionFinderContract {
+		if !strings.Contains(nextActionFinderContract, required) {
+			t.Fatalf("next action finder agent body missing %q", required)
 		}
 	}
 
