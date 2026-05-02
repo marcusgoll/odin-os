@@ -141,6 +141,7 @@ func TestLoadDirLoadsUniversalIntakeAgents(t *testing.T) {
 		"monthly-strategy-review-agent",
 		"system-memory-curator-agent",
 		"knowledge-base-filing-agent",
+		"knowledge-retrieval-agent",
 		"voice-note-cleaner-agent",
 		"email-to-task-extractor-agent",
 		"email-drafting-agent",
@@ -1701,6 +1702,43 @@ func TestLoadDirLoadsUniversalIntakeAgents(t *testing.T) {
 	for _, required := range requiredKnowledgeBaseFilingContract {
 		if !strings.Contains(knowledgeBaseFilingContract, required) {
 			t.Fatalf("knowledge base filing agent body missing %q", required)
+		}
+	}
+
+	knowledgeRetrieval := snapshot.ByKey["knowledge-retrieval-agent"]
+	knowledgeRetrievalContract := strings.Join([]string{
+		knowledgeRetrieval.Title,
+		knowledgeRetrieval.Summary,
+		knowledgeRetrieval.Sections[registry.SectionPurpose],
+		knowledgeRetrieval.Sections[registry.SectionWhenToUse],
+		knowledgeRetrieval.Sections[registry.SectionInputs],
+		knowledgeRetrieval.Sections[registry.SectionProcedure],
+		knowledgeRetrieval.Sections[registry.SectionOutputs],
+		knowledgeRetrieval.Sections[registry.SectionConstraints],
+		knowledgeRetrieval.Sections[registry.SectionSuccessCriteria],
+	}, "\n")
+	requiredKnowledgeRetrievalContract := []string{
+		"Knowledge Retrieval Agent",
+		"{{raw_input}}",
+		"For this task",
+		"project docs",
+		"prior decisions",
+		"personal preferences",
+		"active tasks",
+		"previous tickets",
+		"related files",
+		"meeting notes",
+		"research notes",
+		"relevant sources",
+		"summarized context",
+		"conflicts or outdated information",
+		"missing information",
+		"confidence level",
+		"recommended next step",
+	}
+	for _, required := range requiredKnowledgeRetrievalContract {
+		if !strings.Contains(knowledgeRetrievalContract, required) {
+			t.Fatalf("knowledge retrieval agent body missing %q", required)
 		}
 	}
 }
