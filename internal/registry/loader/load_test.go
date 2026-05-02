@@ -125,6 +125,7 @@ func TestLoadDirLoadsUniversalIntakeAgents(t *testing.T) {
 		"review-agent",
 		"final-review-agent",
 		"scope-creep-detector-agent",
+		"risk-review-agent",
 		"chief-of-staff-agent",
 		"system-memory-curator-agent",
 		"voice-note-cleaner-agent",
@@ -883,6 +884,44 @@ func TestLoadDirLoadsUniversalIntakeAgents(t *testing.T) {
 	for _, required := range requiredScopeCreepDetectorContract {
 		if !strings.Contains(scopeCreepDetectorContract, required) {
 			t.Fatalf("scope creep detector agent body missing %q", required)
+		}
+	}
+
+	riskReviewAgent := snapshot.ByKey["risk-review-agent"]
+	riskReviewAgentContract := strings.Join([]string{
+		riskReviewAgent.Title,
+		riskReviewAgent.Summary,
+		riskReviewAgent.Sections[registry.SectionPurpose],
+		riskReviewAgent.Sections[registry.SectionWhenToUse],
+		riskReviewAgent.Sections[registry.SectionInputs],
+		riskReviewAgent.Sections[registry.SectionProcedure],
+		riskReviewAgent.Sections[registry.SectionOutputs],
+		riskReviewAgent.Sections[registry.SectionConstraints],
+		riskReviewAgent.Sections[registry.SectionSuccessCriteria],
+	}, "\n")
+	requiredRiskReviewAgentContract := []string{
+		"Risk Review Agent",
+		"{{raw_input}}",
+		"Analyze this proposed action",
+		"privacy risk",
+		"financial risk",
+		"security risk",
+		"legal risk",
+		"health or safety risk",
+		"reputational risk",
+		"data loss risk",
+		"relationship risk",
+		"time waste risk",
+		"risk level",
+		"risks found",
+		"mitigations",
+		"approval required: yes/no",
+		"safer alternative",
+		"whether to proceed, revise, or block",
+	}
+	for _, required := range requiredRiskReviewAgentContract {
+		if !strings.Contains(riskReviewAgentContract, required) {
+			t.Fatalf("risk review agent body missing %q", required)
 		}
 	}
 
