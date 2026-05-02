@@ -127,6 +127,7 @@ func TestLoadDirLoadsUniversalIntakeAgents(t *testing.T) {
 		"scope-creep-detector-agent",
 		"risk-review-agent",
 		"chief-of-staff-agent",
+		"weekly-review-agent",
 		"system-memory-curator-agent",
 		"voice-note-cleaner-agent",
 		"email-to-task-extractor-agent",
@@ -1100,6 +1101,43 @@ func TestLoadDirLoadsUniversalIntakeAgents(t *testing.T) {
 	for _, required := range requiredBriefContract {
 		if !strings.Contains(chiefOfStaffContract, required) {
 			t.Fatalf("chief of staff agent body missing %q", required)
+		}
+	}
+
+	weeklyReview := snapshot.ByKey["weekly-review-agent"]
+	weeklyReviewContract := strings.Join([]string{
+		weeklyReview.Title,
+		weeklyReview.Summary,
+		weeklyReview.Sections[registry.SectionPurpose],
+		weeklyReview.Sections[registry.SectionWhenToUse],
+		weeklyReview.Sections[registry.SectionInputs],
+		weeklyReview.Sections[registry.SectionProcedure],
+		weeklyReview.Sections[registry.SectionOutputs],
+		weeklyReview.Sections[registry.SectionConstraints],
+		weeklyReview.Sections[registry.SectionSuccessCriteria],
+	}, "\n")
+	requiredWeeklyReviewContract := []string{
+		"Weekly Review Agent",
+		"active projects",
+		"tasks",
+		"waiting-for items",
+		"calendar commitments",
+		"recent captures",
+		"completed this week",
+		"carried forward",
+		"overdue items",
+		"blocked items",
+		"stale tasks to delete or defer",
+		"projects needing attention",
+		"top priorities for next week",
+		"follow-ups to send",
+		"decisions needed",
+		"one recommendation to reduce workload",
+		"Be ruthless about deleting low-value clutter",
+	}
+	for _, required := range requiredWeeklyReviewContract {
+		if !strings.Contains(weeklyReviewContract, required) {
+			t.Fatalf("weekly review agent body missing %q", required)
 		}
 	}
 
