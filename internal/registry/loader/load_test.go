@@ -110,6 +110,7 @@ func TestLoadDirLoadsUniversalIntakeAgents(t *testing.T) {
 		"router-agent",
 		"spec-task-builder-agent",
 		"universal-ticket-generator-agent",
+		"project-spec-builder-agent",
 		"review-agent",
 		"chief-of-staff-agent",
 		"system-memory-curator-agent",
@@ -387,6 +388,43 @@ func TestLoadDirLoadsUniversalIntakeAgents(t *testing.T) {
 	for _, required := range requiredUniversalTicketGeneratorContract {
 		if !strings.Contains(universalTicketGeneratorContract, required) {
 			t.Fatalf("universal ticket generator agent body missing %q", required)
+		}
+	}
+
+	projectSpecBuilder := snapshot.ByKey["project-spec-builder-agent"]
+	projectSpecBuilderContract := strings.Join([]string{
+		projectSpecBuilder.Title,
+		projectSpecBuilder.Summary,
+		projectSpecBuilder.Sections[registry.SectionPurpose],
+		projectSpecBuilder.Sections[registry.SectionWhenToUse],
+		projectSpecBuilder.Sections[registry.SectionInputs],
+		projectSpecBuilder.Sections[registry.SectionProcedure],
+		projectSpecBuilder.Sections[registry.SectionOutputs],
+		projectSpecBuilder.Sections[registry.SectionConstraints],
+		projectSpecBuilder.Sections[registry.SectionSuccessCriteria],
+	}, "\n")
+	requiredProjectSpecBuilderContract := []string{
+		"Project Spec Builder",
+		"{{raw_input}}",
+		"Turn this idea into a project spec",
+		"project name",
+		"one-sentence purpose",
+		"target user or beneficiary",
+		"problem",
+		"success criteria",
+		"scope",
+		"non-goals",
+		"phases",
+		"required resources",
+		"risks",
+		"first milestone",
+		"first next action",
+		"clarification checklist",
+		"If the idea is too vague",
+	}
+	for _, required := range requiredProjectSpecBuilderContract {
+		if !strings.Contains(projectSpecBuilderContract, required) {
+			t.Fatalf("project spec builder agent body missing %q", required)
 		}
 	}
 
