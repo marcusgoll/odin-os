@@ -137,6 +137,28 @@ func TestParseIntakeReviewCommands(t *testing.T) {
 	}
 }
 
+func TestParseIntakeApprovalCommands(t *testing.T) {
+	t.Parallel()
+
+	listCommand, err := ParseIntake([]string{"approval", "list", "--json"})
+	if err != nil {
+		t.Fatalf("ParseIntake(approval list) error = %v", err)
+	}
+	if listCommand.Name != "approval" || listCommand.ApprovalAction != "list" || !listCommand.JSON {
+		t.Fatalf("list command = %+v, want approval list json", listCommand)
+	}
+
+	for _, action := range []string{"show", "approve", "deny"} {
+		command, err := ParseIntake([]string{"approval", action, "intake-42", "--json"})
+		if err != nil {
+			t.Fatalf("ParseIntake(approval %s) error = %v", action, err)
+		}
+		if command.Name != "approval" || command.ApprovalAction != action || command.ShowRef != "intake-42" || !command.JSON {
+			t.Fatalf("command = %+v, want approval %s intake-42 json", command, action)
+		}
+	}
+}
+
 func TestParseIntakeRejectsMissingSource(t *testing.T) {
 	t.Parallel()
 

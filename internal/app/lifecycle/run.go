@@ -628,6 +628,9 @@ func runIntake(ctx context.Context, app bootstrap.App, stdin io.Reader, args []s
 	if command.Name == "review" {
 		return runReviewIntake(ctx, app, command, jsonOutput || command.JSON, stdout)
 	}
+	if command.Name == "approval" {
+		return runApprovalIntake(ctx, app, command, jsonOutput || command.JSON, stdout)
+	}
 
 	payloadJSON, err := loadIntakePayloadJSON(command.PayloadFile, stdin)
 	if err != nil {
@@ -1006,6 +1009,203 @@ func runReviewIntake(ctx context.Context, app bootstrap.App, command commands.In
 	default:
 		return errors.New(commands.IntakeUsage)
 	}
+}
+
+func runApprovalIntake(ctx context.Context, app bootstrap.App, command commands.IntakeCommand, jsonOutput bool, stdout io.Writer) error {
+	switch command.ApprovalAction {
+	case "list":
+		return runIntakeApprovalList(ctx, app, jsonOutput, stdout)
+	case "show":
+		return runIntakeApprovalShow(ctx, app, command, jsonOutput, stdout)
+	case "approve", "deny":
+		return runIntakeApprovalDecision(ctx, app, command, jsonOutput, stdout)
+	default:
+		return errors.New(commands.IntakeUsage)
+	}
+}
+
+func runIntakeApprovalList(ctx context.Context, app bootstrap.App, jsonOutput bool, stdout io.Writer) error {
+	items, err := app.Store.ListIntakeItems(ctx, sqlite.ListIntakeItemsParams{WorkspaceID: workspaces.DefaultWorkspaceKey, Status: "approval_required"})
+	if err != nil {
+		return err
+	}
+	views := make([]rawIntakeItemView, 0, len(items))
+	for _, item := range items {
+		view, err := rawIntakeView(item, false)
+		if err != nil {
+			return err
+		}
+		views = append(views, view)
+	}
+	if jsonOutput {
+		return commands.WriteJSON(stdout, intakeReviewQueueView{IntakeItems: views})
+	}
+	if len(views) == 0 {
+		_, err := fmt.Fprintln(stdout, "no intake approvals waiting")
+		return err
+	}
+	for _, view := range views {
+		if _, err := fmt.Fprintf(stdout, "approval_intake=%s status=%s policy_reason=%s title=%s\n", view.Key, view.Status, valueOrNone(view.PolicyReason), view.Title); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func runIntakeApprovalShow(ctx context.Context, app bootstrap.App, command commands.IntakeCommand, jsonOutput bool, stdout io.Writer) error {
+	item, err := findRawIntakeItem(ctx, app.Store, command.ShowRef)
+	if err != nil {
+		return err
+	}
+	view, err := rawIntakeView(item, true)
+	if err != nil {
+		return err
+	}
+	if jsonOutput {
+		return commands.WriteJSON(stdout, rawIntakeItemEnvelope{IntakeItem: view})
+	}
+	_, err = fmt.Fprintf(stdout, "approval_intake=%s status=%s policy_reason=%s title=%s\n", view.Key, view.Status, valueOrNone(view.PolicyReason), view.Title)
+	return err
+}
+
+func runIntakeApprovalDecision(ctx context.Context, app bootstrap.App, command commands.IntakeCommand, jsonOutput bool, stdout io.Writer) error {
+	item, err := findRawIntakeItem(ctx, app.Store, command.ShowRef)
+	if err != nil {
+		return err
+	}
+	notes, err := intakeNotesFromItem(item)
+	if err != nil {
+		return err
+	}
+
+	status := item.Status
+	summary := item.Summary
+	decision := ""
+	eventType := runtimeevents.EventIntakeApprovalDenied
+	policyDecision := ""
+	policyReason := ""
+	var task *sqlite.Task
+	workCreated := false
+
+	switch command.ApprovalAction {
+	case "approve":
+		if item.Status == "accepted" && notes.Review != nil && notes.Review.WorkItem != nil {
+			existing := sqlite.Task{ID: notes.Review.WorkItem.ID, Key: notes.Review.WorkItem.Key, Status: notes.Review.WorkItem.Status}
+			if existing.ID > 0 {
+				if loaded, err := app.Store.GetTask(ctx, existing.ID); err == nil {
+					existing = loaded
+				}
+			}
+			task = &existing
+			decision = "approved"
+			eventType = runtimeevents.EventIntakeApprovalApproved
+			status = "accepted"
+			summary = "Risky intake approval reused existing linked work item"
+			policyDecision = "approved"
+			policyReason = "operator_approved_risky_intake"
+			break
+		}
+		if item.Status != "approval_required" || notes.Review == nil || !notes.Review.ApprovalRequired {
+			return fmt.Errorf("intake %s is not pending approval", rawIntakeKey(item.ID))
+		}
+		created, createdNow, err := createTaskFromReviewedIntake(ctx, app, item)
+		if err != nil {
+			return err
+		}
+		task = &created
+		workCreated = createdNow
+		decision = "approved"
+		eventType = runtimeevents.EventIntakeApprovalApproved
+		status = "accepted"
+		summary = "Risky intake approved by operator and promoted to real work item"
+		policyDecision = "approved"
+		policyReason = "operator_approved_risky_intake"
+	case "deny":
+		if item.Status == "approval_denied" {
+			decision = "denied"
+			eventType = runtimeevents.EventIntakeApprovalDenied
+			status = "approval_denied"
+			summary = "Risky intake approval denied; no work item created"
+			policyDecision = "denied"
+			policyReason = "operator_denied_risky_intake"
+			break
+		}
+		if item.Status != "approval_required" || notes.Review == nil || !notes.Review.ApprovalRequired {
+			return fmt.Errorf("intake %s is not pending approval", rawIntakeKey(item.ID))
+		}
+		decision = "denied"
+		eventType = runtimeevents.EventIntakeApprovalDenied
+		status = "approval_denied"
+		summary = "Risky intake approval denied; no work item created"
+		policyDecision = "denied"
+		policyReason = "operator_denied_risky_intake"
+	default:
+		return errors.New(commands.IntakeUsage)
+	}
+
+	review := intakeReviewDecision{
+		Decision:               decision,
+		WorkCreated:            workCreated,
+		ApprovalRequired:       false,
+		BlockedPendingApproval: false,
+		PolicyDecision:         policyDecision,
+		PolicyReason:           policyReason,
+	}
+	var workItemID *int64
+	workItemKey := ""
+	if task != nil {
+		id := task.ID
+		workItemID = &id
+		workItemKey = task.Key
+		review.WorkItem = &intakeReviewWork{ID: task.ID, Key: task.Key, Status: task.Status}
+	}
+	notes.Review = &review
+	notesJSON, err := json.Marshal(notes)
+	if err != nil {
+		return err
+	}
+	updated, err := app.Store.ReviewIntakeItem(ctx, sqlite.ReviewIntakeItemParams{
+		ID:               item.ID,
+		Status:           status,
+		Summary:          summary,
+		RoutingNotes:     string(notesJSON),
+		EventType:        eventType,
+		Decision:         decision,
+		WorkCreated:      workCreated,
+		ApprovalRequired: false,
+		PolicyDecision:   policyDecision,
+		PolicyReason:     policyReason,
+		WorkItemID:       workItemID,
+		WorkItemKey:      workItemKey,
+	})
+	if err != nil {
+		return err
+	}
+	view, err := rawIntakeView(updated, true)
+	if err != nil {
+		return err
+	}
+	result := intakeReviewDecisionView{
+		IntakeItem:             view,
+		Decision:               decision,
+		WorkCreated:            workCreated,
+		ApprovalRequired:       false,
+		BlockedPendingApproval: false,
+		PolicyDecision:         policyDecision,
+		PolicyReason:           policyReason,
+	}
+	if task != nil {
+		result.WorkItem = &reviewWorkItemView{ID: task.ID, Key: task.Key, Status: task.Status}
+	}
+	if jsonOutput {
+		return commands.WriteJSON(stdout, result)
+	}
+	workKey := "none"
+	if task != nil {
+		workKey = task.Key
+	}
+	_, err = fmt.Fprintf(stdout, "approval_intake=%s decision=%s status=%s work_created=%t work_item=%s\n", view.Key, decision, view.Status, workCreated, workKey)
+	return err
 }
 
 func runIntakeReviewList(ctx context.Context, app bootstrap.App, jsonOutput bool, stdout io.Writer) error {
@@ -1570,6 +1770,13 @@ func rawStringFact(facts map[string]json.RawMessage, key string) string {
 	var value string
 	if err := json.Unmarshal(raw, &value); err != nil {
 		return ""
+	}
+	return value
+}
+
+func valueOrNone(value string) string {
+	if strings.TrimSpace(value) == "" {
+		return "none"
 	}
 	return value
 }

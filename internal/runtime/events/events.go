@@ -70,6 +70,8 @@ const (
 	EventIntakeReviewArchived               Type = "intake.review_archived"
 	EventIntakeReviewDuplicateAcknowledged  Type = "intake.review_duplicate_acknowledged"
 	EventIntakeReviewApprovalRequired       Type = "intake.review_approval_required"
+	EventIntakeApprovalApproved             Type = "intake.approval_approved"
+	EventIntakeApprovalDenied               Type = "intake.approval_denied"
 	EventAutomationTriggerCreated           Type = "automation_trigger.created"
 	EventAutomationTriggerFireRequested     Type = "automation_trigger.fire_requested"
 	EventAutomationTriggerEvaluated         Type = "automation_trigger.evaluated"

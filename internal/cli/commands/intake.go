@@ -8,22 +8,23 @@ import (
 	"unicode"
 )
 
-const IntakeUsage = "usage: odin intake enqueue --source <source> --project <key> --title <title> --type <type> [--action-key <key>] [--dedup-key <key>] [--requested-by <actor>] [--payload-file <path|-] [--json] | odin intake raw create --source <source> --title <title> --type <type> --dedup-key <key> [--project <key>] [--requested-by <actor>] [--payload-file <path|-] [--json] | odin intake raw list [--project <key>] [--status <status>] [--json] | odin intake raw show <id|key> [--json] | odin intake process --id <id|key> [--json] | odin intake review list [--json] | odin intake review show|accept|reject|clarify|archive <id|key> [--json]"
+const IntakeUsage = "usage: odin intake enqueue --source <source> --project <key> --title <title> --type <type> [--action-key <key>] [--dedup-key <key>] [--requested-by <actor>] [--payload-file <path|-] [--json] | odin intake raw create --source <source> --title <title> --type <type> --dedup-key <key> [--project <key>] [--requested-by <actor>] [--payload-file <path|-] [--json] | odin intake raw list [--project <key>] [--status <status>] [--json] | odin intake raw show <id|key> [--json] | odin intake process --id <id|key> [--json] | odin intake review list [--json] | odin intake review show|accept|reject|clarify|archive <id|key> [--json] | odin intake approval list [--json] | odin intake approval show|approve|deny <id|key> [--json]"
 
 type IntakeCommand struct {
-	Name         string
-	RawAction    string
-	ReviewAction string
-	ShowRef      string
-	Source       string
-	Type         string
-	ProjectKey   string
-	Title        string
-	ActionKey    string
-	DedupKey     string
-	RequestedBy  string
-	PayloadFile  string
-	JSON         bool
+	Name           string
+	RawAction      string
+	ReviewAction   string
+	ApprovalAction string
+	ShowRef        string
+	Source         string
+	Type           string
+	ProjectKey     string
+	Title          string
+	ActionKey      string
+	DedupKey       string
+	RequestedBy    string
+	PayloadFile    string
+	JSON           bool
 }
 
 func ParseIntake(args []string) (IntakeCommand, error) {
@@ -41,6 +42,9 @@ func ParseIntake(args []string) (IntakeCommand, error) {
 	}
 	if args[0] == "review" {
 		return parseIntakeReview(args[1:])
+	}
+	if args[0] == "approval" {
+		return parseIntakeApproval(args[1:])
 	}
 
 	command := IntakeCommand{Name: strings.ToLower(args[0])}
@@ -238,6 +242,47 @@ func parseIntakeReview(args []string) (IntakeCommand, error) {
 		return command, nil
 	default:
 		return IntakeCommand{}, fmt.Errorf("unsupported intake review subcommand: %s", args[0])
+	}
+}
+
+func parseIntakeApproval(args []string) (IntakeCommand, error) {
+	if len(args) == 0 {
+		return IntakeCommand{}, fmt.Errorf(IntakeUsage)
+	}
+	command := IntakeCommand{Name: "approval", ApprovalAction: strings.ToLower(args[0])}
+	switch command.ApprovalAction {
+	case "list":
+		for index := 1; index < len(args); index++ {
+			switch args[index] {
+			case "--json":
+				if command.JSON {
+					return IntakeCommand{}, fmt.Errorf("duplicate --json flag")
+				}
+				command.JSON = true
+			default:
+				return IntakeCommand{}, fmt.Errorf("unknown intake approval list argument: %s", args[index])
+			}
+		}
+		return command, nil
+	case "show", "approve", "deny":
+		if len(args) < 2 || strings.HasPrefix(args[1], "--") {
+			return IntakeCommand{}, fmt.Errorf("usage: odin intake approval %s <id|key> [--json]", command.ApprovalAction)
+		}
+		command.ShowRef = args[1]
+		for index := 2; index < len(args); index++ {
+			switch args[index] {
+			case "--json":
+				if command.JSON {
+					return IntakeCommand{}, fmt.Errorf("duplicate --json flag")
+				}
+				command.JSON = true
+			default:
+				return IntakeCommand{}, fmt.Errorf("unknown intake approval %s argument: %s", command.ApprovalAction, args[index])
+			}
+		}
+		return command, nil
+	default:
+		return IntakeCommand{}, fmt.Errorf("unsupported intake approval subcommand: %s", args[0])
 	}
 }
 
