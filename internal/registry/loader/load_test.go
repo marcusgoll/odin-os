@@ -115,6 +115,7 @@ func TestLoadDirLoadsUniversalIntakeAgents(t *testing.T) {
 		"bug-report-builder-agent",
 		"research-ticket-builder-agent",
 		"coding-task-prompt-generator-agent",
+		"code-review-prompt-generator-agent",
 		"writing-task-builder-agent",
 		"plan-first-execution-agent",
 		"subagent-delegation-planner-agent",
@@ -582,6 +583,42 @@ func TestLoadDirLoadsUniversalIntakeAgents(t *testing.T) {
 	for _, required := range requiredCodingTaskPromptGeneratorContract {
 		if !strings.Contains(codingTaskPromptGeneratorContract, required) {
 			t.Fatalf("coding task prompt generator agent body missing %q", required)
+		}
+	}
+
+	codeReviewPromptGenerator := snapshot.ByKey["code-review-prompt-generator-agent"]
+	codeReviewPromptGeneratorContract := strings.Join([]string{
+		codeReviewPromptGenerator.Title,
+		codeReviewPromptGenerator.Summary,
+		codeReviewPromptGenerator.Sections[registry.SectionPurpose],
+		codeReviewPromptGenerator.Sections[registry.SectionWhenToUse],
+		codeReviewPromptGenerator.Sections[registry.SectionInputs],
+		codeReviewPromptGenerator.Sections[registry.SectionProcedure],
+		codeReviewPromptGenerator.Sections[registry.SectionOutputs],
+		codeReviewPromptGenerator.Sections[registry.SectionConstraints],
+		codeReviewPromptGenerator.Sections[registry.SectionSuccessCriteria],
+	}, "\n")
+	requiredCodeReviewPromptGeneratorContract := []string{
+		"Code Review Prompt Generator",
+		"{{raw_input}}",
+		"Create a code review prompt for this PR or change",
+		"correctness",
+		"tests",
+		"security",
+		"privacy",
+		"maintainability",
+		"performance",
+		"scope creep",
+		"documentation",
+		"breaking changes",
+		"user-facing behavior",
+		"blocking issues",
+		"non-blocking issues",
+		"merge/revise/block recommendation",
+	}
+	for _, required := range requiredCodeReviewPromptGeneratorContract {
+		if !strings.Contains(codeReviewPromptGeneratorContract, required) {
+			t.Fatalf("code review prompt generator agent body missing %q", required)
 		}
 	}
 
