@@ -115,6 +115,7 @@ func TestLoadDirLoadsUniversalIntakeAgents(t *testing.T) {
 		"research-ticket-builder-agent",
 		"writing-task-builder-agent",
 		"plan-first-execution-agent",
+		"subagent-delegation-planner-agent",
 		"project-spec-builder-agent",
 		"personal-project-builder-agent",
 		"review-agent",
@@ -572,6 +573,52 @@ func TestLoadDirLoadsUniversalIntakeAgents(t *testing.T) {
 	for _, required := range requiredPlanFirstExecutionContract {
 		if !strings.Contains(planFirstExecutionContract, required) {
 			t.Fatalf("plan-first execution agent body missing %q", required)
+		}
+	}
+
+	subagentDelegationPlanner := snapshot.ByKey["subagent-delegation-planner-agent"]
+	subagentDelegationPlannerContract := strings.Join([]string{
+		subagentDelegationPlanner.Title,
+		subagentDelegationPlanner.Summary,
+		subagentDelegationPlanner.Sections[registry.SectionPurpose],
+		subagentDelegationPlanner.Sections[registry.SectionWhenToUse],
+		subagentDelegationPlanner.Sections[registry.SectionInputs],
+		subagentDelegationPlanner.Sections[registry.SectionProcedure],
+		subagentDelegationPlanner.Sections[registry.SectionOutputs],
+		subagentDelegationPlanner.Sections[registry.SectionConstraints],
+		subagentDelegationPlanner.Sections[registry.SectionSuccessCriteria],
+	}, "\n")
+	requiredSubagentDelegationPlannerContract := []string{
+		"Subagent Delegation Planner",
+		"{{raw_input}}",
+		"Given this task",
+		"Decide whether subagents are needed",
+		"Research Agent",
+		"Planner Agent",
+		"Software Architect Agent",
+		"Coding Agent",
+		"Code Review Agent",
+		"Security Agent",
+		"Writing Agent",
+		"Editor Agent",
+		"Email Agent",
+		"Calendar Agent",
+		"Personal Admin Agent",
+		"Finance Admin Agent",
+		"Household Agent",
+		"Learning Coach Agent",
+		"Decision Analyst Agent",
+		"whether subagents are needed",
+		"selected subagents",
+		"task for each subagent",
+		"sequence or parallel execution",
+		"required shared context",
+		"consolidation method",
+		"final reviewer",
+	}
+	for _, required := range requiredSubagentDelegationPlannerContract {
+		if !strings.Contains(subagentDelegationPlannerContract, required) {
+			t.Fatalf("subagent delegation planner agent body missing %q", required)
 		}
 	}
 
