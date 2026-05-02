@@ -110,6 +110,7 @@ func TestLoadDirLoadsUniversalIntakeAgents(t *testing.T) {
 		"router-agent",
 		"spec-task-builder-agent",
 		"universal-ticket-generator-agent",
+		"software-project-intake-agent",
 		"software-feature-ticket-builder-agent",
 		"bug-report-builder-agent",
 		"research-ticket-builder-agent",
@@ -404,6 +405,39 @@ func TestLoadDirLoadsUniversalIntakeAgents(t *testing.T) {
 	for _, required := range requiredUniversalTicketGeneratorContract {
 		if !strings.Contains(universalTicketGeneratorContract, required) {
 			t.Fatalf("universal ticket generator agent body missing %q", required)
+		}
+	}
+
+	softwareProjectIntake := snapshot.ByKey["software-project-intake-agent"]
+	softwareProjectIntakeContract := strings.Join([]string{
+		softwareProjectIntake.Title,
+		softwareProjectIntake.Summary,
+		softwareProjectIntake.Sections[registry.SectionPurpose],
+		softwareProjectIntake.Sections[registry.SectionWhenToUse],
+		softwareProjectIntake.Sections[registry.SectionInputs],
+		softwareProjectIntake.Sections[registry.SectionProcedure],
+		softwareProjectIntake.Sections[registry.SectionOutputs],
+		softwareProjectIntake.Sections[registry.SectionConstraints],
+		softwareProjectIntake.Sections[registry.SectionSuccessCriteria],
+	}, "\n")
+	requiredSoftwareProjectIntakeContract := []string{
+		"Software Project Intake Agent",
+		"{{raw_input}}",
+		"Analyze this software-related input",
+		"project or repo",
+		"feature, bug, refactor, test, docs, research, or infrastructure",
+		"user problem",
+		"desired behavior",
+		"affected area",
+		"complexity",
+		"security/privacy risk",
+		"whether Codex or a coding agent should be used",
+		"required planning before implementation",
+		"recommended ticket type",
+	}
+	for _, required := range requiredSoftwareProjectIntakeContract {
+		if !strings.Contains(softwareProjectIntakeContract, required) {
+			t.Fatalf("software project intake agent body missing %q", required)
 		}
 	}
 
