@@ -114,6 +114,7 @@ func TestLoadDirLoadsUniversalIntakeAgents(t *testing.T) {
 		"bug-report-builder-agent",
 		"research-ticket-builder-agent",
 		"writing-task-builder-agent",
+		"plan-first-execution-agent",
 		"project-spec-builder-agent",
 		"personal-project-builder-agent",
 		"review-agent",
@@ -536,6 +537,41 @@ func TestLoadDirLoadsUniversalIntakeAgents(t *testing.T) {
 	for _, required := range requiredWritingTaskBuilderContract {
 		if !strings.Contains(writingTaskBuilderContract, required) {
 			t.Fatalf("writing task builder agent body missing %q", required)
+		}
+	}
+
+	planFirstExecution := snapshot.ByKey["plan-first-execution-agent"]
+	planFirstExecutionContract := strings.Join([]string{
+		planFirstExecution.Title,
+		planFirstExecution.Summary,
+		planFirstExecution.Sections[registry.SectionPurpose],
+		planFirstExecution.Sections[registry.SectionWhenToUse],
+		planFirstExecution.Sections[registry.SectionInputs],
+		planFirstExecution.Sections[registry.SectionProcedure],
+		planFirstExecution.Sections[registry.SectionOutputs],
+		planFirstExecution.Sections[registry.SectionConstraints],
+		planFirstExecution.Sections[registry.SectionSuccessCriteria],
+	}, "\n")
+	requiredPlanFirstExecutionContract := []string{
+		"Plan-First Execution Agent",
+		"{{raw_input}}",
+		"Given this approved task",
+		"Create an execution plan before taking action",
+		"objective",
+		"assumptions",
+		"required context",
+		"steps",
+		"tools needed",
+		"risks",
+		"approval gates",
+		"expected output",
+		"definition of done",
+		"rollback or undo plan, if applicable",
+		"Do not execute until the plan is approved if risk is medium, high, or critical",
+	}
+	for _, required := range requiredPlanFirstExecutionContract {
+		if !strings.Contains(planFirstExecutionContract, required) {
+			t.Fatalf("plan-first execution agent body missing %q", required)
 		}
 	}
 
