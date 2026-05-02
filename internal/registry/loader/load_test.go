@@ -139,6 +139,7 @@ func TestLoadDirLoadsUniversalIntakeAgents(t *testing.T) {
 		"voice-note-cleaner-agent",
 		"email-to-task-extractor-agent",
 		"email-drafting-agent",
+		"follow-up-tracker-agent",
 		"visual-intake-agent",
 		"meeting-notes-intake-agent",
 	}
@@ -1243,6 +1244,38 @@ func TestLoadDirLoadsUniversalIntakeAgents(t *testing.T) {
 	for _, required := range requiredEmailDraftingContract {
 		if !strings.Contains(emailDraftingContract, required) {
 			t.Fatalf("email drafting agent body missing %q", required)
+		}
+	}
+
+	followUpTracker := snapshot.ByKey["follow-up-tracker-agent"]
+	followUpTrackerContract := strings.Join([]string{
+		followUpTracker.Title,
+		followUpTracker.Summary,
+		followUpTracker.Sections[registry.SectionPurpose],
+		followUpTracker.Sections[registry.SectionWhenToUse],
+		followUpTracker.Sections[registry.SectionInputs],
+		followUpTracker.Sections[registry.SectionProcedure],
+		followUpTracker.Sections[registry.SectionOutputs],
+		followUpTracker.Sections[registry.SectionConstraints],
+		followUpTracker.Sections[registry.SectionSuccessCriteria],
+	}, "\n")
+	requiredFollowUpTrackerContract := []string{
+		"Follow-Up Tracker",
+		"{{raw_input}}",
+		"Analyze this item",
+		"person or organization",
+		"what I am waiting for",
+		"date requested",
+		"expected response date",
+		"follow-up date",
+		"suggested follow-up message",
+		"priority",
+		"project or life area",
+		"whether to create a waiting-for task",
+	}
+	for _, required := range requiredFollowUpTrackerContract {
+		if !strings.Contains(followUpTrackerContract, required) {
+			t.Fatalf("follow-up tracker agent body missing %q", required)
 		}
 	}
 
