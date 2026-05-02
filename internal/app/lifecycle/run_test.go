@@ -764,6 +764,126 @@ func TestRunIntakeReviewPromotesOnlyOnOperatorAccept(t *testing.T) {
 	}
 }
 
+func TestRunIntakeReviewAcceptRequiresApprovalForRiskyIntake(t *testing.T) {
+	t.Parallel()
+
+	root := testRepoRoot(t)
+	payloadPath := filepath.Join(t.TempDir(), "payload.json")
+	if err := os.WriteFile(payloadPath, []byte(`{"body":"policy sensitive request"}`), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	createRaw := func(title, dedup string) {
+		t.Helper()
+		if err := Run(context.Background(), root, []string{
+			"intake", "raw", "create",
+			"--source", "operator",
+			"--project", "odin-core",
+			"--title", title,
+			"--type", "request",
+			"--dedup-key", dedup,
+			"--requested-by", "codex",
+			"--payload-file", payloadPath,
+			"--json",
+		}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+			t.Fatalf("Run(intake raw create %q) error = %v", title, err)
+		}
+	}
+	createRaw("Build low risk intake work", "approval-low-risk")
+	createRaw("Delete production data from risky system", "approval-risky")
+
+	for _, id := range []string{"intake-1", "intake-2"} {
+		if err := Run(context.Background(), root, []string{"intake", "process", "--id", id, "--json"}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+			t.Fatalf("Run(intake process %s) error = %v", id, err)
+		}
+	}
+
+	var lowRiskAccept bytes.Buffer
+	if err := Run(context.Background(), root, []string{"intake", "review", "accept", "intake-1", "--json"}, strings.NewReader(""), &lowRiskAccept); err != nil {
+		t.Fatalf("Run(low-risk accept) error = %v", err)
+	}
+	if output := lowRiskAccept.String(); !strings.Contains(output, `"work_created": true`) || strings.Contains(output, `"approval_required": true`) {
+		t.Fatalf("low-risk accept output = %s, want direct work creation", output)
+	}
+
+	var riskyAccept bytes.Buffer
+	if err := Run(context.Background(), root, []string{"intake", "review", "accept", "intake-2", "--json"}, strings.NewReader(""), &riskyAccept); err != nil {
+		t.Fatalf("Run(risky accept) error = %v", err)
+	}
+	if output := riskyAccept.String(); !strings.Contains(output, `"decision": "approval_required"`) || !strings.Contains(output, `"work_created": false`) || !strings.Contains(output, `"approval_required": true`) {
+		t.Fatalf("risky accept output = %s, want approval required without work", output)
+	}
+	if output := riskyAccept.String(); !strings.Contains(output, `"policy_reason": "risky_intake_requires_operator_approval"`) {
+		t.Fatalf("risky accept output = %s, want policy reason", output)
+	}
+
+	var repeatRiskyAccept bytes.Buffer
+	if err := Run(context.Background(), root, []string{"intake", "review", "accept", "intake-2", "--json"}, strings.NewReader(""), &repeatRiskyAccept); err != nil {
+		t.Fatalf("Run(risky repeat accept) error = %v", err)
+	}
+	if output := repeatRiskyAccept.String(); !strings.Contains(output, `"decision": "approval_required"`) || !strings.Contains(output, `"work_created": false`) || strings.Contains(output, `"work_item"`) {
+		t.Fatalf("risky repeat accept output = %s, want idempotent approval block without work", output)
+	}
+
+	var showOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"intake", "review", "show", "intake-2", "--json"}, strings.NewReader(""), &showOutput); err != nil {
+		t.Fatalf("Run(risky review show) error = %v", err)
+	}
+	if output := showOutput.String(); !strings.Contains(output, `"status": "approval_required"`) || !strings.Contains(output, `"blocked_pending_approval": true`) {
+		t.Fatalf("risky show output = %s, want blocked approval state", output)
+	}
+
+	var approvalsOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"approvals", "all", "--json"}, strings.NewReader(""), &approvalsOutput); err != nil {
+		t.Fatalf("Run(approvals all --json) error = %v", err)
+	}
+	if output := approvalsOutput.String(); !strings.Contains(output, `"approvals": []`) {
+		t.Fatalf("approvals output = %s, want no task-backed approvals before work creation", output)
+	}
+
+	var overviewOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"overview", "--json"}, strings.NewReader(""), &overviewOutput); err != nil {
+		t.Fatalf("Run(overview --json) error = %v", err)
+	}
+	if output := overviewOutput.String(); !strings.Contains(output, `"open_work_item_count": 1`) || !strings.Contains(output, `"intake_approval_required_count": 1`) {
+		t.Fatalf("overview output = %s, want one direct work item and one intake approval block", output)
+	}
+
+	var logsOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"logs", "--json"}, strings.NewReader(""), &logsOutput); err != nil {
+		t.Fatalf("Run(logs --json) error = %v", err)
+	}
+	if output := logsOutput.String(); !strings.Contains(output, `"type": "intake.review_approval_required"`) || !strings.Contains(output, `"policy_reason": "risky_intake_requires_operator_approval"`) {
+		t.Fatalf("logs output = %s, want approval policy audit evidence", output)
+	}
+
+	var jobsOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"jobs", "--json"}, strings.NewReader(""), &jobsOutput); err != nil {
+		t.Fatalf("Run(jobs --json) error = %v", err)
+	}
+	if count := strings.Count(jobsOutput.String(), `"status": "queued"`); count != 1 {
+		t.Fatalf("jobs output = %s, want only low-risk queued work item", jobsOutput.String())
+	}
+
+	for _, args := range [][]string{{"runs", "--json"}, {"approvals", "all", "--json"}} {
+		var output bytes.Buffer
+		if err := Run(context.Background(), root, args, strings.NewReader(""), &output); err != nil {
+			t.Fatalf("Run(%v) error = %v", args, err)
+		}
+		if !strings.Contains(output.String(), `[]`) {
+			t.Fatalf("Run(%v) output = %s, want empty list", args, output.String())
+		}
+	}
+
+	var workStatusOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"work", "status"}, strings.NewReader(""), &workStatusOutput); err != nil {
+		t.Fatalf("Run(work status) error = %v", err)
+	}
+	if output := workStatusOutput.String(); !strings.Contains(output, "work_items=1") || !strings.Contains(output, "intake_approval_required_items=1") {
+		t.Fatalf("work status output = %s, want approval-required intake count", output)
+	}
+}
+
 func TestRunHelpIncludesOverviewCommand(t *testing.T) {
 	t.Parallel()
 

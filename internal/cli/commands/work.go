@@ -61,9 +61,13 @@ func runWorkStatus(ctx context.Context, store *sqlite.Store, snapshot registry.S
 		return err
 	}
 	intakeReviewItems := 0
+	intakeApprovalRequiredItems := 0
 	for _, item := range rawIntakeItems {
 		if isReviewableIntakeStatus(item.Status) {
 			intakeReviewItems++
+		}
+		if strings.EqualFold(strings.TrimSpace(item.Status), "approval_required") {
+			intakeApprovalRequiredItems++
 		}
 	}
 
@@ -83,7 +87,7 @@ func runWorkStatus(ctx context.Context, store *sqlite.Store, snapshot registry.S
 
 	_, err = fmt.Fprintf(
 		stdout,
-		"work_items=%d open_work_items=%d active_run_attempts=%d pending_approvals=%d delivery_profiles=%d raw_intake_items=%d intake_review_items=%d dispatch=not_implemented intake=raw_cli\n",
+		"work_items=%d open_work_items=%d active_run_attempts=%d pending_approvals=%d delivery_profiles=%d raw_intake_items=%d intake_review_items=%d intake_approval_required_items=%d dispatch=not_implemented intake=raw_cli\n",
 		len(taskViews),
 		openWorkItems,
 		activeRunAttempts,
@@ -91,6 +95,7 @@ func runWorkStatus(ctx context.Context, store *sqlite.Store, snapshot registry.S
 		len(deliveryProfiles(snapshot)),
 		len(rawIntakeItems),
 		intakeReviewItems,
+		intakeApprovalRequiredItems,
 	)
 	return err
 }
@@ -241,7 +246,7 @@ func isActiveRunAttemptStatus(status string) bool {
 
 func isReviewableIntakeStatus(status string) bool {
 	switch strings.ToLower(strings.TrimSpace(status)) {
-	case "review_required", "needs_clarification", "duplicate_linked_or_suppressed":
+	case "review_required", "needs_clarification", "duplicate_linked_or_suppressed", "approval_required":
 		return true
 	default:
 		return false

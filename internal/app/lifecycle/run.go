@@ -727,6 +727,10 @@ type rawIntakeItemView struct {
 	AcceptedWorkItemID     int64           `json:"accepted_work_item_id,omitempty"`
 	AcceptedWorkItemKey    string          `json:"accepted_work_item_key,omitempty"`
 	AcceptedWorkItemStatus string          `json:"accepted_work_item_status,omitempty"`
+	ApprovalRequired       bool            `json:"approval_required,omitempty"`
+	BlockedPendingApproval bool            `json:"blocked_pending_approval,omitempty"`
+	PolicyReason           string          `json:"policy_reason,omitempty"`
+	PolicyDecision         string          `json:"policy_decision,omitempty"`
 	Payload                json.RawMessage `json:"payload,omitempty"`
 	Processing             json.RawMessage `json:"processing,omitempty"`
 }
@@ -752,10 +756,14 @@ type intakeReviewQueueView struct {
 }
 
 type intakeReviewDecisionView struct {
-	IntakeItem  rawIntakeItemView   `json:"intake_item"`
-	Decision    string              `json:"decision"`
-	WorkCreated bool                `json:"work_created"`
-	WorkItem    *reviewWorkItemView `json:"work_item,omitempty"`
+	IntakeItem             rawIntakeItemView   `json:"intake_item"`
+	Decision               string              `json:"decision"`
+	WorkCreated            bool                `json:"work_created"`
+	ApprovalRequired       bool                `json:"approval_required,omitempty"`
+	BlockedPendingApproval bool                `json:"blocked_pending_approval,omitempty"`
+	PolicyReason           string              `json:"policy_reason,omitempty"`
+	PolicyDecision         string              `json:"policy_decision,omitempty"`
+	WorkItem               *reviewWorkItemView `json:"work_item,omitempty"`
 }
 
 type reviewWorkItemView struct {
@@ -801,9 +809,13 @@ type intakeClarification struct {
 }
 
 type intakeReviewDecision struct {
-	Decision    string            `json:"decision"`
-	WorkCreated bool              `json:"work_created"`
-	WorkItem    *intakeReviewWork `json:"work_item,omitempty"`
+	Decision               string            `json:"decision"`
+	WorkCreated            bool              `json:"work_created"`
+	ApprovalRequired       bool              `json:"approval_required,omitempty"`
+	BlockedPendingApproval bool              `json:"blocked_pending_approval,omitempty"`
+	PolicyReason           string            `json:"policy_reason,omitempty"`
+	PolicyDecision         string            `json:"policy_decision,omitempty"`
+	WorkItem               *intakeReviewWork `json:"work_item,omitempty"`
 }
 
 type intakeReviewWork struct {
@@ -1059,9 +1071,28 @@ func runIntakeReviewDecision(ctx context.Context, app bootstrap.App, command com
 	eventType := runtimeevents.EventIntakeReviewRejected
 	var task *sqlite.Task
 	workCreated := false
+	policyDecision := "direct_work_allowed"
+	policyReason := "low_risk_review_acceptance"
+	approvalRequired := false
 
 	switch command.ReviewAction {
 	case "accept":
+		if item.Status == "approval_required" && notes.Review != nil && notes.Review.ApprovalRequired {
+			decision = "approval_required"
+			eventType = runtimeevents.EventIntakeReviewApprovalRequired
+			status = "approval_required"
+			summary = "Risk policy requires operator approval before work promotion"
+			approvalRequired = true
+			policyDecision = notes.Review.PolicyDecision
+			if policyDecision == "" {
+				policyDecision = "approval_required"
+			}
+			policyReason = notes.Review.PolicyReason
+			if policyReason == "" {
+				policyReason = "risky_intake_requires_operator_approval"
+			}
+			break
+		}
 		if item.Status == "accepted" && notes.Review != nil && notes.Review.WorkItem != nil {
 			existing := sqlite.Task{
 				ID:     notes.Review.WorkItem.ID,
@@ -1090,6 +1121,17 @@ func runIntakeReviewDecision(ctx context.Context, app bootstrap.App, command com
 		}
 		if item.Status != "review_required" || notes.DraftArtifact == nil || notes.DraftArtifact.Kind != "draft_task" {
 			return fmt.Errorf("intake %s cannot be accepted into work from status %s", rawIntakeKey(item.ID), item.Status)
+		}
+		policy := intakePromotionPolicy(item)
+		if policy.ApprovalRequired {
+			decision = "approval_required"
+			eventType = runtimeevents.EventIntakeReviewApprovalRequired
+			status = "approval_required"
+			summary = "Risk policy requires operator approval before work promotion"
+			approvalRequired = true
+			policyDecision = policy.Decision
+			policyReason = policy.Reason
+			break
 		}
 		created, createdNow, err := createTaskFromReviewedIntake(ctx, app, item)
 		if err != nil {
@@ -1127,7 +1169,14 @@ func runIntakeReviewDecision(ctx context.Context, app bootstrap.App, command com
 		return errors.New(commands.IntakeUsage)
 	}
 
-	review := intakeReviewDecision{Decision: decision, WorkCreated: workCreated}
+	review := intakeReviewDecision{
+		Decision:               decision,
+		WorkCreated:            workCreated,
+		ApprovalRequired:       approvalRequired,
+		BlockedPendingApproval: approvalRequired,
+		PolicyDecision:         policyDecision,
+		PolicyReason:           policyReason,
+	}
 	var workItemID *int64
 	workItemKey := ""
 	if task != nil {
@@ -1142,15 +1191,18 @@ func runIntakeReviewDecision(ctx context.Context, app bootstrap.App, command com
 		return err
 	}
 	updated, err := app.Store.ReviewIntakeItem(ctx, sqlite.ReviewIntakeItemParams{
-		ID:           item.ID,
-		Status:       status,
-		Summary:      summary,
-		RoutingNotes: string(notesJSON),
-		EventType:    eventType,
-		Decision:     decision,
-		WorkCreated:  workCreated,
-		WorkItemID:   workItemID,
-		WorkItemKey:  workItemKey,
+		ID:               item.ID,
+		Status:           status,
+		Summary:          summary,
+		RoutingNotes:     string(notesJSON),
+		EventType:        eventType,
+		Decision:         decision,
+		WorkCreated:      workCreated,
+		ApprovalRequired: approvalRequired,
+		PolicyDecision:   policyDecision,
+		PolicyReason:     policyReason,
+		WorkItemID:       workItemID,
+		WorkItemKey:      workItemKey,
 	})
 	if err != nil {
 		return err
@@ -1160,9 +1212,13 @@ func runIntakeReviewDecision(ctx context.Context, app bootstrap.App, command com
 		return err
 	}
 	result := intakeReviewDecisionView{
-		IntakeItem:  view,
-		Decision:    decision,
-		WorkCreated: workCreated,
+		IntakeItem:             view,
+		Decision:               decision,
+		WorkCreated:            workCreated,
+		ApprovalRequired:       approvalRequired,
+		BlockedPendingApproval: approvalRequired,
+		PolicyDecision:         policyDecision,
+		PolicyReason:           policyReason,
 	}
 	if task != nil {
 		result.WorkItem = &reviewWorkItemView{ID: task.ID, Key: task.Key, Status: task.Status}
@@ -1210,6 +1266,30 @@ func reviewedIntakeWorkItemKey(id int64) string {
 	return fmt.Sprintf("intake-review-%d", id)
 }
 
+type intakePromotionPolicyDecision struct {
+	ApprovalRequired bool
+	Decision         string
+	Reason           string
+}
+
+func intakePromotionPolicy(item sqlite.IntakeItem) intakePromotionPolicyDecision {
+	text := strings.ToLower(strings.Join([]string{item.Subject, item.Summary, item.SourceFactsJSON}, " "))
+	for _, marker := range []string{"delete", "production", "prod", "credential", "secret", "payment", "deploy"} {
+		if strings.Contains(text, marker) {
+			return intakePromotionPolicyDecision{
+				ApprovalRequired: true,
+				Decision:         "approval_required",
+				Reason:           "risky_intake_requires_operator_approval",
+			}
+		}
+	}
+	return intakePromotionPolicyDecision{
+		ApprovalRequired: false,
+		Decision:         "direct_work_allowed",
+		Reason:           "low_risk_review_acceptance",
+	}
+}
+
 func intakeNotesFromItem(item sqlite.IntakeItem) (intakeProcessingNotes, error) {
 	var notes intakeProcessingNotes
 	if strings.TrimSpace(item.RoutingNotes) == "" {
@@ -1223,7 +1303,7 @@ func intakeNotesFromItem(item sqlite.IntakeItem) (intakeProcessingNotes, error) 
 
 func isReviewableIntakeStatus(status string) bool {
 	switch strings.ToLower(strings.TrimSpace(status)) {
-	case "review_required", "needs_clarification", "duplicate_linked_or_suppressed":
+	case "review_required", "needs_clarification", "duplicate_linked_or_suppressed", "approval_required":
 		return true
 	default:
 		return false
@@ -1459,6 +1539,12 @@ func rawIntakeView(item sqlite.IntakeItem, includePayload bool) (rawIntakeItemVi
 			view.AcceptedWorkItemID = notes.Review.WorkItem.ID
 			view.AcceptedWorkItemKey = notes.Review.WorkItem.Key
 			view.AcceptedWorkItemStatus = notes.Review.WorkItem.Status
+		}
+		if err := json.Unmarshal([]byte(item.RoutingNotes), &notes); err == nil && notes.Review != nil {
+			view.ApprovalRequired = notes.Review.ApprovalRequired
+			view.BlockedPendingApproval = notes.Review.BlockedPendingApproval
+			view.PolicyReason = notes.Review.PolicyReason
+			view.PolicyDecision = notes.Review.PolicyDecision
 		}
 	}
 	view.RequestedBy = rawStringFact(facts, "requested_by")

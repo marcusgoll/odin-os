@@ -368,15 +368,18 @@ type ProcessIntakeItemParams struct {
 }
 
 type ReviewIntakeItemParams struct {
-	ID           int64
-	Status       string
-	Summary      string
-	RoutingNotes string
-	EventType    runtimeevents.Type
-	Decision     string
-	WorkCreated  bool
-	WorkItemID   *int64
-	WorkItemKey  string
+	ID               int64
+	Status           string
+	Summary          string
+	RoutingNotes     string
+	EventType        runtimeevents.Type
+	Decision         string
+	WorkCreated      bool
+	ApprovalRequired bool
+	PolicyDecision   string
+	PolicyReason     string
+	WorkItemID       *int64
+	WorkItemKey      string
 }
 
 type IntakeItemProcessingEvent struct {

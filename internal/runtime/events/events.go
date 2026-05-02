@@ -69,6 +69,7 @@ const (
 	EventIntakeReviewClarificationRequested Type = "intake.review_clarification_requested"
 	EventIntakeReviewArchived               Type = "intake.review_archived"
 	EventIntakeReviewDuplicateAcknowledged  Type = "intake.review_duplicate_acknowledged"
+	EventIntakeReviewApprovalRequired       Type = "intake.review_approval_required"
 	EventAutomationTriggerCreated           Type = "automation_trigger.created"
 	EventAutomationTriggerFireRequested     Type = "automation_trigger.fire_requested"
 	EventAutomationTriggerEvaluated         Type = "automation_trigger.evaluated"
@@ -330,6 +331,9 @@ type IntakeReviewDecisionPayload struct {
 	Status            string `json:"status"`
 	PreviousStatus    string `json:"previous_status,omitempty"`
 	WorkCreated       bool   `json:"work_created"`
+	ApprovalRequired  bool   `json:"approval_required,omitempty"`
+	PolicyDecision    string `json:"policy_decision,omitempty"`
+	PolicyReason      string `json:"policy_reason,omitempty"`
 	WorkItemID        *int64 `json:"work_item_id,omitempty"`
 	WorkItemKey       string `json:"work_item_key,omitempty"`
 	CanonicalIntakeID *int64 `json:"canonical_intake_id,omitempty"`

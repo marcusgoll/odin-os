@@ -236,14 +236,15 @@ type PlaceholderLane struct {
 }
 
 type IntakeInboxLane struct {
-	Wiring            Wiring                  `json:"wiring"`
-	Source            string                  `json:"source"`
-	Status            string                  `json:"status"`
-	Note              string                  `json:"note"`
-	RawItemCount      int                     `json:"raw_item_count"`
-	RawProcessedCount int                     `json:"raw_processed_count"`
-	ReviewQueueCount  int                     `json:"review_queue_count"`
-	Items             []IntakeEvidenceSummary `json:"items"`
+	Wiring                      Wiring                  `json:"wiring"`
+	Source                      string                  `json:"source"`
+	Status                      string                  `json:"status"`
+	Note                        string                  `json:"note"`
+	RawItemCount                int                     `json:"raw_item_count"`
+	RawProcessedCount           int                     `json:"raw_processed_count"`
+	ReviewQueueCount            int                     `json:"review_queue_count"`
+	IntakeApprovalRequiredCount int                     `json:"intake_approval_required_count"`
+	Items                       []IntakeEvidenceSummary `json:"items"`
 }
 
 type IntakeEvidenceSummary struct {
@@ -751,6 +752,9 @@ func (service Service) Build(ctx context.Context, resolved scope.Resolution) (Vi
 		if isReviewableIntakeStatus(item.Status) {
 			view.IntakeInbox.ReviewQueueCount++
 		}
+		if strings.EqualFold(strings.TrimSpace(item.Status), "approval_required") {
+			view.IntakeInbox.IntakeApprovalRequiredCount++
+		}
 	}
 	if len(rawIntakeItems) > 0 && len(view.IntakeInbox.Items) == 0 {
 		view.IntakeInbox.Status = "raw_review"
@@ -1005,7 +1009,7 @@ func isClosedWorkItemStatus(status string) bool {
 
 func isReviewableIntakeStatus(status string) bool {
 	switch strings.ToLower(strings.TrimSpace(status)) {
-	case "review_required", "needs_clarification", "duplicate_linked_or_suppressed":
+	case "review_required", "needs_clarification", "duplicate_linked_or_suppressed", "approval_required":
 		return true
 	default:
 		return false
