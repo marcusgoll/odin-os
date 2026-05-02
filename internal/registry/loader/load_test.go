@@ -127,6 +127,7 @@ func TestLoadDirLoadsUniversalIntakeAgents(t *testing.T) {
 		"project-spec-builder-agent",
 		"personal-project-builder-agent",
 		"personal-admin-agent",
+		"calendar-planning-agent",
 		"review-agent",
 		"final-review-agent",
 		"scope-creep-detector-agent",
@@ -999,6 +1000,41 @@ func TestLoadDirLoadsUniversalIntakeAgents(t *testing.T) {
 	for _, required := range requiredPersonalAdminContract {
 		if !strings.Contains(personalAdminContract, required) {
 			t.Fatalf("personal admin agent body missing %q", required)
+		}
+	}
+
+	calendarPlanning := snapshot.ByKey["calendar-planning-agent"]
+	calendarPlanningContract := strings.Join([]string{
+		calendarPlanning.Title,
+		calendarPlanning.Summary,
+		calendarPlanning.Sections[registry.SectionPurpose],
+		calendarPlanning.Sections[registry.SectionWhenToUse],
+		calendarPlanning.Sections[registry.SectionInputs],
+		calendarPlanning.Sections[registry.SectionProcedure],
+		calendarPlanning.Sections[registry.SectionOutputs],
+		calendarPlanning.Sections[registry.SectionConstraints],
+		calendarPlanning.Sections[registry.SectionSuccessCriteria],
+	}, "\n")
+	requiredCalendarPlanningContract := []string{
+		"Calendar Planning Agent",
+		"{{raw_input}}",
+		"Given these tasks, priorities, and calendar constraints",
+		"Create a scheduling recommendation",
+		"tasks to schedule",
+		"suggested time blocks",
+		"estimated duration",
+		"energy level required",
+		"deadlines",
+		"conflicts",
+		"tasks that should not be scheduled yet",
+		"recommended order",
+		"buffer time needed",
+		"approval request before creating events",
+		"Do not create calendar events without approval",
+	}
+	for _, required := range requiredCalendarPlanningContract {
+		if !strings.Contains(calendarPlanningContract, required) {
+			t.Fatalf("calendar planning agent body missing %q", required)
 		}
 	}
 
