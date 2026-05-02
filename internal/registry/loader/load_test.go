@@ -134,6 +134,7 @@ func TestLoadDirLoadsUniversalIntakeAgents(t *testing.T) {
 		"final-review-agent",
 		"scope-creep-detector-agent",
 		"risk-review-agent",
+		"decision-support-agent",
 		"chief-of-staff-agent",
 		"weekly-review-agent",
 		"monthly-strategy-review-agent",
@@ -1521,6 +1522,39 @@ func TestLoadDirLoadsUniversalIntakeAgents(t *testing.T) {
 	for _, required := range requiredMonthlyStrategyReviewContract {
 		if !strings.Contains(monthlyStrategyReviewContract, required) {
 			t.Fatalf("monthly strategy review agent body missing %q", required)
+		}
+	}
+
+	decisionSupport := snapshot.ByKey["decision-support-agent"]
+	decisionSupportContract := strings.Join([]string{
+		decisionSupport.Title,
+		decisionSupport.Summary,
+		decisionSupport.Sections[registry.SectionPurpose],
+		decisionSupport.Sections[registry.SectionWhenToUse],
+		decisionSupport.Sections[registry.SectionInputs],
+		decisionSupport.Sections[registry.SectionProcedure],
+		decisionSupport.Sections[registry.SectionOutputs],
+		decisionSupport.Sections[registry.SectionConstraints],
+		decisionSupport.Sections[registry.SectionSuccessCriteria],
+	}, "\n")
+	requiredDecisionSupportContract := []string{
+		"Decision Support Agent",
+		"{{raw_input}}",
+		"Analyze this decision",
+		"decision to make",
+		"options",
+		"criteria",
+		"pros and cons",
+		"risks",
+		"reversibility",
+		"cost of delaying",
+		"recommended option",
+		"confidence level",
+		"what information would change the recommendation",
+	}
+	for _, required := range requiredDecisionSupportContract {
+		if !strings.Contains(decisionSupportContract, required) {
+			t.Fatalf("decision support agent body missing %q", required)
 		}
 	}
 
