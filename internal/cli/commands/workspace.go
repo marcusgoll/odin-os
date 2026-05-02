@@ -10,7 +10,7 @@ import (
 	"odin-os/internal/store/sqlite"
 )
 
-const workspaceUsage = "usage: odin workspace list [--json]"
+const workspaceUsage = "usage: odin workspace status [--json]|list [--json]"
 
 func RunWorkspace(ctx context.Context, store *sqlite.Store, args []string, stdout io.Writer) error {
 	if len(args) == 0 || args[0] == "help" || args[0] == "--help" {
@@ -19,12 +19,63 @@ func RunWorkspace(ctx context.Context, store *sqlite.Store, args []string, stdou
 	}
 
 	switch args[0] {
+	case "status":
+		return runWorkspaceStatus(ctx, store, args[1:], stdout)
 	case "list":
 		return runWorkspaceList(ctx, store, args[1:], stdout)
 	default:
 		_, err := fmt.Fprintf(stdout, "unknown workspace command: %s\n%s\n", args[0], workspaceUsage)
 		return err
 	}
+}
+
+func runWorkspaceStatus(ctx context.Context, store *sqlite.Store, args []string, stdout io.Writer) error {
+	params := parseWorkStartArgs(args)
+	views, err := projections.ListActiveWorktreeLeaseViews(ctx, store.DB())
+	if err != nil {
+		return err
+	}
+	report := map[string]any{
+		"surface":                 "odin workspace status",
+		"status":                  "read_only",
+		"active_worktree_leases":  len(views),
+		"live_execution_sessions": "not_implemented",
+		"adoption":                "not_implemented",
+		"attach":                  "not_implemented",
+		"handoff":                 "not_implemented",
+		"stop":                    "not_implemented",
+	}
+	if parseBoolFlag(params, "json") {
+		encoder := json.NewEncoder(stdout)
+		encoder.SetIndent("", "  ")
+		return encoder.Encode(report)
+	}
+
+	if _, err := fmt.Fprintln(stdout, "Workspace Status"); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintln(stdout, "Operator Surface: odin workspace ..."); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(stdout, "Worktree Leases: active=%d\n", len(views)); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintln(stdout, "Live Execution Sessions: not_implemented"); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintln(stdout, "Adoption: not_implemented"); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintln(stdout, "Attach: not_implemented"); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintln(stdout, "Handoff: not_implemented"); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintln(stdout, "Stop: not_implemented"); err != nil {
+		return err
+	}
+	return nil
 }
 
 func runWorkspaceList(ctx context.Context, store *sqlite.Store, args []string, stdout io.Writer) error {

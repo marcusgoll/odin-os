@@ -125,6 +125,38 @@ func TestRunWorkspaceListRendersActiveWorktreeLeases(t *testing.T) {
 	}
 }
 
+func TestRunWorkspaceStatusSummarizesLeaseProjectionAndMissingSessionControls(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	root := newLifecycleTestRoot(t)
+	store := openLifecycleStore(t, root)
+	defer store.Close()
+	_, _, _ = seedLifecycleWorktreeLease(t, ctx, store)
+
+	var stdout bytes.Buffer
+	err := Run(ctx, root, []string{"workspace", "status"}, strings.NewReader(""), &stdout)
+	if err != nil {
+		t.Fatalf("Run(workspace status) error = %v", err)
+	}
+
+	output := stdout.String()
+	for _, want := range []string{
+		"Workspace Status",
+		"Operator Surface: odin workspace ...",
+		"Worktree Leases: active=1",
+		"Live Execution Sessions: not_implemented",
+		"Adoption: not_implemented",
+		"Attach: not_implemented",
+		"Handoff: not_implemented",
+		"Stop: not_implemented",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("Run(workspace status) output = %q, want %q", output, want)
+		}
+	}
+}
+
 func TestRunWorkProfilesListsDeliveryProfileWorkflows(t *testing.T) {
 	t.Parallel()
 
