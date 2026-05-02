@@ -109,6 +109,7 @@ func TestLoadDirLoadsUniversalIntakeAgents(t *testing.T) {
 		"urgency-importance-judge-agent",
 		"router-agent",
 		"spec-task-builder-agent",
+		"universal-ticket-generator-agent",
 		"review-agent",
 		"chief-of-staff-agent",
 		"system-memory-curator-agent",
@@ -349,6 +350,43 @@ func TestLoadDirLoadsUniversalIntakeAgents(t *testing.T) {
 	for _, required := range requiredUrgencyImportanceJudgeContract {
 		if !strings.Contains(urgencyImportanceJudgeContract, required) {
 			t.Fatalf("urgency importance judge agent body missing %q", required)
+		}
+	}
+
+	universalTicketGenerator := snapshot.ByKey["universal-ticket-generator-agent"]
+	universalTicketGeneratorContract := strings.Join([]string{
+		universalTicketGenerator.Title,
+		universalTicketGenerator.Summary,
+		universalTicketGenerator.Sections[registry.SectionPurpose],
+		universalTicketGenerator.Sections[registry.SectionWhenToUse],
+		universalTicketGenerator.Sections[registry.SectionInputs],
+		universalTicketGenerator.Sections[registry.SectionProcedure],
+		universalTicketGenerator.Sections[registry.SectionOutputs],
+		universalTicketGenerator.Sections[registry.SectionConstraints],
+		universalTicketGenerator.Sections[registry.SectionSuccessCriteria],
+	}, "\n")
+	requiredUniversalTicketGeneratorContract := []string{
+		"Universal Ticket Generator",
+		"{{raw_input}}",
+		"Create a ticket from this input",
+		"title",
+		"type",
+		"project or area",
+		"problem statement",
+		"desired outcome",
+		"acceptance criteria",
+		"non-goals",
+		"constraints",
+		"dependencies",
+		"risks",
+		"estimated effort",
+		"recommended owner or agent",
+		"approval status",
+		"Do not create implementation instructions unless the task is approved for execution",
+	}
+	for _, required := range requiredUniversalTicketGeneratorContract {
+		if !strings.Contains(universalTicketGeneratorContract, required) {
+			t.Fatalf("universal ticket generator agent body missing %q", required)
 		}
 	}
 
