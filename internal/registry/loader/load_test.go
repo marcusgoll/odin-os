@@ -140,6 +140,7 @@ func TestLoadDirLoadsUniversalIntakeAgents(t *testing.T) {
 		"weekly-review-agent",
 		"monthly-strategy-review-agent",
 		"system-memory-curator-agent",
+		"knowledge-base-filing-agent",
 		"voice-note-cleaner-agent",
 		"email-to-task-extractor-agent",
 		"email-drafting-agent",
@@ -1667,6 +1668,39 @@ func TestLoadDirLoadsUniversalIntakeAgents(t *testing.T) {
 	for _, required := range requiredMemoryCuratorContract {
 		if !strings.Contains(memoryCuratorContract, required) {
 			t.Fatalf("system memory curator agent body missing %q", required)
+		}
+	}
+
+	knowledgeBaseFiling := snapshot.ByKey["knowledge-base-filing-agent"]
+	knowledgeBaseFilingContract := strings.Join([]string{
+		knowledgeBaseFiling.Title,
+		knowledgeBaseFiling.Summary,
+		knowledgeBaseFiling.Sections[registry.SectionPurpose],
+		knowledgeBaseFiling.Sections[registry.SectionWhenToUse],
+		knowledgeBaseFiling.Sections[registry.SectionInputs],
+		knowledgeBaseFiling.Sections[registry.SectionProcedure],
+		knowledgeBaseFiling.Sections[registry.SectionOutputs],
+		knowledgeBaseFiling.Sections[registry.SectionConstraints],
+		knowledgeBaseFiling.Sections[registry.SectionSuccessCriteria],
+	}, "\n")
+	requiredKnowledgeBaseFilingContract := []string{
+		"Knowledge Base Filing Agent",
+		"{{raw_input}}",
+		"Classify this information",
+		"should_save: yes/no",
+		"folder or collection",
+		"tags",
+		"project association",
+		"summary",
+		"source",
+		"expiration or review date",
+		"whether this should become a task",
+		"whether this should become a reference document",
+		"whether this duplicates existing knowledge",
+	}
+	for _, required := range requiredKnowledgeBaseFilingContract {
+		if !strings.Contains(knowledgeBaseFilingContract, required) {
+			t.Fatalf("knowledge base filing agent body missing %q", required)
 		}
 	}
 }
