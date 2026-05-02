@@ -6,6 +6,12 @@ Work inside `odin-os`.
 
 `odin-orchestrator` is a migration source only and is being phased out. Do not treat it as the primary implementation target or runtime root unless the user explicitly asks for legacy migration work.
 
+## Command Policy
+
+- Use `odin ...` for all operator-facing commands and runtime proofs.
+- Before command execution, verify `which odin` resolves to the intended binary.
+- Use `./bin/odin ...` only for explicit repo-local build verification after a fresh build.
+
 ## Reuse and Verification Rules
 
 Before implementing any Odin feature, Codex must first audit the existing repo state.
