@@ -123,6 +123,7 @@ func TestLoadDirLoadsUniversalIntakeAgents(t *testing.T) {
 		"project-spec-builder-agent",
 		"personal-project-builder-agent",
 		"review-agent",
+		"final-review-agent",
 		"chief-of-staff-agent",
 		"system-memory-curator-agent",
 		"voice-note-cleaner-agent",
@@ -820,6 +821,37 @@ func TestLoadDirLoadsUniversalIntakeAgents(t *testing.T) {
 	for _, required := range requiredPersonalProjectBuilderContract {
 		if !strings.Contains(personalProjectBuilderContract, required) {
 			t.Fatalf("personal project builder agent body missing %q", required)
+		}
+	}
+
+	finalReviewAgent := snapshot.ByKey["final-review-agent"]
+	finalReviewAgentContract := strings.Join([]string{
+		finalReviewAgent.Title,
+		finalReviewAgent.Summary,
+		finalReviewAgent.Sections[registry.SectionPurpose],
+		finalReviewAgent.Sections[registry.SectionWhenToUse],
+		finalReviewAgent.Sections[registry.SectionInputs],
+		finalReviewAgent.Sections[registry.SectionProcedure],
+		finalReviewAgent.Sections[registry.SectionOutputs],
+		finalReviewAgent.Sections[registry.SectionConstraints],
+		finalReviewAgent.Sections[registry.SectionSuccessCriteria],
+	}, "\n")
+	requiredFinalReviewAgentContract := []string{
+		"Final Review Agent",
+		"{{raw_input}}",
+		"{{knowledge_base_context}}",
+		"Review this completed work against the original task",
+		"meets requirements: yes/no/partially",
+		"missing items",
+		"quality issues",
+		"risks",
+		"recommended fixes",
+		"whether human review is required",
+		"final status: approve, revise, block, archive",
+	}
+	for _, required := range requiredFinalReviewAgentContract {
+		if !strings.Contains(finalReviewAgentContract, required) {
+			t.Fatalf("final review agent body missing %q", required)
 		}
 	}
 
