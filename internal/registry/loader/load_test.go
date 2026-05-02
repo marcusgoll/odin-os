@@ -138,6 +138,7 @@ func TestLoadDirLoadsUniversalIntakeAgents(t *testing.T) {
 		"system-memory-curator-agent",
 		"voice-note-cleaner-agent",
 		"email-to-task-extractor-agent",
+		"email-drafting-agent",
 		"visual-intake-agent",
 		"meeting-notes-intake-agent",
 	}
@@ -1210,6 +1211,38 @@ func TestLoadDirLoadsUniversalIntakeAgents(t *testing.T) {
 	for _, required := range requiredEmailToTaskExtractorContract {
 		if !strings.Contains(emailToTaskExtractorContract, required) {
 			t.Fatalf("email-to-task extractor agent body missing %q", required)
+		}
+	}
+
+	emailDrafting := snapshot.ByKey["email-drafting-agent"]
+	emailDraftingContract := strings.Join([]string{
+		emailDrafting.Title,
+		emailDrafting.Summary,
+		emailDrafting.Sections[registry.SectionPurpose],
+		emailDrafting.Sections[registry.SectionWhenToUse],
+		emailDrafting.Sections[registry.SectionInputs],
+		emailDrafting.Sections[registry.SectionProcedure],
+		emailDrafting.Sections[registry.SectionOutputs],
+		emailDrafting.Sections[registry.SectionConstraints],
+		emailDrafting.Sections[registry.SectionSuccessCriteria],
+	}, "\n")
+	requiredEmailDraftingContract := []string{
+		"Email Drafting Agent",
+		"{{raw_input}}",
+		"Draft an email response based on this context",
+		"suggested subject",
+		"concise email draft",
+		"tone used",
+		"assumptions",
+		"open questions",
+		"whether it is safe to send",
+		"approval required: yes",
+		"Do not send the email",
+		"Do not promise anything not supported by the context",
+	}
+	for _, required := range requiredEmailDraftingContract {
+		if !strings.Contains(emailDraftingContract, required) {
+			t.Fatalf("email drafting agent body missing %q", required)
 		}
 	}
 
