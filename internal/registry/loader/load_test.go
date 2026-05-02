@@ -116,6 +116,7 @@ func TestLoadDirLoadsUniversalIntakeAgents(t *testing.T) {
 		"writing-task-builder-agent",
 		"plan-first-execution-agent",
 		"subagent-delegation-planner-agent",
+		"task-splitter-agent",
 		"project-spec-builder-agent",
 		"personal-project-builder-agent",
 		"review-agent",
@@ -619,6 +620,37 @@ func TestLoadDirLoadsUniversalIntakeAgents(t *testing.T) {
 	for _, required := range requiredSubagentDelegationPlannerContract {
 		if !strings.Contains(subagentDelegationPlannerContract, required) {
 			t.Fatalf("subagent delegation planner agent body missing %q", required)
+		}
+	}
+
+	taskSplitter := snapshot.ByKey["task-splitter-agent"]
+	taskSplitterContract := strings.Join([]string{
+		taskSplitter.Title,
+		taskSplitter.Summary,
+		taskSplitter.Sections[registry.SectionPurpose],
+		taskSplitter.Sections[registry.SectionWhenToUse],
+		taskSplitter.Sections[registry.SectionInputs],
+		taskSplitter.Sections[registry.SectionProcedure],
+		taskSplitter.Sections[registry.SectionOutputs],
+		taskSplitter.Sections[registry.SectionConstraints],
+		taskSplitter.Sections[registry.SectionSuccessCriteria],
+	}, "\n")
+	requiredTaskSplitterContract := []string{
+		"Task Splitter",
+		"{{raw_input}}",
+		"Break this task or project into smaller tasks",
+		"recommended task list",
+		"order of execution",
+		"dependencies",
+		"estimated effort per task",
+		"which tasks can be automated",
+		"which tasks require human review",
+		"first task to start with",
+		"tasks that should be deferred",
+	}
+	for _, required := range requiredTaskSplitterContract {
+		if !strings.Contains(taskSplitterContract, required) {
+			t.Fatalf("task splitter agent body missing %q", required)
 		}
 	}
 
