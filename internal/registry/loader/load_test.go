@@ -113,6 +113,7 @@ func TestLoadDirLoadsUniversalIntakeAgents(t *testing.T) {
 		"software-feature-ticket-builder-agent",
 		"bug-report-builder-agent",
 		"research-ticket-builder-agent",
+		"writing-task-builder-agent",
 		"project-spec-builder-agent",
 		"personal-project-builder-agent",
 		"review-agent",
@@ -501,6 +502,40 @@ func TestLoadDirLoadsUniversalIntakeAgents(t *testing.T) {
 	for _, required := range requiredResearchTicketBuilderContract {
 		if !strings.Contains(researchTicketBuilderContract, required) {
 			t.Fatalf("research ticket builder agent body missing %q", required)
+		}
+	}
+
+	writingTaskBuilder := snapshot.ByKey["writing-task-builder-agent"]
+	writingTaskBuilderContract := strings.Join([]string{
+		writingTaskBuilder.Title,
+		writingTaskBuilder.Summary,
+		writingTaskBuilder.Sections[registry.SectionPurpose],
+		writingTaskBuilder.Sections[registry.SectionWhenToUse],
+		writingTaskBuilder.Sections[registry.SectionInputs],
+		writingTaskBuilder.Sections[registry.SectionProcedure],
+		writingTaskBuilder.Sections[registry.SectionOutputs],
+		writingTaskBuilder.Sections[registry.SectionConstraints],
+		writingTaskBuilder.Sections[registry.SectionSuccessCriteria],
+	}, "\n")
+	requiredWritingTaskBuilderContract := []string{
+		"Writing Task Builder",
+		"{{raw_input}}",
+		"Create a writing brief from this input",
+		"working title",
+		"purpose",
+		"audience",
+		"format",
+		"desired tone",
+		"key points",
+		"sources or references needed",
+		"length target",
+		"call to action",
+		"deadline",
+		"first draft instructions",
+	}
+	for _, required := range requiredWritingTaskBuilderContract {
+		if !strings.Contains(writingTaskBuilderContract, required) {
+			t.Fatalf("writing task builder agent body missing %q", required)
 		}
 	}
 
