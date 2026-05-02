@@ -65,6 +65,13 @@ type DispatchOutcome struct {
 	Reason     string
 }
 
+type RunExecutionOutcome struct {
+	Task     sqlite.Task
+	Run      *sqlite.Run
+	Executed bool
+	Reason   string
+}
+
 type ExecutionRequest struct {
 	PromptOverride string
 	Metadata       map[string]string
@@ -581,6 +588,110 @@ func (service Service) DispatchTaskRunAttempt(ctx context.Context, taskID int64)
 		Run:        &updatedRun,
 		Dispatched: true,
 		Reason:     "dispatched",
+	}, nil
+}
+
+func (service Service) ExecuteDispatchedRun(ctx context.Context, taskID int64) (RunExecutionOutcome, error) {
+	if service.Store == nil {
+		return RunExecutionOutcome{}, fmt.Errorf("job store is required")
+	}
+
+	task, err := service.Store.GetTask(ctx, taskID)
+	if err != nil {
+		return RunExecutionOutcome{}, err
+	}
+	if task.Status != "running" || task.CurrentRunID == nil {
+		return RunExecutionOutcome{
+			Task:   task,
+			Reason: "task_not_running",
+		}, nil
+	}
+
+	run, err := service.Store.GetRun(ctx, *task.CurrentRunID)
+	if err != nil {
+		return RunExecutionOutcome{}, err
+	}
+	if run.Status != "running" {
+		return RunExecutionOutcome{
+			Task:   task,
+			Run:    &run,
+			Reason: "run_not_running",
+		}, nil
+	}
+
+	project, err := service.Store.GetProject(ctx, task.ProjectID)
+	if err != nil {
+		return RunExecutionOutcome{}, err
+	}
+	executors := service.Executors
+	if len(executors) == 0 {
+		executors = executorrouter.DefaultCatalog()
+	}
+	executor, ok := executors[run.Executor]
+	if !ok {
+		return RunExecutionOutcome{}, fmt.Errorf("executor %q is unavailable", run.Executor)
+	}
+
+	spec := contract.TaskSpec{
+		ID:     task.Key,
+		Kind:   contract.TaskKindGeneral,
+		Scope:  task.Scope,
+		Prompt: task.Title,
+		Requirements: contract.Requirements{
+			AllowedClasses:    []contract.ExecutorClass{contract.ExecutorClassPlanBackedCLI},
+			NeedsHeadlessPlan: true,
+		},
+		Metadata: map[string]string{
+			"project_key": project.Key,
+			"task_id":     fmt.Sprintf("%d", task.ID),
+			"run_id":      fmt.Sprintf("%d", run.ID),
+		},
+	}
+	if service.PromptRenderer != nil {
+		renderedPrompt, err := service.renderPrompt(ctx, spec, task)
+		if err != nil {
+			return RunExecutionOutcome{}, err
+		}
+		spec.Prompt = renderedPrompt
+		spec.Metadata["prompt_size_bytes"] = fmt.Sprintf("%d", prompts.PromptSizeBytes(renderedPrompt))
+	}
+
+	result, execErr := runExecutorTask(ctx, run.Executor, executor, spec)
+	executionMetadata := executionMetadataForResult(spec.Metadata, result.Metadata, leases.Assignment{}, run.Executor, result.Handle.ExternalID)
+	finalizeErr := service.finalizeOutcome(ctx, task, run, admissionDecision{}, result, execErr)
+	outcome, loadErr := service.loadExecutionOutcome(ctx, task.ID, &run.ID)
+	if finalizeErr != nil {
+		if loadErr == nil {
+			return RunExecutionOutcome{
+				Task:     outcome.Task,
+				Run:      outcome.Run,
+				Executed: true,
+				Reason:   "execution_failed",
+			}, finalizeErr
+		}
+		return RunExecutionOutcome{}, finalizeErr
+	}
+	if loadErr != nil {
+		return RunExecutionOutcome{}, loadErr
+	}
+	if outcome.Run != nil && execErr == nil {
+		if err := service.recordExecutionEvidenceArtifact(ctx, outcome.Run.ID, executionMetadata); err != nil {
+			return RunExecutionOutcome{}, err
+		}
+	}
+	if err := service.recordExecutionMemory(ctx, project, outcome.Task, outcome.Run, task.Title, executionMetadata); err != nil {
+		return RunExecutionOutcome{}, err
+	}
+
+	reason := "completed"
+	if outcome.Run != nil && outcome.Run.Status != "completed" {
+		reason = outcome.Run.Status
+	}
+	return RunExecutionOutcome{
+		Task:     outcome.Task,
+		Run:      outcome.Run,
+		Executed: true,
+		Reason:   reason,
 	}, nil
 }
 

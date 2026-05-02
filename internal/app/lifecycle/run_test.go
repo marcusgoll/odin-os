@@ -1250,6 +1250,177 @@ func TestRunWorkDispatchCreatesRunAttemptFromAcceptedIntake(t *testing.T) {
 	}
 }
 
+func TestRunWorkExecuteCompletesDispatchedIntakeRun(t *testing.T) {
+	configureLifecycleHarnessDriver(t)
+	t.Setenv("HOME", t.TempDir())
+	root := testRepoRoot(t)
+	payloadPath := filepath.Join(t.TempDir(), "payload.json")
+	if err := os.WriteFile(payloadPath, []byte(`{"body":"prepare weekly summary"}`), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	if err := Run(context.Background(), root, []string{"project", "select", testProjectKey}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+		t.Fatalf("Run(project select) error = %v", err)
+	}
+	if err := Run(context.Background(), root, []string{"transition", "set", "cutover", "confirm", "because", "execute test"}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+		t.Fatalf("Run(transition set) error = %v", err)
+	}
+
+	if err := Run(context.Background(), root, []string{
+		"intake", "raw", "create",
+		"--source", "operator",
+		"--project", "alpha-cli",
+		"--title", "Prepare weekly summary",
+		"--type", "request",
+		"--dedup-key", "execute-intake",
+		"--requested-by", "codex",
+		"--payload-file", payloadPath,
+		"--json",
+	}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+		t.Fatalf("Run(intake raw create) error = %v", err)
+	}
+	if err := Run(context.Background(), root, []string{"intake", "process", "--id", "intake-1", "--json"}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+		t.Fatalf("Run(intake process) error = %v", err)
+	}
+	if err := Run(context.Background(), root, []string{"intake", "review", "accept", "intake-1", "--json"}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+		t.Fatalf("Run(intake review accept) error = %v", err)
+	}
+	if err := Run(context.Background(), root, []string{"work", "dispatch", "--task", "intake-review-1", "--json"}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+		t.Fatalf("Run(work dispatch) error = %v", err)
+	}
+
+	var executeOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"work", "execute", "--task", "intake-review-1", "--json"}, strings.NewReader(""), &executeOutput); err != nil {
+		t.Fatalf("Run(work execute) error = %v\n%s", err, executeOutput.String())
+	}
+	var executed struct {
+		Executed bool   `json:"executed"`
+		Reason   string `json:"reason"`
+		Task     struct {
+			ID     int64  `json:"id"`
+			Key    string `json:"key"`
+			Status string `json:"status"`
+		} `json:"task"`
+		Run *struct {
+			ID      int64  `json:"id"`
+			TaskID  int64  `json:"task_id"`
+			Status  string `json:"status"`
+			Summary string `json:"summary"`
+		} `json:"run"`
+	}
+	if err := json.Unmarshal(executeOutput.Bytes(), &executed); err != nil {
+		t.Fatalf("json.Unmarshal(execute) error = %v\n%s", err, executeOutput.String())
+	}
+	if !executed.Executed || executed.Reason != "completed" || executed.Task.Key != "intake-review-1" || executed.Task.Status != "completed" {
+		t.Fatalf("execute output = %+v, want completed task execution", executed)
+	}
+	if executed.Run == nil || executed.Run.ID != 1 || executed.Run.TaskID != executed.Task.ID || executed.Run.Status != "completed" || executed.Run.Summary != "driver test ok" {
+		t.Fatalf("execute run = %+v, want completed run summary", executed.Run)
+	}
+
+	var repeatDispatchOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"work", "dispatch", "--task", "intake-review-1", "--json"}, strings.NewReader(""), &repeatDispatchOutput); err != nil {
+		t.Fatalf("Run(work dispatch repeat after completion) error = %v", err)
+	}
+	if output := repeatDispatchOutput.String(); !strings.Contains(output, `"dispatched": false`) || !strings.Contains(output, `"reason": "task_not_queued"`) || strings.Contains(output, `"status": "running"`) {
+		t.Fatalf("repeat dispatch output = %s, want safe terminal block", output)
+	}
+
+	var runsOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"runs", "--json"}, strings.NewReader(""), &runsOutput); err != nil {
+		t.Fatalf("Run(runs --json) error = %v", err)
+	}
+	if output := runsOutput.String(); !strings.Contains(output, `"run_id": 1`) || !strings.Contains(output, `"task_id": 1`) || !strings.Contains(output, `"status": "completed"`) {
+		t.Fatalf("runs output = %s, want correlated completed run", output)
+	}
+
+	var jobsOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"jobs", "--json"}, strings.NewReader(""), &jobsOutput); err != nil {
+		t.Fatalf("Run(jobs --json) error = %v", err)
+	}
+	if output := jobsOutput.String(); !strings.Contains(output, `"task_id": 1`) || !strings.Contains(output, `"status": "completed"`) || strings.Contains(output, `"current_run_id"`) {
+		t.Fatalf("jobs output = %s, want completed terminal job without active run", output)
+	}
+
+	var logsOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"logs", "--json"}, strings.NewReader(""), &logsOutput); err != nil {
+		t.Fatalf("Run(logs --json) error = %v", err)
+	}
+	for _, want := range []string{
+		`"type": "run.finished"`,
+		`"type": "task.status_changed"`,
+		`"status": "completed"`,
+	} {
+		if !strings.Contains(logsOutput.String(), want) {
+			t.Fatalf("logs output = %s, want %s", logsOutput.String(), want)
+		}
+	}
+
+	var statusOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"work", "status"}, strings.NewReader(""), &statusOutput); err != nil {
+		t.Fatalf("Run(work status) error = %v", err)
+	}
+	for _, want := range []string{"work_items=1", "open_work_items=0", "active_run_attempts=0", "dispatch=work_dispatch"} {
+		if !strings.Contains(statusOutput.String(), want) {
+			t.Fatalf("work status output = %s, want %s", statusOutput.String(), want)
+		}
+	}
+}
+
+func TestRunWorkExecuteSurfacesFailedDispatchedRun(t *testing.T) {
+	configureLifecycleHarnessDriverStatus(t, "failed", "driver failed proof")
+	t.Setenv("HOME", t.TempDir())
+	root := testRepoRoot(t)
+	payloadPath := filepath.Join(t.TempDir(), "payload.json")
+	if err := os.WriteFile(payloadPath, []byte(`{"body":"prepare failed dispatch proof"}`), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	if err := Run(context.Background(), root, []string{"project", "select", testProjectKey}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+		t.Fatalf("Run(project select) error = %v", err)
+	}
+	if err := Run(context.Background(), root, []string{"transition", "set", "cutover", "confirm", "because", "failed execute test"}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+		t.Fatalf("Run(transition set) error = %v", err)
+	}
+
+	if err := Run(context.Background(), root, []string{
+		"intake", "raw", "create",
+		"--source", "operator",
+		"--project", "alpha-cli",
+		"--title", "Prepare failed dispatch proof",
+		"--type", "request",
+		"--dedup-key", "execute-failed-intake",
+		"--requested-by", "codex",
+		"--payload-file", payloadPath,
+		"--json",
+	}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+		t.Fatalf("Run(intake raw create) error = %v", err)
+	}
+	if err := Run(context.Background(), root, []string{"intake", "process", "--id", "intake-1", "--json"}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+		t.Fatalf("Run(intake process) error = %v", err)
+	}
+	if err := Run(context.Background(), root, []string{"intake", "review", "accept", "intake-1", "--json"}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+		t.Fatalf("Run(intake review accept) error = %v", err)
+	}
+	if err := Run(context.Background(), root, []string{"work", "dispatch", "--task", "intake-review-1", "--json"}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+		t.Fatalf("Run(work dispatch) error = %v", err)
+	}
+
+	var executeOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"work", "execute", "--task", "intake-review-1", "--json"}, strings.NewReader(""), &executeOutput); err != nil {
+		t.Fatalf("Run(work execute failed result) error = %v\n%s", err, executeOutput.String())
+	}
+	if output := executeOutput.String(); !strings.Contains(output, `"executed": true`) || !strings.Contains(output, `"status": "failed"`) || !strings.Contains(output, "driver failed proof") {
+		t.Fatalf("execute output = %s, want visible failed execution", output)
+	}
+
+	var logsOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"logs", "--json"}, strings.NewReader(""), &logsOutput); err != nil {
+		t.Fatalf("Run(logs --json) error = %v", err)
+	}
+	if output := logsOutput.String(); !strings.Contains(output, `"type": "run.finished"`) || !strings.Contains(output, `"status": "failed"`) || !strings.Contains(output, "driver failed proof") {
+		t.Fatalf("logs output = %s, want auditable failed terminal run", output)
+	}
+}
+
 func TestRunCompanionGetJSON(t *testing.T) {
 	t.Parallel()
 
@@ -2703,10 +2874,14 @@ func seedStatusCompanionSwarms(t *testing.T, ctx context.Context, store *sqlite.
 }
 
 func configureLifecycleHarnessDriver(t *testing.T) {
+	configureLifecycleHarnessDriverStatus(t, "completed", "driver test ok")
+}
+
+func configureLifecycleHarnessDriverStatus(t *testing.T, status string, output string) {
 	t.Helper()
 
 	path := filepath.Join(t.TempDir(), "codex-driver.sh")
-	if err := os.WriteFile(path, []byte(`#!/usr/bin/env bash
+	script := fmt.Sprintf(`#!/usr/bin/env bash
 payload="$(cat)"
 PAYLOAD="$payload" python3 - <<'PY'
 import json
@@ -2717,9 +2892,10 @@ action = request.get("action")
 if action == "health":
     print(json.dumps({"status":"healthy","details":"lifecycle test driver healthy"}))
 else:
-    print(json.dumps({"status":"completed","output":"driver test ok","handle":{"external_id":"fixture-driver"}}))
+    print(json.dumps({"status":%q,"output":%q,"handle":{"external_id":"fixture-driver"}}))
 PY
-`), 0o755); err != nil {
+`, status, output)
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
 		t.Fatalf("WriteFile(driver) error = %v", err)
 	}
 	if err := os.Chmod(path, 0o755); err != nil {

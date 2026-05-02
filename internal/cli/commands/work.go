@@ -20,7 +20,7 @@ import (
 	trackerintake "odin-os/internal/tracker/intake"
 )
 
-const workUsage = "usage: odin work status|profiles|start --project <key> --title <text>|intake --project <key> [--dry-run]|dispatch [--task <id|key>] [--json]"
+const workUsage = "usage: odin work status|profiles|start --project <key> --title <text>|intake --project <key> [--dry-run]|dispatch [--task <id|key>] [--json]|execute --task <id|key> [--json]"
 
 var newIntakeTracker = trackerintake.NewGitHubTracker
 
@@ -49,6 +49,7 @@ type workDispatchRunView struct {
 	Executor string `json:"executor"`
 	Status   string `json:"status"`
 	Attempt  int    `json:"attempt"`
+	Summary  string `json:"summary,omitempty"`
 }
 
 func RunWork(ctx context.Context, store *sqlite.Store, projectRegistry projects.Registry, snapshot registry.Snapshot, args []string, stdout io.Writer, options ...WorkOptions) error {
@@ -68,6 +69,8 @@ func RunWork(ctx context.Context, store *sqlite.Store, projectRegistry projects.
 		return runWorkIntake(ctx, store, projectRegistry, args[1:], stdout)
 	case "dispatch":
 		return runWorkDispatch(ctx, store, projectRegistry, args[1:], stdout, options...)
+	case "execute":
+		return runWorkExecute(ctx, store, projectRegistry, args[1:], stdout, options...)
 	default:
 		_, err := fmt.Fprintf(stdout, "unknown work command: %s\n%s\n", args[0], workUsage)
 		return err
@@ -178,6 +181,46 @@ func runWorkDispatch(ctx context.Context, store *sqlite.Store, projectRegistry p
 	return err
 }
 
+func runWorkExecute(ctx context.Context, store *sqlite.Store, projectRegistry projects.Registry, args []string, stdout io.Writer, options ...WorkOptions) error {
+	params := parseWorkStartArgs(args)
+	jsonOutput := parseBoolFlag(params, "json")
+	if _, ok := params["help"]; ok {
+		_, err := fmt.Fprintln(stdout, "usage: odin work execute --task <id|key> [--json]")
+		return err
+	}
+	taskRef := strings.TrimSpace(params["task"])
+	if taskRef == "" {
+		return fmt.Errorf("usage: odin work execute --task <id|key> [--json]")
+	}
+
+	jobService := jobs.Service{Store: store, Registry: projectRegistry}
+	if len(options) > 0 && options[0].JobService.Store != nil {
+		jobService = options[0].JobService
+	}
+	task, err := findWorkTask(ctx, store, taskRef)
+	if err != nil {
+		return err
+	}
+	outcome, err := jobService.ExecuteDispatchedRun(ctx, task.ID)
+	if err != nil && outcome.Task.ID == 0 {
+		return err
+	}
+
+	view := workExecutionOutcomeView(outcome)
+	if jsonOutput {
+		return WriteJSON(stdout, view)
+	}
+	runStatus := "none"
+	if view.Run != nil {
+		runStatus = view.Run.Status
+	}
+	_, writeErr := fmt.Fprintf(stdout, "executed=%t reason=%s task=%s status=%s run_status=%s\n", view.Executed, view.Reason, view.Task.Key, view.Task.Status, runStatus)
+	if err != nil {
+		return err
+	}
+	return writeErr
+}
+
 func findWorkTask(ctx context.Context, store *sqlite.Store, ref string) (sqlite.Task, error) {
 	ref = strings.TrimSpace(ref)
 	idRef := strings.TrimPrefix(ref, "task-")
@@ -221,6 +264,44 @@ func workDispatchOutcomeView(outcome jobs.DispatchOutcome) workDispatchView {
 			Executor: outcome.Run.Executor,
 			Status:   outcome.Run.Status,
 			Attempt:  outcome.Run.Attempt,
+			Summary:  outcome.Run.Summary,
+		}
+	}
+	return view
+}
+
+type workExecutionView struct {
+	Executed bool                 `json:"executed"`
+	Reason   string               `json:"reason"`
+	Task     workDispatchTaskView `json:"task,omitempty"`
+	Run      *workDispatchRunView `json:"run,omitempty"`
+}
+
+func workExecutionOutcomeView(outcome jobs.RunExecutionOutcome) workExecutionView {
+	view := workExecutionView{
+		Executed: outcome.Executed,
+		Reason:   outcome.Reason,
+	}
+	if view.Reason == "" {
+		view.Reason = "unknown"
+	}
+	if outcome.Task.ID != 0 {
+		view.Task = workDispatchTaskView{
+			ID:           outcome.Task.ID,
+			ProjectID:    outcome.Task.ProjectID,
+			Key:          outcome.Task.Key,
+			Status:       outcome.Task.Status,
+			CurrentRunID: outcome.Task.CurrentRunID,
+		}
+	}
+	if outcome.Run != nil {
+		view.Run = &workDispatchRunView{
+			ID:       outcome.Run.ID,
+			TaskID:   outcome.Run.TaskID,
+			Executor: outcome.Run.Executor,
+			Status:   outcome.Run.Status,
+			Attempt:  outcome.Run.Attempt,
+			Summary:  outcome.Run.Summary,
 		}
 	}
 	return view
