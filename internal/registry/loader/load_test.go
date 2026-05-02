@@ -129,6 +129,7 @@ func TestLoadDirLoadsUniversalIntakeAgents(t *testing.T) {
 		"learning-coach-agent",
 		"personal-admin-agent",
 		"household-task-agent",
+		"errand-batcher-agent",
 		"calendar-planning-agent",
 		"review-agent",
 		"final-review-agent",
@@ -1071,6 +1072,41 @@ func TestLoadDirLoadsUniversalIntakeAgents(t *testing.T) {
 	for _, required := range requiredHouseholdTaskContract {
 		if !strings.Contains(householdTaskContract, required) {
 			t.Fatalf("household task agent body missing %q", required)
+		}
+	}
+
+	errandBatcher := snapshot.ByKey["errand-batcher-agent"]
+	errandBatcherContract := strings.Join([]string{
+		errandBatcher.Title,
+		errandBatcher.Summary,
+		errandBatcher.Sections[registry.SectionPurpose],
+		errandBatcher.Sections[registry.SectionWhenToUse],
+		errandBatcher.Sections[registry.SectionInputs],
+		errandBatcher.Sections[registry.SectionProcedure],
+		errandBatcher.Sections[registry.SectionOutputs],
+		errandBatcher.Sections[registry.SectionConstraints],
+		errandBatcher.Sections[registry.SectionSuccessCriteria],
+	}, "\n")
+	requiredErrandBatcherContract := []string{
+		"Errand Batcher",
+		"{{raw_input}}",
+		"Review these tasks",
+		"location",
+		"tool needed",
+		"energy level",
+		"time required",
+		"deadline",
+		"whether they can be done together",
+		"grouped task batches",
+		"recommended order",
+		"estimated time",
+		"items to defer",
+		"items to delete",
+		"first batch to execute",
+	}
+	for _, required := range requiredErrandBatcherContract {
+		if !strings.Contains(errandBatcherContract, required) {
+			t.Fatalf("errand batcher agent body missing %q", required)
 		}
 	}
 
