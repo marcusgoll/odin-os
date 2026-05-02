@@ -126,6 +126,7 @@ func TestLoadDirLoadsUniversalIntakeAgents(t *testing.T) {
 		"blocker-resolver-agent",
 		"project-spec-builder-agent",
 		"personal-project-builder-agent",
+		"personal-admin-agent",
 		"review-agent",
 		"final-review-agent",
 		"scope-creep-detector-agent",
@@ -965,6 +966,39 @@ func TestLoadDirLoadsUniversalIntakeAgents(t *testing.T) {
 	for _, required := range requiredPersonalProjectBuilderContract {
 		if !strings.Contains(personalProjectBuilderContract, required) {
 			t.Fatalf("personal project builder agent body missing %q", required)
+		}
+	}
+
+	personalAdmin := snapshot.ByKey["personal-admin-agent"]
+	personalAdminContract := strings.Join([]string{
+		personalAdmin.Title,
+		personalAdmin.Summary,
+		personalAdmin.Sections[registry.SectionPurpose],
+		personalAdmin.Sections[registry.SectionWhenToUse],
+		personalAdmin.Sections[registry.SectionInputs],
+		personalAdmin.Sections[registry.SectionProcedure],
+		personalAdmin.Sections[registry.SectionOutputs],
+		personalAdmin.Sections[registry.SectionConstraints],
+		personalAdmin.Sections[registry.SectionSuccessCriteria],
+	}, "\n")
+	requiredPersonalAdminContract := []string{
+		"Personal Admin Agent",
+		"{{raw_input}}",
+		"Analyze this personal admin item",
+		"task summary",
+		"category",
+		"deadline",
+		"required materials",
+		"people involved",
+		"next action",
+		"whether calendar scheduling is needed",
+		"whether email or message drafting is needed",
+		"risk if ignored",
+		"recommended priority",
+	}
+	for _, required := range requiredPersonalAdminContract {
+		if !strings.Contains(personalAdminContract, required) {
+			t.Fatalf("personal admin agent body missing %q", required)
 		}
 	}
 
