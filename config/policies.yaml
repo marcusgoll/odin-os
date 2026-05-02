@@ -1,2 +1,40 @@
-# Phase 01 placeholder.
-# Policy configuration is introduced in later phases.
+version: 1
+
+work_taxonomy:
+  categories:
+    - Projects
+    - Personal Admin
+    - Software Development
+    - Writing
+    - Research
+    - Calendar
+    - Email
+    - Finance/Admin
+    - Household
+    - Learning
+    - Health/Wellbeing
+    - Waiting For
+    - Archive
+  statuses:
+    - inbox
+    - needs_clarification
+    - needs_review
+    - approved_for_plan
+    - approved_for_execution
+    - in_progress
+    - waiting_for
+    - blocked
+    - done
+    - archived
+    - deleted
+
+approval_policy:
+  require_approval_before:
+    - send email
+    - create calendar event with others
+    - make purchase
+    - delete data
+    - deploy code
+    - modify production systems
+    - share public content
+    - change financial/legal/medical-related records
