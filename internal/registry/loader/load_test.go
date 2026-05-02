@@ -120,6 +120,7 @@ func TestLoadDirLoadsUniversalIntakeAgents(t *testing.T) {
 		"writing-task-builder-agent",
 		"plan-first-execution-agent",
 		"workflow-designer-agent",
+		"automation-candidate-finder-agent",
 		"subagent-delegation-planner-agent",
 		"task-splitter-agent",
 		"definition-of-done-generator-agent",
@@ -768,6 +769,38 @@ func TestLoadDirLoadsUniversalIntakeAgents(t *testing.T) {
 	for _, required := range requiredWorkflowDesignerContract {
 		if !strings.Contains(workflowDesignerContract, required) {
 			t.Fatalf("workflow designer agent body missing %q", required)
+		}
+	}
+
+	automationCandidateFinder := snapshot.ByKey["automation-candidate-finder-agent"]
+	automationCandidateFinderContract := strings.Join([]string{
+		automationCandidateFinder.Title,
+		automationCandidateFinder.Summary,
+		automationCandidateFinder.Sections[registry.SectionPurpose],
+		automationCandidateFinder.Sections[registry.SectionWhenToUse],
+		automationCandidateFinder.Sections[registry.SectionInputs],
+		automationCandidateFinder.Sections[registry.SectionProcedure],
+		automationCandidateFinder.Sections[registry.SectionOutputs],
+		automationCandidateFinder.Sections[registry.SectionConstraints],
+		automationCandidateFinder.Sections[registry.SectionSuccessCriteria],
+	}, "\n")
+	requiredAutomationCandidateFinderContract := []string{
+		"Automation Candidate Finder",
+		"{{raw_input}}",
+		"Review these tasks or workflows",
+		"automation candidates",
+		"reason each is a candidate",
+		"expected time savings",
+		"risk level",
+		"required tools",
+		"setup complexity",
+		"human approval needs",
+		"tasks not worth automating",
+		"recommended first automation",
+	}
+	for _, required := range requiredAutomationCandidateFinderContract {
+		if !strings.Contains(automationCandidateFinderContract, required) {
+			t.Fatalf("automation candidate finder agent body missing %q", required)
 		}
 	}
 
