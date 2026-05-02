@@ -28,11 +28,29 @@ type TelemetryFile struct {
 	Version int `yaml:"version"`
 }
 
+type PoliciesFile struct {
+	Version        int            `yaml:"version"`
+	WorkTaxonomy   WorkTaxonomy   `yaml:"work_taxonomy"`
+	ApprovalPolicy ApprovalPolicy `yaml:"approval_policy"`
+}
+
+type WorkTaxonomy struct {
+	Categories []string `yaml:"categories"`
+	Statuses   []string `yaml:"statuses"`
+}
+
+type ApprovalPolicy struct {
+	RequireApprovalBefore []string `yaml:"require_approval_before"`
+}
+
 func ValidateRepo(repoRoot string) error {
 	if _, err := LoadModels(filepath.Join(repoRoot, "config", "models.yaml")); err != nil {
 		return err
 	}
 	if _, err := LoadTelemetry(filepath.Join(repoRoot, "config", "telemetry.yaml")); err != nil {
+		return err
+	}
+	if _, err := LoadPolicies(filepath.Join(repoRoot, "config", "policies.yaml")); err != nil {
 		return err
 	}
 	return nil
@@ -70,6 +88,20 @@ func LoadTelemetry(path string) (TelemetryFile, error) {
 			return TelemetryFile{Version: 1}, nil
 		}
 		return TelemetryFile{}, err
+	}
+	if raw.Version == 0 {
+		raw.Version = 1
+	}
+	return raw, nil
+}
+
+func LoadPolicies(path string) (PoliciesFile, error) {
+	var raw PoliciesFile
+	if err := decodeYAMLFile(path, &raw); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return PoliciesFile{Version: 1}, nil
+		}
+		return PoliciesFile{}, err
 	}
 	if raw.Version == 0 {
 		raw.Version = 1

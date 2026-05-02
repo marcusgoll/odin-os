@@ -3,8 +3,11 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 func TestLoadUsesDefaultsFromFile(t *testing.T) {
@@ -146,6 +149,20 @@ func TestValidateRepoAllowsMissingAuxiliaryConfigFiles(t *testing.T) {
 	}
 }
 
+func TestValidateRepoRejectsUnknownPolicyConfigFields(t *testing.T) {
+	t.Parallel()
+
+	repoRoot := t.TempDir()
+	mustWriteConfig(t, filepath.Join(repoRoot, "config", "policies.yaml"), `
+version: 1
+stale_field: true
+`)
+
+	if err := ValidateRepo(repoRoot); err == nil {
+		t.Fatal("ValidateRepo() error = nil, want unknown policy field rejection")
+	}
+}
+
 func TestLoadTelemetryAcceptsValidatedBootstrapMarkerOnly(t *testing.T) {
 	t.Parallel()
 
@@ -198,6 +215,82 @@ func TestCapabilityReloadDocsMatchRuntimeSurface(t *testing.T) {
 		if !strings.Contains(string(reloadDoc), token) {
 			t.Fatalf("capability reload doc missing runtime surface token %q", token)
 		}
+	}
+}
+
+func TestRepositoryPoliciesDefineUniversalWorkTaxonomy(t *testing.T) {
+	t.Parallel()
+
+	repoRoot := filepath.Clean(filepath.Join("..", "..", ".."))
+	path := filepath.Join(repoRoot, "config", "policies.yaml")
+
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile(%s) error = %v", path, err)
+	}
+
+	var policy struct {
+		Version      int `yaml:"version"`
+		WorkTaxonomy struct {
+			Categories []string `yaml:"categories"`
+			Statuses   []string `yaml:"statuses"`
+		} `yaml:"work_taxonomy"`
+		ApprovalPolicy struct {
+			RequireApprovalBefore []string `yaml:"require_approval_before"`
+		} `yaml:"approval_policy"`
+	}
+	if err := yaml.Unmarshal(content, &policy); err != nil {
+		t.Fatalf("Unmarshal(policies.yaml) error = %v", err)
+	}
+
+	wantCategories := []string{
+		"Projects",
+		"Personal Admin",
+		"Software Development",
+		"Writing",
+		"Research",
+		"Calendar",
+		"Email",
+		"Finance/Admin",
+		"Household",
+		"Learning",
+		"Health/Wellbeing",
+		"Waiting For",
+		"Archive",
+	}
+	if !slices.Equal(policy.WorkTaxonomy.Categories, wantCategories) {
+		t.Fatalf("work_taxonomy.categories = %#v, want %#v", policy.WorkTaxonomy.Categories, wantCategories)
+	}
+
+	wantStatuses := []string{
+		"inbox",
+		"needs_clarification",
+		"needs_review",
+		"approved_for_plan",
+		"approved_for_execution",
+		"in_progress",
+		"waiting_for",
+		"blocked",
+		"done",
+		"archived",
+		"deleted",
+	}
+	if !slices.Equal(policy.WorkTaxonomy.Statuses, wantStatuses) {
+		t.Fatalf("work_taxonomy.statuses = %#v, want %#v", policy.WorkTaxonomy.Statuses, wantStatuses)
+	}
+
+	wantApprovalActions := []string{
+		"send email",
+		"create calendar event with others",
+		"make purchase",
+		"delete data",
+		"deploy code",
+		"modify production systems",
+		"share public content",
+		"change financial/legal/medical-related records",
+	}
+	if !slices.Equal(policy.ApprovalPolicy.RequireApprovalBefore, wantApprovalActions) {
+		t.Fatalf("approval_policy.require_approval_before = %#v, want %#v", policy.ApprovalPolicy.RequireApprovalBefore, wantApprovalActions)
 	}
 }
 
