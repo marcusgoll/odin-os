@@ -116,6 +116,7 @@ func TestLoadDirLoadsUniversalIntakeAgents(t *testing.T) {
 		"research-ticket-builder-agent",
 		"coding-task-prompt-generator-agent",
 		"code-review-prompt-generator-agent",
+		"release-notes-agent",
 		"writing-task-builder-agent",
 		"plan-first-execution-agent",
 		"subagent-delegation-planner-agent",
@@ -619,6 +620,39 @@ func TestLoadDirLoadsUniversalIntakeAgents(t *testing.T) {
 	for _, required := range requiredCodeReviewPromptGeneratorContract {
 		if !strings.Contains(codeReviewPromptGeneratorContract, required) {
 			t.Fatalf("code review prompt generator agent body missing %q", required)
+		}
+	}
+
+	releaseNotes := snapshot.ByKey["release-notes-agent"]
+	releaseNotesContract := strings.Join([]string{
+		releaseNotes.Title,
+		releaseNotes.Summary,
+		releaseNotes.Sections[registry.SectionPurpose],
+		releaseNotes.Sections[registry.SectionWhenToUse],
+		releaseNotes.Sections[registry.SectionInputs],
+		releaseNotes.Sections[registry.SectionProcedure],
+		releaseNotes.Sections[registry.SectionOutputs],
+		releaseNotes.Sections[registry.SectionConstraints],
+		releaseNotes.Sections[registry.SectionSuccessCriteria],
+	}, "\n")
+	requiredReleaseNotesContract := []string{
+		"Release Notes Agent",
+		"{{raw_input}}",
+		"Create release notes from these completed changes",
+		"summary",
+		"new features",
+		"bug fixes",
+		"improvements",
+		"breaking changes",
+		"migration notes",
+		"known issues",
+		"user impact",
+		"internal notes",
+		"follow-up tasks",
+	}
+	for _, required := range requiredReleaseNotesContract {
+		if !strings.Contains(releaseNotesContract, required) {
+			t.Fatalf("release notes agent body missing %q", required)
 		}
 	}
 
