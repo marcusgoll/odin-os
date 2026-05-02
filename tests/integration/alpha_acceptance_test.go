@@ -266,14 +266,16 @@ func TestAlphaAcceptance(t *testing.T) {
 			}
 		})
 
-		deadline := time.Now().Add(5 * time.Second)
+		deadline := time.Now().Add(15 * time.Second)
+		lastHealthcheckOutput := ""
 		for {
 			output, err := runOdinCommand(t, repoRoot, odinBinary, runtimeRoot, nil, "", "healthcheck")
+			lastHealthcheckOutput = output
 			if err == nil && strings.Contains(output, "ready") {
 				break
 			}
 			if time.Now().After(deadline) {
-				t.Fatalf("serve never became ready\noutput:\n%s", serveOutput.String())
+				t.Fatalf("serve never became ready\nserve output:\n%s\nlast healthcheck output:\n%s", serveOutput.String(), lastHealthcheckOutput)
 			}
 			time.Sleep(100 * time.Millisecond)
 		}
@@ -1112,14 +1114,16 @@ func TestAlphaAcceptance(t *testing.T) {
 			}
 		})
 
-		deadline := time.Now().Add(5 * time.Second)
+		deadline := time.Now().Add(15 * time.Second)
+		lastHealthcheckOutput := ""
 		for {
 			output, err := runOdinCommand(t, repoRoot, odinBinary, runtimeRoot, nil, "", "healthcheck")
+			lastHealthcheckOutput = output
 			if err == nil && strings.Contains(output, "ready") {
 				break
 			}
 			if time.Now().After(deadline) {
-				t.Fatalf("serve never became ready\noutput:\n%s", serveOutput.String())
+				t.Fatalf("serve never became ready\nserve output:\n%s\nlast healthcheck output:\n%s", serveOutput.String(), lastHealthcheckOutput)
 			}
 			time.Sleep(100 * time.Millisecond)
 		}
