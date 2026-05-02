@@ -114,6 +114,7 @@ func TestLoadDirLoadsUniversalIntakeAgents(t *testing.T) {
 		"software-feature-ticket-builder-agent",
 		"bug-report-builder-agent",
 		"research-ticket-builder-agent",
+		"coding-task-prompt-generator-agent",
 		"writing-task-builder-agent",
 		"plan-first-execution-agent",
 		"subagent-delegation-planner-agent",
@@ -547,6 +548,40 @@ func TestLoadDirLoadsUniversalIntakeAgents(t *testing.T) {
 	for _, required := range requiredResearchTicketBuilderContract {
 		if !strings.Contains(researchTicketBuilderContract, required) {
 			t.Fatalf("research ticket builder agent body missing %q", required)
+		}
+	}
+
+	codingTaskPromptGenerator := snapshot.ByKey["coding-task-prompt-generator-agent"]
+	codingTaskPromptGeneratorContract := strings.Join([]string{
+		codingTaskPromptGenerator.Title,
+		codingTaskPromptGenerator.Summary,
+		codingTaskPromptGenerator.Sections[registry.SectionPurpose],
+		codingTaskPromptGenerator.Sections[registry.SectionWhenToUse],
+		codingTaskPromptGenerator.Sections[registry.SectionInputs],
+		codingTaskPromptGenerator.Sections[registry.SectionProcedure],
+		codingTaskPromptGenerator.Sections[registry.SectionOutputs],
+		codingTaskPromptGenerator.Sections[registry.SectionConstraints],
+		codingTaskPromptGenerator.Sections[registry.SectionSuccessCriteria],
+	}, "\n")
+	requiredCodingTaskPromptGeneratorContract := []string{
+		"Coding Task Prompt Generator",
+		"{{raw_input}}",
+		"Convert this approved software ticket into a coding-agent prompt",
+		"goal",
+		"context",
+		"constraints",
+		"files or areas to inspect",
+		"implementation requirements",
+		"tests required",
+		"commands to run",
+		"documentation updates",
+		"definition of done",
+		"things not to change",
+		"plan first if the task is complex",
+	}
+	for _, required := range requiredCodingTaskPromptGeneratorContract {
+		if !strings.Contains(codingTaskPromptGeneratorContract, required) {
+			t.Fatalf("coding task prompt generator agent body missing %q", required)
 		}
 	}
 
