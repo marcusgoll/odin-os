@@ -122,6 +122,7 @@ func TestLoadDirLoadsUniversalIntakeAgents(t *testing.T) {
 		"workflow-designer-agent",
 		"automation-candidate-finder-agent",
 		"failed-automation-investigator-agent",
+		"audit-log-summarizer-agent",
 		"subagent-delegation-planner-agent",
 		"task-splitter-agent",
 		"definition-of-done-generator-agent",
@@ -835,6 +836,39 @@ func TestLoadDirLoadsUniversalIntakeAgents(t *testing.T) {
 	for _, required := range requiredFailedAutomationInvestigatorContract {
 		if !strings.Contains(failedAutomationInvestigatorContract, required) {
 			t.Fatalf("failed automation investigator agent body missing %q", required)
+		}
+	}
+
+	auditLogSummarizer := snapshot.ByKey["audit-log-summarizer-agent"]
+	auditLogSummarizerContract := strings.Join([]string{
+		auditLogSummarizer.Title,
+		auditLogSummarizer.Summary,
+		auditLogSummarizer.Sections[registry.SectionPurpose],
+		auditLogSummarizer.Sections[registry.SectionWhenToUse],
+		auditLogSummarizer.Sections[registry.SectionInputs],
+		auditLogSummarizer.Sections[registry.SectionProcedure],
+		auditLogSummarizer.Sections[registry.SectionOutputs],
+		auditLogSummarizer.Sections[registry.SectionConstraints],
+		auditLogSummarizer.Sections[registry.SectionSuccessCriteria],
+	}, "\n")
+	requiredAuditLogSummarizerContract := []string{
+		"Audit Log Summarizer",
+		"{{raw_input}}",
+		"Summarize these agent actions",
+		"actions taken",
+		"agents involved",
+		"tools used",
+		"items created",
+		"items changed",
+		"approvals requested",
+		"errors",
+		"unresolved issues",
+		"risks",
+		"recommended follow-up",
+	}
+	for _, required := range requiredAuditLogSummarizerContract {
+		if !strings.Contains(auditLogSummarizerContract, required) {
+			t.Fatalf("audit log summarizer agent body missing %q", required)
 		}
 	}
 
