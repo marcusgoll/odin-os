@@ -128,6 +128,7 @@ func TestLoadDirLoadsUniversalIntakeAgents(t *testing.T) {
 		"risk-review-agent",
 		"chief-of-staff-agent",
 		"weekly-review-agent",
+		"monthly-strategy-review-agent",
 		"system-memory-curator-agent",
 		"voice-note-cleaner-agent",
 		"email-to-task-extractor-agent",
@@ -1138,6 +1139,44 @@ func TestLoadDirLoadsUniversalIntakeAgents(t *testing.T) {
 	for _, required := range requiredWeeklyReviewContract {
 		if !strings.Contains(weeklyReviewContract, required) {
 			t.Fatalf("weekly review agent body missing %q", required)
+		}
+	}
+
+	monthlyStrategyReview := snapshot.ByKey["monthly-strategy-review-agent"]
+	monthlyStrategyReviewContract := strings.Join([]string{
+		monthlyStrategyReview.Title,
+		monthlyStrategyReview.Summary,
+		monthlyStrategyReview.Sections[registry.SectionPurpose],
+		monthlyStrategyReview.Sections[registry.SectionWhenToUse],
+		monthlyStrategyReview.Sections[registry.SectionInputs],
+		monthlyStrategyReview.Sections[registry.SectionProcedure],
+		monthlyStrategyReview.Sections[registry.SectionOutputs],
+		monthlyStrategyReview.Sections[registry.SectionConstraints],
+		monthlyStrategyReview.Sections[registry.SectionSuccessCriteria],
+	}, "\n")
+	requiredMonthlyStrategyReviewContract := []string{
+		"Monthly Strategy Review Agent",
+		"past month",
+		"tasks",
+		"projects",
+		"completed work",
+		"deferred work",
+		"goals",
+		"calendar commitments",
+		"what moved forward",
+		"what stalled",
+		"what consumed too much time",
+		"what should be stopped",
+		"what should be doubled down on",
+		"project priority changes",
+		"personal priority changes",
+		"systems to improve",
+		"next month's top 3 outcomes",
+		"recommended changes to Odin-OS workflows",
+	}
+	for _, required := range requiredMonthlyStrategyReviewContract {
+		if !strings.Contains(monthlyStrategyReviewContract, required) {
+			t.Fatalf("monthly strategy review agent body missing %q", required)
 		}
 	}
 
