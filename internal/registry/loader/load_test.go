@@ -121,6 +121,7 @@ func TestLoadDirLoadsUniversalIntakeAgents(t *testing.T) {
 		"plan-first-execution-agent",
 		"workflow-designer-agent",
 		"automation-candidate-finder-agent",
+		"failed-automation-investigator-agent",
 		"subagent-delegation-planner-agent",
 		"task-splitter-agent",
 		"definition-of-done-generator-agent",
@@ -801,6 +802,39 @@ func TestLoadDirLoadsUniversalIntakeAgents(t *testing.T) {
 	for _, required := range requiredAutomationCandidateFinderContract {
 		if !strings.Contains(automationCandidateFinderContract, required) {
 			t.Fatalf("automation candidate finder agent body missing %q", required)
+		}
+	}
+
+	failedAutomationInvestigator := snapshot.ByKey["failed-automation-investigator-agent"]
+	failedAutomationInvestigatorContract := strings.Join([]string{
+		failedAutomationInvestigator.Title,
+		failedAutomationInvestigator.Summary,
+		failedAutomationInvestigator.Sections[registry.SectionPurpose],
+		failedAutomationInvestigator.Sections[registry.SectionWhenToUse],
+		failedAutomationInvestigator.Sections[registry.SectionInputs],
+		failedAutomationInvestigator.Sections[registry.SectionProcedure],
+		failedAutomationInvestigator.Sections[registry.SectionOutputs],
+		failedAutomationInvestigator.Sections[registry.SectionConstraints],
+		failedAutomationInvestigator.Sections[registry.SectionSuccessCriteria],
+	}, "\n")
+	requiredFailedAutomationInvestigatorContract := []string{
+		"Failed Automation Investigator",
+		"{{raw_input}}",
+		"Analyze this failed workflow",
+		"workflow name",
+		"failure point",
+		"likely cause",
+		"missing context",
+		"tool failure or reasoning failure",
+		"user impact",
+		"immediate fix",
+		"long-term prevention",
+		"whether human intervention is required",
+		"updated workflow rule",
+	}
+	for _, required := range requiredFailedAutomationInvestigatorContract {
+		if !strings.Contains(failedAutomationInvestigatorContract, required) {
+			t.Fatalf("failed automation investigator agent body missing %q", required)
 		}
 	}
 
