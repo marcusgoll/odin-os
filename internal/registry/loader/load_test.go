@@ -112,6 +112,7 @@ func TestLoadDirLoadsUniversalIntakeAgents(t *testing.T) {
 		"universal-ticket-generator-agent",
 		"software-feature-ticket-builder-agent",
 		"bug-report-builder-agent",
+		"research-ticket-builder-agent",
 		"project-spec-builder-agent",
 		"personal-project-builder-agent",
 		"review-agent",
@@ -466,6 +467,40 @@ func TestLoadDirLoadsUniversalIntakeAgents(t *testing.T) {
 	for _, required := range requiredBugReportBuilderContract {
 		if !strings.Contains(bugReportBuilderContract, required) {
 			t.Fatalf("bug report builder agent body missing %q", required)
+		}
+	}
+
+	researchTicketBuilder := snapshot.ByKey["research-ticket-builder-agent"]
+	researchTicketBuilderContract := strings.Join([]string{
+		researchTicketBuilder.Title,
+		researchTicketBuilder.Summary,
+		researchTicketBuilder.Sections[registry.SectionPurpose],
+		researchTicketBuilder.Sections[registry.SectionWhenToUse],
+		researchTicketBuilder.Sections[registry.SectionInputs],
+		researchTicketBuilder.Sections[registry.SectionProcedure],
+		researchTicketBuilder.Sections[registry.SectionOutputs],
+		researchTicketBuilder.Sections[registry.SectionConstraints],
+		researchTicketBuilder.Sections[registry.SectionSuccessCriteria],
+	}, "\n")
+	requiredResearchTicketBuilderContract := []string{
+		"Research Ticket Builder",
+		"{{raw_input}}",
+		"Turn this input into a research ticket",
+		"research question",
+		"why this matters",
+		"sources to check",
+		"freshness requirement",
+		"decision this research supports",
+		"output format",
+		"deadline",
+		"risks of using outdated information",
+		"what would change the conclusion",
+		"recommended next step",
+		"If the topic is time-sensitive, require current sources",
+	}
+	for _, required := range requiredResearchTicketBuilderContract {
+		if !strings.Contains(researchTicketBuilderContract, required) {
+			t.Fatalf("research ticket builder agent body missing %q", required)
 		}
 	}
 
