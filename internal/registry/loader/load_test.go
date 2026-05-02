@@ -119,6 +119,7 @@ func TestLoadDirLoadsUniversalIntakeAgents(t *testing.T) {
 		"release-notes-agent",
 		"writing-task-builder-agent",
 		"plan-first-execution-agent",
+		"workflow-designer-agent",
 		"subagent-delegation-planner-agent",
 		"task-splitter-agent",
 		"definition-of-done-generator-agent",
@@ -733,6 +734,40 @@ func TestLoadDirLoadsUniversalIntakeAgents(t *testing.T) {
 	for _, required := range requiredPlanFirstExecutionContract {
 		if !strings.Contains(planFirstExecutionContract, required) {
 			t.Fatalf("plan-first execution agent body missing %q", required)
+		}
+	}
+
+	workflowDesigner := snapshot.ByKey["workflow-designer-agent"]
+	workflowDesignerContract := strings.Join([]string{
+		workflowDesigner.Title,
+		workflowDesigner.Summary,
+		workflowDesigner.Sections[registry.SectionPurpose],
+		workflowDesigner.Sections[registry.SectionWhenToUse],
+		workflowDesigner.Sections[registry.SectionInputs],
+		workflowDesigner.Sections[registry.SectionProcedure],
+		workflowDesigner.Sections[registry.SectionOutputs],
+		workflowDesigner.Sections[registry.SectionConstraints],
+		workflowDesigner.Sections[registry.SectionSuccessCriteria],
+	}, "\n")
+	requiredWorkflowDesignerContract := []string{
+		"Workflow Designer Agent",
+		"{{raw_input}}",
+		"Design an automation workflow for this recurring process",
+		"workflow name",
+		"trigger",
+		"inputs",
+		"steps",
+		"agents involved",
+		"tools required",
+		"approval gates",
+		"error handling",
+		"logging requirements",
+		"success criteria",
+		"rollback or manual fallback",
+	}
+	for _, required := range requiredWorkflowDesignerContract {
+		if !strings.Contains(workflowDesignerContract, required) {
+			t.Fatalf("workflow designer agent body missing %q", required)
 		}
 	}
 
