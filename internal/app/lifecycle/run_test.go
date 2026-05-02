@@ -1105,6 +1105,151 @@ func TestRunWorkStartAndStatusUseCanonicalCommandPath(t *testing.T) {
 	}
 }
 
+func TestRunWorkDispatchCreatesRunAttemptFromAcceptedIntake(t *testing.T) {
+	t.Parallel()
+
+	root := testRepoRoot(t)
+	payloadPath := filepath.Join(t.TempDir(), "payload.json")
+	if err := os.WriteFile(payloadPath, []byte(`{"body":"prepare weekly summary"}`), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	if err := Run(context.Background(), root, []string{"project", "select", testProjectKey}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+		t.Fatalf("Run(project select) error = %v", err)
+	}
+	if err := Run(context.Background(), root, []string{"transition", "set", "cutover", "confirm", "because", "dispatch test"}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+		t.Fatalf("Run(transition set) error = %v", err)
+	}
+
+	if err := Run(context.Background(), root, []string{
+		"intake", "raw", "create",
+		"--source", "operator",
+		"--project", "alpha-cli",
+		"--title", "Prepare weekly summary",
+		"--type", "request",
+		"--dedup-key", "dispatch-intake",
+		"--requested-by", "codex",
+		"--payload-file", payloadPath,
+		"--json",
+	}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+		t.Fatalf("Run(intake raw create) error = %v", err)
+	}
+	if err := Run(context.Background(), root, []string{"intake", "process", "--id", "intake-1", "--json"}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+		t.Fatalf("Run(intake process) error = %v", err)
+	}
+	if err := Run(context.Background(), root, []string{"intake", "review", "accept", "intake-1", "--json"}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+		t.Fatalf("Run(intake review accept) error = %v", err)
+	}
+
+	var dispatchOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"work", "dispatch", "--task", "intake-review-1", "--json"}, strings.NewReader(""), &dispatchOutput); err != nil {
+		t.Fatalf("Run(work dispatch) error = %v", err)
+	}
+	var dispatch struct {
+		Dispatched bool   `json:"dispatched"`
+		Reason     string `json:"reason"`
+		Task       struct {
+			ID     int64  `json:"id"`
+			Key    string `json:"key"`
+			Status string `json:"status"`
+		} `json:"task"`
+		Run *struct {
+			ID       int64  `json:"id"`
+			TaskID   int64  `json:"task_id"`
+			Executor string `json:"executor"`
+			Status   string `json:"status"`
+			Attempt  int    `json:"attempt"`
+		} `json:"run"`
+	}
+	if err := json.Unmarshal(dispatchOutput.Bytes(), &dispatch); err != nil {
+		t.Fatalf("json.Unmarshal(dispatch) error = %v\n%s", err, dispatchOutput.String())
+	}
+	if !dispatch.Dispatched || dispatch.Reason != "dispatched" || dispatch.Task.Key != "intake-review-1" || dispatch.Task.Status != "running" {
+		t.Fatalf("dispatch output = %+v, want running dispatched intake work", dispatch)
+	}
+	if dispatch.Run == nil || dispatch.Run.ID == 0 || dispatch.Run.TaskID != dispatch.Task.ID || dispatch.Run.Executor != "codex_headless" || dispatch.Run.Status != "running" || dispatch.Run.Attempt != 1 {
+		t.Fatalf("dispatch run = %+v, want correlated running codex_headless attempt", dispatch.Run)
+	}
+
+	var repeatOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"work", "dispatch", "--task", "intake-review-1", "--json"}, strings.NewReader(""), &repeatOutput); err != nil {
+		t.Fatalf("Run(work dispatch repeat) error = %v", err)
+	}
+	var repeat struct {
+		Dispatched bool   `json:"dispatched"`
+		Reason     string `json:"reason"`
+		Task       struct {
+			ID     int64  `json:"id"`
+			Key    string `json:"key"`
+			Status string `json:"status"`
+		} `json:"task"`
+		Run *struct {
+			ID     int64  `json:"id"`
+			TaskID int64  `json:"task_id"`
+			Status string `json:"status"`
+		} `json:"run"`
+	}
+	if err := json.Unmarshal(repeatOutput.Bytes(), &repeat); err != nil {
+		t.Fatalf("json.Unmarshal(repeat dispatch) error = %v\n%s", err, repeatOutput.String())
+	}
+	if repeat.Dispatched || repeat.Reason != "task_not_queued" || repeat.Run == nil || repeat.Run.ID != dispatch.Run.ID || repeat.Run.TaskID != dispatch.Task.ID {
+		t.Fatalf("repeat dispatch = %+v, want blocked with existing run", repeat)
+	}
+
+	var jobsOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"jobs", "--json"}, strings.NewReader(""), &jobsOutput); err != nil {
+		t.Fatalf("Run(jobs --json) error = %v", err)
+	}
+	for _, want := range []string{
+		`"task_id": 1`,
+		`"task_key": "intake-review-1"`,
+		`"current_run_id": 1`,
+		`"status": "running"`,
+	} {
+		if !strings.Contains(jobsOutput.String(), want) {
+			t.Fatalf("jobs output = %s, want %s", jobsOutput.String(), want)
+		}
+	}
+
+	var runsOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"runs", "--json"}, strings.NewReader(""), &runsOutput); err != nil {
+		t.Fatalf("Run(runs --json) error = %v", err)
+	}
+	for _, want := range []string{
+		`"run_id": 1`,
+		`"task_id": 1`,
+		`"task_key": "intake-review-1"`,
+		`"status": "running"`,
+	} {
+		if !strings.Contains(runsOutput.String(), want) {
+			t.Fatalf("runs output = %s, want %s", runsOutput.String(), want)
+		}
+	}
+
+	var logsOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"logs", "--json"}, strings.NewReader(""), &logsOutput); err != nil {
+		t.Fatalf("Run(logs --json) error = %v", err)
+	}
+	for _, want := range []string{
+		`"type": "task.dispatch_requested"`,
+		`"type": "run.started"`,
+		`"type": "task.status_changed"`,
+	} {
+		if !strings.Contains(logsOutput.String(), want) {
+			t.Fatalf("logs output = %s, want %s", logsOutput.String(), want)
+		}
+	}
+
+	var statusOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"work", "status"}, strings.NewReader(""), &statusOutput); err != nil {
+		t.Fatalf("Run(work status) error = %v", err)
+	}
+	for _, want := range []string{"work_items=1", "active_run_attempts=1", "dispatch=work_dispatch"} {
+		if !strings.Contains(statusOutput.String(), want) {
+			t.Fatalf("work status output = %s, want %s", statusOutput.String(), want)
+		}
+	}
+}
+
 func TestRunCompanionGetJSON(t *testing.T) {
 	t.Parallel()
 

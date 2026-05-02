@@ -58,6 +58,13 @@ type ExecutionOutcome struct {
 	Run  *sqlite.Run
 }
 
+type DispatchOutcome struct {
+	Task       sqlite.Task
+	Run        *sqlite.Run
+	Dispatched bool
+	Reason     string
+}
+
 type ExecutionRequest struct {
 	PromptOverride string
 	Metadata       map[string]string
@@ -444,6 +451,137 @@ func (service Service) ExecuteNextQueued(ctx context.Context) error {
 
 func (service Service) ExecuteTask(ctx context.Context, taskID int64) (ExecutionOutcome, error) {
 	return service.ExecuteTaskWithRequest(ctx, taskID, ExecutionRequest{})
+}
+
+func (service Service) DispatchNextRunAttempt(ctx context.Context) (DispatchOutcome, error) {
+	if service.Store == nil {
+		return DispatchOutcome{}, fmt.Errorf("job store is required")
+	}
+	task, err := service.nextQueuedTask(ctx)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return DispatchOutcome{Reason: "no_queued_work"}, nil
+		}
+		return DispatchOutcome{}, err
+	}
+	return service.DispatchTaskRunAttempt(ctx, task.ID)
+}
+
+func (service Service) DispatchTaskRunAttempt(ctx context.Context, taskID int64) (DispatchOutcome, error) {
+	if service.Store == nil {
+		return DispatchOutcome{}, fmt.Errorf("job store is required")
+	}
+
+	task, err := service.Store.GetTask(ctx, taskID)
+	if err != nil {
+		return DispatchOutcome{}, err
+	}
+	if task.Status != "queued" {
+		outcome := DispatchOutcome{
+			Task:   task,
+			Reason: "task_not_queued",
+		}
+		if task.CurrentRunID != nil {
+			run, runErr := service.Store.GetRun(ctx, *task.CurrentRunID)
+			if runErr != nil {
+				return DispatchOutcome{}, runErr
+			}
+			outcome.Run = &run
+		}
+		return outcome, nil
+	}
+
+	project, err := service.Store.GetProject(ctx, task.ProjectID)
+	if err != nil {
+		return DispatchOutcome{}, err
+	}
+	manifest, ok := service.Registry.Lookup(project.Key)
+	if !ok {
+		return DispatchOutcome{}, fmt.Errorf("unknown manifest for project %q", project.Key)
+	}
+
+	executors := service.Executors
+	if len(executors) == 0 {
+		executors = executorrouter.DefaultCatalog()
+	}
+	if service.Transitions.Store == nil {
+		service.Transitions = projects.Service{Store: service.Store}
+	}
+
+	config, err := service.executionConfig(ctx)
+	if err != nil {
+		return DispatchOutcome{}, err
+	}
+	selector := executorrouter.Selector{
+		Config:    config,
+		Executors: executors,
+	}
+	spec := contract.TaskSpec{
+		ID:     task.Key,
+		Kind:   contract.TaskKindGeneral,
+		Scope:  task.Scope,
+		Prompt: task.Title,
+		Requirements: contract.Requirements{
+			AllowedClasses:    []contract.ExecutorClass{contract.ExecutorClassPlanBackedCLI},
+			NeedsHeadlessPlan: true,
+		},
+		Metadata: map[string]string{
+			"project_key": project.Key,
+			"task_id":     fmt.Sprintf("%d", task.ID),
+		},
+	}
+	decision, err := selector.Select(ctx, spec)
+	if err != nil {
+		return DispatchOutcome{}, err
+	}
+
+	admission, err := service.admitDirectTask(ctx, task, project, manifest)
+	if err != nil {
+		return DispatchOutcome{}, err
+	}
+	if admission.Outcome != admissionDispatchable {
+		if err := service.applyAdmissionDecision(ctx, task, admission); err != nil {
+			return DispatchOutcome{}, err
+		}
+		updated, loadErr := service.Store.GetTask(ctx, task.ID)
+		if loadErr != nil {
+			return DispatchOutcome{}, loadErr
+		}
+		reason := string(admission.Outcome)
+		if admission.BlockedReason != "" {
+			reason = admission.BlockedReason
+		}
+		if admission.LastError != "" {
+			reason = admission.LastError
+		}
+		return DispatchOutcome{Task: updated, Reason: reason}, nil
+	}
+
+	attempt, err := service.nextRunAttempt(ctx, task.ID)
+	if err != nil {
+		return DispatchOutcome{}, err
+	}
+	if err := service.Store.RecordTaskDispatchRequested(ctx, task, decision.ExecutorKey, attempt); err != nil {
+		return DispatchOutcome{}, err
+	}
+	run, err := service.prepareRun(ctx, task, decision.ExecutorKey, attempt)
+	if err != nil {
+		return DispatchOutcome{}, err
+	}
+	updatedTask, updatedRun, err := service.Store.UpdateRunAndTaskStatus(ctx, sqlite.UpdateRunAndTaskStatusParams{
+		RunID:      run.ID,
+		RunStatus:  "running",
+		TaskStatus: "running",
+	})
+	if err != nil {
+		return DispatchOutcome{}, err
+	}
+	return DispatchOutcome{
+		Task:       updatedTask,
+		Run:        &updatedRun,
+		Dispatched: true,
+		Reason:     "dispatched",
+	}, nil
 }
 
 func (service Service) ExecuteTaskWithRequest(ctx context.Context, taskID int64, request ExecutionRequest) (ExecutionOutcome, error) {

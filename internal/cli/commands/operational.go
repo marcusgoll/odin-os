@@ -21,9 +21,13 @@ type ScopeView struct {
 }
 
 type JobView struct {
-	ProjectKey string `json:"project_key"`
-	TaskKey    string `json:"task_key"`
-	Status     string `json:"status"`
+	ProjectKey       string `json:"project_key"`
+	ProjectID        int64  `json:"project_id,omitempty"`
+	TaskID           int64  `json:"task_id,omitempty"`
+	TaskKey          string `json:"task_key"`
+	Status           string `json:"status"`
+	CurrentRunID     *int64 `json:"current_run_id,omitempty"`
+	CurrentRunStatus string `json:"current_run_status,omitempty"`
 }
 
 type JobsView struct {
@@ -31,9 +35,12 @@ type JobsView struct {
 }
 
 type RunView struct {
+	RunID    int64  `json:"run_id,omitempty"`
+	TaskID   int64  `json:"task_id,omitempty"`
 	TaskKey  string `json:"task_key"`
 	Executor string `json:"executor"`
 	Status   string `json:"status"`
+	Attempt  int    `json:"attempt,omitempty"`
 }
 
 type RunsView struct {

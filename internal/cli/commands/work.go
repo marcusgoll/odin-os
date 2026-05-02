@@ -2,9 +2,11 @@ package commands
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"io"
 	"sort"
+	"strconv"
 	"strings"
 
 	"odin-os/internal/cli/scope"
@@ -18,11 +20,38 @@ import (
 	trackerintake "odin-os/internal/tracker/intake"
 )
 
-const workUsage = "usage: odin work status|profiles|start --project <key> --title <text>|intake --project <key> [--dry-run]"
+const workUsage = "usage: odin work status|profiles|start --project <key> --title <text>|intake --project <key> [--dry-run]|dispatch [--task <id|key>] [--json]"
 
 var newIntakeTracker = trackerintake.NewGitHubTracker
 
-func RunWork(ctx context.Context, store *sqlite.Store, projectRegistry projects.Registry, snapshot registry.Snapshot, args []string, stdout io.Writer) error {
+type WorkOptions struct {
+	JobService jobs.Service
+}
+
+type workDispatchView struct {
+	Dispatched bool                 `json:"dispatched"`
+	Reason     string               `json:"reason"`
+	Task       workDispatchTaskView `json:"task,omitempty"`
+	Run        *workDispatchRunView `json:"run,omitempty"`
+}
+
+type workDispatchTaskView struct {
+	ID           int64  `json:"id"`
+	ProjectID    int64  `json:"project_id"`
+	Key          string `json:"key"`
+	Status       string `json:"status"`
+	CurrentRunID *int64 `json:"current_run_id,omitempty"`
+}
+
+type workDispatchRunView struct {
+	ID       int64  `json:"id"`
+	TaskID   int64  `json:"task_id"`
+	Executor string `json:"executor"`
+	Status   string `json:"status"`
+	Attempt  int    `json:"attempt"`
+}
+
+func RunWork(ctx context.Context, store *sqlite.Store, projectRegistry projects.Registry, snapshot registry.Snapshot, args []string, stdout io.Writer, options ...WorkOptions) error {
 	if len(args) == 0 || args[0] == "help" || args[0] == "--help" {
 		_, err := fmt.Fprintln(stdout, workUsage)
 		return err
@@ -37,6 +66,8 @@ func RunWork(ctx context.Context, store *sqlite.Store, projectRegistry projects.
 		return runWorkStart(ctx, store, projectRegistry, args[1:], stdout)
 	case "intake":
 		return runWorkIntake(ctx, store, projectRegistry, args[1:], stdout)
+	case "dispatch":
+		return runWorkDispatch(ctx, store, projectRegistry, args[1:], stdout, options...)
 	default:
 		_, err := fmt.Fprintf(stdout, "unknown work command: %s\n%s\n", args[0], workUsage)
 		return err
@@ -87,7 +118,7 @@ func runWorkStatus(ctx context.Context, store *sqlite.Store, snapshot registry.S
 
 	_, err = fmt.Fprintf(
 		stdout,
-		"work_items=%d open_work_items=%d active_run_attempts=%d pending_approvals=%d delivery_profiles=%d raw_intake_items=%d intake_review_items=%d intake_approval_required_items=%d dispatch=not_implemented intake=raw_cli\n",
+		"work_items=%d open_work_items=%d active_run_attempts=%d pending_approvals=%d delivery_profiles=%d raw_intake_items=%d intake_review_items=%d intake_approval_required_items=%d dispatch=work_dispatch intake=raw_cli\n",
 		len(taskViews),
 		openWorkItems,
 		activeRunAttempts,
@@ -98,6 +129,101 @@ func runWorkStatus(ctx context.Context, store *sqlite.Store, snapshot registry.S
 		intakeApprovalRequiredItems,
 	)
 	return err
+}
+
+func runWorkDispatch(ctx context.Context, store *sqlite.Store, projectRegistry projects.Registry, args []string, stdout io.Writer, options ...WorkOptions) error {
+	params := parseWorkStartArgs(args)
+	jsonOutput := parseBoolFlag(params, "json")
+	if _, ok := params["help"]; ok {
+		_, err := fmt.Fprintln(stdout, "usage: odin work dispatch [--task <id|key>] [--json]")
+		return err
+	}
+
+	jobService := jobs.Service{Store: store, Registry: projectRegistry}
+	if len(options) > 0 && options[0].JobService.Store != nil {
+		jobService = options[0].JobService
+	}
+
+	var (
+		outcome jobs.DispatchOutcome
+		err     error
+	)
+	taskRef := strings.TrimSpace(params["task"])
+	if taskRef == "" {
+		outcome, err = jobService.DispatchNextRunAttempt(ctx)
+	} else {
+		task, findErr := findWorkTask(ctx, store, taskRef)
+		if findErr != nil {
+			return findErr
+		}
+		outcome, err = jobService.DispatchTaskRunAttempt(ctx, task.ID)
+	}
+	if err != nil {
+		return err
+	}
+
+	view := workDispatchOutcomeView(outcome)
+	if jsonOutput {
+		return WriteJSON(stdout, view)
+	}
+	if view.Task.ID == 0 {
+		_, err := fmt.Fprintf(stdout, "dispatched=%t reason=%s\n", view.Dispatched, view.Reason)
+		return err
+	}
+	runID := int64(0)
+	if view.Run != nil {
+		runID = view.Run.ID
+	}
+	_, err = fmt.Fprintf(stdout, "dispatched=%t reason=%s task=%s status=%s run_id=%d\n", view.Dispatched, view.Reason, view.Task.Key, view.Task.Status, runID)
+	return err
+}
+
+func findWorkTask(ctx context.Context, store *sqlite.Store, ref string) (sqlite.Task, error) {
+	ref = strings.TrimSpace(ref)
+	idRef := strings.TrimPrefix(ref, "task-")
+	if id, err := strconv.ParseInt(idRef, 10, 64); err == nil && id > 0 {
+		return store.GetTask(ctx, id)
+	}
+
+	views, err := projections.ListTaskStatusViews(ctx, store.DB())
+	if err != nil {
+		return sqlite.Task{}, err
+	}
+	for _, view := range views {
+		if view.TaskKey == ref {
+			return store.GetTask(ctx, view.TaskID)
+		}
+	}
+	return sqlite.Task{}, sql.ErrNoRows
+}
+
+func workDispatchOutcomeView(outcome jobs.DispatchOutcome) workDispatchView {
+	view := workDispatchView{
+		Dispatched: outcome.Dispatched,
+		Reason:     outcome.Reason,
+	}
+	if view.Reason == "" {
+		view.Reason = "unknown"
+	}
+	if outcome.Task.ID != 0 {
+		view.Task = workDispatchTaskView{
+			ID:           outcome.Task.ID,
+			ProjectID:    outcome.Task.ProjectID,
+			Key:          outcome.Task.Key,
+			Status:       outcome.Task.Status,
+			CurrentRunID: outcome.Task.CurrentRunID,
+		}
+	}
+	if outcome.Run != nil {
+		view.Run = &workDispatchRunView{
+			ID:       outcome.Run.ID,
+			TaskID:   outcome.Run.TaskID,
+			Executor: outcome.Run.Executor,
+			Status:   outcome.Run.Status,
+			Attempt:  outcome.Run.Attempt,
+		}
+	}
+	return view
 }
 
 func runWorkProfiles(snapshot registry.Snapshot, stdout io.Writer) error {

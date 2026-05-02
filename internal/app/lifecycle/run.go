@@ -254,7 +254,16 @@ func Run(ctx context.Context, root string, args []string, stdin io.Reader, stdou
 	case "workspace":
 		return commands.RunWorkspace(ctx, app.Store, app.Registry, args[1:], stdout)
 	case "work":
-		return commands.RunWork(ctx, app.Store, app.Registry, app.RegistrySnapshot, args[1:], stdout)
+		return commands.RunWork(ctx, app.Store, app.Registry, app.RegistrySnapshot, args[1:], stdout, commands.WorkOptions{
+			JobService: jobs.Service{
+				Store:          app.Store,
+				Registry:       app.Registry,
+				Executors:      app.Executors,
+				ExecutorConfig: app.ExecutorConfig,
+				Transitions:    projects.Service{Store: app.Store},
+				Now:            time.Now,
+			},
+		})
 	case "scope":
 		return runScope(app, args[1:], stdout)
 	case "jobs":
@@ -395,9 +404,13 @@ func runJobs(ctx context.Context, app bootstrap.App, args []string, stdout io.Wr
 		jobViews := make([]commands.JobView, 0, len(views))
 		for _, view := range views {
 			jobViews = append(jobViews, commands.JobView{
-				ProjectKey: view.ProjectKey,
-				TaskKey:    view.TaskKey,
-				Status:     view.Status,
+				ProjectKey:       view.ProjectKey,
+				ProjectID:        view.ProjectID,
+				TaskID:           view.TaskID,
+				TaskKey:          view.TaskKey,
+				Status:           view.Status,
+				CurrentRunID:     view.CurrentRunID,
+				CurrentRunStatus: view.CurrentRunStatus,
 			})
 		}
 		return commands.WriteJSON(stdout, commands.JobsView{Jobs: jobViews})
@@ -471,9 +484,12 @@ func runRuns(ctx context.Context, app bootstrap.App, args []string, stdout io.Wr
 		runViews := make([]commands.RunView, 0, len(views))
 		for _, view := range views {
 			runViews = append(runViews, commands.RunView{
+				RunID:    view.RunID,
+				TaskID:   view.TaskID,
 				TaskKey:  view.TaskKey,
 				Executor: view.Executor,
 				Status:   view.Status,
+				Attempt:  view.Attempt,
 			})
 		}
 		return commands.WriteJSON(stdout, commands.RunsView{Runs: runViews})

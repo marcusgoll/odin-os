@@ -1563,6 +1563,28 @@ func appendTaskStatusChangedEventTx(ctx context.Context, tx *sql.Tx, previous Ta
 	})
 }
 
+func (store *Store) RecordTaskDispatchRequested(ctx context.Context, task Task, executor string, attempt int) error {
+	now := store.now()
+	return store.withTx(ctx, func(tx *sql.Tx) error {
+		projectID := task.ProjectID
+		return appendEventTx(ctx, tx, eventInsert{
+			StreamType: runtimeevents.StreamTask,
+			StreamID:   task.ID,
+			EventType:  runtimeevents.EventTaskDispatchRequested,
+			Scope:      task.Scope,
+			ProjectID:  &projectID,
+			TaskID:     &task.ID,
+			Payload: runtimeevents.TaskDispatchRequestedPayload{
+				TaskID:   task.ID,
+				Executor: executor,
+				Attempt:  attempt,
+				Status:   task.Status,
+			},
+			OccurredAt: now,
+		})
+	})
+}
+
 func appendRunStatusChangedEventTx(ctx context.Context, tx *sql.Tx, task Task, previous Run, updated Run, occurredAt time.Time) error {
 	if previous.Status == updated.Status {
 		return nil

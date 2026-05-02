@@ -37,6 +37,7 @@ const (
 	EventServiceHeartbeatRecorded           Type = "service.heartbeat_recorded"
 	EventProjectCreated                     Type = "project.created"
 	EventTaskCreated                        Type = "task.created"
+	EventTaskDispatchRequested              Type = "task.dispatch_requested"
 	EventTaskStatusChanged                  Type = "task.status_changed"
 	EventTaskQueueStateChanged              Type = "task.queue_state_changed"
 	EventRunStarted                         Type = "run.started"
@@ -153,6 +154,13 @@ type TaskCreatedPayload struct {
 	MaxAttempts    int    `json:"max_attempts,omitempty"`
 	LastError      string `json:"last_error,omitempty"`
 	BlockedReason  string `json:"blocked_reason,omitempty"`
+}
+
+type TaskDispatchRequestedPayload struct {
+	TaskID   int64  `json:"task_id"`
+	Executor string `json:"executor"`
+	Attempt  int    `json:"attempt"`
+	Status   string `json:"status"`
 }
 
 type TaskStatusChangedPayload struct {
