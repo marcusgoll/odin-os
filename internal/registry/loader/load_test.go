@@ -111,6 +111,7 @@ func TestLoadDirLoadsUniversalIntakeAgents(t *testing.T) {
 		"spec-task-builder-agent",
 		"universal-ticket-generator-agent",
 		"software-feature-ticket-builder-agent",
+		"bug-report-builder-agent",
 		"project-spec-builder-agent",
 		"personal-project-builder-agent",
 		"review-agent",
@@ -430,6 +431,41 @@ func TestLoadDirLoadsUniversalIntakeAgents(t *testing.T) {
 	for _, required := range requiredSoftwareFeatureTicketBuilderContract {
 		if !strings.Contains(softwareFeatureTicketBuilderContract, required) {
 			t.Fatalf("software feature ticket builder agent body missing %q", required)
+		}
+	}
+
+	bugReportBuilder := snapshot.ByKey["bug-report-builder-agent"]
+	bugReportBuilderContract := strings.Join([]string{
+		bugReportBuilder.Title,
+		bugReportBuilder.Summary,
+		bugReportBuilder.Sections[registry.SectionPurpose],
+		bugReportBuilder.Sections[registry.SectionWhenToUse],
+		bugReportBuilder.Sections[registry.SectionInputs],
+		bugReportBuilder.Sections[registry.SectionProcedure],
+		bugReportBuilder.Sections[registry.SectionOutputs],
+		bugReportBuilder.Sections[registry.SectionConstraints],
+		bugReportBuilder.Sections[registry.SectionSuccessCriteria],
+	}, "\n")
+	requiredBugReportBuilderContract := []string{
+		"Bug Report Builder",
+		"{{raw_input}}",
+		"Turn this bug-related input into a structured bug report",
+		"bug title",
+		"observed behavior",
+		"expected behavior",
+		"steps to reproduce",
+		"affected user or system",
+		"frequency",
+		"severity",
+		"possible cause",
+		"logs or screenshots needed",
+		"workaround, if known",
+		"test that should fail before the fix",
+		"recommended owner or agent",
+	}
+	for _, required := range requiredBugReportBuilderContract {
+		if !strings.Contains(bugReportBuilderContract, required) {
+			t.Fatalf("bug report builder agent body missing %q", required)
 		}
 	}
 
