@@ -60,6 +60,12 @@ odin
 
 This installs a symlink at `~/.local/bin/odin` pointing to this repo's built binary. Remove it with `make uninstall-local`.
 
+Use `odin ...` for normal operator work once the local install is in place. Use
+`./bin/odin ...` from this repository for repo-truth verification, fresh-build
+checks, and implementation proof. The installed command is only trusted when
+`which odin` resolves to `~/.local/bin/odin` and that path points back to this
+repo's `bin/odin`.
+
 ## Observability
 
 Odin observability uses one telemetry truth:
