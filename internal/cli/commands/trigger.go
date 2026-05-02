@@ -14,7 +14,14 @@ import (
 const TriggerUsage = "trigger [list|show <key>|upsert <key>|fire <key>|evaluate] [key=value ...]"
 
 func RunTrigger(ctx context.Context, service triggers.Service, args []string, stdout io.Writer) error {
-	if len(args) == 0 || args[0] == "list" {
+	if len(args) == 0 {
+		return fmt.Errorf("usage: odin %s", TriggerUsage)
+	}
+	if args[0] == "--help" || args[0] == "help" {
+		_, err := fmt.Fprintf(stdout, "usage: odin %s\n", TriggerUsage)
+		return err
+	}
+	if args[0] == "list" {
 		options, err := parseOptionTokens(args[1:])
 		if err != nil {
 			return err
