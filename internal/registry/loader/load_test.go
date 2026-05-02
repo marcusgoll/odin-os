@@ -126,6 +126,7 @@ func TestLoadDirLoadsUniversalIntakeAgents(t *testing.T) {
 		"blocker-resolver-agent",
 		"project-spec-builder-agent",
 		"personal-project-builder-agent",
+		"learning-coach-agent",
 		"personal-admin-agent",
 		"household-task-agent",
 		"calendar-planning-agent",
@@ -970,6 +971,40 @@ func TestLoadDirLoadsUniversalIntakeAgents(t *testing.T) {
 	for _, required := range requiredPersonalProjectBuilderContract {
 		if !strings.Contains(personalProjectBuilderContract, required) {
 			t.Fatalf("personal project builder agent body missing %q", required)
+		}
+	}
+
+	learningCoach := snapshot.ByKey["learning-coach-agent"]
+	learningCoachContract := strings.Join([]string{
+		learningCoach.Title,
+		learningCoach.Summary,
+		learningCoach.Sections[registry.SectionPurpose],
+		learningCoach.Sections[registry.SectionWhenToUse],
+		learningCoach.Sections[registry.SectionInputs],
+		learningCoach.Sections[registry.SectionProcedure],
+		learningCoach.Sections[registry.SectionOutputs],
+		learningCoach.Sections[registry.SectionConstraints],
+		learningCoach.Sections[registry.SectionSuccessCriteria],
+	}, "\n")
+	requiredLearningCoachContract := []string{
+		"Learning Coach Agent",
+		"{{raw_input}}",
+		"Create a learning plan from this input",
+		"learning goal",
+		"current level, if known",
+		"target outcome",
+		"topics to study",
+		"practice tasks",
+		"resources needed",
+		"weekly schedule",
+		"milestone checkpoints",
+		"assessment method",
+		"first study session plan",
+		"Keep it practical and measurable",
+	}
+	for _, required := range requiredLearningCoachContract {
+		if !strings.Contains(learningCoachContract, required) {
+			t.Fatalf("learning coach agent body missing %q", required)
 		}
 	}
 
