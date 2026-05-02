@@ -111,6 +111,7 @@ func TestLoadDirLoadsUniversalIntakeAgents(t *testing.T) {
 		"spec-task-builder-agent",
 		"universal-ticket-generator-agent",
 		"project-spec-builder-agent",
+		"personal-project-builder-agent",
 		"review-agent",
 		"chief-of-staff-agent",
 		"system-memory-curator-agent",
@@ -425,6 +426,41 @@ func TestLoadDirLoadsUniversalIntakeAgents(t *testing.T) {
 	for _, required := range requiredProjectSpecBuilderContract {
 		if !strings.Contains(projectSpecBuilderContract, required) {
 			t.Fatalf("project spec builder agent body missing %q", required)
+		}
+	}
+
+	personalProjectBuilder := snapshot.ByKey["personal-project-builder-agent"]
+	personalProjectBuilderContract := strings.Join([]string{
+		personalProjectBuilder.Title,
+		personalProjectBuilder.Summary,
+		personalProjectBuilder.Sections[registry.SectionPurpose],
+		personalProjectBuilder.Sections[registry.SectionWhenToUse],
+		personalProjectBuilder.Sections[registry.SectionInputs],
+		personalProjectBuilder.Sections[registry.SectionProcedure],
+		personalProjectBuilder.Sections[registry.SectionOutputs],
+		personalProjectBuilder.Sections[registry.SectionConstraints],
+		personalProjectBuilder.Sections[registry.SectionSuccessCriteria],
+	}, "\n")
+	requiredPersonalProjectBuilderContract := []string{
+		"Personal Project Builder",
+		"{{raw_input}}",
+		"Turn this personal goal into a structured project",
+		"goal statement",
+		"why it matters",
+		"measurable outcome",
+		"deadline or review date",
+		"milestones",
+		"weekly actions",
+		"daily habits, if relevant",
+		"blockers",
+		"support needed",
+		"first action under 15 minutes",
+		"Keep the plan realistic",
+		"Do not create a motivational poster disguised as a plan",
+	}
+	for _, required := range requiredPersonalProjectBuilderContract {
+		if !strings.Contains(personalProjectBuilderContract, required) {
+			t.Fatalf("personal project builder agent body missing %q", required)
 		}
 	}
 
