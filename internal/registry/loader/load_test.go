@@ -110,6 +110,7 @@ func TestLoadDirLoadsUniversalIntakeAgents(t *testing.T) {
 		"router-agent",
 		"spec-task-builder-agent",
 		"universal-ticket-generator-agent",
+		"software-feature-ticket-builder-agent",
 		"project-spec-builder-agent",
 		"personal-project-builder-agent",
 		"review-agent",
@@ -389,6 +390,46 @@ func TestLoadDirLoadsUniversalIntakeAgents(t *testing.T) {
 	for _, required := range requiredUniversalTicketGeneratorContract {
 		if !strings.Contains(universalTicketGeneratorContract, required) {
 			t.Fatalf("universal ticket generator agent body missing %q", required)
+		}
+	}
+
+	softwareFeatureTicketBuilder := snapshot.ByKey["software-feature-ticket-builder-agent"]
+	softwareFeatureTicketBuilderContract := strings.Join([]string{
+		softwareFeatureTicketBuilder.Title,
+		softwareFeatureTicketBuilder.Summary,
+		softwareFeatureTicketBuilder.Sections[registry.SectionPurpose],
+		softwareFeatureTicketBuilder.Sections[registry.SectionWhenToUse],
+		softwareFeatureTicketBuilder.Sections[registry.SectionInputs],
+		softwareFeatureTicketBuilder.Sections[registry.SectionProcedure],
+		softwareFeatureTicketBuilder.Sections[registry.SectionOutputs],
+		softwareFeatureTicketBuilder.Sections[registry.SectionConstraints],
+		softwareFeatureTicketBuilder.Sections[registry.SectionSuccessCriteria],
+	}, "\n")
+	requiredSoftwareFeatureTicketBuilderContract := []string{
+		"Software Feature Ticket Builder",
+		"{{raw_input}}",
+		"Create a software feature ticket from this input",
+		"feature title",
+		"user story",
+		"problem",
+		"proposed solution",
+		"acceptance criteria",
+		"non-goals",
+		"affected users",
+		"affected systems",
+		"data model impact",
+		"API impact",
+		"UI impact",
+		"security/privacy risks",
+		"test requirements",
+		"documentation requirements",
+		"recommended implementation phases",
+		"Do not write code",
+		"Do not assume architecture details that are not provided",
+	}
+	for _, required := range requiredSoftwareFeatureTicketBuilderContract {
+		if !strings.Contains(softwareFeatureTicketBuilderContract, required) {
+			t.Fatalf("software feature ticket builder agent body missing %q", required)
 		}
 	}
 
