@@ -119,6 +119,7 @@ func TestLoadDirLoadsUniversalIntakeAgents(t *testing.T) {
 		"task-splitter-agent",
 		"definition-of-done-generator-agent",
 		"next-action-finder-agent",
+		"blocker-resolver-agent",
 		"project-spec-builder-agent",
 		"personal-project-builder-agent",
 		"review-agent",
@@ -716,6 +717,37 @@ func TestLoadDirLoadsUniversalIntakeAgents(t *testing.T) {
 	for _, required := range requiredNextActionFinderContract {
 		if !strings.Contains(nextActionFinderContract, required) {
 			t.Fatalf("next action finder agent body missing %q", required)
+		}
+	}
+
+	blockerResolver := snapshot.ByKey["blocker-resolver-agent"]
+	blockerResolverContract := strings.Join([]string{
+		blockerResolver.Title,
+		blockerResolver.Summary,
+		blockerResolver.Sections[registry.SectionPurpose],
+		blockerResolver.Sections[registry.SectionWhenToUse],
+		blockerResolver.Sections[registry.SectionInputs],
+		blockerResolver.Sections[registry.SectionProcedure],
+		blockerResolver.Sections[registry.SectionOutputs],
+		blockerResolver.Sections[registry.SectionConstraints],
+		blockerResolver.Sections[registry.SectionSuccessCriteria],
+	}, "\n")
+	requiredBlockerResolverContract := []string{
+		"Blocker Resolver",
+		"{{raw_input}}",
+		"Analyze this blocked item",
+		"blocker type",
+		"root cause",
+		"missing information",
+		"person or system needed",
+		"fastest unblock path",
+		"fallback path",
+		"message to send, if needed",
+		"whether to defer, delegate, or delete",
+	}
+	for _, required := range requiredBlockerResolverContract {
+		if !strings.Contains(blockerResolverContract, required) {
+			t.Fatalf("blocker resolver agent body missing %q", required)
 		}
 	}
 
