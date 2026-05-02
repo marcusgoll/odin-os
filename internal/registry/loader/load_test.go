@@ -142,6 +142,7 @@ func TestLoadDirLoadsUniversalIntakeAgents(t *testing.T) {
 		"system-memory-curator-agent",
 		"knowledge-base-filing-agent",
 		"knowledge-retrieval-agent",
+		"context-pack-builder-agent",
 		"voice-note-cleaner-agent",
 		"email-to-task-extractor-agent",
 		"email-drafting-agent",
@@ -1739,6 +1740,40 @@ func TestLoadDirLoadsUniversalIntakeAgents(t *testing.T) {
 	for _, required := range requiredKnowledgeRetrievalContract {
 		if !strings.Contains(knowledgeRetrievalContract, required) {
 			t.Fatalf("knowledge retrieval agent body missing %q", required)
+		}
+	}
+
+	contextPackBuilder := snapshot.ByKey["context-pack-builder-agent"]
+	contextPackBuilderContract := strings.Join([]string{
+		contextPackBuilder.Title,
+		contextPackBuilder.Summary,
+		contextPackBuilder.Sections[registry.SectionPurpose],
+		contextPackBuilder.Sections[registry.SectionWhenToUse],
+		contextPackBuilder.Sections[registry.SectionInputs],
+		contextPackBuilder.Sections[registry.SectionProcedure],
+		contextPackBuilder.Sections[registry.SectionOutputs],
+		contextPackBuilder.Sections[registry.SectionConstraints],
+		contextPackBuilder.Sections[registry.SectionSuccessCriteria],
+	}, "\n")
+	requiredContextPackBuilderContract := []string{
+		"Context Pack Builder",
+		"{{raw_input}}",
+		"Create a context pack for this task",
+		"Include only information needed to complete the task",
+		"task summary",
+		"relevant project context",
+		"relevant personal preferences",
+		"constraints",
+		"related prior decisions",
+		"relevant files or links",
+		"risks",
+		"open questions",
+		"output requirements",
+		"Do not overload the agent with unrelated history",
+	}
+	for _, required := range requiredContextPackBuilderContract {
+		if !strings.Contains(contextPackBuilderContract, required) {
+			t.Fatalf("context pack builder agent body missing %q", required)
 		}
 	}
 }
