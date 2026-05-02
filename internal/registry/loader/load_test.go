@@ -117,6 +117,7 @@ func TestLoadDirLoadsUniversalIntakeAgents(t *testing.T) {
 		"plan-first-execution-agent",
 		"subagent-delegation-planner-agent",
 		"task-splitter-agent",
+		"definition-of-done-generator-agent",
 		"project-spec-builder-agent",
 		"personal-project-builder-agent",
 		"review-agent",
@@ -651,6 +652,38 @@ func TestLoadDirLoadsUniversalIntakeAgents(t *testing.T) {
 	for _, required := range requiredTaskSplitterContract {
 		if !strings.Contains(taskSplitterContract, required) {
 			t.Fatalf("task splitter agent body missing %q", required)
+		}
+	}
+
+	definitionOfDoneGenerator := snapshot.ByKey["definition-of-done-generator-agent"]
+	definitionOfDoneGeneratorContract := strings.Join([]string{
+		definitionOfDoneGenerator.Title,
+		definitionOfDoneGenerator.Summary,
+		definitionOfDoneGenerator.Sections[registry.SectionPurpose],
+		definitionOfDoneGenerator.Sections[registry.SectionWhenToUse],
+		definitionOfDoneGenerator.Sections[registry.SectionInputs],
+		definitionOfDoneGenerator.Sections[registry.SectionProcedure],
+		definitionOfDoneGenerator.Sections[registry.SectionOutputs],
+		definitionOfDoneGenerator.Sections[registry.SectionConstraints],
+		definitionOfDoneGenerator.Sections[registry.SectionSuccessCriteria],
+	}, "\n")
+	requiredDefinitionOfDoneGeneratorContract := []string{
+		"Definition of Done Generator",
+		"{{raw_input}}",
+		"For this task",
+		"Create a definition of done",
+		"required deliverables",
+		"quality checks",
+		"tests or verification steps",
+		"documentation updates",
+		"approval requirements",
+		"handoff notes",
+		"what explicitly does not count as done",
+		"Make the definition measurable",
+	}
+	for _, required := range requiredDefinitionOfDoneGeneratorContract {
+		if !strings.Contains(definitionOfDoneGeneratorContract, required) {
+			t.Fatalf("definition of done generator agent body missing %q", required)
 		}
 	}
 
