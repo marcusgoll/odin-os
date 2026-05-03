@@ -511,6 +511,53 @@ func runApprovals(ctx context.Context, app bootstrap.App, args []string, stdout 
 	if err != nil {
 		return err
 	}
+	if len(remaining) > 0 && strings.EqualFold(remaining[0], "show") {
+		if len(remaining) != 2 {
+			return fmt.Errorf("usage: odin approvals show <approval-id> [--json]")
+		}
+		approvalID, err := strconv.ParseInt(remaining[1], 10, 64)
+		if err != nil || approvalID <= 0 {
+			return fmt.Errorf("approval id must be a positive integer")
+		}
+		detail, err := approvalsvc.Service{Store: app.Store}.Detail(ctx, approvalID)
+		if err != nil {
+			return err
+		}
+		if jsonOutput {
+			return commands.WriteJSON(stdout, struct {
+				ID              int64  `json:"id"`
+				Status          string `json:"status"`
+				TaskID          int64  `json:"task_id"`
+				TaskKey         string `json:"task_key"`
+				TaskStatus      string `json:"task_status"`
+				RunID           *int64 `json:"run_id,omitempty"`
+				DecisionBy      string `json:"decision_by,omitempty"`
+				Reason          string `json:"reason,omitempty"`
+				ResolverSupport string `json:"resolver_support"`
+			}{
+				ID:              detail.Approval.ID,
+				Status:          detail.Approval.Status,
+				TaskID:          detail.Task.ID,
+				TaskKey:         detail.Task.Key,
+				TaskStatus:      detail.Task.Status,
+				RunID:           detail.Approval.RunID,
+				DecisionBy:      detail.Approval.DecisionBy,
+				Reason:          detail.Approval.Reason,
+				ResolverSupport: string(detail.ResolverSupport),
+			})
+		}
+		_, err = fmt.Fprintf(
+			stdout,
+			"approval=%d task=%s run=%s status=%s task_status=%s resolver=%s\n",
+			detail.Approval.ID,
+			detail.Task.Key,
+			approvalRunIDLabel(detail.Approval.RunID),
+			detail.Approval.Status,
+			detail.Task.Status,
+			detail.ResolverSupport,
+		)
+		return err
+	}
 	if len(remaining) > 0 && strings.EqualFold(remaining[0], "resolve") {
 		command := commands.ApprovalResolveCommand{Name: "resolve"}
 		if len(remaining) > 1 && !strings.HasPrefix(remaining[1], "--") {
@@ -585,7 +632,7 @@ func runApprovals(ctx context.Context, app bootstrap.App, args []string, stdout 
 	}
 	filter, err := commands.ParseApprovalSupportFilter(remaining)
 	if err != nil {
-		return fmt.Errorf("usage: odin approvals [all|supported|unsupported] [--json] | odin approvals resolve <approval-id> <approve|deny> <reason...> [--json]")
+		return fmt.Errorf("usage: odin approvals [all|supported|unsupported] [--json] | odin approvals show <approval-id> [--json] | odin approvals resolve <approval-id> <approve|deny> <reason...> [--json]")
 	}
 
 	state, err := loadCLIState(app)

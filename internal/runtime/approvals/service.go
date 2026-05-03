@@ -91,6 +91,9 @@ func (service Service) Detail(ctx context.Context, approvalID int64) (Detail, er
 	if resumeState != nil && isPreparedTransfer(*resumeState) {
 		support = ResolverSupported
 	}
+	if isTaskBackedApproval(approval, task) {
+		support = ResolverSupported
+	}
 
 	return Detail{
 		Approval:        approval,
@@ -126,6 +129,12 @@ func (service Service) Resolve(ctx context.Context, params ResolveParams) (Resol
 	}
 	current := detail.Approval
 	if current.Status != "pending" {
+		if current.Status == status {
+			return ResolveResult{
+				Approval:        current,
+				ResolverSupport: detail.ResolverSupport,
+			}, nil
+		}
 		return ResolveResult{}, fmt.Errorf("approval %d is %s, want pending", params.ApprovalID, current.Status)
 	}
 	if detail.ResolverSupport != ResolverSupported {
@@ -171,10 +180,7 @@ func (service Service) Resolve(ctx context.Context, params ResolveParams) (Resol
 	}
 
 	if detail.ResumeState == nil || !isPreparedTransfer(*detail.ResumeState) {
-		return ResolveResult{
-			Approval:        current,
-			ResolverSupport: ResolverUnsupported,
-		}, UnsupportedResolverError{ApprovalID: current.ID}
+		return result, nil
 	}
 	result, err = service.resumePreparedTransfer(ctx, detail.Task, approval, *detail.ResumeState)
 	if err != nil {
@@ -212,6 +218,13 @@ func isPreparedTransfer(state checkpoints.ResumeState) bool {
 		}
 	}
 	return false
+}
+
+func isTaskBackedApproval(approval sqlite.Approval, task sqlite.Task) bool {
+	if approval.Status != "pending" {
+		return approval.Status == "approved" || approval.Status == "denied"
+	}
+	return task.Status == "blocked" && task.BlockedReason == "approval_required"
 }
 
 func (service Service) resumePreparedTransfer(ctx context.Context, task sqlite.Task, approval sqlite.Approval, state checkpoints.ResumeState) (ResolveResult, error) {
@@ -466,10 +479,14 @@ func FormatReceipt(result ResolveResult) (Receipt, error) {
 		line := fmt.Sprintf("approval=%d status=resolved result=approved", result.Approval.ID)
 		if result.SubmitRun != nil {
 			line = fmt.Sprintf("%s run=%d", line, result.SubmitRun.ID)
+			return Receipt{
+				Line:    line,
+				Summary: "summary=approval granted; submit continuation started",
+			}, nil
 		}
 		return Receipt{
 			Line:    line,
-			Summary: "summary=approval granted; submit continuation started",
+			Summary: "summary=approval granted; task unblocked",
 		}, nil
 	case "denied":
 		return Receipt{

@@ -1957,6 +1957,120 @@ func TestRunApprovalsResolveUnsupportedDenyDoesNotMutate(t *testing.T) {
 	}
 }
 
+func TestRunApprovalsResolveTaskBackedCompanionWork(t *testing.T) {
+	configureLifecycleHarnessDriver(t)
+	t.Setenv("HOME", t.TempDir())
+
+	root := testRepoRoot(t)
+	run := func(args ...string) string {
+		t.Helper()
+		var output bytes.Buffer
+		if err := Run(context.Background(), root, args, strings.NewReader(""), &output); err != nil {
+			t.Fatalf("Run(%v) error = %v\noutput=%s", args, err, output.String())
+		}
+		return output.String()
+	}
+
+	run("project", "select", "odin-core")
+	run("transition", "set", "cutover", "confirm", "because", "task-backed approval test")
+	run("companion", "run", "primary", "--objective", "Prepare companion approval proof", "--trigger", "test", "--json")
+
+	blocked := run("work", "dispatch", "--task", "1", "--json")
+	if !strings.Contains(blocked, `"dispatched": false`) || !strings.Contains(blocked, `"reason": "approval_required"`) || !strings.Contains(blocked, `"status": "blocked"`) {
+		t.Fatalf("dispatch output = %s, want approval-required block", blocked)
+	}
+
+	approvalList := run("approvals", "all", "--json")
+	if !strings.Contains(approvalList, `"approval_id": 1`) || !strings.Contains(approvalList, `"resolver_support": "supported"`) {
+		t.Fatalf("approval list output = %s, want supported task-backed approval", approvalList)
+	}
+
+	show := run("approvals", "show", "1", "--json")
+	for _, want := range []string{
+		`"id": 1`,
+		`"status": "pending"`,
+		`"task_id": 1`,
+		`"task_status": "blocked"`,
+		`"resolver_support": "supported"`,
+	} {
+		if !strings.Contains(show, want) {
+			t.Fatalf("approval show output = %s, want %s", show, want)
+		}
+	}
+
+	approved := run("approvals", "resolve", "1", "approve", "operator", "approved", "task", "work", "--json")
+	for _, want := range []string{
+		`"id": 1`,
+		`"status": "approved"`,
+		`"resolver_support": "supported"`,
+		`"result": "approved"`,
+		`"summary": "approval granted; task unblocked"`,
+	} {
+		if !strings.Contains(approved, want) {
+			t.Fatalf("approval resolve output = %s, want %s", approved, want)
+		}
+	}
+
+	repeatApproved := run("approvals", "resolve", "1", "approve", "repeat", "approval", "--json")
+	if !strings.Contains(repeatApproved, `"status": "approved"`) || !strings.Contains(repeatApproved, `"result": "approved"`) {
+		t.Fatalf("repeat approval output = %s, want idempotent approved result", repeatApproved)
+	}
+
+	jobsAfterApprove := run("jobs", "--json")
+	if !strings.Contains(jobsAfterApprove, `"task_id": 1`) || !strings.Contains(jobsAfterApprove, `"status": "queued"`) {
+		t.Fatalf("jobs after approve = %s, want task requeued", jobsAfterApprove)
+	}
+
+	dispatched := run("work", "dispatch", "--task", "1", "--json")
+	if !strings.Contains(dispatched, `"dispatched": true`) || !strings.Contains(dispatched, `"status": "running"`) {
+		t.Fatalf("dispatch after approve = %s, want running run", dispatched)
+	}
+	executed := run("work", "execute", "--task", "1", "--json")
+	if !strings.Contains(executed, `"executed": true`) || !strings.Contains(executed, `"reason": "completed"`) || !strings.Contains(executed, `"status": "completed"`) {
+		t.Fatalf("execute after approve = %s, want completed task", executed)
+	}
+
+	run("companion", "run", "primary", "--objective", "Prepare companion denial proof", "--trigger", "test", "--json")
+	denialBlock := run("work", "dispatch", "--task", "2", "--json")
+	if !strings.Contains(denialBlock, `"reason": "approval_required"`) {
+		t.Fatalf("denial dispatch output = %s, want approval-required block", denialBlock)
+	}
+	denied := run("approvals", "resolve", "2", "deny", "operator", "denied", "task", "work", "--json")
+	if !strings.Contains(denied, `"status": "denied"`) || !strings.Contains(denied, `"result": "denied"`) {
+		t.Fatalf("deny output = %s, want denied result", denied)
+	}
+	repeatDenied := run("approvals", "resolve", "2", "deny", "repeat", "denial", "--json")
+	if !strings.Contains(repeatDenied, `"status": "denied"`) || !strings.Contains(repeatDenied, `"result": "denied"`) {
+		t.Fatalf("repeat deny output = %s, want idempotent denied result", repeatDenied)
+	}
+	deniedDispatch := run("work", "dispatch", "--task", "2", "--json")
+	if !strings.Contains(deniedDispatch, `"dispatched": false`) || !strings.Contains(deniedDispatch, `"reason": "task_not_queued"`) || strings.Contains(deniedDispatch, `"status": "running"`) {
+		t.Fatalf("denied dispatch output = %s, want denied work to remain blocked", deniedDispatch)
+	}
+
+	runsOutput := run("runs", "--json")
+	if !strings.Contains(runsOutput, `"status": "completed"`) || strings.Count(runsOutput, `"run_id":`) != 1 {
+		t.Fatalf("runs output = %s, want only approved work run completed", runsOutput)
+	}
+	logsOutput := run("logs", "--json")
+	for _, want := range []string{
+		`"type": "approval.resolved"`,
+		`"status": "approved"`,
+		`"status": "denied"`,
+		`"type": "run.finished"`,
+	} {
+		if !strings.Contains(logsOutput, want) {
+			t.Fatalf("logs output = %s, want %s", logsOutput, want)
+		}
+	}
+	statusOutput := run("work", "status")
+	for _, want := range []string{"work_items=2", "open_work_items=1", "active_run_attempts=0", "pending_approvals=0"} {
+		if !strings.Contains(statusOutput, want) {
+			t.Fatalf("work status output = %s, want %s", statusOutput, want)
+		}
+	}
+}
+
 func TestRunApprovalsSupportFiltersAreReadOnly(t *testing.T) {
 	t.Parallel()
 
