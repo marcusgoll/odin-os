@@ -2388,6 +2388,107 @@ printf '%s\n' '{"status":"ok","summary":"echo complete","output":{"message":"hel
 	}
 }
 
+func TestRunSkillsInvokeLifecycleVisibleInLogsAndOverview(t *testing.T) {
+	t.Parallel()
+
+	root := testRepoRoot(t)
+	scriptPath := filepath.Join(root, "scripts", "skills", "audit-skill.sh")
+	if err := os.MkdirAll(filepath.Dir(scriptPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll(script dir) error = %v", err)
+	}
+	if err := os.WriteFile(scriptPath, []byte(`#!/usr/bin/env bash
+cat >/dev/null
+printf '%s\n' '{"status":"ok","summary":"audit complete","output":{"message":"tracked"}}'
+`), 0o755); err != nil {
+		t.Fatalf("WriteFile(script) error = %v", err)
+	}
+
+	specPath := filepath.Join(root, "audit-skill.json")
+	if err := os.WriteFile(specPath, []byte(`{
+  "key": "audit-skill",
+  "title": "Audit Skill",
+  "summary": "Returns a tracked response.",
+  "status": "active",
+  "version": "1.0.0",
+  "enabled": true,
+  "tags": ["testing"],
+  "owners": ["odin-core"],
+  "strictness": "rigid",
+  "applies_to": ["testing"],
+  "scopes": ["project"],
+  "permissions": ["repo.read"],
+  "handler_type": "command",
+  "handler_ref": "scripts/skills/audit-skill.sh",
+  "timeout_seconds": 15,
+  "input_schema": {"type":"object"},
+  "output_schema": {"type":"object"},
+  "sections": {
+    "Purpose": "Echo input.",
+    "When to Use": "When testing.",
+    "Inputs": "A message.",
+    "Procedure": "Read and echo.",
+    "Outputs": "A JSON response.",
+    "Constraints": "Stay deterministic.",
+    "Success Criteria": "The caller gets a stable response."
+  }
+}`), 0o644); err != nil {
+		t.Fatalf("WriteFile(spec) error = %v", err)
+	}
+
+	if err := Run(context.Background(), root, []string{"skills", "create", "--spec", specPath, "--json"}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+		t.Fatalf("Run(skills create) error = %v", err)
+	}
+	if err := Run(context.Background(), root, []string{"project", "select", testProjectKey}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+		t.Fatalf("Run(project select) error = %v", err)
+	}
+	if err := Run(context.Background(), root, []string{"skills", "invoke", "audit-skill", "--input", `{"message":"hello"}`, "--json"}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+		t.Fatalf("Run(skills invoke) error = %v", err)
+	}
+	err := Run(context.Background(), root, []string{"skills", "invoke", "missing-skill", "--input", `{"message":"fail"}`, "--json"}, strings.NewReader(""), &bytes.Buffer{})
+	if err == nil {
+		t.Fatal("Run(skills invoke missing-skill) error = nil, want failure")
+	}
+
+	var logsOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"logs", "--json"}, strings.NewReader(""), &logsOutput); err != nil {
+		t.Fatalf("Run(logs --json) error = %v", err)
+	}
+	for _, want := range []string{
+		`"type": "skill.lifecycle_recorded"`,
+		`"skill_key": "audit-skill"`,
+		`"handler_ref": "scripts/skills/audit-skill.sh"`,
+		`"execution_profile": "restricted_command_v1"`,
+		`"permissions": [`,
+		`"runtime_effect": "command_output_only"`,
+		`"skill_key": "missing-skill"`,
+		`"outcome": "failure"`,
+		`"error_code": "not_found"`,
+		`"runtime_effect": "not_invoked"`,
+	} {
+		if !strings.Contains(logsOutput.String(), want) {
+			t.Fatalf("logs output = %s, want %s", logsOutput.String(), want)
+		}
+	}
+
+	var overviewOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"overview", "--json"}, strings.NewReader(""), &overviewOutput); err != nil {
+		t.Fatalf("Run(overview --json) error = %v", err)
+	}
+	for _, want := range []string{
+		`"skill_activity"`,
+		`"invoke_success_count": 1`,
+		`"invoke_failure_count": 1`,
+		`"command_output_only_count": 1`,
+		`"delegation_truth"`,
+		`"runtime_status": "not_proven"`,
+		`"companion_work_path": "governed_work_items"`,
+	} {
+		if !strings.Contains(overviewOutput.String(), want) {
+			t.Fatalf("overview output = %s, want %s", overviewOutput.String(), want)
+		}
+	}
+}
+
 func TestRunSkillsInvokeUsesSelectedProjectTransitionState(t *testing.T) {
 	t.Parallel()
 

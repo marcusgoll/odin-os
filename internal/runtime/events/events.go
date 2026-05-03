@@ -464,6 +464,7 @@ type SkillLifecycleRecordedPayload struct {
 	Operation        string   `json:"operation"`
 	Outcome          string   `json:"outcome"`
 	ExecutionProfile string   `json:"execution_profile,omitempty"`
+	RuntimeEffect    string   `json:"runtime_effect,omitempty"`
 	Version          string   `json:"version,omitempty"`
 	HandlerType      string   `json:"handler_type,omitempty"`
 	HandlerRef       string   `json:"handler_ref,omitempty"`

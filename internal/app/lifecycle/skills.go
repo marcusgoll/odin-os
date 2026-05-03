@@ -37,9 +37,11 @@ func runSkills(ctx context.Context, app bootstrap.App, args []string, stdout io.
 			if err := app.Store.RecordSkillLifecycleEvent(ctx, sqlite.RecordSkillLifecycleEventParams{
 				SkillKey:         event.SkillKey,
 				Scope:            event.Scope,
+				ProjectID:        event.ProjectID,
 				Operation:        string(event.Operation),
 				Outcome:          string(event.Outcome),
 				ExecutionProfile: event.ExecutionProfile,
+				RuntimeEffect:    event.RuntimeEffect,
 				Version:          event.Version,
 				HandlerType:      event.HandlerType,
 				HandlerRef:       event.HandlerRef,

@@ -33,7 +33,9 @@ type Event struct {
 	Outcome          Outcome
 	SkillKey         string
 	Scope            string
+	ProjectID        *int64
 	ExecutionProfile string
+	RuntimeEffect    string
 	Version          string
 	HandlerType      string
 	HandlerRef       string
@@ -97,6 +99,9 @@ func (observer LoggerObserver) RecordSkillEvent(_ context.Context, event Event) 
 		"handler_type":     event.HandlerType,
 		"handler_ref":      event.HandlerRef,
 		"permission_count": len(event.Permissions),
+	}
+	if event.RuntimeEffect != "" {
+		fields["runtime_effect"] = event.RuntimeEffect
 	}
 	if event.ExecutionProfile != "" {
 		fields["execution_profile"] = event.ExecutionProfile

@@ -757,9 +757,11 @@ type RecordExecutorHealthParams struct {
 type RecordSkillLifecycleEventParams struct {
 	SkillKey         string
 	Scope            string
+	ProjectID        *int64
 	Operation        string
 	Outcome          string
 	ExecutionProfile string
+	RuntimeEffect    string
 	Version          string
 	HandlerType      string
 	HandlerRef       string

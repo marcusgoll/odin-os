@@ -16,6 +16,7 @@ import (
 	knowledgememory "odin-os/internal/memory/knowledge"
 	"odin-os/internal/registry"
 	approvalsvc "odin-os/internal/runtime/approvals"
+	runtimeevents "odin-os/internal/runtime/events"
 	"odin-os/internal/runtime/projections"
 	"odin-os/internal/store/sqlite"
 	toolcatalog "odin-os/internal/tools/catalog"
@@ -43,6 +44,8 @@ type View struct {
 	CompanionSwarms    []CompanionSwarmSummary `json:"companion_swarms"`
 	Companions         CompanionLane           `json:"companions"`
 	CapabilityCatalog  CapabilityCatalogLane   `json:"capability_catalog"`
+	SkillActivity      SkillActivityLane       `json:"skill_activity"`
+	DelegationTruth    DelegationTruthLane     `json:"delegation_truth"`
 	Approvals          []ApprovalSummary       `json:"approvals"`
 	Observability      ObservabilityLane       `json:"observability"`
 	Memory             MemoryLane              `json:"memory"`
@@ -119,6 +122,38 @@ type CapabilityCatalogLane struct {
 	WorkflowCount        int    `json:"workflow_count"`
 	CommandCount         int    `json:"command_count"`
 	ToolCount            int    `json:"tool_count"`
+}
+
+type SkillActivityLane struct {
+	Wiring                 Wiring                 `json:"wiring"`
+	InvokeSuccessCount     int                    `json:"invoke_success_count"`
+	InvokeFailureCount     int                    `json:"invoke_failure_count"`
+	StubResultCount        int                    `json:"stub_result_count"`
+	CommandOutputOnlyCount int                    `json:"command_output_only_count"`
+	Recent                 []SkillActivitySummary `json:"recent"`
+}
+
+type SkillActivitySummary struct {
+	EventID          int64    `json:"event_id"`
+	SkillKey         string   `json:"skill_key"`
+	Scope            string   `json:"scope"`
+	Operation        string   `json:"operation"`
+	Outcome          string   `json:"outcome"`
+	ExecutionProfile string   `json:"execution_profile"`
+	RuntimeEffect    string   `json:"runtime_effect"`
+	HandlerRef       string   `json:"handler_ref"`
+	Permissions      []string `json:"permissions"`
+	ErrorCode        string   `json:"error_code,omitempty"`
+	OccurredAt       string   `json:"occurred_at"`
+}
+
+type DelegationTruthLane struct {
+	Wiring              Wiring `json:"wiring"`
+	RuntimeStatus       string `json:"runtime_status"`
+	OperatorSurface     string `json:"operator_surface"`
+	CompanionWorkPath   string `json:"companion_work_path"`
+	CompanionSwarmCount int    `json:"companion_swarm_count"`
+	Note                string `json:"note"`
 }
 
 type ApprovalSummary struct {
@@ -321,6 +356,16 @@ func (service Service) Build(ctx context.Context, resolved scope.Resolution) (Vi
 		CapabilityCatalog: CapabilityCatalogLane{
 			Wiring:    WiringCatalogBacked,
 			ToolCount: len(toolcatalog.BuiltinDefinitions()),
+		},
+		SkillActivity: SkillActivityLane{
+			Wiring: WiringLive,
+		},
+		DelegationTruth: DelegationTruthLane{
+			Wiring:            WiringLive,
+			RuntimeStatus:     "not_proven",
+			OperatorSurface:   "none",
+			CompanionWorkPath: "governed_work_items",
+			Note:              "companion run creates normal governed work items; no live delegation or subagent execution evidence is visible",
 		},
 		Observability: ObservabilityLane{
 			Wiring: WiringLive,
@@ -649,6 +694,12 @@ func (service Service) Build(ctx context.Context, resolved scope.Resolution) (Vi
 			BudgetBacklogCount:       swarm.BudgetBacklogCount,
 		})
 	}
+	view.DelegationTruth.CompanionSwarmCount = len(view.CompanionSwarms)
+	if len(view.CompanionSwarms) > 0 {
+		view.DelegationTruth.RuntimeStatus = "delegation_artifacts_visible"
+		view.DelegationTruth.OperatorSurface = "companion_swarm_projection"
+		view.DelegationTruth.Note = "delegation artifacts are visible through companion swarm projections"
+	}
 
 	companionViews, err := projections.ListCompanionAssignmentViews(ctx, service.Store.DB(), workspaces.DefaultWorkspaceKey)
 	if err != nil && err != sql.ErrNoRows {
@@ -876,7 +927,102 @@ func (service Service) Build(ctx context.Context, resolved scope.Resolution) (Vi
 		}
 	}
 
+	skillActivity, err := service.skillActivity(ctx, resolved)
+	if err != nil {
+		return View{}, err
+	}
+	view.SkillActivity = skillActivity
+
 	return view, nil
+}
+
+func (service Service) skillActivity(ctx context.Context, resolved scope.Resolution) (SkillActivityLane, error) {
+	lane := SkillActivityLane{
+		Wiring: WiringLive,
+	}
+
+	var projectID *int64
+	if resolved.Kind == scope.ScopeProject || resolved.Kind == scope.ScopeOdinCore {
+		project, err := service.Store.GetProjectByKey(ctx, resolved.ProjectKey)
+		switch err {
+		case nil:
+			id := project.ID
+			projectID = &id
+		case sql.ErrNoRows:
+			return lane, nil
+		default:
+			return SkillActivityLane{}, err
+		}
+	}
+
+	records, err := service.Store.ListEvents(ctx, sqlite.ListEventsParams{})
+	if err != nil {
+		return SkillActivityLane{}, err
+	}
+
+	for _, record := range records {
+		if record.StreamType != runtimeevents.StreamSkill || record.Type != runtimeevents.EventSkillLifecycleRecorded {
+			continue
+		}
+		if !matchesSkillEventScope(record, resolved, projectID) {
+			continue
+		}
+
+		payload, err := runtimeevents.DecodePayload[runtimeevents.SkillLifecycleRecordedPayload](record.Payload)
+		if err != nil {
+			return SkillActivityLane{}, err
+		}
+		if payload.Operation == string(skillsOperationInvoke) {
+			switch payload.Outcome {
+			case "success":
+				lane.InvokeSuccessCount++
+			case "failure":
+				lane.InvokeFailureCount++
+			}
+			switch payload.RuntimeEffect {
+			case "stub_result":
+				lane.StubResultCount++
+			case "command_output_only":
+				lane.CommandOutputOnlyCount++
+			}
+		}
+		lane.Recent = append(lane.Recent, SkillActivitySummary{
+			EventID:          record.ID,
+			SkillKey:         payload.SkillKey,
+			Scope:            record.Scope,
+			Operation:        payload.Operation,
+			Outcome:          payload.Outcome,
+			ExecutionProfile: payload.ExecutionProfile,
+			RuntimeEffect:    payload.RuntimeEffect,
+			HandlerRef:       payload.HandlerRef,
+			Permissions:      append([]string(nil), payload.Permissions...),
+			ErrorCode:        payload.ErrorCode,
+			OccurredAt:       record.OccurredAt.UTC().Format(time.RFC3339),
+		})
+	}
+
+	const recentLimit = 5
+	if len(lane.Recent) > recentLimit {
+		lane.Recent = append([]SkillActivitySummary(nil), lane.Recent[len(lane.Recent)-recentLimit:]...)
+	}
+	return lane, nil
+}
+
+type skillsOperation string
+
+const skillsOperationInvoke skillsOperation = "invoke"
+
+func matchesSkillEventScope(record runtimeevents.Record, resolved scope.Resolution, projectID *int64) bool {
+	switch resolved.Kind {
+	case scope.ScopeGlobal:
+		return true
+	case scope.ScopeProject, scope.ScopeOdinCore:
+		return projectID != nil && record.ProjectID != nil && *record.ProjectID == *projectID && record.Scope == string(resolved.Kind)
+	case scope.ScopeNewProject:
+		return record.Scope == string(scope.ScopeNewProject)
+	default:
+		return false
+	}
 }
 
 func (service Service) now() time.Time {

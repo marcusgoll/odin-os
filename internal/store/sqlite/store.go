@@ -3166,11 +3166,13 @@ func (store *Store) RecordSkillLifecycleEvent(ctx context.Context, params Record
 			StreamID:   skillEventStreamID(params.SkillKey),
 			EventType:  runtimeevents.EventSkillLifecycleRecorded,
 			Scope:      scope,
+			ProjectID:  params.ProjectID,
 			Payload: runtimeevents.SkillLifecycleRecordedPayload{
 				SkillKey:         params.SkillKey,
 				Operation:        params.Operation,
 				Outcome:          params.Outcome,
 				ExecutionProfile: params.ExecutionProfile,
+				RuntimeEffect:    params.RuntimeEffect,
 				Version:          params.Version,
 				HandlerType:      params.HandlerType,
 				HandlerRef:       params.HandlerRef,
