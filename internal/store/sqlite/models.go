@@ -1206,3 +1206,8 @@ type RecordDelegationRetryEventParams struct {
 	EventType    runtimeevents.Type
 	Reason       string
 }
+
+type RecordDelegationReuseEventParams struct {
+	DelegationID int64
+	Reason       string
+}

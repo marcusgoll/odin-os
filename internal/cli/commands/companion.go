@@ -110,6 +110,8 @@ type CompanionRunView struct {
 }
 
 type CompanionDelegationRunView struct {
+	Reused              bool                      `json:"reused"`
+	Reason              string                    `json:"reason,omitempty"`
 	CompanionKey        string                    `json:"companion_key"`
 	AgentKey            string                    `json:"agent_key"`
 	PortalTrack         string                    `json:"portal_track"`

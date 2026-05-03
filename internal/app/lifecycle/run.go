@@ -2609,6 +2609,8 @@ func renderCompanionDelegationRunView(companionKey string, command commands.Comp
 	}
 
 	return commands.CompanionDelegationRunView{
+		Reused:       result.Reused,
+		Reason:       result.Reason,
 		CompanionKey: companionKey,
 		AgentKey:     command.AgentKey,
 		PortalTrack:  command.PortalTrack,
@@ -3448,15 +3450,12 @@ func listLogs(ctx context.Context, store *sqlite.Store, resolved scope.Resolutio
 		return nil, err
 	}
 
-	filtered := make([]runtimeevents.Record, 0, 50)
+	filtered := make([]runtimeevents.Record, 0, len(records))
 	for _, record := range records {
 		if !matchesEventScope(record.Scope, resolved) {
 			continue
 		}
 		filtered = append(filtered, record)
-		if len(filtered) == 50 {
-			break
-		}
 	}
 	return filtered, nil
 }

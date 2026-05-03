@@ -2,6 +2,8 @@ package delegations
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strconv"
@@ -38,6 +40,8 @@ type RunResult struct {
 	ParentRun           *sqlite.Run
 	ChildDelegations    []sqlite.Delegation
 	LearningProposalIDs []int64
+	Reused              bool
+	Reason              string
 }
 
 type RetryResult struct {
@@ -203,14 +207,23 @@ func (service Service) RunAgent(ctx context.Context, input RunInput) (sqlite.Tas
 		requestedBy = "operator"
 	}
 
-	parentTask, err := service.Jobs.CreateTask(ctx, jobsvc.CreateTaskParams{
+	parentTaskResult, err := service.Jobs.CreateTaskOnce(ctx, jobsvc.CreateTaskParams{
 		Resolved:    input.ResolvedScope,
 		Title:       parentTaskTitle(input.AgentKey, input.Inputs),
 		RequestedBy: requestedBy,
+		Key:         delegationParentTaskKey(input),
 		CompanionID: input.CompanionID,
 	})
 	if err != nil {
 		return sqlite.Task{}, nil, RunResult{}, fmt.Errorf("create parent task: %w", err)
+	}
+	parentTask := parentTaskResult.Task
+	if !parentTaskResult.Created {
+		result, err := service.reusedRunResult(ctx, parentTask, childSpecs)
+		if err != nil {
+			return parentTask, nil, result, err
+		}
+		return parentTask, result.ParentRun, result, nil
 	}
 
 	parentRun, err := service.startParentRun(ctx, parentTask, input)
@@ -267,6 +280,47 @@ func (service Service) RunAgent(ctx context.Context, input RunInput) (sqlite.Tas
 	result.ParentTask = parentTask
 	result.ParentRun = &parentRun
 	return parentTask, &parentRun, result, nil
+}
+
+func (service Service) reusedRunResult(ctx context.Context, parentTask sqlite.Task, childSpecs []ChildSpec) (RunResult, error) {
+	delegations, err := service.Store.ListDelegations(ctx, sqlite.ListDelegationsParams{ParentTaskID: &parentTask.ID})
+	if err != nil {
+		return RunResult{}, err
+	}
+	if len(delegations) == 0 {
+		return RunResult{}, fmt.Errorf("existing delegation parent task %s has no child delegations", parentTask.Key)
+	}
+	delegations = orderDelegationsBySpecs(delegations, childSpecs)
+	reason := existingDelegationReason(delegations)
+	for _, delegation := range delegations {
+		if err := service.Store.RecordDelegationReuseEvent(ctx, sqlite.RecordDelegationReuseEventParams{
+			DelegationID: delegation.ID,
+			Reason:       reason,
+		}); err != nil {
+			return RunResult{}, err
+		}
+	}
+
+	var parentRun *sqlite.Run
+	for _, delegation := range delegations {
+		if delegation.ParentRunID == nil {
+			continue
+		}
+		run, err := service.Store.GetRun(ctx, *delegation.ParentRunID)
+		if err != nil {
+			return RunResult{}, err
+		}
+		parentRun = &run
+		break
+	}
+
+	return RunResult{
+		ParentTask:       parentTask,
+		ParentRun:        parentRun,
+		ChildDelegations: delegations,
+		Reused:           true,
+		Reason:           reason,
+	}, nil
 }
 
 func (service Service) runChildWave(ctx context.Context, parentTask sqlite.Task, parentRun *sqlite.Run, input RunInput, childSpecs []ChildSpec, indexes []int) []childExecutionResult {
@@ -550,6 +604,105 @@ func isFailedDelegationTaskStatus(status string) bool {
 	default:
 		return false
 	}
+}
+
+func delegationParentTaskKey(input RunInput) string {
+	agent := cleanInput(input.AgentKey)
+	portalTrack := cleanInput(input.Inputs["portal_track"])
+	surface := cleanInput(input.Inputs["surface"])
+	goal := cleanInput(input.Inputs["goal"])
+	requestedBy := cleanInput(input.RequestedBy)
+	digestInput := strings.Join([]string{
+		requestedBy,
+		agent,
+		portalTrack,
+		surface,
+		goal,
+	}, "\x00")
+	sum := sha256.Sum256([]byte(digestInput))
+	digest := hex.EncodeToString(sum[:])[:16]
+	return strings.Join(compactNonEmpty([]string{
+		"delegate",
+		keySegment(agent),
+		keySegment(portalTrack),
+		keySegment(surface),
+		digest,
+	}), "-")
+}
+
+func keySegment(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	var builder strings.Builder
+	lastDash := false
+	for _, char := range value {
+		switch {
+		case char >= 'a' && char <= 'z':
+			builder.WriteRune(char)
+			lastDash = false
+		case char >= '0' && char <= '9':
+			builder.WriteRune(char)
+			lastDash = false
+		default:
+			if !lastDash && builder.Len() > 0 {
+				builder.WriteByte('-')
+				lastDash = true
+			}
+		}
+		if builder.Len() >= 36 {
+			break
+		}
+	}
+	result := strings.Trim(builder.String(), "-")
+	if result == "" {
+		return "request"
+	}
+	return result
+}
+
+func compactNonEmpty(values []string) []string {
+	compacted := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.Trim(value, "-")
+		if value != "" {
+			compacted = append(compacted, value)
+		}
+	}
+	return compacted
+}
+
+func orderDelegationsBySpecs(delegations []sqlite.Delegation, specs []ChildSpec) []sqlite.Delegation {
+	byKey := make(map[string][]sqlite.Delegation, len(delegations))
+	for _, delegation := range delegations {
+		byKey[delegation.DelegationKey] = append(byKey[delegation.DelegationKey], delegation)
+	}
+	ordered := make([]sqlite.Delegation, 0, len(delegations))
+	seen := make(map[int64]bool, len(delegations))
+	for _, spec := range specs {
+		items := byKey[spec.DelegationKey]
+		for _, delegation := range items {
+			if seen[delegation.ID] {
+				continue
+			}
+			ordered = append(ordered, delegation)
+			seen[delegation.ID] = true
+			break
+		}
+	}
+	for _, delegation := range delegations {
+		if !seen[delegation.ID] {
+			ordered = append(ordered, delegation)
+		}
+	}
+	return ordered
+}
+
+func existingDelegationReason(delegations []sqlite.Delegation) string {
+	for _, delegation := range delegations {
+		if isRetryableDelegationStatus(delegation.Status) {
+			return "existing_failed_use_retry"
+		}
+	}
+	return "existing_delegation_tree"
 }
 
 func retryInputsFromDelegation(delegation sqlite.Delegation) map[string]string {

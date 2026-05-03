@@ -94,6 +94,7 @@ const (
 	EventLearningPromotionRolledBack        Type = "learning.promotion_rolled_back"
 	EventSkillLifecycleRecorded             Type = "skill.lifecycle_recorded"
 	EventDelegationCreated                  Type = "delegation.created"
+	EventDelegationCreateReused             Type = "delegation.create_reused"
 	EventDelegationStatusChanged            Type = "delegation.status_changed"
 	EventDelegationChildAttached            Type = "delegation.child_attached"
 	EventDelegationArtifactRecorded         Type = "delegation.artifact_recorded"
@@ -494,6 +495,18 @@ type DelegationCreatedPayload struct {
 	ConvergenceMode string `json:"convergence_mode"`
 	ArtifactTarget  string `json:"artifact_target"`
 	Executor        string `json:"executor"`
+}
+
+type DelegationCreateReusedPayload struct {
+	DelegationID  int64  `json:"delegation_id"`
+	ParentTaskID  int64  `json:"parent_task_id"`
+	ParentRunID   *int64 `json:"parent_run_id,omitempty"`
+	ChildTaskID   *int64 `json:"child_task_id,omitempty"`
+	ChildRunID    *int64 `json:"child_run_id,omitempty"`
+	DelegationKey string `json:"delegation_key"`
+	Role          string `json:"role"`
+	Status        string `json:"status"`
+	Reason        string `json:"reason"`
 }
 
 type DelegationStatusChangedPayload struct {

@@ -1930,6 +1930,132 @@ func TestCompanionDelegateCreatesAuditableChildWork(t *testing.T) {
 	}
 }
 
+func TestCompanionDelegateCreateIsIdempotentForSameLogicalRequest(t *testing.T) {
+	configureLifecycleHarnessDriver(t)
+	t.Setenv("HOME", t.TempDir())
+
+	root := testRepoRoot(t)
+	seedDelegationSkillFixture(t, root)
+	if err := Run(context.Background(), root, []string{"project", "select", testProjectKey}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+		t.Fatalf("Run(project select) error = %v", err)
+	}
+	if err := Run(context.Background(), root, []string{"transition", "set", "cutover", "confirm", "because", "delegation idempotency test"}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+		t.Fatalf("Run(transition set) error = %v", err)
+	}
+
+	args := []string{
+		"companion",
+		"delegate",
+		"primary",
+		"--agent",
+		"portal-delivery-agent",
+		"--portal-track",
+		"admin",
+		"--surface",
+		"dashboard",
+		"--goal",
+		"audit idempotent delegated operator path",
+		"--json",
+	}
+	var firstOutput bytes.Buffer
+	if err := Run(context.Background(), root, args, strings.NewReader(""), &firstOutput); err != nil {
+		t.Fatalf("Run(companion delegate first) error = %v\nstdout:\n%s", err, firstOutput.String())
+	}
+	var secondOutput bytes.Buffer
+	if err := Run(context.Background(), root, args, strings.NewReader(""), &secondOutput); err != nil {
+		t.Fatalf("Run(companion delegate repeat) error = %v\nstdout:\n%s", err, secondOutput.String())
+	}
+
+	var firstPayload struct {
+		Reused     bool `json:"reused"`
+		ParentTask struct {
+			ID  int64  `json:"id"`
+			Key string `json:"key"`
+		} `json:"parent_task"`
+		ParentRun *struct {
+			RunID int64 `json:"run_id"`
+		} `json:"parent_run"`
+		ChildDelegations []struct {
+			ID          int64  `json:"id"`
+			Status      string `json:"status"`
+			ChildTaskID int64  `json:"child_task_id"`
+			ChildRunID  *int64 `json:"child_run_id,omitempty"`
+		} `json:"child_delegations"`
+	}
+	var secondPayload struct {
+		Reused     bool   `json:"reused"`
+		Reason     string `json:"reason"`
+		ParentTask struct {
+			ID  int64  `json:"id"`
+			Key string `json:"key"`
+		} `json:"parent_task"`
+		ParentRun *struct {
+			RunID int64 `json:"run_id"`
+		} `json:"parent_run"`
+		ChildDelegations []struct {
+			ID          int64  `json:"id"`
+			Status      string `json:"status"`
+			ChildTaskID int64  `json:"child_task_id"`
+			ChildRunID  *int64 `json:"child_run_id,omitempty"`
+		} `json:"child_delegations"`
+	}
+	if err := json.Unmarshal(firstOutput.Bytes(), &firstPayload); err != nil {
+		t.Fatalf("first delegate json = %v\n%s", err, firstOutput.String())
+	}
+	if err := json.Unmarshal(secondOutput.Bytes(), &secondPayload); err != nil {
+		t.Fatalf("second delegate json = %v\n%s", err, secondOutput.String())
+	}
+	if firstPayload.Reused {
+		t.Fatal("first delegate reused = true, want fresh create")
+	}
+	if !secondPayload.Reused || secondPayload.Reason != "existing_delegation_tree" {
+		t.Fatalf("second delegate reused=%t reason=%q, want existing_delegation_tree", secondPayload.Reused, secondPayload.Reason)
+	}
+	if firstPayload.ParentTask.ID != secondPayload.ParentTask.ID || firstPayload.ParentTask.Key != secondPayload.ParentTask.Key {
+		t.Fatalf("repeat parent = (%d,%s), want same (%d,%s)", secondPayload.ParentTask.ID, secondPayload.ParentTask.Key, firstPayload.ParentTask.ID, firstPayload.ParentTask.Key)
+	}
+	if firstPayload.ParentRun == nil || secondPayload.ParentRun == nil || firstPayload.ParentRun.RunID != secondPayload.ParentRun.RunID {
+		t.Fatalf("repeat parent run = %+v, want same %+v", secondPayload.ParentRun, firstPayload.ParentRun)
+	}
+	if len(firstPayload.ChildDelegations) != 5 || len(secondPayload.ChildDelegations) != 5 {
+		t.Fatalf("child delegation counts = first %d second %d, want 5 each", len(firstPayload.ChildDelegations), len(secondPayload.ChildDelegations))
+	}
+	for index := range firstPayload.ChildDelegations {
+		first := firstPayload.ChildDelegations[index]
+		second := secondPayload.ChildDelegations[index]
+		if first.ID != second.ID || first.ChildTaskID != second.ChildTaskID {
+			t.Fatalf("child %d repeat = %+v, want same id/task as %+v", index, second, first)
+		}
+		if first.ChildRunID == nil || second.ChildRunID == nil || *first.ChildRunID != *second.ChildRunID {
+			t.Fatalf("child %d repeat run = %+v, want same %+v", index, second.ChildRunID, first.ChildRunID)
+		}
+	}
+
+	var listOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"companion", "delegate", "list", "--json"}, strings.NewReader(""), &listOutput); err != nil {
+		t.Fatalf("Run(companion delegate list --json) error = %v", err)
+	}
+	var listPayload struct {
+		Delegations []struct {
+			ID int64 `json:"id"`
+		} `json:"delegations"`
+	}
+	if err := json.Unmarshal(listOutput.Bytes(), &listPayload); err != nil {
+		t.Fatalf("list json = %v\n%s", err, listOutput.String())
+	}
+	if len(listPayload.Delegations) != 5 {
+		t.Fatalf("delegation rows after repeat = %d, want 5\n%s", len(listPayload.Delegations), listOutput.String())
+	}
+
+	var logsOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"logs", "--json"}, strings.NewReader(""), &logsOutput); err != nil {
+		t.Fatalf("Run(logs --json) error = %v", err)
+	}
+	if !strings.Contains(logsOutput.String(), `"type": "delegation.create_reused"`) || !strings.Contains(logsOutput.String(), `"reason": "existing_delegation_tree"`) {
+		t.Fatalf("logs output = %s, want delegation.create_reused evidence", logsOutput.String())
+	}
+}
+
 func TestCompanionDelegateListShowsFailedPartialLifecycle(t *testing.T) {
 	configureLifecycleHarnessDriverStatus(t, "failed", "delegated child failed proof")
 	t.Setenv("HOME", t.TempDir())
@@ -2040,6 +2166,60 @@ func TestCompanionDelegateRetryRecoversFailedChildrenIdempotently(t *testing.T) 
 		if delegation.Status != "failed" || delegation.ChildTaskID == 0 || delegation.ChildRunID != nil {
 			t.Fatalf("failed delegation = %+v, want failed child task without child run", delegation)
 		}
+	}
+
+	var repeatFailedOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{
+		"companion",
+		"delegate",
+		"primary",
+		"--agent",
+		"portal-delivery-agent",
+		"--portal-track",
+		"admin",
+		"--surface",
+		"dashboard",
+		"--goal",
+		"recover failed delegated operator path",
+		"--json",
+	}, strings.NewReader(""), &repeatFailedOutput); err != nil {
+		t.Fatalf("Run(companion delegate repeat failed) error = %v\nstdout:\n%s", err, repeatFailedOutput.String())
+	}
+	var repeatFailedPayload struct {
+		Reused           bool   `json:"reused"`
+		Reason           string `json:"reason"`
+		ChildDelegations []struct {
+			ID          int64  `json:"id"`
+			Status      string `json:"status"`
+			ChildTaskID int64  `json:"child_task_id"`
+			ChildRunID  *int64 `json:"child_run_id,omitempty"`
+		} `json:"child_delegations"`
+	}
+	if err := json.Unmarshal(repeatFailedOutput.Bytes(), &repeatFailedPayload); err != nil {
+		t.Fatalf("repeat failed json = %v\n%s", err, repeatFailedOutput.String())
+	}
+	if !repeatFailedPayload.Reused || repeatFailedPayload.Reason != "existing_failed_use_retry" {
+		t.Fatalf("repeat failed reused=%t reason=%q, want existing_failed_use_retry", repeatFailedPayload.Reused, repeatFailedPayload.Reason)
+	}
+	if len(repeatFailedPayload.ChildDelegations) != len(failedList.Delegations) {
+		t.Fatalf("repeat failed child count = %d, want %d", len(repeatFailedPayload.ChildDelegations), len(failedList.Delegations))
+	}
+	failedByID := make(map[int64]int64, len(failedList.Delegations))
+	for _, delegation := range failedList.Delegations {
+		failedByID[delegation.ID] = delegation.ChildTaskID
+	}
+	for index, delegation := range repeatFailedPayload.ChildDelegations {
+		originalChildTaskID, ok := failedByID[delegation.ID]
+		if !ok || delegation.ChildTaskID != originalChildTaskID || delegation.Status != "failed" || delegation.ChildRunID != nil {
+			t.Fatalf("repeat failed delegation %d = %+v, want same failed row set %#v", index, delegation, failedByID)
+		}
+	}
+	var repeatFailedListOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"companion", "delegate", "list", "--json"}, strings.NewReader(""), &repeatFailedListOutput); err != nil {
+		t.Fatalf("Run(companion delegate list repeat failed) error = %v", err)
+	}
+	if strings.Count(repeatFailedListOutput.String(), `"status": "failed"`) != 2 {
+		t.Fatalf("repeat failed list = %s, want exactly two failed delegation rows", repeatFailedListOutput.String())
 	}
 
 	if err := Run(context.Background(), root, []string{"transition", "set", "cutover", "confirm", "because", "delegation retry test"}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
