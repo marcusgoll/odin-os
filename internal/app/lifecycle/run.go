@@ -43,7 +43,9 @@ import (
 	"odin-os/internal/executors/contract"
 	executorrouter "odin-os/internal/executors/router"
 	approvalsvc "odin-os/internal/runtime/approvals"
+	"odin-os/internal/runtime/checkpoints"
 	conversationsvc "odin-os/internal/runtime/conversation"
+	delegationsvc "odin-os/internal/runtime/delegations"
 	runtimeevents "odin-os/internal/runtime/events"
 	healthsvc "odin-os/internal/runtime/health"
 	"odin-os/internal/runtime/jobs"
@@ -2277,9 +2279,114 @@ func runCompanion(ctx context.Context, app bootstrap.App, args []string, stdout 
 			view.Task.Scope,
 		)
 		return err
+	case "delegate":
+		resolved, err := companionRunScope(app)
+		if err != nil {
+			return err
+		}
+
+		companion, err := service.GetCompanionByKey(ctx, workspace.ID, command.Key)
+		if err != nil {
+			return err
+		}
+
+		jobService := newJobService(app).Service
+		delegationService := delegationsvc.Service{
+			Store:            app.Store,
+			Jobs:             jobService,
+			Checkpoints:      checkpoints.Service{Store: app.Store},
+			RegistrySnapshot: app.RegistrySnapshot,
+		}
+		parentTask, parentRun, result, err := delegationService.RunAgent(ctx, delegationsvc.RunInput{
+			ResolvedScope: resolved,
+			AgentKey:      command.AgentKey,
+			RequestedBy:   "companion:" + companion.Key,
+			CompanionID:   companion.ID,
+			Inputs: map[string]string{
+				"portal_track": command.PortalTrack,
+				"surface":      command.Surface,
+				"goal":         command.Goal,
+			},
+		})
+		if err != nil {
+			return err
+		}
+
+		view := renderCompanionDelegationRunView(companion.Key, command, parentTask, parentRun, result)
+		if command.JSON {
+			return commands.WriteJSON(stdout, view)
+		}
+		_, err = fmt.Fprintf(stdout, "delegated companion=%s agent=%s parent_task=%s parent_run=%s child_delegations=%d\n",
+			view.CompanionKey,
+			view.AgentKey,
+			view.ParentTask.Key,
+			formatOptionalInt64(runIDPtr(parentRun)),
+			len(view.ChildDelegations),
+		)
+		return err
 	default:
 		return fmt.Errorf("unsupported companion subcommand: %s", command.Name)
 	}
+}
+
+func renderCompanionDelegationRunView(companionKey string, command commands.CompanionCommand, parentTask sqlite.Task, parentRun *sqlite.Run, result delegationsvc.RunResult) commands.CompanionDelegationRunView {
+	var parentRunView *commands.RunView
+	if parentRun != nil {
+		parentRunView = &commands.RunView{
+			RunID:    parentRun.ID,
+			TaskID:   parentRun.TaskID,
+			TaskKey:  parentTask.Key,
+			Executor: parentRun.Executor,
+			Status:   parentRun.Status,
+			Attempt:  parentRun.Attempt,
+		}
+	}
+
+	delegations := make([]commands.CompanionDelegationView, 0, len(result.ChildDelegations))
+	for _, delegation := range result.ChildDelegations {
+		delegations = append(delegations, commands.CompanionDelegationView{
+			ID:            delegation.ID,
+			DelegationKey: delegation.DelegationKey,
+			Role:          delegation.Role,
+			Status:        delegation.Status,
+			ParentTaskID:  delegation.ParentTaskID,
+			ParentRunID:   delegation.ParentRunID,
+			ChildTaskID:   delegation.ChildTaskID,
+			ChildRunID:    delegation.ChildRunID,
+			Executor:      delegation.Executor,
+		})
+	}
+
+	return commands.CompanionDelegationRunView{
+		CompanionKey: companionKey,
+		AgentKey:     command.AgentKey,
+		PortalTrack:  command.PortalTrack,
+		Surface:      command.Surface,
+		Goal:         command.Goal,
+		ParentTask: commands.TaskCreateView{
+			ID:     parentTask.ID,
+			Key:    parentTask.Key,
+			Status: parentTask.Status,
+			Scope:  parentTask.Scope,
+		},
+		ParentRun:           parentRunView,
+		ChildDelegations:    delegations,
+		LearningProposalIDs: append([]int64(nil), result.LearningProposalIDs...),
+	}
+}
+
+func runIDPtr(run *sqlite.Run) *int64 {
+	if run == nil {
+		return nil
+	}
+	return &run.ID
+}
+
+func formatOptionalInt64(value *int64) string {
+	if value == nil {
+		return "none"
+	}
+	return strconv.FormatInt(*value, 10)
 }
 
 func companionRunScope(app bootstrap.App) (cliscope.Resolution, error) {

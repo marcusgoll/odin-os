@@ -46,6 +46,7 @@ type CreateTaskParams struct {
 	Title       string
 	RequestedBy string
 	Key         string
+	CompanionID int64
 }
 
 type CreateTaskResult struct {
@@ -186,7 +187,7 @@ func (service Service) CreateTaskOnce(ctx context.Context, params CreateTaskPara
 	}
 	return service.createManagedTaskOnce(ctx, params.Resolved, params.Title, createManagedTaskInput{
 		requestedBy:           requestedBy,
-		taskCompanionID:       0,
+		taskCompanionID:       params.CompanionID,
 		requestedSwarmTrigger: "",
 		key:                   strings.TrimSpace(params.Key),
 	})

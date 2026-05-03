@@ -363,9 +363,9 @@ func (service Service) Build(ctx context.Context, resolved scope.Resolution) (Vi
 		DelegationTruth: DelegationTruthLane{
 			Wiring:            WiringLive,
 			RuntimeStatus:     "not_proven",
-			OperatorSurface:   "none",
+			OperatorSurface:   "companion delegate",
 			CompanionWorkPath: "governed_work_items",
-			Note:              "companion run creates normal governed work items; no live delegation or subagent execution evidence is visible",
+			Note:              "companion delegate is the operator path; no live delegation evidence is present in this scope yet",
 		},
 		Observability: ObservabilityLane{
 			Wiring: WiringLive,
@@ -697,7 +697,7 @@ func (service Service) Build(ctx context.Context, resolved scope.Resolution) (Vi
 	view.DelegationTruth.CompanionSwarmCount = len(view.CompanionSwarms)
 	if len(view.CompanionSwarms) > 0 {
 		view.DelegationTruth.RuntimeStatus = "delegation_artifacts_visible"
-		view.DelegationTruth.OperatorSurface = "companion_swarm_projection"
+		view.DelegationTruth.OperatorSurface = "companion delegate"
 		view.DelegationTruth.Note = "delegation artifacts are visible through companion swarm projections"
 	}
 

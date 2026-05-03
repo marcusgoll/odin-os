@@ -1212,6 +1212,9 @@ func TestRunWorkDispatchCreatesRunAttemptFromAcceptedIntake(t *testing.T) {
 	if err := Run(context.Background(), root, []string{"project", "select", testProjectKey}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
 		t.Fatalf("Run(project select) error = %v", err)
 	}
+	if err := Run(context.Background(), root, []string{"transition", "set", "cutover", "confirm", "because", "delegation operator proof"}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+		t.Fatalf("Run(transition set) error = %v", err)
+	}
 	if err := Run(context.Background(), root, []string{"transition", "set", "cutover", "confirm", "because", "dispatch test"}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
 		t.Fatalf("Run(transition set) error = %v", err)
 	}
@@ -1794,6 +1797,81 @@ func TestCompanionRunCreatesOwnedTaskInDefaultScope(t *testing.T) {
 	}
 	if task.InitiativeID == nil {
 		t.Fatal("Task.InitiativeID = nil, want initiative ownership")
+	}
+}
+
+func TestCompanionDelegateCreatesAuditableChildWork(t *testing.T) {
+	configureLifecycleHarnessDriver(t)
+
+	root := testRepoRoot(t)
+	seedDelegationSkillFixture(t, root)
+	if err := Run(context.Background(), root, []string{"project", "select", testProjectKey}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+		t.Fatalf("Run(project select) error = %v", err)
+	}
+
+	var output bytes.Buffer
+	if err := Run(context.Background(), root, []string{
+		"companion",
+		"delegate",
+		"primary",
+		"--agent",
+		"portal-delivery-agent",
+		"--portal-track",
+		"admin",
+		"--surface",
+		"dashboard",
+		"--goal",
+		"audit delegated operator path",
+		"--json",
+	}, strings.NewReader(""), &output); err != nil {
+		t.Fatalf("Run(companion delegate) error = %v\nstdout:\n%s", err, output.String())
+	}
+	for _, want := range []string{
+		`"companion_key": "primary"`,
+		`"agent_key": "portal-delivery-agent"`,
+		`"parent_task"`,
+		`"parent_run"`,
+		`"child_delegations"`,
+		`"delegation_key": "ia-audit"`,
+		`"child_task_id":`,
+	} {
+		if !strings.Contains(output.String(), want) {
+			t.Fatalf("delegate output = %s, want %s", output.String(), want)
+		}
+	}
+
+	var logsOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"logs", "--json"}, strings.NewReader(""), &logsOutput); err != nil {
+		t.Fatalf("Run(logs --json) error = %v", err)
+	}
+	for _, want := range []string{
+		`"type": "delegation.created"`,
+		`"type": "delegation.child_attached"`,
+		`"type": "delegation.status_changed"`,
+		`"type": "delegation.artifact_recorded"`,
+		`"parent_task_id":`,
+		`"child_task_id":`,
+	} {
+		if !strings.Contains(logsOutput.String(), want) {
+			t.Fatalf("logs output = %s, want %s", logsOutput.String(), want)
+		}
+	}
+
+	var overviewOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"overview", "--json"}, strings.NewReader(""), &overviewOutput); err != nil {
+		t.Fatalf("Run(overview --json) error = %v", err)
+	}
+	for _, want := range []string{
+		`"companion_swarms"`,
+		`"delegation_count": 5`,
+		`"completed_delegation_count": 5`,
+		`"blocked_work_item_count": 0`,
+		`"runtime_status": "delegation_artifacts_visible"`,
+		`"operator_surface": "companion delegate"`,
+	} {
+		if !strings.Contains(overviewOutput.String(), want) {
+			t.Fatalf("overview output = %s, want %s", overviewOutput.String(), want)
+		}
 	}
 }
 
@@ -3213,4 +3291,71 @@ PY
 		t.Fatalf("Chmod(driver) error = %v", err)
 	}
 	t.Setenv("ODIN_CODEX_DRIVER", path)
+}
+
+func seedDelegationSkillFixture(t *testing.T, root string) {
+	t.Helper()
+
+	skillDir := filepath.Join(root, "registry", "skills")
+	if err := os.MkdirAll(skillDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(skill dir) error = %v", err)
+	}
+	stubPath := filepath.Join(root, "scripts", "skills", "registry-skill-stub.sh")
+	if err := os.MkdirAll(filepath.Dir(stubPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll(skill script dir) error = %v", err)
+	}
+	if err := os.WriteFile(stubPath, []byte(`#!/usr/bin/env bash
+cat >/dev/null
+printf '%s\n' '{"result":"ok"}'
+`), 0o755); err != nil {
+		t.Fatalf("WriteFile(skill stub) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(skillDir, "pixel-perfect-ui-ux-designer.md"), []byte(`---
+kind: skill
+key: pixel-perfect-ui-ux-designer
+title: Pixel Perfect UI/UX Designer
+summary: Test delegation skill.
+status: active
+version: "1.0.0"
+enabled: true
+tags: [design]
+owners: [odin-core]
+strictness: adaptive
+applies_to: [design]
+scopes: [project]
+permissions: [repo.read]
+handler_type: command
+handler_ref: scripts/skills/registry-skill-stub.sh
+timeout_seconds: 15
+input_schema:
+  type: object
+output_schema:
+  type: object
+---
+
+# Pixel Perfect UI/UX Designer
+
+## Purpose
+Test skill.
+
+## When to Use
+Delegation tests.
+
+## Inputs
+Prompt.
+
+## Procedure
+Read and respond.
+
+## Outputs
+Structured result.
+
+## Constraints
+No mutation.
+
+## Success Criteria
+Prompt includes skill content.
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile(skill fixture) error = %v", err)
+	}
 }

@@ -799,7 +799,7 @@ func ListCompanionSwarmViews(ctx context.Context, queryer Queryer, workspaceKey 
 		}
 
 		acc.view.DelegationCount++
-		if resultArtifactCount > 0 {
+		if resultArtifactCount > 0 || strings.EqualFold(delegationStatus, "completed") {
 			acc.view.CompletedDelegationCount++
 		}
 		if strings.EqualFold(childRunStatus, "running") {
@@ -1645,6 +1645,7 @@ func GetWorkspaceOverviewView(ctx context.Context, queryer Queryer, workspaceKey
 			 LEFT JOIN incidents i ON i.run_id = r.id AND i.status = 'open'
 			 LEFT JOIN context_packets cp ON cp.task_id = t.id AND cp.packet_scope = 'task_wake_packet' AND cp.status = 'active'
 			 WHERE t.workspace_id = w.id
+			   AND t.status NOT IN ('completed', 'cancelled', 'failed', 'dead_letter', 'timeout')
 			   AND (a.id IS NOT NULL OR i.id IS NOT NULL OR cp.id IS NOT NULL OR (t.status = 'blocked' AND t.blocked_reason <> ''))) AS blocked_work_item_count,
 			(SELECT COUNT(*)
 			 FROM follow_up_obligations fo
@@ -1727,6 +1728,7 @@ func ListInitiativePortfolioViews(ctx context.Context, queryer Queryer, workspac
 			 LEFT JOIN incidents inc ON inc.run_id = r.id AND inc.status = 'open'
 			 LEFT JOIN context_packets cp ON cp.task_id = t.id AND cp.packet_scope = 'task_wake_packet' AND cp.status = 'active'
 			 WHERE t.initiative_id = i.id
+			   AND t.status NOT IN ('completed', 'cancelled', 'failed', 'dead_letter', 'timeout')
 			   AND (a.id IS NOT NULL OR inc.id IS NOT NULL OR cp.id IS NOT NULL OR (t.status = 'blocked' AND t.blocked_reason <> ''))) AS blocked_work_item_count,
 			(SELECT COUNT(*)
 			 FROM follow_up_obligations fo
@@ -1807,6 +1809,7 @@ func ListCompanionAssignmentViews(ctx context.Context, queryer Queryer, workspac
 			 LEFT JOIN incidents inc ON inc.run_id = r.id AND inc.status = 'open'
 			 LEFT JOIN context_packets cp ON cp.task_id = t.id AND cp.packet_scope = 'task_wake_packet' AND cp.status = 'active'
 			 WHERE t.companion_id = c.id
+			   AND t.status NOT IN ('completed', 'cancelled', 'failed', 'dead_letter', 'timeout')
 			   AND (a.id IS NOT NULL OR inc.id IS NOT NULL OR cp.id IS NOT NULL OR (t.status = 'blocked' AND t.blocked_reason <> ''))) AS blocked_work_item_count,
 			(SELECT COUNT(*)
 			 FROM follow_up_obligations fo

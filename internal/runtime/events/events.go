@@ -26,6 +26,7 @@ const (
 	StreamLearningEvaluation StreamType = "learning_evaluation"
 	StreamLearningPromotion  StreamType = "learning_promotion"
 	StreamSkill              StreamType = "skill"
+	StreamDelegation         StreamType = "delegation"
 	StreamCapability         StreamType = "capability"
 	StreamFollowUp           StreamType = "follow_up"
 )
@@ -92,6 +93,10 @@ const (
 	EventLearningPromotionApplied           Type = "learning.promotion_applied"
 	EventLearningPromotionRolledBack        Type = "learning.promotion_rolled_back"
 	EventSkillLifecycleRecorded             Type = "skill.lifecycle_recorded"
+	EventDelegationCreated                  Type = "delegation.created"
+	EventDelegationStatusChanged            Type = "delegation.status_changed"
+	EventDelegationChildAttached            Type = "delegation.child_attached"
+	EventDelegationArtifactRecorded         Type = "delegation.artifact_recorded"
 	EventCapabilitySnapshotPublished        Type = "capability.snapshot_published"
 	EventCapabilitySnapshotRejected         Type = "capability.snapshot_rejected"
 	EventFollowUpMaterialized               Type = "follow_up.materialized"
@@ -472,6 +477,50 @@ type SkillLifecycleRecordedPayload struct {
 	DurationMS       int64    `json:"duration_ms"`
 	ErrorCode        string   `json:"error_code,omitempty"`
 	ErrorText        string   `json:"error_text,omitempty"`
+}
+
+type DelegationCreatedPayload struct {
+	DelegationID    int64  `json:"delegation_id"`
+	ParentTaskID    int64  `json:"parent_task_id"`
+	ParentRunID     *int64 `json:"parent_run_id,omitempty"`
+	DelegationKey   string `json:"delegation_key"`
+	Role            string `json:"role"`
+	ActionClass     string `json:"action_class"`
+	ActionKey       string `json:"action_key"`
+	MutationMode    string `json:"mutation_mode"`
+	Status          string `json:"status"`
+	ConvergenceMode string `json:"convergence_mode"`
+	ArtifactTarget  string `json:"artifact_target"`
+	Executor        string `json:"executor"`
+}
+
+type DelegationStatusChangedPayload struct {
+	DelegationID   int64  `json:"delegation_id"`
+	ParentTaskID   int64  `json:"parent_task_id"`
+	ParentRunID    *int64 `json:"parent_run_id,omitempty"`
+	ChildTaskID    *int64 `json:"child_task_id,omitempty"`
+	ChildRunID     *int64 `json:"child_run_id,omitempty"`
+	PreviousStatus string `json:"previous_status"`
+	Status         string `json:"status"`
+}
+
+type DelegationChildAttachedPayload struct {
+	DelegationID int64  `json:"delegation_id"`
+	ParentTaskID int64  `json:"parent_task_id"`
+	ParentRunID  *int64 `json:"parent_run_id,omitempty"`
+	ChildTaskID  *int64 `json:"child_task_id,omitempty"`
+	ChildRunID   *int64 `json:"child_run_id,omitempty"`
+}
+
+type DelegationArtifactRecordedPayload struct {
+	DelegationID int64  `json:"delegation_id"`
+	ParentTaskID int64  `json:"parent_task_id"`
+	ParentRunID  *int64 `json:"parent_run_id,omitempty"`
+	ChildTaskID  *int64 `json:"child_task_id,omitempty"`
+	ChildRunID   *int64 `json:"child_run_id,omitempty"`
+	ArtifactID   int64  `json:"artifact_id"`
+	ArtifactType string `json:"artifact_type"`
+	Summary      string `json:"summary"`
 }
 
 type CapabilitySnapshotPublishedPayload struct {

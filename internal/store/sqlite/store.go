@@ -5025,7 +5025,27 @@ func (store *Store) createDelegationTx(ctx context.Context, tx *sql.Tx, params C
 	if err != nil {
 		return Delegation{}, err
 	}
-	return store.getDelegationTx(ctx, tx, delegationID)
+	delegation, err := store.getDelegationTx(ctx, tx, delegationID)
+	if err != nil {
+		return Delegation{}, err
+	}
+	if err := appendDelegationEventTx(ctx, tx, delegation, runtimeevents.EventDelegationCreated, runtimeevents.DelegationCreatedPayload{
+		DelegationID:    delegation.ID,
+		ParentTaskID:    delegation.ParentTaskID,
+		ParentRunID:     delegation.ParentRunID,
+		DelegationKey:   delegation.DelegationKey,
+		Role:            delegation.Role,
+		ActionClass:     delegation.ActionClass,
+		ActionKey:       delegation.ActionKey,
+		MutationMode:    delegation.MutationMode,
+		Status:          delegation.Status,
+		ConvergenceMode: delegation.ConvergenceMode,
+		ArtifactTarget:  delegation.ArtifactTarget,
+		Executor:        delegation.Executor,
+	}, now); err != nil {
+		return Delegation{}, err
+	}
+	return delegation, nil
 }
 
 func (store *Store) GetDelegation(ctx context.Context, delegationID int64) (Delegation, error) {
@@ -5108,6 +5128,10 @@ func (store *Store) UpdateDelegationStatus(ctx context.Context, params UpdateDel
 	var delegation Delegation
 
 	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		previous, err := store.getDelegationTx(ctx, tx, params.DelegationID)
+		if err != nil {
+			return err
+		}
 		if _, err := tx.ExecContext(ctx, `
 			UPDATE delegations
 			SET status = ?, updated_at = ?
@@ -5121,7 +5145,15 @@ func (store *Store) UpdateDelegationStatus(ctx context.Context, params UpdateDel
 			return err
 		}
 		delegation = record
-		return nil
+		return appendDelegationEventTx(ctx, tx, record, runtimeevents.EventDelegationStatusChanged, runtimeevents.DelegationStatusChangedPayload{
+			DelegationID:   record.ID,
+			ParentTaskID:   record.ParentTaskID,
+			ParentRunID:    record.ParentRunID,
+			ChildTaskID:    record.ChildTaskID,
+			ChildRunID:     record.ChildRunID,
+			PreviousStatus: previous.Status,
+			Status:         record.Status,
+		}, now)
 	})
 
 	return delegation, err
@@ -5145,7 +5177,13 @@ func (store *Store) AttachDelegationChildTask(ctx context.Context, params Attach
 			return err
 		}
 		delegation = record
-		return nil
+		return appendDelegationEventTx(ctx, tx, record, runtimeevents.EventDelegationChildAttached, runtimeevents.DelegationChildAttachedPayload{
+			DelegationID: record.ID,
+			ParentTaskID: record.ParentTaskID,
+			ParentRunID:  record.ParentRunID,
+			ChildTaskID:  record.ChildTaskID,
+			ChildRunID:   record.ChildRunID,
+		}, now)
 	})
 
 	return delegation, err
@@ -5219,7 +5257,20 @@ func (store *Store) CreateDelegationArtifact(ctx context.Context, params CreateD
 			return err
 		}
 		artifact = record
-		return nil
+		delegation, err := store.getDelegationTx(ctx, tx, params.DelegationID)
+		if err != nil {
+			return err
+		}
+		return appendDelegationEventTx(ctx, tx, delegation, runtimeevents.EventDelegationArtifactRecorded, runtimeevents.DelegationArtifactRecordedPayload{
+			DelegationID: delegation.ID,
+			ParentTaskID: delegation.ParentTaskID,
+			ParentRunID:  delegation.ParentRunID,
+			ChildTaskID:  delegation.ChildTaskID,
+			ChildRunID:   delegation.ChildRunID,
+			ArtifactID:   artifact.ID,
+			ArtifactType: artifact.ArtifactType,
+			Summary:      artifact.Summary,
+		}, now)
 	})
 
 	return artifact, err
@@ -7439,6 +7490,20 @@ func appendEventTx(ctx context.Context, tx *sql.Tx, params eventInsert) error {
 		formatTime(params.OccurredAt),
 	)
 	return err
+}
+
+func appendDelegationEventTx(ctx context.Context, tx *sql.Tx, delegation Delegation, eventType runtimeevents.Type, payload any, occurredAt time.Time) error {
+	return appendEventTx(ctx, tx, eventInsert{
+		StreamType: runtimeevents.StreamDelegation,
+		StreamID:   delegation.ID,
+		EventType:  eventType,
+		Scope:      delegation.Scope,
+		ProjectID:  &delegation.ProjectID,
+		TaskID:     &delegation.ParentTaskID,
+		RunID:      delegation.ParentRunID,
+		Payload:    payload,
+		OccurredAt: occurredAt,
+	})
 }
 
 func normalizeCreateContextPacketParams(params CreateContextPacketParams) CreateContextPacketParams {

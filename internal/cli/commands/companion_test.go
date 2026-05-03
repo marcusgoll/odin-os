@@ -119,11 +119,67 @@ func TestParseCompanionRunJSON(t *testing.T) {
 	}
 }
 
+func TestParseCompanionDelegateJSON(t *testing.T) {
+	t.Parallel()
+
+	command, err := ParseCompanion([]string{
+		"delegate",
+		"primary",
+		"--agent",
+		"portal-delivery-agent",
+		"--portal-track",
+		"admin",
+		"--surface",
+		"dashboard",
+		"--goal",
+		"audit delegated work",
+		"--json",
+	})
+	if err != nil {
+		t.Fatalf("ParseCompanion() error = %v", err)
+	}
+	if command.Name != "delegate" {
+		t.Fatalf("Name = %q, want delegate", command.Name)
+	}
+	if command.Key != "primary" {
+		t.Fatalf("Key = %q, want primary", command.Key)
+	}
+	if command.AgentKey != "portal-delivery-agent" {
+		t.Fatalf("AgentKey = %q, want portal-delivery-agent", command.AgentKey)
+	}
+	if command.PortalTrack != "admin" {
+		t.Fatalf("PortalTrack = %q, want admin", command.PortalTrack)
+	}
+	if command.Surface != "dashboard" {
+		t.Fatalf("Surface = %q, want dashboard", command.Surface)
+	}
+	if command.Goal != "audit delegated work" {
+		t.Fatalf("Goal = %q, want audit delegated work", command.Goal)
+	}
+	if !command.JSON {
+		t.Fatal("JSON = false, want true")
+	}
+}
+
 func TestParseCompanionRunRejectsMissingObjective(t *testing.T) {
 	t.Parallel()
 
 	if _, err := ParseCompanion([]string{"run", "finance"}); err == nil {
 		t.Fatal("ParseCompanion() error = nil, want missing objective error")
+	}
+}
+
+func TestParseCompanionDelegateRejectsMissingInputs(t *testing.T) {
+	t.Parallel()
+
+	if _, err := ParseCompanion([]string{"delegate", "primary", "--agent", "portal-delivery-agent", "--surface", "dashboard"}); err == nil {
+		t.Fatal("ParseCompanion() error = nil, want missing portal-track error")
+	}
+	if _, err := ParseCompanion([]string{"delegate", "primary", "--agent", "portal-delivery-agent", "--portal-track", "admin"}); err == nil {
+		t.Fatal("ParseCompanion() error = nil, want missing surface error")
+	}
+	if _, err := ParseCompanion([]string{"delegate", "primary", "--portal-track", "admin", "--surface", "dashboard"}); err == nil {
+		t.Fatal("ParseCompanion() error = nil, want missing agent error")
 	}
 }
 

@@ -28,6 +28,7 @@ type RunInput struct {
 	ResolvedScope scope.Resolution
 	AgentKey      string
 	RequestedBy   string
+	CompanionID   int64
 	Inputs        map[string]string
 }
 
@@ -71,6 +72,7 @@ func (service Service) RunAgent(ctx context.Context, input RunInput) (sqlite.Tas
 		Resolved:    input.ResolvedScope,
 		Title:       parentTaskTitle(input.AgentKey, input.Inputs),
 		RequestedBy: requestedBy,
+		CompanionID: input.CompanionID,
 	})
 	if err != nil {
 		return sqlite.Task{}, nil, RunResult{}, fmt.Errorf("create parent task: %w", err)
@@ -219,6 +221,7 @@ func (service Service) runChildDelegation(ctx context.Context, parentTask sqlite
 		Resolved:    input.ResolvedScope,
 		Title:       childTaskTitle(spec, input.Inputs),
 		RequestedBy: "agent:" + input.AgentKey,
+		CompanionID: input.CompanionID,
 	})
 	if err != nil {
 		return sqlite.Delegation{}, err
