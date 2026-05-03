@@ -1035,6 +1035,171 @@ func TestRunIntakeApprovalResolutionPromotesOrDeniesRiskyIntake(t *testing.T) {
 	}
 }
 
+func TestRunUnifiedReviewQueueListsShowsAndRoutesExistingReviewObjects(t *testing.T) {
+	configureLifecycleHarnessDriver(t)
+	t.Setenv("HOME", t.TempDir())
+
+	root := testRepoRoot(t)
+	payloadPath := filepath.Join(t.TempDir(), "payload.json")
+	if err := os.WriteFile(payloadPath, []byte(`{"body":"unified review proof"}`), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	seedReviewableSkill(t, root, "review-queue-skill", "review queue skill ready", `{"title":"Queue skill artifact","next_step":"review"}`)
+
+	run := func(args ...string) string {
+		t.Helper()
+		var output bytes.Buffer
+		if err := Run(context.Background(), root, args, strings.NewReader(""), &output); err != nil {
+			t.Fatalf("Run(%v) error = %v\noutput=%s", args, err, output.String())
+		}
+		return output.String()
+	}
+	createRaw := func(title, dedup string) {
+		t.Helper()
+		run(
+			"intake", "raw", "create",
+			"--source", "operator",
+			"--project", testProjectKey,
+			"--title", title,
+			"--type", "request",
+			"--dedup-key", dedup,
+			"--requested-by", "codex",
+			"--payload-file", payloadPath,
+			"--json",
+		)
+	}
+
+	createRaw("Build unified review queue proof", "unified-review-clear")
+	createRaw("Delete production data through unified review", "unified-review-risky")
+	run("intake", "process", "--id", "intake-1", "--json")
+	run("intake", "process", "--id", "intake-2", "--json")
+	run("intake", "review", "accept", "intake-2", "--json")
+
+	run("project", "select", "odin-core")
+	run("transition", "set", "cutover", "confirm", "because", "unified review approval proof")
+	run("companion", "run", "primary", "--objective", "Prepare unified review task-backed approval", "--trigger", "test", "--json")
+	blocked := run("work", "dispatch", "--task", "1", "--json")
+	if !strings.Contains(blocked, `"reason": "approval_required"`) {
+		t.Fatalf("dispatch output = %s, want task-backed approval", blocked)
+	}
+
+	run("project", "select", testProjectKey)
+	invoked := run("skills", "invoke", "review-queue-skill", "--json")
+	if !strings.Contains(invoked, `"runtime_effect": "durable_reviewable_artifact"`) {
+		t.Fatalf("skills invoke output = %s, want reviewable artifact", invoked)
+	}
+
+	list := run("review", "list", "--json")
+	for _, want := range []string{
+		`"queue_id": "intake-review:1"`,
+		`"source_type": "intake_review"`,
+		`"queue_id": "intake-approval:2"`,
+		`"source_type": "intake_approval"`,
+		`"queue_id": "approval:1"`,
+		`"source_type": "task_approval"`,
+		`"queue_id": "skill-artifact:1"`,
+		`"source_type": "skill_artifact"`,
+		`"allowed_actions": [`,
+	} {
+		if !strings.Contains(list, want) {
+			t.Fatalf("review list output = %s, want %s", list, want)
+		}
+	}
+
+	show := run("review", "show", "intake-review:1", "--json")
+	if !strings.Contains(show, `"source_type": "intake_review"`) || !strings.Contains(show, `"review_state": "review_required"`) {
+		t.Fatalf("review show output = %s, want intake review detail", show)
+	}
+
+	accepted := run("review", "act", "intake-review:1", "accept", "--json")
+	if !strings.Contains(accepted, `"decision": "accepted"`) || !strings.Contains(accepted, `"work_created": true`) {
+		t.Fatalf("review act accept output = %s, want accepted intake work", accepted)
+	}
+	deniedIntake := run("review", "act", "intake-approval:2", "deny", "--json")
+	if !strings.Contains(deniedIntake, `"decision": "denied"`) || !strings.Contains(deniedIntake, `"work_created": false`) {
+		t.Fatalf("review act intake deny output = %s, want denied intake approval", deniedIntake)
+	}
+	deniedApproval := run("review", "act", "approval:1", "deny", "--json")
+	if !strings.Contains(deniedApproval, `"status": "denied"`) || !strings.Contains(deniedApproval, `"result": "denied"`) {
+		t.Fatalf("review act approval deny output = %s, want denied task approval", deniedApproval)
+	}
+	archivedArtifact := run("review", "act", "skill-artifact:1", "archive", "--json")
+	if !strings.Contains(archivedArtifact, `"decision": "archived"`) || !strings.Contains(archivedArtifact, `"work_created": false`) {
+		t.Fatalf("review act artifact archive output = %s, want archived skill artifact", archivedArtifact)
+	}
+
+	logsOutput := run("logs", "--json")
+	for _, want := range []string{
+		`"type": "intake.review_accepted"`,
+		`"type": "intake.approval_denied"`,
+		`"type": "skill.artifact_reviewed"`,
+	} {
+		if !strings.Contains(logsOutput, want) {
+			t.Fatalf("logs output = %s, want %s", logsOutput, want)
+		}
+	}
+	run("project", "select", "odin-core")
+	approvalLogsOutput := run("logs", "--json")
+	if !strings.Contains(approvalLogsOutput, `"type": "approval.resolved"`) {
+		t.Fatalf("approval logs output = %s, want task approval resolution event", approvalLogsOutput)
+	}
+
+	run("project", "select", testProjectKey)
+	overview := run("overview", "--json")
+	for _, want := range []string{
+		`"open_work_item_count": 1`,
+		`"archived_artifact_count": 1`,
+	} {
+		if !strings.Contains(overview, want) {
+			t.Fatalf("overview output = %s, want %s", overview, want)
+		}
+	}
+}
+
+func TestRunLogsIncludeProjectScopedIntakeEventsForOdinCoreScope(t *testing.T) {
+	t.Parallel()
+
+	root := testRepoRoot(t)
+	payloadPath := filepath.Join(t.TempDir(), "payload.json")
+	if err := os.WriteFile(payloadPath, []byte(`{"body":"odin core scoped intake log proof"}`), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	run := func(args ...string) string {
+		t.Helper()
+		var output bytes.Buffer
+		if err := Run(context.Background(), root, args, strings.NewReader(""), &output); err != nil {
+			t.Fatalf("Run(%v) error = %v\noutput=%s", args, err, output.String())
+		}
+		return output.String()
+	}
+
+	run("project", "select", "odin-core")
+	run(
+		"intake", "raw", "create",
+		"--source", "operator",
+		"--project", "odin-core",
+		"--title", "Build Odin core scoped intake log proof",
+		"--type", "request",
+		"--dedup-key", "odin-core-intake-log-proof",
+		"--requested-by", "codex",
+		"--payload-file", payloadPath,
+		"--json",
+	)
+	run("intake", "process", "--id", "intake-1", "--json")
+	run("intake", "review", "accept", "intake-1", "--json")
+
+	logsOutput := run("logs", "--json")
+	for _, want := range []string{
+		`"type": "intake.review_accepted"`,
+		`"scope": "project"`,
+		`"project_id":`,
+	} {
+		if !strings.Contains(logsOutput, want) {
+			t.Fatalf("logs output = %s, want %s", logsOutput, want)
+		}
+	}
+}
+
 func TestRunIntakeLifecycleIsVisibleInProjectLogsAndOverview(t *testing.T) {
 	t.Parallel()
 

@@ -67,7 +67,7 @@ import (
 
 var errRuntimeNotReady = errors.New("runtime not ready")
 
-const rootUsageBanner = "Usage: odin <command> [args]\n\nCommands: help repl overview tui doctor healthcheck serve backup restore verify-backup status legacy project workspace work scope jobs runs approvals intake agenda logs task initiative companion profile followup trigger transition skills e2e"
+const rootUsageBanner = "Usage: odin <command> [args]\n\nCommands: help repl overview tui doctor healthcheck serve backup restore verify-backup status legacy project workspace work scope jobs runs approvals review intake agenda logs task initiative companion profile followup trigger transition skills e2e"
 
 var (
 	serveTaskLoopInterval     = 1 * time.Second
@@ -274,6 +274,8 @@ func Run(ctx context.Context, root string, args []string, stdin io.Reader, stdou
 		return runRuns(ctx, app, args[1:], stdout)
 	case "approvals":
 		return runApprovals(ctx, app, args[1:], stdout)
+	case "review":
+		return runReview(ctx, app, args[1:], stdout)
 	case "intake":
 		return runIntake(ctx, app, stdin, args[1:], stdout)
 	case "agenda":
@@ -3480,7 +3482,7 @@ func matchesEventScope(eventScope string, resolved scope.Resolution) bool {
 	case scope.ScopeProject:
 		return eventScope == string(scope.ScopeProject)
 	case scope.ScopeOdinCore:
-		return eventScope == string(scope.ScopeOdinCore)
+		return eventScope == string(scope.ScopeOdinCore) || eventScope == string(scope.ScopeProject)
 	case scope.ScopeNewProject:
 		return eventScope == string(scope.ScopeNewProject)
 	default:
