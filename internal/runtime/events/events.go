@@ -93,6 +93,7 @@ const (
 	EventLearningPromotionApplied           Type = "learning.promotion_applied"
 	EventLearningPromotionRolledBack        Type = "learning.promotion_rolled_back"
 	EventSkillLifecycleRecorded             Type = "skill.lifecycle_recorded"
+	EventSkillArtifactRecorded              Type = "skill.artifact_recorded"
 	EventDelegationCreated                  Type = "delegation.created"
 	EventDelegationCreateReused             Type = "delegation.create_reused"
 	EventDelegationStatusChanged            Type = "delegation.status_changed"
@@ -480,6 +481,18 @@ type SkillLifecycleRecordedPayload struct {
 	DurationMS       int64    `json:"duration_ms"`
 	ErrorCode        string   `json:"error_code,omitempty"`
 	ErrorText        string   `json:"error_text,omitempty"`
+}
+
+type SkillArtifactRecordedPayload struct {
+	ArtifactID       int64    `json:"artifact_id"`
+	SkillKey         string   `json:"skill_key"`
+	Status           string   `json:"status"`
+	ArtifactType     string   `json:"artifact_type"`
+	Summary          string   `json:"summary,omitempty"`
+	ExecutionProfile string   `json:"execution_profile,omitempty"`
+	RuntimeEffect    string   `json:"runtime_effect,omitempty"`
+	HandlerRef       string   `json:"handler_ref,omitempty"`
+	Permissions      []string `json:"permissions,omitempty"`
 }
 
 type DelegationCreatedPayload struct {

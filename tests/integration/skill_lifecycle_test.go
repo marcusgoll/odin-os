@@ -168,7 +168,7 @@ printf '%s\n' '{"status":"ok","summary":"echo complete","output":{"message":"hel
 
 	var skillEvents []runtimeevents.Record
 	for _, event := range events {
-		if event.StreamType == runtimeevents.StreamSkill {
+		if event.StreamType == runtimeevents.StreamSkill && event.Type == runtimeevents.EventSkillLifecycleRecorded {
 			skillEvents = append(skillEvents, event)
 		}
 	}

@@ -125,12 +125,14 @@ type CapabilityCatalogLane struct {
 }
 
 type SkillActivityLane struct {
-	Wiring                 Wiring                 `json:"wiring"`
-	InvokeSuccessCount     int                    `json:"invoke_success_count"`
-	InvokeFailureCount     int                    `json:"invoke_failure_count"`
-	StubResultCount        int                    `json:"stub_result_count"`
-	CommandOutputOnlyCount int                    `json:"command_output_only_count"`
-	Recent                 []SkillActivitySummary `json:"recent"`
+	Wiring                         Wiring                 `json:"wiring"`
+	InvokeSuccessCount             int                    `json:"invoke_success_count"`
+	InvokeFailureCount             int                    `json:"invoke_failure_count"`
+	StubResultCount                int                    `json:"stub_result_count"`
+	CommandOutputOnlyCount         int                    `json:"command_output_only_count"`
+	DurableReviewableArtifactCount int                    `json:"durable_reviewable_artifact_count"`
+	ReviewRequiredArtifactCount    int                    `json:"review_required_artifact_count"`
+	Recent                         []SkillActivitySummary `json:"recent"`
 }
 
 type SkillActivitySummary struct {
@@ -961,13 +963,39 @@ func (service Service) skillActivity(ctx context.Context, resolved scope.Resolut
 	}
 
 	for _, record := range records {
-		if record.StreamType != runtimeevents.StreamSkill || record.Type != runtimeevents.EventSkillLifecycleRecorded {
+		if record.StreamType != runtimeevents.StreamSkill {
 			continue
 		}
 		if !matchesSkillEventScope(record, resolved, projectID) {
 			continue
 		}
 
+		if record.Type == runtimeevents.EventSkillArtifactRecorded {
+			payload, err := runtimeevents.DecodePayload[runtimeevents.SkillArtifactRecordedPayload](record.Payload)
+			if err != nil {
+				return SkillActivityLane{}, err
+			}
+			lane.DurableReviewableArtifactCount++
+			if payload.Status == "review_required" {
+				lane.ReviewRequiredArtifactCount++
+			}
+			lane.Recent = append(lane.Recent, SkillActivitySummary{
+				EventID:          record.ID,
+				SkillKey:         payload.SkillKey,
+				Scope:            record.Scope,
+				Operation:        "artifact_recorded",
+				Outcome:          payload.Status,
+				ExecutionProfile: payload.ExecutionProfile,
+				RuntimeEffect:    payload.RuntimeEffect,
+				HandlerRef:       payload.HandlerRef,
+				Permissions:      append([]string(nil), payload.Permissions...),
+				OccurredAt:       record.OccurredAt.UTC().Format(time.RFC3339),
+			})
+			continue
+		}
+		if record.Type != runtimeevents.EventSkillLifecycleRecorded {
+			continue
+		}
 		payload, err := runtimeevents.DecodePayload[runtimeevents.SkillLifecycleRecordedPayload](record.Payload)
 		if err != nil {
 			return SkillActivityLane{}, err

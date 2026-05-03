@@ -2992,11 +2992,14 @@ printf '%s\n' '{"status":"ok","summary":"audit complete","output":{"message":"tr
 	}
 	for _, want := range []string{
 		`"type": "skill.lifecycle_recorded"`,
+		`"type": "skill.artifact_recorded"`,
 		`"skill_key": "audit-skill"`,
 		`"handler_ref": "scripts/skills/audit-skill.sh"`,
 		`"execution_profile": "restricted_command_v1"`,
 		`"permissions": [`,
-		`"runtime_effect": "command_output_only"`,
+		`"runtime_effect": "durable_reviewable_artifact"`,
+		`"artifact_type": "skill_output"`,
+		`"status": "review_required"`,
 		`"skill_key": "missing-skill"`,
 		`"outcome": "failure"`,
 		`"error_code": "not_found"`,
@@ -3015,7 +3018,8 @@ printf '%s\n' '{"status":"ok","summary":"audit complete","output":{"message":"tr
 		`"skill_activity"`,
 		`"invoke_success_count": 1`,
 		`"invoke_failure_count": 1`,
-		`"command_output_only_count": 1`,
+		`"durable_reviewable_artifact_count": 1`,
+		`"review_required_artifact_count": 1`,
 		`"delegation_truth"`,
 		`"runtime_status": "not_proven"`,
 		`"companion_work_path": "governed_work_items"`,
@@ -3023,6 +3027,38 @@ printf '%s\n' '{"status":"ok","summary":"audit complete","output":{"message":"tr
 		if !strings.Contains(overviewOutput.String(), want) {
 			t.Fatalf("overview output = %s, want %s", overviewOutput.String(), want)
 		}
+	}
+
+	var artifactsOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"skills", "artifacts", "--json"}, strings.NewReader(""), &artifactsOutput); err != nil {
+		t.Fatalf("Run(skills artifacts --json) error = %v", err)
+	}
+	for _, want := range []string{
+		`"skill_key": "audit-skill"`,
+		`"artifact_type": "skill_output"`,
+		`"status": "review_required"`,
+		`"summary": "audit complete"`,
+		`"output_json": "{\"message\":\"tracked\"}"`,
+	} {
+		if !strings.Contains(artifactsOutput.String(), want) {
+			t.Fatalf("skills artifacts output = %s, want %s", artifactsOutput.String(), want)
+		}
+	}
+
+	var artifactShowOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"skills", "artifact", "show", "1", "--json"}, strings.NewReader(""), &artifactShowOutput); err != nil {
+		t.Fatalf("Run(skills artifact show) error = %v", err)
+	}
+	if !strings.Contains(artifactShowOutput.String(), `"skill_key": "audit-skill"`) || !strings.Contains(artifactShowOutput.String(), `"status": "review_required"`) {
+		t.Fatalf("skills artifact show output = %s, want reviewable audit artifact", artifactShowOutput.String())
+	}
+
+	var jobsOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"jobs", "--json"}, strings.NewReader(""), &jobsOutput); err != nil {
+		t.Fatalf("Run(jobs --json) error = %v", err)
+	}
+	if strings.Contains(jobsOutput.String(), `"jobs": [`) && strings.Contains(jobsOutput.String(), `"id"`) {
+		t.Fatalf("jobs output = %s, skill artifact must not create jobs", jobsOutput.String())
 	}
 }
 

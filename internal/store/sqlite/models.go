@@ -771,6 +771,43 @@ type RecordSkillLifecycleEventParams struct {
 	ErrorText        string
 }
 
+type SkillArtifact struct {
+	ID               int64
+	SkillKey         string
+	Scope            string
+	ProjectID        *int64
+	Status           string
+	ArtifactType     string
+	Summary          string
+	OutputJSON       string
+	RawOutput        string
+	HandlerRef       string
+	ExecutionProfile string
+	PermissionsJSON  string
+	CreatedAt        time.Time
+	UpdatedAt        time.Time
+}
+
+type CreateSkillArtifactParams struct {
+	SkillKey         string
+	Scope            string
+	ProjectID        *int64
+	Status           string
+	ArtifactType     string
+	Summary          string
+	OutputJSON       string
+	RawOutput        string
+	HandlerRef       string
+	ExecutionProfile string
+	PermissionsJSON  string
+}
+
+type ListSkillArtifactsParams struct {
+	SkillKey string
+	Status   string
+	Limit    int
+}
+
 type ContextPacket struct {
 	ID                 int64
 	TaskID             *int64

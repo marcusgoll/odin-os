@@ -24,10 +24,11 @@ var (
 )
 
 type Service struct {
-	RepoRoot             string
-	Observer             Observer
-	TransitionAuthorizer TransitionAuthorizer
-	SnapshotLoader       func() (registry.Snapshot, error)
+	RepoRoot               string
+	Observer               Observer
+	TransitionAuthorizer   TransitionAuthorizer
+	ReviewArtifactRecorder ReviewArtifactRecorder
+	SnapshotLoader         func() (registry.Snapshot, error)
 }
 
 type TransitionAuthorizer interface {

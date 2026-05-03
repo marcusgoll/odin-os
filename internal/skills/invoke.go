@@ -164,6 +164,27 @@ func (service Service) Invoke(ctx context.Context, request InvokeRequest) (_ Inv
 	}
 	response.Permissions = cloneStrings(skill.Permissions)
 	runtimeEffect = classifyInvokeRuntimeEffect(skill.HandlerRef, response)
+	if shouldRecordReviewableArtifact(runtimeEffect, response) && service.ReviewArtifactRecorder != nil {
+		artifact, err := service.ReviewArtifactRecorder.RecordReviewArtifact(ctx, RecordReviewArtifactInput{
+			SkillKey:         response.SkillKey,
+			Scope:            eventScope,
+			ProjectID:        projectID,
+			Summary:          response.Summary,
+			Output:           cloneAnyMap(response.Output),
+			RawOutput:        response.RawOutput,
+			HandlerRef:       skill.HandlerRef,
+			ExecutionProfile: executionProfile,
+			Permissions:      cloneStrings(skill.Permissions),
+		})
+		if err != nil {
+			return InvokeResponse{}, fmt.Errorf("record skill review artifact: %w", err)
+		}
+		runtimeEffect = "durable_reviewable_artifact"
+		response.RuntimeEffect = runtimeEffect
+		response.ReviewArtifact = &artifact
+	} else {
+		response.RuntimeEffect = runtimeEffect
+	}
 
 	return response, nil
 }
@@ -177,6 +198,13 @@ func classifyInvokeRuntimeEffect(handlerRef string, response InvokeResponse) str
 	default:
 		return "command_output_only"
 	}
+}
+
+func shouldRecordReviewableArtifact(runtimeEffect string, response InvokeResponse) bool {
+	if runtimeEffect == "stub_result" {
+		return false
+	}
+	return strings.TrimSpace(response.Summary) != "" || len(response.Output) != 0 || strings.TrimSpace(response.RawOutput) != ""
 }
 
 func (service Service) resolveHandlerPath(handlerRef string) (string, error) {

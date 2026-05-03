@@ -2,9 +2,11 @@ package lifecycle
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 
 	"odin-os/internal/app/bootstrap"
 	"odin-os/internal/cli/commands"
@@ -22,7 +24,7 @@ func runSkills(ctx context.Context, app bootstrap.App, args []string, stdout io.
 		return err
 	}
 	if len(remaining) == 0 {
-		return fmt.Errorf("usage: odin skills [list|get|create|update|delete|invoke] ... [--json]")
+		return fmt.Errorf("usage: odin skills [list|get|create|update|delete|invoke|artifacts|artifact] ... [--json]")
 	}
 
 	logger := logs.Logger{Writer: os.Stderr}
@@ -77,6 +79,9 @@ func runSkills(ctx context.Context, app bootstrap.App, args []string, stdout io.
 		RepoRoot:             app.RepoRoot,
 		Observer:             observers,
 		TransitionAuthorizer: projects.Service{Store: app.Store},
+	}
+	if app.Store != nil {
+		service.ReviewArtifactRecorder = skillReviewArtifactRecorder{Store: app.Store}
 	}
 
 	state, err := loadCLIState(app)
@@ -170,6 +175,51 @@ func runSkills(ctx context.Context, app bootstrap.App, args []string, stdout io.
 		}
 		_, err := fmt.Fprintf(stdout, "deleted=%s\n", remaining[1])
 		return err
+	case "artifacts":
+		if len(remaining) != 1 {
+			return fmt.Errorf("usage: odin skills artifacts [--json]")
+		}
+		if app.Store == nil {
+			return fmt.Errorf("skill artifacts require runtime store")
+		}
+		artifacts, err := app.Store.ListSkillArtifacts(ctx, sqlite.ListSkillArtifactsParams{})
+		if err != nil {
+			return err
+		}
+		views := make([]skills.ReviewArtifact, 0, len(artifacts))
+		for _, artifact := range artifacts {
+			views = append(views, renderSkillReviewArtifact(artifact))
+		}
+		if jsonOutput {
+			return commands.WriteJSON(stdout, map[string]any{"artifacts": views})
+		}
+		for _, artifact := range views {
+			if _, err := fmt.Fprintf(stdout, "artifact id=%d skill=%s status=%s type=%s summary=%s\n", artifact.ID, artifact.SkillKey, artifact.Status, artifact.ArtifactType, artifact.Summary); err != nil {
+				return err
+			}
+		}
+		return nil
+	case "artifact":
+		if len(remaining) != 3 || remaining[1] != "show" {
+			return fmt.Errorf("usage: odin skills artifact show <id> [--json]")
+		}
+		if app.Store == nil {
+			return fmt.Errorf("skill artifact show requires runtime store")
+		}
+		artifactID, err := strconv.ParseInt(remaining[2], 10, 64)
+		if err != nil || artifactID <= 0 {
+			return fmt.Errorf("skill artifact id must be a positive integer")
+		}
+		artifact, err := app.Store.GetSkillArtifact(ctx, artifactID)
+		if err != nil {
+			return err
+		}
+		view := renderSkillReviewArtifact(artifact)
+		if jsonOutput {
+			return commands.WriteJSON(stdout, view)
+		}
+		_, err = fmt.Fprintf(stdout, "artifact id=%d skill=%s status=%s type=%s summary=%s\n", view.ID, view.SkillKey, view.Status, view.ArtifactType, view.Summary)
+		return err
 	case "invoke":
 		if len(remaining) < 2 {
 			return fmt.Errorf("usage: odin skills invoke <key> [--input <json>] [--json]")
@@ -215,6 +265,68 @@ func runSkills(ctx context.Context, app bootstrap.App, args []string, stdout io.
 		return err
 	default:
 		return fmt.Errorf("unknown skills subcommand: %s", remaining[0])
+	}
+}
+
+type skillReviewArtifactRecorder struct {
+	Store *sqlite.Store
+}
+
+func (recorder skillReviewArtifactRecorder) RecordReviewArtifact(ctx context.Context, input skills.RecordReviewArtifactInput) (skills.ReviewArtifact, error) {
+	outputJSON := "{}"
+	if len(input.Output) != 0 {
+		encoded, err := json.Marshal(input.Output)
+		if err != nil {
+			return skills.ReviewArtifact{}, err
+		}
+		outputJSON = string(encoded)
+	}
+	permissionsJSON := "[]"
+	if len(input.Permissions) != 0 {
+		encoded, err := json.Marshal(input.Permissions)
+		if err != nil {
+			return skills.ReviewArtifact{}, err
+		}
+		permissionsJSON = string(encoded)
+	}
+
+	artifact, err := recorder.Store.CreateSkillArtifact(ctx, sqlite.CreateSkillArtifactParams{
+		SkillKey:         input.SkillKey,
+		Scope:            input.Scope,
+		ProjectID:        input.ProjectID,
+		Status:           "review_required",
+		ArtifactType:     "skill_output",
+		Summary:          input.Summary,
+		OutputJSON:       outputJSON,
+		RawOutput:        input.RawOutput,
+		HandlerRef:       input.HandlerRef,
+		ExecutionProfile: input.ExecutionProfile,
+		PermissionsJSON:  permissionsJSON,
+	})
+	if err != nil {
+		return skills.ReviewArtifact{}, err
+	}
+	return renderSkillReviewArtifact(artifact), nil
+}
+
+func renderSkillReviewArtifact(artifact sqlite.SkillArtifact) skills.ReviewArtifact {
+	var permissions []string
+	_ = json.Unmarshal([]byte(artifact.PermissionsJSON), &permissions)
+	return skills.ReviewArtifact{
+		ID:               artifact.ID,
+		SkillKey:         artifact.SkillKey,
+		Scope:            artifact.Scope,
+		ProjectID:        artifact.ProjectID,
+		Status:           artifact.Status,
+		ArtifactType:     artifact.ArtifactType,
+		Summary:          artifact.Summary,
+		OutputJSON:       artifact.OutputJSON,
+		RawOutput:        artifact.RawOutput,
+		HandlerRef:       artifact.HandlerRef,
+		ExecutionProfile: artifact.ExecutionProfile,
+		Permissions:      permissions,
+		CreatedAt:        artifact.CreatedAt,
+		UpdatedAt:        artifact.UpdatedAt,
 	}
 }
 

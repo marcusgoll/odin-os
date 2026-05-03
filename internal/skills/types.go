@@ -1,6 +1,9 @@
 package skills
 
 import (
+	"context"
+	"time"
+
 	"odin-os/internal/core/projects"
 	"odin-os/internal/registry"
 )
@@ -52,14 +55,49 @@ type InvokeRequest struct {
 }
 
 type InvokeResponse struct {
-	SkillKey    string         `json:"skill_key,omitempty"`
-	Status      string         `json:"status"`
-	Summary     string         `json:"summary"`
-	Output      map[string]any `json:"output,omitempty"`
-	Artifacts   []string       `json:"artifacts,omitempty"`
-	RawRef      string         `json:"raw_ref,omitempty"`
-	RawOutput   string         `json:"raw_output,omitempty"`
-	Permissions []string       `json:"permissions,omitempty"`
+	SkillKey       string          `json:"skill_key,omitempty"`
+	Status         string          `json:"status"`
+	Summary        string          `json:"summary"`
+	Output         map[string]any  `json:"output,omitempty"`
+	Artifacts      []string        `json:"artifacts,omitempty"`
+	RawRef         string          `json:"raw_ref,omitempty"`
+	RawOutput      string          `json:"raw_output,omitempty"`
+	Permissions    []string        `json:"permissions,omitempty"`
+	RuntimeEffect  string          `json:"runtime_effect,omitempty"`
+	ReviewArtifact *ReviewArtifact `json:"review_artifact,omitempty"`
+}
+
+type ReviewArtifact struct {
+	ID               int64     `json:"id"`
+	SkillKey         string    `json:"skill_key"`
+	Scope            string    `json:"scope"`
+	ProjectID        *int64    `json:"project_id,omitempty"`
+	Status           string    `json:"status"`
+	ArtifactType     string    `json:"artifact_type"`
+	Summary          string    `json:"summary"`
+	OutputJSON       string    `json:"output_json"`
+	RawOutput        string    `json:"raw_output,omitempty"`
+	HandlerRef       string    `json:"handler_ref"`
+	ExecutionProfile string    `json:"execution_profile"`
+	Permissions      []string  `json:"permissions,omitempty"`
+	CreatedAt        time.Time `json:"created_at"`
+	UpdatedAt        time.Time `json:"updated_at"`
+}
+
+type RecordReviewArtifactInput struct {
+	SkillKey         string
+	Scope            string
+	ProjectID        *int64
+	Summary          string
+	Output           map[string]any
+	RawOutput        string
+	HandlerRef       string
+	ExecutionProfile string
+	Permissions      []string
+}
+
+type ReviewArtifactRecorder interface {
+	RecordReviewArtifact(context.Context, RecordReviewArtifactInput) (ReviewArtifact, error)
 }
 
 func fromRegistryItem(item registry.Item) Skill {
