@@ -68,20 +68,26 @@ type InvokeResponse struct {
 }
 
 type ReviewArtifact struct {
-	ID               int64     `json:"id"`
-	SkillKey         string    `json:"skill_key"`
-	Scope            string    `json:"scope"`
-	ProjectID        *int64    `json:"project_id,omitempty"`
-	Status           string    `json:"status"`
-	ArtifactType     string    `json:"artifact_type"`
-	Summary          string    `json:"summary"`
-	OutputJSON       string    `json:"output_json"`
-	RawOutput        string    `json:"raw_output,omitempty"`
-	HandlerRef       string    `json:"handler_ref"`
-	ExecutionProfile string    `json:"execution_profile"`
-	Permissions      []string  `json:"permissions,omitempty"`
-	CreatedAt        time.Time `json:"created_at"`
-	UpdatedAt        time.Time `json:"updated_at"`
+	ID               int64      `json:"id"`
+	SkillKey         string     `json:"skill_key"`
+	Scope            string     `json:"scope"`
+	ProjectID        *int64     `json:"project_id,omitempty"`
+	Status           string     `json:"status"`
+	ArtifactType     string     `json:"artifact_type"`
+	Summary          string     `json:"summary"`
+	OutputJSON       string     `json:"output_json"`
+	RawOutput        string     `json:"raw_output,omitempty"`
+	HandlerRef       string     `json:"handler_ref"`
+	ExecutionProfile string     `json:"execution_profile"`
+	Permissions      []string   `json:"permissions,omitempty"`
+	ReviewDecision   string     `json:"review_decision,omitempty"`
+	ReviewedAt       *time.Time `json:"reviewed_at,omitempty"`
+	ReviewedBy       string     `json:"reviewed_by,omitempty"`
+	ReviewReason     string     `json:"review_reason,omitempty"`
+	FollowOnTaskID   *int64     `json:"follow_on_task_id,omitempty"`
+	FollowOnTaskKey  string     `json:"follow_on_task_key,omitempty"`
+	CreatedAt        time.Time  `json:"created_at"`
+	UpdatedAt        time.Time  `json:"updated_at"`
 }
 
 type RecordReviewArtifactInput struct {

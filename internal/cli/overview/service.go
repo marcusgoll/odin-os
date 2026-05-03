@@ -132,6 +132,9 @@ type SkillActivityLane struct {
 	CommandOutputOnlyCount         int                    `json:"command_output_only_count"`
 	DurableReviewableArtifactCount int                    `json:"durable_reviewable_artifact_count"`
 	ReviewRequiredArtifactCount    int                    `json:"review_required_artifact_count"`
+	AcceptedArtifactCount          int                    `json:"accepted_artifact_count"`
+	RejectedArtifactCount          int                    `json:"rejected_artifact_count"`
+	ArchivedArtifactCount          int                    `json:"archived_artifact_count"`
 	Recent                         []SkillActivitySummary `json:"recent"`
 }
 
@@ -976,9 +979,6 @@ func (service Service) skillActivity(ctx context.Context, resolved scope.Resolut
 				return SkillActivityLane{}, err
 			}
 			lane.DurableReviewableArtifactCount++
-			if payload.Status == "review_required" {
-				lane.ReviewRequiredArtifactCount++
-			}
 			lane.Recent = append(lane.Recent, SkillActivitySummary{
 				EventID:          record.ID,
 				SkillKey:         payload.SkillKey,
@@ -990,6 +990,22 @@ func (service Service) skillActivity(ctx context.Context, resolved scope.Resolut
 				HandlerRef:       payload.HandlerRef,
 				Permissions:      append([]string(nil), payload.Permissions...),
 				OccurredAt:       record.OccurredAt.UTC().Format(time.RFC3339),
+			})
+			continue
+		}
+		if record.Type == runtimeevents.EventSkillArtifactReviewed {
+			payload, err := runtimeevents.DecodePayload[runtimeevents.SkillArtifactReviewedPayload](record.Payload)
+			if err != nil {
+				return SkillActivityLane{}, err
+			}
+			lane.Recent = append(lane.Recent, SkillActivitySummary{
+				EventID:       record.ID,
+				SkillKey:      payload.SkillKey,
+				Scope:         record.Scope,
+				Operation:     "artifact_reviewed",
+				Outcome:       payload.Decision,
+				RuntimeEffect: "review_decision",
+				OccurredAt:    record.OccurredAt.UTC().Format(time.RFC3339),
 			})
 			continue
 		}
@@ -1033,6 +1049,25 @@ func (service Service) skillActivity(ctx context.Context, resolved scope.Resolut
 	if len(lane.Recent) > recentLimit {
 		lane.Recent = append([]SkillActivitySummary(nil), lane.Recent[len(lane.Recent)-recentLimit:]...)
 	}
+	artifacts, err := service.Store.ListSkillArtifacts(ctx, sqlite.ListSkillArtifactsParams{})
+	if err != nil {
+		return SkillActivityLane{}, err
+	}
+	for _, artifact := range artifacts {
+		if !matchesSkillArtifactScope(artifact, resolved, projectID) {
+			continue
+		}
+		switch artifact.Status {
+		case "review_required":
+			lane.ReviewRequiredArtifactCount++
+		case "accepted":
+			lane.AcceptedArtifactCount++
+		case "rejected":
+			lane.RejectedArtifactCount++
+		case "archived":
+			lane.ArchivedArtifactCount++
+		}
+	}
 	return lane, nil
 }
 
@@ -1048,6 +1083,19 @@ func matchesSkillEventScope(record runtimeevents.Record, resolved scope.Resoluti
 		return projectID != nil && record.ProjectID != nil && *record.ProjectID == *projectID && record.Scope == string(resolved.Kind)
 	case scope.ScopeNewProject:
 		return record.Scope == string(scope.ScopeNewProject)
+	default:
+		return false
+	}
+}
+
+func matchesSkillArtifactScope(artifact sqlite.SkillArtifact, resolved scope.Resolution, projectID *int64) bool {
+	switch resolved.Kind {
+	case scope.ScopeGlobal:
+		return true
+	case scope.ScopeProject, scope.ScopeOdinCore:
+		return projectID != nil && artifact.ProjectID != nil && *artifact.ProjectID == *projectID && artifact.Scope == string(resolved.Kind)
+	case scope.ScopeNewProject:
+		return artifact.Scope == string(scope.ScopeNewProject)
 	default:
 		return false
 	}

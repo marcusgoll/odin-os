@@ -3240,7 +3240,7 @@ func (store *Store) CreateSkillArtifact(ctx context.Context, params CreateSkillA
 			return err
 		}
 		record, err := scanSkillArtifact(tx.QueryRowContext(ctx, `
-			SELECT id, skill_key, scope, project_id, status, artifact_type, summary, output_json, raw_output, handler_ref, execution_profile, permissions_json, created_at, updated_at
+			SELECT id, skill_key, scope, project_id, status, artifact_type, summary, output_json, raw_output, handler_ref, execution_profile, permissions_json, review_decision, reviewed_at, reviewed_by, review_reason, follow_on_task_id, follow_on_task_key, created_at, updated_at
 			FROM skill_artifacts
 			WHERE id = ?
 		`, artifactID))
@@ -3274,7 +3274,7 @@ func (store *Store) CreateSkillArtifact(ctx context.Context, params CreateSkillA
 
 func (store *Store) ListSkillArtifacts(ctx context.Context, params ListSkillArtifactsParams) ([]SkillArtifact, error) {
 	query := `
-		SELECT id, skill_key, scope, project_id, status, artifact_type, summary, output_json, raw_output, handler_ref, execution_profile, permissions_json, created_at, updated_at
+		SELECT id, skill_key, scope, project_id, status, artifact_type, summary, output_json, raw_output, handler_ref, execution_profile, permissions_json, review_decision, reviewed_at, reviewed_by, review_reason, follow_on_task_id, follow_on_task_key, created_at, updated_at
 		FROM skill_artifacts
 		WHERE 1=1
 	`
@@ -3312,11 +3312,91 @@ func (store *Store) ListSkillArtifacts(ctx context.Context, params ListSkillArti
 
 func (store *Store) GetSkillArtifact(ctx context.Context, artifactID int64) (SkillArtifact, error) {
 	row := store.db.QueryRowContext(ctx, `
-		SELECT id, skill_key, scope, project_id, status, artifact_type, summary, output_json, raw_output, handler_ref, execution_profile, permissions_json, created_at, updated_at
+		SELECT id, skill_key, scope, project_id, status, artifact_type, summary, output_json, raw_output, handler_ref, execution_profile, permissions_json, review_decision, reviewed_at, reviewed_by, review_reason, follow_on_task_id, follow_on_task_key, created_at, updated_at
 		FROM skill_artifacts
 		WHERE id = ?
 	`, artifactID)
 	return scanSkillArtifact(row)
+}
+
+func (store *Store) ReviewSkillArtifact(ctx context.Context, params ReviewSkillArtifactParams) (SkillArtifact, error) {
+	now := store.now()
+	reviewedBy := strings.TrimSpace(params.ReviewedBy)
+	if reviewedBy == "" {
+		reviewedBy = "operator"
+	}
+	var artifact SkillArtifact
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		current, err := scanSkillArtifact(tx.QueryRowContext(ctx, `
+			SELECT id, skill_key, scope, project_id, status, artifact_type, summary, output_json, raw_output, handler_ref, execution_profile, permissions_json, review_decision, reviewed_at, reviewed_by, review_reason, follow_on_task_id, follow_on_task_key, created_at, updated_at
+			FROM skill_artifacts
+			WHERE id = ?
+		`, params.ArtifactID))
+		if err != nil {
+			return err
+		}
+		previousStatus := current.Status
+
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE skill_artifacts
+			SET status = ?,
+			    review_decision = ?,
+			    reviewed_at = ?,
+			    reviewed_by = ?,
+			    review_reason = ?,
+			    follow_on_task_id = ?,
+			    follow_on_task_key = ?,
+			    updated_at = ?
+			WHERE id = ?
+		`,
+			params.Status,
+			params.Decision,
+			formatTime(now),
+			reviewedBy,
+			params.Reason,
+			nullInt64(params.FollowOnTaskID),
+			params.FollowOnTaskKey,
+			formatTime(now),
+			params.ArtifactID,
+		); err != nil {
+			return err
+		}
+
+		updated, err := scanSkillArtifact(tx.QueryRowContext(ctx, `
+			SELECT id, skill_key, scope, project_id, status, artifact_type, summary, output_json, raw_output, handler_ref, execution_profile, permissions_json, review_decision, reviewed_at, reviewed_by, review_reason, follow_on_task_id, follow_on_task_key, created_at, updated_at
+			FROM skill_artifacts
+			WHERE id = ?
+		`, params.ArtifactID))
+		if err != nil {
+			return err
+		}
+		artifact = updated
+
+		return appendEventTx(ctx, tx, eventInsert{
+			StreamType: runtimeevents.StreamSkill,
+			StreamID:   skillEventStreamID(updated.SkillKey),
+			EventType:  runtimeevents.EventSkillArtifactReviewed,
+			Scope:      updated.Scope,
+			ProjectID:  updated.ProjectID,
+			TaskID:     params.FollowOnTaskID,
+			Payload: runtimeevents.SkillArtifactReviewedPayload{
+				ArtifactID:        updated.ID,
+				SkillKey:          updated.SkillKey,
+				Decision:          params.Decision,
+				Status:            updated.Status,
+				PreviousStatus:    previousStatus,
+				ReviewedBy:        reviewedBy,
+				Reason:            params.Reason,
+				Repeated:          params.Repeated,
+				WorkCreated:       params.WorkCreated,
+				FollowOnTaskID:    params.FollowOnTaskID,
+				FollowOnTaskKey:   params.FollowOnTaskKey,
+				FollowOnTaskState: params.FollowOnTaskState,
+			},
+			OccurredAt: now,
+		})
+	})
+	return artifact, err
 }
 
 func (store *Store) CreateContextPacket(ctx context.Context, params CreateContextPacketParams) (ContextPacket, error) {
@@ -8182,6 +8262,8 @@ func scanDelegationArtifact(row interface{ Scan(...any) error }) (DelegationArti
 func scanSkillArtifact(row interface{ Scan(...any) error }) (SkillArtifact, error) {
 	var artifact SkillArtifact
 	var projectID sql.NullInt64
+	var reviewedAt sql.NullString
+	var followOnTaskID sql.NullInt64
 	var createdAt string
 	var updatedAt string
 	if err := row.Scan(
@@ -8197,6 +8279,12 @@ func scanSkillArtifact(row interface{ Scan(...any) error }) (SkillArtifact, erro
 		&artifact.HandlerRef,
 		&artifact.ExecutionProfile,
 		&artifact.PermissionsJSON,
+		&artifact.ReviewDecision,
+		&reviewedAt,
+		&artifact.ReviewedBy,
+		&artifact.ReviewReason,
+		&followOnTaskID,
+		&artifact.FollowOnTaskKey,
 		&createdAt,
 		&updatedAt,
 	); err != nil {
@@ -8204,7 +8292,12 @@ func scanSkillArtifact(row interface{ Scan(...any) error }) (SkillArtifact, erro
 	}
 
 	artifact.ProjectID = nullableInt64Ptr(projectID)
+	artifact.FollowOnTaskID = nullableInt64Ptr(followOnTaskID)
 	var err error
+	artifact.ReviewedAt, err = parseNullableTime(reviewedAt)
+	if err != nil {
+		return SkillArtifact{}, err
+	}
 	artifact.CreatedAt, err = parseTime(createdAt)
 	if err != nil {
 		return SkillArtifact{}, err

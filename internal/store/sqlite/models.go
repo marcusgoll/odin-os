@@ -784,6 +784,12 @@ type SkillArtifact struct {
 	HandlerRef       string
 	ExecutionProfile string
 	PermissionsJSON  string
+	ReviewDecision   string
+	ReviewedAt       *time.Time
+	ReviewedBy       string
+	ReviewReason     string
+	FollowOnTaskID   *int64
+	FollowOnTaskKey  string
 	CreatedAt        time.Time
 	UpdatedAt        time.Time
 }
@@ -806,6 +812,19 @@ type ListSkillArtifactsParams struct {
 	SkillKey string
 	Status   string
 	Limit    int
+}
+
+type ReviewSkillArtifactParams struct {
+	ArtifactID        int64
+	Decision          string
+	Status            string
+	ReviewedBy        string
+	Reason            string
+	Repeated          bool
+	WorkCreated       bool
+	FollowOnTaskID    *int64
+	FollowOnTaskKey   string
+	FollowOnTaskState string
 }
 
 type ContextPacket struct {

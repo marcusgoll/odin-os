@@ -7,12 +7,15 @@ import (
 	"io"
 	"os"
 	"strconv"
+	"strings"
+	"time"
 
 	"odin-os/internal/app/bootstrap"
 	"odin-os/internal/cli/commands"
 	"odin-os/internal/cli/scope"
 	clistate "odin-os/internal/cli/state"
 	"odin-os/internal/core/projects"
+	"odin-os/internal/runtime/jobs"
 	"odin-os/internal/skills"
 	"odin-os/internal/store/sqlite"
 	"odin-os/internal/telemetry/logs"
@@ -200,8 +203,11 @@ func runSkills(ctx context.Context, app bootstrap.App, args []string, stdout io.
 		}
 		return nil
 	case "artifact":
+		if len(remaining) == 4 && remaining[1] == "review" {
+			return runSkillArtifactReview(ctx, app, remaining[2], remaining[3], jsonOutput, stdout)
+		}
 		if len(remaining) != 3 || remaining[1] != "show" {
-			return fmt.Errorf("usage: odin skills artifact show <id> [--json]")
+			return fmt.Errorf("usage: odin skills artifact show <id> [--json] OR odin skills artifact review <accept|reject|archive> <id> [--json]")
 		}
 		if app.Store == nil {
 			return fmt.Errorf("skill artifact show requires runtime store")
@@ -268,6 +274,181 @@ func runSkills(ctx context.Context, app bootstrap.App, args []string, stdout io.
 	}
 }
 
+type skillArtifactReviewDecisionView struct {
+	Artifact    skills.ReviewArtifact      `json:"artifact"`
+	Decision    string                     `json:"decision"`
+	WorkCreated bool                       `json:"work_created"`
+	Repeated    bool                       `json:"repeated"`
+	WorkItem    *skillArtifactWorkItemView `json:"work_item,omitempty"`
+}
+
+type skillArtifactWorkItemView struct {
+	ID          int64  `json:"id"`
+	Key         string `json:"key"`
+	Status      string `json:"status"`
+	RequestedBy string `json:"requested_by"`
+}
+
+func runSkillArtifactReview(ctx context.Context, app bootstrap.App, action string, artifactRef string, jsonOutput bool, stdout io.Writer) error {
+	if app.Store == nil {
+		return fmt.Errorf("skill artifact review requires runtime store")
+	}
+	artifactID, err := strconv.ParseInt(artifactRef, 10, 64)
+	if err != nil || artifactID <= 0 {
+		return fmt.Errorf("skill artifact id must be a positive integer")
+	}
+	artifact, err := app.Store.GetSkillArtifact(ctx, artifactID)
+	if err != nil {
+		return err
+	}
+
+	decision := ""
+	status := ""
+	reason := ""
+	var task *sqlite.Task
+	workCreated := false
+	repeated := false
+
+	switch action {
+	case "accept":
+		decision = "accepted"
+		status = "accepted"
+		reason = "skill artifact accepted by operator"
+		if artifact.Status == "accepted" {
+			repeated = true
+			loaded, created, err := createTaskFromAcceptedSkillArtifact(ctx, app, artifact)
+			if err != nil {
+				return err
+			}
+			task = &loaded
+			workCreated = created
+			break
+		}
+		if artifact.Status != "review_required" {
+			return fmt.Errorf("skill artifact %d cannot be accepted from status %s", artifact.ID, artifact.Status)
+		}
+		createdTask, created, err := createTaskFromAcceptedSkillArtifact(ctx, app, artifact)
+		if err != nil {
+			return err
+		}
+		task = &createdTask
+		workCreated = created
+	case "reject":
+		decision = "rejected"
+		status = "rejected"
+		reason = "skill artifact rejected by operator"
+		if artifact.Status == "rejected" {
+			repeated = true
+			break
+		}
+		if artifact.Status != "review_required" {
+			return fmt.Errorf("skill artifact %d cannot be rejected from status %s", artifact.ID, artifact.Status)
+		}
+	case "archive":
+		decision = "archived"
+		status = "archived"
+		reason = "skill artifact archived by operator"
+		if artifact.Status == "archived" {
+			repeated = true
+			break
+		}
+		if artifact.Status != "review_required" {
+			return fmt.Errorf("skill artifact %d cannot be archived from status %s", artifact.ID, artifact.Status)
+		}
+	default:
+		return fmt.Errorf("usage: odin skills artifact review <accept|reject|archive> <id> [--json]")
+	}
+
+	var followOnTaskID *int64
+	followOnTaskKey := ""
+	followOnTaskState := ""
+	if task != nil {
+		id := task.ID
+		followOnTaskID = &id
+		followOnTaskKey = task.Key
+		followOnTaskState = task.Status
+	}
+	updated, err := app.Store.ReviewSkillArtifact(ctx, sqlite.ReviewSkillArtifactParams{
+		ArtifactID:        artifact.ID,
+		Decision:          decision,
+		Status:            status,
+		ReviewedBy:        "operator",
+		Reason:            reason,
+		Repeated:          repeated,
+		WorkCreated:       workCreated,
+		FollowOnTaskID:    followOnTaskID,
+		FollowOnTaskKey:   followOnTaskKey,
+		FollowOnTaskState: followOnTaskState,
+	})
+	if err != nil {
+		return err
+	}
+
+	result := skillArtifactReviewDecisionView{
+		Artifact:    renderSkillReviewArtifact(updated),
+		Decision:    decision,
+		WorkCreated: workCreated,
+		Repeated:    repeated,
+	}
+	if task != nil {
+		result.WorkItem = &skillArtifactWorkItemView{
+			ID:          task.ID,
+			Key:         task.Key,
+			Status:      task.Status,
+			RequestedBy: task.RequestedBy,
+		}
+	}
+	if jsonOutput {
+		return commands.WriteJSON(stdout, result)
+	}
+	workKey := "none"
+	if task != nil {
+		workKey = task.Key
+	}
+	_, err = fmt.Fprintf(stdout, "skill_artifact=%d decision=%s status=%s work_created=%t work_item=%s\n", artifact.ID, decision, updated.Status, workCreated, workKey)
+	return err
+}
+
+func createTaskFromAcceptedSkillArtifact(ctx context.Context, app bootstrap.App, artifact sqlite.SkillArtifact) (sqlite.Task, bool, error) {
+	if artifact.Scope != "project" || artifact.ProjectID == nil {
+		return sqlite.Task{}, false, fmt.Errorf("skill artifact %d has no project scope for work promotion", artifact.ID)
+	}
+	project, err := app.Store.GetProject(ctx, *artifact.ProjectID)
+	if err != nil {
+		return sqlite.Task{}, false, err
+	}
+	manifest, ok := app.Registry.Lookup(project.Key)
+	if !ok {
+		return sqlite.Task{}, false, fmt.Errorf("unknown project %q", project.Key)
+	}
+	resolved := scope.Resolve(scope.ResolveInput{
+		ExplicitTarget: &scope.Target{
+			ProjectKey:    manifest.Key,
+			SystemProject: manifest.SystemProject,
+		},
+	})
+	title := strings.TrimSpace(artifact.Summary)
+	if title == "" {
+		title = fmt.Sprintf("Review skill artifact %d", artifact.ID)
+	}
+	result, err := jobs.Service{
+		Store:       app.Store,
+		Registry:    app.Registry,
+		Transitions: projects.Service{Store: app.Store},
+		Now:         time.Now,
+	}.CreateTaskOnce(ctx, jobs.CreateTaskParams{
+		Resolved:    resolved,
+		Title:       title,
+		RequestedBy: fmt.Sprintf("skill_artifact_review:%d", artifact.ID),
+		Key:         skillArtifactWorkItemKey(artifact.ID),
+	})
+	return result.Task, result.Created, err
+}
+
+func skillArtifactWorkItemKey(id int64) string {
+	return fmt.Sprintf("skill-artifact-%d", id)
+}
+
 type skillReviewArtifactRecorder struct {
 	Store *sqlite.Store
 }
@@ -325,6 +506,12 @@ func renderSkillReviewArtifact(artifact sqlite.SkillArtifact) skills.ReviewArtif
 		HandlerRef:       artifact.HandlerRef,
 		ExecutionProfile: artifact.ExecutionProfile,
 		Permissions:      permissions,
+		ReviewDecision:   artifact.ReviewDecision,
+		ReviewedAt:       artifact.ReviewedAt,
+		ReviewedBy:       artifact.ReviewedBy,
+		ReviewReason:     artifact.ReviewReason,
+		FollowOnTaskID:   artifact.FollowOnTaskID,
+		FollowOnTaskKey:  artifact.FollowOnTaskKey,
 		CreatedAt:        artifact.CreatedAt,
 		UpdatedAt:        artifact.UpdatedAt,
 	}

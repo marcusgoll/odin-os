@@ -3062,6 +3062,147 @@ printf '%s\n' '{"status":"ok","summary":"audit complete","output":{"message":"tr
 	}
 }
 
+func TestRunSkillsArtifactReviewAcceptPromotesQueuedWork(t *testing.T) {
+	t.Parallel()
+
+	root := testRepoRoot(t)
+	seedReviewableSkill(t, root, "review-plan", "review plan ready", `{"title":"Prepare operator rollout","next_step":"queue"}`)
+	if err := Run(context.Background(), root, []string{"project", "select", testProjectKey}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+		t.Fatalf("Run(project select) error = %v", err)
+	}
+
+	var invokeOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"skills", "invoke", "review-plan", "--json"}, strings.NewReader(""), &invokeOutput); err != nil {
+		t.Fatalf("Run(skills invoke) error = %v", err)
+	}
+	if !strings.Contains(invokeOutput.String(), `"status": "review_required"`) || !strings.Contains(invokeOutput.String(), `"runtime_effect": "durable_reviewable_artifact"`) {
+		t.Fatalf("skills invoke output = %s, want review-required artifact", invokeOutput.String())
+	}
+
+	var acceptOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"skills", "artifact", "review", "accept", "1", "--json"}, strings.NewReader(""), &acceptOutput); err != nil {
+		t.Fatalf("Run(skills artifact review accept) error = %v", err)
+	}
+	for _, want := range []string{
+		`"decision": "accepted"`,
+		`"status": "accepted"`,
+		`"work_created": true`,
+		`"key": "skill-artifact-1"`,
+		`"requested_by": "skill_artifact_review:1"`,
+	} {
+		if !strings.Contains(acceptOutput.String(), want) {
+			t.Fatalf("accept output = %s, want %s", acceptOutput.String(), want)
+		}
+	}
+
+	var repeatOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"skills", "artifact", "review", "accept", "1", "--json"}, strings.NewReader(""), &repeatOutput); err != nil {
+		t.Fatalf("Run(skills artifact review accept repeat) error = %v", err)
+	}
+	if !strings.Contains(repeatOutput.String(), `"decision": "accepted"`) || !strings.Contains(repeatOutput.String(), `"work_created": false`) || !strings.Contains(repeatOutput.String(), `"key": "skill-artifact-1"`) {
+		t.Fatalf("repeat accept output = %s, want idempotent linked work", repeatOutput.String())
+	}
+
+	var jobsOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"jobs", "--json"}, strings.NewReader(""), &jobsOutput); err != nil {
+		t.Fatalf("Run(jobs --json) error = %v", err)
+	}
+	if strings.Count(jobsOutput.String(), `"task_key": "skill-artifact-1"`) != 1 {
+		t.Fatalf("jobs output = %s, want one promoted skill artifact task", jobsOutput.String())
+	}
+
+	var logsOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"logs", "--json"}, strings.NewReader(""), &logsOutput); err != nil {
+		t.Fatalf("Run(logs --json) error = %v", err)
+	}
+	for _, want := range []string{
+		`"type": "skill.artifact_reviewed"`,
+		`"decision": "accepted"`,
+		`"follow_on_task_key": "skill-artifact-1"`,
+		`"repeated": true`,
+	} {
+		if !strings.Contains(logsOutput.String(), want) {
+			t.Fatalf("logs output = %s, want %s", logsOutput.String(), want)
+		}
+	}
+
+	var overviewOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"overview", "--json"}, strings.NewReader(""), &overviewOutput); err != nil {
+		t.Fatalf("Run(overview --json) error = %v", err)
+	}
+	for _, want := range []string{
+		`"review_required_artifact_count": 0`,
+		`"accepted_artifact_count": 1`,
+		`"rejected_artifact_count": 0`,
+		`"archived_artifact_count": 0`,
+	} {
+		if !strings.Contains(overviewOutput.String(), want) {
+			t.Fatalf("overview output = %s, want %s", overviewOutput.String(), want)
+		}
+	}
+}
+
+func TestRunSkillsArtifactReviewRejectAndArchiveDoNotCreateWork(t *testing.T) {
+	t.Parallel()
+
+	root := testRepoRoot(t)
+	seedReviewableSkill(t, root, "review-note", "review note ready", `{"title":"Draft note","next_step":"inspect"}`)
+	if err := Run(context.Background(), root, []string{"project", "select", testProjectKey}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+		t.Fatalf("Run(project select) error = %v", err)
+	}
+	for index := 0; index < 2; index++ {
+		if err := Run(context.Background(), root, []string{"skills", "invoke", "review-note", "--json"}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+			t.Fatalf("Run(skills invoke %d) error = %v", index, err)
+		}
+	}
+
+	var rejectOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"skills", "artifact", "review", "reject", "1", "--json"}, strings.NewReader(""), &rejectOutput); err != nil {
+		t.Fatalf("Run(skills artifact review reject) error = %v", err)
+	}
+	if !strings.Contains(rejectOutput.String(), `"decision": "rejected"`) || !strings.Contains(rejectOutput.String(), `"work_created": false`) {
+		t.Fatalf("reject output = %s, want rejected with no work", rejectOutput.String())
+	}
+	var repeatRejectOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"skills", "artifact", "review", "reject", "1", "--json"}, strings.NewReader(""), &repeatRejectOutput); err != nil {
+		t.Fatalf("Run(skills artifact review reject repeat) error = %v", err)
+	}
+	if !strings.Contains(repeatRejectOutput.String(), `"repeated": true`) || !strings.Contains(repeatRejectOutput.String(), `"work_created": false`) {
+		t.Fatalf("repeat reject output = %s, want safe repeated rejection", repeatRejectOutput.String())
+	}
+
+	var archiveOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"skills", "artifact", "review", "archive", "2", "--json"}, strings.NewReader(""), &archiveOutput); err != nil {
+		t.Fatalf("Run(skills artifact review archive) error = %v", err)
+	}
+	if !strings.Contains(archiveOutput.String(), `"decision": "archived"`) || !strings.Contains(archiveOutput.String(), `"work_created": false`) {
+		t.Fatalf("archive output = %s, want archived with no work", archiveOutput.String())
+	}
+
+	var jobsOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"jobs", "--json"}, strings.NewReader(""), &jobsOutput); err != nil {
+		t.Fatalf("Run(jobs --json) error = %v", err)
+	}
+	if strings.Contains(jobsOutput.String(), `"task_key": "skill-artifact-`) {
+		t.Fatalf("jobs output = %s, reject/archive must not create work", jobsOutput.String())
+	}
+
+	var overviewOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"overview", "--json"}, strings.NewReader(""), &overviewOutput); err != nil {
+		t.Fatalf("Run(overview --json) error = %v", err)
+	}
+	for _, want := range []string{
+		`"review_required_artifact_count": 0`,
+		`"accepted_artifact_count": 0`,
+		`"rejected_artifact_count": 1`,
+		`"archived_artifact_count": 1`,
+	} {
+		if !strings.Contains(overviewOutput.String(), want) {
+			t.Fatalf("overview output = %s, want %s", overviewOutput.String(), want)
+		}
+	}
+}
+
 func TestRunSkillsInvokeUsesSelectedProjectTransitionState(t *testing.T) {
 	t.Parallel()
 
@@ -3852,5 +3993,56 @@ No mutation.
 Prompt includes skill content.
 `), 0o644); err != nil {
 		t.Fatalf("WriteFile(skill fixture) error = %v", err)
+	}
+}
+
+func seedReviewableSkill(t *testing.T, root string, key string, summary string, outputJSON string) {
+	t.Helper()
+
+	scriptPath := filepath.Join(root, "scripts", "skills", key+".sh")
+	if err := os.MkdirAll(filepath.Dir(scriptPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll(skill script dir) error = %v", err)
+	}
+	if err := os.WriteFile(scriptPath, []byte(fmt.Sprintf(`#!/usr/bin/env bash
+cat >/dev/null
+printf '%%s\n' '{"status":"ok","summary":%q,"output":%s}'
+`, summary, outputJSON)), 0o755); err != nil {
+		t.Fatalf("WriteFile(skill script) error = %v", err)
+	}
+
+	specPath := filepath.Join(root, key+".json")
+	spec := fmt.Sprintf(`{
+  "key": %q,
+  "title": "Reviewable Skill",
+  "summary": "Produces a reviewable artifact.",
+  "status": "active",
+  "version": "1.0.0",
+  "enabled": true,
+  "tags": ["testing"],
+  "owners": ["odin-core"],
+  "strictness": "rigid",
+  "applies_to": ["testing"],
+  "scopes": ["project"],
+  "permissions": ["repo.read"],
+  "handler_type": "command",
+  "handler_ref": %q,
+  "timeout_seconds": 15,
+  "input_schema": {"type":"object"},
+  "output_schema": {"type":"object"},
+  "sections": {
+    "Purpose": "Return a deterministic review artifact.",
+    "When to Use": "When testing skill artifact review.",
+    "Inputs": "None.",
+    "Procedure": "Return JSON.",
+    "Outputs": "A JSON response.",
+    "Constraints": "No mutation.",
+    "Success Criteria": "A reviewable artifact is created."
+  }
+}`, key, filepath.ToSlash(filepath.Join("scripts", "skills", key+".sh")))
+	if err := os.WriteFile(specPath, []byte(spec), 0o644); err != nil {
+		t.Fatalf("WriteFile(skill spec) error = %v", err)
+	}
+	if err := Run(context.Background(), root, []string{"skills", "create", "--spec", specPath, "--json"}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+		t.Fatalf("Run(skills create) error = %v", err)
 	}
 }
