@@ -194,6 +194,23 @@ func TestParseCompanionDelegateListAndShow(t *testing.T) {
 	if !showCommand.JSON {
 		t.Fatal("JSON = false, want true")
 	}
+
+	retryCommand, err := ParseCompanion([]string{"delegate", "retry", "7", "--json"})
+	if err != nil {
+		t.Fatalf("ParseCompanion(delegate retry) error = %v", err)
+	}
+	if retryCommand.Name != "delegate" {
+		t.Fatalf("Name = %q, want delegate", retryCommand.Name)
+	}
+	if retryCommand.DelegateAction != "retry" {
+		t.Fatalf("DelegateAction = %q, want retry", retryCommand.DelegateAction)
+	}
+	if retryCommand.Key != "7" {
+		t.Fatalf("Key = %q, want 7", retryCommand.Key)
+	}
+	if !retryCommand.JSON {
+		t.Fatal("JSON = false, want true")
+	}
 }
 
 func TestParseCompanionRunRejectsMissingObjective(t *testing.T) {
@@ -209,6 +226,9 @@ func TestParseCompanionDelegateRejectsMissingInputs(t *testing.T) {
 
 	if _, err := ParseCompanion([]string{"delegate", "show"}); err == nil {
 		t.Fatal("ParseCompanion() error = nil, want missing show identifier error")
+	}
+	if _, err := ParseCompanion([]string{"delegate", "retry"}); err == nil {
+		t.Fatal("ParseCompanion() error = nil, want missing retry identifier error")
 	}
 	if _, err := ParseCompanion([]string{"delegate", "primary", "--agent", "portal-delivery-agent", "--surface", "dashboard"}); err == nil {
 		t.Fatal("ParseCompanion() error = nil, want missing portal-track error")

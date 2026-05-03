@@ -144,6 +144,17 @@ type CompanionDelegationDetailView struct {
 	Artifacts  []CompanionDelegationArtifact `json:"artifacts"`
 }
 
+type CompanionDelegationRetryView struct {
+	Retried    bool                          `json:"retried"`
+	Reason     string                        `json:"reason"`
+	Delegation CompanionDelegationView       `json:"delegation"`
+	ParentTask *TaskCreateView               `json:"parent_task,omitempty"`
+	ParentRun  *RunView                      `json:"parent_run,omitempty"`
+	ChildTask  *TaskCreateView               `json:"child_task,omitempty"`
+	ChildRun   *RunView                      `json:"child_run,omitempty"`
+	Artifacts  []CompanionDelegationArtifact `json:"artifacts"`
+}
+
 type CompanionDelegationArtifact struct {
 	ID           int64     `json:"id"`
 	DelegationID int64     `json:"delegation_id"`
@@ -233,7 +244,7 @@ func ParseCompanion(args []string) (CompanionCommand, error) {
 			}
 			if command.Name == "delegate" && command.DelegateAction == "" {
 				delegateAction := strings.ToLower(strings.TrimSpace(args[index]))
-				if delegateAction == "list" || delegateAction == "show" {
+				if delegateAction == "list" || delegateAction == "show" || delegateAction == "retry" {
 					command.DelegateAction = delegateAction
 					continue
 				}
@@ -315,12 +326,12 @@ func ParseCompanion(args []string) (CompanionCommand, error) {
 				return CompanionCommand{}, fmt.Errorf("companion delegate list does not accept create flags")
 			}
 			return command, nil
-		case "show":
+		case "show", "retry":
 			if command.Key == "" {
-				return CompanionCommand{}, fmt.Errorf("companion delegate show requires an id or key")
+				return CompanionCommand{}, fmt.Errorf("companion delegate %s requires an id or key", command.DelegateAction)
 			}
 			if command.AgentKey != "" || command.PortalTrack != "" || command.Surface != "" || command.Goal != "" {
-				return CompanionCommand{}, fmt.Errorf("companion delegate show does not accept create flags")
+				return CompanionCommand{}, fmt.Errorf("companion delegate %s does not accept create flags", command.DelegateAction)
 			}
 			return command, nil
 		case "":
@@ -344,7 +355,7 @@ func ParseCompanion(args []string) (CompanionCommand, error) {
 	return command, nil
 }
 
-const companionUsage = "usage: odin companion <create|list> [--kind <kind>] [--key <key>] [--title <title>] [--json] | odin companion <get|state|capabilities> <key> [--json] | odin companion run <key> --objective <objective> [--trigger <trigger>] [--json] | odin companion delegate <key> --agent <agent-key> --portal-track <track> --surface <surface> [--goal <goal>] [--json] | odin companion delegate <list|show <id|key>> [--json]"
+const companionUsage = "usage: odin companion <create|list> [--kind <kind>] [--key <key>] [--title <title>] [--json] | odin companion <get|state|capabilities> <key> [--json] | odin companion run <key> --objective <objective> [--trigger <trigger>] [--json] | odin companion delegate <key> --agent <agent-key> --portal-track <track> --surface <surface> [--goal <goal>] [--json] | odin companion delegate <list|show <id|key>|retry <id|key>> [--json]"
 
 func isSupportedCompanionKind(kind string) bool {
 	switch corecompanions.Kind(strings.ToLower(kind)) {

@@ -1200,3 +1200,9 @@ type ListDelegationArtifactsParams struct {
 	DelegationID int64
 	ArtifactType string
 }
+
+type RecordDelegationRetryEventParams struct {
+	DelegationID int64
+	EventType    runtimeevents.Type
+	Reason       string
+}

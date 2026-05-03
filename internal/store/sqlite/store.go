@@ -5312,6 +5312,26 @@ func (store *Store) ListDelegationArtifacts(ctx context.Context, params ListDele
 	return artifacts, rows.Err()
 }
 
+func (store *Store) RecordDelegationRetryEvent(ctx context.Context, params RecordDelegationRetryEventParams) error {
+	now := store.now()
+	return store.withTx(ctx, func(tx *sql.Tx) error {
+		delegation, err := store.getDelegationTx(ctx, tx, params.DelegationID)
+		if err != nil {
+			return err
+		}
+		return appendDelegationEventTx(ctx, tx, delegation, params.EventType, runtimeevents.DelegationRetryPayload{
+			DelegationID:   delegation.ID,
+			ParentTaskID:   delegation.ParentTaskID,
+			ParentRunID:    delegation.ParentRunID,
+			ChildTaskID:    delegation.ChildTaskID,
+			ChildRunID:     delegation.ChildRunID,
+			PreviousStatus: delegation.Status,
+			Status:         delegation.Status,
+			Reason:         strings.TrimSpace(params.Reason),
+		}, now)
+	})
+}
+
 func (store *Store) GetCompanionByKey(ctx context.Context, workspaceID int64, key string) (Companion, error) {
 	row := store.db.QueryRowContext(ctx, `
 		SELECT

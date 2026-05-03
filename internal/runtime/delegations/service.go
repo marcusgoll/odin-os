@@ -13,6 +13,7 @@ import (
 	"odin-os/internal/prompting"
 	"odin-os/internal/registry"
 	"odin-os/internal/runtime/checkpoints"
+	runtimeevents "odin-os/internal/runtime/events"
 	jobsvc "odin-os/internal/runtime/jobs"
 	"odin-os/internal/store/sqlite"
 )
@@ -39,12 +40,146 @@ type RunResult struct {
 	LearningProposalIDs []int64
 }
 
+type RetryResult struct {
+	Delegation sqlite.Delegation
+	ParentTask *sqlite.Task
+	ParentRun  *sqlite.Run
+	ChildTask  *sqlite.Task
+	ChildRun   *sqlite.Run
+	Retried    bool
+	Reason     string
+}
+
 type childExecutionResult struct {
 	index      int
 	spec       ChildSpec
 	delegation sqlite.Delegation
 	proposalID int64
 	err        error
+}
+
+func (service Service) RetryDelegation(ctx context.Context, delegationID int64) (RetryResult, error) {
+	if service.Store == nil {
+		return RetryResult{}, fmt.Errorf("delegation store is required")
+	}
+	if service.Jobs.Store == nil {
+		return RetryResult{}, fmt.Errorf("jobs service is required")
+	}
+
+	delegation, err := service.Store.GetDelegation(ctx, delegationID)
+	if err != nil {
+		return RetryResult{}, err
+	}
+	result, err := service.retryResult(ctx, delegation, false, "loaded")
+	if err != nil {
+		return RetryResult{}, err
+	}
+	if delegation.Status == "completed" {
+		if err := service.Store.RecordDelegationRetryEvent(ctx, sqlite.RecordDelegationRetryEventParams{
+			DelegationID: delegation.ID,
+			EventType:    runtimeevents.EventDelegationRetrySkipped,
+			Reason:       "already_completed",
+		}); err != nil {
+			return RetryResult{}, err
+		}
+		result.Retried = false
+		result.Reason = "already_completed"
+		return result, nil
+	}
+	if !isRetryableDelegationStatus(delegation.Status) {
+		if err := service.Store.RecordDelegationRetryEvent(ctx, sqlite.RecordDelegationRetryEventParams{
+			DelegationID: delegation.ID,
+			EventType:    runtimeevents.EventDelegationRetrySkipped,
+			Reason:       "not_retryable:" + delegation.Status,
+		}); err != nil {
+			return RetryResult{}, err
+		}
+		result.Retried = false
+		result.Reason = "not_retryable:" + delegation.Status
+		return result, nil
+	}
+	if delegation.ChildTaskID == nil {
+		if err := service.Store.RecordDelegationRetryEvent(ctx, sqlite.RecordDelegationRetryEventParams{
+			DelegationID: delegation.ID,
+			EventType:    runtimeevents.EventDelegationRetrySkipped,
+			Reason:       "missing_child_task",
+		}); err != nil {
+			return RetryResult{}, err
+		}
+		result.Retried = false
+		result.Reason = "missing_child_task"
+		return result, nil
+	}
+	if err := service.Store.RecordDelegationRetryEvent(ctx, sqlite.RecordDelegationRetryEventParams{
+		DelegationID: delegation.ID,
+		EventType:    runtimeevents.EventDelegationRetryRequested,
+		Reason:       "operator_retry",
+	}); err != nil {
+		return RetryResult{}, err
+	}
+
+	childTask, err := service.Store.GetTask(ctx, *delegation.ChildTaskID)
+	if err != nil {
+		return RetryResult{}, err
+	}
+	inputs := retryInputsFromDelegation(delegation)
+	agentKey := cleanInput(inputs["agent_key"])
+	spec := childSpecFromDelegation(delegation, inputs)
+
+	delegation, err = service.Store.UpdateDelegationStatus(ctx, sqlite.UpdateDelegationStatusParams{
+		DelegationID: delegation.ID,
+		Status:       "running",
+	})
+	if err != nil {
+		return RetryResult{}, fmt.Errorf("mark delegation running: %w", err)
+	}
+
+	requestMetadata := retryRequestMetadata(delegation, agentKey, spec, inputs)
+	promptOverride, err := service.childPrompt(spec, inputs)
+	if err != nil {
+		return RetryResult{}, fmt.Errorf("build child prompt: %w", err)
+	}
+	outcome, execErr := service.Jobs.ExecuteTaskWithRequest(ctx, childTask.ID, jobsvc.ExecutionRequest{
+		PromptOverride: promptOverride,
+		Metadata:       requestMetadata,
+	})
+
+	childStatus, statusErr := delegationStatusFromOutcome(outcome, execErr)
+	if statusErr != nil && execErr == nil {
+		execErr = statusErr
+	}
+	if outcome.Run != nil {
+		delegation, err = service.Store.AttachDelegationChildTask(ctx, sqlite.AttachDelegationChildTaskParams{
+			DelegationID: delegation.ID,
+			ChildTaskID:  childTask.ID,
+			ChildRunID:   &outcome.Run.ID,
+		})
+		if err != nil {
+			return RetryResult{}, fmt.Errorf("attach child run: %w", err)
+		}
+	}
+	delegation, err = service.Store.UpdateDelegationStatus(ctx, sqlite.UpdateDelegationStatusParams{
+		DelegationID: delegation.ID,
+		Status:       childStatus,
+	})
+	if err != nil {
+		return RetryResult{}, fmt.Errorf("mark delegation %s: %w", childStatus, err)
+	}
+	if artifactErr := service.recordDelegationArtifacts(ctx, delegation, outcome.Task, outcome, requestMetadata); artifactErr != nil {
+		return RetryResult{}, fmt.Errorf("record delegation artifacts: %w", artifactErr)
+	}
+	if err := service.reconcileParentAfterRetry(ctx, delegation); err != nil {
+		return RetryResult{}, err
+	}
+
+	result, err = service.retryResult(ctx, delegation, true, "retried")
+	if err != nil {
+		return RetryResult{}, err
+	}
+	if execErr != nil {
+		return result, fmt.Errorf("execute child task: %w", execErr)
+	}
+	return result, nil
 }
 
 func (service Service) RunAgent(ctx context.Context, input RunInput) (sqlite.Task, *sqlite.Run, RunResult, error) {
@@ -270,15 +405,9 @@ func (service Service) runChildDelegation(ctx context.Context, parentTask sqlite
 		Metadata:       requestMetadata,
 	})
 
-	childStatus := "completed"
-	if execErr != nil {
-		childStatus = "failed"
-	} else if outcome.Run != nil && isFailedDelegationRunStatus(outcome.Run.Status) {
-		childStatus = outcome.Run.Status
-		execErr = fmt.Errorf("child run finished with status %s", outcome.Run.Status)
-	} else if outcome.Run == nil && isFailedDelegationTaskStatus(outcome.Task.Status) {
-		childStatus = outcome.Task.Status
-		execErr = fmt.Errorf("child task finished with status %s", outcome.Task.Status)
+	childStatus, statusErr := delegationStatusFromOutcome(outcome, execErr)
+	if statusErr != nil && execErr == nil {
+		execErr = statusErr
 	}
 	if outcome.Run != nil {
 		delegation, err = service.Store.AttachDelegationChildTask(ctx, sqlite.AttachDelegationChildTaskParams{
@@ -307,9 +436,107 @@ func (service Service) runChildDelegation(ctx context.Context, parentTask sqlite
 	return delegation, nil
 }
 
+func (service Service) retryResult(ctx context.Context, delegation sqlite.Delegation, retried bool, reason string) (RetryResult, error) {
+	current, err := service.Store.GetDelegation(ctx, delegation.ID)
+	if err != nil {
+		return RetryResult{}, err
+	}
+	result := RetryResult{
+		Delegation: current,
+		Retried:    retried,
+		Reason:     reason,
+	}
+	if parentTask, err := service.Store.GetTask(ctx, current.ParentTaskID); err == nil {
+		result.ParentTask = &parentTask
+	} else {
+		return RetryResult{}, err
+	}
+	if current.ParentRunID != nil {
+		parentRun, err := service.Store.GetRun(ctx, *current.ParentRunID)
+		if err != nil {
+			return RetryResult{}, err
+		}
+		result.ParentRun = &parentRun
+	}
+	if current.ChildTaskID != nil {
+		childTask, err := service.Store.GetTask(ctx, *current.ChildTaskID)
+		if err != nil {
+			return RetryResult{}, err
+		}
+		result.ChildTask = &childTask
+	}
+	if current.ChildRunID != nil {
+		childRun, err := service.Store.GetRun(ctx, *current.ChildRunID)
+		if err != nil {
+			return RetryResult{}, err
+		}
+		result.ChildRun = &childRun
+	}
+	return result, nil
+}
+
+func (service Service) reconcileParentAfterRetry(ctx context.Context, delegation sqlite.Delegation) error {
+	siblings, err := service.Store.ListDelegations(ctx, sqlite.ListDelegationsParams{ParentTaskID: &delegation.ParentTaskID})
+	if err != nil {
+		return err
+	}
+	if len(siblings) == 0 {
+		return nil
+	}
+	for _, sibling := range siblings {
+		if sibling.Status != "completed" {
+			return nil
+		}
+	}
+	parentTask, err := service.Store.GetTask(ctx, delegation.ParentTaskID)
+	if err != nil {
+		return err
+	}
+	if parentTask.Status == "completed" {
+		return nil
+	}
+	if delegation.ParentRunID == nil {
+		_, err := service.Store.UpdateTaskStatus(ctx, sqlite.UpdateTaskStatusParams{
+			TaskID:  parentTask.ID,
+			Status:  "completed",
+			Summary: "delegation retry recovered all child delegations",
+		})
+		return err
+	}
+	_, _, err = service.Store.FinishRunAndSetTaskStatus(ctx, sqlite.FinishRunAndSetTaskStatusParams{
+		RunID:      *delegation.ParentRunID,
+		RunStatus:  "completed",
+		Summary:    "delegation retry recovered all child delegations",
+		TaskStatus: "completed",
+	})
+	return err
+}
+
+func delegationStatusFromOutcome(outcome jobsvc.ExecutionOutcome, execErr error) (string, error) {
+	if execErr != nil {
+		return "failed", execErr
+	}
+	if outcome.Run != nil && isFailedDelegationRunStatus(outcome.Run.Status) {
+		return outcome.Run.Status, fmt.Errorf("child run finished with status %s", outcome.Run.Status)
+	}
+	if outcome.Run == nil && isFailedDelegationTaskStatus(outcome.Task.Status) {
+		return outcome.Task.Status, fmt.Errorf("child task finished with status %s", outcome.Task.Status)
+	}
+	return "completed", nil
+}
+
 func isFailedDelegationRunStatus(status string) bool {
 	switch strings.TrimSpace(strings.ToLower(status)) {
 	case "failed", "dead_letter", "timeout", "cancelled":
+		return true
+	default:
+		return false
+	}
+}
+
+func isRetryableDelegationStatus(status string) bool {
+	switch strings.TrimSpace(strings.ToLower(status)) {
+	case "failed", "dead_letter", "timeout", "cancelled", "blocked", "approval_required":
 		return true
 	default:
 		return false
@@ -323,6 +550,51 @@ func isFailedDelegationTaskStatus(status string) bool {
 	default:
 		return false
 	}
+}
+
+func retryInputsFromDelegation(delegation sqlite.Delegation) map[string]string {
+	inputs := map[string]string{}
+	var details map[string]string
+	if err := json.Unmarshal([]byte(delegation.DetailsJSON), &details); err == nil {
+		for key, value := range details {
+			inputs[key] = value
+		}
+	}
+	if inputs["role"] == "" {
+		inputs["role"] = delegation.Role
+	}
+	return inputs
+}
+
+func childSpecFromDelegation(delegation sqlite.Delegation, inputs map[string]string) ChildSpec {
+	return ChildSpec{
+		DelegationKey:   delegation.DelegationKey,
+		Role:            delegation.Role,
+		ActionClass:     delegation.ActionClass,
+		ActionKey:       delegation.ActionKey,
+		MutationMode:    delegation.MutationMode,
+		ConvergenceMode: delegation.ConvergenceMode,
+		ArtifactTarget:  delegation.ArtifactTarget,
+		Executor:        delegation.Executor,
+		SkillKey:        cleanInput(inputs["skill_key"]),
+	}
+}
+
+func retryRequestMetadata(delegation sqlite.Delegation, agentKey string, spec ChildSpec, inputs map[string]string) map[string]string {
+	metadata := map[string]string{
+		"agent_key":      agentKey,
+		"delegation_id":  strconv.FormatInt(delegation.ID, 10),
+		"portal_track":   cleanInput(inputs["portal_track"]),
+		"delegation_key": delegation.DelegationKey,
+		"child_role":     spec.Role,
+		"retry":          "true",
+	}
+	if spec.SkillKey != "" {
+		metadata["requested_skill"] = spec.SkillKey
+		metadata["effective_skill"] = spec.SkillKey
+		metadata["skill_source"] = "agent_template"
+	}
+	return metadata
 }
 
 func (service Service) recordChildCheckpoint(ctx context.Context, childTask sqlite.Task, input RunInput, delegation sqlite.Delegation, spec ChildSpec) error {
