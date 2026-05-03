@@ -2280,6 +2280,42 @@ func runCompanion(ctx context.Context, app bootstrap.App, args []string, stdout 
 		)
 		return err
 	case "delegate":
+		if command.DelegateAction == "list" {
+			resolved, err := companionRunScope(app)
+			if err != nil {
+				return err
+			}
+			view, err := companionDelegationListView(ctx, app.Store, resolved)
+			if err != nil {
+				return err
+			}
+			if command.JSON {
+				return commands.WriteJSON(stdout, view)
+			}
+			_, err = fmt.Fprintf(stdout, "delegations=%d\n", len(view.Delegations))
+			return err
+		}
+		if command.DelegateAction == "show" {
+			resolved, err := companionRunScope(app)
+			if err != nil {
+				return err
+			}
+			view, err := companionDelegationShowView(ctx, app.Store, resolved, command.Key)
+			if err != nil {
+				return err
+			}
+			if command.JSON {
+				return commands.WriteJSON(stdout, view)
+			}
+			_, err = fmt.Fprintf(stdout, "delegation id=%d key=%s status=%s artifacts=%d\n",
+				view.Delegation.ID,
+				view.Delegation.DelegationKey,
+				view.Delegation.Status,
+				len(view.Artifacts),
+			)
+			return err
+		}
+
 		resolved, err := companionRunScope(app)
 		if err != nil {
 			return err
@@ -2326,6 +2362,124 @@ func runCompanion(ctx context.Context, app bootstrap.App, args []string, stdout 
 		return err
 	default:
 		return fmt.Errorf("unsupported companion subcommand: %s", command.Name)
+	}
+}
+
+func companionDelegationListView(ctx context.Context, store *sqlite.Store, resolved cliscope.Resolution) (commands.CompanionDelegationListView, error) {
+	projectID, err := projectIDForResolution(ctx, store, resolved)
+	if err != nil {
+		return commands.CompanionDelegationListView{}, err
+	}
+
+	delegations, err := store.ListDelegations(ctx, sqlite.ListDelegationsParams{ProjectID: projectID})
+	if err != nil {
+		return commands.CompanionDelegationListView{}, err
+	}
+
+	view := commands.CompanionDelegationListView{
+		Delegations: make([]commands.CompanionDelegationView, 0, len(delegations)),
+	}
+	for _, delegation := range delegations {
+		artifacts, err := store.ListDelegationArtifacts(ctx, sqlite.ListDelegationArtifactsParams{DelegationID: delegation.ID})
+		if err != nil {
+			return commands.CompanionDelegationListView{}, err
+		}
+		view.Delegations = append(view.Delegations, renderCompanionDelegationView(delegation, len(artifacts)))
+	}
+	return view, nil
+}
+
+func companionDelegationShowView(ctx context.Context, store *sqlite.Store, resolved cliscope.Resolution, identifier string) (commands.CompanionDelegationDetailView, error) {
+	projectID, err := projectIDForResolution(ctx, store, resolved)
+	if err != nil {
+		return commands.CompanionDelegationDetailView{}, err
+	}
+
+	delegation, err := lookupScopedDelegation(ctx, store, projectID, identifier)
+	if err != nil {
+		return commands.CompanionDelegationDetailView{}, err
+	}
+	artifacts, err := store.ListDelegationArtifacts(ctx, sqlite.ListDelegationArtifactsParams{DelegationID: delegation.ID})
+	if err != nil {
+		return commands.CompanionDelegationDetailView{}, err
+	}
+
+	view := commands.CompanionDelegationDetailView{
+		Delegation: renderCompanionDelegationView(delegation, len(artifacts)),
+		Artifacts:  make([]commands.CompanionDelegationArtifact, 0, len(artifacts)),
+	}
+	for _, artifact := range artifacts {
+		view.Artifacts = append(view.Artifacts, commands.CompanionDelegationArtifact{
+			ID:           artifact.ID,
+			DelegationID: artifact.DelegationID,
+			ArtifactType: artifact.ArtifactType,
+			Summary:      artifact.Summary,
+			DetailsJSON:  artifact.DetailsJSON,
+			CreatedAt:    artifact.CreatedAt,
+		})
+	}
+	return view, nil
+}
+
+func lookupScopedDelegation(ctx context.Context, store *sqlite.Store, projectID *int64, identifier string) (sqlite.Delegation, error) {
+	identifier = strings.TrimSpace(identifier)
+	if identifier == "" {
+		return sqlite.Delegation{}, fmt.Errorf("delegation id or key is required")
+	}
+	if id, err := strconv.ParseInt(identifier, 10, 64); err == nil {
+		delegation, err := store.GetDelegation(ctx, id)
+		if err != nil {
+			return sqlite.Delegation{}, err
+		}
+		if projectID != nil && delegation.ProjectID != *projectID {
+			return sqlite.Delegation{}, sql.ErrNoRows
+		}
+		return delegation, nil
+	}
+
+	delegations, err := store.ListDelegations(ctx, sqlite.ListDelegationsParams{
+		ProjectID:     projectID,
+		DelegationKey: identifier,
+	})
+	if err != nil {
+		return sqlite.Delegation{}, err
+	}
+	if len(delegations) == 0 {
+		return sqlite.Delegation{}, sql.ErrNoRows
+	}
+	if len(delegations) > 1 {
+		return sqlite.Delegation{}, fmt.Errorf("multiple delegations match key %q; use id", identifier)
+	}
+	return delegations[0], nil
+}
+
+func projectIDForResolution(ctx context.Context, store *sqlite.Store, resolved cliscope.Resolution) (*int64, error) {
+	if resolved.Kind != cliscope.ScopeProject && resolved.Kind != cliscope.ScopeOdinCore {
+		return nil, nil
+	}
+	project, err := store.GetProjectByKey(ctx, resolved.ProjectKey)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &project.ID, nil
+}
+
+func renderCompanionDelegationView(delegation sqlite.Delegation, artifactCount int) commands.CompanionDelegationView {
+	return commands.CompanionDelegationView{
+		ID:            delegation.ID,
+		DelegationKey: delegation.DelegationKey,
+		Role:          delegation.Role,
+		Status:        delegation.Status,
+		ParentTaskID:  delegation.ParentTaskID,
+		ParentRunID:   delegation.ParentRunID,
+		ChildTaskID:   delegation.ChildTaskID,
+		ChildRunID:    delegation.ChildRunID,
+		Executor:      delegation.Executor,
+		ArtifactCount: artifactCount,
+		DetailsJSON:   delegation.DetailsJSON,
 	}
 }
 

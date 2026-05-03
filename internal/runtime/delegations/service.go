@@ -273,6 +273,12 @@ func (service Service) runChildDelegation(ctx context.Context, parentTask sqlite
 	childStatus := "completed"
 	if execErr != nil {
 		childStatus = "failed"
+	} else if outcome.Run != nil && isFailedDelegationRunStatus(outcome.Run.Status) {
+		childStatus = outcome.Run.Status
+		execErr = fmt.Errorf("child run finished with status %s", outcome.Run.Status)
+	} else if outcome.Run == nil && isFailedDelegationTaskStatus(outcome.Task.Status) {
+		childStatus = outcome.Task.Status
+		execErr = fmt.Errorf("child task finished with status %s", outcome.Task.Status)
 	}
 	if outcome.Run != nil {
 		delegation, err = service.Store.AttachDelegationChildTask(ctx, sqlite.AttachDelegationChildTaskParams{
@@ -299,6 +305,24 @@ func (service Service) runChildDelegation(ctx context.Context, parentTask sqlite
 		return delegation, fmt.Errorf("execute child task: %w", execErr)
 	}
 	return delegation, nil
+}
+
+func isFailedDelegationRunStatus(status string) bool {
+	switch strings.TrimSpace(strings.ToLower(status)) {
+	case "failed", "dead_letter", "timeout", "cancelled":
+		return true
+	default:
+		return false
+	}
+}
+
+func isFailedDelegationTaskStatus(status string) bool {
+	switch strings.TrimSpace(strings.ToLower(status)) {
+	case "failed", "dead_letter", "timeout", "cancelled", "blocked", "approval_required":
+		return true
+	default:
+		return false
+	}
 }
 
 func (service Service) recordChildCheckpoint(ctx context.Context, childTask sqlite.Task, input RunInput, delegation sqlite.Delegation, spec ChildSpec) error {

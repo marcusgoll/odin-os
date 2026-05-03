@@ -10,17 +10,18 @@ import (
 )
 
 type CompanionCommand struct {
-	Name        string
-	Kind        string
-	Key         string
-	Title       string
-	Objective   string
-	Trigger     string
-	AgentKey    string
-	PortalTrack string
-	Surface     string
-	Goal        string
-	JSON        bool
+	Name           string
+	DelegateAction string
+	Kind           string
+	Key            string
+	Title          string
+	Objective      string
+	Trigger        string
+	AgentKey       string
+	PortalTrack    string
+	Surface        string
+	Goal           string
+	JSON           bool
 }
 
 type CompanionView struct {
@@ -130,6 +131,26 @@ type CompanionDelegationView struct {
 	ChildTaskID   *int64 `json:"child_task_id,omitempty"`
 	ChildRunID    *int64 `json:"child_run_id,omitempty"`
 	Executor      string `json:"executor"`
+	ArtifactCount int    `json:"artifact_count,omitempty"`
+	DetailsJSON   string `json:"details_json,omitempty"`
+}
+
+type CompanionDelegationListView struct {
+	Delegations []CompanionDelegationView `json:"delegations"`
+}
+
+type CompanionDelegationDetailView struct {
+	Delegation CompanionDelegationView       `json:"delegation"`
+	Artifacts  []CompanionDelegationArtifact `json:"artifacts"`
+}
+
+type CompanionDelegationArtifact struct {
+	ID           int64     `json:"id"`
+	DelegationID int64     `json:"delegation_id"`
+	ArtifactType string    `json:"artifact_type"`
+	Summary      string    `json:"summary"`
+	DetailsJSON  string    `json:"details_json"`
+	CreatedAt    time.Time `json:"created_at"`
 }
 
 func ParseCompanion(args []string) (CompanionCommand, error) {
@@ -210,6 +231,13 @@ func ParseCompanion(args []string) (CompanionCommand, error) {
 			if strings.HasPrefix(args[index], "--") {
 				return CompanionCommand{}, fmt.Errorf("unknown companion argument: %s", args[index])
 			}
+			if command.Name == "delegate" && command.DelegateAction == "" {
+				delegateAction := strings.ToLower(strings.TrimSpace(args[index]))
+				if delegateAction == "list" || delegateAction == "show" {
+					command.DelegateAction = delegateAction
+					continue
+				}
+			}
 			if command.Name == "create" || command.Name == "list" {
 				return CompanionCommand{}, fmt.Errorf("unknown companion argument: %s", args[index])
 			}
@@ -278,6 +306,27 @@ func ParseCompanion(args []string) (CompanionCommand, error) {
 		if command.Title != "" || command.Objective != "" || command.Trigger != "" {
 			return CompanionCommand{}, fmt.Errorf("companion delegate does not accept create or run flags")
 		}
+		switch command.DelegateAction {
+		case "list":
+			if command.Key != "" {
+				return CompanionCommand{}, fmt.Errorf("companion delegate list does not accept an identifier")
+			}
+			if command.AgentKey != "" || command.PortalTrack != "" || command.Surface != "" || command.Goal != "" {
+				return CompanionCommand{}, fmt.Errorf("companion delegate list does not accept create flags")
+			}
+			return command, nil
+		case "show":
+			if command.Key == "" {
+				return CompanionCommand{}, fmt.Errorf("companion delegate show requires an id or key")
+			}
+			if command.AgentKey != "" || command.PortalTrack != "" || command.Surface != "" || command.Goal != "" {
+				return CompanionCommand{}, fmt.Errorf("companion delegate show does not accept create flags")
+			}
+			return command, nil
+		case "":
+		default:
+			return CompanionCommand{}, fmt.Errorf("unsupported companion delegate action: %s", command.DelegateAction)
+		}
 		if command.Key == "" {
 			return CompanionCommand{}, fmt.Errorf("companion delegate requires a key")
 		}
@@ -295,7 +344,7 @@ func ParseCompanion(args []string) (CompanionCommand, error) {
 	return command, nil
 }
 
-const companionUsage = "usage: odin companion <create|list> [--kind <kind>] [--key <key>] [--title <title>] [--json] | odin companion <get|state|capabilities> <key> [--json] | odin companion run <key> --objective <objective> [--trigger <trigger>] [--json] | odin companion delegate <key> --agent <agent-key> --portal-track <track> --surface <surface> [--goal <goal>] [--json]"
+const companionUsage = "usage: odin companion <create|list> [--kind <kind>] [--key <key>] [--title <title>] [--json] | odin companion <get|state|capabilities> <key> [--json] | odin companion run <key> --objective <objective> [--trigger <trigger>] [--json] | odin companion delegate <key> --agent <agent-key> --portal-track <track> --surface <surface> [--goal <goal>] [--json] | odin companion delegate <list|show <id|key>> [--json]"
 
 func isSupportedCompanionKind(kind string) bool {
 	switch corecompanions.Kind(strings.ToLower(kind)) {

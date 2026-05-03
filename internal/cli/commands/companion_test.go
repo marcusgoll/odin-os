@@ -161,6 +161,41 @@ func TestParseCompanionDelegateJSON(t *testing.T) {
 	}
 }
 
+func TestParseCompanionDelegateListAndShow(t *testing.T) {
+	t.Parallel()
+
+	listCommand, err := ParseCompanion([]string{"delegate", "list", "--json"})
+	if err != nil {
+		t.Fatalf("ParseCompanion(delegate list) error = %v", err)
+	}
+	if listCommand.Name != "delegate" {
+		t.Fatalf("Name = %q, want delegate", listCommand.Name)
+	}
+	if listCommand.DelegateAction != "list" {
+		t.Fatalf("DelegateAction = %q, want list", listCommand.DelegateAction)
+	}
+	if !listCommand.JSON {
+		t.Fatal("JSON = false, want true")
+	}
+
+	showCommand, err := ParseCompanion([]string{"delegate", "show", "ia-audit", "--json"})
+	if err != nil {
+		t.Fatalf("ParseCompanion(delegate show) error = %v", err)
+	}
+	if showCommand.Name != "delegate" {
+		t.Fatalf("Name = %q, want delegate", showCommand.Name)
+	}
+	if showCommand.DelegateAction != "show" {
+		t.Fatalf("DelegateAction = %q, want show", showCommand.DelegateAction)
+	}
+	if showCommand.Key != "ia-audit" {
+		t.Fatalf("Key = %q, want ia-audit", showCommand.Key)
+	}
+	if !showCommand.JSON {
+		t.Fatal("JSON = false, want true")
+	}
+}
+
 func TestParseCompanionRunRejectsMissingObjective(t *testing.T) {
 	t.Parallel()
 
@@ -172,6 +207,9 @@ func TestParseCompanionRunRejectsMissingObjective(t *testing.T) {
 func TestParseCompanionDelegateRejectsMissingInputs(t *testing.T) {
 	t.Parallel()
 
+	if _, err := ParseCompanion([]string{"delegate", "show"}); err == nil {
+		t.Fatal("ParseCompanion() error = nil, want missing show identifier error")
+	}
 	if _, err := ParseCompanion([]string{"delegate", "primary", "--agent", "portal-delivery-agent", "--surface", "dashboard"}); err == nil {
 		t.Fatal("ParseCompanion() error = nil, want missing portal-track error")
 	}

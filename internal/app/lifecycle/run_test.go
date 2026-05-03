@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -1212,6 +1213,9 @@ func TestRunWorkDispatchCreatesRunAttemptFromAcceptedIntake(t *testing.T) {
 	if err := Run(context.Background(), root, []string{"project", "select", testProjectKey}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
 		t.Fatalf("Run(project select) error = %v", err)
 	}
+	if err := Run(context.Background(), root, []string{"transition", "set", "cutover", "confirm", "because", "delegation inspection test"}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+		t.Fatalf("Run(transition set) error = %v", err)
+	}
 	if err := Run(context.Background(), root, []string{"transition", "set", "cutover", "confirm", "because", "delegation operator proof"}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
 		t.Fatalf("Run(transition set) error = %v", err)
 	}
@@ -1359,6 +1363,9 @@ func TestRunWorkExecuteCompletesDispatchedIntakeRun(t *testing.T) {
 	}
 	if err := Run(context.Background(), root, []string{"project", "select", testProjectKey}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
 		t.Fatalf("Run(project select) error = %v", err)
+	}
+	if err := Run(context.Background(), root, []string{"transition", "set", "cutover", "confirm", "because", "failed delegation inspection test"}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+		t.Fatalf("Run(transition set) error = %v", err)
 	}
 	if err := Run(context.Background(), root, []string{"transition", "set", "cutover", "confirm", "because", "execute test"}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
 		t.Fatalf("Run(transition set) error = %v", err)
@@ -1802,11 +1809,15 @@ func TestCompanionRunCreatesOwnedTaskInDefaultScope(t *testing.T) {
 
 func TestCompanionDelegateCreatesAuditableChildWork(t *testing.T) {
 	configureLifecycleHarnessDriver(t)
+	t.Setenv("HOME", t.TempDir())
 
 	root := testRepoRoot(t)
 	seedDelegationSkillFixture(t, root)
 	if err := Run(context.Background(), root, []string{"project", "select", testProjectKey}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
 		t.Fatalf("Run(project select) error = %v", err)
+	}
+	if err := Run(context.Background(), root, []string{"transition", "set", "cutover", "confirm", "because", "delegation inspection test"}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+		t.Fatalf("Run(transition set) error = %v", err)
 	}
 
 	var output bytes.Buffer
@@ -1837,6 +1848,50 @@ func TestCompanionDelegateCreatesAuditableChildWork(t *testing.T) {
 	} {
 		if !strings.Contains(output.String(), want) {
 			t.Fatalf("delegate output = %s, want %s", output.String(), want)
+		}
+	}
+	var delegatePayload struct {
+		ChildDelegations []struct {
+			ID            int64  `json:"id"`
+			DelegationKey string `json:"delegation_key"`
+		} `json:"child_delegations"`
+	}
+	if err := json.Unmarshal(output.Bytes(), &delegatePayload); err != nil {
+		t.Fatalf("delegate json = %v\n%s", err, output.String())
+	}
+	if len(delegatePayload.ChildDelegations) == 0 {
+		t.Fatalf("child delegations len = 0, want delegated children")
+	}
+
+	var listOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"companion", "delegate", "list", "--json"}, strings.NewReader(""), &listOutput); err != nil {
+		t.Fatalf("Run(companion delegate list --json) error = %v\nstdout:\n%s", err, listOutput.String())
+	}
+	for _, want := range []string{
+		`"delegations"`,
+		`"delegation_key": "ia-audit"`,
+		`"parent_task_id":`,
+		`"parent_run_id":`,
+		`"child_task_id":`,
+		`"artifact_count":`,
+	} {
+		if !strings.Contains(listOutput.String(), want) {
+			t.Fatalf("delegate list output = %s, want %s", listOutput.String(), want)
+		}
+	}
+
+	var showOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"companion", "delegate", "show", strconv.FormatInt(delegatePayload.ChildDelegations[0].ID, 10), "--json"}, strings.NewReader(""), &showOutput); err != nil {
+		t.Fatalf("Run(companion delegate show --json) error = %v\nstdout:\n%s", err, showOutput.String())
+	}
+	for _, want := range []string{
+		`"delegation"`,
+		`"artifacts"`,
+		`"artifact_type": "run_summary"`,
+		`"details_json":`,
+	} {
+		if !strings.Contains(showOutput.String(), want) {
+			t.Fatalf("delegate show output = %s, want %s", showOutput.String(), want)
 		}
 	}
 
@@ -1871,6 +1926,65 @@ func TestCompanionDelegateCreatesAuditableChildWork(t *testing.T) {
 	} {
 		if !strings.Contains(overviewOutput.String(), want) {
 			t.Fatalf("overview output = %s, want %s", overviewOutput.String(), want)
+		}
+	}
+}
+
+func TestCompanionDelegateListShowsFailedPartialLifecycle(t *testing.T) {
+	configureLifecycleHarnessDriverStatus(t, "failed", "delegated child failed proof")
+	t.Setenv("HOME", t.TempDir())
+
+	root := testRepoRoot(t)
+	seedDelegationSkillFixture(t, root)
+	if err := Run(context.Background(), root, []string{"project", "select", testProjectKey}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+		t.Fatalf("Run(project select) error = %v", err)
+	}
+
+	var output bytes.Buffer
+	err := Run(context.Background(), root, []string{
+		"companion",
+		"delegate",
+		"primary",
+		"--agent",
+		"portal-delivery-agent",
+		"--portal-track",
+		"admin",
+		"--surface",
+		"dashboard",
+		"--goal",
+		"audit failed delegated operator path",
+		"--json",
+	}, strings.NewReader(""), &output)
+	if err == nil {
+		t.Fatalf("Run(companion delegate) error = nil, want failed child execution\nstdout:\n%s", output.String())
+	}
+
+	var listOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"companion", "delegate", "list", "--json"}, strings.NewReader(""), &listOutput); err != nil {
+		t.Fatalf("Run(companion delegate list --json) error = %v\nstdout:\n%s", err, listOutput.String())
+	}
+	for _, want := range []string{
+		`"delegations"`,
+		`"status": "failed"`,
+		`"child_task_id":`,
+		`"artifact_count":`,
+	} {
+		if !strings.Contains(listOutput.String(), want) {
+			t.Fatalf("delegate list output = %s, want %s", listOutput.String(), want)
+		}
+	}
+
+	var logsOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"logs", "--json"}, strings.NewReader(""), &logsOutput); err != nil {
+		t.Fatalf("Run(logs --json) error = %v", err)
+	}
+	for _, want := range []string{
+		`"type": "delegation.status_changed"`,
+		`"status": "failed"`,
+		`transition_denied`,
+	} {
+		if !strings.Contains(logsOutput.String(), want) {
+			t.Fatalf("logs output = %s, want %s", logsOutput.String(), want)
 		}
 	}
 }
