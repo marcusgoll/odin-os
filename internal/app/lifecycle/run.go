@@ -1936,10 +1936,16 @@ func runLogs(ctx context.Context, app bootstrap.App, args []string, stdout io.Wr
 		logViews := make([]commands.LogView, 0, len(records))
 		for _, record := range records {
 			logViews = append(logViews, commands.LogView{
-				ID:      record.ID,
-				Type:    string(record.Type),
-				Scope:   record.Scope,
-				Payload: record.Payload,
+				ID:         record.ID,
+				StreamType: string(record.StreamType),
+				StreamID:   record.StreamID,
+				Type:       string(record.Type),
+				Scope:      record.Scope,
+				ProjectID:  record.ProjectID,
+				TaskID:     record.TaskID,
+				RunID:      record.RunID,
+				OccurredAt: record.OccurredAt.UTC().Format(time.RFC3339),
+				Payload:    record.Payload,
 			})
 		}
 		return commands.WriteJSON(stdout, commands.LogsView{Logs: logViews})

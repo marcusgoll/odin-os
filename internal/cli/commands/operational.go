@@ -60,10 +60,16 @@ type ApprovalsView struct {
 }
 
 type LogView struct {
-	ID      int64           `json:"id"`
-	Type    string          `json:"type"`
-	Scope   string          `json:"scope"`
-	Payload json.RawMessage `json:"payload,omitempty"`
+	ID         int64           `json:"id"`
+	StreamType string          `json:"stream_type"`
+	StreamID   int64           `json:"stream_id"`
+	Type       string          `json:"type"`
+	Scope      string          `json:"scope"`
+	ProjectID  *int64          `json:"project_id,omitempty"`
+	TaskID     *int64          `json:"task_id,omitempty"`
+	RunID      *int64          `json:"run_id,omitempty"`
+	OccurredAt string          `json:"occurred_at"`
+	Payload    json.RawMessage `json:"payload,omitempty"`
 }
 
 type LogsView struct {

@@ -109,8 +109,8 @@ func TestBuildReturnsCanonicalOverviewFromCurrentAuthority(t *testing.T) {
 	if len(view.Memory.Recent) != 1 || view.Memory.Count != 1 {
 		t.Fatalf("Memory = %+v, want one recent entry", view.Memory)
 	}
-	if view.IntakeInbox.Wiring != WiringNotYetWired {
-		t.Fatalf("Intake wiring = %q, want %q", view.IntakeInbox.Wiring, WiringNotYetWired)
+	if view.IntakeInbox.Wiring != WiringLive {
+		t.Fatalf("Intake wiring = %q, want %q", view.IntakeInbox.Wiring, WiringLive)
 	}
 	if view.IntakeInbox.Source != "task_intakes" {
 		t.Fatalf("Intake source = %q, want task_intakes", view.IntakeInbox.Source)
@@ -118,8 +118,8 @@ func TestBuildReturnsCanonicalOverviewFromCurrentAuthority(t *testing.T) {
 	if view.IntakeInbox.Status != "linked_evidence" {
 		t.Fatalf("Intake status = %q, want linked_evidence", view.IntakeInbox.Status)
 	}
-	if !strings.Contains(view.IntakeInbox.Note, "raw Intake Items are available through odin intake raw") {
-		t.Fatalf("Intake note = %q, want raw intake operator surface note", view.IntakeInbox.Note)
+	if !strings.Contains(view.IntakeInbox.Note, "linked intake evidence") {
+		t.Fatalf("Intake note = %q, want linked intake evidence note", view.IntakeInbox.Note)
 	}
 	if len(view.IntakeInbox.Items) != 1 {
 		t.Fatalf("Intake items len = %d, want 1", len(view.IntakeInbox.Items))

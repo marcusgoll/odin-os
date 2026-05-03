@@ -3,6 +3,7 @@ package overview
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -242,9 +243,32 @@ type IntakeInboxLane struct {
 	Note                        string                  `json:"note"`
 	RawItemCount                int                     `json:"raw_item_count"`
 	RawProcessedCount           int                     `json:"raw_processed_count"`
+	ReviewRequiredCount         int                     `json:"review_required_count"`
+	NeedsClarificationCount     int                     `json:"needs_clarification_count"`
+	DuplicateLinkedCount        int                     `json:"duplicate_linked_or_suppressed_count"`
 	ReviewQueueCount            int                     `json:"review_queue_count"`
 	IntakeApprovalRequiredCount int                     `json:"intake_approval_required_count"`
+	AcceptedCount               int                     `json:"accepted_count"`
+	RejectedCount               int                     `json:"rejected_count"`
+	ArchivedCount               int                     `json:"archived_count"`
+	ApprovalDeniedCount         int                     `json:"approval_denied_count"`
+	RawItems                    []RawIntakeSummary      `json:"raw_items"`
 	Items                       []IntakeEvidenceSummary `json:"items"`
+}
+
+type RawIntakeSummary struct {
+	ID          int64  `json:"id"`
+	Key         string `json:"key"`
+	ProjectKey  string `json:"project_key,omitempty"`
+	Source      string `json:"source"`
+	IntakeType  string `json:"intake_type"`
+	DedupKey    string `json:"dedup_key"`
+	RequestedBy string `json:"requested_by,omitempty"`
+	Title       string `json:"title"`
+	Status      string `json:"status"`
+	Summary     string `json:"summary,omitempty"`
+	CreatedAt   string `json:"created_at"`
+	UpdatedAt   string `json:"updated_at"`
 }
 
 type IntakeEvidenceSummary struct {
@@ -305,9 +329,10 @@ func (service Service) Build(ctx context.Context, resolved scope.Resolution) (Vi
 			Wiring: WiringLive,
 		},
 		IntakeInbox: IntakeInboxLane{
-			Wiring: WiringNotYetWired,
-			Status: "unavailable",
-			Note:   "raw Intake Items are available through odin intake raw; overview shows linked task intake evidence only",
+			Wiring: WiringLive,
+			Source: "intake_items",
+			Status: "empty",
+			Note:   "governed intake items and linked task intake evidence are summarized from the runtime store",
 		},
 		AutomationTriggers: AutomationTriggerLane{
 			Wiring: WiringNotYetWired,
@@ -736,28 +761,50 @@ func (service Service) Build(ctx context.Context, resolved scope.Resolution) (Vi
 			CreatedAt:      intake.CreatedAt,
 		})
 	}
-	if len(view.IntakeInbox.Items) > 0 {
-		view.IntakeInbox.Status = "linked_evidence"
-		view.IntakeInbox.Note = "task_intakes are linked intake evidence; raw Intake Items are available through odin intake raw"
-	}
 	rawIntakeItems, err := service.Store.ListIntakeItems(ctx, sqlite.ListIntakeItemsParams{WorkspaceID: workspaces.DefaultWorkspaceKey})
 	if err != nil {
 		return View{}, err
 	}
+	view.IntakeInbox.Source = "intake_items"
 	view.IntakeInbox.RawItemCount = len(rawIntakeItems)
 	for _, item := range rawIntakeItems {
-		if item.Status != "received" {
+		status := strings.ToLower(strings.TrimSpace(item.Status))
+		if status != "received" {
 			view.IntakeInbox.RawProcessedCount++
 		}
-		if isReviewableIntakeStatus(item.Status) {
+		if isReviewableIntakeStatus(status) {
 			view.IntakeInbox.ReviewQueueCount++
 		}
-		if strings.EqualFold(strings.TrimSpace(item.Status), "approval_required") {
+		switch status {
+		case "review_required":
+			view.IntakeInbox.ReviewRequiredCount++
+		case "needs_clarification":
+			view.IntakeInbox.NeedsClarificationCount++
+		case "duplicate_linked_or_suppressed":
+			view.IntakeInbox.DuplicateLinkedCount++
+		case "approval_required":
 			view.IntakeInbox.IntakeApprovalRequiredCount++
+		case "accepted":
+			view.IntakeInbox.AcceptedCount++
+		case "rejected":
+			view.IntakeInbox.RejectedCount++
+		case "archived":
+			view.IntakeInbox.ArchivedCount++
+		case "approval_denied":
+			view.IntakeInbox.ApprovalDeniedCount++
 		}
+		view.IntakeInbox.RawItems = append(view.IntakeInbox.RawItems, rawIntakeSummary(item))
 	}
-	if len(rawIntakeItems) > 0 && len(view.IntakeInbox.Items) == 0 {
-		view.IntakeInbox.Status = "raw_review"
+	if len(rawIntakeItems) > 0 {
+		if len(view.IntakeInbox.Items) > 0 {
+			view.IntakeInbox.Source = "intake_items_and_task_intakes"
+		}
+		view.IntakeInbox.Status = intakeLaneStatus(view.IntakeInbox)
+		view.IntakeInbox.Note = "governed intake lifecycle is live; raw, review, approval, and accepted states are counted before task execution"
+	} else if len(view.IntakeInbox.Items) > 0 {
+		view.IntakeInbox.Source = "task_intakes"
+		view.IntakeInbox.Status = "linked_evidence"
+		view.IntakeInbox.Note = "task_intakes are linked intake evidence; no raw governed intake items are currently present"
 	}
 
 	followUpViews, err := projections.ListFollowUpSummaryViews(ctx, service.Store.DB(), workspaces.DefaultWorkspaceKey, service.now())
@@ -1013,5 +1060,54 @@ func isReviewableIntakeStatus(status string) bool {
 		return true
 	default:
 		return false
+	}
+}
+
+func rawIntakeSummary(item sqlite.IntakeItem) RawIntakeSummary {
+	return RawIntakeSummary{
+		ID:          item.ID,
+		Key:         fmt.Sprintf("intake-%d", item.ID),
+		ProjectKey:  rawIntakeProjectKey(item),
+		Source:      item.SourceFamily,
+		IntakeType:  item.EventKind,
+		DedupKey:    item.DedupeKey,
+		RequestedBy: rawIntakeRequestedBy(item.SourceFactsJSON),
+		Title:       item.Subject,
+		Status:      item.Status,
+		Summary:     item.Summary,
+		CreatedAt:   item.CreatedAt.UTC().Format(time.RFC3339),
+		UpdatedAt:   item.UpdatedAt.UTC().Format(time.RFC3339),
+	}
+}
+
+func rawIntakeProjectKey(item sqlite.IntakeItem) string {
+	switch strings.TrimSpace(item.Scope) {
+	case "project", "odin-core":
+		return strings.TrimSpace(item.ScopeKey)
+	default:
+		return ""
+	}
+}
+
+func rawIntakeRequestedBy(sourceFactsJSON string) string {
+	var facts struct {
+		RequestedBy string `json:"requested_by"`
+	}
+	if err := json.Unmarshal([]byte(sourceFactsJSON), &facts); err != nil {
+		return ""
+	}
+	return facts.RequestedBy
+}
+
+func intakeLaneStatus(lane IntakeInboxLane) string {
+	switch {
+	case lane.IntakeApprovalRequiredCount > 0:
+		return "approval_pending"
+	case lane.ReviewQueueCount > 0:
+		return "review_pending"
+	case lane.RawProcessedCount > 0:
+		return "processed"
+	default:
+		return "received"
 	}
 }

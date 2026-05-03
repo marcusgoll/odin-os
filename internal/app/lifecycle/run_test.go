@@ -374,8 +374,8 @@ func TestRunOverviewJSONUsesCanonicalView(t *testing.T) {
 	if payload.CapabilityCatalog.ToolCount == 0 {
 		t.Fatalf("CapabilityCatalog = %+v, want populated builtin tool count", payload.CapabilityCatalog)
 	}
-	if payload.IntakeInbox.Wiring != clioverview.WiringNotYetWired {
-		t.Fatalf("IntakeInbox.Wiring = %q, want %q", payload.IntakeInbox.Wiring, clioverview.WiringNotYetWired)
+	if payload.IntakeInbox.Wiring != clioverview.WiringLive {
+		t.Fatalf("IntakeInbox.Wiring = %q, want %q", payload.IntakeInbox.Wiring, clioverview.WiringLive)
 	}
 	if payload.AutomationTriggers.Wiring != clioverview.WiringLive {
 		t.Fatalf("AutomationTriggers.Wiring = %q, want %q", payload.AutomationTriggers.Wiring, clioverview.WiringLive)
@@ -1031,6 +1031,102 @@ func TestRunIntakeApprovalResolutionPromotesOrDeniesRiskyIntake(t *testing.T) {
 	}
 	if output := workStatusOutput.String(); !strings.Contains(output, "work_items=1") || !strings.Contains(output, "intake_approval_required_items=0") {
 		t.Fatalf("work status output = %s, want one work item and no pending intake approvals", output)
+	}
+}
+
+func TestRunIntakeLifecycleIsVisibleInProjectLogsAndOverview(t *testing.T) {
+	t.Parallel()
+
+	root := testRepoRoot(t)
+	payloadPath := filepath.Join(t.TempDir(), "payload.json")
+	if err := os.WriteFile(payloadPath, []byte(`{"body":"operator auditability proof"}`), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	run := func(args ...string) string {
+		t.Helper()
+		var output bytes.Buffer
+		if err := Run(context.Background(), root, args, strings.NewReader(""), &output); err != nil {
+			t.Fatalf("Run(%v) error = %v\noutput=%s", args, err, output.String())
+		}
+		return output.String()
+	}
+	createRaw := func(title, dedup string) {
+		t.Helper()
+		run(
+			"intake", "raw", "create",
+			"--source", "operator",
+			"--project", testProjectKey,
+			"--title", title,
+			"--type", "request",
+			"--dedup-key", dedup,
+			"--requested-by", "codex",
+			"--payload-file", payloadPath,
+			"--json",
+		)
+	}
+
+	run("project", "select", testProjectKey)
+	run("transition", "set", "cutover", "confirm", "because", "intake auditability test")
+
+	createRaw("Prepare weekly status summary", "audit-clear")
+	createRaw("Help with this", "audit-vague")
+	createRaw("Prepare weekly status summary duplicate", "audit-clear")
+	createRaw("Delete production cache after approval", "audit-risk-approve")
+	createRaw("Delete production archive after approval", "audit-risk-deny")
+
+	for _, id := range []string{"intake-1", "intake-2", "intake-3", "intake-4", "intake-5"} {
+		run("intake", "process", "--id", id, "--json")
+	}
+	run("intake", "review", "accept", "intake-1", "--json")
+	run("intake", "review", "accept", "intake-4", "--json")
+	run("intake", "review", "accept", "intake-5", "--json")
+	run("intake", "approval", "approve", "intake-4", "--json")
+	run("intake", "approval", "deny", "intake-5", "--json")
+
+	logsOutput := run("logs", "--json")
+	for _, want := range []string{
+		`"stream_type": "intake_item"`,
+		`"stream_id": 1`,
+		`"project_id":`,
+		`"type": "intake.processing_started"`,
+		`"type": "intake.classified"`,
+		`"type": "intake.dedupe_reviewed"`,
+		`"type": "intake.routed"`,
+		`"type": "intake.draft_artifact_created"`,
+		`"type": "intake.clarification_needed"`,
+		`"type": "intake.duplicate_linked_or_suppressed"`,
+		`"type": "intake.review_accepted"`,
+		`"type": "intake.review_approval_required"`,
+		`"type": "intake.approval_approved"`,
+		`"type": "intake.approval_denied"`,
+		`"intake_item_id": 4`,
+		`"policy_reason": "operator_approved_risky_intake"`,
+		`"policy_reason": "operator_denied_risky_intake"`,
+	} {
+		if !strings.Contains(logsOutput, want) {
+			t.Fatalf("logs output = %s, want %s", logsOutput, want)
+		}
+	}
+
+	overviewOutput := run("overview", "--json")
+	for _, want := range []string{
+		`"intake_inbox":`,
+		`"wiring": "live"`,
+		`"raw_item_count": 5`,
+		`"raw_processed_count": 5`,
+		`"review_queue_count": 2`,
+		`"accepted_count": 2`,
+		`"needs_clarification_count": 1`,
+		`"duplicate_linked_or_suppressed_count": 1`,
+		`"approval_denied_count": 1`,
+		`"key": "intake-4"`,
+		`"status": "accepted"`,
+		`"key": "intake-5"`,
+		`"status": "approval_denied"`,
+	} {
+		if !strings.Contains(overviewOutput, want) {
+			t.Fatalf("overview output = %s, want %s", overviewOutput, want)
+		}
 	}
 }
 

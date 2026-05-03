@@ -525,11 +525,16 @@ func (store *Store) CreateIntakeItem(ctx context.Context, params CreateIntakeIte
 			UpdatedAt:                now,
 		}
 
+		projectID, err := projectIDForIntakeScopeTx(ctx, tx, params.Scope, params.ScopeKey)
+		if err != nil {
+			return err
+		}
 		return appendEventTx(ctx, tx, eventInsert{
 			StreamType: runtimeevents.StreamIntakeItem,
 			StreamID:   itemID,
 			EventType:  runtimeevents.EventIntakeItemCreated,
 			Scope:      params.Scope,
+			ProjectID:  projectID,
 			Payload: runtimeevents.IntakeItemCreatedPayload{
 				WorkspaceID:         params.WorkspaceID,
 				SourceFamily:        params.SourceFamily,
@@ -614,6 +619,10 @@ func (store *Store) ProcessIntakeItem(ctx context.Context, params ProcessIntakeI
 		if err != nil {
 			return err
 		}
+		projectID, err := projectIDForIntakeScopeTx(ctx, tx, existing.Scope, existing.ScopeKey)
+		if err != nil {
+			return err
+		}
 		if _, err := tx.ExecContext(ctx, `
 			UPDATE intake_items
 			SET status = ?, summary = ?, canonical_intake_item_id = ?, suppression_reason = ?, routing_notes = ?, updated_at = ?
@@ -645,6 +654,7 @@ func (store *Store) ProcessIntakeItem(ctx context.Context, params ProcessIntakeI
 				StreamID:   params.ID,
 				EventType:  processingEvent.Type,
 				Scope:      existing.Scope,
+				ProjectID:  projectID,
 				Payload:    payload,
 				OccurredAt: now,
 			}); err != nil {
@@ -662,6 +672,10 @@ func (store *Store) ReviewIntakeItem(ctx context.Context, params ReviewIntakeIte
 	var item IntakeItem
 	err := store.withTx(ctx, func(tx *sql.Tx) error {
 		existing, err := store.getIntakeItemTx(ctx, tx, params.ID)
+		if err != nil {
+			return err
+		}
+		projectID, err := projectIDForIntakeScopeTx(ctx, tx, existing.Scope, existing.ScopeKey)
 		if err != nil {
 			return err
 		}
@@ -683,6 +697,7 @@ func (store *Store) ReviewIntakeItem(ctx context.Context, params ReviewIntakeIte
 			StreamID:   params.ID,
 			EventType:  params.EventType,
 			Scope:      existing.Scope,
+			ProjectID:  projectID,
 			TaskID:     params.WorkItemID,
 			Payload: runtimeevents.IntakeReviewDecisionPayload{
 				IntakeItemID:      params.ID,
@@ -6382,6 +6397,25 @@ func (store *Store) getProjectTx(ctx context.Context, tx *sql.Tx, projectID int6
 		WHERE id = ?
 	`, projectID)
 	return scanProject(row)
+}
+
+func projectIDForIntakeScopeTx(ctx context.Context, tx *sql.Tx, scopeValue string, scopeKey string) (*int64, error) {
+	scopeValue = strings.TrimSpace(scopeValue)
+	scopeKey = strings.TrimSpace(scopeKey)
+	if scopeKey == "" || (scopeValue != "project" && scopeValue != "odin-core") {
+		return nil, nil
+	}
+
+	var projectID int64
+	err := tx.QueryRowContext(ctx, `SELECT id FROM projects WHERE key = ?`, scopeKey).Scan(&projectID)
+	switch {
+	case err == nil:
+		return &projectID, nil
+	case errors.Is(err, sql.ErrNoRows):
+		return nil, nil
+	default:
+		return nil, err
+	}
 }
 
 func (store *Store) upsertProjectTx(ctx context.Context, tx *sql.Tx, params UpsertProjectParams, now time.Time) (Project, error) {
