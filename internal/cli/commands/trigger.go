@@ -11,7 +11,7 @@ import (
 	"odin-os/internal/store/sqlite"
 )
 
-const TriggerUsage = "trigger [list|show <key>|upsert <key>|fire <key>|evaluate] [key=value ...]"
+const TriggerUsage = "trigger [list|show <key>|upsert <key>|fire <key>|evaluate] [key=value ...] [--json]"
 
 func RunTrigger(ctx context.Context, service triggers.Service, args []string, stdout io.Writer) error {
 	if len(args) == 0 {
@@ -21,12 +21,16 @@ func RunTrigger(ctx context.Context, service triggers.Service, args []string, st
 		_, err := fmt.Fprintf(stdout, "usage: odin %s\n", TriggerUsage)
 		return err
 	}
+	jsonOutput, args, err := consumeTriggerJSONFlag(args)
+	if err != nil {
+		return err
+	}
 	if args[0] == "list" {
 		options, err := parseOptionTokens(args[1:])
 		if err != nil {
 			return err
 		}
-		return runTriggerList(ctx, service, options["workspace"], stdout)
+		return runTriggerList(ctx, service, options["workspace"], stdout, jsonOutput)
 	}
 
 	switch strings.ToLower(args[0]) {
@@ -38,7 +42,7 @@ func RunTrigger(ctx context.Context, service triggers.Service, args []string, st
 		if err != nil {
 			return err
 		}
-		return runTriggerShow(ctx, service, options["workspace"], args[1], stdout)
+		return runTriggerShow(ctx, service, options["workspace"], args[1], stdout, jsonOutput)
 	case "upsert":
 		if len(args) < 2 {
 			return fmt.Errorf("usage: odin %s", TriggerUsage)
@@ -67,6 +71,9 @@ func RunTrigger(ctx context.Context, service triggers.Service, args []string, st
 		if err != nil {
 			return err
 		}
+		if jsonOutput {
+			return WriteJSON(stdout, triggerEnvelope{Trigger: newAutomationTriggerView(trigger)})
+		}
 		_, err = fmt.Fprintf(stdout, "trigger=%s status=%s workspace=%s initiative=%s kind=%s\n",
 			trigger.Key,
 			trigger.Status,
@@ -92,6 +99,9 @@ func RunTrigger(ctx context.Context, service triggers.Service, args []string, st
 		if err != nil {
 			return err
 		}
+		if jsonOutput {
+			return WriteJSON(stdout, newTriggerFireView(result))
+		}
 		_, err = fmt.Fprintf(stdout, "trigger=%s status=%s materialization_key=%s work_item=%s created=%t\n",
 			result.Trigger.Key,
 			result.Trigger.Status,
@@ -113,6 +123,9 @@ func RunTrigger(ctx context.Context, service triggers.Service, args []string, st
 		if err != nil {
 			return err
 		}
+		if jsonOutput {
+			return WriteJSON(stdout, newTriggerEvaluateView(result))
+		}
 		_, err = fmt.Fprintf(stdout, "automation_trigger_evaluation evaluated=%d materialized=%d errored=%d\n",
 			result.Evaluated,
 			result.Materialized,
@@ -124,10 +137,17 @@ func RunTrigger(ctx context.Context, service triggers.Service, args []string, st
 	}
 }
 
-func runTriggerList(ctx context.Context, service triggers.Service, workspaceID string, stdout io.Writer) error {
+func runTriggerList(ctx context.Context, service triggers.Service, workspaceID string, stdout io.Writer, jsonOutput bool) error {
 	items, err := service.List(ctx, workspaceID)
 	if err != nil {
 		return err
+	}
+	if jsonOutput {
+		views := make([]automationTriggerView, 0, len(items))
+		for _, item := range items {
+			views = append(views, newAutomationTriggerView(item))
+		}
+		return WriteJSON(stdout, triggerListView{Triggers: views})
 	}
 	if _, err := fmt.Fprintf(stdout, "automation_triggers total=%d\n", len(items)); err != nil {
 		return err
@@ -150,10 +170,13 @@ func runTriggerList(ctx context.Context, service triggers.Service, workspaceID s
 	return nil
 }
 
-func runTriggerShow(ctx context.Context, service triggers.Service, workspaceID string, key string, stdout io.Writer) error {
+func runTriggerShow(ctx context.Context, service triggers.Service, workspaceID string, key string, stdout io.Writer, jsonOutput bool) error {
 	item, err := service.Show(ctx, workspaceID, key)
 	if err != nil {
 		return err
+	}
+	if jsonOutput {
+		return WriteJSON(stdout, triggerEnvelope{Trigger: newAutomationTriggerView(item)})
 	}
 	_, err = fmt.Fprintf(stdout, "trigger=%s workspace=%s initiative=%s kind=%s status=%s readiness=%s rule_summary=%q last_materialization=%s last_work_item=%s next_eligible=%s\n",
 		item.Key,
@@ -168,6 +191,159 @@ func runTriggerShow(ctx context.Context, service triggers.Service, workspaceID s
 		formatOptionalTime(item.NextEligibleAt),
 	)
 	return err
+}
+
+type triggerEnvelope struct {
+	Trigger automationTriggerView `json:"trigger"`
+}
+
+type triggerListView struct {
+	Triggers []automationTriggerView `json:"triggers"`
+}
+
+type triggerEvaluateView struct {
+	Evaluated    int               `json:"evaluated"`
+	Materialized int               `json:"materialized"`
+	Errored      int               `json:"errored"`
+	Results      []triggerFireView `json:"results"`
+}
+
+type triggerFireView struct {
+	Trigger         automationTriggerView      `json:"trigger"`
+	Materialization triggerMaterializationView `json:"materialization"`
+	WorkItem        triggerWorkItemView        `json:"work_item"`
+	CreatedWorkItem bool                       `json:"created_work_item"`
+}
+
+type automationTriggerView struct {
+	ID                     int64   `json:"id"`
+	Key                    string  `json:"key"`
+	WorkspaceID            string  `json:"workspace_id"`
+	InitiativeKey          string  `json:"initiative_key"`
+	Kind                   string  `json:"kind"`
+	Status                 string  `json:"status"`
+	Readiness              string  `json:"readiness"`
+	RuleSummary            string  `json:"rule_summary"`
+	RuleJSON               string  `json:"rule_json"`
+	WorkItemTitle          string  `json:"work_item_title"`
+	NextEligibleAt         *string `json:"next_eligible_at"`
+	LastEvaluatedAt        *string `json:"last_evaluated_at"`
+	LastMaterializedAt     *string `json:"last_materialized_at"`
+	LastMaterializationKey string  `json:"last_materialization_key"`
+	LastWorkItemID         *int64  `json:"last_work_item_id"`
+	LastWorkItemKey        string  `json:"last_work_item_key"`
+	CreatedAt              string  `json:"created_at"`
+	UpdatedAt              string  `json:"updated_at"`
+}
+
+type triggerMaterializationView struct {
+	ID                 int64  `json:"id"`
+	TriggerID          int64  `json:"trigger_id"`
+	MaterializationKey string `json:"materialization_key"`
+	TaskID             int64  `json:"task_id"`
+	Reason             string `json:"reason"`
+	RequestedBy        string `json:"requested_by"`
+	CreatedAt          string `json:"created_at"`
+	UpdatedAt          string `json:"updated_at"`
+}
+
+type triggerWorkItemView struct {
+	ID          int64  `json:"id"`
+	Key         string `json:"key"`
+	Title       string `json:"title"`
+	Status      string `json:"status"`
+	Scope       string `json:"scope"`
+	RequestedBy string `json:"requested_by"`
+	WorkKind    string `json:"work_kind"`
+}
+
+func newTriggerEvaluateView(result triggers.DueEvaluationResult) triggerEvaluateView {
+	views := make([]triggerFireView, 0, len(result.Results))
+	for _, item := range result.Results {
+		views = append(views, newTriggerFireView(item))
+	}
+	return triggerEvaluateView{
+		Evaluated:    result.Evaluated,
+		Materialized: result.Materialized,
+		Errored:      result.Errored,
+		Results:      views,
+	}
+}
+
+func newTriggerFireView(result sqlite.FireAutomationTriggerResult) triggerFireView {
+	return triggerFireView{
+		Trigger:         newAutomationTriggerView(result.Trigger),
+		Materialization: newTriggerMaterializationView(result.Materialization),
+		WorkItem:        newTriggerWorkItemView(result.WorkItem),
+		CreatedWorkItem: result.CreatedWorkItem,
+	}
+}
+
+func newAutomationTriggerView(item sqlite.AutomationTrigger) automationTriggerView {
+	return automationTriggerView{
+		ID:                     item.ID,
+		Key:                    item.Key,
+		WorkspaceID:            item.WorkspaceID,
+		InitiativeKey:          item.InitiativeKey,
+		Kind:                   item.Kind,
+		Status:                 item.Status,
+		Readiness:              triggerReadiness(item),
+		RuleSummary:            item.RuleSummary,
+		RuleJSON:               item.RuleJSON,
+		WorkItemTitle:          item.WorkItemTitle,
+		NextEligibleAt:         formatOptionalTimePointer(item.NextEligibleAt),
+		LastEvaluatedAt:        formatOptionalTimePointer(item.LastEvaluatedAt),
+		LastMaterializedAt:     formatOptionalTimePointer(item.LastMaterializedAt),
+		LastMaterializationKey: item.LastMaterializationKey,
+		LastWorkItemID:         item.LastWorkItemID,
+		LastWorkItemKey:        item.LastWorkItemKey,
+		CreatedAt:              item.CreatedAt.UTC().Format(time.RFC3339),
+		UpdatedAt:              item.UpdatedAt.UTC().Format(time.RFC3339),
+	}
+}
+
+func newTriggerMaterializationView(item sqlite.AutomationTriggerMaterialization) triggerMaterializationView {
+	return triggerMaterializationView{
+		ID:                 item.ID,
+		TriggerID:          item.TriggerID,
+		MaterializationKey: item.MaterializationKey,
+		TaskID:             item.TaskID,
+		Reason:             item.Reason,
+		RequestedBy:        item.RequestedBy,
+		CreatedAt:          item.CreatedAt.UTC().Format(time.RFC3339),
+		UpdatedAt:          item.UpdatedAt.UTC().Format(time.RFC3339),
+	}
+}
+
+func newTriggerWorkItemView(item sqlite.Task) triggerWorkItemView {
+	return triggerWorkItemView{
+		ID:          item.ID,
+		Key:         item.Key,
+		Title:       item.Title,
+		Status:      item.Status,
+		Scope:       item.Scope,
+		RequestedBy: item.RequestedBy,
+		WorkKind:    item.WorkKind,
+	}
+}
+
+func consumeTriggerJSONFlag(args []string) (bool, []string, error) {
+	filtered := make([]string, 0, len(args))
+	var jsonOutput bool
+	for _, arg := range args {
+		if arg == "--json" {
+			jsonOutput = true
+			continue
+		}
+		if strings.HasPrefix(arg, "--json=") {
+			return false, nil, fmt.Errorf("invalid option: %s", arg)
+		}
+		filtered = append(filtered, arg)
+	}
+	if len(filtered) == 0 {
+		return jsonOutput, filtered, fmt.Errorf("usage: odin %s", TriggerUsage)
+	}
+	return jsonOutput, filtered, nil
 }
 
 func parseOptionTokens(args []string) (map[string]string, error) {
@@ -206,6 +382,14 @@ func formatOptionalTime(value *time.Time) string {
 		return "none"
 	}
 	return value.UTC().Format(time.RFC3339)
+}
+
+func formatOptionalTimePointer(value *time.Time) *string {
+	if value == nil {
+		return nil
+	}
+	formatted := value.UTC().Format(time.RFC3339)
+	return &formatted
 }
 
 func parseTriggerNextEligibleAt(value string) (*time.Time, error) {

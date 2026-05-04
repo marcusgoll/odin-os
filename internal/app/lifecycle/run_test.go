@@ -1638,6 +1638,137 @@ func TestRunWorkDispatchCreatesRunAttemptFromAcceptedIntake(t *testing.T) {
 	}
 }
 
+func TestRunTriggerMVPUsesLiveOperatorLifecycle(t *testing.T) {
+	t.Parallel()
+
+	root := testRepoRoot(t)
+	run := func(args ...string) string {
+		t.Helper()
+		var stdout bytes.Buffer
+		if err := Run(context.Background(), root, args, strings.NewReader(""), &stdout); err != nil {
+			t.Fatalf("Run(%v) error = %v\nstdout=%s", args, err, stdout.String())
+		}
+		return stdout.String()
+	}
+
+	run("project", "select", testProjectKey)
+	upsertOutput := run("trigger", "upsert", "daily-review",
+		"initiative="+testProjectKey,
+		"kind=schedule",
+		"status=enabled",
+		"cadence=1h",
+		"next=2026-05-02T00:00:00Z",
+		"title=Run_daily_review",
+		"summary=hourly_review",
+		"--json",
+	)
+	if !strings.Contains(upsertOutput, `"key": "daily-review"`) || !strings.Contains(upsertOutput, `"status": "enabled"`) {
+		t.Fatalf("trigger upsert output = %s, want enabled daily-review JSON", upsertOutput)
+	}
+	listOutput := run("trigger", "list", "--json")
+	if !strings.Contains(listOutput, `"key": "daily-review"`) || !strings.Contains(listOutput, `"next_eligible_at": "2026-05-02T00:00:00Z"`) {
+		t.Fatalf("trigger list output = %s, want daily-review with next eligible time", listOutput)
+	}
+	showOutput := run("trigger", "show", "daily-review", "--json")
+	if !strings.Contains(showOutput, `"rule_summary": "hourly_review"`) || !strings.Contains(showOutput, `"work_item_title": "Run daily review"`) {
+		t.Fatalf("trigger show output = %s, want reviewable trigger details", showOutput)
+	}
+
+	evaluateOutput := run("trigger", "evaluate", "now=2026-05-02T00:00:00Z", "--json")
+	var evaluate struct {
+		Evaluated    int `json:"evaluated"`
+		Materialized int `json:"materialized"`
+		Results      []struct {
+			CreatedWorkItem bool `json:"created_work_item"`
+			WorkItem        struct {
+				ID     int64  `json:"id"`
+				Key    string `json:"key"`
+				Status string `json:"status"`
+			} `json:"work_item"`
+			Materialization struct {
+				MaterializationKey string `json:"materialization_key"`
+				Reason             string `json:"reason"`
+				RequestedBy        string `json:"requested_by"`
+			} `json:"materialization"`
+		} `json:"results"`
+	}
+	if err := json.Unmarshal([]byte(evaluateOutput), &evaluate); err != nil {
+		t.Fatalf("json.Unmarshal(evaluate) error = %v\n%s", err, evaluateOutput)
+	}
+	if evaluate.Evaluated != 1 || evaluate.Materialized != 1 || len(evaluate.Results) != 1 || !evaluate.Results[0].CreatedWorkItem {
+		t.Fatalf("trigger evaluate output = %+v, want one materialized queued work item", evaluate)
+	}
+	if evaluate.Results[0].WorkItem.Status != "queued" || evaluate.Results[0].Materialization.Reason != "due-20260502t000000z" || evaluate.Results[0].Materialization.RequestedBy != "automation_trigger_evaluator" {
+		t.Fatalf("trigger materialization = %+v, want queued scheduled provenance", evaluate.Results[0])
+	}
+
+	repeatEvaluateOutput := run("trigger", "evaluate", "now=2026-05-02T00:00:00Z", "--json")
+	if !strings.Contains(repeatEvaluateOutput, `"evaluated": 0`) || !strings.Contains(repeatEvaluateOutput, `"materialized": 0`) {
+		t.Fatalf("repeat trigger evaluate output = %s, want no duplicate due materialization", repeatEvaluateOutput)
+	}
+
+	run("project", "select", "odin-core")
+	run("transition", "set", "cutover", "confirm", "because", "trigger approval proof")
+	run("trigger", "upsert", "risky-trigger",
+		"initiative=odin-core",
+		"kind=schedule",
+		"status=enabled",
+		"cadence=1h",
+		"next=2026-05-02T00:00:00Z",
+		"title=Review_system_trigger",
+		"summary=system_trigger",
+		"--json",
+	)
+	fireOutput := run("trigger", "fire", "risky-trigger", "reason=approval-proof", "--json")
+	var fire struct {
+		CreatedWorkItem bool `json:"created_work_item"`
+		WorkItem        struct {
+			ID     int64  `json:"id"`
+			Key    string `json:"key"`
+			Status string `json:"status"`
+		} `json:"work_item"`
+		Materialization struct {
+			MaterializationKey string `json:"materialization_key"`
+		} `json:"materialization"`
+	}
+	if err := json.Unmarshal([]byte(fireOutput), &fire); err != nil {
+		t.Fatalf("json.Unmarshal(fire) error = %v\n%s", err, fireOutput)
+	}
+	if !fire.CreatedWorkItem || fire.WorkItem.Status != "queued" || fire.Materialization.MaterializationKey == "" {
+		t.Fatalf("trigger fire output = %+v, want queued risky work item with materialization key", fire)
+	}
+	repeatFireOutput := run("trigger", "fire", "risky-trigger", "reason=approval-proof", "--json")
+	if !strings.Contains(repeatFireOutput, `"created_work_item": false`) || !strings.Contains(repeatFireOutput, fire.WorkItem.Key) {
+		t.Fatalf("repeat trigger fire output = %s, want duplicate suppressed with existing work item", repeatFireOutput)
+	}
+
+	dispatchOutput := run("work", "dispatch", "--task", fire.WorkItem.Key, "--json")
+	if !strings.Contains(dispatchOutput, `"dispatched": false`) || !strings.Contains(dispatchOutput, `"reason": "approval_required"`) || !strings.Contains(dispatchOutput, `"status": "blocked"`) {
+		t.Fatalf("dispatch risky trigger work output = %s, want approval-required block", dispatchOutput)
+	}
+	approvalsOutput := run("approvals", "all", "--json")
+	if !strings.Contains(approvalsOutput, `"status": "pending"`) || !strings.Contains(approvalsOutput, fmt.Sprintf(`"task_key": "%s"`, fire.WorkItem.Key)) {
+		t.Fatalf("approvals output = %s, want pending task-backed trigger approval", approvalsOutput)
+	}
+	logsOutput := run("logs", "--json")
+	for _, want := range []string{
+		`"type": "automation_trigger.created"`,
+		`"type": "automation_trigger.fire_requested"`,
+		`"type": "automation_trigger.evaluated"`,
+		`"type": "automation_trigger.materialized"`,
+		`"created_work_item": false`,
+		`"materialization_key": "default:risky-trigger:manual:approval-proof"`,
+	} {
+		if !strings.Contains(logsOutput, want) {
+			t.Fatalf("logs output = %s, want %s", logsOutput, want)
+		}
+	}
+	overviewOutput := run("overview", "--json")
+	if !strings.Contains(overviewOutput, `"automation_triggers"`) || !strings.Contains(overviewOutput, `"trigger_count": 1`) || !strings.Contains(overviewOutput, `"last_work_item_key": "`+fire.WorkItem.Key+`"`) || !strings.Contains(overviewOutput, `"open_work_item_count": 2`) {
+		t.Fatalf("overview output = %s, want trigger and queued/blocked work visibility", overviewOutput)
+	}
+}
+
 func TestRunWorkExecuteCompletesDispatchedIntakeRun(t *testing.T) {
 	configureLifecycleHarnessDriver(t)
 	t.Setenv("HOME", t.TempDir())

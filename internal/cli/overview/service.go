@@ -344,21 +344,30 @@ type IntakeEvidenceSummary struct {
 }
 
 type AutomationTriggerLane struct {
-	Wiring Wiring                     `json:"wiring"`
-	Items  []AutomationTriggerSummary `json:"items"`
+	Wiring            Wiring                     `json:"wiring"`
+	TriggerCount      int                        `json:"trigger_count"`
+	EnabledCount      int                        `json:"enabled_count"`
+	MaterializedCount int                        `json:"materialized_count"`
+	Items             []AutomationTriggerSummary `json:"items"`
 }
 
 type AutomationTriggerSummary struct {
-	TriggerID        int64   `json:"trigger_id"`
-	WorkspaceKey     string  `json:"workspace_key"`
-	InitiativeKey    *string `json:"initiative_key"`
-	CompanionKey     *string `json:"companion_key"`
-	TargetProjectKey string  `json:"target_project_key"`
-	Title            string  `json:"title"`
-	Status           string  `json:"status"`
-	DueStatus        string  `json:"due_status"`
-	NextDueAt        string  `json:"next_due_at"`
-	LastCompletedAt  *string `json:"last_completed_at"`
+	Source                 string  `json:"source"`
+	TriggerID              int64   `json:"trigger_id"`
+	Key                    string  `json:"key"`
+	WorkspaceKey           string  `json:"workspace_key"`
+	InitiativeKey          *string `json:"initiative_key"`
+	CompanionKey           *string `json:"companion_key"`
+	TargetProjectKey       string  `json:"target_project_key"`
+	Title                  string  `json:"title"`
+	Kind                   string  `json:"kind"`
+	Status                 string  `json:"status"`
+	DueStatus              string  `json:"due_status"`
+	NextDueAt              string  `json:"next_due_at"`
+	LastCompletedAt        *string `json:"last_completed_at"`
+	LastMaterializedAt     *string `json:"last_materialized_at,omitempty"`
+	LastMaterializationKey string  `json:"last_materialization_key,omitempty"`
+	LastWorkItemKey        string  `json:"last_work_item_key,omitempty"`
 }
 
 func (service Service) Build(ctx context.Context, resolved scope.Resolution) (View, error) {
@@ -914,6 +923,7 @@ func (service Service) Build(ctx context.Context, resolved scope.Resolution) (Vi
 			lastCompletedAt = stringPtr(followUp.LastCompletedAt.UTC().Format(time.RFC3339))
 		}
 		view.AutomationTriggers.Items = append(view.AutomationTriggers.Items, AutomationTriggerSummary{
+			Source:           "follow_up_obligation",
 			TriggerID:        followUp.ObligationID,
 			WorkspaceKey:     followUp.WorkspaceKey,
 			InitiativeKey:    followUp.InitiativeKey,
@@ -925,6 +935,37 @@ func (service Service) Build(ctx context.Context, resolved scope.Resolution) (Vi
 			NextDueAt:        followUp.NextDueAt.UTC().Format(time.RFC3339),
 			LastCompletedAt:  lastCompletedAt,
 		})
+	}
+	automationTriggers, err := service.Store.ListAutomationTriggers(ctx, sqlite.ListAutomationTriggersParams{WorkspaceID: workspaces.DefaultWorkspaceKey})
+	if err != nil {
+		return View{}, err
+	}
+	projectKeyCache := make(map[int64]string)
+	projectKeyForTrigger := func(trigger sqlite.AutomationTrigger) string {
+		if cached, ok := projectKeyCache[trigger.ProjectID]; ok {
+			return cached
+		}
+		project, err := service.Store.GetProject(ctx, trigger.ProjectID)
+		if err != nil {
+			projectKeyCache[trigger.ProjectID] = trigger.InitiativeKey
+			return trigger.InitiativeKey
+		}
+		projectKeyCache[trigger.ProjectID] = project.Key
+		return project.Key
+	}
+	for _, trigger := range automationTriggers {
+		projectKey := projectKeyForTrigger(trigger)
+		if !matchesAutomationTriggerScope(trigger, projectKey, resolved) {
+			continue
+		}
+		view.AutomationTriggers.TriggerCount++
+		if trigger.Status == "enabled" {
+			view.AutomationTriggers.EnabledCount++
+		}
+		if trigger.LastWorkItemID != nil {
+			view.AutomationTriggers.MaterializedCount++
+		}
+		view.AutomationTriggers.Items = append(view.AutomationTriggers.Items, automationTriggerSummary(trigger, projectKey, service.now()))
 	}
 
 	memoryScope, err := service.memoryScope(ctx, resolved)
@@ -1216,6 +1257,64 @@ func matchesFollowUpScope(followUp projections.FollowUpSummaryView, resolved sco
 	default:
 		return true
 	}
+}
+
+func matchesAutomationTriggerScope(trigger sqlite.AutomationTrigger, projectKey string, resolved scope.Resolution) bool {
+	switch resolved.Kind {
+	case scope.ScopeProject, scope.ScopeOdinCore:
+		return projectKey == resolved.ProjectKey || trigger.InitiativeKey == resolved.ProjectKey
+	case scope.ScopeNewProject:
+		return false
+	default:
+		return true
+	}
+}
+
+func automationTriggerSummary(trigger sqlite.AutomationTrigger, projectKey string, now time.Time) AutomationTriggerSummary {
+	title := trigger.WorkItemTitle
+	if title == "" {
+		title = trigger.RuleSummary
+	}
+	if title == "" {
+		title = trigger.Key
+	}
+	var nextDueAt string
+	if trigger.NextEligibleAt != nil {
+		nextDueAt = trigger.NextEligibleAt.UTC().Format(time.RFC3339)
+	}
+	var lastMaterializedAt *string
+	if trigger.LastMaterializedAt != nil {
+		lastMaterializedAt = stringPtr(trigger.LastMaterializedAt.UTC().Format(time.RFC3339))
+	}
+	return AutomationTriggerSummary{
+		Source:                 "automation_trigger",
+		TriggerID:              trigger.ID,
+		Key:                    trigger.Key,
+		WorkspaceKey:           trigger.WorkspaceID,
+		InitiativeKey:          stringPtr(trigger.InitiativeKey),
+		TargetProjectKey:       projectKey,
+		Title:                  title,
+		Kind:                   trigger.Kind,
+		Status:                 trigger.Status,
+		DueStatus:              automationTriggerDueStatus(trigger, now),
+		NextDueAt:              nextDueAt,
+		LastMaterializedAt:     lastMaterializedAt,
+		LastMaterializationKey: trigger.LastMaterializationKey,
+		LastWorkItemKey:        trigger.LastWorkItemKey,
+	}
+}
+
+func automationTriggerDueStatus(trigger sqlite.AutomationTrigger, now time.Time) string {
+	if trigger.Status != "enabled" {
+		return trigger.Status
+	}
+	if trigger.NextEligibleAt == nil {
+		return "manual"
+	}
+	if trigger.NextEligibleAt.After(now.UTC()) {
+		return "waiting"
+	}
+	return "due"
 }
 
 func matchesIntakeScope(intake projections.TaskIntakeEvidenceView, resolved scope.Resolution) bool {

@@ -36,6 +36,7 @@ type DueEvaluationResult struct {
 	Evaluated    int
 	Materialized int
 	Errored      int
+	Results      []sqlite.FireAutomationTriggerResult
 }
 
 func (service Service) Upsert(ctx context.Context, params UpsertParams) (sqlite.AutomationTrigger, error) {
@@ -184,6 +185,7 @@ func (service Service) EvaluateDue(ctx context.Context, now time.Time) (DueEvalu
 		if fire.CreatedWorkItem {
 			result.Materialized++
 		}
+		result.Results = append(result.Results, fire)
 	}
 	return result, nil
 }

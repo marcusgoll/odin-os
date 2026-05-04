@@ -765,11 +765,12 @@ func (store *Store) UpsertAutomationTrigger(ctx context.Context, params UpsertAu
 			if err != nil {
 				return err
 			}
+			eventScope := store.automationTriggerEventScopeTx(ctx, tx, trigger)
 			return appendEventTx(ctx, tx, eventInsert{
 				StreamType: runtimeevents.StreamAutomationTrigger,
 				StreamID:   trigger.ID,
 				EventType:  runtimeevents.EventAutomationTriggerCreated,
-				Scope:      trigger.Kind,
+				Scope:      eventScope,
 				ProjectID:  &trigger.ProjectID,
 				Payload: runtimeevents.AutomationTriggerCreatedPayload{
 					WorkspaceID:   trigger.WorkspaceID,
@@ -856,12 +857,13 @@ func (store *Store) FireAutomationTrigger(ctx context.Context, params FireAutoma
 		if trigger.Status != "enabled" {
 			return fmt.Errorf("automation trigger %s is %s", trigger.Key, trigger.Status)
 		}
+		eventScope := store.automationTriggerEventScopeTx(ctx, tx, trigger)
 
 		if err := appendEventTx(ctx, tx, eventInsert{
 			StreamType: runtimeevents.StreamAutomationTrigger,
 			StreamID:   trigger.ID,
 			EventType:  runtimeevents.EventAutomationTriggerFireRequested,
-			Scope:      trigger.Kind,
+			Scope:      eventScope,
 			ProjectID:  &trigger.ProjectID,
 			Payload: runtimeevents.AutomationTriggerFireRequestedPayload{
 				WorkspaceID:        trigger.WorkspaceID,
@@ -888,7 +890,7 @@ func (store *Store) FireAutomationTrigger(ctx context.Context, params FireAutoma
 			if err != nil {
 				return err
 			}
-			if err := appendAutomationTriggerEvaluatedEvent(ctx, tx, updated, materializationKey, false, now); err != nil {
+			if err := appendAutomationTriggerEvaluatedEvent(ctx, tx, updated, eventScope, materializationKey, false, now); err != nil {
 				return err
 			}
 			result = FireAutomationTriggerResult{
@@ -922,14 +924,15 @@ func (store *Store) FireAutomationTrigger(ctx context.Context, params FireAutoma
 		if err != nil {
 			return err
 		}
-		if err := appendAutomationTriggerEvaluatedEvent(ctx, tx, updated, materializationKey, true, now); err != nil {
+		eventScope = project.Scope
+		if err := appendAutomationTriggerEvaluatedEvent(ctx, tx, updated, eventScope, materializationKey, true, now); err != nil {
 			return err
 		}
 		if err := appendEventTx(ctx, tx, eventInsert{
 			StreamType: runtimeevents.StreamAutomationTrigger,
 			StreamID:   updated.ID,
 			EventType:  runtimeevents.EventAutomationTriggerMaterialized,
-			Scope:      updated.Kind,
+			Scope:      eventScope,
 			ProjectID:  &updated.ProjectID,
 			TaskID:     &task.ID,
 			Payload: runtimeevents.AutomationTriggerMaterializedPayload{
@@ -975,11 +978,12 @@ func (store *Store) MarkAutomationTriggerErrored(ctx context.Context, params Mar
 			return err
 		}
 		if trigger.Status != updated.Status {
+			eventScope := store.automationTriggerEventScopeTx(ctx, tx, updated)
 			if err := appendEventTx(ctx, tx, eventInsert{
 				StreamType: runtimeevents.StreamAutomationTrigger,
 				StreamID:   updated.ID,
 				EventType:  runtimeevents.EventAutomationTriggerStatusChanged,
-				Scope:      updated.Kind,
+				Scope:      eventScope,
 				ProjectID:  &updated.ProjectID,
 				Payload: runtimeevents.AutomationTriggerStatusChangedPayload{
 					WorkspaceID:    updated.WorkspaceID,
@@ -993,11 +997,12 @@ func (store *Store) MarkAutomationTriggerErrored(ctx context.Context, params Mar
 				return err
 			}
 		}
+		eventScope := store.automationTriggerEventScopeTx(ctx, tx, updated)
 		return appendEventTx(ctx, tx, eventInsert{
 			StreamType: runtimeevents.StreamAutomationTrigger,
 			StreamID:   updated.ID,
 			EventType:  runtimeevents.EventAutomationTriggerErrored,
-			Scope:      updated.Kind,
+			Scope:      eventScope,
 			ProjectID:  &updated.ProjectID,
 			Payload: runtimeevents.AutomationTriggerErroredPayload{
 				WorkspaceID: updated.WorkspaceID,
@@ -8077,12 +8082,23 @@ func (store *Store) updateAutomationTriggerMaterializedTx(ctx context.Context, t
 	return err
 }
 
-func appendAutomationTriggerEvaluatedEvent(ctx context.Context, tx *sql.Tx, trigger AutomationTrigger, materializationKey string, createdWorkItem bool, now time.Time) error {
+func (store *Store) automationTriggerEventScopeTx(ctx context.Context, tx *sql.Tx, trigger AutomationTrigger) string {
+	project, err := store.getProjectTx(ctx, tx, trigger.ProjectID)
+	if err == nil && strings.TrimSpace(project.Scope) != "" {
+		return project.Scope
+	}
+	if strings.TrimSpace(trigger.Kind) != "" {
+		return trigger.Kind
+	}
+	return "automation_trigger"
+}
+
+func appendAutomationTriggerEvaluatedEvent(ctx context.Context, tx *sql.Tx, trigger AutomationTrigger, scope string, materializationKey string, createdWorkItem bool, now time.Time) error {
 	return appendEventTx(ctx, tx, eventInsert{
 		StreamType: runtimeevents.StreamAutomationTrigger,
 		StreamID:   trigger.ID,
 		EventType:  runtimeevents.EventAutomationTriggerEvaluated,
-		Scope:      trigger.Kind,
+		Scope:      scope,
 		ProjectID:  &trigger.ProjectID,
 		Payload: runtimeevents.AutomationTriggerEvaluatedPayload{
 			WorkspaceID:        trigger.WorkspaceID,
