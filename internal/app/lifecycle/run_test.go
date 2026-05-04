@@ -2778,6 +2778,79 @@ func TestRunWorkExecuteCompletesDispatchedIntakeRun(t *testing.T) {
 	}
 }
 
+func TestRunWorkExecuteBindsDispatchedRunToProjectRoot(t *testing.T) {
+	configureLifecycleMetadataEchoDriver(t)
+	t.Setenv("HOME", t.TempDir())
+	root := testRepoRoot(t)
+	if err := Run(context.Background(), root, []string{"project", "select", testProjectKey}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+		t.Fatalf("Run(project select) error = %v", err)
+	}
+	if err := Run(context.Background(), root, []string{"transition", "set", "cutover", "confirm", "because", "project root execution metadata test"}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+		t.Fatalf("Run(transition set) error = %v", err)
+	}
+
+	var startOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"work", "start", "--project", testProjectKey, "--title", "Project root metadata proof"}, strings.NewReader(""), &startOutput); err != nil {
+		t.Fatalf("Run(work start) error = %v", err)
+	}
+	taskKey := ""
+	for _, field := range strings.Fields(startOutput.String()) {
+		if value, ok := strings.CutPrefix(field, "key="); ok {
+			taskKey = value
+		}
+	}
+	if taskKey == "" {
+		t.Fatalf("work start output = %q, want task key", startOutput.String())
+	}
+
+	if err := Run(context.Background(), root, []string{"work", "dispatch", "--task", taskKey, "--json"}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+		t.Fatalf("Run(work dispatch) error = %v", err)
+	}
+
+	var executeOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"work", "execute", "--task", taskKey, "--json"}, strings.NewReader(""), &executeOutput); err != nil {
+		t.Fatalf("Run(work execute) error = %v\n%s", err, executeOutput.String())
+	}
+	var executed struct {
+		Run *struct {
+			Status  string `json:"status"`
+			Summary string `json:"summary"`
+		} `json:"run"`
+	}
+	if err := json.Unmarshal(executeOutput.Bytes(), &executed); err != nil {
+		t.Fatalf("json.Unmarshal(execute) error = %v\n%s", err, executeOutput.String())
+	}
+	wantRoot := filepath.Join(root, "alpha")
+	wantSummary := wantRoot + "|" + wantRoot + "|main"
+	if executed.Run == nil || executed.Run.Status != "completed" || executed.Run.Summary != wantSummary {
+		t.Fatalf("execute run = %+v, want summary %q", executed.Run, wantSummary)
+	}
+
+	store, err := sqlite.Open(filepath.Join(root, "data", "odin.db"))
+	if err != nil {
+		t.Fatalf("sqlite.Open() error = %v", err)
+	}
+	defer store.Close()
+	var detailsJSON string
+	if err := store.DB().QueryRowContext(context.Background(), `
+		SELECT details_json
+		FROM run_artifacts
+		WHERE run_id = 1 AND artifact_type = 'executor_evidence'
+	`).Scan(&detailsJSON); err != nil {
+		t.Fatalf("query executor evidence artifact error = %v", err)
+	}
+	var details map[string]string
+	if err := json.Unmarshal([]byte(detailsJSON), &details); err != nil {
+		t.Fatalf("json.Unmarshal(details_json) error = %v\n%s", err, detailsJSON)
+	}
+	if !strings.HasPrefix(details["artifact_path"], filepath.Join(root, "runs", "artifacts")+string(os.PathSeparator)) {
+		t.Fatalf("artifact_path = %q, want runtime-root artifact", details["artifact_path"])
+	}
+	if strings.HasPrefix(details["artifact_path"], filepath.Join(wantRoot, "runs", "artifacts")+string(os.PathSeparator)) {
+		t.Fatalf("artifact_path = %q, should not be written under project repo", details["artifact_path"])
+	}
+}
+
 func TestRunWorkExecuteSurfacesFailedDispatchedRun(t *testing.T) {
 	configureLifecycleHarnessDriverStatus(t, "failed", "driver failed proof")
 	t.Setenv("HOME", t.TempDir())
@@ -5451,6 +5524,39 @@ else:
     print(json.dumps({"status":%q,"output":%q,"handle":{"external_id":"fixture-driver"}}))
 PY
 `, status, output)
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatalf("WriteFile(driver) error = %v", err)
+	}
+	if err := os.Chmod(path, 0o755); err != nil {
+		t.Fatalf("Chmod(driver) error = %v", err)
+	}
+	t.Setenv("ODIN_CODEX_DRIVER", path)
+}
+
+func configureLifecycleMetadataEchoDriver(t *testing.T) {
+	t.Helper()
+
+	path := filepath.Join(t.TempDir(), "codex-driver.sh")
+	script := `#!/usr/bin/env bash
+payload="$(cat)"
+PAYLOAD="$payload" python3 - <<'PY'
+import json
+import os
+
+request = json.loads(os.environ["PAYLOAD"])
+action = request.get("action")
+if action == "health":
+    print(json.dumps({"status":"healthy","details":"lifecycle metadata echo driver healthy"}))
+else:
+    metadata = (request.get("task") or {}).get("metadata") or {}
+    output = "|".join([
+        metadata.get("repo_root", ""),
+        metadata.get("worktree_path", ""),
+        metadata.get("branch_name", ""),
+    ])
+    print(json.dumps({"status":"completed","output":output,"handle":{"external_id":"metadata-echo-driver"}}))
+PY
+`
 	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
 		t.Fatalf("WriteFile(driver) error = %v", err)
 	}

@@ -29,6 +29,7 @@ import (
 
 type Service struct {
 	Store               *sqlite.Store
+	RuntimeRoot         string
 	Registry            projects.Registry
 	Executors           map[string]contract.Executor
 	ExecutorConfig      executorrouter.Config
@@ -384,6 +385,7 @@ func (service Service) ExecuteNextQueued(ctx context.Context) error {
 			"task_id":     fmt.Sprintf("%d", task.ID),
 		},
 	}
+	service.addRuntimeRootMetadata(spec.Metadata)
 
 	decision, err := selector.Select(ctx, spec)
 	if err != nil {
@@ -454,6 +456,7 @@ func (service Service) ExecuteNextQueued(ctx context.Context) error {
 	spec.Metadata["branch_name"] = assignment.BranchName
 	spec.Metadata["repo_root"] = assignment.RepoRoot
 	spec.Metadata["worktree_path"] = assignment.WorktreePath
+	service.addRuntimeRootMetadata(spec.Metadata)
 	if service.PromptRenderer != nil {
 		renderedPrompt, err := service.renderPrompt(ctx, spec, task)
 		if err != nil {
@@ -837,11 +840,15 @@ func (service Service) executeDispatchedRun(ctx context.Context, taskID int64, a
 			NeedsHeadlessPlan: true,
 		},
 		Metadata: map[string]string{
-			"project_key": project.Key,
-			"task_id":     fmt.Sprintf("%d", task.ID),
-			"run_id":      fmt.Sprintf("%d", run.ID),
+			"project_key":   project.Key,
+			"task_id":       fmt.Sprintf("%d", task.ID),
+			"run_id":        fmt.Sprintf("%d", run.ID),
+			"repo_root":     project.GitRoot,
+			"worktree_path": project.GitRoot,
+			"branch_name":   project.DefaultBranch,
 		},
 	}
+	service.addRuntimeRootMetadata(spec.Metadata)
 	if service.PromptRenderer != nil {
 		renderedPrompt, err := service.renderPrompt(ctx, spec, task)
 		if err != nil {
@@ -947,6 +954,7 @@ func (service Service) ExecuteTaskWithRequest(ctx context.Context, taskID int64,
 			"task_id":     fmt.Sprintf("%d", task.ID),
 		},
 	}
+	service.addRuntimeRootMetadata(spec.Metadata)
 	intakeSummary := ""
 	if hasIntake {
 		spec.Metadata["intake_source"] = intake.Source
@@ -1030,6 +1038,7 @@ func (service Service) ExecuteTaskWithRequest(ctx context.Context, taskID int64,
 	spec.Metadata["branch_name"] = assignment.BranchName
 	spec.Metadata["repo_root"] = assignment.RepoRoot
 	spec.Metadata["worktree_path"] = assignment.WorktreePath
+	service.addRuntimeRootMetadata(spec.Metadata)
 	if service.PromptRenderer != nil && strings.TrimSpace(request.PromptOverride) == "" {
 		renderedPrompt, err := service.renderPrompt(ctx, spec, task)
 		if err != nil {
@@ -1075,6 +1084,15 @@ func (service Service) now() time.Time {
 		return service.Now().UTC()
 	}
 	return time.Now().UTC()
+}
+
+func (service Service) addRuntimeRootMetadata(metadata map[string]string) {
+	if metadata == nil {
+		return
+	}
+	if root := strings.TrimSpace(service.RuntimeRoot); root != "" {
+		metadata["runtime_root"] = root
+	}
 }
 
 func runExecutorTask(ctx context.Context, executorKey string, executor contract.Executor, spec contract.TaskSpec) (result contract.ExecutionResult, execErr error) {

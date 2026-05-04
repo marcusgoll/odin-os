@@ -259,6 +259,7 @@ func Run(ctx context.Context, root string, args []string, stdin io.Reader, stdou
 		return commands.RunWork(ctx, app.Store, app.Registry, app.RegistrySnapshot, args[1:], stdout, commands.WorkOptions{
 			JobService: jobs.Service{
 				Store:          app.Store,
+				RuntimeRoot:    app.RuntimeRoot,
 				Registry:       app.Registry,
 				Executors:      app.Executors,
 				ExecutorConfig: app.ExecutorConfig,
@@ -3735,6 +3736,7 @@ func runServe(ctx context.Context, app bootstrap.App, cfg appconfig.Config, stdo
 	var shutdownRequested atomic.Bool
 	jobService := jobs.Service{
 		Store:          app.Store,
+		RuntimeRoot:    app.RuntimeRoot,
 		Registry:       app.Registry,
 		Executors:      app.Executors,
 		ExecutorConfig: app.ExecutorConfig,
