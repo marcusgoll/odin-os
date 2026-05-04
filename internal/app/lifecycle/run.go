@@ -411,13 +411,16 @@ func runJobs(ctx context.Context, app bootstrap.App, args []string, stdout io.Wr
 		jobViews := make([]commands.JobView, 0, len(views))
 		for _, view := range views {
 			jobViews = append(jobViews, commands.JobView{
-				ProjectKey:       view.ProjectKey,
-				ProjectID:        view.ProjectID,
-				TaskID:           view.TaskID,
-				TaskKey:          view.TaskKey,
-				Status:           view.Status,
-				CurrentRunID:     view.CurrentRunID,
-				CurrentRunStatus: view.CurrentRunStatus,
+				ProjectKey:            view.ProjectKey,
+				ProjectID:             view.ProjectID,
+				TaskID:                view.TaskID,
+				TaskKey:               view.TaskKey,
+				Status:                view.Status,
+				ExecutionIntent:       view.ExecutionIntent,
+				ExecutionIntentSource: view.ExecutionIntentSource,
+				BlockedReason:         view.BlockedReason,
+				CurrentRunID:          view.CurrentRunID,
+				CurrentRunStatus:      view.CurrentRunStatus,
 			})
 		}
 		return commands.WriteJSON(stdout, commands.JobsView{Jobs: jobViews})
@@ -491,16 +494,18 @@ func runRuns(ctx context.Context, app bootstrap.App, args []string, stdout io.Wr
 		runViews := make([]commands.RunView, 0, len(views))
 		for _, view := range views {
 			runViews = append(runViews, commands.RunView{
-				RunID:        view.RunID,
-				TaskID:       view.TaskID,
-				TaskKey:      view.TaskKey,
-				ProjectKey:   view.ProjectKey,
-				RepoRoot:     view.RepoRoot,
-				WorktreePath: view.WorktreePath,
-				BranchName:   view.BranchName,
-				Executor:     view.Executor,
-				Status:       view.Status,
-				Attempt:      view.Attempt,
+				RunID:                 view.RunID,
+				TaskID:                view.TaskID,
+				TaskKey:               view.TaskKey,
+				ProjectKey:            view.ProjectKey,
+				RepoRoot:              view.RepoRoot,
+				WorktreePath:          view.WorktreePath,
+				BranchName:            view.BranchName,
+				ExecutionIntent:       view.ExecutionIntent,
+				ExecutionIntentSource: view.ExecutionIntentSource,
+				Executor:              view.Executor,
+				Status:                view.Status,
+				Attempt:               view.Attempt,
 			})
 		}
 		return commands.WriteJSON(stdout, commands.RunsView{Runs: runViews})
@@ -1528,10 +1533,12 @@ func createTaskFromReviewedIntake(ctx context.Context, app bootstrap.App, item s
 		Transitions: projects.Service{Store: app.Store},
 		Now:         time.Now,
 	}.CreateTaskOnce(ctx, jobs.CreateTaskParams{
-		Resolved:    resolved,
-		Title:       item.Subject,
-		RequestedBy: "intake_review:" + rawIntakeKey(item.ID),
-		Key:         reviewedIntakeWorkItemKey(item.ID),
+		Resolved:              resolved,
+		Title:                 item.Subject,
+		RequestedBy:           "intake_review:" + rawIntakeKey(item.ID),
+		Key:                   reviewedIntakeWorkItemKey(item.ID),
+		ExecutionIntent:       "read_only",
+		ExecutionIntentSource: "intake",
 	})
 	return result.Task, result.Created, err
 }

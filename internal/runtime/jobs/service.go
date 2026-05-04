@@ -43,11 +43,13 @@ type Service struct {
 }
 
 type CreateTaskParams struct {
-	Resolved    scope.Resolution
-	Title       string
-	RequestedBy string
-	Key         string
-	CompanionID int64
+	Resolved              scope.Resolution
+	Title                 string
+	RequestedBy           string
+	Key                   string
+	CompanionID           int64
+	ExecutionIntent       string
+	ExecutionIntentSource string
 }
 
 type CreateTaskResult struct {
@@ -134,6 +136,8 @@ type executionIntent struct {
 	ActionKey   string
 	Mutating    bool
 	Reason      string
+	Value       string
+	Source      string
 }
 
 func (service Service) NarrowDelegationAdmission(input DelegationAdmissionInput) (DelegationAdmissionProfile, error) {
@@ -207,6 +211,8 @@ func (service Service) CreateTaskOnce(ctx context.Context, params CreateTaskPara
 		taskCompanionID:       params.CompanionID,
 		requestedSwarmTrigger: "",
 		key:                   strings.TrimSpace(params.Key),
+		executionIntent:       params.ExecutionIntent,
+		executionIntentSource: params.ExecutionIntentSource,
 	})
 }
 
@@ -224,6 +230,8 @@ type createManagedTaskInput struct {
 	requestedSwarmTrigger string
 	actionKey             string
 	key                   string
+	executionIntent       string
+	executionIntentSource string
 }
 
 func (service Service) CreateTaskFromActWithAction(ctx context.Context, resolved scope.Resolution, title string, actionKey string) (sqlite.Task, error) {
@@ -297,19 +305,29 @@ func (service Service) createManagedTaskOnce(ctx context.Context, resolved scope
 	} else if existing, err := service.Store.GetTaskByProjectAndKey(ctx, project.ID, key); err == nil {
 		return CreateTaskResult{Task: existing, Created: false}, nil
 	}
+	executionIntent := normalizeExecutionIntentValue(input.executionIntent)
+	if strings.TrimSpace(input.executionIntent) != "" && executionIntent == "" {
+		return CreateTaskResult{}, fmt.Errorf("execution intent must be one of read_only, mutation, governance, destructive")
+	}
+	executionIntentSource := strings.TrimSpace(input.executionIntentSource)
+	if executionIntent != "" && executionIntentSource == "" {
+		executionIntentSource = "operator"
+	}
 
 	task, err := service.Store.CreateTask(ctx, sqlite.CreateTaskParams{
-		ProjectID:    project.ID,
-		Key:          key,
-		Title:        title,
-		ActionKey:    actionKey,
-		Status:       "queued",
-		Scope:        taskScope,
-		RequestedBy:  input.requestedBy,
-		WorkspaceID:  &workspace.ID,
-		InitiativeID: &initiative.ID,
-		CompanionID:  &taskCompanionID,
-		WorkKind:     taskScope,
+		ProjectID:             project.ID,
+		Key:                   key,
+		Title:                 title,
+		ActionKey:             actionKey,
+		Status:                "queued",
+		Scope:                 taskScope,
+		RequestedBy:           input.requestedBy,
+		WorkspaceID:           &workspace.ID,
+		InitiativeID:          &initiative.ID,
+		CompanionID:           &taskCompanionID,
+		WorkKind:              taskScope,
+		ExecutionIntent:       executionIntent,
+		ExecutionIntentSource: executionIntentSource,
 	})
 	if err != nil && input.key != "" && isTaskKeyConflict(err) {
 		existing, getErr := service.Store.GetTaskByProjectAndKey(ctx, project.ID, key)
@@ -1712,7 +1730,7 @@ func pointerIfScope(scopes []string, required string, value *int64) *int64 {
 }
 
 func (service Service) admitTask(ctx context.Context, task sqlite.Task, project sqlite.Project, manifest projects.Manifest, executorKey string) (admissionDecision, error) {
-	intent := applyManifestExecutionDefaults(manifest, classifyTaskExecutionIntent(task.Title))
+	intent := resolveTaskExecutionIntent(manifest, task)
 	approvalDecision, required, err := service.evaluateTaskApproval(ctx, task, manifest, intent)
 	if err != nil {
 		return admissionDecision{}, err
@@ -1753,7 +1771,7 @@ func (service Service) admitTask(ctx context.Context, task sqlite.Task, project 
 }
 
 func (service Service) admitDirectTask(ctx context.Context, task sqlite.Task, project sqlite.Project, manifest projects.Manifest) (admissionDecision, error) {
-	intent := applyManifestExecutionDefaults(manifest, classifyTaskExecutionIntent(task.Title))
+	intent := resolveTaskExecutionIntent(manifest, task)
 	approvalDecision, required, err := service.evaluateTaskApproval(ctx, task, manifest, intent)
 	if err != nil {
 		return admissionDecision{}, err
@@ -1800,7 +1818,7 @@ func (service Service) prepareRun(ctx context.Context, task sqlite.Task, executo
 }
 
 func (service Service) prepareLease(ctx context.Context, task sqlite.Task, project sqlite.Project, manifest projects.Manifest, run sqlite.Run, attempt int) (leases.Assignment, admissionDecision, error) {
-	intent := applyManifestExecutionDefaults(manifest, classifyTaskExecutionIntent(task.Title))
+	intent := resolveTaskExecutionIntent(manifest, task)
 	assignment := leases.Assignment{
 		Mode:         "read_only",
 		RepoRoot:     project.GitRoot,
@@ -2357,6 +2375,8 @@ func classifyTaskExecutionIntent(title string) executionIntent {
 		ActionClass: projects.ActionClassReadOnly,
 		ActionKey:   "read_only_task",
 		Reason:      "default_read_only",
+		Value:       "read_only",
+		Source:      "fallback_title",
 	}
 	if normalized == "" {
 		return intent
@@ -2375,6 +2395,8 @@ func classifyTaskExecutionIntent(title string) executionIntent {
 			ActionKey:   "run_task",
 			Mutating:    true,
 			Reason:      "destructive_keyword",
+			Value:       "destructive",
+			Source:      "fallback_title",
 		}
 	}
 	if containsAny(normalized, []string{
@@ -2385,6 +2407,8 @@ func classifyTaskExecutionIntent(title string) executionIntent {
 			ActionKey:   "run_task",
 			Mutating:    true,
 			Reason:      "governance_keyword",
+			Value:       "governance",
+			Source:      "fallback_title",
 		}
 	}
 	if containsAny(normalized, []string{
@@ -2396,9 +2420,65 @@ func classifyTaskExecutionIntent(title string) executionIntent {
 			ActionKey:   "run_task",
 			Mutating:    true,
 			Reason:      "mutation_keyword",
+			Value:       "mutation",
+			Source:      "fallback_title",
 		}
 	}
 	return intent
+}
+
+func resolveTaskExecutionIntent(manifest projects.Manifest, task sqlite.Task) executionIntent {
+	if intent := executionIntentFromStored(task.ExecutionIntent, task.ExecutionIntentSource); intent.Value != "" {
+		return intent
+	}
+	return applyManifestExecutionDefaults(manifest, classifyTaskExecutionIntent(task.Title))
+}
+
+func executionIntentFromStored(value string, source string) executionIntent {
+	intentValue := normalizeExecutionIntentValue(value)
+	if intentValue == "" {
+		return executionIntent{}
+	}
+	intent := executionIntent{
+		ActionKey: "run_task",
+		Value:     intentValue,
+		Source:    strings.TrimSpace(source),
+		Reason:    "persisted_intent",
+	}
+	if intent.Source == "" {
+		intent.Source = "persisted"
+	}
+	switch intentValue {
+	case "read_only":
+		intent.ActionClass = projects.ActionClassReadOnly
+		intent.ActionKey = "read_only_task"
+		intent.Mutating = false
+	case "mutation":
+		intent.ActionClass = projects.ActionClassIsolatedMutation
+		intent.Mutating = true
+	case "governance":
+		intent.ActionClass = projects.ActionClassGovernanceMutation
+		intent.Mutating = true
+	case "destructive":
+		intent.ActionClass = projects.ActionClassDestructiveMutation
+		intent.Mutating = true
+	}
+	return intent
+}
+
+func normalizeExecutionIntentValue(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "read_only", "readonly", "read-only", "read only":
+		return "read_only"
+	case "mutation", "mutating":
+		return "mutation"
+	case "governance", "governance_mutation":
+		return "governance"
+	case "destructive", "destructive_mutation":
+		return "destructive"
+	default:
+		return ""
+	}
 }
 
 func applyManifestExecutionDefaults(manifest projects.Manifest, intent executionIntent) executionIntent {
@@ -2408,6 +2488,8 @@ func applyManifestExecutionDefaults(manifest projects.Manifest, intent execution
 			ActionKey:   "run_task",
 			Mutating:    false,
 			Reason:      "system_project_default_approval_gate",
+			Value:       "mutation",
+			Source:      "system_project_default",
 		}
 	}
 	return intent

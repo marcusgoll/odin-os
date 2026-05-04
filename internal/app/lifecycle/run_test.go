@@ -1663,16 +1663,16 @@ func TestRunWorkDispatchEnforcesProjectExecutionPolicy(t *testing.T) {
 
 	run("project", "select", testProjectKey)
 	run("transition", "set", "cutover", "confirm", "because", "execution policy read-only proof")
-	readOnlyKey := parseTaskKey(run("work", "start", "--project", testProjectKey, "--title", "Read-only inspect project status"))
+	readOnlyKey := parseTaskKey(run("work", "start", "--project", testProjectKey, "--title", "Neutral status proof", "--intent", "read_only"))
 	readOnlyDispatch := run("work", "dispatch", "--task", readOnlyKey, "--json")
-	if !strings.Contains(readOnlyDispatch, `"dispatched": true`) || !strings.Contains(readOnlyDispatch, `"reason": "dispatched"`) || !strings.Contains(readOnlyDispatch, `"status": "running"`) {
-		t.Fatalf("read-only dispatch output = %s, want dispatched running task", readOnlyDispatch)
+	if !strings.Contains(readOnlyDispatch, `"dispatched": true`) || !strings.Contains(readOnlyDispatch, `"reason": "dispatched"`) || !strings.Contains(readOnlyDispatch, `"status": "running"`) || !strings.Contains(readOnlyDispatch, `"execution_intent": "read_only"`) || !strings.Contains(readOnlyDispatch, `"execution_intent_source": "operator"`) {
+		t.Fatalf("read-only dispatch output = %s, want dispatched running task with explicit read-only intent", readOnlyDispatch)
 	}
 
-	mutationKey := parseTaskKey(run("work", "start", "--project", testProjectKey, "--title", "Modify README through direct project root mutation"))
+	mutationKey := parseTaskKey(run("work", "start", "--project", testProjectKey, "--title", "Neutral repo task", "--intent", "mutation"))
 	mutationDispatch := run("work", "dispatch", "--task", mutationKey, "--json")
-	if !strings.Contains(mutationDispatch, `"dispatched": false`) || !strings.Contains(mutationDispatch, `"reason": "mutation_requires_isolated_worktree"`) || !strings.Contains(mutationDispatch, `"status": "blocked"`) {
-		t.Fatalf("mutation dispatch output = %s, want direct mutation blocked by project policy", mutationDispatch)
+	if !strings.Contains(mutationDispatch, `"dispatched": false`) || !strings.Contains(mutationDispatch, `"reason": "mutation_requires_isolated_worktree"`) || !strings.Contains(mutationDispatch, `"status": "blocked"`) || !strings.Contains(mutationDispatch, `"execution_intent": "mutation"`) || !strings.Contains(mutationDispatch, `"execution_intent_source": "operator"`) {
+		t.Fatalf("mutation dispatch output = %s, want direct mutation blocked by persisted operator intent", mutationDispatch)
 	}
 	runsAfterMutation := run("runs", "--json")
 	if strings.Count(runsAfterMutation, `"task_key": "`) != 1 {
@@ -1682,16 +1682,16 @@ func TestRunWorkDispatchEnforcesProjectExecutionPolicy(t *testing.T) {
 		t.Fatalf("runs output = %s, want project/worktree/branch execution context", runsAfterMutation)
 	}
 	mutationLogs := run("logs", "--json")
-	if !strings.Contains(mutationLogs, `"type": "task.queue_state_changed"`) || !strings.Contains(mutationLogs, `"blocked_reason": "mutation_requires_isolated_worktree"`) {
-		t.Fatalf("mutation logs output = %s, want mutation policy block evidence", mutationLogs)
+	if !strings.Contains(mutationLogs, `"type": "task.queue_state_changed"`) || !strings.Contains(mutationLogs, `"blocked_reason": "mutation_requires_isolated_worktree"`) || !strings.Contains(mutationLogs, `"execution_intent": "mutation"`) || !strings.Contains(mutationLogs, `"execution_intent_source": "operator"`) {
+		t.Fatalf("mutation logs output = %s, want mutation policy block evidence with persisted intent", mutationLogs)
 	}
 
 	run("project", "select", "odin-core")
 	run("transition", "set", "cutover", "confirm", "because", "execution policy approval proof")
-	systemMutationKey := parseTaskKey(run("work", "start", "--project", "odin-core", "--title", "Modify system project policy"))
+	systemMutationKey := parseTaskKey(run("work", "start", "--project", "odin-core", "--title", "Neutral system task", "--intent", "governance"))
 	systemMutationDispatch := run("work", "dispatch", "--task", systemMutationKey, "--json")
-	if !strings.Contains(systemMutationDispatch, `"dispatched": false`) || !strings.Contains(systemMutationDispatch, `"reason": "approval_required"`) || !strings.Contains(systemMutationDispatch, `"status": "blocked"`) {
-		t.Fatalf("system mutation dispatch output = %s, want approval-required mutation block", systemMutationDispatch)
+	if !strings.Contains(systemMutationDispatch, `"dispatched": false`) || !strings.Contains(systemMutationDispatch, `"reason": "approval_required"`) || !strings.Contains(systemMutationDispatch, `"status": "blocked"`) || !strings.Contains(systemMutationDispatch, `"execution_intent": "governance"`) {
+		t.Fatalf("system mutation dispatch output = %s, want approval-required governance block from persisted intent", systemMutationDispatch)
 	}
 
 	logsOutput := run("logs", "--json")
@@ -1699,6 +1699,7 @@ func TestRunWorkDispatchEnforcesProjectExecutionPolicy(t *testing.T) {
 		`"type": "task.queue_state_changed"`,
 		`"type": "approval.requested"`,
 		`"blocked_reason": "approval_required"`,
+		`"execution_intent_source": "operator"`,
 	} {
 		if !strings.Contains(logsOutput, want) {
 			t.Fatalf("logs output = %s, want %s", logsOutput, want)
@@ -1710,10 +1711,65 @@ func TestRunWorkDispatchEnforcesProjectExecutionPolicy(t *testing.T) {
 		"open_work_items=3",
 		"active_run_attempts=1",
 		"pending_approvals=1",
+		"explicit_intent_work_items=3",
 	} {
 		if !strings.Contains(statusOutput, want) {
 			t.Fatalf("work status output = %s, want %s", statusOutput, want)
 		}
+	}
+}
+
+func TestRunWorkExplicitTriggerIntentDoesNotDependOnTitleInference(t *testing.T) {
+	t.Parallel()
+
+	root := testRepoRoot(t)
+	run := func(args ...string) string {
+		t.Helper()
+		var stdout bytes.Buffer
+		if err := Run(context.Background(), root, args, strings.NewReader(""), &stdout); err != nil {
+			t.Fatalf("Run(%v) error = %v\nstdout=%s", args, err, stdout.String())
+		}
+		return stdout.String()
+	}
+
+	run("project", "select", "odin-core")
+	run("transition", "set", "cutover", "confirm", "because", "explicit trigger intent proof")
+	run("trigger", "upsert", "neutral-governance-trigger",
+		"initiative=odin-core",
+		"kind=schedule",
+		"status=enabled",
+		"next=2026-05-05T00:00:00Z",
+		"title=Neutral_periodic_check",
+		"summary=neutral periodic check",
+		"intent=governance",
+		"--json",
+	)
+	fireOutput := run("trigger", "fire", "neutral-governance-trigger", "reason=explicit-intent-proof", "--json")
+	var fire struct {
+		WorkItem struct {
+			Key                   string `json:"key"`
+			ExecutionIntent       string `json:"execution_intent"`
+			ExecutionIntentSource string `json:"execution_intent_source"`
+		} `json:"work_item"`
+	}
+	if err := json.Unmarshal([]byte(fireOutput), &fire); err != nil {
+		t.Fatalf("json.Unmarshal(fire) error = %v\n%s", err, fireOutput)
+	}
+	if fire.WorkItem.Key == "" || fire.WorkItem.ExecutionIntent != "governance" || fire.WorkItem.ExecutionIntentSource != "trigger" {
+		t.Fatalf("trigger fire output = %+v, want trigger-persisted governance intent", fire)
+	}
+
+	dispatchOutput := run("work", "dispatch", "--task", fire.WorkItem.Key, "--json")
+	if !strings.Contains(dispatchOutput, `"dispatched": false`) || !strings.Contains(dispatchOutput, `"reason": "approval_required"`) || !strings.Contains(dispatchOutput, `"execution_intent": "governance"`) || !strings.Contains(dispatchOutput, `"execution_intent_source": "trigger"`) {
+		t.Fatalf("dispatch output = %s, want approval gated by trigger intent without risky title wording", dispatchOutput)
+	}
+	jobsOutput := run("jobs", "--json")
+	if !strings.Contains(jobsOutput, `"execution_intent": "governance"`) || !strings.Contains(jobsOutput, `"execution_intent_source": "trigger"`) || !strings.Contains(jobsOutput, `"blocked_reason": "approval_required"`) {
+		t.Fatalf("jobs output = %s, want persisted trigger intent and policy result", jobsOutput)
+	}
+	overviewOutput := run("overview", "--json")
+	if !strings.Contains(overviewOutput, `"execution_intent": "governance"`) || !strings.Contains(overviewOutput, `"execution_intent_source": "trigger"`) {
+		t.Fatalf("overview output = %s, want trigger-created work intent visibility", overviewOutput)
 	}
 }
 

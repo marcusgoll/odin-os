@@ -41,6 +41,7 @@ type UpsertParams struct {
 	MatchScope          string
 	MatchProvider       string
 	MatchRepo           string
+	ExecutionIntent     string
 }
 
 type GitHubIssueIngestParams struct {
@@ -105,7 +106,11 @@ func (service Service) Upsert(ctx context.Context, params UpsertParams) (sqlite.
 	matchScope := strings.TrimSpace(params.MatchScope)
 	matchProvider := strings.TrimSpace(params.MatchProvider)
 	matchRepo := strings.TrimSpace(params.MatchRepo)
+	executionIntent := strings.ToLower(strings.TrimSpace(params.ExecutionIntent))
 	kind := strings.ToLower(strings.TrimSpace(params.Kind))
+	if executionIntent != "" && !validTriggerExecutionIntent(executionIntent) {
+		return sqlite.AutomationTrigger{}, fmt.Errorf("automation trigger intent must be one of read_only, mutation, governance, destructive")
+	}
 	if cadence != "" {
 		if _, _, err := parseScheduleCadence(cadence); err != nil {
 			return sqlite.AutomationTrigger{}, err
@@ -165,6 +170,9 @@ func (service Service) Upsert(ctx context.Context, params UpsertParams) (sqlite.
 		if matchRepo != "" {
 			payload["match_repo"] = matchRepo
 		}
+		if executionIntent != "" {
+			payload["execution_intent"] = executionIntent
+		}
 		if cadence != "" {
 			payload["cadence"] = cadence
 		}
@@ -205,6 +213,15 @@ func (service Service) Upsert(ctx context.Context, params UpsertParams) (sqlite.
 		WorkItemTitle:  params.WorkItemTitle,
 		NextEligibleAt: nextEligibleAt,
 	})
+}
+
+func validTriggerExecutionIntent(intent string) bool {
+	switch intent {
+	case "read_only", "mutation", "governance", "destructive":
+		return true
+	default:
+		return false
+	}
 }
 
 func (service Service) List(ctx context.Context, workspaceID string) ([]sqlite.AutomationTrigger, error) {

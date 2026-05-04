@@ -159,25 +159,29 @@ type ProjectCreatedPayload struct {
 }
 
 type TaskCreatedPayload struct {
-	Key            string `json:"key"`
-	Title          string `json:"title"`
-	ActionKey      string `json:"action_key,omitempty"`
-	Status         string `json:"status"`
-	Scope          string `json:"scope"`
-	RequestedBy    string `json:"requested_by"`
-	NextEligibleAt string `json:"next_eligible_at,omitempty"`
-	Priority       int    `json:"priority,omitempty"`
-	RetryCount     int    `json:"retry_count,omitempty"`
-	MaxAttempts    int    `json:"max_attempts,omitempty"`
-	LastError      string `json:"last_error,omitempty"`
-	BlockedReason  string `json:"blocked_reason,omitempty"`
+	Key                   string `json:"key"`
+	Title                 string `json:"title"`
+	ActionKey             string `json:"action_key,omitempty"`
+	Status                string `json:"status"`
+	Scope                 string `json:"scope"`
+	RequestedBy           string `json:"requested_by"`
+	NextEligibleAt        string `json:"next_eligible_at,omitempty"`
+	Priority              int    `json:"priority,omitempty"`
+	RetryCount            int    `json:"retry_count,omitempty"`
+	MaxAttempts           int    `json:"max_attempts,omitempty"`
+	LastError             string `json:"last_error,omitempty"`
+	BlockedReason         string `json:"blocked_reason,omitempty"`
+	ExecutionIntent       string `json:"execution_intent,omitempty"`
+	ExecutionIntentSource string `json:"execution_intent_source,omitempty"`
 }
 
 type TaskDispatchRequestedPayload struct {
-	TaskID   int64  `json:"task_id"`
-	Executor string `json:"executor"`
-	Attempt  int    `json:"attempt"`
-	Status   string `json:"status"`
+	TaskID                int64  `json:"task_id"`
+	Executor              string `json:"executor"`
+	Attempt               int    `json:"attempt"`
+	Status                string `json:"status"`
+	ExecutionIntent       string `json:"execution_intent,omitempty"`
+	ExecutionIntentSource string `json:"execution_intent_source,omitempty"`
 }
 
 type TaskRetryEvaluatedPayload struct {
@@ -216,14 +220,16 @@ type TaskStatusChangedPayload struct {
 }
 
 type TaskQueueStateChangedPayload struct {
-	PreviousStatus string `json:"previous_status"`
-	Status         string `json:"status"`
-	NextEligibleAt string `json:"next_eligible_at"`
-	Priority       int    `json:"priority"`
-	RetryCount     int    `json:"retry_count"`
-	MaxAttempts    int    `json:"max_attempts"`
-	LastError      string `json:"last_error,omitempty"`
-	BlockedReason  string `json:"blocked_reason,omitempty"`
+	PreviousStatus        string `json:"previous_status"`
+	Status                string `json:"status"`
+	NextEligibleAt        string `json:"next_eligible_at"`
+	Priority              int    `json:"priority"`
+	RetryCount            int    `json:"retry_count"`
+	MaxAttempts           int    `json:"max_attempts"`
+	LastError             string `json:"last_error,omitempty"`
+	BlockedReason         string `json:"blocked_reason,omitempty"`
+	ExecutionIntent       string `json:"execution_intent,omitempty"`
+	ExecutionIntentSource string `json:"execution_intent_source,omitempty"`
 }
 
 type FollowUpMaterializedPayload struct {

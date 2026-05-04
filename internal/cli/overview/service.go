@@ -89,16 +89,18 @@ type InitiativeSummary struct {
 }
 
 type WorkItemSummary struct {
-	ProjectKey       string              `json:"project_key"`
-	InitiativeKey    *string             `json:"initiative_key"`
-	CompanionKey     *string             `json:"companion_key"`
-	WorkItemKey      string              `json:"work_item_key"`
-	Title            string              `json:"title"`
-	Status           string              `json:"status"`
-	Scope            string              `json:"scope"`
-	CurrentRunID     *int64              `json:"current_run_id"`
-	CurrentRunStatus string              `json:"current_run_status"`
-	RunAttempts      []RunAttemptSummary `json:"run_attempts"`
+	ProjectKey            string              `json:"project_key"`
+	InitiativeKey         *string             `json:"initiative_key"`
+	CompanionKey          *string             `json:"companion_key"`
+	WorkItemKey           string              `json:"work_item_key"`
+	Title                 string              `json:"title"`
+	Status                string              `json:"status"`
+	Scope                 string              `json:"scope"`
+	ExecutionIntent       string              `json:"execution_intent,omitempty"`
+	ExecutionIntentSource string              `json:"execution_intent_source,omitempty"`
+	CurrentRunID          *int64              `json:"current_run_id"`
+	CurrentRunStatus      string              `json:"current_run_status"`
+	RunAttempts           []RunAttemptSummary `json:"run_attempts"`
 }
 
 type CompanionLane struct {
@@ -680,16 +682,18 @@ func (service Service) Build(ctx context.Context, resolved scope.Resolution) (Vi
 			continue
 		}
 		view.WorkItems = append(view.WorkItems, WorkItemSummary{
-			ProjectKey:       task.ProjectKey,
-			InitiativeKey:    taskContext.initiativeKey,
-			CompanionKey:     taskContext.companionKey,
-			WorkItemKey:      task.TaskKey,
-			Title:            task.Title,
-			Status:           task.Status,
-			Scope:            task.Scope,
-			CurrentRunID:     task.CurrentRunID,
-			CurrentRunStatus: task.CurrentRunStatus,
-			RunAttempts:      append([]RunAttemptSummary(nil), runAttemptsByTaskID[task.TaskID]...),
+			ProjectKey:            task.ProjectKey,
+			InitiativeKey:         taskContext.initiativeKey,
+			CompanionKey:          taskContext.companionKey,
+			WorkItemKey:           task.TaskKey,
+			Title:                 task.Title,
+			Status:                task.Status,
+			Scope:                 task.Scope,
+			ExecutionIntent:       task.ExecutionIntent,
+			ExecutionIntentSource: task.ExecutionIntentSource,
+			CurrentRunID:          task.CurrentRunID,
+			CurrentRunStatus:      task.CurrentRunStatus,
+			RunAttempts:           append([]RunAttemptSummary(nil), runAttemptsByTaskID[task.TaskID]...),
 		})
 	}
 

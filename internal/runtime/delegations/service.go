@@ -208,11 +208,13 @@ func (service Service) RunAgent(ctx context.Context, input RunInput) (sqlite.Tas
 	}
 
 	parentTaskResult, err := service.Jobs.CreateTaskOnce(ctx, jobsvc.CreateTaskParams{
-		Resolved:    input.ResolvedScope,
-		Title:       parentTaskTitle(input.AgentKey, input.Inputs),
-		RequestedBy: requestedBy,
-		Key:         delegationParentTaskKey(input),
-		CompanionID: input.CompanionID,
+		Resolved:              input.ResolvedScope,
+		Title:                 parentTaskTitle(input.AgentKey, input.Inputs),
+		RequestedBy:           requestedBy,
+		Key:                   delegationParentTaskKey(input),
+		CompanionID:           input.CompanionID,
+		ExecutionIntent:       "read_only",
+		ExecutionIntentSource: "companion_delegate",
 	})
 	if err != nil {
 		return sqlite.Task{}, nil, RunResult{}, fmt.Errorf("create parent task: %w", err)
@@ -407,10 +409,12 @@ func (service Service) runChildDelegation(ctx context.Context, parentTask sqlite
 	}
 
 	childTask, err := service.Jobs.CreateTask(ctx, jobsvc.CreateTaskParams{
-		Resolved:    input.ResolvedScope,
-		Title:       childTaskTitle(spec, input.Inputs),
-		RequestedBy: "agent:" + input.AgentKey,
-		CompanionID: input.CompanionID,
+		Resolved:              input.ResolvedScope,
+		Title:                 childTaskTitle(spec, input.Inputs),
+		RequestedBy:           "agent:" + input.AgentKey,
+		CompanionID:           input.CompanionID,
+		ExecutionIntent:       delegationExecutionIntent(spec.MutationMode),
+		ExecutionIntentSource: "companion_delegate",
 	})
 	if err != nil {
 		return sqlite.Delegation{}, err
@@ -1051,6 +1055,19 @@ func (service Service) childPrompt(spec ChildSpec, inputs map[string]string) (st
 
 func cleanInput(value string) string {
 	return strings.TrimSpace(value)
+}
+
+func delegationExecutionIntent(mutationMode string) string {
+	switch strings.ToLower(strings.TrimSpace(mutationMode)) {
+	case "mutation", "mutating", "write":
+		return "mutation"
+	case "governance":
+		return "governance"
+	case "destructive":
+		return "destructive"
+	default:
+		return "read_only"
+	}
 }
 
 func delegationIDs(delegations []sqlite.Delegation) []int64 {

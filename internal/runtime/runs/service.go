@@ -63,6 +63,8 @@ func (service Service) List(ctx context.Context, resolved scope.Resolution) ([]p
 			p.git_root,
 			COALESCE(wl.worktree_path, p.git_root),
 			COALESCE(wl.branch_name, p.default_branch),
+			COALESCE(t.execution_intent, ''),
+			COALESCE(t.execution_intent_source, ''),
 			t.scope
 		FROM runs r
 		JOIN tasks t ON t.id = r.task_id
@@ -94,6 +96,8 @@ func (service Service) List(ctx context.Context, resolved scope.Resolution) ([]p
 			&view.RepoRoot,
 			&view.WorktreePath,
 			&view.BranchName,
+			&view.ExecutionIntent,
+			&view.ExecutionIntentSource,
 			&taskScope,
 		); err != nil {
 			return nil, err

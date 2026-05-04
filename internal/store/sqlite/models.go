@@ -240,6 +240,8 @@ type Task struct {
 	FollowUpObligationID  *int64
 	FollowUpOccurrenceKey string
 	WorkKind              string
+	ExecutionIntent       string
+	ExecutionIntentSource string
 	Summary               string
 	TerminalReason        string
 	ArtifactsJSON         string
@@ -334,6 +336,8 @@ type CreateTaskParams struct {
 	FollowUpObligationID  *int64
 	FollowUpOccurrenceKey string
 	WorkKind              string
+	ExecutionIntent       string
+	ExecutionIntentSource string
 }
 
 type CreateTaskIntakeParams struct {

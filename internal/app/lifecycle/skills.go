@@ -437,10 +437,12 @@ func createTaskFromAcceptedSkillArtifact(ctx context.Context, app bootstrap.App,
 		Transitions: projects.Service{Store: app.Store},
 		Now:         time.Now,
 	}.CreateTaskOnce(ctx, jobs.CreateTaskParams{
-		Resolved:    resolved,
-		Title:       title,
-		RequestedBy: fmt.Sprintf("skill_artifact_review:%d", artifact.ID),
-		Key:         skillArtifactWorkItemKey(artifact.ID),
+		Resolved:              resolved,
+		Title:                 title,
+		RequestedBy:           fmt.Sprintf("skill_artifact_review:%d", artifact.ID),
+		Key:                   skillArtifactWorkItemKey(artifact.ID),
+		ExecutionIntent:       "read_only",
+		ExecutionIntentSource: "skill_artifact",
 	})
 	return result.Task, result.Created, err
 }

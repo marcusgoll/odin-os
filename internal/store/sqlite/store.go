@@ -1275,6 +1275,8 @@ func (store *Store) CreateTask(ctx context.Context, params CreateTaskParams) (Ta
 				follow_up_obligation_id,
 				follow_up_occurrence_key,
 				work_kind,
+				execution_intent,
+				execution_intent_source,
 				current_run_id,
 				summary,
 				terminal_reason,
@@ -1282,7 +1284,7 @@ func (store *Store) CreateTask(ctx context.Context, params CreateTaskParams) (Ta
 				created_at,
 				updated_at
 			)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, '', '', '[]', ?, ?)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, '', '', '[]', ?, ?)
 		`,
 			params.ProjectID,
 			params.Key,
@@ -1297,9 +1299,56 @@ func (store *Store) CreateTask(ctx context.Context, params CreateTaskParams) (Ta
 			nullInt64(params.FollowUpObligationID),
 			nullIfEmpty(params.FollowUpOccurrenceKey),
 			nullIfEmpty(params.WorkKind),
+			params.ExecutionIntent,
+			params.ExecutionIntentSource,
 			formatTime(now),
 			formatTime(now),
 		)
+		if err != nil && isMissingTaskExecutionIntentColumns(err) {
+			if hasTaskExecutionIntent(params) {
+				return fmt.Errorf("execution intent requires execution-intent task columns")
+			}
+			result, err = tx.ExecContext(ctx, `
+				INSERT INTO tasks (
+					project_id,
+					key,
+					title,
+					action_key,
+					status,
+					scope,
+					requested_by,
+					workspace_id,
+					initiative_id,
+					companion_id,
+					follow_up_obligation_id,
+					follow_up_occurrence_key,
+					work_kind,
+					current_run_id,
+					summary,
+					terminal_reason,
+					artifacts_json,
+					created_at,
+					updated_at
+				)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, '', '', '[]', ?, ?)
+			`,
+				params.ProjectID,
+				params.Key,
+				params.Title,
+				params.ActionKey,
+				params.Status,
+				params.Scope,
+				params.RequestedBy,
+				nullInt64(params.WorkspaceID),
+				nullInt64(params.InitiativeID),
+				nullInt64(params.CompanionID),
+				nullInt64(params.FollowUpObligationID),
+				nullIfEmpty(params.FollowUpOccurrenceKey),
+				nullIfEmpty(params.WorkKind),
+				formatTime(now),
+				formatTime(now),
+			)
+		}
 		if err != nil && isMissingTaskFollowUpColumns(err) {
 			if hasTaskFollowUpProvenance(params) {
 				return fmt.Errorf("follow-up provenance requires follow-up task columns")
@@ -1365,6 +1414,8 @@ func (store *Store) CreateTask(ctx context.Context, params CreateTaskParams) (Ta
 			FollowUpObligationID:  params.FollowUpObligationID,
 			FollowUpOccurrenceKey: params.FollowUpOccurrenceKey,
 			WorkKind:              params.WorkKind,
+			ExecutionIntent:       params.ExecutionIntent,
+			ExecutionIntentSource: params.ExecutionIntentSource,
 			ArtifactsJSON:         "[]",
 			NextEligibleAt:        time.Time{},
 			Priority:              100,
@@ -1384,18 +1435,20 @@ func (store *Store) CreateTask(ctx context.Context, params CreateTaskParams) (Ta
 			ProjectID:  &project.ID,
 			TaskID:     &task.ID,
 			Payload: runtimeevents.TaskCreatedPayload{
-				Key:            task.Key,
-				Title:          task.Title,
-				ActionKey:      task.ActionKey,
-				Status:         task.Status,
-				Scope:          task.Scope,
-				RequestedBy:    task.RequestedBy,
-				NextEligibleAt: formatTime(task.NextEligibleAt),
-				Priority:       task.Priority,
-				RetryCount:     task.RetryCount,
-				MaxAttempts:    task.MaxAttempts,
-				LastError:      task.LastError,
-				BlockedReason:  task.BlockedReason,
+				Key:                   task.Key,
+				Title:                 task.Title,
+				ActionKey:             task.ActionKey,
+				Status:                task.Status,
+				Scope:                 task.Scope,
+				RequestedBy:           task.RequestedBy,
+				NextEligibleAt:        formatTime(task.NextEligibleAt),
+				Priority:              task.Priority,
+				RetryCount:            task.RetryCount,
+				MaxAttempts:           task.MaxAttempts,
+				LastError:             task.LastError,
+				BlockedReason:         task.BlockedReason,
+				ExecutionIntent:       task.ExecutionIntent,
+				ExecutionIntentSource: task.ExecutionIntentSource,
 			},
 			OccurredAt: now,
 		})
@@ -1685,10 +1738,12 @@ func (store *Store) RecordTaskDispatchRequested(ctx context.Context, task Task, 
 			ProjectID:  &projectID,
 			TaskID:     &task.ID,
 			Payload: runtimeevents.TaskDispatchRequestedPayload{
-				TaskID:   task.ID,
-				Executor: executor,
-				Attempt:  attempt,
-				Status:   task.Status,
+				TaskID:                task.ID,
+				Executor:              executor,
+				Attempt:               attempt,
+				Status:                task.Status,
+				ExecutionIntent:       task.ExecutionIntent,
+				ExecutionIntentSource: task.ExecutionIntentSource,
 			},
 			OccurredAt: now,
 		})
@@ -1814,14 +1869,16 @@ func appendTaskQueueStateChangedEventTx(ctx context.Context, tx *sql.Tx, previou
 		ProjectID:  &projectID,
 		TaskID:     &updated.ID,
 		Payload: runtimeevents.TaskQueueStateChangedPayload{
-			PreviousStatus: previous.Status,
-			Status:         updated.Status,
-			NextEligibleAt: formatTime(updated.NextEligibleAt),
-			Priority:       updated.Priority,
-			RetryCount:     updated.RetryCount,
-			MaxAttempts:    updated.MaxAttempts,
-			LastError:      updated.LastError,
-			BlockedReason:  updated.BlockedReason,
+			PreviousStatus:        previous.Status,
+			Status:                updated.Status,
+			NextEligibleAt:        formatTime(updated.NextEligibleAt),
+			Priority:              updated.Priority,
+			RetryCount:            updated.RetryCount,
+			MaxAttempts:           updated.MaxAttempts,
+			LastError:             updated.LastError,
+			BlockedReason:         updated.BlockedReason,
+			ExecutionIntent:       updated.ExecutionIntent,
+			ExecutionIntentSource: updated.ExecutionIntentSource,
 		},
 		OccurredAt: occurredAt,
 	})
@@ -4411,6 +4468,8 @@ func (store *Store) GetTaskByFollowUpOccurrence(ctx context.Context, obligationI
 			follow_up_obligation_id,
 			follow_up_occurrence_key,
 			work_kind,
+			execution_intent,
+			execution_intent_source,
 			summary,
 			terminal_reason,
 			artifacts_json,
@@ -5078,7 +5137,7 @@ func (store *Store) GetTask(ctx context.Context, taskID int64) (Task, error) {
 
 func (store *Store) GetTaskByProjectAndKey(ctx context.Context, projectID int64, key string) (Task, error) {
 	row := store.db.QueryRowContext(ctx, `
-		SELECT id, project_id, key, title, action_key, status, scope, requested_by, workspace_id, initiative_id, companion_id, follow_up_obligation_id, follow_up_occurrence_key, work_kind, summary, terminal_reason, artifacts_json, current_run_id, next_eligible_at, priority, last_error, retry_count, max_attempts, blocked_reason, created_at, updated_at
+		SELECT id, project_id, key, title, action_key, status, scope, requested_by, workspace_id, initiative_id, companion_id, follow_up_obligation_id, follow_up_occurrence_key, work_kind, execution_intent, execution_intent_source, summary, terminal_reason, artifacts_json, current_run_id, next_eligible_at, priority, last_error, retry_count, max_attempts, blocked_reason, created_at, updated_at
 		FROM tasks
 		WHERE project_id = ? AND key = ?
 	`, projectID, key)
@@ -5087,7 +5146,7 @@ func (store *Store) GetTaskByProjectAndKey(ctx context.Context, projectID int64,
 
 func (store *Store) ListEligibleQueuedTasks(ctx context.Context, now time.Time) ([]Task, error) {
 	rows, err := store.db.QueryContext(ctx, `
-		SELECT id, project_id, key, title, action_key, status, scope, requested_by, workspace_id, initiative_id, companion_id, follow_up_obligation_id, follow_up_occurrence_key, work_kind, summary, terminal_reason, artifacts_json, current_run_id, next_eligible_at, priority, last_error, retry_count, max_attempts, blocked_reason, created_at, updated_at
+		SELECT id, project_id, key, title, action_key, status, scope, requested_by, workspace_id, initiative_id, companion_id, follow_up_obligation_id, follow_up_occurrence_key, work_kind, execution_intent, execution_intent_source, summary, terminal_reason, artifacts_json, current_run_id, next_eligible_at, priority, last_error, retry_count, max_attempts, blocked_reason, created_at, updated_at
 		FROM tasks
 		WHERE status = 'queued'
 		  AND next_eligible_at <= ?
@@ -6929,7 +6988,7 @@ func (store *Store) getWorkspaceByKeyTx(ctx context.Context, tx *sql.Tx, key str
 
 func (store *Store) getTaskQuery(ctx context.Context, queryer sqlQueryRow, taskID int64) (Task, error) {
 	row := queryer.QueryRowContext(ctx, `
-		SELECT id, project_id, key, title, action_key, status, scope, requested_by, workspace_id, initiative_id, companion_id, follow_up_obligation_id, follow_up_occurrence_key, work_kind, summary, terminal_reason, artifacts_json, current_run_id, next_eligible_at, priority, last_error, retry_count, max_attempts, blocked_reason, created_at, updated_at
+		SELECT id, project_id, key, title, action_key, status, scope, requested_by, workspace_id, initiative_id, companion_id, follow_up_obligation_id, follow_up_occurrence_key, work_kind, execution_intent, execution_intent_source, summary, terminal_reason, artifacts_json, current_run_id, next_eligible_at, priority, last_error, retry_count, max_attempts, blocked_reason, created_at, updated_at
 		FROM tasks
 		WHERE id = ?
 	`, taskID)
@@ -7510,7 +7569,7 @@ func (store *Store) getRunWithTaskTx(ctx context.Context, tx *sql.Tx, runID int6
 	row := tx.QueryRowContext(ctx, `
 		SELECT
 			r.id, r.task_id, r.executor, r.status, r.attempt, r.started_at, r.finished_at, r.summary, r.terminal_reason, r.artifacts_json,
-			t.id, t.project_id, t.key, t.title, t.action_key, t.status, t.scope, t.requested_by, t.workspace_id, t.initiative_id, t.companion_id, t.follow_up_obligation_id, t.follow_up_occurrence_key, t.work_kind, t.summary, t.terminal_reason, t.artifacts_json, t.current_run_id, t.next_eligible_at, t.priority, t.last_error, t.retry_count, t.max_attempts, t.blocked_reason, t.created_at, t.updated_at
+			t.id, t.project_id, t.key, t.title, t.action_key, t.status, t.scope, t.requested_by, t.workspace_id, t.initiative_id, t.companion_id, t.follow_up_obligation_id, t.follow_up_occurrence_key, t.work_kind, t.execution_intent, t.execution_intent_source, t.summary, t.terminal_reason, t.artifacts_json, t.current_run_id, t.next_eligible_at, t.priority, t.last_error, t.retry_count, t.max_attempts, t.blocked_reason, t.created_at, t.updated_at
 		FROM runs r
 		JOIN tasks t ON t.id = r.task_id
 		WHERE r.id = ?
@@ -7532,6 +7591,8 @@ func (store *Store) getRunWithTaskTx(ctx context.Context, tx *sql.Tx, runID int6
 	var followUpObligationID sql.NullInt64
 	var followUpOccurrenceKey sql.NullString
 	var workKind sql.NullString
+	var executionIntent sql.NullString
+	var executionIntentSource sql.NullString
 	var nextEligibleAt string
 	var priority int
 	var lastError string
@@ -7567,6 +7628,8 @@ func (store *Store) getRunWithTaskTx(ctx context.Context, tx *sql.Tx, runID int6
 		&followUpObligationID,
 		&followUpOccurrenceKey,
 		&workKind,
+		&executionIntent,
+		&executionIntentSource,
 		&taskSummary,
 		&taskTerminalReason,
 		&taskArtifactsJSON,
@@ -7602,6 +7665,8 @@ func (store *Store) getRunWithTaskTx(ctx context.Context, tx *sql.Tx, runID int6
 	task.FollowUpObligationID = nullableInt64Ptr(followUpObligationID)
 	task.FollowUpOccurrenceKey = stringOrDefault(followUpOccurrenceKey, "")
 	task.WorkKind = stringOrDefault(workKind, "")
+	task.ExecutionIntent = stringOrDefault(executionIntent, "")
+	task.ExecutionIntentSource = stringOrDefault(executionIntentSource, "")
 	task.Summary = taskSummary.String
 	task.TerminalReason = taskTerminalReason.String
 	task.ArtifactsJSON = normalizeArtifactsJSON(taskArtifactsJSON.String)
@@ -7631,7 +7696,7 @@ func (store *Store) getApprovalWithTaskTx(ctx context.Context, tx *sql.Tx, appro
 	row := tx.QueryRowContext(ctx, `
 		SELECT
 			a.id, a.task_id, a.run_id, a.status, a.requested_at, a.resolved_at, a.decision_by, a.reason,
-			t.id, t.project_id, t.key, t.title, t.action_key, t.status, t.scope, t.requested_by, t.workspace_id, t.initiative_id, t.companion_id, t.follow_up_obligation_id, t.follow_up_occurrence_key, t.work_kind, t.summary, t.terminal_reason, t.artifacts_json, t.current_run_id, t.next_eligible_at, t.priority, t.last_error, t.retry_count, t.max_attempts, t.blocked_reason, t.created_at, t.updated_at
+			t.id, t.project_id, t.key, t.title, t.action_key, t.status, t.scope, t.requested_by, t.workspace_id, t.initiative_id, t.companion_id, t.follow_up_obligation_id, t.follow_up_occurrence_key, t.work_kind, t.execution_intent, t.execution_intent_source, t.summary, t.terminal_reason, t.artifacts_json, t.current_run_id, t.next_eligible_at, t.priority, t.last_error, t.retry_count, t.max_attempts, t.blocked_reason, t.created_at, t.updated_at
 		FROM approvals a
 		JOIN tasks t ON t.id = a.task_id
 		WHERE a.id = ?
@@ -7654,6 +7719,8 @@ func (store *Store) getApprovalWithTaskTx(ctx context.Context, tx *sql.Tx, appro
 	var followUpObligationID sql.NullInt64
 	var followUpOccurrenceKey sql.NullString
 	var workKind sql.NullString
+	var executionIntent sql.NullString
+	var executionIntentSource sql.NullString
 	var nextEligibleAt string
 	var priority int
 	var lastError string
@@ -7686,6 +7753,8 @@ func (store *Store) getApprovalWithTaskTx(ctx context.Context, tx *sql.Tx, appro
 		&followUpObligationID,
 		&followUpOccurrenceKey,
 		&workKind,
+		&executionIntent,
+		&executionIntentSource,
 		&taskSummary,
 		&taskTerminalReason,
 		&taskArtifactsJSON,
@@ -7721,6 +7790,8 @@ func (store *Store) getApprovalWithTaskTx(ctx context.Context, tx *sql.Tx, appro
 	task.FollowUpObligationID = nullableInt64Ptr(followUpObligationID)
 	task.FollowUpOccurrenceKey = stringOrDefault(followUpOccurrenceKey, "")
 	task.WorkKind = stringOrDefault(workKind, "")
+	task.ExecutionIntent = stringOrDefault(executionIntent, "")
+	task.ExecutionIntentSource = stringOrDefault(executionIntentSource, "")
 	task.Summary = taskSummary.String
 	task.TerminalReason = taskTerminalReason.String
 	task.ArtifactsJSON = normalizeArtifactsJSON(taskArtifactsJSON.String)
@@ -8106,6 +8177,24 @@ func automationTriggerSelectSQL() string {
 	`
 }
 
+func automationTriggerExecutionIntent(trigger AutomationTrigger) (string, string) {
+	var rule map[string]any
+	if err := json.Unmarshal([]byte(trigger.RuleJSON), &rule); err != nil {
+		return "", ""
+	}
+	intent, ok := rule["execution_intent"].(string)
+	if !ok {
+		intent, _ = rule["intent"].(string)
+	}
+	intent = strings.ToLower(strings.TrimSpace(intent))
+	switch intent {
+	case "read_only", "mutation", "governance", "destructive":
+		return intent, "trigger"
+	default:
+		return "", ""
+	}
+}
+
 func (store *Store) getAutomationTriggerByIDQuery(ctx context.Context, queryer sqlQueryRow, id int64) (AutomationTrigger, error) {
 	row := queryer.QueryRowContext(ctx, automationTriggerSelectSQL()+` WHERE at.id = ?`, id)
 	return scanAutomationTrigger(row)
@@ -8150,19 +8239,23 @@ func (store *Store) createAutomationTriggerTaskTx(ctx context.Context, tx *sql.T
 		title = "Automation trigger " + trigger.Key
 	}
 	requestedBy := "automation_trigger:" + trigger.Key
+	executionIntent, executionIntentSource := automationTriggerExecutionIntent(trigger)
 	result, err := tx.ExecContext(ctx, `
 		INSERT INTO tasks (
 			project_id, key, title, action_key, status, scope, requested_by, workspace_id, initiative_id,
-			companion_id, follow_up_obligation_id, follow_up_occurrence_key, work_kind, current_run_id,
+			companion_id, follow_up_obligation_id, follow_up_occurrence_key, work_kind, execution_intent,
+			execution_intent_source, current_run_id,
 			summary, terminal_reason, artifacts_json, created_at, updated_at
 		)
-		VALUES (?, ?, ?, '', 'queued', ?, ?, NULL, NULL, NULL, NULL, NULL, 'automation_trigger', NULL, '', '', '[]', ?, ?)
+		VALUES (?, ?, ?, '', 'queued', ?, ?, NULL, NULL, NULL, NULL, NULL, 'automation_trigger', ?, ?, NULL, '', '', '[]', ?, ?)
 	`,
 		trigger.ProjectID,
 		taskKey,
 		title,
 		project.Scope,
 		requestedBy,
+		executionIntent,
+		executionIntentSource,
 		formatTime(now),
 		formatTime(now),
 	)
@@ -8174,20 +8267,22 @@ func (store *Store) createAutomationTriggerTaskTx(ctx context.Context, tx *sql.T
 		return Task{}, err
 	}
 	task := Task{
-		ID:             taskID,
-		ProjectID:      trigger.ProjectID,
-		Key:            taskKey,
-		Title:          title,
-		Status:         "queued",
-		Scope:          project.Scope,
-		RequestedBy:    requestedBy,
-		WorkKind:       "automation_trigger",
-		ArtifactsJSON:  "[]",
-		NextEligibleAt: time.Time{},
-		Priority:       100,
-		MaxAttempts:    3,
-		CreatedAt:      now,
-		UpdatedAt:      now,
+		ID:                    taskID,
+		ProjectID:             trigger.ProjectID,
+		Key:                   taskKey,
+		Title:                 title,
+		Status:                "queued",
+		Scope:                 project.Scope,
+		RequestedBy:           requestedBy,
+		WorkKind:              "automation_trigger",
+		ExecutionIntent:       executionIntent,
+		ExecutionIntentSource: executionIntentSource,
+		ArtifactsJSON:         "[]",
+		NextEligibleAt:        time.Time{},
+		Priority:              100,
+		MaxAttempts:           3,
+		CreatedAt:             now,
+		UpdatedAt:             now,
 	}
 	if err := appendEventTx(ctx, tx, eventInsert{
 		StreamType: runtimeevents.StreamTask,
@@ -8197,14 +8292,16 @@ func (store *Store) createAutomationTriggerTaskTx(ctx context.Context, tx *sql.T
 		ProjectID:  &project.ID,
 		TaskID:     &task.ID,
 		Payload: runtimeevents.TaskCreatedPayload{
-			Key:            task.Key,
-			Title:          task.Title,
-			Status:         task.Status,
-			Scope:          task.Scope,
-			RequestedBy:    task.RequestedBy,
-			NextEligibleAt: formatTime(task.NextEligibleAt),
-			Priority:       task.Priority,
-			MaxAttempts:    task.MaxAttempts,
+			Key:                   task.Key,
+			Title:                 task.Title,
+			Status:                task.Status,
+			Scope:                 task.Scope,
+			RequestedBy:           task.RequestedBy,
+			NextEligibleAt:        formatTime(task.NextEligibleAt),
+			Priority:              task.Priority,
+			MaxAttempts:           task.MaxAttempts,
+			ExecutionIntent:       task.ExecutionIntent,
+			ExecutionIntentSource: task.ExecutionIntentSource,
 		},
 		OccurredAt: now,
 	}); err != nil {
@@ -8636,6 +8733,8 @@ func scanTask(row interface{ Scan(...any) error }) (Task, error) {
 	var followUpObligationID sql.NullInt64
 	var followUpOccurrenceKey sql.NullString
 	var workKind sql.NullString
+	var executionIntent sql.NullString
+	var executionIntentSource sql.NullString
 	var nextEligibleAt string
 	var createdAt string
 	var updatedAt string
@@ -8654,6 +8753,8 @@ func scanTask(row interface{ Scan(...any) error }) (Task, error) {
 		&followUpObligationID,
 		&followUpOccurrenceKey,
 		&workKind,
+		&executionIntent,
+		&executionIntentSource,
 		&summary,
 		&terminalReason,
 		&artifactsJSON,
@@ -8677,6 +8778,8 @@ func scanTask(row interface{ Scan(...any) error }) (Task, error) {
 	task.FollowUpObligationID = nullableInt64Ptr(followUpObligationID)
 	task.FollowUpOccurrenceKey = stringOrDefault(followUpOccurrenceKey, "")
 	task.WorkKind = stringOrDefault(workKind, "")
+	task.ExecutionIntent = stringOrDefault(executionIntent, "")
+	task.ExecutionIntentSource = stringOrDefault(executionIntentSource, "")
 	task.Summary = summary.String
 	task.TerminalReason = terminalReason.String
 	task.ArtifactsJSON = normalizeArtifactsJSON(artifactsJSON.String)
@@ -9725,8 +9828,21 @@ func isMissingTaskFollowUpColumns(err error) bool {
 		strings.Contains(message, "has no column named follow_up_occurrence_key")
 }
 
+func isMissingTaskExecutionIntentColumns(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := err.Error()
+	return strings.Contains(message, "has no column named execution_intent") ||
+		strings.Contains(message, "has no column named execution_intent_source")
+}
+
 func hasTaskFollowUpProvenance(params CreateTaskParams) bool {
 	return params.FollowUpObligationID != nil || strings.TrimSpace(params.FollowUpOccurrenceKey) != ""
+}
+
+func hasTaskExecutionIntent(params CreateTaskParams) bool {
+	return strings.TrimSpace(params.ExecutionIntent) != "" || strings.TrimSpace(params.ExecutionIntentSource) != ""
 }
 
 func nullInt64(value *int64) any {

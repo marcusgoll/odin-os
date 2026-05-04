@@ -21,7 +21,7 @@ import (
 	trackerintake "odin-os/internal/tracker/intake"
 )
 
-const workUsage = "usage: odin work status|profiles|start --project <key> --title <text>|intake --project <key> [--dry-run]|dispatch [--task <id|key>] [--json]|execute --task <id|key> [--json]|retry --task <id|key> [--json]"
+const workUsage = "usage: odin work status|profiles|start --project <key> --title <text> [--intent <read_only|mutation|governance|destructive>]|intake --project <key> [--dry-run]|dispatch [--task <id|key>] [--json]|execute --task <id|key> [--json]|retry --task <id|key> [--json]"
 
 var newIntakeTracker = trackerintake.NewGitHubTracker
 
@@ -37,11 +37,14 @@ type workDispatchView struct {
 }
 
 type workDispatchTaskView struct {
-	ID           int64  `json:"id"`
-	ProjectID    int64  `json:"project_id"`
-	Key          string `json:"key"`
-	Status       string `json:"status"`
-	CurrentRunID *int64 `json:"current_run_id,omitempty"`
+	ID                    int64  `json:"id"`
+	ProjectID             int64  `json:"project_id"`
+	Key                   string `json:"key"`
+	Status                string `json:"status"`
+	CurrentRunID          *int64 `json:"current_run_id,omitempty"`
+	ExecutionIntent       string `json:"execution_intent,omitempty"`
+	ExecutionIntentSource string `json:"execution_intent_source,omitempty"`
+	BlockedReason         string `json:"blocked_reason,omitempty"`
 }
 
 type workDispatchRunView struct {
@@ -111,9 +114,16 @@ func runWorkStatus(ctx context.Context, store *sqlite.Store, snapshot registry.S
 	openWorkItems := 0
 	failedRetryableWorkItems := 0
 	retryBlockedWorkItems := 0
+	explicitIntentWorkItems := 0
+	fallbackIntentWorkItems := 0
 	for _, view := range taskViews {
 		if isOpenWorkItemStatus(view.Status) {
 			openWorkItems++
+		}
+		if strings.TrimSpace(view.ExecutionIntent) != "" {
+			explicitIntentWorkItems++
+		} else {
+			fallbackIntentWorkItems++
 		}
 		if strings.EqualFold(strings.TrimSpace(view.Status), "failed") {
 			if isTaskRetryEligible(view.RetryCount, view.MaxAttempts) {
@@ -133,7 +143,7 @@ func runWorkStatus(ctx context.Context, store *sqlite.Store, snapshot registry.S
 
 	_, err = fmt.Fprintf(
 		stdout,
-		"work_items=%d open_work_items=%d active_run_attempts=%d pending_approvals=%d delivery_profiles=%d raw_intake_items=%d intake_review_items=%d intake_approval_required_items=%d failed_retryable_work_items=%d retry_blocked_work_items=%d dispatch=work_dispatch intake=raw_cli\n",
+		"work_items=%d open_work_items=%d active_run_attempts=%d pending_approvals=%d delivery_profiles=%d raw_intake_items=%d intake_review_items=%d intake_approval_required_items=%d failed_retryable_work_items=%d retry_blocked_work_items=%d explicit_intent_work_items=%d fallback_intent_work_items=%d dispatch=work_dispatch intake=raw_cli\n",
 		len(taskViews),
 		openWorkItems,
 		activeRunAttempts,
@@ -144,6 +154,8 @@ func runWorkStatus(ctx context.Context, store *sqlite.Store, snapshot registry.S
 		intakeApprovalRequiredItems,
 		failedRetryableWorkItems,
 		retryBlockedWorkItems,
+		explicitIntentWorkItems,
+		fallbackIntentWorkItems,
 	)
 	return err
 }
@@ -349,11 +361,14 @@ func workDispatchOutcomeView(outcome jobs.DispatchOutcome) workDispatchView {
 	}
 	if outcome.Task.ID != 0 {
 		view.Task = workDispatchTaskView{
-			ID:           outcome.Task.ID,
-			ProjectID:    outcome.Task.ProjectID,
-			Key:          outcome.Task.Key,
-			Status:       outcome.Task.Status,
-			CurrentRunID: outcome.Task.CurrentRunID,
+			ID:                    outcome.Task.ID,
+			ProjectID:             outcome.Task.ProjectID,
+			Key:                   outcome.Task.Key,
+			Status:                outcome.Task.Status,
+			CurrentRunID:          outcome.Task.CurrentRunID,
+			ExecutionIntent:       outcome.Task.ExecutionIntent,
+			ExecutionIntentSource: outcome.Task.ExecutionIntentSource,
+			BlockedReason:         outcome.Task.BlockedReason,
 		}
 	}
 	if outcome.Run != nil {
@@ -386,11 +401,14 @@ func workExecutionOutcomeView(outcome jobs.RunExecutionOutcome) workExecutionVie
 	}
 	if outcome.Task.ID != 0 {
 		view.Task = workDispatchTaskView{
-			ID:           outcome.Task.ID,
-			ProjectID:    outcome.Task.ProjectID,
-			Key:          outcome.Task.Key,
-			Status:       outcome.Task.Status,
-			CurrentRunID: outcome.Task.CurrentRunID,
+			ID:                    outcome.Task.ID,
+			ProjectID:             outcome.Task.ProjectID,
+			Key:                   outcome.Task.Key,
+			Status:                outcome.Task.Status,
+			CurrentRunID:          outcome.Task.CurrentRunID,
+			ExecutionIntent:       outcome.Task.ExecutionIntent,
+			ExecutionIntentSource: outcome.Task.ExecutionIntentSource,
+			BlockedReason:         outcome.Task.BlockedReason,
 		}
 	}
 	if outcome.Run != nil {
@@ -429,9 +447,13 @@ func runWorkStart(ctx context.Context, store *sqlite.Store, projectRegistry proj
 	params := parseWorkStartArgs(args)
 	projectKey := strings.TrimSpace(params["project"])
 	title := strings.TrimSpace(params["title"])
+	intent := strings.TrimSpace(params["intent"])
 	if projectKey == "" || title == "" {
-		_, err := fmt.Fprintln(stdout, "usage: odin work start --project <key> --title <text>")
+		_, err := fmt.Fprintln(stdout, "usage: odin work start --project <key> --title <text> [--intent <read_only|mutation|governance|destructive>]")
 		return err
+	}
+	if intent != "" && !isValidWorkIntent(intent) {
+		return fmt.Errorf("intent must be one of read_only, mutation, governance, destructive")
 	}
 
 	resolved := scope.Resolution{
@@ -445,13 +467,35 @@ func runWorkStart(ctx context.Context, store *sqlite.Store, projectRegistry proj
 	task, err := jobs.Service{
 		Store:    store,
 		Registry: projectRegistry,
-	}.CreateTaskFromAct(ctx, resolved, title)
+	}.CreateTaskOnce(ctx, jobs.CreateTaskParams{
+		Resolved:              resolved,
+		Title:                 title,
+		RequestedBy:           "operator",
+		ExecutionIntent:       intent,
+		ExecutionIntentSource: intentSourceForWorkStart(intent),
+	})
 	if err != nil {
 		return err
 	}
 
-	_, err = fmt.Fprintf(stdout, "work_item_id=%d project=%s key=%s status=%s\n", task.ID, projectKey, task.Key, task.Status)
+	_, err = fmt.Fprintf(stdout, "work_item_id=%d project=%s key=%s status=%s intent=%s intent_source=%s\n", task.Task.ID, projectKey, task.Task.Key, task.Task.Status, noneIfEmpty(task.Task.ExecutionIntent), noneIfEmpty(task.Task.ExecutionIntentSource))
 	return err
+}
+
+func isValidWorkIntent(intent string) bool {
+	switch strings.ToLower(strings.TrimSpace(intent)) {
+	case "read_only", "mutation", "governance", "destructive":
+		return true
+	default:
+		return false
+	}
+}
+
+func intentSourceForWorkStart(intent string) string {
+	if strings.TrimSpace(intent) == "" {
+		return ""
+	}
+	return "operator"
 }
 
 func runWorkIntake(ctx context.Context, store *sqlite.Store, projectRegistry projects.Registry, args []string, stdout io.Writer) error {
