@@ -2473,6 +2473,179 @@ func TestRunKnowledgeSearchAndContextPackAreReadOnly(t *testing.T) {
 	}
 }
 
+func TestRunKnowledgeContextPackProposalReviewLifecycle(t *testing.T) {
+	t.Parallel()
+
+	root := testRepoRoot(t)
+	run := func(args ...string) string {
+		t.Helper()
+		var stdout bytes.Buffer
+		if err := Run(context.Background(), root, args, strings.NewReader(""), &stdout); err != nil {
+			t.Fatalf("Run(%v) error = %v\nstdout=%s", args, err, stdout.String())
+		}
+		return stdout.String()
+	}
+	extractCreatedTaskKey := func(output string) string {
+		t.Helper()
+		var payload struct {
+			Results []struct {
+				CreatedWorkItem bool `json:"created_work_item"`
+				WorkItem        struct {
+					Key string `json:"key"`
+				} `json:"work_item"`
+			} `json:"results"`
+		}
+		if err := json.Unmarshal([]byte(output), &payload); err != nil {
+			t.Fatalf("json.Unmarshal(trigger evaluate) error = %v\n%s", err, output)
+		}
+		for _, result := range payload.Results {
+			if result.CreatedWorkItem {
+				return result.WorkItem.Key
+			}
+		}
+		t.Fatalf("trigger evaluate output = %s, want created task", output)
+		return ""
+	}
+	extractPacketID := func(output string) int64 {
+		t.Helper()
+		var payload struct {
+			Proposal struct {
+				ID int64 `json:"id"`
+			} `json:"proposal"`
+		}
+		if err := json.Unmarshal([]byte(output), &payload); err != nil {
+			t.Fatalf("json.Unmarshal(proposal) error = %v\n%s", err, output)
+		}
+		if payload.Proposal.ID == 0 {
+			t.Fatalf("proposal output = %s, want proposal id", output)
+		}
+		return payload.Proposal.ID
+	}
+
+	run("project", "select", testProjectKey)
+	run("transition", "set", "cutover", "confirm", "because", "knowledge proposal proof")
+	run("trigger", "upsert", "knowledge-proposal",
+		"initiative="+testProjectKey,
+		"kind=event",
+		"status=enabled",
+		"event=external.github.issue",
+		"match_status=opened",
+		"match_provider=github",
+		"match_repo=acme/alpha",
+		"title=Review proposal context issue",
+		"summary=knowledge_context_pack_proposal_event",
+		"--json",
+	)
+	run("trigger", "ingest", "github-issue",
+		"project="+testProjectKey,
+		"repo=acme/alpha",
+		"number=89",
+		"action=opened",
+		"title=Knowledge proposal issue",
+		"body=prepare proposed context pack evidence",
+		"url=https://github.example/acme/alpha/issues/89",
+		"--json",
+	)
+	taskKey := extractCreatedTaskKey(run("trigger", "evaluate", "source=events", "--json"))
+	beforeLogs := run("logs", "--json")
+	readOnly := run("knowledge", "context-pack", "task="+taskKey, "project="+testProjectKey, "--json")
+	afterReadOnlyLogs := run("logs", "--json")
+	if beforeLogs != afterReadOnlyLogs || !strings.Contains(readOnly, `"persistence": "none"`) {
+		t.Fatalf("read-only context pack mutated logs or omitted persistence marker\nbefore=%s\nafter=%s\npack=%s", beforeLogs, afterReadOnlyLogs, readOnly)
+	}
+
+	proposalOutput := run("knowledge", "context-pack", "task="+taskKey, "project="+testProjectKey, "--propose", "--json")
+	proposalID := extractPacketID(proposalOutput)
+	for _, want := range []string{
+		`"proposed": true`,
+		`"persistence": "review_required"`,
+		`"status": "review_required"`,
+		`"packet_scope": "operator_context_pack"`,
+		`"trigger": "knowledge_context_pack_proposed"`,
+	} {
+		if !strings.Contains(proposalOutput, want) {
+			t.Fatalf("proposal output = %s, want %s", proposalOutput, want)
+		}
+	}
+	listOutput := run("knowledge", "context-packs", "--json")
+	if !strings.Contains(listOutput, fmt.Sprintf(`"id": %d`, proposalID)) || !strings.Contains(listOutput, `"status": "review_required"`) {
+		t.Fatalf("context-packs list = %s, want review-required proposal %d", listOutput, proposalID)
+	}
+	reviewList := run("review", "list", "--json")
+	queueID := fmt.Sprintf("context-pack:%d", proposalID)
+	if !strings.Contains(reviewList, queueID) || !strings.Contains(reviewList, `"source_type": "context_pack"`) || !strings.Contains(reviewList, `"allowed_actions": [
+        "accept",
+        "reject",
+        "archive"
+      ]`) {
+		t.Fatalf("review list = %s, want context pack review entry", reviewList)
+	}
+	reviewShow := run("review", "show", queueID, "--json")
+	if !strings.Contains(reviewShow, `"object_key": "context-pack-`) || !strings.Contains(reviewShow, `"context_pack"`) || !strings.Contains(reviewShow, taskKey) {
+		t.Fatalf("review show = %s, want context pack detail", reviewShow)
+	}
+	acceptOutput := run("review", "act", queueID, "accept", "--json")
+	if !strings.Contains(acceptOutput, `"decision": "accept"`) || !strings.Contains(acceptOutput, `"status": "active"`) {
+		t.Fatalf("accept output = %s, want active accepted proposal", acceptOutput)
+	}
+	repeatAccept := run("review", "act", queueID, "accept", "--json")
+	if !strings.Contains(repeatAccept, `"repeated": true`) || !strings.Contains(repeatAccept, `"status": "active"`) {
+		t.Fatalf("repeat accept output = %s, want idempotent active proposal", repeatAccept)
+	}
+	acceptedShow := run("knowledge", "context-pack", "show", fmt.Sprint(proposalID), "--json")
+	if !strings.Contains(acceptedShow, `"status": "active"`) || !strings.Contains(acceptedShow, `"review_decision": "accept"`) {
+		t.Fatalf("accepted context pack show = %s, want persisted accepted state", acceptedShow)
+	}
+
+	rejectOutput := run("knowledge", "context-pack", "task="+taskKey, "project="+testProjectKey, "--propose", "--json")
+	rejectID := extractPacketID(rejectOutput)
+	rejectQueueID := fmt.Sprintf("context-pack:%d", rejectID)
+	rejected := run("review", "act", rejectQueueID, "reject", "--json")
+	if !strings.Contains(rejected, `"decision": "reject"`) || !strings.Contains(rejected, `"status": "rejected"`) {
+		t.Fatalf("reject output = %s, want rejected proposal", rejected)
+	}
+	archivedOutput := run("knowledge", "context-pack", "task="+taskKey, "project="+testProjectKey, "--propose", "--json")
+	archiveID := extractPacketID(archivedOutput)
+	archiveQueueID := fmt.Sprintf("context-pack:%d", archiveID)
+	archived := run("review", "act", archiveQueueID, "archive", "--json")
+	if !strings.Contains(archived, `"decision": "archive"`) || !strings.Contains(archived, `"status": "archived"`) {
+		t.Fatalf("archive output = %s, want archived proposal", archived)
+	}
+
+	logs := run("logs", "--json")
+	for _, want := range []string{
+		`"type": "context_packet.created"`,
+		`"type": "context_packet.reviewed"`,
+		`"decision": "accept"`,
+		`"decision": "reject"`,
+		`"decision": "archive"`,
+	} {
+		if !strings.Contains(logs, want) {
+			t.Fatalf("logs output = %s, want %s", logs, want)
+		}
+	}
+	overview := run("overview", "--json")
+	for _, want := range []string{
+		`"knowledge_context_packs"`,
+		`"review_required_count": 0`,
+		`"accepted_count": 1`,
+		`"rejected_count": 1`,
+		`"archived_count": 1`,
+	} {
+		if !strings.Contains(overview, want) {
+			t.Fatalf("overview output = %s, want %s", overview, want)
+		}
+	}
+	jobs := run("jobs", "--json")
+	if strings.Count(jobs, `"task_key"`) != 1 || !strings.Contains(jobs, taskKey) {
+		t.Fatalf("jobs output = %s, want no work from context pack review", jobs)
+	}
+	runs := run("runs", "--json")
+	if !strings.Contains(runs, `"runs": []`) {
+		t.Fatalf("runs output = %s, want no run creation from context pack review", runs)
+	}
+}
+
 func TestRunWorkExecuteCompletesDispatchedIntakeRun(t *testing.T) {
 	configureLifecycleHarnessDriver(t)
 	t.Setenv("HOME", t.TempDir())

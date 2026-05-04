@@ -15,6 +15,16 @@ import (
 
 const PersistenceNone = "none"
 
+const (
+	PersistenceReviewRequired        = "review_required"
+	ContextPackPacketKind            = "context_pack"
+	ContextPackPacketScope           = "operator_context_pack"
+	ContextPackProposalTrigger       = "knowledge_context_pack_proposed"
+	ContextPackReviewAcceptDecision  = "accept"
+	ContextPackReviewRejectDecision  = "reject"
+	ContextPackReviewArchiveDecision = "archive"
+)
+
 type Service struct {
 	Store *sqlite.Store
 }
@@ -26,23 +36,23 @@ type SearchParams struct {
 }
 
 type SearchResult struct {
-	Kind       string
-	ID         int64
-	Key        string
-	ProjectKey string
-	Title      string
-	Status     string
-	Summary    string
-	OccurredAt time.Time
-	Source     string
+	Kind       string    `json:"kind"`
+	ID         int64     `json:"id"`
+	Key        string    `json:"key"`
+	ProjectKey string    `json:"project_key,omitempty"`
+	Title      string    `json:"title"`
+	Status     string    `json:"status,omitempty"`
+	Summary    string    `json:"summary,omitempty"`
+	OccurredAt time.Time `json:"occurred_at,omitempty"`
+	Source     string    `json:"source"`
 }
 
 type SearchResponse struct {
-	Query       string
-	ProjectKey  string
-	ReadOnly    bool
-	Persistence string
-	Results     []SearchResult
+	Query       string         `json:"query"`
+	ProjectKey  string         `json:"project_key,omitempty"`
+	ReadOnly    bool           `json:"read_only"`
+	Persistence string         `json:"persistence"`
+	Results     []SearchResult `json:"results"`
 }
 
 type ContextPackParams struct {
@@ -52,16 +62,16 @@ type ContextPackParams struct {
 }
 
 type ContextPack struct {
-	ObjectType   string
-	ObjectID     int64
-	ObjectKey    string
-	ProjectKey   string
-	ReadOnly     bool
-	Persistence  string
-	Task         TaskContext
-	Runs         []RunContext
-	Events       []EventContext
-	ContextItems []ContextItem
+	ObjectType   string         `json:"object_type"`
+	ObjectID     int64          `json:"object_id"`
+	ObjectKey    string         `json:"object_key"`
+	ProjectKey   string         `json:"project_key,omitempty"`
+	ReadOnly     bool           `json:"read_only"`
+	Persistence  string         `json:"persistence"`
+	Task         TaskContext    `json:"task"`
+	Runs         []RunContext   `json:"runs"`
+	Events       []EventContext `json:"events"`
+	ContextItems []ContextItem  `json:"context_items"`
 }
 
 type TaskContext struct {
@@ -85,11 +95,11 @@ type RunContext struct {
 }
 
 type EventContext struct {
-	ID         int64
-	Type       string
-	Scope      string
-	Payload    json.RawMessage
-	OccurredAt time.Time
+	ID         int64           `json:"id"`
+	Type       string          `json:"type"`
+	Scope      string          `json:"scope"`
+	Payload    json.RawMessage `json:"payload"`
+	OccurredAt time.Time       `json:"occurred_at"`
 }
 
 type ContextItem struct {
@@ -97,6 +107,36 @@ type ContextItem struct {
 	ID      int64  `json:"id"`
 	Summary string `json:"summary"`
 	Status  string `json:"status"`
+}
+
+type ContextPackProposal struct {
+	Packet         sqlite.ContextPacket
+	ContextPack    ContextPack
+	Review         ContextPackReview
+	Persistence    string
+	Proposed       bool
+	Reviewable     bool
+	AllowedActions []string
+}
+
+type ContextPackReview struct {
+	Decision   string `json:"decision,omitempty"`
+	Status     string `json:"status"`
+	ReviewedBy string `json:"reviewed_by,omitempty"`
+	Reason     string `json:"reason,omitempty"`
+	Repeated   bool   `json:"repeated"`
+}
+
+type ContextPackProposalPayload struct {
+	ContextPack ContextPack       `json:"context_pack"`
+	Review      ContextPackReview `json:"review"`
+}
+
+type ContextPackReviewOutcome struct {
+	Proposal ContextPackProposal
+	Decision string
+	Status   string
+	Repeated bool
 }
 
 func (service Service) Search(ctx context.Context, params SearchParams) (SearchResponse, error) {
@@ -207,6 +247,119 @@ func (service Service) BuildContextPack(ctx context.Context, params ContextPackP
 		Runs:         newRunContexts(runs),
 		Events:       newEventContexts(events),
 		ContextItems: contextItems,
+	}, nil
+}
+
+func (service Service) ProposeContextPack(ctx context.Context, params ContextPackParams) (ContextPackProposal, error) {
+	pack, err := service.BuildContextPack(ctx, params)
+	if err != nil {
+		return ContextPackProposal{}, err
+	}
+	payload := ContextPackProposalPayload{
+		ContextPack: pack,
+		Review: ContextPackReview{
+			Decision: "propose",
+			Status:   "review_required",
+		},
+	}
+	payloadBytes, err := json.Marshal(payload)
+	if err != nil {
+		return ContextPackProposal{}, err
+	}
+	packet, err := service.Store.CreateContextPacket(ctx, sqlite.CreateContextPacketParams{
+		TaskID:      &pack.ObjectID,
+		PacketKind:  ContextPackPacketKind,
+		PacketScope: ContextPackPacketScope,
+		Trigger:     ContextPackProposalTrigger,
+		Status:      "review_required",
+		Summary:     fmt.Sprintf("Context pack for task %s", pack.ObjectKey),
+		PayloadJSON: string(payloadBytes),
+	})
+	if err != nil {
+		return ContextPackProposal{}, err
+	}
+	return contextPackProposalFromPacket(packet)
+}
+
+func (service Service) ListContextPackProposals(ctx context.Context, status string) ([]ContextPackProposal, error) {
+	if service.Store == nil {
+		return nil, fmt.Errorf("knowledge store is required")
+	}
+	packets, err := service.Store.ListContextPackets(ctx, sqlite.ListContextPacketsParams{
+		PacketKind:  ContextPackPacketKind,
+		PacketScope: ContextPackPacketScope,
+		Status:      strings.TrimSpace(status),
+	})
+	if err != nil {
+		return nil, err
+	}
+	proposals := make([]ContextPackProposal, 0, len(packets))
+	for _, packet := range packets {
+		proposal, err := contextPackProposalFromPacket(packet)
+		if err != nil {
+			return nil, err
+		}
+		proposals = append(proposals, proposal)
+	}
+	return proposals, nil
+}
+
+func (service Service) GetContextPackProposal(ctx context.Context, packetID int64) (ContextPackProposal, error) {
+	if service.Store == nil {
+		return ContextPackProposal{}, fmt.Errorf("knowledge store is required")
+	}
+	packet, err := service.Store.GetContextPacket(ctx, packetID)
+	if err != nil {
+		return ContextPackProposal{}, err
+	}
+	return contextPackProposalFromPacket(packet)
+}
+
+func (service Service) ReviewContextPackProposal(ctx context.Context, packetID int64, decision string) (ContextPackReviewOutcome, error) {
+	if service.Store == nil {
+		return ContextPackReviewOutcome{}, fmt.Errorf("knowledge store is required")
+	}
+	current, err := service.GetContextPackProposal(ctx, packetID)
+	if err != nil {
+		return ContextPackReviewOutcome{}, err
+	}
+	decision = strings.ToLower(strings.TrimSpace(decision))
+	status, err := contextPackStatusForDecision(current.Packet.Status, decision)
+	if err != nil {
+		return ContextPackReviewOutcome{}, err
+	}
+	review := current.Review
+	review.Decision = decision
+	review.Status = status
+	review.ReviewedBy = "operator"
+	review.Repeated = current.Packet.Status == status
+	payload := ContextPackProposalPayload{
+		ContextPack: current.ContextPack,
+		Review:      review,
+	}
+	payloadBytes, err := json.Marshal(payload)
+	if err != nil {
+		return ContextPackReviewOutcome{}, err
+	}
+	result, err := service.Store.ReviewContextPacket(ctx, sqlite.ReviewContextPacketParams{
+		PacketID:    packetID,
+		Status:      status,
+		Decision:    decision,
+		ReviewedBy:  "operator",
+		PayloadJSON: string(payloadBytes),
+	})
+	if err != nil {
+		return ContextPackReviewOutcome{}, err
+	}
+	proposal, err := contextPackProposalFromPacket(result.Packet)
+	if err != nil {
+		return ContextPackReviewOutcome{}, err
+	}
+	return ContextPackReviewOutcome{
+		Proposal: proposal,
+		Decision: decision,
+		Status:   result.Packet.Status,
+		Repeated: result.Repeated,
 	}, nil
 }
 
@@ -368,6 +521,87 @@ func newEventContexts(records []runtimeevents.Record) []EventContext {
 		})
 	}
 	return contexts
+}
+
+func contextPackProposalFromPacket(packet sqlite.ContextPacket) (ContextPackProposal, error) {
+	if packet.PacketKind != ContextPackPacketKind || packet.PacketScope != ContextPackPacketScope {
+		return ContextPackProposal{}, fmt.Errorf("context packet %d is not an operator context pack", packet.ID)
+	}
+	var payload ContextPackProposalPayload
+	if strings.TrimSpace(packet.PayloadJSON) != "" {
+		if err := json.Unmarshal([]byte(packet.PayloadJSON), &payload); err != nil {
+			return ContextPackProposal{}, err
+		}
+	}
+	if payload.Review.Status == "" {
+		payload.Review.Status = packet.Status
+	}
+	if payload.ContextPack.ObjectType == "" {
+		payload.ContextPack = ContextPack{
+			ObjectType:  "task",
+			ReadOnly:    true,
+			Persistence: PersistenceNone,
+		}
+		if packet.TaskID != nil {
+			payload.ContextPack.ObjectID = *packet.TaskID
+		}
+	}
+	return ContextPackProposal{
+		Packet:         packet,
+		ContextPack:    payload.ContextPack,
+		Review:         payload.Review,
+		Persistence:    packet.Status,
+		Proposed:       packet.Status == "review_required",
+		Reviewable:     true,
+		AllowedActions: ContextPackAllowedActions(packet.Status),
+	}, nil
+}
+
+func ContextPackAllowedActions(status string) []string {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "review_required":
+		return []string{"accept", "reject", "archive"}
+	case "active":
+		return []string{"accept"}
+	case "rejected":
+		return []string{"reject"}
+	case "archived":
+		return []string{"archive"}
+	default:
+		return nil
+	}
+}
+
+func contextPackStatusForDecision(currentStatus string, decision string) (string, error) {
+	switch decision {
+	case ContextPackReviewAcceptDecision:
+		if !oneOfKnowledgeStatus(currentStatus, "review_required", "active") {
+			return "", fmt.Errorf("context pack proposal cannot be accepted from status %q", currentStatus)
+		}
+		return "active", nil
+	case ContextPackReviewRejectDecision:
+		if !oneOfKnowledgeStatus(currentStatus, "review_required", "rejected") {
+			return "", fmt.Errorf("context pack proposal cannot be rejected from status %q", currentStatus)
+		}
+		return "rejected", nil
+	case ContextPackReviewArchiveDecision:
+		if !oneOfKnowledgeStatus(currentStatus, "review_required", "archived") {
+			return "", fmt.Errorf("context pack proposal cannot be archived from status %q", currentStatus)
+		}
+		return "archived", nil
+	default:
+		return "", fmt.Errorf("context pack review action must be one of accept, reject, archive")
+	}
+}
+
+func oneOfKnowledgeStatus(value string, candidates ...string) bool {
+	value = strings.ToLower(strings.TrimSpace(value))
+	for _, candidate := range candidates {
+		if value == strings.ToLower(strings.TrimSpace(candidate)) {
+			return true
+		}
+	}
+	return false
 }
 
 func like(value string) string {

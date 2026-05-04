@@ -59,6 +59,7 @@ const (
 	EventRegistryVersionRecorded            Type = "registry_version.recorded"
 	EventExecutorHealthRecorded             Type = "executor_health.recorded"
 	EventContextPacketCreated               Type = "context_packet.created"
+	EventContextPacketReviewed              Type = "context_packet.reviewed"
 	EventConversationTranscriptRecorded     Type = "conversation.transcript_recorded"
 	EventMemorySummaryRecorded              Type = "memory.summary_recorded"
 	EventMemorySummaryUpdated               Type = "memory.summary_updated"
@@ -332,6 +333,18 @@ type ContextPacketCreatedPayload struct {
 	Trigger     string `json:"trigger"`
 	Status      string `json:"status"`
 	Summary     string `json:"summary"`
+}
+
+type ContextPacketReviewedPayload struct {
+	PacketID       int64  `json:"packet_id"`
+	PacketKind     string `json:"packet_kind"`
+	PacketScope    string `json:"packet_scope"`
+	Decision       string `json:"decision"`
+	Status         string `json:"status"`
+	PreviousStatus string `json:"previous_status"`
+	ReviewedBy     string `json:"reviewed_by,omitempty"`
+	Reason         string `json:"reason,omitempty"`
+	Repeated       bool   `json:"repeated"`
 }
 
 type ConversationTranscriptRecordedPayload struct {

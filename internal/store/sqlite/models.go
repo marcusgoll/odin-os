@@ -901,6 +901,21 @@ type UpdateContextPacketStatusParams struct {
 	PayloadJSON string
 }
 
+type ReviewContextPacketParams struct {
+	PacketID    int64
+	Status      string
+	Decision    string
+	ReviewedBy  string
+	Reason      string
+	Summary     string
+	PayloadJSON string
+}
+
+type ReviewContextPacketResult struct {
+	Packet   ContextPacket
+	Repeated bool
+}
+
 type ConversationTranscript struct {
 	ID          int64
 	ProjectID   *int64

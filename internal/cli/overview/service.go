@@ -17,6 +17,7 @@ import (
 	"odin-os/internal/registry"
 	approvalsvc "odin-os/internal/runtime/approvals"
 	runtimeevents "odin-os/internal/runtime/events"
+	runtimeknowledge "odin-os/internal/runtime/knowledge"
 	"odin-os/internal/runtime/projections"
 	"odin-os/internal/runtime/recovery"
 	"odin-os/internal/store/sqlite"
@@ -39,19 +40,20 @@ type Service struct {
 }
 
 type View struct {
-	Workspace          WorkspaceLane           `json:"workspace"`
-	Initiatives        []InitiativeSummary     `json:"initiatives"`
-	WorkItems          []WorkItemSummary       `json:"work_items"`
-	CompanionSwarms    []CompanionSwarmSummary `json:"companion_swarms"`
-	Companions         CompanionLane           `json:"companions"`
-	CapabilityCatalog  CapabilityCatalogLane   `json:"capability_catalog"`
-	SkillActivity      SkillActivityLane       `json:"skill_activity"`
-	DelegationTruth    DelegationTruthLane     `json:"delegation_truth"`
-	Approvals          []ApprovalSummary       `json:"approvals"`
-	Observability      ObservabilityLane       `json:"observability"`
-	Memory             MemoryLane              `json:"memory"`
-	IntakeInbox        IntakeInboxLane         `json:"intake_inbox"`
-	AutomationTriggers AutomationTriggerLane   `json:"automation_triggers"`
+	Workspace             WorkspaceLane            `json:"workspace"`
+	Initiatives           []InitiativeSummary      `json:"initiatives"`
+	WorkItems             []WorkItemSummary        `json:"work_items"`
+	CompanionSwarms       []CompanionSwarmSummary  `json:"companion_swarms"`
+	Companions            CompanionLane            `json:"companions"`
+	CapabilityCatalog     CapabilityCatalogLane    `json:"capability_catalog"`
+	SkillActivity         SkillActivityLane        `json:"skill_activity"`
+	DelegationTruth       DelegationTruthLane      `json:"delegation_truth"`
+	Approvals             []ApprovalSummary        `json:"approvals"`
+	Observability         ObservabilityLane        `json:"observability"`
+	Memory                MemoryLane               `json:"memory"`
+	KnowledgeContextPacks KnowledgeContextPackLane `json:"knowledge_context_packs"`
+	IntakeInbox           IntakeInboxLane          `json:"intake_inbox"`
+	AutomationTriggers    AutomationTriggerLane    `json:"automation_triggers"`
 }
 
 type WorkspaceLane struct {
@@ -151,6 +153,24 @@ type SkillActivitySummary struct {
 	Permissions      []string `json:"permissions"`
 	ErrorCode        string   `json:"error_code,omitempty"`
 	OccurredAt       string   `json:"occurred_at"`
+}
+
+type KnowledgeContextPackLane struct {
+	Wiring              Wiring                        `json:"wiring"`
+	ReviewRequiredCount int                           `json:"review_required_count"`
+	AcceptedCount       int                           `json:"accepted_count"`
+	RejectedCount       int                           `json:"rejected_count"`
+	ArchivedCount       int                           `json:"archived_count"`
+	Recent              []KnowledgeContextPackSummary `json:"recent"`
+}
+
+type KnowledgeContextPackSummary struct {
+	ID         int64  `json:"id"`
+	Status     string `json:"status"`
+	ProjectKey string `json:"project_key,omitempty"`
+	TaskKey    string `json:"task_key,omitempty"`
+	Summary    string `json:"summary"`
+	CreatedAt  string `json:"created_at"`
 }
 
 type DelegationTruthLane struct {
@@ -404,6 +424,9 @@ func (service Service) Build(ctx context.Context, resolved scope.Resolution) (Vi
 			Wiring: WiringLive,
 		},
 		Memory: MemoryLane{
+			Wiring: WiringLive,
+		},
+		KnowledgeContextPacks: KnowledgeContextPackLane{
 			Wiring: WiringLive,
 		},
 		IntakeInbox: IntakeInboxLane{
@@ -1025,7 +1048,49 @@ func (service Service) Build(ctx context.Context, resolved scope.Resolution) (Vi
 	}
 	view.SkillActivity = skillActivity
 
+	knowledgeContextPacks, err := service.knowledgeContextPacks(ctx, resolved)
+	if err != nil {
+		return View{}, err
+	}
+	view.KnowledgeContextPacks = knowledgeContextPacks
+
 	return view, nil
+}
+
+func (service Service) knowledgeContextPacks(ctx context.Context, resolved scope.Resolution) (KnowledgeContextPackLane, error) {
+	lane := KnowledgeContextPackLane{Wiring: WiringLive}
+	proposals, err := runtimeknowledge.Service{Store: service.Store}.ListContextPackProposals(ctx, "")
+	if err != nil {
+		return KnowledgeContextPackLane{}, err
+	}
+	for _, proposal := range proposals {
+		if !matchesKnowledgeContextPackScope(proposal, resolved) {
+			continue
+		}
+		switch strings.ToLower(strings.TrimSpace(proposal.Packet.Status)) {
+		case "review_required":
+			lane.ReviewRequiredCount++
+		case "active":
+			lane.AcceptedCount++
+		case "rejected":
+			lane.RejectedCount++
+		case "archived":
+			lane.ArchivedCount++
+		}
+		lane.Recent = append(lane.Recent, KnowledgeContextPackSummary{
+			ID:         proposal.Packet.ID,
+			Status:     proposal.Packet.Status,
+			ProjectKey: proposal.ContextPack.ProjectKey,
+			TaskKey:    proposal.ContextPack.Task.Key,
+			Summary:    proposal.Packet.Summary,
+			CreatedAt:  proposal.Packet.CreatedAt.UTC().Format(time.RFC3339),
+		})
+	}
+	const recentLimit = 5
+	if len(lane.Recent) > recentLimit {
+		lane.Recent = append([]KnowledgeContextPackSummary(nil), lane.Recent[len(lane.Recent)-recentLimit:]...)
+	}
+	return lane, nil
 }
 
 func (service Service) skillActivity(ctx context.Context, resolved scope.Resolution) (SkillActivityLane, error) {
@@ -1183,6 +1248,19 @@ func matchesSkillArtifactScope(artifact sqlite.SkillArtifact, resolved scope.Res
 		return projectID != nil && artifact.ProjectID != nil && *artifact.ProjectID == *projectID && artifact.Scope == string(resolved.Kind)
 	case scope.ScopeNewProject:
 		return artifact.Scope == string(scope.ScopeNewProject)
+	default:
+		return false
+	}
+}
+
+func matchesKnowledgeContextPackScope(proposal runtimeknowledge.ContextPackProposal, resolved scope.Resolution) bool {
+	switch resolved.Kind {
+	case scope.ScopeGlobal:
+		return true
+	case scope.ScopeProject, scope.ScopeOdinCore:
+		return strings.EqualFold(proposal.ContextPack.ProjectKey, resolved.ProjectKey)
+	case scope.ScopeNewProject:
+		return proposal.ContextPack.ProjectKey == ""
 	default:
 		return false
 	}

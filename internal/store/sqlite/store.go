@@ -6189,6 +6189,85 @@ func (store *Store) UpdateContextPacketStatus(ctx context.Context, params Update
 	return packet, nil
 }
 
+func (store *Store) ReviewContextPacket(ctx context.Context, params ReviewContextPacketParams) (ReviewContextPacketResult, error) {
+	now := store.now()
+	reviewedBy := strings.TrimSpace(params.ReviewedBy)
+	if reviewedBy == "" {
+		reviewedBy = "operator"
+	}
+	decision := strings.TrimSpace(params.Decision)
+	if decision == "" {
+		decision = params.Status
+	}
+	var result ReviewContextPacketResult
+
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		current, err := store.getContextPacketTx(ctx, tx, params.PacketID)
+		if err != nil {
+			return err
+		}
+		previousStatus := current.Status
+		repeated := current.Status == params.Status
+
+		summary := current.Summary
+		if strings.TrimSpace(params.Summary) != "" {
+			summary = params.Summary
+		}
+		payloadJSON := current.PayloadJSON
+		if strings.TrimSpace(params.PayloadJSON) != "" {
+			payloadJSON = params.PayloadJSON
+		}
+
+		if !repeated || summary != current.Summary || payloadJSON != current.PayloadJSON {
+			if _, err := tx.ExecContext(ctx, `
+				UPDATE context_packets
+				SET status = ?, summary = ?, payload_json = ?
+				WHERE id = ?
+			`, params.Status, summary, payloadJSON, params.PacketID); err != nil {
+				return err
+			}
+			current.Status = params.Status
+			current.Summary = summary
+			current.PayloadJSON = payloadJSON
+		}
+
+		contextRow, err := store.contextPacketContextTx(ctx, tx, current.TaskID, current.RunID)
+		if err != nil {
+			return err
+		}
+		if err := appendEventTx(ctx, tx, eventInsert{
+			StreamType: runtimeevents.StreamContextPacket,
+			StreamID:   current.ID,
+			EventType:  runtimeevents.EventContextPacketReviewed,
+			Scope:      contextRow.Scope,
+			ProjectID:  contextRow.ProjectID,
+			TaskID:     current.TaskID,
+			RunID:      current.RunID,
+			Payload: runtimeevents.ContextPacketReviewedPayload{
+				PacketID:       current.ID,
+				PacketKind:     current.PacketKind,
+				PacketScope:    current.PacketScope,
+				Decision:       decision,
+				Status:         current.Status,
+				PreviousStatus: previousStatus,
+				ReviewedBy:     reviewedBy,
+				Reason:         params.Reason,
+				Repeated:       repeated,
+			},
+			OccurredAt: now,
+		}); err != nil {
+			return err
+		}
+
+		result = ReviewContextPacketResult{Packet: current, Repeated: repeated}
+		return nil
+	})
+	if err != nil {
+		return ReviewContextPacketResult{}, err
+	}
+	return result, nil
+}
+
 func (store *Store) CreateWorktreeLease(ctx context.Context, params CreateWorktreeLeaseParams) (WorktreeLease, error) {
 	now := store.now()
 	var lease WorktreeLease

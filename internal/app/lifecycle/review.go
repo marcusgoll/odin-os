@@ -13,6 +13,7 @@ import (
 	"odin-os/internal/core/workspaces"
 	approvalsvc "odin-os/internal/runtime/approvals"
 	jobsvc "odin-os/internal/runtime/jobs"
+	runtimeknowledge "odin-os/internal/runtime/knowledge"
 	"odin-os/internal/runtime/projections"
 	"odin-os/internal/runtime/recovery"
 	"odin-os/internal/store/sqlite"
@@ -162,6 +163,11 @@ func runReviewAct(ctx context.Context, app bootstrap.App, queueID string, action
 			return fmt.Errorf("skill artifact action must be one of accept, reject, archive")
 		}
 		return runSkillArtifactReview(ctx, app, action, idRef, jsonOutput, stdout)
+	case "context-pack":
+		if !oneOf(action, "accept", "reject", "archive") {
+			return fmt.Errorf("context pack action must be one of accept, reject, archive")
+		}
+		return runContextPackReview(ctx, app, ref.ID, action, jsonOutput, stdout)
 	case "failed-work":
 		if action != "retry" {
 			return fmt.Errorf("failed work action must be retry")
@@ -218,6 +224,14 @@ func listReviewQueueEntries(ctx context.Context, app bootstrap.App) ([]reviewQue
 			return nil, err
 		}
 		entries = append(entries, entry)
+	}
+
+	contextPacks, err := runtimeknowledge.Service{Store: app.Store}.ListContextPackProposals(ctx, "")
+	if err != nil {
+		return nil, err
+	}
+	for _, proposal := range contextPacks {
+		entries = append(entries, reviewEntryFromContextPackProposal(proposal))
 	}
 
 	taskViews, err := projections.ListTaskStatusViews(ctx, app.Store.DB())
@@ -282,6 +296,13 @@ func reviewQueueDetail(ctx context.Context, app bootstrap.App, ref reviewQueueRe
 			return reviewQueueEntry{}, nil, err
 		}
 		return entry, renderSkillReviewArtifact(artifact), nil
+	case "context-pack":
+		proposal, err := runtimeknowledge.Service{Store: app.Store}.GetContextPackProposal(ctx, ref.ID)
+		if err != nil {
+			return reviewQueueEntry{}, nil, err
+		}
+		entry := reviewEntryFromContextPackProposal(proposal)
+		return entry, commands.NewKnowledgeContextPackProposalView(proposal), nil
 	case "failed-work":
 		task, err := app.Store.GetTask(ctx, ref.ID)
 		if err != nil {
@@ -416,6 +437,24 @@ func reviewEntryFromSkillArtifact(ctx context.Context, store *sqlite.Store, arti
 	}, nil
 }
 
+func reviewEntryFromContextPackProposal(proposal runtimeknowledge.ContextPackProposal) reviewQueueEntry {
+	projectScope := proposal.ContextPack.ProjectKey
+	return reviewQueueEntry{
+		QueueID:        fmt.Sprintf("context-pack:%d", proposal.Packet.ID),
+		SourceType:     "context_pack",
+		ObjectID:       proposal.Packet.ID,
+		ObjectKey:      fmt.Sprintf("context-pack-%d", proposal.Packet.ID),
+		Status:         proposal.Packet.Status,
+		ProjectScope:   projectScope,
+		Summary:        proposal.Packet.Summary,
+		TaskID:         proposal.ContextPack.Task.ID,
+		TaskKey:        proposal.ContextPack.Task.Key,
+		TaskStatus:     proposal.ContextPack.Task.Status,
+		WorkKind:       proposal.ContextPack.Task.WorkKind,
+		AllowedActions: runtimeknowledge.ContextPackAllowedActions(proposal.Packet.Status),
+	}
+}
+
 func reviewEntryFromFailedTask(task projections.TaskStatusView) reviewQueueEntry {
 	guidance := recovery.RetryGuidanceForTask(recovery.RetryGuidanceInput{
 		RetryCount:  task.RetryCount,
@@ -507,7 +546,7 @@ func parseReviewQueueRef(queueID string) (reviewQueueRef, error) {
 	queueID = strings.TrimSpace(queueID)
 	parts := strings.SplitN(queueID, ":", 2)
 	if len(parts) != 2 {
-		return reviewQueueRef{}, fmt.Errorf("review queue id must look like intake-review:<id>, intake-approval:<id>, approval:<id>, skill-artifact:<id>, or failed-work:<id>")
+		return reviewQueueRef{}, fmt.Errorf("review queue id must look like intake-review:<id>, intake-approval:<id>, approval:<id>, skill-artifact:<id>, context-pack:<id>, or failed-work:<id>")
 	}
 	kind := strings.ToLower(strings.TrimSpace(parts[0]))
 	idRef := strings.TrimSpace(parts[1])
@@ -518,6 +557,8 @@ func parseReviewQueueRef(queueID string) (reviewQueueRef, error) {
 		idRef = strings.TrimPrefix(idRef, "approval-")
 	case "skill-artifact":
 		idRef = strings.TrimPrefix(idRef, "skill-artifact-")
+	case "context-pack":
+		idRef = strings.TrimPrefix(idRef, "context-pack-")
 	case "failed-work":
 		idRef = strings.TrimPrefix(idRef, "task-")
 	default:
@@ -582,6 +623,29 @@ func runFailedWorkReviewRetry(ctx context.Context, app bootstrap.App, taskID int
 		return commands.WriteJSON(stdout, view)
 	}
 	_, err = fmt.Fprintf(stdout, "retried=%t reason=%s decision=%s retry_eligible=%t task=%s status=%s retry_count=%d recommendation=%q\n", view.Retried, view.Reason, view.Decision, view.RetryEligible, view.Task.Key, view.Task.Status, view.Task.RetryCount, view.RecoveryRecommendation)
+	return err
+}
+
+func runContextPackReview(ctx context.Context, app bootstrap.App, packetID int64, action string, jsonOutput bool, stdout io.Writer) error {
+	outcome, err := runtimeknowledge.Service{Store: app.Store}.ReviewContextPackProposal(ctx, packetID, action)
+	if err != nil {
+		return err
+	}
+	view := struct {
+		Decision string `json:"decision"`
+		Status   string `json:"status"`
+		Repeated bool   `json:"repeated"`
+		Proposal any    `json:"proposal"`
+	}{
+		Decision: outcome.Decision,
+		Status:   outcome.Status,
+		Repeated: outcome.Repeated,
+		Proposal: commands.NewKnowledgeContextPackProposalView(outcome.Proposal),
+	}
+	if jsonOutput {
+		return commands.WriteJSON(stdout, view)
+	}
+	_, err = fmt.Fprintf(stdout, "context_pack id=%d decision=%s status=%s repeated=%t\n", packetID, outcome.Decision, outcome.Status, outcome.Repeated)
 	return err
 }
 
