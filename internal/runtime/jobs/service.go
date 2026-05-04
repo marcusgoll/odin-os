@@ -614,6 +614,14 @@ func (service Service) DispatchTaskRunAttempt(ctx context.Context, taskID int64)
 }
 
 func (service Service) RetryFailedTask(ctx context.Context, taskID int64) (RetryOutcome, error) {
+	return service.retryFailedTask(ctx, taskID, "work_retry", "")
+}
+
+func (service Service) RetryFailedTaskFromReview(ctx context.Context, taskID int64, queueID string) (RetryOutcome, error) {
+	return service.retryFailedTask(ctx, taskID, "review_queue", queueID)
+}
+
+func (service Service) retryFailedTask(ctx context.Context, taskID int64, source string, queueID string) (RetryOutcome, error) {
 	if service.Store == nil {
 		return RetryOutcome{}, fmt.Errorf("job store is required")
 	}
@@ -626,7 +634,14 @@ func (service Service) RetryFailedTask(ctx context.Context, taskID int64) (Retry
 	case "failed":
 		policy := evaluateRetryPolicy(task)
 		if !policy.retryEligible {
-			if err := service.Store.RecordTaskRetryDecision(ctx, task, policy.decision, false, policy.recoveryRecommendation); err != nil {
+			if err := service.Store.RecordTaskRetryDecision(ctx, sqlite.RecordTaskRetryDecisionParams{
+				Task:                   task,
+				Decision:               policy.decision,
+				RetryEligible:          false,
+				RecoveryRecommendation: policy.recoveryRecommendation,
+				Source:                 source,
+				QueueID:                queueID,
+			}); err != nil {
 				return RetryOutcome{}, err
 			}
 			return RetryOutcome{
@@ -653,6 +668,8 @@ func (service Service) RetryFailedTask(ctx context.Context, taskID int64) (Retry
 			Decision:               policy.decision,
 			RetryEligible:          true,
 			RecoveryRecommendation: policy.recoveryRecommendation,
+			RetrySource:            source,
+			ReviewQueueID:          queueID,
 		})
 		if err != nil {
 			return RetryOutcome{}, err
@@ -667,19 +684,19 @@ func (service Service) RetryFailedTask(ctx context.Context, taskID int64) (Retry
 		}, nil
 	case "queued":
 		const recommendation = "Task is already queued; dispatch it instead of retrying again."
-		if err := service.Store.RecordTaskRetryDecision(ctx, task, "retry_already_queued", false, recommendation); err != nil {
+		if err := service.Store.RecordTaskRetryDecision(ctx, sqlite.RecordTaskRetryDecisionParams{Task: task, Decision: "retry_already_queued", RetryEligible: false, RecoveryRecommendation: recommendation, Source: source, QueueID: queueID}); err != nil {
 			return RetryOutcome{}, err
 		}
 		return RetryOutcome{Task: task, Retried: false, Reason: "already_queued", Decision: "retry_already_queued", RetryEligible: false, RecoveryRecommendation: recommendation}, nil
 	case "running", "preparing", "executing":
 		const recommendation = "Task already has active execution; wait for the current run to finish before retrying."
-		if err := service.Store.RecordTaskRetryDecision(ctx, task, "retry_blocked_active", false, recommendation); err != nil {
+		if err := service.Store.RecordTaskRetryDecision(ctx, sqlite.RecordTaskRetryDecisionParams{Task: task, Decision: "retry_blocked_active", RetryEligible: false, RecoveryRecommendation: recommendation, Source: source, QueueID: queueID}); err != nil {
 			return RetryOutcome{}, err
 		}
 		return RetryOutcome{Task: task, Retried: false, Reason: "already_active", Decision: "retry_blocked_active", RetryEligible: false, RecoveryRecommendation: recommendation}, nil
 	default:
 		const recommendation = "Only terminal failed work can be retried through work retry."
-		if err := service.Store.RecordTaskRetryDecision(ctx, task, "retry_blocked_non_retryable", false, recommendation); err != nil {
+		if err := service.Store.RecordTaskRetryDecision(ctx, sqlite.RecordTaskRetryDecisionParams{Task: task, Decision: "retry_blocked_non_retryable", RetryEligible: false, RecoveryRecommendation: recommendation, Source: source, QueueID: queueID}); err != nil {
 			return RetryOutcome{}, err
 		}
 		return RetryOutcome{Task: task, Retried: false, Reason: "task_not_failed", Decision: "retry_blocked_non_retryable", RetryEligible: false, RecoveryRecommendation: recommendation}, nil

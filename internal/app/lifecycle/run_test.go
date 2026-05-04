@@ -1156,6 +1156,126 @@ func TestRunUnifiedReviewQueueListsShowsAndRoutesExistingReviewObjects(t *testin
 	}
 }
 
+func TestRunUnifiedReviewQueueSurfacesFailedWorkRetryPolicy(t *testing.T) {
+	t.Setenv("ODIN_CODEX_DRIVER", "")
+	t.Setenv("HOME", t.TempDir())
+
+	root := testRepoRoot(t)
+	installRepoCodexDriverScript(t, root)
+	payloadPath := filepath.Join(t.TempDir(), "payload.json")
+	if err := os.WriteFile(payloadPath, []byte(`{"body":"failed work review proof"}`), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	run := func(args ...string) string {
+		t.Helper()
+		var output bytes.Buffer
+		if err := Run(context.Background(), root, args, strings.NewReader(""), &output); err != nil {
+			t.Fatalf("Run(%v) error = %v\noutput=%s", args, err, output.String())
+		}
+		return output.String()
+	}
+	failTask := func(taskKey string, attempt int) {
+		t.Helper()
+		dispatched := run("work", "dispatch", "--task", taskKey, "--json")
+		if !strings.Contains(dispatched, fmt.Sprintf(`"attempt": %d`, attempt)) || !strings.Contains(dispatched, `"status": "running"`) {
+			t.Fatalf("dispatch output = %s, want attempt %d running", dispatched, attempt)
+		}
+		executed := run("work", "execute", "--task", taskKey, "--json")
+		if !strings.Contains(executed, `"status": "failed"`) {
+			t.Fatalf("execute output = %s, want terminal failure", executed)
+		}
+	}
+
+	run("project", "select", testProjectKey)
+	run("transition", "set", "cutover", "confirm", "because", "failed work review proof")
+	run(
+		"intake", "raw", "create",
+		"--source", "operator",
+		"--project", testProjectKey,
+		"--title", "run this exact command: printf 'failed work review proof' >&2; exit 42",
+		"--type", "request",
+		"--dedup-key", "failed-work-review-proof",
+		"--requested-by", "codex",
+		"--payload-file", payloadPath,
+		"--json",
+	)
+	run("intake", "process", "--id", "intake-1", "--json")
+	run("review", "act", "intake-review:1", "accept", "--json")
+	failTask("intake-review-1", 1)
+
+	list := run("review", "list", "--json")
+	for _, want := range []string{
+		`"queue_id": "failed-work:1"`,
+		`"source_type": "failed_work"`,
+		`"object_key": "intake-review-1"`,
+		`"status": "failed"`,
+		`"retry_eligible": true`,
+		`"allowed_actions": [`,
+		`"retry"`,
+	} {
+		if !strings.Contains(list, want) {
+			t.Fatalf("review list output = %s, want %s", list, want)
+		}
+	}
+
+	show := run("review", "show", "failed-work:1", "--json")
+	for _, want := range []string{
+		`"source_type": "failed_work"`,
+		`"task_key": "intake-review-1"`,
+		`"retry_eligible": true`,
+		`"decision": "retry_allowed"`,
+		`"recovery_recommendation": "Retry is allowed; dispatch the queued task to create the next run attempt."`,
+	} {
+		if !strings.Contains(show, want) {
+			t.Fatalf("review show output = %s, want %s", show, want)
+		}
+	}
+
+	retried := run("review", "act", "failed-work:1", "retry", "--json")
+	if !strings.Contains(retried, `"retried": true`) || !strings.Contains(retried, `"decision": "retry_allowed"`) || !strings.Contains(retried, `"status": "queued"`) {
+		t.Fatalf("review retry output = %s, want bounded retry success", retried)
+	}
+	repeatList := run("review", "list", "--json")
+	if strings.Contains(repeatList, `"queue_id": "failed-work:1"`) {
+		t.Fatalf("review list output = %s, want queued retried work removed from failed-work queue", repeatList)
+	}
+
+	failTask("intake-review-1", 2)
+	retried = run("review", "act", "failed-work:1", "retry", "--json")
+	if !strings.Contains(retried, `"retried": true`) || !strings.Contains(retried, `"retry_count": 2`) {
+		t.Fatalf("second review retry output = %s, want second bounded retry", retried)
+	}
+	failTask("intake-review-1", 3)
+
+	blockedList := run("review", "list", "--json")
+	for _, want := range []string{
+		`"queue_id": "failed-work:1"`,
+		`"retry_eligible": false`,
+		`"retry_block_reason": "retry_blocked_max_attempts"`,
+		`"recovery_recommendation": "Open a follow-up or adjust the task before retrying; max attempts reached."`,
+	} {
+		if !strings.Contains(blockedList, want) {
+			t.Fatalf("blocked review list output = %s, want %s", blockedList, want)
+		}
+	}
+	blockedRetry := run("review", "act", "failed-work:1", "retry", "--json")
+	if !strings.Contains(blockedRetry, `"retried": false`) || !strings.Contains(blockedRetry, `"decision": "retry_blocked_max_attempts"`) || !strings.Contains(blockedRetry, `"retry_eligible": false`) {
+		t.Fatalf("blocked review retry output = %s, want policy block", blockedRetry)
+	}
+	runsOutput := run("runs", "--json")
+	if strings.Count(runsOutput, `"task_key": "intake-review-1"`) != 3 {
+		t.Fatalf("runs output = %s, want no fourth run after blocked review retry", runsOutput)
+	}
+	logsOutput := run("logs", "--json")
+	if !strings.Contains(logsOutput, `"type": "task.retry_evaluated"`) || !strings.Contains(logsOutput, `"decision": "retry_blocked_max_attempts"`) {
+		t.Fatalf("logs output = %s, want retry evaluation audit evidence", logsOutput)
+	}
+	statusOutput := run("work", "status")
+	if !strings.Contains(statusOutput, "failed_retryable_work_items=0") || !strings.Contains(statusOutput, "retry_blocked_work_items=1") {
+		t.Fatalf("work status output = %s, want blocked retry counts", statusOutput)
+	}
+}
+
 func TestRunLogsIncludeProjectScopedIntakeEventsForOdinCoreScope(t *testing.T) {
 	t.Parallel()
 

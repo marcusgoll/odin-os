@@ -179,6 +179,8 @@ type TaskRetryEvaluatedPayload struct {
 	TaskID                 int64  `json:"task_id"`
 	Status                 string `json:"status"`
 	Requested              bool   `json:"requested"`
+	Source                 string `json:"source,omitempty"`
+	QueueID                string `json:"queue_id,omitempty"`
 	Decision               string `json:"decision"`
 	RetryEligible          bool   `json:"retry_eligible"`
 	RetryCount             int    `json:"retry_count"`

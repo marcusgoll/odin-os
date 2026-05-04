@@ -1548,7 +1548,13 @@ func (store *Store) IncrementTaskRetry(ctx context.Context, params IncrementTask
 			return err
 		}
 		if params.RecordDecision {
-			if err := appendTaskRetryEvaluatedEventTx(ctx, tx, updated, params.Decision, params.RetryEligible, params.RecoveryRecommendation, now); err != nil {
+			if err := appendTaskRetryEvaluatedEventTx(ctx, tx, updated, taskRetryEventParams{
+				Decision:               params.Decision,
+				RetryEligible:          params.RetryEligible,
+				RecoveryRecommendation: params.RecoveryRecommendation,
+				Source:                 params.RetrySource,
+				QueueID:                params.ReviewQueueID,
+			}, now); err != nil {
 				return err
 			}
 		}
@@ -1605,10 +1611,25 @@ func (store *Store) RecordTaskDispatchRequested(ctx context.Context, task Task, 
 	})
 }
 
-func (store *Store) RecordTaskRetryDecision(ctx context.Context, task Task, decision string, retryEligible bool, recoveryRecommendation string) error {
+type RecordTaskRetryDecisionParams struct {
+	Task                   Task
+	Decision               string
+	RetryEligible          bool
+	RecoveryRecommendation string
+	Source                 string
+	QueueID                string
+}
+
+func (store *Store) RecordTaskRetryDecision(ctx context.Context, params RecordTaskRetryDecisionParams) error {
 	now := store.now()
 	return store.withTx(ctx, func(tx *sql.Tx) error {
-		return appendTaskRetryEvaluatedEventTx(ctx, tx, task, decision, retryEligible, recoveryRecommendation, now)
+		return appendTaskRetryEvaluatedEventTx(ctx, tx, params.Task, taskRetryEventParams{
+			Decision:               params.Decision,
+			RetryEligible:          params.RetryEligible,
+			RecoveryRecommendation: params.RecoveryRecommendation,
+			Source:                 params.Source,
+			QueueID:                params.QueueID,
+		}, now)
 	})
 }
 
@@ -1687,7 +1708,15 @@ func appendTaskQueueStateChangedEventTx(ctx context.Context, tx *sql.Tx, previou
 	})
 }
 
-func appendTaskRetryEvaluatedEventTx(ctx context.Context, tx *sql.Tx, task Task, decision string, retryEligible bool, recoveryRecommendation string, occurredAt time.Time) error {
+type taskRetryEventParams struct {
+	Decision               string
+	RetryEligible          bool
+	RecoveryRecommendation string
+	Source                 string
+	QueueID                string
+}
+
+func appendTaskRetryEvaluatedEventTx(ctx context.Context, tx *sql.Tx, task Task, params taskRetryEventParams, occurredAt time.Time) error {
 	projectID := task.ProjectID
 	return appendEventTx(ctx, tx, eventInsert{
 		StreamType: runtimeevents.StreamTask,
@@ -1700,13 +1729,15 @@ func appendTaskRetryEvaluatedEventTx(ctx context.Context, tx *sql.Tx, task Task,
 			TaskID:                 task.ID,
 			Status:                 task.Status,
 			Requested:              true,
-			Decision:               decision,
-			RetryEligible:          retryEligible,
+			Source:                 params.Source,
+			QueueID:                params.QueueID,
+			Decision:               params.Decision,
+			RetryEligible:          params.RetryEligible,
 			RetryCount:             task.RetryCount,
 			MaxAttempts:            task.MaxAttempts,
 			NextEligibleAt:         formatTime(task.NextEligibleAt),
 			LastError:              task.LastError,
-			RecoveryRecommendation: recoveryRecommendation,
+			RecoveryRecommendation: params.RecoveryRecommendation,
 		},
 		OccurredAt: occurredAt,
 	})

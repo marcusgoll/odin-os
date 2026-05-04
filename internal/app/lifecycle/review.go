@@ -6,16 +6,18 @@ import (
 	"io"
 	"strconv"
 	"strings"
+	"time"
 
 	"odin-os/internal/app/bootstrap"
 	commands "odin-os/internal/cli/commands"
 	"odin-os/internal/core/workspaces"
 	approvalsvc "odin-os/internal/runtime/approvals"
+	jobsvc "odin-os/internal/runtime/jobs"
 	"odin-os/internal/runtime/projections"
 	"odin-os/internal/store/sqlite"
 )
 
-const reviewUsage = "usage: odin review list [--json] | odin review show <queue-id> [--json] | odin review act <queue-id> <accept|reject|archive|approve|deny|clarify> [--json]"
+const reviewUsage = "usage: odin review list [--json] | odin review show <queue-id> [--json] | odin review act <queue-id> <accept|reject|archive|approve|deny|clarify|retry> [--json]"
 
 type reviewQueueListView struct {
 	Items []reviewQueueEntry `json:"items"`
@@ -27,14 +29,21 @@ type reviewQueueShowView struct {
 }
 
 type reviewQueueEntry struct {
-	QueueID        string   `json:"queue_id"`
-	SourceType     string   `json:"source_type"`
-	ObjectID       int64    `json:"object_id"`
-	ObjectKey      string   `json:"object_key"`
-	Status         string   `json:"status"`
-	ProjectScope   string   `json:"project_scope,omitempty"`
-	Summary        string   `json:"summary,omitempty"`
-	AllowedActions []string `json:"allowed_actions"`
+	QueueID                string   `json:"queue_id"`
+	SourceType             string   `json:"source_type"`
+	ObjectID               int64    `json:"object_id"`
+	ObjectKey              string   `json:"object_key"`
+	Status                 string   `json:"status"`
+	ProjectScope           string   `json:"project_scope,omitempty"`
+	Summary                string   `json:"summary,omitempty"`
+	TaskID                 int64    `json:"task_id,omitempty"`
+	TaskKey                string   `json:"task_key,omitempty"`
+	TaskStatus             string   `json:"task_status,omitempty"`
+	Decision               string   `json:"decision,omitempty"`
+	RetryEligible          *bool    `json:"retry_eligible,omitempty"`
+	RetryBlockReason       string   `json:"retry_block_reason,omitempty"`
+	RecoveryRecommendation string   `json:"recovery_recommendation,omitempty"`
+	AllowedActions         []string `json:"allowed_actions"`
 }
 
 type reviewQueueRef struct {
@@ -150,6 +159,11 @@ func runReviewAct(ctx context.Context, app bootstrap.App, queueID string, action
 			return fmt.Errorf("skill artifact action must be one of accept, reject, archive")
 		}
 		return runSkillArtifactReview(ctx, app, action, idRef, jsonOutput, stdout)
+	case "failed-work":
+		if action != "retry" {
+			return fmt.Errorf("failed work action must be retry")
+		}
+		return runFailedWorkReviewRetry(ctx, app, ref.ID, jsonOutput, stdout)
 	default:
 		return fmt.Errorf("unsupported review queue source %q", ref.Kind)
 	}
@@ -201,6 +215,17 @@ func listReviewQueueEntries(ctx context.Context, app bootstrap.App) ([]reviewQue
 			return nil, err
 		}
 		entries = append(entries, entry)
+	}
+
+	taskViews, err := projections.ListTaskStatusViews(ctx, app.Store.DB())
+	if err != nil {
+		return nil, err
+	}
+	for _, task := range taskViews {
+		if !strings.EqualFold(strings.TrimSpace(task.Status), "failed") {
+			continue
+		}
+		entries = append(entries, reviewEntryFromFailedTask(task))
 	}
 	return entries, nil
 }
@@ -254,9 +279,62 @@ func reviewQueueDetail(ctx context.Context, app bootstrap.App, ref reviewQueueRe
 			return reviewQueueEntry{}, nil, err
 		}
 		return entry, renderSkillReviewArtifact(artifact), nil
+	case "failed-work":
+		task, err := app.Store.GetTask(ctx, ref.ID)
+		if err != nil {
+			return reviewQueueEntry{}, nil, err
+		}
+		entry, detail, err := reviewFailedTaskDetail(ctx, app.Store, task)
+		if err != nil {
+			return reviewQueueEntry{}, nil, err
+		}
+		return entry, detail, nil
 	default:
 		return reviewQueueEntry{}, nil, fmt.Errorf("unsupported review queue source %q", ref.Kind)
 	}
+}
+
+type failedWorkReviewDetail struct {
+	TaskID                 int64                  `json:"task_id"`
+	TaskKey                string                 `json:"task_key"`
+	TaskStatus             string                 `json:"task_status"`
+	ProjectKey             string                 `json:"project_key"`
+	Decision               string                 `json:"decision"`
+	RetryEligible          bool                   `json:"retry_eligible"`
+	RetryBlockReason       string                 `json:"retry_block_reason,omitempty"`
+	RecoveryRecommendation string                 `json:"recovery_recommendation"`
+	RetryCount             int                    `json:"retry_count"`
+	MaxAttempts            int                    `json:"max_attempts"`
+	LastError              string                 `json:"last_error,omitempty"`
+	RunAttempts            []failedWorkRunAttempt `json:"run_attempts"`
+}
+
+type failedWorkRunAttempt struct {
+	RunID    int64  `json:"run_id"`
+	Status   string `json:"status"`
+	Attempt  int    `json:"attempt"`
+	Executor string `json:"executor"`
+}
+
+type failedWorkRetryView struct {
+	Retried                bool                    `json:"retried"`
+	Reason                 string                  `json:"reason"`
+	Decision               string                  `json:"decision"`
+	RetryEligible          bool                    `json:"retry_eligible"`
+	RecoveryRecommendation string                  `json:"recovery_recommendation,omitempty"`
+	Task                   failedWorkRetryTaskView `json:"task,omitempty"`
+}
+
+type failedWorkRetryTaskView struct {
+	ID             int64  `json:"id"`
+	ProjectID      int64  `json:"project_id"`
+	Key            string `json:"key"`
+	Status         string `json:"status"`
+	RetryCount     int    `json:"retry_count"`
+	MaxAttempts    int    `json:"max_attempts"`
+	LastError      string `json:"last_error,omitempty"`
+	BlockedReason  string `json:"blocked_reason,omitempty"`
+	NextEligibleAt string `json:"next_eligible_at,omitempty"`
 }
 
 func reviewEntryFromIntakeItem(item sqlite.IntakeItem, kind string) (reviewQueueEntry, error) {
@@ -335,11 +413,84 @@ func reviewEntryFromSkillArtifact(ctx context.Context, store *sqlite.Store, arti
 	}, nil
 }
 
+func reviewEntryFromFailedTask(task projections.TaskStatusView) reviewQueueEntry {
+	decision, eligible, recommendation := failedWorkRetryGuidance(task.RetryCount, task.MaxAttempts)
+	retryEligible := eligible
+	return reviewQueueEntry{
+		QueueID:                fmt.Sprintf("failed-work:%d", task.TaskID),
+		SourceType:             "failed_work",
+		ObjectID:               task.TaskID,
+		ObjectKey:              task.TaskKey,
+		Status:                 task.Status,
+		ProjectScope:           task.ProjectKey,
+		Summary:                firstNonBlank(task.LastError, task.Title),
+		TaskID:                 task.TaskID,
+		TaskKey:                task.TaskKey,
+		TaskStatus:             task.Status,
+		Decision:               decision,
+		RetryEligible:          &retryEligible,
+		RetryBlockReason:       retryBlockReason(decision, eligible),
+		RecoveryRecommendation: recommendation,
+		AllowedActions:         []string{"retry"},
+	}
+}
+
+func reviewFailedTaskDetail(ctx context.Context, store *sqlite.Store, task sqlite.Task) (reviewQueueEntry, failedWorkReviewDetail, error) {
+	project, err := store.GetProject(ctx, task.ProjectID)
+	if err != nil {
+		return reviewQueueEntry{}, failedWorkReviewDetail{}, err
+	}
+	taskView := projections.TaskStatusView{
+		TaskID:      task.ID,
+		ProjectID:   task.ProjectID,
+		ProjectKey:  project.Key,
+		TaskKey:     task.Key,
+		Title:       task.Title,
+		Status:      task.Status,
+		Scope:       task.Scope,
+		RetryCount:  task.RetryCount,
+		MaxAttempts: task.MaxAttempts,
+		LastError:   task.LastError,
+	}
+	entry := reviewEntryFromFailedTask(taskView)
+	decision, eligible, recommendation := failedWorkRetryGuidance(task.RetryCount, task.MaxAttempts)
+	runs, err := projections.ListRunSummaryViews(ctx, store.DB())
+	if err != nil {
+		return reviewQueueEntry{}, failedWorkReviewDetail{}, err
+	}
+	attempts := make([]failedWorkRunAttempt, 0)
+	for _, run := range runs {
+		if run.TaskID != task.ID {
+			continue
+		}
+		attempts = append(attempts, failedWorkRunAttempt{
+			RunID:    run.RunID,
+			Status:   run.Status,
+			Attempt:  run.Attempt,
+			Executor: run.Executor,
+		})
+	}
+	return entry, failedWorkReviewDetail{
+		TaskID:                 task.ID,
+		TaskKey:                task.Key,
+		TaskStatus:             task.Status,
+		ProjectKey:             project.Key,
+		Decision:               decision,
+		RetryEligible:          eligible,
+		RetryBlockReason:       retryBlockReason(decision, eligible),
+		RecoveryRecommendation: recommendation,
+		RetryCount:             task.RetryCount,
+		MaxAttempts:            task.MaxAttempts,
+		LastError:              task.LastError,
+		RunAttempts:            attempts,
+	}, nil
+}
+
 func parseReviewQueueRef(queueID string) (reviewQueueRef, error) {
 	queueID = strings.TrimSpace(queueID)
 	parts := strings.SplitN(queueID, ":", 2)
 	if len(parts) != 2 {
-		return reviewQueueRef{}, fmt.Errorf("review queue id must look like intake-review:<id>, intake-approval:<id>, approval:<id>, or skill-artifact:<id>")
+		return reviewQueueRef{}, fmt.Errorf("review queue id must look like intake-review:<id>, intake-approval:<id>, approval:<id>, skill-artifact:<id>, or failed-work:<id>")
 	}
 	kind := strings.ToLower(strings.TrimSpace(parts[0]))
 	idRef := strings.TrimSpace(parts[1])
@@ -350,6 +501,8 @@ func parseReviewQueueRef(queueID string) (reviewQueueRef, error) {
 		idRef = strings.TrimPrefix(idRef, "approval-")
 	case "skill-artifact":
 		idRef = strings.TrimPrefix(idRef, "skill-artifact-")
+	case "failed-work":
+		idRef = strings.TrimPrefix(idRef, "task-")
 	default:
 		return reviewQueueRef{}, fmt.Errorf("unsupported review queue source %q", kind)
 	}
@@ -399,6 +552,69 @@ func skillArtifactAllowedActions(status string) []string {
 	default:
 		return nil
 	}
+}
+
+func runFailedWorkReviewRetry(ctx context.Context, app bootstrap.App, taskID int64, jsonOutput bool, stdout io.Writer) error {
+	queueID := fmt.Sprintf("failed-work:%d", taskID)
+	outcome, err := (jobsvc.Service{Store: app.Store, Registry: app.Registry}).RetryFailedTaskFromReview(ctx, taskID, queueID)
+	if err != nil {
+		return err
+	}
+	view := failedWorkRetryOutcomeView(outcome)
+	if jsonOutput {
+		return commands.WriteJSON(stdout, view)
+	}
+	_, err = fmt.Fprintf(stdout, "retried=%t reason=%s decision=%s retry_eligible=%t task=%s status=%s retry_count=%d recommendation=%q\n", view.Retried, view.Reason, view.Decision, view.RetryEligible, view.Task.Key, view.Task.Status, view.Task.RetryCount, view.RecoveryRecommendation)
+	return err
+}
+
+func failedWorkRetryOutcomeView(outcome jobsvc.RetryOutcome) failedWorkRetryView {
+	view := failedWorkRetryView{
+		Retried:                outcome.Retried,
+		Reason:                 outcome.Reason,
+		Decision:               outcome.Decision,
+		RetryEligible:          outcome.RetryEligible,
+		RecoveryRecommendation: outcome.RecoveryRecommendation,
+	}
+	if view.Reason == "" {
+		view.Reason = "unknown"
+	}
+	if view.Decision == "" {
+		view.Decision = view.Reason
+	}
+	if outcome.Task.ID != 0 {
+		view.Task = failedWorkRetryTaskView{
+			ID:            outcome.Task.ID,
+			ProjectID:     outcome.Task.ProjectID,
+			Key:           outcome.Task.Key,
+			Status:        outcome.Task.Status,
+			RetryCount:    outcome.Task.RetryCount,
+			MaxAttempts:   outcome.Task.MaxAttempts,
+			LastError:     outcome.Task.LastError,
+			BlockedReason: outcome.Task.BlockedReason,
+		}
+		if !outcome.Task.NextEligibleAt.IsZero() {
+			view.Task.NextEligibleAt = outcome.Task.NextEligibleAt.UTC().Format(time.RFC3339Nano)
+		}
+	}
+	return view
+}
+
+func failedWorkRetryGuidance(retryCount int, maxAttempts int) (string, bool, string) {
+	if maxAttempts <= 1 {
+		return "retry_blocked_non_retryable", false, "Open a follow-up or change task policy before retrying; this task is marked non-retryable."
+	}
+	if retryCount+1 >= maxAttempts {
+		return "retry_blocked_max_attempts", false, "Open a follow-up or adjust the task before retrying; max attempts reached."
+	}
+	return "retry_allowed", true, "Retry is allowed; dispatch the queued task to create the next run attempt."
+}
+
+func retryBlockReason(decision string, eligible bool) string {
+	if eligible {
+		return ""
+	}
+	return decision
 }
 
 func isReviewQueueSkillArtifactStatus(status string) bool {

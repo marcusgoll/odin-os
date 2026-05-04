@@ -469,6 +469,8 @@ type IncrementTaskRetryParams struct {
 	Decision               string
 	RetryEligible          bool
 	RecoveryRecommendation string
+	RetrySource            string
+	ReviewQueueID          string
 }
 
 type Run struct {
