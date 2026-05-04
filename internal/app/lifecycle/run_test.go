@@ -2226,6 +2226,151 @@ func TestRunTriggerProducedFailedWorkSurfacesSelfHealingGuidance(t *testing.T) {
 	}
 }
 
+func TestRunTriggerGitHubIssueExternalEventAdapterMVP(t *testing.T) {
+	t.Parallel()
+
+	root := testRepoRoot(t)
+	run := func(args ...string) string {
+		t.Helper()
+		var stdout bytes.Buffer
+		if err := Run(context.Background(), root, args, strings.NewReader(""), &stdout); err != nil {
+			t.Fatalf("Run(%v) error = %v\nstdout=%s", args, err, stdout.String())
+		}
+		return stdout.String()
+	}
+	extractCreatedTaskKey := func(output string, prefix string) string {
+		t.Helper()
+		var payload struct {
+			Results []struct {
+				CreatedWorkItem bool `json:"created_work_item"`
+				WorkItem        struct {
+					Key string `json:"key"`
+				} `json:"work_item"`
+			} `json:"results"`
+		}
+		if err := json.Unmarshal([]byte(output), &payload); err != nil {
+			t.Fatalf("json.Unmarshal(trigger evaluate) error = %v\n%s", err, output)
+		}
+		for _, result := range payload.Results {
+			if result.CreatedWorkItem && strings.HasPrefix(result.WorkItem.Key, prefix) {
+				return result.WorkItem.Key
+			}
+		}
+		t.Fatalf("trigger evaluate output = %s, want created task prefix %s", output, prefix)
+		return ""
+	}
+
+	run("project", "select", testProjectKey)
+	run("transition", "set", "cutover", "confirm", "because", "github issue trigger proof")
+	run("trigger", "upsert", "github-low",
+		"initiative="+testProjectKey,
+		"kind=event",
+		"status=enabled",
+		"event=external.github.issue",
+		"match_status=opened",
+		"match_provider=github",
+		"match_repo=acme/alpha",
+		"title=Review GitHub issue event",
+		"summary=github_issue_external_event",
+		"--json",
+	)
+	ingested := run("trigger", "ingest", "github-issue",
+		"project="+testProjectKey,
+		"repo=acme/alpha",
+		"number=77",
+		"action=opened",
+		"title=Low risk GitHub issue",
+		"body=prepare release checklist",
+		"url=https://github.example/acme/alpha/issues/77",
+		"--json",
+	)
+	for _, want := range []string{
+		`"source": "github_issue"`,
+		`"event_type": "external.github.issue"`,
+		`"external_event_key": "github:issue:acme/alpha:77:opened"`,
+		`"repo": "acme/alpha"`,
+		`"number": 77`,
+	} {
+		if !strings.Contains(ingested, want) {
+			t.Fatalf("ingest output = %s, want %s", ingested, want)
+		}
+	}
+	lowRiskEvaluate := run("trigger", "evaluate", "source=events", "--json")
+	lowRiskTaskKey := extractCreatedTaskKey(lowRiskEvaluate, "automation-github-low-")
+	if !strings.Contains(lowRiskEvaluate, `"materialization_key": "default:github-low:event:external-github-issue-acme-alpha-77-opened"`) {
+		t.Fatalf("event evaluate output = %s, want external stable materialization key", lowRiskEvaluate)
+	}
+	replayed := run("trigger", "ingest", "github-issue",
+		"project="+testProjectKey,
+		"repo=acme/alpha",
+		"number=77",
+		"action=opened",
+		"title=Low risk GitHub issue",
+		"body=prepare release checklist",
+		"url=https://github.example/acme/alpha/issues/77",
+		"--json",
+	)
+	if !strings.Contains(replayed, `"external_event_key": "github:issue:acme/alpha:77:opened"`) {
+		t.Fatalf("replay ingest output = %s, want stable external event key", replayed)
+	}
+	repeatEvaluate := run("trigger", "evaluate", "source=events", "--json")
+	if !strings.Contains(repeatEvaluate, `"materialized": 0`) || !strings.Contains(repeatEvaluate, `"created_work_item": false`) || !strings.Contains(repeatEvaluate, lowRiskTaskKey) {
+		t.Fatalf("repeat evaluate output = %s, want duplicate external event suppressed", repeatEvaluate)
+	}
+
+	run("project", "select", "odin-core")
+	run("transition", "set", "cutover", "confirm", "because", "github issue approval proof")
+	run("trigger", "upsert", "github-risky",
+		"initiative=odin-core",
+		"kind=event",
+		"status=enabled",
+		"event=external.github.issue",
+		"match_status=opened",
+		"match_provider=github",
+		"match_repo=acme/odin-core",
+		"title=Review risky GitHub issue event",
+		"summary=github_issue_risky_event",
+		"--json",
+	)
+	run("trigger", "ingest", "github-issue",
+		"project=odin-core",
+		"repo=acme/odin-core",
+		"number=9",
+		"action=opened",
+		"title=Governance mutation request",
+		"body=change system policy",
+		"url=https://github.example/acme/odin-core/issues/9",
+		"--json",
+	)
+	riskyEvaluate := run("trigger", "evaluate", "source=events", "--json")
+	riskyTaskKey := extractCreatedTaskKey(riskyEvaluate, "automation-github-risky-")
+	dispatch := run("work", "dispatch", "--task", riskyTaskKey, "--json")
+	if !strings.Contains(dispatch, `"reason": "approval_required"`) || !strings.Contains(dispatch, `"status": "blocked"`) {
+		t.Fatalf("risky dispatch output = %s, want approval gate", dispatch)
+	}
+	approvals := run("approvals", "all", "--json")
+	if !strings.Contains(approvals, `"status": "pending"`) || !strings.Contains(approvals, riskyTaskKey) {
+		t.Fatalf("approvals output = %s, want pending risky external approval", approvals)
+	}
+	logs := run("logs", "--json")
+	for _, want := range []string{
+		`"type": "external.github.issue"`,
+		`"external_event_key": "github:issue:acme/odin-core:9:opened"`,
+		`"type": "automation_trigger.materialized"`,
+		`"source": "event"`,
+		`"source_event_type": "external.github.issue"`,
+		`"type": "approval.requested"`,
+	} {
+		if !strings.Contains(logs, want) {
+			t.Fatalf("logs output = %s, want %s", logs, want)
+		}
+	}
+	overview := run("overview", "--json")
+	if !strings.Contains(overview, `"key": "github-risky"`) || !strings.Contains(overview, `"kind": "event"`) || !strings.Contains(overview, `"pending_approval_count": 1`) {
+		t.Fatalf("overview output = %s, want risky GitHub trigger visibility", overview)
+	}
+}
+
 func TestRunWorkExecuteCompletesDispatchedIntakeRun(t *testing.T) {
 	configureLifecycleHarnessDriver(t)
 	t.Setenv("HOME", t.TempDir())

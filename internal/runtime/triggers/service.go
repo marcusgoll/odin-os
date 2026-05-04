@@ -2,6 +2,7 @@ package triggers
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -38,6 +39,28 @@ type UpsertParams struct {
 	MatchPreviousStatus string
 	MatchTaskID         string
 	MatchScope          string
+	MatchProvider       string
+	MatchRepo           string
+}
+
+type GitHubIssueIngestParams struct {
+	ProjectKey string
+	Repo       string
+	Number     int
+	Action     string
+	Title      string
+	Body       string
+	URL        string
+	Labels     string
+}
+
+type GitHubIssueIngestResult struct {
+	Issue            sqlite.ExternalIssue
+	Source           string
+	EventType        string
+	ExternalEventKey string
+	ProjectKey       string
+	Action           string
 }
 
 type DueEvaluationResult struct {
@@ -80,6 +103,8 @@ func (service Service) Upsert(ctx context.Context, params UpsertParams) (sqlite.
 	matchPreviousStatus := strings.TrimSpace(params.MatchPreviousStatus)
 	matchTaskID := strings.TrimSpace(params.MatchTaskID)
 	matchScope := strings.TrimSpace(params.MatchScope)
+	matchProvider := strings.TrimSpace(params.MatchProvider)
+	matchRepo := strings.TrimSpace(params.MatchRepo)
 	kind := strings.ToLower(strings.TrimSpace(params.Kind))
 	if cadence != "" {
 		if _, _, err := parseScheduleCadence(cadence); err != nil {
@@ -133,6 +158,12 @@ func (service Service) Upsert(ctx context.Context, params UpsertParams) (sqlite.
 		}
 		if matchScope != "" {
 			payload["match_scope"] = matchScope
+		}
+		if matchProvider != "" {
+			payload["match_provider"] = matchProvider
+		}
+		if matchRepo != "" {
+			payload["match_repo"] = matchRepo
 		}
 		if cadence != "" {
 			payload["cadence"] = cadence
@@ -190,6 +221,76 @@ func (service Service) Show(ctx context.Context, workspaceID string, key string)
 		return sqlite.AutomationTrigger{}, fmt.Errorf("automation trigger store is required")
 	}
 	return service.Store.GetAutomationTriggerByWorkspaceKey(ctx, workspaceID, key)
+}
+
+func (service Service) IngestGitHubIssue(ctx context.Context, params GitHubIssueIngestParams) (GitHubIssueIngestResult, error) {
+	if service.Store == nil {
+		return GitHubIssueIngestResult{}, fmt.Errorf("automation trigger store is required")
+	}
+	projectKey := strings.TrimSpace(params.ProjectKey)
+	if projectKey == "" {
+		return GitHubIssueIngestResult{}, fmt.Errorf("github issue event project is required")
+	}
+	project, err := service.ensureRuntimeProject(ctx, projectKey)
+	if err != nil {
+		return GitHubIssueIngestResult{}, err
+	}
+	repo := strings.TrimSpace(params.Repo)
+	if repo == "" {
+		repo = strings.TrimSpace(project.GitHubRepo)
+	}
+	if repo == "" {
+		return GitHubIssueIngestResult{}, fmt.Errorf("github issue event repo is required")
+	}
+	if params.Number <= 0 {
+		return GitHubIssueIngestResult{}, fmt.Errorf("github issue event number must be positive")
+	}
+	action := normalizeGitHubIssueAction(params.Action)
+	bodyHash := hashExternalIssueBody(params.Body)
+	labelsJSON, err := encodeExternalIssueLabels(params.Labels)
+	if err != nil {
+		return GitHubIssueIngestResult{}, err
+	}
+	externalEventKey := fmt.Sprintf("github:issue:%s:%d:%s", repo, params.Number, action)
+	issue, err := service.Store.UpsertExternalIssue(ctx, sqlite.UpsertExternalIssueParams{
+		ProjectID:  project.ID,
+		Provider:   "github",
+		Repo:       repo,
+		Number:     params.Number,
+		Title:      strings.TrimSpace(params.Title),
+		BodyHash:   bodyHash,
+		URL:        strings.TrimSpace(params.URL),
+		State:      action,
+		LabelsJSON: labelsJSON,
+		SyncStatus: "event_received",
+	})
+	if err != nil {
+		return GitHubIssueIngestResult{}, err
+	}
+	if err := service.Store.RecordExternalGitHubIssueEvent(ctx, sqlite.RecordExternalGitHubIssueEventParams{
+		ProjectID:        project.ID,
+		ProjectKey:       project.Key,
+		ExternalIssueID:  issue.ID,
+		Provider:         issue.Provider,
+		Repo:             issue.Repo,
+		Number:           issue.Number,
+		Action:           action,
+		Title:            issue.Title,
+		BodyHash:         issue.BodyHash,
+		URL:              issue.URL,
+		LabelsJSON:       issue.LabelsJSON,
+		ExternalEventKey: externalEventKey,
+	}); err != nil {
+		return GitHubIssueIngestResult{}, err
+	}
+	return GitHubIssueIngestResult{
+		Issue:            issue,
+		Source:           "github_issue",
+		EventType:        string(runtimeevents.EventExternalGitHubIssue),
+		ExternalEventKey: externalEventKey,
+		ProjectKey:       project.Key,
+		Action:           action,
+	}, nil
 }
 
 func (service Service) Fire(ctx context.Context, params sqlite.FireAutomationTriggerParams) (sqlite.FireAutomationTriggerResult, error) {
@@ -407,6 +508,38 @@ func scheduledDueReason(dueAt time.Time) string {
 	return "due-" + dueAt.UTC().Format("20060102t150405z")
 }
 
+func normalizeGitHubIssueAction(value string) string {
+	action := strings.ToLower(strings.TrimSpace(value))
+	if action == "" {
+		return "opened"
+	}
+	return action
+}
+
+func hashExternalIssueBody(body string) string {
+	sum := sha256.Sum256([]byte(body))
+	return fmt.Sprintf("sha256:%x", sum)
+}
+
+func encodeExternalIssueLabels(value string) (string, error) {
+	parts := strings.Split(value, ",")
+	labels := make([]string, 0, len(parts))
+	for _, part := range parts {
+		label := strings.TrimSpace(part)
+		if label != "" {
+			labels = append(labels, label)
+		}
+	}
+	if labels == nil {
+		labels = []string{}
+	}
+	encoded, err := json.Marshal(labels)
+	if err != nil {
+		return "", err
+	}
+	return string(encoded), nil
+}
+
 func nextScheduleEligibleAt(rule scheduleRule, trigger sqlite.AutomationTrigger, dueAt time.Time, evaluatedAt time.Time) (*time.Time, error) {
 	if strings.TrimSpace(rule.Cron) != "" {
 		next, err := nextCronEligibleAt(rule.Cron, dueAt)
@@ -450,6 +583,8 @@ type scheduleRule struct {
 	MatchPreviousStatus string `json:"match_previous_status"`
 	MatchTaskID         string `json:"match_task_id"`
 	MatchScope          string `json:"match_scope"`
+	MatchProvider       string `json:"match_provider"`
+	MatchRepo           string `json:"match_repo"`
 }
 
 func parseTriggerScheduleRule(trigger sqlite.AutomationTrigger) (scheduleRule, error) {
@@ -473,7 +608,10 @@ func eventTriggerMatches(rule scheduleRule, record runtimeevents.Record) bool {
 			return false
 		}
 	}
-	if strings.TrimSpace(rule.MatchStatus) == "" && strings.TrimSpace(rule.MatchPreviousStatus) == "" {
+	if strings.TrimSpace(rule.MatchStatus) == "" &&
+		strings.TrimSpace(rule.MatchPreviousStatus) == "" &&
+		strings.TrimSpace(rule.MatchProvider) == "" &&
+		strings.TrimSpace(rule.MatchRepo) == "" {
 		return true
 	}
 	var payload map[string]any
@@ -484,6 +622,12 @@ func eventTriggerMatches(rule scheduleRule, record runtimeevents.Record) bool {
 		return false
 	}
 	if strings.TrimSpace(rule.MatchPreviousStatus) != "" && !strings.EqualFold(payloadString(payload, "previous_status"), strings.TrimSpace(rule.MatchPreviousStatus)) {
+		return false
+	}
+	if strings.TrimSpace(rule.MatchProvider) != "" && !strings.EqualFold(payloadString(payload, "provider"), strings.TrimSpace(rule.MatchProvider)) {
+		return false
+	}
+	if strings.TrimSpace(rule.MatchRepo) != "" && !strings.EqualFold(payloadString(payload, "repo"), strings.TrimSpace(rule.MatchRepo)) {
 		return false
 	}
 	return true
@@ -503,7 +647,31 @@ func payloadString(payload map[string]any, key string) string {
 }
 
 func eventTriggerReason(record runtimeevents.Record) string {
+	var payload map[string]any
+	if err := json.Unmarshal(record.Payload, &payload); err == nil {
+		if key := strings.TrimSpace(payloadString(payload, "external_event_key")); key != "" {
+			return "external-" + sanitizeExternalEventKey(key)
+		}
+	}
 	return fmt.Sprintf("event-%d", record.ID)
+}
+
+func sanitizeExternalEventKey(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	var builder strings.Builder
+	lastDash := false
+	for _, r := range value {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			builder.WriteRune(r)
+			lastDash = false
+			continue
+		}
+		if !lastDash {
+			builder.WriteByte('-')
+			lastDash = true
+		}
+	}
+	return strings.Trim(builder.String(), "-")
 }
 
 type quietHoursRule struct {

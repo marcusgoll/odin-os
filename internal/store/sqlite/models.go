@@ -91,6 +91,21 @@ type UpsertExternalIssueParams struct {
 	SyncStatus string
 }
 
+type RecordExternalGitHubIssueEventParams struct {
+	ProjectID        int64
+	ProjectKey       string
+	ExternalIssueID  int64
+	Provider         string
+	Repo             string
+	Number           int
+	Action           string
+	Title            string
+	BodyHash         string
+	URL              string
+	LabelsJSON       string
+	ExternalEventKey string
+}
+
 type ListExternalIssuesParams struct {
 	Repo       string
 	SyncStatus string

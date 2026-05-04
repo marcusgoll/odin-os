@@ -21,6 +21,7 @@ const (
 	StreamConversation       StreamType = "conversation_transcript"
 	StreamMemorySummary      StreamType = "memory_summary"
 	StreamIntakeItem         StreamType = "intake_item"
+	StreamExternalEvent      StreamType = "external_event"
 	StreamAutomationTrigger  StreamType = "automation_trigger"
 	StreamLearningProposal   StreamType = "learning_proposal"
 	StreamLearningEvaluation StreamType = "learning_evaluation"
@@ -77,6 +78,7 @@ const (
 	EventIntakeReviewApprovalRequired       Type = "intake.review_approval_required"
 	EventIntakeApprovalApproved             Type = "intake.approval_approved"
 	EventIntakeApprovalDenied               Type = "intake.approval_denied"
+	EventExternalGitHubIssue                Type = "external.github.issue"
 	EventAutomationTriggerCreated           Type = "automation_trigger.created"
 	EventAutomationTriggerFireRequested     Type = "automation_trigger.fire_requested"
 	EventAutomationTriggerEvaluated         Type = "automation_trigger.evaluated"
@@ -395,6 +397,22 @@ type IntakeReviewDecisionPayload struct {
 	WorkItemID        *int64 `json:"work_item_id,omitempty"`
 	WorkItemKey       string `json:"work_item_key,omitempty"`
 	CanonicalIntakeID *int64 `json:"canonical_intake_id,omitempty"`
+}
+
+type ExternalGitHubIssuePayload struct {
+	Source           string `json:"source"`
+	Provider         string `json:"provider"`
+	Repo             string `json:"repo"`
+	Number           int    `json:"number"`
+	Action           string `json:"action"`
+	Status           string `json:"status"`
+	ProjectKey       string `json:"project_key"`
+	ExternalEventKey string `json:"external_event_key"`
+	ExternalIssueID  int64  `json:"external_issue_id"`
+	Title            string `json:"title"`
+	URL              string `json:"url,omitempty"`
+	BodyHash         string `json:"body_hash,omitempty"`
+	LabelsJSON       string `json:"labels_json,omitempty"`
 }
 
 type AutomationTriggerCreatedPayload struct {

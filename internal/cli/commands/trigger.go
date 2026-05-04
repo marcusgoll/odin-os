@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 	"time"
 
@@ -11,14 +12,14 @@ import (
 	"odin-os/internal/store/sqlite"
 )
 
-const TriggerUsage = "trigger [list|show <key>|upsert <key>|fire <key>|evaluate] [key=value ...] [--json]"
+const TriggerUsage = "trigger [list|show <key>|upsert <key>|fire <key>|evaluate|ingest github-issue] [key=value ...] [--json]"
 
 func RunTrigger(ctx context.Context, service triggers.Service, args []string, stdout io.Writer) error {
 	if len(args) == 0 {
 		return fmt.Errorf("usage: odin %s", TriggerUsage)
 	}
 	if args[0] == "--help" || args[0] == "help" {
-		_, err := fmt.Fprintf(stdout, "usage: odin %s\n\nEvent triggers:\n  odin trigger upsert <key> initiative=<project> kind=event event=<event_type> [match_status=<status>] [match_previous_status=<status>] [match_task_id=<id>] [match_scope=<scope>] [--json]\n  odin trigger evaluate source=events [--json]\n", TriggerUsage)
+		_, err := fmt.Fprintf(stdout, "usage: odin %s\n\nEvent triggers:\n  odin trigger upsert <key> initiative=<project> kind=event event=<event_type> [match_status=<status>] [match_previous_status=<status>] [match_task_id=<id>] [match_scope=<scope>] [match_provider=<provider>] [match_repo=<owner/repo>] [--json]\n  odin trigger evaluate source=events [--json]\n\nExternal event ingest:\n  odin trigger ingest github-issue project=<project> repo=<owner/repo> number=<n> action=<opened> title=<text> [body=<text>] [url=<url>] [labels=a,b] [--json]\n", TriggerUsage)
 		return err
 	}
 	jsonOutput, args, err := consumeTriggerJSONFlag(args)
@@ -74,6 +75,8 @@ func RunTrigger(ctx context.Context, service triggers.Service, args []string, st
 			MatchPreviousStatus: options["match_previous_status"],
 			MatchTaskID:         options["match_task_id"],
 			MatchScope:          options["match_scope"],
+			MatchProvider:       options["match_provider"],
+			MatchRepo:           options["match_repo"],
 		})
 		if err != nil {
 			return err
@@ -144,6 +147,43 @@ func RunTrigger(ctx context.Context, service triggers.Service, args []string, st
 			result.Evaluated,
 			result.Materialized,
 			result.Errored,
+		)
+		return err
+	case "ingest":
+		if len(args) < 2 || !strings.EqualFold(args[1], "github-issue") {
+			return fmt.Errorf("usage: odin %s", TriggerUsage)
+		}
+		options, err := parseOptionTokens(args[2:])
+		if err != nil {
+			return err
+		}
+		number, err := strconv.Atoi(options["number"])
+		if err != nil {
+			return fmt.Errorf("github issue event number must be an integer: %w", err)
+		}
+		result, err := service.IngestGitHubIssue(ctx, triggers.GitHubIssueIngestParams{
+			ProjectKey: triggerFirstNonEmpty(options["project"], options["initiative"]),
+			Repo:       options["repo"],
+			Number:     number,
+			Action:     options["action"],
+			Title:      strings.ReplaceAll(options["title"], "_", " "),
+			Body:       strings.ReplaceAll(options["body"], "_", " "),
+			URL:        options["url"],
+			Labels:     options["labels"],
+		})
+		if err != nil {
+			return err
+		}
+		if jsonOutput {
+			return WriteJSON(stdout, newTriggerGitHubIssueIngestView(result))
+		}
+		_, err = fmt.Fprintf(stdout, "external_event source=%s event_type=%s key=%s repo=%s number=%d action=%s\n",
+			result.Source,
+			result.EventType,
+			result.ExternalEventKey,
+			result.Issue.Repo,
+			result.Issue.Number,
+			result.Action,
 		)
 		return err
 	default:
@@ -229,6 +269,21 @@ type triggerFireView struct {
 	Materialization triggerMaterializationView `json:"materialization"`
 	WorkItem        triggerWorkItemView        `json:"work_item"`
 	CreatedWorkItem bool                       `json:"created_work_item"`
+}
+
+type triggerGitHubIssueIngestView struct {
+	Source           string `json:"source"`
+	EventType        string `json:"event_type"`
+	ExternalEventKey string `json:"external_event_key"`
+	ProjectKey       string `json:"project_key"`
+	Provider         string `json:"provider"`
+	Repo             string `json:"repo"`
+	Number           int    `json:"number"`
+	Action           string `json:"action"`
+	Title            string `json:"title"`
+	URL              string `json:"url,omitempty"`
+	ExternalIssueID  int64  `json:"external_issue_id"`
+	SyncStatus       string `json:"sync_status"`
 }
 
 type automationTriggerView struct {
@@ -317,6 +372,23 @@ func newTriggerFireView(result sqlite.FireAutomationTriggerResult) triggerFireVi
 		Materialization: newTriggerMaterializationView(result.Materialization),
 		WorkItem:        newTriggerWorkItemView(result.WorkItem),
 		CreatedWorkItem: result.CreatedWorkItem,
+	}
+}
+
+func newTriggerGitHubIssueIngestView(result triggers.GitHubIssueIngestResult) triggerGitHubIssueIngestView {
+	return triggerGitHubIssueIngestView{
+		Source:           result.Source,
+		EventType:        result.EventType,
+		ExternalEventKey: result.ExternalEventKey,
+		ProjectKey:       result.ProjectKey,
+		Provider:         result.Issue.Provider,
+		Repo:             result.Issue.Repo,
+		Number:           result.Issue.Number,
+		Action:           result.Action,
+		Title:            result.Issue.Title,
+		URL:              result.Issue.URL,
+		ExternalIssueID:  result.Issue.ID,
+		SyncStatus:       result.Issue.SyncStatus,
 	}
 }
 

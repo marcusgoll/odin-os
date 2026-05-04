@@ -232,6 +232,39 @@ func (store *Store) UpsertExternalIssue(ctx context.Context, params UpsertExtern
 	return issue, err
 }
 
+func (store *Store) RecordExternalGitHubIssueEvent(ctx context.Context, params RecordExternalGitHubIssueEventParams) error {
+	now := store.now()
+	return store.withTx(ctx, func(tx *sql.Tx) error {
+		project, err := store.getProjectTx(ctx, tx, params.ProjectID)
+		if err != nil {
+			return err
+		}
+		return appendEventTx(ctx, tx, eventInsert{
+			StreamType: runtimeevents.StreamExternalEvent,
+			StreamID:   params.ExternalIssueID,
+			EventType:  runtimeevents.EventExternalGitHubIssue,
+			Scope:      project.Scope,
+			ProjectID:  &params.ProjectID,
+			Payload: runtimeevents.ExternalGitHubIssuePayload{
+				Source:           "github_issue",
+				Provider:         params.Provider,
+				Repo:             params.Repo,
+				Number:           params.Number,
+				Action:           params.Action,
+				Status:           params.Action,
+				ProjectKey:       params.ProjectKey,
+				ExternalEventKey: params.ExternalEventKey,
+				ExternalIssueID:  params.ExternalIssueID,
+				Title:            params.Title,
+				URL:              params.URL,
+				BodyHash:         params.BodyHash,
+				LabelsJSON:       params.LabelsJSON,
+			},
+			OccurredAt: now,
+		})
+	})
+}
+
 func (store *Store) UpsertInitiative(ctx context.Context, params UpsertInitiativeParams) (Initiative, error) {
 	now := store.now()
 	var initiative Initiative
