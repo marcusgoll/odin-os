@@ -462,9 +462,13 @@ type RequeueTaskAtParams struct {
 }
 
 type IncrementTaskRetryParams struct {
-	TaskID         int64
-	LastError      string
-	NextEligibleAt time.Time
+	TaskID                 int64
+	LastError              string
+	NextEligibleAt         time.Time
+	RecordDecision         bool
+	Decision               string
+	RetryEligible          bool
+	RecoveryRecommendation string
 }
 
 type Run struct {

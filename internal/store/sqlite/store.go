@@ -1547,6 +1547,11 @@ func (store *Store) IncrementTaskRetry(ctx context.Context, params IncrementTask
 		if err := appendTaskQueueStateChangedEventTx(ctx, tx, current, updated, now); err != nil {
 			return err
 		}
+		if params.RecordDecision {
+			if err := appendTaskRetryEvaluatedEventTx(ctx, tx, updated, params.Decision, params.RetryEligible, params.RecoveryRecommendation, now); err != nil {
+				return err
+			}
+		}
 		task = updated
 		return nil
 	})
@@ -1597,6 +1602,13 @@ func (store *Store) RecordTaskDispatchRequested(ctx context.Context, task Task, 
 			},
 			OccurredAt: now,
 		})
+	})
+}
+
+func (store *Store) RecordTaskRetryDecision(ctx context.Context, task Task, decision string, retryEligible bool, recoveryRecommendation string) error {
+	now := store.now()
+	return store.withTx(ctx, func(tx *sql.Tx) error {
+		return appendTaskRetryEvaluatedEventTx(ctx, tx, task, decision, retryEligible, recoveryRecommendation, now)
 	})
 }
 
@@ -1670,6 +1682,31 @@ func appendTaskQueueStateChangedEventTx(ctx context.Context, tx *sql.Tx, previou
 			MaxAttempts:    updated.MaxAttempts,
 			LastError:      updated.LastError,
 			BlockedReason:  updated.BlockedReason,
+		},
+		OccurredAt: occurredAt,
+	})
+}
+
+func appendTaskRetryEvaluatedEventTx(ctx context.Context, tx *sql.Tx, task Task, decision string, retryEligible bool, recoveryRecommendation string, occurredAt time.Time) error {
+	projectID := task.ProjectID
+	return appendEventTx(ctx, tx, eventInsert{
+		StreamType: runtimeevents.StreamTask,
+		StreamID:   task.ID,
+		EventType:  runtimeevents.EventTaskRetryEvaluated,
+		Scope:      task.Scope,
+		ProjectID:  &projectID,
+		TaskID:     &task.ID,
+		Payload: runtimeevents.TaskRetryEvaluatedPayload{
+			TaskID:                 task.ID,
+			Status:                 task.Status,
+			Requested:              true,
+			Decision:               decision,
+			RetryEligible:          retryEligible,
+			RetryCount:             task.RetryCount,
+			MaxAttempts:            task.MaxAttempts,
+			NextEligibleAt:         formatTime(task.NextEligibleAt),
+			LastError:              task.LastError,
+			RecoveryRecommendation: recoveryRecommendation,
 		},
 		OccurredAt: occurredAt,
 	})

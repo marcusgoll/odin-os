@@ -1826,6 +1826,97 @@ func TestRunWorkRetryRequeuesTerminalFailedWorkOnce(t *testing.T) {
 	}
 }
 
+func TestRunWorkRetryBlocksAtMaxAttemptsWithGuidance(t *testing.T) {
+	t.Setenv("ODIN_CODEX_DRIVER", "")
+	t.Setenv("HOME", t.TempDir())
+
+	root := testRepoRoot(t)
+	installRepoCodexDriverScript(t, root)
+	payloadPath := filepath.Join(t.TempDir(), "payload.json")
+	if err := os.WriteFile(payloadPath, []byte(`{"body":"operator retry policy proof"}`), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	run := func(args ...string) string {
+		t.Helper()
+		var output bytes.Buffer
+		if err := Run(context.Background(), root, args, strings.NewReader(""), &output); err != nil {
+			t.Fatalf("Run(%v) error = %v\noutput=%s", args, err, output.String())
+		}
+		return output.String()
+	}
+
+	run("project", "select", testProjectKey)
+	run("transition", "set", "cutover", "confirm", "because", "retry policy test")
+	run(
+		"intake", "raw", "create",
+		"--source", "operator",
+		"--project", testProjectKey,
+		"--title", "run this exact command: printf 'operator retry policy failure proof' >&2; exit 42",
+		"--type", "request",
+		"--dedup-key", "retry-policy-intake",
+		"--requested-by", "codex",
+		"--payload-file", payloadPath,
+		"--json",
+	)
+	run("intake", "process", "--id", "intake-1", "--json")
+	run("review", "act", "intake-review:1", "accept", "--json")
+	for attempt := 1; attempt <= 3; attempt++ {
+		dispatchOutput := run("work", "dispatch", "--task", "intake-review-1", "--json")
+		if !strings.Contains(dispatchOutput, fmt.Sprintf(`"attempt": %d`, attempt)) || !strings.Contains(dispatchOutput, `"status": "running"`) {
+			t.Fatalf("dispatch attempt %d output = %s, want running attempt", attempt, dispatchOutput)
+		}
+		executeOutput := run("work", "execute", "--task", "intake-review-1", "--json")
+		if !strings.Contains(executeOutput, `"status": "failed"`) || !strings.Contains(executeOutput, "operator retry policy failure proof") {
+			t.Fatalf("execute attempt %d output = %s, want failed terminal run", attempt, executeOutput)
+		}
+		if attempt < 3 {
+			retryOutput := run("work", "retry", "--task", "intake-review-1", "--json")
+			if !strings.Contains(retryOutput, `"retried": true`) || !strings.Contains(retryOutput, `"decision": "retry_allowed"`) || !strings.Contains(retryOutput, fmt.Sprintf(`"retry_count": %d`, attempt)) {
+				t.Fatalf("retry attempt %d output = %s, want policy-allowed retry", attempt, retryOutput)
+			}
+		}
+	}
+
+	blockedRetryOutput := run("work", "retry", "--task", "intake-review-1", "--json")
+	for _, want := range []string{
+		`"retried": false`,
+		`"reason": "retry_blocked_max_attempts"`,
+		`"decision": "retry_blocked_max_attempts"`,
+		`"retry_eligible": false`,
+		`"recovery_recommendation": "Open a follow-up or adjust the task before retrying; max attempts reached."`,
+		`"status": "failed"`,
+		`"retry_count": 2`,
+		`"max_attempts": 3`,
+	} {
+		if !strings.Contains(blockedRetryOutput, want) {
+			t.Fatalf("blocked retry output = %s, want %s", blockedRetryOutput, want)
+		}
+	}
+	runsOutput := run("runs", "--json")
+	if strings.Count(runsOutput, `"task_key": "intake-review-1"`) != 3 || strings.Count(runsOutput, `"status": "failed"`) < 3 {
+		t.Fatalf("runs output = %s, want three failed attempts and no fourth run", runsOutput)
+	}
+	logsOutput := run("logs", "--json")
+	for _, want := range []string{
+		`"type": "task.retry_evaluated"`,
+		`"decision": "retry_allowed"`,
+		`"decision": "retry_blocked_max_attempts"`,
+		`"recovery_recommendation": "Open a follow-up or adjust the task before retrying; max attempts reached."`,
+	} {
+		if !strings.Contains(logsOutput, want) {
+			t.Fatalf("logs output = %s, want %s", logsOutput, want)
+		}
+	}
+	overviewOutput := run("overview", "--json")
+	if !strings.Contains(overviewOutput, `"recovery_guidance"`) || !strings.Contains(overviewOutput, `"decision": "retry_blocked_max_attempts"`) || !strings.Contains(overviewOutput, `"work_item_key": "intake-review-1"`) {
+		t.Fatalf("overview output = %s, want retry guidance for blocked failed work", overviewOutput)
+	}
+	statusOutput := run("work", "status")
+	if !strings.Contains(statusOutput, "failed_retryable_work_items=0") || !strings.Contains(statusOutput, "retry_blocked_work_items=1") {
+		t.Fatalf("work status output = %s, want retry policy counts", statusOutput)
+	}
+}
+
 func TestRunCompanionGetJSON(t *testing.T) {
 	t.Parallel()
 

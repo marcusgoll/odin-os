@@ -109,9 +109,18 @@ func runWorkStatus(ctx context.Context, store *sqlite.Store, snapshot registry.S
 	}
 
 	openWorkItems := 0
+	failedRetryableWorkItems := 0
+	retryBlockedWorkItems := 0
 	for _, view := range taskViews {
 		if isOpenWorkItemStatus(view.Status) {
 			openWorkItems++
+		}
+		if strings.EqualFold(strings.TrimSpace(view.Status), "failed") {
+			if isTaskRetryEligible(view.RetryCount, view.MaxAttempts) {
+				failedRetryableWorkItems++
+			} else {
+				retryBlockedWorkItems++
+			}
 		}
 	}
 
@@ -124,7 +133,7 @@ func runWorkStatus(ctx context.Context, store *sqlite.Store, snapshot registry.S
 
 	_, err = fmt.Fprintf(
 		stdout,
-		"work_items=%d open_work_items=%d active_run_attempts=%d pending_approvals=%d delivery_profiles=%d raw_intake_items=%d intake_review_items=%d intake_approval_required_items=%d dispatch=work_dispatch intake=raw_cli\n",
+		"work_items=%d open_work_items=%d active_run_attempts=%d pending_approvals=%d delivery_profiles=%d raw_intake_items=%d intake_review_items=%d intake_approval_required_items=%d failed_retryable_work_items=%d retry_blocked_work_items=%d dispatch=work_dispatch intake=raw_cli\n",
 		len(taskViews),
 		openWorkItems,
 		activeRunAttempts,
@@ -133,6 +142,8 @@ func runWorkStatus(ctx context.Context, store *sqlite.Store, snapshot registry.S
 		len(rawIntakeItems),
 		intakeReviewItems,
 		intakeApprovalRequiredItems,
+		failedRetryableWorkItems,
+		retryBlockedWorkItems,
 	)
 	return err
 }
@@ -252,7 +263,7 @@ func runWorkRetry(ctx context.Context, store *sqlite.Store, projectRegistry proj
 	if jsonOutput {
 		return WriteJSON(stdout, view)
 	}
-	_, err = fmt.Fprintf(stdout, "retried=%t reason=%s task=%s status=%s retry_count=%d\n", view.Retried, view.Reason, view.Task.Key, view.Task.Status, view.Task.RetryCount)
+	_, err = fmt.Fprintf(stdout, "retried=%t reason=%s decision=%s retry_eligible=%t task=%s status=%s retry_count=%d recommendation=%q\n", view.Retried, view.Reason, view.Decision, view.RetryEligible, view.Task.Key, view.Task.Status, view.Task.RetryCount, view.RecoveryRecommendation)
 	return err
 }
 
@@ -276,9 +287,12 @@ func findWorkTask(ctx context.Context, store *sqlite.Store, ref string) (sqlite.
 }
 
 type workRetryView struct {
-	Retried bool              `json:"retried"`
-	Reason  string            `json:"reason"`
-	Task    workRetryTaskView `json:"task,omitempty"`
+	Retried                bool              `json:"retried"`
+	Reason                 string            `json:"reason"`
+	Decision               string            `json:"decision"`
+	RetryEligible          bool              `json:"retry_eligible"`
+	RecoveryRecommendation string            `json:"recovery_recommendation,omitempty"`
+	Task                   workRetryTaskView `json:"task,omitempty"`
 }
 
 type workRetryTaskView struct {
@@ -289,26 +303,34 @@ type workRetryTaskView struct {
 	RetryCount     int    `json:"retry_count"`
 	MaxAttempts    int    `json:"max_attempts"`
 	LastError      string `json:"last_error,omitempty"`
+	BlockedReason  string `json:"blocked_reason,omitempty"`
 	NextEligibleAt string `json:"next_eligible_at,omitempty"`
 }
 
 func workRetryOutcomeView(outcome jobs.RetryOutcome) workRetryView {
 	view := workRetryView{
-		Retried: outcome.Retried,
-		Reason:  outcome.Reason,
+		Retried:                outcome.Retried,
+		Reason:                 outcome.Reason,
+		Decision:               outcome.Decision,
+		RetryEligible:          outcome.RetryEligible,
+		RecoveryRecommendation: outcome.RecoveryRecommendation,
 	}
 	if view.Reason == "" {
 		view.Reason = "unknown"
 	}
+	if view.Decision == "" {
+		view.Decision = view.Reason
+	}
 	if outcome.Task.ID != 0 {
 		view.Task = workRetryTaskView{
-			ID:          outcome.Task.ID,
-			ProjectID:   outcome.Task.ProjectID,
-			Key:         outcome.Task.Key,
-			Status:      outcome.Task.Status,
-			RetryCount:  outcome.Task.RetryCount,
-			MaxAttempts: outcome.Task.MaxAttempts,
-			LastError:   outcome.Task.LastError,
+			ID:            outcome.Task.ID,
+			ProjectID:     outcome.Task.ProjectID,
+			Key:           outcome.Task.Key,
+			Status:        outcome.Task.Status,
+			RetryCount:    outcome.Task.RetryCount,
+			MaxAttempts:   outcome.Task.MaxAttempts,
+			LastError:     outcome.Task.LastError,
+			BlockedReason: outcome.Task.BlockedReason,
 		}
 		if !outcome.Task.NextEligibleAt.IsZero() {
 			view.Task.NextEligibleAt = outcome.Task.NextEligibleAt.UTC().Format(time.RFC3339Nano)
@@ -535,4 +557,8 @@ func isReviewableIntakeStatus(status string) bool {
 	default:
 		return false
 	}
+}
+
+func isTaskRetryEligible(retryCount int, maxAttempts int) bool {
+	return maxAttempts > 1 && retryCount+1 < maxAttempts
 }

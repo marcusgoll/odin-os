@@ -81,7 +81,7 @@ func AnalyzeFailure(input FailureInput) FailureAnalysis {
 	category := classifyFailure(normalized)
 	target := nextStepTargetFor(category)
 	summary := failureSummary(category, normalized)
-	maxAttemptsReached := normalized.MaxAttempts > 0 && normalized.RetryCount >= normalized.MaxAttempts
+	maxAttemptsReached := retryBudgetExhausted(normalized.RetryCount, normalized.MaxAttempts)
 
 	return FailureAnalysis{
 		Category:                category,
@@ -277,7 +277,7 @@ func followUpFor(category FailureCategory, input FailureInput) FollowUpRecommend
 			Reason:      "unknown failures need explicit triage before retry",
 		}
 	}
-	if category == FailureCodexTimeout && input.RetryCount+1 < input.MaxAttempts {
+	if category == FailureCodexTimeout && !retryBudgetExhausted(input.RetryCount, input.MaxAttempts) {
 		return FollowUpRecommendation{}
 	}
 	labels := []string{"odin:ready", agentLabelFor(category), typeLabelFor(category)}
@@ -352,6 +352,10 @@ func retryRecommendedFor(category FailureCategory) bool {
 	default:
 		return false
 	}
+}
+
+func retryBudgetExhausted(retryCount int, maxAttempts int) bool {
+	return maxAttempts > 0 && retryCount+1 >= maxAttempts
 }
 
 func containsAny(value string, needles ...string) bool {

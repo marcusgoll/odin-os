@@ -104,6 +104,27 @@ func TestAnalyzeFailureStopsRetryRecommendationAtMaxAttempts(t *testing.T) {
 	}
 }
 
+func TestAnalyzeFailureMarksLastAllowedAttemptAsMaxAttemptsReached(t *testing.T) {
+	t.Parallel()
+
+	analysis := recovery.AnalyzeFailure(recovery.FailureInput{
+		Step:                  "codex_run",
+		TicketTitle:           "Refactor runner",
+		AcceptanceCriteria:    []string{"worker completes"},
+		ExistingBehaviorKnown: true,
+		ErrorText:             "context deadline exceeded",
+		RetryCount:            2,
+		MaxAttempts:           3,
+	})
+
+	if analysis.RetryRecommended {
+		t.Fatal("RetryRecommended = true, want false when the next retry would exceed max attempts")
+	}
+	if !analysis.MaxAttemptsReached {
+		t.Fatal("MaxAttemptsReached = false, want true when the next retry would exceed max attempts")
+	}
+}
+
 func TestFailureAnalysisArtifactIsDeterministicJSON(t *testing.T) {
 	t.Parallel()
 

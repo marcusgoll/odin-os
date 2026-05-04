@@ -174,12 +174,13 @@ type ApprovalSummary struct {
 }
 
 type ObservabilityLane struct {
-	Wiring      Wiring               `json:"wiring"`
-	ActiveRuns  []RunAttemptSummary  `json:"active_runs"`
-	BlockedWork []BlockedWorkSummary `json:"blocked_work"`
-	Incidents   []IncidentSummary    `json:"incidents"`
-	Recoveries  []RecoverySummary    `json:"recoveries"`
-	Freshness   []FreshnessSummary   `json:"freshness"`
+	Wiring           Wiring                         `json:"wiring"`
+	ActiveRuns       []RunAttemptSummary            `json:"active_runs"`
+	BlockedWork      []BlockedWorkSummary           `json:"blocked_work"`
+	RecoveryGuidance []RetryRecoveryGuidanceSummary `json:"recovery_guidance"`
+	Incidents        []IncidentSummary              `json:"incidents"`
+	Recoveries       []RecoverySummary              `json:"recoveries"`
+	Freshness        []FreshnessSummary             `json:"freshness"`
 }
 
 type RunAttemptSummary struct {
@@ -205,6 +206,21 @@ type BlockedWorkSummary struct {
 	WorkKind      string  `json:"work_kind"`
 	Source        string  `json:"source"`
 	Reason        string  `json:"reason"`
+}
+
+type RetryRecoveryGuidanceSummary struct {
+	TaskID                 int64   `json:"task_id"`
+	WorkItemKey            string  `json:"work_item_key"`
+	ProjectKey             string  `json:"project_key"`
+	InitiativeKey          *string `json:"initiative_key"`
+	CompanionKey           *string `json:"companion_key"`
+	Status                 string  `json:"status"`
+	Decision               string  `json:"decision"`
+	RetryEligible          bool    `json:"retry_eligible"`
+	RetryCount             int     `json:"retry_count"`
+	MaxAttempts            int     `json:"max_attempts"`
+	LastError              string  `json:"last_error,omitempty"`
+	RecoveryRecommendation string  `json:"recovery_recommendation"`
 }
 
 type IncidentSummary struct {
@@ -591,7 +607,7 @@ func (service Service) Build(ctx context.Context, resolved scope.Resolution) (Vi
 		}
 	}
 	for _, task := range taskViews {
-		if !matchesProjectScope(task.ProjectKey, resolved) || isClosedWorkItemStatus(task.Status) {
+		if !matchesProjectScope(task.ProjectKey, resolved) {
 			continue
 		}
 		taskContext, err := resolveTaskContext(task.TaskID)
@@ -600,6 +616,26 @@ func (service Service) Build(ctx context.Context, resolved scope.Resolution) (Vi
 		}
 		if taskContext.companionKey != nil {
 			visibleCompanionKeys[*taskContext.companionKey] = struct{}{}
+		}
+		if strings.EqualFold(strings.TrimSpace(task.Status), "failed") {
+			decision, eligible, recommendation := retryGuidanceForTask(task.RetryCount, task.MaxAttempts)
+			view.Observability.RecoveryGuidance = append(view.Observability.RecoveryGuidance, RetryRecoveryGuidanceSummary{
+				TaskID:                 task.TaskID,
+				WorkItemKey:            task.TaskKey,
+				ProjectKey:             task.ProjectKey,
+				InitiativeKey:          taskContext.initiativeKey,
+				CompanionKey:           taskContext.companionKey,
+				Status:                 task.Status,
+				Decision:               decision,
+				RetryEligible:          eligible,
+				RetryCount:             task.RetryCount,
+				MaxAttempts:            task.MaxAttempts,
+				LastError:              task.LastError,
+				RecoveryRecommendation: recommendation,
+			})
+		}
+		if isClosedWorkItemStatus(task.Status) {
+			continue
 		}
 		view.WorkItems = append(view.WorkItems, WorkItemSummary{
 			ProjectKey:       task.ProjectKey,
@@ -1283,6 +1319,16 @@ func isReviewableIntakeStatus(status string) bool {
 	default:
 		return false
 	}
+}
+
+func retryGuidanceForTask(retryCount int, maxAttempts int) (string, bool, string) {
+	if maxAttempts <= 1 {
+		return "retry_blocked_non_retryable", false, "Open a follow-up or change task policy before retrying; this task is marked non-retryable."
+	}
+	if retryCount+1 >= maxAttempts {
+		return "retry_blocked_max_attempts", false, "Open a follow-up or adjust the task before retrying; max attempts reached."
+	}
+	return "retry_allowed", true, "Retry is allowed; dispatch the queued task to create the next run attempt."
 }
 
 func rawIntakeSummary(item sqlite.IntakeItem) RawIntakeSummary {

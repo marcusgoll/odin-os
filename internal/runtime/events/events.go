@@ -39,6 +39,7 @@ const (
 	EventProjectCreated                     Type = "project.created"
 	EventTaskCreated                        Type = "task.created"
 	EventTaskDispatchRequested              Type = "task.dispatch_requested"
+	EventTaskRetryEvaluated                 Type = "task.retry_evaluated"
 	EventTaskStatusChanged                  Type = "task.status_changed"
 	EventTaskQueueStateChanged              Type = "task.queue_state_changed"
 	EventRunStarted                         Type = "run.started"
@@ -172,6 +173,19 @@ type TaskDispatchRequestedPayload struct {
 	Executor string `json:"executor"`
 	Attempt  int    `json:"attempt"`
 	Status   string `json:"status"`
+}
+
+type TaskRetryEvaluatedPayload struct {
+	TaskID                 int64  `json:"task_id"`
+	Status                 string `json:"status"`
+	Requested              bool   `json:"requested"`
+	Decision               string `json:"decision"`
+	RetryEligible          bool   `json:"retry_eligible"`
+	RetryCount             int    `json:"retry_count"`
+	MaxAttempts            int    `json:"max_attempts"`
+	NextEligibleAt         string `json:"next_eligible_at,omitempty"`
+	LastError              string `json:"last_error,omitempty"`
+	RecoveryRecommendation string `json:"recovery_recommendation,omitempty"`
 }
 
 type TaskStatusChangedPayload struct {
