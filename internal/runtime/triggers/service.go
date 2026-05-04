@@ -30,13 +30,24 @@ type UpsertParams struct {
 	NextEligibleAt *time.Time
 	Cadence        string
 	Cron           string
+	QuietHours     string
+	QuietTimezone  string
 }
 
 type DueEvaluationResult struct {
 	Evaluated    int
 	Materialized int
+	Deferred     int
 	Errored      int
 	Results      []sqlite.FireAutomationTriggerResult
+	Deferrals    []DeferredEvaluationResult
+}
+
+type DeferredEvaluationResult struct {
+	Trigger       sqlite.AutomationTrigger
+	Reason        string
+	DueAt         time.Time
+	DeferredUntil time.Time
 }
 
 func (service Service) Upsert(ctx context.Context, params UpsertParams) (sqlite.AutomationTrigger, error) {
@@ -56,6 +67,8 @@ func (service Service) Upsert(ctx context.Context, params UpsertParams) (sqlite.
 	ruleSummary := strings.TrimSpace(params.RuleSummary)
 	cadence := strings.TrimSpace(params.Cadence)
 	cron := strings.TrimSpace(params.Cron)
+	quietHours := strings.TrimSpace(params.QuietHours)
+	quietTimezone := strings.TrimSpace(params.QuietTimezone)
 	if cadence != "" {
 		if _, _, err := parseScheduleCadence(cadence); err != nil {
 			return sqlite.AutomationTrigger{}, err
@@ -68,6 +81,11 @@ func (service Service) Upsert(ctx context.Context, params UpsertParams) (sqlite.
 	}
 	if cadence != "" && cron != "" {
 		return sqlite.AutomationTrigger{}, fmt.Errorf("automation trigger cadence cannot be combined with cron")
+	}
+	if quietHours != "" {
+		if _, err := parseQuietHoursRule(quietHours, quietTimezone); err != nil {
+			return sqlite.AutomationTrigger{}, err
+		}
 	}
 	if ruleJSON != "" && (cadence != "" || cron != "") {
 		return sqlite.AutomationTrigger{}, fmt.Errorf("automation trigger cadence or cron cannot be combined with rule_json")
@@ -84,6 +102,10 @@ func (service Service) Upsert(ctx context.Context, params UpsertParams) (sqlite.
 		}
 		if cron != "" {
 			payload["cron"] = cron
+		}
+		if quietHours != "" {
+			payload["quiet_hours"] = quietHours
+			payload["quiet_timezone"] = defaultTriggerString(quietTimezone, "UTC")
 		}
 		encoded, err := json.Marshal(payload)
 		if err != nil {
@@ -157,7 +179,51 @@ func (service Service) EvaluateDue(ctx context.Context, now time.Time) (DueEvalu
 		}
 		dueAt := *trigger.NextEligibleAt
 		result.Evaluated++
-		nextEligibleAt, err := nextScheduleEligibleAt(trigger, dueAt)
+		rule, err := parseTriggerScheduleRule(trigger)
+		if err != nil {
+			if _, markErr := service.Store.MarkAutomationTriggerErrored(ctx, sqlite.MarkAutomationTriggerErroredParams{
+				WorkspaceID: trigger.WorkspaceID,
+				Key:         trigger.Key,
+				Reason:      "rule-evaluation",
+				Error:       err.Error(),
+			}); markErr != nil {
+				return result, markErr
+			}
+			result.Errored++
+			continue
+		}
+		if deferredUntil, ok, err := quietHoursDeferral(rule, now.UTC()); err != nil {
+			if _, markErr := service.Store.MarkAutomationTriggerErrored(ctx, sqlite.MarkAutomationTriggerErroredParams{
+				WorkspaceID: trigger.WorkspaceID,
+				Key:         trigger.Key,
+				Reason:      "quiet-hours-evaluation",
+				Error:       err.Error(),
+			}); markErr != nil {
+				return result, markErr
+			}
+			result.Errored++
+			continue
+		} else if ok {
+			deferred, err := service.Store.DeferAutomationTrigger(ctx, sqlite.DeferAutomationTriggerParams{
+				WorkspaceID:   trigger.WorkspaceID,
+				Key:           trigger.Key,
+				Reason:        "quiet_hours",
+				DueAt:         dueAt,
+				DeferredUntil: deferredUntil,
+			})
+			if err != nil {
+				return result, err
+			}
+			result.Deferred++
+			result.Deferrals = append(result.Deferrals, DeferredEvaluationResult{
+				Trigger:       deferred,
+				Reason:        "quiet_hours",
+				DueAt:         dueAt,
+				DeferredUntil: deferredUntil,
+			})
+			continue
+		}
+		nextEligibleAt, err := nextScheduleEligibleAt(rule, trigger, dueAt, now.UTC())
 		if err != nil {
 			if _, markErr := service.Store.MarkAutomationTriggerErrored(ctx, sqlite.MarkAutomationTriggerErroredParams{
 				WorkspaceID: trigger.WorkspaceID,
@@ -230,15 +296,17 @@ func scheduledDueReason(dueAt time.Time) string {
 	return "due-" + dueAt.UTC().Format("20060102t150405z")
 }
 
-func nextScheduleEligibleAt(trigger sqlite.AutomationTrigger, dueAt time.Time) (*time.Time, error) {
-	rule, err := parseTriggerScheduleRule(trigger)
-	if err != nil {
-		return nil, err
-	}
+func nextScheduleEligibleAt(rule scheduleRule, trigger sqlite.AutomationTrigger, dueAt time.Time, evaluatedAt time.Time) (*time.Time, error) {
 	if strings.TrimSpace(rule.Cron) != "" {
 		next, err := nextCronEligibleAt(rule.Cron, dueAt)
 		if err != nil {
 			return nil, fmt.Errorf("automation trigger %s has invalid cron rule: %w", trigger.Key, err)
+		}
+		for !next.After(evaluatedAt.UTC()) {
+			next, err = nextCronEligibleAt(rule.Cron, next)
+			if err != nil {
+				return nil, fmt.Errorf("automation trigger %s has invalid cron rule: %w", trigger.Key, err)
+			}
 		}
 		return &next, nil
 	}
@@ -254,6 +322,9 @@ func nextScheduleEligibleAt(trigger sqlite.AutomationTrigger, dueAt time.Time) (
 		return nil, nil
 	}
 	next := dueAt.UTC().Add(cadence)
+	for !next.After(evaluatedAt.UTC()) {
+		next = next.Add(cadence)
+	}
 	return &next, nil
 }
 
@@ -261,6 +332,8 @@ type scheduleRule struct {
 	Cadence        string `json:"cadence"`
 	CadenceSeconds int64  `json:"cadence_seconds"`
 	Cron           string `json:"cron"`
+	QuietHours     string `json:"quiet_hours"`
+	QuietTimezone  string `json:"quiet_timezone"`
 }
 
 func parseTriggerScheduleRule(trigger sqlite.AutomationTrigger) (scheduleRule, error) {
@@ -269,6 +342,82 @@ func parseTriggerScheduleRule(trigger sqlite.AutomationTrigger) (scheduleRule, e
 		return scheduleRule{}, fmt.Errorf("automation trigger %s has invalid rule json: %w", trigger.Key, err)
 	}
 	return rule, nil
+}
+
+type quietHoursRule struct {
+	Start    time.Duration
+	End      time.Duration
+	Timezone string
+}
+
+func quietHoursDeferral(rule scheduleRule, now time.Time) (time.Time, bool, error) {
+	quietRule, err := parseQuietHoursRule(rule.QuietHours, rule.QuietTimezone)
+	if err != nil {
+		return time.Time{}, false, err
+	}
+	if quietRule == nil {
+		return time.Time{}, false, nil
+	}
+	now = now.UTC()
+	current := time.Duration(now.Hour())*time.Hour + time.Duration(now.Minute())*time.Minute + time.Duration(now.Second())*time.Second
+	if !quietRule.contains(current) {
+		return time.Time{}, false, nil
+	}
+	midnight := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+	deferredUntil := midnight.Add(quietRule.End)
+	if quietRule.crossesMidnight() && current >= quietRule.Start {
+		deferredUntil = deferredUntil.Add(24 * time.Hour)
+	}
+	if !quietRule.crossesMidnight() && !deferredUntil.After(now) {
+		deferredUntil = deferredUntil.Add(24 * time.Hour)
+	}
+	return deferredUntil, true, nil
+}
+
+func (rule quietHoursRule) contains(current time.Duration) bool {
+	if rule.crossesMidnight() {
+		return current >= rule.Start || current < rule.End
+	}
+	return current >= rule.Start && current < rule.End
+}
+
+func (rule quietHoursRule) crossesMidnight() bool {
+	return rule.Start > rule.End
+}
+
+func parseQuietHoursRule(value string, timezone string) (*quietHoursRule, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil, nil
+	}
+	timezone = defaultTriggerString(timezone, "UTC")
+	if !strings.EqualFold(timezone, "UTC") && !strings.EqualFold(timezone, "Z") {
+		return nil, fmt.Errorf("automation trigger quiet timezone %q is not supported yet; use UTC", timezone)
+	}
+	startValue, endValue, ok := strings.Cut(value, "-")
+	if !ok {
+		return nil, fmt.Errorf("automation trigger quiet hours %q must use HH:MM-HH:MM", value)
+	}
+	start, err := parseQuietClock(startValue)
+	if err != nil {
+		return nil, err
+	}
+	end, err := parseQuietClock(endValue)
+	if err != nil {
+		return nil, err
+	}
+	if start == end {
+		return nil, fmt.Errorf("automation trigger quiet hours start and end must differ")
+	}
+	return &quietHoursRule{Start: start, End: end, Timezone: "UTC"}, nil
+}
+
+func parseQuietClock(value string) (time.Duration, error) {
+	parsed, err := time.Parse("15:04", strings.TrimSpace(value))
+	if err != nil {
+		return 0, fmt.Errorf("invalid automation trigger quiet clock %q: use HH:MM", value)
+	}
+	return time.Duration(parsed.Hour())*time.Hour + time.Duration(parsed.Minute())*time.Minute, nil
 }
 
 func parseScheduleCadence(value string) (time.Duration, bool, error) {
@@ -285,6 +434,13 @@ func parseScheduleCadence(value string) (time.Duration, bool, error) {
 		return 0, false, fmt.Errorf("invalid automation trigger cadence %q: %w", value, err)
 	}
 	return cadence, true, nil
+}
+
+func defaultTriggerString(value string, fallback string) string {
+	if strings.TrimSpace(value) == "" {
+		return fallback
+	}
+	return strings.TrimSpace(value)
 }
 
 type cronSchedule struct {

@@ -958,6 +958,46 @@ func (store *Store) FireAutomationTrigger(ctx context.Context, params FireAutoma
 	return result, err
 }
 
+func (store *Store) DeferAutomationTrigger(ctx context.Context, params DeferAutomationTriggerParams) (AutomationTrigger, error) {
+	now := store.now()
+	var updated AutomationTrigger
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		trigger, err := store.getAutomationTriggerByWorkspaceKeyQuery(ctx, tx, defaultString(params.WorkspaceID, "default"), strings.TrimSpace(params.Key))
+		if err != nil {
+			return err
+		}
+		if trigger.Status != "enabled" {
+			return fmt.Errorf("automation trigger %s is %s", trigger.Key, trigger.Status)
+		}
+		deferredUntil := params.DeferredUntil.UTC()
+		if err := store.updateAutomationTriggerEvaluationTx(ctx, tx, trigger.ID, now, true, &deferredUntil); err != nil {
+			return err
+		}
+		updated, err = store.getAutomationTriggerByIDQuery(ctx, tx, trigger.ID)
+		if err != nil {
+			return err
+		}
+		eventScope := store.automationTriggerEventScopeTx(ctx, tx, updated)
+		return appendEventTx(ctx, tx, eventInsert{
+			StreamType: runtimeevents.StreamAutomationTrigger,
+			StreamID:   updated.ID,
+			EventType:  runtimeevents.EventAutomationTriggerDeferred,
+			Scope:      eventScope,
+			ProjectID:  &updated.ProjectID,
+			Payload: runtimeevents.AutomationTriggerDeferredPayload{
+				WorkspaceID:   updated.WorkspaceID,
+				Key:           updated.Key,
+				Reason:        defaultString(params.Reason, "quiet_hours"),
+				DueAt:         params.DueAt.UTC().Format(time.RFC3339),
+				DeferredUntil: params.DeferredUntil.UTC().Format(time.RFC3339),
+				Status:        updated.Status,
+			},
+			OccurredAt: now,
+		})
+	})
+	return updated, err
+}
+
 func (store *Store) MarkAutomationTriggerErrored(ctx context.Context, params MarkAutomationTriggerErroredParams) (AutomationTrigger, error) {
 	now := store.now()
 	var updated AutomationTrigger

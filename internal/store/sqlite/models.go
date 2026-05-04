@@ -424,6 +424,14 @@ type FireAutomationTriggerResult struct {
 	CreatedWorkItem bool
 }
 
+type DeferAutomationTriggerParams struct {
+	WorkspaceID   string
+	Key           string
+	Reason        string
+	DueAt         time.Time
+	DeferredUntil time.Time
+}
+
 type MarkAutomationTriggerErroredParams struct {
 	WorkspaceID string
 	Key         string

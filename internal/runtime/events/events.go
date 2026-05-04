@@ -80,6 +80,7 @@ const (
 	EventAutomationTriggerFireRequested     Type = "automation_trigger.fire_requested"
 	EventAutomationTriggerEvaluated         Type = "automation_trigger.evaluated"
 	EventAutomationTriggerMaterialized      Type = "automation_trigger.materialized"
+	EventAutomationTriggerDeferred          Type = "automation_trigger.deferred"
 	EventAutomationTriggerErrored           Type = "automation_trigger.errored"
 	EventAutomationTriggerStatusChanged     Type = "automation_trigger.status_changed"
 	EventProjectTransitionChanged           Type = "project.transition_changed"
@@ -414,6 +415,15 @@ type AutomationTriggerMaterializedPayload struct {
 	TaskID             int64  `json:"task_id"`
 	TaskKey            string `json:"task_key"`
 	RequestedBy        string `json:"requested_by,omitempty"`
+}
+
+type AutomationTriggerDeferredPayload struct {
+	WorkspaceID   string `json:"workspace_id"`
+	Key           string `json:"key"`
+	Reason        string `json:"reason"`
+	DueAt         string `json:"due_at"`
+	DeferredUntil string `json:"deferred_until"`
+	Status        string `json:"status"`
 }
 
 type AutomationTriggerErroredPayload struct {

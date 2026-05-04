@@ -1312,6 +1312,9 @@ func automationTriggerDueStatus(trigger sqlite.AutomationTrigger, now time.Time)
 		return "manual"
 	}
 	if trigger.NextEligibleAt.After(now.UTC()) {
+		if trigger.LastEvaluatedAt != nil && (trigger.LastMaterializedAt == nil || trigger.LastEvaluatedAt.After(*trigger.LastMaterializedAt)) {
+			return "deferred"
+		}
 		return "waiting"
 	}
 	return "due"

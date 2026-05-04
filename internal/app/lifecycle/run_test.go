@@ -1657,7 +1657,7 @@ func TestRunTriggerMVPUsesLiveOperatorLifecycle(t *testing.T) {
 		"kind=schedule",
 		"status=enabled",
 		"cadence=1h",
-		"next=2026-05-02T00:00:00Z",
+		"next=2026-05-05T00:00:00Z",
 		"title=Run_daily_review",
 		"summary=hourly_review",
 		"--json",
@@ -1666,7 +1666,7 @@ func TestRunTriggerMVPUsesLiveOperatorLifecycle(t *testing.T) {
 		t.Fatalf("trigger upsert output = %s, want enabled daily-review JSON", upsertOutput)
 	}
 	listOutput := run("trigger", "list", "--json")
-	if !strings.Contains(listOutput, `"key": "daily-review"`) || !strings.Contains(listOutput, `"next_eligible_at": "2026-05-02T00:00:00Z"`) {
+	if !strings.Contains(listOutput, `"key": "daily-review"`) || !strings.Contains(listOutput, `"next_eligible_at": "2026-05-05T00:00:00Z"`) {
 		t.Fatalf("trigger list output = %s, want daily-review with next eligible time", listOutput)
 	}
 	showOutput := run("trigger", "show", "daily-review", "--json")
@@ -1674,7 +1674,7 @@ func TestRunTriggerMVPUsesLiveOperatorLifecycle(t *testing.T) {
 		t.Fatalf("trigger show output = %s, want reviewable trigger details", showOutput)
 	}
 
-	evaluateOutput := run("trigger", "evaluate", "now=2026-05-02T00:00:00Z", "--json")
+	evaluateOutput := run("trigger", "evaluate", "now=2026-05-05T00:00:00Z", "--json")
 	var evaluate struct {
 		Evaluated    int `json:"evaluated"`
 		Materialized int `json:"materialized"`
@@ -1698,11 +1698,11 @@ func TestRunTriggerMVPUsesLiveOperatorLifecycle(t *testing.T) {
 	if evaluate.Evaluated != 1 || evaluate.Materialized != 1 || len(evaluate.Results) != 1 || !evaluate.Results[0].CreatedWorkItem {
 		t.Fatalf("trigger evaluate output = %+v, want one materialized queued work item", evaluate)
 	}
-	if evaluate.Results[0].WorkItem.Status != "queued" || evaluate.Results[0].Materialization.Reason != "due-20260502t000000z" || evaluate.Results[0].Materialization.RequestedBy != "automation_trigger_evaluator" {
+	if evaluate.Results[0].WorkItem.Status != "queued" || evaluate.Results[0].Materialization.Reason != "due-20260505t000000z" || evaluate.Results[0].Materialization.RequestedBy != "automation_trigger_evaluator" {
 		t.Fatalf("trigger materialization = %+v, want queued scheduled provenance", evaluate.Results[0])
 	}
 
-	repeatEvaluateOutput := run("trigger", "evaluate", "now=2026-05-02T00:00:00Z", "--json")
+	repeatEvaluateOutput := run("trigger", "evaluate", "now=2026-05-05T00:00:00Z", "--json")
 	if !strings.Contains(repeatEvaluateOutput, `"evaluated": 0`) || !strings.Contains(repeatEvaluateOutput, `"materialized": 0`) {
 		t.Fatalf("repeat trigger evaluate output = %s, want no duplicate due materialization", repeatEvaluateOutput)
 	}
@@ -1714,7 +1714,7 @@ func TestRunTriggerMVPUsesLiveOperatorLifecycle(t *testing.T) {
 		"kind=schedule",
 		"status=enabled",
 		"cadence=1h",
-		"next=2026-05-02T00:00:00Z",
+		"next=2026-05-05T00:00:00Z",
 		"title=Review_system_trigger",
 		"summary=system_trigger",
 		"--json",
@@ -1766,6 +1766,156 @@ func TestRunTriggerMVPUsesLiveOperatorLifecycle(t *testing.T) {
 	overviewOutput := run("overview", "--json")
 	if !strings.Contains(overviewOutput, `"automation_triggers"`) || !strings.Contains(overviewOutput, `"trigger_count": 1`) || !strings.Contains(overviewOutput, `"last_work_item_key": "`+fire.WorkItem.Key+`"`) || !strings.Contains(overviewOutput, `"open_work_item_count": 2`) {
 		t.Fatalf("overview output = %s, want trigger and queued/blocked work visibility", overviewOutput)
+	}
+}
+
+func TestRunTriggerHumanizedTimingDefersQuietHoursAndCoalescesMissedRuns(t *testing.T) {
+	t.Parallel()
+
+	root := testRepoRoot(t)
+	run := func(args ...string) string {
+		t.Helper()
+		var stdout bytes.Buffer
+		if err := Run(context.Background(), root, args, strings.NewReader(""), &stdout); err != nil {
+			t.Fatalf("Run(%v) error = %v\nstdout=%s", args, err, stdout.String())
+		}
+		return stdout.String()
+	}
+
+	run("project", "select", testProjectKey)
+	run("trigger", "upsert", "quiet-proof",
+		"initiative="+testProjectKey,
+		"kind=schedule",
+		"status=enabled",
+		"cadence=1h",
+		"next=2026-05-05T03:00:00Z",
+		"title=Quiet_hours_proof",
+		"summary=quiet_hours_probe",
+		"quiet=02:00-06:00",
+		"--json",
+	)
+	quietEvaluate := run("trigger", "evaluate", "now=2026-05-05T03:15:00Z", "--json")
+	var quiet struct {
+		Evaluated    int `json:"evaluated"`
+		Materialized int `json:"materialized"`
+		Deferred     int `json:"deferred"`
+		Deferrals    []struct {
+			Key           string `json:"key"`
+			Reason        string `json:"reason"`
+			DueAt         string `json:"due_at"`
+			DeferredUntil string `json:"deferred_until"`
+		} `json:"deferrals"`
+	}
+	if err := json.Unmarshal([]byte(quietEvaluate), &quiet); err != nil {
+		t.Fatalf("json.Unmarshal(quiet evaluate) error = %v\n%s", err, quietEvaluate)
+	}
+	if quiet.Evaluated != 1 || quiet.Materialized != 0 || quiet.Deferred != 1 || len(quiet.Deferrals) != 1 {
+		t.Fatalf("quiet evaluate = %+v, want one deferred and no materialized work", quiet)
+	}
+	if quiet.Deferrals[0].Key != "quiet-proof" || quiet.Deferrals[0].Reason != "quiet_hours" || quiet.Deferrals[0].DueAt != "2026-05-05T03:00:00Z" || quiet.Deferrals[0].DeferredUntil != "2026-05-05T06:00:00Z" {
+		t.Fatalf("quiet deferral = %+v, want quiet-hours deferral to 06:00Z", quiet.Deferrals[0])
+	}
+	if jobsOutput := run("jobs", "--json"); !strings.Contains(jobsOutput, `"jobs": []`) {
+		t.Fatalf("jobs output = %s, want no work during quiet-hours deferral", jobsOutput)
+	}
+	showDeferred := run("trigger", "show", "quiet-proof", "--json")
+	if !strings.Contains(showDeferred, `"timing_status": "deferred"`) || !strings.Contains(showDeferred, `"next_eligible_at": "2026-05-05T06:00:00Z"`) {
+		t.Fatalf("show deferred output = %s, want deferred state visible", showDeferred)
+	}
+
+	release := run("trigger", "evaluate", "now=2026-05-05T06:00:00Z", "--json")
+	if !strings.Contains(release, `"evaluated": 1`) || !strings.Contains(release, `"materialized": 1`) || !strings.Contains(release, `"created_work_item": true`) {
+		t.Fatalf("release evaluate output = %s, want one materialized work item after quiet hours", release)
+	}
+	repeatRelease := run("trigger", "evaluate", "now=2026-05-05T06:00:00Z", "--json")
+	if !strings.Contains(repeatRelease, `"evaluated": 0`) || !strings.Contains(repeatRelease, `"materialized": 0`) {
+		t.Fatalf("repeat release output = %s, want no duplicate materialization", repeatRelease)
+	}
+
+	run("trigger", "upsert", "missed-proof",
+		"initiative="+testProjectKey,
+		"kind=schedule",
+		"status=enabled",
+		"cadence=1h",
+		"next=2026-05-05T00:00:00Z",
+		"title=Missed_run_proof",
+		"summary=missed_probe",
+		"--json",
+	)
+	missed := run("trigger", "evaluate", "now=2026-05-05T05:30:00Z", "--json")
+	if !strings.Contains(missed, `"evaluated": 1`) || !strings.Contains(missed, `"materialized": 1`) || !strings.Contains(missed, `"materialization_key": "default:missed-proof:schedule:due-20260505t000000z"`) {
+		t.Fatalf("missed evaluate output = %s, want one deterministic missed-window materialization", missed)
+	}
+	showMissed := run("trigger", "show", "missed-proof", "--json")
+	if !strings.Contains(showMissed, `"next_eligible_at": "2026-05-05T06:00:00Z"`) {
+		t.Fatalf("missed show output = %s, want next future cadence window after evaluation time", showMissed)
+	}
+	repeatMissed := run("trigger", "evaluate", "now=2026-05-05T05:30:00Z", "--json")
+	if !strings.Contains(repeatMissed, `"evaluated": 0`) || !strings.Contains(repeatMissed, `"materialized": 0`) {
+		t.Fatalf("repeat missed output = %s, want no duplicate missed materialization", repeatMissed)
+	}
+	run("trigger", "upsert", "missed-proof",
+		"initiative="+testProjectKey,
+		"kind=schedule",
+		"status=disabled",
+		"cadence=1h",
+		"next=2026-05-05T06:00:00Z",
+		"title=Missed_run_proof",
+		"summary=missed_probe",
+		"--json",
+	)
+
+	run("project", "select", "odin-core")
+	run("transition", "set", "cutover", "confirm", "because", "humanized trigger approval proof")
+	run("trigger", "upsert", "risky-timing",
+		"initiative=odin-core",
+		"kind=schedule",
+		"status=enabled",
+		"cadence=1h",
+		"next=2026-05-05T03:00:00Z",
+		"title=Risky_timing_proof",
+		"summary=risky_timing_probe",
+		"quiet=02:00-06:00",
+		"--json",
+	)
+	riskyQuiet := run("trigger", "evaluate", "now=2026-05-05T03:30:00Z", "--json")
+	if !strings.Contains(riskyQuiet, `"deferred": 1`) || !strings.Contains(riskyQuiet, `"materialized": 0`) {
+		t.Fatalf("risky quiet output = %s, want quiet-hours deferral before approval path", riskyQuiet)
+	}
+	riskyRelease := run("trigger", "evaluate", "now=2026-05-05T06:00:00Z", "--json")
+	var risky struct {
+		Results []struct {
+			WorkItem struct {
+				Key string `json:"key"`
+			} `json:"work_item"`
+		} `json:"results"`
+	}
+	if err := json.Unmarshal([]byte(riskyRelease), &risky); err != nil {
+		t.Fatalf("json.Unmarshal(risky release) error = %v\n%s", err, riskyRelease)
+	}
+	if len(risky.Results) != 1 || risky.Results[0].WorkItem.Key == "" {
+		t.Fatalf("risky release = %+v, want one trigger-created work item", risky)
+	}
+	dispatch := run("work", "dispatch", "--task", risky.Results[0].WorkItem.Key, "--json")
+	if !strings.Contains(dispatch, `"reason": "approval_required"`) || !strings.Contains(dispatch, `"status": "blocked"`) {
+		t.Fatalf("risky dispatch output = %s, want approval-required block after timing release", dispatch)
+	}
+
+	logsOutput := run("logs", "--json")
+	for _, want := range []string{
+		`"type": "automation_trigger.deferred"`,
+		`"reason": "quiet_hours"`,
+		`"deferred_until": "2026-05-05T06:00:00Z"`,
+		`"type": "automation_trigger.materialized"`,
+		`"type": "approval.requested"`,
+	} {
+		if !strings.Contains(logsOutput, want) {
+			t.Fatalf("logs output = %s, want %s", logsOutput, want)
+		}
+	}
+	overviewOutput := run("overview", "--json")
+	if !strings.Contains(overviewOutput, `"key": "risky-timing"`) || !strings.Contains(overviewOutput, `"pending_approval_count": 1`) {
+		t.Fatalf("overview output = %s, want risky timing trigger and pending approval", overviewOutput)
 	}
 }
 

@@ -67,6 +67,8 @@ func RunTrigger(ctx context.Context, service triggers.Service, args []string, st
 			NextEligibleAt: nextEligibleAt,
 			Cadence:        options["cadence"],
 			Cron:           strings.ReplaceAll(options["cron"], "_", " "),
+			QuietHours:     triggerFirstNonEmpty(options["quiet"], options["quiet_hours"]),
+			QuietTimezone:  triggerFirstNonEmpty(options["quiet_tz"], options["quiet_timezone"], options["timezone"]),
 		})
 		if err != nil {
 			return err
@@ -202,10 +204,12 @@ type triggerListView struct {
 }
 
 type triggerEvaluateView struct {
-	Evaluated    int               `json:"evaluated"`
-	Materialized int               `json:"materialized"`
-	Errored      int               `json:"errored"`
-	Results      []triggerFireView `json:"results"`
+	Evaluated    int                   `json:"evaluated"`
+	Materialized int                   `json:"materialized"`
+	Deferred     int                   `json:"deferred"`
+	Errored      int                   `json:"errored"`
+	Results      []triggerFireView     `json:"results"`
+	Deferrals    []triggerDeferralView `json:"deferrals"`
 }
 
 type triggerFireView struct {
@@ -223,6 +227,7 @@ type automationTriggerView struct {
 	Kind                   string  `json:"kind"`
 	Status                 string  `json:"status"`
 	Readiness              string  `json:"readiness"`
+	TimingStatus           string  `json:"timing_status"`
 	RuleSummary            string  `json:"rule_summary"`
 	RuleJSON               string  `json:"rule_json"`
 	WorkItemTitle          string  `json:"work_item_title"`
@@ -234,6 +239,14 @@ type automationTriggerView struct {
 	LastWorkItemKey        string  `json:"last_work_item_key"`
 	CreatedAt              string  `json:"created_at"`
 	UpdatedAt              string  `json:"updated_at"`
+}
+
+type triggerDeferralView struct {
+	Key           string `json:"key"`
+	WorkspaceID   string `json:"workspace_id"`
+	Reason        string `json:"reason"`
+	DueAt         string `json:"due_at"`
+	DeferredUntil string `json:"deferred_until"`
 }
 
 type triggerMaterializationView struct {
@@ -262,11 +275,27 @@ func newTriggerEvaluateView(result triggers.DueEvaluationResult) triggerEvaluate
 	for _, item := range result.Results {
 		views = append(views, newTriggerFireView(item))
 	}
+	deferrals := make([]triggerDeferralView, 0, len(result.Deferrals))
+	for _, item := range result.Deferrals {
+		deferrals = append(deferrals, newTriggerDeferralView(item))
+	}
 	return triggerEvaluateView{
 		Evaluated:    result.Evaluated,
 		Materialized: result.Materialized,
+		Deferred:     result.Deferred,
 		Errored:      result.Errored,
 		Results:      views,
+		Deferrals:    deferrals,
+	}
+}
+
+func newTriggerDeferralView(result triggers.DeferredEvaluationResult) triggerDeferralView {
+	return triggerDeferralView{
+		Key:           result.Trigger.Key,
+		WorkspaceID:   result.Trigger.WorkspaceID,
+		Reason:        result.Reason,
+		DueAt:         result.DueAt.UTC().Format(time.RFC3339),
+		DeferredUntil: result.DeferredUntil.UTC().Format(time.RFC3339),
 	}
 }
 
@@ -288,6 +317,7 @@ func newAutomationTriggerView(item sqlite.AutomationTrigger) automationTriggerVi
 		Kind:                   item.Kind,
 		Status:                 item.Status,
 		Readiness:              triggerReadiness(item),
+		TimingStatus:           triggerTimingStatus(item, time.Now().UTC()),
 		RuleSummary:            item.RuleSummary,
 		RuleJSON:               item.RuleJSON,
 		WorkItemTitle:          item.WorkItemTitle,
@@ -368,10 +398,21 @@ func triggerFirstNonEmpty(values ...string) string {
 }
 
 func triggerReadiness(item sqlite.AutomationTrigger) string {
+	status := triggerTimingStatus(item, time.Now().UTC())
+	if status == "deferred" {
+		return "waiting"
+	}
+	return status
+}
+
+func triggerTimingStatus(item sqlite.AutomationTrigger, now time.Time) string {
 	if item.Status != "enabled" {
 		return item.Status
 	}
-	if item.NextEligibleAt != nil && item.NextEligibleAt.After(time.Now().UTC()) {
+	if item.NextEligibleAt != nil && item.NextEligibleAt.After(now.UTC()) {
+		if item.LastEvaluatedAt != nil && (item.LastMaterializedAt == nil || item.LastEvaluatedAt.After(*item.LastMaterializedAt)) {
+			return "deferred"
+		}
 		return "waiting"
 	}
 	return "ready"
