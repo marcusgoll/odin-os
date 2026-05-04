@@ -1638,6 +1638,85 @@ func TestRunWorkDispatchCreatesRunAttemptFromAcceptedIntake(t *testing.T) {
 	}
 }
 
+func TestRunWorkDispatchEnforcesProjectExecutionPolicy(t *testing.T) {
+	t.Parallel()
+
+	root := testRepoRoot(t)
+	run := func(args ...string) string {
+		t.Helper()
+		var stdout bytes.Buffer
+		if err := Run(context.Background(), root, args, strings.NewReader(""), &stdout); err != nil {
+			t.Fatalf("Run(%v) error = %v\nstdout=%s", args, err, stdout.String())
+		}
+		return stdout.String()
+	}
+	parseTaskKey := func(output string) string {
+		t.Helper()
+		for _, field := range strings.Fields(output) {
+			if value, ok := strings.CutPrefix(field, "key="); ok {
+				return value
+			}
+		}
+		t.Fatalf("work start output = %q, want task key", output)
+		return ""
+	}
+
+	run("project", "select", testProjectKey)
+	run("transition", "set", "cutover", "confirm", "because", "execution policy read-only proof")
+	readOnlyKey := parseTaskKey(run("work", "start", "--project", testProjectKey, "--title", "Read-only inspect project status"))
+	readOnlyDispatch := run("work", "dispatch", "--task", readOnlyKey, "--json")
+	if !strings.Contains(readOnlyDispatch, `"dispatched": true`) || !strings.Contains(readOnlyDispatch, `"reason": "dispatched"`) || !strings.Contains(readOnlyDispatch, `"status": "running"`) {
+		t.Fatalf("read-only dispatch output = %s, want dispatched running task", readOnlyDispatch)
+	}
+
+	mutationKey := parseTaskKey(run("work", "start", "--project", testProjectKey, "--title", "Modify README through direct project root mutation"))
+	mutationDispatch := run("work", "dispatch", "--task", mutationKey, "--json")
+	if !strings.Contains(mutationDispatch, `"dispatched": false`) || !strings.Contains(mutationDispatch, `"reason": "mutation_requires_isolated_worktree"`) || !strings.Contains(mutationDispatch, `"status": "blocked"`) {
+		t.Fatalf("mutation dispatch output = %s, want direct mutation blocked by project policy", mutationDispatch)
+	}
+	runsAfterMutation := run("runs", "--json")
+	if strings.Count(runsAfterMutation, `"task_key": "`) != 1 {
+		t.Fatalf("runs output = %s, want only the read-only dispatch run", runsAfterMutation)
+	}
+	if !strings.Contains(runsAfterMutation, `"project_key": "alpha-cli"`) || !strings.Contains(runsAfterMutation, `"repo_root": "`) || !strings.Contains(runsAfterMutation, `"worktree_path": "`) || !strings.Contains(runsAfterMutation, `"branch_name": "main"`) {
+		t.Fatalf("runs output = %s, want project/worktree/branch execution context", runsAfterMutation)
+	}
+	mutationLogs := run("logs", "--json")
+	if !strings.Contains(mutationLogs, `"type": "task.queue_state_changed"`) || !strings.Contains(mutationLogs, `"blocked_reason": "mutation_requires_isolated_worktree"`) {
+		t.Fatalf("mutation logs output = %s, want mutation policy block evidence", mutationLogs)
+	}
+
+	run("project", "select", "odin-core")
+	run("transition", "set", "cutover", "confirm", "because", "execution policy approval proof")
+	systemMutationKey := parseTaskKey(run("work", "start", "--project", "odin-core", "--title", "Modify system project policy"))
+	systemMutationDispatch := run("work", "dispatch", "--task", systemMutationKey, "--json")
+	if !strings.Contains(systemMutationDispatch, `"dispatched": false`) || !strings.Contains(systemMutationDispatch, `"reason": "approval_required"`) || !strings.Contains(systemMutationDispatch, `"status": "blocked"`) {
+		t.Fatalf("system mutation dispatch output = %s, want approval-required mutation block", systemMutationDispatch)
+	}
+
+	logsOutput := run("logs", "--json")
+	for _, want := range []string{
+		`"type": "task.queue_state_changed"`,
+		`"type": "approval.requested"`,
+		`"blocked_reason": "approval_required"`,
+	} {
+		if !strings.Contains(logsOutput, want) {
+			t.Fatalf("logs output = %s, want %s", logsOutput, want)
+		}
+	}
+	statusOutput := run("work", "status")
+	for _, want := range []string{
+		"work_items=3",
+		"open_work_items=3",
+		"active_run_attempts=1",
+		"pending_approvals=1",
+	} {
+		if !strings.Contains(statusOutput, want) {
+			t.Fatalf("work status output = %s, want %s", statusOutput, want)
+		}
+	}
+}
+
 func TestRunTriggerMVPUsesLiveOperatorLifecycle(t *testing.T) {
 	t.Parallel()
 
@@ -3711,7 +3790,7 @@ func TestCompanionDelegateListShowsFailedPartialLifecycle(t *testing.T) {
 	for _, want := range []string{
 		`"type": "delegation.status_changed"`,
 		`"status": "failed"`,
-		`transition_denied`,
+		`delegated child failed proof`,
 	} {
 		if !strings.Contains(logsOutput.String(), want) {
 			t.Fatalf("logs output = %s, want %s", logsOutput.String(), want)
@@ -3720,7 +3799,7 @@ func TestCompanionDelegateListShowsFailedPartialLifecycle(t *testing.T) {
 }
 
 func TestCompanionDelegateRetryRecoversFailedChildrenIdempotently(t *testing.T) {
-	configureLifecycleHarnessDriver(t)
+	configureLifecycleHarnessDriverStatus(t, "failed", "delegated child failed proof")
 	t.Setenv("HOME", t.TempDir())
 
 	root := testRepoRoot(t)
@@ -3741,7 +3820,7 @@ func TestCompanionDelegateRetryRecoversFailedChildrenIdempotently(t *testing.T) 
 		"--surface",
 		"dashboard",
 		"--goal",
-		"recover failed delegated operator path",
+		"audit failed delegated operator path",
 		"--json",
 	}, strings.NewReader(""), &failedOutput)
 	if err == nil {
@@ -3767,8 +3846,8 @@ func TestCompanionDelegateRetryRecoversFailedChildrenIdempotently(t *testing.T) 
 		t.Fatalf("failed delegation count = %d, want 2\n%s", len(failedList.Delegations), failedListOutput.String())
 	}
 	for _, delegation := range failedList.Delegations {
-		if delegation.Status != "failed" || delegation.ChildTaskID == 0 || delegation.ChildRunID != nil {
-			t.Fatalf("failed delegation = %+v, want failed child task without child run", delegation)
+		if delegation.Status != "failed" || delegation.ChildTaskID == 0 || delegation.ChildRunID == nil {
+			t.Fatalf("failed delegation = %+v, want failed child task with failed child run", delegation)
 		}
 	}
 
@@ -3784,7 +3863,7 @@ func TestCompanionDelegateRetryRecoversFailedChildrenIdempotently(t *testing.T) 
 		"--surface",
 		"dashboard",
 		"--goal",
-		"recover failed delegated operator path",
+		"audit failed delegated operator path",
 		"--json",
 	}, strings.NewReader(""), &repeatFailedOutput); err != nil {
 		t.Fatalf("Run(companion delegate repeat failed) error = %v\nstdout:\n%s", err, repeatFailedOutput.String())
@@ -3814,7 +3893,7 @@ func TestCompanionDelegateRetryRecoversFailedChildrenIdempotently(t *testing.T) 
 	}
 	for index, delegation := range repeatFailedPayload.ChildDelegations {
 		originalChildTaskID, ok := failedByID[delegation.ID]
-		if !ok || delegation.ChildTaskID != originalChildTaskID || delegation.Status != "failed" || delegation.ChildRunID != nil {
+		if !ok || delegation.ChildTaskID != originalChildTaskID || delegation.Status != "failed" || delegation.ChildRunID == nil {
 			t.Fatalf("repeat failed delegation %d = %+v, want same failed row set %#v", index, delegation, failedByID)
 		}
 	}
@@ -3826,6 +3905,7 @@ func TestCompanionDelegateRetryRecoversFailedChildrenIdempotently(t *testing.T) 
 		t.Fatalf("repeat failed list = %s, want exactly two failed delegation rows", repeatFailedListOutput.String())
 	}
 
+	configureLifecycleHarnessDriver(t)
 	if err := Run(context.Background(), root, []string{"transition", "set", "cutover", "confirm", "because", "delegation retry test"}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
 		t.Fatalf("Run(transition set) error = %v", err)
 	}

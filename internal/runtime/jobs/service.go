@@ -129,6 +129,13 @@ type admissionDecision struct {
 	NextEligibleAt time.Time
 }
 
+type executionIntent struct {
+	ActionClass projects.ActionClass
+	ActionKey   string
+	Mutating    bool
+	Reason      string
+}
+
 func (service Service) NarrowDelegationAdmission(input DelegationAdmissionInput) (DelegationAdmissionProfile, error) {
 	if input.ParentTask.ID <= 0 {
 		return DelegationAdmissionProfile{}, fmt.Errorf("parent task is required")
@@ -583,7 +590,7 @@ func (service Service) DispatchTaskRunAttempt(ctx context.Context, taskID int64)
 		if admission.BlockedReason != "" {
 			reason = admission.BlockedReason
 		}
-		if admission.LastError != "" {
+		if reason == "" && admission.LastError != "" {
 			reason = admission.LastError
 		}
 		return DispatchOutcome{Task: updated, Reason: reason}, nil
@@ -1705,30 +1712,13 @@ func pointerIfScope(scopes []string, required string, value *int64) *int64 {
 }
 
 func (service Service) admitTask(ctx context.Context, task sqlite.Task, project sqlite.Project, manifest projects.Manifest, executorKey string) (admissionDecision, error) {
-	if requiresExplicitApproval(manifest) {
-		approval, err := service.latestTaskApproval(ctx, task.ID)
-		if err != nil {
-			return admissionDecision{}, err
-		}
-		switch approval.Status {
-		case "approved":
-		case "pending":
-			return admissionDecision{Outcome: admissionBlocked, BlockedReason: "approval_required"}, nil
-		case "":
-			if _, err := service.Store.RequestApproval(ctx, sqlite.RequestApprovalParams{
-				TaskID:      task.ID,
-				Status:      "pending",
-				RequestedBy: "system",
-			}); err != nil {
-				return admissionDecision{}, err
-			}
-			return admissionDecision{Outcome: admissionBlocked, BlockedReason: "approval_required"}, nil
-		default:
-			return admissionDecision{
-				Outcome:   admissionFailed,
-				LastError: fmt.Sprintf("approval for task %d is %s", task.ID, approval.Status),
-			}, nil
-		}
+	intent := applyManifestExecutionDefaults(manifest, classifyTaskExecutionIntent(task.Title))
+	approvalDecision, required, err := service.evaluateTaskApproval(ctx, task, manifest, intent)
+	if err != nil {
+		return admissionDecision{}, err
+	}
+	if required && approvalDecision.Outcome != admissionDispatchable {
+		return approvalDecision, nil
 	}
 
 	executorCheck, _, err := healthsvc.Service{
@@ -1750,8 +1740,8 @@ func (service Service) admitTask(ctx context.Context, task sqlite.Task, project 
 	if _, err := service.Transitions.AuthorizeAction(ctx, projects.ActionInput{
 		ProjectID:   project.ID,
 		Actor:       projects.TransitionControllerOdinOS,
-		ActionClass: projects.ActionClassIsolatedMutation,
-		ActionKey:   "run_task",
+		ActionClass: intent.ActionClass,
+		ActionKey:   intent.ActionKey,
 	}); err != nil {
 		return admissionDecision{
 			Outcome:   admissionFailed,
@@ -1763,41 +1753,32 @@ func (service Service) admitTask(ctx context.Context, task sqlite.Task, project 
 }
 
 func (service Service) admitDirectTask(ctx context.Context, task sqlite.Task, project sqlite.Project, manifest projects.Manifest) (admissionDecision, error) {
-	if requiresExplicitApproval(manifest) {
-		approval, err := service.latestTaskApproval(ctx, task.ID)
-		if err != nil {
-			return admissionDecision{}, err
-		}
-		switch approval.Status {
-		case "approved":
-		case "pending":
-			return admissionDecision{Outcome: admissionBlocked, BlockedReason: "approval_required"}, nil
-		case "":
-			if _, err := service.Store.RequestApproval(ctx, sqlite.RequestApprovalParams{
-				TaskID:      task.ID,
-				Status:      "pending",
-				RequestedBy: "system",
-			}); err != nil {
-				return admissionDecision{}, err
-			}
-			return admissionDecision{Outcome: admissionBlocked, BlockedReason: "approval_required"}, nil
-		default:
-			return admissionDecision{
-				Outcome:   admissionFailed,
-				LastError: fmt.Sprintf("approval for task %d is %s", task.ID, approval.Status),
-			}, nil
-		}
+	intent := applyManifestExecutionDefaults(manifest, classifyTaskExecutionIntent(task.Title))
+	approvalDecision, required, err := service.evaluateTaskApproval(ctx, task, manifest, intent)
+	if err != nil {
+		return admissionDecision{}, err
+	}
+	if required && approvalDecision.Outcome != admissionDispatchable {
+		return approvalDecision, nil
 	}
 
 	if _, err := service.Transitions.AuthorizeAction(ctx, projects.ActionInput{
 		ProjectID:   project.ID,
 		Actor:       projects.TransitionControllerOdinOS,
-		ActionClass: projects.ActionClassIsolatedMutation,
-		ActionKey:   "run_task",
+		ActionClass: intent.ActionClass,
+		ActionKey:   intent.ActionKey,
 	}); err != nil {
 		return admissionDecision{
 			Outcome:   admissionFailed,
 			LastError: fmt.Sprintf("transition_denied: %v", err),
+		}, nil
+	}
+
+	if intent.Mutating && mutationRequiresIsolatedWorktree(manifest) {
+		return admissionDecision{
+			Outcome:       admissionBlocked,
+			BlockedReason: "mutation_requires_isolated_worktree",
+			LastError:     fmt.Sprintf("policy_denied: project %q requires an isolated task worktree before mutation", manifest.Key),
 		}, nil
 	}
 
@@ -1819,6 +1800,7 @@ func (service Service) prepareRun(ctx context.Context, task sqlite.Task, executo
 }
 
 func (service Service) prepareLease(ctx context.Context, task sqlite.Task, project sqlite.Project, manifest projects.Manifest, run sqlite.Run, attempt int) (leases.Assignment, admissionDecision, error) {
+	intent := applyManifestExecutionDefaults(manifest, classifyTaskExecutionIntent(task.Title))
 	assignment := leases.Assignment{
 		Mode:         "read_only",
 		RepoRoot:     project.GitRoot,
@@ -1830,7 +1812,7 @@ func (service Service) prepareLease(ctx context.Context, task sqlite.Task, proje
 		leaseManager.Store = service.Store
 	}
 	assignment, err := leaseManager.Prepare(ctx, leases.Request{
-		Mutating:      true,
+		Mutating:      intent.Mutating,
 		ProjectID:     project.ID,
 		ProjectKey:    project.Key,
 		TaskID:        task.ID,
@@ -1849,10 +1831,27 @@ func (service Service) prepareLease(ctx context.Context, task sqlite.Task, proje
 		}
 		return leases.Assignment{}, admissionDecision{}, err
 	}
-	if err := validateAssignment(manifest, project, assignment); err != nil {
+	if intent.Mutating {
+		if err := validateAssignment(manifest, project, assignment); err != nil {
+			return leases.Assignment{}, admissionDecision{
+				Outcome:   admissionFailed,
+				LastError: fmt.Sprintf("policy_denied: %v", err),
+			}, nil
+		}
+	}
+	if !intent.Mutating && assignment.Mode == "" {
+		assignment.Mode = "read_only"
+	}
+	if !intent.Mutating && assignment.WorktreePath == "" {
+		assignment.WorktreePath = project.GitRoot
+	}
+	if !intent.Mutating && assignment.RepoRoot == "" {
+		assignment.RepoRoot = project.GitRoot
+	}
+	if intent.Mutating && assignment.WorktreePath == project.GitRoot {
 		return leases.Assignment{}, admissionDecision{
 			Outcome:   admissionFailed,
-			LastError: fmt.Sprintf("policy_denied: %v", err),
+			LastError: fmt.Sprintf("policy_denied: project %q requires an isolated task worktree before mutation", manifest.Key),
 		}, nil
 	}
 	return assignment, admissionDecision{Outcome: admissionDispatchable}, nil
@@ -2312,10 +2311,119 @@ func (service Service) latestTaskApproval(ctx context.Context, taskID int64) (sq
 	return sqlite.Approval{}, err
 }
 
-func requiresExplicitApproval(manifest projects.Manifest) bool {
-	return manifest.SystemProject &&
-		manifest.Policy.ApprovalGates.RequireForSystemProjectChanges != nil &&
-		*manifest.Policy.ApprovalGates.RequireForSystemProjectChanges
+func (service Service) evaluateTaskApproval(ctx context.Context, task sqlite.Task, manifest projects.Manifest, intent executionIntent) (admissionDecision, bool, error) {
+	requirement := projects.ApprovalRequiredForAction(manifest, intent.ActionClass)
+	if !requirement.Required {
+		return admissionDecision{Outcome: admissionDispatchable}, false, nil
+	}
+
+	approval, err := service.latestTaskApproval(ctx, task.ID)
+	if err != nil {
+		return admissionDecision{}, true, err
+	}
+	switch approval.Status {
+	case "approved":
+		return admissionDecision{Outcome: admissionDispatchable}, true, nil
+	case "pending":
+		return admissionDecision{
+			Outcome:       admissionBlocked,
+			BlockedReason: "approval_required",
+			LastError:     requirement.Reason,
+		}, true, nil
+	case "":
+		if _, err := service.Store.RequestApproval(ctx, sqlite.RequestApprovalParams{
+			TaskID:      task.ID,
+			Status:      "pending",
+			RequestedBy: "system",
+		}); err != nil {
+			return admissionDecision{}, true, err
+		}
+		return admissionDecision{
+			Outcome:       admissionBlocked,
+			BlockedReason: "approval_required",
+			LastError:     requirement.Reason,
+		}, true, nil
+	default:
+		return admissionDecision{
+			Outcome:   admissionFailed,
+			LastError: fmt.Sprintf("approval for task %d is %s", task.ID, approval.Status),
+		}, true, nil
+	}
+}
+
+func classifyTaskExecutionIntent(title string) executionIntent {
+	normalized := strings.ToLower(strings.TrimSpace(title))
+	intent := executionIntent{
+		ActionClass: projects.ActionClassReadOnly,
+		ActionKey:   "read_only_task",
+		Reason:      "default_read_only",
+	}
+	if normalized == "" {
+		return intent
+	}
+	if containsAny(normalized, []string{"read-only", "read only", "inspect", "status", "list "}) {
+		intent.Reason = "explicit_read_only"
+		return intent
+	}
+
+	if containsAny(normalized, []string{
+		"delete", "remove", "rm ", " reset ", "git reset", "clean", "force push", "force-push",
+		"drop ", "destroy", "truncate", "wipe", "purge", "destructive",
+	}) {
+		return executionIntent{
+			ActionClass: projects.ActionClassDestructiveMutation,
+			ActionKey:   "run_task",
+			Mutating:    true,
+			Reason:      "destructive_keyword",
+		}
+	}
+	if containsAny(normalized, []string{
+		"governance", "transition", "system project", "_system_", "system_trigger",
+	}) {
+		return executionIntent{
+			ActionClass: projects.ActionClassGovernanceMutation,
+			ActionKey:   "run_task",
+			Mutating:    true,
+			Reason:      "governance_keyword",
+		}
+	}
+	if containsAny(normalized, []string{
+		"modify", "mutate", "mutation", "write", "edit", "change", "update", "create", "add file",
+		"touch ", "apply patch", "commit", "implement ", "fix ", "repair", "refactor",
+	}) {
+		return executionIntent{
+			ActionClass: projects.ActionClassIsolatedMutation,
+			ActionKey:   "run_task",
+			Mutating:    true,
+			Reason:      "mutation_keyword",
+		}
+	}
+	return intent
+}
+
+func applyManifestExecutionDefaults(manifest projects.Manifest, intent executionIntent) executionIntent {
+	if manifest.SystemProject && intent.Reason == "default_read_only" {
+		return executionIntent{
+			ActionClass: projects.ActionClassIsolatedMutation,
+			ActionKey:   "run_task",
+			Mutating:    false,
+			Reason:      "system_project_default_approval_gate",
+		}
+	}
+	return intent
+}
+
+func containsAny(value string, candidates []string) bool {
+	for _, candidate := range candidates {
+		if strings.Contains(value, candidate) {
+			return true
+		}
+	}
+	return false
+}
+
+func mutationRequiresIsolatedWorktree(manifest projects.Manifest) bool {
+	return manifest.Policy.BranchRules.RequireWorktree != nil && *manifest.Policy.BranchRules.RequireWorktree
 }
 
 func validateAssignment(manifest projects.Manifest, project sqlite.Project, assignment leases.Assignment) error {

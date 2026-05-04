@@ -60,10 +60,14 @@ func (service Service) List(ctx context.Context, resolved scope.Resolution) ([]p
 			r.started_at,
 			r.finished_at,
 			p.key,
+			p.git_root,
+			COALESCE(wl.worktree_path, p.git_root),
+			COALESCE(wl.branch_name, p.default_branch),
 			t.scope
 		FROM runs r
 		JOIN tasks t ON t.id = r.task_id
 		JOIN projects p ON p.id = t.project_id
+		LEFT JOIN worktree_leases wl ON wl.run_id = r.id
 		ORDER BY r.id ASC
 	`)
 	if err != nil {
@@ -87,10 +91,14 @@ func (service Service) List(ctx context.Context, resolved scope.Resolution) ([]p
 			&view.StartedAt,
 			&finishedAt,
 			&projectKey,
+			&view.RepoRoot,
+			&view.WorktreePath,
+			&view.BranchName,
 			&taskScope,
 		); err != nil {
 			return nil, err
 		}
+		view.ProjectKey = projectKey
 		if finishedAt.Valid {
 			view.FinishedAt = &finishedAt.String
 		}

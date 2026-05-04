@@ -35,12 +35,16 @@ type JobsView struct {
 }
 
 type RunView struct {
-	RunID    int64  `json:"run_id,omitempty"`
-	TaskID   int64  `json:"task_id,omitempty"`
-	TaskKey  string `json:"task_key"`
-	Executor string `json:"executor"`
-	Status   string `json:"status"`
-	Attempt  int    `json:"attempt,omitempty"`
+	RunID        int64  `json:"run_id,omitempty"`
+	TaskID       int64  `json:"task_id,omitempty"`
+	TaskKey      string `json:"task_key"`
+	ProjectKey   string `json:"project_key,omitempty"`
+	RepoRoot     string `json:"repo_root,omitempty"`
+	WorktreePath string `json:"worktree_path,omitempty"`
+	BranchName   string `json:"branch_name,omitempty"`
+	Executor     string `json:"executor"`
+	Status       string `json:"status"`
+	Attempt      int    `json:"attempt,omitempty"`
 }
 
 type RunsView struct {

@@ -37,14 +37,18 @@ type TaskStatusView struct {
 }
 
 type RunSummaryView struct {
-	RunID      int64
-	TaskID     int64
-	TaskKey    string
-	Executor   string
-	Status     string
-	Attempt    int
-	StartedAt  string
-	FinishedAt *string
+	RunID        int64
+	TaskID       int64
+	TaskKey      string
+	ProjectKey   string
+	RepoRoot     string
+	WorktreePath string
+	BranchName   string
+	Executor     string
+	Status       string
+	Attempt      int
+	StartedAt    string
+	FinishedAt   *string
 }
 
 type PendingApprovalView struct {

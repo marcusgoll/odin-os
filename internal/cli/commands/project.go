@@ -40,6 +40,38 @@ type projectView struct {
 	WorkspaceEligible    bool                        `json:"workspace_eligible"`
 	WorkspaceReason      string                      `json:"workspace_reason,omitempty"`
 	Profile              coreprojects.ProjectProfile `json:"profile"`
+	ExecutionPolicy      projectExecutionPolicyView  `json:"execution_policy"`
+}
+
+type projectExecutionPolicyView struct {
+	AllowedCommands            []string                  `json:"allowed_commands,omitempty"`
+	LimitedActions             []string                  `json:"limited_actions,omitempty"`
+	ReadOnlyAllowed            bool                      `json:"read_only_allowed"`
+	MutationRequiresWorktree   bool                      `json:"mutation_requires_worktree"`
+	MutationRequiresTaskBranch bool                      `json:"mutation_requires_task_branch"`
+	DirectMutationAllowed      bool                      `json:"direct_mutation_allowed"`
+	ProtectedBranches          []string                  `json:"protected_branches,omitempty"`
+	ApprovalGates              projectApprovalGatesView  `json:"approval_gates"`
+	DestructiveOperations      projectDestructiveOpsView `json:"destructive_operations"`
+	MergePolicy                projectMergePolicyView    `json:"merge_policy"`
+}
+
+type projectApprovalGatesView struct {
+	RequireForGovernanceChanges     bool `json:"require_for_governance_changes"`
+	RequireForDestructiveOperations bool `json:"require_for_destructive_operations"`
+	RequireForSystemProjectChanges  bool `json:"require_for_system_project_changes"`
+}
+
+type projectDestructiveOpsView struct {
+	AllowReset              bool `json:"allow_reset"`
+	AllowClean              bool `json:"allow_clean"`
+	AllowForcePush          bool `json:"allow_force_push"`
+	RequireExplicitApproval bool `json:"require_explicit_approval"`
+}
+
+type projectMergePolicyView struct {
+	Mode                       string `json:"mode,omitempty"`
+	AllowDirectToDefaultBranch bool   `json:"allow_direct_to_default_branch"`
 }
 
 func ParseProject(args []string) (ProjectCommand, error) {
@@ -312,7 +344,49 @@ func buildProjectView(ctx context.Context, store *sqlite.Store, manifest corepro
 		WorkspaceEligible:    eligible,
 		WorkspaceReason:      reason,
 		Profile:              coreprojects.DetectProjectProfile(manifest.GitRoot),
+		ExecutionPolicy:      buildProjectExecutionPolicyView(manifest),
 	}, nil
+}
+
+func buildProjectExecutionPolicyView(manifest coreprojects.Manifest) projectExecutionPolicyView {
+	limitedActions := make([]string, 0, len(manifest.Policy.LimitedActions))
+	for key := range manifest.Policy.LimitedActions {
+		limitedActions = append(limitedActions, key)
+	}
+	sort.Strings(limitedActions)
+
+	requireWorktree := boolPointerValue(manifest.Policy.BranchRules.RequireWorktree)
+	requireTaskBranch := boolPointerValue(manifest.Policy.BranchRules.RequireTaskBranch)
+	allowDefaultBranchMutation := boolPointerValue(manifest.Policy.BranchRules.AllowDefaultBranchMutation)
+
+	return projectExecutionPolicyView{
+		AllowedCommands:            append([]string(nil), manifest.Policy.AllowedCommands...),
+		LimitedActions:             limitedActions,
+		ReadOnlyAllowed:            true,
+		MutationRequiresWorktree:   requireWorktree,
+		MutationRequiresTaskBranch: requireTaskBranch,
+		DirectMutationAllowed:      !requireWorktree && allowDefaultBranchMutation,
+		ProtectedBranches:          append([]string(nil), manifest.Policy.BranchRules.ProtectedBranches...),
+		ApprovalGates: projectApprovalGatesView{
+			RequireForGovernanceChanges:     boolPointerValue(manifest.Policy.ApprovalGates.RequireForGovernanceChanges),
+			RequireForDestructiveOperations: boolPointerValue(manifest.Policy.ApprovalGates.RequireForDestructiveOperations),
+			RequireForSystemProjectChanges:  boolPointerValue(manifest.Policy.ApprovalGates.RequireForSystemProjectChanges),
+		},
+		DestructiveOperations: projectDestructiveOpsView{
+			AllowReset:              boolPointerValue(manifest.Policy.DestructiveOperations.AllowReset),
+			AllowClean:              boolPointerValue(manifest.Policy.DestructiveOperations.AllowClean),
+			AllowForcePush:          boolPointerValue(manifest.Policy.DestructiveOperations.AllowForcePush),
+			RequireExplicitApproval: boolPointerValue(manifest.Policy.DestructiveOperations.RequireExplicitApproval),
+		},
+		MergePolicy: projectMergePolicyView{
+			Mode:                       manifest.Policy.MergePolicy.Mode,
+			AllowDirectToDefaultBranch: boolPointerValue(manifest.Policy.MergePolicy.AllowDirectToDefaultBranch),
+		},
+	}
+}
+
+func boolPointerValue(value *bool) bool {
+	return value != nil && *value
 }
 
 func loadProjectTransition(ctx context.Context, store *sqlite.Store, key string) (string, string, error) {
@@ -401,6 +475,9 @@ func renderProjectShow(stdout io.Writer, view projectView) error {
 		"transition_state=" + view.TransitionState,
 		"transition_controller=" + view.TransitionController,
 		fmt.Sprintf("workspace_eligible=%t", view.WorkspaceEligible),
+		fmt.Sprintf("read_only_allowed=%t", view.ExecutionPolicy.ReadOnlyAllowed),
+		fmt.Sprintf("mutation_requires_worktree=%t", view.ExecutionPolicy.MutationRequiresWorktree),
+		fmt.Sprintf("direct_mutation_allowed=%t", view.ExecutionPolicy.DirectMutationAllowed),
 	}
 	if view.Profile.SpecFlowCompatible {
 		lines = append(lines, "spec_flow_compatible=true")

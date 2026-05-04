@@ -1220,7 +1220,7 @@ func TestExecuteNextQueuedKeepsRunPreparingAndReleasesLeaseOnAdmissionFailure(t 
 	task, err := service.CreateTaskFromAct(ctx, scope.Resolution{
 		Kind:       scope.ScopeProject,
 		ProjectKey: "alpha",
-	}, "Admission fails after lease preparation")
+	}, "Modify repo after lease preparation")
 	if err != nil {
 		t.Fatalf("CreateTaskFromAct() error = %v", err)
 	}
@@ -1335,7 +1335,7 @@ func TestExecuteNextQueuedRequeuesWhenFailedDispatchWakePacketCompactionFails(t 
 	task, err := service.CreateTaskFromAct(ctx, scope.Resolution{
 		Kind:       scope.ScopeProject,
 		ProjectKey: "alpha",
-	}, "Admission fails after lease preparation")
+	}, "Modify repo after lease preparation")
 	if err != nil {
 		t.Fatalf("CreateTaskFromAct() error = %v", err)
 	}

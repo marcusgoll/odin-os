@@ -491,12 +491,16 @@ func runRuns(ctx context.Context, app bootstrap.App, args []string, stdout io.Wr
 		runViews := make([]commands.RunView, 0, len(views))
 		for _, view := range views {
 			runViews = append(runViews, commands.RunView{
-				RunID:    view.RunID,
-				TaskID:   view.TaskID,
-				TaskKey:  view.TaskKey,
-				Executor: view.Executor,
-				Status:   view.Status,
-				Attempt:  view.Attempt,
+				RunID:        view.RunID,
+				TaskID:       view.TaskID,
+				TaskKey:      view.TaskKey,
+				ProjectKey:   view.ProjectKey,
+				RepoRoot:     view.RepoRoot,
+				WorktreePath: view.WorktreePath,
+				BranchName:   view.BranchName,
+				Executor:     view.Executor,
+				Status:       view.Status,
+				Attempt:      view.Attempt,
 			})
 		}
 		return commands.WriteJSON(stdout, commands.RunsView{Runs: runViews})

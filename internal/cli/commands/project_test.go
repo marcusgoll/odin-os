@@ -77,6 +77,35 @@ func TestRunProjectShowJSON(t *testing.T) {
 	}
 }
 
+func TestRunProjectShowJSONExposesExecutionPolicy(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openProjectTestStore(t)
+	defer store.Close()
+
+	registry := writeProjectRegistry(t, map[string]string{"alpha": "main"})
+
+	var stdout bytes.Buffer
+	if err := RunProject(ctx, store, registry, []string{"show", "alpha", "--json"}, &stdout); err != nil {
+		t.Fatalf("RunProject(show --json) error = %v", err)
+	}
+
+	output := stdout.String()
+	for _, want := range []string{
+		`"execution_policy":`,
+		`"allowed_commands":`,
+		`"read_only_allowed": true`,
+		`"mutation_requires_worktree": true`,
+		`"direct_mutation_allowed": false`,
+		`"require_for_destructive_operations": true`,
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("show output = %q, want substring %q", output, want)
+		}
+	}
+}
+
 func TestRunProjectShowIncludesSpecFlowProfileEvidence(t *testing.T) {
 	t.Parallel()
 
