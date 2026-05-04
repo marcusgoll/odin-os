@@ -1651,6 +1651,19 @@ func TestRunTriggerMVPUsesLiveOperatorLifecycle(t *testing.T) {
 		return stdout.String()
 	}
 
+	helpOutput := run("trigger", "--help")
+	for _, want := range []string{
+		"Scheduled triggers:",
+		"odin trigger upsert <key> initiative=<project> kind=schedule",
+		"odin trigger evaluate now=<RFC3339>",
+		"Manual trigger fire:",
+		"odin trigger fire <key>",
+	} {
+		if !strings.Contains(helpOutput, want) {
+			t.Fatalf("trigger help output = %s, want %s", helpOutput, want)
+		}
+	}
+
 	run("project", "select", testProjectKey)
 	upsertOutput := run("trigger", "upsert", "daily-review",
 		"initiative="+testProjectKey,
