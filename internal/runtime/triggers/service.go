@@ -227,7 +227,11 @@ func (service Service) IngestGitHubIssue(ctx context.Context, params GitHubIssue
 	if service.Store == nil {
 		return GitHubIssueIngestResult{}, fmt.Errorf("automation trigger store is required")
 	}
+	repo := strings.TrimSpace(params.Repo)
 	projectKey := strings.TrimSpace(params.ProjectKey)
+	if projectKey == "" {
+		projectKey = service.projectKeyForGitHubRepo(repo)
+	}
 	if projectKey == "" {
 		return GitHubIssueIngestResult{}, fmt.Errorf("github issue event project is required")
 	}
@@ -235,7 +239,6 @@ func (service Service) IngestGitHubIssue(ctx context.Context, params GitHubIssue
 	if err != nil {
 		return GitHubIssueIngestResult{}, err
 	}
-	repo := strings.TrimSpace(params.Repo)
 	if repo == "" {
 		repo = strings.TrimSpace(project.GitHubRepo)
 	}
@@ -495,6 +498,19 @@ func (service Service) ensureRuntimeProject(ctx context.Context, key string) (sq
 		GitHubRepo:    manifest.GitHub.Repo,
 		ManifestPath:  manifest.SourcePath,
 	})
+}
+
+func (service Service) projectKeyForGitHubRepo(repo string) string {
+	repo = strings.TrimSpace(repo)
+	if repo == "" {
+		return ""
+	}
+	for _, manifest := range service.Registry.Projects() {
+		if strings.EqualFold(strings.TrimSpace(manifest.GitHub.Repo), repo) {
+			return manifest.Key
+		}
+	}
+	return ""
 }
 
 func (service Service) now() time.Time {

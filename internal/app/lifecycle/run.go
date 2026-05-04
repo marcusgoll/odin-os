@@ -3825,6 +3825,8 @@ func runServe(ctx context.Context, app bootstrap.App, cfg appconfig.Config, stdo
 					RuntimeRoot:       cfg.RuntimeRoot,
 					Logger:            logger,
 				},
+				GitHubWebhookSecret: os.Getenv("ODIN_GITHUB_WEBHOOK_SECRET"),
+				GitHubIssueIngester: triggers.Service{Store: app.Store, Registry: app.Registry},
 			}),
 		}),
 	}

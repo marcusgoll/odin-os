@@ -3,6 +3,9 @@ package lifecycle
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -769,6 +772,149 @@ service:
 	}
 	if output := manualOutput.String(); !strings.Contains(output, `"executed": false`) || !strings.Contains(output, `"reason": "task_not_running"`) {
 		t.Fatalf("manual execute output = %s, want safe non-executing terminal response", output)
+	}
+}
+
+func TestRunServeGitHubIssueWebhookFeedsTriggerIngest(t *testing.T) {
+	root := createRuntimeRoot(t)
+	writeMutableProjectsConfig(t, root)
+	addr := allocateHTTPAddr(t)
+	writeRuntimeConfig(t, root, fmt.Sprintf(`
+version: 1
+runtime:
+  root: .
+service:
+  http_addr: %s
+  startup_recovery: true
+`, addr))
+	t.Setenv("ODIN_GITHUB_WEBHOOK_SECRET", "webhook-secret")
+
+	run := func(args ...string) string {
+		t.Helper()
+		var stdout bytes.Buffer
+		if err := Run(context.Background(), root, args, strings.NewReader(""), &stdout); err != nil {
+			t.Fatalf("Run(%v) error = %v\nstdout=%s", args, err, stdout.String())
+		}
+		return stdout.String()
+	}
+	extractTaskKey := func(output string, prefix string) string {
+		t.Helper()
+		var payload struct {
+			Results []struct {
+				CreatedWorkItem bool `json:"created_work_item"`
+				WorkItem        struct {
+					Key string `json:"key"`
+				} `json:"work_item"`
+			} `json:"results"`
+		}
+		if err := json.Unmarshal([]byte(output), &payload); err != nil {
+			t.Fatalf("json.Unmarshal(trigger evaluate) error = %v\n%s", err, output)
+		}
+		for _, result := range payload.Results {
+			if result.CreatedWorkItem && strings.HasPrefix(result.WorkItem.Key, prefix) {
+				return result.WorkItem.Key
+			}
+		}
+		t.Fatalf("trigger evaluate output = %s, want created task prefix %s", output, prefix)
+		return ""
+	}
+
+	run("project", "select", "alpha")
+	run("transition", "set", "cutover", "confirm", "because", "github webhook proof")
+	run("trigger", "upsert", "github-low",
+		"initiative=alpha",
+		"kind=event",
+		"status=enabled",
+		"event=external.github.issue",
+		"match_status=opened",
+		"match_provider=github",
+		"match_repo=acme/alpha",
+		"title=Review GitHub webhook event",
+		"summary=github_webhook_event",
+		"--json",
+	)
+	run("project", "select", "odin-core")
+	run("transition", "set", "cutover", "confirm", "because", "github webhook approval proof")
+	run("trigger", "upsert", "github-risky",
+		"initiative=odin-core",
+		"kind=event",
+		"status=enabled",
+		"event=external.github.issue",
+		"match_status=opened",
+		"match_provider=github",
+		"match_repo=acme/odin-core",
+		"title=Review risky GitHub webhook event",
+		"summary=github_webhook_risky_event",
+		"--json",
+	)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	ctx = withServeLoopConfig(ctx, serveLoopConfig{
+		taskInterval:   20 * time.Millisecond,
+		healthInterval: 20 * time.Millisecond,
+	})
+	defer cancel()
+	runErr := make(chan error, 1)
+	go func() {
+		runErr <- Run(ctx, root, []string{"serve"}, strings.NewReader(""), io.Discard)
+	}()
+	if err := waitForServeHealthStatus(ctx, "http://"+addr, http.StatusOK, "degraded", "/healthz"); err != nil {
+		t.Fatal(err)
+	}
+
+	lowBody := []byte(`{"action":"opened","repository":{"full_name":"acme/alpha"},"issue":{"number":77,"title":"Low risk GitHub issue","body":"prepare release checklist","html_url":"https://github.example/acme/alpha/issues/77"}}`)
+	if status, body := postGitHubWebhook(t, "http://"+addr+"/webhooks/github/issues", lowBody, "bad-secret"); status != http.StatusUnauthorized {
+		t.Fatalf("invalid signature status=%d body=%s, want %d", status, body, http.StatusUnauthorized)
+	}
+	if status, body := postGitHubWebhook(t, "http://"+addr+"/webhooks/github/issues", lowBody, "webhook-secret"); status != http.StatusAccepted {
+		t.Fatalf("webhook status=%d body=%s, want %d", status, body, http.StatusAccepted)
+	} else if !strings.Contains(body, `"external_event_key":"github:issue:acme/alpha:77:opened"`) {
+		t.Fatalf("webhook body=%s, want stable external event key", body)
+	}
+	lowEvaluate := run("trigger", "evaluate", "source=events", "--json")
+	lowTaskKey := extractTaskKey(lowEvaluate, "automation-github-low-")
+	if !strings.Contains(lowEvaluate, `"materialization_key": "default:github-low:event:external-github-issue-acme-alpha-77-opened"`) {
+		t.Fatalf("low-risk evaluate output = %s, want webhook materialization key", lowEvaluate)
+	}
+	if status, body := postGitHubWebhook(t, "http://"+addr+"/webhooks/github/issues", lowBody, "webhook-secret"); status != http.StatusAccepted {
+		t.Fatalf("webhook replay status=%d body=%s, want %d", status, body, http.StatusAccepted)
+	}
+	replayEvaluate := run("trigger", "evaluate", "source=events", "--json")
+	if !strings.Contains(replayEvaluate, `"materialized": 0`) || !strings.Contains(replayEvaluate, lowTaskKey) {
+		t.Fatalf("replay evaluate output = %s, want duplicate delivery suppressed", replayEvaluate)
+	}
+
+	riskyBody := []byte(`{"action":"opened","repository":{"full_name":"acme/odin-core"},"issue":{"number":9,"title":"Governance mutation request","body":"change system policy","html_url":"https://github.example/acme/odin-core/issues/9"}}`)
+	if status, body := postGitHubWebhook(t, "http://"+addr+"/webhooks/github/issues?project=odin-core", riskyBody, "webhook-secret"); status != http.StatusAccepted {
+		t.Fatalf("risky webhook status=%d body=%s, want %d", status, body, http.StatusAccepted)
+	}
+	riskyEvaluate := run("trigger", "evaluate", "source=events", "--json")
+	riskyTaskKey := extractTaskKey(riskyEvaluate, "automation-github-risky-")
+	dispatch := run("work", "dispatch", "--task", riskyTaskKey, "--json")
+	if !strings.Contains(dispatch, `"reason": "approval_required"`) || !strings.Contains(dispatch, `"status": "blocked"`) {
+		t.Fatalf("risky dispatch output = %s, want approval gate", dispatch)
+	}
+	logs := run("logs", "--json")
+	for _, want := range []string{
+		`"type": "external.github.issue"`,
+		`"external_event_key": "github:issue:acme/odin-core:9:opened"`,
+		`"type": "automation_trigger.materialized"`,
+		`"source_event_type": "external.github.issue"`,
+		`"type": "approval.requested"`,
+	} {
+		if !strings.Contains(logs, want) {
+			t.Fatalf("logs output = %s, want %s", logs, want)
+		}
+	}
+	approvals := run("approvals", "all", "--json")
+	if !strings.Contains(approvals, `"status": "pending"`) || !strings.Contains(approvals, riskyTaskKey) {
+		t.Fatalf("approvals output = %s, want pending risky webhook approval", approvals)
+	}
+
+	cancel()
+	err := <-runErr
+	if err != nil && !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run(serve) error = %v", err)
 	}
 }
 
@@ -1839,6 +1985,35 @@ func waitForServeHealthStatus(ctx context.Context, baseURL string, wantCode int,
 			}
 		}
 	}
+}
+
+func postGitHubWebhook(t *testing.T, endpoint string, body []byte, secret string) (int, string) {
+	t.Helper()
+
+	request, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("NewRequest() error = %v", err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-GitHub-Event", "issues")
+	request.Header.Set("X-GitHub-Delivery", "test-delivery")
+	request.Header.Set("X-Hub-Signature-256", "sha256="+signGitHubWebhookBody(body, secret))
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatalf("POST webhook error = %v", err)
+	}
+	defer response.Body.Close()
+	content, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatalf("ReadAll(webhook response) error = %v", err)
+	}
+	return response.StatusCode, string(content)
+}
+
+func signGitHubWebhookBody(body []byte, secret string) string {
+	mac := hmac.New(sha256.New, []byte(secret))
+	_, _ = mac.Write(body)
+	return hex.EncodeToString(mac.Sum(nil))
 }
 
 func assertLifecycleSequence(t *testing.T, statuses []string, want []string) {
