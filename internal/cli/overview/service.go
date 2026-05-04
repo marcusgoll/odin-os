@@ -96,6 +96,7 @@ type WorkItemSummary struct {
 	Title                 string              `json:"title"`
 	Status                string              `json:"status"`
 	Scope                 string              `json:"scope"`
+	BlockedReason         string              `json:"blocked_reason,omitempty"`
 	ExecutionIntent       string              `json:"execution_intent,omitempty"`
 	ExecutionIntentSource string              `json:"execution_intent_source,omitempty"`
 	CurrentRunID          *int64              `json:"current_run_id"`
@@ -689,6 +690,7 @@ func (service Service) Build(ctx context.Context, resolved scope.Resolution) (Vi
 			Title:                 task.Title,
 			Status:                task.Status,
 			Scope:                 task.Scope,
+			BlockedReason:         task.BlockedReason,
 			ExecutionIntent:       task.ExecutionIntent,
 			ExecutionIntentSource: task.ExecutionIntentSource,
 			CurrentRunID:          task.CurrentRunID,

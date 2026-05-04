@@ -178,6 +178,9 @@ func runWorkDispatch(ctx context.Context, store *sqlite.Store, projectRegistry p
 		err     error
 	)
 	taskRef := strings.TrimSpace(params["task"])
+	if _, ok := params["task"]; ok && taskRef == "" {
+		return fmt.Errorf("usage: odin work dispatch --task <id|key> [--json]")
+	}
 	if taskRef == "" {
 		outcome, err = jobService.DispatchNextRunAttempt(ctx)
 	} else {

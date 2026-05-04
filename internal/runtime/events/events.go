@@ -394,14 +394,16 @@ type IntakeItemCreatedPayload struct {
 }
 
 type IntakeProcessingPayload struct {
-	IntakeItemID       int64  `json:"intake_item_id"`
-	Status             string `json:"status,omitempty"`
-	Stage              string `json:"stage"`
-	Result             string `json:"result,omitempty"`
-	RoutedOutcome      string `json:"routed_outcome,omitempty"`
-	CanonicalIntakeID  *int64 `json:"canonical_intake_id,omitempty"`
-	DraftArtifactKind  string `json:"draft_artifact_kind,omitempty"`
-	ClarificationState string `json:"clarification_state,omitempty"`
+	IntakeItemID          int64  `json:"intake_item_id"`
+	Status                string `json:"status,omitempty"`
+	Stage                 string `json:"stage"`
+	Result                string `json:"result,omitempty"`
+	RoutedOutcome         string `json:"routed_outcome,omitempty"`
+	ExecutionIntent       string `json:"execution_intent,omitempty"`
+	ExecutionIntentSource string `json:"execution_intent_source,omitempty"`
+	CanonicalIntakeID     *int64 `json:"canonical_intake_id,omitempty"`
+	DraftArtifactKind     string `json:"draft_artifact_kind,omitempty"`
+	ClarificationState    string `json:"clarification_state,omitempty"`
 }
 
 type IntakeReviewDecisionPayload struct {

@@ -875,14 +875,18 @@ type intakeDedupeReview struct {
 }
 
 type intakeRoutingResult struct {
-	Outcome    string `json:"outcome"`
-	ProjectKey string `json:"project_key,omitempty"`
+	Outcome               string `json:"outcome"`
+	ProjectKey            string `json:"project_key,omitempty"`
+	ExecutionIntent       string `json:"execution_intent,omitempty"`
+	ExecutionIntentSource string `json:"execution_intent_source,omitempty"`
 }
 
 type intakeDraftArtifact struct {
-	Kind        string `json:"kind"`
-	Title       string `json:"title"`
-	ReviewState string `json:"review_state"`
+	Kind                  string `json:"kind"`
+	Title                 string `json:"title"`
+	ReviewState           string `json:"review_state"`
+	ExecutionIntent       string `json:"execution_intent,omitempty"`
+	ExecutionIntentSource string `json:"execution_intent_source,omitempty"`
 }
 
 type intakeClarification struct {
@@ -1398,7 +1402,7 @@ func runIntakeReviewDecision(ctx context.Context, app bootstrap.App, command com
 			summary = "Duplicate raw intake acknowledged; no duplicate work item created"
 			break
 		}
-		if item.Status != "review_required" || notes.DraftArtifact == nil || notes.DraftArtifact.Kind != "draft_task" {
+		if item.Status != "review_required" || !isAcceptableIntakeDraftArtifact(notes.DraftArtifact) {
 			return fmt.Errorf("intake %s cannot be accepted into work from status %s", rawIntakeKey(item.ID), item.Status)
 		}
 		policy := intakePromotionPolicy(item)
@@ -1527,6 +1531,7 @@ func createTaskFromReviewedIntake(ctx context.Context, app bootstrap.App, item s
 			SystemProject: manifest.SystemProject,
 		},
 	})
+	intent := intakeExecutionIntentForTask(item)
 	result, err := jobs.Service{
 		Store:       app.Store,
 		Registry:    app.Registry,
@@ -1537,8 +1542,8 @@ func createTaskFromReviewedIntake(ctx context.Context, app bootstrap.App, item s
 		Title:                 item.Subject,
 		RequestedBy:           "intake_review:" + rawIntakeKey(item.ID),
 		Key:                   reviewedIntakeWorkItemKey(item.ID),
-		ExecutionIntent:       "read_only",
-		ExecutionIntentSource: "intake",
+		ExecutionIntent:       intent.ExecutionIntent,
+		ExecutionIntentSource: intent.ExecutionIntentSource,
 	})
 	return result.Task, result.Created, err
 }
@@ -1554,6 +1559,16 @@ type intakePromotionPolicyDecision struct {
 }
 
 func intakePromotionPolicy(item sqlite.IntakeItem) intakePromotionPolicyDecision {
+	intent := intakeExecutionIntentForTask(item)
+	switch intent.ExecutionIntent {
+	case "governance", "destructive":
+		return intakePromotionPolicyDecision{
+			ApprovalRequired: true,
+			Decision:         "approval_required",
+			Reason:           "intake_intent_requires_operator_approval",
+		}
+	}
+
 	text := strings.ToLower(strings.Join([]string{item.Subject, item.Summary, item.SourceFactsJSON}, " "))
 	for _, marker := range []string{"delete", "production", "prod", "credential", "secret", "payment", "deploy"} {
 		if strings.Contains(text, marker) {
@@ -1569,6 +1584,53 @@ func intakePromotionPolicy(item sqlite.IntakeItem) intakePromotionPolicyDecision
 		Decision:         "direct_work_allowed",
 		Reason:           "low_risk_review_acceptance",
 	}
+}
+
+type intakeDerivedRoute struct {
+	RoutingOutcome        string
+	DraftArtifactKind     string
+	ExecutionIntent       string
+	ExecutionIntentSource string
+}
+
+func intakeExecutionIntentForTask(item sqlite.IntakeItem) intakeDerivedRoute {
+	notes, err := intakeNotesFromItem(item)
+	if err == nil {
+		if intent := strings.TrimSpace(notes.Routing.ExecutionIntent); intent != "" {
+			source := strings.TrimSpace(notes.Routing.ExecutionIntentSource)
+			if source == "" {
+				source = "intake_type:" + normalizedIntakeType(item.EventKind)
+			}
+			return intakeDerivedRoute{
+				ExecutionIntent:       intent,
+				ExecutionIntentSource: source,
+			}
+		}
+		if notes.DraftArtifact != nil {
+			if intent := strings.TrimSpace(notes.DraftArtifact.ExecutionIntent); intent != "" {
+				source := strings.TrimSpace(notes.DraftArtifact.ExecutionIntentSource)
+				if source == "" {
+					source = "intake_type:" + normalizedIntakeType(item.EventKind)
+				}
+				return intakeDerivedRoute{
+					ExecutionIntent:       intent,
+					ExecutionIntentSource: source,
+				}
+			}
+		}
+	}
+	route := deriveIntakeRoute(item)
+	return intakeDerivedRoute{
+		ExecutionIntent:       route.ExecutionIntent,
+		ExecutionIntentSource: route.ExecutionIntentSource,
+	}
+}
+
+func isAcceptableIntakeDraftArtifact(artifact *intakeDraftArtifact) bool {
+	if artifact == nil {
+		return false
+	}
+	return strings.HasPrefix(strings.TrimSpace(artifact.Kind), "draft_")
 }
 
 func intakeNotesFromItem(item sqlite.IntakeItem) (intakeProcessingNotes, error) {
@@ -1644,19 +1706,60 @@ func buildIntakeProcessOutcome(ctx context.Context, store *sqlite.Store, item sq
 		return outcome, nil
 	}
 
-	notes.Routing = intakeRoutingResult{Outcome: "draft_task", ProjectKey: item.ScopeKey}
+	route := deriveIntakeRoute(item)
+	notes.Routing = intakeRoutingResult{
+		Outcome:               route.RoutingOutcome,
+		ProjectKey:            item.ScopeKey,
+		ExecutionIntent:       route.ExecutionIntent,
+		ExecutionIntentSource: route.ExecutionIntentSource,
+	}
 	notes.DraftArtifact = &intakeDraftArtifact{
-		Kind:        "draft_task",
-		Title:       item.Subject,
-		ReviewState: "review_required",
+		Kind:                  route.DraftArtifactKind,
+		Title:                 item.Subject,
+		ReviewState:           "review_required",
+		ExecutionIntent:       route.ExecutionIntent,
+		ExecutionIntentSource: route.ExecutionIntentSource,
 	}
 	outcome := intakeProcessOutcome{
 		status:  "review_required",
-		summary: "Draft task prepared for human review; no work item created",
+		summary: route.DraftArtifactKind + " prepared for human review; no work item created",
 		notes:   notes,
 	}
 	outcome.events = intakeProcessingEvents(item.ID, outcome.status, notes, nil)
 	return outcome, nil
+}
+
+func deriveIntakeRoute(item sqlite.IntakeItem) intakeDerivedRoute {
+	intakeType := normalizedIntakeType(item.EventKind)
+	source := "intake_type:" + intakeType
+	switch intakeType {
+	case "research":
+		return intakeDerivedRoute{RoutingOutcome: "draft_research", DraftArtifactKind: "draft_research", ExecutionIntent: "read_only", ExecutionIntentSource: source}
+	case "writing":
+		return intakeDerivedRoute{RoutingOutcome: "draft_document", DraftArtifactKind: "draft_document", ExecutionIntent: "mutation", ExecutionIntentSource: source}
+	case "admin":
+		return intakeDerivedRoute{RoutingOutcome: "draft_admin_task", DraftArtifactKind: "draft_admin_task", ExecutionIntent: "mutation", ExecutionIntentSource: source}
+	case "bug", "incident":
+		return intakeDerivedRoute{RoutingOutcome: "draft_incident_review", DraftArtifactKind: "draft_incident_review", ExecutionIntent: "read_only", ExecutionIntentSource: source}
+	case "governance":
+		return intakeDerivedRoute{RoutingOutcome: "draft_policy_change", DraftArtifactKind: "draft_policy_change", ExecutionIntent: "governance", ExecutionIntentSource: source}
+	case "destructive":
+		return intakeDerivedRoute{RoutingOutcome: "draft_destructive_action", DraftArtifactKind: "draft_destructive_action", ExecutionIntent: "destructive", ExecutionIntentSource: source}
+	default:
+		return intakeDerivedRoute{RoutingOutcome: "draft_task", DraftArtifactKind: "draft_task", ExecutionIntent: "read_only", ExecutionIntentSource: source}
+	}
+}
+
+func normalizedIntakeType(value string) string {
+	normalized := strings.ToLower(strings.TrimSpace(value))
+	switch normalized {
+	case "bug/incident", "bug_incident", "incident":
+		return "incident"
+	case "":
+		return "request"
+	default:
+		return normalized
+	}
 }
 
 func classifyIntakeItem(item sqlite.IntakeItem) intakeClassification {
@@ -1709,10 +1812,12 @@ func intakeProcessingEvents(itemID int64, status string, notes intakeProcessingN
 			Stage:  "routing",
 			Result: notes.Routing.Outcome,
 			Payload: runtimeevents.IntakeProcessingPayload{
-				IntakeItemID:  itemID,
-				Status:        status,
-				Stage:         "routing",
-				RoutedOutcome: notes.Routing.Outcome,
+				IntakeItemID:          itemID,
+				Status:                status,
+				Stage:                 "routing",
+				RoutedOutcome:         notes.Routing.Outcome,
+				ExecutionIntent:       notes.Routing.ExecutionIntent,
+				ExecutionIntentSource: notes.Routing.ExecutionIntentSource,
 			},
 		},
 	}
@@ -1723,11 +1828,13 @@ func intakeProcessingEvents(itemID int64, status string, notes intakeProcessingN
 			Stage:  "draft_artifact",
 			Result: notes.DraftArtifact.Kind,
 			Payload: runtimeevents.IntakeProcessingPayload{
-				IntakeItemID:      itemID,
-				Status:            status,
-				Stage:             "draft_artifact",
-				RoutedOutcome:     notes.Routing.Outcome,
-				DraftArtifactKind: notes.DraftArtifact.Kind,
+				IntakeItemID:          itemID,
+				Status:                status,
+				Stage:                 "draft_artifact",
+				RoutedOutcome:         notes.Routing.Outcome,
+				ExecutionIntent:       notes.Routing.ExecutionIntent,
+				ExecutionIntentSource: notes.Routing.ExecutionIntentSource,
+				DraftArtifactKind:     notes.DraftArtifact.Kind,
 			},
 		})
 	case notes.Clarification != nil:
@@ -1736,11 +1843,13 @@ func intakeProcessingEvents(itemID int64, status string, notes intakeProcessingN
 			Stage:  "clarification",
 			Result: notes.Clarification.State,
 			Payload: runtimeevents.IntakeProcessingPayload{
-				IntakeItemID:       itemID,
-				Status:             status,
-				Stage:              "clarification",
-				RoutedOutcome:      notes.Routing.Outcome,
-				ClarificationState: notes.Clarification.State,
+				IntakeItemID:          itemID,
+				Status:                status,
+				Stage:                 "clarification",
+				RoutedOutcome:         notes.Routing.Outcome,
+				ExecutionIntent:       notes.Routing.ExecutionIntent,
+				ExecutionIntentSource: notes.Routing.ExecutionIntentSource,
+				ClarificationState:    notes.Clarification.State,
 			},
 		})
 	case canonical != nil:
@@ -1749,11 +1858,13 @@ func intakeProcessingEvents(itemID int64, status string, notes intakeProcessingN
 			Stage:  "duplicate",
 			Result: notes.Dedupe.Result,
 			Payload: runtimeevents.IntakeProcessingPayload{
-				IntakeItemID:      itemID,
-				Status:            status,
-				Stage:             "duplicate",
-				RoutedOutcome:     notes.Routing.Outcome,
-				CanonicalIntakeID: canonical,
+				IntakeItemID:          itemID,
+				Status:                status,
+				Stage:                 "duplicate",
+				RoutedOutcome:         notes.Routing.Outcome,
+				ExecutionIntent:       notes.Routing.ExecutionIntent,
+				ExecutionIntentSource: notes.Routing.ExecutionIntentSource,
+				CanonicalIntakeID:     canonical,
 			},
 		})
 	}

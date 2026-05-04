@@ -167,6 +167,35 @@ func TestBuildReturnsCanonicalOverviewFromCurrentAuthority(t *testing.T) {
 	}
 }
 
+func TestBuildWorkItemsExposeBlockedReason(t *testing.T) {
+	ctx := context.Background()
+	env := newOverviewTestEnvironment(t)
+	if _, err := env.store.UpdateTaskQueueState(ctx, sqlite.UpdateTaskQueueStateParams{
+		TaskID:         env.taskID,
+		Status:         "blocked",
+		NextEligibleAt: time.Time{},
+		Priority:       100,
+		MaxAttempts:    3,
+		BlockedReason:  "mutation_requires_isolated_worktree",
+	}); err != nil {
+		t.Fatalf("UpdateTaskQueueState() error = %v", err)
+	}
+
+	view, err := Service{
+		Store:            env.store,
+		RegistrySnapshot: env.snapshot,
+	}.Build(ctx, scope.Resolution{Kind: scope.ScopeGlobal})
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+	if len(view.WorkItems) != 1 {
+		t.Fatalf("Work items len = %d, want 1", len(view.WorkItems))
+	}
+	if view.WorkItems[0].BlockedReason != "mutation_requires_isolated_worktree" {
+		t.Fatalf("Work item blocked reason = %q, want mutation_requires_isolated_worktree", view.WorkItems[0].BlockedReason)
+	}
+}
+
 func TestBuildIncludesRegistryInitiativesWithoutRuntimeRows(t *testing.T) {
 	ctx := context.Background()
 	store, err := sqlite.Open(filepath.Join(t.TempDir(), "odin.db"))
@@ -633,7 +662,6 @@ func newOverviewTestEnvironment(t *testing.T) overviewTestEnvironment {
 	if err != nil {
 		t.Fatalf("CreateTask() error = %v", err)
 	}
-
 	run, err := store.StartRun(ctx, sqlite.StartRunParams{
 		TaskID:   task.ID,
 		Executor: "codex",

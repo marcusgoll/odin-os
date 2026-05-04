@@ -573,6 +573,72 @@ func TestRunIntakeProcessCreatesReviewStatesWithoutExecution(t *testing.T) {
 	}
 }
 
+func TestRunIntakeProcessDerivesTypeSpecificRoutingAndIntent(t *testing.T) {
+	t.Parallel()
+
+	root := testRepoRoot(t)
+	payloadPath := filepath.Join(t.TempDir(), "payload.json")
+	if err := os.WriteFile(payloadPath, []byte(`{"body":"typed intake proof"}`), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	createRaw := func(title, intakeType string) {
+		t.Helper()
+		if err := Run(context.Background(), root, []string{
+			"intake", "raw", "create",
+			"--source", "operator",
+			"--project", "odin-core",
+			"--title", title,
+			"--type", intakeType,
+			"--dedup-key", "typed-" + intakeType,
+			"--requested-by", "codex",
+			"--payload-file", payloadPath,
+			"--json",
+		}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+			t.Fatalf("Run(intake raw create %s) error = %v", intakeType, err)
+		}
+	}
+
+	cases := []struct {
+		title        string
+		intakeType   string
+		wantRoute    string
+		wantArtifact string
+		wantIntent   string
+	}{
+		{title: "Research release readiness constraints", intakeType: "research", wantRoute: "draft_research", wantArtifact: "draft_research", wantIntent: "read_only"},
+		{title: "Draft operator release note", intakeType: "writing", wantRoute: "draft_document", wantArtifact: "draft_document", wantIntent: "mutation"},
+		{title: "Organize project triage queue", intakeType: "admin", wantRoute: "draft_admin_task", wantArtifact: "draft_admin_task", wantIntent: "mutation"},
+		{title: "Investigate import incident", intakeType: "bug", wantRoute: "draft_incident_review", wantArtifact: "draft_incident_review", wantIntent: "read_only"},
+		{title: "Review approval boundary", intakeType: "governance", wantRoute: "draft_policy_change", wantArtifact: "draft_policy_change", wantIntent: "governance"},
+		{title: "Clear cache artifact", intakeType: "destructive", wantRoute: "draft_destructive_action", wantArtifact: "draft_destructive_action", wantIntent: "destructive"},
+	}
+
+	for _, tc := range cases {
+		createRaw(tc.title, tc.intakeType)
+	}
+
+	for i, tc := range cases {
+		id := fmt.Sprintf("intake-%d", i+1)
+		var output bytes.Buffer
+		if err := Run(context.Background(), root, []string{"intake", "process", "--id", id, "--json"}, strings.NewReader(""), &output); err != nil {
+			t.Fatalf("Run(intake process %s) error = %v", id, err)
+		}
+		for _, want := range []string{
+			`"intake_type": "` + tc.intakeType + `"`,
+			`"routed_outcome": "` + tc.wantRoute + `"`,
+			`"outcome": "` + tc.wantRoute + `"`,
+			`"kind": "` + tc.wantArtifact + `"`,
+			`"execution_intent": "` + tc.wantIntent + `"`,
+			`"execution_intent_source": "intake_type:` + tc.intakeType + `"`,
+		} {
+			if !strings.Contains(output.String(), want) {
+				t.Fatalf("process output for %s = %s, want %s", tc.intakeType, output.String(), want)
+			}
+		}
+	}
+}
+
 func TestRunIntakeReviewPromotesOnlyOnOperatorAccept(t *testing.T) {
 	t.Parallel()
 
@@ -882,6 +948,88 @@ func TestRunIntakeReviewAcceptRequiresApprovalForRiskyIntake(t *testing.T) {
 	}
 	if output := workStatusOutput.String(); !strings.Contains(output, "work_items=1") || !strings.Contains(output, "intake_approval_required_items=1") {
 		t.Fatalf("work status output = %s, want approval-required intake count", output)
+	}
+}
+
+func TestRunIntakePromotionPersistsDerivedGovernanceIntent(t *testing.T) {
+	t.Parallel()
+
+	root := testRepoRoot(t)
+	run := func(args ...string) string {
+		t.Helper()
+		var stdout bytes.Buffer
+		if err := Run(context.Background(), root, args, strings.NewReader(""), &stdout); err != nil {
+			t.Fatalf("Run(%v) error = %v\nstdout=%s", args, err, stdout.String())
+		}
+		return stdout.String()
+	}
+
+	run("project", "select", testProjectKey)
+	run("transition", "set", "cutover", "confirm", "because", "intake governance intent proof")
+	run(
+		"intake", "raw", "create",
+		"--source", "operator",
+		"--project", testProjectKey,
+		"--title", "Review approval boundary",
+		"--type", "governance",
+		"--dedup-key", "governance-intent",
+		"--requested-by", "codex",
+		"--json",
+	)
+	processOutput := run("intake", "process", "--id", "intake-1", "--json")
+	for _, want := range []string{
+		`"routed_outcome": "draft_policy_change"`,
+		`"execution_intent": "governance"`,
+		`"execution_intent_source": "intake_type:governance"`,
+	} {
+		if !strings.Contains(processOutput, want) {
+			t.Fatalf("process output = %s, want %s", processOutput, want)
+		}
+	}
+
+	reviewOutput := run("intake", "review", "accept", "intake-1", "--json")
+	if !strings.Contains(reviewOutput, `"approval_required": true`) || !strings.Contains(reviewOutput, `"policy_reason": "intake_intent_requires_operator_approval"`) {
+		t.Fatalf("review output = %s, want approval required from intake-derived governance intent", reviewOutput)
+	}
+	approveOutput := run("intake", "approval", "approve", "intake-1", "--json")
+	if !strings.Contains(approveOutput, `"work_item"`) || !strings.Contains(approveOutput, `"key": "intake-review-1"`) {
+		t.Fatalf("approve output = %s, want linked work item", approveOutput)
+	}
+
+	jobsOutput := run("jobs", "--json")
+	for _, want := range []string{
+		`"task_key": "intake-review-1"`,
+		`"execution_intent": "governance"`,
+		`"execution_intent_source": "intake_type:governance"`,
+	} {
+		if !strings.Contains(jobsOutput, want) {
+			t.Fatalf("jobs output = %s, want %s", jobsOutput, want)
+		}
+	}
+
+	dispatchOutput := run("work", "dispatch", "--task", "intake-review-1", "--json")
+	for _, want := range []string{
+		`"dispatched": false`,
+		`"reason": "approval_required"`,
+		`"status": "blocked"`,
+		`"execution_intent": "governance"`,
+		`"execution_intent_source": "intake_type:governance"`,
+	} {
+		if !strings.Contains(dispatchOutput, want) {
+			t.Fatalf("dispatch output = %s, want %s", dispatchOutput, want)
+		}
+	}
+
+	logsOutput := run("logs", "--json")
+	for _, want := range []string{
+		`"type": "intake.review_approval_required"`,
+		`"type": "task.created"`,
+		`"execution_intent": "governance"`,
+		`"execution_intent_source": "intake_type:governance"`,
+	} {
+		if !strings.Contains(logsOutput, want) {
+			t.Fatalf("logs output = %s, want %s", logsOutput, want)
+		}
 	}
 }
 
@@ -1635,6 +1783,42 @@ func TestRunWorkDispatchCreatesRunAttemptFromAcceptedIntake(t *testing.T) {
 		if !strings.Contains(statusOutput.String(), want) {
 			t.Fatalf("work status output = %s, want %s", statusOutput.String(), want)
 		}
+	}
+}
+
+func TestRunWorkDispatchFailsClosedForEmptyTaskArgument(t *testing.T) {
+	t.Parallel()
+
+	root := testRepoRoot(t)
+	run := func(args ...string) string {
+		t.Helper()
+		var stdout bytes.Buffer
+		if err := Run(context.Background(), root, args, strings.NewReader(""), &stdout); err != nil {
+			t.Fatalf("Run(%v) error = %v\nstdout=%s", args, err, stdout.String())
+		}
+		return stdout.String()
+	}
+
+	run("project", "select", testProjectKey)
+	run("transition", "set", "cutover", "confirm", "because", "empty dispatch task proof")
+	run("work", "start", "--project", testProjectKey, "--title", "Neutral status proof", "--intent", "read_only")
+
+	var dispatchOutput bytes.Buffer
+	err := Run(context.Background(), root, []string{"work", "dispatch", "--task", "", "--json"}, strings.NewReader(""), &dispatchOutput)
+	if err == nil {
+		t.Fatalf("Run(work dispatch --task empty) error = nil output=%s, want fail-closed usage error", dispatchOutput.String())
+	}
+	if !strings.Contains(err.Error(), "usage: odin work dispatch --task <id|key> [--json]") {
+		t.Fatalf("Run(work dispatch --task empty) error = %v, want usage error", err)
+	}
+
+	jobsOutput := run("jobs", "--json")
+	if !strings.Contains(jobsOutput, `"status": "queued"`) || strings.Contains(jobsOutput, `"status": "running"`) {
+		t.Fatalf("jobs output = %s, want queued task untouched by empty dispatch", jobsOutput)
+	}
+	runsOutput := run("runs", "--json")
+	if !strings.Contains(runsOutput, `"runs": []`) {
+		t.Fatalf("runs output = %s, want no run from empty dispatch", runsOutput)
 	}
 }
 
