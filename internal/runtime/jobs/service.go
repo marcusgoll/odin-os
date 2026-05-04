@@ -710,24 +710,16 @@ type retryPolicyDecision struct {
 }
 
 func evaluateRetryPolicy(task sqlite.Task) retryPolicyDecision {
-	if task.MaxAttempts <= 1 {
-		return retryPolicyDecision{
-			decision:               "retry_blocked_non_retryable",
-			retryEligible:          false,
-			recoveryRecommendation: "Open a follow-up or change task policy before retrying; this task is marked non-retryable.",
-		}
-	}
-	if task.RetryCount+1 >= task.MaxAttempts {
-		return retryPolicyDecision{
-			decision:               "retry_blocked_max_attempts",
-			retryEligible:          false,
-			recoveryRecommendation: "Open a follow-up or adjust the task before retrying; max attempts reached.",
-		}
-	}
+	guidance := recovery.RetryGuidanceForTask(recovery.RetryGuidanceInput{
+		RetryCount:  task.RetryCount,
+		MaxAttempts: task.MaxAttempts,
+		WorkKind:    task.WorkKind,
+		RequestedBy: task.RequestedBy,
+	})
 	return retryPolicyDecision{
-		decision:               "retry_allowed",
-		retryEligible:          true,
-		recoveryRecommendation: "Retry is allowed; dispatch the queued task to create the next run attempt.",
+		decision:               guidance.Decision,
+		retryEligible:          guidance.RetryEligible,
+		recoveryRecommendation: guidance.RecoveryRecommendation,
 	}
 }
 
@@ -1892,7 +1884,7 @@ func (service Service) finalizeOutcome(ctx context.Context, task sqlite.Task, ru
 		if isTransientFailure(execErr) {
 			artifactsJSON := service.failureAnalysisArtifact(task, "codex_run", execErr.Error(), task.RetryCount+1)
 			if task.RetryCount+1 >= task.MaxAttempts {
-				_, _, err := service.Store.FinishRunAndSetTaskStatus(ctx, sqlite.FinishRunAndSetTaskStatusParams{
+				failedTask, _, err := service.Store.FinishRunAndSetTaskStatus(ctx, sqlite.FinishRunAndSetTaskStatusParams{
 					RunID:         run.ID,
 					RunStatus:     "failed",
 					Summary:       execErr.Error(),
@@ -1900,6 +1892,9 @@ func (service Service) finalizeOutcome(ctx context.Context, task sqlite.Task, ru
 					TaskStatus:    "failed",
 				})
 				if err != nil {
+					return err
+				}
+				if err := service.recordTaskRecoveryRecommendation(ctx, failedTask); err != nil {
 					return err
 				}
 				return execErr
@@ -1917,7 +1912,7 @@ func (service Service) finalizeOutcome(ctx context.Context, task sqlite.Task, ru
 		}
 
 		artifactsJSON := service.failureAnalysisArtifact(task, "codex_run", execErr.Error(), task.RetryCount)
-		_, _, err := service.Store.FinishRunAndSetTaskStatus(ctx, sqlite.FinishRunAndSetTaskStatusParams{
+		failedTask, _, err := service.Store.FinishRunAndSetTaskStatus(ctx, sqlite.FinishRunAndSetTaskStatusParams{
 			RunID:         run.ID,
 			RunStatus:     "failed",
 			Summary:       execErr.Error(),
@@ -1925,6 +1920,9 @@ func (service Service) finalizeOutcome(ctx context.Context, task sqlite.Task, ru
 			TaskStatus:    "failed",
 		})
 		if err != nil {
+			return err
+		}
+		if err := service.recordTaskRecoveryRecommendation(ctx, failedTask); err != nil {
 			return err
 		}
 		return execErr
@@ -1941,14 +1939,39 @@ func (service Service) finalizeOutcome(ctx context.Context, task sqlite.Task, ru
 		artifactsJSON = service.failureAnalysisArtifact(task, "codex_run", result.Output, task.RetryCount)
 	}
 
-	_, _, err := service.Store.FinishRunAndSetTaskStatus(ctx, sqlite.FinishRunAndSetTaskStatusParams{
+	updatedTask, _, err := service.Store.FinishRunAndSetTaskStatus(ctx, sqlite.FinishRunAndSetTaskStatusParams{
 		RunID:         run.ID,
 		RunStatus:     runStatus,
 		Summary:       result.Output,
 		ArtifactsJSON: artifactsJSON,
 		TaskStatus:    taskStatus,
 	})
-	return err
+	if err != nil {
+		return err
+	}
+	if taskStatus == "failed" {
+		return service.recordTaskRecoveryRecommendation(ctx, updatedTask)
+	}
+	return nil
+}
+
+func (service Service) recordTaskRecoveryRecommendation(ctx context.Context, task sqlite.Task) error {
+	if service.Store == nil || !strings.EqualFold(strings.TrimSpace(task.Status), "failed") {
+		return nil
+	}
+	guidance := recovery.RetryGuidanceForTask(recovery.RetryGuidanceInput{
+		RetryCount:  task.RetryCount,
+		MaxAttempts: task.MaxAttempts,
+		WorkKind:    task.WorkKind,
+		RequestedBy: task.RequestedBy,
+	})
+	return service.Store.RecordTaskRecoveryRecommendation(ctx, sqlite.RecordTaskRecoveryRecommendationParams{
+		Task:                   task,
+		Decision:               guidance.Decision,
+		RetryEligible:          guidance.RetryEligible,
+		RecoveryRecommendation: guidance.RecoveryRecommendation,
+		Source:                 guidance.Source,
+	})
 }
 
 func (service Service) failureAnalysisArtifact(task sqlite.Task, step string, summary string, retryCount int) string {

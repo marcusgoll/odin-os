@@ -2069,6 +2069,163 @@ func TestRunTriggerEventMVPUsesInternalEventsWithDedupeAndApprovalGates(t *testi
 	}
 }
 
+func TestRunTriggerProducedFailedWorkSurfacesSelfHealingGuidance(t *testing.T) {
+	t.Setenv("ODIN_CODEX_DRIVER", "")
+	t.Setenv("HOME", t.TempDir())
+
+	root := testRepoRoot(t)
+	installRepoCodexDriverScript(t, root)
+	run := func(args ...string) string {
+		t.Helper()
+		var stdout bytes.Buffer
+		if err := Run(context.Background(), root, args, strings.NewReader(""), &stdout); err != nil {
+			t.Fatalf("Run(%v) error = %v\nstdout=%s", args, err, stdout.String())
+		}
+		return stdout.String()
+	}
+	extractAutomationTaskKey := func(output string, triggerKey string) string {
+		t.Helper()
+		var payload struct {
+			Results []struct {
+				WorkItem struct {
+					Key string `json:"key"`
+				} `json:"work_item"`
+			} `json:"results"`
+		}
+		if err := json.Unmarshal([]byte(output), &payload); err != nil {
+			t.Fatalf("json.Unmarshal(trigger evaluate) error = %v\n%s", err, output)
+		}
+		prefix := "automation-" + triggerKey + "-"
+		for _, result := range payload.Results {
+			if strings.HasPrefix(result.WorkItem.Key, prefix) {
+				return result.WorkItem.Key
+			}
+		}
+		t.Fatalf("trigger evaluate output = %s, want work item prefix %s", output, prefix)
+		return ""
+	}
+	failTask := func(taskKey string, attempt int, proof string) {
+		t.Helper()
+		dispatch := run("work", "dispatch", "--task", taskKey, "--json")
+		if !strings.Contains(dispatch, fmt.Sprintf(`"attempt": %d`, attempt)) || !strings.Contains(dispatch, `"status": "running"`) {
+			t.Fatalf("dispatch output = %s, want attempt %d running", dispatch, attempt)
+		}
+		execute := run("work", "execute", "--task", taskKey, "--json")
+		if !strings.Contains(execute, `"status": "failed"`) || !strings.Contains(execute, proof) {
+			t.Fatalf("execute output = %s, want failed proof %q", execute, proof)
+		}
+	}
+
+	run("project", "select", testProjectKey)
+	run("transition", "set", "cutover", "confirm", "because", "trigger self healing proof")
+	run("trigger", "upsert", "fail-schedule",
+		"initiative="+testProjectKey,
+		"kind=schedule",
+		"status=enabled",
+		"next=2026-05-04T00:00:00Z",
+		"title=run this exact command: printf 'trigger schedule failure proof' >&2; exit 42",
+		"summary=trigger_failure_recovery",
+		"--json",
+	)
+	scheduledTaskKey := extractAutomationTaskKey(run("trigger", "evaluate", "now=2026-05-04T01:00:00Z", "--json"), "fail-schedule")
+	failTask(scheduledTaskKey, 1, "trigger schedule failure proof")
+
+	show := run("review", "show", "failed-work:1", "--json")
+	for _, want := range []string{
+		`"source_type": "failed_work"`,
+		`"task_key": "` + scheduledTaskKey + `"`,
+		`"decision": "retry_allowed"`,
+		`"recovery_recommendation": "Trigger-produced work failed. Inspect the trigger materialization and failed run logs, then retry only through odin review act failed-work ID retry or odin work retry within policy."`,
+	} {
+		if !strings.Contains(show, want) {
+			t.Fatalf("review show output = %s, want %s", show, want)
+		}
+	}
+	overview := run("overview", "--json")
+	for _, want := range []string{
+		`"recovery_guidance"`,
+		`"work_item_key": "` + scheduledTaskKey + `"`,
+		`"work_kind": "automation_trigger"`,
+		`"source": "automation_trigger"`,
+		`"recovery_recommendation": "Trigger-produced work failed. Inspect the trigger materialization and failed run logs, then retry only through odin review act failed-work ID retry or odin work retry within policy."`,
+	} {
+		if !strings.Contains(overview, want) {
+			t.Fatalf("overview output = %s, want %s", overview, want)
+		}
+	}
+	logs := run("logs", "--json")
+	for _, want := range []string{
+		`"type": "task.recovery_recommended"`,
+		`"source": "automation_trigger"`,
+		`"retry_eligible": true`,
+		`"recovery_recommendation": "Trigger-produced work failed. Inspect the trigger materialization and failed run logs, then retry only through odin review act failed-work ID retry or odin work retry within policy."`,
+	} {
+		if !strings.Contains(logs, want) {
+			t.Fatalf("logs output = %s, want %s", logs, want)
+		}
+	}
+
+	run("review", "act", "failed-work:1", "retry", "--json")
+	failTask(scheduledTaskKey, 2, "trigger schedule failure proof")
+	run("review", "act", "failed-work:1", "retry", "--json")
+	failTask(scheduledTaskKey, 3, "trigger schedule failure proof")
+	blockedShow := run("review", "show", "failed-work:1", "--json")
+	for _, want := range []string{
+		`"decision": "retry_blocked_max_attempts"`,
+		`"retry_eligible": false`,
+		`"recovery_recommendation": "Trigger-produced work reached the retry limit. Inspect the trigger rule and materialization, then open a follow-up or adjust task policy before any further retry."`,
+	} {
+		if !strings.Contains(blockedShow, want) {
+			t.Fatalf("blocked review show output = %s, want %s", blockedShow, want)
+		}
+	}
+	blockedRetry := run("review", "act", "failed-work:1", "retry", "--json")
+	if !strings.Contains(blockedRetry, `"retried": false`) || !strings.Contains(blockedRetry, `"decision": "retry_blocked_max_attempts"`) {
+		t.Fatalf("blocked retry output = %s, want bounded retry block", blockedRetry)
+	}
+
+	eventSource := run("work", "start", "--project", testProjectKey, "--title", "Event self healing source")
+	var eventSourceID int64
+	var eventSourceKey string
+	for _, field := range strings.Fields(eventSource) {
+		if value, ok := strings.CutPrefix(field, "work_item_id="); ok {
+			parsed, err := strconv.ParseInt(value, 10, 64)
+			if err != nil {
+				t.Fatalf("parse work_item_id from %q: %v", eventSource, err)
+			}
+			eventSourceID = parsed
+		}
+		if value, ok := strings.CutPrefix(field, "key="); ok {
+			eventSourceKey = value
+		}
+	}
+	if eventSourceID == 0 || eventSourceKey == "" {
+		t.Fatalf("work start output = %q, want event source id/key", eventSource)
+	}
+	run("trigger", "upsert", "fail-event",
+		"initiative="+testProjectKey,
+		"kind=event",
+		"status=enabled",
+		"event=task.status_changed",
+		"match_status=running",
+		fmt.Sprintf("match_task_id=%d", eventSourceID),
+		"title=run this exact command: printf 'trigger event failure proof' >&2; exit 42",
+		"summary=trigger_event_failure_recovery",
+		"--json",
+	)
+	run("work", "dispatch", "--task", eventSourceKey, "--json")
+	eventTaskKey := extractAutomationTaskKey(run("trigger", "evaluate", "source=events", "--json"), "fail-event")
+	failTask(eventTaskKey, 1, "trigger event failure proof")
+	eventReviewList := run("review", "list", "--json")
+	if !strings.Contains(eventReviewList, `"object_key": "`+eventTaskKey+`"`) || !strings.Contains(eventReviewList, `"source": "automation_trigger"`) {
+		t.Fatalf("review list output = %s, want event-trigger failed work guidance", eventReviewList)
+	}
+	status := run("work", "status")
+	if !strings.Contains(status, "failed_retryable_work_items=1") || !strings.Contains(status, "retry_blocked_work_items=1") {
+		t.Fatalf("work status output = %s, want one retryable trigger failure and one blocked trigger failure", status)
+	}
+}
+
 func TestRunWorkExecuteCompletesDispatchedIntakeRun(t *testing.T) {
 	configureLifecycleHarnessDriver(t)
 	t.Setenv("HOME", t.TempDir())

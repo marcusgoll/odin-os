@@ -18,6 +18,7 @@ import (
 	approvalsvc "odin-os/internal/runtime/approvals"
 	runtimeevents "odin-os/internal/runtime/events"
 	"odin-os/internal/runtime/projections"
+	"odin-os/internal/runtime/recovery"
 	"odin-os/internal/store/sqlite"
 	toolcatalog "odin-os/internal/tools/catalog"
 )
@@ -214,6 +215,8 @@ type RetryRecoveryGuidanceSummary struct {
 	ProjectKey             string  `json:"project_key"`
 	InitiativeKey          *string `json:"initiative_key"`
 	CompanionKey           *string `json:"companion_key"`
+	WorkKind               string  `json:"work_kind,omitempty"`
+	Source                 string  `json:"source,omitempty"`
 	Status                 string  `json:"status"`
 	Decision               string  `json:"decision"`
 	RetryEligible          bool    `json:"retry_eligible"`
@@ -627,20 +630,27 @@ func (service Service) Build(ctx context.Context, resolved scope.Resolution) (Vi
 			visibleCompanionKeys[*taskContext.companionKey] = struct{}{}
 		}
 		if strings.EqualFold(strings.TrimSpace(task.Status), "failed") {
-			decision, eligible, recommendation := retryGuidanceForTask(task.RetryCount, task.MaxAttempts)
+			guidance := recovery.RetryGuidanceForTask(recovery.RetryGuidanceInput{
+				RetryCount:  task.RetryCount,
+				MaxAttempts: task.MaxAttempts,
+				WorkKind:    task.WorkKind,
+				RequestedBy: task.RequestedBy,
+			})
 			view.Observability.RecoveryGuidance = append(view.Observability.RecoveryGuidance, RetryRecoveryGuidanceSummary{
 				TaskID:                 task.TaskID,
 				WorkItemKey:            task.TaskKey,
 				ProjectKey:             task.ProjectKey,
 				InitiativeKey:          taskContext.initiativeKey,
 				CompanionKey:           taskContext.companionKey,
+				WorkKind:               task.WorkKind,
+				Source:                 guidance.Source,
 				Status:                 task.Status,
-				Decision:               decision,
-				RetryEligible:          eligible,
+				Decision:               guidance.Decision,
+				RetryEligible:          guidance.RetryEligible,
 				RetryCount:             task.RetryCount,
 				MaxAttempts:            task.MaxAttempts,
 				LastError:              task.LastError,
-				RecoveryRecommendation: recommendation,
+				RecoveryRecommendation: guidance.RecoveryRecommendation,
 			})
 		}
 		if isClosedWorkItemStatus(task.Status) {
@@ -1421,16 +1431,6 @@ func isReviewableIntakeStatus(status string) bool {
 	default:
 		return false
 	}
-}
-
-func retryGuidanceForTask(retryCount int, maxAttempts int) (string, bool, string) {
-	if maxAttempts <= 1 {
-		return "retry_blocked_non_retryable", false, "Open a follow-up or change task policy before retrying; this task is marked non-retryable."
-	}
-	if retryCount+1 >= maxAttempts {
-		return "retry_blocked_max_attempts", false, "Open a follow-up or adjust the task before retrying; max attempts reached."
-	}
-	return "retry_allowed", true, "Retry is allowed; dispatch the queued task to create the next run attempt."
 }
 
 func rawIntakeSummary(item sqlite.IntakeItem) RawIntakeSummary {

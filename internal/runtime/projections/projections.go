@@ -22,6 +22,8 @@ type TaskStatusView struct {
 	ProjectKey       string
 	TaskKey          string
 	Title            string
+	RequestedBy      string
+	WorkKind         string
 	Status           string
 	Scope            string
 	CurrentRunID     *int64
@@ -336,6 +338,8 @@ func ListTaskStatusViews(ctx context.Context, queryer Queryer) ([]TaskStatusView
 			p.key,
 			t.key,
 			t.title,
+			t.requested_by,
+			COALESCE(t.work_kind, ''),
 			t.status,
 			t.scope,
 			t.current_run_id,
@@ -366,6 +370,8 @@ func ListTaskStatusViews(ctx context.Context, queryer Queryer) ([]TaskStatusView
 			&view.ProjectKey,
 			&view.TaskKey,
 			&view.Title,
+			&view.RequestedBy,
+			&view.WorkKind,
 			&view.Status,
 			&view.Scope,
 			&currentRunID,

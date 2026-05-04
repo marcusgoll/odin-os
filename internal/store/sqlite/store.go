@@ -1671,6 +1671,14 @@ type RecordTaskRetryDecisionParams struct {
 	QueueID                string
 }
 
+type RecordTaskRecoveryRecommendationParams struct {
+	Task                   Task
+	Decision               string
+	RetryEligible          bool
+	RecoveryRecommendation string
+	Source                 string
+}
+
 func (store *Store) RecordTaskRetryDecision(ctx context.Context, params RecordTaskRetryDecisionParams) error {
 	now := store.now()
 	return store.withTx(ctx, func(tx *sql.Tx) error {
@@ -1681,6 +1689,33 @@ func (store *Store) RecordTaskRetryDecision(ctx context.Context, params RecordTa
 			Source:                 params.Source,
 			QueueID:                params.QueueID,
 		}, now)
+	})
+}
+
+func (store *Store) RecordTaskRecoveryRecommendation(ctx context.Context, params RecordTaskRecoveryRecommendationParams) error {
+	now := store.now()
+	return store.withTx(ctx, func(tx *sql.Tx) error {
+		projectID := params.Task.ProjectID
+		return appendEventTx(ctx, tx, eventInsert{
+			StreamType: runtimeevents.StreamTask,
+			StreamID:   params.Task.ID,
+			EventType:  runtimeevents.EventTaskRecoveryRecommended,
+			Scope:      params.Task.Scope,
+			ProjectID:  &projectID,
+			TaskID:     &params.Task.ID,
+			Payload: runtimeevents.TaskRecoveryRecommendedPayload{
+				TaskID:                 params.Task.ID,
+				Status:                 params.Task.Status,
+				Source:                 params.Source,
+				Decision:               params.Decision,
+				RetryEligible:          params.RetryEligible,
+				RetryCount:             params.Task.RetryCount,
+				MaxAttempts:            params.Task.MaxAttempts,
+				LastError:              params.Task.LastError,
+				RecoveryRecommendation: params.RecoveryRecommendation,
+			},
+			OccurredAt: now,
+		})
 	})
 }
 

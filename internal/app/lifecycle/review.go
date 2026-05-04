@@ -14,6 +14,7 @@ import (
 	approvalsvc "odin-os/internal/runtime/approvals"
 	jobsvc "odin-os/internal/runtime/jobs"
 	"odin-os/internal/runtime/projections"
+	"odin-os/internal/runtime/recovery"
 	"odin-os/internal/store/sqlite"
 )
 
@@ -39,6 +40,8 @@ type reviewQueueEntry struct {
 	TaskID                 int64    `json:"task_id,omitempty"`
 	TaskKey                string   `json:"task_key,omitempty"`
 	TaskStatus             string   `json:"task_status,omitempty"`
+	WorkKind               string   `json:"work_kind,omitempty"`
+	Source                 string   `json:"source,omitempty"`
 	Decision               string   `json:"decision,omitempty"`
 	RetryEligible          *bool    `json:"retry_eligible,omitempty"`
 	RetryBlockReason       string   `json:"retry_block_reason,omitempty"`
@@ -414,8 +417,13 @@ func reviewEntryFromSkillArtifact(ctx context.Context, store *sqlite.Store, arti
 }
 
 func reviewEntryFromFailedTask(task projections.TaskStatusView) reviewQueueEntry {
-	decision, eligible, recommendation := failedWorkRetryGuidance(task.RetryCount, task.MaxAttempts)
-	retryEligible := eligible
+	guidance := recovery.RetryGuidanceForTask(recovery.RetryGuidanceInput{
+		RetryCount:  task.RetryCount,
+		MaxAttempts: task.MaxAttempts,
+		WorkKind:    task.WorkKind,
+		RequestedBy: task.RequestedBy,
+	})
+	retryEligible := guidance.RetryEligible
 	return reviewQueueEntry{
 		QueueID:                fmt.Sprintf("failed-work:%d", task.TaskID),
 		SourceType:             "failed_work",
@@ -427,10 +435,12 @@ func reviewEntryFromFailedTask(task projections.TaskStatusView) reviewQueueEntry
 		TaskID:                 task.TaskID,
 		TaskKey:                task.TaskKey,
 		TaskStatus:             task.Status,
-		Decision:               decision,
+		WorkKind:               task.WorkKind,
+		Source:                 guidance.Source,
+		Decision:               guidance.Decision,
 		RetryEligible:          &retryEligible,
-		RetryBlockReason:       retryBlockReason(decision, eligible),
-		RecoveryRecommendation: recommendation,
+		RetryBlockReason:       retryBlockReason(guidance.Decision, guidance.RetryEligible),
+		RecoveryRecommendation: guidance.RecoveryRecommendation,
 		AllowedActions:         []string{"retry"},
 	}
 }
@@ -446,6 +456,8 @@ func reviewFailedTaskDetail(ctx context.Context, store *sqlite.Store, task sqlit
 		ProjectKey:  project.Key,
 		TaskKey:     task.Key,
 		Title:       task.Title,
+		RequestedBy: task.RequestedBy,
+		WorkKind:    task.WorkKind,
 		Status:      task.Status,
 		Scope:       task.Scope,
 		RetryCount:  task.RetryCount,
@@ -453,7 +465,12 @@ func reviewFailedTaskDetail(ctx context.Context, store *sqlite.Store, task sqlit
 		LastError:   task.LastError,
 	}
 	entry := reviewEntryFromFailedTask(taskView)
-	decision, eligible, recommendation := failedWorkRetryGuidance(task.RetryCount, task.MaxAttempts)
+	guidance := recovery.RetryGuidanceForTask(recovery.RetryGuidanceInput{
+		RetryCount:  task.RetryCount,
+		MaxAttempts: task.MaxAttempts,
+		WorkKind:    task.WorkKind,
+		RequestedBy: task.RequestedBy,
+	})
 	runs, err := projections.ListRunSummaryViews(ctx, store.DB())
 	if err != nil {
 		return reviewQueueEntry{}, failedWorkReviewDetail{}, err
@@ -475,10 +492,10 @@ func reviewFailedTaskDetail(ctx context.Context, store *sqlite.Store, task sqlit
 		TaskKey:                task.Key,
 		TaskStatus:             task.Status,
 		ProjectKey:             project.Key,
-		Decision:               decision,
-		RetryEligible:          eligible,
-		RetryBlockReason:       retryBlockReason(decision, eligible),
-		RecoveryRecommendation: recommendation,
+		Decision:               guidance.Decision,
+		RetryEligible:          guidance.RetryEligible,
+		RetryBlockReason:       retryBlockReason(guidance.Decision, guidance.RetryEligible),
+		RecoveryRecommendation: guidance.RecoveryRecommendation,
 		RetryCount:             task.RetryCount,
 		MaxAttempts:            task.MaxAttempts,
 		LastError:              task.LastError,
@@ -598,16 +615,6 @@ func failedWorkRetryOutcomeView(outcome jobsvc.RetryOutcome) failedWorkRetryView
 		}
 	}
 	return view
-}
-
-func failedWorkRetryGuidance(retryCount int, maxAttempts int) (string, bool, string) {
-	if maxAttempts <= 1 {
-		return "retry_blocked_non_retryable", false, "Open a follow-up or change task policy before retrying; this task is marked non-retryable."
-	}
-	if retryCount+1 >= maxAttempts {
-		return "retry_blocked_max_attempts", false, "Open a follow-up or adjust the task before retrying; max attempts reached."
-	}
-	return "retry_allowed", true, "Retry is allowed; dispatch the queued task to create the next run attempt."
 }
 
 func retryBlockReason(decision string, eligible bool) string {

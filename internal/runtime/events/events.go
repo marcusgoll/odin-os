@@ -40,6 +40,7 @@ const (
 	EventTaskCreated                        Type = "task.created"
 	EventTaskDispatchRequested              Type = "task.dispatch_requested"
 	EventTaskRetryEvaluated                 Type = "task.retry_evaluated"
+	EventTaskRecoveryRecommended            Type = "task.recovery_recommended"
 	EventTaskStatusChanged                  Type = "task.status_changed"
 	EventTaskQueueStateChanged              Type = "task.queue_state_changed"
 	EventRunStarted                         Type = "run.started"
@@ -187,6 +188,18 @@ type TaskRetryEvaluatedPayload struct {
 	RetryCount             int    `json:"retry_count"`
 	MaxAttempts            int    `json:"max_attempts"`
 	NextEligibleAt         string `json:"next_eligible_at,omitempty"`
+	LastError              string `json:"last_error,omitempty"`
+	RecoveryRecommendation string `json:"recovery_recommendation,omitempty"`
+}
+
+type TaskRecoveryRecommendedPayload struct {
+	TaskID                 int64  `json:"task_id"`
+	Status                 string `json:"status"`
+	Source                 string `json:"source,omitempty"`
+	Decision               string `json:"decision"`
+	RetryEligible          bool   `json:"retry_eligible"`
+	RetryCount             int    `json:"retry_count"`
+	MaxAttempts            int    `json:"max_attempts"`
 	LastError              string `json:"last_error,omitempty"`
 	RecoveryRecommendation string `json:"recovery_recommendation,omitempty"`
 }
