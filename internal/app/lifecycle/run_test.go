@@ -2371,6 +2371,108 @@ func TestRunTriggerGitHubIssueExternalEventAdapterMVP(t *testing.T) {
 	}
 }
 
+func TestRunKnowledgeSearchAndContextPackAreReadOnly(t *testing.T) {
+	t.Parallel()
+
+	root := testRepoRoot(t)
+	run := func(args ...string) string {
+		t.Helper()
+		var stdout bytes.Buffer
+		if err := Run(context.Background(), root, args, strings.NewReader(""), &stdout); err != nil {
+			t.Fatalf("Run(%v) error = %v\nstdout=%s", args, err, stdout.String())
+		}
+		return stdout.String()
+	}
+	extractCreatedTaskKey := func(output string) string {
+		t.Helper()
+		var payload struct {
+			Results []struct {
+				CreatedWorkItem bool `json:"created_work_item"`
+				WorkItem        struct {
+					Key string `json:"key"`
+				} `json:"work_item"`
+			} `json:"results"`
+		}
+		if err := json.Unmarshal([]byte(output), &payload); err != nil {
+			t.Fatalf("json.Unmarshal(trigger evaluate) error = %v\n%s", err, output)
+		}
+		for _, result := range payload.Results {
+			if result.CreatedWorkItem {
+				return result.WorkItem.Key
+			}
+		}
+		t.Fatalf("trigger evaluate output = %s, want created task", output)
+		return ""
+	}
+
+	run("project", "select", testProjectKey)
+	run("transition", "set", "cutover", "confirm", "because", "knowledge context proof")
+	run("trigger", "upsert", "knowledge-low",
+		"initiative="+testProjectKey,
+		"kind=event",
+		"status=enabled",
+		"event=external.github.issue",
+		"match_status=opened",
+		"match_provider=github",
+		"match_repo=acme/alpha",
+		"title=Review knowledge retrieval issue",
+		"summary=knowledge_context_pack_event",
+		"--json",
+	)
+	run("trigger", "ingest", "github-issue",
+		"project="+testProjectKey,
+		"repo=acme/alpha",
+		"number=88",
+		"action=opened",
+		"title=Knowledge retrieval issue",
+		"body=prepare context pack evidence",
+		"url=https://github.example/acme/alpha/issues/88",
+		"--json",
+	)
+	taskKey := extractCreatedTaskKey(run("trigger", "evaluate", "source=events", "--json"))
+	beforeLogs := run("logs", "--json")
+
+	search := run("knowledge", "search", "query=knowledge", "project="+testProjectKey, "--json")
+	for _, want := range []string{
+		`"read_only": true`,
+		`"persistence": "none"`,
+		`"project_key": "` + testProjectKey + `"`,
+		`"kind": "task"`,
+		`"kind": "event"`,
+		`knowledge`,
+	} {
+		if !strings.Contains(search, want) {
+			t.Fatalf("knowledge search output = %s, want %s", search, want)
+		}
+	}
+	contextPack := run("knowledge", "context-pack", "task="+taskKey, "project="+testProjectKey, "--json")
+	for _, want := range []string{
+		`"read_only": true`,
+		`"persistence": "none"`,
+		`"object_type": "task"`,
+		`"object_key": "` + taskKey + `"`,
+		`"events"`,
+		`"context_items"`,
+		`external-github-issue-acme-alpha-88-opened`,
+	} {
+		if !strings.Contains(contextPack, want) {
+			t.Fatalf("knowledge context-pack output = %s, want %s", contextPack, want)
+		}
+	}
+	afterLogs := run("logs", "--json")
+	if beforeLogs != afterLogs {
+		t.Fatalf("knowledge commands mutated logs\nbefore=%s\nafter=%s", beforeLogs, afterLogs)
+	}
+	jobs := run("jobs", "--json")
+	if strings.Count(jobs, `"task_key"`) != 1 || !strings.Contains(jobs, taskKey) {
+		t.Fatalf("jobs output = %s, want only existing trigger-created work", jobs)
+	}
+	runs := run("runs", "--json")
+	if !strings.Contains(runs, `"runs": []`) {
+		t.Fatalf("runs output = %s, want no run creation from knowledge commands", runs)
+	}
+}
+
 func TestRunWorkExecuteCompletesDispatchedIntakeRun(t *testing.T) {
 	configureLifecycleHarnessDriver(t)
 	t.Setenv("HOME", t.TempDir())
