@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"odin-os/internal/core/projects"
+	runtimeevents "odin-os/internal/runtime/events"
 	"odin-os/internal/store/sqlite"
 )
 
@@ -19,19 +20,24 @@ type Service struct {
 }
 
 type UpsertParams struct {
-	WorkspaceID    string
-	Key            string
-	InitiativeKey  string
-	Kind           string
-	Status         string
-	RuleSummary    string
-	RuleJSON       string
-	WorkItemTitle  string
-	NextEligibleAt *time.Time
-	Cadence        string
-	Cron           string
-	QuietHours     string
-	QuietTimezone  string
+	WorkspaceID         string
+	Key                 string
+	InitiativeKey       string
+	Kind                string
+	Status              string
+	RuleSummary         string
+	RuleJSON            string
+	WorkItemTitle       string
+	NextEligibleAt      *time.Time
+	Cadence             string
+	Cron                string
+	QuietHours          string
+	QuietTimezone       string
+	EventType           string
+	MatchStatus         string
+	MatchPreviousStatus string
+	MatchTaskID         string
+	MatchScope          string
 }
 
 type DueEvaluationResult struct {
@@ -69,6 +75,12 @@ func (service Service) Upsert(ctx context.Context, params UpsertParams) (sqlite.
 	cron := strings.TrimSpace(params.Cron)
 	quietHours := strings.TrimSpace(params.QuietHours)
 	quietTimezone := strings.TrimSpace(params.QuietTimezone)
+	eventType := strings.TrimSpace(params.EventType)
+	matchStatus := strings.TrimSpace(params.MatchStatus)
+	matchPreviousStatus := strings.TrimSpace(params.MatchPreviousStatus)
+	matchTaskID := strings.TrimSpace(params.MatchTaskID)
+	matchScope := strings.TrimSpace(params.MatchScope)
+	kind := strings.ToLower(strings.TrimSpace(params.Kind))
 	if cadence != "" {
 		if _, _, err := parseScheduleCadence(cadence); err != nil {
 			return sqlite.AutomationTrigger{}, err
@@ -87,6 +99,16 @@ func (service Service) Upsert(ctx context.Context, params UpsertParams) (sqlite.
 			return sqlite.AutomationTrigger{}, err
 		}
 	}
+	if kind == "event" {
+		if eventType == "" {
+			return sqlite.AutomationTrigger{}, fmt.Errorf("automation trigger event type is required for event triggers")
+		}
+		if matchTaskID != "" {
+			if _, err := strconv.ParseInt(matchTaskID, 10, 64); err != nil {
+				return sqlite.AutomationTrigger{}, fmt.Errorf("automation trigger match_task_id must be an integer: %w", err)
+			}
+		}
+	}
 	if ruleJSON != "" && (cadence != "" || cron != "") {
 		return sqlite.AutomationTrigger{}, fmt.Errorf("automation trigger cadence or cron cannot be combined with rule_json")
 	}
@@ -96,6 +118,21 @@ func (service Service) Upsert(ctx context.Context, params UpsertParams) (sqlite.
 		}
 		if kind := strings.TrimSpace(params.Kind); kind != "" {
 			payload["kind"] = strings.ToLower(kind)
+		}
+		if eventType != "" {
+			payload["event_type"] = eventType
+		}
+		if matchStatus != "" {
+			payload["match_status"] = matchStatus
+		}
+		if matchPreviousStatus != "" {
+			payload["match_previous_status"] = matchPreviousStatus
+		}
+		if matchTaskID != "" {
+			payload["match_task_id"] = matchTaskID
+		}
+		if matchScope != "" {
+			payload["match_scope"] = matchScope
 		}
 		if cadence != "" {
 			payload["cadence"] = cadence
@@ -256,6 +293,80 @@ func (service Service) EvaluateDue(ctx context.Context, now time.Time) (DueEvalu
 	return result, nil
 }
 
+func (service Service) EvaluateEvents(ctx context.Context) (DueEvaluationResult, error) {
+	if service.Store == nil {
+		return DueEvaluationResult{}, fmt.Errorf("automation trigger store is required")
+	}
+
+	triggers, err := service.Store.ListAutomationTriggers(ctx, sqlite.ListAutomationTriggersParams{WorkspaceID: "default", Status: "enabled"})
+	if err != nil {
+		return DueEvaluationResult{}, err
+	}
+	records, err := service.Store.ListEvents(ctx, sqlite.ListEventsParams{})
+	if err != nil {
+		return DueEvaluationResult{}, err
+	}
+
+	var result DueEvaluationResult
+	for _, trigger := range triggers {
+		if !strings.EqualFold(trigger.Kind, "event") {
+			continue
+		}
+		rule, err := parseTriggerScheduleRule(trigger)
+		if err != nil {
+			if _, markErr := service.Store.MarkAutomationTriggerErrored(ctx, sqlite.MarkAutomationTriggerErroredParams{
+				WorkspaceID: trigger.WorkspaceID,
+				Key:         trigger.Key,
+				Reason:      "event-rule-evaluation",
+				Error:       err.Error(),
+			}); markErr != nil {
+				return result, markErr
+			}
+			result.Errored++
+			continue
+		}
+		if strings.TrimSpace(rule.EventType) == "" {
+			if _, markErr := service.Store.MarkAutomationTriggerErrored(ctx, sqlite.MarkAutomationTriggerErroredParams{
+				WorkspaceID: trigger.WorkspaceID,
+				Key:         trigger.Key,
+				Reason:      "event-rule-evaluation",
+				Error:       "event_type is required",
+			}); markErr != nil {
+				return result, markErr
+			}
+			result.Errored++
+			continue
+		}
+		for _, record := range records {
+			if !record.OccurredAt.After(trigger.CreatedAt) {
+				continue
+			}
+			if !eventTriggerMatches(rule, record) {
+				continue
+			}
+			result.Evaluated++
+			eventID := record.ID
+			fire, err := service.Store.FireAutomationTrigger(ctx, sqlite.FireAutomationTriggerParams{
+				WorkspaceID:     trigger.WorkspaceID,
+				Key:             trigger.Key,
+				Source:          "event",
+				Reason:          eventTriggerReason(record),
+				RequestedBy:     "automation_trigger_event_evaluator",
+				SourceEventID:   &eventID,
+				SourceEventType: string(record.Type),
+			})
+			if err != nil {
+				return result, err
+			}
+			if fire.CreatedWorkItem {
+				result.Materialized++
+			}
+			result.Results = append(result.Results, fire)
+		}
+	}
+	return result, nil
+}
+
 func (service Service) ensureRuntimeProject(ctx context.Context, key string) (sqlite.Project, error) {
 	manifest, ok := service.Registry.Lookup(key)
 	if !ok {
@@ -329,11 +440,16 @@ func nextScheduleEligibleAt(rule scheduleRule, trigger sqlite.AutomationTrigger,
 }
 
 type scheduleRule struct {
-	Cadence        string `json:"cadence"`
-	CadenceSeconds int64  `json:"cadence_seconds"`
-	Cron           string `json:"cron"`
-	QuietHours     string `json:"quiet_hours"`
-	QuietTimezone  string `json:"quiet_timezone"`
+	Cadence             string `json:"cadence"`
+	CadenceSeconds      int64  `json:"cadence_seconds"`
+	Cron                string `json:"cron"`
+	QuietHours          string `json:"quiet_hours"`
+	QuietTimezone       string `json:"quiet_timezone"`
+	EventType           string `json:"event_type"`
+	MatchStatus         string `json:"match_status"`
+	MatchPreviousStatus string `json:"match_previous_status"`
+	MatchTaskID         string `json:"match_task_id"`
+	MatchScope          string `json:"match_scope"`
 }
 
 func parseTriggerScheduleRule(trigger sqlite.AutomationTrigger) (scheduleRule, error) {
@@ -342,6 +458,52 @@ func parseTriggerScheduleRule(trigger sqlite.AutomationTrigger) (scheduleRule, e
 		return scheduleRule{}, fmt.Errorf("automation trigger %s has invalid rule json: %w", trigger.Key, err)
 	}
 	return rule, nil
+}
+
+func eventTriggerMatches(rule scheduleRule, record runtimeevents.Record) bool {
+	if strings.TrimSpace(rule.EventType) != string(record.Type) {
+		return false
+	}
+	if strings.TrimSpace(rule.MatchScope) != "" && strings.TrimSpace(rule.MatchScope) != record.Scope {
+		return false
+	}
+	if strings.TrimSpace(rule.MatchTaskID) != "" {
+		taskID, err := strconv.ParseInt(strings.TrimSpace(rule.MatchTaskID), 10, 64)
+		if err != nil || record.TaskID == nil || *record.TaskID != taskID {
+			return false
+		}
+	}
+	if strings.TrimSpace(rule.MatchStatus) == "" && strings.TrimSpace(rule.MatchPreviousStatus) == "" {
+		return true
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(record.Payload, &payload); err != nil {
+		return false
+	}
+	if strings.TrimSpace(rule.MatchStatus) != "" && !strings.EqualFold(payloadString(payload, "status"), strings.TrimSpace(rule.MatchStatus)) {
+		return false
+	}
+	if strings.TrimSpace(rule.MatchPreviousStatus) != "" && !strings.EqualFold(payloadString(payload, "previous_status"), strings.TrimSpace(rule.MatchPreviousStatus)) {
+		return false
+	}
+	return true
+}
+
+func payloadString(payload map[string]any, key string) string {
+	value, ok := payload[key]
+	if !ok {
+		return ""
+	}
+	switch typed := value.(type) {
+	case string:
+		return typed
+	default:
+		return fmt.Sprint(typed)
+	}
+}
+
+func eventTriggerReason(record runtimeevents.Record) string {
+	return fmt.Sprintf("event-%d", record.ID)
 }
 
 type quietHoursRule struct {

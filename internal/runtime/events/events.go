@@ -395,26 +395,35 @@ type AutomationTriggerCreatedPayload struct {
 type AutomationTriggerFireRequestedPayload struct {
 	WorkspaceID        string `json:"workspace_id"`
 	Key                string `json:"key"`
+	Source             string `json:"source,omitempty"`
 	MaterializationKey string `json:"materialization_key"`
 	Reason             string `json:"reason,omitempty"`
 	RequestedBy        string `json:"requested_by,omitempty"`
+	SourceEventID      *int64 `json:"source_event_id,omitempty"`
+	SourceEventType    string `json:"source_event_type,omitempty"`
 }
 
 type AutomationTriggerEvaluatedPayload struct {
 	WorkspaceID        string `json:"workspace_id"`
 	Key                string `json:"key"`
+	Source             string `json:"source,omitempty"`
 	MaterializationKey string `json:"materialization_key"`
 	Status             string `json:"status"`
 	CreatedWorkItem    bool   `json:"created_work_item"`
+	SourceEventID      *int64 `json:"source_event_id,omitempty"`
+	SourceEventType    string `json:"source_event_type,omitempty"`
 }
 
 type AutomationTriggerMaterializedPayload struct {
 	WorkspaceID        string `json:"workspace_id"`
 	Key                string `json:"key"`
+	Source             string `json:"source,omitempty"`
 	MaterializationKey string `json:"materialization_key"`
 	TaskID             int64  `json:"task_id"`
 	TaskKey            string `json:"task_key"`
 	RequestedBy        string `json:"requested_by,omitempty"`
+	SourceEventID      *int64 `json:"source_event_id,omitempty"`
+	SourceEventType    string `json:"source_event_type,omitempty"`
 }
 
 type AutomationTriggerDeferredPayload struct {

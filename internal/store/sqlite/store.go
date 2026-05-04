@@ -868,9 +868,12 @@ func (store *Store) FireAutomationTrigger(ctx context.Context, params FireAutoma
 			Payload: runtimeevents.AutomationTriggerFireRequestedPayload{
 				WorkspaceID:        trigger.WorkspaceID,
 				Key:                trigger.Key,
+				Source:             source,
 				MaterializationKey: materializationKey,
 				Reason:             reason,
 				RequestedBy:        requestedBy,
+				SourceEventID:      params.SourceEventID,
+				SourceEventType:    params.SourceEventType,
 			},
 			OccurredAt: now,
 		}); err != nil {
@@ -890,7 +893,7 @@ func (store *Store) FireAutomationTrigger(ctx context.Context, params FireAutoma
 			if err != nil {
 				return err
 			}
-			if err := appendAutomationTriggerEvaluatedEvent(ctx, tx, updated, eventScope, materializationKey, false, now); err != nil {
+			if err := appendAutomationTriggerEvaluatedEvent(ctx, tx, updated, eventScope, source, materializationKey, false, params.SourceEventID, params.SourceEventType, now); err != nil {
 				return err
 			}
 			result = FireAutomationTriggerResult{
@@ -925,7 +928,7 @@ func (store *Store) FireAutomationTrigger(ctx context.Context, params FireAutoma
 			return err
 		}
 		eventScope = project.Scope
-		if err := appendAutomationTriggerEvaluatedEvent(ctx, tx, updated, eventScope, materializationKey, true, now); err != nil {
+		if err := appendAutomationTriggerEvaluatedEvent(ctx, tx, updated, eventScope, source, materializationKey, true, params.SourceEventID, params.SourceEventType, now); err != nil {
 			return err
 		}
 		if err := appendEventTx(ctx, tx, eventInsert{
@@ -938,10 +941,13 @@ func (store *Store) FireAutomationTrigger(ctx context.Context, params FireAutoma
 			Payload: runtimeevents.AutomationTriggerMaterializedPayload{
 				WorkspaceID:        updated.WorkspaceID,
 				Key:                updated.Key,
+				Source:             source,
 				MaterializationKey: materializationKey,
 				TaskID:             task.ID,
 				TaskKey:            task.Key,
 				RequestedBy:        requestedBy,
+				SourceEventID:      params.SourceEventID,
+				SourceEventType:    params.SourceEventType,
 			},
 			OccurredAt: now,
 		}); err != nil {
@@ -8133,7 +8139,7 @@ func (store *Store) automationTriggerEventScopeTx(ctx context.Context, tx *sql.T
 	return "automation_trigger"
 }
 
-func appendAutomationTriggerEvaluatedEvent(ctx context.Context, tx *sql.Tx, trigger AutomationTrigger, scope string, materializationKey string, createdWorkItem bool, now time.Time) error {
+func appendAutomationTriggerEvaluatedEvent(ctx context.Context, tx *sql.Tx, trigger AutomationTrigger, scope string, source string, materializationKey string, createdWorkItem bool, sourceEventID *int64, sourceEventType string, now time.Time) error {
 	return appendEventTx(ctx, tx, eventInsert{
 		StreamType: runtimeevents.StreamAutomationTrigger,
 		StreamID:   trigger.ID,
@@ -8143,9 +8149,12 @@ func appendAutomationTriggerEvaluatedEvent(ctx context.Context, tx *sql.Tx, trig
 		Payload: runtimeevents.AutomationTriggerEvaluatedPayload{
 			WorkspaceID:        trigger.WorkspaceID,
 			Key:                trigger.Key,
+			Source:             source,
 			MaterializationKey: materializationKey,
 			Status:             trigger.Status,
 			CreatedWorkItem:    createdWorkItem,
+			SourceEventID:      sourceEventID,
+			SourceEventType:    sourceEventType,
 		},
 		OccurredAt: now,
 	})

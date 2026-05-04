@@ -415,6 +415,8 @@ type FireAutomationTriggerParams struct {
 	RequestedBy       string
 	SetNextEligibleAt bool
 	NextEligibleAt    *time.Time
+	SourceEventID     *int64
+	SourceEventType   string
 }
 
 type FireAutomationTriggerResult struct {

@@ -1919,6 +1919,156 @@ func TestRunTriggerHumanizedTimingDefersQuietHoursAndCoalescesMissedRuns(t *test
 	}
 }
 
+func TestRunTriggerEventMVPUsesInternalEventsWithDedupeAndApprovalGates(t *testing.T) {
+	t.Parallel()
+
+	root := testRepoRoot(t)
+	run := func(args ...string) string {
+		t.Helper()
+		var stdout bytes.Buffer
+		if err := Run(context.Background(), root, args, strings.NewReader(""), &stdout); err != nil {
+			t.Fatalf("Run(%v) error = %v\nstdout=%s", args, err, stdout.String())
+		}
+		return stdout.String()
+	}
+	parseWorkStart := func(output string) (int64, string) {
+		t.Helper()
+		var taskID int64
+		var taskKey string
+		for _, field := range strings.Fields(output) {
+			if value, ok := strings.CutPrefix(field, "work_item_id="); ok {
+				parsed, err := strconv.ParseInt(value, 10, 64)
+				if err != nil {
+					t.Fatalf("parse work_item_id from %q: %v", output, err)
+				}
+				taskID = parsed
+			}
+			if value, ok := strings.CutPrefix(field, "key="); ok {
+				taskKey = value
+			}
+		}
+		if taskID == 0 || taskKey == "" {
+			t.Fatalf("work start output = %q, want id and key", output)
+		}
+		return taskID, taskKey
+	}
+
+	run("project", "select", testProjectKey)
+	run("transition", "set", "cutover", "confirm", "because", "event trigger low risk proof")
+	sourceID, sourceKey := parseWorkStart(run("work", "start", "--project", testProjectKey, "--title", "Event source low risk"))
+	run("trigger", "upsert", "low-risk-event",
+		"initiative="+testProjectKey,
+		"kind=event",
+		"status=enabled",
+		"event=task.status_changed",
+		"match_status=running",
+		fmt.Sprintf("match_task_id=%d", sourceID),
+		"title=Review_event_trigger_output",
+		"summary=event_trigger_low_risk",
+		"--json",
+	)
+	dispatchSource := run("work", "dispatch", "--task", sourceKey, "--json")
+	if !strings.Contains(dispatchSource, `"dispatched": true`) || !strings.Contains(dispatchSource, `"status": "running"`) {
+		t.Fatalf("source dispatch output = %s, want running source task", dispatchSource)
+	}
+	evaluateEvents := run("trigger", "evaluate", "source=events", "--json")
+	var lowRisk struct {
+		Evaluated    int `json:"evaluated"`
+		Materialized int `json:"materialized"`
+		Results      []struct {
+			CreatedWorkItem bool `json:"created_work_item"`
+			Materialization struct {
+				MaterializationKey string `json:"materialization_key"`
+				Reason             string `json:"reason"`
+				RequestedBy        string `json:"requested_by"`
+			} `json:"materialization"`
+			WorkItem struct {
+				Key    string `json:"key"`
+				Status string `json:"status"`
+			} `json:"work_item"`
+		} `json:"results"`
+	}
+	if err := json.Unmarshal([]byte(evaluateEvents), &lowRisk); err != nil {
+		t.Fatalf("json.Unmarshal(event evaluate) error = %v\n%s", err, evaluateEvents)
+	}
+	if lowRisk.Evaluated != 1 || lowRisk.Materialized != 1 || len(lowRisk.Results) != 1 || !lowRisk.Results[0].CreatedWorkItem {
+		t.Fatalf("event evaluate output = %+v, want one event materialization", lowRisk)
+	}
+	if !strings.Contains(lowRisk.Results[0].Materialization.MaterializationKey, ":event:event-") || lowRisk.Results[0].Materialization.RequestedBy != "automation_trigger_event_evaluator" || lowRisk.Results[0].WorkItem.Status != "queued" {
+		t.Fatalf("event materialization = %+v, want event provenance and queued work", lowRisk.Results[0])
+	}
+	repeatEvents := run("trigger", "evaluate", "source=events", "--json")
+	if !strings.Contains(repeatEvents, `"evaluated": 1`) || !strings.Contains(repeatEvents, `"materialized": 0`) || !strings.Contains(repeatEvents, `"created_work_item": false`) || !strings.Contains(repeatEvents, lowRisk.Results[0].WorkItem.Key) {
+		t.Fatalf("repeat event evaluate output = %s, want duplicate suppressed with existing work", repeatEvents)
+	}
+
+	run("project", "select", "odin-core")
+	run("transition", "set", "cutover", "confirm", "because", "event trigger approval proof")
+	riskySourceID, riskySourceKey := parseWorkStart(run("work", "start", "--project", testProjectKey, "--title", "Event source risky"))
+	run("trigger", "upsert", "risky-event",
+		"initiative=odin-core",
+		"kind=event",
+		"status=enabled",
+		"event=task.status_changed",
+		"match_status=running",
+		fmt.Sprintf("match_task_id=%d", riskySourceID),
+		"title=Review_risky_event_trigger",
+		"summary=event_trigger_risky",
+		"--json",
+	)
+	run("work", "dispatch", "--task", riskySourceKey, "--json")
+	riskyEvents := run("trigger", "evaluate", "source=events", "--json")
+	var risky struct {
+		Results []struct {
+			CreatedWorkItem bool `json:"created_work_item"`
+			WorkItem        struct {
+				Key string `json:"key"`
+			} `json:"work_item"`
+		} `json:"results"`
+	}
+	if err := json.Unmarshal([]byte(riskyEvents), &risky); err != nil {
+		t.Fatalf("json.Unmarshal(risky event evaluate) error = %v\n%s", err, riskyEvents)
+	}
+	var riskyWorkKey string
+	for _, result := range risky.Results {
+		if result.CreatedWorkItem && result.WorkItem.Key != "" {
+			riskyWorkKey = result.WorkItem.Key
+		}
+	}
+	if riskyWorkKey == "" {
+		t.Fatalf("risky event evaluate = %+v, want risky trigger-created work", risky)
+	}
+	repeatRiskyEvents := run("trigger", "evaluate", "source=events", "--json")
+	if !strings.Contains(repeatRiskyEvents, `"materialized": 0`) || !strings.Contains(repeatRiskyEvents, `"created_work_item": false`) || !strings.Contains(repeatRiskyEvents, riskyWorkKey) {
+		t.Fatalf("repeat risky event evaluate output = %s, want duplicate suppressed with existing work", repeatRiskyEvents)
+	}
+	dispatchRisky := run("work", "dispatch", "--task", riskyWorkKey, "--json")
+	if !strings.Contains(dispatchRisky, `"reason": "approval_required"`) || !strings.Contains(dispatchRisky, `"status": "blocked"`) {
+		t.Fatalf("risky event dispatch output = %s, want approval required", dispatchRisky)
+	}
+	approvals := run("approvals", "all", "--json")
+	if !strings.Contains(approvals, `"status": "pending"`) || !strings.Contains(approvals, riskyWorkKey) {
+		t.Fatalf("approvals output = %s, want pending risky event approval", approvals)
+	}
+	logs := run("logs", "--json")
+	for _, want := range []string{
+		`"type": "automation_trigger.fire_requested"`,
+		`"source": "event"`,
+		`"source_event_type": "task.status_changed"`,
+		`"type": "automation_trigger.materialized"`,
+		`"created_work_item": false`,
+		`"type": "approval.requested"`,
+	} {
+		if !strings.Contains(logs, want) {
+			t.Fatalf("logs output = %s, want %s", logs, want)
+		}
+	}
+	overview := run("overview", "--json")
+	if !strings.Contains(overview, `"key": "risky-event"`) || !strings.Contains(overview, `"kind": "event"`) || !strings.Contains(overview, `"pending_approval_count": 1`) {
+		t.Fatalf("overview output = %s, want event trigger and approval visibility", overview)
+	}
+}
+
 func TestRunWorkExecuteCompletesDispatchedIntakeRun(t *testing.T) {
 	configureLifecycleHarnessDriver(t)
 	t.Setenv("HOME", t.TempDir())

@@ -18,7 +18,7 @@ func RunTrigger(ctx context.Context, service triggers.Service, args []string, st
 		return fmt.Errorf("usage: odin %s", TriggerUsage)
 	}
 	if args[0] == "--help" || args[0] == "help" {
-		_, err := fmt.Fprintf(stdout, "usage: odin %s\n", TriggerUsage)
+		_, err := fmt.Fprintf(stdout, "usage: odin %s\n\nEvent triggers:\n  odin trigger upsert <key> initiative=<project> kind=event event=<event_type> [match_status=<status>] [match_previous_status=<status>] [match_task_id=<id>] [match_scope=<scope>] [--json]\n  odin trigger evaluate source=events [--json]\n", TriggerUsage)
 		return err
 	}
 	jsonOutput, args, err := consumeTriggerJSONFlag(args)
@@ -56,19 +56,24 @@ func RunTrigger(ctx context.Context, service triggers.Service, args []string, st
 			return err
 		}
 		trigger, err := service.Upsert(ctx, triggers.UpsertParams{
-			WorkspaceID:    options["workspace"],
-			Key:            args[1],
-			InitiativeKey:  options["initiative"],
-			Kind:           options["kind"],
-			Status:         options["status"],
-			RuleSummary:    triggerFirstNonEmpty(options["rule"], options["summary"]),
-			RuleJSON:       options["rule_json"],
-			WorkItemTitle:  strings.ReplaceAll(options["title"], "_", " "),
-			NextEligibleAt: nextEligibleAt,
-			Cadence:        options["cadence"],
-			Cron:           strings.ReplaceAll(options["cron"], "_", " "),
-			QuietHours:     triggerFirstNonEmpty(options["quiet"], options["quiet_hours"]),
-			QuietTimezone:  triggerFirstNonEmpty(options["quiet_tz"], options["quiet_timezone"], options["timezone"]),
+			WorkspaceID:         options["workspace"],
+			Key:                 args[1],
+			InitiativeKey:       options["initiative"],
+			Kind:                options["kind"],
+			Status:              options["status"],
+			RuleSummary:         triggerFirstNonEmpty(options["rule"], options["summary"]),
+			RuleJSON:            options["rule_json"],
+			WorkItemTitle:       strings.ReplaceAll(options["title"], "_", " "),
+			NextEligibleAt:      nextEligibleAt,
+			Cadence:             options["cadence"],
+			Cron:                strings.ReplaceAll(options["cron"], "_", " "),
+			QuietHours:          triggerFirstNonEmpty(options["quiet"], options["quiet_hours"]),
+			QuietTimezone:       triggerFirstNonEmpty(options["quiet_tz"], options["quiet_timezone"], options["timezone"]),
+			EventType:           triggerFirstNonEmpty(options["event"], options["event_type"]),
+			MatchStatus:         options["match_status"],
+			MatchPreviousStatus: options["match_previous_status"],
+			MatchTaskID:         options["match_task_id"],
+			MatchScope:          options["match_scope"],
 		})
 		if err != nil {
 			return err
@@ -117,13 +122,20 @@ func RunTrigger(ctx context.Context, service triggers.Service, args []string, st
 		if err != nil {
 			return err
 		}
-		evaluateAt, err := parseTriggerEvaluateAt(options["now"])
-		if err != nil {
-			return err
+		var result triggers.DueEvaluationResult
+		var evaluateErr error
+		if triggerEvaluateUsesEvents(options) {
+			result, evaluateErr = service.EvaluateEvents(ctx)
+		} else {
+			var evaluateAt time.Time
+			evaluateAt, evaluateErr = parseTriggerEvaluateAt(options["now"])
+			if evaluateErr != nil {
+				return evaluateErr
+			}
+			result, evaluateErr = service.EvaluateDue(ctx, evaluateAt)
 		}
-		result, err := service.EvaluateDue(ctx, evaluateAt)
-		if err != nil {
-			return err
+		if evaluateErr != nil {
+			return evaluateErr
 		}
 		if jsonOutput {
 			return WriteJSON(stdout, newTriggerEvaluateView(result))
@@ -395,6 +407,16 @@ func triggerFirstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func triggerEvaluateUsesEvents(options map[string]string) bool {
+	for _, key := range []string{"source", "mode"} {
+		value := strings.ToLower(strings.TrimSpace(options[key]))
+		if value == "event" || value == "events" || value == "internal_events" {
+			return true
+		}
+	}
+	return strings.EqualFold(strings.TrimSpace(options["events"]), "true")
 }
 
 func triggerReadiness(item sqlite.AutomationTrigger) string {
