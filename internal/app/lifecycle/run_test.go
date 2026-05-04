@@ -1692,6 +1692,76 @@ func TestRunWorkExecuteSurfacesFailedDispatchedRun(t *testing.T) {
 	}
 }
 
+func TestRunWorkExecuteFailsExactCommandThroughRepoDriver(t *testing.T) {
+	t.Setenv("ODIN_CODEX_DRIVER", "")
+	t.Setenv("HOME", t.TempDir())
+
+	root := testRepoRoot(t)
+	installRepoCodexDriverScript(t, root)
+	payloadPath := filepath.Join(t.TempDir(), "payload.json")
+	if err := os.WriteFile(payloadPath, []byte(`{"body":"operator visible exact command failure"}`), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	run := func(args ...string) string {
+		t.Helper()
+		var output bytes.Buffer
+		if err := Run(context.Background(), root, args, strings.NewReader(""), &output); err != nil {
+			t.Fatalf("Run(%v) error = %v\noutput=%s", args, err, output.String())
+		}
+		return output.String()
+	}
+
+	run("project", "select", testProjectKey)
+	run("transition", "set", "cutover", "confirm", "because", "exact command failure test")
+	run(
+		"intake", "raw", "create",
+		"--source", "operator",
+		"--project", testProjectKey,
+		"--title", "run this exact command: printf 'operator visible failure proof' >&2; exit 42",
+		"--type", "request",
+		"--dedup-key", "exact-command-failure-intake",
+		"--requested-by", "codex",
+		"--payload-file", payloadPath,
+		"--json",
+	)
+	run("intake", "process", "--id", "intake-1", "--json")
+	accepted := run("review", "act", "intake-review:1", "accept", "--json")
+	if !strings.Contains(accepted, `"work_created": true`) {
+		t.Fatalf("accept output = %s, want promoted work", accepted)
+	}
+	dispatched := run("work", "dispatch", "--task", "intake-review-1", "--json")
+	if !strings.Contains(dispatched, `"status": "running"`) {
+		t.Fatalf("dispatch output = %s, want running task", dispatched)
+	}
+
+	executed := run("work", "execute", "--task", "intake-review-1", "--json")
+	if !strings.Contains(executed, `"executed": true`) || !strings.Contains(executed, `"status": "failed"`) || !strings.Contains(executed, "operator visible failure proof") {
+		t.Fatalf("execute output = %s, want visible failed execution", executed)
+	}
+
+	repeatDispatch := run("work", "dispatch", "--task", "intake-review-1", "--json")
+	if !strings.Contains(repeatDispatch, `"dispatched": false`) || !strings.Contains(repeatDispatch, `"reason": "task_not_queued"`) {
+		t.Fatalf("repeat dispatch output = %s, want safe non-duplicate dispatch", repeatDispatch)
+	}
+	repeatExecute := run("work", "execute", "--task", "intake-review-1", "--json")
+	if !strings.Contains(repeatExecute, `"executed": false`) || !strings.Contains(repeatExecute, `"reason": "task_not_running"`) {
+		t.Fatalf("repeat execute output = %s, want safe non-duplicate execute", repeatExecute)
+	}
+
+	runsOutput := run("runs", "--json")
+	if !strings.Contains(runsOutput, `"status": "failed"`) {
+		t.Fatalf("runs output = %s, want failed terminal run", runsOutput)
+	}
+	logsOutput := run("logs", "--json")
+	if !strings.Contains(logsOutput, `"type": "run.finished"`) || !strings.Contains(logsOutput, `"status": "failed"`) || !strings.Contains(logsOutput, "operator visible failure proof") {
+		t.Fatalf("logs output = %s, want auditable failed terminal run", logsOutput)
+	}
+	statusOutput := run("work", "status")
+	if !strings.Contains(statusOutput, "work_items=1") || !strings.Contains(statusOutput, "open_work_items=0") || !strings.Contains(statusOutput, "active_run_attempts=0") {
+		t.Fatalf("work status output = %s, want terminal failed work not open or active", statusOutput)
+	}
+}
+
 func TestRunCompanionGetJSON(t *testing.T) {
 	t.Parallel()
 
@@ -4092,6 +4162,23 @@ PY
 		t.Fatalf("Chmod(driver) error = %v", err)
 	}
 	t.Setenv("ODIN_CODEX_DRIVER", path)
+}
+
+func installRepoCodexDriverScript(t *testing.T, root string) {
+	t.Helper()
+
+	sourcePath := filepath.Join("..", "..", "..", "scripts", "drivers", "codex-headless.sh")
+	contents, err := os.ReadFile(sourcePath)
+	if err != nil {
+		t.Fatalf("ReadFile(%s) error = %v", sourcePath, err)
+	}
+	targetPath := filepath.Join(root, "scripts", "drivers", "codex-headless.sh")
+	if err := os.MkdirAll(filepath.Dir(targetPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll(driver dir) error = %v", err)
+	}
+	if err := os.WriteFile(targetPath, contents, 0o755); err != nil {
+		t.Fatalf("WriteFile(%s) error = %v", targetPath, err)
+	}
 }
 
 func seedDelegationSkillFixture(t *testing.T, root string) {
