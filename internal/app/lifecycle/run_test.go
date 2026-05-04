@@ -1762,6 +1762,70 @@ func TestRunWorkExecuteFailsExactCommandThroughRepoDriver(t *testing.T) {
 	}
 }
 
+func TestRunWorkRetryRequeuesTerminalFailedWorkOnce(t *testing.T) {
+	t.Setenv("ODIN_CODEX_DRIVER", "")
+	t.Setenv("HOME", t.TempDir())
+
+	root := testRepoRoot(t)
+	installRepoCodexDriverScript(t, root)
+	payloadPath := filepath.Join(t.TempDir(), "payload.json")
+	if err := os.WriteFile(payloadPath, []byte(`{"body":"operator retry proof"}`), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	run := func(args ...string) string {
+		t.Helper()
+		var output bytes.Buffer
+		if err := Run(context.Background(), root, args, strings.NewReader(""), &output); err != nil {
+			t.Fatalf("Run(%v) error = %v\noutput=%s", args, err, output.String())
+		}
+		return output.String()
+	}
+
+	run("project", "select", testProjectKey)
+	run("transition", "set", "cutover", "confirm", "because", "retry failed work test")
+	run(
+		"intake", "raw", "create",
+		"--source", "operator",
+		"--project", testProjectKey,
+		"--title", "run this exact command: printf 'operator retry failure proof' >&2; exit 42",
+		"--type", "request",
+		"--dedup-key", "retry-failure-intake",
+		"--requested-by", "codex",
+		"--payload-file", payloadPath,
+		"--json",
+	)
+	run("intake", "process", "--id", "intake-1", "--json")
+	run("review", "act", "intake-review:1", "accept", "--json")
+	run("work", "dispatch", "--task", "intake-review-1", "--json")
+	run("work", "execute", "--task", "intake-review-1", "--json")
+
+	retryOutput := run("work", "retry", "--task", "intake-review-1", "--json")
+	if !strings.Contains(retryOutput, `"retried": true`) || !strings.Contains(retryOutput, `"reason": "retried"`) || !strings.Contains(retryOutput, `"status": "queued"`) || !strings.Contains(retryOutput, `"retry_count": 1`) {
+		t.Fatalf("retry output = %s, want requeued failed task", retryOutput)
+	}
+	repeatRetryOutput := run("work", "retry", "--task", "intake-review-1", "--json")
+	if !strings.Contains(repeatRetryOutput, `"retried": false`) || !strings.Contains(repeatRetryOutput, `"reason": "already_queued"`) || !strings.Contains(repeatRetryOutput, `"retry_count": 1`) {
+		t.Fatalf("repeat retry output = %s, want idempotent already queued", repeatRetryOutput)
+	}
+
+	dispatchOutput := run("work", "dispatch", "--task", "intake-review-1", "--json")
+	if !strings.Contains(dispatchOutput, `"dispatched": true`) || !strings.Contains(dispatchOutput, `"attempt": 2`) || !strings.Contains(dispatchOutput, `"status": "running"`) {
+		t.Fatalf("dispatch output = %s, want new second run attempt", dispatchOutput)
+	}
+	runsOutput := run("runs", "--json")
+	if strings.Count(runsOutput, `"task_key": "intake-review-1"`) != 2 || !strings.Contains(runsOutput, `"attempt": 1`) || !strings.Contains(runsOutput, `"attempt": 2`) || !strings.Contains(runsOutput, `"status": "failed"`) || !strings.Contains(runsOutput, `"status": "running"`) {
+		t.Fatalf("runs output = %s, want original failed run plus recovered running attempt", runsOutput)
+	}
+	logsOutput := run("logs", "--json")
+	if !strings.Contains(logsOutput, `"type": "task.queue_state_changed"`) || !strings.Contains(logsOutput, `"retry_count": 1`) {
+		t.Fatalf("logs output = %s, want auditable retry queue-state event", logsOutput)
+	}
+	statusOutput := run("work", "status")
+	if !strings.Contains(statusOutput, "work_items=1") || !strings.Contains(statusOutput, "open_work_items=1") || !strings.Contains(statusOutput, "active_run_attempts=1") {
+		t.Fatalf("work status output = %s, want active recovered run", statusOutput)
+	}
+}
+
 func TestRunCompanionGetJSON(t *testing.T) {
 	t.Parallel()
 

@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"odin-os/internal/cli/scope"
 	"odin-os/internal/core/projects"
@@ -20,7 +21,7 @@ import (
 	trackerintake "odin-os/internal/tracker/intake"
 )
 
-const workUsage = "usage: odin work status|profiles|start --project <key> --title <text>|intake --project <key> [--dry-run]|dispatch [--task <id|key>] [--json]|execute --task <id|key> [--json]"
+const workUsage = "usage: odin work status|profiles|start --project <key> --title <text>|intake --project <key> [--dry-run]|dispatch [--task <id|key>] [--json]|execute --task <id|key> [--json]|retry --task <id|key> [--json]"
 
 var newIntakeTracker = trackerintake.NewGitHubTracker
 
@@ -71,6 +72,8 @@ func RunWork(ctx context.Context, store *sqlite.Store, projectRegistry projects.
 		return runWorkDispatch(ctx, store, projectRegistry, args[1:], stdout, options...)
 	case "execute":
 		return runWorkExecute(ctx, store, projectRegistry, args[1:], stdout, options...)
+	case "retry":
+		return runWorkRetry(ctx, store, projectRegistry, args[1:], stdout, options...)
 	default:
 		_, err := fmt.Fprintf(stdout, "unknown work command: %s\n%s\n", args[0], workUsage)
 		return err
@@ -221,6 +224,38 @@ func runWorkExecute(ctx context.Context, store *sqlite.Store, projectRegistry pr
 	return writeErr
 }
 
+func runWorkRetry(ctx context.Context, store *sqlite.Store, projectRegistry projects.Registry, args []string, stdout io.Writer, options ...WorkOptions) error {
+	params := parseWorkStartArgs(args)
+	jsonOutput := parseBoolFlag(params, "json")
+	if _, ok := params["help"]; ok {
+		_, err := fmt.Fprintln(stdout, "usage: odin work retry --task <id|key> [--json]")
+		return err
+	}
+	taskRef := strings.TrimSpace(params["task"])
+	if taskRef == "" {
+		return fmt.Errorf("usage: odin work retry --task <id|key> [--json]")
+	}
+
+	jobService := jobs.Service{Store: store, Registry: projectRegistry}
+	if len(options) > 0 && options[0].JobService.Store != nil {
+		jobService = options[0].JobService
+	}
+	task, err := findWorkTask(ctx, store, taskRef)
+	if err != nil {
+		return err
+	}
+	outcome, err := jobService.RetryFailedTask(ctx, task.ID)
+	if err != nil {
+		return err
+	}
+	view := workRetryOutcomeView(outcome)
+	if jsonOutput {
+		return WriteJSON(stdout, view)
+	}
+	_, err = fmt.Fprintf(stdout, "retried=%t reason=%s task=%s status=%s retry_count=%d\n", view.Retried, view.Reason, view.Task.Key, view.Task.Status, view.Task.RetryCount)
+	return err
+}
+
 func findWorkTask(ctx context.Context, store *sqlite.Store, ref string) (sqlite.Task, error) {
 	ref = strings.TrimSpace(ref)
 	idRef := strings.TrimPrefix(ref, "task-")
@@ -238,6 +273,48 @@ func findWorkTask(ctx context.Context, store *sqlite.Store, ref string) (sqlite.
 		}
 	}
 	return sqlite.Task{}, sql.ErrNoRows
+}
+
+type workRetryView struct {
+	Retried bool              `json:"retried"`
+	Reason  string            `json:"reason"`
+	Task    workRetryTaskView `json:"task,omitempty"`
+}
+
+type workRetryTaskView struct {
+	ID             int64  `json:"id"`
+	ProjectID      int64  `json:"project_id"`
+	Key            string `json:"key"`
+	Status         string `json:"status"`
+	RetryCount     int    `json:"retry_count"`
+	MaxAttempts    int    `json:"max_attempts"`
+	LastError      string `json:"last_error,omitempty"`
+	NextEligibleAt string `json:"next_eligible_at,omitempty"`
+}
+
+func workRetryOutcomeView(outcome jobs.RetryOutcome) workRetryView {
+	view := workRetryView{
+		Retried: outcome.Retried,
+		Reason:  outcome.Reason,
+	}
+	if view.Reason == "" {
+		view.Reason = "unknown"
+	}
+	if outcome.Task.ID != 0 {
+		view.Task = workRetryTaskView{
+			ID:          outcome.Task.ID,
+			ProjectID:   outcome.Task.ProjectID,
+			Key:         outcome.Task.Key,
+			Status:      outcome.Task.Status,
+			RetryCount:  outcome.Task.RetryCount,
+			MaxAttempts: outcome.Task.MaxAttempts,
+			LastError:   outcome.Task.LastError,
+		}
+		if !outcome.Task.NextEligibleAt.IsZero() {
+			view.Task.NextEligibleAt = outcome.Task.NextEligibleAt.UTC().Format(time.RFC3339Nano)
+		}
+	}
+	return view
 }
 
 func workDispatchOutcomeView(outcome jobs.DispatchOutcome) workDispatchView {

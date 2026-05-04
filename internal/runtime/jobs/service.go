@@ -73,6 +73,12 @@ type RunExecutionOutcome struct {
 	Reason   string
 }
 
+type RetryOutcome struct {
+	Task    sqlite.Task
+	Retried bool
+	Reason  string
+}
+
 type ExecutionRequest struct {
 	PromptOverride string
 	Metadata       map[string]string
@@ -602,6 +608,42 @@ func (service Service) DispatchTaskRunAttempt(ctx context.Context, taskID int64)
 		Dispatched: true,
 		Reason:     "dispatched",
 	}, nil
+}
+
+func (service Service) RetryFailedTask(ctx context.Context, taskID int64) (RetryOutcome, error) {
+	if service.Store == nil {
+		return RetryOutcome{}, fmt.Errorf("job store is required")
+	}
+	task, err := service.Store.GetTask(ctx, taskID)
+	if err != nil {
+		return RetryOutcome{}, err
+	}
+
+	switch task.Status {
+	case "failed":
+		lastError := strings.TrimSpace(task.TerminalReason)
+		if lastError == "" {
+			lastError = strings.TrimSpace(task.Summary)
+		}
+		if lastError == "" {
+			lastError = "operator requested retry after terminal failure"
+		}
+		updated, err := service.Store.IncrementTaskRetry(ctx, sqlite.IncrementTaskRetryParams{
+			TaskID:         task.ID,
+			LastError:      lastError,
+			NextEligibleAt: service.now(),
+		})
+		if err != nil {
+			return RetryOutcome{}, err
+		}
+		return RetryOutcome{Task: updated, Retried: true, Reason: "retried"}, nil
+	case "queued":
+		return RetryOutcome{Task: task, Retried: false, Reason: "already_queued"}, nil
+	case "running", "preparing", "executing":
+		return RetryOutcome{Task: task, Retried: false, Reason: "already_active"}, nil
+	default:
+		return RetryOutcome{Task: task, Retried: false, Reason: "task_not_failed"}, nil
+	}
 }
 
 func (service Service) ExecuteDispatchedRun(ctx context.Context, taskID int64) (RunExecutionOutcome, error) {
