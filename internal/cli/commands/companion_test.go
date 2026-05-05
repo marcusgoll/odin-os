@@ -133,6 +133,8 @@ func TestParseCompanionDelegateJSON(t *testing.T) {
 		"dashboard",
 		"--goal",
 		"audit delegated work",
+		"--intent",
+		"governance",
 		"--json",
 	})
 	if err != nil {
@@ -155,6 +157,9 @@ func TestParseCompanionDelegateJSON(t *testing.T) {
 	}
 	if command.Goal != "audit delegated work" {
 		t.Fatalf("Goal = %q, want audit delegated work", command.Goal)
+	}
+	if command.Intent != "governance" {
+		t.Fatalf("Intent = %q, want governance", command.Intent)
 	}
 	if !command.JSON {
 		t.Fatal("JSON = false, want true")
@@ -238,6 +243,9 @@ func TestParseCompanionDelegateRejectsMissingInputs(t *testing.T) {
 	}
 	if _, err := ParseCompanion([]string{"delegate", "primary", "--portal-track", "admin", "--surface", "dashboard"}); err == nil {
 		t.Fatal("ParseCompanion() error = nil, want missing agent error")
+	}
+	if _, err := ParseCompanion([]string{"delegate", "primary", "--agent", "portal-delivery-agent", "--portal-track", "admin", "--surface", "dashboard", "--intent", "banana"}); err == nil {
+		t.Fatal("ParseCompanion() error = nil, want unsupported intent error")
 	}
 }
 

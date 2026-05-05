@@ -3979,6 +3979,124 @@ func TestCompanionDelegateCreateIsIdempotentForSameLogicalRequest(t *testing.T) 
 	}
 }
 
+func TestCompanionDelegateGovernanceIntentRequiresApproval(t *testing.T) {
+	configureLifecycleHarnessDriver(t)
+	t.Setenv("HOME", t.TempDir())
+
+	root := testRepoRoot(t)
+	seedDelegationSkillFixture(t, root)
+	if err := Run(context.Background(), root, []string{"project", "select", "odin-core"}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+		t.Fatalf("Run(project select odin-core) error = %v", err)
+	}
+	if err := Run(context.Background(), root, []string{"transition", "set", "cutover", "confirm", "because", "delegation governance intent test"}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+		t.Fatalf("Run(transition set) error = %v", err)
+	}
+
+	var output bytes.Buffer
+	err := Run(context.Background(), root, []string{
+		"companion",
+		"delegate",
+		"primary",
+		"--agent",
+		"portal-delivery-agent",
+		"--portal-track",
+		"odin-core",
+		"--surface",
+		"policy",
+		"--goal",
+		"audit approval-aware delegated governance work",
+		"--intent",
+		"governance",
+		"--json",
+	}, strings.NewReader(""), &output)
+	if err == nil {
+		t.Fatalf("Run(companion delegate governance) error = nil, want approval-gated delegation\nstdout:\n%s", output.String())
+	}
+
+	var listOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"companion", "delegate", "list", "--json"}, strings.NewReader(""), &listOutput); err != nil {
+		t.Fatalf("Run(companion delegate list --json) error = %v\nstdout:\n%s", err, listOutput.String())
+	}
+	for _, want := range []string{
+		`"status": "blocked"`,
+		`"mutation_mode": "governance"`,
+		`"execution_intent": "governance"`,
+		`"execution_intent_source": "companion_delegate"`,
+	} {
+		if !strings.Contains(listOutput.String(), want) {
+			t.Fatalf("delegate list output = %s, want %s", listOutput.String(), want)
+		}
+	}
+	var listPayload struct {
+		Delegations []struct {
+			ID     int64  `json:"id"`
+			Status string `json:"status"`
+		} `json:"delegations"`
+	}
+	if err := json.Unmarshal(listOutput.Bytes(), &listPayload); err != nil {
+		t.Fatalf("delegate list json = %v\n%s", err, listOutput.String())
+	}
+	if len(listPayload.Delegations) == 0 {
+		t.Fatalf("delegate list = %s, want blocked delegation rows", listOutput.String())
+	}
+
+	var retryOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"companion", "delegate", "retry", strconv.FormatInt(listPayload.Delegations[0].ID, 10), "--json"}, strings.NewReader(""), &retryOutput); err != nil {
+		t.Fatalf("Run(companion delegate retry approval-blocked) error = %v\nstdout:\n%s", err, retryOutput.String())
+	}
+	for _, want := range []string{
+		`"retried": false`,
+		`"reason": "approval_required"`,
+		`"status": "blocked"`,
+		`"execution_intent": "governance"`,
+	} {
+		if !strings.Contains(retryOutput.String(), want) {
+			t.Fatalf("retry output = %s, want %s", retryOutput.String(), want)
+		}
+	}
+
+	var approvalsOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"approvals", "all", "--json"}, strings.NewReader(""), &approvalsOutput); err != nil {
+		t.Fatalf("Run(approvals all --json) error = %v", err)
+	}
+	if output := approvalsOutput.String(); !strings.Contains(output, `"status": "pending"`) || !strings.Contains(output, `"task_key": "odin-core-policy-`) {
+		t.Fatalf("approvals output = %s, want pending approval for delegated governance child", output)
+	}
+
+	var jobsOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"jobs", "--json"}, strings.NewReader(""), &jobsOutput); err != nil {
+		t.Fatalf("Run(jobs --json) error = %v", err)
+	}
+	for _, want := range []string{
+		`"status": "blocked"`,
+		`"blocked_reason": "approval_required"`,
+		`"execution_intent": "governance"`,
+		`"execution_intent_source": "companion_delegate"`,
+	} {
+		if !strings.Contains(jobsOutput.String(), want) {
+			t.Fatalf("jobs output = %s, want %s", jobsOutput.String(), want)
+		}
+	}
+
+	var logsOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"logs", "--json"}, strings.NewReader(""), &logsOutput); err != nil {
+		t.Fatalf("Run(logs --json) error = %v", err)
+	}
+	for _, want := range []string{
+		`"type": "delegation.created"`,
+		`"mutation_mode": "governance"`,
+		`"type": "approval.requested"`,
+		`"type": "task.status_changed"`,
+		`"status": "blocked"`,
+		`"execution_intent": "governance"`,
+		`"execution_intent_source": "companion_delegate"`,
+	} {
+		if !strings.Contains(logsOutput.String(), want) {
+			t.Fatalf("logs output = %s, want %s", logsOutput.String(), want)
+		}
+	}
+}
+
 func TestCompanionDelegateListShowsFailedPartialLifecycle(t *testing.T) {
 	configureLifecycleHarnessDriverStatus(t, "failed", "delegated child failed proof")
 	t.Setenv("HOME", t.TempDir())

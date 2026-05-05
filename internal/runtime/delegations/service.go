@@ -32,6 +32,7 @@ type RunInput struct {
 	AgentKey      string
 	RequestedBy   string
 	CompanionID   int64
+	Intent        string
 	Inputs        map[string]string
 }
 
@@ -114,6 +115,24 @@ func (service Service) RetryDelegation(ctx context.Context, delegationID int64) 
 		result.Reason = "missing_child_task"
 		return result, nil
 	}
+	childTask, err := service.Store.GetTask(ctx, *delegation.ChildTaskID)
+	if err != nil {
+		return RetryResult{}, err
+	}
+	if service.delegationRetryBlockedByApproval(ctx, childTask) {
+		if err := service.Store.RecordDelegationRetryEvent(ctx, sqlite.RecordDelegationRetryEventParams{
+			DelegationID: delegation.ID,
+			EventType:    runtimeevents.EventDelegationRetrySkipped,
+			Reason:       "approval_required",
+		}); err != nil {
+			return RetryResult{}, err
+		}
+		result, err := service.retryResult(ctx, delegation, false, "approval_required")
+		if err != nil {
+			return RetryResult{}, err
+		}
+		return result, nil
+	}
 	if err := service.Store.RecordDelegationRetryEvent(ctx, sqlite.RecordDelegationRetryEventParams{
 		DelegationID: delegation.ID,
 		EventType:    runtimeevents.EventDelegationRetryRequested,
@@ -122,10 +141,6 @@ func (service Service) RetryDelegation(ctx context.Context, delegationID int64) 
 		return RetryResult{}, err
 	}
 
-	childTask, err := service.Store.GetTask(ctx, *delegation.ChildTaskID)
-	if err != nil {
-		return RetryResult{}, err
-	}
 	inputs := retryInputsFromDelegation(delegation)
 	agentKey := cleanInput(inputs["agent_key"])
 	spec := childSpecFromDelegation(delegation, inputs)
@@ -213,7 +228,7 @@ func (service Service) RunAgent(ctx context.Context, input RunInput) (sqlite.Tas
 		RequestedBy:           requestedBy,
 		Key:                   delegationParentTaskKey(input),
 		CompanionID:           input.CompanionID,
-		ExecutionIntent:       "read_only",
+		ExecutionIntent:       delegationRunIntent(input.Intent),
 		ExecutionIntentSource: "companion_delegate",
 	})
 	if err != nil {
@@ -378,12 +393,14 @@ func (service Service) runChildDelegation(ctx context.Context, parentTask sqlite
 	}
 
 	detailsJSON, err := json.Marshal(map[string]string{
-		"agent_key":    input.AgentKey,
-		"portal_track": cleanInput(input.Inputs["portal_track"]),
-		"surface":      cleanInput(input.Inputs["surface"]),
-		"goal":         cleanInput(input.Inputs["goal"]),
-		"skill_key":    spec.SkillKey,
-		"role":         spec.Role,
+		"agent_key":               input.AgentKey,
+		"portal_track":            cleanInput(input.Inputs["portal_track"]),
+		"surface":                 cleanInput(input.Inputs["surface"]),
+		"goal":                    cleanInput(input.Inputs["goal"]),
+		"skill_key":               spec.SkillKey,
+		"role":                    spec.Role,
+		"execution_intent":        delegationExecutionIntent(spec.MutationMode),
+		"execution_intent_source": "companion_delegate",
 	})
 	if err != nil {
 		return sqlite.Delegation{}, fmt.Errorf("create delegation: %w", err)
@@ -441,11 +458,13 @@ func (service Service) runChildDelegation(ctx context.Context, parentTask sqlite
 	}
 
 	requestMetadata := map[string]string{
-		"agent_key":      input.AgentKey,
-		"delegation_id":  strconv.FormatInt(delegation.ID, 10),
-		"portal_track":   cleanInput(input.Inputs["portal_track"]),
-		"delegation_key": spec.DelegationKey,
-		"child_role":     spec.Role,
+		"agent_key":               input.AgentKey,
+		"delegation_id":           strconv.FormatInt(delegation.ID, 10),
+		"portal_track":            cleanInput(input.Inputs["portal_track"]),
+		"delegation_key":          spec.DelegationKey,
+		"child_role":              spec.Role,
+		"execution_intent":        delegationExecutionIntent(spec.MutationMode),
+		"execution_intent_source": "companion_delegate",
 	}
 	if spec.SkillKey != "" {
 		requestMetadata["requested_skill"] = spec.SkillKey
@@ -610,6 +629,17 @@ func isFailedDelegationTaskStatus(status string) bool {
 	}
 }
 
+func (service Service) delegationRetryBlockedByApproval(ctx context.Context, childTask sqlite.Task) bool {
+	if strings.TrimSpace(childTask.BlockedReason) == "approval_required" {
+		return true
+	}
+	approval, err := service.Store.GetLatestTaskApproval(ctx, childTask.ID)
+	if err != nil {
+		return false
+	}
+	return strings.TrimSpace(approval.Status) == "pending"
+}
+
 func delegationParentTaskKey(input RunInput) string {
 	agent := cleanInput(input.AgentKey)
 	portalTrack := cleanInput(input.Inputs["portal_track"])
@@ -622,6 +652,7 @@ func delegationParentTaskKey(input RunInput) string {
 		portalTrack,
 		surface,
 		goal,
+		delegationRunIntent(input.Intent),
 	}, "\x00")
 	sum := sha256.Sum256([]byte(digestInput))
 	digest := hex.EncodeToString(sum[:])[:16]
@@ -723,6 +754,16 @@ func retryInputsFromDelegation(delegation sqlite.Delegation) map[string]string {
 	return inputs
 }
 
+func delegationRunIntent(value string) string {
+	intent := strings.ToLower(strings.TrimSpace(value))
+	switch intent {
+	case "mutation", "governance", "destructive":
+		return intent
+	default:
+		return "read_only"
+	}
+}
+
 func childSpecFromDelegation(delegation sqlite.Delegation, inputs map[string]string) ChildSpec {
 	return ChildSpec{
 		DelegationKey:   delegation.DelegationKey,
@@ -795,7 +836,7 @@ func (service Service) recordDelegationArtifacts(ctx context.Context, delegation
 		"task_key":    childTask.Key,
 		"task_status": outcome.Task.Status,
 	}
-	for _, key := range []string{"agent_key", "delegation_id", "portal_track", "delegation_key", "child_role", "requested_skill", "effective_skill", "skill_source"} {
+	for _, key := range []string{"agent_key", "delegation_id", "portal_track", "delegation_key", "child_role", "requested_skill", "effective_skill", "skill_source", "execution_intent", "execution_intent_source"} {
 		if value := cleanInput(metadata[key]); value != "" {
 			runDetails[key] = value
 		}

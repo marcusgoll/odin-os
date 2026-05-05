@@ -2500,10 +2500,12 @@ func runCompanion(ctx context.Context, app bootstrap.App, args []string, stdout 
 			AgentKey:      command.AgentKey,
 			RequestedBy:   "companion:" + companion.Key,
 			CompanionID:   companion.ID,
+			Intent:        command.Intent,
 			Inputs: map[string]string{
 				"portal_track": command.PortalTrack,
 				"surface":      command.Surface,
 				"goal":         command.Goal,
+				"intent":       command.Intent,
 			},
 		})
 		if err != nil {
@@ -2702,8 +2704,22 @@ func renderCompanionDelegationView(delegation sqlite.Delegation, artifactCount i
 		ChildTaskID:   delegation.ChildTaskID,
 		ChildRunID:    delegation.ChildRunID,
 		Executor:      delegation.Executor,
-		ArtifactCount: artifactCount,
-		DetailsJSON:   delegation.DetailsJSON,
+		MutationMode:  delegation.MutationMode,
+		ExecutionIntent: func() string {
+			return delegationExecutionIntentView(delegation.MutationMode)
+		}(),
+		ExecutionIntentSource: "companion_delegate",
+		ArtifactCount:         artifactCount,
+		DetailsJSON:           delegation.DetailsJSON,
+	}
+}
+
+func delegationExecutionIntentView(mutationMode string) string {
+	switch strings.ToLower(strings.TrimSpace(mutationMode)) {
+	case "mutation", "governance", "destructive":
+		return strings.ToLower(strings.TrimSpace(mutationMode))
+	default:
+		return "read_only"
 	}
 }
 
@@ -2732,6 +2748,11 @@ func renderCompanionDelegationRunView(companionKey string, command commands.Comp
 			ChildTaskID:   delegation.ChildTaskID,
 			ChildRunID:    delegation.ChildRunID,
 			Executor:      delegation.Executor,
+			MutationMode:  delegation.MutationMode,
+			ExecutionIntent: func() string {
+				return delegationExecutionIntentView(delegation.MutationMode)
+			}(),
+			ExecutionIntentSource: "companion_delegate",
 		})
 	}
 
@@ -2743,6 +2764,7 @@ func renderCompanionDelegationRunView(companionKey string, command commands.Comp
 		PortalTrack:  command.PortalTrack,
 		Surface:      command.Surface,
 		Goal:         command.Goal,
+		Intent:       command.Intent,
 		ParentTask: commands.TaskCreateView{
 			ID:     parentTask.ID,
 			Key:    parentTask.Key,
