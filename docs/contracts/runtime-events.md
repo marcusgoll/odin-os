@@ -203,3 +203,15 @@ Raw intake processing remains on the `intake_items` SQLite authority. When deter
 - `goal.created`
 
 The processing payload must include the source intake ID, route decision, classification result, and created goal ID when a goal is created. Intake conversion must not approve, run, or mutate external systems.
+
+## Browser session handoff expectation
+
+Manual Huginn browser login and authenticated read-only session reuse are design-only until `docs/contracts/browser-session-handoff.md` is implemented. The future implementation must keep browser session metadata in SQLite, keep browser profile files under `ODIN_ROOT`, and append profile lifecycle events through the runtime event stream:
+
+- `browser.session_created`
+- `browser.session_login_requested`
+- `browser.session_verified`
+- `browser.session_revoked`
+- `goal.waiting_for_human_login`
+
+Browser session events must not include passwords, cookies, tokens, passkey material, TOTP values, backup codes, or raw credential prompts. Session verification may unblock a waiting goal only through normal policy checks; it must not approve or execute the goal by itself.
