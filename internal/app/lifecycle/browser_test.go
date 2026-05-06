@@ -3,6 +3,7 @@ package lifecycle
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -70,4 +71,107 @@ func TestRunBrowserRunRejectsUnsafeInputs(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "mutation action") {
 		t.Fatalf("Run(browser mutation action) error = %v output=%s, want mutation action rejection", err, actionOut.String())
 	}
+}
+
+func TestRunBrowserSessionCreateListShowStatusAndRevoke(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	root := testRepoRoot(t)
+
+	run := func(args ...string) string {
+		t.Helper()
+		var output bytes.Buffer
+		if err := Run(context.Background(), root, args, strings.NewReader(""), &output); err != nil {
+			t.Fatalf("Run(%v) error = %v\noutput=%s", args, err, output.String())
+		}
+		return output.String()
+	}
+
+	created := decodeBrowserSessionEnvelope(t, []byte(run(
+		"browser", "session", "create",
+		"--name", "google-main",
+		"--domain", "google.com",
+		"--permission-tier", "authenticated_read",
+		"--account-hint", "marcus",
+		"--json",
+	)))
+	if created.ID != 1 || created.Name != "google-main" || created.Domain != "google.com" || created.PermissionTier != "authenticated_readonly" || created.Status != "created" {
+		t.Fatalf("created session = %+v, want created google session metadata", created)
+	}
+	if created.ProfilePath != "browser-sessions/profiles/google-main" {
+		t.Fatalf("created.ProfilePath = %q, want default profile metadata path", created.ProfilePath)
+	}
+
+	list := run("browser", "session", "list", "--json")
+	for _, want := range []string{`"sessions":`, `"name": "google-main"`, `"domain": "google.com"`} {
+		if !strings.Contains(list, want) {
+			t.Fatalf("list output = %s, want %s", list, want)
+		}
+	}
+
+	shown := decodeBrowserSessionEnvelope(t, []byte(run("browser", "session", "show", "--id", int64String(created.ID), "--json")))
+	if shown.ID != created.ID || shown.Name != created.Name {
+		t.Fatalf("shown session = %+v, want created session", shown)
+	}
+
+	verified := decodeBrowserSessionEnvelope(t, []byte(run("browser", "session", "status", "--id", int64String(created.ID), "--status", "verified", "--json")))
+	if verified.Status != "verified" || verified.LastVerifiedAt == "" {
+		t.Fatalf("verified session = %+v, want verified with timestamp", verified)
+	}
+
+	revoked := decodeBrowserSessionEnvelope(t, []byte(run("browser", "session", "revoke", "--id", int64String(created.ID), "--json")))
+	if revoked.Status != "revoked" || revoked.RevokedAt == "" {
+		t.Fatalf("revoked session = %+v, want revoked with timestamp", revoked)
+	}
+
+	logs := run("logs", "--json")
+	for _, want := range []string{`"type": "browser.session_created"`, `"type": "browser.session_status_changed"`, `"type": "browser.session_revoked"`} {
+		if !strings.Contains(logs, want) {
+			t.Fatalf("logs output = %s, want audit event %s", logs, want)
+		}
+	}
+	for _, forbidden := range []string{"password", "totp", "backup_code", "cookie", "profile_bytes"} {
+		if strings.Contains(strings.ToLower(logs), forbidden) {
+			t.Fatalf("logs output contains forbidden credential/profile byte token %q: %s", forbidden, logs)
+		}
+	}
+}
+
+func TestRunBrowserSessionValidationErrors(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	root := testRepoRoot(t)
+
+	var output bytes.Buffer
+	err := Run(context.Background(), root, []string{"browser", "session", "create", "--domain", "google.com", "--permission-tier", "authenticated_read", "--json"}, strings.NewReader(""), &output)
+	if err == nil || !strings.Contains(err.Error(), "--name is required") {
+		t.Fatalf("Run(browser session create missing name) error = %v output=%s, want name required", err, output.String())
+	}
+
+	output.Reset()
+	err = Run(context.Background(), root, []string{"browser", "session", "status", "--id", "1", "--status", "invalid", "--json"}, strings.NewReader(""), &output)
+	if err == nil || !strings.Contains(err.Error(), "--status must be") {
+		t.Fatalf("Run(browser session status invalid) error = %v output=%s, want status validation", err, output.String())
+	}
+}
+
+type browserSessionJSON struct {
+	ID             int64  `json:"id"`
+	Name           string `json:"name"`
+	Domain         string `json:"domain"`
+	AccountHint    string `json:"account_hint"`
+	PermissionTier string `json:"permission_tier"`
+	Status         string `json:"status"`
+	ProfilePath    string `json:"profile_path"`
+	LastVerifiedAt string `json:"last_verified_at,omitempty"`
+	RevokedAt      string `json:"revoked_at,omitempty"`
+}
+
+func decodeBrowserSessionEnvelope(t *testing.T, payload []byte) browserSessionJSON {
+	t.Helper()
+	var envelope struct {
+		Session browserSessionJSON `json:"session"`
+	}
+	if err := json.Unmarshal(payload, &envelope); err != nil {
+		t.Fatalf("browser session json decode error = %v; output=%s", err, string(payload))
+	}
+	return envelope.Session
 }

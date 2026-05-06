@@ -131,14 +131,23 @@ Forbidden goal types for session reuse:
 
 ## CLI Contract
 
-The future CLI must extend the existing `odin browser` command group:
+The metadata foundation extends the existing `odin browser` command group:
 
 ```bash
-odin browser session create --profile <key> --domain <domain> --account-label <label> --tier authenticated_readonly --allowed-goal-type authenticated_read --expires-at <rfc3339> --json
-odin browser session list [--status <status>] [--domain <domain>] [--json]
-odin browser session login --profile <key> [--goal-id <id>] --json
-odin browser session verify --profile <key> [--goal-id <id>] --json
-odin browser session revoke --profile <key> --reason <text> --json
+odin browser session create --name <name> --domain <domain> --permission-tier <tier> [--account-hint <hint>] [--profile-path <path>] --json
+odin browser session list --json
+odin browser session show --id <id> --json
+odin browser session status --id <id> --status <status> --json
+odin browser session revoke --id <id> --json
+```
+
+`--permission-tier authenticated_read` is accepted by the CLI as an operator-facing alias for stored tier `authenticated_readonly`. If `--profile-path` is omitted, Odin records the metadata-only default `browser-sessions/profiles/<sanitized-name>` and does not create a directory.
+
+Future manual handoff slices may add:
+
+```bash
+odin browser session login --id <id> [--goal-id <id>] --json
+odin browser session verify --id <id> [--goal-id <id>] --json
 ```
 
 JSON output should follow the existing Odin style: stable top-level envelopes, snake-case keys, and explicit IDs. Suggested envelopes:
@@ -147,25 +156,26 @@ JSON output should follow the existing Odin style: stable top-level envelopes, s
 {
   "session": {
     "id": 1,
-    "profile_key": "marcus-example",
+    "name": "marcus-example",
     "status": "verified",
     "domain": "example.com",
-    "account_label": "marcus-example",
+    "account_hint": "marcus-example",
     "permission_tier": "authenticated_readonly",
-    "allowed_goal_types": ["authenticated_read"],
-    "expires_at": "2026-06-05T00:00:00Z",
+    "profile_path": "browser-sessions/profiles/marcus-example",
+    "created_at": "2026-05-06T00:00:00Z",
+    "updated_at": "2026-05-06T00:00:00Z",
     "last_verified_at": "2026-05-06T00:00:00Z"
   }
 }
 ```
 
-`login --json` should return a handoff object without secrets:
+Future `login --json` should return a handoff object without secrets:
 
 ```json
 {
   "session": {
     "id": 1,
-    "profile_key": "marcus-example",
+    "name": "marcus-example",
     "status": "login_requested"
   },
   "handoff": {
@@ -270,7 +280,7 @@ Rules:
 ## Implementation Slices
 
 1. Contract tests and store schema: add browser session profile metadata tables, event constants, and tests proving create/verify/revoke append runtime events in the same transaction.
-2. CLI metadata surface: add `odin browser session create|list|revoke` with JSON output, no browser launch, and fail-closed policy.
+2. CLI metadata surface: add `odin browser session create|list|show|status|revoke` with JSON output, no browser launch, and fail-closed policy.
 3. Login handoff request surface: add `odin browser session login` that records `login_requested` and returns a placeholder private handoff URL only after NoVNC/Tailscale prerequisites are configured.
 4. Manual verification surface: add `odin browser session verify` with read-only domain/account checks and no credential handling.
 5. Goal waiting integration: add `waiting_for_human_login` status or blocker-specific goal event handling, then prove the runner skips waiting goals.
