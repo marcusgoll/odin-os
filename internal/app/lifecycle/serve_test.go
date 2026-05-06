@@ -675,6 +675,308 @@ service:
 	}
 }
 
+func TestServeGoalTickStartsApprovedGoal(t *testing.T) {
+	root := createRuntimeRoot(t)
+	writeRuntimeConfig(t, root, `
+version: 1
+runtime:
+  root: .
+service:
+  http_addr: 127.0.0.1:0
+  startup_recovery: false
+`)
+	seedHealthyRuntime(t, root)
+
+	store, err := sqlite.Open(filepath.Join(root, "data", "odin.db"))
+	if err != nil {
+		t.Fatalf("sqlite.Open() error = %v", err)
+	}
+	defer store.Close()
+
+	goal, err := store.CreateGoal(context.Background(), sqlite.CreateGoalParams{Title: "Serve approved goal"})
+	if err != nil {
+		t.Fatalf("CreateGoal() error = %v", err)
+	}
+	for _, status := range []sqlite.GoalStatus{sqlite.GoalStatusPlanned, sqlite.GoalStatusApprovedForExecution} {
+		if _, err := store.TransitionGoal(context.Background(), sqlite.TransitionGoalParams{GoalID: goal.ID, Status: status}); err != nil {
+			t.Fatalf("TransitionGoal(%s) error = %v", status, err)
+		}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	ctx = withServeLoopConfig(ctx, serveLoopConfig{
+		goalInterval: time.Hour,
+	})
+	time.AfterFunc(150*time.Millisecond, cancel)
+
+	var stdout bytes.Buffer
+	err = Run(ctx, root, []string{"serve"}, strings.NewReader(""), &stdout)
+	if err != nil && !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run(serve) error = %v\n%s", err, stdout.String())
+	}
+
+	got, err := store.GetGoal(context.Background(), goal.ID)
+	if err != nil {
+		t.Fatalf("GetGoal() error = %v", err)
+	}
+	if got.Status != sqlite.GoalStatusRunning || got.CurrentRunID == nil {
+		t.Fatalf("goal after serve = %+v, want running with active run", got)
+	}
+	runs, err := store.ListGoalRunsByGoalID(context.Background(), goal.ID)
+	if err != nil {
+		t.Fatalf("ListGoalRunsByGoalID() error = %v", err)
+	}
+	if len(runs) != 1 {
+		t.Fatalf("runs len = %d, want one active run from serve tick", len(runs))
+	}
+	counts := countServeGoalEvents(t, store)
+	if counts[string(runtimeevents.EventGoalRunnerObserved)] != 1 || counts[string(runtimeevents.EventGoalRunStarted)] != 1 {
+		t.Fatalf("goal event counts = %#v, want serve observed and started", counts)
+	}
+}
+
+func TestServeGoalTickDoesNotRunUnapprovedPlannedGoal(t *testing.T) {
+	root := createRuntimeRoot(t)
+	writeRuntimeConfig(t, root, `
+version: 1
+runtime:
+  root: .
+service:
+  http_addr: 127.0.0.1:0
+  startup_recovery: false
+`)
+	seedHealthyRuntime(t, root)
+
+	store, err := sqlite.Open(filepath.Join(root, "data", "odin.db"))
+	if err != nil {
+		t.Fatalf("sqlite.Open() error = %v", err)
+	}
+	defer store.Close()
+
+	goal, err := store.CreateGoal(context.Background(), sqlite.CreateGoalParams{Title: "Serve planned goal"})
+	if err != nil {
+		t.Fatalf("CreateGoal() error = %v", err)
+	}
+	if _, err := store.TransitionGoal(context.Background(), sqlite.TransitionGoalParams{GoalID: goal.ID, Status: sqlite.GoalStatusPlanned}); err != nil {
+		t.Fatalf("TransitionGoal(planned) error = %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	ctx = withServeLoopConfig(ctx, serveLoopConfig{
+		goalInterval: time.Hour,
+	})
+	time.AfterFunc(150*time.Millisecond, cancel)
+
+	var stdout bytes.Buffer
+	err = Run(ctx, root, []string{"serve"}, strings.NewReader(""), &stdout)
+	if err != nil && !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run(serve) error = %v\n%s", err, stdout.String())
+	}
+
+	got, err := store.GetGoal(context.Background(), goal.ID)
+	if err != nil {
+		t.Fatalf("GetGoal() error = %v", err)
+	}
+	if got.Status != sqlite.GoalStatusPlanned || got.CurrentRunID != nil {
+		t.Fatalf("goal after serve = %+v, want planned without active run", got)
+	}
+	runs, err := store.ListGoalRunsByGoalID(context.Background(), goal.ID)
+	if err != nil {
+		t.Fatalf("ListGoalRunsByGoalID() error = %v", err)
+	}
+	if len(runs) != 0 {
+		t.Fatalf("runs len = %d, want no run for unapproved planned goal", len(runs))
+	}
+}
+
+func TestServeGoalTickDoesNotRunConvertedIntakeGoalWithoutApproval(t *testing.T) {
+	root := createRuntimeRoot(t)
+	writeRuntimeConfig(t, root, `
+version: 1
+runtime:
+  root: .
+service:
+  http_addr: 127.0.0.1:0
+  startup_recovery: false
+`)
+	seedHealthyRuntime(t, root)
+
+	if err := Run(context.Background(), root, []string{
+		"intake", "raw", "create",
+		"--text", "Build a browser executor for Odin research goals",
+		"--json",
+	}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+		t.Fatalf("Run(intake raw create --text) error = %v", err)
+	}
+	if err := Run(context.Background(), root, []string{"intake", "process", "--id", "intake-1", "--json"}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+		t.Fatalf("Run(intake process) error = %v", err)
+	}
+
+	store, err := sqlite.Open(filepath.Join(root, "data", "odin.db"))
+	if err != nil {
+		t.Fatalf("sqlite.Open() error = %v", err)
+	}
+	defer store.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	ctx = withServeLoopConfig(ctx, serveLoopConfig{
+		goalInterval: time.Hour,
+	})
+	time.AfterFunc(150*time.Millisecond, cancel)
+
+	var stdout bytes.Buffer
+	err = Run(ctx, root, []string{"serve"}, strings.NewReader(""), &stdout)
+	if err != nil && !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run(serve) error = %v\n%s", err, stdout.String())
+	}
+
+	goal, err := store.GetGoal(context.Background(), 1)
+	if err != nil {
+		t.Fatalf("GetGoal() error = %v", err)
+	}
+	if goal.Status != sqlite.GoalStatusCreated || goal.CurrentRunID != nil {
+		t.Fatalf("converted goal after serve = %+v, want created without active run", goal)
+	}
+	runs, err := store.ListGoalRunsByGoalID(context.Background(), goal.ID)
+	if err != nil {
+		t.Fatalf("ListGoalRunsByGoalID() error = %v", err)
+	}
+	if len(runs) != 0 {
+		t.Fatalf("runs len = %d, want no run for converted unapproved goal", len(runs))
+	}
+}
+
+func TestServeGoalTickDoesNotRetryBlockedGoal(t *testing.T) {
+	root := createRuntimeRoot(t)
+	writeRuntimeConfig(t, root, `
+version: 1
+runtime:
+  root: .
+service:
+  http_addr: 127.0.0.1:0
+  startup_recovery: false
+`)
+	seedHealthyRuntime(t, root)
+
+	store, err := sqlite.Open(filepath.Join(root, "data", "odin.db"))
+	if err != nil {
+		t.Fatalf("sqlite.Open() error = %v", err)
+	}
+	defer store.Close()
+
+	goal, err := store.CreateGoal(context.Background(), sqlite.CreateGoalParams{Title: "Serve blocked goal"})
+	if err != nil {
+		t.Fatalf("CreateGoal() error = %v", err)
+	}
+	for _, status := range []sqlite.GoalStatus{sqlite.GoalStatusPlanned, sqlite.GoalStatusApprovedForExecution} {
+		if _, err := store.TransitionGoal(context.Background(), sqlite.TransitionGoalParams{GoalID: goal.ID, Status: status}); err != nil {
+			t.Fatalf("TransitionGoal(%s) error = %v", status, err)
+		}
+	}
+	run, err := store.CreateGoalRun(context.Background(), sqlite.CreateGoalRunParams{GoalID: goal.ID, Status: sqlite.GoalRunStatusRunning})
+	if err != nil {
+		t.Fatalf("CreateGoalRun() error = %v", err)
+	}
+	if _, err := store.TransitionGoal(context.Background(), sqlite.TransitionGoalParams{GoalID: goal.ID, Status: sqlite.GoalStatusRunning}); err != nil {
+		t.Fatalf("TransitionGoal(running) error = %v", err)
+	}
+	if _, err := store.TransitionGoal(context.Background(), sqlite.TransitionGoalParams{GoalID: goal.ID, Status: sqlite.GoalStatusBlocked}); err != nil {
+		t.Fatalf("TransitionGoal(blocked) error = %v", err)
+	}
+	beforeCounts := countServeGoalEvents(t, store)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	ctx = withServeLoopConfig(ctx, serveLoopConfig{
+		goalInterval: 20 * time.Millisecond,
+	})
+	time.AfterFunc(120*time.Millisecond, cancel)
+
+	var stdout bytes.Buffer
+	err = Run(ctx, root, []string{"serve"}, strings.NewReader(""), &stdout)
+	if err != nil && !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run(serve) error = %v\n%s", err, stdout.String())
+	}
+
+	runs, err := store.ListGoalRunsByGoalID(context.Background(), goal.ID)
+	if err != nil {
+		t.Fatalf("ListGoalRunsByGoalID() error = %v", err)
+	}
+	if len(runs) != 1 || runs[0].ID != run.ID {
+		t.Fatalf("runs = %+v, want original blocked goal run only", runs)
+	}
+	afterCounts := countServeGoalEvents(t, store)
+	if afterCounts[string(runtimeevents.EventGoalRunStarted)] != beforeCounts[string(runtimeevents.EventGoalRunStarted)] {
+		t.Fatalf("goal_run.started count changed from %d to %d, want no retry", beforeCounts[string(runtimeevents.EventGoalRunStarted)], afterCounts[string(runtimeevents.EventGoalRunStarted)])
+	}
+	if afterCounts[string(runtimeevents.EventGoalBlockerRecorded)] != beforeCounts[string(runtimeevents.EventGoalBlockerRecorded)] {
+		t.Fatalf("goal.blocker_recorded count changed from %d to %d, want no blocked retry", beforeCounts[string(runtimeevents.EventGoalBlockerRecorded)], afterCounts[string(runtimeevents.EventGoalBlockerRecorded)])
+	}
+}
+
+func TestServeGoalTickSkipsCompletedAndWaitingGoals(t *testing.T) {
+	root := createRuntimeRoot(t)
+	writeRuntimeConfig(t, root, `
+version: 1
+runtime:
+  root: .
+service:
+  http_addr: 127.0.0.1:0
+  startup_recovery: false
+`)
+	seedHealthyRuntime(t, root)
+
+	store, err := sqlite.Open(filepath.Join(root, "data", "odin.db"))
+	if err != nil {
+		t.Fatalf("sqlite.Open() error = %v", err)
+	}
+	defer store.Close()
+
+	waiting, err := store.CreateGoal(context.Background(), sqlite.CreateGoalParams{Title: "Serve waiting goal"})
+	if err != nil {
+		t.Fatalf("CreateGoal(waiting) error = %v", err)
+	}
+	if _, err := store.TransitionGoal(context.Background(), sqlite.TransitionGoalParams{GoalID: waiting.ID, Status: sqlite.GoalStatusWaitingForHuman}); err != nil {
+		t.Fatalf("TransitionGoal(waiting) error = %v", err)
+	}
+	completed, err := store.CreateGoal(context.Background(), sqlite.CreateGoalParams{Title: "Serve completed goal"})
+	if err != nil {
+		t.Fatalf("CreateGoal(completed) error = %v", err)
+	}
+	for _, status := range []sqlite.GoalStatus{
+		sqlite.GoalStatusPlanned,
+		sqlite.GoalStatusApprovedForExecution,
+		sqlite.GoalStatusRunning,
+		sqlite.GoalStatusVerifying,
+		sqlite.GoalStatusCompleted,
+	} {
+		if _, err := store.TransitionGoal(context.Background(), sqlite.TransitionGoalParams{GoalID: completed.ID, Status: status}); err != nil {
+			t.Fatalf("TransitionGoal(completed %s) error = %v", status, err)
+		}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	ctx = withServeLoopConfig(ctx, serveLoopConfig{
+		goalInterval: time.Hour,
+	})
+	time.AfterFunc(150*time.Millisecond, cancel)
+
+	var stdout bytes.Buffer
+	err = Run(ctx, root, []string{"serve"}, strings.NewReader(""), &stdout)
+	if err != nil && !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run(serve) error = %v\n%s", err, stdout.String())
+	}
+
+	for _, goalID := range []int64{waiting.ID, completed.ID} {
+		runs, err := store.ListGoalRunsByGoalID(context.Background(), goalID)
+		if err != nil {
+			t.Fatalf("ListGoalRunsByGoalID(%d) error = %v", goalID, err)
+		}
+		if len(runs) != 0 {
+			t.Fatalf("goal %d runs = %+v, want none for skipped serve goal", goalID, runs)
+		}
+	}
+}
+
 func TestRunServeCompletesAlreadyDispatchedIntakeRun(t *testing.T) {
 	configureLifecycleHarnessDriver(t)
 	t.Setenv("HOME", t.TempDir())
@@ -1946,6 +2248,21 @@ func lifecycleStatuses(store *sqlite.Store) ([]string, error) {
 		statuses = append(statuses, payload.Status)
 	}
 	return statuses, nil
+}
+
+func countServeGoalEvents(t *testing.T, store *sqlite.Store) map[string]int {
+	t.Helper()
+	events, err := store.ListEvents(context.Background(), sqlite.ListEventsParams{})
+	if err != nil {
+		t.Fatalf("ListEvents() error = %v", err)
+	}
+	counts := map[string]int{}
+	for _, event := range events {
+		if event.StreamType == runtimeevents.StreamGoal {
+			counts[string(event.Type)]++
+		}
+	}
+	return counts
 }
 
 func waitForServeHealthStatus(ctx context.Context, baseURL string, wantCode int, wantStatus string, pathOverride ...string) error {
