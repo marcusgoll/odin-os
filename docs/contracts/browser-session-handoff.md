@@ -139,6 +139,131 @@ Forbidden goal types for session reuse:
 11. Odin appends `browser.session_status_changed` and `browser.session_verified` with status `verified`, and `browser.session_login_completed` when a login request is completed.
 12. The blocked goal resumes from waiting state only after policy re-evaluates that the verified profile tier allows the requested read-only goal type. It must not transition to `approved_for_execution` unless a normal approval path already did that separately.
 
+## Future NoVNC/Tailscale Handoff Runner Contract
+
+The handoff runner is a future, operator-attended process boundary for manual login only. Its purpose is to launch one temporary visible browser session, expose its viewer only over an operator-approved private network path such as Tailscale to a NoVNC endpoint, and then stop after completion, expiration, or cancellation. Odin remains the metadata, policy, and audit authority. The runner must never become a credential collector, browser automation agent, profile registry, or goal execution authority.
+
+This section is a design contract only. It does not add runtime behavior, HTTP handlers, process launch, NoVNC services, Tailscale services, browser profile writes, cookie writes, or credential storage.
+
+### Runner Request
+
+A future runner start command or service call must use a stable JSON request envelope:
+
+```json
+{
+  "handoff_runner_request": {
+    "session_id": 1,
+    "login_request_id": 1,
+    "handoff_id": "opaque-handoff-id",
+    "profile_path": "browser-sessions/profiles/marcus-example",
+    "allowed_domain": "example.com",
+    "timeout_seconds": 600,
+    "bind_addr": "127.0.0.1:0",
+    "private_base_url": "https://odin-handoff.tailnet.local",
+    "public_base_url": null
+  }
+}
+```
+
+Field rules:
+
+- `session_id`, `login_request_id`, and `handoff_id` must refer to one valid, non-expired requested login request and its linked non-revoked browser session.
+- `profile_path` must be the session profile path already recorded in SQLite, relative to `ODIN_ROOT`, and must pass the same path safety rules as `prepare-profile`.
+- `allowed_domain` must equal the session domain policy or a stricter allowed hostname. The runner must reject broader or unrelated domains.
+- `timeout_seconds` must be bounded by policy and must not exceed the linked login request expiration.
+- `bind_addr` must default to loopback or another explicitly configured private interface. Binding to a public interface is forbidden unless a later policy contract explicitly allows it.
+- `private_base_url` is the preferred viewer origin for Tailscale or another private network route.
+- `public_base_url` must be null for the initial implementation. A non-null public base URL requires a later explicit security contract and approval path.
+
+### Runner Response
+
+A future runner start result must use a stable JSON response envelope:
+
+```json
+{
+  "handoff_runner": {
+    "runner_id": "browser-handoff-runner-1",
+    "process_id": 12345,
+    "session_id": 1,
+    "login_request_id": 1,
+    "handoff_id": "opaque-handoff-id",
+    "status": "started",
+    "viewer_url": "https://odin-handoff.tailnet.local/session/browser-handoff-runner-1",
+    "expires_at": "2026-05-06T00:10:00Z",
+    "error_code": null,
+    "error_message": null
+  }
+}
+```
+
+Allowed response statuses are:
+
+- `started`: runner process and private viewer route are ready for manual operator login.
+- `failed`: runner did not start or failed before a usable viewer URL existed.
+- `expired`: timeout or login request expiration stopped the runner.
+- `completed`: operator-attested completion was recorded and the runner stopped.
+
+`viewer_url` must be absent or null for `failed` results. `error_code` and `error_message` are required for `failed` and optional for terminal non-failure states. `process_id` may be null when an implementation uses a supervised runner ID rather than an OS process ID, but `runner_id` must always be present.
+
+### Runner Safety Policy
+
+The runner policy is fail-closed:
+
+- Manual login only. The operator performs username, password, passkey, 2FA, consent, and account selection directly in the visible browser.
+- No auto-submit, form fill, credential scraping, prompt capture, password manager integration, TOTP handling, recovery-code handling, or OAuth token extraction.
+- No cross-domain navigation unless the destination is the configured `allowed_domain` or a narrower approved hostname. Redirects outside policy must stop the runner or require a later explicit approval contract.
+- No browser profile writes until `profile_storage_policy` and `CanWriteBrowserProfile(session)` allow writes. In the current implementation every policy value denies profile writes, so a future runner must run with ephemeral browser state or stop before persistence.
+- No cookies, storage state, browser profile bytes, screenshots containing secrets, raw credential prompts, passwords, passkeys, TOTP values, backup codes, OAuth tokens, or bearer tokens may be written to Odin metadata, events, logs, evidence, or profile storage.
+- Runner startup does not approve a goal, transition a goal to executable state, satisfy a policy approval, or grant mutation authority.
+- Viewer access must be time-limited, bound to the login request, and accessible only through an operator-approved private network path.
+
+### Runner Lifecycle
+
+Runner metadata uses a separate future lifecycle from browser session status and login request status:
+
+1. `requested`: Odin has accepted the runner request metadata but has not exposed a viewer.
+2. `started`: the visible browser and private viewer route are available for manual login.
+3. `completed`: the operator completed login and Odin recorded metadata-only completion or later read-only verification.
+4. `expired`: timeout or login request expiration stopped the runner before completion.
+5. `cancelled`: the operator or policy stopped the runner before completion.
+
+Allowed transitions are `requested -> started`, `requested -> failed`, `started -> completed`, `started -> expired`, and `started -> cancelled`. Terminal states are `failed`, `completed`, `expired`, and `cancelled`. A terminal runner must not be restarted in place; create a new login request and runner record instead.
+
+Runner lifecycle must not silently mutate session lifecycle. A `completed` runner may complete the linked login request only through the same completion path as `POST /browser/session/handoff/complete`; session verification still requires the existing verification policy for the current slice and stronger browser-observed checks in a later slice.
+
+### Runner Audit Events
+
+Future runner state changes must append runtime events in the same transaction as runner metadata changes. Event payloads must follow the existing browser session audit redaction rules.
+
+Required future event types:
+
+- `browser.handoff_runner_started`
+- `browser.handoff_runner_expired`
+- `browser.handoff_runner_cancelled`
+- `browser.handoff_runner_completed`
+
+Suggested payload fields:
+
+- `runner_id`
+- `process_id`
+- `session_id`
+- `login_request_id`
+- `handoff_id`
+- `allowed_domain`
+- `bind_addr`
+- `viewer_url`
+- `expires_at`
+- `status`
+- `previous_status`
+- `reason`
+- `actor`
+- `profile_path`
+- `profile_storage_policy`
+- `error_code`
+- `policy_decision`
+
+Runner audit payloads must not contain passwords, cookies, bearer tokens, passkey material, TOTP values, backup codes, profile bytes, raw credential prompts, or screenshot text that reveals secrets.
+
 ## CLI Contract
 
 The metadata foundation extends the existing `odin browser` command group:
@@ -353,6 +478,13 @@ Required event types for the metadata foundation:
 - `browser.session_login_expired`
 - `goal.waiting_for_human_login`
 
+Required future runner event types:
+
+- `browser.handoff_runner_started`
+- `browser.handoff_runner_expired`
+- `browser.handoff_runner_cancelled`
+- `browser.handoff_runner_completed`
+
 `browser.session_status_changed` covers profile status changes. Login request metadata uses specific request lifecycle events.
 
 Suggested payload fields:
@@ -399,8 +531,13 @@ Rules:
 6. Profile storage policy gate: implemented `profile_storage_policy` with default `encrypted_required`, CLI JSON output, and a deny-all `CanWriteBrowserProfile` helper until encrypted storage exists.
 7. Encrypted profile storage: add encrypted profile root handling and policy denial for unencrypted profiles.
 8. Authenticated read-only attachment: allow `odin browser run` and goal runner evidence collection to attach a verified `authenticated_readonly` profile for allowed domains only.
-9. NoVNC/Tailscale handoff service: add a private-network browser handoff endpoint with short-lived tokens after the metadata and policy gates are proven.
-10. Operator runbooks and overview visibility: surface session health, expiring profiles, and waiting login goals in existing overview lanes if a clean projection lane exists.
+9. Handoff runner metadata store: add additive SQLite runner metadata with `requested`, `started`, `failed`, `completed`, `expired`, and `cancelled` states; append runner audit events transactionally.
+10. Handoff runner CLI: add minimal start/cancel/show/list commands under the existing `odin browser session handoff` surface, reusing current session and login request validation.
+11. Process boundary: define and implement the isolated runner process contract, shutdown semantics, timeout enforcement, and fail-closed cleanup without profile writes.
+12. Local NoVNC fixture: add a local-only fixture for tests that proves viewer URL wiring and lifecycle behavior without external network mutation.
+13. Tailscale/private URL config: add private viewer URL configuration and reject public exposure unless a later security contract explicitly allows it.
+14. Profile write gate integration: connect runner persistence only after encrypted profile storage and `CanWriteBrowserProfile(session)` allow writes.
+15. Operator runbooks and overview visibility: surface session health, expiring profiles, active handoff runners, and waiting login goals in existing overview lanes if a clean projection lane exists.
 
 ## Best Operating Rule
 
