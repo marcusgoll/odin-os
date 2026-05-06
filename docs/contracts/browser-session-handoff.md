@@ -168,6 +168,12 @@ The same route returns a static HTML shell when the request sends `Accept: text/
 GET /browser/session/handoff?handoff_id=<id>&format=html
 ```
 
+Operators can also record metadata-only manual completion through the served handoff surface:
+
+```http
+POST /browser/session/handoff/complete
+```
+
 `--permission-tier authenticated_read` is accepted by the CLI as an operator-facing alias for stored tier `authenticated_readonly`. If `--profile-path` is omitted, Odin records the metadata-only default `browser-sessions/profiles/<sanitized-name>` and does not create a directory. Explicit profile paths must remain under `browser-sessions/profiles/`, must be relative to `ODIN_ROOT`, and must not contain path traversal.
 
 `login-request` creates request metadata only. Odin always records an opaque `handoff_id` with the request and reuses the existing `expires_at` as the metadata expiration. With no base URL, its JSON envelope returns `handoff_url: null`. When `--handoff-base-url <url>` is provided, Odin validates that the base is an absolute `http` or `https` URL and returns a metadata URL with `handoff_id` in the query string. The handoff ID must not encode the browser session ID directly.
@@ -177,6 +183,10 @@ The handoff URL is not proof that a browser handoff service exists. Odin now exp
 `handoff show` and `GET /browser/session/handoff?handoff_id=<id>` are read-only lookups for safe manual-login metadata. They require a handoff ID, reject missing IDs, unknown handoffs, non-`requested` login requests, expired requests, and revoked or missing linked sessions. They return only the handoff ID, login request ID, session ID, session name, domain, optional account hint, expiration, request status, and `allowed_actions: manual_login_only`. They must not append runtime events, launch a browser, create NoVNC/Tailscale resources, write profile files, or store credential material.
 
 The HTML shell is static and informational. It displays safe metadata, states that no browser session is launched yet, states that Odin is not collecting credentials, and states that login and 2FA will be manual in a future handoff step. Dynamic values must be escaped. The page must not include external scripts, inline scripts, forms, credential inputs, password fields, or profile/session write affordances.
+
+`POST /browser/session/handoff/complete` accepts either a JSON body or form body with `handoff_id`. It requires the existing Odin admin-token protection and fails closed when admin actions are disabled or unauthenticated. The route validates the same handoff states as the read-only lookup, then records operator-attested metadata by marking the browser session `verified` and the linked login request `completed` through the existing store verification path. It emits the existing browser session runtime events, including status change, session verified, and login completed. This route is not browser proof: it must not launch a browser, inspect a profile directory, store profile bytes, collect credentials, create NoVNC/Tailscale resources, or approve/execute any goal.
+
+Form completion returns a static escaped HTML result page. JSON completion returns a stable `completion` envelope with the handoff ID, login request ID, session ID, session name, domain, optional account hint, session status, login request status, completion timestamp, and `allowed_actions: manual_login_only`. The completion HTML must not include scripts, forms, credential inputs, password fields, textareas, or profile/session write affordances.
 
 `verify` records metadata-only operator verification. It must not launch a browser, inspect a profile directory, store credential material, or approve/execute a goal. Revoked sessions cannot be verified. Expired or cancelled login requests cannot be completed.
 
@@ -251,6 +261,25 @@ Implemented `handoff show --json` and `GET /browser/session/handoff?handoff_id=<
     "account_hint": "marcus-example",
     "expires_at": "2026-05-06T00:10:00Z",
     "status": "requested",
+    "allowed_actions": "manual_login_only"
+  }
+}
+```
+
+Implemented `POST /browser/session/handoff/complete` returns metadata-only operator-attested completion without secrets:
+
+```json
+{
+  "completion": {
+    "handoff_id": "opaque-handoff-id",
+    "login_request_id": 1,
+    "session_id": 1,
+    "session_name": "marcus-example",
+    "domain": "example.com",
+    "account_hint": "marcus-example",
+    "session_status": "verified",
+    "login_request_status": "completed",
+    "completed_at": "2026-05-06T00:04:00Z",
     "allowed_actions": "manual_login_only"
   }
 }

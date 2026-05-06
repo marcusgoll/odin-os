@@ -1,6 +1,7 @@
 package httpapi_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -19,6 +20,7 @@ import (
 	"odin-os/internal/core/initiatives"
 	coremedia "odin-os/internal/core/media"
 	"odin-os/internal/core/workspaces"
+	runtimeevents "odin-os/internal/runtime/events"
 	healthsvc "odin-os/internal/runtime/health"
 	"odin-os/internal/runtime/projections"
 	"odin-os/internal/store/sqlite"
@@ -769,6 +771,257 @@ func TestOperationalHandlerBrowserSessionHandoffRejectsInvalidStates(t *testing.
 	assertHandoffStatus(t, server.URL+"/browser/session/handoff?format=html&handoff_id="+revokedRequest.HandoffID, http.StatusConflict)
 }
 
+func TestOperationalHandlerBrowserSessionHandoffCompleteJSONVerifiesSessionAndRequest(t *testing.T) {
+	ctx := context.Background()
+	store := openStore(t)
+	defer store.Close()
+	now := time.Date(2026, 5, 6, 20, 0, 0, 0, time.UTC)
+	store.Now = func() time.Time { return now }
+	store.BrowserSessionHandoffID = func() (string, error) { return "complete-json-handoff", nil }
+
+	session, err := store.CreateBrowserSession(ctx, sqlite.CreateBrowserSessionParams{
+		Name:           "google-main",
+		Domain:         "google.com",
+		AccountHint:    "marcus",
+		PermissionTier: sqlite.BrowserSessionPermissionTierAuthenticatedReadOnly,
+	})
+	if err != nil {
+		t.Fatalf("CreateBrowserSession() error = %v", err)
+	}
+	loginRequest, err := store.CreateBrowserSessionLoginRequest(ctx, sqlite.CreateBrowserSessionLoginRequestParams{
+		SessionID: session.ID,
+		ExpiresAt: now.Add(10 * time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("CreateBrowserSessionLoginRequest() error = %v", err)
+	}
+	store.Now = func() time.Time { return now.Add(2 * time.Minute) }
+
+	server := httptest.NewServer(httpapi.NewOperationalHandler(httpapi.Dependencies{
+		Store:      store,
+		AdminToken: "secret",
+	}))
+	defer server.Close()
+
+	body := bytes.NewBufferString(`{"handoff_id":"` + loginRequest.HandoffID + `"}`)
+	request, err := http.NewRequest(http.MethodPost, server.URL+"/browser/session/handoff/complete", body)
+	if err != nil {
+		t.Fatalf("NewRequest() error = %v", err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Authorization", "Bearer secret")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatalf("POST handoff complete error = %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("handoff complete status = %d body=%s, want %d", response.StatusCode, string(body), http.StatusOK)
+	}
+	if contentType := response.Header.Get("Content-Type"); !strings.Contains(contentType, "application/json") {
+		t.Fatalf("handoff complete Content-Type = %q, want application/json", contentType)
+	}
+	var payload struct {
+		Completion struct {
+			HandoffID          string `json:"handoff_id"`
+			SessionID          int64  `json:"session_id"`
+			LoginRequestID     int64  `json:"login_request_id"`
+			SessionStatus      string `json:"session_status"`
+			LoginRequestStatus string `json:"login_request_status"`
+			AllowedActions     string `json:"allowed_actions"`
+		} `json:"completion"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode handoff complete response error = %v", err)
+	}
+	if payload.Completion.HandoffID != loginRequest.HandoffID || payload.Completion.SessionID != session.ID || payload.Completion.LoginRequestID != loginRequest.ID {
+		t.Fatalf("completion payload = %+v, want linked handoff/session/request", payload.Completion)
+	}
+	if payload.Completion.SessionStatus != string(sqlite.BrowserSessionStatusVerified) || payload.Completion.LoginRequestStatus != string(sqlite.BrowserSessionLoginRequestStatusCompleted) || payload.Completion.AllowedActions != "manual_login_only" {
+		t.Fatalf("completion payload = %+v, want verified/completed metadata only response", payload.Completion)
+	}
+
+	persistedSession, err := store.GetBrowserSession(ctx, session.ID)
+	if err != nil {
+		t.Fatalf("GetBrowserSession() error = %v", err)
+	}
+	if persistedSession.Status != sqlite.BrowserSessionStatusVerified || persistedSession.LastVerifiedAt == nil {
+		t.Fatalf("persistedSession = %+v, want verified with last verified time", persistedSession)
+	}
+	persistedRequest, err := store.GetBrowserSessionLoginRequest(ctx, loginRequest.ID)
+	if err != nil {
+		t.Fatalf("GetBrowserSessionLoginRequest() error = %v", err)
+	}
+	if persistedRequest.Status != sqlite.BrowserSessionLoginRequestStatusCompleted || persistedRequest.CompletedAt == nil {
+		t.Fatalf("persistedRequest = %+v, want completed metadata", persistedRequest)
+	}
+	counts := countBrowserSessionEventTypes(t, ctx, store)
+	if counts[runtimeevents.EventBrowserSessionStatusChanged] != 1 || counts[runtimeevents.EventBrowserSessionVerified] != 1 || counts[runtimeevents.EventBrowserSessionLoginCompleted] != 1 {
+		t.Fatalf("browser session event counts = %#v, want status_changed, verified, and login_completed", counts)
+	}
+}
+
+func TestOperationalHandlerBrowserSessionHandoffCompleteFormReturnsEscapedHTML(t *testing.T) {
+	ctx := context.Background()
+	store := openStore(t)
+	defer store.Close()
+	now := time.Date(2026, 5, 6, 20, 0, 0, 0, time.UTC)
+	store.Now = func() time.Time { return now }
+	store.BrowserSessionHandoffID = func() (string, error) { return "complete-form-handoff", nil }
+
+	session, err := store.CreateBrowserSession(ctx, sqlite.CreateBrowserSessionParams{
+		Name:           `google <script>alert(1)</script>`,
+		Domain:         "google.com",
+		AccountHint:    `marcus"><input name=password>`,
+		PermissionTier: sqlite.BrowserSessionPermissionTierAuthenticatedReadOnly,
+	})
+	if err != nil {
+		t.Fatalf("CreateBrowserSession() error = %v", err)
+	}
+	loginRequest, err := store.CreateBrowserSessionLoginRequest(ctx, sqlite.CreateBrowserSessionLoginRequestParams{
+		SessionID: session.ID,
+		ExpiresAt: now.Add(10 * time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("CreateBrowserSessionLoginRequest() error = %v", err)
+	}
+
+	server := httptest.NewServer(httpapi.NewOperationalHandler(httpapi.Dependencies{
+		Store:      store,
+		AdminToken: "secret",
+	}))
+	defer server.Close()
+
+	form := url.Values{"handoff_id": []string{loginRequest.HandoffID}}
+	request, err := http.NewRequest(http.MethodPost, server.URL+"/browser/session/handoff/complete", strings.NewReader(form.Encode()))
+	if err != nil {
+		t.Fatalf("NewRequest() error = %v", err)
+	}
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	request.Header.Set("Authorization", "Bearer secret")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatalf("POST handoff complete form error = %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("handoff complete form status = %d body=%s, want %d", response.StatusCode, string(body), http.StatusOK)
+	}
+	if contentType := response.Header.Get("Content-Type"); !strings.Contains(contentType, "text/html") {
+		t.Fatalf("handoff complete form Content-Type = %q, want text/html", contentType)
+	}
+	bodyBytes, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatalf("ReadAll(completion html) error = %v", err)
+	}
+	body := string(bodyBytes)
+	for _, want := range []string{
+		"Browser Login Handoff Complete",
+		"google &lt;script&gt;alert(1)&lt;/script&gt;",
+		"google.com",
+		"verified",
+		"completed",
+		"Operator-attested completion only.",
+		"No browser was launched by Odin.",
+		"No credentials or profile bytes were collected.",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("completion html body missing %q:\n%s", want, body)
+		}
+	}
+	for _, forbidden := range []string{
+		`google <script>alert(1)</script>`,
+		`<script`,
+		`<form`,
+		`<input`,
+		`type="password"`,
+		`<textarea`,
+	} {
+		if strings.Contains(strings.ToLower(body), strings.ToLower(forbidden)) {
+			t.Fatalf("completion html body contains forbidden %q:\n%s", forbidden, body)
+		}
+	}
+}
+
+func TestOperationalHandlerBrowserSessionHandoffCompleteRejectsInvalidStates(t *testing.T) {
+	ctx := context.Background()
+	store := openStore(t)
+	defer store.Close()
+	now := time.Date(2026, 5, 6, 20, 0, 0, 0, time.UTC)
+	store.Now = func() time.Time { return now }
+
+	session, err := store.CreateBrowserSession(ctx, sqlite.CreateBrowserSessionParams{
+		Name:           "google-main",
+		Domain:         "google.com",
+		PermissionTier: sqlite.BrowserSessionPermissionTierAuthenticatedReadOnly,
+	})
+	if err != nil {
+		t.Fatalf("CreateBrowserSession() error = %v", err)
+	}
+	handoffIDs := []string{"completed-complete-handoff", "expired-complete-handoff", "revoked-complete-handoff"}
+	store.BrowserSessionHandoffID = func() (string, error) {
+		next := handoffIDs[0]
+		handoffIDs = handoffIDs[1:]
+		return next, nil
+	}
+	completed, err := store.CreateBrowserSessionLoginRequest(ctx, sqlite.CreateBrowserSessionLoginRequestParams{
+		SessionID: session.ID,
+		ExpiresAt: now.Add(10 * time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("CreateBrowserSessionLoginRequest(completed) error = %v", err)
+	}
+	if _, err := store.CompleteBrowserSessionLoginRequest(ctx, sqlite.CompleteBrowserSessionLoginRequestParams{RequestID: completed.ID}); err != nil {
+		t.Fatalf("CompleteBrowserSessionLoginRequest() error = %v", err)
+	}
+	expired, err := store.CreateBrowserSessionLoginRequest(ctx, sqlite.CreateBrowserSessionLoginRequestParams{
+		SessionID: session.ID,
+		ExpiresAt: now.Add(10 * time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("CreateBrowserSessionLoginRequest(expired) error = %v", err)
+	}
+	revokedSession, err := store.CreateBrowserSession(ctx, sqlite.CreateBrowserSessionParams{
+		Name:           "github-main",
+		Domain:         "github.com",
+		PermissionTier: sqlite.BrowserSessionPermissionTierAuthenticatedReadOnly,
+	})
+	if err != nil {
+		t.Fatalf("CreateBrowserSession(revoked) error = %v", err)
+	}
+	revokedRequest, err := store.CreateBrowserSessionLoginRequest(ctx, sqlite.CreateBrowserSessionLoginRequestParams{
+		SessionID: revokedSession.ID,
+		ExpiresAt: now.Add(10 * time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("CreateBrowserSessionLoginRequest(revoked) error = %v", err)
+	}
+	if _, err := store.RevokeBrowserSession(ctx, sqlite.RevokeBrowserSessionParams{
+		SessionID: revokedSession.ID,
+		Actor:     "operator",
+		Reason:    "test revocation",
+	}); err != nil {
+		t.Fatalf("RevokeBrowserSession() error = %v", err)
+	}
+
+	server := httptest.NewServer(httpapi.NewOperationalHandler(httpapi.Dependencies{
+		Store:      store,
+		AdminToken: "secret",
+	}))
+	defer server.Close()
+
+	assertHandoffCompleteJSONStatus(t, server.URL, "secret", "", http.StatusBadRequest)
+	assertHandoffCompleteJSONStatus(t, server.URL, "secret", "missing-complete-handoff", http.StatusNotFound)
+	assertHandoffCompleteJSONStatus(t, server.URL, "secret", completed.HandoffID, http.StatusConflict)
+	store.Now = func() time.Time { return now.Add(11 * time.Minute) }
+	assertHandoffCompleteJSONStatus(t, server.URL, "secret", expired.HandoffID, http.StatusGone)
+	store.Now = func() time.Time { return now }
+	assertHandoffCompleteJSONStatus(t, server.URL, "secret", revokedRequest.HandoffID, http.StatusConflict)
+	assertHandoffCompleteJSONStatus(t, server.URL, "", revokedRequest.HandoffID, http.StatusUnauthorized)
+}
+
 type recordingAdminActions struct {
 	killSwitchOnCalls int
 	pauseIssueID      int64
@@ -822,6 +1075,28 @@ func assertHandoffStatus(t *testing.T, url string, want int) {
 	}
 }
 
+func assertHandoffCompleteJSONStatus(t *testing.T, serverURL string, token string, handoffID string, want int) {
+	t.Helper()
+	body := bytes.NewBufferString(`{"handoff_id":"` + handoffID + `"}`)
+	request, err := http.NewRequest(http.MethodPost, serverURL+"/browser/session/handoff/complete", body)
+	if err != nil {
+		t.Fatalf("NewRequest() error = %v", err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	if token != "" {
+		request.Header.Set("Authorization", "Bearer "+token)
+	}
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatalf("POST handoff complete error = %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != want {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("POST handoff complete status = %d body=%s, want %d", response.StatusCode, string(body), want)
+	}
+}
+
 func openStore(t *testing.T) *sqlite.Store {
 	t.Helper()
 
@@ -848,6 +1123,21 @@ func countBrowserSessionEvents(t *testing.T, ctx context.Context, store *sqlite.
 		}
 	}
 	return count
+}
+
+func countBrowserSessionEventTypes(t *testing.T, ctx context.Context, store *sqlite.Store) map[runtimeevents.Type]int {
+	t.Helper()
+	events, err := store.ListEvents(ctx, sqlite.ListEventsParams{})
+	if err != nil {
+		t.Fatalf("ListEvents() error = %v", err)
+	}
+	counts := map[runtimeevents.Type]int{}
+	for _, event := range events {
+		if event.StreamType == "browser_session" {
+			counts[event.Type]++
+		}
+	}
+	return counts
 }
 
 func seedExternalIssue(t *testing.T, ctx context.Context, store *sqlite.Store) {
