@@ -30,6 +30,7 @@ const (
 	StreamDelegation         StreamType = "delegation"
 	StreamCapability         StreamType = "capability"
 	StreamFollowUp           StreamType = "follow_up"
+	StreamGoal               StreamType = "goal"
 )
 
 type Type string
@@ -63,11 +64,15 @@ const (
 	EventConversationTranscriptRecorded     Type = "conversation.transcript_recorded"
 	EventMemorySummaryRecorded              Type = "memory.summary_recorded"
 	EventMemorySummaryUpdated               Type = "memory.summary_updated"
+	EventReviewApproved                     Type = "review.approved"
+	EventReviewRejected                     Type = "review.rejected"
 	EventIntakeItemCreated                  Type = "intake.item_created"
 	EventIntakeProcessingStarted            Type = "intake.processing_started"
 	EventIntakeClassified                   Type = "intake.classified"
 	EventIntakeDedupeReviewed               Type = "intake.dedupe_reviewed"
 	EventIntakeRouted                       Type = "intake.routed"
+	EventIntakeProcessed                    Type = "intake.processed"
+	EventIntakeRoutedToGoal                 Type = "intake.routed_to_goal"
 	EventIntakeDraftArtifactCreated         Type = "intake.draft_artifact_created"
 	EventIntakeClarificationNeeded          Type = "intake.clarification_needed"
 	EventIntakeDuplicateLinkedOrSuppressed  Type = "intake.duplicate_linked_or_suppressed"
@@ -112,6 +117,15 @@ const (
 	EventCapabilitySnapshotRejected         Type = "capability.snapshot_rejected"
 	EventFollowUpMaterialized               Type = "follow_up.materialized"
 	EventFollowUpPaused                     Type = "follow_up.paused"
+	EventGoalCreated                        Type = "goal.created"
+	EventGoalUpdated                        Type = "goal.updated"
+	EventGoalStatusChanged                  Type = "goal.status_changed"
+	EventGoalRunnerObserved                 Type = "goal_runner.observed"
+	EventGoalRunStarted                     Type = "goal_run.started"
+	EventGoalRunStatusChanged               Type = "goal_run.status_changed"
+	EventGoalRunFinished                    Type = "goal_run.finished"
+	EventGoalBlockerRecorded                Type = "goal.blocker_recorded"
+	EventGoalEvidenceRecorded               Type = "goal.evidence_recorded"
 )
 
 const (
@@ -217,6 +231,103 @@ type TaskStatusChangedPayload struct {
 	Summary        string `json:"summary,omitempty"`
 	TerminalReason string `json:"terminal_reason,omitempty"`
 	ArtifactsJSON  string `json:"artifacts_json,omitempty"`
+}
+
+type GoalCreatedPayload struct {
+	Title       string `json:"title"`
+	Description string `json:"description,omitempty"`
+	Status      string `json:"status"`
+	CreatedBy   string `json:"created_by,omitempty"`
+	Source      string `json:"source,omitempty"`
+}
+
+type GoalUpdatedPayload struct {
+	PreviousTitle       string `json:"previous_title,omitempty"`
+	Title               string `json:"title,omitempty"`
+	PreviousDescription string `json:"previous_description,omitempty"`
+	Description         string `json:"description,omitempty"`
+	Status              string `json:"status"`
+	Actor               string `json:"actor,omitempty"`
+	Reason              string `json:"reason,omitempty"`
+}
+
+type GoalStatusChangedPayload struct {
+	PreviousStatus string `json:"previous_status"`
+	Status         string `json:"status"`
+	Actor          string `json:"actor,omitempty"`
+	Reason         string `json:"reason,omitempty"`
+}
+
+type GoalRunnerObservedPayload struct {
+	GoalID int64  `json:"goal_id"`
+	Status string `json:"status"`
+	Action string `json:"action"`
+	Reason string `json:"reason,omitempty"`
+	Actor  string `json:"actor,omitempty"`
+}
+
+type GoalRunStartedPayload struct {
+	GoalRunID int64  `json:"goal_run_id"`
+	Status    string `json:"status"`
+	Executor  string `json:"executor,omitempty"`
+	Attempt   int    `json:"attempt"`
+}
+
+type GoalRunStatusChangedPayload struct {
+	GoalRunID      int64  `json:"goal_run_id"`
+	PreviousStatus string `json:"previous_status"`
+	Status         string `json:"status"`
+	Attempts       int    `json:"attempts"`
+	MaxAttempts    int    `json:"max_attempts"`
+	LeaseOwner     string `json:"lease_owner,omitempty"`
+	NextWakeAt     string `json:"next_wake_at,omitempty"`
+	LastProgressAt string `json:"last_progress_at,omitempty"`
+	EndedAt        string `json:"ended_at,omitempty"`
+	Summary        string `json:"summary,omitempty"`
+}
+
+type GoalRunFinishedPayload struct {
+	GoalRunID int64  `json:"goal_run_id"`
+	Status    string `json:"status"`
+	Summary   string `json:"summary,omitempty"`
+}
+
+type GoalBlockerRecordedPayload struct {
+	BlockerID   int64  `json:"blocker_id"`
+	Status      string `json:"status"`
+	BlockerType string `json:"blocker_type,omitempty"`
+	Summary     string `json:"summary"`
+	CreatedBy   string `json:"created_by,omitempty"`
+}
+
+type GoalEvidenceRecordedPayload struct {
+	EvidenceID   int64  `json:"evidence_id"`
+	GoalRunID    *int64 `json:"goal_run_id,omitempty"`
+	EvidenceType string `json:"evidence_type"`
+	Summary      string `json:"summary"`
+	URI          string `json:"uri,omitempty"`
+	CreatedBy    string `json:"created_by,omitempty"`
+}
+
+type ReviewApprovedPayload struct {
+	ReviewID   string `json:"review_id"`
+	SourceType string `json:"source_type"`
+	SourceID   int64  `json:"source_id"`
+	GoalID     int64  `json:"goal_id,omitempty"`
+	Status     string `json:"status"`
+	Actor      string `json:"actor,omitempty"`
+	Reason     string `json:"reason,omitempty"`
+}
+
+type ReviewRejectedPayload struct {
+	ReviewID   string `json:"review_id"`
+	SourceType string `json:"source_type"`
+	SourceID   int64  `json:"source_id"`
+	GoalID     int64  `json:"goal_id,omitempty"`
+	BlockerID  int64  `json:"blocker_id,omitempty"`
+	Status     string `json:"status"`
+	Actor      string `json:"actor,omitempty"`
+	Reason     string `json:"reason"`
 }
 
 type TaskQueueStateChangedPayload struct {
@@ -402,6 +513,7 @@ type IntakeProcessingPayload struct {
 	ExecutionIntent       string `json:"execution_intent,omitempty"`
 	ExecutionIntentSource string `json:"execution_intent_source,omitempty"`
 	CanonicalIntakeID     *int64 `json:"canonical_intake_id,omitempty"`
+	GoalID                *int64 `json:"goal_id,omitempty"`
 	DraftArtifactKind     string `json:"draft_artifact_kind,omitempty"`
 	ClarificationState    string `json:"clarification_state,omitempty"`
 }

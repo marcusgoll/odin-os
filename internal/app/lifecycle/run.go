@@ -47,6 +47,7 @@ import (
 	conversationsvc "odin-os/internal/runtime/conversation"
 	delegationsvc "odin-os/internal/runtime/delegations"
 	runtimeevents "odin-os/internal/runtime/events"
+	goalruntime "odin-os/internal/runtime/goals"
 	healthsvc "odin-os/internal/runtime/health"
 	"odin-os/internal/runtime/jobs"
 	mediasvc "odin-os/internal/runtime/media"
@@ -67,7 +68,7 @@ import (
 
 var errRuntimeNotReady = errors.New("runtime not ready")
 
-const rootUsageBanner = "Usage: odin <command> [args]\n\nCommands: help repl overview tui doctor healthcheck serve backup restore verify-backup status legacy project workspace work scope jobs runs approvals review intake agenda logs knowledge task initiative companion profile followup trigger transition skills e2e"
+const rootUsageBanner = "Usage: odin <command> [args]\n\nCommands: help repl overview tui doctor healthcheck serve backup restore verify-backup status legacy project workspace work scope jobs runs approvals review intake agenda logs knowledge goal task initiative companion profile followup trigger transition skills e2e"
 
 var (
 	serveTaskLoopInterval     = 1 * time.Second
@@ -84,6 +85,7 @@ var (
 type serveLoopConfig struct {
 	taskInterval      time.Duration
 	schedulerInterval time.Duration
+	goalInterval      time.Duration
 	selfHealInterval  time.Duration
 	leaseInterval     time.Duration
 	leaseStaleAfter   time.Duration
@@ -95,6 +97,7 @@ type serveLoopConfigKey struct{}
 var defaultServeLoopConfig = serveLoopConfig{
 	taskInterval:      1 * time.Second,
 	schedulerInterval: 5 * time.Second,
+	goalInterval:      30 * time.Second,
 	selfHealInterval:  30 * time.Second,
 	leaseInterval:     30 * time.Second,
 	leaseStaleAfter:   5 * time.Minute,
@@ -112,6 +115,9 @@ func serveLoopConfigFromContext(ctx context.Context) serveLoopConfig {
 	}
 	if cfg.schedulerInterval <= 0 {
 		cfg.schedulerInterval = defaultServeLoopConfig.schedulerInterval
+	}
+	if cfg.goalInterval <= 0 {
+		cfg.goalInterval = defaultServeLoopConfig.goalInterval
 	}
 	if cfg.selfHealInterval <= 0 {
 		cfg.selfHealInterval = defaultServeLoopConfig.selfHealInterval
@@ -289,6 +295,8 @@ func Run(ctx context.Context, root string, args []string, stdin io.Reader, stdou
 		return runLogs(ctx, app, args[1:], stdout)
 	case "knowledge":
 		return commands.RunKnowledge(ctx, app.Store, args[1:], stdout)
+	case "goal":
+		return runGoal(ctx, app, args[1:], stdout)
 	case "transition":
 		return runTransition(ctx, app, args[1:], stdout)
 	case "task":
@@ -2138,6 +2146,130 @@ func runLogs(ctx context.Context, app bootstrap.App, args []string, stdout io.Wr
 	return nil
 }
 
+func runGoal(ctx context.Context, app bootstrap.App, args []string, stdout io.Writer) error {
+	command, err := commands.ParseGoal(args)
+	if err != nil {
+		return err
+	}
+	if command.Name == "help" {
+		_, err := fmt.Fprintln(stdout, commands.GoalUsage)
+		return err
+	}
+
+	switch command.Name {
+	case "create":
+		goal, err := app.Store.CreateGoal(ctx, sqlite.CreateGoalParams{
+			Title:       command.Title,
+			Description: command.Description,
+			CreatedBy:   command.CreatedBy,
+			Source:      command.Source,
+		})
+		if err != nil {
+			return err
+		}
+		view := newGoalView(goal)
+		if command.JSON {
+			return commands.WriteJSON(stdout, commands.GoalEnvelope{Goal: view})
+		}
+		_, err = fmt.Fprintf(stdout, "goal=%d status=%s title=%q\n", goal.ID, goal.Status, goal.Title)
+		return err
+	case "list":
+		goals, err := app.Store.ListGoals(ctx, sqlite.ListGoalsParams{Status: sqlite.GoalStatus(command.Status), Limit: command.Limit})
+		if err != nil {
+			return err
+		}
+		views := make([]commands.GoalView, 0, len(goals))
+		for _, goal := range goals {
+			views = append(views, newGoalView(goal))
+		}
+		if command.JSON {
+			return commands.WriteJSON(stdout, commands.GoalListView{Goals: views})
+		}
+		if len(views) == 0 {
+			_, err := fmt.Fprintln(stdout, "no goals")
+			return err
+		}
+		for _, view := range views {
+			if _, err := fmt.Fprintf(stdout, "goal=%d status=%s title=%q\n", view.ID, view.Status, view.Title); err != nil {
+				return err
+			}
+		}
+		return nil
+	case "show":
+		goal, err := app.Store.GetGoal(ctx, command.ID)
+		if err != nil {
+			return err
+		}
+		view := newGoalView(goal)
+		if command.JSON {
+			return commands.WriteJSON(stdout, commands.GoalEnvelope{Goal: view})
+		}
+		_, err = fmt.Fprintf(stdout, "goal=%d status=%s title=%q\n", goal.ID, goal.Status, goal.Title)
+		return err
+	case "update":
+		goal, err := app.Store.UpdateGoal(ctx, sqlite.UpdateGoalParams{
+			GoalID:         command.ID,
+			Title:          command.Title,
+			TitleSet:       command.TitleSet,
+			Description:    command.Description,
+			DescriptionSet: command.DescriptionSet,
+			Actor:          command.Actor,
+			Reason:         command.Reason,
+		})
+		if err != nil {
+			return err
+		}
+		view := newGoalView(goal)
+		if command.JSON {
+			return commands.WriteJSON(stdout, commands.GoalEnvelope{Goal: view})
+		}
+		_, err = fmt.Fprintf(stdout, "goal=%d status=%s title=%q\n", goal.ID, goal.Status, goal.Title)
+		return err
+	case "transition":
+		goal, err := app.Store.TransitionGoal(ctx, sqlite.TransitionGoalParams{
+			GoalID: command.ID,
+			Status: sqlite.GoalStatus(command.Status),
+			Actor:  command.Actor,
+			Reason: command.Reason,
+		})
+		if err != nil {
+			return err
+		}
+		view := newGoalView(goal)
+		if command.JSON {
+			return commands.WriteJSON(stdout, commands.GoalEnvelope{Goal: view})
+		}
+		_, err = fmt.Fprintf(stdout, "goal=%d status=%s title=%q\n", goal.ID, goal.Status, goal.Title)
+		return err
+	case "tick":
+		result, err := goalruntime.NewService(app.Store).Tick(ctx)
+		if err != nil {
+			return err
+		}
+		if command.JSON {
+			return commands.WriteJSON(stdout, result)
+		}
+		_, err = fmt.Fprintf(stdout, "observed=%d started=%d blocked=%d skipped=%d\n", result.Observed, result.Started, result.Blocked, result.Skipped)
+		return err
+	default:
+		return fmt.Errorf(commands.GoalUsage)
+	}
+}
+
+func newGoalView(goal sqlite.Goal) commands.GoalView {
+	return commands.GoalView{
+		ID:           goal.ID,
+		Title:        goal.Title,
+		Description:  goal.Description,
+		Status:       string(goal.Status),
+		CreatedBy:    goal.CreatedBy,
+		Source:       goal.Source,
+		CurrentRunID: goal.CurrentRunID,
+		CreatedAt:    goal.CreatedAt,
+		UpdatedAt:    goal.UpdatedAt,
+	}
+}
+
 func runInitiative(ctx context.Context, app bootstrap.App, args []string, stdout io.Writer) error {
 	command, err := commands.ParseInitiative(args)
 	if err != nil {
@@ -3908,6 +4040,7 @@ func runServe(ctx context.Context, app bootstrap.App, cfg appconfig.Config, stdo
 		Now:               now,
 		ShutdownRequested: &shutdownRequested,
 	}
+	goalService := goalruntime.NewService(app.Store)
 	socialService := socialcopilot.Service{
 		Store:    app.Store,
 		Registry: app.Registry,
@@ -3982,7 +4115,7 @@ func runServe(ctx context.Context, app bootstrap.App, cfg appconfig.Config, stdo
 	runLeaseMaintenanceCycle(operationCtx, leaseService, logger, loopConfig.leaseStaleAfter)
 
 	var background sync.WaitGroup
-	loopCount := 6
+	loopCount := 7
 	if mediaService != nil {
 		loopCount++
 	}
@@ -3993,6 +4126,7 @@ func runServe(ctx context.Context, app bootstrap.App, cfg appconfig.Config, stdo
 	loopCtx, stopLoops := context.WithCancel(context.Background())
 	dispatchNudges := make(chan struct{}, 32)
 	go runSchedulerLoop(loopCtx, operationCtx, &background, schedulerService, dispatchNudges, logger, loopConfig.schedulerInterval)
+	go runGoalLoop(loopCtx, operationCtx, &background, goalService, logger, loopConfig.goalInterval)
 	go runTaskLoop(loopCtx, operationCtx, &background, healthService, healthDeps.RegistryHealthy, jobService, dispatchNudges, logger, loopConfig.taskInterval)
 	go runSelfHealLoop(loopCtx, operationCtx, &background, recoveryService, logger, loopConfig.selfHealInterval)
 	go runLeaseLoop(loopCtx, operationCtx, &background, leaseService, logger, loopConfig.leaseInterval, loopConfig.leaseStaleAfter)
@@ -4012,6 +4146,7 @@ func runServe(ctx context.Context, app bootstrap.App, cfg appconfig.Config, stdo
 	if _, err := runFollowUpCycle(operationCtx, followUpService, now()); err != nil {
 		logBackgroundError(logger, "follow_up", err)
 	}
+	runGoalTickCycle(operationCtx, goalService, logger)
 	if _, err := recoveryService.RunCycle(operationCtx); err != nil {
 		logBackgroundError(logger, "self_heal", err)
 	}
@@ -4177,6 +4312,48 @@ func runSchedulerLoop(ctx context.Context, operationCtx context.Context, wg *syn
 			}
 		}
 	}
+}
+
+func runGoalLoop(ctx context.Context, operationCtx context.Context, wg *sync.WaitGroup, service goalruntime.Service, logger *logs.Logger, interval time.Duration) {
+	defer wg.Done()
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			goalCtx, cancel := serveOperationContext(operationCtx)
+			runGoalTickCycle(goalCtx, service, logger)
+			cancel()
+		}
+	}
+}
+
+func runGoalTickCycle(ctx context.Context, service goalruntime.Service, logger *logs.Logger) {
+	result, err := service.Tick(ctx)
+	if err != nil {
+		logBackgroundError(logger, "goal_runner", err)
+		return
+	}
+	if logger == nil || result.Observed == 0 {
+		return
+	}
+	_ = logger.Log(logs.Record{
+		Level:         logs.LevelInfo,
+		Component:     "goal_runner",
+		Message:       "goal runner tick completed",
+		CorrelationID: "goal_runner",
+		Scope:         "global",
+		Fields: map[string]any{
+			"observed": result.Observed,
+			"started":  result.Started,
+			"blocked":  result.Blocked,
+			"skipped":  result.Skipped,
+		},
+	})
 }
 
 func runSelfHealLoop(ctx context.Context, operationCtx context.Context, wg *sync.WaitGroup, service recovery.Service, logger *logs.Logger, interval time.Duration) {
