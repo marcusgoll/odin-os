@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"odin-os/internal/app/bootstrap"
 	clioverview "odin-os/internal/cli/overview"
@@ -2537,18 +2538,26 @@ func TestRunTriggerHumanizedTimingDefersQuietHoursAndCoalescesMissedRuns(t *test
 	}
 
 	run("project", "select", testProjectKey)
+	quietBase := time.Now().UTC().AddDate(0, 0, 1)
+	quietDueAt := time.Date(quietBase.Year(), quietBase.Month(), quietBase.Day(), 3, 0, 0, 0, time.UTC)
+	quietEvaluateAt := time.Date(quietBase.Year(), quietBase.Month(), quietBase.Day(), 3, 15, 0, 0, time.UTC)
+	quietDeferredUntil := time.Date(quietBase.Year(), quietBase.Month(), quietBase.Day(), 6, 0, 0, 0, time.UTC)
+	quietDueText := quietDueAt.Format(time.RFC3339)
+	quietEvaluateText := quietEvaluateAt.Format(time.RFC3339)
+	quietDeferredText := quietDeferredUntil.Format(time.RFC3339)
+
 	run("trigger", "upsert", "quiet-proof",
 		"initiative="+testProjectKey,
 		"kind=schedule",
 		"status=enabled",
 		"cadence=1h",
-		"next=2026-05-05T03:00:00Z",
+		"next="+quietDueText,
 		"title=Quiet_hours_proof",
 		"summary=quiet_hours_probe",
 		"quiet=02:00-06:00",
 		"--json",
 	)
-	quietEvaluate := run("trigger", "evaluate", "now=2026-05-05T03:15:00Z", "--json")
+	quietEvaluate := run("trigger", "evaluate", "now="+quietEvaluateText, "--json")
 	var quiet struct {
 		Evaluated    int `json:"evaluated"`
 		Materialized int `json:"materialized"`
@@ -2566,22 +2575,22 @@ func TestRunTriggerHumanizedTimingDefersQuietHoursAndCoalescesMissedRuns(t *test
 	if quiet.Evaluated != 1 || quiet.Materialized != 0 || quiet.Deferred != 1 || len(quiet.Deferrals) != 1 {
 		t.Fatalf("quiet evaluate = %+v, want one deferred and no materialized work", quiet)
 	}
-	if quiet.Deferrals[0].Key != "quiet-proof" || quiet.Deferrals[0].Reason != "quiet_hours" || quiet.Deferrals[0].DueAt != "2026-05-05T03:00:00Z" || quiet.Deferrals[0].DeferredUntil != "2026-05-05T06:00:00Z" {
+	if quiet.Deferrals[0].Key != "quiet-proof" || quiet.Deferrals[0].Reason != "quiet_hours" || quiet.Deferrals[0].DueAt != quietDueText || quiet.Deferrals[0].DeferredUntil != quietDeferredText {
 		t.Fatalf("quiet deferral = %+v, want quiet-hours deferral to 06:00Z", quiet.Deferrals[0])
 	}
 	if jobsOutput := run("jobs", "--json"); !strings.Contains(jobsOutput, `"jobs": []`) {
 		t.Fatalf("jobs output = %s, want no work during quiet-hours deferral", jobsOutput)
 	}
 	showDeferred := run("trigger", "show", "quiet-proof", "--json")
-	if !strings.Contains(showDeferred, `"timing_status": "deferred"`) || !strings.Contains(showDeferred, `"next_eligible_at": "2026-05-05T06:00:00Z"`) {
+	if !strings.Contains(showDeferred, `"timing_status": "deferred"`) || !strings.Contains(showDeferred, `"next_eligible_at": "`+quietDeferredText+`"`) {
 		t.Fatalf("show deferred output = %s, want deferred state visible", showDeferred)
 	}
 
-	release := run("trigger", "evaluate", "now=2026-05-05T06:00:00Z", "--json")
+	release := run("trigger", "evaluate", "now="+quietDeferredText, "--json")
 	if !strings.Contains(release, `"evaluated": 1`) || !strings.Contains(release, `"materialized": 1`) || !strings.Contains(release, `"created_work_item": true`) {
 		t.Fatalf("release evaluate output = %s, want one materialized work item after quiet hours", release)
 	}
-	repeatRelease := run("trigger", "evaluate", "now=2026-05-05T06:00:00Z", "--json")
+	repeatRelease := run("trigger", "evaluate", "now="+quietDeferredText, "--json")
 	if !strings.Contains(repeatRelease, `"evaluated": 0`) || !strings.Contains(repeatRelease, `"materialized": 0`) {
 		t.Fatalf("repeat release output = %s, want no duplicate materialization", repeatRelease)
 	}
