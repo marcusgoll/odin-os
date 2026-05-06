@@ -1,12 +1,12 @@
 ---
 title: Browser Session Handoff Contract
-status: proposed
+status: partially implemented
 date: 2026-05-06
 ---
 
 # Browser Session Handoff Contract
 
-This contract defines the future Odin-native handoff for manual Huginn browser login and reusable authenticated read-only sessions. It is design-only. It does not add runtime behavior, launch a browser, store cookies, store credentials, automate login, or mutate external systems.
+This contract defines the Odin-native handoff for manual Huginn browser login and reusable authenticated read-only sessions. The session metadata and login request metadata slices are implemented. Real NoVNC/Tailscale handoff, browser launch, browser profile persistence, login automation, and authenticated session attachment remain future work.
 
 ## Existing State
 
@@ -15,6 +15,8 @@ This contract defines the future Odin-native handoff for manual Huginn browser l
 - `internal/adapters/huginnbrowser.LiveAdapter` is selected only by explicit environment configuration, requires an allowlisted command, and rejects live response fields that imply forms, messages, purchases, deletes, sessions, or other mutations.
 - `bin/huginn-browser-worker` supports explicit `mode:"browser"` and otherwise defaults to bounded fetch. Browser mode currently uses a fresh temporary Chromium profile, records local evidence, and logs `no_cookies_or_session_profile`.
 - Goal state, goal evidence, blockers, and audit events are persisted in SQLite. Goal runner ticks do not execute created or planned goals, and approved goals block when no executor/action exists.
+- `odin browser session login-request --id <session_id> --json` records metadata-only manual login requests with `handoff_url: null` until a real private handoff service exists.
+- `odin browser session login-requests --id <session_id> --json` lists persisted login request metadata for one session.
 - Older Huginn/Plaid/Google notes describe narrow attended browser needs, but they do not define a durable Odin browser session profile authority.
 
 ## Non-Goals
@@ -24,7 +26,7 @@ This contract defines the future Odin-native handoff for manual Huginn browser l
 - No form submit, message send, purchase, account change, delete, or external mutation execution.
 - No NoVNC implementation in this slice.
 - No cookies, browser profile files, or profile bytes are created by this design.
-- No Codex, Huginn, or browser executor implementation is added by this design.
+- No Codex, Huginn, or browser executor implementation is added by the metadata slices.
 
 ## Session Concepts
 
@@ -139,14 +141,17 @@ odin browser session list --json
 odin browser session show --id <id> --json
 odin browser session status --id <id> --status <status> --json
 odin browser session revoke --id <id> --json
+odin browser session login-request --id <id> --json
+odin browser session login-requests --id <id> --json
 ```
 
 `--permission-tier authenticated_read` is accepted by the CLI as an operator-facing alias for stored tier `authenticated_readonly`. If `--profile-path` is omitted, Odin records the metadata-only default `browser-sessions/profiles/<sanitized-name>` and does not create a directory.
 
+`login-request` creates request metadata only. Its JSON envelope returns a `login_request` object with `handoff_url: null` until the future private handoff service can provide a short-lived operator URL. It must not launch a browser, write a browser profile, store credential material, or mark the session verified.
+
 Future manual handoff slices may add:
 
 ```bash
-odin browser session login --id <id> [--goal-id <id>] --json
 odin browser session verify --id <id> [--goal-id <id>] --json
 ```
 
@@ -169,20 +174,19 @@ JSON output should follow the existing Odin style: stable top-level envelopes, s
 }
 ```
 
-Future `login --json` should return a handoff object without secrets:
+Implemented `login-request --json` returns metadata without secrets:
 
 ```json
 {
-  "session": {
+  "login_request": {
     "id": 1,
-    "name": "marcus-example",
-    "status": "login_requested"
-  },
-  "handoff": {
-    "url": "https://private-odin-browser.example/session/1",
+    "session_id": 1,
+    "status": "requested",
+    "handoff_url": null,
     "expires_at": "2026-05-06T00:10:00Z",
-    "network": "tailscale",
-    "instructions": "complete login manually; do not paste credentials into Odin"
+    "completed_at": null,
+    "created_at": "2026-05-06T00:00:00Z",
+    "updated_at": "2026-05-06T00:00:00Z"
   }
 }
 ```
@@ -196,6 +200,7 @@ SQLite tables for browser sessions are additive and must not replace goal, intak
 Tables:
 
 - `browser_session_profiles`: implemented profile metadata and policy binding.
+- `browser_session_login_requests`: implemented metadata-only manual login requests with status, optional future handoff URL, expiration, completion timestamp, and audit timestamps.
 - `browser_session_events`: optional profile-local lifecycle detail if the global runtime events stream alone is not sufficient for efficient profile show/history.
 - `browser_session_goal_links`: explicit goal/profile relation with reason, requested tier, and verification evidence references.
 
@@ -242,9 +247,12 @@ Required event types for the metadata foundation:
 - `browser.session_created`
 - `browser.session_status_changed`
 - `browser.session_revoked`
+- `browser.session_login_requested`
+- `browser.session_login_completed`
+- `browser.session_login_expired`
 - `goal.waiting_for_human_login`
 
-`browser.session_status_changed` covers `login_requested`, `verified`, and `expired` profile status changes until a later handoff implementation needs more specific handoff events.
+`browser.session_status_changed` covers profile status changes. Login request metadata uses specific request lifecycle events.
 
 Suggested payload fields:
 
@@ -281,7 +289,7 @@ Rules:
 
 1. Contract tests and store schema: add browser session profile metadata tables, event constants, and tests proving create/verify/revoke append runtime events in the same transaction.
 2. CLI metadata surface: add `odin browser session create|list|show|status|revoke` with JSON output, no browser launch, and fail-closed policy.
-3. Login handoff request surface: add `odin browser session login` that records `login_requested` and returns a placeholder private handoff URL only after NoVNC/Tailscale prerequisites are configured.
+3. Login request metadata surface: implemented `odin browser session login-request|login-requests` to record and inspect metadata-only manual login requests with `handoff_url: null`.
 4. Manual verification surface: add `odin browser session verify` with read-only domain/account checks and no credential handling.
 5. Goal waiting integration: add `waiting_for_human_login` status or blocker-specific goal event handling, then prove the runner skips waiting goals.
 6. Encrypted profile storage: add encrypted profile root handling and policy denial for unencrypted profiles.

@@ -205,3 +205,128 @@ func TestBrowserSessionMetadataRejectsCredentialLikeFields(t *testing.T) {
 		t.Fatalf("table_info rows error = %v", err)
 	}
 }
+
+func TestBrowserSessionLoginRequestLifecyclePersistsAndAudits(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(filepath.Join(t.TempDir(), "browser-session-login-requests.db"))
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer store.Close()
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
+	}
+	now := time.Date(2026, 5, 6, 19, 0, 0, 0, time.UTC)
+	store.Now = func() time.Time { return now }
+
+	exists, err := store.HasTable(ctx, "browser_session_login_requests")
+	if err != nil {
+		t.Fatalf("HasTable(browser_session_login_requests) error = %v", err)
+	}
+	if !exists {
+		t.Fatal("HasTable(browser_session_login_requests) = false, want true")
+	}
+
+	session, err := store.CreateBrowserSession(ctx, CreateBrowserSessionParams{
+		Name:           "Google main",
+		Domain:         "google.com",
+		PermissionTier: BrowserSessionPermissionTierAuthenticatedReadOnly,
+		ProfilePath:    "browser-sessions/profiles/google-main",
+	})
+	if err != nil {
+		t.Fatalf("CreateBrowserSession() error = %v", err)
+	}
+
+	expiresAt := now.Add(10 * time.Minute)
+	request, err := store.CreateBrowserSessionLoginRequest(ctx, CreateBrowserSessionLoginRequestParams{
+		SessionID: session.ID,
+		ExpiresAt: expiresAt,
+	})
+	if err != nil {
+		t.Fatalf("CreateBrowserSessionLoginRequest() error = %v", err)
+	}
+	if request.ID <= 0 || request.SessionID != session.ID {
+		t.Fatalf("request = %+v, want persisted request for session %d", request, session.ID)
+	}
+	if request.Status != BrowserSessionLoginRequestStatusRequested {
+		t.Fatalf("request.Status = %q, want %q", request.Status, BrowserSessionLoginRequestStatusRequested)
+	}
+	if request.HandoffURL != nil {
+		t.Fatalf("request.HandoffURL = %v, want nil placeholder until handoff exists", request.HandoffURL)
+	}
+	if !request.ExpiresAt.Equal(expiresAt) || request.CompletedAt != nil {
+		t.Fatalf("request timestamps = expires %v completed %v, want expires only", request.ExpiresAt, request.CompletedAt)
+	}
+
+	fetched, err := store.GetBrowserSessionLoginRequest(ctx, request.ID)
+	if err != nil {
+		t.Fatalf("GetBrowserSessionLoginRequest() error = %v", err)
+	}
+	if fetched.ID != request.ID || fetched.SessionID != session.ID {
+		t.Fatalf("fetched request = %+v, want %+v", fetched, request)
+	}
+
+	listed, err := store.ListBrowserSessionLoginRequests(ctx, ListBrowserSessionLoginRequestsParams{SessionID: session.ID})
+	if err != nil {
+		t.Fatalf("ListBrowserSessionLoginRequests() error = %v", err)
+	}
+	if len(listed) != 1 || listed[0].ID != request.ID {
+		t.Fatalf("listed requests = %+v, want created request", listed)
+	}
+
+	store.Now = func() time.Time { return now.Add(time.Minute) }
+	completed, err := store.CompleteBrowserSessionLoginRequest(ctx, CompleteBrowserSessionLoginRequestParams{
+		RequestID: request.ID,
+	})
+	if err != nil {
+		t.Fatalf("CompleteBrowserSessionLoginRequest() error = %v", err)
+	}
+	if completed.Status != BrowserSessionLoginRequestStatusCompleted || completed.CompletedAt == nil {
+		t.Fatalf("completed request = %+v, want completed with timestamp", completed)
+	}
+
+	store.Now = func() time.Time { return now.Add(2 * time.Minute) }
+	expiring, err := store.CreateBrowserSessionLoginRequest(ctx, CreateBrowserSessionLoginRequestParams{
+		SessionID: session.ID,
+		ExpiresAt: now.Add(12 * time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("CreateBrowserSessionLoginRequest(expiring) error = %v", err)
+	}
+	store.Now = func() time.Time { return now.Add(3 * time.Minute) }
+	expired, err := store.ExpireBrowserSessionLoginRequest(ctx, ExpireBrowserSessionLoginRequestParams{
+		RequestID: expiring.ID,
+	})
+	if err != nil {
+		t.Fatalf("ExpireBrowserSessionLoginRequest() error = %v", err)
+	}
+	if expired.Status != BrowserSessionLoginRequestStatusExpired || expired.CompletedAt != nil {
+		t.Fatalf("expired request = %+v, want expired without completed timestamp", expired)
+	}
+
+	events, err := store.ListEvents(ctx, ListEventsParams{})
+	if err != nil {
+		t.Fatalf("ListEvents() error = %v", err)
+	}
+	counts := map[runtimeevents.Type]int{}
+	for _, event := range events {
+		if event.StreamType == runtimeevents.StreamBrowserSession {
+			counts[event.Type]++
+			payload := strings.ToLower(string(event.Payload))
+			for _, forbidden := range []string{"password", "totp", "backup_code", "cookie", "profile_bytes"} {
+				if strings.Contains(payload, forbidden) {
+					t.Fatalf("browser session login request payload contains forbidden token %q: %s", forbidden, payload)
+				}
+			}
+		}
+	}
+	if counts[runtimeevents.EventBrowserSessionLoginRequested] != 2 {
+		t.Fatalf("browser.session_login_requested events = %d, want 2", counts[runtimeevents.EventBrowserSessionLoginRequested])
+	}
+	if counts[runtimeevents.EventBrowserSessionLoginCompleted] != 1 {
+		t.Fatalf("browser.session_login_completed events = %d, want 1", counts[runtimeevents.EventBrowserSessionLoginCompleted])
+	}
+	if counts[runtimeevents.EventBrowserSessionLoginExpired] != 1 {
+		t.Fatalf("browser.session_login_expired events = %d, want 1", counts[runtimeevents.EventBrowserSessionLoginExpired])
+	}
+}

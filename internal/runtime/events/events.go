@@ -130,6 +130,9 @@ const (
 	EventBrowserSessionCreated              Type = "browser.session_created"
 	EventBrowserSessionStatusChanged        Type = "browser.session_status_changed"
 	EventBrowserSessionRevoked              Type = "browser.session_revoked"
+	EventBrowserSessionLoginRequested       Type = "browser.session_login_requested"
+	EventBrowserSessionLoginCompleted       Type = "browser.session_login_completed"
+	EventBrowserSessionLoginExpired         Type = "browser.session_login_expired"
 )
 
 const (
@@ -362,6 +365,30 @@ type BrowserSessionRevokedPayload struct {
 	Actor          string `json:"actor,omitempty"`
 	Reason         string `json:"reason"`
 	RevokedAt      string `json:"revoked_at"`
+}
+
+type BrowserSessionLoginRequestedPayload struct {
+	SessionID      int64  `json:"session_id"`
+	LoginRequestID int64  `json:"login_request_id"`
+	Status         string `json:"status"`
+	HandoffURL     string `json:"handoff_url,omitempty"`
+	ExpiresAt      string `json:"expires_at"`
+}
+
+type BrowserSessionLoginCompletedPayload struct {
+	SessionID      int64  `json:"session_id"`
+	LoginRequestID int64  `json:"login_request_id"`
+	PreviousStatus string `json:"previous_status"`
+	Status         string `json:"status"`
+	CompletedAt    string `json:"completed_at"`
+}
+
+type BrowserSessionLoginExpiredPayload struct {
+	SessionID      int64  `json:"session_id"`
+	LoginRequestID int64  `json:"login_request_id"`
+	PreviousStatus string `json:"previous_status"`
+	Status         string `json:"status"`
+	ExpiresAt      string `json:"expires_at"`
 }
 
 type TaskQueueStateChangedPayload struct {

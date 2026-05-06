@@ -153,6 +153,51 @@ func TestRunBrowserSessionValidationErrors(t *testing.T) {
 	}
 }
 
+func TestRunBrowserSessionLoginRequestCreateAndList(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	root := testRepoRoot(t)
+
+	run := func(args ...string) string {
+		t.Helper()
+		var output bytes.Buffer
+		if err := Run(context.Background(), root, args, strings.NewReader(""), &output); err != nil {
+			t.Fatalf("Run(%v) error = %v\noutput=%s", args, err, output.String())
+		}
+		return output.String()
+	}
+
+	created := decodeBrowserSessionEnvelope(t, []byte(run(
+		"browser", "session", "create",
+		"--name", "google-main",
+		"--domain", "google.com",
+		"--permission-tier", "authenticated_read",
+		"--json",
+	)))
+	loginRequestOutput := run("browser", "session", "login-request", "--id", int64String(created.ID), "--json")
+	if !strings.Contains(loginRequestOutput, `"handoff_url": null`) {
+		t.Fatalf("login-request output = %s, want explicit null handoff_url", loginRequestOutput)
+	}
+	loginRequest := decodeBrowserSessionLoginRequestEnvelope(t, []byte(loginRequestOutput))
+	if loginRequest.ID != 1 || loginRequest.SessionID != created.ID || loginRequest.Status != "requested" || loginRequest.ExpiresAt == "" || loginRequest.HandoffURL != nil {
+		t.Fatalf("login request = %+v, want requested metadata with nil handoff URL", loginRequest)
+	}
+
+	loginRequestsOutput := run("browser", "session", "login-requests", "--id", int64String(created.ID), "--json")
+	if !strings.Contains(loginRequestsOutput, `"login_requests":`) || !strings.Contains(loginRequestsOutput, `"status": "requested"`) {
+		t.Fatalf("login-requests output = %s, want requested login metadata list", loginRequestsOutput)
+	}
+
+	logs := run("logs", "--json")
+	if !strings.Contains(logs, `"type": "browser.session_login_requested"`) {
+		t.Fatalf("logs output = %s, want browser.session_login_requested audit event", logs)
+	}
+	for _, forbidden := range []string{"password", "totp", "backup_code", "cookie", "profile_bytes"} {
+		if strings.Contains(strings.ToLower(logs), forbidden) {
+			t.Fatalf("logs output contains forbidden credential/profile byte token %q: %s", forbidden, logs)
+		}
+	}
+}
+
 type browserSessionJSON struct {
 	ID             int64  `json:"id"`
 	Name           string `json:"name"`
@@ -165,6 +210,17 @@ type browserSessionJSON struct {
 	RevokedAt      string `json:"revoked_at,omitempty"`
 }
 
+type browserSessionLoginRequestJSON struct {
+	ID          int64   `json:"id"`
+	SessionID   int64   `json:"session_id"`
+	Status      string  `json:"status"`
+	HandoffURL  *string `json:"handoff_url"`
+	ExpiresAt   string  `json:"expires_at"`
+	CompletedAt string  `json:"completed_at,omitempty"`
+	CreatedAt   string  `json:"created_at"`
+	UpdatedAt   string  `json:"updated_at"`
+}
+
 func decodeBrowserSessionEnvelope(t *testing.T, payload []byte) browserSessionJSON {
 	t.Helper()
 	var envelope struct {
@@ -174,4 +230,15 @@ func decodeBrowserSessionEnvelope(t *testing.T, payload []byte) browserSessionJS
 		t.Fatalf("browser session json decode error = %v; output=%s", err, string(payload))
 	}
 	return envelope.Session
+}
+
+func decodeBrowserSessionLoginRequestEnvelope(t *testing.T, payload []byte) browserSessionLoginRequestJSON {
+	t.Helper()
+	var envelope struct {
+		LoginRequest browserSessionLoginRequestJSON `json:"login_request"`
+	}
+	if err := json.Unmarshal(payload, &envelope); err != nil {
+		t.Fatalf("browser session login request json decode error = %v; output=%s", err, string(payload))
+	}
+	return envelope.LoginRequest
 }

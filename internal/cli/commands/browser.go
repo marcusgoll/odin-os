@@ -161,7 +161,7 @@ func parseBrowserSession(args []string, command BrowserCommand) (BrowserCommand,
 	}
 	command.SessionAction = strings.ToLower(strings.TrimSpace(args[0]))
 	switch command.SessionAction {
-	case "create", "list", "show", "status", "revoke":
+	case "create", "list", "show", "status", "revoke", "login-request", "login-requests":
 	default:
 		return BrowserCommand{}, fmt.Errorf("unsupported browser session subcommand: %s", args[0])
 	}
@@ -250,7 +250,7 @@ func parseBrowserSession(args []string, command BrowserCommand) (BrowserCommand,
 		if command.ID != 0 || command.SessionName != "" || command.SessionDomain != "" || command.PermissionTier != "" || command.AccountHint != "" || command.ProfilePath != "" || command.Status != "" {
 			return BrowserCommand{}, fmt.Errorf("browser session list only accepts --json")
 		}
-	case "show", "revoke":
+	case "show", "revoke", "login-request", "login-requests":
 		if command.ID <= 0 {
 			return BrowserCommand{}, fmt.Errorf("--id is required")
 		}

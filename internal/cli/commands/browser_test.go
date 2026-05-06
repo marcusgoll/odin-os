@@ -75,3 +75,21 @@ func TestParseBrowserSessionValidatesRequiredFields(t *testing.T) {
 		t.Fatal("ParseBrowser(session status unknown status) error = nil, want error")
 	}
 }
+
+func TestParseBrowserSessionLoginRequestCommands(t *testing.T) {
+	request, err := ParseBrowser([]string{"session", "login-request", "--id", "42", "--json"})
+	if err != nil {
+		t.Fatalf("ParseBrowser(session login-request) error = %v", err)
+	}
+	if request.Name != "session" || request.SessionAction != "login-request" || request.ID != 42 || !request.JSON {
+		t.Fatalf("login-request command = %+v, want parsed request command", request)
+	}
+
+	list, err := ParseBrowser([]string{"session", "login-requests", "--id", "42", "--json"})
+	if err != nil {
+		t.Fatalf("ParseBrowser(session login-requests) error = %v", err)
+	}
+	if list.Name != "session" || list.SessionAction != "login-requests" || list.ID != 42 || !list.JSON {
+		t.Fatalf("login-requests command = %+v, want parsed list command", list)
+	}
+}

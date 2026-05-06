@@ -39,6 +39,14 @@ type browserSessionListView struct {
 	Sessions []browserSessionView `json:"sessions"`
 }
 
+type browserSessionLoginRequestEnvelope struct {
+	LoginRequest browserSessionLoginRequestView `json:"login_request"`
+}
+
+type browserSessionLoginRequestListView struct {
+	LoginRequests []browserSessionLoginRequestView `json:"login_requests"`
+}
+
 type browserSessionView struct {
 	ID             int64  `json:"id"`
 	Name           string `json:"name"`
@@ -52,6 +60,17 @@ type browserSessionView struct {
 	LastVerifiedAt string `json:"last_verified_at,omitempty"`
 	ExpiresAt      string `json:"expires_at,omitempty"`
 	RevokedAt      string `json:"revoked_at,omitempty"`
+}
+
+type browserSessionLoginRequestView struct {
+	ID          int64   `json:"id"`
+	SessionID   int64   `json:"session_id"`
+	Status      string  `json:"status"`
+	HandoffURL  *string `json:"handoff_url"`
+	ExpiresAt   string  `json:"expires_at"`
+	CompletedAt string  `json:"completed_at,omitempty"`
+	CreatedAt   string  `json:"created_at"`
+	UpdatedAt   string  `json:"updated_at"`
 }
 
 func runBrowser(ctx context.Context, app bootstrap.App, args []string, stdout io.Writer) error {
@@ -196,6 +215,42 @@ func runBrowserSession(ctx context.Context, app bootstrap.App, command commands.
 		}
 		_, err = fmt.Fprintf(stdout, "browser_session=%d status=%s name=%q domain=%s\n", view.ID, view.Status, view.Name, view.Domain)
 		return err
+	case "login-request":
+		request, err := app.Store.CreateBrowserSessionLoginRequest(ctx, sqlite.CreateBrowserSessionLoginRequestParams{
+			SessionID: command.ID,
+			ExpiresAt: time.Now().UTC().Add(10 * time.Minute),
+		})
+		if err != nil {
+			return err
+		}
+		view := newBrowserSessionLoginRequestView(request)
+		if command.JSON {
+			return commands.WriteJSON(stdout, browserSessionLoginRequestEnvelope{LoginRequest: view})
+		}
+		_, err = fmt.Fprintf(stdout, "browser_session_login_request=%d session=%d status=%s\n", view.ID, view.SessionID, view.Status)
+		return err
+	case "login-requests":
+		requests, err := app.Store.ListBrowserSessionLoginRequests(ctx, sqlite.ListBrowserSessionLoginRequestsParams{SessionID: command.ID})
+		if err != nil {
+			return err
+		}
+		views := make([]browserSessionLoginRequestView, 0, len(requests))
+		for _, request := range requests {
+			views = append(views, newBrowserSessionLoginRequestView(request))
+		}
+		if command.JSON {
+			return commands.WriteJSON(stdout, browserSessionLoginRequestListView{LoginRequests: views})
+		}
+		if len(views) == 0 {
+			_, err := fmt.Fprintln(stdout, "no browser session login requests")
+			return err
+		}
+		for _, view := range views {
+			if _, err := fmt.Fprintf(stdout, "browser_session_login_request=%d session=%d status=%s\n", view.ID, view.SessionID, view.Status); err != nil {
+				return err
+			}
+		}
+		return nil
 	default:
 		return fmt.Errorf(commands.BrowserUsage)
 	}
@@ -254,6 +309,28 @@ func newBrowserSessionView(session sqlite.BrowserSession) browserSessionView {
 		ExpiresAt:      formatBrowserSessionOptionalTime(session.ExpiresAt),
 		RevokedAt:      formatBrowserSessionOptionalTime(session.RevokedAt),
 	}
+}
+
+func newBrowserSessionLoginRequestView(request sqlite.BrowserSessionLoginRequest) browserSessionLoginRequestView {
+	return browserSessionLoginRequestView{
+		ID:          request.ID,
+		SessionID:   request.SessionID,
+		Status:      string(request.Status),
+		HandoffURL:  cloneBrowserSessionStringPtr(request.HandoffURL),
+		ExpiresAt:   formatBrowserSessionTime(request.ExpiresAt),
+		CompletedAt: formatBrowserSessionOptionalTime(request.CompletedAt),
+		CreatedAt:   formatBrowserSessionTime(request.CreatedAt),
+		UpdatedAt:   formatBrowserSessionTime(request.UpdatedAt),
+	}
+}
+
+func cloneBrowserSessionStringPtr(value *string) *string {
+	if value == nil {
+		return nil
+	}
+	ptr := new(string)
+	*ptr = *value
+	return ptr
 }
 
 func formatBrowserSessionOptionalTime(value *time.Time) string {

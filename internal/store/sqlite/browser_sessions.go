@@ -13,6 +13,7 @@ import (
 
 type BrowserSessionStatus string
 type BrowserSessionPermissionTier string
+type BrowserSessionLoginRequestStatus string
 
 const (
 	BrowserSessionStatusCreated        BrowserSessionStatus = "created"
@@ -25,6 +26,13 @@ const (
 const (
 	BrowserSessionPermissionTierPublicReadOnly        BrowserSessionPermissionTier = "public_readonly"
 	BrowserSessionPermissionTierAuthenticatedReadOnly BrowserSessionPermissionTier = "authenticated_readonly"
+)
+
+const (
+	BrowserSessionLoginRequestStatusRequested BrowserSessionLoginRequestStatus = "requested"
+	BrowserSessionLoginRequestStatusCompleted BrowserSessionLoginRequestStatus = "completed"
+	BrowserSessionLoginRequestStatusExpired   BrowserSessionLoginRequestStatus = "expired"
+	BrowserSessionLoginRequestStatusCancelled BrowserSessionLoginRequestStatus = "cancelled"
 )
 
 type BrowserSession struct {
@@ -40,6 +48,17 @@ type BrowserSession struct {
 	LastVerifiedAt *time.Time
 	ExpiresAt      *time.Time
 	RevokedAt      *time.Time
+}
+
+type BrowserSessionLoginRequest struct {
+	ID          int64
+	SessionID   int64
+	Status      BrowserSessionLoginRequestStatus
+	HandoffURL  *string
+	ExpiresAt   time.Time
+	CompletedAt *time.Time
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
 }
 
 type CreateBrowserSessionParams struct {
@@ -68,6 +87,24 @@ type RevokeBrowserSessionParams struct {
 	SessionID int64
 	Actor     string
 	Reason    string
+}
+
+type CreateBrowserSessionLoginRequestParams struct {
+	SessionID  int64
+	HandoffURL *string
+	ExpiresAt  time.Time
+}
+
+type ListBrowserSessionLoginRequestsParams struct {
+	SessionID int64
+}
+
+type CompleteBrowserSessionLoginRequestParams struct {
+	RequestID int64
+}
+
+type ExpireBrowserSessionLoginRequestParams struct {
+	RequestID int64
 }
 
 func (store *Store) CreateBrowserSession(ctx context.Context, params CreateBrowserSessionParams) (BrowserSession, error) {
@@ -283,6 +320,174 @@ func (store *Store) RevokeBrowserSession(ctx context.Context, params RevokeBrows
 	return revoked, err
 }
 
+func (store *Store) CreateBrowserSessionLoginRequest(ctx context.Context, params CreateBrowserSessionLoginRequestParams) (BrowserSessionLoginRequest, error) {
+	if params.SessionID <= 0 {
+		return BrowserSessionLoginRequest{}, fmt.Errorf("browser session id must be positive")
+	}
+	expiresAt := params.ExpiresAt.UTC()
+	if expiresAt.IsZero() {
+		return BrowserSessionLoginRequest{}, fmt.Errorf("browser session login request expires_at is required")
+	}
+	now := store.now()
+	request := BrowserSessionLoginRequest{
+		SessionID:  params.SessionID,
+		Status:     BrowserSessionLoginRequestStatusRequested,
+		HandoffURL: cloneStringPtr(params.HandoffURL),
+		ExpiresAt:  expiresAt,
+		CreatedAt:  now,
+		UpdatedAt:  now,
+	}
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		session, err := getBrowserSessionTx(ctx, tx, params.SessionID)
+		if err != nil {
+			return err
+		}
+		result, err := tx.ExecContext(ctx, `
+			INSERT INTO browser_session_login_requests (
+				session_id, status, handoff_url, expires_at, completed_at, created_at, updated_at
+			)
+			VALUES (?, ?, ?, ?, NULL, ?, ?)
+		`,
+			request.SessionID,
+			string(request.Status),
+			nullStringPtr(request.HandoffURL),
+			formatTime(request.ExpiresAt),
+			formatTime(now),
+			formatTime(now),
+		)
+		if err != nil {
+			return err
+		}
+		request.ID, err = result.LastInsertId()
+		if err != nil {
+			return err
+		}
+		return appendBrowserSessionEventTx(ctx, tx, session, runtimeevents.EventBrowserSessionLoginRequested, runtimeevents.BrowserSessionLoginRequestedPayload{
+			SessionID:      session.ID,
+			LoginRequestID: request.ID,
+			Status:         string(request.Status),
+			HandoffURL:     stringPtrValue(request.HandoffURL),
+			ExpiresAt:      formatTime(request.ExpiresAt),
+		}, now)
+	})
+	return request, err
+}
+
+func (store *Store) GetBrowserSessionLoginRequest(ctx context.Context, id int64) (BrowserSessionLoginRequest, error) {
+	if id <= 0 {
+		return BrowserSessionLoginRequest{}, fmt.Errorf("browser session login request id must be positive")
+	}
+	row := store.db.QueryRowContext(ctx, browserSessionLoginRequestSelectSQL()+` WHERE id = ?`, id)
+	return scanBrowserSessionLoginRequest(row)
+}
+
+func (store *Store) ListBrowserSessionLoginRequests(ctx context.Context, params ListBrowserSessionLoginRequestsParams) ([]BrowserSessionLoginRequest, error) {
+	if params.SessionID <= 0 {
+		return nil, fmt.Errorf("browser session id must be positive")
+	}
+	rows, err := store.db.QueryContext(ctx, browserSessionLoginRequestSelectSQL()+` WHERE session_id = ? ORDER BY id ASC`, params.SessionID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	requests := make([]BrowserSessionLoginRequest, 0)
+	for rows.Next() {
+		request, err := scanBrowserSessionLoginRequest(rows)
+		if err != nil {
+			return nil, err
+		}
+		requests = append(requests, request)
+	}
+	return requests, rows.Err()
+}
+
+func (store *Store) CompleteBrowserSessionLoginRequest(ctx context.Context, params CompleteBrowserSessionLoginRequestParams) (BrowserSessionLoginRequest, error) {
+	if params.RequestID <= 0 {
+		return BrowserSessionLoginRequest{}, fmt.Errorf("browser session login request id must be positive")
+	}
+	now := store.now()
+	var updated BrowserSessionLoginRequest
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		current, err := getBrowserSessionLoginRequestTx(ctx, tx, params.RequestID)
+		if err != nil {
+			return err
+		}
+		if current.Status == BrowserSessionLoginRequestStatusCompleted {
+			updated = current
+			return nil
+		}
+		if current.Status != BrowserSessionLoginRequestStatusRequested {
+			return fmt.Errorf("browser session login request status %q cannot complete", current.Status)
+		}
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE browser_session_login_requests
+			SET status = ?, completed_at = ?, updated_at = ?
+			WHERE id = ?
+		`, string(BrowserSessionLoginRequestStatusCompleted), formatTime(now), formatTime(now), current.ID); err != nil {
+			return err
+		}
+		updated = current
+		updated.Status = BrowserSessionLoginRequestStatusCompleted
+		updated.CompletedAt = &now
+		updated.UpdatedAt = now
+		session, err := getBrowserSessionTx(ctx, tx, current.SessionID)
+		if err != nil {
+			return err
+		}
+		return appendBrowserSessionEventTx(ctx, tx, session, runtimeevents.EventBrowserSessionLoginCompleted, runtimeevents.BrowserSessionLoginCompletedPayload{
+			SessionID:      session.ID,
+			LoginRequestID: updated.ID,
+			PreviousStatus: string(current.Status),
+			Status:         string(updated.Status),
+			CompletedAt:    formatTime(now),
+		}, now)
+	})
+	return updated, err
+}
+
+func (store *Store) ExpireBrowserSessionLoginRequest(ctx context.Context, params ExpireBrowserSessionLoginRequestParams) (BrowserSessionLoginRequest, error) {
+	if params.RequestID <= 0 {
+		return BrowserSessionLoginRequest{}, fmt.Errorf("browser session login request id must be positive")
+	}
+	now := store.now()
+	var updated BrowserSessionLoginRequest
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		current, err := getBrowserSessionLoginRequestTx(ctx, tx, params.RequestID)
+		if err != nil {
+			return err
+		}
+		if current.Status == BrowserSessionLoginRequestStatusExpired {
+			updated = current
+			return nil
+		}
+		if current.Status != BrowserSessionLoginRequestStatusRequested {
+			return fmt.Errorf("browser session login request status %q cannot expire", current.Status)
+		}
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE browser_session_login_requests
+			SET status = ?, updated_at = ?
+			WHERE id = ?
+		`, string(BrowserSessionLoginRequestStatusExpired), formatTime(now), current.ID); err != nil {
+			return err
+		}
+		updated = current
+		updated.Status = BrowserSessionLoginRequestStatusExpired
+		updated.UpdatedAt = now
+		session, err := getBrowserSessionTx(ctx, tx, current.SessionID)
+		if err != nil {
+			return err
+		}
+		return appendBrowserSessionEventTx(ctx, tx, session, runtimeevents.EventBrowserSessionLoginExpired, runtimeevents.BrowserSessionLoginExpiredPayload{
+			SessionID:      session.ID,
+			LoginRequestID: updated.ID,
+			PreviousStatus: string(current.Status),
+			Status:         string(updated.Status),
+			ExpiresAt:      formatTime(updated.ExpiresAt),
+		}, now)
+	})
+	return updated, err
+}
+
 func appendBrowserSessionEventTx(ctx context.Context, tx *sql.Tx, session BrowserSession, eventType runtimeevents.Type, payload any, occurredAt time.Time) error {
 	return appendEventTx(ctx, tx, eventInsert{
 		StreamType: runtimeevents.StreamBrowserSession,
@@ -299,11 +504,23 @@ func getBrowserSessionTx(ctx context.Context, tx *sql.Tx, id int64) (BrowserSess
 	return scanBrowserSession(row)
 }
 
+func getBrowserSessionLoginRequestTx(ctx context.Context, tx *sql.Tx, id int64) (BrowserSessionLoginRequest, error) {
+	row := tx.QueryRowContext(ctx, browserSessionLoginRequestSelectSQL()+` WHERE id = ?`, id)
+	return scanBrowserSessionLoginRequest(row)
+}
+
 func browserSessionSelectSQL() string {
 	return `
 		SELECT id, name, domain, account_hint, permission_tier, status, profile_path,
 			created_at, updated_at, last_verified_at, expires_at, revoked_at
 		FROM browser_session_profiles
+	`
+}
+
+func browserSessionLoginRequestSelectSQL() string {
+	return `
+		SELECT id, session_id, status, handoff_url, expires_at, completed_at, created_at, updated_at
+		FROM browser_session_login_requests
 	`
 }
 
@@ -356,6 +573,45 @@ func scanBrowserSession(scanner browserSessionScanner) (BrowserSession, error) {
 	return session, nil
 }
 
+func scanBrowserSessionLoginRequest(scanner browserSessionScanner) (BrowserSessionLoginRequest, error) {
+	var request BrowserSessionLoginRequest
+	var handoffURL, completedAt sql.NullString
+	var expiresAt, createdAt, updatedAt string
+	if err := scanner.Scan(
+		&request.ID,
+		&request.SessionID,
+		&request.Status,
+		&handoffURL,
+		&expiresAt,
+		&completedAt,
+		&createdAt,
+		&updatedAt,
+	); err != nil {
+		return BrowserSessionLoginRequest{}, err
+	}
+	request.HandoffURL = nullableStringPtr(handoffURL)
+	parsedExpiresAt, err := parseTime(expiresAt)
+	if err != nil {
+		return BrowserSessionLoginRequest{}, err
+	}
+	request.ExpiresAt = parsedExpiresAt
+	request.CompletedAt, err = parseNullableTime(completedAt)
+	if err != nil {
+		return BrowserSessionLoginRequest{}, err
+	}
+	parsedCreatedAt, err := parseTime(createdAt)
+	if err != nil {
+		return BrowserSessionLoginRequest{}, err
+	}
+	request.CreatedAt = parsedCreatedAt
+	parsedUpdatedAt, err := parseTime(updatedAt)
+	if err != nil {
+		return BrowserSessionLoginRequest{}, err
+	}
+	request.UpdatedAt = parsedUpdatedAt
+	return request, nil
+}
+
 func normalizeBrowserSessionStatus(status BrowserSessionStatus) BrowserSessionStatus {
 	switch BrowserSessionStatus(strings.ToLower(strings.TrimSpace(string(status)))) {
 	case BrowserSessionStatusCreated:
@@ -379,6 +635,21 @@ func normalizeBrowserSessionPermissionTier(tier BrowserSessionPermissionTier) Br
 		return BrowserSessionPermissionTierPublicReadOnly
 	case BrowserSessionPermissionTierAuthenticatedReadOnly:
 		return BrowserSessionPermissionTierAuthenticatedReadOnly
+	default:
+		return ""
+	}
+}
+
+func normalizeBrowserSessionLoginRequestStatus(status BrowserSessionLoginRequestStatus) BrowserSessionLoginRequestStatus {
+	switch BrowserSessionLoginRequestStatus(strings.ToLower(strings.TrimSpace(string(status)))) {
+	case BrowserSessionLoginRequestStatusRequested:
+		return BrowserSessionLoginRequestStatusRequested
+	case BrowserSessionLoginRequestStatusCompleted:
+		return BrowserSessionLoginRequestStatusCompleted
+	case BrowserSessionLoginRequestStatusExpired:
+		return BrowserSessionLoginRequestStatusExpired
+	case BrowserSessionLoginRequestStatusCancelled:
+		return BrowserSessionLoginRequestStatusCancelled
 	default:
 		return ""
 	}
@@ -415,4 +686,38 @@ func formatOptionalTime(value *time.Time) string {
 		return ""
 	}
 	return formatTime(*value)
+}
+
+func cloneStringPtr(value *string) *string {
+	if value == nil {
+		return nil
+	}
+	trimmed := strings.TrimSpace(*value)
+	if trimmed == "" {
+		return nil
+	}
+	return &trimmed
+}
+
+func nullStringPtr(value *string) any {
+	if value == nil {
+		return nil
+	}
+	return *value
+}
+
+func nullableStringPtr(value sql.NullString) *string {
+	if !value.Valid || value.String == "" {
+		return nil
+	}
+	ptr := new(string)
+	*ptr = value.String
+	return ptr
+}
+
+func stringPtrValue(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
 }
