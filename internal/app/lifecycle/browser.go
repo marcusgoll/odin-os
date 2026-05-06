@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -48,18 +50,19 @@ type browserSessionLoginRequestListView struct {
 }
 
 type browserSessionView struct {
-	ID             int64  `json:"id"`
-	Name           string `json:"name"`
-	Domain         string `json:"domain"`
-	AccountHint    string `json:"account_hint,omitempty"`
-	PermissionTier string `json:"permission_tier"`
-	Status         string `json:"status"`
-	ProfilePath    string `json:"profile_path"`
-	CreatedAt      string `json:"created_at"`
-	UpdatedAt      string `json:"updated_at"`
-	LastVerifiedAt string `json:"last_verified_at,omitempty"`
-	ExpiresAt      string `json:"expires_at,omitempty"`
-	RevokedAt      string `json:"revoked_at,omitempty"`
+	ID                int64  `json:"id"`
+	Name              string `json:"name"`
+	Domain            string `json:"domain"`
+	AccountHint       string `json:"account_hint,omitempty"`
+	PermissionTier    string `json:"permission_tier"`
+	Status            string `json:"status"`
+	ProfilePath       string `json:"profile_path"`
+	ProfilePathExists bool   `json:"profile_path_exists"`
+	CreatedAt         string `json:"created_at"`
+	UpdatedAt         string `json:"updated_at"`
+	LastVerifiedAt    string `json:"last_verified_at,omitempty"`
+	ExpiresAt         string `json:"expires_at,omitempty"`
+	RevokedAt         string `json:"revoked_at,omitempty"`
 }
 
 type browserSessionLoginRequestView struct {
@@ -140,12 +143,12 @@ func runBrowserSession(ctx context.Context, app bootstrap.App, command commands.
 			Domain:         command.SessionDomain,
 			AccountHint:    command.AccountHint,
 			PermissionTier: browserSessionPermissionTier(command.PermissionTier),
-			ProfilePath:    browserSessionProfilePath(command),
+			ProfilePath:    command.ProfilePath,
 		})
 		if err != nil {
 			return err
 		}
-		view := newBrowserSessionView(session)
+		view := newBrowserSessionView(app.RuntimeRoot, session)
 		if command.JSON {
 			return commands.WriteJSON(stdout, browserSessionEnvelope{Session: view})
 		}
@@ -158,7 +161,7 @@ func runBrowserSession(ctx context.Context, app bootstrap.App, command commands.
 		}
 		views := make([]browserSessionView, 0, len(sessions))
 		for _, session := range sessions {
-			views = append(views, newBrowserSessionView(session))
+			views = append(views, newBrowserSessionView(app.RuntimeRoot, session))
 		}
 		if command.JSON {
 			return commands.WriteJSON(stdout, browserSessionListView{Sessions: views})
@@ -178,7 +181,7 @@ func runBrowserSession(ctx context.Context, app bootstrap.App, command commands.
 		if err != nil {
 			return err
 		}
-		view := newBrowserSessionView(session)
+		view := newBrowserSessionView(app.RuntimeRoot, session)
 		if command.JSON {
 			return commands.WriteJSON(stdout, browserSessionEnvelope{Session: view})
 		}
@@ -194,7 +197,7 @@ func runBrowserSession(ctx context.Context, app bootstrap.App, command commands.
 		if err != nil {
 			return err
 		}
-		view := newBrowserSessionView(session)
+		view := newBrowserSessionView(app.RuntimeRoot, session)
 		if command.JSON {
 			return commands.WriteJSON(stdout, browserSessionEnvelope{Session: view})
 		}
@@ -209,7 +212,7 @@ func runBrowserSession(ctx context.Context, app bootstrap.App, command commands.
 		if err != nil {
 			return err
 		}
-		view := newBrowserSessionView(session)
+		view := newBrowserSessionView(app.RuntimeRoot, session)
 		if command.JSON {
 			return commands.WriteJSON(stdout, browserSessionEnvelope{Session: view})
 		}
@@ -225,7 +228,7 @@ func runBrowserSession(ctx context.Context, app bootstrap.App, command commands.
 		if err != nil {
 			return err
 		}
-		view := newBrowserSessionView(session)
+		view := newBrowserSessionView(app.RuntimeRoot, session)
 		if command.JSON {
 			return commands.WriteJSON(stdout, browserSessionEnvelope{Session: view})
 		}
@@ -281,50 +284,31 @@ func browserSessionPermissionTier(value string) sqlite.BrowserSessionPermissionT
 	}
 }
 
-func browserSessionProfilePath(command commands.BrowserCommand) string {
-	if strings.TrimSpace(command.ProfilePath) != "" {
-		return command.ProfilePath
-	}
-	return "browser-sessions/profiles/" + browserSessionPathSegment(command.SessionName)
-}
-
-func browserSessionPathSegment(value string) string {
-	value = strings.ToLower(strings.TrimSpace(value))
-	var builder strings.Builder
-	for _, r := range value {
-		switch {
-		case r >= 'a' && r <= 'z':
-			builder.WriteRune(r)
-		case r >= '0' && r <= '9':
-			builder.WriteRune(r)
-		case r == '-' || r == '_' || r == '.':
-			builder.WriteRune(r)
-		default:
-			builder.WriteRune('-')
-		}
-	}
-	segment := strings.Trim(builder.String(), "-._")
-	if segment == "" {
-		return "session"
-	}
-	return segment
-}
-
-func newBrowserSessionView(session sqlite.BrowserSession) browserSessionView {
+func newBrowserSessionView(runtimeRoot string, session sqlite.BrowserSession) browserSessionView {
 	return browserSessionView{
-		ID:             session.ID,
-		Name:           session.Name,
-		Domain:         session.Domain,
-		AccountHint:    session.AccountHint,
-		PermissionTier: string(session.PermissionTier),
-		Status:         string(session.Status),
-		ProfilePath:    session.ProfilePath,
-		CreatedAt:      formatBrowserSessionTime(session.CreatedAt),
-		UpdatedAt:      formatBrowserSessionTime(session.UpdatedAt),
-		LastVerifiedAt: formatBrowserSessionOptionalTime(session.LastVerifiedAt),
-		ExpiresAt:      formatBrowserSessionOptionalTime(session.ExpiresAt),
-		RevokedAt:      formatBrowserSessionOptionalTime(session.RevokedAt),
+		ID:                session.ID,
+		Name:              session.Name,
+		Domain:            session.Domain,
+		AccountHint:       session.AccountHint,
+		PermissionTier:    string(session.PermissionTier),
+		Status:            string(session.Status),
+		ProfilePath:       session.ProfilePath,
+		ProfilePathExists: browserSessionProfilePathExists(runtimeRoot, session.ProfilePath),
+		CreatedAt:         formatBrowserSessionTime(session.CreatedAt),
+		UpdatedAt:         formatBrowserSessionTime(session.UpdatedAt),
+		LastVerifiedAt:    formatBrowserSessionOptionalTime(session.LastVerifiedAt),
+		ExpiresAt:         formatBrowserSessionOptionalTime(session.ExpiresAt),
+		RevokedAt:         formatBrowserSessionOptionalTime(session.RevokedAt),
 	}
+}
+
+func browserSessionProfilePathExists(runtimeRoot string, profilePath string) bool {
+	profilePath = strings.TrimSpace(profilePath)
+	if profilePath == "" || filepath.IsAbs(profilePath) {
+		return false
+	}
+	_, err := os.Stat(filepath.Join(runtimeRoot, filepath.FromSlash(profilePath)))
+	return err == nil
 }
 
 func newBrowserSessionLoginRequestView(request sqlite.BrowserSessionLoginRequest) browserSessionLoginRequestView {

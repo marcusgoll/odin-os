@@ -38,7 +38,6 @@ func TestBrowserSessionMetadataLifecyclePersistsAndAudits(t *testing.T) {
 		Domain:         "aa.com",
 		AccountHint:    "marcus-aa",
 		PermissionTier: BrowserSessionPermissionTierAuthenticatedReadOnly,
-		ProfilePath:    "browser-sessions/profiles/marcus-aa",
 		ExpiresAt:      &expiresAt,
 	})
 	if err != nil {
@@ -166,6 +165,62 @@ func TestBrowserSessionMetadataLifecyclePersistsAndAudits(t *testing.T) {
 	}
 	if persisted.Status != BrowserSessionStatusRevoked {
 		t.Fatalf("persisted.Status = %q, want %q", persisted.Status, BrowserSessionStatusRevoked)
+	}
+}
+
+func TestBrowserSessionProfilePathAllocationSanitizesAndRejectsUnsafePaths(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(filepath.Join(t.TempDir(), "browser-session-profile-paths.db"))
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer store.Close()
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
+	}
+
+	session, err := store.CreateBrowserSession(ctx, CreateBrowserSessionParams{
+		Name:           "Google Main!!",
+		Domain:         "google.com",
+		PermissionTier: BrowserSessionPermissionTierAuthenticatedReadOnly,
+	})
+	if err != nil {
+		t.Fatalf("CreateBrowserSession(default profile path) error = %v", err)
+	}
+	if session.ProfilePath != "browser-sessions/profiles/google-main" {
+		t.Fatalf("session.ProfilePath = %q, want sanitized default under browser-sessions/profiles", session.ProfilePath)
+	}
+
+	explicit, err := store.CreateBrowserSession(ctx, CreateBrowserSessionParams{
+		Name:           "Explicit",
+		Domain:         "example.com",
+		PermissionTier: BrowserSessionPermissionTierAuthenticatedReadOnly,
+		ProfilePath:    "browser-sessions/profiles/explicit-main",
+	})
+	if err != nil {
+		t.Fatalf("CreateBrowserSession(explicit safe path) error = %v", err)
+	}
+	if explicit.ProfilePath != "browser-sessions/profiles/explicit-main" {
+		t.Fatalf("explicit.ProfilePath = %q, want cleaned explicit path", explicit.ProfilePath)
+	}
+
+	for _, unsafe := range []string{
+		"../profiles/escape",
+		"/tmp/odin-browser-profile",
+		"browser-sessions/../profiles/escape",
+		"state/cache/session",
+		"browser-sessions/profiles/../../escape",
+		"browser-sessions/profiles/nested/path",
+	} {
+		_, err := store.CreateBrowserSession(ctx, CreateBrowserSessionParams{
+			Name:           "Unsafe",
+			Domain:         "unsafe.example",
+			PermissionTier: BrowserSessionPermissionTierAuthenticatedReadOnly,
+			ProfilePath:    unsafe,
+		})
+		if err == nil {
+			t.Fatalf("CreateBrowserSession(profile_path=%q) error = nil, want rejection", unsafe)
+		}
 	}
 }
 

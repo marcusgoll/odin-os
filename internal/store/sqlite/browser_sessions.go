@@ -127,7 +127,7 @@ func (store *Store) CreateBrowserSession(ctx context.Context, params CreateBrows
 	if tier == "" {
 		return BrowserSession{}, fmt.Errorf("browser session permission tier is required")
 	}
-	profilePath, err := normalizeBrowserSessionProfilePath(params.ProfilePath)
+	profilePath, err := normalizeBrowserSessionProfilePath(params.ProfilePath, name)
 	if err != nil {
 		return BrowserSession{}, err
 	}
@@ -767,19 +767,84 @@ func normalizeBrowserSessionDomain(domain string) (string, error) {
 	return domain, nil
 }
 
-func normalizeBrowserSessionProfilePath(profilePath string) (string, error) {
+func normalizeBrowserSessionProfilePath(profilePath string, sessionName string) (string, error) {
 	profilePath = strings.TrimSpace(profilePath)
 	if profilePath == "" {
-		return "", fmt.Errorf("browser session profile path is required")
+		return filepath.ToSlash(filepath.Join("browser-sessions", "profiles", browserSessionPathSegment(sessionName))), nil
 	}
 	if filepath.IsAbs(profilePath) {
 		return "", fmt.Errorf("browser session profile path must be relative to ODIN_ROOT")
+	}
+	if hasPathTraversalSegment(profilePath) {
+		return "", fmt.Errorf("browser session profile path must stay under ODIN_ROOT")
 	}
 	clean := filepath.Clean(profilePath)
 	if clean == "." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) || clean == ".." {
 		return "", fmt.Errorf("browser session profile path must stay under ODIN_ROOT")
 	}
-	return filepath.ToSlash(clean), nil
+	slashed := filepath.ToSlash(clean)
+	const profileRoot = "browser-sessions/profiles/"
+	if !strings.HasPrefix(slashed, profileRoot) || strings.TrimSpace(strings.TrimPrefix(slashed, profileRoot)) == "" {
+		return "", fmt.Errorf("browser session profile path must stay under browser-sessions/profiles")
+	}
+	component := strings.TrimPrefix(slashed, profileRoot)
+	if strings.Contains(component, "/") {
+		return "", fmt.Errorf("browser session profile path must use a single safe component")
+	}
+	if !isSafeBrowserSessionPathSegment(component) {
+		return "", fmt.Errorf("browser session profile path contains unsafe component %q", component)
+	}
+	return slashed, nil
+}
+
+func browserSessionPathSegment(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	var builder strings.Builder
+	for _, r := range value {
+		switch {
+		case r >= 'a' && r <= 'z':
+			builder.WriteRune(r)
+		case r >= '0' && r <= '9':
+			builder.WriteRune(r)
+		case r == '-' || r == '_' || r == '.':
+			builder.WriteRune(r)
+		default:
+			builder.WriteRune('-')
+		}
+	}
+	segment := strings.Trim(builder.String(), "-._")
+	if segment == "" {
+		return "session"
+	}
+	return segment
+}
+
+func hasPathTraversalSegment(value string) bool {
+	for _, component := range strings.FieldsFunc(value, func(r rune) bool {
+		return r == '/' || r == '\\'
+	}) {
+		if component == ".." {
+			return true
+		}
+	}
+	return false
+}
+
+func isSafeBrowserSessionPathSegment(value string) bool {
+	if value == "" || value == "." || value == ".." {
+		return false
+	}
+	for _, r := range value {
+		switch {
+		case r >= 'a' && r <= 'z':
+		case r >= 'A' && r <= 'Z':
+		case r >= '0' && r <= '9':
+		case r == '-' || r == '_' || r == '.':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func formatOptionalTime(value *time.Time) string {

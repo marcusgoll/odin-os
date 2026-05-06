@@ -47,6 +47,7 @@ Required metadata fields for the future store slice:
 - `permission_tier`: one of the tiers below.
 - `allowed_goal_types`: explicit list of goal categories this profile may support.
 - `profile_path`: relative path under `ODIN_ROOT/browser-sessions/profiles/<profile_key>`.
+- `profile_path_exists`: operator JSON field computed from the runtime filesystem; it is not persisted as a second authority.
 - `encrypted_at_rest`: boolean assertion recorded by the implementation.
 - `expires_at`: required expiration timestamp.
 - `reauth_after`: optional earlier timestamp when domain policy requires fresh login.
@@ -148,7 +149,7 @@ odin browser session login-requests --id <id> --json
 odin browser session verify --id <id> [--login-request-id <id>] --json
 ```
 
-`--permission-tier authenticated_read` is accepted by the CLI as an operator-facing alias for stored tier `authenticated_readonly`. If `--profile-path` is omitted, Odin records the metadata-only default `browser-sessions/profiles/<sanitized-name>` and does not create a directory.
+`--permission-tier authenticated_read` is accepted by the CLI as an operator-facing alias for stored tier `authenticated_readonly`. If `--profile-path` is omitted, Odin records the metadata-only default `browser-sessions/profiles/<sanitized-name>` and does not create a directory. Explicit profile paths must remain under `browser-sessions/profiles/`, must be relative to `ODIN_ROOT`, and must not contain path traversal.
 
 `login-request` creates request metadata only. Its JSON envelope returns a `login_request` object with `handoff_url: null` until the future private handoff service can provide a short-lived operator URL. It must not launch a browser, write a browser profile, store credential material, or mark the session verified.
 
@@ -166,6 +167,7 @@ JSON output should follow the existing Odin style: stable top-level envelopes, s
     "account_hint": "marcus-example",
     "permission_tier": "authenticated_readonly",
     "profile_path": "browser-sessions/profiles/marcus-example",
+    "profile_path_exists": false,
     "created_at": "2026-05-06T00:00:00Z",
     "updated_at": "2026-05-06T00:00:00Z",
     "last_verified_at": "2026-05-06T00:00:00Z"
@@ -205,8 +207,10 @@ Tables:
 
 Browser profile files:
 
-- Default root: `ODIN_ROOT/browser-sessions/profiles/<profile_key>`.
+- Default root: `ODIN_ROOT/browser-sessions/profiles/<sanitized-name>`.
 - Paths stored in SQLite must be relative to `ODIN_ROOT`.
+- Odin allocates profile paths as metadata only. It must not create browser profile contents, cookies, storage state, or credential material during session creation.
+- `profile_path_exists` reports whether the allocated relative path currently exists under `ODIN_ROOT`; the field is informational and does not make the filesystem a profile registry.
 - Profile files must be encrypted at rest before `authenticated_readonly` is enabled. If host-level encryption is the first slice, the CLI must report `encrypted_at_rest=false` or `encryption_gap=host_only` and policy must deny reuse unless the operator explicitly accepts that documented gap in a later policy slice.
 - No credential material may be written to Odin-specific metadata, events, logs, screenshots, or evidence payloads.
 

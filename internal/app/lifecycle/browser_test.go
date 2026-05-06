@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -100,17 +102,36 @@ func TestRunBrowserSessionCreateListShowStatusAndRevoke(t *testing.T) {
 	if created.ProfilePath != "browser-sessions/profiles/google-main" {
 		t.Fatalf("created.ProfilePath = %q, want default profile metadata path", created.ProfilePath)
 	}
+	if created.ProfilePathExists {
+		t.Fatalf("created.ProfilePathExists = true, want false before profile directory exists")
+	}
+	if _, err := os.Stat(filepath.Join(root, "browser-sessions")); !os.IsNotExist(err) {
+		t.Fatalf("browser-sessions directory exists after create err=%v, want no profile directory allocation side effects", err)
+	}
 
 	list := run("browser", "session", "list", "--json")
-	for _, want := range []string{`"sessions":`, `"name": "google-main"`, `"domain": "google.com"`} {
+	for _, want := range []string{`"sessions":`, `"name": "google-main"`, `"domain": "google.com"`, `"profile_path_exists": false`} {
 		if !strings.Contains(list, want) {
 			t.Fatalf("list output = %s, want %s", list, want)
 		}
 	}
 
+	if err := os.MkdirAll(filepath.Join(root, filepath.FromSlash(created.ProfilePath)), 0o755); err != nil {
+		t.Fatalf("mkdir profile path: %v", err)
+	}
 	shown := decodeBrowserSessionEnvelope(t, []byte(run("browser", "session", "show", "--id", int64String(created.ID), "--json")))
 	if shown.ID != created.ID || shown.Name != created.Name {
 		t.Fatalf("shown session = %+v, want created session", shown)
+	}
+	if !shown.ProfilePathExists {
+		t.Fatalf("shown.ProfilePathExists = false, want true after empty profile directory exists")
+	}
+	entries, err := os.ReadDir(filepath.Join(root, filepath.FromSlash(created.ProfilePath)))
+	if err != nil {
+		t.Fatalf("ReadDir(profile path) error = %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("profile path entries = %v, want empty directory only", entries)
 	}
 
 	verified := decodeBrowserSessionEnvelope(t, []byte(run("browser", "session", "status", "--id", int64String(created.ID), "--status", "verified", "--json")))
@@ -150,6 +171,12 @@ func TestRunBrowserSessionValidationErrors(t *testing.T) {
 	err = Run(context.Background(), root, []string{"browser", "session", "status", "--id", "1", "--status", "invalid", "--json"}, strings.NewReader(""), &output)
 	if err == nil || !strings.Contains(err.Error(), "--status must be") {
 		t.Fatalf("Run(browser session status invalid) error = %v output=%s, want status validation", err, output.String())
+	}
+
+	output.Reset()
+	err = Run(context.Background(), root, []string{"browser", "session", "create", "--name", "unsafe", "--domain", "google.com", "--permission-tier", "authenticated_read", "--profile-path", "../escape", "--json"}, strings.NewReader(""), &output)
+	if err == nil || !strings.Contains(err.Error(), "stay under ODIN_ROOT") {
+		t.Fatalf("Run(browser session create unsafe profile path) error = %v output=%s, want traversal rejection", err, output.String())
 	}
 }
 
@@ -280,15 +307,16 @@ func TestRunBrowserSessionVerifyRejectsRevokedSession(t *testing.T) {
 }
 
 type browserSessionJSON struct {
-	ID             int64  `json:"id"`
-	Name           string `json:"name"`
-	Domain         string `json:"domain"`
-	AccountHint    string `json:"account_hint"`
-	PermissionTier string `json:"permission_tier"`
-	Status         string `json:"status"`
-	ProfilePath    string `json:"profile_path"`
-	LastVerifiedAt string `json:"last_verified_at,omitempty"`
-	RevokedAt      string `json:"revoked_at,omitempty"`
+	ID                int64  `json:"id"`
+	Name              string `json:"name"`
+	Domain            string `json:"domain"`
+	AccountHint       string `json:"account_hint"`
+	PermissionTier    string `json:"permission_tier"`
+	Status            string `json:"status"`
+	ProfilePath       string `json:"profile_path"`
+	ProfilePathExists bool   `json:"profile_path_exists"`
+	LastVerifiedAt    string `json:"last_verified_at,omitempty"`
+	RevokedAt         string `json:"revoked_at,omitempty"`
 }
 
 type browserSessionLoginRequestJSON struct {
