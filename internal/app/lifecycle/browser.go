@@ -81,6 +81,7 @@ type browserSessionLoginRequestView struct {
 	ID          int64   `json:"id"`
 	SessionID   int64   `json:"session_id"`
 	Status      string  `json:"status"`
+	HandoffID   string  `json:"handoff_id"`
 	HandoffURL  *string `json:"handoff_url"`
 	ExpiresAt   string  `json:"expires_at"`
 	CompletedAt string  `json:"completed_at,omitempty"`
@@ -262,8 +263,9 @@ func runBrowserSession(ctx context.Context, app bootstrap.App, command commands.
 		return err
 	case "login-request":
 		request, err := app.Store.CreateBrowserSessionLoginRequest(ctx, sqlite.CreateBrowserSessionLoginRequestParams{
-			SessionID: command.ID,
-			ExpiresAt: time.Now().UTC().Add(10 * time.Minute),
+			SessionID:      command.ID,
+			HandoffBaseURL: command.HandoffBaseURL,
+			ExpiresAt:      time.Now().UTC().Add(10 * time.Minute),
 		})
 		if err != nil {
 			return err
@@ -405,6 +407,7 @@ func newBrowserSessionLoginRequestView(request sqlite.BrowserSessionLoginRequest
 		ID:          request.ID,
 		SessionID:   request.SessionID,
 		Status:      string(request.Status),
+		HandoffID:   request.HandoffID,
 		HandoffURL:  cloneBrowserSessionStringPtr(request.HandoffURL),
 		ExpiresAt:   formatBrowserSessionTime(request.ExpiresAt),
 		CompletedAt: formatBrowserSessionOptionalTime(request.CompletedAt),

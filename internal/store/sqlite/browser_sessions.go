@@ -2,8 +2,11 @@ package sqlite
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
+	"encoding/hex"
 	"fmt"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"time"
@@ -62,6 +65,7 @@ type BrowserSessionLoginRequest struct {
 	ID          int64
 	SessionID   int64
 	Status      BrowserSessionLoginRequestStatus
+	HandoffID   string
 	HandoffURL  *string
 	ExpiresAt   time.Time
 	CompletedAt *time.Time
@@ -112,9 +116,9 @@ type RecordBrowserSessionProfilePreparedParams struct {
 }
 
 type CreateBrowserSessionLoginRequestParams struct {
-	SessionID  int64
-	HandoffURL *string
-	ExpiresAt  time.Time
+	SessionID      int64
+	HandoffBaseURL string
+	ExpiresAt      time.Time
 }
 
 type ListBrowserSessionLoginRequestsParams struct {
@@ -467,28 +471,41 @@ func (store *Store) CreateBrowserSessionLoginRequest(ctx context.Context, params
 	if expiresAt.IsZero() {
 		return BrowserSessionLoginRequest{}, fmt.Errorf("browser session login request expires_at is required")
 	}
+	handoffID, err := store.newBrowserSessionHandoffID()
+	if err != nil {
+		return BrowserSessionLoginRequest{}, err
+	}
+	handoffURL, err := buildBrowserSessionHandoffURL(params.HandoffBaseURL, handoffID)
+	if err != nil {
+		return BrowserSessionLoginRequest{}, err
+	}
 	now := store.now()
 	request := BrowserSessionLoginRequest{
 		SessionID:  params.SessionID,
 		Status:     BrowserSessionLoginRequestStatusRequested,
-		HandoffURL: cloneStringPtr(params.HandoffURL),
+		HandoffID:  handoffID,
+		HandoffURL: handoffURL,
 		ExpiresAt:  expiresAt,
 		CreatedAt:  now,
 		UpdatedAt:  now,
 	}
-	err := store.withTx(ctx, func(tx *sql.Tx) error {
+	err = store.withTx(ctx, func(tx *sql.Tx) error {
 		session, err := getBrowserSessionTx(ctx, tx, params.SessionID)
 		if err != nil {
 			return err
 		}
+		if session.Status == BrowserSessionStatusRevoked {
+			return fmt.Errorf("revoked browser session cannot create login request")
+		}
 		result, err := tx.ExecContext(ctx, `
 			INSERT INTO browser_session_login_requests (
-				session_id, status, handoff_url, expires_at, completed_at, created_at, updated_at
+				session_id, status, handoff_id, handoff_url, expires_at, completed_at, created_at, updated_at
 			)
-			VALUES (?, ?, ?, ?, NULL, ?, ?)
+			VALUES (?, ?, ?, ?, ?, NULL, ?, ?)
 		`,
 			request.SessionID,
 			string(request.Status),
+			request.HandoffID,
 			nullStringPtr(request.HandoffURL),
 			formatTime(request.ExpiresAt),
 			formatTime(now),
@@ -505,6 +522,7 @@ func (store *Store) CreateBrowserSessionLoginRequest(ctx context.Context, params
 			SessionID:      session.ID,
 			LoginRequestID: request.ID,
 			Status:         string(request.Status),
+			HandoffID:      request.HandoffID,
 			HandoffURL:     stringPtrValue(request.HandoffURL),
 			ExpiresAt:      formatTime(request.ExpiresAt),
 		}, now)
@@ -669,7 +687,7 @@ func browserSessionSelectSQL() string {
 
 func browserSessionLoginRequestSelectSQL() string {
 	return `
-		SELECT id, session_id, status, handoff_url, expires_at, completed_at, created_at, updated_at
+		SELECT id, session_id, status, handoff_id, handoff_url, expires_at, completed_at, created_at, updated_at
 		FROM browser_session_login_requests
 	`
 }
@@ -736,6 +754,7 @@ func scanBrowserSessionLoginRequest(scanner browserSessionScanner) (BrowserSessi
 		&request.ID,
 		&request.SessionID,
 		&request.Status,
+		&request.HandoffID,
 		&handoffURL,
 		&expiresAt,
 		&completedAt,
@@ -765,6 +784,44 @@ func scanBrowserSessionLoginRequest(scanner browserSessionScanner) (BrowserSessi
 	}
 	request.UpdatedAt = parsedUpdatedAt
 	return request, nil
+}
+
+func (store *Store) newBrowserSessionHandoffID() (string, error) {
+	if store.BrowserSessionHandoffID != nil {
+		id, err := store.BrowserSessionHandoffID()
+		if err != nil {
+			return "", err
+		}
+		id = strings.TrimSpace(id)
+		if id == "" {
+			return "", fmt.Errorf("browser session handoff id is required")
+		}
+		return id, nil
+	}
+	var data [16]byte
+	if _, err := rand.Read(data[:]); err != nil {
+		return "", fmt.Errorf("browser session handoff id: %w", err)
+	}
+	return hex.EncodeToString(data[:]), nil
+}
+
+func buildBrowserSessionHandoffURL(baseURL string, handoffID string) (*string, error) {
+	baseURL = strings.TrimSpace(baseURL)
+	if baseURL == "" {
+		return nil, nil
+	}
+	parsed, err := url.Parse(baseURL)
+	if err != nil || parsed == nil || parsed.Hostname() == "" {
+		return nil, fmt.Errorf("handoff base URL must be an absolute http or https URL")
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return nil, fmt.Errorf("handoff base URL must use http or https")
+	}
+	query := parsed.Query()
+	query.Set("handoff_id", handoffID)
+	parsed.RawQuery = query.Encode()
+	result := parsed.String()
+	return &result, nil
 }
 
 func normalizeBrowserSessionStatus(status BrowserSessionStatus) BrowserSessionStatus {

@@ -80,11 +80,11 @@ func TestParseBrowserSessionValidatesRequiredFields(t *testing.T) {
 }
 
 func TestParseBrowserSessionLoginRequestCommands(t *testing.T) {
-	request, err := ParseBrowser([]string{"session", "login-request", "--id", "42", "--json"})
+	request, err := ParseBrowser([]string{"session", "login-request", "--id", "42", "--handoff-base-url", "https://odin-handoff.tailnet.local/manual-login", "--json"})
 	if err != nil {
 		t.Fatalf("ParseBrowser(session login-request) error = %v", err)
 	}
-	if request.Name != "session" || request.SessionAction != "login-request" || request.ID != 42 || !request.JSON {
+	if request.Name != "session" || request.SessionAction != "login-request" || request.ID != 42 || request.HandoffBaseURL != "https://odin-handoff.tailnet.local/manual-login" || !request.JSON {
 		t.Fatalf("login-request command = %+v, want parsed request command", request)
 	}
 

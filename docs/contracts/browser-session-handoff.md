@@ -15,7 +15,7 @@ This contract defines the Odin-native handoff for manual Huginn browser login an
 - `internal/adapters/huginnbrowser.LiveAdapter` is selected only by explicit environment configuration, requires an allowlisted command, and rejects live response fields that imply forms, messages, purchases, deletes, sessions, or other mutations.
 - `bin/huginn-browser-worker` supports explicit `mode:"browser"` and otherwise defaults to bounded fetch. Browser mode currently uses a fresh temporary Chromium profile, records local evidence, and logs `no_cookies_or_session_profile`.
 - Goal state, goal evidence, blockers, and audit events are persisted in SQLite. Goal runner ticks do not execute created or planned goals, and approved goals block when no executor/action exists.
-- `odin browser session login-request --id <session_id> --json` records metadata-only manual login requests with `handoff_url: null` until a real private handoff service exists.
+- `odin browser session login-request --id <session_id> [--handoff-base-url <url>] --json` records metadata-only manual login requests with an opaque `handoff_id`; `handoff_url` is null unless a private base URL is provided.
 - `odin browser session login-requests --id <session_id> --json` lists persisted login request metadata for one session.
 - `odin browser session verify --id <session_id> [--login-request-id <id>] --json` records metadata-only operator verification, sets `last_verified_at`, moves the session to `verified`, and completes the login request when one is provided.
 - `odin browser session prepare-profile --id <session_id> --json` explicitly creates the empty profile directory under `ODIN_ROOT` and records an audit event without writing browser files.
@@ -148,7 +148,7 @@ odin browser session list --json
 odin browser session show --id <id> --json
 odin browser session status --id <id> --status <status> --json
 odin browser session revoke --id <id> --json
-odin browser session login-request --id <id> --json
+odin browser session login-request --id <id> [--handoff-base-url <url>] --json
 odin browser session login-requests --id <id> --json
 odin browser session verify --id <id> [--login-request-id <id>] --json
 odin browser session prepare-profile --id <id> --json
@@ -156,7 +156,9 @@ odin browser session prepare-profile --id <id> --json
 
 `--permission-tier authenticated_read` is accepted by the CLI as an operator-facing alias for stored tier `authenticated_readonly`. If `--profile-path` is omitted, Odin records the metadata-only default `browser-sessions/profiles/<sanitized-name>` and does not create a directory. Explicit profile paths must remain under `browser-sessions/profiles/`, must be relative to `ODIN_ROOT`, and must not contain path traversal.
 
-`login-request` creates request metadata only. Its JSON envelope returns a `login_request` object with `handoff_url: null` until the future private handoff service can provide a short-lived operator URL. It must not launch a browser, write a browser profile, store credential material, or mark the session verified.
+`login-request` creates request metadata only. Odin always records an opaque `handoff_id` with the request and reuses the existing `expires_at` as the metadata expiration. With no base URL, its JSON envelope returns `handoff_url: null`. When `--handoff-base-url <url>` is provided, Odin validates that the base is an absolute `http` or `https` URL and returns a metadata URL with `handoff_id` in the query string. The handoff ID must not encode the browser session ID directly.
+
+The handoff URL is not proof that a server route exists. This slice does not add an HTTP handler, NoVNC process, Tailscale service, browser launch, browser profile write, credential storage, or session verification. Operators should treat any base URL as a future private-network handoff surface only, intended for Tailscale or another operator-approved private path after that service is implemented.
 
 `verify` records metadata-only operator verification. It must not launch a browser, inspect a profile directory, store credential material, or approve/execute a goal. Revoked sessions cannot be verified. Expired or cancelled login requests cannot be completed.
 
@@ -206,6 +208,7 @@ Implemented `login-request --json` returns metadata without secrets:
     "id": 1,
     "session_id": 1,
     "status": "requested",
+    "handoff_id": "opaque-handoff-id",
     "handoff_url": null,
     "expires_at": "2026-05-06T00:10:00Z",
     "completed_at": null,
@@ -214,6 +217,8 @@ Implemented `login-request --json` returns metadata without secrets:
   }
 }
 ```
+
+When called with `--handoff-base-url https://odin-handoff.tailnet.local/manual-login`, `handoff_url` may be returned as `https://odin-handoff.tailnet.local/manual-login?handoff_id=<opaque-id>`. This remains metadata-only; no route is served by Odin in this slice.
 
 `revoke` is always mutating and must require a reason. `verify` is mutating when it changes status, binding, expiration, or verification timestamps.
 
@@ -224,7 +229,7 @@ SQLite tables for browser sessions are additive and must not replace goal, intak
 Tables:
 
 - `browser_session_profiles`: implemented profile metadata and policy binding.
-- `browser_session_login_requests`: implemented metadata-only manual login requests with status, optional future handoff URL, expiration, completion timestamp, and audit timestamps.
+- `browser_session_login_requests`: implemented metadata-only manual login requests with status, opaque handoff ID, optional future handoff URL, expiration, completion timestamp, and audit timestamps.
 - `browser_session_events`: optional profile-local lifecycle detail if the global runtime events stream alone is not sufficient for efficient profile show/history.
 - `browser_session_goal_links`: explicit goal/profile relation with reason, requested tier, and verification evidence references.
 
@@ -323,7 +328,7 @@ Rules:
 
 1. Contract tests and store schema: add browser session profile metadata tables, event constants, and tests proving create/verify/revoke append runtime events in the same transaction.
 2. CLI metadata surface: add `odin browser session create|list|show|status|revoke` with JSON output, no browser launch, and fail-closed policy.
-3. Login request metadata surface: implemented `odin browser session login-request|login-requests` to record and inspect metadata-only manual login requests with `handoff_url: null`.
+3. Login request metadata surface: implemented `odin browser session login-request|login-requests` to record and inspect metadata-only manual login requests with opaque `handoff_id` and optional metadata-only `handoff_url`.
 4. Manual verification metadata surface: implemented `odin browser session verify` to set session status `verified`, record `last_verified_at`, and optionally complete a login request, with no browser launch or credential handling.
 5. Profile path and empty directory preparation: implemented safe profile path allocation plus explicit `odin browser session prepare-profile` for empty-directory creation.
 6. Profile storage policy gate: implemented `profile_storage_policy` with default `encrypted_required`, CLI JSON output, and a deny-all `CanWriteBrowserProfile` helper until encrypted storage exists.

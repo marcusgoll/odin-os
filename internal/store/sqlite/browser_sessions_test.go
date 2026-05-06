@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -430,6 +431,101 @@ func TestBrowserSessionLoginRequestLifecyclePersistsAndAudits(t *testing.T) {
 	}
 	if counts[runtimeevents.EventBrowserSessionLoginExpired] != 1 {
 		t.Fatalf("browser.session_login_expired events = %d, want 1", counts[runtimeevents.EventBrowserSessionLoginExpired])
+	}
+}
+
+func TestBrowserSessionLoginRequestHandoffMetadataIsOpaqueAndValidated(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(filepath.Join(t.TempDir(), "browser-session-login-handoff.db"))
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer store.Close()
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
+	}
+	now := time.Date(2026, 5, 6, 20, 0, 0, 0, time.UTC)
+	store.Now = func() time.Time { return now }
+	store.BrowserSessionHandoffID = func() (string, error) { return "opaque-handoff-id", nil }
+
+	session, err := store.CreateBrowserSession(ctx, CreateBrowserSessionParams{
+		Name:           "Google main",
+		Domain:         "google.com",
+		PermissionTier: BrowserSessionPermissionTierAuthenticatedReadOnly,
+	})
+	if err != nil {
+		t.Fatalf("CreateBrowserSession() error = %v", err)
+	}
+
+	expiresAt := now.Add(10 * time.Minute)
+	request, err := store.CreateBrowserSessionLoginRequest(ctx, CreateBrowserSessionLoginRequestParams{
+		SessionID:      session.ID,
+		HandoffBaseURL: "https://odin-handoff.tailnet.local/manual-login",
+		ExpiresAt:      expiresAt,
+	})
+	if err != nil {
+		t.Fatalf("CreateBrowserSessionLoginRequest(with base URL) error = %v", err)
+	}
+	if request.HandoffID != "opaque-handoff-id" {
+		t.Fatalf("request.HandoffID = %q, want injected opaque id", request.HandoffID)
+	}
+	sessionIDString := strconv.FormatInt(session.ID, 10)
+	if strings.Contains(request.HandoffID, sessionIDString) {
+		t.Fatalf("request.HandoffID = %q, must not expose session id %d", request.HandoffID, session.ID)
+	}
+	if request.HandoffURL == nil || *request.HandoffURL != "https://odin-handoff.tailnet.local/manual-login?handoff_id=opaque-handoff-id" {
+		t.Fatalf("request.HandoffURL = %v, want metadata URL with opaque id", request.HandoffURL)
+	}
+
+	persisted, err := store.GetBrowserSessionLoginRequest(ctx, request.ID)
+	if err != nil {
+		t.Fatalf("GetBrowserSessionLoginRequest() error = %v", err)
+	}
+	if persisted.HandoffID != request.HandoffID || persisted.HandoffURL == nil || *persisted.HandoffURL != *request.HandoffURL {
+		t.Fatalf("persisted request = %+v, want handoff metadata persisted", persisted)
+	}
+
+	withoutBase, err := store.CreateBrowserSessionLoginRequest(ctx, CreateBrowserSessionLoginRequestParams{
+		SessionID: session.ID,
+		ExpiresAt: now.Add(11 * time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("CreateBrowserSessionLoginRequest(no base URL) error = %v", err)
+	}
+	if withoutBase.HandoffID == "" || withoutBase.HandoffURL != nil {
+		t.Fatalf("withoutBase = %+v, want opaque id with nil URL when no base URL", withoutBase)
+	}
+
+	for _, unsafeBaseURL := range []string{"ssh://odin-handoff.tailnet.local/manual-login", "https://", "not-a-url"} {
+		_, err := store.CreateBrowserSessionLoginRequest(ctx, CreateBrowserSessionLoginRequestParams{
+			SessionID:      session.ID,
+			HandoffBaseURL: unsafeBaseURL,
+			ExpiresAt:      now.Add(12 * time.Minute),
+		})
+		if err == nil {
+			t.Fatalf("CreateBrowserSessionLoginRequest(base=%q) error = nil, want rejection", unsafeBaseURL)
+		}
+	}
+
+	events, err := store.ListEvents(ctx, ListEventsParams{})
+	if err != nil {
+		t.Fatalf("ListEvents() error = %v", err)
+	}
+	var sawRequested bool
+	for _, event := range events {
+		if event.Type != runtimeevents.EventBrowserSessionLoginRequested {
+			continue
+		}
+		payload := string(event.Payload)
+		if strings.Contains(payload, `"session_id":"`) || strings.Contains(payload, `"handoff_id":"`+sessionIDString+`"`) {
+			t.Fatalf("login request event payload exposes session id as string token: %s", payload)
+		}
+		if strings.Contains(payload, `"handoff_id":"opaque-handoff-id"`) {
+			sawRequested = true
+		}
+	}
+	if !sawRequested {
+		t.Fatalf("events = %+v, want browser.session_login_requested with handoff_id", events)
 	}
 }
 

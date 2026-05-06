@@ -393,6 +393,7 @@ type BrowserSessionLoginRequestedPayload struct {
 	SessionID      int64  `json:"session_id"`
 	LoginRequestID int64  `json:"login_request_id"`
 	Status         string `json:"status"`
+	HandoffID      string `json:"handoff_id,omitempty"`
 	HandoffURL     string `json:"handoff_url,omitempty"`
 	ExpiresAt      string `json:"expires_at"`
 }

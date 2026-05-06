@@ -38,9 +38,10 @@ const (
 )
 
 type Store struct {
-	db        *sql.DB
-	closeOnce sync.Once
-	Now       func() time.Time
+	db                      *sql.DB
+	closeOnce               sync.Once
+	Now                     func() time.Time
+	BrowserSessionHandoffID func() (string, error)
 }
 
 func Open(path string) (*Store, error) {

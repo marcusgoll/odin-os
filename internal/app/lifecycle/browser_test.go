@@ -211,13 +211,30 @@ func TestRunBrowserSessionLoginRequestCreateAndList(t *testing.T) {
 		t.Fatalf("login-request output = %s, want explicit null handoff_url", loginRequestOutput)
 	}
 	loginRequest := decodeBrowserSessionLoginRequestEnvelope(t, []byte(loginRequestOutput))
-	if loginRequest.ID != 1 || loginRequest.SessionID != created.ID || loginRequest.Status != "requested" || loginRequest.ExpiresAt == "" || loginRequest.HandoffURL != nil {
-		t.Fatalf("login request = %+v, want requested metadata with nil handoff URL", loginRequest)
+	if loginRequest.ID != 1 || loginRequest.SessionID != created.ID || loginRequest.Status != "requested" || loginRequest.ExpiresAt == "" || loginRequest.HandoffID == "" || loginRequest.HandoffURL != nil {
+		t.Fatalf("login request = %+v, want requested metadata with handoff id and nil handoff URL", loginRequest)
+	}
+
+	loginWithURL := decodeBrowserSessionLoginRequestEnvelope(t, []byte(run(
+		"browser", "session", "login-request",
+		"--id", int64String(created.ID),
+		"--handoff-base-url", "https://odin-handoff.tailnet.local/manual-login",
+		"--json",
+	)))
+	if loginWithURL.HandoffID == "" || loginWithURL.HandoffURL == nil || !strings.HasPrefix(*loginWithURL.HandoffURL, "https://odin-handoff.tailnet.local/manual-login?handoff_id=") {
+		t.Fatalf("loginWithURL = %+v, want metadata handoff URL with opaque id", loginWithURL)
+	}
+	if loginWithURL.HandoffID == int64String(created.ID) || strings.Contains(*loginWithURL.HandoffURL, "session_id=") {
+		t.Fatalf("loginWithURL = %+v, must not expose session id in handoff metadata", loginWithURL)
 	}
 
 	loginRequestsOutput := run("browser", "session", "login-requests", "--id", int64String(created.ID), "--json")
-	if !strings.Contains(loginRequestsOutput, `"login_requests":`) || !strings.Contains(loginRequestsOutput, `"status": "requested"`) {
+	if !strings.Contains(loginRequestsOutput, `"login_requests":`) || !strings.Contains(loginRequestsOutput, `"status": "requested"`) || !strings.Contains(loginRequestsOutput, `"handoff_id":`) {
 		t.Fatalf("login-requests output = %s, want requested login metadata list", loginRequestsOutput)
+	}
+
+	if _, err := os.Stat(filepath.Join(root, "browser-sessions")); !os.IsNotExist(err) {
+		t.Fatalf("browser-sessions directory exists after login request err=%v, want metadata-only request", err)
 	}
 
 	logs := run("logs", "--json")
@@ -228,6 +245,41 @@ func TestRunBrowserSessionLoginRequestCreateAndList(t *testing.T) {
 		if strings.Contains(strings.ToLower(logs), forbidden) {
 			t.Fatalf("logs output contains forbidden credential/profile byte token %q: %s", forbidden, logs)
 		}
+	}
+}
+
+func TestRunBrowserSessionLoginRequestRejectsInvalidBaseURLAndRevokedSession(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	root := testRepoRoot(t)
+
+	run := func(args ...string) string {
+		t.Helper()
+		var output bytes.Buffer
+		if err := Run(context.Background(), root, args, strings.NewReader(""), &output); err != nil {
+			t.Fatalf("Run(%v) error = %v\noutput=%s", args, err, output.String())
+		}
+		return output.String()
+	}
+
+	created := decodeBrowserSessionEnvelope(t, []byte(run(
+		"browser", "session", "create",
+		"--name", "google-main",
+		"--domain", "google.com",
+		"--permission-tier", "authenticated_read",
+		"--json",
+	)))
+
+	var output bytes.Buffer
+	err := Run(context.Background(), root, []string{"browser", "session", "login-request", "--id", int64String(created.ID), "--handoff-base-url", "ssh://odin-handoff.tailnet.local/manual-login", "--json"}, strings.NewReader(""), &output)
+	if err == nil || !strings.Contains(err.Error(), "handoff base URL must use http or https") {
+		t.Fatalf("Run(login-request invalid base URL) error = %v output=%s, want http/https rejection", err, output.String())
+	}
+
+	run("browser", "session", "revoke", "--id", int64String(created.ID), "--json")
+	output.Reset()
+	err = Run(context.Background(), root, []string{"browser", "session", "login-request", "--id", int64String(created.ID), "--handoff-base-url", "https://odin-handoff.tailnet.local/manual-login", "--json"}, strings.NewReader(""), &output)
+	if err == nil || !strings.Contains(err.Error(), "revoked browser session cannot create login request") {
+		t.Fatalf("Run(login-request revoked) error = %v output=%s, want revoked rejection", err, output.String())
 	}
 }
 
@@ -468,6 +520,7 @@ type browserSessionLoginRequestJSON struct {
 	ID          int64   `json:"id"`
 	SessionID   int64   `json:"session_id"`
 	Status      string  `json:"status"`
+	HandoffID   string  `json:"handoff_id"`
 	HandoffURL  *string `json:"handoff_url"`
 	ExpiresAt   string  `json:"expires_at"`
 	CompletedAt string  `json:"completed_at,omitempty"`
