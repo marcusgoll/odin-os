@@ -41,6 +41,7 @@ Phase 03 through Phase 14 stream types are:
 - `learning_evaluation`
 - `learning_promotion`
 - `skill`
+- `browser_session`
 
 ## Event types
 
@@ -75,6 +76,14 @@ Phase 03 through Phase 14 event types are:
 - `learning.promotion_applied`
 - `learning.promotion_rolled_back`
 - `skill.lifecycle_recorded`
+- `browser.session_created`
+- `browser.session_status_changed`
+- `browser.session_verified`
+- `browser.session_revoked`
+- `browser.session_profile_prepared`
+- `browser.session_login_requested`
+- `browser.session_login_completed`
+- `browser.session_login_expired`
 
 ## Contract rules
 
@@ -203,3 +212,21 @@ Raw intake processing remains on the `intake_items` SQLite authority. When deter
 - `goal.created`
 
 The processing payload must include the source intake ID, route decision, classification result, and created goal ID when a goal is created. Intake conversion must not approve, run, or mutate external systems.
+
+## Browser session handoff expectation
+
+Manual Huginn browser login and authenticated read-only session reuse are being implemented in metadata-first slices. Browser session metadata, profile storage policy metadata, and login request metadata live in SQLite, future browser profile files must stay under `ODIN_ROOT`, and profile/request lifecycle mutations append events through the runtime event stream:
+
+- `browser.session_created`
+- `browser.session_status_changed`
+- `browser.session_verified`
+- `browser.session_revoked`
+- `browser.session_profile_prepared`
+- `browser.session_login_requested`
+- `browser.session_login_completed`
+- `browser.session_login_expired`
+- `goal.waiting_for_human_login`
+
+Browser session events must not include passwords, cookies, bearer tokens, passkey material, TOTP values, backup codes, profile bytes, or raw credential prompts. Login request events may include a log-safe opaque `handoff_id` and a metadata-only `handoff_url`; neither proves that a handoff HTTP route exists. Metadata-only session verification records operator-attested verification and `last_verified_at`; browser-observed account/domain verification remains future work. Profile preparation records only empty-directory preparation metadata plus `profile_storage_policy`; a prepared directory is not approval to write browser files. Session verification may unblock a waiting goal only through normal policy checks; it must not approve or execute the goal by itself.
+
+`odin browser session handoff show --handoff-id <id>` is intentionally read-only. It validates the handoff ID, login request status, expiration, and linked session status, but emits no runtime event because it performs no state change.

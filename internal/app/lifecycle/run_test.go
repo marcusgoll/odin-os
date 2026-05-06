@@ -705,6 +705,38 @@ func TestRunIntakeProcessConvertsGoalLikeRawItemToGoal(t *testing.T) {
 	}
 }
 
+func TestRunIntakeProcessConvertsProjectLikeRawItemToGoal(t *testing.T) {
+	root := testRepoRoot(t)
+
+	var createOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{
+		"intake", "raw", "create",
+		"--text", "Plan the Odin project for browser session handoff",
+		"--json",
+	}, strings.NewReader(""), &createOutput); err != nil {
+		t.Fatalf("Run(intake raw create --text) error = %v", err)
+	}
+	if output := createOutput.String(); !strings.Contains(output, `"status": "received"`) || !strings.Contains(output, `"key": "intake-1"`) {
+		t.Fatalf("create output = %s, want received intake-1", output)
+	}
+
+	var processOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"intake", "process", "--id", "intake-1", "--json"}, strings.NewReader(""), &processOutput); err != nil {
+		t.Fatalf("Run(intake process) error = %v", err)
+	}
+	if output := processOutput.String(); !strings.Contains(output, `"routed_outcome": "goal_created"`) || !strings.Contains(output, `"goal_id": 1`) {
+		t.Fatalf("process output = %s, want project-like intake routed to goal", output)
+	}
+
+	var goalShow bytes.Buffer
+	if err := Run(context.Background(), root, []string{"goal", "show", "--id", "1", "--json"}, strings.NewReader(""), &goalShow); err != nil {
+		t.Fatalf("Run(goal show) error = %v", err)
+	}
+	if output := goalShow.String(); !strings.Contains(output, `"status": "created"`) || strings.Contains(output, `"status": "approved_for_execution"`) {
+		t.Fatalf("goal show output = %s, want created unapproved goal", output)
+	}
+}
+
 func TestRunIntakeProcessDuplicateGoalLikeRawItemDoesNotCreateSecondGoal(t *testing.T) {
 	root := testRepoRoot(t)
 

@@ -7,10 +7,14 @@ import (
 	"strings"
 )
 
-const BrowserUsage = "usage: odin browser run --goal-id <id> --url <url> [--objective <text>] [--allowed-domain <domain>] [--max-pages <n>] [--max-duration-seconds <n>] [--worker-mode <fetch|browser>] [--evidence-required] [--action <read|navigate|snapshot|extract>] [--json]"
+const BrowserUsage = "usage: odin browser run --goal-id <id> --url <url> [--objective <text>] [--allowed-domain <domain>] [--max-pages <n>] [--max-duration-seconds <n>] [--worker-mode <fetch|browser>] [--evidence-required] [--action <read|navigate|snapshot|extract>] [--json] | odin browser session create --name <name> --domain <domain> --permission-tier <tier> [--account-hint <hint>] [--profile-path <path>] [--json] | odin browser session list [--json] | odin browser session show --id <id> [--json] | odin browser session status --id <id> --status <status> [--json] | odin browser session revoke --id <id> [--json] | odin browser session login-request --id <id> [--handoff-base-url <url>] [--json] | odin browser session login-requests --id <id> [--json] | odin browser session handoff show --handoff-id <id> [--json] | odin browser session verify --id <id> [--login-request-id <id>] [--json] | odin browser session prepare-profile --id <id> [--json]"
 
 type BrowserCommand struct {
 	Name               string
+	SessionAction      string
+	HandoffAction      string
+	ID                 int64
+	LoginRequestID     int64
 	GoalID             int64
 	URL                string
 	URLs               []string
@@ -21,6 +25,14 @@ type BrowserCommand struct {
 	WorkerMode         string
 	EvidenceRequired   bool
 	Actions            []string
+	SessionName        string
+	SessionDomain      string
+	PermissionTier     string
+	AccountHint        string
+	ProfilePath        string
+	HandoffID          string
+	HandoffBaseURL     string
+	Status             string
 	JSON               bool
 }
 
@@ -36,6 +48,9 @@ func ParseBrowser(args []string) (BrowserCommand, error) {
 		MaxPages:           1,
 		MaxDurationSeconds: 30,
 		Actions:            []string{"read"},
+	}
+	if command.Name == "session" {
+		return parseBrowserSession(args[1:], command)
 	}
 	if command.Name != "run" {
 		return BrowserCommand{}, fmt.Errorf("unsupported browser subcommand: %s", args[0])
@@ -142,6 +157,206 @@ func ParseBrowser(args []string) (BrowserCommand, error) {
 		command.AllowedDomains = []string{host}
 	}
 	return command, nil
+}
+
+func parseBrowserSession(args []string, command BrowserCommand) (BrowserCommand, error) {
+	if len(args) == 0 {
+		return BrowserCommand{}, fmt.Errorf(BrowserUsage)
+	}
+	command.SessionAction = strings.ToLower(strings.TrimSpace(args[0]))
+	flagStart := 1
+	if command.SessionAction == "handoff" {
+		if len(args) < 2 || strings.HasPrefix(args[1], "--") {
+			return BrowserCommand{}, fmt.Errorf("usage: odin browser session handoff show --handoff-id <id> [--json]")
+		}
+		command.HandoffAction = strings.ToLower(strings.TrimSpace(args[1]))
+		flagStart = 2
+		if command.HandoffAction != "show" {
+			return BrowserCommand{}, fmt.Errorf("unsupported browser session handoff subcommand: %s", args[1])
+		}
+	}
+	switch command.SessionAction {
+	case "create", "list", "show", "status", "revoke", "login-request", "login-requests", "verify", "prepare-profile", "handoff":
+	default:
+		return BrowserCommand{}, fmt.Errorf("unsupported browser session subcommand: %s", args[0])
+	}
+	for index := flagStart; index < len(args); index++ {
+		switch args[index] {
+		case "--id":
+			value, nextIndex, err := requiredValue(args, index, "--id")
+			if err != nil {
+				return BrowserCommand{}, err
+			}
+			id, err := strconv.ParseInt(value, 10, 64)
+			if err != nil || id <= 0 {
+				return BrowserCommand{}, fmt.Errorf("--id must be a positive integer")
+			}
+			command.ID = id
+			index = nextIndex
+		case "--login-request-id":
+			value, nextIndex, err := requiredValue(args, index, "--login-request-id")
+			if err != nil {
+				return BrowserCommand{}, err
+			}
+			id, err := strconv.ParseInt(value, 10, 64)
+			if err != nil || id <= 0 {
+				return BrowserCommand{}, fmt.Errorf("--login-request-id must be a positive integer")
+			}
+			command.LoginRequestID = id
+			index = nextIndex
+		case "--name":
+			value, nextIndex, err := requiredValue(args, index, "--name")
+			if err != nil {
+				return BrowserCommand{}, err
+			}
+			command.SessionName = value
+			index = nextIndex
+		case "--domain":
+			value, nextIndex, err := requiredValue(args, index, "--domain")
+			if err != nil {
+				return BrowserCommand{}, err
+			}
+			command.SessionDomain = value
+			index = nextIndex
+		case "--permission-tier":
+			value, nextIndex, err := requiredValue(args, index, "--permission-tier")
+			if err != nil {
+				return BrowserCommand{}, err
+			}
+			command.PermissionTier = strings.ToLower(strings.TrimSpace(value))
+			if !isKnownBrowserSessionPermissionTier(command.PermissionTier) {
+				return BrowserCommand{}, fmt.Errorf("--permission-tier must be public_readonly, authenticated_read, or authenticated_readonly")
+			}
+			index = nextIndex
+		case "--account-hint":
+			value, nextIndex, err := requiredValue(args, index, "--account-hint")
+			if err != nil {
+				return BrowserCommand{}, err
+			}
+			command.AccountHint = value
+			index = nextIndex
+		case "--profile-path":
+			value, nextIndex, err := requiredValue(args, index, "--profile-path")
+			if err != nil {
+				return BrowserCommand{}, err
+			}
+			command.ProfilePath = value
+			index = nextIndex
+		case "--handoff-id":
+			value, nextIndex, err := requiredValue(args, index, "--handoff-id")
+			if err != nil {
+				return BrowserCommand{}, err
+			}
+			if command.HandoffID != "" {
+				return BrowserCommand{}, fmt.Errorf("duplicate --handoff-id flag")
+			}
+			command.HandoffID = strings.TrimSpace(value)
+			index = nextIndex
+		case "--handoff-base-url":
+			value, nextIndex, err := requiredValue(args, index, "--handoff-base-url")
+			if err != nil {
+				return BrowserCommand{}, err
+			}
+			command.HandoffBaseURL = value
+			index = nextIndex
+		case "--status":
+			value, nextIndex, err := requiredValue(args, index, "--status")
+			if err != nil {
+				return BrowserCommand{}, err
+			}
+			command.Status = strings.ToLower(strings.TrimSpace(value))
+			if !isKnownBrowserSessionStatus(command.Status) {
+				return BrowserCommand{}, fmt.Errorf("--status must be created, login_requested, verified, or expired")
+			}
+			index = nextIndex
+		case "--json":
+			if command.JSON {
+				return BrowserCommand{}, fmt.Errorf("duplicate --json flag")
+			}
+			command.JSON = true
+		default:
+			return BrowserCommand{}, fmt.Errorf("unknown browser session argument: %s", args[index])
+		}
+	}
+	switch command.SessionAction {
+	case "create":
+		if strings.TrimSpace(command.SessionName) == "" {
+			return BrowserCommand{}, fmt.Errorf("--name is required")
+		}
+		if strings.TrimSpace(command.SessionDomain) == "" {
+			return BrowserCommand{}, fmt.Errorf("--domain is required")
+		}
+		if strings.TrimSpace(command.PermissionTier) == "" {
+			return BrowserCommand{}, fmt.Errorf("--permission-tier is required")
+		}
+		if command.ID != 0 || command.LoginRequestID != 0 || command.HandoffAction != "" || command.HandoffID != "" || command.HandoffBaseURL != "" || command.Status != "" {
+			return BrowserCommand{}, fmt.Errorf("browser session create only accepts create fields and --json")
+		}
+	case "list":
+		if command.ID != 0 || command.LoginRequestID != 0 || command.HandoffAction != "" || command.SessionName != "" || command.SessionDomain != "" || command.PermissionTier != "" || command.AccountHint != "" || command.ProfilePath != "" || command.HandoffID != "" || command.HandoffBaseURL != "" || command.Status != "" {
+			return BrowserCommand{}, fmt.Errorf("browser session list only accepts --json")
+		}
+	case "show", "revoke", "login-requests", "prepare-profile":
+		if command.ID <= 0 {
+			return BrowserCommand{}, fmt.Errorf("--id is required")
+		}
+		if command.LoginRequestID != 0 || command.HandoffAction != "" || command.SessionName != "" || command.SessionDomain != "" || command.PermissionTier != "" || command.AccountHint != "" || command.ProfilePath != "" || command.HandoffID != "" || command.HandoffBaseURL != "" || command.Status != "" {
+			return BrowserCommand{}, fmt.Errorf("browser session %s only accepts --id and --json", command.SessionAction)
+		}
+	case "login-request":
+		if command.ID <= 0 {
+			return BrowserCommand{}, fmt.Errorf("--id is required")
+		}
+		if command.LoginRequestID != 0 || command.HandoffAction != "" || command.SessionName != "" || command.SessionDomain != "" || command.PermissionTier != "" || command.AccountHint != "" || command.ProfilePath != "" || command.HandoffID != "" || command.Status != "" {
+			return BrowserCommand{}, fmt.Errorf("browser session login-request only accepts --id, --handoff-base-url, and --json")
+		}
+	case "handoff":
+		if command.HandoffAction != "show" {
+			return BrowserCommand{}, fmt.Errorf("unsupported browser session handoff subcommand: %s", command.HandoffAction)
+		}
+		if strings.TrimSpace(command.HandoffID) == "" {
+			return BrowserCommand{}, fmt.Errorf("--handoff-id is required")
+		}
+		if command.ID != 0 || command.LoginRequestID != 0 || command.SessionName != "" || command.SessionDomain != "" || command.PermissionTier != "" || command.AccountHint != "" || command.ProfilePath != "" || command.HandoffBaseURL != "" || command.Status != "" {
+			return BrowserCommand{}, fmt.Errorf("browser session handoff show only accepts --handoff-id and --json")
+		}
+	case "status":
+		if command.ID <= 0 {
+			return BrowserCommand{}, fmt.Errorf("--id is required")
+		}
+		if command.Status == "" {
+			return BrowserCommand{}, fmt.Errorf("--status is required")
+		}
+		if command.LoginRequestID != 0 || command.HandoffAction != "" || command.SessionName != "" || command.SessionDomain != "" || command.PermissionTier != "" || command.AccountHint != "" || command.ProfilePath != "" || command.HandoffID != "" || command.HandoffBaseURL != "" {
+			return BrowserCommand{}, fmt.Errorf("browser session status only accepts --id, --status, and --json")
+		}
+	case "verify":
+		if command.ID <= 0 {
+			return BrowserCommand{}, fmt.Errorf("--id is required")
+		}
+		if command.HandoffAction != "" || command.SessionName != "" || command.SessionDomain != "" || command.PermissionTier != "" || command.AccountHint != "" || command.ProfilePath != "" || command.HandoffID != "" || command.HandoffBaseURL != "" || command.Status != "" {
+			return BrowserCommand{}, fmt.Errorf("browser session verify only accepts --id, --login-request-id, and --json")
+		}
+	}
+	return command, nil
+}
+
+func isKnownBrowserSessionPermissionTier(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "public_readonly", "authenticated_read", "authenticated_readonly":
+		return true
+	default:
+		return false
+	}
+}
+
+func isKnownBrowserSessionStatus(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "created", "login_requested", "verified", "expired":
+		return true
+	default:
+		return false
+	}
 }
 
 func browserURLHost(rawURL string) (string, error) {

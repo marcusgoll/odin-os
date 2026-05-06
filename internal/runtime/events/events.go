@@ -31,6 +31,7 @@ const (
 	StreamCapability         StreamType = "capability"
 	StreamFollowUp           StreamType = "follow_up"
 	StreamGoal               StreamType = "goal"
+	StreamBrowserSession     StreamType = "browser_session"
 )
 
 type Type string
@@ -126,6 +127,14 @@ const (
 	EventGoalRunFinished                    Type = "goal_run.finished"
 	EventGoalBlockerRecorded                Type = "goal.blocker_recorded"
 	EventGoalEvidenceRecorded               Type = "goal.evidence_recorded"
+	EventBrowserSessionCreated              Type = "browser.session_created"
+	EventBrowserSessionStatusChanged        Type = "browser.session_status_changed"
+	EventBrowserSessionVerified             Type = "browser.session_verified"
+	EventBrowserSessionRevoked              Type = "browser.session_revoked"
+	EventBrowserSessionProfilePrepared      Type = "browser.session_profile_prepared"
+	EventBrowserSessionLoginRequested       Type = "browser.session_login_requested"
+	EventBrowserSessionLoginCompleted       Type = "browser.session_login_completed"
+	EventBrowserSessionLoginExpired         Type = "browser.session_login_expired"
 )
 
 const (
@@ -328,6 +337,81 @@ type ReviewRejectedPayload struct {
 	Status     string `json:"status"`
 	Actor      string `json:"actor,omitempty"`
 	Reason     string `json:"reason"`
+}
+
+type BrowserSessionCreatedPayload struct {
+	SessionID            int64  `json:"session_id"`
+	Name                 string `json:"name"`
+	Domain               string `json:"domain"`
+	AccountHint          string `json:"account_hint,omitempty"`
+	PermissionTier       string `json:"permission_tier"`
+	Status               string `json:"status"`
+	ProfileStoragePolicy string `json:"profile_storage_policy"`
+	ProfilePath          string `json:"profile_path"`
+	ExpiresAt            string `json:"expires_at,omitempty"`
+}
+
+type BrowserSessionStatusChangedPayload struct {
+	SessionID      int64  `json:"session_id"`
+	PreviousStatus string `json:"previous_status"`
+	Status         string `json:"status"`
+	Actor          string `json:"actor,omitempty"`
+	Reason         string `json:"reason,omitempty"`
+	LastVerifiedAt string `json:"last_verified_at,omitempty"`
+	ExpiresAt      string `json:"expires_at,omitempty"`
+}
+
+type BrowserSessionVerifiedPayload struct {
+	SessionID      int64  `json:"session_id"`
+	PreviousStatus string `json:"previous_status"`
+	Status         string `json:"status"`
+	Actor          string `json:"actor,omitempty"`
+	Reason         string `json:"reason,omitempty"`
+	LastVerifiedAt string `json:"last_verified_at"`
+	LoginRequestID int64  `json:"login_request_id,omitempty"`
+}
+
+type BrowserSessionRevokedPayload struct {
+	SessionID      int64  `json:"session_id"`
+	PreviousStatus string `json:"previous_status"`
+	Status         string `json:"status"`
+	Actor          string `json:"actor,omitempty"`
+	Reason         string `json:"reason"`
+	RevokedAt      string `json:"revoked_at"`
+}
+
+type BrowserSessionProfilePreparedPayload struct {
+	SessionID            int64  `json:"session_id"`
+	Status               string `json:"status"`
+	ProfileStoragePolicy string `json:"profile_storage_policy"`
+	ProfilePath          string `json:"profile_path"`
+	Created              bool   `json:"created"`
+	Actor                string `json:"actor,omitempty"`
+}
+
+type BrowserSessionLoginRequestedPayload struct {
+	SessionID      int64  `json:"session_id"`
+	LoginRequestID int64  `json:"login_request_id"`
+	Status         string `json:"status"`
+	HandoffID      string `json:"handoff_id,omitempty"`
+	HandoffURL     string `json:"handoff_url,omitempty"`
+	ExpiresAt      string `json:"expires_at"`
+}
+
+type BrowserSessionLoginCompletedPayload struct {
+	SessionID      int64  `json:"session_id"`
+	LoginRequestID int64  `json:"login_request_id"`
+	PreviousStatus string `json:"previous_status"`
+	Status         string `json:"status"`
+	CompletedAt    string `json:"completed_at"`
+}
+
+type BrowserSessionLoginExpiredPayload struct {
+	SessionID      int64  `json:"session_id"`
+	LoginRequestID int64  `json:"login_request_id"`
+	PreviousStatus string `json:"previous_status"`
+	Status         string `json:"status"`
+	ExpiresAt      string `json:"expires_at"`
 }
 
 type TaskQueueStateChangedPayload struct {

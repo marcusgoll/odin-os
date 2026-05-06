@@ -9,6 +9,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"html/template"
 	"io"
 	"net/http"
 	"strconv"
@@ -19,12 +21,14 @@ import (
 	healthsvc "odin-os/internal/runtime/health"
 	"odin-os/internal/runtime/projections"
 	"odin-os/internal/runtime/triggers"
+	"odin-os/internal/store/sqlite"
 	metricsvc "odin-os/internal/telemetry/metrics"
 )
 
 type Dependencies struct {
 	Health              healthsvc.Service
 	Metrics             metricsvc.Service
+	Store               *sqlite.Store
 	ReadModels          projections.Queryer
 	RegistryHealthy     bool
 	Now                 func() time.Time
@@ -142,6 +146,12 @@ func NewOperationalHandler(deps Dependencies) http.Handler {
 			return
 		}
 		writeJSON(writer, http.StatusOK, run)
+	})
+	mux.HandleFunc("GET /browser/session/handoff", func(writer http.ResponseWriter, request *http.Request) {
+		handleBrowserSessionHandoffShow(writer, request, deps)
+	})
+	mux.HandleFunc("POST /browser/session/handoff/complete", func(writer http.ResponseWriter, request *http.Request) {
+		handleBrowserSessionHandoffComplete(writer, request, deps)
 	})
 	mux.HandleFunc("POST /kill-switch/on", func(writer http.ResponseWriter, request *http.Request) {
 		handleAdminAction(writer, request, deps, "kill_switch_on", func(ctx context.Context, admin AdminActions) error {
@@ -291,6 +301,279 @@ func NewOperationalHandler(deps Dependencies) http.Handler {
 		writeJSON(writer, http.StatusOK, view)
 	})
 	return mux
+}
+
+type browserSessionHandoffResponse struct {
+	Handoff browserSessionHandoffView `json:"handoff"`
+}
+
+type browserSessionHandoffCompletionResponse struct {
+	Completion browserSessionHandoffCompletionView `json:"completion"`
+}
+
+type browserSessionHandoffView struct {
+	HandoffID      string `json:"handoff_id"`
+	LoginRequestID int64  `json:"login_request_id"`
+	SessionID      int64  `json:"session_id"`
+	SessionName    string `json:"session_name"`
+	Domain         string `json:"domain"`
+	AccountHint    string `json:"account_hint"`
+	ExpiresAt      string `json:"expires_at"`
+	Status         string `json:"status"`
+	AllowedActions string `json:"allowed_actions"`
+}
+
+type browserSessionHandoffCompletionView struct {
+	HandoffID          string `json:"handoff_id"`
+	LoginRequestID     int64  `json:"login_request_id"`
+	SessionID          int64  `json:"session_id"`
+	SessionName        string `json:"session_name"`
+	Domain             string `json:"domain"`
+	AccountHint        string `json:"account_hint"`
+	SessionStatus      string `json:"session_status"`
+	LoginRequestStatus string `json:"login_request_status"`
+	CompletedAt        string `json:"completed_at"`
+	AllowedActions     string `json:"allowed_actions"`
+}
+
+func handleBrowserSessionHandoffShow(writer http.ResponseWriter, request *http.Request, deps Dependencies) {
+	if deps.Store == nil {
+		writeAPIError(writer, http.StatusServiceUnavailable, "browser_handoff_unavailable", "browser session handoff store unavailable")
+		return
+	}
+	handoffID := strings.TrimSpace(request.URL.Query().Get("handoff_id"))
+	if handoffID == "" {
+		writeAPIError(writer, http.StatusBadRequest, "browser_handoff_id_required", "handoff_id is required")
+		return
+	}
+	handoff, err := deps.Store.GetBrowserSessionLoginHandoff(request.Context(), handoffID)
+	if err != nil {
+		statusCode, code := browserSessionHandoffErrorStatus(err)
+		writeAPIError(writer, statusCode, code, err.Error())
+		return
+	}
+	view := newBrowserSessionHandoffView(handoff)
+	if wantsBrowserSessionHandoffHTML(request) {
+		writeBrowserSessionHandoffHTML(writer, view)
+		return
+	}
+	writeJSON(writer, http.StatusOK, browserSessionHandoffResponse{Handoff: view})
+}
+
+func handleBrowserSessionHandoffComplete(writer http.ResponseWriter, request *http.Request, deps Dependencies) {
+	if statusCode, ok := authorizeAdmin(request, deps.AdminToken); !ok {
+		writeAdminAuthorizationError(writer, statusCode)
+		return
+	}
+	if deps.Store == nil {
+		writeAPIError(writer, http.StatusServiceUnavailable, "browser_handoff_unavailable", "browser session handoff store unavailable")
+		return
+	}
+	handoffID, formPost, err := parseBrowserSessionHandoffCompletionID(writer, request)
+	if err != nil {
+		writeAPIError(writer, http.StatusBadRequest, "browser_handoff_invalid_request", err.Error())
+		return
+	}
+	if strings.TrimSpace(handoffID) == "" {
+		writeAPIError(writer, http.StatusBadRequest, "browser_handoff_id_required", "handoff_id is required")
+		return
+	}
+	handoff, err := deps.Store.GetBrowserSessionLoginHandoff(request.Context(), handoffID)
+	if err != nil {
+		statusCode, code := browserSessionHandoffErrorStatus(err)
+		writeAPIError(writer, statusCode, code, err.Error())
+		return
+	}
+	session, completed, err := deps.Store.VerifyBrowserSession(request.Context(), sqlite.VerifyBrowserSessionParams{
+		SessionID:      handoff.Session.ID,
+		LoginRequestID: handoff.LoginRequest.ID,
+		Actor:          "operator",
+		Reason:         "operator attested manual browser handoff completion",
+	})
+	if err != nil {
+		statusCode, code := browserSessionHandoffErrorStatus(err)
+		writeAPIError(writer, statusCode, code, err.Error())
+		return
+	}
+	if completed == nil {
+		writeAPIError(writer, http.StatusInternalServerError, "browser_handoff_completion_failed", "login request completion was not recorded")
+		return
+	}
+	view := newBrowserSessionHandoffCompletionView(handoff.HandoffID, session, *completed)
+	if formPost || wantsBrowserSessionHandoffHTML(request) {
+		writeBrowserSessionHandoffCompletionHTML(writer, view)
+		return
+	}
+	writeJSON(writer, http.StatusOK, browserSessionHandoffCompletionResponse{Completion: view})
+}
+
+func parseBrowserSessionHandoffCompletionID(writer http.ResponseWriter, request *http.Request) (string, bool, error) {
+	contentType := strings.ToLower(request.Header.Get("Content-Type"))
+	if strings.Contains(contentType, "application/json") {
+		var payload struct {
+			HandoffID string `json:"handoff_id"`
+		}
+		if err := json.NewDecoder(http.MaxBytesReader(writer, request.Body, 1<<20)).Decode(&payload); err != nil {
+			return "", false, fmt.Errorf("invalid JSON handoff completion payload: %w", err)
+		}
+		return payload.HandoffID, false, nil
+	}
+	if err := request.ParseForm(); err != nil {
+		return "", false, fmt.Errorf("invalid form handoff completion payload: %w", err)
+	}
+	return request.FormValue("handoff_id"), true, nil
+}
+
+func newBrowserSessionHandoffView(handoff sqlite.BrowserSessionLoginHandoff) browserSessionHandoffView {
+	return browserSessionHandoffView{
+		HandoffID:      handoff.HandoffID,
+		LoginRequestID: handoff.LoginRequest.ID,
+		SessionID:      handoff.Session.ID,
+		SessionName:    handoff.Session.Name,
+		Domain:         handoff.Session.Domain,
+		AccountHint:    handoff.Session.AccountHint,
+		ExpiresAt:      handoff.LoginRequest.ExpiresAt.UTC().Format(time.RFC3339),
+		Status:         string(handoff.LoginRequest.Status),
+		AllowedActions: "manual_login_only",
+	}
+}
+
+func newBrowserSessionHandoffCompletionView(handoffID string, session sqlite.BrowserSession, request sqlite.BrowserSessionLoginRequest) browserSessionHandoffCompletionView {
+	return browserSessionHandoffCompletionView{
+		HandoffID:          handoffID,
+		LoginRequestID:     request.ID,
+		SessionID:          session.ID,
+		SessionName:        session.Name,
+		Domain:             session.Domain,
+		AccountHint:        session.AccountHint,
+		SessionStatus:      string(session.Status),
+		LoginRequestStatus: string(request.Status),
+		CompletedAt:        formatOptionalBrowserSessionHandoffTime(request.CompletedAt),
+		AllowedActions:     "manual_login_only",
+	}
+}
+
+func formatOptionalBrowserSessionHandoffTime(value *time.Time) string {
+	if value == nil {
+		return ""
+	}
+	return value.UTC().Format(time.RFC3339)
+}
+
+func browserSessionHandoffErrorStatus(err error) (int, string) {
+	message := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(message, "handoff id is required"):
+		return http.StatusBadRequest, "browser_handoff_id_required"
+	case strings.Contains(message, "not found"):
+		return http.StatusNotFound, "browser_handoff_not_found"
+	case strings.Contains(message, "expired"):
+		return http.StatusGone, "browser_handoff_expired"
+	case strings.Contains(message, "revoked"):
+		return http.StatusConflict, "browser_handoff_session_revoked"
+	case strings.Contains(message, "status"):
+		return http.StatusConflict, "browser_handoff_unavailable"
+	default:
+		return http.StatusBadRequest, "browser_handoff_invalid"
+	}
+}
+
+func wantsBrowserSessionHandoffHTML(request *http.Request) bool {
+	format := strings.ToLower(strings.TrimSpace(request.URL.Query().Get("format")))
+	if format == "html" {
+		return true
+	}
+	if format == "json" {
+		return false
+	}
+	return strings.Contains(strings.ToLower(request.Header.Get("Accept")), "text/html")
+}
+
+var browserSessionHandoffHTMLTemplate = template.Must(template.New("browser_session_handoff").Parse(`<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Browser Login Handoff</title>
+  <style>
+    body { margin: 0; font-family: system-ui, sans-serif; color: #111827; background: #f8fafc; }
+    main { max-width: 720px; margin: 48px auto; padding: 0 24px; }
+    section { background: #ffffff; border: 1px solid #d1d5db; border-radius: 8px; padding: 24px; }
+    h1 { margin: 0 0 16px; font-size: 1.5rem; }
+    dl { display: grid; grid-template-columns: 160px 1fr; gap: 10px 16px; margin: 20px 0; }
+    dt { color: #4b5563; font-weight: 600; }
+    dd { margin: 0; overflow-wrap: anywhere; }
+    .notice { border-left: 4px solid #2563eb; background: #eff6ff; padding: 12px 16px; }
+  </style>
+</head>
+<body>
+  <main>
+    <section>
+      <h1>Browser Login Handoff</h1>
+      <p class="notice">No browser session is launched yet. Odin is not collecting credentials. Login and 2FA will be manual in a future handoff step.</p>
+      <dl>
+        <dt>Session</dt><dd>{{.SessionName}}</dd>
+        <dt>Domain</dt><dd>{{.Domain}}</dd>
+        {{if .AccountHint}}<dt>Account hint</dt><dd>{{.AccountHint}}</dd>{{end}}
+        <dt>Expires at</dt><dd>{{.ExpiresAt}}</dd>
+        <dt>Status</dt><dd>{{.Status}}</dd>
+        <dt>Allowed action</dt><dd>{{.AllowedActions}}</dd>
+      </dl>
+    </section>
+  </main>
+</body>
+</html>
+`))
+
+var browserSessionHandoffCompletionHTMLTemplate = template.Must(template.New("browser_session_handoff_completion").Parse(`<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Browser Login Handoff Complete</title>
+  <style>
+    body { margin: 0; font-family: system-ui, sans-serif; color: #111827; background: #f8fafc; }
+    main { max-width: 720px; margin: 48px auto; padding: 0 24px; }
+    section { background: #ffffff; border: 1px solid #d1d5db; border-radius: 8px; padding: 24px; }
+    h1 { margin: 0 0 16px; font-size: 1.5rem; }
+    dl { display: grid; grid-template-columns: 180px 1fr; gap: 10px 16px; margin: 20px 0; }
+    dt { color: #4b5563; font-weight: 600; }
+    dd { margin: 0; overflow-wrap: anywhere; }
+    .notice { border-left: 4px solid #16a34a; background: #f0fdf4; padding: 12px 16px; }
+  </style>
+</head>
+<body>
+  <main>
+    <section>
+      <h1>Browser Login Handoff Complete</h1>
+      <p class="notice">Operator-attested completion only. No browser was launched by Odin. No credentials or profile bytes were collected.</p>
+      <dl>
+        <dt>Session</dt><dd>{{.SessionName}}</dd>
+        <dt>Domain</dt><dd>{{.Domain}}</dd>
+        {{if .AccountHint}}<dt>Account hint</dt><dd>{{.AccountHint}}</dd>{{end}}
+        <dt>Session status</dt><dd>{{.SessionStatus}}</dd>
+        <dt>Login request status</dt><dd>{{.LoginRequestStatus}}</dd>
+        <dt>Completed at</dt><dd>{{.CompletedAt}}</dd>
+        <dt>Allowed action</dt><dd>{{.AllowedActions}}</dd>
+      </dl>
+    </section>
+  </main>
+</body>
+</html>
+`))
+
+func writeBrowserSessionHandoffHTML(writer http.ResponseWriter, view browserSessionHandoffView) {
+	writer.Header().Set("Content-Type", "text/html; charset=utf-8")
+	writer.Header().Set("X-Content-Type-Options", "nosniff")
+	writer.WriteHeader(http.StatusOK)
+	_ = browserSessionHandoffHTMLTemplate.Execute(writer, view)
+}
+
+func writeBrowserSessionHandoffCompletionHTML(writer http.ResponseWriter, view browserSessionHandoffCompletionView) {
+	writer.Header().Set("Content-Type", "text/html; charset=utf-8")
+	writer.Header().Set("X-Content-Type-Options", "nosniff")
+	writer.WriteHeader(http.StatusOK)
+	_ = browserSessionHandoffCompletionHTMLTemplate.Execute(writer, view)
 }
 
 type githubIssuesWebhookPayload struct {
@@ -613,16 +896,20 @@ func parseStringList(raw string) []string {
 	return values
 }
 
+func writeAdminAuthorizationError(writer http.ResponseWriter, statusCode int) {
+	switch statusCode {
+	case http.StatusServiceUnavailable:
+		writeAPIError(writer, statusCode, "admin_disabled", "admin actions are disabled")
+	case http.StatusUnauthorized:
+		writeAPIError(writer, statusCode, "admin_auth_required", "admin authentication is required")
+	default:
+		writeAPIError(writer, statusCode, "admin_auth_failed", "admin authentication failed")
+	}
+}
+
 func handleAdminAction(writer http.ResponseWriter, request *http.Request, deps Dependencies, action string, call func(context.Context, AdminActions) error) {
 	if statusCode, ok := authorizeAdmin(request, deps.AdminToken); !ok {
-		switch statusCode {
-		case http.StatusServiceUnavailable:
-			writeAPIError(writer, statusCode, "admin_disabled", "admin actions are disabled")
-		case http.StatusUnauthorized:
-			writeAPIError(writer, statusCode, "admin_auth_required", "admin authentication is required")
-		default:
-			writeAPIError(writer, statusCode, "admin_auth_failed", "admin authentication failed")
-		}
+		writeAdminAuthorizationError(writer, statusCode)
 		return
 	}
 	if deps.Admin == nil {

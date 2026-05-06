@@ -1,6 +1,9 @@
 package commands
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestParseBrowserRunDefaultsAllowedDomainFromURL(t *testing.T) {
 	command, err := ParseBrowser([]string{"run", "--goal-id", "42", "--url", "https://example.com/research", "--json"})
@@ -31,5 +34,115 @@ func TestParseBrowserRunAcceptsSafetyOptions(t *testing.T) {
 	}
 	if command.Objective != "Collect public docs" || command.AllowedDomains[0] != "example.com" || command.MaxPages != 3 || command.MaxDurationSeconds != 45 || command.WorkerMode != "browser" || !command.EvidenceRequired || command.Actions[0] != "read" {
 		t.Fatalf("command = %+v, want parsed safety options", command)
+	}
+}
+
+func TestParseBrowserSessionCreateAndShow(t *testing.T) {
+	create, err := ParseBrowser([]string{
+		"session",
+		"create",
+		"--name", "google-main",
+		"--domain", "google.com",
+		"--permission-tier", "authenticated_read",
+		"--account-hint", "marcus",
+		"--profile-path", "browser-sessions/profiles/google-main",
+		"--json",
+	})
+	if err != nil {
+		t.Fatalf("ParseBrowser(session create) error = %v", err)
+	}
+	if create.Name != "session" || create.SessionAction != "create" || create.SessionName != "google-main" || create.SessionDomain != "google.com" || create.PermissionTier != "authenticated_read" || create.AccountHint != "marcus" || create.ProfilePath != "browser-sessions/profiles/google-main" || !create.JSON {
+		t.Fatalf("create command = %+v, want parsed browser session create", create)
+	}
+
+	show, err := ParseBrowser([]string{"session", "show", "--id", "42", "--json"})
+	if err != nil {
+		t.Fatalf("ParseBrowser(session show) error = %v", err)
+	}
+	if show.Name != "session" || show.SessionAction != "show" || show.ID != 42 || !show.JSON {
+		t.Fatalf("show command = %+v, want parsed browser session show", show)
+	}
+}
+
+func TestParseBrowserSessionValidatesRequiredFields(t *testing.T) {
+	if _, err := ParseBrowser([]string{"session", "create", "--domain", "google.com", "--permission-tier", "authenticated_read", "--json"}); err == nil {
+		t.Fatal("ParseBrowser(session create missing name) error = nil, want error")
+	}
+	if _, err := ParseBrowser([]string{"session", "create", "--name", "google-main", "--permission-tier", "authenticated_read", "--json"}); err == nil {
+		t.Fatal("ParseBrowser(session create missing domain) error = nil, want error")
+	}
+	if _, err := ParseBrowser([]string{"session", "create", "--name", "google-main", "--domain", "google.com", "--json"}); err == nil {
+		t.Fatal("ParseBrowser(session create missing permission tier) error = nil, want error")
+	}
+	if _, err := ParseBrowser([]string{"session", "status", "--id", "42", "--status", "unknown", "--json"}); err == nil {
+		t.Fatal("ParseBrowser(session status unknown status) error = nil, want error")
+	}
+}
+
+func TestParseBrowserSessionLoginRequestCommands(t *testing.T) {
+	request, err := ParseBrowser([]string{"session", "login-request", "--id", "42", "--handoff-base-url", "https://odin-handoff.tailnet.local/manual-login", "--json"})
+	if err != nil {
+		t.Fatalf("ParseBrowser(session login-request) error = %v", err)
+	}
+	if request.Name != "session" || request.SessionAction != "login-request" || request.ID != 42 || request.HandoffBaseURL != "https://odin-handoff.tailnet.local/manual-login" || !request.JSON {
+		t.Fatalf("login-request command = %+v, want parsed request command", request)
+	}
+
+	list, err := ParseBrowser([]string{"session", "login-requests", "--id", "42", "--json"})
+	if err != nil {
+		t.Fatalf("ParseBrowser(session login-requests) error = %v", err)
+	}
+	if list.Name != "session" || list.SessionAction != "login-requests" || list.ID != 42 || !list.JSON {
+		t.Fatalf("login-requests command = %+v, want parsed list command", list)
+	}
+}
+
+func TestParseBrowserSessionHandoffShowCommand(t *testing.T) {
+	command, err := ParseBrowser([]string{"session", "handoff", "show", "--handoff-id", "opaque-handoff-id", "--json"})
+	if err != nil {
+		t.Fatalf("ParseBrowser(session handoff show) error = %v", err)
+	}
+	if command.Name != "session" || command.SessionAction != "handoff" || command.HandoffAction != "show" || command.HandoffID != "opaque-handoff-id" || !command.JSON {
+		t.Fatalf("command = %+v, want parsed handoff show command", command)
+	}
+
+	if _, err := ParseBrowser([]string{"session", "handoff", "show", "--json"}); err == nil {
+		t.Fatal("ParseBrowser(session handoff show missing handoff id) error = nil, want error")
+	}
+	if _, err := ParseBrowser([]string{"session", "handoff", "approve", "--handoff-id", "opaque-handoff-id", "--json"}); err == nil {
+		t.Fatal("ParseBrowser(session handoff unsupported action) error = nil, want error")
+	}
+	if _, err := ParseBrowser([]string{"session", "handoff", "show", "--handoff-id", "opaque-handoff-id", "--id", "42", "--json"}); err == nil {
+		t.Fatal("ParseBrowser(session handoff show with id) error = nil, want read-only lookup flag rejection")
+	}
+}
+
+func TestParseBrowserSessionVerifyCommand(t *testing.T) {
+	command, err := ParseBrowser([]string{"session", "verify", "--id", "42", "--login-request-id", "7", "--json"})
+	if err != nil {
+		t.Fatalf("ParseBrowser(session verify) error = %v", err)
+	}
+	if command.Name != "session" || command.SessionAction != "verify" || command.ID != 42 || command.LoginRequestID != 7 || !command.JSON {
+		t.Fatalf("verify command = %+v, want parsed verify request", command)
+	}
+
+	_, err = ParseBrowser([]string{"session", "verify", "--id", "42", "--status", "verified", "--json"})
+	if err == nil || !strings.Contains(err.Error(), "only accepts --id, --login-request-id, and --json") {
+		t.Fatalf("ParseBrowser(session verify with status) error = %v, want rejected status flag", err)
+	}
+}
+
+func TestParseBrowserSessionPrepareProfileCommand(t *testing.T) {
+	command, err := ParseBrowser([]string{"session", "prepare-profile", "--id", "42", "--json"})
+	if err != nil {
+		t.Fatalf("ParseBrowser(session prepare-profile) error = %v", err)
+	}
+	if command.Name != "session" || command.SessionAction != "prepare-profile" || command.ID != 42 || !command.JSON {
+		t.Fatalf("prepare-profile command = %+v, want parsed prepare-profile request", command)
+	}
+
+	_, err = ParseBrowser([]string{"session", "prepare-profile", "--id", "42", "--profile-path", "browser-sessions/profiles/other", "--json"})
+	if err == nil || !strings.Contains(err.Error(), "only accepts --id and --json") {
+		t.Fatalf("ParseBrowser(session prepare-profile with profile path) error = %v, want rejected profile path", err)
 	}
 }
