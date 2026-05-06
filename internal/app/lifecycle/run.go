@@ -1806,7 +1806,12 @@ func buildIntakeProcessOutcome(ctx context.Context, store *sqlite.Store, item sq
 
 func isGoalLikeIntake(item sqlite.IntakeItem) bool {
 	text := strings.ToLower(strings.TrimSpace(item.Subject + " " + item.Summary))
-	return strings.Contains(text, "goal") || strings.Contains(text, "research goals") || strings.Contains(text, "long-running")
+	for _, marker := range []string{"goal", "research goals", "long-running", "long running", "initiative", "roadmap", "multi-step", "project plan"} {
+		if strings.Contains(text, marker) {
+			return true
+		}
+	}
+	return strings.Contains(text, "plan the ") && strings.Contains(text, " project")
 }
 
 func deriveIntakeRoute(item sqlite.IntakeItem) intakeDerivedRoute {
