@@ -170,3 +170,36 @@ Permission-gated invoke denials use stable `error_code` values so operators and 
 Because skill files live in the repo rather than SQLite, these events are appended immediately after the lifecycle action instead of sharing a SQL transaction with a row mutation. The repo remains the source of truth; the event stream is the auditable runtime trail.
 
 Allowed invokes record `execution_profile=restricted_command_v1`. Denied pre-exec invokes leave `execution_profile` empty so the event stream does not claim a wrapper profile that never ran.
+
+## Goal lifecycle expectation
+
+Odin-native goals are persisted in SQLite and append runtime events for operator-visible state changes:
+
+- `goal.created`
+- `goal.updated`
+- `goal.status_changed`
+- `goal_runner.observed`
+
+Goal run, blocker, and evidence records use the same stream for future runner-facing mutations:
+
+- `goal_run.started`
+- `goal_run.status_changed`
+- `goal_run.finished`
+- `goal.blocker_recorded`
+- `goal.evidence_recorded`
+- `review.approved`
+- `review.rejected`
+
+The `goal` stream is the audit trail for goal CLI mutations. Goal state remains in SQLite; registry files, overview projections, and future runners must not become a parallel goal authority.
+
+Goal-derived review queue items use existing goal state as their authority. `intake-goal:<id>`, `goal:<id>`, and `goal-approval:<id>` can approve or reject created/planned goals through the review CLI. `goal-blocker:<id>` items are visible for inspection, but blocker resolution is not implemented until a store-level resolution primitive and lifecycle rule exist; approve/reject attempts must return an unsupported/not-resolved result without mutating goal or blocker state.
+
+## Intake-to-goal expectation
+
+Raw intake processing remains on the `intake_items` SQLite authority. When deterministic processing routes a raw intake item into a reviewable goal, Odin must preserve the intake-to-goal link on the intake row, leave the goal unapproved, and append audit events through the runtime event stream:
+
+- `intake.processed`
+- `intake.routed_to_goal`
+- `goal.created`
+
+The processing payload must include the source intake ID, route decision, classification result, and created goal ID when a goal is created. Intake conversion must not approve, run, or mutate external systems.

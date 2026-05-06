@@ -1405,6 +1405,327 @@ func TestRunUnifiedReviewQueueListsShowsAndRoutesExistingReviewObjects(t *testin
 	}
 }
 
+func TestRunReviewQueueIncludesGoalReviewItems(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	root := testRepoRoot(t)
+
+	run := func(args ...string) string {
+		t.Helper()
+		var output bytes.Buffer
+		if err := Run(context.Background(), root, args, strings.NewReader(""), &output); err != nil {
+			t.Fatalf("Run(%v) error = %v\noutput=%s", args, err, output.String())
+		}
+		return output.String()
+	}
+	createGoal := func(title string) int64 {
+		t.Helper()
+		output := run("goal", "create", "--title", title, "--json")
+		created := decodeGoalEnvelope(t, []byte(output))
+		return created.ID
+	}
+
+	run("intake", "raw", "create", "--text", "Build a browser executor for Odin research goals", "--json")
+	run("intake", "process", "--id", "intake-1", "--json")
+	manualCreatedID := createGoal("Manual created goal review")
+	plannedID := createGoal("Planned goal awaiting approval")
+	run("goal", "transition", "--id", int64String(plannedID), "--status", "planned", "--json")
+	blockedID := createGoal("Blocked goal needs human action")
+	run("goal", "transition", "--id", int64String(blockedID), "--status", "planned", "--json")
+	run("goal", "transition", "--id", int64String(blockedID), "--status", "approved_for_execution", "--json")
+	run("goal", "tick", "--json")
+	run("goal", "tick", "--json")
+
+	list := run("review", "list", "--json")
+	for _, want := range []string{
+		`"review_id": "intake-goal:1"`,
+		`"source_type": "intake_goal_conversion"`,
+		`"goal_id": 1`,
+		`"review_id": "goal:` + int64String(manualCreatedID) + `"`,
+		`"source_type": "goal"`,
+		`"title": "Manual created goal review"`,
+		`"review_id": "goal-approval:` + int64String(plannedID) + `"`,
+		`"reason": "goal_planned_awaiting_approval"`,
+		`"source_type": "goal_blocker"`,
+		`"title": "Blocked goal needs human action"`,
+	} {
+		if !strings.Contains(list, want) {
+			t.Fatalf("review list output = %s, want %s", list, want)
+		}
+	}
+	if count := strings.Count(list, `"title": "Build a browser executor for Odin research goals"`); count != 1 {
+		t.Fatalf("review list output = %s, want converted intake goal title once, got %d", list, count)
+	}
+
+	var listed struct {
+		Items []struct {
+			ReviewID   string `json:"review_id"`
+			SourceType string `json:"source_type"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal([]byte(list), &listed); err != nil {
+		t.Fatalf("review list json decode error = %v; output=%s", err, list)
+	}
+	var convertedReviewID string
+	for _, item := range listed.Items {
+		if item.SourceType == "intake_goal_conversion" {
+			convertedReviewID = item.ReviewID
+			break
+		}
+	}
+	if convertedReviewID == "" {
+		t.Fatalf("review list items = %+v, want converted intake goal review item", listed.Items)
+	}
+
+	show := run("review", "show", "--id", convertedReviewID, "--json")
+	if !strings.Contains(show, `"review_id": "`+convertedReviewID+`"`) || !strings.Contains(show, `"source_type": "intake_goal_conversion"`) || !strings.Contains(show, `"goal_id": 1`) {
+		t.Fatalf("review show output = %s, want one converted intake goal item", show)
+	}
+}
+
+func TestRunReviewApproveGoalDerivedItems(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	root := testRepoRoot(t)
+
+	run := func(args ...string) string {
+		t.Helper()
+		var output bytes.Buffer
+		if err := Run(context.Background(), root, args, strings.NewReader(""), &output); err != nil {
+			t.Fatalf("Run(%v) error = %v\noutput=%s", args, err, output.String())
+		}
+		return output.String()
+	}
+	createGoal := func(title string) int64 {
+		t.Helper()
+		output := run("goal", "create", "--title", title, "--json")
+		created := decodeGoalEnvelope(t, []byte(output))
+		return created.ID
+	}
+	assertGoalStatus := func(goalID int64, want string) {
+		t.Helper()
+		output := run("goal", "show", "--id", int64String(goalID), "--json")
+		shown := decodeGoalEnvelope(t, []byte(output))
+		if shown.Status != want {
+			t.Fatalf("goal %d status = %q, want %q\noutput=%s", goalID, shown.Status, want, output)
+		}
+	}
+
+	run("intake", "raw", "create", "--text", "Build a browser executor for Odin research goals", "--json")
+	run("intake", "process", "--id", "intake-1", "--json")
+	intakeApproved := run("review", "approve", "--id", "intake-goal:1", "--json")
+	if !strings.Contains(intakeApproved, `"review_id": "intake-goal:1"`) || !strings.Contains(intakeApproved, `"status": "approved_for_execution"`) {
+		t.Fatalf("review approve intake-goal output = %s, want approved goal", intakeApproved)
+	}
+	assertGoalStatus(1, string(sqlite.GoalStatusApprovedForExecution))
+
+	tick := run("goal", "tick", "--json")
+	if !strings.Contains(tick, `"started": 1`) || !strings.Contains(tick, `"goal_id": 1`) {
+		t.Fatalf("goal tick output = %s, want approved goal picked up", tick)
+	}
+
+	createdGoalID := createGoal("Approve created review goal")
+	createdApproved := run("review", "approve", "--id", "goal:"+int64String(createdGoalID), "--json")
+	if !strings.Contains(createdApproved, `"review_id": "goal:`+int64String(createdGoalID)+`"`) || !strings.Contains(createdApproved, `"status": "approved_for_execution"`) {
+		t.Fatalf("review approve goal output = %s, want approved goal", createdApproved)
+	}
+	assertGoalStatus(createdGoalID, string(sqlite.GoalStatusApprovedForExecution))
+
+	plannedGoalID := createGoal("Approve planned review goal")
+	run("goal", "transition", "--id", int64String(plannedGoalID), "--status", "planned", "--json")
+	plannedApproved := run("review", "approve", "--id", "goal-approval:"+int64String(plannedGoalID), "--json")
+	if !strings.Contains(plannedApproved, `"review_id": "goal-approval:`+int64String(plannedGoalID)+`"`) || !strings.Contains(plannedApproved, `"status": "approved_for_execution"`) {
+		t.Fatalf("review approve goal-approval output = %s, want approved goal", plannedApproved)
+	}
+	assertGoalStatus(plannedGoalID, string(sqlite.GoalStatusApprovedForExecution))
+
+	store, err := sqlite.Open(filepath.Join(root, "data", "odin.db"))
+	if err != nil {
+		t.Fatalf("sqlite.Open() error = %v", err)
+	}
+	blockedGoal, err := store.CreateGoal(context.Background(), sqlite.CreateGoalParams{Title: "Blocked review approval unsupported"})
+	if err != nil {
+		t.Fatalf("CreateGoal(blocked) error = %v", err)
+	}
+	if _, err := store.TransitionGoal(context.Background(), sqlite.TransitionGoalParams{GoalID: blockedGoal.ID, Status: sqlite.GoalStatusBlocked}); err != nil {
+		t.Fatalf("TransitionGoal(blocked) error = %v", err)
+	}
+	blocker, err := store.AddGoalBlocker(context.Background(), sqlite.AddGoalBlockerParams{
+		GoalID:      blockedGoal.ID,
+		Status:      "open",
+		BlockerType: "operator_action",
+		Summary:     "operator must resolve blocker",
+		CreatedBy:   "test",
+	})
+	if err != nil {
+		t.Fatalf("AddGoalBlocker() error = %v", err)
+	}
+	store.Close()
+
+	var unsupportedOut bytes.Buffer
+	err = Run(context.Background(), root, []string{"review", "approve", "--id", "goal-blocker:" + int64String(blocker.ID), "--json"}, strings.NewReader(""), &unsupportedOut)
+	if err == nil || !strings.Contains(err.Error(), "review approve does not support goal-blocker") {
+		t.Fatalf("Run(review approve goal-blocker) error = %v output=%s, want unsupported-action error", err, unsupportedOut.String())
+	}
+
+	logs := run("logs", "--json")
+	if strings.Count(logs, `"type": "review.approved"`) != 3 || !strings.Contains(logs, `"type": "goal.status_changed"`) {
+		t.Fatalf("logs output = %s, want review.approved and goal.status_changed audit events", logs)
+	}
+}
+
+func TestRunReviewRejectGoalDerivedItems(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	root := testRepoRoot(t)
+
+	run := func(args ...string) string {
+		t.Helper()
+		var output bytes.Buffer
+		if err := Run(context.Background(), root, args, strings.NewReader(""), &output); err != nil {
+			t.Fatalf("Run(%v) error = %v\noutput=%s", args, err, output.String())
+		}
+		return output.String()
+	}
+	createGoal := func(title string) int64 {
+		t.Helper()
+		output := run("goal", "create", "--title", title, "--json")
+		created := decodeGoalEnvelope(t, []byte(output))
+		return created.ID
+	}
+	assertGoalStatus := func(goalID int64, want string) {
+		t.Helper()
+		output := run("goal", "show", "--id", int64String(goalID), "--json")
+		shown := decodeGoalEnvelope(t, []byte(output))
+		if shown.Status != want {
+			t.Fatalf("goal %d status = %q, want %q\noutput=%s", goalID, shown.Status, want, output)
+		}
+	}
+
+	run("intake", "raw", "create", "--text", "Build a browser executor for Odin research goals", "--json")
+	run("intake", "process", "--id", "intake-1", "--json")
+	intakeRejected := run("review", "reject", "--id", "intake-goal:1", "--reason", "not ready", "--json")
+	if !strings.Contains(intakeRejected, `"review_id": "intake-goal:1"`) || !strings.Contains(intakeRejected, `"decision": "rejected"`) || !strings.Contains(intakeRejected, `"status": "blocked"`) || !strings.Contains(intakeRejected, `"blocker"`) {
+		t.Fatalf("review reject intake-goal output = %s, want blocked rejected goal with blocker", intakeRejected)
+	}
+	assertGoalStatus(1, string(sqlite.GoalStatusBlocked))
+
+	tick := run("goal", "tick", "--json")
+	if !strings.Contains(tick, `"started": 0`) {
+		t.Fatalf("goal tick output = %s, want rejected blocked goal not executed", tick)
+	}
+	list := run("review", "list", "--json")
+	if strings.Contains(list, `"review_id": "intake-goal:1"`) || !strings.Contains(list, `"source_type": "goal_blocker"`) {
+		t.Fatalf("review list output = %s, want rejected item represented only as blocked goal", list)
+	}
+
+	createdGoalID := createGoal("Reject created review goal")
+	createdRejected := run("review", "reject", "--id", "goal:"+int64String(createdGoalID), "--reason", "not ready", "--json")
+	if !strings.Contains(createdRejected, `"review_id": "goal:`+int64String(createdGoalID)+`"`) || !strings.Contains(createdRejected, `"status": "blocked"`) {
+		t.Fatalf("review reject goal output = %s, want blocked rejected goal", createdRejected)
+	}
+	assertGoalStatus(createdGoalID, string(sqlite.GoalStatusBlocked))
+
+	plannedGoalID := createGoal("Reject planned review goal")
+	run("goal", "transition", "--id", int64String(plannedGoalID), "--status", "planned", "--json")
+	plannedRejected := run("review", "reject", "--id", "goal-approval:"+int64String(plannedGoalID), "--reason", "not ready", "--json")
+	if !strings.Contains(plannedRejected, `"review_id": "goal-approval:`+int64String(plannedGoalID)+`"`) || !strings.Contains(plannedRejected, `"status": "blocked"`) {
+		t.Fatalf("review reject goal-approval output = %s, want blocked rejected goal", plannedRejected)
+	}
+	assertGoalStatus(plannedGoalID, string(sqlite.GoalStatusBlocked))
+
+	rawShow := run("intake", "raw", "show", "intake-1", "--json")
+	if !strings.Contains(rawShow, `"goal_id": 1`) || !strings.Contains(rawShow, `"status": "review_required"`) {
+		t.Fatalf("intake raw show output = %s, want preserved intake goal link", rawShow)
+	}
+
+	allBlockedTick := run("goal", "tick", "--json")
+	if !strings.Contains(allBlockedTick, `"started": 0`) || strings.Count(allBlockedTick, `"action": "skipped"`) != 3 {
+		t.Fatalf("goal tick output = %s, want all rejected goals skipped", allBlockedTick)
+	}
+
+	list = run("review", "list", "--json")
+	for _, blockedReviewID := range []string{
+		`"review_id": "intake-goal:1"`,
+		`"review_id": "goal:` + int64String(createdGoalID) + `"`,
+		`"review_id": "goal-approval:` + int64String(plannedGoalID) + `"`,
+	} {
+		if strings.Contains(list, blockedReviewID) {
+			t.Fatalf("review list output = %s, want %s removed as normal pending review", list, blockedReviewID)
+		}
+	}
+	if strings.Count(list, `"source_type": "goal_blocker"`) != 3 || !strings.Contains(list, `"review_id": "goal-blocker:1"`) || !strings.Contains(list, `"review_id": "goal-blocker:2"`) || !strings.Contains(list, `"review_id": "goal-blocker:3"`) {
+		t.Fatalf("review list output = %s, want three blocker review items", list)
+	}
+
+	var unsupportedOut bytes.Buffer
+	err := Run(context.Background(), root, []string{"review", "reject", "--id", "goal-blocker:1", "--reason", "still blocked", "--json"}, strings.NewReader(""), &unsupportedOut)
+	if err == nil || !strings.Contains(err.Error(), "review reject does not support goal-blocker") {
+		t.Fatalf("Run(review reject goal-blocker) error = %v output=%s, want unsupported-action error", err, unsupportedOut.String())
+	}
+
+	logs := run("logs", "--json")
+	if strings.Count(logs, `"type": "review.rejected"`) != 3 || !strings.Contains(logs, `"type": "goal.blocker_recorded"`) || !strings.Contains(logs, `"type": "goal.status_changed"`) {
+		t.Fatalf("logs output = %s, want review.rejected, blocker, and status audit events", logs)
+	}
+}
+
+func TestRunReviewGoalBlockerActionsAreExplicitUnsupportedJSON(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	root := testRepoRoot(t)
+
+	run := func(args ...string) string {
+		t.Helper()
+		var output bytes.Buffer
+		if err := Run(context.Background(), root, args, strings.NewReader(""), &output); err != nil {
+			t.Fatalf("Run(%v) error = %v\noutput=%s", args, err, output.String())
+		}
+		return output.String()
+	}
+
+	run("intake", "raw", "create", "--text", "Build a browser executor for Odin research goals", "--json")
+	run("intake", "process", "--id", "intake-1", "--json")
+	rejected := run("review", "reject", "--id", "intake-goal:1", "--reason", "not ready", "--json")
+	if !strings.Contains(rejected, `"blocker"`) {
+		t.Fatalf("review reject output = %s, want blocker", rejected)
+	}
+
+	list := run("review", "list", "--json")
+	if !strings.Contains(list, `"review_id": "goal-blocker:1"`) || !strings.Contains(list, `"source_type": "goal_blocker"`) || !strings.Contains(list, `"allowed_actions": []`) {
+		t.Fatalf("review list output = %s, want visible unsupported goal blocker item", list)
+	}
+
+	show := run("review", "show", "--id", "goal-blocker:1", "--json")
+	if !strings.Contains(show, `"review_id": "goal-blocker:1"`) || !strings.Contains(show, `"blocker_type": "review_rejected"`) || !strings.Contains(show, `"status": "blocked"`) {
+		t.Fatalf("review show output = %s, want blocked goal blocker detail", show)
+	}
+
+	var approveOut bytes.Buffer
+	err := Run(context.Background(), root, []string{"review", "approve", "--id", "goal-blocker:1", "--json"}, strings.NewReader(""), &approveOut)
+	if err == nil || !strings.Contains(err.Error(), "review approve does not support goal-blocker") {
+		t.Fatalf("Run(review approve goal-blocker) error = %v output=%s, want unsupported-action error", err, approveOut.String())
+	}
+	if !strings.Contains(approveOut.String(), `"status": "unsupported"`) || !strings.Contains(approveOut.String(), `"result": "not_resolved"`) || !strings.Contains(approveOut.String(), `"action": "approve"`) || !strings.Contains(approveOut.String(), `"review_id": "goal-blocker:1"`) {
+		t.Fatalf("review approve unsupported output = %s, want machine-readable unsupported JSON", approveOut.String())
+	}
+
+	var rejectOut bytes.Buffer
+	err = Run(context.Background(), root, []string{"review", "reject", "--id", "goal-blocker:1", "--reason", "still blocked", "--json"}, strings.NewReader(""), &rejectOut)
+	if err == nil || !strings.Contains(err.Error(), "review reject does not support goal-blocker") {
+		t.Fatalf("Run(review reject goal-blocker) error = %v output=%s, want unsupported-action error", err, rejectOut.String())
+	}
+	if !strings.Contains(rejectOut.String(), `"status": "unsupported"`) || !strings.Contains(rejectOut.String(), `"result": "not_resolved"`) || !strings.Contains(rejectOut.String(), `"action": "reject"`) || !strings.Contains(rejectOut.String(), `"review_id": "goal-blocker:1"`) {
+		t.Fatalf("review reject unsupported output = %s, want machine-readable unsupported JSON", rejectOut.String())
+	}
+
+	goal := decodeGoalEnvelope(t, []byte(run("goal", "show", "--id", "1", "--json")))
+	if goal.Status != string(sqlite.GoalStatusBlocked) {
+		t.Fatalf("goal status = %q, want blocked after unsupported blocker actions", goal.Status)
+	}
+
+	logs := run("logs", "--json")
+	if strings.Contains(logs, `"type": "review.approved"`) || strings.Count(logs, `"type": "review.rejected"`) != 1 {
+		t.Fatalf("logs output = %s, want unsupported blocker actions without approval/rejection audit mutation", logs)
+	}
+}
+
 func TestRunUnifiedReviewQueueSurfacesFailedWorkRetryPolicy(t *testing.T) {
 	t.Setenv("ODIN_CODEX_DRIVER", "")
 	t.Setenv("HOME", t.TempDir())
