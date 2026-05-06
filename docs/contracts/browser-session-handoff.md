@@ -6,7 +6,7 @@ date: 2026-05-06
 
 # Browser Session Handoff Contract
 
-This contract defines the Odin-native handoff for manual Huginn browser login and reusable authenticated read-only sessions. The session metadata, login request metadata, read-only handoff lookup, handoff runner metadata CLI, manual verification metadata, profile path allocation, explicit empty profile directory preparation, and profile storage policy gate slices are implemented. Real NoVNC/Tailscale handoff, browser launch, browser profile persistence, login automation, read-only verification checks, and authenticated session attachment remain future work.
+This contract defines the Odin-native handoff for manual Huginn browser login and reusable authenticated read-only sessions. The session metadata, login request metadata, read-only handoff lookup, handoff runner metadata CLI, handoff runner process-boundary skeleton, manual verification metadata, profile path allocation, explicit empty profile directory preparation, and profile storage policy gate slices are implemented. Real NoVNC/Tailscale handoff, browser launch, browser profile persistence, login automation, read-only verification checks, and authenticated session attachment remain future work.
 
 ## Existing State
 
@@ -19,6 +19,7 @@ This contract defines the Odin-native handoff for manual Huginn browser login an
 - `odin browser session login-requests --id <session_id> --json` lists persisted login request metadata for one session.
 - `odin browser session handoff show --handoff-id <id> --json` resolves safe manual-login metadata for one valid, unexpired requested handoff without mutating runtime state.
 - `odin browser session runner create|list|show|status|cancel --json` records and inspects metadata-only browser handoff runner records without launching a process.
+- `internal/runtime/browserhandoff` defines the future runner process boundary request/response types plus a stub runner that validates requests and returns structured `not_implemented` responses without launching a process.
 - `odin browser session verify --id <session_id> [--login-request-id <id>] --json` records metadata-only operator verification, sets `last_verified_at`, moves the session to `verified`, and completes the login request when one is provided.
 - `odin browser session prepare-profile --id <session_id> --json` explicitly creates the empty profile directory under `ODIN_ROOT` and records an audit event without writing browser files.
 - Browser session JSON reports `profile_storage_policy`. The default is `encrypted_required`, and `CanWriteBrowserProfile` denies writes for every current policy value until encrypted profile storage is implemented.
@@ -144,7 +145,7 @@ Forbidden goal types for session reuse:
 
 The handoff runner is an operator-attended process boundary for manual login only. Its future process implementation will launch one temporary visible browser session, expose its viewer only over an operator-approved private network path such as Tailscale to a NoVNC endpoint, and then stop after completion, expiration, or cancellation. Odin remains the metadata, policy, and audit authority. The runner must never become a credential collector, browser automation agent, profile registry, or goal execution authority.
 
-The SQLite runner metadata store is implemented. The process, CLI, and service parts remain design only. This slice does not add HTTP handlers, process launch, NoVNC services, Tailscale services, browser profile writes, cookie writes, or credential storage.
+The SQLite runner metadata store, metadata CLI, and typed process-boundary skeleton are implemented. The real process implementation and service wiring remain design only. This slice does not add HTTP handlers, process launch, NoVNC services, Tailscale services, browser profile writes, cookie writes, or credential storage.
 
 ### Runner Request
 
@@ -178,7 +179,7 @@ Field rules:
 
 ### Runner Response
 
-A future runner start result must use a stable JSON response envelope:
+A future non-stub runner start result must use a stable JSON response envelope:
 
 ```json
 {
@@ -205,6 +206,17 @@ Allowed response statuses are:
 - `completed`: operator-attested completion was recorded and the runner stopped.
 
 `viewer_url` must be absent or null for `failed` results. `error_code` and `error_message` are required for `failed` and optional for terminal non-failure states. `process_id` may be null when an implementation uses a supervised runner ID rather than an OS process ID, but `runner_id` must always be present.
+
+### Runner Process Boundary Skeleton
+
+`internal/runtime/browserhandoff` defines the safe process boundary shape before any real process runner exists:
+
+- `StartRequest`: `session_id`, `login_request_id`, `handoff_id`, `profile_path`, `allowed_domain`, `timeout_seconds`, optional loopback `bind_addr`, optional `private_base_url`, and unsupported `public_base_url`.
+- `StartResponse`: safe runner metadata, status, optional future process/viewer fields, and structured error metadata.
+- `CancelRequest`: future runner ID plus optional reason.
+- `StatusResponse`: structured status for cancellation and later status lookups.
+
+The default `StubRunner` validates required request fields and returns `not_implemented`. It must not import `os/exec`, launch a browser, start NoVNC/Tailscale, write profile data, create viewer URLs, or store credential material. `public_base_url` is rejected until a later security contract explicitly permits it. `bind_addr` must stay on loopback in the stub boundary.
 
 ### Runner Safety Policy
 
@@ -573,7 +585,7 @@ Rules:
 8. Authenticated read-only attachment: allow `odin browser run` and goal runner evidence collection to attach a verified `authenticated_readonly` profile for allowed domains only.
 9. Handoff runner metadata store: implemented additive SQLite runner metadata with `requested`, `started`, `failed`, `completed`, `expired`, and `cancelled` states; append runner audit events transactionally.
 10. Handoff runner CLI: implemented minimal `odin browser session runner create|list|show|status|cancel` commands, reusing current session and login request validation without process launch.
-11. Process boundary: define and implement the isolated runner process contract, shutdown semantics, timeout enforcement, and fail-closed cleanup without profile writes.
+11. Process boundary: implemented a typed `internal/runtime/browserhandoff` skeleton with validating `StubRunner`; real process launch, shutdown semantics, timeout enforcement, and fail-closed cleanup remain future work.
 12. Local NoVNC fixture: add a local-only fixture for tests that proves viewer URL wiring and lifecycle behavior without external network mutation.
 13. Tailscale/private URL config: add private viewer URL configuration and reject public exposure unless a later security contract explicitly allows it.
 14. Profile write gate integration: connect runner persistence only after encrypted profile storage and `CanWriteBrowserProfile(session)` allow writes.
