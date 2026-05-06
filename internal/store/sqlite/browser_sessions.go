@@ -827,6 +827,9 @@ func (store *Store) CreateBrowserHandoffRunner(ctx context.Context, params Creat
 		if request.Status != BrowserSessionLoginRequestStatusRequested {
 			return fmt.Errorf("browser session login request status %q cannot create handoff runner", request.Status)
 		}
+		if !request.ExpiresAt.After(now) {
+			return fmt.Errorf("browser session login request expired at %s", formatTime(request.ExpiresAt))
+		}
 		if runner.ExpiresAt.After(request.ExpiresAt) {
 			return fmt.Errorf("browser handoff runner expires_at cannot exceed login request expires_at")
 		}

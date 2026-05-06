@@ -53,6 +53,14 @@ type browserSessionHandoffEnvelope struct {
 	Handoff browserSessionHandoffView `json:"handoff"`
 }
 
+type browserSessionRunnerEnvelope struct {
+	Runner browserSessionRunnerView `json:"runner"`
+}
+
+type browserSessionRunnerListView struct {
+	Runners []browserSessionRunnerView `json:"runners"`
+}
+
 type browserSessionProfileEnvelope struct {
 	Profile browserSessionProfileView `json:"profile"`
 }
@@ -103,6 +111,28 @@ type browserSessionHandoffView struct {
 	ExpiresAt      string `json:"expires_at"`
 	Status         string `json:"status"`
 	AllowedActions string `json:"allowed_actions"`
+}
+
+type browserSessionRunnerView struct {
+	ID             int64   `json:"id"`
+	SessionID      int64   `json:"session_id"`
+	LoginRequestID int64   `json:"login_request_id"`
+	HandoffID      string  `json:"handoff_id"`
+	Status         string  `json:"status"`
+	ViewerURL      *string `json:"viewer_url"`
+	RunnerID       *string `json:"runner_id"`
+	ProcessID      *int64  `json:"process_id"`
+	BindAddr       *string `json:"bind_addr"`
+	PrivateBaseURL *string `json:"private_base_url"`
+	PublicBaseURL  *string `json:"public_base_url"`
+	ExpiresAt      string  `json:"expires_at"`
+	StartedAt      string  `json:"started_at,omitempty"`
+	CompletedAt    string  `json:"completed_at,omitempty"`
+	CancelledAt    string  `json:"cancelled_at,omitempty"`
+	CreatedAt      string  `json:"created_at"`
+	UpdatedAt      string  `json:"updated_at"`
+	ErrorCode      *string `json:"error_code"`
+	ErrorMessage   *string `json:"error_message"`
 }
 
 func runBrowser(ctx context.Context, app bootstrap.App, args []string, stdout io.Writer) error {
@@ -325,6 +355,99 @@ func runBrowserSession(ctx context.Context, app bootstrap.App, command commands.
 		}
 		_, err = fmt.Fprintf(stdout, "browser_session_handoff=%s login_request=%d session=%d status=%s allowed_actions=%s\n", view.HandoffID, view.LoginRequestID, view.SessionID, view.Status, view.AllowedActions)
 		return err
+	case "runner":
+		return runBrowserSessionRunner(ctx, app, command, stdout)
+	default:
+		return fmt.Errorf(commands.BrowserUsage)
+	}
+}
+
+func runBrowserSessionRunner(ctx context.Context, app bootstrap.App, command commands.BrowserCommand, stdout io.Writer) error {
+	switch command.RunnerAction {
+	case "create":
+		request, err := app.Store.GetBrowserSessionLoginRequest(ctx, command.LoginRequestID)
+		if err != nil {
+			return err
+		}
+		runner, err := app.Store.CreateBrowserHandoffRunner(ctx, sqlite.CreateBrowserHandoffRunnerParams{
+			SessionID:      request.SessionID,
+			LoginRequestID: request.ID,
+			HandoffID:      request.HandoffID,
+			ExpiresAt:      request.ExpiresAt,
+		})
+		if err != nil {
+			return err
+		}
+		view := newBrowserSessionRunnerView(runner)
+		if command.JSON {
+			return commands.WriteJSON(stdout, browserSessionRunnerEnvelope{Runner: view})
+		}
+		_, err = fmt.Fprintf(stdout, "browser_session_runner=%d login_request=%d session=%d status=%s\n", view.ID, view.LoginRequestID, view.SessionID, view.Status)
+		return err
+	case "list":
+		runners, err := app.Store.ListBrowserHandoffRunners(ctx, sqlite.ListBrowserHandoffRunnersParams{LoginRequestID: command.LoginRequestID})
+		if err != nil {
+			return err
+		}
+		views := make([]browserSessionRunnerView, 0, len(runners))
+		for _, runner := range runners {
+			views = append(views, newBrowserSessionRunnerView(runner))
+		}
+		if command.JSON {
+			return commands.WriteJSON(stdout, browserSessionRunnerListView{Runners: views})
+		}
+		if len(views) == 0 {
+			_, err := fmt.Fprintln(stdout, "no browser session handoff runners")
+			return err
+		}
+		for _, view := range views {
+			if _, err := fmt.Fprintf(stdout, "browser_session_runner=%d login_request=%d session=%d status=%s\n", view.ID, view.LoginRequestID, view.SessionID, view.Status); err != nil {
+				return err
+			}
+		}
+		return nil
+	case "show":
+		runner, err := app.Store.GetBrowserHandoffRunner(ctx, command.ID)
+		if err != nil {
+			return err
+		}
+		view := newBrowserSessionRunnerView(runner)
+		if command.JSON {
+			return commands.WriteJSON(stdout, browserSessionRunnerEnvelope{Runner: view})
+		}
+		_, err = fmt.Fprintf(stdout, "browser_session_runner=%d login_request=%d session=%d status=%s\n", view.ID, view.LoginRequestID, view.SessionID, view.Status)
+		return err
+	case "status":
+		runner, err := app.Store.UpdateBrowserHandoffRunnerStatus(ctx, sqlite.UpdateBrowserHandoffRunnerStatusParams{
+			ID:     command.ID,
+			Status: sqlite.BrowserHandoffRunnerStatus(command.Status),
+			Actor:  "operator",
+			Reason: "operator updated browser handoff runner metadata",
+		})
+		if err != nil {
+			return err
+		}
+		view := newBrowserSessionRunnerView(runner)
+		if command.JSON {
+			return commands.WriteJSON(stdout, browserSessionRunnerEnvelope{Runner: view})
+		}
+		_, err = fmt.Fprintf(stdout, "browser_session_runner=%d login_request=%d session=%d status=%s\n", view.ID, view.LoginRequestID, view.SessionID, view.Status)
+		return err
+	case "cancel":
+		runner, err := app.Store.CancelBrowserHandoffRunner(ctx, sqlite.CancelBrowserHandoffRunnerParams{
+			ID:     command.ID,
+			Actor:  "operator",
+			Reason: "operator cancelled browser handoff runner metadata",
+		})
+		if err != nil {
+			return err
+		}
+		view := newBrowserSessionRunnerView(runner)
+		if command.JSON {
+			return commands.WriteJSON(stdout, browserSessionRunnerEnvelope{Runner: view})
+		}
+		_, err = fmt.Fprintf(stdout, "browser_session_runner=%d login_request=%d session=%d status=%s\n", view.ID, view.LoginRequestID, view.SessionID, view.Status)
+		return err
 	default:
 		return fmt.Errorf(commands.BrowserUsage)
 	}
@@ -457,11 +580,44 @@ func newBrowserSessionHandoffView(handoff sqlite.BrowserSessionLoginHandoff) bro
 	}
 }
 
+func newBrowserSessionRunnerView(runner sqlite.BrowserHandoffRunner) browserSessionRunnerView {
+	return browserSessionRunnerView{
+		ID:             runner.ID,
+		SessionID:      runner.SessionID,
+		LoginRequestID: runner.LoginRequestID,
+		HandoffID:      runner.HandoffID,
+		Status:         string(runner.Status),
+		ViewerURL:      cloneBrowserSessionStringPtr(runner.ViewerURL),
+		RunnerID:       cloneBrowserSessionStringPtr(runner.RunnerID),
+		ProcessID:      cloneBrowserSessionInt64Ptr(runner.ProcessID),
+		BindAddr:       cloneBrowserSessionStringPtr(runner.BindAddr),
+		PrivateBaseURL: cloneBrowserSessionStringPtr(runner.PrivateBaseURL),
+		PublicBaseURL:  cloneBrowserSessionStringPtr(runner.PublicBaseURL),
+		ExpiresAt:      formatBrowserSessionTime(runner.ExpiresAt),
+		StartedAt:      formatBrowserSessionOptionalTime(runner.StartedAt),
+		CompletedAt:    formatBrowserSessionOptionalTime(runner.CompletedAt),
+		CancelledAt:    formatBrowserSessionOptionalTime(runner.CancelledAt),
+		CreatedAt:      formatBrowserSessionTime(runner.CreatedAt),
+		UpdatedAt:      formatBrowserSessionTime(runner.UpdatedAt),
+		ErrorCode:      cloneBrowserSessionStringPtr(runner.ErrorCode),
+		ErrorMessage:   cloneBrowserSessionStringPtr(runner.ErrorMessage),
+	}
+}
+
 func cloneBrowserSessionStringPtr(value *string) *string {
 	if value == nil {
 		return nil
 	}
 	ptr := new(string)
+	*ptr = *value
+	return ptr
+}
+
+func cloneBrowserSessionInt64Ptr(value *int64) *int64 {
+	if value == nil {
+		return nil
+	}
+	ptr := new(int64)
 	*ptr = *value
 	return ptr
 }

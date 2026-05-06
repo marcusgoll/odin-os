@@ -248,6 +248,107 @@ func TestRunBrowserSessionLoginRequestCreateAndList(t *testing.T) {
 	}
 }
 
+func TestRunBrowserSessionRunnerMetadataCommands(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	root := testRepoRoot(t)
+
+	run := func(args ...string) string {
+		t.Helper()
+		var output bytes.Buffer
+		if err := Run(context.Background(), root, args, strings.NewReader(""), &output); err != nil {
+			t.Fatalf("Run(%v) error = %v\noutput=%s", args, err, output.String())
+		}
+		return output.String()
+	}
+
+	created := decodeBrowserSessionEnvelope(t, []byte(run(
+		"browser", "session", "create",
+		"--name", "google-main",
+		"--domain", "google.com",
+		"--permission-tier", "authenticated_read",
+		"--json",
+	)))
+	loginRequest := decodeBrowserSessionLoginRequestEnvelope(t, []byte(run("browser", "session", "login-request", "--id", int64String(created.ID), "--json")))
+
+	runner := decodeBrowserSessionRunnerEnvelope(t, []byte(run("browser", "session", "runner", "create", "--login-request-id", int64String(loginRequest.ID), "--json")))
+	if runner.ID != 1 || runner.SessionID != created.ID || runner.LoginRequestID != loginRequest.ID || runner.HandoffID != loginRequest.HandoffID {
+		t.Fatalf("runner = %+v, want linked runner metadata", runner)
+	}
+	if runner.Status != "requested" || runner.ViewerURL != nil || runner.RunnerID != nil || runner.ProcessID != nil || runner.ExpiresAt == "" {
+		t.Fatalf("runner = %+v, want requested metadata-only runner with nil process fields", runner)
+	}
+	if _, err := os.Stat(filepath.Join(root, "browser-sessions")); !os.IsNotExist(err) {
+		t.Fatalf("browser-sessions directory exists after runner create err=%v, want metadata-only runner", err)
+	}
+
+	listOutput := run("browser", "session", "runner", "list", "--login-request-id", int64String(loginRequest.ID), "--json")
+	if !strings.Contains(listOutput, `"runners":`) || !strings.Contains(listOutput, `"status": "requested"`) || !strings.Contains(listOutput, `"viewer_url": null`) {
+		t.Fatalf("runner list output = %s, want requested runner metadata list", listOutput)
+	}
+
+	shown := decodeBrowserSessionRunnerEnvelope(t, []byte(run("browser", "session", "runner", "show", "--id", int64String(runner.ID), "--json")))
+	if shown.ID != runner.ID || shown.HandoffID != runner.HandoffID {
+		t.Fatalf("shown runner = %+v, want created runner", shown)
+	}
+
+	started := decodeBrowserSessionRunnerEnvelope(t, []byte(run("browser", "session", "runner", "status", "--id", int64String(runner.ID), "--status", "started", "--json")))
+	if started.Status != "started" || started.StartedAt == "" {
+		t.Fatalf("started runner = %+v, want started with timestamp", started)
+	}
+
+	completed := decodeBrowserSessionRunnerEnvelope(t, []byte(run("browser", "session", "runner", "status", "--id", int64String(runner.ID), "--status", "completed", "--json")))
+	if completed.Status != "completed" || completed.CompletedAt == "" {
+		t.Fatalf("completed runner = %+v, want completed with timestamp", completed)
+	}
+
+	cancelRequest := decodeBrowserSessionLoginRequestEnvelope(t, []byte(run("browser", "session", "login-request", "--id", int64String(created.ID), "--json")))
+	cancelRunner := decodeBrowserSessionRunnerEnvelope(t, []byte(run("browser", "session", "runner", "create", "--login-request-id", int64String(cancelRequest.ID), "--json")))
+	cancelled := decodeBrowserSessionRunnerEnvelope(t, []byte(run("browser", "session", "runner", "cancel", "--id", int64String(cancelRunner.ID), "--json")))
+	if cancelled.Status != "cancelled" || cancelled.CancelledAt == "" {
+		t.Fatalf("cancelled runner = %+v, want cancelled with timestamp", cancelled)
+	}
+
+	verifiedRequest := decodeBrowserSessionLoginRequestEnvelope(t, []byte(run("browser", "session", "login-request", "--id", int64String(created.ID), "--json")))
+	run("browser", "session", "verify", "--id", int64String(created.ID), "--login-request-id", int64String(verifiedRequest.ID), "--json")
+	var completedRequestOutput bytes.Buffer
+	err := Run(context.Background(), root, []string{"browser", "session", "runner", "create", "--login-request-id", int64String(verifiedRequest.ID), "--json"}, strings.NewReader(""), &completedRequestOutput)
+	if err == nil || !strings.Contains(err.Error(), `status "completed"`) {
+		t.Fatalf("Run(runner create completed request) error = %v output=%s, want completed request rejection", err, completedRequestOutput.String())
+	}
+
+	store, err := sqlite.Open(filepath.Join(root, "data", "odin.db"))
+	if err != nil {
+		t.Fatalf("Open store error = %v", err)
+	}
+	defer store.Close()
+	expiredRequest := decodeBrowserSessionLoginRequestEnvelope(t, []byte(run("browser", "session", "login-request", "--id", int64String(created.ID), "--json")))
+	if _, err := store.DB().ExecContext(context.Background(), `UPDATE browser_session_login_requests SET expires_at = ? WHERE id = ?`, "2000-01-01T00:00:00.000000000Z", expiredRequest.ID); err != nil {
+		t.Fatalf("expire login request metadata error = %v", err)
+	}
+	var expiredRequestOutput bytes.Buffer
+	err = Run(context.Background(), root, []string{"browser", "session", "runner", "create", "--login-request-id", int64String(expiredRequest.ID), "--json"}, strings.NewReader(""), &expiredRequestOutput)
+	if err == nil || !strings.Contains(err.Error(), "expired") {
+		t.Fatalf("Run(runner create expired request) error = %v output=%s, want expired request rejection", err, expiredRequestOutput.String())
+	}
+
+	logs := run("logs", "--json")
+	for _, want := range []string{
+		`"type": "browser.handoff_runner_requested"`,
+		`"type": "browser.handoff_runner_started"`,
+		`"type": "browser.handoff_runner_completed"`,
+		`"type": "browser.handoff_runner_cancelled"`,
+	} {
+		if !strings.Contains(logs, want) {
+			t.Fatalf("logs output = %s, want audit event %s", logs, want)
+		}
+	}
+	for _, forbidden := range []string{"password", "totp", "backup_code", "cookie", "profile_bytes"} {
+		if strings.Contains(strings.ToLower(logs), forbidden) {
+			t.Fatalf("logs output contains forbidden credential/profile byte token %q: %s", forbidden, logs)
+		}
+	}
+}
+
 func TestRunBrowserSessionHandoffShowValidatesReadOnlyMetadata(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	root := testRepoRoot(t)
@@ -615,6 +716,28 @@ type browserSessionHandoffJSON struct {
 	AllowedActions string `json:"allowed_actions"`
 }
 
+type browserSessionRunnerJSON struct {
+	ID             int64   `json:"id"`
+	SessionID      int64   `json:"session_id"`
+	LoginRequestID int64   `json:"login_request_id"`
+	HandoffID      string  `json:"handoff_id"`
+	Status         string  `json:"status"`
+	ViewerURL      *string `json:"viewer_url"`
+	RunnerID       *string `json:"runner_id"`
+	ProcessID      *int64  `json:"process_id"`
+	BindAddr       *string `json:"bind_addr"`
+	PrivateBaseURL *string `json:"private_base_url"`
+	PublicBaseURL  *string `json:"public_base_url"`
+	ExpiresAt      string  `json:"expires_at"`
+	StartedAt      string  `json:"started_at,omitempty"`
+	CompletedAt    string  `json:"completed_at,omitempty"`
+	CancelledAt    string  `json:"cancelled_at,omitempty"`
+	CreatedAt      string  `json:"created_at"`
+	UpdatedAt      string  `json:"updated_at"`
+	ErrorCode      *string `json:"error_code"`
+	ErrorMessage   *string `json:"error_message"`
+}
+
 func decodeBrowserSessionPrepareProfileEnvelope(t *testing.T, payload []byte) browserSessionPrepareProfileJSON {
 	t.Helper()
 	var envelope struct {
@@ -657,4 +780,15 @@ func decodeBrowserSessionHandoffEnvelope(t *testing.T, payload []byte) browserSe
 		t.Fatalf("browser session handoff json decode error = %v; output=%s", err, string(payload))
 	}
 	return envelope.Handoff
+}
+
+func decodeBrowserSessionRunnerEnvelope(t *testing.T, payload []byte) browserSessionRunnerJSON {
+	t.Helper()
+	var envelope struct {
+		Runner browserSessionRunnerJSON `json:"runner"`
+	}
+	if err := json.Unmarshal(payload, &envelope); err != nil {
+		t.Fatalf("browser session runner json decode error = %v; output=%s", err, string(payload))
+	}
+	return envelope.Runner
 }

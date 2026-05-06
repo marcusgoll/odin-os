@@ -7,12 +7,13 @@ import (
 	"strings"
 )
 
-const BrowserUsage = "usage: odin browser run --goal-id <id> --url <url> [--objective <text>] [--allowed-domain <domain>] [--max-pages <n>] [--max-duration-seconds <n>] [--worker-mode <fetch|browser>] [--evidence-required] [--action <read|navigate|snapshot|extract>] [--json] | odin browser session create --name <name> --domain <domain> --permission-tier <tier> [--account-hint <hint>] [--profile-path <path>] [--json] | odin browser session list [--json] | odin browser session show --id <id> [--json] | odin browser session status --id <id> --status <status> [--json] | odin browser session revoke --id <id> [--json] | odin browser session login-request --id <id> [--handoff-base-url <url>] [--json] | odin browser session login-requests --id <id> [--json] | odin browser session handoff show --handoff-id <id> [--json] | odin browser session verify --id <id> [--login-request-id <id>] [--json] | odin browser session prepare-profile --id <id> [--json]"
+const BrowserUsage = "usage: odin browser run --goal-id <id> --url <url> [--objective <text>] [--allowed-domain <domain>] [--max-pages <n>] [--max-duration-seconds <n>] [--worker-mode <fetch|browser>] [--evidence-required] [--action <read|navigate|snapshot|extract>] [--json] | odin browser session create --name <name> --domain <domain> --permission-tier <tier> [--account-hint <hint>] [--profile-path <path>] [--json] | odin browser session list [--json] | odin browser session show --id <id> [--json] | odin browser session status --id <id> --status <status> [--json] | odin browser session revoke --id <id> [--json] | odin browser session login-request --id <id> [--handoff-base-url <url>] [--json] | odin browser session login-requests --id <id> [--json] | odin browser session handoff show --handoff-id <id> [--json] | odin browser session runner create --login-request-id <id> [--json] | odin browser session runner list --login-request-id <id> [--json] | odin browser session runner show --id <id> [--json] | odin browser session runner status --id <id> --status <status> [--json] | odin browser session runner cancel --id <id> [--json] | odin browser session verify --id <id> [--login-request-id <id>] [--json] | odin browser session prepare-profile --id <id> [--json]"
 
 type BrowserCommand struct {
 	Name               string
 	SessionAction      string
 	HandoffAction      string
+	RunnerAction       string
 	ID                 int64
 	LoginRequestID     int64
 	GoalID             int64
@@ -175,8 +176,18 @@ func parseBrowserSession(args []string, command BrowserCommand) (BrowserCommand,
 			return BrowserCommand{}, fmt.Errorf("unsupported browser session handoff subcommand: %s", args[1])
 		}
 	}
+	if command.SessionAction == "runner" {
+		if len(args) < 2 || strings.HasPrefix(args[1], "--") {
+			return BrowserCommand{}, fmt.Errorf("usage: odin browser session runner <create|list|show|status|cancel> [flags]")
+		}
+		command.RunnerAction = strings.ToLower(strings.TrimSpace(args[1]))
+		flagStart = 2
+		if !isKnownBrowserHandoffRunnerAction(command.RunnerAction) {
+			return BrowserCommand{}, fmt.Errorf("unsupported browser session runner subcommand: %s", args[1])
+		}
+	}
 	switch command.SessionAction {
-	case "create", "list", "show", "status", "revoke", "login-request", "login-requests", "verify", "prepare-profile", "handoff":
+	case "create", "list", "show", "status", "revoke", "login-request", "login-requests", "verify", "prepare-profile", "handoff", "runner":
 	default:
 		return BrowserCommand{}, fmt.Errorf("unsupported browser session subcommand: %s", args[0])
 	}
@@ -265,7 +276,11 @@ func parseBrowserSession(args []string, command BrowserCommand) (BrowserCommand,
 				return BrowserCommand{}, err
 			}
 			command.Status = strings.ToLower(strings.TrimSpace(value))
-			if !isKnownBrowserSessionStatus(command.Status) {
+			if command.SessionAction == "runner" {
+				if !isKnownBrowserHandoffRunnerStatus(command.Status) {
+					return BrowserCommand{}, fmt.Errorf("--status must be started, completed, expired, cancelled, or failed")
+				}
+			} else if !isKnownBrowserSessionStatus(command.Status) {
 				return BrowserCommand{}, fmt.Errorf("--status must be created, login_requested, verified, or expired")
 			}
 			index = nextIndex
@@ -320,6 +335,38 @@ func parseBrowserSession(args []string, command BrowserCommand) (BrowserCommand,
 		if command.ID != 0 || command.LoginRequestID != 0 || command.SessionName != "" || command.SessionDomain != "" || command.PermissionTier != "" || command.AccountHint != "" || command.ProfilePath != "" || command.HandoffBaseURL != "" || command.Status != "" {
 			return BrowserCommand{}, fmt.Errorf("browser session handoff show only accepts --handoff-id and --json")
 		}
+	case "runner":
+		if command.HandoffAction != "" || command.SessionName != "" || command.SessionDomain != "" || command.PermissionTier != "" || command.AccountHint != "" || command.ProfilePath != "" || command.HandoffID != "" || command.HandoffBaseURL != "" {
+			return BrowserCommand{}, fmt.Errorf("browser session runner %s only accepts runner fields and --json", command.RunnerAction)
+		}
+		switch command.RunnerAction {
+		case "create", "list":
+			if command.LoginRequestID <= 0 {
+				return BrowserCommand{}, fmt.Errorf("--login-request-id is required")
+			}
+			if command.ID != 0 || command.Status != "" {
+				return BrowserCommand{}, fmt.Errorf("browser session runner %s only accepts --login-request-id and --json", command.RunnerAction)
+			}
+		case "show", "cancel":
+			if command.ID <= 0 {
+				return BrowserCommand{}, fmt.Errorf("--id is required")
+			}
+			if command.LoginRequestID != 0 || command.Status != "" {
+				return BrowserCommand{}, fmt.Errorf("browser session runner %s only accepts --id and --json", command.RunnerAction)
+			}
+		case "status":
+			if command.ID <= 0 {
+				return BrowserCommand{}, fmt.Errorf("--id is required")
+			}
+			if command.Status == "" {
+				return BrowserCommand{}, fmt.Errorf("--status is required")
+			}
+			if command.LoginRequestID != 0 {
+				return BrowserCommand{}, fmt.Errorf("browser session runner status only accepts --id, --status, and --json")
+			}
+		default:
+			return BrowserCommand{}, fmt.Errorf("unsupported browser session runner subcommand: %s", command.RunnerAction)
+		}
 	case "status":
 		if command.ID <= 0 {
 			return BrowserCommand{}, fmt.Errorf("--id is required")
@@ -341,6 +388,15 @@ func parseBrowserSession(args []string, command BrowserCommand) (BrowserCommand,
 	return command, nil
 }
 
+func isKnownBrowserHandoffRunnerAction(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "create", "list", "show", "status", "cancel":
+		return true
+	default:
+		return false
+	}
+}
+
 func isKnownBrowserSessionPermissionTier(value string) bool {
 	switch strings.ToLower(strings.TrimSpace(value)) {
 	case "public_readonly", "authenticated_read", "authenticated_readonly":
@@ -353,6 +409,15 @@ func isKnownBrowserSessionPermissionTier(value string) bool {
 func isKnownBrowserSessionStatus(value string) bool {
 	switch strings.ToLower(strings.TrimSpace(value)) {
 	case "created", "login_requested", "verified", "expired":
+		return true
+	default:
+		return false
+	}
+}
+
+func isKnownBrowserHandoffRunnerStatus(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "started", "completed", "expired", "cancelled", "failed":
 		return true
 	default:
 		return false
