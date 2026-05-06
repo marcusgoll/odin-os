@@ -1,0 +1,418 @@
+package sqlite
+
+import (
+	"context"
+	"database/sql"
+	"fmt"
+	"path/filepath"
+	"strings"
+	"time"
+
+	runtimeevents "odin-os/internal/runtime/events"
+)
+
+type BrowserSessionStatus string
+type BrowserSessionPermissionTier string
+
+const (
+	BrowserSessionStatusCreated        BrowserSessionStatus = "created"
+	BrowserSessionStatusLoginRequested BrowserSessionStatus = "login_requested"
+	BrowserSessionStatusVerified       BrowserSessionStatus = "verified"
+	BrowserSessionStatusExpired        BrowserSessionStatus = "expired"
+	BrowserSessionStatusRevoked        BrowserSessionStatus = "revoked"
+)
+
+const (
+	BrowserSessionPermissionTierPublicReadOnly        BrowserSessionPermissionTier = "public_readonly"
+	BrowserSessionPermissionTierAuthenticatedReadOnly BrowserSessionPermissionTier = "authenticated_readonly"
+)
+
+type BrowserSession struct {
+	ID             int64
+	Name           string
+	Domain         string
+	AccountHint    string
+	PermissionTier BrowserSessionPermissionTier
+	Status         BrowserSessionStatus
+	ProfilePath    string
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
+	LastVerifiedAt *time.Time
+	ExpiresAt      *time.Time
+	RevokedAt      *time.Time
+}
+
+type CreateBrowserSessionParams struct {
+	Name           string
+	Domain         string
+	AccountHint    string
+	PermissionTier BrowserSessionPermissionTier
+	ProfilePath    string
+	ExpiresAt      *time.Time
+}
+
+type ListBrowserSessionsParams struct {
+	Status BrowserSessionStatus
+	Domain string
+	Limit  int
+}
+
+type UpdateBrowserSessionStatusParams struct {
+	SessionID int64
+	Status    BrowserSessionStatus
+	Actor     string
+	Reason    string
+}
+
+type RevokeBrowserSessionParams struct {
+	SessionID int64
+	Actor     string
+	Reason    string
+}
+
+func (store *Store) CreateBrowserSession(ctx context.Context, params CreateBrowserSessionParams) (BrowserSession, error) {
+	name := strings.TrimSpace(params.Name)
+	if name == "" {
+		return BrowserSession{}, fmt.Errorf("browser session name is required")
+	}
+	domain, err := normalizeBrowserSessionDomain(params.Domain)
+	if err != nil {
+		return BrowserSession{}, err
+	}
+	tier := normalizeBrowserSessionPermissionTier(params.PermissionTier)
+	if tier == "" {
+		return BrowserSession{}, fmt.Errorf("browser session permission tier is required")
+	}
+	profilePath, err := normalizeBrowserSessionProfilePath(params.ProfilePath)
+	if err != nil {
+		return BrowserSession{}, err
+	}
+	now := store.now()
+	session := BrowserSession{
+		Name:           name,
+		Domain:         domain,
+		AccountHint:    strings.TrimSpace(params.AccountHint),
+		PermissionTier: tier,
+		Status:         BrowserSessionStatusCreated,
+		ProfilePath:    profilePath,
+		CreatedAt:      now,
+		UpdatedAt:      now,
+		ExpiresAt:      cloneTimePtr(params.ExpiresAt),
+	}
+
+	err = store.withTx(ctx, func(tx *sql.Tx) error {
+		result, err := tx.ExecContext(ctx, `
+			INSERT INTO browser_session_profiles (
+				name, domain, account_hint, permission_tier, status, profile_path,
+				created_at, updated_at, last_verified_at, expires_at, revoked_at
+			)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL)
+		`,
+			session.Name,
+			session.Domain,
+			session.AccountHint,
+			string(session.PermissionTier),
+			string(session.Status),
+			session.ProfilePath,
+			formatTime(now),
+			formatTime(now),
+			nullTime(session.ExpiresAt),
+		)
+		if err != nil {
+			return err
+		}
+		session.ID, err = result.LastInsertId()
+		if err != nil {
+			return err
+		}
+		return appendBrowserSessionEventTx(ctx, tx, session, runtimeevents.EventBrowserSessionCreated, runtimeevents.BrowserSessionCreatedPayload{
+			SessionID:      session.ID,
+			Name:           session.Name,
+			Domain:         session.Domain,
+			AccountHint:    session.AccountHint,
+			PermissionTier: string(session.PermissionTier),
+			Status:         string(session.Status),
+			ProfilePath:    session.ProfilePath,
+			ExpiresAt:      formatOptionalTime(session.ExpiresAt),
+		}, now)
+	})
+	return session, err
+}
+
+func (store *Store) GetBrowserSession(ctx context.Context, id int64) (BrowserSession, error) {
+	if id <= 0 {
+		return BrowserSession{}, fmt.Errorf("browser session id must be positive")
+	}
+	row := store.db.QueryRowContext(ctx, browserSessionSelectSQL()+` WHERE id = ?`, id)
+	return scanBrowserSession(row)
+}
+
+func (store *Store) ListBrowserSessions(ctx context.Context, params ListBrowserSessionsParams) ([]BrowserSession, error) {
+	query := browserSessionSelectSQL()
+	var args []any
+	clauses := []string{}
+	if params.Status != "" {
+		status := normalizeBrowserSessionStatus(params.Status)
+		if status == "" {
+			return nil, fmt.Errorf("unsupported browser session status: %s", params.Status)
+		}
+		clauses = append(clauses, `status = ?`)
+		args = append(args, string(status))
+	}
+	if strings.TrimSpace(params.Domain) != "" {
+		domain, err := normalizeBrowserSessionDomain(params.Domain)
+		if err != nil {
+			return nil, err
+		}
+		clauses = append(clauses, `domain = ?`)
+		args = append(args, domain)
+	}
+	if len(clauses) > 0 {
+		query += ` WHERE ` + strings.Join(clauses, ` AND `)
+	}
+	query += ` ORDER BY id ASC`
+	if params.Limit > 0 {
+		query += ` LIMIT ?`
+		args = append(args, params.Limit)
+	}
+	rows, err := store.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	sessions := make([]BrowserSession, 0)
+	for rows.Next() {
+		session, err := scanBrowserSession(rows)
+		if err != nil {
+			return nil, err
+		}
+		sessions = append(sessions, session)
+	}
+	return sessions, rows.Err()
+}
+
+func (store *Store) UpdateBrowserSessionStatus(ctx context.Context, params UpdateBrowserSessionStatusParams) (BrowserSession, error) {
+	if params.SessionID <= 0 {
+		return BrowserSession{}, fmt.Errorf("browser session id must be positive")
+	}
+	status := normalizeBrowserSessionStatus(params.Status)
+	if status == "" {
+		return BrowserSession{}, fmt.Errorf("browser session status is required")
+	}
+	if status == BrowserSessionStatusRevoked {
+		return BrowserSession{}, fmt.Errorf("use RevokeBrowserSession for revoked status")
+	}
+	now := store.now()
+	var updated BrowserSession
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		current, err := getBrowserSessionTx(ctx, tx, params.SessionID)
+		if err != nil {
+			return err
+		}
+		if current.Status == status {
+			updated = current
+			return nil
+		}
+		lastVerifiedAt := current.LastVerifiedAt
+		if status == BrowserSessionStatusVerified {
+			lastVerifiedAt = &now
+		}
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE browser_session_profiles
+			SET status = ?, updated_at = ?, last_verified_at = ?
+			WHERE id = ?
+		`, string(status), formatTime(now), nullTime(lastVerifiedAt), current.ID); err != nil {
+			return err
+		}
+		updated = current
+		updated.Status = status
+		updated.UpdatedAt = now
+		updated.LastVerifiedAt = cloneTimePtr(lastVerifiedAt)
+		return appendBrowserSessionEventTx(ctx, tx, updated, runtimeevents.EventBrowserSessionStatusChanged, runtimeevents.BrowserSessionStatusChangedPayload{
+			SessionID:      updated.ID,
+			PreviousStatus: string(current.Status),
+			Status:         string(status),
+			Actor:          defaultString(params.Actor, "operator"),
+			Reason:         strings.TrimSpace(params.Reason),
+			LastVerifiedAt: formatOptionalTime(updated.LastVerifiedAt),
+			ExpiresAt:      formatOptionalTime(updated.ExpiresAt),
+		}, now)
+	})
+	return updated, err
+}
+
+func (store *Store) RevokeBrowserSession(ctx context.Context, params RevokeBrowserSessionParams) (BrowserSession, error) {
+	if params.SessionID <= 0 {
+		return BrowserSession{}, fmt.Errorf("browser session id must be positive")
+	}
+	reason := strings.TrimSpace(params.Reason)
+	if reason == "" {
+		return BrowserSession{}, fmt.Errorf("browser session revoke reason is required")
+	}
+	now := store.now()
+	var revoked BrowserSession
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		current, err := getBrowserSessionTx(ctx, tx, params.SessionID)
+		if err != nil {
+			return err
+		}
+		if current.Status == BrowserSessionStatusRevoked {
+			revoked = current
+			return nil
+		}
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE browser_session_profiles
+			SET status = ?, updated_at = ?, revoked_at = ?
+			WHERE id = ?
+		`, string(BrowserSessionStatusRevoked), formatTime(now), formatTime(now), current.ID); err != nil {
+			return err
+		}
+		revoked = current
+		revoked.Status = BrowserSessionStatusRevoked
+		revoked.UpdatedAt = now
+		revoked.RevokedAt = &now
+		return appendBrowserSessionEventTx(ctx, tx, revoked, runtimeevents.EventBrowserSessionRevoked, runtimeevents.BrowserSessionRevokedPayload{
+			SessionID:      revoked.ID,
+			PreviousStatus: string(current.Status),
+			Status:         string(BrowserSessionStatusRevoked),
+			Actor:          defaultString(params.Actor, "operator"),
+			Reason:         reason,
+			RevokedAt:      formatTime(now),
+		}, now)
+	})
+	return revoked, err
+}
+
+func appendBrowserSessionEventTx(ctx context.Context, tx *sql.Tx, session BrowserSession, eventType runtimeevents.Type, payload any, occurredAt time.Time) error {
+	return appendEventTx(ctx, tx, eventInsert{
+		StreamType: runtimeevents.StreamBrowserSession,
+		StreamID:   session.ID,
+		EventType:  eventType,
+		Scope:      "browser_session",
+		Payload:    payload,
+		OccurredAt: occurredAt,
+	})
+}
+
+func getBrowserSessionTx(ctx context.Context, tx *sql.Tx, id int64) (BrowserSession, error) {
+	row := tx.QueryRowContext(ctx, browserSessionSelectSQL()+` WHERE id = ?`, id)
+	return scanBrowserSession(row)
+}
+
+func browserSessionSelectSQL() string {
+	return `
+		SELECT id, name, domain, account_hint, permission_tier, status, profile_path,
+			created_at, updated_at, last_verified_at, expires_at, revoked_at
+		FROM browser_session_profiles
+	`
+}
+
+type browserSessionScanner interface {
+	Scan(dest ...any) error
+}
+
+func scanBrowserSession(scanner browserSessionScanner) (BrowserSession, error) {
+	var session BrowserSession
+	var createdAt, updatedAt string
+	var lastVerifiedAt, expiresAt, revokedAt sql.NullString
+	if err := scanner.Scan(
+		&session.ID,
+		&session.Name,
+		&session.Domain,
+		&session.AccountHint,
+		&session.PermissionTier,
+		&session.Status,
+		&session.ProfilePath,
+		&createdAt,
+		&updatedAt,
+		&lastVerifiedAt,
+		&expiresAt,
+		&revokedAt,
+	); err != nil {
+		return BrowserSession{}, err
+	}
+	parsedCreatedAt, err := parseTime(createdAt)
+	if err != nil {
+		return BrowserSession{}, err
+	}
+	session.CreatedAt = parsedCreatedAt
+	parsedUpdatedAt, err := parseTime(updatedAt)
+	if err != nil {
+		return BrowserSession{}, err
+	}
+	session.UpdatedAt = parsedUpdatedAt
+	session.LastVerifiedAt, err = parseNullableTime(lastVerifiedAt)
+	if err != nil {
+		return BrowserSession{}, err
+	}
+	session.ExpiresAt, err = parseNullableTime(expiresAt)
+	if err != nil {
+		return BrowserSession{}, err
+	}
+	session.RevokedAt, err = parseNullableTime(revokedAt)
+	if err != nil {
+		return BrowserSession{}, err
+	}
+	return session, nil
+}
+
+func normalizeBrowserSessionStatus(status BrowserSessionStatus) BrowserSessionStatus {
+	switch BrowserSessionStatus(strings.ToLower(strings.TrimSpace(string(status)))) {
+	case BrowserSessionStatusCreated:
+		return BrowserSessionStatusCreated
+	case BrowserSessionStatusLoginRequested:
+		return BrowserSessionStatusLoginRequested
+	case BrowserSessionStatusVerified:
+		return BrowserSessionStatusVerified
+	case BrowserSessionStatusExpired:
+		return BrowserSessionStatusExpired
+	case BrowserSessionStatusRevoked:
+		return BrowserSessionStatusRevoked
+	default:
+		return ""
+	}
+}
+
+func normalizeBrowserSessionPermissionTier(tier BrowserSessionPermissionTier) BrowserSessionPermissionTier {
+	switch BrowserSessionPermissionTier(strings.ToLower(strings.TrimSpace(string(tier)))) {
+	case BrowserSessionPermissionTierPublicReadOnly:
+		return BrowserSessionPermissionTierPublicReadOnly
+	case BrowserSessionPermissionTierAuthenticatedReadOnly:
+		return BrowserSessionPermissionTierAuthenticatedReadOnly
+	default:
+		return ""
+	}
+}
+
+func normalizeBrowserSessionDomain(domain string) (string, error) {
+	domain = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(domain)), ".")
+	if domain == "" {
+		return "", fmt.Errorf("browser session domain is required")
+	}
+	if strings.Contains(domain, "/") || strings.Contains(domain, ":") || strings.Contains(domain, "@") {
+		return "", fmt.Errorf("browser session domain must be a hostname")
+	}
+	return domain, nil
+}
+
+func normalizeBrowserSessionProfilePath(profilePath string) (string, error) {
+	profilePath = strings.TrimSpace(profilePath)
+	if profilePath == "" {
+		return "", fmt.Errorf("browser session profile path is required")
+	}
+	if filepath.IsAbs(profilePath) {
+		return "", fmt.Errorf("browser session profile path must be relative to ODIN_ROOT")
+	}
+	clean := filepath.Clean(profilePath)
+	if clean == "." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) || clean == ".." {
+		return "", fmt.Errorf("browser session profile path must stay under ODIN_ROOT")
+	}
+	return filepath.ToSlash(clean), nil
+}
+
+func formatOptionalTime(value *time.Time) string {
+	if value == nil {
+		return ""
+	}
+	return formatTime(*value)
+}

@@ -206,12 +206,11 @@ The processing payload must include the source intake ID, route decision, classi
 
 ## Browser session handoff expectation
 
-Manual Huginn browser login and authenticated read-only session reuse are design-only until `docs/contracts/browser-session-handoff.md` is implemented. The future implementation must keep browser session metadata in SQLite, keep browser profile files under `ODIN_ROOT`, and append profile lifecycle events through the runtime event stream:
+Manual Huginn browser login and authenticated read-only session reuse remain design-only until the later handoff slices are implemented. Browser session metadata lives in SQLite, future browser profile files must stay under `ODIN_ROOT`, and profile lifecycle mutations append events through the runtime event stream:
 
 - `browser.session_created`
-- `browser.session_login_requested`
-- `browser.session_verified`
+- `browser.session_status_changed`
 - `browser.session_revoked`
 - `goal.waiting_for_human_login`
 
-Browser session events must not include passwords, cookies, tokens, passkey material, TOTP values, backup codes, or raw credential prompts. Session verification may unblock a waiting goal only through normal policy checks; it must not approve or execute the goal by itself.
+Browser session events must not include passwords, cookies, tokens, passkey material, TOTP values, backup codes, profile bytes, or raw credential prompts. Session verification may unblock a waiting goal only through normal policy checks; it must not approve or execute the goal by itself.

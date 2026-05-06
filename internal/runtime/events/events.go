@@ -31,6 +31,7 @@ const (
 	StreamCapability         StreamType = "capability"
 	StreamFollowUp           StreamType = "follow_up"
 	StreamGoal               StreamType = "goal"
+	StreamBrowserSession     StreamType = "browser_session"
 )
 
 type Type string
@@ -126,6 +127,9 @@ const (
 	EventGoalRunFinished                    Type = "goal_run.finished"
 	EventGoalBlockerRecorded                Type = "goal.blocker_recorded"
 	EventGoalEvidenceRecorded               Type = "goal.evidence_recorded"
+	EventBrowserSessionCreated              Type = "browser.session_created"
+	EventBrowserSessionStatusChanged        Type = "browser.session_status_changed"
+	EventBrowserSessionRevoked              Type = "browser.session_revoked"
 )
 
 const (
@@ -328,6 +332,36 @@ type ReviewRejectedPayload struct {
 	Status     string `json:"status"`
 	Actor      string `json:"actor,omitempty"`
 	Reason     string `json:"reason"`
+}
+
+type BrowserSessionCreatedPayload struct {
+	SessionID      int64  `json:"session_id"`
+	Name           string `json:"name"`
+	Domain         string `json:"domain"`
+	AccountHint    string `json:"account_hint,omitempty"`
+	PermissionTier string `json:"permission_tier"`
+	Status         string `json:"status"`
+	ProfilePath    string `json:"profile_path"`
+	ExpiresAt      string `json:"expires_at,omitempty"`
+}
+
+type BrowserSessionStatusChangedPayload struct {
+	SessionID      int64  `json:"session_id"`
+	PreviousStatus string `json:"previous_status"`
+	Status         string `json:"status"`
+	Actor          string `json:"actor,omitempty"`
+	Reason         string `json:"reason,omitempty"`
+	LastVerifiedAt string `json:"last_verified_at,omitempty"`
+	ExpiresAt      string `json:"expires_at,omitempty"`
+}
+
+type BrowserSessionRevokedPayload struct {
+	SessionID      int64  `json:"session_id"`
+	PreviousStatus string `json:"previous_status"`
+	Status         string `json:"status"`
+	Actor          string `json:"actor,omitempty"`
+	Reason         string `json:"reason"`
+	RevokedAt      string `json:"revoked_at"`
 }
 
 type TaskQueueStateChangedPayload struct {

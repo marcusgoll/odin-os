@@ -23,7 +23,7 @@ This contract defines the future Odin-native handoff for manual Huginn browser l
 - No password, TOTP seed, backup code, OAuth refresh token, or recovery-secret storage.
 - No form submit, message send, purchase, account change, delete, or external mutation execution.
 - No NoVNC implementation in this slice.
-- No cookies, browser profiles, or schema migrations are created by this design.
+- No cookies, browser profile files, or profile bytes are created by this design.
 - No Codex, Huginn, or browser executor implementation is added by this design.
 
 ## Session Concepts
@@ -126,7 +126,7 @@ Forbidden goal types for session reuse:
 8. Odin saves only the encrypted browser profile state, never credentials or 2FA secrets.
 9. The operator runs `odin browser session verify --profile <profile_key> --json`, or the login flow asks Odin to verify after the browser closes.
 10. Verification performs read-only checks: domain match, account binding match when visible, no active login challenge, and optional operator-approved URL snapshot.
-11. Odin appends `browser.session_verified` and records profile status `verified`.
+11. Odin appends `browser.session_status_changed` with status `verified` and records profile status `verified`.
 12. The blocked goal resumes from waiting state only after policy re-evaluates that the verified profile tier allows the requested read-only goal type. It must not transition to `approved_for_execution` unless a normal approval path already did that separately.
 
 ## CLI Contract
@@ -181,11 +181,11 @@ JSON output should follow the existing Odin style: stable top-level envelopes, s
 
 ## Storage Contract
 
-SQLite tables for a future implementation should be additive and should not replace goal, intake, approval, or runtime event tables.
+SQLite tables for browser sessions are additive and must not replace goal, intake, approval, or runtime event tables.
 
-Expected tables:
+Tables:
 
-- `browser_session_profiles`: profile metadata and policy binding.
+- `browser_session_profiles`: implemented profile metadata and policy binding.
 - `browser_session_events`: optional profile-local lifecycle detail if the global runtime events stream alone is not sufficient for efficient profile show/history.
 - `browser_session_goal_links`: explicit goal/profile relation with reason, requested tier, and verification evidence references.
 
@@ -227,13 +227,14 @@ If a future attended action is approved, it must use the existing approval syste
 
 All session state changes must append runtime events in the same SQL transaction as the profile row mutation. The future implementation should add a `browser_session` stream type rather than overloading the goal stream for profile-local lifecycle.
 
-Required event types:
+Required event types for the metadata foundation:
 
 - `browser.session_created`
-- `browser.session_login_requested`
-- `browser.session_verified`
+- `browser.session_status_changed`
 - `browser.session_revoked`
 - `goal.waiting_for_human_login`
+
+`browser.session_status_changed` covers `login_requested`, `verified`, and `expired` profile status changes until a later handoff implementation needs more specific handoff events.
 
 Suggested payload fields:
 
