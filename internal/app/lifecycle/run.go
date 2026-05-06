@@ -4221,6 +4221,7 @@ func runServe(ctx context.Context, app bootstrap.App, cfg appconfig.Config, stdo
 			Fallback: apihttp.NewOperationalHandler(apihttp.Dependencies{
 				Health:          healthService,
 				Metrics:         metricsService,
+				Store:           app.Store,
 				ReadModels:      app.Store.DB(),
 				RegistryHealthy: healthDeps.RegistryHealthy,
 				Now:             now,

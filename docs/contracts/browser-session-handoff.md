@@ -156,13 +156,19 @@ odin browser session verify --id <id> [--login-request-id <id>] --json
 odin browser session prepare-profile --id <id> --json
 ```
 
+`odin serve` also exposes a read-only JSON inspection route:
+
+```http
+GET /browser/session/handoff?handoff_id=<id>
+```
+
 `--permission-tier authenticated_read` is accepted by the CLI as an operator-facing alias for stored tier `authenticated_readonly`. If `--profile-path` is omitted, Odin records the metadata-only default `browser-sessions/profiles/<sanitized-name>` and does not create a directory. Explicit profile paths must remain under `browser-sessions/profiles/`, must be relative to `ODIN_ROOT`, and must not contain path traversal.
 
 `login-request` creates request metadata only. Odin always records an opaque `handoff_id` with the request and reuses the existing `expires_at` as the metadata expiration. With no base URL, its JSON envelope returns `handoff_url: null`. When `--handoff-base-url <url>` is provided, Odin validates that the base is an absolute `http` or `https` URL and returns a metadata URL with `handoff_id` in the query string. The handoff ID must not encode the browser session ID directly.
 
-The handoff URL is not proof that a server route exists. This slice does not add an HTTP handler, NoVNC process, Tailscale service, browser launch, browser profile write, credential storage, or session verification. Operators should treat any base URL as a future private-network handoff surface only, intended for Tailscale or another operator-approved private path after that service is implemented.
+The handoff URL is not proof that a browser handoff service exists. Odin now exposes only a read-only HTTP metadata inspection route. This slice does not add NoVNC, Tailscale service, browser launch, browser profile write, credential storage, or session verification. Operators should treat any base URL as a future private-network browser handoff surface only, intended for Tailscale or another operator-approved private path after that service is implemented.
 
-`handoff show` is a read-only lookup for safe manual-login metadata. It requires `--handoff-id`, rejects missing IDs, unknown handoffs, non-`requested` login requests, expired requests, and revoked or missing linked sessions. It returns only the handoff ID, login request ID, session ID, session name, domain, optional account hint, expiration, request status, and `allowed_actions: manual_login_only`. It must not append runtime events, launch a browser, serve HTTP, create NoVNC/Tailscale resources, write profile files, or store credential material.
+`handoff show` and `GET /browser/session/handoff?handoff_id=<id>` are read-only lookups for safe manual-login metadata. They require a handoff ID, reject missing IDs, unknown handoffs, non-`requested` login requests, expired requests, and revoked or missing linked sessions. They return only the handoff ID, login request ID, session ID, session name, domain, optional account hint, expiration, request status, and `allowed_actions: manual_login_only`. They must not append runtime events, launch a browser, create NoVNC/Tailscale resources, write profile files, or store credential material.
 
 `verify` records metadata-only operator verification. It must not launch a browser, inspect a profile directory, store credential material, or approve/execute a goal. Revoked sessions cannot be verified. Expired or cancelled login requests cannot be completed.
 
@@ -224,7 +230,7 @@ Implemented `login-request --json` returns metadata without secrets:
 
 When called with `--handoff-base-url https://odin-handoff.tailnet.local/manual-login`, `handoff_url` may be returned as `https://odin-handoff.tailnet.local/manual-login?handoff_id=<opaque-id>`. This remains metadata-only; no route is served by Odin in this slice.
 
-Implemented `handoff show --json` returns read-only manual-login metadata without secrets:
+Implemented `handoff show --json` and `GET /browser/session/handoff?handoff_id=<id>` return read-only manual-login metadata without secrets:
 
 ```json
 {

@@ -19,12 +19,14 @@ import (
 	healthsvc "odin-os/internal/runtime/health"
 	"odin-os/internal/runtime/projections"
 	"odin-os/internal/runtime/triggers"
+	"odin-os/internal/store/sqlite"
 	metricsvc "odin-os/internal/telemetry/metrics"
 )
 
 type Dependencies struct {
 	Health              healthsvc.Service
 	Metrics             metricsvc.Service
+	Store               *sqlite.Store
 	ReadModels          projections.Queryer
 	RegistryHealthy     bool
 	Now                 func() time.Time
@@ -142,6 +144,9 @@ func NewOperationalHandler(deps Dependencies) http.Handler {
 			return
 		}
 		writeJSON(writer, http.StatusOK, run)
+	})
+	mux.HandleFunc("GET /browser/session/handoff", func(writer http.ResponseWriter, request *http.Request) {
+		handleBrowserSessionHandoffShow(writer, request, deps)
 	})
 	mux.HandleFunc("POST /kill-switch/on", func(writer http.ResponseWriter, request *http.Request) {
 		handleAdminAction(writer, request, deps, "kill_switch_on", func(ctx context.Context, admin AdminActions) error {
@@ -291,6 +296,73 @@ func NewOperationalHandler(deps Dependencies) http.Handler {
 		writeJSON(writer, http.StatusOK, view)
 	})
 	return mux
+}
+
+type browserSessionHandoffResponse struct {
+	Handoff browserSessionHandoffView `json:"handoff"`
+}
+
+type browserSessionHandoffView struct {
+	HandoffID      string `json:"handoff_id"`
+	LoginRequestID int64  `json:"login_request_id"`
+	SessionID      int64  `json:"session_id"`
+	SessionName    string `json:"session_name"`
+	Domain         string `json:"domain"`
+	AccountHint    string `json:"account_hint"`
+	ExpiresAt      string `json:"expires_at"`
+	Status         string `json:"status"`
+	AllowedActions string `json:"allowed_actions"`
+}
+
+func handleBrowserSessionHandoffShow(writer http.ResponseWriter, request *http.Request, deps Dependencies) {
+	if deps.Store == nil {
+		writeAPIError(writer, http.StatusServiceUnavailable, "browser_handoff_unavailable", "browser session handoff store unavailable")
+		return
+	}
+	handoffID := strings.TrimSpace(request.URL.Query().Get("handoff_id"))
+	if handoffID == "" {
+		writeAPIError(writer, http.StatusBadRequest, "browser_handoff_id_required", "handoff_id is required")
+		return
+	}
+	handoff, err := deps.Store.GetBrowserSessionLoginHandoff(request.Context(), handoffID)
+	if err != nil {
+		statusCode, code := browserSessionHandoffErrorStatus(err)
+		writeAPIError(writer, statusCode, code, err.Error())
+		return
+	}
+	writeJSON(writer, http.StatusOK, browserSessionHandoffResponse{Handoff: newBrowserSessionHandoffView(handoff)})
+}
+
+func newBrowserSessionHandoffView(handoff sqlite.BrowserSessionLoginHandoff) browserSessionHandoffView {
+	return browserSessionHandoffView{
+		HandoffID:      handoff.HandoffID,
+		LoginRequestID: handoff.LoginRequest.ID,
+		SessionID:      handoff.Session.ID,
+		SessionName:    handoff.Session.Name,
+		Domain:         handoff.Session.Domain,
+		AccountHint:    handoff.Session.AccountHint,
+		ExpiresAt:      handoff.LoginRequest.ExpiresAt.UTC().Format(time.RFC3339),
+		Status:         string(handoff.LoginRequest.Status),
+		AllowedActions: "manual_login_only",
+	}
+}
+
+func browserSessionHandoffErrorStatus(err error) (int, string) {
+	message := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(message, "handoff id is required"):
+		return http.StatusBadRequest, "browser_handoff_id_required"
+	case strings.Contains(message, "not found"):
+		return http.StatusNotFound, "browser_handoff_not_found"
+	case strings.Contains(message, "expired"):
+		return http.StatusGone, "browser_handoff_expired"
+	case strings.Contains(message, "revoked"):
+		return http.StatusConflict, "browser_handoff_session_revoked"
+	case strings.Contains(message, "status"):
+		return http.StatusConflict, "browser_handoff_unavailable"
+	default:
+		return http.StatusBadRequest, "browser_handoff_invalid"
+	}
 }
 
 type githubIssuesWebhookPayload struct {
