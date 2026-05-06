@@ -102,6 +102,9 @@ func TestRunBrowserSessionCreateListShowStatusAndRevoke(t *testing.T) {
 	if created.ProfilePath != "browser-sessions/profiles/google-main" {
 		t.Fatalf("created.ProfilePath = %q, want default profile metadata path", created.ProfilePath)
 	}
+	if created.ProfileStoragePolicy != "encrypted_required" {
+		t.Fatalf("created.ProfileStoragePolicy = %q, want encrypted_required", created.ProfileStoragePolicy)
+	}
 	if created.ProfilePathExists {
 		t.Fatalf("created.ProfilePathExists = true, want false before profile directory exists")
 	}
@@ -110,7 +113,7 @@ func TestRunBrowserSessionCreateListShowStatusAndRevoke(t *testing.T) {
 	}
 
 	list := run("browser", "session", "list", "--json")
-	for _, want := range []string{`"sessions":`, `"name": "google-main"`, `"domain": "google.com"`, `"profile_path_exists": false`} {
+	for _, want := range []string{`"sessions":`, `"name": "google-main"`, `"domain": "google.com"`, `"profile_storage_policy": "encrypted_required"`, `"profile_path_exists": false`} {
 		if !strings.Contains(list, want) {
 			t.Fatalf("list output = %s, want %s", list, want)
 		}
@@ -122,6 +125,9 @@ func TestRunBrowserSessionCreateListShowStatusAndRevoke(t *testing.T) {
 	shown := decodeBrowserSessionEnvelope(t, []byte(run("browser", "session", "show", "--id", int64String(created.ID), "--json")))
 	if shown.ID != created.ID || shown.Name != created.Name {
 		t.Fatalf("shown session = %+v, want created session", shown)
+	}
+	if shown.ProfileStoragePolicy != "encrypted_required" {
+		t.Fatalf("shown.ProfileStoragePolicy = %q, want encrypted_required", shown.ProfileStoragePolicy)
 	}
 	if !shown.ProfilePathExists {
 		t.Fatalf("shown.ProfilePathExists = false, want true after empty profile directory exists")
@@ -369,6 +375,9 @@ func TestRunBrowserSessionPrepareProfileCreatesEmptyDirectoryAndAudits(t *testin
 	if !shown.ProfilePathExists {
 		t.Fatalf("shown.ProfilePathExists = false, want true after prepare")
 	}
+	if shown.ProfileStoragePolicy != "encrypted_required" {
+		t.Fatalf("shown.ProfileStoragePolicy = %q, want prepare-profile to leave writes denied", shown.ProfileStoragePolicy)
+	}
 
 	logs := run("logs", "--json")
 	if !strings.Contains(logs, `"type": "browser.session_profile_prepared"`) {
@@ -435,16 +444,17 @@ func TestRunBrowserSessionPrepareProfileRejectsRevokedAndUnsafeMetadata(t *testi
 }
 
 type browserSessionJSON struct {
-	ID                int64  `json:"id"`
-	Name              string `json:"name"`
-	Domain            string `json:"domain"`
-	AccountHint       string `json:"account_hint"`
-	PermissionTier    string `json:"permission_tier"`
-	Status            string `json:"status"`
-	ProfilePath       string `json:"profile_path"`
-	ProfilePathExists bool   `json:"profile_path_exists"`
-	LastVerifiedAt    string `json:"last_verified_at,omitempty"`
-	RevokedAt         string `json:"revoked_at,omitempty"`
+	ID                   int64  `json:"id"`
+	Name                 string `json:"name"`
+	Domain               string `json:"domain"`
+	AccountHint          string `json:"account_hint"`
+	PermissionTier       string `json:"permission_tier"`
+	Status               string `json:"status"`
+	ProfileStoragePolicy string `json:"profile_storage_policy"`
+	ProfilePath          string `json:"profile_path"`
+	ProfilePathExists    bool   `json:"profile_path_exists"`
+	LastVerifiedAt       string `json:"last_verified_at,omitempty"`
+	RevokedAt            string `json:"revoked_at,omitempty"`
 }
 
 type browserSessionPrepareProfileJSON struct {

@@ -340,14 +340,15 @@ type ReviewRejectedPayload struct {
 }
 
 type BrowserSessionCreatedPayload struct {
-	SessionID      int64  `json:"session_id"`
-	Name           string `json:"name"`
-	Domain         string `json:"domain"`
-	AccountHint    string `json:"account_hint,omitempty"`
-	PermissionTier string `json:"permission_tier"`
-	Status         string `json:"status"`
-	ProfilePath    string `json:"profile_path"`
-	ExpiresAt      string `json:"expires_at,omitempty"`
+	SessionID            int64  `json:"session_id"`
+	Name                 string `json:"name"`
+	Domain               string `json:"domain"`
+	AccountHint          string `json:"account_hint,omitempty"`
+	PermissionTier       string `json:"permission_tier"`
+	Status               string `json:"status"`
+	ProfileStoragePolicy string `json:"profile_storage_policy"`
+	ProfilePath          string `json:"profile_path"`
+	ExpiresAt            string `json:"expires_at,omitempty"`
 }
 
 type BrowserSessionStatusChangedPayload struct {
@@ -380,11 +381,12 @@ type BrowserSessionRevokedPayload struct {
 }
 
 type BrowserSessionProfilePreparedPayload struct {
-	SessionID   int64  `json:"session_id"`
-	Status      string `json:"status"`
-	ProfilePath string `json:"profile_path"`
-	Created     bool   `json:"created"`
-	Actor       string `json:"actor,omitempty"`
+	SessionID            int64  `json:"session_id"`
+	Status               string `json:"status"`
+	ProfileStoragePolicy string `json:"profile_storage_policy"`
+	ProfilePath          string `json:"profile_path"`
+	Created              bool   `json:"created"`
+	Actor                string `json:"actor,omitempty"`
 }
 
 type BrowserSessionLoginRequestedPayload struct {

@@ -215,7 +215,7 @@ The processing payload must include the source intake ID, route decision, classi
 
 ## Browser session handoff expectation
 
-Manual Huginn browser login and authenticated read-only session reuse are being implemented in metadata-first slices. Browser session metadata and login request metadata live in SQLite, future browser profile files must stay under `ODIN_ROOT`, and profile/request lifecycle mutations append events through the runtime event stream:
+Manual Huginn browser login and authenticated read-only session reuse are being implemented in metadata-first slices. Browser session metadata, profile storage policy metadata, and login request metadata live in SQLite, future browser profile files must stay under `ODIN_ROOT`, and profile/request lifecycle mutations append events through the runtime event stream:
 
 - `browser.session_created`
 - `browser.session_status_changed`
@@ -227,4 +227,4 @@ Manual Huginn browser login and authenticated read-only session reuse are being 
 - `browser.session_login_expired`
 - `goal.waiting_for_human_login`
 
-Browser session events must not include passwords, cookies, tokens, passkey material, TOTP values, backup codes, profile bytes, or raw credential prompts. Metadata-only session verification records operator-attested verification and `last_verified_at`; browser-observed account/domain verification remains future work. Profile preparation records only empty-directory preparation metadata. Session verification may unblock a waiting goal only through normal policy checks; it must not approve or execute the goal by itself.
+Browser session events must not include passwords, cookies, tokens, passkey material, TOTP values, backup codes, profile bytes, or raw credential prompts. Metadata-only session verification records operator-attested verification and `last_verified_at`; browser-observed account/domain verification remains future work. Profile preparation records only empty-directory preparation metadata plus `profile_storage_policy`; a prepared directory is not approval to write browser files. Session verification may unblock a waiting goal only through normal policy checks; it must not approve or execute the goal by itself.

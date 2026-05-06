@@ -54,19 +54,20 @@ type browserSessionProfileEnvelope struct {
 }
 
 type browserSessionView struct {
-	ID                int64  `json:"id"`
-	Name              string `json:"name"`
-	Domain            string `json:"domain"`
-	AccountHint       string `json:"account_hint,omitempty"`
-	PermissionTier    string `json:"permission_tier"`
-	Status            string `json:"status"`
-	ProfilePath       string `json:"profile_path"`
-	ProfilePathExists bool   `json:"profile_path_exists"`
-	CreatedAt         string `json:"created_at"`
-	UpdatedAt         string `json:"updated_at"`
-	LastVerifiedAt    string `json:"last_verified_at,omitempty"`
-	ExpiresAt         string `json:"expires_at,omitempty"`
-	RevokedAt         string `json:"revoked_at,omitempty"`
+	ID                   int64  `json:"id"`
+	Name                 string `json:"name"`
+	Domain               string `json:"domain"`
+	AccountHint          string `json:"account_hint,omitempty"`
+	PermissionTier       string `json:"permission_tier"`
+	Status               string `json:"status"`
+	ProfileStoragePolicy string `json:"profile_storage_policy"`
+	ProfilePath          string `json:"profile_path"`
+	ProfilePathExists    bool   `json:"profile_path_exists"`
+	CreatedAt            string `json:"created_at"`
+	UpdatedAt            string `json:"updated_at"`
+	LastVerifiedAt       string `json:"last_verified_at,omitempty"`
+	ExpiresAt            string `json:"expires_at,omitempty"`
+	RevokedAt            string `json:"revoked_at,omitempty"`
 }
 
 type browserSessionProfileView struct {
@@ -373,19 +374,20 @@ func browserSessionPermissionTier(value string) sqlite.BrowserSessionPermissionT
 
 func newBrowserSessionView(runtimeRoot string, session sqlite.BrowserSession) browserSessionView {
 	return browserSessionView{
-		ID:                session.ID,
-		Name:              session.Name,
-		Domain:            session.Domain,
-		AccountHint:       session.AccountHint,
-		PermissionTier:    string(session.PermissionTier),
-		Status:            string(session.Status),
-		ProfilePath:       session.ProfilePath,
-		ProfilePathExists: browserSessionProfilePathExists(runtimeRoot, session.ProfilePath),
-		CreatedAt:         formatBrowserSessionTime(session.CreatedAt),
-		UpdatedAt:         formatBrowserSessionTime(session.UpdatedAt),
-		LastVerifiedAt:    formatBrowserSessionOptionalTime(session.LastVerifiedAt),
-		ExpiresAt:         formatBrowserSessionOptionalTime(session.ExpiresAt),
-		RevokedAt:         formatBrowserSessionOptionalTime(session.RevokedAt),
+		ID:                   session.ID,
+		Name:                 session.Name,
+		Domain:               session.Domain,
+		AccountHint:          session.AccountHint,
+		PermissionTier:       string(session.PermissionTier),
+		Status:               string(session.Status),
+		ProfileStoragePolicy: string(session.ProfileStoragePolicy),
+		ProfilePath:          session.ProfilePath,
+		ProfilePathExists:    browserSessionProfilePathExists(runtimeRoot, session.ProfilePath),
+		CreatedAt:            formatBrowserSessionTime(session.CreatedAt),
+		UpdatedAt:            formatBrowserSessionTime(session.UpdatedAt),
+		LastVerifiedAt:       formatBrowserSessionOptionalTime(session.LastVerifiedAt),
+		ExpiresAt:            formatBrowserSessionOptionalTime(session.ExpiresAt),
+		RevokedAt:            formatBrowserSessionOptionalTime(session.RevokedAt),
 	}
 }
 

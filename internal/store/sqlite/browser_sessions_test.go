@@ -224,6 +224,53 @@ func TestBrowserSessionProfilePathAllocationSanitizesAndRejectsUnsafePaths(t *te
 	}
 }
 
+func TestBrowserSessionProfileStoragePolicyDeniesWritesByDefault(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(filepath.Join(t.TempDir(), "browser-session-profile-storage-policy.db"))
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer store.Close()
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
+	}
+
+	session, err := store.CreateBrowserSession(ctx, CreateBrowserSessionParams{
+		Name:           "Google Main",
+		Domain:         "google.com",
+		PermissionTier: BrowserSessionPermissionTierAuthenticatedReadOnly,
+	})
+	if err != nil {
+		t.Fatalf("CreateBrowserSession() error = %v", err)
+	}
+	if session.ProfileStoragePolicy != BrowserSessionProfileStoragePolicyEncryptedRequired {
+		t.Fatalf("session.ProfileStoragePolicy = %q, want encrypted_required", session.ProfileStoragePolicy)
+	}
+	if CanWriteBrowserProfile(session) {
+		t.Fatalf("CanWriteBrowserProfile(default policy) = true, want false")
+	}
+
+	prepared := session
+	prepared.ProfileStoragePolicy = BrowserSessionProfileStoragePolicyPreparedUnencrypted
+	if CanWriteBrowserProfile(prepared) {
+		t.Fatalf("CanWriteBrowserProfile(prepared_unencrypted) = true, want false")
+	}
+
+	revoked := session
+	revoked.Status = BrowserSessionStatusRevoked
+	if CanWriteBrowserProfile(revoked) {
+		t.Fatalf("CanWriteBrowserProfile(revoked) = true, want false")
+	}
+
+	reopened, err := store.GetBrowserSession(ctx, session.ID)
+	if err != nil {
+		t.Fatalf("GetBrowserSession() error = %v", err)
+	}
+	if reopened.ProfileStoragePolicy != BrowserSessionProfileStoragePolicyEncryptedRequired {
+		t.Fatalf("reopened.ProfileStoragePolicy = %q, want encrypted_required", reopened.ProfileStoragePolicy)
+	}
+}
+
 func TestBrowserSessionMetadataRejectsCredentialLikeFields(t *testing.T) {
 	ctx := context.Background()
 	store, err := Open(filepath.Join(t.TempDir(), "browser-sessions-columns.db"))

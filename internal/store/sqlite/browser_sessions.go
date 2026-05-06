@@ -13,6 +13,7 @@ import (
 
 type BrowserSessionStatus string
 type BrowserSessionPermissionTier string
+type BrowserSessionProfileStoragePolicy string
 type BrowserSessionLoginRequestStatus string
 
 const (
@@ -29,6 +30,12 @@ const (
 )
 
 const (
+	BrowserSessionProfileStoragePolicyDisabled            BrowserSessionProfileStoragePolicy = "disabled"
+	BrowserSessionProfileStoragePolicyPreparedUnencrypted BrowserSessionProfileStoragePolicy = "prepared_unencrypted"
+	BrowserSessionProfileStoragePolicyEncryptedRequired   BrowserSessionProfileStoragePolicy = "encrypted_required"
+)
+
+const (
 	BrowserSessionLoginRequestStatusRequested BrowserSessionLoginRequestStatus = "requested"
 	BrowserSessionLoginRequestStatusCompleted BrowserSessionLoginRequestStatus = "completed"
 	BrowserSessionLoginRequestStatusExpired   BrowserSessionLoginRequestStatus = "expired"
@@ -36,18 +43,19 @@ const (
 )
 
 type BrowserSession struct {
-	ID             int64
-	Name           string
-	Domain         string
-	AccountHint    string
-	PermissionTier BrowserSessionPermissionTier
-	Status         BrowserSessionStatus
-	ProfilePath    string
-	CreatedAt      time.Time
-	UpdatedAt      time.Time
-	LastVerifiedAt *time.Time
-	ExpiresAt      *time.Time
-	RevokedAt      *time.Time
+	ID                   int64
+	Name                 string
+	Domain               string
+	AccountHint          string
+	PermissionTier       BrowserSessionPermissionTier
+	Status               BrowserSessionStatus
+	ProfileStoragePolicy BrowserSessionProfileStoragePolicy
+	ProfilePath          string
+	CreatedAt            time.Time
+	UpdatedAt            time.Time
+	LastVerifiedAt       *time.Time
+	ExpiresAt            *time.Time
+	RevokedAt            *time.Time
 }
 
 type BrowserSessionLoginRequest struct {
@@ -140,30 +148,32 @@ func (store *Store) CreateBrowserSession(ctx context.Context, params CreateBrows
 	}
 	now := store.now()
 	session := BrowserSession{
-		Name:           name,
-		Domain:         domain,
-		AccountHint:    strings.TrimSpace(params.AccountHint),
-		PermissionTier: tier,
-		Status:         BrowserSessionStatusCreated,
-		ProfilePath:    profilePath,
-		CreatedAt:      now,
-		UpdatedAt:      now,
-		ExpiresAt:      cloneTimePtr(params.ExpiresAt),
+		Name:                 name,
+		Domain:               domain,
+		AccountHint:          strings.TrimSpace(params.AccountHint),
+		PermissionTier:       tier,
+		Status:               BrowserSessionStatusCreated,
+		ProfileStoragePolicy: BrowserSessionProfileStoragePolicyEncryptedRequired,
+		ProfilePath:          profilePath,
+		CreatedAt:            now,
+		UpdatedAt:            now,
+		ExpiresAt:            cloneTimePtr(params.ExpiresAt),
 	}
 
 	err = store.withTx(ctx, func(tx *sql.Tx) error {
 		result, err := tx.ExecContext(ctx, `
 			INSERT INTO browser_session_profiles (
-				name, domain, account_hint, permission_tier, status, profile_path,
+				name, domain, account_hint, permission_tier, status, profile_storage_policy, profile_path,
 				created_at, updated_at, last_verified_at, expires_at, revoked_at
 			)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL)
 		`,
 			session.Name,
 			session.Domain,
 			session.AccountHint,
 			string(session.PermissionTier),
 			string(session.Status),
+			string(session.ProfileStoragePolicy),
 			session.ProfilePath,
 			formatTime(now),
 			formatTime(now),
@@ -177,14 +187,15 @@ func (store *Store) CreateBrowserSession(ctx context.Context, params CreateBrows
 			return err
 		}
 		return appendBrowserSessionEventTx(ctx, tx, session, runtimeevents.EventBrowserSessionCreated, runtimeevents.BrowserSessionCreatedPayload{
-			SessionID:      session.ID,
-			Name:           session.Name,
-			Domain:         session.Domain,
-			AccountHint:    session.AccountHint,
-			PermissionTier: string(session.PermissionTier),
-			Status:         string(session.Status),
-			ProfilePath:    session.ProfilePath,
-			ExpiresAt:      formatOptionalTime(session.ExpiresAt),
+			SessionID:            session.ID,
+			Name:                 session.Name,
+			Domain:               session.Domain,
+			AccountHint:          session.AccountHint,
+			PermissionTier:       string(session.PermissionTier),
+			Status:               string(session.Status),
+			ProfileStoragePolicy: string(session.ProfileStoragePolicy),
+			ProfilePath:          session.ProfilePath,
+			ExpiresAt:            formatOptionalTime(session.ExpiresAt),
 		}, now)
 	})
 	return session, err
@@ -438,11 +449,12 @@ func (store *Store) RecordBrowserSessionProfilePrepared(ctx context.Context, par
 			return fmt.Errorf("browser session profile path mismatch")
 		}
 		return appendBrowserSessionEventTx(ctx, tx, session, runtimeevents.EventBrowserSessionProfilePrepared, runtimeevents.BrowserSessionProfilePreparedPayload{
-			SessionID:   session.ID,
-			Status:      string(session.Status),
-			ProfilePath: profilePath,
-			Created:     params.Created,
-			Actor:       defaultString(params.Actor, "operator"),
+			SessionID:            session.ID,
+			Status:               string(session.Status),
+			ProfileStoragePolicy: string(session.ProfileStoragePolicy),
+			ProfilePath:          profilePath,
+			Created:              params.Created,
+			Actor:                defaultString(params.Actor, "operator"),
 		}, now)
 	})
 }
@@ -649,7 +661,7 @@ func getBrowserSessionLoginRequestTx(ctx context.Context, tx *sql.Tx, id int64) 
 
 func browserSessionSelectSQL() string {
 	return `
-		SELECT id, name, domain, account_hint, permission_tier, status, profile_path,
+		SELECT id, name, domain, account_hint, permission_tier, status, profile_storage_policy, profile_path,
 			created_at, updated_at, last_verified_at, expires_at, revoked_at
 		FROM browser_session_profiles
 	`
@@ -677,6 +689,7 @@ func scanBrowserSession(scanner browserSessionScanner) (BrowserSession, error) {
 		&session.AccountHint,
 		&session.PermissionTier,
 		&session.Status,
+		&session.ProfileStoragePolicy,
 		&session.ProfilePath,
 		&createdAt,
 		&updatedAt,
@@ -707,6 +720,10 @@ func scanBrowserSession(scanner browserSessionScanner) (BrowserSession, error) {
 	session.RevokedAt, err = parseNullableTime(revokedAt)
 	if err != nil {
 		return BrowserSession{}, err
+	}
+	session.ProfileStoragePolicy = normalizeBrowserSessionProfileStoragePolicy(session.ProfileStoragePolicy)
+	if session.ProfileStoragePolicy == "" {
+		session.ProfileStoragePolicy = BrowserSessionProfileStoragePolicyEncryptedRequired
 	}
 	return session, nil
 }
@@ -775,6 +792,33 @@ func normalizeBrowserSessionPermissionTier(tier BrowserSessionPermissionTier) Br
 		return BrowserSessionPermissionTierAuthenticatedReadOnly
 	default:
 		return ""
+	}
+}
+
+func normalizeBrowserSessionProfileStoragePolicy(policy BrowserSessionProfileStoragePolicy) BrowserSessionProfileStoragePolicy {
+	switch BrowserSessionProfileStoragePolicy(strings.ToLower(strings.TrimSpace(string(policy)))) {
+	case BrowserSessionProfileStoragePolicyDisabled:
+		return BrowserSessionProfileStoragePolicyDisabled
+	case BrowserSessionProfileStoragePolicyPreparedUnencrypted:
+		return BrowserSessionProfileStoragePolicyPreparedUnencrypted
+	case BrowserSessionProfileStoragePolicyEncryptedRequired:
+		return BrowserSessionProfileStoragePolicyEncryptedRequired
+	default:
+		return ""
+	}
+}
+
+func CanWriteBrowserProfile(session BrowserSession) bool {
+	if session.Status == BrowserSessionStatusRevoked {
+		return false
+	}
+	switch normalizeBrowserSessionProfileStoragePolicy(session.ProfileStoragePolicy) {
+	case BrowserSessionProfileStoragePolicyDisabled,
+		BrowserSessionProfileStoragePolicyPreparedUnencrypted,
+		BrowserSessionProfileStoragePolicyEncryptedRequired:
+		return false
+	default:
+		return false
 	}
 }
 
