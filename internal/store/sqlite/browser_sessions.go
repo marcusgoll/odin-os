@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net/url"
 	"path/filepath"
@@ -71,6 +72,12 @@ type BrowserSessionLoginRequest struct {
 	CompletedAt *time.Time
 	CreatedAt   time.Time
 	UpdatedAt   time.Time
+}
+
+type BrowserSessionLoginHandoff struct {
+	HandoffID    string
+	LoginRequest BrowserSessionLoginRequest
+	Session      BrowserSession
 }
 
 type CreateBrowserSessionParams struct {
@@ -536,6 +543,42 @@ func (store *Store) GetBrowserSessionLoginRequest(ctx context.Context, id int64)
 	}
 	row := store.db.QueryRowContext(ctx, browserSessionLoginRequestSelectSQL()+` WHERE id = ?`, id)
 	return scanBrowserSessionLoginRequest(row)
+}
+
+func (store *Store) GetBrowserSessionLoginHandoff(ctx context.Context, handoffID string) (BrowserSessionLoginHandoff, error) {
+	handoffID = strings.TrimSpace(handoffID)
+	if handoffID == "" {
+		return BrowserSessionLoginHandoff{}, fmt.Errorf("browser session handoff id is required")
+	}
+	row := store.db.QueryRowContext(ctx, browserSessionLoginRequestSelectSQL()+` WHERE handoff_id = ?`, handoffID)
+	request, err := scanBrowserSessionLoginRequest(row)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return BrowserSessionLoginHandoff{}, fmt.Errorf("browser session handoff %q not found", handoffID)
+		}
+		return BrowserSessionLoginHandoff{}, err
+	}
+	if request.Status != BrowserSessionLoginRequestStatusRequested {
+		return BrowserSessionLoginHandoff{}, fmt.Errorf("browser session login request status %q cannot use handoff", request.Status)
+	}
+	if !request.ExpiresAt.After(store.now()) {
+		return BrowserSessionLoginHandoff{}, fmt.Errorf("browser session handoff %q expired at %s", handoffID, formatTime(request.ExpiresAt))
+	}
+	session, err := store.GetBrowserSession(ctx, request.SessionID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return BrowserSessionLoginHandoff{}, fmt.Errorf("browser session handoff %q linked session %d not found", handoffID, request.SessionID)
+		}
+		return BrowserSessionLoginHandoff{}, err
+	}
+	if session.Status == BrowserSessionStatusRevoked {
+		return BrowserSessionLoginHandoff{}, fmt.Errorf("revoked browser session cannot use handoff")
+	}
+	return BrowserSessionLoginHandoff{
+		HandoffID:    handoffID,
+		LoginRequest: request,
+		Session:      session,
+	}, nil
 }
 
 func (store *Store) ListBrowserSessionLoginRequests(ctx context.Context, params ListBrowserSessionLoginRequestsParams) ([]BrowserSessionLoginRequest, error) {

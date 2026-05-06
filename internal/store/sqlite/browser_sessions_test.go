@@ -529,6 +529,142 @@ func TestBrowserSessionLoginRequestHandoffMetadataIsOpaqueAndValidated(t *testin
 	}
 }
 
+func TestBrowserSessionLoginHandoffLookupValidatesRequestAndSession(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(filepath.Join(t.TempDir(), "browser-session-login-handoff-lookup.db"))
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer store.Close()
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
+	}
+	now := time.Date(2026, 5, 6, 20, 0, 0, 0, time.UTC)
+	store.Now = func() time.Time { return now }
+
+	session, err := store.CreateBrowserSession(ctx, CreateBrowserSessionParams{
+		Name:           "Google main",
+		Domain:         "google.com",
+		AccountHint:    "marcus",
+		PermissionTier: BrowserSessionPermissionTierAuthenticatedReadOnly,
+	})
+	if err != nil {
+		t.Fatalf("CreateBrowserSession() error = %v", err)
+	}
+
+	handoffIDs := []string{"valid-handoff", "completed-handoff", "expired-status-handoff", "cancelled-handoff", "expired-time-handoff"}
+	store.BrowserSessionHandoffID = func() (string, error) {
+		if len(handoffIDs) == 0 {
+			t.Fatal("unexpected handoff id request")
+		}
+		next := handoffIDs[0]
+		handoffIDs = handoffIDs[1:]
+		return next, nil
+	}
+
+	validRequest, err := store.CreateBrowserSessionLoginRequest(ctx, CreateBrowserSessionLoginRequestParams{
+		SessionID: session.ID,
+		ExpiresAt: now.Add(10 * time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("CreateBrowserSessionLoginRequest(valid) error = %v", err)
+	}
+	handoff, err := store.GetBrowserSessionLoginHandoff(ctx, "valid-handoff")
+	if err != nil {
+		t.Fatalf("GetBrowserSessionLoginHandoff(valid) error = %v", err)
+	}
+	if handoff.HandoffID != "valid-handoff" || handoff.LoginRequest.ID != validRequest.ID || handoff.Session.ID != session.ID || handoff.Session.AccountHint != "marcus" {
+		t.Fatalf("handoff = %+v, want linked request and session metadata", handoff)
+	}
+
+	completed, err := store.CreateBrowserSessionLoginRequest(ctx, CreateBrowserSessionLoginRequestParams{
+		SessionID: session.ID,
+		ExpiresAt: now.Add(10 * time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("CreateBrowserSessionLoginRequest(completed) error = %v", err)
+	}
+	if _, err := store.CompleteBrowserSessionLoginRequest(ctx, CompleteBrowserSessionLoginRequestParams{RequestID: completed.ID}); err != nil {
+		t.Fatalf("CompleteBrowserSessionLoginRequest() error = %v", err)
+	}
+	if _, err := store.GetBrowserSessionLoginHandoff(ctx, "completed-handoff"); err == nil || !strings.Contains(err.Error(), "status \"completed\"") {
+		t.Fatalf("GetBrowserSessionLoginHandoff(completed) error = %v, want status rejection", err)
+	}
+
+	expiredStatus, err := store.CreateBrowserSessionLoginRequest(ctx, CreateBrowserSessionLoginRequestParams{
+		SessionID: session.ID,
+		ExpiresAt: now.Add(10 * time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("CreateBrowserSessionLoginRequest(expired status) error = %v", err)
+	}
+	if _, err := store.ExpireBrowserSessionLoginRequest(ctx, ExpireBrowserSessionLoginRequestParams{RequestID: expiredStatus.ID}); err != nil {
+		t.Fatalf("ExpireBrowserSessionLoginRequest() error = %v", err)
+	}
+	if _, err := store.GetBrowserSessionLoginHandoff(ctx, "expired-status-handoff"); err == nil || !strings.Contains(err.Error(), "status \"expired\"") {
+		t.Fatalf("GetBrowserSessionLoginHandoff(expired status) error = %v, want status rejection", err)
+	}
+
+	cancelled, err := store.CreateBrowserSessionLoginRequest(ctx, CreateBrowserSessionLoginRequestParams{
+		SessionID: session.ID,
+		ExpiresAt: now.Add(10 * time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("CreateBrowserSessionLoginRequest(cancelled) error = %v", err)
+	}
+	if _, err := store.DB().ExecContext(ctx, `UPDATE browser_session_login_requests SET status = ? WHERE id = ?`, string(BrowserSessionLoginRequestStatusCancelled), cancelled.ID); err != nil {
+		t.Fatalf("cancel login request error = %v", err)
+	}
+	if _, err := store.GetBrowserSessionLoginHandoff(ctx, "cancelled-handoff"); err == nil || !strings.Contains(err.Error(), "status \"cancelled\"") {
+		t.Fatalf("GetBrowserSessionLoginHandoff(cancelled) error = %v, want status rejection", err)
+	}
+
+	if _, err := store.CreateBrowserSessionLoginRequest(ctx, CreateBrowserSessionLoginRequestParams{
+		SessionID: session.ID,
+		ExpiresAt: now.Add(10 * time.Minute),
+	}); err != nil {
+		t.Fatalf("CreateBrowserSessionLoginRequest(expired time) error = %v", err)
+	}
+	store.Now = func() time.Time { return now.Add(11 * time.Minute) }
+	if _, err := store.GetBrowserSessionLoginHandoff(ctx, "expired-time-handoff"); err == nil || !strings.Contains(err.Error(), "expired") {
+		t.Fatalf("GetBrowserSessionLoginHandoff(expired time) error = %v, want expiration rejection", err)
+	}
+
+	if _, err := store.GetBrowserSessionLoginHandoff(ctx, "missing-handoff"); err == nil || !strings.Contains(err.Error(), "not found") {
+		t.Fatalf("GetBrowserSessionLoginHandoff(missing) error = %v, want not found", err)
+	}
+	if _, err := store.GetBrowserSessionLoginHandoff(ctx, " "); err == nil || !strings.Contains(err.Error(), "handoff id is required") {
+		t.Fatalf("GetBrowserSessionLoginHandoff(empty) error = %v, want required id", err)
+	}
+
+	revokedSession, err := store.CreateBrowserSession(ctx, CreateBrowserSessionParams{
+		Name:           "GitHub main",
+		Domain:         "github.com",
+		PermissionTier: BrowserSessionPermissionTierAuthenticatedReadOnly,
+	})
+	if err != nil {
+		t.Fatalf("CreateBrowserSession(revoked) error = %v", err)
+	}
+	store.Now = func() time.Time { return now }
+	store.BrowserSessionHandoffID = func() (string, error) { return "revoked-handoff", nil }
+	if _, err := store.CreateBrowserSessionLoginRequest(ctx, CreateBrowserSessionLoginRequestParams{
+		SessionID: revokedSession.ID,
+		ExpiresAt: now.Add(10 * time.Minute),
+	}); err != nil {
+		t.Fatalf("CreateBrowserSessionLoginRequest(revoked session) error = %v", err)
+	}
+	if _, err := store.RevokeBrowserSession(ctx, RevokeBrowserSessionParams{
+		SessionID: revokedSession.ID,
+		Actor:     "operator",
+		Reason:    "test revocation",
+	}); err != nil {
+		t.Fatalf("RevokeBrowserSession() error = %v", err)
+	}
+	if _, err := store.GetBrowserSessionLoginHandoff(ctx, "revoked-handoff"); err == nil || !strings.Contains(err.Error(), "revoked") {
+		t.Fatalf("GetBrowserSessionLoginHandoff(revoked session) error = %v, want revoked rejection", err)
+	}
+}
+
 func TestBrowserSessionManualVerificationCompletesLoginRequestAndAudits(t *testing.T) {
 	ctx := context.Background()
 	store, err := Open(filepath.Join(t.TempDir(), "browser-session-verify.db"))

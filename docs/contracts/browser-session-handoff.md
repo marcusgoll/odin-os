@@ -6,7 +6,7 @@ date: 2026-05-06
 
 # Browser Session Handoff Contract
 
-This contract defines the Odin-native handoff for manual Huginn browser login and reusable authenticated read-only sessions. The session metadata, login request metadata, manual verification metadata, profile path allocation, explicit empty profile directory preparation, and profile storage policy gate slices are implemented. Real NoVNC/Tailscale handoff, browser launch, browser profile persistence, login automation, read-only verification checks, and authenticated session attachment remain future work.
+This contract defines the Odin-native handoff for manual Huginn browser login and reusable authenticated read-only sessions. The session metadata, login request metadata, read-only handoff lookup, manual verification metadata, profile path allocation, explicit empty profile directory preparation, and profile storage policy gate slices are implemented. Real NoVNC/Tailscale handoff, browser launch, browser profile persistence, login automation, read-only verification checks, and authenticated session attachment remain future work.
 
 ## Existing State
 
@@ -17,6 +17,7 @@ This contract defines the Odin-native handoff for manual Huginn browser login an
 - Goal state, goal evidence, blockers, and audit events are persisted in SQLite. Goal runner ticks do not execute created or planned goals, and approved goals block when no executor/action exists.
 - `odin browser session login-request --id <session_id> [--handoff-base-url <url>] --json` records metadata-only manual login requests with an opaque `handoff_id`; `handoff_url` is null unless a private base URL is provided.
 - `odin browser session login-requests --id <session_id> --json` lists persisted login request metadata for one session.
+- `odin browser session handoff show --handoff-id <id> --json` resolves safe manual-login metadata for one valid, unexpired requested handoff without mutating runtime state.
 - `odin browser session verify --id <session_id> [--login-request-id <id>] --json` records metadata-only operator verification, sets `last_verified_at`, moves the session to `verified`, and completes the login request when one is provided.
 - `odin browser session prepare-profile --id <session_id> --json` explicitly creates the empty profile directory under `ODIN_ROOT` and records an audit event without writing browser files.
 - Browser session JSON reports `profile_storage_policy`. The default is `encrypted_required`, and `CanWriteBrowserProfile` denies writes for every current policy value until encrypted profile storage is implemented.
@@ -150,6 +151,7 @@ odin browser session status --id <id> --status <status> --json
 odin browser session revoke --id <id> --json
 odin browser session login-request --id <id> [--handoff-base-url <url>] --json
 odin browser session login-requests --id <id> --json
+odin browser session handoff show --handoff-id <id> --json
 odin browser session verify --id <id> [--login-request-id <id>] --json
 odin browser session prepare-profile --id <id> --json
 ```
@@ -159,6 +161,8 @@ odin browser session prepare-profile --id <id> --json
 `login-request` creates request metadata only. Odin always records an opaque `handoff_id` with the request and reuses the existing `expires_at` as the metadata expiration. With no base URL, its JSON envelope returns `handoff_url: null`. When `--handoff-base-url <url>` is provided, Odin validates that the base is an absolute `http` or `https` URL and returns a metadata URL with `handoff_id` in the query string. The handoff ID must not encode the browser session ID directly.
 
 The handoff URL is not proof that a server route exists. This slice does not add an HTTP handler, NoVNC process, Tailscale service, browser launch, browser profile write, credential storage, or session verification. Operators should treat any base URL as a future private-network handoff surface only, intended for Tailscale or another operator-approved private path after that service is implemented.
+
+`handoff show` is a read-only lookup for safe manual-login metadata. It requires `--handoff-id`, rejects missing IDs, unknown handoffs, non-`requested` login requests, expired requests, and revoked or missing linked sessions. It returns only the handoff ID, login request ID, session ID, session name, domain, optional account hint, expiration, request status, and `allowed_actions: manual_login_only`. It must not append runtime events, launch a browser, serve HTTP, create NoVNC/Tailscale resources, write profile files, or store credential material.
 
 `verify` records metadata-only operator verification. It must not launch a browser, inspect a profile directory, store credential material, or approve/execute a goal. Revoked sessions cannot be verified. Expired or cancelled login requests cannot be completed.
 
@@ -219,6 +223,24 @@ Implemented `login-request --json` returns metadata without secrets:
 ```
 
 When called with `--handoff-base-url https://odin-handoff.tailnet.local/manual-login`, `handoff_url` may be returned as `https://odin-handoff.tailnet.local/manual-login?handoff_id=<opaque-id>`. This remains metadata-only; no route is served by Odin in this slice.
+
+Implemented `handoff show --json` returns read-only manual-login metadata without secrets:
+
+```json
+{
+  "handoff": {
+    "handoff_id": "opaque-handoff-id",
+    "login_request_id": 1,
+    "session_id": 1,
+    "session_name": "marcus-example",
+    "domain": "example.com",
+    "account_hint": "marcus-example",
+    "expires_at": "2026-05-06T00:10:00Z",
+    "status": "requested",
+    "allowed_actions": "manual_login_only"
+  }
+}
+```
 
 `revoke` is always mutating and must require a reason. `verify` is mutating when it changes status, binding, expiration, or verification timestamps.
 

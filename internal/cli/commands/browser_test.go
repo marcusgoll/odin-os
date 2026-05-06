@@ -97,6 +97,26 @@ func TestParseBrowserSessionLoginRequestCommands(t *testing.T) {
 	}
 }
 
+func TestParseBrowserSessionHandoffShowCommand(t *testing.T) {
+	command, err := ParseBrowser([]string{"session", "handoff", "show", "--handoff-id", "opaque-handoff-id", "--json"})
+	if err != nil {
+		t.Fatalf("ParseBrowser(session handoff show) error = %v", err)
+	}
+	if command.Name != "session" || command.SessionAction != "handoff" || command.HandoffAction != "show" || command.HandoffID != "opaque-handoff-id" || !command.JSON {
+		t.Fatalf("command = %+v, want parsed handoff show command", command)
+	}
+
+	if _, err := ParseBrowser([]string{"session", "handoff", "show", "--json"}); err == nil {
+		t.Fatal("ParseBrowser(session handoff show missing handoff id) error = nil, want error")
+	}
+	if _, err := ParseBrowser([]string{"session", "handoff", "approve", "--handoff-id", "opaque-handoff-id", "--json"}); err == nil {
+		t.Fatal("ParseBrowser(session handoff unsupported action) error = nil, want error")
+	}
+	if _, err := ParseBrowser([]string{"session", "handoff", "show", "--handoff-id", "opaque-handoff-id", "--id", "42", "--json"}); err == nil {
+		t.Fatal("ParseBrowser(session handoff show with id) error = nil, want read-only lookup flag rejection")
+	}
+}
+
 func TestParseBrowserSessionVerifyCommand(t *testing.T) {
 	command, err := ParseBrowser([]string{"session", "verify", "--id", "42", "--login-request-id", "7", "--json"})
 	if err != nil {

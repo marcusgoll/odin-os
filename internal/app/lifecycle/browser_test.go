@@ -248,6 +248,81 @@ func TestRunBrowserSessionLoginRequestCreateAndList(t *testing.T) {
 	}
 }
 
+func TestRunBrowserSessionHandoffShowValidatesReadOnlyMetadata(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	root := testRepoRoot(t)
+
+	run := func(args ...string) string {
+		t.Helper()
+		var output bytes.Buffer
+		if err := Run(context.Background(), root, args, strings.NewReader(""), &output); err != nil {
+			t.Fatalf("Run(%v) error = %v\noutput=%s", args, err, output.String())
+		}
+		return output.String()
+	}
+
+	created := decodeBrowserSessionEnvelope(t, []byte(run(
+		"browser", "session", "create",
+		"--name", "google-main",
+		"--domain", "google.com",
+		"--permission-tier", "authenticated_read",
+		"--account-hint", "marcus",
+		"--json",
+	)))
+	loginRequest := decodeBrowserSessionLoginRequestEnvelope(t, []byte(run(
+		"browser", "session", "login-request",
+		"--id", int64String(created.ID),
+		"--handoff-base-url", "https://odin-handoff.tailnet.local/manual-login",
+		"--json",
+	)))
+
+	logsBefore := run("logs", "--json")
+	handoffOutput := run("browser", "session", "handoff", "show", "--handoff-id", loginRequest.HandoffID, "--json")
+	handoff := decodeBrowserSessionHandoffEnvelope(t, []byte(handoffOutput))
+	if handoff.HandoffID != loginRequest.HandoffID || handoff.LoginRequestID != loginRequest.ID || handoff.SessionID != created.ID {
+		t.Fatalf("handoff = %+v, want linked handoff/request/session", handoff)
+	}
+	if handoff.SessionName != "google-main" || handoff.Domain != "google.com" || handoff.AccountHint != "marcus" || handoff.Status != "requested" || handoff.ExpiresAt == "" {
+		t.Fatalf("handoff = %+v, want safe session metadata", handoff)
+	}
+	if handoff.AllowedActions != "manual_login_only" {
+		t.Fatalf("AllowedActions = %q, want manual_login_only", handoff.AllowedActions)
+	}
+
+	logsAfter := run("logs", "--json")
+	if strings.Count(logsAfter, `"type": "browser.session_`) != strings.Count(logsBefore, `"type": "browser.session_`) {
+		t.Fatalf("handoff lookup changed browser session audit events before=%s after=%s", logsBefore, logsAfter)
+	}
+	if _, err := os.Stat(filepath.Join(root, "browser-sessions")); !os.IsNotExist(err) {
+		t.Fatalf("browser-sessions directory exists after handoff lookup err=%v, want read-only metadata lookup", err)
+	}
+
+	verified := run("browser", "session", "verify", "--id", int64String(created.ID), "--login-request-id", int64String(loginRequest.ID), "--json")
+	if !strings.Contains(verified, `"status": "verified"`) {
+		t.Fatalf("verify output = %s, want verified session", verified)
+	}
+	var completedOutput bytes.Buffer
+	err := Run(context.Background(), root, []string{"browser", "session", "handoff", "show", "--handoff-id", loginRequest.HandoffID, "--json"}, strings.NewReader(""), &completedOutput)
+	if err == nil || !strings.Contains(err.Error(), `status "completed"`) {
+		t.Fatalf("Run(handoff show completed) error = %v output=%s, want completed rejection", err, completedOutput.String())
+	}
+
+	revoked := decodeBrowserSessionEnvelope(t, []byte(run(
+		"browser", "session", "create",
+		"--name", "github-main",
+		"--domain", "github.com",
+		"--permission-tier", "authenticated_read",
+		"--json",
+	)))
+	revokedRequest := decodeBrowserSessionLoginRequestEnvelope(t, []byte(run("browser", "session", "login-request", "--id", int64String(revoked.ID), "--json")))
+	run("browser", "session", "revoke", "--id", int64String(revoked.ID), "--json")
+	var revokedOutput bytes.Buffer
+	err = Run(context.Background(), root, []string{"browser", "session", "handoff", "show", "--handoff-id", revokedRequest.HandoffID, "--json"}, strings.NewReader(""), &revokedOutput)
+	if err == nil || !strings.Contains(err.Error(), "revoked") {
+		t.Fatalf("Run(handoff show revoked session) error = %v output=%s, want revoked rejection", err, revokedOutput.String())
+	}
+}
+
 func TestRunBrowserSessionLoginRequestRejectsInvalidBaseURLAndRevokedSession(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	root := testRepoRoot(t)
@@ -528,6 +603,18 @@ type browserSessionLoginRequestJSON struct {
 	UpdatedAt   string  `json:"updated_at"`
 }
 
+type browserSessionHandoffJSON struct {
+	HandoffID      string `json:"handoff_id"`
+	LoginRequestID int64  `json:"login_request_id"`
+	SessionID      int64  `json:"session_id"`
+	SessionName    string `json:"session_name"`
+	Domain         string `json:"domain"`
+	AccountHint    string `json:"account_hint"`
+	ExpiresAt      string `json:"expires_at"`
+	Status         string `json:"status"`
+	AllowedActions string `json:"allowed_actions"`
+}
+
 func decodeBrowserSessionPrepareProfileEnvelope(t *testing.T, payload []byte) browserSessionPrepareProfileJSON {
 	t.Helper()
 	var envelope struct {
@@ -559,4 +646,15 @@ func decodeBrowserSessionLoginRequestEnvelope(t *testing.T, payload []byte) brow
 		t.Fatalf("browser session login request json decode error = %v; output=%s", err, string(payload))
 	}
 	return envelope.LoginRequest
+}
+
+func decodeBrowserSessionHandoffEnvelope(t *testing.T, payload []byte) browserSessionHandoffJSON {
+	t.Helper()
+	var envelope struct {
+		Handoff browserSessionHandoffJSON `json:"handoff"`
+	}
+	if err := json.Unmarshal(payload, &envelope); err != nil {
+		t.Fatalf("browser session handoff json decode error = %v; output=%s", err, string(payload))
+	}
+	return envelope.Handoff
 }

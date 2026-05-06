@@ -49,6 +49,10 @@ type browserSessionLoginRequestListView struct {
 	LoginRequests []browserSessionLoginRequestView `json:"login_requests"`
 }
 
+type browserSessionHandoffEnvelope struct {
+	Handoff browserSessionHandoffView `json:"handoff"`
+}
+
 type browserSessionProfileEnvelope struct {
 	Profile browserSessionProfileView `json:"profile"`
 }
@@ -87,6 +91,18 @@ type browserSessionLoginRequestView struct {
 	CompletedAt string  `json:"completed_at,omitempty"`
 	CreatedAt   string  `json:"created_at"`
 	UpdatedAt   string  `json:"updated_at"`
+}
+
+type browserSessionHandoffView struct {
+	HandoffID      string `json:"handoff_id"`
+	LoginRequestID int64  `json:"login_request_id"`
+	SessionID      int64  `json:"session_id"`
+	SessionName    string `json:"session_name"`
+	Domain         string `json:"domain"`
+	AccountHint    string `json:"account_hint,omitempty"`
+	ExpiresAt      string `json:"expires_at"`
+	Status         string `json:"status"`
+	AllowedActions string `json:"allowed_actions"`
 }
 
 func runBrowser(ctx context.Context, app bootstrap.App, args []string, stdout io.Writer) error {
@@ -298,6 +314,17 @@ func runBrowserSession(ctx context.Context, app bootstrap.App, command commands.
 			}
 		}
 		return nil
+	case "handoff":
+		handoff, err := app.Store.GetBrowserSessionLoginHandoff(ctx, command.HandoffID)
+		if err != nil {
+			return err
+		}
+		view := newBrowserSessionHandoffView(handoff)
+		if command.JSON {
+			return commands.WriteJSON(stdout, browserSessionHandoffEnvelope{Handoff: view})
+		}
+		_, err = fmt.Fprintf(stdout, "browser_session_handoff=%s login_request=%d session=%d status=%s allowed_actions=%s\n", view.HandoffID, view.LoginRequestID, view.SessionID, view.Status, view.AllowedActions)
+		return err
 	default:
 		return fmt.Errorf(commands.BrowserUsage)
 	}
@@ -413,6 +440,20 @@ func newBrowserSessionLoginRequestView(request sqlite.BrowserSessionLoginRequest
 		CompletedAt: formatBrowserSessionOptionalTime(request.CompletedAt),
 		CreatedAt:   formatBrowserSessionTime(request.CreatedAt),
 		UpdatedAt:   formatBrowserSessionTime(request.UpdatedAt),
+	}
+}
+
+func newBrowserSessionHandoffView(handoff sqlite.BrowserSessionLoginHandoff) browserSessionHandoffView {
+	return browserSessionHandoffView{
+		HandoffID:      handoff.HandoffID,
+		LoginRequestID: handoff.LoginRequest.ID,
+		SessionID:      handoff.Session.ID,
+		SessionName:    handoff.Session.Name,
+		Domain:         handoff.Session.Domain,
+		AccountHint:    handoff.Session.AccountHint,
+		ExpiresAt:      formatBrowserSessionTime(handoff.LoginRequest.ExpiresAt),
+		Status:         string(handoff.LoginRequest.Status),
+		AllowedActions: "manual_login_only",
 	}
 }
 
