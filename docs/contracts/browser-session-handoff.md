@@ -6,7 +6,7 @@ date: 2026-05-06
 
 # Browser Session Handoff Contract
 
-This contract defines the Odin-native handoff for manual Huginn browser login and reusable authenticated read-only sessions. The session metadata and login request metadata slices are implemented. Real NoVNC/Tailscale handoff, browser launch, browser profile persistence, login automation, and authenticated session attachment remain future work.
+This contract defines the Odin-native handoff for manual Huginn browser login and reusable authenticated read-only sessions. The session metadata, login request metadata, and manual verification metadata slices are implemented. Real NoVNC/Tailscale handoff, browser launch, browser profile persistence, login automation, read-only verification checks, and authenticated session attachment remain future work.
 
 ## Existing State
 
@@ -17,6 +17,7 @@ This contract defines the Odin-native handoff for manual Huginn browser login an
 - Goal state, goal evidence, blockers, and audit events are persisted in SQLite. Goal runner ticks do not execute created or planned goals, and approved goals block when no executor/action exists.
 - `odin browser session login-request --id <session_id> --json` records metadata-only manual login requests with `handoff_url: null` until a real private handoff service exists.
 - `odin browser session login-requests --id <session_id> --json` lists persisted login request metadata for one session.
+- `odin browser session verify --id <session_id> [--login-request-id <id>] --json` records metadata-only operator verification, sets `last_verified_at`, moves the session to `verified`, and completes the login request when one is provided.
 - Older Huginn/Plaid/Google notes describe narrow attended browser needs, but they do not define a durable Odin browser session profile authority.
 
 ## Non-Goals
@@ -26,6 +27,7 @@ This contract defines the Odin-native handoff for manual Huginn browser login an
 - No form submit, message send, purchase, account change, delete, or external mutation execution.
 - No NoVNC implementation in this slice.
 - No cookies, browser profile files, or profile bytes are created by this design.
+- No browser-observed account binding or read-only domain verification check is performed by the metadata-only verification slice.
 - No Codex, Huginn, or browser executor implementation is added by the metadata slices.
 
 ## Session Concepts
@@ -84,7 +86,7 @@ The session lifecycle is:
 4. `expired`: expiration or reauth policy requires manual login again before reuse.
 5. `revoked`: operator or policy permanently disables reuse until a new profile is created.
 
-Allowed lifecycle transitions for the first implementation should be `created -> login_requested -> verified`, `verified -> expired`, `expired -> login_requested`, and any non-revoked state to `revoked`. Direct `created -> verified` is not allowed because manual login and verification must be auditable as separate steps.
+Allowed lifecycle transitions for the metadata implementation are `created -> login_requested -> verified`, `created -> verified` through explicit operator verification, `verified -> expired`, `expired -> login_requested`, and any non-revoked state to `revoked`. When a login request exists, verification should complete that request so manual login and verification remain auditable as separate records.
 
 ### Expiration and Reauth Rules
 
@@ -126,9 +128,9 @@ Forbidden goal types for session reuse:
 6. The handoff URL is reachable only on the operator-approved private network path, such as Tailscale to a NoVNC endpoint. It must be time-limited and bound to the session profile.
 7. The operator completes username, password, passkey, 2FA, consent, and account selection manually in the remote browser.
 8. Odin saves only the encrypted browser profile state, never credentials or 2FA secrets.
-9. The operator runs `odin browser session verify --profile <profile_key> --json`, or the login flow asks Odin to verify after the browser closes.
-10. Verification performs read-only checks: domain match, account binding match when visible, no active login challenge, and optional operator-approved URL snapshot.
-11. Odin appends `browser.session_status_changed` with status `verified` and records profile status `verified`.
+9. The operator runs `odin browser session verify --id <session_id> [--login-request-id <id>] --json`, or a future login flow asks Odin to verify after the browser closes.
+10. The current metadata-only verification records operator-attested verification, sets `last_verified_at`, marks the session `verified`, and optionally completes the login request. A later slice must add read-only checks for domain match, account binding match when visible, no active login challenge, and optional operator-approved URL snapshot before verified profiles can be attached to browser runs.
+11. Odin appends `browser.session_status_changed` and `browser.session_verified` with status `verified`, and `browser.session_login_completed` when a login request is completed.
 12. The blocked goal resumes from waiting state only after policy re-evaluates that the verified profile tier allows the requested read-only goal type. It must not transition to `approved_for_execution` unless a normal approval path already did that separately.
 
 ## CLI Contract
@@ -143,17 +145,14 @@ odin browser session status --id <id> --status <status> --json
 odin browser session revoke --id <id> --json
 odin browser session login-request --id <id> --json
 odin browser session login-requests --id <id> --json
+odin browser session verify --id <id> [--login-request-id <id>] --json
 ```
 
 `--permission-tier authenticated_read` is accepted by the CLI as an operator-facing alias for stored tier `authenticated_readonly`. If `--profile-path` is omitted, Odin records the metadata-only default `browser-sessions/profiles/<sanitized-name>` and does not create a directory.
 
 `login-request` creates request metadata only. Its JSON envelope returns a `login_request` object with `handoff_url: null` until the future private handoff service can provide a short-lived operator URL. It must not launch a browser, write a browser profile, store credential material, or mark the session verified.
 
-Future manual handoff slices may add:
-
-```bash
-odin browser session verify --id <id> [--goal-id <id>] --json
-```
+`verify` records metadata-only operator verification. It must not launch a browser, inspect a profile directory, store credential material, or approve/execute a goal. Revoked sessions cannot be verified. Expired or cancelled login requests cannot be completed.
 
 JSON output should follow the existing Odin style: stable top-level envelopes, snake-case keys, and explicit IDs. Suggested envelopes:
 
@@ -240,12 +239,13 @@ If a future attended action is approved, it must use the existing approval syste
 
 ## Audit Events
 
-All session state changes must append runtime events in the same SQL transaction as the profile row mutation. The future implementation should add a `browser_session` stream type rather than overloading the goal stream for profile-local lifecycle.
+All session state changes must append runtime events in the same SQL transaction as the profile row mutation. Browser session metadata uses a `browser_session` stream type rather than overloading the goal stream for profile-local lifecycle.
 
 Required event types for the metadata foundation:
 
 - `browser.session_created`
 - `browser.session_status_changed`
+- `browser.session_verified`
 - `browser.session_revoked`
 - `browser.session_login_requested`
 - `browser.session_login_completed`
@@ -269,7 +269,7 @@ Suggested payload fields:
 - `actor`
 - `expires_at`
 - `handoff_expires_at`
-- `verification_result`
+- `last_verified_at`
 - `policy_decision`
 
 Audit payloads must not contain passwords, cookies, tokens, passkey material, TOTP values, backup codes, raw credential prompts, or screenshot text that reveals secrets.
@@ -290,7 +290,7 @@ Rules:
 1. Contract tests and store schema: add browser session profile metadata tables, event constants, and tests proving create/verify/revoke append runtime events in the same transaction.
 2. CLI metadata surface: add `odin browser session create|list|show|status|revoke` with JSON output, no browser launch, and fail-closed policy.
 3. Login request metadata surface: implemented `odin browser session login-request|login-requests` to record and inspect metadata-only manual login requests with `handoff_url: null`.
-4. Manual verification surface: add `odin browser session verify` with read-only domain/account checks and no credential handling.
+4. Manual verification metadata surface: implemented `odin browser session verify` to set session status `verified`, record `last_verified_at`, and optionally complete a login request, with no browser launch or credential handling.
 5. Goal waiting integration: add `waiting_for_human_login` status or blocker-specific goal event handling, then prove the runner skips waiting goals.
 6. Encrypted profile storage: add encrypted profile root handling and policy denial for unencrypted profiles.
 7. Authenticated read-only attachment: allow `odin browser run` and goal runner evidence collection to attach a verified `authenticated_readonly` profile for allowed domains only.

@@ -330,3 +330,168 @@ func TestBrowserSessionLoginRequestLifecyclePersistsAndAudits(t *testing.T) {
 		t.Fatalf("browser.session_login_expired events = %d, want 1", counts[runtimeevents.EventBrowserSessionLoginExpired])
 	}
 }
+
+func TestBrowserSessionManualVerificationCompletesLoginRequestAndAudits(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(filepath.Join(t.TempDir(), "browser-session-verify.db"))
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer store.Close()
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
+	}
+	now := time.Date(2026, 5, 6, 20, 0, 0, 0, time.UTC)
+	store.Now = func() time.Time { return now }
+
+	session, err := store.CreateBrowserSession(ctx, CreateBrowserSessionParams{
+		Name:           "Google main",
+		Domain:         "google.com",
+		PermissionTier: BrowserSessionPermissionTierAuthenticatedReadOnly,
+		ProfilePath:    "browser-sessions/profiles/google-main",
+	})
+	if err != nil {
+		t.Fatalf("CreateBrowserSession() error = %v", err)
+	}
+	request, err := store.CreateBrowserSessionLoginRequest(ctx, CreateBrowserSessionLoginRequestParams{
+		SessionID: session.ID,
+		ExpiresAt: now.Add(10 * time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("CreateBrowserSessionLoginRequest() error = %v", err)
+	}
+
+	verifiedAt := now.Add(2 * time.Minute)
+	store.Now = func() time.Time { return verifiedAt }
+	verified, completed, err := store.VerifyBrowserSession(ctx, VerifyBrowserSessionParams{
+		SessionID:      session.ID,
+		LoginRequestID: request.ID,
+		Actor:          "operator",
+		Reason:         "manual login completed",
+	})
+	if err != nil {
+		t.Fatalf("VerifyBrowserSession() error = %v", err)
+	}
+	if verified.Status != BrowserSessionStatusVerified {
+		t.Fatalf("verified.Status = %q, want %q", verified.Status, BrowserSessionStatusVerified)
+	}
+	if verified.LastVerifiedAt == nil || !verified.LastVerifiedAt.Equal(verifiedAt) {
+		t.Fatalf("verified.LastVerifiedAt = %v, want %v", verified.LastVerifiedAt, verifiedAt)
+	}
+	if completed == nil || completed.ID != request.ID || completed.Status != BrowserSessionLoginRequestStatusCompleted || completed.CompletedAt == nil {
+		t.Fatalf("completed request = %+v, want completed login request", completed)
+	}
+	persistedRequest, err := store.GetBrowserSessionLoginRequest(ctx, request.ID)
+	if err != nil {
+		t.Fatalf("GetBrowserSessionLoginRequest() error = %v", err)
+	}
+	if persistedRequest.Status != BrowserSessionLoginRequestStatusCompleted || persistedRequest.CompletedAt == nil {
+		t.Fatalf("persisted request = %+v, want completed", persistedRequest)
+	}
+
+	events, err := store.ListEvents(ctx, ListEventsParams{})
+	if err != nil {
+		t.Fatalf("ListEvents() error = %v", err)
+	}
+	counts := map[runtimeevents.Type]int{}
+	for _, event := range events {
+		if event.StreamType == runtimeevents.StreamBrowserSession {
+			counts[event.Type]++
+			payload := strings.ToLower(string(event.Payload))
+			for _, forbidden := range []string{"password", "totp", "backup_code", "cookie", "profile_bytes"} {
+				if strings.Contains(payload, forbidden) {
+					t.Fatalf("browser session verification payload contains forbidden token %q: %s", forbidden, payload)
+				}
+			}
+		}
+	}
+	if counts[runtimeevents.EventBrowserSessionStatusChanged] != 1 {
+		t.Fatalf("browser.session_status_changed events = %d, want 1", counts[runtimeevents.EventBrowserSessionStatusChanged])
+	}
+	if counts[runtimeevents.EventBrowserSessionVerified] != 1 {
+		t.Fatalf("browser.session_verified events = %d, want 1", counts[runtimeevents.EventBrowserSessionVerified])
+	}
+	if counts[runtimeevents.EventBrowserSessionLoginCompleted] != 1 {
+		t.Fatalf("browser.session_login_completed events = %d, want 1", counts[runtimeevents.EventBrowserSessionLoginCompleted])
+	}
+}
+
+func TestBrowserSessionManualVerificationRejectsRevokedAndInvalidLoginRequests(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(filepath.Join(t.TempDir(), "browser-session-verify-rejections.db"))
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer store.Close()
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
+	}
+	now := time.Date(2026, 5, 6, 21, 0, 0, 0, time.UTC)
+	store.Now = func() time.Time { return now }
+
+	session, err := store.CreateBrowserSession(ctx, CreateBrowserSessionParams{
+		Name:           "Google main",
+		Domain:         "google.com",
+		PermissionTier: BrowserSessionPermissionTierAuthenticatedReadOnly,
+		ProfilePath:    "browser-sessions/profiles/google-main",
+	})
+	if err != nil {
+		t.Fatalf("CreateBrowserSession() error = %v", err)
+	}
+	expiring, err := store.CreateBrowserSessionLoginRequest(ctx, CreateBrowserSessionLoginRequestParams{
+		SessionID: session.ID,
+		ExpiresAt: now.Add(10 * time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("CreateBrowserSessionLoginRequest() error = %v", err)
+	}
+	expired, err := store.ExpireBrowserSessionLoginRequest(ctx, ExpireBrowserSessionLoginRequestParams{RequestID: expiring.ID})
+	if err != nil {
+		t.Fatalf("ExpireBrowserSessionLoginRequest() error = %v", err)
+	}
+	_, _, err = store.VerifyBrowserSession(ctx, VerifyBrowserSessionParams{
+		SessionID:      session.ID,
+		LoginRequestID: expired.ID,
+		Actor:          "operator",
+		Reason:         "manual login completed",
+	})
+	if err == nil || !strings.Contains(err.Error(), "cannot complete") {
+		t.Fatalf("VerifyBrowserSession(expired request) error = %v, want cannot complete", err)
+	}
+
+	cancelled, err := store.CreateBrowserSessionLoginRequest(ctx, CreateBrowserSessionLoginRequestParams{
+		SessionID: session.ID,
+		ExpiresAt: now.Add(15 * time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("CreateBrowserSessionLoginRequest(cancelled) error = %v", err)
+	}
+	if _, err := store.DB().ExecContext(ctx, `UPDATE browser_session_login_requests SET status = ? WHERE id = ?`, string(BrowserSessionLoginRequestStatusCancelled), cancelled.ID); err != nil {
+		t.Fatalf("set cancelled login request error = %v", err)
+	}
+	_, _, err = store.VerifyBrowserSession(ctx, VerifyBrowserSessionParams{
+		SessionID:      session.ID,
+		LoginRequestID: cancelled.ID,
+		Actor:          "operator",
+		Reason:         "manual login completed",
+	})
+	if err == nil || !strings.Contains(err.Error(), "cannot complete") {
+		t.Fatalf("VerifyBrowserSession(cancelled request) error = %v, want cannot complete", err)
+	}
+
+	if _, err := store.RevokeBrowserSession(ctx, RevokeBrowserSessionParams{
+		SessionID: session.ID,
+		Actor:     "operator",
+		Reason:    "test revocation",
+	}); err != nil {
+		t.Fatalf("RevokeBrowserSession() error = %v", err)
+	}
+	_, _, err = store.VerifyBrowserSession(ctx, VerifyBrowserSessionParams{
+		SessionID: session.ID,
+		Actor:     "operator",
+		Reason:    "manual login completed",
+	})
+	if err == nil || !strings.Contains(err.Error(), "revoked") {
+		t.Fatalf("VerifyBrowserSession(revoked session) error = %v, want revoked rejection", err)
+	}
+}

@@ -215,6 +215,22 @@ func runBrowserSession(ctx context.Context, app bootstrap.App, command commands.
 		}
 		_, err = fmt.Fprintf(stdout, "browser_session=%d status=%s name=%q domain=%s\n", view.ID, view.Status, view.Name, view.Domain)
 		return err
+	case "verify":
+		session, _, err := app.Store.VerifyBrowserSession(ctx, sqlite.VerifyBrowserSessionParams{
+			SessionID:      command.ID,
+			LoginRequestID: command.LoginRequestID,
+			Actor:          "operator",
+			Reason:         "operator manually verified browser session metadata",
+		})
+		if err != nil {
+			return err
+		}
+		view := newBrowserSessionView(session)
+		if command.JSON {
+			return commands.WriteJSON(stdout, browserSessionEnvelope{Session: view})
+		}
+		_, err = fmt.Fprintf(stdout, "browser_session=%d status=%s name=%q domain=%s\n", view.ID, view.Status, view.Name, view.Domain)
+		return err
 	case "login-request":
 		request, err := app.Store.CreateBrowserSessionLoginRequest(ctx, sqlite.CreateBrowserSessionLoginRequestParams{
 			SessionID: command.ID,

@@ -89,6 +89,13 @@ type RevokeBrowserSessionParams struct {
 	Reason    string
 }
 
+type VerifyBrowserSessionParams struct {
+	SessionID      int64
+	LoginRequestID int64
+	Actor          string
+	Reason         string
+}
+
 type CreateBrowserSessionLoginRequestParams struct {
 	SessionID  int64
 	HandoffURL *string
@@ -246,6 +253,9 @@ func (store *Store) UpdateBrowserSessionStatus(ctx context.Context, params Updat
 		if err != nil {
 			return err
 		}
+		if current.Status == BrowserSessionStatusRevoked {
+			return fmt.Errorf("revoked browser session cannot change status")
+		}
 		if current.Status == status {
 			updated = current
 			return nil
@@ -318,6 +328,86 @@ func (store *Store) RevokeBrowserSession(ctx context.Context, params RevokeBrows
 		}, now)
 	})
 	return revoked, err
+}
+
+func (store *Store) VerifyBrowserSession(ctx context.Context, params VerifyBrowserSessionParams) (BrowserSession, *BrowserSessionLoginRequest, error) {
+	if params.SessionID <= 0 {
+		return BrowserSession{}, nil, fmt.Errorf("browser session id must be positive")
+	}
+	if params.LoginRequestID < 0 {
+		return BrowserSession{}, nil, fmt.Errorf("browser session login request id must be positive")
+	}
+	now := store.now()
+	var verified BrowserSession
+	var completed *BrowserSessionLoginRequest
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		current, err := getBrowserSessionTx(ctx, tx, params.SessionID)
+		if err != nil {
+			return err
+		}
+		if current.Status == BrowserSessionStatusRevoked {
+			return fmt.Errorf("revoked browser session cannot be verified")
+		}
+		var request *BrowserSessionLoginRequest
+		if params.LoginRequestID > 0 {
+			currentRequest, err := getBrowserSessionLoginRequestTx(ctx, tx, params.LoginRequestID)
+			if err != nil {
+				return err
+			}
+			if currentRequest.SessionID != current.ID {
+				return fmt.Errorf("browser session login request %d does not belong to session %d", currentRequest.ID, current.ID)
+			}
+			if currentRequest.Status != BrowserSessionLoginRequestStatusRequested {
+				return fmt.Errorf("browser session login request status %q cannot complete", currentRequest.Status)
+			}
+			request = &currentRequest
+		}
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE browser_session_profiles
+			SET status = ?, updated_at = ?, last_verified_at = ?
+			WHERE id = ?
+		`, string(BrowserSessionStatusVerified), formatTime(now), formatTime(now), current.ID); err != nil {
+			return err
+		}
+		verified = current
+		verified.Status = BrowserSessionStatusVerified
+		verified.UpdatedAt = now
+		verified.LastVerifiedAt = &now
+		actor := defaultString(params.Actor, "operator")
+		reason := strings.TrimSpace(params.Reason)
+		if err := appendBrowserSessionEventTx(ctx, tx, verified, runtimeevents.EventBrowserSessionStatusChanged, runtimeevents.BrowserSessionStatusChangedPayload{
+			SessionID:      verified.ID,
+			PreviousStatus: string(current.Status),
+			Status:         string(verified.Status),
+			Actor:          actor,
+			Reason:         reason,
+			LastVerifiedAt: formatTime(now),
+			ExpiresAt:      formatOptionalTime(verified.ExpiresAt),
+		}, now); err != nil {
+			return err
+		}
+		if err := appendBrowserSessionEventTx(ctx, tx, verified, runtimeevents.EventBrowserSessionVerified, runtimeevents.BrowserSessionVerifiedPayload{
+			SessionID:      verified.ID,
+			PreviousStatus: string(current.Status),
+			Status:         string(verified.Status),
+			Actor:          actor,
+			Reason:         reason,
+			LastVerifiedAt: formatTime(now),
+			LoginRequestID: params.LoginRequestID,
+		}, now); err != nil {
+			return err
+		}
+		if request == nil {
+			return nil
+		}
+		updatedRequest, err := completeBrowserSessionLoginRequestTx(ctx, tx, *request, verified, now)
+		if err != nil {
+			return err
+		}
+		completed = &updatedRequest
+		return nil
+	})
+	return verified, completed, err
 }
 
 func (store *Store) CreateBrowserSessionLoginRequest(ctx context.Context, params CreateBrowserSessionLoginRequestParams) (BrowserSessionLoginRequest, error) {
@@ -419,30 +509,41 @@ func (store *Store) CompleteBrowserSessionLoginRequest(ctx context.Context, para
 		if current.Status != BrowserSessionLoginRequestStatusRequested {
 			return fmt.Errorf("browser session login request status %q cannot complete", current.Status)
 		}
-		if _, err := tx.ExecContext(ctx, `
-			UPDATE browser_session_login_requests
-			SET status = ?, completed_at = ?, updated_at = ?
-			WHERE id = ?
-		`, string(BrowserSessionLoginRequestStatusCompleted), formatTime(now), formatTime(now), current.ID); err != nil {
-			return err
-		}
-		updated = current
-		updated.Status = BrowserSessionLoginRequestStatusCompleted
-		updated.CompletedAt = &now
-		updated.UpdatedAt = now
 		session, err := getBrowserSessionTx(ctx, tx, current.SessionID)
 		if err != nil {
 			return err
 		}
-		return appendBrowserSessionEventTx(ctx, tx, session, runtimeevents.EventBrowserSessionLoginCompleted, runtimeevents.BrowserSessionLoginCompletedPayload{
-			SessionID:      session.ID,
-			LoginRequestID: updated.ID,
-			PreviousStatus: string(current.Status),
-			Status:         string(updated.Status),
-			CompletedAt:    formatTime(now),
-		}, now)
+		updated, err = completeBrowserSessionLoginRequestTx(ctx, tx, current, session, now)
+		return err
 	})
 	return updated, err
+}
+
+func completeBrowserSessionLoginRequestTx(ctx context.Context, tx *sql.Tx, current BrowserSessionLoginRequest, session BrowserSession, now time.Time) (BrowserSessionLoginRequest, error) {
+	if current.Status != BrowserSessionLoginRequestStatusRequested {
+		return BrowserSessionLoginRequest{}, fmt.Errorf("browser session login request status %q cannot complete", current.Status)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE browser_session_login_requests
+		SET status = ?, completed_at = ?, updated_at = ?
+		WHERE id = ?
+	`, string(BrowserSessionLoginRequestStatusCompleted), formatTime(now), formatTime(now), current.ID); err != nil {
+		return BrowserSessionLoginRequest{}, err
+	}
+	updated := current
+	updated.Status = BrowserSessionLoginRequestStatusCompleted
+	updated.CompletedAt = &now
+	updated.UpdatedAt = now
+	if err := appendBrowserSessionEventTx(ctx, tx, session, runtimeevents.EventBrowserSessionLoginCompleted, runtimeevents.BrowserSessionLoginCompletedPayload{
+		SessionID:      session.ID,
+		LoginRequestID: updated.ID,
+		PreviousStatus: string(current.Status),
+		Status:         string(updated.Status),
+		CompletedAt:    formatTime(now),
+	}, now); err != nil {
+		return BrowserSessionLoginRequest{}, err
+	}
+	return updated, nil
 }
 
 func (store *Store) ExpireBrowserSessionLoginRequest(ctx context.Context, params ExpireBrowserSessionLoginRequestParams) (BrowserSessionLoginRequest, error) {

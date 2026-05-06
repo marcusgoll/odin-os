@@ -129,6 +129,7 @@ const (
 	EventGoalEvidenceRecorded               Type = "goal.evidence_recorded"
 	EventBrowserSessionCreated              Type = "browser.session_created"
 	EventBrowserSessionStatusChanged        Type = "browser.session_status_changed"
+	EventBrowserSessionVerified             Type = "browser.session_verified"
 	EventBrowserSessionRevoked              Type = "browser.session_revoked"
 	EventBrowserSessionLoginRequested       Type = "browser.session_login_requested"
 	EventBrowserSessionLoginCompleted       Type = "browser.session_login_completed"
@@ -356,6 +357,16 @@ type BrowserSessionStatusChangedPayload struct {
 	Reason         string `json:"reason,omitempty"`
 	LastVerifiedAt string `json:"last_verified_at,omitempty"`
 	ExpiresAt      string `json:"expires_at,omitempty"`
+}
+
+type BrowserSessionVerifiedPayload struct {
+	SessionID      int64  `json:"session_id"`
+	PreviousStatus string `json:"previous_status"`
+	Status         string `json:"status"`
+	Actor          string `json:"actor,omitempty"`
+	Reason         string `json:"reason,omitempty"`
+	LastVerifiedAt string `json:"last_verified_at"`
+	LoginRequestID int64  `json:"login_request_id,omitempty"`
 }
 
 type BrowserSessionRevokedPayload struct {

@@ -1,6 +1,9 @@
 package commands
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestParseBrowserRunDefaultsAllowedDomainFromURL(t *testing.T) {
 	command, err := ParseBrowser([]string{"run", "--goal-id", "42", "--url", "https://example.com/research", "--json"})
@@ -91,5 +94,20 @@ func TestParseBrowserSessionLoginRequestCommands(t *testing.T) {
 	}
 	if list.Name != "session" || list.SessionAction != "login-requests" || list.ID != 42 || !list.JSON {
 		t.Fatalf("login-requests command = %+v, want parsed list command", list)
+	}
+}
+
+func TestParseBrowserSessionVerifyCommand(t *testing.T) {
+	command, err := ParseBrowser([]string{"session", "verify", "--id", "42", "--login-request-id", "7", "--json"})
+	if err != nil {
+		t.Fatalf("ParseBrowser(session verify) error = %v", err)
+	}
+	if command.Name != "session" || command.SessionAction != "verify" || command.ID != 42 || command.LoginRequestID != 7 || !command.JSON {
+		t.Fatalf("verify command = %+v, want parsed verify request", command)
+	}
+
+	_, err = ParseBrowser([]string{"session", "verify", "--id", "42", "--status", "verified", "--json"})
+	if err == nil || !strings.Contains(err.Error(), "only accepts --id, --login-request-id, and --json") {
+		t.Fatalf("ParseBrowser(session verify with status) error = %v, want rejected status flag", err)
 	}
 }
