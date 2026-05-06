@@ -9,6 +9,9 @@ import (
 
 const (
 	StatusNotImplemented = "not_implemented"
+	StatusStarted        = "started"
+	StatusFailed         = "failed"
+	StatusExpired        = "expired"
 	StatusCancelled      = "cancelled"
 )
 

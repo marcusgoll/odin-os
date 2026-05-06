@@ -480,7 +480,11 @@ func startBrowserSessionRunner(ctx context.Context, app bootstrap.App, runnerID 
 	if handoff.LoginRequest.ID != runner.LoginRequestID || handoff.Session.ID != runner.SessionID {
 		return sqlite.BrowserHandoffRunner{}, fmt.Errorf("browser handoff runner link mismatch")
 	}
-	response, err := browserhandoff.StubRunner{}.Start(ctx, browserhandoff.StartRequest{
+	selectedRunner, err := browserhandoff.RunnerFromEnv()
+	if err != nil {
+		return sqlite.BrowserHandoffRunner{}, err
+	}
+	response, err := selectedRunner.Start(ctx, browserhandoff.StartRequest{
 		SessionID:      handoff.Session.ID,
 		LoginRequestID: handoff.LoginRequest.ID,
 		HandoffID:      handoff.HandoffID,
@@ -495,6 +499,16 @@ func startBrowserSessionRunner(ctx context.Context, app bootstrap.App, runnerID 
 		return sqlite.BrowserHandoffRunner{}, err
 	}
 	switch response.Status {
+	case browserhandoff.StatusStarted:
+		return app.Store.UpdateBrowserHandoffRunnerStatus(ctx, sqlite.UpdateBrowserHandoffRunnerStatusParams{
+			ID:        runner.ID,
+			Status:    sqlite.BrowserHandoffRunnerStatusStarted,
+			ViewerURL: nonEmptyBrowserSessionStringPtr(response.ViewerURL),
+			RunnerID:  nonEmptyBrowserSessionStringPtr(response.RunnerID),
+			ProcessID: positiveBrowserSessionInt64Ptr(response.ProcessID),
+			Actor:     "operator",
+			Reason:    "browser handoff runner fixture started",
+		})
 	case browserhandoff.StatusNotImplemented:
 		errorCode := response.ErrorCode
 		if strings.TrimSpace(errorCode) == "" {
@@ -511,6 +525,44 @@ func startBrowserSessionRunner(ctx context.Context, app bootstrap.App, runnerID 
 			ErrorMessage: &errorMessage,
 			Actor:        "operator",
 			Reason:       "browser handoff StubRunner returned not_implemented",
+		})
+	case browserhandoff.StatusFailed:
+		errorCode := response.ErrorCode
+		if strings.TrimSpace(errorCode) == "" {
+			errorCode = "fixture_failed"
+		}
+		errorMessage := response.ErrorMessage
+		if strings.TrimSpace(errorMessage) == "" {
+			errorMessage = "browser handoff fixture runner failed"
+		}
+		return app.Store.UpdateBrowserHandoffRunnerStatus(ctx, sqlite.UpdateBrowserHandoffRunnerStatusParams{
+			ID:           runner.ID,
+			Status:       sqlite.BrowserHandoffRunnerStatusFailed,
+			RunnerID:     nonEmptyBrowserSessionStringPtr(response.RunnerID),
+			ProcessID:    positiveBrowserSessionInt64Ptr(response.ProcessID),
+			ErrorCode:    &errorCode,
+			ErrorMessage: &errorMessage,
+			Actor:        "operator",
+			Reason:       "browser handoff fixture runner failed",
+		})
+	case browserhandoff.StatusExpired:
+		errorCode := response.ErrorCode
+		if strings.TrimSpace(errorCode) == "" {
+			errorCode = "fixture_timeout"
+		}
+		errorMessage := response.ErrorMessage
+		if strings.TrimSpace(errorMessage) == "" {
+			errorMessage = "browser handoff fixture runner timed out"
+		}
+		return app.Store.UpdateBrowserHandoffRunnerStatus(ctx, sqlite.UpdateBrowserHandoffRunnerStatusParams{
+			ID:           runner.ID,
+			Status:       sqlite.BrowserHandoffRunnerStatusExpired,
+			RunnerID:     nonEmptyBrowserSessionStringPtr(response.RunnerID),
+			ProcessID:    positiveBrowserSessionInt64Ptr(response.ProcessID),
+			ErrorCode:    &errorCode,
+			ErrorMessage: &errorMessage,
+			Actor:        "operator",
+			Reason:       "browser handoff fixture runner timed out",
 		})
 	default:
 		return sqlite.BrowserHandoffRunner{}, fmt.Errorf("unsupported browser handoff runner start status %q", response.Status)
@@ -696,6 +748,14 @@ func browserSessionStringPtrValue(value *string) string {
 	return *value
 }
 
+func nonEmptyBrowserSessionStringPtr(value string) *string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil
+	}
+	return &value
+}
+
 func cloneBrowserSessionInt64Ptr(value *int64) *int64 {
 	if value == nil {
 		return nil
@@ -703,6 +763,13 @@ func cloneBrowserSessionInt64Ptr(value *int64) *int64 {
 	ptr := new(int64)
 	*ptr = *value
 	return ptr
+}
+
+func positiveBrowserSessionInt64Ptr(value int64) *int64 {
+	if value <= 0 {
+		return nil
+	}
+	return &value
 }
 
 func formatBrowserSessionOptionalTime(value *time.Time) string {

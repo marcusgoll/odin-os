@@ -409,6 +409,59 @@ func TestRunBrowserSessionRunnerStartUsesStubRunnerSafely(t *testing.T) {
 	}
 }
 
+func TestRunBrowserSessionRunnerStartFixtureUpdatesMetadataSafely(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	root := testRepoRoot(t)
+	fixtureCommand := testLifecycleExecutablePath(t, "true")
+	t.Setenv("ODIN_BROWSER_HANDOFF_RUNNER", "fixture")
+	t.Setenv("ODIN_BROWSER_HANDOFF_FIXTURE_COMMAND", fixtureCommand)
+	t.Setenv("ODIN_BROWSER_HANDOFF_FIXTURE_ALLOWED_COMMANDS", fixtureCommand)
+	t.Setenv("ODIN_BROWSER_HANDOFF_FIXTURE_TIMEOUT_SECONDS", "2")
+
+	run := func(args ...string) string {
+		t.Helper()
+		var output bytes.Buffer
+		if err := Run(context.Background(), root, args, strings.NewReader(""), &output); err != nil {
+			t.Fatalf("Run(%v) error = %v\noutput=%s", args, err, output.String())
+		}
+		return output.String()
+	}
+
+	created := decodeBrowserSessionEnvelope(t, []byte(run(
+		"browser", "session", "create",
+		"--name", "fixture-start",
+		"--domain", "example.com",
+		"--permission-tier", "authenticated_read",
+		"--json",
+	)))
+	loginRequest := decodeBrowserSessionLoginRequestEnvelope(t, []byte(run("browser", "session", "login-request", "--id", int64String(created.ID), "--json")))
+	runner := decodeBrowserSessionRunnerEnvelope(t, []byte(run("browser", "session", "runner", "create", "--login-request-id", int64String(loginRequest.ID), "--json")))
+
+	started := decodeBrowserSessionRunnerEnvelope(t, []byte(run("browser", "session", "runner", "start", "--id", int64String(runner.ID), "--json")))
+	if started.Status != "started" || started.StartedAt == "" {
+		t.Fatalf("started runner = %+v, want started metadata", started)
+	}
+	if started.RunnerID == nil || *started.RunnerID == "" || started.ProcessID == nil || *started.ProcessID <= 0 {
+		t.Fatalf("started runner = %+v, want fixture runner id and process id", started)
+	}
+	if started.ViewerURL != nil {
+		t.Fatalf("started runner viewer_url = %v, want null fixture viewer URL", started.ViewerURL)
+	}
+	if _, err := os.Stat(filepath.Join(root, "browser-sessions")); !os.IsNotExist(err) {
+		t.Fatalf("browser-sessions directory exists after fixture runner start err=%v, want metadata-only fixture start", err)
+	}
+
+	logs := run("logs", "--json")
+	if !strings.Contains(logs, `"type": "browser.handoff_runner_started"`) {
+		t.Fatalf("logs output = %s, want started runner audit event", logs)
+	}
+	for _, forbidden := range []string{"password", "totp", "backup_code", "cookie", "profile_bytes"} {
+		if strings.Contains(strings.ToLower(logs), forbidden) {
+			t.Fatalf("logs output contains forbidden credential/profile byte token %q: %s", forbidden, logs)
+		}
+	}
+}
+
 func TestRunBrowserSessionHandoffShowValidatesReadOnlyMetadata(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	root := testRepoRoot(t)
@@ -851,4 +904,16 @@ func decodeBrowserSessionRunnerEnvelope(t *testing.T, payload []byte) browserSes
 		t.Fatalf("browser session runner json decode error = %v; output=%s", err, string(payload))
 	}
 	return envelope.Runner
+}
+
+func testLifecycleExecutablePath(t *testing.T, name string) string {
+	t.Helper()
+	for _, dir := range []string{"/usr/bin", "/bin"} {
+		path := filepath.Join(dir, name)
+		if info, err := os.Stat(path); err == nil && !info.IsDir() {
+			return path
+		}
+	}
+	t.Fatalf("required fixture executable %q not found", name)
+	return ""
 }
