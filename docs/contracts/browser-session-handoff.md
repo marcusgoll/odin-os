@@ -156,10 +156,16 @@ odin browser session verify --id <id> [--login-request-id <id>] --json
 odin browser session prepare-profile --id <id> --json
 ```
 
-`odin serve` also exposes a read-only JSON inspection route:
+`odin serve` also exposes a read-only inspection route. JSON remains the default response for API clients:
 
 ```http
 GET /browser/session/handoff?handoff_id=<id>
+```
+
+The same route returns a static HTML shell when the request sends `Accept: text/html` or includes `format=html`:
+
+```http
+GET /browser/session/handoff?handoff_id=<id>&format=html
 ```
 
 `--permission-tier authenticated_read` is accepted by the CLI as an operator-facing alias for stored tier `authenticated_readonly`. If `--profile-path` is omitted, Odin records the metadata-only default `browser-sessions/profiles/<sanitized-name>` and does not create a directory. Explicit profile paths must remain under `browser-sessions/profiles/`, must be relative to `ODIN_ROOT`, and must not contain path traversal.
@@ -169,6 +175,8 @@ GET /browser/session/handoff?handoff_id=<id>
 The handoff URL is not proof that a browser handoff service exists. Odin now exposes only a read-only HTTP metadata inspection route. This slice does not add NoVNC, Tailscale service, browser launch, browser profile write, credential storage, or session verification. Operators should treat any base URL as a future private-network browser handoff surface only, intended for Tailscale or another operator-approved private path after that service is implemented.
 
 `handoff show` and `GET /browser/session/handoff?handoff_id=<id>` are read-only lookups for safe manual-login metadata. They require a handoff ID, reject missing IDs, unknown handoffs, non-`requested` login requests, expired requests, and revoked or missing linked sessions. They return only the handoff ID, login request ID, session ID, session name, domain, optional account hint, expiration, request status, and `allowed_actions: manual_login_only`. They must not append runtime events, launch a browser, create NoVNC/Tailscale resources, write profile files, or store credential material.
+
+The HTML shell is static and informational. It displays safe metadata, states that no browser session is launched yet, states that Odin is not collecting credentials, and states that login and 2FA will be manual in a future handoff step. Dynamic values must be escaped. The page must not include external scripts, inline scripts, forms, credential inputs, password fields, or profile/session write affordances.
 
 `verify` records metadata-only operator verification. It must not launch a browser, inspect a profile directory, store credential material, or approve/execute a goal. Revoked sessions cannot be verified. Expired or cancelled login requests cannot be completed.
 

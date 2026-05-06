@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"html/template"
 	"io"
 	"net/http"
 	"strconv"
@@ -330,7 +331,12 @@ func handleBrowserSessionHandoffShow(writer http.ResponseWriter, request *http.R
 		writeAPIError(writer, statusCode, code, err.Error())
 		return
 	}
-	writeJSON(writer, http.StatusOK, browserSessionHandoffResponse{Handoff: newBrowserSessionHandoffView(handoff)})
+	view := newBrowserSessionHandoffView(handoff)
+	if wantsBrowserSessionHandoffHTML(request) {
+		writeBrowserSessionHandoffHTML(writer, view)
+		return
+	}
+	writeJSON(writer, http.StatusOK, browserSessionHandoffResponse{Handoff: view})
 }
 
 func newBrowserSessionHandoffView(handoff sqlite.BrowserSessionLoginHandoff) browserSessionHandoffView {
@@ -363,6 +369,60 @@ func browserSessionHandoffErrorStatus(err error) (int, string) {
 	default:
 		return http.StatusBadRequest, "browser_handoff_invalid"
 	}
+}
+
+func wantsBrowserSessionHandoffHTML(request *http.Request) bool {
+	format := strings.ToLower(strings.TrimSpace(request.URL.Query().Get("format")))
+	if format == "html" {
+		return true
+	}
+	if format == "json" {
+		return false
+	}
+	return strings.Contains(strings.ToLower(request.Header.Get("Accept")), "text/html")
+}
+
+var browserSessionHandoffHTMLTemplate = template.Must(template.New("browser_session_handoff").Parse(`<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Browser Login Handoff</title>
+  <style>
+    body { margin: 0; font-family: system-ui, sans-serif; color: #111827; background: #f8fafc; }
+    main { max-width: 720px; margin: 48px auto; padding: 0 24px; }
+    section { background: #ffffff; border: 1px solid #d1d5db; border-radius: 8px; padding: 24px; }
+    h1 { margin: 0 0 16px; font-size: 1.5rem; }
+    dl { display: grid; grid-template-columns: 160px 1fr; gap: 10px 16px; margin: 20px 0; }
+    dt { color: #4b5563; font-weight: 600; }
+    dd { margin: 0; overflow-wrap: anywhere; }
+    .notice { border-left: 4px solid #2563eb; background: #eff6ff; padding: 12px 16px; }
+  </style>
+</head>
+<body>
+  <main>
+    <section>
+      <h1>Browser Login Handoff</h1>
+      <p class="notice">No browser session is launched yet. Odin is not collecting credentials. Login and 2FA will be manual in a future handoff step.</p>
+      <dl>
+        <dt>Session</dt><dd>{{.SessionName}}</dd>
+        <dt>Domain</dt><dd>{{.Domain}}</dd>
+        {{if .AccountHint}}<dt>Account hint</dt><dd>{{.AccountHint}}</dd>{{end}}
+        <dt>Expires at</dt><dd>{{.ExpiresAt}}</dd>
+        <dt>Status</dt><dd>{{.Status}}</dd>
+        <dt>Allowed action</dt><dd>{{.AllowedActions}}</dd>
+      </dl>
+    </section>
+  </main>
+</body>
+</html>
+`))
+
+func writeBrowserSessionHandoffHTML(writer http.ResponseWriter, view browserSessionHandoffView) {
+	writer.Header().Set("Content-Type", "text/html; charset=utf-8")
+	writer.Header().Set("X-Content-Type-Options", "nosniff")
+	writer.WriteHeader(http.StatusOK)
+	_ = browserSessionHandoffHTMLTemplate.Execute(writer, view)
 }
 
 type githubIssuesWebhookPayload struct {

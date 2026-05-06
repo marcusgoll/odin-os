@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"path"
 	"path/filepath"
 	"runtime"
@@ -572,6 +573,9 @@ func TestOperationalHandlerBrowserSessionHandoffShowIsReadOnly(t *testing.T) {
 		body, _ := io.ReadAll(response.Body)
 		t.Fatalf("handoff status = %d body=%s, want %d", response.StatusCode, string(body), http.StatusOK)
 	}
+	if contentType := response.Header.Get("Content-Type"); !strings.Contains(contentType, "application/json") {
+		t.Fatalf("handoff Content-Type = %q, want application/json", contentType)
+	}
 	var payload struct {
 		Handoff struct {
 			HandoffID      string `json:"handoff_id"`
@@ -596,6 +600,95 @@ func TestOperationalHandlerBrowserSessionHandoffShowIsReadOnly(t *testing.T) {
 	}
 	if eventsAfter := countBrowserSessionEvents(t, ctx, store); eventsAfter != eventsBefore {
 		t.Fatalf("browser session event count changed from %d to %d on read-only handoff lookup", eventsBefore, eventsAfter)
+	}
+}
+
+func TestOperationalHandlerBrowserSessionHandoffReturnsStaticEscapedHTML(t *testing.T) {
+	ctx := context.Background()
+	store := openStore(t)
+	defer store.Close()
+	now := time.Date(2026, 5, 6, 20, 0, 0, 0, time.UTC)
+	store.Now = func() time.Time { return now }
+	store.BrowserSessionHandoffID = func() (string, error) { return "opaque-html-handoff", nil }
+
+	session, err := store.CreateBrowserSession(ctx, sqlite.CreateBrowserSessionParams{
+		Name:           `google <script>alert(1)</script>`,
+		Domain:         "google.com",
+		AccountHint:    `marcus"><input name=password>`,
+		PermissionTier: sqlite.BrowserSessionPermissionTierAuthenticatedReadOnly,
+	})
+	if err != nil {
+		t.Fatalf("CreateBrowserSession() error = %v", err)
+	}
+	request, err := store.CreateBrowserSessionLoginRequest(ctx, sqlite.CreateBrowserSessionLoginRequestParams{
+		SessionID: session.ID,
+		ExpiresAt: now.Add(10 * time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("CreateBrowserSessionLoginRequest() error = %v", err)
+	}
+
+	server := httptest.NewServer(httpapi.NewOperationalHandler(httpapi.Dependencies{
+		Store: store,
+	}))
+	defer server.Close()
+
+	httpRequest, err := http.NewRequest(http.MethodGet, server.URL+"/browser/session/handoff?handoff_id="+url.QueryEscape(request.HandoffID), nil)
+	if err != nil {
+		t.Fatalf("NewRequest() error = %v", err)
+	}
+	httpRequest.Header.Set("Accept", "text/html")
+	response, err := http.DefaultClient.Do(httpRequest)
+	if err != nil {
+		t.Fatalf("GET handoff html error = %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("handoff html status = %d body=%s, want %d", response.StatusCode, string(body), http.StatusOK)
+	}
+	if contentType := response.Header.Get("Content-Type"); !strings.Contains(contentType, "text/html") {
+		t.Fatalf("handoff html Content-Type = %q, want text/html", contentType)
+	}
+	bodyBytes, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatalf("ReadAll(handoff html) error = %v", err)
+	}
+	body := string(bodyBytes)
+	for _, want := range []string{
+		"Browser Login Handoff",
+		"google &lt;script&gt;alert(1)&lt;/script&gt;",
+		"google.com",
+		"manual_login_only",
+		"No browser session is launched yet.",
+		"Odin is not collecting credentials.",
+		"Login and 2FA will be manual in a future handoff step.",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("handoff html body missing %q:\n%s", want, body)
+		}
+	}
+	for _, forbidden := range []string{
+		`google <script>alert(1)</script>`,
+		`<script`,
+		`<form`,
+		`<input`,
+		`type="password"`,
+		`<textarea`,
+	} {
+		if strings.Contains(strings.ToLower(body), strings.ToLower(forbidden)) {
+			t.Fatalf("handoff html body contains forbidden %q:\n%s", forbidden, body)
+		}
+	}
+
+	formatResponse, err := http.Get(server.URL + "/browser/session/handoff?format=html&handoff_id=" + url.QueryEscape(request.HandoffID))
+	if err != nil {
+		t.Fatalf("GET handoff format html error = %v", err)
+	}
+	defer formatResponse.Body.Close()
+	if formatResponse.StatusCode != http.StatusOK || !strings.Contains(formatResponse.Header.Get("Content-Type"), "text/html") {
+		body, _ := io.ReadAll(formatResponse.Body)
+		t.Fatalf("format=html status/content-type/body = %d/%q/%s, want HTML 200", formatResponse.StatusCode, formatResponse.Header.Get("Content-Type"), string(body))
 	}
 }
 
@@ -668,10 +761,12 @@ func TestOperationalHandlerBrowserSessionHandoffRejectsInvalidStates(t *testing.
 	assertHandoffStatus(t, server.URL+"/browser/session/handoff", http.StatusBadRequest)
 	assertHandoffStatus(t, server.URL+"/browser/session/handoff?handoff_id=missing-http-handoff", http.StatusNotFound)
 	assertHandoffStatus(t, server.URL+"/browser/session/handoff?handoff_id="+completed.HandoffID, http.StatusConflict)
+	assertHandoffStatus(t, server.URL+"/browser/session/handoff?format=html&handoff_id="+completed.HandoffID, http.StatusConflict)
 	store.Now = func() time.Time { return now.Add(11 * time.Minute) }
 	assertHandoffStatus(t, server.URL+"/browser/session/handoff?handoff_id="+expired.HandoffID, http.StatusGone)
 	store.Now = func() time.Time { return now }
 	assertHandoffStatus(t, server.URL+"/browser/session/handoff?handoff_id="+revokedRequest.HandoffID, http.StatusConflict)
+	assertHandoffStatus(t, server.URL+"/browser/session/handoff?format=html&handoff_id="+revokedRequest.HandoffID, http.StatusConflict)
 }
 
 type recordingAdminActions struct {
