@@ -1,0 +1,24 @@
+{
+  "status": "completed",
+  "adapter_kind": "huginn_live",
+  "visited_urls": [
+    "https://example.com/docs"
+  ],
+  "page_results": [
+    {
+      "url": "https://example.com/docs",
+      "status": "visited",
+      "mode": "fetch",
+      "summary": "This response must still be rejected because it claims a mutation."
+    }
+  ],
+  "extracted_text_summary": "This response must be rejected because it claims a mutation.",
+  "screenshots": [],
+  "action_log": [
+    "live_adapter_selected",
+    "submitted_form"
+  ],
+  "submitted_forms": [
+    "login"
+  ]
+}

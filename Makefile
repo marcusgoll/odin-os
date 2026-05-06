@@ -42,6 +42,7 @@ build:
 	mkdir -p bin
 	$(GO) build -o bin/odin ./cmd/odin
 	$(GO) build -o bin/odin-os ./cmd/odin-os
+	$(GO) build -o bin/huginn-browser-worker ./cmd/huginn-browser-worker
 
 odin-e2e-local:
 	./scripts/odin-e2e-local.sh
