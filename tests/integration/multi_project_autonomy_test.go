@@ -175,10 +175,15 @@ func TestCutoverPilotProjectsStayRunnableWithoutLegacyPrimary(t *testing.T) {
 		Now: time.Now,
 	}
 
-	task, err := service.CreateTaskFromAct(ctx, scope.Resolution{
-		Kind:       scope.ScopeProject,
-		ProjectKey: projectManifest.Key,
-	}, "PBS pilot cutover task")
+	task, err := service.CreateTask(ctx, jobsvc.CreateTaskParams{
+		Resolved: scope.Resolution{
+			Kind:       scope.ScopeProject,
+			ProjectKey: projectManifest.Key,
+		},
+		Title:                 "PBS pilot cutover task",
+		ExecutionIntent:       "mutation",
+		ExecutionIntentSource: "test",
+	})
 	if err != nil {
 		t.Fatalf("CreateTaskFromAct() error = %v", err)
 	}

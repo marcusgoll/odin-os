@@ -406,7 +406,7 @@ func TestAlphaAcceptance(t *testing.T) {
 			t.Fatalf("transition output = %q, want limited_action state", output)
 		}
 
-		runOutput, err := runOdinCommandInDir(t, odinRoot, odinBinary, runtimeRoot, env, "", "task", "run", "--project", "sandcastle-demo", "--title", "sandcastle fixture task", "--json")
+		runOutput, err := runOdinCommandInDir(t, odinRoot, odinBinary, runtimeRoot, env, "", "task", "run", "--project", "sandcastle-demo", "--title", "fix sandcastle fixture task", "--json")
 		if err != nil {
 			t.Fatalf("runOdinCommand(task run) error = %v\n%s", err, runOutput)
 		}
