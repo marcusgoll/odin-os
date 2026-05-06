@@ -1,6 +1,10 @@
 package sqlite
 
-import "time"
+import (
+	"time"
+
+	runtimeevents "odin-os/internal/runtime/events"
+)
 
 type Project struct {
 	ID            int64
@@ -85,6 +89,21 @@ type UpsertExternalIssueParams struct {
 	State      string
 	LabelsJSON string
 	SyncStatus string
+}
+
+type RecordExternalGitHubIssueEventParams struct {
+	ProjectID        int64
+	ProjectKey       string
+	ExternalIssueID  int64
+	Provider         string
+	Repo             string
+	Number           int
+	Action           string
+	Title            string
+	BodyHash         string
+	URL              string
+	LabelsJSON       string
+	ExternalEventKey string
 }
 
 type ListExternalIssuesParams struct {
@@ -221,6 +240,8 @@ type Task struct {
 	FollowUpObligationID  *int64
 	FollowUpOccurrenceKey string
 	WorkKind              string
+	ExecutionIntent       string
+	ExecutionIntentSource string
 	Summary               string
 	TerminalReason        string
 	ArtifactsJSON         string
@@ -262,6 +283,7 @@ type IntakeItem struct {
 	Summary                  string
 	ConversationTranscriptID *int64
 	CanonicalIntakeItemID    *int64
+	GoalID                   *int64
 	SuppressionReason        string
 	RoutingNotes             string
 	ReceivedAt               time.Time
@@ -315,6 +337,8 @@ type CreateTaskParams struct {
 	FollowUpObligationID  *int64
 	FollowUpOccurrenceKey string
 	WorkKind              string
+	ExecutionIntent       string
+	ExecutionIntentSource string
 }
 
 type CreateTaskIntakeParams struct {
@@ -353,6 +377,39 @@ type ListIntakeItemsParams struct {
 	ScopeKey    string
 }
 
+type ProcessIntakeItemParams struct {
+	ID                    int64
+	Status                string
+	Summary               string
+	CanonicalIntakeItemID *int64
+	GoalID                *int64
+	SuppressionReason     string
+	RoutingNotes          string
+	Events                []IntakeItemProcessingEvent
+}
+
+type ReviewIntakeItemParams struct {
+	ID               int64
+	Status           string
+	Summary          string
+	RoutingNotes     string
+	EventType        runtimeevents.Type
+	Decision         string
+	WorkCreated      bool
+	ApprovalRequired bool
+	PolicyDecision   string
+	PolicyReason     string
+	WorkItemID       *int64
+	WorkItemKey      string
+}
+
+type IntakeItemProcessingEvent struct {
+	Type    runtimeevents.Type
+	Stage   string
+	Result  string
+	Payload any
+}
+
 type UpsertAutomationTriggerParams struct {
 	WorkspaceID    string
 	Key            string
@@ -379,6 +436,8 @@ type FireAutomationTriggerParams struct {
 	RequestedBy       string
 	SetNextEligibleAt bool
 	NextEligibleAt    *time.Time
+	SourceEventID     *int64
+	SourceEventType   string
 }
 
 type FireAutomationTriggerResult struct {
@@ -386,6 +445,14 @@ type FireAutomationTriggerResult struct {
 	Materialization AutomationTriggerMaterialization
 	WorkItem        Task
 	CreatedWorkItem bool
+}
+
+type DeferAutomationTriggerParams struct {
+	WorkspaceID   string
+	Key           string
+	Reason        string
+	DueAt         time.Time
+	DeferredUntil time.Time
 }
 
 type MarkAutomationTriggerErroredParams struct {
@@ -426,9 +493,15 @@ type RequeueTaskAtParams struct {
 }
 
 type IncrementTaskRetryParams struct {
-	TaskID         int64
-	LastError      string
-	NextEligibleAt time.Time
+	TaskID                 int64
+	LastError              string
+	NextEligibleAt         time.Time
+	RecordDecision         bool
+	Decision               string
+	RetryEligible          bool
+	RecoveryRecommendation string
+	RetrySource            string
+	ReviewQueueID          string
 }
 
 type Run struct {
@@ -528,6 +601,12 @@ type UpdateRunAndTaskStatusParams struct {
 	RunID      int64
 	RunStatus  string
 	TaskStatus string
+}
+
+type ClaimRunExecutionParams struct {
+	TaskID int64
+	RunID  int64
+	Actor  string
 }
 
 type FinishRunParams struct {
@@ -715,9 +794,11 @@ type RecordExecutorHealthParams struct {
 type RecordSkillLifecycleEventParams struct {
 	SkillKey         string
 	Scope            string
+	ProjectID        *int64
 	Operation        string
 	Outcome          string
 	ExecutionProfile string
+	RuntimeEffect    string
 	Version          string
 	HandlerType      string
 	HandlerRef       string
@@ -725,6 +806,62 @@ type RecordSkillLifecycleEventParams struct {
 	DurationMS       int64
 	ErrorCode        string
 	ErrorText        string
+}
+
+type SkillArtifact struct {
+	ID               int64
+	SkillKey         string
+	Scope            string
+	ProjectID        *int64
+	Status           string
+	ArtifactType     string
+	Summary          string
+	OutputJSON       string
+	RawOutput        string
+	HandlerRef       string
+	ExecutionProfile string
+	PermissionsJSON  string
+	ReviewDecision   string
+	ReviewedAt       *time.Time
+	ReviewedBy       string
+	ReviewReason     string
+	FollowOnTaskID   *int64
+	FollowOnTaskKey  string
+	CreatedAt        time.Time
+	UpdatedAt        time.Time
+}
+
+type CreateSkillArtifactParams struct {
+	SkillKey         string
+	Scope            string
+	ProjectID        *int64
+	Status           string
+	ArtifactType     string
+	Summary          string
+	OutputJSON       string
+	RawOutput        string
+	HandlerRef       string
+	ExecutionProfile string
+	PermissionsJSON  string
+}
+
+type ListSkillArtifactsParams struct {
+	SkillKey string
+	Status   string
+	Limit    int
+}
+
+type ReviewSkillArtifactParams struct {
+	ArtifactID        int64
+	Decision          string
+	Status            string
+	ReviewedBy        string
+	Reason            string
+	Repeated          bool
+	WorkCreated       bool
+	FollowOnTaskID    *int64
+	FollowOnTaskKey   string
+	FollowOnTaskState string
 }
 
 type ContextPacket struct {
@@ -768,6 +905,21 @@ type UpdateContextPacketStatusParams struct {
 	Status      string
 	Summary     string
 	PayloadJSON string
+}
+
+type ReviewContextPacketParams struct {
+	PacketID    int64
+	Status      string
+	Decision    string
+	ReviewedBy  string
+	Reason      string
+	Summary     string
+	PayloadJSON string
+}
+
+type ReviewContextPacketResult struct {
+	Packet   ContextPacket
+	Repeated bool
 }
 
 type ConversationTranscript struct {
@@ -1155,4 +1307,15 @@ type CreateDelegationArtifactParams struct {
 type ListDelegationArtifactsParams struct {
 	DelegationID int64
 	ArtifactType string
+}
+
+type RecordDelegationRetryEventParams struct {
+	DelegationID int64
+	EventType    runtimeevents.Type
+	Reason       string
+}
+
+type RecordDelegationReuseEventParams struct {
+	DelegationID int64
+	Reason       string
 }

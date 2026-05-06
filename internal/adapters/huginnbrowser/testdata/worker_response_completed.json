@@ -1,0 +1,34 @@
+{
+  "status": "completed",
+  "adapter_kind": "huginn_live",
+  "visited_urls": [
+    "https://example.com/docs",
+    "https://example.com/docs/reference"
+  ],
+  "page_results": [
+    {
+      "url": "https://example.com/docs",
+      "status": "visited",
+      "mode": "fetch",
+      "title": "Example Docs",
+      "summary": "Collected public documentation page."
+    },
+    {
+      "url": "https://example.com/docs/reference",
+      "status": "visited",
+      "mode": "fetch",
+      "title": "Example Reference",
+      "summary": "Collected public reference page."
+    }
+  ],
+  "extracted_text_summary": "Collected public documentation pages for operator review.",
+  "screenshots": [
+    "artifact://huginn-browser/screenshots/example-docs.png"
+  ],
+  "action_log": [
+    "live_adapter_selected",
+    "validated_read_only_request",
+    "opened_start_url",
+    "captured_read_only_evidence"
+  ]
+}

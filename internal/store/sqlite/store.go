@@ -232,6 +232,39 @@ func (store *Store) UpsertExternalIssue(ctx context.Context, params UpsertExtern
 	return issue, err
 }
 
+func (store *Store) RecordExternalGitHubIssueEvent(ctx context.Context, params RecordExternalGitHubIssueEventParams) error {
+	now := store.now()
+	return store.withTx(ctx, func(tx *sql.Tx) error {
+		project, err := store.getProjectTx(ctx, tx, params.ProjectID)
+		if err != nil {
+			return err
+		}
+		return appendEventTx(ctx, tx, eventInsert{
+			StreamType: runtimeevents.StreamExternalEvent,
+			StreamID:   params.ExternalIssueID,
+			EventType:  runtimeevents.EventExternalGitHubIssue,
+			Scope:      project.Scope,
+			ProjectID:  &params.ProjectID,
+			Payload: runtimeevents.ExternalGitHubIssuePayload{
+				Source:           "github_issue",
+				Provider:         params.Provider,
+				Repo:             params.Repo,
+				Number:           params.Number,
+				Action:           params.Action,
+				Status:           params.Action,
+				ProjectKey:       params.ProjectKey,
+				ExternalEventKey: params.ExternalEventKey,
+				ExternalIssueID:  params.ExternalIssueID,
+				Title:            params.Title,
+				URL:              params.URL,
+				BodyHash:         params.BodyHash,
+				LabelsJSON:       params.LabelsJSON,
+			},
+			OccurredAt: now,
+		})
+	})
+}
+
 func (store *Store) UpsertInitiative(ctx context.Context, params UpsertInitiativeParams) (Initiative, error) {
 	now := store.now()
 	var initiative Initiative
@@ -525,11 +558,16 @@ func (store *Store) CreateIntakeItem(ctx context.Context, params CreateIntakeIte
 			UpdatedAt:                now,
 		}
 
+		projectID, err := projectIDForIntakeScopeTx(ctx, tx, params.Scope, params.ScopeKey)
+		if err != nil {
+			return err
+		}
 		return appendEventTx(ctx, tx, eventInsert{
 			StreamType: runtimeevents.StreamIntakeItem,
 			StreamID:   itemID,
 			EventType:  runtimeevents.EventIntakeItemCreated,
 			Scope:      params.Scope,
+			ProjectID:  projectID,
 			Payload: runtimeevents.IntakeItemCreatedPayload{
 				WorkspaceID:         params.WorkspaceID,
 				SourceFamily:        params.SourceFamily,
@@ -553,7 +591,7 @@ func (store *Store) ListIntakeItems(ctx context.Context, params ListIntakeItemsP
 	query := `
 		SELECT id, workspace_id, source_family, external_object_id, event_kind, subject, dedupe_key,
 			dedupe_recipe_version, source_facts_json, status, scope, scope_key, summary,
-			conversation_transcript_id, canonical_intake_item_id, suppression_reason, routing_notes,
+			conversation_transcript_id, canonical_intake_item_id, goal_id, suppression_reason, routing_notes,
 			received_at, created_at, updated_at
 		FROM intake_items
 		WHERE 1 = 1
@@ -592,6 +630,130 @@ func (store *Store) ListIntakeItems(ctx context.Context, params ListIntakeItemsP
 		items = append(items, item)
 	}
 	return items, rows.Err()
+}
+
+func (store *Store) GetIntakeItem(ctx context.Context, id int64) (IntakeItem, error) {
+	row := store.db.QueryRowContext(ctx, `
+		SELECT id, workspace_id, source_family, external_object_id, event_kind, subject, dedupe_key,
+			dedupe_recipe_version, source_facts_json, status, scope, scope_key, summary,
+			conversation_transcript_id, canonical_intake_item_id, goal_id, suppression_reason, routing_notes,
+			received_at, created_at, updated_at
+		FROM intake_items
+		WHERE id = ?
+	`, id)
+	return scanIntakeItem(row)
+}
+
+func (store *Store) ProcessIntakeItem(ctx context.Context, params ProcessIntakeItemParams) (IntakeItem, error) {
+	now := store.now()
+	var item IntakeItem
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		existing, err := store.getIntakeItemTx(ctx, tx, params.ID)
+		if err != nil {
+			return err
+		}
+		projectID, err := projectIDForIntakeScopeTx(ctx, tx, existing.Scope, existing.ScopeKey)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE intake_items
+			SET status = ?, summary = ?, canonical_intake_item_id = ?, goal_id = ?, suppression_reason = ?, routing_notes = ?, updated_at = ?
+			WHERE id = ?
+		`,
+			params.Status,
+			params.Summary,
+			nullInt64(params.CanonicalIntakeItemID),
+			nullInt64(params.GoalID),
+			params.SuppressionReason,
+			params.RoutingNotes,
+			formatTime(now),
+			params.ID,
+		); err != nil {
+			return err
+		}
+		for _, processingEvent := range params.Events {
+			payload := processingEvent.Payload
+			if payload == nil {
+				payload = runtimeevents.IntakeProcessingPayload{
+					IntakeItemID:      params.ID,
+					Status:            params.Status,
+					Stage:             processingEvent.Stage,
+					Result:            processingEvent.Result,
+					CanonicalIntakeID: params.CanonicalIntakeItemID,
+				}
+			}
+			if err := appendEventTx(ctx, tx, eventInsert{
+				StreamType: runtimeevents.StreamIntakeItem,
+				StreamID:   params.ID,
+				EventType:  processingEvent.Type,
+				Scope:      existing.Scope,
+				ProjectID:  projectID,
+				Payload:    payload,
+				OccurredAt: now,
+			}); err != nil {
+				return err
+			}
+		}
+		item, err = store.getIntakeItemTx(ctx, tx, params.ID)
+		return err
+	})
+	return item, err
+}
+
+func (store *Store) ReviewIntakeItem(ctx context.Context, params ReviewIntakeItemParams) (IntakeItem, error) {
+	now := store.now()
+	var item IntakeItem
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		existing, err := store.getIntakeItemTx(ctx, tx, params.ID)
+		if err != nil {
+			return err
+		}
+		projectID, err := projectIDForIntakeScopeTx(ctx, tx, existing.Scope, existing.ScopeKey)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE intake_items
+			SET status = ?, summary = ?, routing_notes = ?, updated_at = ?
+			WHERE id = ?
+		`,
+			params.Status,
+			params.Summary,
+			params.RoutingNotes,
+			formatTime(now),
+			params.ID,
+		); err != nil {
+			return err
+		}
+		if err := appendEventTx(ctx, tx, eventInsert{
+			StreamType: runtimeevents.StreamIntakeItem,
+			StreamID:   params.ID,
+			EventType:  params.EventType,
+			Scope:      existing.Scope,
+			ProjectID:  projectID,
+			TaskID:     params.WorkItemID,
+			Payload: runtimeevents.IntakeReviewDecisionPayload{
+				IntakeItemID:      params.ID,
+				Decision:          params.Decision,
+				Status:            params.Status,
+				PreviousStatus:    existing.Status,
+				WorkCreated:       params.WorkCreated,
+				ApprovalRequired:  params.ApprovalRequired,
+				PolicyDecision:    params.PolicyDecision,
+				PolicyReason:      params.PolicyReason,
+				WorkItemID:        params.WorkItemID,
+				WorkItemKey:       params.WorkItemKey,
+				CanonicalIntakeID: existing.CanonicalIntakeItemID,
+			},
+			OccurredAt: now,
+		}); err != nil {
+			return err
+		}
+		item, err = store.getIntakeItemTx(ctx, tx, params.ID)
+		return err
+	})
+	return item, err
 }
 
 func (store *Store) UpsertAutomationTrigger(ctx context.Context, params UpsertAutomationTriggerParams) (AutomationTrigger, error) {
@@ -637,11 +799,12 @@ func (store *Store) UpsertAutomationTrigger(ctx context.Context, params UpsertAu
 			if err != nil {
 				return err
 			}
+			eventScope := store.automationTriggerEventScopeTx(ctx, tx, trigger)
 			return appendEventTx(ctx, tx, eventInsert{
 				StreamType: runtimeevents.StreamAutomationTrigger,
 				StreamID:   trigger.ID,
 				EventType:  runtimeevents.EventAutomationTriggerCreated,
-				Scope:      trigger.Kind,
+				Scope:      eventScope,
 				ProjectID:  &trigger.ProjectID,
 				Payload: runtimeevents.AutomationTriggerCreatedPayload{
 					WorkspaceID:   trigger.WorkspaceID,
@@ -728,19 +891,23 @@ func (store *Store) FireAutomationTrigger(ctx context.Context, params FireAutoma
 		if trigger.Status != "enabled" {
 			return fmt.Errorf("automation trigger %s is %s", trigger.Key, trigger.Status)
 		}
+		eventScope := store.automationTriggerEventScopeTx(ctx, tx, trigger)
 
 		if err := appendEventTx(ctx, tx, eventInsert{
 			StreamType: runtimeevents.StreamAutomationTrigger,
 			StreamID:   trigger.ID,
 			EventType:  runtimeevents.EventAutomationTriggerFireRequested,
-			Scope:      trigger.Kind,
+			Scope:      eventScope,
 			ProjectID:  &trigger.ProjectID,
 			Payload: runtimeevents.AutomationTriggerFireRequestedPayload{
 				WorkspaceID:        trigger.WorkspaceID,
 				Key:                trigger.Key,
+				Source:             source,
 				MaterializationKey: materializationKey,
 				Reason:             reason,
 				RequestedBy:        requestedBy,
+				SourceEventID:      params.SourceEventID,
+				SourceEventType:    params.SourceEventType,
 			},
 			OccurredAt: now,
 		}); err != nil {
@@ -760,7 +927,7 @@ func (store *Store) FireAutomationTrigger(ctx context.Context, params FireAutoma
 			if err != nil {
 				return err
 			}
-			if err := appendAutomationTriggerEvaluatedEvent(ctx, tx, updated, materializationKey, false, now); err != nil {
+			if err := appendAutomationTriggerEvaluatedEvent(ctx, tx, updated, eventScope, source, materializationKey, false, params.SourceEventID, params.SourceEventType, now); err != nil {
 				return err
 			}
 			result = FireAutomationTriggerResult{
@@ -794,23 +961,27 @@ func (store *Store) FireAutomationTrigger(ctx context.Context, params FireAutoma
 		if err != nil {
 			return err
 		}
-		if err := appendAutomationTriggerEvaluatedEvent(ctx, tx, updated, materializationKey, true, now); err != nil {
+		eventScope = project.Scope
+		if err := appendAutomationTriggerEvaluatedEvent(ctx, tx, updated, eventScope, source, materializationKey, true, params.SourceEventID, params.SourceEventType, now); err != nil {
 			return err
 		}
 		if err := appendEventTx(ctx, tx, eventInsert{
 			StreamType: runtimeevents.StreamAutomationTrigger,
 			StreamID:   updated.ID,
 			EventType:  runtimeevents.EventAutomationTriggerMaterialized,
-			Scope:      updated.Kind,
+			Scope:      eventScope,
 			ProjectID:  &updated.ProjectID,
 			TaskID:     &task.ID,
 			Payload: runtimeevents.AutomationTriggerMaterializedPayload{
 				WorkspaceID:        updated.WorkspaceID,
 				Key:                updated.Key,
+				Source:             source,
 				MaterializationKey: materializationKey,
 				TaskID:             task.ID,
 				TaskKey:            task.Key,
 				RequestedBy:        requestedBy,
+				SourceEventID:      params.SourceEventID,
+				SourceEventType:    params.SourceEventType,
 			},
 			OccurredAt: now,
 		}); err != nil {
@@ -825,6 +996,46 @@ func (store *Store) FireAutomationTrigger(ctx context.Context, params FireAutoma
 		return nil
 	})
 	return result, err
+}
+
+func (store *Store) DeferAutomationTrigger(ctx context.Context, params DeferAutomationTriggerParams) (AutomationTrigger, error) {
+	now := store.now()
+	var updated AutomationTrigger
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		trigger, err := store.getAutomationTriggerByWorkspaceKeyQuery(ctx, tx, defaultString(params.WorkspaceID, "default"), strings.TrimSpace(params.Key))
+		if err != nil {
+			return err
+		}
+		if trigger.Status != "enabled" {
+			return fmt.Errorf("automation trigger %s is %s", trigger.Key, trigger.Status)
+		}
+		deferredUntil := params.DeferredUntil.UTC()
+		if err := store.updateAutomationTriggerEvaluationTx(ctx, tx, trigger.ID, now, true, &deferredUntil); err != nil {
+			return err
+		}
+		updated, err = store.getAutomationTriggerByIDQuery(ctx, tx, trigger.ID)
+		if err != nil {
+			return err
+		}
+		eventScope := store.automationTriggerEventScopeTx(ctx, tx, updated)
+		return appendEventTx(ctx, tx, eventInsert{
+			StreamType: runtimeevents.StreamAutomationTrigger,
+			StreamID:   updated.ID,
+			EventType:  runtimeevents.EventAutomationTriggerDeferred,
+			Scope:      eventScope,
+			ProjectID:  &updated.ProjectID,
+			Payload: runtimeevents.AutomationTriggerDeferredPayload{
+				WorkspaceID:   updated.WorkspaceID,
+				Key:           updated.Key,
+				Reason:        defaultString(params.Reason, "quiet_hours"),
+				DueAt:         params.DueAt.UTC().Format(time.RFC3339),
+				DeferredUntil: params.DeferredUntil.UTC().Format(time.RFC3339),
+				Status:        updated.Status,
+			},
+			OccurredAt: now,
+		})
+	})
+	return updated, err
 }
 
 func (store *Store) MarkAutomationTriggerErrored(ctx context.Context, params MarkAutomationTriggerErroredParams) (AutomationTrigger, error) {
@@ -847,11 +1058,12 @@ func (store *Store) MarkAutomationTriggerErrored(ctx context.Context, params Mar
 			return err
 		}
 		if trigger.Status != updated.Status {
+			eventScope := store.automationTriggerEventScopeTx(ctx, tx, updated)
 			if err := appendEventTx(ctx, tx, eventInsert{
 				StreamType: runtimeevents.StreamAutomationTrigger,
 				StreamID:   updated.ID,
 				EventType:  runtimeevents.EventAutomationTriggerStatusChanged,
-				Scope:      updated.Kind,
+				Scope:      eventScope,
 				ProjectID:  &updated.ProjectID,
 				Payload: runtimeevents.AutomationTriggerStatusChangedPayload{
 					WorkspaceID:    updated.WorkspaceID,
@@ -865,11 +1077,12 @@ func (store *Store) MarkAutomationTriggerErrored(ctx context.Context, params Mar
 				return err
 			}
 		}
+		eventScope := store.automationTriggerEventScopeTx(ctx, tx, updated)
 		return appendEventTx(ctx, tx, eventInsert{
 			StreamType: runtimeevents.StreamAutomationTrigger,
 			StreamID:   updated.ID,
 			EventType:  runtimeevents.EventAutomationTriggerErrored,
-			Scope:      updated.Kind,
+			Scope:      eventScope,
 			ProjectID:  &updated.ProjectID,
 			Payload: runtimeevents.AutomationTriggerErroredPayload{
 				WorkspaceID: updated.WorkspaceID,
@@ -1063,6 +1276,8 @@ func (store *Store) CreateTask(ctx context.Context, params CreateTaskParams) (Ta
 				follow_up_obligation_id,
 				follow_up_occurrence_key,
 				work_kind,
+				execution_intent,
+				execution_intent_source,
 				current_run_id,
 				summary,
 				terminal_reason,
@@ -1070,7 +1285,7 @@ func (store *Store) CreateTask(ctx context.Context, params CreateTaskParams) (Ta
 				created_at,
 				updated_at
 			)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, '', '', '[]', ?, ?)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, '', '', '[]', ?, ?)
 		`,
 			params.ProjectID,
 			params.Key,
@@ -1085,9 +1300,56 @@ func (store *Store) CreateTask(ctx context.Context, params CreateTaskParams) (Ta
 			nullInt64(params.FollowUpObligationID),
 			nullIfEmpty(params.FollowUpOccurrenceKey),
 			nullIfEmpty(params.WorkKind),
+			params.ExecutionIntent,
+			params.ExecutionIntentSource,
 			formatTime(now),
 			formatTime(now),
 		)
+		if err != nil && isMissingTaskExecutionIntentColumns(err) {
+			if hasTaskExecutionIntent(params) {
+				return fmt.Errorf("execution intent requires execution-intent task columns")
+			}
+			result, err = tx.ExecContext(ctx, `
+				INSERT INTO tasks (
+					project_id,
+					key,
+					title,
+					action_key,
+					status,
+					scope,
+					requested_by,
+					workspace_id,
+					initiative_id,
+					companion_id,
+					follow_up_obligation_id,
+					follow_up_occurrence_key,
+					work_kind,
+					current_run_id,
+					summary,
+					terminal_reason,
+					artifacts_json,
+					created_at,
+					updated_at
+				)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, '', '', '[]', ?, ?)
+			`,
+				params.ProjectID,
+				params.Key,
+				params.Title,
+				params.ActionKey,
+				params.Status,
+				params.Scope,
+				params.RequestedBy,
+				nullInt64(params.WorkspaceID),
+				nullInt64(params.InitiativeID),
+				nullInt64(params.CompanionID),
+				nullInt64(params.FollowUpObligationID),
+				nullIfEmpty(params.FollowUpOccurrenceKey),
+				nullIfEmpty(params.WorkKind),
+				formatTime(now),
+				formatTime(now),
+			)
+		}
 		if err != nil && isMissingTaskFollowUpColumns(err) {
 			if hasTaskFollowUpProvenance(params) {
 				return fmt.Errorf("follow-up provenance requires follow-up task columns")
@@ -1153,6 +1415,8 @@ func (store *Store) CreateTask(ctx context.Context, params CreateTaskParams) (Ta
 			FollowUpObligationID:  params.FollowUpObligationID,
 			FollowUpOccurrenceKey: params.FollowUpOccurrenceKey,
 			WorkKind:              params.WorkKind,
+			ExecutionIntent:       params.ExecutionIntent,
+			ExecutionIntentSource: params.ExecutionIntentSource,
 			ArtifactsJSON:         "[]",
 			NextEligibleAt:        time.Time{},
 			Priority:              100,
@@ -1172,18 +1436,20 @@ func (store *Store) CreateTask(ctx context.Context, params CreateTaskParams) (Ta
 			ProjectID:  &project.ID,
 			TaskID:     &task.ID,
 			Payload: runtimeevents.TaskCreatedPayload{
-				Key:            task.Key,
-				Title:          task.Title,
-				ActionKey:      task.ActionKey,
-				Status:         task.Status,
-				Scope:          task.Scope,
-				RequestedBy:    task.RequestedBy,
-				NextEligibleAt: formatTime(task.NextEligibleAt),
-				Priority:       task.Priority,
-				RetryCount:     task.RetryCount,
-				MaxAttempts:    task.MaxAttempts,
-				LastError:      task.LastError,
-				BlockedReason:  task.BlockedReason,
+				Key:                   task.Key,
+				Title:                 task.Title,
+				ActionKey:             task.ActionKey,
+				Status:                task.Status,
+				Scope:                 task.Scope,
+				RequestedBy:           task.RequestedBy,
+				NextEligibleAt:        formatTime(task.NextEligibleAt),
+				Priority:              task.Priority,
+				RetryCount:            task.RetryCount,
+				MaxAttempts:           task.MaxAttempts,
+				LastError:             task.LastError,
+				BlockedReason:         task.BlockedReason,
+				ExecutionIntent:       task.ExecutionIntent,
+				ExecutionIntentSource: task.ExecutionIntentSource,
 			},
 			OccurredAt: now,
 		})
@@ -1419,6 +1685,17 @@ func (store *Store) IncrementTaskRetry(ctx context.Context, params IncrementTask
 		if err := appendTaskQueueStateChangedEventTx(ctx, tx, current, updated, now); err != nil {
 			return err
 		}
+		if params.RecordDecision {
+			if err := appendTaskRetryEvaluatedEventTx(ctx, tx, updated, taskRetryEventParams{
+				Decision:               params.Decision,
+				RetryEligible:          params.RetryEligible,
+				RecoveryRecommendation: params.RecoveryRecommendation,
+				Source:                 params.RetrySource,
+				QueueID:                params.ReviewQueueID,
+			}, now); err != nil {
+				return err
+			}
+		}
 		task = updated
 		return nil
 	})
@@ -1450,6 +1727,87 @@ func appendTaskStatusChangedEventTx(ctx context.Context, tx *sql.Tx, previous Ta
 	})
 }
 
+func (store *Store) RecordTaskDispatchRequested(ctx context.Context, task Task, executor string, attempt int) error {
+	now := store.now()
+	return store.withTx(ctx, func(tx *sql.Tx) error {
+		projectID := task.ProjectID
+		return appendEventTx(ctx, tx, eventInsert{
+			StreamType: runtimeevents.StreamTask,
+			StreamID:   task.ID,
+			EventType:  runtimeevents.EventTaskDispatchRequested,
+			Scope:      task.Scope,
+			ProjectID:  &projectID,
+			TaskID:     &task.ID,
+			Payload: runtimeevents.TaskDispatchRequestedPayload{
+				TaskID:                task.ID,
+				Executor:              executor,
+				Attempt:               attempt,
+				Status:                task.Status,
+				ExecutionIntent:       task.ExecutionIntent,
+				ExecutionIntentSource: task.ExecutionIntentSource,
+			},
+			OccurredAt: now,
+		})
+	})
+}
+
+type RecordTaskRetryDecisionParams struct {
+	Task                   Task
+	Decision               string
+	RetryEligible          bool
+	RecoveryRecommendation string
+	Source                 string
+	QueueID                string
+}
+
+type RecordTaskRecoveryRecommendationParams struct {
+	Task                   Task
+	Decision               string
+	RetryEligible          bool
+	RecoveryRecommendation string
+	Source                 string
+}
+
+func (store *Store) RecordTaskRetryDecision(ctx context.Context, params RecordTaskRetryDecisionParams) error {
+	now := store.now()
+	return store.withTx(ctx, func(tx *sql.Tx) error {
+		return appendTaskRetryEvaluatedEventTx(ctx, tx, params.Task, taskRetryEventParams{
+			Decision:               params.Decision,
+			RetryEligible:          params.RetryEligible,
+			RecoveryRecommendation: params.RecoveryRecommendation,
+			Source:                 params.Source,
+			QueueID:                params.QueueID,
+		}, now)
+	})
+}
+
+func (store *Store) RecordTaskRecoveryRecommendation(ctx context.Context, params RecordTaskRecoveryRecommendationParams) error {
+	now := store.now()
+	return store.withTx(ctx, func(tx *sql.Tx) error {
+		projectID := params.Task.ProjectID
+		return appendEventTx(ctx, tx, eventInsert{
+			StreamType: runtimeevents.StreamTask,
+			StreamID:   params.Task.ID,
+			EventType:  runtimeevents.EventTaskRecoveryRecommended,
+			Scope:      params.Task.Scope,
+			ProjectID:  &projectID,
+			TaskID:     &params.Task.ID,
+			Payload: runtimeevents.TaskRecoveryRecommendedPayload{
+				TaskID:                 params.Task.ID,
+				Status:                 params.Task.Status,
+				Source:                 params.Source,
+				Decision:               params.Decision,
+				RetryEligible:          params.RetryEligible,
+				RetryCount:             params.Task.RetryCount,
+				MaxAttempts:            params.Task.MaxAttempts,
+				LastError:              params.Task.LastError,
+				RecoveryRecommendation: params.RecoveryRecommendation,
+			},
+			OccurredAt: now,
+		})
+	})
+}
+
 func appendRunStatusChangedEventTx(ctx context.Context, tx *sql.Tx, task Task, previous Run, updated Run, occurredAt time.Time) error {
 	if previous.Status == updated.Status {
 		return nil
@@ -1467,6 +1825,26 @@ func appendRunStatusChangedEventTx(ctx context.Context, tx *sql.Tx, task Task, p
 		Payload: runtimeevents.RunStatusChangedPayload{
 			PreviousStatus: previous.Status,
 			Status:         updated.Status,
+		},
+		OccurredAt: occurredAt,
+	})
+}
+
+func appendRunExecutionClaimedEventTx(ctx context.Context, tx *sql.Tx, task Task, previous Run, updated Run, actor string, occurredAt time.Time) error {
+	projectID := task.ProjectID
+	return appendEventTx(ctx, tx, eventInsert{
+		StreamType: runtimeevents.StreamRun,
+		StreamID:   updated.ID,
+		EventType:  runtimeevents.EventRunExecutionClaimed,
+		Scope:      task.Scope,
+		ProjectID:  &projectID,
+		TaskID:     &task.ID,
+		RunID:      &updated.ID,
+		Payload: runtimeevents.RunExecutionClaimedPayload{
+			TaskID:         task.ID,
+			PreviousStatus: previous.Status,
+			Status:         updated.Status,
+			Actor:          actor,
 		},
 		OccurredAt: occurredAt,
 	})
@@ -1492,14 +1870,51 @@ func appendTaskQueueStateChangedEventTx(ctx context.Context, tx *sql.Tx, previou
 		ProjectID:  &projectID,
 		TaskID:     &updated.ID,
 		Payload: runtimeevents.TaskQueueStateChangedPayload{
-			PreviousStatus: previous.Status,
-			Status:         updated.Status,
-			NextEligibleAt: formatTime(updated.NextEligibleAt),
-			Priority:       updated.Priority,
-			RetryCount:     updated.RetryCount,
-			MaxAttempts:    updated.MaxAttempts,
-			LastError:      updated.LastError,
-			BlockedReason:  updated.BlockedReason,
+			PreviousStatus:        previous.Status,
+			Status:                updated.Status,
+			NextEligibleAt:        formatTime(updated.NextEligibleAt),
+			Priority:              updated.Priority,
+			RetryCount:            updated.RetryCount,
+			MaxAttempts:           updated.MaxAttempts,
+			LastError:             updated.LastError,
+			BlockedReason:         updated.BlockedReason,
+			ExecutionIntent:       updated.ExecutionIntent,
+			ExecutionIntentSource: updated.ExecutionIntentSource,
+		},
+		OccurredAt: occurredAt,
+	})
+}
+
+type taskRetryEventParams struct {
+	Decision               string
+	RetryEligible          bool
+	RecoveryRecommendation string
+	Source                 string
+	QueueID                string
+}
+
+func appendTaskRetryEvaluatedEventTx(ctx context.Context, tx *sql.Tx, task Task, params taskRetryEventParams, occurredAt time.Time) error {
+	projectID := task.ProjectID
+	return appendEventTx(ctx, tx, eventInsert{
+		StreamType: runtimeevents.StreamTask,
+		StreamID:   task.ID,
+		EventType:  runtimeevents.EventTaskRetryEvaluated,
+		Scope:      task.Scope,
+		ProjectID:  &projectID,
+		TaskID:     &task.ID,
+		Payload: runtimeevents.TaskRetryEvaluatedPayload{
+			TaskID:                 task.ID,
+			Status:                 task.Status,
+			Requested:              true,
+			Source:                 params.Source,
+			QueueID:                params.QueueID,
+			Decision:               params.Decision,
+			RetryEligible:          params.RetryEligible,
+			RetryCount:             task.RetryCount,
+			MaxAttempts:            task.MaxAttempts,
+			NextEligibleAt:         formatTime(task.NextEligibleAt),
+			LastError:              task.LastError,
+			RecoveryRecommendation: params.RecoveryRecommendation,
 		},
 		OccurredAt: occurredAt,
 	})
@@ -1674,6 +2089,59 @@ func (store *Store) UpdateRunAndTaskStatus(ctx context.Context, params UpdateRun
 	})
 
 	return task, run, err
+}
+
+func (store *Store) ClaimRunExecution(ctx context.Context, params ClaimRunExecutionParams) (Task, Run, bool, error) {
+	now := store.now()
+	actor := strings.TrimSpace(params.Actor)
+	if actor == "" {
+		actor = "operator"
+	}
+	var (
+		task    Task
+		run     Run
+		claimed bool
+	)
+
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		currentRun, currentTask, err := store.getRunWithTaskTx(ctx, tx, params.RunID)
+		if err != nil {
+			return err
+		}
+		if currentRun.TaskID != params.TaskID || currentTask.ID != params.TaskID {
+			return sql.ErrNoRows
+		}
+
+		task = currentTask
+		run = currentRun
+		if currentTask.Status != "running" || currentTask.CurrentRunID == nil || *currentTask.CurrentRunID != currentRun.ID || currentRun.Status != "running" {
+			return nil
+		}
+
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE runs
+			SET status = ?
+			WHERE id = ?
+			  AND status = ?
+		`, "executing", currentRun.ID, "running"); err != nil {
+			return err
+		}
+
+		updatedRun := currentRun
+		updatedRun.Status = "executing"
+		if err := appendRunStatusChangedEventTx(ctx, tx, currentTask, currentRun, updatedRun, now); err != nil {
+			return err
+		}
+		if err := appendRunExecutionClaimedEventTx(ctx, tx, currentTask, currentRun, updatedRun, actor, now); err != nil {
+			return err
+		}
+
+		run = updatedRun
+		claimed = true
+		return nil
+	})
+
+	return task, run, claimed, err
 }
 
 func releaseActiveWorktreeLeaseByTaskRunTx(ctx context.Context, tx *sql.Tx, taskID int64, runID int64, now time.Time) error {
@@ -2943,11 +3411,13 @@ func (store *Store) RecordSkillLifecycleEvent(ctx context.Context, params Record
 			StreamID:   skillEventStreamID(params.SkillKey),
 			EventType:  runtimeevents.EventSkillLifecycleRecorded,
 			Scope:      scope,
+			ProjectID:  params.ProjectID,
 			Payload: runtimeevents.SkillLifecycleRecordedPayload{
 				SkillKey:         params.SkillKey,
 				Operation:        params.Operation,
 				Outcome:          params.Outcome,
 				ExecutionProfile: params.ExecutionProfile,
+				RuntimeEffect:    params.RuntimeEffect,
 				Version:          params.Version,
 				HandlerType:      params.HandlerType,
 				HandlerRef:       params.HandlerRef,
@@ -2959,6 +3429,219 @@ func (store *Store) RecordSkillLifecycleEvent(ctx context.Context, params Record
 			OccurredAt: now,
 		})
 	})
+}
+
+func (store *Store) CreateSkillArtifact(ctx context.Context, params CreateSkillArtifactParams) (SkillArtifact, error) {
+	now := store.now()
+	params = normalizeCreateSkillArtifactParams(params)
+
+	if !json.Valid([]byte(params.OutputJSON)) {
+		return SkillArtifact{}, fmt.Errorf("invalid skill artifact output JSON")
+	}
+	if !json.Valid([]byte(params.PermissionsJSON)) {
+		return SkillArtifact{}, fmt.Errorf("invalid skill artifact permissions JSON")
+	}
+
+	var artifact SkillArtifact
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		result, err := tx.ExecContext(ctx, `
+			INSERT INTO skill_artifacts (
+				skill_key,
+				scope,
+				project_id,
+				status,
+				artifact_type,
+				summary,
+				output_json,
+				raw_output,
+				handler_ref,
+				execution_profile,
+				permissions_json,
+				created_at,
+				updated_at
+			)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`,
+			params.SkillKey,
+			params.Scope,
+			nullInt64(params.ProjectID),
+			params.Status,
+			params.ArtifactType,
+			params.Summary,
+			params.OutputJSON,
+			params.RawOutput,
+			params.HandlerRef,
+			params.ExecutionProfile,
+			params.PermissionsJSON,
+			formatTime(now),
+			formatTime(now),
+		)
+		if err != nil {
+			return err
+		}
+
+		artifactID, err := result.LastInsertId()
+		if err != nil {
+			return err
+		}
+		record, err := scanSkillArtifact(tx.QueryRowContext(ctx, `
+			SELECT id, skill_key, scope, project_id, status, artifact_type, summary, output_json, raw_output, handler_ref, execution_profile, permissions_json, review_decision, reviewed_at, reviewed_by, review_reason, follow_on_task_id, follow_on_task_key, created_at, updated_at
+			FROM skill_artifacts
+			WHERE id = ?
+		`, artifactID))
+		if err != nil {
+			return err
+		}
+		artifact = record
+
+		return appendEventTx(ctx, tx, eventInsert{
+			StreamType: runtimeevents.StreamSkill,
+			StreamID:   skillEventStreamID(params.SkillKey),
+			EventType:  runtimeevents.EventSkillArtifactRecorded,
+			Scope:      params.Scope,
+			ProjectID:  params.ProjectID,
+			Payload: runtimeevents.SkillArtifactRecordedPayload{
+				ArtifactID:       artifact.ID,
+				SkillKey:         artifact.SkillKey,
+				Status:           artifact.Status,
+				ArtifactType:     artifact.ArtifactType,
+				Summary:          artifact.Summary,
+				ExecutionProfile: artifact.ExecutionProfile,
+				RuntimeEffect:    "durable_reviewable_artifact",
+				HandlerRef:       artifact.HandlerRef,
+				Permissions:      decodeStringList(artifact.PermissionsJSON),
+			},
+			OccurredAt: now,
+		})
+	})
+	return artifact, err
+}
+
+func (store *Store) ListSkillArtifacts(ctx context.Context, params ListSkillArtifactsParams) ([]SkillArtifact, error) {
+	query := `
+		SELECT id, skill_key, scope, project_id, status, artifact_type, summary, output_json, raw_output, handler_ref, execution_profile, permissions_json, review_decision, reviewed_at, reviewed_by, review_reason, follow_on_task_id, follow_on_task_key, created_at, updated_at
+		FROM skill_artifacts
+		WHERE 1=1
+	`
+	args := []any{}
+	if params.SkillKey != "" {
+		query += ` AND skill_key = ?`
+		args = append(args, params.SkillKey)
+	}
+	if params.Status != "" {
+		query += ` AND status = ?`
+		args = append(args, params.Status)
+	}
+	query += ` ORDER BY id ASC`
+	if params.Limit > 0 {
+		query += ` LIMIT ?`
+		args = append(args, params.Limit)
+	}
+
+	rows, err := store.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var artifacts []SkillArtifact
+	for rows.Next() {
+		artifact, err := scanSkillArtifact(rows)
+		if err != nil {
+			return nil, err
+		}
+		artifacts = append(artifacts, artifact)
+	}
+	return artifacts, rows.Err()
+}
+
+func (store *Store) GetSkillArtifact(ctx context.Context, artifactID int64) (SkillArtifact, error) {
+	row := store.db.QueryRowContext(ctx, `
+		SELECT id, skill_key, scope, project_id, status, artifact_type, summary, output_json, raw_output, handler_ref, execution_profile, permissions_json, review_decision, reviewed_at, reviewed_by, review_reason, follow_on_task_id, follow_on_task_key, created_at, updated_at
+		FROM skill_artifacts
+		WHERE id = ?
+	`, artifactID)
+	return scanSkillArtifact(row)
+}
+
+func (store *Store) ReviewSkillArtifact(ctx context.Context, params ReviewSkillArtifactParams) (SkillArtifact, error) {
+	now := store.now()
+	reviewedBy := strings.TrimSpace(params.ReviewedBy)
+	if reviewedBy == "" {
+		reviewedBy = "operator"
+	}
+	var artifact SkillArtifact
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		current, err := scanSkillArtifact(tx.QueryRowContext(ctx, `
+			SELECT id, skill_key, scope, project_id, status, artifact_type, summary, output_json, raw_output, handler_ref, execution_profile, permissions_json, review_decision, reviewed_at, reviewed_by, review_reason, follow_on_task_id, follow_on_task_key, created_at, updated_at
+			FROM skill_artifacts
+			WHERE id = ?
+		`, params.ArtifactID))
+		if err != nil {
+			return err
+		}
+		previousStatus := current.Status
+
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE skill_artifacts
+			SET status = ?,
+			    review_decision = ?,
+			    reviewed_at = ?,
+			    reviewed_by = ?,
+			    review_reason = ?,
+			    follow_on_task_id = ?,
+			    follow_on_task_key = ?,
+			    updated_at = ?
+			WHERE id = ?
+		`,
+			params.Status,
+			params.Decision,
+			formatTime(now),
+			reviewedBy,
+			params.Reason,
+			nullInt64(params.FollowOnTaskID),
+			params.FollowOnTaskKey,
+			formatTime(now),
+			params.ArtifactID,
+		); err != nil {
+			return err
+		}
+
+		updated, err := scanSkillArtifact(tx.QueryRowContext(ctx, `
+			SELECT id, skill_key, scope, project_id, status, artifact_type, summary, output_json, raw_output, handler_ref, execution_profile, permissions_json, review_decision, reviewed_at, reviewed_by, review_reason, follow_on_task_id, follow_on_task_key, created_at, updated_at
+			FROM skill_artifacts
+			WHERE id = ?
+		`, params.ArtifactID))
+		if err != nil {
+			return err
+		}
+		artifact = updated
+
+		return appendEventTx(ctx, tx, eventInsert{
+			StreamType: runtimeevents.StreamSkill,
+			StreamID:   skillEventStreamID(updated.SkillKey),
+			EventType:  runtimeevents.EventSkillArtifactReviewed,
+			Scope:      updated.Scope,
+			ProjectID:  updated.ProjectID,
+			TaskID:     params.FollowOnTaskID,
+			Payload: runtimeevents.SkillArtifactReviewedPayload{
+				ArtifactID:        updated.ID,
+				SkillKey:          updated.SkillKey,
+				Decision:          params.Decision,
+				Status:            updated.Status,
+				PreviousStatus:    previousStatus,
+				ReviewedBy:        reviewedBy,
+				Reason:            params.Reason,
+				Repeated:          params.Repeated,
+				WorkCreated:       params.WorkCreated,
+				FollowOnTaskID:    params.FollowOnTaskID,
+				FollowOnTaskKey:   params.FollowOnTaskKey,
+				FollowOnTaskState: params.FollowOnTaskState,
+			},
+			OccurredAt: now,
+		})
+	})
+	return artifact, err
 }
 
 func (store *Store) CreateContextPacket(ctx context.Context, params CreateContextPacketParams) (ContextPacket, error) {
@@ -3786,6 +4469,8 @@ func (store *Store) GetTaskByFollowUpOccurrence(ctx context.Context, obligationI
 			follow_up_obligation_id,
 			follow_up_occurrence_key,
 			work_kind,
+			execution_intent,
+			execution_intent_source,
 			summary,
 			terminal_reason,
 			artifacts_json,
@@ -4453,7 +5138,7 @@ func (store *Store) GetTask(ctx context.Context, taskID int64) (Task, error) {
 
 func (store *Store) GetTaskByProjectAndKey(ctx context.Context, projectID int64, key string) (Task, error) {
 	row := store.db.QueryRowContext(ctx, `
-		SELECT id, project_id, key, title, action_key, status, scope, requested_by, workspace_id, initiative_id, companion_id, follow_up_obligation_id, follow_up_occurrence_key, work_kind, summary, terminal_reason, artifacts_json, current_run_id, next_eligible_at, priority, last_error, retry_count, max_attempts, blocked_reason, created_at, updated_at
+		SELECT id, project_id, key, title, action_key, status, scope, requested_by, workspace_id, initiative_id, companion_id, follow_up_obligation_id, follow_up_occurrence_key, work_kind, execution_intent, execution_intent_source, summary, terminal_reason, artifacts_json, current_run_id, next_eligible_at, priority, last_error, retry_count, max_attempts, blocked_reason, created_at, updated_at
 		FROM tasks
 		WHERE project_id = ? AND key = ?
 	`, projectID, key)
@@ -4462,7 +5147,7 @@ func (store *Store) GetTaskByProjectAndKey(ctx context.Context, projectID int64,
 
 func (store *Store) ListEligibleQueuedTasks(ctx context.Context, now time.Time) ([]Task, error) {
 	rows, err := store.db.QueryContext(ctx, `
-		SELECT id, project_id, key, title, action_key, status, scope, requested_by, workspace_id, initiative_id, companion_id, follow_up_obligation_id, follow_up_occurrence_key, work_kind, summary, terminal_reason, artifacts_json, current_run_id, next_eligible_at, priority, last_error, retry_count, max_attempts, blocked_reason, created_at, updated_at
+		SELECT id, project_id, key, title, action_key, status, scope, requested_by, workspace_id, initiative_id, companion_id, follow_up_obligation_id, follow_up_occurrence_key, work_kind, execution_intent, execution_intent_source, summary, terminal_reason, artifacts_json, current_run_id, next_eligible_at, priority, last_error, retry_count, max_attempts, blocked_reason, created_at, updated_at
 		FROM tasks
 		WHERE status = 'queued'
 		  AND next_eligible_at <= ?
@@ -4800,7 +5485,27 @@ func (store *Store) createDelegationTx(ctx context.Context, tx *sql.Tx, params C
 	if err != nil {
 		return Delegation{}, err
 	}
-	return store.getDelegationTx(ctx, tx, delegationID)
+	delegation, err := store.getDelegationTx(ctx, tx, delegationID)
+	if err != nil {
+		return Delegation{}, err
+	}
+	if err := appendDelegationEventTx(ctx, tx, delegation, runtimeevents.EventDelegationCreated, runtimeevents.DelegationCreatedPayload{
+		DelegationID:    delegation.ID,
+		ParentTaskID:    delegation.ParentTaskID,
+		ParentRunID:     delegation.ParentRunID,
+		DelegationKey:   delegation.DelegationKey,
+		Role:            delegation.Role,
+		ActionClass:     delegation.ActionClass,
+		ActionKey:       delegation.ActionKey,
+		MutationMode:    delegation.MutationMode,
+		Status:          delegation.Status,
+		ConvergenceMode: delegation.ConvergenceMode,
+		ArtifactTarget:  delegation.ArtifactTarget,
+		Executor:        delegation.Executor,
+	}, now); err != nil {
+		return Delegation{}, err
+	}
+	return delegation, nil
 }
 
 func (store *Store) GetDelegation(ctx context.Context, delegationID int64) (Delegation, error) {
@@ -4883,6 +5588,10 @@ func (store *Store) UpdateDelegationStatus(ctx context.Context, params UpdateDel
 	var delegation Delegation
 
 	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		previous, err := store.getDelegationTx(ctx, tx, params.DelegationID)
+		if err != nil {
+			return err
+		}
 		if _, err := tx.ExecContext(ctx, `
 			UPDATE delegations
 			SET status = ?, updated_at = ?
@@ -4896,7 +5605,15 @@ func (store *Store) UpdateDelegationStatus(ctx context.Context, params UpdateDel
 			return err
 		}
 		delegation = record
-		return nil
+		return appendDelegationEventTx(ctx, tx, record, runtimeevents.EventDelegationStatusChanged, runtimeevents.DelegationStatusChangedPayload{
+			DelegationID:   record.ID,
+			ParentTaskID:   record.ParentTaskID,
+			ParentRunID:    record.ParentRunID,
+			ChildTaskID:    record.ChildTaskID,
+			ChildRunID:     record.ChildRunID,
+			PreviousStatus: previous.Status,
+			Status:         record.Status,
+		}, now)
 	})
 
 	return delegation, err
@@ -4920,7 +5637,13 @@ func (store *Store) AttachDelegationChildTask(ctx context.Context, params Attach
 			return err
 		}
 		delegation = record
-		return nil
+		return appendDelegationEventTx(ctx, tx, record, runtimeevents.EventDelegationChildAttached, runtimeevents.DelegationChildAttachedPayload{
+			DelegationID: record.ID,
+			ParentTaskID: record.ParentTaskID,
+			ParentRunID:  record.ParentRunID,
+			ChildTaskID:  record.ChildTaskID,
+			ChildRunID:   record.ChildRunID,
+		}, now)
 	})
 
 	return delegation, err
@@ -4994,7 +5717,20 @@ func (store *Store) CreateDelegationArtifact(ctx context.Context, params CreateD
 			return err
 		}
 		artifact = record
-		return nil
+		delegation, err := store.getDelegationTx(ctx, tx, params.DelegationID)
+		if err != nil {
+			return err
+		}
+		return appendDelegationEventTx(ctx, tx, delegation, runtimeevents.EventDelegationArtifactRecorded, runtimeevents.DelegationArtifactRecordedPayload{
+			DelegationID: delegation.ID,
+			ParentTaskID: delegation.ParentTaskID,
+			ParentRunID:  delegation.ParentRunID,
+			ChildTaskID:  delegation.ChildTaskID,
+			ChildRunID:   delegation.ChildRunID,
+			ArtifactID:   artifact.ID,
+			ArtifactType: artifact.ArtifactType,
+			Summary:      artifact.Summary,
+		}, now)
 	})
 
 	return artifact, err
@@ -5034,6 +5770,47 @@ func (store *Store) ListDelegationArtifacts(ctx context.Context, params ListDele
 		artifacts = append(artifacts, record)
 	}
 	return artifacts, rows.Err()
+}
+
+func (store *Store) RecordDelegationRetryEvent(ctx context.Context, params RecordDelegationRetryEventParams) error {
+	now := store.now()
+	return store.withTx(ctx, func(tx *sql.Tx) error {
+		delegation, err := store.getDelegationTx(ctx, tx, params.DelegationID)
+		if err != nil {
+			return err
+		}
+		return appendDelegationEventTx(ctx, tx, delegation, params.EventType, runtimeevents.DelegationRetryPayload{
+			DelegationID:   delegation.ID,
+			ParentTaskID:   delegation.ParentTaskID,
+			ParentRunID:    delegation.ParentRunID,
+			ChildTaskID:    delegation.ChildTaskID,
+			ChildRunID:     delegation.ChildRunID,
+			PreviousStatus: delegation.Status,
+			Status:         delegation.Status,
+			Reason:         strings.TrimSpace(params.Reason),
+		}, now)
+	})
+}
+
+func (store *Store) RecordDelegationReuseEvent(ctx context.Context, params RecordDelegationReuseEventParams) error {
+	now := store.now()
+	return store.withTx(ctx, func(tx *sql.Tx) error {
+		delegation, err := store.getDelegationTx(ctx, tx, params.DelegationID)
+		if err != nil {
+			return err
+		}
+		return appendDelegationEventTx(ctx, tx, delegation, runtimeevents.EventDelegationCreateReused, runtimeevents.DelegationCreateReusedPayload{
+			DelegationID:  delegation.ID,
+			ParentTaskID:  delegation.ParentTaskID,
+			ParentRunID:   delegation.ParentRunID,
+			ChildTaskID:   delegation.ChildTaskID,
+			ChildRunID:    delegation.ChildRunID,
+			DelegationKey: delegation.DelegationKey,
+			Role:          delegation.Role,
+			Status:        delegation.Status,
+			Reason:        strings.TrimSpace(params.Reason),
+		}, now)
+	})
 }
 
 func (store *Store) GetCompanionByKey(ctx context.Context, workspaceID int64, key string) (Companion, error) {
@@ -5470,6 +6247,85 @@ func (store *Store) UpdateContextPacketStatus(ctx context.Context, params Update
 		return ContextPacket{}, err
 	}
 	return packet, nil
+}
+
+func (store *Store) ReviewContextPacket(ctx context.Context, params ReviewContextPacketParams) (ReviewContextPacketResult, error) {
+	now := store.now()
+	reviewedBy := strings.TrimSpace(params.ReviewedBy)
+	if reviewedBy == "" {
+		reviewedBy = "operator"
+	}
+	decision := strings.TrimSpace(params.Decision)
+	if decision == "" {
+		decision = params.Status
+	}
+	var result ReviewContextPacketResult
+
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		current, err := store.getContextPacketTx(ctx, tx, params.PacketID)
+		if err != nil {
+			return err
+		}
+		previousStatus := current.Status
+		repeated := current.Status == params.Status
+
+		summary := current.Summary
+		if strings.TrimSpace(params.Summary) != "" {
+			summary = params.Summary
+		}
+		payloadJSON := current.PayloadJSON
+		if strings.TrimSpace(params.PayloadJSON) != "" {
+			payloadJSON = params.PayloadJSON
+		}
+
+		if !repeated || summary != current.Summary || payloadJSON != current.PayloadJSON {
+			if _, err := tx.ExecContext(ctx, `
+				UPDATE context_packets
+				SET status = ?, summary = ?, payload_json = ?
+				WHERE id = ?
+			`, params.Status, summary, payloadJSON, params.PacketID); err != nil {
+				return err
+			}
+			current.Status = params.Status
+			current.Summary = summary
+			current.PayloadJSON = payloadJSON
+		}
+
+		contextRow, err := store.contextPacketContextTx(ctx, tx, current.TaskID, current.RunID)
+		if err != nil {
+			return err
+		}
+		if err := appendEventTx(ctx, tx, eventInsert{
+			StreamType: runtimeevents.StreamContextPacket,
+			StreamID:   current.ID,
+			EventType:  runtimeevents.EventContextPacketReviewed,
+			Scope:      contextRow.Scope,
+			ProjectID:  contextRow.ProjectID,
+			TaskID:     current.TaskID,
+			RunID:      current.RunID,
+			Payload: runtimeevents.ContextPacketReviewedPayload{
+				PacketID:       current.ID,
+				PacketKind:     current.PacketKind,
+				PacketScope:    current.PacketScope,
+				Decision:       decision,
+				Status:         current.Status,
+				PreviousStatus: previousStatus,
+				ReviewedBy:     reviewedBy,
+				Reason:         params.Reason,
+				Repeated:       repeated,
+			},
+			OccurredAt: now,
+		}); err != nil {
+			return err
+		}
+
+		result = ReviewContextPacketResult{Packet: current, Repeated: repeated}
+		return nil
+	})
+	if err != nil {
+		return ReviewContextPacketResult{}, err
+	}
+	return result, nil
 }
 
 func (store *Store) CreateWorktreeLease(ctx context.Context, params CreateWorktreeLeaseParams) (WorktreeLease, error) {
@@ -6133,7 +6989,7 @@ func (store *Store) getWorkspaceByKeyTx(ctx context.Context, tx *sql.Tx, key str
 
 func (store *Store) getTaskQuery(ctx context.Context, queryer sqlQueryRow, taskID int64) (Task, error) {
 	row := queryer.QueryRowContext(ctx, `
-		SELECT id, project_id, key, title, action_key, status, scope, requested_by, workspace_id, initiative_id, companion_id, follow_up_obligation_id, follow_up_occurrence_key, work_kind, summary, terminal_reason, artifacts_json, current_run_id, next_eligible_at, priority, last_error, retry_count, max_attempts, blocked_reason, created_at, updated_at
+		SELECT id, project_id, key, title, action_key, status, scope, requested_by, workspace_id, initiative_id, companion_id, follow_up_obligation_id, follow_up_occurrence_key, work_kind, execution_intent, execution_intent_source, summary, terminal_reason, artifacts_json, current_run_id, next_eligible_at, priority, last_error, retry_count, max_attempts, blocked_reason, created_at, updated_at
 		FROM tasks
 		WHERE id = ?
 	`, taskID)
@@ -6174,6 +7030,25 @@ func (store *Store) getProjectTx(ctx context.Context, tx *sql.Tx, projectID int6
 		WHERE id = ?
 	`, projectID)
 	return scanProject(row)
+}
+
+func projectIDForIntakeScopeTx(ctx context.Context, tx *sql.Tx, scopeValue string, scopeKey string) (*int64, error) {
+	scopeValue = strings.TrimSpace(scopeValue)
+	scopeKey = strings.TrimSpace(scopeKey)
+	if scopeKey == "" || (scopeValue != "project" && scopeValue != "odin-core") {
+		return nil, nil
+	}
+
+	var projectID int64
+	err := tx.QueryRowContext(ctx, `SELECT id FROM projects WHERE key = ?`, scopeKey).Scan(&projectID)
+	switch {
+	case err == nil:
+		return &projectID, nil
+	case errors.Is(err, sql.ErrNoRows):
+		return nil, nil
+	default:
+		return nil, err
+	}
 }
 
 func (store *Store) upsertProjectTx(ctx context.Context, tx *sql.Tx, params UpsertProjectParams, now time.Time) (Project, error) {
@@ -6695,7 +7570,7 @@ func (store *Store) getRunWithTaskTx(ctx context.Context, tx *sql.Tx, runID int6
 	row := tx.QueryRowContext(ctx, `
 		SELECT
 			r.id, r.task_id, r.executor, r.status, r.attempt, r.started_at, r.finished_at, r.summary, r.terminal_reason, r.artifacts_json,
-			t.id, t.project_id, t.key, t.title, t.action_key, t.status, t.scope, t.requested_by, t.workspace_id, t.initiative_id, t.companion_id, t.follow_up_obligation_id, t.follow_up_occurrence_key, t.work_kind, t.summary, t.terminal_reason, t.artifacts_json, t.current_run_id, t.next_eligible_at, t.priority, t.last_error, t.retry_count, t.max_attempts, t.blocked_reason, t.created_at, t.updated_at
+			t.id, t.project_id, t.key, t.title, t.action_key, t.status, t.scope, t.requested_by, t.workspace_id, t.initiative_id, t.companion_id, t.follow_up_obligation_id, t.follow_up_occurrence_key, t.work_kind, t.execution_intent, t.execution_intent_source, t.summary, t.terminal_reason, t.artifacts_json, t.current_run_id, t.next_eligible_at, t.priority, t.last_error, t.retry_count, t.max_attempts, t.blocked_reason, t.created_at, t.updated_at
 		FROM runs r
 		JOIN tasks t ON t.id = r.task_id
 		WHERE r.id = ?
@@ -6717,6 +7592,8 @@ func (store *Store) getRunWithTaskTx(ctx context.Context, tx *sql.Tx, runID int6
 	var followUpObligationID sql.NullInt64
 	var followUpOccurrenceKey sql.NullString
 	var workKind sql.NullString
+	var executionIntent sql.NullString
+	var executionIntentSource sql.NullString
 	var nextEligibleAt string
 	var priority int
 	var lastError string
@@ -6752,6 +7629,8 @@ func (store *Store) getRunWithTaskTx(ctx context.Context, tx *sql.Tx, runID int6
 		&followUpObligationID,
 		&followUpOccurrenceKey,
 		&workKind,
+		&executionIntent,
+		&executionIntentSource,
 		&taskSummary,
 		&taskTerminalReason,
 		&taskArtifactsJSON,
@@ -6787,6 +7666,8 @@ func (store *Store) getRunWithTaskTx(ctx context.Context, tx *sql.Tx, runID int6
 	task.FollowUpObligationID = nullableInt64Ptr(followUpObligationID)
 	task.FollowUpOccurrenceKey = stringOrDefault(followUpOccurrenceKey, "")
 	task.WorkKind = stringOrDefault(workKind, "")
+	task.ExecutionIntent = stringOrDefault(executionIntent, "")
+	task.ExecutionIntentSource = stringOrDefault(executionIntentSource, "")
 	task.Summary = taskSummary.String
 	task.TerminalReason = taskTerminalReason.String
 	task.ArtifactsJSON = normalizeArtifactsJSON(taskArtifactsJSON.String)
@@ -6816,7 +7697,7 @@ func (store *Store) getApprovalWithTaskTx(ctx context.Context, tx *sql.Tx, appro
 	row := tx.QueryRowContext(ctx, `
 		SELECT
 			a.id, a.task_id, a.run_id, a.status, a.requested_at, a.resolved_at, a.decision_by, a.reason,
-			t.id, t.project_id, t.key, t.title, t.action_key, t.status, t.scope, t.requested_by, t.workspace_id, t.initiative_id, t.companion_id, t.follow_up_obligation_id, t.follow_up_occurrence_key, t.work_kind, t.summary, t.terminal_reason, t.artifacts_json, t.current_run_id, t.next_eligible_at, t.priority, t.last_error, t.retry_count, t.max_attempts, t.blocked_reason, t.created_at, t.updated_at
+			t.id, t.project_id, t.key, t.title, t.action_key, t.status, t.scope, t.requested_by, t.workspace_id, t.initiative_id, t.companion_id, t.follow_up_obligation_id, t.follow_up_occurrence_key, t.work_kind, t.execution_intent, t.execution_intent_source, t.summary, t.terminal_reason, t.artifacts_json, t.current_run_id, t.next_eligible_at, t.priority, t.last_error, t.retry_count, t.max_attempts, t.blocked_reason, t.created_at, t.updated_at
 		FROM approvals a
 		JOIN tasks t ON t.id = a.task_id
 		WHERE a.id = ?
@@ -6839,6 +7720,8 @@ func (store *Store) getApprovalWithTaskTx(ctx context.Context, tx *sql.Tx, appro
 	var followUpObligationID sql.NullInt64
 	var followUpOccurrenceKey sql.NullString
 	var workKind sql.NullString
+	var executionIntent sql.NullString
+	var executionIntentSource sql.NullString
 	var nextEligibleAt string
 	var priority int
 	var lastError string
@@ -6871,6 +7754,8 @@ func (store *Store) getApprovalWithTaskTx(ctx context.Context, tx *sql.Tx, appro
 		&followUpObligationID,
 		&followUpOccurrenceKey,
 		&workKind,
+		&executionIntent,
+		&executionIntentSource,
 		&taskSummary,
 		&taskTerminalReason,
 		&taskArtifactsJSON,
@@ -6906,6 +7791,8 @@ func (store *Store) getApprovalWithTaskTx(ctx context.Context, tx *sql.Tx, appro
 	task.FollowUpObligationID = nullableInt64Ptr(followUpObligationID)
 	task.FollowUpOccurrenceKey = stringOrDefault(followUpOccurrenceKey, "")
 	task.WorkKind = stringOrDefault(workKind, "")
+	task.ExecutionIntent = stringOrDefault(executionIntent, "")
+	task.ExecutionIntentSource = stringOrDefault(executionIntentSource, "")
 	task.Summary = taskSummary.String
 	task.TerminalReason = taskTerminalReason.String
 	task.ArtifactsJSON = normalizeArtifactsJSON(taskArtifactsJSON.String)
@@ -7143,6 +8030,18 @@ func (store *Store) getInitiativeTx(ctx context.Context, tx *sql.Tx, workspaceID
 	return scanInitiative(row)
 }
 
+func (store *Store) getIntakeItemTx(ctx context.Context, tx *sql.Tx, id int64) (IntakeItem, error) {
+	row := tx.QueryRowContext(ctx, `
+		SELECT id, workspace_id, source_family, external_object_id, event_kind, subject, dedupe_key,
+			dedupe_recipe_version, source_facts_json, status, scope, scope_key, summary,
+			conversation_transcript_id, canonical_intake_item_id, goal_id, suppression_reason, routing_notes,
+			received_at, created_at, updated_at
+		FROM intake_items
+		WHERE id = ?
+	`, id)
+	return scanIntakeItem(row)
+}
+
 type eventInsert struct {
 	StreamType runtimeevents.StreamType
 	StreamID   int64
@@ -7185,6 +8084,20 @@ func appendEventTx(ctx context.Context, tx *sql.Tx, params eventInsert) error {
 	return err
 }
 
+func appendDelegationEventTx(ctx context.Context, tx *sql.Tx, delegation Delegation, eventType runtimeevents.Type, payload any, occurredAt time.Time) error {
+	return appendEventTx(ctx, tx, eventInsert{
+		StreamType: runtimeevents.StreamDelegation,
+		StreamID:   delegation.ID,
+		EventType:  eventType,
+		Scope:      delegation.Scope,
+		ProjectID:  &delegation.ProjectID,
+		TaskID:     &delegation.ParentTaskID,
+		RunID:      delegation.ParentRunID,
+		Payload:    payload,
+		OccurredAt: occurredAt,
+	})
+}
+
 func normalizeCreateContextPacketParams(params CreateContextPacketParams) CreateContextPacketParams {
 	if params.PacketScope == "" {
 		switch params.PacketKind {
@@ -7201,6 +8114,31 @@ func normalizeCreateContextPacketParams(params CreateContextPacketParams) Create
 	}
 	if params.Status == "" {
 		params.Status = "active"
+	}
+	return params
+}
+
+func normalizeCreateSkillArtifactParams(params CreateSkillArtifactParams) CreateSkillArtifactParams {
+	params.SkillKey = strings.TrimSpace(params.SkillKey)
+	params.Scope = strings.TrimSpace(params.Scope)
+	if params.Scope == "" {
+		params.Scope = "repo"
+	}
+	params.Status = strings.TrimSpace(params.Status)
+	if params.Status == "" {
+		params.Status = "review_required"
+	}
+	params.ArtifactType = strings.TrimSpace(params.ArtifactType)
+	if params.ArtifactType == "" {
+		params.ArtifactType = "skill_output"
+	}
+	params.OutputJSON = strings.TrimSpace(params.OutputJSON)
+	if params.OutputJSON == "" {
+		params.OutputJSON = "{}"
+	}
+	params.PermissionsJSON = strings.TrimSpace(params.PermissionsJSON)
+	if params.PermissionsJSON == "" {
+		params.PermissionsJSON = "[]"
 	}
 	return params
 }
@@ -7238,6 +8176,24 @@ func automationTriggerSelectSQL() string {
 		FROM automation_triggers at
 		LEFT JOIN tasks t ON t.id = at.last_work_item_id
 	`
+}
+
+func automationTriggerExecutionIntent(trigger AutomationTrigger) (string, string) {
+	var rule map[string]any
+	if err := json.Unmarshal([]byte(trigger.RuleJSON), &rule); err != nil {
+		return "", ""
+	}
+	intent, ok := rule["execution_intent"].(string)
+	if !ok {
+		intent, _ = rule["intent"].(string)
+	}
+	intent = strings.ToLower(strings.TrimSpace(intent))
+	switch intent {
+	case "read_only", "mutation", "governance", "destructive":
+		return intent, "trigger"
+	default:
+		return "", ""
+	}
 }
 
 func (store *Store) getAutomationTriggerByIDQuery(ctx context.Context, queryer sqlQueryRow, id int64) (AutomationTrigger, error) {
@@ -7284,19 +8240,23 @@ func (store *Store) createAutomationTriggerTaskTx(ctx context.Context, tx *sql.T
 		title = "Automation trigger " + trigger.Key
 	}
 	requestedBy := "automation_trigger:" + trigger.Key
+	executionIntent, executionIntentSource := automationTriggerExecutionIntent(trigger)
 	result, err := tx.ExecContext(ctx, `
 		INSERT INTO tasks (
 			project_id, key, title, action_key, status, scope, requested_by, workspace_id, initiative_id,
-			companion_id, follow_up_obligation_id, follow_up_occurrence_key, work_kind, current_run_id,
+			companion_id, follow_up_obligation_id, follow_up_occurrence_key, work_kind, execution_intent,
+			execution_intent_source, current_run_id,
 			summary, terminal_reason, artifacts_json, created_at, updated_at
 		)
-		VALUES (?, ?, ?, '', 'queued', ?, ?, NULL, NULL, NULL, NULL, NULL, 'automation_trigger', NULL, '', '', '[]', ?, ?)
+		VALUES (?, ?, ?, '', 'queued', ?, ?, NULL, NULL, NULL, NULL, NULL, 'automation_trigger', ?, ?, NULL, '', '', '[]', ?, ?)
 	`,
 		trigger.ProjectID,
 		taskKey,
 		title,
 		project.Scope,
 		requestedBy,
+		executionIntent,
+		executionIntentSource,
 		formatTime(now),
 		formatTime(now),
 	)
@@ -7308,20 +8268,22 @@ func (store *Store) createAutomationTriggerTaskTx(ctx context.Context, tx *sql.T
 		return Task{}, err
 	}
 	task := Task{
-		ID:             taskID,
-		ProjectID:      trigger.ProjectID,
-		Key:            taskKey,
-		Title:          title,
-		Status:         "queued",
-		Scope:          project.Scope,
-		RequestedBy:    requestedBy,
-		WorkKind:       "automation_trigger",
-		ArtifactsJSON:  "[]",
-		NextEligibleAt: time.Time{},
-		Priority:       100,
-		MaxAttempts:    3,
-		CreatedAt:      now,
-		UpdatedAt:      now,
+		ID:                    taskID,
+		ProjectID:             trigger.ProjectID,
+		Key:                   taskKey,
+		Title:                 title,
+		Status:                "queued",
+		Scope:                 project.Scope,
+		RequestedBy:           requestedBy,
+		WorkKind:              "automation_trigger",
+		ExecutionIntent:       executionIntent,
+		ExecutionIntentSource: executionIntentSource,
+		ArtifactsJSON:         "[]",
+		NextEligibleAt:        time.Time{},
+		Priority:              100,
+		MaxAttempts:           3,
+		CreatedAt:             now,
+		UpdatedAt:             now,
 	}
 	if err := appendEventTx(ctx, tx, eventInsert{
 		StreamType: runtimeevents.StreamTask,
@@ -7331,14 +8293,16 @@ func (store *Store) createAutomationTriggerTaskTx(ctx context.Context, tx *sql.T
 		ProjectID:  &project.ID,
 		TaskID:     &task.ID,
 		Payload: runtimeevents.TaskCreatedPayload{
-			Key:            task.Key,
-			Title:          task.Title,
-			Status:         task.Status,
-			Scope:          task.Scope,
-			RequestedBy:    task.RequestedBy,
-			NextEligibleAt: formatTime(task.NextEligibleAt),
-			Priority:       task.Priority,
-			MaxAttempts:    task.MaxAttempts,
+			Key:                   task.Key,
+			Title:                 task.Title,
+			Status:                task.Status,
+			Scope:                 task.Scope,
+			RequestedBy:           task.RequestedBy,
+			NextEligibleAt:        formatTime(task.NextEligibleAt),
+			Priority:              task.Priority,
+			MaxAttempts:           task.MaxAttempts,
+			ExecutionIntent:       task.ExecutionIntent,
+			ExecutionIntentSource: task.ExecutionIntentSource,
 		},
 		OccurredAt: now,
 	}); err != nil {
@@ -7409,19 +8373,33 @@ func (store *Store) updateAutomationTriggerMaterializedTx(ctx context.Context, t
 	return err
 }
 
-func appendAutomationTriggerEvaluatedEvent(ctx context.Context, tx *sql.Tx, trigger AutomationTrigger, materializationKey string, createdWorkItem bool, now time.Time) error {
+func (store *Store) automationTriggerEventScopeTx(ctx context.Context, tx *sql.Tx, trigger AutomationTrigger) string {
+	project, err := store.getProjectTx(ctx, tx, trigger.ProjectID)
+	if err == nil && strings.TrimSpace(project.Scope) != "" {
+		return project.Scope
+	}
+	if strings.TrimSpace(trigger.Kind) != "" {
+		return trigger.Kind
+	}
+	return "automation_trigger"
+}
+
+func appendAutomationTriggerEvaluatedEvent(ctx context.Context, tx *sql.Tx, trigger AutomationTrigger, scope string, source string, materializationKey string, createdWorkItem bool, sourceEventID *int64, sourceEventType string, now time.Time) error {
 	return appendEventTx(ctx, tx, eventInsert{
 		StreamType: runtimeevents.StreamAutomationTrigger,
 		StreamID:   trigger.ID,
 		EventType:  runtimeevents.EventAutomationTriggerEvaluated,
-		Scope:      trigger.Kind,
+		Scope:      scope,
 		ProjectID:  &trigger.ProjectID,
 		Payload: runtimeevents.AutomationTriggerEvaluatedPayload{
 			WorkspaceID:        trigger.WorkspaceID,
 			Key:                trigger.Key,
+			Source:             source,
 			MaterializationKey: materializationKey,
 			Status:             trigger.Status,
 			CreatedWorkItem:    createdWorkItem,
+			SourceEventID:      sourceEventID,
+			SourceEventType:    sourceEventType,
 		},
 		OccurredAt: now,
 	})
@@ -7659,6 +8637,56 @@ func scanDelegationArtifact(row interface{ Scan(...any) error }) (DelegationArti
 	return artifact, nil
 }
 
+func scanSkillArtifact(row interface{ Scan(...any) error }) (SkillArtifact, error) {
+	var artifact SkillArtifact
+	var projectID sql.NullInt64
+	var reviewedAt sql.NullString
+	var followOnTaskID sql.NullInt64
+	var createdAt string
+	var updatedAt string
+	if err := row.Scan(
+		&artifact.ID,
+		&artifact.SkillKey,
+		&artifact.Scope,
+		&projectID,
+		&artifact.Status,
+		&artifact.ArtifactType,
+		&artifact.Summary,
+		&artifact.OutputJSON,
+		&artifact.RawOutput,
+		&artifact.HandlerRef,
+		&artifact.ExecutionProfile,
+		&artifact.PermissionsJSON,
+		&artifact.ReviewDecision,
+		&reviewedAt,
+		&artifact.ReviewedBy,
+		&artifact.ReviewReason,
+		&followOnTaskID,
+		&artifact.FollowOnTaskKey,
+		&createdAt,
+		&updatedAt,
+	); err != nil {
+		return SkillArtifact{}, err
+	}
+
+	artifact.ProjectID = nullableInt64Ptr(projectID)
+	artifact.FollowOnTaskID = nullableInt64Ptr(followOnTaskID)
+	var err error
+	artifact.ReviewedAt, err = parseNullableTime(reviewedAt)
+	if err != nil {
+		return SkillArtifact{}, err
+	}
+	artifact.CreatedAt, err = parseTime(createdAt)
+	if err != nil {
+		return SkillArtifact{}, err
+	}
+	artifact.UpdatedAt, err = parseTime(updatedAt)
+	if err != nil {
+		return SkillArtifact{}, err
+	}
+	return artifact, nil
+}
+
 func scanWorkspace(row interface{ Scan(...any) error }) (Workspace, error) {
 	var workspace Workspace
 	var policyJSON sql.NullString
@@ -7706,6 +8734,8 @@ func scanTask(row interface{ Scan(...any) error }) (Task, error) {
 	var followUpObligationID sql.NullInt64
 	var followUpOccurrenceKey sql.NullString
 	var workKind sql.NullString
+	var executionIntent sql.NullString
+	var executionIntentSource sql.NullString
 	var nextEligibleAt string
 	var createdAt string
 	var updatedAt string
@@ -7724,6 +8754,8 @@ func scanTask(row interface{ Scan(...any) error }) (Task, error) {
 		&followUpObligationID,
 		&followUpOccurrenceKey,
 		&workKind,
+		&executionIntent,
+		&executionIntentSource,
 		&summary,
 		&terminalReason,
 		&artifactsJSON,
@@ -7747,6 +8779,8 @@ func scanTask(row interface{ Scan(...any) error }) (Task, error) {
 	task.FollowUpObligationID = nullableInt64Ptr(followUpObligationID)
 	task.FollowUpOccurrenceKey = stringOrDefault(followUpOccurrenceKey, "")
 	task.WorkKind = stringOrDefault(workKind, "")
+	task.ExecutionIntent = stringOrDefault(executionIntent, "")
+	task.ExecutionIntentSource = stringOrDefault(executionIntentSource, "")
 	task.Summary = summary.String
 	task.TerminalReason = terminalReason.String
 	task.ArtifactsJSON = normalizeArtifactsJSON(artifactsJSON.String)
@@ -7794,6 +8828,7 @@ func scanIntakeItem(row interface{ Scan(...any) error }) (IntakeItem, error) {
 	var item IntakeItem
 	var conversationTranscriptID sql.NullInt64
 	var canonicalIntakeItemID sql.NullInt64
+	var goalID sql.NullInt64
 	var receivedAt string
 	var createdAt string
 	var updatedAt string
@@ -7813,6 +8848,7 @@ func scanIntakeItem(row interface{ Scan(...any) error }) (IntakeItem, error) {
 		&item.Summary,
 		&conversationTranscriptID,
 		&canonicalIntakeItemID,
+		&goalID,
 		&item.SuppressionReason,
 		&item.RoutingNotes,
 		&receivedAt,
@@ -7824,6 +8860,7 @@ func scanIntakeItem(row interface{ Scan(...any) error }) (IntakeItem, error) {
 
 	item.ConversationTranscriptID = nullableInt64Ptr(conversationTranscriptID)
 	item.CanonicalIntakeItemID = nullableInt64Ptr(canonicalIntakeItemID)
+	item.GoalID = nullableInt64Ptr(goalID)
 	var err error
 	item.ReceivedAt, err = parseTime(receivedAt)
 	if err != nil {
@@ -8762,6 +9799,14 @@ func cloneInt64Ptr(value *int64) *int64 {
 	return ptr
 }
 
+func decodeStringList(raw string) []string {
+	var values []string
+	if err := json.Unmarshal([]byte(raw), &values); err != nil {
+		return nil
+	}
+	return values
+}
+
 func normalizeArtifactsJSON(value string) string {
 	value = strings.TrimSpace(value)
 	if value == "" {
@@ -8787,8 +9832,21 @@ func isMissingTaskFollowUpColumns(err error) bool {
 		strings.Contains(message, "has no column named follow_up_occurrence_key")
 }
 
+func isMissingTaskExecutionIntentColumns(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := err.Error()
+	return strings.Contains(message, "has no column named execution_intent") ||
+		strings.Contains(message, "has no column named execution_intent_source")
+}
+
 func hasTaskFollowUpProvenance(params CreateTaskParams) bool {
 	return params.FollowUpObligationID != nil || strings.TrimSpace(params.FollowUpOccurrenceKey) != ""
+}
+
+func hasTaskExecutionIntent(params CreateTaskParams) bool {
+	return strings.TrimSpace(params.ExecutionIntent) != "" || strings.TrimSpace(params.ExecutionIntentSource) != ""
 }
 
 func nullInt64(value *int64) any {

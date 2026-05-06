@@ -18,6 +18,13 @@ Passing internal tests is necessary and often fast feedback. It is not sufficien
 - For user-visible or orchestration behavior, Definition of Done requires real command execution through the repo-owned `odin` binary.
 - Verification output must separate what is proven from what is still unproven.
 
+## Invocation vocabulary
+
+- Operator usage is `odin ...` after local installation through `make install-local`.
+- Repo-truth verification is `./bin/odin ...` from this repository after building the current checkout.
+- Before treating `odin ...` as the current repo operator surface, verify `which odin` and confirm the installed path resolves to this repository's `bin/odin`.
+- Fresh-build verification must keep using `./bin/odin ...` so command proof cannot be hidden by an older PATH-installed binary.
+
 ## Proof layers
 
 ### Unit

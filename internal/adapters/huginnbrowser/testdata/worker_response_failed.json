@@ -1,0 +1,25 @@
+{
+  "status": "failed",
+  "adapter_kind": "huginn_live",
+  "visited_urls": [
+    "https://example.com/docs"
+  ],
+  "page_results": [
+    {
+      "url": "https://example.com/docs",
+      "status": "failed",
+      "mode": "fetch",
+      "error_code": "navigation_failed",
+      "error_message": "Worker could not load the allowed start URL."
+    }
+  ],
+  "extracted_text_summary": "",
+  "screenshots": [],
+  "action_log": [
+    "live_adapter_selected",
+    "validated_read_only_request",
+    "worker_failed_before_evidence"
+  ],
+  "error_code": "navigation_failed",
+  "error_message": "Worker could not load the allowed start URL."
+}

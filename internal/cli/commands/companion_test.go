@@ -119,11 +119,133 @@ func TestParseCompanionRunJSON(t *testing.T) {
 	}
 }
 
+func TestParseCompanionDelegateJSON(t *testing.T) {
+	t.Parallel()
+
+	command, err := ParseCompanion([]string{
+		"delegate",
+		"primary",
+		"--agent",
+		"portal-delivery-agent",
+		"--portal-track",
+		"admin",
+		"--surface",
+		"dashboard",
+		"--goal",
+		"audit delegated work",
+		"--intent",
+		"governance",
+		"--json",
+	})
+	if err != nil {
+		t.Fatalf("ParseCompanion() error = %v", err)
+	}
+	if command.Name != "delegate" {
+		t.Fatalf("Name = %q, want delegate", command.Name)
+	}
+	if command.Key != "primary" {
+		t.Fatalf("Key = %q, want primary", command.Key)
+	}
+	if command.AgentKey != "portal-delivery-agent" {
+		t.Fatalf("AgentKey = %q, want portal-delivery-agent", command.AgentKey)
+	}
+	if command.PortalTrack != "admin" {
+		t.Fatalf("PortalTrack = %q, want admin", command.PortalTrack)
+	}
+	if command.Surface != "dashboard" {
+		t.Fatalf("Surface = %q, want dashboard", command.Surface)
+	}
+	if command.Goal != "audit delegated work" {
+		t.Fatalf("Goal = %q, want audit delegated work", command.Goal)
+	}
+	if command.Intent != "governance" {
+		t.Fatalf("Intent = %q, want governance", command.Intent)
+	}
+	if !command.JSON {
+		t.Fatal("JSON = false, want true")
+	}
+}
+
+func TestParseCompanionDelegateListAndShow(t *testing.T) {
+	t.Parallel()
+
+	listCommand, err := ParseCompanion([]string{"delegate", "list", "--json"})
+	if err != nil {
+		t.Fatalf("ParseCompanion(delegate list) error = %v", err)
+	}
+	if listCommand.Name != "delegate" {
+		t.Fatalf("Name = %q, want delegate", listCommand.Name)
+	}
+	if listCommand.DelegateAction != "list" {
+		t.Fatalf("DelegateAction = %q, want list", listCommand.DelegateAction)
+	}
+	if !listCommand.JSON {
+		t.Fatal("JSON = false, want true")
+	}
+
+	showCommand, err := ParseCompanion([]string{"delegate", "show", "ia-audit", "--json"})
+	if err != nil {
+		t.Fatalf("ParseCompanion(delegate show) error = %v", err)
+	}
+	if showCommand.Name != "delegate" {
+		t.Fatalf("Name = %q, want delegate", showCommand.Name)
+	}
+	if showCommand.DelegateAction != "show" {
+		t.Fatalf("DelegateAction = %q, want show", showCommand.DelegateAction)
+	}
+	if showCommand.Key != "ia-audit" {
+		t.Fatalf("Key = %q, want ia-audit", showCommand.Key)
+	}
+	if !showCommand.JSON {
+		t.Fatal("JSON = false, want true")
+	}
+
+	retryCommand, err := ParseCompanion([]string{"delegate", "retry", "7", "--json"})
+	if err != nil {
+		t.Fatalf("ParseCompanion(delegate retry) error = %v", err)
+	}
+	if retryCommand.Name != "delegate" {
+		t.Fatalf("Name = %q, want delegate", retryCommand.Name)
+	}
+	if retryCommand.DelegateAction != "retry" {
+		t.Fatalf("DelegateAction = %q, want retry", retryCommand.DelegateAction)
+	}
+	if retryCommand.Key != "7" {
+		t.Fatalf("Key = %q, want 7", retryCommand.Key)
+	}
+	if !retryCommand.JSON {
+		t.Fatal("JSON = false, want true")
+	}
+}
+
 func TestParseCompanionRunRejectsMissingObjective(t *testing.T) {
 	t.Parallel()
 
 	if _, err := ParseCompanion([]string{"run", "finance"}); err == nil {
 		t.Fatal("ParseCompanion() error = nil, want missing objective error")
+	}
+}
+
+func TestParseCompanionDelegateRejectsMissingInputs(t *testing.T) {
+	t.Parallel()
+
+	if _, err := ParseCompanion([]string{"delegate", "show"}); err == nil {
+		t.Fatal("ParseCompanion() error = nil, want missing show identifier error")
+	}
+	if _, err := ParseCompanion([]string{"delegate", "retry"}); err == nil {
+		t.Fatal("ParseCompanion() error = nil, want missing retry identifier error")
+	}
+	if _, err := ParseCompanion([]string{"delegate", "primary", "--agent", "portal-delivery-agent", "--surface", "dashboard"}); err == nil {
+		t.Fatal("ParseCompanion() error = nil, want missing portal-track error")
+	}
+	if _, err := ParseCompanion([]string{"delegate", "primary", "--agent", "portal-delivery-agent", "--portal-track", "admin"}); err == nil {
+		t.Fatal("ParseCompanion() error = nil, want missing surface error")
+	}
+	if _, err := ParseCompanion([]string{"delegate", "primary", "--portal-track", "admin", "--surface", "dashboard"}); err == nil {
+		t.Fatal("ParseCompanion() error = nil, want missing agent error")
+	}
+	if _, err := ParseCompanion([]string{"delegate", "primary", "--agent", "portal-delivery-agent", "--portal-track", "admin", "--surface", "dashboard", "--intent", "banana"}); err == nil {
+		t.Fatal("ParseCompanion() error = nil, want unsupported intent error")
 	}
 }
 

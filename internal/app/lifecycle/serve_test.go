@@ -3,6 +3,9 @@ package lifecycle
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -669,6 +672,566 @@ service:
 		logPath := filepath.Join(root, "runs", "logs", "odin-service.log")
 		logContent, _ := os.ReadFile(logPath)
 		t.Fatalf("Task.Status = %q, want completed (last_error=%q retry_count=%d next_eligible_at=%v log=%s)", gotTask.Status, gotTask.LastError, gotTask.RetryCount, gotTask.NextEligibleAt, string(logContent))
+	}
+}
+
+func TestServeGoalTickStartsApprovedGoal(t *testing.T) {
+	root := createRuntimeRoot(t)
+	writeRuntimeConfig(t, root, `
+version: 1
+runtime:
+  root: .
+service:
+  http_addr: 127.0.0.1:0
+  startup_recovery: false
+`)
+	seedHealthyRuntime(t, root)
+
+	store, err := sqlite.Open(filepath.Join(root, "data", "odin.db"))
+	if err != nil {
+		t.Fatalf("sqlite.Open() error = %v", err)
+	}
+	defer store.Close()
+
+	goal, err := store.CreateGoal(context.Background(), sqlite.CreateGoalParams{Title: "Serve approved goal"})
+	if err != nil {
+		t.Fatalf("CreateGoal() error = %v", err)
+	}
+	for _, status := range []sqlite.GoalStatus{sqlite.GoalStatusPlanned, sqlite.GoalStatusApprovedForExecution} {
+		if _, err := store.TransitionGoal(context.Background(), sqlite.TransitionGoalParams{GoalID: goal.ID, Status: status}); err != nil {
+			t.Fatalf("TransitionGoal(%s) error = %v", status, err)
+		}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	ctx = withServeLoopConfig(ctx, serveLoopConfig{
+		goalInterval: time.Hour,
+	})
+	time.AfterFunc(150*time.Millisecond, cancel)
+
+	var stdout bytes.Buffer
+	err = Run(ctx, root, []string{"serve"}, strings.NewReader(""), &stdout)
+	if err != nil && !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run(serve) error = %v\n%s", err, stdout.String())
+	}
+
+	got, err := store.GetGoal(context.Background(), goal.ID)
+	if err != nil {
+		t.Fatalf("GetGoal() error = %v", err)
+	}
+	if got.Status != sqlite.GoalStatusRunning || got.CurrentRunID == nil {
+		t.Fatalf("goal after serve = %+v, want running with active run", got)
+	}
+	runs, err := store.ListGoalRunsByGoalID(context.Background(), goal.ID)
+	if err != nil {
+		t.Fatalf("ListGoalRunsByGoalID() error = %v", err)
+	}
+	if len(runs) != 1 {
+		t.Fatalf("runs len = %d, want one active run from serve tick", len(runs))
+	}
+	counts := countServeGoalEvents(t, store)
+	if counts[string(runtimeevents.EventGoalRunnerObserved)] != 1 || counts[string(runtimeevents.EventGoalRunStarted)] != 1 {
+		t.Fatalf("goal event counts = %#v, want serve observed and started", counts)
+	}
+}
+
+func TestServeGoalTickDoesNotRunUnapprovedPlannedGoal(t *testing.T) {
+	root := createRuntimeRoot(t)
+	writeRuntimeConfig(t, root, `
+version: 1
+runtime:
+  root: .
+service:
+  http_addr: 127.0.0.1:0
+  startup_recovery: false
+`)
+	seedHealthyRuntime(t, root)
+
+	store, err := sqlite.Open(filepath.Join(root, "data", "odin.db"))
+	if err != nil {
+		t.Fatalf("sqlite.Open() error = %v", err)
+	}
+	defer store.Close()
+
+	goal, err := store.CreateGoal(context.Background(), sqlite.CreateGoalParams{Title: "Serve planned goal"})
+	if err != nil {
+		t.Fatalf("CreateGoal() error = %v", err)
+	}
+	if _, err := store.TransitionGoal(context.Background(), sqlite.TransitionGoalParams{GoalID: goal.ID, Status: sqlite.GoalStatusPlanned}); err != nil {
+		t.Fatalf("TransitionGoal(planned) error = %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	ctx = withServeLoopConfig(ctx, serveLoopConfig{
+		goalInterval: time.Hour,
+	})
+	time.AfterFunc(150*time.Millisecond, cancel)
+
+	var stdout bytes.Buffer
+	err = Run(ctx, root, []string{"serve"}, strings.NewReader(""), &stdout)
+	if err != nil && !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run(serve) error = %v\n%s", err, stdout.String())
+	}
+
+	got, err := store.GetGoal(context.Background(), goal.ID)
+	if err != nil {
+		t.Fatalf("GetGoal() error = %v", err)
+	}
+	if got.Status != sqlite.GoalStatusPlanned || got.CurrentRunID != nil {
+		t.Fatalf("goal after serve = %+v, want planned without active run", got)
+	}
+	runs, err := store.ListGoalRunsByGoalID(context.Background(), goal.ID)
+	if err != nil {
+		t.Fatalf("ListGoalRunsByGoalID() error = %v", err)
+	}
+	if len(runs) != 0 {
+		t.Fatalf("runs len = %d, want no run for unapproved planned goal", len(runs))
+	}
+}
+
+func TestServeGoalTickDoesNotRunConvertedIntakeGoalWithoutApproval(t *testing.T) {
+	root := createRuntimeRoot(t)
+	writeRuntimeConfig(t, root, `
+version: 1
+runtime:
+  root: .
+service:
+  http_addr: 127.0.0.1:0
+  startup_recovery: false
+`)
+	seedHealthyRuntime(t, root)
+
+	if err := Run(context.Background(), root, []string{
+		"intake", "raw", "create",
+		"--text", "Build a browser executor for Odin research goals",
+		"--json",
+	}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+		t.Fatalf("Run(intake raw create --text) error = %v", err)
+	}
+	if err := Run(context.Background(), root, []string{"intake", "process", "--id", "intake-1", "--json"}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+		t.Fatalf("Run(intake process) error = %v", err)
+	}
+
+	store, err := sqlite.Open(filepath.Join(root, "data", "odin.db"))
+	if err != nil {
+		t.Fatalf("sqlite.Open() error = %v", err)
+	}
+	defer store.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	ctx = withServeLoopConfig(ctx, serveLoopConfig{
+		goalInterval: time.Hour,
+	})
+	time.AfterFunc(150*time.Millisecond, cancel)
+
+	var stdout bytes.Buffer
+	err = Run(ctx, root, []string{"serve"}, strings.NewReader(""), &stdout)
+	if err != nil && !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run(serve) error = %v\n%s", err, stdout.String())
+	}
+
+	goal, err := store.GetGoal(context.Background(), 1)
+	if err != nil {
+		t.Fatalf("GetGoal() error = %v", err)
+	}
+	if goal.Status != sqlite.GoalStatusCreated || goal.CurrentRunID != nil {
+		t.Fatalf("converted goal after serve = %+v, want created without active run", goal)
+	}
+	runs, err := store.ListGoalRunsByGoalID(context.Background(), goal.ID)
+	if err != nil {
+		t.Fatalf("ListGoalRunsByGoalID() error = %v", err)
+	}
+	if len(runs) != 0 {
+		t.Fatalf("runs len = %d, want no run for converted unapproved goal", len(runs))
+	}
+}
+
+func TestServeGoalTickDoesNotRetryBlockedGoal(t *testing.T) {
+	root := createRuntimeRoot(t)
+	writeRuntimeConfig(t, root, `
+version: 1
+runtime:
+  root: .
+service:
+  http_addr: 127.0.0.1:0
+  startup_recovery: false
+`)
+	seedHealthyRuntime(t, root)
+
+	store, err := sqlite.Open(filepath.Join(root, "data", "odin.db"))
+	if err != nil {
+		t.Fatalf("sqlite.Open() error = %v", err)
+	}
+	defer store.Close()
+
+	goal, err := store.CreateGoal(context.Background(), sqlite.CreateGoalParams{Title: "Serve blocked goal"})
+	if err != nil {
+		t.Fatalf("CreateGoal() error = %v", err)
+	}
+	for _, status := range []sqlite.GoalStatus{sqlite.GoalStatusPlanned, sqlite.GoalStatusApprovedForExecution} {
+		if _, err := store.TransitionGoal(context.Background(), sqlite.TransitionGoalParams{GoalID: goal.ID, Status: status}); err != nil {
+			t.Fatalf("TransitionGoal(%s) error = %v", status, err)
+		}
+	}
+	run, err := store.CreateGoalRun(context.Background(), sqlite.CreateGoalRunParams{GoalID: goal.ID, Status: sqlite.GoalRunStatusRunning})
+	if err != nil {
+		t.Fatalf("CreateGoalRun() error = %v", err)
+	}
+	if _, err := store.TransitionGoal(context.Background(), sqlite.TransitionGoalParams{GoalID: goal.ID, Status: sqlite.GoalStatusRunning}); err != nil {
+		t.Fatalf("TransitionGoal(running) error = %v", err)
+	}
+	if _, err := store.TransitionGoal(context.Background(), sqlite.TransitionGoalParams{GoalID: goal.ID, Status: sqlite.GoalStatusBlocked}); err != nil {
+		t.Fatalf("TransitionGoal(blocked) error = %v", err)
+	}
+	beforeCounts := countServeGoalEvents(t, store)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	ctx = withServeLoopConfig(ctx, serveLoopConfig{
+		goalInterval: 20 * time.Millisecond,
+	})
+	time.AfterFunc(120*time.Millisecond, cancel)
+
+	var stdout bytes.Buffer
+	err = Run(ctx, root, []string{"serve"}, strings.NewReader(""), &stdout)
+	if err != nil && !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run(serve) error = %v\n%s", err, stdout.String())
+	}
+
+	runs, err := store.ListGoalRunsByGoalID(context.Background(), goal.ID)
+	if err != nil {
+		t.Fatalf("ListGoalRunsByGoalID() error = %v", err)
+	}
+	if len(runs) != 1 || runs[0].ID != run.ID {
+		t.Fatalf("runs = %+v, want original blocked goal run only", runs)
+	}
+	afterCounts := countServeGoalEvents(t, store)
+	if afterCounts[string(runtimeevents.EventGoalRunStarted)] != beforeCounts[string(runtimeevents.EventGoalRunStarted)] {
+		t.Fatalf("goal_run.started count changed from %d to %d, want no retry", beforeCounts[string(runtimeevents.EventGoalRunStarted)], afterCounts[string(runtimeevents.EventGoalRunStarted)])
+	}
+	if afterCounts[string(runtimeevents.EventGoalBlockerRecorded)] != beforeCounts[string(runtimeevents.EventGoalBlockerRecorded)] {
+		t.Fatalf("goal.blocker_recorded count changed from %d to %d, want no blocked retry", beforeCounts[string(runtimeevents.EventGoalBlockerRecorded)], afterCounts[string(runtimeevents.EventGoalBlockerRecorded)])
+	}
+}
+
+func TestServeGoalTickSkipsCompletedAndWaitingGoals(t *testing.T) {
+	root := createRuntimeRoot(t)
+	writeRuntimeConfig(t, root, `
+version: 1
+runtime:
+  root: .
+service:
+  http_addr: 127.0.0.1:0
+  startup_recovery: false
+`)
+	seedHealthyRuntime(t, root)
+
+	store, err := sqlite.Open(filepath.Join(root, "data", "odin.db"))
+	if err != nil {
+		t.Fatalf("sqlite.Open() error = %v", err)
+	}
+	defer store.Close()
+
+	waiting, err := store.CreateGoal(context.Background(), sqlite.CreateGoalParams{Title: "Serve waiting goal"})
+	if err != nil {
+		t.Fatalf("CreateGoal(waiting) error = %v", err)
+	}
+	if _, err := store.TransitionGoal(context.Background(), sqlite.TransitionGoalParams{GoalID: waiting.ID, Status: sqlite.GoalStatusWaitingForHuman}); err != nil {
+		t.Fatalf("TransitionGoal(waiting) error = %v", err)
+	}
+	completed, err := store.CreateGoal(context.Background(), sqlite.CreateGoalParams{Title: "Serve completed goal"})
+	if err != nil {
+		t.Fatalf("CreateGoal(completed) error = %v", err)
+	}
+	for _, status := range []sqlite.GoalStatus{
+		sqlite.GoalStatusPlanned,
+		sqlite.GoalStatusApprovedForExecution,
+		sqlite.GoalStatusRunning,
+		sqlite.GoalStatusVerifying,
+		sqlite.GoalStatusCompleted,
+	} {
+		if _, err := store.TransitionGoal(context.Background(), sqlite.TransitionGoalParams{GoalID: completed.ID, Status: status}); err != nil {
+			t.Fatalf("TransitionGoal(completed %s) error = %v", status, err)
+		}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	ctx = withServeLoopConfig(ctx, serveLoopConfig{
+		goalInterval: time.Hour,
+	})
+	time.AfterFunc(150*time.Millisecond, cancel)
+
+	var stdout bytes.Buffer
+	err = Run(ctx, root, []string{"serve"}, strings.NewReader(""), &stdout)
+	if err != nil && !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run(serve) error = %v\n%s", err, stdout.String())
+	}
+
+	for _, goalID := range []int64{waiting.ID, completed.ID} {
+		runs, err := store.ListGoalRunsByGoalID(context.Background(), goalID)
+		if err != nil {
+			t.Fatalf("ListGoalRunsByGoalID(%d) error = %v", goalID, err)
+		}
+		if len(runs) != 0 {
+			t.Fatalf("goal %d runs = %+v, want none for skipped serve goal", goalID, runs)
+		}
+	}
+}
+
+func TestRunServeCompletesAlreadyDispatchedIntakeRun(t *testing.T) {
+	configureLifecycleHarnessDriver(t)
+	t.Setenv("HOME", t.TempDir())
+	root := testRepoRoot(t)
+	writeRuntimeConfig(t, root, `
+version: 1
+runtime:
+  root: .
+service:
+  http_addr: 127.0.0.1:0
+  startup_recovery: false
+`)
+	payloadPath := filepath.Join(t.TempDir(), "payload.json")
+	if err := os.WriteFile(payloadPath, []byte(`{"body":"prepare automatic execution proof"}`), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	if err := Run(context.Background(), root, []string{"project", "select", testProjectKey}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+		t.Fatalf("Run(project select) error = %v", err)
+	}
+	if err := Run(context.Background(), root, []string{"transition", "set", "cutover", "confirm", "because", "automatic execute test"}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+		t.Fatalf("Run(transition set) error = %v", err)
+	}
+	if err := Run(context.Background(), root, []string{
+		"intake", "raw", "create",
+		"--source", "operator",
+		"--project", "alpha-cli",
+		"--title", "Prepare automatic execution proof",
+		"--type", "request",
+		"--dedup-key", "serve-execute-intake",
+		"--requested-by", "codex",
+		"--payload-file", payloadPath,
+		"--json",
+	}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+		t.Fatalf("Run(intake raw create) error = %v", err)
+	}
+	if err := Run(context.Background(), root, []string{"intake", "process", "--id", "intake-1", "--json"}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+		t.Fatalf("Run(intake process) error = %v", err)
+	}
+	if err := Run(context.Background(), root, []string{"intake", "review", "accept", "intake-1", "--json"}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+		t.Fatalf("Run(intake review accept) error = %v", err)
+	}
+	if err := Run(context.Background(), root, []string{"work", "dispatch", "--task", "intake-review-1", "--json"}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+		t.Fatalf("Run(work dispatch) error = %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	ctx = withServeLoopConfig(ctx, serveLoopConfig{
+		taskInterval: 20 * time.Millisecond,
+	})
+	time.AfterFunc(700*time.Millisecond, cancel)
+
+	var stdout bytes.Buffer
+	err := Run(ctx, root, []string{"serve"}, strings.NewReader(""), &stdout)
+	if err != nil && !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run(serve) error = %v\n%s", err, stdout.String())
+	}
+
+	var runsOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"runs", "--json"}, strings.NewReader(""), &runsOutput); err != nil {
+		t.Fatalf("Run(runs --json) error = %v", err)
+	}
+	if output := runsOutput.String(); !strings.Contains(output, `"run_id": 1`) || !strings.Contains(output, `"status": "completed"`) {
+		t.Fatalf("runs output = %s, want automatically completed dispatched run", output)
+	}
+
+	var jobsOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"jobs", "--json"}, strings.NewReader(""), &jobsOutput); err != nil {
+		t.Fatalf("Run(jobs --json) error = %v", err)
+	}
+	if output := jobsOutput.String(); !strings.Contains(output, `"task_id": 1`) || !strings.Contains(output, `"status": "completed"`) || strings.Contains(output, `"current_run_id"`) {
+		t.Fatalf("jobs output = %s, want completed job without active run", output)
+	}
+
+	var logsOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"logs", "--json"}, strings.NewReader(""), &logsOutput); err != nil {
+		t.Fatalf("Run(logs --json) error = %v", err)
+	}
+	if output := logsOutput.String(); !strings.Contains(output, `"type": "run.execution_claimed"`) || !strings.Contains(output, `"actor": "serve.task_loop"`) || strings.Count(output, `"type": "run.finished"`) != 1 {
+		t.Fatalf("logs output = %s, want one automatic execution claim and one terminal run event", output)
+	}
+
+	var statusOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"work", "status"}, strings.NewReader(""), &statusOutput); err != nil {
+		t.Fatalf("Run(work status) error = %v", err)
+	}
+	for _, want := range []string{"work_items=1", "open_work_items=0", "active_run_attempts=0", "dispatch=work_dispatch"} {
+		if !strings.Contains(statusOutput.String(), want) {
+			t.Fatalf("work status output = %s, want %s", statusOutput.String(), want)
+		}
+	}
+
+	var manualOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"work", "execute", "--task", "intake-review-1", "--json"}, strings.NewReader(""), &manualOutput); err != nil {
+		t.Fatalf("Run(work execute terminal) error = %v\n%s", err, manualOutput.String())
+	}
+	if output := manualOutput.String(); !strings.Contains(output, `"executed": false`) || !strings.Contains(output, `"reason": "task_not_running"`) {
+		t.Fatalf("manual execute output = %s, want safe non-executing terminal response", output)
+	}
+}
+
+func TestRunServeGitHubIssueWebhookFeedsTriggerIngest(t *testing.T) {
+	root := createRuntimeRoot(t)
+	writeMutableProjectsConfig(t, root)
+	addr := allocateHTTPAddr(t)
+	writeRuntimeConfig(t, root, fmt.Sprintf(`
+version: 1
+runtime:
+  root: .
+service:
+  http_addr: %s
+  startup_recovery: true
+`, addr))
+	t.Setenv("ODIN_GITHUB_WEBHOOK_SECRET", "webhook-secret")
+
+	run := func(args ...string) string {
+		t.Helper()
+		var stdout bytes.Buffer
+		if err := Run(context.Background(), root, args, strings.NewReader(""), &stdout); err != nil {
+			t.Fatalf("Run(%v) error = %v\nstdout=%s", args, err, stdout.String())
+		}
+		return stdout.String()
+	}
+	extractTaskKey := func(output string, prefix string) string {
+		t.Helper()
+		var payload struct {
+			Results []struct {
+				CreatedWorkItem bool `json:"created_work_item"`
+				WorkItem        struct {
+					Key string `json:"key"`
+				} `json:"work_item"`
+			} `json:"results"`
+		}
+		if err := json.Unmarshal([]byte(output), &payload); err != nil {
+			t.Fatalf("json.Unmarshal(trigger evaluate) error = %v\n%s", err, output)
+		}
+		for _, result := range payload.Results {
+			if result.CreatedWorkItem && strings.HasPrefix(result.WorkItem.Key, prefix) {
+				return result.WorkItem.Key
+			}
+		}
+		t.Fatalf("trigger evaluate output = %s, want created task prefix %s", output, prefix)
+		return ""
+	}
+
+	run("project", "select", "alpha")
+	run("transition", "set", "cutover", "confirm", "because", "github webhook proof")
+	run("trigger", "upsert", "github-low",
+		"initiative=alpha",
+		"kind=event",
+		"status=enabled",
+		"event=external.github.issue",
+		"match_status=opened",
+		"match_provider=github",
+		"match_repo=acme/alpha",
+		"title=Review GitHub webhook event",
+		"summary=github_webhook_event",
+		"--json",
+	)
+	run("project", "select", "odin-core")
+	run("transition", "set", "cutover", "confirm", "because", "github webhook approval proof")
+	run("trigger", "upsert", "github-risky",
+		"initiative=odin-core",
+		"kind=event",
+		"status=enabled",
+		"event=external.github.issue",
+		"match_status=opened",
+		"match_provider=github",
+		"match_repo=acme/odin-core",
+		"title=Review risky GitHub webhook event",
+		"summary=github_webhook_risky_event",
+		"--json",
+	)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	ctx = withServeLoopConfig(ctx, serveLoopConfig{
+		taskInterval:   20 * time.Millisecond,
+		healthInterval: 20 * time.Millisecond,
+	})
+	defer cancel()
+	runErr := make(chan error, 1)
+	go func() {
+		runErr <- Run(ctx, root, []string{"serve"}, strings.NewReader(""), io.Discard)
+	}()
+	serveStopped := false
+	stopServe := func() {
+		t.Helper()
+		if serveStopped {
+			return
+		}
+		cancel()
+		err := <-runErr
+		serveStopped = true
+		if err != nil && !errors.Is(err, context.Canceled) {
+			t.Fatalf("Run(serve) error = %v", err)
+		}
+	}
+	t.Cleanup(stopServe)
+	if err := waitForServeHealthStatus(ctx, "http://"+addr, http.StatusOK, "degraded", "/healthz"); err != nil {
+		t.Fatal(err)
+	}
+
+	lowBody := []byte(`{"action":"opened","repository":{"full_name":"acme/alpha"},"issue":{"number":77,"title":"Low risk GitHub issue","body":"prepare release checklist","html_url":"https://github.example/acme/alpha/issues/77"}}`)
+	if status, body := postGitHubWebhook(t, "http://"+addr+"/webhooks/github/issues", lowBody, "bad-secret"); status != http.StatusUnauthorized {
+		t.Fatalf("invalid signature status=%d body=%s, want %d", status, body, http.StatusUnauthorized)
+	}
+	if status, body := postGitHubWebhook(t, "http://"+addr+"/webhooks/github/issues", lowBody, "webhook-secret"); status != http.StatusAccepted {
+		t.Fatalf("webhook status=%d body=%s, want %d", status, body, http.StatusAccepted)
+	} else if !strings.Contains(body, `"external_event_key":"github:issue:acme/alpha:77:opened"`) {
+		t.Fatalf("webhook body=%s, want stable external event key", body)
+	}
+	if status, body := postGitHubWebhook(t, "http://"+addr+"/webhooks/github/issues", lowBody, "webhook-secret"); status != http.StatusAccepted {
+		t.Fatalf("webhook replay status=%d body=%s, want %d", status, body, http.StatusAccepted)
+	}
+
+	riskyBody := []byte(`{"action":"opened","repository":{"full_name":"acme/odin-core"},"issue":{"number":9,"title":"Governance mutation request","body":"change system policy","html_url":"https://github.example/acme/odin-core/issues/9"}}`)
+	if status, body := postGitHubWebhook(t, "http://"+addr+"/webhooks/github/issues?project=odin-core", riskyBody, "webhook-secret"); status != http.StatusAccepted {
+		t.Fatalf("risky webhook status=%d body=%s, want %d", status, body, http.StatusAccepted)
+	}
+
+	stopServe()
+
+	evaluate := run("trigger", "evaluate", "source=events", "--json")
+	lowTaskKey := extractTaskKey(evaluate, "automation-github-low-")
+	riskyTaskKey := extractTaskKey(evaluate, "automation-github-risky-")
+	for _, want := range []string{
+		`"materialization_key": "default:github-low:event:external-github-issue-acme-alpha-77-opened"`,
+		`"materialization_key": "default:github-risky:event:external-github-issue-acme-odin-core-9-opened"`,
+	} {
+		if !strings.Contains(evaluate, want) {
+			t.Fatalf("trigger evaluate output = %s, want %s", evaluate, want)
+		}
+	}
+	replayEvaluate := run("trigger", "evaluate", "source=events", "--json")
+	if !strings.Contains(replayEvaluate, `"materialized": 0`) || !strings.Contains(replayEvaluate, lowTaskKey) || !strings.Contains(replayEvaluate, riskyTaskKey) {
+		t.Fatalf("replay evaluate output = %s, want duplicate delivery suppressed", replayEvaluate)
+	}
+	dispatch := run("work", "dispatch", "--task", riskyTaskKey, "--json")
+	if !strings.Contains(dispatch, `"reason": "approval_required"`) || !strings.Contains(dispatch, `"status": "blocked"`) {
+		t.Fatalf("risky dispatch output = %s, want approval gate", dispatch)
+	}
+	logs := run("logs", "--json")
+	for _, want := range []string{
+		`"type": "external.github.issue"`,
+		`"external_event_key": "github:issue:acme/odin-core:9:opened"`,
+		`"type": "automation_trigger.materialized"`,
+		`"source_event_type": "external.github.issue"`,
+		`"type": "approval.requested"`,
+	} {
+		if !strings.Contains(logs, want) {
+			t.Fatalf("logs output = %s, want %s", logs, want)
+		}
+	}
+	approvals := run("approvals", "all", "--json")
+	if !strings.Contains(approvals, `"status": "pending"`) || !strings.Contains(approvals, riskyTaskKey) {
+		t.Fatalf("approvals output = %s, want pending risky webhook approval", approvals)
 	}
 }
 
@@ -1702,6 +2265,21 @@ func lifecycleStatuses(store *sqlite.Store) ([]string, error) {
 	return statuses, nil
 }
 
+func countServeGoalEvents(t *testing.T, store *sqlite.Store) map[string]int {
+	t.Helper()
+	events, err := store.ListEvents(context.Background(), sqlite.ListEventsParams{})
+	if err != nil {
+		t.Fatalf("ListEvents() error = %v", err)
+	}
+	counts := map[string]int{}
+	for _, event := range events {
+		if event.StreamType == runtimeevents.StreamGoal {
+			counts[string(event.Type)]++
+		}
+	}
+	return counts
+}
+
 func waitForServeHealthStatus(ctx context.Context, baseURL string, wantCode int, wantStatus string, pathOverride ...string) error {
 	path := "/healthz"
 	if len(pathOverride) > 0 && pathOverride[0] != "" {
@@ -1739,6 +2317,35 @@ func waitForServeHealthStatus(ctx context.Context, baseURL string, wantCode int,
 			}
 		}
 	}
+}
+
+func postGitHubWebhook(t *testing.T, endpoint string, body []byte, secret string) (int, string) {
+	t.Helper()
+
+	request, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("NewRequest() error = %v", err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-GitHub-Event", "issues")
+	request.Header.Set("X-GitHub-Delivery", "test-delivery")
+	request.Header.Set("X-Hub-Signature-256", "sha256="+signGitHubWebhookBody(body, secret))
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatalf("POST webhook error = %v", err)
+	}
+	defer response.Body.Close()
+	content, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatalf("ReadAll(webhook response) error = %v", err)
+	}
+	return response.StatusCode, string(content)
+}
+
+func signGitHubWebhookBody(body []byte, secret string) string {
+	mac := hmac.New(sha256.New, []byte(secret))
+	_, _ = mac.Write(body)
+	return hex.EncodeToString(mac.Sum(nil))
 }
 
 func assertLifecycleSequence(t *testing.T, statuses []string, want []string) {

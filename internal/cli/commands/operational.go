@@ -21,9 +21,16 @@ type ScopeView struct {
 }
 
 type JobView struct {
-	ProjectKey string `json:"project_key"`
-	TaskKey    string `json:"task_key"`
-	Status     string `json:"status"`
+	ProjectKey            string `json:"project_key"`
+	ProjectID             int64  `json:"project_id,omitempty"`
+	TaskID                int64  `json:"task_id,omitempty"`
+	TaskKey               string `json:"task_key"`
+	Status                string `json:"status"`
+	ExecutionIntent       string `json:"execution_intent,omitempty"`
+	ExecutionIntentSource string `json:"execution_intent_source,omitempty"`
+	BlockedReason         string `json:"blocked_reason,omitempty"`
+	CurrentRunID          *int64 `json:"current_run_id,omitempty"`
+	CurrentRunStatus      string `json:"current_run_status,omitempty"`
 }
 
 type JobsView struct {
@@ -31,9 +38,18 @@ type JobsView struct {
 }
 
 type RunView struct {
-	TaskKey  string `json:"task_key"`
-	Executor string `json:"executor"`
-	Status   string `json:"status"`
+	RunID                 int64  `json:"run_id,omitempty"`
+	TaskID                int64  `json:"task_id,omitempty"`
+	TaskKey               string `json:"task_key"`
+	ProjectKey            string `json:"project_key,omitempty"`
+	RepoRoot              string `json:"repo_root,omitempty"`
+	WorktreePath          string `json:"worktree_path,omitempty"`
+	BranchName            string `json:"branch_name,omitempty"`
+	ExecutionIntent       string `json:"execution_intent,omitempty"`
+	ExecutionIntentSource string `json:"execution_intent_source,omitempty"`
+	Executor              string `json:"executor"`
+	Status                string `json:"status"`
+	Attempt               int    `json:"attempt,omitempty"`
 }
 
 type RunsView struct {
@@ -53,9 +69,16 @@ type ApprovalsView struct {
 }
 
 type LogView struct {
-	ID    int64  `json:"id"`
-	Type  string `json:"type"`
-	Scope string `json:"scope"`
+	ID         int64           `json:"id"`
+	StreamType string          `json:"stream_type"`
+	StreamID   int64           `json:"stream_id"`
+	Type       string          `json:"type"`
+	Scope      string          `json:"scope"`
+	ProjectID  *int64          `json:"project_id,omitempty"`
+	TaskID     *int64          `json:"task_id,omitempty"`
+	RunID      *int64          `json:"run_id,omitempty"`
+	OccurredAt string          `json:"occurred_at"`
+	Payload    json.RawMessage `json:"payload,omitempty"`
 }
 
 type LogsView struct {

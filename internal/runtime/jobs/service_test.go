@@ -69,6 +69,60 @@ func TestCreateTaskFromActEnsuresRuntimeProjectAndCreatesQueuedTask(t *testing.T
 	}
 }
 
+func TestCreateTaskOnceReusesDeterministicKey(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openJobStore(t)
+	defer store.Close()
+
+	registry := writeRegistry(t)
+	service := Service{
+		Store:    store,
+		Registry: registry,
+		Now: func() time.Time {
+			return time.Date(2026, 5, 2, 12, 0, 0, 0, time.UTC)
+		},
+	}
+
+	params := CreateTaskParams{
+		Resolved: scope.Resolution{
+			Kind:       scope.ScopeProject,
+			ProjectKey: "alpha",
+		},
+		Title:       "Promote reviewed intake",
+		RequestedBy: "intake_review:intake-1",
+		Key:         "intake-review-1",
+	}
+
+	first, err := service.CreateTaskOnce(ctx, params)
+	if err != nil {
+		t.Fatalf("CreateTaskOnce(first) error = %v", err)
+	}
+	if !first.Created {
+		t.Fatalf("CreateTaskOnce(first).Created = false, want true")
+	}
+
+	second, err := service.CreateTaskOnce(ctx, params)
+	if err != nil {
+		t.Fatalf("CreateTaskOnce(second) error = %v", err)
+	}
+	if second.Created {
+		t.Fatalf("CreateTaskOnce(second).Created = true, want false")
+	}
+	if second.Task.ID != first.Task.ID || second.Task.Key != first.Task.Key {
+		t.Fatalf("CreateTaskOnce(second).Task = %+v, want original %+v", second.Task, first.Task)
+	}
+
+	var taskCount int
+	if err := store.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM tasks WHERE key = ?`, params.Key).Scan(&taskCount); err != nil {
+		t.Fatalf("count tasks error = %v", err)
+	}
+	if taskCount != 1 {
+		t.Fatalf("task count = %d, want exactly one deterministic work item", taskCount)
+	}
+}
+
 func TestCompanionRunCreatesOwnedTaskAndMarksOnlySupportedTriggers(t *testing.T) {
 	t.Parallel()
 
@@ -1166,7 +1220,7 @@ func TestExecuteNextQueuedKeepsRunPreparingAndReleasesLeaseOnAdmissionFailure(t 
 	task, err := service.CreateTaskFromAct(ctx, scope.Resolution{
 		Kind:       scope.ScopeProject,
 		ProjectKey: "alpha",
-	}, "Admission fails after lease preparation")
+	}, "Modify repo after lease preparation")
 	if err != nil {
 		t.Fatalf("CreateTaskFromAct() error = %v", err)
 	}
@@ -1281,7 +1335,7 @@ func TestExecuteNextQueuedRequeuesWhenFailedDispatchWakePacketCompactionFails(t 
 	task, err := service.CreateTaskFromAct(ctx, scope.Resolution{
 		Kind:       scope.ScopeProject,
 		ProjectKey: "alpha",
-	}, "Admission fails after lease preparation")
+	}, "Modify repo after lease preparation")
 	if err != nil {
 		t.Fatalf("CreateTaskFromAct() error = %v", err)
 	}

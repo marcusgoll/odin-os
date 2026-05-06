@@ -269,6 +269,68 @@ func TestMigrateRepairsLegacyVersionCollisionBeforeWorkspaceMigrations(t *testin
 	}
 }
 
+func TestMigrateRepairsLegacyTaskQueueMigrationCollision(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openMigrationBackfillStore(t)
+	defer store.Close()
+
+	for version := 1; version <= 16; version++ {
+		migration, err := loadMigrationByVersion(version)
+		if err != nil {
+			t.Fatalf("loadMigrationByVersion(%d) error = %v", version, err)
+		}
+		if err := store.applyMigration(ctx, migration); err != nil {
+			t.Fatalf("applyMigration(%d) error = %v", version, err)
+		}
+	}
+
+	if _, err := store.DB().ExecContext(ctx, `
+		CREATE TABLE IF NOT EXISTS workspace_profile (
+		  id INTEGER PRIMARY KEY AUTOINCREMENT,
+		  workspace_id INTEGER NOT NULL UNIQUE REFERENCES workspaces(id) ON DELETE CASCADE,
+		  preferences_json TEXT NOT NULL,
+		  boundaries_json TEXT NOT NULL,
+		  cadence_defaults_json TEXT NOT NULL,
+		  created_at TEXT NOT NULL,
+		  updated_at TEXT NOT NULL
+		);
+		INSERT INTO schema_migrations (version, name, applied_at)
+		VALUES
+		  (17, '0017_workspace_profile.sql', '2026-04-17T21:51:32Z'),
+		  (18, '0018_intake_items.sql', '2026-04-30T18:00:00Z'),
+		  (19, '0019_automation_triggers.sql', '2026-04-30T18:01:00Z')
+	`); err != nil {
+		t.Fatalf("seed legacy migration collisions error = %v", err)
+	}
+
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
+	}
+
+	for _, table := range []string{"runtime_state", "workspace_profile"} {
+		var tableName string
+		if err := store.DB().QueryRowContext(ctx, `
+			SELECT name
+			FROM sqlite_master
+			WHERE type = 'table' AND name = ?
+		`, table).Scan(&tableName); err != nil {
+			t.Fatalf("%s table query error = %v", table, err)
+		}
+	}
+
+	taskColumns, err := taskColumnNames(ctx, store)
+	if err != nil {
+		t.Fatalf("taskColumnNames() error = %v", err)
+	}
+	for _, want := range []string{"next_eligible_at", "priority", "last_error", "retry_count", "max_attempts", "blocked_reason"} {
+		if !containsTaskColumn(taskColumns, want) {
+			t.Fatalf("tasks columns = %v, want %q", taskColumns, want)
+		}
+	}
+}
+
 func TestProfileMigrationCreatesWorkspaceProfileTable(t *testing.T) {
 	t.Parallel()
 

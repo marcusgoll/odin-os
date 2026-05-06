@@ -230,6 +230,46 @@ func RenderOverview(view overview.View) string {
 	))
 
 	lines = append(lines, "")
+	lines = append(lines, "Skill Activity")
+	lines = append(lines, fmt.Sprintf(
+		"  wiring=%s invoke_success=%d invoke_failure=%d stub_results=%d command_output_only=%d",
+		valueOrNone(string(view.SkillActivity.Wiring)),
+		view.SkillActivity.InvokeSuccessCount,
+		view.SkillActivity.InvokeFailureCount,
+		view.SkillActivity.StubResultCount,
+		view.SkillActivity.CommandOutputOnlyCount,
+	))
+	if len(view.SkillActivity.Recent) == 0 {
+		lines = append(lines, "  recent=none")
+	} else {
+		for _, event := range view.SkillActivity.Recent {
+			lines = append(lines, fmt.Sprintf(
+				"  skill=%s operation=%s outcome=%s effect=%s handler=%s at=%s",
+				valueOrNone(event.SkillKey),
+				valueOrNone(event.Operation),
+				valueOrNone(event.Outcome),
+				valueOrNone(event.RuntimeEffect),
+				valueOrNone(event.HandlerRef),
+				valueOrNone(event.OccurredAt),
+			))
+		}
+	}
+
+	lines = append(lines, "")
+	lines = append(lines, "Delegation Truth")
+	lines = append(lines, fmt.Sprintf(
+		"  wiring=%s runtime_status=%s operator_surface=%s companion_work_path=%s swarms=%d",
+		valueOrNone(string(view.DelegationTruth.Wiring)),
+		valueOrNone(view.DelegationTruth.RuntimeStatus),
+		valueOrNone(view.DelegationTruth.OperatorSurface),
+		valueOrNone(view.DelegationTruth.CompanionWorkPath),
+		view.DelegationTruth.CompanionSwarmCount,
+	))
+	if view.DelegationTruth.Note != "" {
+		lines = append(lines, fmt.Sprintf("  note=%s", view.DelegationTruth.Note))
+	}
+
+	lines = append(lines, "")
 	lines = append(lines, "Approvals")
 	if len(view.Approvals) == 0 {
 		lines = append(lines, "  none")
@@ -343,11 +383,15 @@ func RenderOverview(view overview.View) string {
 	lines = append(lines, "")
 	lines = append(lines, "Intake Inbox")
 	lines = append(lines, fmt.Sprintf(
-		"  wiring=%s source=%s status=%s count=%d note=%s",
+		"  wiring=%s source=%s status=%s count=%d raw_items=%d raw_processed=%d review_queue=%d approval_required=%d note=%s",
 		valueOrNone(string(view.IntakeInbox.Wiring)),
 		valueOrNone(view.IntakeInbox.Source),
 		valueOrNone(view.IntakeInbox.Status),
 		len(view.IntakeInbox.Items),
+		view.IntakeInbox.RawItemCount,
+		view.IntakeInbox.RawProcessedCount,
+		view.IntakeInbox.ReviewQueueCount,
+		view.IntakeInbox.IntakeApprovalRequiredCount,
 		valueOrNone(view.IntakeInbox.Note),
 	))
 	if len(view.IntakeInbox.Items) == 0 {

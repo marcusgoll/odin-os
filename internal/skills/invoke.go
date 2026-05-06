@@ -16,15 +16,23 @@ func (service Service) Invoke(ctx context.Context, request InvokeRequest) (_ Inv
 	request.Key = strings.TrimSpace(request.Key)
 	invocationContext := service.normalizeInvocationContext(request)
 	eventScope := invocationContext.ResolvedScopeKind
+	var projectID *int64
+	if invocationContext.Project != nil && invocationContext.Project.ID != 0 {
+		id := invocationContext.Project.ID
+		projectID = &id
+	}
 	var skill Skill
 	executionProfile := ""
+	runtimeEffect := "not_invoked"
 	defer func() {
 		service.recordEvent(ctx, Event{
 			Operation:        OperationInvoke,
 			Outcome:          outcomeForError(err),
 			SkillKey:         request.Key,
 			Scope:            eventScope,
+			ProjectID:        projectID,
 			ExecutionProfile: executionProfile,
+			RuntimeEffect:    runtimeEffect,
 			Version:          skill.Version,
 			HandlerType:      skill.HandlerType,
 			HandlerRef:       skill.HandlerRef,
@@ -137,6 +145,7 @@ func (service Service) Invoke(ctx context.Context, request InvokeRequest) (_ Inv
 		if message == "" {
 			message = err.Error()
 		}
+		runtimeEffect = "handler_failed_no_state_change"
 		return InvokeResponse{}, fmt.Errorf("skill %q failed: %s", request.Key, message)
 	}
 
@@ -154,8 +163,48 @@ func (service Service) Invoke(ctx context.Context, request InvokeRequest) (_ Inv
 		response.RawOutput = strings.TrimSpace(stdout)
 	}
 	response.Permissions = cloneStrings(skill.Permissions)
+	runtimeEffect = classifyInvokeRuntimeEffect(skill.HandlerRef, response)
+	if shouldRecordReviewableArtifact(runtimeEffect, response) && service.ReviewArtifactRecorder != nil {
+		artifact, err := service.ReviewArtifactRecorder.RecordReviewArtifact(ctx, RecordReviewArtifactInput{
+			SkillKey:         response.SkillKey,
+			Scope:            eventScope,
+			ProjectID:        projectID,
+			Summary:          response.Summary,
+			Output:           cloneAnyMap(response.Output),
+			RawOutput:        response.RawOutput,
+			HandlerRef:       skill.HandlerRef,
+			ExecutionProfile: executionProfile,
+			Permissions:      cloneStrings(skill.Permissions),
+		})
+		if err != nil {
+			return InvokeResponse{}, fmt.Errorf("record skill review artifact: %w", err)
+		}
+		runtimeEffect = "durable_reviewable_artifact"
+		response.RuntimeEffect = runtimeEffect
+		response.ReviewArtifact = &artifact
+	} else {
+		response.RuntimeEffect = runtimeEffect
+	}
 
 	return response, nil
+}
+
+func classifyInvokeRuntimeEffect(handlerRef string, response InvokeResponse) string {
+	switch {
+	case strings.Contains(handlerRef, "registry-skill-stub.sh"):
+		return "stub_result"
+	case len(response.Artifacts) != 0 || strings.TrimSpace(response.RawRef) != "":
+		return "command_output_with_artifact_reference"
+	default:
+		return "command_output_only"
+	}
+}
+
+func shouldRecordReviewableArtifact(runtimeEffect string, response InvokeResponse) bool {
+	if runtimeEffect == "stub_result" {
+		return false
+	}
+	return strings.TrimSpace(response.Summary) != "" || len(response.Output) != 0 || strings.TrimSpace(response.RawOutput) != ""
 }
 
 func (service Service) resolveHandlerPath(handlerRef string) (string, error) {

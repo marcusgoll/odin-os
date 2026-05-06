@@ -131,6 +131,34 @@ func TestHeadlessRunTaskUsesDriverScript(t *testing.T) {
 	}
 }
 
+func TestHeadlessRunTaskExecutesExactCommandFailure(t *testing.T) {
+	t.Setenv("ODIN_CODEX_DRIVER", "")
+
+	executor := NewHeadlessWithRepoRoot(fixtureRepoRoot())
+	result, err := executor.RunTask(context.Background(), contract.TaskSpec{
+		ID:     "runtime-smoke",
+		Kind:   contract.TaskKindGeneral,
+		Scope:  "project",
+		Prompt: "run this exact command: printf 'operator visible failure proof' >&2; exit 42",
+		Metadata: map[string]string{
+			"project_key": "alpha",
+			"repo_root":   fixtureRepoRoot(),
+		},
+	})
+	if err != nil {
+		t.Fatalf("RunTask() error = %v", err)
+	}
+	if result.Status != "failed" {
+		t.Fatalf("Status = %q, want failed", result.Status)
+	}
+	if !strings.Contains(result.Output, "operator visible failure proof") {
+		t.Fatalf("Output = %q, want command failure details", result.Output)
+	}
+	if result.Metadata["driver"] != "codex-headless" {
+		t.Fatalf("driver metadata = %q, want codex-headless", result.Metadata["driver"])
+	}
+}
+
 func TestHeadlessRunTaskUsesLegacyDriverWhenExplicitDriverConfigured(t *testing.T) {
 	tracePath := filepath.Join(t.TempDir(), "legacy-request.json")
 	driverPath := writeExecutable(t, "legacy-driver.sh", `#!/usr/bin/env bash

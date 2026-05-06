@@ -143,8 +143,8 @@ func TestOperatorOverviewUsesCanonicalBoard(t *testing.T) {
 		"Observability",
 		"Memory",
 		"Intake Inbox",
-		"wiring=not_yet_wired source=task_intakes status=linked_evidence count=1",
-		"raw Intake Item authority not implemented",
+		"wiring=live source=task_intakes status=linked_evidence count=1",
+		"linked intake evidence",
 		"linked_intake=1 source=n8n type=ci_failure dedup_key=ci_failure:pbs:overview requested_by=n8n",
 		"work_status=queued initiative=pbs",
 		"Automation Triggers",
@@ -167,8 +167,8 @@ func TestOperatorOverviewUsesCanonicalBoard(t *testing.T) {
 	if strings.Contains(output, "raw_intake=1") {
 		t.Fatalf("overview output must not label task_intakes as raw Intake Items:\n%s", output)
 	}
-	if strings.Contains(output, "wiring=live source=task_intakes") {
-		t.Fatalf("overview output must not mark task_intakes as full live Intake Inbox authority:\n%s", output)
+	if strings.Contains(output, "source=task_intakes status=raw_review") {
+		t.Fatalf("overview output must not label task_intakes as raw governed intake review:\n%s", output)
 	}
 	if strings.Contains(output, "automation trigger overview projection not implemented") {
 		t.Fatalf("overview output still contains placeholder automation trigger note:\n%s", output)

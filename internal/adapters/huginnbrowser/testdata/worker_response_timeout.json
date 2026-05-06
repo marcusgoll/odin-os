@@ -1,0 +1,25 @@
+{
+  "status": "timeout",
+  "adapter_kind": "huginn_live",
+  "visited_urls": [
+    "https://example.com/docs"
+  ],
+  "page_results": [
+    {
+      "url": "https://example.com/docs",
+      "status": "failed",
+      "mode": "fetch",
+      "error_code": "worker_timeout",
+      "error_message": "Worker exceeded max_duration_seconds before completing evidence collection."
+    }
+  ],
+  "extracted_text_summary": "",
+  "screenshots": [],
+  "action_log": [
+    "live_adapter_selected",
+    "validated_read_only_request",
+    "worker_timeout"
+  ],
+  "error_code": "worker_timeout",
+  "error_message": "Worker exceeded max_duration_seconds before completing evidence collection."
+}

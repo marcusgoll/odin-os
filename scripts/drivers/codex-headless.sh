@@ -77,6 +77,113 @@ if [[ -n "${legacy_action}" || -n "${ODIN_CODEX_DRIVER_ACTION:-}" ]]; then
         printf '%s\n' "${payload}" >"${ODIN_CODEX_DRIVER_TRACE}"
     fi
 
+    exact_command_info="$(
+        PAYLOAD="${payload}" LEGACY_ACTION="${legacy_action:-${ODIN_CODEX_DRIVER_ACTION:-}}" python3 - <<'PY'
+import json
+import os
+
+payload = os.environ.get("PAYLOAD", "").strip()
+request = json.loads(payload) if payload else {}
+action = (os.environ.get("LEGACY_ACTION", "") or request.get("action") or "").strip()
+
+def pick(mapping, *keys):
+    if not isinstance(mapping, dict):
+        return ""
+    for key in keys:
+        value = mapping.get(key)
+        if value not in (None, ""):
+            return value
+    return ""
+
+def extract_exact_command(objective):
+    phrases = (
+        "execute this exact read-only command from the repo root and return only its stdout",
+        "execute this exact read-only command from the repo root and return only its json result plus one sentence interpreting it",
+        "execute this exact read-only command from the repo root",
+        "execute this exact read-only command",
+        "execute this exact command",
+        "run this exact command",
+        "run the following command",
+    )
+    lower_objective = objective.lower()
+    for phrase in phrases:
+        index = lower_objective.find(phrase)
+        if index == -1:
+            continue
+        tail = objective[index + len(phrase):]
+        colon_index = tail.find(":")
+        if colon_index != -1:
+            command = tail[colon_index + 1:].lstrip(" \n\t")
+        else:
+            command = tail.lstrip(" :\n\t")
+        if command:
+            return command
+    return ""
+
+task = request.get("task") if isinstance(request.get("task"), dict) else request
+metadata = task.get("metadata") or task.get("Metadata") or request.get("meta") or {}
+objective = pick(task, "prompt", "Prompt").strip()
+lower_objective = objective.lower()
+exact_command_requested = any(
+    phrase in lower_objective
+    for phrase in (
+        "execute this exact command",
+        "execute this exact read-only command",
+        "run this exact command",
+        "run the following command",
+    )
+)
+exact_command = extract_exact_command(objective) if action == "run" and exact_command_requested else ""
+workdir = metadata.get("worktree_path") or metadata.get("repo_root") or "."
+print(json.dumps({"command": exact_command, "workdir": workdir}))
+PY
+    )"
+    exact_command="$(
+        python3 - "${exact_command_info}" <<'PY'
+import json
+import sys
+print(json.loads(sys.argv[1]).get("command", ""))
+PY
+    )"
+    exact_workdir="$(
+        python3 - "${exact_command_info}" <<'PY'
+import json
+import sys
+print(json.loads(sys.argv[1]).get("workdir", "."))
+PY
+    )"
+    if [[ -n "${exact_command}" ]]; then
+        if [[ ! -d "${exact_workdir}" ]]; then
+            exact_workdir="$(pwd)"
+        fi
+        status="completed"
+        if ! (
+            cd "${exact_workdir}" &&
+            bash -c "${exact_command}"
+        ) >"${stdout_file}" 2>"${stderr_file}"; then
+            status="failed"
+        fi
+        python3 - "${status}" "${stderr_file}" "${stdout_file}" <<'PY'
+import json
+import sys
+
+status, stderr_path, stdout_path = sys.argv[1:4]
+summary = ""
+for path in (stderr_path, stdout_path):
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            summary = handle.read().strip()
+    except FileNotFoundError:
+        summary = ""
+    if summary:
+        break
+if not summary:
+    summary = "codex driver produced no summary"
+print(json.dumps({"status": status, "output": summary, "metadata": {"lane": "driver", "driver": "codex-headless"}}))
+PY
+        exit 0
+    fi
+
     PAYLOAD="${payload}" LEGACY_ACTION="${legacy_action:-${ODIN_CODEX_DRIVER_ACTION:-}}" python3 - <<'PY'
 import json
 import os

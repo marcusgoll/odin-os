@@ -147,12 +147,16 @@ func (store *Store) repairLegacyMigrationCollisions(ctx context.Context, migrati
 	// Early live databases used versions 11 and 12 for different migration files.
 	// Apply the skipped current SQL idempotently so later workspace migrations can run.
 	repairs := []struct {
-		version     int
-		currentName string
-		markerTable string
+		version      int
+		currentName  string
+		markerTable  string
+		markerColumn string
 	}{
 		{version: 11, currentName: "0011_workspaces.sql", markerTable: "workspace_policies"},
 		{version: 12, currentName: "0012_initiatives.sql", markerTable: "initiatives"},
+		{version: 17, currentName: "0017_runtime_state.sql", markerTable: "runtime_state"},
+		{version: 18, currentName: "0018_task_queue_fields.sql", markerTable: "tasks", markerColumn: "next_eligible_at"},
+		{version: 19, currentName: "0019_workspace_profile.sql", markerTable: "workspace_profile"},
 	}
 
 	for _, repair := range repairs {
@@ -160,11 +164,11 @@ func (store *Store) repairLegacyMigrationCollisions(ctx context.Context, migrati
 		if !ok || appliedName == repair.currentName {
 			continue
 		}
-		exists, err := store.HasTable(ctx, repair.markerTable)
+		repaired, err := store.hasLegacyRepairMarker(ctx, repair.markerTable, repair.markerColumn)
 		if err != nil {
 			return err
 		}
-		if exists {
+		if repaired {
 			continue
 		}
 		migration, ok := migrationByVersion(migrations, repair.version)
@@ -177,6 +181,28 @@ func (store *Store) repairLegacyMigrationCollisions(ctx context.Context, migrati
 	}
 
 	return nil
+}
+
+func (store *Store) hasLegacyRepairMarker(ctx context.Context, tableName string, columnName string) (bool, error) {
+	exists, err := store.HasTable(ctx, tableName)
+	if err != nil {
+		return false, err
+	}
+	if !exists || columnName == "" {
+		return exists, nil
+	}
+
+	var found int
+	if err := store.db.QueryRowContext(ctx, `
+		SELECT EXISTS(
+			SELECT 1
+			FROM pragma_table_info(?)
+			WHERE name = ?
+		)
+	`, tableName, columnName).Scan(&found); err != nil {
+		return false, err
+	}
+	return found == 1, nil
 }
 
 func migrationByVersion(migrations []migration, version int) (migration, bool) {

@@ -112,6 +112,18 @@ ODIN_ENV_FILE=~/.config/odin/odin-os.env scripts/healthcheck.sh
 curl -fsS http://127.0.0.1:9444/readyz
 ```
 
+## Goal Tick Loop
+
+`odin serve` runs the deterministic goal runner tick once during startup and
+then on a conservative 30 second cadence. Operators can still run the same path
+manually with:
+
+```bash
+odin goal tick --json
+```
+
+Goal tick state remains in SQLite and audit events appear in `odin logs --json`.
+
 ## Kill Switch
 
 When dashboard admin auth is configured with `ODIN_ADMIN_TOKEN`, the kill switch

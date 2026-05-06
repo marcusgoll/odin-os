@@ -10,13 +10,19 @@ import (
 )
 
 type CompanionCommand struct {
-	Name      string
-	Kind      string
-	Key       string
-	Title     string
-	Objective string
-	Trigger   string
-	JSON      bool
+	Name           string
+	DelegateAction string
+	Kind           string
+	Key            string
+	Title          string
+	Objective      string
+	Trigger        string
+	AgentKey       string
+	PortalTrack    string
+	Surface        string
+	Goal           string
+	Intent         string
+	JSON           bool
 }
 
 type CompanionView struct {
@@ -104,14 +110,75 @@ type CompanionRunView struct {
 	Task                  TaskCreateView `json:"task"`
 }
 
+type CompanionDelegationRunView struct {
+	Reused              bool                      `json:"reused"`
+	Reason              string                    `json:"reason,omitempty"`
+	CompanionKey        string                    `json:"companion_key"`
+	AgentKey            string                    `json:"agent_key"`
+	PortalTrack         string                    `json:"portal_track"`
+	Surface             string                    `json:"surface"`
+	Goal                string                    `json:"goal,omitempty"`
+	Intent              string                    `json:"intent,omitempty"`
+	ParentTask          TaskCreateView            `json:"parent_task"`
+	ParentRun           *RunView                  `json:"parent_run,omitempty"`
+	ChildDelegations    []CompanionDelegationView `json:"child_delegations"`
+	LearningProposalIDs []int64                   `json:"learning_proposal_ids,omitempty"`
+}
+
+type CompanionDelegationView struct {
+	ID                    int64  `json:"id"`
+	DelegationKey         string `json:"delegation_key"`
+	Role                  string `json:"role"`
+	Status                string `json:"status"`
+	ParentTaskID          int64  `json:"parent_task_id"`
+	ParentRunID           *int64 `json:"parent_run_id,omitempty"`
+	ChildTaskID           *int64 `json:"child_task_id,omitempty"`
+	ChildRunID            *int64 `json:"child_run_id,omitempty"`
+	Executor              string `json:"executor"`
+	MutationMode          string `json:"mutation_mode,omitempty"`
+	ExecutionIntent       string `json:"execution_intent,omitempty"`
+	ExecutionIntentSource string `json:"execution_intent_source,omitempty"`
+	ArtifactCount         int    `json:"artifact_count,omitempty"`
+	DetailsJSON           string `json:"details_json,omitempty"`
+}
+
+type CompanionDelegationListView struct {
+	Delegations []CompanionDelegationView `json:"delegations"`
+}
+
+type CompanionDelegationDetailView struct {
+	Delegation CompanionDelegationView       `json:"delegation"`
+	Artifacts  []CompanionDelegationArtifact `json:"artifacts"`
+}
+
+type CompanionDelegationRetryView struct {
+	Retried    bool                          `json:"retried"`
+	Reason     string                        `json:"reason"`
+	Delegation CompanionDelegationView       `json:"delegation"`
+	ParentTask *TaskCreateView               `json:"parent_task,omitempty"`
+	ParentRun  *RunView                      `json:"parent_run,omitempty"`
+	ChildTask  *TaskCreateView               `json:"child_task,omitempty"`
+	ChildRun   *RunView                      `json:"child_run,omitempty"`
+	Artifacts  []CompanionDelegationArtifact `json:"artifacts"`
+}
+
+type CompanionDelegationArtifact struct {
+	ID           int64     `json:"id"`
+	DelegationID int64     `json:"delegation_id"`
+	ArtifactType string    `json:"artifact_type"`
+	Summary      string    `json:"summary"`
+	DetailsJSON  string    `json:"details_json"`
+	CreatedAt    time.Time `json:"created_at"`
+}
+
 func ParseCompanion(args []string) (CompanionCommand, error) {
 	if len(args) == 0 {
-		return CompanionCommand{}, fmt.Errorf("usage: odin companion <create|list> [--kind <kind>] [--key <key>] [--title <title>] [--json] | odin companion <get|state|capabilities> <key> [--json] | odin companion run <key> --objective <objective> [--trigger <trigger>] [--json]")
+		return CompanionCommand{}, fmt.Errorf(companionUsage)
 	}
 
 	command := CompanionCommand{Name: strings.ToLower(args[0])}
 	switch command.Name {
-	case "create", "list", "get", "state", "capabilities", "run":
+	case "create", "list", "get", "state", "capabilities", "run", "delegate":
 	default:
 		return CompanionCommand{}, fmt.Errorf("unsupported companion subcommand: %s", args[0])
 	}
@@ -149,6 +216,39 @@ func ParseCompanion(args []string) (CompanionCommand, error) {
 			}
 			index++
 			command.Trigger = strings.ToLower(strings.TrimSpace(args[index]))
+		case "--agent":
+			if index+1 >= len(args) {
+				return CompanionCommand{}, fmt.Errorf("--agent requires a value")
+			}
+			index++
+			command.AgentKey = strings.TrimSpace(args[index])
+		case "--portal-track":
+			if index+1 >= len(args) {
+				return CompanionCommand{}, fmt.Errorf("--portal-track requires a value")
+			}
+			index++
+			command.PortalTrack = strings.TrimSpace(args[index])
+		case "--surface":
+			if index+1 >= len(args) {
+				return CompanionCommand{}, fmt.Errorf("--surface requires a value")
+			}
+			index++
+			command.Surface = strings.TrimSpace(args[index])
+		case "--goal":
+			if index+1 >= len(args) {
+				return CompanionCommand{}, fmt.Errorf("--goal requires a value")
+			}
+			index++
+			command.Goal = strings.TrimSpace(args[index])
+		case "--intent":
+			if index+1 >= len(args) {
+				return CompanionCommand{}, fmt.Errorf("--intent requires a value")
+			}
+			index++
+			command.Intent = normalizeCompanionExecutionIntent(args[index])
+			if command.Intent == "" {
+				return CompanionCommand{}, fmt.Errorf("--intent must be one of read_only, mutation, governance, destructive")
+			}
 		case "--json":
 			if command.JSON {
 				return CompanionCommand{}, fmt.Errorf("duplicate --json flag")
@@ -157,6 +257,13 @@ func ParseCompanion(args []string) (CompanionCommand, error) {
 		default:
 			if strings.HasPrefix(args[index], "--") {
 				return CompanionCommand{}, fmt.Errorf("unknown companion argument: %s", args[index])
+			}
+			if command.Name == "delegate" && command.DelegateAction == "" {
+				delegateAction := strings.ToLower(strings.TrimSpace(args[index]))
+				if delegateAction == "list" || delegateAction == "show" || delegateAction == "retry" {
+					command.DelegateAction = delegateAction
+					continue
+				}
 			}
 			if command.Name == "create" || command.Name == "list" {
 				return CompanionCommand{}, fmt.Errorf("unknown companion argument: %s", args[index])
@@ -193,7 +300,7 @@ func ParseCompanion(args []string) (CompanionCommand, error) {
 		if command.Kind != "" {
 			return CompanionCommand{}, fmt.Errorf("--kind is only valid for companion create")
 		}
-		if command.Key != "" || command.Title != "" || command.Objective != "" || command.Trigger != "" {
+		if command.Key != "" || command.Title != "" || command.Objective != "" || command.Trigger != "" || command.AgentKey != "" || command.PortalTrack != "" || command.Surface != "" || command.Goal != "" || command.Intent != "" {
 			return CompanionCommand{}, fmt.Errorf("companion list does not accept run or create flags")
 		}
 	case "get", "state", "capabilities":
@@ -203,7 +310,7 @@ func ParseCompanion(args []string) (CompanionCommand, error) {
 		if command.Title != "" {
 			return CompanionCommand{}, fmt.Errorf("companion %s does not accept --title", command.Name)
 		}
-		if command.Objective != "" || command.Trigger != "" {
+		if command.Objective != "" || command.Trigger != "" || command.AgentKey != "" || command.PortalTrack != "" || command.Surface != "" || command.Goal != "" || command.Intent != "" {
 			return CompanionCommand{}, fmt.Errorf("companion %s does not accept run flags", command.Name)
 		}
 	case "run":
@@ -216,10 +323,58 @@ func ParseCompanion(args []string) (CompanionCommand, error) {
 		if command.Objective == "" {
 			return CompanionCommand{}, fmt.Errorf("--objective is required")
 		}
+		if command.AgentKey != "" || command.PortalTrack != "" || command.Surface != "" || command.Goal != "" || command.Intent != "" {
+			return CompanionCommand{}, fmt.Errorf("companion run does not accept delegation flags")
+		}
+	case "delegate":
+		if command.Kind != "" {
+			return CompanionCommand{}, fmt.Errorf("companion delegate does not accept --kind")
+		}
+		if command.Title != "" || command.Objective != "" || command.Trigger != "" {
+			return CompanionCommand{}, fmt.Errorf("companion delegate does not accept create or run flags")
+		}
+		switch command.DelegateAction {
+		case "list":
+			if command.Key != "" {
+				return CompanionCommand{}, fmt.Errorf("companion delegate list does not accept an identifier")
+			}
+			if command.AgentKey != "" || command.PortalTrack != "" || command.Surface != "" || command.Goal != "" || command.Intent != "" {
+				return CompanionCommand{}, fmt.Errorf("companion delegate list does not accept create flags")
+			}
+			return command, nil
+		case "show", "retry":
+			if command.Key == "" {
+				return CompanionCommand{}, fmt.Errorf("companion delegate %s requires an id or key", command.DelegateAction)
+			}
+			if command.AgentKey != "" || command.PortalTrack != "" || command.Surface != "" || command.Goal != "" || command.Intent != "" {
+				return CompanionCommand{}, fmt.Errorf("companion delegate %s does not accept create flags", command.DelegateAction)
+			}
+			return command, nil
+		case "":
+		default:
+			return CompanionCommand{}, fmt.Errorf("unsupported companion delegate action: %s", command.DelegateAction)
+		}
+		if command.Key == "" {
+			return CompanionCommand{}, fmt.Errorf("companion delegate requires a key")
+		}
+		if command.AgentKey == "" {
+			return CompanionCommand{}, fmt.Errorf("--agent is required")
+		}
+		if command.PortalTrack == "" {
+			return CompanionCommand{}, fmt.Errorf("--portal-track is required")
+		}
+		if command.Surface == "" {
+			return CompanionCommand{}, fmt.Errorf("--surface is required")
+		}
+		if command.Intent == "" {
+			command.Intent = "read_only"
+		}
 	}
 
 	return command, nil
 }
+
+const companionUsage = "usage: odin companion <create|list> [--kind <kind>] [--key <key>] [--title <title>] [--json] | odin companion <get|state|capabilities> <key> [--json] | odin companion run <key> --objective <objective> [--trigger <trigger>] [--json] | odin companion delegate <key> --agent <agent-key> --portal-track <track> --surface <surface> [--goal <goal>] [--intent <read_only|mutation|governance|destructive>] [--json] | odin companion delegate <list|show <id|key>|retry <id|key>> [--json]"
 
 func isSupportedCompanionKind(kind string) bool {
 	switch corecompanions.Kind(strings.ToLower(kind)) {
@@ -227,5 +382,20 @@ func isSupportedCompanionKind(kind string) bool {
 		return true
 	default:
 		return false
+	}
+}
+
+func normalizeCompanionExecutionIntent(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "read_only", "readonly", "read-only", "read only":
+		return "read_only"
+	case "mutation", "mutating":
+		return "mutation"
+	case "governance", "governance_mutation":
+		return "governance"
+	case "destructive", "destructive_mutation":
+		return "destructive"
+	default:
+		return ""
 	}
 }

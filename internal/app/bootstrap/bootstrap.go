@@ -27,6 +27,7 @@ import (
 type App struct {
 	Store               *sqlite.Store
 	RepoRoot            string
+	RuntimeRoot         string
 	Registry            projects.Registry
 	RegistrySnapshot    registry.Snapshot
 	RegistryDiagnostics []projects.Diagnostic
@@ -188,6 +189,7 @@ func Load(ctx context.Context, repoRoot string, runtimeRoot string) (App, error)
 	return App{
 		Store:               store,
 		RepoRoot:            repoRoot,
+		RuntimeRoot:         runtimeRoot,
 		Registry:            registry,
 		RegistrySnapshot:    registrySnapshot,
 		RegistryDiagnostics: diagnostics,

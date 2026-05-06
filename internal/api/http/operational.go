@@ -2,10 +2,14 @@ package httpapi
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
 	"crypto/subtle"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -14,18 +18,21 @@ import (
 	"odin-os/internal/core/workspaces"
 	healthsvc "odin-os/internal/runtime/health"
 	"odin-os/internal/runtime/projections"
+	"odin-os/internal/runtime/triggers"
 	metricsvc "odin-os/internal/telemetry/metrics"
 )
 
 type Dependencies struct {
-	Health          healthsvc.Service
-	Metrics         metricsvc.Service
-	ReadModels      projections.Queryer
-	RegistryHealthy bool
-	Now             func() time.Time
-	AdminToken      string
-	Admin           AdminActions
-	Tmux            TmuxStatusProvider
+	Health              healthsvc.Service
+	Metrics             metricsvc.Service
+	ReadModels          projections.Queryer
+	RegistryHealthy     bool
+	Now                 func() time.Time
+	AdminToken          string
+	Admin               AdminActions
+	Tmux                TmuxStatusProvider
+	GitHubWebhookSecret string
+	GitHubIssueIngester GitHubIssueIngester
 }
 
 type AdminActions interface {
@@ -37,6 +44,10 @@ type AdminActions interface {
 
 type TmuxStatusProvider interface {
 	Status(context.Context) (TmuxStatus, error)
+}
+
+type GitHubIssueIngester interface {
+	IngestGitHubIssue(context.Context, triggers.GitHubIssueIngestParams) (triggers.GitHubIssueIngestResult, error)
 }
 
 type TmuxStatus struct {
@@ -162,6 +173,9 @@ func NewOperationalHandler(deps Dependencies) http.Handler {
 			return admin.ResumeIssue(ctx, issueID)
 		})
 	})
+	mux.HandleFunc("POST /webhooks/github/issues", func(writer http.ResponseWriter, request *http.Request) {
+		handleGitHubIssuesWebhook(writer, request, deps)
+	})
 	mux.HandleFunc("/metrics", func(writer http.ResponseWriter, request *http.Request) {
 		snapshot, err := deps.Metrics.Collect(request.Context())
 		if err != nil {
@@ -277,6 +291,110 @@ func NewOperationalHandler(deps Dependencies) http.Handler {
 		writeJSON(writer, http.StatusOK, view)
 	})
 	return mux
+}
+
+type githubIssuesWebhookPayload struct {
+	Action     string `json:"action"`
+	Repository struct {
+		FullName string `json:"full_name"`
+	} `json:"repository"`
+	Issue struct {
+		Number  int    `json:"number"`
+		Title   string `json:"title"`
+		Body    string `json:"body"`
+		HTMLURL string `json:"html_url"`
+		Labels  []struct {
+			Name string `json:"name"`
+		} `json:"labels"`
+	} `json:"issue"`
+}
+
+type githubIssuesWebhookResponse struct {
+	DeliveryMode     string `json:"delivery_mode"`
+	Verified         bool   `json:"verified"`
+	Source           string `json:"source"`
+	EventType        string `json:"event_type"`
+	ExternalEventKey string `json:"external_event_key"`
+	ProjectKey       string `json:"project_key"`
+	Repo             string `json:"repo"`
+	Number           int    `json:"number"`
+	Action           string `json:"action"`
+}
+
+func handleGitHubIssuesWebhook(writer http.ResponseWriter, request *http.Request, deps Dependencies) {
+	if deps.GitHubIssueIngester == nil {
+		writeAPIError(writer, http.StatusServiceUnavailable, "github_webhook_unavailable", "github issue ingester unavailable")
+		return
+	}
+	secret := strings.TrimSpace(deps.GitHubWebhookSecret)
+	if secret == "" {
+		writeAPIError(writer, http.StatusServiceUnavailable, "github_webhook_unconfigured", "github webhook secret is not configured")
+		return
+	}
+	if !strings.EqualFold(strings.TrimSpace(request.Header.Get("X-GitHub-Event")), "issues") {
+		writeAPIError(writer, http.StatusBadRequest, "unsupported_github_event", "only GitHub issues events are supported")
+		return
+	}
+	body, err := io.ReadAll(http.MaxBytesReader(writer, request.Body, 1<<20))
+	if err != nil {
+		writeAPIError(writer, http.StatusBadRequest, "invalid_webhook_body", err.Error())
+		return
+	}
+	if !validGitHubWebhookSignature(body, secret, request.Header.Get("X-Hub-Signature-256")) {
+		writeAPIError(writer, http.StatusUnauthorized, "invalid_github_signature", "GitHub webhook signature verification failed")
+		return
+	}
+	var payload githubIssuesWebhookPayload
+	if err := json.Unmarshal(body, &payload); err != nil {
+		writeAPIError(writer, http.StatusBadRequest, "invalid_github_payload", err.Error())
+		return
+	}
+	labels := make([]string, 0, len(payload.Issue.Labels))
+	for _, label := range payload.Issue.Labels {
+		if name := strings.TrimSpace(label.Name); name != "" {
+			labels = append(labels, name)
+		}
+	}
+	result, err := deps.GitHubIssueIngester.IngestGitHubIssue(request.Context(), triggers.GitHubIssueIngestParams{
+		ProjectKey: strings.TrimSpace(request.URL.Query().Get("project")),
+		Repo:       payload.Repository.FullName,
+		Number:     payload.Issue.Number,
+		Action:     payload.Action,
+		Title:      payload.Issue.Title,
+		Body:       payload.Issue.Body,
+		URL:        payload.Issue.HTMLURL,
+		Labels:     strings.Join(labels, ","),
+	})
+	if err != nil {
+		writeAPIError(writer, http.StatusBadRequest, "github_issue_ingest_failed", err.Error())
+		return
+	}
+	writeJSON(writer, http.StatusAccepted, githubIssuesWebhookResponse{
+		DeliveryMode:     "github_webhook",
+		Verified:         true,
+		Source:           result.Source,
+		EventType:        result.EventType,
+		ExternalEventKey: result.ExternalEventKey,
+		ProjectKey:       result.ProjectKey,
+		Repo:             result.Issue.Repo,
+		Number:           result.Issue.Number,
+		Action:           result.Action,
+	})
+}
+
+func validGitHubWebhookSignature(body []byte, secret string, signature string) bool {
+	signature = strings.TrimSpace(signature)
+	signature = strings.TrimPrefix(signature, "sha256=")
+	if signature == "" {
+		return false
+	}
+	decoded, err := hex.DecodeString(signature)
+	if err != nil {
+		return false
+	}
+	mac := hmac.New(sha256.New, []byte(secret))
+	_, _ = mac.Write(body)
+	return hmac.Equal(decoded, mac.Sum(nil))
 }
 
 type dashboardStatus struct {

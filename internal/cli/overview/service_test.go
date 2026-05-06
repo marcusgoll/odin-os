@@ -109,8 +109,8 @@ func TestBuildReturnsCanonicalOverviewFromCurrentAuthority(t *testing.T) {
 	if len(view.Memory.Recent) != 1 || view.Memory.Count != 1 {
 		t.Fatalf("Memory = %+v, want one recent entry", view.Memory)
 	}
-	if view.IntakeInbox.Wiring != WiringNotYetWired {
-		t.Fatalf("Intake wiring = %q, want %q", view.IntakeInbox.Wiring, WiringNotYetWired)
+	if view.IntakeInbox.Wiring != WiringLive {
+		t.Fatalf("Intake wiring = %q, want %q", view.IntakeInbox.Wiring, WiringLive)
 	}
 	if view.IntakeInbox.Source != "task_intakes" {
 		t.Fatalf("Intake source = %q, want task_intakes", view.IntakeInbox.Source)
@@ -118,8 +118,8 @@ func TestBuildReturnsCanonicalOverviewFromCurrentAuthority(t *testing.T) {
 	if view.IntakeInbox.Status != "linked_evidence" {
 		t.Fatalf("Intake status = %q, want linked_evidence", view.IntakeInbox.Status)
 	}
-	if !strings.Contains(view.IntakeInbox.Note, "raw Intake Item authority not implemented") {
-		t.Fatalf("Intake note = %q, want raw authority disclaimer", view.IntakeInbox.Note)
+	if !strings.Contains(view.IntakeInbox.Note, "linked intake evidence") {
+		t.Fatalf("Intake note = %q, want linked intake evidence note", view.IntakeInbox.Note)
 	}
 	if len(view.IntakeInbox.Items) != 1 {
 		t.Fatalf("Intake items len = %d, want 1", len(view.IntakeInbox.Items))
@@ -164,6 +164,35 @@ func TestBuildReturnsCanonicalOverviewFromCurrentAuthority(t *testing.T) {
 	}
 	if trigger.NextDueAt != "2026-04-25T09:00:00Z" {
 		t.Fatalf("Automation trigger next due = %q, want 2026-04-25T09:00:00Z", trigger.NextDueAt)
+	}
+}
+
+func TestBuildWorkItemsExposeBlockedReason(t *testing.T) {
+	ctx := context.Background()
+	env := newOverviewTestEnvironment(t)
+	if _, err := env.store.UpdateTaskQueueState(ctx, sqlite.UpdateTaskQueueStateParams{
+		TaskID:         env.taskID,
+		Status:         "blocked",
+		NextEligibleAt: time.Time{},
+		Priority:       100,
+		MaxAttempts:    3,
+		BlockedReason:  "mutation_requires_isolated_worktree",
+	}); err != nil {
+		t.Fatalf("UpdateTaskQueueState() error = %v", err)
+	}
+
+	view, err := Service{
+		Store:            env.store,
+		RegistrySnapshot: env.snapshot,
+	}.Build(ctx, scope.Resolution{Kind: scope.ScopeGlobal})
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+	if len(view.WorkItems) != 1 {
+		t.Fatalf("Work items len = %d, want 1", len(view.WorkItems))
+	}
+	if view.WorkItems[0].BlockedReason != "mutation_requires_isolated_worktree" {
+		t.Fatalf("Work item blocked reason = %q, want mutation_requires_isolated_worktree", view.WorkItems[0].BlockedReason)
 	}
 }
 
@@ -633,7 +662,6 @@ func newOverviewTestEnvironment(t *testing.T) overviewTestEnvironment {
 	if err != nil {
 		t.Fatalf("CreateTask() error = %v", err)
 	}
-
 	run, err := store.StartRun(ctx, sqlite.StartRunParams{
 		TaskID:   task.ID,
 		Executor: "codex",
