@@ -1160,6 +1160,20 @@ service:
 	go func() {
 		runErr <- Run(ctx, root, []string{"serve"}, strings.NewReader(""), io.Discard)
 	}()
+	serveStopped := false
+	stopServe := func() {
+		t.Helper()
+		if serveStopped {
+			return
+		}
+		cancel()
+		err := <-runErr
+		serveStopped = true
+		if err != nil && !errors.Is(err, context.Canceled) {
+			t.Fatalf("Run(serve) error = %v", err)
+		}
+	}
+	t.Cleanup(stopServe)
 	if err := waitForServeHealthStatus(ctx, "http://"+addr, http.StatusOK, "degraded", "/healthz"); err != nil {
 		t.Fatal(err)
 	}
@@ -1173,25 +1187,32 @@ service:
 	} else if !strings.Contains(body, `"external_event_key":"github:issue:acme/alpha:77:opened"`) {
 		t.Fatalf("webhook body=%s, want stable external event key", body)
 	}
-	lowEvaluate := run("trigger", "evaluate", "source=events", "--json")
-	lowTaskKey := extractTaskKey(lowEvaluate, "automation-github-low-")
-	if !strings.Contains(lowEvaluate, `"materialization_key": "default:github-low:event:external-github-issue-acme-alpha-77-opened"`) {
-		t.Fatalf("low-risk evaluate output = %s, want webhook materialization key", lowEvaluate)
-	}
 	if status, body := postGitHubWebhook(t, "http://"+addr+"/webhooks/github/issues", lowBody, "webhook-secret"); status != http.StatusAccepted {
 		t.Fatalf("webhook replay status=%d body=%s, want %d", status, body, http.StatusAccepted)
-	}
-	replayEvaluate := run("trigger", "evaluate", "source=events", "--json")
-	if !strings.Contains(replayEvaluate, `"materialized": 0`) || !strings.Contains(replayEvaluate, lowTaskKey) {
-		t.Fatalf("replay evaluate output = %s, want duplicate delivery suppressed", replayEvaluate)
 	}
 
 	riskyBody := []byte(`{"action":"opened","repository":{"full_name":"acme/odin-core"},"issue":{"number":9,"title":"Governance mutation request","body":"change system policy","html_url":"https://github.example/acme/odin-core/issues/9"}}`)
 	if status, body := postGitHubWebhook(t, "http://"+addr+"/webhooks/github/issues?project=odin-core", riskyBody, "webhook-secret"); status != http.StatusAccepted {
 		t.Fatalf("risky webhook status=%d body=%s, want %d", status, body, http.StatusAccepted)
 	}
-	riskyEvaluate := run("trigger", "evaluate", "source=events", "--json")
-	riskyTaskKey := extractTaskKey(riskyEvaluate, "automation-github-risky-")
+
+	stopServe()
+
+	evaluate := run("trigger", "evaluate", "source=events", "--json")
+	lowTaskKey := extractTaskKey(evaluate, "automation-github-low-")
+	riskyTaskKey := extractTaskKey(evaluate, "automation-github-risky-")
+	for _, want := range []string{
+		`"materialization_key": "default:github-low:event:external-github-issue-acme-alpha-77-opened"`,
+		`"materialization_key": "default:github-risky:event:external-github-issue-acme-odin-core-9-opened"`,
+	} {
+		if !strings.Contains(evaluate, want) {
+			t.Fatalf("trigger evaluate output = %s, want %s", evaluate, want)
+		}
+	}
+	replayEvaluate := run("trigger", "evaluate", "source=events", "--json")
+	if !strings.Contains(replayEvaluate, `"materialized": 0`) || !strings.Contains(replayEvaluate, lowTaskKey) || !strings.Contains(replayEvaluate, riskyTaskKey) {
+		t.Fatalf("replay evaluate output = %s, want duplicate delivery suppressed", replayEvaluate)
+	}
 	dispatch := run("work", "dispatch", "--task", riskyTaskKey, "--json")
 	if !strings.Contains(dispatch, `"reason": "approval_required"`) || !strings.Contains(dispatch, `"status": "blocked"`) {
 		t.Fatalf("risky dispatch output = %s, want approval gate", dispatch)
@@ -1211,12 +1232,6 @@ service:
 	approvals := run("approvals", "all", "--json")
 	if !strings.Contains(approvals, `"status": "pending"`) || !strings.Contains(approvals, riskyTaskKey) {
 		t.Fatalf("approvals output = %s, want pending risky webhook approval", approvals)
-	}
-
-	cancel()
-	err := <-runErr
-	if err != nil && !errors.Is(err, context.Canceled) {
-		t.Fatalf("Run(serve) error = %v", err)
 	}
 }
 
