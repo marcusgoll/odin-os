@@ -96,6 +96,13 @@ type VerifyBrowserSessionParams struct {
 	Reason         string
 }
 
+type RecordBrowserSessionProfilePreparedParams struct {
+	SessionID   int64
+	ProfilePath string
+	Created     bool
+	Actor       string
+}
+
 type CreateBrowserSessionLoginRequestParams struct {
 	SessionID  int64
 	HandoffURL *string
@@ -408,6 +415,36 @@ func (store *Store) VerifyBrowserSession(ctx context.Context, params VerifyBrows
 		return nil
 	})
 	return verified, completed, err
+}
+
+func (store *Store) RecordBrowserSessionProfilePrepared(ctx context.Context, params RecordBrowserSessionProfilePreparedParams) error {
+	if params.SessionID <= 0 {
+		return fmt.Errorf("browser session id must be positive")
+	}
+	profilePath, err := ValidateBrowserSessionProfilePath(params.ProfilePath)
+	if err != nil {
+		return err
+	}
+	now := store.now()
+	return store.withTx(ctx, func(tx *sql.Tx) error {
+		session, err := getBrowserSessionTx(ctx, tx, params.SessionID)
+		if err != nil {
+			return err
+		}
+		if session.Status == BrowserSessionStatusRevoked {
+			return fmt.Errorf("revoked browser session cannot prepare profile")
+		}
+		if session.ProfilePath != profilePath {
+			return fmt.Errorf("browser session profile path mismatch")
+		}
+		return appendBrowserSessionEventTx(ctx, tx, session, runtimeevents.EventBrowserSessionProfilePrepared, runtimeevents.BrowserSessionProfilePreparedPayload{
+			SessionID:   session.ID,
+			Status:      string(session.Status),
+			ProfilePath: profilePath,
+			Created:     params.Created,
+			Actor:       defaultString(params.Actor, "operator"),
+		}, now)
+	})
 }
 
 func (store *Store) CreateBrowserSessionLoginRequest(ctx context.Context, params CreateBrowserSessionLoginRequestParams) (BrowserSessionLoginRequest, error) {
@@ -772,6 +809,11 @@ func normalizeBrowserSessionProfilePath(profilePath string, sessionName string) 
 	if profilePath == "" {
 		return filepath.ToSlash(filepath.Join("browser-sessions", "profiles", browserSessionPathSegment(sessionName))), nil
 	}
+	return ValidateBrowserSessionProfilePath(profilePath)
+}
+
+func ValidateBrowserSessionProfilePath(profilePath string) (string, error) {
+	profilePath = strings.TrimSpace(profilePath)
 	if filepath.IsAbs(profilePath) {
 		return "", fmt.Errorf("browser session profile path must be relative to ODIN_ROOT")
 	}

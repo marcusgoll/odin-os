@@ -306,6 +306,134 @@ func TestRunBrowserSessionVerifyRejectsRevokedSession(t *testing.T) {
 	}
 }
 
+func TestRunBrowserSessionPrepareProfileCreatesEmptyDirectoryAndAudits(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	root := testRepoRoot(t)
+
+	run := func(args ...string) string {
+		t.Helper()
+		var output bytes.Buffer
+		if err := Run(context.Background(), root, args, strings.NewReader(""), &output); err != nil {
+			t.Fatalf("Run(%v) error = %v\noutput=%s", args, err, output.String())
+		}
+		return output.String()
+	}
+
+	created := decodeBrowserSessionEnvelope(t, []byte(run(
+		"browser", "session", "create",
+		"--name", "google-main",
+		"--domain", "google.com",
+		"--permission-tier", "authenticated_read",
+		"--json",
+	)))
+	profileDir := filepath.Join(root, filepath.FromSlash(created.ProfilePath))
+	if _, err := os.Stat(profileDir); !os.IsNotExist(err) {
+		t.Fatalf("profile directory exists before prepare err=%v, want absent", err)
+	}
+
+	first := decodeBrowserSessionPrepareProfileEnvelope(t, []byte(run("browser", "session", "prepare-profile", "--id", int64String(created.ID), "--json")))
+	if first.ProfilePath != created.ProfilePath || !first.ProfilePathExists || !first.Created {
+		t.Fatalf("first prepare-profile = %+v, want created empty profile directory", first)
+	}
+	info, err := os.Stat(profileDir)
+	if err != nil {
+		t.Fatalf("Stat(profileDir) error = %v", err)
+	}
+	if !info.IsDir() {
+		t.Fatalf("profile path mode = %v, want directory", info.Mode())
+	}
+	if info.Mode().Perm()&0o077 != 0 {
+		t.Fatalf("profile directory permissions = %v, want no group/other permissions", info.Mode().Perm())
+	}
+	entries, err := os.ReadDir(profileDir)
+	if err != nil {
+		t.Fatalf("ReadDir(profileDir) error = %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("profile directory entries = %v, want empty directory only", entries)
+	}
+
+	second := decodeBrowserSessionPrepareProfileEnvelope(t, []byte(run("browser", "session", "prepare-profile", "--id", int64String(created.ID), "--json")))
+	if second.ProfilePath != created.ProfilePath || !second.ProfilePathExists || second.Created {
+		t.Fatalf("second prepare-profile = %+v, want idempotent existing directory", second)
+	}
+	entries, err = os.ReadDir(profileDir)
+	if err != nil {
+		t.Fatalf("ReadDir(profileDir after second prepare) error = %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("profile directory entries after second prepare = %v, want empty directory only", entries)
+	}
+
+	shown := decodeBrowserSessionEnvelope(t, []byte(run("browser", "session", "show", "--id", int64String(created.ID), "--json")))
+	if !shown.ProfilePathExists {
+		t.Fatalf("shown.ProfilePathExists = false, want true after prepare")
+	}
+
+	logs := run("logs", "--json")
+	if !strings.Contains(logs, `"type": "browser.session_profile_prepared"`) {
+		t.Fatalf("logs output = %s, want browser.session_profile_prepared audit event", logs)
+	}
+	for _, forbidden := range []string{"password", "totp", "backup_code", "cookie", "profile_bytes"} {
+		if strings.Contains(strings.ToLower(logs), forbidden) {
+			t.Fatalf("logs output contains forbidden credential/profile byte token %q: %s", forbidden, logs)
+		}
+	}
+}
+
+func TestRunBrowserSessionPrepareProfileRejectsRevokedAndUnsafeMetadata(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	root := testRepoRoot(t)
+
+	run := func(args ...string) string {
+		t.Helper()
+		var output bytes.Buffer
+		if err := Run(context.Background(), root, args, strings.NewReader(""), &output); err != nil {
+			t.Fatalf("Run(%v) error = %v\noutput=%s", args, err, output.String())
+		}
+		return output.String()
+	}
+
+	created := decodeBrowserSessionEnvelope(t, []byte(run(
+		"browser", "session", "create",
+		"--name", "google-main",
+		"--domain", "google.com",
+		"--permission-tier", "authenticated_read",
+		"--json",
+	)))
+	run("browser", "session", "revoke", "--id", int64String(created.ID), "--json")
+	var output bytes.Buffer
+	err := Run(context.Background(), root, []string{"browser", "session", "prepare-profile", "--id", int64String(created.ID), "--json"}, strings.NewReader(""), &output)
+	if err == nil || !strings.Contains(err.Error(), "revoked") {
+		t.Fatalf("Run(browser session prepare-profile revoked) error = %v output=%s, want revoked rejection", err, output.String())
+	}
+
+	unsafe := decodeBrowserSessionEnvelope(t, []byte(run(
+		"browser", "session", "create",
+		"--name", "unsafe",
+		"--domain", "unsafe.example",
+		"--permission-tier", "authenticated_read",
+		"--json",
+	)))
+	store, err := sqlite.Open(filepath.Join(root, "data", "odin.db"))
+	if err != nil {
+		t.Fatalf("Open store error = %v", err)
+	}
+	defer store.Close()
+	if _, err := store.DB().ExecContext(context.Background(), `UPDATE browser_session_profiles SET profile_path = ? WHERE id = ?`, "../escape", unsafe.ID); err != nil {
+		t.Fatalf("update unsafe profile path error = %v", err)
+	}
+
+	output.Reset()
+	err = Run(context.Background(), root, []string{"browser", "session", "prepare-profile", "--id", int64String(unsafe.ID), "--json"}, strings.NewReader(""), &output)
+	if err == nil || !strings.Contains(err.Error(), "stay under ODIN_ROOT") {
+		t.Fatalf("Run(browser session prepare-profile unsafe path) error = %v output=%s, want unsafe path rejection", err, output.String())
+	}
+	if _, err := os.Stat(filepath.Join(root, "..", "escape")); !os.IsNotExist(err) {
+		t.Fatalf("unsafe escape path stat error = %v, want no directory outside runtime root", err)
+	}
+}
+
 type browserSessionJSON struct {
 	ID                int64  `json:"id"`
 	Name              string `json:"name"`
@@ -319,6 +447,13 @@ type browserSessionJSON struct {
 	RevokedAt         string `json:"revoked_at,omitempty"`
 }
 
+type browserSessionPrepareProfileJSON struct {
+	SessionID         int64  `json:"session_id"`
+	ProfilePath       string `json:"profile_path"`
+	ProfilePathExists bool   `json:"profile_path_exists"`
+	Created           bool   `json:"created"`
+}
+
 type browserSessionLoginRequestJSON struct {
 	ID          int64   `json:"id"`
 	SessionID   int64   `json:"session_id"`
@@ -328,6 +463,17 @@ type browserSessionLoginRequestJSON struct {
 	CompletedAt string  `json:"completed_at,omitempty"`
 	CreatedAt   string  `json:"created_at"`
 	UpdatedAt   string  `json:"updated_at"`
+}
+
+func decodeBrowserSessionPrepareProfileEnvelope(t *testing.T, payload []byte) browserSessionPrepareProfileJSON {
+	t.Helper()
+	var envelope struct {
+		Profile browserSessionPrepareProfileJSON `json:"profile"`
+	}
+	if err := json.Unmarshal(payload, &envelope); err != nil {
+		t.Fatalf("browser session prepare profile json decode error = %v; output=%s", err, string(payload))
+	}
+	return envelope.Profile
 }
 
 func decodeBrowserSessionEnvelope(t *testing.T, payload []byte) browserSessionJSON {

@@ -80,6 +80,7 @@ Phase 03 through Phase 14 event types are:
 - `browser.session_status_changed`
 - `browser.session_verified`
 - `browser.session_revoked`
+- `browser.session_profile_prepared`
 - `browser.session_login_requested`
 - `browser.session_login_completed`
 - `browser.session_login_expired`
@@ -220,9 +221,10 @@ Manual Huginn browser login and authenticated read-only session reuse are being 
 - `browser.session_status_changed`
 - `browser.session_verified`
 - `browser.session_revoked`
+- `browser.session_profile_prepared`
 - `browser.session_login_requested`
 - `browser.session_login_completed`
 - `browser.session_login_expired`
 - `goal.waiting_for_human_login`
 
-Browser session events must not include passwords, cookies, tokens, passkey material, TOTP values, backup codes, profile bytes, or raw credential prompts. Metadata-only session verification records operator-attested verification and `last_verified_at`; browser-observed account/domain verification remains future work. Session verification may unblock a waiting goal only through normal policy checks; it must not approve or execute the goal by itself.
+Browser session events must not include passwords, cookies, tokens, passkey material, TOTP values, backup codes, profile bytes, or raw credential prompts. Metadata-only session verification records operator-attested verification and `last_verified_at`; browser-observed account/domain verification remains future work. Profile preparation records only empty-directory preparation metadata. Session verification may unblock a waiting goal only through normal policy checks; it must not approve or execute the goal by itself.

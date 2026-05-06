@@ -49,6 +49,10 @@ type browserSessionLoginRequestListView struct {
 	LoginRequests []browserSessionLoginRequestView `json:"login_requests"`
 }
 
+type browserSessionProfileEnvelope struct {
+	Profile browserSessionProfileView `json:"profile"`
+}
+
 type browserSessionView struct {
 	ID                int64  `json:"id"`
 	Name              string `json:"name"`
@@ -63,6 +67,13 @@ type browserSessionView struct {
 	LastVerifiedAt    string `json:"last_verified_at,omitempty"`
 	ExpiresAt         string `json:"expires_at,omitempty"`
 	RevokedAt         string `json:"revoked_at,omitempty"`
+}
+
+type browserSessionProfileView struct {
+	SessionID         int64  `json:"session_id"`
+	ProfilePath       string `json:"profile_path"`
+	ProfilePathExists bool   `json:"profile_path_exists"`
+	Created           bool   `json:"created"`
 }
 
 type browserSessionLoginRequestView struct {
@@ -234,6 +245,20 @@ func runBrowserSession(ctx context.Context, app bootstrap.App, command commands.
 		}
 		_, err = fmt.Fprintf(stdout, "browser_session=%d status=%s name=%q domain=%s\n", view.ID, view.Status, view.Name, view.Domain)
 		return err
+	case "prepare-profile":
+		session, err := app.Store.GetBrowserSession(ctx, command.ID)
+		if err != nil {
+			return err
+		}
+		view, err := prepareBrowserSessionProfile(ctx, app, session)
+		if err != nil {
+			return err
+		}
+		if command.JSON {
+			return commands.WriteJSON(stdout, browserSessionProfileEnvelope{Profile: view})
+		}
+		_, err = fmt.Fprintf(stdout, "browser_session_profile=%d path=%s exists=%t created=%t\n", view.SessionID, view.ProfilePath, view.ProfilePathExists, view.Created)
+		return err
 	case "login-request":
 		request, err := app.Store.CreateBrowserSessionLoginRequest(ctx, sqlite.CreateBrowserSessionLoginRequestParams{
 			SessionID: command.ID,
@@ -273,6 +298,68 @@ func runBrowserSession(ctx context.Context, app bootstrap.App, command commands.
 	default:
 		return fmt.Errorf(commands.BrowserUsage)
 	}
+}
+
+func prepareBrowserSessionProfile(ctx context.Context, app bootstrap.App, session sqlite.BrowserSession) (browserSessionProfileView, error) {
+	if session.Status == sqlite.BrowserSessionStatusRevoked {
+		return browserSessionProfileView{}, fmt.Errorf("revoked browser session cannot prepare profile")
+	}
+	profilePath, absPath, err := resolveBrowserSessionProfilePath(app.RuntimeRoot, session.ProfilePath)
+	if err != nil {
+		return browserSessionProfileView{}, err
+	}
+	created := false
+	info, err := os.Stat(absPath)
+	switch {
+	case err == nil:
+		if !info.IsDir() {
+			return browserSessionProfileView{}, fmt.Errorf("browser session profile path exists and is not a directory")
+		}
+	case os.IsNotExist(err):
+		if err := os.MkdirAll(absPath, 0o700); err != nil {
+			return browserSessionProfileView{}, err
+		}
+		created = true
+	default:
+		return browserSessionProfileView{}, err
+	}
+	if err := os.Chmod(absPath, 0o700); err != nil {
+		return browserSessionProfileView{}, err
+	}
+	if err := app.Store.RecordBrowserSessionProfilePrepared(ctx, sqlite.RecordBrowserSessionProfilePreparedParams{
+		SessionID:   session.ID,
+		ProfilePath: profilePath,
+		Created:     created,
+		Actor:       "operator",
+	}); err != nil {
+		return browserSessionProfileView{}, err
+	}
+	return browserSessionProfileView{
+		SessionID:         session.ID,
+		ProfilePath:       profilePath,
+		ProfilePathExists: browserSessionProfilePathExists(app.RuntimeRoot, profilePath),
+		Created:           created,
+	}, nil
+}
+
+func resolveBrowserSessionProfilePath(runtimeRoot string, profilePath string) (string, string, error) {
+	profilePath, err := sqlite.ValidateBrowserSessionProfilePath(profilePath)
+	if err != nil {
+		return "", "", err
+	}
+	absRuntimeRoot, err := filepath.Abs(runtimeRoot)
+	if err != nil {
+		return "", "", err
+	}
+	absPath := filepath.Join(absRuntimeRoot, filepath.FromSlash(profilePath))
+	rel, err := filepath.Rel(absRuntimeRoot, absPath)
+	if err != nil {
+		return "", "", err
+	}
+	if rel == "." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || rel == ".." || filepath.IsAbs(rel) {
+		return "", "", fmt.Errorf("browser session profile path must stay under ODIN_ROOT")
+	}
+	return profilePath, absPath, nil
 }
 
 func browserSessionPermissionTier(value string) sqlite.BrowserSessionPermissionTier {

@@ -111,3 +111,18 @@ func TestParseBrowserSessionVerifyCommand(t *testing.T) {
 		t.Fatalf("ParseBrowser(session verify with status) error = %v, want rejected status flag", err)
 	}
 }
+
+func TestParseBrowserSessionPrepareProfileCommand(t *testing.T) {
+	command, err := ParseBrowser([]string{"session", "prepare-profile", "--id", "42", "--json"})
+	if err != nil {
+		t.Fatalf("ParseBrowser(session prepare-profile) error = %v", err)
+	}
+	if command.Name != "session" || command.SessionAction != "prepare-profile" || command.ID != 42 || !command.JSON {
+		t.Fatalf("prepare-profile command = %+v, want parsed prepare-profile request", command)
+	}
+
+	_, err = ParseBrowser([]string{"session", "prepare-profile", "--id", "42", "--profile-path", "browser-sessions/profiles/other", "--json"})
+	if err == nil || !strings.Contains(err.Error(), "only accepts --id and --json") {
+		t.Fatalf("ParseBrowser(session prepare-profile with profile path) error = %v, want rejected profile path", err)
+	}
+}

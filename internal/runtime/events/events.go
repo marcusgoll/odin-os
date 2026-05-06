@@ -131,6 +131,7 @@ const (
 	EventBrowserSessionStatusChanged        Type = "browser.session_status_changed"
 	EventBrowserSessionVerified             Type = "browser.session_verified"
 	EventBrowserSessionRevoked              Type = "browser.session_revoked"
+	EventBrowserSessionProfilePrepared      Type = "browser.session_profile_prepared"
 	EventBrowserSessionLoginRequested       Type = "browser.session_login_requested"
 	EventBrowserSessionLoginCompleted       Type = "browser.session_login_completed"
 	EventBrowserSessionLoginExpired         Type = "browser.session_login_expired"
@@ -376,6 +377,14 @@ type BrowserSessionRevokedPayload struct {
 	Actor          string `json:"actor,omitempty"`
 	Reason         string `json:"reason"`
 	RevokedAt      string `json:"revoked_at"`
+}
+
+type BrowserSessionProfilePreparedPayload struct {
+	SessionID   int64  `json:"session_id"`
+	Status      string `json:"status"`
+	ProfilePath string `json:"profile_path"`
+	Created     bool   `json:"created"`
+	Actor       string `json:"actor,omitempty"`
 }
 
 type BrowserSessionLoginRequestedPayload struct {

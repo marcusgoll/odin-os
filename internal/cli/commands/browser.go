@@ -7,7 +7,7 @@ import (
 	"strings"
 )
 
-const BrowserUsage = "usage: odin browser run --goal-id <id> --url <url> [--objective <text>] [--allowed-domain <domain>] [--max-pages <n>] [--max-duration-seconds <n>] [--worker-mode <fetch|browser>] [--evidence-required] [--action <read|navigate|snapshot|extract>] [--json] | odin browser session create --name <name> --domain <domain> --permission-tier <tier> [--account-hint <hint>] [--profile-path <path>] [--json] | odin browser session list [--json] | odin browser session show --id <id> [--json] | odin browser session status --id <id> --status <status> [--json] | odin browser session revoke --id <id> [--json] | odin browser session login-request --id <id> [--json] | odin browser session login-requests --id <id> [--json] | odin browser session verify --id <id> [--login-request-id <id>] [--json]"
+const BrowserUsage = "usage: odin browser run --goal-id <id> --url <url> [--objective <text>] [--allowed-domain <domain>] [--max-pages <n>] [--max-duration-seconds <n>] [--worker-mode <fetch|browser>] [--evidence-required] [--action <read|navigate|snapshot|extract>] [--json] | odin browser session create --name <name> --domain <domain> --permission-tier <tier> [--account-hint <hint>] [--profile-path <path>] [--json] | odin browser session list [--json] | odin browser session show --id <id> [--json] | odin browser session status --id <id> --status <status> [--json] | odin browser session revoke --id <id> [--json] | odin browser session login-request --id <id> [--json] | odin browser session login-requests --id <id> [--json] | odin browser session verify --id <id> [--login-request-id <id>] [--json] | odin browser session prepare-profile --id <id> [--json]"
 
 type BrowserCommand struct {
 	Name               string
@@ -162,7 +162,7 @@ func parseBrowserSession(args []string, command BrowserCommand) (BrowserCommand,
 	}
 	command.SessionAction = strings.ToLower(strings.TrimSpace(args[0]))
 	switch command.SessionAction {
-	case "create", "list", "show", "status", "revoke", "login-request", "login-requests", "verify":
+	case "create", "list", "show", "status", "revoke", "login-request", "login-requests", "verify", "prepare-profile":
 	default:
 		return BrowserCommand{}, fmt.Errorf("unsupported browser session subcommand: %s", args[0])
 	}
@@ -265,7 +265,7 @@ func parseBrowserSession(args []string, command BrowserCommand) (BrowserCommand,
 		if command.ID != 0 || command.LoginRequestID != 0 || command.SessionName != "" || command.SessionDomain != "" || command.PermissionTier != "" || command.AccountHint != "" || command.ProfilePath != "" || command.Status != "" {
 			return BrowserCommand{}, fmt.Errorf("browser session list only accepts --json")
 		}
-	case "show", "revoke", "login-request", "login-requests":
+	case "show", "revoke", "login-request", "login-requests", "prepare-profile":
 		if command.ID <= 0 {
 			return BrowserCommand{}, fmt.Errorf("--id is required")
 		}

@@ -6,7 +6,7 @@ date: 2026-05-06
 
 # Browser Session Handoff Contract
 
-This contract defines the Odin-native handoff for manual Huginn browser login and reusable authenticated read-only sessions. The session metadata, login request metadata, and manual verification metadata slices are implemented. Real NoVNC/Tailscale handoff, browser launch, browser profile persistence, login automation, read-only verification checks, and authenticated session attachment remain future work.
+This contract defines the Odin-native handoff for manual Huginn browser login and reusable authenticated read-only sessions. The session metadata, login request metadata, manual verification metadata, profile path allocation, and explicit empty profile directory preparation slices are implemented. Real NoVNC/Tailscale handoff, browser launch, browser profile persistence, login automation, read-only verification checks, and authenticated session attachment remain future work.
 
 ## Existing State
 
@@ -18,6 +18,7 @@ This contract defines the Odin-native handoff for manual Huginn browser login an
 - `odin browser session login-request --id <session_id> --json` records metadata-only manual login requests with `handoff_url: null` until a real private handoff service exists.
 - `odin browser session login-requests --id <session_id> --json` lists persisted login request metadata for one session.
 - `odin browser session verify --id <session_id> [--login-request-id <id>] --json` records metadata-only operator verification, sets `last_verified_at`, moves the session to `verified`, and completes the login request when one is provided.
+- `odin browser session prepare-profile --id <session_id> --json` explicitly creates the empty profile directory under `ODIN_ROOT` and records an audit event without writing browser files.
 - Older Huginn/Plaid/Google notes describe narrow attended browser needs, but they do not define a durable Odin browser session profile authority.
 
 ## Non-Goals
@@ -27,6 +28,7 @@ This contract defines the Odin-native handoff for manual Huginn browser login an
 - No form submit, message send, purchase, account change, delete, or external mutation execution.
 - No NoVNC implementation in this slice.
 - No cookies, browser profile files, or profile bytes are created by this design.
+- Empty profile directory preparation does not write browser files, cookies, storage state, credentials, or profile bytes.
 - No browser-observed account binding or read-only domain verification check is performed by the metadata-only verification slice.
 - No Codex, Huginn, or browser executor implementation is added by the metadata slices.
 
@@ -147,6 +149,7 @@ odin browser session revoke --id <id> --json
 odin browser session login-request --id <id> --json
 odin browser session login-requests --id <id> --json
 odin browser session verify --id <id> [--login-request-id <id>] --json
+odin browser session prepare-profile --id <id> --json
 ```
 
 `--permission-tier authenticated_read` is accepted by the CLI as an operator-facing alias for stored tier `authenticated_readonly`. If `--profile-path` is omitted, Odin records the metadata-only default `browser-sessions/profiles/<sanitized-name>` and does not create a directory. Explicit profile paths must remain under `browser-sessions/profiles/`, must be relative to `ODIN_ROOT`, and must not contain path traversal.
@@ -154,6 +157,8 @@ odin browser session verify --id <id> [--login-request-id <id>] --json
 `login-request` creates request metadata only. Its JSON envelope returns a `login_request` object with `handoff_url: null` until the future private handoff service can provide a short-lived operator URL. It must not launch a browser, write a browser profile, store credential material, or mark the session verified.
 
 `verify` records metadata-only operator verification. It must not launch a browser, inspect a profile directory, store credential material, or approve/execute a goal. Revoked sessions cannot be verified. Expired or cancelled login requests cannot be completed.
+
+`prepare-profile` creates only the empty allocated profile directory under `ODIN_ROOT`, applies restrictive directory permissions where supported, is idempotent when the directory already exists, and appends `browser.session_profile_prepared`. Revoked sessions cannot prepare profiles. The command must not write browser files, cookies, storage state, credentials, or profile bytes.
 
 JSON output should follow the existing Odin style: stable top-level envelopes, snake-case keys, and explicit IDs. Suggested envelopes:
 
@@ -171,6 +176,19 @@ JSON output should follow the existing Odin style: stable top-level envelopes, s
     "created_at": "2026-05-06T00:00:00Z",
     "updated_at": "2026-05-06T00:00:00Z",
     "last_verified_at": "2026-05-06T00:00:00Z"
+  }
+}
+```
+
+Implemented `prepare-profile --json` returns preparation metadata without secrets:
+
+```json
+{
+  "profile": {
+    "session_id": 1,
+    "profile_path": "browser-sessions/profiles/marcus-example",
+    "profile_path_exists": true,
+    "created": true
   }
 }
 ```
@@ -210,6 +228,7 @@ Browser profile files:
 - Default root: `ODIN_ROOT/browser-sessions/profiles/<sanitized-name>`.
 - Paths stored in SQLite must be relative to `ODIN_ROOT`.
 - Odin allocates profile paths as metadata only. It must not create browser profile contents, cookies, storage state, or credential material during session creation.
+- Odin creates profile directories only through explicit `prepare-profile`. The prepared directory must be empty immediately after creation.
 - `profile_path_exists` reports whether the allocated relative path currently exists under `ODIN_ROOT`; the field is informational and does not make the filesystem a profile registry.
 - Profile files must be encrypted at rest before `authenticated_readonly` is enabled. If host-level encryption is the first slice, the CLI must report `encrypted_at_rest=false` or `encryption_gap=host_only` and policy must deny reuse unless the operator explicitly accepts that documented gap in a later policy slice.
 - No credential material may be written to Odin-specific metadata, events, logs, screenshots, or evidence payloads.
@@ -251,6 +270,7 @@ Required event types for the metadata foundation:
 - `browser.session_status_changed`
 - `browser.session_verified`
 - `browser.session_revoked`
+- `browser.session_profile_prepared`
 - `browser.session_login_requested`
 - `browser.session_login_completed`
 - `browser.session_login_expired`
@@ -271,6 +291,8 @@ Suggested payload fields:
 - `previous_status`
 - `reason`
 - `actor`
+- `created`
+- `profile_path`
 - `expires_at`
 - `handoff_expires_at`
 - `last_verified_at`
@@ -295,11 +317,12 @@ Rules:
 2. CLI metadata surface: add `odin browser session create|list|show|status|revoke` with JSON output, no browser launch, and fail-closed policy.
 3. Login request metadata surface: implemented `odin browser session login-request|login-requests` to record and inspect metadata-only manual login requests with `handoff_url: null`.
 4. Manual verification metadata surface: implemented `odin browser session verify` to set session status `verified`, record `last_verified_at`, and optionally complete a login request, with no browser launch or credential handling.
-5. Goal waiting integration: add `waiting_for_human_login` status or blocker-specific goal event handling, then prove the runner skips waiting goals.
-6. Encrypted profile storage: add encrypted profile root handling and policy denial for unencrypted profiles.
-7. Authenticated read-only attachment: allow `odin browser run` and goal runner evidence collection to attach a verified `authenticated_readonly` profile for allowed domains only.
-8. NoVNC/Tailscale handoff service: add a private-network browser handoff endpoint with short-lived tokens after the metadata and policy gates are proven.
-9. Operator runbooks and overview visibility: surface session health, expiring profiles, and waiting login goals in existing overview lanes if a clean projection lane exists.
+5. Profile path and empty directory preparation: implemented safe profile path allocation plus explicit `odin browser session prepare-profile` for empty-directory creation.
+6. Goal waiting integration: add `waiting_for_human_login` status or blocker-specific goal event handling, then prove the runner skips waiting goals.
+7. Encrypted profile storage: add encrypted profile root handling and policy denial for unencrypted profiles.
+8. Authenticated read-only attachment: allow `odin browser run` and goal runner evidence collection to attach a verified `authenticated_readonly` profile for allowed domains only.
+9. NoVNC/Tailscale handoff service: add a private-network browser handoff endpoint with short-lived tokens after the metadata and policy gates are proven.
+10. Operator runbooks and overview visibility: surface session health, expiring profiles, and waiting login goals in existing overview lanes if a clean projection lane exists.
 
 ## Best Operating Rule
 
