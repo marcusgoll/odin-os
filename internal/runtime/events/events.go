@@ -135,6 +135,12 @@ const (
 	EventBrowserSessionLoginRequested       Type = "browser.session_login_requested"
 	EventBrowserSessionLoginCompleted       Type = "browser.session_login_completed"
 	EventBrowserSessionLoginExpired         Type = "browser.session_login_expired"
+	EventBrowserHandoffRunnerRequested      Type = "browser.handoff_runner_requested"
+	EventBrowserHandoffRunnerStarted        Type = "browser.handoff_runner_started"
+	EventBrowserHandoffRunnerExpired        Type = "browser.handoff_runner_expired"
+	EventBrowserHandoffRunnerCancelled      Type = "browser.handoff_runner_cancelled"
+	EventBrowserHandoffRunnerCompleted      Type = "browser.handoff_runner_completed"
+	EventBrowserHandoffRunnerFailed         Type = "browser.handoff_runner_failed"
 )
 
 const (
@@ -412,6 +418,29 @@ type BrowserSessionLoginExpiredPayload struct {
 	PreviousStatus string `json:"previous_status"`
 	Status         string `json:"status"`
 	ExpiresAt      string `json:"expires_at"`
+}
+
+type BrowserHandoffRunnerLifecyclePayload struct {
+	ID             int64  `json:"id"`
+	SessionID      int64  `json:"session_id"`
+	LoginRequestID int64  `json:"login_request_id"`
+	HandoffID      string `json:"handoff_id"`
+	RunnerID       string `json:"runner_id,omitempty"`
+	ProcessID      int64  `json:"process_id,omitempty"`
+	PreviousStatus string `json:"previous_status"`
+	Status         string `json:"status"`
+	ViewerURL      string `json:"viewer_url,omitempty"`
+	BindAddr       string `json:"bind_addr,omitempty"`
+	PrivateBaseURL string `json:"private_base_url,omitempty"`
+	PublicBaseURL  string `json:"public_base_url,omitempty"`
+	ExpiresAt      string `json:"expires_at,omitempty"`
+	StartedAt      string `json:"started_at,omitempty"`
+	CompletedAt    string `json:"completed_at,omitempty"`
+	CancelledAt    string `json:"cancelled_at,omitempty"`
+	ErrorCode      string `json:"error_code,omitempty"`
+	ErrorMessage   string `json:"error_message,omitempty"`
+	Actor          string `json:"actor,omitempty"`
+	Reason         string `json:"reason,omitempty"`
 }
 
 type TaskQueueStateChangedPayload struct {

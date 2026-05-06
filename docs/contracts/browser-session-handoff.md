@@ -141,9 +141,9 @@ Forbidden goal types for session reuse:
 
 ## Future NoVNC/Tailscale Handoff Runner Contract
 
-The handoff runner is a future, operator-attended process boundary for manual login only. Its purpose is to launch one temporary visible browser session, expose its viewer only over an operator-approved private network path such as Tailscale to a NoVNC endpoint, and then stop after completion, expiration, or cancellation. Odin remains the metadata, policy, and audit authority. The runner must never become a credential collector, browser automation agent, profile registry, or goal execution authority.
+The handoff runner is an operator-attended process boundary for manual login only. Its future process implementation will launch one temporary visible browser session, expose its viewer only over an operator-approved private network path such as Tailscale to a NoVNC endpoint, and then stop after completion, expiration, or cancellation. Odin remains the metadata, policy, and audit authority. The runner must never become a credential collector, browser automation agent, profile registry, or goal execution authority.
 
-This section is a design contract only. It does not add runtime behavior, HTTP handlers, process launch, NoVNC services, Tailscale services, browser profile writes, cookie writes, or credential storage.
+The SQLite runner metadata store is implemented. The process, CLI, and service parts remain design only. This slice does not add HTTP handlers, process launch, NoVNC services, Tailscale services, browser profile writes, cookie writes, or credential storage.
 
 ### Runner Request
 
@@ -219,7 +219,7 @@ The runner policy is fail-closed:
 
 ### Runner Lifecycle
 
-Runner metadata uses a separate future lifecycle from browser session status and login request status:
+Runner metadata uses a separate lifecycle from browser session status and login request status:
 
 1. `requested`: Odin has accepted the runner request metadata but has not exposed a viewer.
 2. `started`: the visible browser and private viewer route are available for manual login.
@@ -227,20 +227,22 @@ Runner metadata uses a separate future lifecycle from browser session status and
 4. `expired`: timeout or login request expiration stopped the runner before completion.
 5. `cancelled`: the operator or policy stopped the runner before completion.
 
-Allowed transitions are `requested -> started`, `requested -> failed`, `started -> completed`, `started -> expired`, and `started -> cancelled`. Terminal states are `failed`, `completed`, `expired`, and `cancelled`. A terminal runner must not be restarted in place; create a new login request and runner record instead.
+Allowed transitions are `requested -> started`, `requested -> expired`, `requested -> cancelled`, `requested -> failed`, `started -> completed`, `started -> expired`, `started -> cancelled`, and `started -> failed`. Terminal states are `failed`, `completed`, `expired`, and `cancelled`. A terminal runner must not be restarted in place; create a new login request and runner record instead.
 
 Runner lifecycle must not silently mutate session lifecycle. A `completed` runner may complete the linked login request only through the same completion path as `POST /browser/session/handoff/complete`; session verification still requires the existing verification policy for the current slice and stronger browser-observed checks in a later slice.
 
 ### Runner Audit Events
 
-Future runner state changes must append runtime events in the same transaction as runner metadata changes. Event payloads must follow the existing browser session audit redaction rules.
+Runner state changes append runtime events in the same transaction as runner metadata changes. Event payloads must follow the existing browser session audit redaction rules.
 
-Required future event types:
+Required event types:
 
+- `browser.handoff_runner_requested`
 - `browser.handoff_runner_started`
 - `browser.handoff_runner_expired`
 - `browser.handoff_runner_cancelled`
 - `browser.handoff_runner_completed`
+- `browser.handoff_runner_failed`
 
 Suggested payload fields:
 
@@ -478,12 +480,14 @@ Required event types for the metadata foundation:
 - `browser.session_login_expired`
 - `goal.waiting_for_human_login`
 
-Required future runner event types:
+Required runner event types:
 
+- `browser.handoff_runner_requested`
 - `browser.handoff_runner_started`
 - `browser.handoff_runner_expired`
 - `browser.handoff_runner_cancelled`
 - `browser.handoff_runner_completed`
+- `browser.handoff_runner_failed`
 
 `browser.session_status_changed` covers profile status changes. Login request metadata uses specific request lifecycle events.
 
@@ -531,7 +535,7 @@ Rules:
 6. Profile storage policy gate: implemented `profile_storage_policy` with default `encrypted_required`, CLI JSON output, and a deny-all `CanWriteBrowserProfile` helper until encrypted storage exists.
 7. Encrypted profile storage: add encrypted profile root handling and policy denial for unencrypted profiles.
 8. Authenticated read-only attachment: allow `odin browser run` and goal runner evidence collection to attach a verified `authenticated_readonly` profile for allowed domains only.
-9. Handoff runner metadata store: add additive SQLite runner metadata with `requested`, `started`, `failed`, `completed`, `expired`, and `cancelled` states; append runner audit events transactionally.
+9. Handoff runner metadata store: implemented additive SQLite runner metadata with `requested`, `started`, `failed`, `completed`, `expired`, and `cancelled` states; append runner audit events transactionally.
 10. Handoff runner CLI: add minimal start/cancel/show/list commands under the existing `odin browser session handoff` surface, reusing current session and login request validation.
 11. Process boundary: define and implement the isolated runner process contract, shutdown semantics, timeout enforcement, and fail-closed cleanup without profile writes.
 12. Local NoVNC fixture: add a local-only fixture for tests that proves viewer URL wiring and lifecycle behavior without external network mutation.
