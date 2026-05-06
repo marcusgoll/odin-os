@@ -142,6 +142,14 @@ func TestParseBrowserSessionRunnerCommands(t *testing.T) {
 		t.Fatalf("show command = %+v, want parsed runner show", show)
 	}
 
+	start, err := ParseBrowser([]string{"session", "runner", "start", "--id", "3", "--json"})
+	if err != nil {
+		t.Fatalf("ParseBrowser(session runner start) error = %v", err)
+	}
+	if start.SessionAction != "runner" || start.RunnerAction != "start" || start.ID != 3 || !start.JSON {
+		t.Fatalf("start command = %+v, want parsed runner start", start)
+	}
+
 	status, err := ParseBrowser([]string{"session", "runner", "status", "--id", "3", "--status", "started", "--json"})
 	if err != nil {
 		t.Fatalf("ParseBrowser(session runner status) error = %v", err)
@@ -163,6 +171,9 @@ func TestParseBrowserSessionRunnerCommands(t *testing.T) {
 	}
 	if _, err := ParseBrowser([]string{"session", "runner", "status", "--id", "3", "--status", "requested", "--json"}); err == nil {
 		t.Fatal("ParseBrowser(session runner status requested) error = nil, want rejection")
+	}
+	if _, err := ParseBrowser([]string{"session", "runner", "start", "--id", "3", "--status", "started", "--json"}); err == nil {
+		t.Fatal("ParseBrowser(session runner start with status) error = nil, want rejection")
 	}
 	if _, err := ParseBrowser([]string{"session", "runner", "approve", "--id", "3", "--json"}); err == nil {
 		t.Fatal("ParseBrowser(session runner unsupported action) error = nil, want rejection")

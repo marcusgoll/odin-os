@@ -7,7 +7,7 @@ import (
 	"strings"
 )
 
-const BrowserUsage = "usage: odin browser run --goal-id <id> --url <url> [--objective <text>] [--allowed-domain <domain>] [--max-pages <n>] [--max-duration-seconds <n>] [--worker-mode <fetch|browser>] [--evidence-required] [--action <read|navigate|snapshot|extract>] [--json] | odin browser session create --name <name> --domain <domain> --permission-tier <tier> [--account-hint <hint>] [--profile-path <path>] [--json] | odin browser session list [--json] | odin browser session show --id <id> [--json] | odin browser session status --id <id> --status <status> [--json] | odin browser session revoke --id <id> [--json] | odin browser session login-request --id <id> [--handoff-base-url <url>] [--json] | odin browser session login-requests --id <id> [--json] | odin browser session handoff show --handoff-id <id> [--json] | odin browser session runner create --login-request-id <id> [--json] | odin browser session runner list --login-request-id <id> [--json] | odin browser session runner show --id <id> [--json] | odin browser session runner status --id <id> --status <status> [--json] | odin browser session runner cancel --id <id> [--json] | odin browser session verify --id <id> [--login-request-id <id>] [--json] | odin browser session prepare-profile --id <id> [--json]"
+const BrowserUsage = "usage: odin browser run --goal-id <id> --url <url> [--objective <text>] [--allowed-domain <domain>] [--max-pages <n>] [--max-duration-seconds <n>] [--worker-mode <fetch|browser>] [--evidence-required] [--action <read|navigate|snapshot|extract>] [--json] | odin browser session create --name <name> --domain <domain> --permission-tier <tier> [--account-hint <hint>] [--profile-path <path>] [--json] | odin browser session list [--json] | odin browser session show --id <id> [--json] | odin browser session status --id <id> --status <status> [--json] | odin browser session revoke --id <id> [--json] | odin browser session login-request --id <id> [--handoff-base-url <url>] [--json] | odin browser session login-requests --id <id> [--json] | odin browser session handoff show --handoff-id <id> [--json] | odin browser session runner create --login-request-id <id> [--json] | odin browser session runner list --login-request-id <id> [--json] | odin browser session runner show --id <id> [--json] | odin browser session runner start --id <id> [--json] | odin browser session runner status --id <id> --status <status> [--json] | odin browser session runner cancel --id <id> [--json] | odin browser session verify --id <id> [--login-request-id <id>] [--json] | odin browser session prepare-profile --id <id> [--json]"
 
 type BrowserCommand struct {
 	Name               string
@@ -178,7 +178,7 @@ func parseBrowserSession(args []string, command BrowserCommand) (BrowserCommand,
 	}
 	if command.SessionAction == "runner" {
 		if len(args) < 2 || strings.HasPrefix(args[1], "--") {
-			return BrowserCommand{}, fmt.Errorf("usage: odin browser session runner <create|list|show|status|cancel> [flags]")
+			return BrowserCommand{}, fmt.Errorf("usage: odin browser session runner <create|list|show|start|status|cancel> [flags]")
 		}
 		command.RunnerAction = strings.ToLower(strings.TrimSpace(args[1]))
 		flagStart = 2
@@ -347,7 +347,7 @@ func parseBrowserSession(args []string, command BrowserCommand) (BrowserCommand,
 			if command.ID != 0 || command.Status != "" {
 				return BrowserCommand{}, fmt.Errorf("browser session runner %s only accepts --login-request-id and --json", command.RunnerAction)
 			}
-		case "show", "cancel":
+		case "show", "start", "cancel":
 			if command.ID <= 0 {
 				return BrowserCommand{}, fmt.Errorf("--id is required")
 			}
@@ -390,7 +390,7 @@ func parseBrowserSession(args []string, command BrowserCommand) (BrowserCommand,
 
 func isKnownBrowserHandoffRunnerAction(value string) bool {
 	switch strings.ToLower(strings.TrimSpace(value)) {
-	case "create", "list", "show", "status", "cancel":
+	case "create", "list", "show", "start", "status", "cancel":
 		return true
 	default:
 		return false

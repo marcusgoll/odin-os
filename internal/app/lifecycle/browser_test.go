@@ -349,6 +349,66 @@ func TestRunBrowserSessionRunnerMetadataCommands(t *testing.T) {
 	}
 }
 
+func TestRunBrowserSessionRunnerStartUsesStubRunnerSafely(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	root := testRepoRoot(t)
+
+	run := func(args ...string) string {
+		t.Helper()
+		var output bytes.Buffer
+		if err := Run(context.Background(), root, args, strings.NewReader(""), &output); err != nil {
+			t.Fatalf("Run(%v) error = %v\noutput=%s", args, err, output.String())
+		}
+		return output.String()
+	}
+
+	created := decodeBrowserSessionEnvelope(t, []byte(run(
+		"browser", "session", "create",
+		"--name", "stub-start",
+		"--domain", "example.com",
+		"--permission-tier", "authenticated_read",
+		"--json",
+	)))
+	loginRequest := decodeBrowserSessionLoginRequestEnvelope(t, []byte(run("browser", "session", "login-request", "--id", int64String(created.ID), "--json")))
+	runner := decodeBrowserSessionRunnerEnvelope(t, []byte(run("browser", "session", "runner", "create", "--login-request-id", int64String(loginRequest.ID), "--json")))
+
+	started := decodeBrowserSessionRunnerEnvelope(t, []byte(run("browser", "session", "runner", "start", "--id", int64String(runner.ID), "--json")))
+	if started.Status != "failed" {
+		t.Fatalf("started runner status = %q, want failed for StubRunner not_implemented", started.Status)
+	}
+	if started.ErrorCode == nil || *started.ErrorCode != "not_implemented" {
+		t.Fatalf("started runner error_code = %v, want not_implemented", started.ErrorCode)
+	}
+	if started.ViewerURL != nil || started.RunnerID != nil || started.ProcessID != nil {
+		t.Fatalf("started runner = %+v, want no viewer/process metadata from StubRunner", started)
+	}
+	if started.StartedAt != "" {
+		t.Fatalf("started.StartedAt = %q, want empty because StubRunner did not start", started.StartedAt)
+	}
+	if _, err := os.Stat(filepath.Join(root, "browser-sessions")); !os.IsNotExist(err) {
+		t.Fatalf("browser-sessions directory exists after runner start err=%v, want metadata-only stub start", err)
+	}
+
+	logs := run("logs", "--json")
+	if !strings.Contains(logs, `"type": "browser.handoff_runner_failed"`) || !strings.Contains(logs, `"error_code": "not_implemented"`) {
+		t.Fatalf("logs output = %s, want failed not_implemented runner audit event", logs)
+	}
+	for _, forbidden := range []string{"password", "totp", "backup_code", "cookie", "profile_bytes"} {
+		if strings.Contains(strings.ToLower(logs), forbidden) {
+			t.Fatalf("logs output contains forbidden credential/profile byte token %q: %s", forbidden, logs)
+		}
+	}
+
+	completedRequest := decodeBrowserSessionLoginRequestEnvelope(t, []byte(run("browser", "session", "login-request", "--id", int64String(created.ID), "--json")))
+	completedRunner := decodeBrowserSessionRunnerEnvelope(t, []byte(run("browser", "session", "runner", "create", "--login-request-id", int64String(completedRequest.ID), "--json")))
+	run("browser", "session", "verify", "--id", int64String(created.ID), "--login-request-id", int64String(completedRequest.ID), "--json")
+	var output bytes.Buffer
+	err := Run(context.Background(), root, []string{"browser", "session", "runner", "start", "--id", int64String(completedRunner.ID), "--json"}, strings.NewReader(""), &output)
+	if err == nil || !strings.Contains(err.Error(), `status "completed"`) {
+		t.Fatalf("Run(runner start completed request) error = %v output=%s, want completed request rejection", err, output.String())
+	}
+}
+
 func TestRunBrowserSessionHandoffShowValidatesReadOnlyMetadata(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	root := testRepoRoot(t)

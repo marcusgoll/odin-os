@@ -12,6 +12,7 @@ import (
 	"odin-os/internal/app/bootstrap"
 	commands "odin-os/internal/cli/commands"
 	browserexecutor "odin-os/internal/executors/browser"
+	"odin-os/internal/runtime/browserhandoff"
 	"odin-os/internal/store/sqlite"
 )
 
@@ -417,6 +418,17 @@ func runBrowserSessionRunner(ctx context.Context, app bootstrap.App, command com
 		}
 		_, err = fmt.Fprintf(stdout, "browser_session_runner=%d login_request=%d session=%d status=%s\n", view.ID, view.LoginRequestID, view.SessionID, view.Status)
 		return err
+	case "start":
+		runner, err := startBrowserSessionRunner(ctx, app, command.ID)
+		if err != nil {
+			return err
+		}
+		view := newBrowserSessionRunnerView(runner)
+		if command.JSON {
+			return commands.WriteJSON(stdout, browserSessionRunnerEnvelope{Runner: view})
+		}
+		_, err = fmt.Fprintf(stdout, "browser_session_runner=%d login_request=%d session=%d status=%s\n", view.ID, view.LoginRequestID, view.SessionID, view.Status)
+		return err
 	case "status":
 		runner, err := app.Store.UpdateBrowserHandoffRunnerStatus(ctx, sqlite.UpdateBrowserHandoffRunnerStatusParams{
 			ID:     command.ID,
@@ -451,6 +463,70 @@ func runBrowserSessionRunner(ctx context.Context, app bootstrap.App, command com
 	default:
 		return fmt.Errorf(commands.BrowserUsage)
 	}
+}
+
+func startBrowserSessionRunner(ctx context.Context, app bootstrap.App, runnerID int64) (sqlite.BrowserHandoffRunner, error) {
+	runner, err := app.Store.GetBrowserHandoffRunner(ctx, runnerID)
+	if err != nil {
+		return sqlite.BrowserHandoffRunner{}, err
+	}
+	if runner.Status != sqlite.BrowserHandoffRunnerStatusRequested {
+		return sqlite.BrowserHandoffRunner{}, fmt.Errorf("browser handoff runner status %q cannot start", runner.Status)
+	}
+	handoff, err := app.Store.GetBrowserSessionLoginHandoff(ctx, runner.HandoffID)
+	if err != nil {
+		return sqlite.BrowserHandoffRunner{}, err
+	}
+	if handoff.LoginRequest.ID != runner.LoginRequestID || handoff.Session.ID != runner.SessionID {
+		return sqlite.BrowserHandoffRunner{}, fmt.Errorf("browser handoff runner link mismatch")
+	}
+	response, err := browserhandoff.StubRunner{}.Start(ctx, browserhandoff.StartRequest{
+		SessionID:      handoff.Session.ID,
+		LoginRequestID: handoff.LoginRequest.ID,
+		HandoffID:      handoff.HandoffID,
+		ProfilePath:    handoff.Session.ProfilePath,
+		AllowedDomain:  handoff.Session.Domain,
+		TimeoutSeconds: browserSessionRunnerTimeoutSeconds(handoff.LoginRequest.ExpiresAt),
+		BindAddr:       browserSessionStringPtrValue(runner.BindAddr),
+		PrivateBaseURL: browserSessionStringPtrValue(runner.PrivateBaseURL),
+		PublicBaseURL:  browserSessionStringPtrValue(runner.PublicBaseURL),
+	})
+	if err != nil {
+		return sqlite.BrowserHandoffRunner{}, err
+	}
+	switch response.Status {
+	case browserhandoff.StatusNotImplemented:
+		errorCode := response.ErrorCode
+		if strings.TrimSpace(errorCode) == "" {
+			errorCode = "not_implemented"
+		}
+		errorMessage := response.ErrorMessage
+		if strings.TrimSpace(errorMessage) == "" {
+			errorMessage = "browser handoff runner process boundary is not implemented"
+		}
+		return app.Store.UpdateBrowserHandoffRunnerStatus(ctx, sqlite.UpdateBrowserHandoffRunnerStatusParams{
+			ID:           runner.ID,
+			Status:       sqlite.BrowserHandoffRunnerStatusFailed,
+			ErrorCode:    &errorCode,
+			ErrorMessage: &errorMessage,
+			Actor:        "operator",
+			Reason:       "browser handoff StubRunner returned not_implemented",
+		})
+	default:
+		return sqlite.BrowserHandoffRunner{}, fmt.Errorf("unsupported browser handoff runner start status %q", response.Status)
+	}
+}
+
+func browserSessionRunnerTimeoutSeconds(expiresAt time.Time) int {
+	remaining := time.Until(expiresAt)
+	if remaining <= 0 {
+		return 0
+	}
+	seconds := int(remaining.Seconds())
+	if seconds <= 0 {
+		return 1
+	}
+	return seconds
 }
 
 func prepareBrowserSessionProfile(ctx context.Context, app bootstrap.App, session sqlite.BrowserSession) (browserSessionProfileView, error) {
@@ -611,6 +687,13 @@ func cloneBrowserSessionStringPtr(value *string) *string {
 	ptr := new(string)
 	*ptr = *value
 	return ptr
+}
+
+func browserSessionStringPtrValue(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
 }
 
 func cloneBrowserSessionInt64Ptr(value *int64) *int64 {
