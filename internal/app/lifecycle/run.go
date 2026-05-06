@@ -813,6 +813,7 @@ type rawIntakeItemView struct {
 	Title                  string          `json:"title,omitempty"`
 	Summary                string          `json:"summary,omitempty"`
 	CanonicalIntakeKey     string          `json:"canonical_intake_key,omitempty"`
+	GoalID                 int64           `json:"goal_id,omitempty"`
 	SuppressionReason      string          `json:"suppression_reason,omitempty"`
 	AcceptedWorkItemID     int64           `json:"accepted_work_item_id,omitempty"`
 	AcceptedWorkItemKey    string          `json:"accepted_work_item_key,omitempty"`
@@ -839,6 +840,7 @@ type intakeProcessView struct {
 	Classification string            `json:"classification"`
 	DedupeResult   string            `json:"dedupe_result"`
 	RoutedOutcome  string            `json:"routed_outcome"`
+	GoalID         int64             `json:"goal_id,omitempty"`
 }
 
 type intakeReviewQueueView struct {
@@ -868,6 +870,7 @@ type intakeProcessingNotes struct {
 	Dedupe            intakeDedupeReview    `json:"dedupe"`
 	Routing           intakeRoutingResult   `json:"routing"`
 	DraftArtifact     *intakeDraftArtifact  `json:"draft_artifact,omitempty"`
+	Goal              *intakeGoalConversion `json:"goal,omitempty"`
 	Clarification     *intakeClarification  `json:"clarification,omitempty"`
 	Review            *intakeReviewDecision `json:"review,omitempty"`
 }
@@ -887,6 +890,15 @@ type intakeRoutingResult struct {
 	ProjectKey            string `json:"project_key,omitempty"`
 	ExecutionIntent       string `json:"execution_intent,omitempty"`
 	ExecutionIntentSource string `json:"execution_intent_source,omitempty"`
+	GoalID                int64  `json:"goal_id,omitempty"`
+}
+
+type intakeGoalConversion struct {
+	ID              int64  `json:"id"`
+	Title           string `json:"title"`
+	Status          string `json:"status"`
+	SourceIntakeKey string `json:"source_intake_key"`
+	ReviewState     string `json:"review_state"`
 }
 
 type intakeDraftArtifact struct {
@@ -1055,6 +1067,28 @@ func runProcessIntake(ctx context.Context, app bootstrap.App, command commands.I
 	if err != nil {
 		return err
 	}
+	if outcome.createGoal {
+		goal, err := app.Store.CreateGoal(ctx, sqlite.CreateGoalParams{
+			Title:       item.Subject,
+			Description: "Created from raw intake " + rawIntakeKey(item.ID) + ". " + item.Summary,
+			CreatedBy:   "intake:" + rawIntakeKey(item.ID),
+			Source:      "intake",
+		})
+		if err != nil {
+			return err
+		}
+		goalID := goal.ID
+		outcome.goalID = &goalID
+		outcome.notes.Routing.GoalID = goal.ID
+		outcome.notes.Goal = &intakeGoalConversion{
+			ID:              goal.ID,
+			Title:           goal.Title,
+			Status:          string(goal.Status),
+			SourceIntakeKey: rawIntakeKey(item.ID),
+			ReviewState:     "created_not_approved",
+		}
+	}
+	outcome.events = intakeProcessingEvents(item.ID, outcome.status, outcome.notes, outcome.canonicalIntakeItemID)
 	notesJSON, err := json.Marshal(outcome.notes)
 	if err != nil {
 		return err
@@ -1064,6 +1098,7 @@ func runProcessIntake(ctx context.Context, app bootstrap.App, command commands.I
 		Status:                outcome.status,
 		Summary:               outcome.summary,
 		CanonicalIntakeItemID: outcome.canonicalIntakeItemID,
+		GoalID:                outcome.goalID,
 		SuppressionReason:     outcome.suppressionReason,
 		RoutingNotes:          string(notesJSON),
 		Events:                outcome.events,
@@ -1081,6 +1116,9 @@ func runProcessIntake(ctx context.Context, app bootstrap.App, command commands.I
 		Classification: outcome.notes.Classification.Result,
 		DedupeResult:   outcome.notes.Dedupe.Result,
 		RoutedOutcome:  outcome.notes.Routing.Outcome,
+	}
+	if outcome.goalID != nil {
+		processView.GoalID = *outcome.goalID
 	}
 	if jsonOutput {
 		return commands.WriteJSON(stdout, processView)
@@ -1665,6 +1703,8 @@ type intakeProcessOutcome struct {
 	status                string
 	summary               string
 	canonicalIntakeItemID *int64
+	goalID                *int64
+	createGoal            bool
 	suppressionReason     string
 	notes                 intakeProcessingNotes
 	events                []sqlite.IntakeItemProcessingEvent
@@ -1692,7 +1732,6 @@ func buildIntakeProcessOutcome(ctx context.Context, store *sqlite.Store, item sq
 			suppressionReason:     "duplicate_dedupe_key",
 			notes:                 notes,
 		}
-		outcome.events = intakeProcessingEvents(item.ID, outcome.status, notes, duplicate)
 		return outcome, nil
 	}
 
@@ -1710,7 +1749,34 @@ func buildIntakeProcessOutcome(ctx context.Context, store *sqlite.Store, item sq
 			summary: "Raw intake needs operator clarification before drafting work",
 			notes:   notes,
 		}
-		outcome.events = intakeProcessingEvents(item.ID, outcome.status, notes, nil)
+		return outcome, nil
+	}
+
+	if isGoalLikeIntake(item) {
+		notes.Routing = intakeRoutingResult{
+			Outcome:               "goal_created",
+			ProjectKey:            item.ScopeKey,
+			ExecutionIntent:       "read_only",
+			ExecutionIntentSource: "intake_goal_rule:v1",
+		}
+		outcome := intakeProcessOutcome{
+			status:     "review_required",
+			summary:    "Goal created from raw intake for operator review; no execution approval granted",
+			goalID:     item.GoalID,
+			createGoal: item.GoalID == nil,
+			notes:      notes,
+		}
+		if item.GoalID != nil {
+			notes.Routing.GoalID = *item.GoalID
+			notes.Goal = &intakeGoalConversion{
+				ID:              *item.GoalID,
+				Title:           item.Subject,
+				Status:          "created",
+				SourceIntakeKey: rawIntakeKey(item.ID),
+				ReviewState:     "created_not_approved",
+			}
+			outcome.notes = notes
+		}
 		return outcome, nil
 	}
 
@@ -1733,8 +1799,12 @@ func buildIntakeProcessOutcome(ctx context.Context, store *sqlite.Store, item sq
 		summary: route.DraftArtifactKind + " prepared for human review; no work item created",
 		notes:   notes,
 	}
-	outcome.events = intakeProcessingEvents(item.ID, outcome.status, notes, nil)
 	return outcome, nil
+}
+
+func isGoalLikeIntake(item sqlite.IntakeItem) bool {
+	text := strings.ToLower(strings.TrimSpace(item.Subject + " " + item.Summary))
+	return strings.Contains(text, "goal") || strings.Contains(text, "research goals") || strings.Contains(text, "long-running")
 }
 
 func deriveIntakeRoute(item sqlite.IntakeItem) intakeDerivedRoute {
@@ -1826,10 +1896,43 @@ func intakeProcessingEvents(itemID int64, status string, notes intakeProcessingN
 				RoutedOutcome:         notes.Routing.Outcome,
 				ExecutionIntent:       notes.Routing.ExecutionIntent,
 				ExecutionIntentSource: notes.Routing.ExecutionIntentSource,
+				GoalID:                intakeGoalIDPtr(notes),
+			},
+		},
+		{
+			Type:   runtimeevents.EventIntakeProcessed,
+			Stage:  "processed",
+			Result: status,
+			Payload: runtimeevents.IntakeProcessingPayload{
+				IntakeItemID:          itemID,
+				Status:                status,
+				Stage:                 "processed",
+				Result:                status,
+				RoutedOutcome:         notes.Routing.Outcome,
+				ExecutionIntent:       notes.Routing.ExecutionIntent,
+				ExecutionIntentSource: notes.Routing.ExecutionIntentSource,
+				CanonicalIntakeID:     canonical,
+				GoalID:                intakeGoalIDPtr(notes),
 			},
 		},
 	}
 	switch {
+	case notes.Goal != nil:
+		events = append(events, sqlite.IntakeItemProcessingEvent{
+			Type:   runtimeevents.EventIntakeRoutedToGoal,
+			Stage:  "goal",
+			Result: "goal_created",
+			Payload: runtimeevents.IntakeProcessingPayload{
+				IntakeItemID:          itemID,
+				Status:                status,
+				Stage:                 "goal",
+				Result:                "goal_created",
+				RoutedOutcome:         notes.Routing.Outcome,
+				ExecutionIntent:       notes.Routing.ExecutionIntent,
+				ExecutionIntentSource: notes.Routing.ExecutionIntentSource,
+				GoalID:                intakeGoalIDPtr(notes),
+			},
+		})
 	case notes.DraftArtifact != nil:
 		events = append(events, sqlite.IntakeItemProcessingEvent{
 			Type:   runtimeevents.EventIntakeDraftArtifactCreated,
@@ -1879,6 +1982,14 @@ func intakeProcessingEvents(itemID int64, status string, notes intakeProcessingN
 	return events
 }
 
+func intakeGoalIDPtr(notes intakeProcessingNotes) *int64 {
+	if notes.Goal == nil {
+		return nil
+	}
+	id := notes.Goal.ID
+	return &id
+}
+
 func rawIntakeSourceFactsJSON(command commands.IntakeCommand, payloadJSON string) (string, error) {
 	var payload json.RawMessage
 	if strings.TrimSpace(payloadJSON) == "" {
@@ -1925,6 +2036,9 @@ func rawIntakeView(item sqlite.IntakeItem, includePayload bool) (rawIntakeItemVi
 		Title:         item.Subject,
 		Summary:       item.Summary,
 	}
+	if item.GoalID != nil {
+		view.GoalID = *item.GoalID
+	}
 	if item.Scope == "project" {
 		view.ProjectKey = item.ScopeKey
 	}
@@ -1935,16 +2049,21 @@ func rawIntakeView(item sqlite.IntakeItem, includePayload bool) (rawIntakeItemVi
 	if strings.TrimSpace(item.RoutingNotes) != "" && json.Valid([]byte(item.RoutingNotes)) {
 		view.Processing = json.RawMessage(item.RoutingNotes)
 		var notes intakeProcessingNotes
-		if err := json.Unmarshal([]byte(item.RoutingNotes), &notes); err == nil && notes.Review != nil && notes.Review.WorkItem != nil {
-			view.AcceptedWorkItemID = notes.Review.WorkItem.ID
-			view.AcceptedWorkItemKey = notes.Review.WorkItem.Key
-			view.AcceptedWorkItemStatus = notes.Review.WorkItem.Status
-		}
-		if err := json.Unmarshal([]byte(item.RoutingNotes), &notes); err == nil && notes.Review != nil {
-			view.ApprovalRequired = notes.Review.ApprovalRequired
-			view.BlockedPendingApproval = notes.Review.BlockedPendingApproval
-			view.PolicyReason = notes.Review.PolicyReason
-			view.PolicyDecision = notes.Review.PolicyDecision
+		if err := json.Unmarshal([]byte(item.RoutingNotes), &notes); err == nil {
+			if view.GoalID == 0 && notes.Goal != nil {
+				view.GoalID = notes.Goal.ID
+			}
+			if notes.Review != nil && notes.Review.WorkItem != nil {
+				view.AcceptedWorkItemID = notes.Review.WorkItem.ID
+				view.AcceptedWorkItemKey = notes.Review.WorkItem.Key
+				view.AcceptedWorkItemStatus = notes.Review.WorkItem.Status
+			}
+			if notes.Review != nil {
+				view.ApprovalRequired = notes.Review.ApprovalRequired
+				view.BlockedPendingApproval = notes.Review.BlockedPendingApproval
+				view.PolicyReason = notes.Review.PolicyReason
+				view.PolicyDecision = notes.Review.PolicyDecision
+			}
 		}
 	}
 	view.RequestedBy = rawStringFact(facts, "requested_by")

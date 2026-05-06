@@ -283,6 +283,7 @@ type IntakeItem struct {
 	Summary                  string
 	ConversationTranscriptID *int64
 	CanonicalIntakeItemID    *int64
+	GoalID                   *int64
 	SuppressionReason        string
 	RoutingNotes             string
 	ReceivedAt               time.Time
@@ -381,6 +382,7 @@ type ProcessIntakeItemParams struct {
 	Status                string
 	Summary               string
 	CanonicalIntakeItemID *int64
+	GoalID                *int64
 	SuppressionReason     string
 	RoutingNotes          string
 	Events                []IntakeItemProcessingEvent

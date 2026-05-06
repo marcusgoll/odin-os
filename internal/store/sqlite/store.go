@@ -591,7 +591,7 @@ func (store *Store) ListIntakeItems(ctx context.Context, params ListIntakeItemsP
 	query := `
 		SELECT id, workspace_id, source_family, external_object_id, event_kind, subject, dedupe_key,
 			dedupe_recipe_version, source_facts_json, status, scope, scope_key, summary,
-			conversation_transcript_id, canonical_intake_item_id, suppression_reason, routing_notes,
+			conversation_transcript_id, canonical_intake_item_id, goal_id, suppression_reason, routing_notes,
 			received_at, created_at, updated_at
 		FROM intake_items
 		WHERE 1 = 1
@@ -636,7 +636,7 @@ func (store *Store) GetIntakeItem(ctx context.Context, id int64) (IntakeItem, er
 	row := store.db.QueryRowContext(ctx, `
 		SELECT id, workspace_id, source_family, external_object_id, event_kind, subject, dedupe_key,
 			dedupe_recipe_version, source_facts_json, status, scope, scope_key, summary,
-			conversation_transcript_id, canonical_intake_item_id, suppression_reason, routing_notes,
+			conversation_transcript_id, canonical_intake_item_id, goal_id, suppression_reason, routing_notes,
 			received_at, created_at, updated_at
 		FROM intake_items
 		WHERE id = ?
@@ -658,12 +658,13 @@ func (store *Store) ProcessIntakeItem(ctx context.Context, params ProcessIntakeI
 		}
 		if _, err := tx.ExecContext(ctx, `
 			UPDATE intake_items
-			SET status = ?, summary = ?, canonical_intake_item_id = ?, suppression_reason = ?, routing_notes = ?, updated_at = ?
+			SET status = ?, summary = ?, canonical_intake_item_id = ?, goal_id = ?, suppression_reason = ?, routing_notes = ?, updated_at = ?
 			WHERE id = ?
 		`,
 			params.Status,
 			params.Summary,
 			nullInt64(params.CanonicalIntakeItemID),
+			nullInt64(params.GoalID),
 			params.SuppressionReason,
 			params.RoutingNotes,
 			formatTime(now),
@@ -8033,7 +8034,7 @@ func (store *Store) getIntakeItemTx(ctx context.Context, tx *sql.Tx, id int64) (
 	row := tx.QueryRowContext(ctx, `
 		SELECT id, workspace_id, source_family, external_object_id, event_kind, subject, dedupe_key,
 			dedupe_recipe_version, source_facts_json, status, scope, scope_key, summary,
-			conversation_transcript_id, canonical_intake_item_id, suppression_reason, routing_notes,
+			conversation_transcript_id, canonical_intake_item_id, goal_id, suppression_reason, routing_notes,
 			received_at, created_at, updated_at
 		FROM intake_items
 		WHERE id = ?
@@ -8827,6 +8828,7 @@ func scanIntakeItem(row interface{ Scan(...any) error }) (IntakeItem, error) {
 	var item IntakeItem
 	var conversationTranscriptID sql.NullInt64
 	var canonicalIntakeItemID sql.NullInt64
+	var goalID sql.NullInt64
 	var receivedAt string
 	var createdAt string
 	var updatedAt string
@@ -8846,6 +8848,7 @@ func scanIntakeItem(row interface{ Scan(...any) error }) (IntakeItem, error) {
 		&item.Summary,
 		&conversationTranscriptID,
 		&canonicalIntakeItemID,
+		&goalID,
 		&item.SuppressionReason,
 		&item.RoutingNotes,
 		&receivedAt,
@@ -8857,6 +8860,7 @@ func scanIntakeItem(row interface{ Scan(...any) error }) (IntakeItem, error) {
 
 	item.ConversationTranscriptID = nullableInt64Ptr(conversationTranscriptID)
 	item.CanonicalIntakeItemID = nullableInt64Ptr(canonicalIntakeItemID)
+	item.GoalID = nullableInt64Ptr(goalID)
 	var err error
 	item.ReceivedAt, err = parseTime(receivedAt)
 	if err != nil {

@@ -1,6 +1,8 @@
 package commands
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -8,7 +10,7 @@ import (
 	"unicode"
 )
 
-const IntakeUsage = "usage: odin intake enqueue --source <source> --project <key> --title <title> --type <type> [--action-key <key>] [--dedup-key <key>] [--requested-by <actor>] [--payload-file <path|-] [--json] | odin intake raw create --source <source> --title <title> --type <type> --dedup-key <key> [--project <key>] [--requested-by <actor>] [--payload-file <path|-] [--json] | odin intake raw list [--project <key>] [--status <status>] [--json] | odin intake raw show <id|key> [--json] | odin intake process --id <id|key> [--json] | odin intake review list [--json] | odin intake review show|accept|reject|clarify|archive <id|key> [--json] | odin intake approval list [--json] | odin intake approval show|approve|deny <id|key> [--json]"
+const IntakeUsage = "usage: odin intake enqueue --source <source> --project <key> --title <title> --type <type> [--action-key <key>] [--dedup-key <key>] [--requested-by <actor>] [--payload-file <path|-] [--json] | odin intake raw create --text <text> [--json] | odin intake raw create --source <source> --title <title> --type <type> --dedup-key <key> [--project <key>] [--requested-by <actor>] [--payload-file <path|-] [--json] | odin intake raw list [--project <key>] [--status <status>] [--json] | odin intake raw show <id|key> [--json] | odin intake process --id <id|key> [--json] | odin intake review list [--json] | odin intake review show|accept|reject|clarify|archive <id|key> [--json] | odin intake approval list [--json] | odin intake approval show|approve|deny <id|key> [--json]"
 
 type IntakeCommand struct {
 	Name           string
@@ -338,6 +340,7 @@ func parseRawIntakeCreate(command IntakeCommand, args []string) (IntakeCommand, 
 		intakeType  bool
 		project     bool
 		title       bool
+		text        bool
 		actionKey   bool
 		dedupKey    bool
 		requestedBy bool
@@ -379,7 +382,7 @@ func parseRawIntakeCreate(command IntakeCommand, args []string) (IntakeCommand, 
 			command.ProjectKey = value
 			index = nextIndex
 		case "--title":
-			if seen.title {
+			if seen.title || seen.text {
 				return IntakeCommand{}, fmt.Errorf("duplicate --title flag")
 			}
 			value, nextIndex, err := requiredValue(args, index, "--title")
@@ -387,6 +390,17 @@ func parseRawIntakeCreate(command IntakeCommand, args []string) (IntakeCommand, 
 				return IntakeCommand{}, err
 			}
 			seen.title = true
+			command.Title = value
+			index = nextIndex
+		case "--text":
+			if seen.text || seen.title {
+				return IntakeCommand{}, fmt.Errorf("duplicate raw intake text/title flag")
+			}
+			value, nextIndex, err := requiredValue(args, index, "--text")
+			if err != nil {
+				return IntakeCommand{}, err
+			}
+			seen.text = true
 			command.Title = value
 			index = nextIndex
 		case "--action-key":
@@ -442,6 +456,20 @@ func parseRawIntakeCreate(command IntakeCommand, args []string) (IntakeCommand, 
 			return IntakeCommand{}, fmt.Errorf("unknown intake raw create argument: %s", args[index])
 		}
 	}
+	if seen.text {
+		if command.Source == "" {
+			command.Source = "operator"
+		}
+		if command.Type == "" {
+			command.Type = "request"
+		}
+		if command.RequestedBy == "" {
+			command.RequestedBy = "operator"
+		}
+		if command.DedupKey == "" {
+			command.DedupKey = textDedupKey(command.Title)
+		}
+	}
 	if command.Source == "" {
 		return IntakeCommand{}, fmt.Errorf("--source is required")
 	}
@@ -479,6 +507,11 @@ func parseRawIntakeCreate(command IntakeCommand, args []string) (IntakeCommand, 
 		return IntakeCommand{}, err
 	}
 	return command, nil
+}
+
+func textDedupKey(text string) string {
+	sum := sha256.Sum256([]byte(strings.ToLower(strings.TrimSpace(text))))
+	return "raw-text:" + hex.EncodeToString(sum[:])[:16]
 }
 
 func parseRawIntakeList(command IntakeCommand, args []string) (IntakeCommand, error) {

@@ -83,6 +83,26 @@ func TestParseIntakeRawCreate(t *testing.T) {
 	}
 }
 
+func TestParseIntakeRawCreateTextShorthand(t *testing.T) {
+	t.Parallel()
+
+	command, err := ParseIntake([]string{
+		"raw",
+		"create",
+		"--text", "Build a browser executor for Odin research goals",
+		"--json",
+	})
+	if err != nil {
+		t.Fatalf("ParseIntake(raw create --text) error = %v", err)
+	}
+	if command.Name != "raw" || command.RawAction != "create" || command.Title != "Build a browser executor for Odin research goals" {
+		t.Fatalf("command = %+v, want raw create text title", command)
+	}
+	if command.Source != "operator" || command.Type != "request" || command.DedupKey == "" || command.RequestedBy != "operator" || !command.JSON {
+		t.Fatalf("command = %+v, want default source/type/dedupe/requested-by/json", command)
+	}
+}
+
 func TestParseIntakeRawListAndShow(t *testing.T) {
 	t.Parallel()
 
