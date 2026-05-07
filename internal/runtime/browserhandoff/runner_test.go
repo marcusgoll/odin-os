@@ -247,6 +247,42 @@ func TestNoVNCRunnerStartAllowsRealDisplayWithExplicitGate(t *testing.T) {
 	}
 }
 
+func TestNoVNCRunnerStartAllowsRealBrowserWithExplicitGate(t *testing.T) {
+	commandPath := testExecutablePath(t, "true")
+	browserPath := writeProcessTestScript(t, "browser", "#!/bin/sh\nexit 0\n")
+	runner := NoVNCRunner{
+		LoadConfig: func() (NoVNCLaunchConfig, error) {
+			return NoVNCLaunchConfig{
+				BrowserCommand:      browserPath,
+				DisplayCommand:      commandPath,
+				WebsockifyCommand:   commandPath,
+				AllowedCommandPaths: []string{commandPath, browserPath},
+				BindAddr:            "127.0.0.1:6080",
+				PrivateBaseURL:      "https://odin-handoff.tailnet.local",
+				TimeoutSeconds:      2,
+				RealBrowserEnabled:  true,
+			}, nil
+		},
+	}
+
+	response, err := runner.Start(context.Background(), validFixtureStartRequest())
+	if err != nil {
+		t.Fatalf("NoVNCRunner.Start(real browser) error = %v", err)
+	}
+	if response.Status != StatusCompleted {
+		t.Fatalf("response.Status = %q, want %q", response.Status, StatusCompleted)
+	}
+	if response.RunnerID == "" || response.ProcessID <= 0 || response.ViewerURL == "" {
+		t.Fatalf("response = %+v, want runner/process/viewer metadata", response)
+	}
+	if len(response.ChildProcesses) != 3 {
+		t.Fatalf("ChildProcesses = %+v, want display/browser/websockify results", response.ChildProcesses)
+	}
+	if got := response.ChildProcesses[1].CommandPath; got != browserPath {
+		t.Fatalf("browser command path = %q, want %q", got, browserPath)
+	}
+}
+
 func TestNoVNCRunnerStartRejectsRealDisplayWithoutExplicitGate(t *testing.T) {
 	commandPath := testExecutablePath(t, "true")
 	displayPath := writeProcessTestScript(t, "display-vnc", "#!/bin/sh\nexit 0\n")
@@ -295,6 +331,57 @@ func TestNoVNCRunnerStartRejectsDisallowedRealDisplayBeforeLaunch(t *testing.T) 
 	}
 	if len(supervisor.started) != 0 {
 		t.Fatalf("started processes = %+v, want no launch after display allowlist rejection", supervisor.started)
+	}
+}
+
+func TestNoVNCRunnerStartRejectsRealBrowserWithoutExplicitGate(t *testing.T) {
+	commandPath := testExecutablePath(t, "true")
+	browserPath := writeProcessTestScript(t, "browser", "#!/bin/sh\nexit 0\n")
+	supervisor := &fakeNoVNCProcessSupervisor{}
+	runner := NoVNCRunner{
+		Supervisor: supervisor,
+		LoadConfig: func() (NoVNCLaunchConfig, error) {
+			return NoVNCLaunchConfig{
+				BrowserCommand:      browserPath,
+				DisplayCommand:      commandPath,
+				WebsockifyCommand:   commandPath,
+				AllowedCommandPaths: []string{commandPath, browserPath},
+				BindAddr:            "127.0.0.1:6080",
+				PrivateBaseURL:      "https://odin-handoff.tailnet.local",
+				TimeoutSeconds:      300,
+			}, nil
+		},
+	}
+
+	_, err := runner.Start(context.Background(), validFixtureStartRequest())
+	if err == nil || !strings.Contains(err.Error(), "real browser") {
+		t.Fatalf("NoVNCRunner.Start(real browser without gate) error = %v, want explicit gate rejection", err)
+	}
+	if len(supervisor.started) != 0 {
+		t.Fatalf("started processes = %+v, want no launch without real browser gate", supervisor.started)
+	}
+}
+
+func TestNoVNCRunnerStartRejectsDisallowedRealBrowserBeforeLaunch(t *testing.T) {
+	commandPath := testExecutablePath(t, "true")
+	browserPath := writeProcessTestScript(t, "browser", "#!/bin/sh\nexit 0\n")
+	supervisor := &fakeNoVNCProcessSupervisor{}
+	runner := NoVNCRunner{
+		Supervisor: supervisor,
+		LoadConfig: func() (NoVNCLaunchConfig, error) {
+			config := validNoVNCLaunchConfig(commandPath)
+			config.BrowserCommand = browserPath
+			config.RealBrowserEnabled = true
+			return config, nil
+		},
+	}
+
+	_, err := runner.Start(context.Background(), validFixtureStartRequest())
+	if err == nil || !strings.Contains(err.Error(), "browser command") || !strings.Contains(err.Error(), "allowlist") {
+		t.Fatalf("NoVNCRunner.Start(disallowed real browser) error = %v, want browser allowlist rejection", err)
+	}
+	if len(supervisor.started) != 0 {
+		t.Fatalf("started processes = %+v, want no launch after browser allowlist rejection", supervisor.started)
 	}
 }
 
@@ -383,6 +470,32 @@ func TestNoVNCRunnerStartFailsWhenRealDisplayExecutableFails(t *testing.T) {
 	}
 }
 
+func TestNoVNCRunnerStartFailsWhenRealBrowserExecutableFails(t *testing.T) {
+	commandPath := testExecutablePath(t, "true")
+	browserPath := writeProcessTestScript(t, "browser", "#!/bin/sh\nexit 7\n")
+	runner := NoVNCRunner{
+		LoadConfig: func() (NoVNCLaunchConfig, error) {
+			config := validNoVNCLaunchConfig(commandPath)
+			config.BrowserCommand = browserPath
+			config.AllowedCommandPaths = []string{commandPath, browserPath}
+			config.RealBrowserEnabled = true
+			config.TimeoutSeconds = 2
+			return config, nil
+		},
+	}
+
+	response, err := runner.Start(context.Background(), validFixtureStartRequest())
+	if err != nil {
+		t.Fatalf("NoVNCRunner.Start(failing real browser) error = %v", err)
+	}
+	if response.Status != StatusFailed || response.ErrorCode != "novnc_process_failed" {
+		t.Fatalf("response = %+v, want failed novnc_process_failed", response)
+	}
+	if !strings.Contains(response.ErrorMessage, "exit status 7") {
+		t.Fatalf("response.ErrorMessage = %q, want exit status", response.ErrorMessage)
+	}
+}
+
 func TestNoVNCRunnerStartFailsWhenRealWebsockifyExecutableFails(t *testing.T) {
 	commandPath := testExecutablePath(t, "true")
 	websockifyPath := writeProcessTestScript(t, "websockify", "#!/bin/sh\nexit 7\n")
@@ -455,6 +568,30 @@ func TestNoVNCRunnerStartExpiresWhenRealDisplayTimesOut(t *testing.T) {
 	response, err := runner.Start(context.Background(), validFixtureStartRequest())
 	if err != nil {
 		t.Fatalf("NoVNCRunner.Start(timeout real display) error = %v", err)
+	}
+	if response.Status != StatusExpired || response.ErrorCode != "novnc_timeout" {
+		t.Fatalf("response = %+v, want expired novnc_timeout", response)
+	}
+}
+
+func TestNoVNCRunnerStartExpiresWhenRealBrowserTimesOut(t *testing.T) {
+	commandPath := testExecutablePath(t, "true")
+	sleepPath := testExecutablePath(t, "sleep")
+	browserPath := writeProcessTestScript(t, "browser", "#!/bin/sh\n"+shellQuote(sleepPath)+" 5\n")
+	runner := NoVNCRunner{
+		LoadConfig: func() (NoVNCLaunchConfig, error) {
+			config := validNoVNCLaunchConfig(commandPath)
+			config.BrowserCommand = browserPath
+			config.AllowedCommandPaths = []string{commandPath, browserPath}
+			config.RealBrowserEnabled = true
+			config.TimeoutSeconds = 1
+			return config, nil
+		},
+	}
+
+	response, err := runner.Start(context.Background(), validFixtureStartRequest())
+	if err != nil {
+		t.Fatalf("NoVNCRunner.Start(timeout real browser) error = %v", err)
 	}
 	if response.Status != StatusExpired || response.ErrorCode != "novnc_timeout" {
 		t.Fatalf("response = %+v, want expired novnc_timeout", response)
@@ -544,6 +681,40 @@ func TestNoVNCRunnerStartReturnsExpiredOnTimeout(t *testing.T) {
 	}
 }
 
+func TestNoVNCRunnerStartDoesNotPassProfileStorageToRealBrowser(t *testing.T) {
+	commandPath := testExecutablePath(t, "true")
+	browserPath := writeProcessTestScript(t, "browser", "#!/bin/sh\nexit 0\n")
+	supervisor := &fakeNoVNCProcessSupervisor{}
+	runner := NoVNCRunner{
+		Supervisor: supervisor,
+		LoadConfig: func() (NoVNCLaunchConfig, error) {
+			config := validNoVNCLaunchConfig(commandPath)
+			config.BrowserCommand = browserPath
+			config.AllowedCommandPaths = []string{commandPath, browserPath}
+			config.RealBrowserEnabled = true
+			return config, nil
+		},
+	}
+
+	response, err := runner.Start(context.Background(), validFixtureStartRequest())
+	if err != nil {
+		t.Fatalf("NoVNCRunner.Start(real browser profile storage guard) error = %v", err)
+	}
+	if response.Status != StatusCompleted {
+		t.Fatalf("response.Status = %q, want completed", response.Status)
+	}
+	if len(supervisor.started) != 3 {
+		t.Fatalf("started processes = %+v, want display/browser/websockify", supervisor.started)
+	}
+	browserStart := supervisor.started[1]
+	if browserStart.Role != NoVNCBrowserCommandRole {
+		t.Fatalf("browser start role = %q, want %q", browserStart.Role, NoVNCBrowserCommandRole)
+	}
+	if len(browserStart.Args) != 0 || len(browserStart.Env) != 0 || browserStart.WorkingDirectory != "" {
+		t.Fatalf("browser start request = %+v, want no args/env/working directory for profile/session storage", browserStart)
+	}
+}
+
 func TestNoVNCRunnerStartRejectsInvalidLaunchConfig(t *testing.T) {
 	commandPath := testExecutablePath(t, "true")
 	supervisor := &fakeNoVNCProcessSupervisor{}
@@ -620,8 +791,8 @@ func TestNoVNCRunnerStartRejectsNonFixtureSafeCommands(t *testing.T) {
 	}
 
 	_, err := runner.Start(context.Background(), validFixtureStartRequest())
-	if err == nil || !strings.Contains(err.Error(), "fixture-safe") {
-		t.Fatalf("NoVNCRunner.Start(real browser) error = %v, want fixture-safe rejection", err)
+	if err == nil || !strings.Contains(err.Error(), "real browser") {
+		t.Fatalf("NoVNCRunner.Start(real browser) error = %v, want explicit gate rejection", err)
 	}
 	if len(supervisor.started) != 0 {
 		t.Fatalf("started processes = %+v, want no launch for non-fixture command", supervisor.started)
@@ -976,6 +1147,7 @@ func TestNoVNCLaunchConfigFromEnvValidatesCommonAllowlist(t *testing.T) {
 	t.Setenv(NoVNCBindAddrEnvVar, "127.0.0.1:6080")
 	t.Setenv(NoVNCPrivateBaseURLEnvVar, "https://odin-handoff.tailnet.local/")
 	t.Setenv(NoVNCTimeoutSecondsEnvVar, "300")
+	t.Setenv(NoVNCRealBrowserEnvVar, "true")
 	t.Setenv(NoVNCRealDisplayEnvVar, "true")
 	t.Setenv(NoVNCRealWebsockifyEnvVar, "true")
 
@@ -998,6 +1170,9 @@ func TestNoVNCLaunchConfigFromEnvValidatesCommonAllowlist(t *testing.T) {
 	}
 	if !normalized.RealDisplayEnabled {
 		t.Fatalf("normalized.RealDisplayEnabled = false, want env gate preserved")
+	}
+	if !normalized.RealBrowserEnabled {
+		t.Fatalf("normalized.RealBrowserEnabled = false, want env gate preserved")
 	}
 }
 
