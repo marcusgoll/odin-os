@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -431,6 +432,267 @@ func TestBrowserSessionLoginRequestLifecyclePersistsAndAudits(t *testing.T) {
 	}
 	if counts[runtimeevents.EventBrowserSessionLoginExpired] != 1 {
 		t.Fatalf("browser.session_login_expired events = %d, want 1", counts[runtimeevents.EventBrowserSessionLoginExpired])
+	}
+}
+
+func TestBrowserHandoffRunnerMetadataLifecyclePersistsAndAudits(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	dbPath := filepath.Join(root, "browser-handoff-runners.db")
+	store, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer store.Close()
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
+	}
+	now := time.Date(2026, 5, 6, 21, 0, 0, 0, time.UTC)
+	store.Now = func() time.Time { return now }
+	store.BrowserSessionHandoffID = func() (string, error) { return "opaque-runner-handoff", nil }
+
+	exists, err := store.HasTable(ctx, "browser_handoff_runners")
+	if err != nil {
+		t.Fatalf("HasTable(browser_handoff_runners) error = %v", err)
+	}
+	if !exists {
+		t.Fatal("HasTable(browser_handoff_runners) = false, want true")
+	}
+
+	session, err := store.CreateBrowserSession(ctx, CreateBrowserSessionParams{
+		Name:           "Research login",
+		Domain:         "research.example",
+		PermissionTier: BrowserSessionPermissionTierAuthenticatedReadOnly,
+	})
+	if err != nil {
+		t.Fatalf("CreateBrowserSession() error = %v", err)
+	}
+	requestExpiresAt := now.Add(15 * time.Minute)
+	request, err := store.CreateBrowserSessionLoginRequest(ctx, CreateBrowserSessionLoginRequestParams{
+		SessionID: session.ID,
+		ExpiresAt: requestExpiresAt,
+	})
+	if err != nil {
+		t.Fatalf("CreateBrowserSessionLoginRequest() error = %v", err)
+	}
+
+	bindAddr := "127.0.0.1:5901"
+	privateBaseURL := "https://odin-handoff.tailnet.local"
+	runner, err := store.CreateBrowserHandoffRunner(ctx, CreateBrowserHandoffRunnerParams{
+		SessionID:      session.ID,
+		LoginRequestID: request.ID,
+		HandoffID:      request.HandoffID,
+		BindAddr:       &bindAddr,
+		PrivateBaseURL: &privateBaseURL,
+		ExpiresAt:      now.Add(10 * time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("CreateBrowserHandoffRunner() error = %v", err)
+	}
+	if runner.ID <= 0 || runner.SessionID != session.ID || runner.LoginRequestID != request.ID {
+		t.Fatalf("runner = %+v, want persisted runner linked to session/request", runner)
+	}
+	if runner.Status != BrowserHandoffRunnerStatusRequested {
+		t.Fatalf("runner.Status = %q, want %q", runner.Status, BrowserHandoffRunnerStatusRequested)
+	}
+	if runner.StartedAt != nil || runner.CompletedAt != nil || runner.CancelledAt != nil {
+		t.Fatalf("new runner timestamps = started %v completed %v cancelled %v, want nil", runner.StartedAt, runner.CompletedAt, runner.CancelledAt)
+	}
+	if _, err := os.Stat(filepath.Join(root, "browser-sessions")); !os.IsNotExist(err) {
+		t.Fatalf("browser handoff runner metadata created browser-sessions directory: err=%v", err)
+	}
+
+	fetched, err := store.GetBrowserHandoffRunner(ctx, runner.ID)
+	if err != nil {
+		t.Fatalf("GetBrowserHandoffRunner() error = %v", err)
+	}
+	if fetched.ID != runner.ID || fetched.HandoffID != request.HandoffID {
+		t.Fatalf("fetched runner = %+v, want %+v", fetched, runner)
+	}
+	listed, err := store.ListBrowserHandoffRunners(ctx, ListBrowserHandoffRunnersParams{LoginRequestID: request.ID})
+	if err != nil {
+		t.Fatalf("ListBrowserHandoffRunners() error = %v", err)
+	}
+	if len(listed) != 1 || listed[0].ID != runner.ID {
+		t.Fatalf("listed runners = %+v, want created runner", listed)
+	}
+
+	store.Now = func() time.Time { return now.Add(time.Minute) }
+	viewerURL := "https://odin-handoff.tailnet.local/session/browser-handoff-runner-1"
+	externalRunnerID := "browser-handoff-runner-1"
+	processID := int64(4242)
+	started, err := store.UpdateBrowserHandoffRunnerStatus(ctx, UpdateBrowserHandoffRunnerStatusParams{
+		ID:        runner.ID,
+		Status:    BrowserHandoffRunnerStatusStarted,
+		ViewerURL: &viewerURL,
+		RunnerID:  &externalRunnerID,
+		ProcessID: &processID,
+		Actor:     "operator",
+		Reason:    "handoff runner process started",
+	})
+	if err != nil {
+		t.Fatalf("UpdateBrowserHandoffRunnerStatus(started) error = %v", err)
+	}
+	if started.Status != BrowserHandoffRunnerStatusStarted || started.StartedAt == nil {
+		t.Fatalf("started runner = %+v, want started with timestamp", started)
+	}
+	if started.ViewerURL == nil || *started.ViewerURL != viewerURL || started.RunnerID == nil || *started.RunnerID != externalRunnerID || started.ProcessID == nil || *started.ProcessID != processID {
+		t.Fatalf("started runner metadata = %+v, want viewer, runner id, and pid", started)
+	}
+
+	store.Now = func() time.Time { return now.Add(2 * time.Minute) }
+	completed, err := store.UpdateBrowserHandoffRunnerStatus(ctx, UpdateBrowserHandoffRunnerStatusParams{
+		ID:     runner.ID,
+		Status: BrowserHandoffRunnerStatusCompleted,
+		Actor:  "operator",
+		Reason: "operator completed manual handoff",
+	})
+	if err != nil {
+		t.Fatalf("UpdateBrowserHandoffRunnerStatus(completed) error = %v", err)
+	}
+	if completed.Status != BrowserHandoffRunnerStatusCompleted || completed.CompletedAt == nil {
+		t.Fatalf("completed runner = %+v, want completed with timestamp", completed)
+	}
+	if _, err := store.UpdateBrowserHandoffRunnerStatus(ctx, UpdateBrowserHandoffRunnerStatusParams{
+		ID:     runner.ID,
+		Status: BrowserHandoffRunnerStatusStarted,
+	}); err == nil {
+		t.Fatal("UpdateBrowserHandoffRunnerStatus(completed -> started) error = nil, want rejection")
+	}
+
+	expiring, err := store.CreateBrowserHandoffRunner(ctx, CreateBrowserHandoffRunnerParams{
+		SessionID:      session.ID,
+		LoginRequestID: request.ID,
+		HandoffID:      request.HandoffID,
+		ExpiresAt:      now.Add(11 * time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("CreateBrowserHandoffRunner(expiring) error = %v", err)
+	}
+	store.Now = func() time.Time { return now.Add(3 * time.Minute) }
+	expired, err := store.ExpireBrowserHandoffRunner(ctx, ExpireBrowserHandoffRunnerParams{
+		ID:     expiring.ID,
+		Actor:  "operator",
+		Reason: "handoff runner timed out",
+	})
+	if err != nil {
+		t.Fatalf("ExpireBrowserHandoffRunner() error = %v", err)
+	}
+	if expired.Status != BrowserHandoffRunnerStatusExpired {
+		t.Fatalf("expired.Status = %q, want %q", expired.Status, BrowserHandoffRunnerStatusExpired)
+	}
+
+	cancelling, err := store.CreateBrowserHandoffRunner(ctx, CreateBrowserHandoffRunnerParams{
+		SessionID:      session.ID,
+		LoginRequestID: request.ID,
+		HandoffID:      request.HandoffID,
+		ExpiresAt:      now.Add(12 * time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("CreateBrowserHandoffRunner(cancelling) error = %v", err)
+	}
+	store.Now = func() time.Time { return now.Add(4 * time.Minute) }
+	cancelled, err := store.CancelBrowserHandoffRunner(ctx, CancelBrowserHandoffRunnerParams{
+		ID:     cancelling.ID,
+		Actor:  "operator",
+		Reason: "operator cancelled handoff",
+	})
+	if err != nil {
+		t.Fatalf("CancelBrowserHandoffRunner() error = %v", err)
+	}
+	if cancelled.Status != BrowserHandoffRunnerStatusCancelled || cancelled.CancelledAt == nil {
+		t.Fatalf("cancelled runner = %+v, want cancelled with timestamp", cancelled)
+	}
+
+	failing, err := store.CreateBrowserHandoffRunner(ctx, CreateBrowserHandoffRunnerParams{
+		SessionID:      session.ID,
+		LoginRequestID: request.ID,
+		HandoffID:      request.HandoffID,
+		ExpiresAt:      now.Add(13 * time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("CreateBrowserHandoffRunner(failing) error = %v", err)
+	}
+	store.Now = func() time.Time { return now.Add(5 * time.Minute) }
+	errorCode := "novnc_unavailable"
+	errorMessage := "runner failed before viewer became available"
+	failed, err := store.UpdateBrowserHandoffRunnerStatus(ctx, UpdateBrowserHandoffRunnerStatusParams{
+		ID:           failing.ID,
+		Status:       BrowserHandoffRunnerStatusFailed,
+		ErrorCode:    &errorCode,
+		ErrorMessage: &errorMessage,
+		Actor:        "runner",
+		Reason:       "runner process failed",
+	})
+	if err != nil {
+		t.Fatalf("UpdateBrowserHandoffRunnerStatus(failed) error = %v", err)
+	}
+	if failed.Status != BrowserHandoffRunnerStatusFailed || failed.ErrorCode == nil || *failed.ErrorCode != errorCode {
+		t.Fatalf("failed runner = %+v, want failed with error code", failed)
+	}
+
+	if _, err := store.CreateBrowserHandoffRunner(ctx, CreateBrowserHandoffRunnerParams{
+		SessionID:      session.ID,
+		LoginRequestID: request.ID,
+		HandoffID:      request.HandoffID,
+		ExpiresAt:      requestExpiresAt.Add(time.Minute),
+	}); err == nil {
+		t.Fatal("CreateBrowserHandoffRunner(expires after login request) error = nil, want rejection")
+	}
+
+	events, err := store.ListEvents(ctx, ListEventsParams{})
+	if err != nil {
+		t.Fatalf("ListEvents() error = %v", err)
+	}
+	counts := map[runtimeevents.Type]int{}
+	for _, event := range events {
+		if event.StreamType != runtimeevents.StreamBrowserSession {
+			continue
+		}
+		counts[event.Type]++
+		payload := strings.ToLower(string(event.Payload))
+		for _, forbidden := range []string{"password", "totp", "backup_code", "cookie", "profile_bytes"} {
+			if strings.Contains(payload, forbidden) {
+				t.Fatalf("browser handoff runner audit payload contains forbidden token %q: %s", forbidden, payload)
+			}
+		}
+	}
+	if counts[runtimeevents.EventBrowserHandoffRunnerRequested] != 4 {
+		t.Fatalf("browser.handoff_runner_requested events = %d, want 4", counts[runtimeevents.EventBrowserHandoffRunnerRequested])
+	}
+	if counts[runtimeevents.EventBrowserHandoffRunnerStarted] != 1 {
+		t.Fatalf("browser.handoff_runner_started events = %d, want 1", counts[runtimeevents.EventBrowserHandoffRunnerStarted])
+	}
+	if counts[runtimeevents.EventBrowserHandoffRunnerCompleted] != 1 {
+		t.Fatalf("browser.handoff_runner_completed events = %d, want 1", counts[runtimeevents.EventBrowserHandoffRunnerCompleted])
+	}
+	if counts[runtimeevents.EventBrowserHandoffRunnerExpired] != 1 {
+		t.Fatalf("browser.handoff_runner_expired events = %d, want 1", counts[runtimeevents.EventBrowserHandoffRunnerExpired])
+	}
+	if counts[runtimeevents.EventBrowserHandoffRunnerCancelled] != 1 {
+		t.Fatalf("browser.handoff_runner_cancelled events = %d, want 1", counts[runtimeevents.EventBrowserHandoffRunnerCancelled])
+	}
+	if counts[runtimeevents.EventBrowserHandoffRunnerFailed] != 1 {
+		t.Fatalf("browser.handoff_runner_failed events = %d, want 1", counts[runtimeevents.EventBrowserHandoffRunnerFailed])
+	}
+
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	reopened, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open(reopened) error = %v", err)
+	}
+	defer reopened.Close()
+	if err := reopened.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate(reopened) error = %v", err)
+	}
+	persisted, err := reopened.GetBrowserHandoffRunner(ctx, runner.ID)
+	if err != nil {
+		t.Fatalf("GetBrowserHandoffRunner(reopened) error = %v", err)
+	}
+	if persisted.Status != BrowserHandoffRunnerStatusCompleted {
+		t.Fatalf("persisted.Status = %q, want %q", persisted.Status, BrowserHandoffRunnerStatusCompleted)
 	}
 }
 

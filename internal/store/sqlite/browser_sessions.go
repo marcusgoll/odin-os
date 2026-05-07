@@ -19,6 +19,7 @@ type BrowserSessionStatus string
 type BrowserSessionPermissionTier string
 type BrowserSessionProfileStoragePolicy string
 type BrowserSessionLoginRequestStatus string
+type BrowserHandoffRunnerStatus string
 
 const (
 	BrowserSessionStatusCreated        BrowserSessionStatus = "created"
@@ -44,6 +45,15 @@ const (
 	BrowserSessionLoginRequestStatusCompleted BrowserSessionLoginRequestStatus = "completed"
 	BrowserSessionLoginRequestStatusExpired   BrowserSessionLoginRequestStatus = "expired"
 	BrowserSessionLoginRequestStatusCancelled BrowserSessionLoginRequestStatus = "cancelled"
+)
+
+const (
+	BrowserHandoffRunnerStatusRequested BrowserHandoffRunnerStatus = "requested"
+	BrowserHandoffRunnerStatusStarted   BrowserHandoffRunnerStatus = "started"
+	BrowserHandoffRunnerStatusCompleted BrowserHandoffRunnerStatus = "completed"
+	BrowserHandoffRunnerStatusExpired   BrowserHandoffRunnerStatus = "expired"
+	BrowserHandoffRunnerStatusCancelled BrowserHandoffRunnerStatus = "cancelled"
+	BrowserHandoffRunnerStatusFailed    BrowserHandoffRunnerStatus = "failed"
 )
 
 type BrowserSession struct {
@@ -78,6 +88,28 @@ type BrowserSessionLoginHandoff struct {
 	HandoffID    string
 	LoginRequest BrowserSessionLoginRequest
 	Session      BrowserSession
+}
+
+type BrowserHandoffRunner struct {
+	ID             int64
+	SessionID      int64
+	LoginRequestID int64
+	HandoffID      string
+	Status         BrowserHandoffRunnerStatus
+	ViewerURL      *string
+	RunnerID       *string
+	ProcessID      *int64
+	BindAddr       *string
+	PrivateBaseURL *string
+	PublicBaseURL  *string
+	ExpiresAt      time.Time
+	StartedAt      *time.Time
+	CompletedAt    *time.Time
+	CancelledAt    *time.Time
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
+	ErrorCode      *string
+	ErrorMessage   *string
 }
 
 type CreateBrowserSessionParams struct {
@@ -138,6 +170,50 @@ type CompleteBrowserSessionLoginRequestParams struct {
 
 type ExpireBrowserSessionLoginRequestParams struct {
 	RequestID int64
+}
+
+type CreateBrowserHandoffRunnerParams struct {
+	SessionID      int64
+	LoginRequestID int64
+	HandoffID      string
+	ViewerURL      *string
+	RunnerID       *string
+	ProcessID      *int64
+	BindAddr       *string
+	PrivateBaseURL *string
+	PublicBaseURL  *string
+	ExpiresAt      time.Time
+}
+
+type ListBrowserHandoffRunnersParams struct {
+	LoginRequestID int64
+}
+
+type UpdateBrowserHandoffRunnerStatusParams struct {
+	ID             int64
+	Status         BrowserHandoffRunnerStatus
+	ViewerURL      *string
+	RunnerID       *string
+	ProcessID      *int64
+	BindAddr       *string
+	PrivateBaseURL *string
+	PublicBaseURL  *string
+	ErrorCode      *string
+	ErrorMessage   *string
+	Actor          string
+	Reason         string
+}
+
+type ExpireBrowserHandoffRunnerParams struct {
+	ID     int64
+	Actor  string
+	Reason string
+}
+
+type CancelBrowserHandoffRunnerParams struct {
+	ID     int64
+	Actor  string
+	Reason string
 }
 
 func (store *Store) CreateBrowserSession(ctx context.Context, params CreateBrowserSessionParams) (BrowserSession, error) {
@@ -699,6 +775,240 @@ func (store *Store) ExpireBrowserSessionLoginRequest(ctx context.Context, params
 	return updated, err
 }
 
+func (store *Store) CreateBrowserHandoffRunner(ctx context.Context, params CreateBrowserHandoffRunnerParams) (BrowserHandoffRunner, error) {
+	if params.SessionID <= 0 {
+		return BrowserHandoffRunner{}, fmt.Errorf("browser session id must be positive")
+	}
+	if params.LoginRequestID <= 0 {
+		return BrowserHandoffRunner{}, fmt.Errorf("browser session login request id must be positive")
+	}
+	handoffID := strings.TrimSpace(params.HandoffID)
+	if handoffID == "" {
+		return BrowserHandoffRunner{}, fmt.Errorf("browser session handoff id is required")
+	}
+	expiresAt := params.ExpiresAt.UTC()
+	if expiresAt.IsZero() {
+		return BrowserHandoffRunner{}, fmt.Errorf("browser handoff runner expires_at is required")
+	}
+	now := store.now()
+	runner := BrowserHandoffRunner{
+		SessionID:      params.SessionID,
+		LoginRequestID: params.LoginRequestID,
+		HandoffID:      handoffID,
+		Status:         BrowserHandoffRunnerStatusRequested,
+		ViewerURL:      cloneStringPtr(params.ViewerURL),
+		RunnerID:       cloneStringPtr(params.RunnerID),
+		ProcessID:      cloneInt64Ptr(params.ProcessID),
+		BindAddr:       cloneStringPtr(params.BindAddr),
+		PrivateBaseURL: cloneStringPtr(params.PrivateBaseURL),
+		PublicBaseURL:  cloneStringPtr(params.PublicBaseURL),
+		ExpiresAt:      expiresAt,
+		CreatedAt:      now,
+		UpdatedAt:      now,
+	}
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		session, err := getBrowserSessionTx(ctx, tx, params.SessionID)
+		if err != nil {
+			return err
+		}
+		if session.Status == BrowserSessionStatusRevoked {
+			return fmt.Errorf("revoked browser session cannot create handoff runner")
+		}
+		request, err := getBrowserSessionLoginRequestTx(ctx, tx, params.LoginRequestID)
+		if err != nil {
+			return err
+		}
+		if request.SessionID != session.ID {
+			return fmt.Errorf("browser session login request %d does not belong to session %d", request.ID, session.ID)
+		}
+		if request.HandoffID != runner.HandoffID {
+			return fmt.Errorf("browser session login request handoff id mismatch")
+		}
+		if request.Status != BrowserSessionLoginRequestStatusRequested {
+			return fmt.Errorf("browser session login request status %q cannot create handoff runner", request.Status)
+		}
+		if !request.ExpiresAt.After(now) {
+			return fmt.Errorf("browser session login request expired at %s", formatTime(request.ExpiresAt))
+		}
+		if runner.ExpiresAt.After(request.ExpiresAt) {
+			return fmt.Errorf("browser handoff runner expires_at cannot exceed login request expires_at")
+		}
+		result, err := tx.ExecContext(ctx, `
+			INSERT INTO browser_handoff_runners (
+				session_id, login_request_id, handoff_id, status, viewer_url, runner_id, process_id,
+				bind_addr, private_base_url, public_base_url, expires_at, started_at, completed_at,
+				cancelled_at, created_at, updated_at, error_code, error_message
+			)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?, ?, NULL, NULL)
+		`,
+			runner.SessionID,
+			runner.LoginRequestID,
+			runner.HandoffID,
+			string(runner.Status),
+			nullStringPtr(runner.ViewerURL),
+			nullStringPtr(runner.RunnerID),
+			nullInt64Ptr(runner.ProcessID),
+			nullStringPtr(runner.BindAddr),
+			nullStringPtr(runner.PrivateBaseURL),
+			nullStringPtr(runner.PublicBaseURL),
+			formatTime(runner.ExpiresAt),
+			formatTime(now),
+			formatTime(now),
+		)
+		if err != nil {
+			return err
+		}
+		runner.ID, err = result.LastInsertId()
+		if err != nil {
+			return err
+		}
+		return appendBrowserSessionEventTx(ctx, tx, session, runtimeevents.EventBrowserHandoffRunnerRequested, browserHandoffRunnerLifecyclePayload(runner, "", "", ""), now)
+	})
+	return runner, err
+}
+
+func (store *Store) GetBrowserHandoffRunner(ctx context.Context, id int64) (BrowserHandoffRunner, error) {
+	if id <= 0 {
+		return BrowserHandoffRunner{}, fmt.Errorf("browser handoff runner id must be positive")
+	}
+	row := store.db.QueryRowContext(ctx, browserHandoffRunnerSelectSQL()+` WHERE id = ?`, id)
+	return scanBrowserHandoffRunner(row)
+}
+
+func (store *Store) ListBrowserHandoffRunners(ctx context.Context, params ListBrowserHandoffRunnersParams) ([]BrowserHandoffRunner, error) {
+	if params.LoginRequestID <= 0 {
+		return nil, fmt.Errorf("browser session login request id must be positive")
+	}
+	rows, err := store.db.QueryContext(ctx, browserHandoffRunnerSelectSQL()+` WHERE login_request_id = ? ORDER BY id ASC`, params.LoginRequestID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	runners := make([]BrowserHandoffRunner, 0)
+	for rows.Next() {
+		runner, err := scanBrowserHandoffRunner(rows)
+		if err != nil {
+			return nil, err
+		}
+		runners = append(runners, runner)
+	}
+	return runners, rows.Err()
+}
+
+func (store *Store) UpdateBrowserHandoffRunnerStatus(ctx context.Context, params UpdateBrowserHandoffRunnerStatusParams) (BrowserHandoffRunner, error) {
+	if params.ID <= 0 {
+		return BrowserHandoffRunner{}, fmt.Errorf("browser handoff runner id must be positive")
+	}
+	status := normalizeBrowserHandoffRunnerStatus(params.Status)
+	if status == "" || status == BrowserHandoffRunnerStatusRequested {
+		return BrowserHandoffRunner{}, fmt.Errorf("browser handoff runner status is required")
+	}
+	now := store.now()
+	var updated BrowserHandoffRunner
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		current, err := getBrowserHandoffRunnerTx(ctx, tx, params.ID)
+		if err != nil {
+			return err
+		}
+		if current.Status == status {
+			updated = current
+			return nil
+		}
+		if !canTransitionBrowserHandoffRunner(current.Status, status) {
+			return fmt.Errorf("browser handoff runner status %q cannot transition to %q", current.Status, status)
+		}
+		updated = current
+		updated.Status = status
+		updated.UpdatedAt = now
+		if params.ViewerURL != nil {
+			updated.ViewerURL = cloneStringPtr(params.ViewerURL)
+		}
+		if params.RunnerID != nil {
+			updated.RunnerID = cloneStringPtr(params.RunnerID)
+		}
+		if params.ProcessID != nil {
+			updated.ProcessID = cloneInt64Ptr(params.ProcessID)
+		}
+		if params.BindAddr != nil {
+			updated.BindAddr = cloneStringPtr(params.BindAddr)
+		}
+		if params.PrivateBaseURL != nil {
+			updated.PrivateBaseURL = cloneStringPtr(params.PrivateBaseURL)
+		}
+		if params.PublicBaseURL != nil {
+			updated.PublicBaseURL = cloneStringPtr(params.PublicBaseURL)
+		}
+		if params.ErrorCode != nil {
+			updated.ErrorCode = cloneStringPtr(params.ErrorCode)
+		}
+		if params.ErrorMessage != nil {
+			updated.ErrorMessage = cloneStringPtr(params.ErrorMessage)
+		}
+		switch status {
+		case BrowserHandoffRunnerStatusStarted:
+			if updated.StartedAt == nil {
+				updated.StartedAt = &now
+			}
+		case BrowserHandoffRunnerStatusCompleted:
+			updated.CompletedAt = &now
+		case BrowserHandoffRunnerStatusCancelled:
+			updated.CancelledAt = &now
+		}
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE browser_handoff_runners
+			SET status = ?, viewer_url = ?, runner_id = ?, process_id = ?, bind_addr = ?,
+				private_base_url = ?, public_base_url = ?, started_at = ?, completed_at = ?,
+				cancelled_at = ?, updated_at = ?, error_code = ?, error_message = ?
+			WHERE id = ?
+		`,
+			string(updated.Status),
+			nullStringPtr(updated.ViewerURL),
+			nullStringPtr(updated.RunnerID),
+			nullInt64Ptr(updated.ProcessID),
+			nullStringPtr(updated.BindAddr),
+			nullStringPtr(updated.PrivateBaseURL),
+			nullStringPtr(updated.PublicBaseURL),
+			nullTime(updated.StartedAt),
+			nullTime(updated.CompletedAt),
+			nullTime(updated.CancelledAt),
+			formatTime(now),
+			nullStringPtr(updated.ErrorCode),
+			nullStringPtr(updated.ErrorMessage),
+			updated.ID,
+		); err != nil {
+			return err
+		}
+		session, err := getBrowserSessionTx(ctx, tx, updated.SessionID)
+		if err != nil {
+			return err
+		}
+		eventType, ok := browserHandoffRunnerEventType(status)
+		if !ok {
+			return nil
+		}
+		return appendBrowserSessionEventTx(ctx, tx, session, eventType, browserHandoffRunnerLifecyclePayload(updated, current.Status, params.Actor, params.Reason), now)
+	})
+	return updated, err
+}
+
+func (store *Store) ExpireBrowserHandoffRunner(ctx context.Context, params ExpireBrowserHandoffRunnerParams) (BrowserHandoffRunner, error) {
+	return store.UpdateBrowserHandoffRunnerStatus(ctx, UpdateBrowserHandoffRunnerStatusParams{
+		ID:     params.ID,
+		Status: BrowserHandoffRunnerStatusExpired,
+		Actor:  params.Actor,
+		Reason: params.Reason,
+	})
+}
+
+func (store *Store) CancelBrowserHandoffRunner(ctx context.Context, params CancelBrowserHandoffRunnerParams) (BrowserHandoffRunner, error) {
+	return store.UpdateBrowserHandoffRunnerStatus(ctx, UpdateBrowserHandoffRunnerStatusParams{
+		ID:     params.ID,
+		Status: BrowserHandoffRunnerStatusCancelled,
+		Actor:  params.Actor,
+		Reason: params.Reason,
+	})
+}
+
 func appendBrowserSessionEventTx(ctx context.Context, tx *sql.Tx, session BrowserSession, eventType runtimeevents.Type, payload any, occurredAt time.Time) error {
 	return appendEventTx(ctx, tx, eventInsert{
 		StreamType: runtimeevents.StreamBrowserSession,
@@ -720,6 +1030,11 @@ func getBrowserSessionLoginRequestTx(ctx context.Context, tx *sql.Tx, id int64) 
 	return scanBrowserSessionLoginRequest(row)
 }
 
+func getBrowserHandoffRunnerTx(ctx context.Context, tx *sql.Tx, id int64) (BrowserHandoffRunner, error) {
+	row := tx.QueryRowContext(ctx, browserHandoffRunnerSelectSQL()+` WHERE id = ?`, id)
+	return scanBrowserHandoffRunner(row)
+}
+
 func browserSessionSelectSQL() string {
 	return `
 		SELECT id, name, domain, account_hint, permission_tier, status, profile_storage_policy, profile_path,
@@ -732,6 +1047,15 @@ func browserSessionLoginRequestSelectSQL() string {
 	return `
 		SELECT id, session_id, status, handoff_id, handoff_url, expires_at, completed_at, created_at, updated_at
 		FROM browser_session_login_requests
+	`
+}
+
+func browserHandoffRunnerSelectSQL() string {
+	return `
+		SELECT id, session_id, login_request_id, handoff_id, status, viewer_url, runner_id, process_id,
+			bind_addr, private_base_url, public_base_url, expires_at, started_at, completed_at, cancelled_at,
+			created_at, updated_at, error_code, error_message
+		FROM browser_handoff_runners
 	`
 }
 
@@ -827,6 +1151,77 @@ func scanBrowserSessionLoginRequest(scanner browserSessionScanner) (BrowserSessi
 	}
 	request.UpdatedAt = parsedUpdatedAt
 	return request, nil
+}
+
+func scanBrowserHandoffRunner(scanner browserSessionScanner) (BrowserHandoffRunner, error) {
+	var runner BrowserHandoffRunner
+	var viewerURL, runnerID, bindAddr, privateBaseURL, publicBaseURL sql.NullString
+	var processID sql.NullInt64
+	var expiresAt, createdAt, updatedAt string
+	var startedAt, completedAt, cancelledAt, errorCode, errorMessage sql.NullString
+	if err := scanner.Scan(
+		&runner.ID,
+		&runner.SessionID,
+		&runner.LoginRequestID,
+		&runner.HandoffID,
+		&runner.Status,
+		&viewerURL,
+		&runnerID,
+		&processID,
+		&bindAddr,
+		&privateBaseURL,
+		&publicBaseURL,
+		&expiresAt,
+		&startedAt,
+		&completedAt,
+		&cancelledAt,
+		&createdAt,
+		&updatedAt,
+		&errorCode,
+		&errorMessage,
+	); err != nil {
+		return BrowserHandoffRunner{}, err
+	}
+	runner.Status = normalizeBrowserHandoffRunnerStatus(runner.Status)
+	if runner.Status == "" {
+		return BrowserHandoffRunner{}, fmt.Errorf("unsupported browser handoff runner status")
+	}
+	runner.ViewerURL = nullableStringPtr(viewerURL)
+	runner.RunnerID = nullableStringPtr(runnerID)
+	runner.ProcessID = nullableInt64Ptr(processID)
+	runner.BindAddr = nullableStringPtr(bindAddr)
+	runner.PrivateBaseURL = nullableStringPtr(privateBaseURL)
+	runner.PublicBaseURL = nullableStringPtr(publicBaseURL)
+	parsedExpiresAt, err := parseTime(expiresAt)
+	if err != nil {
+		return BrowserHandoffRunner{}, err
+	}
+	runner.ExpiresAt = parsedExpiresAt
+	runner.StartedAt, err = parseNullableTime(startedAt)
+	if err != nil {
+		return BrowserHandoffRunner{}, err
+	}
+	runner.CompletedAt, err = parseNullableTime(completedAt)
+	if err != nil {
+		return BrowserHandoffRunner{}, err
+	}
+	runner.CancelledAt, err = parseNullableTime(cancelledAt)
+	if err != nil {
+		return BrowserHandoffRunner{}, err
+	}
+	parsedCreatedAt, err := parseTime(createdAt)
+	if err != nil {
+		return BrowserHandoffRunner{}, err
+	}
+	runner.CreatedAt = parsedCreatedAt
+	parsedUpdatedAt, err := parseTime(updatedAt)
+	if err != nil {
+		return BrowserHandoffRunner{}, err
+	}
+	runner.UpdatedAt = parsedUpdatedAt
+	runner.ErrorCode = nullableStringPtr(errorCode)
+	runner.ErrorMessage = nullableStringPtr(errorMessage)
+	return runner, nil
 }
 
 func (store *Store) newBrowserSessionHandoffID() (string, error) {
@@ -934,6 +1329,89 @@ func normalizeBrowserSessionLoginRequestStatus(status BrowserSessionLoginRequest
 		return BrowserSessionLoginRequestStatusCancelled
 	default:
 		return ""
+	}
+}
+
+func normalizeBrowserHandoffRunnerStatus(status BrowserHandoffRunnerStatus) BrowserHandoffRunnerStatus {
+	switch BrowserHandoffRunnerStatus(strings.ToLower(strings.TrimSpace(string(status)))) {
+	case BrowserHandoffRunnerStatusRequested:
+		return BrowserHandoffRunnerStatusRequested
+	case BrowserHandoffRunnerStatusStarted:
+		return BrowserHandoffRunnerStatusStarted
+	case BrowserHandoffRunnerStatusCompleted:
+		return BrowserHandoffRunnerStatusCompleted
+	case BrowserHandoffRunnerStatusExpired:
+		return BrowserHandoffRunnerStatusExpired
+	case BrowserHandoffRunnerStatusCancelled:
+		return BrowserHandoffRunnerStatusCancelled
+	case BrowserHandoffRunnerStatusFailed:
+		return BrowserHandoffRunnerStatusFailed
+	default:
+		return ""
+	}
+}
+
+func canTransitionBrowserHandoffRunner(current BrowserHandoffRunnerStatus, next BrowserHandoffRunnerStatus) bool {
+	switch current {
+	case BrowserHandoffRunnerStatusRequested:
+		return next == BrowserHandoffRunnerStatusStarted ||
+			next == BrowserHandoffRunnerStatusExpired ||
+			next == BrowserHandoffRunnerStatusCancelled ||
+			next == BrowserHandoffRunnerStatusFailed
+	case BrowserHandoffRunnerStatusStarted:
+		return next == BrowserHandoffRunnerStatusCompleted ||
+			next == BrowserHandoffRunnerStatusExpired ||
+			next == BrowserHandoffRunnerStatusCancelled ||
+			next == BrowserHandoffRunnerStatusFailed
+	case BrowserHandoffRunnerStatusCompleted,
+		BrowserHandoffRunnerStatusExpired,
+		BrowserHandoffRunnerStatusCancelled,
+		BrowserHandoffRunnerStatusFailed:
+		return false
+	default:
+		return false
+	}
+}
+
+func browserHandoffRunnerEventType(status BrowserHandoffRunnerStatus) (runtimeevents.Type, bool) {
+	switch status {
+	case BrowserHandoffRunnerStatusStarted:
+		return runtimeevents.EventBrowserHandoffRunnerStarted, true
+	case BrowserHandoffRunnerStatusCompleted:
+		return runtimeevents.EventBrowserHandoffRunnerCompleted, true
+	case BrowserHandoffRunnerStatusExpired:
+		return runtimeevents.EventBrowserHandoffRunnerExpired, true
+	case BrowserHandoffRunnerStatusCancelled:
+		return runtimeevents.EventBrowserHandoffRunnerCancelled, true
+	case BrowserHandoffRunnerStatusFailed:
+		return runtimeevents.EventBrowserHandoffRunnerFailed, true
+	default:
+		return "", false
+	}
+}
+
+func browserHandoffRunnerLifecyclePayload(runner BrowserHandoffRunner, previousStatus BrowserHandoffRunnerStatus, actor string, reason string) runtimeevents.BrowserHandoffRunnerLifecyclePayload {
+	return runtimeevents.BrowserHandoffRunnerLifecyclePayload{
+		ID:             runner.ID,
+		SessionID:      runner.SessionID,
+		LoginRequestID: runner.LoginRequestID,
+		HandoffID:      runner.HandoffID,
+		RunnerID:       stringPtrValue(runner.RunnerID),
+		ProcessID:      int64PtrValue(runner.ProcessID),
+		PreviousStatus: string(previousStatus),
+		Status:         string(runner.Status),
+		ViewerURL:      stringPtrValue(runner.ViewerURL),
+		BindAddr:       stringPtrValue(runner.BindAddr),
+		PrivateBaseURL: stringPtrValue(runner.PrivateBaseURL),
+		PublicBaseURL:  stringPtrValue(runner.PublicBaseURL),
+		ExpiresAt:      formatTime(runner.ExpiresAt),
+		StartedAt:      formatOptionalTime(runner.StartedAt),
+		CompletedAt:    formatOptionalTime(runner.CompletedAt),
+		CancelledAt:    formatOptionalTime(runner.CancelledAt),
+		ErrorCode:      stringPtrValue(runner.ErrorCode),
+		ErrorMessage:   stringPtrValue(runner.ErrorMessage),
+		Actor:          defaultString(actor, "operator"),
+		Reason:         strings.TrimSpace(reason),
 	}
 }
 
@@ -1058,6 +1536,13 @@ func nullStringPtr(value *string) any {
 	return *value
 }
 
+func nullInt64Ptr(value *int64) any {
+	if value == nil {
+		return nil
+	}
+	return *value
+}
+
 func nullableStringPtr(value sql.NullString) *string {
 	if !value.Valid || value.String == "" {
 		return nil
@@ -1070,6 +1555,13 @@ func nullableStringPtr(value sql.NullString) *string {
 func stringPtrValue(value *string) string {
 	if value == nil {
 		return ""
+	}
+	return *value
+}
+
+func int64PtrValue(value *int64) int64 {
+	if value == nil {
+		return 0
 	}
 	return *value
 }

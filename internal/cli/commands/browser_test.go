@@ -117,6 +117,69 @@ func TestParseBrowserSessionHandoffShowCommand(t *testing.T) {
 	}
 }
 
+func TestParseBrowserSessionRunnerCommands(t *testing.T) {
+	create, err := ParseBrowser([]string{"session", "runner", "create", "--login-request-id", "7", "--json"})
+	if err != nil {
+		t.Fatalf("ParseBrowser(session runner create) error = %v", err)
+	}
+	if create.Name != "session" || create.SessionAction != "runner" || create.RunnerAction != "create" || create.LoginRequestID != 7 || !create.JSON {
+		t.Fatalf("create command = %+v, want parsed runner create", create)
+	}
+
+	list, err := ParseBrowser([]string{"session", "runner", "list", "--login-request-id", "7", "--json"})
+	if err != nil {
+		t.Fatalf("ParseBrowser(session runner list) error = %v", err)
+	}
+	if list.SessionAction != "runner" || list.RunnerAction != "list" || list.LoginRequestID != 7 || !list.JSON {
+		t.Fatalf("list command = %+v, want parsed runner list", list)
+	}
+
+	show, err := ParseBrowser([]string{"session", "runner", "show", "--id", "3", "--json"})
+	if err != nil {
+		t.Fatalf("ParseBrowser(session runner show) error = %v", err)
+	}
+	if show.SessionAction != "runner" || show.RunnerAction != "show" || show.ID != 3 || !show.JSON {
+		t.Fatalf("show command = %+v, want parsed runner show", show)
+	}
+
+	start, err := ParseBrowser([]string{"session", "runner", "start", "--id", "3", "--json"})
+	if err != nil {
+		t.Fatalf("ParseBrowser(session runner start) error = %v", err)
+	}
+	if start.SessionAction != "runner" || start.RunnerAction != "start" || start.ID != 3 || !start.JSON {
+		t.Fatalf("start command = %+v, want parsed runner start", start)
+	}
+
+	status, err := ParseBrowser([]string{"session", "runner", "status", "--id", "3", "--status", "started", "--json"})
+	if err != nil {
+		t.Fatalf("ParseBrowser(session runner status) error = %v", err)
+	}
+	if status.SessionAction != "runner" || status.RunnerAction != "status" || status.ID != 3 || status.Status != "started" || !status.JSON {
+		t.Fatalf("status command = %+v, want parsed runner status", status)
+	}
+
+	cancel, err := ParseBrowser([]string{"session", "runner", "cancel", "--id", "3", "--json"})
+	if err != nil {
+		t.Fatalf("ParseBrowser(session runner cancel) error = %v", err)
+	}
+	if cancel.SessionAction != "runner" || cancel.RunnerAction != "cancel" || cancel.ID != 3 || !cancel.JSON {
+		t.Fatalf("cancel command = %+v, want parsed runner cancel", cancel)
+	}
+
+	if _, err := ParseBrowser([]string{"session", "runner", "create", "--id", "3", "--login-request-id", "7", "--json"}); err == nil {
+		t.Fatal("ParseBrowser(session runner create with id) error = nil, want rejection")
+	}
+	if _, err := ParseBrowser([]string{"session", "runner", "status", "--id", "3", "--status", "requested", "--json"}); err == nil {
+		t.Fatal("ParseBrowser(session runner status requested) error = nil, want rejection")
+	}
+	if _, err := ParseBrowser([]string{"session", "runner", "start", "--id", "3", "--status", "started", "--json"}); err == nil {
+		t.Fatal("ParseBrowser(session runner start with status) error = nil, want rejection")
+	}
+	if _, err := ParseBrowser([]string{"session", "runner", "approve", "--id", "3", "--json"}); err == nil {
+		t.Fatal("ParseBrowser(session runner unsupported action) error = nil, want rejection")
+	}
+}
+
 func TestParseBrowserSessionVerifyCommand(t *testing.T) {
 	command, err := ParseBrowser([]string{"session", "verify", "--id", "42", "--login-request-id", "7", "--json"})
 	if err != nil {
