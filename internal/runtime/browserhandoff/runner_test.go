@@ -375,6 +375,16 @@ func TestNoVNCPlanRejectsInvalidCommandPath(t *testing.T) {
 	}
 }
 
+func TestNoVNCPlanRejectsMissingDisplayCommand(t *testing.T) {
+	config := validNoVNCConfig(t)
+	config.DisplayCommand = ""
+
+	_, err := PlanNoVNCStart(validFixtureStartRequest(), config)
+	if err == nil || !strings.Contains(err.Error(), "display command") || !strings.Contains(err.Error(), "required") {
+		t.Fatalf("PlanNoVNCStart(missing display command) error = %v, want display command required rejection", err)
+	}
+}
+
 func TestNoVNCPlanRejectsNonAllowlistedCommandPath(t *testing.T) {
 	config := validNoVNCConfig(t)
 	config.NoVNCAllowedCommands = []string{"/usr/bin/not-allowed"}
@@ -382,6 +392,108 @@ func TestNoVNCPlanRejectsNonAllowlistedCommandPath(t *testing.T) {
 	_, err := PlanNoVNCStart(validFixtureStartRequest(), config)
 	if err == nil || !strings.Contains(err.Error(), "novnc command") || !strings.Contains(err.Error(), "allowlist") {
 		t.Fatalf("PlanNoVNCStart(disallowed novnc command) error = %v, want allowlist rejection", err)
+	}
+}
+
+func TestNoVNCPlanRejectsNonAllowlistedBrowserCommandPath(t *testing.T) {
+	config := validNoVNCConfig(t)
+	config.BrowserAllowedCommands = []string{"/usr/bin/not-allowed"}
+
+	_, err := PlanNoVNCStart(validFixtureStartRequest(), config)
+	if err == nil || !strings.Contains(err.Error(), "browser command") || !strings.Contains(err.Error(), "allowlist") {
+		t.Fatalf("PlanNoVNCStart(disallowed browser command) error = %v, want browser allowlist rejection", err)
+	}
+}
+
+func TestDetectNoVNCWebsockifyCommandAcceptsExplicitExecutablePath(t *testing.T) {
+	commandPath := testExecutablePath(t, "true")
+
+	detection, err := DetectNoVNCWebsockifyCommand(commandPath, []string{commandPath})
+	if err != nil {
+		t.Fatalf("DetectNoVNCWebsockifyCommand() error = %v", err)
+	}
+	if detection.DetectedPath != commandPath {
+		t.Fatalf("DetectedPath = %q, want %q", detection.DetectedPath, commandPath)
+	}
+	if detection.CommandRole != NoVNCWebsockifyCommandRole {
+		t.Fatalf("CommandRole = %q, want %q", detection.CommandRole, NoVNCWebsockifyCommandRole)
+	}
+	if detection.ValidationStatus != NoVNCCommandValidationValid {
+		t.Fatalf("ValidationStatus = %q, want %q", detection.ValidationStatus, NoVNCCommandValidationValid)
+	}
+	if detection.ErrorCode != "" || detection.ErrorMessage != "" {
+		t.Fatalf("detection = %+v, want no error metadata", detection)
+	}
+}
+
+func TestDetectNoVNCCommandAcceptsDisplayAndBrowserRoles(t *testing.T) {
+	commandPath := testExecutablePath(t, "true")
+	tests := []struct {
+		name string
+		role string
+	}{
+		{name: "display", role: NoVNCDisplayCommandRole},
+		{name: "browser", role: NoVNCBrowserCommandRole},
+		{name: "novnc", role: NoVNCWebsockifyCommandRole},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			detection, err := DetectNoVNCCommand(test.name+" command", test.role, commandPath, []string{commandPath})
+			if err != nil {
+				t.Fatalf("DetectNoVNCCommand(%s) error = %v", test.name, err)
+			}
+			if detection.DetectedPath != commandPath {
+				t.Fatalf("DetectedPath = %q, want %q", detection.DetectedPath, commandPath)
+			}
+			if detection.CommandRole != test.role {
+				t.Fatalf("CommandRole = %q, want %q", detection.CommandRole, test.role)
+			}
+			if detection.ValidationStatus != NoVNCCommandValidationValid {
+				t.Fatalf("ValidationStatus = %q, want %q", detection.ValidationStatus, NoVNCCommandValidationValid)
+			}
+		})
+	}
+}
+
+func TestDetectNoVNCWebsockifyCommandRejectsUnsafeValues(t *testing.T) {
+	commandPath := testExecutablePath(t, "true")
+	nonExecutablePath := filepath.Join(t.TempDir(), "websockify")
+	if err := os.WriteFile(nonExecutablePath, []byte("#!/bin/sh\nexit 0\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile(non-executable fixture) error = %v", err)
+	}
+	missingPath := filepath.Join(t.TempDir(), "missing-websockify")
+
+	tests := []struct {
+		name    string
+		command string
+		allowed []string
+		want    string
+	}{
+		{name: "missing path", command: "", allowed: []string{commandPath}, want: NoVNCCommandErrorMissing},
+		{name: "relative path", command: "websockify", allowed: []string{"websockify"}, want: NoVNCCommandErrorRelative},
+		{name: "not allowlisted", command: commandPath, allowed: []string{"/usr/bin/not-allowed"}, want: NoVNCCommandErrorNotAllowlisted},
+		{name: "not found", command: missingPath, allowed: []string{missingPath}, want: NoVNCCommandErrorNotFound},
+		{name: "not executable", command: nonExecutablePath, allowed: []string{nonExecutablePath}, want: NoVNCCommandErrorNotExecutable},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			detection, err := DetectNoVNCWebsockifyCommand(test.command, test.allowed)
+			if err == nil {
+				t.Fatalf("DetectNoVNCWebsockifyCommand() error = nil, want rejection")
+			}
+			if detection.CommandRole != NoVNCWebsockifyCommandRole {
+				t.Fatalf("CommandRole = %q, want %q", detection.CommandRole, NoVNCWebsockifyCommandRole)
+			}
+			if detection.ValidationStatus != NoVNCCommandValidationInvalid {
+				t.Fatalf("ValidationStatus = %q, want %q", detection.ValidationStatus, NoVNCCommandValidationInvalid)
+			}
+			if detection.ErrorCode != test.want {
+				t.Fatalf("ErrorCode = %q, want %q; detection = %+v", detection.ErrorCode, test.want, detection)
+			}
+			if strings.TrimSpace(detection.ErrorMessage) == "" {
+				t.Fatalf("ErrorMessage is empty for detection %+v", detection)
+			}
+		})
 	}
 }
 
@@ -448,6 +560,46 @@ func TestNoVNCPlanGeneratesDryRunPlanWithoutLaunching(t *testing.T) {
 		if !found {
 			t.Fatalf("plan.Commands = %+v, missing role %q", plan.Commands, wantRole)
 		}
+	}
+}
+
+func TestNoVNCPlanIncludesCommandDetectionMetadata(t *testing.T) {
+	config := validNoVNCConfig(t)
+
+	plan, err := PlanNoVNCStart(validFixtureStartRequest(), config)
+	if err != nil {
+		t.Fatalf("PlanNoVNCStart() error = %v", err)
+	}
+
+	wants := map[string]struct {
+		path string
+		role string
+	}{
+		"display": {path: config.DisplayCommand, role: NoVNCDisplayCommandRole},
+		"browser": {path: config.BrowserCommand, role: NoVNCBrowserCommandRole},
+		"novnc":   {path: config.NoVNCCommand, role: NoVNCWebsockifyCommandRole},
+	}
+	for _, command := range plan.Commands {
+		want, ok := wants[command.Role]
+		if !ok {
+			t.Fatalf("unexpected command role %q in plan %+v", command.Role, plan.Commands)
+		}
+		if command.DetectedPath != want.path {
+			t.Fatalf("%s DetectedPath = %q, want %q", command.Role, command.DetectedPath, want.path)
+		}
+		if command.CommandRole != want.role {
+			t.Fatalf("%s CommandRole = %q, want %q", command.Role, command.CommandRole, want.role)
+		}
+		if command.ValidationStatus != NoVNCCommandValidationValid {
+			t.Fatalf("%s ValidationStatus = %q, want %q", command.Role, command.ValidationStatus, NoVNCCommandValidationValid)
+		}
+		if command.ErrorCode != "" || command.ErrorMessage != "" {
+			t.Fatalf("%s command = %+v, want no detection error metadata", command.Role, command)
+		}
+		delete(wants, command.Role)
+	}
+	if len(wants) != 0 {
+		t.Fatalf("plan.Commands = %+v, missing detection metadata for %v", plan.Commands, wants)
 	}
 }
 
