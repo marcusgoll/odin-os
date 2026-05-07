@@ -6,7 +6,7 @@ date: 2026-05-06
 
 # Browser Session Handoff Contract
 
-This contract defines the Odin-native handoff for manual Huginn browser login and reusable authenticated read-only sessions. The session metadata, login request metadata, read-only handoff lookup, handoff runner metadata CLI, handoff runner process-boundary skeleton, bounded fixture runner, bounded exec process runner, fixture supervisor lifecycle wiring, NoVNC dry-run planning, NoVNC fixture-safe runner launch, real NoVNC command config validation, display/browser/noVNC dry-run detection metadata, explicit real display/VNC role launch, explicit real browser role launch, explicit real websockify/noVNC role launch, manual verification metadata, profile path allocation, explicit empty profile directory preparation, and profile storage policy gate slices are implemented. Tailscale handoff, browser profile persistence, login automation, read-only verification checks, and authenticated session attachment remain future work.
+This contract defines the Odin-native handoff for manual Huginn browser login and reusable authenticated read-only sessions. The session metadata, login request metadata, read-only handoff lookup, handoff runner metadata CLI, handoff runner process-boundary skeleton, bounded fixture runner, bounded exec process runner, fixture supervisor lifecycle wiring, NoVNC dry-run planning, NoVNC fixture-safe runner launch, real NoVNC command config validation, display/browser/noVNC dry-run detection metadata, explicit real display/VNC role launch, explicit real browser role launch, explicit real websockify/noVNC role launch, manual verification metadata, profile path allocation, explicit empty profile directory preparation, and profile storage policy gate slices are implemented. The encrypted profile storage contract is design-only. Tailscale handoff, browser profile persistence, login automation, read-only verification checks, and authenticated session attachment remain future work.
 
 ## Existing State
 
@@ -667,6 +667,58 @@ Browser profile files:
 - Profile files must be encrypted at rest before real session writes are allowed. If host-level encryption is the first slice, policy must still deny profile writes unless the operator explicitly accepts that documented gap in a later policy slice.
 - No credential material may be written to Odin-specific metadata, events, logs, screenshots, or evidence payloads.
 
+### Encrypted Profile Storage Contract
+
+Encrypted profile storage is the future contract for converting a prepared empty profile directory into reusable browser state. It is not implemented in this slice. Until the storage schema, key provider, encryption helper, capture/export path, read-only attach path, and cleanup/rotation behavior are implemented, `CanWriteBrowserProfile(session)` must continue to deny every policy value.
+
+What may be stored after the future encrypted-storage slice is approved:
+
+- A browser profile directory snapshot captured from the allocated `ODIN_ROOT/browser-sessions/profiles/<session>` directory.
+- Cookie and session-state files that the browser writes as part of that profile snapshot, but only inside the encrypted archive/blob.
+- Local storage, session storage, IndexedDB, cache metadata, and equivalent browser-origin state when they are part of the captured profile snapshot and are required for read-only authenticated reuse.
+
+What must never be stored by Odin:
+
+- Passwords, passkeys, password-manager exports, or password autofill databases.
+- TOTP seeds, MFA enrollment secrets, backup factors, recovery codes, or equivalent account-recovery material.
+- Raw credentials, credential prompts, operator-entered secret text, OAuth refresh tokens copied out of the browser profile, or any secret copied into SQLite metadata, runtime events, logs, screenshots, or goal evidence.
+
+Encryption model:
+
+- Key source: a future Odin key provider supplies an operator-approved profile encryption key or key handle. The key provider must not store raw key bytes in SQLite, runtime events, logs, or profile metadata.
+- Key identity: SQLite may store non-secret key metadata such as `key_provider`, `key_id`, `key_version`, `cipher`, `archive_digest`, `encrypted_blob_path`, `captured_at`, `encrypted_at`, and `expires_at`.
+- Encryption at rest: reusable profile state must be encrypted before Odin records it as attachable. A prepared unencrypted directory is temporary working state only and cannot satisfy attachment policy.
+- Fail closed: if the key provider is unavailable, returns an unknown key, fails integrity verification, or cannot decrypt the profile blob, Odin must refuse capture, attach, rotation, and read-only reuse. It may record safe failure metadata and audit events, but must not fall back to plaintext.
+- Key rotation: rotation creates a new encrypted blob with a newer `key_version`, verifies decryptability and digest metadata, updates SQLite in one transaction, and schedules the old encrypted blob for cleanup only after the new blob is durable. Rotation failure leaves the previous encrypted blob authoritative.
+
+Storage layout:
+
+- Prepared working directory: `ODIN_ROOT/browser-sessions/profiles/<session>`.
+- Encrypted archive/blob path: `ODIN_ROOT/browser-sessions/profiles/<session>/profile.enc` or a future content-addressed path under the same `browser-sessions/profiles/<session>` boundary.
+- Temporary capture path: `ODIN_ROOT/browser-sessions/profiles/<session>/.capture-tmp/<capture-id>` and only for bounded capture/rotation work. Temporary plaintext must be removed on success, failure, cancellation, and expiry.
+- Metadata authority: SQLite stores profile lifecycle, policy, encryption metadata, encrypted blob relative path, digest, key metadata, and audit linkage. The filesystem is never the registry of record.
+
+Policy gates:
+
+- `disabled`: no profile directory creation, capture, encryption, attach, or rotation is allowed.
+- `encrypted_required`: profile writes may proceed only through the future capture/encrypt path and become attachable only after the encrypted blob and SQLite metadata are committed together.
+- `prepared_unencrypted`: an explicitly non-attachable state for an empty or temporary prepared directory. It may support manual login setup in a bounded future flow, but it cannot be reused by the goal runner and cannot be attached to read-only browser work.
+
+Lifecycle:
+
+- `prepared`: Odin has allocated metadata and, if explicitly requested, created an empty profile directory. No reusable browser state exists.
+- `capture_requested`: an operator-approved or policy-approved capture has been requested for a verified session. Odin records `browser.profile_capture_requested` before capture begins.
+- `encrypted`: Odin has captured allowed browser state, encrypted it at rest, committed SQLite metadata, removed temporary plaintext, and recorded `browser.profile_encrypted`.
+- `attached_readonly`: Odin has mounted or materialized the encrypted profile for a read-only browser run under the allowed domain and recorded `browser.profile_attached`. The attached copy must be read-only to Odin callers and must not become the source of truth until a later capture is explicitly requested.
+- `revoked`: Odin refuses future capture, attach, decrypt, and rotation for the profile, records `browser.profile_revoked`, and schedules encrypted blobs and prepared directories for cleanup according to retention policy.
+- `expired`: Odin refuses attach and capture until the operator completes a fresh verification/capture flow. Expiry does not delete evidence immediately unless the cleanup policy says so.
+
+Security review:
+
+- This contract intentionally does not implement encryption, key storage, profile capture, browser launch changes, profile writes, credential collection, or read-only attachment.
+- Future implementation must prove that plaintext profile bytes are bounded to the prepared working directory or temporary capture path, are never copied into SQLite/events/logs/evidence, and are removed on all terminal paths.
+- Audit payloads for profile storage must include only safe metadata: session ID, profile key, policy decision, lifecycle status, key ID/version, encrypted blob relative path, digest, actor, reason, and timestamps.
+
 ## Policy Gates
 
 Policy must fail closed. A browser session may be attached to a goal only when all checks pass:
@@ -720,6 +772,13 @@ Required runner event types:
 - `browser.handoff_runner_completed`
 - `browser.handoff_runner_failed`
 
+Required encrypted profile storage event types:
+
+- `browser.profile_capture_requested`
+- `browser.profile_encrypted`
+- `browser.profile_attached`
+- `browser.profile_revoked`
+
 `browser.session_status_changed` covers profile status changes. Login request metadata uses specific request lifecycle events.
 
 Suggested payload fields:
@@ -764,7 +823,7 @@ Rules:
 4. Manual verification metadata surface: implemented `odin browser session verify` to set session status `verified`, record `last_verified_at`, and optionally complete a login request, with no browser launch or credential handling.
 5. Profile path and empty directory preparation: implemented safe profile path allocation plus explicit `odin browser session prepare-profile` for empty-directory creation.
 6. Profile storage policy gate: implemented `profile_storage_policy` with default `encrypted_required`, CLI JSON output, and a deny-all `CanWriteBrowserProfile` helper until encrypted storage exists.
-7. Encrypted profile storage: add encrypted profile root handling and policy denial for unencrypted profiles.
+7. Encrypted profile storage: add schema, key provider, encryption helper, capture/export, attach read-only, cleanup, and rotation slices. The schema slice records encrypted blob metadata in SQLite only. The key-provider slice supplies non-logged key handles and fail-closed lookup. The encryption-helper slice writes encrypted archives and verifies digest/decryptability. The capture/export slice turns an allowed prepared profile directory into an encrypted blob without storing forbidden credential material in metadata or logs. The attach read-only slice materializes or mounts encrypted state only for read-only allowed-domain browser work. Cleanup/rotation removes temporary plaintext, rotates keys transactionally, and preserves the previous encrypted blob if rotation fails.
 8. Authenticated read-only attachment: allow `odin browser run` and goal runner evidence collection to attach a verified `authenticated_readonly` profile for allowed domains only.
 9. Handoff runner metadata store: implemented additive SQLite runner metadata with `requested`, `started`, `failed`, `completed`, `expired`, and `cancelled` states; append runner audit events transactionally.
 10. Handoff runner CLI: implemented minimal `odin browser session runner create|list|show|start|status|cancel` commands, reusing current session and login request validation without process launch.
