@@ -6,7 +6,7 @@ date: 2026-05-06
 
 # Browser Session Handoff Contract
 
-This contract defines the Odin-native handoff for manual Huginn browser login and reusable authenticated read-only sessions. The session metadata, login request metadata, read-only handoff lookup, handoff runner metadata CLI, handoff runner process-boundary skeleton, bounded fixture runner, bounded exec process runner, fixture supervisor lifecycle wiring, NoVNC dry-run planning, manual verification metadata, profile path allocation, explicit empty profile directory preparation, and profile storage policy gate slices are implemented. Real NoVNC/Tailscale handoff, browser launch, browser profile persistence, login automation, read-only verification checks, and authenticated session attachment remain future work.
+This contract defines the Odin-native handoff for manual Huginn browser login and reusable authenticated read-only sessions. The session metadata, login request metadata, read-only handoff lookup, handoff runner metadata CLI, handoff runner process-boundary skeleton, bounded fixture runner, bounded exec process runner, fixture supervisor lifecycle wiring, NoVNC dry-run planning, real NoVNC command config validation, manual verification metadata, profile path allocation, explicit empty profile directory preparation, and profile storage policy gate slices are implemented. Real NoVNC/Tailscale handoff, browser launch, browser profile persistence, login automation, read-only verification checks, and authenticated session attachment remain future work.
 
 ## Existing State
 
@@ -20,7 +20,7 @@ This contract defines the Odin-native handoff for manual Huginn browser login an
 - `odin browser session handoff show --handoff-id <id> --json` resolves safe manual-login metadata for one valid, unexpired requested handoff without mutating runtime state.
 - `odin browser session runner create|list|show|plan-novnc|status|cancel --json` records, inspects, or dry-run plans metadata-only browser handoff runner records without launching a process.
 - `internal/runtime/browserhandoff` defines the future runner process boundary request/response types, a default stub runner that returns structured `not_implemented` responses, and an explicit env-gated fixture runner for harmless local process lifecycle proof.
-- `internal/runtime/browserhandoff` also defines a NoVNC dry-run planner that validates command paths, allowlists, bind address, private base URL, and timeout, then returns planned commands and a private planned viewer URL without launching processes.
+- `internal/runtime/browserhandoff` also defines a NoVNC dry-run planner and real-launch config validator that validate command paths, allowlists, bind address, private base URL, and timeout, then return normalized config or planned metadata without launching processes.
 - `internal/runtime/browserhandoff` defines a bounded process supervisor abstraction with fake-runner and harmless local exec-runner tests for command validation, timeout kill handling, cancellation handling, bounded stdout/stderr capture, and safe process metadata. `runner start` now wires the explicit fixture mode through this supervisor using only allowlisted harmless local commands. It does not add a real browser or NoVNC launch path.
 - `odin browser session verify --id <session_id> [--login-request-id <id>] --json` records metadata-only operator verification, sets `last_verified_at`, moves the session to `verified`, and completes the login request when one is provided.
 - `odin browser session prepare-profile --id <session_id> --json` explicitly creates the empty profile directory under `ODIN_ROOT` and records an audit event without writing browser files.
@@ -167,30 +167,27 @@ The future NoVNC runner must fail closed unless all required config is present a
 Required fields for the real process boundary:
 
 - `ODIN_BROWSER_HANDOFF_RUNNER=novnc`: selects the real local NoVNC runner. Empty or `stub` continues to select `StubRunner`; `fixture` continues to select the bounded fixture runner.
-- `ODIN_BROWSER_HANDOFF_BROWSER_COMMAND`: absolute path to the browser executable.
-- `ODIN_BROWSER_HANDOFF_BROWSER_ALLOWED_COMMANDS`: comma-separated allowlist of absolute browser executable paths. The selected browser command must match one clean allowlist entry exactly.
-- `ODIN_BROWSER_HANDOFF_DISPLAY_COMMAND`: absolute path to the virtual display or VNC/display command when the platform requires one.
-- `ODIN_BROWSER_HANDOFF_DISPLAY_ALLOWED_COMMANDS`: comma-separated allowlist for the display command.
-- `ODIN_BROWSER_HANDOFF_NOVNC_COMMAND`: absolute path to the noVNC or websockify command.
-- `ODIN_BROWSER_HANDOFF_NOVNC_ALLOWED_COMMANDS`: comma-separated allowlist for the noVNC/websockify command.
-- `ODIN_BROWSER_HANDOFF_BIND_ADDR`: bind host and port for the viewer proxy. Default must be `127.0.0.1:0` or equivalent loopback.
-- `ODIN_BROWSER_HANDOFF_PRIVATE_BASE_URL`: private operator URL base used to generate `viewer_url`, for example a Tailscale-only HTTPS origin.
-- `ODIN_BROWSER_HANDOFF_TIMEOUT_SECONDS`: positive timeout capped by policy and never longer than the linked login request expiration.
+- `ODIN_NOVNC_BROWSER_COMMAND`: absolute path to the browser executable.
+- `ODIN_NOVNC_DISPLAY_COMMAND`: absolute path to the virtual display or VNC/display command when the platform requires one.
+- `ODIN_NOVNC_WEBSOCKIFY_COMMAND`: absolute path to the noVNC or websockify command.
+- `ODIN_NOVNC_ALLOWED_COMMANDS`: comma-separated common allowlist of absolute executable paths. Every selected command must match one clean allowlist entry exactly.
+- `ODIN_NOVNC_BIND_ADDR`: optional bind host and port for the viewer proxy. Empty defaults to `127.0.0.1:0`.
+- `ODIN_NOVNC_PRIVATE_BASE_URL`: private operator URL base used to generate `viewer_url`, for example a Tailscale-only HTTPS origin.
+- `ODIN_NOVNC_TIMEOUT_SECONDS`: positive timeout capped by policy and never longer than the linked login request expiration.
 
 Optional fields:
 
-- `ODIN_BROWSER_HANDOFF_BROWSER_ARGS`: explicit extra browser arguments. The implementation must reject shell syntax and must pass args without a shell.
-- `ODIN_BROWSER_HANDOFF_DISPLAY_ARGS`: explicit extra display/VNC arguments, passed without a shell.
-- `ODIN_BROWSER_HANDOFF_NOVNC_ARGS`: explicit extra noVNC/websockify arguments, passed without a shell.
+- Future explicit browser, display, and websockify arg fields may be added only if they remain structured argument lists passed without a shell. This slice does not add arg loading for the real NoVNC boundary.
 
 Config validation rules:
 
-- Every configured command path must be absolute, clean, executable, and present in its matching allowlist.
+- Every configured command path must be absolute, clean, and present in `ODIN_NOVNC_ALLOWED_COMMANDS`.
 - The implementation must not search `PATH`, invoke a shell, or accept command strings that combine executable and args.
 - `bind_addr` must be loopback by default. A non-loopback private interface requires an explicit later policy option and must still reject public wildcard binds such as `0.0.0.0`.
 - `private_base_url` must be absolute `http` or `https`; the first real slice should prefer `https` for any non-loopback origin.
 - `public_base_url` remains unsupported and must be rejected until a separate security contract approves public exposure.
 - Missing config must produce a structured `failed` runner result and audit event, not a partial process launch.
+- `LoadNoVNCLaunchConfigFromEnv` and `ValidateNoVNCLaunchConfig` validate the future real launch config only. They must not import `os/exec`, start child processes, create viewer routes, write profile data, or append runtime events by themselves.
 
 ### Runner Request
 
@@ -348,7 +345,7 @@ Cancel behavior:
 
 Timeout cleanup:
 
-- The supervisor must stop the process group when `ODIN_BROWSER_HANDOFF_TIMEOUT_SECONDS` expires or when the linked login request expires, whichever comes first.
+- The supervisor must stop the process group when `ODIN_NOVNC_TIMEOUT_SECONDS` expires or when the linked login request expires, whichever comes first.
 - Timeout records `expired` through the existing store transition path.
 - Cleanup must be idempotent so repeated cancel/status/tick calls do not relaunch or double-record terminal transitions.
 
@@ -759,7 +756,7 @@ Rules:
 11. Process boundary: implemented a typed `internal/runtime/browserhandoff` skeleton with validating `StubRunner`; real browser process launch, shutdown semantics, and fail-closed cleanup remain future work.
 12. Bounded fixture runner: implemented explicit env-gated `FixtureRunner` for harmless allowlisted local commands with timeout handling and safe process metadata. Local NoVNC fixture remains future work.
 13. NoVNC runner contract refinement: document process topology, config, security rules, lifecycle cleanup, and staged implementation constraints before process code.
-14. Command contract and config validation: implemented a pure NoVNC config model and validator for absolute allowlisted command paths, loopback/private bind settings, private base URL, and timeout without launching processes. `novnc` runner mode selection remains future work.
+14. Command contract and config validation: implemented pure NoVNC dry-run and real-launch config models with validation for absolute allowlisted command paths, loopback/private bind settings, private base URL, and bounded timeout without launching processes. `ODIN_NOVNC_*` env loading is validation-only; `novnc` runner mode selection remains future work.
 15. Dry-run NoVNC runner: implemented pure request/config planning and `odin browser session runner plan-novnc` JSON output that returns planned command roles, validated bind/timeout config, and a private planned `viewer_url` without starting child processes or mutating runner metadata. Wiring this plan into real runner start remains future work.
 16. Bounded process supervisor abstraction: implemented injected-runner process supervision contracts, request/handle/result shapes, allowlist validation, timeout result handling, and cancellation result handling without wiring into real runner start.
 17. Bounded exec process runner: implemented `ExecCommandRunner` behind the supervisor abstraction for harmless allowlisted local commands with process-group kill on timeout/cancel, bounded stdout/stderr capture, and no wiring into runner start.
