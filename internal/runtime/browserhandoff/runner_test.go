@@ -111,6 +111,87 @@ func TestRunnerFromEnvDefaultsToStubRunner(t *testing.T) {
 	}
 }
 
+func TestRunnerFromEnvSelectsNoVNCRunner(t *testing.T) {
+	t.Setenv(RunnerModeEnvVar, RunnerModeNoVNC)
+
+	runner, err := RunnerFromEnv()
+	if err != nil {
+		t.Fatalf("RunnerFromEnv() error = %v", err)
+	}
+	if _, ok := runner.(NoVNCRunner); !ok {
+		t.Fatalf("RunnerFromEnv() = %T, want NoVNCRunner", runner)
+	}
+}
+
+func TestNoVNCRunnerStartValidatesConfigAndReturnsNotImplemented(t *testing.T) {
+	commandPath := testExecutablePath(t, "true")
+	runner := NoVNCRunner{
+		LoadConfig: func() (NoVNCLaunchConfig, error) {
+			return NoVNCLaunchConfig{
+				BrowserCommand:      commandPath,
+				DisplayCommand:      commandPath,
+				WebsockifyCommand:   commandPath,
+				AllowedCommandPaths: []string{commandPath},
+				BindAddr:            "127.0.0.1:6080",
+				PrivateBaseURL:      "https://odin-handoff.tailnet.local",
+				TimeoutSeconds:      300,
+			}, nil
+		},
+	}
+
+	response, err := runner.Start(context.Background(), validFixtureStartRequest())
+	if err != nil {
+		t.Fatalf("NoVNCRunner.Start() error = %v", err)
+	}
+	if response.Status != StatusNotImplemented || response.ErrorCode != "not_implemented" {
+		t.Fatalf("response = %+v, want structured not_implemented", response)
+	}
+	if response.SessionID != 1 || response.LoginRequestID != 2 || response.HandoffID != "opaque-handoff-id" {
+		t.Fatalf("response = %+v, want linked request metadata", response)
+	}
+	if response.RunnerID != "" || response.ProcessID != 0 || response.ViewerURL != "" {
+		t.Fatalf("response = %+v, want no runner/process/viewer metadata from skeleton", response)
+	}
+	if runner.LaunchCount() != 0 {
+		t.Fatalf("LaunchCount() = %d, want 0", runner.LaunchCount())
+	}
+}
+
+func TestNoVNCRunnerStartRejectsInvalidLaunchConfig(t *testing.T) {
+	commandPath := testExecutablePath(t, "true")
+	runner := NoVNCRunner{
+		LoadConfig: func() (NoVNCLaunchConfig, error) {
+			return NoVNCLaunchConfig{
+				BrowserCommand:      commandPath,
+				DisplayCommand:      commandPath,
+				WebsockifyCommand:   commandPath,
+				AllowedCommandPaths: []string{"/usr/bin/not-allowed"},
+				BindAddr:            "127.0.0.1:6080",
+				PrivateBaseURL:      "https://odin-handoff.tailnet.local",
+				TimeoutSeconds:      300,
+			}, nil
+		},
+	}
+
+	_, err := runner.Start(context.Background(), validFixtureStartRequest())
+	if err == nil || !strings.Contains(err.Error(), "allowlist") {
+		t.Fatalf("NoVNCRunner.Start() error = %v, want allowlist rejection", err)
+	}
+}
+
+func TestNoVNCRunnerCancelReturnsNotImplemented(t *testing.T) {
+	response, err := NoVNCRunner{}.Cancel(context.Background(), CancelRequest{
+		RunnerID: "novnc-1",
+		Reason:   "operator cancelled",
+	})
+	if err != nil {
+		t.Fatalf("NoVNCRunner.Cancel() error = %v", err)
+	}
+	if response.RunnerID != "novnc-1" || response.Status != StatusNotImplemented || response.ErrorCode != "not_implemented" {
+		t.Fatalf("Cancel() = %+v, want structured not_implemented response", response)
+	}
+}
+
 func TestFixtureRunnerRequiresExplicitEnablementAndAllowlist(t *testing.T) {
 	valid := validFixtureStartRequest()
 	commandPath := testExecutablePath(t, "true")
@@ -258,6 +339,84 @@ func TestNoVNCPlanGeneratesDryRunPlanWithoutLaunching(t *testing.T) {
 		if !found {
 			t.Fatalf("plan.Commands = %+v, missing role %q", plan.Commands, wantRole)
 		}
+	}
+}
+
+func TestNoVNCLaunchConfigFromEnvValidatesCommonAllowlist(t *testing.T) {
+	commandPath := testExecutablePath(t, "true")
+	t.Setenv(NoVNCBrowserCommandEnvVar, commandPath)
+	t.Setenv(NoVNCDisplayCommandEnvVar, commandPath)
+	t.Setenv(NoVNCWebsockifyCommandEnvVar, commandPath)
+	t.Setenv(NoVNCAllowedCommandsEnvVar, strings.Join([]string{"/usr/bin/not-used", commandPath}, ","))
+	t.Setenv(NoVNCBindAddrEnvVar, "127.0.0.1:6080")
+	t.Setenv(NoVNCPrivateBaseURLEnvVar, "https://odin-handoff.tailnet.local/")
+	t.Setenv(NoVNCTimeoutSecondsEnvVar, "300")
+
+	config, err := LoadNoVNCLaunchConfigFromEnv()
+	if err != nil {
+		t.Fatalf("LoadNoVNCLaunchConfigFromEnv() error = %v", err)
+	}
+	normalized, err := ValidateNoVNCLaunchConfig(config, 600)
+	if err != nil {
+		t.Fatalf("ValidateNoVNCLaunchConfig() error = %v", err)
+	}
+	if normalized.BrowserCommand != commandPath || normalized.DisplayCommand != commandPath || normalized.WebsockifyCommand != commandPath {
+		t.Fatalf("normalized commands = %+v, want env command path", normalized)
+	}
+	if normalized.BindAddr != "127.0.0.1:6080" || normalized.PrivateBaseURL != "https://odin-handoff.tailnet.local" || normalized.TimeoutSeconds != 300 {
+		t.Fatalf("normalized config = %+v, want validated bind/base/timeout", normalized)
+	}
+}
+
+func TestNoVNCLaunchConfigRejectsUnsafeValues(t *testing.T) {
+	commandPath := testExecutablePath(t, "true")
+	tests := []struct {
+		name    string
+		mutate  func(*NoVNCLaunchConfig)
+		wantErr string
+	}{
+		{name: "relative browser command", mutate: func(config *NoVNCLaunchConfig) { config.BrowserCommand = "chromium" }, wantErr: "browser command"},
+		{name: "not allowlisted websockify", mutate: func(config *NoVNCLaunchConfig) { config.AllowedCommandPaths = []string{"/usr/bin/not-allowed"} }, wantErr: "allowlist"},
+		{name: "public bind", mutate: func(config *NoVNCLaunchConfig) { config.BindAddr = "0.0.0.0:6080" }, wantErr: "bind_addr"},
+		{name: "missing private base url", mutate: func(config *NoVNCLaunchConfig) { config.PrivateBaseURL = "" }, wantErr: "private_base_url"},
+		{name: "timeout beyond request", mutate: func(config *NoVNCLaunchConfig) { config.TimeoutSeconds = 601 }, wantErr: "timeout_seconds"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			config := NoVNCLaunchConfig{
+				BrowserCommand:      commandPath,
+				DisplayCommand:      commandPath,
+				WebsockifyCommand:   commandPath,
+				AllowedCommandPaths: []string{commandPath},
+				BindAddr:            "127.0.0.1:6080",
+				PrivateBaseURL:      "https://odin-handoff.tailnet.local",
+				TimeoutSeconds:      300,
+			}
+			test.mutate(&config)
+			if _, err := ValidateNoVNCLaunchConfig(config, 600); err == nil || !strings.Contains(err.Error(), test.wantErr) {
+				t.Fatalf("ValidateNoVNCLaunchConfig() error = %v, want substring %q", err, test.wantErr)
+			}
+		})
+	}
+}
+
+func TestNoVNCLaunchConfigDefaultsBindAddrToLoopback(t *testing.T) {
+	commandPath := testExecutablePath(t, "true")
+	config := NoVNCLaunchConfig{
+		BrowserCommand:      commandPath,
+		DisplayCommand:      commandPath,
+		WebsockifyCommand:   commandPath,
+		AllowedCommandPaths: []string{commandPath},
+		PrivateBaseURL:      "https://odin-handoff.tailnet.local",
+		TimeoutSeconds:      300,
+	}
+
+	normalized, err := ValidateNoVNCLaunchConfig(config, 600)
+	if err != nil {
+		t.Fatalf("ValidateNoVNCLaunchConfig(default bind) error = %v", err)
+	}
+	if normalized.BindAddr != "127.0.0.1:0" {
+		t.Fatalf("normalized.BindAddr = %q, want loopback default", normalized.BindAddr)
 	}
 }
 
