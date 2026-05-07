@@ -409,7 +409,7 @@ func TestRunBrowserSessionRunnerStartUsesStubRunnerSafely(t *testing.T) {
 	}
 }
 
-func TestRunBrowserSessionRunnerStartUsesNoVNCSkeletonSafely(t *testing.T) {
+func TestRunBrowserSessionRunnerStartUsesNoVNCFixtureLaunchSafely(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	root := testRepoRoot(t)
 	commandPath := testLifecycleExecutablePath(t, "true")
@@ -442,22 +442,33 @@ func TestRunBrowserSessionRunnerStartUsesNoVNCSkeletonSafely(t *testing.T) {
 	runner := decodeBrowserSessionRunnerEnvelope(t, []byte(run("browser", "session", "runner", "create", "--login-request-id", int64String(loginRequest.ID), "--json")))
 
 	started := decodeBrowserSessionRunnerEnvelope(t, []byte(run("browser", "session", "runner", "start", "--id", int64String(runner.ID), "--json")))
-	if started.Status != "failed" {
-		t.Fatalf("started runner status = %q, want failed for NoVNCRunner not_implemented", started.Status)
+	if started.Status != "completed" {
+		t.Fatalf("started runner status = %q, want completed for harmless NoVNC fixture launch", started.Status)
 	}
-	if started.ErrorCode == nil || *started.ErrorCode != "not_implemented" {
-		t.Fatalf("started runner error_code = %v, want not_implemented", started.ErrorCode)
+	if started.ErrorCode != nil || started.ErrorMessage != nil {
+		t.Fatalf("started runner error metadata = %v/%v, want empty after completion", started.ErrorCode, started.ErrorMessage)
 	}
-	if started.ViewerURL != nil || started.RunnerID != nil || started.ProcessID != nil || started.StartedAt != "" {
-		t.Fatalf("started runner = %+v, want no started process/viewer metadata from NoVNC skeleton", started)
+	if started.ViewerURL == nil || !strings.HasPrefix(*started.ViewerURL, "https://odin-handoff.tailnet.local/session/novnc-") {
+		t.Fatalf("started runner viewer_url = %v, want private NoVNC fixture viewer URL", started.ViewerURL)
+	}
+	if started.RunnerID == nil || !strings.HasPrefix(*started.RunnerID, "novnc-") || started.ProcessID == nil || *started.ProcessID <= 0 || started.StartedAt == "" || started.CompletedAt == "" {
+		t.Fatalf("started runner = %+v, want runner/process and started/completed metadata", started)
+	}
+	if started.BindAddr == nil || *started.BindAddr != "127.0.0.1:6080" || started.PrivateBaseURL == nil || *started.PrivateBaseURL != "https://odin-handoff.tailnet.local" {
+		t.Fatalf("started runner network metadata = bind %v base %v, want validated private metadata", started.BindAddr, started.PrivateBaseURL)
 	}
 	if _, err := os.Stat(filepath.Join(root, "browser-sessions")); !os.IsNotExist(err) {
-		t.Fatalf("browser-sessions directory exists after runner start err=%v, want skeleton-only start", err)
+		t.Fatalf("browser-sessions directory exists after runner start err=%v, want fixture process proof only", err)
 	}
 
 	logs := run("logs", "--json")
-	if !strings.Contains(logs, `"type": "browser.handoff_runner_failed"`) || !strings.Contains(logs, `"error_code": "not_implemented"`) {
-		t.Fatalf("logs output = %s, want failed not_implemented runner audit event", logs)
+	if !strings.Contains(logs, `"type": "browser.handoff_runner_started"`) || !strings.Contains(logs, `"type": "browser.handoff_runner_completed"`) {
+		t.Fatalf("logs output = %s, want started and completed runner audit events", logs)
+	}
+	for _, forbidden := range []string{"password", "totp", "backup_code", "cookie", "profile_bytes"} {
+		if strings.Contains(strings.ToLower(logs), forbidden) {
+			t.Fatalf("logs output contains forbidden credential/profile byte token %q: %s", forbidden, logs)
+		}
 	}
 }
 

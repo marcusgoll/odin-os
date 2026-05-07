@@ -23,6 +23,13 @@ const (
 	defaultNoVNCBindAddr = "127.0.0.1:0"
 )
 
+var noVNCFixtureSafeCommandNames = map[string]struct{}{
+	"false": {},
+	"sleep": {},
+	"true":  {},
+	"yes":   {},
+}
+
 type NoVNCRunnerConfig struct {
 	BrowserCommand         string
 	BrowserAllowedCommands []string
@@ -47,6 +54,7 @@ type NoVNCLaunchConfig struct {
 
 type NoVNCRunner struct {
 	LoadConfig func() (NoVNCLaunchConfig, error)
+	Supervisor ProcessSupervisor
 }
 
 type NoVNCPlan struct {
@@ -63,7 +71,7 @@ type NoVNCPlannedCommand struct {
 	Args []string `json:"args,omitempty"`
 }
 
-func (runner NoVNCRunner) Start(_ context.Context, request StartRequest) (StartResponse, error) {
+func (runner NoVNCRunner) Start(ctx context.Context, request StartRequest) (StartResponse, error) {
 	if err := ValidateStartRequest(request); err != nil {
 		return StartResponse{}, err
 	}
@@ -75,17 +83,170 @@ func (runner NoVNCRunner) Start(_ context.Context, request StartRequest) (StartR
 	if err != nil {
 		return StartResponse{}, err
 	}
-	if _, err := ValidateNoVNCLaunchConfig(config, request.TimeoutSeconds); err != nil {
+	config, err = ValidateNoVNCLaunchConfig(config, request.TimeoutSeconds)
+	if err != nil {
 		return StartResponse{}, err
 	}
-	return StartResponse{
+	if err := validateNoVNCFixtureSafeLaunchConfig(config); err != nil {
+		return StartResponse{}, err
+	}
+	supervisor := runner.Supervisor
+	if supervisor == nil {
+		supervisor = BoundedProcessSupervisor{Runner: NewExecCommandRunner()}
+	}
+
+	commands := []NoVNCPlannedCommand{
+		{Role: "display", Path: config.DisplayCommand},
+		{Role: "browser", Path: config.BrowserCommand},
+		{Role: "novnc", Path: config.WebsockifyCommand},
+	}
+	handles := make([]ProcessHandle, 0, len(commands))
+	for _, command := range commands {
+		handle, err := supervisor.StartProcess(ctx, StartProcessRequest{
+			Role:            command.Role,
+			CommandPath:     command.Path,
+			TimeoutSeconds:  config.TimeoutSeconds,
+			AllowedCommands: config.AllowedCommandPaths,
+		})
+		if err != nil {
+			results := cancelNoVNCProcesses(ctx, supervisor, handles, "novnc start failed")
+			response := newNoVNCStartResponse(request, config, handles, results)
+			response.Status = StatusFailed
+			response.ErrorCode = "novnc_start_failed"
+			response.ErrorMessage = err.Error()
+			return response, nil
+		}
+		handles = append(handles, handle)
+	}
+
+	response := newNoVNCStartResponse(request, config, handles, nil)
+	results := make([]ProcessResult, 0, len(handles))
+	for index, handle := range handles {
+		result, err := supervisor.WaitProcess(ctx, handle)
+		if err != nil {
+			results = append(results, cancelNoVNCProcesses(ctx, supervisor, handles[index+1:], "novnc wait failed")...)
+			response.ChildProcesses = results
+			response.Status = StatusFailed
+			response.ErrorCode = "novnc_wait_failed"
+			response.ErrorMessage = err.Error()
+			return response, nil
+		}
+		results = append(results, result)
+		switch result.Status {
+		case ProcessStatusExited:
+			continue
+		case ProcessStatusTimeout:
+			results = append(results, cancelNoVNCProcesses(ctx, supervisor, handles[index+1:], "novnc timeout cleanup")...)
+			response.ChildProcesses = results
+			response.Status = StatusExpired
+			response.ErrorCode = "novnc_timeout"
+			response.ErrorMessage = noVNCProcessErrorMessage(result, "browser handoff NoVNC fixture process timed out")
+			return response, nil
+		case ProcessStatusFailed:
+			results = append(results, cancelNoVNCProcesses(ctx, supervisor, handles[index+1:], "novnc failure cleanup")...)
+			response.ChildProcesses = results
+			response.Status = StatusFailed
+			response.ErrorCode = "novnc_process_failed"
+			response.ErrorMessage = noVNCProcessErrorMessage(result, "browser handoff NoVNC fixture process failed")
+			return response, nil
+		case ProcessStatusCancelled:
+			results = append(results, cancelNoVNCProcesses(ctx, supervisor, handles[index+1:], "novnc cancellation cleanup")...)
+			response.ChildProcesses = results
+			response.Status = StatusFailed
+			response.ErrorCode = "novnc_process_cancelled"
+			response.ErrorMessage = noVNCProcessErrorMessage(result, "browser handoff NoVNC fixture process cancelled")
+			return response, nil
+		default:
+			results = append(results, cancelNoVNCProcesses(ctx, supervisor, handles[index+1:], "novnc unsupported status cleanup")...)
+			response.ChildProcesses = results
+			response.Status = StatusFailed
+			response.ErrorCode = "novnc_unsupported_process_status"
+			response.ErrorMessage = fmt.Sprintf("unsupported NoVNC process status %q", result.Status)
+			return response, nil
+		}
+	}
+	response.ChildProcesses = results
+	response.Status = StatusCompleted
+	return response, nil
+}
+
+func newNoVNCStartResponse(request StartRequest, config NoVNCLaunchConfig, handles []ProcessHandle, results []ProcessResult) StartResponse {
+	runnerID := buildNoVNCRunnerID(handles)
+	processID := int64(0)
+	if len(handles) > 0 {
+		processID = handles[len(handles)-1].PID
+	}
+	response := StartResponse{
 		Status:         StatusNotImplemented,
+		RunnerID:       runnerID,
+		ProcessID:      processID,
 		SessionID:      request.SessionID,
 		LoginRequestID: request.LoginRequestID,
 		HandoffID:      strings.TrimSpace(request.HandoffID),
-		ErrorCode:      "not_implemented",
-		ErrorMessage:   "browser handoff NoVNC runner process launch is not implemented",
-	}, nil
+		ViewerURL:      buildNoVNCSessionViewerURL(config.PrivateBaseURL, runnerID),
+		BindAddr:       config.BindAddr,
+		PrivateBaseURL: config.PrivateBaseURL,
+		ChildProcesses: results,
+	}
+	return response
+}
+
+func validateNoVNCFixtureSafeLaunchConfig(config NoVNCLaunchConfig) error {
+	commands := []struct {
+		label string
+		path  string
+	}{
+		{label: "display command", path: config.DisplayCommand},
+		{label: "browser command", path: config.BrowserCommand},
+		{label: "websockify command", path: config.WebsockifyCommand},
+	}
+	for _, command := range commands {
+		name := filepath.Base(command.path)
+		if _, ok := noVNCFixtureSafeCommandNames[name]; !ok {
+			return fmt.Errorf("%s %q is not fixture-safe", command.label, command.path)
+		}
+	}
+	return nil
+}
+
+func buildNoVNCRunnerID(handles []ProcessHandle) string {
+	if len(handles) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(handles)+1)
+	parts = append(parts, "novnc")
+	for _, handle := range handles {
+		parts = append(parts, strconv.FormatInt(handle.PID, 10))
+	}
+	return strings.Join(parts, "-")
+}
+
+func cancelNoVNCProcesses(ctx context.Context, supervisor ProcessSupervisor, handles []ProcessHandle, reason string) []ProcessResult {
+	results := make([]ProcessResult, 0, len(handles))
+	for index := len(handles) - 1; index >= 0; index-- {
+		result, err := supervisor.CancelProcess(ctx, handles[index], reason)
+		if err != nil {
+			result = ProcessResult{
+				PID:          handles[index].PID,
+				Role:         handles[index].Role,
+				CommandPath:  handles[index].CommandPath,
+				StartedAt:    handles[index].StartedAt,
+				Status:       ProcessStatusFailed,
+				ErrorMessage: err.Error(),
+			}
+		}
+		results = append(results, result)
+	}
+	return results
+}
+
+func noVNCProcessErrorMessage(result ProcessResult, fallback string) string {
+	for _, candidate := range []string{result.ErrorMessage, result.Stderr, result.Stdout} {
+		if trimmed := strings.TrimSpace(candidate); trimmed != "" {
+			return trimmed
+		}
+	}
+	return fallback
 }
 
 func (runner NoVNCRunner) Cancel(_ context.Context, request CancelRequest) (StatusResponse, error) {
@@ -279,6 +440,14 @@ func validateNoVNCTimeout(timeoutSeconds int, requestTimeoutSeconds int) (int, e
 
 func buildNoVNCViewerURL(privateBaseURL string, handoffID string) string {
 	return strings.TrimRight(privateBaseURL, "/") + "/session/dry-run-" + url.PathEscape(strings.TrimSpace(handoffID))
+}
+
+func buildNoVNCSessionViewerURL(privateBaseURL string, runnerID string) string {
+	runnerID = strings.TrimSpace(runnerID)
+	if runnerID == "" {
+		return ""
+	}
+	return strings.TrimRight(privateBaseURL, "/") + "/session/" + url.PathEscape(runnerID)
 }
 
 func noVNCTimeoutSecondsFromEnv() (int, error) {
