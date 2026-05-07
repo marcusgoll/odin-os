@@ -122,7 +122,7 @@ func (runner NoVNCRunner) Start(ctx context.Context, request StartRequest) (Star
 	commands := []NoVNCPlannedCommand{
 		{Role: "display", Path: config.DisplayCommand},
 		{Role: "browser", Path: config.BrowserCommand},
-		{Role: "novnc", Path: config.WebsockifyCommand},
+		{Role: NoVNCWebsockifyCommandRole, Path: config.WebsockifyCommand},
 	}
 	handles := make([]ProcessHandle, 0, len(commands))
 	for _, command := range commands {
