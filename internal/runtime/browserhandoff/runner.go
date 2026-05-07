@@ -10,6 +10,7 @@ import (
 const (
 	StatusNotImplemented = "not_implemented"
 	StatusStarted        = "started"
+	StatusCompleted      = "completed"
 	StatusFailed         = "failed"
 	StatusExpired        = "expired"
 	StatusCancelled      = "cancelled"
@@ -28,16 +29,19 @@ type StartRequest struct {
 }
 
 type StartResponse struct {
-	Status         string `json:"status"`
-	RunnerID       string `json:"runner_id,omitempty"`
-	ProcessID      int64  `json:"process_id,omitempty"`
-	SessionID      int64  `json:"session_id"`
-	LoginRequestID int64  `json:"login_request_id"`
-	HandoffID      string `json:"handoff_id"`
-	ViewerURL      string `json:"viewer_url,omitempty"`
-	ExpiresAt      string `json:"expires_at,omitempty"`
-	ErrorCode      string `json:"error_code,omitempty"`
-	ErrorMessage   string `json:"error_message,omitempty"`
+	Status         string          `json:"status"`
+	RunnerID       string          `json:"runner_id,omitempty"`
+	ProcessID      int64           `json:"process_id,omitempty"`
+	SessionID      int64           `json:"session_id"`
+	LoginRequestID int64           `json:"login_request_id"`
+	HandoffID      string          `json:"handoff_id"`
+	ViewerURL      string          `json:"viewer_url,omitempty"`
+	BindAddr       string          `json:"bind_addr,omitempty"`
+	PrivateBaseURL string          `json:"private_base_url,omitempty"`
+	ExpiresAt      string          `json:"expires_at,omitempty"`
+	ErrorCode      string          `json:"error_code,omitempty"`
+	ErrorMessage   string          `json:"error_message,omitempty"`
+	ChildProcesses []ProcessResult `json:"child_processes,omitempty"`
 }
 
 type CancelRequest struct {

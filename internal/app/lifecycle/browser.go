@@ -579,14 +579,17 @@ func startBrowserSessionRunner(ctx context.Context, app bootstrap.App, runnerID 
 	}
 	switch response.Status {
 	case browserhandoff.StatusStarted:
+		return updateBrowserSessionRunnerStartedFromResponse(ctx, app, runner, response, "browser handoff runner started")
+	case browserhandoff.StatusCompleted:
+		started, err := updateBrowserSessionRunnerStartedFromResponse(ctx, app, runner, response, "browser handoff runner started")
+		if err != nil {
+			return sqlite.BrowserHandoffRunner{}, err
+		}
 		return app.Store.UpdateBrowserHandoffRunnerStatus(ctx, sqlite.UpdateBrowserHandoffRunnerStatusParams{
-			ID:        runner.ID,
-			Status:    sqlite.BrowserHandoffRunnerStatusStarted,
-			ViewerURL: nonEmptyBrowserSessionStringPtr(response.ViewerURL),
-			RunnerID:  nonEmptyBrowserSessionStringPtr(response.RunnerID),
-			ProcessID: positiveBrowserSessionInt64Ptr(response.ProcessID),
-			Actor:     "operator",
-			Reason:    "browser handoff runner fixture started",
+			ID:     started.ID,
+			Status: sqlite.BrowserHandoffRunnerStatusCompleted,
+			Actor:  "operator",
+			Reason: "browser handoff runner completed",
 		})
 	case browserhandoff.StatusNotImplemented:
 		errorCode := response.ErrorCode
@@ -606,6 +609,14 @@ func startBrowserSessionRunner(ctx context.Context, app bootstrap.App, runnerID 
 			Reason:       "browser handoff StubRunner returned not_implemented",
 		})
 	case browserhandoff.StatusFailed:
+		targetRunner := runner
+		if browserSessionRunnerResponseHasStartMetadata(response) {
+			started, err := updateBrowserSessionRunnerStartedFromResponse(ctx, app, runner, response, "browser handoff runner started before failure")
+			if err != nil {
+				return sqlite.BrowserHandoffRunner{}, err
+			}
+			targetRunner = started
+		}
 		errorCode := response.ErrorCode
 		if strings.TrimSpace(errorCode) == "" {
 			errorCode = "fixture_failed"
@@ -615,7 +626,7 @@ func startBrowserSessionRunner(ctx context.Context, app bootstrap.App, runnerID 
 			errorMessage = "browser handoff fixture runner failed"
 		}
 		return app.Store.UpdateBrowserHandoffRunnerStatus(ctx, sqlite.UpdateBrowserHandoffRunnerStatusParams{
-			ID:           runner.ID,
+			ID:           targetRunner.ID,
 			Status:       sqlite.BrowserHandoffRunnerStatusFailed,
 			RunnerID:     nonEmptyBrowserSessionStringPtr(response.RunnerID),
 			ProcessID:    positiveBrowserSessionInt64Ptr(response.ProcessID),
@@ -625,6 +636,14 @@ func startBrowserSessionRunner(ctx context.Context, app bootstrap.App, runnerID 
 			Reason:       "browser handoff fixture runner failed",
 		})
 	case browserhandoff.StatusExpired:
+		targetRunner := runner
+		if browserSessionRunnerResponseHasStartMetadata(response) {
+			started, err := updateBrowserSessionRunnerStartedFromResponse(ctx, app, runner, response, "browser handoff runner started before timeout")
+			if err != nil {
+				return sqlite.BrowserHandoffRunner{}, err
+			}
+			targetRunner = started
+		}
 		errorCode := response.ErrorCode
 		if strings.TrimSpace(errorCode) == "" {
 			errorCode = "fixture_timeout"
@@ -634,7 +653,7 @@ func startBrowserSessionRunner(ctx context.Context, app bootstrap.App, runnerID 
 			errorMessage = "browser handoff fixture runner timed out"
 		}
 		return app.Store.UpdateBrowserHandoffRunnerStatus(ctx, sqlite.UpdateBrowserHandoffRunnerStatusParams{
-			ID:           runner.ID,
+			ID:           targetRunner.ID,
 			Status:       sqlite.BrowserHandoffRunnerStatusExpired,
 			RunnerID:     nonEmptyBrowserSessionStringPtr(response.RunnerID),
 			ProcessID:    positiveBrowserSessionInt64Ptr(response.ProcessID),
@@ -726,6 +745,26 @@ func startBrowserSessionRunnerWithSupervisor(ctx context.Context, app bootstrap.
 	default:
 		return sqlite.BrowserHandoffRunner{}, fmt.Errorf("unsupported browser handoff process status %q", result.Status)
 	}
+}
+
+func updateBrowserSessionRunnerStartedFromResponse(ctx context.Context, app bootstrap.App, runner sqlite.BrowserHandoffRunner, response browserhandoff.StartResponse, reason string) (sqlite.BrowserHandoffRunner, error) {
+	return app.Store.UpdateBrowserHandoffRunnerStatus(ctx, sqlite.UpdateBrowserHandoffRunnerStatusParams{
+		ID:             runner.ID,
+		Status:         sqlite.BrowserHandoffRunnerStatusStarted,
+		ViewerURL:      nonEmptyBrowserSessionStringPtr(response.ViewerURL),
+		RunnerID:       nonEmptyBrowserSessionStringPtr(response.RunnerID),
+		ProcessID:      positiveBrowserSessionInt64Ptr(response.ProcessID),
+		BindAddr:       nonEmptyBrowserSessionStringPtr(response.BindAddr),
+		PrivateBaseURL: nonEmptyBrowserSessionStringPtr(response.PrivateBaseURL),
+		Actor:          "operator",
+		Reason:         reason,
+	})
+}
+
+func browserSessionRunnerResponseHasStartMetadata(response browserhandoff.StartResponse) bool {
+	return strings.TrimSpace(response.RunnerID) != "" ||
+		response.ProcessID > 0 ||
+		strings.TrimSpace(response.ViewerURL) != ""
 }
 
 func browserSessionRunnerProcessErrorMessage(result browserhandoff.ProcessResult, fallback string) string {
