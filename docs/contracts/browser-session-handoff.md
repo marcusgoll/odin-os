@@ -6,7 +6,7 @@ date: 2026-05-06
 
 # Browser Session Handoff Contract
 
-This contract defines the Odin-native handoff for manual Huginn browser login and reusable authenticated read-only sessions. The session metadata, login request metadata, read-only handoff lookup, handoff runner metadata CLI, handoff runner process-boundary skeleton, bounded fixture runner, bounded exec process runner, fixture supervisor lifecycle wiring, NoVNC dry-run planning, NoVNC fixture-safe runner launch, real NoVNC command config validation, noVNC/websockify dry-run detection metadata, manual verification metadata, profile path allocation, explicit empty profile directory preparation, and profile storage policy gate slices are implemented. Real NoVNC/Tailscale handoff, browser launch, browser profile persistence, login automation, read-only verification checks, and authenticated session attachment remain future work.
+This contract defines the Odin-native handoff for manual Huginn browser login and reusable authenticated read-only sessions. The session metadata, login request metadata, read-only handoff lookup, handoff runner metadata CLI, handoff runner process-boundary skeleton, bounded fixture runner, bounded exec process runner, fixture supervisor lifecycle wiring, NoVNC dry-run planning, NoVNC fixture-safe runner launch, real NoVNC command config validation, display/browser/noVNC dry-run detection metadata, manual verification metadata, profile path allocation, explicit empty profile directory preparation, and profile storage policy gate slices are implemented. Real NoVNC/Tailscale handoff, browser launch, browser profile persistence, login automation, read-only verification checks, and authenticated session attachment remain future work.
 
 ## Existing State
 
@@ -20,7 +20,7 @@ This contract defines the Odin-native handoff for manual Huginn browser login an
 - `odin browser session handoff show --handoff-id <id> --json` resolves safe manual-login metadata for one valid, unexpired requested handoff without mutating runtime state.
 - `odin browser session runner create|list|show|plan-novnc|status|cancel --json` records, inspects, or dry-run plans metadata-only browser handoff runner records without launching a process.
 - `internal/runtime/browserhandoff` defines the future runner process boundary request/response types, a default stub runner that returns structured `not_implemented` responses, and an explicit env-gated fixture runner for harmless local process lifecycle proof.
-- `internal/runtime/browserhandoff` also defines a NoVNC dry-run planner and real-launch config validator that validate command paths, allowlists, bind address, private base URL, and timeout, then return normalized config or planned metadata without launching processes. The dry-run planner records noVNC/websockify detection metadata for the configured viewer command.
+- `internal/runtime/browserhandoff` also defines a NoVNC dry-run planner and real-launch config validator that validate command paths, allowlists, bind address, private base URL, and timeout, then return normalized config or planned metadata without launching processes. The dry-run planner records display, browser, and noVNC/websockify detection metadata for each configured command.
 - `internal/runtime/browserhandoff` defines a bounded process supervisor abstraction with fake-runner and harmless local exec-runner tests for command validation, timeout kill handling, cancellation handling, bounded stdout/stderr capture, and safe process metadata. `runner start` wires both the explicit fixture mode and the explicit NoVNC fixture-safe mode through this supervisor using only allowlisted harmless local commands. It does not add a real browser or NoVNC service launch path.
 - `odin browser session verify --id <session_id> [--login-request-id <id>] --json` records metadata-only operator verification, sets `last_verified_at`, moves the session to `verified`, and completes the login request when one is provided.
 - `odin browser session prepare-profile --id <session_id> --json` explicitly creates the empty profile directory under `ODIN_ROOT` and records an audit event without writing browser files.
@@ -182,7 +182,7 @@ Optional fields:
 Config validation rules:
 
 - Every configured command path must be absolute, clean, and present in `ODIN_NOVNC_ALLOWED_COMMANDS`.
-- Dry-run noVNC/websockify detection must also verify the configured viewer command exists and has an executable bit before reporting `validation_status: "valid"`.
+- Dry-run display, browser, and noVNC/websockify detection must also verify each configured command exists and has an executable bit before reporting `validation_status: "valid"`.
 - The implementation must not search `PATH`, invoke a shell, or accept command strings that combine executable and args.
 - `bind_addr` must be loopback by default. A non-loopback private interface requires an explicit later policy option and must still reject public wildcard binds such as `0.0.0.0`.
 - `private_base_url` must be absolute `http` or `https`; the first real slice should prefer `https` for any non-loopback origin.
@@ -447,7 +447,7 @@ The handoff URL is not proof that a browser handoff service exists. Odin now exp
 
 `runner start` loads existing runner metadata, validates the linked login request and browser session through the existing handoff lookup rules, and calls the selected `internal/runtime/browserhandoff` runner path. The default stub returns `not_implemented`, so Odin records a safe `failed` runner status through the existing store transition path with `error_code: "not_implemented"`. The explicit NoVNC fixture-safe mode validates configured `ODIN_NOVNC_*` launch settings, starts the configured harmless display/browser/novnc commands through the bounded supervisor, records `started` with private `viewer_url`, `runner_id`, process metadata, bind address, and private base URL, waits for child process exit, and then records `completed`, `expired`, or `failed` through the existing event stream. The explicit fixture mode uses the bounded process supervisor and `ExecCommandRunner` to start only the configured allowlisted harmless command, record `started` with `runner_id`, `process_id`, and `started_at`, wait for process exit, and then record `completed`, `expired`, `failed`, or `cancelled` with terminal `exited_at` and safe error metadata. These paths must not launch a browser, create real NoVNC/Tailscale resources, write profile files, or store credential material.
 
-`runner plan-novnc` loads existing runner metadata, validates the linked login request and browser session through the existing handoff lookup rules, and calls the pure NoVNC dry-run planner. It returns planned command roles, validated bind/private URL/timeout config, a planned private `viewer_url`, and noVNC/websockify command detection metadata including `detected_path`, `command_role`, and `validation_status`. It must not update runner status, append runtime events, launch processes, start browsers, start NoVNC/websockify, create Tailscale resources, write profile files, or store credential material. The command accepts explicit command paths and allowlists as flags; later config-file support must use the same validation rules.
+`runner plan-novnc` loads existing runner metadata, validates the linked login request and browser session through the existing handoff lookup rules, and calls the pure NoVNC dry-run planner. It returns planned command roles, validated bind/private URL/timeout config, a planned private `viewer_url`, and display/browser/noVNC command detection metadata including `detected_path`, `command_role`, and `validation_status` for every planned command. It must not update runner status, append runtime events, launch processes, start browsers, start NoVNC/websockify, create Tailscale resources, write profile files, or store credential material. The command accepts explicit command paths and allowlists as flags; later config-file support must use the same validation rules.
 
 `runner list`, `runner show`, `runner status`, and `runner cancel` expose and mutate only the `browser_handoff_runners` metadata rows. Status changes append runner lifecycle events transactionally through the existing browser session runtime event stream. `runner show --id <id> --json` is the non-mutating runner status inspection path; `runner status` is reserved for explicit lifecycle transitions and accepts `started`, `completed`, `expired`, `cancelled`, and `failed`. Terminal runners cannot be restarted in place.
 
@@ -611,11 +611,17 @@ Implemented `runner plan-novnc --json` returns a dry-run plan without mutating r
     "commands": [
       {
         "role": "display",
-        "path": "/usr/bin/x11vnc"
+        "path": "/usr/bin/x11vnc",
+        "detected_path": "/usr/bin/x11vnc",
+        "command_role": "display",
+        "validation_status": "valid"
       },
       {
         "role": "browser",
-        "path": "/usr/bin/chromium"
+        "path": "/usr/bin/chromium",
+        "detected_path": "/usr/bin/chromium",
+        "command_role": "browser",
+        "validation_status": "valid"
       },
       {
         "role": "novnc",
@@ -763,13 +769,13 @@ Rules:
 12. Bounded fixture runner: implemented explicit env-gated `FixtureRunner` for harmless allowlisted local commands with timeout handling and safe process metadata. Local NoVNC fixture remains future work.
 13. NoVNC runner contract refinement: document process topology, config, security rules, lifecycle cleanup, and staged implementation constraints before process code.
 14. Command contract and config validation: implemented pure NoVNC dry-run and real-launch config models with validation for absolute allowlisted command paths, loopback/private bind settings, private base URL, and bounded timeout without launching processes.
-15. Dry-run NoVNC runner: implemented pure request/config planning and `odin browser session runner plan-novnc` JSON output that returns planned command roles, validated bind/timeout config, noVNC/websockify detection metadata, and a private planned `viewer_url` without starting child processes or mutating runner metadata. Real process wiring remains future work.
+15. Dry-run NoVNC runner: implemented pure request/config planning and `odin browser session runner plan-novnc` JSON output that returns planned command roles, validated bind/timeout config, command detection metadata for every planned display/browser/noVNC role, and a private planned `viewer_url` without starting child processes or mutating runner metadata. Real process wiring remains future work.
 16. Bounded process supervisor abstraction: implemented injected-runner process supervision contracts, request/handle/result shapes, allowlist validation, timeout result handling, and cancellation result handling without wiring into real runner start.
 17. Bounded exec process runner: implemented `ExecCommandRunner` behind the supervisor abstraction for harmless allowlisted local commands with process-group kill on timeout/cancel, bounded stdout/stderr capture, and no wiring into runner start.
 18. Local fixture process runner lifecycle: implemented `runner start` wiring from fixture mode through the bounded process supervisor and existing runner metadata transitions, proving harmless allowlisted command completion, timeout, disallowed command rejection, `started` and terminal audit events, and no browser/NoVNC/Tailscale/profile writes.
 19. NoVNC runner skeleton: implemented explicit `ODIN_BROWSER_HANDOFF_RUNNER=novnc` selection that validates `ODIN_NOVNC_*` launch config and returns `not_implemented` through the existing `runner start` status/audit path without process launch.
 20. NoVNC fixture-safe launch: implemented explicit NoVNC runner wiring through the bounded supervisor using only allowlisted harmless local commands for display, browser, and novnc roles, with private viewer URL metadata, started/completed/failed/expired lifecycle transitions, and no real browser/NoVNC/Tailscale/profile writes.
-21. Websockify/noVNC command detection: implemented dry-run detection metadata for explicit noVNC/websockify command paths with absolute path, allowlist, existence, and executable-bit checks without process launch.
+21. Display/browser/websockify command detection: implemented dry-run detection metadata for explicit display, browser, and noVNC/websockify command paths with absolute path, allowlist, existence, and executable-bit checks without process launch.
 22. Real noVNC process boundary: start display/VNC, browser, and noVNC/websockify under one supervisor, generate only private `viewer_url`, and prove cleanup with no persistent profile writes.
 23. Real browser visible session: allow operator-attended manual login in the visible browser only after profile write policy, private viewer routing, cancellation, timeout, and audit behavior are proven.
 24. Profile write gate integration: connect runner persistence only after encrypted profile storage and `CanWriteBrowserProfile(session)` allow writes.

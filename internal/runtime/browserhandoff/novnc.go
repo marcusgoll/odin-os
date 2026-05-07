@@ -22,6 +22,8 @@ const (
 
 	defaultNoVNCBindAddr = "127.0.0.1:0"
 
+	NoVNCDisplayCommandRole         = "display"
+	NoVNCBrowserCommandRole         = "browser"
 	NoVNCWebsockifyCommandRole      = "novnc/websockify"
 	NoVNCCommandValidationValid     = "valid"
 	NoVNCCommandValidationInvalid   = "invalid"
@@ -292,11 +294,11 @@ func PlanNoVNCStart(request StartRequest, config NoVNCRunnerConfig) (NoVNCPlan, 
 	if err := ValidateStartRequest(request); err != nil {
 		return NoVNCPlan{}, err
 	}
-	browserCommand, err := validateNoVNCCommand("browser command", config.BrowserCommand, config.BrowserAllowedCommands)
+	displayDetection, err := DetectNoVNCCommand("display command", NoVNCDisplayCommandRole, config.DisplayCommand, config.DisplayAllowedCommands)
 	if err != nil {
 		return NoVNCPlan{}, err
 	}
-	displayCommand, err := validateNoVNCCommand("display command", config.DisplayCommand, config.DisplayAllowedCommands)
+	browserDetection, err := DetectNoVNCCommand("browser command", NoVNCBrowserCommandRole, config.BrowserCommand, config.BrowserAllowedCommands)
 	if err != nil {
 		return NoVNCPlan{}, err
 	}
@@ -319,17 +321,9 @@ func PlanNoVNCStart(request StartRequest, config NoVNCRunnerConfig) (NoVNCPlan, 
 
 	return NoVNCPlan{
 		Commands: []NoVNCPlannedCommand{
-			{Role: "display", Path: displayCommand},
-			{Role: "browser", Path: browserCommand},
-			{
-				Role:             "novnc",
-				Path:             novncDetection.DetectedPath,
-				DetectedPath:     novncDetection.DetectedPath,
-				CommandRole:      novncDetection.CommandRole,
-				ValidationStatus: novncDetection.ValidationStatus,
-				ErrorCode:        novncDetection.ErrorCode,
-				ErrorMessage:     novncDetection.ErrorMessage,
-			},
+			newNoVNCPlannedCommand("display", displayDetection),
+			newNoVNCPlannedCommand("browser", browserDetection),
+			newNoVNCPlannedCommand("novnc", novncDetection),
 		},
 		BindAddr:       bindAddr,
 		PrivateBaseURL: privateBaseURL,
@@ -339,34 +333,58 @@ func PlanNoVNCStart(request StartRequest, config NoVNCRunnerConfig) (NoVNCPlan, 
 }
 
 func DetectNoVNCWebsockifyCommand(command string, allowedCommands []string) (NoVNCCommandDetection, error) {
+	return DetectNoVNCCommand("novnc command", NoVNCWebsockifyCommandRole, command, allowedCommands)
+}
+
+func DetectNoVNCCommand(label string, commandRole string, command string, allowedCommands []string) (NoVNCCommandDetection, error) {
+	label = strings.TrimSpace(label)
+	if label == "" {
+		label = "command"
+	}
+	commandRole = strings.TrimSpace(commandRole)
+	if commandRole == "" {
+		commandRole = label
+	}
 	detection := NoVNCCommandDetection{
-		CommandRole:      NoVNCWebsockifyCommandRole,
+		CommandRole:      commandRole,
 		ValidationStatus: NoVNCCommandValidationInvalid,
 	}
 	command = strings.TrimSpace(command)
 	if command == "" {
-		return noVNCCommandDetectionError(detection, NoVNCCommandErrorMissing, "novnc command is required")
+		return noVNCCommandDetectionError(detection, NoVNCCommandErrorMissing, fmt.Sprintf("%s is required", label))
 	}
 	if !filepath.IsAbs(command) {
-		return noVNCCommandDetectionError(detection, NoVNCCommandErrorRelative, "novnc command must be an absolute path")
+		return noVNCCommandDetectionError(detection, NoVNCCommandErrorRelative, fmt.Sprintf("%s must be an absolute path", label))
 	}
 	cleanCommand := filepath.Clean(command)
 	detection.DetectedPath = cleanCommand
 	if !isNoVNCCommandAllowlisted(cleanCommand, allowedCommands) {
-		return noVNCCommandDetectionError(detection, NoVNCCommandErrorNotAllowlisted, fmt.Sprintf("novnc command %q is not in allowlist", cleanCommand))
+		return noVNCCommandDetectionError(detection, NoVNCCommandErrorNotAllowlisted, fmt.Sprintf("%s %q is not in allowlist", label, cleanCommand))
 	}
 	info, err := os.Stat(cleanCommand)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return noVNCCommandDetectionError(detection, NoVNCCommandErrorNotFound, fmt.Sprintf("novnc command %q was not found", cleanCommand))
+			return noVNCCommandDetectionError(detection, NoVNCCommandErrorNotFound, fmt.Sprintf("%s %q was not found", label, cleanCommand))
 		}
-		return noVNCCommandDetectionError(detection, NoVNCCommandErrorNotFound, fmt.Sprintf("novnc command %q could not be inspected: %v", cleanCommand, err))
+		return noVNCCommandDetectionError(detection, NoVNCCommandErrorNotFound, fmt.Sprintf("%s %q could not be inspected: %v", label, cleanCommand, err))
 	}
 	if info.IsDir() || info.Mode().Perm()&0o111 == 0 {
-		return noVNCCommandDetectionError(detection, NoVNCCommandErrorNotExecutable, fmt.Sprintf("novnc command %q is not executable", cleanCommand))
+		return noVNCCommandDetectionError(detection, NoVNCCommandErrorNotExecutable, fmt.Sprintf("%s %q is not executable", label, cleanCommand))
 	}
 	detection.ValidationStatus = NoVNCCommandValidationValid
 	return detection, nil
+}
+
+func newNoVNCPlannedCommand(role string, detection NoVNCCommandDetection) NoVNCPlannedCommand {
+	return NoVNCPlannedCommand{
+		Role:             role,
+		Path:             detection.DetectedPath,
+		DetectedPath:     detection.DetectedPath,
+		CommandRole:      detection.CommandRole,
+		ValidationStatus: detection.ValidationStatus,
+		ErrorCode:        detection.ErrorCode,
+		ErrorMessage:     detection.ErrorMessage,
+	}
 }
 
 func noVNCCommandDetectionError(detection NoVNCCommandDetection, code string, message string) (NoVNCCommandDetection, error) {
