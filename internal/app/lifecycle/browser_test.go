@@ -533,6 +533,66 @@ func TestRunBrowserSessionRunnerStartUsesRealWebsockifyGateWithFakeBackends(t *t
 	}
 }
 
+func TestRunBrowserSessionRunnerStartUsesRealDisplayGateWithFakeBrowser(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	root := testRepoRoot(t)
+	commandPath := testLifecycleExecutablePath(t, "true")
+	markerPath := filepath.Join(t.TempDir(), "display.marker")
+	displayPath := writeLifecycleExecutable(t, "display-vnc", "#!/bin/sh\nprintf ran > "+shellQuote(markerPath)+"\n")
+	t.Setenv("ODIN_BROWSER_HANDOFF_RUNNER", "novnc")
+	t.Setenv("ODIN_NOVNC_BROWSER_COMMAND", commandPath)
+	t.Setenv("ODIN_NOVNC_DISPLAY_COMMAND", displayPath)
+	t.Setenv("ODIN_NOVNC_WEBSOCKIFY_COMMAND", commandPath)
+	t.Setenv("ODIN_NOVNC_ALLOWED_COMMANDS", strings.Join([]string{commandPath, displayPath}, ","))
+	t.Setenv("ODIN_NOVNC_BIND_ADDR", "127.0.0.1:6080")
+	t.Setenv("ODIN_NOVNC_PRIVATE_BASE_URL", "https://odin-handoff.tailnet.local")
+	t.Setenv("ODIN_NOVNC_TIMEOUT_SECONDS", "2")
+	t.Setenv("ODIN_NOVNC_REAL_DISPLAY", "true")
+
+	run := func(args ...string) string {
+		t.Helper()
+		var output bytes.Buffer
+		if err := Run(context.Background(), root, args, strings.NewReader(""), &output); err != nil {
+			t.Fatalf("Run(%v) error = %v\noutput=%s", args, err, output.String())
+		}
+		return output.String()
+	}
+
+	created := decodeBrowserSessionEnvelope(t, []byte(run(
+		"browser", "session", "create",
+		"--name", "display-start",
+		"--domain", "example.com",
+		"--permission-tier", "authenticated_read",
+		"--json",
+	)))
+	loginRequest := decodeBrowserSessionLoginRequestEnvelope(t, []byte(run("browser", "session", "login-request", "--id", int64String(created.ID), "--json")))
+	runner := decodeBrowserSessionRunnerEnvelope(t, []byte(run("browser", "session", "runner", "create", "--login-request-id", int64String(loginRequest.ID), "--json")))
+
+	completed := decodeBrowserSessionRunnerEnvelope(t, []byte(run("browser", "session", "runner", "start", "--id", int64String(runner.ID), "--json")))
+	if completed.Status != "completed" {
+		t.Fatalf("completed runner status = %q, want completed for real display role with fake browser", completed.Status)
+	}
+	if completed.ViewerURL == nil || !strings.HasPrefix(*completed.ViewerURL, "https://odin-handoff.tailnet.local/session/novnc-") {
+		t.Fatalf("completed runner viewer_url = %v, want private NoVNC viewer URL", completed.ViewerURL)
+	}
+	if payload, err := os.ReadFile(markerPath); err != nil || string(payload) != "ran" {
+		t.Fatalf("display marker payload=%q err=%v, want real display role executable to run", string(payload), err)
+	}
+	assertNoBrowserSessionArtifacts(t, root)
+
+	logs := run("logs", "--json")
+	for _, want := range []string{`"type": "browser.handoff_runner_started"`, `"type": "browser.handoff_runner_completed"`} {
+		if !strings.Contains(logs, want) {
+			t.Fatalf("logs output = %s, want audit event %s", logs, want)
+		}
+	}
+	for _, forbidden := range []string{"password", "totp", "backup_code", "cookie", "profile_bytes"} {
+		if strings.Contains(strings.ToLower(logs), forbidden) {
+			t.Fatalf("logs output contains forbidden credential/profile byte token %q: %s", forbidden, logs)
+		}
+	}
+}
+
 func TestRunBrowserSessionRunnerPlanNoVNCIsReadOnly(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	root := testRepoRoot(t)

@@ -19,6 +19,7 @@ const (
 	NoVNCBindAddrEnvVar          = "ODIN_NOVNC_BIND_ADDR"
 	NoVNCPrivateBaseURLEnvVar    = "ODIN_NOVNC_PRIVATE_BASE_URL"
 	NoVNCTimeoutSecondsEnvVar    = "ODIN_NOVNC_TIMEOUT_SECONDS"
+	NoVNCRealDisplayEnvVar       = "ODIN_NOVNC_REAL_DISPLAY"
 	NoVNCRealWebsockifyEnvVar    = "ODIN_NOVNC_REAL_WEBSOCKIFY"
 
 	defaultNoVNCBindAddr = "127.0.0.1:0"
@@ -62,6 +63,7 @@ type NoVNCLaunchConfig struct {
 	BindAddr              string
 	PrivateBaseURL        string
 	TimeoutSeconds        int
+	RealDisplayEnabled    bool
 	RealWebsockifyEnabled bool
 }
 
@@ -221,17 +223,24 @@ func validateNoVNCFixtureSafeLaunchConfig(config NoVNCLaunchConfig) error {
 	commands := []struct {
 		label               string
 		path                string
+		allowRealDisplay    bool
 		allowRealWebsockify bool
 	}{
-		{label: "display command", path: config.DisplayCommand},
+		{label: "display command", path: config.DisplayCommand, allowRealDisplay: config.RealDisplayEnabled},
 		{label: "browser command", path: config.BrowserCommand},
 		{label: "websockify command", path: config.WebsockifyCommand, allowRealWebsockify: config.RealWebsockifyEnabled},
 	}
 	for _, command := range commands {
 		name := filepath.Base(command.path)
 		if _, ok := noVNCFixtureSafeCommandNames[name]; !ok {
+			if command.allowRealDisplay {
+				continue
+			}
 			if command.allowRealWebsockify {
 				continue
+			}
+			if command.label == "display command" {
+				return fmt.Errorf("real display command %q requires %s=true", command.path, NoVNCRealDisplayEnvVar)
 			}
 			if command.label == "websockify command" {
 				return fmt.Errorf("real websockify command %q requires %s=true", command.path, NoVNCRealWebsockifyEnvVar)
@@ -408,6 +417,10 @@ func LoadNoVNCLaunchConfigFromEnv() (NoVNCLaunchConfig, error) {
 	if err != nil {
 		return NoVNCLaunchConfig{}, err
 	}
+	realDisplayEnabled, err := noVNCRealDisplayFromEnv()
+	if err != nil {
+		return NoVNCLaunchConfig{}, err
+	}
 	realWebsockifyEnabled, err := noVNCRealWebsockifyFromEnv()
 	if err != nil {
 		return NoVNCLaunchConfig{}, err
@@ -420,6 +433,7 @@ func LoadNoVNCLaunchConfigFromEnv() (NoVNCLaunchConfig, error) {
 		BindAddr:              strings.TrimSpace(os.Getenv(NoVNCBindAddrEnvVar)),
 		PrivateBaseURL:        strings.TrimSpace(os.Getenv(NoVNCPrivateBaseURLEnvVar)),
 		TimeoutSeconds:        timeoutSeconds,
+		RealDisplayEnabled:    realDisplayEnabled,
 		RealWebsockifyEnabled: realWebsockifyEnabled,
 	}, nil
 }
@@ -461,6 +475,7 @@ func ValidateNoVNCLaunchConfig(config NoVNCLaunchConfig, requestTimeoutSeconds i
 		BindAddr:              bindAddr,
 		PrivateBaseURL:        privateBaseURL,
 		TimeoutSeconds:        timeoutSeconds,
+		RealDisplayEnabled:    config.RealDisplayEnabled,
 		RealWebsockifyEnabled: config.RealWebsockifyEnabled,
 	}, nil
 }
@@ -563,8 +578,16 @@ func noVNCTimeoutSecondsFromEnv() (int, error) {
 	return value, nil
 }
 
+func noVNCRealDisplayFromEnv() (bool, error) {
+	return noVNCBoolFromEnv(NoVNCRealDisplayEnvVar)
+}
+
 func noVNCRealWebsockifyFromEnv() (bool, error) {
-	raw := strings.ToLower(strings.TrimSpace(os.Getenv(NoVNCRealWebsockifyEnvVar)))
+	return noVNCBoolFromEnv(NoVNCRealWebsockifyEnvVar)
+}
+
+func noVNCBoolFromEnv(name string) (bool, error) {
+	raw := strings.ToLower(strings.TrimSpace(os.Getenv(name)))
 	switch raw {
 	case "":
 		return false, nil
@@ -573,7 +596,7 @@ func noVNCRealWebsockifyFromEnv() (bool, error) {
 	case "0", "false", "no", "n", "off":
 		return false, nil
 	default:
-		return false, fmt.Errorf("%s must be a boolean", NoVNCRealWebsockifyEnvVar)
+		return false, fmt.Errorf("%s must be a boolean", name)
 	}
 }
 
