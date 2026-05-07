@@ -409,6 +409,67 @@ func TestRunBrowserSessionRunnerStartUsesStubRunnerSafely(t *testing.T) {
 	}
 }
 
+func TestRunBrowserSessionRunnerPlanNoVNCIsReadOnly(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	root := testRepoRoot(t)
+	commandPath := testLifecycleExecutablePath(t, "true")
+
+	run := func(args ...string) string {
+		t.Helper()
+		var output bytes.Buffer
+		if err := Run(context.Background(), root, args, strings.NewReader(""), &output); err != nil {
+			t.Fatalf("Run(%v) error = %v\noutput=%s", args, err, output.String())
+		}
+		return output.String()
+	}
+
+	created := decodeBrowserSessionEnvelope(t, []byte(run(
+		"browser", "session", "create",
+		"--name", "novnc-plan",
+		"--domain", "example.com",
+		"--permission-tier", "authenticated_read",
+		"--json",
+	)))
+	loginRequest := decodeBrowserSessionLoginRequestEnvelope(t, []byte(run("browser", "session", "login-request", "--id", int64String(created.ID), "--json")))
+	runner := decodeBrowserSessionRunnerEnvelope(t, []byte(run("browser", "session", "runner", "create", "--login-request-id", int64String(loginRequest.ID), "--json")))
+	logsBefore := run("logs", "--json")
+
+	plan := decodeBrowserSessionRunnerPlanEnvelope(t, []byte(run(novncPlanArgs(runner.ID, commandPath, "127.0.0.1:6080")...)))
+	if plan.ID != runner.ID || plan.SessionID != created.ID || plan.LoginRequestID != loginRequest.ID || plan.HandoffID != loginRequest.HandoffID {
+		t.Fatalf("plan = %+v, want linked runner/session/request metadata", plan)
+	}
+	if plan.ViewerURL != "https://odin-handoff.tailnet.local/session/dry-run-"+loginRequest.HandoffID {
+		t.Fatalf("plan.ViewerURL = %q, want private dry-run viewer URL", plan.ViewerURL)
+	}
+	if plan.BindAddr != "127.0.0.1:6080" || plan.PrivateBaseURL != "https://odin-handoff.tailnet.local" || plan.TimeoutSeconds != 300 {
+		t.Fatalf("plan config = %+v, want validated bind/base/timeout", plan)
+	}
+	if len(plan.Commands) != 3 {
+		t.Fatalf("plan.Commands = %+v, want planned display/browser/novnc commands", plan.Commands)
+	}
+
+	shown := decodeBrowserSessionRunnerEnvelope(t, []byte(run("browser", "session", "runner", "show", "--id", int64String(runner.ID), "--json")))
+	if shown.Status != "requested" || shown.ViewerURL != nil || shown.RunnerID != nil || shown.ProcessID != nil || shown.StartedAt != "" {
+		t.Fatalf("shown runner after plan = %+v, want unmutated requested metadata", shown)
+	}
+	logsAfter := run("logs", "--json")
+	if logsAfter != logsBefore {
+		t.Fatalf("logs changed after plan-novnc\nbefore=%s\nafter=%s", logsBefore, logsAfter)
+	}
+	if _, err := os.Stat(filepath.Join(root, "browser-sessions")); !os.IsNotExist(err) {
+		t.Fatalf("browser-sessions directory exists after plan-novnc err=%v, want dry-run only", err)
+	}
+
+	var unsafeOutput bytes.Buffer
+	err := Run(context.Background(), root, novncPlanArgs(runner.ID, commandPath, "0.0.0.0:6080"), strings.NewReader(""), &unsafeOutput)
+	if err == nil || !strings.Contains(err.Error(), "bind_addr") {
+		t.Fatalf("Run(plan-novnc unsafe bind) error = %v output=%s, want bind_addr rejection", err, unsafeOutput.String())
+	}
+	if logsAfterUnsafe := run("logs", "--json"); logsAfterUnsafe != logsBefore {
+		t.Fatalf("logs changed after rejected plan-novnc\nbefore=%s\nafter=%s", logsBefore, logsAfterUnsafe)
+	}
+}
+
 func TestRunBrowserSessionRunnerStartFixtureUpdatesMetadataSafely(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	root := testRepoRoot(t)
@@ -851,6 +912,24 @@ type browserSessionRunnerJSON struct {
 	ErrorMessage   *string `json:"error_message"`
 }
 
+type browserSessionRunnerPlanJSON struct {
+	ID             int64                                 `json:"id"`
+	SessionID      int64                                 `json:"session_id"`
+	LoginRequestID int64                                 `json:"login_request_id"`
+	HandoffID      string                                `json:"handoff_id"`
+	Commands       []browserSessionRunnerPlanCommandJSON `json:"commands"`
+	BindAddr       string                                `json:"bind_addr"`
+	PrivateBaseURL string                                `json:"private_base_url"`
+	ViewerURL      string                                `json:"viewer_url"`
+	TimeoutSeconds int                                   `json:"timeout_seconds"`
+}
+
+type browserSessionRunnerPlanCommandJSON struct {
+	Role string   `json:"role"`
+	Path string   `json:"path"`
+	Args []string `json:"args"`
+}
+
 func decodeBrowserSessionPrepareProfileEnvelope(t *testing.T, payload []byte) browserSessionPrepareProfileJSON {
 	t.Helper()
 	var envelope struct {
@@ -904,6 +983,34 @@ func decodeBrowserSessionRunnerEnvelope(t *testing.T, payload []byte) browserSes
 		t.Fatalf("browser session runner json decode error = %v; output=%s", err, string(payload))
 	}
 	return envelope.Runner
+}
+
+func decodeBrowserSessionRunnerPlanEnvelope(t *testing.T, payload []byte) browserSessionRunnerPlanJSON {
+	t.Helper()
+	var envelope struct {
+		Plan browserSessionRunnerPlanJSON `json:"plan"`
+	}
+	if err := json.Unmarshal(payload, &envelope); err != nil {
+		t.Fatalf("browser session runner plan json decode error = %v; output=%s", err, string(payload))
+	}
+	return envelope.Plan
+}
+
+func novncPlanArgs(runnerID int64, commandPath string, bindAddr string) []string {
+	return []string{
+		"browser", "session", "runner", "plan-novnc",
+		"--id", int64String(runnerID),
+		"--browser-command", commandPath,
+		"--browser-allowed-command", commandPath,
+		"--display-command", commandPath,
+		"--display-allowed-command", commandPath,
+		"--novnc-command", commandPath,
+		"--novnc-allowed-command", commandPath,
+		"--bind-addr", bindAddr,
+		"--private-base-url", "https://odin-handoff.tailnet.local",
+		"--timeout-seconds", "300",
+		"--json",
+	}
 }
 
 func testLifecycleExecutablePath(t *testing.T, name string) string {
