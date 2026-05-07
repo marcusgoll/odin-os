@@ -147,6 +147,49 @@ The handoff runner is an operator-attended process boundary for manual login onl
 
 The SQLite runner metadata store, metadata CLI, and typed process-boundary skeleton are implemented. The real process implementation and service wiring remain design only. This slice does not add HTTP handlers, process launch, NoVNC services, Tailscale services, browser profile writes, cookie writes, or credential storage.
 
+### Local Process Topology
+
+The first real runner implementation must keep one local supervised topology per browser handoff runner record:
+
+1. **Browser process**: one visible browser instance launched for the linked session/login request only. The browser starts on the configured `allowed_domain` or a later approved start URL under that domain. It must run in a process group owned by the runner supervisor so cancellation and timeout cleanup can stop the full tree.
+2. **Virtual display or VNC server**: one display boundary for that browser process. The implementation may use a combined VNC server/display command or separate virtual display plus VNC commands, but Odin must treat them as child processes of the same runner lifecycle.
+3. **noVNC/websockify viewer**: one local viewer proxy that exposes the display through a private URL. The viewer process must be bound to loopback or an explicitly configured private interface by default.
+4. **Lifecycle supervisor**: Odin-owned runner code that validates config, starts children in order, records safe metadata, watches exits, enforces timeout, and performs cleanup. The supervisor is not a browser automation agent and must not inspect, collect, or persist credential material.
+
+The runner metadata row remains the durable authority. Process IDs, runner IDs, bind addresses, and viewer URLs are operational metadata attached to the row; they must not create a second runner registry.
+
+### Required Runner Config
+
+The future NoVNC runner must fail closed unless all required config is present and valid. Config may come from environment variables first, then a later Odin config file only if it uses the same validation rules.
+
+Required fields for the real process boundary:
+
+- `ODIN_BROWSER_HANDOFF_RUNNER=novnc`: selects the real local NoVNC runner. Empty or `stub` continues to select `StubRunner`; `fixture` continues to select the bounded fixture runner.
+- `ODIN_BROWSER_HANDOFF_BROWSER_COMMAND`: absolute path to the browser executable.
+- `ODIN_BROWSER_HANDOFF_BROWSER_ALLOWED_COMMANDS`: comma-separated allowlist of absolute browser executable paths. The selected browser command must match one clean allowlist entry exactly.
+- `ODIN_BROWSER_HANDOFF_DISPLAY_COMMAND`: absolute path to the virtual display or VNC/display command when the platform requires one.
+- `ODIN_BROWSER_HANDOFF_DISPLAY_ALLOWED_COMMANDS`: comma-separated allowlist for the display command.
+- `ODIN_BROWSER_HANDOFF_NOVNC_COMMAND`: absolute path to the noVNC or websockify command.
+- `ODIN_BROWSER_HANDOFF_NOVNC_ALLOWED_COMMANDS`: comma-separated allowlist for the noVNC/websockify command.
+- `ODIN_BROWSER_HANDOFF_BIND_ADDR`: bind host and port for the viewer proxy. Default must be `127.0.0.1:0` or equivalent loopback.
+- `ODIN_BROWSER_HANDOFF_PRIVATE_BASE_URL`: private operator URL base used to generate `viewer_url`, for example a Tailscale-only HTTPS origin.
+- `ODIN_BROWSER_HANDOFF_TIMEOUT_SECONDS`: positive timeout capped by policy and never longer than the linked login request expiration.
+
+Optional fields:
+
+- `ODIN_BROWSER_HANDOFF_BROWSER_ARGS`: explicit extra browser arguments. The implementation must reject shell syntax and must pass args without a shell.
+- `ODIN_BROWSER_HANDOFF_DISPLAY_ARGS`: explicit extra display/VNC arguments, passed without a shell.
+- `ODIN_BROWSER_HANDOFF_NOVNC_ARGS`: explicit extra noVNC/websockify arguments, passed without a shell.
+
+Config validation rules:
+
+- Every configured command path must be absolute, clean, executable, and present in its matching allowlist.
+- The implementation must not search `PATH`, invoke a shell, or accept command strings that combine executable and args.
+- `bind_addr` must be loopback by default. A non-loopback private interface requires an explicit later policy option and must still reject public wildcard binds such as `0.0.0.0`.
+- `private_base_url` must be absolute `http` or `https`; the first real slice should prefer `https` for any non-loopback origin.
+- `public_base_url` remains unsupported and must be rejected until a separate security contract approves public exposure.
+- Missing config must produce a structured `failed` runner result and audit event, not a partial process launch.
+
 ### Runner Request
 
 A future runner start command or service call must use a stable JSON request envelope:
@@ -227,10 +270,14 @@ The runner policy is fail-closed:
 - Manual login only. The operator performs username, password, passkey, 2FA, consent, and account selection directly in the visible browser.
 - No auto-submit, form fill, credential scraping, prompt capture, password manager integration, TOTP handling, recovery-code handling, or OAuth token extraction.
 - No cross-domain navigation unless the destination is the configured `allowed_domain` or a narrower approved hostname. Redirects outside policy must stop the runner or require a later explicit approval contract.
+- `allowed_domain` is required for every start request and must be validated before process launch.
+- `profile_path` must already be allocated in SQLite and the empty profile directory must already be prepared when a persistent profile run is requested.
 - No browser profile writes until `profile_storage_policy` and `CanWriteBrowserProfile(session)` allow writes. In the current implementation every policy value denies profile writes, so a future runner must run with ephemeral browser state or stop before persistence.
+- Persistent profile mode is forbidden until the profile write policy explicitly allows writes. A prepared empty directory is necessary for persistent mode, but it is not sufficient authorization.
 - No cookies, storage state, browser profile bytes, screenshots containing secrets, raw credential prompts, passwords, passkeys, TOTP values, backup codes, OAuth tokens, or bearer tokens may be written to Odin metadata, events, logs, evidence, or profile storage.
 - Runner startup does not approve a goal, transition a goal to executable state, satisfy a policy approval, or grant mutation authority.
 - Viewer access must be time-limited, bound to the login request, and accessible only through an operator-approved private network path.
+- No public viewer URL is generated by default. The first real runner must return `viewer_url` only when it can be derived from validated private config and bound runner metadata.
 
 ### Runner Lifecycle
 
@@ -245,6 +292,41 @@ Runner metadata uses a separate lifecycle from browser session status and login 
 Allowed transitions are `requested -> started`, `requested -> expired`, `requested -> cancelled`, `requested -> failed`, `started -> completed`, `started -> expired`, `started -> cancelled`, and `started -> failed`. Terminal states are `failed`, `completed`, `expired`, and `cancelled`. A terminal runner must not be restarted in place; create a new login request and runner record instead.
 
 Runner lifecycle must not silently mutate session lifecycle. A `completed` runner may complete the linked login request only through the same completion path as `POST /browser/session/handoff/complete`; session verification still requires the existing verification policy for the current slice and stronger browser-observed checks in a later slice.
+
+### Runner Start, Status, Cancel, and Cleanup Behavior
+
+Start behavior:
+
+- Load the runner metadata row and require status `requested`.
+- Resolve the linked login request and browser session through the existing handoff lookup validation.
+- Validate config before launching any child process.
+- Start child processes in dependency order: display/VNC first when needed, browser second, noVNC/websockify last.
+- Record `started` only after the viewer proxy is reachable on the configured bind address and the generated `viewer_url` is private and time-limited.
+- If any process fails before that point, terminate already-started children and record `failed` with a structured `error_code`.
+
+Status behavior:
+
+- `runner show --id <id> --json` remains the operator status read path.
+- A future status implementation may inspect process liveness, but SQLite remains the state authority. If process liveness disagrees with SQLite, the runner must reconcile by appending an audited transition such as `failed`, `expired`, or `cancelled`; it must not silently rewrite state.
+- Stale `started` runners whose process group no longer exists must be marked `failed` or `expired` with an explicit stale-runner reason.
+
+Cancel behavior:
+
+- Cancel must signal the runner process group, wait a bounded grace period, then kill remaining children.
+- Cancel must remove transient viewer/display resources owned by the runner.
+- Cancel records `cancelled` through the existing store transition path. If cleanup cannot fully complete, record safe error metadata and keep the terminal state auditable.
+
+Timeout cleanup:
+
+- The supervisor must stop the process group when `ODIN_BROWSER_HANDOFF_TIMEOUT_SECONDS` expires or when the linked login request expires, whichever comes first.
+- Timeout records `expired` through the existing store transition path.
+- Cleanup must be idempotent so repeated cancel/status/tick calls do not relaunch or double-record terminal transitions.
+
+Stale runner cleanup:
+
+- A later `odin serve` or maintenance tick may scan for active runners past expiration and call the same cleanup path.
+- The scan must be metadata-driven from SQLite, not from a sidecar pid file registry.
+- Missing pid/process metadata must fail closed by marking the runner terminal when the viewer cannot be proven active and private.
 
 ### Runner Audit Events
 
@@ -612,9 +694,14 @@ Rules:
 10. Handoff runner CLI: implemented minimal `odin browser session runner create|list|show|start|status|cancel` commands, reusing current session and login request validation without process launch.
 11. Process boundary: implemented a typed `internal/runtime/browserhandoff` skeleton with validating `StubRunner`; real browser process launch, shutdown semantics, and fail-closed cleanup remain future work.
 12. Bounded fixture runner: implemented explicit env-gated `FixtureRunner` for harmless allowlisted local commands with timeout handling and safe process metadata. Local NoVNC fixture remains future work.
-13. Tailscale/private URL config: add private viewer URL configuration and reject public exposure unless a later security contract explicitly allows it.
-14. Profile write gate integration: connect runner persistence only after encrypted profile storage and `CanWriteBrowserProfile(session)` allow writes.
-15. Operator runbooks and overview visibility: surface session health, expiring profiles, active handoff runners, and waiting login goals in existing overview lanes if a clean projection lane exists.
+13. NoVNC runner contract refinement: document process topology, config, security rules, lifecycle cleanup, and staged implementation constraints before process code.
+14. Command contract and config validation: add `novnc` runner mode, parse required env/config, validate absolute allowlisted command paths, loopback/private bind settings, private base URL, and timeout without launching processes.
+15. Dry-run NoVNC runner: validate request/config and return the exact process plan plus safe `failed` or `not_implemented` metadata without starting child processes.
+16. Local fake process runner: run harmless allowlisted local fake commands to prove process-group supervision, timeout, cancellation, stale cleanup, and audit transitions without browsers, NoVNC, Tailscale, profile writes, cookies, or credentials.
+17. Real noVNC process boundary: start display/VNC, browser, and noVNC/websockify under one supervisor, generate only private `viewer_url`, and prove cleanup with no persistent profile writes.
+18. Real browser visible session: allow operator-attended manual login in the visible browser only after profile write policy, private viewer routing, cancellation, timeout, and audit behavior are proven.
+19. Profile write gate integration: connect runner persistence only after encrypted profile storage and `CanWriteBrowserProfile(session)` allow writes.
+20. Operator runbooks and overview visibility: surface session health, expiring profiles, active handoff runners, and waiting login goals in existing overview lanes if a clean projection lane exists.
 
 ## Best Operating Rule
 
