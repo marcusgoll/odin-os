@@ -21,6 +21,7 @@ This contract defines the Odin-native handoff for manual Huginn browser login an
 - `odin browser session runner create|list|show|plan-novnc|status|cancel --json` records, inspects, or dry-run plans metadata-only browser handoff runner records without launching a process.
 - `internal/runtime/browserhandoff` defines the future runner process boundary request/response types, a default stub runner that returns structured `not_implemented` responses, and an explicit env-gated fixture runner for harmless local process lifecycle proof.
 - `internal/runtime/browserhandoff` also defines a NoVNC dry-run planner that validates command paths, allowlists, bind address, private base URL, and timeout, then returns planned commands and a private planned viewer URL without launching processes.
+- `internal/runtime/browserhandoff` defines a bounded process supervisor abstraction with fake-runner tests for command validation, timeout result handling, cancellation result handling, and safe process metadata. It is not wired into runner start and does not add a real browser or NoVNC launch path.
 - `odin browser session verify --id <session_id> [--login-request-id <id>] --json` records metadata-only operator verification, sets `last_verified_at`, moves the session to `verified`, and completes the login request when one is provided.
 - `odin browser session prepare-profile --id <session_id> --json` explicitly creates the empty profile directory under `ODIN_ROOT` and records an audit event without writing browser files.
 - Browser session JSON reports `profile_storage_policy`. The default is `encrypted_required`, and `CanWriteBrowserProfile` denies writes for every current policy value until encrypted profile storage is implemented.
@@ -263,6 +264,34 @@ Allowed response statuses are:
 The default `StubRunner` validates required request fields and returns `not_implemented`. It must not import `os/exec`, launch a browser, start NoVNC/Tailscale, write profile data, create viewer URLs, or store credential material. `public_base_url` is rejected until a later security contract explicitly permits it. `bind_addr` must stay on loopback in the stub boundary.
 
 The `FixtureRunner` is selected only when `ODIN_BROWSER_HANDOFF_RUNNER=fixture`. It requires `ODIN_BROWSER_HANDOFF_FIXTURE_COMMAND` to be an absolute path and that same path to appear in comma-separated `ODIN_BROWSER_HANDOFF_FIXTURE_ALLOWED_COMMANDS`. Optional `ODIN_BROWSER_HANDOFF_FIXTURE_ARGS` supplies explicit fixture arguments, and `ODIN_BROWSER_HANDOFF_FIXTURE_TIMEOUT_SECONDS` bounds execution. The fixture runner does not use a shell, does not create viewer URLs, does not launch a browser, and must only be used for harmless local test commands such as process lifecycle fixtures. It can return `started`, `failed`, or `expired` with safe `runner_id` and `process_id` metadata.
+
+### Bounded Process Supervisor Abstraction
+
+`internal/runtime/browserhandoff` includes a reusable process supervisor contract for the future display, browser, and noVNC/websockify children. The abstraction is intentionally separate from `RunnerFromEnv`, `StubRunner`, `FixtureRunner`, and `runner start`; this slice does not wire it into live runner behavior.
+
+`StartProcessRequest` defines:
+
+- `role`: process role such as `display`, `browser`, or `novnc`.
+- `command_path`: absolute executable path.
+- `args`: explicit arguments passed without a shell by any future real runner.
+- `env`: explicit environment entries.
+- `working_directory`: optional absolute working directory.
+- `timeout_seconds`: positive timeout for the process.
+- `allowed_commands`: absolute command allowlist for the role.
+
+`ProcessHandle` records `pid`, `role`, `command_path`, `started_at`, and status `started`.
+
+`ProcessResult` records `pid`, `role`, `command_path`, `started_at`, optional `exited_at`, status `started`, `exited`, `failed`, `timeout`, or `cancelled`, plus safe stdout/stderr/error metadata. Result payloads must not contain passwords, cookies, bearer tokens, passkey material, TOTP values, backup codes, browser profile bytes, or screenshots.
+
+Supervisor validation is fail-closed:
+
+- command paths must be absolute and exactly present in the role allowlist.
+- `timeout_seconds` is required and positive.
+- `role` is required.
+- optional working directories must be absolute.
+- cancellation returns an audited-safe `cancelled` result shape, but this abstraction does not append runtime events by itself.
+
+The current implementation uses an injected `ProcessCommandRunner` in tests. It does not import `os/exec`, start real processes, create process groups, launch browsers, start NoVNC/websockify, start Tailscale, write profile files, or store credential material. A later real command runner must add process-group handling, timeout kill, cancel kill, stdout/stderr bounds, and platform-specific cleanup under this same contract before being wired into `runner start`.
 
 ### Runner Safety Policy
 
@@ -732,11 +761,12 @@ Rules:
 13. NoVNC runner contract refinement: document process topology, config, security rules, lifecycle cleanup, and staged implementation constraints before process code.
 14. Command contract and config validation: implemented a pure NoVNC config model and validator for absolute allowlisted command paths, loopback/private bind settings, private base URL, and timeout without launching processes. `novnc` runner mode selection remains future work.
 15. Dry-run NoVNC runner: implemented pure request/config planning and `odin browser session runner plan-novnc` JSON output that returns planned command roles, validated bind/timeout config, and a private planned `viewer_url` without starting child processes or mutating runner metadata. Wiring this plan into real runner start remains future work.
-16. Local fake process runner: run harmless allowlisted local fake commands to prove process-group supervision, timeout, cancellation, stale cleanup, and audit transitions without browsers, NoVNC, Tailscale, profile writes, cookies, or credentials.
-17. Real noVNC process boundary: start display/VNC, browser, and noVNC/websockify under one supervisor, generate only private `viewer_url`, and prove cleanup with no persistent profile writes.
-18. Real browser visible session: allow operator-attended manual login in the visible browser only after profile write policy, private viewer routing, cancellation, timeout, and audit behavior are proven.
-19. Profile write gate integration: connect runner persistence only after encrypted profile storage and `CanWriteBrowserProfile(session)` allow writes.
-20. Operator runbooks and overview visibility: surface session health, expiring profiles, active handoff runners, and waiting login goals in existing overview lanes if a clean projection lane exists.
+16. Bounded process supervisor abstraction: implemented injected-runner process supervision contracts, request/handle/result shapes, allowlist validation, timeout result handling, and cancellation result handling without wiring into real runner start.
+17. Local fake process runner: run harmless allowlisted local fake commands to prove process-group supervision, timeout, cancellation, stale cleanup, and audit transitions without browsers, NoVNC, Tailscale, profile writes, cookies, or credentials.
+18. Real noVNC process boundary: start display/VNC, browser, and noVNC/websockify under one supervisor, generate only private `viewer_url`, and prove cleanup with no persistent profile writes.
+19. Real browser visible session: allow operator-attended manual login in the visible browser only after profile write policy, private viewer routing, cancellation, timeout, and audit behavior are proven.
+20. Profile write gate integration: connect runner persistence only after encrypted profile storage and `CanWriteBrowserProfile(session)` allow writes.
+21. Operator runbooks and overview visibility: surface session health, expiring profiles, active handoff runners, and waiting login goals in existing overview lanes if a clean projection lane exists.
 
 ## Best Operating Rule
 
