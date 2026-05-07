@@ -385,6 +385,69 @@ func TestNoVNCPlanRejectsNonAllowlistedCommandPath(t *testing.T) {
 	}
 }
 
+func TestDetectNoVNCWebsockifyCommandAcceptsExplicitExecutablePath(t *testing.T) {
+	commandPath := testExecutablePath(t, "true")
+
+	detection, err := DetectNoVNCWebsockifyCommand(commandPath, []string{commandPath})
+	if err != nil {
+		t.Fatalf("DetectNoVNCWebsockifyCommand() error = %v", err)
+	}
+	if detection.DetectedPath != commandPath {
+		t.Fatalf("DetectedPath = %q, want %q", detection.DetectedPath, commandPath)
+	}
+	if detection.CommandRole != NoVNCWebsockifyCommandRole {
+		t.Fatalf("CommandRole = %q, want %q", detection.CommandRole, NoVNCWebsockifyCommandRole)
+	}
+	if detection.ValidationStatus != NoVNCCommandValidationValid {
+		t.Fatalf("ValidationStatus = %q, want %q", detection.ValidationStatus, NoVNCCommandValidationValid)
+	}
+	if detection.ErrorCode != "" || detection.ErrorMessage != "" {
+		t.Fatalf("detection = %+v, want no error metadata", detection)
+	}
+}
+
+func TestDetectNoVNCWebsockifyCommandRejectsUnsafeValues(t *testing.T) {
+	commandPath := testExecutablePath(t, "true")
+	nonExecutablePath := filepath.Join(t.TempDir(), "websockify")
+	if err := os.WriteFile(nonExecutablePath, []byte("#!/bin/sh\nexit 0\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile(non-executable fixture) error = %v", err)
+	}
+	missingPath := filepath.Join(t.TempDir(), "missing-websockify")
+
+	tests := []struct {
+		name    string
+		command string
+		allowed []string
+		want    string
+	}{
+		{name: "missing path", command: "", allowed: []string{commandPath}, want: NoVNCCommandErrorMissing},
+		{name: "relative path", command: "websockify", allowed: []string{"websockify"}, want: NoVNCCommandErrorRelative},
+		{name: "not allowlisted", command: commandPath, allowed: []string{"/usr/bin/not-allowed"}, want: NoVNCCommandErrorNotAllowlisted},
+		{name: "not found", command: missingPath, allowed: []string{missingPath}, want: NoVNCCommandErrorNotFound},
+		{name: "not executable", command: nonExecutablePath, allowed: []string{nonExecutablePath}, want: NoVNCCommandErrorNotExecutable},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			detection, err := DetectNoVNCWebsockifyCommand(test.command, test.allowed)
+			if err == nil {
+				t.Fatalf("DetectNoVNCWebsockifyCommand() error = nil, want rejection")
+			}
+			if detection.CommandRole != NoVNCWebsockifyCommandRole {
+				t.Fatalf("CommandRole = %q, want %q", detection.CommandRole, NoVNCWebsockifyCommandRole)
+			}
+			if detection.ValidationStatus != NoVNCCommandValidationInvalid {
+				t.Fatalf("ValidationStatus = %q, want %q", detection.ValidationStatus, NoVNCCommandValidationInvalid)
+			}
+			if detection.ErrorCode != test.want {
+				t.Fatalf("ErrorCode = %q, want %q; detection = %+v", detection.ErrorCode, test.want, detection)
+			}
+			if strings.TrimSpace(detection.ErrorMessage) == "" {
+				t.Fatalf("ErrorMessage is empty for detection %+v", detection)
+			}
+		})
+	}
+}
+
 func TestNoVNCPlanRejectsPublicBindAddress(t *testing.T) {
 	config := validNoVNCConfig(t)
 	config.BindAddr = "0.0.0.0:6080"
@@ -448,6 +511,38 @@ func TestNoVNCPlanGeneratesDryRunPlanWithoutLaunching(t *testing.T) {
 		if !found {
 			t.Fatalf("plan.Commands = %+v, missing role %q", plan.Commands, wantRole)
 		}
+	}
+}
+
+func TestNoVNCPlanIncludesWebsockifyDetectionMetadata(t *testing.T) {
+	config := validNoVNCConfig(t)
+
+	plan, err := PlanNoVNCStart(validFixtureStartRequest(), config)
+	if err != nil {
+		t.Fatalf("PlanNoVNCStart() error = %v", err)
+	}
+
+	var novncCommand NoVNCPlannedCommand
+	for _, command := range plan.Commands {
+		if command.Role == "novnc" {
+			novncCommand = command
+			break
+		}
+	}
+	if novncCommand.Role == "" {
+		t.Fatalf("plan.Commands = %+v, want novnc command", plan.Commands)
+	}
+	if novncCommand.DetectedPath != config.NoVNCCommand {
+		t.Fatalf("DetectedPath = %q, want %q", novncCommand.DetectedPath, config.NoVNCCommand)
+	}
+	if novncCommand.CommandRole != NoVNCWebsockifyCommandRole {
+		t.Fatalf("CommandRole = %q, want %q", novncCommand.CommandRole, NoVNCWebsockifyCommandRole)
+	}
+	if novncCommand.ValidationStatus != NoVNCCommandValidationValid {
+		t.Fatalf("ValidationStatus = %q, want %q", novncCommand.ValidationStatus, NoVNCCommandValidationValid)
+	}
+	if novncCommand.ErrorCode != "" || novncCommand.ErrorMessage != "" {
+		t.Fatalf("novnc command = %+v, want no detection error metadata", novncCommand)
 	}
 }
 

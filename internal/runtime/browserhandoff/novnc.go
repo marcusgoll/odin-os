@@ -21,6 +21,15 @@ const (
 	NoVNCTimeoutSecondsEnvVar    = "ODIN_NOVNC_TIMEOUT_SECONDS"
 
 	defaultNoVNCBindAddr = "127.0.0.1:0"
+
+	NoVNCWebsockifyCommandRole      = "novnc/websockify"
+	NoVNCCommandValidationValid     = "valid"
+	NoVNCCommandValidationInvalid   = "invalid"
+	NoVNCCommandErrorMissing        = "missing_command"
+	NoVNCCommandErrorRelative       = "relative_command"
+	NoVNCCommandErrorNotAllowlisted = "command_not_allowlisted"
+	NoVNCCommandErrorNotFound       = "command_not_found"
+	NoVNCCommandErrorNotExecutable  = "command_not_executable"
 )
 
 var noVNCFixtureSafeCommandNames = map[string]struct{}{
@@ -66,9 +75,22 @@ type NoVNCPlan struct {
 }
 
 type NoVNCPlannedCommand struct {
-	Role string   `json:"role"`
-	Path string   `json:"path"`
-	Args []string `json:"args,omitempty"`
+	Role             string   `json:"role"`
+	Path             string   `json:"path"`
+	Args             []string `json:"args,omitempty"`
+	DetectedPath     string   `json:"detected_path,omitempty"`
+	CommandRole      string   `json:"command_role,omitempty"`
+	ValidationStatus string   `json:"validation_status,omitempty"`
+	ErrorCode        string   `json:"error_code,omitempty"`
+	ErrorMessage     string   `json:"error_message,omitempty"`
+}
+
+type NoVNCCommandDetection struct {
+	DetectedPath     string
+	CommandRole      string
+	ValidationStatus string
+	ErrorCode        string
+	ErrorMessage     string
 }
 
 func (runner NoVNCRunner) Start(ctx context.Context, request StartRequest) (StartResponse, error) {
@@ -278,7 +300,7 @@ func PlanNoVNCStart(request StartRequest, config NoVNCRunnerConfig) (NoVNCPlan, 
 	if err != nil {
 		return NoVNCPlan{}, err
 	}
-	novncCommand, err := validateNoVNCCommand("novnc command", config.NoVNCCommand, config.NoVNCAllowedCommands)
+	novncDetection, err := DetectNoVNCWebsockifyCommand(config.NoVNCCommand, config.NoVNCAllowedCommands)
 	if err != nil {
 		return NoVNCPlan{}, err
 	}
@@ -299,13 +321,59 @@ func PlanNoVNCStart(request StartRequest, config NoVNCRunnerConfig) (NoVNCPlan, 
 		Commands: []NoVNCPlannedCommand{
 			{Role: "display", Path: displayCommand},
 			{Role: "browser", Path: browserCommand},
-			{Role: "novnc", Path: novncCommand},
+			{
+				Role:             "novnc",
+				Path:             novncDetection.DetectedPath,
+				DetectedPath:     novncDetection.DetectedPath,
+				CommandRole:      novncDetection.CommandRole,
+				ValidationStatus: novncDetection.ValidationStatus,
+				ErrorCode:        novncDetection.ErrorCode,
+				ErrorMessage:     novncDetection.ErrorMessage,
+			},
 		},
 		BindAddr:       bindAddr,
 		PrivateBaseURL: privateBaseURL,
 		ViewerURL:      buildNoVNCViewerURL(privateBaseURL, request.HandoffID),
 		TimeoutSeconds: timeoutSeconds,
 	}, nil
+}
+
+func DetectNoVNCWebsockifyCommand(command string, allowedCommands []string) (NoVNCCommandDetection, error) {
+	detection := NoVNCCommandDetection{
+		CommandRole:      NoVNCWebsockifyCommandRole,
+		ValidationStatus: NoVNCCommandValidationInvalid,
+	}
+	command = strings.TrimSpace(command)
+	if command == "" {
+		return noVNCCommandDetectionError(detection, NoVNCCommandErrorMissing, "novnc command is required")
+	}
+	if !filepath.IsAbs(command) {
+		return noVNCCommandDetectionError(detection, NoVNCCommandErrorRelative, "novnc command must be an absolute path")
+	}
+	cleanCommand := filepath.Clean(command)
+	detection.DetectedPath = cleanCommand
+	if !isNoVNCCommandAllowlisted(cleanCommand, allowedCommands) {
+		return noVNCCommandDetectionError(detection, NoVNCCommandErrorNotAllowlisted, fmt.Sprintf("novnc command %q is not in allowlist", cleanCommand))
+	}
+	info, err := os.Stat(cleanCommand)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return noVNCCommandDetectionError(detection, NoVNCCommandErrorNotFound, fmt.Sprintf("novnc command %q was not found", cleanCommand))
+		}
+		return noVNCCommandDetectionError(detection, NoVNCCommandErrorNotFound, fmt.Sprintf("novnc command %q could not be inspected: %v", cleanCommand, err))
+	}
+	if info.IsDir() || info.Mode().Perm()&0o111 == 0 {
+		return noVNCCommandDetectionError(detection, NoVNCCommandErrorNotExecutable, fmt.Sprintf("novnc command %q is not executable", cleanCommand))
+	}
+	detection.ValidationStatus = NoVNCCommandValidationValid
+	return detection, nil
+}
+
+func noVNCCommandDetectionError(detection NoVNCCommandDetection, code string, message string) (NoVNCCommandDetection, error) {
+	detection.ValidationStatus = NoVNCCommandValidationInvalid
+	detection.ErrorCode = code
+	detection.ErrorMessage = message
+	return detection, fmt.Errorf("%s", message)
 }
 
 func LoadNoVNCLaunchConfigFromEnv() (NoVNCLaunchConfig, error) {
@@ -383,6 +451,19 @@ func validateNoVNCCommand(label string, command string, allowedCommands []string
 		}
 	}
 	return "", fmt.Errorf("%s %q is not in allowlist", label, cleanCommand)
+}
+
+func isNoVNCCommandAllowlisted(command string, allowedCommands []string) bool {
+	for _, allowed := range allowedCommands {
+		allowed = strings.TrimSpace(allowed)
+		if allowed == "" {
+			continue
+		}
+		if filepath.Clean(allowed) == command {
+			return true
+		}
+	}
+	return false
 }
 
 func validateNoVNCBindAddr(bindAddr string) (string, error) {
