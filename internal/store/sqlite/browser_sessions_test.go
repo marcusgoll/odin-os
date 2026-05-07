@@ -273,6 +273,266 @@ func TestBrowserSessionProfileStoragePolicyDeniesWritesByDefault(t *testing.T) {
 	}
 }
 
+func TestBrowserEncryptedProfileArtifactMetadataLifecyclePersistsAndAudits(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "browser-profile-artifacts.db")
+	store, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer store.Close()
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
+	}
+	now := time.Date(2026, 5, 7, 12, 0, 0, 0, time.UTC)
+	store.Now = func() time.Time { return now }
+
+	exists, err := store.HasTable(ctx, "browser_encrypted_profile_artifacts")
+	if err != nil {
+		t.Fatalf("HasTable(browser_encrypted_profile_artifacts) error = %v", err)
+	}
+	if !exists {
+		t.Fatal("HasTable(browser_encrypted_profile_artifacts) = false, want true")
+	}
+
+	session, err := store.CreateBrowserSession(ctx, CreateBrowserSessionParams{
+		Name:           "Marcus Browser",
+		Domain:         "example.com",
+		PermissionTier: BrowserSessionPermissionTierAuthenticatedReadOnly,
+	})
+	if err != nil {
+		t.Fatalf("CreateBrowserSession() error = %v", err)
+	}
+	expiresAt := now.Add(24 * time.Hour)
+	artifact, err := store.CreateBrowserEncryptedProfileArtifact(ctx, CreateBrowserEncryptedProfileArtifactParams{
+		SessionID:             session.ID,
+		ProfilePath:           session.ProfilePath,
+		EncryptedArtifactPath: session.ProfilePath + "/profile.enc",
+		EncryptionKeyRef:      "local-key:v1",
+		ExpiresAt:             &expiresAt,
+	})
+	if err != nil {
+		t.Fatalf("CreateBrowserEncryptedProfileArtifact() error = %v", err)
+	}
+	if artifact.ID <= 0 || artifact.SessionID != session.ID {
+		t.Fatalf("artifact identity = %+v, want persisted session artifact", artifact)
+	}
+	if artifact.Status != BrowserEncryptedProfileArtifactStatusEncrypted {
+		t.Fatalf("artifact.Status = %q, want %q", artifact.Status, BrowserEncryptedProfileArtifactStatusEncrypted)
+	}
+	if artifact.ProfilePath != session.ProfilePath || artifact.EncryptedArtifactPath != session.ProfilePath+"/profile.enc" {
+		t.Fatalf("artifact paths = %q/%q, want session profile path and encrypted artifact path", artifact.ProfilePath, artifact.EncryptedArtifactPath)
+	}
+	if artifact.EncryptionKeyRef != "local-key:v1" {
+		t.Fatalf("artifact.EncryptionKeyRef = %q, want key ref", artifact.EncryptionKeyRef)
+	}
+	if artifact.ExpiresAt == nil || !artifact.ExpiresAt.Equal(expiresAt) {
+		t.Fatalf("artifact.ExpiresAt = %v, want %v", artifact.ExpiresAt, expiresAt)
+	}
+	if artifact.RevokedAt != nil || artifact.ErrorCode != nil || artifact.ErrorMessage != nil {
+		t.Fatalf("new artifact terminal fields = revoked_at:%v error:%v/%v, want nil", artifact.RevokedAt, artifact.ErrorCode, artifact.ErrorMessage)
+	}
+
+	fetched, err := store.GetBrowserEncryptedProfileArtifact(ctx, artifact.ID)
+	if err != nil {
+		t.Fatalf("GetBrowserEncryptedProfileArtifact() error = %v", err)
+	}
+	if fetched.ID != artifact.ID || fetched.EncryptedArtifactPath != artifact.EncryptedArtifactPath {
+		t.Fatalf("fetched artifact = %+v, want %+v", fetched, artifact)
+	}
+
+	listed, err := store.ListBrowserEncryptedProfileArtifacts(ctx, ListBrowserEncryptedProfileArtifactsParams{SessionID: session.ID})
+	if err != nil {
+		t.Fatalf("ListBrowserEncryptedProfileArtifacts() error = %v", err)
+	}
+	if len(listed) != 1 || listed[0].ID != artifact.ID {
+		t.Fatalf("listed artifacts = %+v, want created artifact", listed)
+	}
+
+	store.Now = func() time.Time { return now.Add(time.Hour) }
+	revoked, err := store.MarkBrowserEncryptedProfileArtifactRevoked(ctx, MarkBrowserEncryptedProfileArtifactRevokedParams{
+		ID:     artifact.ID,
+		Actor:  "operator",
+		Reason: "manual revocation",
+	})
+	if err != nil {
+		t.Fatalf("MarkBrowserEncryptedProfileArtifactRevoked() error = %v", err)
+	}
+	if revoked.Status != BrowserEncryptedProfileArtifactStatusRevoked {
+		t.Fatalf("revoked.Status = %q, want %q", revoked.Status, BrowserEncryptedProfileArtifactStatusRevoked)
+	}
+	if revoked.RevokedAt == nil || !revoked.RevokedAt.Equal(now.Add(time.Hour)) {
+		t.Fatalf("revoked.RevokedAt = %v, want revoke time", revoked.RevokedAt)
+	}
+
+	store.Now = func() time.Time { return now.Add(2 * time.Hour) }
+	expiring, err := store.CreateBrowserEncryptedProfileArtifact(ctx, CreateBrowserEncryptedProfileArtifactParams{
+		SessionID:             session.ID,
+		ProfilePath:           session.ProfilePath,
+		EncryptedArtifactPath: session.ProfilePath + "/profile-2.enc",
+		EncryptionKeyRef:      "local-key:v2",
+	})
+	if err != nil {
+		t.Fatalf("CreateBrowserEncryptedProfileArtifact(expiring) error = %v", err)
+	}
+	expiredCode := "expired"
+	expiredMessage := "profile artifact expired"
+	expired, err := store.MarkBrowserEncryptedProfileArtifactExpired(ctx, MarkBrowserEncryptedProfileArtifactExpiredParams{
+		ID:           expiring.ID,
+		Actor:        "operator",
+		Reason:       "expired by policy",
+		ErrorCode:    &expiredCode,
+		ErrorMessage: &expiredMessage,
+	})
+	if err != nil {
+		t.Fatalf("MarkBrowserEncryptedProfileArtifactExpired() error = %v", err)
+	}
+	if expired.Status != BrowserEncryptedProfileArtifactStatusExpired {
+		t.Fatalf("expired.Status = %q, want %q", expired.Status, BrowserEncryptedProfileArtifactStatusExpired)
+	}
+	if expired.ErrorCode == nil || *expired.ErrorCode != "expired" {
+		t.Fatalf("expired.ErrorCode = %v, want expired", expired.ErrorCode)
+	}
+
+	events, err := store.ListEvents(ctx, ListEventsParams{})
+	if err != nil {
+		t.Fatalf("ListEvents() error = %v", err)
+	}
+	counts := map[runtimeevents.Type]int{}
+	for _, event := range events {
+		if event.StreamType != runtimeevents.StreamBrowserSession {
+			continue
+		}
+		counts[event.Type]++
+		payload := strings.ToLower(string(event.Payload))
+		for _, forbidden := range []string{"password", "totp", "backup_code", "cookie", "profile_bytes"} {
+			if strings.Contains(payload, forbidden) {
+				t.Fatalf("encrypted profile artifact audit payload contains forbidden token %q: %s", forbidden, event.Payload)
+			}
+		}
+	}
+	if counts[runtimeevents.EventBrowserProfileEncrypted] != 2 {
+		t.Fatalf("browser.profile_encrypted events = %d, want 2", counts[runtimeevents.EventBrowserProfileEncrypted])
+	}
+	if counts[runtimeevents.EventBrowserProfileRevoked] != 1 {
+		t.Fatalf("browser.profile_revoked events = %d, want 1", counts[runtimeevents.EventBrowserProfileRevoked])
+	}
+	if counts[runtimeevents.EventBrowserProfileExpired] != 1 {
+		t.Fatalf("browser.profile_expired events = %d, want 1", counts[runtimeevents.EventBrowserProfileExpired])
+	}
+
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	reopened, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open(reopened) error = %v", err)
+	}
+	defer reopened.Close()
+	if err := reopened.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate(reopened) error = %v", err)
+	}
+	persisted, err := reopened.GetBrowserEncryptedProfileArtifact(ctx, revoked.ID)
+	if err != nil {
+		t.Fatalf("GetBrowserEncryptedProfileArtifact(reopened) error = %v", err)
+	}
+	if persisted.Status != BrowserEncryptedProfileArtifactStatusRevoked {
+		t.Fatalf("persisted.Status = %q, want %q", persisted.Status, BrowserEncryptedProfileArtifactStatusRevoked)
+	}
+}
+
+func TestBrowserEncryptedProfileArtifactRejectsUnsafeMetadata(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(filepath.Join(t.TempDir(), "browser-profile-artifact-validation.db"))
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer store.Close()
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
+	}
+	session, err := store.CreateBrowserSession(ctx, CreateBrowserSessionParams{
+		Name:           "Safe Profile",
+		Domain:         "example.com",
+		PermissionTier: BrowserSessionPermissionTierAuthenticatedReadOnly,
+	})
+	if err != nil {
+		t.Fatalf("CreateBrowserSession() error = %v", err)
+	}
+
+	for _, tc := range []struct {
+		name   string
+		params CreateBrowserEncryptedProfileArtifactParams
+	}{
+		{
+			name: "absolute artifact path",
+			params: CreateBrowserEncryptedProfileArtifactParams{
+				SessionID:             session.ID,
+				ProfilePath:           session.ProfilePath,
+				EncryptedArtifactPath: "/tmp/profile.enc",
+				EncryptionKeyRef:      "local-key:v1",
+			},
+		},
+		{
+			name: "artifact outside session profile path",
+			params: CreateBrowserEncryptedProfileArtifactParams{
+				SessionID:             session.ID,
+				ProfilePath:           session.ProfilePath,
+				EncryptedArtifactPath: "browser-sessions/profiles/other/profile.enc",
+				EncryptionKeyRef:      "local-key:v1",
+			},
+		},
+		{
+			name: "profile path mismatch",
+			params: CreateBrowserEncryptedProfileArtifactParams{
+				SessionID:             session.ID,
+				ProfilePath:           "browser-sessions/profiles/other",
+				EncryptedArtifactPath: session.ProfilePath + "/profile.enc",
+				EncryptionKeyRef:      "local-key:v1",
+			},
+		},
+		{
+			name: "missing encryption key ref",
+			params: CreateBrowserEncryptedProfileArtifactParams{
+				SessionID:             session.ID,
+				ProfilePath:           session.ProfilePath,
+				EncryptedArtifactPath: session.ProfilePath + "/profile.enc",
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := store.CreateBrowserEncryptedProfileArtifact(ctx, tc.params); err == nil {
+				t.Fatal("CreateBrowserEncryptedProfileArtifact() error = nil, want rejection")
+			}
+		})
+	}
+
+	rows, err := store.DB().QueryContext(ctx, `PRAGMA table_info(browser_encrypted_profile_artifacts)`)
+	if err != nil {
+		t.Fatalf("PRAGMA table_info(browser_encrypted_profile_artifacts) error = %v", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name, columnType string
+		var notNull int
+		var defaultValue any
+		var pk int
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &pk); err != nil {
+			t.Fatalf("scan table_info error = %v", err)
+		}
+		lower := strings.ToLower(name)
+		for _, forbidden := range []string{"password", "totp", "backup", "cookie", "credential"} {
+			if strings.Contains(lower, forbidden) {
+				t.Fatalf("browser_encrypted_profile_artifacts column %q contains forbidden marker %q", name, forbidden)
+			}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("table_info rows error = %v", err)
+	}
+}
+
 func TestBrowserSessionMetadataRejectsCredentialLikeFields(t *testing.T) {
 	ctx := context.Background()
 	store, err := Open(filepath.Join(t.TempDir(), "browser-sessions-columns.db"))

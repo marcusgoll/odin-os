@@ -141,6 +141,11 @@ const (
 	EventBrowserHandoffRunnerCancelled      Type = "browser.handoff_runner_cancelled"
 	EventBrowserHandoffRunnerCompleted      Type = "browser.handoff_runner_completed"
 	EventBrowserHandoffRunnerFailed         Type = "browser.handoff_runner_failed"
+	EventBrowserProfileCaptureRequested     Type = "browser.profile_capture_requested"
+	EventBrowserProfileEncrypted            Type = "browser.profile_encrypted"
+	EventBrowserProfileAttached             Type = "browser.profile_attached"
+	EventBrowserProfileRevoked              Type = "browser.profile_revoked"
+	EventBrowserProfileExpired              Type = "browser.profile_expired"
 )
 
 const (
