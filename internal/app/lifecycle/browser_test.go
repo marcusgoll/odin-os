@@ -409,6 +409,58 @@ func TestRunBrowserSessionRunnerStartUsesStubRunnerSafely(t *testing.T) {
 	}
 }
 
+func TestRunBrowserSessionRunnerStartUsesNoVNCSkeletonSafely(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	root := testRepoRoot(t)
+	commandPath := testLifecycleExecutablePath(t, "true")
+	t.Setenv("ODIN_BROWSER_HANDOFF_RUNNER", "novnc")
+	t.Setenv("ODIN_NOVNC_BROWSER_COMMAND", commandPath)
+	t.Setenv("ODIN_NOVNC_DISPLAY_COMMAND", commandPath)
+	t.Setenv("ODIN_NOVNC_WEBSOCKIFY_COMMAND", commandPath)
+	t.Setenv("ODIN_NOVNC_ALLOWED_COMMANDS", commandPath)
+	t.Setenv("ODIN_NOVNC_BIND_ADDR", "127.0.0.1:6080")
+	t.Setenv("ODIN_NOVNC_PRIVATE_BASE_URL", "https://odin-handoff.tailnet.local")
+	t.Setenv("ODIN_NOVNC_TIMEOUT_SECONDS", "300")
+
+	run := func(args ...string) string {
+		t.Helper()
+		var output bytes.Buffer
+		if err := Run(context.Background(), root, args, strings.NewReader(""), &output); err != nil {
+			t.Fatalf("Run(%v) error = %v\noutput=%s", args, err, output.String())
+		}
+		return output.String()
+	}
+
+	created := decodeBrowserSessionEnvelope(t, []byte(run(
+		"browser", "session", "create",
+		"--name", "novnc-start",
+		"--domain", "example.com",
+		"--permission-tier", "authenticated_read",
+		"--json",
+	)))
+	loginRequest := decodeBrowserSessionLoginRequestEnvelope(t, []byte(run("browser", "session", "login-request", "--id", int64String(created.ID), "--json")))
+	runner := decodeBrowserSessionRunnerEnvelope(t, []byte(run("browser", "session", "runner", "create", "--login-request-id", int64String(loginRequest.ID), "--json")))
+
+	started := decodeBrowserSessionRunnerEnvelope(t, []byte(run("browser", "session", "runner", "start", "--id", int64String(runner.ID), "--json")))
+	if started.Status != "failed" {
+		t.Fatalf("started runner status = %q, want failed for NoVNCRunner not_implemented", started.Status)
+	}
+	if started.ErrorCode == nil || *started.ErrorCode != "not_implemented" {
+		t.Fatalf("started runner error_code = %v, want not_implemented", started.ErrorCode)
+	}
+	if started.ViewerURL != nil || started.RunnerID != nil || started.ProcessID != nil || started.StartedAt != "" {
+		t.Fatalf("started runner = %+v, want no started process/viewer metadata from NoVNC skeleton", started)
+	}
+	if _, err := os.Stat(filepath.Join(root, "browser-sessions")); !os.IsNotExist(err) {
+		t.Fatalf("browser-sessions directory exists after runner start err=%v, want skeleton-only start", err)
+	}
+
+	logs := run("logs", "--json")
+	if !strings.Contains(logs, `"type": "browser.handoff_runner_failed"`) || !strings.Contains(logs, `"error_code": "not_implemented"`) {
+		t.Fatalf("logs output = %s, want failed not_implemented runner audit event", logs)
+	}
+}
+
 func TestRunBrowserSessionRunnerPlanNoVNCIsReadOnly(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	root := testRepoRoot(t)

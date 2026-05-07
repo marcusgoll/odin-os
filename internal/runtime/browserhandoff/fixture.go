@@ -20,6 +20,7 @@ const (
 	FixtureAllowedCommandsEnvVar     = "ODIN_BROWSER_HANDOFF_FIXTURE_ALLOWED_COMMANDS"
 	FixtureTimeoutSecondsEnvVar      = "ODIN_BROWSER_HANDOFF_FIXTURE_TIMEOUT_SECONDS"
 	RunnerModeFixture                = "fixture"
+	RunnerModeNoVNC                  = "novnc"
 	defaultFixtureErrorMessageLength = 512
 )
 
@@ -35,6 +36,9 @@ func RunnerFromEnv() (Runner, error) {
 	mode := strings.ToLower(strings.TrimSpace(os.Getenv(RunnerModeEnvVar)))
 	if mode == "" || mode == "stub" {
 		return StubRunner{}, nil
+	}
+	if mode == RunnerModeNoVNC {
+		return NoVNCRunner{}, nil
 	}
 	if mode != RunnerModeFixture {
 		return nil, fmt.Errorf("unsupported browser handoff runner mode %q", mode)

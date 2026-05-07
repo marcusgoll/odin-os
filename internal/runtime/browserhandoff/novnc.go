@@ -1,6 +1,7 @@
 package browserhandoff
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"net/url"
@@ -44,6 +45,10 @@ type NoVNCLaunchConfig struct {
 	TimeoutSeconds      int
 }
 
+type NoVNCRunner struct {
+	LoadConfig func() (NoVNCLaunchConfig, error)
+}
+
 type NoVNCPlan struct {
 	Commands       []NoVNCPlannedCommand `json:"commands"`
 	BindAddr       string                `json:"bind_addr"`
@@ -56,6 +61,48 @@ type NoVNCPlannedCommand struct {
 	Role string   `json:"role"`
 	Path string   `json:"path"`
 	Args []string `json:"args,omitempty"`
+}
+
+func (runner NoVNCRunner) Start(_ context.Context, request StartRequest) (StartResponse, error) {
+	if err := ValidateStartRequest(request); err != nil {
+		return StartResponse{}, err
+	}
+	loadConfig := runner.LoadConfig
+	if loadConfig == nil {
+		loadConfig = LoadNoVNCLaunchConfigFromEnv
+	}
+	config, err := loadConfig()
+	if err != nil {
+		return StartResponse{}, err
+	}
+	if _, err := ValidateNoVNCLaunchConfig(config, request.TimeoutSeconds); err != nil {
+		return StartResponse{}, err
+	}
+	return StartResponse{
+		Status:         StatusNotImplemented,
+		SessionID:      request.SessionID,
+		LoginRequestID: request.LoginRequestID,
+		HandoffID:      strings.TrimSpace(request.HandoffID),
+		ErrorCode:      "not_implemented",
+		ErrorMessage:   "browser handoff NoVNC runner process launch is not implemented",
+	}, nil
+}
+
+func (runner NoVNCRunner) Cancel(_ context.Context, request CancelRequest) (StatusResponse, error) {
+	runnerID := strings.TrimSpace(request.RunnerID)
+	if runnerID == "" {
+		return StatusResponse{}, fmt.Errorf("runner_id is required")
+	}
+	return StatusResponse{
+		Status:       StatusNotImplemented,
+		RunnerID:     runnerID,
+		ErrorCode:    "not_implemented",
+		ErrorMessage: "browser handoff NoVNC runner cancellation is not implemented",
+	}, nil
+}
+
+func (runner NoVNCRunner) LaunchCount() int {
+	return 0
 }
 
 func PlanNoVNCStart(request StartRequest, config NoVNCRunnerConfig) (NoVNCPlan, error) {
