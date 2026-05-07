@@ -435,6 +435,7 @@ type BrowserHandoffRunnerLifecyclePayload struct {
 	PublicBaseURL  string `json:"public_base_url,omitempty"`
 	ExpiresAt      string `json:"expires_at,omitempty"`
 	StartedAt      string `json:"started_at,omitempty"`
+	ExitedAt       string `json:"exited_at,omitempty"`
 	CompletedAt    string `json:"completed_at,omitempty"`
 	CancelledAt    string `json:"cancelled_at,omitempty"`
 	ErrorCode      string `json:"error_code,omitempty"`
