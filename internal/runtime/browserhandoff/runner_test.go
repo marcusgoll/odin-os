@@ -211,6 +211,93 @@ func TestNoVNCRunnerStartAllowsRealWebsockifyWithExplicitGate(t *testing.T) {
 	}
 }
 
+func TestNoVNCRunnerStartAllowsRealDisplayWithExplicitGate(t *testing.T) {
+	commandPath := testExecutablePath(t, "true")
+	displayPath := writeProcessTestScript(t, "display-vnc", "#!/bin/sh\nexit 0\n")
+	runner := NoVNCRunner{
+		LoadConfig: func() (NoVNCLaunchConfig, error) {
+			return NoVNCLaunchConfig{
+				BrowserCommand:      commandPath,
+				DisplayCommand:      displayPath,
+				WebsockifyCommand:   commandPath,
+				AllowedCommandPaths: []string{commandPath, displayPath},
+				BindAddr:            "127.0.0.1:6080",
+				PrivateBaseURL:      "https://odin-handoff.tailnet.local",
+				TimeoutSeconds:      2,
+				RealDisplayEnabled:  true,
+			}, nil
+		},
+	}
+
+	response, err := runner.Start(context.Background(), validFixtureStartRequest())
+	if err != nil {
+		t.Fatalf("NoVNCRunner.Start(real display) error = %v", err)
+	}
+	if response.Status != StatusCompleted {
+		t.Fatalf("response.Status = %q, want %q", response.Status, StatusCompleted)
+	}
+	if response.RunnerID == "" || response.ProcessID <= 0 || response.ViewerURL == "" {
+		t.Fatalf("response = %+v, want runner/process/viewer metadata", response)
+	}
+	if len(response.ChildProcesses) != 3 {
+		t.Fatalf("ChildProcesses = %+v, want display/browser/websockify results", response.ChildProcesses)
+	}
+	if got := response.ChildProcesses[0].CommandPath; got != displayPath {
+		t.Fatalf("display command path = %q, want %q", got, displayPath)
+	}
+}
+
+func TestNoVNCRunnerStartRejectsRealDisplayWithoutExplicitGate(t *testing.T) {
+	commandPath := testExecutablePath(t, "true")
+	displayPath := writeProcessTestScript(t, "display-vnc", "#!/bin/sh\nexit 0\n")
+	supervisor := &fakeNoVNCProcessSupervisor{}
+	runner := NoVNCRunner{
+		Supervisor: supervisor,
+		LoadConfig: func() (NoVNCLaunchConfig, error) {
+			return NoVNCLaunchConfig{
+				BrowserCommand:      commandPath,
+				DisplayCommand:      displayPath,
+				WebsockifyCommand:   commandPath,
+				AllowedCommandPaths: []string{commandPath, displayPath},
+				BindAddr:            "127.0.0.1:6080",
+				PrivateBaseURL:      "https://odin-handoff.tailnet.local",
+				TimeoutSeconds:      300,
+			}, nil
+		},
+	}
+
+	_, err := runner.Start(context.Background(), validFixtureStartRequest())
+	if err == nil || !strings.Contains(err.Error(), "real display") {
+		t.Fatalf("NoVNCRunner.Start(real display without gate) error = %v, want explicit gate rejection", err)
+	}
+	if len(supervisor.started) != 0 {
+		t.Fatalf("started processes = %+v, want no launch without real display gate", supervisor.started)
+	}
+}
+
+func TestNoVNCRunnerStartRejectsDisallowedRealDisplayBeforeLaunch(t *testing.T) {
+	commandPath := testExecutablePath(t, "true")
+	displayPath := writeProcessTestScript(t, "display-vnc", "#!/bin/sh\nexit 0\n")
+	supervisor := &fakeNoVNCProcessSupervisor{}
+	runner := NoVNCRunner{
+		Supervisor: supervisor,
+		LoadConfig: func() (NoVNCLaunchConfig, error) {
+			config := validNoVNCLaunchConfig(commandPath)
+			config.DisplayCommand = displayPath
+			config.RealDisplayEnabled = true
+			return config, nil
+		},
+	}
+
+	_, err := runner.Start(context.Background(), validFixtureStartRequest())
+	if err == nil || !strings.Contains(err.Error(), "display command") || !strings.Contains(err.Error(), "allowlist") {
+		t.Fatalf("NoVNCRunner.Start(disallowed real display) error = %v, want display allowlist rejection", err)
+	}
+	if len(supervisor.started) != 0 {
+		t.Fatalf("started processes = %+v, want no launch after display allowlist rejection", supervisor.started)
+	}
+}
+
 func TestNoVNCRunnerStartRejectsRealWebsockifyWithoutExplicitGate(t *testing.T) {
 	commandPath := testExecutablePath(t, "true")
 	websockifyPath := writeProcessTestScript(t, "websockify", "#!/bin/sh\nexit 0\n")
@@ -270,6 +357,32 @@ func TestNoVNCRunnerStartFailsWhenWebsockifyProcessFails(t *testing.T) {
 	}
 }
 
+func TestNoVNCRunnerStartFailsWhenRealDisplayExecutableFails(t *testing.T) {
+	commandPath := testExecutablePath(t, "true")
+	displayPath := writeProcessTestScript(t, "display-vnc", "#!/bin/sh\nexit 7\n")
+	runner := NoVNCRunner{
+		LoadConfig: func() (NoVNCLaunchConfig, error) {
+			config := validNoVNCLaunchConfig(commandPath)
+			config.DisplayCommand = displayPath
+			config.AllowedCommandPaths = []string{commandPath, displayPath}
+			config.RealDisplayEnabled = true
+			config.TimeoutSeconds = 2
+			return config, nil
+		},
+	}
+
+	response, err := runner.Start(context.Background(), validFixtureStartRequest())
+	if err != nil {
+		t.Fatalf("NoVNCRunner.Start(failing real display) error = %v", err)
+	}
+	if response.Status != StatusFailed || response.ErrorCode != "novnc_process_failed" {
+		t.Fatalf("response = %+v, want failed novnc_process_failed", response)
+	}
+	if !strings.Contains(response.ErrorMessage, "exit status 7") {
+		t.Fatalf("response.ErrorMessage = %q, want exit status", response.ErrorMessage)
+	}
+}
+
 func TestNoVNCRunnerStartFailsWhenRealWebsockifyExecutableFails(t *testing.T) {
 	commandPath := testExecutablePath(t, "true")
 	websockifyPath := writeProcessTestScript(t, "websockify", "#!/bin/sh\nexit 7\n")
@@ -321,6 +434,30 @@ func TestNoVNCRunnerStartExpiresWhenWebsockifyProcessTimesOut(t *testing.T) {
 	}
 	if !strings.Contains(response.ErrorMessage, NoVNCWebsockifyCommandRole) {
 		t.Fatalf("response.ErrorMessage = %q, want websockify role context", response.ErrorMessage)
+	}
+}
+
+func TestNoVNCRunnerStartExpiresWhenRealDisplayTimesOut(t *testing.T) {
+	commandPath := testExecutablePath(t, "true")
+	sleepPath := testExecutablePath(t, "sleep")
+	displayPath := writeProcessTestScript(t, "display-vnc", "#!/bin/sh\n"+shellQuote(sleepPath)+" 5\n")
+	runner := NoVNCRunner{
+		LoadConfig: func() (NoVNCLaunchConfig, error) {
+			config := validNoVNCLaunchConfig(commandPath)
+			config.DisplayCommand = displayPath
+			config.AllowedCommandPaths = []string{commandPath, displayPath}
+			config.RealDisplayEnabled = true
+			config.TimeoutSeconds = 1
+			return config, nil
+		},
+	}
+
+	response, err := runner.Start(context.Background(), validFixtureStartRequest())
+	if err != nil {
+		t.Fatalf("NoVNCRunner.Start(timeout real display) error = %v", err)
+	}
+	if response.Status != StatusExpired || response.ErrorCode != "novnc_timeout" {
+		t.Fatalf("response = %+v, want expired novnc_timeout", response)
 	}
 }
 
@@ -476,6 +613,7 @@ func TestNoVNCRunnerStartRejectsNonFixtureSafeCommands(t *testing.T) {
 				BindAddr:              "127.0.0.1:6080",
 				PrivateBaseURL:        "https://odin-handoff.tailnet.local",
 				TimeoutSeconds:        300,
+				RealDisplayEnabled:    true,
 				RealWebsockifyEnabled: true,
 			}, nil
 		},
@@ -838,6 +976,7 @@ func TestNoVNCLaunchConfigFromEnvValidatesCommonAllowlist(t *testing.T) {
 	t.Setenv(NoVNCBindAddrEnvVar, "127.0.0.1:6080")
 	t.Setenv(NoVNCPrivateBaseURLEnvVar, "https://odin-handoff.tailnet.local/")
 	t.Setenv(NoVNCTimeoutSecondsEnvVar, "300")
+	t.Setenv(NoVNCRealDisplayEnvVar, "true")
 	t.Setenv(NoVNCRealWebsockifyEnvVar, "true")
 
 	config, err := LoadNoVNCLaunchConfigFromEnv()
@@ -856,6 +995,9 @@ func TestNoVNCLaunchConfigFromEnvValidatesCommonAllowlist(t *testing.T) {
 	}
 	if !normalized.RealWebsockifyEnabled {
 		t.Fatalf("normalized.RealWebsockifyEnabled = false, want env gate preserved")
+	}
+	if !normalized.RealDisplayEnabled {
+		t.Fatalf("normalized.RealDisplayEnabled = false, want env gate preserved")
 	}
 }
 
