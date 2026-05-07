@@ -778,6 +778,7 @@ Required encrypted profile storage event types:
 - `browser.profile_encrypted`
 - `browser.profile_attached`
 - `browser.profile_revoked`
+- `browser.profile_expired`
 
 `browser.session_status_changed` covers profile status changes. Login request metadata uses specific request lifecycle events.
 
