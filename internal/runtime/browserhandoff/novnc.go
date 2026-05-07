@@ -19,6 +19,7 @@ const (
 	NoVNCBindAddrEnvVar          = "ODIN_NOVNC_BIND_ADDR"
 	NoVNCPrivateBaseURLEnvVar    = "ODIN_NOVNC_PRIVATE_BASE_URL"
 	NoVNCTimeoutSecondsEnvVar    = "ODIN_NOVNC_TIMEOUT_SECONDS"
+	NoVNCRealBrowserEnvVar       = "ODIN_NOVNC_REAL_BROWSER"
 	NoVNCRealDisplayEnvVar       = "ODIN_NOVNC_REAL_DISPLAY"
 	NoVNCRealWebsockifyEnvVar    = "ODIN_NOVNC_REAL_WEBSOCKIFY"
 
@@ -63,6 +64,7 @@ type NoVNCLaunchConfig struct {
 	BindAddr              string
 	PrivateBaseURL        string
 	TimeoutSeconds        int
+	RealBrowserEnabled    bool
 	RealDisplayEnabled    bool
 	RealWebsockifyEnabled bool
 }
@@ -223,21 +225,28 @@ func validateNoVNCFixtureSafeLaunchConfig(config NoVNCLaunchConfig) error {
 	commands := []struct {
 		label               string
 		path                string
+		allowRealBrowser    bool
 		allowRealDisplay    bool
 		allowRealWebsockify bool
 	}{
 		{label: "display command", path: config.DisplayCommand, allowRealDisplay: config.RealDisplayEnabled},
-		{label: "browser command", path: config.BrowserCommand},
+		{label: "browser command", path: config.BrowserCommand, allowRealBrowser: config.RealBrowserEnabled},
 		{label: "websockify command", path: config.WebsockifyCommand, allowRealWebsockify: config.RealWebsockifyEnabled},
 	}
 	for _, command := range commands {
 		name := filepath.Base(command.path)
 		if _, ok := noVNCFixtureSafeCommandNames[name]; !ok {
+			if command.allowRealBrowser {
+				continue
+			}
 			if command.allowRealDisplay {
 				continue
 			}
 			if command.allowRealWebsockify {
 				continue
+			}
+			if command.label == "browser command" {
+				return fmt.Errorf("real browser command %q requires %s=true", command.path, NoVNCRealBrowserEnvVar)
 			}
 			if command.label == "display command" {
 				return fmt.Errorf("real display command %q requires %s=true", command.path, NoVNCRealDisplayEnvVar)
@@ -417,6 +426,10 @@ func LoadNoVNCLaunchConfigFromEnv() (NoVNCLaunchConfig, error) {
 	if err != nil {
 		return NoVNCLaunchConfig{}, err
 	}
+	realBrowserEnabled, err := noVNCRealBrowserFromEnv()
+	if err != nil {
+		return NoVNCLaunchConfig{}, err
+	}
 	realDisplayEnabled, err := noVNCRealDisplayFromEnv()
 	if err != nil {
 		return NoVNCLaunchConfig{}, err
@@ -433,6 +446,7 @@ func LoadNoVNCLaunchConfigFromEnv() (NoVNCLaunchConfig, error) {
 		BindAddr:              strings.TrimSpace(os.Getenv(NoVNCBindAddrEnvVar)),
 		PrivateBaseURL:        strings.TrimSpace(os.Getenv(NoVNCPrivateBaseURLEnvVar)),
 		TimeoutSeconds:        timeoutSeconds,
+		RealBrowserEnabled:    realBrowserEnabled,
 		RealDisplayEnabled:    realDisplayEnabled,
 		RealWebsockifyEnabled: realWebsockifyEnabled,
 	}, nil
@@ -475,6 +489,7 @@ func ValidateNoVNCLaunchConfig(config NoVNCLaunchConfig, requestTimeoutSeconds i
 		BindAddr:              bindAddr,
 		PrivateBaseURL:        privateBaseURL,
 		TimeoutSeconds:        timeoutSeconds,
+		RealBrowserEnabled:    config.RealBrowserEnabled,
 		RealDisplayEnabled:    config.RealDisplayEnabled,
 		RealWebsockifyEnabled: config.RealWebsockifyEnabled,
 	}, nil
@@ -576,6 +591,10 @@ func noVNCTimeoutSecondsFromEnv() (int, error) {
 		return 0, fmt.Errorf("%s must be a positive integer", NoVNCTimeoutSecondsEnvVar)
 	}
 	return value, nil
+}
+
+func noVNCRealBrowserFromEnv() (bool, error) {
+	return noVNCBoolFromEnv(NoVNCRealBrowserEnvVar)
 }
 
 func noVNCRealDisplayFromEnv() (bool, error) {
