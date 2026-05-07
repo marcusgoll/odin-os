@@ -166,6 +166,30 @@ func TestParseBrowserSessionRunnerCommands(t *testing.T) {
 		t.Fatalf("cancel command = %+v, want parsed runner cancel", cancel)
 	}
 
+	plan, err := ParseBrowser([]string{
+		"session", "runner", "plan-novnc",
+		"--id", "3",
+		"--browser-command", "/usr/bin/chromium",
+		"--browser-allowed-command", "/usr/bin/chromium",
+		"--display-command", "/usr/bin/x11vnc",
+		"--display-allowed-command", "/usr/bin/x11vnc",
+		"--novnc-command", "/usr/bin/websockify",
+		"--novnc-allowed-command", "/usr/bin/websockify",
+		"--bind-addr", "127.0.0.1:6080",
+		"--private-base-url", "https://odin-handoff.tailnet.local",
+		"--timeout-seconds", "300",
+		"--json",
+	})
+	if err != nil {
+		t.Fatalf("ParseBrowser(session runner plan-novnc) error = %v", err)
+	}
+	if plan.SessionAction != "runner" || plan.RunnerAction != "plan-novnc" || plan.ID != 3 || plan.NoVNCBrowserCommand != "/usr/bin/chromium" || plan.NoVNCDisplayCommand != "/usr/bin/x11vnc" || plan.NoVNCCommand != "/usr/bin/websockify" || plan.NoVNCBindAddr != "127.0.0.1:6080" || plan.NoVNCPrivateBaseURL != "https://odin-handoff.tailnet.local" || plan.NoVNCTimeoutSeconds != 300 || !plan.JSON {
+		t.Fatalf("plan command = %+v, want parsed NoVNC dry-run plan config", plan)
+	}
+	if len(plan.NoVNCBrowserAllowedCommands) != 1 || plan.NoVNCBrowserAllowedCommands[0] != "/usr/bin/chromium" || len(plan.NoVNCDisplayAllowedCommands) != 1 || plan.NoVNCDisplayAllowedCommands[0] != "/usr/bin/x11vnc" || len(plan.NoVNCAllowedCommands) != 1 || plan.NoVNCAllowedCommands[0] != "/usr/bin/websockify" {
+		t.Fatalf("plan allowed commands = browser %+v display %+v novnc %+v, want parsed allowlists", plan.NoVNCBrowserAllowedCommands, plan.NoVNCDisplayAllowedCommands, plan.NoVNCAllowedCommands)
+	}
+
 	if _, err := ParseBrowser([]string{"session", "runner", "create", "--id", "3", "--login-request-id", "7", "--json"}); err == nil {
 		t.Fatal("ParseBrowser(session runner create with id) error = nil, want rejection")
 	}
@@ -174,6 +198,9 @@ func TestParseBrowserSessionRunnerCommands(t *testing.T) {
 	}
 	if _, err := ParseBrowser([]string{"session", "runner", "start", "--id", "3", "--status", "started", "--json"}); err == nil {
 		t.Fatal("ParseBrowser(session runner start with status) error = nil, want rejection")
+	}
+	if _, err := ParseBrowser([]string{"session", "runner", "plan-novnc", "--id", "3", "--status", "started", "--json"}); err == nil {
+		t.Fatal("ParseBrowser(session runner plan-novnc with status) error = nil, want rejection")
 	}
 	if _, err := ParseBrowser([]string{"session", "runner", "approve", "--id", "3", "--json"}); err == nil {
 		t.Fatal("ParseBrowser(session runner unsupported action) error = nil, want rejection")

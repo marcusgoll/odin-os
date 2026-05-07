@@ -175,6 +175,105 @@ func TestFixtureRunnerStartReturnsExpiredOnTimeout(t *testing.T) {
 	}
 }
 
+func TestNoVNCPlanRejectsInvalidCommandPath(t *testing.T) {
+	config := validNoVNCConfig(t)
+	config.BrowserCommand = "chromium"
+
+	_, err := PlanNoVNCStart(validFixtureStartRequest(), config)
+	if err == nil || !strings.Contains(err.Error(), "browser command") {
+		t.Fatalf("PlanNoVNCStart(relative browser command) error = %v, want browser command rejection", err)
+	}
+}
+
+func TestNoVNCPlanRejectsNonAllowlistedCommandPath(t *testing.T) {
+	config := validNoVNCConfig(t)
+	config.NoVNCAllowedCommands = []string{"/usr/bin/not-allowed"}
+
+	_, err := PlanNoVNCStart(validFixtureStartRequest(), config)
+	if err == nil || !strings.Contains(err.Error(), "novnc command") || !strings.Contains(err.Error(), "allowlist") {
+		t.Fatalf("PlanNoVNCStart(disallowed novnc command) error = %v, want allowlist rejection", err)
+	}
+}
+
+func TestNoVNCPlanRejectsPublicBindAddress(t *testing.T) {
+	config := validNoVNCConfig(t)
+	config.BindAddr = "0.0.0.0:6080"
+
+	_, err := PlanNoVNCStart(validFixtureStartRequest(), config)
+	if err == nil || !strings.Contains(err.Error(), "bind_addr") {
+		t.Fatalf("PlanNoVNCStart(public bind) error = %v, want bind_addr rejection", err)
+	}
+}
+
+func TestNoVNCPlanRequiresPrivateBaseURLAndBoundedTimeout(t *testing.T) {
+	t.Run("private base url", func(t *testing.T) {
+		config := validNoVNCConfig(t)
+		config.PrivateBaseURL = ""
+
+		_, err := PlanNoVNCStart(validFixtureStartRequest(), config)
+		if err == nil || !strings.Contains(err.Error(), "private_base_url") {
+			t.Fatalf("PlanNoVNCStart(missing private base URL) error = %v, want private_base_url rejection", err)
+		}
+	})
+
+	t.Run("timeout bound", func(t *testing.T) {
+		config := validNoVNCConfig(t)
+		config.TimeoutSeconds = 601
+
+		_, err := PlanNoVNCStart(validFixtureStartRequest(), config)
+		if err == nil || !strings.Contains(err.Error(), "timeout_seconds") {
+			t.Fatalf("PlanNoVNCStart(timeout beyond request) error = %v, want timeout_seconds rejection", err)
+		}
+	})
+}
+
+func TestNoVNCPlanGeneratesDryRunPlanWithoutLaunching(t *testing.T) {
+	request := validFixtureStartRequest()
+	request.HandoffID = "opaque handoff"
+	config := validNoVNCConfig(t)
+
+	plan, err := PlanNoVNCStart(request, config)
+	if err != nil {
+		t.Fatalf("PlanNoVNCStart() error = %v", err)
+	}
+	if plan.BindAddr != config.BindAddr || plan.PrivateBaseURL != config.PrivateBaseURL || plan.TimeoutSeconds != config.TimeoutSeconds {
+		t.Fatalf("plan config = %+v, want bind/base/timeout from config %+v", plan, config)
+	}
+	if plan.ViewerURL != "https://odin-handoff.tailnet.local/session/dry-run-opaque%20handoff" {
+		t.Fatalf("plan.ViewerURL = %q, want private dry-run viewer URL", plan.ViewerURL)
+	}
+	if len(plan.Commands) != 3 {
+		t.Fatalf("plan.Commands = %+v, want display, browser, and novnc commands", plan.Commands)
+	}
+	for _, wantRole := range []string{"display", "browser", "novnc"} {
+		found := false
+		for _, command := range plan.Commands {
+			if command.Role == wantRole {
+				found = true
+				if command.Path == "" {
+					t.Fatalf("command %+v has empty path", command)
+				}
+			}
+		}
+		if !found {
+			t.Fatalf("plan.Commands = %+v, missing role %q", plan.Commands, wantRole)
+		}
+	}
+}
+
+func TestNoVNCDryRunPlannerSourceDoesNotImportExec(t *testing.T) {
+	payload, err := os.ReadFile("novnc.go")
+	if err != nil {
+		t.Fatalf("ReadFile(novnc.go) error = %v", err)
+	}
+	source := string(payload)
+	for _, forbidden := range []string{"os/" + "exec", "exec." + "Command"} {
+		if strings.Contains(source, forbidden) {
+			t.Fatalf("novnc.go contains forbidden process launch token %q", forbidden)
+		}
+	}
+}
+
 func validFixtureStartRequest() StartRequest {
 	return StartRequest{
 		SessionID:      1,
@@ -183,6 +282,22 @@ func validFixtureStartRequest() StartRequest {
 		ProfilePath:    "browser-sessions/profiles/marcus-example",
 		AllowedDomain:  "example.com",
 		TimeoutSeconds: 600,
+	}
+}
+
+func validNoVNCConfig(t *testing.T) NoVNCRunnerConfig {
+	t.Helper()
+	commandPath := testExecutablePath(t, "true")
+	return NoVNCRunnerConfig{
+		BrowserCommand:         commandPath,
+		BrowserAllowedCommands: []string{commandPath},
+		DisplayCommand:         commandPath,
+		DisplayAllowedCommands: []string{commandPath},
+		NoVNCCommand:           commandPath,
+		NoVNCAllowedCommands:   []string{commandPath},
+		BindAddr:               "127.0.0.1:6080",
+		PrivateBaseURL:         "https://odin-handoff.tailnet.local",
+		TimeoutSeconds:         300,
 	}
 }
 

@@ -7,34 +7,43 @@ import (
 	"strings"
 )
 
-const BrowserUsage = "usage: odin browser run --goal-id <id> --url <url> [--objective <text>] [--allowed-domain <domain>] [--max-pages <n>] [--max-duration-seconds <n>] [--worker-mode <fetch|browser>] [--evidence-required] [--action <read|navigate|snapshot|extract>] [--json] | odin browser session create --name <name> --domain <domain> --permission-tier <tier> [--account-hint <hint>] [--profile-path <path>] [--json] | odin browser session list [--json] | odin browser session show --id <id> [--json] | odin browser session status --id <id> --status <status> [--json] | odin browser session revoke --id <id> [--json] | odin browser session login-request --id <id> [--handoff-base-url <url>] [--json] | odin browser session login-requests --id <id> [--json] | odin browser session handoff show --handoff-id <id> [--json] | odin browser session runner create --login-request-id <id> [--json] | odin browser session runner list --login-request-id <id> [--json] | odin browser session runner show --id <id> [--json] | odin browser session runner start --id <id> [--json] | odin browser session runner status --id <id> --status <status> [--json] | odin browser session runner cancel --id <id> [--json] | odin browser session verify --id <id> [--login-request-id <id>] [--json] | odin browser session prepare-profile --id <id> [--json]"
+const BrowserUsage = "usage: odin browser run --goal-id <id> --url <url> [--objective <text>] [--allowed-domain <domain>] [--max-pages <n>] [--max-duration-seconds <n>] [--worker-mode <fetch|browser>] [--evidence-required] [--action <read|navigate|snapshot|extract>] [--json] | odin browser session create --name <name> --domain <domain> --permission-tier <tier> [--account-hint <hint>] [--profile-path <path>] [--json] | odin browser session list [--json] | odin browser session show --id <id> [--json] | odin browser session status --id <id> --status <status> [--json] | odin browser session revoke --id <id> [--json] | odin browser session login-request --id <id> [--handoff-base-url <url>] [--json] | odin browser session login-requests --id <id> [--json] | odin browser session handoff show --handoff-id <id> [--json] | odin browser session runner create --login-request-id <id> [--json] | odin browser session runner list --login-request-id <id> [--json] | odin browser session runner show --id <id> [--json] | odin browser session runner start --id <id> [--json] | odin browser session runner plan-novnc --id <id> --browser-command <path> --browser-allowed-command <path> --display-command <path> --display-allowed-command <path> --novnc-command <path> --novnc-allowed-command <path> --bind-addr <addr> --private-base-url <url> --timeout-seconds <n> [--json] | odin browser session runner status --id <id> --status <status> [--json] | odin browser session runner cancel --id <id> [--json] | odin browser session verify --id <id> [--login-request-id <id>] [--json] | odin browser session prepare-profile --id <id> [--json]"
 
 type BrowserCommand struct {
-	Name               string
-	SessionAction      string
-	HandoffAction      string
-	RunnerAction       string
-	ID                 int64
-	LoginRequestID     int64
-	GoalID             int64
-	URL                string
-	URLs               []string
-	Objective          string
-	AllowedDomains     []string
-	MaxPages           int
-	MaxDurationSeconds int
-	WorkerMode         string
-	EvidenceRequired   bool
-	Actions            []string
-	SessionName        string
-	SessionDomain      string
-	PermissionTier     string
-	AccountHint        string
-	ProfilePath        string
-	HandoffID          string
-	HandoffBaseURL     string
-	Status             string
-	JSON               bool
+	Name                        string
+	SessionAction               string
+	HandoffAction               string
+	RunnerAction                string
+	ID                          int64
+	LoginRequestID              int64
+	GoalID                      int64
+	URL                         string
+	URLs                        []string
+	Objective                   string
+	AllowedDomains              []string
+	MaxPages                    int
+	MaxDurationSeconds          int
+	WorkerMode                  string
+	EvidenceRequired            bool
+	Actions                     []string
+	SessionName                 string
+	SessionDomain               string
+	PermissionTier              string
+	AccountHint                 string
+	ProfilePath                 string
+	HandoffID                   string
+	HandoffBaseURL              string
+	Status                      string
+	NoVNCBrowserCommand         string
+	NoVNCBrowserAllowedCommands []string
+	NoVNCDisplayCommand         string
+	NoVNCDisplayAllowedCommands []string
+	NoVNCCommand                string
+	NoVNCAllowedCommands        []string
+	NoVNCBindAddr               string
+	NoVNCPrivateBaseURL         string
+	NoVNCTimeoutSeconds         int
+	JSON                        bool
 }
 
 func ParseBrowser(args []string) (BrowserCommand, error) {
@@ -178,7 +187,7 @@ func parseBrowserSession(args []string, command BrowserCommand) (BrowserCommand,
 	}
 	if command.SessionAction == "runner" {
 		if len(args) < 2 || strings.HasPrefix(args[1], "--") {
-			return BrowserCommand{}, fmt.Errorf("usage: odin browser session runner <create|list|show|start|status|cancel> [flags]")
+			return BrowserCommand{}, fmt.Errorf("usage: odin browser session runner <create|list|show|start|plan-novnc|status|cancel> [flags]")
 		}
 		command.RunnerAction = strings.ToLower(strings.TrimSpace(args[1]))
 		flagStart = 2
@@ -284,6 +293,73 @@ func parseBrowserSession(args []string, command BrowserCommand) (BrowserCommand,
 				return BrowserCommand{}, fmt.Errorf("--status must be created, login_requested, verified, or expired")
 			}
 			index = nextIndex
+		case "--browser-command":
+			value, nextIndex, err := requiredValue(args, index, "--browser-command")
+			if err != nil {
+				return BrowserCommand{}, err
+			}
+			command.NoVNCBrowserCommand = value
+			index = nextIndex
+		case "--browser-allowed-command":
+			value, nextIndex, err := requiredValue(args, index, "--browser-allowed-command")
+			if err != nil {
+				return BrowserCommand{}, err
+			}
+			command.NoVNCBrowserAllowedCommands = append(command.NoVNCBrowserAllowedCommands, value)
+			index = nextIndex
+		case "--display-command":
+			value, nextIndex, err := requiredValue(args, index, "--display-command")
+			if err != nil {
+				return BrowserCommand{}, err
+			}
+			command.NoVNCDisplayCommand = value
+			index = nextIndex
+		case "--display-allowed-command":
+			value, nextIndex, err := requiredValue(args, index, "--display-allowed-command")
+			if err != nil {
+				return BrowserCommand{}, err
+			}
+			command.NoVNCDisplayAllowedCommands = append(command.NoVNCDisplayAllowedCommands, value)
+			index = nextIndex
+		case "--novnc-command":
+			value, nextIndex, err := requiredValue(args, index, "--novnc-command")
+			if err != nil {
+				return BrowserCommand{}, err
+			}
+			command.NoVNCCommand = value
+			index = nextIndex
+		case "--novnc-allowed-command":
+			value, nextIndex, err := requiredValue(args, index, "--novnc-allowed-command")
+			if err != nil {
+				return BrowserCommand{}, err
+			}
+			command.NoVNCAllowedCommands = append(command.NoVNCAllowedCommands, value)
+			index = nextIndex
+		case "--bind-addr":
+			value, nextIndex, err := requiredValue(args, index, "--bind-addr")
+			if err != nil {
+				return BrowserCommand{}, err
+			}
+			command.NoVNCBindAddr = value
+			index = nextIndex
+		case "--private-base-url":
+			value, nextIndex, err := requiredValue(args, index, "--private-base-url")
+			if err != nil {
+				return BrowserCommand{}, err
+			}
+			command.NoVNCPrivateBaseURL = value
+			index = nextIndex
+		case "--timeout-seconds":
+			value, nextIndex, err := requiredValue(args, index, "--timeout-seconds")
+			if err != nil {
+				return BrowserCommand{}, err
+			}
+			timeoutSeconds, err := strconv.Atoi(value)
+			if err != nil || timeoutSeconds <= 0 {
+				return BrowserCommand{}, fmt.Errorf("--timeout-seconds must be a positive integer")
+			}
+			command.NoVNCTimeoutSeconds = timeoutSeconds
+			index = nextIndex
 		case "--json":
 			if command.JSON {
 				return BrowserCommand{}, fmt.Errorf("duplicate --json flag")
@@ -344,15 +420,22 @@ func parseBrowserSession(args []string, command BrowserCommand) (BrowserCommand,
 			if command.LoginRequestID <= 0 {
 				return BrowserCommand{}, fmt.Errorf("--login-request-id is required")
 			}
-			if command.ID != 0 || command.Status != "" {
+			if command.ID != 0 || command.Status != "" || command.hasNoVNCPlanConfig() {
 				return BrowserCommand{}, fmt.Errorf("browser session runner %s only accepts --login-request-id and --json", command.RunnerAction)
 			}
 		case "show", "start", "cancel":
 			if command.ID <= 0 {
 				return BrowserCommand{}, fmt.Errorf("--id is required")
 			}
-			if command.LoginRequestID != 0 || command.Status != "" {
+			if command.LoginRequestID != 0 || command.Status != "" || command.hasNoVNCPlanConfig() {
 				return BrowserCommand{}, fmt.Errorf("browser session runner %s only accepts --id and --json", command.RunnerAction)
+			}
+		case "plan-novnc":
+			if command.ID <= 0 {
+				return BrowserCommand{}, fmt.Errorf("--id is required")
+			}
+			if command.LoginRequestID != 0 || command.Status != "" {
+				return BrowserCommand{}, fmt.Errorf("browser session runner plan-novnc only accepts --id, NoVNC config fields, and --json")
 			}
 		case "status":
 			if command.ID <= 0 {
@@ -361,7 +444,7 @@ func parseBrowserSession(args []string, command BrowserCommand) (BrowserCommand,
 			if command.Status == "" {
 				return BrowserCommand{}, fmt.Errorf("--status is required")
 			}
-			if command.LoginRequestID != 0 {
+			if command.LoginRequestID != 0 || command.hasNoVNCPlanConfig() {
 				return BrowserCommand{}, fmt.Errorf("browser session runner status only accepts --id, --status, and --json")
 			}
 		default:
@@ -390,11 +473,23 @@ func parseBrowserSession(args []string, command BrowserCommand) (BrowserCommand,
 
 func isKnownBrowserHandoffRunnerAction(value string) bool {
 	switch strings.ToLower(strings.TrimSpace(value)) {
-	case "create", "list", "show", "start", "status", "cancel":
+	case "create", "list", "show", "start", "plan-novnc", "status", "cancel":
 		return true
 	default:
 		return false
 	}
+}
+
+func (command BrowserCommand) hasNoVNCPlanConfig() bool {
+	return command.NoVNCBrowserCommand != "" ||
+		len(command.NoVNCBrowserAllowedCommands) > 0 ||
+		command.NoVNCDisplayCommand != "" ||
+		len(command.NoVNCDisplayAllowedCommands) > 0 ||
+		command.NoVNCCommand != "" ||
+		len(command.NoVNCAllowedCommands) > 0 ||
+		command.NoVNCBindAddr != "" ||
+		command.NoVNCPrivateBaseURL != "" ||
+		command.NoVNCTimeoutSeconds != 0
 }
 
 func isKnownBrowserSessionPermissionTier(value string) bool {

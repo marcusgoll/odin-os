@@ -62,6 +62,10 @@ type browserSessionRunnerListView struct {
 	Runners []browserSessionRunnerView `json:"runners"`
 }
 
+type browserSessionRunnerPlanEnvelope struct {
+	Plan browserSessionRunnerPlanView `json:"plan"`
+}
+
 type browserSessionProfileEnvelope struct {
 	Profile browserSessionProfileView `json:"profile"`
 }
@@ -134,6 +138,18 @@ type browserSessionRunnerView struct {
 	UpdatedAt      string  `json:"updated_at"`
 	ErrorCode      *string `json:"error_code"`
 	ErrorMessage   *string `json:"error_message"`
+}
+
+type browserSessionRunnerPlanView struct {
+	ID             int64                                `json:"id"`
+	SessionID      int64                                `json:"session_id"`
+	LoginRequestID int64                                `json:"login_request_id"`
+	HandoffID      string                               `json:"handoff_id"`
+	Commands       []browserhandoff.NoVNCPlannedCommand `json:"commands"`
+	BindAddr       string                               `json:"bind_addr"`
+	PrivateBaseURL string                               `json:"private_base_url"`
+	ViewerURL      string                               `json:"viewer_url"`
+	TimeoutSeconds int                                  `json:"timeout_seconds"`
 }
 
 func runBrowser(ctx context.Context, app bootstrap.App, args []string, stdout io.Writer) error {
@@ -429,6 +445,16 @@ func runBrowserSessionRunner(ctx context.Context, app bootstrap.App, command com
 		}
 		_, err = fmt.Fprintf(stdout, "browser_session_runner=%d login_request=%d session=%d status=%s\n", view.ID, view.LoginRequestID, view.SessionID, view.Status)
 		return err
+	case "plan-novnc":
+		plan, err := planBrowserSessionRunnerNoVNC(ctx, app, command)
+		if err != nil {
+			return err
+		}
+		if command.JSON {
+			return commands.WriteJSON(stdout, browserSessionRunnerPlanEnvelope{Plan: plan})
+		}
+		_, err = fmt.Fprintf(stdout, "browser_session_runner_plan=%d login_request=%d session=%d viewer_url=%s\n", plan.ID, plan.LoginRequestID, plan.SessionID, plan.ViewerURL)
+		return err
 	case "status":
 		runner, err := app.Store.UpdateBrowserHandoffRunnerStatus(ctx, sqlite.UpdateBrowserHandoffRunnerStatusParams{
 			ID:     command.ID,
@@ -463,6 +489,55 @@ func runBrowserSessionRunner(ctx context.Context, app bootstrap.App, command com
 	default:
 		return fmt.Errorf(commands.BrowserUsage)
 	}
+}
+
+func planBrowserSessionRunnerNoVNC(ctx context.Context, app bootstrap.App, command commands.BrowserCommand) (browserSessionRunnerPlanView, error) {
+	runner, err := app.Store.GetBrowserHandoffRunner(ctx, command.ID)
+	if err != nil {
+		return browserSessionRunnerPlanView{}, err
+	}
+	if runner.Status != sqlite.BrowserHandoffRunnerStatusRequested {
+		return browserSessionRunnerPlanView{}, fmt.Errorf("browser handoff runner status %q cannot plan NoVNC start", runner.Status)
+	}
+	handoff, err := app.Store.GetBrowserSessionLoginHandoff(ctx, runner.HandoffID)
+	if err != nil {
+		return browserSessionRunnerPlanView{}, err
+	}
+	if handoff.LoginRequest.ID != runner.LoginRequestID || handoff.Session.ID != runner.SessionID {
+		return browserSessionRunnerPlanView{}, fmt.Errorf("browser handoff runner link mismatch")
+	}
+	plan, err := browserhandoff.PlanNoVNCStart(browserhandoff.StartRequest{
+		SessionID:      handoff.Session.ID,
+		LoginRequestID: handoff.LoginRequest.ID,
+		HandoffID:      handoff.HandoffID,
+		ProfilePath:    handoff.Session.ProfilePath,
+		AllowedDomain:  handoff.Session.Domain,
+		TimeoutSeconds: browserSessionRunnerTimeoutSeconds(handoff.LoginRequest.ExpiresAt),
+	}, browserhandoff.NoVNCRunnerConfig{
+		BrowserCommand:         command.NoVNCBrowserCommand,
+		BrowserAllowedCommands: command.NoVNCBrowserAllowedCommands,
+		DisplayCommand:         command.NoVNCDisplayCommand,
+		DisplayAllowedCommands: command.NoVNCDisplayAllowedCommands,
+		NoVNCCommand:           command.NoVNCCommand,
+		NoVNCAllowedCommands:   command.NoVNCAllowedCommands,
+		BindAddr:               command.NoVNCBindAddr,
+		PrivateBaseURL:         command.NoVNCPrivateBaseURL,
+		TimeoutSeconds:         command.NoVNCTimeoutSeconds,
+	})
+	if err != nil {
+		return browserSessionRunnerPlanView{}, err
+	}
+	return browserSessionRunnerPlanView{
+		ID:             runner.ID,
+		SessionID:      runner.SessionID,
+		LoginRequestID: runner.LoginRequestID,
+		HandoffID:      runner.HandoffID,
+		Commands:       plan.Commands,
+		BindAddr:       plan.BindAddr,
+		PrivateBaseURL: plan.PrivateBaseURL,
+		ViewerURL:      plan.ViewerURL,
+		TimeoutSeconds: plan.TimeoutSeconds,
+	}, nil
 }
 
 func startBrowserSessionRunner(ctx context.Context, app bootstrap.App, runnerID int64) (sqlite.BrowserHandoffRunner, error) {
