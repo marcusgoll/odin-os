@@ -19,6 +19,7 @@ const (
 	NoVNCBindAddrEnvVar          = "ODIN_NOVNC_BIND_ADDR"
 	NoVNCPrivateBaseURLEnvVar    = "ODIN_NOVNC_PRIVATE_BASE_URL"
 	NoVNCTimeoutSecondsEnvVar    = "ODIN_NOVNC_TIMEOUT_SECONDS"
+	NoVNCRealWebsockifyEnvVar    = "ODIN_NOVNC_REAL_WEBSOCKIFY"
 
 	defaultNoVNCBindAddr = "127.0.0.1:0"
 
@@ -54,13 +55,14 @@ type NoVNCRunnerConfig struct {
 }
 
 type NoVNCLaunchConfig struct {
-	BrowserCommand      string
-	DisplayCommand      string
-	WebsockifyCommand   string
-	AllowedCommandPaths []string
-	BindAddr            string
-	PrivateBaseURL      string
-	TimeoutSeconds      int
+	BrowserCommand        string
+	DisplayCommand        string
+	WebsockifyCommand     string
+	AllowedCommandPaths   []string
+	BindAddr              string
+	PrivateBaseURL        string
+	TimeoutSeconds        int
+	RealWebsockifyEnabled bool
 }
 
 type NoVNCRunner struct {
@@ -217,16 +219,23 @@ func newNoVNCStartResponse(request StartRequest, config NoVNCLaunchConfig, handl
 
 func validateNoVNCFixtureSafeLaunchConfig(config NoVNCLaunchConfig) error {
 	commands := []struct {
-		label string
-		path  string
+		label               string
+		path                string
+		allowRealWebsockify bool
 	}{
 		{label: "display command", path: config.DisplayCommand},
 		{label: "browser command", path: config.BrowserCommand},
-		{label: "websockify command", path: config.WebsockifyCommand},
+		{label: "websockify command", path: config.WebsockifyCommand, allowRealWebsockify: config.RealWebsockifyEnabled},
 	}
 	for _, command := range commands {
 		name := filepath.Base(command.path)
 		if _, ok := noVNCFixtureSafeCommandNames[name]; !ok {
+			if command.allowRealWebsockify {
+				continue
+			}
+			if command.label == "websockify command" {
+				return fmt.Errorf("real websockify command %q requires %s=true", command.path, NoVNCRealWebsockifyEnvVar)
+			}
 			return fmt.Errorf("%s %q is not fixture-safe", command.label, command.path)
 		}
 	}
@@ -399,27 +408,32 @@ func LoadNoVNCLaunchConfigFromEnv() (NoVNCLaunchConfig, error) {
 	if err != nil {
 		return NoVNCLaunchConfig{}, err
 	}
+	realWebsockifyEnabled, err := noVNCRealWebsockifyFromEnv()
+	if err != nil {
+		return NoVNCLaunchConfig{}, err
+	}
 	return NoVNCLaunchConfig{
-		BrowserCommand:      strings.TrimSpace(os.Getenv(NoVNCBrowserCommandEnvVar)),
-		DisplayCommand:      strings.TrimSpace(os.Getenv(NoVNCDisplayCommandEnvVar)),
-		WebsockifyCommand:   strings.TrimSpace(os.Getenv(NoVNCWebsockifyCommandEnvVar)),
-		AllowedCommandPaths: splitNoVNCList(os.Getenv(NoVNCAllowedCommandsEnvVar)),
-		BindAddr:            strings.TrimSpace(os.Getenv(NoVNCBindAddrEnvVar)),
-		PrivateBaseURL:      strings.TrimSpace(os.Getenv(NoVNCPrivateBaseURLEnvVar)),
-		TimeoutSeconds:      timeoutSeconds,
+		BrowserCommand:        strings.TrimSpace(os.Getenv(NoVNCBrowserCommandEnvVar)),
+		DisplayCommand:        strings.TrimSpace(os.Getenv(NoVNCDisplayCommandEnvVar)),
+		WebsockifyCommand:     strings.TrimSpace(os.Getenv(NoVNCWebsockifyCommandEnvVar)),
+		AllowedCommandPaths:   splitNoVNCList(os.Getenv(NoVNCAllowedCommandsEnvVar)),
+		BindAddr:              strings.TrimSpace(os.Getenv(NoVNCBindAddrEnvVar)),
+		PrivateBaseURL:        strings.TrimSpace(os.Getenv(NoVNCPrivateBaseURLEnvVar)),
+		TimeoutSeconds:        timeoutSeconds,
+		RealWebsockifyEnabled: realWebsockifyEnabled,
 	}, nil
 }
 
 func ValidateNoVNCLaunchConfig(config NoVNCLaunchConfig, requestTimeoutSeconds int) (NoVNCLaunchConfig, error) {
-	browserCommand, err := validateNoVNCCommand("browser command", config.BrowserCommand, config.AllowedCommandPaths)
+	browserCommand, err := validateNoVNCCommand("browser command", NoVNCBrowserCommandRole, config.BrowserCommand, config.AllowedCommandPaths)
 	if err != nil {
 		return NoVNCLaunchConfig{}, err
 	}
-	displayCommand, err := validateNoVNCCommand("display command", config.DisplayCommand, config.AllowedCommandPaths)
+	displayCommand, err := validateNoVNCCommand("display command", NoVNCDisplayCommandRole, config.DisplayCommand, config.AllowedCommandPaths)
 	if err != nil {
 		return NoVNCLaunchConfig{}, err
 	}
-	websockifyCommand, err := validateNoVNCCommand("websockify command", config.WebsockifyCommand, config.AllowedCommandPaths)
+	websockifyCommand, err := validateNoVNCCommand("websockify command", NoVNCWebsockifyCommandRole, config.WebsockifyCommand, config.AllowedCommandPaths)
 	if err != nil {
 		return NoVNCLaunchConfig{}, err
 	}
@@ -440,35 +454,23 @@ func ValidateNoVNCLaunchConfig(config NoVNCLaunchConfig, requestTimeoutSeconds i
 		return NoVNCLaunchConfig{}, err
 	}
 	return NoVNCLaunchConfig{
-		BrowserCommand:      browserCommand,
-		DisplayCommand:      displayCommand,
-		WebsockifyCommand:   websockifyCommand,
-		AllowedCommandPaths: cleanNoVNCAllowedCommands(config.AllowedCommandPaths),
-		BindAddr:            bindAddr,
-		PrivateBaseURL:      privateBaseURL,
-		TimeoutSeconds:      timeoutSeconds,
+		BrowserCommand:        browserCommand,
+		DisplayCommand:        displayCommand,
+		WebsockifyCommand:     websockifyCommand,
+		AllowedCommandPaths:   cleanNoVNCAllowedCommands(config.AllowedCommandPaths),
+		BindAddr:              bindAddr,
+		PrivateBaseURL:        privateBaseURL,
+		TimeoutSeconds:        timeoutSeconds,
+		RealWebsockifyEnabled: config.RealWebsockifyEnabled,
 	}, nil
 }
 
-func validateNoVNCCommand(label string, command string, allowedCommands []string) (string, error) {
-	command = strings.TrimSpace(command)
-	if command == "" {
-		return "", fmt.Errorf("%s is required", label)
+func validateNoVNCCommand(label string, commandRole string, command string, allowedCommands []string) (string, error) {
+	detection, err := DetectNoVNCCommand(label, commandRole, command, allowedCommands)
+	if err != nil {
+		return "", err
 	}
-	if !filepath.IsAbs(command) {
-		return "", fmt.Errorf("%s must be an absolute path", label)
-	}
-	cleanCommand := filepath.Clean(command)
-	for _, allowed := range allowedCommands {
-		allowed = strings.TrimSpace(allowed)
-		if allowed == "" {
-			continue
-		}
-		if filepath.Clean(allowed) == cleanCommand {
-			return cleanCommand, nil
-		}
-	}
-	return "", fmt.Errorf("%s %q is not in allowlist", label, cleanCommand)
+	return detection.DetectedPath, nil
 }
 
 func isNoVNCCommandAllowlisted(command string, allowedCommands []string) bool {
@@ -559,6 +561,20 @@ func noVNCTimeoutSecondsFromEnv() (int, error) {
 		return 0, fmt.Errorf("%s must be a positive integer", NoVNCTimeoutSecondsEnvVar)
 	}
 	return value, nil
+}
+
+func noVNCRealWebsockifyFromEnv() (bool, error) {
+	raw := strings.ToLower(strings.TrimSpace(os.Getenv(NoVNCRealWebsockifyEnvVar)))
+	switch raw {
+	case "":
+		return false, nil
+	case "1", "true", "yes", "y", "on":
+		return true, nil
+	case "0", "false", "no", "n", "off":
+		return false, nil
+	default:
+		return false, fmt.Errorf("%s must be a boolean", NoVNCRealWebsockifyEnvVar)
+	}
 }
 
 func splitNoVNCList(raw string) []string {
