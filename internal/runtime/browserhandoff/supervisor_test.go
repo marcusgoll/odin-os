@@ -2,6 +2,8 @@ package browserhandoff
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -119,6 +121,152 @@ func TestBoundedProcessSupervisorDoesNotInvokeBrowserOrNoVNCCommands(t *testing.
 	}
 }
 
+func TestExecCommandRunnerTrueExitsSuccessfully(t *testing.T) {
+	supervisor := BoundedProcessSupervisor{Runner: NewExecCommandRunner()}
+	request := validStartProcessRequest(t, "display")
+	request.Args = nil
+
+	handle, err := supervisor.StartProcess(context.Background(), request)
+	if err != nil {
+		t.Fatalf("StartProcess() error = %v", err)
+	}
+	result, err := supervisor.WaitProcess(context.Background(), handle)
+	if err != nil {
+		t.Fatalf("WaitProcess() error = %v", err)
+	}
+	if result.Status != ProcessStatusExited || result.ExitedAt == nil || result.PID != handle.PID {
+		t.Fatalf("result = %+v, want exited result for harmless true command", result)
+	}
+}
+
+func TestExecCommandRunnerNonzeroCommandFails(t *testing.T) {
+	commandPath := testExecutablePath(t, "false")
+	supervisor := BoundedProcessSupervisor{Runner: NewExecCommandRunner()}
+	request := StartProcessRequest{
+		Role:            "display",
+		CommandPath:     commandPath,
+		TimeoutSeconds:  5,
+		AllowedCommands: []string{commandPath},
+	}
+
+	handle, err := supervisor.StartProcess(context.Background(), request)
+	if err != nil {
+		t.Fatalf("StartProcess() error = %v", err)
+	}
+	result, err := supervisor.WaitProcess(context.Background(), handle)
+	if err != nil {
+		t.Fatalf("WaitProcess() error = %v", err)
+	}
+	if result.Status != ProcessStatusFailed || result.ExitedAt == nil || result.ErrorMessage == "" {
+		t.Fatalf("result = %+v, want failed result with error message for nonzero command", result)
+	}
+}
+
+func TestExecCommandRunnerTimeoutKillsProcess(t *testing.T) {
+	commandPath := testExecutablePath(t, "sleep")
+	supervisor := BoundedProcessSupervisor{Runner: NewExecCommandRunner()}
+	request := StartProcessRequest{
+		Role:            "display",
+		CommandPath:     commandPath,
+		Args:            []string{"5"},
+		TimeoutSeconds:  1,
+		AllowedCommands: []string{commandPath},
+	}
+
+	startedAt := time.Now()
+	handle, err := supervisor.StartProcess(context.Background(), request)
+	if err != nil {
+		t.Fatalf("StartProcess() error = %v", err)
+	}
+	result, err := supervisor.WaitProcess(context.Background(), handle)
+	if err != nil {
+		t.Fatalf("WaitProcess() error = %v", err)
+	}
+	if result.Status != ProcessStatusTimeout || result.ExitedAt == nil {
+		t.Fatalf("result = %+v, want timeout result", result)
+	}
+	if elapsed := time.Since(startedAt); elapsed > 3*time.Second {
+		t.Fatalf("WaitProcess() elapsed = %v, want process killed near timeout", elapsed)
+	}
+}
+
+func TestExecCommandRunnerCancelKillsAndUntracksProcess(t *testing.T) {
+	commandPath := testExecutablePath(t, "sleep")
+	runner := NewExecCommandRunner()
+	supervisor := BoundedProcessSupervisor{Runner: runner}
+	request := StartProcessRequest{
+		Role:            "display",
+		CommandPath:     commandPath,
+		Args:            []string{"5"},
+		TimeoutSeconds:  5,
+		AllowedCommands: []string{commandPath},
+	}
+
+	startedAt := time.Now()
+	handle, err := supervisor.StartProcess(context.Background(), request)
+	if err != nil {
+		t.Fatalf("StartProcess() error = %v", err)
+	}
+	result, err := supervisor.CancelProcess(context.Background(), handle, "operator cancelled")
+	if err != nil {
+		t.Fatalf("CancelProcess() error = %v", err)
+	}
+	if result.Status != ProcessStatusCancelled || result.ExitedAt == nil {
+		t.Fatalf("result = %+v, want cancelled result", result)
+	}
+	if elapsed := time.Since(startedAt); elapsed > 3*time.Second {
+		t.Fatalf("CancelProcess() elapsed = %v, want process killed promptly", elapsed)
+	}
+	if _, err := runner.processForHandle(handle); err == nil || !strings.Contains(err.Error(), "not tracked") {
+		t.Fatalf("processForHandle(after cancel) error = %v, want process untracked", err)
+	}
+}
+
+func TestExecCommandRunnerDisallowedCommandNeverExecutes(t *testing.T) {
+	markerPath := filepath.Join(t.TempDir(), "marker")
+	commandPath := writeProcessTestScript(t, "mark.sh", "#!/bin/sh\nprintf ran > "+shellQuote(markerPath)+"\n")
+	supervisor := BoundedProcessSupervisor{Runner: NewExecCommandRunner()}
+	request := StartProcessRequest{
+		Role:            "display",
+		CommandPath:     commandPath,
+		TimeoutSeconds:  5,
+		AllowedCommands: []string{testExecutablePath(t, "true")},
+	}
+
+	if _, err := supervisor.StartProcess(context.Background(), request); err == nil || !strings.Contains(err.Error(), "allowlist") {
+		t.Fatalf("StartProcess(disallowed) error = %v, want allowlist rejection", err)
+	}
+	if _, err := os.Stat(markerPath); !os.IsNotExist(err) {
+		t.Fatalf("marker stat error = %v, want no marker because disallowed command was not executed", err)
+	}
+}
+
+func TestExecCommandRunnerCapturesBoundedStdoutAndStderr(t *testing.T) {
+	commandPath := writeProcessTestScript(t, "output.sh", "#!/bin/sh\nprintf '%05000d' 0\nprintf '%05000d' 1 >&2\n")
+	supervisor := BoundedProcessSupervisor{Runner: NewExecCommandRunner()}
+	request := StartProcessRequest{
+		Role:            "display",
+		CommandPath:     commandPath,
+		TimeoutSeconds:  5,
+		AllowedCommands: []string{commandPath},
+	}
+
+	handle, err := supervisor.StartProcess(context.Background(), request)
+	if err != nil {
+		t.Fatalf("StartProcess() error = %v", err)
+	}
+	result, err := supervisor.WaitProcess(context.Background(), handle)
+	if err != nil {
+		t.Fatalf("WaitProcess() error = %v", err)
+	}
+	if result.Status != ProcessStatusExited {
+		t.Fatalf("result.Status = %q, want exited", result.Status)
+	}
+	if len(result.Stdout) != DefaultExecCaptureLimitBytes || len(result.Stderr) != DefaultExecCaptureLimitBytes {
+		t.Fatalf("stdout/stderr lengths = %d/%d, want bounded %d", len(result.Stdout), len(result.Stderr), DefaultExecCaptureLimitBytes)
+	}
+}
+
 func validStartProcessRequest(t *testing.T, role string) StartProcessRequest {
 	t.Helper()
 	commandPath := testExecutablePath(t, "true")
@@ -169,4 +317,17 @@ func (runner *fakeProcessCommandRunner) Wait(_ context.Context, handle ProcessHa
 func (runner *fakeProcessCommandRunner) Cancel(_ context.Context, handle ProcessHandle) error {
 	runner.cancelled = append(runner.cancelled, handle)
 	return nil
+}
+
+func writeProcessTestScript(t *testing.T, name string, content string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), name)
+	if err := os.WriteFile(path, []byte(content), 0o700); err != nil {
+		t.Fatalf("WriteFile(%s) error = %v", path, err)
+	}
+	return path
+}
+
+func shellQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
 }
