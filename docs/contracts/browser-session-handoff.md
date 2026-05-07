@@ -6,7 +6,7 @@ date: 2026-05-06
 
 # Browser Session Handoff Contract
 
-This contract defines the Odin-native handoff for manual Huginn browser login and reusable authenticated read-only sessions. The session metadata, login request metadata, read-only handoff lookup, handoff runner metadata CLI, handoff runner process-boundary skeleton, bounded fixture runner, NoVNC dry-run planning, manual verification metadata, profile path allocation, explicit empty profile directory preparation, and profile storage policy gate slices are implemented. Real NoVNC/Tailscale handoff, browser launch, browser profile persistence, login automation, read-only verification checks, and authenticated session attachment remain future work.
+This contract defines the Odin-native handoff for manual Huginn browser login and reusable authenticated read-only sessions. The session metadata, login request metadata, read-only handoff lookup, handoff runner metadata CLI, handoff runner process-boundary skeleton, bounded fixture runner, bounded exec process runner, fixture supervisor lifecycle wiring, NoVNC dry-run planning, manual verification metadata, profile path allocation, explicit empty profile directory preparation, and profile storage policy gate slices are implemented. Real NoVNC/Tailscale handoff, browser launch, browser profile persistence, login automation, read-only verification checks, and authenticated session attachment remain future work.
 
 ## Existing State
 
@@ -21,6 +21,7 @@ This contract defines the Odin-native handoff for manual Huginn browser login an
 - `odin browser session runner create|list|show|plan-novnc|status|cancel --json` records, inspects, or dry-run plans metadata-only browser handoff runner records without launching a process.
 - `internal/runtime/browserhandoff` defines the future runner process boundary request/response types, a default stub runner that returns structured `not_implemented` responses, and an explicit env-gated fixture runner for harmless local process lifecycle proof.
 - `internal/runtime/browserhandoff` also defines a NoVNC dry-run planner that validates command paths, allowlists, bind address, private base URL, and timeout, then returns planned commands and a private planned viewer URL without launching processes.
+- `internal/runtime/browserhandoff` defines a bounded process supervisor abstraction with fake-runner and harmless local exec-runner tests for command validation, timeout kill handling, cancellation handling, bounded stdout/stderr capture, and safe process metadata. `runner start` now wires the explicit fixture mode through this supervisor using only allowlisted harmless local commands. It does not add a real browser or NoVNC launch path.
 - `odin browser session verify --id <session_id> [--login-request-id <id>] --json` records metadata-only operator verification, sets `last_verified_at`, moves the session to `verified`, and completes the login request when one is provided.
 - `odin browser session prepare-profile --id <session_id> --json` explicitly creates the empty profile directory under `ODIN_ROOT` and records an audit event without writing browser files.
 - Browser session JSON reports `profile_storage_policy`. The default is `encrypted_required`, and `CanWriteBrowserProfile` denies writes for every current policy value until encrypted profile storage is implemented.
@@ -264,6 +265,34 @@ The default `StubRunner` validates required request fields and returns `not_impl
 
 The `FixtureRunner` is selected only when `ODIN_BROWSER_HANDOFF_RUNNER=fixture`. It requires `ODIN_BROWSER_HANDOFF_FIXTURE_COMMAND` to be an absolute path and that same path to appear in comma-separated `ODIN_BROWSER_HANDOFF_FIXTURE_ALLOWED_COMMANDS`. Optional `ODIN_BROWSER_HANDOFF_FIXTURE_ARGS` supplies explicit fixture arguments, and `ODIN_BROWSER_HANDOFF_FIXTURE_TIMEOUT_SECONDS` bounds execution. The fixture runner does not use a shell, does not create viewer URLs, does not launch a browser, and must only be used for harmless local test commands such as process lifecycle fixtures. It can return `started`, `failed`, or `expired` with safe `runner_id` and `process_id` metadata.
 
+### Bounded Process Supervisor Abstraction
+
+`internal/runtime/browserhandoff` includes a reusable process supervisor contract for the future display, browser, and noVNC/websockify children. The abstraction is intentionally separate from `RunnerFromEnv`, `StubRunner`, `FixtureRunner`, and `runner start`; this slice does not wire it into live runner behavior.
+
+`StartProcessRequest` defines:
+
+- `role`: process role such as `display`, `browser`, or `novnc`.
+- `command_path`: absolute executable path.
+- `args`: explicit arguments passed without a shell by any future real runner.
+- `env`: explicit environment entries.
+- `working_directory`: optional absolute working directory.
+- `timeout_seconds`: positive timeout for the process.
+- `allowed_commands`: absolute command allowlist for the role.
+
+`ProcessHandle` records `pid`, `role`, `command_path`, `started_at`, and status `started`.
+
+`ProcessResult` records `pid`, `role`, `command_path`, `started_at`, optional `exited_at`, status `started`, `exited`, `failed`, `timeout`, or `cancelled`, plus safe stdout/stderr/error metadata. Runner metadata now persists terminal `exited_at` for completed, expired, cancelled, and failed lifecycle transitions. Result payloads must not contain passwords, cookies, bearer tokens, passkey material, TOTP values, backup codes, browser profile bytes, or screenshots.
+
+Supervisor validation is fail-closed:
+
+- command paths must be absolute and exactly present in the role allowlist.
+- `timeout_seconds` is required and positive.
+- `role` is required.
+- optional working directories must be absolute.
+- cancellation returns an audited-safe `cancelled` result shape, but this abstraction does not append runtime events by itself.
+
+The current implementation includes both an injected fake `ProcessCommandRunner` for unit tests and an `ExecCommandRunner` for harmless allowlisted local commands. `ExecCommandRunner` uses `exec.CommandContext` without a shell, requires supervisor validation before start, starts commands in a process group, enforces `timeout_seconds`, kills the process group on timeout or cancellation, and captures stdout/stderr up to `4096` bytes per stream by default. The explicit `ODIN_BROWSER_HANDOFF_RUNNER=fixture` path is wired through `BoundedProcessSupervisor` and `ExecCommandRunner` from `runner start`: Odin records `started`, waits for the harmless process to exit, then records `completed`, `expired`, `failed`, or `cancelled` through the existing store transition path and audit event stream. The exec runner remains separate from NoVNC planning and real browser handoff behavior; it does not launch browsers, start NoVNC/websockify, start Tailscale, create viewer URLs, write profile files, or store credential material.
+
 ### Runner Safety Policy
 
 The runner policy is fail-closed:
@@ -416,7 +445,7 @@ The handoff URL is not proof that a browser handoff service exists. Odin now exp
 
 `runner create` resolves the login request and linked session from the existing store, then writes only runner metadata with status `requested`. It rejects missing, completed, expired, cancelled, or otherwise invalid login requests through the store validation path. It does not launch a browser, expose a viewer, start NoVNC/Tailscale, write profile data, or handle credential material. `viewer_url`, `runner_id`, `process_id`, and network fields remain null until a future process-boundary implementation records safe metadata.
 
-`runner start` loads existing runner metadata, validates the linked login request and browser session through the existing handoff lookup rules, and calls the selected `internal/runtime/browserhandoff` runner. The default stub returns `not_implemented`, so Odin records a safe `failed` runner status through the existing store transition path with `error_code: "not_implemented"`. The explicit fixture mode may record `started`, `failed`, or `expired` using only safe fixture process metadata. It must not create a viewer URL, launch a browser, create NoVNC/Tailscale resources, write profile files, or store credential material.
+`runner start` loads existing runner metadata, validates the linked login request and browser session through the existing handoff lookup rules, and calls the selected `internal/runtime/browserhandoff` runner path. The default stub returns `not_implemented`, so Odin records a safe `failed` runner status through the existing store transition path with `error_code: "not_implemented"`. The explicit fixture mode uses the bounded process supervisor and `ExecCommandRunner` to start only the configured allowlisted harmless command, record `started` with `runner_id`, `process_id`, and `started_at`, wait for process exit, and then record `completed`, `expired`, `failed`, or `cancelled` with terminal `exited_at` and safe error metadata. It must not create a viewer URL, launch a browser, create NoVNC/Tailscale resources, write profile files, or store credential material.
 
 `runner plan-novnc` loads existing runner metadata, validates the linked login request and browser session through the existing handoff lookup rules, and calls the pure NoVNC dry-run planner. It returns planned command roles, validated bind/private URL/timeout config, and a planned private `viewer_url`. It must not update runner status, append runtime events, launch processes, start browsers, start NoVNC/websockify, create Tailscale resources, write profile files, or store credential material. The command accepts explicit command paths and allowlists as flags; later config-file support must use the same validation rules.
 
@@ -611,7 +640,7 @@ Tables:
 
 - `browser_session_profiles`: implemented profile metadata and policy binding.
 - `browser_session_login_requests`: implemented metadata-only manual login requests with status, opaque handoff ID, optional future handoff URL, expiration, completion timestamp, and audit timestamps.
-- `browser_handoff_runners`: implemented metadata-only runner records linked to login requests and browser sessions, with lifecycle status, optional future viewer/process/network fields, expiration, timestamps, and safe error metadata.
+- `browser_handoff_runners`: implemented metadata-only runner records linked to login requests and browser sessions, with lifecycle status, optional future viewer/process/network fields, expiration, started/exited timestamps, terminal timestamps, and safe error metadata.
 - `browser_session_events`: optional profile-local lifecycle detail if the global runtime events stream alone is not sufficient for efficient profile show/history.
 - `browser_session_goal_links`: explicit goal/profile relation with reason, requested tier, and verification evidence references.
 
@@ -732,11 +761,13 @@ Rules:
 13. NoVNC runner contract refinement: document process topology, config, security rules, lifecycle cleanup, and staged implementation constraints before process code.
 14. Command contract and config validation: implemented a pure NoVNC config model and validator for absolute allowlisted command paths, loopback/private bind settings, private base URL, and timeout without launching processes. `novnc` runner mode selection remains future work.
 15. Dry-run NoVNC runner: implemented pure request/config planning and `odin browser session runner plan-novnc` JSON output that returns planned command roles, validated bind/timeout config, and a private planned `viewer_url` without starting child processes or mutating runner metadata. Wiring this plan into real runner start remains future work.
-16. Local fake process runner: run harmless allowlisted local fake commands to prove process-group supervision, timeout, cancellation, stale cleanup, and audit transitions without browsers, NoVNC, Tailscale, profile writes, cookies, or credentials.
-17. Real noVNC process boundary: start display/VNC, browser, and noVNC/websockify under one supervisor, generate only private `viewer_url`, and prove cleanup with no persistent profile writes.
-18. Real browser visible session: allow operator-attended manual login in the visible browser only after profile write policy, private viewer routing, cancellation, timeout, and audit behavior are proven.
-19. Profile write gate integration: connect runner persistence only after encrypted profile storage and `CanWriteBrowserProfile(session)` allow writes.
-20. Operator runbooks and overview visibility: surface session health, expiring profiles, active handoff runners, and waiting login goals in existing overview lanes if a clean projection lane exists.
+16. Bounded process supervisor abstraction: implemented injected-runner process supervision contracts, request/handle/result shapes, allowlist validation, timeout result handling, and cancellation result handling without wiring into real runner start.
+17. Bounded exec process runner: implemented `ExecCommandRunner` behind the supervisor abstraction for harmless allowlisted local commands with process-group kill on timeout/cancel, bounded stdout/stderr capture, and no wiring into runner start.
+18. Local fixture process runner lifecycle: implemented `runner start` wiring from fixture mode through the bounded process supervisor and existing runner metadata transitions, proving harmless allowlisted command completion, timeout, disallowed command rejection, `started` and terminal audit events, and no browser/NoVNC/Tailscale/profile writes.
+19. Real noVNC process boundary: start display/VNC, browser, and noVNC/websockify under one supervisor, generate only private `viewer_url`, and prove cleanup with no persistent profile writes.
+20. Real browser visible session: allow operator-attended manual login in the visible browser only after profile write policy, private viewer routing, cancellation, timeout, and audit behavior are proven.
+21. Profile write gate integration: connect runner persistence only after encrypted profile storage and `CanWriteBrowserProfile(session)` allow writes.
+22. Operator runbooks and overview visibility: surface session health, expiring profiles, active handoff runners, and waiting login goals in existing overview lanes if a clean projection lane exists.
 
 ## Best Operating Rule
 

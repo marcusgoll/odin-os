@@ -132,6 +132,7 @@ type browserSessionRunnerView struct {
 	PublicBaseURL  *string `json:"public_base_url"`
 	ExpiresAt      string  `json:"expires_at"`
 	StartedAt      string  `json:"started_at,omitempty"`
+	ExitedAt       string  `json:"exited_at,omitempty"`
 	CompletedAt    string  `json:"completed_at,omitempty"`
 	CancelledAt    string  `json:"cancelled_at,omitempty"`
 	CreatedAt      string  `json:"created_at"`
@@ -559,6 +560,9 @@ func startBrowserSessionRunner(ctx context.Context, app bootstrap.App, runnerID 
 	if err != nil {
 		return sqlite.BrowserHandoffRunner{}, err
 	}
+	if fixtureRunner, ok := selectedRunner.(browserhandoff.FixtureRunner); ok {
+		return startBrowserSessionRunnerWithSupervisor(ctx, app, runner, handoff, fixtureRunner)
+	}
 	response, err := selectedRunner.Start(ctx, browserhandoff.StartRequest{
 		SessionID:      handoff.Session.ID,
 		LoginRequestID: handoff.LoginRequest.ID,
@@ -642,6 +646,95 @@ func startBrowserSessionRunner(ctx context.Context, app bootstrap.App, runnerID 
 	default:
 		return sqlite.BrowserHandoffRunner{}, fmt.Errorf("unsupported browser handoff runner start status %q", response.Status)
 	}
+}
+
+func startBrowserSessionRunnerWithSupervisor(ctx context.Context, app bootstrap.App, runner sqlite.BrowserHandoffRunner, handoff sqlite.BrowserSessionLoginHandoff, fixtureRunner browserhandoff.FixtureRunner) (sqlite.BrowserHandoffRunner, error) {
+	timeoutSeconds := fixtureRunner.TimeoutSeconds
+	if timeoutSeconds <= 0 {
+		timeoutSeconds = browserSessionRunnerTimeoutSeconds(handoff.LoginRequest.ExpiresAt)
+	}
+	supervisor := browserhandoff.BoundedProcessSupervisor{Runner: browserhandoff.NewExecCommandRunner()}
+	handle, err := supervisor.StartProcess(ctx, browserhandoff.StartProcessRequest{
+		Role:            "fixture",
+		CommandPath:     fixtureRunner.Command,
+		Args:            fixtureRunner.Args,
+		TimeoutSeconds:  timeoutSeconds,
+		AllowedCommands: fixtureRunner.AllowedCommands,
+	})
+	if err != nil {
+		return sqlite.BrowserHandoffRunner{}, err
+	}
+	runnerID := fmt.Sprintf("fixture-%d", handle.PID)
+	processID := handle.PID
+	started, err := app.Store.UpdateBrowserHandoffRunnerStatus(ctx, sqlite.UpdateBrowserHandoffRunnerStatusParams{
+		ID:        runner.ID,
+		Status:    sqlite.BrowserHandoffRunnerStatusStarted,
+		RunnerID:  &runnerID,
+		ProcessID: &processID,
+		Actor:     "operator",
+		Reason:    "browser handoff fixture supervisor started",
+	})
+	if err != nil {
+		_, _ = supervisor.CancelProcess(ctx, handle, "failed to persist runner start")
+		return sqlite.BrowserHandoffRunner{}, err
+	}
+	result, err := supervisor.WaitProcess(ctx, handle)
+	if err != nil {
+		return sqlite.BrowserHandoffRunner{}, err
+	}
+	switch result.Status {
+	case browserhandoff.ProcessStatusExited:
+		return app.Store.UpdateBrowserHandoffRunnerStatus(ctx, sqlite.UpdateBrowserHandoffRunnerStatusParams{
+			ID:     started.ID,
+			Status: sqlite.BrowserHandoffRunnerStatusCompleted,
+			Actor:  "operator",
+			Reason: "browser handoff fixture supervisor completed",
+		})
+	case browserhandoff.ProcessStatusTimeout:
+		errorCode := "fixture_timeout"
+		errorMessage := browserSessionRunnerProcessErrorMessage(result, "browser handoff fixture runner timed out")
+		return app.Store.UpdateBrowserHandoffRunnerStatus(ctx, sqlite.UpdateBrowserHandoffRunnerStatusParams{
+			ID:           started.ID,
+			Status:       sqlite.BrowserHandoffRunnerStatusExpired,
+			ErrorCode:    &errorCode,
+			ErrorMessage: &errorMessage,
+			Actor:        "operator",
+			Reason:       "browser handoff fixture supervisor timed out",
+		})
+	case browserhandoff.ProcessStatusCancelled:
+		errorCode := "fixture_cancelled"
+		errorMessage := browserSessionRunnerProcessErrorMessage(result, "browser handoff fixture runner cancelled")
+		return app.Store.UpdateBrowserHandoffRunnerStatus(ctx, sqlite.UpdateBrowserHandoffRunnerStatusParams{
+			ID:           started.ID,
+			Status:       sqlite.BrowserHandoffRunnerStatusCancelled,
+			ErrorCode:    &errorCode,
+			ErrorMessage: &errorMessage,
+			Actor:        "operator",
+			Reason:       "browser handoff fixture supervisor cancelled",
+		})
+	case browserhandoff.ProcessStatusFailed:
+		errorCode := "fixture_failed"
+		errorMessage := browserSessionRunnerProcessErrorMessage(result, "browser handoff fixture runner failed")
+		return app.Store.UpdateBrowserHandoffRunnerStatus(ctx, sqlite.UpdateBrowserHandoffRunnerStatusParams{
+			ID:           started.ID,
+			Status:       sqlite.BrowserHandoffRunnerStatusFailed,
+			ErrorCode:    &errorCode,
+			ErrorMessage: &errorMessage,
+			Actor:        "operator",
+			Reason:       "browser handoff fixture supervisor failed",
+		})
+	default:
+		return sqlite.BrowserHandoffRunner{}, fmt.Errorf("unsupported browser handoff process status %q", result.Status)
+	}
+}
+
+func browserSessionRunnerProcessErrorMessage(result browserhandoff.ProcessResult, fallback string) string {
+	for _, candidate := range []string{result.ErrorMessage, result.Stderr, result.Stdout} {
+		if trimmed := strings.TrimSpace(candidate); trimmed != "" {
+			return trimmed
+		}
+	}
+	return fallback
 }
 
 func browserSessionRunnerTimeoutSeconds(expiresAt time.Time) int {
@@ -798,6 +891,7 @@ func newBrowserSessionRunnerView(runner sqlite.BrowserHandoffRunner) browserSess
 		PublicBaseURL:  cloneBrowserSessionStringPtr(runner.PublicBaseURL),
 		ExpiresAt:      formatBrowserSessionTime(runner.ExpiresAt),
 		StartedAt:      formatBrowserSessionOptionalTime(runner.StartedAt),
+		ExitedAt:       formatBrowserSessionOptionalTime(runner.ExitedAt),
 		CompletedAt:    formatBrowserSessionOptionalTime(runner.CompletedAt),
 		CancelledAt:    formatBrowserSessionOptionalTime(runner.CancelledAt),
 		CreatedAt:      formatBrowserSessionTime(runner.CreatedAt),

@@ -297,15 +297,15 @@ func TestRunBrowserSessionRunnerMetadataCommands(t *testing.T) {
 	}
 
 	completed := decodeBrowserSessionRunnerEnvelope(t, []byte(run("browser", "session", "runner", "status", "--id", int64String(runner.ID), "--status", "completed", "--json")))
-	if completed.Status != "completed" || completed.CompletedAt == "" {
-		t.Fatalf("completed runner = %+v, want completed with timestamp", completed)
+	if completed.Status != "completed" || completed.CompletedAt == "" || completed.ExitedAt == "" {
+		t.Fatalf("completed runner = %+v, want completed with completion and exit timestamps", completed)
 	}
 
 	cancelRequest := decodeBrowserSessionLoginRequestEnvelope(t, []byte(run("browser", "session", "login-request", "--id", int64String(created.ID), "--json")))
 	cancelRunner := decodeBrowserSessionRunnerEnvelope(t, []byte(run("browser", "session", "runner", "create", "--login-request-id", int64String(cancelRequest.ID), "--json")))
 	cancelled := decodeBrowserSessionRunnerEnvelope(t, []byte(run("browser", "session", "runner", "cancel", "--id", int64String(cancelRunner.ID), "--json")))
-	if cancelled.Status != "cancelled" || cancelled.CancelledAt == "" {
-		t.Fatalf("cancelled runner = %+v, want cancelled with timestamp", cancelled)
+	if cancelled.Status != "cancelled" || cancelled.CancelledAt == "" || cancelled.ExitedAt == "" {
+		t.Fatalf("cancelled runner = %+v, want cancelled with cancellation and exit timestamps", cancelled)
 	}
 
 	verifiedRequest := decodeBrowserSessionLoginRequestEnvelope(t, []byte(run("browser", "session", "login-request", "--id", int64String(created.ID), "--json")))
@@ -470,7 +470,7 @@ func TestRunBrowserSessionRunnerPlanNoVNCIsReadOnly(t *testing.T) {
 	}
 }
 
-func TestRunBrowserSessionRunnerStartFixtureUpdatesMetadataSafely(t *testing.T) {
+func TestRunBrowserSessionRunnerStartFixtureCompletesThroughSupervisor(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	root := testRepoRoot(t)
 	fixtureCommand := testLifecycleExecutablePath(t, "true")
@@ -498,28 +498,117 @@ func TestRunBrowserSessionRunnerStartFixtureUpdatesMetadataSafely(t *testing.T) 
 	loginRequest := decodeBrowserSessionLoginRequestEnvelope(t, []byte(run("browser", "session", "login-request", "--id", int64String(created.ID), "--json")))
 	runner := decodeBrowserSessionRunnerEnvelope(t, []byte(run("browser", "session", "runner", "create", "--login-request-id", int64String(loginRequest.ID), "--json")))
 
-	started := decodeBrowserSessionRunnerEnvelope(t, []byte(run("browser", "session", "runner", "start", "--id", int64String(runner.ID), "--json")))
-	if started.Status != "started" || started.StartedAt == "" {
-		t.Fatalf("started runner = %+v, want started metadata", started)
+	completed := decodeBrowserSessionRunnerEnvelope(t, []byte(run("browser", "session", "runner", "start", "--id", int64String(runner.ID), "--json")))
+	if completed.Status != "completed" || completed.StartedAt == "" || completed.CompletedAt == "" || completed.ExitedAt == "" {
+		t.Fatalf("completed runner = %+v, want supervisor start and completion metadata", completed)
 	}
-	if started.RunnerID == nil || *started.RunnerID == "" || started.ProcessID == nil || *started.ProcessID <= 0 {
-		t.Fatalf("started runner = %+v, want fixture runner id and process id", started)
+	if completed.RunnerID == nil || *completed.RunnerID == "" || completed.ProcessID == nil || *completed.ProcessID <= 0 {
+		t.Fatalf("completed runner = %+v, want fixture runner id and process id", completed)
 	}
-	if started.ViewerURL != nil {
-		t.Fatalf("started runner viewer_url = %v, want null fixture viewer URL", started.ViewerURL)
+	if completed.ViewerURL != nil {
+		t.Fatalf("completed runner viewer_url = %v, want null fixture viewer URL", completed.ViewerURL)
 	}
 	if _, err := os.Stat(filepath.Join(root, "browser-sessions")); !os.IsNotExist(err) {
 		t.Fatalf("browser-sessions directory exists after fixture runner start err=%v, want metadata-only fixture start", err)
 	}
 
 	logs := run("logs", "--json")
-	if !strings.Contains(logs, `"type": "browser.handoff_runner_started"`) {
-		t.Fatalf("logs output = %s, want started runner audit event", logs)
+	for _, want := range []string{`"type": "browser.handoff_runner_started"`, `"type": "browser.handoff_runner_completed"`} {
+		if !strings.Contains(logs, want) {
+			t.Fatalf("logs output = %s, want audit event %s", logs, want)
+		}
 	}
 	for _, forbidden := range []string{"password", "totp", "backup_code", "cookie", "profile_bytes"} {
 		if strings.Contains(strings.ToLower(logs), forbidden) {
 			t.Fatalf("logs output contains forbidden credential/profile byte token %q: %s", forbidden, logs)
 		}
+	}
+}
+
+func TestRunBrowserSessionRunnerStartFixtureTimeoutThroughSupervisor(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	root := testRepoRoot(t)
+	fixtureCommand := testLifecycleExecutablePath(t, "sleep")
+	t.Setenv("ODIN_BROWSER_HANDOFF_RUNNER", "fixture")
+	t.Setenv("ODIN_BROWSER_HANDOFF_FIXTURE_COMMAND", fixtureCommand)
+	t.Setenv("ODIN_BROWSER_HANDOFF_FIXTURE_ARGS", "5")
+	t.Setenv("ODIN_BROWSER_HANDOFF_FIXTURE_ALLOWED_COMMANDS", fixtureCommand)
+	t.Setenv("ODIN_BROWSER_HANDOFF_FIXTURE_TIMEOUT_SECONDS", "1")
+
+	run := func(args ...string) string {
+		t.Helper()
+		var output bytes.Buffer
+		if err := Run(context.Background(), root, args, strings.NewReader(""), &output); err != nil {
+			t.Fatalf("Run(%v) error = %v\noutput=%s", args, err, output.String())
+		}
+		return output.String()
+	}
+
+	created := decodeBrowserSessionEnvelope(t, []byte(run(
+		"browser", "session", "create",
+		"--name", "fixture-timeout",
+		"--domain", "example.com",
+		"--permission-tier", "authenticated_read",
+		"--json",
+	)))
+	loginRequest := decodeBrowserSessionLoginRequestEnvelope(t, []byte(run("browser", "session", "login-request", "--id", int64String(created.ID), "--json")))
+	runner := decodeBrowserSessionRunnerEnvelope(t, []byte(run("browser", "session", "runner", "create", "--login-request-id", int64String(loginRequest.ID), "--json")))
+
+	expired := decodeBrowserSessionRunnerEnvelope(t, []byte(run("browser", "session", "runner", "start", "--id", int64String(runner.ID), "--json")))
+	if expired.Status != "expired" || expired.StartedAt == "" || expired.ExitedAt == "" {
+		t.Fatalf("expired runner = %+v, want supervisor timeout metadata", expired)
+	}
+	if expired.ErrorCode == nil || *expired.ErrorCode != "fixture_timeout" {
+		t.Fatalf("expired runner error_code = %v, want fixture_timeout", expired.ErrorCode)
+	}
+	logs := run("logs", "--json")
+	for _, want := range []string{`"type": "browser.handoff_runner_started"`, `"type": "browser.handoff_runner_expired"`} {
+		if !strings.Contains(logs, want) {
+			t.Fatalf("logs output = %s, want audit event %s", logs, want)
+		}
+	}
+}
+
+func TestRunBrowserSessionRunnerStartFixtureRejectsDisallowedCommand(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	root := testRepoRoot(t)
+	markerPath := filepath.Join(t.TempDir(), "marker")
+	fixtureCommand := writeLifecycleExecutable(t, "mark.sh", "#!/bin/sh\nprintf ran > "+shellQuote(markerPath)+"\n")
+	t.Setenv("ODIN_BROWSER_HANDOFF_RUNNER", "fixture")
+	t.Setenv("ODIN_BROWSER_HANDOFF_FIXTURE_COMMAND", fixtureCommand)
+	t.Setenv("ODIN_BROWSER_HANDOFF_FIXTURE_ALLOWED_COMMANDS", testLifecycleExecutablePath(t, "true"))
+	t.Setenv("ODIN_BROWSER_HANDOFF_FIXTURE_TIMEOUT_SECONDS", "2")
+
+	run := func(args ...string) string {
+		t.Helper()
+		var output bytes.Buffer
+		if err := Run(context.Background(), root, args, strings.NewReader(""), &output); err != nil {
+			t.Fatalf("Run(%v) error = %v\noutput=%s", args, err, output.String())
+		}
+		return output.String()
+	}
+
+	created := decodeBrowserSessionEnvelope(t, []byte(run(
+		"browser", "session", "create",
+		"--name", "fixture-disallowed",
+		"--domain", "example.com",
+		"--permission-tier", "authenticated_read",
+		"--json",
+	)))
+	loginRequest := decodeBrowserSessionLoginRequestEnvelope(t, []byte(run("browser", "session", "login-request", "--id", int64String(created.ID), "--json")))
+	runner := decodeBrowserSessionRunnerEnvelope(t, []byte(run("browser", "session", "runner", "create", "--login-request-id", int64String(loginRequest.ID), "--json")))
+
+	var output bytes.Buffer
+	err := Run(context.Background(), root, []string{"browser", "session", "runner", "start", "--id", int64String(runner.ID), "--json"}, strings.NewReader(""), &output)
+	if err == nil || !strings.Contains(err.Error(), "allowlist") {
+		t.Fatalf("Run(disallowed fixture start) error = %v output=%s, want allowlist rejection", err, output.String())
+	}
+	if _, err := os.Stat(markerPath); !os.IsNotExist(err) {
+		t.Fatalf("marker stat error = %v, want no marker because disallowed command was not executed", err)
+	}
+	shown := decodeBrowserSessionRunnerEnvelope(t, []byte(run("browser", "session", "runner", "show", "--id", int64String(runner.ID), "--json")))
+	if shown.Status != "requested" || shown.StartedAt != "" || shown.ExitedAt != "" {
+		t.Fatalf("shown runner after rejected start = %+v, want unchanged requested runner", shown)
 	}
 }
 
@@ -904,6 +993,7 @@ type browserSessionRunnerJSON struct {
 	PublicBaseURL  *string `json:"public_base_url"`
 	ExpiresAt      string  `json:"expires_at"`
 	StartedAt      string  `json:"started_at,omitempty"`
+	ExitedAt       string  `json:"exited_at,omitempty"`
 	CompletedAt    string  `json:"completed_at,omitempty"`
 	CancelledAt    string  `json:"cancelled_at,omitempty"`
 	CreatedAt      string  `json:"created_at"`
@@ -1023,4 +1113,17 @@ func testLifecycleExecutablePath(t *testing.T, name string) string {
 	}
 	t.Fatalf("required fixture executable %q not found", name)
 	return ""
+}
+
+func writeLifecycleExecutable(t *testing.T, name string, content string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), name)
+	if err := os.WriteFile(path, []byte(content), 0o700); err != nil {
+		t.Fatalf("WriteFile(%s) error = %v", path, err)
+	}
+	return path
+}
+
+func shellQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
 }

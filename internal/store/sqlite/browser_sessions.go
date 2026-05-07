@@ -104,6 +104,7 @@ type BrowserHandoffRunner struct {
 	PublicBaseURL  *string
 	ExpiresAt      time.Time
 	StartedAt      *time.Time
+	ExitedAt       *time.Time
 	CompletedAt    *time.Time
 	CancelledAt    *time.Time
 	CreatedAt      time.Time
@@ -951,13 +952,18 @@ func (store *Store) UpdateBrowserHandoffRunnerStatus(ctx context.Context, params
 			}
 		case BrowserHandoffRunnerStatusCompleted:
 			updated.CompletedAt = &now
+			updated.ExitedAt = &now
+		case BrowserHandoffRunnerStatusExpired,
+			BrowserHandoffRunnerStatusFailed:
+			updated.ExitedAt = &now
 		case BrowserHandoffRunnerStatusCancelled:
 			updated.CancelledAt = &now
+			updated.ExitedAt = &now
 		}
 		if _, err := tx.ExecContext(ctx, `
 			UPDATE browser_handoff_runners
 			SET status = ?, viewer_url = ?, runner_id = ?, process_id = ?, bind_addr = ?,
-				private_base_url = ?, public_base_url = ?, started_at = ?, completed_at = ?,
+				private_base_url = ?, public_base_url = ?, started_at = ?, exited_at = ?, completed_at = ?,
 				cancelled_at = ?, updated_at = ?, error_code = ?, error_message = ?
 			WHERE id = ?
 		`,
@@ -969,6 +975,7 @@ func (store *Store) UpdateBrowserHandoffRunnerStatus(ctx context.Context, params
 			nullStringPtr(updated.PrivateBaseURL),
 			nullStringPtr(updated.PublicBaseURL),
 			nullTime(updated.StartedAt),
+			nullTime(updated.ExitedAt),
 			nullTime(updated.CompletedAt),
 			nullTime(updated.CancelledAt),
 			formatTime(now),
@@ -1053,7 +1060,7 @@ func browserSessionLoginRequestSelectSQL() string {
 func browserHandoffRunnerSelectSQL() string {
 	return `
 		SELECT id, session_id, login_request_id, handoff_id, status, viewer_url, runner_id, process_id,
-			bind_addr, private_base_url, public_base_url, expires_at, started_at, completed_at, cancelled_at,
+			bind_addr, private_base_url, public_base_url, expires_at, started_at, exited_at, completed_at, cancelled_at,
 			created_at, updated_at, error_code, error_message
 		FROM browser_handoff_runners
 	`
@@ -1158,7 +1165,7 @@ func scanBrowserHandoffRunner(scanner browserSessionScanner) (BrowserHandoffRunn
 	var viewerURL, runnerID, bindAddr, privateBaseURL, publicBaseURL sql.NullString
 	var processID sql.NullInt64
 	var expiresAt, createdAt, updatedAt string
-	var startedAt, completedAt, cancelledAt, errorCode, errorMessage sql.NullString
+	var startedAt, exitedAt, completedAt, cancelledAt, errorCode, errorMessage sql.NullString
 	if err := scanner.Scan(
 		&runner.ID,
 		&runner.SessionID,
@@ -1173,6 +1180,7 @@ func scanBrowserHandoffRunner(scanner browserSessionScanner) (BrowserHandoffRunn
 		&publicBaseURL,
 		&expiresAt,
 		&startedAt,
+		&exitedAt,
 		&completedAt,
 		&cancelledAt,
 		&createdAt,
@@ -1198,6 +1206,10 @@ func scanBrowserHandoffRunner(scanner browserSessionScanner) (BrowserHandoffRunn
 	}
 	runner.ExpiresAt = parsedExpiresAt
 	runner.StartedAt, err = parseNullableTime(startedAt)
+	if err != nil {
+		return BrowserHandoffRunner{}, err
+	}
+	runner.ExitedAt, err = parseNullableTime(exitedAt)
 	if err != nil {
 		return BrowserHandoffRunner{}, err
 	}
@@ -1406,6 +1418,7 @@ func browserHandoffRunnerLifecyclePayload(runner BrowserHandoffRunner, previousS
 		PublicBaseURL:  stringPtrValue(runner.PublicBaseURL),
 		ExpiresAt:      formatTime(runner.ExpiresAt),
 		StartedAt:      formatOptionalTime(runner.StartedAt),
+		ExitedAt:       formatOptionalTime(runner.ExitedAt),
 		CompletedAt:    formatOptionalTime(runner.CompletedAt),
 		CancelledAt:    formatOptionalTime(runner.CancelledAt),
 		ErrorCode:      stringPtrValue(runner.ErrorCode),
