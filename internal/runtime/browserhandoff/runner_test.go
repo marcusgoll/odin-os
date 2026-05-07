@@ -128,9 +128,9 @@ func TestNoVNCRunnerStartLaunchesFixtureProcessesAndCompletes(t *testing.T) {
 	commandPath := testExecutablePath(t, "true")
 	supervisor := &fakeNoVNCProcessSupervisor{
 		results: map[string]ProcessStatus{
-			"display": ProcessStatusExited,
-			"browser": ProcessStatusExited,
-			"novnc":   ProcessStatusExited,
+			"display":                  ProcessStatusExited,
+			"browser":                  ProcessStatusExited,
+			NoVNCWebsockifyCommandRole: ProcessStatusExited,
 		},
 	}
 	runner := NoVNCRunner{
@@ -164,8 +164,8 @@ func TestNoVNCRunnerStartLaunchesFixtureProcessesAndCompletes(t *testing.T) {
 	if response.BindAddr != "127.0.0.1:6080" || response.PrivateBaseURL != "https://odin-handoff.tailnet.local" {
 		t.Fatalf("response = %+v, want validated bind/private base metadata", response)
 	}
-	if got := processRoles(supervisor.started); strings.Join(got, ",") != "display,browser,novnc" {
-		t.Fatalf("started roles = %v, want display,browser,novnc", got)
+	if got := processRoles(supervisor.started); strings.Join(got, ",") != "display,browser,"+NoVNCWebsockifyCommandRole {
+		t.Fatalf("started roles = %v, want display,browser,%s", got, NoVNCWebsockifyCommandRole)
 	}
 	if len(response.ChildProcesses) != 3 {
 		t.Fatalf("ChildProcesses = %+v, want three process results", response.ChildProcesses)
@@ -175,13 +175,72 @@ func TestNoVNCRunnerStartLaunchesFixtureProcessesAndCompletes(t *testing.T) {
 	}
 }
 
+func TestNoVNCRunnerStartFailsWhenWebsockifyProcessFails(t *testing.T) {
+	commandPath := testExecutablePath(t, "true")
+	supervisor := &fakeNoVNCProcessSupervisor{
+		results: map[string]ProcessStatus{
+			"display":                  ProcessStatusExited,
+			"browser":                  ProcessStatusExited,
+			NoVNCWebsockifyCommandRole: ProcessStatusFailed,
+		},
+	}
+	runner := NoVNCRunner{
+		Supervisor: supervisor,
+		LoadConfig: func() (NoVNCLaunchConfig, error) {
+			return validNoVNCLaunchConfig(commandPath), nil
+		},
+	}
+
+	response, err := runner.Start(context.Background(), validFixtureStartRequest())
+	if err != nil {
+		t.Fatalf("NoVNCRunner.Start() error = %v", err)
+	}
+	if response.Status != StatusFailed || response.ErrorCode != "novnc_process_failed" {
+		t.Fatalf("response = %+v, want failed novnc_process_failed", response)
+	}
+	if !strings.Contains(response.ErrorMessage, NoVNCWebsockifyCommandRole) {
+		t.Fatalf("response.ErrorMessage = %q, want websockify role context", response.ErrorMessage)
+	}
+	if len(supervisor.started) != 3 {
+		t.Fatalf("started processes = %+v, want display, browser, and websockify", supervisor.started)
+	}
+}
+
+func TestNoVNCRunnerStartExpiresWhenWebsockifyProcessTimesOut(t *testing.T) {
+	commandPath := testExecutablePath(t, "true")
+	supervisor := &fakeNoVNCProcessSupervisor{
+		results: map[string]ProcessStatus{
+			"display":                  ProcessStatusExited,
+			"browser":                  ProcessStatusExited,
+			NoVNCWebsockifyCommandRole: ProcessStatusTimeout,
+		},
+	}
+	runner := NoVNCRunner{
+		Supervisor: supervisor,
+		LoadConfig: func() (NoVNCLaunchConfig, error) {
+			return validNoVNCLaunchConfig(commandPath), nil
+		},
+	}
+
+	response, err := runner.Start(context.Background(), validFixtureStartRequest())
+	if err != nil {
+		t.Fatalf("NoVNCRunner.Start() error = %v", err)
+	}
+	if response.Status != StatusExpired || response.ErrorCode != "novnc_timeout" {
+		t.Fatalf("response = %+v, want expired novnc_timeout", response)
+	}
+	if !strings.Contains(response.ErrorMessage, NoVNCWebsockifyCommandRole) {
+		t.Fatalf("response.ErrorMessage = %q, want websockify role context", response.ErrorMessage)
+	}
+}
+
 func TestNoVNCRunnerStartReturnsFailedWhenAProcessFails(t *testing.T) {
 	commandPath := testExecutablePath(t, "true")
 	supervisor := &fakeNoVNCProcessSupervisor{
 		results: map[string]ProcessStatus{
-			"display": ProcessStatusExited,
-			"browser": ProcessStatusFailed,
-			"novnc":   ProcessStatusExited,
+			"display":                  ProcessStatusExited,
+			"browser":                  ProcessStatusFailed,
+			NoVNCWebsockifyCommandRole: ProcessStatusExited,
 		},
 	}
 	runner := NoVNCRunner{
@@ -210,9 +269,9 @@ func TestNoVNCRunnerStartReturnsExpiredOnTimeout(t *testing.T) {
 	commandPath := testExecutablePath(t, "true")
 	supervisor := &fakeNoVNCProcessSupervisor{
 		results: map[string]ProcessStatus{
-			"display": ProcessStatusTimeout,
-			"browser": ProcessStatusExited,
-			"novnc":   ProcessStatusExited,
+			"display":                  ProcessStatusTimeout,
+			"browser":                  ProcessStatusExited,
+			NoVNCWebsockifyCommandRole: ProcessStatusExited,
 		},
 	}
 	runner := NoVNCRunner{
@@ -258,6 +317,34 @@ func TestNoVNCRunnerStartRejectsInvalidLaunchConfig(t *testing.T) {
 	}
 	if len(supervisor.started) != 0 {
 		t.Fatalf("started processes = %+v, want no launch after config rejection", supervisor.started)
+	}
+}
+
+func TestNoVNCRunnerStartRejectsDisallowedWebsockifyBeforeLaunch(t *testing.T) {
+	commandPath := testExecutablePath(t, "true")
+	websockifyPath := testExecutablePath(t, "false")
+	supervisor := &fakeNoVNCProcessSupervisor{}
+	runner := NoVNCRunner{
+		Supervisor: supervisor,
+		LoadConfig: func() (NoVNCLaunchConfig, error) {
+			return NoVNCLaunchConfig{
+				BrowserCommand:      commandPath,
+				DisplayCommand:      commandPath,
+				WebsockifyCommand:   websockifyPath,
+				AllowedCommandPaths: []string{commandPath},
+				BindAddr:            "127.0.0.1:6080",
+				PrivateBaseURL:      "https://odin-handoff.tailnet.local",
+				TimeoutSeconds:      300,
+			}, nil
+		},
+	}
+
+	_, err := runner.Start(context.Background(), validFixtureStartRequest())
+	if err == nil || !strings.Contains(err.Error(), "websockify command") || !strings.Contains(err.Error(), "allowlist") {
+		t.Fatalf("NoVNCRunner.Start(disallowed websockify) error = %v, want websockify allowlist rejection", err)
+	}
+	if len(supervisor.started) != 0 {
+		t.Fatalf("started processes = %+v, want no launch after websockify allowlist rejection", supervisor.started)
 	}
 }
 

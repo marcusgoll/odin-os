@@ -460,6 +460,7 @@ func TestRunBrowserSessionRunnerStartUsesNoVNCFixtureLaunchSafely(t *testing.T) 
 	if _, err := os.Stat(filepath.Join(root, "browser-sessions")); !os.IsNotExist(err) {
 		t.Fatalf("browser-sessions directory exists after runner start err=%v, want fixture process proof only", err)
 	}
+	assertNoBrowserSessionArtifacts(t, root)
 
 	logs := run("logs", "--json")
 	if !strings.Contains(logs, `"type": "browser.handoff_runner_started"`) || !strings.Contains(logs, `"type": "browser.handoff_runner_completed"`) {
@@ -1176,6 +1177,21 @@ func testLifecycleExecutablePath(t *testing.T, name string) string {
 	}
 	t.Fatalf("required fixture executable %q not found", name)
 	return ""
+}
+
+func assertNoBrowserSessionArtifacts(t *testing.T, root string) {
+	t.Helper()
+	for _, relativePath := range []string{
+		"browser-sessions",
+		"cookies",
+		"cookie",
+		"credentials",
+		"profile-bytes",
+	} {
+		if _, err := os.Stat(filepath.Join(root, relativePath)); !os.IsNotExist(err) {
+			t.Fatalf("%s exists after NoVNC fixture launch err=%v, want absent", relativePath, err)
+		}
+	}
 }
 
 func writeLifecycleExecutable(t *testing.T, name string, content string) string {
