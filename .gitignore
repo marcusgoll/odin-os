@@ -7,6 +7,7 @@
 /.codex-runs/
 /logs/
 /workspaces/
+/releases/
 /coverage/
 /data/*.db
 /runs/logs/*
