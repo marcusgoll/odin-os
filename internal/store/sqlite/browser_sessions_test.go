@@ -307,7 +307,7 @@ func TestBrowserEncryptedProfileArtifactMetadataLifecyclePersistsAndAudits(t *te
 	artifact, err := store.CreateBrowserEncryptedProfileArtifact(ctx, CreateBrowserEncryptedProfileArtifactParams{
 		SessionID:             session.ID,
 		ProfilePath:           session.ProfilePath,
-		EncryptedArtifactPath: session.ProfilePath + "/profile.enc",
+		EncryptedArtifactPath: "browser-sessions/encrypted-profiles/profile.enc",
 		EncryptionKeyRef:      "local-key:v1",
 		ExpiresAt:             &expiresAt,
 	})
@@ -320,7 +320,7 @@ func TestBrowserEncryptedProfileArtifactMetadataLifecyclePersistsAndAudits(t *te
 	if artifact.Status != BrowserEncryptedProfileArtifactStatusEncrypted {
 		t.Fatalf("artifact.Status = %q, want %q", artifact.Status, BrowserEncryptedProfileArtifactStatusEncrypted)
 	}
-	if artifact.ProfilePath != session.ProfilePath || artifact.EncryptedArtifactPath != session.ProfilePath+"/profile.enc" {
+	if artifact.ProfilePath != session.ProfilePath || artifact.EncryptedArtifactPath != "browser-sessions/encrypted-profiles/profile.enc" {
 		t.Fatalf("artifact paths = %q/%q, want session profile path and encrypted artifact path", artifact.ProfilePath, artifact.EncryptedArtifactPath)
 	}
 	if artifact.EncryptionKeyRef != "local-key:v1" {
@@ -369,7 +369,7 @@ func TestBrowserEncryptedProfileArtifactMetadataLifecyclePersistsAndAudits(t *te
 	expiring, err := store.CreateBrowserEncryptedProfileArtifact(ctx, CreateBrowserEncryptedProfileArtifactParams{
 		SessionID:             session.ID,
 		ProfilePath:           session.ProfilePath,
-		EncryptedArtifactPath: session.ProfilePath + "/profile-2.enc",
+		EncryptedArtifactPath: "browser-sessions/encrypted-profiles/profile-2.enc",
 		EncryptionKeyRef:      "local-key:v2",
 	})
 	if err != nil {
