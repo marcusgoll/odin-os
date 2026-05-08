@@ -34,8 +34,8 @@ func TestRetentionDryRunReportsEligibleArtifactsWithoutMutatingFilesOrStatus(t *
 	if err != nil {
 		t.Fatalf("Retain(dry-run) error = %v", err)
 	}
-	if !result.DryRun || result.Eligible != 2 || result.Cleaned != 0 || result.Failed != 0 {
-		t.Fatalf("Retain(dry-run) = %+v, want two eligible dry-run artifacts", result)
+	if !result.DryRun || result.Eligible != 2 || result.Cleaned != 0 || result.Failed != 0 || result.Skipped != 1 {
+		t.Fatalf("Retain(dry-run) = %+v, want two eligible and one skipped dry-run artifacts", result)
 	}
 	if len(result.Artifacts) != 2 {
 		t.Fatalf("Retain(dry-run) artifacts = %d, want 2", len(result.Artifacts))
@@ -87,8 +87,8 @@ func TestRetentionApplyDeletesEligibleArtifactsAuditsCleanupAndPreservesActiveAn
 	if err != nil {
 		t.Fatalf("Retain(apply) error = %v", err)
 	}
-	if result.DryRun || result.Eligible != 2 || result.Cleaned != 2 || result.Failed != 0 {
-		t.Fatalf("Retain(apply) = %+v, want two cleaned artifacts", result)
+	if result.DryRun || result.Eligible != 2 || result.Cleaned != 2 || result.Failed != 0 || result.Skipped != 1 {
+		t.Fatalf("Retain(apply) = %+v, want two cleaned and one skipped artifact", result)
 	}
 	for _, item := range result.Artifacts {
 		if item.Action != RetentionActionCleaned || !item.Removed {

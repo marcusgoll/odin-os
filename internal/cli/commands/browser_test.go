@@ -236,3 +236,31 @@ func TestParseBrowserSessionPrepareProfileCommand(t *testing.T) {
 		t.Fatalf("ParseBrowser(session prepare-profile with profile path) error = %v, want rejected profile path", err)
 	}
 }
+
+func TestParseBrowserSessionProfileRetentionCleanupCommand(t *testing.T) {
+	command, err := ParseBrowser([]string{"session", "profile", "retention", "cleanup", "--session-id", "42", "--apply", "--json"})
+	if err != nil {
+		t.Fatalf("ParseBrowser(session profile retention cleanup) error = %v", err)
+	}
+	if command.Name != "session" || command.SessionAction != "profile" || command.ProfileAction != "retention" || command.RetentionAction != "cleanup" || command.SessionID != 42 || !command.Apply || !command.JSON {
+		t.Fatalf("command = %+v, want parsed profile retention cleanup", command)
+	}
+
+	dryRun, err := ParseBrowser([]string{"session", "profile", "retention", "cleanup", "--json"})
+	if err != nil {
+		t.Fatalf("ParseBrowser(session profile retention cleanup dry-run) error = %v", err)
+	}
+	if dryRun.Apply || dryRun.SessionID != 0 || dryRun.ProfileAction != "retention" || dryRun.RetentionAction != "cleanup" {
+		t.Fatalf("dryRun command = %+v, want global dry-run cleanup", dryRun)
+	}
+
+	if _, err := ParseBrowser([]string{"session", "profile", "retention", "cleanup", "--id", "42", "--json"}); err == nil {
+		t.Fatal("ParseBrowser(profile retention cleanup with --id) error = nil, want rejection")
+	}
+	if _, err := ParseBrowser([]string{"session", "profile", "retention", "cleanup", "--session-id", "0", "--json"}); err == nil {
+		t.Fatal("ParseBrowser(profile retention cleanup with invalid session id) error = nil, want rejection")
+	}
+	if _, err := ParseBrowser([]string{"session", "profile", "rotate", "--json"}); err == nil {
+		t.Fatal("ParseBrowser(profile rotate) error = nil, want rejection")
+	}
+}
