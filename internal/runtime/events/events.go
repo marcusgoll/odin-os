@@ -146,6 +146,8 @@ const (
 	EventBrowserProfileAttached             Type = "browser.profile_attached"
 	EventBrowserProfileRevoked              Type = "browser.profile_revoked"
 	EventBrowserProfileExpired              Type = "browser.profile_expired"
+	EventBrowserProfileCleaned              Type = "browser.profile_cleaned"
+	EventBrowserProfileCleanupFailed        Type = "browser.profile_cleanup_failed"
 )
 
 const (
