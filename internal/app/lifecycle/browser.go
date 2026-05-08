@@ -14,6 +14,7 @@ import (
 	browserexecutor "odin-os/internal/executors/browser"
 	"odin-os/internal/runtime/browserhandoff"
 	"odin-os/internal/runtime/browserprofileartifacts"
+	"odin-os/internal/runtime/browserprofilekeys"
 	"odin-os/internal/store/sqlite"
 )
 
@@ -75,6 +76,10 @@ type browserSessionProfileRetentionEnvelope struct {
 	Retention browserSessionProfileRetentionView `json:"retention"`
 }
 
+type browserSessionProfileArtifactEnvelope struct {
+	Artifact browserSessionProfileArtifactView `json:"artifact"`
+}
+
 type browserSessionView struct {
 	ID                   int64  `json:"id"`
 	Name                 string `json:"name"`
@@ -107,6 +112,16 @@ type browserSessionProfileRetentionView struct {
 	Failed    int                                             `json:"failed"`
 	Skipped   int                                             `json:"skipped"`
 	Artifacts []browserprofileartifacts.RetentionArtifactItem `json:"artifacts"`
+}
+
+type browserSessionProfileArtifactView struct {
+	ID               int64  `json:"id"`
+	SessionID        int64  `json:"session_id"`
+	Status           string `json:"status"`
+	ProfilePath      string `json:"profile_path"`
+	ArtifactPath     string `json:"artifact_path"`
+	EncryptionKeyRef string `json:"encryption_key_ref"`
+	CreatedAt        string `json:"created_at"`
 }
 
 type browserSessionLoginRequestView struct {
@@ -398,7 +413,18 @@ func runBrowserSession(ctx context.Context, app bootstrap.App, command commands.
 }
 
 func runBrowserSessionProfile(ctx context.Context, app bootstrap.App, command commands.BrowserCommand, stdout io.Writer) error {
-	if command.ProfileAction != "retention" || command.RetentionAction != "cleanup" {
+	switch command.ProfileAction {
+	case "retention":
+		return runBrowserSessionProfileRetention(ctx, app, command, stdout)
+	case "artifact":
+		return runBrowserSessionProfileArtifact(ctx, app, command, stdout)
+	default:
+		return fmt.Errorf(commands.BrowserUsage)
+	}
+}
+
+func runBrowserSessionProfileRetention(ctx context.Context, app bootstrap.App, command commands.BrowserCommand, stdout io.Writer) error {
+	if command.RetentionAction != "cleanup" {
 		return fmt.Errorf(commands.BrowserUsage)
 	}
 	result, err := browserprofileartifacts.Retain(ctx, browserprofileartifacts.RetentionParams{
@@ -424,6 +450,42 @@ func runBrowserSessionProfile(ctx context.Context, app bootstrap.App, command co
 		return commands.WriteJSON(stdout, browserSessionProfileRetentionEnvelope{Retention: view})
 	}
 	_, err = fmt.Fprintf(stdout, "browser_session_profile_retention dry_run=%t apply=%t eligible=%d cleaned=%d failed=%d skipped=%d\n", view.DryRun, view.Apply, view.Eligible, view.Cleaned, view.Failed, view.Skipped)
+	return err
+}
+
+func runBrowserSessionProfileArtifact(ctx context.Context, app bootstrap.App, command commands.BrowserCommand, stdout io.Writer) error {
+	if command.ArtifactAction != "create-fixture" {
+		return fmt.Errorf(commands.BrowserUsage)
+	}
+	session, err := app.Store.GetBrowserSession(ctx, command.SessionID)
+	if err != nil {
+		return err
+	}
+	artifactPath, err := browserSessionFixtureArtifactPath(command.ArtifactName)
+	if err != nil {
+		return err
+	}
+	plaintext, err := readBrowserSessionFixturePlaintext(app.RuntimeRoot, command.PlaintextFile)
+	if err != nil {
+		return err
+	}
+	artifact, err := browserprofileartifacts.Write(ctx, browserprofileartifacts.Params{
+		Store:        app.Store,
+		ODINRoot:     app.RuntimeRoot,
+		SessionID:    session.ID,
+		ProfilePath:  session.ProfilePath,
+		Plaintext:    plaintext,
+		ArtifactPath: artifactPath,
+		KeyProvider:  browserprofilekeys.LoadFromEnv,
+	})
+	if err != nil {
+		return err
+	}
+	view := newBrowserSessionProfileArtifactView(artifact)
+	if command.JSON {
+		return commands.WriteJSON(stdout, browserSessionProfileArtifactEnvelope{Artifact: view})
+	}
+	_, err = fmt.Fprintf(stdout, "browser_session_profile_artifact=%d session=%d status=%s path=%s key_ref=%s\n", view.ID, view.SessionID, view.Status, view.ArtifactPath, view.EncryptionKeyRef)
 	return err
 }
 
@@ -932,6 +994,99 @@ func browserSessionProfilePathExists(runtimeRoot string, profilePath string) boo
 	}
 	_, err := os.Stat(filepath.Join(runtimeRoot, filepath.FromSlash(profilePath)))
 	return err == nil
+}
+
+func newBrowserSessionProfileArtifactView(artifact sqlite.BrowserEncryptedProfileArtifact) browserSessionProfileArtifactView {
+	return browserSessionProfileArtifactView{
+		ID:               artifact.ID,
+		SessionID:        artifact.SessionID,
+		Status:           string(artifact.Status),
+		ProfilePath:      artifact.ProfilePath,
+		ArtifactPath:     artifact.EncryptedArtifactPath,
+		EncryptionKeyRef: artifact.EncryptionKeyRef,
+		CreatedAt:        formatBrowserSessionTime(artifact.CreatedAt),
+	}
+}
+
+func browserSessionFixtureArtifactPath(name string) (string, error) {
+	name = strings.TrimSpace(name)
+	if strings.HasSuffix(name, ".enc") {
+		name = strings.TrimSuffix(name, ".enc")
+	}
+	if name == "" || name == "." || name == ".." {
+		return "", fmt.Errorf("browser profile fixture artifact name is required")
+	}
+	if strings.ContainsAny(name, `/\`) {
+		return "", fmt.Errorf("browser profile fixture artifact name must be one safe component")
+	}
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z':
+		case r >= 'A' && r <= 'Z':
+		case r >= '0' && r <= '9':
+		case r == '-' || r == '_' || r == '.':
+		default:
+			return "", fmt.Errorf("browser profile fixture artifact name contains unsafe component %q", name)
+		}
+	}
+	if err := rejectBrowserSessionFixtureMetadata(name); err != nil {
+		return "", err
+	}
+	return filepath.ToSlash(filepath.Join("browser-sessions", "encrypted-profiles", name+".enc")), nil
+}
+
+func readBrowserSessionFixturePlaintext(runtimeRoot string, plaintextFile string) ([]byte, error) {
+	plaintextFile = strings.TrimSpace(plaintextFile)
+	if plaintextFile == "" {
+		return nil, fmt.Errorf("--plaintext-file is required")
+	}
+	absPath, err := filepath.Abs(plaintextFile)
+	if err != nil {
+		return nil, fmt.Errorf("browser profile fixture plaintext path: %w", err)
+	}
+	if err := rejectBrowserSessionFixtureRuntimePath(runtimeRoot, absPath); err != nil {
+		return nil, err
+	}
+	info, err := os.Stat(absPath)
+	if err != nil {
+		return nil, fmt.Errorf("read plaintext fixture: %w", err)
+	}
+	if info.IsDir() {
+		return nil, fmt.Errorf("read plaintext fixture: path is a directory")
+	}
+	plaintext, err := os.ReadFile(absPath)
+	if err != nil {
+		return nil, fmt.Errorf("read plaintext fixture: %w", err)
+	}
+	return plaintext, nil
+}
+
+func rejectBrowserSessionFixtureRuntimePath(runtimeRoot string, absPath string) error {
+	rootAbs, err := filepath.Abs(runtimeRoot)
+	if err != nil {
+		return fmt.Errorf("ODIN_ROOT absolute path: %w", err)
+	}
+	browserRoot := filepath.Join(filepath.Clean(rootAbs), "browser-sessions")
+	rel, err := filepath.Rel(browserRoot, absPath)
+	if err != nil {
+		return fmt.Errorf("read plaintext fixture path: %w", err)
+	}
+	if rel == "." || (!strings.HasPrefix(rel, ".."+string(filepath.Separator)) && rel != ".." && !filepath.IsAbs(rel)) {
+		return fmt.Errorf("read plaintext fixture: file must not come from ODIN_ROOT/browser-sessions")
+	}
+	return nil
+}
+
+func rejectBrowserSessionFixtureMetadata(values ...string) error {
+	for _, value := range values {
+		lower := strings.ToLower(value)
+		for _, forbidden := range []string{"password", "passkey", "totp", "backup_code", "cookie", "credential", "profile_bytes"} {
+			if strings.Contains(lower, forbidden) {
+				return fmt.Errorf("browser profile fixture artifact forbidden metadata marker %q", forbidden)
+			}
+		}
+	}
+	return nil
 }
 
 func newBrowserSessionLoginRequestView(request sqlite.BrowserSessionLoginRequest) browserSessionLoginRequestView {

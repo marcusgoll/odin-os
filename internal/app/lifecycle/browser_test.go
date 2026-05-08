@@ -3,12 +3,16 @@ package lifecycle
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"odin-os/internal/runtime/browserprofileartifacts"
+	"odin-os/internal/runtime/browserprofilecrypto"
+	"odin-os/internal/runtime/browserprofilekeys"
 	"odin-os/internal/store/sqlite"
 )
 
@@ -1365,6 +1369,170 @@ func TestRunBrowserSessionProfileRetentionCleanupDryRunAndApply(t *testing.T) {
 	}
 }
 
+func TestRunBrowserSessionProfileArtifactCreateFixtureEncryptsAndRecordsMetadata(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	root := testRepoRoot(t)
+	key := bytes.Repeat([]byte{0x52}, browserprofilecrypto.KeySize)
+	t.Setenv(browserprofilekeys.EnvKeyB64, base64.StdEncoding.EncodeToString(key))
+	plaintext := []byte("fixture plaintext sentinel for cli artifact")
+	plaintextPath := filepath.Join(t.TempDir(), "fixture-profile.txt")
+	if err := os.WriteFile(plaintextPath, plaintext, 0o600); err != nil {
+		t.Fatalf("WriteFile(plaintext fixture) error = %v", err)
+	}
+
+	run := func(args ...string) string {
+		t.Helper()
+		var output bytes.Buffer
+		if err := Run(context.Background(), root, args, strings.NewReader(""), &output); err != nil {
+			t.Fatalf("Run(%v) error = %v\noutput=%s", args, err, output.String())
+		}
+		return output.String()
+	}
+
+	created := decodeBrowserSessionEnvelope(t, []byte(run(
+		"browser", "session", "create",
+		"--name", "fixture-cli",
+		"--domain", "example.com",
+		"--permission-tier", "authenticated_read",
+		"--json",
+	)))
+	output := run(
+		"browser", "session", "profile", "artifact", "create-fixture",
+		"--session-id", int64String(created.ID),
+		"--name", "fixture-one",
+		"--plaintext-file", plaintextPath,
+		"--json",
+	)
+	if strings.Contains(output, string(plaintext)) || strings.Contains(output, plaintextPath) {
+		t.Fatalf("create-fixture output leaked plaintext/source path: %s", output)
+	}
+	artifact := decodeBrowserSessionProfileArtifactEnvelope(t, []byte(output))
+	if artifact.ID <= 0 || artifact.SessionID != created.ID || artifact.Status != "encrypted" {
+		t.Fatalf("artifact = %+v, want encrypted artifact linked to session", artifact)
+	}
+	if artifact.ArtifactPath != "browser-sessions/encrypted-profiles/fixture-one.enc" {
+		t.Fatalf("artifact.ArtifactPath = %q, want safe encrypted artifact path", artifact.ArtifactPath)
+	}
+	if artifact.ProfilePath != created.ProfilePath {
+		t.Fatalf("artifact.ProfilePath = %q, want session profile path %q", artifact.ProfilePath, created.ProfilePath)
+	}
+	if artifact.EncryptionKeyRef != "env:"+browserprofilekeys.EnvKeyB64 {
+		t.Fatalf("artifact.EncryptionKeyRef = %q, want env key ref", artifact.EncryptionKeyRef)
+	}
+	artifactBytes, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(artifact.ArtifactPath)))
+	if err != nil {
+		t.Fatalf("ReadFile(encrypted artifact) error = %v", err)
+	}
+	if bytes.Contains(artifactBytes, plaintext) {
+		t.Fatalf("encrypted artifact contains fixture plaintext")
+	}
+	readPlaintext, err := browserprofileartifacts.Read(browserprofileartifacts.ReadParams{
+		ODINRoot:     root,
+		ArtifactPath: artifact.ArtifactPath,
+		KeyProvider:  browserprofilekeys.LoadFromEnv,
+	})
+	if err != nil {
+		t.Fatalf("Read(encrypted artifact) error = %v", err)
+	}
+	if !bytes.Equal(readPlaintext, plaintext) {
+		t.Fatalf("decrypted artifact plaintext = %q, want fixture plaintext", readPlaintext)
+	}
+
+	store := openLifecycleBrowserStore(t, root)
+	persisted := assertLifecycleBrowserArtifactStatus(t, store, artifact.ID, sqlite.BrowserEncryptedProfileArtifactStatusEncrypted)
+	closeLifecycleBrowserStore(t, store)
+	if persisted.EncryptedArtifactPath != artifact.ArtifactPath || persisted.EncryptionKeyRef != artifact.EncryptionKeyRef {
+		t.Fatalf("persisted artifact = %+v, want CLI metadata %+v", persisted, artifact)
+	}
+
+	retention := decodeBrowserSessionProfileRetentionEnvelope(t, []byte(run("browser", "session", "profile", "retention", "cleanup", "--json")))
+	if retention.Eligible != 0 || retention.Skipped != 1 || retention.Cleaned != 0 {
+		t.Fatalf("retention = %+v, want active encrypted artifact skipped by cleanup", retention)
+	}
+	for _, rel := range []string{created.ProfilePath, "cookies", "credentials"} {
+		if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(rel))); !os.IsNotExist(err) {
+			t.Fatalf("path %q exists after create-fixture err=%v, want no profile/cookie/credential writes", rel, err)
+		}
+	}
+
+	logs := run("logs", "--json")
+	if !strings.Contains(logs, `"type": "browser.profile_encrypted"`) {
+		t.Fatalf("logs output = %s, want browser.profile_encrypted audit event", logs)
+	}
+	for _, forbidden := range []string{string(plaintext), plaintextPath, "password", "totp", "backup_code", "profile_bytes"} {
+		if strings.Contains(strings.ToLower(logs), strings.ToLower(forbidden)) {
+			t.Fatalf("logs output contains forbidden marker %q: %s", forbidden, logs)
+		}
+	}
+}
+
+func TestRunBrowserSessionProfileArtifactCreateFixtureFailsClosed(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	root := testRepoRoot(t)
+	plaintextPath := filepath.Join(t.TempDir(), "fixture-profile.txt")
+	if err := os.WriteFile(plaintextPath, []byte("fixture plaintext"), 0o600); err != nil {
+		t.Fatalf("WriteFile(plaintext fixture) error = %v", err)
+	}
+
+	run := func(args ...string) string {
+		t.Helper()
+		var output bytes.Buffer
+		if err := Run(context.Background(), root, args, strings.NewReader(""), &output); err != nil {
+			t.Fatalf("Run(%v) error = %v\noutput=%s", args, err, output.String())
+		}
+		return output.String()
+	}
+
+	created := decodeBrowserSessionEnvelope(t, []byte(run(
+		"browser", "session", "create",
+		"--name", "fixture-fail-closed",
+		"--domain", "example.com",
+		"--permission-tier", "authenticated_read",
+		"--json",
+	)))
+
+	var output bytes.Buffer
+	err := Run(context.Background(), root, []string{
+		"browser", "session", "profile", "artifact", "create-fixture",
+		"--session-id", int64String(created.ID),
+		"--name", "missing-key",
+		"--plaintext-file", plaintextPath,
+		"--json",
+	}, strings.NewReader(""), &output)
+	if err == nil || !strings.Contains(err.Error(), browserprofilekeys.EnvKeyB64) {
+		t.Fatalf("Run(create-fixture missing key) error = %v output=%s, want missing key rejection", err, output.String())
+	}
+	if _, statErr := os.Stat(filepath.Join(root, "browser-sessions", "encrypted-profiles", "missing-key.enc")); !os.IsNotExist(statErr) {
+		t.Fatalf("artifact exists after missing-key rejection: err=%v", statErr)
+	}
+
+	key := bytes.Repeat([]byte{0x61}, browserprofilecrypto.KeySize)
+	t.Setenv(browserprofilekeys.EnvKeyB64, base64.StdEncoding.EncodeToString(key))
+	output.Reset()
+	err = Run(context.Background(), root, []string{
+		"browser", "session", "profile", "artifact", "create-fixture",
+		"--session-id", int64String(created.ID),
+		"--name", "cookies",
+		"--plaintext-file", plaintextPath,
+		"--json",
+	}, strings.NewReader(""), &output)
+	if err == nil || !strings.Contains(strings.ToLower(err.Error()), "forbidden") {
+		t.Fatalf("Run(create-fixture credential-looking name) error = %v output=%s, want forbidden name rejection", err, output.String())
+	}
+
+	output.Reset()
+	err = Run(context.Background(), root, []string{
+		"browser", "session", "profile", "artifact", "create-fixture",
+		"--session-id", int64String(created.ID),
+		"--name", "missing-file",
+		"--plaintext-file", filepath.Join(t.TempDir(), "missing.txt"),
+		"--json",
+	}, strings.NewReader(""), &output)
+	if err == nil || !strings.Contains(strings.ToLower(err.Error()), "read plaintext fixture") {
+		t.Fatalf("Run(create-fixture missing file) error = %v output=%s, want missing file rejection", err, output.String())
+	}
+}
+
 type browserSessionJSON struct {
 	ID                   int64  `json:"id"`
 	Name                 string `json:"name"`
@@ -1405,6 +1573,16 @@ type browserSessionProfileRetentionArtifactJSON struct {
 	Removed      bool   `json:"removed"`
 	ErrorCode    string `json:"error_code,omitempty"`
 	ErrorMessage string `json:"error_message,omitempty"`
+}
+
+type browserSessionProfileArtifactJSON struct {
+	ID               int64  `json:"id"`
+	SessionID        int64  `json:"session_id"`
+	Status           string `json:"status"`
+	ProfilePath      string `json:"profile_path"`
+	ArtifactPath     string `json:"artifact_path"`
+	EncryptionKeyRef string `json:"encryption_key_ref"`
+	CreatedAt        string `json:"created_at"`
 }
 
 type browserSessionLoginRequestJSON struct {
@@ -1492,6 +1670,17 @@ func decodeBrowserSessionProfileRetentionEnvelope(t *testing.T, payload []byte) 
 		t.Fatalf("browser session profile retention json decode error = %v; output=%s", err, string(payload))
 	}
 	return envelope.Retention
+}
+
+func decodeBrowserSessionProfileArtifactEnvelope(t *testing.T, payload []byte) browserSessionProfileArtifactJSON {
+	t.Helper()
+	var envelope struct {
+		Artifact browserSessionProfileArtifactJSON `json:"artifact"`
+	}
+	if err := json.Unmarshal(payload, &envelope); err != nil {
+		t.Fatalf("browser session profile artifact json decode error = %v; output=%s", err, string(payload))
+	}
+	return envelope.Artifact
 }
 
 func decodeBrowserSessionEnvelope(t *testing.T, payload []byte) browserSessionJSON {
