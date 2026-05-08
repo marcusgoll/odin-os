@@ -264,3 +264,35 @@ func TestParseBrowserSessionProfileRetentionCleanupCommand(t *testing.T) {
 		t.Fatal("ParseBrowser(profile rotate) error = nil, want rejection")
 	}
 }
+
+func TestParseBrowserSessionProfileArtifactCreateFixtureCommand(t *testing.T) {
+	command, err := ParseBrowser([]string{
+		"session", "profile", "artifact", "create-fixture",
+		"--session-id", "42",
+		"--name", "fixture-one",
+		"--plaintext-file", "/tmp/fixture-profile.txt",
+		"--json",
+	})
+	if err != nil {
+		t.Fatalf("ParseBrowser(session profile artifact create-fixture) error = %v", err)
+	}
+	if command.Name != "session" || command.SessionAction != "profile" || command.ProfileAction != "artifact" || command.ArtifactAction != "create-fixture" || command.SessionID != 42 || command.ArtifactName != "fixture-one" || command.PlaintextFile != "/tmp/fixture-profile.txt" || !command.JSON {
+		t.Fatalf("command = %+v, want parsed fixture artifact create", command)
+	}
+
+	if _, err := ParseBrowser([]string{"session", "profile", "artifact", "create-fixture", "--name", "fixture-one", "--plaintext-file", "/tmp/fixture-profile.txt", "--json"}); err == nil {
+		t.Fatal("ParseBrowser(create-fixture missing session id) error = nil, want rejection")
+	}
+	if _, err := ParseBrowser([]string{"session", "profile", "artifact", "create-fixture", "--session-id", "42", "--plaintext-file", "/tmp/fixture-profile.txt", "--json"}); err == nil {
+		t.Fatal("ParseBrowser(create-fixture missing name) error = nil, want rejection")
+	}
+	if _, err := ParseBrowser([]string{"session", "profile", "artifact", "create-fixture", "--session-id", "42", "--name", "fixture-one", "--json"}); err == nil {
+		t.Fatal("ParseBrowser(create-fixture missing plaintext file) error = nil, want rejection")
+	}
+	if _, err := ParseBrowser([]string{"session", "profile", "artifact", "create-fixture", "--session-id", "42", "--name", "fixture-one", "--plaintext-file", "/tmp/fixture-profile.txt", "--apply", "--json"}); err == nil {
+		t.Fatal("ParseBrowser(create-fixture with apply) error = nil, want rejection")
+	}
+	if _, err := ParseBrowser([]string{"session", "profile", "artifact", "show", "--session-id", "42", "--json"}); err == nil {
+		t.Fatal("ParseBrowser(profile artifact unsupported action) error = nil, want rejection")
+	}
+}
