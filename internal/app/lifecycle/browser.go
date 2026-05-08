@@ -80,6 +80,10 @@ type browserSessionProfileArtifactEnvelope struct {
 	Artifact browserSessionProfileArtifactView `json:"artifact"`
 }
 
+type browserSessionProfileArtifactListView struct {
+	Artifacts []browserSessionProfileArtifactView `json:"artifacts"`
+}
+
 type browserSessionView struct {
 	ID                   int64  `json:"id"`
 	Name                 string `json:"name"`
@@ -122,6 +126,12 @@ type browserSessionProfileArtifactView struct {
 	ArtifactPath     string `json:"artifact_path"`
 	EncryptionKeyRef string `json:"encryption_key_ref"`
 	CreatedAt        string `json:"created_at"`
+	UpdatedAt        string `json:"updated_at"`
+	ExpiresAt        string `json:"expires_at,omitempty"`
+	RevokedAt        string `json:"revoked_at,omitempty"`
+	CleanedAt        string `json:"cleaned_at,omitempty"`
+	ErrorCode        string `json:"error_code,omitempty"`
+	ErrorMessage     string `json:"error_message,omitempty"`
 }
 
 type browserSessionLoginRequestView struct {
@@ -454,39 +464,89 @@ func runBrowserSessionProfileRetention(ctx context.Context, app bootstrap.App, c
 }
 
 func runBrowserSessionProfileArtifact(ctx context.Context, app bootstrap.App, command commands.BrowserCommand, stdout io.Writer) error {
-	if command.ArtifactAction != "create-fixture" {
+	switch command.ArtifactAction {
+	case "create-fixture":
+		session, err := app.Store.GetBrowserSession(ctx, command.SessionID)
+		if err != nil {
+			return err
+		}
+		artifactPath, err := browserSessionFixtureArtifactPath(command.ArtifactName)
+		if err != nil {
+			return err
+		}
+		plaintext, err := readBrowserSessionFixturePlaintext(app.RuntimeRoot, command.PlaintextFile)
+		if err != nil {
+			return err
+		}
+		artifact, err := browserprofileartifacts.Write(ctx, browserprofileartifacts.Params{
+			Store:        app.Store,
+			ODINRoot:     app.RuntimeRoot,
+			SessionID:    session.ID,
+			ProfilePath:  session.ProfilePath,
+			Plaintext:    plaintext,
+			ArtifactPath: artifactPath,
+			KeyProvider:  browserprofilekeys.LoadFromEnv,
+		})
+		if err != nil {
+			return err
+		}
+		view := newBrowserSessionProfileArtifactView(artifact)
+		if command.JSON {
+			return commands.WriteJSON(stdout, browserSessionProfileArtifactEnvelope{Artifact: view})
+		}
+		_, err = fmt.Fprintf(stdout, "browser_session_profile_artifact=%d session=%d status=%s path=%s key_ref=%s\n", view.ID, view.SessionID, view.Status, view.ArtifactPath, view.EncryptionKeyRef)
+		return err
+	case "list":
+		artifacts, err := app.Store.ListBrowserEncryptedProfileArtifacts(ctx, sqlite.ListBrowserEncryptedProfileArtifactsParams{SessionID: command.SessionID})
+		if err != nil {
+			return err
+		}
+		views := make([]browserSessionProfileArtifactView, 0, len(artifacts))
+		for _, artifact := range artifacts {
+			views = append(views, newBrowserSessionProfileArtifactView(artifact))
+		}
+		if command.JSON {
+			return commands.WriteJSON(stdout, browserSessionProfileArtifactListView{Artifacts: views})
+		}
+		if len(views) == 0 {
+			_, err := fmt.Fprintln(stdout, "no browser session profile artifacts")
+			return err
+		}
+		for _, view := range views {
+			if _, err := fmt.Fprintf(stdout, "browser_session_profile_artifact=%d session=%d status=%s path=%s key_ref=%s\n", view.ID, view.SessionID, view.Status, view.ArtifactPath, view.EncryptionKeyRef); err != nil {
+				return err
+			}
+		}
+		return nil
+	case "show":
+		artifact, err := app.Store.GetBrowserEncryptedProfileArtifact(ctx, command.ID)
+		if err != nil {
+			return err
+		}
+		view := newBrowserSessionProfileArtifactView(artifact)
+		if command.JSON {
+			return commands.WriteJSON(stdout, browserSessionProfileArtifactEnvelope{Artifact: view})
+		}
+		_, err = fmt.Fprintf(stdout, "browser_session_profile_artifact=%d session=%d status=%s path=%s key_ref=%s\n", view.ID, view.SessionID, view.Status, view.ArtifactPath, view.EncryptionKeyRef)
+		return err
+	case "revoke":
+		artifact, err := app.Store.MarkBrowserEncryptedProfileArtifactRevoked(ctx, sqlite.MarkBrowserEncryptedProfileArtifactRevokedParams{
+			ID:     command.ID,
+			Actor:  "operator",
+			Reason: "operator revoked encrypted profile artifact metadata",
+		})
+		if err != nil {
+			return err
+		}
+		view := newBrowserSessionProfileArtifactView(artifact)
+		if command.JSON {
+			return commands.WriteJSON(stdout, browserSessionProfileArtifactEnvelope{Artifact: view})
+		}
+		_, err = fmt.Fprintf(stdout, "browser_session_profile_artifact=%d session=%d status=%s path=%s key_ref=%s\n", view.ID, view.SessionID, view.Status, view.ArtifactPath, view.EncryptionKeyRef)
+		return err
+	default:
 		return fmt.Errorf(commands.BrowserUsage)
 	}
-	session, err := app.Store.GetBrowserSession(ctx, command.SessionID)
-	if err != nil {
-		return err
-	}
-	artifactPath, err := browserSessionFixtureArtifactPath(command.ArtifactName)
-	if err != nil {
-		return err
-	}
-	plaintext, err := readBrowserSessionFixturePlaintext(app.RuntimeRoot, command.PlaintextFile)
-	if err != nil {
-		return err
-	}
-	artifact, err := browserprofileartifacts.Write(ctx, browserprofileartifacts.Params{
-		Store:        app.Store,
-		ODINRoot:     app.RuntimeRoot,
-		SessionID:    session.ID,
-		ProfilePath:  session.ProfilePath,
-		Plaintext:    plaintext,
-		ArtifactPath: artifactPath,
-		KeyProvider:  browserprofilekeys.LoadFromEnv,
-	})
-	if err != nil {
-		return err
-	}
-	view := newBrowserSessionProfileArtifactView(artifact)
-	if command.JSON {
-		return commands.WriteJSON(stdout, browserSessionProfileArtifactEnvelope{Artifact: view})
-	}
-	_, err = fmt.Fprintf(stdout, "browser_session_profile_artifact=%d session=%d status=%s path=%s key_ref=%s\n", view.ID, view.SessionID, view.Status, view.ArtifactPath, view.EncryptionKeyRef)
-	return err
 }
 
 func runBrowserSessionRunner(ctx context.Context, app bootstrap.App, command commands.BrowserCommand, stdout io.Writer) error {
@@ -1005,6 +1065,12 @@ func newBrowserSessionProfileArtifactView(artifact sqlite.BrowserEncryptedProfil
 		ArtifactPath:     artifact.EncryptedArtifactPath,
 		EncryptionKeyRef: artifact.EncryptionKeyRef,
 		CreatedAt:        formatBrowserSessionTime(artifact.CreatedAt),
+		UpdatedAt:        formatBrowserSessionTime(artifact.UpdatedAt),
+		ExpiresAt:        formatBrowserSessionOptionalTime(artifact.ExpiresAt),
+		RevokedAt:        formatBrowserSessionOptionalTime(artifact.RevokedAt),
+		CleanedAt:        formatBrowserSessionOptionalTime(artifact.CleanedAt),
+		ErrorCode:        browserSessionStringPtrValue(artifact.ErrorCode),
+		ErrorMessage:     browserSessionStringPtrValue(artifact.ErrorMessage),
 	}
 }
 

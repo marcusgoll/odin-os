@@ -292,7 +292,64 @@ func TestParseBrowserSessionProfileArtifactCreateFixtureCommand(t *testing.T) {
 	if _, err := ParseBrowser([]string{"session", "profile", "artifact", "create-fixture", "--session-id", "42", "--name", "fixture-one", "--plaintext-file", "/tmp/fixture-profile.txt", "--apply", "--json"}); err == nil {
 		t.Fatal("ParseBrowser(create-fixture with apply) error = nil, want rejection")
 	}
-	if _, err := ParseBrowser([]string{"session", "profile", "artifact", "show", "--session-id", "42", "--json"}); err == nil {
+	if _, err := ParseBrowser([]string{"session", "profile", "artifact", "rotate", "--session-id", "42", "--json"}); err == nil {
 		t.Fatal("ParseBrowser(profile artifact unsupported action) error = nil, want rejection")
+	}
+}
+
+func TestParseBrowserSessionProfileArtifactStatusCommands(t *testing.T) {
+	show, err := ParseBrowser([]string{
+		"session", "profile", "artifact", "show",
+		"--id", "9",
+		"--json",
+	})
+	if err != nil {
+		t.Fatalf("ParseBrowser(profile artifact show) error = %v", err)
+	}
+	if show.Name != "session" || show.SessionAction != "profile" || show.ProfileAction != "artifact" || show.ArtifactAction != "show" || show.ID != 9 || !show.JSON {
+		t.Fatalf("show command = %+v, want parsed artifact show", show)
+	}
+
+	list, err := ParseBrowser([]string{
+		"session", "profile", "artifact", "list",
+		"--session-id", "42",
+		"--json",
+	})
+	if err != nil {
+		t.Fatalf("ParseBrowser(profile artifact list) error = %v", err)
+	}
+	if list.SessionAction != "profile" || list.ProfileAction != "artifact" || list.ArtifactAction != "list" || list.SessionID != 42 || !list.JSON {
+		t.Fatalf("list command = %+v, want parsed artifact list", list)
+	}
+
+	revoke, err := ParseBrowser([]string{
+		"session", "profile", "artifact", "revoke",
+		"--id", "9",
+		"--json",
+	})
+	if err != nil {
+		t.Fatalf("ParseBrowser(profile artifact revoke) error = %v", err)
+	}
+	if revoke.SessionAction != "profile" || revoke.ProfileAction != "artifact" || revoke.ArtifactAction != "revoke" || revoke.ID != 9 || !revoke.JSON {
+		t.Fatalf("revoke command = %+v, want parsed artifact revoke", revoke)
+	}
+
+	if _, err := ParseBrowser([]string{"session", "profile", "artifact", "show", "--json"}); err == nil {
+		t.Fatal("ParseBrowser(profile artifact show missing id) error = nil, want rejection")
+	}
+	if _, err := ParseBrowser([]string{"session", "profile", "artifact", "list", "--json"}); err == nil {
+		t.Fatal("ParseBrowser(profile artifact list missing session id) error = nil, want rejection")
+	}
+	if _, err := ParseBrowser([]string{"session", "profile", "artifact", "revoke", "--json"}); err == nil {
+		t.Fatal("ParseBrowser(profile artifact revoke missing id) error = nil, want rejection")
+	}
+	if _, err := ParseBrowser([]string{"session", "profile", "artifact", "show", "--id", "9", "--plaintext-file", "/tmp/plain", "--json"}); err == nil {
+		t.Fatal("ParseBrowser(profile artifact show with plaintext file) error = nil, want rejection")
+	}
+	if _, err := ParseBrowser([]string{"session", "profile", "artifact", "list", "--session-id", "42", "--apply", "--json"}); err == nil {
+		t.Fatal("ParseBrowser(profile artifact list with apply) error = nil, want rejection")
+	}
+	if _, err := ParseBrowser([]string{"session", "profile", "artifact", "revoke", "--id", "9", "--session-id", "42", "--json"}); err == nil {
+		t.Fatal("ParseBrowser(profile artifact revoke with session id) error = nil, want rejection")
 	}
 }

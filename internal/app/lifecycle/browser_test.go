@@ -1533,6 +1533,156 @@ func TestRunBrowserSessionProfileArtifactCreateFixtureFailsClosed(t *testing.T) 
 	}
 }
 
+func TestRunBrowserSessionProfileArtifactStatusRevokeAndRetentionFlow(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	root := testRepoRoot(t)
+	key := bytes.Repeat([]byte{0x73}, browserprofilecrypto.KeySize)
+	encodedKey := base64.StdEncoding.EncodeToString(key)
+	t.Setenv(browserprofilekeys.EnvKeyB64, encodedKey)
+	secretText := "fixture plaintext sentinel for artifact revoke flow"
+	activeText := "fixture plaintext sentinel for active artifact"
+	plaintextPath := filepath.Join(t.TempDir(), "revoked-profile.txt")
+	activePlaintextPath := filepath.Join(t.TempDir(), "active-profile.txt")
+	if err := os.WriteFile(plaintextPath, []byte(secretText), 0o600); err != nil {
+		t.Fatalf("WriteFile(revoked plaintext) error = %v", err)
+	}
+	if err := os.WriteFile(activePlaintextPath, []byte(activeText), 0o600); err != nil {
+		t.Fatalf("WriteFile(active plaintext) error = %v", err)
+	}
+
+	run := func(args ...string) string {
+		t.Helper()
+		var output bytes.Buffer
+		if err := Run(context.Background(), root, args, strings.NewReader(""), &output); err != nil {
+			t.Fatalf("Run(%v) error = %v\noutput=%s", args, err, output.String())
+		}
+		return output.String()
+	}
+
+	created := decodeBrowserSessionEnvelope(t, []byte(run(
+		"browser", "session", "create",
+		"--name", "artifact-status-cli",
+		"--domain", "example.com",
+		"--permission-tier", "authenticated_read",
+		"--json",
+	)))
+	revokedArtifact := decodeBrowserSessionProfileArtifactEnvelope(t, []byte(run(
+		"browser", "session", "profile", "artifact", "create-fixture",
+		"--session-id", int64String(created.ID),
+		"--name", "revoke-flow",
+		"--plaintext-file", plaintextPath,
+		"--json",
+	)))
+	activeArtifact := decodeBrowserSessionProfileArtifactEnvelope(t, []byte(run(
+		"browser", "session", "profile", "artifact", "create-fixture",
+		"--session-id", int64String(created.ID),
+		"--name", "active-flow",
+		"--plaintext-file", activePlaintextPath,
+		"--json",
+	)))
+
+	listOutput := run(
+		"browser", "session", "profile", "artifact", "list",
+		"--session-id", int64String(created.ID),
+		"--json",
+	)
+	forbiddenJSONMarkers := []string{secretText, activeText, plaintextPath, activePlaintextPath, encodedKey}
+	for _, forbidden := range forbiddenJSONMarkers {
+		if strings.Contains(listOutput, forbidden) {
+			t.Fatalf("artifact list output leaked forbidden marker %q: %s", forbidden, listOutput)
+		}
+	}
+	list := decodeBrowserSessionProfileArtifactListEnvelope(t, []byte(listOutput))
+	if len(list) != 2 || list[0].ID != revokedArtifact.ID || list[1].ID != activeArtifact.ID {
+		t.Fatalf("artifact list = %+v, want two persisted artifacts in id order", list)
+	}
+
+	showOutput := run(
+		"browser", "session", "profile", "artifact", "show",
+		"--id", int64String(revokedArtifact.ID),
+		"--json",
+	)
+	for _, forbidden := range forbiddenJSONMarkers {
+		if strings.Contains(showOutput, forbidden) {
+			t.Fatalf("artifact show output leaked forbidden marker %q: %s", forbidden, showOutput)
+		}
+	}
+	show := decodeBrowserSessionProfileArtifactEnvelope(t, []byte(showOutput))
+	if show.ID != revokedArtifact.ID || show.SessionID != created.ID || show.Status != "encrypted" || show.ArtifactPath == "" || show.EncryptionKeyRef != "env:"+browserprofilekeys.EnvKeyB64 {
+		t.Fatalf("show artifact = %+v, want metadata-only encrypted artifact", show)
+	}
+
+	revoke := decodeBrowserSessionProfileArtifactEnvelope(t, []byte(run(
+		"browser", "session", "profile", "artifact", "revoke",
+		"--id", int64String(revokedArtifact.ID),
+		"--json",
+	)))
+	if revoke.ID != revokedArtifact.ID || revoke.Status != "revoked" || revoke.RevokedAt == "" {
+		t.Fatalf("revoke artifact = %+v, want revoked artifact with timestamp", revoke)
+	}
+	revokedArtifactAbsPath := filepath.Join(root, filepath.FromSlash(revokedArtifact.ArtifactPath))
+	activeArtifactAbsPath := filepath.Join(root, filepath.FromSlash(activeArtifact.ArtifactPath))
+	if _, err := os.Stat(revokedArtifactAbsPath); err != nil {
+		t.Fatalf("revoked artifact file missing after revoke: %v", err)
+	}
+	if _, err := os.Stat(activeArtifactAbsPath); err != nil {
+		t.Fatalf("active artifact file missing after revoke: %v", err)
+	}
+
+	dryRun := decodeBrowserSessionProfileRetentionEnvelope(t, []byte(run(
+		"browser", "session", "profile", "retention", "cleanup",
+		"--session-id", int64String(created.ID),
+		"--json",
+	)))
+	if !dryRun.DryRun || dryRun.Apply || dryRun.Eligible != 1 || dryRun.Cleaned != 0 || dryRun.Failed != 0 || dryRun.Skipped != 1 {
+		t.Fatalf("dry-run retention = %+v, want one revoked eligible and one active skipped", dryRun)
+	}
+	if len(dryRun.Artifacts) != 1 || dryRun.Artifacts[0].ArtifactID != revokedArtifact.ID || dryRun.Artifacts[0].Action != "would_clean" || dryRun.Artifacts[0].Removed {
+		t.Fatalf("dry-run retention artifacts = %+v, want revoked artifact would_clean", dryRun.Artifacts)
+	}
+	if _, err := os.Stat(revokedArtifactAbsPath); err != nil {
+		t.Fatalf("revoked artifact file missing after dry-run: %v", err)
+	}
+
+	applied := decodeBrowserSessionProfileRetentionEnvelope(t, []byte(run(
+		"browser", "session", "profile", "retention", "cleanup",
+		"--session-id", int64String(created.ID),
+		"--apply",
+		"--json",
+	)))
+	if applied.DryRun || !applied.Apply || applied.Eligible != 1 || applied.Cleaned != 1 || applied.Failed != 0 || applied.Skipped != 1 {
+		t.Fatalf("apply retention = %+v, want one revoked cleaned and one active skipped", applied)
+	}
+	if _, err := os.Stat(revokedArtifactAbsPath); !os.IsNotExist(err) {
+		t.Fatalf("revoked artifact file exists after apply: err=%v", err)
+	}
+	if _, err := os.Stat(activeArtifactAbsPath); err != nil {
+		t.Fatalf("active artifact missing after apply: %v", err)
+	}
+
+	store := openLifecycleBrowserStore(t, root)
+	assertLifecycleBrowserArtifactStatus(t, store, revokedArtifact.ID, sqlite.BrowserEncryptedProfileArtifactStatusCleaned)
+	assertLifecycleBrowserArtifactStatus(t, store, activeArtifact.ID, sqlite.BrowserEncryptedProfileArtifactStatusEncrypted)
+	closeLifecycleBrowserStore(t, store)
+
+	logs := run("logs", "--json")
+	for _, want := range []string{`"type": "browser.profile_encrypted"`, `"type": "browser.profile_revoked"`, `"type": "browser.profile_cleaned"`} {
+		if !strings.Contains(logs, want) {
+			t.Fatalf("logs output = %s, want audit event %s", logs, want)
+		}
+	}
+	for _, forbidden := range forbiddenJSONMarkers {
+		if strings.Contains(logs, forbidden) {
+			t.Fatalf("logs output leaked forbidden marker %q: %s", forbidden, logs)
+		}
+	}
+	for _, rel := range []string{created.ProfilePath, "cookies", "credentials"} {
+		if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(rel))); !os.IsNotExist(err) {
+			t.Fatalf("path %q exists after artifact status flow err=%v, want no profile/cookie/credential writes", rel, err)
+		}
+	}
+}
+
 type browserSessionJSON struct {
 	ID                   int64  `json:"id"`
 	Name                 string `json:"name"`
@@ -1583,6 +1733,12 @@ type browserSessionProfileArtifactJSON struct {
 	ArtifactPath     string `json:"artifact_path"`
 	EncryptionKeyRef string `json:"encryption_key_ref"`
 	CreatedAt        string `json:"created_at"`
+	UpdatedAt        string `json:"updated_at"`
+	ExpiresAt        string `json:"expires_at,omitempty"`
+	RevokedAt        string `json:"revoked_at,omitempty"`
+	CleanedAt        string `json:"cleaned_at,omitempty"`
+	ErrorCode        string `json:"error_code,omitempty"`
+	ErrorMessage     string `json:"error_message,omitempty"`
 }
 
 type browserSessionLoginRequestJSON struct {
@@ -1681,6 +1837,17 @@ func decodeBrowserSessionProfileArtifactEnvelope(t *testing.T, payload []byte) b
 		t.Fatalf("browser session profile artifact json decode error = %v; output=%s", err, string(payload))
 	}
 	return envelope.Artifact
+}
+
+func decodeBrowserSessionProfileArtifactListEnvelope(t *testing.T, payload []byte) []browserSessionProfileArtifactJSON {
+	t.Helper()
+	var envelope struct {
+		Artifacts []browserSessionProfileArtifactJSON `json:"artifacts"`
+	}
+	if err := json.Unmarshal(payload, &envelope); err != nil {
+		t.Fatalf("browser session profile artifact list json decode error = %v; output=%s", err, string(payload))
+	}
+	return envelope.Artifacts
 }
 
 func decodeBrowserSessionEnvelope(t *testing.T, payload []byte) browserSessionJSON {
