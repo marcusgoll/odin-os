@@ -13,6 +13,7 @@ import (
 	commands "odin-os/internal/cli/commands"
 	browserexecutor "odin-os/internal/executors/browser"
 	"odin-os/internal/runtime/browserhandoff"
+	"odin-os/internal/runtime/browserprofileartifacts"
 	"odin-os/internal/store/sqlite"
 )
 
@@ -70,6 +71,10 @@ type browserSessionProfileEnvelope struct {
 	Profile browserSessionProfileView `json:"profile"`
 }
 
+type browserSessionProfileRetentionEnvelope struct {
+	Retention browserSessionProfileRetentionView `json:"retention"`
+}
+
 type browserSessionView struct {
 	ID                   int64  `json:"id"`
 	Name                 string `json:"name"`
@@ -92,6 +97,16 @@ type browserSessionProfileView struct {
 	ProfilePath       string `json:"profile_path"`
 	ProfilePathExists bool   `json:"profile_path_exists"`
 	Created           bool   `json:"created"`
+}
+
+type browserSessionProfileRetentionView struct {
+	DryRun    bool                                            `json:"dry_run"`
+	Apply     bool                                            `json:"apply"`
+	Eligible  int                                             `json:"eligible"`
+	Cleaned   int                                             `json:"cleaned"`
+	Failed    int                                             `json:"failed"`
+	Skipped   int                                             `json:"skipped"`
+	Artifacts []browserprofileartifacts.RetentionArtifactItem `json:"artifacts"`
 }
 
 type browserSessionLoginRequestView struct {
@@ -375,9 +390,41 @@ func runBrowserSession(ctx context.Context, app bootstrap.App, command commands.
 		return err
 	case "runner":
 		return runBrowserSessionRunner(ctx, app, command, stdout)
+	case "profile":
+		return runBrowserSessionProfile(ctx, app, command, stdout)
 	default:
 		return fmt.Errorf(commands.BrowserUsage)
 	}
+}
+
+func runBrowserSessionProfile(ctx context.Context, app bootstrap.App, command commands.BrowserCommand, stdout io.Writer) error {
+	if command.ProfileAction != "retention" || command.RetentionAction != "cleanup" {
+		return fmt.Errorf(commands.BrowserUsage)
+	}
+	result, err := browserprofileartifacts.Retain(ctx, browserprofileartifacts.RetentionParams{
+		Store:     app.Store,
+		ODINRoot:  app.RuntimeRoot,
+		Now:       time.Now().UTC(),
+		SessionID: command.SessionID,
+		Apply:     command.Apply,
+	})
+	if err != nil {
+		return err
+	}
+	view := browserSessionProfileRetentionView{
+		DryRun:    result.DryRun,
+		Apply:     command.Apply,
+		Eligible:  result.Eligible,
+		Cleaned:   result.Cleaned,
+		Failed:    result.Failed,
+		Skipped:   result.Skipped,
+		Artifacts: result.Artifacts,
+	}
+	if command.JSON {
+		return commands.WriteJSON(stdout, browserSessionProfileRetentionEnvelope{Retention: view})
+	}
+	_, err = fmt.Fprintf(stdout, "browser_session_profile_retention dry_run=%t apply=%t eligible=%d cleaned=%d failed=%d skipped=%d\n", view.DryRun, view.Apply, view.Eligible, view.Cleaned, view.Failed, view.Skipped)
+	return err
 }
 
 func runBrowserSessionRunner(ctx context.Context, app bootstrap.App, command commands.BrowserCommand, stdout io.Writer) error {

@@ -1243,6 +1243,128 @@ func TestRunBrowserSessionPrepareProfileRejectsRevokedAndUnsafeMetadata(t *testi
 	}
 }
 
+func TestRunBrowserSessionProfileRetentionCleanupDryRunAndApply(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	root := testRepoRoot(t)
+
+	run := func(args ...string) string {
+		t.Helper()
+		var output bytes.Buffer
+		if err := Run(context.Background(), root, args, strings.NewReader(""), &output); err != nil {
+			t.Fatalf("Run(%v) error = %v\noutput=%s", args, err, output.String())
+		}
+		return output.String()
+	}
+
+	created := decodeBrowserSessionEnvelope(t, []byte(run(
+		"browser", "session", "create",
+		"--name", "retention-cli",
+		"--domain", "example.com",
+		"--permission-tier", "authenticated_read",
+		"--json",
+	)))
+
+	store := openLifecycleBrowserStore(t, root)
+	active := createLifecycleBrowserArtifact(t, context.Background(), store, root, created, "active-cli.enc")
+	revoked := createLifecycleBrowserArtifact(t, context.Background(), store, root, created, "revoked-cli.enc")
+	expired := createLifecycleBrowserArtifact(t, context.Background(), store, root, created, "expired-cli.enc")
+	if _, err := store.MarkBrowserEncryptedProfileArtifactRevoked(context.Background(), sqlite.MarkBrowserEncryptedProfileArtifactRevokedParams{
+		ID:     revoked.ID,
+		Actor:  "test",
+		Reason: "retention cli test revoke",
+	}); err != nil {
+		t.Fatalf("MarkBrowserEncryptedProfileArtifactRevoked() error = %v", err)
+	}
+	if _, err := store.MarkBrowserEncryptedProfileArtifactExpired(context.Background(), sqlite.MarkBrowserEncryptedProfileArtifactExpiredParams{
+		ID:     expired.ID,
+		Actor:  "test",
+		Reason: "retention cli test expire",
+	}); err != nil {
+		t.Fatalf("MarkBrowserEncryptedProfileArtifactExpired() error = %v", err)
+	}
+	protectedPaths := []string{
+		"browser-sessions/encrypted-profiles/not-an-artifact.txt",
+	}
+	for _, rel := range protectedPaths {
+		writeLifecycleRetentionMarker(t, filepath.Join(root, filepath.FromSlash(rel)))
+	}
+	closeLifecycleBrowserStore(t, store)
+
+	dryRun := decodeBrowserSessionProfileRetentionEnvelope(t, []byte(run("browser", "session", "profile", "retention", "cleanup", "--json")))
+	if !dryRun.DryRun || dryRun.Apply || dryRun.Eligible != 2 || dryRun.Cleaned != 0 || dryRun.Failed != 0 || dryRun.Skipped != 1 {
+		t.Fatalf("dry-run retention = %+v, want two eligible, one skipped, no mutation", dryRun)
+	}
+	if len(dryRun.Artifacts) != 2 {
+		t.Fatalf("dry-run artifacts = %d, want 2", len(dryRun.Artifacts))
+	}
+	for _, item := range dryRun.Artifacts {
+		if item.Action != "would_clean" || item.Removed {
+			t.Fatalf("dry-run item = %+v, want would_clean without removal", item)
+		}
+	}
+	for _, artifact := range []sqlite.BrowserEncryptedProfileArtifact{active, revoked, expired} {
+		if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(artifact.EncryptedArtifactPath))); err != nil {
+			t.Fatalf("artifact %d missing after dry-run: %v", artifact.ID, err)
+		}
+	}
+
+	afterDryRun := openLifecycleBrowserStore(t, root)
+	assertLifecycleBrowserArtifactStatus(t, afterDryRun, active.ID, sqlite.BrowserEncryptedProfileArtifactStatusEncrypted)
+	assertLifecycleBrowserArtifactStatus(t, afterDryRun, revoked.ID, sqlite.BrowserEncryptedProfileArtifactStatusRevoked)
+	assertLifecycleBrowserArtifactStatus(t, afterDryRun, expired.ID, sqlite.BrowserEncryptedProfileArtifactStatusExpired)
+	closeLifecycleBrowserStore(t, afterDryRun)
+
+	applied := decodeBrowserSessionProfileRetentionEnvelope(t, []byte(run(
+		"browser", "session", "profile", "retention", "cleanup",
+		"--session-id", int64String(created.ID),
+		"--apply",
+		"--json",
+	)))
+	if applied.DryRun || !applied.Apply || applied.Eligible != 2 || applied.Cleaned != 2 || applied.Failed != 0 || applied.Skipped != 1 {
+		t.Fatalf("apply retention = %+v, want two cleaned and one skipped", applied)
+	}
+	for _, item := range applied.Artifacts {
+		if item.Action != "cleaned" || !item.Removed {
+			t.Fatalf("apply item = %+v, want cleaned removal", item)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(revoked.EncryptedArtifactPath))); !os.IsNotExist(err) {
+		t.Fatalf("revoked artifact still exists after apply: err=%v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(expired.EncryptedArtifactPath))); !os.IsNotExist(err) {
+		t.Fatalf("expired artifact still exists after apply: err=%v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(active.EncryptedArtifactPath))); err != nil {
+		t.Fatalf("active artifact missing after apply: %v", err)
+	}
+	for _, rel := range protectedPaths {
+		if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(rel))); err != nil {
+			t.Fatalf("protected path %q was touched by retention cleanup: %v", rel, err)
+		}
+	}
+	for _, rel := range []string{created.ProfilePath, "cookies", "credentials"} {
+		if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(rel))); !os.IsNotExist(err) {
+			t.Fatalf("path %q exists after retention cleanup err=%v, want no profile/cookie/credential writes", rel, err)
+		}
+	}
+
+	afterApply := openLifecycleBrowserStore(t, root)
+	assertLifecycleBrowserArtifactStatus(t, afterApply, active.ID, sqlite.BrowserEncryptedProfileArtifactStatusEncrypted)
+	assertLifecycleBrowserArtifactStatus(t, afterApply, revoked.ID, sqlite.BrowserEncryptedProfileArtifactStatusCleaned)
+	assertLifecycleBrowserArtifactStatus(t, afterApply, expired.ID, sqlite.BrowserEncryptedProfileArtifactStatusCleaned)
+	closeLifecycleBrowserStore(t, afterApply)
+
+	logs := run("logs", "--json")
+	if strings.Count(logs, `"type": "browser.profile_cleaned"`) != 2 {
+		t.Fatalf("logs output = %s, want two browser.profile_cleaned audit events", logs)
+	}
+	for _, forbidden := range []string{"password", "totp", "backup_code", "profile_bytes"} {
+		if strings.Contains(strings.ToLower(logs), forbidden) {
+			t.Fatalf("logs output contains forbidden marker %q: %s", forbidden, logs)
+		}
+	}
+}
+
 type browserSessionJSON struct {
 	ID                   int64  `json:"id"`
 	Name                 string `json:"name"`
@@ -1262,6 +1384,27 @@ type browserSessionPrepareProfileJSON struct {
 	ProfilePath       string `json:"profile_path"`
 	ProfilePathExists bool   `json:"profile_path_exists"`
 	Created           bool   `json:"created"`
+}
+
+type browserSessionProfileRetentionJSON struct {
+	DryRun    bool                                         `json:"dry_run"`
+	Apply     bool                                         `json:"apply"`
+	Eligible  int                                          `json:"eligible"`
+	Cleaned   int                                          `json:"cleaned"`
+	Failed    int                                          `json:"failed"`
+	Skipped   int                                          `json:"skipped"`
+	Artifacts []browserSessionProfileRetentionArtifactJSON `json:"artifacts"`
+}
+
+type browserSessionProfileRetentionArtifactJSON struct {
+	ArtifactID   int64  `json:"artifact_id"`
+	SessionID    int64  `json:"session_id"`
+	Status       string `json:"status"`
+	ArtifactPath string `json:"artifact_path"`
+	Action       string `json:"action"`
+	Removed      bool   `json:"removed"`
+	ErrorCode    string `json:"error_code,omitempty"`
+	ErrorMessage string `json:"error_message,omitempty"`
 }
 
 type browserSessionLoginRequestJSON struct {
@@ -1338,6 +1481,17 @@ func decodeBrowserSessionPrepareProfileEnvelope(t *testing.T, payload []byte) br
 		t.Fatalf("browser session prepare profile json decode error = %v; output=%s", err, string(payload))
 	}
 	return envelope.Profile
+}
+
+func decodeBrowserSessionProfileRetentionEnvelope(t *testing.T, payload []byte) browserSessionProfileRetentionJSON {
+	t.Helper()
+	var envelope struct {
+		Retention browserSessionProfileRetentionJSON `json:"retention"`
+	}
+	if err := json.Unmarshal(payload, &envelope); err != nil {
+		t.Fatalf("browser session profile retention json decode error = %v; output=%s", err, string(payload))
+	}
+	return envelope.Retention
 }
 
 func decodeBrowserSessionEnvelope(t *testing.T, payload []byte) browserSessionJSON {
@@ -1436,6 +1590,60 @@ func assertNoBrowserSessionArtifacts(t *testing.T, root string) {
 		if _, err := os.Stat(filepath.Join(root, relativePath)); !os.IsNotExist(err) {
 			t.Fatalf("%s exists after NoVNC fixture launch err=%v, want absent", relativePath, err)
 		}
+	}
+}
+
+func openLifecycleBrowserStore(t *testing.T, root string) *sqlite.Store {
+	t.Helper()
+	store, err := sqlite.Open(filepath.Join(root, "data", "odin.db"))
+	if err != nil {
+		t.Fatalf("Open store error = %v", err)
+	}
+	return store
+}
+
+func closeLifecycleBrowserStore(t *testing.T, store *sqlite.Store) {
+	t.Helper()
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close store error = %v", err)
+	}
+}
+
+func createLifecycleBrowserArtifact(t *testing.T, ctx context.Context, store *sqlite.Store, root string, session browserSessionJSON, name string) sqlite.BrowserEncryptedProfileArtifact {
+	t.Helper()
+	path := filepath.ToSlash(filepath.Join("browser-sessions", "encrypted-profiles", name))
+	writeLifecycleRetentionMarker(t, filepath.Join(root, filepath.FromSlash(path)))
+	artifact, err := store.CreateBrowserEncryptedProfileArtifact(ctx, sqlite.CreateBrowserEncryptedProfileArtifactParams{
+		SessionID:             session.ID,
+		ProfilePath:           session.ProfilePath,
+		EncryptedArtifactPath: path,
+		EncryptionKeyRef:      "test-key:v1",
+	})
+	if err != nil {
+		t.Fatalf("CreateBrowserEncryptedProfileArtifact(%s) error = %v", name, err)
+	}
+	return artifact
+}
+
+func assertLifecycleBrowserArtifactStatus(t *testing.T, store *sqlite.Store, id int64, want sqlite.BrowserEncryptedProfileArtifactStatus) sqlite.BrowserEncryptedProfileArtifact {
+	t.Helper()
+	artifact, err := store.GetBrowserEncryptedProfileArtifact(context.Background(), id)
+	if err != nil {
+		t.Fatalf("GetBrowserEncryptedProfileArtifact(%d) error = %v", id, err)
+	}
+	if artifact.Status != want {
+		t.Fatalf("artifact %d status = %q, want %q", id, artifact.Status, want)
+	}
+	return artifact
+}
+
+func writeLifecycleRetentionMarker(t *testing.T, path string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatalf("MkdirAll(%s) error = %v", path, err)
+	}
+	if err := os.WriteFile(path, []byte("fixture marker"), 0o600); err != nil {
+		t.Fatalf("WriteFile(%s) error = %v", path, err)
 	}
 }
 

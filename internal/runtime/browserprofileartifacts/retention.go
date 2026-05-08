@@ -34,6 +34,7 @@ type RetentionResult struct {
 	Eligible  int                     `json:"eligible"`
 	Cleaned   int                     `json:"cleaned"`
 	Failed    int                     `json:"failed"`
+	Skipped   int                     `json:"skipped"`
 	Artifacts []RetentionArtifactItem `json:"artifacts"`
 }
 
@@ -69,6 +70,7 @@ func Retain(ctx context.Context, params RetentionParams) (RetentionResult, error
 	}
 	for _, artifact := range artifacts {
 		if !isRetentionEligibleStatus(artifact.Status) {
+			result.Skipped++
 			continue
 		}
 		result.Eligible++
