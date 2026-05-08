@@ -329,8 +329,8 @@ func TestBrowserEncryptedProfileArtifactMetadataLifecyclePersistsAndAudits(t *te
 	if artifact.ExpiresAt == nil || !artifact.ExpiresAt.Equal(expiresAt) {
 		t.Fatalf("artifact.ExpiresAt = %v, want %v", artifact.ExpiresAt, expiresAt)
 	}
-	if artifact.RevokedAt != nil || artifact.ErrorCode != nil || artifact.ErrorMessage != nil {
-		t.Fatalf("new artifact terminal fields = revoked_at:%v error:%v/%v, want nil", artifact.RevokedAt, artifact.ErrorCode, artifact.ErrorMessage)
+	if artifact.RevokedAt != nil || artifact.CleanedAt != nil || artifact.ErrorCode != nil || artifact.ErrorMessage != nil {
+		t.Fatalf("new artifact terminal fields = revoked_at:%v cleaned_at:%v error:%v/%v, want nil", artifact.RevokedAt, artifact.CleanedAt, artifact.ErrorCode, artifact.ErrorMessage)
 	}
 
 	fetched, err := store.GetBrowserEncryptedProfileArtifact(ctx, artifact.ID)
@@ -364,6 +364,21 @@ func TestBrowserEncryptedProfileArtifactMetadataLifecyclePersistsAndAudits(t *te
 	if revoked.RevokedAt == nil || !revoked.RevokedAt.Equal(now.Add(time.Hour)) {
 		t.Fatalf("revoked.RevokedAt = %v, want revoke time", revoked.RevokedAt)
 	}
+	store.Now = func() time.Time { return now.Add(90 * time.Minute) }
+	cleaned, err := store.MarkBrowserEncryptedProfileArtifactCleaned(ctx, MarkBrowserEncryptedProfileArtifactCleanedParams{
+		ID:     revoked.ID,
+		Actor:  "retention",
+		Reason: "encrypted artifact file removed",
+	})
+	if err != nil {
+		t.Fatalf("MarkBrowserEncryptedProfileArtifactCleaned() error = %v", err)
+	}
+	if cleaned.Status != BrowserEncryptedProfileArtifactStatusCleaned {
+		t.Fatalf("cleaned.Status = %q, want %q", cleaned.Status, BrowserEncryptedProfileArtifactStatusCleaned)
+	}
+	if cleaned.CleanedAt == nil || !cleaned.CleanedAt.Equal(now.Add(90*time.Minute)) {
+		t.Fatalf("cleaned.CleanedAt = %v, want cleanup time", cleaned.CleanedAt)
+	}
 
 	store.Now = func() time.Time { return now.Add(2 * time.Hour) }
 	expiring, err := store.CreateBrowserEncryptedProfileArtifact(ctx, CreateBrowserEncryptedProfileArtifactParams{
@@ -393,6 +408,24 @@ func TestBrowserEncryptedProfileArtifactMetadataLifecyclePersistsAndAudits(t *te
 	if expired.ErrorCode == nil || *expired.ErrorCode != "expired" {
 		t.Fatalf("expired.ErrorCode = %v, want expired", expired.ErrorCode)
 	}
+	cleanupCode := "cleanup_failed"
+	cleanupMessage := "artifact path escaped ODIN_ROOT"
+	failed, err := store.RecordBrowserEncryptedProfileArtifactCleanupFailed(ctx, RecordBrowserEncryptedProfileArtifactCleanupFailedParams{
+		ID:           expired.ID,
+		Actor:        "retention",
+		Reason:       "cleanup failed",
+		ErrorCode:    &cleanupCode,
+		ErrorMessage: &cleanupMessage,
+	})
+	if err != nil {
+		t.Fatalf("RecordBrowserEncryptedProfileArtifactCleanupFailed() error = %v", err)
+	}
+	if failed.Status != BrowserEncryptedProfileArtifactStatusExpired {
+		t.Fatalf("failed.Status = %q, want expired status preserved", failed.Status)
+	}
+	if failed.ErrorCode == nil || *failed.ErrorCode != cleanupCode {
+		t.Fatalf("failed.ErrorCode = %v, want cleanup_failed", failed.ErrorCode)
+	}
 
 	events, err := store.ListEvents(ctx, ListEventsParams{})
 	if err != nil {
@@ -420,6 +453,12 @@ func TestBrowserEncryptedProfileArtifactMetadataLifecyclePersistsAndAudits(t *te
 	if counts[runtimeevents.EventBrowserProfileExpired] != 1 {
 		t.Fatalf("browser.profile_expired events = %d, want 1", counts[runtimeevents.EventBrowserProfileExpired])
 	}
+	if counts[runtimeevents.EventBrowserProfileCleaned] != 1 {
+		t.Fatalf("browser.profile_cleaned events = %d, want 1", counts[runtimeevents.EventBrowserProfileCleaned])
+	}
+	if counts[runtimeevents.EventBrowserProfileCleanupFailed] != 1 {
+		t.Fatalf("browser.profile_cleanup_failed events = %d, want 1", counts[runtimeevents.EventBrowserProfileCleanupFailed])
+	}
 
 	if err := store.Close(); err != nil {
 		t.Fatalf("Close() error = %v", err)
@@ -436,8 +475,8 @@ func TestBrowserEncryptedProfileArtifactMetadataLifecyclePersistsAndAudits(t *te
 	if err != nil {
 		t.Fatalf("GetBrowserEncryptedProfileArtifact(reopened) error = %v", err)
 	}
-	if persisted.Status != BrowserEncryptedProfileArtifactStatusRevoked {
-		t.Fatalf("persisted.Status = %q, want %q", persisted.Status, BrowserEncryptedProfileArtifactStatusRevoked)
+	if persisted.Status != BrowserEncryptedProfileArtifactStatusCleaned || persisted.CleanedAt == nil {
+		t.Fatalf("persisted = %+v, want cleaned artifact with cleaned_at", persisted)
 	}
 }
 

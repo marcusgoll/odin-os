@@ -61,6 +61,7 @@ const (
 	BrowserEncryptedProfileArtifactStatusEncrypted BrowserEncryptedProfileArtifactStatus = "encrypted"
 	BrowserEncryptedProfileArtifactStatusRevoked   BrowserEncryptedProfileArtifactStatus = "revoked"
 	BrowserEncryptedProfileArtifactStatusExpired   BrowserEncryptedProfileArtifactStatus = "expired"
+	BrowserEncryptedProfileArtifactStatusCleaned   BrowserEncryptedProfileArtifactStatus = "cleaned"
 )
 
 type BrowserSession struct {
@@ -131,6 +132,7 @@ type BrowserEncryptedProfileArtifact struct {
 	UpdatedAt             time.Time
 	ExpiresAt             *time.Time
 	RevokedAt             *time.Time
+	CleanedAt             *time.Time
 	ErrorCode             *string
 	ErrorMessage          *string
 }
@@ -249,6 +251,7 @@ type CreateBrowserEncryptedProfileArtifactParams struct {
 
 type ListBrowserEncryptedProfileArtifactsParams struct {
 	SessionID int64
+	Status    BrowserEncryptedProfileArtifactStatus
 }
 
 type MarkBrowserEncryptedProfileArtifactRevokedParams struct {
@@ -260,6 +263,22 @@ type MarkBrowserEncryptedProfileArtifactRevokedParams struct {
 }
 
 type MarkBrowserEncryptedProfileArtifactExpiredParams struct {
+	ID           int64
+	Actor        string
+	Reason       string
+	ErrorCode    *string
+	ErrorMessage *string
+}
+
+type MarkBrowserEncryptedProfileArtifactCleanedParams struct {
+	ID           int64
+	Actor        string
+	Reason       string
+	ErrorCode    *string
+	ErrorMessage *string
+}
+
+type RecordBrowserEncryptedProfileArtifactCleanupFailedParams struct {
 	ID           int64
 	Actor        string
 	Reason       string
@@ -672,10 +691,29 @@ func (store *Store) GetBrowserEncryptedProfileArtifact(ctx context.Context, id i
 }
 
 func (store *Store) ListBrowserEncryptedProfileArtifacts(ctx context.Context, params ListBrowserEncryptedProfileArtifactsParams) ([]BrowserEncryptedProfileArtifact, error) {
-	if params.SessionID <= 0 {
+	if params.SessionID < 0 {
 		return nil, fmt.Errorf("browser session id must be positive")
 	}
-	rows, err := store.db.QueryContext(ctx, browserEncryptedProfileArtifactSelectSQL()+` WHERE session_id = ? ORDER BY id ASC`, params.SessionID)
+	status := normalizeBrowserEncryptedProfileArtifactStatus(params.Status)
+	if params.Status != "" && status == "" {
+		return nil, fmt.Errorf("unsupported browser encrypted profile artifact status %q", params.Status)
+	}
+	query := browserEncryptedProfileArtifactSelectSQL()
+	args := make([]any, 0, 2)
+	clauses := make([]string, 0, 2)
+	if params.SessionID > 0 {
+		clauses = append(clauses, "session_id = ?")
+		args = append(args, params.SessionID)
+	}
+	if status != "" {
+		clauses = append(clauses, "status = ?")
+		args = append(args, string(status))
+	}
+	if len(clauses) > 0 {
+		query += ` WHERE ` + strings.Join(clauses, ` AND `)
+	}
+	query += ` ORDER BY id ASC`
+	rows, err := store.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -697,6 +735,97 @@ func (store *Store) MarkBrowserEncryptedProfileArtifactRevoked(ctx context.Conte
 
 func (store *Store) MarkBrowserEncryptedProfileArtifactExpired(ctx context.Context, params MarkBrowserEncryptedProfileArtifactExpiredParams) (BrowserEncryptedProfileArtifact, error) {
 	return store.markBrowserEncryptedProfileArtifactTerminal(ctx, params.ID, BrowserEncryptedProfileArtifactStatusExpired, runtimeevents.EventBrowserProfileExpired, params.Actor, params.Reason, params.ErrorCode, params.ErrorMessage)
+}
+
+func (store *Store) MarkBrowserEncryptedProfileArtifactCleaned(ctx context.Context, params MarkBrowserEncryptedProfileArtifactCleanedParams) (BrowserEncryptedProfileArtifact, error) {
+	if params.ID <= 0 {
+		return BrowserEncryptedProfileArtifact{}, fmt.Errorf("browser encrypted profile artifact id must be positive")
+	}
+	now := store.now()
+	var updated BrowserEncryptedProfileArtifact
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		current, err := getBrowserEncryptedProfileArtifactTx(ctx, tx, params.ID)
+		if err != nil {
+			return err
+		}
+		if current.Status == BrowserEncryptedProfileArtifactStatusCleaned {
+			updated = current
+			return nil
+		}
+		if current.Status != BrowserEncryptedProfileArtifactStatusRevoked && current.Status != BrowserEncryptedProfileArtifactStatusExpired {
+			return fmt.Errorf("browser encrypted profile artifact status %q cannot transition to %q", current.Status, BrowserEncryptedProfileArtifactStatusCleaned)
+		}
+		updated = current
+		updated.Status = BrowserEncryptedProfileArtifactStatusCleaned
+		updated.UpdatedAt = now
+		updated.CleanedAt = &now
+		if params.ErrorCode != nil {
+			updated.ErrorCode = cloneStringPtr(params.ErrorCode)
+		}
+		if params.ErrorMessage != nil {
+			updated.ErrorMessage = cloneStringPtr(params.ErrorMessage)
+		}
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE browser_encrypted_profile_artifacts
+			SET status = ?, updated_at = ?, cleaned_at = ?, error_code = ?, error_message = ?
+			WHERE id = ?
+		`,
+			string(updated.Status),
+			formatTime(now),
+			nullTime(updated.CleanedAt),
+			nullStringPtr(updated.ErrorCode),
+			nullStringPtr(updated.ErrorMessage),
+			updated.ID,
+		); err != nil {
+			return err
+		}
+		session, err := getBrowserSessionTx(ctx, tx, updated.SessionID)
+		if err != nil {
+			return err
+		}
+		return appendBrowserSessionEventTx(ctx, tx, session, runtimeevents.EventBrowserProfileCleaned, browserEncryptedProfileArtifactPayload(updated, current.Status, params.Actor, params.Reason), now)
+	})
+	return updated, err
+}
+
+func (store *Store) RecordBrowserEncryptedProfileArtifactCleanupFailed(ctx context.Context, params RecordBrowserEncryptedProfileArtifactCleanupFailedParams) (BrowserEncryptedProfileArtifact, error) {
+	if params.ID <= 0 {
+		return BrowserEncryptedProfileArtifact{}, fmt.Errorf("browser encrypted profile artifact id must be positive")
+	}
+	now := store.now()
+	var updated BrowserEncryptedProfileArtifact
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		current, err := getBrowserEncryptedProfileArtifactTx(ctx, tx, params.ID)
+		if err != nil {
+			return err
+		}
+		updated = current
+		updated.UpdatedAt = now
+		if params.ErrorCode != nil {
+			updated.ErrorCode = cloneStringPtr(params.ErrorCode)
+		}
+		if params.ErrorMessage != nil {
+			updated.ErrorMessage = cloneStringPtr(params.ErrorMessage)
+		}
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE browser_encrypted_profile_artifacts
+			SET updated_at = ?, error_code = ?, error_message = ?
+			WHERE id = ?
+		`,
+			formatTime(now),
+			nullStringPtr(updated.ErrorCode),
+			nullStringPtr(updated.ErrorMessage),
+			updated.ID,
+		); err != nil {
+			return err
+		}
+		session, err := getBrowserSessionTx(ctx, tx, updated.SessionID)
+		if err != nil {
+			return err
+		}
+		return appendBrowserSessionEventTx(ctx, tx, session, runtimeevents.EventBrowserProfileCleanupFailed, browserEncryptedProfileArtifactPayload(updated, current.Status, params.Actor, params.Reason), now)
+	})
+	return updated, err
 }
 
 func (store *Store) markBrowserEncryptedProfileArtifactTerminal(ctx context.Context, id int64, status BrowserEncryptedProfileArtifactStatus, eventType runtimeevents.Type, actor string, reason string, errorCode *string, errorMessage *string) (BrowserEncryptedProfileArtifact, error) {
@@ -1279,7 +1408,7 @@ func browserHandoffRunnerSelectSQL() string {
 func browserEncryptedProfileArtifactSelectSQL() string {
 	return `
 		SELECT id, session_id, profile_path, encrypted_artifact_path, encryption_key_ref, status,
-			created_at, updated_at, expires_at, revoked_at, error_code, error_message
+			created_at, updated_at, expires_at, revoked_at, cleaned_at, error_code, error_message
 		FROM browser_encrypted_profile_artifacts
 	`
 }
@@ -1457,7 +1586,7 @@ func scanBrowserHandoffRunner(scanner browserSessionScanner) (BrowserHandoffRunn
 func scanBrowserEncryptedProfileArtifact(scanner browserSessionScanner) (BrowserEncryptedProfileArtifact, error) {
 	var artifact BrowserEncryptedProfileArtifact
 	var createdAt, updatedAt string
-	var expiresAt, revokedAt, errorCode, errorMessage sql.NullString
+	var expiresAt, revokedAt, cleanedAt, errorCode, errorMessage sql.NullString
 	if err := scanner.Scan(
 		&artifact.ID,
 		&artifact.SessionID,
@@ -1469,6 +1598,7 @@ func scanBrowserEncryptedProfileArtifact(scanner browserSessionScanner) (Browser
 		&updatedAt,
 		&expiresAt,
 		&revokedAt,
+		&cleanedAt,
 		&errorCode,
 		&errorMessage,
 	); err != nil {
@@ -1493,6 +1623,10 @@ func scanBrowserEncryptedProfileArtifact(scanner browserSessionScanner) (Browser
 		return BrowserEncryptedProfileArtifact{}, err
 	}
 	artifact.RevokedAt, err = parseNullableTime(revokedAt)
+	if err != nil {
+		return BrowserEncryptedProfileArtifact{}, err
+	}
+	artifact.CleanedAt, err = parseNullableTime(cleanedAt)
 	if err != nil {
 		return BrowserEncryptedProfileArtifact{}, err
 	}
@@ -1636,6 +1770,8 @@ func normalizeBrowserEncryptedProfileArtifactStatus(status BrowserEncryptedProfi
 		return BrowserEncryptedProfileArtifactStatusRevoked
 	case BrowserEncryptedProfileArtifactStatusExpired:
 		return BrowserEncryptedProfileArtifactStatusExpired
+	case BrowserEncryptedProfileArtifactStatusCleaned:
+		return BrowserEncryptedProfileArtifactStatusCleaned
 	default:
 		return ""
 	}
@@ -1717,6 +1853,7 @@ func browserEncryptedProfileArtifactPayload(artifact BrowserEncryptedProfileArti
 		"status":                  string(artifact.Status),
 		"expires_at":              formatOptionalTime(artifact.ExpiresAt),
 		"revoked_at":              formatOptionalTime(artifact.RevokedAt),
+		"cleaned_at":              formatOptionalTime(artifact.CleanedAt),
 		"error_code":              stringPtrValue(artifact.ErrorCode),
 		"error_message":           stringPtrValue(artifact.ErrorMessage),
 		"actor":                   defaultString(actor, "operator"),
