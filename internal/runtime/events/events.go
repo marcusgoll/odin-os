@@ -151,6 +151,11 @@ const (
 )
 
 const (
+	EventBrowserProfileMaterialized           Type = "browser.profile_materialized"
+	EventBrowserProfileMaterializationCleaned Type = "browser.profile_materialization_cleaned"
+)
+
+const (
 	SkillLifecycleErrorUnknownPermission            = "unknown_permission"
 	SkillLifecycleErrorMutationRequiresProjectScope = "mutation_requires_project_scope"
 	SkillLifecycleErrorTransitionDenied             = "transition_denied"

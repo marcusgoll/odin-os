@@ -225,8 +225,15 @@ Manual Huginn browser login and authenticated read-only session reuse are being 
 - `browser.session_login_requested`
 - `browser.session_login_completed`
 - `browser.session_login_expired`
+- `browser.profile_encrypted`
+- `browser.profile_revoked`
+- `browser.profile_expired`
+- `browser.profile_cleaned`
+- `browser.profile_cleanup_failed`
+- `browser.profile_materialized`
+- `browser.profile_materialization_cleaned`
 - `goal.waiting_for_human_login`
 
-Browser session events must not include passwords, cookies, bearer tokens, passkey material, TOTP values, backup codes, profile bytes, or raw credential prompts. Login request events may include a log-safe opaque `handoff_id` and a metadata-only `handoff_url`; neither proves that a handoff HTTP route exists. Metadata-only session verification records operator-attested verification and `last_verified_at`; browser-observed account/domain verification remains future work. Profile preparation records only empty-directory preparation metadata plus `profile_storage_policy`; a prepared directory is not approval to write browser files. Session verification may unblock a waiting goal only through normal policy checks; it must not approve or execute the goal by itself.
+Browser session events must not include passwords, cookies, bearer tokens, passkey material, TOTP values, backup codes, profile bytes, or raw credential prompts. Login request events may include a log-safe opaque `handoff_id` and a metadata-only `handoff_url`; neither proves that a handoff HTTP route exists. Metadata-only session verification records operator-attested verification and `last_verified_at`; browser-observed account/domain verification remains future work. Profile preparation records only empty-directory preparation metadata plus `profile_storage_policy`; a prepared directory is not approval to write browser files. Encrypted profile artifact events record only safe metadata such as artifact ID, session ID, relative encrypted artifact path, key reference, relative materialization path, actor, and reason; they must not include fixture plaintext, key bytes, source fixture path, cookie values, credential stores, or browser profile bytes. Session verification may unblock a waiting goal only through normal policy checks; it must not approve or execute the goal by itself.
 
 `odin browser session handoff show --handoff-id <id>` is intentionally read-only. It validates the handoff ID, login request status, expiration, and linked session status, but emits no runtime event because it performs no state change.

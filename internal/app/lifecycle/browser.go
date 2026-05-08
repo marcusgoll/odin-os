@@ -15,6 +15,7 @@ import (
 	"odin-os/internal/runtime/browserhandoff"
 	"odin-os/internal/runtime/browserprofileartifacts"
 	"odin-os/internal/runtime/browserprofilekeys"
+	"odin-os/internal/runtime/browserprofilematerialize"
 	"odin-os/internal/store/sqlite"
 )
 
@@ -84,6 +85,10 @@ type browserSessionProfileArtifactListView struct {
 	Artifacts []browserSessionProfileArtifactView `json:"artifacts"`
 }
 
+type browserSessionProfileMaterializationEnvelope struct {
+	Materialization browserSessionProfileMaterializationView `json:"materialization"`
+}
+
 type browserSessionView struct {
 	ID                   int64  `json:"id"`
 	Name                 string `json:"name"`
@@ -132,6 +137,16 @@ type browserSessionProfileArtifactView struct {
 	CleanedAt        string `json:"cleaned_at,omitempty"`
 	ErrorCode        string `json:"error_code,omitempty"`
 	ErrorMessage     string `json:"error_message,omitempty"`
+}
+
+type browserSessionProfileMaterializationView struct {
+	ArtifactID           int64  `json:"artifact_id"`
+	SessionID            int64  `json:"session_id"`
+	ArtifactPath         string `json:"artifact_path"`
+	MaterializationPath  string `json:"materialization_path"`
+	MaterializedFilePath string `json:"materialized_file_path,omitempty"`
+	ReadOnly             bool   `json:"read_only,omitempty"`
+	Removed              bool   `json:"removed,omitempty"`
 }
 
 type browserSessionLoginRequestView struct {
@@ -543,6 +558,51 @@ func runBrowserSessionProfileArtifact(ctx context.Context, app bootstrap.App, co
 			return commands.WriteJSON(stdout, browserSessionProfileArtifactEnvelope{Artifact: view})
 		}
 		_, err = fmt.Fprintf(stdout, "browser_session_profile_artifact=%d session=%d status=%s path=%s key_ref=%s\n", view.ID, view.SessionID, view.Status, view.ArtifactPath, view.EncryptionKeyRef)
+		return err
+	case "materialize":
+		artifact, err := app.Store.GetBrowserEncryptedProfileArtifact(ctx, command.ID)
+		if err != nil {
+			return err
+		}
+		result, err := browserprofilematerialize.Materialize(ctx, browserprofilematerialize.Params{
+			Store:       app.Store,
+			ODINRoot:    app.RuntimeRoot,
+			Artifact:    artifact,
+			TargetDir:   command.TargetDir,
+			KeyProvider: browserprofilekeys.LoadFromEnv,
+			Actor:       "operator",
+			Reason:      "operator materialized encrypted profile artifact read-only",
+		})
+		if err != nil {
+			return err
+		}
+		view := newBrowserSessionProfileMaterializationView(result)
+		if command.JSON {
+			return commands.WriteJSON(stdout, browserSessionProfileMaterializationEnvelope{Materialization: view})
+		}
+		_, err = fmt.Fprintf(stdout, "browser_session_profile_materialization artifact=%d session=%d path=%s file=%s read_only=%t\n", view.ArtifactID, view.SessionID, view.MaterializationPath, view.MaterializedFilePath, view.ReadOnly)
+		return err
+	case "cleanup-materialization":
+		artifact, err := app.Store.GetBrowserEncryptedProfileArtifact(ctx, command.ID)
+		if err != nil {
+			return err
+		}
+		result, err := browserprofilematerialize.Cleanup(ctx, browserprofilematerialize.CleanupParams{
+			Store:     app.Store,
+			ODINRoot:  app.RuntimeRoot,
+			Artifact:  artifact,
+			TargetDir: command.TargetDir,
+			Actor:     "operator",
+			Reason:    "operator cleaned encrypted profile materialization",
+		})
+		if err != nil {
+			return err
+		}
+		view := newBrowserSessionProfileMaterializationCleanupView(result)
+		if command.JSON {
+			return commands.WriteJSON(stdout, browserSessionProfileMaterializationEnvelope{Materialization: view})
+		}
+		_, err = fmt.Fprintf(stdout, "browser_session_profile_materialization artifact=%d session=%d path=%s removed=%t\n", view.ArtifactID, view.SessionID, view.MaterializationPath, view.Removed)
 		return err
 	default:
 		return fmt.Errorf(commands.BrowserUsage)
@@ -1071,6 +1131,27 @@ func newBrowserSessionProfileArtifactView(artifact sqlite.BrowserEncryptedProfil
 		CleanedAt:        formatBrowserSessionOptionalTime(artifact.CleanedAt),
 		ErrorCode:        browserSessionStringPtrValue(artifact.ErrorCode),
 		ErrorMessage:     browserSessionStringPtrValue(artifact.ErrorMessage),
+	}
+}
+
+func newBrowserSessionProfileMaterializationView(result browserprofilematerialize.Result) browserSessionProfileMaterializationView {
+	return browserSessionProfileMaterializationView{
+		ArtifactID:           result.ArtifactID,
+		SessionID:            result.SessionID,
+		ArtifactPath:         result.ArtifactPath,
+		MaterializationPath:  result.MaterializationPath,
+		MaterializedFilePath: result.MaterializedFilePath,
+		ReadOnly:             result.ReadOnly,
+	}
+}
+
+func newBrowserSessionProfileMaterializationCleanupView(result browserprofilematerialize.CleanupResult) browserSessionProfileMaterializationView {
+	return browserSessionProfileMaterializationView{
+		ArtifactID:          result.ArtifactID,
+		SessionID:           result.SessionID,
+		ArtifactPath:        result.ArtifactPath,
+		MaterializationPath: result.MaterializationPath,
+		Removed:             result.Removed,
 	}
 }
 
