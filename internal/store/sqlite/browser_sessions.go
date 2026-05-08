@@ -1786,11 +1786,17 @@ func validateBrowserEncryptedArtifactPath(artifactPath string, profilePath strin
 		return "", fmt.Errorf("browser encrypted profile artifact path must stay under ODIN_ROOT")
 	}
 	slashed := filepath.ToSlash(clean)
-	prefix := strings.TrimSuffix(profilePath, "/") + "/"
-	if !strings.HasPrefix(slashed, prefix) {
-		return "", fmt.Errorf("browser encrypted profile artifact path must stay under the session profile path")
+	const encryptedProfileRoot = "browser-sessions/encrypted-profiles/"
+	profilePrefix := strings.TrimSuffix(profilePath, "/") + "/"
+	var relativeName string
+	switch {
+	case strings.HasPrefix(slashed, encryptedProfileRoot):
+		relativeName = strings.TrimPrefix(slashed, encryptedProfileRoot)
+	case strings.HasPrefix(slashed, profilePrefix):
+		relativeName = strings.TrimPrefix(slashed, profilePrefix)
+	default:
+		return "", fmt.Errorf("browser encrypted profile artifact path must stay under browser-sessions/encrypted-profiles")
 	}
-	relativeName := strings.TrimPrefix(slashed, prefix)
 	if relativeName == "" || strings.Contains(relativeName, "/") {
 		return "", fmt.Errorf("browser encrypted profile artifact path must be one encrypted artifact file")
 	}
