@@ -353,3 +353,44 @@ func TestParseBrowserSessionProfileArtifactStatusCommands(t *testing.T) {
 		t.Fatal("ParseBrowser(profile artifact revoke with session id) error = nil, want rejection")
 	}
 }
+
+func TestParseBrowserSessionProfileArtifactMaterializationCommands(t *testing.T) {
+	materialize, err := ParseBrowser([]string{
+		"session", "profile", "artifact", "materialize",
+		"--id", "9",
+		"--target-dir", "runtime/browser-profile-materializations/proof",
+		"--json",
+	})
+	if err != nil {
+		t.Fatalf("ParseBrowser(profile artifact materialize) error = %v", err)
+	}
+	if materialize.SessionAction != "profile" || materialize.ProfileAction != "artifact" || materialize.ArtifactAction != "materialize" || materialize.ID != 9 || materialize.TargetDir != "runtime/browser-profile-materializations/proof" || !materialize.JSON {
+		t.Fatalf("materialize command = %+v, want parsed artifact materialization", materialize)
+	}
+
+	cleanup, err := ParseBrowser([]string{
+		"session", "profile", "artifact", "cleanup-materialization",
+		"--id", "9",
+		"--target-dir", "runtime/browser-profile-materializations/proof",
+		"--json",
+	})
+	if err != nil {
+		t.Fatalf("ParseBrowser(profile artifact cleanup-materialization) error = %v", err)
+	}
+	if cleanup.ArtifactAction != "cleanup-materialization" || cleanup.ID != 9 || cleanup.TargetDir != "runtime/browser-profile-materializations/proof" || !cleanup.JSON {
+		t.Fatalf("cleanup command = %+v, want parsed artifact materialization cleanup", cleanup)
+	}
+
+	if _, err := ParseBrowser([]string{"session", "profile", "artifact", "materialize", "--target-dir", "runtime/browser-profile-materializations/proof", "--json"}); err == nil {
+		t.Fatal("ParseBrowser(profile artifact materialize missing id) error = nil, want rejection")
+	}
+	if _, err := ParseBrowser([]string{"session", "profile", "artifact", "materialize", "--id", "9", "--json"}); err == nil {
+		t.Fatal("ParseBrowser(profile artifact materialize missing target dir) error = nil, want rejection")
+	}
+	if _, err := ParseBrowser([]string{"session", "profile", "artifact", "cleanup-materialization", "--id", "9", "--target-dir", "runtime/browser-profile-materializations/proof", "--plaintext-file", "/tmp/plain", "--json"}); err == nil {
+		t.Fatal("ParseBrowser(profile artifact cleanup-materialization with plaintext file) error = nil, want rejection")
+	}
+	if _, err := ParseBrowser([]string{"session", "profile", "artifact", "materialize", "--id", "9", "--target-dir", "runtime/browser-profile-materializations/proof", "--apply", "--json"}); err == nil {
+		t.Fatal("ParseBrowser(profile artifact materialize with apply) error = nil, want rejection")
+	}
+}

@@ -7,7 +7,7 @@ import (
 	"strings"
 )
 
-const BrowserUsage = "usage: odin browser run --goal-id <id> --url <url> [--objective <text>] [--allowed-domain <domain>] [--max-pages <n>] [--max-duration-seconds <n>] [--worker-mode <fetch|browser>] [--evidence-required] [--action <read|navigate|snapshot|extract>] [--json] | odin browser session create --name <name> --domain <domain> --permission-tier <tier> [--account-hint <hint>] [--profile-path <path>] [--json] | odin browser session list [--json] | odin browser session show --id <id> [--json] | odin browser session status --id <id> --status <status> [--json] | odin browser session revoke --id <id> [--json] | odin browser session login-request --id <id> [--handoff-base-url <url>] [--json] | odin browser session login-requests --id <id> [--json] | odin browser session handoff show --handoff-id <id> [--json] | odin browser session runner create --login-request-id <id> [--json] | odin browser session runner list --login-request-id <id> [--json] | odin browser session runner show --id <id> [--json] | odin browser session runner start --id <id> [--json] | odin browser session runner plan-novnc --id <id> --browser-command <path> --browser-allowed-command <path> --display-command <path> --display-allowed-command <path> --novnc-command <path> --novnc-allowed-command <path> --bind-addr <addr> --private-base-url <url> --timeout-seconds <n> [--json] | odin browser session runner status --id <id> --status <status> [--json] | odin browser session runner cancel --id <id> [--json] | odin browser session verify --id <id> [--login-request-id <id>] [--json] | odin browser session prepare-profile --id <id> [--json] | odin browser session profile retention cleanup [--session-id <id>] [--apply] [--json] | odin browser session profile artifact create-fixture --session-id <id> --name <safe-name> --plaintext-file <path> [--json] | odin browser session profile artifact list --session-id <id> [--json] | odin browser session profile artifact show --id <id> [--json] | odin browser session profile artifact revoke --id <id> [--json]"
+const BrowserUsage = "usage: odin browser run --goal-id <id> --url <url> [--objective <text>] [--allowed-domain <domain>] [--max-pages <n>] [--max-duration-seconds <n>] [--worker-mode <fetch|browser>] [--evidence-required] [--action <read|navigate|snapshot|extract>] [--json] | odin browser session create --name <name> --domain <domain> --permission-tier <tier> [--account-hint <hint>] [--profile-path <path>] [--json] | odin browser session list [--json] | odin browser session show --id <id> [--json] | odin browser session status --id <id> --status <status> [--json] | odin browser session revoke --id <id> [--json] | odin browser session login-request --id <id> [--handoff-base-url <url>] [--json] | odin browser session login-requests --id <id> [--json] | odin browser session handoff show --handoff-id <id> [--json] | odin browser session runner create --login-request-id <id> [--json] | odin browser session runner list --login-request-id <id> [--json] | odin browser session runner show --id <id> [--json] | odin browser session runner start --id <id> [--json] | odin browser session runner plan-novnc --id <id> --browser-command <path> --browser-allowed-command <path> --display-command <path> --display-allowed-command <path> --novnc-command <path> --novnc-allowed-command <path> --bind-addr <addr> --private-base-url <url> --timeout-seconds <n> [--json] | odin browser session runner status --id <id> --status <status> [--json] | odin browser session runner cancel --id <id> [--json] | odin browser session verify --id <id> [--login-request-id <id>] [--json] | odin browser session prepare-profile --id <id> [--json] | odin browser session profile retention cleanup [--session-id <id>] [--apply] [--json] | odin browser session profile artifact create-fixture --session-id <id> --name <safe-name> --plaintext-file <path> [--json] | odin browser session profile artifact list --session-id <id> [--json] | odin browser session profile artifact show --id <id> [--json] | odin browser session profile artifact revoke --id <id> [--json] | odin browser session profile artifact materialize --id <id> --target-dir <path> [--json] | odin browser session profile artifact cleanup-materialization --id <id> --target-dir <path> [--json]"
 
 type BrowserCommand struct {
 	Name                        string
@@ -36,6 +36,7 @@ type BrowserCommand struct {
 	AccountHint                 string
 	ArtifactName                string
 	PlaintextFile               string
+	TargetDir                   string
 	ProfilePath                 string
 	HandoffID                   string
 	HandoffBaseURL              string
@@ -281,6 +282,13 @@ func parseBrowserSession(args []string, command BrowserCommand) (BrowserCommand,
 			}
 			command.PlaintextFile = value
 			index = nextIndex
+		case "--target-dir":
+			value, nextIndex, err := requiredValue(args, index, "--target-dir")
+			if err != nil {
+				return BrowserCommand{}, err
+			}
+			command.TargetDir = value
+			index = nextIndex
 		case "--domain":
 			value, nextIndex, err := requiredValue(args, index, "--domain")
 			if err != nil {
@@ -435,25 +443,25 @@ func parseBrowserSession(args []string, command BrowserCommand) (BrowserCommand,
 		if strings.TrimSpace(command.PermissionTier) == "" {
 			return BrowserCommand{}, fmt.Errorf("--permission-tier is required")
 		}
-		if command.ID != 0 || command.SessionID != 0 || command.LoginRequestID != 0 || command.HandoffAction != "" || command.ProfileAction != "" || command.RetentionAction != "" || command.ArtifactAction != "" || command.ArtifactName != "" || command.PlaintextFile != "" || command.HandoffID != "" || command.HandoffBaseURL != "" || command.Status != "" || command.Apply {
+		if command.ID != 0 || command.SessionID != 0 || command.LoginRequestID != 0 || command.HandoffAction != "" || command.ProfileAction != "" || command.RetentionAction != "" || command.ArtifactAction != "" || command.ArtifactName != "" || command.PlaintextFile != "" || command.TargetDir != "" || command.HandoffID != "" || command.HandoffBaseURL != "" || command.Status != "" || command.Apply {
 			return BrowserCommand{}, fmt.Errorf("browser session create only accepts create fields and --json")
 		}
 	case "list":
-		if command.ID != 0 || command.SessionID != 0 || command.LoginRequestID != 0 || command.HandoffAction != "" || command.ProfileAction != "" || command.RetentionAction != "" || command.ArtifactAction != "" || command.SessionName != "" || command.SessionDomain != "" || command.PermissionTier != "" || command.AccountHint != "" || command.ArtifactName != "" || command.PlaintextFile != "" || command.ProfilePath != "" || command.HandoffID != "" || command.HandoffBaseURL != "" || command.Status != "" || command.Apply {
+		if command.ID != 0 || command.SessionID != 0 || command.LoginRequestID != 0 || command.HandoffAction != "" || command.ProfileAction != "" || command.RetentionAction != "" || command.ArtifactAction != "" || command.SessionName != "" || command.SessionDomain != "" || command.PermissionTier != "" || command.AccountHint != "" || command.ArtifactName != "" || command.PlaintextFile != "" || command.TargetDir != "" || command.ProfilePath != "" || command.HandoffID != "" || command.HandoffBaseURL != "" || command.Status != "" || command.Apply {
 			return BrowserCommand{}, fmt.Errorf("browser session list only accepts --json")
 		}
 	case "show", "revoke", "login-requests", "prepare-profile":
 		if command.ID <= 0 {
 			return BrowserCommand{}, fmt.Errorf("--id is required")
 		}
-		if command.SessionID != 0 || command.LoginRequestID != 0 || command.HandoffAction != "" || command.ProfileAction != "" || command.RetentionAction != "" || command.ArtifactAction != "" || command.SessionName != "" || command.SessionDomain != "" || command.PermissionTier != "" || command.AccountHint != "" || command.ArtifactName != "" || command.PlaintextFile != "" || command.ProfilePath != "" || command.HandoffID != "" || command.HandoffBaseURL != "" || command.Status != "" || command.Apply {
+		if command.SessionID != 0 || command.LoginRequestID != 0 || command.HandoffAction != "" || command.ProfileAction != "" || command.RetentionAction != "" || command.ArtifactAction != "" || command.SessionName != "" || command.SessionDomain != "" || command.PermissionTier != "" || command.AccountHint != "" || command.ArtifactName != "" || command.PlaintextFile != "" || command.TargetDir != "" || command.ProfilePath != "" || command.HandoffID != "" || command.HandoffBaseURL != "" || command.Status != "" || command.Apply {
 			return BrowserCommand{}, fmt.Errorf("browser session %s only accepts --id and --json", command.SessionAction)
 		}
 	case "login-request":
 		if command.ID <= 0 {
 			return BrowserCommand{}, fmt.Errorf("--id is required")
 		}
-		if command.SessionID != 0 || command.LoginRequestID != 0 || command.HandoffAction != "" || command.ProfileAction != "" || command.RetentionAction != "" || command.ArtifactAction != "" || command.SessionName != "" || command.SessionDomain != "" || command.PermissionTier != "" || command.AccountHint != "" || command.ArtifactName != "" || command.PlaintextFile != "" || command.ProfilePath != "" || command.HandoffID != "" || command.Status != "" || command.Apply {
+		if command.SessionID != 0 || command.LoginRequestID != 0 || command.HandoffAction != "" || command.ProfileAction != "" || command.RetentionAction != "" || command.ArtifactAction != "" || command.SessionName != "" || command.SessionDomain != "" || command.PermissionTier != "" || command.AccountHint != "" || command.ArtifactName != "" || command.PlaintextFile != "" || command.TargetDir != "" || command.ProfilePath != "" || command.HandoffID != "" || command.Status != "" || command.Apply {
 			return BrowserCommand{}, fmt.Errorf("browser session login-request only accepts --id, --handoff-base-url, and --json")
 		}
 	case "handoff":
@@ -463,11 +471,11 @@ func parseBrowserSession(args []string, command BrowserCommand) (BrowserCommand,
 		if strings.TrimSpace(command.HandoffID) == "" {
 			return BrowserCommand{}, fmt.Errorf("--handoff-id is required")
 		}
-		if command.ID != 0 || command.SessionID != 0 || command.LoginRequestID != 0 || command.SessionName != "" || command.SessionDomain != "" || command.PermissionTier != "" || command.AccountHint != "" || command.ArtifactName != "" || command.PlaintextFile != "" || command.ProfilePath != "" || command.HandoffBaseURL != "" || command.Status != "" || command.Apply {
+		if command.ID != 0 || command.SessionID != 0 || command.LoginRequestID != 0 || command.SessionName != "" || command.SessionDomain != "" || command.PermissionTier != "" || command.AccountHint != "" || command.ArtifactName != "" || command.PlaintextFile != "" || command.TargetDir != "" || command.ProfilePath != "" || command.HandoffBaseURL != "" || command.Status != "" || command.Apply {
 			return BrowserCommand{}, fmt.Errorf("browser session handoff show only accepts --handoff-id and --json")
 		}
 	case "runner":
-		if command.SessionID != 0 || command.HandoffAction != "" || command.ProfileAction != "" || command.RetentionAction != "" || command.ArtifactAction != "" || command.SessionName != "" || command.SessionDomain != "" || command.PermissionTier != "" || command.AccountHint != "" || command.ArtifactName != "" || command.PlaintextFile != "" || command.ProfilePath != "" || command.HandoffID != "" || command.HandoffBaseURL != "" || command.Apply {
+		if command.SessionID != 0 || command.HandoffAction != "" || command.ProfileAction != "" || command.RetentionAction != "" || command.ArtifactAction != "" || command.SessionName != "" || command.SessionDomain != "" || command.PermissionTier != "" || command.AccountHint != "" || command.ArtifactName != "" || command.PlaintextFile != "" || command.TargetDir != "" || command.ProfilePath != "" || command.HandoffID != "" || command.HandoffBaseURL != "" || command.Apply {
 			return BrowserCommand{}, fmt.Errorf("browser session runner %s only accepts runner fields and --json", command.RunnerAction)
 		}
 		switch command.RunnerAction {
@@ -512,14 +520,14 @@ func parseBrowserSession(args []string, command BrowserCommand) (BrowserCommand,
 		if command.Status == "" {
 			return BrowserCommand{}, fmt.Errorf("--status is required")
 		}
-		if command.SessionID != 0 || command.LoginRequestID != 0 || command.HandoffAction != "" || command.ProfileAction != "" || command.RetentionAction != "" || command.ArtifactAction != "" || command.SessionName != "" || command.SessionDomain != "" || command.PermissionTier != "" || command.AccountHint != "" || command.ArtifactName != "" || command.PlaintextFile != "" || command.ProfilePath != "" || command.HandoffID != "" || command.HandoffBaseURL != "" || command.Apply {
+		if command.SessionID != 0 || command.LoginRequestID != 0 || command.HandoffAction != "" || command.ProfileAction != "" || command.RetentionAction != "" || command.ArtifactAction != "" || command.SessionName != "" || command.SessionDomain != "" || command.PermissionTier != "" || command.AccountHint != "" || command.ArtifactName != "" || command.PlaintextFile != "" || command.TargetDir != "" || command.ProfilePath != "" || command.HandoffID != "" || command.HandoffBaseURL != "" || command.Apply {
 			return BrowserCommand{}, fmt.Errorf("browser session status only accepts --id, --status, and --json")
 		}
 	case "verify":
 		if command.ID <= 0 {
 			return BrowserCommand{}, fmt.Errorf("--id is required")
 		}
-		if command.SessionID != 0 || command.HandoffAction != "" || command.ProfileAction != "" || command.RetentionAction != "" || command.ArtifactAction != "" || command.SessionName != "" || command.SessionDomain != "" || command.PermissionTier != "" || command.AccountHint != "" || command.ArtifactName != "" || command.PlaintextFile != "" || command.ProfilePath != "" || command.HandoffID != "" || command.HandoffBaseURL != "" || command.Status != "" || command.Apply {
+		if command.SessionID != 0 || command.HandoffAction != "" || command.ProfileAction != "" || command.RetentionAction != "" || command.ArtifactAction != "" || command.SessionName != "" || command.SessionDomain != "" || command.PermissionTier != "" || command.AccountHint != "" || command.ArtifactName != "" || command.PlaintextFile != "" || command.TargetDir != "" || command.ProfilePath != "" || command.HandoffID != "" || command.HandoffBaseURL != "" || command.Status != "" || command.Apply {
 			return BrowserCommand{}, fmt.Errorf("browser session verify only accepts --id, --login-request-id, and --json")
 		}
 	case "profile":
@@ -528,7 +536,7 @@ func parseBrowserSession(args []string, command BrowserCommand) (BrowserCommand,
 			if command.RetentionAction != "cleanup" {
 				return BrowserCommand{}, fmt.Errorf("unsupported browser session profile subcommand: %s %s", command.ProfileAction, command.RetentionAction)
 			}
-			if command.ID != 0 || command.LoginRequestID != 0 || command.HandoffAction != "" || command.RunnerAction != "" || command.ArtifactAction != "" || command.SessionName != "" || command.SessionDomain != "" || command.PermissionTier != "" || command.AccountHint != "" || command.ArtifactName != "" || command.PlaintextFile != "" || command.ProfilePath != "" || command.HandoffID != "" || command.HandoffBaseURL != "" || command.Status != "" || command.hasNoVNCPlanConfig() {
+			if command.ID != 0 || command.LoginRequestID != 0 || command.HandoffAction != "" || command.RunnerAction != "" || command.ArtifactAction != "" || command.SessionName != "" || command.SessionDomain != "" || command.PermissionTier != "" || command.AccountHint != "" || command.ArtifactName != "" || command.PlaintextFile != "" || command.TargetDir != "" || command.ProfilePath != "" || command.HandoffID != "" || command.HandoffBaseURL != "" || command.Status != "" || command.hasNoVNCPlanConfig() {
 				return BrowserCommand{}, fmt.Errorf("browser session profile retention cleanup only accepts --session-id, --apply, and --json")
 			}
 		case "artifact":
@@ -546,22 +554,32 @@ func parseBrowserSession(args []string, command BrowserCommand) (BrowserCommand,
 				if strings.TrimSpace(command.PlaintextFile) == "" {
 					return BrowserCommand{}, fmt.Errorf("--plaintext-file is required")
 				}
-				if command.ID != 0 || command.LoginRequestID != 0 || command.HandoffAction != "" || command.RunnerAction != "" || command.RetentionAction != "" || command.SessionName != "" || command.SessionDomain != "" || command.PermissionTier != "" || command.AccountHint != "" || command.ProfilePath != "" || command.HandoffID != "" || command.HandoffBaseURL != "" || command.Status != "" || command.Apply || command.hasNoVNCPlanConfig() {
+				if command.ID != 0 || command.LoginRequestID != 0 || command.HandoffAction != "" || command.RunnerAction != "" || command.RetentionAction != "" || command.SessionName != "" || command.SessionDomain != "" || command.PermissionTier != "" || command.AccountHint != "" || command.TargetDir != "" || command.ProfilePath != "" || command.HandoffID != "" || command.HandoffBaseURL != "" || command.Status != "" || command.Apply || command.hasNoVNCPlanConfig() {
 					return BrowserCommand{}, fmt.Errorf("browser session profile artifact create-fixture only accepts --session-id, --name, --plaintext-file, and --json")
 				}
 			case "list":
 				if command.SessionID <= 0 {
 					return BrowserCommand{}, fmt.Errorf("--session-id is required")
 				}
-				if command.ID != 0 || command.LoginRequestID != 0 || command.HandoffAction != "" || command.RunnerAction != "" || command.RetentionAction != "" || command.SessionName != "" || command.SessionDomain != "" || command.PermissionTier != "" || command.AccountHint != "" || command.ArtifactName != "" || command.PlaintextFile != "" || command.ProfilePath != "" || command.HandoffID != "" || command.HandoffBaseURL != "" || command.Status != "" || command.Apply || command.hasNoVNCPlanConfig() {
+				if command.ID != 0 || command.LoginRequestID != 0 || command.HandoffAction != "" || command.RunnerAction != "" || command.RetentionAction != "" || command.SessionName != "" || command.SessionDomain != "" || command.PermissionTier != "" || command.AccountHint != "" || command.ArtifactName != "" || command.PlaintextFile != "" || command.TargetDir != "" || command.ProfilePath != "" || command.HandoffID != "" || command.HandoffBaseURL != "" || command.Status != "" || command.Apply || command.hasNoVNCPlanConfig() {
 					return BrowserCommand{}, fmt.Errorf("browser session profile artifact list only accepts --session-id and --json")
 				}
 			case "show", "revoke":
 				if command.ID <= 0 {
 					return BrowserCommand{}, fmt.Errorf("--id is required")
 				}
-				if command.SessionID != 0 || command.LoginRequestID != 0 || command.HandoffAction != "" || command.RunnerAction != "" || command.RetentionAction != "" || command.SessionName != "" || command.SessionDomain != "" || command.PermissionTier != "" || command.AccountHint != "" || command.ArtifactName != "" || command.PlaintextFile != "" || command.ProfilePath != "" || command.HandoffID != "" || command.HandoffBaseURL != "" || command.Status != "" || command.Apply || command.hasNoVNCPlanConfig() {
+				if command.SessionID != 0 || command.LoginRequestID != 0 || command.HandoffAction != "" || command.RunnerAction != "" || command.RetentionAction != "" || command.SessionName != "" || command.SessionDomain != "" || command.PermissionTier != "" || command.AccountHint != "" || command.ArtifactName != "" || command.PlaintextFile != "" || command.TargetDir != "" || command.ProfilePath != "" || command.HandoffID != "" || command.HandoffBaseURL != "" || command.Status != "" || command.Apply || command.hasNoVNCPlanConfig() {
 					return BrowserCommand{}, fmt.Errorf("browser session profile artifact %s only accepts --id and --json", command.ArtifactAction)
+				}
+			case "materialize", "cleanup-materialization":
+				if command.ID <= 0 {
+					return BrowserCommand{}, fmt.Errorf("--id is required")
+				}
+				if strings.TrimSpace(command.TargetDir) == "" {
+					return BrowserCommand{}, fmt.Errorf("--target-dir is required")
+				}
+				if command.SessionID != 0 || command.LoginRequestID != 0 || command.HandoffAction != "" || command.RunnerAction != "" || command.RetentionAction != "" || command.SessionName != "" || command.SessionDomain != "" || command.PermissionTier != "" || command.AccountHint != "" || command.ArtifactName != "" || command.PlaintextFile != "" || command.ProfilePath != "" || command.HandoffID != "" || command.HandoffBaseURL != "" || command.Status != "" || command.Apply || command.hasNoVNCPlanConfig() {
+					return BrowserCommand{}, fmt.Errorf("browser session profile artifact %s only accepts --id, --target-dir, and --json", command.ArtifactAction)
 				}
 			}
 		default:
@@ -582,7 +600,7 @@ func isKnownBrowserHandoffRunnerAction(value string) bool {
 
 func isKnownBrowserProfileArtifactAction(value string) bool {
 	switch strings.ToLower(strings.TrimSpace(value)) {
-	case "create-fixture", "list", "show", "revoke":
+	case "create-fixture", "list", "show", "revoke", "materialize", "cleanup-materialization":
 		return true
 	default:
 		return false

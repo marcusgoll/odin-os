@@ -426,6 +426,32 @@ func TestBrowserEncryptedProfileArtifactMetadataLifecyclePersistsAndAudits(t *te
 	if failed.ErrorCode == nil || *failed.ErrorCode != cleanupCode {
 		t.Fatalf("failed.ErrorCode = %v, want cleanup_failed", failed.ErrorCode)
 	}
+	materialized, err := store.RecordBrowserProfileMaterialized(ctx, RecordBrowserProfileMaterializedParams{
+		ID:                   expiring.ID,
+		MaterializationPath:  "runtime/browser-profile-materializations/proof",
+		MaterializedFilePath: "runtime/browser-profile-materializations/proof/profile.materialized",
+		Actor:                "operator",
+		Reason:               "read-only materialization",
+	})
+	if err != nil {
+		t.Fatalf("RecordBrowserProfileMaterialized() error = %v", err)
+	}
+	if materialized.ID != expiring.ID || materialized.Status != BrowserEncryptedProfileArtifactStatusExpired {
+		t.Fatalf("materialized artifact = %+v, want status-preserving audit", materialized)
+	}
+	materializationCleaned, err := store.RecordBrowserProfileMaterializationCleaned(ctx, RecordBrowserProfileMaterializationCleanedParams{
+		ID:                  expiring.ID,
+		MaterializationPath: "runtime/browser-profile-materializations/proof",
+		Removed:             true,
+		Actor:               "operator",
+		Reason:              "read-only materialization cleanup",
+	})
+	if err != nil {
+		t.Fatalf("RecordBrowserProfileMaterializationCleaned() error = %v", err)
+	}
+	if materializationCleaned.ID != expiring.ID || materializationCleaned.Status != BrowserEncryptedProfileArtifactStatusExpired {
+		t.Fatalf("materializationCleaned artifact = %+v, want status-preserving audit", materializationCleaned)
+	}
 
 	events, err := store.ListEvents(ctx, ListEventsParams{})
 	if err != nil {
@@ -458,6 +484,12 @@ func TestBrowserEncryptedProfileArtifactMetadataLifecyclePersistsAndAudits(t *te
 	}
 	if counts[runtimeevents.EventBrowserProfileCleanupFailed] != 1 {
 		t.Fatalf("browser.profile_cleanup_failed events = %d, want 1", counts[runtimeevents.EventBrowserProfileCleanupFailed])
+	}
+	if counts[runtimeevents.EventBrowserProfileMaterialized] != 1 {
+		t.Fatalf("browser.profile_materialized events = %d, want 1", counts[runtimeevents.EventBrowserProfileMaterialized])
+	}
+	if counts[runtimeevents.EventBrowserProfileMaterializationCleaned] != 1 {
+		t.Fatalf("browser.profile_materialization_cleaned events = %d, want 1", counts[runtimeevents.EventBrowserProfileMaterializationCleaned])
 	}
 
 	if err := store.Close(); err != nil {

@@ -286,6 +286,22 @@ type RecordBrowserEncryptedProfileArtifactCleanupFailedParams struct {
 	ErrorMessage *string
 }
 
+type RecordBrowserProfileMaterializedParams struct {
+	ID                   int64
+	MaterializationPath  string
+	MaterializedFilePath string
+	Actor                string
+	Reason               string
+}
+
+type RecordBrowserProfileMaterializationCleanedParams struct {
+	ID                  int64
+	MaterializationPath string
+	Removed             bool
+	Actor               string
+	Reason              string
+}
+
 func (store *Store) CreateBrowserSession(ctx context.Context, params CreateBrowserSessionParams) (BrowserSession, error) {
 	name := strings.TrimSpace(params.Name)
 	if name == "" {
@@ -826,6 +842,60 @@ func (store *Store) RecordBrowserEncryptedProfileArtifactCleanupFailed(ctx conte
 		return appendBrowserSessionEventTx(ctx, tx, session, runtimeevents.EventBrowserProfileCleanupFailed, browserEncryptedProfileArtifactPayload(updated, current.Status, params.Actor, params.Reason), now)
 	})
 	return updated, err
+}
+
+func (store *Store) RecordBrowserProfileMaterialized(ctx context.Context, params RecordBrowserProfileMaterializedParams) (BrowserEncryptedProfileArtifact, error) {
+	if params.ID <= 0 {
+		return BrowserEncryptedProfileArtifact{}, fmt.Errorf("browser encrypted profile artifact id must be positive")
+	}
+	materializationPath := strings.TrimSpace(params.MaterializationPath)
+	if materializationPath == "" {
+		return BrowserEncryptedProfileArtifact{}, fmt.Errorf("browser profile materialization path is required")
+	}
+	materializedFilePath := strings.TrimSpace(params.MaterializedFilePath)
+	if materializedFilePath == "" {
+		return BrowserEncryptedProfileArtifact{}, fmt.Errorf("browser profile materialized file path is required")
+	}
+	now := store.now()
+	var artifact BrowserEncryptedProfileArtifact
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		current, err := getBrowserEncryptedProfileArtifactTx(ctx, tx, params.ID)
+		if err != nil {
+			return err
+		}
+		artifact = current
+		session, err := getBrowserSessionTx(ctx, tx, current.SessionID)
+		if err != nil {
+			return err
+		}
+		return appendBrowserSessionEventTx(ctx, tx, session, runtimeevents.EventBrowserProfileMaterialized, browserProfileMaterializationPayload(current, materializationPath, materializedFilePath, false, params.Actor, params.Reason), now)
+	})
+	return artifact, err
+}
+
+func (store *Store) RecordBrowserProfileMaterializationCleaned(ctx context.Context, params RecordBrowserProfileMaterializationCleanedParams) (BrowserEncryptedProfileArtifact, error) {
+	if params.ID <= 0 {
+		return BrowserEncryptedProfileArtifact{}, fmt.Errorf("browser encrypted profile artifact id must be positive")
+	}
+	materializationPath := strings.TrimSpace(params.MaterializationPath)
+	if materializationPath == "" {
+		return BrowserEncryptedProfileArtifact{}, fmt.Errorf("browser profile materialization path is required")
+	}
+	now := store.now()
+	var artifact BrowserEncryptedProfileArtifact
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		current, err := getBrowserEncryptedProfileArtifactTx(ctx, tx, params.ID)
+		if err != nil {
+			return err
+		}
+		artifact = current
+		session, err := getBrowserSessionTx(ctx, tx, current.SessionID)
+		if err != nil {
+			return err
+		}
+		return appendBrowserSessionEventTx(ctx, tx, session, runtimeevents.EventBrowserProfileMaterializationCleaned, browserProfileMaterializationPayload(current, materializationPath, "", params.Removed, params.Actor, params.Reason), now)
+	})
+	return artifact, err
 }
 
 func (store *Store) markBrowserEncryptedProfileArtifactTerminal(ctx context.Context, id int64, status BrowserEncryptedProfileArtifactStatus, eventType runtimeevents.Type, actor string, reason string, errorCode *string, errorMessage *string) (BrowserEncryptedProfileArtifact, error) {
@@ -1859,6 +1929,25 @@ func browserEncryptedProfileArtifactPayload(artifact BrowserEncryptedProfileArti
 		"actor":                   defaultString(actor, "operator"),
 		"reason":                  strings.TrimSpace(reason),
 	}
+}
+
+func browserProfileMaterializationPayload(artifact BrowserEncryptedProfileArtifact, materializationPath string, materializedFilePath string, removed bool, actor string, reason string) map[string]any {
+	payload := map[string]any{
+		"artifact_id":             artifact.ID,
+		"session_id":              artifact.SessionID,
+		"profile_path":            artifact.ProfilePath,
+		"encrypted_artifact_path": artifact.EncryptedArtifactPath,
+		"encryption_key_ref":      artifact.EncryptionKeyRef,
+		"status":                  string(artifact.Status),
+		"materialization_path":    strings.TrimSpace(materializationPath),
+		"removed":                 removed,
+		"actor":                   defaultString(actor, "operator"),
+		"reason":                  strings.TrimSpace(reason),
+	}
+	if strings.TrimSpace(materializedFilePath) != "" {
+		payload["materialized_file_path"] = strings.TrimSpace(materializedFilePath)
+	}
+	return payload
 }
 
 func normalizeBrowserSessionDomain(domain string) (string, error) {

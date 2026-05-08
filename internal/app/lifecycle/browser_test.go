@@ -1533,6 +1533,104 @@ func TestRunBrowserSessionProfileArtifactCreateFixtureFailsClosed(t *testing.T) 
 	}
 }
 
+func TestRunBrowserSessionProfileArtifactMaterializeAndCleanup(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	root := testRepoRoot(t)
+	key := bytes.Repeat([]byte{0x6d}, browserprofilecrypto.KeySize)
+	encodedKey := base64.StdEncoding.EncodeToString(key)
+	t.Setenv(browserprofilekeys.EnvKeyB64, encodedKey)
+	secretText := "fixture plaintext sentinel for materialization"
+	plaintextPath := filepath.Join(t.TempDir(), "materialize-profile.txt")
+	if err := os.WriteFile(plaintextPath, []byte(secretText), 0o600); err != nil {
+		t.Fatalf("WriteFile(plaintext fixture) error = %v", err)
+	}
+
+	run := func(args ...string) string {
+		t.Helper()
+		var output bytes.Buffer
+		if err := Run(context.Background(), root, args, strings.NewReader(""), &output); err != nil {
+			t.Fatalf("Run(%v) error = %v\noutput=%s", args, err, output.String())
+		}
+		return output.String()
+	}
+
+	created := decodeBrowserSessionEnvelope(t, []byte(run(
+		"browser", "session", "create",
+		"--name", "materialize-cli",
+		"--domain", "example.com",
+		"--permission-tier", "authenticated_read",
+		"--json",
+	)))
+	artifact := decodeBrowserSessionProfileArtifactEnvelope(t, []byte(run(
+		"browser", "session", "profile", "artifact", "create-fixture",
+		"--session-id", int64String(created.ID),
+		"--name", "materialize-flow",
+		"--plaintext-file", plaintextPath,
+		"--json",
+	)))
+	materializationDir := "runtime/browser-profile-materializations/cli-proof"
+	materializeOutput := run(
+		"browser", "session", "profile", "artifact", "materialize",
+		"--id", int64String(artifact.ID),
+		"--target-dir", materializationDir,
+		"--json",
+	)
+	for _, forbidden := range []string{secretText, plaintextPath, encodedKey} {
+		if strings.Contains(materializeOutput, forbidden) {
+			t.Fatalf("materialize output leaked forbidden marker %q: %s", forbidden, materializeOutput)
+		}
+	}
+	materialization := decodeBrowserSessionProfileMaterializationEnvelope(t, []byte(materializeOutput))
+	if materialization.ArtifactID != artifact.ID || materialization.SessionID != created.ID || materialization.MaterializationPath != materializationDir || materialization.MaterializedFilePath == "" {
+		t.Fatalf("materialization = %+v, want artifact materialized under requested temp path", materialization)
+	}
+	materializedAbs := filepath.Join(root, filepath.FromSlash(materialization.MaterializedFilePath))
+	materializedBytes, err := os.ReadFile(materializedAbs)
+	if err != nil {
+		t.Fatalf("ReadFile(materialized) error = %v", err)
+	}
+	if string(materializedBytes) != secretText {
+		t.Fatalf("materialized bytes = %q, want fixture text", materializedBytes)
+	}
+	artifactAbs := filepath.Join(root, filepath.FromSlash(artifact.ArtifactPath))
+	if _, err := os.Stat(artifactAbs); err != nil {
+		t.Fatalf("encrypted artifact missing after materialize: %v", err)
+	}
+	for _, rel := range []string{created.ProfilePath, "cookies", "cookie", "credentials", "profile-bytes"} {
+		if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(rel))); !os.IsNotExist(err) {
+			t.Fatalf("forbidden path %q exists after materialize err=%v", rel, err)
+		}
+	}
+
+	cleanupOutput := run(
+		"browser", "session", "profile", "artifact", "cleanup-materialization",
+		"--id", int64String(artifact.ID),
+		"--target-dir", materializationDir,
+		"--json",
+	)
+	cleanup := decodeBrowserSessionProfileMaterializationEnvelope(t, []byte(cleanupOutput))
+	if cleanup.ArtifactID != artifact.ID || cleanup.MaterializationPath != materializationDir || !cleanup.Removed {
+		t.Fatalf("cleanup = %+v, want materialization removed", cleanup)
+	}
+	if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(materializationDir))); !os.IsNotExist(err) {
+		t.Fatalf("materialization dir exists after cleanup err=%v", err)
+	}
+	if _, err := os.Stat(artifactAbs); err != nil {
+		t.Fatalf("encrypted artifact missing after cleanup: %v", err)
+	}
+	logs := run("logs", "--json")
+	for _, want := range []string{`"type": "browser.profile_materialized"`, `"type": "browser.profile_materialization_cleaned"`} {
+		if !strings.Contains(logs, want) {
+			t.Fatalf("logs output = %s, want audit event %s", logs, want)
+		}
+	}
+	for _, forbidden := range []string{secretText, plaintextPath, encodedKey} {
+		if strings.Contains(logs, forbidden) {
+			t.Fatalf("logs output leaked forbidden marker %q: %s", forbidden, logs)
+		}
+	}
+}
+
 func TestRunBrowserSessionProfileArtifactStatusRevokeAndRetentionFlow(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	root := testRepoRoot(t)
@@ -1741,6 +1839,16 @@ type browserSessionProfileArtifactJSON struct {
 	ErrorMessage     string `json:"error_message,omitempty"`
 }
 
+type browserSessionProfileMaterializationJSON struct {
+	ArtifactID           int64  `json:"artifact_id"`
+	SessionID            int64  `json:"session_id"`
+	ArtifactPath         string `json:"artifact_path"`
+	MaterializationPath  string `json:"materialization_path"`
+	MaterializedFilePath string `json:"materialized_file_path,omitempty"`
+	ReadOnly             bool   `json:"read_only,omitempty"`
+	Removed              bool   `json:"removed,omitempty"`
+}
+
 type browserSessionLoginRequestJSON struct {
 	ID          int64   `json:"id"`
 	SessionID   int64   `json:"session_id"`
@@ -1848,6 +1956,17 @@ func decodeBrowserSessionProfileArtifactListEnvelope(t *testing.T, payload []byt
 		t.Fatalf("browser session profile artifact list json decode error = %v; output=%s", err, string(payload))
 	}
 	return envelope.Artifacts
+}
+
+func decodeBrowserSessionProfileMaterializationEnvelope(t *testing.T, payload []byte) browserSessionProfileMaterializationJSON {
+	t.Helper()
+	var envelope struct {
+		Materialization browserSessionProfileMaterializationJSON `json:"materialization"`
+	}
+	if err := json.Unmarshal(payload, &envelope); err != nil {
+		t.Fatalf("browser session profile materialization json decode error = %v; output=%s", err, string(payload))
+	}
+	return envelope.Materialization
 }
 
 func decodeBrowserSessionEnvelope(t *testing.T, payload []byte) browserSessionJSON {
