@@ -11,7 +11,7 @@ Odin OS is the canonical future runtime for Odin: a Go-first, CLI-first orchestr
 
 This repository is the runtime root. `odin-orchestrator` is a migration source only. The system is designed around a workspace-first semantic center that still operates across explicit scopes: global control, the reserved `odin-core` system project, managed local or GitHub-backed projects, and new-project setup flows. GitHub is optional, but Git is mandatory for any managed project.
 
-See `docs/contracts/ubiquitous-language.md` for the frozen vocabulary, `docs/contracts/workspace-context-map.md` for the bounded-context map, `docs/contracts/follow-through-contract.md` for the workspace-owned operating profile and follow-through model, and `docs/contracts/companion-swarm-orchestration.md` for bounded companion delegation and swarm rules.
+See `docs/contracts/ubiquitous-language.md` for the frozen vocabulary, `docs/contracts/workspace-context-map.md` for the bounded-context map, `docs/contracts/follow-through-contract.md` for the workspace-owned operating profile and follow-through model, `docs/contracts/pause-resume.md` for Work Item pause/resume and GitHub `odin:paused` projection boundaries, and `docs/contracts/companion-swarm-orchestration.md` for bounded companion delegation and swarm rules.
 
 ## Architecture Summary
 
@@ -37,6 +37,7 @@ See `docs/contracts/ubiquitous-language.md` for the frozen vocabulary, `docs/con
 - `docs/contracts/ubiquitous-language.md` freezes the canonical workspace vocabulary.
 - `docs/contracts/workspace-context-map.md` defines the target bounded-context dependency direction.
 - `docs/contracts/tui-overview.md` defines the canonical workspace-first operator overview and lane semantics.
+- `docs/contracts/pause-resume.md` defines Work Item pause/resume ownership and keeps GitHub `odin:paused` labels projection-only.
 - `docs/adr/0001-canonical-authority.md` defines the system's source-of-truth model, control-scope model, and governance rules.
 - `docs/adr/0002-migration-policy.md` defines how legacy assets from `odin-orchestrator` are classified and moved into this repo.
 - `docs/contracts/repo-layout.md` defines package and folder responsibilities.

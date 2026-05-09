@@ -42,3 +42,11 @@ Validation rules:
 - `--payload-file` may be `-` to indicate stdin will be consumed by a later stage.
 - This parser validates file-backed `--payload-file` inputs only; stdin-backed payload validation happens in the intake execution stage.
 - A file-backed `--payload-file` must contain a valid JSON object.
+
+## GitHub `odin:paused` Labels
+
+Inbound tracker labels are source facts. `odin:paused` does not pause or resume
+runtime work when it appears on an external GitHub issue. The pause/resume
+contract in `docs/contracts/pause-resume.md` keeps runtime pause authority in
+SQLite and permits GitHub labels only as outbound projections or stored external
+evidence.
