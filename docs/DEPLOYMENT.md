@@ -194,6 +194,33 @@ docker compose -f deploy/docker/docker-compose.yml up -d
 docker compose -f deploy/docker/docker-compose.yml ps
 ```
 
+Run the local runtime smoke:
+
+```bash
+make docker-smoke
+```
+
+The smoke builds `deploy/docker/Dockerfile`, starts the Compose service with a
+non-secret env fixture, verifies `GET /health`, confirms the container runs as a
+non-root user, and checks the Compose hardening settings: read-only root
+filesystem, `cap_drop: ALL`, and `no-new-privileges:true`.
+The target delegates to `scripts/tests/docker-compose-smoke.sh`.
+
+Required host prerequisites:
+
+- Docker daemon reachable by the current user
+- Docker Compose plugin
+- `curl`
+- a free loopback port; the smoke chooses one automatically unless
+  `ODIN_DOCKER_SMOKE_PORT` is set
+
+The Compose listener defaults to `127.0.0.1:9444`. Override it for local smoke
+or port-conflict avoidance:
+
+```bash
+ODIN_COMPOSE_HTTP_BIND=127.0.0.1:19444 docker compose -f deploy/docker/docker-compose.yml up -d
+```
+
 Use a machine-local env file for real secrets:
 
 ```bash
