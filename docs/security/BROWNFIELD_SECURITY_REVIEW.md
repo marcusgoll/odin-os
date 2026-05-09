@@ -49,7 +49,7 @@ block merging this documentation-only review.
 | SEC-01 | Critical | `scripts/drivers/codex-headless.sh:6-43` | The live Codex driver now rejects `ODIN_CODEX_SANDBOX_MODE=danger-full-access`; keep this blocked in every autonomous worker lane. | A regression or parallel runner that reintroduces sandbox bypass support could let a misconfigured service env or compromised operator env cause worker runs to bypass Codex approvals and filesystem sandboxing. | Keep the live driver and canonical Go executor fail-closed on `danger-full-access` and sandbox bypass flags. |
 | SEC-02 | Critical | `scripts/drivers/codex-headless.sh` | The live Codex driver now treats prompt text that looks like an exact command as prompt data and does not execute it through shell. | A regression or parallel runner that reintroduces prompt-command extraction could allow a GitHub issue body or persisted prompt to become host shell code. | Keep prompt and issue text as data. If command-like automation is needed later, implement explicit allowlisted operations with structured args instead of prompt parsing. |
 | SEC-03 | High | `internal/executors/codex/adapter.go:241-250`, `internal/executors/drivers/driver.go:43-58` | Codex driver subprocesses inherit the full daemon environment through `os.Environ`. | A worker or driver can read `GITHUB_TOKEN`, `ODIN_ADMIN_TOKEN`, OpenAI/Codex credentials, Google tokens, or other production env values and echo them into logs/artifacts. | Launch workers with an allowlisted environment. Pass only runtime IDs, workspace path, and non-secret config needed for that lane. |
-| SEC-04 | High | `internal/telemetry/logs/logger.go:34-70`, `internal/telemetry/logs/logger_test.go:67-91` | Structured logger writes sensitive field values verbatim; the current characterization test explicitly protects that behavior. | A GitHub, Codex, browser, or deployment error includes a token in `Fields`; Odin persists it into service logs. | Add a redacting logger layer for key names and token-like values, then flip the characterization test to require redaction. |
+| SEC-04 | High | `internal/telemetry/logs/logger.go`, `internal/telemetry/logs/logger_test.go` | Structured logger now redacts sensitive field names, token-like field keys, and token-like field values before JSON persistence; keep this as the final logging boundary. | A regression lets a GitHub, Codex, browser, or deployment error include a token in `Fields`, and Odin persists it into service logs. | Keep the logger-level redaction tests covering GitHub, OpenAI, admin-token, and generic token-like values. |
 | SEC-05 | High | `internal/api/http/capabilities.go:195-216`, `internal/core/policy/service.go:81-83`, `internal/app/lifecycle/run.go:2247-2265` | `POST /capabilities/{id}:invoke` is not authenticated at the HTTP route, and policy permits empty caller identity when a descriptor has no permissions. | If the HTTP service is exposed beyond loopback, an unauthenticated caller can invoke currently narrow capabilities and future mutable/subprocess-backed capabilities unless every descriptor is perfectly permissioned. | Require admin or service-token authentication for all HTTP capability invocation. Reject empty API caller identity and default-deny mutable or subprocess-backed capabilities. |
 | SEC-06 | High | `internal/runtime/jobs/service.go:450-473`, `internal/prompts/renderer.go:70-82` | GitHub issue title/body-derived intake data and metadata can enter prompts without a strict untrusted-data envelope. | A malicious issue includes instructions that masquerade as system/developer guidance, causing a worker to ignore guardrails or leak context. | Wrap tracker and intake content in quoted untrusted-data blocks, avoid passing raw bodies unless needed, and make prompt renderer mark provenance and immutable instructions separately. |
 
@@ -79,6 +79,10 @@ block merging this documentation-only review.
   uses tokens only in the HTTP adapter.
 - `internal/tracker/github/client_test.go:88-156` tests dry-run no-write
   behavior and token redaction.
+- `internal/telemetry/logs/logger.go` redacts sensitive structured log keys and
+  token-like values while preserving non-secret diagnostic fields.
+- `internal/telemetry/logs/logger_test.go` covers GitHub, OpenAI, admin-token,
+  generic token-like, nested, and diagnostic-context redaction behavior.
 - `internal/prompts/renderer.go:89-101` rejects template path traversal.
 - `deploy/systemd/odin-os.service:16-26` adds user-service hardening.
 - `deploy/docker/Dockerfile:12-27` and `deploy/docker/docker-compose.yml:7-24`
@@ -90,8 +94,8 @@ block merging this documentation-only review.
 
 No committed raw GitHub, OpenAI, Codex, Google, AWS, or private-key secrets were
 found by a pattern scan of the clean worktree. The highest exposure risk is
-runtime leakage: inherited daemon environment, verbatim structured logs, shell
-token caches, and worker artifacts.
+runtime leakage: inherited daemon environment, shell token caches, and worker
+artifacts.
 
 ## Process Execution Review
 

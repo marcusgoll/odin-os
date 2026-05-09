@@ -76,6 +76,9 @@ orchestrator risk surface, not on a greenfield target.
 - `internal/tracker/github/client.go` uses GitHub tokens only for API requests,
   supports dry-run no-write behavior, and redacts token-like strings in adapter
   errors.
+- `internal/telemetry/logs.Logger` redacts sensitive structured log keys and
+  token-like values before JSON persistence while preserving non-secret
+  diagnostic fields.
 - `internal/prompts/renderer.go` rejects path traversal in template names and
   blocks implementation prompts that lack brownfield guardrails.
 - `deploy/systemd/odin-os.service` is a user unit with hardening options.
@@ -95,10 +98,9 @@ unattended Codex implementation workers:
    parallel runner from treating issue or prompt text as shell.
 3. Canonical Codex execution inherits the full daemon environment when launching
    the driver.
-4. Structured logging writes sensitive field values verbatim.
-5. HTTP capability invocation is not authenticated at the route level and can
+4. HTTP capability invocation is not authenticated at the route level and can
    pass with empty caller identity for unpermissioned capabilities.
-6. GitHub issue text and persisted intake metadata can enter prompts without a
+5. GitHub issue text and persisted intake metadata can enter prompts without a
    strict untrusted-data envelope.
 
 ## Non-Goals
