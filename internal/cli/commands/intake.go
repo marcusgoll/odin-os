@@ -207,9 +207,21 @@ func ParseIntake(args []string) (IntakeCommand, error) {
 	return command, nil
 }
 
+func hasHelpArg(args []string) bool {
+	for _, arg := range args {
+		if arg == "help" || arg == "--help" {
+			return true
+		}
+	}
+	return false
+}
+
 func parseIntakeReview(args []string) (IntakeCommand, error) {
 	if len(args) == 0 {
 		return IntakeCommand{}, fmt.Errorf(IntakeUsage)
+	}
+	if hasHelpArg(args[1:]) {
+		return IntakeCommand{Name: "help"}, nil
 	}
 	command := IntakeCommand{Name: "review", ReviewAction: strings.ToLower(args[0])}
 	switch command.ReviewAction {
@@ -321,6 +333,9 @@ func parseIntakeProcess(args []string) (IntakeCommand, error) {
 func parseRawIntake(args []string) (IntakeCommand, error) {
 	if len(args) == 0 {
 		return IntakeCommand{}, fmt.Errorf(IntakeUsage)
+	}
+	if hasHelpArg(args[1:]) {
+		return IntakeCommand{Name: "help"}, nil
 	}
 	command := IntakeCommand{Name: "raw", RawAction: strings.ToLower(args[0])}
 	switch command.RawAction {
