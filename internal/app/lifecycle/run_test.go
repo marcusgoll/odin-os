@@ -21,6 +21,7 @@ import (
 	"odin-os/internal/cli/tui"
 	"odin-os/internal/core/capabilities"
 	"odin-os/internal/core/initiatives"
+	"odin-os/internal/prompts"
 	"odin-os/internal/runtime/checkpoints"
 	runtimestate "odin-os/internal/runtime/state"
 	"odin-os/internal/runtime/supervision"
@@ -6367,6 +6368,29 @@ func TestNewJobServiceIncludesSupervisor(t *testing.T) {
 	}
 	if _, ok := service.Supervisor.(supervision.Service); !ok {
 		t.Fatalf("newJobService() Supervisor = %T, want supervision.Service", service.Supervisor)
+	}
+	if service.PromptRenderer != nil {
+		t.Fatalf("newJobService() PromptRenderer = %T, want nil for unconfigured app", service.PromptRenderer)
+	}
+	if service.PromptTemplateName != "" {
+		t.Fatalf("newJobService() PromptTemplateName = %q, want empty for unconfigured app", service.PromptTemplateName)
+	}
+}
+
+func TestNewJobServicePropagatesPromptConfiguration(t *testing.T) {
+	t.Parallel()
+
+	renderer := prompts.FileRenderer{Root: filepath.Join(t.TempDir(), "prompts", "workers")}
+	service := newJobService(bootstrap.App{
+		PromptRenderer:     renderer,
+		PromptTemplateName: "go-orchestrator",
+	})
+
+	if service.PromptRenderer != renderer {
+		t.Fatalf("PromptRenderer was not propagated")
+	}
+	if service.PromptTemplateName != "go-orchestrator" {
+		t.Fatalf("PromptTemplateName = %q, want %q", service.PromptTemplateName, "go-orchestrator")
 	}
 }
 

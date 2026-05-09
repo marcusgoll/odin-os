@@ -11,6 +11,7 @@ import (
 
 	"odin-os/internal/core/followups"
 	"odin-os/internal/core/workspaces"
+	"odin-os/internal/prompts"
 	runtimeevents "odin-os/internal/runtime/events"
 	"odin-os/internal/store/sqlite"
 )
@@ -195,6 +196,48 @@ projects:
 	}
 	if len(app.RegistryDiagnostics) != 0 {
 		t.Fatalf("RegistryDiagnostics = %+v, want none", app.RegistryDiagnostics)
+	}
+}
+
+func TestLoadConfiguresPromptRendererFromRepoRoot(t *testing.T) {
+	repoRoot := createBootstrapRepoRoot(t, true)
+	writeBootstrapPromptTemplate(t, repoRoot)
+	runtimeRoot := t.TempDir()
+
+	app, err := Load(context.Background(), repoRoot, runtimeRoot)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	defer app.Store.Close()
+
+	renderer, ok := app.PromptRenderer.(prompts.FileRenderer)
+	if !ok {
+		t.Fatalf("PromptRenderer = %T, want prompts.FileRenderer", app.PromptRenderer)
+	}
+	wantRoot := filepath.Join(repoRoot, "prompts", "workers")
+	if renderer.Root != wantRoot {
+		t.Fatalf("PromptRenderer.Root = %q, want %q", renderer.Root, wantRoot)
+	}
+	if app.PromptTemplateName != "go-orchestrator" {
+		t.Fatalf("PromptTemplateName = %q, want %q", app.PromptTemplateName, "go-orchestrator")
+	}
+}
+
+func TestLoadLeavesPromptRendererUnconfiguredWhenTemplateIsMissing(t *testing.T) {
+	repoRoot := createBootstrapRepoRoot(t, true)
+	runtimeRoot := t.TempDir()
+
+	app, err := Load(context.Background(), repoRoot, runtimeRoot)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	defer app.Store.Close()
+
+	if app.PromptRenderer != nil {
+		t.Fatalf("PromptRenderer = %T, want nil", app.PromptRenderer)
+	}
+	if app.PromptTemplateName != "" {
+		t.Fatalf("PromptTemplateName = %q, want empty", app.PromptTemplateName)
 	}
 }
 
@@ -644,6 +687,18 @@ routes:
 	}
 
 	return root
+}
+
+func writeBootstrapPromptTemplate(t *testing.T, repoRoot string) {
+	t.Helper()
+
+	root := filepath.Join(repoRoot, "prompts", "workers")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatalf("mkdir prompts root: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "go-orchestrator.md"), []byte("---\nrequires_acceptance_criteria: true\n---\n"), 0o644); err != nil {
+		t.Fatalf("write prompt template: %v", err)
+	}
 }
 
 func bootstrapContextWithBootID(ctx context.Context, bootID string) context.Context {

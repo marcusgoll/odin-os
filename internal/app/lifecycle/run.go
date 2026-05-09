@@ -266,13 +266,15 @@ func Run(ctx context.Context, root string, args []string, stdin io.Reader, stdou
 	case "work":
 		return commands.RunWork(ctx, app.Store, app.Registry, app.RegistrySnapshot, args[1:], stdout, commands.WorkOptions{
 			JobService: jobs.Service{
-				Store:          app.Store,
-				RuntimeRoot:    app.RuntimeRoot,
-				Registry:       app.Registry,
-				Executors:      app.Executors,
-				ExecutorConfig: app.ExecutorConfig,
-				Transitions:    projects.Service{Store: app.Store},
-				Now:            time.Now,
+				Store:              app.Store,
+				RuntimeRoot:        app.RuntimeRoot,
+				Registry:           app.Registry,
+				Executors:          app.Executors,
+				ExecutorConfig:     app.ExecutorConfig,
+				PromptRenderer:     app.PromptRenderer,
+				PromptTemplateName: app.PromptTemplateName,
+				Transitions:        projects.Service{Store: app.Store},
+				Now:                time.Now,
 			},
 		})
 	case "scope":
@@ -4141,11 +4143,13 @@ type servedJobService struct {
 func newJobService(app bootstrap.App) servedJobService {
 	return servedJobService{
 		Service: jobs.Service{
-			Store:          app.Store,
-			Registry:       app.Registry,
-			Executors:      app.Executors,
-			ExecutorConfig: app.ExecutorConfig,
-			Transitions:    projects.Service{Store: app.Store},
+			Store:              app.Store,
+			Registry:           app.Registry,
+			Executors:          app.Executors,
+			ExecutorConfig:     app.ExecutorConfig,
+			PromptRenderer:     app.PromptRenderer,
+			PromptTemplateName: app.PromptTemplateName,
+			Transitions:        projects.Service{Store: app.Store},
 			Leases: leases.Manager{
 				Store:        app.Store,
 				Git:          gitadapter.Adapter{},
@@ -4746,12 +4750,14 @@ func runServe(ctx context.Context, app bootstrap.App, cfg appconfig.Config, stdo
 
 	var shutdownRequested atomic.Bool
 	jobService := jobs.Service{
-		Store:          app.Store,
-		RuntimeRoot:    app.RuntimeRoot,
-		Registry:       app.Registry,
-		Executors:      app.Executors,
-		ExecutorConfig: app.ExecutorConfig,
-		Transitions:    projects.Service{Store: app.Store},
+		Store:              app.Store,
+		RuntimeRoot:        app.RuntimeRoot,
+		Registry:           app.Registry,
+		Executors:          app.Executors,
+		ExecutorConfig:     app.ExecutorConfig,
+		PromptRenderer:     app.PromptRenderer,
+		PromptTemplateName: app.PromptTemplateName,
+		Transitions:        projects.Service{Store: app.Store},
 		Leases: leases.Manager{
 			Store:        app.Store,
 			Git:          gitadapter.Adapter{},
