@@ -8,8 +8,9 @@ date: 2026-04-30
 
 ## Current State
 
-Odin-OS has PR and review policy assets, but it does not yet have a live GitHub
-PR mutation adapter.
+Odin-OS has PR and review policy assets, plus a fixture-backed GitHub PR
+manager behind `review.PullRequestManager`. The manager is not wired into live
+orchestration yet, and live GitHub PR mutation remains deferred.
 
 Existing assets to preserve:
 
@@ -38,6 +39,10 @@ Canonical helpers:
 - `review.BuildPullRequestBody`
 - `review.BuildReviewComment`
 - `review.SelectReviewAgents`
+
+Fixture-backed adapter:
+
+- `review.GitHubPullRequestManager`
 
 `PullRequestManager` intentionally has no merge, approval, or deployment method.
 Human approval remains required before merge or production deployment.
@@ -74,10 +79,9 @@ deploy.
 
 ## Follow-Up Work
 
-1. Add a live GitHub PR adapter behind `review.PullRequestManager`.
-2. Wire review selection into the orchestration loop after PR handoff exists.
-3. Persist PR handoff and review results in SQLite.
-4. Add read-only reviewer, QA, and security run attempts behind the executor
+1. Wire review selection into the orchestration loop after PR handoff exists.
+2. Persist PR handoff and review results in SQLite.
+3. Add read-only reviewer, QA, and security run attempts behind the executor
    contract.
-5. Add a live GitHub proof ticket before enabling PR create/update outside
+4. Add a live GitHub proof ticket before enabling PR create/update outside
    fixture-backed tests.
