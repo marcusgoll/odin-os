@@ -146,6 +146,10 @@ curl -fsS -X POST \
 Keep the HTTP listener on loopback unless a reviewed reverse proxy, SSH tunnel,
 or firewall policy protects admin endpoints.
 
+Use `docs/operations/dashboard-admin-hardening.md` for the full admin endpoint
+runbook, including token setup, rotation, SSH tunnel, reverse proxy/TLS, and
+audit expectations.
+
 ## Dry Run
 
 There is no global production dispatch dry-run switch yet. Until one exists,
