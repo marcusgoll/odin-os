@@ -23,9 +23,11 @@ import (
 
 	"odin-os/internal/app/bootstrap"
 	"odin-os/internal/core/projects"
+	"odin-os/internal/executors/contract"
 	"odin-os/internal/runtime/checkpoints"
 	runtimeevents "odin-os/internal/runtime/events"
 	healthsvc "odin-os/internal/runtime/health"
+	"odin-os/internal/runtime/jobs"
 	runtimestate "odin-os/internal/runtime/state"
 	"odin-os/internal/store/sqlite"
 	"odin-os/internal/vcs/leases"
@@ -1077,6 +1079,138 @@ service:
 	}
 }
 
+func TestAttemptDispatchRecoversStaleExecutingRunWithoutDuplicateExecutorEntry(t *testing.T) {
+	root := createRuntimeRoot(t)
+	writeMutableProjectsConfig(t, root)
+	writeRuntimeConfig(t, root, `
+version: 1
+runtime:
+  root: .
+service:
+  http_addr: 127.0.0.1:0
+  startup_recovery: false
+`)
+
+	now := time.Now().UTC()
+	seedHealthyRuntime(t, root)
+	seedRuntimeState(t, root, "ready", now)
+	if err := os.MkdirAll(filepath.Join(root, "repos", "alpha", ".git"), 0o755); err != nil {
+		t.Fatalf("mkdir alpha git root: %v", err)
+	}
+
+	store, err := sqlite.Open(filepath.Join(root, "data", "odin.db"))
+	if err != nil {
+		t.Fatalf("sqlite.Open() error = %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	store.Now = func() time.Time { return now.Add(-2 * time.Hour) }
+	project, err := store.CreateProject(ctx, sqlite.CreateProjectParams{
+		Key:           "alpha",
+		Name:          "Alpha",
+		Scope:         "project",
+		GitRoot:       filepath.Join(root, "repos", "alpha"),
+		DefaultBranch: "main",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+	task, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "stale-executing-run",
+		Title:       "Stale executing run",
+		Status:      "running",
+		Scope:       "project",
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+	run, err := store.StartRun(ctx, sqlite.StartRunParams{
+		TaskID:     task.ID,
+		Executor:   "codex_headless",
+		Attempt:    1,
+		Status:     "executing",
+		TaskStatus: "running",
+	})
+	if err != nil {
+		t.Fatalf("StartRun() error = %v", err)
+	}
+	if _, err := store.CreateWorktreeLease(ctx, sqlite.CreateWorktreeLeaseParams{
+		ProjectID:    project.ID,
+		TaskID:       task.ID,
+		RunID:        run.ID,
+		Mode:         "mutable",
+		BranchName:   "odin/alpha/task-1/run-1/try-1",
+		WorktreePath: filepath.Join(root, ".worktrees", "stale-executing-run"),
+		RepoRoot:     project.GitRoot,
+		State:        "active",
+	}); err != nil {
+		t.Fatalf("CreateWorktreeLease() error = %v", err)
+	}
+	store.Now = func() time.Time { return now }
+
+	registry, diagnostics, err := projects.Register(filepath.Join(root, "config", "projects.yaml"))
+	if err != nil {
+		t.Fatalf("projects.Register() error = %v", err)
+	}
+	if len(diagnostics) != 0 {
+		t.Fatalf("projects.Register() diagnostics = %#v", diagnostics)
+	}
+
+	executor := &countingLifecycleExecutor{key: "codex_headless"}
+	err = attemptDispatchIfReady(
+		ctx,
+		healthsvc.Service{
+			DB:           store.DB(),
+			Now:          func() time.Time { return now },
+			ExecutorKeys: []string{"codex_headless"},
+		},
+		true,
+		jobs.Service{
+			Store:           store,
+			Registry:        registry,
+			Executors:       map[string]contract.Executor{"codex_headless": executor},
+			Now:             func() time.Time { return now },
+			StaleRunTimeout: 30 * time.Minute,
+		},
+	)
+	if err != nil {
+		t.Fatalf("attemptDispatchIfReady() error = %v", err)
+	}
+	if calls := executor.calls.Load(); calls != 0 {
+		t.Fatalf("executor calls = %d, want 0 after stale recovery tick", calls)
+	}
+
+	var runsOutput bytes.Buffer
+	if err := Run(ctx, root, []string{"runs", "--json"}, strings.NewReader(""), &runsOutput); err != nil {
+		t.Fatalf("Run(runs --json) error = %v", err)
+	}
+	if output := runsOutput.String(); !strings.Contains(output, `"run_id": 1`) || !strings.Contains(output, `"status": "interrupted"`) {
+		t.Fatalf("runs output = %s, want interrupted stale recovery", output)
+	}
+
+	var statusOutput bytes.Buffer
+	if err := Run(ctx, root, []string{"work", "status"}, strings.NewReader(""), &statusOutput); err != nil {
+		t.Fatalf("Run(work status) error = %v", err)
+	}
+	for _, want := range []string{"work_items=1", "open_work_items=1", "active_run_attempts=0", "dispatch=work_dispatch"} {
+		if !strings.Contains(statusOutput.String(), want) {
+			t.Fatalf("work status output = %s, want %s", statusOutput.String(), want)
+		}
+	}
+
+	var logsOutput bytes.Buffer
+	if err := Run(ctx, root, []string{"logs", "--json"}, strings.NewReader(""), &logsOutput); err != nil {
+		t.Fatalf("Run(logs --json) error = %v", err)
+	}
+	if output := logsOutput.String(); !strings.Contains(output, `"type": "run.finished"`) || !strings.Contains(output, "stale executing run recovered by live service loop") {
+		t.Fatalf("logs output = %s, want visible stale recovery decision", output)
+	}
+}
+
 func TestRunServeGitHubIssueWebhookFeedsTriggerIngest(t *testing.T) {
 	root := createRuntimeRoot(t)
 	writeMutableProjectsConfig(t, root)
@@ -2083,6 +2217,45 @@ func seedRuntimeState(t *testing.T, root string, status string, heartbeatAt time
 	}, sqlite.RuntimeStateWriteOptions{}); err != nil {
 		t.Fatalf("UpsertRuntimeState() error = %v", err)
 	}
+}
+
+type countingLifecycleExecutor struct {
+	key   string
+	calls atomic.Int64
+}
+
+func (executor *countingLifecycleExecutor) Key() string { return executor.key }
+
+func (*countingLifecycleExecutor) Class() contract.ExecutorClass {
+	return contract.ExecutorClassPlanBackedCLI
+}
+
+func (*countingLifecycleExecutor) Health(context.Context) (contract.HealthReport, error) {
+	return contract.HealthReport{Status: contract.HealthStatusHealthy}, nil
+}
+
+func (*countingLifecycleExecutor) Capabilities(context.Context) (contract.Capabilities, error) {
+	return contract.Capabilities{
+		ExecutorClass:        contract.ExecutorClassPlanBackedCLI,
+		SupportsHeadlessPlan: true,
+	}, nil
+}
+
+func (executor *countingLifecycleExecutor) RunTask(context.Context, contract.TaskSpec) (contract.ExecutionResult, error) {
+	executor.calls.Add(1)
+	return contract.ExecutionResult{Status: "completed", Output: "unexpected executor entry"}, nil
+}
+
+func (*countingLifecycleExecutor) ResumeTask(context.Context, contract.TaskHandle, contract.ResumePacket) (contract.ExecutionResult, error) {
+	return contract.ExecutionResult{}, contract.ErrNotImplemented
+}
+
+func (*countingLifecycleExecutor) CancelTask(context.Context, contract.TaskHandle) error {
+	return contract.ErrNotImplemented
+}
+
+func (*countingLifecycleExecutor) EstimateCost(context.Context, contract.TaskSpec) (contract.CostEstimate, error) {
+	return contract.CostEstimate{}, contract.ErrNotImplemented
 }
 
 func seedQueuedTask(t *testing.T, root string) (int64, int64) {

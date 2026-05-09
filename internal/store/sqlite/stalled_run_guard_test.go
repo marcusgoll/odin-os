@@ -142,3 +142,73 @@ func TestResolveStalledRunRejectsFinishedOrDetachedState(t *testing.T) {
 		}
 	})
 }
+
+func TestResolveStalledRunAcceptsExecutingRun(t *testing.T) {
+	ctx := context.Background()
+	store := openMigratedTestStore(t, "resolve-stalled-executing.db")
+	defer store.Close()
+
+	project, task, run := seedContextPacketTask(t, ctx, store)
+	lease, err := store.CreateWorktreeLease(ctx, CreateWorktreeLeaseParams{
+		ProjectID:    project.ID,
+		TaskID:       task.ID,
+		RunID:        run.ID,
+		Mode:         "mutable",
+		BranchName:   "odin/cfipros/task-1/run-1/try-1",
+		WorktreePath: "/tmp/odin/cfipros/task-1/run-1/try-1",
+		RepoRoot:     project.GitRoot,
+		State:        "active",
+	})
+	if err != nil {
+		t.Fatalf("CreateWorktreeLease() error = %v", err)
+	}
+	if _, err := store.DB().ExecContext(ctx, `
+		UPDATE runs
+		SET status = 'executing'
+		WHERE id = ?
+	`, run.ID); err != nil {
+		t.Fatalf("force executing run error = %v", err)
+	}
+
+	err = store.ResolveStalledRun(ctx, ResolveStalledRunParams{
+		RunID:          run.ID,
+		TaskID:         task.ID,
+		TaskStatus:     "queued",
+		Summary:        "stale executing run recovered by live service loop",
+		TerminalReason: "stale executing run recovered by live service loop",
+		ArtifactsJSON:  `{"reason":"stale_executing_run"}`,
+	})
+	if err != nil {
+		t.Fatalf("ResolveStalledRun() error = %v", err)
+	}
+
+	gotTask, err := store.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
+	}
+	if gotTask.Status != "queued" {
+		t.Fatalf("task status = %q, want queued", gotTask.Status)
+	}
+	if gotTask.CurrentRunID != nil {
+		t.Fatalf("task current run = %v, want nil", gotTask.CurrentRunID)
+	}
+
+	gotRun, err := store.GetRun(ctx, run.ID)
+	if err != nil {
+		t.Fatalf("GetRun() error = %v", err)
+	}
+	if gotRun.Status != "interrupted" {
+		t.Fatalf("run status = %q, want interrupted", gotRun.Status)
+	}
+	if gotRun.Summary != "stale executing run recovered by live service loop" {
+		t.Fatalf("run summary = %q, want stale recovery summary", gotRun.Summary)
+	}
+
+	gotLease, err := store.GetWorktreeLease(ctx, lease.ID)
+	if err != nil {
+		t.Fatalf("GetWorktreeLease() error = %v", err)
+	}
+	if gotLease.State != "released" {
+		t.Fatalf("lease state = %q, want released", gotLease.State)
+	}
+}

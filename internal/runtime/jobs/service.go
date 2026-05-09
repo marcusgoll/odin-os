@@ -40,6 +40,7 @@ type Service struct {
 	CheckpointCompactor func(context.Context, checkpoints.CompactParams) (checkpoints.CompactionResult, error)
 	ShutdownRequested   *atomic.Bool
 	Now                 func() time.Time
+	StaleRunTimeout     time.Duration
 }
 
 type CreateTaskParams struct {
@@ -123,6 +124,7 @@ const (
 	admissionFailed         admissionOutcome = "failed"
 	admissionRetryLater     admissionOutcome = "retry_later"
 	checkpointRecoveryDelay                  = time.Second
+	defaultStaleRunTimeout                   = 30 * time.Minute
 )
 
 type admissionDecision struct {
@@ -777,6 +779,28 @@ func (service Service) ExecuteNextDispatchedRun(ctx context.Context) (RunExecuti
 		if err != nil {
 			return RunExecutionOutcome{}, err
 		}
+		if service.isStaleRun(run) && task.Status == "running" && task.CurrentRunID != nil && *task.CurrentRunID == run.ID {
+			const summary = "stale executing run recovered by live service loop"
+			if err := service.Store.ResolveStalledRun(ctx, sqlite.ResolveStalledRunParams{
+				RunID:          run.ID,
+				TaskID:         task.ID,
+				TaskStatus:     "queued",
+				Summary:        summary,
+				TerminalReason: summary,
+				ArtifactsJSON:  `{"reason":"stale_executing_run","recovered_by":"serve.task_loop"}`,
+			}); err != nil {
+				return RunExecutionOutcome{}, err
+			}
+			recoveredRun, err := service.Store.GetRun(ctx, run.ID)
+			if err != nil {
+				return RunExecutionOutcome{}, err
+			}
+			recoveredTask, err := service.Store.GetTask(ctx, task.ID)
+			if err != nil {
+				return RunExecutionOutcome{}, err
+			}
+			return RunExecutionOutcome{Task: recoveredTask, Run: &recoveredRun, Reason: "stale_executing_run_recovered"}, nil
+		}
 		return RunExecutionOutcome{Task: task, Run: &run, Reason: "run_already_executing"}, nil
 	}
 	runs, err := service.Store.ListRunsByStatus(ctx, "running")
@@ -794,6 +818,17 @@ func (service Service) ExecuteNextDispatchedRun(ctx context.Context) (RunExecuti
 		return service.executeDispatchedRun(ctx, task.ID, "serve.task_loop")
 	}
 	return RunExecutionOutcome{Reason: "no_running_dispatched_runs"}, nil
+}
+
+func (service Service) staleRunTimeout() time.Duration {
+	if service.StaleRunTimeout > 0 {
+		return service.StaleRunTimeout
+	}
+	return defaultStaleRunTimeout
+}
+
+func (service Service) isStaleRun(run sqlite.Run) bool {
+	return run.StartedAt.Before(service.now().Add(-service.staleRunTimeout()))
 }
 
 func (service Service) executeDispatchedRun(ctx context.Context, taskID int64, actor string) (RunExecutionOutcome, error) {
