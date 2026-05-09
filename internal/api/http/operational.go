@@ -161,7 +161,18 @@ func NewOperationalHandler(deps Dependencies) http.Handler {
 			writeAPIError(writer, http.StatusServiceUnavailable, "read_models_unavailable", "read models unavailable")
 			return
 		}
-		issues, err := listDashboardIssues(request.Context(), deps.ReadModels)
+		options, err := parseDashboardListOptions(request)
+		if err != nil {
+			writeAPIError(writer, http.StatusBadRequest, "invalid_query", err.Error())
+			return
+		}
+		query := request.URL.Query()
+		issues, err := listDashboardIssues(request.Context(), deps.ReadModels, options, dashboardIssueFilters{
+			Provider:   query.Get("provider"),
+			Repo:       query.Get("repo"),
+			State:      query.Get("state"),
+			SyncStatus: query.Get("sync_status"),
+		})
 		if err != nil {
 			writeAPIError(writer, http.StatusServiceUnavailable, "issues_unavailable", err.Error())
 			return
@@ -173,7 +184,26 @@ func NewOperationalHandler(deps Dependencies) http.Handler {
 			writeAPIError(writer, http.StatusServiceUnavailable, "read_models_unavailable", "read models unavailable")
 			return
 		}
-		views, err := projections.ListRunSummaryViews(request.Context(), deps.ReadModels)
+		options, err := parseDashboardListOptions(request)
+		if err != nil {
+			writeAPIError(writer, http.StatusBadRequest, "invalid_query", err.Error())
+			return
+		}
+		query := request.URL.Query()
+		var taskID *int64
+		if rawTaskID := strings.TrimSpace(query.Get("task_id")); rawTaskID != "" {
+			parsedTaskID, err := strconv.ParseInt(rawTaskID, 10, 64)
+			if err != nil || parsedTaskID <= 0 {
+				writeAPIError(writer, http.StatusBadRequest, "invalid_query", "task_id must be a positive integer")
+				return
+			}
+			taskID = &parsedTaskID
+		}
+		views, err := listDashboardRuns(request.Context(), deps.ReadModels, options, dashboardRunFilters{
+			Status:   query.Get("status"),
+			Executor: query.Get("executor"),
+			TaskID:   taskID,
+		})
 		if err != nil {
 			writeAPIError(writer, http.StatusServiceUnavailable, "runs_unavailable", err.Error())
 			return
@@ -784,6 +814,29 @@ type dashboardRun struct {
 	ArtifactsJSON  string  `json:"artifacts_json"`
 }
 
+const (
+	dashboardDefaultLimit = 100
+	dashboardMaxLimit     = 500
+)
+
+type dashboardListOptions struct {
+	Limit  int
+	Offset int
+}
+
+type dashboardIssueFilters struct {
+	Provider   string
+	Repo       string
+	State      string
+	SyncStatus string
+}
+
+type dashboardRunFilters struct {
+	Status   string
+	Executor string
+	TaskID   *int64
+}
+
 func buildStatusPayload(ctx context.Context, deps Dependencies, now func() time.Time) (dashboardStatus, error) {
 	report, err := deps.Health.Doctor(ctx, deps.RegistryHealthy)
 	if err != nil {
@@ -873,12 +926,62 @@ func getRuntimeStatus(ctx context.Context, queryer projections.Queryer) (runtime
 	return status, rows.Err()
 }
 
-func listDashboardIssues(ctx context.Context, queryer projections.Queryer) ([]dashboardIssue, error) {
-	rows, err := queryer.QueryContext(ctx, `
+func parseDashboardListOptions(request *http.Request) (dashboardListOptions, error) {
+	values := request.URL.Query()
+	options := dashboardListOptions{Limit: dashboardDefaultLimit}
+	if rawLimit := strings.TrimSpace(values.Get("limit")); rawLimit != "" {
+		limit, err := strconv.Atoi(rawLimit)
+		if err != nil || limit <= 0 {
+			return dashboardListOptions{}, fmt.Errorf("limit must be a positive integer")
+		}
+		if limit > dashboardMaxLimit {
+			return dashboardListOptions{}, fmt.Errorf("limit must be less than or equal to %d", dashboardMaxLimit)
+		}
+		options.Limit = limit
+	}
+	if rawOffset := strings.TrimSpace(values.Get("offset")); rawOffset != "" {
+		offset, err := strconv.Atoi(rawOffset)
+		if err != nil || offset < 0 {
+			return dashboardListOptions{}, fmt.Errorf("offset must be a non-negative integer")
+		}
+		options.Offset = offset
+	}
+	return options, nil
+}
+
+func listDashboardIssues(ctx context.Context, queryer projections.Queryer, options dashboardListOptions, filters dashboardIssueFilters) ([]dashboardIssue, error) {
+	var query strings.Builder
+	query.WriteString(`
 		SELECT id, project_id, provider, repo, number, title, url, state, labels_json, sync_status, last_synced_at
 		FROM external_issues
-		ORDER BY repo ASC, number ASC, id ASC
 	`)
+
+	clauses := make([]string, 0, 4)
+	args := make([]any, 0, 6)
+	if provider := strings.TrimSpace(filters.Provider); provider != "" {
+		clauses = append(clauses, "provider = ?")
+		args = append(args, provider)
+	}
+	if repo := strings.TrimSpace(filters.Repo); repo != "" {
+		clauses = append(clauses, "repo = ?")
+		args = append(args, repo)
+	}
+	if state := strings.TrimSpace(filters.State); state != "" {
+		clauses = append(clauses, "state = ?")
+		args = append(args, state)
+	}
+	if syncStatus := strings.TrimSpace(filters.SyncStatus); syncStatus != "" {
+		clauses = append(clauses, "sync_status = ?")
+		args = append(args, syncStatus)
+	}
+	if len(clauses) > 0 {
+		query.WriteString(" WHERE ")
+		query.WriteString(strings.Join(clauses, " AND "))
+	}
+	query.WriteString(" ORDER BY repo ASC, number ASC, id ASC LIMIT ? OFFSET ?")
+	args = append(args, options.Limit, options.Offset)
+
+	rows, err := queryer.QueryContext(ctx, query.String(), args...)
 	if err != nil {
 		return nil, err
 	}
@@ -907,6 +1010,73 @@ func listDashboardIssues(ctx context.Context, queryer projections.Queryer) ([]da
 		issues = append(issues, issue)
 	}
 	return issues, rows.Err()
+}
+
+func listDashboardRuns(ctx context.Context, queryer projections.Queryer, options dashboardListOptions, filters dashboardRunFilters) ([]projections.RunSummaryView, error) {
+	var query strings.Builder
+	query.WriteString(`
+		SELECT
+			r.id,
+			r.task_id,
+			t.key,
+			r.executor,
+			r.status,
+			r.attempt,
+			r.started_at,
+			r.finished_at
+		FROM runs r
+		JOIN tasks t ON t.id = r.task_id
+	`)
+
+	clauses := make([]string, 0, 3)
+	args := make([]any, 0, 5)
+	if status := strings.TrimSpace(filters.Status); status != "" {
+		clauses = append(clauses, "r.status = ?")
+		args = append(args, status)
+	}
+	if executor := strings.TrimSpace(filters.Executor); executor != "" {
+		clauses = append(clauses, "r.executor = ?")
+		args = append(args, executor)
+	}
+	if filters.TaskID != nil {
+		clauses = append(clauses, "r.task_id = ?")
+		args = append(args, *filters.TaskID)
+	}
+	if len(clauses) > 0 {
+		query.WriteString(" WHERE ")
+		query.WriteString(strings.Join(clauses, " AND "))
+	}
+	query.WriteString(" ORDER BY r.id ASC LIMIT ? OFFSET ?")
+	args = append(args, options.Limit, options.Offset)
+
+	rows, err := queryer.QueryContext(ctx, query.String(), args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var views []projections.RunSummaryView
+	for rows.Next() {
+		var view projections.RunSummaryView
+		var finishedAt sql.NullString
+		if err := rows.Scan(
+			&view.RunID,
+			&view.TaskID,
+			&view.TaskKey,
+			&view.Executor,
+			&view.Status,
+			&view.Attempt,
+			&view.StartedAt,
+			&finishedAt,
+		); err != nil {
+			return nil, err
+		}
+		if finishedAt.Valid {
+			view.FinishedAt = &finishedAt.String
+		}
+		views = append(views, view)
+	}
+	return views, rows.Err()
 }
 
 func getDashboardRun(ctx context.Context, queryer projections.Queryer, runID int64) (dashboardRun, error) {

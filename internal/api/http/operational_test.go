@@ -554,6 +554,169 @@ func TestOperationalHandlerExposesIssuesAndRunsFromRuntimeState(t *testing.T) {
 	}
 }
 
+func TestOperationalHandlerPaginatesAndFiltersDashboardIssues(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openStore(t)
+	defer store.Close()
+
+	seedHealthyObservability(t, ctx, store)
+	seedOperatorReadModels(t, ctx, store)
+	for number := 1; number <= 105; number++ {
+		repo := "owner/alpha"
+		if number%2 == 0 {
+			repo = "owner/beta"
+		}
+		syncStatus := "eligible"
+		if number%3 == 0 {
+			syncStatus = "paused"
+		}
+		seedDashboardIssue(t, ctx, store, repo, number, "github", "open", syncStatus)
+	}
+
+	server := httptest.NewServer(httpapi.NewOperationalHandler(httpapi.Dependencies{
+		Health:          healthsvc.Service{DB: store.DB()},
+		ReadModels:      store.DB(),
+		RegistryHealthy: true,
+	}))
+	defer server.Close()
+
+	var defaultIssues []struct {
+		Number int `json:"number"`
+	}
+	decodeURLJSON(t, server.URL+"/issues", &defaultIssues)
+	if len(defaultIssues) != 100 {
+		t.Fatalf("default /issues count = %d, want bounded 100", len(defaultIssues))
+	}
+
+	var filtered []struct {
+		Repo       string `json:"repo"`
+		Number     int    `json:"number"`
+		SyncStatus string `json:"sync_status"`
+	}
+	decodeURLJSON(t, server.URL+"/issues?repo=owner%2Falpha&sync_status=eligible&limit=2&offset=1", &filtered)
+	if len(filtered) != 2 {
+		t.Fatalf("filtered /issues count = %d, want 2: %+v", len(filtered), filtered)
+	}
+	if filtered[0].Number != 5 || filtered[1].Number != 7 {
+		t.Fatalf("filtered /issues = %+v, want owner/alpha eligible numbers 5 and 7", filtered)
+	}
+	for _, issue := range filtered {
+		if issue.Repo != "owner/alpha" || issue.SyncStatus != "eligible" {
+			t.Fatalf("filtered /issues includes wrong row: %+v", issue)
+		}
+	}
+}
+
+func TestOperationalHandlerRejectsInvalidDashboardIssuePagination(t *testing.T) {
+	t.Parallel()
+
+	store := openStore(t)
+	defer store.Close()
+
+	server := httptest.NewServer(httpapi.NewOperationalHandler(httpapi.Dependencies{
+		Health:          healthsvc.Service{DB: store.DB()},
+		ReadModels:      store.DB(),
+		RegistryHealthy: true,
+	}))
+	defer server.Close()
+
+	assertGETStatus(t, server.URL+"/issues?limit=0", http.StatusBadRequest)
+	assertGETStatus(t, server.URL+"/issues?offset=-1", http.StatusBadRequest)
+	assertGETStatus(t, server.URL+"/issues?limit=501", http.StatusBadRequest)
+}
+
+func TestOperationalHandlerPaginatesAndFiltersDashboardRuns(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openStore(t)
+	defer store.Close()
+
+	seedHealthyObservability(t, ctx, store)
+	seedOperatorReadModels(t, ctx, store)
+	project := mustProject(t, ctx, store, "alpha")
+	for number := 1; number <= 105; number++ {
+		task := seedDashboardTask(t, ctx, store, project.ID, fmt.Sprintf("run-filter-task-%03d", number))
+		executor := "codex"
+		if number%2 == 0 {
+			executor = "gemini"
+		}
+		run, err := store.StartRun(ctx, sqlite.StartRunParams{
+			TaskID:   task.ID,
+			Executor: executor,
+			Attempt:  1,
+			Status:   "running",
+		})
+		if err != nil {
+			t.Fatalf("StartRun(%d) error = %v", number, err)
+		}
+		if number%2 == 0 {
+			if _, err := store.FinishRun(ctx, sqlite.FinishRunParams{
+				RunID:          run.ID,
+				Status:         "completed",
+				Summary:        "done",
+				TerminalReason: "completed",
+			}); err != nil {
+				t.Fatalf("FinishRun(%d) error = %v", number, err)
+			}
+		}
+	}
+
+	server := httptest.NewServer(httpapi.NewOperationalHandler(httpapi.Dependencies{
+		Health:          healthsvc.Service{DB: store.DB()},
+		ReadModels:      store.DB(),
+		RegistryHealthy: true,
+	}))
+	defer server.Close()
+
+	var defaultRuns []projections.RunSummaryView
+	decodeURLJSON(t, server.URL+"/runs", &defaultRuns)
+	if len(defaultRuns) != 100 {
+		t.Fatalf("default /runs count = %d, want bounded 100", len(defaultRuns))
+	}
+
+	var filtered []projections.RunSummaryView
+	decodeURLJSON(t, server.URL+"/runs?status=completed&executor=gemini&limit=2&offset=1", &filtered)
+	if len(filtered) != 2 {
+		t.Fatalf("filtered /runs count = %d, want 2: %+v", len(filtered), filtered)
+	}
+	if filtered[0].TaskKey != "run-filter-task-004" || filtered[1].TaskKey != "run-filter-task-006" {
+		t.Fatalf("filtered /runs = %+v, want tasks 004 and 006", filtered)
+	}
+	for _, run := range filtered {
+		if run.Status != "completed" || run.Executor != "gemini" {
+			t.Fatalf("filtered /runs includes wrong row: %+v", run)
+		}
+	}
+
+	taskID := filtered[0].TaskID
+	var taskFiltered []projections.RunSummaryView
+	decodeURLJSON(t, fmt.Sprintf("%s/runs?task_id=%d", server.URL, taskID), &taskFiltered)
+	if len(taskFiltered) != 1 || taskFiltered[0].TaskID != taskID {
+		t.Fatalf("task_id filtered /runs = %+v, want task_id %d", taskFiltered, taskID)
+	}
+}
+
+func TestOperationalHandlerRejectsInvalidDashboardRunPagination(t *testing.T) {
+	t.Parallel()
+
+	store := openStore(t)
+	defer store.Close()
+
+	server := httptest.NewServer(httpapi.NewOperationalHandler(httpapi.Dependencies{
+		Health:          healthsvc.Service{DB: store.DB()},
+		ReadModels:      store.DB(),
+		RegistryHealthy: true,
+	}))
+	defer server.Close()
+
+	assertGETStatus(t, server.URL+"/runs?limit=0", http.StatusBadRequest)
+	assertGETStatus(t, server.URL+"/runs?offset=-1", http.StatusBadRequest)
+	assertGETStatus(t, server.URL+"/runs?task_id=abc", http.StatusBadRequest)
+}
+
 func TestOperationalHandlerProtectsAdminActions(t *testing.T) {
 	t.Parallel()
 
@@ -1304,6 +1467,19 @@ func assertHandoffStatus(t *testing.T, url string, want int) {
 	}
 }
 
+func assertGETStatus(t *testing.T, url string, want int) {
+	t.Helper()
+	response, err := http.Get(url)
+	if err != nil {
+		t.Fatalf("GET %s error = %v", url, err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != want {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("GET %s status = %d body=%s, want %d", url, response.StatusCode, string(body), want)
+	}
+}
+
 func assertHandoffCompleteJSONStatus(t *testing.T, serverURL string, token string, handoffID string, want int) {
 	t.Helper()
 	body := bytes.NewBufferString(`{"handoff_id":"` + handoffID + `"}`)
@@ -1339,6 +1515,15 @@ func openStore(t *testing.T) *sqlite.Store {
 	return store
 }
 
+func mustProject(t *testing.T, ctx context.Context, store *sqlite.Store, key string) sqlite.Project {
+	t.Helper()
+	project, err := store.GetProjectByKey(ctx, key)
+	if err != nil {
+		t.Fatalf("GetProjectByKey(%s) error = %v", key, err)
+	}
+	return project
+}
+
 func countBrowserSessionEvents(t *testing.T, ctx context.Context, store *sqlite.Store) int {
 	t.Helper()
 	events, err := store.ListEvents(ctx, sqlite.ListEventsParams{})
@@ -1369,6 +1554,26 @@ func countBrowserSessionEventTypes(t *testing.T, ctx context.Context, store *sql
 	return counts
 }
 
+func seedDashboardIssue(t *testing.T, ctx context.Context, store *sqlite.Store, repo string, number int, provider string, state string, syncStatus string) {
+	t.Helper()
+
+	project := mustProject(t, ctx, store, "alpha")
+	if _, err := store.UpsertExternalIssue(ctx, sqlite.UpsertExternalIssueParams{
+		ProjectID:  project.ID,
+		Provider:   provider,
+		Repo:       repo,
+		Number:     number,
+		Title:      fmt.Sprintf("Issue %d", number),
+		BodyHash:   fmt.Sprintf("sha256:%d", number),
+		URL:        fmt.Sprintf("https://github.com/%s/issues/%d", repo, number),
+		State:      state,
+		LabelsJSON: `[]`,
+		SyncStatus: syncStatus,
+	}); err != nil {
+		t.Fatalf("UpsertExternalIssue(%s#%d) error = %v", repo, number, err)
+	}
+}
+
 func seedExternalIssue(t *testing.T, ctx context.Context, store *sqlite.Store) {
 	t.Helper()
 
@@ -1390,6 +1595,22 @@ func seedExternalIssue(t *testing.T, ctx context.Context, store *sqlite.Store) {
 	}); err != nil {
 		t.Fatalf("UpsertExternalIssue() error = %v", err)
 	}
+}
+
+func seedDashboardTask(t *testing.T, ctx context.Context, store *sqlite.Store, projectID int64, key string) sqlite.Task {
+	t.Helper()
+	task, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:   projectID,
+		Key:         key,
+		Title:       key,
+		Status:      "queued",
+		Scope:       "project",
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask(%s) error = %v", key, err)
+	}
+	return task
 }
 
 func seedHealthyObservability(t *testing.T, ctx context.Context, store *sqlite.Store) {
