@@ -54,7 +54,7 @@ Current duplicate/scaffold modules:
 
 ```text
 internal/runner        duplicates internal/executors
-internal/workspace     duplicates internal/vcs
+historical internal/workspace duplicate has been removed; use internal/vcs
 internal/tracker       placeholder GitHub intake seam
 internal/orchestrator  placeholder agency coordinator
 internal/prompts       placeholder renderer interface
@@ -107,7 +107,7 @@ eligible GitHub Issue
 | Go daemon | `cmd/odin`, `internal/app/lifecycle.Run`, `runServe`, systemd unit. `cmd/odin-os` exists as duplicate worktree-only entrypoint. | Daemon exists but agency loop is not complete; binary naming is unresolved. | Preserve `cmd/odin` and lifecycle. Decide whether `cmd/odin-os` is a supported alias. | Medium |
 | GitHub Issues adapter | `internal/tracker/github/client.go` placeholder; `internal/adapters/github/.gitkeep`; `config/projects.yaml` supports GitHub repo metadata. | No real GitHub issue query, labels, comments, or token policy. Duplicate adapter root unresolved. | Pick one GitHub intake seam and start read-only. | High |
 | SQLite runtime state | `internal/store/sqlite`, embedded migrations, task/run/approval/event/action/lease/recovery/knowledge tables. | Strong existing authority; store is large and mixes many domains. | Preserve. Split by domain files only after characterization tests. | Medium |
-| Git worktree workspace manager | `internal/vcs/leases`, `internal/vcs/worktrees`, `internal/vcs/git`, `docs/contracts/git-worktrees.md`. | Real worktree lease path exists; `internal/workspace` duplicates it. Cleanup/recovery exists but agency-facing workspace commands are partial. | Use `internal/vcs` as canonical. Remove/merge `internal/workspace`. | High |
+| Git worktree workspace manager | `internal/vcs/leases`, `internal/vcs/worktrees`, `internal/vcs/git`, `docs/contracts/git-worktrees.md`. | Real worktree lease path exists; the historical `internal/workspace` duplicate is removed. Cleanup/recovery exists but agency-facing workspace commands are partial. | Use `internal/vcs` as canonical; do not recreate `internal/workspace`. | High |
 | Codex exec runner | `internal/executors/contract`, router, `codex_headless` deterministic adapter; `internal/runner/codexexec` placeholder. | No real `codex exec` subprocess. Security policy not enforced in canonical executor path. | Implement `codex_exec` as an `internal/executors` adapter after security contract. | High |
 | Optional app-server runner | `internal/runner/appserver` placeholder. | Not behind canonical executor seam; app-server is experimental. | Defer. Add only as an `internal/executors` adapter after Codex exec works. | Medium |
 | Prompt renderer | Prompt files in `prompts/`; `internal/prompts/renderer.go`; historical TypeScript prompt renderer inventory for removed `src/prompts`. | No prompt frontmatter contract. Duplicate builder prompts remain. | Define prompt contract, choose one prompt layout, wire through Go renderer. Do not recreate the removed TypeScript renderer. | Medium |
@@ -173,7 +173,7 @@ The largest gaps are:
 ## Existing Modules To Replace
 
 - `internal/runner/*`: replace with `internal/executors` adapters.
-- `internal/workspace/manager.go`: replace with `internal/vcs` lease/worktree manager.
+- Historical `internal/workspace/manager.go`: removed; keep using `internal/vcs` lease/worktree manager.
 - `internal/tracker/*`: replace or move into the single chosen GitHub intake adapter seam.
 - `internal/orchestrator/service.go`: replace with lifecycle-composed runtime modules rather than a shallow standalone coordinator.
 - `internal/db`, `internal/config`, `internal/logging`, `internal/dashboard`, `internal/review`, `internal/utils`: replace only if their useful concepts are promoted into existing deeper modules.
@@ -268,7 +268,7 @@ Remove only after explicit cleanup approval and after preserving useful knowledg
 2. Remove/quarantine accidental TypeScript scaffold after preserving useful prompt text.
 3. Collapse duplicate config roots into `config/`.
 4. Collapse `internal/runner` into `internal/executors`.
-5. Collapse `internal/workspace` into `internal/vcs`.
+5. Keep the removed `internal/workspace` scaffold collapsed into `internal/vcs`.
 6. Choose GitHub intake adapter seam and document token policy.
 7. Add `odin work readiness` with dry-run and kill-switch visibility.
 8. Add read-only GitHub Issues intake with fixture-backed tests.

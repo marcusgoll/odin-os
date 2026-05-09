@@ -37,7 +37,8 @@ Classification values:
 | `internal/runner` | Uncommitted duplicate runner seam. | `internal/runner/*` | Remove/replace | Merge into `internal/executors` if useful. |
 | `internal/tracker` | Uncommitted GitHub tracker placeholder. | `internal/tracker/*` | Remove/replace | Use one GitHub intake seam. |
 | `internal/orchestrator` | Uncommitted agency orchestrator placeholder. | `internal/orchestrator/service.go` | Replace | Too generic; real orchestration should compose existing runtime services. |
-| `internal/config`, `internal/logging`, `internal/db`, `internal/dashboard`, `internal/security`, `internal/utils`, `internal/workspace`, `internal/prompts`, `internal/review`, `internal/agents` | Uncommitted scaffold packages. | directories under `internal/` | Remove/refactor | Promote only if they replace a specific missing package and do not duplicate existing seams. |
+| `internal/config`, `internal/logging`, `internal/db`, `internal/dashboard`, `internal/security`, `internal/utils`, `internal/prompts`, `internal/review`, `internal/agents` | Uncommitted scaffold packages. | directories under `internal/` | Remove/refactor | Promote only if they replace a specific missing package and do not duplicate existing seams. |
+| Historical `internal/workspace` | Removed duplicate workspace scaffold. | Removed `internal/workspace/manager.go` | Remove | Keep absent; use `internal/vcs/leases` and `internal/vcs/worktrees` for worktree lease behavior. |
 
 ## Registry Assets
 

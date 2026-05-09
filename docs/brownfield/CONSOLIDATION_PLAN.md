@@ -11,7 +11,8 @@ date: 2026-04-30
 Odin-OS has one active registry skill, one active registry agent, several active workflow/command registry assets, a working planner service, thin shell scripts, and a large legacy migration inventory. It also has uncommitted agency scaffold assets that duplicate existing Go seams:
 
 - `internal/runner` duplicates `internal/executors`.
-- `internal/workspace` duplicates `internal/vcs`.
+- The historical `internal/workspace` duplicate is removed; `internal/vcs`
+  remains canonical.
 - `internal/agents/roles.go` duplicates executor task kinds and worker directories.
 - `src/*`, `package.json`, and prompt scaffolds duplicate the Go-native target.
 - `config/agency.example.yaml` and `configs/*.yaml` duplicate the active `config/` root.
@@ -50,7 +51,8 @@ Odin-OS has one active registry skill, one active registry agent, several active
 
 - `internal/runner/*`: replace with `internal/executors` implementations.
 - `internal/tracker/github`: replace/refactor into one canonical GitHub intake adapter after package root decision.
-- `internal/workspace/manager.go`: replace with `internal/vcs` leases/worktrees.
+- Historical `internal/workspace/manager.go`: removed; keep using
+  `internal/vcs` leases/worktrees.
 - `configs/*.yaml` and `config/agency.example.yaml`: merge useful examples into the active `config/` convention or remove.
 
 ### Remove
@@ -88,7 +90,8 @@ Use one vocabulary across registry, prompts, workers, and executors:
    - Keep real `codex exec` future work behind `internal/executors/contract`.
 
 4. **Collapse workspace seam**
-   - Replace `internal/workspace/manager.go` concept with `internal/vcs` worktree leases.
+   - Keep the removed `internal/workspace/manager.go` concept collapsed into
+     `internal/vcs` worktree leases.
    - Add characterization tests before changing lease behavior.
 
 5. **Decide prompt layout**
