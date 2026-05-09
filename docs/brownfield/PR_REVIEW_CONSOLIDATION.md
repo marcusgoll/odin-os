@@ -9,10 +9,12 @@ date: 2026-04-30
 ## Current State
 
 Odin-OS has PR and review policy assets, plus a fixture-backed GitHub PR
-manager behind `review.PullRequestManager`. The manager is not wired into live
-orchestration yet, and live GitHub PR mutation remains deferred. PR handoff
-metadata and read-only review outcomes persist in SQLite so later orchestration
-wiring can resume after restart.
+manager behind `review.PullRequestManager`. `review.HandoffOrchestrator`
+sequences PR upsert, read-only review selection, SQLite handoff persistence, and
+optional handoff comments. Live GitHub PR mutation remains deferred to fixture
+or explicitly configured manager paths. PR handoff metadata and read-only review
+outcomes persist in SQLite so later orchestration wiring can resume after
+restart.
 
 Existing assets to preserve:
 
@@ -40,6 +42,7 @@ Canonical helpers:
 
 - `review.BuildPullRequestBody`
 - `review.BuildReviewComment`
+- `review.HandoffOrchestrator`
 - `review.SelectReviewAgents`
 
 Fixture-backed adapter:
@@ -67,9 +70,10 @@ Security review is required for changes touching:
 - secrets or runtime config
 - deployment files or GitHub Actions automation
 
-Review agents selected by `internal/review` are read-only. A reviewer, QA, or
-security run may report findings and blockers, but must not approve, merge, or
-deploy.
+Review agents selected by `internal/review` are read-only. The handoff
+orchestrator persists selected reviewer, QA, and security review intents as
+read-only pending review results. A reviewer, QA, or security run may report
+findings and blockers, but must not approve, merge, or deploy.
 
 ## Duplicate Or Placeholder Paths
 
@@ -86,8 +90,7 @@ deploy.
 
 ## Follow-Up Work
 
-1. Wire review selection into the orchestration loop after PR handoff exists.
-2. Add read-only reviewer, QA, and security run attempts behind the executor
+1. Add read-only reviewer, QA, and security run attempts behind the executor
    contract.
-3. Add a live GitHub proof ticket before enabling PR create/update outside
+2. Add a live GitHub proof ticket before enabling PR create/update outside
    fixture-backed tests.
