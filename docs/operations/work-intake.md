@@ -145,4 +145,5 @@ Stop before running live intake when:
 `odin work intake` is only the read-only issue intake surface. Work Item
 creation happens through `odin work reconcile`, while dispatch, worker
 execution, PR creation, and GitHub mutation require separate operator surfaces
-and proof.
+and proof. Future GitHub label, comment, issue-close, or follow-up issue writes
+must follow `docs/contracts/github-tracker-mutations.md`.
