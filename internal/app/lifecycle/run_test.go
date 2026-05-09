@@ -2254,6 +2254,9 @@ func TestRunHelpIncludesOverviewCommand(t *testing.T) {
 	if !strings.Contains(stdout.String(), "overview") {
 		t.Fatalf("help output = %q, want overview command", stdout.String())
 	}
+	if !strings.Contains(stdout.String(), "runs show <id>") {
+		t.Fatalf("help output = %q, want top-level runs show command", stdout.String())
+	}
 	if strings.Contains(stdout.String(), "scheduler") {
 		t.Fatalf("help output = %q, should not claim scheduler command", stdout.String())
 	}
@@ -6424,6 +6427,88 @@ func cleanupTaskRunWorktree(t *testing.T, projectKey string) {
 	})
 	if err := os.RemoveAll(path); err != nil {
 		t.Fatalf("RemoveAll(%s) error = %v", path, err)
+	}
+}
+
+func TestRunRunsShowRendersFailureAnalysis(t *testing.T) {
+	t.Parallel()
+
+	root := testRepoRoot(t)
+	ctx := context.Background()
+	store, err := sqlite.Open(filepath.Join(root, "data", "odin.db"))
+	if err != nil {
+		t.Fatalf("sqlite.Open() error = %v", err)
+	}
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
+	}
+	project, err := store.CreateProject(ctx, sqlite.CreateProjectParams{
+		Key:           "alpha-cli",
+		Name:          "Alpha CLI",
+		Scope:         "project",
+		GitRoot:       root,
+		DefaultBranch: "main",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+	task, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "failure-task",
+		Title:       "Failure task",
+		Status:      "running",
+		Scope:       "project",
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+	run, err := store.StartRun(ctx, sqlite.StartRunParams{
+		TaskID:   task.ID,
+		Executor: "codex",
+		Attempt:  1,
+		Status:   "running",
+	})
+	if err != nil {
+		t.Fatalf("StartRun() error = %v", err)
+	}
+	const artifactJSON = `{"failure_analysis":{"category":"test_failure","suggested_fix":"Inspect failing test output and repair the regression.","next_step_target":"test","retry_recommended":true,"follow_up":{"recommended":true,"title":"Fix flaky test","reason":"needs a focused repair"}}}`
+	if _, err := store.FinishRun(ctx, sqlite.FinishRunParams{
+		RunID:          run.ID,
+		Status:         "failed",
+		Summary:        "test failed",
+		TerminalReason: "failed",
+		ArtifactsJSON:  artifactJSON,
+	}); err != nil {
+		t.Fatalf("FinishRun() error = %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	var stdout bytes.Buffer
+	if err := Run(context.Background(), root, []string{"runs", "show", strconv.FormatInt(run.ID, 10)}, strings.NewReader(""), &stdout); err != nil {
+		t.Fatalf("Run(runs show) error = %v", err)
+	}
+
+	output := stdout.String()
+	for _, want := range []string{
+		"run=1",
+		"task=failure-task",
+		"status=failed",
+		"artifacts_json=" + artifactJSON,
+		"failure_analysis_category=test_failure",
+		"failure_analysis_suggested_fix=Inspect failing test output and repair the regression.",
+		"failure_analysis_next_step_target=test",
+		"failure_analysis_retry_recommended=true",
+		"failure_analysis_follow_up_recommended=true",
+		"failure_analysis_follow_up_title=Fix flaky test",
+		"failure_analysis_follow_up_reason=needs a focused repair",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("runs show output = %q, want substring %q", output, want)
+		}
 	}
 }
 

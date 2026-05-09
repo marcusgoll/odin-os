@@ -29,15 +29,29 @@ type RunRecord struct {
 }
 
 type Detail struct {
-	RunID      int64
-	TaskID     int64
-	TaskKey    string
-	ProjectKey string
-	Executor   string
-	Status     string
-	Attempt    int
-	Summary    string
-	Artifacts  []sqlite.RunArtifact
+	RunID           int64
+	TaskID          int64
+	TaskKey         string
+	ProjectKey      string
+	Executor        string
+	Status          string
+	Attempt         int
+	Summary         string
+	ArtifactsJSON   string
+	FailureAnalysis *FailureAnalysisDetail
+	Artifacts       []sqlite.RunArtifact
+}
+
+type FailureAnalysisDetail struct {
+	Category            string   `json:"category"`
+	SuggestedFix        string   `json:"suggested_fix"`
+	NextStepTarget      string   `json:"next_step_target"`
+	RetryRecommended    bool     `json:"retry_recommended"`
+	MaxAttemptsReached  bool     `json:"max_attempts_reached"`
+	FollowUpRecommended bool     `json:"follow_up_recommended"`
+	FollowUpTitle       string   `json:"follow_up_title,omitempty"`
+	FollowUpReason      string   `json:"follow_up_reason,omitempty"`
+	FollowUpLabels      []string `json:"follow_up_labels,omitempty"`
 }
 
 func (service Service) List(ctx context.Context, resolved scope.Resolution) ([]projections.RunSummaryView, error) {
@@ -165,6 +179,7 @@ func (service Service) Show(ctx context.Context, resolved scope.Resolution, runI
 			r.status,
 			r.attempt,
 			r.summary,
+			r.artifacts_json,
 			t.scope
 		FROM runs r
 		JOIN tasks t ON t.id = r.task_id
@@ -183,10 +198,12 @@ func (service Service) Show(ctx context.Context, resolved scope.Resolution, runI
 		&detail.Status,
 		&detail.Attempt,
 		&detail.Summary,
+		&detail.ArtifactsJSON,
 		&taskScope,
 	); err != nil {
 		return Detail{}, err
 	}
+	detail.FailureAnalysis = failureAnalysisFromArtifactJSON(detail.ArtifactsJSON)
 	if !matchesRunScope(detail.ProjectKey, taskScope, resolved) {
 		return Detail{}, fmt.Errorf("run %d is outside the current scope", runID)
 	}
@@ -199,6 +216,65 @@ func (service Service) Show(ctx context.Context, resolved scope.Resolution, runI
 	}
 
 	return detail, nil
+}
+
+func failureAnalysisFromArtifactJSON(raw string) *FailureAnalysisDetail {
+	if strings.TrimSpace(raw) == "" || strings.TrimSpace(raw) == "[]" {
+		return nil
+	}
+
+	if detail := failureAnalysisFromObject(raw); detail != nil {
+		return detail
+	}
+
+	var artifacts []json.RawMessage
+	if err := json.Unmarshal([]byte(raw), &artifacts); err != nil {
+		return nil
+	}
+	for _, artifact := range artifacts {
+		if detail := failureAnalysisFromObject(string(artifact)); detail != nil {
+			return detail
+		}
+	}
+	return nil
+}
+
+func failureAnalysisFromObject(raw string) *FailureAnalysisDetail {
+	var payload struct {
+		FailureAnalysis struct {
+			Category           string `json:"category"`
+			SuggestedFix       string `json:"suggested_fix"`
+			NextStepTarget     string `json:"next_step_target"`
+			RetryRecommended   bool   `json:"retry_recommended"`
+			MaxAttemptsReached bool   `json:"max_attempts_reached"`
+			FollowUp           struct {
+				Recommended bool     `json:"recommended"`
+				Title       string   `json:"title"`
+				Labels      []string `json:"labels"`
+				Reason      string   `json:"reason"`
+			} `json:"follow_up"`
+		} `json:"failure_analysis"`
+	}
+	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+		return nil
+	}
+	analysis := payload.FailureAnalysis
+	if strings.TrimSpace(analysis.Category) == "" &&
+		strings.TrimSpace(analysis.SuggestedFix) == "" &&
+		strings.TrimSpace(analysis.NextStepTarget) == "" {
+		return nil
+	}
+	return &FailureAnalysisDetail{
+		Category:            analysis.Category,
+		SuggestedFix:        analysis.SuggestedFix,
+		NextStepTarget:      analysis.NextStepTarget,
+		RetryRecommended:    analysis.RetryRecommended,
+		MaxAttemptsReached:  analysis.MaxAttemptsReached,
+		FollowUpRecommended: analysis.FollowUp.Recommended,
+		FollowUpTitle:       analysis.FollowUp.Title,
+		FollowUpReason:      analysis.FollowUp.Reason,
+		FollowUpLabels:      analysis.FollowUp.Labels,
+	}
 }
 
 func (service Service) GetRunEnvelope(ctx context.Context, runID int64) (capabilities.RunEnvelope, error) {
