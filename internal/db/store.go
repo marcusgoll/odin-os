@@ -257,8 +257,25 @@ func (repository *SQLiteRepository) ListIssues(ctx context.Context, filter Issue
 	return issues, nil
 }
 
-func (repository *SQLiteRepository) ListPullRequests(context.Context, PullRequestFilter) ([]PullRequest, error) {
-	return nil, explicitNotMigrated("pull requests")
+func (repository *SQLiteRepository) ListPullRequests(ctx context.Context, filter PullRequestFilter) ([]PullRequest, error) {
+	records, err := repository.store.ListPullRequestHandoffs(ctx, sqlite.ListPullRequestHandoffsParams{
+		Repo:        filter.Repo,
+		ReviewState: filter.Status,
+	})
+	if err != nil {
+		return nil, err
+	}
+	pullRequests := make([]PullRequest, 0, len(records))
+	for _, record := range records {
+		pullRequests = append(pullRequests, PullRequest{
+			ID:     record.ID,
+			Repo:   record.Repo,
+			Number: record.Number,
+			Status: record.ReviewState,
+			URL:    record.URL,
+		})
+	}
+	return pullRequests, nil
 }
 
 func (repository *SQLiteRepository) ListLocks(context.Context, LockFilter) ([]Lock, error) {

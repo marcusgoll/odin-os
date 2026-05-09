@@ -10,7 +10,9 @@ date: 2026-04-30
 
 Odin-OS has PR and review policy assets, plus a fixture-backed GitHub PR
 manager behind `review.PullRequestManager`. The manager is not wired into live
-orchestration yet, and live GitHub PR mutation remains deferred.
+orchestration yet, and live GitHub PR mutation remains deferred. PR handoff
+metadata and read-only review outcomes persist in SQLite so later orchestration
+wiring can resume after restart.
 
 Existing assets to preserve:
 
@@ -43,6 +45,11 @@ Canonical helpers:
 Fixture-backed adapter:
 
 - `review.GitHubPullRequestManager`
+
+Restart-safe persistence:
+
+- `pull_request_handoffs`
+- `pull_request_review_results`
 
 `PullRequestManager` intentionally has no merge, approval, or deployment method.
 Human approval remains required before merge or production deployment.
@@ -80,8 +87,7 @@ deploy.
 ## Follow-Up Work
 
 1. Wire review selection into the orchestration loop after PR handoff exists.
-2. Persist PR handoff and review results in SQLite.
-3. Add read-only reviewer, QA, and security run attempts behind the executor
+2. Add read-only reviewer, QA, and security run attempts behind the executor
    contract.
-4. Add a live GitHub proof ticket before enabling PR create/update outside
+3. Add a live GitHub proof ticket before enabling PR create/update outside
    fixture-backed tests.

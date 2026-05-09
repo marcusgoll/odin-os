@@ -203,6 +203,73 @@ func TestMigrateDeduplicatesPendingApprovalsBeforeAddingUniquenessIndex(t *testi
 	}
 }
 
+func TestMigrateAddsPullRequestHandoffsWithoutTouchingExternalIssues(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openMigrationBackfillStore(t)
+	defer store.Close()
+
+	for version := 1; version <= 42; version++ {
+		migration, err := loadMigrationByVersion(version)
+		if err != nil {
+			t.Fatalf("loadMigrationByVersion(%d) error = %v", version, err)
+		}
+		if err := store.applyMigration(ctx, migration); err != nil {
+			t.Fatalf("applyMigration(%d) error = %v", version, err)
+		}
+	}
+
+	project, err := store.CreateProject(ctx, CreateProjectParams{
+		Key:           "alpha",
+		Name:          "Alpha",
+		Scope:         "project",
+		GitRoot:       filepath.Join(t.TempDir(), "alpha"),
+		DefaultBranch: "main",
+		GitHubRepo:    "acme/alpha",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+	if _, err := store.UpsertExternalIssue(ctx, UpsertExternalIssueParams{
+		ProjectID:          project.ID,
+		Provider:           "github",
+		Repo:               "acme/alpha",
+		Number:             75,
+		Title:              "Persist PR state",
+		BodyHash:           "sha256:issue",
+		URL:                "https://github.example/acme/alpha/issues/75",
+		State:              "open",
+		LabelsJSON:         `["odin:ready"]`,
+		SyncStatus:         "eligible",
+		SyncCursor:         "github:issue:acme/alpha:75",
+		AcceptanceCriteria: []string{"existing issue state survives PR migration"},
+	}); err != nil {
+		t.Fatalf("UpsertExternalIssue() error = %v", err)
+	}
+
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
+	}
+	for _, table := range []string{"pull_request_handoffs", "pull_request_review_results"} {
+		exists, err := store.HasTable(ctx, table)
+		if err != nil {
+			t.Fatalf("HasTable(%s) error = %v", table, err)
+		}
+		if !exists {
+			t.Fatalf("HasTable(%s) = false, want true", table)
+		}
+	}
+	issues, err := store.ListExternalIssues(ctx, ListExternalIssuesParams{Repo: "acme/alpha", SyncStatus: "eligible"})
+	if err != nil {
+		t.Fatalf("ListExternalIssues() error = %v", err)
+	}
+	if len(issues) != 1 || issues[0].Number != 75 || len(issues[0].AcceptanceCriteria) != 1 {
+		t.Fatalf("external issues after migration = %+v, want preserved issue state", issues)
+	}
+}
+
 func TestMigrateRepairsLegacyVersionCollisionBeforeWorkspaceMigrations(t *testing.T) {
 	t.Parallel()
 

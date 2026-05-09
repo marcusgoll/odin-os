@@ -40,6 +40,40 @@ type ExternalIssue struct {
 	UpdatedAt          time.Time
 }
 
+type PullRequestHandoff struct {
+	ID            int64
+	ProjectID     int64
+	Provider      string
+	Repo          string
+	Number        int
+	URL           string
+	State         string
+	IssueURL      string
+	Branch        string
+	Title         string
+	Summary       string
+	Tests         []string
+	Risks         []string
+	Blockers      []string
+	SelectedRoles []string
+	ReviewState   string
+	CreatedAt     time.Time
+	UpdatedAt     time.Time
+}
+
+type PullRequestReviewResult struct {
+	ID        int64
+	HandoffID int64
+	Role      string
+	State     string
+	Summary   string
+	Comments  []string
+	Blockers  []string
+	Outcome   string
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
 type Initiative struct {
 	ID               int64
 	WorkspaceID      int64
@@ -95,6 +129,40 @@ type UpsertExternalIssueParams struct {
 	SyncStatus         string
 	SyncCursor         string
 	AcceptanceCriteria []string
+}
+
+type UpsertPullRequestHandoffParams struct {
+	ProjectID     int64
+	Provider      string
+	Repo          string
+	Number        int
+	URL           string
+	State         string
+	IssueURL      string
+	Branch        string
+	Title         string
+	Summary       string
+	Tests         []string
+	Risks         []string
+	Blockers      []string
+	SelectedRoles []string
+	ReviewState   string
+}
+
+type ListPullRequestHandoffsParams struct {
+	Repo        string
+	ReviewState string
+	ProjectID   *int64
+}
+
+type UpsertPullRequestReviewResultParams struct {
+	HandoffID int64
+	Role      string
+	State     string
+	Summary   string
+	Comments  []string
+	Blockers  []string
+	Outcome   string
 }
 
 type RecordExternalGitHubIssueEventParams struct {
@@ -367,6 +435,36 @@ func DecodeAcceptanceCriteriaJSON(raw string) []string {
 		return nil
 	}
 	return NormalizeAcceptanceCriteria(criteria)
+}
+
+func EncodeStringListJSON(values []string) string {
+	normalized := NormalizeStringList(values)
+	if len(normalized) == 0 {
+		return "[]"
+	}
+	encoded, err := json.Marshal(normalized)
+	if err != nil {
+		return "[]"
+	}
+	return string(encoded)
+}
+
+func DecodeStringListJSON(raw string) []string {
+	var values []string
+	if err := json.Unmarshal([]byte(strings.TrimSpace(raw)), &values); err != nil {
+		return nil
+	}
+	return NormalizeStringList(values)
+}
+
+func NormalizeStringList(values []string) []string {
+	normalized := make([]string, 0, len(values))
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			normalized = append(normalized, trimmed)
+		}
+	}
+	return normalized
 }
 
 func NormalizeAcceptanceCriteria(criteria []string) []string {

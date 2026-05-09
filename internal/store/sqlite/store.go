@@ -240,6 +240,201 @@ func (store *Store) UpsertExternalIssue(ctx context.Context, params UpsertExtern
 	return issue, err
 }
 
+func (store *Store) UpsertPullRequestHandoff(ctx context.Context, params UpsertPullRequestHandoffParams) (PullRequestHandoff, error) {
+	now := store.now()
+	var handoff PullRequestHandoff
+	testsJSON := EncodeStringListJSON(params.Tests)
+	risksJSON := EncodeStringListJSON(params.Risks)
+	blockersJSON := EncodeStringListJSON(params.Blockers)
+	selectedRolesJSON := EncodeStringListJSON(params.SelectedRoles)
+
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO pull_request_handoffs (
+				project_id,
+				provider,
+				repo,
+				number,
+				url,
+				state,
+				issue_url,
+				branch,
+				title,
+				summary,
+				tests_json,
+				risks_json,
+				blockers_json,
+				selected_roles_json,
+				review_state,
+				created_at,
+				updated_at
+			)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT(project_id, issue_url, branch, provider, repo, number) DO UPDATE SET
+				url = excluded.url,
+				state = excluded.state,
+				title = excluded.title,
+				summary = excluded.summary,
+				tests_json = excluded.tests_json,
+				risks_json = excluded.risks_json,
+				blockers_json = excluded.blockers_json,
+				selected_roles_json = excluded.selected_roles_json,
+				review_state = excluded.review_state,
+				updated_at = excluded.updated_at
+		`,
+			params.ProjectID,
+			params.Provider,
+			params.Repo,
+			params.Number,
+			params.URL,
+			params.State,
+			params.IssueURL,
+			params.Branch,
+			params.Title,
+			params.Summary,
+			testsJSON,
+			risksJSON,
+			blockersJSON,
+			selectedRolesJSON,
+			params.ReviewState,
+			formatTime(now),
+			formatTime(now),
+		); err != nil {
+			return err
+		}
+
+		record, err := scanPullRequestHandoff(tx.QueryRowContext(ctx, `
+			SELECT id, project_id, provider, repo, number, url, state, issue_url, branch, title, summary, tests_json, risks_json, blockers_json, selected_roles_json, review_state, created_at, updated_at
+			FROM pull_request_handoffs
+			WHERE project_id = ? AND issue_url = ? AND branch = ? AND provider = ? AND repo = ? AND number = ?
+		`, params.ProjectID, params.IssueURL, params.Branch, params.Provider, params.Repo, params.Number))
+		if err != nil {
+			return err
+		}
+		handoff = record
+		return nil
+	})
+
+	return handoff, err
+}
+
+func (store *Store) ListPullRequestHandoffs(ctx context.Context, params ListPullRequestHandoffsParams) ([]PullRequestHandoff, error) {
+	query := `
+		SELECT id, project_id, provider, repo, number, url, state, issue_url, branch, title, summary, tests_json, risks_json, blockers_json, selected_roles_json, review_state, created_at, updated_at
+		FROM pull_request_handoffs
+		WHERE 1=1
+	`
+	args := []any{}
+	if params.ProjectID != nil {
+		query += " AND project_id = ?"
+		args = append(args, *params.ProjectID)
+	}
+	if strings.TrimSpace(params.Repo) != "" {
+		query += " AND repo = ?"
+		args = append(args, strings.TrimSpace(params.Repo))
+	}
+	if strings.TrimSpace(params.ReviewState) != "" {
+		query += " AND review_state = ?"
+		args = append(args, strings.TrimSpace(params.ReviewState))
+	}
+	query += " ORDER BY updated_at DESC, id DESC"
+
+	rows, err := store.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var handoffs []PullRequestHandoff
+	for rows.Next() {
+		handoff, err := scanPullRequestHandoff(rows)
+		if err != nil {
+			return nil, err
+		}
+		handoffs = append(handoffs, handoff)
+	}
+	return handoffs, rows.Err()
+}
+
+func (store *Store) UpsertPullRequestReviewResult(ctx context.Context, params UpsertPullRequestReviewResultParams) (PullRequestReviewResult, error) {
+	now := store.now()
+	var result PullRequestReviewResult
+	commentsJSON := EncodeStringListJSON(params.Comments)
+	blockersJSON := EncodeStringListJSON(params.Blockers)
+
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO pull_request_review_results (
+				handoff_id,
+				role,
+				state,
+				summary,
+				comments_json,
+				blockers_json,
+				outcome,
+				created_at,
+				updated_at
+			)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT(handoff_id, role) DO UPDATE SET
+				state = excluded.state,
+				summary = excluded.summary,
+				comments_json = excluded.comments_json,
+				blockers_json = excluded.blockers_json,
+				outcome = excluded.outcome,
+				updated_at = excluded.updated_at
+		`,
+			params.HandoffID,
+			params.Role,
+			params.State,
+			params.Summary,
+			commentsJSON,
+			blockersJSON,
+			params.Outcome,
+			formatTime(now),
+			formatTime(now),
+		); err != nil {
+			return err
+		}
+
+		record, err := scanPullRequestReviewResult(tx.QueryRowContext(ctx, `
+			SELECT id, handoff_id, role, state, summary, comments_json, blockers_json, outcome, created_at, updated_at
+			FROM pull_request_review_results
+			WHERE handoff_id = ? AND role = ?
+		`, params.HandoffID, params.Role))
+		if err != nil {
+			return err
+		}
+		result = record
+		return nil
+	})
+
+	return result, err
+}
+
+func (store *Store) ListPullRequestReviewResults(ctx context.Context, handoffID int64) ([]PullRequestReviewResult, error) {
+	rows, err := store.db.QueryContext(ctx, `
+		SELECT id, handoff_id, role, state, summary, comments_json, blockers_json, outcome, created_at, updated_at
+		FROM pull_request_review_results
+		WHERE handoff_id = ?
+		ORDER BY id
+	`, handoffID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var results []PullRequestReviewResult
+	for rows.Next() {
+		result, err := scanPullRequestReviewResult(rows)
+		if err != nil {
+			return nil, err
+		}
+		results = append(results, result)
+	}
+	return results, rows.Err()
+}
+
 func (store *Store) RecordExternalGitHubIssueEvent(ctx context.Context, params RecordExternalGitHubIssueEventParams) error {
 	now := store.now()
 	return store.withTx(ctx, func(tx *sql.Tx) error {
@@ -8867,6 +9062,88 @@ func scanExternalIssue(row interface{ Scan(...any) error }) (ExternalIssue, erro
 		return ExternalIssue{}, err
 	}
 	return issue, nil
+}
+
+func scanPullRequestHandoff(row interface{ Scan(...any) error }) (PullRequestHandoff, error) {
+	var handoff PullRequestHandoff
+	var testsJSON sql.NullString
+	var risksJSON sql.NullString
+	var blockersJSON sql.NullString
+	var selectedRolesJSON sql.NullString
+	var createdAt string
+	var updatedAt string
+	if err := row.Scan(
+		&handoff.ID,
+		&handoff.ProjectID,
+		&handoff.Provider,
+		&handoff.Repo,
+		&handoff.Number,
+		&handoff.URL,
+		&handoff.State,
+		&handoff.IssueURL,
+		&handoff.Branch,
+		&handoff.Title,
+		&handoff.Summary,
+		&testsJSON,
+		&risksJSON,
+		&blockersJSON,
+		&selectedRolesJSON,
+		&handoff.ReviewState,
+		&createdAt,
+		&updatedAt,
+	); err != nil {
+		return PullRequestHandoff{}, err
+	}
+
+	var err error
+	handoff.Tests = DecodeStringListJSON(testsJSON.String)
+	handoff.Risks = DecodeStringListJSON(risksJSON.String)
+	handoff.Blockers = DecodeStringListJSON(blockersJSON.String)
+	handoff.SelectedRoles = DecodeStringListJSON(selectedRolesJSON.String)
+	handoff.CreatedAt, err = parseTime(createdAt)
+	if err != nil {
+		return PullRequestHandoff{}, err
+	}
+	handoff.UpdatedAt, err = parseTime(updatedAt)
+	if err != nil {
+		return PullRequestHandoff{}, err
+	}
+	return handoff, nil
+}
+
+func scanPullRequestReviewResult(row interface{ Scan(...any) error }) (PullRequestReviewResult, error) {
+	var result PullRequestReviewResult
+	var commentsJSON sql.NullString
+	var blockersJSON sql.NullString
+	var createdAt string
+	var updatedAt string
+	if err := row.Scan(
+		&result.ID,
+		&result.HandoffID,
+		&result.Role,
+		&result.State,
+		&result.Summary,
+		&commentsJSON,
+		&blockersJSON,
+		&result.Outcome,
+		&createdAt,
+		&updatedAt,
+	); err != nil {
+		return PullRequestReviewResult{}, err
+	}
+
+	var err error
+	result.Comments = DecodeStringListJSON(commentsJSON.String)
+	result.Blockers = DecodeStringListJSON(blockersJSON.String)
+	result.CreatedAt, err = parseTime(createdAt)
+	if err != nil {
+		return PullRequestReviewResult{}, err
+	}
+	result.UpdatedAt, err = parseTime(updatedAt)
+	if err != nil {
+		return PullRequestReviewResult{}, err
+	}
+	return result, nil
 }
 
 func scanInitiative(row interface{ Scan(...any) error }) (Initiative, error) {

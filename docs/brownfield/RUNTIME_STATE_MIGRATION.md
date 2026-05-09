@@ -16,7 +16,7 @@ SQLite is the current runtime authority. The active implementation is `internal/
 | `workspaces` | `worktree_leases` table. | `internal/vcs/leases`, `internal/vcs/worktrees`, `internal/store/sqlite` | Wrap existing lease state. |
 | `agent_runs` | `runs` table. | `internal/runtime/jobs`, `internal/runtime/runs`, `internal/store/sqlite` | Wrap existing runs as Agent Runs. |
 | `run_events` | `events` table. | `internal/runtime/events`, `internal/store/sqlite` | Wrap existing append-only events. |
-| `pull_requests` | No dedicated table yet. PR behavior is template/CI only. | `.github/*`, scripts | Add later with explicit migration. |
+| `pull_requests` | PR handoff and read-only review result state persists in `pull_request_handoffs` and `pull_request_review_results`. | `internal/review`, `internal/store/sqlite`, `.github/*` | Keep SQLite as restart-safe runtime authority; live GitHub mutation remains adapter/proof-gated. |
 | `locks` | No general lock table. Bootstrap has filesystem lock behavior; SQLite has uniqueness constraints. | `internal/app/bootstrap`, SQLite indexes | Add only if a runtime lock model is required. |
 | `failures` | `incidents` and `recoveries` tables. | `internal/runtime/recovery`, `internal/store/sqlite` | Wrap incidents first; keep recovery state separate. |
 
@@ -31,7 +31,11 @@ The first step added typed models and repository interfaces in `internal/db`,
 backed by the existing `internal/store/sqlite.Store`. Read-only GitHub intake
 adds `external_issues` as the smallest explicit schema extension because no
 existing table stores external issue identity, labels, body hash, sync status,
-and stable sync cursor idempotently.
+and stable sync cursor idempotently. PR handoff persistence adds
+`pull_request_handoffs` and `pull_request_review_results` because no existing
+table stores PR URL/number, linked issue, branch, selected review roles,
+evidence lists, blockers, comments, and read-only review outcomes
+restart-safely.
 
 Rationale:
 
@@ -47,6 +51,7 @@ Rationale:
 `internal/db.NewSQLiteRepository(store)` currently maps:
 
 - `external_issues` -> `Issue`
+- `pull_request_handoffs` -> `PullRequest`
 - `runs` -> `AgentRun`
 - `events` -> `RunEvent`
 - `worktree_leases` -> `Workspace`
@@ -54,7 +59,6 @@ Rationale:
 
 Missing target repositories return explicit `ErrRepositoryNotMigrated`:
 
-- `pull_requests`
 - `locks`
 
 This prevents silent success against nonexistent state.
@@ -86,14 +90,14 @@ ODIN_ROOT="$runtime_root" ./bin/odin verify-backup "$backup_dir/odin-backup.tar.
 
 ## Rollback Path
 
-For this wrapper-only slice, rollback is code-only:
+For wrapper-only slices, rollback is code-only:
 
 1. Revert the `internal/db` wrapper changes and docs.
 2. Keep the SQLite database untouched.
 3. Run `go test ./...`.
 4. Run `ODIN_ROOT=<tmp> ./bin/odin doctor --json`.
 
-For future schema migrations:
+For additive schema migrations such as PR handoff persistence:
 
 1. Stop the service.
 2. Restore the backed-up DB to the runtime root.
