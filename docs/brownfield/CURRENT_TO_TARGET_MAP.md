@@ -21,7 +21,7 @@ date: 2026-04-30
 | Event audit | `events` table, runtime events contract | Present. | All important agency mutations append events. | Preserve and require for new modules. |
 | Approvals | `approvals` table, action-bound approvals, REPL `/approvals` | Present but incomplete operator surface. | Human approval before merge/deploy and sensitive actions. | Preserve and extend. |
 | Git worktree workspace manager | `internal/vcs/leases`, `internal/vcs/worktrees`, `internal/vcs/git` | Present and useful. | Every mutating worker gets one worktree and task branch. | Preserve. |
-| Duplicate workspace seam | `internal/workspace/manager.go` | Scaffold duplicate. | No separate workspace manager outside `internal/vcs`. | Replace/remove. |
+| Duplicate workspace seam | Historical `internal/workspace/manager.go` | Removed scaffold duplicate. | No separate workspace manager outside `internal/vcs`. | Keep removed; use `internal/vcs/leases` and `internal/vcs/worktrees`. |
 | Executor seam | `internal/executors/contract`, `internal/executors/router` | Strong existing seam. | All runner adapters implement this interface. | Preserve. |
 | Codex exec runner | `internal/executors/codex`, `internal/runner/codexexec` | Deterministic alpha adapter plus placeholder duplicate. | Real `codex exec` adapter with security checks. | Refactor under `internal/executors`. |
 | Future app-server runner | `internal/runner/appserver` | Placeholder duplicate. | Optional phase-two adapter behind executor seam. | Defer/replace later. |
@@ -83,7 +83,7 @@ These modules contain useful intent but need locality and seam cleanup:
 These modules should not become separate active seams:
 
 - `internal/runner`
-- `internal/workspace`
+- historical `internal/workspace`
 - `internal/tracker` unless chosen as the canonical GitHub intake root
 - `internal/orchestrator`
 - `src/*`
