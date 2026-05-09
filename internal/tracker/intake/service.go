@@ -150,6 +150,7 @@ func mapIssue(projectID int64, issue tracker.Issue, fallbackRepo string) sqlite.
 		State:      state,
 		LabelsJSON: string(labelsJSON),
 		SyncStatus: "eligible",
+		SyncCursor: fmt.Sprintf("%s:issue:%s:%d", provider, repo, issue.Number),
 	}
 }
 
