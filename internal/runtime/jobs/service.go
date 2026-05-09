@@ -128,6 +128,7 @@ type admissionDecision struct {
 	Outcome        admissionOutcome
 	BlockedReason  string
 	LastError      string
+	FailureCode    recovery.FailureCode
 	NextEligibleAt time.Time
 }
 
@@ -1381,7 +1382,7 @@ func executionMetadataForResult(requestMetadata map[string]string, resultMetadat
 
 func executorResultMetadataAllowed(key string) bool {
 	switch strings.TrimSpace(key) {
-	case "driver_kind", "operation", "external_id", "driver_cwd", "branch_observed", "marker_path", "marker_written", "artifact_path", "artifacts_json":
+	case "driver_kind", "operation", "external_id", "driver_cwd", "branch_observed", "marker_path", "marker_written", "artifact_path", "artifacts_json", "failure_code":
 		return true
 	default:
 		return false
@@ -1755,6 +1756,7 @@ func (service Service) admitTask(ctx context.Context, task sqlite.Task, project 
 			Outcome:       admissionBlocked,
 			BlockedReason: "executor_unavailable",
 			LastError:     executorCheck.Summary,
+			FailureCode:   recovery.FailureCodeExecutorUnavailable,
 		}, nil
 	}
 
@@ -1765,8 +1767,9 @@ func (service Service) admitTask(ctx context.Context, task sqlite.Task, project 
 		ActionKey:   intent.ActionKey,
 	}); err != nil {
 		return admissionDecision{
-			Outcome:   admissionFailed,
-			LastError: fmt.Sprintf("transition_denied: %v", err),
+			Outcome:     admissionFailed,
+			LastError:   fmt.Sprintf("transition_denied: %v", err),
+			FailureCode: recovery.FailureCodePolicyDenied,
 		}, nil
 	}
 
@@ -1793,8 +1796,9 @@ func (service Service) admitDirectTask(ctx context.Context, task sqlite.Task, pr
 		ActionKey:   intent.ActionKey,
 	}); err != nil {
 		return admissionDecision{
-			Outcome:   admissionFailed,
-			LastError: fmt.Sprintf("transition_denied: %v", err),
+			Outcome:     admissionFailed,
+			LastError:   fmt.Sprintf("transition_denied: %v", err),
+			FailureCode: recovery.FailureCodePolicyDenied,
 		}, nil
 	}
 
@@ -1803,6 +1807,7 @@ func (service Service) admitDirectTask(ctx context.Context, task sqlite.Task, pr
 			Outcome:       admissionBlocked,
 			BlockedReason: "mutation_requires_isolated_worktree",
 			LastError:     fmt.Sprintf("policy_denied: project %q requires an isolated task worktree before mutation", manifest.Key),
+			FailureCode:   recovery.FailureCodeWorkspacePolicyDenied,
 		}, nil
 	}
 
@@ -1850,6 +1855,7 @@ func (service Service) prepareLease(ctx context.Context, task sqlite.Task, proje
 			return leases.Assignment{}, admissionDecision{
 				Outcome:        admissionRetryLater,
 				LastError:      err.Error(),
+				FailureCode:    recovery.FailureCodeWorkspaceLeaseConflict,
 				NextEligibleAt: service.now().Add(time.Second),
 			}, nil
 		}
@@ -1858,8 +1864,9 @@ func (service Service) prepareLease(ctx context.Context, task sqlite.Task, proje
 	if intent.Mutating {
 		if err := validateAssignment(manifest, project, assignment); err != nil {
 			return leases.Assignment{}, admissionDecision{
-				Outcome:   admissionFailed,
-				LastError: fmt.Sprintf("policy_denied: %v", err),
+				Outcome:     admissionFailed,
+				LastError:   fmt.Sprintf("policy_denied: %v", err),
+				FailureCode: recovery.FailureCodeWorkspacePolicyDenied,
 			}, nil
 		}
 	}
@@ -1874,8 +1881,9 @@ func (service Service) prepareLease(ctx context.Context, task sqlite.Task, proje
 	}
 	if intent.Mutating && assignment.WorktreePath == project.GitRoot {
 		return leases.Assignment{}, admissionDecision{
-			Outcome:   admissionFailed,
-			LastError: fmt.Sprintf("policy_denied: project %q requires an isolated task worktree before mutation", manifest.Key),
+			Outcome:     admissionFailed,
+			LastError:   fmt.Sprintf("policy_denied: project %q requires an isolated task worktree before mutation", manifest.Key),
+			FailureCode: recovery.FailureCodeWorkspacePolicyDenied,
 		}, nil
 	}
 	return assignment, admissionDecision{Outcome: admissionDispatchable}, nil
@@ -1885,7 +1893,7 @@ func (service Service) finalizeOutcome(ctx context.Context, task sqlite.Task, ru
 	if admission.Outcome != "" && admission.Outcome != admissionDispatchable {
 		switch admission.Outcome {
 		case admissionFailed:
-			artifactsJSON := service.failureAnalysisArtifact(task, "dispatch", admission.LastError, task.RetryCount)
+			artifactsJSON := service.failureAnalysisArtifact(task, "dispatch", admission.LastError, task.RetryCount, admission.FailureCode)
 			updatedTask, updatedRun, err := service.Store.FinishRunAndSetTaskStatus(ctx, sqlite.FinishRunAndSetTaskStatusParams{
 				RunID:         run.ID,
 				RunStatus:     "failed",
@@ -1907,7 +1915,7 @@ func (service Service) finalizeOutcome(ctx context.Context, task sqlite.Task, ru
 			}
 			return nil
 		case admissionRetryLater:
-			artifactsJSON := service.failureAnalysisArtifact(task, "dispatch", admission.LastError, task.RetryCount)
+			artifactsJSON := service.failureAnalysisArtifact(task, "dispatch", admission.LastError, task.RetryCount, admission.FailureCode)
 			_, _, err := service.Store.FailRunAndRetryTask(ctx, sqlite.FailRunAndRetryTaskParams{
 				RunID:          run.ID,
 				Summary:        admission.LastError,
@@ -1922,8 +1930,9 @@ func (service Service) finalizeOutcome(ctx context.Context, task sqlite.Task, ru
 	}
 
 	if execErr != nil {
+		failureCode := failureCodeForExecutionError(execErr, result)
 		if isTransientFailure(execErr) {
-			artifactsJSON := service.failureAnalysisArtifact(task, "codex_run", execErr.Error(), task.RetryCount+1)
+			artifactsJSON := service.failureAnalysisArtifact(task, "codex_run", execErr.Error(), task.RetryCount+1, failureCode)
 			if task.RetryCount+1 >= task.MaxAttempts {
 				failedTask, _, err := service.Store.FinishRunAndSetTaskStatus(ctx, sqlite.FinishRunAndSetTaskStatusParams{
 					RunID:         run.ID,
@@ -1952,7 +1961,7 @@ func (service Service) finalizeOutcome(ctx context.Context, task sqlite.Task, ru
 			return err
 		}
 
-		artifactsJSON := service.failureAnalysisArtifact(task, "codex_run", execErr.Error(), task.RetryCount)
+		artifactsJSON := service.failureAnalysisArtifact(task, "codex_run", execErr.Error(), task.RetryCount, failureCode)
 		failedTask, _, err := service.Store.FinishRunAndSetTaskStatus(ctx, sqlite.FinishRunAndSetTaskStatusParams{
 			RunID:         run.ID,
 			RunStatus:     "failed",
@@ -1977,7 +1986,7 @@ func (service Service) finalizeOutcome(ctx context.Context, task sqlite.Task, ru
 	artifactsJSON := ""
 	if runStatus != "completed" {
 		taskStatus = "failed"
-		artifactsJSON = service.failureAnalysisArtifact(task, "codex_run", result.Output, task.RetryCount)
+		artifactsJSON = service.failureAnalysisArtifact(task, "codex_run", result.Output, task.RetryCount, failureCodeFromResult(result))
 	}
 
 	updatedTask, _, err := service.Store.FinishRunAndSetTaskStatus(ctx, sqlite.FinishRunAndSetTaskStatusParams{
@@ -2015,8 +2024,9 @@ func (service Service) recordTaskRecoveryRecommendation(ctx context.Context, tas
 	})
 }
 
-func (service Service) failureAnalysisArtifact(task sqlite.Task, step string, summary string, retryCount int) string {
+func (service Service) failureAnalysisArtifact(task sqlite.Task, step string, summary string, retryCount int, code recovery.FailureCode) string {
 	analysis := recovery.AnalyzeFailure(recovery.FailureInput{
+		Code:                  code,
 		Step:                  step,
 		TicketTitle:           task.Title,
 		ExistingBehaviorKnown: true,
@@ -2030,6 +2040,26 @@ func (service Service) failureAnalysisArtifact(task sqlite.Task, step string, su
 		return ""
 	}
 	return payload
+}
+
+func failureCodeForExecutionError(err error, result contract.ExecutionResult) recovery.FailureCode {
+	if code := failureCodeFromResult(result); code != "" {
+		return code
+	}
+	if isTransientFailure(err) {
+		return recovery.FailureCodeExecutorTimeout
+	}
+	return ""
+}
+
+func failureCodeFromResult(result contract.ExecutionResult) recovery.FailureCode {
+	if code := recovery.FailureCode(strings.TrimSpace(result.FailureCode)); code != "" {
+		return code
+	}
+	if result.Metadata == nil {
+		return ""
+	}
+	return recovery.FailureCode(strings.TrimSpace(result.Metadata["failure_code"]))
 }
 
 func (service Service) applyAdmissionDecision(ctx context.Context, task sqlite.Task, decision admissionDecision) error {
@@ -2391,8 +2421,9 @@ func (service Service) evaluateTaskApproval(ctx context.Context, task sqlite.Tas
 		}, true, nil
 	default:
 		return admissionDecision{
-			Outcome:   admissionFailed,
-			LastError: fmt.Sprintf("approval for task %d is %s", task.ID, approval.Status),
+			Outcome:     admissionFailed,
+			LastError:   fmt.Sprintf("approval for task %d is %s", task.ID, approval.Status),
+			FailureCode: recovery.FailureCodePolicyDenied,
 		}, true, nil
 	}
 }
