@@ -4828,7 +4828,8 @@ func runServe(ctx context.Context, app bootstrap.App, cfg appconfig.Config, stdo
 
 	server := &stdhttp.Server{
 		Handler: apihttp.NewCapabilitiesHandler(apihttp.CapabilitiesDependencies{
-			Gateway: newServeCapabilityGateway(app),
+			Gateway:    newServeCapabilityGateway(app),
+			AdminToken: cfg.AdminToken,
 			Fallback: apihttp.NewOperationalHandler(apihttp.Dependencies{
 				Health:          healthService,
 				Metrics:         metricsService,

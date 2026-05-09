@@ -78,7 +78,14 @@ func (service *Service) AuthorizeInvocation(_ context.Context, desc Descriptor, 
 		}
 	}
 
-	if caller.Kind == "" || len(desc.Permissions) == 0 {
+	if strings.TrimSpace(caller.Kind) == "" {
+		return &Error{
+			CodeValue: "permission_denied",
+			Message:   "caller kind is required for capability invocation",
+		}
+	}
+
+	if len(desc.Permissions) == 0 {
 		return nil
 	}
 

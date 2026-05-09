@@ -22,8 +22,9 @@ type CapabilityGateway interface {
 }
 
 type CapabilitiesDependencies struct {
-	Gateway  CapabilityGateway
-	Fallback http.Handler
+	Gateway    CapabilityGateway
+	Fallback   http.Handler
+	AdminToken string
 }
 
 type capabilityDescriptorResponse struct {
@@ -112,7 +113,7 @@ func NewCapabilitiesHandler(deps CapabilitiesDependencies) http.Handler {
 				http.NotFound(writer, request)
 				return
 			}
-			handleInvokeCapability(writer, request, deps.Gateway, id)
+			handleInvokeCapability(writer, request, deps.Gateway, id, deps.AdminToken)
 			return
 		}
 
@@ -192,7 +193,12 @@ func handleGetCapability(writer http.ResponseWriter, request *http.Request, gate
 	})
 }
 
-func handleInvokeCapability(writer http.ResponseWriter, request *http.Request, gateway CapabilityGateway, id string) {
+func handleInvokeCapability(writer http.ResponseWriter, request *http.Request, gateway CapabilityGateway, id string, adminToken string) {
+	if statusCode, ok := authorizeAdmin(request, adminToken); !ok {
+		writeAdminAuthorizationError(writer, statusCode)
+		return
+	}
+
 	var body invokeRequestBody
 	if err := json.NewDecoder(request.Body).Decode(&body); err != nil && !errors.Is(err, io.EOF) {
 		writeAPIError(writer, http.StatusBadRequest, "invalid_request", err.Error())
