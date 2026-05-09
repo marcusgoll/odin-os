@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -19,6 +20,7 @@ import (
 	httpapi "odin-os/internal/api/http"
 	"odin-os/internal/core/initiatives"
 	coremedia "odin-os/internal/core/media"
+	coreworkspace "odin-os/internal/core/workspace"
 	"odin-os/internal/core/workspaces"
 	runtimeevents "odin-os/internal/runtime/events"
 	healthsvc "odin-os/internal/runtime/health"
@@ -269,6 +271,222 @@ func TestOperationalHandlerExposesDashboardStatusWithoutSecretsOrTmuxDependency(
 	if status.Tmux.Available || status.Tmux.Source != "not_configured" {
 		t.Fatalf("/status tmux = %+v, want absence reported without daemon failure", status.Tmux)
 	}
+}
+
+func TestOperationalHandlerIncludesTmuxProviderStatus(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openStore(t)
+	defer store.Close()
+
+	seedHealthyObservability(t, ctx, store)
+	seedRuntimeState(t, ctx, store, "ready")
+
+	server := httptest.NewServer(httpapi.NewOperationalHandler(httpapi.Dependencies{
+		Health: healthsvc.Service{DB: store.DB()},
+		Metrics: metricsvc.Service{
+			DB: store.DB(),
+		},
+		ReadModels:      store.DB(),
+		RegistryHealthy: true,
+		Tmux: fakeTmuxStatusProvider{status: httpapi.TmuxStatus{
+			Available:        true,
+			Source:           "workspace_sessions",
+			LiveSessions:     1,
+			AttachedSessions: 1,
+			Sessions: []httpapi.TmuxWorkspaceSession{
+				{
+					ProjectKey:    "alpha",
+					SessionName:   "odin-workspace-alpha",
+					State:         "live",
+					FactsSource:   "live",
+					AttachedCount: 1,
+				},
+			},
+		}},
+	}))
+	defer server.Close()
+
+	response, err := http.Get(server.URL + "/status")
+	if err != nil {
+		t.Fatalf("GET /status error = %v", err)
+	}
+	defer response.Body.Close()
+
+	var status struct {
+		Tmux struct {
+			Available        bool   `json:"available"`
+			Source           string `json:"source"`
+			LiveSessions     int    `json:"live_sessions"`
+			AttachedSessions int    `json:"attached_sessions"`
+			Sessions         []struct {
+				ProjectKey    string `json:"project_key"`
+				SessionName   string `json:"session_name"`
+				State         string `json:"state"`
+				FactsSource   string `json:"facts_source"`
+				AttachedCount int    `json:"attached_count"`
+			} `json:"sessions"`
+		} `json:"tmux"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&status); err != nil {
+		t.Fatalf("decode /status: %v", err)
+	}
+	if !status.Tmux.Available || status.Tmux.Source != "workspace_sessions" || status.Tmux.LiveSessions != 1 || status.Tmux.AttachedSessions != 1 {
+		t.Fatalf("/status tmux = %+v, want provider summary", status.Tmux)
+	}
+	if len(status.Tmux.Sessions) != 1 || status.Tmux.Sessions[0].SessionName != "odin-workspace-alpha" {
+		t.Fatalf("/status tmux sessions = %+v, want workspace session", status.Tmux.Sessions)
+	}
+}
+
+func TestOperationalHandlerReportsTmuxProviderErrorWithoutFailingStatus(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openStore(t)
+	defer store.Close()
+
+	seedHealthyObservability(t, ctx, store)
+	seedRuntimeState(t, ctx, store, "ready")
+
+	server := httptest.NewServer(httpapi.NewOperationalHandler(httpapi.Dependencies{
+		Health: healthsvc.Service{DB: store.DB()},
+		Metrics: metricsvc.Service{
+			DB: store.DB(),
+		},
+		ReadModels:      store.DB(),
+		RegistryHealthy: true,
+		Tmux:            fakeTmuxStatusProvider{err: errors.New("tmux unavailable")},
+	}))
+	defer server.Close()
+
+	response, err := http.Get(server.URL + "/status")
+	if err != nil {
+		t.Fatalf("GET /status error = %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("/status status = %d, want %d", response.StatusCode, http.StatusOK)
+	}
+
+	var status struct {
+		Tmux struct {
+			Available bool   `json:"available"`
+			Source    string `json:"source"`
+			Error     string `json:"error"`
+		} `json:"tmux"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&status); err != nil {
+		t.Fatalf("decode /status: %v", err)
+	}
+	if status.Tmux.Available || status.Tmux.Source != "tmux" || status.Tmux.Error != "tmux unavailable" {
+		t.Fatalf("/status tmux = %+v, want non-fatal provider error", status.Tmux)
+	}
+}
+
+func TestOperationalHandlerReportsWorkspaceTmuxAbsentWithoutFailingStatus(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openStore(t)
+	defer store.Close()
+
+	seedHealthyObservability(t, ctx, store)
+	seedRuntimeState(t, ctx, store, "ready")
+
+	server := httptest.NewServer(httpapi.NewOperationalHandler(httpapi.Dependencies{
+		Health: healthsvc.Service{DB: store.DB()},
+		Metrics: metricsvc.Service{
+			DB: store.DB(),
+		},
+		ReadModels:      store.DB(),
+		RegistryHealthy: true,
+		Tmux: httpapi.WorkspaceTmuxStatusProvider{
+			Workspaces: fakeWorkspaceStatusLister{err: errors.New(`exec: "tmux": executable file not found in $PATH`)},
+		},
+	}))
+	defer server.Close()
+
+	response, err := http.Get(server.URL + "/status")
+	if err != nil {
+		t.Fatalf("GET /status error = %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("/status status = %d, want %d", response.StatusCode, http.StatusOK)
+	}
+
+	var status struct {
+		Tmux struct {
+			Available bool   `json:"available"`
+			Source    string `json:"source"`
+			Error     string `json:"error"`
+		} `json:"tmux"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&status); err != nil {
+		t.Fatalf("decode /status: %v", err)
+	}
+	if status.Tmux.Available || status.Tmux.Source != "tmux" || !strings.Contains(status.Tmux.Error, "executable file not found") {
+		t.Fatalf("/status tmux = %+v, want non-fatal tmux absence", status.Tmux)
+	}
+}
+
+func TestWorkspaceTmuxStatusProviderSummarizesWorkspaceSessions(t *testing.T) {
+	t.Parallel()
+
+	provider := httpapi.WorkspaceTmuxStatusProvider{
+		Workspaces: fakeWorkspaceStatusLister{statuses: []coreworkspace.Status{
+			{
+				ProjectKey:    "alpha",
+				SessionName:   "odin-workspace-alpha",
+				State:         coreworkspace.StateLive,
+				FactsSource:   coreworkspace.FactsSourceLive,
+				AttachedCount: 2,
+			},
+			{
+				ProjectKey:  "beta",
+				SessionName: "odin-workspace-beta",
+				State:       coreworkspace.StateStopped,
+				FactsSource: coreworkspace.FactsSourceLastKnown,
+			},
+		}},
+	}
+
+	status, err := provider.Status(context.Background())
+	if err != nil {
+		t.Fatalf("Status() error = %v", err)
+	}
+	if !status.Available || status.Source != "workspace_sessions" || status.LiveSessions != 1 || status.AttachedSessions != 1 {
+		t.Fatalf("Status() = %+v, want one live attached workspace session", status)
+	}
+	if len(status.Sessions) != 1 || status.Sessions[0].ProjectKey != "alpha" || status.Sessions[0].AttachedCount != 2 {
+		t.Fatalf("Status().Sessions = %+v, want alpha live session", status.Sessions)
+	}
+}
+
+type fakeTmuxStatusProvider struct {
+	status httpapi.TmuxStatus
+	err    error
+}
+
+func (provider fakeTmuxStatusProvider) Status(context.Context) (httpapi.TmuxStatus, error) {
+	if provider.err != nil {
+		return httpapi.TmuxStatus{}, provider.err
+	}
+	return provider.status, nil
+}
+
+type fakeWorkspaceStatusLister struct {
+	statuses []coreworkspace.Status
+	err      error
+}
+
+func (lister fakeWorkspaceStatusLister) List(context.Context) ([]coreworkspace.Status, error) {
+	if lister.err != nil {
+		return nil, lister.err
+	}
+	return lister.statuses, nil
 }
 
 func TestOperationalHandlerExposesIssuesAndRunsFromRuntimeState(t *testing.T) {

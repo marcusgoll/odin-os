@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	coreworkspace "odin-os/internal/core/workspace"
 	"odin-os/internal/core/workspaces"
 	healthsvc "odin-os/internal/runtime/health"
 	"odin-os/internal/runtime/projections"
@@ -50,17 +51,70 @@ type TmuxStatusProvider interface {
 	Status(context.Context) (TmuxStatus, error)
 }
 
+type WorkspaceStatusLister interface {
+	List(context.Context) ([]coreworkspace.Status, error)
+}
+
 type GitHubIssueIngester interface {
 	IngestGitHubIssue(context.Context, triggers.GitHubIssueIngestParams) (triggers.GitHubIssueIngestResult, error)
 }
 
 type TmuxStatus struct {
-	Available bool   `json:"available"`
-	Source    string `json:"source"`
-	Error     string `json:"error,omitempty"`
+	Available        bool                   `json:"available"`
+	Source           string                 `json:"source"`
+	Error            string                 `json:"error,omitempty"`
+	LiveSessions     int                    `json:"live_sessions,omitempty"`
+	AttachedSessions int                    `json:"attached_sessions,omitempty"`
+	Sessions         []TmuxWorkspaceSession `json:"sessions,omitempty"`
+}
+
+type TmuxWorkspaceSession struct {
+	ProjectKey    string `json:"project_key"`
+	SessionName   string `json:"session_name"`
+	State         string `json:"state"`
+	FactsSource   string `json:"facts_source"`
+	AttachedCount int    `json:"attached_count"`
+}
+
+type WorkspaceTmuxStatusProvider struct {
+	Workspaces WorkspaceStatusLister
 }
 
 var ErrAdminActionNotImplemented = errors.New("admin action not implemented")
+
+func (provider WorkspaceTmuxStatusProvider) Status(ctx context.Context) (TmuxStatus, error) {
+	if provider.Workspaces == nil {
+		return TmuxStatus{Available: false, Source: "not_configured"}, nil
+	}
+	statuses, err := provider.Workspaces.List(ctx)
+	if err != nil {
+		return TmuxStatus{}, err
+	}
+
+	tmuxStatus := TmuxStatus{
+		Source:   "workspace_sessions",
+		Sessions: make([]TmuxWorkspaceSession, 0),
+	}
+	for _, status := range statuses {
+		if status.State != coreworkspace.StateLive {
+			continue
+		}
+		session := TmuxWorkspaceSession{
+			ProjectKey:    status.ProjectKey,
+			SessionName:   status.SessionName,
+			State:         string(status.State),
+			FactsSource:   string(status.FactsSource),
+			AttachedCount: status.AttachedCount,
+		}
+		tmuxStatus.Sessions = append(tmuxStatus.Sessions, session)
+		tmuxStatus.LiveSessions++
+		if status.AttachedCount > 0 {
+			tmuxStatus.AttachedSessions++
+		}
+	}
+	tmuxStatus.Available = tmuxStatus.LiveSessions > 0
+	return tmuxStatus, nil
+}
 
 func NewOperationalHandler(deps Dependencies) http.Handler {
 	now := deps.Now
