@@ -781,7 +781,7 @@ func (service Service) DispatchTaskRunAttempt(ctx context.Context, taskID int64)
 		return DispatchOutcome{}, err
 	}
 
-	admission, err := service.admitDirectTask(ctx, task, project, manifest)
+	admission, err := service.admitTask(ctx, task, project, manifest, decision.ExecutorKey)
 	if err != nil {
 		return DispatchOutcome{}, err
 	}
@@ -807,6 +807,34 @@ func (service Service) DispatchTaskRunAttempt(ctx context.Context, taskID int64)
 	if err != nil {
 		return DispatchOutcome{}, err
 	}
+
+	_, leaseAdmission, err := service.prepareLease(ctx, task, project, manifest, run, attempt)
+	if err != nil {
+		return DispatchOutcome{}, err
+	}
+	if leaseAdmission.Outcome != admissionDispatchable {
+		finalizeErr := service.finalizeOutcome(ctx, task, run, leaseAdmission, contract.ExecutionResult{}, nil)
+		outcome, loadErr := service.loadExecutionOutcome(ctx, task.ID, &run.ID)
+		if finalizeErr != nil {
+			if loadErr == nil {
+				return DispatchOutcome{
+					Task:   outcome.Task,
+					Run:    outcome.Run,
+					Reason: admissionReason(leaseAdmission),
+				}, finalizeErr
+			}
+			return DispatchOutcome{}, finalizeErr
+		}
+		if loadErr != nil {
+			return DispatchOutcome{}, loadErr
+		}
+		return DispatchOutcome{
+			Task:   outcome.Task,
+			Run:    outcome.Run,
+			Reason: admissionReason(leaseAdmission),
+		}, nil
+	}
+
 	updatedTask, updatedRun, err := service.Store.UpdateRunAndTaskStatus(ctx, sqlite.UpdateRunAndTaskStatusParams{
 		RunID:      run.ID,
 		RunStatus:  "running",
@@ -1072,6 +1100,49 @@ func (service Service) executeDispatchedRun(ctx context.Context, taskID int64, a
 	if err != nil {
 		return RunExecutionOutcome{}, err
 	}
+	manifest, ok := service.Registry.Lookup(project.Key)
+	if !ok {
+		return RunExecutionOutcome{}, fmt.Errorf("unknown manifest for project %q", project.Key)
+	}
+	intent := resolveTaskExecutionIntent(manifest, task)
+	assignment := leases.Assignment{
+		Mode:         "read_only",
+		RepoRoot:     project.GitRoot,
+		WorktreePath: project.GitRoot,
+		BranchName:   project.DefaultBranch,
+	}
+	lease, err := service.Store.GetActiveWorktreeLeaseByTaskRun(ctx, task.ID, run.ID)
+	if err == nil {
+		assignment = assignmentFromActiveLease(lease)
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return RunExecutionOutcome{}, err
+	} else if intent.Mutating {
+		admission := admissionDecision{
+			Outcome:   admissionFailed,
+			LastError: fmt.Sprintf("policy_denied: project %q requires an active isolated task worktree lease before mutation", manifest.Key),
+		}
+		finalizeErr := service.finalizeOutcome(ctx, task, run, admission, contract.ExecutionResult{}, nil)
+		outcome, loadErr := service.loadExecutionOutcome(ctx, task.ID, &run.ID)
+		if finalizeErr != nil {
+			if loadErr == nil {
+				return RunExecutionOutcome{
+					Task:   outcome.Task,
+					Run:    outcome.Run,
+					Reason: admissionReason(admission),
+				}, finalizeErr
+			}
+			return RunExecutionOutcome{}, finalizeErr
+		}
+		if loadErr != nil {
+			return RunExecutionOutcome{}, loadErr
+		}
+		return RunExecutionOutcome{
+			Task:   outcome.Task,
+			Run:    outcome.Run,
+			Reason: admissionReason(admission),
+		}, nil
+	}
+
 	executors := service.Executors
 	if len(executors) == 0 {
 		executors = executorrouter.DefaultCatalog()
@@ -1094,9 +1165,9 @@ func (service Service) executeDispatchedRun(ctx context.Context, taskID int64, a
 			"project_key":   project.Key,
 			"task_id":       fmt.Sprintf("%d", task.ID),
 			"run_id":        fmt.Sprintf("%d", run.ID),
-			"repo_root":     project.GitRoot,
-			"worktree_path": project.GitRoot,
-			"branch_name":   project.DefaultBranch,
+			"repo_root":     assignment.RepoRoot,
+			"worktree_path": assignment.WorktreePath,
+			"branch_name":   assignment.BranchName,
 		},
 	}
 	service.addRuntimeRootMetadata(spec.Metadata)
@@ -1113,7 +1184,7 @@ func (service Service) executeDispatchedRun(ctx context.Context, taskID int64, a
 	}
 
 	result, execErr := runExecutorTask(ctx, run.Executor, executor, spec)
-	executionMetadata := executionMetadataForResult(spec.Metadata, result.Metadata, leases.Assignment{}, run.Executor, result.Handle.ExternalID)
+	executionMetadata := executionMetadataForResult(spec.Metadata, result.Metadata, assignment, run.Executor, result.Handle.ExternalID)
 	finalizeErr := service.finalizeOutcome(ctx, task, run, admissionDecision{}, result, execErr)
 	outcome, loadErr := service.loadExecutionOutcome(ctx, task.ID, &run.ID)
 	if finalizeErr != nil {
@@ -2181,6 +2252,17 @@ func (service Service) prepareLease(ctx context.Context, task sqlite.Task, proje
 		}, nil
 	}
 	return assignment, admissionDecision{Outcome: admissionDispatchable}, nil
+}
+
+func assignmentFromActiveLease(lease sqlite.WorktreeLease) leases.Assignment {
+	return leases.Assignment{
+		Mode:         lease.Mode,
+		LeaseID:      &lease.ID,
+		BranchName:   lease.BranchName,
+		WorktreePath: lease.WorktreePath,
+		RepoRoot:     lease.RepoRoot,
+		Reused:       true,
+	}
 }
 
 func (service Service) finalizeOutcome(ctx context.Context, task sqlite.Task, run sqlite.Run, admission admissionDecision, result contract.ExecutionResult, execErr error) error {

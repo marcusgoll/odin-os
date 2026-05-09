@@ -1822,6 +1822,7 @@ func TestDispatchTaskRunAttemptDoesNotBlockReadOnlyIntentForApproval(t *testing.
 	}); err != nil {
 		t.Fatalf("SetTransitionState(cutover) error = %v", err)
 	}
+	recordHealthyExecutorSample(t, ctx, store)
 
 	outcome, err := service.DispatchTaskRunAttempt(ctx, task.ID)
 	if err != nil {
@@ -1835,6 +1836,169 @@ func TestDispatchTaskRunAttemptDoesNotBlockReadOnlyIntentForApproval(t *testing.
 	}
 	if _, err := store.GetLatestTaskApproval(ctx, task.ID); !errors.Is(err, sql.ErrNoRows) {
 		t.Fatalf("GetLatestTaskApproval() error = %v, want sql.ErrNoRows", err)
+	}
+}
+
+func TestDispatchTaskRunAttemptCreatesLeaseForMutatingTask(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openJobStore(t)
+	defer store.Close()
+
+	registry := writeRegistry(t)
+	service := Service{
+		Store:          store,
+		Registry:       registry,
+		Executors:      testJobExecutors(),
+		ExecutorConfig: mustLoadExecutorConfig(t),
+		Transitions:    projects.Service{Store: store},
+		Leases: leases.Manager{
+			Store:        store,
+			Git:          &jobTestGit{},
+			WorktreeRoot: t.TempDir(),
+		},
+		Now: time.Now,
+	}
+
+	task, err := service.CreateTask(ctx, CreateTaskParams{
+		Resolved: scope.Resolution{
+			Kind:       scope.ScopeProject,
+			ProjectKey: "alpha",
+		},
+		Title:                 "Implement reviewed prompt",
+		RequestedBy:           "test",
+		ExecutionIntent:       "mutation",
+		ExecutionIntentSource: "test",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+	project, err := store.GetProjectByKey(ctx, "alpha")
+	if err != nil {
+		t.Fatalf("GetProjectByKey(alpha) error = %v", err)
+	}
+	if _, err := service.Transitions.SetTransitionState(ctx, projects.TransitionStateInput{
+		ProjectID:   project.ID,
+		Actor:       projects.TransitionControllerOdinOS,
+		TargetState: projects.TransitionStateCutover,
+		ChangedBy:   "test",
+	}); err != nil {
+		t.Fatalf("SetTransitionState(cutover) error = %v", err)
+	}
+	recordHealthyExecutorSample(t, ctx, store)
+
+	outcome, err := service.DispatchTaskRunAttempt(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("DispatchTaskRunAttempt() error = %v", err)
+	}
+	if !outcome.Dispatched || outcome.Run == nil || outcome.Reason != "dispatched" {
+		t.Fatalf("DispatchTaskRunAttempt() = %+v, want dispatched mutating run", outcome)
+	}
+
+	lease, err := store.GetActiveWorktreeLeaseByTaskRun(ctx, task.ID, outcome.Run.ID)
+	if err != nil {
+		t.Fatalf("GetActiveWorktreeLeaseByTaskRun() error = %v", err)
+	}
+	if lease.Mode != "mutable" {
+		t.Fatalf("lease.Mode = %q, want mutable", lease.Mode)
+	}
+	if lease.WorktreePath == "" || lease.WorktreePath == project.GitRoot {
+		t.Fatalf("lease.WorktreePath = %q, want isolated path different from %q", lease.WorktreePath, project.GitRoot)
+	}
+	if lease.RepoRoot != project.GitRoot {
+		t.Fatalf("lease.RepoRoot = %q, want %q", lease.RepoRoot, project.GitRoot)
+	}
+	if !strings.Contains(lease.BranchName, fmt.Sprintf("task-%d/run-%d", task.ID, outcome.Run.ID)) {
+		t.Fatalf("lease.BranchName = %q, want task/run scoped branch", lease.BranchName)
+	}
+}
+
+func TestExecuteDispatchedRunUsesActiveWorktreeLeaseMetadata(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openJobStore(t)
+	defer store.Close()
+
+	registry := writeRegistry(t)
+	executor := &capturingJobExecutor{
+		key: "codex_headless",
+		result: contract.ExecutionResult{
+			Status: "completed",
+			Output: "task complete",
+		},
+	}
+	service := Service{
+		Store:          store,
+		Registry:       registry,
+		Executors:      map[string]contract.Executor{"codex_headless": executor},
+		ExecutorConfig: mustLoadExecutorConfig(t),
+		Transitions:    projects.Service{Store: store},
+		Leases: leases.Manager{
+			Store:        store,
+			Git:          &jobTestGit{},
+			WorktreeRoot: t.TempDir(),
+		},
+		Now: time.Now,
+	}
+
+	task, err := service.CreateTask(ctx, CreateTaskParams{
+		Resolved: scope.Resolution{
+			Kind:       scope.ScopeProject,
+			ProjectKey: "alpha",
+		},
+		Title:                 "Implement reviewed prompt",
+		RequestedBy:           "test",
+		ExecutionIntent:       "mutation",
+		ExecutionIntentSource: "test",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+	project, err := store.GetProjectByKey(ctx, "alpha")
+	if err != nil {
+		t.Fatalf("GetProjectByKey(alpha) error = %v", err)
+	}
+	if _, err := service.Transitions.SetTransitionState(ctx, projects.TransitionStateInput{
+		ProjectID:   project.ID,
+		Actor:       projects.TransitionControllerOdinOS,
+		TargetState: projects.TransitionStateCutover,
+		ChangedBy:   "test",
+	}); err != nil {
+		t.Fatalf("SetTransitionState(cutover) error = %v", err)
+	}
+	recordHealthyExecutorSample(t, ctx, store)
+
+	dispatch, err := service.DispatchTaskRunAttempt(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("DispatchTaskRunAttempt() error = %v", err)
+	}
+	if !dispatch.Dispatched || dispatch.Run == nil {
+		t.Fatalf("DispatchTaskRunAttempt() = %+v, want dispatched run", dispatch)
+	}
+	lease, err := store.GetActiveWorktreeLeaseByTaskRun(ctx, task.ID, dispatch.Run.ID)
+	if err != nil {
+		t.Fatalf("GetActiveWorktreeLeaseByTaskRun() error = %v", err)
+	}
+
+	outcome, err := service.ExecuteDispatchedRun(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("ExecuteDispatchedRun() error = %v", err)
+	}
+	if !outcome.Executed || outcome.Reason != "completed" {
+		t.Fatalf("ExecuteDispatchedRun() = %+v, want completed execution", outcome)
+	}
+
+	metadata := executor.lastSpec.Metadata
+	for key, want := range map[string]string{
+		"repo_root":     lease.RepoRoot,
+		"worktree_path": lease.WorktreePath,
+		"branch_name":   lease.BranchName,
+	} {
+		if got := metadata[key]; got != want {
+			t.Fatalf("metadata[%s] = %q, want %q from active lease in %#v", key, got, want, metadata)
+		}
 	}
 }
 
@@ -2919,6 +3083,58 @@ func (jobTestExecutor) CancelTask(context.Context, contract.TaskHandle) error {
 }
 
 func (jobTestExecutor) EstimateCost(context.Context, contract.TaskSpec) (contract.CostEstimate, error) {
+	return contract.CostEstimate{}, contract.ErrNotImplemented
+}
+
+type capturingJobExecutor struct {
+	key      string
+	result   contract.ExecutionResult
+	lastSpec contract.TaskSpec
+}
+
+func (executor *capturingJobExecutor) Key() string { return executor.key }
+
+func (*capturingJobExecutor) Class() contract.ExecutorClass {
+	return contract.ExecutorClassPlanBackedCLI
+}
+
+func (*capturingJobExecutor) Health(context.Context) (contract.HealthReport, error) {
+	return contract.HealthReport{
+		Status:    contract.HealthStatusHealthy,
+		CheckedAt: time.Now().UTC(),
+	}, nil
+}
+
+func (*capturingJobExecutor) Capabilities(context.Context) (contract.Capabilities, error) {
+	return contract.Capabilities{
+		ExecutorClass:        contract.ExecutorClassPlanBackedCLI,
+		SupportsHeadlessPlan: true,
+		TaskKinds: []contract.TaskKind{
+			contract.TaskKindGeneral,
+			contract.TaskKindPlan,
+			contract.TaskKindBuild,
+			contract.TaskKindReview,
+			contract.TaskKindQA,
+			contract.TaskKindResearch,
+		},
+		Scopes: []string{"global", "odin-core", "project", "new-project"},
+	}, nil
+}
+
+func (executor *capturingJobExecutor) RunTask(_ context.Context, spec contract.TaskSpec) (contract.ExecutionResult, error) {
+	executor.lastSpec = spec
+	return executor.result, nil
+}
+
+func (*capturingJobExecutor) ResumeTask(context.Context, contract.TaskHandle, contract.ResumePacket) (contract.ExecutionResult, error) {
+	return contract.ExecutionResult{}, contract.ErrNotImplemented
+}
+
+func (*capturingJobExecutor) CancelTask(context.Context, contract.TaskHandle) error {
+	return contract.ErrNotImplemented
+}
+
+func (*capturingJobExecutor) EstimateCost(context.Context, contract.TaskSpec) (contract.CostEstimate, error) {
 	return contract.CostEstimate{}, contract.ErrNotImplemented
 }
 
