@@ -29,10 +29,28 @@ type CleanupResult struct {
 	Removed []sqlite.WorktreeLease
 }
 
+const (
+	CleanupActionCleanup = "cleanup"
+	CleanupActionRefuse  = "refuse"
+	CleanupActionSkip    = "skip"
+)
+
 type CleanupOptions struct {
 	ForceDirty     bool
 	ApprovedBy     string
 	ApprovalReason string
+}
+
+type CleanupPreview struct {
+	Leases []CleanupPreviewLease
+}
+
+type CleanupPreviewLease struct {
+	Lease  sqlite.WorktreeLease
+	Action string
+	Reason string
+	Dirty  *bool
+	Error  string
 }
 
 func (manager Manager) Cleanup(ctx context.Context, staleBefore time.Time) (CleanupResult, error) {
@@ -53,6 +71,68 @@ func (manager Manager) Cleanup(ctx context.Context, staleBefore time.Time) (Clea
 	}
 
 	return manager.cleanupLeases(ctx, root, leases, CleanupOptions{})
+}
+
+func (manager Manager) PreviewCleanup(ctx context.Context, staleBefore time.Time) (CleanupPreview, error) {
+	if manager.Store == nil {
+		return CleanupPreview{}, fmt.Errorf("cleanup store is required")
+	}
+	if manager.Git == nil {
+		return CleanupPreview{}, fmt.Errorf("cleanup git adapter is required")
+	}
+	root, err := cleanupRoot(manager.WorktreeRoot)
+	if err != nil {
+		return CleanupPreview{}, err
+	}
+
+	leases, err := manager.Store.ListWorktreeLeases(ctx)
+	if err != nil {
+		return CleanupPreview{}, err
+	}
+	eligible, err := manager.Store.ListCleanupEligibleWorktreeLeases(ctx, staleBefore)
+	if err != nil {
+		return CleanupPreview{}, err
+	}
+	eligibleByID := map[int64]sqlite.WorktreeLease{}
+	for _, lease := range eligible {
+		eligibleByID[lease.ID] = lease
+	}
+
+	preview := CleanupPreview{Leases: make([]CleanupPreviewLease, 0, len(leases))}
+	for _, lease := range leases {
+		decision := CleanupPreviewLease{
+			Lease:  lease,
+			Action: CleanupActionSkip,
+			Reason: cleanupSkipReason(lease),
+		}
+		if _, ok := eligibleByID[lease.ID]; ok {
+			decision.Action = CleanupActionCleanup
+			decision.Reason = cleanupEligibleReason(lease)
+
+			if err := validateCleanupPath(root, lease.WorktreePath); err != nil {
+				decision.Action = CleanupActionRefuse
+				decision.Reason = "unsafe_path"
+				decision.Error = err.Error()
+				preview.Leases = append(preview.Leases, decision)
+				continue
+			}
+			dirty, err := manager.Git.WorktreeDirty(ctx, lease.WorktreePath)
+			if err != nil {
+				decision.Action = CleanupActionRefuse
+				decision.Reason = "dirty_check_failed"
+				decision.Error = err.Error()
+				preview.Leases = append(preview.Leases, decision)
+				continue
+			}
+			decision.Dirty = &dirty
+			if dirty {
+				decision.Action = CleanupActionRefuse
+				decision.Reason = "dirty"
+			}
+		}
+		preview.Leases = append(preview.Leases, decision)
+	}
+	return preview, nil
 }
 
 func (manager Manager) CleanupLeases(ctx context.Context, leases []sqlite.WorktreeLease) (CleanupResult, error) {
@@ -119,6 +199,23 @@ func validateCleanupOptions(options CleanupOptions) error {
 		return fmt.Errorf("force dirty cleanup requires approval reason")
 	}
 	return nil
+}
+
+func cleanupEligibleReason(lease sqlite.WorktreeLease) string {
+	if lease.State == "active" {
+		return "stale"
+	}
+	return "released"
+}
+
+func cleanupSkipReason(lease sqlite.WorktreeLease) string {
+	if lease.CleanedUpAt != nil || lease.State == "cleaned" {
+		return "already_cleaned"
+	}
+	if strings.TrimSpace(lease.State) == "" {
+		return "unknown_state"
+	}
+	return lease.State
 }
 
 func cleanupRoot(root string) (string, error) {

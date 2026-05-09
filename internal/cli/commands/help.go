@@ -53,6 +53,7 @@ func OperatorHelp(binary string) string {
   %[1]s profile          Show runtime profile details
   %[1]s project          Manage enrolled projects
   %[1]s workspace        Manage project Codex workspaces
+  %[1]s leases cleanup   Preview or confirm task-owned worktree cleanup
 
 Interactive shell:
   %[2]s

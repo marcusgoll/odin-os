@@ -68,7 +68,7 @@ import (
 
 var errRuntimeNotReady = errors.New("runtime not ready")
 
-const rootUsageBanner = "Usage: odin <command> [args]\n\nCommands: help repl overview tui doctor healthcheck serve backup restore verify-backup status legacy project workspace work scope jobs runs approvals review intake agenda logs knowledge goal browser task initiative companion profile followup trigger transition skills e2e"
+const rootUsageBanner = "Usage: odin <command> [args]\n\nCommands: help repl overview tui doctor healthcheck serve backup restore verify-backup status legacy project workspace work scope jobs runs leases approvals review intake agenda logs knowledge goal browser task initiative companion profile followup trigger transition skills e2e"
 
 var (
 	serveTaskLoopInterval     = 1 * time.Second
@@ -279,6 +279,8 @@ func Run(ctx context.Context, root string, args []string, stdin io.Reader, stdou
 		return runJobs(ctx, app, args[1:], stdout)
 	case "runs":
 		return runRuns(ctx, app, args[1:], stdout)
+	case "leases":
+		return runLeases(ctx, app, args[1:], stdout)
 	case "approvals":
 		return runApprovals(ctx, app, args[1:], stdout)
 	case "review":
@@ -530,6 +532,104 @@ func runRuns(ctx context.Context, app bootstrap.App, args []string, stdout io.Wr
 		}
 	}
 	return nil
+}
+
+func runLeases(ctx context.Context, app bootstrap.App, args []string, stdout io.Writer) error {
+	if len(args) == 0 || args[0] != "cleanup" {
+		return fmt.Errorf("usage: odin leases cleanup [--dry-run|confirm]")
+	}
+	return runLeasesCleanup(ctx, app, args[1:], stdout)
+}
+
+func runLeasesCleanup(ctx context.Context, app bootstrap.App, args []string, stdout io.Writer) error {
+	dryRun := true
+	switch len(args) {
+	case 0:
+	case 1:
+		switch strings.ToLower(args[0]) {
+		case "--dry-run", "dry-run":
+			dryRun = true
+		case "confirm":
+			dryRun = false
+		default:
+			return fmt.Errorf("usage: odin leases cleanup [--dry-run|confirm]")
+		}
+	default:
+		return fmt.Errorf("usage: odin leases cleanup [--dry-run|confirm]")
+	}
+
+	manager := worktrees.Manager{
+		Store:        app.Store,
+		Git:          gitadapter.Adapter{},
+		WorktreeRoot: worktrees.DefaultRoot(),
+	}
+	staleBefore := time.Now().UTC().Add(-defaultServeLoopConfig.leaseStaleAfter)
+	preview, err := manager.PreviewCleanup(ctx, staleBefore)
+	if err != nil {
+		return err
+	}
+	if err := renderLeaseCleanupPreview(ctx, app, preview, stdout); err != nil {
+		return err
+	}
+	if dryRun {
+		return nil
+	}
+
+	cleanupLeases := make([]sqlite.WorktreeLease, 0)
+	for _, decision := range preview.Leases {
+		if decision.Action == worktrees.CleanupActionCleanup {
+			cleanupLeases = append(cleanupLeases, decision.Lease)
+		}
+	}
+	if len(cleanupLeases) == 0 {
+		_, err := fmt.Fprintln(stdout, "no cleanup-eligible leases")
+		return err
+	}
+
+	result, err := manager.CleanupLeases(ctx, cleanupLeases)
+	if err != nil {
+		return err
+	}
+	_, err = fmt.Fprintf(stdout, "cleaned %d lease(s)\n", len(result.Removed))
+	return err
+}
+
+func renderLeaseCleanupPreview(ctx context.Context, app bootstrap.App, preview worktrees.CleanupPreview, stdout io.Writer) error {
+	if len(preview.Leases) == 0 {
+		_, err := fmt.Fprintln(stdout, "no worktree leases")
+		return err
+	}
+	projectKeyByID := map[int64]string{}
+	for _, decision := range preview.Leases {
+		projectKey, err := projectKeyForID(ctx, app.Store, projectKeyByID, decision.Lease.ProjectID)
+		if err != nil {
+			return err
+		}
+		cleanup := "pending"
+		if decision.Lease.CleanedUpAt != nil || decision.Lease.State == "cleaned" {
+			cleanup = "complete"
+		}
+		dirty := "unknown"
+		if decision.Dirty != nil {
+			dirty = strconv.FormatBool(*decision.Dirty)
+		}
+		if _, err := fmt.Fprintf(stdout, "lease_id=%d project=%s state=%s cleanup=%s action=%s reason=%s dirty=%s task=%d run=%d branch=%s worktree=%s\n", decision.Lease.ID, projectKey, decision.Lease.State, cleanup, decision.Action, decision.Reason, dirty, decision.Lease.TaskID, decision.Lease.RunID, decision.Lease.BranchName, decision.Lease.WorktreePath); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func projectKeyForID(ctx context.Context, store *sqlite.Store, cache map[int64]string, projectID int64) (string, error) {
+	if projectKey := cache[projectID]; projectKey != "" {
+		return projectKey, nil
+	}
+	project, err := store.GetProject(ctx, projectID)
+	if err != nil {
+		return "", err
+	}
+	cache[projectID] = project.Key
+	return project.Key, nil
 }
 
 func runApprovals(ctx context.Context, app bootstrap.App, args []string, stdout io.Writer) error {
