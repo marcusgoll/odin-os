@@ -779,6 +779,8 @@ func (store *Store) CreateIntakeItem(ctx context.Context, params CreateIntakeIte
 				Subject:             params.Subject,
 				DedupeKey:           params.DedupeKey,
 				DedupeRecipeVersion: params.DedupeRecipeVersion,
+				RequestedBy:         intakeSourceFact(sourceFactsJSON, "requested_by"),
+				PayloadPolicy:       intakeSourceFact(sourceFactsJSON, "payload_policy"),
 				Status:              params.Status,
 				Scope:               params.Scope,
 				ScopeKey:            params.ScopeKey,
@@ -788,6 +790,22 @@ func (store *Store) CreateIntakeItem(ctx context.Context, params CreateIntakeIte
 	})
 
 	return item, err
+}
+
+func intakeSourceFact(sourceFactsJSON string, key string) string {
+	var facts map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(sourceFactsJSON), &facts); err != nil {
+		return ""
+	}
+	raw, ok := facts[key]
+	if !ok {
+		return ""
+	}
+	var value string
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return ""
+	}
+	return value
 }
 
 func (store *Store) ListIntakeItems(ctx context.Context, params ListIntakeItemsParams) ([]IntakeItem, error) {

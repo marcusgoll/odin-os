@@ -1009,7 +1009,9 @@ type rawIntakeItemView struct {
 	IntakeType             string          `json:"intake_type"`
 	DedupKey               string          `json:"dedup_key"`
 	RequestedBy            string          `json:"requested_by"`
+	ReceivedAt             string          `json:"received_at"`
 	CreatedAt              string          `json:"created_at"`
+	UpdatedAt              string          `json:"updated_at"`
 	PayloadPolicy          string          `json:"payload_policy"`
 	ProjectKey             string          `json:"project_key,omitempty"`
 	Title                  string          `json:"title,omitempty"`
@@ -2202,6 +2204,13 @@ func rawIntakeSourceFactsJSON(command commands.IntakeCommand, payloadJSON string
 	if strings.TrimSpace(payloadJSON) == "" {
 		payloadJSON = "{}"
 	}
+	if command.RawText != "" && payloadJSON == "{}" {
+		rawTextPayload, err := json.Marshal(map[string]string{"text": command.RawText})
+		if err != nil {
+			return "", err
+		}
+		payloadJSON = string(rawTextPayload)
+	}
 	if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
 		return "", fmt.Errorf("raw intake payload json: %w", err)
 	}
@@ -2238,7 +2247,9 @@ func rawIntakeView(item sqlite.IntakeItem, includePayload bool) (rawIntakeItemVi
 		Source:        item.SourceFamily,
 		IntakeType:    item.EventKind,
 		DedupKey:      item.DedupeKey,
+		ReceivedAt:    item.ReceivedAt.UTC().Format(time.RFC3339Nano),
 		CreatedAt:     item.CreatedAt.UTC().Format(time.RFC3339Nano),
+		UpdatedAt:     item.UpdatedAt.UTC().Format(time.RFC3339Nano),
 		PayloadPolicy: rawIntakePayloadPolicy,
 		Title:         item.Subject,
 		Summary:       item.Summary,

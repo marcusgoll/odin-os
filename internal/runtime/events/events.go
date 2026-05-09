@@ -628,6 +628,8 @@ type IntakeItemCreatedPayload struct {
 	Subject             string `json:"subject"`
 	DedupeKey           string `json:"dedupe_key"`
 	DedupeRecipeVersion string `json:"dedupe_recipe_version"`
+	RequestedBy         string `json:"requested_by,omitempty"`
+	PayloadPolicy       string `json:"payload_policy,omitempty"`
 	Status              string `json:"status"`
 	Scope               string `json:"scope,omitempty"`
 	ScopeKey            string `json:"scope_key,omitempty"`

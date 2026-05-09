@@ -26,7 +26,7 @@ func TestCreateIntakeItemPreservesDuplicateRawArrivalsBeforeWork(t *testing.T) {
 		Subject:             "pbs build failed",
 		DedupeKey:           "default:n8n:ci-failure:pbs",
 		DedupeRecipeVersion: "intake-v1",
-		SourceFactsJSON:     `{"source_family":"n8n","external_object_id":"evt-1","event_kind":"ci_failure","project":"pbs"}`,
+		SourceFactsJSON:     `{"source_family":"n8n","external_object_id":"evt-1","event_kind":"ci_failure","project":"pbs","requested_by":"n8n","payload_policy":"stored_in_source_facts_json"}`,
 		Status:              "received",
 		Scope:               "project",
 		ScopeKey:            "pbs",
@@ -44,7 +44,7 @@ func TestCreateIntakeItemPreservesDuplicateRawArrivalsBeforeWork(t *testing.T) {
 		Subject:             "pbs build failed",
 		DedupeKey:           "default:n8n:ci-failure:pbs",
 		DedupeRecipeVersion: "intake-v1",
-		SourceFactsJSON:     `{"source_family":"n8n","external_object_id":"evt-2","event_kind":"ci_failure","project":"pbs"}`,
+		SourceFactsJSON:     `{"source_family":"n8n","external_object_id":"evt-2","event_kind":"ci_failure","project":"pbs","requested_by":"n8n","payload_policy":"stored_in_source_facts_json"}`,
 		Status:              "received",
 		Scope:               "project",
 		ScopeKey:            "pbs",
@@ -88,6 +88,13 @@ func TestCreateIntakeItemPreservesDuplicateRawArrivalsBeforeWork(t *testing.T) {
 		switch event.Type {
 		case runtimeevents.EventIntakeItemCreated:
 			intakeCreated++
+			var payload map[string]any
+			if err := json.Unmarshal(event.Payload, &payload); err != nil {
+				t.Fatalf("intake created payload unmarshal: %v\n%s", err, string(event.Payload))
+			}
+			if payload["requested_by"] == "" || payload["payload_policy"] != "stored_in_source_facts_json" {
+				t.Fatalf("intake created payload = %+v, want requested_by and payload policy provenance", payload)
+			}
 		case runtimeevents.EventTaskCreated:
 			t.Fatalf("raw intake created governed work event: %+v", event)
 		}

@@ -566,6 +566,85 @@ func TestRunIntakeRawCreateListShowDoesNotCreateTask(t *testing.T) {
 	}
 }
 
+func TestRunIntakeRawTextShorthandPreservesRawEvidenceAndTimestamps(t *testing.T) {
+	t.Parallel()
+
+	root := testRepoRoot(t)
+	rawText := "Capture this raw operator note with enough detail for later triage."
+
+	var createOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{
+		"intake", "raw", "create",
+		"--text", rawText,
+		"--json",
+	}, strings.NewReader(""), &createOutput); err != nil {
+		t.Fatalf("Run(intake raw create --text) error = %v", err)
+	}
+
+	var created struct {
+		IntakeItem struct {
+			Key           string          `json:"key"`
+			Status        string          `json:"status"`
+			Source        string          `json:"source"`
+			IntakeType    string          `json:"intake_type"`
+			RequestedBy   string          `json:"requested_by"`
+			CreatedAt     string          `json:"created_at"`
+			ReceivedAt    string          `json:"received_at"`
+			UpdatedAt     string          `json:"updated_at"`
+			PayloadPolicy string          `json:"payload_policy"`
+			Payload       json.RawMessage `json:"payload"`
+		} `json:"intake_item"`
+	}
+	if err := json.Unmarshal(createOutput.Bytes(), &created); err != nil {
+		t.Fatalf("json.Unmarshal(create) error = %v\n%s", err, createOutput.String())
+	}
+	if created.IntakeItem.Key != "intake-1" || created.IntakeItem.Status != "received" {
+		t.Fatalf("created intake = %+v, want received intake-1", created.IntakeItem)
+	}
+	if created.IntakeItem.Source != "operator" || created.IntakeItem.IntakeType != "request" || created.IntakeItem.RequestedBy != "operator" {
+		t.Fatalf("created provenance = %+v, want operator/request/operator", created.IntakeItem)
+	}
+	if created.IntakeItem.CreatedAt == "" || created.IntakeItem.ReceivedAt == "" || created.IntakeItem.UpdatedAt == "" {
+		t.Fatalf("created timestamps = created %q received %q updated %q, want all populated", created.IntakeItem.CreatedAt, created.IntakeItem.ReceivedAt, created.IntakeItem.UpdatedAt)
+	}
+	if created.IntakeItem.PayloadPolicy != "stored_in_source_facts_json" {
+		t.Fatalf("payload policy = %q, want stored_in_source_facts_json", created.IntakeItem.PayloadPolicy)
+	}
+	var createPayload struct {
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal(created.IntakeItem.Payload, &createPayload); err != nil {
+		t.Fatalf("json.Unmarshal(create payload) error = %v\npayload=%s", err, string(created.IntakeItem.Payload))
+	}
+	if createPayload.Text != rawText {
+		t.Fatalf("create payload text = %q, want raw text preserved", createPayload.Text)
+	}
+
+	var showOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"intake", "raw", "show", "intake-1", "--json"}, strings.NewReader(""), &showOutput); err != nil {
+		t.Fatalf("Run(intake raw show) error = %v", err)
+	}
+	var shown struct {
+		IntakeItem struct {
+			ReceivedAt string          `json:"received_at"`
+			UpdatedAt  string          `json:"updated_at"`
+			Payload    json.RawMessage `json:"payload"`
+		} `json:"intake_item"`
+	}
+	if err := json.Unmarshal(showOutput.Bytes(), &shown); err != nil {
+		t.Fatalf("json.Unmarshal(show) error = %v\n%s", err, showOutput.String())
+	}
+	var showPayload struct {
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal(shown.IntakeItem.Payload, &showPayload); err != nil {
+		t.Fatalf("json.Unmarshal(show payload) error = %v\npayload=%s", err, string(shown.IntakeItem.Payload))
+	}
+	if showPayload.Text != rawText || shown.IntakeItem.ReceivedAt == "" || shown.IntakeItem.UpdatedAt == "" {
+		t.Fatalf("show item = %+v payload=%+v, want full raw text evidence and timestamps", shown.IntakeItem, showPayload)
+	}
+}
+
 func TestRunIntakeProcessCreatesReviewStatesWithoutExecution(t *testing.T) {
 	t.Parallel()
 

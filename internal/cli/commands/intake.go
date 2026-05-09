@@ -26,6 +26,7 @@ type IntakeCommand struct {
 	DedupKey       string
 	RequestedBy    string
 	PayloadFile    string
+	RawText        string
 	JSON           bool
 }
 
@@ -402,6 +403,7 @@ func parseRawIntakeCreate(command IntakeCommand, args []string) (IntakeCommand, 
 			}
 			seen.text = true
 			command.Title = value
+			command.RawText = value
 			index = nextIndex
 		case "--action-key":
 			if seen.actionKey {
