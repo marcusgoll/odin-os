@@ -30,6 +30,27 @@ Normal intake does not:
 - create branches, commits, PRs, comments, or follow-up issues
 - mutate GitHub labels or issue state
 
+## Reconcile Persisted Issues
+
+Use reconciliation after intake has persisted eligible issues and an operator is
+ready to materialize those persisted records into Odin Work Items:
+
+```bash
+odin work reconcile --project <key>
+```
+
+Reconciliation:
+
+- reads eligible rows from SQLite `external_issues`
+- creates or reuses deterministic Work Items for those persisted issues
+- links the Work Item back to `task_intakes` evidence
+- marks reconciled external issue rows with `sync_status=reconciled`
+- reports `intake=not_started`, `reconciliation=completed`,
+  `dispatch=not_started`, and `prs=not_created`
+
+Reconciliation does not fetch live GitHub data, dispatch workers, create runs,
+create branches, create PRs, add comments, or mutate GitHub labels.
+
 ## Dry Run
 
 Use dry-run mode before allowing a new project or token environment to persist
@@ -84,6 +105,16 @@ go test ./internal/tracker/intake -run TestServiceDryRunFetchesEligibleIssuesWit
 This test proves dry-run fetches eligible fixture issues and leaves
 `external_issues` empty.
 
+The reconciliation proof is:
+
+```bash
+go test ./internal/cli/commands -run TestRunWorkReconcileCreatesWorkItemsFromPersistedIssuesWithoutDispatch -count=1
+go test ./internal/tracker/intake -run TestServiceReconcilesPersistedExternalIssuesIntoWorkItemsIdempotently -count=1
+```
+
+These tests prove reconciliation reads persisted issue state, creates one
+idempotent Work Item, links intake evidence, and does not create runs or PRs.
+
 ## Live Read-Only Proof
 
 Live GitHub access is intentionally not part of normal CI. Use the opt-in
@@ -109,8 +140,9 @@ Stop before running live intake when:
 - `GITHUB_TOKEN` is absent for live GitHub access
 - token scope is broader than the operator has accepted
 - the run would rely on production state instead of a disposable proof target
-- the operator expects work items, dispatch, workers, or PRs to be created
+- the operator expects intake to directly dispatch workers or create PRs
 
-`odin work intake` is only the read-only issue intake surface. Work creation,
-dispatch, worker execution, PR creation, and GitHub mutation require separate
-operator surfaces and proof.
+`odin work intake` is only the read-only issue intake surface. Work Item
+creation happens through `odin work reconcile`, while dispatch, worker
+execution, PR creation, and GitHub mutation require separate operator surfaces
+and proof.

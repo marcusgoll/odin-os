@@ -21,7 +21,7 @@ import (
 	trackerintake "odin-os/internal/tracker/intake"
 )
 
-const workUsage = "usage: odin work status|profiles|start --project <key> --title <text> [--intent <read_only|mutation|governance|destructive>]|intake --project <key> [--dry-run]|dispatch [--task <id|key>] [--json]|execute --task <id|key> [--json]|retry --task <id|key> [--json]"
+const workUsage = "usage: odin work status|profiles|start --project <key> --title <text> [--intent <read_only|mutation|governance|destructive>]|intake --project <key> [--dry-run]|reconcile --project <key>|dispatch [--task <id|key>] [--json]|execute --task <id|key> [--json]|retry --task <id|key> [--json]"
 
 var newIntakeTracker = trackerintake.NewGitHubTracker
 
@@ -71,6 +71,8 @@ func RunWork(ctx context.Context, store *sqlite.Store, projectRegistry projects.
 		return runWorkStart(ctx, store, projectRegistry, args[1:], stdout)
 	case "intake":
 		return runWorkIntake(ctx, store, projectRegistry, args[1:], stdout)
+	case "reconcile":
+		return runWorkReconcile(ctx, store, projectRegistry, args[1:], stdout)
 	case "dispatch":
 		return runWorkDispatch(ctx, store, projectRegistry, args[1:], stdout, options...)
 	case "execute":
@@ -531,6 +533,37 @@ func runWorkIntake(ctx context.Context, store *sqlite.Store, projectRegistry pro
 		summary.Fetched,
 		summary.Persisted,
 		summary.DryRun,
+	)
+	return err
+}
+
+func runWorkReconcile(ctx context.Context, store *sqlite.Store, projectRegistry projects.Registry, args []string, stdout io.Writer) error {
+	params := parseWorkStartArgs(args)
+	projectKey := strings.TrimSpace(params["project"])
+	if projectKey == "" {
+		_, err := fmt.Fprintln(stdout, "usage: odin work reconcile --project <key>")
+		return err
+	}
+
+	summary, err := trackerintake.Service{
+		Store:    store,
+		Registry: projectRegistry,
+	}.ReconcileProject(ctx, trackerintake.ReconcileOptions{
+		ProjectKey: projectKey,
+	})
+	if err != nil {
+		return err
+	}
+
+	_, err = fmt.Fprintf(
+		stdout,
+		"project=%s repo=%s intake=not_started reconciliation=completed eligible=%d created=%d existing=%d linked=%d dispatch=not_started prs=not_created\n",
+		summary.ProjectKey,
+		summary.Repo,
+		summary.Eligible,
+		summary.Created,
+		summary.Existing,
+		summary.Linked,
 	)
 	return err
 }

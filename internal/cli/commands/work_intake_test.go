@@ -73,6 +73,77 @@ func TestRunWorkIntakeSyncsEligibleIssuesWithoutStartingWork(t *testing.T) {
 	}
 }
 
+func TestRunWorkReconcileCreatesWorkItemsFromPersistedIssuesWithoutDispatch(t *testing.T) {
+	ctx := context.Background()
+	store := openWorkCommandStore(t)
+	defer store.Close()
+	projectRegistry := commandProjectRegistry(t)
+
+	project, err := store.CreateProject(ctx, sqlite.CreateProjectParams{
+		Key:           "alpha",
+		Name:          "Alpha",
+		Scope:         "project",
+		GitRoot:       ".",
+		DefaultBranch: "main",
+		GitHubRepo:    "acme/alpha",
+		ManifestPath:  "projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+	if _, err := store.UpsertExternalIssue(ctx, sqlite.UpsertExternalIssueParams{
+		ProjectID:  project.ID,
+		Provider:   "github",
+		Repo:       "acme/alpha",
+		Number:     9,
+		Title:      "Reconcile persisted issue",
+		BodyHash:   "sha256:body",
+		URL:        "https://github.example/acme/alpha/issues/9",
+		State:      "open",
+		LabelsJSON: `["odin:ready"]`,
+		SyncStatus: "eligible",
+		SyncCursor: "github:issue:acme/alpha:9",
+	}); err != nil {
+		t.Fatalf("UpsertExternalIssue() error = %v", err)
+	}
+
+	var output strings.Builder
+	if err := RunWork(ctx, store, projectRegistry, registry.Snapshot{}, []string{"reconcile", "--project", "alpha"}, &output); err != nil {
+		t.Fatalf("RunWork(reconcile) error = %v", err)
+	}
+	for _, want := range []string{
+		"project=alpha",
+		"repo=acme/alpha",
+		"intake=not_started",
+		"reconciliation=completed",
+		"eligible=1",
+		"created=1",
+		"existing=0",
+		"linked=1",
+		"dispatch=not_started",
+		"prs=not_created",
+	} {
+		if !strings.Contains(output.String(), want) {
+			t.Fatalf("output = %q, want %q", output.String(), want)
+		}
+	}
+
+	task, err := store.GetTaskByProjectAndKey(ctx, project.ID, "github-issue-9")
+	if err != nil {
+		t.Fatalf("GetTaskByProjectAndKey() error = %v", err)
+	}
+	if task.Title != "Reconcile persisted issue" || task.Status != "queued" {
+		t.Fatalf("task = %+v, want queued reconciled work item", task)
+	}
+	var runCount int
+	if err := store.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM runs`).Scan(&runCount); err != nil {
+		t.Fatalf("run count query: %v", err)
+	}
+	if runCount != 0 {
+		t.Fatalf("run count = %d, want no dispatch/run creation", runCount)
+	}
+}
+
 func openWorkCommandStore(t *testing.T) *sqlite.Store {
 	t.Helper()
 

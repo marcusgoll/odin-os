@@ -12,7 +12,7 @@ SQLite is the current runtime authority. The active implementation is `internal/
 
 | Target state area | Current storage | Current package | Decision |
 | --- | --- | --- | --- |
-| `issues` | External GitHub issue intake persists in `external_issues`. | `internal/tracker`, `internal/tracker/intake`, `internal/store/sqlite` | Keep read-only and projection-only until scheduler reconciliation is specified. |
+| `issues` | External GitHub issue intake persists in `external_issues`; reconciliation materializes eligible rows into `tasks` plus `task_intakes` evidence. | `internal/tracker`, `internal/tracker/intake`, `internal/runtime/jobs`, `internal/store/sqlite` | Keep GitHub read-only; reconcile from SQLite into Work Items before any separate dispatch step. |
 | `workspaces` | `worktree_leases` table. | `internal/vcs/leases`, `internal/vcs/worktrees`, `internal/store/sqlite` | Wrap existing lease state. |
 | `agent_runs` | `runs` table. | `internal/runtime/jobs`, `internal/runtime/runs`, `internal/store/sqlite` | Wrap existing runs as Agent Runs. |
 | `run_events` | `events` table. | `internal/runtime/events`, `internal/store/sqlite` | Wrap existing append-only events. |
@@ -113,8 +113,7 @@ For future schema migrations:
 
 ## Next Migration Tickets
 
-1. Reconcile persisted external issues into Work Items only after scheduler semantics are specified.
-2. Add pull request handoff tables only after PR manager behavior is specified.
-3. Decide whether locks are SQLite rows, projection freshness records, or filesystem locks before adding a table.
-4. Add repository methods for active agent runs and cleanup-eligible workspaces.
-5. Move services one at a time from direct `sqlite.Store` calls to `internal/db` interfaces after characterization tests exist.
+1. Add pull request handoff tables only after PR manager behavior is specified.
+2. Decide whether locks are SQLite rows, projection freshness records, or filesystem locks before adding a table.
+3. Add repository methods for active agent runs and cleanup-eligible workspaces.
+4. Move services one at a time from direct `sqlite.Store` calls to `internal/db` interfaces after characterization tests exist.
