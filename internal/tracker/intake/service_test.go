@@ -3,8 +3,12 @@ package intake
 import (
 	"context"
 	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"odin-os/internal/core/projects"
@@ -115,6 +119,122 @@ func TestServiceDryRunFetchesEligibleIssuesWithoutPersisting(t *testing.T) {
 	}
 }
 
+func TestNewGitHubTrackerUsesProjectManifestRepoTokenEnvAndDryRun(t *testing.T) {
+	const token = "ghp_manifesttoken1234567890abcdef"
+
+	t.Setenv("GITHUB_TOKEN", token)
+
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		requests++
+		if request.Method != http.MethodGet {
+			t.Fatalf("method = %s, want GET", request.Method)
+		}
+		if request.URL.Path != "/repos/acme/manifest-repo/issues" {
+			t.Fatalf("path = %s, want /repos/acme/manifest-repo/issues", request.URL.Path)
+		}
+		if got := request.URL.Query().Get("state"); got != "open" {
+			t.Fatalf("state query = %q, want open", got)
+		}
+		if got := request.Header.Get("Authorization"); got != "Bearer "+token {
+			t.Fatalf("Authorization = %q, want bearer token from env", got)
+		}
+		fmt.Fprint(response, `[{"number":17,"title":"ready","body":"body","html_url":"https://github.example/acme/manifest-repo/issues/17","state":"open","labels":[{"name":"odin:ready"}]}]`)
+	}))
+	defer server.Close()
+	t.Setenv("ODIN_GITHUB_API_BASE_URL", server.URL)
+
+	source, err := NewGitHubTracker(projects.Manifest{
+		Key:          "alpha",
+		ProjectClass: projects.ProjectClassGitHubBacked,
+		GitHub:       projects.GitHub{Repo: "acme/manifest-repo"},
+	}, SyncOptions{DryRun: true})
+	if err != nil {
+		t.Fatalf("NewGitHubTracker() error = %v", err)
+	}
+
+	issues, err := source.FetchEligibleIssues(context.Background())
+	if err != nil {
+		t.Fatalf("FetchEligibleIssues() error = %v", err)
+	}
+	if len(issues) != 1 || issues[0].Repo != "acme/manifest-repo" || issues[0].Number != 17 {
+		t.Fatalf("issues = %+v, want manifest repo issue #17", issues)
+	}
+
+	if err := source.MarkInProgress(context.Background(), tracker.IssueID{Provider: "github", Repo: "acme/manifest-repo", Number: 17}); err != nil {
+		t.Fatalf("dry-run MarkInProgress() error = %v", err)
+	}
+	if requests != 1 {
+		t.Fatalf("requests = %d, want only the read-only fetch request", requests)
+	}
+}
+
+func TestServiceRejectsProjectsWithoutGitHubMetadataBeforeTrackerConstruction(t *testing.T) {
+	ctx := context.Background()
+	store := openMigratedStore(t)
+	defer store.Close()
+
+	calls := 0
+	service := Service{
+		Store: store,
+		Registry: testProjectRegistryFromYAML(t, `
+version: 1
+projects:
+  - key: local
+    name: Local
+    project_class: local_git_project
+    git_root: .
+    default_branch: main
+    policy:
+      allowed_commands: [status]
+      branch_rules:
+        protected_branches: [main]
+        require_worktree: true
+        require_task_branch: true
+        allow_default_branch_mutation: false
+      approval_gates:
+        require_for_governance_changes: true
+        require_for_destructive_operations: true
+        require_for_system_project_changes: true
+      merge_policy:
+        mode: squash
+        allow_direct_to_default_branch: false
+      destructive_operations:
+        allow_reset: false
+        allow_clean: false
+        allow_force_push: false
+        require_explicit_approval: true
+`),
+		NewTracker: func(project projects.Manifest, options SyncOptions) (tracker.Tracker, error) {
+			calls++
+			return &fakeTracker{}, nil
+		},
+	}
+
+	_, err := service.SyncProject(ctx, SyncOptions{ProjectKey: "local"})
+	if err == nil || !strings.Contains(err.Error(), `project "local" is not a GitHub-backed intake source`) {
+		t.Fatalf("SyncProject(local) error = %v, want GitHub-backed source error", err)
+	}
+	if calls != 0 {
+		t.Fatalf("tracker factory calls = %d, want 0 for missing GitHub metadata", calls)
+	}
+}
+
+func TestNewGitHubTrackerRejectsInvalidGitHubRepoMetadata(t *testing.T) {
+	for _, repo := range []string{"missing-slash", "/repo", "owner/"} {
+		t.Run(repo, func(t *testing.T) {
+			_, err := NewGitHubTracker(projects.Manifest{
+				Key:          "alpha",
+				ProjectClass: projects.ProjectClassGitHubBacked,
+				GitHub:       projects.GitHub{Repo: repo},
+			}, SyncOptions{})
+			if err == nil || !strings.Contains(err.Error(), "invalid GitHub repo") {
+				t.Fatalf("NewGitHubTracker(%q) error = %v, want invalid GitHub repo", repo, err)
+			}
+		})
+	}
+}
+
 func openMigratedStore(t *testing.T) *sqlite.Store {
 	t.Helper()
 
@@ -132,12 +252,7 @@ func openMigratedStore(t *testing.T) *sqlite.Store {
 func testProjectRegistry(t *testing.T) projects.Registry {
 	t.Helper()
 
-	root := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(root, ".git"), 0o755); err != nil {
-		t.Fatalf("mkdir git root: %v", err)
-	}
-	path := filepath.Join(root, "projects.yaml")
-	if err := os.WriteFile(path, []byte(`
+	return testProjectRegistryFromYAML(t, `
 version: 1
 projects:
   - key: alpha
@@ -166,7 +281,18 @@ projects:
         allow_clean: false
         allow_force_push: false
         require_explicit_approval: true
-`), 0o644); err != nil {
+`)
+}
+
+func testProjectRegistryFromYAML(t *testing.T, content string) projects.Registry {
+	t.Helper()
+
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, ".git"), 0o755); err != nil {
+		t.Fatalf("mkdir git root: %v", err)
+	}
+	path := filepath.Join(root, "projects.yaml")
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatalf("write projects: %v", err)
 	}
 	registry, diagnostics, err := projects.Register(path)
