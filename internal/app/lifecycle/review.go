@@ -2,6 +2,7 @@ package lifecycle
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"strconv"
@@ -71,6 +72,7 @@ type reviewUnsupportedActionView struct {
 type reviewQueueEntry struct {
 	ReviewID               string   `json:"review_id,omitempty"`
 	QueueID                string   `json:"queue_id"`
+	Type                   string   `json:"type,omitempty"`
 	SourceType             string   `json:"source_type"`
 	SourceID               int64    `json:"source_id,omitempty"`
 	ObjectID               int64    `json:"object_id"`
@@ -87,6 +89,7 @@ type reviewQueueEntry struct {
 	TaskStatus             string   `json:"task_status,omitempty"`
 	WorkKind               string   `json:"work_kind,omitempty"`
 	Source                 string   `json:"source,omitempty"`
+	Risk                   string   `json:"risk,omitempty"`
 	Decision               string   `json:"decision,omitempty"`
 	RetryEligible          *bool    `json:"retry_eligible,omitempty"`
 	RetryBlockReason       string   `json:"retry_block_reason,omitempty"`
@@ -171,7 +174,7 @@ func runReviewList(ctx context.Context, app bootstrap.App, jsonOutput bool, stdo
 		return err
 	}
 	for _, entry := range entries {
-		if _, err := fmt.Fprintf(stdout, "review=%s source=%s status=%s object=%s actions=%s\n", entry.QueueID, entry.SourceType, entry.Status, entry.ObjectKey, strings.Join(entry.AllowedActions, ",")); err != nil {
+		if err := writeReviewQueueEntryHuman(stdout, entry); err != nil {
 			return err
 		}
 	}
@@ -234,8 +237,49 @@ func runReviewShow(ctx context.Context, app bootstrap.App, queueID string, jsonO
 	if jsonOutput {
 		return commands.WriteJSON(stdout, reviewQueueShowView{Entry: entry, Detail: detail})
 	}
-	_, err = fmt.Fprintf(stdout, "review=%s source=%s status=%s object=%s actions=%s\n", entry.QueueID, entry.SourceType, entry.Status, entry.ObjectKey, strings.Join(entry.AllowedActions, ","))
+	return writeReviewQueueEntryHuman(stdout, entry)
+}
+
+func writeReviewQueueEntryHuman(stdout io.Writer, entry reviewQueueEntry) error {
+	if _, err := fmt.Fprintf(
+		stdout,
+		"review=%s type=%s source=%s source_type=%s risk=%s reason=%s status=%s object=%s actions=%s\n",
+		entry.QueueID,
+		reviewHumanValue(entry.Type),
+		reviewHumanValue(entry.Source),
+		reviewHumanValue(entry.SourceType),
+		reviewHumanValue(entry.Risk),
+		reviewHumanValue(entry.Reason),
+		reviewHumanValue(entry.Status),
+		reviewHumanValue(entry.ObjectKey),
+		reviewActionsHuman(entry.AllowedActions),
+	); err != nil {
+		return err
+	}
+	_, err := fmt.Fprintf(stdout, "next_steps=%s\n", reviewNextStepsHuman(entry))
 	return err
+}
+
+func reviewActionsHuman(actions []string) string {
+	if len(actions) == 0 {
+		return "none"
+	}
+	return strings.Join(actions, ",")
+}
+
+func reviewHumanValue(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "none"
+	}
+	return value
+}
+
+func reviewNextStepsHuman(entry reviewQueueEntry) string {
+	if len(entry.AllowedActions) == 0 {
+		return fmt.Sprintf("inspect with odin review show %s; no direct review action available", entry.QueueID)
+	}
+	return fmt.Sprintf("inspect with odin review show %s; act with odin review act %s <%s>", entry.QueueID, entry.QueueID, strings.Join(entry.AllowedActions, "|"))
 }
 
 func runReviewAct(ctx context.Context, app bootstrap.App, queueID string, action string, jsonOutput bool, stdout io.Writer) error {
@@ -294,6 +338,8 @@ func runReviewAct(ctx context.Context, app bootstrap.App, queueID string, action
 			return fmt.Errorf("failed work action must be retry")
 		}
 		return runFailedWorkReviewRetry(ctx, app, ref.ID, jsonOutput, stdout)
+	case "memory-proposal":
+		return fmt.Errorf("memory proposal review actions are not implemented; use the existing memory workflow")
 	default:
 		return fmt.Errorf("unsupported review queue source %q", ref.Kind)
 	}
@@ -642,6 +688,21 @@ func listReviewQueueEntries(ctx context.Context, app bootstrap.App) ([]reviewQue
 		entries = append(entries, reviewEntryFromContextPackProposal(proposal))
 	}
 
+	memorySummaries, err := app.Store.ListMemorySummaries(ctx, sqlite.ListMemorySummariesParams{})
+	if err != nil {
+		return nil, err
+	}
+	for _, summary := range memorySummaries {
+		if !isReviewQueueMemoryProposal(summary) {
+			continue
+		}
+		entry, err := reviewEntryFromMemoryProposal(ctx, app.Store, summary)
+		if err != nil {
+			return nil, err
+		}
+		entries = append(entries, entry)
+	}
+
 	taskViews, err := projections.ListTaskStatusViews(ctx, app.Store.DB())
 	if err != nil {
 		return nil, err
@@ -755,6 +816,20 @@ func reviewQueueDetail(ctx context.Context, app bootstrap.App, ref reviewQueueRe
 			return reviewQueueEntry{}, nil, err
 		}
 		return entry, detail, nil
+	case "memory-proposal":
+		summary, err := findMemoryProposalSummary(ctx, app.Store, ref.ID)
+		if err != nil {
+			return reviewQueueEntry{}, nil, err
+		}
+		entry, err := reviewEntryFromMemoryProposal(ctx, app.Store, summary)
+		if err != nil {
+			return reviewQueueEntry{}, nil, err
+		}
+		detail, err := memoryProposalReviewDetailFromSummary(summary)
+		if err != nil {
+			return reviewQueueEntry{}, nil, err
+		}
+		return entry, detail, nil
 	default:
 		return reviewQueueEntry{}, nil, fmt.Errorf("unsupported review queue source %q", ref.Kind)
 	}
@@ -780,6 +855,18 @@ type failedWorkRunAttempt struct {
 	Status   string `json:"status"`
 	Attempt  int    `json:"attempt"`
 	Executor string `json:"executor"`
+}
+
+type memoryProposalReviewDetail struct {
+	ID           int64             `json:"id"`
+	Scope        string            `json:"scope"`
+	ScopeKey     string            `json:"scope_key"`
+	MemoryType   string            `json:"memory_type"`
+	Summary      string            `json:"summary"`
+	Fields       map[string]string `json:"fields"`
+	CreatedAt    string            `json:"created_at"`
+	UpdatedAt    string            `json:"updated_at"`
+	AllowedNotes string            `json:"allowed_notes,omitempty"`
 }
 
 type failedWorkRetryView struct {
@@ -817,6 +904,7 @@ func reviewEntryFromIntakeItem(item sqlite.IntakeItem, kind string) (reviewQueue
 	return reviewQueueEntry{
 		ReviewID:       fmt.Sprintf("%s:%d", kind, item.ID),
 		QueueID:        fmt.Sprintf("%s:%d", kind, item.ID),
+		Type:           sourceType,
 		SourceType:     sourceType,
 		SourceID:       item.ID,
 		ObjectID:       item.ID,
@@ -827,6 +915,8 @@ func reviewEntryFromIntakeItem(item sqlite.IntakeItem, kind string) (reviewQueue
 		CreatedAt:      formatReviewTime(item.CreatedAt),
 		ProjectScope:   view.ProjectKey,
 		Summary:        firstNonBlank(item.Summary, item.Subject),
+		Source:         "intake_items",
+		Risk:           intakeReviewRisk(item.Status, kind),
 		AllowedActions: actions,
 	}, nil
 }
@@ -843,6 +933,7 @@ func reviewEntryFromIntakeGoalItem(item sqlite.IntakeItem) (reviewQueueEntry, er
 	return reviewQueueEntry{
 		ReviewID:       fmt.Sprintf("intake-goal:%d", item.ID),
 		QueueID:        fmt.Sprintf("intake-goal:%d", item.ID),
+		Type:           "intake_goal_conversion",
 		SourceType:     "intake_goal_conversion",
 		SourceID:       item.ID,
 		ObjectID:       item.ID,
@@ -854,6 +945,8 @@ func reviewEntryFromIntakeGoalItem(item sqlite.IntakeItem) (reviewQueueEntry, er
 		CreatedAt:      formatReviewTime(item.UpdatedAt),
 		ProjectScope:   view.ProjectKey,
 		Summary:        firstNonBlank(item.Summary, item.Subject),
+		Source:         "intake_items",
+		Risk:           "medium",
 		AllowedActions: []string{},
 	}, nil
 }
@@ -895,6 +988,7 @@ func reviewEntryFromGoal(goal sqlite.Goal) reviewQueueEntry {
 	return reviewQueueEntry{
 		ReviewID:       fmt.Sprintf("goal:%d", goal.ID),
 		QueueID:        fmt.Sprintf("goal:%d", goal.ID),
+		Type:           "goal",
 		SourceType:     "goal",
 		SourceID:       goal.ID,
 		ObjectID:       goal.ID,
@@ -905,6 +999,8 @@ func reviewEntryFromGoal(goal sqlite.Goal) reviewQueueEntry {
 		Title:          goal.Title,
 		CreatedAt:      formatReviewTime(goal.CreatedAt),
 		Summary:        firstNonBlank(goal.Description, goal.Title),
+		Source:         "goals",
+		Risk:           "medium",
 		AllowedActions: []string{},
 	}
 }
@@ -913,6 +1009,7 @@ func reviewEntryFromPlannedGoal(goal sqlite.Goal) reviewQueueEntry {
 	return reviewQueueEntry{
 		ReviewID:       fmt.Sprintf("goal-approval:%d", goal.ID),
 		QueueID:        fmt.Sprintf("goal-approval:%d", goal.ID),
+		Type:           "goal",
 		SourceType:     "goal",
 		SourceID:       goal.ID,
 		ObjectID:       goal.ID,
@@ -923,6 +1020,8 @@ func reviewEntryFromPlannedGoal(goal sqlite.Goal) reviewQueueEntry {
 		Title:          goal.Title,
 		CreatedAt:      formatReviewTime(goal.UpdatedAt),
 		Summary:        firstNonBlank(goal.Description, goal.Title),
+		Source:         "goals",
+		Risk:           "governance",
 		AllowedActions: []string{},
 	}
 }
@@ -931,6 +1030,7 @@ func reviewEntryFromGoalBlocker(goal sqlite.Goal, blocker sqlite.GoalBlocker) re
 	return reviewQueueEntry{
 		ReviewID:       fmt.Sprintf("goal-blocker:%d", blocker.ID),
 		QueueID:        fmt.Sprintf("goal-blocker:%d", blocker.ID),
+		Type:           "goal_blocker",
 		SourceType:     "goal_blocker",
 		SourceID:       blocker.ID,
 		ObjectID:       blocker.ID,
@@ -941,6 +1041,8 @@ func reviewEntryFromGoalBlocker(goal sqlite.Goal, blocker sqlite.GoalBlocker) re
 		Title:          goal.Title,
 		CreatedAt:      formatReviewTime(blocker.CreatedAt),
 		Summary:        firstNonBlank(blocker.Summary, goal.Title),
+		Source:         "goal_blockers",
+		Risk:           "medium",
 		AllowedActions: []string{},
 	}
 }
@@ -979,6 +1081,7 @@ func reviewEntryFromPendingApproval(view projections.PendingApprovalView) review
 	return reviewQueueEntry{
 		ReviewID:       fmt.Sprintf("approval:%d", view.ApprovalID),
 		QueueID:        fmt.Sprintf("approval:%d", view.ApprovalID),
+		Type:           "task_approval",
 		SourceType:     "task_approval",
 		SourceID:       view.ApprovalID,
 		ObjectID:       view.ApprovalID,
@@ -989,6 +1092,8 @@ func reviewEntryFromPendingApproval(view projections.PendingApprovalView) review
 		CreatedAt:      view.RequestedAt,
 		ProjectScope:   view.ProjectKey,
 		Summary:        view.TaskKey,
+		Source:         "approval_requests",
+		Risk:           "governance",
 		AllowedActions: []string{"approve", "deny"},
 	}
 }
@@ -1003,6 +1108,7 @@ func reviewEntryFromApprovalDetail(ctx context.Context, store *sqlite.Store, det
 	return reviewQueueEntry{
 		ReviewID:       fmt.Sprintf("approval:%d", detail.Approval.ID),
 		QueueID:        fmt.Sprintf("approval:%d", detail.Approval.ID),
+		Type:           "task_approval",
 		SourceType:     "task_approval",
 		SourceID:       detail.Approval.ID,
 		ObjectID:       detail.Approval.ID,
@@ -1013,6 +1119,8 @@ func reviewEntryFromApprovalDetail(ctx context.Context, store *sqlite.Store, det
 		CreatedAt:      formatReviewTime(detail.Approval.RequestedAt),
 		ProjectScope:   projectScope,
 		Summary:        detail.Task.Key,
+		Source:         "approval_requests",
+		Risk:           "governance",
 		AllowedActions: taskApprovalAllowedActions(detail.Approval.Status),
 	}
 }
@@ -1029,6 +1137,7 @@ func reviewEntryFromSkillArtifact(ctx context.Context, store *sqlite.Store, arti
 	return reviewQueueEntry{
 		ReviewID:       fmt.Sprintf("skill-artifact:%d", artifact.ID),
 		QueueID:        fmt.Sprintf("skill-artifact:%d", artifact.ID),
+		Type:           "skill_artifact",
 		SourceType:     "skill_artifact",
 		SourceID:       artifact.ID,
 		ObjectID:       artifact.ID,
@@ -1039,6 +1148,8 @@ func reviewEntryFromSkillArtifact(ctx context.Context, store *sqlite.Store, arti
 		CreatedAt:      formatReviewTime(artifact.CreatedAt),
 		ProjectScope:   projectScope,
 		Summary:        artifact.Summary,
+		Source:         "skill_artifacts",
+		Risk:           "medium",
 		AllowedActions: skillArtifactAllowedActions(artifact.Status),
 	}, nil
 }
@@ -1048,6 +1159,7 @@ func reviewEntryFromContextPackProposal(proposal runtimeknowledge.ContextPackPro
 	return reviewQueueEntry{
 		ReviewID:       fmt.Sprintf("context-pack:%d", proposal.Packet.ID),
 		QueueID:        fmt.Sprintf("context-pack:%d", proposal.Packet.ID),
+		Type:           "context_pack",
 		SourceType:     "context_pack",
 		SourceID:       proposal.Packet.ID,
 		ObjectID:       proposal.Packet.ID,
@@ -1062,6 +1174,8 @@ func reviewEntryFromContextPackProposal(proposal runtimeknowledge.ContextPackPro
 		TaskKey:        proposal.ContextPack.Task.Key,
 		TaskStatus:     proposal.ContextPack.Task.Status,
 		WorkKind:       proposal.ContextPack.Task.WorkKind,
+		Source:         "context_packets",
+		Risk:           "medium",
 		AllowedActions: runtimeknowledge.ContextPackAllowedActions(proposal.Packet.Status),
 	}
 }
@@ -1077,6 +1191,7 @@ func reviewEntryFromFailedTask(task projections.TaskStatusView) reviewQueueEntry
 	return reviewQueueEntry{
 		ReviewID:               fmt.Sprintf("failed-work:%d", task.TaskID),
 		QueueID:                fmt.Sprintf("failed-work:%d", task.TaskID),
+		Type:                   "failed_work",
 		SourceType:             "failed_work",
 		SourceID:               task.TaskID,
 		ObjectID:               task.TaskID,
@@ -1091,12 +1206,126 @@ func reviewEntryFromFailedTask(task projections.TaskStatusView) reviewQueueEntry
 		TaskStatus:             task.Status,
 		WorkKind:               task.WorkKind,
 		Source:                 guidance.Source,
+		Risk:                   "medium",
 		Decision:               guidance.Decision,
 		RetryEligible:          &retryEligible,
 		RetryBlockReason:       retryBlockReason(guidance.Decision, guidance.RetryEligible),
 		RecoveryRecommendation: guidance.RecoveryRecommendation,
 		AllowedActions:         []string{"retry"},
 	}
+}
+
+func isReviewQueueMemoryProposal(summary sqlite.MemorySummary) bool {
+	fields, err := memorySummaryFields(summary.DetailsJSON)
+	if err != nil {
+		return false
+	}
+	if strings.EqualFold(strings.TrimSpace(fields["approval"]), "pending") {
+		return true
+	}
+	if strings.EqualFold(strings.TrimSpace(fields["status"]), "pending") {
+		return true
+	}
+	return false
+}
+
+func reviewEntryFromMemoryProposal(ctx context.Context, store *sqlite.Store, summary sqlite.MemorySummary) (reviewQueueEntry, error) {
+	fields, err := memorySummaryFields(summary.DetailsJSON)
+	if err != nil {
+		return reviewQueueEntry{}, err
+	}
+	projectScope := summary.ScopeKey
+	if summary.ProjectID != nil {
+		if project, err := store.GetProject(ctx, *summary.ProjectID); err == nil {
+			projectScope = project.Key
+		}
+	}
+	status := "pending"
+	reason := "memory_proposal_pending"
+	if value := strings.TrimSpace(fields["approval"]); value != "" {
+		status = value
+		reason = "memory_approval_" + value
+	} else if value := strings.TrimSpace(fields["status"]); value != "" {
+		status = value
+		reason = "memory_status_" + value
+	}
+	return reviewQueueEntry{
+		ReviewID:       fmt.Sprintf("memory-proposal:%d", summary.ID),
+		QueueID:        fmt.Sprintf("memory-proposal:%d", summary.ID),
+		Type:           "memory_proposal",
+		SourceType:     "memory_proposal",
+		SourceID:       summary.ID,
+		ObjectID:       summary.ID,
+		ObjectKey:      fmt.Sprintf("memory-proposal-%d", summary.ID),
+		Status:         status,
+		Reason:         reason,
+		Title:          summary.Summary,
+		CreatedAt:      formatReviewTime(summary.CreatedAt),
+		ProjectScope:   projectScope,
+		Summary:        summary.Summary,
+		TaskID:         nullableInt64Value(summary.TaskID),
+		Source:         "memory_summaries",
+		Risk:           "governance",
+		AllowedActions: []string{},
+	}, nil
+}
+
+func findMemoryProposalSummary(ctx context.Context, store *sqlite.Store, memoryID int64) (sqlite.MemorySummary, error) {
+	summaries, err := store.ListMemorySummaries(ctx, sqlite.ListMemorySummariesParams{})
+	if err != nil {
+		return sqlite.MemorySummary{}, err
+	}
+	for _, summary := range summaries {
+		if summary.ID == memoryID {
+			if !isReviewQueueMemoryProposal(summary) {
+				return sqlite.MemorySummary{}, fmt.Errorf("memory proposal %d is not pending review", memoryID)
+			}
+			return summary, nil
+		}
+	}
+	return sqlite.MemorySummary{}, fmt.Errorf("memory proposal %d not found", memoryID)
+}
+
+func memoryProposalReviewDetailFromSummary(summary sqlite.MemorySummary) (memoryProposalReviewDetail, error) {
+	fields, err := memorySummaryFields(summary.DetailsJSON)
+	if err != nil {
+		return memoryProposalReviewDetail{}, err
+	}
+	return memoryProposalReviewDetail{
+		ID:           summary.ID,
+		Scope:        summary.Scope,
+		ScopeKey:     summary.ScopeKey,
+		MemoryType:   summary.MemoryType,
+		Summary:      summary.Summary,
+		Fields:       fields,
+		CreatedAt:    formatReviewTime(summary.CreatedAt),
+		UpdatedAt:    formatReviewTime(summary.UpdatedAt),
+		AllowedNotes: "read-only in odin review until a memory resolve command is available on the operator surface",
+	}, nil
+}
+
+func memorySummaryFields(detailsJSON string) (map[string]string, error) {
+	fields := map[string]string{}
+	if strings.TrimSpace(detailsJSON) == "" {
+		return fields, nil
+	}
+	var payload struct {
+		Fields map[string]string `json:"fields"`
+	}
+	if err := json.Unmarshal([]byte(detailsJSON), &payload); err != nil {
+		return nil, fmt.Errorf("memory summary details are invalid: %w", err)
+	}
+	for key, value := range payload.Fields {
+		fields[key] = value
+	}
+	return fields, nil
+}
+
+func nullableInt64Value(value *int64) int64 {
+	if value == nil {
+		return 0
+	}
+	return *value
 }
 
 func reviewFailedTaskDetail(ctx context.Context, store *sqlite.Store, task sqlite.Task) (reviewQueueEntry, failedWorkReviewDetail, error) {
@@ -1161,7 +1390,7 @@ func parseReviewQueueRef(queueID string) (reviewQueueRef, error) {
 	queueID = strings.TrimSpace(queueID)
 	parts := strings.SplitN(queueID, ":", 2)
 	if len(parts) != 2 {
-		return reviewQueueRef{}, fmt.Errorf("review queue id must look like intake-goal:<id>, goal:<id>, goal-approval:<id>, goal-blocker:<id>, intake-review:<id>, intake-approval:<id>, approval:<id>, skill-artifact:<id>, context-pack:<id>, or failed-work:<id>")
+		return reviewQueueRef{}, fmt.Errorf("review queue id must look like intake-goal:<id>, goal:<id>, goal-approval:<id>, goal-blocker:<id>, intake-review:<id>, intake-approval:<id>, approval:<id>, skill-artifact:<id>, context-pack:<id>, failed-work:<id>, or memory-proposal:<id>")
 	}
 	kind := strings.ToLower(strings.TrimSpace(parts[0]))
 	idRef := strings.TrimSpace(parts[1])
@@ -1180,6 +1409,8 @@ func parseReviewQueueRef(queueID string) (reviewQueueRef, error) {
 		idRef = strings.TrimPrefix(idRef, "context-pack-")
 	case "failed-work":
 		idRef = strings.TrimPrefix(idRef, "task-")
+	case "memory-proposal":
+		idRef = strings.TrimPrefix(idRef, "memory-proposal-")
 	default:
 		return reviewQueueRef{}, fmt.Errorf("unsupported review queue source %q", kind)
 	}
@@ -1200,6 +1431,20 @@ func intakeReviewAllowedActions(status string) []string {
 		return []string{"accept", "archive"}
 	default:
 		return nil
+	}
+}
+
+func intakeReviewRisk(status string, kind string) string {
+	if kind == "intake-approval" {
+		return "governance"
+	}
+	switch status {
+	case "approval_required":
+		return "governance"
+	case "needs_clarification", "duplicate_linked_or_suppressed":
+		return "low"
+	default:
+		return "medium"
 	}
 }
 

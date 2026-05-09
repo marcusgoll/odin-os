@@ -1387,6 +1387,27 @@ func TestRunUnifiedReviewQueueListsShowsAndRoutesExistingReviewObjects(t *testin
 			t.Fatalf("review list output = %s, want %s", list, want)
 		}
 	}
+	var mixedList struct {
+		Items []struct {
+			QueueID        string   `json:"queue_id"`
+			Type           string   `json:"type"`
+			SourceType     string   `json:"source_type"`
+			Source         string   `json:"source"`
+			Status         string   `json:"status"`
+			Reason         string   `json:"reason"`
+			CreatedAt      string   `json:"created_at"`
+			Risk           string   `json:"risk"`
+			AllowedActions []string `json:"allowed_actions"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal([]byte(list), &mixedList); err != nil {
+		t.Fatalf("json.Unmarshal(review list) error = %v; output=%s", err, list)
+	}
+	for _, item := range mixedList.Items {
+		if item.QueueID == "" || item.Type == "" || item.SourceType == "" || item.Source == "" || item.Status == "" || item.Reason == "" || item.CreatedAt == "" || item.Risk == "" || item.AllowedActions == nil {
+			t.Fatalf("review list item = %+v, want type/source/status/created/reason/risk/actions", item)
+		}
+	}
 
 	show := run("review", "show", "intake-review:1", "--json")
 	if !strings.Contains(show, `"source_type": "intake_review"`) || !strings.Contains(show, `"review_state": "review_required"`) {
@@ -1435,6 +1456,192 @@ func TestRunUnifiedReviewQueueListsShowsAndRoutesExistingReviewObjects(t *testin
 		if !strings.Contains(overview, want) {
 			t.Fatalf("overview output = %s, want %s", overview, want)
 		}
+	}
+}
+
+func TestRunApprovalGatedReviewHumanOutputExplainsOperatorAction(t *testing.T) {
+	configureLifecycleHarnessDriver(t)
+	t.Setenv("HOME", t.TempDir())
+
+	root := testRepoRoot(t)
+	run := func(args ...string) string {
+		t.Helper()
+		var output bytes.Buffer
+		if err := Run(context.Background(), root, args, strings.NewReader(""), &output); err != nil {
+			t.Fatalf("Run(%v) error = %v\noutput=%s", args, err, output.String())
+		}
+		return output.String()
+	}
+
+	run("project", "select", "odin-core")
+	run("transition", "set", "cutover", "confirm", "because", "human approval UX proof")
+	run("companion", "run", "primary", "--objective", "Prepare approval UX proof", "--trigger", "test", "--json")
+	blocked := run("work", "dispatch", "--task", "1", "--json")
+	if !strings.Contains(blocked, `"reason": "approval_required"`) {
+		t.Fatalf("dispatch output = %s, want approval gate", blocked)
+	}
+
+	approvalList := run("approvals", "all")
+	for _, want := range []string{
+		"approval=1",
+		"source=approval_requests",
+		"risk=governance",
+		"reason=approval_required",
+		"task=prepare-approval-ux-proof-",
+		"status=pending",
+		"resolver=supported",
+		"actions=approve,deny",
+		"next_steps=inspect with odin approvals show 1; resolve with odin approvals resolve 1 <approve|deny> <reason...>",
+		"on_approve=task unblocked or registered continuation starts",
+	} {
+		if !strings.Contains(approvalList, want) {
+			t.Fatalf("approvals output = %q, want %q", approvalList, want)
+		}
+	}
+
+	approvalShow := run("approvals", "show", "1")
+	for _, want := range []string{
+		"approval=1",
+		"source=approval_requests",
+		"risk=governance",
+		"reason=approval_required",
+		"task_status=blocked",
+		"actions=approve,deny",
+		"next_steps=inspect with odin approvals show 1; resolve with odin approvals resolve 1 <approve|deny> <reason...>",
+		"on_approve=task unblocked or registered continuation starts",
+	} {
+		if !strings.Contains(approvalShow, want) {
+			t.Fatalf("approvals show output = %q, want %q", approvalShow, want)
+		}
+	}
+
+	reviewList := run("review", "list")
+	for _, want := range []string{
+		"review=approval:1",
+		"type=task_approval",
+		"source=approval_requests",
+		"risk=governance",
+		"reason=task_approval_pending",
+		"status=pending",
+		"actions=approve,deny",
+		"next_steps=inspect with odin review show approval:1; act with odin review act approval:1 <approve|deny>",
+	} {
+		if !strings.Contains(reviewList, want) {
+			t.Fatalf("review list output = %q, want %q", reviewList, want)
+		}
+	}
+
+	reviewShow := run("review", "show", "approval:1")
+	for _, want := range []string{
+		"review=approval:1",
+		"type=task_approval",
+		"source=approval_requests",
+		"risk=governance",
+		"reason=task_approval_pending",
+		"status=pending",
+		"actions=approve,deny",
+		"next_steps=inspect with odin review show approval:1; act with odin review act approval:1 <approve|deny>",
+	} {
+		if !strings.Contains(reviewShow, want) {
+			t.Fatalf("review show output = %q, want %q", reviewShow, want)
+		}
+	}
+
+	approved := run("review", "act", "approval:1", "approve")
+	for _, want := range []string{
+		"approval=1",
+		"status=resolved",
+		"result=approved",
+		"summary=approval granted; task unblocked",
+	} {
+		if !strings.Contains(approved, want) {
+			t.Fatalf("review act output = %q, want %q", approved, want)
+		}
+	}
+
+	logs := run("logs", "--json")
+	for _, want := range []string{
+		`"type": "approval.resolved"`,
+		`"task_id": 1`,
+		`"status": "approved"`,
+		`"decision_by": "operator"`,
+		`"reason": "unified review decision"`,
+	} {
+		if !strings.Contains(logs, want) {
+			t.Fatalf("logs output = %s, want %s", logs, want)
+		}
+	}
+}
+
+func TestRunUnifiedReviewQueueSurfacesMemoryProposalsReadOnly(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	root := testRepoRoot(t)
+
+	run := func(args ...string) string {
+		t.Helper()
+		var output bytes.Buffer
+		if err := Run(context.Background(), root, args, strings.NewReader(""), &output); err != nil {
+			t.Fatalf("Run(%v) error = %v\noutput=%s", args, err, output.String())
+		}
+		return output.String()
+	}
+
+	store, err := sqlite.Open(filepath.Join(root, "data", "odin.db"))
+	if err != nil {
+		t.Fatalf("sqlite.Open() error = %v", err)
+	}
+	if err := store.Migrate(context.Background()); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
+	}
+	project, err := store.CreateProject(context.Background(), sqlite.CreateProjectParams{
+		Key:  testProjectKey,
+		Name: "Alpha CLI",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+	recorded, err := store.RecordMemorySummary(context.Background(), sqlite.RecordMemorySummaryParams{
+		ProjectID:   &project.ID,
+		Scope:       "project",
+		ScopeKey:    testProjectKey,
+		MemoryType:  "social_draft",
+		Summary:     "Draft social memory awaiting operator review",
+		DetailsJSON: `{"fields":{"approval":"pending","channel":"x","content_kind":"post"}}`,
+	})
+	if err != nil {
+		t.Fatalf("RecordMemorySummary() error = %v", err)
+	}
+	store.Close()
+
+	list := run("review", "list", "--json")
+	for _, want := range []string{
+		`"queue_id": "memory-proposal:` + int64String(recorded.ID) + `"`,
+		`"source_type": "memory_proposal"`,
+		`"source": "memory_summaries"`,
+		`"risk": "governance"`,
+		`"allowed_actions": []`,
+	} {
+		if !strings.Contains(list, want) {
+			t.Fatalf("review list output = %s, want %s", list, want)
+		}
+	}
+
+	show := run("review", "show", "memory-proposal:"+int64String(recorded.ID), "--json")
+	for _, want := range []string{
+		`"source_type": "memory_proposal"`,
+		`"memory_type": "social_draft"`,
+		`"approval": "pending"`,
+		`"risk": "governance"`,
+	} {
+		if !strings.Contains(show, want) {
+			t.Fatalf("review show output = %s, want %s", show, want)
+		}
+	}
+
+	var actionOutput bytes.Buffer
+	err = Run(context.Background(), root, []string{"review", "act", "memory-proposal:" + int64String(recorded.ID), "approve", "--json"}, strings.NewReader(""), &actionOutput)
+	if err == nil || !strings.Contains(err.Error(), "memory proposal review actions are not implemented") {
+		t.Fatalf("Run(review act memory proposal approve) error = %v output=%s, want forbidden action", err, actionOutput.String())
 	}
 }
 
@@ -5028,8 +5235,20 @@ func TestRunApprovalsResolveTaskBackedCompanionWork(t *testing.T) {
 	}
 
 	approvalList := run("approvals", "all", "--json")
-	if !strings.Contains(approvalList, `"approval_id": 1`) || !strings.Contains(approvalList, `"resolver_support": "supported"`) {
-		t.Fatalf("approval list output = %s, want supported task-backed approval", approvalList)
+	for _, want := range []string{
+		`"approval_id": 1`,
+		`"resolver_support": "supported"`,
+		`"source": "approval_requests"`,
+		`"risk": "governance"`,
+		`"reason": "approval_required"`,
+		`"allowed_actions": [`,
+		`"approve"`,
+		`"next_steps": "inspect with odin approvals show 1; resolve with odin approvals resolve 1 \u003capprove|deny\u003e \u003creason...\u003e"`,
+		`"on_approve": "task unblocked or registered continuation starts"`,
+	} {
+		if !strings.Contains(approvalList, want) {
+			t.Fatalf("approval list output = %s, want %s", approvalList, want)
+		}
 	}
 
 	show := run("approvals", "show", "1", "--json")
@@ -5039,6 +5258,13 @@ func TestRunApprovalsResolveTaskBackedCompanionWork(t *testing.T) {
 		`"task_id": 1`,
 		`"task_status": "blocked"`,
 		`"resolver_support": "supported"`,
+		`"source": "approval_requests"`,
+		`"risk": "governance"`,
+		`"reason": "approval_required"`,
+		`"allowed_actions": [`,
+		`"approve"`,
+		`"next_steps": "inspect with odin approvals show 1; resolve with odin approvals resolve 1 \u003capprove|deny\u003e \u003creason...\u003e"`,
+		`"on_approve": "task unblocked or registered continuation starts"`,
 	} {
 		if !strings.Contains(show, want) {
 			t.Fatalf("approval show output = %s, want %s", show, want)

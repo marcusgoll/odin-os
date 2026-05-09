@@ -550,16 +550,29 @@ func runApprovals(ctx context.Context, app bootstrap.App, args []string, stdout 
 			return err
 		}
 		if jsonOutput {
+			resolverSupport := string(detail.ResolverSupport)
+			reason := approvalOperatorReason(detail.Approval.Status, resolverSupport)
+			if storedReason := strings.TrimSpace(detail.Approval.Reason); storedReason != "" {
+				reason = storedReason
+			}
+			allowedActions := approvalOperatorAllowedActions(detail.Approval.Status, resolverSupport)
+			nextSteps := approvalOperatorNextSteps(detail.Approval.ID, detail.Approval.Status, resolverSupport)
+			onApprove := approvalOperatorOnApprove(resolverSupport)
 			return commands.WriteJSON(stdout, struct {
-				ID              int64  `json:"id"`
-				Status          string `json:"status"`
-				TaskID          int64  `json:"task_id"`
-				TaskKey         string `json:"task_key"`
-				TaskStatus      string `json:"task_status"`
-				RunID           *int64 `json:"run_id,omitempty"`
-				DecisionBy      string `json:"decision_by,omitempty"`
-				Reason          string `json:"reason,omitempty"`
-				ResolverSupport string `json:"resolver_support"`
+				ID              int64    `json:"id"`
+				Status          string   `json:"status"`
+				TaskID          int64    `json:"task_id"`
+				TaskKey         string   `json:"task_key"`
+				TaskStatus      string   `json:"task_status"`
+				RunID           *int64   `json:"run_id,omitempty"`
+				DecisionBy      string   `json:"decision_by,omitempty"`
+				Reason          string   `json:"reason,omitempty"`
+				ResolverSupport string   `json:"resolver_support"`
+				Source          string   `json:"source,omitempty"`
+				Risk            string   `json:"risk,omitempty"`
+				AllowedActions  []string `json:"allowed_actions,omitempty"`
+				NextSteps       string   `json:"next_steps,omitempty"`
+				OnApprove       string   `json:"on_approve,omitempty"`
 			}{
 				ID:              detail.Approval.ID,
 				Status:          detail.Approval.Status,
@@ -568,20 +581,38 @@ func runApprovals(ctx context.Context, app bootstrap.App, args []string, stdout 
 				TaskStatus:      detail.Task.Status,
 				RunID:           detail.Approval.RunID,
 				DecisionBy:      detail.Approval.DecisionBy,
-				Reason:          detail.Approval.Reason,
-				ResolverSupport: string(detail.ResolverSupport),
+				Reason:          reason,
+				ResolverSupport: resolverSupport,
+				Source:          "approval_requests",
+				Risk:            "governance",
+				AllowedActions:  allowedActions,
+				NextSteps:       nextSteps,
+				OnApprove:       onApprove,
 			})
 		}
-		_, err = fmt.Fprintf(
-			stdout,
-			"approval=%d task=%s run=%s status=%s task_status=%s resolver=%s\n",
+		resolverSupport := string(detail.ResolverSupport)
+		reason := approvalOperatorReason(detail.Approval.Status, resolverSupport)
+		if storedReason := strings.TrimSpace(detail.Approval.Reason); storedReason != "" {
+			reason = storedReason
+		}
+		_, err = fmt.Fprintf(stdout,
+			"approval=%d source=approval_requests risk=governance reason=%s task=%s run=%s status=%s task_status=%s resolver=%s actions=%s\n",
 			detail.Approval.ID,
+			reason,
 			detail.Task.Key,
 			approvalRunIDLabel(detail.Approval.RunID),
 			detail.Approval.Status,
 			detail.Task.Status,
-			detail.ResolverSupport,
+			resolverSupport,
+			strings.Join(approvalOperatorAllowedActions(detail.Approval.Status, resolverSupport), ","),
 		)
+		if err != nil {
+			return err
+		}
+		if _, err := fmt.Fprintf(stdout, "next_steps=%s\n", approvalOperatorNextSteps(detail.Approval.ID, detail.Approval.Status, resolverSupport)); err != nil {
+			return err
+		}
+		_, err = fmt.Fprintf(stdout, "on_approve=%s\n", approvalOperatorOnApprove(resolverSupport))
 		return err
 	}
 	if len(remaining) > 0 && strings.EqualFold(remaining[0], "resolve") {
@@ -680,13 +711,23 @@ func runApprovals(ctx context.Context, app bootstrap.App, args []string, stdout 
 	for _, approval := range approvals {
 		if _, err := fmt.Fprintf(
 			stdout,
-			"approval=%d task=%s run=%s status=%s resolver=%s\n",
+			"approval=%d source=%s risk=%s reason=%s task=%s run=%s status=%s resolver=%s actions=%s\n",
 			approval.ApprovalID,
+			approval.Source,
+			approval.Risk,
+			approval.Reason,
 			approval.TaskKey,
 			approvalRunIDLabel(approval.RunID),
 			approval.Status,
 			approval.ResolverSupport,
+			strings.Join(approval.AllowedActions, ","),
 		); err != nil {
+			return err
+		}
+		if _, err := fmt.Fprintf(stdout, "next_steps=%s\n", approval.NextSteps); err != nil {
+			return err
+		}
+		if _, err := fmt.Fprintf(stdout, "on_approve=%s\n", approval.OnApprove); err != nil {
 			return err
 		}
 	}
@@ -3826,9 +3867,58 @@ func listPendingApprovals(ctx context.Context, store *sqlite.Store, resolved sco
 			RunID:           detail.Approval.RunID,
 			Status:          view.Status,
 			ResolverSupport: resolverSupport,
+			Source:          "approval_requests",
+			Risk:            "governance",
+			Reason:          approvalOperatorReason(view.Status, resolverSupport),
+			AllowedActions:  approvalOperatorAllowedActions(view.Status, resolverSupport),
+			NextSteps:       approvalOperatorNextSteps(view.ApprovalID, view.Status, resolverSupport),
+			OnApprove:       approvalOperatorOnApprove(resolverSupport),
 		})
 	}
 	return approvals, nil
+}
+
+func approvalOperatorReason(status string, resolverSupport string) string {
+	status = strings.ToLower(strings.TrimSpace(status))
+	if status == "pending" {
+		if resolverSupport == string(approvalsvc.ResolverUnsupported) {
+			return "approval_required_no_registered_resolver"
+		}
+		return "approval_required"
+	}
+	if status == "" {
+		return "approval_state_unknown"
+	}
+	return "approval_" + status
+}
+
+func approvalOperatorAllowedActions(status string, resolverSupport string) []string {
+	status = strings.ToLower(strings.TrimSpace(status))
+	if status != "pending" {
+		return []string{"inspect"}
+	}
+	if resolverSupport == string(approvalsvc.ResolverSupported) {
+		return []string{"approve", "deny"}
+	}
+	return []string{"inspect"}
+}
+
+func approvalOperatorNextSteps(approvalID int64, status string, resolverSupport string) string {
+	status = strings.ToLower(strings.TrimSpace(status))
+	if status == "pending" && resolverSupport == string(approvalsvc.ResolverSupported) {
+		return fmt.Sprintf("inspect with odin approvals show %d; resolve with odin approvals resolve %d <approve|deny> <reason...>", approvalID, approvalID)
+	}
+	if status == "pending" {
+		return fmt.Sprintf("inspect with odin approvals show %d; no supported resolver is registered", approvalID)
+	}
+	return fmt.Sprintf("inspect with odin approvals show %d; already %s", approvalID, status)
+}
+
+func approvalOperatorOnApprove(resolverSupport string) string {
+	if resolverSupport == string(approvalsvc.ResolverSupported) {
+		return "task unblocked or registered continuation starts"
+	}
+	return "not resolved; inspect only"
 }
 
 func approvalRunIDLabel(runID *int64) string {
