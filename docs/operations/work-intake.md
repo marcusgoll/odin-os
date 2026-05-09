@@ -96,6 +96,11 @@ Do not use a production repository as the first live proof target. The live
 proof should use a disposable issue or repository and verify that only read-only
 GitHub requests are made.
 
+For tracker-level fetch, label, comment, and dry-run behavior, use the
+disposable-target runbook in
+[github-tracker-live-smoke.md](github-tracker-live-smoke.md). That proof is
+opt-in, mutates only the named disposable issue, and is not part of normal CI.
+
 ## Operator Stop Conditions
 
 Stop before running live intake when:
