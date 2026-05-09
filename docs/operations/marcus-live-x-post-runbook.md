@@ -19,7 +19,7 @@ From `/home/orchestrator/odin-os`:
 ```bash
 cd /home/orchestrator/odin-os
 set -a
-. ~/.config/odin/odin.env
+. ~/.config/odin/odin-os.env
 set +a
 printf 'ODIN_ROOT=%s\n' "$ODIN_ROOT"
 printf 'ODIN_HUGINN_VISUAL_DRIVER=%s\n' "$ODIN_HUGINN_VISUAL_DRIVER"
@@ -32,7 +32,7 @@ test -x "$ODIN_HUGINN_X_POST_DRIVER"
 ```
 
 Stop condition:
-If any variable is empty or any driver path is not executable, stop and repair `~/.config/odin/odin.env` before continuing.
+If any variable is empty or any driver path is not executable, stop and repair `~/.config/odin/odin-os.env` before continuing.
 
 ## 2. Run top-level preflight
 
@@ -106,7 +106,7 @@ If the compose preflight lands on the X login page instead of a logged-in compos
 ```bash
 cd /home/orchestrator/odin-os
 set -a
-. ~/.config/odin/odin.env
+. ~/.config/odin/odin-os.env
 set +a
 scripts/ops/odin-trusted-browser-access.sh start
 ```
@@ -125,7 +125,7 @@ After Marcus finishes the X login in the trusted browser session:
 ```bash
 cd /home/orchestrator/odin-os
 set -a
-. ~/.config/odin/odin.env
+. ~/.config/odin/odin-os.env
 set +a
 scripts/ops/odin-trusted-browser-access.sh stop
 ```

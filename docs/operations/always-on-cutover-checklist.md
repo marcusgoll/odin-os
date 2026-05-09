@@ -5,10 +5,10 @@ Use this checklist before treating a single-daemon `odin serve` deployment as th
 ## Install and service restart
 
 - `make build` completes and the intended `odin` binary is installed on the host path used by the service manager.
-- `deploy/systemd/odin.service` and the real env file derived from `deploy/systemd/odin.env.example` are installed and reviewed.
+- `deploy/systemd/odin-os.service` and the real env file derived from `deploy/systemd/odin-os.env.example` are installed and reviewed.
 - `ODIN_ROOT` points at the intended runtime root and the service account can read and write `data/`, `state/`, and `runs/`.
-- `systemctl restart odin` completes cleanly.
-- `systemctl status odin --no-pager` shows one active daemon for the runtime root.
+- `systemctl --user restart odin-os.service` completes cleanly.
+- `systemctl --user status odin-os.service --no-pager` shows one active daemon for the runtime root.
 
 ## Health and readiness verification
 
