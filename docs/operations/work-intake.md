@@ -86,11 +86,10 @@ This test proves dry-run fetches eligible fixture issues and leaves
 
 ## Live Read-Only Proof
 
-Live GitHub access is intentionally not part of normal CI. The opt-in live proof
-for `odin work intake --project <key>` is tracked by
-[issue #60](https://github.com/marcusgoll/odin-os/issues/60). Until that issue
-lands, fixture-backed tests are the repo-owned proof and live token scope/API
-behavior remains unproven.
+Live GitHub access is intentionally not part of normal CI. Use the opt-in
+[work-intake-live-smoke.md](work-intake-live-smoke.md) runbook to prove
+`odin work intake --project <key> --dry-run` against a disposable GitHub-backed
+project.
 
 Do not use a production repository as the first live proof target. The live
 proof should use a disposable issue or repository and verify that only read-only
