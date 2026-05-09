@@ -13,7 +13,7 @@ date: 2026-04-30
 | Go daemon | `cmd/odin`, `internal/app/lifecycle`, `deploy/systemd/odin.service` | Partial target met. `serve` runs loops and HTTP endpoints. | Long-running agency daemon with scheduler/intake/dispatch/review loops. | Preserve and deepen. |
 | Binary entrypoint | `cmd/odin`; duplicate `cmd/odin-os` | `cmd/odin` established; `cmd/odin-os` duplicate. | One documented operator binary plus optional alias if justified. | Refactor decision. |
 | Runtime composition | `internal/app/bootstrap`, `internal/app/lifecycle` | Strong existing composition root. | All agency modules wired through lifecycle/bootstrap. | Preserve. |
-| GitHub Issues adapter | `internal/tracker/github`, `internal/adapters/github`, `config/projects.yaml` | Missing real adapter; duplicate roots. | One read-only-first typed adapter for eligible issues. | Replace/refactor. |
+| GitHub Issues adapter | `internal/tracker`, `internal/tracker/github`, `internal/tracker/intake`, `config/projects.yaml`; reserved empty `internal/adapters/github` | Canonical tracker seam selected and implemented for read-only intake plus gated projection operations; `internal/adapters/github` is not an active root. | One typed tracker seam for eligible issues, comments, labels, and follow-up issue creation behind approval gates. | Preserve `internal/tracker`; keep `internal/adapters/github` empty unless an ADR assigns a non-tracker role. |
 | GitHub token policy | `config/agency.example.yaml`, `configs/*.yaml`, docs security rules | Scaffold only. | Token env names and scopes documented; no production secrets to workers. | Add contract before code. |
 | SQLite runtime state | `internal/store/sqlite`, migrations | Strong existing runtime authority. | Work Items, Run Attempts, external issues, PR handoffs, approvals all persisted. | Preserve and extend. |
 | Work Items | `tasks` table, `jobs.Service`, `odin work start/status` | Present under task terminology. | Canonical Work Item projection over existing tasks or renamed vocabulary. | Refactor vocabulary, preserve table initially. |
@@ -84,14 +84,16 @@ These modules should not become separate active seams:
 
 - `internal/runner`
 - historical `internal/workspace`
-- `internal/tracker` unless chosen as the canonical GitHub intake root
+- `internal/adapters/github` for tracker behavior; the canonical GitHub tracker
+  root is `internal/tracker`
 - `internal/orchestrator`
 - `src/*`
 - `configs/*`
 
 ## Missing Target Modules
 
-- Real GitHub Issues adapter.
+- Live mutation wiring behind approval gates for the existing GitHub tracker
+  adapter.
 - PR manager.
 - Real Codex exec adapter.
 - Prompt renderer implementation.

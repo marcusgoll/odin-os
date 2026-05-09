@@ -55,7 +55,7 @@ Current duplicate/scaffold modules:
 ```text
 internal/runner        duplicates internal/executors
 historical internal/workspace duplicate has been removed; use internal/vcs
-internal/tracker       placeholder GitHub intake seam
+internal/tracker       canonical GitHub intake seam
 internal/orchestrator  placeholder agency coordinator
 internal/prompts       placeholder renderer interface
 internal/review        placeholder reviewer interface
@@ -71,7 +71,7 @@ systemd or Docker
   -> odin daemon (cmd/odin serve, or documented service alias)
     -> lifecycle composition
       -> scheduler / agency loop
-        -> GitHub Issues intake adapter
+        -> GitHub Issues tracker adapter
         -> SQLite runtime state
         -> agent/skill/prompt registry
         -> worktree workspace manager
@@ -105,7 +105,7 @@ eligible GitHub Issue
 | Target module | Current evidence | Gap | Recommendation | Risk |
 | --- | --- | --- | --- | --- |
 | Go daemon | `cmd/odin`, `internal/app/lifecycle.Run`, `runServe`, systemd unit. `cmd/odin-os` exists as duplicate worktree-only entrypoint. | Daemon exists but agency loop is not complete; binary naming is unresolved. | Preserve `cmd/odin` and lifecycle. Decide whether `cmd/odin-os` is a supported alias. | Medium |
-| GitHub Issues adapter | `internal/tracker/github/client.go` placeholder; `internal/adapters/github/.gitkeep`; `config/projects.yaml` supports GitHub repo metadata. | No real GitHub issue query, labels, comments, or token policy. Duplicate adapter root unresolved. | Pick one GitHub intake seam and start read-only. | High |
+| GitHub Issues adapter | `internal/tracker`, `internal/tracker/github`, `internal/tracker/intake`, `config/projects.yaml`; reserved empty `internal/adapters/github`. | Canonical package root is selected. Remaining gaps are approval-gated live mutation, PR manager ownership, rate-limit classification, and token-scope checks. | Preserve `internal/tracker` as the only GitHub tracker seam; keep `internal/adapters/github` empty unless a later ADR assigns non-tracker responsibility. | High |
 | SQLite runtime state | `internal/store/sqlite`, embedded migrations, task/run/approval/event/action/lease/recovery/knowledge tables. | Strong existing authority; store is large and mixes many domains. | Preserve. Split by domain files only after characterization tests. | Medium |
 | Git worktree workspace manager | `internal/vcs/leases`, `internal/vcs/worktrees`, `internal/vcs/git`, `docs/contracts/git-worktrees.md`. | Real worktree lease path exists; the historical `internal/workspace` duplicate is removed. Cleanup/recovery exists but agency-facing workspace commands are partial. | Use `internal/vcs` as canonical; do not recreate `internal/workspace`. | High |
 | Codex exec runner | `internal/executors/contract`, router, `codex_headless` deterministic adapter; `internal/runner/codexexec` placeholder. | No real `codex exec` subprocess. Security policy not enforced in canonical executor path. | Implement `codex_exec` as an `internal/executors` adapter after security contract. | High |
@@ -174,7 +174,8 @@ The largest gaps are:
 
 - `internal/runner/*`: replace with `internal/executors` adapters.
 - Historical `internal/workspace/manager.go`: removed; keep using `internal/vcs` lease/worktree manager.
-- `internal/tracker/*`: replace or move into the single chosen GitHub intake adapter seam.
+- `internal/tracker/*`: preserve as the single chosen GitHub intake adapter
+  seam.
 - `internal/orchestrator/service.go`: replace with lifecycle-composed runtime modules rather than a shallow standalone coordinator.
 - `internal/db`, `internal/config`, `internal/logging`, `internal/dashboard`, `internal/review`, `internal/utils`: replace only if their useful concepts are promoted into existing deeper modules.
 
@@ -205,7 +206,7 @@ Remove only after explicit cleanup approval and after preserving useful knowledg
 
 ### Phase 2: GitHub Intake Read-Only
 
-- Choose GitHub intake seam.
+- Preserve `internal/tracker` as the GitHub intake seam.
 - Read eligible issues into normalized intake records or Work Items.
 - Store external issue identity in SQLite.
 - Add dry-run output and structured logs.
@@ -269,7 +270,8 @@ Remove only after explicit cleanup approval and after preserving useful knowledg
 3. Collapse duplicate config roots into `config/`.
 4. Collapse `internal/runner` into `internal/executors`.
 5. Keep the removed `internal/workspace` scaffold collapsed into `internal/vcs`.
-6. Choose GitHub intake adapter seam and document token policy.
+6. Preserve `internal/tracker` as the GitHub intake adapter seam and document
+   token policy.
 7. Add `odin work readiness` with dry-run and kill-switch visibility.
 8. Add read-only GitHub Issues intake with fixture-backed tests.
 9. Persist external issue identity in SQLite without making GitHub runtime authority.

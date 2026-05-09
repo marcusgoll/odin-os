@@ -277,7 +277,8 @@ Known from code/tests:
 - `odin workspace ...` is planned in docs but absent in current command dispatcher.
 - Real `codex exec` runner is absent; `codex_headless` is deterministic local alpha behavior.
 - Codex app-server runner is absent and should remain phase two.
-- GitHub Issues intake adapter is absent except for an uncommitted placeholder under `internal/tracker/github`.
+- GitHub Issues intake now uses the canonical `internal/tracker` seam; live
+  mutation and PR creation/update remain unfinished.
 - Pull request creation/update is absent.
 - `config/policies.yaml` is placeholder-only.
 - The active registry contains no delivery profile workflow tagged `delivery_profile`, so `odin work profiles` currently has no profiles unless uncommitted or future registry files add them.
@@ -286,7 +287,9 @@ Known from code/tests:
 
 - `cmd/odin` vs uncommitted `cmd/odin-os`: both delegate to lifecycle. Decide whether there is one binary with `serve` mode or a second service binary.
 - `internal/executors/*` vs uncommitted `internal/runner/*`: both describe execution lanes. Keep one canonical seam.
-- `internal/adapters/github` placeholder directory vs uncommitted `internal/tracker/github`: both could become GitHub integration roots. Decide whether GitHub is an adapter under `internal/adapters` or an intake adapter under `internal/core/intake/github`.
+- `internal/adapters/github` is a reserved empty placeholder. GitHub issue and
+  PR tracker behavior belongs under `internal/tracker` unless a later ADR moves
+  the seam.
 - `config/` vs tracked duplicate `configs/`: duplicate config root.
 - Go-native scaffold vs uncommitted TypeScript scaffold in `src/`: TypeScript is contrary to the current Go-native decision and should be removed unless explicitly archived as reference-only.
 - Canonical Work Item / Run Attempt language vs storage names `tasks` and `runs`: this is a known compatibility naming conflict in `CONTEXT.md`.
@@ -302,7 +305,8 @@ Highest risks:
 - systemd service lacks explicit hardening settings.
 - Duplicate scaffold and config roots can lead future agents to implement into the wrong seam.
 - Default `odin serve` port collision can hide service-state truth.
-- GitHub integration is not implemented, so token scoping and mutation boundaries are only documented.
+- GitHub tracker intake has a canonical seam, but token scoping and mutation
+  boundaries for live writes still need approval-gated enforcement.
 
 ## Refactor Opportunities
 
@@ -311,7 +315,8 @@ Highest risks:
 3. Move agency-specific placeholder config into `config/` only after contract decisions; remove `configs/`.
 4. Add a top-level usage/help command through `internal/app/lifecycle`.
 5. Split `internal/store/sqlite/store.go` by domain area while preserving one SQLite store package and transaction model.
-6. Add a read-only GitHub intake adapter under one chosen package root.
+6. Deepen the existing `internal/tracker` GitHub intake adapter with live
+   mutation gates and token-scope checks.
 7. Promote delivery profiles into registry workflows instead of hardcoded route logic.
 8. Add systemd hardening before long-running unattended use.
 9. Add CI hygiene checks for generated/untracked scaffold classes.
@@ -327,7 +332,9 @@ Target shape:
 - One lifecycle composition root: `internal/app/lifecycle`.
 - One runtime authority: `internal/store/sqlite` with smaller domain services layered above it.
 - One executor seam: `internal/executors/contract` and `internal/executors/router`.
-- One GitHub intake seam: standardize under `internal/core/intake/github` or `internal/adapters/github`, not both.
+- One GitHub intake seam: use `internal/tracker`; keep
+  `internal/adapters/github` empty unless a later ADR assigns non-tracker
+  responsibility.
 - One operator proof path: top-level `odin ...` commands with REPL aliases as thin adapters only.
 - One authored asset model: registry Markdown/frontmatter, prompts under `prompts/`, memory under `memory/`, config under `config/`.
 - One work isolation model: `internal/vcs` branches, worktrees, and leases.

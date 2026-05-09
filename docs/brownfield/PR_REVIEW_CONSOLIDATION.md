@@ -85,7 +85,7 @@ findings and blockers, but must not approve, merge, or deploy.
 | `prompts/workers/qa.md` | Draft prompt | keep | Prompt text remains available for future QA worker. |
 | `prompts/workers/reviewer.md` | Draft prompt | keep | Prompt text remains available for future reviewer worker. |
 | `prompts/workers/security.md` | Draft prompt | keep | Prompt text remains available for future security worker. |
-| `internal/adapters/github` | Empty placeholder | remove later | Do not create a PR adapter here unless the GitHub adapter root decision changes. |
+| `internal/adapters/github` | Reserved empty placeholder | keep empty | Do not create issue or PR tracker behavior here unless a later ADR changes the GitHub tracker root. |
 | `internal/tracker/github` | Existing issue tracker adapter | keep | PR mutation should not be bolted into issue intake without a follow-up design. |
 
 ## Follow-Up Work
