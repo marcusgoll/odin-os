@@ -629,6 +629,78 @@ func TestExecuteTaskWithRequestWrapsExternalIntakeInRenderedPrompt(t *testing.T)
 	}
 }
 
+func TestExecuteTaskWithRequestRendersPersistedAcceptanceCriteria(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openJobStore(t)
+	defer store.Close()
+
+	capturing := &capturingPromptExecutor{key: "codex_headless"}
+	registry := writeRegistryAllowingDirectAlphaMutation(t)
+	service := Service{
+		Store:              store,
+		Registry:           registry,
+		Executors:          map[string]contract.Executor{"codex_headless": capturing},
+		ExecutorConfig:     mustLoadExecutorConfig(t),
+		PromptRenderer:     testPromptRenderer(t),
+		PromptTemplateName: "go-orchestrator",
+		Transitions:        projects.Service{Store: store},
+		Leases: leases.Manager{
+			Store:        store,
+			Git:          &jobTestGit{},
+			WorktreeRoot: t.TempDir(),
+		},
+		Now: time.Now,
+	}
+
+	task, err := service.CreateTaskOnce(ctx, CreateTaskParams{
+		Resolved:    scope.Resolution{Kind: scope.ScopeProject, ProjectKey: "alpha"},
+		Key:         "github-issue-68",
+		Title:       "Persist criteria for prompt rendering",
+		RequestedBy: "github_issue_intake",
+		AcceptanceCriteria: []string{
+			"prompt rendering reads persisted criteria",
+			"metadata fallback is not required",
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateTaskOnce() error = %v", err)
+	}
+
+	project, err := store.GetProjectByKey(ctx, "alpha")
+	if err != nil {
+		t.Fatalf("GetProjectByKey(alpha) error = %v", err)
+	}
+	if _, err := service.Transitions.SetTransitionState(ctx, projects.TransitionStateInput{
+		ProjectID:   project.ID,
+		Actor:       projects.TransitionControllerOdinOS,
+		TargetState: projects.TransitionStateCutover,
+		ChangedBy:   "test",
+	}); err != nil {
+		t.Fatalf("SetTransitionState(cutover) error = %v", err)
+	}
+
+	outcome, err := service.ExecuteTaskWithRequest(ctx, task.Task.ID, ExecutionRequest{})
+	if err != nil {
+		t.Fatalf("ExecuteTaskWithRequest() error = %v", err)
+	}
+	if outcome.Run == nil || outcome.Run.Status != "completed" {
+		t.Fatalf("ExecutionOutcome = %+v, want completed run", outcome)
+	}
+
+	prompt := capturing.prompt()
+	for _, want := range []string{
+		"Acceptance Criteria:",
+		"- prompt rendering reads persisted criteria",
+		"- metadata fallback is not required",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("captured prompt missing %q\n%s", want, prompt)
+		}
+	}
+}
+
 func TestExecuteTaskWithRequestRecordsWorkerPanicAsFailedRun(t *testing.T) {
 	t.Parallel()
 

@@ -171,6 +171,7 @@ func (store *Store) UpsertProject(ctx context.Context, params UpsertProjectParam
 func (store *Store) UpsertExternalIssue(ctx context.Context, params UpsertExternalIssueParams) (ExternalIssue, error) {
 	now := store.now()
 	var issue ExternalIssue
+	acceptanceCriteriaJSON := EncodeAcceptanceCriteriaJSON(params.AcceptanceCriteria)
 
 	err := store.withTx(ctx, func(tx *sql.Tx) error {
 		if _, err := tx.ExecContext(ctx, `
@@ -186,11 +187,12 @@ func (store *Store) UpsertExternalIssue(ctx context.Context, params UpsertExtern
 				labels_json,
 				sync_status,
 				sync_cursor,
+				acceptance_criteria_json,
 				last_synced_at,
 				created_at,
 				updated_at
 			)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			ON CONFLICT(provider, repo, number) DO UPDATE SET
 				project_id = excluded.project_id,
 				title = excluded.title,
@@ -200,6 +202,7 @@ func (store *Store) UpsertExternalIssue(ctx context.Context, params UpsertExtern
 				labels_json = excluded.labels_json,
 				sync_status = excluded.sync_status,
 				sync_cursor = excluded.sync_cursor,
+				acceptance_criteria_json = excluded.acceptance_criteria_json,
 				last_synced_at = excluded.last_synced_at,
 				updated_at = excluded.updated_at
 		`,
@@ -214,6 +217,7 @@ func (store *Store) UpsertExternalIssue(ctx context.Context, params UpsertExtern
 			params.LabelsJSON,
 			params.SyncStatus,
 			params.SyncCursor,
+			acceptanceCriteriaJSON,
 			formatTime(now),
 			formatTime(now),
 			formatTime(now),
@@ -222,7 +226,7 @@ func (store *Store) UpsertExternalIssue(ctx context.Context, params UpsertExtern
 		}
 
 		record, err := scanExternalIssue(tx.QueryRowContext(ctx, `
-			SELECT id, project_id, provider, repo, number, title, body_hash, url, state, labels_json, sync_status, sync_cursor, last_synced_at, created_at, updated_at
+			SELECT id, project_id, provider, repo, number, title, body_hash, url, state, labels_json, sync_status, sync_cursor, acceptance_criteria_json, last_synced_at, created_at, updated_at
 			FROM external_issues
 			WHERE provider = ? AND repo = ? AND number = ?
 		`, params.Provider, params.Repo, params.Number))
@@ -1372,6 +1376,8 @@ func (store *Store) ListMemoryEntries(ctx context.Context, params ListMemoryEntr
 func (store *Store) CreateTask(ctx context.Context, params CreateTaskParams) (Task, error) {
 	now := store.now()
 	var task Task
+	acceptanceCriteria := NormalizeAcceptanceCriteria(params.AcceptanceCriteria)
+	acceptanceCriteriaJSON := EncodeAcceptanceCriteriaJSON(acceptanceCriteria)
 
 	err := store.withTx(ctx, func(tx *sql.Tx) error {
 		project, err := store.getProjectTx(ctx, tx, params.ProjectID)
@@ -1384,6 +1390,7 @@ func (store *Store) CreateTask(ctx context.Context, params CreateTaskParams) (Ta
 				project_id,
 				key,
 				title,
+				acceptance_criteria_json,
 				action_key,
 				status,
 				scope,
@@ -1403,11 +1410,12 @@ func (store *Store) CreateTask(ctx context.Context, params CreateTaskParams) (Ta
 				created_at,
 				updated_at
 			)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, '', '', '[]', ?, ?)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, '', '', '[]', ?, ?)
 		`,
 			params.ProjectID,
 			params.Key,
 			params.Title,
+			acceptanceCriteriaJSON,
 			params.ActionKey,
 			params.Status,
 			params.Scope,
@@ -1423,6 +1431,100 @@ func (store *Store) CreateTask(ctx context.Context, params CreateTaskParams) (Ta
 			formatTime(now),
 			formatTime(now),
 		)
+		if err != nil && isMissingTaskExecutionIntentColumns(err) {
+			if hasTaskExecutionIntent(params) {
+				return fmt.Errorf("execution intent requires execution-intent task columns")
+			}
+			result, err = tx.ExecContext(ctx, `
+				INSERT INTO tasks (
+				project_id,
+				key,
+				title,
+				action_key,
+					status,
+					scope,
+					requested_by,
+					workspace_id,
+					initiative_id,
+					companion_id,
+					follow_up_obligation_id,
+					follow_up_occurrence_key,
+					work_kind,
+					current_run_id,
+					summary,
+					terminal_reason,
+					artifacts_json,
+					created_at,
+					updated_at
+				)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, '', '', '[]', ?, ?)
+			`,
+				params.ProjectID,
+				params.Key,
+				params.Title,
+				params.ActionKey,
+				params.Status,
+				params.Scope,
+				params.RequestedBy,
+				nullInt64(params.WorkspaceID),
+				nullInt64(params.InitiativeID),
+				nullInt64(params.CompanionID),
+				nullInt64(params.FollowUpObligationID),
+				nullIfEmpty(params.FollowUpOccurrenceKey),
+				nullIfEmpty(params.WorkKind),
+				formatTime(now),
+				formatTime(now),
+			)
+		}
+		if err != nil && isMissingTaskAcceptanceCriteriaColumn(err) {
+			if len(acceptanceCriteria) > 0 {
+				return fmt.Errorf("acceptance criteria require acceptance-criteria task columns")
+			}
+			result, err = tx.ExecContext(ctx, `
+				INSERT INTO tasks (
+					project_id,
+					key,
+					title,
+					action_key,
+					status,
+					scope,
+					requested_by,
+					workspace_id,
+					initiative_id,
+					companion_id,
+					follow_up_obligation_id,
+					follow_up_occurrence_key,
+					work_kind,
+					execution_intent,
+					execution_intent_source,
+					current_run_id,
+					summary,
+					terminal_reason,
+					artifacts_json,
+					created_at,
+					updated_at
+				)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, '', '', '[]', ?, ?)
+			`,
+				params.ProjectID,
+				params.Key,
+				params.Title,
+				params.ActionKey,
+				params.Status,
+				params.Scope,
+				params.RequestedBy,
+				nullInt64(params.WorkspaceID),
+				nullInt64(params.InitiativeID),
+				nullInt64(params.CompanionID),
+				nullInt64(params.FollowUpObligationID),
+				nullIfEmpty(params.FollowUpOccurrenceKey),
+				nullIfEmpty(params.WorkKind),
+				params.ExecutionIntent,
+				params.ExecutionIntentSource,
+				formatTime(now),
+				formatTime(now),
+			)
+		}
 		if err != nil && isMissingTaskExecutionIntentColumns(err) {
 			if hasTaskExecutionIntent(params) {
 				return fmt.Errorf("execution intent requires execution-intent task columns")
@@ -1474,10 +1576,10 @@ func (store *Store) CreateTask(ctx context.Context, params CreateTaskParams) (Ta
 			}
 			result, err = tx.ExecContext(ctx, `
 				INSERT INTO tasks (
-					project_id,
-					key,
-					title,
-					action_key,
+				project_id,
+				key,
+				title,
+				action_key,
 					status,
 					scope,
 					requested_by,
@@ -1523,6 +1625,7 @@ func (store *Store) CreateTask(ctx context.Context, params CreateTaskParams) (Ta
 			ProjectID:             params.ProjectID,
 			Key:                   params.Key,
 			Title:                 params.Title,
+			AcceptanceCriteria:    acceptanceCriteria,
 			ActionKey:             params.ActionKey,
 			Status:                params.Status,
 			Scope:                 params.Scope,
@@ -1571,6 +1674,37 @@ func (store *Store) CreateTask(ctx context.Context, params CreateTaskParams) (Ta
 			},
 			OccurredAt: now,
 		})
+	})
+
+	return task, err
+}
+
+func (store *Store) UpdateTaskAcceptanceCriteria(ctx context.Context, taskID int64, criteria []string) (Task, error) {
+	now := store.now()
+	var task Task
+	normalized := NormalizeAcceptanceCriteria(criteria)
+	criteriaJSON := EncodeAcceptanceCriteriaJSON(normalized)
+
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		current, err := store.getTaskTx(ctx, tx, taskID)
+		if err != nil {
+			return err
+		}
+		if EncodeAcceptanceCriteriaJSON(current.AcceptanceCriteria) == criteriaJSON {
+			task = current
+			return nil
+		}
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE tasks
+			SET acceptance_criteria_json = ?, updated_at = ?
+			WHERE id = ?
+		`, criteriaJSON, formatTime(now), taskID); err != nil {
+			return err
+		}
+		current.AcceptanceCriteria = normalized
+		current.UpdatedAt = now
+		task = current
+		return nil
 	})
 
 	return task, err
@@ -4609,6 +4743,7 @@ func (store *Store) GetTaskByFollowUpOccurrence(ctx context.Context, obligationI
 			project_id,
 			key,
 			title,
+			acceptance_criteria_json,
 			action_key,
 			status,
 			scope,
@@ -5288,7 +5423,7 @@ func (store *Store) GetTask(ctx context.Context, taskID int64) (Task, error) {
 
 func (store *Store) GetTaskByProjectAndKey(ctx context.Context, projectID int64, key string) (Task, error) {
 	row := store.db.QueryRowContext(ctx, `
-		SELECT id, project_id, key, title, action_key, status, scope, requested_by, workspace_id, initiative_id, companion_id, follow_up_obligation_id, follow_up_occurrence_key, work_kind, execution_intent, execution_intent_source, summary, terminal_reason, artifacts_json, current_run_id, next_eligible_at, priority, last_error, retry_count, max_attempts, blocked_reason, created_at, updated_at
+		SELECT id, project_id, key, title, acceptance_criteria_json, action_key, status, scope, requested_by, workspace_id, initiative_id, companion_id, follow_up_obligation_id, follow_up_occurrence_key, work_kind, execution_intent, execution_intent_source, summary, terminal_reason, artifacts_json, current_run_id, next_eligible_at, priority, last_error, retry_count, max_attempts, blocked_reason, created_at, updated_at
 		FROM tasks
 		WHERE project_id = ? AND key = ?
 	`, projectID, key)
@@ -5297,7 +5432,7 @@ func (store *Store) GetTaskByProjectAndKey(ctx context.Context, projectID int64,
 
 func (store *Store) ListEligibleQueuedTasks(ctx context.Context, now time.Time) ([]Task, error) {
 	rows, err := store.db.QueryContext(ctx, `
-		SELECT id, project_id, key, title, action_key, status, scope, requested_by, workspace_id, initiative_id, companion_id, follow_up_obligation_id, follow_up_occurrence_key, work_kind, execution_intent, execution_intent_source, summary, terminal_reason, artifacts_json, current_run_id, next_eligible_at, priority, last_error, retry_count, max_attempts, blocked_reason, created_at, updated_at
+		SELECT id, project_id, key, title, acceptance_criteria_json, action_key, status, scope, requested_by, workspace_id, initiative_id, companion_id, follow_up_obligation_id, follow_up_occurrence_key, work_kind, execution_intent, execution_intent_source, summary, terminal_reason, artifacts_json, current_run_id, next_eligible_at, priority, last_error, retry_count, max_attempts, blocked_reason, created_at, updated_at
 		FROM tasks
 		WHERE status = 'queued'
 		  AND next_eligible_at <= ?
@@ -5435,7 +5570,7 @@ func (store *Store) GetProjectByKey(ctx context.Context, key string) (Project, e
 
 func (store *Store) ListExternalIssues(ctx context.Context, params ListExternalIssuesParams) ([]ExternalIssue, error) {
 	query := `
-		SELECT id, project_id, provider, repo, number, title, body_hash, url, state, labels_json, sync_status, sync_cursor, last_synced_at, created_at, updated_at
+		SELECT id, project_id, provider, repo, number, title, body_hash, url, state, labels_json, sync_status, sync_cursor, acceptance_criteria_json, last_synced_at, created_at, updated_at
 		FROM external_issues
 		WHERE 1 = 1
 	`
@@ -7139,7 +7274,7 @@ func (store *Store) getWorkspaceByKeyTx(ctx context.Context, tx *sql.Tx, key str
 
 func (store *Store) getTaskQuery(ctx context.Context, queryer sqlQueryRow, taskID int64) (Task, error) {
 	row := queryer.QueryRowContext(ctx, `
-		SELECT id, project_id, key, title, action_key, status, scope, requested_by, workspace_id, initiative_id, companion_id, follow_up_obligation_id, follow_up_occurrence_key, work_kind, execution_intent, execution_intent_source, summary, terminal_reason, artifacts_json, current_run_id, next_eligible_at, priority, last_error, retry_count, max_attempts, blocked_reason, created_at, updated_at
+		SELECT id, project_id, key, title, acceptance_criteria_json, action_key, status, scope, requested_by, workspace_id, initiative_id, companion_id, follow_up_obligation_id, follow_up_occurrence_key, work_kind, execution_intent, execution_intent_source, summary, terminal_reason, artifacts_json, current_run_id, next_eligible_at, priority, last_error, retry_count, max_attempts, blocked_reason, created_at, updated_at
 		FROM tasks
 		WHERE id = ?
 	`, taskID)
@@ -7720,7 +7855,7 @@ func (store *Store) getRunWithTaskTx(ctx context.Context, tx *sql.Tx, runID int6
 	row := tx.QueryRowContext(ctx, `
 		SELECT
 			r.id, r.task_id, r.executor, r.status, r.attempt, r.started_at, r.finished_at, r.summary, r.terminal_reason, r.artifacts_json,
-			t.id, t.project_id, t.key, t.title, t.action_key, t.status, t.scope, t.requested_by, t.workspace_id, t.initiative_id, t.companion_id, t.follow_up_obligation_id, t.follow_up_occurrence_key, t.work_kind, t.execution_intent, t.execution_intent_source, t.summary, t.terminal_reason, t.artifacts_json, t.current_run_id, t.next_eligible_at, t.priority, t.last_error, t.retry_count, t.max_attempts, t.blocked_reason, t.created_at, t.updated_at
+			t.id, t.project_id, t.key, t.title, t.acceptance_criteria_json, t.action_key, t.status, t.scope, t.requested_by, t.workspace_id, t.initiative_id, t.companion_id, t.follow_up_obligation_id, t.follow_up_occurrence_key, t.work_kind, t.execution_intent, t.execution_intent_source, t.summary, t.terminal_reason, t.artifacts_json, t.current_run_id, t.next_eligible_at, t.priority, t.last_error, t.retry_count, t.max_attempts, t.blocked_reason, t.created_at, t.updated_at
 		FROM runs r
 		JOIN tasks t ON t.id = r.task_id
 		WHERE r.id = ?
@@ -7732,6 +7867,7 @@ func (store *Store) getRunWithTaskTx(ctx context.Context, tx *sql.Tx, runID int6
 	var summary sql.NullString
 	var terminalReason sql.NullString
 	var artifactsJSON sql.NullString
+	var taskAcceptanceCriteriaJSON sql.NullString
 	var taskSummary sql.NullString
 	var taskTerminalReason sql.NullString
 	var taskArtifactsJSON sql.NullString
@@ -7769,6 +7905,7 @@ func (store *Store) getRunWithTaskTx(ctx context.Context, tx *sql.Tx, runID int6
 		&task.ProjectID,
 		&task.Key,
 		&task.Title,
+		&taskAcceptanceCriteriaJSON,
 		&task.ActionKey,
 		&task.Status,
 		&task.Scope,
@@ -7810,6 +7947,7 @@ func (store *Store) getRunWithTaskTx(ctx context.Context, tx *sql.Tx, runID int6
 	run.TerminalReason = terminalReason.String
 	run.ArtifactsJSON = normalizeArtifactsJSON(artifactsJSON.String)
 
+	task.AcceptanceCriteria = DecodeAcceptanceCriteriaJSON(taskAcceptanceCriteriaJSON.String)
 	task.WorkspaceID = nullableInt64Ptr(workspaceID)
 	task.InitiativeID = nullableInt64Ptr(initiativeID)
 	task.CompanionID = nullableInt64Ptr(companionID)
@@ -7847,7 +7985,7 @@ func (store *Store) getApprovalWithTaskTx(ctx context.Context, tx *sql.Tx, appro
 	row := tx.QueryRowContext(ctx, `
 		SELECT
 			a.id, a.task_id, a.run_id, a.status, a.requested_at, a.resolved_at, a.decision_by, a.reason,
-			t.id, t.project_id, t.key, t.title, t.action_key, t.status, t.scope, t.requested_by, t.workspace_id, t.initiative_id, t.companion_id, t.follow_up_obligation_id, t.follow_up_occurrence_key, t.work_kind, t.execution_intent, t.execution_intent_source, t.summary, t.terminal_reason, t.artifacts_json, t.current_run_id, t.next_eligible_at, t.priority, t.last_error, t.retry_count, t.max_attempts, t.blocked_reason, t.created_at, t.updated_at
+			t.id, t.project_id, t.key, t.title, t.acceptance_criteria_json, t.action_key, t.status, t.scope, t.requested_by, t.workspace_id, t.initiative_id, t.companion_id, t.follow_up_obligation_id, t.follow_up_occurrence_key, t.work_kind, t.execution_intent, t.execution_intent_source, t.summary, t.terminal_reason, t.artifacts_json, t.current_run_id, t.next_eligible_at, t.priority, t.last_error, t.retry_count, t.max_attempts, t.blocked_reason, t.created_at, t.updated_at
 		FROM approvals a
 		JOIN tasks t ON t.id = a.task_id
 		WHERE a.id = ?
@@ -7860,6 +7998,7 @@ func (store *Store) getApprovalWithTaskTx(ctx context.Context, tx *sql.Tx, appro
 	var decisionBy sql.NullString
 	var reason sql.NullString
 	var requestedAt string
+	var taskAcceptanceCriteriaJSON sql.NullString
 	var taskSummary sql.NullString
 	var taskTerminalReason sql.NullString
 	var taskArtifactsJSON sql.NullString
@@ -7894,6 +8033,7 @@ func (store *Store) getApprovalWithTaskTx(ctx context.Context, tx *sql.Tx, appro
 		&task.ProjectID,
 		&task.Key,
 		&task.Title,
+		&taskAcceptanceCriteriaJSON,
 		&task.ActionKey,
 		&task.Status,
 		&task.Scope,
@@ -7935,6 +8075,7 @@ func (store *Store) getApprovalWithTaskTx(ctx context.Context, tx *sql.Tx, appro
 	approval.DecisionBy = decisionBy.String
 	approval.Reason = reason.String
 
+	task.AcceptanceCriteria = DecodeAcceptanceCriteriaJSON(taskAcceptanceCriteriaJSON.String)
 	task.WorkspaceID = nullableInt64Ptr(workspaceID)
 	task.InitiativeID = nullableInt64Ptr(initiativeID)
 	task.CompanionID = nullableInt64Ptr(companionID)
@@ -8686,6 +8827,7 @@ func scanProject(row interface{ Scan(...any) error }) (Project, error) {
 
 func scanExternalIssue(row interface{ Scan(...any) error }) (ExternalIssue, error) {
 	var issue ExternalIssue
+	var acceptanceCriteriaJSON sql.NullString
 	var lastSyncedAt string
 	var createdAt string
 	var updatedAt string
@@ -8702,6 +8844,7 @@ func scanExternalIssue(row interface{ Scan(...any) error }) (ExternalIssue, erro
 		&issue.LabelsJSON,
 		&issue.SyncStatus,
 		&issue.SyncCursor,
+		&acceptanceCriteriaJSON,
 		&lastSyncedAt,
 		&createdAt,
 		&updatedAt,
@@ -8710,6 +8853,7 @@ func scanExternalIssue(row interface{ Scan(...any) error }) (ExternalIssue, erro
 	}
 
 	var err error
+	issue.AcceptanceCriteria = DecodeAcceptanceCriteriaJSON(acceptanceCriteriaJSON.String)
 	issue.LastSyncedAt, err = parseTime(lastSyncedAt)
 	if err != nil {
 		return ExternalIssue{}, err
@@ -8954,6 +9098,7 @@ func scanWorkspace(row interface{ Scan(...any) error }) (Workspace, error) {
 
 func scanTask(row interface{ Scan(...any) error }) (Task, error) {
 	var task Task
+	var acceptanceCriteriaJSON sql.NullString
 	var summary sql.NullString
 	var terminalReason sql.NullString
 	var artifactsJSON sql.NullString
@@ -8974,6 +9119,7 @@ func scanTask(row interface{ Scan(...any) error }) (Task, error) {
 		&task.ProjectID,
 		&task.Key,
 		&task.Title,
+		&acceptanceCriteriaJSON,
 		&task.ActionKey,
 		&task.Status,
 		&task.Scope,
@@ -9003,6 +9149,7 @@ func scanTask(row interface{ Scan(...any) error }) (Task, error) {
 	}
 
 	var err error
+	task.AcceptanceCriteria = DecodeAcceptanceCriteriaJSON(acceptanceCriteriaJSON.String)
 	task.WorkspaceID = nullableInt64Ptr(workspaceID)
 	task.InitiativeID = nullableInt64Ptr(initiativeID)
 	task.CompanionID = nullableInt64Ptr(companionID)
@@ -10060,6 +10207,13 @@ func isMissingTaskFollowUpColumns(err error) bool {
 	message := err.Error()
 	return strings.Contains(message, "has no column named follow_up_obligation_id") ||
 		strings.Contains(message, "has no column named follow_up_occurrence_key")
+}
+
+func isMissingTaskAcceptanceCriteriaColumn(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(err.Error(), "has no column named acceptance_criteria_json")
 }
 
 func isMissingTaskExecutionIntentColumns(err error) bool {

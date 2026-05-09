@@ -1,6 +1,8 @@
 package sqlite
 
 import (
+	"encoding/json"
+	"strings"
 	"time"
 
 	runtimeevents "odin-os/internal/runtime/events"
@@ -20,21 +22,22 @@ type Project struct {
 }
 
 type ExternalIssue struct {
-	ID           int64
-	ProjectID    int64
-	Provider     string
-	Repo         string
-	Number       int
-	Title        string
-	BodyHash     string
-	URL          string
-	State        string
-	LabelsJSON   string
-	SyncStatus   string
-	SyncCursor   string
-	LastSyncedAt time.Time
-	CreatedAt    time.Time
-	UpdatedAt    time.Time
+	ID                 int64
+	ProjectID          int64
+	Provider           string
+	Repo               string
+	Number             int
+	Title              string
+	BodyHash           string
+	URL                string
+	State              string
+	LabelsJSON         string
+	SyncStatus         string
+	SyncCursor         string
+	AcceptanceCriteria []string
+	LastSyncedAt       time.Time
+	CreatedAt          time.Time
+	UpdatedAt          time.Time
 }
 
 type Initiative struct {
@@ -80,17 +83,18 @@ type CreateProjectParams struct {
 type UpsertProjectParams = CreateProjectParams
 
 type UpsertExternalIssueParams struct {
-	ProjectID  int64
-	Provider   string
-	Repo       string
-	Number     int
-	Title      string
-	BodyHash   string
-	URL        string
-	State      string
-	LabelsJSON string
-	SyncStatus string
-	SyncCursor string
+	ProjectID          int64
+	Provider           string
+	Repo               string
+	Number             int
+	Title              string
+	BodyHash           string
+	URL                string
+	State              string
+	LabelsJSON         string
+	SyncStatus         string
+	SyncCursor         string
+	AcceptanceCriteria []string
 }
 
 type RecordExternalGitHubIssueEventParams struct {
@@ -232,6 +236,7 @@ type Task struct {
 	ProjectID             int64
 	Key                   string
 	Title                 string
+	AcceptanceCriteria    []string
 	ActionKey             string
 	Status                string
 	Scope                 string
@@ -329,6 +334,7 @@ type CreateTaskParams struct {
 	ProjectID             int64
 	Key                   string
 	Title                 string
+	AcceptanceCriteria    []string
 	ActionKey             string
 	Status                string
 	Scope                 string
@@ -341,6 +347,43 @@ type CreateTaskParams struct {
 	WorkKind              string
 	ExecutionIntent       string
 	ExecutionIntentSource string
+}
+
+func EncodeAcceptanceCriteriaJSON(criteria []string) string {
+	normalized := NormalizeAcceptanceCriteria(criteria)
+	if len(normalized) == 0 {
+		return "[]"
+	}
+	encoded, err := json.Marshal(normalized)
+	if err != nil {
+		return "[]"
+	}
+	return string(encoded)
+}
+
+func DecodeAcceptanceCriteriaJSON(raw string) []string {
+	var criteria []string
+	if err := json.Unmarshal([]byte(strings.TrimSpace(raw)), &criteria); err != nil {
+		return nil
+	}
+	return NormalizeAcceptanceCriteria(criteria)
+}
+
+func NormalizeAcceptanceCriteria(criteria []string) []string {
+	normalized := make([]string, 0, len(criteria))
+	seen := make(map[string]struct{}, len(criteria))
+	for _, criterion := range criteria {
+		criterion = strings.TrimSpace(criterion)
+		if criterion == "" {
+			continue
+		}
+		if _, ok := seen[criterion]; ok {
+			continue
+		}
+		seen[criterion] = struct{}{}
+		normalized = append(normalized, criterion)
+	}
+	return normalized
 }
 
 type CreateTaskIntakeParams struct {

@@ -2,6 +2,7 @@ package intake
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -72,6 +73,95 @@ func TestServiceFetchesEligibleIssuesAndPersistsThemIdempotently(t *testing.T) {
 	}
 	if len(issues) != 1 {
 		t.Fatalf("ListExternalIssues() len = %d, want idempotent 1: %+v", len(issues), issues)
+	}
+}
+
+func TestServicePreservesGitHubIssueAcceptanceCriteriaThroughReconcile(t *testing.T) {
+	ctx := context.Background()
+	store := openMigratedStore(t)
+	defer store.Close()
+
+	registry := testProjectRegistry(t)
+	fake := &fakeTracker{
+		issues: []tracker.Issue{
+			{
+				Provider: "github",
+				Repo:     "acme/alpha",
+				Number:   68,
+				Title:    "Persist Work Item acceptance criteria",
+				Body: strings.Join([]string{
+					"## Goal",
+					"Store criteria.",
+					"",
+					"## Acceptance criteria",
+					"- GitHub issue intake preserves criteria",
+					"- Prompt rendering reads persisted criteria",
+					"",
+					"## Notes",
+					"- ignored note",
+				}, "\n"),
+				URL:    "https://github.example/acme/alpha/issues/68",
+				State:  "open",
+				Labels: []string{tracker.LabelReady, tracker.AgentLabelGoOrchestrator},
+			},
+		},
+	}
+	service := Service{
+		Store:    store,
+		Registry: registry,
+		NewTracker: func(projects.Manifest, SyncOptions) (tracker.Tracker, error) {
+			return fake, nil
+		},
+	}
+
+	if _, err := service.SyncProject(ctx, SyncOptions{ProjectKey: "alpha"}); err != nil {
+		t.Fatalf("SyncProject() error = %v", err)
+	}
+	issues, err := store.ListExternalIssues(ctx, sqlite.ListExternalIssuesParams{Repo: "acme/alpha", SyncStatus: "eligible"})
+	if err != nil {
+		t.Fatalf("ListExternalIssues() error = %v", err)
+	}
+	wantCriteria := "GitHub issue intake preserves criteria\nPrompt rendering reads persisted criteria"
+	if len(issues) != 1 || strings.Join(issues[0].AcceptanceCriteria, "\n") != wantCriteria {
+		t.Fatalf("synced issues = %+v, want criteria %q", issues, wantCriteria)
+	}
+
+	summary, err := service.ReconcileProject(ctx, ReconcileOptions{ProjectKey: "alpha"})
+	if err != nil {
+		t.Fatalf("ReconcileProject() error = %v", err)
+	}
+	if summary.Created != 1 || summary.Linked != 1 {
+		t.Fatalf("summary = %+v, want created and linked work item", summary)
+	}
+
+	project, err := store.GetProjectByKey(ctx, "alpha")
+	if err != nil {
+		t.Fatalf("GetProjectByKey(alpha) error = %v", err)
+	}
+	task, err := store.GetTaskByProjectAndKey(ctx, project.ID, "github-issue-68")
+	if err != nil {
+		t.Fatalf("GetTaskByProjectAndKey() error = %v", err)
+	}
+	if strings.Join(task.AcceptanceCriteria, "\n") != wantCriteria {
+		t.Fatalf("task.AcceptanceCriteria = %#v, want %q", task.AcceptanceCriteria, wantCriteria)
+	}
+
+	var payloadJSON string
+	if err := store.DB().QueryRowContext(ctx, `
+		SELECT payload_json
+		FROM task_intakes
+		WHERE task_id = ? AND source = 'github_issue' AND intake_type = 'external_issue'
+	`, task.ID).Scan(&payloadJSON); err != nil {
+		t.Fatalf("task intake payload query: %v", err)
+	}
+	var payload struct {
+		AcceptanceCriteria []string `json:"acceptance_criteria"`
+	}
+	if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
+		t.Fatalf("unmarshal intake payload: %v", err)
+	}
+	if strings.Join(payload.AcceptanceCriteria, "\n") != wantCriteria {
+		t.Fatalf("payload.AcceptanceCriteria = %#v, want %q", payload.AcceptanceCriteria, wantCriteria)
 	}
 }
 
