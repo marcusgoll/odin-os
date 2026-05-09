@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -350,6 +351,19 @@ func (service Service) EvaluateDue(ctx context.Context, now time.Time) (DueEvalu
 			result.Errored++
 			continue
 		}
+		rule, err = service.applyWorkspaceQuietHours(ctx, trigger, rule)
+		if err != nil {
+			if _, markErr := service.Store.MarkAutomationTriggerErrored(ctx, sqlite.MarkAutomationTriggerErroredParams{
+				WorkspaceID: trigger.WorkspaceID,
+				Key:         trigger.Key,
+				Reason:      "quiet-hours-policy",
+				Error:       err.Error(),
+			}); markErr != nil {
+				return result, markErr
+			}
+			result.Errored++
+			continue
+		}
 		if deferredUntil, ok, err := quietHoursDeferral(rule, now.UTC()); err != nil {
 			if _, markErr := service.Store.MarkAutomationTriggerErrored(ctx, sqlite.MarkAutomationTriggerErroredParams{
 				WorkspaceID: trigger.WorkspaceID,
@@ -412,6 +426,40 @@ func (service Service) EvaluateDue(ctx context.Context, now time.Time) (DueEvalu
 		result.Results = append(result.Results, fire)
 	}
 	return result, nil
+}
+
+func (service Service) applyWorkspaceQuietHours(ctx context.Context, trigger sqlite.AutomationTrigger, rule scheduleRule) (scheduleRule, error) {
+	if strings.TrimSpace(rule.QuietHours) != "" {
+		return rule, nil
+	}
+	workspace, err := service.Store.GetWorkspaceByKey(ctx, defaultTriggerString(trigger.WorkspaceID, "default"))
+	if errors.Is(err, sql.ErrNoRows) {
+		return rule, nil
+	}
+	if err != nil {
+		return rule, err
+	}
+	profile, err := service.Store.GetWorkspaceProfile(ctx, workspace.ID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return rule, nil
+	}
+	if err != nil {
+		return rule, err
+	}
+	var preferences struct {
+		QuietHours string `json:"quiet_hours"`
+	}
+	if strings.TrimSpace(profile.PreferencesJSON) == "" {
+		return rule, nil
+	}
+	if err := json.Unmarshal([]byte(profile.PreferencesJSON), &preferences); err != nil {
+		return rule, fmt.Errorf("workspace profile preferences JSON is invalid: %w", err)
+	}
+	if quietHours := strings.TrimSpace(preferences.QuietHours); quietHours != "" {
+		rule.QuietHours = quietHours
+		rule.QuietTimezone = "UTC"
+	}
+	return rule, nil
 }
 
 func (service Service) EvaluateEvents(ctx context.Context) (DueEvaluationResult, error) {

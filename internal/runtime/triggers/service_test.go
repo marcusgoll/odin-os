@@ -175,6 +175,57 @@ func TestEvaluateDueReschedulesCronRuleFromDueWindow(t *testing.T) {
 	}
 }
 
+func TestEvaluateDueUsesWorkspaceProfileQuietHoursByDefault(t *testing.T) {
+	ctx := context.Background()
+	store := openTriggerStore(t)
+	defer store.Close()
+
+	workspace := seedDefaultWorkspace(t, ctx, store)
+	if _, err := store.UpsertWorkspaceProfile(ctx, sqlite.UpsertWorkspaceProfileParams{
+		WorkspaceID:         workspace.ID,
+		PreferencesJSON:     `{"quiet_hours":"02:00-06:00"}`,
+		BoundariesJSON:      `{}`,
+		CadenceDefaultsJSON: `{}`,
+	}); err != nil {
+		t.Fatalf("UpsertWorkspaceProfile() error = %v", err)
+	}
+
+	now := time.Date(2026, 5, 5, 3, 30, 0, 0, time.UTC)
+	dueAt := time.Date(2026, 5, 5, 3, 0, 0, 0, time.UTC)
+	store.Now = func() time.Time {
+		return now
+	}
+	seedTrigger(t, ctx, store, sqlite.UpsertAutomationTriggerParams{
+		Key:            "profile-quiet",
+		RuleJSON:       `{"summary":"profile quiet proof","cadence":"1h"}`,
+		RuleSummary:    "profile quiet proof",
+		WorkItemTitle:  "Profile quiet proof",
+		NextEligibleAt: &dueAt,
+	})
+
+	result, err := Service{Store: store}.EvaluateDue(ctx, now)
+	if err != nil {
+		t.Fatalf("EvaluateDue() error = %v", err)
+	}
+	if result.Evaluated != 1 || result.Deferred != 1 || result.Materialized != 0 || len(result.Deferrals) != 1 {
+		t.Fatalf("EvaluateDue() = %+v, want one profile quiet-hours deferral and no materialized work", result)
+	}
+	wantDeferredUntil := time.Date(2026, 5, 5, 6, 0, 0, 0, time.UTC)
+	if !result.Deferrals[0].DeferredUntil.Equal(wantDeferredUntil) {
+		t.Fatalf("DeferredUntil = %s, want %s", result.Deferrals[0].DeferredUntil, wantDeferredUntil)
+	}
+	trigger, err := store.GetAutomationTriggerByWorkspaceKey(ctx, "default", "profile-quiet")
+	if err != nil {
+		t.Fatalf("GetAutomationTriggerByWorkspaceKey() error = %v", err)
+	}
+	if trigger.LastWorkItemID != nil {
+		t.Fatalf("LastWorkItemID = %d, want no work item during quiet hours", *trigger.LastWorkItemID)
+	}
+	if trigger.NextEligibleAt == nil || !trigger.NextEligibleAt.Equal(wantDeferredUntil) {
+		t.Fatalf("NextEligibleAt = %v, want deferred until %s", trigger.NextEligibleAt, wantDeferredUntil)
+	}
+}
+
 func TestEvaluateDueMarksInvalidTriggerRuleErroredAndContinues(t *testing.T) {
 	ctx := context.Background()
 	store := openTriggerStore(t)
@@ -231,6 +282,25 @@ func openTriggerStore(t *testing.T) *sqlite.Store {
 		t.Fatalf("Migrate() error = %v", err)
 	}
 	return store
+}
+
+func seedDefaultWorkspace(t *testing.T, ctx context.Context, store *sqlite.Store) sqlite.Workspace {
+	t.Helper()
+	if workspace, err := store.GetWorkspaceByKey(ctx, "default"); err == nil {
+		return workspace
+	}
+	workspace, err := store.CreateWorkspace(ctx, sqlite.CreateWorkspaceParams{
+		Key:                 "default",
+		Name:                "Default Workspace",
+		OwnerRef:            "operator",
+		DefaultCompanionKey: "primary",
+		Status:              "active",
+		PolicyJSON:          `{}`,
+	})
+	if err != nil {
+		t.Fatalf("CreateWorkspace(default) error = %v", err)
+	}
+	return workspace
 }
 
 func seedTrigger(t *testing.T, ctx context.Context, store *sqlite.Store, params sqlite.UpsertAutomationTriggerParams) sqlite.AutomationTrigger {
