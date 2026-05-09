@@ -3740,6 +3740,19 @@ func runStatus(ctx context.Context, app bootstrap.App, cfg appconfig.Config, arg
 	if err != nil {
 		return err
 	}
+	healthService := newHealthService(app, healthsvc.DefaultConfig(), cfg)
+	readinessReport, ready, err := healthService.Readiness(ctx, len(app.RegistryDiagnostics) == 0)
+	if err != nil {
+		return err
+	}
+	runtimeStatus := "unknown"
+	runtimeState, err := app.Store.GetRuntimeState(ctx)
+	if err == nil {
+		runtimeStatus = runtimeState.Status
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	workerDispatch := healthsvc.NewWorkerDispatchStatus(ready, runtimeStatus, readinessReport.Status)
 
 	if jsonOutput {
 		companionSwarmCounts := struct {
@@ -3769,11 +3782,12 @@ func runStatus(ctx context.Context, app bootstrap.App, cfg appconfig.Config, arg
 			"project_transition_ownership": snapshot.ProjectTransitionOwnership,
 			"companion_swarm_counts":       companionSwarmCounts,
 			"companion_swarms":             snapshot.CompanionSwarms,
+			"worker_dispatch":              workerDispatch,
 		})
 	}
 
 	companionSwarmCount := len(snapshot.CompanionSwarms)
-	_, err = fmt.Fprintf(stdout, "health=%s pending_approvals=%d stalled_runs=%d active_runs=%d project_transitions=%d companion_swarms=%d registry_healthy=%t\n",
+	_, err = fmt.Fprintf(stdout, "health=%s pending_approvals=%d stalled_runs=%d active_runs=%d project_transitions=%d companion_swarms=%d registry_healthy=%t worker_dispatch=%s dry_run=%t read_only=%t\n",
 		summary.Status,
 		len(snapshot.ApprovalsWaiting),
 		len(snapshot.StalledRuns),
@@ -3781,6 +3795,9 @@ func runStatus(ctx context.Context, app bootstrap.App, cfg appconfig.Config, arg
 		len(snapshot.ProjectTransitions),
 		companionSwarmCount,
 		summary.RegistryHealthy,
+		workerDispatch.Mode,
+		workerDispatch.DryRun,
+		workerDispatch.ReadOnly,
 	)
 	return err
 }

@@ -249,6 +249,14 @@ func TestOperationalHandlerExposesDashboardStatusWithoutSecretsOrTmuxDependency(
 		Runtime      struct {
 			Status string `json:"status"`
 		} `json:"runtime"`
+		WorkerDispatch struct {
+			Mode     string `json:"mode"`
+			Enabled  bool   `json:"enabled"`
+			DryRun   bool   `json:"dry_run"`
+			ReadOnly bool   `json:"read_only"`
+			Source   string `json:"source"`
+			Reason   string `json:"reason"`
+		} `json:"worker_dispatch"`
 		Counts struct {
 			WorkItems         int `json:"work_items"`
 			ActiveRunAttempts int `json:"active_run_attempts"`
@@ -264,6 +272,9 @@ func TestOperationalHandlerExposesDashboardStatusWithoutSecretsOrTmuxDependency(
 	}
 	if status.HealthStatus != "healthy" || !status.Ready || status.Runtime.Status != "ready" {
 		t.Fatalf("/status = %+v, want healthy ready runtime", status)
+	}
+	if status.WorkerDispatch.Mode != "live" || !status.WorkerDispatch.Enabled || status.WorkerDispatch.DryRun || status.WorkerDispatch.ReadOnly || status.WorkerDispatch.Source != "runtime_readiness" || status.WorkerDispatch.Reason != "" {
+		t.Fatalf("/status worker_dispatch = %+v, want live non-dry-run non-read-only runtime readiness status", status.WorkerDispatch)
 	}
 	if status.Counts.WorkItems == 0 || status.Counts.ActiveRunAttempts == 0 || status.Counts.PendingApprovals == 0 {
 		t.Fatalf("/status counts = %+v, want runtime-state-backed counts", status.Counts)
