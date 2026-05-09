@@ -17,6 +17,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode"
 
 	"github.com/google/uuid"
 	apihttp "odin-os/internal/api/http"
@@ -1925,15 +1926,15 @@ func buildIntakeProcessOutcome(ctx context.Context, store *sqlite.Store, item sq
 	notes.Dedupe = intakeDedupeReview{Result: "unique"}
 	if duplicate != nil {
 		notes.Dedupe = intakeDedupeReview{
-			Result:             "duplicate_linked",
-			CanonicalIntakeKey: rawIntakeKey(*duplicate),
+			Result:             duplicate.Result,
+			CanonicalIntakeKey: rawIntakeKey(duplicate.CanonicalIntakeItemID),
 		}
 		notes.Routing = intakeRoutingResult{Outcome: "duplicate_linked_or_suppressed", ProjectKey: item.ScopeKey}
 		outcome := intakeProcessOutcome{
 			status:                "duplicate_linked_or_suppressed",
-			summary:               "Duplicate raw intake linked to " + rawIntakeKey(*duplicate),
-			canonicalIntakeItemID: duplicate,
-			suppressionReason:     "duplicate_dedupe_key",
+			summary:               "Duplicate raw intake linked to " + rawIntakeKey(duplicate.CanonicalIntakeItemID),
+			canonicalIntakeItemID: &duplicate.CanonicalIntakeItemID,
+			suppressionReason:     duplicate.SuppressionReason,
 			notes:                 notes,
 		}
 		return outcome, nil
@@ -2057,10 +2058,13 @@ func classifyIntakeItem(item sqlite.IntakeItem) intakeClassification {
 	return intakeClassification{Result: "actionable_request", Reason: "intake has enough subject detail for a draft review artifact"}
 }
 
-func findCanonicalDuplicate(ctx context.Context, store *sqlite.Store, item sqlite.IntakeItem) (*int64, error) {
-	if strings.TrimSpace(item.DedupeKey) == "" {
-		return nil, nil
-	}
+type intakeDuplicateMatch struct {
+	CanonicalIntakeItemID int64
+	Result                string
+	SuppressionReason     string
+}
+
+func findCanonicalDuplicate(ctx context.Context, store *sqlite.Store, item sqlite.IntakeItem) (*intakeDuplicateMatch, error) {
 	items, err := store.ListIntakeItems(ctx, sqlite.ListIntakeItemsParams{WorkspaceID: item.WorkspaceID})
 	if err != nil {
 		return nil, err
@@ -2069,12 +2073,62 @@ func findCanonicalDuplicate(ctx context.Context, store *sqlite.Store, item sqlit
 		if candidate.ID >= item.ID {
 			continue
 		}
-		if candidate.DedupeKey == item.DedupeKey {
-			id := candidate.ID
-			return &id, nil
+		if strings.TrimSpace(item.DedupeKey) != "" && candidate.DedupeKey == item.DedupeKey {
+			return &intakeDuplicateMatch{
+				CanonicalIntakeItemID: candidate.ID,
+				Result:                "duplicate_linked",
+				SuppressionReason:     "duplicate_dedupe_key",
+			}, nil
+		}
+	}
+
+	subjectKey := normalizedIntakeSubjectDedupeKey(item)
+	if subjectKey == "" {
+		return nil, nil
+	}
+	for _, candidate := range items {
+		if candidate.ID >= item.ID {
+			continue
+		}
+		if !sameIntakeRoutingScope(candidate, item) {
+			continue
+		}
+		if normalizedIntakeSubjectDedupeKey(candidate) == subjectKey {
+			return &intakeDuplicateMatch{
+				CanonicalIntakeItemID: candidate.ID,
+				Result:                "near_duplicate_linked",
+				SuppressionReason:     "near_duplicate_subject",
+			}, nil
 		}
 	}
 	return nil, nil
+}
+
+func sameIntakeRoutingScope(left sqlite.IntakeItem, right sqlite.IntakeItem) bool {
+	return left.WorkspaceID == right.WorkspaceID &&
+		left.Scope == right.Scope &&
+		left.ScopeKey == right.ScopeKey &&
+		normalizedIntakeType(left.EventKind) == normalizedIntakeType(right.EventKind)
+}
+
+func normalizedIntakeSubjectDedupeKey(item sqlite.IntakeItem) string {
+	if classifyIntakeItem(item).Result == "ambiguous" {
+		return ""
+	}
+	var builder strings.Builder
+	lastWasSpace := true
+	for _, r := range strings.ToLower(item.Subject) {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			builder.WriteRune(r)
+			lastWasSpace = false
+			continue
+		}
+		if !lastWasSpace {
+			builder.WriteByte(' ')
+			lastWasSpace = true
+		}
+	}
+	return strings.TrimSpace(builder.String())
 }
 
 func intakeProcessingEvents(itemID int64, status string, notes intakeProcessingNotes, canonical *int64) []sqlite.IntakeItemProcessingEvent {

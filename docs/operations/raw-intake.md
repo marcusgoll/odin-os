@@ -45,6 +45,32 @@ odin intake raw show <intake-id|dedupe-key> [--json]
 `show --json` includes the stored payload evidence and processing status when
 the item has moved through intake processing or review.
 
+## Process
+
+Use processing to classify a raw item into an auditable review outcome:
+
+```bash
+odin intake process --id <intake-id|dedupe-key> [--json]
+```
+
+Processing:
+
+- appends `intake.processing_started`, `intake.classified`,
+  `intake.dedupe_reviewed`, `intake.routed`, and `intake.processed` events
+- routes clear items to `review_required` with a draft artifact, not a Work Item
+- routes ambiguous items to `needs_clarification`
+- links exact duplicate dedupe-key hits and deterministic normalized-title
+  near-duplicates to the earlier canonical Intake Item as
+  `duplicate_linked_or_suppressed`
+- preserves every raw Intake Item and its payload evidence, including duplicate
+  arrivals
+- does not create a Work Item, Run Attempt, approval, dispatch, branch, PR, or
+  external mutation
+
+Goal-like raw items may create a reviewable unapproved Goal with the intake row
+linked to the created goal. Goal conversion does not approve, tick, run, or
+mutate external systems.
+
 ## Boundary
 
 `odin work intake` remains the GitHub issue sync surface. It is not the raw

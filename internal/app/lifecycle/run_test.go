@@ -746,6 +746,72 @@ func TestRunIntakeProcessCreatesReviewStatesWithoutExecution(t *testing.T) {
 	}
 }
 
+func TestRunIntakeProcessLinksNearDuplicateWithoutCreatingWork(t *testing.T) {
+	t.Parallel()
+
+	root := testRepoRoot(t)
+	payloadPath := filepath.Join(t.TempDir(), "payload.json")
+	if err := os.WriteFile(payloadPath, []byte(`{"body":"prepare a careful ticket for review"}`), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	createRaw := func(title, dedup string) {
+		t.Helper()
+		if err := Run(context.Background(), root, []string{
+			"intake", "raw", "create",
+			"--source", "operator",
+			"--project", "odin-core",
+			"--title", title,
+			"--type", "request",
+			"--dedup-key", dedup,
+			"--requested-by", "codex",
+			"--payload-file", payloadPath,
+			"--json",
+		}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+			t.Fatalf("Run(intake raw create %q) error = %v", title, err)
+		}
+	}
+	createRaw("Build governed intake process review", "near-duplicate-a")
+	createRaw("build governed intake process review.", "near-duplicate-b")
+
+	if err := Run(context.Background(), root, []string{"intake", "process", "--id", "intake-1", "--json"}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+		t.Fatalf("Run(intake process canonical) error = %v", err)
+	}
+
+	var duplicateOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"intake", "process", "--id", "intake-2", "--json"}, strings.NewReader(""), &duplicateOutput); err != nil {
+		t.Fatalf("Run(intake process near duplicate) error = %v", err)
+	}
+	for _, want := range []string{
+		`"status": "duplicate_linked_or_suppressed"`,
+		`"canonical_intake_key": "intake-1"`,
+		`"dedupe_result": "near_duplicate_linked"`,
+		`"suppression_reason": "near_duplicate_subject"`,
+	} {
+		if !strings.Contains(duplicateOutput.String(), want) {
+			t.Fatalf("duplicate output = %s, want %s", duplicateOutput.String(), want)
+		}
+	}
+
+	var showOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"intake", "raw", "show", "intake-2", "--json"}, strings.NewReader(""), &showOutput); err != nil {
+		t.Fatalf("Run(intake raw show near duplicate) error = %v", err)
+	}
+	if output := showOutput.String(); !strings.Contains(output, `"payload": {`) || !strings.Contains(output, `"canonical_intake_key": "intake-1"`) {
+		t.Fatalf("show output = %s, want preserved raw evidence and canonical link", output)
+	}
+
+	for _, args := range [][]string{{"jobs", "--json"}, {"runs", "--json"}, {"approvals", "all", "--json"}} {
+		var output bytes.Buffer
+		if err := Run(context.Background(), root, args, strings.NewReader(""), &output); err != nil {
+			t.Fatalf("Run(%v) error = %v", args, err)
+		}
+		if !strings.Contains(output.String(), `[]`) {
+			t.Fatalf("Run(%v) output = %s, want empty list", args, output.String())
+		}
+	}
+}
+
 func TestRunIntakeProcessDerivesTypeSpecificRoutingAndIntent(t *testing.T) {
 	t.Parallel()
 
