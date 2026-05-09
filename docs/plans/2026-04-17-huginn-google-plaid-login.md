@@ -161,7 +161,7 @@ Run:
 
 ```bash
 export ODIN_CODEX_DRIVER="$PWD/scripts/drivers/codex-headless.sh"
-export ODIN_CODEX_SANDBOX_MODE="danger-full-access"
+export ODIN_CODEX_SANDBOX_MODE="workspace-write"
 export ODIN_BROWSER_SERVER_URL="http://127.0.0.1:19227"
 ./bin/odin
 ```

@@ -89,8 +89,8 @@ orchestrator risk surface, not on a greenfield target.
 The following issues must be fixed before Odin OS can safely run real
 unattended Codex implementation workers:
 
-1. `scripts/drivers/codex-headless.sh` still supports
-   `danger-full-access` through `--dangerously-bypass-approvals-and-sandbox`.
+1. Codex `danger-full-access` is now blocked in the live driver and Go runner;
+   keep any parallel worker launch path from reintroducing sandbox bypass flags.
 2. `scripts/drivers/codex-headless.sh` can extract command text from a prompt
    and execute it through `bash -c`.
 3. Canonical Codex execution inherits the full daemon environment when launching
@@ -108,4 +108,3 @@ unattended Codex implementation workers:
 - This review does not implement a new runner, tracker, dashboard, or
   orchestrator loop.
 - This review does not remove legacy scripts or compatibility paths.
-
