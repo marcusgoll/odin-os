@@ -943,13 +943,28 @@ func (store *Store) FireAutomationTrigger(ctx context.Context, params FireAutoma
 			return err
 		}
 
-		project, err := store.getProjectTx(ctx, tx, trigger.ProjectID)
-		if err != nil {
-			return err
-		}
-		task, err := store.createAutomationTriggerTaskTx(ctx, tx, trigger, project, materializationKey, now)
-		if err != nil {
-			return err
+		var task Task
+		createdWorkItem := true
+		if params.ReuseTaskID != nil {
+			var err error
+			task, err = store.getTaskTx(ctx, tx, *params.ReuseTaskID)
+			if err != nil {
+				return err
+			}
+			if task.ProjectID != trigger.ProjectID {
+				return fmt.Errorf("automation trigger %s cannot reuse task %d from project %d", trigger.Key, task.ID, task.ProjectID)
+			}
+			createdWorkItem = false
+		} else {
+			project, err := store.getProjectTx(ctx, tx, trigger.ProjectID)
+			if err != nil {
+				return err
+			}
+			task, err = store.createAutomationTriggerTaskTx(ctx, tx, trigger, project, materializationKey, now)
+			if err != nil {
+				return err
+			}
+			eventScope = project.Scope
 		}
 		materialization, err := store.createAutomationTriggerMaterializationTx(ctx, tx, trigger.ID, materializationKey, task.ID, reason, requestedBy, now)
 		if err != nil {
@@ -962,8 +977,7 @@ func (store *Store) FireAutomationTrigger(ctx context.Context, params FireAutoma
 		if err != nil {
 			return err
 		}
-		eventScope = project.Scope
-		if err := appendAutomationTriggerEvaluatedEvent(ctx, tx, updated, eventScope, source, materializationKey, true, params.SourceEventID, params.SourceEventType, now); err != nil {
+		if err := appendAutomationTriggerEvaluatedEvent(ctx, tx, updated, eventScope, source, materializationKey, createdWorkItem, params.SourceEventID, params.SourceEventType, now); err != nil {
 			return err
 		}
 		if err := appendEventTx(ctx, tx, eventInsert{
@@ -992,7 +1006,7 @@ func (store *Store) FireAutomationTrigger(ctx context.Context, params FireAutoma
 			Trigger:         updated,
 			Materialization: materialization,
 			WorkItem:        task,
-			CreatedWorkItem: true,
+			CreatedWorkItem: createdWorkItem,
 		}
 		return nil
 	})

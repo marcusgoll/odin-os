@@ -175,6 +175,130 @@ func TestEvaluateDueReschedulesCronRuleFromDueWindow(t *testing.T) {
 	}
 }
 
+func TestEvaluateDueUsesWorkspaceProfileQuietHoursByDefault(t *testing.T) {
+	ctx := context.Background()
+	store := openTriggerStore(t)
+	defer store.Close()
+
+	workspace := seedDefaultWorkspace(t, ctx, store)
+	if _, err := store.UpsertWorkspaceProfile(ctx, sqlite.UpsertWorkspaceProfileParams{
+		WorkspaceID:         workspace.ID,
+		PreferencesJSON:     `{"quiet_hours":"02:00-06:00"}`,
+		BoundariesJSON:      `{}`,
+		CadenceDefaultsJSON: `{}`,
+	}); err != nil {
+		t.Fatalf("UpsertWorkspaceProfile() error = %v", err)
+	}
+
+	now := time.Date(2026, 5, 5, 3, 30, 0, 0, time.UTC)
+	dueAt := time.Date(2026, 5, 5, 3, 0, 0, 0, time.UTC)
+	store.Now = func() time.Time {
+		return now
+	}
+	seedTrigger(t, ctx, store, sqlite.UpsertAutomationTriggerParams{
+		Key:            "profile-quiet",
+		RuleJSON:       `{"summary":"profile quiet proof","cadence":"1h"}`,
+		RuleSummary:    "profile quiet proof",
+		WorkItemTitle:  "Profile quiet proof",
+		NextEligibleAt: &dueAt,
+	})
+
+	result, err := Service{Store: store}.EvaluateDue(ctx, now)
+	if err != nil {
+		t.Fatalf("EvaluateDue() error = %v", err)
+	}
+	if result.Evaluated != 1 || result.Deferred != 1 || result.Materialized != 0 || len(result.Deferrals) != 1 {
+		t.Fatalf("EvaluateDue() = %+v, want one profile quiet-hours deferral and no materialized work", result)
+	}
+	wantDeferredUntil := time.Date(2026, 5, 5, 6, 0, 0, 0, time.UTC)
+	if !result.Deferrals[0].DeferredUntil.Equal(wantDeferredUntil) {
+		t.Fatalf("DeferredUntil = %s, want %s", result.Deferrals[0].DeferredUntil, wantDeferredUntil)
+	}
+	trigger, err := store.GetAutomationTriggerByWorkspaceKey(ctx, "default", "profile-quiet")
+	if err != nil {
+		t.Fatalf("GetAutomationTriggerByWorkspaceKey() error = %v", err)
+	}
+	if trigger.LastWorkItemID != nil {
+		t.Fatalf("LastWorkItemID = %d, want no work item during quiet hours", *trigger.LastWorkItemID)
+	}
+	if trigger.NextEligibleAt == nil || !trigger.NextEligibleAt.Equal(wantDeferredUntil) {
+		t.Fatalf("NextEligibleAt = %v, want deferred until %s", trigger.NextEligibleAt, wantDeferredUntil)
+	}
+}
+
+func TestEvaluateDueBatchesCompatibleScheduleTriggersPreservingIntentAndAudit(t *testing.T) {
+	ctx := context.Background()
+	store := openTriggerStore(t)
+	defer store.Close()
+
+	now := time.Date(2026, 5, 5, 9, 30, 0, 0, time.UTC)
+	firstDueAt := time.Date(2026, 5, 5, 9, 5, 0, 0, time.UTC)
+	secondDueAt := time.Date(2026, 5, 5, 9, 20, 0, 0, time.UTC)
+	store.Now = func() time.Time {
+		return now
+	}
+	batchRule := `{"summary":"batch proof","batch_key":"ops-review","batch_window":"1h","execution_intent":"governance"}`
+	seedTrigger(t, ctx, store, sqlite.UpsertAutomationTriggerParams{
+		Key:            "batch-first",
+		RuleJSON:       batchRule,
+		RuleSummary:    "batch proof",
+		WorkItemTitle:  "First batched proof",
+		NextEligibleAt: &firstDueAt,
+	})
+	seedTrigger(t, ctx, store, sqlite.UpsertAutomationTriggerParams{
+		Key:            "batch-second",
+		RuleJSON:       batchRule,
+		RuleSummary:    "batch proof",
+		WorkItemTitle:  "Second batched proof",
+		NextEligibleAt: &secondDueAt,
+	})
+
+	result, err := Service{Store: store}.EvaluateDue(ctx, now)
+	if err != nil {
+		t.Fatalf("EvaluateDue() error = %v", err)
+	}
+	if result.Evaluated != 2 || result.Materialized != 1 || result.Deferred != 0 || result.Errored != 0 || len(result.Results) != 2 {
+		t.Fatalf("EvaluateDue() = %+v, want two evaluated triggers grouped into one work item", result)
+	}
+	firstTaskID := result.Results[0].WorkItem.ID
+	if firstTaskID == 0 || result.Results[1].WorkItem.ID != firstTaskID {
+		t.Fatalf("batched work item IDs = %d and %d, want same non-zero task", firstTaskID, result.Results[1].WorkItem.ID)
+	}
+	if result.Results[0].WorkItem.ExecutionIntent != "governance" || result.Results[0].WorkItem.ExecutionIntentSource != "trigger" {
+		t.Fatalf("batched work intent = %q/%q, want governance/trigger", result.Results[0].WorkItem.ExecutionIntent, result.Results[0].WorkItem.ExecutionIntentSource)
+	}
+	if !result.Results[0].CreatedWorkItem || result.Results[1].CreatedWorkItem {
+		t.Fatalf("CreatedWorkItem flags = %t/%t, want first create and second reuse", result.Results[0].CreatedWorkItem, result.Results[1].CreatedWorkItem)
+	}
+	for _, key := range []string{"batch-first", "batch-second"} {
+		trigger, err := store.GetAutomationTriggerByWorkspaceKey(ctx, "default", key)
+		if err != nil {
+			t.Fatalf("GetAutomationTriggerByWorkspaceKey(%s) error = %v", key, err)
+		}
+		if trigger.LastWorkItemID == nil || *trigger.LastWorkItemID != firstTaskID {
+			t.Fatalf("%s LastWorkItemID = %v, want shared task %d", key, trigger.LastWorkItemID, firstTaskID)
+		}
+	}
+
+	records, err := store.ListEvents(ctx, sqlite.ListEventsParams{})
+	if err != nil {
+		t.Fatalf("ListEvents() error = %v", err)
+	}
+	counts := map[events.Type]int{}
+	for _, record := range records {
+		counts[record.Type]++
+	}
+	if counts[events.EventTaskCreated] != 1 {
+		t.Fatalf("task.created count = %d, want one batched task", counts[events.EventTaskCreated])
+	}
+	if counts[events.EventAutomationTriggerMaterialized] != 2 {
+		t.Fatalf("automation_trigger.materialized count = %d, want one event per source trigger", counts[events.EventAutomationTriggerMaterialized])
+	}
+	if counts[events.EventAutomationTriggerFireRequested] != 2 {
+		t.Fatalf("automation_trigger.fire_requested count = %d, want one event per source trigger", counts[events.EventAutomationTriggerFireRequested])
+	}
+}
+
 func TestEvaluateDueMarksInvalidTriggerRuleErroredAndContinues(t *testing.T) {
 	ctx := context.Background()
 	store := openTriggerStore(t)
@@ -231,6 +355,25 @@ func openTriggerStore(t *testing.T) *sqlite.Store {
 		t.Fatalf("Migrate() error = %v", err)
 	}
 	return store
+}
+
+func seedDefaultWorkspace(t *testing.T, ctx context.Context, store *sqlite.Store) sqlite.Workspace {
+	t.Helper()
+	if workspace, err := store.GetWorkspaceByKey(ctx, "default"); err == nil {
+		return workspace
+	}
+	workspace, err := store.CreateWorkspace(ctx, sqlite.CreateWorkspaceParams{
+		Key:                 "default",
+		Name:                "Default Workspace",
+		OwnerRef:            "operator",
+		DefaultCompanionKey: "primary",
+		Status:              "active",
+		PolicyJSON:          `{}`,
+	})
+	if err != nil {
+		t.Fatalf("CreateWorkspace(default) error = %v", err)
+	}
+	return workspace
 }
 
 func seedTrigger(t *testing.T, ctx context.Context, store *sqlite.Store, params sqlite.UpsertAutomationTriggerParams) sqlite.AutomationTrigger {
