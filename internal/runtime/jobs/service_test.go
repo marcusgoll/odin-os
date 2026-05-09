@@ -699,6 +699,10 @@ func TestExecuteTaskWithRequestRendersPersistedAcceptanceCriteria(t *testing.T) 
 			t.Fatalf("captured prompt missing %q\n%s", want, prompt)
 		}
 	}
+	metadata := capturing.metadata()
+	if metadata["prompt_size_bytes"] != fmt.Sprintf("%d", prompts.PromptSizeBytes(prompt)) {
+		t.Fatalf("prompt_size_bytes = %q, want rendered prompt size", metadata["prompt_size_bytes"])
+	}
 }
 
 func TestExecuteTaskWithRequestRecordsWorkerPanicAsFailedRun(t *testing.T) {
@@ -2289,8 +2293,9 @@ func testPromptRenderer(t *testing.T) prompts.Renderer {
 }
 
 type capturingPromptExecutor struct {
-	key        string
-	lastPrompt atomic.Value
+	key          string
+	lastPrompt   atomic.Value
+	lastMetadata atomic.Value
 }
 
 func (executor *capturingPromptExecutor) Key() string { return executor.key }
@@ -2324,6 +2329,7 @@ func (*capturingPromptExecutor) Capabilities(context.Context) (contract.Capabili
 
 func (executor *capturingPromptExecutor) RunTask(_ context.Context, spec contract.TaskSpec) (contract.ExecutionResult, error) {
 	executor.lastPrompt.Store(spec.Prompt)
+	executor.lastMetadata.Store(spec.Metadata)
 	return contract.ExecutionResult{
 		Status: "completed",
 		Output: "task complete",
@@ -2349,6 +2355,15 @@ func (executor *capturingPromptExecutor) prompt() string {
 		}
 	}
 	return ""
+}
+
+func (executor *capturingPromptExecutor) metadata() map[string]string {
+	if value := executor.lastMetadata.Load(); value != nil {
+		if metadata, ok := value.(map[string]string); ok {
+			return metadata
+		}
+	}
+	return nil
 }
 
 type jobTestExecutor struct {

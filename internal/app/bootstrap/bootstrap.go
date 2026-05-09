@@ -17,6 +17,7 @@ import (
 	"odin-os/internal/core/workspaces"
 	"odin-os/internal/executors/contract"
 	executorrouter "odin-os/internal/executors/router"
+	"odin-os/internal/prompts"
 	"odin-os/internal/registry"
 	registryloader "odin-os/internal/registry/loader"
 	healthsvc "odin-os/internal/runtime/health"
@@ -34,6 +35,8 @@ type App struct {
 	SessionStore        clistate.SessionStore
 	ExecutorConfig      executorrouter.Config
 	Executors           map[string]contract.Executor
+	PromptRenderer      prompts.Renderer
+	PromptTemplateName  string
 	BootID              string
 	RuntimeState        runtimestate.Service
 }
@@ -67,6 +70,8 @@ var serviceOwnedProjectionSurfaces = []string{
 	"freshness",
 	"project_portfolio",
 }
+
+const defaultWorkerPromptTemplateName = "go-orchestrator"
 
 func WithBootID(ctx context.Context, bootID string) context.Context {
 	return context.WithValue(ctx, bootIDKey, bootID)
@@ -175,6 +180,7 @@ func Load(ctx context.Context, repoRoot string, runtimeRoot string) (App, error)
 		return App{}, err
 	}
 	executors := executorrouter.DefaultCatalogForRepo(repoRoot)
+	promptRenderer, promptTemplateName := promptRendererConfig(repoRoot)
 
 	if bootID != "" {
 		if err := initializeReadinessState(ctx, store, filepath.Join(repoRoot, "registry"), registrySnapshot, executorConfig, executors); err != nil {
@@ -196,11 +202,21 @@ func Load(ctx context.Context, repoRoot string, runtimeRoot string) (App, error)
 		SessionStore: clistate.SessionStore{
 			Path: filepath.Join(runtimeRoot, "state", "cache", "cli-session.json"),
 		},
-		ExecutorConfig: executorConfig,
-		Executors:      executors,
-		BootID:         bootID,
-		RuntimeState:   runtimeState,
+		ExecutorConfig:     executorConfig,
+		Executors:          executors,
+		PromptRenderer:     promptRenderer,
+		PromptTemplateName: promptTemplateName,
+		BootID:             bootID,
+		RuntimeState:       runtimeState,
 	}, nil
+}
+
+func promptRendererConfig(repoRoot string) (prompts.Renderer, string) {
+	root := filepath.Join(repoRoot, "prompts", "workers")
+	if _, err := os.Stat(filepath.Join(root, defaultWorkerPromptTemplateName+".md")); err != nil {
+		return nil, ""
+	}
+	return prompts.FileRenderer{Root: root}, defaultWorkerPromptTemplateName
 }
 
 func RefreshReadinessSamples(ctx context.Context, app App, registryHealthy bool) error {
