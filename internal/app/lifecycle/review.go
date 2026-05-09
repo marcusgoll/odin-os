@@ -174,7 +174,7 @@ func runReviewList(ctx context.Context, app bootstrap.App, jsonOutput bool, stdo
 		return err
 	}
 	for _, entry := range entries {
-		if _, err := fmt.Fprintf(stdout, "review=%s source=%s status=%s object=%s actions=%s\n", entry.QueueID, entry.SourceType, entry.Status, entry.ObjectKey, strings.Join(entry.AllowedActions, ",")); err != nil {
+		if err := writeReviewQueueEntryHuman(stdout, entry); err != nil {
 			return err
 		}
 	}
@@ -237,8 +237,49 @@ func runReviewShow(ctx context.Context, app bootstrap.App, queueID string, jsonO
 	if jsonOutput {
 		return commands.WriteJSON(stdout, reviewQueueShowView{Entry: entry, Detail: detail})
 	}
-	_, err = fmt.Fprintf(stdout, "review=%s source=%s status=%s object=%s actions=%s\n", entry.QueueID, entry.SourceType, entry.Status, entry.ObjectKey, strings.Join(entry.AllowedActions, ","))
+	return writeReviewQueueEntryHuman(stdout, entry)
+}
+
+func writeReviewQueueEntryHuman(stdout io.Writer, entry reviewQueueEntry) error {
+	if _, err := fmt.Fprintf(
+		stdout,
+		"review=%s type=%s source=%s source_type=%s risk=%s reason=%s status=%s object=%s actions=%s\n",
+		entry.QueueID,
+		reviewHumanValue(entry.Type),
+		reviewHumanValue(entry.Source),
+		reviewHumanValue(entry.SourceType),
+		reviewHumanValue(entry.Risk),
+		reviewHumanValue(entry.Reason),
+		reviewHumanValue(entry.Status),
+		reviewHumanValue(entry.ObjectKey),
+		reviewActionsHuman(entry.AllowedActions),
+	); err != nil {
+		return err
+	}
+	_, err := fmt.Fprintf(stdout, "next_steps=%s\n", reviewNextStepsHuman(entry))
 	return err
+}
+
+func reviewActionsHuman(actions []string) string {
+	if len(actions) == 0 {
+		return "none"
+	}
+	return strings.Join(actions, ",")
+}
+
+func reviewHumanValue(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "none"
+	}
+	return value
+}
+
+func reviewNextStepsHuman(entry reviewQueueEntry) string {
+	if len(entry.AllowedActions) == 0 {
+		return fmt.Sprintf("inspect with odin review show %s; no direct review action available", entry.QueueID)
+	}
+	return fmt.Sprintf("inspect with odin review show %s; act with odin review act %s <%s>", entry.QueueID, entry.QueueID, strings.Join(entry.AllowedActions, "|"))
 }
 
 func runReviewAct(ctx context.Context, app bootstrap.App, queueID string, action string, jsonOutput bool, stdout io.Writer) error {
