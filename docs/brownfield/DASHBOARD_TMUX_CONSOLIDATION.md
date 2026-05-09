@@ -37,7 +37,13 @@ If no tmux status provider is configured, `/status` returns:
 
 tmux absence must not prevent `odin serve` from starting. If the provider cannot read tmux state, `/status` still returns 200 and reports the provider error under `tmux.error`. Existing tmux/operator scripts remain compatible because `/status` consumes the current workspace service and does not replace or scrape script output as durable authority.
 
+## Pause/resume implementation
+
+- `POST /issues/{id}/pause` and `POST /issues/{id}/resume` are authenticated HTTP hooks wired through the `odin serve` admin adapter into SQLite-backed Work Item state.
+- Pause writes `status=blocked` and `blocked_reason=operator_paused`.
+- Resume only clears that operator pause hold and returns the Work Item to `queued`.
+- The endpoints do not mutate GitHub labels; `odin:paused` remains projection-only until a future approved tracker-mutation ticket.
+
 ## Remaining placeholders
 
-- `POST /issues/{id}/pause` and `POST /issues/{id}/resume` are authenticated HTTP hooks, but the `odin serve` admin adapter currently returns `admin_action_not_implemented`. Keep this behavior until issue pause/resume semantics are modeled in runtime state.
 - Existing `/healthz` and `/readyz` paths are kept for compatibility. Do not remove them without a migration ticket.

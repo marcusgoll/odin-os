@@ -20,6 +20,7 @@ import (
 	executorrouter "odin-os/internal/executors/router"
 	"odin-os/internal/prompts"
 	"odin-os/internal/runtime/checkpoints"
+	runtimeevents "odin-os/internal/runtime/events"
 	healthsvc "odin-os/internal/runtime/health"
 	"odin-os/internal/runtime/projections"
 	"odin-os/internal/runtime/recovery"
@@ -125,6 +126,12 @@ const (
 	admissionRetryLater     admissionOutcome = "retry_later"
 	checkpointRecoveryDelay                  = time.Second
 	defaultStaleRunTimeout                   = 30 * time.Minute
+	operatorPausedReason                     = "operator_paused"
+)
+
+var (
+	ErrOperatorPauseUnsupported  = errors.New("operator pause unsupported")
+	ErrOperatorResumeUnsupported = errors.New("operator resume unsupported")
 )
 
 type admissionDecision struct {
@@ -203,6 +210,133 @@ func (service Service) CreateTaskFromAct(ctx context.Context, resolved scope.Res
 func (service Service) CreateTask(ctx context.Context, params CreateTaskParams) (sqlite.Task, error) {
 	result, err := service.CreateTaskOnce(ctx, params)
 	return result.Task, err
+}
+
+func (service Service) PauseIssue(ctx context.Context, issueID int64) (sqlite.Task, error) {
+	if service.Store == nil {
+		return sqlite.Task{}, fmt.Errorf("job store is required")
+	}
+	task, err := service.resolveDashboardIssueTask(ctx, issueID)
+	if err != nil {
+		return sqlite.Task{}, err
+	}
+
+	switch task.Status {
+	case "queued":
+		return service.Store.BlockTask(ctx, sqlite.BlockTaskParams{
+			TaskID: task.ID,
+			Reason: operatorPausedReason,
+		})
+	case "blocked":
+		if task.BlockedReason == operatorPausedReason {
+			return task, nil
+		}
+		return task, fmt.Errorf("%w: task %d is blocked by %s", ErrOperatorPauseUnsupported, task.ID, task.BlockedReason)
+	case "running":
+		return task, fmt.Errorf("%w: task %d is running and run interruption is not supported", ErrOperatorPauseUnsupported, task.ID)
+	case "completed", "failed", "canceled":
+		return task, fmt.Errorf("%w: task %d is terminal with status %s", ErrOperatorPauseUnsupported, task.ID, task.Status)
+	default:
+		return task, fmt.Errorf("%w: task %d has unsupported status %s", ErrOperatorPauseUnsupported, task.ID, task.Status)
+	}
+}
+
+func (service Service) ResumeIssue(ctx context.Context, issueID int64) (sqlite.Task, error) {
+	if service.Store == nil {
+		return sqlite.Task{}, fmt.Errorf("job store is required")
+	}
+	task, err := service.resolveDashboardIssueTask(ctx, issueID)
+	if err != nil {
+		return sqlite.Task{}, err
+	}
+	if task.Status != "blocked" || task.BlockedReason != operatorPausedReason {
+		return task, fmt.Errorf("%w: task %d is %s/%s", ErrOperatorResumeUnsupported, task.ID, task.Status, task.BlockedReason)
+	}
+	return service.Store.RequeueTaskAt(ctx, sqlite.RequeueTaskAtParams{
+		TaskID:         task.ID,
+		NextEligibleAt: task.NextEligibleAt,
+	})
+}
+
+func (service Service) resolveDashboardIssueTask(ctx context.Context, issueID int64) (sqlite.Task, error) {
+	if issueID <= 0 {
+		return sqlite.Task{}, sql.ErrNoRows
+	}
+	task, err := service.taskForExternalIssue(ctx, issueID)
+	if err == nil {
+		return task, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return sqlite.Task{}, err
+	}
+	externalExists, err := service.externalIssueExists(ctx, issueID)
+	if err != nil {
+		return sqlite.Task{}, err
+	}
+	if externalExists {
+		return sqlite.Task{}, sql.ErrNoRows
+	}
+	return service.Store.GetTask(ctx, issueID)
+}
+
+func (service Service) externalIssueExists(ctx context.Context, issueID int64) (bool, error) {
+	var id int64
+	err := service.Store.DB().QueryRowContext(ctx, `
+		SELECT id
+		FROM external_issues
+		WHERE id = ?
+	`, issueID).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func (service Service) taskForExternalIssue(ctx context.Context, issueID int64) (sqlite.Task, error) {
+	records, err := service.Store.ListEvents(ctx, sqlite.ListEventsParams{})
+	if err != nil {
+		return sqlite.Task{}, err
+	}
+	externalEventIDs := make(map[int64]struct{})
+	for _, record := range records {
+		if record.StreamType == runtimeevents.StreamExternalEvent && record.StreamID == issueID && record.Type == runtimeevents.EventExternalGitHubIssue {
+			externalEventIDs[record.ID] = struct{}{}
+		}
+	}
+	if len(externalEventIDs) == 0 {
+		return sqlite.Task{}, sql.ErrNoRows
+	}
+
+	var taskID int64
+	for _, record := range records {
+		if record.Type != runtimeevents.EventAutomationTriggerMaterialized {
+			continue
+		}
+		var payload runtimeevents.AutomationTriggerMaterializedPayload
+		if err := json.Unmarshal(record.Payload, &payload); err != nil {
+			continue
+		}
+		if payload.SourceEventID == nil {
+			continue
+		}
+		if _, ok := externalEventIDs[*payload.SourceEventID]; !ok {
+			continue
+		}
+		if payload.TaskID != 0 {
+			taskID = payload.TaskID
+			continue
+		}
+		if record.TaskID != nil {
+			taskID = *record.TaskID
+		}
+	}
+	if taskID == 0 {
+		return sqlite.Task{}, sql.ErrNoRows
+	}
+	return service.Store.GetTask(ctx, taskID)
 }
 
 func (service Service) CreateTaskOnce(ctx context.Context, params CreateTaskParams) (CreateTaskResult, error) {

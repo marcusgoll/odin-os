@@ -152,6 +152,7 @@ type healthLoopDeps struct {
 type serveDashboardAdmin struct {
 	ImmediateNotReady *atomic.Bool
 	RuntimeState      runtimestate.Service
+	Jobs              jobs.Service
 	BootID            string
 	RuntimeRoot       string
 	Logger            *logs.Logger
@@ -195,18 +196,43 @@ func (admin serveDashboardAdmin) KillSwitchOff(context.Context) error {
 	return nil
 }
 
-func (admin serveDashboardAdmin) PauseIssue(_ context.Context, issueID int64) error {
-	logBackgroundEvent(admin.Logger, logs.LevelWarn, "dashboard_admin", "issue pause requested but not implemented", map[string]any{
+func (admin serveDashboardAdmin) PauseIssue(ctx context.Context, issueID int64) error {
+	task, err := admin.Jobs.PauseIssue(ctx, issueID)
+	if err != nil {
+		logBackgroundError(admin.Logger, "dashboard_admin", err)
+		return dashboardAdminIssueActionError(err)
+	}
+	logBackgroundEvent(admin.Logger, logs.LevelWarn, "dashboard_admin", "issue paused", map[string]any{
 		"external_issue_id": issueID,
+		"task_id":           task.ID,
+		"blocked_reason":    task.BlockedReason,
 	})
-	return apihttp.ErrAdminActionNotImplemented
+	return nil
 }
 
-func (admin serveDashboardAdmin) ResumeIssue(_ context.Context, issueID int64) error {
-	logBackgroundEvent(admin.Logger, logs.LevelWarn, "dashboard_admin", "issue resume requested but not implemented", map[string]any{
+func (admin serveDashboardAdmin) ResumeIssue(ctx context.Context, issueID int64) error {
+	task, err := admin.Jobs.ResumeIssue(ctx, issueID)
+	if err != nil {
+		logBackgroundError(admin.Logger, "dashboard_admin", err)
+		return dashboardAdminIssueActionError(err)
+	}
+	logBackgroundEvent(admin.Logger, logs.LevelInfo, "dashboard_admin", "issue resumed", map[string]any{
 		"external_issue_id": issueID,
+		"task_id":           task.ID,
+		"status":            task.Status,
 	})
-	return apihttp.ErrAdminActionNotImplemented
+	return nil
+}
+
+func dashboardAdminIssueActionError(err error) error {
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return fmt.Errorf("%w: issue or work item not found", apihttp.ErrAdminTargetNotFound)
+	case errors.Is(err, jobs.ErrOperatorPauseUnsupported), errors.Is(err, jobs.ErrOperatorResumeUnsupported):
+		return fmt.Errorf("%w: %v", apihttp.ErrAdminActionConflict, err)
+	default:
+		return err
+	}
 }
 
 // Run dispatches between the interactive shell and machine-oriented operational commands.
@@ -4853,9 +4879,13 @@ func runServe(ctx context.Context, app bootstrap.App, cfg appconfig.Config, stdo
 				Admin: serveDashboardAdmin{
 					ImmediateNotReady: &immediateNotReady,
 					RuntimeState:      stateService,
-					BootID:            bootID,
-					RuntimeRoot:       cfg.RuntimeRoot,
-					Logger:            logger,
+					Jobs: jobs.Service{
+						Store: app.Store,
+						Now:   now,
+					},
+					BootID:      bootID,
+					RuntimeRoot: cfg.RuntimeRoot,
+					Logger:      logger,
 				},
 				GitHubWebhookSecret: os.Getenv("ODIN_GITHUB_WEBHOOK_SECRET"),
 				GitHubIssueIngester: triggers.Service{Store: app.Store, Registry: app.Registry},

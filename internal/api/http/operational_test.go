@@ -750,6 +750,24 @@ func TestOperationalHandlerProtectsAdminActions(t *testing.T) {
 		t.Fatalf("KillSwitchOn calls = %d, want 1", admin.killSwitchOnCalls)
 	}
 
+	res = mustPost(t, server.URL+"/issues/not-a-number/pause", "dashboard-secret")
+	if res.StatusCode != http.StatusBadRequest {
+		t.Fatalf("POST /issues/not-a-number/pause status = %d, want %d", res.StatusCode, http.StatusBadRequest)
+	}
+	res.Body.Close()
+	if admin.pauseIssueID != 0 {
+		t.Fatalf("PauseIssue called for invalid issue id %d, want no call", admin.pauseIssueID)
+	}
+
+	res = mustPost(t, server.URL+"/issues/42/pause", "")
+	if res.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("POST /issues/42/pause without token status = %d, want %d", res.StatusCode, http.StatusUnauthorized)
+	}
+	res.Body.Close()
+	if admin.pauseIssueID != 0 {
+		t.Fatalf("PauseIssue called without token for issue id %d, want no call", admin.pauseIssueID)
+	}
+
 	res = mustPost(t, server.URL+"/issues/42/pause", "dashboard-secret")
 	if res.StatusCode != http.StatusOK {
 		t.Fatalf("POST /issues/42/pause status = %d, want %d", res.StatusCode, http.StatusOK)
@@ -757,6 +775,15 @@ func TestOperationalHandlerProtectsAdminActions(t *testing.T) {
 	res.Body.Close()
 	if admin.pauseIssueID != 42 {
 		t.Fatalf("PauseIssue issue id = %d, want 42", admin.pauseIssueID)
+	}
+
+	res = mustPost(t, server.URL+"/issues/42/resume", "dashboard-secret")
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("POST /issues/42/resume status = %d, want %d", res.StatusCode, http.StatusOK)
+	}
+	res.Body.Close()
+	if admin.resumeIssueID != 42 {
+		t.Fatalf("ResumeIssue issue id = %d, want 42", admin.resumeIssueID)
 	}
 }
 
@@ -1417,6 +1444,7 @@ func TestOperationalHandlerBrowserSessionHandoffCompleteRejectsInvalidStates(t *
 type recordingAdminActions struct {
 	killSwitchOnCalls int
 	pauseIssueID      int64
+	resumeIssueID     int64
 }
 
 func (admin *recordingAdminActions) KillSwitchOn(context.Context) error {
@@ -1433,7 +1461,8 @@ func (admin *recordingAdminActions) PauseIssue(_ context.Context, issueID int64)
 	return nil
 }
 
-func (admin *recordingAdminActions) ResumeIssue(context.Context, int64) error {
+func (admin *recordingAdminActions) ResumeIssue(_ context.Context, issueID int64) error {
+	admin.resumeIssueID = issueID
 	return nil
 }
 
