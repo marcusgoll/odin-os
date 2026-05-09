@@ -3157,6 +3157,8 @@ func TestRunTriggerOperatorWorkflowCreateShowTestAndAudit(t *testing.T) {
 	for _, want := range []string{
 		`"trigger_key": "operator-daily"`,
 		`"event_type": "automation_trigger.created"`,
+		`"event_type": "automation_trigger.tested"`,
+		`"decision": "defer"`,
 		`"audit_events"`,
 	} {
 		if !strings.Contains(auditOutput, want) {
@@ -3233,6 +3235,17 @@ func TestRunSchedulerTickDryRunExplainsDecisionsWithoutMutation(t *testing.T) {
 	}
 	if jobsOutput := run("jobs", "--json"); !strings.Contains(jobsOutput, `"jobs": []`) {
 		t.Fatalf("jobs output after scheduler dry-run = %s, want no materialized work", jobsOutput)
+	}
+	logsOutput := run("logs", "--json")
+	for _, want := range []string{
+		`"type": "scheduler.tick_evaluated"`,
+		`"dry_run": true`,
+		`"would_batch": 2`,
+		`"approval_required": 2`,
+	} {
+		if !strings.Contains(logsOutput, want) {
+			t.Fatalf("logs output after scheduler dry-run = %s, want %s", logsOutput, want)
+		}
 	}
 
 	humanOutput := run("scheduler", "tick", "now=2026-05-05T09:30:00Z", "recovery=false", "--dry-run")

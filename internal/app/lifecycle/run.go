@@ -3700,6 +3700,25 @@ func runSchedulerTick(ctx context.Context, app bootstrap.App, args []string, std
 			return err
 		}
 		view := schedulerPreviewTickView(now, preview)
+		auditScope, auditProjectID := schedulerTickAuditTarget(ctx, app)
+		if err := app.Store.RecordSchedulerTick(ctx, sqlite.RecordSchedulerTickParams{
+			Now:              now,
+			Scope:            auditScope,
+			ProjectID:        auditProjectID,
+			DryRun:           true,
+			Mutates:          false,
+			Evaluated:        view.TriggerEvaluation.Evaluated,
+			Materialized:     view.TriggerEvaluation.Materialized,
+			Deferred:         view.TriggerEvaluation.Deferred,
+			Errored:          view.TriggerEvaluation.Errored,
+			WouldRun:         view.WouldRun,
+			WouldDefer:       view.WouldDefer,
+			WouldBatch:       view.WouldBatch,
+			ApprovalRequired: view.ApprovalRequired,
+			RecoveryRan:      false,
+		}); err != nil {
+			return err
+		}
 		if jsonOutput {
 			return commands.WriteJSON(stdout, view)
 		}
@@ -3778,6 +3797,21 @@ func runSchedulerTick(ctx context.Context, app bootstrap.App, args []string, std
 			Decisions:    len(result.Decisions),
 			Outcomes:     len(result.Outcomes),
 		}
+	}
+	auditScope, auditProjectID := schedulerTickAuditTarget(ctx, app)
+	if err := app.Store.RecordSchedulerTick(ctx, sqlite.RecordSchedulerTickParams{
+		Now:          now,
+		Scope:        auditScope,
+		ProjectID:    auditProjectID,
+		DryRun:       false,
+		Mutates:      true,
+		Evaluated:    view.TriggerEvaluation.Evaluated,
+		Materialized: view.TriggerEvaluation.Materialized,
+		Deferred:     view.TriggerEvaluation.Deferred,
+		Errored:      view.TriggerEvaluation.Errored,
+		RecoveryRan:  view.RecoveryRan,
+	}); err != nil {
+		return err
 	}
 
 	if jsonOutput {
@@ -3865,6 +3899,21 @@ func schedulerTriggerRuleDetails(trigger sqlite.AutomationTrigger) (string, stri
 		schedule = "event:" + strings.TrimSpace(rule.EventType)
 	}
 	return schedule, strings.TrimSpace(rule.QuietHours), strings.TrimSpace(rule.BatchKey), strings.TrimSpace(rule.BatchWindow)
+}
+
+func schedulerTickAuditTarget(ctx context.Context, app bootstrap.App) (string, *int64) {
+	state, err := loadCLIState(app)
+	if err != nil {
+		return "runtime", nil
+	}
+	if state.Scope.Kind != cliscope.ScopeProject && state.Scope.Kind != cliscope.ScopeOdinCore {
+		return "runtime", nil
+	}
+	project, err := app.Store.GetProjectByKey(ctx, state.Scope.ProjectKey)
+	if err != nil {
+		return state.Scope.ProjectKey, nil
+	}
+	return project.Scope, &project.ID
 }
 
 func parseBoolEnv(value string) bool {

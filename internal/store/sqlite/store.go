@@ -1017,6 +1017,89 @@ func (store *Store) FireAutomationTrigger(ctx context.Context, params FireAutoma
 	return result, err
 }
 
+func (store *Store) RecordAutomationTriggerTest(ctx context.Context, params RecordAutomationTriggerTestParams) error {
+	now := store.now()
+	workspaceID := defaultString(params.WorkspaceID, "default")
+	key := strings.TrimSpace(params.Key)
+	return store.withTx(ctx, func(tx *sql.Tx) error {
+		trigger, err := store.getAutomationTriggerByWorkspaceKeyQuery(ctx, tx, workspaceID, key)
+		if err != nil {
+			return err
+		}
+		eventScope := store.automationTriggerEventScopeTx(ctx, tx, trigger)
+		payload := runtimeevents.AutomationTriggerTestedPayload{
+			WorkspaceID:      trigger.WorkspaceID,
+			Key:              trigger.Key,
+			Decision:         strings.TrimSpace(params.Decision),
+			Reason:           strings.TrimSpace(params.Reason),
+			QuietHourEffect:  strings.TrimSpace(params.QuietHourEffect),
+			BatchKey:         strings.TrimSpace(params.BatchKey),
+			BatchWindow:      strings.TrimSpace(params.BatchWindow),
+			ApprovalRequired: params.ApprovalRequired,
+			RecoveryState:    strings.TrimSpace(params.RecoveryState),
+			Mutates:          params.Mutates,
+			Envelope: automationTriggerEnvelope(trigger, FireAutomationTriggerParams{
+				WorkspaceID: trigger.WorkspaceID,
+				Key:         trigger.Key,
+				Source:      "test",
+				Reason:      strings.TrimSpace(params.Reason),
+				DueAt:       params.DueAt,
+			}, "test", "", strings.TrimSpace(params.RecoveryState), now),
+		}
+		if params.DueAt != nil {
+			payload.DueAt = params.DueAt.UTC().Format(time.RFC3339)
+		}
+		if params.NextRun != nil {
+			payload.NextRun = params.NextRun.UTC().Format(time.RFC3339)
+		}
+		return appendEventTx(ctx, tx, eventInsert{
+			StreamType: runtimeevents.StreamAutomationTrigger,
+			StreamID:   trigger.ID,
+			EventType:  runtimeevents.EventAutomationTriggerTested,
+			Scope:      eventScope,
+			ProjectID:  &trigger.ProjectID,
+			Payload:    payload,
+			OccurredAt: now,
+		})
+	})
+}
+
+func (store *Store) RecordSchedulerTick(ctx context.Context, params RecordSchedulerTickParams) error {
+	now := store.now()
+	tickAt := params.Now.UTC()
+	if tickAt.IsZero() {
+		tickAt = now
+	}
+	scope := strings.TrimSpace(params.Scope)
+	if scope == "" {
+		scope = "runtime"
+	}
+	return store.withTx(ctx, func(tx *sql.Tx) error {
+		return appendEventTx(ctx, tx, eventInsert{
+			StreamType: runtimeevents.StreamScheduler,
+			StreamID:   0,
+			EventType:  runtimeevents.EventSchedulerTickEvaluated,
+			Scope:      scope,
+			ProjectID:  cloneInt64Ptr(params.ProjectID),
+			Payload: runtimeevents.SchedulerTickEvaluatedPayload{
+				Now:              tickAt.Format(time.RFC3339),
+				DryRun:           params.DryRun,
+				Mutates:          params.Mutates,
+				Evaluated:        params.Evaluated,
+				Materialized:     params.Materialized,
+				Deferred:         params.Deferred,
+				Errored:          params.Errored,
+				WouldRun:         params.WouldRun,
+				WouldDefer:       params.WouldDefer,
+				WouldBatch:       params.WouldBatch,
+				ApprovalRequired: params.ApprovalRequired,
+				RecoveryRan:      params.RecoveryRan,
+			},
+			OccurredAt: now,
+		})
+	})
+}
+
 func (store *Store) DeferAutomationTrigger(ctx context.Context, params DeferAutomationTriggerParams) (AutomationTrigger, error) {
 	now := store.now()
 	var updated AutomationTrigger

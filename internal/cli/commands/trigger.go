@@ -112,6 +112,9 @@ func RunTrigger(ctx context.Context, service triggers.Service, args []string, st
 		if err != nil {
 			return err
 		}
+		if err := service.RecordTestAudit(ctx, result); err != nil {
+			return err
+		}
 		if jsonOutput {
 			return WriteJSON(stdout, newTriggerPreviewView(result))
 		}

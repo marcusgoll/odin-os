@@ -536,6 +536,31 @@ func (service Service) PreviewTrigger(ctx context.Context, workspaceID string, k
 	return result, nil
 }
 
+func (service Service) RecordTestAudit(ctx context.Context, result PreviewResult) error {
+	if service.Store == nil {
+		return fmt.Errorf("automation trigger store is required")
+	}
+	for _, decision := range result.Decisions {
+		if err := service.Store.RecordAutomationTriggerTest(ctx, sqlite.RecordAutomationTriggerTestParams{
+			WorkspaceID:      decision.Trigger.WorkspaceID,
+			Key:              decision.Trigger.Key,
+			Decision:         decision.Decision,
+			Reason:           decision.Reason,
+			DueAt:            decision.DueAt,
+			NextRun:          decision.NextEligibleAt,
+			QuietHourEffect:  decision.QuietHourEffect,
+			BatchKey:         decision.BatchKey,
+			BatchWindow:      decision.BatchWindow,
+			ApprovalRequired: decision.ApprovalRequired,
+			RecoveryState:    decision.RecoveryState,
+			Mutates:          false,
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (result *PreviewResult) append(decision PreviewDecision) {
 	result.Decisions = append(result.Decisions, decision)
 	if decision.Decision != "wait" && decision.Decision != "disabled" {

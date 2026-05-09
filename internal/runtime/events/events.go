@@ -23,6 +23,7 @@ const (
 	StreamIntakeItem         StreamType = "intake_item"
 	StreamExternalEvent      StreamType = "external_event"
 	StreamAutomationTrigger  StreamType = "automation_trigger"
+	StreamScheduler          StreamType = "scheduler"
 	StreamLearningProposal   StreamType = "learning_proposal"
 	StreamLearningEvaluation StreamType = "learning_evaluation"
 	StreamLearningPromotion  StreamType = "learning_promotion"
@@ -90,9 +91,11 @@ const (
 	EventAutomationTriggerFireRequested     Type = "automation_trigger.fire_requested"
 	EventAutomationTriggerEvaluated         Type = "automation_trigger.evaluated"
 	EventAutomationTriggerMaterialized      Type = "automation_trigger.materialized"
+	EventAutomationTriggerTested            Type = "automation_trigger.tested"
 	EventAutomationTriggerDeferred          Type = "automation_trigger.deferred"
 	EventAutomationTriggerErrored           Type = "automation_trigger.errored"
 	EventAutomationTriggerStatusChanged     Type = "automation_trigger.status_changed"
+	EventSchedulerTickEvaluated             Type = "scheduler.tick_evaluated"
 	EventProjectTransitionChanged           Type = "project.transition_changed"
 	EventProjectShadowObservationRecorded   Type = "project.shadow_observation_recorded"
 	EventProjectCompareReportRecorded       Type = "project.compare_report_recorded"
@@ -744,6 +747,22 @@ type AutomationTriggerMaterializedPayload struct {
 	Envelope           *AutomationTriggerEnvelope `json:"envelope,omitempty"`
 }
 
+type AutomationTriggerTestedPayload struct {
+	WorkspaceID      string                     `json:"workspace_id"`
+	Key              string                     `json:"key"`
+	Decision         string                     `json:"decision"`
+	Reason           string                     `json:"reason,omitempty"`
+	DueAt            string                     `json:"due_at,omitempty"`
+	NextRun          string                     `json:"next_run,omitempty"`
+	QuietHourEffect  string                     `json:"quiet_hour_effect,omitempty"`
+	BatchKey         string                     `json:"batch_key,omitempty"`
+	BatchWindow      string                     `json:"batch_window,omitempty"`
+	ApprovalRequired bool                       `json:"approval_required"`
+	RecoveryState    string                     `json:"recovery_state,omitempty"`
+	Mutates          bool                       `json:"mutates"`
+	Envelope         *AutomationTriggerEnvelope `json:"envelope,omitempty"`
+}
+
 type AutomationTriggerDeferredPayload struct {
 	WorkspaceID   string                     `json:"workspace_id"`
 	Key           string                     `json:"key"`
@@ -768,6 +787,21 @@ type AutomationTriggerStatusChangedPayload struct {
 	PreviousStatus string `json:"previous_status"`
 	Status         string `json:"status"`
 	Reason         string `json:"reason,omitempty"`
+}
+
+type SchedulerTickEvaluatedPayload struct {
+	Now              string `json:"now"`
+	DryRun           bool   `json:"dry_run"`
+	Mutates          bool   `json:"mutates"`
+	Evaluated        int    `json:"evaluated"`
+	Materialized     int    `json:"materialized"`
+	Deferred         int    `json:"deferred"`
+	Errored          int    `json:"errored"`
+	WouldRun         int    `json:"would_run,omitempty"`
+	WouldDefer       int    `json:"would_defer,omitempty"`
+	WouldBatch       int    `json:"would_batch,omitempty"`
+	ApprovalRequired int    `json:"approval_required,omitempty"`
+	RecoveryRan      bool   `json:"recovery_ran"`
 }
 
 type ProjectTransitionChangedPayload struct {

@@ -450,6 +450,38 @@ type FireAutomationTriggerResult struct {
 	CreatedWorkItem bool
 }
 
+type RecordAutomationTriggerTestParams struct {
+	WorkspaceID      string
+	Key              string
+	Decision         string
+	Reason           string
+	DueAt            *time.Time
+	NextRun          *time.Time
+	QuietHourEffect  string
+	BatchKey         string
+	BatchWindow      string
+	ApprovalRequired bool
+	RecoveryState    string
+	Mutates          bool
+}
+
+type RecordSchedulerTickParams struct {
+	Now              time.Time
+	Scope            string
+	ProjectID        *int64
+	DryRun           bool
+	Mutates          bool
+	Evaluated        int
+	Materialized     int
+	Deferred         int
+	Errored          int
+	WouldRun         int
+	WouldDefer       int
+	WouldBatch       int
+	ApprovalRequired int
+	RecoveryRan      bool
+}
+
 type DeferAutomationTriggerParams struct {
 	WorkspaceID   string
 	Key           string
