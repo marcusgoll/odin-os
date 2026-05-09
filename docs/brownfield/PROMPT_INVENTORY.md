@@ -26,8 +26,8 @@ This inventory covers authored prompt assets, prompt-like registry instructions,
 
 | Path | Purpose | Inputs | Outputs | Valid | Overlap | Recommendation |
 | --- | --- | --- | --- | --- | --- | --- |
-| `internal/prompts/renderer.go` | Go interface for rendering Odin-owned prompt templates into worker prompts. | Template name and `TemplateData` with WorkItemID and Role. | Rendered prompt string. | Compiles as scaffold if included, but is uncommitted and not wired to active runtime. | Overlaps TypeScript prompt renderer and current file-based prompts. | Refactor. Useful seam if connected to canonical prompt directory and executor contract. |
-| `src/prompts/index.ts` | TypeScript prompt renderer scaffold. | `WorkItem` and `RunAttempt` from TS orchestrator types. | Joined role/work item/boundary string. | TypeScript scaffold only; not Go-native. | Overlaps Go prompt renderer and prompt files. | Remove with TypeScript scaffold after explicit cleanup approval. |
+| `internal/prompts/renderer.go` | Go interface for rendering Odin-owned prompt templates into worker prompts. | Template name and `TemplateData` with WorkItemID and Role. | Rendered prompt string. | Compiles and is covered by `internal/prompts` tests; wiring remains limited to current runtime callers. | Overlaps current file-based prompts. | Refactor. Useful seam if connected to canonical prompt directory and executor contract. |
+| `src/prompts/index.ts` | Removed TypeScript prompt renderer scaffold. | Historical inputs were `WorkItem` and `RunAttempt` from TS orchestrator types. | Prior inventory preserved its useful summary as a joined role/work item/boundary string. | Absent from the current tree; no active TypeScript prompt source remains to migrate. | No active runtime overlap remains. | Keep removed; do not recreate a TypeScript prompt renderer. |
 
 ## Registry Instructions With Prompt Content
 
