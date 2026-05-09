@@ -82,13 +82,16 @@ remain the durable authority.
 - Worker prompts do not receive GitHub tokens from this adapter.
 - Dry-run mode returns projected results and exits before mutation requests.
 - Token-like strings in GitHub errors are replaced with `[REDACTED]`.
+- Live label, comment, issue-close, and follow-up issue mutations are governed
+  by `docs/contracts/github-tracker-mutations.md`.
 
 ## Remaining Cleanup Tickets
 
 1. Add live GitHub proof for read-only intake with an env-gated disposable
    issue/repository runbook.
-2. Add live mutation wiring only after approval gates and PR manager contracts
-   are specified.
+2. Add live mutation wiring only after
+   `docs/contracts/github-tracker-mutations.md` is implemented through an
+   operator-visible approval path; PR manager contracts remain separate.
 3. Add integration fixtures for `FetchIssueByID`, comments, label mutation, and
    follow-up issue creation.
 4. Keep `internal/adapters/github` empty unless a later ADR assigns it a

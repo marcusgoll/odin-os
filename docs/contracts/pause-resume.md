@@ -125,10 +125,10 @@ Allowed uses:
 
 - Odin may apply `odin:paused` to an external GitHub issue to mirror an
   Odin-owned runtime pause after that outbound mutation is explicitly approved
-  by a future tracker-mutation ticket.
+  through `docs/contracts/github-tracker-mutations.md`.
 - Odin may remove `odin:paused` from an external GitHub issue after the
-  Odin-owned runtime pause is resumed, under the same approved outbound
-  mutation path.
+  Odin-owned runtime pause is resumed, under the same approved outbound mutation
+  path.
 - Odin may store inbound labels in external issue source-fact records for audit
   or operator display.
 
@@ -158,8 +158,8 @@ The dashboard pause/resume implementation covers:
   eligible `queued` rows
 - resume refuses blocked Work Items whose `blocked_reason` belongs to approvals,
   denial, stale context, policy, or transition gates
-- pause/resume does not call GitHub unless a later approved tracker-mutation
-  ticket explicitly adds outbound label projection
+- pause/resume does not call GitHub unless a later implementation explicitly
+  wires the approval protocol in `docs/contracts/github-tracker-mutations.md`
 
 Follow-Up Obligation pause/resume behavior remains separate from dashboard Work
 Item pause/resume tests.
