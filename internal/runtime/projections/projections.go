@@ -1173,7 +1173,7 @@ func ListStalledRunViews(ctx context.Context, queryer Queryer, cutoff time.Time)
 		FROM runs r
 		JOIN tasks t ON t.id = r.task_id
 		JOIN projects p ON p.id = t.project_id
-		WHERE r.status = 'running'
+		WHERE r.status IN ('running', 'executing')
 		  AND r.started_at < ?
 		ORDER BY r.started_at ASC, r.id ASC
 	`, cutoff.UTC().Format(time.RFC3339Nano))

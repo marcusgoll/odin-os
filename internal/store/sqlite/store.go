@@ -3438,7 +3438,7 @@ func (store *Store) ResolveStalledRun(ctx context.Context, params ResolveStalled
 		if currentRun.TaskID != params.TaskID {
 			return sql.ErrNoRows
 		}
-		if currentRun.Status != "running" || currentTask.CurrentRunID == nil || *currentTask.CurrentRunID != currentRun.ID {
+		if (currentRun.Status != "running" && currentRun.Status != "executing") || currentTask.CurrentRunID == nil || *currentTask.CurrentRunID != currentRun.ID {
 			return sql.ErrNoRows
 		}
 

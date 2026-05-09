@@ -10,7 +10,7 @@ import (
 	"odin-os/internal/store/sqlite"
 )
 
-func TestListStalledRunViewsFiltersOldRunningRuns(t *testing.T) {
+func TestListStalledRunViewsFiltersOldRunningAndExecutingRuns(t *testing.T) {
 	ctx := context.Background()
 	store, err := sqlite.Open(filepath.Join(t.TempDir(), "odin.db"))
 	if err != nil {
@@ -57,6 +57,26 @@ func TestListStalledRunViewsFiltersOldRunningRuns(t *testing.T) {
 		t.Fatalf("StartRun(stalled) error = %v", err)
 	}
 
+	stalledExecutingTask, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "stalled-executing-task",
+		Title:       "Stalled executing task",
+		Status:      "running",
+		Scope:       "project",
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask(stalled executing) error = %v", err)
+	}
+	if _, err := store.StartRun(ctx, sqlite.StartRunParams{
+		TaskID:   stalledExecutingTask.ID,
+		Executor: "codex",
+		Attempt:  1,
+		Status:   "executing",
+	}); err != nil {
+		t.Fatalf("StartRun(stalled executing) error = %v", err)
+	}
+
 	recentTask, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
 		ProjectID:   project.ID,
 		Key:         "recent-task",
@@ -83,10 +103,23 @@ func TestListStalledRunViewsFiltersOldRunningRuns(t *testing.T) {
 		t.Fatalf("ListStalledRunViews() error = %v", err)
 	}
 
-	if len(views) != 1 {
-		t.Fatalf("ListStalledRunViews() len = %d, want 1", len(views))
+	if len(views) != 2 {
+		t.Fatalf("ListStalledRunViews() len = %d, want 2", len(views))
 	}
-	if views[0].TaskKey != "stalled-task" {
-		t.Fatalf("stalled task key = %q, want stalled-task", views[0].TaskKey)
+	wantKeys := map[string]bool{
+		"stalled-task":           false,
+		"stalled-executing-task": false,
+	}
+	for _, view := range views {
+		_, ok := wantKeys[view.TaskKey]
+		if !ok {
+			t.Fatalf("stalled task key = %q, want one of %#v", view.TaskKey, wantKeys)
+		}
+		wantKeys[view.TaskKey] = true
+	}
+	for key, seen := range wantKeys {
+		if !seen {
+			t.Fatalf("ListStalledRunViews() missing task key %q; views=%+v", key, views)
+		}
 	}
 }

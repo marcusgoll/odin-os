@@ -1204,6 +1204,175 @@ func TestInterruptDispatchCreatesResumableWakePacket(t *testing.T) {
 	}
 }
 
+func TestExecuteNextDispatchedRunRecoversStaleExecutingRun(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openJobStore(t)
+	defer store.Close()
+
+	now := time.Date(2026, 5, 9, 12, 0, 0, 0, time.UTC)
+	store.Now = func() time.Time { return now.Add(-2 * time.Hour) }
+
+	project, err := store.CreateProject(ctx, sqlite.CreateProjectParams{
+		Key:           "alpha-runtime",
+		Name:          "Alpha Runtime",
+		Scope:         "project",
+		GitRoot:       "/tmp/alpha-runtime",
+		DefaultBranch: "main",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+	task, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "stale-executing-run",
+		Title:       "Stale executing run",
+		Status:      "running",
+		Scope:       "project",
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+	run, err := store.StartRun(ctx, sqlite.StartRunParams{
+		TaskID:     task.ID,
+		Executor:   "codex_headless",
+		Attempt:    1,
+		Status:     "executing",
+		TaskStatus: "running",
+	})
+	if err != nil {
+		t.Fatalf("StartRun() error = %v", err)
+	}
+	if _, err := store.CreateWorktreeLease(ctx, sqlite.CreateWorktreeLeaseParams{
+		ProjectID:    project.ID,
+		TaskID:       task.ID,
+		RunID:        run.ID,
+		Mode:         "mutable",
+		BranchName:   "odin/alpha-runtime/task-1/run-1/try-1",
+		WorktreePath: "/tmp/odin/alpha-runtime/task-1/run-1/try-1",
+		RepoRoot:     project.GitRoot,
+		State:        "active",
+	}); err != nil {
+		t.Fatalf("CreateWorktreeLease() error = %v", err)
+	}
+	store.Now = func() time.Time { return now }
+
+	service := Service{
+		Store:           store,
+		StaleRunTimeout: 30 * time.Minute,
+		Now:             func() time.Time { return now },
+	}
+
+	outcome, err := service.ExecuteNextDispatchedRun(ctx)
+	if err != nil {
+		t.Fatalf("ExecuteNextDispatchedRun() error = %v", err)
+	}
+	if outcome.Executed {
+		t.Fatalf("ExecuteNextDispatchedRun().Executed = true, want recovery without executor entry")
+	}
+	if outcome.Reason != "stale_executing_run_recovered" {
+		t.Fatalf("ExecuteNextDispatchedRun().Reason = %q, want stale_executing_run_recovered", outcome.Reason)
+	}
+
+	gotRun, err := store.GetRun(ctx, run.ID)
+	if err != nil {
+		t.Fatalf("GetRun() error = %v", err)
+	}
+	if gotRun.Status != "interrupted" {
+		t.Fatalf("run status = %q, want interrupted", gotRun.Status)
+	}
+	gotTask, err := store.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
+	}
+	if gotTask.Status != "queued" || gotTask.CurrentRunID != nil {
+		t.Fatalf("task = %+v, want queued without current run", gotTask)
+	}
+
+	events, err := store.ListEvents(ctx, sqlite.ListEventsParams{TaskID: &task.ID})
+	if err != nil {
+		t.Fatalf("ListEvents() error = %v", err)
+	}
+	found := false
+	for _, event := range events {
+		if event.Type == runtimeevents.EventRunFinished && strings.Contains(string(event.Payload), "stale executing run recovered by live service loop") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("events = %+v, want run.finished stale executing recovery event", events)
+	}
+}
+
+func TestExecuteNextDispatchedRunKeepsFreshExecutingRunActive(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openJobStore(t)
+	defer store.Close()
+
+	now := time.Date(2026, 5, 9, 12, 0, 0, 0, time.UTC)
+	store.Now = func() time.Time { return now.Add(-5 * time.Minute) }
+
+	project, err := store.CreateProject(ctx, sqlite.CreateProjectParams{
+		Key:           "alpha-runtime",
+		Name:          "Alpha Runtime",
+		Scope:         "project",
+		GitRoot:       "/tmp/alpha-runtime",
+		DefaultBranch: "main",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+	task, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "fresh-executing-run",
+		Title:       "Fresh executing run",
+		Status:      "running",
+		Scope:       "project",
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+	run, err := store.StartRun(ctx, sqlite.StartRunParams{
+		TaskID:     task.ID,
+		Executor:   "codex_headless",
+		Attempt:    1,
+		Status:     "executing",
+		TaskStatus: "running",
+	})
+	if err != nil {
+		t.Fatalf("StartRun() error = %v", err)
+	}
+	store.Now = func() time.Time { return now }
+
+	service := Service{
+		Store:           store,
+		StaleRunTimeout: 30 * time.Minute,
+		Now:             func() time.Time { return now },
+	}
+
+	outcome, err := service.ExecuteNextDispatchedRun(ctx)
+	if err != nil {
+		t.Fatalf("ExecuteNextDispatchedRun() error = %v", err)
+	}
+	if outcome.Reason != "run_already_executing" {
+		t.Fatalf("ExecuteNextDispatchedRun().Reason = %q, want run_already_executing", outcome.Reason)
+	}
+	gotRun, err := store.GetRun(ctx, run.ID)
+	if err != nil {
+		t.Fatalf("GetRun() error = %v", err)
+	}
+	if gotRun.Status != "executing" {
+		t.Fatalf("run status = %q, want executing", gotRun.Status)
+	}
+}
+
 func TestExecuteNextQueuedBlocksWhenExecutorHealthSampleIsMissing(t *testing.T) {
 	t.Parallel()
 
