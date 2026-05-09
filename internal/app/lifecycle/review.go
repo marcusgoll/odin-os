@@ -11,6 +11,7 @@ import (
 
 	"odin-os/internal/app/bootstrap"
 	commands "odin-os/internal/cli/commands"
+	"odin-os/internal/core/followups"
 	"odin-os/internal/core/workspaces"
 	approvalsvc "odin-os/internal/runtime/approvals"
 	jobsvc "odin-os/internal/runtime/jobs"
@@ -20,7 +21,7 @@ import (
 	"odin-os/internal/store/sqlite"
 )
 
-const reviewUsage = "usage: odin review list [--json] | odin review show <queue-id>|--id <queue-id> [--json] | odin review approve --id <queue-id> [--json] | odin review reject --id <queue-id> --reason <reason> [--json] | odin review act <queue-id> <accept|reject|archive|approve|deny|clarify|retry> [--json]"
+const reviewUsage = "usage: odin review list [--json] | odin review show <queue-id>|--id <queue-id> [--json] | odin review approve --id <queue-id> [--json] | odin review reject --id <queue-id> --reason <reason> [--json] | odin review act <queue-id> <accept|reject|archive|approve|deny|clarify|retry|follow-up> [--dry-run] [--json]"
 
 type reviewQueueListView struct {
 	Items []reviewQueueEntry `json:"items"`
@@ -67,6 +68,35 @@ type reviewUnsupportedActionView struct {
 	Summary    string            `json:"summary"`
 	Goal       commands.GoalView `json:"goal"`
 	Blocker    goalBlockerEntry  `json:"blocker"`
+}
+
+type failedWorkGitHubIssueProposal struct {
+	Status string `json:"status"`
+	Reason string `json:"reason"`
+}
+
+type failedWorkFollowUpProposal struct {
+	ReviewID               string                        `json:"review_id"`
+	TaskID                 int64                         `json:"task_id"`
+	TaskKey                string                        `json:"task_key"`
+	ProjectKey             string                        `json:"project_key"`
+	Title                  string                        `json:"title"`
+	Destination            string                        `json:"destination"`
+	ApprovalRequired       bool                          `json:"approval_required"`
+	RecoveryRecommendation string                        `json:"recovery_recommendation"`
+	GitHubIssue            failedWorkGitHubIssueProposal `json:"github_issue"`
+}
+
+type failedWorkFollowUpOutcomeView struct {
+	Action             string                        `json:"action"`
+	ReviewID           string                        `json:"review_id"`
+	DryRun             bool                          `json:"dry_run"`
+	Created            bool                          `json:"created"`
+	ApprovalRequired   bool                          `json:"approval_required"`
+	GitHubIssueCreated bool                          `json:"github_issue_created"`
+	GitHubIssue        failedWorkGitHubIssueProposal `json:"github_issue"`
+	Proposal           failedWorkFollowUpProposal    `json:"proposal"`
+	FollowUp           *commands.FollowUpView        `json:"follow_up,omitempty"`
 }
 
 type reviewQueueEntry struct {
@@ -152,10 +182,11 @@ func runReview(ctx context.Context, app bootstrap.App, args []string, stdout io.
 		}
 		return runReviewReject(ctx, app, queueID, reason, jsonOutput, stdout)
 	case "act":
-		if len(remaining) != 3 {
+		queueID, action, dryRun, err := reviewActOptions(remaining[1:])
+		if err != nil {
 			return fmt.Errorf(reviewUsage)
 		}
-		return runReviewAct(ctx, app, remaining[1], remaining[2], jsonOutput, stdout)
+		return runReviewAct(ctx, app, queueID, action, dryRun, jsonOutput, stdout)
 	default:
 		return fmt.Errorf(reviewUsage)
 	}
@@ -225,6 +256,30 @@ func reviewRejectOptions(args []string) (string, string, error) {
 	return queueID, reason, nil
 }
 
+func reviewActOptions(args []string) (string, string, bool, error) {
+	if len(args) < 2 {
+		return "", "", false, fmt.Errorf(reviewUsage)
+	}
+	queueID := strings.TrimSpace(args[0])
+	action := strings.TrimSpace(args[1])
+	if queueID == "" || action == "" {
+		return "", "", false, fmt.Errorf(reviewUsage)
+	}
+	dryRun := false
+	for _, arg := range args[2:] {
+		switch arg {
+		case "--dry-run":
+			if dryRun {
+				return "", "", false, fmt.Errorf("duplicate --dry-run flag")
+			}
+			dryRun = true
+		default:
+			return "", "", false, fmt.Errorf(reviewUsage)
+		}
+	}
+	return queueID, action, dryRun, nil
+}
+
 func runReviewShow(ctx context.Context, app bootstrap.App, queueID string, jsonOutput bool, stdout io.Writer) error {
 	ref, err := parseReviewQueueRef(queueID)
 	if err != nil {
@@ -282,7 +337,7 @@ func reviewNextStepsHuman(entry reviewQueueEntry) string {
 	return fmt.Sprintf("inspect with odin review show %s; act with odin review act %s <%s>", entry.QueueID, entry.QueueID, strings.Join(entry.AllowedActions, "|"))
 }
 
-func runReviewAct(ctx context.Context, app bootstrap.App, queueID string, action string, jsonOutput bool, stdout io.Writer) error {
+func runReviewAct(ctx context.Context, app bootstrap.App, queueID string, action string, dryRun bool, jsonOutput bool, stdout io.Writer) error {
 	ref, err := parseReviewQueueRef(queueID)
 	if err != nil {
 		return err
@@ -292,11 +347,17 @@ func runReviewAct(ctx context.Context, app bootstrap.App, queueID string, action
 
 	switch ref.Kind {
 	case "intake-goal", "goal", "goal-approval", "goal-blocker":
+		if dryRun {
+			return fmt.Errorf("--dry-run is only supported for failed-work follow-up review actions")
+		}
 		if action != "approve" {
 			return fmt.Errorf("goal review action must use review approve --id or review reject --id --reason")
 		}
 		return runReviewApprove(ctx, app, queueID, jsonOutput, stdout)
 	case "intake-review":
+		if dryRun {
+			return fmt.Errorf("--dry-run is only supported for failed-work follow-up review actions")
+		}
 		if !oneOf(action, "accept", "reject", "archive", "clarify") {
 			return fmt.Errorf("intake review action must be one of accept, reject, archive, clarify")
 		}
@@ -306,6 +367,9 @@ func runReviewAct(ctx context.Context, app bootstrap.App, queueID string, action
 			ShowRef:      rawIntakeKey(ref.ID),
 		}, jsonOutput, stdout)
 	case "intake-approval":
+		if dryRun {
+			return fmt.Errorf("--dry-run is only supported for failed-work follow-up review actions")
+		}
 		if !oneOf(action, "approve", "deny") {
 			return fmt.Errorf("intake approval action must be one of approve, deny")
 		}
@@ -315,6 +379,9 @@ func runReviewAct(ctx context.Context, app bootstrap.App, queueID string, action
 			ShowRef:        rawIntakeKey(ref.ID),
 		}, jsonOutput, stdout)
 	case "approval":
+		if dryRun {
+			return fmt.Errorf("--dry-run is only supported for failed-work follow-up review actions")
+		}
 		if !oneOf(action, "approve", "deny") {
 			return fmt.Errorf("task approval action must be one of approve, deny")
 		}
@@ -324,21 +391,37 @@ func runReviewAct(ctx context.Context, app bootstrap.App, queueID string, action
 		}
 		return runApprovals(ctx, app, args, stdout)
 	case "skill-artifact":
+		if dryRun {
+			return fmt.Errorf("--dry-run is only supported for failed-work follow-up review actions")
+		}
 		if !oneOf(action, "accept", "reject", "archive") {
 			return fmt.Errorf("skill artifact action must be one of accept, reject, archive")
 		}
 		return runSkillArtifactReview(ctx, app, action, idRef, jsonOutput, stdout)
 	case "context-pack":
+		if dryRun {
+			return fmt.Errorf("--dry-run is only supported for failed-work follow-up review actions")
+		}
 		if !oneOf(action, "accept", "reject", "archive") {
 			return fmt.Errorf("context pack action must be one of accept, reject, archive")
 		}
 		return runContextPackReview(ctx, app, ref.ID, action, jsonOutput, stdout)
 	case "failed-work":
-		if action != "retry" {
-			return fmt.Errorf("failed work action must be retry")
+		switch action {
+		case "retry":
+			if dryRun {
+				return fmt.Errorf("--dry-run is only supported for failed-work follow-up review actions")
+			}
+			return runFailedWorkReviewRetry(ctx, app, ref.ID, jsonOutput, stdout)
+		case "follow-up":
+			return runFailedWorkReviewFollowUp(ctx, app, ref.ID, dryRun, jsonOutput, stdout)
+		default:
+			return fmt.Errorf("failed work action must be retry or follow-up")
 		}
-		return runFailedWorkReviewRetry(ctx, app, ref.ID, jsonOutput, stdout)
 	case "memory-proposal":
+		if dryRun {
+			return fmt.Errorf("--dry-run is only supported for failed-work follow-up review actions")
+		}
 		return fmt.Errorf("memory proposal review actions are not implemented; use the existing memory workflow")
 	default:
 		return fmt.Errorf("unsupported review queue source %q", ref.Kind)
@@ -836,18 +919,19 @@ func reviewQueueDetail(ctx context.Context, app bootstrap.App, ref reviewQueueRe
 }
 
 type failedWorkReviewDetail struct {
-	TaskID                 int64                  `json:"task_id"`
-	TaskKey                string                 `json:"task_key"`
-	TaskStatus             string                 `json:"task_status"`
-	ProjectKey             string                 `json:"project_key"`
-	Decision               string                 `json:"decision"`
-	RetryEligible          bool                   `json:"retry_eligible"`
-	RetryBlockReason       string                 `json:"retry_block_reason,omitempty"`
-	RecoveryRecommendation string                 `json:"recovery_recommendation"`
-	RetryCount             int                    `json:"retry_count"`
-	MaxAttempts            int                    `json:"max_attempts"`
-	LastError              string                 `json:"last_error,omitempty"`
-	RunAttempts            []failedWorkRunAttempt `json:"run_attempts"`
+	TaskID                 int64                      `json:"task_id"`
+	TaskKey                string                     `json:"task_key"`
+	TaskStatus             string                     `json:"task_status"`
+	ProjectKey             string                     `json:"project_key"`
+	Decision               string                     `json:"decision"`
+	RetryEligible          bool                       `json:"retry_eligible"`
+	RetryBlockReason       string                     `json:"retry_block_reason,omitempty"`
+	RecoveryRecommendation string                     `json:"recovery_recommendation"`
+	RetryCount             int                        `json:"retry_count"`
+	MaxAttempts            int                        `json:"max_attempts"`
+	LastError              string                     `json:"last_error,omitempty"`
+	RunAttempts            []failedWorkRunAttempt     `json:"run_attempts"`
+	FollowUp               failedWorkFollowUpProposal `json:"follow_up"`
 }
 
 type failedWorkRunAttempt struct {
@@ -1211,7 +1295,7 @@ func reviewEntryFromFailedTask(task projections.TaskStatusView) reviewQueueEntry
 		RetryEligible:          &retryEligible,
 		RetryBlockReason:       retryBlockReason(guidance.Decision, guidance.RetryEligible),
 		RecoveryRecommendation: guidance.RecoveryRecommendation,
-		AllowedActions:         []string{"retry"},
+		AllowedActions:         []string{"retry", "follow-up"},
 	}
 }
 
@@ -1370,6 +1454,7 @@ func reviewFailedTaskDetail(ctx context.Context, store *sqlite.Store, task sqlit
 			Executor: run.Executor,
 		})
 	}
+	proposal := failedWorkFollowUpProposalForTask(task, project.Key, guidance)
 	return entry, failedWorkReviewDetail{
 		TaskID:                 task.ID,
 		TaskKey:                task.Key,
@@ -1383,6 +1468,7 @@ func reviewFailedTaskDetail(ctx context.Context, store *sqlite.Store, task sqlit
 		MaxAttempts:            task.MaxAttempts,
 		LastError:              task.LastError,
 		RunAttempts:            attempts,
+		FollowUp:               proposal,
 	}, nil
 }
 
@@ -1488,6 +1574,114 @@ func runFailedWorkReviewRetry(ctx context.Context, app bootstrap.App, taskID int
 	}
 	_, err = fmt.Fprintf(stdout, "retried=%t reason=%s decision=%s retry_eligible=%t task=%s status=%s retry_count=%d recommendation=%q\n", view.Retried, view.Reason, view.Decision, view.RetryEligible, view.Task.Key, view.Task.Status, view.Task.RetryCount, view.RecoveryRecommendation)
 	return err
+}
+
+func runFailedWorkReviewFollowUp(ctx context.Context, app bootstrap.App, taskID int64, dryRun bool, jsonOutput bool, stdout io.Writer) error {
+	task, err := app.Store.GetTask(ctx, taskID)
+	if err != nil {
+		return err
+	}
+	project, err := app.Store.GetProject(ctx, task.ProjectID)
+	if err != nil {
+		return err
+	}
+	guidance := recovery.RetryGuidanceForTask(recovery.RetryGuidanceInput{
+		RetryCount:  task.RetryCount,
+		MaxAttempts: task.MaxAttempts,
+		WorkKind:    task.WorkKind,
+		RequestedBy: task.RequestedBy,
+	})
+	proposal := failedWorkFollowUpProposalForTask(task, project.Key, guidance)
+	view := failedWorkFollowUpOutcomeView{
+		Action:             "follow-up",
+		ReviewID:           proposal.ReviewID,
+		DryRun:             dryRun,
+		Created:            false,
+		ApprovalRequired:   proposal.ApprovalRequired,
+		GitHubIssueCreated: false,
+		GitHubIssue:        proposal.GitHubIssue,
+		Proposal:           proposal,
+	}
+
+	if !dryRun {
+		workspace, err := (workspaces.Service{Store: app.Store}).BootstrapDefaultWorkspace(ctx)
+		if err != nil {
+			return err
+		}
+		policyJSON, err := failedWorkFollowUpPolicyJSON(task, project.Key, guidance, proposal)
+		if err != nil {
+			return err
+		}
+		obligation, err := (followups.Service{Store: app.Store}).Create(ctx, followups.CreateParams{
+			WorkspaceID:     workspace.ID,
+			TargetProjectID: &task.ProjectID,
+			Title:           proposal.Title,
+			Cadence:         followups.Cadence{Mode: followups.CadenceModeOnce},
+			NextDueAt:       time.Now().UTC(),
+			PolicyJSON:      policyJSON,
+		})
+		if err != nil {
+			return err
+		}
+		followUpView, err := renderFollowUpView(ctx, app.Store, obligation)
+		if err != nil {
+			return err
+		}
+		view.Created = true
+		view.FollowUp = &followUpView
+	}
+
+	if jsonOutput {
+		return commands.WriteJSON(stdout, view)
+	}
+	_, err = fmt.Fprintf(stdout, "action=follow-up review=%s dry_run=%t created=%t destination=%s github_issue=%s title=%q\n", view.ReviewID, view.DryRun, view.Created, proposal.Destination, proposal.GitHubIssue.Status, proposal.Title)
+	return err
+}
+
+func failedWorkFollowUpProposalForTask(task sqlite.Task, projectKey string, guidance recovery.RetryGuidance) failedWorkFollowUpProposal {
+	return failedWorkFollowUpProposal{
+		ReviewID:               fmt.Sprintf("failed-work:%d", task.ID),
+		TaskID:                 task.ID,
+		TaskKey:                task.Key,
+		ProjectKey:             projectKey,
+		Title:                  fmt.Sprintf("Follow up on failed work: %s", task.Key),
+		Destination:            "odin_follow_up_obligation",
+		ApprovalRequired:       true,
+		RecoveryRecommendation: guidance.RecoveryRecommendation,
+		GitHubIssue: failedWorkGitHubIssueProposal{
+			Status: "not_created",
+			Reason: "github_issue_creation_requires_approved_tracker_mutation_contract",
+		},
+	}
+}
+
+func failedWorkFollowUpPolicyJSON(task sqlite.Task, projectKey string, guidance recovery.RetryGuidance, proposal failedWorkFollowUpProposal) (string, error) {
+	payload := struct {
+		Source                 string `json:"source"`
+		ReviewID               string `json:"review_id"`
+		TaskID                 int64  `json:"task_id"`
+		TaskKey                string `json:"task_key"`
+		ProjectKey             string `json:"project_key"`
+		Decision               string `json:"decision"`
+		RecoveryRecommendation string `json:"recovery_recommendation"`
+		GitHubIssueStatus      string `json:"github_issue_status"`
+		GitHubIssueReason      string `json:"github_issue_reason"`
+	}{
+		Source:                 "failure_analysis_review",
+		ReviewID:               proposal.ReviewID,
+		TaskID:                 task.ID,
+		TaskKey:                task.Key,
+		ProjectKey:             projectKey,
+		Decision:               guidance.Decision,
+		RecoveryRecommendation: guidance.RecoveryRecommendation,
+		GitHubIssueStatus:      proposal.GitHubIssue.Status,
+		GitHubIssueReason:      proposal.GitHubIssue.Reason,
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return "", err
+	}
+	return string(encoded), nil
 }
 
 func runContextPackReview(ctx context.Context, app bootstrap.App, packetID int64, action string, jsonOutput bool, stdout io.Writer) error {

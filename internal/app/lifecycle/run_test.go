@@ -2180,6 +2180,98 @@ func TestRunUnifiedReviewQueueSurfacesFailedWorkRetryPolicy(t *testing.T) {
 	}
 }
 
+func TestRunReviewActFailedWorkFollowUpRequiresExplicitApproval(t *testing.T) {
+	t.Setenv("ODIN_CODEX_DRIVER", "")
+	t.Setenv("ODIN_CODEX_DRIVER_RUN_RESPONSE", `{"status":"failed","output":"failed work follow-up proof"}`)
+	t.Setenv("HOME", t.TempDir())
+
+	root := testRepoRoot(t)
+	installRepoCodexDriverScript(t, root)
+	payloadPath := filepath.Join(t.TempDir(), "payload.json")
+	if err := os.WriteFile(payloadPath, []byte(`{"body":"failed work follow-up proof"}`), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	run := func(args ...string) string {
+		t.Helper()
+		var output bytes.Buffer
+		if err := Run(context.Background(), root, args, strings.NewReader(""), &output); err != nil {
+			t.Fatalf("Run(%v) error = %v\noutput=%s", args, err, output.String())
+		}
+		return output.String()
+	}
+
+	run("project", "select", testProjectKey)
+	run("transition", "set", "cutover", "confirm", "because", "failed work follow-up proof")
+	run(
+		"intake", "raw", "create",
+		"--source", "operator",
+		"--project", testProjectKey,
+		"--title", "failed work follow-up proof",
+		"--type", "request",
+		"--dedup-key", "failed-work-follow-up-proof",
+		"--requested-by", "codex",
+		"--payload-file", payloadPath,
+		"--json",
+	)
+	run("intake", "process", "--id", "intake-1", "--json")
+	run("review", "act", "intake-review:1", "accept", "--json")
+	run("work", "dispatch", "--task", "intake-review-1", "--json")
+	run("work", "execute", "--task", "intake-review-1", "--json")
+
+	show := run("review", "show", "failed-work:1", "--json")
+	for _, want := range []string{
+		`"allowed_actions": [`,
+		`"follow-up"`,
+		`"follow_up"`,
+		`"approval_required": true`,
+		`"destination": "odin_follow_up_obligation"`,
+		`"github_issue"`,
+		`"status": "not_created"`,
+	} {
+		if !strings.Contains(show, want) {
+			t.Fatalf("review show output = %s, want %s", show, want)
+		}
+	}
+
+	dryRun := run("review", "act", "failed-work:1", "follow-up", "--dry-run", "--json")
+	for _, want := range []string{
+		`"action": "follow-up"`,
+		`"dry_run": true`,
+		`"created": false`,
+		`"approval_required": true`,
+		`"github_issue_created": false`,
+		`"status": "not_created"`,
+	} {
+		if !strings.Contains(dryRun, want) {
+			t.Fatalf("review follow-up dry-run output = %s, want %s", dryRun, want)
+		}
+	}
+	emptyFollowUps := run("followup", "list", "--json")
+	if !strings.Contains(emptyFollowUps, `"obligations": []`) {
+		t.Fatalf("followup list after dry-run = %s, want no persisted obligations", emptyFollowUps)
+	}
+
+	created := run("review", "act", "failed-work:1", "follow-up", "--json")
+	for _, want := range []string{
+		`"action": "follow-up"`,
+		`"dry_run": false`,
+		`"created": true`,
+		`"approval_required": true`,
+		`"github_issue_created": false`,
+		`"status": "not_created"`,
+		`"follow_up"`,
+		`"title": "Follow up on failed work: intake-review-1"`,
+	} {
+		if !strings.Contains(created, want) {
+			t.Fatalf("review follow-up create output = %s, want %s", created, want)
+		}
+	}
+	followUps := run("followup", "list", "--json")
+	if strings.Count(followUps, `"title": "Follow up on failed work: intake-review-1"`) != 1 || !strings.Contains(followUps, `"cadence": "once"`) {
+		t.Fatalf("followup list output = %s, want one persisted failed-work follow-up", followUps)
+	}
+}
+
 func TestRunLogsIncludeProjectScopedIntakeEventsForOdinCoreScope(t *testing.T) {
 	t.Parallel()
 
