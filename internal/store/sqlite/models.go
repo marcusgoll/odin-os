@@ -31,6 +31,7 @@ type ExternalIssue struct {
 	State        string
 	LabelsJSON   string
 	SyncStatus   string
+	SyncCursor   string
 	LastSyncedAt time.Time
 	CreatedAt    time.Time
 	UpdatedAt    time.Time
@@ -89,6 +90,7 @@ type UpsertExternalIssueParams struct {
 	State      string
 	LabelsJSON string
 	SyncStatus string
+	SyncCursor string
 }
 
 type RecordExternalGitHubIssueEventParams struct {

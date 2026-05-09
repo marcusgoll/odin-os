@@ -346,6 +346,7 @@ func (service Service) IngestGitHubIssue(ctx context.Context, params GitHubIssue
 		State:      action,
 		LabelsJSON: labelsJSON,
 		SyncStatus: "event_received",
+		SyncCursor: fmt.Sprintf("github:issue:%s:%d", repo, params.Number),
 	})
 	if err != nil {
 		return GitHubIssueIngestResult{}, err

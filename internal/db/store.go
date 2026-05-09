@@ -38,6 +38,7 @@ type Issue struct {
 	Number   int
 	Title    string
 	Status   string
+	Cursor   string
 }
 
 type IssueFilter struct {
@@ -250,6 +251,7 @@ func (repository *SQLiteRepository) ListIssues(ctx context.Context, filter Issue
 			Number:   record.Number,
 			Title:    record.Title,
 			Status:   record.SyncStatus,
+			Cursor:   record.SyncCursor,
 		})
 	}
 	return issues, nil

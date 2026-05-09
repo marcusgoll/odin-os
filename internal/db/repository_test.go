@@ -146,6 +146,7 @@ func TestSQLiteRepositoryListsPersistedExternalIssues(t *testing.T) {
 		State:      "open",
 		LabelsJSON: `["odin:ready"]`,
 		SyncStatus: "eligible",
+		SyncCursor: "github:issue:acme/alpha:7",
 	}); err != nil {
 		t.Fatalf("UpsertExternalIssue() error = %v", err)
 	}
@@ -158,7 +159,7 @@ func TestSQLiteRepositoryListsPersistedExternalIssues(t *testing.T) {
 	if len(issues) != 1 {
 		t.Fatalf("ListIssues() len = %d, want 1: %+v", len(issues), issues)
 	}
-	if issues[0].Provider != "github" || issues[0].Repo != "acme/alpha" || issues[0].Number != 7 || issues[0].Status != "eligible" {
+	if issues[0].Provider != "github" || issues[0].Repo != "acme/alpha" || issues[0].Number != 7 || issues[0].Status != "eligible" || issues[0].Cursor != "github:issue:acme/alpha:7" {
 		t.Fatalf("Issue = %+v, want persisted external issue", issues[0])
 	}
 }

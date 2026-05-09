@@ -185,11 +185,12 @@ func (store *Store) UpsertExternalIssue(ctx context.Context, params UpsertExtern
 				state,
 				labels_json,
 				sync_status,
+				sync_cursor,
 				last_synced_at,
 				created_at,
 				updated_at
 			)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			ON CONFLICT(provider, repo, number) DO UPDATE SET
 				project_id = excluded.project_id,
 				title = excluded.title,
@@ -198,6 +199,7 @@ func (store *Store) UpsertExternalIssue(ctx context.Context, params UpsertExtern
 				state = excluded.state,
 				labels_json = excluded.labels_json,
 				sync_status = excluded.sync_status,
+				sync_cursor = excluded.sync_cursor,
 				last_synced_at = excluded.last_synced_at,
 				updated_at = excluded.updated_at
 		`,
@@ -211,6 +213,7 @@ func (store *Store) UpsertExternalIssue(ctx context.Context, params UpsertExtern
 			params.State,
 			params.LabelsJSON,
 			params.SyncStatus,
+			params.SyncCursor,
 			formatTime(now),
 			formatTime(now),
 			formatTime(now),
@@ -219,7 +222,7 @@ func (store *Store) UpsertExternalIssue(ctx context.Context, params UpsertExtern
 		}
 
 		record, err := scanExternalIssue(tx.QueryRowContext(ctx, `
-			SELECT id, project_id, provider, repo, number, title, body_hash, url, state, labels_json, sync_status, last_synced_at, created_at, updated_at
+			SELECT id, project_id, provider, repo, number, title, body_hash, url, state, labels_json, sync_status, sync_cursor, last_synced_at, created_at, updated_at
 			FROM external_issues
 			WHERE provider = ? AND repo = ? AND number = ?
 		`, params.Provider, params.Repo, params.Number))
@@ -5432,7 +5435,7 @@ func (store *Store) GetProjectByKey(ctx context.Context, key string) (Project, e
 
 func (store *Store) ListExternalIssues(ctx context.Context, params ListExternalIssuesParams) ([]ExternalIssue, error) {
 	query := `
-		SELECT id, project_id, provider, repo, number, title, body_hash, url, state, labels_json, sync_status, last_synced_at, created_at, updated_at
+		SELECT id, project_id, provider, repo, number, title, body_hash, url, state, labels_json, sync_status, sync_cursor, last_synced_at, created_at, updated_at
 		FROM external_issues
 		WHERE 1 = 1
 	`
@@ -8698,6 +8701,7 @@ func scanExternalIssue(row interface{ Scan(...any) error }) (ExternalIssue, erro
 		&issue.State,
 		&issue.LabelsJSON,
 		&issue.SyncStatus,
+		&issue.SyncCursor,
 		&lastSyncedAt,
 		&createdAt,
 		&updatedAt,

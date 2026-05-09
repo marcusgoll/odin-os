@@ -30,7 +30,8 @@ not contain the required state.
 The first step added typed models and repository interfaces in `internal/db`,
 backed by the existing `internal/store/sqlite.Store`. Read-only GitHub intake
 adds `external_issues` as the smallest explicit schema extension because no
-existing table stores external issue identity idempotently.
+existing table stores external issue identity, labels, body hash, sync status,
+and stable sync cursor idempotently.
 
 Rationale:
 
