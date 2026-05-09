@@ -6,11 +6,14 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
 
+	"odin-os/internal/cli/scope"
 	"odin-os/internal/core/projects"
+	"odin-os/internal/runtime/jobs"
 	"odin-os/internal/store/sqlite"
 	"odin-os/internal/tracker"
 	trackergithub "odin-os/internal/tracker/github"
@@ -37,6 +40,21 @@ type SyncSummary struct {
 	Fetched    int
 	Persisted  int
 	DryRun     bool
+}
+
+type ReconcileOptions struct {
+	ProjectKey string
+}
+
+type ReconcileSummary struct {
+	ProjectKey          string
+	Repo                string
+	Eligible            int
+	Created             int
+	Existing            int
+	Linked              int
+	Dispatched          bool
+	PullRequestsCreated bool
 }
 
 func (service Service) SyncProject(ctx context.Context, options SyncOptions) (SyncSummary, error) {
@@ -88,6 +106,87 @@ func (service Service) SyncProject(ctx context.Context, options SyncOptions) (Sy
 	return summary, nil
 }
 
+func (service Service) ReconcileProject(ctx context.Context, options ReconcileOptions) (ReconcileSummary, error) {
+	if service.Store == nil {
+		return ReconcileSummary{}, fmt.Errorf("intake store is required")
+	}
+	project, ok := service.Registry.Lookup(strings.TrimSpace(options.ProjectKey))
+	if !ok {
+		return ReconcileSummary{}, fmt.Errorf("unknown project %q", options.ProjectKey)
+	}
+	if project.ProjectClass != projects.ProjectClassGitHubBacked || strings.TrimSpace(project.GitHub.Repo) == "" {
+		return ReconcileSummary{}, fmt.Errorf("project %q is not a GitHub-backed intake source", project.Key)
+	}
+
+	runtimeProject, err := service.ensureRuntimeProject(ctx, project)
+	if err != nil {
+		return ReconcileSummary{}, err
+	}
+	issues, err := service.Store.ListExternalIssues(ctx, sqlite.ListExternalIssuesParams{
+		ProjectID:  &runtimeProject.ID,
+		Repo:       project.GitHub.Repo,
+		SyncStatus: "eligible",
+	})
+	if err != nil {
+		return ReconcileSummary{}, err
+	}
+
+	summary := ReconcileSummary{
+		ProjectKey: project.Key,
+		Repo:       project.GitHub.Repo,
+		Eligible:   len(issues),
+	}
+	jobService := jobs.Service{
+		Store:    service.Store,
+		Registry: service.Registry,
+	}
+	resolved := scope.Resolution{
+		Kind:       scope.ScopeProject,
+		ProjectKey: project.Key,
+	}
+	for _, issue := range issues {
+		result, err := jobService.CreateTaskOnce(ctx, jobs.CreateTaskParams{
+			Resolved:    resolved,
+			Key:         externalIssueTaskKey(issue),
+			Title:       issue.Title,
+			RequestedBy: "github_issue_intake",
+		})
+		if err != nil {
+			return ReconcileSummary{}, err
+		}
+		if result.Created {
+			summary.Created++
+		} else {
+			summary.Existing++
+		}
+
+		linked, err := service.linkExternalIssueToTask(ctx, result.Task, issue)
+		if err != nil {
+			return ReconcileSummary{}, err
+		}
+		if linked {
+			summary.Linked++
+		}
+		if _, err := service.Store.UpsertExternalIssue(ctx, sqlite.UpsertExternalIssueParams{
+			ProjectID:  issue.ProjectID,
+			Provider:   issue.Provider,
+			Repo:       issue.Repo,
+			Number:     issue.Number,
+			Title:      issue.Title,
+			BodyHash:   issue.BodyHash,
+			URL:        issue.URL,
+			State:      issue.State,
+			LabelsJSON: issue.LabelsJSON,
+			SyncStatus: "reconciled",
+			SyncCursor: issue.SyncCursor,
+		}); err != nil {
+			return ReconcileSummary{}, err
+		}
+	}
+
+	return summary, nil
+}
+
 func NewGitHubTracker(project projects.Manifest, options SyncOptions) (tracker.Tracker, error) {
 	owner, repo, ok := strings.Cut(project.GitHub.Repo, "/")
 	if !ok || owner == "" || repo == "" {
@@ -123,6 +222,94 @@ func (service Service) ensureRuntimeProject(ctx context.Context, manifest projec
 		GitHubRepo:    manifest.GitHub.Repo,
 		ManifestPath:  manifest.SourcePath,
 	})
+}
+
+func (service Service) linkExternalIssueToTask(ctx context.Context, task sqlite.Task, issue sqlite.ExternalIssue) (bool, error) {
+	payload, err := json.Marshal(externalIssueIntakePayload{
+		ExternalIssueID: issue.ID,
+		Provider:        issue.Provider,
+		Repo:            issue.Repo,
+		Number:          issue.Number,
+		Title:           issue.Title,
+		BodyHash:        issue.BodyHash,
+		URL:             issue.URL,
+		State:           issue.State,
+		LabelsJSON:      issue.LabelsJSON,
+		SyncStatus:      issue.SyncStatus,
+		SyncCursor:      externalIssueDedupKey(issue),
+	})
+	if err != nil {
+		return false, err
+	}
+	if _, err := service.Store.CreateTaskIntake(ctx, sqlite.CreateTaskIntakeParams{
+		TaskID:      task.ID,
+		Source:      "github_issue",
+		IntakeType:  "external_issue",
+		DedupKey:    externalIssueDedupKey(issue),
+		RequestedBy: "github_issue_intake",
+		PayloadJSON: string(payload),
+	}); err != nil {
+		if errors.Is(err, sqlite.ErrTaskIntakeConflict) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
+}
+
+type externalIssueIntakePayload struct {
+	ExternalIssueID int64  `json:"external_issue_id"`
+	Provider        string `json:"provider"`
+	Repo            string `json:"repo"`
+	Number          int    `json:"number"`
+	Title           string `json:"title"`
+	BodyHash        string `json:"body_hash"`
+	URL             string `json:"url"`
+	State           string `json:"state"`
+	LabelsJSON      string `json:"labels_json"`
+	SyncStatus      string `json:"sync_status"`
+	SyncCursor      string `json:"sync_cursor"`
+}
+
+func externalIssueTaskKey(issue sqlite.ExternalIssue) string {
+	provider := strings.TrimSpace(issue.Provider)
+	if provider == "" {
+		provider = "external"
+	}
+	providerKey := slugKeyPart(provider)
+	if providerKey == "" {
+		providerKey = "external"
+	}
+	return fmt.Sprintf("%s-issue-%d", providerKey, issue.Number)
+}
+
+func externalIssueDedupKey(issue sqlite.ExternalIssue) string {
+	if cursor := strings.TrimSpace(issue.SyncCursor); cursor != "" {
+		return cursor
+	}
+	provider := strings.TrimSpace(issue.Provider)
+	if provider == "" {
+		provider = "external"
+	}
+	return fmt.Sprintf("%s:issue:%s:%d", provider, issue.Repo, issue.Number)
+}
+
+func slugKeyPart(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	var builder strings.Builder
+	lastDash := false
+	for _, r := range value {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			builder.WriteRune(r)
+			lastDash = false
+			continue
+		}
+		if !lastDash {
+			builder.WriteByte('-')
+			lastDash = true
+		}
+	}
+	return strings.Trim(builder.String(), "-")
 }
 
 func mapIssue(projectID int64, issue tracker.Issue, fallbackRepo string) sqlite.UpsertExternalIssueParams {

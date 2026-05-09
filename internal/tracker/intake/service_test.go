@@ -119,6 +119,106 @@ func TestServiceDryRunFetchesEligibleIssuesWithoutPersisting(t *testing.T) {
 	}
 }
 
+func TestServiceReconcilesPersistedExternalIssuesIntoWorkItemsIdempotently(t *testing.T) {
+	ctx := context.Background()
+	store := openMigratedStore(t)
+	defer store.Close()
+
+	registry := testProjectRegistry(t)
+	manifest, ok := registry.Lookup("alpha")
+	if !ok {
+		t.Fatal("Lookup(alpha) = false, want test project")
+	}
+	service := Service{
+		Store:    store,
+		Registry: registry,
+	}
+	project, err := service.ensureRuntimeProject(ctx, manifest)
+	if err != nil {
+		t.Fatalf("ensureRuntimeProject() error = %v", err)
+	}
+	if _, err := store.UpsertExternalIssue(ctx, sqlite.UpsertExternalIssueParams{
+		ProjectID:  project.ID,
+		Provider:   "github",
+		Repo:       "acme/alpha",
+		Number:     21,
+		Title:      "Persisted eligible work",
+		BodyHash:   "sha256:first",
+		URL:        "https://github.example/acme/alpha/issues/21",
+		State:      "open",
+		LabelsJSON: `["odin:ready"]`,
+		SyncStatus: "eligible",
+		SyncCursor: "github:issue:acme/alpha:21",
+	}); err != nil {
+		t.Fatalf("UpsertExternalIssue(first) error = %v", err)
+	}
+
+	first, err := service.ReconcileProject(ctx, ReconcileOptions{ProjectKey: "alpha"})
+	if err != nil {
+		t.Fatalf("ReconcileProject(first) error = %v", err)
+	}
+	if first.Eligible != 1 || first.Created != 1 || first.Existing != 0 || first.Linked != 1 || first.Dispatched || first.PullRequestsCreated {
+		t.Fatalf("first summary = %+v, want one created linked work item without dispatch or PRs", first)
+	}
+
+	task, err := store.GetTaskByProjectAndKey(ctx, project.ID, "github-issue-21")
+	if err != nil {
+		t.Fatalf("GetTaskByProjectAndKey() error = %v", err)
+	}
+	if task.Title != "Persisted eligible work" || task.Status != "queued" || task.RequestedBy != "github_issue_intake" {
+		t.Fatalf("task = %+v, want queued reconciled work item", task)
+	}
+	var intakeCount int
+	if err := store.DB().QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM task_intakes
+		WHERE task_id = ? AND source = 'github_issue' AND intake_type = 'external_issue' AND dedup_key = 'github:issue:acme/alpha:21'
+	`, task.ID).Scan(&intakeCount); err != nil {
+		t.Fatalf("task intake count query: %v", err)
+	}
+	if intakeCount != 1 {
+		t.Fatalf("task intake count = %d, want one linked intake evidence row", intakeCount)
+	}
+
+	issues, err := store.ListExternalIssues(ctx, sqlite.ListExternalIssuesParams{Repo: "acme/alpha"})
+	if err != nil {
+		t.Fatalf("ListExternalIssues() error = %v", err)
+	}
+	if len(issues) != 1 || issues[0].SyncStatus != "reconciled" {
+		t.Fatalf("issues = %+v, want reconciled sync status", issues)
+	}
+
+	if _, err := store.UpsertExternalIssue(ctx, sqlite.UpsertExternalIssueParams{
+		ProjectID:  project.ID,
+		Provider:   "github",
+		Repo:       "acme/alpha",
+		Number:     21,
+		Title:      "Persisted eligible work updated",
+		BodyHash:   "sha256:second",
+		URL:        "https://github.example/acme/alpha/issues/21",
+		State:      "open",
+		LabelsJSON: `["odin:ready","backend"]`,
+		SyncStatus: "eligible",
+		SyncCursor: "github:issue:acme/alpha:21",
+	}); err != nil {
+		t.Fatalf("UpsertExternalIssue(second) error = %v", err)
+	}
+
+	second, err := service.ReconcileProject(ctx, ReconcileOptions{ProjectKey: "alpha"})
+	if err != nil {
+		t.Fatalf("ReconcileProject(second) error = %v", err)
+	}
+	if second.Eligible != 1 || second.Created != 0 || second.Existing != 1 || second.Linked != 0 || second.Dispatched || second.PullRequestsCreated {
+		t.Fatalf("second summary = %+v, want existing work item without duplicate link, dispatch, or PRs", second)
+	}
+	if err := store.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM tasks WHERE project_id = ?`, project.ID).Scan(&intakeCount); err != nil {
+		t.Fatalf("task count query: %v", err)
+	}
+	if intakeCount != 1 {
+		t.Fatalf("task count = %d, want one idempotent work item", intakeCount)
+	}
+}
+
 func TestNewGitHubTrackerUsesProjectManifestRepoTokenEnvAndDryRun(t *testing.T) {
 	const token = "ghp_manifesttoken1234567890abcdef"
 
