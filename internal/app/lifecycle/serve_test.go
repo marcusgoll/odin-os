@@ -1813,6 +1813,10 @@ func (git *cleanupFailureGit) RemoveWorktree(context.Context, string, string) er
 	return git.err
 }
 
+func (git *cleanupFailureGit) WorktreeDirty(context.Context, string) (bool, error) {
+	return false, nil
+}
+
 func createRuntimeRoot(t *testing.T) string {
 	t.Helper()
 

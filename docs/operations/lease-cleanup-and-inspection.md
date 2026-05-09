@@ -38,6 +38,7 @@ Rules:
 
 - cleanup only acts on released, not-yet-cleaned leases
 - cleanup respects the current shell scope
+- cleanup refuses dirty worktrees by default; force cleanup is reserved for explicit approved internal cleanup calls, not `/leases cleanup confirm`
 - cleaned leases remain visible through `/leases all`
 - cleaned worktree paths are removed from disk
 

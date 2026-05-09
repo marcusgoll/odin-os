@@ -995,4 +995,8 @@ func (git *fixtureGit) RemoveWorktree(context.Context, string, string) error {
 	return nil
 }
 
+func (git *fixtureGit) WorktreeDirty(context.Context, string) (bool, error) {
+	return false, nil
+}
+
 var _ leases.Git = (*fixtureGit)(nil)

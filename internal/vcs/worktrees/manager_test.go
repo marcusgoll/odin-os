@@ -2,6 +2,7 @@ package worktrees
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -48,6 +49,9 @@ func TestManagerCleanupRemovesReleasedLeaseDeterministically(t *testing.T) {
 	if git.removeCalls != 1 {
 		t.Fatalf("git remove calls = %d, want 1", git.removeCalls)
 	}
+	if git.dirtyCalls != 1 {
+		t.Fatalf("git dirty calls = %d, want 1", git.dirtyCalls)
+	}
 
 	updated, err := store.GetWorktreeLease(ctx, lease.ID)
 	if err != nil {
@@ -92,6 +96,9 @@ func TestManagerCleanupPreservesActiveLease(t *testing.T) {
 	}
 	if git.removeCalls != 0 {
 		t.Fatalf("git remove calls = %d, want 0", git.removeCalls)
+	}
+	if git.dirtyCalls != 0 {
+		t.Fatalf("git dirty calls = %d, want 0", git.dirtyCalls)
 	}
 
 	updated, err := store.GetWorktreeLease(ctx, lease.ID)
@@ -160,6 +167,9 @@ func TestManagerCleanupLeasesRemovesSelectedReleasedLeases(t *testing.T) {
 	if len(result.Removed) != 1 {
 		t.Fatalf("CleanupLeases().Removed len = %d, want 1", len(result.Removed))
 	}
+	if git.dirtyCalls != 1 {
+		t.Fatalf("git dirty calls = %d, want 1", git.dirtyCalls)
+	}
 	if result.Removed[0].ID != released.ID {
 		t.Fatalf("CleanupLeases().Removed[0].ID = %d, want %d", result.Removed[0].ID, released.ID)
 	}
@@ -178,6 +188,125 @@ func TestManagerCleanupLeasesRemovesSelectedReleasedLeases(t *testing.T) {
 	}
 	if untouched.CleanedUpAt != nil || untouched.State != "released" {
 		t.Fatalf("untouched lease = %+v, want released and not cleaned", untouched)
+	}
+}
+
+func TestManagerCleanupLeasesRejectsDirtyWorktreeByDefault(t *testing.T) {
+	ctx := context.Background()
+	store, project, task, run := openCleanupStore(t)
+	defer store.Close()
+
+	released, err := store.CreateWorktreeLease(ctx, sqlite.CreateWorktreeLeaseParams{
+		ProjectID:    project.ID,
+		TaskID:       task.ID,
+		RunID:        run.ID,
+		Mode:         "mutable",
+		BranchName:   "odin/cfipros/task-1/run-1/try-1",
+		WorktreePath: "/var/tmp/odin-worktrees/cfipros/task-1/run-1/try-1",
+		RepoRoot:     project.GitRoot,
+		State:        "released",
+	})
+	if err != nil {
+		t.Fatalf("CreateWorktreeLease() error = %v", err)
+	}
+
+	git := &cleanupGit{dirty: true}
+	manager := Manager{Store: store, Git: git, WorktreeRoot: "/var/tmp/odin-worktrees"}
+
+	result, err := manager.CleanupLeases(ctx, []sqlite.WorktreeLease{released})
+	if !errors.Is(err, ErrDirtyWorktree) {
+		t.Fatalf("CleanupLeases(dirty) error = %v, want ErrDirtyWorktree", err)
+	}
+	if len(result.Removed) != 0 {
+		t.Fatalf("CleanupLeases(dirty).Removed len = %d, want 0", len(result.Removed))
+	}
+	if git.dirtyCalls != 1 {
+		t.Fatalf("dirty calls = %d, want 1", git.dirtyCalls)
+	}
+	if git.removeCalls != 0 {
+		t.Fatalf("remove calls = %d, want 0", git.removeCalls)
+	}
+
+	unchanged, err := store.GetWorktreeLease(ctx, released.ID)
+	if err != nil {
+		t.Fatalf("GetWorktreeLease() error = %v", err)
+	}
+	if unchanged.CleanedUpAt != nil || unchanged.State != "released" {
+		t.Fatalf("dirty lease = %+v, want released and not cleaned", unchanged)
+	}
+}
+
+func TestManagerCleanupLeasesForceDirtyRequiresApproval(t *testing.T) {
+	ctx := context.Background()
+	store, project, task, run := openCleanupStore(t)
+	defer store.Close()
+
+	released, err := store.CreateWorktreeLease(ctx, sqlite.CreateWorktreeLeaseParams{
+		ProjectID:    project.ID,
+		TaskID:       task.ID,
+		RunID:        run.ID,
+		Mode:         "mutable",
+		BranchName:   "odin/cfipros/task-1/run-1/try-1",
+		WorktreePath: "/var/tmp/odin-worktrees/cfipros/task-1/run-1/try-1",
+		RepoRoot:     project.GitRoot,
+		State:        "released",
+	})
+	if err != nil {
+		t.Fatalf("CreateWorktreeLease() error = %v", err)
+	}
+
+	git := &cleanupGit{dirty: true}
+	manager := Manager{Store: store, Git: git, WorktreeRoot: "/var/tmp/odin-worktrees"}
+
+	result, err := manager.CleanupLeasesWithOptions(ctx, []sqlite.WorktreeLease{released}, CleanupOptions{
+		ForceDirty: true,
+	})
+	if err == nil {
+		t.Fatalf("CleanupLeasesWithOptions(force without approval) error = nil, want approval error")
+	}
+	if len(result.Removed) != 0 {
+		t.Fatalf("CleanupLeasesWithOptions(force without approval).Removed len = %d, want 0", len(result.Removed))
+	}
+	if git.dirtyCalls != 0 || git.removeCalls != 0 {
+		t.Fatalf("git calls dirty=%d remove=%d, want 0/0 before approval", git.dirtyCalls, git.removeCalls)
+	}
+}
+
+func TestManagerCleanupLeasesForceDirtyWithApprovalRemovesWorktree(t *testing.T) {
+	ctx := context.Background()
+	store, project, task, run := openCleanupStore(t)
+	defer store.Close()
+
+	released, err := store.CreateWorktreeLease(ctx, sqlite.CreateWorktreeLeaseParams{
+		ProjectID:    project.ID,
+		TaskID:       task.ID,
+		RunID:        run.ID,
+		Mode:         "mutable",
+		BranchName:   "odin/cfipros/task-1/run-1/try-1",
+		WorktreePath: "/var/tmp/odin-worktrees/cfipros/task-1/run-1/try-1",
+		RepoRoot:     project.GitRoot,
+		State:        "released",
+	})
+	if err != nil {
+		t.Fatalf("CreateWorktreeLease() error = %v", err)
+	}
+
+	git := &cleanupGit{dirty: true}
+	manager := Manager{Store: store, Git: git, WorktreeRoot: "/var/tmp/odin-worktrees"}
+
+	result, err := manager.CleanupLeasesWithOptions(ctx, []sqlite.WorktreeLease{released}, CleanupOptions{
+		ForceDirty:     true,
+		ApprovedBy:     "operator",
+		ApprovalReason: "explicit cleanup test",
+	})
+	if err != nil {
+		t.Fatalf("CleanupLeasesWithOptions(force approved) error = %v", err)
+	}
+	if len(result.Removed) != 1 || result.Removed[0].ID != released.ID {
+		t.Fatalf("CleanupLeasesWithOptions(force approved).Removed = %+v, want lease %d", result.Removed, released.ID)
+	}
+	if git.dirtyCalls != 1 || git.removeCalls != 1 {
+		t.Fatalf("git calls dirty=%d remove=%d, want 1/1", git.dirtyCalls, git.removeCalls)
 	}
 }
 
@@ -213,15 +342,25 @@ func TestManagerCleanupLeasesRejectsPathOutsideWorkspaceRoot(t *testing.T) {
 	if git.removeCalls != 0 {
 		t.Fatalf("git remove calls = %d, want 0", git.removeCalls)
 	}
+	if git.dirtyCalls != 0 {
+		t.Fatalf("git dirty calls = %d, want 0", git.dirtyCalls)
+	}
 }
 
 type cleanupGit struct {
 	removeCalls int
+	dirtyCalls  int
+	dirty       bool
 }
 
 func (git *cleanupGit) RemoveWorktree(context.Context, string, string) error {
 	git.removeCalls++
 	return nil
+}
+
+func (git *cleanupGit) WorktreeDirty(context.Context, string) (bool, error) {
+	git.dirtyCalls++
+	return git.dirty, nil
 }
 
 func openCleanupStore(t *testing.T) (*sqlite.Store, sqlite.Project, sqlite.Task, sqlite.Run) {

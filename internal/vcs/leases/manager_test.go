@@ -254,6 +254,10 @@ func (git *fakeGit) RemoveWorktree(context.Context, string, string) error {
 	return nil
 }
 
+func (git *fakeGit) WorktreeDirty(context.Context, string) (bool, error) {
+	return false, nil
+}
+
 func openLeaseManagerStore(t *testing.T) (*sqlite.Store, sqlite.Project, sqlite.Task, sqlite.Run) {
 	t.Helper()
 
