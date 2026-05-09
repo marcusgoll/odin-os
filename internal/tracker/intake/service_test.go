@@ -74,6 +74,9 @@ func TestServiceFetchesEligibleIssuesAndPersistsThemIdempotently(t *testing.T) {
 	if len(issues) != 1 {
 		t.Fatalf("ListExternalIssues() len = %d, want idempotent 1: %+v", len(issues), issues)
 	}
+	if countTasks(t, ctx, store) != 0 {
+		t.Fatalf("SyncProject created executable tasks")
+	}
 }
 
 func TestServicePreservesGitHubIssueAcceptanceCriteriaThroughReconcile(t *testing.T) {
@@ -351,8 +354,8 @@ func TestNewGitHubTrackerUsesProjectManifestRepoTokenEnvAndDryRun(t *testing.T) 
 		t.Fatalf("issues = %+v, want manifest repo issue #17", issues)
 	}
 
-	if err := source.MarkInProgress(context.Background(), tracker.IssueID{Provider: "github", Repo: "acme/manifest-repo", Number: 17}); err != nil {
-		t.Fatalf("dry-run MarkInProgress() error = %v", err)
+	if err := source.MarkInProgress(context.Background(), tracker.IssueID{Provider: "github", Repo: "acme/manifest-repo", Number: 17}); !errors.Is(err, tracker.ErrMutationUnsupported) {
+		t.Fatalf("dry-run MarkInProgress() error = %v, want %v", err, tracker.ErrMutationUnsupported)
 	}
 	if requests != 1 {
 		t.Fatalf("requests = %d, want only the read-only fetch request", requests)
@@ -544,4 +547,14 @@ func (fake *fakeTracker) AddComment(context.Context, tracker.IssueID, string) er
 func (fake *fakeTracker) CreateFollowUpIssue(context.Context, tracker.FollowUpIssue) (tracker.Issue, error) {
 	fake.mutationCalls++
 	return tracker.Issue{}, errors.New("unexpected mutation")
+}
+
+func countTasks(t *testing.T, ctx context.Context, store *sqlite.Store) int {
+	t.Helper()
+	row := store.DB().QueryRowContext(ctx, `SELECT COUNT(1) FROM tasks`)
+	var count int
+	if err := row.Scan(&count); err != nil {
+		t.Fatalf("count tasks: %v", err)
+	}
+	return count
 }

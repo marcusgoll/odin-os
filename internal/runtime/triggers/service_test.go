@@ -259,6 +259,45 @@ func TestEvaluateDueMaterializesReadOnlyIntentWithoutApprovalBlock(t *testing.T)
 	}
 }
 
+func TestExternalAdapterEventsCreateIntakeOnly(t *testing.T) {
+	ctx := context.Background()
+	store := openTriggerStore(t)
+	defer store.Close()
+	service := Service{Store: store, Registry: writeTriggerRegistry(t)}
+
+	result, err := service.IngestGitHubIssue(ctx, GitHubIssueIngestParams{
+		ProjectKey: "odin-core",
+		Repo:       "owner/repo",
+		Number:     42,
+		Action:     "opened",
+		Title:      "Fix failing CI",
+		URL:        "https://github.com/owner/repo/issues/42",
+	})
+	if err != nil {
+		t.Fatalf("IngestGitHubIssue() error = %v", err)
+	}
+	if result.EventType != "external.github.issue" {
+		t.Fatalf("event type = %q, want external.github.issue", result.EventType)
+	}
+	if countTasks(t, ctx, store) != 0 {
+		t.Fatalf("external issue ingest created executable tasks")
+	}
+
+	records, err := store.ListEvents(ctx, sqlite.ListEventsParams{})
+	if err != nil {
+		t.Fatalf("ListEvents() error = %v", err)
+	}
+	var externalEvents int
+	for _, record := range records {
+		if record.Type == events.EventExternalGitHubIssue {
+			externalEvents++
+		}
+	}
+	if externalEvents != 1 {
+		t.Fatalf("external github issue events = %d, want 1", externalEvents)
+	}
+}
+
 func TestEvaluateDueReschedulesRecurringCadenceFromDueWindow(t *testing.T) {
 	ctx := context.Background()
 	store := openTriggerStore(t)
@@ -711,6 +750,16 @@ func lastAutomationTriggerMaterializedPayload(t *testing.T, ctx context.Context,
 	}
 	t.Fatalf("missing %s event", events.EventAutomationTriggerMaterialized)
 	return events.AutomationTriggerMaterializedPayload{}
+}
+
+func countTasks(t *testing.T, ctx context.Context, store *sqlite.Store) int {
+	t.Helper()
+	row := store.DB().QueryRowContext(ctx, `SELECT COUNT(1) FROM tasks`)
+	var count int
+	if err := row.Scan(&count); err != nil {
+		t.Fatalf("count tasks: %v", err)
+	}
+	return count
 }
 
 func writeTriggerRegistry(t *testing.T) projects.Registry {

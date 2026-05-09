@@ -90,6 +90,9 @@ func (driver Driver) Invoke(ctx context.Context, request Request) (Response, err
 	if response.Artifacts == nil {
 		response.Artifacts = map[string]any{}
 	}
+	if hasMutationArtifact(response.Artifacts) {
+		return Response{}, fmt.Errorf("external adapter mutation is not supported; create intake evidence and request approval")
+	}
 
 	return response, nil
 }
@@ -99,4 +102,45 @@ func (driver Driver) envVar() string {
 		return defaultDriverEnvVar
 	}
 	return driver.EnvVar
+}
+
+func hasMutationArtifact(artifacts map[string]any) bool {
+	return hasMutationValue(artifacts)
+}
+
+func hasMutationValue(value any) bool {
+	switch typed := value.(type) {
+	case map[string]any:
+		for key, nested := range typed {
+			if looksMutationLike(key) || hasMutationValue(nested) {
+				return true
+			}
+		}
+	case []any:
+		for _, nested := range typed {
+			if hasMutationValue(nested) {
+				return true
+			}
+		}
+	case string:
+		return looksMutationLike(typed)
+	}
+	return false
+}
+
+func looksMutationLike(value string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(value))
+	normalized = strings.NewReplacer("-", "_", " ", "_").Replace(normalized)
+	words := strings.Split(normalized, "_")
+	for _, word := range words {
+		switch word {
+		case "create", "created", "update", "updated", "delete", "deleted", "change", "changed", "mutate", "mutated", "mutation", "send", "sent", "publish", "published", "purchase", "purchased", "deploy", "deployed":
+			return true
+		}
+	}
+	return strings.Contains(normalized, "createdevents") ||
+		strings.Contains(normalized, "updatedevents") ||
+		strings.Contains(normalized, "deletedevents") ||
+		strings.Contains(normalized, "changedevents") ||
+		strings.Contains(normalized, "externalmutation")
 }

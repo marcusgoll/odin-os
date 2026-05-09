@@ -128,98 +128,31 @@ func (client *Client) FetchIssueByID(ctx context.Context, id tracker.IssueID) (t
 }
 
 func (client *Client) MarkInProgress(ctx context.Context, id tracker.IssueID) error {
-	return client.addLabels(ctx, id, []string{tracker.LabelRunning})
+	return tracker.ErrMutationUnsupported
 }
 
 func (client *Client) MarkBlocked(ctx context.Context, id tracker.IssueID, reason string) error {
-	if err := client.addLabels(ctx, id, []string{tracker.LabelBlocked}); err != nil {
-		return err
-	}
-	if strings.TrimSpace(reason) == "" {
-		return nil
-	}
-	return client.AddComment(ctx, id, reason)
+	return tracker.ErrMutationUnsupported
 }
 
 func (client *Client) MarkFailed(ctx context.Context, id tracker.IssueID, reason string) error {
-	if err := client.addLabels(ctx, id, []string{tracker.LabelFailed}); err != nil {
-		return err
-	}
-	if strings.TrimSpace(reason) == "" {
-		return nil
-	}
-	return client.AddComment(ctx, id, reason)
+	return tracker.ErrMutationUnsupported
 }
 
 func (client *Client) MarkReadyForReview(ctx context.Context, id tracker.IssueID) error {
-	return client.addLabels(ctx, id, []string{tracker.LabelHumanReview})
+	return tracker.ErrMutationUnsupported
 }
 
 func (client *Client) MarkDone(ctx context.Context, id tracker.IssueID) error {
-	if client.config.DryRun {
-		return nil
-	}
-	if err := client.addLabels(ctx, id, []string{tracker.LabelDone}); err != nil {
-		return err
-	}
-	owner, repo, err := client.resolveRepo(id.Repo)
-	if err != nil {
-		return err
-	}
-	path := fmt.Sprintf("/repos/%s/%s/issues/%d", url.PathEscape(owner), url.PathEscape(repo), id.Number)
-	_, err = client.doJSON(ctx, http.MethodPatch, path, nil, map[string]string{"state": "closed"})
-	return err
+	return tracker.ErrMutationUnsupported
 }
 
 func (client *Client) AddComment(ctx context.Context, id tracker.IssueID, body string) error {
-	if client.config.DryRun {
-		return nil
-	}
-	owner, repo, err := client.resolveRepo(id.Repo)
-	if err != nil {
-		return err
-	}
-	path := fmt.Sprintf("/repos/%s/%s/issues/%d/comments", url.PathEscape(owner), url.PathEscape(repo), id.Number)
-	_, err = client.doJSON(ctx, http.MethodPost, path, nil, map[string]string{"body": body})
-	return err
+	return tracker.ErrMutationUnsupported
 }
 
 func (client *Client) CreateFollowUpIssue(ctx context.Context, issue tracker.FollowUpIssue) (tracker.Issue, error) {
-	repoID := issue.Repo
-	if repoID == "" {
-		repoID = client.repoID()
-	}
-	if client.config.DryRun {
-		return tracker.Issue{
-			Provider: provider,
-			Repo:     repoID,
-			Title:    issue.Title,
-			Body:     issue.Body,
-			State:    "dry-run",
-			Labels:   append([]string(nil), issue.Labels...),
-		}, nil
-	}
-	if !client.configured() {
-		return tracker.Issue{}, tracker.ErrNotImplemented
-	}
-	owner, repo, err := client.resolveRepo(repoID)
-	if err != nil {
-		return tracker.Issue{}, err
-	}
-	path := fmt.Sprintf("/repos/%s/%s/issues", url.PathEscape(owner), url.PathEscape(repo))
-	rawIssue, err := client.doJSON(ctx, http.MethodPost, path, nil, map[string]any{
-		"title":  issue.Title,
-		"body":   issue.Body,
-		"labels": issue.Labels,
-	})
-	if err != nil {
-		return tracker.Issue{}, err
-	}
-	var decoded githubIssue
-	if err := json.Unmarshal(rawIssue, &decoded); err != nil {
-		return tracker.Issue{}, fmt.Errorf("decode GitHub follow-up issue: %w", err)
-	}
-	return client.toTrackerIssue(decoded, labelNames(decoded.Labels)), nil
+	return tracker.Issue{}, tracker.ErrMutationUnsupported
 }
 
 func (client *Client) addLabels(ctx context.Context, id tracker.IssueID, labels []string) error {

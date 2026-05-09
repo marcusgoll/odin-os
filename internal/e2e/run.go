@@ -380,7 +380,8 @@ func (runner *runner) runTrackerDryRunLifecycle(ctx context.Context) error {
 		default:
 			continue
 		}
-		if err != nil {
+		denied := errors.Is(err, tracker.ErrMutationUnsupported)
+		if err != nil && !denied {
 			return runner.failStage(step.Name, err)
 		}
 		writes := doer.requests - before
@@ -388,7 +389,7 @@ func (runner *runner) runTrackerDryRunLifecycle(ctx context.Context) error {
 			runner.report.GitHub.Mutated = writes > 0
 			return runner.failStage(step.Name, fmt.Errorf("github_writes = %d, want %d", writes, step.Expect.GitHubWrites))
 		}
-		runner.passStage(step.Name, fmt.Sprintf("dry_run=%t github_writes=%d", step.DryRun, writes))
+		runner.passStage(step.Name, fmt.Sprintf("dry_run=%t mutation_denied=%t github_writes=%d", step.DryRun, denied, writes))
 	}
 	return nil
 }
@@ -495,10 +496,11 @@ func (runner *runner) runFailureAnalysis(ctx context.Context) error {
 		Body:   input.Summary,
 		Labels: []string{tracker.LabelHumanReview},
 	})
-	if err != nil {
+	denied := errors.Is(err, tracker.ErrMutationUnsupported)
+	if err != nil && !denied {
 		return runner.failStage(step.Name, err)
 	}
-	created := followUp.State == "dry-run" && followUp.Title != ""
+	created := !denied && followUp.State == "dry-run" && followUp.Title != ""
 	if created != step.Expect.CreatesFollowUp {
 		return runner.failStage(step.Name, fmt.Errorf("creates_follow_up = %t, want %t", created, step.Expect.CreatesFollowUp))
 	}
@@ -507,7 +509,7 @@ func (runner *runner) runFailureAnalysis(ctx context.Context) error {
 		return runner.failStage(step.Name, fmt.Errorf("github writes = %d, want 0", doer.requests))
 	}
 	runner.report.Failure = failureReport{Category: category, CreatesFollowUp: created}
-	runner.passStage(step.Name, fmt.Sprintf("category=%q creates_follow_up=%t", category, created))
+	runner.passStage(step.Name, fmt.Sprintf("category=%q creates_follow_up=%t mutation_denied=%t", category, created, denied))
 	return nil
 }
 

@@ -50,3 +50,9 @@ runtime work when it appears on an external GitHub issue. The pause/resume
 contract in `docs/contracts/pause-resume.md` keeps runtime pause authority in
 SQLite and permits GitHub labels only as outbound projections or stored external
 evidence.
+
+## External Adapter Rule
+
+External adapter rule:
+
+- External adapters may create Intake Items, external event records, or read-only evidence. They must not create executable Work Items, resolve approvals, send messages, change calendar events, publish content, purchase, delete, deploy, or mutate production systems until a source-specific resolver contract and approval policy are implemented and proven through real `odin` commands.
