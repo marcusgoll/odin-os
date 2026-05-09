@@ -922,6 +922,39 @@ func (store *Store) ProcessIntakeItem(ctx context.Context, params ProcessIntakeI
 	return item, err
 }
 
+func (store *Store) LinkIntakeItemGoal(ctx context.Context, intakeItemID int64, goalID int64) (IntakeItem, error) {
+	if intakeItemID <= 0 {
+		return IntakeItem{}, fmt.Errorf("intake item id is required")
+	}
+	if goalID <= 0 {
+		return IntakeItem{}, fmt.Errorf("goal id is required")
+	}
+	now := store.now()
+	var item IntakeItem
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		if _, err := store.getGoalTx(ctx, tx, goalID); err != nil {
+			return err
+		}
+		if _, err := store.getIntakeItemTx(ctx, tx, intakeItemID); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE intake_items
+			SET goal_id = ?, updated_at = ?
+			WHERE id = ?
+		`, goalID, formatTime(now), intakeItemID); err != nil {
+			return err
+		}
+		linked, err := store.getIntakeItemTx(ctx, tx, intakeItemID)
+		if err != nil {
+			return err
+		}
+		item = linked
+		return nil
+	})
+	return item, err
+}
+
 func (store *Store) ReviewIntakeItem(ctx context.Context, params ReviewIntakeItemParams) (IntakeItem, error) {
 	now := store.now()
 	var item IntakeItem
@@ -965,6 +998,8 @@ func (store *Store) ReviewIntakeItem(ctx context.Context, params ReviewIntakeIte
 				PolicyReason:      params.PolicyReason,
 				WorkItemID:        params.WorkItemID,
 				WorkItemKey:       params.WorkItemKey,
+				GoalID:            params.GoalID,
+				GoalStatus:        params.GoalStatus,
 				CanonicalIntakeID: existing.CanonicalIntakeItemID,
 			},
 			OccurredAt: now,

@@ -655,12 +655,18 @@ type IntakeProcessingPayload struct {
 }
 
 type IntakeClassification struct {
-	Result string `json:"result"`
-	Reason string `json:"reason"`
+	Result         string `json:"result"`
+	Reason         string `json:"reason"`
+	SourceType     string `json:"source_type,omitempty"`
+	Intent         string `json:"intent,omitempty"`
+	Risk           string `json:"risk,omitempty"`
+	Confidence     string `json:"confidence,omitempty"`
+	SuggestedRoute string `json:"suggested_route,omitempty"`
 }
 
 type IntakeDedupeReview struct {
 	Result             string `json:"result"`
+	Basis              string `json:"basis,omitempty"`
 	CanonicalIntakeKey string `json:"canonical_intake_key,omitempty"`
 }
 
@@ -696,6 +702,8 @@ type IntakeReviewDecisionPayload struct {
 	PolicyReason      string `json:"policy_reason,omitempty"`
 	WorkItemID        *int64 `json:"work_item_id,omitempty"`
 	WorkItemKey       string `json:"work_item_key,omitempty"`
+	GoalID            *int64 `json:"goal_id,omitempty"`
+	GoalStatus        string `json:"goal_status,omitempty"`
 	CanonicalIntakeID *int64 `json:"canonical_intake_id,omitempty"`
 }
 

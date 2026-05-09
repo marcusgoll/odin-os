@@ -63,18 +63,20 @@ func (intakeReviewQueueSource) ListReviewQueueEntries(ctx context.Context, app b
 
 	entries := make([]reviewQueueEntry, 0)
 	for _, item := range intakeItems {
-		if item.GoalID != nil {
-			goal, err := app.Store.GetGoal(ctx, *item.GoalID)
-			if err != nil {
-				return nil, err
-			}
+		if isIntakeGoalReviewItem(item) {
 			entry, err := reviewEntryFromIntakeGoalItem(item)
 			if err != nil {
 				return nil, err
 			}
-			state.convertedGoalIDs[*item.GoalID] = true
-			if goal.Status == sqlite.GoalStatusBlocked {
-				continue
+			if item.GoalID != nil {
+				goal, err := app.Store.GetGoal(ctx, *item.GoalID)
+				if err != nil {
+					return nil, err
+				}
+				state.convertedGoalIDs[*item.GoalID] = true
+				if goal.Status == sqlite.GoalStatusBlocked {
+					continue
+				}
 			}
 			entries = append(entries, entry)
 			continue
@@ -96,6 +98,18 @@ func (intakeReviewQueueSource) ListReviewQueueEntries(ctx context.Context, app b
 		}
 	}
 	return entries, nil
+}
+
+func isIntakeGoalReviewItem(item sqlite.IntakeItem) bool {
+	return item.GoalID != nil || isDraftGoalIntakeItem(item)
+}
+
+func isDraftGoalIntakeItem(item sqlite.IntakeItem) bool {
+	notes, err := intakeNotesFromItem(item)
+	if err != nil || notes.DraftArtifact == nil {
+		return false
+	}
+	return item.Status == "review_required" && strings.TrimSpace(notes.DraftArtifact.Kind) == "draft_goal"
 }
 
 type goalReviewQueueSource struct{}

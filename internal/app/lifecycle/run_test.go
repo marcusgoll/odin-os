@@ -919,9 +919,9 @@ func TestRunIntakeProcessPersistsDraftArtifactEvidenceForAllReviewOutcomes(t *te
 		{
 			ref:              "intake-1",
 			wantStatus:       "review_required",
-			wantRoute:        "goal_created",
-			wantArtifactKind: "goal_review",
-			wantReviewState:  "created_not_approved",
+			wantRoute:        "draft_goal",
+			wantArtifactKind: "draft_goal",
+			wantReviewState:  "review_required",
 		},
 		{
 			ref:              "intake-2",
@@ -1193,8 +1193,8 @@ func TestRunIntakeProcessConvertsGoalLikeRawItemToGoal(t *testing.T) {
 	if err := Run(context.Background(), root, []string{"intake", "process", "--id", "intake-1", "--json"}, strings.NewReader(""), &processOutput); err != nil {
 		t.Fatalf("Run(intake process) error = %v", err)
 	}
-	if output := processOutput.String(); !strings.Contains(output, `"routed_outcome": "goal_created"`) || !strings.Contains(output, `"goal_id": 1`) {
-		t.Fatalf("process output = %s, want goal conversion evidence", output)
+	if output := processOutput.String(); !strings.Contains(output, `"routed_outcome": "draft_goal"`) || strings.Contains(output, `"goal_id": 1`) {
+		t.Fatalf("process output = %s, want draft goal review evidence without goal creation", output)
 	}
 	if output := processOutput.String(); strings.Contains(output, `"status": "approved_for_execution"`) {
 		t.Fatalf("process output = %s, must not auto-approve goal", output)
@@ -1204,16 +1204,16 @@ func TestRunIntakeProcessConvertsGoalLikeRawItemToGoal(t *testing.T) {
 	if err := Run(context.Background(), root, []string{"intake", "raw", "show", "intake-1", "--json"}, strings.NewReader(""), &rawShow); err != nil {
 		t.Fatalf("Run(intake raw show) error = %v", err)
 	}
-	if output := rawShow.String(); !strings.Contains(output, `"goal_id": 1`) || !strings.Contains(output, `"processing"`) {
-		t.Fatalf("raw show output = %s, want persisted intake goal link and processing evidence", output)
+	if output := rawShow.String(); strings.Contains(output, `"goal_id": 1`) || !strings.Contains(output, `"processing"`) {
+		t.Fatalf("raw show output = %s, want draft goal processing evidence without goal link", output)
 	}
 
 	var goalList bytes.Buffer
 	if err := Run(context.Background(), root, []string{"goal", "list", "--json"}, strings.NewReader(""), &goalList); err != nil {
 		t.Fatalf("Run(goal list) error = %v", err)
 	}
-	if output := goalList.String(); !strings.Contains(output, `"title": "Build a browser executor for Odin research goals"`) || !strings.Contains(output, `"status": "created"`) {
-		t.Fatalf("goal list output = %s, want created converted goal", output)
+	if output := goalList.String(); strings.Contains(output, `"title": "Build a browser executor for Odin research goals"`) {
+		t.Fatalf("goal list output = %s, want no goal before review acceptance", output)
 	}
 
 	var tickOutput bytes.Buffer
@@ -1230,12 +1230,14 @@ func TestRunIntakeProcessConvertsGoalLikeRawItemToGoal(t *testing.T) {
 	}
 	for _, want := range []string{
 		`"type": "intake.processed"`,
-		`"type": "intake.routed_to_goal"`,
-		`"type": "goal.created"`,
+		`"type": "intake.draft_artifact_created"`,
 	} {
 		if !strings.Contains(logsOutput.String(), want) {
 			t.Fatalf("logs output = %s, want %s", logsOutput.String(), want)
 		}
+	}
+	if strings.Contains(logsOutput.String(), `"type": "goal.created"`) {
+		t.Fatalf("logs output = %s, must not create a goal before review acceptance", logsOutput.String())
 	}
 }
 
@@ -1258,16 +1260,16 @@ func TestRunIntakeProcessConvertsProjectLikeRawItemToGoal(t *testing.T) {
 	if err := Run(context.Background(), root, []string{"intake", "process", "--id", "intake-1", "--json"}, strings.NewReader(""), &processOutput); err != nil {
 		t.Fatalf("Run(intake process) error = %v", err)
 	}
-	if output := processOutput.String(); !strings.Contains(output, `"routed_outcome": "goal_created"`) || !strings.Contains(output, `"goal_id": 1`) {
-		t.Fatalf("process output = %s, want project-like intake routed to goal", output)
+	if output := processOutput.String(); !strings.Contains(output, `"routed_outcome": "draft_goal"`) || strings.Contains(output, `"goal_id": 1`) {
+		t.Fatalf("process output = %s, want project-like intake routed to draft goal without goal creation", output)
 	}
 
-	var goalShow bytes.Buffer
-	if err := Run(context.Background(), root, []string{"goal", "show", "--id", "1", "--json"}, strings.NewReader(""), &goalShow); err != nil {
-		t.Fatalf("Run(goal show) error = %v", err)
+	var goalList bytes.Buffer
+	if err := Run(context.Background(), root, []string{"goal", "list", "--json"}, strings.NewReader(""), &goalList); err != nil {
+		t.Fatalf("Run(goal list) error = %v", err)
 	}
-	if output := goalShow.String(); !strings.Contains(output, `"status": "created"`) || strings.Contains(output, `"status": "approved_for_execution"`) {
-		t.Fatalf("goal show output = %s, want created unapproved goal", output)
+	if output := goalList.String(); strings.Contains(output, `"Plan the Odin project for browser session handoff"`) {
+		t.Fatalf("goal list output = %s, want no goal before review acceptance", output)
 	}
 }
 
@@ -1302,8 +1304,8 @@ func TestRunIntakeProcessDuplicateGoalLikeRawItemDoesNotCreateSecondGoal(t *test
 	if err := Run(context.Background(), root, []string{"goal", "list", "--json"}, strings.NewReader(""), &goalList); err != nil {
 		t.Fatalf("Run(goal list) error = %v", err)
 	}
-	if output := goalList.String(); strings.Count(output, `"title": "Build a browser executor for Odin research goals"`) != 1 {
-		t.Fatalf("goal list output = %s, want exactly one converted goal", output)
+	if output := goalList.String(); strings.Contains(output, `"title": "Build a browser executor for Odin research goals"`) {
+		t.Fatalf("goal list output = %s, want no converted goal before review acceptance", output)
 	}
 }
 
@@ -1350,6 +1352,19 @@ func TestRunIntakeReviewPromotesOnlyOnOperatorAccept(t *testing.T) {
 	if output := listOutput.String(); !strings.Contains(output, `"status": "review_required"`) || !strings.Contains(output, `"status": "needs_clarification"`) || !strings.Contains(output, `"status": "duplicate_linked_or_suppressed"`) {
 		t.Fatalf("review list output = %s, want all reviewable states", output)
 	}
+	for _, want := range []string{
+		`"classification": "actionable_request"`,
+		`"dedupe_result": "unique"`,
+		`"risk": "low"`,
+		`"suggested_route": "draft_task"`,
+		`"evidence": {`,
+		`"payload_policy": "stored_in_source_facts_json"`,
+		`"payload_available": true`,
+	} {
+		if !strings.Contains(listOutput.String(), want) {
+			t.Fatalf("review list output = %s, want review metadata %s", listOutput.String(), want)
+		}
+	}
 
 	var showOutput bytes.Buffer
 	if err := Run(context.Background(), root, []string{"intake", "review", "show", "intake-1", "--json"}, strings.NewReader(""), &showOutput); err != nil {
@@ -1357,6 +1372,17 @@ func TestRunIntakeReviewPromotesOnlyOnOperatorAccept(t *testing.T) {
 	}
 	if output := showOutput.String(); !strings.Contains(output, `"draft_artifact"`) || !strings.Contains(output, `"review_state": "review_required"`) {
 		t.Fatalf("review show output = %s, want draft artifact", output)
+	}
+	for _, want := range []string{
+		`"classification": "actionable_request"`,
+		`"dedupe_result": "unique"`,
+		`"risk": "low"`,
+		`"suggested_route": "draft_task"`,
+		`"payload_included": true`,
+	} {
+		if !strings.Contains(showOutput.String(), want) {
+			t.Fatalf("review show output = %s, want review metadata %s", showOutput.String(), want)
+		}
 	}
 
 	var acceptOutput bytes.Buffer
@@ -1496,6 +1522,80 @@ func TestRunIntakeReviewPromotesOnlyOnOperatorAccept(t *testing.T) {
 		if !strings.Contains(output.String(), `[]`) {
 			t.Fatalf("Run(%v) output = %s, want empty list", args, output.String())
 		}
+	}
+}
+
+func TestRunIntakeReviewAcceptsDraftGoalOnlyAfterReview(t *testing.T) {
+	root := testRepoRoot(t)
+
+	if err := Run(context.Background(), root, []string{
+		"intake", "raw", "create",
+		"--text", "Build a browser executor for Odin research goals",
+		"--json",
+	}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+		t.Fatalf("Run(intake raw create --text) error = %v", err)
+	}
+	if err := Run(context.Background(), root, []string{"intake", "process", "--id", "intake-1", "--json"}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+		t.Fatalf("Run(intake process) error = %v", err)
+	}
+
+	var beforeGoalList bytes.Buffer
+	if err := Run(context.Background(), root, []string{"goal", "list", "--json"}, strings.NewReader(""), &beforeGoalList); err != nil {
+		t.Fatalf("Run(goal list before accept) error = %v", err)
+	}
+	if output := beforeGoalList.String(); !strings.Contains(output, `"goals": []`) {
+		t.Fatalf("goal list before accept = %s, want no goal before review", output)
+	}
+
+	var acceptOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"intake", "review", "accept", "intake-1", "--json"}, strings.NewReader(""), &acceptOutput); err != nil {
+		t.Fatalf("Run(intake review accept draft_goal) error = %v", err)
+	}
+	for _, want := range []string{
+		`"decision": "accepted"`,
+		`"work_created": false`,
+		`"goal_id": 1`,
+		`"goal_status": "approved_for_execution"`,
+	} {
+		if !strings.Contains(acceptOutput.String(), want) {
+			t.Fatalf("accept output = %s, want %s", acceptOutput.String(), want)
+		}
+	}
+
+	var goalList bytes.Buffer
+	if err := Run(context.Background(), root, []string{"goal", "list", "--json"}, strings.NewReader(""), &goalList); err != nil {
+		t.Fatalf("Run(goal list after accept) error = %v", err)
+	}
+	if output := goalList.String(); !strings.Contains(output, `"title": "Build a browser executor for Odin research goals"`) || !strings.Contains(output, `"status": "approved_for_execution"`) {
+		t.Fatalf("goal list after accept = %s, want accepted intake goal", output)
+	}
+
+	for _, args := range [][]string{{"jobs", "--json"}, {"runs", "--json"}} {
+		var output bytes.Buffer
+		if err := Run(context.Background(), root, args, strings.NewReader(""), &output); err != nil {
+			t.Fatalf("Run(%v) error = %v", args, err)
+		}
+		if !strings.Contains(output.String(), `[]`) {
+			t.Fatalf("Run(%v) output = %s, want no task/run objects", args, output.String())
+		}
+	}
+
+	var logsOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"logs", "--json"}, strings.NewReader(""), &logsOutput); err != nil {
+		t.Fatalf("Run(logs --json) error = %v", err)
+	}
+	for _, want := range []string{
+		`"type": "intake.review_accepted"`,
+		`"type": "goal.created"`,
+		`"goal_id": 1`,
+		`"goal_status": "approved_for_execution"`,
+	} {
+		if !strings.Contains(logsOutput.String(), want) {
+			t.Fatalf("logs output = %s, want %s", logsOutput.String(), want)
+		}
+	}
+	if strings.Contains(logsOutput.String(), `"type": "task.created"`) {
+		t.Fatalf("logs output = %s, must not create task for draft goal", logsOutput.String())
 	}
 }
 
@@ -2213,7 +2313,6 @@ func TestRunReviewQueueIncludesGoalReviewItems(t *testing.T) {
 	for _, want := range []string{
 		`"review_id": "intake-goal:1"`,
 		`"source_type": "intake_goal_conversion"`,
-		`"goal_id": 1`,
 		`"review_id": "goal:` + int64String(manualCreatedID) + `"`,
 		`"source_type": "goal"`,
 		`"title": "Manual created goal review"`,
@@ -2251,8 +2350,8 @@ func TestRunReviewQueueIncludesGoalReviewItems(t *testing.T) {
 	}
 
 	show := run("review", "show", "--id", convertedReviewID, "--json")
-	if !strings.Contains(show, `"review_id": "`+convertedReviewID+`"`) || !strings.Contains(show, `"source_type": "intake_goal_conversion"`) || !strings.Contains(show, `"goal_id": 1`) {
-		t.Fatalf("review show output = %s, want one converted intake goal item", show)
+	if !strings.Contains(show, `"review_id": "`+convertedReviewID+`"`) || !strings.Contains(show, `"source_type": "intake_goal_conversion"`) || !strings.Contains(show, `"suggested_route": "draft_goal"`) {
+		t.Fatalf("review show output = %s, want one draft intake goal item", show)
 	}
 }
 

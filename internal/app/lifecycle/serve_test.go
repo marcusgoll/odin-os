@@ -832,19 +832,19 @@ service:
 		t.Fatalf("Run(serve) error = %v\n%s", err, stdout.String())
 	}
 
-	goal, err := store.GetGoal(context.Background(), 1)
+	goals, err := store.ListGoals(context.Background(), sqlite.ListGoalsParams{})
 	if err != nil {
-		t.Fatalf("GetGoal() error = %v", err)
+		t.Fatalf("ListGoals() error = %v", err)
 	}
-	if goal.Status != sqlite.GoalStatusCreated || goal.CurrentRunID != nil {
-		t.Fatalf("converted goal after serve = %+v, want created without active run", goal)
+	if len(goals) != 0 {
+		t.Fatalf("goals after serve = %+v, want no goal before intake review approval", goals)
 	}
-	runs, err := store.ListGoalRunsByGoalID(context.Background(), goal.ID)
+	runs, err := store.ListGoalRunsByGoalID(context.Background(), 1)
 	if err != nil {
 		t.Fatalf("ListGoalRunsByGoalID() error = %v", err)
 	}
 	if len(runs) != 0 {
-		t.Fatalf("runs len = %d, want no run for converted unapproved goal", len(runs))
+		t.Fatalf("runs len = %d, want no run before intake review approval", len(runs))
 	}
 }
 

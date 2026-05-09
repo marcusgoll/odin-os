@@ -157,6 +157,23 @@ func TestParseIntakeReviewCommands(t *testing.T) {
 	}
 }
 
+func TestParseIntakeNestedHelp(t *testing.T) {
+	t.Parallel()
+
+	for _, args := range [][]string{
+		{"raw", "create", "--help"},
+		{"review", "list", "--help"},
+	} {
+		command, err := ParseIntake(args)
+		if err != nil {
+			t.Fatalf("ParseIntake(%v) error = %v", args, err)
+		}
+		if command.Name != "help" {
+			t.Fatalf("ParseIntake(%v) = %+v, want help command", args, command)
+		}
+	}
+}
+
 func TestParseIntakeApprovalCommands(t *testing.T) {
 	t.Parallel()
 

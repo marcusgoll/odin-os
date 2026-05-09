@@ -544,6 +544,8 @@ type ReviewIntakeItemParams struct {
 	PolicyReason     string
 	WorkItemID       *int64
 	WorkItemKey      string
+	GoalID           *int64
+	GoalStatus       string
 }
 
 type IntakeItemProcessingEvent struct {
