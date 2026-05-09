@@ -1730,7 +1730,10 @@ func pointerIfScope(scopes []string, required string, value *int64) *int64 {
 }
 
 func (service Service) admitTask(ctx context.Context, task sqlite.Task, project sqlite.Project, manifest projects.Manifest, executorKey string) (admissionDecision, error) {
-	intent := resolveTaskExecutionIntent(manifest, task)
+	task, intent, err := service.resolveAndPersistTaskExecutionIntent(ctx, manifest, task)
+	if err != nil {
+		return admissionDecision{}, err
+	}
 	approvalDecision, required, err := service.evaluateTaskApproval(ctx, task, manifest, intent)
 	if err != nil {
 		return admissionDecision{}, err
@@ -1771,7 +1774,10 @@ func (service Service) admitTask(ctx context.Context, task sqlite.Task, project 
 }
 
 func (service Service) admitDirectTask(ctx context.Context, task sqlite.Task, project sqlite.Project, manifest projects.Manifest) (admissionDecision, error) {
-	intent := resolveTaskExecutionIntent(manifest, task)
+	task, intent, err := service.resolveAndPersistTaskExecutionIntent(ctx, manifest, task)
+	if err != nil {
+		return admissionDecision{}, err
+	}
 	approvalDecision, required, err := service.evaluateTaskApproval(ctx, task, manifest, intent)
 	if err != nil {
 		return admissionDecision{}, err
@@ -2329,6 +2335,28 @@ func (service Service) latestTaskApproval(ctx context.Context, taskID int64) (sq
 	return sqlite.Approval{}, err
 }
 
+func (service Service) resolveAndPersistTaskExecutionIntent(ctx context.Context, manifest projects.Manifest, task sqlite.Task) (sqlite.Task, executionIntent, error) {
+	intent := resolveTaskExecutionIntent(manifest, task)
+	if intent.Value == "" {
+		return task, intent, nil
+	}
+	if strings.TrimSpace(task.ExecutionIntent) == intent.Value && strings.TrimSpace(task.ExecutionIntentSource) == intent.Source {
+		return task, intent, nil
+	}
+	if intent.Source != "safety_classifier" {
+		return task, intent, nil
+	}
+	updated, err := service.Store.UpdateTaskExecutionIntent(ctx, sqlite.UpdateTaskExecutionIntentParams{
+		TaskID:                task.ID,
+		ExecutionIntent:       intent.Value,
+		ExecutionIntentSource: intent.Source,
+	})
+	if err != nil {
+		return task, executionIntent{}, err
+	}
+	return updated, intent, nil
+}
+
 func (service Service) evaluateTaskApproval(ctx context.Context, task sqlite.Task, manifest projects.Manifest, intent executionIntent) (admissionDecision, bool, error) {
 	requirement := projects.ApprovalRequiredForAction(manifest, intent.ActionClass)
 	if !requirement.Required {
@@ -2370,7 +2398,7 @@ func (service Service) evaluateTaskApproval(ctx context.Context, task sqlite.Tas
 }
 
 func classifyTaskExecutionIntent(title string) executionIntent {
-	normalized := strings.ToLower(strings.TrimSpace(title))
+	normalized := normalizeIntentTitle(title)
 	intent := executionIntent{
 		ActionClass: projects.ActionClassReadOnly,
 		ActionKey:   "read_only_task",
@@ -2384,6 +2412,9 @@ func classifyTaskExecutionIntent(title string) executionIntent {
 	if containsAny(normalized, []string{"read-only", "read only", "inspect", "status", "list "}) {
 		intent.Reason = "explicit_read_only"
 		return intent
+	}
+	if highRiskIntent := classifyHighRiskExecutionIntent(normalized); highRiskIntent.Value != "" {
+		return highRiskIntent
 	}
 
 	if containsAny(normalized, []string{
@@ -2429,9 +2460,61 @@ func classifyTaskExecutionIntent(title string) executionIntent {
 
 func resolveTaskExecutionIntent(manifest projects.Manifest, task sqlite.Task) executionIntent {
 	if intent := executionIntentFromStored(task.ExecutionIntent, task.ExecutionIntentSource); intent.Value != "" {
+		if intent.Value == "read_only" {
+			if highRiskIntent := classifyHighRiskExecutionIntent(normalizeIntentTitle(task.Title)); highRiskIntent.Value != "" {
+				highRiskIntent.Source = "safety_classifier"
+				highRiskIntent.Reason = "high_risk_read_only_override"
+				return applyManifestExecutionDefaults(manifest, highRiskIntent)
+			}
+		}
 		return intent
 	}
 	return applyManifestExecutionDefaults(manifest, classifyTaskExecutionIntent(task.Title))
+}
+
+func normalizeIntentTitle(title string) string {
+	normalized := strings.ToLower(strings.TrimSpace(title))
+	normalized = strings.NewReplacer("_", " ", "-", " ").Replace(normalized)
+	return strings.Join(strings.Fields(normalized), " ")
+}
+
+func classifyHighRiskExecutionIntent(normalized string) executionIntent {
+	if normalized == "" {
+		return executionIntent{}
+	}
+	if containsAny(normalized, []string{
+		"delete data", "delete record", "delete records", "remove data", "remove record", "remove records",
+		"destroy data", "wipe data", "purge data", "truncate",
+	}) {
+		return executionIntent{
+			ActionClass: projects.ActionClassDestructiveMutation,
+			ActionKey:   "run_task",
+			Mutating:    true,
+			Reason:      "high_risk_destructive_keyword",
+			Value:       "destructive",
+			Source:      "fallback_title",
+		}
+	}
+	if containsAny(normalized, []string{
+		"send email", "send message", "send sms", "send text",
+		"create calendar event", "change calendar event", "update calendar event", "modify calendar event",
+		"make purchase", "buy ", "purchase ",
+		"deploy code", "deploy ", "release to production",
+		"modify production", "change production", "production system", "prod system",
+		"change permission", "change permissions", "grant permission", "revoke permission",
+		"publish public", "publish post", "post to x", "publish to x", "publish social",
+		"financial record", "financial records", "legal record", "legal records", "medical record", "medical records",
+	}) {
+		return executionIntent{
+			ActionClass: projects.ActionClassGovernanceMutation,
+			ActionKey:   "run_task",
+			Mutating:    true,
+			Reason:      "high_risk_real_world_keyword",
+			Value:       "governance",
+			Source:      "fallback_title",
+		}
+	}
+	return executionIntent{}
 }
 
 func executionIntentFromStored(value string, source string) executionIntent {

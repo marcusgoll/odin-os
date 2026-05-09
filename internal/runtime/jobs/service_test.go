@@ -1332,6 +1332,124 @@ func TestExecuteNextQueuedResumesAfterApprovalIsApproved(t *testing.T) {
 	}
 }
 
+func TestExecuteNextQueuedTreatsHighRiskReadOnlyTaskAsApprovalRequired(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openJobStore(t)
+	defer store.Close()
+
+	registry := writeRegistryAllowingDirectAlphaMutation(t)
+	service := Service{
+		Store:          store,
+		Registry:       registry,
+		Executors:      testJobExecutors(),
+		ExecutorConfig: mustLoadExecutorConfig(t),
+		Transitions:    projects.Service{Store: store},
+		Leases: leases.Manager{
+			Store:        store,
+			Git:          &jobTestGit{},
+			WorktreeRoot: t.TempDir(),
+		},
+		Now: time.Now,
+	}
+
+	alpha, ok := registry.Lookup("alpha")
+	if !ok {
+		t.Fatal("registry.Lookup(alpha) = false")
+	}
+	project, err := store.CreateProject(ctx, sqlite.CreateProjectParams{
+		Key:           alpha.Key,
+		Name:          alpha.Name,
+		Scope:         "project",
+		GitRoot:       alpha.GitRoot,
+		DefaultBranch: alpha.DefaultBranch,
+		GitHubRepo:    alpha.GitHub.Repo,
+		ManifestPath:  alpha.SourcePath,
+	})
+	if err != nil {
+		t.Fatalf("CreateProject(alpha) error = %v", err)
+	}
+	if _, err := service.Transitions.SetTransitionState(ctx, projects.TransitionStateInput{
+		ProjectID:   project.ID,
+		Actor:       projects.TransitionControllerOdinOS,
+		TargetState: projects.TransitionStateCutover,
+		ChangedBy:   "test",
+	}); err != nil {
+		t.Fatalf("SetTransitionState(cutover) error = %v", err)
+	}
+	task, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:             project.ID,
+		Key:                   "send-email-read-only",
+		Title:                 "Send_email_to_customer",
+		Status:                "queued",
+		Scope:                 "project",
+		RequestedBy:           "operator",
+		ExecutionIntent:       "read_only",
+		ExecutionIntentSource: "operator",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+
+	if err := service.ExecuteNextQueued(ctx); err != nil {
+		t.Fatalf("ExecuteNextQueued(first) error = %v", err)
+	}
+	blockedTask, err := store.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("GetTask(blocked) error = %v", err)
+	}
+	if blockedTask.Status != "blocked" || blockedTask.BlockedReason != "approval_required" {
+		t.Fatalf("blocked task = %+v, want blocked approval_required", blockedTask)
+	}
+	if blockedTask.ExecutionIntent != "governance" || blockedTask.ExecutionIntentSource != "safety_classifier" {
+		t.Fatalf("blocked execution intent = %q/%q, want governance/safety_classifier", blockedTask.ExecutionIntent, blockedTask.ExecutionIntentSource)
+	}
+	approval, err := store.GetLatestTaskApproval(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("GetLatestTaskApproval() error = %v", err)
+	}
+	if approval.Status != "pending" {
+		t.Fatalf("Approval.Status = %q, want pending", approval.Status)
+	}
+	records, err := store.ListEvents(ctx, sqlite.ListEventsParams{})
+	if err != nil {
+		t.Fatalf("ListEvents() error = %v", err)
+	}
+	var sawSafetyIntentEvent bool
+	for _, record := range records {
+		if strings.Contains(string(record.Payload), `"execution_intent":"governance"`) &&
+			strings.Contains(string(record.Payload), `"execution_intent_source":"safety_classifier"`) {
+			sawSafetyIntentEvent = true
+			break
+		}
+	}
+	if !sawSafetyIntentEvent {
+		t.Fatalf("events = %+v, want safety-classified governance intent evidence", records)
+	}
+
+	if _, err := store.ResolveApproval(ctx, sqlite.ResolveApprovalParams{
+		ApprovalID: approval.ID,
+		Status:     "approved",
+		DecisionBy: "operator",
+		Reason:     "operator approved customer email",
+	}); err != nil {
+		t.Fatalf("ResolveApproval() error = %v", err)
+	}
+	recordHealthyExecutorSample(t, ctx, store)
+
+	if err := service.ExecuteNextQueued(ctx); err != nil {
+		t.Fatalf("ExecuteNextQueued(second) error = %v", err)
+	}
+	completedTask, err := store.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("GetTask(completed) error = %v", err)
+	}
+	if completedTask.Status != "completed" {
+		t.Fatalf("Task.Status after approval = %q, want completed", completedTask.Status)
+	}
+}
+
 func TestExecuteNextQueuedKeepsRunPreparingAndReleasesLeaseOnAdmissionFailure(t *testing.T) {
 	t.Parallel()
 

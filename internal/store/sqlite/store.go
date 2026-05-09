@@ -1543,6 +1543,36 @@ func (store *Store) UpdateTaskQueueState(ctx context.Context, params UpdateTaskQ
 	return task, err
 }
 
+func (store *Store) UpdateTaskExecutionIntent(ctx context.Context, params UpdateTaskExecutionIntentParams) (Task, error) {
+	var task Task
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		current, err := store.getTaskTx(ctx, tx, params.TaskID)
+		if err != nil {
+			return err
+		}
+		intent := strings.TrimSpace(params.ExecutionIntent)
+		source := strings.TrimSpace(params.ExecutionIntentSource)
+		now := store.now()
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE tasks
+			SET execution_intent = ?, execution_intent_source = ?, updated_at = ?
+			WHERE id = ?
+		`, intent, source, formatTime(now), params.TaskID); err != nil {
+			return err
+		}
+		updated, err := store.getTaskTx(ctx, tx, params.TaskID)
+		if err != nil {
+			return err
+		}
+		if err := appendTaskQueueStateChangedEventTx(ctx, tx, current, updated, now); err != nil {
+			return err
+		}
+		task = updated
+		return nil
+	})
+	return task, err
+}
+
 func (store *Store) updateTaskQueueStateTx(ctx context.Context, tx *sql.Tx, params UpdateTaskQueueStateParams) (Task, error) {
 	current, err := store.getTaskTx(ctx, tx, params.TaskID)
 	if err != nil {
@@ -1858,7 +1888,9 @@ func appendTaskQueueStateChangedEventTx(ctx context.Context, tx *sql.Tx, previou
 		previous.LastError == updated.LastError &&
 		previous.RetryCount == updated.RetryCount &&
 		previous.MaxAttempts == updated.MaxAttempts &&
-		previous.BlockedReason == updated.BlockedReason {
+		previous.BlockedReason == updated.BlockedReason &&
+		previous.ExecutionIntent == updated.ExecutionIntent &&
+		previous.ExecutionIntentSource == updated.ExecutionIntentSource {
 		return nil
 	}
 

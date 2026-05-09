@@ -38,19 +38,21 @@ type Card struct {
 }
 
 type ToolDefinition struct {
-	Key          string
-	CanonicalKey string
-	Aliases      []string
-	Title        string
-	Summary      string
-	Hidden       bool
-	Scopes       []string
-	Tags         []string
-	CostHint     CostHint
-	BudgetCost   int
-	SourceRef    string
-	Schema       map[string]any
-	Invoke       func(map[string]string) (StructuredResult, error)
+	Key              string
+	CanonicalKey     string
+	Aliases          []string
+	Title            string
+	Summary          string
+	Hidden           bool
+	Scopes           []string
+	Tags             []string
+	CostHint         CostHint
+	BudgetCost       int
+	SourceRef        string
+	Schema           map[string]any
+	RequiresApproval bool
+	ApprovalReason   string
+	Invoke           func(map[string]string) (StructuredResult, error)
 }
 
 type SkillDefinition struct {
