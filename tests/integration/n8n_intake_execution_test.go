@@ -214,3 +214,4 @@ func (intakeTestGit) BranchExists(context.Context, string, string) (bool, error)
 func (intakeTestGit) CreateBranch(context.Context, string, string, string) error { return nil }
 func (intakeTestGit) AddWorktree(context.Context, string, string, string) error  { return nil }
 func (intakeTestGit) RemoveWorktree(context.Context, string, string) error       { return nil }
+func (intakeTestGit) WorktreeDirty(context.Context, string) (bool, error)        { return false, nil }

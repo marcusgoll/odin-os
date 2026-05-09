@@ -1739,6 +1739,7 @@ func (jobTestGit) BranchExists(context.Context, string, string) (bool, error) { 
 func (jobTestGit) CreateBranch(context.Context, string, string, string) error { return nil }
 func (jobTestGit) AddWorktree(context.Context, string, string, string) error  { return nil }
 func (jobTestGit) RemoveWorktree(context.Context, string, string) error       { return nil }
+func (jobTestGit) WorktreeDirty(context.Context, string) (bool, error)        { return false, nil }
 
 func mustLoadExecutorConfig(t *testing.T) router.Config {
 	t.Helper()

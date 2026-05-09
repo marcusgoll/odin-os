@@ -186,6 +186,7 @@ func (executionTestGit) BranchExists(context.Context, string, string) (bool, err
 func (executionTestGit) CreateBranch(context.Context, string, string, string) error { return nil }
 func (executionTestGit) AddWorktree(context.Context, string, string, string) error  { return nil }
 func (executionTestGit) RemoveWorktree(context.Context, string, string) error       { return nil }
+func (executionTestGit) WorktreeDirty(context.Context, string) (bool, error)        { return false, nil }
 
 func openExecutionStore(t *testing.T) *sqlite.Store {
 	t.Helper()

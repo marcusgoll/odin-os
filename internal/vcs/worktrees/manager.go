@@ -13,6 +13,7 @@ import (
 
 type Git interface {
 	RemoveWorktree(context.Context, string, string) error
+	WorktreeDirty(context.Context, string) (bool, error)
 }
 
 type Manager struct {
@@ -22,9 +23,16 @@ type Manager struct {
 }
 
 var ErrWorktreeAlreadyRemoved = errors.New("worktree already removed")
+var ErrDirtyWorktree = errors.New("dirty worktree requires explicit force cleanup")
 
 type CleanupResult struct {
 	Removed []sqlite.WorktreeLease
+}
+
+type CleanupOptions struct {
+	ForceDirty     bool
+	ApprovedBy     string
+	ApprovalReason string
 }
 
 func (manager Manager) Cleanup(ctx context.Context, staleBefore time.Time) (CleanupResult, error) {
@@ -44,29 +52,45 @@ func (manager Manager) Cleanup(ctx context.Context, staleBefore time.Time) (Clea
 		return CleanupResult{}, err
 	}
 
-	return manager.cleanupLeases(ctx, root, leases)
+	return manager.cleanupLeases(ctx, root, leases, CleanupOptions{})
 }
 
 func (manager Manager) CleanupLeases(ctx context.Context, leases []sqlite.WorktreeLease) (CleanupResult, error) {
+	return manager.CleanupLeasesWithOptions(ctx, leases, CleanupOptions{})
+}
+
+func (manager Manager) CleanupLeasesWithOptions(ctx context.Context, leases []sqlite.WorktreeLease, options CleanupOptions) (CleanupResult, error) {
 	if manager.Store == nil {
 		return CleanupResult{}, fmt.Errorf("cleanup store is required")
 	}
 	if manager.Git == nil {
 		return CleanupResult{}, fmt.Errorf("cleanup git adapter is required")
 	}
+	if err := validateCleanupOptions(options); err != nil {
+		return CleanupResult{}, err
+	}
 	root, err := cleanupRoot(manager.WorktreeRoot)
 	if err != nil {
 		return CleanupResult{}, err
 	}
-	return manager.cleanupLeases(ctx, root, leases)
+	return manager.cleanupLeases(ctx, root, leases, options)
 }
 
-func (manager Manager) cleanupLeases(ctx context.Context, root string, leases []sqlite.WorktreeLease) (CleanupResult, error) {
+func (manager Manager) cleanupLeases(ctx context.Context, root string, leases []sqlite.WorktreeLease, options CleanupOptions) (CleanupResult, error) {
 	result := CleanupResult{}
 	var cleanupErr error
 	for _, lease := range leases {
 		if err := validateCleanupPath(root, lease.WorktreePath); err != nil {
 			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("validate worktree lease %d: %w", lease.ID, err))
+			continue
+		}
+		dirty, err := manager.Git.WorktreeDirty(ctx, lease.WorktreePath)
+		if err != nil {
+			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("check dirty worktree lease %d: %w", lease.ID, err))
+			continue
+		}
+		if dirty && !options.ForceDirty {
+			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("refusing to cleanup dirty worktree lease %d: %w", lease.ID, ErrDirtyWorktree))
 			continue
 		}
 		if err := manager.Git.RemoveWorktree(ctx, lease.RepoRoot, lease.WorktreePath); err != nil && !errors.Is(err, ErrWorktreeAlreadyRemoved) {
@@ -82,6 +106,19 @@ func (manager Manager) cleanupLeases(ctx context.Context, root string, leases []
 	}
 
 	return result, cleanupErr
+}
+
+func validateCleanupOptions(options CleanupOptions) error {
+	if !options.ForceDirty {
+		return nil
+	}
+	if strings.TrimSpace(options.ApprovedBy) == "" {
+		return fmt.Errorf("force dirty cleanup requires approval identity")
+	}
+	if strings.TrimSpace(options.ApprovalReason) == "" {
+		return fmt.Errorf("force dirty cleanup requires approval reason")
+	}
+	return nil
 }
 
 func cleanupRoot(root string) (string, error) {

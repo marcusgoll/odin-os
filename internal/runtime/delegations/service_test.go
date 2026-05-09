@@ -809,6 +809,10 @@ func (delegationTestGit) RemoveWorktree(_ context.Context, _, worktreePath strin
 	return os.RemoveAll(worktreePath)
 }
 
+func (delegationTestGit) WorktreeDirty(context.Context, string) (bool, error) {
+	return false, nil
+}
+
 func hasArtifactType(artifacts []sqlite.DelegationArtifact, want string) bool {
 	for _, artifact := range artifacts {
 		if artifact.ArtifactType == want {

@@ -372,6 +372,10 @@ func (git *fakeCleanupGit) RemoveWorktree(context.Context, string, string) error
 	return git.removeErr
 }
 
+func (git *fakeCleanupGit) WorktreeDirty(context.Context, string) (bool, error) {
+	return false, nil
+}
+
 func (git *fakeCleanupGit) err() error {
 	if git.removeErr != nil {
 		return git.removeErr

@@ -18,6 +18,7 @@ type Git interface {
 	CreateBranch(context.Context, string, string, string) error
 	AddWorktree(context.Context, string, string, string) error
 	RemoveWorktree(context.Context, string, string) error
+	WorktreeDirty(context.Context, string) (bool, error)
 }
 
 type Preparer interface {
