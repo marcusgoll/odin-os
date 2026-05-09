@@ -128,11 +128,29 @@ Classification values:
 | `config/projects.yaml` | Keep | Canonical project manifest. |
 | `config/executors.yaml` | Keep | Active executor config. |
 | `config/models.yaml` | Keep | Model metadata. |
+| `config/media-stack.yaml` | Keep | Active media-stack operations config. |
 | `config/telemetry.yaml` | Keep/refactor | Health config exists but not all values are wired through current app config. |
 | `config/policies.yaml` | Refactor | Placeholder. |
-| `config/agency.example.yaml` | Remove/refactor | Uncommitted duplicate agency config. |
-| `configs/*.yaml` | Remove/refactor | Duplicate config root. |
+| `config/agency.example.yaml` | Refactor | Tracked agency example in the canonical `config/` root; overlaps `configs/*.yaml` runner/GitHub-token examples. |
+| `configs/default.yaml` | Remove/refactor | Duplicate agency example root; useful fields are `runtime.log_dir` and `runners.codex_exec.sandbox_mode`. |
+| `configs/development.yaml` | Remove/refactor | Duplicate agency example root; useful field is `logging.level=debug`. |
+| `configs/production.example.yaml` | Remove/refactor | Duplicate agency example root; useful production placeholders are `runtime.workspace_root`, `runtime.log_dir`, `runtime.kill_switch=true`, and runner sandbox mode. |
 | `deploy/systemd/odin.env.example` | Keep/refactor | No secrets committed; token is empty placeholder. |
+
+### Config root decision
+
+`config/` is the only canonical repo-authored configuration root. Runtime loaders and tests read `config/odin.yaml`, `config/projects.yaml`, `config/projects.local.yaml`, `config/executors.yaml`, and other config files below `config/`; no runtime loader should be taught to scan `configs/`.
+
+`configs/` is a tracked duplicate example root. Before removing it, preserve any useful agency example fields in `config/agency.example.yaml` or an operations doc, then remove `configs/` in a cleanup PR with reference checks.
+
+Cleanup reference checks:
+
+- `rg -n "configs/" .`
+- `rg -n "config/agency.example.yaml|configs/(default|development|production.example).yaml" docs config configs`
+- `go test ./internal/app/config ./internal/core/projects ./internal/app/bootstrap ./internal/app/lifecycle -count=1`
+- `ODIN_ROOT="$(mktemp -d)" ./bin/odin doctor --json`
+
+Rollback: restore the removed files from the cleanup commit or revert the cleanup commit; no database migration or runtime state rollback is needed because `configs/` is not loaded by the runtime.
 
 ## Deployment Inventory
 

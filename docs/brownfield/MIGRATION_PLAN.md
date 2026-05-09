@@ -116,9 +116,12 @@ Codex app-server should remain behind the executor interface and should not leak
    - Proof: router tests and `go test ./internal/executors/...`.
 
 4. **Collapse duplicate config roots**
-   - Remove `configs/` or move examples under `config/*.example.yaml`.
-   - Keep active config loading through `internal/app/config`.
-   - Proof: bootstrap tests and `ODIN_ROOT=<tmp> ./bin/odin doctor --json`.
+   - Canonical decision: keep `config/` as the only repo-authored configuration root.
+   - Keep active config loading through `internal/app/config`, `internal/app/bootstrap`, and explicit `config/*.yaml` paths; do not add a loader fallback for `configs/`.
+   - Treat `configs/` as duplicate agency examples. Preserve useful fields by moving them into `config/agency.example.yaml` or an operations doc, then remove `configs/` in a cleanup PR.
+   - Reference checks before removal: `rg -n "configs/" .` and `rg -n "config/agency.example.yaml|configs/(default|development|production.example).yaml" docs config configs`.
+   - Rollback: revert the cleanup commit or restore the removed example files from Git. No database rollback is required because `configs/` is not runtime-loaded.
+   - Proof: bootstrap/config/lifecycle tests and `ODIN_ROOT=<tmp> ./bin/odin doctor --json`.
 
 5. **Add top-level Odin usage output**
    - Implement `odin help` and `odin --help` through `internal/app/lifecycle`.

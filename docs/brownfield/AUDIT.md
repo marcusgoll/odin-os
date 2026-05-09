@@ -30,7 +30,7 @@ The repo also contains uncommitted scaffold material from recent agency-orchestr
 
 - `cmd/odin-os/`
 - `internal/{agents,config,dashboard,db,logging,orchestrator,prompts,review,runner,security,tracker,utils,workspace}/`
-- `configs/`
+- `configs/` (now tracked duplicate agency examples, not active runtime config)
 - TypeScript files under `src/`, `package.json`, `package-lock.json`, `tsconfig.json`, and `eslint.config.js`
 
 Those uncommitted assets are not yet proven as canonical Odin architecture. They should be audited and either promoted deliberately or removed.
@@ -49,7 +49,7 @@ Top-level directories:
 | `prompts/` | Prompt assets. Mostly `.gitkeep`; uncommitted agency prompts exist. | Refactor |
 | `memory/` | Authored durable memory roots. Currently mostly placeholders. | Keep |
 | `config/` | Active Odin config. Used by bootstrap and lifecycle. | Keep |
-| `configs/` | Uncommitted agency config examples, not wired into current bootstrap. | Replace or remove |
+| `configs/` | Tracked duplicate agency config examples, not wired into current bootstrap. | Replace or remove |
 | `data/` | Runtime SQLite data location. Ignored database files. | Keep local runtime output |
 | `runs/` | Logs, summaries, artifacts output roots. | Keep local runtime output |
 | `state/` | Cache, compiled registry, snapshot output roots. | Keep local runtime output |
@@ -185,10 +185,11 @@ Active config:
 - `config/models.yaml`: model metadata.
 - `config/telemetry.yaml`: logging, health, metrics, and doctor defaults.
 - `config/policies.yaml`: placeholder.
+- `config/media-stack.yaml`: media-stack operations config.
+- `config/agency.example.yaml`: tracked agency example in the canonical root; overlaps duplicate `configs/*.yaml` examples.
 
-Uncommitted config:
+Duplicate example config:
 
-- `config/agency.example.yaml`
 - `configs/default.yaml`
 - `configs/development.yaml`
 - `configs/production.example.yaml`
@@ -199,7 +200,7 @@ Secrets:
 - `deploy/systemd/odin.env.example` includes `ODIN_TRADEBOARD_API_TOKEN=` as an empty placeholder.
 - GitHub token references use environment variable names such as `GITHUB_TOKEN`.
 
-Risk: there are now two config roots, `config/` and `configs/`, with overlapping agency settings. That is a drift risk.
+Risk: there are now two config roots, `config/` and `configs/`, with overlapping agency settings. That is a drift risk. The canonical root is `config/`; `configs/` should be removed only after useful example fields are preserved and reference checks prove no runtime or documentation dependency remains.
 
 ## Existing Deployment Inventory
 
@@ -286,7 +287,7 @@ Known from code/tests:
 - `cmd/odin` vs uncommitted `cmd/odin-os`: both delegate to lifecycle. Decide whether there is one binary with `serve` mode or a second service binary.
 - `internal/executors/*` vs uncommitted `internal/runner/*`: both describe execution lanes. Keep one canonical seam.
 - `internal/adapters/github` placeholder directory vs uncommitted `internal/tracker/github`: both could become GitHub integration roots. Decide whether GitHub is an adapter under `internal/adapters` or an intake adapter under `internal/core/intake/github`.
-- `config/` vs uncommitted `configs/`: duplicate config root.
+- `config/` vs tracked duplicate `configs/`: duplicate config root.
 - Go-native scaffold vs uncommitted TypeScript scaffold in `src/`: TypeScript is contrary to the current Go-native decision and should be removed unless explicitly archived as reference-only.
 - Canonical Work Item / Run Attempt language vs storage names `tasks` and `runs`: this is a known compatibility naming conflict in `CONTEXT.md`.
 
