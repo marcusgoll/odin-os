@@ -21,9 +21,20 @@ These routes expose the runtime capability snapshot and invocation envelope with
 ## Invocation
 
 - `POST /capabilities/{id}:invoke` accepts the canonical capability invocation request.
+- Invocation requires admin authorization through the same admin-token contract
+  used by operational mutation routes.
+- Invocation requests must include a non-empty caller kind. Empty caller
+  identity is default-denied before dispatch, even when the descriptor does not
+  require specific permissions.
 - Inputs are validated against the descriptor schema before dispatch.
 - Permissions are enforced centrally before dispatch.
 - Results return a canonical run envelope with status, structured output, artifacts, and structured errors.
+
+Read-only discovery routes remain unauthenticated:
+
+- `GET /capabilities`
+- `GET /capabilities/{id}`
+- `GET /runs/{run_id}`
 
 ## Run Lookup
 

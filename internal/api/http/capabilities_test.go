@@ -77,7 +77,8 @@ func TestHTTPCapabilityEndpoints(t *testing.T) {
 	}
 
 	server := httptest.NewServer(httpapi.NewCapabilitiesHandler(httpapi.CapabilitiesDependencies{
-		Gateway: gateway,
+		Gateway:    gateway,
+		AdminToken: "secret",
 	}))
 	defer server.Close()
 
@@ -115,7 +116,9 @@ func TestHTTPCapabilityEndpoints(t *testing.T) {
 		t.Fatalf("GET /capabilities/project.status response = %+v, want project.status 1.0.0", descriptor)
 	}
 
-	res = mustRequest(t, server, http.MethodPost, "/capabilities/project.status:invoke", bytes.NewBufferString(`{"scope":{"kind":"project","project_key":"alpha"},"input":{"invalid":true}}`))
+	res = mustRequestWithHeaders(t, server, http.MethodPost, "/capabilities/project.status:invoke", bytes.NewBufferString(`{"scope":{"kind":"project","project_key":"alpha"},"caller":{"kind":"api","id":"dashboard"},"input":{"invalid":true}}`), map[string]string{
+		"Authorization": "Bearer secret",
+	})
 	defer res.Body.Close()
 	if res.StatusCode != http.StatusBadRequest {
 		t.Fatalf("POST /capabilities/project.status:invoke status = %d, want %d", res.StatusCode, http.StatusBadRequest)
@@ -136,7 +139,9 @@ func TestHTTPCapabilityEndpoints(t *testing.T) {
 		t.Fatalf("invoke error code = %q, want %q", invokeResponse.Error.Code, "validation_failed")
 	}
 
-	res = mustRequest(t, server, http.MethodPost, "/capabilities/project.status:invoke", bytes.NewBufferString(`{"scope":{"kind":"project","project_key":"alpha"},"input":{"forbidden":true}}`))
+	res = mustRequestWithHeaders(t, server, http.MethodPost, "/capabilities/project.status:invoke", bytes.NewBufferString(`{"scope":{"kind":"project","project_key":"alpha"},"caller":{"kind":"api","id":"dashboard"},"input":{"forbidden":true}}`), map[string]string{
+		"Authorization": "Bearer secret",
+	})
 	defer res.Body.Close()
 	if res.StatusCode != http.StatusForbidden {
 		t.Fatalf("POST /capabilities/project.status:invoke forbidden status = %d, want %d", res.StatusCode, http.StatusForbidden)
@@ -165,6 +170,73 @@ func TestHTTPCapabilityEndpoints(t *testing.T) {
 	}
 	if runResponse.Error.Code != "run_failed" {
 		t.Fatalf("run error code = %q, want %q", runResponse.Error.Code, "run_failed")
+	}
+}
+
+func TestHTTPCapabilityInvokeRequiresAdminAuth(t *testing.T) {
+	t.Parallel()
+
+	invokeCalls := 0
+	gateway := &recordingHTTPCapabilityGateway{
+		cardsByScope: map[string][]capabilities.CapabilityCard{
+			"": {
+				{ID: "project.status", Kind: registry.KindCommand, Name: "project.status", Version: "1.0.0", Scope: "project"},
+			},
+		},
+		descriptor: capabilities.Descriptor{
+			Kind:         registry.KindCommand,
+			Key:          "project.status",
+			Name:         "project.status",
+			Version:      "1.0.0",
+			Availability: registry.Availability{Scope: "project"},
+		},
+		invokeFn: func(_ context.Context, request capabilities.InvokeRequest, _ capabilities.Descriptor) (capabilities.InvokeResponse, error) {
+			invokeCalls++
+			if request.Caller.Kind != "api" {
+				t.Fatalf("Caller.Kind = %q, want api", request.Caller.Kind)
+			}
+			return capabilities.InvokeResponse{
+				RunID:  "run-7",
+				Status: "completed",
+			}, nil
+		},
+	}
+
+	server := httptest.NewServer(httpapi.NewCapabilitiesHandler(httpapi.CapabilitiesDependencies{
+		Gateway:    gateway,
+		AdminToken: "secret",
+	}))
+	defer server.Close()
+
+	body := bytes.NewBufferString(`{"scope":{"kind":"project"},"caller":{"kind":"api","id":"dashboard"},"input":{}}`)
+	res := mustRequest(t, server, http.MethodPost, "/capabilities/project.status:invoke", body)
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated invoke status = %d, want %d", res.StatusCode, http.StatusUnauthorized)
+	}
+
+	body = bytes.NewBufferString(`{"scope":{"kind":"project"},"caller":{"kind":"api","id":"dashboard"},"input":{}}`)
+	res = mustRequestWithHeaders(t, server, http.MethodPost, "/capabilities/project.status:invoke", body, map[string]string{
+		"Authorization": "Bearer wrong",
+	})
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusForbidden {
+		t.Fatalf("wrong-token invoke status = %d, want %d", res.StatusCode, http.StatusForbidden)
+	}
+	if invokeCalls != 0 {
+		t.Fatalf("invokeCalls = %d, want 0 before authorized request", invokeCalls)
+	}
+
+	body = bytes.NewBufferString(`{"scope":{"kind":"project"},"caller":{"kind":"api","id":"dashboard"},"input":{}}`)
+	res = mustRequestWithHeaders(t, server, http.MethodPost, "/capabilities/project.status:invoke", body, map[string]string{
+		"X-Odin-Admin-Token": "secret",
+	})
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("authorized invoke status = %d, want %d", res.StatusCode, http.StatusOK)
+	}
+	if invokeCalls != 1 {
+		t.Fatalf("invokeCalls = %d, want 1 after authorized request", invokeCalls)
 	}
 }
 
@@ -305,6 +377,12 @@ func (gateway *recordingHTTPCapabilityGateway) GetRun(context.Context, int64) (c
 func mustRequest(t *testing.T, server *httptest.Server, method, path string, body *bytes.Buffer) *http.Response {
 	t.Helper()
 
+	return mustRequestWithHeaders(t, server, method, path, body, nil)
+}
+
+func mustRequestWithHeaders(t *testing.T, server *httptest.Server, method, path string, body *bytes.Buffer, headers map[string]string) *http.Response {
+	t.Helper()
+
 	var reader io.Reader
 	if body == nil {
 		reader = bytes.NewReader(nil)
@@ -317,6 +395,9 @@ func mustRequest(t *testing.T, server *httptest.Server, method, path string, bod
 	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
+	}
+	for key, value := range headers {
+		req.Header.Set(key, value)
 	}
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
