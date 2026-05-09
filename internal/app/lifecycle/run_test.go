@@ -1761,6 +1761,7 @@ func TestRunReviewGoalBlockerActionsAreExplicitUnsupportedJSON(t *testing.T) {
 
 func TestRunUnifiedReviewQueueSurfacesFailedWorkRetryPolicy(t *testing.T) {
 	t.Setenv("ODIN_CODEX_DRIVER", "")
+	t.Setenv("ODIN_CODEX_DRIVER_RUN_RESPONSE", `{"status":"failed","output":"failed work review proof"}`)
 	t.Setenv("HOME", t.TempDir())
 
 	root := testRepoRoot(t)
@@ -1795,7 +1796,7 @@ func TestRunUnifiedReviewQueueSurfacesFailedWorkRetryPolicy(t *testing.T) {
 		"intake", "raw", "create",
 		"--source", "operator",
 		"--project", testProjectKey,
-		"--title", "run this exact command: printf 'failed work review proof' >&2; exit 42",
+		"--title", "failed work review proof",
 		"--type", "request",
 		"--dedup-key", "failed-work-review-proof",
 		"--requested-by", "codex",
@@ -2866,6 +2867,7 @@ func TestRunTriggerEventMVPUsesInternalEventsWithDedupeAndApprovalGates(t *testi
 
 func TestRunTriggerProducedFailedWorkSurfacesSelfHealingGuidance(t *testing.T) {
 	t.Setenv("ODIN_CODEX_DRIVER", "")
+	t.Setenv("ODIN_CODEX_DRIVER_RUN_RESPONSE", `{"status":"failed","output":"trigger fixture failure proof"}`)
 	t.Setenv("HOME", t.TempDir())
 
 	root := testRepoRoot(t)
@@ -2918,12 +2920,12 @@ func TestRunTriggerProducedFailedWorkSurfacesSelfHealingGuidance(t *testing.T) {
 		"kind=schedule",
 		"status=enabled",
 		"next=2026-05-04T00:00:00Z",
-		"title=run this exact command: printf 'trigger schedule failure proof' >&2; exit 42",
+		"title=trigger schedule failure proof",
 		"summary=trigger_failure_recovery",
 		"--json",
 	)
 	scheduledTaskKey := extractAutomationTaskKey(run("trigger", "evaluate", "now=2026-05-04T01:00:00Z", "--json"), "fail-schedule")
-	failTask(scheduledTaskKey, 1, "trigger schedule failure proof")
+	failTask(scheduledTaskKey, 1, "trigger fixture failure proof")
 
 	show := run("review", "show", "failed-work:1", "--json")
 	for _, want := range []string{
@@ -2961,9 +2963,9 @@ func TestRunTriggerProducedFailedWorkSurfacesSelfHealingGuidance(t *testing.T) {
 	}
 
 	run("review", "act", "failed-work:1", "retry", "--json")
-	failTask(scheduledTaskKey, 2, "trigger schedule failure proof")
+	failTask(scheduledTaskKey, 2, "trigger fixture failure proof")
 	run("review", "act", "failed-work:1", "retry", "--json")
-	failTask(scheduledTaskKey, 3, "trigger schedule failure proof")
+	failTask(scheduledTaskKey, 3, "trigger fixture failure proof")
 	blockedShow := run("review", "show", "failed-work:1", "--json")
 	for _, want := range []string{
 		`"decision": "retry_blocked_max_attempts"`,
@@ -3004,13 +3006,13 @@ func TestRunTriggerProducedFailedWorkSurfacesSelfHealingGuidance(t *testing.T) {
 		"event=task.status_changed",
 		"match_status=running",
 		fmt.Sprintf("match_task_id=%d", eventSourceID),
-		"title=run this exact command: printf 'trigger event failure proof' >&2; exit 42",
+		"title=trigger event failure proof",
 		"summary=trigger_event_failure_recovery",
 		"--json",
 	)
 	run("work", "dispatch", "--task", eventSourceKey, "--json")
 	eventTaskKey := extractAutomationTaskKey(run("trigger", "evaluate", "source=events", "--json"), "fail-event")
-	failTask(eventTaskKey, 1, "trigger event failure proof")
+	failTask(eventTaskKey, 1, "trigger fixture failure proof")
 	eventReviewList := run("review", "list", "--json")
 	if !strings.Contains(eventReviewList, `"object_key": "`+eventTaskKey+`"`) || !strings.Contains(eventReviewList, `"source": "automation_trigger"`) {
 		t.Fatalf("review list output = %s, want event-trigger failed work guidance", eventReviewList)
@@ -3688,8 +3690,9 @@ func TestRunWorkExecuteSurfacesFailedDispatchedRun(t *testing.T) {
 	}
 }
 
-func TestRunWorkExecuteFailsExactCommandThroughRepoDriver(t *testing.T) {
+func TestRunWorkExecuteSurfacesRepoDriverFailure(t *testing.T) {
 	t.Setenv("ODIN_CODEX_DRIVER", "")
+	t.Setenv("ODIN_CODEX_DRIVER_RUN_RESPONSE", `{"status":"failed","output":"operator visible failure proof"}`)
 	t.Setenv("HOME", t.TempDir())
 
 	root := testRepoRoot(t)
@@ -3713,7 +3716,7 @@ func TestRunWorkExecuteFailsExactCommandThroughRepoDriver(t *testing.T) {
 		"intake", "raw", "create",
 		"--source", "operator",
 		"--project", testProjectKey,
-		"--title", "run this exact command: printf 'operator visible failure proof' >&2; exit 42",
+		"--title", "operator visible failure proof",
 		"--type", "request",
 		"--dedup-key", "exact-command-failure-intake",
 		"--requested-by", "codex",
@@ -3760,6 +3763,7 @@ func TestRunWorkExecuteFailsExactCommandThroughRepoDriver(t *testing.T) {
 
 func TestRunWorkRetryRequeuesTerminalFailedWorkOnce(t *testing.T) {
 	t.Setenv("ODIN_CODEX_DRIVER", "")
+	t.Setenv("ODIN_CODEX_DRIVER_RUN_RESPONSE", `{"status":"failed","output":"operator retry failure proof"}`)
 	t.Setenv("HOME", t.TempDir())
 
 	root := testRepoRoot(t)
@@ -3783,7 +3787,7 @@ func TestRunWorkRetryRequeuesTerminalFailedWorkOnce(t *testing.T) {
 		"intake", "raw", "create",
 		"--source", "operator",
 		"--project", testProjectKey,
-		"--title", "run this exact command: printf 'operator retry failure proof' >&2; exit 42",
+		"--title", "operator retry failure proof",
 		"--type", "request",
 		"--dedup-key", "retry-failure-intake",
 		"--requested-by", "codex",
@@ -3824,6 +3828,7 @@ func TestRunWorkRetryRequeuesTerminalFailedWorkOnce(t *testing.T) {
 
 func TestRunWorkRetryBlocksAtMaxAttemptsWithGuidance(t *testing.T) {
 	t.Setenv("ODIN_CODEX_DRIVER", "")
+	t.Setenv("ODIN_CODEX_DRIVER_RUN_RESPONSE", `{"status":"failed","output":"operator retry policy failure proof"}`)
 	t.Setenv("HOME", t.TempDir())
 
 	root := testRepoRoot(t)
@@ -3847,7 +3852,7 @@ func TestRunWorkRetryBlocksAtMaxAttemptsWithGuidance(t *testing.T) {
 		"intake", "raw", "create",
 		"--source", "operator",
 		"--project", testProjectKey,
-		"--title", "run this exact command: printf 'operator retry policy failure proof' >&2; exit 42",
+		"--title", "operator retry policy failure proof",
 		"--type", "request",
 		"--dedup-key", "retry-policy-intake",
 		"--requested-by", "codex",

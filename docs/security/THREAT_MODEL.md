@@ -91,8 +91,8 @@ unattended Codex implementation workers:
 
 1. Codex `danger-full-access` is now blocked in the live driver and Go runner;
    keep any parallel worker launch path from reintroducing sandbox bypass flags.
-2. `scripts/drivers/codex-headless.sh` can extract command text from a prompt
-   and execute it through `bash -c`.
+2. Prompt-command extraction is now blocked in the live Codex driver; keep any
+   parallel runner from treating issue or prompt text as shell.
 3. Canonical Codex execution inherits the full daemon environment when launching
    the driver.
 4. Structured logging writes sensitive field values verbatim.

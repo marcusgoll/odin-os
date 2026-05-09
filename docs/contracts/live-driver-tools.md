@@ -74,6 +74,12 @@ Codex headless driver sandbox modes:
 before invoking Codex. Operators must not use Codex sandbox bypass flags for
 autonomous worker lanes.
 
+The Codex headless driver treats prompt, issue, and objective text as data. Text
+such as "run this exact command" is passed to Codex as part of the prompt and is
+not extracted or executed by Odin as shell. The legacy exact-command shortcut has
+no compatibility path in the live driver; any future replacement must be an
+explicit allowlisted operation with structured arguments.
+
 ## Request contract
 
 Calendar driver request:
