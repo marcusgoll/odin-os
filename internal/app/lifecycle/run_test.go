@@ -3190,8 +3190,7 @@ func TestRunWorkDispatchFailsClosedForUnknownGoalArgument(t *testing.T) {
 }
 
 func TestRunWorkDispatchEnforcesProjectExecutionPolicy(t *testing.T) {
-	t.Parallel()
-
+	t.Setenv("HOME", t.TempDir())
 	root := testRepoRoot(t)
 	run := func(args ...string) string {
 		t.Helper()

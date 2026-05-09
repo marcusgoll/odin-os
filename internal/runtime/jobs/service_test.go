@@ -2805,6 +2805,7 @@ func (git failingJobGit) AddWorktree(context.Context, string, string, string) er
 }
 
 func (failingJobGit) RemoveWorktree(context.Context, string, string) error { return nil }
+func (failingJobGit) WorktreeDirty(context.Context, string) (bool, error)  { return false, nil }
 
 func mustLoadExecutorConfig(t *testing.T) router.Config {
 	t.Helper()
