@@ -1106,6 +1106,17 @@ type ReviewContextPacketResult struct {
 	Repeated bool
 }
 
+type ReviewContextPacketAndRecordMemorySummaryParams struct {
+	Review                ReviewContextPacketParams
+	Memory                RecordMemorySummaryParams
+	SourceContextPacketID int64
+}
+
+type ReviewContextPacketAndRecordMemorySummaryResult struct {
+	Review ReviewContextPacketResult
+	Memory *MemorySummary
+}
+
 type ConversationTranscript struct {
 	ID          int64
 	ProjectID   *int64

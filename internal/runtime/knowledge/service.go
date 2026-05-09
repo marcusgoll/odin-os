@@ -133,10 +133,11 @@ type ContextPackProposalPayload struct {
 }
 
 type ContextPackReviewOutcome struct {
-	Proposal ContextPackProposal
-	Decision string
-	Status   string
-	Repeated bool
+	Proposal      ContextPackProposal
+	Decision      string
+	Status        string
+	Repeated      bool
+	MemorySummary *sqlite.MemorySummary
 }
 
 func (service Service) Search(ctx context.Context, params SearchParams) (SearchResponse, error) {
@@ -341,13 +342,14 @@ func (service Service) ReviewContextPackProposal(ctx context.Context, packetID i
 	if err != nil {
 		return ContextPackReviewOutcome{}, err
 	}
-	result, err := service.Store.ReviewContextPacket(ctx, sqlite.ReviewContextPacketParams{
+	reviewParams := sqlite.ReviewContextPacketParams{
 		PacketID:    packetID,
 		Status:      status,
 		Decision:    decision,
 		ReviewedBy:  "operator",
 		PayloadJSON: string(payloadBytes),
-	})
+	}
+	result, memorySummary, err := service.reviewContextPackAndMaybeRecordMemory(ctx, current, reviewParams)
 	if err != nil {
 		return ContextPackReviewOutcome{}, err
 	}
@@ -356,10 +358,63 @@ func (service Service) ReviewContextPackProposal(ctx context.Context, packetID i
 		return ContextPackReviewOutcome{}, err
 	}
 	return ContextPackReviewOutcome{
-		Proposal: proposal,
-		Decision: decision,
-		Status:   result.Packet.Status,
-		Repeated: result.Repeated,
+		Proposal:      proposal,
+		Decision:      decision,
+		Status:        result.Packet.Status,
+		Repeated:      result.Repeated,
+		MemorySummary: memorySummary,
+	}, nil
+}
+
+func (service Service) reviewContextPackAndMaybeRecordMemory(ctx context.Context, current ContextPackProposal, reviewParams sqlite.ReviewContextPacketParams) (sqlite.ReviewContextPacketResult, *sqlite.MemorySummary, error) {
+	if strings.ToLower(strings.TrimSpace(reviewParams.Decision)) != ContextPackReviewAcceptDecision || reviewParams.Status != "active" {
+		result, err := service.Store.ReviewContextPacket(ctx, reviewParams)
+		return result, nil, err
+	}
+	memoryParams, err := service.contextPackMemorySummaryParams(ctx, current)
+	if err != nil {
+		return sqlite.ReviewContextPacketResult{}, nil, err
+	}
+	result, err := service.Store.ReviewContextPacketAndRecordMemorySummary(ctx, sqlite.ReviewContextPacketAndRecordMemorySummaryParams{
+		Review:                reviewParams,
+		Memory:                memoryParams,
+		SourceContextPacketID: current.Packet.ID,
+	})
+	if err != nil {
+		return sqlite.ReviewContextPacketResult{}, nil, err
+	}
+	return result.Review, result.Memory, nil
+}
+
+func (service Service) contextPackMemorySummaryParams(ctx context.Context, proposal ContextPackProposal) (sqlite.RecordMemorySummaryParams, error) {
+	if proposal.Packet.TaskID == nil {
+		return sqlite.RecordMemorySummaryParams{}, fmt.Errorf("context pack proposal %d has no task for memory persistence", proposal.Packet.ID)
+	}
+	task, err := service.Store.GetTask(ctx, *proposal.Packet.TaskID)
+	if err != nil {
+		return sqlite.RecordMemorySummaryParams{}, err
+	}
+	project, err := service.projectForID(ctx, task.ProjectID)
+	if err != nil {
+		return sqlite.RecordMemorySummaryParams{}, err
+	}
+	detailsJSON, err := json.Marshal(map[string]any{
+		"source":                 "context_pack_review",
+		"source_context_pack_id": proposal.Packet.ID,
+		"task_key":               task.Key,
+		"project_key":            project.Key,
+	})
+	if err != nil {
+		return sqlite.RecordMemorySummaryParams{}, err
+	}
+	return sqlite.RecordMemorySummaryParams{
+		ProjectID:   &project.ID,
+		TaskID:      &task.ID,
+		Scope:       task.Scope,
+		ScopeKey:    project.Key,
+		MemoryType:  ContextPackPacketKind,
+		Summary:     proposal.Packet.Summary,
+		DetailsJSON: string(detailsJSON),
 	}, nil
 }
 
@@ -387,9 +442,11 @@ func (service Service) projectForID(ctx context.Context, projectID int64) (sqlit
 	var project sqlite.Project
 	var createdAt string
 	var updatedAt string
-	if err := row.Scan(&project.ID, &project.Key, &project.Name, &project.Scope, &project.GitRoot, &project.DefaultBranch, &project.GitHubRepo, &project.ManifestPath, &createdAt, &updatedAt); err != nil {
+	var githubRepo sql.NullString
+	if err := row.Scan(&project.ID, &project.Key, &project.Name, &project.Scope, &project.GitRoot, &project.DefaultBranch, &githubRepo, &project.ManifestPath, &createdAt, &updatedAt); err != nil {
 		return sqlite.Project{}, err
 	}
+	project.GitHubRepo = githubRepo.String
 	return project, nil
 }
 

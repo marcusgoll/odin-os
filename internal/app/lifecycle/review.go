@@ -1583,21 +1583,50 @@ func runContextPackReview(ctx context.Context, app bootstrap.App, packetID int64
 		return err
 	}
 	view := struct {
-		Decision string `json:"decision"`
-		Status   string `json:"status"`
-		Repeated bool   `json:"repeated"`
-		Proposal any    `json:"proposal"`
+		Decision      string                              `json:"decision"`
+		Status        string                              `json:"status"`
+		Repeated      bool                                `json:"repeated"`
+		MemorySummary *contextPackMemorySummaryReviewView `json:"memory_summary,omitempty"`
+		Proposal      any                                 `json:"proposal"`
 	}{
-		Decision: outcome.Decision,
-		Status:   outcome.Status,
-		Repeated: outcome.Repeated,
-		Proposal: commands.NewKnowledgeContextPackProposalView(outcome.Proposal),
+		Decision:      outcome.Decision,
+		Status:        outcome.Status,
+		Repeated:      outcome.Repeated,
+		MemorySummary: contextPackMemorySummaryReview(outcome.MemorySummary),
+		Proposal:      commands.NewKnowledgeContextPackProposalView(outcome.Proposal),
 	}
 	if jsonOutput {
 		return commands.WriteJSON(stdout, view)
 	}
 	_, err = fmt.Fprintf(stdout, "context_pack id=%d decision=%s status=%s repeated=%t\n", packetID, outcome.Decision, outcome.Status, outcome.Repeated)
 	return err
+}
+
+type contextPackMemorySummaryReviewView struct {
+	ID         int64  `json:"id"`
+	Scope      string `json:"scope"`
+	ScopeKey   string `json:"scope_key"`
+	MemoryType string `json:"memory_type"`
+	TaskID     *int64 `json:"task_id,omitempty"`
+	Details    any    `json:"details,omitempty"`
+}
+
+func contextPackMemorySummaryReview(summary *sqlite.MemorySummary) *contextPackMemorySummaryReviewView {
+	if summary == nil {
+		return nil
+	}
+	details := map[string]any{}
+	if strings.TrimSpace(summary.DetailsJSON) != "" {
+		_ = json.Unmarshal([]byte(summary.DetailsJSON), &details)
+	}
+	return &contextPackMemorySummaryReviewView{
+		ID:         summary.ID,
+		Scope:      summary.Scope,
+		ScopeKey:   summary.ScopeKey,
+		MemoryType: summary.MemoryType,
+		TaskID:     summary.TaskID,
+		Details:    details,
+	}
 }
 
 func failedWorkRetryOutcomeView(outcome jobsvc.RetryOutcome) failedWorkRetryView {

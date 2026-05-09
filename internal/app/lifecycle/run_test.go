@@ -4569,8 +4569,16 @@ func TestRunKnowledgeContextPackProposalReviewLifecycle(t *testing.T) {
 		t.Fatalf("review show = %s, want context pack detail", reviewShow)
 	}
 	acceptOutput := run("review", "act", queueID, "accept", "--json")
-	if !strings.Contains(acceptOutput, `"decision": "accept"`) || !strings.Contains(acceptOutput, `"status": "active"`) {
-		t.Fatalf("accept output = %s, want active accepted proposal", acceptOutput)
+	for _, want := range []string{
+		`"decision": "accept"`,
+		`"status": "active"`,
+		`"memory_summary"`,
+		`"memory_type": "context_pack"`,
+		`"source_context_pack_id": ` + fmt.Sprint(proposalID),
+	} {
+		if !strings.Contains(acceptOutput, want) {
+			t.Fatalf("accept output = %s, want %s", acceptOutput, want)
+		}
 	}
 	repeatAccept := run("review", "act", queueID, "accept", "--json")
 	if !strings.Contains(repeatAccept, `"repeated": true`) || !strings.Contains(repeatAccept, `"status": "active"`) {
@@ -4600,6 +4608,7 @@ func TestRunKnowledgeContextPackProposalReviewLifecycle(t *testing.T) {
 	for _, want := range []string{
 		`"type": "context_packet.created"`,
 		`"type": "context_packet.reviewed"`,
+		`"type": "memory.summary_recorded"`,
 		`"decision": "accept"`,
 		`"decision": "reject"`,
 		`"decision": "archive"`,

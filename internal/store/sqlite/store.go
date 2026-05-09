@@ -4580,6 +4580,24 @@ func (store *Store) UpdateMemorySummaryDetails(ctx context.Context, params Updat
 }
 
 func (store *Store) ListMemorySummaries(ctx context.Context, params ListMemorySummariesParams) ([]MemorySummary, error) {
+	return store.listMemorySummariesQuery(ctx, store.db, params)
+}
+
+func (store *Store) listMemorySummariesTx(ctx context.Context, tx *sql.Tx, params RecordMemorySummaryParams) ([]MemorySummary, error) {
+	return store.listMemorySummariesQuery(ctx, tx, ListMemorySummariesParams{
+		ProjectID:          params.ProjectID,
+		SourceTranscriptID: params.SourceTranscriptID,
+		TaskID:             params.TaskID,
+		RunID:              params.RunID,
+		Scope:              params.Scope,
+		ScopeKey:           params.ScopeKey,
+		MemoryType:         params.MemoryType,
+	})
+}
+
+func (store *Store) listMemorySummariesQuery(ctx context.Context, querier interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}, params ListMemorySummariesParams) ([]MemorySummary, error) {
 	query := `
 		SELECT
 			id,
@@ -4628,7 +4646,7 @@ func (store *Store) ListMemorySummaries(ctx context.Context, params ListMemorySu
 	}
 	query += ` ORDER BY id ASC`
 
-	rows, err := store.db.QueryContext(ctx, query, args...)
+	rows, err := querier.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -6749,6 +6767,77 @@ func (store *Store) UpdateContextPacketStatus(ctx context.Context, params Update
 
 func (store *Store) ReviewContextPacket(ctx context.Context, params ReviewContextPacketParams) (ReviewContextPacketResult, error) {
 	now := store.now()
+	var result ReviewContextPacketResult
+
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		result, err = store.reviewContextPacketTx(ctx, tx, params, now)
+		return err
+	})
+	if err != nil {
+		return ReviewContextPacketResult{}, err
+	}
+	return result, nil
+}
+
+func (store *Store) ReviewContextPacketAndRecordMemorySummary(ctx context.Context, params ReviewContextPacketAndRecordMemorySummaryParams) (ReviewContextPacketAndRecordMemorySummaryResult, error) {
+	now := store.now()
+	var result ReviewContextPacketAndRecordMemorySummaryResult
+
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		review, err := store.reviewContextPacketTx(ctx, tx, params.Review, now)
+		if err != nil {
+			return err
+		}
+		result.Review = review
+
+		if params.SourceContextPacketID <= 0 {
+			return fmt.Errorf("source context packet id is required")
+		}
+		if review.Packet.ID != params.SourceContextPacketID {
+			return fmt.Errorf("source context packet id %d does not match reviewed packet %d", params.SourceContextPacketID, review.Packet.ID)
+		}
+		if strings.ToLower(strings.TrimSpace(params.Review.Decision)) != "accept" || review.Packet.Status != "active" {
+			return nil
+		}
+		if err := store.validateAcceptedContextPacketMemorySourceTx(ctx, tx, params.SourceContextPacketID, params.Memory); err != nil {
+			return err
+		}
+		memory, err := store.recordContextPacketMemorySummaryTx(ctx, tx, params.Memory, params.SourceContextPacketID, now)
+		if err != nil {
+			return err
+		}
+		result.Memory = &memory
+		return nil
+	})
+	if err != nil {
+		return ReviewContextPacketAndRecordMemorySummaryResult{}, err
+	}
+	return result, nil
+}
+
+func (store *Store) RecordMemorySummaryForAcceptedContextPacket(ctx context.Context, sourceContextPacketID int64, params RecordMemorySummaryParams) (MemorySummary, error) {
+	now := store.now()
+	var summary MemorySummary
+
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		if err := store.validateAcceptedContextPacketMemorySourceTx(ctx, tx, sourceContextPacketID, params); err != nil {
+			return err
+		}
+		recorded, err := store.recordContextPacketMemorySummaryTx(ctx, tx, params, sourceContextPacketID, now)
+		if err != nil {
+			return err
+		}
+		summary = recorded
+		return nil
+	})
+	if err != nil {
+		return MemorySummary{}, err
+	}
+	return summary, nil
+}
+
+func (store *Store) reviewContextPacketTx(ctx context.Context, tx *sql.Tx, params ReviewContextPacketParams, now time.Time) (ReviewContextPacketResult, error) {
 	reviewedBy := strings.TrimSpace(params.ReviewedBy)
 	if reviewedBy == "" {
 		reviewedBy = "operator"
@@ -6757,73 +6846,301 @@ func (store *Store) ReviewContextPacket(ctx context.Context, params ReviewContex
 	if decision == "" {
 		decision = params.Status
 	}
-	var result ReviewContextPacketResult
-
-	err := store.withTx(ctx, func(tx *sql.Tx) error {
-		current, err := store.getContextPacketTx(ctx, tx, params.PacketID)
-		if err != nil {
-			return err
-		}
-		previousStatus := current.Status
-		repeated := current.Status == params.Status
-
-		summary := current.Summary
-		if strings.TrimSpace(params.Summary) != "" {
-			summary = params.Summary
-		}
-		payloadJSON := current.PayloadJSON
-		if strings.TrimSpace(params.PayloadJSON) != "" {
-			payloadJSON = params.PayloadJSON
-		}
-
-		if !repeated || summary != current.Summary || payloadJSON != current.PayloadJSON {
-			if _, err := tx.ExecContext(ctx, `
-				UPDATE context_packets
-				SET status = ?, summary = ?, payload_json = ?
-				WHERE id = ?
-			`, params.Status, summary, payloadJSON, params.PacketID); err != nil {
-				return err
-			}
-			current.Status = params.Status
-			current.Summary = summary
-			current.PayloadJSON = payloadJSON
-		}
-
-		contextRow, err := store.contextPacketContextTx(ctx, tx, current.TaskID, current.RunID)
-		if err != nil {
-			return err
-		}
-		if err := appendEventTx(ctx, tx, eventInsert{
-			StreamType: runtimeevents.StreamContextPacket,
-			StreamID:   current.ID,
-			EventType:  runtimeevents.EventContextPacketReviewed,
-			Scope:      contextRow.Scope,
-			ProjectID:  contextRow.ProjectID,
-			TaskID:     current.TaskID,
-			RunID:      current.RunID,
-			Payload: runtimeevents.ContextPacketReviewedPayload{
-				PacketID:       current.ID,
-				PacketKind:     current.PacketKind,
-				PacketScope:    current.PacketScope,
-				Decision:       decision,
-				Status:         current.Status,
-				PreviousStatus: previousStatus,
-				ReviewedBy:     reviewedBy,
-				Reason:         params.Reason,
-				Repeated:       repeated,
-			},
-			OccurredAt: now,
-		}); err != nil {
-			return err
-		}
-
-		result = ReviewContextPacketResult{Packet: current, Repeated: repeated}
-		return nil
-	})
+	current, err := store.getContextPacketTx(ctx, tx, params.PacketID)
 	if err != nil {
 		return ReviewContextPacketResult{}, err
 	}
-	return result, nil
+	previousStatus := current.Status
+	repeated := current.Status == params.Status
+
+	summary := current.Summary
+	if strings.TrimSpace(params.Summary) != "" {
+		summary = params.Summary
+	}
+	payloadJSON := current.PayloadJSON
+	if strings.TrimSpace(params.PayloadJSON) != "" {
+		payloadJSON = params.PayloadJSON
+	}
+
+	if !repeated || summary != current.Summary || payloadJSON != current.PayloadJSON {
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE context_packets
+			SET status = ?, summary = ?, payload_json = ?
+			WHERE id = ?
+		`, params.Status, summary, payloadJSON, params.PacketID); err != nil {
+			return ReviewContextPacketResult{}, err
+		}
+		current.Status = params.Status
+		current.Summary = summary
+		current.PayloadJSON = payloadJSON
+	}
+
+	contextRow, err := store.contextPacketContextTx(ctx, tx, current.TaskID, current.RunID)
+	if err != nil {
+		return ReviewContextPacketResult{}, err
+	}
+	if err := appendEventTx(ctx, tx, eventInsert{
+		StreamType: runtimeevents.StreamContextPacket,
+		StreamID:   current.ID,
+		EventType:  runtimeevents.EventContextPacketReviewed,
+		Scope:      contextRow.Scope,
+		ProjectID:  contextRow.ProjectID,
+		TaskID:     current.TaskID,
+		RunID:      current.RunID,
+		Payload: runtimeevents.ContextPacketReviewedPayload{
+			PacketID:       current.ID,
+			PacketKind:     current.PacketKind,
+			PacketScope:    current.PacketScope,
+			Decision:       decision,
+			Status:         current.Status,
+			PreviousStatus: previousStatus,
+			ReviewedBy:     reviewedBy,
+			Reason:         params.Reason,
+			Repeated:       repeated,
+		},
+		OccurredAt: now,
+	}); err != nil {
+		return ReviewContextPacketResult{}, err
+	}
+
+	return ReviewContextPacketResult{Packet: current, Repeated: repeated}, nil
+}
+
+func (store *Store) recordContextPacketMemorySummaryTx(ctx context.Context, tx *sql.Tx, params RecordMemorySummaryParams, sourceContextPacketID int64, now time.Time) (MemorySummary, error) {
+	params.Scope = strings.TrimSpace(params.Scope)
+	params.ScopeKey = strings.TrimSpace(params.ScopeKey)
+	params.MemoryType = strings.TrimSpace(params.MemoryType)
+	if params.Scope == "" {
+		return MemorySummary{}, fmt.Errorf("memory summary scope is required")
+	}
+	if params.ScopeKey == "" {
+		return MemorySummary{}, fmt.Errorf("memory summary scope key is required")
+	}
+	if params.MemoryType == "" {
+		return MemorySummary{}, fmt.Errorf("memory summary type is required")
+	}
+	if _, _, _, err := store.validateProjectTaskRunLineageTx(ctx, tx, params.ProjectID, params.TaskID, params.RunID, params.Scope, params.ScopeKey, "memory summary"); err != nil {
+		return MemorySummary{}, err
+	}
+
+	existingForSource, found, err := store.memorySummaryForSourceContextPacketTx(ctx, tx, sourceContextPacketID)
+	if err != nil {
+		return MemorySummary{}, err
+	}
+	if found {
+		return existingForSource, nil
+	}
+
+	existing, err := store.listMemorySummariesTx(ctx, tx, params)
+	if err != nil {
+		return MemorySummary{}, err
+	}
+	for _, summary := range existing {
+		if memorySummarySourceContextPacketID(summary.DetailsJSON) == sourceContextPacketID {
+			return summary, nil
+		}
+	}
+
+	result, err := tx.ExecContext(ctx, `
+		INSERT INTO memory_summaries (
+			project_id,
+			source_transcript_id,
+			task_id,
+			run_id,
+			scope,
+			scope_key,
+			memory_type,
+			summary,
+			details_json,
+			created_at,
+			updated_at
+		)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`,
+		nullInt64(params.ProjectID),
+		nullInt64(params.SourceTranscriptID),
+		nullInt64(params.TaskID),
+		nullInt64(params.RunID),
+		params.Scope,
+		params.ScopeKey,
+		params.MemoryType,
+		params.Summary,
+		params.DetailsJSON,
+		formatTime(now),
+		formatTime(now),
+	)
+	if err != nil {
+		return MemorySummary{}, err
+	}
+	summaryID, err := result.LastInsertId()
+	if err != nil {
+		return MemorySummary{}, err
+	}
+	summary := MemorySummary{
+		ID:                 summaryID,
+		ProjectID:          params.ProjectID,
+		SourceTranscriptID: params.SourceTranscriptID,
+		TaskID:             params.TaskID,
+		RunID:              params.RunID,
+		Scope:              params.Scope,
+		ScopeKey:           params.ScopeKey,
+		MemoryType:         params.MemoryType,
+		Summary:            params.Summary,
+		DetailsJSON:        params.DetailsJSON,
+		CreatedAt:          now,
+		UpdatedAt:          now,
+	}
+
+	if err := appendEventTx(ctx, tx, eventInsert{
+		StreamType: runtimeevents.StreamMemorySummary,
+		StreamID:   summary.ID,
+		EventType:  runtimeevents.EventMemorySummaryRecorded,
+		Scope:      summary.Scope,
+		ProjectID:  summary.ProjectID,
+		TaskID:     summary.TaskID,
+		RunID:      summary.RunID,
+		Payload: runtimeevents.MemorySummaryRecordedPayload{
+			Scope:              summary.Scope,
+			ScopeKey:           summary.ScopeKey,
+			MemoryType:         summary.MemoryType,
+			SourceTranscriptID: summary.SourceTranscriptID,
+			TaskID:             summary.TaskID,
+			RunID:              summary.RunID,
+		},
+		OccurredAt: now,
+	}); err != nil {
+		return MemorySummary{}, err
+	}
+
+	return summary, nil
+}
+
+func (store *Store) validateAcceptedContextPacketMemorySourceTx(ctx context.Context, tx *sql.Tx, packetID int64, params RecordMemorySummaryParams) error {
+	packet, err := store.getContextPacketTx(ctx, tx, packetID)
+	if err != nil {
+		return err
+	}
+	if packet.PacketKind != "context_pack" || packet.PacketScope != "operator_context_pack" {
+		return fmt.Errorf("context packet %d is not an operator context pack", packet.ID)
+	}
+	if packet.Status != "active" {
+		return fmt.Errorf("knowledge memory persistence requires accepted proposal")
+	}
+	if packet.TaskID == nil {
+		return fmt.Errorf("context pack proposal %d has no task for memory persistence", packet.ID)
+	}
+	task, err := store.getTaskTx(ctx, tx, *packet.TaskID)
+	if err != nil {
+		return err
+	}
+	project, err := store.getProjectTx(ctx, tx, task.ProjectID)
+	if err != nil {
+		return err
+	}
+	if params.ProjectID == nil || *params.ProjectID != project.ID {
+		return fmt.Errorf("memory summary project must match context pack project %d", project.ID)
+	}
+	if params.TaskID == nil || *params.TaskID != task.ID {
+		return fmt.Errorf("memory summary task must match context pack task %d", task.ID)
+	}
+	if params.RunID != nil {
+		if packet.RunID == nil || *params.RunID != *packet.RunID {
+			return fmt.Errorf("memory summary run does not match context pack run")
+		}
+	}
+	if strings.TrimSpace(params.MemoryType) != "context_pack" {
+		return fmt.Errorf("context pack memory summary type must be context_pack")
+	}
+	if strings.TrimSpace(params.Scope) != task.Scope || strings.TrimSpace(params.ScopeKey) != project.Key {
+		return fmt.Errorf("context pack memory scope must match task project scope")
+	}
+
+	rows, err := tx.QueryContext(ctx, `
+		SELECT payload_json
+		FROM events
+		WHERE stream_type = ?
+		  AND stream_id = ?
+		  AND event_type = ?
+	`, runtimeevents.StreamContextPacket, packet.ID, runtimeevents.EventContextPacketReviewed)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var payloadJSON string
+		if err := rows.Scan(&payloadJSON); err != nil {
+			return err
+		}
+		var payload runtimeevents.ContextPacketReviewedPayload
+		if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
+			return err
+		}
+		if payload.Decision == "accept" && payload.Status == "active" {
+			return nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	return fmt.Errorf("knowledge memory persistence requires accepted proposal")
+}
+
+func (store *Store) memorySummaryForSourceContextPacketTx(ctx context.Context, tx *sql.Tx, sourceContextPacketID int64) (MemorySummary, bool, error) {
+	rows, err := tx.QueryContext(ctx, `
+		SELECT
+			id,
+			project_id,
+			source_transcript_id,
+			task_id,
+			run_id,
+			scope,
+			scope_key,
+			memory_type,
+			summary,
+			details_json,
+			created_at,
+			updated_at
+		FROM memory_summaries
+		ORDER BY id ASC
+	`)
+	if err != nil {
+		return MemorySummary{}, false, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		summary, err := scanMemorySummary(rows)
+		if err != nil {
+			return MemorySummary{}, false, err
+		}
+		if memorySummarySourceContextPacketID(summary.DetailsJSON) == sourceContextPacketID {
+			return summary, true, nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return MemorySummary{}, false, err
+	}
+	return MemorySummary{}, false, nil
+}
+
+func memorySummarySourceContextPacketID(detailsJSON string) int64 {
+	var details map[string]any
+	if err := json.Unmarshal([]byte(detailsJSON), &details); err != nil {
+		return 0
+	}
+	switch value := details["source_context_pack_id"].(type) {
+	case float64:
+		return int64(value)
+	case int64:
+		return value
+	case int:
+		return int64(value)
+	case string:
+		var parsed int64
+		if _, err := fmt.Sscan(value, &parsed); err == nil {
+			return parsed
+		}
+	}
+	return 0
 }
 
 func (store *Store) CreateWorktreeLease(ctx context.Context, params CreateWorktreeLeaseParams) (WorktreeLease, error) {
