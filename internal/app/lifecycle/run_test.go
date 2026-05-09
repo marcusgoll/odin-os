@@ -871,6 +871,84 @@ func TestRunIntakeProcessPersistsReviewableEvidenceAndAuditsStages(t *testing.T)
 	assertIntakeProcessingAuditEvidence(t, logsOutput.Bytes())
 }
 
+func TestRunIntakeProcessPersistsDraftArtifactEvidenceForAllReviewOutcomes(t *testing.T) {
+	t.Parallel()
+
+	root := testRepoRoot(t)
+	payloadPath := filepath.Join(t.TempDir(), "payload.json")
+	if err := os.WriteFile(payloadPath, []byte(`{"body":"prepare non-standard intake evidence"}`), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	createRaw := func(title, dedupKey string) {
+		t.Helper()
+		if err := Run(context.Background(), root, []string{
+			"intake", "raw", "create",
+			"--source", "operator",
+			"--project", "odin-core",
+			"--title", title,
+			"--type", "request",
+			"--dedup-key", dedupKey,
+			"--requested-by", "codex",
+			"--payload-file", payloadPath,
+			"--json",
+		}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+			t.Fatalf("Run(intake raw create %q) error = %v", title, err)
+		}
+	}
+
+	createRaw("Build Odin research goals", "draft-artifact:goal")
+	createRaw("Help", "draft-artifact:clarification")
+	createRaw("Build duplicate processing evidence", "draft-artifact:duplicate")
+	createRaw("Build duplicate processing evidence again", "draft-artifact:duplicate")
+
+	for _, id := range []string{"intake-1", "intake-2", "intake-3", "intake-4"} {
+		var processOutput bytes.Buffer
+		if err := Run(context.Background(), root, []string{"intake", "process", "--id", id, "--json"}, strings.NewReader(""), &processOutput); err != nil {
+			t.Fatalf("Run(intake process %s) error = %v", id, err)
+		}
+	}
+
+	cases := []struct {
+		ref              string
+		wantStatus       string
+		wantRoute        string
+		wantArtifactKind string
+		wantReviewState  string
+	}{
+		{
+			ref:              "intake-1",
+			wantStatus:       "review_required",
+			wantRoute:        "goal_created",
+			wantArtifactKind: "goal_review",
+			wantReviewState:  "created_not_approved",
+		},
+		{
+			ref:              "intake-2",
+			wantStatus:       "needs_clarification",
+			wantRoute:        "needs_clarification",
+			wantArtifactKind: "clarification_request",
+			wantReviewState:  "needs_clarification",
+		},
+		{
+			ref:              "intake-4",
+			wantStatus:       "duplicate_linked_or_suppressed",
+			wantRoute:        "duplicate_linked_or_suppressed",
+			wantArtifactKind: "duplicate_review",
+			wantReviewState:  "duplicate_linked_or_suppressed",
+		},
+	}
+
+	for _, tc := range cases {
+		var showOutput bytes.Buffer
+		if err := Run(context.Background(), root, []string{"intake", "raw", "show", tc.ref, "--json"}, strings.NewReader(""), &showOutput); err != nil {
+			t.Fatalf("Run(intake raw show %s) error = %v", tc.ref, err)
+		}
+		view := decodeRawIntakeEvidenceEnvelope(t, showOutput.Bytes())
+		assertIntakeOutcomeDraftArtifactEvidence(t, view.IntakeItem, tc.wantStatus, tc.wantRoute, tc.wantArtifactKind, tc.wantReviewState, tc.ref)
+	}
+}
+
 type intakeEvidenceProcessView struct {
 	IntakeItem intakeEvidenceItem `json:"intake_item"`
 }
@@ -960,6 +1038,26 @@ func assertReviewableIntakeProcessingEvidence(t *testing.T, item intakeEvidenceI
 	}
 	if item.Processing.DraftArtifact.Kind == "" || item.Processing.DraftArtifact.ReviewState != "review_required" || item.Processing.DraftArtifact.ExecutionIntent == "" {
 		t.Fatalf("%s draft_artifact = %+v, want stable review-required draft evidence", source, *item.Processing.DraftArtifact)
+	}
+}
+
+func assertIntakeOutcomeDraftArtifactEvidence(t *testing.T, item intakeEvidenceItem, wantStatus, wantRoute, wantArtifactKind, wantReviewState, source string) {
+	t.Helper()
+
+	if item.Status != wantStatus {
+		t.Fatalf("%s status = %q, want %q", source, item.Status, wantStatus)
+	}
+	if item.Processing.Classification.Result == "" || item.Processing.Dedupe.Result == "" {
+		t.Fatalf("%s processing evidence = %+v, want classification and dedupe", source, item.Processing)
+	}
+	if item.Processing.Routing.Outcome != wantRoute {
+		t.Fatalf("%s route outcome = %q, want %q", source, item.Processing.Routing.Outcome, wantRoute)
+	}
+	if item.Processing.DraftArtifact == nil {
+		t.Fatalf("%s draft_artifact = nil, want persisted draft artifact evidence", source)
+	}
+	if item.Processing.DraftArtifact.Kind != wantArtifactKind || item.Processing.DraftArtifact.ReviewState != wantReviewState {
+		t.Fatalf("%s draft_artifact = %+v, want kind %q review_state %q", source, *item.Processing.DraftArtifact, wantArtifactKind, wantReviewState)
 	}
 }
 

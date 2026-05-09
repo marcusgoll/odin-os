@@ -1930,6 +1930,11 @@ func buildIntakeProcessOutcome(ctx context.Context, store *sqlite.Store, item sq
 			CanonicalIntakeKey: rawIntakeKey(duplicate.CanonicalIntakeItemID),
 		}
 		notes.Routing = intakeRoutingResult{Outcome: "duplicate_linked_or_suppressed", ProjectKey: item.ScopeKey}
+		notes.DraftArtifact = &intakeDraftArtifact{
+			Kind:        "duplicate_review",
+			Title:       item.Subject,
+			ReviewState: "duplicate_linked_or_suppressed",
+		}
 		outcome := intakeProcessOutcome{
 			status:                "duplicate_linked_or_suppressed",
 			summary:               "Duplicate raw intake linked to " + rawIntakeKey(duplicate.CanonicalIntakeItemID),
@@ -1942,6 +1947,11 @@ func buildIntakeProcessOutcome(ctx context.Context, store *sqlite.Store, item sq
 
 	if notes.Classification.Result == "ambiguous" {
 		notes.Routing = intakeRoutingResult{Outcome: "needs_clarification", ProjectKey: item.ScopeKey}
+		notes.DraftArtifact = &intakeDraftArtifact{
+			Kind:        "clarification_request",
+			Title:       item.Subject,
+			ReviewState: "needs_clarification",
+		}
 		notes.Clarification = &intakeClarification{
 			State: "needs_clarification",
 			Prompts: []string{
@@ -1961,6 +1971,13 @@ func buildIntakeProcessOutcome(ctx context.Context, store *sqlite.Store, item sq
 		notes.Routing = intakeRoutingResult{
 			Outcome:               "goal_created",
 			ProjectKey:            item.ScopeKey,
+			ExecutionIntent:       "read_only",
+			ExecutionIntentSource: "intake_goal_rule:v1",
+		}
+		notes.DraftArtifact = &intakeDraftArtifact{
+			Kind:                  "goal_review",
+			Title:                 item.Subject,
+			ReviewState:           "created_not_approved",
 			ExecutionIntent:       "read_only",
 			ExecutionIntentSource: "intake_goal_rule:v1",
 		}
@@ -2172,13 +2189,6 @@ func intakeProcessingEvents(itemID int64, status string, notes intakeProcessingN
 			Result:  "goal_created",
 			Payload: intakeProcessingAuditPayload(itemID, status, "goal", "goal_created", notes, canonical),
 		})
-	case notes.DraftArtifact != nil:
-		events = append(events, sqlite.IntakeItemProcessingEvent{
-			Type:    runtimeevents.EventIntakeDraftArtifactCreated,
-			Stage:   "draft_artifact",
-			Result:  notes.DraftArtifact.Kind,
-			Payload: intakeProcessingAuditPayload(itemID, status, "draft_artifact", notes.DraftArtifact.Kind, notes, canonical),
-		})
 	case notes.Clarification != nil:
 		events = append(events, sqlite.IntakeItemProcessingEvent{
 			Type:    runtimeevents.EventIntakeClarificationNeeded,
@@ -2192,6 +2202,13 @@ func intakeProcessingEvents(itemID int64, status string, notes intakeProcessingN
 			Stage:   "duplicate",
 			Result:  notes.Dedupe.Result,
 			Payload: intakeProcessingAuditPayload(itemID, status, "duplicate", notes.Dedupe.Result, notes, canonical),
+		})
+	case notes.DraftArtifact != nil:
+		events = append(events, sqlite.IntakeItemProcessingEvent{
+			Type:    runtimeevents.EventIntakeDraftArtifactCreated,
+			Stage:   "draft_artifact",
+			Result:  notes.DraftArtifact.Kind,
+			Payload: intakeProcessingAuditPayload(itemID, status, "draft_artifact", notes.DraftArtifact.Kind, notes, canonical),
 		})
 	}
 	return events
