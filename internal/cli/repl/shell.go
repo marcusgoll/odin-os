@@ -1438,70 +1438,10 @@ func (shell *Shell) handleRunShow(ctx context.Context, args []string, output io.
 		return writeErr
 	}
 
-	if _, err := fmt.Fprintf(output, "run=%d task=%s status=%s executor=%s\n", detail.RunID, detail.TaskKey, detail.Status, detail.Executor); err != nil {
+	if _, err := fmt.Fprint(output, render.RenderRunDetail(detail)); err != nil {
 		return err
 	}
-	if strings.TrimSpace(detail.Summary) != "" {
-		if _, err := fmt.Fprintf(output, "summary=%s\n", detail.Summary); err != nil {
-			return err
-		}
-	}
-	for _, artifact := range detail.Artifacts {
-		if _, err := fmt.Fprintf(output, "artifact=%s summary=%s\n", artifact.ArtifactType, artifact.Summary); err != nil {
-			return err
-		}
-		if details := strings.TrimSpace(artifact.DetailsJSON); details != "" && details != "{}" {
-			if _, err := fmt.Fprintf(output, "details=%s\n", details); err != nil {
-				return err
-			}
-			if err := renderRunEvidenceFields(output, details); err != nil {
-				return err
-			}
-		}
-	}
 	return nil
-}
-
-func renderRunEvidenceFields(output io.Writer, raw string) error {
-	fields := runEvidenceFields(raw)
-	for _, key := range []string{
-		"executor_lane",
-		"driver_kind",
-		"operation",
-		"external_id",
-		"repo_root",
-		"worktree_path",
-		"branch_name",
-		"driver_cwd",
-		"branch_observed",
-		"marker_path",
-		"marker_written",
-		"artifact_path",
-	} {
-		if value := strings.TrimSpace(fields[key]); value != "" {
-			if _, err := fmt.Fprintf(output, "%s=%s\n", key, value); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
-}
-
-func runEvidenceFields(raw string) map[string]string {
-	if strings.TrimSpace(raw) == "" {
-		return nil
-	}
-	var decoded map[string]any
-	if err := json.Unmarshal([]byte(raw), &decoded); err != nil {
-		return nil
-	}
-	fields := make(map[string]string)
-	for key, value := range decoded {
-		if stringValue, ok := value.(string); ok {
-			fields[key] = stringValue
-		}
-	}
-	return fields
 }
 
 func (shell *Shell) handleWorkspace(ctx context.Context, output io.Writer) error {

@@ -68,7 +68,7 @@ import (
 
 var errRuntimeNotReady = errors.New("runtime not ready")
 
-const rootUsageBanner = "Usage: odin <command> [args]\n\nCommands: help repl overview tui doctor healthcheck serve backup restore verify-backup status legacy project workspace work scope jobs runs leases approvals review intake agenda logs knowledge goal browser task initiative companion profile followup trigger transition skills e2e"
+const rootUsageBanner = "Usage: odin <command> [args]\n\nCommands: help repl overview tui doctor healthcheck serve backup restore verify-backup status legacy project workspace work scope jobs runs leases approvals review intake agenda logs knowledge goal browser task initiative companion profile followup trigger transition skills e2e\n\nRun detail: odin runs show <id>"
 
 var (
 	serveTaskLoopInterval     = 1 * time.Second
@@ -489,8 +489,27 @@ func runRuns(ctx context.Context, app bootstrap.App, args []string, stdout io.Wr
 	if err != nil {
 		return err
 	}
-	if len(remaining) != 0 {
-		return fmt.Errorf("usage: odin runs [--json]")
+	if len(remaining) > 0 {
+		if strings.EqualFold(remaining[0], "show") {
+			if jsonOutput || len(remaining) != 2 {
+				return fmt.Errorf("usage: odin runs [--json] | odin runs show <run-id>")
+			}
+			runID, err := strconv.ParseInt(remaining[1], 10, 64)
+			if err != nil || runID <= 0 {
+				return fmt.Errorf("run id must be a positive integer")
+			}
+			state, err := loadCLIState(app)
+			if err != nil {
+				return err
+			}
+			detail, err := runs.Service{DB: app.Store.DB(), Store: app.Store}.Show(ctx, state.Scope, runID)
+			if err != nil {
+				return err
+			}
+			_, err = fmt.Fprint(stdout, clirender.RenderRunDetail(detail))
+			return err
+		}
+		return fmt.Errorf("usage: odin runs [--json] | odin runs show <run-id>")
 	}
 
 	state, err := loadCLIState(app)
