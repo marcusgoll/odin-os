@@ -45,6 +45,7 @@ type Service struct {
 type CreateTaskParams struct {
 	Resolved              scope.Resolution
 	Title                 string
+	AcceptanceCriteria    []string
 	RequestedBy           string
 	Key                   string
 	CompanionID           int64
@@ -212,6 +213,7 @@ func (service Service) CreateTaskOnce(ctx context.Context, params CreateTaskPara
 		taskCompanionID:       params.CompanionID,
 		requestedSwarmTrigger: "",
 		key:                   strings.TrimSpace(params.Key),
+		acceptanceCriteria:    sqlite.NormalizeAcceptanceCriteria(params.AcceptanceCriteria),
 		executionIntent:       params.ExecutionIntent,
 		executionIntentSource: params.ExecutionIntentSource,
 	})
@@ -231,6 +233,7 @@ type createManagedTaskInput struct {
 	requestedSwarmTrigger string
 	actionKey             string
 	key                   string
+	acceptanceCriteria    []string
 	executionIntent       string
 	executionIntentSource string
 }
@@ -319,6 +322,7 @@ func (service Service) createManagedTaskOnce(ctx context.Context, resolved scope
 		ProjectID:             project.ID,
 		Key:                   key,
 		Title:                 title,
+		AcceptanceCriteria:    input.acceptanceCriteria,
 		ActionKey:             actionKey,
 		Status:                "queued",
 		Scope:                 taskScope,
@@ -1584,10 +1588,20 @@ func (service Service) renderPrompt(ctx context.Context, spec contract.TaskSpec,
 		WorkItemID:         task.Key,
 		Role:               templateName,
 		Title:              trustedPromptTitle(task.Title, spec.Metadata),
-		AcceptanceCriteria: acceptanceCriteriaFromMetadata(spec.Metadata["acceptance_criteria"]),
+		AcceptanceCriteria: promptAcceptanceCriteria(task, spec.Metadata),
 		Metadata:           spec.Metadata,
 		UntrustedData:      untrustedPromptData(task, spec.Metadata),
 	})
+}
+
+func promptAcceptanceCriteria(task sqlite.Task, metadata map[string]string) []string {
+	if criteria := sqlite.NormalizeAcceptanceCriteria(task.AcceptanceCriteria); len(criteria) > 0 {
+		return criteria
+	}
+	if metadata == nil {
+		return nil
+	}
+	return acceptanceCriteriaFromMetadata(metadata["acceptance_criteria"])
 }
 
 func trustedPromptTitle(title string, metadata map[string]string) string {

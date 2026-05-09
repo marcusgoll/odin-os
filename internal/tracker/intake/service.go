@@ -145,14 +145,23 @@ func (service Service) ReconcileProject(ctx context.Context, options ReconcileOp
 		ProjectKey: project.Key,
 	}
 	for _, issue := range issues {
+		criteria := sqlite.NormalizeAcceptanceCriteria(issue.AcceptanceCriteria)
 		result, err := jobService.CreateTaskOnce(ctx, jobs.CreateTaskParams{
-			Resolved:    resolved,
-			Key:         externalIssueTaskKey(issue),
-			Title:       issue.Title,
-			RequestedBy: "github_issue_intake",
+			Resolved:           resolved,
+			Key:                externalIssueTaskKey(issue),
+			Title:              issue.Title,
+			AcceptanceCriteria: criteria,
+			RequestedBy:        "github_issue_intake",
 		})
 		if err != nil {
 			return ReconcileSummary{}, err
+		}
+		if len(criteria) > 0 {
+			task, err := service.Store.UpdateTaskAcceptanceCriteria(ctx, result.Task.ID, criteria)
+			if err != nil {
+				return ReconcileSummary{}, err
+			}
+			result.Task = task
 		}
 		if result.Created {
 			summary.Created++
@@ -168,17 +177,18 @@ func (service Service) ReconcileProject(ctx context.Context, options ReconcileOp
 			summary.Linked++
 		}
 		if _, err := service.Store.UpsertExternalIssue(ctx, sqlite.UpsertExternalIssueParams{
-			ProjectID:  issue.ProjectID,
-			Provider:   issue.Provider,
-			Repo:       issue.Repo,
-			Number:     issue.Number,
-			Title:      issue.Title,
-			BodyHash:   issue.BodyHash,
-			URL:        issue.URL,
-			State:      issue.State,
-			LabelsJSON: issue.LabelsJSON,
-			SyncStatus: "reconciled",
-			SyncCursor: issue.SyncCursor,
+			ProjectID:          issue.ProjectID,
+			Provider:           issue.Provider,
+			Repo:               issue.Repo,
+			Number:             issue.Number,
+			Title:              issue.Title,
+			BodyHash:           issue.BodyHash,
+			URL:                issue.URL,
+			State:              issue.State,
+			LabelsJSON:         issue.LabelsJSON,
+			SyncStatus:         "reconciled",
+			SyncCursor:         issue.SyncCursor,
+			AcceptanceCriteria: issue.AcceptanceCriteria,
 		}); err != nil {
 			return ReconcileSummary{}, err
 		}
@@ -226,17 +236,18 @@ func (service Service) ensureRuntimeProject(ctx context.Context, manifest projec
 
 func (service Service) linkExternalIssueToTask(ctx context.Context, task sqlite.Task, issue sqlite.ExternalIssue) (bool, error) {
 	payload, err := json.Marshal(externalIssueIntakePayload{
-		ExternalIssueID: issue.ID,
-		Provider:        issue.Provider,
-		Repo:            issue.Repo,
-		Number:          issue.Number,
-		Title:           issue.Title,
-		BodyHash:        issue.BodyHash,
-		URL:             issue.URL,
-		State:           issue.State,
-		LabelsJSON:      issue.LabelsJSON,
-		SyncStatus:      issue.SyncStatus,
-		SyncCursor:      externalIssueDedupKey(issue),
+		ExternalIssueID:    issue.ID,
+		Provider:           issue.Provider,
+		Repo:               issue.Repo,
+		Number:             issue.Number,
+		Title:              issue.Title,
+		BodyHash:           issue.BodyHash,
+		URL:                issue.URL,
+		State:              issue.State,
+		LabelsJSON:         issue.LabelsJSON,
+		SyncStatus:         issue.SyncStatus,
+		SyncCursor:         externalIssueDedupKey(issue),
+		AcceptanceCriteria: issue.AcceptanceCriteria,
 	})
 	if err != nil {
 		return false, err
@@ -258,17 +269,18 @@ func (service Service) linkExternalIssueToTask(ctx context.Context, task sqlite.
 }
 
 type externalIssueIntakePayload struct {
-	ExternalIssueID int64  `json:"external_issue_id"`
-	Provider        string `json:"provider"`
-	Repo            string `json:"repo"`
-	Number          int    `json:"number"`
-	Title           string `json:"title"`
-	BodyHash        string `json:"body_hash"`
-	URL             string `json:"url"`
-	State           string `json:"state"`
-	LabelsJSON      string `json:"labels_json"`
-	SyncStatus      string `json:"sync_status"`
-	SyncCursor      string `json:"sync_cursor"`
+	ExternalIssueID    int64    `json:"external_issue_id"`
+	Provider           string   `json:"provider"`
+	Repo               string   `json:"repo"`
+	Number             int      `json:"number"`
+	Title              string   `json:"title"`
+	BodyHash           string   `json:"body_hash"`
+	URL                string   `json:"url"`
+	State              string   `json:"state"`
+	LabelsJSON         string   `json:"labels_json"`
+	SyncStatus         string   `json:"sync_status"`
+	SyncCursor         string   `json:"sync_cursor"`
+	AcceptanceCriteria []string `json:"acceptance_criteria,omitempty"`
 }
 
 func externalIssueTaskKey(issue sqlite.ExternalIssue) string {
@@ -327,21 +339,74 @@ func mapIssue(projectID int64, issue tracker.Issue, fallbackRepo string) sqlite.
 	}
 	labelsJSON, _ := json.Marshal(issue.Labels)
 	return sqlite.UpsertExternalIssueParams{
-		ProjectID:  projectID,
-		Provider:   provider,
-		Repo:       repo,
-		Number:     issue.Number,
-		Title:      issue.Title,
-		BodyHash:   "sha256:" + sha256Hex(issue.Body),
-		URL:        issue.URL,
-		State:      state,
-		LabelsJSON: string(labelsJSON),
-		SyncStatus: "eligible",
-		SyncCursor: fmt.Sprintf("%s:issue:%s:%d", provider, repo, issue.Number),
+		ProjectID:          projectID,
+		Provider:           provider,
+		Repo:               repo,
+		Number:             issue.Number,
+		Title:              issue.Title,
+		BodyHash:           "sha256:" + sha256Hex(issue.Body),
+		URL:                issue.URL,
+		State:              state,
+		LabelsJSON:         string(labelsJSON),
+		SyncStatus:         "eligible",
+		SyncCursor:         fmt.Sprintf("%s:issue:%s:%d", provider, repo, issue.Number),
+		AcceptanceCriteria: extractAcceptanceCriteria(issue.Body),
 	}
 }
 
 func sha256Hex(value string) string {
 	sum := sha256.Sum256([]byte(value))
 	return hex.EncodeToString(sum[:])
+}
+
+func extractAcceptanceCriteria(body string) []string {
+	lines := strings.Split(strings.ReplaceAll(strings.ReplaceAll(body, "\r\n", "\n"), "\r", "\n"), "\n")
+	inSection := false
+	var criteria []string
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "#") {
+			heading := strings.TrimSpace(strings.TrimLeft(trimmed, "#"))
+			normalizedHeading := strings.ToLower(strings.TrimSuffix(heading, ":"))
+			if inSection {
+				break
+			}
+			inSection = normalizedHeading == "acceptance criteria"
+			continue
+		}
+		if !inSection || trimmed == "" {
+			continue
+		}
+		if criterion, ok := acceptanceCriterionLine(trimmed); ok {
+			criteria = append(criteria, criterion)
+		}
+	}
+	return sqlite.NormalizeAcceptanceCriteria(criteria)
+}
+
+func acceptanceCriterionLine(line string) (string, bool) {
+	line = strings.TrimSpace(line)
+	for _, prefix := range []string{"- ", "* "} {
+		if strings.HasPrefix(line, prefix) {
+			return stripGitHubCheckbox(strings.TrimSpace(strings.TrimPrefix(line, prefix))), true
+		}
+	}
+	index := 0
+	for index < len(line) && line[index] >= '0' && line[index] <= '9' {
+		index++
+	}
+	if index > 0 && index+1 < len(line) && line[index] == '.' && line[index+1] == ' ' {
+		return stripGitHubCheckbox(strings.TrimSpace(line[index+2:])), true
+	}
+	return "", false
+}
+
+func stripGitHubCheckbox(line string) string {
+	lower := strings.ToLower(line)
+	for _, checkbox := range []string{"[ ] ", "[x] "} {
+		if strings.HasPrefix(lower, checkbox) {
+			return strings.TrimSpace(line[len(checkbox):])
+		}
+	}
+	return strings.TrimSpace(line)
 }

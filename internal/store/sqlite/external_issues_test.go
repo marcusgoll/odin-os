@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	"path/filepath"
+	"reflect"
 	"testing"
 )
 
@@ -67,6 +68,9 @@ func TestExternalIssueUpsertIsIdempotentByProviderRepoAndNumber(t *testing.T) {
 	if second.SyncCursor != "github:issue:acme/alpha:42:v2" {
 		t.Fatalf("updated cursor = %q, want latest cursor", second.SyncCursor)
 	}
+	if len(second.AcceptanceCriteria) != 0 {
+		t.Fatalf("updated criteria = %#v, want none before criteria are provided", second.AcceptanceCriteria)
+	}
 
 	issues, err := store.ListExternalIssues(ctx, ListExternalIssuesParams{
 		Repo:       "acme/alpha",
@@ -83,6 +87,31 @@ func TestExternalIssueUpsertIsIdempotentByProviderRepoAndNumber(t *testing.T) {
 	}
 	if issues[0].SyncCursor != "github:issue:acme/alpha:42:v2" {
 		t.Fatalf("listed cursor = %q, want persisted cursor", issues[0].SyncCursor)
+	}
+
+	withCriteria, err := store.UpsertExternalIssue(ctx, UpsertExternalIssueParams{
+		ProjectID:  project.ID,
+		Provider:   "github",
+		Repo:       "acme/alpha",
+		Number:     42,
+		Title:      "Updated title",
+		BodyHash:   "sha256:criteria",
+		URL:        "https://github.example/acme/alpha/issues/42",
+		State:      "open",
+		LabelsJSON: `["odin:ready","backend"]`,
+		SyncStatus: "eligible",
+		SyncCursor: "github:issue:acme/alpha:42:v3",
+		AcceptanceCriteria: []string{
+			"criteria persist through intake sync",
+			"criteria render into worker prompts",
+		},
+	})
+	if err != nil {
+		t.Fatalf("UpsertExternalIssue(criteria) error = %v", err)
+	}
+	wantCriteria := []string{"criteria persist through intake sync", "criteria render into worker prompts"}
+	if !reflect.DeepEqual(withCriteria.AcceptanceCriteria, wantCriteria) {
+		t.Fatalf("withCriteria.AcceptanceCriteria = %#v, want %#v", withCriteria.AcceptanceCriteria, wantCriteria)
 	}
 }
 
