@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"odin-os/internal/store/sqlite"
+	"odin-os/internal/telemetry/logs"
 	"odin-os/internal/vcs/branches"
 	"odin-os/internal/vcs/worktrees"
 )
@@ -31,6 +32,7 @@ type Manager struct {
 	Store        *sqlite.Store
 	Git          Git
 	WorktreeRoot string
+	Logger       *logs.Logger
 }
 
 type Request struct {
@@ -62,21 +64,28 @@ func (manager Manager) Prepare(ctx context.Context, request Request) (Assignment
 		}, nil
 	}
 	if manager.Store == nil {
-		return Assignment{}, fmt.Errorf("lease store is required for mutable work")
+		err := fmt.Errorf("lease store is required for mutable work")
+		manager.logPrepareFailure(ctx, request, "store_missing", "", "", request.RepoRoot, err)
+		return Assignment{}, err
 	}
 	if manager.Git == nil {
-		return Assignment{}, fmt.Errorf("git adapter is required for mutable work")
+		err := fmt.Errorf("git adapter is required for mutable work")
+		manager.logPrepareFailure(ctx, request, "git_missing", "", "", request.RepoRoot, err)
+		return Assignment{}, err
 	}
 
 	existing, err := manager.Store.GetActiveWorktreeLeaseByTaskRun(ctx, request.TaskID, request.RunID)
 	if err == nil {
 		updated, heartbeatErr := manager.Store.HeartbeatWorktreeLease(ctx, existing.ID)
 		if heartbeatErr != nil {
+			manager.logPrepareFailure(ctx, request, "heartbeat_failed", existing.BranchName, existing.WorktreePath, existing.RepoRoot, heartbeatErr)
 			return Assignment{}, heartbeatErr
 		}
+		manager.logPrepared(ctx, request, updated, true)
 		return assignmentFromLease(updated, true), nil
 	}
 	if err != nil && err != sql.ErrNoRows {
+		manager.logPrepareFailure(ctx, request, "active_lease_lookup_failed", "", "", request.RepoRoot, err)
 		return Assignment{}, err
 	}
 
@@ -104,15 +113,18 @@ func (manager Manager) Prepare(ctx context.Context, request Request) (Assignment
 		if _, statErr := os.Stat(worktreePath); statErr == nil {
 			continue
 		} else if !os.IsNotExist(statErr) {
+			manager.logPrepareFailure(ctx, request, "worktree_stat_failed", branchName, worktreePath, request.RepoRoot, statErr)
 			return Assignment{}, statErr
 		}
 
 		exists, err := manager.Git.BranchExists(ctx, request.RepoRoot, branchName)
 		if err != nil {
+			manager.logPrepareFailure(ctx, request, "branch_exists_failed", branchName, worktreePath, request.RepoRoot, err)
 			return Assignment{}, err
 		}
 		if !exists {
 			if err := manager.Git.CreateBranch(ctx, request.RepoRoot, branchName, request.DefaultBranch); err != nil {
+				manager.logPrepareFailure(ctx, request, "create_branch_failed", branchName, worktreePath, request.RepoRoot, err)
 				return Assignment{}, err
 			}
 		}
@@ -130,10 +142,12 @@ func (manager Manager) Prepare(ctx context.Context, request Request) (Assignment
 		if err != nil {
 			if errors.Is(err, sqlite.ErrWorktreeLeaseConflict) {
 				if isTaskLeaseConflictError(err) {
+					manager.logPrepareFailure(ctx, request, "task_lease_conflict", branchName, worktreePath, request.RepoRoot, err)
 					return Assignment{}, err
 				}
 				continue
 			}
+			manager.logPrepareFailure(ctx, request, "create_lease_failed", branchName, worktreePath, request.RepoRoot, err)
 			return Assignment{}, err
 		}
 
@@ -145,13 +159,72 @@ func (manager Manager) Prepare(ctx context.Context, request Request) (Assignment
 			if isExistingWorktreePathError(err) {
 				continue
 			}
+			manager.logPrepareFailure(ctx, request, "add_worktree_failed", branchName, worktreePath, request.RepoRoot, err)
 			return Assignment{}, err
 		}
 
+		manager.logPrepared(ctx, request, lease, false)
 		return assignmentFromLease(lease, false), nil
 	}
 
-	return Assignment{}, fmt.Errorf("unable to allocate worktree for task %d run %d after %d tries", request.TaskID, request.RunID, maxPrepareTries)
+	err = fmt.Errorf("unable to allocate worktree for task %d run %d after %d tries", request.TaskID, request.RunID, maxPrepareTries)
+	manager.logPrepareFailure(ctx, request, "allocation_exhausted", "", "", request.RepoRoot, err)
+	return Assignment{}, err
+}
+
+func (manager Manager) logPrepared(ctx context.Context, request Request, lease sqlite.WorktreeLease, reused bool) {
+	outcome := "prepared"
+	message := "workspace lease prepared"
+	if reused {
+		outcome = "reused"
+		message = "workspace lease reused"
+	}
+	leaseID := lease.ID
+	manager.logPrepareRecord(ctx, request, logs.LevelInfo, message, outcome, "", &leaseID, lease.BranchName, lease.WorktreePath, lease.RepoRoot, nil)
+}
+
+func (manager Manager) logPrepareFailure(ctx context.Context, request Request, reason string, branchName string, worktreePath string, repoRoot string, err error) {
+	manager.logPrepareRecord(ctx, request, logs.LevelWarn, "workspace lease prepare failed", "failed", reason, nil, branchName, worktreePath, repoRoot, err)
+}
+
+func (manager Manager) logPrepareRecord(ctx context.Context, request Request, level logs.Level, message string, outcome string, reason string, leaseID *int64, branchName string, worktreePath string, repoRoot string, cause error) {
+	if manager.Logger == nil {
+		return
+	}
+	fields := map[string]any{
+		"operation":   "prepare",
+		"outcome":     outcome,
+		"project_key": request.ProjectKey,
+	}
+	if reason != "" {
+		fields["reason"] = reason
+	}
+	if leaseID != nil {
+		fields["lease_id"] = *leaseID
+	}
+	if branchName != "" {
+		fields["branch_name"] = branchName
+	}
+	if worktreePath != "" {
+		fields["worktree_path"] = worktreePath
+	}
+	if repoRoot != "" {
+		fields["repo_root"] = repoRoot
+	}
+	if cause != nil {
+		fields["error"] = cause.Error()
+	}
+	_ = manager.Logger.Log(logs.Record{
+		Level:         level,
+		Component:     "workspace",
+		Message:       message,
+		CorrelationID: fmt.Sprintf("task:%d/run:%d", request.TaskID, request.RunID),
+		Scope:         "project",
+		ProjectID:     int64Ptr(request.ProjectID),
+		TaskID:        int64Ptr(request.TaskID),
+		RunID:         int64Ptr(request.RunID),
+		Fields:        fields,
+	})
 }
 
 func assignmentFromLease(lease sqlite.WorktreeLease, reused bool) Assignment {

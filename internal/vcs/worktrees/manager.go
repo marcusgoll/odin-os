@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"odin-os/internal/store/sqlite"
+	"odin-os/internal/telemetry/logs"
 )
 
 type Git interface {
@@ -20,6 +21,7 @@ type Manager struct {
 	Store        *sqlite.Store
 	Git          Git
 	WorktreeRoot string
+	Logger       *logs.Logger
 }
 
 var ErrWorktreeAlreadyRemoved = errors.New("worktree already removed")
@@ -114,6 +116,7 @@ func (manager Manager) PreviewCleanup(ctx context.Context, staleBefore time.Time
 				decision.Reason = "unsafe_path"
 				decision.Error = err.Error()
 				preview.Leases = append(preview.Leases, decision)
+				manager.logCleanupDecision(ctx, decision)
 				continue
 			}
 			dirty, err := manager.Git.WorktreeDirty(ctx, lease.WorktreePath)
@@ -122,6 +125,7 @@ func (manager Manager) PreviewCleanup(ctx context.Context, staleBefore time.Time
 				decision.Reason = "dirty_check_failed"
 				decision.Error = err.Error()
 				preview.Leases = append(preview.Leases, decision)
+				manager.logCleanupDecision(ctx, decision)
 				continue
 			}
 			decision.Dirty = &dirty
@@ -131,6 +135,7 @@ func (manager Manager) PreviewCleanup(ctx context.Context, staleBefore time.Time
 			}
 		}
 		preview.Leases = append(preview.Leases, decision)
+		manager.logCleanupDecision(ctx, decision)
 	}
 	return preview, nil
 }
@@ -161,27 +166,33 @@ func (manager Manager) cleanupLeases(ctx context.Context, root string, leases []
 	var cleanupErr error
 	for _, lease := range leases {
 		if err := validateCleanupPath(root, lease.WorktreePath); err != nil {
+			manager.logCleanupRejected(ctx, lease, "unsafe_path", err)
 			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("validate worktree lease %d: %w", lease.ID, err))
 			continue
 		}
 		dirty, err := manager.Git.WorktreeDirty(ctx, lease.WorktreePath)
 		if err != nil {
+			manager.logCleanupRejected(ctx, lease, "dirty_check_failed", err)
 			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("check dirty worktree lease %d: %w", lease.ID, err))
 			continue
 		}
 		if dirty && !options.ForceDirty {
+			manager.logCleanupRejected(ctx, lease, "dirty", ErrDirtyWorktree)
 			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("refusing to cleanup dirty worktree lease %d: %w", lease.ID, ErrDirtyWorktree))
 			continue
 		}
 		if err := manager.Git.RemoveWorktree(ctx, lease.RepoRoot, lease.WorktreePath); err != nil && !errors.Is(err, ErrWorktreeAlreadyRemoved) {
+			manager.logCleanupRejected(ctx, lease, "remove_failed", err)
 			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("remove worktree lease %d: %w", lease.ID, err))
 			continue
 		}
 		updated, err := manager.Store.MarkWorktreeLeaseCleanedUp(ctx, lease.ID)
 		if err != nil {
+			manager.logCleanupRejected(ctx, lease, "mark_cleaned_failed", err)
 			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("mark cleaned lease %d: %w", lease.ID, err))
 			continue
 		}
+		manager.logCleanupRemoved(ctx, updated)
 		result.Removed = append(result.Removed, updated)
 	}
 
@@ -199,6 +210,62 @@ func validateCleanupOptions(options CleanupOptions) error {
 		return fmt.Errorf("force dirty cleanup requires approval reason")
 	}
 	return nil
+}
+
+func (manager Manager) logCleanupDecision(ctx context.Context, decision CleanupPreviewLease) {
+	switch decision.Action {
+	case CleanupActionCleanup:
+		manager.logCleanupRecord(ctx, logs.LevelInfo, "workspace lease cleanup selected", "selected", decision.Reason, decision.Lease, decision.Error)
+	case CleanupActionRefuse:
+		manager.logCleanupRecord(ctx, logs.LevelWarn, "workspace lease cleanup rejected", "rejected", decision.Reason, decision.Lease, decision.Error)
+	default:
+		manager.logCleanupRecord(ctx, logs.LevelInfo, "workspace lease cleanup skipped", "skipped", decision.Reason, decision.Lease, decision.Error)
+	}
+}
+
+func (manager Manager) logCleanupRejected(ctx context.Context, lease sqlite.WorktreeLease, reason string, err error) {
+	errorText := ""
+	if err != nil {
+		errorText = err.Error()
+	}
+	manager.logCleanupRecord(ctx, logs.LevelWarn, "workspace lease cleanup rejected", "rejected", reason, lease, errorText)
+}
+
+func (manager Manager) logCleanupRemoved(ctx context.Context, lease sqlite.WorktreeLease) {
+	manager.logCleanupRecord(ctx, logs.LevelInfo, "workspace lease cleanup removed", "removed", "removed", lease, "")
+}
+
+func (manager Manager) logCleanupRecord(ctx context.Context, level logs.Level, message string, outcome string, reason string, lease sqlite.WorktreeLease, errorText string) {
+	if manager.Logger == nil {
+		return
+	}
+	fields := map[string]any{
+		"operation":     "cleanup",
+		"outcome":       outcome,
+		"lease_id":      lease.ID,
+		"branch_name":   lease.BranchName,
+		"worktree_path": lease.WorktreePath,
+		"repo_root":     lease.RepoRoot,
+		"reason":        reason,
+	}
+	if errorText != "" {
+		fields["error"] = errorText
+	}
+	_ = manager.Logger.Log(logs.Record{
+		Level:         level,
+		Component:     "workspace",
+		Message:       message,
+		CorrelationID: fmt.Sprintf("lease:%d", lease.ID),
+		Scope:         "project",
+		ProjectID:     int64Ptr(lease.ProjectID),
+		TaskID:        int64Ptr(lease.TaskID),
+		RunID:         int64Ptr(lease.RunID),
+		Fields:        fields,
+	})
+}
+
+func int64Ptr(value int64) *int64 {
+	return &value
 }
 
 func cleanupEligibleReason(lease sqlite.WorktreeLease) string {

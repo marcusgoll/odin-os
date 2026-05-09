@@ -1,13 +1,16 @@
 package worktrees
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"path/filepath"
 	"testing"
 	"time"
 
 	"odin-os/internal/store/sqlite"
+	"odin-os/internal/telemetry/logs"
 )
 
 func TestManagerCleanupRemovesReleasedLeaseDeterministically(t *testing.T) {
@@ -37,7 +40,13 @@ func TestManagerCleanupRemovesReleasedLeaseDeterministically(t *testing.T) {
 	}
 
 	git := &cleanupGit{}
-	manager := Manager{Store: store, Git: git, WorktreeRoot: "/var/tmp/odin-worktrees"}
+	var logOutput bytes.Buffer
+	manager := Manager{
+		Store:        store,
+		Git:          git,
+		WorktreeRoot: "/var/tmp/odin-worktrees",
+		Logger:       &logs.Logger{Writer: &logOutput},
+	}
 
 	result, err := manager.Cleanup(ctx, time.Now().UTC().Add(-30*time.Minute))
 	if err != nil {
@@ -85,7 +94,13 @@ func TestManagerCleanupPreservesActiveLease(t *testing.T) {
 	}
 
 	git := &cleanupGit{}
-	manager := Manager{Store: store, Git: git, WorktreeRoot: "/var/tmp/odin-worktrees"}
+	var logOutput bytes.Buffer
+	manager := Manager{
+		Store:        store,
+		Git:          git,
+		WorktreeRoot: "/var/tmp/odin-worktrees",
+		Logger:       &logs.Logger{Writer: &logOutput},
+	}
 
 	result, err := manager.Cleanup(ctx, time.Now().UTC().Add(-30*time.Minute))
 	if err != nil {
@@ -158,7 +173,13 @@ func TestManagerCleanupLeasesRemovesSelectedReleasedLeases(t *testing.T) {
 	}
 
 	git := &cleanupGit{}
-	manager := Manager{Store: store, Git: git, WorktreeRoot: "/var/tmp/odin-worktrees"}
+	var logOutput bytes.Buffer
+	manager := Manager{
+		Store:        store,
+		Git:          git,
+		WorktreeRoot: "/var/tmp/odin-worktrees",
+		Logger:       &logs.Logger{Writer: &logOutput},
+	}
 
 	result, err := manager.CleanupLeases(ctx, []sqlite.WorktreeLease{released})
 	if err != nil {
@@ -188,6 +209,33 @@ func TestManagerCleanupLeasesRemovesSelectedReleasedLeases(t *testing.T) {
 	}
 	if untouched.CleanedUpAt != nil || untouched.State != "released" {
 		t.Fatalf("untouched lease = %+v, want released and not cleaned", untouched)
+	}
+
+	record := decodeSingleWorktreeLogRecord(t, logOutput.Bytes())
+	if record.Message != "workspace lease cleanup removed" {
+		t.Fatalf("log message = %q, want workspace lease cleanup removed", record.Message)
+	}
+	if record.ProjectID == nil || *record.ProjectID != project.ID {
+		t.Fatalf("log project_id = %v, want %d", record.ProjectID, project.ID)
+	}
+	if record.TaskID == nil || *record.TaskID != task.ID {
+		t.Fatalf("log task_id = %v, want %d", record.TaskID, task.ID)
+	}
+	if record.RunID == nil || *record.RunID != run.ID {
+		t.Fatalf("log run_id = %v, want %d", record.RunID, run.ID)
+	}
+	for key, want := range map[string]any{
+		"operation":     "cleanup",
+		"outcome":       "removed",
+		"lease_id":      float64(released.ID),
+		"branch_name":   released.BranchName,
+		"worktree_path": released.WorktreePath,
+		"repo_root":     released.RepoRoot,
+		"reason":        "removed",
+	} {
+		if got := record.Fields[key]; got != want {
+			t.Fatalf("log field %s = %v, want %v", key, got, want)
+		}
 	}
 }
 
@@ -431,7 +479,13 @@ func TestManagerPreviewCleanupClassifiesLeasesWithoutMutation(t *testing.T) {
 	git := &cleanupGit{dirtyByPath: map[string]bool{
 		releasedDirty.WorktreePath: true,
 	}}
-	manager := Manager{Store: store, Git: git, WorktreeRoot: worktreeRoot}
+	var logOutput bytes.Buffer
+	manager := Manager{
+		Store:        store,
+		Git:          git,
+		WorktreeRoot: worktreeRoot,
+		Logger:       &logs.Logger{Writer: &logOutput},
+	}
 
 	preview, err := manager.PreviewCleanup(ctx, staleAt.Add(2*time.Hour))
 	if err != nil {
@@ -455,6 +509,28 @@ func TestManagerPreviewCleanupClassifiesLeasesWithoutMutation(t *testing.T) {
 		if lease.CleanedUpAt != nil || lease.State == "cleaned" {
 			t.Fatalf("PreviewCleanup() mutated lease %d: %+v", leaseID, lease)
 		}
+	}
+
+	records := decodeWorktreeLogRecords(t, logOutput.Bytes())
+	if len(records) != 5 {
+		t.Fatalf("log record count = %d, want 5", len(records))
+	}
+	byLeaseID := map[int64]worktreeLogRecord{}
+	for _, record := range records {
+		rawLeaseID, ok := record.Fields["lease_id"].(float64)
+		if !ok {
+			t.Fatalf("log fields = %#v, want numeric lease_id", record.Fields)
+		}
+		byLeaseID[int64(rawLeaseID)] = record
+	}
+	if got := byLeaseID[active.ID]; got.Message != "workspace lease cleanup skipped" || got.Fields["outcome"] != "skipped" || got.Fields["reason"] != "active" {
+		t.Fatalf("active log = %+v, want skipped active", got)
+	}
+	if got := byLeaseID[releasedDirty.ID]; got.Message != "workspace lease cleanup rejected" || got.Fields["outcome"] != "rejected" || got.Fields["reason"] != "dirty" {
+		t.Fatalf("dirty log = %+v, want rejected dirty", got)
+	}
+	if got := byLeaseID[unsafe.ID]; got.Message != "workspace lease cleanup rejected" || got.Fields["outcome"] != "rejected" || got.Fields["reason"] != "unsafe_path" {
+		t.Fatalf("unsafe log = %+v, want rejected unsafe_path", got)
 	}
 }
 
@@ -591,4 +667,42 @@ func openCleanupStore(t *testing.T) (*sqlite.Store, sqlite.Project, sqlite.Task,
 	}
 
 	return store, project, task, run
+}
+
+type worktreeLogRecord struct {
+	Level     logs.Level     `json:"level"`
+	Component string         `json:"component"`
+	Message   string         `json:"message"`
+	ProjectID *int64         `json:"project_id,omitempty"`
+	TaskID    *int64         `json:"task_id,omitempty"`
+	RunID     *int64         `json:"run_id,omitempty"`
+	Fields    map[string]any `json:"fields,omitempty"`
+}
+
+func decodeSingleWorktreeLogRecord(t *testing.T, data []byte) worktreeLogRecord {
+	t.Helper()
+
+	records := decodeWorktreeLogRecords(t, data)
+	if len(records) != 1 {
+		t.Fatalf("log record count = %d, want 1: %s", len(records), string(data))
+	}
+	return records[0]
+}
+
+func decodeWorktreeLogRecords(t *testing.T, data []byte) []worktreeLogRecord {
+	t.Helper()
+
+	lines := bytes.Split(bytes.TrimSpace(data), []byte("\n"))
+	if len(lines) == 1 && len(lines[0]) == 0 {
+		return nil
+	}
+	records := make([]worktreeLogRecord, 0, len(lines))
+	for _, line := range lines {
+		var record worktreeLogRecord
+		if err := json.Unmarshal(line, &record); err != nil {
+			t.Fatalf("decode log record %q: %v", string(line), err)
+		}
+		records = append(records, record)
+	}
+	return records
 }
