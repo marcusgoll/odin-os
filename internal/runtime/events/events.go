@@ -696,6 +696,8 @@ type IntakeReviewDecisionPayload struct {
 	PolicyReason      string `json:"policy_reason,omitempty"`
 	WorkItemID        *int64 `json:"work_item_id,omitempty"`
 	WorkItemKey       string `json:"work_item_key,omitempty"`
+	GoalID            *int64 `json:"goal_id,omitempty"`
+	GoalStatus        string `json:"goal_status,omitempty"`
 	CanonicalIntakeID *int64 `json:"canonical_intake_id,omitempty"`
 }
 

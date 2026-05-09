@@ -965,6 +965,8 @@ func (store *Store) ReviewIntakeItem(ctx context.Context, params ReviewIntakeIte
 				PolicyReason:      params.PolicyReason,
 				WorkItemID:        params.WorkItemID,
 				WorkItemKey:       params.WorkItemKey,
+				GoalID:            params.GoalID,
+				GoalStatus:        params.GoalStatus,
 				CanonicalIntakeID: existing.CanonicalIntakeItemID,
 			},
 			OccurredAt: now,

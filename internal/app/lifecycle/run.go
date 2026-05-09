@@ -1008,32 +1008,45 @@ func runIntake(ctx context.Context, app bootstrap.App, stdin io.Reader, args []s
 const rawIntakePayloadPolicy = "stored_in_source_facts_json"
 
 type rawIntakeItemView struct {
-	ID                     int64           `json:"id"`
-	Key                    string          `json:"key"`
-	Status                 string          `json:"status"`
-	Source                 string          `json:"source"`
-	IntakeType             string          `json:"intake_type"`
-	DedupKey               string          `json:"dedup_key"`
-	RequestedBy            string          `json:"requested_by"`
-	ReceivedAt             string          `json:"received_at"`
-	CreatedAt              string          `json:"created_at"`
-	UpdatedAt              string          `json:"updated_at"`
-	PayloadPolicy          string          `json:"payload_policy"`
-	ProjectKey             string          `json:"project_key,omitempty"`
-	Title                  string          `json:"title,omitempty"`
-	Summary                string          `json:"summary,omitempty"`
-	CanonicalIntakeKey     string          `json:"canonical_intake_key,omitempty"`
-	GoalID                 int64           `json:"goal_id,omitempty"`
-	SuppressionReason      string          `json:"suppression_reason,omitempty"`
-	AcceptedWorkItemID     int64           `json:"accepted_work_item_id,omitempty"`
-	AcceptedWorkItemKey    string          `json:"accepted_work_item_key,omitempty"`
-	AcceptedWorkItemStatus string          `json:"accepted_work_item_status,omitempty"`
-	ApprovalRequired       bool            `json:"approval_required,omitempty"`
-	BlockedPendingApproval bool            `json:"blocked_pending_approval,omitempty"`
-	PolicyReason           string          `json:"policy_reason,omitempty"`
-	PolicyDecision         string          `json:"policy_decision,omitempty"`
-	Payload                json.RawMessage `json:"payload,omitempty"`
-	Processing             json.RawMessage `json:"processing,omitempty"`
+	ID                     int64                  `json:"id"`
+	Key                    string                 `json:"key"`
+	Status                 string                 `json:"status"`
+	Source                 string                 `json:"source"`
+	IntakeType             string                 `json:"intake_type"`
+	DedupKey               string                 `json:"dedup_key"`
+	RequestedBy            string                 `json:"requested_by"`
+	ReceivedAt             string                 `json:"received_at"`
+	CreatedAt              string                 `json:"created_at"`
+	UpdatedAt              string                 `json:"updated_at"`
+	PayloadPolicy          string                 `json:"payload_policy"`
+	ProjectKey             string                 `json:"project_key,omitempty"`
+	Title                  string                 `json:"title,omitempty"`
+	Summary                string                 `json:"summary,omitempty"`
+	CanonicalIntakeKey     string                 `json:"canonical_intake_key,omitempty"`
+	GoalID                 int64                  `json:"goal_id,omitempty"`
+	SuppressionReason      string                 `json:"suppression_reason,omitempty"`
+	AcceptedWorkItemID     int64                  `json:"accepted_work_item_id,omitempty"`
+	AcceptedWorkItemKey    string                 `json:"accepted_work_item_key,omitempty"`
+	AcceptedWorkItemStatus string                 `json:"accepted_work_item_status,omitempty"`
+	ApprovalRequired       bool                   `json:"approval_required,omitempty"`
+	BlockedPendingApproval bool                   `json:"blocked_pending_approval,omitempty"`
+	PolicyReason           string                 `json:"policy_reason,omitempty"`
+	PolicyDecision         string                 `json:"policy_decision,omitempty"`
+	Classification         string                 `json:"classification,omitempty"`
+	DedupeResult           string                 `json:"dedupe_result,omitempty"`
+	DedupeBasis            string                 `json:"dedupe_basis,omitempty"`
+	Risk                   string                 `json:"risk,omitempty"`
+	SuggestedRoute         string                 `json:"suggested_route,omitempty"`
+	Evidence               *rawIntakeEvidenceView `json:"evidence,omitempty"`
+	Payload                json.RawMessage        `json:"payload,omitempty"`
+	Processing             json.RawMessage        `json:"processing,omitempty"`
+}
+
+type rawIntakeEvidenceView struct {
+	PayloadPolicy        string `json:"payload_policy"`
+	SourceFactsAvailable bool   `json:"source_facts_available"`
+	PayloadAvailable     bool   `json:"payload_available"`
+	PayloadIncluded      bool   `json:"payload_included"`
 }
 
 type rawIntakeItemEnvelope struct {
@@ -1066,6 +1079,8 @@ type intakeReviewDecisionView struct {
 	PolicyReason           string              `json:"policy_reason,omitempty"`
 	PolicyDecision         string              `json:"policy_decision,omitempty"`
 	WorkItem               *reviewWorkItemView `json:"work_item,omitempty"`
+	GoalID                 int64               `json:"goal_id,omitempty"`
+	GoalStatus             string              `json:"goal_status,omitempty"`
 }
 
 type reviewWorkItemView struct {
@@ -1132,11 +1147,17 @@ type intakeReviewDecision struct {
 	PolicyReason           string            `json:"policy_reason,omitempty"`
 	PolicyDecision         string            `json:"policy_decision,omitempty"`
 	WorkItem               *intakeReviewWork `json:"work_item,omitempty"`
+	Goal                   *intakeReviewGoal `json:"goal,omitempty"`
 }
 
 type intakeReviewWork struct {
 	ID     int64  `json:"id"`
 	Key    string `json:"key"`
+	Status string `json:"status"`
+}
+
+type intakeReviewGoal struct {
+	ID     int64  `json:"id"`
 	Status string `json:"status"`
 }
 
@@ -1609,6 +1630,7 @@ func runIntakeReviewDecision(ctx context.Context, app bootstrap.App, command com
 	decision := ""
 	eventType := runtimeevents.EventIntakeReviewRejected
 	var task *sqlite.Task
+	var goal *sqlite.Goal
 	workCreated := false
 	policyDecision := "direct_work_allowed"
 	policyReason := "low_risk_review_acceptance"
@@ -1660,6 +1682,24 @@ func runIntakeReviewDecision(ctx context.Context, app bootstrap.App, command com
 		}
 		if item.Status != "review_required" || !isAcceptableIntakeDraftArtifact(notes.DraftArtifact) {
 			return fmt.Errorf("intake %s cannot be accepted into work from status %s", rawIntakeKey(item.ID), item.Status)
+		}
+		if isDraftGoalArtifact(notes.DraftArtifact) {
+			createdGoal, err := ensureGoalForIntakeGoalReview(ctx, app.Store, item)
+			if err != nil {
+				return err
+			}
+			approvedGoal, _, err := approveGoalThroughReview(ctx, app.Store, createdGoal, fmt.Sprintf("intake-goal:%d", item.ID))
+			if err != nil {
+				return err
+			}
+			goal = &approvedGoal
+			decision = "accepted"
+			eventType = runtimeevents.EventIntakeReviewAccepted
+			status = "accepted"
+			summary = "Draft goal accepted by operator and promoted to goal review"
+			policyDecision = "goal_review_accepted"
+			policyReason = "operator_accepted_draft_goal"
+			break
 		}
 		policy := intakePromotionPolicy(item)
 		if policy.ApprovalRequired {
@@ -1724,6 +1764,14 @@ func runIntakeReviewDecision(ctx context.Context, app bootstrap.App, command com
 		workItemKey = task.Key
 		review.WorkItem = &intakeReviewWork{ID: task.ID, Key: task.Key, Status: task.Status}
 	}
+	var goalID *int64
+	goalStatus := ""
+	if goal != nil {
+		id := goal.ID
+		goalID = &id
+		goalStatus = string(goal.Status)
+		review.Goal = &intakeReviewGoal{ID: goal.ID, Status: string(goal.Status)}
+	}
 	notes.Review = &review
 	notesJSON, err := json.Marshal(notes)
 	if err != nil {
@@ -1742,6 +1790,8 @@ func runIntakeReviewDecision(ctx context.Context, app bootstrap.App, command com
 		PolicyReason:     policyReason,
 		WorkItemID:       workItemID,
 		WorkItemKey:      workItemKey,
+		GoalID:           goalID,
+		GoalStatus:       goalStatus,
 	})
 	if err != nil {
 		return err
@@ -1762,6 +1812,10 @@ func runIntakeReviewDecision(ctx context.Context, app bootstrap.App, command com
 	if task != nil {
 		result.WorkItem = &reviewWorkItemView{ID: task.ID, Key: task.Key, Status: task.Status}
 	}
+	if goal != nil {
+		result.GoalID = goal.ID
+		result.GoalStatus = string(goal.Status)
+	}
 	if jsonOutput {
 		return commands.WriteJSON(stdout, result)
 	}
@@ -1771,6 +1825,10 @@ func runIntakeReviewDecision(ctx context.Context, app bootstrap.App, command com
 	}
 	_, err = fmt.Fprintf(stdout, "review_intake=%s decision=%s status=%s work_created=%t work_item=%s\n", view.Key, decision, view.Status, workCreated, workKey)
 	return err
+}
+
+func isDraftGoalArtifact(artifact *intakeDraftArtifact) bool {
+	return artifact != nil && strings.TrimSpace(artifact.Kind) == "draft_goal"
 }
 
 func createTaskFromReviewedIntake(ctx context.Context, app bootstrap.App, item sqlite.IntakeItem) (sqlite.Task, bool, error) {
@@ -2339,12 +2397,30 @@ func rawIntakeView(item sqlite.IntakeItem, includePayload bool) (rawIntakeItemVi
 		view.CanonicalIntakeKey = rawIntakeKey(*item.CanonicalIntakeItemID)
 	}
 	view.SuppressionReason = item.SuppressionReason
+	_, payloadAvailable := facts["payload"]
+	view.Evidence = &rawIntakeEvidenceView{
+		PayloadPolicy:        rawIntakePayloadPolicy,
+		SourceFactsAvailable: strings.TrimSpace(item.SourceFactsJSON) != "",
+		PayloadAvailable:     payloadAvailable,
+		PayloadIncluded:      includePayload && payloadAvailable,
+	}
 	if strings.TrimSpace(item.RoutingNotes) != "" && json.Valid([]byte(item.RoutingNotes)) {
 		view.Processing = json.RawMessage(item.RoutingNotes)
 		var notes intakeProcessingNotes
 		if err := json.Unmarshal([]byte(item.RoutingNotes), &notes); err == nil {
+			view.Classification = notes.Classification.Result
+			view.DedupeResult = notes.Dedupe.Result
+			view.DedupeBasis = notes.Dedupe.Basis
+			view.Risk = notes.Classification.Risk
+			view.SuggestedRoute = notes.Classification.SuggestedRoute
+			if view.SuggestedRoute == "" {
+				view.SuggestedRoute = notes.Routing.Outcome
+			}
 			if view.GoalID == 0 && notes.Goal != nil {
 				view.GoalID = notes.Goal.ID
+			}
+			if view.GoalID == 0 && notes.Review != nil && notes.Review.Goal != nil {
+				view.GoalID = notes.Review.Goal.ID
 			}
 			if notes.Review != nil && notes.Review.WorkItem != nil {
 				view.AcceptedWorkItemID = notes.Review.WorkItem.ID
