@@ -255,6 +255,9 @@ func TestBuilderPromptCurrentlyProtectsHumanHandoffBoundaries(t *testing.T) {
 		"Do not merge.",
 		"Do not deploy production.",
 		"Do not read production secrets.",
+		"Do not run as root.",
+		"Do not request danger-full-access.",
+		"human handoff state",
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("%s missing %q", path, want)
