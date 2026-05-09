@@ -17,6 +17,8 @@ Boundaries:
 - Do not merge.
 - Do not deploy production.
 - Do not read production secrets.
+- Do not run as root.
+- Do not request danger-full-access.
 - Run Go quality gates.
 
-Return changed files, tests, risks, and follow-up issues. Include verification run and handoff notes.
+Return changed files, tests, risks, and follow-up issues. Include verification run, human handoff state, and handoff notes.

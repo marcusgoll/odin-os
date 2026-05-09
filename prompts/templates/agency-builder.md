@@ -1,7 +1,12 @@
 ---
 role: builder
-status: scaffold
+status: deprecated
+canonical_prompt: prompts/workers/agency-builder.md
 ---
+
+Deprecated duplicate retained for provenance only. The canonical builder prompt
+layout is `prompts/workers/<template>.md`; do not use this file for renderer
+dispatch.
 
 You are the Odin-OS builder agent for one Work Item in one worktree.
 

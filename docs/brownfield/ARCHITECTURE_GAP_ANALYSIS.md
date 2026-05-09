@@ -110,7 +110,7 @@ eligible GitHub Issue
 | Git worktree workspace manager | `internal/vcs/leases`, `internal/vcs/worktrees`, `internal/vcs/git`, `docs/contracts/git-worktrees.md`. | Real worktree lease path exists; the historical `internal/workspace` duplicate is removed. Cleanup/recovery exists but agency-facing workspace commands are partial. | Use `internal/vcs` as canonical; do not recreate `internal/workspace`. | High |
 | Codex exec runner | `internal/executors/contract`, router, `codex_headless` deterministic adapter; `internal/runner/codexexec` placeholder. | No real `codex exec` subprocess. Security policy not enforced in canonical executor path. | Implement `codex_exec` as an `internal/executors` adapter after security contract. | High |
 | Optional app-server runner | `internal/runner/appserver` placeholder. | Not behind canonical executor seam; app-server is experimental. | Defer. Add only as an `internal/executors` adapter after Codex exec works. | Medium |
-| Prompt renderer | Prompt files in `prompts/`; `internal/prompts/renderer.go`; historical TypeScript prompt renderer inventory for removed `src/prompts`. | No prompt frontmatter contract. Duplicate builder prompts remain. | Define prompt contract, choose one prompt layout, wire through Go renderer. Do not recreate the removed TypeScript renderer. | Medium |
+| Prompt renderer | Prompt files in `prompts/`; `internal/prompts/renderer.go`; historical TypeScript prompt renderer inventory for removed `src/prompts`. | Current Go file renderer loads from canonical `prompts/workers/<template>.md`; fuller prompt frontmatter contract is still needed before expanding prompt kinds; deprecated builder template remains for provenance. | Define fuller prompt contract and remove duplicate builder prompt only after cleanup approval. Do not recreate the removed TypeScript renderer. | Medium |
 | Agent/skill registry | `registry/`, `internal/registry`, `docs/contracts/registry-format.md`, active triage agent/skill. | Strong existing registry. Builder/QA/reviewer/security agents missing. Registry watcher is noop. | Preserve registry. Add missing agents only after role vocabulary is settled. | Medium |
 | PR manager | PR template validator and GitHub Actions CI exist; no runtime PR creation/update module. | No draft PR creation, branch push, review handoff, or merge-blocking PR manager. | Add after GitHub intake and worktree execution are proven. Human approval remains required. | High |
 | Reviewer/QA/security automation | Executor task kinds include review/QA/research; prompt drafts; `internal/workers` placeholders; `internal/review` and `internal/security` scaffold. | Planner exists; reviewer/QA/security execution is not implemented. Security policy is detached from executor launch. | Implement one role at a time through runtime jobs and executor contract. | High |
@@ -164,8 +164,8 @@ The largest gaps are:
 - `cmd/odin-os`: decide supported alias vs remove.
 - `internal/executors/codex`: evolve from deterministic alpha to real Codex CLI adapter, or add sibling adapter under `internal/executors`.
 - `internal/workers`: keep planner, implement other roles through existing runtime/executor seams.
-- `prompts/`: choose one layout and add a prompt contract.
-- `internal/prompts`: wire only if it becomes the canonical Go prompt renderer.
+- `prompts/`: keep `prompts/workers/<template>.md` as the canonical rendered worker prompt layout and add a fuller prompt contract.
+- `internal/prompts`: keep as the canonical Go file renderer while worker prompts remain repo-authored Markdown.
 - `internal/security`: move checks into executor launch policy.
 - `internal/api/http`: extend with dashboard/read-model endpoints over existing projections.
 - `scripts/dev/install-systemd-service.sh`: harden deployment behavior after service mode decision.
@@ -277,7 +277,7 @@ Remove only after explicit cleanup approval and after preserving useful knowledg
 11. Add worktree dispatch proof using `codex_headless`.
 12. Write Codex exec security contract.
 13. Implement `codex_exec` adapter behind `internal/executors/contract`.
-14. Add prompt frontmatter contract and Go prompt renderer.
+14. Tighten prompt frontmatter contract around the existing Go file renderer.
 15. Reconcile role vocabulary across registry, workers, prompts, and executor task kinds.
 16. Add builder role registry/prompt using existing executor path.
 17. Add QA role as separate Run Attempt.

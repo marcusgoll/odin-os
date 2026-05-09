@@ -41,8 +41,8 @@ Odin-OS has one active registry skill, one active registry agent, several active
 
 ### Refactor
 
-- `prompts/workers/*.md` and `prompts/templates/agency-builder.md`: choose one prompt layout and add a prompt contract.
-- `internal/prompts/renderer.go`: keep only if wired to canonical prompt assets.
+- `prompts/workers/*.md` and `prompts/templates/agency-builder.md`: keep `prompts/workers/<template>.md` as the canonical rendered worker prompt layout; add a fuller prompt contract before expanding prompt kinds.
+- `internal/prompts/renderer.go`: keep wired to canonical worker prompt assets.
 - `internal/security/policy.go`: move enforcement into the canonical executor launch path before real subprocess execution.
 - `scripts/dev/install-systemd-service.sh`: add hardening review before production use.
 - high-value migration drafts such as `odin-control-plane-contract-checks`, `odin-github-auth-boundaries`, and `incident-commander`: rewrite into current contracts or registry entries.
@@ -94,8 +94,8 @@ Use one vocabulary across registry, prompts, workers, and executors:
      `internal/vcs` worktree leases.
    - Add characterization tests before changing lease behavior.
 
-5. **Decide prompt layout**
-   - Choose `prompts/workers/` or `prompts/templates/` as canonical, add a prompt contract, and remove duplicate builder prompt after approval.
+5. **Tighten prompt contract**
+   - Keep `prompts/workers/` as canonical for rendered worker prompts, add a fuller prompt contract, and remove duplicate builder prompt only after separate approval.
 
 6. **Promote only one migration skill**
    - Start with `odin-control-plane-contract-checks`.

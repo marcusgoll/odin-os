@@ -34,7 +34,7 @@ No skill, agent, prompt, shim, or script should be removed until a separate clea
 | `state/migration/drafts/skills/cloudflare.md` | Review-only | `release-checklist`, managed-project ops docs | Promote only for a project that actually uses Cloudflare. |
 | `state/migration/drafts/skills/odin-control-plane-contract-checks.md` | Review-only, high value | `brownfield-audit`, `architecture-plan`, `pr-review` | Rewrite selected contract checks into current docs/contracts or tests. |
 | `state/migration/archive/skills/slack-gif-creator.md` | Archived | None for Odin core | Archived from `state/migration/drafts/skills/slack-gif-creator.md`; not part of Odin-OS orchestration. |
-| `prompts/templates/agency-builder.md` | Deprecated duplicate | `prompts/workers/agency-builder.md` until prompt contract exists | Keep for provenance; choose one prompt layout in a future ticket. |
+| `prompts/templates/agency-builder.md` | Deprecated duplicate | `prompts/workers/agency-builder.md` | Canonical layout is `prompts/workers/<template>.md`; useful no-root, no-danger-full-access, and human handoff wording is preserved in the worker prompt. Keep this file for provenance until a separate cleanup ticket has removal approval. |
 | `internal/agents/roles.go` | Deprecated duplicate role authority | Registry role docs, worker directories, executor `TaskKind` | Reconcile in role-vocabulary ticket before removing. |
 | `src/agents/index.ts` | Deprecated scaffold | Go registry and Go runtime | Remove with TypeScript scaffold cleanup after approval. |
 | `src/runner/*` | Deprecated scaffold | `internal/runner/codexexec`, then `internal/executors` | Do not wire TS runner into Odin runtime. |
@@ -60,7 +60,7 @@ No skill, agent, prompt, shim, or script should be removed until a separate clea
 
 1. Keep all existing assets available.
 2. Use the new registry skills for new brownfield work.
-3. Decide prompt layout before editing prompt duplicates.
+3. Keep `prompts/workers/<template>.md` as the canonical rendered worker prompt layout.
 4. Reconcile role vocabulary before adding new worker implementations.
 5. Clean TypeScript scaffold only after explicit cleanup approval.
 6. Promote migration drafts one at a time by rewrite, not copy.
