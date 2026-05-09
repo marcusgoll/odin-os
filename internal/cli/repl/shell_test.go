@@ -1292,6 +1292,44 @@ printf '{"status":"completed","tool_key":"browser_x_post_publish","summary":"Pub
 	}
 }
 
+func TestShellToolRunBlocksDirectXPublish(t *testing.T) {
+	ctx := context.Background()
+	env := newTestEnvironment(t)
+	shell, err := New(env)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	driverPath := filepath.Join(t.TempDir(), "huginn-x-post-publish-driver.sh")
+	requestPath := filepath.Join(t.TempDir(), "request.json")
+	script := `#!/usr/bin/env bash
+set -euo pipefail
+cat >"$ODIN_DRIVER_REQUEST_PATH"
+printf '{"status":"completed","tool_key":"browser_x_post_publish","summary":"Published direct X post."}'
+`
+	if err := os.WriteFile(driverPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("WriteFile(driver) error = %v", err)
+	}
+	t.Setenv("ODIN_HUGINN_X_PUBLISH_DRIVER", driverPath)
+	t.Setenv("ODIN_DRIVER_REQUEST_PATH", requestPath)
+
+	var output bytes.Buffer
+	if err := shell.HandleLine(ctx, "/tool run browser_x_post_publish post_text=Approved_X_post_ready_to_publish_natively. wait_ms=0", &output); err != nil {
+		t.Fatalf("HandleLine(/tool run browser_x_post_publish) error = %v", err)
+	}
+	for _, want := range []string{
+		"requires an approved social_outcome",
+		"/memory publish <id> via=huginn_x",
+	} {
+		if !strings.Contains(output.String(), want) {
+			t.Fatalf("output = %q, want %q", output.String(), want)
+		}
+	}
+	if _, err := os.Stat(requestPath); !os.IsNotExist(err) {
+		t.Fatalf("direct publish driver was invoked; Stat(requestPath) error = %v", err)
+	}
+}
+
 func TestShellScopeShowsCurrentControlScopeDetails(t *testing.T) {
 	t.Parallel()
 
