@@ -812,6 +812,204 @@ func TestRunIntakeProcessLinksNearDuplicateWithoutCreatingWork(t *testing.T) {
 	}
 }
 
+func TestRunIntakeProcessPersistsReviewableEvidenceAndAuditsStages(t *testing.T) {
+	t.Parallel()
+
+	root := testRepoRoot(t)
+	payloadPath := filepath.Join(t.TempDir(), "payload.json")
+	if err := os.WriteFile(payloadPath, []byte(`{"body":"prepare stable evidence for review"}`), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	if err := Run(context.Background(), root, []string{
+		"intake", "raw", "create",
+		"--source", "operator",
+		"--project", "odin-core",
+		"--title", "Build stable intake evidence",
+		"--type", "request",
+		"--dedup-key", "stable-evidence:1",
+		"--requested-by", "codex",
+		"--payload-file", payloadPath,
+		"--json",
+	}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+		t.Fatalf("Run(intake raw create) error = %v", err)
+	}
+
+	var processOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"intake", "process", "--id", "intake-1", "--json"}, strings.NewReader(""), &processOutput); err != nil {
+		t.Fatalf("Run(intake process) error = %v", err)
+	}
+	processView := decodeIntakeEvidenceView(t, processOutput.Bytes())
+	assertReviewableIntakeProcessingEvidence(t, processView.IntakeItem, "process output")
+
+	var showOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"intake", "raw", "show", "intake-1", "--json"}, strings.NewReader(""), &showOutput); err != nil {
+		t.Fatalf("Run(intake raw show) error = %v", err)
+	}
+	showView := decodeRawIntakeEvidenceEnvelope(t, showOutput.Bytes())
+	assertReviewableIntakeProcessingEvidence(t, showView.IntakeItem, "raw show output")
+
+	var reviewOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"intake", "review", "show", "intake-1", "--json"}, strings.NewReader(""), &reviewOutput); err != nil {
+		t.Fatalf("Run(intake review show) error = %v", err)
+	}
+	reviewView := decodeRawIntakeEvidenceEnvelope(t, reviewOutput.Bytes())
+	assertReviewableIntakeProcessingEvidence(t, reviewView.IntakeItem, "review show output")
+
+	var jobsOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"jobs", "--json"}, strings.NewReader(""), &jobsOutput); err != nil {
+		t.Fatalf("Run(jobs --json) error = %v", err)
+	}
+	if output := jobsOutput.String(); !strings.Contains(output, `"jobs": []`) {
+		t.Fatalf("jobs output = %s, want processing to leave jobs empty before review acceptance", output)
+	}
+
+	var logsOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"logs", "--json"}, strings.NewReader(""), &logsOutput); err != nil {
+		t.Fatalf("Run(logs --json) error = %v", err)
+	}
+	assertIntakeProcessingAuditEvidence(t, logsOutput.Bytes())
+}
+
+type intakeEvidenceProcessView struct {
+	IntakeItem intakeEvidenceItem `json:"intake_item"`
+}
+
+type rawIntakeEvidenceEnvelope struct {
+	IntakeItem intakeEvidenceItem `json:"intake_item"`
+}
+
+type intakeEvidenceItem struct {
+	Status     string                   `json:"status"`
+	Processing intakeEvidenceProcessing `json:"processing"`
+}
+
+type intakeEvidenceProcessing struct {
+	ProcessingStarted bool                   `json:"processing_started"`
+	Classification    classificationEvidence `json:"classification"`
+	Dedupe            dedupeEvidence         `json:"dedupe"`
+	Routing           routingEvidence        `json:"routing"`
+	DraftArtifact     *draftArtifactEvidence `json:"draft_artifact"`
+}
+
+type classificationEvidence struct {
+	Result string `json:"result"`
+	Reason string `json:"reason"`
+}
+
+type dedupeEvidence struct {
+	Result             string `json:"result"`
+	CanonicalIntakeKey string `json:"canonical_intake_key"`
+}
+
+type routingEvidence struct {
+	Outcome               string `json:"outcome"`
+	ProjectKey            string `json:"project_key"`
+	ExecutionIntent       string `json:"execution_intent"`
+	ExecutionIntentSource string `json:"execution_intent_source"`
+}
+
+type draftArtifactEvidence struct {
+	Kind                  string `json:"kind"`
+	Title                 string `json:"title"`
+	ReviewState           string `json:"review_state"`
+	ExecutionIntent       string `json:"execution_intent"`
+	ExecutionIntentSource string `json:"execution_intent_source"`
+}
+
+func decodeIntakeEvidenceView(t *testing.T, raw []byte) intakeEvidenceProcessView {
+	t.Helper()
+
+	var view intakeEvidenceProcessView
+	if err := json.Unmarshal(raw, &view); err != nil {
+		t.Fatalf("json.Unmarshal(process output) error = %v\n%s", err, raw)
+	}
+	return view
+}
+
+func decodeRawIntakeEvidenceEnvelope(t *testing.T, raw []byte) rawIntakeEvidenceEnvelope {
+	t.Helper()
+
+	var view rawIntakeEvidenceEnvelope
+	if err := json.Unmarshal(raw, &view); err != nil {
+		t.Fatalf("json.Unmarshal(raw intake envelope) error = %v\n%s", err, raw)
+	}
+	return view
+}
+
+func assertReviewableIntakeProcessingEvidence(t *testing.T, item intakeEvidenceItem, source string) {
+	t.Helper()
+
+	if item.Status != "review_required" {
+		t.Fatalf("%s status = %q, want review_required", source, item.Status)
+	}
+	if !item.Processing.ProcessingStarted {
+		t.Fatalf("%s processing_started = false, want true", source)
+	}
+	if item.Processing.Classification.Result == "" || item.Processing.Classification.Reason == "" {
+		t.Fatalf("%s classification = %+v, want result and reason", source, item.Processing.Classification)
+	}
+	if item.Processing.Dedupe.Result == "" {
+		t.Fatalf("%s dedupe = %+v, want result", source, item.Processing.Dedupe)
+	}
+	if item.Processing.Routing.Outcome == "" || item.Processing.Routing.ExecutionIntent == "" || item.Processing.Routing.ExecutionIntentSource == "" {
+		t.Fatalf("%s routing = %+v, want outcome and execution intent evidence", source, item.Processing.Routing)
+	}
+	if item.Processing.DraftArtifact == nil {
+		t.Fatalf("%s draft_artifact = nil, want draft artifact evidence", source)
+	}
+	if item.Processing.DraftArtifact.Kind == "" || item.Processing.DraftArtifact.ReviewState != "review_required" || item.Processing.DraftArtifact.ExecutionIntent == "" {
+		t.Fatalf("%s draft_artifact = %+v, want stable review-required draft evidence", source, *item.Processing.DraftArtifact)
+	}
+}
+
+func assertIntakeProcessingAuditEvidence(t *testing.T, raw []byte) {
+	t.Helper()
+
+	var view struct {
+		Logs []struct {
+			Type    string `json:"type"`
+			Payload struct {
+				Stage          string                  `json:"stage"`
+				Classification *classificationEvidence `json:"classification"`
+				Dedupe         *dedupeEvidence         `json:"dedupe"`
+				Routing        *routingEvidence        `json:"routing"`
+				DraftArtifact  *draftArtifactEvidence  `json:"draft_artifact"`
+			} `json:"payload"`
+		} `json:"logs"`
+	}
+	if err := json.Unmarshal(raw, &view); err != nil {
+		t.Fatalf("json.Unmarshal(logs) error = %v\n%s", err, raw)
+	}
+
+	var sawClassification bool
+	var sawDedupe bool
+	var sawRouting bool
+	var sawDraftArtifact bool
+	for _, log := range view.Logs {
+		switch log.Type {
+		case "intake.classified":
+			sawClassification = log.Payload.Classification != nil &&
+				log.Payload.Classification.Result != "" &&
+				log.Payload.Classification.Reason != ""
+		case "intake.dedupe_reviewed":
+			sawDedupe = log.Payload.Dedupe != nil &&
+				log.Payload.Dedupe.Result != ""
+		case "intake.routed":
+			sawRouting = log.Payload.Routing != nil &&
+				log.Payload.Routing.Outcome != "" &&
+				log.Payload.Routing.ExecutionIntent != ""
+		case "intake.draft_artifact_created":
+			sawDraftArtifact = log.Payload.DraftArtifact != nil &&
+				log.Payload.DraftArtifact.Kind != "" &&
+				log.Payload.DraftArtifact.ReviewState == "review_required"
+		}
+	}
+	if !sawClassification || !sawDedupe || !sawRouting || !sawDraftArtifact {
+		t.Fatalf("logs = %s, want stage audit payloads with classification=%v dedupe=%v routing=%v draft_artifact=%v", raw, sawClassification, sawDedupe, sawRouting, sawDraftArtifact)
+	}
+}
+
 func TestRunIntakeProcessDerivesTypeSpecificRoutingAndIntent(t *testing.T) {
 	t.Parallel()
 

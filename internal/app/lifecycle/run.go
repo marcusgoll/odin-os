@@ -2134,112 +2134,64 @@ func normalizedIntakeSubjectDedupeKey(item sqlite.IntakeItem) string {
 func intakeProcessingEvents(itemID int64, status string, notes intakeProcessingNotes, canonical *int64) []sqlite.IntakeItemProcessingEvent {
 	events := []sqlite.IntakeItemProcessingEvent{
 		{
-			Type:   runtimeevents.EventIntakeProcessingStarted,
-			Stage:  "processing_started",
-			Result: "started",
+			Type:    runtimeevents.EventIntakeProcessingStarted,
+			Stage:   "processing_started",
+			Result:  "started",
+			Payload: intakeProcessingAuditPayload(itemID, status, "processing_started", "started", notes, canonical),
 		},
 		{
-			Type:   runtimeevents.EventIntakeClassified,
-			Stage:  "classification",
-			Result: notes.Classification.Result,
+			Type:    runtimeevents.EventIntakeClassified,
+			Stage:   "classification",
+			Result:  notes.Classification.Result,
+			Payload: intakeProcessingAuditPayload(itemID, status, "classification", notes.Classification.Result, notes, canonical),
 		},
 		{
-			Type:   runtimeevents.EventIntakeDedupeReviewed,
-			Stage:  "dedupe",
-			Result: notes.Dedupe.Result,
+			Type:    runtimeevents.EventIntakeDedupeReviewed,
+			Stage:   "dedupe",
+			Result:  notes.Dedupe.Result,
+			Payload: intakeProcessingAuditPayload(itemID, status, "dedupe", notes.Dedupe.Result, notes, canonical),
 		},
 		{
-			Type:   runtimeevents.EventIntakeRouted,
-			Stage:  "routing",
-			Result: notes.Routing.Outcome,
-			Payload: runtimeevents.IntakeProcessingPayload{
-				IntakeItemID:          itemID,
-				Status:                status,
-				Stage:                 "routing",
-				RoutedOutcome:         notes.Routing.Outcome,
-				ExecutionIntent:       notes.Routing.ExecutionIntent,
-				ExecutionIntentSource: notes.Routing.ExecutionIntentSource,
-				GoalID:                intakeGoalIDPtr(notes),
-			},
+			Type:    runtimeevents.EventIntakeRouted,
+			Stage:   "routing",
+			Result:  notes.Routing.Outcome,
+			Payload: intakeProcessingAuditPayload(itemID, status, "routing", notes.Routing.Outcome, notes, canonical),
 		},
 		{
-			Type:   runtimeevents.EventIntakeProcessed,
-			Stage:  "processed",
-			Result: status,
-			Payload: runtimeevents.IntakeProcessingPayload{
-				IntakeItemID:          itemID,
-				Status:                status,
-				Stage:                 "processed",
-				Result:                status,
-				RoutedOutcome:         notes.Routing.Outcome,
-				ExecutionIntent:       notes.Routing.ExecutionIntent,
-				ExecutionIntentSource: notes.Routing.ExecutionIntentSource,
-				CanonicalIntakeID:     canonical,
-				GoalID:                intakeGoalIDPtr(notes),
-			},
+			Type:    runtimeevents.EventIntakeProcessed,
+			Stage:   "processed",
+			Result:  status,
+			Payload: intakeProcessingAuditPayload(itemID, status, "processed", status, notes, canonical),
 		},
 	}
 	switch {
 	case notes.Goal != nil:
 		events = append(events, sqlite.IntakeItemProcessingEvent{
-			Type:   runtimeevents.EventIntakeRoutedToGoal,
-			Stage:  "goal",
-			Result: "goal_created",
-			Payload: runtimeevents.IntakeProcessingPayload{
-				IntakeItemID:          itemID,
-				Status:                status,
-				Stage:                 "goal",
-				Result:                "goal_created",
-				RoutedOutcome:         notes.Routing.Outcome,
-				ExecutionIntent:       notes.Routing.ExecutionIntent,
-				ExecutionIntentSource: notes.Routing.ExecutionIntentSource,
-				GoalID:                intakeGoalIDPtr(notes),
-			},
+			Type:    runtimeevents.EventIntakeRoutedToGoal,
+			Stage:   "goal",
+			Result:  "goal_created",
+			Payload: intakeProcessingAuditPayload(itemID, status, "goal", "goal_created", notes, canonical),
 		})
 	case notes.DraftArtifact != nil:
 		events = append(events, sqlite.IntakeItemProcessingEvent{
-			Type:   runtimeevents.EventIntakeDraftArtifactCreated,
-			Stage:  "draft_artifact",
-			Result: notes.DraftArtifact.Kind,
-			Payload: runtimeevents.IntakeProcessingPayload{
-				IntakeItemID:          itemID,
-				Status:                status,
-				Stage:                 "draft_artifact",
-				RoutedOutcome:         notes.Routing.Outcome,
-				ExecutionIntent:       notes.Routing.ExecutionIntent,
-				ExecutionIntentSource: notes.Routing.ExecutionIntentSource,
-				DraftArtifactKind:     notes.DraftArtifact.Kind,
-			},
+			Type:    runtimeevents.EventIntakeDraftArtifactCreated,
+			Stage:   "draft_artifact",
+			Result:  notes.DraftArtifact.Kind,
+			Payload: intakeProcessingAuditPayload(itemID, status, "draft_artifact", notes.DraftArtifact.Kind, notes, canonical),
 		})
 	case notes.Clarification != nil:
 		events = append(events, sqlite.IntakeItemProcessingEvent{
-			Type:   runtimeevents.EventIntakeClarificationNeeded,
-			Stage:  "clarification",
-			Result: notes.Clarification.State,
-			Payload: runtimeevents.IntakeProcessingPayload{
-				IntakeItemID:          itemID,
-				Status:                status,
-				Stage:                 "clarification",
-				RoutedOutcome:         notes.Routing.Outcome,
-				ExecutionIntent:       notes.Routing.ExecutionIntent,
-				ExecutionIntentSource: notes.Routing.ExecutionIntentSource,
-				ClarificationState:    notes.Clarification.State,
-			},
+			Type:    runtimeevents.EventIntakeClarificationNeeded,
+			Stage:   "clarification",
+			Result:  notes.Clarification.State,
+			Payload: intakeProcessingAuditPayload(itemID, status, "clarification", notes.Clarification.State, notes, canonical),
 		})
 	case canonical != nil:
 		events = append(events, sqlite.IntakeItemProcessingEvent{
-			Type:   runtimeevents.EventIntakeDuplicateLinkedOrSuppressed,
-			Stage:  "duplicate",
-			Result: notes.Dedupe.Result,
-			Payload: runtimeevents.IntakeProcessingPayload{
-				IntakeItemID:          itemID,
-				Status:                status,
-				Stage:                 "duplicate",
-				RoutedOutcome:         notes.Routing.Outcome,
-				ExecutionIntent:       notes.Routing.ExecutionIntent,
-				ExecutionIntentSource: notes.Routing.ExecutionIntentSource,
-				CanonicalIntakeID:     canonical,
-			},
+			Type:    runtimeevents.EventIntakeDuplicateLinkedOrSuppressed,
+			Stage:   "duplicate",
+			Result:  notes.Dedupe.Result,
+			Payload: intakeProcessingAuditPayload(itemID, status, "duplicate", notes.Dedupe.Result, notes, canonical),
 		})
 	}
 	return events
@@ -2251,6 +2203,53 @@ func intakeGoalIDPtr(notes intakeProcessingNotes) *int64 {
 	}
 	id := notes.Goal.ID
 	return &id
+}
+
+func intakeProcessingAuditPayload(itemID int64, status string, stage string, result string, notes intakeProcessingNotes, canonical *int64) runtimeevents.IntakeProcessingPayload {
+	payload := runtimeevents.IntakeProcessingPayload{
+		IntakeItemID:          itemID,
+		Status:                status,
+		Stage:                 stage,
+		Result:                result,
+		RoutedOutcome:         notes.Routing.Outcome,
+		ExecutionIntent:       notes.Routing.ExecutionIntent,
+		ExecutionIntentSource: notes.Routing.ExecutionIntentSource,
+		CanonicalIntakeID:     canonical,
+		GoalID:                intakeGoalIDPtr(notes),
+		Classification: &runtimeevents.IntakeClassification{
+			Result: notes.Classification.Result,
+			Reason: notes.Classification.Reason,
+		},
+		Dedupe: &runtimeevents.IntakeDedupeReview{
+			Result:             notes.Dedupe.Result,
+			CanonicalIntakeKey: notes.Dedupe.CanonicalIntakeKey,
+		},
+		Routing: &runtimeevents.IntakeRoutingResult{
+			Outcome:               notes.Routing.Outcome,
+			ProjectKey:            notes.Routing.ProjectKey,
+			ExecutionIntent:       notes.Routing.ExecutionIntent,
+			ExecutionIntentSource: notes.Routing.ExecutionIntentSource,
+			GoalID:                intakeGoalIDPtr(notes),
+		},
+	}
+	if notes.DraftArtifact != nil {
+		payload.DraftArtifactKind = notes.DraftArtifact.Kind
+		payload.DraftArtifact = &runtimeevents.IntakeDraftArtifact{
+			Kind:                  notes.DraftArtifact.Kind,
+			Title:                 notes.DraftArtifact.Title,
+			ReviewState:           notes.DraftArtifact.ReviewState,
+			ExecutionIntent:       notes.DraftArtifact.ExecutionIntent,
+			ExecutionIntentSource: notes.DraftArtifact.ExecutionIntentSource,
+		}
+	}
+	if notes.Clarification != nil {
+		payload.ClarificationState = notes.Clarification.State
+		payload.Clarification = &runtimeevents.IntakeClarification{
+			State:   notes.Clarification.State,
+			Prompts: notes.Clarification.Prompts,
+		}
+	}
+	return payload
 }
 
 func rawIntakeSourceFactsJSON(command commands.IntakeCommand, payloadJSON string) (string, error) {

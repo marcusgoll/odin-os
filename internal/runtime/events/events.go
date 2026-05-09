@@ -636,17 +636,53 @@ type IntakeItemCreatedPayload struct {
 }
 
 type IntakeProcessingPayload struct {
-	IntakeItemID          int64  `json:"intake_item_id"`
-	Status                string `json:"status,omitempty"`
-	Stage                 string `json:"stage"`
-	Result                string `json:"result,omitempty"`
-	RoutedOutcome         string `json:"routed_outcome,omitempty"`
+	IntakeItemID          int64                 `json:"intake_item_id"`
+	Status                string                `json:"status,omitempty"`
+	Stage                 string                `json:"stage"`
+	Result                string                `json:"result,omitempty"`
+	RoutedOutcome         string                `json:"routed_outcome,omitempty"`
+	ExecutionIntent       string                `json:"execution_intent,omitempty"`
+	ExecutionIntentSource string                `json:"execution_intent_source,omitempty"`
+	CanonicalIntakeID     *int64                `json:"canonical_intake_id,omitempty"`
+	GoalID                *int64                `json:"goal_id,omitempty"`
+	DraftArtifactKind     string                `json:"draft_artifact_kind,omitempty"`
+	ClarificationState    string                `json:"clarification_state,omitempty"`
+	Classification        *IntakeClassification `json:"classification,omitempty"`
+	Dedupe                *IntakeDedupeReview   `json:"dedupe,omitempty"`
+	Routing               *IntakeRoutingResult  `json:"routing,omitempty"`
+	DraftArtifact         *IntakeDraftArtifact  `json:"draft_artifact,omitempty"`
+	Clarification         *IntakeClarification  `json:"clarification,omitempty"`
+}
+
+type IntakeClassification struct {
+	Result string `json:"result"`
+	Reason string `json:"reason"`
+}
+
+type IntakeDedupeReview struct {
+	Result             string `json:"result"`
+	CanonicalIntakeKey string `json:"canonical_intake_key,omitempty"`
+}
+
+type IntakeRoutingResult struct {
+	Outcome               string `json:"outcome"`
+	ProjectKey            string `json:"project_key,omitempty"`
 	ExecutionIntent       string `json:"execution_intent,omitempty"`
 	ExecutionIntentSource string `json:"execution_intent_source,omitempty"`
-	CanonicalIntakeID     *int64 `json:"canonical_intake_id,omitempty"`
 	GoalID                *int64 `json:"goal_id,omitempty"`
-	DraftArtifactKind     string `json:"draft_artifact_kind,omitempty"`
-	ClarificationState    string `json:"clarification_state,omitempty"`
+}
+
+type IntakeDraftArtifact struct {
+	Kind                  string `json:"kind"`
+	Title                 string `json:"title"`
+	ReviewState           string `json:"review_state"`
+	ExecutionIntent       string `json:"execution_intent,omitempty"`
+	ExecutionIntentSource string `json:"execution_intent_source,omitempty"`
+}
+
+type IntakeClarification struct {
+	State   string   `json:"state"`
+	Prompts []string `json:"prompts,omitempty"`
 }
 
 type IntakeReviewDecisionPayload struct {
