@@ -682,54 +682,84 @@ type AutomationTriggerCreatedPayload struct {
 	Status        string `json:"status"`
 }
 
+type AutomationTriggerEnvelope struct {
+	Source           string                             `json:"source"`
+	TriggerType      string                             `json:"trigger_type"`
+	DedupeKey        string                             `json:"dedupe_key"`
+	OccurredAt       string                             `json:"occurred_at"`
+	DueAt            string                             `json:"due_at,omitempty"`
+	SourceOccurredAt string                             `json:"source_occurred_at,omitempty"`
+	RecoveryState    string                             `json:"recovery_state"`
+	Schedule         *AutomationTriggerScheduleEnvelope `json:"schedule,omitempty"`
+	Risk             *AutomationTriggerRiskEnvelope     `json:"risk,omitempty"`
+}
+
+type AutomationTriggerScheduleEnvelope struct {
+	Summary       string `json:"summary,omitempty"`
+	Cadence       string `json:"cadence,omitempty"`
+	Cron          string `json:"cron,omitempty"`
+	QuietHours    string `json:"quiet_hours,omitempty"`
+	QuietTimezone string `json:"quiet_timezone,omitempty"`
+}
+
+type AutomationTriggerRiskEnvelope struct {
+	ExecutionIntent  string `json:"execution_intent,omitempty"`
+	ApprovalRequired bool   `json:"approval_required"`
+}
+
 type AutomationTriggerFireRequestedPayload struct {
-	WorkspaceID        string `json:"workspace_id"`
-	Key                string `json:"key"`
-	Source             string `json:"source,omitempty"`
-	MaterializationKey string `json:"materialization_key"`
-	Reason             string `json:"reason,omitempty"`
-	RequestedBy        string `json:"requested_by,omitempty"`
-	SourceEventID      *int64 `json:"source_event_id,omitempty"`
-	SourceEventType    string `json:"source_event_type,omitempty"`
+	WorkspaceID        string                     `json:"workspace_id"`
+	Key                string                     `json:"key"`
+	Source             string                     `json:"source,omitempty"`
+	MaterializationKey string                     `json:"materialization_key"`
+	Reason             string                     `json:"reason,omitempty"`
+	RequestedBy        string                     `json:"requested_by,omitempty"`
+	SourceEventID      *int64                     `json:"source_event_id,omitempty"`
+	SourceEventType    string                     `json:"source_event_type,omitempty"`
+	Envelope           *AutomationTriggerEnvelope `json:"envelope,omitempty"`
 }
 
 type AutomationTriggerEvaluatedPayload struct {
-	WorkspaceID        string `json:"workspace_id"`
-	Key                string `json:"key"`
-	Source             string `json:"source,omitempty"`
-	MaterializationKey string `json:"materialization_key"`
-	Status             string `json:"status"`
-	CreatedWorkItem    bool   `json:"created_work_item"`
-	SourceEventID      *int64 `json:"source_event_id,omitempty"`
-	SourceEventType    string `json:"source_event_type,omitempty"`
+	WorkspaceID        string                     `json:"workspace_id"`
+	Key                string                     `json:"key"`
+	Source             string                     `json:"source,omitempty"`
+	MaterializationKey string                     `json:"materialization_key"`
+	Status             string                     `json:"status"`
+	CreatedWorkItem    bool                       `json:"created_work_item"`
+	SourceEventID      *int64                     `json:"source_event_id,omitempty"`
+	SourceEventType    string                     `json:"source_event_type,omitempty"`
+	Envelope           *AutomationTriggerEnvelope `json:"envelope,omitempty"`
 }
 
 type AutomationTriggerMaterializedPayload struct {
-	WorkspaceID        string `json:"workspace_id"`
-	Key                string `json:"key"`
-	Source             string `json:"source,omitempty"`
-	MaterializationKey string `json:"materialization_key"`
-	TaskID             int64  `json:"task_id"`
-	TaskKey            string `json:"task_key"`
-	RequestedBy        string `json:"requested_by,omitempty"`
-	SourceEventID      *int64 `json:"source_event_id,omitempty"`
-	SourceEventType    string `json:"source_event_type,omitempty"`
+	WorkspaceID        string                     `json:"workspace_id"`
+	Key                string                     `json:"key"`
+	Source             string                     `json:"source,omitempty"`
+	MaterializationKey string                     `json:"materialization_key"`
+	TaskID             int64                      `json:"task_id"`
+	TaskKey            string                     `json:"task_key"`
+	RequestedBy        string                     `json:"requested_by,omitempty"`
+	SourceEventID      *int64                     `json:"source_event_id,omitempty"`
+	SourceEventType    string                     `json:"source_event_type,omitempty"`
+	Envelope           *AutomationTriggerEnvelope `json:"envelope,omitempty"`
 }
 
 type AutomationTriggerDeferredPayload struct {
-	WorkspaceID   string `json:"workspace_id"`
-	Key           string `json:"key"`
-	Reason        string `json:"reason"`
-	DueAt         string `json:"due_at"`
-	DeferredUntil string `json:"deferred_until"`
-	Status        string `json:"status"`
+	WorkspaceID   string                     `json:"workspace_id"`
+	Key           string                     `json:"key"`
+	Reason        string                     `json:"reason"`
+	DueAt         string                     `json:"due_at"`
+	DeferredUntil string                     `json:"deferred_until"`
+	Status        string                     `json:"status"`
+	Envelope      *AutomationTriggerEnvelope `json:"envelope,omitempty"`
 }
 
 type AutomationTriggerErroredPayload struct {
-	WorkspaceID string `json:"workspace_id"`
-	Key         string `json:"key"`
-	Reason      string `json:"reason,omitempty"`
-	Error       string `json:"error"`
+	WorkspaceID string                     `json:"workspace_id"`
+	Key         string                     `json:"key"`
+	Reason      string                     `json:"reason,omitempty"`
+	Error       string                     `json:"error"`
+	Envelope    *AutomationTriggerEnvelope `json:"envelope,omitempty"`
 }
 
 type AutomationTriggerStatusChangedPayload struct {

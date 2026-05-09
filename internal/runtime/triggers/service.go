@@ -498,6 +498,7 @@ func (service Service) fireDueSchedule(ctx context.Context, item dueScheduleFire
 		RequestedBy:       requestedBy,
 		SetNextEligibleAt: true,
 		NextEligibleAt:    item.NextEligibleAt,
+		DueAt:             &item.DueAt,
 		ReuseTaskID:       reuseTaskID,
 	})
 	if err != nil {
@@ -598,13 +599,14 @@ func (service Service) EvaluateEvents(ctx context.Context) (DueEvaluationResult,
 			result.Evaluated++
 			eventID := record.ID
 			fire, err := service.Store.FireAutomationTrigger(ctx, sqlite.FireAutomationTriggerParams{
-				WorkspaceID:     trigger.WorkspaceID,
-				Key:             trigger.Key,
-				Source:          "event",
-				Reason:          eventTriggerReason(record),
-				RequestedBy:     "automation_trigger_event_evaluator",
-				SourceEventID:   &eventID,
-				SourceEventType: string(record.Type),
+				WorkspaceID:      trigger.WorkspaceID,
+				Key:              trigger.Key,
+				Source:           "event",
+				Reason:           eventTriggerReason(record),
+				RequestedBy:      "automation_trigger_event_evaluator",
+				SourceOccurredAt: &record.OccurredAt,
+				SourceEventID:    &eventID,
+				SourceEventType:  string(record.Type),
 			})
 			if err != nil {
 				return result, err

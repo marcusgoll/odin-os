@@ -436,6 +436,8 @@ type FireAutomationTriggerParams struct {
 	RequestedBy       string
 	SetNextEligibleAt bool
 	NextEligibleAt    *time.Time
+	DueAt             *time.Time
+	SourceOccurredAt  *time.Time
 	SourceEventID     *int64
 	SourceEventType   string
 	ReuseTaskID       *int64
