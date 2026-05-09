@@ -38,7 +38,7 @@ No skill, agent, prompt, shim, or script should be removed until a separate clea
 | `internal/agents/roles.go` | Deprecated duplicate role authority | Registry role docs, worker directories, executor `TaskKind` | Reconcile in role-vocabulary ticket before removing. |
 | `src/agents/index.ts` | Deprecated scaffold | Go registry and Go runtime | Remove with TypeScript scaffold cleanup after approval. |
 | `src/runner/*` | Deprecated scaffold | `internal/runner/codexexec`, then `internal/executors` | Do not wire TS runner into Odin runtime. |
-| `src/prompts/index.ts` | Deprecated scaffold | `registry/skills/*` and future Go prompt renderer | Preserve any unique wording before cleanup. |
+| `src/prompts/index.ts` | Removed scaffold | `registry/skills/*` and future Go prompt renderer | Absent from the current tree; prior inventory preserved its only useful summary as a joined role/work-item/boundary prompt. |
 
 ## Migration Notes By Target Skill
 

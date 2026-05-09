@@ -67,7 +67,7 @@ Do not collapse these into a single "agent" bucket. When in doubt, keep the asse
 | --- | --- | --- | --- |
 | Builder prompts | `prompts/workers/agency-builder.md` | `prompts/templates/agency-builder.md` | Keep both until prompt layout is decided; prefer worker prompt content because it includes worktree/branch boundaries. |
 | Role vocabulary | `registry/agents/triage-agent.md`, `internal/workers/*`, executor `TaskKind` | `internal/agents/roles.go` | Reconcile before adding worker implementations. |
-| TypeScript scaffold roles | Go registry and Go runtime | `src/agents/index.ts`, `src/runner/*`, `src/prompts/*` | Remove or archive after cleanup approval; do not wire into Odin runtime. |
+| TypeScript scaffold roles | Go registry and Go runtime | Historical `src/agents/index.ts`, `src/runner/*`, `src/prompts/*` | Keep absent from the current tree; do not recreate or wire a TypeScript runtime. |
 | Migration skill drafts | New active Odin registry skills | `state/migration/drafts/skills/*.md` | Review-only provenance. Promote by rewriting, not copying wholesale. |
 | App-server runner | `internal/runner/codexexec` compatibility facade and `internal/executors` target | `internal/runner/appserver` | Keep experimental and unimplemented until Codex exec is proven. |
 

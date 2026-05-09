@@ -25,7 +25,7 @@ date: 2026-04-30
 | Executor seam | `internal/executors/contract`, `internal/executors/router` | Strong existing seam. | All runner adapters implement this interface. | Preserve. |
 | Codex exec runner | `internal/executors/codex`, `internal/runner/codexexec` | Deterministic alpha adapter plus placeholder duplicate. | Real `codex exec` adapter with security checks. | Refactor under `internal/executors`. |
 | Future app-server runner | `internal/runner/appserver` | Placeholder duplicate. | Optional phase-two adapter behind executor seam. | Defer/replace later. |
-| Prompt renderer | `prompts/`, `internal/prompts/renderer.go`, `src/prompts` | Draft prompts and placeholder renderer. | Go renderer loads validated prompt templates. | Refactor after prompt contract. |
+| Prompt renderer | `prompts/`, `internal/prompts/renderer.go`; removed `src/prompts` preserved only in inventory notes | Draft prompts and Go renderer exist; the TypeScript prompt scaffold is absent. | Go renderer loads validated prompt templates. | Refactor after prompt contract; do not recreate TypeScript prompt scaffolds. |
 | Agent registry | `registry/agents`, `internal/registry` | Active triage agent only. | Agents for intake, builder, QA, reviewer, security. | Preserve and extend. |
 | Skill registry | `registry/skills`, `state/migration/drafts/skills` | Active triage skill; migration drafts review-only. | Small Odin-native active skill set. | Preserve active, review drafts selectively. |
 | Registry validation | `internal/registry/parser`, `validator`, `compiler` | Present and tested. | Same loader validates new agent/skill/workflow assets. | Preserve. |
