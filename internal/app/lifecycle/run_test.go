@@ -137,6 +137,21 @@ func TestRunWithoutArgsPrintsUsageInsteadOfStartingShell(t *testing.T) {
 	}
 }
 
+func TestRunLeasesCleanupDryRunUsesCanonicalCommandPath(t *testing.T) {
+	t.Parallel()
+
+	root := testRepoRoot(t)
+	var stdout bytes.Buffer
+
+	err := Run(context.Background(), root, []string{"leases", "cleanup", "--dry-run"}, strings.NewReader(""), &stdout)
+	if err != nil {
+		t.Fatalf("Run(leases cleanup --dry-run) error = %v", err)
+	}
+	if !strings.Contains(stdout.String(), "no worktree leases") {
+		t.Fatalf("stdout = %q, want no worktree leases", stdout.String())
+	}
+}
+
 func TestRunStatusJSON(t *testing.T) {
 	t.Parallel()
 
