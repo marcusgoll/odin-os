@@ -1914,6 +1914,88 @@ func TestDispatchTaskRunAttemptCreatesLeaseForMutatingTask(t *testing.T) {
 	}
 }
 
+func TestDispatchTaskRunAttemptFinalizesLeaseHardFailure(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openJobStore(t)
+	defer store.Close()
+
+	registry := writeRegistry(t)
+	leaseErr := errors.New("git branch creation failed")
+	service := Service{
+		Store:          store,
+		Registry:       registry,
+		Executors:      testJobExecutors(),
+		ExecutorConfig: mustLoadExecutorConfig(t),
+		Transitions:    projects.Service{Store: store},
+		Leases: leases.Manager{
+			Store:        store,
+			Git:          failingJobGit{createBranchErr: leaseErr},
+			WorktreeRoot: t.TempDir(),
+		},
+		Now: time.Now,
+	}
+
+	task, err := service.CreateTask(ctx, CreateTaskParams{
+		Resolved: scope.Resolution{
+			Kind:       scope.ScopeProject,
+			ProjectKey: "alpha",
+		},
+		Title:                 "Implement reviewed prompt",
+		RequestedBy:           "test",
+		ExecutionIntent:       "mutation",
+		ExecutionIntentSource: "test",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+	project, err := store.GetProjectByKey(ctx, "alpha")
+	if err != nil {
+		t.Fatalf("GetProjectByKey(alpha) error = %v", err)
+	}
+	if _, err := service.Transitions.SetTransitionState(ctx, projects.TransitionStateInput{
+		ProjectID:   project.ID,
+		Actor:       projects.TransitionControllerOdinOS,
+		TargetState: projects.TransitionStateCutover,
+		ChangedBy:   "test",
+	}); err != nil {
+		t.Fatalf("SetTransitionState(cutover) error = %v", err)
+	}
+	recordHealthyExecutorSample(t, ctx, store)
+
+	outcome, err := service.DispatchTaskRunAttempt(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("DispatchTaskRunAttempt() error = %v", err)
+	}
+	if outcome.Dispatched {
+		t.Fatalf("DispatchTaskRunAttempt().Dispatched = true, want failed dispatch")
+	}
+	if !strings.Contains(outcome.Reason, "lease_preparation_failed") || !strings.Contains(outcome.Reason, leaseErr.Error()) {
+		t.Fatalf("DispatchTaskRunAttempt().Reason = %q, want lease preparation failure", outcome.Reason)
+	}
+	if outcome.Task.Status != "failed" || outcome.Task.CurrentRunID != nil {
+		t.Fatalf("outcome task = %+v, want terminal failed task without current run", outcome.Task)
+	}
+	if outcome.Run == nil || outcome.Run.Status != "failed" {
+		t.Fatalf("outcome run = %+v, want failed run", outcome.Run)
+	}
+
+	loadedTask, err := store.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
+	}
+	if loadedTask.Status != "failed" || loadedTask.CurrentRunID != nil {
+		t.Fatalf("loaded task = %+v, want failed without current run", loadedTask)
+	}
+	if outcome.Run.Summary == "" || !strings.Contains(outcome.Run.Summary, leaseErr.Error()) {
+		t.Fatalf("outcome run summary = %q, want lease failure", outcome.Run.Summary)
+	}
+	if _, err := store.GetActiveWorktreeLeaseByTaskRun(ctx, task.ID, outcome.Run.ID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("GetActiveWorktreeLeaseByTaskRun() error = %v, want no active lease", err)
+	}
+}
+
 func TestExecuteDispatchedRunUsesActiveWorktreeLeaseMetadata(t *testing.T) {
 	t.Parallel()
 
@@ -2700,6 +2782,29 @@ func (jobTestGit) CreateBranch(context.Context, string, string, string) error { 
 func (jobTestGit) AddWorktree(context.Context, string, string, string) error  { return nil }
 func (jobTestGit) RemoveWorktree(context.Context, string, string) error       { return nil }
 func (jobTestGit) WorktreeDirty(context.Context, string) (bool, error)        { return false, nil }
+
+type failingJobGit struct {
+	branchExistsErr error
+	createBranchErr error
+	addWorktreeErr  error
+}
+
+func (git failingJobGit) BranchExists(context.Context, string, string) (bool, error) {
+	if git.branchExistsErr != nil {
+		return false, git.branchExistsErr
+	}
+	return false, nil
+}
+
+func (git failingJobGit) CreateBranch(context.Context, string, string, string) error {
+	return git.createBranchErr
+}
+
+func (git failingJobGit) AddWorktree(context.Context, string, string, string) error {
+	return git.addWorktreeErr
+}
+
+func (failingJobGit) RemoveWorktree(context.Context, string, string) error { return nil }
 
 func mustLoadExecutorConfig(t *testing.T) router.Config {
 	t.Helper()

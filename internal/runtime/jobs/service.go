@@ -810,7 +810,30 @@ func (service Service) DispatchTaskRunAttempt(ctx context.Context, taskID int64)
 
 	_, leaseAdmission, err := service.prepareLease(ctx, task, project, manifest, run, attempt)
 	if err != nil {
-		return DispatchOutcome{}, err
+		admission := admissionDecision{
+			Outcome:   admissionFailed,
+			LastError: fmt.Sprintf("lease_preparation_failed: %v", err),
+		}
+		finalizeErr := service.finalizeOutcome(ctx, task, run, admission, contract.ExecutionResult{}, nil)
+		outcome, loadErr := service.loadExecutionOutcome(ctx, task.ID, &run.ID)
+		if finalizeErr != nil {
+			if loadErr == nil {
+				return DispatchOutcome{
+					Task:   outcome.Task,
+					Run:    outcome.Run,
+					Reason: admissionReason(admission),
+				}, finalizeErr
+			}
+			return DispatchOutcome{}, finalizeErr
+		}
+		if loadErr != nil {
+			return DispatchOutcome{}, loadErr
+		}
+		return DispatchOutcome{
+			Task:   outcome.Task,
+			Run:    outcome.Run,
+			Reason: admissionReason(admission),
+		}, nil
 	}
 	if leaseAdmission.Outcome != admissionDispatchable {
 		finalizeErr := service.finalizeOutcome(ctx, task, run, leaseAdmission, contract.ExecutionResult{}, nil)
@@ -856,7 +879,7 @@ func admissionReason(admission admissionDecision) string {
 	if admission.BlockedReason != "" {
 		reason = admission.BlockedReason
 	}
-	if reason == "" && admission.LastError != "" {
+	if (reason == "" || reason == string(admissionFailed)) && admission.LastError != "" {
 		reason = admission.LastError
 	}
 	return reason
