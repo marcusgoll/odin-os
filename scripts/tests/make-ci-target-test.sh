@@ -25,6 +25,7 @@ grep -Fqx 'bash scripts/tests/install-service-test.sh' <<<"$output" || fail "mis
 grep -Fqx 'bash scripts/tests/assert-odin-e2e-contract-test.sh' <<<"$output" || fail "missing odin e2e contract test"
 grep -Fqx 'bash scripts/tests/odin-e2e-workflow-test.sh' <<<"$output" || fail "missing odin e2e workflow test"
 grep -Fqx 'bash scripts/tests/github-actions-permissions-test.sh' <<<"$output" || fail "missing GitHub Actions permissions test"
+grep -Fqx 'bash scripts/tests/google-driver-security-test.sh' <<<"$output" || fail "missing Google driver security test"
 grep -Fqx 'go test ./tests/integration -run TestAlphaAcceptance -count=1 -v' <<<"$output" || fail "missing alpha acceptance command"
 grep -Fqx 'mkdir -p bin' <<<"$output" || fail "missing build mkdir"
 grep -Fqx 'go build -o bin/odin ./cmd/odin' <<<"$output" || fail "missing build command"
