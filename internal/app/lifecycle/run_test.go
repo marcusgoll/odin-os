@@ -23,6 +23,7 @@ import (
 	"odin-os/internal/core/initiatives"
 	"odin-os/internal/prompts"
 	"odin-os/internal/runtime/checkpoints"
+	"odin-os/internal/runtime/jobs"
 	runtimestate "odin-os/internal/runtime/state"
 	"odin-os/internal/runtime/supervision"
 	"odin-os/internal/store/sqlite"
@@ -93,6 +94,68 @@ func TestServeDashboardAdminKillSwitchUpdatesReadinessAndRuntimeState(t *testing
 	}
 	if _, active, err := readReadinessFlag(runtimeRoot); err != nil || active {
 		t.Fatalf("readiness flag after off active=%v err=%v, want inactive", active, err)
+	}
+}
+
+func TestServeDashboardAdminPauseAndResumeIssueMutatesRuntimeTask(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store, err := sqlite.Open(filepath.Join(t.TempDir(), "odin.db"))
+	if err != nil {
+		t.Fatalf("sqlite.Open() error = %v", err)
+	}
+	defer store.Close()
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
+	}
+
+	project, err := store.CreateProject(ctx, sqlite.CreateProjectParams{
+		Key:           "alpha",
+		Name:          "Alpha",
+		Scope:         "project",
+		GitRoot:       filepath.Join(t.TempDir(), "alpha"),
+		DefaultBranch: "main",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+	task, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "pause-me",
+		Title:       "Pause me",
+		Status:      "queued",
+		Scope:       "project",
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+
+	admin := serveDashboardAdmin{
+		Jobs: jobs.Service{Store: store},
+	}
+	if err := admin.PauseIssue(ctx, task.ID); err != nil {
+		t.Fatalf("PauseIssue() error = %v", err)
+	}
+	paused, err := store.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("GetTask(paused) error = %v", err)
+	}
+	if paused.Status != "blocked" || paused.BlockedReason != "operator_paused" {
+		t.Fatalf("paused task status=%q blocked_reason=%q, want blocked/operator_paused", paused.Status, paused.BlockedReason)
+	}
+
+	if err := admin.ResumeIssue(ctx, task.ID); err != nil {
+		t.Fatalf("ResumeIssue() error = %v", err)
+	}
+	resumed, err := store.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("GetTask(resumed) error = %v", err)
+	}
+	if resumed.Status != "queued" || resumed.BlockedReason != "" {
+		t.Fatalf("resumed task status=%q blocked_reason=%q, want queued with no blocked reason", resumed.Status, resumed.BlockedReason)
 	}
 }
 

@@ -20,8 +20,8 @@ This contract covers:
   label
 - the already-existing Follow-Up Obligation `paused` lifecycle state
 
-It does not implement dashboard pause/resume routes. That remains a separate
-runtime implementation slice.
+Dashboard pause/resume routes are implemented as HTTP adapters over Work Item
+runtime state. The routes do not own lifecycle truth.
 
 ## Ownership
 
@@ -68,6 +68,10 @@ reason or persist a future pause request that takes effect after the run returns
 to a dispatchable state. It must not pretend the live run was paused unless a
 separate run-interruption contract exists.
 
+The initial dashboard implementation rejects running Work Item pause requests
+with an explicit unsupported-action response. It pauses queued Work Items by
+writing `status = blocked` and `blocked_reason = operator_paused` in SQLite.
+
 ## Work Item Resume
 
 Resume reverses only the operator pause hold.
@@ -84,6 +88,10 @@ Resume must:
 - clear `blocked_reason`
 - leave approval, recovery, incident, and run evidence history intact
 - let normal queue eligibility rules determine dispatch timing
+
+The initial dashboard implementation resumes only Work Items currently blocked
+with `blocked_reason = operator_paused`. It returns the Work Item to `queued`
+and preserves its existing queue eligibility timestamp.
 
 Generic resume must not unblock:
 
@@ -135,9 +143,9 @@ If an inbound GitHub issue event includes `odin:paused`, Odin may record that
 label as external evidence, but any runtime pause still requires an Odin-owned
 pause command or approved runtime mutation.
 
-## Future Implementation Tests
+## Implementation Tests
 
-The dashboard pause/resume implementation should add tests for:
+The dashboard pause/resume implementation covers:
 
 - successful pause of a queued Work Item persists `status=blocked` and
   `blocked_reason=operator_paused`
@@ -152,9 +160,9 @@ The dashboard pause/resume implementation should add tests for:
   denial, stale context, policy, or transition gates
 - pause/resume does not call GitHub unless a later approved tracker-mutation
   ticket explicitly adds outbound label projection
-- inbound GitHub `odin:paused` labels are stored as source facts only and do not
-  change Work Item or Follow-Up Obligation state
-- paused Follow-Up Obligations do not materialize new Work Items while paused
+
+Follow-Up Obligation pause/resume behavior remains separate from dashboard Work
+Item pause/resume tests.
 
 ## Operating Rules
 

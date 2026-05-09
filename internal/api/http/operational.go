@@ -81,6 +81,8 @@ type WorkspaceTmuxStatusProvider struct {
 }
 
 var ErrAdminActionNotImplemented = errors.New("admin action not implemented")
+var ErrAdminTargetNotFound = errors.New("admin target not found")
+var ErrAdminActionConflict = errors.New("admin action conflict")
 
 func (provider WorkspaceTmuxStatusProvider) Status(ctx context.Context) (TmuxStatus, error) {
 	if provider.Workspaces == nil {
@@ -249,8 +251,8 @@ func NewOperationalHandler(deps Dependencies) http.Handler {
 	})
 	mux.HandleFunc("POST /issues/{issue_id}/pause", func(writer http.ResponseWriter, request *http.Request) {
 		issueID, err := strconv.ParseInt(request.PathValue("issue_id"), 10, 64)
-		if err != nil {
-			writeAPIError(writer, http.StatusBadRequest, "invalid_issue_id", "issue id must be an integer")
+		if err != nil || issueID <= 0 {
+			writeAPIError(writer, http.StatusBadRequest, "invalid_issue_id", "issue id must be a positive integer")
 			return
 		}
 		handleAdminAction(writer, request, deps, "pause_issue", func(ctx context.Context, admin AdminActions) error {
@@ -259,8 +261,8 @@ func NewOperationalHandler(deps Dependencies) http.Handler {
 	})
 	mux.HandleFunc("POST /issues/{issue_id}/resume", func(writer http.ResponseWriter, request *http.Request) {
 		issueID, err := strconv.ParseInt(request.PathValue("issue_id"), 10, 64)
-		if err != nil {
-			writeAPIError(writer, http.StatusBadRequest, "invalid_issue_id", "issue id must be an integer")
+		if err != nil || issueID <= 0 {
+			writeAPIError(writer, http.StatusBadRequest, "invalid_issue_id", "issue id must be a positive integer")
 			return
 		}
 		handleAdminAction(writer, request, deps, "resume_issue", func(ctx context.Context, admin AdminActions) error {
@@ -1146,6 +1148,14 @@ func handleAdminAction(writer http.ResponseWriter, request *http.Request, deps D
 	if err := call(request.Context(), deps.Admin); err != nil {
 		if errors.Is(err, ErrAdminActionNotImplemented) {
 			writeAPIError(writer, http.StatusNotImplemented, "admin_action_not_implemented", err.Error())
+			return
+		}
+		if errors.Is(err, ErrAdminTargetNotFound) {
+			writeAPIError(writer, http.StatusNotFound, "admin_target_not_found", err.Error())
+			return
+		}
+		if errors.Is(err, ErrAdminActionConflict) {
+			writeAPIError(writer, http.StatusConflict, "admin_action_conflict", err.Error())
 			return
 		}
 		writeAPIError(writer, http.StatusServiceUnavailable, "admin_action_failed", err.Error())

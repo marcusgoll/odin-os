@@ -124,6 +124,111 @@ func TestCreateTaskOnceReusesDeterministicKey(t *testing.T) {
 	}
 }
 
+func TestPauseIssueBlocksMaterializedGitHubIssueWorkItem(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openJobStore(t)
+	defer store.Close()
+
+	issue, task := seedGitHubIssueMaterializedWorkItem(t, ctx, store)
+	service := Service{Store: store}
+
+	paused, err := service.PauseIssue(ctx, issue.ID)
+	if err != nil {
+		t.Fatalf("PauseIssue() error = %v", err)
+	}
+	if paused.Status != "blocked" || paused.BlockedReason != "operator_paused" {
+		t.Fatalf("PauseIssue() task status=%q blocked_reason=%q, want blocked/operator_paused", paused.Status, paused.BlockedReason)
+	}
+
+	reloaded, err := store.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
+	}
+	if reloaded.Status != "blocked" || reloaded.BlockedReason != "operator_paused" {
+		t.Fatalf("persisted task status=%q blocked_reason=%q, want blocked/operator_paused", reloaded.Status, reloaded.BlockedReason)
+	}
+
+	eligible, err := store.ListEligibleQueuedTasks(ctx, time.Now().UTC())
+	if err != nil {
+		t.Fatalf("ListEligibleQueuedTasks() error = %v", err)
+	}
+	for _, candidate := range eligible {
+		if candidate.ID == task.ID {
+			t.Fatalf("paused task %d remained scheduler-eligible: %+v", task.ID, eligible)
+		}
+	}
+}
+
+func TestResumeIssueRequeuesOnlyOperatorPausedWorkItem(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openJobStore(t)
+	defer store.Close()
+
+	issue, task := seedGitHubIssueMaterializedWorkItem(t, ctx, store)
+	service := Service{Store: store}
+
+	if _, err := service.PauseIssue(ctx, issue.ID); err != nil {
+		t.Fatalf("PauseIssue() error = %v", err)
+	}
+	resumed, err := service.ResumeIssue(ctx, issue.ID)
+	if err != nil {
+		t.Fatalf("ResumeIssue() error = %v", err)
+	}
+	if resumed.Status != "queued" || resumed.BlockedReason != "" {
+		t.Fatalf("ResumeIssue() task status=%q blocked_reason=%q, want queued with no blocked reason", resumed.Status, resumed.BlockedReason)
+	}
+
+	eligible, err := store.ListEligibleQueuedTasks(ctx, time.Now().UTC())
+	if err != nil {
+		t.Fatalf("ListEligibleQueuedTasks() error = %v", err)
+	}
+	found := false
+	for _, candidate := range eligible {
+		if candidate.ID == task.ID {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("resumed task %d not scheduler-eligible: %+v", task.ID, eligible)
+	}
+
+	approvalBlocked, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:   task.ProjectID,
+		Key:         "approval-blocked",
+		Title:       "Approval blocked",
+		Status:      "queued",
+		Scope:       "project",
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+	approvalBlocked, err = store.BlockTask(ctx, sqlite.BlockTaskParams{TaskID: approvalBlocked.ID, Reason: "approval_required"})
+	if err != nil {
+		t.Fatalf("BlockTask() error = %v", err)
+	}
+	if _, err := service.ResumeIssue(ctx, approvalBlocked.ID); !errors.Is(err, ErrOperatorResumeUnsupported) {
+		t.Fatalf("ResumeIssue(approval blocked) error = %v, want ErrOperatorResumeUnsupported", err)
+	}
+}
+
+func TestPauseIssueRejectsUnknownIssueID(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openJobStore(t)
+	defer store.Close()
+
+	service := Service{Store: store}
+	if _, err := service.PauseIssue(ctx, 9999); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("PauseIssue(unknown) error = %v, want sql.ErrNoRows", err)
+	}
+}
+
 func TestCompanionRunCreatesOwnedTaskAndMarksOnlySupportedTriggers(t *testing.T) {
 	t.Parallel()
 
@@ -2340,6 +2445,96 @@ func openJobStore(t *testing.T) *sqlite.Store {
 		t.Fatalf("Migrate() error = %v", err)
 	}
 	return store
+}
+
+func seedGitHubIssueMaterializedWorkItem(t *testing.T, ctx context.Context, store *sqlite.Store) (sqlite.ExternalIssue, sqlite.Task) {
+	t.Helper()
+
+	project, err := store.CreateProject(ctx, sqlite.CreateProjectParams{
+		Key:           "alpha",
+		Name:          "Alpha",
+		Scope:         "project",
+		GitRoot:       filepath.Join(t.TempDir(), "alpha"),
+		DefaultBranch: "main",
+		GitHubRepo:    "owner/alpha",
+		ManifestPath:  "registry/projects/alpha.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+	issue, err := store.UpsertExternalIssue(ctx, sqlite.UpsertExternalIssueParams{
+		ProjectID:  project.ID,
+		Provider:   "github",
+		Repo:       "owner/alpha",
+		Number:     77,
+		Title:      "Pause me",
+		BodyHash:   "sha256:test",
+		URL:        "https://github.com/owner/alpha/issues/77",
+		State:      "opened",
+		LabelsJSON: `["odin:ready"]`,
+		SyncStatus: "event_received",
+		SyncCursor: "github:issue:owner/alpha:77",
+	})
+	if err != nil {
+		t.Fatalf("UpsertExternalIssue() error = %v", err)
+	}
+	if err := store.RecordExternalGitHubIssueEvent(ctx, sqlite.RecordExternalGitHubIssueEventParams{
+		ProjectID:        project.ID,
+		ProjectKey:       project.Key,
+		ExternalIssueID:  issue.ID,
+		Provider:         issue.Provider,
+		Repo:             issue.Repo,
+		Number:           issue.Number,
+		Action:           "opened",
+		Title:            issue.Title,
+		BodyHash:         issue.BodyHash,
+		URL:              issue.URL,
+		LabelsJSON:       issue.LabelsJSON,
+		ExternalEventKey: "github:issue:owner/alpha:77:opened",
+	}); err != nil {
+		t.Fatalf("RecordExternalGitHubIssueEvent() error = %v", err)
+	}
+	events, err := store.ListEvents(ctx, sqlite.ListEventsParams{})
+	if err != nil {
+		t.Fatalf("ListEvents() error = %v", err)
+	}
+	var sourceEventID int64
+	for _, record := range events {
+		if record.Type == runtimeevents.EventExternalGitHubIssue && record.StreamID == issue.ID {
+			sourceEventID = record.ID
+		}
+	}
+	if sourceEventID == 0 {
+		t.Fatal("external GitHub issue event was not recorded")
+	}
+	trigger, err := store.UpsertAutomationTrigger(ctx, sqlite.UpsertAutomationTriggerParams{
+		WorkspaceID:   "default",
+		Key:           "github-ready",
+		ProjectID:     project.ID,
+		InitiativeKey: project.Key,
+		Kind:          "event",
+		Status:        "enabled",
+		RuleJSON:      `{"event_type":"external.github.issue","match_provider":"github","match_repo":"owner/alpha"}`,
+		RuleSummary:   "GitHub ready issue",
+		WorkItemTitle: "Review GitHub issue",
+	})
+	if err != nil {
+		t.Fatalf("UpsertAutomationTrigger() error = %v", err)
+	}
+	result, err := store.FireAutomationTrigger(ctx, sqlite.FireAutomationTriggerParams{
+		WorkspaceID:      trigger.WorkspaceID,
+		Key:              trigger.Key,
+		Source:           "event",
+		Reason:           "external-github-issue-owner-alpha-77-opened",
+		RequestedBy:      "automation_trigger_event_evaluator",
+		SourceEventID:    &sourceEventID,
+		SourceEventType:  string(runtimeevents.EventExternalGitHubIssue),
+		SourceOccurredAt: &issue.LastSyncedAt,
+	})
+	if err != nil {
+		t.Fatalf("FireAutomationTrigger() error = %v", err)
+	}
+	return issue, result.WorkItem
 }
 
 func writeRegistry(t *testing.T) projects.Registry {
