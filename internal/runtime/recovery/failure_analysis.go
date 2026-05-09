@@ -31,6 +31,26 @@ const (
 	FailureUnknown                      FailureCategory = "unknown"
 )
 
+type FailureCode string
+
+const (
+	FailureCodeTestFailure               FailureCode = "test_failure"
+	FailureCodeDependencyIssue           FailureCode = "dependency_issue"
+	FailureCodePermissionIssue           FailureCode = "permission_issue"
+	FailureCodeExecutorTimeout           FailureCode = "executor_timeout"
+	FailureCodeBadPrompt                 FailureCode = "bad_prompt"
+	FailureCodeSecurityBlocker           FailureCode = "security_blocker"
+	FailureCodeWorkspaceFailure          FailureCode = "workspace_failure"
+	FailureCodeWorkspaceLeaseConflict    FailureCode = "workspace_lease_conflict"
+	FailureCodeWorkspacePolicyDenied     FailureCode = "workspace_policy_denied"
+	FailureCodeGitHubAPIFailure          FailureCode = "github_api_failure"
+	FailureCodeDashboardAdminFailure     FailureCode = "dashboard_admin_failure"
+	FailureCodeDeploymentFailure         FailureCode = "deployment_failure"
+	FailureCodePolicyDenied              FailureCode = "policy_denied"
+	FailureCodeExecutorUnavailable       FailureCode = "executor_unavailable"
+	FailureCodeMissingAcceptanceCriteria FailureCode = "missing_acceptance_criteria"
+)
+
 type NextStepTarget string
 
 const (
@@ -45,6 +65,7 @@ const (
 )
 
 type FailureInput struct {
+	Code                        FailureCode
 	Step                        string
 	TicketTitle                 string
 	AcceptanceCriteria          []string
@@ -110,6 +131,7 @@ func MarshalFailureAnalysisArtifact(analysis FailureAnalysis) (string, error) {
 }
 
 func normalizeFailureInput(input FailureInput) FailureInput {
+	input.Code = FailureCode(strings.TrimSpace(string(input.Code)))
 	input.Step = strings.TrimSpace(input.Step)
 	input.TicketTitle = strings.TrimSpace(input.TicketTitle)
 	input.ErrorText = strings.TrimSpace(input.ErrorText)
@@ -125,6 +147,10 @@ func normalizeFailureInput(input FailureInput) FailureInput {
 }
 
 func classifyFailure(input FailureInput) FailureCategory {
+	if category, ok := categoryForFailureCode(input.Code); ok {
+		return category
+	}
+
 	text := strings.ToLower(strings.Join([]string{input.Step, input.TicketTitle, input.Summary, input.ErrorText}, "\n"))
 
 	if input.TicketTitle == "" || containsAny(text, "unclear ticket", "ambiguous ticket", "needs clarification", "unclear task") {
@@ -188,6 +214,35 @@ func classifyFailure(input FailureInput) FailureCategory {
 		return FailureTestFailure
 	}
 	return FailureUnknown
+}
+
+func categoryForFailureCode(code FailureCode) (FailureCategory, bool) {
+	switch code {
+	case FailureCodeTestFailure:
+		return FailureTestFailure, true
+	case FailureCodeDependencyIssue, FailureCodeExecutorUnavailable:
+		return FailureDependencyIssue, true
+	case FailureCodePermissionIssue, FailureCodePolicyDenied:
+		return FailurePermissionIssue, true
+	case FailureCodeExecutorTimeout:
+		return FailureCodexTimeout, true
+	case FailureCodeBadPrompt:
+		return FailureBadPrompt, true
+	case FailureCodeSecurityBlocker:
+		return FailureSecurityBlocker, true
+	case FailureCodeWorkspaceFailure, FailureCodeWorkspaceLeaseConflict, FailureCodeWorkspacePolicyDenied:
+		return FailureWorkspaceFailure, true
+	case FailureCodeGitHubAPIFailure:
+		return FailureGitHubAPIFailure, true
+	case FailureCodeDashboardAdminFailure:
+		return FailureDashboardAdminFailure, true
+	case FailureCodeDeploymentFailure:
+		return FailureDeploymentFailure, true
+	case FailureCodeMissingAcceptanceCriteria:
+		return FailureMissingAcceptanceCriteria, true
+	default:
+		return "", false
+	}
 }
 
 func nextStepTargetFor(category FailureCategory) NextStepTarget {

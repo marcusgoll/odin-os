@@ -387,6 +387,100 @@ func TestExecuteNextQueuedRecordsWorkerPanicAsFailedRun(t *testing.T) {
 	}
 }
 
+func TestExecuteNextQueuedUsesTypedFailureCodeFromExecutorResult(t *testing.T) {
+	t.Parallel()
+
+	cases := map[string]contract.ExecutionResult{
+		"field": {
+			Status:      "failed",
+			Output:      "ambiguous executor failure",
+			FailureCode: string(recovery.FailureCodeTestFailure),
+		},
+		"metadata": {
+			Status: "failed",
+			Output: "ambiguous executor failure",
+			Metadata: map[string]string{
+				"failure_code": string(recovery.FailureCodeTestFailure),
+			},
+		},
+	}
+
+	for name, result := range cases {
+		name := name
+		result := result
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			ctx := context.Background()
+			store := openJobStore(t)
+			defer store.Close()
+
+			registry := writeRegistry(t)
+			service := Service{
+				Store:    store,
+				Registry: registry,
+				Executors: map[string]contract.Executor{
+					"codex_headless": jobTestExecutor{
+						key:    "codex_headless",
+						result: result,
+					},
+				},
+				ExecutorConfig: mustLoadExecutorConfig(t),
+				Transitions:    projects.Service{Store: store},
+				Leases: leases.Manager{
+					Store:        store,
+					Git:          &jobTestGit{},
+					WorktreeRoot: t.TempDir(),
+				},
+				Now: time.Now,
+			}
+
+			task, err := service.CreateTaskFromAct(ctx, scope.Resolution{
+				Kind:       scope.ScopeProject,
+				ProjectKey: "alpha",
+			}, "Typed executor failure")
+			if err != nil {
+				t.Fatalf("CreateTaskFromAct() error = %v", err)
+			}
+
+			project, err := store.GetProjectByKey(ctx, "alpha")
+			if err != nil {
+				t.Fatalf("GetProjectByKey(alpha) error = %v", err)
+			}
+			if _, err := service.Transitions.SetTransitionState(ctx, projects.TransitionStateInput{
+				ProjectID:   project.ID,
+				Actor:       projects.TransitionControllerOdinOS,
+				TargetState: projects.TransitionStateCutover,
+				ChangedBy:   "test",
+			}); err != nil {
+				t.Fatalf("SetTransitionState(cutover) error = %v", err)
+			}
+			recordHealthyExecutorSample(t, ctx, store)
+
+			if err := service.ExecuteNextQueued(ctx); err != nil {
+				t.Fatalf("ExecuteNextQueued() error = %v", err)
+			}
+
+			run, err := latestRunForTask(ctx, store, task.ID)
+			if err != nil {
+				t.Fatalf("latestRunForTask() error = %v", err)
+			}
+			if run.Status != "failed" {
+				t.Fatalf("run.Status = %q, want failed", run.Status)
+			}
+			var artifact struct {
+				FailureAnalysis recovery.FailureAnalysis `json:"failure_analysis"`
+			}
+			if err := json.Unmarshal([]byte(run.ArtifactsJSON), &artifact); err != nil {
+				t.Fatalf("json.Unmarshal(run.ArtifactsJSON) error = %v\n%s", err, run.ArtifactsJSON)
+			}
+			if artifact.FailureAnalysis.Category != recovery.FailureTestFailure {
+				t.Fatalf("failure category = %q, want typed test failure", artifact.FailureAnalysis.Category)
+			}
+		})
+	}
+}
+
 func TestExecuteTaskWithRequestCompletesDirectTask(t *testing.T) {
 	t.Parallel()
 
@@ -1817,6 +1911,7 @@ func TestExecutionMetadataForResultKeepsOdinReservedFieldsAuthoritative(t *testi
 		map[string]string{
 			"driver_kind":    "fixture",
 			"external_id":    "driver-id",
+			"failure_code":   string(recovery.FailureCodeTestFailure),
 			"marker_written": "true",
 			"repo_root":      "/driver/repo",
 			"worktree_path":  "/driver/worktree",
@@ -1836,6 +1931,7 @@ func TestExecutionMetadataForResultKeepsOdinReservedFieldsAuthoritative(t *testi
 		"operator_note":  "keep",
 		"driver_kind":    "fixture",
 		"external_id":    "handle-id",
+		"failure_code":   string(recovery.FailureCodeTestFailure),
 		"marker_written": "true",
 		"executor_lane":  "sandcastle_headless",
 		"repo_root":      "/odin/repo",
