@@ -192,6 +192,14 @@ func TestRunStatusJSON(t *testing.T) {
 			Blocked int `json:"blocked"`
 			Backlog int `json:"backlog"`
 		} `json:"companion_swarm_counts"`
+		WorkerDispatch struct {
+			Mode     string `json:"mode"`
+			Enabled  bool   `json:"enabled"`
+			DryRun   bool   `json:"dry_run"`
+			ReadOnly bool   `json:"read_only"`
+			Source   string `json:"source"`
+			Reason   string `json:"reason"`
+		} `json:"worker_dispatch"`
 	}
 	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
 		t.Fatalf("status json = %v", err)
@@ -213,6 +221,12 @@ func TestRunStatusJSON(t *testing.T) {
 	}
 	if payload.CompanionSwarmCounts.Backlog < 1 {
 		t.Fatalf("CompanionSwarmCounts.Backlog = %d, want backlog", payload.CompanionSwarmCounts.Backlog)
+	}
+	if payload.WorkerDispatch.Mode != "paused" || payload.WorkerDispatch.Enabled || payload.WorkerDispatch.DryRun || payload.WorkerDispatch.ReadOnly || payload.WorkerDispatch.Source != "runtime_readiness" {
+		t.Fatalf("WorkerDispatch = %+v, want paused non-dry-run non-read-only runtime readiness status", payload.WorkerDispatch)
+	}
+	if payload.WorkerDispatch.Reason == "" {
+		t.Fatalf("WorkerDispatch.Reason is empty, want paused reason")
 	}
 
 	activeFound := false

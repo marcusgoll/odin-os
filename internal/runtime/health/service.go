@@ -43,6 +43,15 @@ type Summary struct {
 	ExecutorStatus  string
 }
 
+type WorkerDispatchStatus struct {
+	Mode     string `json:"mode"`
+	Enabled  bool   `json:"enabled"`
+	DryRun   bool   `json:"dry_run"`
+	ReadOnly bool   `json:"read_only"`
+	Source   string `json:"source"`
+	Reason   string `json:"reason,omitempty"`
+}
+
 type Config struct {
 	QueuePressureThreshold int
 	ExecutorFreshnessTTL   time.Duration
@@ -73,6 +82,31 @@ func DefaultConfig() Config {
 		ProjectionFreshnessTTL: 30 * time.Minute,
 		RuntimeHeartbeatTTL:    2 * time.Minute,
 	}
+}
+
+func NewWorkerDispatchStatus(ready bool, runtimeStatus string, healthStatus Status) WorkerDispatchStatus {
+	status := WorkerDispatchStatus{
+		Mode:     "paused",
+		Enabled:  false,
+		DryRun:   false,
+		ReadOnly: false,
+		Source:   "runtime_readiness",
+	}
+	if ready {
+		status.Mode = "live"
+		status.Enabled = true
+		return status
+	}
+	if runtimeStatus != "" && runtimeStatus != "unknown" && runtimeStatus != "ready" {
+		status.Reason = fmt.Sprintf("runtime status %s", runtimeStatus)
+		return status
+	}
+	if healthStatus != "" && healthStatus != StatusHealthy {
+		status.Reason = fmt.Sprintf("health status %s", healthStatus)
+		return status
+	}
+	status.Reason = "runtime not ready"
+	return status
 }
 
 func (service Service) Doctor(ctx context.Context, registryHealthy bool) (Report, error) {

@@ -735,12 +735,13 @@ func validGitHubWebhookSignature(body []byte, secret string, signature string) b
 }
 
 type dashboardStatus struct {
-	GeneratedAt  string          `json:"generated_at"`
-	HealthStatus string          `json:"health_status"`
-	Ready        bool            `json:"ready"`
-	Runtime      runtimeStatus   `json:"runtime"`
-	Counts       dashboardCounts `json:"counts"`
-	Tmux         TmuxStatus      `json:"tmux"`
+	GeneratedAt    string                         `json:"generated_at"`
+	HealthStatus   string                         `json:"health_status"`
+	Ready          bool                           `json:"ready"`
+	Runtime        runtimeStatus                  `json:"runtime"`
+	WorkerDispatch healthsvc.WorkerDispatchStatus `json:"worker_dispatch"`
+	Counts         dashboardCounts                `json:"counts"`
+	Tmux           TmuxStatus                     `json:"tmux"`
 }
 
 type runtimeStatus struct {
@@ -837,6 +838,8 @@ func buildStatusPayload(ctx context.Context, deps Dependencies, now func() time.
 			status.Tmux = tmuxStatus
 		}
 	}
+
+	status.WorkerDispatch = healthsvc.NewWorkerDispatchStatus(ready, status.Runtime.Status, report.Status)
 
 	return status, nil
 }

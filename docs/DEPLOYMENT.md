@@ -152,16 +152,26 @@ audit expectations.
 
 ## Dry Run
 
-There is no global production dispatch dry-run switch yet. Until one exists,
-dry-run means:
+There is no global production dispatch dry-run switch yet. `odin status --json`
+and the daemon `/status` endpoint surface the current worker-dispatch posture
+under `worker_dispatch`:
+
+- `mode=live` means readiness currently allows the service loop to attempt
+  queued or dispatched work.
+- `mode=paused` means readiness currently prevents worker dispatch.
+- `dry_run=false` and `read_only=false` mean no global runtime dry-run or
+  read-only switch is active. Project transition, approval, and worktree policy
+  still gate individual task mutation.
+
+Until a global runtime switch exists, dry-run means:
 
 - use `scripts/install-service.sh --dry-run` before installing service files
 - keep new integrations in read-only intake or shadow mode
 - keep human approval required before merge or deployment
 - keep production secrets out of worker environments
 
-Any future runtime dry-run switch must be documented here and surfaced in
-`odin status` or `odin healthcheck`.
+Any future runtime dry-run switch must be documented here and reflected in
+`worker_dispatch.dry_run` or `worker_dispatch.read_only`.
 
 ## Docker Compose
 
