@@ -57,6 +57,9 @@ These overrides are for explicit local customization only. `odin-os` no longer r
 ## Runtime prerequisites
 
 - `google.sh` requires `curl` and `python3`, plus Google OAuth refresh-token credentials in the environment or `~/.odin-env`.
+- `~/.odin-env` must be owned by the current user and use owner-only permissions such as `chmod 600 ~/.odin-env`; group-readable, world-readable, non-regular, or symlinked files are rejected.
+- `~/.odin-env` is parsed as data, not sourced as shell. Use simple `KEY=value` or `export KEY=value` lines for `GOOGLE_OAUTH_CLIENT_ID`, `GOOGLE_OAUTH_CLIENT_SECRET`, and `GOOGLE_OAUTH_REFRESH_TOKEN`.
+- Google token cache files under `${ODIN_DIR}` are written with `0600` permissions and existing cache files with group or world permissions are ignored.
 - `browser-access.sh` can reuse an already running compatible browser server via `ODIN_BROWSER_SERVER_URL`.
 - If `ODIN_BROWSER_SERVER_URL` is unset, `browser-access.sh` starts the repo-local compatible browser server itself and therefore requires `node`.
 ## Request contract

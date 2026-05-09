@@ -10,13 +10,82 @@ GOOGLE_TOKEN_CACHE="${GOOGLE_TOKEN_CACHE:-${ODIN_DIR}/google-token-cache.json}"
 _GOOGLE_ACCESS_TOKEN="${_GOOGLE_ACCESS_TOKEN:-}"
 _GOOGLE_TOKEN_EXPIRY="${_GOOGLE_TOKEN_EXPIRY:-0}"
 
+_google_private_file_ok() {
+    local path="$1"
+    [[ -f "${path}" ]] || return 1
+    python3 - "${path}" <<'PY'
+import os
+import stat
+import sys
+
+path = sys.argv[1]
+try:
+    info = os.lstat(path)
+except OSError:
+    raise SystemExit(1)
+
+if not stat.S_ISREG(info.st_mode):
+    raise SystemExit(1)
+if info.st_uid != os.getuid():
+    raise SystemExit(1)
+if stat.S_IMODE(info.st_mode) & 0o077:
+    raise SystemExit(1)
+PY
+}
+
+_google_load_env_file() {
+    local env_file="$1"
+    local parsed key value
+
+    _google_private_file_ok "${env_file}" || return 1
+    if ! parsed="$(python3 - "${env_file}" <<'PY'
+import shlex
+import sys
+
+allowed = {
+    "GOOGLE_OAUTH_CLIENT_ID",
+    "GOOGLE_OAUTH_CLIENT_SECRET",
+    "GOOGLE_OAUTH_REFRESH_TOKEN",
+}
+
+with open(sys.argv[1], "r", encoding="utf-8") as handle:
+    for raw in handle:
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export "):].strip()
+        try:
+            parts = shlex.split(line, comments=True, posix=True)
+        except ValueError:
+            raise SystemExit(1)
+        if len(parts) != 1 or "=" not in parts[0]:
+            continue
+        key, value = parts[0].split("=", 1)
+        if key in allowed:
+            print(f"{key}\t{value}")
+PY
+)"; then
+        return 1
+    fi
+
+    while IFS=$'\t' read -r key value; do
+        [[ -n "${key}" ]] || continue
+        case "${key}" in
+            GOOGLE_OAUTH_CLIENT_ID|GOOGLE_OAUTH_CLIENT_SECRET|GOOGLE_OAUTH_REFRESH_TOKEN)
+                printf -v "${key}" '%s' "${value}"
+                export "${key}"
+                ;;
+        esac
+    done <<<"${parsed}"
+}
+
 _google_load_env() {
     if [[ -n "${GOOGLE_OAUTH_CLIENT_ID:-}" && -n "${GOOGLE_OAUTH_CLIENT_SECRET:-}" && -n "${GOOGLE_OAUTH_REFRESH_TOKEN:-}" ]]; then
         return 0
     fi
     if [[ -f "${HOME}/.odin-env" ]]; then
-        # shellcheck source=/dev/null
-        source "${HOME}/.odin-env" >/dev/null 2>&1 || true
+        _google_load_env_file "${HOME}/.odin-env" || return 1
     fi
 }
 
@@ -30,6 +99,7 @@ _google_check_creds() {
 _google_cache_read() {
     local cache_file="${GOOGLE_TOKEN_CACHE}"
     [[ -f "${cache_file}" ]] || return 1
+    _google_private_file_ok "${cache_file}" || return 1
 
     local fields
     if ! fields="$(python3 - "${cache_file}" <<'PY'
@@ -68,17 +138,27 @@ PY
 
 _google_cache_write() {
     mkdir -p "$(dirname "${GOOGLE_TOKEN_CACHE}")" >/dev/null 2>&1 || true
-    python3 - "${GOOGLE_TOKEN_CACHE}" "${_GOOGLE_ACCESS_TOKEN}" "${_GOOGLE_TOKEN_EXPIRY}" <<'PY'
+    (
+        umask 077
+        python3 - "${GOOGLE_TOKEN_CACHE}" "${_GOOGLE_ACCESS_TOKEN}" "${_GOOGLE_TOKEN_EXPIRY}" <<'PY'
 import json
 import os
 import sys
 
 path, token, expiry = sys.argv[1:4]
 tmp = f"{path}.tmp"
-with open(tmp, "w", encoding="utf-8") as handle:
+try:
+    os.unlink(tmp)
+except FileNotFoundError:
+    pass
+fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+with os.fdopen(fd, "w", encoding="utf-8") as handle:
     json.dump({"access_token": token, "expiry": int(expiry)}, handle)
+os.chmod(tmp, 0o600)
 os.replace(tmp, path)
+os.chmod(path, 0o600)
 PY
+    )
 }
 
 _google_refresh_token() {
