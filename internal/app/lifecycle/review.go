@@ -507,10 +507,7 @@ func rejectGoalReviewItem(ctx context.Context, store *sqlite.Store, ref reviewQu
 		if err != nil {
 			return reviewRejectView{}, err
 		}
-		if item.GoalID == nil {
-			return reviewRejectView{}, fmt.Errorf("intake goal review %s has no linked goal", reviewID)
-		}
-		goal, err = store.GetGoal(ctx, *item.GoalID)
+		goal, err = ensureGoalForIntakeGoalReview(ctx, store, item)
 		if err != nil {
 			return reviewRejectView{}, err
 		}
@@ -595,10 +592,7 @@ func approveGoalReviewItem(ctx context.Context, store *sqlite.Store, ref reviewQ
 		if err != nil {
 			return reviewApproveView{}, err
 		}
-		if item.GoalID == nil {
-			return reviewApproveView{}, fmt.Errorf("intake goal review %s has no linked goal", reviewID)
-		}
-		goal, err = store.GetGoal(ctx, *item.GoalID)
+		goal, err = ensureGoalForIntakeGoalReview(ctx, store, item)
 		if err != nil {
 			return reviewApproveView{}, err
 		}
@@ -690,6 +684,28 @@ func approveGoalThroughReview(ctx context.Context, store *sqlite.Store, goal sql
 	default:
 		return sqlite.Goal{}, nil, fmt.Errorf("review approve requires goal status created or planned; goal %d is %s", goal.ID, goal.Status)
 	}
+}
+
+func ensureGoalForIntakeGoalReview(ctx context.Context, store *sqlite.Store, item sqlite.IntakeItem) (sqlite.Goal, error) {
+	if item.GoalID != nil {
+		return store.GetGoal(ctx, *item.GoalID)
+	}
+	if !isDraftGoalIntakeItem(item) {
+		return sqlite.Goal{}, fmt.Errorf("intake %s is not a draft goal review item", rawIntakeKey(item.ID))
+	}
+	goal, err := store.CreateGoal(ctx, sqlite.CreateGoalParams{
+		Title:       item.Subject,
+		Description: "Created from raw intake " + rawIntakeKey(item.ID) + ". " + item.Summary,
+		CreatedBy:   "intake_review:" + rawIntakeKey(item.ID),
+		Source:      "intake",
+	})
+	if err != nil {
+		return sqlite.Goal{}, err
+	}
+	if _, err := store.LinkIntakeItemGoal(ctx, item.ID, goal.ID); err != nil {
+		return sqlite.Goal{}, err
+	}
+	return goal, nil
 }
 
 func reviewQueueDetail(ctx context.Context, app bootstrap.App, ref reviewQueueRef, includePayload bool) (reviewQueueEntry, any, error) {

@@ -1101,12 +1101,18 @@ type intakeProcessingNotes struct {
 }
 
 type intakeClassification struct {
-	Result string `json:"result"`
-	Reason string `json:"reason"`
+	Result         string `json:"result"`
+	Reason         string `json:"reason"`
+	SourceType     string `json:"source_type,omitempty"`
+	Intent         string `json:"intent,omitempty"`
+	Risk           string `json:"risk,omitempty"`
+	Confidence     string `json:"confidence,omitempty"`
+	SuggestedRoute string `json:"suggested_route,omitempty"`
 }
 
 type intakeDedupeReview struct {
 	Result             string `json:"result"`
+	Basis              string `json:"basis,omitempty"`
 	CanonicalIntakeKey string `json:"canonical_intake_key,omitempty"`
 }
 
@@ -1990,9 +1996,11 @@ func buildIntakeProcessOutcome(ctx context.Context, store *sqlite.Store, item sq
 	if duplicate != nil {
 		notes.Dedupe = intakeDedupeReview{
 			Result:             duplicate.Result,
+			Basis:              duplicate.Basis,
 			CanonicalIntakeKey: rawIntakeKey(duplicate.CanonicalIntakeItemID),
 		}
 		notes.Routing = intakeRoutingResult{Outcome: "duplicate_linked_or_suppressed", ProjectKey: item.ScopeKey}
+		populateIntakeClassificationRoute(&notes, item)
 		notes.DraftArtifact = &intakeDraftArtifact{
 			Kind:        "duplicate_review",
 			Title:       item.Subject,
@@ -2010,6 +2018,7 @@ func buildIntakeProcessOutcome(ctx context.Context, store *sqlite.Store, item sq
 
 	if notes.Classification.Result == "ambiguous" {
 		notes.Routing = intakeRoutingResult{Outcome: "needs_clarification", ProjectKey: item.ScopeKey}
+		populateIntakeClassificationRoute(&notes, item)
 		notes.DraftArtifact = &intakeDraftArtifact{
 			Kind:        "clarification_request",
 			Title:       item.Subject,
@@ -2032,35 +2041,24 @@ func buildIntakeProcessOutcome(ctx context.Context, store *sqlite.Store, item sq
 
 	if isGoalLikeIntake(item) {
 		notes.Routing = intakeRoutingResult{
-			Outcome:               "goal_created",
+			Outcome:               "draft_goal",
 			ProjectKey:            item.ScopeKey,
-			ExecutionIntent:       "read_only",
+			ExecutionIntent:       "governance",
 			ExecutionIntentSource: "intake_goal_rule:v1",
 		}
+		populateIntakeClassificationRoute(&notes, item)
 		notes.DraftArtifact = &intakeDraftArtifact{
-			Kind:                  "goal_review",
+			Kind:                  "draft_goal",
 			Title:                 item.Subject,
-			ReviewState:           "created_not_approved",
-			ExecutionIntent:       "read_only",
-			ExecutionIntentSource: "intake_goal_rule:v1",
+			ReviewState:           "review_required",
+			ExecutionIntent:       notes.Routing.ExecutionIntent,
+			ExecutionIntentSource: notes.Routing.ExecutionIntentSource,
 		}
 		outcome := intakeProcessOutcome{
-			status:     "review_required",
-			summary:    "Goal created from raw intake for operator review; no execution approval granted",
-			goalID:     item.GoalID,
-			createGoal: item.GoalID == nil,
-			notes:      notes,
-		}
-		if item.GoalID != nil {
-			notes.Routing.GoalID = *item.GoalID
-			notes.Goal = &intakeGoalConversion{
-				ID:              *item.GoalID,
-				Title:           item.Subject,
-				Status:          "created",
-				SourceIntakeKey: rawIntakeKey(item.ID),
-				ReviewState:     "created_not_approved",
-			}
-			outcome.notes = notes
+			status:  "review_required",
+			summary: "draft_goal prepared for human review; no goal created",
+			goalID:  item.GoalID,
+			notes:   notes,
 		}
 		return outcome, nil
 	}
@@ -2072,6 +2070,7 @@ func buildIntakeProcessOutcome(ctx context.Context, store *sqlite.Store, item sq
 		ExecutionIntent:       route.ExecutionIntent,
 		ExecutionIntentSource: route.ExecutionIntentSource,
 	}
+	populateIntakeClassificationRoute(&notes, item)
 	notes.DraftArtifact = &intakeDraftArtifact{
 		Kind:                  route.DraftArtifactKind,
 		Title:                 item.Subject,
@@ -2133,14 +2132,73 @@ func normalizedIntakeType(value string) string {
 func classifyIntakeItem(item sqlite.IntakeItem) intakeClassification {
 	title := strings.ToLower(strings.TrimSpace(item.Subject))
 	if title == "" || title == "help" || title == "help with this" || title == "fix this" || len(strings.Fields(title)) < 3 {
-		return intakeClassification{Result: "ambiguous", Reason: "intake title is too vague to draft reviewable work"}
+		return intakeClassification{
+			Result:     "ambiguous",
+			Reason:     "intake title is too vague to draft reviewable work",
+			SourceType: normalizedIntakeSourceType(item.SourceFamily),
+			Confidence: "low",
+		}
 	}
-	return intakeClassification{Result: "actionable_request", Reason: "intake has enough subject detail for a draft review artifact"}
+	return intakeClassification{
+		Result:     "actionable_request",
+		Reason:     "intake has enough subject detail for a draft review artifact",
+		SourceType: normalizedIntakeSourceType(item.SourceFamily),
+		Confidence: "high",
+	}
+}
+
+func normalizedIntakeSourceType(value string) string {
+	normalized := strings.ToLower(strings.TrimSpace(value))
+	if normalized == "" {
+		return "unknown"
+	}
+	return normalized
+}
+
+func populateIntakeClassificationRoute(notes *intakeProcessingNotes, item sqlite.IntakeItem) {
+	if notes.Classification.SourceType == "" {
+		notes.Classification.SourceType = normalizedIntakeSourceType(item.SourceFamily)
+	}
+	notes.Classification.SuggestedRoute = notes.Routing.Outcome
+	notes.Classification.Intent = notes.Routing.ExecutionIntent
+	if notes.Classification.Intent == "" {
+		switch notes.Routing.Outcome {
+		case "needs_clarification":
+			notes.Classification.Intent = "clarification"
+		case "duplicate_linked_or_suppressed":
+			notes.Classification.Intent = "suppress_duplicate"
+		default:
+			notes.Classification.Intent = "review"
+		}
+	}
+	notes.Classification.Risk = intakeClassificationRisk(notes.Routing.ExecutionIntent, notes.Routing.Outcome)
+}
+
+func intakeClassificationRisk(intent string, outcome string) string {
+	switch strings.ToLower(strings.TrimSpace(intent)) {
+	case "destructive":
+		return "destructive"
+	case "governance":
+		return "governance"
+	case "mutation":
+		return "medium"
+	case "read_only":
+		return "low"
+	}
+	switch strings.ToLower(strings.TrimSpace(outcome)) {
+	case "needs_clarification":
+		return "unknown"
+	case "duplicate_linked_or_suppressed":
+		return "low"
+	default:
+		return "low"
+	}
 }
 
 type intakeDuplicateMatch struct {
 	CanonicalIntakeItemID int64
 	Result                string
+	Basis                 string
 	SuppressionReason     string
 }
 
@@ -2157,6 +2215,7 @@ func findCanonicalDuplicate(ctx context.Context, store *sqlite.Store, item sqlit
 			return &intakeDuplicateMatch{
 				CanonicalIntakeItemID: candidate.ID,
 				Result:                "duplicate_linked",
+				Basis:                 "dedupe_key",
 				SuppressionReason:     "duplicate_dedupe_key",
 			}, nil
 		}
@@ -2177,6 +2236,7 @@ func findCanonicalDuplicate(ctx context.Context, store *sqlite.Store, item sqlit
 			return &intakeDuplicateMatch{
 				CanonicalIntakeItemID: candidate.ID,
 				Result:                "near_duplicate_linked",
+				Basis:                 "normalized_subject",
 				SuppressionReason:     "near_duplicate_subject",
 			}, nil
 		}
@@ -2297,11 +2357,17 @@ func intakeProcessingAuditPayload(itemID int64, status string, stage string, res
 		CanonicalIntakeID:     canonical,
 		GoalID:                intakeGoalIDPtr(notes),
 		Classification: &runtimeevents.IntakeClassification{
-			Result: notes.Classification.Result,
-			Reason: notes.Classification.Reason,
+			Result:         notes.Classification.Result,
+			Reason:         notes.Classification.Reason,
+			SourceType:     notes.Classification.SourceType,
+			Intent:         notes.Classification.Intent,
+			Risk:           notes.Classification.Risk,
+			Confidence:     notes.Classification.Confidence,
+			SuggestedRoute: notes.Classification.SuggestedRoute,
 		},
 		Dedupe: &runtimeevents.IntakeDedupeReview{
 			Result:             notes.Dedupe.Result,
+			Basis:              notes.Dedupe.Basis,
 			CanonicalIntakeKey: notes.Dedupe.CanonicalIntakeKey,
 		},
 		Routing: &runtimeevents.IntakeRoutingResult{

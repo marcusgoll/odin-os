@@ -655,12 +655,18 @@ type IntakeProcessingPayload struct {
 }
 
 type IntakeClassification struct {
-	Result string `json:"result"`
-	Reason string `json:"reason"`
+	Result         string `json:"result"`
+	Reason         string `json:"reason"`
+	SourceType     string `json:"source_type,omitempty"`
+	Intent         string `json:"intent,omitempty"`
+	Risk           string `json:"risk,omitempty"`
+	Confidence     string `json:"confidence,omitempty"`
+	SuggestedRoute string `json:"suggested_route,omitempty"`
 }
 
 type IntakeDedupeReview struct {
 	Result             string `json:"result"`
+	Basis              string `json:"basis,omitempty"`
 	CanonicalIntakeKey string `json:"canonical_intake_key,omitempty"`
 }
 
