@@ -16,6 +16,7 @@ date: 2026-04-23
 - `ODIN_HUGINN_X_POST_DRIVER`
 - `ODIN_HUGINN_X_PUBLISH_DRIVER`
 - `ODIN_HUGINN_ROBINHOOD_TRANSFER_DRIVER`
+- `ODIN_CODEX_SANDBOX_MODE`
 
 These env vars should point to executable commands. The repo-local driver scripts are:
 
@@ -62,6 +63,17 @@ These overrides are for explicit local customization only. `odin-os` no longer r
 - Google token cache files under `${ODIN_DIR}` are written with `0600` permissions and existing cache files with group or world permissions are ignored.
 - `browser-access.sh` can reuse an already running compatible browser server via `ODIN_BROWSER_SERVER_URL`.
 - If `ODIN_BROWSER_SERVER_URL` is unset, `browser-access.sh` starts the repo-local compatible browser server itself and therefore requires `node`.
+
+Codex headless driver sandbox modes:
+
+- unset `ODIN_CODEX_SANDBOX_MODE`: use the Codex CLI default `--full-auto` behavior for the legacy driver
+- `ODIN_CODEX_SANDBOX_MODE=read-only`: pass `--sandbox read-only`
+- `ODIN_CODEX_SANDBOX_MODE=workspace-write`: pass `--sandbox workspace-write`
+
+`ODIN_CODEX_SANDBOX_MODE=danger-full-access` is forbidden and the driver exits
+before invoking Codex. Operators must not use Codex sandbox bypass flags for
+autonomous worker lanes.
+
 ## Request contract
 
 Calendar driver request:

@@ -1713,7 +1713,7 @@ printf 'fixture codex summary' >"$output_file"
 	}
 }
 
-func TestCodexHeadlessDriverScriptUsesDangerousBypassForDangerFullAccess(t *testing.T) {
+func TestCodexHeadlessDriverScriptRejectsDangerFullAccess(t *testing.T) {
 	repoRoot := projectRoot(t)
 	scriptPath := filepath.Join(repoRoot, "scripts", "drivers", "codex-headless.sh")
 	fixtureDir := t.TempDir()
@@ -1752,20 +1752,14 @@ printf 'fixture codex summary' >"$output_file"
 	)
 
 	output, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("%s error = %v\n%s", scriptPath, err, string(output))
+	if err == nil {
+		t.Fatalf("%s succeeded with danger-full-access, want rejection\n%s", scriptPath, string(output))
 	}
-
-	argsBytes, err := os.ReadFile(argsPath)
-	if err != nil {
-		t.Fatalf("ReadFile(argsPath) error = %v", err)
+	if !strings.Contains(string(output), "danger-full-access") {
+		t.Fatalf("%s output = %q, want danger-full-access rejection", scriptPath, string(output))
 	}
-	args := string(argsBytes)
-	if !strings.Contains(args, "--dangerously-bypass-approvals-and-sandbox\n") {
-		t.Fatalf("args = %q, want dangerous bypass flag", args)
-	}
-	if strings.Contains(args, "--full-auto\n") || strings.Contains(args, "--sandbox\n") {
-		t.Fatalf("args = %q, do not want sandbox/full-auto flags when using dangerous bypass", args)
+	if _, err := os.Stat(argsPath); !os.IsNotExist(err) {
+		t.Fatalf("codex args file exists after rejected sandbox mode, want codex not invoked")
 	}
 }
 

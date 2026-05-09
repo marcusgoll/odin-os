@@ -3,6 +3,24 @@ set -euo pipefail
 
 codex_bin="${ODIN_CODEX_BIN:-codex}"
 
+validate_codex_sandbox_mode() {
+    local sandbox_mode="${ODIN_CODEX_SANDBOX_MODE:-}"
+
+    case "${sandbox_mode}" in
+        ""|read-only|workspace-write)
+            return 0
+            ;;
+        danger-full-access)
+            printf 'unsupported ODIN_CODEX_SANDBOX_MODE: danger-full-access is forbidden\n' >&2
+            return 1
+            ;;
+        *)
+            printf 'unsupported ODIN_CODEX_SANDBOX_MODE: %s\n' "${sandbox_mode}" >&2
+            return 1
+            ;;
+    esac
+}
+
 resolve_codex_exec_args() {
     local sandbox_mode="${ODIN_CODEX_SANDBOX_MODE:-}"
     local -a args=("exec")
@@ -15,7 +33,8 @@ resolve_codex_exec_args() {
             args+=("--sandbox" "${sandbox_mode}")
             ;;
         danger-full-access)
-            args+=("--dangerously-bypass-approvals-and-sandbox")
+            printf 'unsupported ODIN_CODEX_SANDBOX_MODE: danger-full-access is forbidden\n' >&2
+            return 1
             ;;
         *)
             printf 'unsupported ODIN_CODEX_SANDBOX_MODE: %s\n' "${sandbox_mode}" >&2
@@ -33,6 +52,10 @@ if [[ "${1:-}" == "--health" ]]; then
         printf '{"status":"unavailable","details":"codex CLI not found"}\n'
     fi
     exit 0
+fi
+
+if ! validate_codex_sandbox_mode; then
+    exit 1
 fi
 
 request_file="$(mktemp)"
