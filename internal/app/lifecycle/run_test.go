@@ -2257,26 +2257,62 @@ func TestRunHelpIncludesOverviewCommand(t *testing.T) {
 	if !strings.Contains(stdout.String(), "runs show <id>") {
 		t.Fatalf("help output = %q, want top-level runs show command", stdout.String())
 	}
-	if strings.Contains(stdout.String(), "scheduler") {
-		t.Fatalf("help output = %q, should not claim scheduler command", stdout.String())
+	if !strings.Contains(stdout.String(), "scheduler") {
+		t.Fatalf("help output = %q, want scheduler command", stdout.String())
 	}
 }
 
-func TestRunSchedulerCommandIsNotClaimedSurface(t *testing.T) {
+func TestRunSchedulerTickUsesExistingRuntimePaths(t *testing.T) {
 	t.Parallel()
 
 	root := testRepoRoot(t)
-	var stdout bytes.Buffer
 
-	err := Run(context.Background(), root, []string{"scheduler", "--help"}, strings.NewReader(""), &stdout)
-	if err == nil {
-		t.Fatal("Run(scheduler --help) error = nil, want unknown command")
+	if err := Run(context.Background(), root, []string{
+		"trigger", "upsert", "scheduler-proof",
+		"initiative=odin-core",
+		"kind=schedule",
+		"status=enabled",
+		"next=2026-05-02T00:00:00Z",
+		"title=Scheduler_proof",
+		"--json",
+	}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+		t.Fatalf("Run(trigger upsert) error = %v", err)
 	}
-	if got := err.Error(); got != "unknown command: scheduler" {
-		t.Fatalf("Run(scheduler --help) error = %q, want unknown command: scheduler", got)
+
+	var stdout bytes.Buffer
+	if err := Run(context.Background(), root, []string{
+		"scheduler", "tick",
+		"now=2026-05-02T00:00:00Z",
+		"recovery=false",
+		"--json",
+	}, strings.NewReader(""), &stdout); err != nil {
+		t.Fatalf("Run(scheduler tick) error = %v", err)
 	}
-	if stdout.Len() != 0 {
-		t.Fatalf("stdout = %q, want empty output", stdout.String())
+	for _, want := range []string{
+		`"now": "2026-05-02T00:00:00Z"`,
+		`"trigger_evaluation"`,
+		`"evaluated": 1`,
+		`"materialized": 1`,
+		`"supervision"`,
+		`"recovery_ran": false`,
+	} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("scheduler tick output = %s, want %s", stdout.String(), want)
+		}
+	}
+
+	var logs bytes.Buffer
+	if err := Run(context.Background(), root, []string{"logs", "--json"}, strings.NewReader(""), &logs); err != nil {
+		t.Fatalf("Run(logs --json) error = %v", err)
+	}
+	for _, want := range []string{
+		`"type": "automation_trigger.fire_requested"`,
+		`"type": "automation_trigger.materialized"`,
+		`"key": "scheduler-proof"`,
+	} {
+		if !strings.Contains(logs.String(), want) {
+			t.Fatalf("logs output = %s, want %s", logs.String(), want)
+		}
 	}
 }
 

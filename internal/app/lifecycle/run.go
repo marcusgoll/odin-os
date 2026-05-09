@@ -68,7 +68,9 @@ import (
 
 var errRuntimeNotReady = errors.New("runtime not ready")
 
-const rootUsageBanner = "Usage: odin <command> [args]\n\nCommands: help repl overview tui doctor healthcheck serve backup restore verify-backup status legacy project workspace work scope jobs runs leases approvals review intake agenda logs knowledge goal browser task initiative companion profile followup trigger transition skills e2e\n\nRun detail: odin runs show <id>"
+const rootUsageBanner = "Usage: odin <command> [args]\n\nCommands: help repl overview tui doctor healthcheck serve backup restore verify-backup status legacy project workspace work scope jobs runs leases approvals review intake agenda logs knowledge goal browser task initiative companion profile followup trigger scheduler transition skills e2e\n\nRun detail: odin runs show <id>"
+
+const schedulerUsage = "usage: odin scheduler tick [now=<RFC3339>] [recovery=<true|false>] [--json]"
 
 var (
 	serveTaskLoopInterval     = 1 * time.Second
@@ -315,6 +317,8 @@ func Run(ctx context.Context, root string, args []string, stdin io.Reader, stdou
 		return runFollowup(ctx, app, args[1:], stdout)
 	case "trigger":
 		return commands.RunTrigger(ctx, triggers.Service{Store: app.Store, Registry: app.Registry}, args[1:], stdout)
+	case "scheduler":
+		return runScheduler(ctx, app, args[1:], stdout)
 	case "skills":
 		return runSkills(ctx, app, args[1:], stdout)
 	case "doctor":
@@ -3581,6 +3585,138 @@ func runFollowup(ctx context.Context, app bootstrap.App, args []string, stdout i
 	default:
 		return fmt.Errorf("unsupported followup subcommand: %s", command.Name)
 	}
+}
+
+type schedulerTickView struct {
+	Now               string                         `json:"now"`
+	TriggerEvaluation schedulerTriggerEvaluationView `json:"trigger_evaluation"`
+	Supervision       schedulerSupervisionView       `json:"supervision"`
+	RecoveryRan       bool                           `json:"recovery_ran"`
+	Recovery          *schedulerRecoveryView         `json:"recovery,omitempty"`
+}
+
+type schedulerTriggerEvaluationView struct {
+	Evaluated    int `json:"evaluated"`
+	Materialized int `json:"materialized"`
+	Deferred     int `json:"deferred"`
+	Errored      int `json:"errored"`
+}
+
+type schedulerSupervisionView struct {
+	Promoted   int `json:"promoted"`
+	Reconciled int `json:"reconciled"`
+}
+
+type schedulerRecoveryView struct {
+	Observations int `json:"observations"`
+	Decisions    int `json:"decisions"`
+	Outcomes     int `json:"outcomes"`
+}
+
+func runScheduler(ctx context.Context, app bootstrap.App, args []string, stdout io.Writer) error {
+	if len(args) == 0 || args[0] == "help" || args[0] == "--help" {
+		_, err := fmt.Fprintln(stdout, schedulerUsage)
+		return err
+	}
+	switch args[0] {
+	case "tick":
+		return runSchedulerTick(ctx, app, args[1:], stdout)
+	default:
+		return fmt.Errorf("unsupported scheduler subcommand: %s", args[0])
+	}
+}
+
+func runSchedulerTick(ctx context.Context, app bootstrap.App, args []string, stdout io.Writer) error {
+	nowFunc, err := runtimeNow()
+	if err != nil {
+		return err
+	}
+	now := nowFunc().UTC()
+	recoveryEnabled := false
+	jsonOutput := false
+	for _, arg := range args {
+		switch {
+		case arg == "--help":
+			_, err := fmt.Fprintln(stdout, schedulerUsage)
+			return err
+		case arg == "--json":
+			jsonOutput = true
+		case strings.HasPrefix(arg, "now="):
+			parsed, err := time.Parse(time.RFC3339, strings.TrimPrefix(arg, "now="))
+			if err != nil {
+				return fmt.Errorf("scheduler tick now must be RFC3339: %w", err)
+			}
+			now = parsed.UTC()
+		case strings.HasPrefix(arg, "recovery="):
+			parsed, err := strconv.ParseBool(strings.TrimPrefix(arg, "recovery="))
+			if err != nil {
+				return fmt.Errorf("scheduler tick recovery must be true or false: %w", err)
+			}
+			recoveryEnabled = parsed
+		default:
+			return fmt.Errorf("unknown scheduler tick argument: %s", arg)
+		}
+	}
+
+	triggerResult, err := (triggers.Service{Store: app.Store, Registry: app.Registry}).EvaluateDue(ctx, now)
+	if err != nil {
+		return err
+	}
+	supervisionResult, err := (supervision.Service{
+		Store: app.Store,
+		Now:   func() time.Time { return now },
+	}).Tick(ctx)
+	if err != nil {
+		return err
+	}
+
+	view := schedulerTickView{
+		Now: now.Format(time.RFC3339),
+		TriggerEvaluation: schedulerTriggerEvaluationView{
+			Evaluated:    triggerResult.Evaluated,
+			Materialized: triggerResult.Materialized,
+			Deferred:     triggerResult.Deferred,
+			Errored:      triggerResult.Errored,
+		},
+		Supervision: schedulerSupervisionView{
+			Promoted:   supervisionResult.Promoted,
+			Reconciled: supervisionResult.Reconciled,
+		},
+		RecoveryRan: recoveryEnabled,
+	}
+	if recoveryEnabled {
+		result, err := (recovery.Service{
+			Store:           app.Store,
+			RegistryRoot:    filepath.Join(app.RepoRoot, "registry"),
+			ExecutorCatalog: app.Executors,
+			HealthConfig:    healthsvc.DefaultConfig(),
+			Now:             func() time.Time { return now },
+		}).RunCycle(ctx)
+		if err != nil {
+			return err
+		}
+		view.Recovery = &schedulerRecoveryView{
+			Observations: len(result.Observations),
+			Decisions:    len(result.Decisions),
+			Outcomes:     len(result.Outcomes),
+		}
+	}
+
+	if jsonOutput {
+		return commands.WriteJSON(stdout, view)
+	}
+	_, err = fmt.Fprintf(stdout,
+		"scheduler tick now=%s evaluated=%d materialized=%d deferred=%d errored=%d promoted=%d reconciled=%d recovery=%t\n",
+		view.Now,
+		view.TriggerEvaluation.Evaluated,
+		view.TriggerEvaluation.Materialized,
+		view.TriggerEvaluation.Deferred,
+		view.TriggerEvaluation.Errored,
+		view.Supervision.Promoted,
+		view.Supervision.Reconciled,
+		view.RecoveryRan,
+	)
+	return err
 }
 
 func runStatus(ctx context.Context, app bootstrap.App, cfg appconfig.Config, args []string, stdout io.Writer) error {
