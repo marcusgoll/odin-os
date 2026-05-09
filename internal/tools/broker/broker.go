@@ -120,6 +120,13 @@ func (broker *Broker) InvokeTool(key string, input map[string]string) (catalog.S
 	if !ok {
 		return catalog.StructuredResult{}, fmt.Errorf("unknown tool %q", key)
 	}
+	if definition.RequiresApproval {
+		reason := definition.ApprovalReason
+		if reason == "" {
+			reason = "approval is required"
+		}
+		return catalog.StructuredResult{}, fmt.Errorf("tool %q requires approval before invocation: %s", definition.Key, reason)
+	}
 	if err := broker.tracker.RecordInvocation(definition.BudgetCost); err != nil {
 		return catalog.StructuredResult{}, err
 	}
