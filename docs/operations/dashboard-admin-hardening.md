@@ -14,6 +14,11 @@ The issue pause/resume routes are authenticated but currently return
 `admin_action_not_implemented` from `odin serve`; keep them protected anyway so
 future implementation work does not inherit a public mutation route.
 
+When implemented, issue pause/resume must follow
+`docs/contracts/pause-resume.md`: dashboard routes are adapters over
+Odin-owned SQLite runtime state, GitHub `odin:paused` labels are projection-only,
+and generic resume may only clear the `operator_paused` blocked reason.
+
 ## Network Exposure
 
 - Bind Odin admin surfaces to localhost by default, for example

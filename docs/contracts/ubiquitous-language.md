@@ -22,6 +22,7 @@ This document freezes the canonical language for Odin OS. New design, planning, 
 | `Run Attempt` | One execution attempt for a work item inside an execution lane. | Run attempts are disposable records of execution, not the durable work itself. |
 | `Control Scope` | The explicit authority boundary that determines what the operator and system may inspect, mutate, or route. | This is the preferred term for authority boundaries. |
 | `Execution Lane` | A bounded execution path that carries work items through planning, runtime execution, and retries. | Lanes are operational capacity and routing constructs, not the work itself. |
+| `Operator Pause` | An Odin-owned hold on a governed Work Item that prevents dispatch until resumed. | Represented as `status=blocked` with `blocked_reason=operator_paused`; GitHub `odin:paused` is projection only. |
 
 ## Legacy or narrowed terms
 
