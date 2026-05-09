@@ -483,6 +483,9 @@ func (service Service) ExecuteNextQueued(ctx context.Context) error {
 	spec.Metadata["repo_root"] = assignment.RepoRoot
 	spec.Metadata["worktree_path"] = assignment.WorktreePath
 	service.addRuntimeRootMetadata(spec.Metadata)
+	if _, err := service.applyLatestTaskIntakeMetadata(ctx, task.ID, spec.Metadata); err != nil {
+		return err
+	}
 	if service.PromptRenderer != nil {
 		renderedPrompt, err := service.renderPrompt(ctx, spec, task)
 		if err != nil {
@@ -875,6 +878,9 @@ func (service Service) executeDispatchedRun(ctx context.Context, taskID int64, a
 		},
 	}
 	service.addRuntimeRootMetadata(spec.Metadata)
+	if _, err := service.applyLatestTaskIntakeMetadata(ctx, task.ID, spec.Metadata); err != nil {
+		return RunExecutionOutcome{}, err
+	}
 	if service.PromptRenderer != nil {
 		renderedPrompt, err := service.renderPrompt(ctx, spec, task)
 		if err != nil {
@@ -983,10 +989,7 @@ func (service Service) ExecuteTaskWithRequest(ctx context.Context, taskID int64,
 	service.addRuntimeRootMetadata(spec.Metadata)
 	intakeSummary := ""
 	if hasIntake {
-		spec.Metadata["intake_source"] = intake.Source
-		spec.Metadata["intake_type"] = intake.IntakeType
-		spec.Metadata["intake_payload_json"] = intake.PayloadJSON
-		intakeSummary = compactIntakeSummary(intake)
+		intakeSummary = applyTaskIntakeMetadata(intake, spec.Metadata)
 	}
 	for key, value := range request.Metadata {
 		key = strings.TrimSpace(key)
@@ -1455,6 +1458,24 @@ func (service Service) latestTaskIntake(ctx context.Context, taskID int64) (sqli
 	return intake, true, nil
 }
 
+func (service Service) applyLatestTaskIntakeMetadata(ctx context.Context, taskID int64, metadata map[string]string) (string, error) {
+	intake, hasIntake, err := service.latestTaskIntake(ctx, taskID)
+	if err != nil || !hasIntake {
+		return "", err
+	}
+	return applyTaskIntakeMetadata(intake, metadata), nil
+}
+
+func applyTaskIntakeMetadata(intake sqlite.TaskIntake, metadata map[string]string) string {
+	if metadata == nil {
+		return compactIntakeSummary(intake)
+	}
+	metadata["intake_source"] = intake.Source
+	metadata["intake_type"] = intake.IntakeType
+	metadata["intake_payload_json"] = intake.PayloadJSON
+	return compactIntakeSummary(intake)
+}
+
 func (service Service) loadExecutionOutcome(ctx context.Context, taskID int64, runID *int64) (ExecutionOutcome, error) {
 	task, err := service.Store.GetTask(ctx, taskID)
 	if err != nil {
@@ -1562,10 +1583,51 @@ func (service Service) renderPrompt(ctx context.Context, spec contract.TaskSpec,
 	return service.PromptRenderer.Render(ctx, templateName, prompts.TemplateData{
 		WorkItemID:         task.Key,
 		Role:               templateName,
-		Title:              task.Title,
+		Title:              trustedPromptTitle(task.Title, spec.Metadata),
 		AcceptanceCriteria: acceptanceCriteriaFromMetadata(spec.Metadata["acceptance_criteria"]),
 		Metadata:           spec.Metadata,
+		UntrustedData:      untrustedPromptData(task, spec.Metadata),
 	})
+}
+
+func trustedPromptTitle(title string, metadata map[string]string) string {
+	if hasExternalIntakeMetadata(metadata) {
+		return ""
+	}
+	return title
+}
+
+func untrustedPromptData(task sqlite.Task, metadata map[string]string) []prompts.UntrustedDataBlock {
+	if !hasExternalIntakeMetadata(metadata) {
+		return nil
+	}
+	source := strings.TrimSpace(metadata["intake_source"])
+	kind := strings.TrimSpace(metadata["intake_type"])
+	blocks := []prompts.UntrustedDataBlock{}
+	if title := strings.TrimSpace(task.Title); title != "" {
+		blocks = append(blocks, prompts.UntrustedDataBlock{
+			Source:  source,
+			Kind:    kind,
+			Field:   "title",
+			Content: title,
+		})
+	}
+	if payload := strings.TrimSpace(metadata["intake_payload_json"]); payload != "" {
+		blocks = append(blocks, prompts.UntrustedDataBlock{
+			Source:  source,
+			Kind:    kind,
+			Field:   "payload_json",
+			Content: payload,
+		})
+	}
+	return blocks
+}
+
+func hasExternalIntakeMetadata(metadata map[string]string) bool {
+	if metadata == nil {
+		return false
+	}
+	return strings.TrimSpace(metadata["intake_source"]) != "" || strings.TrimSpace(metadata["intake_payload_json"]) != ""
 }
 
 func acceptanceCriteriaFromMetadata(raw string) []string {
