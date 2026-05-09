@@ -482,6 +482,12 @@ type UpdateTaskQueueStateParams struct {
 	BlockedReason  string
 }
 
+type UpdateTaskExecutionIntentParams struct {
+	TaskID                int64
+	ExecutionIntent       string
+	ExecutionIntentSource string
+}
+
 type BlockTaskParams struct {
 	TaskID int64
 	Reason string
