@@ -47,6 +47,7 @@ type View struct {
 	Companions            CompanionLane            `json:"companions"`
 	CapabilityCatalog     CapabilityCatalogLane    `json:"capability_catalog"`
 	SkillActivity         SkillActivityLane        `json:"skill_activity"`
+	ReviewQueue           ReviewQueueLane          `json:"review_queue"`
 	DelegationTruth       DelegationTruthLane      `json:"delegation_truth"`
 	Approvals             []ApprovalSummary        `json:"approvals"`
 	Observability         ObservabilityLane        `json:"observability"`
@@ -156,6 +157,16 @@ type SkillActivitySummary struct {
 	Permissions      []string `json:"permissions"`
 	ErrorCode        string   `json:"error_code,omitempty"`
 	OccurredAt       string   `json:"occurred_at"`
+}
+
+type ReviewQueueLane struct {
+	Wiring             Wiring `json:"wiring"`
+	TotalCount         int    `json:"total_count"`
+	IntakeCount        int    `json:"intake_count"`
+	ApprovalCount      int    `json:"approval_count"`
+	KnowledgeCount     int    `json:"knowledge_count"`
+	SkillArtifactCount int    `json:"skill_artifact_count"`
+	FailedWorkCount    int    `json:"failed_work_count"`
 }
 
 type KnowledgeContextPackLane struct {
@@ -414,6 +425,9 @@ func (service Service) Build(ctx context.Context, resolved scope.Resolution) (Vi
 			ToolCount: len(toolcatalog.BuiltinDefinitions()),
 		},
 		SkillActivity: SkillActivityLane{
+			Wiring: WiringLive,
+		},
+		ReviewQueue: ReviewQueueLane{
 			Wiring: WiringLive,
 		},
 		DelegationTruth: DelegationTruthLane{
@@ -1059,8 +1073,22 @@ func (service Service) Build(ctx context.Context, resolved scope.Resolution) (Vi
 		return View{}, err
 	}
 	view.KnowledgeContextPacks = knowledgeContextPacks
+	view.ReviewQueue = reviewQueueLane(view)
 
 	return view, nil
+}
+
+func reviewQueueLane(view View) ReviewQueueLane {
+	lane := ReviewQueueLane{
+		Wiring:             WiringLive,
+		IntakeCount:        view.IntakeInbox.ReviewQueueCount,
+		ApprovalCount:      len(view.Approvals),
+		KnowledgeCount:     view.KnowledgeContextPacks.ReviewRequiredCount,
+		SkillArtifactCount: view.SkillActivity.ReviewRequiredArtifactCount,
+		FailedWorkCount:    len(view.Observability.RecoveryGuidance),
+	}
+	lane.TotalCount = lane.IntakeCount + lane.ApprovalCount + lane.KnowledgeCount + lane.SkillArtifactCount + lane.FailedWorkCount
+	return lane
 }
 
 func (service Service) knowledgeContextPacks(ctx context.Context, resolved scope.Resolution) (KnowledgeContextPackLane, error) {

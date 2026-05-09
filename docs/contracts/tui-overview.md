@@ -131,6 +131,7 @@ Rules:
 - unsupported sources remain visible for inspection with empty or restricted `allowed_actions`
 - unsupported actions must fail closed through the existing review handlers and return machine-readable unsupported / not-resolved output when that handler already supports it
 - adding a source adapter does not grant resolver behavior; resolver behavior belongs to the source-owned workflow or approval service
+- `odin overview` renders a read-only `review_queue` proof lane derived from existing runtime truth; it summarizes counts only and does not own review or approval mutation
 
 Source/action contract:
 

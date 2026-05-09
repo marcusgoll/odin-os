@@ -13,6 +13,7 @@ import (
 	coreprojects "odin-os/internal/core/projects"
 	knowledgememory "odin-os/internal/memory/knowledge"
 	"odin-os/internal/registry"
+	runtimeknowledge "odin-os/internal/runtime/knowledge"
 	"odin-os/internal/store/sqlite"
 )
 
@@ -193,6 +194,116 @@ func TestBuildWorkItemsExposeBlockedReason(t *testing.T) {
 	}
 	if view.WorkItems[0].BlockedReason != "mutation_requires_isolated_worktree" {
 		t.Fatalf("Work item blocked reason = %q, want mutation_requires_isolated_worktree", view.WorkItems[0].BlockedReason)
+	}
+}
+
+func TestOverviewShowsUnifiedReviewAndDecisionCounts(t *testing.T) {
+	ctx := context.Background()
+	env := newOverviewTestEnvironment(t)
+	seedOverviewReviewFixture(t, ctx, env)
+
+	view, err := Service{
+		Store:            env.store,
+		RegistrySnapshot: env.snapshot,
+	}.Build(ctx, scope.Resolution{Kind: scope.ScopeGlobal})
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+
+	if view.ReviewQueue.Wiring != WiringLive {
+		t.Fatalf("ReviewQueue wiring = %q, want live", view.ReviewQueue.Wiring)
+	}
+	if view.ReviewQueue.IntakeCount != 2 {
+		t.Fatalf("ReviewQueue.IntakeCount = %d, want 2", view.ReviewQueue.IntakeCount)
+	}
+	if view.ReviewQueue.ApprovalCount != 1 {
+		t.Fatalf("ReviewQueue.ApprovalCount = %d, want 1", view.ReviewQueue.ApprovalCount)
+	}
+	if view.ReviewQueue.KnowledgeCount != 1 {
+		t.Fatalf("ReviewQueue.KnowledgeCount = %d, want 1", view.ReviewQueue.KnowledgeCount)
+	}
+	if view.ReviewQueue.SkillArtifactCount != 1 {
+		t.Fatalf("ReviewQueue.SkillArtifactCount = %d, want 1", view.ReviewQueue.SkillArtifactCount)
+	}
+	if view.ReviewQueue.FailedWorkCount != 1 {
+		t.Fatalf("ReviewQueue.FailedWorkCount = %d, want 1", view.ReviewQueue.FailedWorkCount)
+	}
+	if view.ReviewQueue.TotalCount != 6 {
+		t.Fatalf("ReviewQueue.TotalCount = %d, want 6", view.ReviewQueue.TotalCount)
+	}
+}
+
+func seedOverviewReviewFixture(t *testing.T, ctx context.Context, env overviewTestEnvironment) {
+	t.Helper()
+
+	for _, item := range []struct {
+		externalID string
+		subject    string
+		status     string
+	}{
+		{externalID: "review-intake", subject: "Review an intake item", status: "review_required"},
+		{externalID: "approval-intake", subject: "Approve an intake item", status: "approval_required"},
+	} {
+		if _, err := env.store.CreateIntakeItem(ctx, sqlite.CreateIntakeItemParams{
+			WorkspaceID:         "default",
+			SourceFamily:        "operator",
+			ExternalObjectID:    item.externalID,
+			EventKind:           "request",
+			Subject:             item.subject,
+			DedupeKey:           item.externalID,
+			DedupeRecipeVersion: "test",
+			SourceFactsJSON:     `{}`,
+			Status:              item.status,
+			Scope:               "project",
+			ScopeKey:            "alpha",
+			Summary:             item.subject,
+		}); err != nil {
+			t.Fatalf("CreateIntakeItem(%s) error = %v", item.externalID, err)
+		}
+	}
+	if _, err := env.store.CreateSkillArtifact(ctx, sqlite.CreateSkillArtifactParams{
+		SkillKey:         "review-fixture-skill",
+		Scope:            "project",
+		ProjectID:        &env.projectID,
+		Status:           "review_required",
+		ArtifactType:     "proposal",
+		Summary:          "Review fixture skill artifact",
+		OutputJSON:       `{"title":"Review fixture skill artifact"}`,
+		RawOutput:        `{"title":"Review fixture skill artifact"}`,
+		HandlerRef:       "fixture",
+		ExecutionProfile: "test",
+		PermissionsJSON:  `[]`,
+	}); err != nil {
+		t.Fatalf("CreateSkillArtifact() error = %v", err)
+	}
+
+	contextTask, err := env.store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:   env.projectID,
+		Key:         "context-task",
+		Title:       "Context task",
+		Status:      "queued",
+		Scope:       "project",
+		RequestedBy: "test",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask(context) error = %v", err)
+	}
+	if _, err := (runtimeknowledge.Service{Store: env.store}).ProposeContextPack(ctx, runtimeknowledge.ContextPackParams{
+		TaskRef:    contextTask.Key,
+		ProjectKey: "alpha",
+	}); err != nil {
+		t.Fatalf("ProposeContextPack() error = %v", err)
+	}
+
+	if _, err := env.store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:   env.projectID,
+		Key:         "failed-task",
+		Title:       "Failed task",
+		Status:      "failed",
+		Scope:       "project",
+		RequestedBy: "test",
+	}); err != nil {
+		t.Fatalf("CreateTask(failed) error = %v", err)
 	}
 }
 

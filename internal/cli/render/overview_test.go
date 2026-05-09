@@ -14,6 +14,8 @@ func TestRenderOverviewUsesCanonicalLanes(t *testing.T) {
 
 	for _, want := range []string{
 		"Attention",
+		"Review Queue",
+		"wiring=live total=5 intake=1 approvals=1 knowledge=1 skills=1 failed=1",
 		"Active Execution",
 		"approval=1 work_item=alpha-task",
 		"run=7 status=pending resolver=unsupported",
@@ -134,6 +136,19 @@ func sampleOverview() overview.View {
 			CommandCount:         1,
 			ToolCount:            4,
 		},
+		SkillActivity: overview.SkillActivityLane{
+			Wiring:                      overview.WiringLive,
+			ReviewRequiredArtifactCount: 1,
+		},
+		ReviewQueue: overview.ReviewQueueLane{
+			Wiring:             overview.WiringLive,
+			TotalCount:         5,
+			IntakeCount:        1,
+			ApprovalCount:      1,
+			KnowledgeCount:     1,
+			SkillArtifactCount: 1,
+			FailedWorkCount:    1,
+		},
 		Approvals: []overview.ApprovalSummary{
 			{
 				ApprovalID:      1,
@@ -166,6 +181,15 @@ func sampleOverview() overview.View {
 					CompanionKey: &owner,
 					Source:       "approval",
 					Reason:       "pending",
+				},
+			},
+			RecoveryGuidance: []overview.RetryRecoveryGuidanceSummary{
+				{
+					TaskID:      1,
+					WorkItemKey: "alpha-task",
+					ProjectKey:  "alpha",
+					Status:      "failed",
+					Decision:    "retry_allowed",
 				},
 			},
 			Incidents: []overview.IncidentSummary{
@@ -212,10 +236,11 @@ func sampleOverview() overview.View {
 			},
 		},
 		IntakeInbox: overview.IntakeInboxLane{
-			Wiring: overview.WiringLive,
-			Source: "task_intakes",
-			Status: "linked_evidence",
-			Note:   "task_intakes are linked intake evidence; no raw governed intake items are currently present",
+			Wiring:           overview.WiringLive,
+			Source:           "task_intakes",
+			Status:           "linked_evidence",
+			Note:             "task_intakes are linked intake evidence; no raw governed intake items are currently present",
+			ReviewQueueCount: 1,
 			Items: []overview.IntakeEvidenceSummary{
 				{
 					IntakeID:       3,
@@ -230,6 +255,10 @@ func sampleOverview() overview.View {
 					WorkItemStatus: "blocked",
 				},
 			},
+		},
+		KnowledgeContextPacks: overview.KnowledgeContextPackLane{
+			Wiring:              overview.WiringLive,
+			ReviewRequiredCount: 1,
 		},
 		AutomationTriggers: overview.AutomationTriggerLane{
 			Wiring: overview.WiringLive,

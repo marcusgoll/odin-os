@@ -100,6 +100,19 @@ func RenderOverview(view overview.View) string {
 	}
 
 	lines = append(lines, "")
+	lines = append(lines, "Review Queue")
+	lines = append(lines, fmt.Sprintf(
+		"  wiring=%s total=%d intake=%d approvals=%d knowledge=%d skills=%d failed=%d",
+		valueOrNone(string(view.ReviewQueue.Wiring)),
+		view.ReviewQueue.TotalCount,
+		view.ReviewQueue.IntakeCount,
+		view.ReviewQueue.ApprovalCount,
+		view.ReviewQueue.KnowledgeCount,
+		view.ReviewQueue.SkillArtifactCount,
+		view.ReviewQueue.FailedWorkCount,
+	))
+
+	lines = append(lines, "")
 	lines = append(lines, "Active Execution")
 	lines = append(lines, fmt.Sprintf(
 		"  runs=%d swarms=%d",
