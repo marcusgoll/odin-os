@@ -101,8 +101,10 @@ Use one vocabulary across registry, prompts, workers, and executors:
    - Start with `odin-control-plane-contract-checks`.
    - Rewrite into current `docs/contracts/` or `registry/skills/`; do not copy legacy source directly.
 
-7. **Define GitHub intake adapter root**
-   - Pick one package root and remove placeholder duplication.
+7. **Preserve the GitHub intake adapter root**
+   - Use `internal/tracker` for GitHub issue/PR tracker behavior and keep
+     `internal/adapters/github` empty unless a later ADR assigns a non-tracker
+     responsibility.
    - Keep GitHub read-only until approval gates and tokens are reviewed.
 
 8. **Add executor security review contract**

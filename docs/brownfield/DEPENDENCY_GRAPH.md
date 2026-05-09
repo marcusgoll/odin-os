@@ -134,7 +134,8 @@ odin daemon
 - New agency scheduler logic must depend on `internal/runtime/jobs`, not bypass it.
 - New worker runners must depend on `internal/executors/contract`, not `internal/runner`.
 - New workspace logic must depend on `internal/vcs`, not `internal/workspace`.
-- New GitHub logic must land in one chosen adapter seam, not both `internal/tracker` and `internal/adapters/github`.
+- New GitHub issue/PR tracker logic must land in `internal/tracker`, not
+  `internal/adapters/github`.
 - New dashboard output must depend on `internal/runtime/projections` and SQLite read models, not query GitHub or worker processes directly.
 - New security checks must execute before subprocess launch, not only appear in prompts.
 

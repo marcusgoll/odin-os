@@ -116,7 +116,13 @@ Owns Git integration, worktrees, branches, and leases. All mutating project work
 
 ### `internal/adapters`
 
-Owns boundary integrations such as GitHub, shell, filesystem, web, Gmail, and calendar. Adapters translate outside systems into internal contracts; they do not own domain rules. Git-specific operational behavior that is not domain policy belongs here only when it is an external-system adapter concern.
+Owns boundary integrations such as shell, filesystem, web, Gmail, and calendar. Adapters translate outside systems into internal contracts; they do not own domain rules. Git-specific operational behavior that is not domain policy belongs here only when it is an external-system adapter concern.
+
+GitHub issue and pull request tracker behavior is the current exception: it
+belongs under the canonical `internal/tracker` seam. The
+`internal/adapters/github` directory is reserved empty and must not receive
+issue, pull request, label, comment, token, follow-up issue, or tracker
+behavior unless a later ADR explicitly moves that responsibility.
 
 ### `internal/store`
 

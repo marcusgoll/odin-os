@@ -1,18 +1,20 @@
 ---
 title: Odin OS GitHub Tracker Consolidation
-status: draft
-date: 2026-04-30
+status: active
+date: 2026-05-09
 ---
 
 # Odin OS GitHub Tracker Consolidation
 
 ## Current Decision
 
-Use `internal/tracker` as the canonical GitHub Issues/PR tracker seam for the
-current migration slice.
+Use `internal/tracker` as the canonical GitHub Issues/PR tracker seam.
 
-The older `internal/adapters/github` directory remains a placeholder and should
-not receive new tracker behavior unless a later ADR explicitly moves the seam.
+The empty `internal/adapters/github` directory is reserved only as a
+non-authoritative placeholder. It must not receive GitHub issue, pull request,
+label, comment, follow-up issue, token, or tracker behavior unless a later ADR
+explicitly moves the seam. Keeping it empty preserves the broader
+`internal/adapters` namespace without creating a second GitHub system.
 
 ## What Changed
 
@@ -34,6 +36,15 @@ not receive new tracker behavior unless a later ADR explicitly moves the seam.
   `external_issues` with idempotent upsert by provider, repo, and issue number.
 - Intake does not dispatch scheduler work, invoke workers, create PRs, add
   comments, or mutate GitHub labels.
+
+## Canonical Paths
+
+| Responsibility | Canonical path | Notes |
+| --- | --- | --- |
+| GitHub issue/PR tracker contract | `internal/tracker` | Domain-facing tracker interface and label vocabulary. |
+| GitHub REST implementation for tracker operations | `internal/tracker/github` | Provider adapter behind the tracker contract. |
+| Intake orchestration and SQLite reconciliation | `internal/tracker/intake` | Bridges external issues into Odin Work Items through existing runtime services. |
+| Generic GitHub adapter placeholder | `internal/adapters/github` | Reserved empty placeholder; no tracker behavior belongs here. |
 
 ## Preserved Labels
 
@@ -80,8 +91,8 @@ remain the durable authority.
    are specified.
 3. Add integration fixtures for `FetchIssueByID`, comments, label mutation, and
    follow-up issue creation.
-4. Decide whether `internal/adapters/github` should be removed or retained only
-   for non-tracker GitHub APIs.
+4. Keep `internal/adapters/github` empty unless a later ADR assigns it a
+   non-tracker GitHub responsibility.
 5. Add rate-limit handling and retry classification for transient GitHub errors.
 6. Add PR-specific methods only after the draft PR manager contract is locked.
 7. Add explicit paused-state behavior only after scheduler pause/resume semantics

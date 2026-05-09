@@ -42,5 +42,6 @@ Do not delete a shim until all of these are true:
 1. Add a canonical `internal/executors/codex_exec` package with command construction tests and security policy enforcement.
 2. Move runner compatibility tests to executor contract tests once the real Codex exec adapter exists.
 3. Replace `internal/runner/appserver` with a phase-two executor adapter only after app-server protocol ownership is decided.
-4. Normalize `internal/tracker/github` into the selected GitHub intake package root.
+4. Keep `internal/tracker/github` as the selected GitHub intake package root;
+   do not move tracker behavior into `internal/adapters/github`.
 5. Normalize `internal/prompts` into a typed renderer over repo-owned prompt assets.

@@ -137,9 +137,10 @@ Codex app-server should remain behind the executor interface and should not leak
    - No behavior changes.
    - Proof: `go test ./internal/store/sqlite`.
 
-8. **Choose GitHub intake package root**
-   - Decide between `internal/adapters/github`, `internal/core/intake/github`, or another single root.
-   - Remove duplicate placeholder root.
+8. **Preserve GitHub intake package root**
+   - Keep GitHub tracker behavior under `internal/tracker`.
+   - Keep `internal/adapters/github` empty unless a later ADR assigns it a
+     non-tracker GitHub responsibility.
    - Proof: package inventory has one GitHub intake seam.
 
 9. **Add service hardening plan for systemd**
