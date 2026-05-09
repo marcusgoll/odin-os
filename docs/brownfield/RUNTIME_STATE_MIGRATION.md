@@ -117,7 +117,10 @@ For additive schema migrations such as PR handoff persistence:
 
 ## Next Migration Tickets
 
-1. Add pull request handoff tables only after PR manager behavior is specified.
+1. Wire persisted PR handoff review intents into read-only executor-backed
+   reviewer, QA, and security run attempts.
+2. Add live GitHub PR create/update proof before enabling non-fixture PR
+   mutation by default.
 2. Decide whether locks are SQLite rows, projection freshness records, or filesystem locks before adding a table.
 3. Add repository methods for active agent runs and cleanup-eligible workspaces.
 4. Move services one at a time from direct `sqlite.Store` calls to `internal/db` interfaces after characterization tests exist.
