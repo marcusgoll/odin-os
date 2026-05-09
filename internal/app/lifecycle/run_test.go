@@ -2976,6 +2976,102 @@ func TestRunTriggerHumanizedTimingDefersQuietHoursAndCoalescesMissedRuns(t *test
 	}
 }
 
+func TestRunTriggerBatchingGroupsSchedulesAndPreservesApproval(t *testing.T) {
+	t.Parallel()
+
+	root := testRepoRoot(t)
+	run := func(args ...string) string {
+		t.Helper()
+		var stdout bytes.Buffer
+		if err := Run(context.Background(), root, args, strings.NewReader(""), &stdout); err != nil {
+			t.Fatalf("Run(%v) error = %v\nstdout=%s", args, err, stdout.String())
+		}
+		return stdout.String()
+	}
+
+	run("project", "select", "odin-core")
+	run("transition", "set", "cutover", "confirm", "because", "batched trigger approval proof")
+	for _, item := range []struct {
+		key  string
+		next string
+	}{
+		{key: "batch-cli-first", next: "2026-05-05T09:05:00Z"},
+		{key: "batch-cli-second", next: "2026-05-05T09:20:00Z"},
+	} {
+		run("trigger", "upsert", item.key,
+			"initiative=odin-core",
+			"kind=schedule",
+			"status=enabled",
+			"next="+item.next,
+			"title="+item.key,
+			"batch=ops-review",
+			"batch_window=1h",
+			"intent=governance",
+			"--json",
+		)
+	}
+
+	tickOutput := run("scheduler", "tick", "now=2026-05-05T09:30:00Z", "recovery=false", "--json")
+	var tick struct {
+		TriggerEvaluation struct {
+			Evaluated    int `json:"evaluated"`
+			Materialized int `json:"materialized"`
+		} `json:"trigger_evaluation"`
+	}
+	if err := json.Unmarshal([]byte(tickOutput), &tick); err != nil {
+		t.Fatalf("json.Unmarshal(scheduler tick) error = %v\n%s", err, tickOutput)
+	}
+	if tick.TriggerEvaluation.Evaluated != 2 || tick.TriggerEvaluation.Materialized != 1 {
+		t.Fatalf("scheduler tick = %+v, want two evaluated triggers and one batched work item", tick)
+	}
+
+	var list struct {
+		Triggers []struct {
+			Key             string `json:"key"`
+			LastWorkItemKey string `json:"last_work_item_key"`
+		} `json:"triggers"`
+	}
+	if err := json.Unmarshal([]byte(run("trigger", "list", "--json")), &list); err != nil {
+		t.Fatalf("json.Unmarshal(trigger list) error = %v", err)
+	}
+	var sharedWorkItem string
+	for _, trigger := range list.Triggers {
+		if trigger.Key != "batch-cli-first" && trigger.Key != "batch-cli-second" {
+			continue
+		}
+		if trigger.LastWorkItemKey == "" {
+			t.Fatalf("trigger %s has no last work item in %+v", trigger.Key, list.Triggers)
+		}
+		if sharedWorkItem == "" {
+			sharedWorkItem = trigger.LastWorkItemKey
+			continue
+		}
+		if trigger.LastWorkItemKey != sharedWorkItem {
+			t.Fatalf("batched trigger work item = %s, want shared %s", trigger.LastWorkItemKey, sharedWorkItem)
+		}
+	}
+	if sharedWorkItem == "" {
+		t.Fatalf("trigger list = %+v, want batched work item", list.Triggers)
+	}
+
+	dispatch := run("work", "dispatch", "--task", sharedWorkItem, "--json")
+	if !strings.Contains(dispatch, `"reason": "approval_required"`) || !strings.Contains(dispatch, `"status": "blocked"`) || !strings.Contains(dispatch, `"execution_intent": "governance"`) {
+		t.Fatalf("batched dispatch output = %s, want governance approval-required block", dispatch)
+	}
+
+	logs := run("logs", "--json")
+	for _, want := range []string{
+		`"key": "batch-cli-first"`,
+		`"key": "batch-cli-second"`,
+		`"requested_by": "automation_trigger_batch_evaluator"`,
+		`"type": "approval.requested"`,
+	} {
+		if !strings.Contains(logs, want) {
+			t.Fatalf("logs output = %s, want %s", logs, want)
+		}
+	}
+}
+
 func TestRunTriggerEventMVPUsesInternalEventsWithDedupeAndApprovalGates(t *testing.T) {
 	t.Parallel()
 

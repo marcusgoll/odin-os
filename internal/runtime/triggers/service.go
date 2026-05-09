@@ -35,6 +35,8 @@ type UpsertParams struct {
 	Cron                string
 	QuietHours          string
 	QuietTimezone       string
+	BatchKey            string
+	BatchWindow         string
 	EventType           string
 	MatchStatus         string
 	MatchPreviousStatus string
@@ -81,6 +83,14 @@ type DeferredEvaluationResult struct {
 	DeferredUntil time.Time
 }
 
+type dueScheduleFire struct {
+	Trigger        sqlite.AutomationTrigger
+	Rule           scheduleRule
+	DueAt          time.Time
+	Reason         string
+	NextEligibleAt *time.Time
+}
+
 func (service Service) Upsert(ctx context.Context, params UpsertParams) (sqlite.AutomationTrigger, error) {
 	if service.Store == nil {
 		return sqlite.AutomationTrigger{}, fmt.Errorf("automation trigger store is required")
@@ -100,6 +110,8 @@ func (service Service) Upsert(ctx context.Context, params UpsertParams) (sqlite.
 	cron := strings.TrimSpace(params.Cron)
 	quietHours := strings.TrimSpace(params.QuietHours)
 	quietTimezone := strings.TrimSpace(params.QuietTimezone)
+	batchKey := strings.TrimSpace(params.BatchKey)
+	batchWindow := strings.TrimSpace(params.BatchWindow)
 	eventType := strings.TrimSpace(params.EventType)
 	matchStatus := strings.TrimSpace(params.MatchStatus)
 	matchPreviousStatus := strings.TrimSpace(params.MatchPreviousStatus)
@@ -127,6 +139,17 @@ func (service Service) Upsert(ctx context.Context, params UpsertParams) (sqlite.
 	}
 	if quietHours != "" {
 		if _, err := parseQuietHoursRule(quietHours, quietTimezone); err != nil {
+			return sqlite.AutomationTrigger{}, err
+		}
+	}
+	if batchKey != "" && batchWindow == "" {
+		return sqlite.AutomationTrigger{}, fmt.Errorf("automation trigger batch_window is required when batch is set")
+	}
+	if batchWindow != "" {
+		if batchKey == "" {
+			return sqlite.AutomationTrigger{}, fmt.Errorf("automation trigger batch is required when batch_window is set")
+		}
+		if _, err := parseScheduleBatchWindow(batchWindow); err != nil {
 			return sqlite.AutomationTrigger{}, err
 		}
 	}
@@ -183,6 +206,10 @@ func (service Service) Upsert(ctx context.Context, params UpsertParams) (sqlite.
 		if quietHours != "" {
 			payload["quiet_hours"] = quietHours
 			payload["quiet_timezone"] = defaultTriggerString(quietTimezone, "UTC")
+		}
+		if batchKey != "" {
+			payload["batch_key"] = batchKey
+			payload["batch_window"] = batchWindow
 		}
 		encoded, err := json.Marshal(payload)
 		if err != nil {
@@ -332,6 +359,8 @@ func (service Service) EvaluateDue(ctx context.Context, now time.Time) (DueEvalu
 	}
 
 	var result DueEvaluationResult
+	batches := map[string][]dueScheduleFire{}
+	var batchOrder []string
 	for _, trigger := range due {
 		if trigger.NextEligibleAt == nil {
 			continue
@@ -408,24 +437,77 @@ func (service Service) EvaluateDue(ctx context.Context, now time.Time) (DueEvalu
 			result.Errored++
 			continue
 		}
-		fire, err := service.Store.FireAutomationTrigger(ctx, sqlite.FireAutomationTriggerParams{
-			WorkspaceID:       trigger.WorkspaceID,
-			Key:               trigger.Key,
-			Source:            "schedule",
-			Reason:            scheduledDueReason(dueAt),
-			RequestedBy:       "automation_trigger_evaluator",
-			SetNextEligibleAt: true,
-			NextEligibleAt:    nextEligibleAt,
-		})
-		if err != nil {
+		fire := dueScheduleFire{
+			Trigger:        trigger,
+			Rule:           rule,
+			DueAt:          dueAt,
+			Reason:         scheduledDueReason(dueAt),
+			NextEligibleAt: nextEligibleAt,
+		}
+		if groupKey, reason, ok, err := scheduleBatchGroup(trigger, rule, dueAt); err != nil {
+			if _, markErr := service.Store.MarkAutomationTriggerErrored(ctx, sqlite.MarkAutomationTriggerErroredParams{
+				WorkspaceID: trigger.WorkspaceID,
+				Key:         trigger.Key,
+				Reason:      "batch-policy",
+				Error:       err.Error(),
+			}); markErr != nil {
+				return result, markErr
+			}
+			result.Errored++
+			continue
+		} else if ok {
+			fire.Reason = reason
+			if _, exists := batches[groupKey]; !exists {
+				batchOrder = append(batchOrder, groupKey)
+			}
+			batches[groupKey] = append(batches[groupKey], fire)
+			continue
+		}
+		if err := service.fireDueSchedule(ctx, fire, "automation_trigger_evaluator", nil, &result); err != nil {
 			return result, err
 		}
-		if fire.CreatedWorkItem {
-			result.Materialized++
+	}
+	for _, key := range batchOrder {
+		if err := service.fireDueScheduleBatch(ctx, batches[key], &result); err != nil {
+			return result, err
 		}
-		result.Results = append(result.Results, fire)
 	}
 	return result, nil
+}
+
+func (service Service) fireDueScheduleBatch(ctx context.Context, batch []dueScheduleFire, result *DueEvaluationResult) error {
+	var reusedTaskID *int64
+	for _, item := range batch {
+		if err := service.fireDueSchedule(ctx, item, "automation_trigger_batch_evaluator", reusedTaskID, result); err != nil {
+			return err
+		}
+		if len(result.Results) > 0 {
+			taskID := result.Results[len(result.Results)-1].WorkItem.ID
+			reusedTaskID = &taskID
+		}
+	}
+	return nil
+}
+
+func (service Service) fireDueSchedule(ctx context.Context, item dueScheduleFire, requestedBy string, reuseTaskID *int64, result *DueEvaluationResult) error {
+	fire, err := service.Store.FireAutomationTrigger(ctx, sqlite.FireAutomationTriggerParams{
+		WorkspaceID:       item.Trigger.WorkspaceID,
+		Key:               item.Trigger.Key,
+		Source:            "schedule",
+		Reason:            item.Reason,
+		RequestedBy:       requestedBy,
+		SetNextEligibleAt: true,
+		NextEligibleAt:    item.NextEligibleAt,
+		ReuseTaskID:       reuseTaskID,
+	})
+	if err != nil {
+		return err
+	}
+	if fire.CreatedWorkItem {
+		result.Materialized++
+	}
+	result.Results = append(result.Results, fire)
+	return nil
 }
 
 func (service Service) applyWorkspaceQuietHours(ctx context.Context, trigger sqlite.AutomationTrigger, rule scheduleRule) (scheduleRule, error) {
@@ -589,6 +671,48 @@ func scheduledDueReason(dueAt time.Time) string {
 	return "due-" + dueAt.UTC().Format("20060102t150405z")
 }
 
+func scheduleBatchGroup(trigger sqlite.AutomationTrigger, rule scheduleRule, dueAt time.Time) (string, string, bool, error) {
+	batchKey := strings.TrimSpace(rule.BatchKey)
+	if batchKey == "" {
+		return "", "", false, nil
+	}
+	window, err := parseScheduleBatchWindow(rule.BatchWindow)
+	if err != nil {
+		return "", "", false, err
+	}
+	bucketStart := dueAt.UTC()
+	bucketStart = time.Unix(0, (bucketStart.UnixNano()/window.Nanoseconds())*window.Nanoseconds()).UTC()
+	normalizedBatchKey := sanitizeExternalEventKey(batchKey)
+	if normalizedBatchKey == "" {
+		return "", "", false, fmt.Errorf("automation trigger batch key %q has no usable characters", batchKey)
+	}
+	intent := strings.ToLower(strings.TrimSpace(rule.ExecutionIntent))
+	groupKey := strings.Join([]string{
+		defaultTriggerString(trigger.WorkspaceID, "default"),
+		strconv.FormatInt(trigger.ProjectID, 10),
+		intent,
+		normalizedBatchKey,
+		bucketStart.Format("20060102t150405z"),
+	}, ":")
+	reason := "batch-" + normalizedBatchKey + "-" + bucketStart.Format("20060102t150405z")
+	return groupKey, reason, true, nil
+}
+
+func parseScheduleBatchWindow(value string) (time.Duration, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0, fmt.Errorf("automation trigger batch_window is required when batch is set")
+	}
+	window, err := time.ParseDuration(value)
+	if err != nil || window <= 0 {
+		if err == nil {
+			err = fmt.Errorf("batch_window must be greater than zero")
+		}
+		return 0, fmt.Errorf("invalid automation trigger batch_window %q: %w", value, err)
+	}
+	return window, nil
+}
+
 func normalizeGitHubIssueAction(value string) string {
 	action := strings.ToLower(strings.TrimSpace(value))
 	if action == "" {
@@ -659,6 +783,9 @@ type scheduleRule struct {
 	Cron                string `json:"cron"`
 	QuietHours          string `json:"quiet_hours"`
 	QuietTimezone       string `json:"quiet_timezone"`
+	BatchKey            string `json:"batch_key"`
+	BatchWindow         string `json:"batch_window"`
+	ExecutionIntent     string `json:"execution_intent"`
 	EventType           string `json:"event_type"`
 	MatchStatus         string `json:"match_status"`
 	MatchPreviousStatus string `json:"match_previous_status"`
