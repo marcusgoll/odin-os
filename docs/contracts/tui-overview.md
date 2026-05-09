@@ -120,6 +120,32 @@ Rules:
 - support filters such as `supported` and `unsupported` may narrow the visible approval list, but they are inspection filters only
 - approval filters must not create batch approve or deny actions; every approval mutation must still target one explicit `Approval Request` and pass workflow-owned resolver support
 
+#### Review Queue Contract
+
+`odin review` is the unified governed decision queue for operator-visible decisions. It is not a second approval system and must not be forked into a parallel review queue.
+
+Rules:
+
+- `odin review list` composes review entries from source-specific same-package adapters; each adapter reads its existing runtime authority and returns `reviewQueueEntry` records
+- source adapters may be added for new governed decision sources, but they must preserve one queue shape and the existing `review show` / `review act` command contract
+- unsupported sources remain visible for inspection with empty or restricted `allowed_actions`
+- unsupported actions must fail closed through the existing review handlers and return machine-readable unsupported / not-resolved output when that handler already supports it
+- adding a source adapter does not grant resolver behavior; resolver behavior belongs to the source-owned workflow or approval service
+
+Source/action contract:
+
+| Source type | Queue ID prefix | Runtime authority | Allowed actions |
+| --- | --- | --- | --- |
+| `intake_review` | `intake-review:<id>` | raw intake item with reviewable status | intake review actions from the intake workflow (`accept`, `reject`, `archive`, `clarify` when supported by status) |
+| `intake_approval` | `intake-approval:<id>` | raw intake item requiring approval | `approve`, `deny` |
+| `intake_goal_conversion` | `intake-goal:<id>` | raw intake item linked to a goal | visible as a goal-derived decision; approve/reject goes through goal review handlers |
+| `goal` | `goal:<id>` or `goal-approval:<id>` | goal status | approve/reject through goal review handlers |
+| `goal_blocker` | `goal-blocker:<id>` | open goal blocker | visible for inspection; approve/reject is unsupported until blocker resolution exists |
+| `task_approval` | `approval:<id>` | pending task approval request | `approve`, `deny` through the approval resolver |
+| `skill_artifact` | `skill-artifact:<id>` | reviewable skill artifact | skill artifact review actions from artifact status (`accept`, `reject`, `archive`) |
+| `context_pack` | `context-pack:<id>` | proposed operator context packet | context-pack review actions (`accept`, `reject`, `archive`) |
+| `failed_work` | `failed-work:<id>` | failed work item projection and retry policy | `retry`, with retry eligibility enforced by failed-work policy |
+
 ### Observability
 
 This is the first-class runtime-understanding lane.
