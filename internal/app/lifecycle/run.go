@@ -4425,7 +4425,13 @@ func runServe(ctx context.Context, app bootstrap.App, cfg appconfig.Config, stdo
 				ReadModels:      app.Store.DB(),
 				RegistryHealthy: healthDeps.RegistryHealthy,
 				Now:             now,
-				AdminToken:      cfg.AdminToken,
+				Tmux: apihttp.WorkspaceTmuxStatusProvider{
+					Workspaces: coreworkspace.Service{
+						Store:    app.Store,
+						Registry: app.Registry,
+					},
+				},
+				AdminToken: cfg.AdminToken,
 				Admin: serveDashboardAdmin{
 					ImmediateNotReady: &immediateNotReady,
 					RuntimeState:      stateService,

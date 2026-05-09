@@ -33,7 +33,9 @@ If no tmux status provider is configured, `/status` returns:
 {"tmux":{"available":false,"source":"not_configured"}}
 ```
 
-tmux absence must not prevent `odin serve` from starting.
+`odin serve` configures the optional workspace tmux status provider. It reports only Odin workspace sessions that the existing workspace service recognizes as live, using the session metadata already bound to managed/adopted workspaces. The provider source is `workspace_sessions`; it reports live and attached session counts plus per-session project key, session name, state, facts source, and attach count.
+
+tmux absence must not prevent `odin serve` from starting. If the provider cannot read tmux state, `/status` still returns 200 and reports the provider error under `tmux.error`. Existing tmux/operator scripts remain compatible because `/status` consumes the current workspace service and does not replace or scrape script output as durable authority.
 
 ## Remaining placeholders
 
