@@ -5,13 +5,13 @@ Use this checklist before treating Odin OS as the active homelab controller.
 ## Deployment
 
 - `odin` binary is built and installed at the intended runtime path
-- `deploy/systemd/odin.service` is installed and enabled
-- `deploy/systemd/odin.env.example` has been copied to a real env file and reviewed
+- `deploy/systemd/odin-os.service` is installed and enabled
+- `deploy/systemd/odin-os.env.example` has been copied to `~/.config/odin/odin-os.env` and reviewed
 - the configured `ODIN_ROOT` exists and has the expected permissions
 
 ## Restart safety
 
-- `systemctl restart odin` completes cleanly
+- `systemctl --user restart odin-os.service` completes cleanly
 - interrupted runs are converted into auditable restart recovery records
 - restart-triggered wake packets are visible for recovered work
 

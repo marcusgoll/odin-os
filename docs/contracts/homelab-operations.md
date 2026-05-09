@@ -84,9 +84,14 @@ Phase 15 treats `systemd` as the primary homelab deployment path.
 
 Supporting artifacts include:
 
-- `deploy/systemd/odin.service`
-- `deploy/systemd/odin.env.example`
-- `scripts/dev/install-systemd-service.sh`
+- `deploy/systemd/odin-os.service`
+- `deploy/systemd/odin-os.env.example`
+- `scripts/install-service.sh`
+
+The older `deploy/systemd/odin.service`, `deploy/systemd/odin.env.example`, and
+`scripts/dev/install-systemd-service.sh` are compatibility assets only. New
+operator docs and proofs must use `odin-os.service`; existing legacy hosts must
+be migrated only with explicit operator approval.
 
 ## Audit expectations
 

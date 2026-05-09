@@ -7,8 +7,8 @@ date: 2026-04-30
 # Odin OS Deployment
 
 This document describes the supported deployment paths for Odin OS. It preserves
-the current user-systemd deployment while adding a hardened `odin-os.service`
-path for future cutovers.
+the current user-systemd deployment through the hardened `odin-os.service`
+path.
 
 ## Current Server Path
 
@@ -29,6 +29,10 @@ systemctl --user status odin-os.service --no-pager
 systemctl --user cat odin-os.service
 ```
 
+See `docs/operations/legacy-systemd-disposition.md` for the full inventory of
+legacy `odin.service` and `odin.env` references and the migration decision for
+each one.
+
 ## Build
 
 Build both binaries from a clean checkout:
@@ -41,7 +45,7 @@ The systemd service uses the canonical `bin/odin` command surface.
 
 ## User systemd Install
 
-Install the safer user service without starting it:
+Install the canonical user service without starting it:
 
 ```bash
 scripts/install-service.sh
@@ -65,6 +69,11 @@ The installer copies:
 - `deploy/systemd/odin-os.env.example` to `~/.config/odin/odin-os.env` if the env file does not already exist
 
 It does not overwrite an existing env file unless `--force` is provided.
+
+Do not use `scripts/dev/install-systemd-service.sh` for new deployments. That
+script remains only as a compatibility installer for the older `odin.service`
+unit and must not be run against a live host unless a human operator explicitly
+approves the legacy path.
 
 ## Environment Files and Secrets
 
