@@ -387,6 +387,143 @@ func TestExecuteNextQueuedRecordsWorkerPanicAsFailedRun(t *testing.T) {
 	}
 }
 
+func TestExecuteTaskWithRequestCompletesDirectTask(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openJobStore(t)
+	defer store.Close()
+
+	registry := writeRegistry(t)
+	service := Service{
+		Store:          store,
+		Registry:       registry,
+		Executors:      testJobExecutors(),
+		ExecutorConfig: mustLoadExecutorConfig(t),
+		Transitions:    projects.Service{Store: store},
+		Leases: leases.Manager{
+			Store:        store,
+			Git:          &jobTestGit{},
+			WorktreeRoot: t.TempDir(),
+		},
+		Now: time.Now,
+	}
+
+	task, err := service.CreateTaskFromAct(ctx, scope.Resolution{
+		Kind:       scope.ScopeProject,
+		ProjectKey: "alpha",
+	}, "Inspect direct task")
+	if err != nil {
+		t.Fatalf("CreateTaskFromAct() error = %v", err)
+	}
+
+	project, err := store.GetProjectByKey(ctx, "alpha")
+	if err != nil {
+		t.Fatalf("GetProjectByKey(alpha) error = %v", err)
+	}
+	if _, err := service.Transitions.SetTransitionState(ctx, projects.TransitionStateInput{
+		ProjectID:   project.ID,
+		Actor:       projects.TransitionControllerOdinOS,
+		TargetState: projects.TransitionStateCutover,
+		ChangedBy:   "test",
+	}); err != nil {
+		t.Fatalf("SetTransitionState(cutover) error = %v", err)
+	}
+
+	outcome, err := service.ExecuteTaskWithRequest(ctx, task.ID, ExecutionRequest{})
+	if err != nil {
+		t.Fatalf("ExecuteTaskWithRequest() error = %v", err)
+	}
+	if outcome.Run == nil {
+		t.Fatal("ExecuteTaskWithRequest().Run = nil, want completed run")
+	}
+	if outcome.Task.Status != "completed" || outcome.Run.Status != "completed" {
+		t.Fatalf("ExecutionOutcome = %+v, want completed task and run", outcome)
+	}
+	if outcome.Run.Executor != "codex_headless" {
+		t.Fatalf("Run.Executor = %q, want codex_headless", outcome.Run.Executor)
+	}
+}
+
+func TestExecuteTaskWithRequestRecordsWorkerPanicAsFailedRun(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openJobStore(t)
+	defer store.Close()
+
+	registry := writeRegistryAllowingDirectAlphaMutation(t)
+	service := Service{
+		Store:    store,
+		Registry: registry,
+		Executors: map[string]contract.Executor{
+			"codex_headless": panicExecutor{},
+		},
+		ExecutorConfig: mustLoadExecutorConfig(t),
+		Transitions:    projects.Service{Store: store},
+		Leases: leases.Manager{
+			Store:        store,
+			Git:          &jobTestGit{},
+			WorktreeRoot: t.TempDir(),
+		},
+		Now: time.Now,
+	}
+
+	task, err := service.CreateTaskFromAct(ctx, scope.Resolution{
+		Kind:       scope.ScopeProject,
+		ProjectKey: "alpha",
+	}, "Implement panic containment")
+	if err != nil {
+		t.Fatalf("CreateTaskFromAct() error = %v", err)
+	}
+
+	project, err := store.GetProjectByKey(ctx, "alpha")
+	if err != nil {
+		t.Fatalf("GetProjectByKey(alpha) error = %v", err)
+	}
+	if _, err := service.Transitions.SetTransitionState(ctx, projects.TransitionStateInput{
+		ProjectID:   project.ID,
+		Actor:       projects.TransitionControllerOdinOS,
+		TargetState: projects.TransitionStateCutover,
+		ChangedBy:   "test",
+	}); err != nil {
+		t.Fatalf("SetTransitionState(cutover) error = %v", err)
+	}
+
+	outcome, err := service.ExecuteTaskWithRequest(ctx, task.ID, ExecutionRequest{})
+	if err == nil {
+		t.Fatal("ExecuteTaskWithRequest() error = nil, want recovered worker panic error")
+	}
+	if !strings.Contains(err.Error(), "worker panic") {
+		t.Fatalf("ExecuteTaskWithRequest() error = %v, want worker panic context", err)
+	}
+	if outcome.Run == nil {
+		t.Fatal("ExecuteTaskWithRequest().Run = nil, want failed run")
+	}
+
+	gotTask, err := store.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
+	}
+	if gotTask.Status != "failed" {
+		t.Fatalf("GetTask().Status = %q, want failed", gotTask.Status)
+	}
+
+	run, err := latestRunForTask(ctx, store, task.ID)
+	if err != nil {
+		t.Fatalf("latestRunForTask() error = %v", err)
+	}
+	if run.Status != "failed" {
+		t.Fatalf("run.Status = %q, want failed", run.Status)
+	}
+	if !strings.Contains(run.Summary, "worker panic") {
+		t.Fatalf("run.Summary = %q, want worker panic context", run.Summary)
+	}
+	if _, err := store.GetActiveWorktreeLeaseByTaskRun(ctx, task.ID, run.ID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("GetActiveWorktreeLeaseByTaskRun() error = %v, want sql.ErrNoRows", err)
+	}
+}
+
 func TestExecuteNextQueuedSkipsDispatchWhenShutdownRequested(t *testing.T) {
 	t.Parallel()
 
@@ -1658,10 +1795,22 @@ func openJobStore(t *testing.T) *sqlite.Store {
 func writeRegistry(t *testing.T) projects.Registry {
 	t.Helper()
 
-	return writeRegistryWithAlphaDefaultBranch(t, "main")
+	return writeRegistryWithAlphaOptions(t, "main", true)
 }
 
 func writeRegistryWithAlphaDefaultBranch(t *testing.T, alphaDefaultBranch string) projects.Registry {
+	t.Helper()
+
+	return writeRegistryWithAlphaOptions(t, alphaDefaultBranch, true)
+}
+
+func writeRegistryAllowingDirectAlphaMutation(t *testing.T) projects.Registry {
+	t.Helper()
+
+	return writeRegistryWithAlphaOptions(t, "main", false)
+}
+
+func writeRegistryWithAlphaOptions(t *testing.T, alphaDefaultBranch string, alphaRequireWorktree bool) projects.Registry {
 	t.Helper()
 
 	root := t.TempDir()
@@ -1713,7 +1862,7 @@ projects:
       allowed_commands: [status]
       branch_rules:
         protected_branches: [main]
-        require_worktree: true
+        require_worktree: %t
         require_task_branch: true
         allow_default_branch_mutation: false
       approval_gates:
@@ -1728,7 +1877,7 @@ projects:
         allow_clean: false
         allow_force_push: false
         require_explicit_approval: true
-`, alphaDefaultBranch)
+`, alphaDefaultBranch, alphaRequireWorktree)
 
 	if err := os.WriteFile(configPath, []byte(configYAML), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
