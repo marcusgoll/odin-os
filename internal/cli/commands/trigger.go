@@ -2,6 +2,7 @@ package commands
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"strconv"
@@ -12,14 +13,14 @@ import (
 	"odin-os/internal/store/sqlite"
 )
 
-const TriggerUsage = "trigger [list|show <key>|upsert <key>|fire <key>|evaluate|ingest github-issue] [key=value ...] [--json]"
+const TriggerUsage = "trigger [list|show <key>|create <key>|upsert <key>|test <key>|audit <key>|fire <key>|evaluate|ingest github-issue] [key=value ...] [--json]"
 
 func RunTrigger(ctx context.Context, service triggers.Service, args []string, stdout io.Writer) error {
 	if len(args) == 0 {
 		return fmt.Errorf("usage: odin %s", TriggerUsage)
 	}
 	if args[0] == "--help" || args[0] == "help" {
-		_, err := fmt.Fprintf(stdout, "usage: odin %s\n\nScheduled triggers:\n  odin trigger upsert <key> initiative=<project> kind=schedule status=enabled next=<RFC3339> [cadence=<duration>] [cron=<expr>] [quiet=<HH:MM-HH:MM>] [batch=<key> batch_window=<duration>] [title=<text>] [summary=<text>] [intent=<read_only|mutation|governance|destructive>] [--json]\n  odin trigger evaluate now=<RFC3339> [--json]\n\nManual trigger fire:\n  odin trigger fire <key> [reason=<reason>] [--json]\n\nEvent triggers:\n  odin trigger upsert <key> initiative=<project> kind=event event=<event_type> [match_status=<status>] [match_previous_status=<status>] [match_task_id=<id>] [match_scope=<scope>] [match_provider=<provider>] [match_repo=<owner/repo>] [intent=<read_only|mutation|governance|destructive>] [--json]\n  odin trigger evaluate source=events [--json]\n\nExternal event ingest:\n  odin trigger ingest github-issue project=<project> repo=<owner/repo> number=<n> action=<opened> title=<text> [body=<text>] [url=<url>] [labels=a,b] [--json]\n", TriggerUsage)
+		_, err := fmt.Fprintf(stdout, "usage: odin %s\n\nScheduled triggers:\n  odin trigger create <key> initiative=<project> kind=schedule status=enabled next=<RFC3339> [cadence=<duration>] [cron=<expr>] [quiet=<HH:MM-HH:MM>] [batch=<key> batch_window=<duration>] [title=<text>] [summary=<text>] [intent=<read_only|mutation|governance|destructive>] [--json]\n  odin trigger upsert <key> initiative=<project> kind=schedule status=enabled next=<RFC3339> [cadence=<duration>] [cron=<expr>] [quiet=<HH:MM-HH:MM>] [batch=<key> batch_window=<duration>] [title=<text>] [summary=<text>] [intent=<read_only|mutation|governance|destructive>] [--json]\n  odin trigger test <key> now=<RFC3339> [--json]\n  odin trigger evaluate now=<RFC3339> [--json]\n\nManual trigger fire:\n  odin trigger fire <key> [reason=<reason>] [--json]\n\nAudit:\n  odin trigger audit <key> [--json]\n\nEvent triggers:\n  odin trigger create <key> initiative=<project> kind=event event=<event_type> [match_status=<status>] [match_previous_status=<status>] [match_task_id=<id>] [match_scope=<scope>] [match_provider=<provider>] [match_repo=<owner/repo>] [intent=<read_only|mutation|governance|destructive>] [--json]\n  odin trigger evaluate source=events [--json]\n\nExternal event ingest:\n  odin trigger ingest github-issue project=<project> repo=<owner/repo> number=<n> action=<opened> title=<text> [body=<text>] [url=<url>] [labels=a,b] [--json]\n", TriggerUsage)
 		return err
 	}
 	jsonOutput, args, err := consumeTriggerJSONFlag(args)
@@ -44,7 +45,7 @@ func RunTrigger(ctx context.Context, service triggers.Service, args []string, st
 			return err
 		}
 		return runTriggerShow(ctx, service, options["workspace"], args[1], stdout, jsonOutput)
-	case "upsert":
+	case "create", "upsert":
 		if len(args) < 2 {
 			return fmt.Errorf("usage: odin %s", TriggerUsage)
 		}
@@ -95,6 +96,78 @@ func RunTrigger(ctx context.Context, service triggers.Service, args []string, st
 			trigger.Kind,
 		)
 		return err
+	case "test":
+		if len(args) < 2 {
+			return fmt.Errorf("usage: odin %s", TriggerUsage)
+		}
+		options, err := parseOptionTokens(args[2:])
+		if err != nil {
+			return err
+		}
+		now, err := parseTriggerEvaluateAt(options["now"])
+		if err != nil {
+			return err
+		}
+		result, err := service.PreviewTrigger(ctx, options["workspace"], args[1], now)
+		if err != nil {
+			return err
+		}
+		if jsonOutput {
+			return WriteJSON(stdout, newTriggerPreviewView(result))
+		}
+		_, err = fmt.Fprintf(stdout, "trigger test now=%s evaluated=%d would_run=%d would_defer=%d would_batch=%d approval_required=%d mutates=false\n",
+			result.Now.UTC().Format(time.RFC3339),
+			result.Evaluated,
+			result.WouldRun,
+			result.WouldDefer,
+			result.WouldBatch,
+			result.ApprovalRequired,
+		)
+		if err != nil {
+			return err
+		}
+		for _, decision := range result.Decisions {
+			if _, err := fmt.Fprintf(stdout, "trigger=%s decision=%s reason=%s quiet_hour_effect=%s batch=%s approval_required=%t recovery_state=%s\n",
+				decision.Trigger.Key,
+				decision.Decision,
+				decision.Reason,
+				defaultTriggerOutput(decision.QuietHourEffect, "none"),
+				formatBatchState(decision.BatchKey, decision.BatchWindow),
+				decision.ApprovalRequired,
+				decision.RecoveryState,
+			); err != nil {
+				return err
+			}
+		}
+		return nil
+	case "audit":
+		if len(args) < 2 {
+			return fmt.Errorf("usage: odin %s", TriggerUsage)
+		}
+		options, err := parseOptionTokens(args[2:])
+		if err != nil {
+			return err
+		}
+		events, err := service.AuditEvents(ctx, options["workspace"], args[1])
+		if err != nil {
+			return err
+		}
+		if jsonOutput {
+			return WriteJSON(stdout, newTriggerAuditView(args[1], events))
+		}
+		if _, err := fmt.Fprintf(stdout, "trigger=%s audit_events=%d\n", args[1], len(events)); err != nil {
+			return err
+		}
+		for _, event := range events {
+			if _, err := fmt.Fprintf(stdout, "event_id=%d event_type=%s occurred_at=%s\n",
+				event.ID,
+				event.EventType,
+				event.OccurredAt.UTC().Format(time.RFC3339),
+			); err != nil {
+				return err
+			}
+		}
+		return nil
 	case "fire":
 		if len(args) < 2 {
 			return fmt.Errorf("usage: odin %s", TriggerUsage)
@@ -235,17 +308,31 @@ func runTriggerShow(ctx context.Context, service triggers.Service, workspaceID s
 	if jsonOutput {
 		return WriteJSON(stdout, triggerEnvelope{Trigger: newAutomationTriggerView(item)})
 	}
-	_, err = fmt.Fprintf(stdout, "trigger=%s workspace=%s initiative=%s kind=%s status=%s readiness=%s rule_summary=%q last_materialization=%s last_work_item=%s next_eligible=%s\n",
+	auditEvents, err := service.AuditEvents(ctx, workspaceID, key)
+	if err != nil {
+		return err
+	}
+	details := triggerOperatorDetails(item, time.Now().UTC())
+	_, err = fmt.Fprintf(stdout, "trigger=%s workspace=%s initiative=%s type=%s kind=%s status=%s readiness=%s schedule=%s next_run=%s last_run=%s quiet_hours=%s quiet_hour_effect=%s batch=%s approval_required=%t recovery_state=%s rule_summary=%q last_materialization=%s last_work_item=%s audit_events=%d\n",
 		item.Key,
 		item.WorkspaceID,
 		item.InitiativeKey,
 		item.Kind,
+		item.Kind,
 		item.Status,
 		triggerReadiness(item),
+		details.Schedule,
+		formatOptionalTime(item.NextEligibleAt),
+		formatOptionalTime(item.LastMaterializedAt),
+		defaultTriggerOutput(details.QuietHours, "none"),
+		details.QuietHourEffect,
+		formatBatchState(details.BatchKey, details.BatchWindow),
+		details.ApprovalRequired,
+		details.RecoveryState,
 		item.RuleSummary,
 		noneIfEmpty(item.LastMaterializationKey),
 		noneIfEmpty(item.LastWorkItemKey),
-		formatOptionalTime(item.NextEligibleAt),
+		len(auditEvents),
 	)
 	return err
 }
@@ -287,6 +374,61 @@ type triggerGitHubIssueIngestView struct {
 	URL              string `json:"url,omitempty"`
 	ExternalIssueID  int64  `json:"external_issue_id"`
 	SyncStatus       string `json:"sync_status"`
+}
+
+type triggerPreviewView struct {
+	Now              string                       `json:"now"`
+	DryRun           bool                         `json:"dry_run"`
+	Mutates          bool                         `json:"mutates"`
+	Evaluated        int                          `json:"evaluated"`
+	WouldRun         int                          `json:"would_run"`
+	WouldDefer       int                          `json:"would_defer"`
+	WouldBatch       int                          `json:"would_batch"`
+	ApprovalRequired int                          `json:"approval_required"`
+	Errored          int                          `json:"errored"`
+	Decisions        []triggerPreviewDecisionView `json:"decisions"`
+}
+
+type triggerPreviewDecisionView struct {
+	Key              string  `json:"key"`
+	Decision         string  `json:"decision"`
+	Reason           string  `json:"reason"`
+	TriggerType      string  `json:"trigger_type"`
+	Schedule         string  `json:"schedule"`
+	DueAt            *string `json:"due_at,omitempty"`
+	NextRun          *string `json:"next_run,omitempty"`
+	LastRun          *string `json:"last_run,omitempty"`
+	QuietHours       string  `json:"quiet_hours"`
+	QuietHourEffect  string  `json:"quiet_hour_effect"`
+	BatchKey         string  `json:"batch_key,omitempty"`
+	BatchWindow      string  `json:"batch_window,omitempty"`
+	BatchGroup       string  `json:"batch_group,omitempty"`
+	ApprovalRequired bool    `json:"approval_required"`
+	RecoveryState    string  `json:"recovery_state"`
+	Mutates          bool    `json:"mutates"`
+	Error            string  `json:"error,omitempty"`
+}
+
+type triggerAuditView struct {
+	TriggerKey  string                  `json:"trigger_key"`
+	AuditEvents []triggerAuditEventView `json:"audit_events"`
+}
+
+type triggerAuditEventView struct {
+	ID         int64           `json:"id"`
+	EventType  string          `json:"event_type"`
+	OccurredAt string          `json:"occurred_at"`
+	Payload    json.RawMessage `json:"payload"`
+}
+
+type triggerDetailsView struct {
+	Schedule         string
+	QuietHours       string
+	QuietHourEffect  string
+	BatchKey         string
+	BatchWindow      string
+	ApprovalRequired bool
+	RecoveryState    string
 }
 
 type automationTriggerView struct {
@@ -397,6 +539,62 @@ func newTriggerGitHubIssueIngestView(result triggers.GitHubIssueIngestResult) tr
 	}
 }
 
+func newTriggerPreviewView(result triggers.PreviewResult) triggerPreviewView {
+	decisions := make([]triggerPreviewDecisionView, 0, len(result.Decisions))
+	for _, decision := range result.Decisions {
+		decisions = append(decisions, newTriggerPreviewDecisionView(decision))
+	}
+	return triggerPreviewView{
+		Now:              result.Now.UTC().Format(time.RFC3339),
+		DryRun:           true,
+		Mutates:          false,
+		Evaluated:        result.Evaluated,
+		WouldRun:         result.WouldRun,
+		WouldDefer:       result.WouldDefer,
+		WouldBatch:       result.WouldBatch,
+		ApprovalRequired: result.ApprovalRequired,
+		Errored:          result.Errored,
+		Decisions:        decisions,
+	}
+}
+
+func newTriggerPreviewDecisionView(decision triggers.PreviewDecision) triggerPreviewDecisionView {
+	details := triggerOperatorDetails(decision.Trigger, time.Now().UTC())
+	quietEffect := defaultTriggerOutput(decision.QuietHourEffect, details.QuietHourEffect)
+	return triggerPreviewDecisionView{
+		Key:              decision.Trigger.Key,
+		Decision:         decision.Decision,
+		Reason:           decision.Reason,
+		TriggerType:      decision.Trigger.Kind,
+		Schedule:         details.Schedule,
+		DueAt:            formatOptionalTimePointer(decision.DueAt),
+		NextRun:          formatOptionalTimePointer(decision.NextEligibleAt),
+		LastRun:          formatOptionalTimePointer(decision.Trigger.LastMaterializedAt),
+		QuietHours:       defaultTriggerOutput(decision.QuietHours, details.QuietHours),
+		QuietHourEffect:  quietEffect,
+		BatchKey:         decision.BatchKey,
+		BatchWindow:      decision.BatchWindow,
+		BatchGroup:       decision.BatchGroup,
+		ApprovalRequired: decision.ApprovalRequired,
+		RecoveryState:    decision.RecoveryState,
+		Mutates:          false,
+		Error:            decision.Error,
+	}
+}
+
+func newTriggerAuditView(key string, events []triggers.AuditEvent) triggerAuditView {
+	views := make([]triggerAuditEventView, 0, len(events))
+	for _, event := range events {
+		views = append(views, triggerAuditEventView{
+			ID:         event.ID,
+			EventType:  event.EventType,
+			OccurredAt: event.OccurredAt.UTC().Format(time.RFC3339),
+			Payload:    event.Payload,
+		})
+	}
+	return triggerAuditView{TriggerKey: key, AuditEvents: views}
+}
+
 func newAutomationTriggerView(item sqlite.AutomationTrigger) automationTriggerView {
 	return automationTriggerView{
 		ID:                     item.ID,
@@ -496,6 +694,73 @@ func triggerEvaluateUsesEvents(options map[string]string) bool {
 		}
 	}
 	return strings.EqualFold(strings.TrimSpace(options["events"]), "true")
+}
+
+func triggerOperatorDetails(item sqlite.AutomationTrigger, now time.Time) triggerDetailsView {
+	var rule struct {
+		Summary         string `json:"summary"`
+		Cadence         string `json:"cadence"`
+		Cron            string `json:"cron"`
+		QuietHours      string `json:"quiet_hours"`
+		QuietTimezone   string `json:"quiet_timezone"`
+		BatchKey        string `json:"batch_key"`
+		BatchWindow     string `json:"batch_window"`
+		EventType       string `json:"event_type"`
+		ExecutionIntent string `json:"execution_intent"`
+	}
+	_ = json.Unmarshal([]byte(item.RuleJSON), &rule)
+	details := triggerDetailsView{
+		Schedule:        "manual",
+		QuietHourEffect: "none",
+		RecoveryState:   "not_started",
+	}
+	switch {
+	case strings.TrimSpace(rule.Cron) != "":
+		details.Schedule = "cron:" + strings.TrimSpace(rule.Cron)
+	case strings.TrimSpace(rule.Cadence) != "":
+		details.Schedule = "cadence:" + strings.TrimSpace(rule.Cadence)
+	case strings.EqualFold(item.Kind, "event") && strings.TrimSpace(rule.EventType) != "":
+		details.Schedule = "event:" + strings.TrimSpace(rule.EventType)
+	}
+	details.QuietHours = strings.TrimSpace(rule.QuietHours)
+	if details.QuietHours != "" {
+		details.QuietHourEffect = "pending"
+	}
+	if triggerTimingStatus(item, now) == "deferred" {
+		details.QuietHourEffect = "deferred"
+	}
+	details.BatchKey = strings.TrimSpace(rule.BatchKey)
+	details.BatchWindow = strings.TrimSpace(rule.BatchWindow)
+	details.ApprovalRequired = triggerIntentNeedsApproval(rule.ExecutionIntent)
+	return details
+}
+
+func triggerIntentNeedsApproval(intent string) bool {
+	switch strings.ToLower(strings.TrimSpace(intent)) {
+	case "governance", "destructive":
+		return true
+	default:
+		return false
+	}
+}
+
+func formatBatchState(key string, window string) string {
+	key = strings.TrimSpace(key)
+	window = strings.TrimSpace(window)
+	if key == "" {
+		return "none"
+	}
+	if window == "" {
+		return key
+	}
+	return key + " window=" + window
+}
+
+func defaultTriggerOutput(value string, fallback string) string {
+	if strings.TrimSpace(value) == "" {
+		return fallback
+	}
+	return strings.TrimSpace(value)
 }
 
 func triggerReadiness(item sqlite.AutomationTrigger) string {
