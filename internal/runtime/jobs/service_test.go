@@ -1696,6 +1696,148 @@ func TestExecuteNextQueuedBlocksWhenRequiredApprovalIsMissing(t *testing.T) {
 	}
 }
 
+func TestDispatchTaskRunAttemptBlocksGovernanceAndDestructiveIntentsForApproval(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name   string
+		intent string
+	}{
+		{name: "governance", intent: "governance"},
+		{name: "destructive", intent: "destructive"},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			ctx := context.Background()
+			store := openJobStore(t)
+			defer store.Close()
+
+			registry := writeRegistry(t)
+			service := Service{
+				Store:          store,
+				Registry:       registry,
+				Executors:      testJobExecutors(),
+				ExecutorConfig: mustLoadExecutorConfig(t),
+				Transitions:    projects.Service{Store: store},
+				Now:            time.Now,
+			}
+
+			task, err := service.CreateTask(ctx, CreateTaskParams{
+				Resolved: scope.Resolution{
+					Kind:       scope.ScopeProject,
+					ProjectKey: "alpha",
+				},
+				Title:                 "Neutral periodic check",
+				RequestedBy:           "test",
+				ExecutionIntent:       tc.intent,
+				ExecutionIntentSource: "test",
+			})
+			if err != nil {
+				t.Fatalf("CreateTask() error = %v", err)
+			}
+			project, err := store.GetProjectByKey(ctx, "alpha")
+			if err != nil {
+				t.Fatalf("GetProjectByKey(alpha) error = %v", err)
+			}
+			if _, err := service.Transitions.SetTransitionState(ctx, projects.TransitionStateInput{
+				ProjectID:   project.ID,
+				Actor:       projects.TransitionControllerOdinOS,
+				TargetState: projects.TransitionStateCutover,
+				ChangedBy:   "test",
+			}); err != nil {
+				t.Fatalf("SetTransitionState(cutover) error = %v", err)
+			}
+
+			outcome, err := service.DispatchTaskRunAttempt(ctx, task.ID)
+			if err != nil {
+				t.Fatalf("DispatchTaskRunAttempt() error = %v", err)
+			}
+			if outcome.Dispatched {
+				t.Fatalf("DispatchTaskRunAttempt().Dispatched = true, want blocked")
+			}
+			if outcome.Reason != "approval_required" {
+				t.Fatalf("DispatchTaskRunAttempt().Reason = %q, want approval_required", outcome.Reason)
+			}
+			if outcome.Task.Status != "blocked" || outcome.Task.BlockedReason != "approval_required" {
+				t.Fatalf("outcome task = %+v, want approval-required blocked task", outcome.Task)
+			}
+			if outcome.Task.ExecutionIntent != tc.intent || outcome.Task.ExecutionIntentSource != "test" {
+				t.Fatalf("outcome intent = %q/%q, want %s/test", outcome.Task.ExecutionIntent, outcome.Task.ExecutionIntentSource, tc.intent)
+			}
+			approval, err := store.GetLatestTaskApproval(ctx, task.ID)
+			if err != nil {
+				t.Fatalf("GetLatestTaskApproval() error = %v", err)
+			}
+			if approval.Status != "pending" {
+				t.Fatalf("Approval.Status = %q, want pending", approval.Status)
+			}
+			if _, err := latestRunForTask(ctx, store, task.ID); !errors.Is(err, sql.ErrNoRows) {
+				t.Fatalf("latestRunForTask() error = %v, want sql.ErrNoRows", err)
+			}
+		})
+	}
+}
+
+func TestDispatchTaskRunAttemptDoesNotBlockReadOnlyIntentForApproval(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openJobStore(t)
+	defer store.Close()
+
+	registry := writeRegistry(t)
+	service := Service{
+		Store:          store,
+		Registry:       registry,
+		Executors:      testJobExecutors(),
+		ExecutorConfig: mustLoadExecutorConfig(t),
+		Transitions:    projects.Service{Store: store},
+		Now:            time.Now,
+	}
+
+	task, err := service.CreateTask(ctx, CreateTaskParams{
+		Resolved: scope.Resolution{
+			Kind:       scope.ScopeProject,
+			ProjectKey: "alpha",
+		},
+		Title:                 "Inspect project status",
+		RequestedBy:           "test",
+		ExecutionIntent:       "read_only",
+		ExecutionIntentSource: "test",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+	project, err := store.GetProjectByKey(ctx, "alpha")
+	if err != nil {
+		t.Fatalf("GetProjectByKey(alpha) error = %v", err)
+	}
+	if _, err := service.Transitions.SetTransitionState(ctx, projects.TransitionStateInput{
+		ProjectID:   project.ID,
+		Actor:       projects.TransitionControllerOdinOS,
+		TargetState: projects.TransitionStateCutover,
+		ChangedBy:   "test",
+	}); err != nil {
+		t.Fatalf("SetTransitionState(cutover) error = %v", err)
+	}
+
+	outcome, err := service.DispatchTaskRunAttempt(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("DispatchTaskRunAttempt() error = %v", err)
+	}
+	if !outcome.Dispatched || outcome.Reason != "dispatched" {
+		t.Fatalf("DispatchTaskRunAttempt() = %+v, want dispatched read-only work", outcome)
+	}
+	if outcome.Task.Status != "running" || outcome.Task.BlockedReason != "" {
+		t.Fatalf("outcome task = %+v, want running without approval block", outcome.Task)
+	}
+	if _, err := store.GetLatestTaskApproval(ctx, task.ID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("GetLatestTaskApproval() error = %v, want sql.ErrNoRows", err)
+	}
+}
+
 func TestExecuteNextQueuedRequeuesWhenBlockedWakePacketCompactionFails(t *testing.T) {
 	t.Parallel()
 

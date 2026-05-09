@@ -129,6 +129,30 @@ func TestResolveInvocationPolicyMarksGovernanceMutationAsApprovalNeeded(t *testi
 	}
 }
 
+func TestResolveInvocationPolicyMarksDestructiveMutationAsApprovalNeeded(t *testing.T) {
+	t.Parallel()
+
+	policy, err := ResolveInvocationPolicy(InvocationPolicyInput{
+		ResolvedScopeKind: "project",
+		Project: &InvocationProject{
+			Key: "alpha",
+		},
+		Permissions: []string{"repo.mutate.destructive"},
+	})
+	if err != nil {
+		t.Fatalf("ResolveInvocationPolicy() error = %v", err)
+	}
+	if !policy.Mutating {
+		t.Fatal("policy.Mutating = false, want true")
+	}
+	if !policy.ApprovalNeeded {
+		t.Fatal("policy.ApprovalNeeded = false, want true")
+	}
+	if policy.ActionClass != projects.ActionClassDestructiveMutation {
+		t.Fatalf("policy.ActionClass = %q, want %q", policy.ActionClass, projects.ActionClassDestructiveMutation)
+	}
+}
+
 func TestResolveInvocationPolicyMarksSystemProjectMutationAsApprovalNeeded(t *testing.T) {
 	t.Parallel()
 

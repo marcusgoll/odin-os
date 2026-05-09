@@ -668,6 +668,51 @@ func (service Service) DispatchNextRunAttempt(ctx context.Context) (DispatchOutc
 	return service.DispatchTaskRunAttempt(ctx, task.ID)
 }
 
+func (service Service) ApplyAdmissionPolicy(ctx context.Context, taskID int64) (DispatchOutcome, error) {
+	if service.Store == nil {
+		return DispatchOutcome{}, fmt.Errorf("job store is required")
+	}
+
+	task, err := service.Store.GetTask(ctx, taskID)
+	if err != nil {
+		return DispatchOutcome{}, err
+	}
+	if task.Status != "queued" {
+		return DispatchOutcome{
+			Task:   task,
+			Reason: "task_not_queued",
+		}, nil
+	}
+
+	project, err := service.Store.GetProject(ctx, task.ProjectID)
+	if err != nil {
+		return DispatchOutcome{}, err
+	}
+	manifest, ok := service.Registry.Lookup(project.Key)
+	if !ok {
+		return DispatchOutcome{}, fmt.Errorf("unknown manifest for project %q", project.Key)
+	}
+	if service.Transitions.Store == nil {
+		service.Transitions = projects.Service{Store: service.Store}
+	}
+
+	admission, err := service.admitDirectTask(ctx, task, project, manifest)
+	if err != nil {
+		return DispatchOutcome{}, err
+	}
+	if admission.Outcome == admissionDispatchable {
+		return DispatchOutcome{Task: task, Reason: string(admissionDispatchable)}, nil
+	}
+	if err := service.applyAdmissionDecision(ctx, task, admission); err != nil {
+		return DispatchOutcome{}, err
+	}
+	updated, err := service.Store.GetTask(ctx, task.ID)
+	if err != nil {
+		return DispatchOutcome{}, err
+	}
+	return DispatchOutcome{Task: updated, Reason: admissionReason(admission)}, nil
+}
+
 func (service Service) DispatchTaskRunAttempt(ctx context.Context, taskID int64) (DispatchOutcome, error) {
 	if service.Store == nil {
 		return DispatchOutcome{}, fmt.Errorf("job store is required")
@@ -748,14 +793,7 @@ func (service Service) DispatchTaskRunAttempt(ctx context.Context, taskID int64)
 		if loadErr != nil {
 			return DispatchOutcome{}, loadErr
 		}
-		reason := string(admission.Outcome)
-		if admission.BlockedReason != "" {
-			reason = admission.BlockedReason
-		}
-		if reason == "" && admission.LastError != "" {
-			reason = admission.LastError
-		}
-		return DispatchOutcome{Task: updated, Reason: reason}, nil
+		return DispatchOutcome{Task: updated, Reason: admissionReason(admission)}, nil
 	}
 
 	attempt, err := service.nextRunAttempt(ctx, task.ID)
@@ -783,6 +821,17 @@ func (service Service) DispatchTaskRunAttempt(ctx context.Context, taskID int64)
 		Dispatched: true,
 		Reason:     "dispatched",
 	}, nil
+}
+
+func admissionReason(admission admissionDecision) string {
+	reason := string(admission.Outcome)
+	if admission.BlockedReason != "" {
+		reason = admission.BlockedReason
+	}
+	if reason == "" && admission.LastError != "" {
+		reason = admission.LastError
+	}
+	return reason
 }
 
 func (service Service) RetryFailedTask(ctx context.Context, taskID int64) (RetryOutcome, error) {

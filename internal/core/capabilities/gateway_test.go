@@ -331,6 +331,45 @@ func TestGatewayRejectsEmptyCallerBeforeDispatch(t *testing.T) {
 	}
 }
 
+func TestGatewayPreservesCapabilityPolicyDenialForGovernancePermission(t *testing.T) {
+	gateway := newGatewayWithDescriptor(Descriptor{
+		Kind:         registry.KindCommand,
+		Key:          "project.governance",
+		Version:      "1.0.0",
+		Availability: registry.Availability{Scope: "project"},
+		Permissions:  []string{"repo.mutate.governance"},
+		InputSchema:  registry.SchemaRef{Type: "object"},
+		OutputSchema: registry.SchemaRef{Type: "object"},
+	}, func(context.Context, InvokeRequest, Descriptor) (InvokeResponse, error) {
+		t.Fatal("invoke callback should not be called when capability policy denies permissions")
+		return InvokeResponse{}, nil
+	})
+
+	_, err := gateway.InvokeCapability(context.Background(), InvokeRequest{
+		RequestID:         "req-governance",
+		CapabilityID:      "project.governance",
+		CapabilityVersion: "1.0.0",
+		Scope: ScopeRef{
+			Kind: "project",
+		},
+		Caller: CallerRef{
+			Kind: "cli",
+		},
+		Input: json.RawMessage(`{}`),
+	})
+	if err == nil {
+		t.Fatal("InvokeCapability() error = nil, want capability policy failure")
+	}
+
+	code, ok := errorCode(err)
+	if !ok {
+		t.Fatalf("InvokeCapability() error = %v, want coded policy error", err)
+	}
+	if code != "permission_denied" {
+		t.Fatalf("InvokeCapability() code = %q, want %q", code, "permission_denied")
+	}
+}
+
 func TestGatewayRejectsInvalidScopeForCapability(t *testing.T) {
 	gateway := newGatewayWithDescriptor(Descriptor{
 		Kind:         registry.KindCommand,

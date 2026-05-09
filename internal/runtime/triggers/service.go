@@ -13,6 +13,7 @@ import (
 
 	"odin-os/internal/core/projects"
 	runtimeevents "odin-os/internal/runtime/events"
+	"odin-os/internal/runtime/jobs"
 	"odin-os/internal/store/sqlite"
 )
 
@@ -381,7 +382,7 @@ func (service Service) Fire(ctx context.Context, params sqlite.FireAutomationTri
 	if service.Store == nil {
 		return sqlite.FireAutomationTriggerResult{}, fmt.Errorf("automation trigger store is required")
 	}
-	return service.Store.FireAutomationTrigger(ctx, params)
+	return service.fireAndApplyMaterializationPolicy(ctx, params)
 }
 
 func (service Service) EvaluateDue(ctx context.Context, now time.Time) (DueEvaluationResult, error) {
@@ -692,7 +693,7 @@ func (service Service) fireDueScheduleBatch(ctx context.Context, batch []dueSche
 }
 
 func (service Service) fireDueSchedule(ctx context.Context, item dueScheduleFire, requestedBy string, reuseTaskID *int64, result *DueEvaluationResult) error {
-	fire, err := service.Store.FireAutomationTrigger(ctx, sqlite.FireAutomationTriggerParams{
+	fire, err := service.fireAndApplyMaterializationPolicy(ctx, sqlite.FireAutomationTriggerParams{
 		WorkspaceID:       item.Trigger.WorkspaceID,
 		Key:               item.Trigger.Key,
 		Source:            "schedule",
@@ -800,7 +801,7 @@ func (service Service) EvaluateEvents(ctx context.Context) (DueEvaluationResult,
 			}
 			result.Evaluated++
 			eventID := record.ID
-			fire, err := service.Store.FireAutomationTrigger(ctx, sqlite.FireAutomationTriggerParams{
+			fire, err := service.fireAndApplyMaterializationPolicy(ctx, sqlite.FireAutomationTriggerParams{
 				WorkspaceID:      trigger.WorkspaceID,
 				Key:              trigger.Key,
 				Source:           "event",
@@ -855,6 +856,35 @@ func (service Service) AuditEvents(ctx context.Context, workspaceID string, key 
 		})
 	}
 	return audit, nil
+}
+
+func (service Service) fireAndApplyMaterializationPolicy(ctx context.Context, params sqlite.FireAutomationTriggerParams) (sqlite.FireAutomationTriggerResult, error) {
+	fire, err := service.Store.FireAutomationTrigger(ctx, params)
+	if err != nil {
+		return sqlite.FireAutomationTriggerResult{}, err
+	}
+	if !fire.CreatedWorkItem || !triggerIntentRequiresImmediateAdmission(fire.WorkItem.ExecutionIntent) {
+		return fire, nil
+	}
+	outcome, err := jobs.Service{
+		Store:       service.Store,
+		Registry:    service.Registry,
+		Transitions: projects.Service{Store: service.Store},
+	}.ApplyAdmissionPolicy(ctx, fire.WorkItem.ID)
+	if err != nil {
+		return sqlite.FireAutomationTriggerResult{}, err
+	}
+	fire.WorkItem = outcome.Task
+	return fire, nil
+}
+
+func triggerIntentRequiresImmediateAdmission(intent string) bool {
+	switch strings.ToLower(strings.TrimSpace(intent)) {
+	case "governance", "destructive":
+		return true
+	default:
+		return false
+	}
 }
 
 func (service Service) ensureRuntimeProject(ctx context.Context, key string) (sqlite.Project, error) {

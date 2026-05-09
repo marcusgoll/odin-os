@@ -2,11 +2,16 @@ package triggers
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
+	"odin-os/internal/core/projects"
 	"odin-os/internal/runtime/events"
 	"odin-os/internal/store/sqlite"
 )
@@ -29,7 +34,7 @@ func TestEvaluateDueMaterializesEnabledScheduleTriggerOnce(t *testing.T) {
 		NextEligibleAt: &dueAt,
 	})
 
-	result, err := Service{Store: store}.EvaluateDue(ctx, now)
+	result, err := Service{Store: store, Registry: writeTriggerRegistry(t)}.EvaluateDue(ctx, now)
 	if err != nil {
 		t.Fatalf("EvaluateDue(first) error = %v", err)
 	}
@@ -75,6 +80,124 @@ func TestEvaluateDueMaterializesEnabledScheduleTriggerOnce(t *testing.T) {
 	}
 	if materialized != 1 {
 		t.Fatalf("materialized events = %d, want 1", materialized)
+	}
+}
+
+func TestEvaluateDueMaterializesHighRiskIntentAsBlockedApprovalWork(t *testing.T) {
+	ctx := context.Background()
+	store := openTriggerStore(t)
+	defer store.Close()
+
+	now := time.Date(2026, 5, 10, 12, 1, 0, 0, time.UTC)
+	dueAt := time.Date(2026, 5, 10, 12, 0, 0, 0, time.UTC)
+	store.Now = func() time.Time {
+		return now
+	}
+	service := Service{
+		Store:    store,
+		Registry: writeTriggerRegistry(t),
+	}
+
+	for _, intent := range []string{"governance", "destructive"} {
+		if _, err := service.Upsert(ctx, UpsertParams{
+			Key:             intent + "-approval",
+			InitiativeKey:   "odin-core",
+			Kind:            "schedule",
+			Status:          "enabled",
+			RuleSummary:     intent + " approval parity",
+			WorkItemTitle:   "Neutral periodic check",
+			NextEligibleAt:  &dueAt,
+			ExecutionIntent: intent,
+		}); err != nil {
+			t.Fatalf("Upsert(%s) error = %v", intent, err)
+		}
+	}
+
+	result, err := service.EvaluateDue(ctx, now)
+	if err != nil {
+		t.Fatalf("EvaluateDue() error = %v", err)
+	}
+	if result.Evaluated != 2 || result.Materialized != 2 {
+		t.Fatalf("EvaluateDue() = %+v, want two high-risk materializations", result)
+	}
+	if len(result.Results) != 2 {
+		t.Fatalf("EvaluateDue().Results = %+v, want materialized work item", result.Results)
+	}
+
+	for _, item := range result.Results {
+		task, err := store.GetTask(ctx, item.WorkItem.ID)
+		if err != nil {
+			t.Fatalf("GetTask(materialized) error = %v", err)
+		}
+		if task.ExecutionIntentSource != "trigger" {
+			t.Fatalf("task intent source = %q, want trigger", task.ExecutionIntentSource)
+		}
+		if task.ExecutionIntent != "governance" && task.ExecutionIntent != "destructive" {
+			t.Fatalf("task intent = %q, want governance or destructive", task.ExecutionIntent)
+		}
+		if task.Status != "blocked" {
+			t.Fatalf("task status = %q, want blocked", task.Status)
+		}
+		if task.BlockedReason != "approval_required" {
+			t.Fatalf("task blocked reason = %q, want approval_required", task.BlockedReason)
+		}
+		approval, err := store.GetLatestTaskApproval(ctx, task.ID)
+		if err != nil {
+			t.Fatalf("GetLatestTaskApproval() error = %v", err)
+		}
+		if approval.Status != "pending" {
+			t.Fatalf("approval status = %q, want pending", approval.Status)
+		}
+	}
+}
+
+func TestEvaluateDueMaterializesReadOnlyIntentWithoutApprovalBlock(t *testing.T) {
+	ctx := context.Background()
+	store := openTriggerStore(t)
+	defer store.Close()
+
+	now := time.Date(2026, 5, 10, 12, 1, 0, 0, time.UTC)
+	dueAt := time.Date(2026, 5, 10, 12, 0, 0, 0, time.UTC)
+	store.Now = func() time.Time {
+		return now
+	}
+	service := Service{
+		Store:    store,
+		Registry: writeTriggerRegistry(t),
+	}
+
+	if _, err := service.Upsert(ctx, UpsertParams{
+		Key:             "read-only-trigger",
+		InitiativeKey:   "odin-core",
+		Kind:            "schedule",
+		Status:          "enabled",
+		RuleSummary:     "read-only parity",
+		WorkItemTitle:   "Inspect status",
+		NextEligibleAt:  &dueAt,
+		ExecutionIntent: "read_only",
+	}); err != nil {
+		t.Fatalf("Upsert() error = %v", err)
+	}
+
+	result, err := service.EvaluateDue(ctx, now)
+	if err != nil {
+		t.Fatalf("EvaluateDue() error = %v", err)
+	}
+	if result.Evaluated != 1 || result.Materialized != 1 {
+		t.Fatalf("EvaluateDue() = %+v, want one read-only materialization", result)
+	}
+	task, err := store.GetTask(ctx, result.Results[0].WorkItem.ID)
+	if err != nil {
+		t.Fatalf("GetTask(materialized) error = %v", err)
+	}
+	if task.ExecutionIntent != "read_only" || task.ExecutionIntentSource != "trigger" {
+		t.Fatalf("task intent = %q/%q, want read_only/trigger", task.ExecutionIntent, task.ExecutionIntentSource)
+	}
+	if task.Status != "queued" || task.BlockedReason != "" {
+		t.Fatalf("task = %+v, want queued without approval block", task)
+	}
+	if _, err := store.GetLatestTaskApproval(ctx, task.ID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("GetLatestTaskApproval() error = %v, want sql.ErrNoRows", err)
 	}
 }
 
@@ -202,7 +325,10 @@ func TestEvaluateEventsMaterializesGovernanceTriggerWithEnvelope(t *testing.T) {
 	store := openTriggerStore(t)
 	defer store.Close()
 
-	service := Service{Store: store}
+	service := Service{
+		Store:    store,
+		Registry: writeTriggerRegistry(t),
+	}
 	store.Now = func() time.Time {
 		return time.Date(2026, 4, 25, 12, 0, 0, 0, time.UTC)
 	}
@@ -305,7 +431,7 @@ func TestEvaluateDueUsesWorkspaceProfileQuietHoursByDefault(t *testing.T) {
 		NextEligibleAt: &dueAt,
 	})
 
-	result, err := Service{Store: store}.EvaluateDue(ctx, now)
+	result, err := Service{Store: store, Registry: writeTriggerRegistry(t)}.EvaluateDue(ctx, now)
 	if err != nil {
 		t.Fatalf("EvaluateDue() error = %v", err)
 	}
@@ -355,7 +481,7 @@ func TestEvaluateDueBatchesCompatibleScheduleTriggersPreservingIntentAndAudit(t 
 		NextEligibleAt: &secondDueAt,
 	})
 
-	result, err := Service{Store: store}.EvaluateDue(ctx, now)
+	result, err := Service{Store: store, Registry: writeTriggerRegistry(t)}.EvaluateDue(ctx, now)
 	if err != nil {
 		t.Fatalf("EvaluateDue() error = %v", err)
 	}
@@ -526,4 +652,57 @@ func lastAutomationTriggerMaterializedPayload(t *testing.T, ctx context.Context,
 	}
 	t.Fatalf("missing %s event", events.EventAutomationTriggerMaterialized)
 	return events.AutomationTriggerMaterializedPayload{}
+}
+
+func writeTriggerRegistry(t *testing.T) projects.Registry {
+	t.Helper()
+
+	root := t.TempDir()
+	configPath := filepath.Join(root, "projects.yaml")
+	gitRoot := filepath.Join(root, "odin-core")
+	if err := os.MkdirAll(filepath.Join(gitRoot, ".git"), 0o755); err != nil {
+		t.Fatalf("mkdir git root: %v", err)
+	}
+
+	configYAML := fmt.Sprintf(`
+version: 1
+projects:
+  - key: odin-core
+    name: Odin Core
+    project_class: system_project
+    system_project: true
+    git_root: %s
+    default_branch: main
+    policy:
+      allowed_commands: [status]
+      branch_rules:
+        protected_branches: [main]
+        require_worktree: true
+        require_task_branch: true
+        allow_default_branch_mutation: false
+      approval_gates:
+        require_for_governance_changes: true
+        require_for_destructive_operations: true
+        require_for_system_project_changes: true
+      merge_policy:
+        mode: squash
+        allow_direct_to_default_branch: false
+      destructive_operations:
+        allow_reset: false
+        allow_clean: false
+        allow_force_push: false
+        require_explicit_approval: true
+`, gitRoot)
+
+	if err := os.WriteFile(configPath, []byte(configYAML), 0o644); err != nil {
+		t.Fatalf("write registry: %v", err)
+	}
+	registry, diagnostics, err := projects.Register(configPath)
+	if err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+	if len(diagnostics) != 0 {
+		t.Fatalf("Register() diagnostics = %#v", diagnostics)
+	}
+	return registry
 }
