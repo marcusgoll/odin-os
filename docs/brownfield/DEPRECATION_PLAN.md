@@ -30,7 +30,7 @@ No skill, agent, prompt, shim, or script should be removed until a separate clea
 | `state/migration/archive/skills/brand-ad-generator.md` | Archived | None for Odin core | Archived from `state/migration/drafts/skills/brand-ad-generator.md`; not part of the orchestration mission. |
 | `state/migration/drafts/skills/changelog-generator.md` | Review-only | `release-checklist`, `pr-review` | Preserve release-note guidance only as release handoff support. |
 | `state/migration/drafts/skills/ci-cd-pipeline-builder.md` | Review-only | `release-checklist`, `security-review` | Keep CI/CD advice advisory and approval-gated. |
-| `state/migration/drafts/skills/claude-api.md` | Deprecated | Executor/provider docs if needed | Replace with provider-neutral executor documentation. |
+| `state/migration/archive/skills/claude-api.md` | Archived | Executor/provider docs if needed | Archived from `state/migration/drafts/skills/claude-api.md`; restore only if provider-specific Claude guidance is explicitly approved. Prefer provider-neutral executor documentation. |
 | `state/migration/drafts/skills/cloudflare.md` | Review-only | `release-checklist`, managed-project ops docs | Promote only for a project that actually uses Cloudflare. |
 | `state/migration/drafts/skills/odin-control-plane-contract-checks.md` | Review-only, high value | `brownfield-audit`, `architecture-plan`, `pr-review` | Rewrite selected contract checks into current docs/contracts or tests. |
 | `state/migration/archive/skills/slack-gif-creator.md` | Archived | None for Odin core | Archived from `state/migration/drafts/skills/slack-gif-creator.md`; not part of Odin-OS orchestration. |
@@ -67,11 +67,11 @@ No skill, agent, prompt, shim, or script should be removed until a separate clea
 
 ## Archived Items
 
-The first cleanup slice archived the non-core content/media migration draft
-group:
+Cleanup slices have archived these non-core migration draft groups:
 
 - `state/migration/archive/skills/blog-writer.md`
 - `state/migration/archive/skills/brand-ad-generator.md`
+- `state/migration/archive/skills/claude-api.md`
 - `state/migration/archive/skills/slack-gif-creator.md`
 
 Rollback path: move the file back to `state/migration/drafts/skills/` and
