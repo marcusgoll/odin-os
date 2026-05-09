@@ -781,7 +781,7 @@ func (service Service) DispatchTaskRunAttempt(ctx context.Context, taskID int64)
 		return DispatchOutcome{}, err
 	}
 
-	admission, err := service.admitTask(ctx, task, project, manifest, decision.ExecutorKey)
+	admission, err := service.admitDispatchedTask(ctx, task, project, manifest)
 	if err != nil {
 		return DispatchOutcome{}, err
 	}
@@ -2173,6 +2173,31 @@ func (service Service) admitDirectTask(ctx context.Context, task sqlite.Task, pr
 			BlockedReason: "mutation_requires_isolated_worktree",
 			LastError:     fmt.Sprintf("policy_denied: project %q requires an isolated task worktree before mutation", manifest.Key),
 			FailureCode:   recovery.FailureCodeWorkspacePolicyDenied,
+		}, nil
+	}
+
+	return admissionDecision{Outcome: admissionDispatchable}, nil
+}
+
+func (service Service) admitDispatchedTask(ctx context.Context, task sqlite.Task, project sqlite.Project, manifest projects.Manifest) (admissionDecision, error) {
+	intent := resolveTaskExecutionIntent(manifest, task)
+	approvalDecision, required, err := service.evaluateTaskApproval(ctx, task, manifest, intent)
+	if err != nil {
+		return admissionDecision{}, err
+	}
+	if required && approvalDecision.Outcome != admissionDispatchable {
+		return approvalDecision, nil
+	}
+
+	if _, err := service.Transitions.AuthorizeAction(ctx, projects.ActionInput{
+		ProjectID:   project.ID,
+		Actor:       projects.TransitionControllerOdinOS,
+		ActionClass: intent.ActionClass,
+		ActionKey:   intent.ActionKey,
+	}); err != nil {
+		return admissionDecision{
+			Outcome:   admissionFailed,
+			LastError: fmt.Sprintf("transition_denied: %v", err),
 		}, nil
 	}
 

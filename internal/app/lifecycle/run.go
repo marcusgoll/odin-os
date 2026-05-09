@@ -301,7 +301,12 @@ func Run(ctx context.Context, root string, args []string, stdin io.Reader, stdou
 				PromptRenderer:     app.PromptRenderer,
 				PromptTemplateName: app.PromptTemplateName,
 				Transitions:        projects.Service{Store: app.Store},
-				Now:                time.Now,
+				Leases: leases.Manager{
+					Store:        app.Store,
+					Git:          gitadapter.Adapter{},
+					WorktreeRoot: worktrees.DefaultRoot(),
+				},
+				Now: time.Now,
 			},
 		})
 	case "scope":

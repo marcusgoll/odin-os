@@ -169,6 +169,9 @@ func runWorkDispatch(ctx context.Context, store *sqlite.Store, projectRegistry p
 		_, err := fmt.Fprintln(stdout, "usage: odin work dispatch [--task <id|key>] [--json]")
 		return err
 	}
+	if err := rejectUnknownWorkArgs(params, "task", "json"); err != nil {
+		return err
+	}
 
 	jobService := jobs.Service{Store: store, Registry: projectRegistry}
 	if len(options) > 0 && options[0].JobService.Store != nil {
@@ -210,6 +213,20 @@ func runWorkDispatch(ctx context.Context, store *sqlite.Store, projectRegistry p
 	}
 	_, err = fmt.Fprintf(stdout, "dispatched=%t reason=%s task=%s status=%s run_id=%d\n", view.Dispatched, view.Reason, view.Task.Key, view.Task.Status, runID)
 	return err
+}
+
+func rejectUnknownWorkArgs(params map[string]string, allowed ...string) error {
+	allowedSet := make(map[string]struct{}, len(allowed))
+	for _, key := range allowed {
+		allowedSet[key] = struct{}{}
+	}
+	for key := range params {
+		if _, ok := allowedSet[key]; ok {
+			continue
+		}
+		return fmt.Errorf("unknown work dispatch argument: %s", key)
+	}
+	return nil
 }
 
 func runWorkExecute(ctx context.Context, store *sqlite.Store, projectRegistry projects.Registry, args []string, stdout io.Writer, options ...WorkOptions) error {

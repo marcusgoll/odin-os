@@ -3150,6 +3150,42 @@ func TestRunWorkDispatchFailsClosedForEmptyTaskArgument(t *testing.T) {
 	}
 }
 
+func TestRunWorkDispatchFailsClosedForUnknownGoalArgument(t *testing.T) {
+	t.Parallel()
+
+	root := testRepoRoot(t)
+	run := func(args ...string) string {
+		t.Helper()
+		var stdout bytes.Buffer
+		if err := Run(context.Background(), root, args, strings.NewReader(""), &stdout); err != nil {
+			t.Fatalf("Run(%v) error = %v\nstdout=%s", args, err, stdout.String())
+		}
+		return stdout.String()
+	}
+
+	run("project", "select", testProjectKey)
+	run("transition", "set", "cutover", "confirm", "because", "unknown dispatch goal proof")
+	run("work", "start", "--project", testProjectKey, "--title", "Neutral status proof", "--intent", "read_only")
+
+	var dispatchOutput bytes.Buffer
+	err := Run(context.Background(), root, []string{"work", "dispatch", "--goal", "1", "--json"}, strings.NewReader(""), &dispatchOutput)
+	if err == nil {
+		t.Fatalf("Run(work dispatch --goal) error = nil output=%s, want fail-closed unknown argument error", dispatchOutput.String())
+	}
+	if !strings.Contains(err.Error(), "unknown work dispatch argument: goal") {
+		t.Fatalf("Run(work dispatch --goal) error = %v, want unknown goal argument", err)
+	}
+
+	jobsOutput := run("jobs", "--json")
+	if !strings.Contains(jobsOutput, `"status": "queued"`) || strings.Contains(jobsOutput, `"status": "running"`) {
+		t.Fatalf("jobs output = %s, want queued task untouched by invalid dispatch", jobsOutput)
+	}
+	runsOutput := run("runs", "--json")
+	if !strings.Contains(runsOutput, `"runs": []`) {
+		t.Fatalf("runs output = %s, want no run from invalid dispatch", runsOutput)
+	}
+}
+
 func TestRunWorkDispatchEnforcesProjectExecutionPolicy(t *testing.T) {
 	t.Parallel()
 
@@ -3183,19 +3219,19 @@ func TestRunWorkDispatchEnforcesProjectExecutionPolicy(t *testing.T) {
 
 	mutationKey := parseTaskKey(run("work", "start", "--project", testProjectKey, "--title", "Neutral repo task", "--intent", "mutation"))
 	mutationDispatch := run("work", "dispatch", "--task", mutationKey, "--json")
-	if !strings.Contains(mutationDispatch, `"dispatched": false`) || !strings.Contains(mutationDispatch, `"reason": "mutation_requires_isolated_worktree"`) || !strings.Contains(mutationDispatch, `"status": "blocked"`) || !strings.Contains(mutationDispatch, `"execution_intent": "mutation"`) || !strings.Contains(mutationDispatch, `"execution_intent_source": "operator"`) {
-		t.Fatalf("mutation dispatch output = %s, want direct mutation blocked by persisted operator intent", mutationDispatch)
+	if !strings.Contains(mutationDispatch, `"dispatched": true`) || !strings.Contains(mutationDispatch, `"reason": "dispatched"`) || !strings.Contains(mutationDispatch, `"status": "running"`) || !strings.Contains(mutationDispatch, `"execution_intent": "mutation"`) || !strings.Contains(mutationDispatch, `"execution_intent_source": "operator"`) {
+		t.Fatalf("mutation dispatch output = %s, want isolated mutating task dispatched by persisted operator intent", mutationDispatch)
 	}
 	runsAfterMutation := run("runs", "--json")
-	if strings.Count(runsAfterMutation, `"task_key": "`) != 1 {
-		t.Fatalf("runs output = %s, want only the read-only dispatch run", runsAfterMutation)
+	if strings.Count(runsAfterMutation, `"task_key": "`) != 2 {
+		t.Fatalf("runs output = %s, want read-only and isolated mutation dispatch runs", runsAfterMutation)
 	}
-	if !strings.Contains(runsAfterMutation, `"project_key": "alpha-cli"`) || !strings.Contains(runsAfterMutation, `"repo_root": "`) || !strings.Contains(runsAfterMutation, `"worktree_path": "`) || !strings.Contains(runsAfterMutation, `"branch_name": "main"`) {
+	if !strings.Contains(runsAfterMutation, `"project_key": "alpha-cli"`) || !strings.Contains(runsAfterMutation, `"repo_root": "`) || !strings.Contains(runsAfterMutation, `"worktree_path": "`) || !strings.Contains(runsAfterMutation, `"branch_name": "main"`) || !strings.Contains(runsAfterMutation, `"branch_name": "odin/alpha-cli/task-2/run-2/try-`) {
 		t.Fatalf("runs output = %s, want project/worktree/branch execution context", runsAfterMutation)
 	}
 	mutationLogs := run("logs", "--json")
-	if !strings.Contains(mutationLogs, `"type": "task.queue_state_changed"`) || !strings.Contains(mutationLogs, `"blocked_reason": "mutation_requires_isolated_worktree"`) || !strings.Contains(mutationLogs, `"execution_intent": "mutation"`) || !strings.Contains(mutationLogs, `"execution_intent_source": "operator"`) {
-		t.Fatalf("mutation logs output = %s, want mutation policy block evidence with persisted intent", mutationLogs)
+	if !strings.Contains(mutationLogs, `"type": "task.dispatch_requested"`) || !strings.Contains(mutationLogs, `"execution_intent": "mutation"`) || !strings.Contains(mutationLogs, `"execution_intent_source": "operator"`) {
+		t.Fatalf("mutation logs output = %s, want mutation dispatch evidence with persisted intent", mutationLogs)
 	}
 
 	run("project", "select", "odin-core")
@@ -3221,7 +3257,7 @@ func TestRunWorkDispatchEnforcesProjectExecutionPolicy(t *testing.T) {
 	for _, want := range []string{
 		"work_items=3",
 		"open_work_items=3",
-		"active_run_attempts=1",
+		"active_run_attempts=2",
 		"pending_approvals=1",
 		"explicit_intent_work_items=3",
 	} {
