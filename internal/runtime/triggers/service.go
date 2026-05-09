@@ -863,7 +863,7 @@ func (service Service) fireAndApplyMaterializationPolicy(ctx context.Context, pa
 	if err != nil {
 		return sqlite.FireAutomationTriggerResult{}, err
 	}
-	if !fire.CreatedWorkItem || !triggerIntentRequiresImmediateAdmission(fire.WorkItem.ExecutionIntent) {
+	if !fire.CreatedWorkItem {
 		return fire, nil
 	}
 	outcome, err := jobs.Service{
@@ -876,15 +876,6 @@ func (service Service) fireAndApplyMaterializationPolicy(ctx context.Context, pa
 	}
 	fire.WorkItem = outcome.Task
 	return fire, nil
-}
-
-func triggerIntentRequiresImmediateAdmission(intent string) bool {
-	switch strings.ToLower(strings.TrimSpace(intent)) {
-	case "governance", "destructive":
-		return true
-	default:
-		return false
-	}
 }
 
 func (service Service) ensureRuntimeProject(ctx context.Context, key string) (sqlite.Project, error) {

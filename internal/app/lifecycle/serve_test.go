@@ -1348,8 +1348,8 @@ service:
 		t.Fatalf("replay evaluate output = %s, want duplicate delivery suppressed", replayEvaluate)
 	}
 	dispatch := run("work", "dispatch", "--task", riskyTaskKey, "--json")
-	if !strings.Contains(dispatch, `"reason": "approval_required"`) || !strings.Contains(dispatch, `"status": "blocked"`) {
-		t.Fatalf("risky dispatch output = %s, want approval gate", dispatch)
+	if !strings.Contains(dispatch, `"reason": "task_not_queued"`) || !strings.Contains(dispatch, `"status": "blocked"`) {
+		t.Fatalf("risky dispatch output = %s, want already-blocked approval gate", dispatch)
 	}
 	logs := run("logs", "--json")
 	for _, want := range []string{

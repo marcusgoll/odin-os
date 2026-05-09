@@ -3260,6 +3260,7 @@ func TestRunWorkExplicitTriggerIntentDoesNotDependOnTitleInference(t *testing.T)
 	var fire struct {
 		WorkItem struct {
 			Key                   string `json:"key"`
+			Status                string `json:"status"`
 			ExecutionIntent       string `json:"execution_intent"`
 			ExecutionIntentSource string `json:"execution_intent_source"`
 		} `json:"work_item"`
@@ -3270,10 +3271,13 @@ func TestRunWorkExplicitTriggerIntentDoesNotDependOnTitleInference(t *testing.T)
 	if fire.WorkItem.Key == "" || fire.WorkItem.ExecutionIntent != "governance" || fire.WorkItem.ExecutionIntentSource != "trigger" {
 		t.Fatalf("trigger fire output = %+v, want trigger-persisted governance intent", fire)
 	}
+	if fire.WorkItem.Status != "blocked" {
+		t.Fatalf("trigger fire work status = %q, want blocked by materialization admission", fire.WorkItem.Status)
+	}
 
 	dispatchOutput := run("work", "dispatch", "--task", fire.WorkItem.Key, "--json")
-	if !strings.Contains(dispatchOutput, `"dispatched": false`) || !strings.Contains(dispatchOutput, `"reason": "approval_required"`) || !strings.Contains(dispatchOutput, `"execution_intent": "governance"`) || !strings.Contains(dispatchOutput, `"execution_intent_source": "trigger"`) {
-		t.Fatalf("dispatch output = %s, want approval gated by trigger intent without risky title wording", dispatchOutput)
+	if !strings.Contains(dispatchOutput, `"dispatched": false`) || !strings.Contains(dispatchOutput, `"reason": "task_not_queued"`) || !strings.Contains(dispatchOutput, `"status": "blocked"`) || !strings.Contains(dispatchOutput, `"execution_intent": "governance"`) || !strings.Contains(dispatchOutput, `"execution_intent_source": "trigger"`) {
+		t.Fatalf("dispatch output = %s, want already-blocked trigger intent work", dispatchOutput)
 	}
 	jobsOutput := run("jobs", "--json")
 	if !strings.Contains(jobsOutput, `"execution_intent": "governance"`) || !strings.Contains(jobsOutput, `"execution_intent_source": "trigger"`) || !strings.Contains(jobsOutput, `"blocked_reason": "approval_required"`) {
@@ -3394,8 +3398,8 @@ func TestRunTriggerMVPUsesLiveOperatorLifecycle(t *testing.T) {
 	if err := json.Unmarshal([]byte(fireOutput), &fire); err != nil {
 		t.Fatalf("json.Unmarshal(fire) error = %v\n%s", err, fireOutput)
 	}
-	if !fire.CreatedWorkItem || fire.WorkItem.Status != "queued" || fire.Materialization.MaterializationKey == "" {
-		t.Fatalf("trigger fire output = %+v, want queued risky work item with materialization key", fire)
+	if !fire.CreatedWorkItem || fire.WorkItem.Status != "blocked" || fire.Materialization.MaterializationKey == "" {
+		t.Fatalf("trigger fire output = %+v, want blocked risky work item with materialization key", fire)
 	}
 	repeatFireOutput := run("trigger", "fire", "risky-trigger", "reason=approval-proof", "--json")
 	if !strings.Contains(repeatFireOutput, `"created_work_item": false`) || !strings.Contains(repeatFireOutput, fire.WorkItem.Key) {
@@ -3403,8 +3407,8 @@ func TestRunTriggerMVPUsesLiveOperatorLifecycle(t *testing.T) {
 	}
 
 	dispatchOutput := run("work", "dispatch", "--task", fire.WorkItem.Key, "--json")
-	if !strings.Contains(dispatchOutput, `"dispatched": false`) || !strings.Contains(dispatchOutput, `"reason": "approval_required"`) || !strings.Contains(dispatchOutput, `"status": "blocked"`) {
-		t.Fatalf("dispatch risky trigger work output = %s, want approval-required block", dispatchOutput)
+	if !strings.Contains(dispatchOutput, `"dispatched": false`) || !strings.Contains(dispatchOutput, `"reason": "task_not_queued"`) || !strings.Contains(dispatchOutput, `"status": "blocked"`) {
+		t.Fatalf("dispatch risky trigger work output = %s, want already-blocked approval-required work", dispatchOutput)
 	}
 	approvalsOutput := run("approvals", "all", "--json")
 	if !strings.Contains(approvalsOutput, `"status": "pending"`) || !strings.Contains(approvalsOutput, fmt.Sprintf(`"task_key": "%s"`, fire.WorkItem.Key)) {
@@ -3565,8 +3569,8 @@ func TestRunTriggerHumanizedTimingDefersQuietHoursAndCoalescesMissedRuns(t *test
 		t.Fatalf("risky release = %+v, want one trigger-created work item", risky)
 	}
 	dispatch := run("work", "dispatch", "--task", risky.Results[0].WorkItem.Key, "--json")
-	if !strings.Contains(dispatch, `"reason": "approval_required"`) || !strings.Contains(dispatch, `"status": "blocked"`) {
-		t.Fatalf("risky dispatch output = %s, want approval-required block after timing release", dispatch)
+	if !strings.Contains(dispatch, `"reason": "task_not_queued"`) || !strings.Contains(dispatch, `"status": "blocked"`) {
+		t.Fatalf("risky dispatch output = %s, want already-blocked approval-required work after timing release", dispatch)
 	}
 
 	logsOutput := run("logs", "--json")
@@ -3666,8 +3670,11 @@ func TestRunTriggerBatchingGroupsSchedulesAndPreservesApproval(t *testing.T) {
 	}
 
 	dispatch := run("work", "dispatch", "--task", sharedWorkItem, "--json")
-	if !strings.Contains(dispatch, `"reason": "approval_required"`) || !strings.Contains(dispatch, `"status": "blocked"`) || !strings.Contains(dispatch, `"execution_intent": "governance"`) {
-		t.Fatalf("batched dispatch output = %s, want governance approval-required block", dispatch)
+	if !strings.Contains(dispatch, `"reason": "task_not_queued"`) ||
+		!strings.Contains(dispatch, `"status": "blocked"`) ||
+		!strings.Contains(dispatch, `"execution_intent": "governance"`) ||
+		!strings.Contains(dispatch, `"blocked_reason": "approval_required"`) {
+		t.Fatalf("batched dispatch output = %s, want already-blocked governance approval-required work", dispatch)
 	}
 
 	logs := run("logs", "--json")
@@ -3983,8 +3990,8 @@ func TestRunTriggerEventMVPUsesInternalEventsWithDedupeAndApprovalGates(t *testi
 		t.Fatalf("repeat risky event evaluate output = %s, want duplicate suppressed with existing work", repeatRiskyEvents)
 	}
 	dispatchRisky := run("work", "dispatch", "--task", riskyWorkKey, "--json")
-	if !strings.Contains(dispatchRisky, `"reason": "approval_required"`) || !strings.Contains(dispatchRisky, `"status": "blocked"`) {
-		t.Fatalf("risky event dispatch output = %s, want approval required", dispatchRisky)
+	if !strings.Contains(dispatchRisky, `"reason": "task_not_queued"`) || !strings.Contains(dispatchRisky, `"status": "blocked"`) {
+		t.Fatalf("risky event dispatch output = %s, want already-blocked approval-required work", dispatchRisky)
 	}
 	approvals := run("approvals", "all", "--json")
 	if !strings.Contains(approvals, `"status": "pending"`) || !strings.Contains(approvals, riskyWorkKey) {
@@ -4286,8 +4293,8 @@ func TestRunTriggerGitHubIssueExternalEventAdapterMVP(t *testing.T) {
 	riskyEvaluate := run("trigger", "evaluate", "source=events", "--json")
 	riskyTaskKey := extractCreatedTaskKey(riskyEvaluate, "automation-github-risky-")
 	dispatch := run("work", "dispatch", "--task", riskyTaskKey, "--json")
-	if !strings.Contains(dispatch, `"reason": "approval_required"`) || !strings.Contains(dispatch, `"status": "blocked"`) {
-		t.Fatalf("risky dispatch output = %s, want approval gate", dispatch)
+	if !strings.Contains(dispatch, `"reason": "task_not_queued"`) || !strings.Contains(dispatch, `"status": "blocked"`) {
+		t.Fatalf("risky dispatch output = %s, want already-blocked approval gate", dispatch)
 	}
 	approvals := run("approvals", "all", "--json")
 	if !strings.Contains(approvals, `"status": "pending"`) || !strings.Contains(approvals, riskyTaskKey) {

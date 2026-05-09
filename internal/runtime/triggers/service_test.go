@@ -28,13 +28,14 @@ func TestEvaluateDueMaterializesEnabledScheduleTriggerOnce(t *testing.T) {
 	}
 	seedTrigger(t, ctx, store, sqlite.UpsertAutomationTriggerParams{
 		Key:            "due-nightly",
-		RuleJSON:       `{"summary":"due proof"}`,
+		RuleJSON:       `{"summary":"due proof","execution_intent":"read_only"}`,
 		RuleSummary:    "due proof",
 		WorkItemTitle:  "Run due nightly",
 		NextEligibleAt: &dueAt,
 	})
 
-	result, err := Service{Store: store, Registry: writeTriggerRegistry(t)}.EvaluateDue(ctx, now)
+	service := Service{Store: store, Registry: writeTriggerRegistry(t)}
+	result, err := service.EvaluateDue(ctx, now)
 	if err != nil {
 		t.Fatalf("EvaluateDue(first) error = %v", err)
 	}
@@ -60,7 +61,7 @@ func TestEvaluateDueMaterializesEnabledScheduleTriggerOnce(t *testing.T) {
 		t.Fatalf("materialized task = %+v, want queued automation-trigger Work Item", task)
 	}
 
-	result, err = Service{Store: store}.EvaluateDue(ctx, now)
+	result, err = service.EvaluateDue(ctx, now)
 	if err != nil {
 		t.Fatalf("EvaluateDue(second) error = %v", err)
 	}
@@ -151,6 +152,63 @@ func TestEvaluateDueMaterializesHighRiskIntentAsBlockedApprovalWork(t *testing.T
 	}
 }
 
+func TestEvaluateDueAppliesJobAdmissionForInferredHighRiskTriggerWork(t *testing.T) {
+	ctx := context.Background()
+	store := openTriggerStore(t)
+	defer store.Close()
+
+	now := time.Date(2026, 5, 10, 12, 1, 0, 0, time.UTC)
+	dueAt := time.Date(2026, 5, 10, 12, 0, 0, 0, time.UTC)
+	store.Now = func() time.Time {
+		return now
+	}
+	service := Service{
+		Store:    store,
+		Registry: writeTriggerRegistry(t),
+	}
+
+	if _, err := service.Upsert(ctx, UpsertParams{
+		Key:            "inferred-governance-trigger",
+		InitiativeKey:  "odin-core",
+		Kind:           "schedule",
+		Status:         "enabled",
+		RuleSummary:    "inferred high-risk trigger",
+		WorkItemTitle:  "Governance transition review",
+		NextEligibleAt: &dueAt,
+	}); err != nil {
+		t.Fatalf("Upsert() error = %v", err)
+	}
+
+	result, err := service.EvaluateDue(ctx, now)
+	if err != nil {
+		t.Fatalf("EvaluateDue() error = %v", err)
+	}
+	if result.Evaluated != 1 || result.Materialized != 1 {
+		t.Fatalf("EvaluateDue() = %+v, want one inferred high-risk materialization", result)
+	}
+
+	task, err := store.GetTask(ctx, result.Results[0].WorkItem.ID)
+	if err != nil {
+		t.Fatalf("GetTask(materialized) error = %v", err)
+	}
+	if task.ExecutionIntent != "" || task.ExecutionIntentSource != "" {
+		t.Fatalf("task stored intent = %q/%q, want empty stored intent so admission inference is proven", task.ExecutionIntent, task.ExecutionIntentSource)
+	}
+	if task.Status != "blocked" {
+		t.Fatalf("task status = %q, want blocked", task.Status)
+	}
+	if task.BlockedReason != "approval_required" {
+		t.Fatalf("task blocked reason = %q, want approval_required", task.BlockedReason)
+	}
+	approval, err := store.GetLatestTaskApproval(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("GetLatestTaskApproval() error = %v", err)
+	}
+	if approval.Status != "pending" {
+		t.Fatalf("approval status = %q, want pending", approval.Status)
+	}
+}
+
 func TestEvaluateDueMaterializesReadOnlyIntentWithoutApprovalBlock(t *testing.T) {
 	ctx := context.Background()
 	store := openTriggerStore(t)
@@ -213,13 +271,14 @@ func TestEvaluateDueReschedulesRecurringCadenceFromDueWindow(t *testing.T) {
 	}
 	seedTrigger(t, ctx, store, sqlite.UpsertAutomationTriggerParams{
 		Key:            "recurring-nightly",
-		RuleJSON:       `{"summary":"recurring proof","cadence":"15m"}`,
+		RuleJSON:       `{"summary":"recurring proof","cadence":"15m","execution_intent":"read_only"}`,
 		RuleSummary:    "recurring proof",
 		WorkItemTitle:  "Run recurring nightly",
 		NextEligibleAt: &dueAt,
 	})
 
-	result, err := Service{Store: store}.EvaluateDue(ctx, currentNow)
+	service := Service{Store: store, Registry: writeTriggerRegistry(t)}
+	result, err := service.EvaluateDue(ctx, currentNow)
 	if err != nil {
 		t.Fatalf("EvaluateDue(first) error = %v", err)
 	}
@@ -236,7 +295,7 @@ func TestEvaluateDueReschedulesRecurringCadenceFromDueWindow(t *testing.T) {
 		t.Fatalf("NextEligibleAt = %v, want %s", trigger.NextEligibleAt, wantNext.Format(time.RFC3339))
 	}
 
-	result, err = Service{Store: store}.EvaluateDue(ctx, currentNow)
+	result, err = service.EvaluateDue(ctx, currentNow)
 	if err != nil {
 		t.Fatalf("EvaluateDue(before next window) error = %v", err)
 	}
@@ -245,7 +304,7 @@ func TestEvaluateDueReschedulesRecurringCadenceFromDueWindow(t *testing.T) {
 	}
 
 	currentNow = wantNext
-	result, err = Service{Store: store}.EvaluateDue(ctx, currentNow)
+	result, err = service.EvaluateDue(ctx, currentNow)
 	if err != nil {
 		t.Fatalf("EvaluateDue(second window) error = %v", err)
 	}
@@ -275,13 +334,13 @@ func TestEvaluateDueReschedulesCronRuleFromDueWindow(t *testing.T) {
 	}
 	seedTrigger(t, ctx, store, sqlite.UpsertAutomationTriggerParams{
 		Key:            "cron-quarter-hour",
-		RuleJSON:       `{"summary":"cron proof","cron":"*/15 * * * *"}`,
+		RuleJSON:       `{"summary":"cron proof","cron":"*/15 * * * *","execution_intent":"read_only"}`,
 		RuleSummary:    "cron proof",
 		WorkItemTitle:  "Run cron proof",
 		NextEligibleAt: &dueAt,
 	})
 
-	result, err := Service{Store: store}.EvaluateDue(ctx, currentNow)
+	result, err := Service{Store: store, Registry: writeTriggerRegistry(t)}.EvaluateDue(ctx, currentNow)
 	if err != nil {
 		t.Fatalf("EvaluateDue(first) error = %v", err)
 	}
@@ -546,13 +605,13 @@ func TestEvaluateDueMarksInvalidTriggerRuleErroredAndContinues(t *testing.T) {
 	})
 	seedTrigger(t, ctx, store, sqlite.UpsertAutomationTriggerParams{
 		Key:            "good-cadence",
-		RuleJSON:       `{"summary":"good cadence"}`,
+		RuleJSON:       `{"summary":"good cadence","execution_intent":"read_only"}`,
 		RuleSummary:    "good cadence",
 		WorkItemTitle:  "Good cadence",
 		NextEligibleAt: &dueAt,
 	})
 
-	result, err := Service{Store: store}.EvaluateDue(ctx, now)
+	result, err := Service{Store: store, Registry: writeTriggerRegistry(t)}.EvaluateDue(ctx, now)
 	if err != nil {
 		t.Fatalf("EvaluateDue() error = %v", err)
 	}
