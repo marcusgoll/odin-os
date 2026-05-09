@@ -70,7 +70,7 @@ var errRuntimeNotReady = errors.New("runtime not ready")
 
 const rootUsageBanner = "Usage: odin <command> [args]\n\nCommands: help repl overview tui doctor healthcheck serve backup restore verify-backup status legacy project workspace work scope jobs runs leases approvals review intake agenda logs knowledge goal browser task initiative companion profile followup trigger scheduler transition skills e2e\n\nRun detail: odin runs show <id>"
 
-const schedulerUsage = "usage: odin scheduler tick [now=<RFC3339>] [recovery=<true|false>] [--json]"
+const schedulerUsage = "usage: odin scheduler tick [now=<RFC3339>] [recovery=<true|false>] [--dry-run|dry_run=<true|false>] [--json]"
 
 var (
 	serveTaskLoopInterval     = 1 * time.Second
@@ -3589,10 +3589,17 @@ func runFollowup(ctx context.Context, app bootstrap.App, args []string, stdout i
 
 type schedulerTickView struct {
 	Now               string                         `json:"now"`
+	DryRun            bool                           `json:"dry_run"`
+	Mutates           bool                           `json:"mutates"`
 	TriggerEvaluation schedulerTriggerEvaluationView `json:"trigger_evaluation"`
 	Supervision       schedulerSupervisionView       `json:"supervision"`
 	RecoveryRan       bool                           `json:"recovery_ran"`
 	Recovery          *schedulerRecoveryView         `json:"recovery,omitempty"`
+	WouldRun          int                            `json:"would_run,omitempty"`
+	WouldDefer        int                            `json:"would_defer,omitempty"`
+	WouldBatch        int                            `json:"would_batch,omitempty"`
+	ApprovalRequired  int                            `json:"approval_required,omitempty"`
+	Decisions         []schedulerDecisionView        `json:"decisions,omitempty"`
 }
 
 type schedulerTriggerEvaluationView struct {
@@ -3611,6 +3618,26 @@ type schedulerRecoveryView struct {
 	Observations int `json:"observations"`
 	Decisions    int `json:"decisions"`
 	Outcomes     int `json:"outcomes"`
+}
+
+type schedulerDecisionView struct {
+	Key              string  `json:"key"`
+	Decision         string  `json:"decision"`
+	Reason           string  `json:"reason"`
+	TriggerType      string  `json:"trigger_type"`
+	Schedule         string  `json:"schedule"`
+	DueAt            *string `json:"due_at,omitempty"`
+	NextRun          *string `json:"next_run,omitempty"`
+	LastRun          *string `json:"last_run,omitempty"`
+	QuietHours       string  `json:"quiet_hours"`
+	QuietHourEffect  string  `json:"quiet_hour_effect"`
+	BatchKey         string  `json:"batch_key,omitempty"`
+	BatchWindow      string  `json:"batch_window,omitempty"`
+	BatchGroup       string  `json:"batch_group,omitempty"`
+	ApprovalRequired bool    `json:"approval_required"`
+	RecoveryState    string  `json:"recovery_state"`
+	Mutates          bool    `json:"mutates"`
+	Error            string  `json:"error,omitempty"`
 }
 
 func runScheduler(ctx context.Context, app bootstrap.App, args []string, stdout io.Writer) error {
@@ -3634,6 +3661,7 @@ func runSchedulerTick(ctx context.Context, app bootstrap.App, args []string, std
 	now := nowFunc().UTC()
 	recoveryEnabled := false
 	jsonOutput := false
+	dryRun := parseBoolEnv(os.Getenv("ODIN_DRY_RUN"))
 	for _, arg := range args {
 		switch {
 		case arg == "--help":
@@ -3641,6 +3669,14 @@ func runSchedulerTick(ctx context.Context, app bootstrap.App, args []string, std
 			return err
 		case arg == "--json":
 			jsonOutput = true
+		case arg == "--dry-run":
+			dryRun = true
+		case strings.HasPrefix(arg, "dry_run="):
+			parsed, err := strconv.ParseBool(strings.TrimPrefix(arg, "dry_run="))
+			if err != nil {
+				return fmt.Errorf("scheduler tick dry_run must be true or false: %w", err)
+			}
+			dryRun = parsed
 		case strings.HasPrefix(arg, "now="):
 			parsed, err := time.Parse(time.RFC3339, strings.TrimPrefix(arg, "now="))
 			if err != nil {
@@ -3658,6 +3694,65 @@ func runSchedulerTick(ctx context.Context, app bootstrap.App, args []string, std
 		}
 	}
 
+	if dryRun {
+		preview, err := (triggers.Service{Store: app.Store, Registry: app.Registry}).PreviewDue(ctx, now)
+		if err != nil {
+			return err
+		}
+		view := schedulerPreviewTickView(now, preview)
+		auditScope, auditProjectID := schedulerTickAuditTarget(ctx, app)
+		if err := app.Store.RecordSchedulerTick(ctx, sqlite.RecordSchedulerTickParams{
+			Now:              now,
+			Scope:            auditScope,
+			ProjectID:        auditProjectID,
+			DryRun:           true,
+			Mutates:          false,
+			Evaluated:        view.TriggerEvaluation.Evaluated,
+			Materialized:     view.TriggerEvaluation.Materialized,
+			Deferred:         view.TriggerEvaluation.Deferred,
+			Errored:          view.TriggerEvaluation.Errored,
+			WouldRun:         view.WouldRun,
+			WouldDefer:       view.WouldDefer,
+			WouldBatch:       view.WouldBatch,
+			ApprovalRequired: view.ApprovalRequired,
+			RecoveryRan:      false,
+		}); err != nil {
+			return err
+		}
+		if jsonOutput {
+			return commands.WriteJSON(stdout, view)
+		}
+		if _, err := fmt.Fprintf(stdout,
+			"scheduler tick dry_run=true now=%s evaluated=%d materialized=0 would_run=%d would_defer=%d would_batch=%d approval_required=%d errored=%d recovery=false mutates=false\n",
+			view.Now,
+			view.TriggerEvaluation.Evaluated,
+			view.WouldRun,
+			view.WouldDefer,
+			view.WouldBatch,
+			view.ApprovalRequired,
+			view.TriggerEvaluation.Errored,
+		); err != nil {
+			return err
+		}
+		for _, decision := range view.Decisions {
+			if _, err := fmt.Fprintf(stdout, "trigger=%s decision=%s reason=%s type=%s schedule=%s next_run=%s quiet_hour_effect=%s batch=%s approval_required=%t recovery_state=%s\n",
+				decision.Key,
+				decision.Decision,
+				decision.Reason,
+				decision.TriggerType,
+				decision.Schedule,
+				defaultSchedulerStringPtr(decision.NextRun, "none"),
+				defaultSchedulerString(decision.QuietHourEffect, "none"),
+				formatSchedulerBatch(decision.BatchKey, decision.BatchWindow),
+				decision.ApprovalRequired,
+				decision.RecoveryState,
+			); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
 	triggerResult, err := (triggers.Service{Store: app.Store, Registry: app.Registry}).EvaluateDue(ctx, now)
 	if err != nil {
 		return err
@@ -3671,7 +3766,9 @@ func runSchedulerTick(ctx context.Context, app bootstrap.App, args []string, std
 	}
 
 	view := schedulerTickView{
-		Now: now.Format(time.RFC3339),
+		Now:     now.Format(time.RFC3339),
+		DryRun:  false,
+		Mutates: true,
 		TriggerEvaluation: schedulerTriggerEvaluationView{
 			Evaluated:    triggerResult.Evaluated,
 			Materialized: triggerResult.Materialized,
@@ -3701,6 +3798,21 @@ func runSchedulerTick(ctx context.Context, app bootstrap.App, args []string, std
 			Outcomes:     len(result.Outcomes),
 		}
 	}
+	auditScope, auditProjectID := schedulerTickAuditTarget(ctx, app)
+	if err := app.Store.RecordSchedulerTick(ctx, sqlite.RecordSchedulerTickParams{
+		Now:          now,
+		Scope:        auditScope,
+		ProjectID:    auditProjectID,
+		DryRun:       false,
+		Mutates:      true,
+		Evaluated:    view.TriggerEvaluation.Evaluated,
+		Materialized: view.TriggerEvaluation.Materialized,
+		Deferred:     view.TriggerEvaluation.Deferred,
+		Errored:      view.TriggerEvaluation.Errored,
+		RecoveryRan:  view.RecoveryRan,
+	}); err != nil {
+		return err
+	}
 
 	if jsonOutput {
 		return commands.WriteJSON(stdout, view)
@@ -3717,6 +3829,133 @@ func runSchedulerTick(ctx context.Context, app bootstrap.App, args []string, std
 		view.RecoveryRan,
 	)
 	return err
+}
+
+func schedulerPreviewTickView(now time.Time, preview triggers.PreviewResult) schedulerTickView {
+	decisions := make([]schedulerDecisionView, 0, len(preview.Decisions))
+	for _, decision := range preview.Decisions {
+		decisions = append(decisions, newSchedulerDecisionView(decision))
+	}
+	return schedulerTickView{
+		Now:     now.UTC().Format(time.RFC3339),
+		DryRun:  true,
+		Mutates: false,
+		TriggerEvaluation: schedulerTriggerEvaluationView{
+			Evaluated:    preview.Evaluated,
+			Materialized: 0,
+			Deferred:     0,
+			Errored:      preview.Errored,
+		},
+		Supervision:      schedulerSupervisionView{},
+		RecoveryRan:      false,
+		WouldRun:         preview.WouldRun,
+		WouldDefer:       preview.WouldDefer,
+		WouldBatch:       preview.WouldBatch,
+		ApprovalRequired: preview.ApprovalRequired,
+		Decisions:        decisions,
+	}
+}
+
+func newSchedulerDecisionView(decision triggers.PreviewDecision) schedulerDecisionView {
+	schedule, quietHours, batchKey, batchWindow := schedulerTriggerRuleDetails(decision.Trigger)
+	return schedulerDecisionView{
+		Key:              decision.Trigger.Key,
+		Decision:         decision.Decision,
+		Reason:           decision.Reason,
+		TriggerType:      decision.Trigger.Kind,
+		Schedule:         schedule,
+		DueAt:            formatSchedulerOptionalTime(decision.DueAt),
+		NextRun:          formatSchedulerOptionalTime(decision.NextEligibleAt),
+		LastRun:          formatSchedulerOptionalTime(decision.Trigger.LastMaterializedAt),
+		QuietHours:       defaultSchedulerString(decision.QuietHours, quietHours),
+		QuietHourEffect:  defaultSchedulerString(decision.QuietHourEffect, "none"),
+		BatchKey:         defaultSchedulerString(decision.BatchKey, batchKey),
+		BatchWindow:      defaultSchedulerString(decision.BatchWindow, batchWindow),
+		BatchGroup:       decision.BatchGroup,
+		ApprovalRequired: decision.ApprovalRequired,
+		RecoveryState:    decision.RecoveryState,
+		Mutates:          false,
+		Error:            decision.Error,
+	}
+}
+
+func schedulerTriggerRuleDetails(trigger sqlite.AutomationTrigger) (string, string, string, string) {
+	var rule struct {
+		Cadence     string `json:"cadence"`
+		Cron        string `json:"cron"`
+		QuietHours  string `json:"quiet_hours"`
+		BatchKey    string `json:"batch_key"`
+		BatchWindow string `json:"batch_window"`
+		EventType   string `json:"event_type"`
+	}
+	_ = json.Unmarshal([]byte(trigger.RuleJSON), &rule)
+	schedule := "manual"
+	switch {
+	case strings.TrimSpace(rule.Cron) != "":
+		schedule = "cron:" + strings.TrimSpace(rule.Cron)
+	case strings.TrimSpace(rule.Cadence) != "":
+		schedule = "cadence:" + strings.TrimSpace(rule.Cadence)
+	case strings.EqualFold(trigger.Kind, "event") && strings.TrimSpace(rule.EventType) != "":
+		schedule = "event:" + strings.TrimSpace(rule.EventType)
+	}
+	return schedule, strings.TrimSpace(rule.QuietHours), strings.TrimSpace(rule.BatchKey), strings.TrimSpace(rule.BatchWindow)
+}
+
+func schedulerTickAuditTarget(ctx context.Context, app bootstrap.App) (string, *int64) {
+	state, err := loadCLIState(app)
+	if err != nil {
+		return "runtime", nil
+	}
+	if state.Scope.Kind != cliscope.ScopeProject && state.Scope.Kind != cliscope.ScopeOdinCore {
+		return "runtime", nil
+	}
+	project, err := app.Store.GetProjectByKey(ctx, state.Scope.ProjectKey)
+	if err != nil {
+		return state.Scope.ProjectKey, nil
+	}
+	return project.Scope, &project.ID
+}
+
+func parseBoolEnv(value string) bool {
+	parsed, err := strconv.ParseBool(strings.TrimSpace(value))
+	return err == nil && parsed
+}
+
+func formatSchedulerOptionalTime(value *time.Time) *string {
+	if value == nil {
+		return nil
+	}
+	formatted := value.UTC().Format(time.RFC3339)
+	return &formatted
+}
+
+func defaultSchedulerString(value string, fallback string) string {
+	if strings.TrimSpace(value) != "" {
+		return strings.TrimSpace(value)
+	}
+	if strings.TrimSpace(fallback) != "" {
+		return strings.TrimSpace(fallback)
+	}
+	return "none"
+}
+
+func defaultSchedulerStringPtr(value *string, fallback string) string {
+	if value == nil {
+		return fallback
+	}
+	return *value
+}
+
+func formatSchedulerBatch(key string, window string) string {
+	key = strings.TrimSpace(key)
+	window = strings.TrimSpace(window)
+	if key == "" {
+		return "none"
+	}
+	if window == "" {
+		return key
+	}
+	return key + " window=" + window
 }
 
 func runStatus(ctx context.Context, app bootstrap.App, cfg appconfig.Config, args []string, stdout io.Writer) error {

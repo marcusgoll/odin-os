@@ -893,6 +893,7 @@ func (store *Store) FireAutomationTrigger(ctx context.Context, params FireAutoma
 			return fmt.Errorf("automation trigger %s is %s", trigger.Key, trigger.Status)
 		}
 		eventScope := store.automationTriggerEventScopeTx(ctx, tx, trigger)
+		requestEnvelope := automationTriggerEnvelope(trigger, params, source, materializationKey, "not_started", now)
 
 		if err := appendEventTx(ctx, tx, eventInsert{
 			StreamType: runtimeevents.StreamAutomationTrigger,
@@ -909,6 +910,7 @@ func (store *Store) FireAutomationTrigger(ctx context.Context, params FireAutoma
 				RequestedBy:        requestedBy,
 				SourceEventID:      params.SourceEventID,
 				SourceEventType:    params.SourceEventType,
+				Envelope:           requestEnvelope,
 			},
 			OccurredAt: now,
 		}); err != nil {
@@ -928,7 +930,7 @@ func (store *Store) FireAutomationTrigger(ctx context.Context, params FireAutoma
 			if err != nil {
 				return err
 			}
-			if err := appendAutomationTriggerEvaluatedEvent(ctx, tx, updated, eventScope, source, materializationKey, false, params.SourceEventID, params.SourceEventType, now); err != nil {
+			if err := appendAutomationTriggerEvaluatedEvent(ctx, tx, updated, eventScope, source, materializationKey, false, params, now); err != nil {
 				return err
 			}
 			result = FireAutomationTriggerResult{
@@ -977,9 +979,10 @@ func (store *Store) FireAutomationTrigger(ctx context.Context, params FireAutoma
 		if err != nil {
 			return err
 		}
-		if err := appendAutomationTriggerEvaluatedEvent(ctx, tx, updated, eventScope, source, materializationKey, createdWorkItem, params.SourceEventID, params.SourceEventType, now); err != nil {
+		if err := appendAutomationTriggerEvaluatedEvent(ctx, tx, updated, eventScope, source, materializationKey, createdWorkItem, params, now); err != nil {
 			return err
 		}
+		materializedEnvelope := automationTriggerEnvelope(updated, params, source, materializationKey, "not_started", now)
 		if err := appendEventTx(ctx, tx, eventInsert{
 			StreamType: runtimeevents.StreamAutomationTrigger,
 			StreamID:   updated.ID,
@@ -997,6 +1000,7 @@ func (store *Store) FireAutomationTrigger(ctx context.Context, params FireAutoma
 				RequestedBy:        requestedBy,
 				SourceEventID:      params.SourceEventID,
 				SourceEventType:    params.SourceEventType,
+				Envelope:           materializedEnvelope,
 			},
 			OccurredAt: now,
 		}); err != nil {
@@ -1011,6 +1015,89 @@ func (store *Store) FireAutomationTrigger(ctx context.Context, params FireAutoma
 		return nil
 	})
 	return result, err
+}
+
+func (store *Store) RecordAutomationTriggerTest(ctx context.Context, params RecordAutomationTriggerTestParams) error {
+	now := store.now()
+	workspaceID := defaultString(params.WorkspaceID, "default")
+	key := strings.TrimSpace(params.Key)
+	return store.withTx(ctx, func(tx *sql.Tx) error {
+		trigger, err := store.getAutomationTriggerByWorkspaceKeyQuery(ctx, tx, workspaceID, key)
+		if err != nil {
+			return err
+		}
+		eventScope := store.automationTriggerEventScopeTx(ctx, tx, trigger)
+		payload := runtimeevents.AutomationTriggerTestedPayload{
+			WorkspaceID:      trigger.WorkspaceID,
+			Key:              trigger.Key,
+			Decision:         strings.TrimSpace(params.Decision),
+			Reason:           strings.TrimSpace(params.Reason),
+			QuietHourEffect:  strings.TrimSpace(params.QuietHourEffect),
+			BatchKey:         strings.TrimSpace(params.BatchKey),
+			BatchWindow:      strings.TrimSpace(params.BatchWindow),
+			ApprovalRequired: params.ApprovalRequired,
+			RecoveryState:    strings.TrimSpace(params.RecoveryState),
+			Mutates:          params.Mutates,
+			Envelope: automationTriggerEnvelope(trigger, FireAutomationTriggerParams{
+				WorkspaceID: trigger.WorkspaceID,
+				Key:         trigger.Key,
+				Source:      "test",
+				Reason:      strings.TrimSpace(params.Reason),
+				DueAt:       params.DueAt,
+			}, "test", "", strings.TrimSpace(params.RecoveryState), now),
+		}
+		if params.DueAt != nil {
+			payload.DueAt = params.DueAt.UTC().Format(time.RFC3339)
+		}
+		if params.NextRun != nil {
+			payload.NextRun = params.NextRun.UTC().Format(time.RFC3339)
+		}
+		return appendEventTx(ctx, tx, eventInsert{
+			StreamType: runtimeevents.StreamAutomationTrigger,
+			StreamID:   trigger.ID,
+			EventType:  runtimeevents.EventAutomationTriggerTested,
+			Scope:      eventScope,
+			ProjectID:  &trigger.ProjectID,
+			Payload:    payload,
+			OccurredAt: now,
+		})
+	})
+}
+
+func (store *Store) RecordSchedulerTick(ctx context.Context, params RecordSchedulerTickParams) error {
+	now := store.now()
+	tickAt := params.Now.UTC()
+	if tickAt.IsZero() {
+		tickAt = now
+	}
+	scope := strings.TrimSpace(params.Scope)
+	if scope == "" {
+		scope = "runtime"
+	}
+	return store.withTx(ctx, func(tx *sql.Tx) error {
+		return appendEventTx(ctx, tx, eventInsert{
+			StreamType: runtimeevents.StreamScheduler,
+			StreamID:   0,
+			EventType:  runtimeevents.EventSchedulerTickEvaluated,
+			Scope:      scope,
+			ProjectID:  cloneInt64Ptr(params.ProjectID),
+			Payload: runtimeevents.SchedulerTickEvaluatedPayload{
+				Now:              tickAt.Format(time.RFC3339),
+				DryRun:           params.DryRun,
+				Mutates:          params.Mutates,
+				Evaluated:        params.Evaluated,
+				Materialized:     params.Materialized,
+				Deferred:         params.Deferred,
+				Errored:          params.Errored,
+				WouldRun:         params.WouldRun,
+				WouldDefer:       params.WouldDefer,
+				WouldBatch:       params.WouldBatch,
+				ApprovalRequired: params.ApprovalRequired,
+				RecoveryRan:      params.RecoveryRan,
+			},
+			OccurredAt: now,
+		})
+	})
 }
 
 func (store *Store) DeferAutomationTrigger(ctx context.Context, params DeferAutomationTriggerParams) (AutomationTrigger, error) {
@@ -1046,6 +1133,13 @@ func (store *Store) DeferAutomationTrigger(ctx context.Context, params DeferAuto
 				DueAt:         params.DueAt.UTC().Format(time.RFC3339),
 				DeferredUntil: params.DeferredUntil.UTC().Format(time.RFC3339),
 				Status:        updated.Status,
+				Envelope: automationTriggerEnvelope(updated, FireAutomationTriggerParams{
+					WorkspaceID: updated.WorkspaceID,
+					Key:         updated.Key,
+					Source:      "schedule",
+					Reason:      defaultString(params.Reason, "quiet_hours"),
+					DueAt:       &params.DueAt,
+				}, "schedule", "", "deferred", now),
 			},
 			OccurredAt: now,
 		})
@@ -1104,6 +1198,12 @@ func (store *Store) MarkAutomationTriggerErrored(ctx context.Context, params Mar
 				Key:         updated.Key,
 				Reason:      params.Reason,
 				Error:       params.Error,
+				Envelope: automationTriggerEnvelope(updated, FireAutomationTriggerParams{
+					WorkspaceID: updated.WorkspaceID,
+					Key:         updated.Key,
+					Source:      "evaluation",
+					Reason:      params.Reason,
+				}, "evaluation", "", "errored", now),
 			},
 			OccurredAt: now,
 		})
@@ -8243,6 +8343,84 @@ func automationTriggerExecutionIntent(trigger AutomationTrigger) (string, string
 	}
 }
 
+func automationTriggerEnvelope(trigger AutomationTrigger, params FireAutomationTriggerParams, source string, materializationKey string, recoveryState string, now time.Time) *runtimeevents.AutomationTriggerEnvelope {
+	if recoveryState == "" {
+		recoveryState = "not_started"
+	}
+	source = defaultString(source, defaultString(params.Source, "manual"))
+	envelope := &runtimeevents.AutomationTriggerEnvelope{
+		Source:        source,
+		TriggerType:   defaultString(trigger.Kind, "schedule"),
+		DedupeKey:     materializationKey,
+		OccurredAt:    now.UTC().Format(time.RFC3339),
+		RecoveryState: recoveryState,
+	}
+	if params.DueAt != nil {
+		envelope.DueAt = params.DueAt.UTC().Format(time.RFC3339)
+	}
+	if params.SourceOccurredAt != nil {
+		envelope.SourceOccurredAt = params.SourceOccurredAt.UTC().Format(time.RFC3339)
+	}
+	metadata := automationTriggerRuleMetadata(trigger)
+	if metadata.schedule != nil {
+		envelope.Schedule = metadata.schedule
+	}
+	if metadata.executionIntent != "" {
+		envelope.Risk = &runtimeevents.AutomationTriggerRiskEnvelope{
+			ExecutionIntent:  metadata.executionIntent,
+			ApprovalRequired: automationTriggerIntentNeedsApproval(metadata.executionIntent),
+		}
+	}
+	return envelope
+}
+
+type automationTriggerRuleMetadataResult struct {
+	schedule        *runtimeevents.AutomationTriggerScheduleEnvelope
+	executionIntent string
+}
+
+func automationTriggerRuleMetadata(trigger AutomationTrigger) automationTriggerRuleMetadataResult {
+	var rule struct {
+		Summary         string `json:"summary"`
+		Cadence         string `json:"cadence"`
+		Cron            string `json:"cron"`
+		QuietHours      string `json:"quiet_hours"`
+		QuietTimezone   string `json:"quiet_timezone"`
+		ExecutionIntent string `json:"execution_intent"`
+		Intent          string `json:"intent"`
+	}
+	_ = json.Unmarshal([]byte(trigger.RuleJSON), &rule)
+	schedule := runtimeevents.AutomationTriggerScheduleEnvelope{
+		Summary:       defaultString(rule.Summary, trigger.RuleSummary),
+		Cadence:       strings.TrimSpace(rule.Cadence),
+		Cron:          strings.TrimSpace(rule.Cron),
+		QuietHours:    strings.TrimSpace(rule.QuietHours),
+		QuietTimezone: strings.TrimSpace(rule.QuietTimezone),
+	}
+	result := automationTriggerRuleMetadataResult{}
+	if schedule.Summary != "" || schedule.Cadence != "" || schedule.Cron != "" || schedule.QuietHours != "" || schedule.QuietTimezone != "" {
+		result.schedule = &schedule
+	}
+	intent := strings.ToLower(strings.TrimSpace(rule.ExecutionIntent))
+	if intent == "" {
+		intent = strings.ToLower(strings.TrimSpace(rule.Intent))
+	}
+	switch intent {
+	case "read_only", "mutation", "governance", "destructive":
+		result.executionIntent = intent
+	}
+	return result
+}
+
+func automationTriggerIntentNeedsApproval(intent string) bool {
+	switch strings.ToLower(strings.TrimSpace(intent)) {
+	case "governance", "destructive":
+		return true
+	default:
+		return false
+	}
+}
+
 func (store *Store) getAutomationTriggerByIDQuery(ctx context.Context, queryer sqlQueryRow, id int64) (AutomationTrigger, error) {
 	row := queryer.QueryRowContext(ctx, automationTriggerSelectSQL()+` WHERE at.id = ?`, id)
 	return scanAutomationTrigger(row)
@@ -8431,7 +8609,7 @@ func (store *Store) automationTriggerEventScopeTx(ctx context.Context, tx *sql.T
 	return "automation_trigger"
 }
 
-func appendAutomationTriggerEvaluatedEvent(ctx context.Context, tx *sql.Tx, trigger AutomationTrigger, scope string, source string, materializationKey string, createdWorkItem bool, sourceEventID *int64, sourceEventType string, now time.Time) error {
+func appendAutomationTriggerEvaluatedEvent(ctx context.Context, tx *sql.Tx, trigger AutomationTrigger, scope string, source string, materializationKey string, createdWorkItem bool, params FireAutomationTriggerParams, now time.Time) error {
 	return appendEventTx(ctx, tx, eventInsert{
 		StreamType: runtimeevents.StreamAutomationTrigger,
 		StreamID:   trigger.ID,
@@ -8445,8 +8623,9 @@ func appendAutomationTriggerEvaluatedEvent(ctx context.Context, tx *sql.Tx, trig
 			MaterializationKey: materializationKey,
 			Status:             trigger.Status,
 			CreatedWorkItem:    createdWorkItem,
-			SourceEventID:      sourceEventID,
-			SourceEventType:    sourceEventType,
+			SourceEventID:      params.SourceEventID,
+			SourceEventType:    params.SourceEventType,
+			Envelope:           automationTriggerEnvelope(trigger, params, source, materializationKey, "not_started", now),
 		},
 		OccurredAt: now,
 	})

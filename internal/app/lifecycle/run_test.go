@@ -3086,6 +3086,182 @@ func TestRunTriggerBatchingGroupsSchedulesAndPreservesApproval(t *testing.T) {
 	}
 }
 
+func TestRunTriggerOperatorWorkflowCreateShowTestAndAudit(t *testing.T) {
+	t.Parallel()
+
+	root := testRepoRoot(t)
+	run := func(args ...string) string {
+		t.Helper()
+		var stdout bytes.Buffer
+		if err := Run(context.Background(), root, args, strings.NewReader(""), &stdout); err != nil {
+			t.Fatalf("Run(%v) error = %v\nstdout=%s", args, err, stdout.String())
+		}
+		return stdout.String()
+	}
+
+	run("project", "select", testProjectKey)
+	createOutput := run("trigger", "create", "operator-daily",
+		"initiative="+testProjectKey,
+		"kind=schedule",
+		"status=enabled",
+		"cadence=1h",
+		"next=2026-05-05T03:00:00Z",
+		"title=Operator_daily_review",
+		"summary=operator_review",
+		"quiet=02:00-06:00",
+		"batch=ops-review",
+		"batch_window=1h",
+		"intent=governance",
+		"--json",
+	)
+	if !strings.Contains(createOutput, `"key": "operator-daily"`) || !strings.Contains(createOutput, `"status": "enabled"`) {
+		t.Fatalf("trigger create output = %s, want enabled operator trigger", createOutput)
+	}
+
+	showOutput := run("trigger", "show", "operator-daily")
+	for _, want := range []string{
+		"trigger=operator-daily",
+		"type=schedule",
+		"schedule=cadence:1h",
+		"next_run=2026-05-05T03:00:00Z",
+		"last_run=none",
+		"quiet_hours=02:00-06:00",
+		"quiet_hour_effect=pending",
+		"batch=ops-review window=1h",
+		"approval_required=true",
+		"recovery_state=not_started",
+		"audit_events=1",
+	} {
+		if !strings.Contains(showOutput, want) {
+			t.Fatalf("trigger show output = %s, want %s", showOutput, want)
+		}
+	}
+
+	testOutput := run("trigger", "test", "operator-daily", "now=2026-05-05T03:30:00Z", "--json")
+	for _, want := range []string{
+		`"key": "operator-daily"`,
+		`"decision": "defer"`,
+		`"quiet_hour_effect": "deferred_until:2026-05-05T06:00:00Z"`,
+		`"approval_required": true`,
+		`"mutates": false`,
+	} {
+		if !strings.Contains(testOutput, want) {
+			t.Fatalf("trigger test output = %s, want %s", testOutput, want)
+		}
+	}
+	if jobsOutput := run("jobs", "--json"); !strings.Contains(jobsOutput, `"jobs": []`) {
+		t.Fatalf("jobs output after trigger test = %s, want no materialized work", jobsOutput)
+	}
+
+	auditOutput := run("trigger", "audit", "operator-daily", "--json")
+	for _, want := range []string{
+		`"trigger_key": "operator-daily"`,
+		`"event_type": "automation_trigger.created"`,
+		`"event_type": "automation_trigger.tested"`,
+		`"decision": "defer"`,
+		`"audit_events"`,
+	} {
+		if !strings.Contains(auditOutput, want) {
+			t.Fatalf("trigger audit output = %s, want %s", auditOutput, want)
+		}
+	}
+}
+
+func TestRunSchedulerTickDryRunExplainsDecisionsWithoutMutation(t *testing.T) {
+	t.Parallel()
+
+	root := testRepoRoot(t)
+	run := func(args ...string) string {
+		t.Helper()
+		var stdout bytes.Buffer
+		if err := Run(context.Background(), root, args, strings.NewReader(""), &stdout); err != nil {
+			t.Fatalf("Run(%v) error = %v\nstdout=%s", args, err, stdout.String())
+		}
+		return stdout.String()
+	}
+
+	run("project", "select", "odin-core")
+	run("transition", "set", "cutover", "confirm", "because", "scheduler dry-run approval proof")
+	run("trigger", "create", "dry-run-single",
+		"initiative=odin-core",
+		"kind=schedule",
+		"status=enabled",
+		"next=2026-05-05T09:00:00Z",
+		"title=Dry_run_single",
+		"summary=single_run",
+		"intent=read_only",
+		"--json",
+	)
+	run("trigger", "create", "dry-run-defer",
+		"initiative=odin-core",
+		"kind=schedule",
+		"status=enabled",
+		"next=2026-05-05T09:00:00Z",
+		"title=Dry_run_defer",
+		"summary=quiet_defer",
+		"quiet=08:00-10:00",
+		"--json",
+	)
+	for _, key := range []string{"dry-run-batch-a", "dry-run-batch-b"} {
+		run("trigger", "create", key,
+			"initiative=odin-core",
+			"kind=schedule",
+			"status=enabled",
+			"next=2026-05-05T09:05:00Z",
+			"title="+key,
+			"summary=batch_run",
+			"batch=ops-review",
+			"batch_window=1h",
+			"intent=governance",
+			"--json",
+		)
+	}
+
+	jsonOutput := run("scheduler", "tick", "now=2026-05-05T09:30:00Z", "recovery=false", "--dry-run", "--json")
+	for _, want := range []string{
+		`"dry_run": true`,
+		`"would_run": 1`,
+		`"would_defer": 1`,
+		`"would_batch": 2`,
+		`"approval_required": 2`,
+		`"decision": "run"`,
+		`"decision": "defer"`,
+		`"decision": "batch"`,
+		`"mutates": false`,
+	} {
+		if !strings.Contains(jsonOutput, want) {
+			t.Fatalf("scheduler dry-run JSON = %s, want %s", jsonOutput, want)
+		}
+	}
+	if jobsOutput := run("jobs", "--json"); !strings.Contains(jobsOutput, `"jobs": []`) {
+		t.Fatalf("jobs output after scheduler dry-run = %s, want no materialized work", jobsOutput)
+	}
+	logsOutput := run("logs", "--json")
+	for _, want := range []string{
+		`"type": "scheduler.tick_evaluated"`,
+		`"dry_run": true`,
+		`"would_batch": 2`,
+		`"approval_required": 2`,
+	} {
+		if !strings.Contains(logsOutput, want) {
+			t.Fatalf("logs output after scheduler dry-run = %s, want %s", logsOutput, want)
+		}
+	}
+
+	humanOutput := run("scheduler", "tick", "now=2026-05-05T09:30:00Z", "recovery=false", "--dry-run")
+	for _, want := range []string{
+		"scheduler tick dry_run=true",
+		"would_run=1",
+		"would_defer=1",
+		"would_batch=2",
+		"approval_required=2",
+	} {
+		if !strings.Contains(humanOutput, want) {
+			t.Fatalf("scheduler dry-run output = %s, want %s", humanOutput, want)
+		}
+	}
+}
+
 func TestRunTriggerEventMVPUsesInternalEventsWithDedupeAndApprovalGates(t *testing.T) {
 	t.Parallel()
 

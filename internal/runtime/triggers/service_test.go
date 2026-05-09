@@ -2,6 +2,7 @@ package triggers
 
 import (
 	"context"
+	"encoding/json"
 	"path/filepath"
 	"testing"
 	"time"
@@ -172,6 +173,107 @@ func TestEvaluateDueReschedulesCronRuleFromDueWindow(t *testing.T) {
 	wantNext := time.Date(2026, 4, 25, 12, 15, 0, 0, time.UTC)
 	if trigger.NextEligibleAt == nil || !trigger.NextEligibleAt.Equal(wantNext) {
 		t.Fatalf("NextEligibleAt = %v, want %s", trigger.NextEligibleAt, wantNext.Format(time.RFC3339))
+	}
+
+	payload := lastAutomationTriggerMaterializedPayload(t, ctx, store)
+	envelope := payload.Envelope
+	if envelope.Source != "schedule" || envelope.TriggerType != "schedule" {
+		t.Fatalf("envelope source/type = %q/%q, want schedule/schedule", envelope.Source, envelope.TriggerType)
+	}
+	if envelope.DedupeKey != "default:cron-quarter-hour:schedule:due-20260425t120000z" {
+		t.Fatalf("envelope dedupe_key = %q, want deterministic schedule materialization key", envelope.DedupeKey)
+	}
+	if envelope.DueAt != dueAt.UTC().Format(time.RFC3339) {
+		t.Fatalf("envelope due_at = %q, want %s", envelope.DueAt, dueAt.UTC().Format(time.RFC3339))
+	}
+	if envelope.OccurredAt != currentNow.UTC().Format(time.RFC3339) {
+		t.Fatalf("envelope occurred_at = %q, want %s", envelope.OccurredAt, currentNow.UTC().Format(time.RFC3339))
+	}
+	if envelope.Schedule == nil || envelope.Schedule.Cron != "*/15 * * * *" || envelope.Schedule.Summary != "cron proof" {
+		t.Fatalf("envelope schedule = %+v, want cron proof metadata", envelope.Schedule)
+	}
+	if envelope.RecoveryState != "not_started" {
+		t.Fatalf("envelope recovery_state = %q, want not_started", envelope.RecoveryState)
+	}
+}
+
+func TestEvaluateEventsMaterializesGovernanceTriggerWithEnvelope(t *testing.T) {
+	ctx := context.Background()
+	store := openTriggerStore(t)
+	defer store.Close()
+
+	service := Service{Store: store}
+	store.Now = func() time.Time {
+		return time.Date(2026, 4, 25, 12, 0, 0, 0, time.UTC)
+	}
+	trigger := seedTrigger(t, ctx, store, sqlite.UpsertAutomationTriggerParams{
+		Key:            "github-governance-event",
+		Kind:           "event",
+		RuleJSON:       `{"summary":"github governance proof","event_type":"external.github.issue","match_provider":"github","match_repo":"odin-os","execution_intent":"governance"}`,
+		RuleSummary:    "github governance proof",
+		WorkItemTitle:  "Review governance issue",
+		NextEligibleAt: nil,
+	})
+
+	store.Now = func() time.Time {
+		return trigger.CreatedAt.Add(time.Minute)
+	}
+	issue, err := store.UpsertExternalIssue(ctx, sqlite.UpsertExternalIssueParams{
+		ProjectID:  trigger.ProjectID,
+		Provider:   "github",
+		Repo:       "odin-os",
+		Number:     42,
+		Title:      "Governance issue",
+		State:      "opened",
+		SyncStatus: "event_received",
+	})
+	if err != nil {
+		t.Fatalf("UpsertExternalIssue() error = %v", err)
+	}
+	if err := store.RecordExternalGitHubIssueEvent(ctx, sqlite.RecordExternalGitHubIssueEventParams{
+		ProjectID:        trigger.ProjectID,
+		ProjectKey:       trigger.InitiativeKey,
+		ExternalIssueID:  issue.ID,
+		Provider:         issue.Provider,
+		Repo:             issue.Repo,
+		Number:           issue.Number,
+		Action:           "opened",
+		Title:            issue.Title,
+		ExternalEventKey: "github:issue:odin-os:42:opened",
+	}); err != nil {
+		t.Fatalf("RecordExternalGitHubIssueEvent() error = %v", err)
+	}
+
+	store.Now = func() time.Time {
+		return trigger.CreatedAt.Add(2 * time.Minute)
+	}
+	result, err := service.EvaluateEvents(ctx)
+	if err != nil {
+		t.Fatalf("EvaluateEvents() error = %v", err)
+	}
+	if result.Evaluated != 1 || result.Materialized != 1 {
+		t.Fatalf("EvaluateEvents() = %+v, want one event materialization", result)
+	}
+
+	payload := lastAutomationTriggerMaterializedPayload(t, ctx, store)
+	envelope := payload.Envelope
+	if envelope.Source != "event" || envelope.TriggerType != "event" {
+		t.Fatalf("envelope source/type = %q/%q, want event/event", envelope.Source, envelope.TriggerType)
+	}
+	if envelope.DedupeKey != "default:github-governance-event:event:external-github-issue-odin-os-42-opened" {
+		t.Fatalf("envelope dedupe_key = %q, want deterministic event materialization key", envelope.DedupeKey)
+	}
+	if envelope.Risk == nil || envelope.Risk.ExecutionIntent != "governance" || !envelope.Risk.ApprovalRequired {
+		t.Fatalf("envelope risk = %+v, want governance approval-required metadata", envelope.Risk)
+	}
+	if envelope.SourceOccurredAt == "" {
+		t.Fatalf("envelope source_occurred_at = empty, want source event timestamp")
+	}
+	if envelope.RecoveryState != "not_started" {
+		t.Fatalf("envelope recovery_state = %q, want not_started", envelope.RecoveryState)
+	}
+	if payload.SourceEventID == nil || payload.SourceEventType != string(events.EventExternalGitHubIssue) {
+		t.Fatalf("payload source event = %v/%q, want external GitHub issue provenance", payload.SourceEventID, payload.SourceEventType)
 	}
 }
 
@@ -395,11 +497,33 @@ func seedTrigger(t *testing.T, ctx context.Context, store *sqlite.Store, params 
 	params.WorkspaceID = "default"
 	params.ProjectID = project.ID
 	params.InitiativeKey = "odin-core"
-	params.Kind = "schedule"
+	if params.Kind == "" {
+		params.Kind = "schedule"
+	}
 	params.Status = "enabled"
 	trigger, err := store.UpsertAutomationTrigger(ctx, params)
 	if err != nil {
 		t.Fatalf("UpsertAutomationTrigger(%s) error = %v", params.Key, err)
 	}
 	return trigger
+}
+
+func lastAutomationTriggerMaterializedPayload(t *testing.T, ctx context.Context, store *sqlite.Store) events.AutomationTriggerMaterializedPayload {
+	t.Helper()
+	records, err := store.ListEvents(ctx, sqlite.ListEventsParams{})
+	if err != nil {
+		t.Fatalf("ListEvents() error = %v", err)
+	}
+	for i := len(records) - 1; i >= 0; i-- {
+		if records[i].Type != events.EventAutomationTriggerMaterialized {
+			continue
+		}
+		var payload events.AutomationTriggerMaterializedPayload
+		if err := json.Unmarshal(records[i].Payload, &payload); err != nil {
+			t.Fatalf("decode materialized payload: %v", err)
+		}
+		return payload
+	}
+	t.Fatalf("missing %s event", events.EventAutomationTriggerMaterialized)
+	return events.AutomationTriggerMaterializedPayload{}
 }
