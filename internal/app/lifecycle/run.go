@@ -563,6 +563,14 @@ func runLeasesCleanup(ctx context.Context, app bootstrap.App, args []string, std
 		Git:          gitadapter.Adapter{},
 		WorktreeRoot: worktrees.DefaultRoot(),
 	}
+	logger, logCloser, err := openServiceLogger(app.RuntimeRoot)
+	if err != nil {
+		return err
+	}
+	if logCloser != nil {
+		defer logCloser.Close()
+	}
+	manager.Logger = logger
 	staleBefore := time.Now().UTC().Add(-defaultServeLoopConfig.leaseStaleAfter)
 	preview, err := manager.PreviewCleanup(ctx, staleBefore)
 	if err != nil {
@@ -4337,6 +4345,7 @@ func runServe(ctx context.Context, app bootstrap.App, cfg appconfig.Config, stdo
 			Store:        app.Store,
 			Git:          gitadapter.Adapter{},
 			WorktreeRoot: worktrees.DefaultRoot(),
+			Logger:       logger,
 		},
 		ShutdownRequested: &shutdownRequested,
 		Now:               now,
@@ -4368,6 +4377,7 @@ func runServe(ctx context.Context, app bootstrap.App, cfg appconfig.Config, stdo
 			Store:        app.Store,
 			Git:          gitadapter.Adapter{},
 			WorktreeRoot: worktrees.DefaultRoot(),
+			Logger:       logger,
 		},
 		Now: time.Now,
 	}

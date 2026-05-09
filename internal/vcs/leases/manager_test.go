@@ -1,14 +1,18 @@
 package leases
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"odin-os/internal/store/sqlite"
+	"odin-os/internal/telemetry/logs"
 )
 
 func TestManagerPrepareMutableAllocatesBranchAndWorktree(t *testing.T) {
@@ -16,12 +20,14 @@ func TestManagerPrepareMutableAllocatesBranchAndWorktree(t *testing.T) {
 	store, project, task, run := openLeaseManagerStore(t)
 	defer store.Close()
 
+	var logOutput bytes.Buffer
 	git := &fakeGit{}
 	worktreeRoot := t.TempDir()
 	manager := Manager{
 		Store:        store,
 		Git:          git,
 		WorktreeRoot: worktreeRoot,
+		Logger:       &logs.Logger{Writer: &logOutput},
 	}
 
 	assignment, err := manager.Prepare(ctx, Request{
@@ -51,6 +57,34 @@ func TestManagerPrepareMutableAllocatesBranchAndWorktree(t *testing.T) {
 	}
 	if git.createBranchCalls != 1 || git.addWorktreeCalls != 1 {
 		t.Fatalf("git calls = create:%d add:%d, want 1/1", git.createBranchCalls, git.addWorktreeCalls)
+	}
+	record := decodeSingleLeaseLogRecord(t, logOutput.Bytes())
+	if record.Message != "workspace lease prepared" {
+		t.Fatalf("log message = %q, want workspace lease prepared", record.Message)
+	}
+	if record.ProjectID == nil || *record.ProjectID != project.ID {
+		t.Fatalf("log project_id = %v, want %d", record.ProjectID, project.ID)
+	}
+	if record.TaskID == nil || *record.TaskID != task.ID {
+		t.Fatalf("log task_id = %v, want %d", record.TaskID, task.ID)
+	}
+	if record.RunID == nil || *record.RunID != run.ID {
+		t.Fatalf("log run_id = %v, want %d", record.RunID, run.ID)
+	}
+	for key, want := range map[string]any{
+		"operation":     "prepare",
+		"outcome":       "prepared",
+		"project_key":   project.Key,
+		"branch_name":   wantBranch,
+		"worktree_path": wantPath,
+		"repo_root":     project.GitRoot,
+	} {
+		if got := record.Fields[key]; got != want {
+			t.Fatalf("log field %s = %v, want %v", key, got, want)
+		}
+	}
+	if record.Fields["lease_id"] == nil {
+		t.Fatalf("log fields = %#v, want lease_id", record.Fields)
 	}
 }
 
@@ -88,11 +122,13 @@ func TestManagerPrepareMutableReusesActiveLeaseForSameTaskRun(t *testing.T) {
 	store, project, task, run := openLeaseManagerStore(t)
 	defer store.Close()
 
+	var logOutput bytes.Buffer
 	git := &fakeGit{}
 	manager := Manager{
 		Store:        store,
 		Git:          git,
 		WorktreeRoot: t.TempDir(),
+		Logger:       &logs.Logger{Writer: &logOutput},
 	}
 
 	first, err := manager.Prepare(ctx, Request{
@@ -131,6 +167,73 @@ func TestManagerPrepareMutableReusesActiveLeaseForSameTaskRun(t *testing.T) {
 	}
 	if git.addWorktreeCalls != 1 {
 		t.Fatalf("git add worktree calls = %d, want 1", git.addWorktreeCalls)
+	}
+	records := decodeLeaseLogRecords(t, logOutput.Bytes())
+	if len(records) != 2 {
+		t.Fatalf("log record count = %d, want 2", len(records))
+	}
+	reuse := records[1]
+	if reuse.Message != "workspace lease reused" {
+		t.Fatalf("reuse log message = %q, want workspace lease reused", reuse.Message)
+	}
+	for key, want := range map[string]any{
+		"operation":     "prepare",
+		"outcome":       "reused",
+		"project_key":   project.Key,
+		"branch_name":   first.BranchName,
+		"worktree_path": first.WorktreePath,
+		"repo_root":     project.GitRoot,
+	} {
+		if got := reuse.Fields[key]; got != want {
+			t.Fatalf("reuse log field %s = %v, want %v", key, got, want)
+		}
+	}
+}
+
+func TestManagerPrepareMutableLogsFailureWithSecretRedaction(t *testing.T) {
+	ctx := context.Background()
+	store, project, task, run := openLeaseManagerStore(t)
+	defer store.Close()
+
+	const token = "ghp_1234567890abcdefghijklmnopqrstuvwx"
+	var logOutput bytes.Buffer
+	manager := Manager{
+		Store: store,
+		Git: &fakeGit{
+			branchExistsErr: fmt.Errorf("git failed token=%s", token),
+		},
+		WorktreeRoot: t.TempDir(),
+		Logger:       &logs.Logger{Writer: &logOutput},
+	}
+
+	_, err := manager.Prepare(ctx, Request{
+		Mutating:      true,
+		ProjectID:     project.ID,
+		ProjectKey:    project.Key,
+		TaskID:        task.ID,
+		RunID:         run.ID,
+		RepoRoot:      project.GitRoot,
+		DefaultBranch: project.DefaultBranch,
+		Try:           1,
+	})
+	if err == nil {
+		t.Fatal("Prepare(branch failure) error = nil, want error")
+	}
+	if strings.Contains(logOutput.String(), token) {
+		t.Fatalf("log output leaked token: %s", logOutput.String())
+	}
+	record := decodeSingleLeaseLogRecord(t, logOutput.Bytes())
+	if record.Level != logs.LevelWarn {
+		t.Fatalf("log level = %q, want warn", record.Level)
+	}
+	if record.Message != "workspace lease prepare failed" {
+		t.Fatalf("log message = %q, want workspace lease prepare failed", record.Message)
+	}
+	if record.Fields["outcome"] != "failed" || record.Fields["reason"] != "branch_exists_failed" {
+		t.Fatalf("log fields = %#v, want failed branch_exists_failed", record.Fields)
+	}
+	if record.Fields["error"] == "" {
+		t.Fatalf("log fields = %#v, want error field", record.Fields)
 	}
 }
 
@@ -234,20 +337,26 @@ func TestManagerPrepareMutableSkipsExistingFilesystemPathByAdvancingTry(t *testi
 type fakeGit struct {
 	createBranchCalls int
 	addWorktreeCalls  int
+	branchExistsErr   error
+	createBranchErr   error
+	addWorktreeErr    error
 }
 
 func (git *fakeGit) BranchExists(context.Context, string, string) (bool, error) {
+	if git.branchExistsErr != nil {
+		return false, git.branchExistsErr
+	}
 	return false, nil
 }
 
 func (git *fakeGit) CreateBranch(context.Context, string, string, string) error {
 	git.createBranchCalls++
-	return nil
+	return git.createBranchErr
 }
 
 func (git *fakeGit) AddWorktree(context.Context, string, string, string) error {
 	git.addWorktreeCalls++
-	return nil
+	return git.addWorktreeErr
 }
 
 func (git *fakeGit) RemoveWorktree(context.Context, string, string) error {
@@ -324,4 +433,42 @@ func createTaskRun(t *testing.T, ctx context.Context, store *sqlite.Store, proje
 		t.Fatalf("StartRun() error = %v", err)
 	}
 	return task, run
+}
+
+type leaseLogRecord struct {
+	Level     logs.Level     `json:"level"`
+	Component string         `json:"component"`
+	Message   string         `json:"message"`
+	ProjectID *int64         `json:"project_id,omitempty"`
+	TaskID    *int64         `json:"task_id,omitempty"`
+	RunID     *int64         `json:"run_id,omitempty"`
+	Fields    map[string]any `json:"fields,omitempty"`
+}
+
+func decodeSingleLeaseLogRecord(t *testing.T, data []byte) leaseLogRecord {
+	t.Helper()
+
+	records := decodeLeaseLogRecords(t, data)
+	if len(records) != 1 {
+		t.Fatalf("log record count = %d, want 1: %s", len(records), string(data))
+	}
+	return records[0]
+}
+
+func decodeLeaseLogRecords(t *testing.T, data []byte) []leaseLogRecord {
+	t.Helper()
+
+	lines := bytes.Split(bytes.TrimSpace(data), []byte("\n"))
+	if len(lines) == 1 && len(lines[0]) == 0 {
+		return nil
+	}
+	records := make([]leaseLogRecord, 0, len(lines))
+	for _, line := range lines {
+		var record leaseLogRecord
+		if err := json.Unmarshal(line, &record); err != nil {
+			t.Fatalf("decode log record %q: %v", string(line), err)
+		}
+		records = append(records, record)
+	}
+	return records
 }
