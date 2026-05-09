@@ -66,6 +66,9 @@ checks, and implementation proof. The installed command is only trusted when
 `which odin` resolves to `~/.local/bin/odin` and that path points back to this
 repo's `bin/odin`.
 
+For GitHub-backed issue intake, use
+[docs/operations/work-intake.md](docs/operations/work-intake.md).
+
 ## Observability
 
 Odin observability uses one telemetry truth:
