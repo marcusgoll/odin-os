@@ -2833,6 +2833,9 @@ func TestRunIntakeLifecycleIsVisibleInProjectLogsAndOverview(t *testing.T) {
 
 	overviewOutput := run("overview", "--json")
 	for _, want := range []string{
+		`"review_queue":`,
+		`"total_count": 2`,
+		`"intake_count": 2`,
 		`"intake_inbox":`,
 		`"wiring": "live"`,
 		`"raw_item_count": 5`,
