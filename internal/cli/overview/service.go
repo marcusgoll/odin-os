@@ -1515,8 +1515,8 @@ func isClosedWorkItemStatus(status string) bool {
 }
 
 func isReviewableIntakeStatus(status string) bool {
-	switch coreintake.CanonicalState(status) {
-	case coreintake.StateReviewRequired, coreintake.StateNeedsClarification, coreintake.StateDuplicateLinked:
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "review_required", "needs_clarification", "duplicate_linked_or_suppressed", "approval_required":
 		return true
 	default:
 		return false
