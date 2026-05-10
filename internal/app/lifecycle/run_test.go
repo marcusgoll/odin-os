@@ -1174,6 +1174,120 @@ func TestRunIntakeProcessDerivesTypeSpecificRoutingAndIntent(t *testing.T) {
 	}
 }
 
+func TestRunIntakeProcessClassifiesOperatorTextIntoDesignedCategories(t *testing.T) {
+	t.Parallel()
+
+	root := testRepoRoot(t)
+	cases := []struct {
+		title        string
+		wantCategory string
+		wantRoute    string
+		wantArtifact string
+		wantPriority string
+	}{
+		{title: "Fix failed production deploy", wantCategory: "bug", wantRoute: "draft_incident_review", wantArtifact: "draft_incident_review", wantPriority: "80"},
+		{title: "Idea for someday dashboard", wantCategory: "idea", wantRoute: "draft_idea", wantArtifact: "draft_idea", wantPriority: "30"},
+		{title: "Research calendar adapter options", wantCategory: "research_item", wantRoute: "draft_research", wantArtifact: "draft_research", wantPriority: "40"},
+		{title: "Draft operator handoff memo", wantCategory: "writing_request", wantRoute: "draft_document", wantArtifact: "draft_document", wantPriority: "50"},
+		{title: "Organize admin inbox labels", wantCategory: "admin_item", wantRoute: "draft_admin_task", wantArtifact: "draft_admin_task", wantPriority: "45"},
+		{title: "Remind me every Friday to review backups", wantCategory: "routine", wantRoute: "draft_routine", wantArtifact: "draft_routine", wantPriority: "35"},
+		{title: "Waiting for bank transfer confirmation", wantCategory: "waiting_for_item", wantRoute: "draft_follow_up", wantArtifact: "draft_follow_up", wantPriority: "35"},
+		{title: "FYI no action needed newsletter", wantCategory: "archive_worthy_noise", wantRoute: "archive_candidate", wantArtifact: "archive_candidate", wantPriority: "10"},
+		{title: "Plan the onboarding project", wantCategory: "project", wantRoute: "draft_goal", wantArtifact: "draft_goal", wantPriority: "70"},
+	}
+
+	for _, tc := range cases {
+		if err := Run(context.Background(), root, []string{
+			"intake", "raw", "create",
+			"--text", tc.title,
+			"--json",
+		}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+			t.Fatalf("Run(intake raw create %q) error = %v", tc.title, err)
+		}
+	}
+
+	for i, tc := range cases {
+		id := fmt.Sprintf("intake-%d", i+1)
+		var output bytes.Buffer
+		if err := Run(context.Background(), root, []string{"intake", "process", "--id", id, "--json"}, strings.NewReader(""), &output); err != nil {
+			t.Fatalf("Run(intake process %s) error = %v", id, err)
+		}
+		for _, want := range []string{
+			`"category": "` + tc.wantCategory + `"`,
+			`"priority_score": ` + tc.wantPriority,
+			`"routed_outcome": "` + tc.wantRoute + `"`,
+			`"outcome": "` + tc.wantRoute + `"`,
+		} {
+			if !strings.Contains(output.String(), want) {
+				t.Fatalf("process output for %q = %s, want %s", tc.title, output.String(), want)
+			}
+		}
+		if !strings.Contains(output.String(), `"kind": "`+tc.wantArtifact+`"`) {
+			t.Fatalf("process output for %q = %s, want artifact %s", tc.title, output.String(), tc.wantArtifact)
+		}
+		if tc.wantArtifact == "draft_goal" && strings.Contains(output.String(), `"goal_id": 1`) {
+			t.Fatalf("process output for %q = %s, must draft goal review artifact without creating a goal", tc.title, output.String())
+		}
+	}
+}
+
+func TestRunIntakeProcessRecordsNormalizedSubjectDuplicateEvidence(t *testing.T) {
+	t.Parallel()
+
+	root := testRepoRoot(t)
+	payloadPath := filepath.Join(t.TempDir(), "payload.json")
+	if err := os.WriteFile(payloadPath, []byte(`{"body":"same subject but different source object"}`), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	createRaw := func(title, dedupeKey string) {
+		t.Helper()
+		if err := Run(context.Background(), root, []string{
+			"intake", "raw", "create",
+			"--source", "operator",
+			"--project", "odin-core",
+			"--title", title,
+			"--type", "request",
+			"--dedup-key", dedupeKey,
+			"--requested-by", "codex",
+			"--payload-file", payloadPath,
+			"--json",
+		}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+			t.Fatalf("Run(intake raw create %q) error = %v", title, err)
+		}
+	}
+	createRaw("Research release readiness constraints", "semantic-a")
+	createRaw("Research release readiness constraints!!!", "semantic-b")
+
+	if err := Run(context.Background(), root, []string{"intake", "process", "--id", "intake-1", "--json"}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+		t.Fatalf("Run(intake process first) error = %v", err)
+	}
+	var output bytes.Buffer
+	if err := Run(context.Background(), root, []string{"intake", "process", "--id", "intake-2", "--json"}, strings.NewReader(""), &output); err != nil {
+		t.Fatalf("Run(intake process second) error = %v", err)
+	}
+	for _, want := range []string{
+		`"status": "duplicate_linked_or_suppressed"`,
+		`"dedupe_result": "near_duplicate_linked"`,
+		`"canonical_intake_key": "intake-1"`,
+		`"suppression_reason": "near_duplicate_subject"`,
+		`"basis": "normalized_subject"`,
+		`"match_reason": "normalized_subject"`,
+	} {
+		if !strings.Contains(output.String(), want) {
+			t.Fatalf("semantic duplicate output = %s, want %s", output.String(), want)
+		}
+	}
+
+	var logsOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"logs", "--json"}, strings.NewReader(""), &logsOutput); err != nil {
+		t.Fatalf("Run(logs --json) error = %v", err)
+	}
+	if !strings.Contains(logsOutput.String(), `"type": "intake.duplicate_linked_or_suppressed"`) || !strings.Contains(logsOutput.String(), `"result": "near_duplicate_linked"`) {
+		t.Fatalf("logs output = %s, want normalized-subject duplicate event evidence", logsOutput.String())
+	}
+}
+
 func TestRunIntakeProcessConvertsGoalLikeRawItemToGoal(t *testing.T) {
 	root := testRepoRoot(t)
 
