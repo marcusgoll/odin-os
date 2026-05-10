@@ -473,6 +473,65 @@ func TestRunIntakeRawCreateListShowDoesNotCreateTask(t *testing.T) {
 	}
 }
 
+func TestRunIntakeProcessCreatesProposalWithoutWorkByDefault(t *testing.T) {
+	t.Parallel()
+
+	root := testRepoRoot(t)
+	var createOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{
+		"intake", "raw", "create",
+		"--text", "Draft an operator runbook for intake review proposals",
+		"--json",
+	}, strings.NewReader(""), &createOutput); err != nil {
+		t.Fatalf("Run(intake raw create --text) error = %v", err)
+	}
+
+	var processOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"intake", "process", "--id", "intake-1", "--json"}, strings.NewReader(""), &processOutput); err != nil {
+		t.Fatalf("Run(intake process) error = %v", err)
+	}
+	for _, want := range []string{
+		`"status": "review_required"`,
+		`"proposal"`,
+		`"approval_posture": "needs_review"`,
+		`"operator_next_action": "odin intake review show intake-1"`,
+	} {
+		if !strings.Contains(processOutput.String(), want) {
+			t.Fatalf("process output = %s, want %s", processOutput.String(), want)
+		}
+	}
+	if proposal := topLevelProposalFromProcessOutput(t, processOutput.Bytes()); len(proposal) == 0 || string(proposal) == "null" {
+		t.Fatalf("process output = %s, want top-level intake_item.proposal", processOutput.String())
+	}
+
+	var workStatus bytes.Buffer
+	if err := Run(context.Background(), root, []string{"work", "status"}, strings.NewReader(""), &workStatus); err != nil {
+		t.Fatalf("Run(work status) error = %v", err)
+	}
+	if output := workStatus.String(); !strings.Contains(output, "work_items=0") || !strings.Contains(output, "active_run_attempts=0") {
+		t.Fatalf("work status output = %s, want no work or runs from process", output)
+	}
+
+	var logsOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"logs", "--json"}, strings.NewReader(""), &logsOutput); err != nil {
+		t.Fatalf("Run(logs --json) error = %v", err)
+	}
+	for _, want := range []string{
+		`"type": "intake.processing_started"`,
+		`"type": "intake.processed"`,
+		`"type": "intake.draft_artifact_created"`,
+	} {
+		if !strings.Contains(logsOutput.String(), want) {
+			t.Fatalf("logs output = %s, want intake proposal processing event %s", logsOutput.String(), want)
+		}
+	}
+	for _, forbidden := range []string{`"type": "task.created"`, `"type": "run.started"`, `"type": "approval.requested"`} {
+		if strings.Contains(logsOutput.String(), forbidden) {
+			t.Fatalf("logs output = %s, must not contain %s", logsOutput.String(), forbidden)
+		}
+	}
+}
+
 func TestRunIntakeProcessCreatesReviewStatesWithoutExecution(t *testing.T) {
 	t.Parallel()
 
@@ -607,6 +666,20 @@ func proposalCategoryFromProcessOutput(t *testing.T, output []byte) string {
 		t.Fatalf("Unmarshal(process output) error = %v; output = %s", err, string(output))
 	}
 	return view.IntakeItem.Processing.Proposal.Category
+}
+
+func topLevelProposalFromProcessOutput(t *testing.T, output []byte) json.RawMessage {
+	t.Helper()
+
+	var view struct {
+		IntakeItem struct {
+			Proposal json.RawMessage `json:"proposal"`
+		} `json:"intake_item"`
+	}
+	if err := json.Unmarshal(output, &view); err != nil {
+		t.Fatalf("Unmarshal(process output) error = %v; output = %s", err, string(output))
+	}
+	return view.IntakeItem.Proposal
 }
 
 func TestRunIntakeProcessDerivesTypeSpecificRoutingAndIntent(t *testing.T) {

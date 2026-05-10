@@ -827,6 +827,7 @@ type rawIntakeItemView struct {
 	PolicyDecision         string          `json:"policy_decision,omitempty"`
 	Payload                json.RawMessage `json:"payload,omitempty"`
 	Processing             json.RawMessage `json:"processing,omitempty"`
+	Proposal               json.RawMessage `json:"proposal,omitempty"`
 }
 
 type rawIntakeItemEnvelope struct {
@@ -2153,6 +2154,13 @@ func rawIntakeView(item sqlite.IntakeItem, includePayload bool) (rawIntakeItemVi
 		if err := json.Unmarshal([]byte(item.RoutingNotes), &notes); err == nil {
 			if view.GoalID == 0 && notes.Goal != nil {
 				view.GoalID = notes.Goal.ID
+			}
+			if notes.Proposal != nil {
+				proposalJSON, err := json.Marshal(notes.Proposal)
+				if err != nil {
+					return rawIntakeItemView{}, err
+				}
+				view.Proposal = proposalJSON
 			}
 			if notes.Review != nil && notes.Review.WorkItem != nil {
 				view.AcceptedWorkItemID = notes.Review.WorkItem.ID
