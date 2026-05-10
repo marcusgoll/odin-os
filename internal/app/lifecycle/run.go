@@ -36,6 +36,7 @@ import (
 	"odin-os/internal/core/companions"
 	"odin-os/internal/core/followups"
 	"odin-os/internal/core/initiatives"
+	coreintake "odin-os/internal/core/intake"
 	"odin-os/internal/core/projects"
 	coreworkspace "odin-os/internal/core/workspace"
 	"odin-os/internal/core/workspaces"
@@ -961,9 +962,17 @@ func runRawIntakeCreate(ctx context.Context, app bootstrap.App, stdin io.Reader,
 		scopeKey = command.ProjectKey
 	}
 
-	sourceFactsJSON, err := rawIntakeSourceFactsJSON(command, payloadJSON)
+	envelope, err := rawIntakeSourceEnvelope(command, payloadJSON)
 	if err != nil {
 		return err
+	}
+	sourceFactsJSON, err := envelope.SourceFactsJSON()
+	if err != nil {
+		return err
+	}
+	dedupeKey := command.DedupKey
+	if strings.TrimSpace(dedupeKey) == "" {
+		dedupeKey = envelope.DedupeKey(workspaces.DefaultWorkspaceKey)
 	}
 
 	item, err := app.Store.CreateIntakeItem(ctx, sqlite.CreateIntakeItemParams{
@@ -972,8 +981,8 @@ func runRawIntakeCreate(ctx context.Context, app bootstrap.App, stdin io.Reader,
 		ExternalObjectID:    command.ActionKey,
 		EventKind:           command.Type,
 		Subject:             command.Title,
-		DedupeKey:           command.DedupKey,
-		DedupeRecipeVersion: "raw-cli-v1",
+		DedupeKey:           dedupeKey,
+		DedupeRecipeVersion: coreintake.DedupeRecipeVersion,
 		SourceFactsJSON:     sourceFactsJSON,
 		Status:              "received",
 		Scope:               scopeKind,
@@ -1997,33 +2006,33 @@ func intakeGoalIDPtr(notes intakeProcessingNotes) *int64 {
 	return &id
 }
 
-func rawIntakeSourceFactsJSON(command commands.IntakeCommand, payloadJSON string) (string, error) {
+func rawIntakeSourceEnvelope(command commands.IntakeCommand, payloadJSON string) (coreintake.SourceEnvelope, error) {
 	var payload json.RawMessage
 	if strings.TrimSpace(payloadJSON) == "" {
 		payloadJSON = "{}"
 	}
 	if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
-		return "", fmt.Errorf("raw intake payload json: %w", err)
+		return coreintake.SourceEnvelope{}, fmt.Errorf("raw intake payload json: %w", err)
 	}
-	facts := map[string]any{
-		"source":         command.Source,
-		"intake_type":    command.Type,
-		"dedup_key":      command.DedupKey,
+	adapterFacts := map[string]any{
 		"requested_by":   command.RequestedBy,
 		"payload_policy": rawIntakePayloadPolicy,
 		"payload":        payload,
 	}
 	if command.ProjectKey != "" {
-		facts["project_key"] = command.ProjectKey
+		adapterFacts["project_key"] = command.ProjectKey
 	}
-	if command.ActionKey != "" {
-		facts["external_object_id"] = command.ActionKey
-	}
-	encoded, err := json.Marshal(facts)
-	if err != nil {
-		return "", err
-	}
-	return string(encoded), nil
+	return coreintake.SourceEnvelope{
+		SourceFamily:     command.Source,
+		ExternalObjectID: command.ActionKey,
+		EventKind:        command.Type,
+		Subject:          command.Title,
+		Summary:          command.Title,
+		Actor:            command.RequestedBy,
+		AdapterFacts: map[string]any{
+			command.Source: adapterFacts,
+		},
+	}, nil
 }
 
 func rawIntakeView(item sqlite.IntakeItem, includePayload bool) (rawIntakeItemView, error) {
@@ -2075,22 +2084,59 @@ func rawIntakeView(item sqlite.IntakeItem, includePayload bool) (rawIntakeItemVi
 	}
 	view.RequestedBy = rawStringFact(facts, "requested_by")
 	if view.RequestedBy == "" {
+		view.RequestedBy = rawStringFact(facts, "actor")
+	}
+	if view.RequestedBy == "" {
+		view.RequestedBy = rawStringFromRaw(rawIntakeAdapterFact(facts, item.SourceFamily, "requested_by"))
+	}
+	if view.RequestedBy == "" {
 		view.RequestedBy = item.SourceFamily
 	}
 	if policy := rawStringFact(facts, "payload_policy"); policy != "" {
 		view.PayloadPolicy = policy
+	} else if policy := rawStringFromRaw(rawIntakeAdapterFact(facts, item.SourceFamily, "payload_policy")); policy != "" {
+		view.PayloadPolicy = policy
 	}
 	if includePayload {
 		if payload, ok := facts["payload"]; ok {
+			view.Payload = payload
+		} else if payload := rawIntakeAdapterFact(facts, item.SourceFamily, "payload"); payload != nil {
 			view.Payload = payload
 		}
 	}
 	return view, nil
 }
 
+func rawIntakeAdapterFact(facts map[string]json.RawMessage, source string, key string) json.RawMessage {
+	rawAdapterFacts, ok := facts["adapter_facts"]
+	if !ok {
+		return nil
+	}
+	var adapterFacts map[string]map[string]json.RawMessage
+	if err := json.Unmarshal(rawAdapterFacts, &adapterFacts); err != nil {
+		return nil
+	}
+	if sourceFacts, ok := adapterFacts[source]; ok {
+		return sourceFacts[key]
+	}
+	for _, sourceFacts := range adapterFacts {
+		if raw := sourceFacts[key]; raw != nil {
+			return raw
+		}
+	}
+	return nil
+}
+
 func rawStringFact(facts map[string]json.RawMessage, key string) string {
 	raw, ok := facts[key]
 	if !ok {
+		return ""
+	}
+	return rawStringFromRaw(raw)
+}
+
+func rawStringFromRaw(raw json.RawMessage) string {
+	if raw == nil {
 		return ""
 	}
 	var value string
