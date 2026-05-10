@@ -3035,6 +3035,136 @@ func TestRunLogsIncludeProjectScopedIntakeEventsForOdinCoreScope(t *testing.T) {
 	}
 }
 
+func TestRunLogsShowAndTrailRenderProvenance(t *testing.T) {
+	t.Parallel()
+
+	root := testRepoRoot(t)
+	run := func(args ...string) string {
+		t.Helper()
+		var output bytes.Buffer
+		if err := Run(context.Background(), root, args, strings.NewReader(""), &output); err != nil {
+			t.Fatalf("Run(%v) error = %v\noutput=%s", args, err, output.String())
+		}
+		return output.String()
+	}
+
+	run("work", "start", "--project", "odin-core", "--title", "Evidence trail proof", "--intent", "governance", "--json")
+	run("work", "dispatch", "--task", "1", "--json")
+
+	beforeLogs := run("logs", "--json")
+	showOutput := run("logs", "show", "3")
+	for _, want := range []string{
+		"event=3",
+		"type=approval.requested",
+		"approval=1",
+		"work_item=evidence-trail-proof-",
+		"summary=approval requested",
+		"requested_by=system",
+	} {
+		if !strings.Contains(showOutput, want) {
+			t.Fatalf("logs show output = %s, want %s", showOutput, want)
+		}
+	}
+
+	taskTrail := run("logs", "trail", "--task", "1")
+	for _, want := range []string{
+		"type=task.created",
+		"type=approval.requested",
+		"type=task.queue_state_changed",
+		"type=context_packet.created",
+		"blocked_reason=approval_required",
+		"work_item=evidence-trail-proof-",
+	} {
+		if !strings.Contains(taskTrail, want) {
+			t.Fatalf("logs trail --task output = %s, want %s", taskTrail, want)
+		}
+	}
+
+	approvalTrailJSON := run("logs", "trail", "--approval", "1", "--json")
+	var trail struct {
+		Items []struct {
+			EventID     int64           `json:"event_id"`
+			EventType   string          `json:"event_type"`
+			ApprovalID  *int64          `json:"approval_id"`
+			WorkItemKey string          `json:"work_item_key"`
+			Summary     string          `json:"summary"`
+			Payload     json.RawMessage `json:"payload"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal([]byte(approvalTrailJSON), &trail); err != nil {
+		t.Fatalf("logs trail --approval --json output = %s, unmarshal error = %v", approvalTrailJSON, err)
+	}
+	var foundApproval bool
+	for _, item := range trail.Items {
+		if item.EventType == "approval.requested" && item.ApprovalID != nil && *item.ApprovalID == 1 {
+			foundApproval = true
+			if !strings.HasPrefix(item.WorkItemKey, "evidence-trail-proof-") || item.Summary == "" || len(item.Payload) == 0 {
+				t.Fatalf("approval trail item = %+v, want work item, summary, and payload", item)
+			}
+		}
+	}
+	if !foundApproval {
+		t.Fatalf("logs trail --approval --json output = %s, want approval.requested item for approval 1", approvalTrailJSON)
+	}
+	if afterLogs := run("logs", "--json"); afterLogs != beforeLogs {
+		t.Fatalf("logs show/trail mutated event stream\nbefore=%s\nafter=%s", beforeLogs, afterLogs)
+	}
+}
+
+func TestRunOverviewIncludesActivityLog(t *testing.T) {
+	t.Parallel()
+
+	root := testRepoRoot(t)
+	run := func(args ...string) string {
+		t.Helper()
+		var output bytes.Buffer
+		if err := Run(context.Background(), root, args, strings.NewReader(""), &output); err != nil {
+			t.Fatalf("Run(%v) error = %v\noutput=%s", args, err, output.String())
+		}
+		return output.String()
+	}
+
+	run("work", "start", "--project", "odin-core", "--title", "Evidence trail overview", "--intent", "governance", "--json")
+	run("work", "dispatch", "--task", "1", "--json")
+
+	overviewOutput := run("overview")
+	for _, want := range []string{
+		"Activity Log",
+		"event=",
+		"type=approval.requested",
+		"work_item=evidence-trail-overview-",
+		"summary=approval requested",
+	} {
+		if !strings.Contains(overviewOutput, want) {
+			t.Fatalf("overview output = %s, want %s", overviewOutput, want)
+		}
+	}
+
+	overviewJSON := run("overview", "--json")
+	var view struct {
+		Observability struct {
+			ActivityLog []struct {
+				EventID     int64  `json:"event_id"`
+				EventType   string `json:"event_type"`
+				WorkItemKey string `json:"work_item_key"`
+				Summary     string `json:"summary"`
+			} `json:"activity_log"`
+		} `json:"observability"`
+	}
+	if err := json.Unmarshal([]byte(overviewJSON), &view); err != nil {
+		t.Fatalf("overview --json output = %s, unmarshal error = %v", overviewJSON, err)
+	}
+	var found bool
+	for _, item := range view.Observability.ActivityLog {
+		if item.EventType == "approval.requested" && strings.HasPrefix(item.WorkItemKey, "evidence-trail-overview-") && item.Summary != "" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("overview --json output = %s, want activity_log approval.requested item", overviewJSON)
+	}
+}
+
 func TestRunIntakeLifecycleIsVisibleInProjectLogsAndOverview(t *testing.T) {
 	t.Parallel()
 

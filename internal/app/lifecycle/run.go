@@ -2729,13 +2729,12 @@ func runAgenda(ctx context.Context, app bootstrap.App, args []string, stdout io.
 	return commands.WriteAgendaText(stdout, view)
 }
 
+const logsUsage = "usage: odin logs [--json] | odin logs show <event-id> [--json] | odin logs trail (--task <id|key> | --run <id> | --approval <id>) [--json]"
+
 func runLogs(ctx context.Context, app bootstrap.App, args []string, stdout io.Writer) error {
 	jsonOutput, remaining, err := consumeJSONFlag(args)
 	if err != nil {
 		return err
-	}
-	if len(remaining) != 0 {
-		return fmt.Errorf("usage: odin logs [--json]")
 	}
 
 	state, err := loadCLIState(app)
@@ -2746,6 +2745,16 @@ func runLogs(ctx context.Context, app bootstrap.App, args []string, stdout io.Wr
 	records, err := listLogs(ctx, app.Store, state.Scope)
 	if err != nil {
 		return err
+	}
+	if len(remaining) != 0 {
+		switch remaining[0] {
+		case "show":
+			return runLogsShow(ctx, app.Store, records, remaining[1:], jsonOutput, stdout)
+		case "trail":
+			return runLogsTrail(ctx, app.Store, records, remaining[1:], jsonOutput, stdout)
+		default:
+			return fmt.Errorf(logsUsage)
+		}
 	}
 	if jsonOutput {
 		logViews := make([]commands.LogView, 0, len(records))
@@ -2775,6 +2784,275 @@ func runLogs(ctx context.Context, app bootstrap.App, args []string, stdout io.Wr
 		}
 	}
 	return nil
+}
+
+func runLogsShow(ctx context.Context, store *sqlite.Store, records []runtimeevents.Record, args []string, jsonOutput bool, stdout io.Writer) error {
+	if len(args) != 1 {
+		return fmt.Errorf(logsUsage)
+	}
+	eventID, err := parsePositiveInt64Arg(args[0], "event id")
+	if err != nil {
+		return err
+	}
+	for _, record := range records {
+		if record.ID != eventID {
+			continue
+		}
+		items, err := clioverview.BuildActivityEventSummaries(ctx, store, []runtimeevents.Record{record}, true)
+		if err != nil {
+			return err
+		}
+		if len(items) == 0 {
+			return fmt.Errorf("event %d not found", eventID)
+		}
+		if jsonOutput {
+			return commands.WriteJSON(stdout, struct {
+				Event clioverview.ActivityEventSummary `json:"event"`
+			}{Event: items[0]})
+		}
+		return writeActivityEventDetail(stdout, items[0])
+	}
+	return fmt.Errorf("event %d not found", eventID)
+}
+
+func runLogsTrail(ctx context.Context, store *sqlite.Store, records []runtimeevents.Record, args []string, jsonOutput bool, stdout io.Writer) error {
+	taskRef, runRef, approvalRef, err := parseLogsTrailArgs(args)
+	if err != nil {
+		return err
+	}
+	var filtered []runtimeevents.Record
+	switch {
+	case taskRef != "":
+		taskID, err := resolveLogsTaskID(ctx, store, taskRef)
+		if err != nil {
+			return err
+		}
+		filtered = filterActivityEventsByTask(records, taskID)
+	case runRef != "":
+		runID, err := parsePositiveInt64Arg(runRef, "run id")
+		if err != nil {
+			return err
+		}
+		run, err := store.GetRun(ctx, runID)
+		if err != nil {
+			return err
+		}
+		filtered = filterActivityEventsByRun(records, runID, run.TaskID)
+	case approvalRef != "":
+		approvalID, err := parsePositiveInt64Arg(approvalRef, "approval id")
+		if err != nil {
+			return err
+		}
+		detail, err := approvalsvc.Service{Store: store}.Detail(ctx, approvalID)
+		if err != nil {
+			return err
+		}
+		filtered = filterActivityEventsByApproval(records, approvalID, detail.Task.ID, detail.Approval.RunID)
+	default:
+		return fmt.Errorf(logsUsage)
+	}
+	items, err := clioverview.BuildActivityEventSummaries(ctx, store, filtered, jsonOutput)
+	if err != nil {
+		return err
+	}
+	if jsonOutput {
+		return commands.WriteJSON(stdout, struct {
+			Items []clioverview.ActivityEventSummary `json:"items"`
+		}{Items: items})
+	}
+	return writeActivityEventTrail(stdout, items)
+}
+
+func parseLogsTrailArgs(args []string) (taskRef, runRef, approvalRef string, err error) {
+	for index := 0; index < len(args); index++ {
+		switch args[index] {
+		case "--task":
+			if taskRef != "" || index+1 >= len(args) {
+				return "", "", "", fmt.Errorf(logsUsage)
+			}
+			index++
+			taskRef = strings.TrimSpace(args[index])
+		case "--run":
+			if runRef != "" || index+1 >= len(args) {
+				return "", "", "", fmt.Errorf(logsUsage)
+			}
+			index++
+			runRef = strings.TrimSpace(args[index])
+		case "--approval":
+			if approvalRef != "" || index+1 >= len(args) {
+				return "", "", "", fmt.Errorf(logsUsage)
+			}
+			index++
+			approvalRef = strings.TrimSpace(args[index])
+		default:
+			return "", "", "", fmt.Errorf(logsUsage)
+		}
+	}
+	selected := 0
+	for _, value := range []string{taskRef, runRef, approvalRef} {
+		if value != "" {
+			selected++
+		}
+	}
+	if selected != 1 {
+		return "", "", "", fmt.Errorf(logsUsage)
+	}
+	return taskRef, runRef, approvalRef, nil
+}
+
+func resolveLogsTaskID(ctx context.Context, store *sqlite.Store, ref string) (int64, error) {
+	if id, err := strconv.ParseInt(strings.TrimSpace(ref), 10, 64); err == nil && id > 0 {
+		if _, err := store.GetTask(ctx, id); err != nil {
+			return 0, err
+		}
+		return id, nil
+	}
+	taskViews, err := projections.ListTaskStatusViews(ctx, store.DB())
+	if err != nil {
+		return 0, err
+	}
+	for _, task := range taskViews {
+		if task.TaskKey == ref {
+			return task.TaskID, nil
+		}
+	}
+	return 0, fmt.Errorf("work item %q not found", ref)
+}
+
+func filterActivityEventsByTask(records []runtimeevents.Record, taskID int64) []runtimeevents.Record {
+	filtered := make([]runtimeevents.Record, 0, len(records))
+	for _, record := range records {
+		if recordMatchesTask(record, taskID) {
+			filtered = append(filtered, record)
+		}
+	}
+	return filtered
+}
+
+func filterActivityEventsByRun(records []runtimeevents.Record, runID, taskID int64) []runtimeevents.Record {
+	filtered := make([]runtimeevents.Record, 0, len(records))
+	for _, record := range records {
+		if recordMatchesRun(record, runID) || recordMatchesTask(record, taskID) {
+			filtered = append(filtered, record)
+		}
+	}
+	return filtered
+}
+
+func filterActivityEventsByApproval(records []runtimeevents.Record, approvalID, taskID int64, runID *int64) []runtimeevents.Record {
+	filtered := make([]runtimeevents.Record, 0, len(records))
+	for _, record := range records {
+		if record.StreamType == runtimeevents.StreamApproval && record.StreamID == approvalID {
+			filtered = append(filtered, record)
+			continue
+		}
+		if recordMatchesTask(record, taskID) {
+			filtered = append(filtered, record)
+			continue
+		}
+		if runID != nil && recordMatchesRun(record, *runID) {
+			filtered = append(filtered, record)
+		}
+	}
+	return filtered
+}
+
+func recordMatchesTask(record runtimeevents.Record, taskID int64) bool {
+	if taskID <= 0 {
+		return false
+	}
+	if record.StreamType == runtimeevents.StreamTask && record.StreamID == taskID {
+		return true
+	}
+	if record.TaskID != nil && *record.TaskID == taskID {
+		return true
+	}
+	return eventPayloadInt64(record.Payload, "task_id") == taskID
+}
+
+func recordMatchesRun(record runtimeevents.Record, runID int64) bool {
+	if runID <= 0 {
+		return false
+	}
+	if record.StreamType == runtimeevents.StreamRun && record.StreamID == runID {
+		return true
+	}
+	if record.RunID != nil && *record.RunID == runID {
+		return true
+	}
+	return eventPayloadInt64(record.Payload, "run_id") == runID
+}
+
+func eventPayloadInt64(raw json.RawMessage, key string) int64 {
+	if len(raw) == 0 {
+		return 0
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return 0
+	}
+	switch value := payload[key].(type) {
+	case float64:
+		return int64(value)
+	case string:
+		parsed, _ := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
+		return parsed
+	default:
+		return 0
+	}
+}
+
+func parsePositiveInt64Arg(raw, label string) (int64, error) {
+	id, err := strconv.ParseInt(strings.TrimSpace(raw), 10, 64)
+	if err != nil || id <= 0 {
+		return 0, fmt.Errorf("%s must be a positive integer", label)
+	}
+	return id, nil
+}
+
+func writeActivityEventDetail(stdout io.Writer, item clioverview.ActivityEventSummary) error {
+	if _, err := fmt.Fprintln(stdout, activityEventLine(item)); err != nil {
+		return err
+	}
+	if len(item.Payload) == 0 {
+		return nil
+	}
+	_, err := fmt.Fprintf(stdout, "  payload=%s\n", strings.TrimSpace(string(item.Payload)))
+	return err
+}
+
+func writeActivityEventTrail(stdout io.Writer, items []clioverview.ActivityEventSummary) error {
+	if len(items) == 0 {
+		_, err := fmt.Fprintln(stdout, "no logs")
+		return err
+	}
+	for _, item := range items {
+		if _, err := fmt.Fprintln(stdout, activityEventLine(item)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func activityEventLine(item clioverview.ActivityEventSummary) string {
+	return fmt.Sprintf(
+		"event=%d type=%s scope=%s project=%s work_item=%s run=%s approval=%s summary=%s",
+		item.EventID,
+		valueOrNone(item.EventType),
+		valueOrNone(item.Scope),
+		valueOrNone(item.ProjectKey),
+		valueOrNone(item.WorkItemKey),
+		activityInt64PtrLabel(item.RunID),
+		activityInt64PtrLabel(item.ApprovalID),
+		valueOrNone(item.Summary),
+	)
+}
+
+func activityInt64PtrLabel(value *int64) string {
+	if value == nil {
+		return "none"
+	}
+	return fmt.Sprintf("%d", *value)
 }
 
 func runGoal(ctx context.Context, app bootstrap.App, args []string, stdout io.Writer) error {
