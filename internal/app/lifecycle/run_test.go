@@ -509,6 +509,9 @@ func TestRunIntakeProcessCreatesReviewStatesWithoutExecution(t *testing.T) {
 	if output := clearOutput.String(); !strings.Contains(output, `"status": "review_required"`) || !strings.Contains(output, `"routed_outcome": "draft_task"`) {
 		t.Fatalf("clear process output = %s, want review_required draft_task", output)
 	}
+	if category := proposalCategoryFromProcessOutput(t, clearOutput.Bytes()); strings.TrimSpace(category) == "" {
+		t.Fatalf("clear process output = %s, want non-empty proposal category", clearOutput.String())
+	}
 
 	var vagueOutput bytes.Buffer
 	if err := Run(context.Background(), root, []string{"intake", "process", "--id", "intake-2", "--json"}, strings.NewReader(""), &vagueOutput); err != nil {
@@ -516,6 +519,9 @@ func TestRunIntakeProcessCreatesReviewStatesWithoutExecution(t *testing.T) {
 	}
 	if output := vagueOutput.String(); !strings.Contains(output, `"status": "needs_clarification"`) || !strings.Contains(output, `"routed_outcome": "needs_clarification"`) {
 		t.Fatalf("vague process output = %s, want needs_clarification", output)
+	}
+	if category := proposalCategoryFromProcessOutput(t, vagueOutput.Bytes()); category != "clarification_needed" {
+		t.Fatalf("vague process output = %s, proposal category = %q, want clarification_needed", vagueOutput.String(), category)
 	}
 
 	var duplicateOutput bytes.Buffer
@@ -572,6 +578,35 @@ func TestRunIntakeProcessCreatesReviewStatesWithoutExecution(t *testing.T) {
 			t.Fatalf("Run(%v) output = %s, want empty list", args, output.String())
 		}
 	}
+}
+
+func TestRunIntakeProcessProposalCategoryFallsBackWithoutClassificationCategory(t *testing.T) {
+	t.Parallel()
+
+	item := sqlite.IntakeItem{EventKind: "research"}
+	route := intakeDerivedRoute{RoutingOutcome: "draft_research"}
+	category := intakeProposalCategory(item, intakeClassification{Result: "actionable_request"}, route)
+	if category != "research" {
+		t.Fatalf("intakeProposalCategory() = %q, want research fallback", category)
+	}
+}
+
+func proposalCategoryFromProcessOutput(t *testing.T, output []byte) string {
+	t.Helper()
+
+	var view struct {
+		IntakeItem struct {
+			Processing struct {
+				Proposal struct {
+					Category string `json:"category"`
+				} `json:"proposal"`
+			} `json:"processing"`
+		} `json:"intake_item"`
+	}
+	if err := json.Unmarshal(output, &view); err != nil {
+		t.Fatalf("Unmarshal(process output) error = %v; output = %s", err, string(output))
+	}
+	return view.IntakeItem.Processing.Proposal.Category
 }
 
 func TestRunIntakeProcessDerivesTypeSpecificRoutingAndIntent(t *testing.T) {

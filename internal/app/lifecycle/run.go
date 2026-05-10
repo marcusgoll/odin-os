@@ -880,8 +880,9 @@ type intakeProcessingNotes struct {
 }
 
 type intakeClassification struct {
-	Result string `json:"result"`
-	Reason string `json:"reason"`
+	Result   string `json:"result"`
+	Reason   string `json:"reason"`
+	Category string `json:"category,omitempty"`
 }
 
 type intakeDedupeReview struct {
@@ -1820,7 +1821,7 @@ func draftReviewableProposal(item sqlite.IntakeItem, notes intakeProcessingNotes
 	proposal := coreintake.ReviewableProposal{
 		SourceIntakeKey: rawIntakeKey(item.ID),
 		Title:           item.Subject,
-		Category:        intakeProposalCategory(notes.Classification),
+		Category:        intakeProposalCategory(item, notes.Classification, route),
 		Route:           route.RoutingOutcome,
 		Summary:         route.DraftArtifactKind + " prepared for human review; no work item created",
 		DraftArtifact: coreintake.DraftArtifact{
@@ -1847,7 +1848,7 @@ func clarificationReviewableProposal(item sqlite.IntakeItem, notes intakeProcess
 	proposal := coreintake.ReviewableProposal{
 		SourceIntakeKey:       rawIntakeKey(item.ID),
 		Title:                 item.Subject,
-		Category:              intakeProposalCategory(notes.Classification),
+		Category:              intakeProposalCategory(item, notes.Classification, intakeDerivedRoute{RoutingOutcome: notes.Routing.Outcome}),
 		Route:                 notes.Routing.Outcome,
 		Summary:               "Raw intake needs operator clarification before drafting work",
 		ClarificationPrompts:  append([]string(nil), notes.Clarification.Prompts...),
@@ -1860,18 +1861,41 @@ func clarificationReviewableProposal(item sqlite.IntakeItem, notes intakeProcess
 	return &proposal
 }
 
-func intakeProposalCategory(classification intakeClassification) string {
-	encoded, err := json.Marshal(classification)
-	if err != nil {
-		return ""
+func intakeProposalCategory(item sqlite.IntakeItem, classification intakeClassification, route intakeDerivedRoute) string {
+	if category := strings.TrimSpace(classification.Category); category != "" {
+		return category
 	}
-	var view struct {
-		Category string `json:"category"`
+	if classification.Result == "ambiguous" || route.RoutingOutcome == "needs_clarification" {
+		return "clarification_needed"
 	}
-	if err := json.Unmarshal(encoded, &view); err != nil {
-		return ""
+	intakeType := normalizedIntakeType(item.EventKind)
+	if intakeType != "" && intakeType != "request" && intakeType != "prompt" {
+		return intakeType
 	}
-	return view.Category
+	switch route.RoutingOutcome {
+	case "draft_research":
+		return "research"
+	case "draft_document":
+		return "writing"
+	case "draft_admin_task":
+		return "admin"
+	case "draft_incident_review":
+		return "incident"
+	case "draft_policy_change":
+		return "governance"
+	case "draft_destructive_action":
+		return "destructive"
+	case "draft_routine":
+		return "routine"
+	case "draft_follow_up":
+		return "follow_up"
+	case "archive_candidate":
+		return "archive_candidate"
+	}
+	if result := strings.TrimSpace(classification.Result); result != "" {
+		return result
+	}
+	return "request"
 }
 
 func isGoalLikeIntake(item sqlite.IntakeItem) bool {
