@@ -213,6 +213,12 @@ Raw intake processing remains on the `intake_items` SQLite authority. When deter
 
 The processing payload must include the source intake ID, route decision, classification result, and created goal ID when a goal is created. Intake conversion must not approve, run, or mutate external systems.
 
+## Intake-to-proposal expectation
+
+Raw intake processing remains on the `intake_items` SQLite authority. Processing may emit `intake.processing_started`, `intake.classified`, `intake.dedupe_reviewed`, `intake.routed`, `intake.draft_artifact_created`, `intake.clarification_needed`, `intake.duplicate_linked_or_suppressed`, and `intake.processed`.
+
+The processing payload and routing notes must preserve enough evidence to reconstruct the Reviewable Intake Proposal. Intake processing must not create Work Items, Run Attempts, dispatches, approvals, or external mutations by default.
+
 ## Browser session handoff expectation
 
 Manual Huginn browser login and authenticated read-only session reuse are being implemented in metadata-first slices. Browser session metadata, profile storage policy metadata, and login request metadata live in SQLite, future browser profile files must stay under `ODIN_ROOT`, and profile/request lifecycle mutations append events through the runtime event stream:

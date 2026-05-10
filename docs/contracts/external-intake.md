@@ -30,6 +30,14 @@ Field rules:
 - `requested_by` defaults to `source` when the caller does not supply a more specific actor.
 - `payload` is a required JSON object in the normalized intake envelope.
 
+## Universal Source Envelope
+
+External sources normalize into `source_family`, `external_object_id`, `event_kind`, `observed_at`, `subject`, `body` or `summary`, `actor`, `source_uri`, `evidence_refs`, and namespaced `adapter_facts`.
+
+Source adapters normalize source facts. Odin core owns `dedupe_key`, `dedupe_recipe_version`, lifecycle state, and promotion boundaries.
+
+Raw intake processing may create a Reviewable Intake Proposal. It must not create executable Work Items, Run Attempts, dispatches, approvals, or external mutations by default.
+
 CLI flags:
 
 - `odin intake enqueue --source <source> --project <key> --title <title> --type <type>`
