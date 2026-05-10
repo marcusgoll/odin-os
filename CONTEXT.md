@@ -394,7 +394,8 @@ _Avoid_: analytics scrape, crawler result
 
 ## Status ownership
 
-- **Intake Item** intake status should be one of: `received`, `triaging`, `resolved`, `suppressed`, `errored`
+- V1 **Intake Item** intake status should be one of: `received`, `processing`, `review_required`, `needs_clarification`, `duplicate_linked_or_suppressed`, `approval_required`, `accepted`, `rejected`, `approval_denied`, `archived`, `errored`
+- `triaging`, `resolved`, and `suppressed` are compatibility or derived language for V1 intake readbacks; stored intake rows should use the explicit review-oriented statuses above so operator queues can distinguish review, clarification, duplicate, approval, acceptance, denial, and archive outcomes without reinterpreting routing notes
 - **Intake Item** should carry outcome references rather than a large branching status enum, including optional links to a **Conversation Transcript**, linked **Work Items**, canonical duplicate **Intake Item** reference, suppression or dedupe reason, routing notes, its explicit **Dedupe Key**, persisted **Source Facts**, and the **Dedupe Recipe Version**
 - **Work Item** operator status should be one of: `queued`, `running`, `blocked`, `completed`, `failed`, `canceled`
 - Work Item pause/resume is owned by Odin runtime state, not GitHub labels; an operator-paused Work Item should use `status=blocked` with `blocked_reason=operator_paused`, and `odin:paused` should remain a projection label only

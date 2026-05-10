@@ -1107,6 +1107,8 @@ type intakeClassification struct {
 	Intent         string `json:"intent,omitempty"`
 	Risk           string `json:"risk,omitempty"`
 	Confidence     string `json:"confidence,omitempty"`
+	Category       string `json:"category,omitempty"`
+	PriorityScore  int    `json:"priority_score,omitempty"`
 	SuggestedRoute string `json:"suggested_route,omitempty"`
 }
 
@@ -1114,6 +1116,7 @@ type intakeDedupeReview struct {
 	Result             string `json:"result"`
 	Basis              string `json:"basis,omitempty"`
 	CanonicalIntakeKey string `json:"canonical_intake_key,omitempty"`
+	MatchReason        string `json:"match_reason,omitempty"`
 }
 
 type intakeRoutingResult struct {
@@ -1939,7 +1942,7 @@ func intakeExecutionIntentForTask(item sqlite.IntakeItem) intakeDerivedRoute {
 			}
 		}
 	}
-	route := deriveIntakeRoute(item)
+	route := deriveIntakeRoute(item, classifyIntakeItem(item))
 	return intakeDerivedRoute{
 		ExecutionIntent:       route.ExecutionIntent,
 		ExecutionIntentSource: route.ExecutionIntentSource,
@@ -1998,6 +2001,7 @@ func buildIntakeProcessOutcome(ctx context.Context, store *sqlite.Store, item sq
 			Result:             duplicate.Result,
 			Basis:              duplicate.Basis,
 			CanonicalIntakeKey: rawIntakeKey(duplicate.CanonicalIntakeItemID),
+			MatchReason:        duplicate.Basis,
 		}
 		notes.Routing = intakeRoutingResult{Outcome: "duplicate_linked_or_suppressed", ProjectKey: item.ScopeKey}
 		populateIntakeClassificationRoute(&notes, item)
@@ -2039,7 +2043,7 @@ func buildIntakeProcessOutcome(ctx context.Context, store *sqlite.Store, item sq
 		return outcome, nil
 	}
 
-	if isGoalLikeIntake(item) {
+	if notes.Classification.Category == "project" || isGoalLikeIntake(item) {
 		notes.Routing = intakeRoutingResult{
 			Outcome:               "draft_goal",
 			ProjectKey:            item.ScopeKey,
@@ -2063,7 +2067,7 @@ func buildIntakeProcessOutcome(ctx context.Context, store *sqlite.Store, item sq
 		return outcome, nil
 	}
 
-	route := deriveIntakeRoute(item)
+	route := deriveIntakeRoute(item, notes.Classification)
 	notes.Routing = intakeRoutingResult{
 		Outcome:               route.RoutingOutcome,
 		ProjectKey:            item.ScopeKey,
@@ -2096,7 +2100,7 @@ func isGoalLikeIntake(item sqlite.IntakeItem) bool {
 	return strings.Contains(text, "plan the ") && strings.Contains(text, " project")
 }
 
-func deriveIntakeRoute(item sqlite.IntakeItem) intakeDerivedRoute {
+func deriveIntakeRoute(item sqlite.IntakeItem, classification intakeClassification) intakeDerivedRoute {
 	intakeType := normalizedIntakeType(item.EventKind)
 	source := "intake_type:" + intakeType
 	switch intakeType {
@@ -2112,6 +2116,28 @@ func deriveIntakeRoute(item sqlite.IntakeItem) intakeDerivedRoute {
 		return intakeDerivedRoute{RoutingOutcome: "draft_policy_change", DraftArtifactKind: "draft_policy_change", ExecutionIntent: "governance", ExecutionIntentSource: source}
 	case "destructive":
 		return intakeDerivedRoute{RoutingOutcome: "draft_destructive_action", DraftArtifactKind: "draft_destructive_action", ExecutionIntent: "destructive", ExecutionIntentSource: source}
+	}
+
+	if classification.Category != "" && (intakeType == "request" || intakeType == "prompt") {
+		source = "classification_category:" + classification.Category
+	}
+	switch classification.Category {
+	case "idea":
+		return intakeDerivedRoute{RoutingOutcome: "draft_idea", DraftArtifactKind: "draft_idea", ExecutionIntent: "read_only", ExecutionIntentSource: source}
+	case "bug":
+		return intakeDerivedRoute{RoutingOutcome: "draft_incident_review", DraftArtifactKind: "draft_incident_review", ExecutionIntent: "read_only", ExecutionIntentSource: source}
+	case "research_item":
+		return intakeDerivedRoute{RoutingOutcome: "draft_research", DraftArtifactKind: "draft_research", ExecutionIntent: "read_only", ExecutionIntentSource: source}
+	case "writing_request":
+		return intakeDerivedRoute{RoutingOutcome: "draft_document", DraftArtifactKind: "draft_document", ExecutionIntent: "mutation", ExecutionIntentSource: source}
+	case "admin_item":
+		return intakeDerivedRoute{RoutingOutcome: "draft_admin_task", DraftArtifactKind: "draft_admin_task", ExecutionIntent: "mutation", ExecutionIntentSource: source}
+	case "routine":
+		return intakeDerivedRoute{RoutingOutcome: "draft_routine", DraftArtifactKind: "draft_routine", ExecutionIntent: "read_only", ExecutionIntentSource: source}
+	case "waiting_for_item":
+		return intakeDerivedRoute{RoutingOutcome: "draft_follow_up", DraftArtifactKind: "draft_follow_up", ExecutionIntent: "read_only", ExecutionIntentSource: source}
+	case "archive_worthy_noise":
+		return intakeDerivedRoute{RoutingOutcome: "archive_candidate", DraftArtifactKind: "archive_candidate", ExecutionIntent: "read_only", ExecutionIntentSource: source}
 	default:
 		return intakeDerivedRoute{RoutingOutcome: "draft_task", DraftArtifactKind: "draft_task", ExecutionIntent: "read_only", ExecutionIntentSource: source}
 	}
@@ -2137,14 +2163,65 @@ func classifyIntakeItem(item sqlite.IntakeItem) intakeClassification {
 			Reason:     "intake title is too vague to draft reviewable work",
 			SourceType: normalizedIntakeSourceType(item.SourceFamily),
 			Confidence: "low",
+			Category:   "clarification_needed",
 		}
 	}
+	category, priority := classifyIntakeCategory(item)
 	return intakeClassification{
-		Result:     "actionable_request",
-		Reason:     "intake has enough subject detail for a draft review artifact",
-		SourceType: normalizedIntakeSourceType(item.SourceFamily),
-		Confidence: "high",
+		Result:        "actionable_request",
+		Reason:        "intake has enough subject detail for a draft review artifact",
+		SourceType:    normalizedIntakeSourceType(item.SourceFamily),
+		Confidence:    "high",
+		Category:      category,
+		PriorityScore: priority,
 	}
+}
+
+func classifyIntakeCategory(item sqlite.IntakeItem) (string, int) {
+	intakeType := normalizedIntakeType(item.EventKind)
+	switch intakeType {
+	case "research":
+		return "research_item", 40
+	case "writing":
+		return "writing_request", 50
+	case "admin":
+		return "admin_item", 45
+	case "bug", "incident":
+		return "bug", 80
+	}
+
+	text := strings.ToLower(strings.TrimSpace(item.Subject + " " + item.Summary))
+	switch {
+	case hasAnyPhrase(text, "no action needed", "fyi", "newsletter", "unsubscribe", "spam"):
+		return "archive_worthy_noise", 10
+	case hasAnyPhrase(text, "waiting for", "wait for", "follow up", "follow-up"):
+		return "waiting_for_item", 35
+	case hasAnyPhrase(text, "remind me", "every day", "every week", "every friday", "every monday", "recurring"):
+		return "routine", 35
+	case hasAnyPhrase(text, "bug", "error", "failed", "failure", "incident", "broken", "fix "):
+		return "bug", 80
+	case hasAnyPhrase(text, "idea", "someday", "maybe"):
+		return "idea", 30
+	case isGoalLikeIntake(item):
+		return "project", 70
+	case hasAnyPhrase(text, "research", "investigate", "analyze", "compare", "options"):
+		return "research_item", 40
+	case hasAnyPhrase(text, "write", "draft", "memo", "document"):
+		return "writing_request", 50
+	case hasAnyPhrase(text, "organize", "book", "file", "labels", "admin"):
+		return "admin_item", 45
+	default:
+		return "task", 50
+	}
+}
+
+func hasAnyPhrase(text string, phrases ...string) bool {
+	for _, phrase := range phrases {
+		if strings.Contains(text, phrase) {
+			return true
+		}
+	}
+	return false
 }
 
 func normalizedIntakeSourceType(value string) string {
