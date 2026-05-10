@@ -479,9 +479,6 @@ func parseRawIntakeCreate(command IntakeCommand, args []string) (IntakeCommand, 
 	if command.Type == "" {
 		return IntakeCommand{}, fmt.Errorf("--type is required")
 	}
-	if command.DedupKey == "" {
-		return IntakeCommand{}, fmt.Errorf("--dedup-key is required")
-	}
 	if err := validateMachineValue("--source", command.Source); err != nil {
 		return IntakeCommand{}, err
 	}

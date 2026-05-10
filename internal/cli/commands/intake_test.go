@@ -83,6 +83,37 @@ func TestParseIntakeRawCreate(t *testing.T) {
 	}
 }
 
+func TestParseIntakeRawCreateAllowsBlankDedupKey(t *testing.T) {
+	t.Parallel()
+
+	command, err := ParseIntake([]string{
+		"raw",
+		"create",
+		"--source", "operator",
+		"--project", "odin-core",
+		"--title", "Capture governed intake",
+		"--type", "request",
+		"--requested-by", "codex",
+		"--payload-file", "-",
+		"--json",
+	})
+	if err != nil {
+		t.Fatalf("ParseIntake(raw create) error = %v", err)
+	}
+	if command.Name != "raw" || command.RawAction != "create" {
+		t.Fatalf("command = %+v, want raw create", command)
+	}
+	if command.DedupKey != "" {
+		t.Fatalf("DedupKey = %q, want blank for core derivation", command.DedupKey)
+	}
+	if command.Source != "operator" || command.Type != "request" || command.ProjectKey != "odin-core" {
+		t.Fatalf("command identity = %+v, want operator request odin-core", command)
+	}
+	if command.RequestedBy != "codex" || command.PayloadFile != "-" || !command.JSON {
+		t.Fatalf("command = %+v, want requested-by/payload/json parsed", command)
+	}
+}
+
 func TestParseIntakeRawCreateTextShorthand(t *testing.T) {
 	t.Parallel()
 
