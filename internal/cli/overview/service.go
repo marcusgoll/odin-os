@@ -11,6 +11,7 @@ import (
 
 	"odin-os/internal/cli/scope"
 	"odin-os/internal/core/initiatives"
+	coreintake "odin-os/internal/core/intake"
 	coreprojects "odin-os/internal/core/projects"
 	"odin-os/internal/core/workspaces"
 	knowledgememory "odin-os/internal/memory/knowledge"
@@ -909,30 +910,34 @@ func (service Service) Build(ctx context.Context, resolved scope.Resolution) (Vi
 	view.IntakeInbox.Source = "intake_items"
 	view.IntakeInbox.RawItemCount = len(rawIntakeItems)
 	for _, item := range rawIntakeItems {
-		status := strings.ToLower(strings.TrimSpace(item.Status))
-		if status != "received" {
+		rawStatus := strings.ToLower(strings.TrimSpace(item.Status))
+		status := coreintake.CanonicalState(rawStatus)
+		if status != coreintake.StateReceived {
 			view.IntakeInbox.RawProcessedCount++
 		}
-		if isReviewableIntakeStatus(status) {
+		if isReviewableIntakeStatus(rawStatus) {
 			view.IntakeInbox.ReviewQueueCount++
 		}
 		switch status {
-		case "review_required":
+		case coreintake.StateReviewRequired:
 			view.IntakeInbox.ReviewRequiredCount++
-		case "needs_clarification":
+		case coreintake.StateNeedsClarification:
 			view.IntakeInbox.NeedsClarificationCount++
-		case "duplicate_linked_or_suppressed":
+		case coreintake.StateDuplicateLinked:
 			view.IntakeInbox.DuplicateLinkedCount++
-		case "approval_required":
-			view.IntakeInbox.IntakeApprovalRequiredCount++
-		case "accepted":
+		case coreintake.StateAcceptedForPromotion:
 			view.IntakeInbox.AcceptedCount++
-		case "rejected":
-			view.IntakeInbox.RejectedCount++
-		case "archived":
+		case coreintake.StateArchived:
 			view.IntakeInbox.ArchivedCount++
-		case "approval_denied":
-			view.IntakeInbox.ApprovalDeniedCount++
+			switch rawStatus {
+			case "rejected":
+				view.IntakeInbox.RejectedCount++
+			case "approval_denied":
+				view.IntakeInbox.ApprovalDeniedCount++
+			}
+		}
+		if rawStatus == "approval_required" {
+			view.IntakeInbox.IntakeApprovalRequiredCount++
 		}
 		view.IntakeInbox.RawItems = append(view.IntakeInbox.RawItems, rawIntakeSummary(item))
 	}
@@ -1510,8 +1515,8 @@ func isClosedWorkItemStatus(status string) bool {
 }
 
 func isReviewableIntakeStatus(status string) bool {
-	switch strings.ToLower(strings.TrimSpace(status)) {
-	case "review_required", "needs_clarification", "duplicate_linked_or_suppressed", "approval_required":
+	switch coreintake.CanonicalState(status) {
+	case coreintake.StateReviewRequired, coreintake.StateNeedsClarification, coreintake.StateDuplicateLinked:
 		return true
 	default:
 		return false

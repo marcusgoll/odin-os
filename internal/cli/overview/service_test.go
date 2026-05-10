@@ -167,6 +167,71 @@ func TestBuildReturnsCanonicalOverviewFromCurrentAuthority(t *testing.T) {
 	}
 }
 
+func TestOverviewIntakeInboxMapsCompatibilityStatuses(t *testing.T) {
+	ctx := context.Background()
+	env := newOverviewTestEnvironment(t)
+
+	statuses := []struct {
+		name    string
+		status  string
+		subject string
+	}{
+		{name: "duplicate", status: "duplicate_linked_or_suppressed", subject: "Duplicate proposal"},
+		{name: "accepted", status: "accepted", subject: "Accepted proposal"},
+		{name: "approval_required", status: "approval_required", subject: "Approval required proposal"},
+		{name: "rejected", status: "rejected", subject: "Rejected proposal"},
+		{name: "approval_denied", status: "approval_denied", subject: "Approval denied proposal"},
+		{name: "archived", status: "archived", subject: "Archived proposal"},
+	}
+	for _, entry := range statuses {
+		if _, err := env.store.CreateIntakeItem(ctx, sqlite.CreateIntakeItemParams{
+			WorkspaceID:         "default",
+			SourceFamily:        "cli",
+			EventKind:           "request",
+			Subject:             entry.subject,
+			DedupeKey:           "overview-alias-" + entry.name,
+			DedupeRecipeVersion: "test-v1",
+			SourceFactsJSON:     `{}`,
+			Status:              entry.status,
+			Scope:               "project",
+			ScopeKey:            "alpha",
+			Summary:             entry.subject,
+		}); err != nil {
+			t.Fatalf("CreateIntakeItem(%s) error = %v", entry.name, err)
+		}
+	}
+
+	view, err := Service{
+		Store:            env.store,
+		RegistrySnapshot: env.snapshot,
+		Now:              time.Now,
+	}.Build(ctx, scope.Resolution{Kind: scope.ScopeGlobal})
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+	if view.IntakeInbox.DuplicateLinkedCount != 1 {
+		t.Fatalf("DuplicateLinkedCount = %d, want 1", view.IntakeInbox.DuplicateLinkedCount)
+	}
+	if view.IntakeInbox.AcceptedCount != 1 {
+		t.Fatalf("AcceptedCount = %d, want 1", view.IntakeInbox.AcceptedCount)
+	}
+	if view.IntakeInbox.ReviewRequiredCount != 1 {
+		t.Fatalf("ReviewRequiredCount = %d, want approval_required to map to review_required", view.IntakeInbox.ReviewRequiredCount)
+	}
+	if view.IntakeInbox.IntakeApprovalRequiredCount != 1 {
+		t.Fatalf("IntakeApprovalRequiredCount = %d, want approval_required compatibility count", view.IntakeInbox.IntakeApprovalRequiredCount)
+	}
+	if view.IntakeInbox.RejectedCount != 1 {
+		t.Fatalf("RejectedCount = %d, want rejected compatibility count", view.IntakeInbox.RejectedCount)
+	}
+	if view.IntakeInbox.ApprovalDeniedCount != 1 {
+		t.Fatalf("ApprovalDeniedCount = %d, want approval_denied compatibility count", view.IntakeInbox.ApprovalDeniedCount)
+	}
+	if view.IntakeInbox.ArchivedCount != 3 {
+		t.Fatalf("ArchivedCount = %d, want archived canonical count for archived/rejected/approval_denied", view.IntakeInbox.ArchivedCount)
+	}
+}
+
 func TestRawIntakeSummaryReadsSourceEnvelopeFacts(t *testing.T) {
 	item := sqlite.IntakeItem{
 		ID:              7,
