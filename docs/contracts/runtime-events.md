@@ -26,7 +26,9 @@ Every stored event must include:
 
 ## Stream types
 
-Phase 03 through Phase 14 stream types are:
+The typed stream inventory lives in `internal/runtime/events/events.go`. This
+contract highlights the baseline lifecycle streams plus intake streams relevant
+to this document:
 
 - `project`
 - `task`
@@ -37,6 +39,7 @@ Phase 03 through Phase 14 stream types are:
 - `registry_version`
 - `executor_health`
 - `context_packet`
+- `intake_item`
 - `learning_proposal`
 - `learning_evaluation`
 - `learning_promotion`
@@ -45,7 +48,9 @@ Phase 03 through Phase 14 stream types are:
 
 ## Event types
 
-Phase 03 through Phase 14 event types are:
+The typed event inventory lives in `internal/runtime/events/events.go`. This
+contract highlights the baseline lifecycle events plus intake events relevant to
+this document:
 
 - `project.created`
 - `task.created`
@@ -65,6 +70,24 @@ Phase 03 through Phase 14 event types are:
 - `registry_version.recorded`
 - `executor_health.recorded`
 - `context_packet.created`
+- `intake.item_created`
+- `intake.processing_started`
+- `intake.classified`
+- `intake.dedupe_reviewed`
+- `intake.routed`
+- `intake.processed`
+- `intake.routed_to_goal`
+- `intake.draft_artifact_created`
+- `intake.clarification_needed`
+- `intake.duplicate_linked_or_suppressed`
+- `intake.review_accepted`
+- `intake.review_rejected`
+- `intake.review_clarification_requested`
+- `intake.review_archived`
+- `intake.review_duplicate_acknowledged`
+- `intake.review_approval_required`
+- `intake.approval_approved`
+- `intake.approval_denied`
 - `project.transition_changed`
 - `project.shadow_observation_recorded`
 - `project.compare_report_recorded`
