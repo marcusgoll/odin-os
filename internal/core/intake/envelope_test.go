@@ -19,7 +19,10 @@ func TestSourceEnvelopeValidatesAndBuildsFacts(t *testing.T) {
 		SourceURI:        "odin://manual/intake/manual-1",
 		EvidenceRefs:     []string{"stdin"},
 		AdapterFacts: map[string]any{
-			"cli": map[string]any{"payload_policy": "stored_in_source_facts_json"},
+			"cli": map[string]any{
+				"payload_policy": "stored_in_source_facts_json",
+				"requested_by":   "operator",
+			},
 		},
 	}
 
@@ -30,10 +33,74 @@ func TestSourceEnvelopeValidatesAndBuildsFacts(t *testing.T) {
 	if !json.Valid([]byte(facts)) {
 		t.Fatalf("facts json is invalid: %s", facts)
 	}
+	var decoded struct {
+		SourceFamily     string                            `json:"source_family"`
+		ExternalObjectID string                            `json:"external_object_id"`
+		EventKind        string                            `json:"event_kind"`
+		ObservedAt       string                            `json:"observed_at"`
+		Subject          string                            `json:"subject"`
+		Body             string                            `json:"body"`
+		Summary          string                            `json:"summary"`
+		Actor            string                            `json:"actor"`
+		SourceURI        string                            `json:"source_uri"`
+		EvidenceRefs     []string                          `json:"evidence_refs"`
+		AdapterFacts     map[string]map[string]interface{} `json:"adapter_facts"`
+	}
+	if err := json.Unmarshal([]byte(facts), &decoded); err != nil {
+		t.Fatalf("Unmarshal(facts) error = %v", err)
+	}
+	if decoded.SourceFamily != "cli" || decoded.ExternalObjectID != "manual-1" || decoded.EventKind != "request" {
+		t.Fatalf("facts identity = %+v, want cli/manual-1/request", decoded)
+	}
+	if decoded.ObservedAt != "2026-05-10T12:00:00Z" || decoded.Subject != "Build universal intake proposal" || decoded.Body != "Preserve raw input and prepare a reviewable proposal." || decoded.Summary != "" {
+		t.Fatalf("facts content = %+v, want canonical observed/content fields", decoded)
+	}
+	if decoded.Actor != "operator" || decoded.SourceURI != "odin://manual/intake/manual-1" || len(decoded.EvidenceRefs) != 1 || decoded.EvidenceRefs[0] != "stdin" {
+		t.Fatalf("facts provenance = %+v, want actor/source/evidence", decoded)
+	}
+	cliFacts := decoded.AdapterFacts["cli"]
+	if cliFacts == nil || cliFacts["payload_policy"] != "stored_in_source_facts_json" {
+		t.Fatalf("adapter facts = %+v, want cli payload policy", decoded.AdapterFacts)
+	}
+	if cliFacts["requested_by"] != "operator" {
+		t.Fatalf("adapter facts = %+v, want cli requested_by", decoded.AdapterFacts)
+	}
 
 	dedupe := envelope.DedupeKey("default")
 	if dedupe == "" || dedupe == "manual-1" {
 		t.Fatalf("DedupeKey() = %q, want Odin-owned derived key", dedupe)
+	}
+}
+
+func TestSourceEnvelopeDedupeKeyUsesStableExternalIdentity(t *testing.T) {
+	base := SourceEnvelope{
+		SourceFamily:     "cli",
+		ExternalObjectID: " Manual-1 ",
+		EventKind:        "Request",
+		Subject:          "Original subject",
+		Body:             "Original body",
+		Summary:          "Original summary",
+		Actor:            "operator",
+		SourceURI:        "odin://manual/intake/manual-1",
+	}
+	changedContent := SourceEnvelope{
+		SourceFamily:     " CLI ",
+		ExternalObjectID: "manual-1",
+		EventKind:        "request",
+		Subject:          "Different subject",
+		Body:             "Different body",
+		Summary:          "Different summary",
+		Actor:            "operator",
+		SourceURI:        "odin://manual/intake/different",
+	}
+	if got, want := base.DedupeKey(" Default "), changedContent.DedupeKey("default"); got != want {
+		t.Fatalf("DedupeKey() = %q, want normalized external identity key %q", got, want)
+	}
+
+	changedExternalID := base
+	changedExternalID.ExternalObjectID = "manual-2"
+	if got, unchanged := changedExternalID.DedupeKey("default"), base.DedupeKey("default"); got == unchanged {
+		t.Fatalf("DedupeKey() = %q, want different key when external id changes", got)
 	}
 }
 

@@ -167,6 +167,53 @@ func TestBuildReturnsCanonicalOverviewFromCurrentAuthority(t *testing.T) {
 	}
 }
 
+func TestRawIntakeSummaryReadsSourceEnvelopeFacts(t *testing.T) {
+	item := sqlite.IntakeItem{
+		ID:              7,
+		SourceFamily:    "operator",
+		EventKind:       "request",
+		DedupeKey:       "odin-intake:abc",
+		Subject:         "Capture governed intake",
+		Status:          "received",
+		Summary:         "Capture governed intake",
+		CreatedAt:       time.Date(2026, 5, 10, 12, 0, 0, 0, time.UTC),
+		UpdatedAt:       time.Date(2026, 5, 10, 12, 1, 0, 0, time.UTC),
+		SourceFactsJSON: `{"source_family":"operator","event_kind":"request","actor":"operator","adapter_facts":{"operator":{"requested_by":"codex","payload_policy":"stored_in_source_facts_json"}}}`,
+	}
+
+	summary := rawIntakeSummary(item)
+
+	if summary.RequestedBy != "codex" {
+		t.Fatalf("RequestedBy = %q, want adapter requested_by", summary.RequestedBy)
+	}
+	if summary.PayloadPolicy != "stored_in_source_facts_json" {
+		t.Fatalf("PayloadPolicy = %q, want adapter payload policy", summary.PayloadPolicy)
+	}
+}
+
+func TestRawIntakeSummaryPreservesTopLevelSourceFactsCompatibility(t *testing.T) {
+	item := sqlite.IntakeItem{
+		ID:              7,
+		SourceFamily:    "operator",
+		EventKind:       "request",
+		DedupeKey:       "governed-intake:1",
+		Subject:         "Capture governed intake",
+		Status:          "received",
+		CreatedAt:       time.Date(2026, 5, 10, 12, 0, 0, 0, time.UTC),
+		UpdatedAt:       time.Date(2026, 5, 10, 12, 1, 0, 0, time.UTC),
+		SourceFactsJSON: `{"requested_by":"codex","payload_policy":"stored_in_source_facts_json"}`,
+	}
+
+	summary := rawIntakeSummary(item)
+
+	if summary.RequestedBy != "codex" {
+		t.Fatalf("RequestedBy = %q, want top-level requested_by", summary.RequestedBy)
+	}
+	if summary.PayloadPolicy != "stored_in_source_facts_json" {
+		t.Fatalf("PayloadPolicy = %q, want top-level payload policy", summary.PayloadPolicy)
+	}
+}
+
 func TestBuildWorkItemsExposeBlockedReason(t *testing.T) {
 	ctx := context.Background()
 	env := newOverviewTestEnvironment(t)

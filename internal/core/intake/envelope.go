@@ -5,7 +5,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"sort"
 	"strings"
 	"time"
 )
@@ -78,14 +77,20 @@ func (envelope SourceEnvelope) DedupeKey(workspaceID string) string {
 		strings.ToLower(strings.TrimSpace(workspaceID)),
 		strings.ToLower(strings.TrimSpace(envelope.SourceFamily)),
 		strings.ToLower(strings.TrimSpace(envelope.EventKind)),
-		normalizedFingerprint(envelope.ExternalObjectID),
-		normalizedFingerprint(envelope.Subject),
-		normalizedFingerprint(envelope.SourceURI),
 	}
-	if envelope.ExternalObjectID == "" && envelope.SourceURI == "" {
-		parts = append(parts, normalizedFingerprint(envelope.Body), normalizedFingerprint(envelope.Summary))
+	switch {
+	case strings.TrimSpace(envelope.ExternalObjectID) != "":
+		parts = append(parts, "external_object_id", normalizedFingerprint(envelope.ExternalObjectID))
+	case strings.TrimSpace(envelope.SourceURI) != "":
+		parts = append(parts, "source_uri", normalizedFingerprint(envelope.SourceURI))
+	default:
+		parts = append(parts,
+			"content",
+			normalizedFingerprint(envelope.Subject),
+			normalizedFingerprint(envelope.Body),
+			normalizedFingerprint(envelope.Summary),
+		)
 	}
-	sort.Strings(parts[3:])
 	sum := sha256.Sum256([]byte(strings.Join(parts, "|")))
 	return "odin-intake:" + hex.EncodeToString(sum[:])[:24]
 }

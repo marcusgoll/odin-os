@@ -339,18 +339,19 @@ type IntakeInboxLane struct {
 }
 
 type RawIntakeSummary struct {
-	ID          int64  `json:"id"`
-	Key         string `json:"key"`
-	ProjectKey  string `json:"project_key,omitempty"`
-	Source      string `json:"source"`
-	IntakeType  string `json:"intake_type"`
-	DedupKey    string `json:"dedup_key"`
-	RequestedBy string `json:"requested_by,omitempty"`
-	Title       string `json:"title"`
-	Status      string `json:"status"`
-	Summary     string `json:"summary,omitempty"`
-	CreatedAt   string `json:"created_at"`
-	UpdatedAt   string `json:"updated_at"`
+	ID            int64  `json:"id"`
+	Key           string `json:"key"`
+	ProjectKey    string `json:"project_key,omitempty"`
+	Source        string `json:"source"`
+	IntakeType    string `json:"intake_type"`
+	DedupKey      string `json:"dedup_key"`
+	RequestedBy   string `json:"requested_by,omitempty"`
+	PayloadPolicy string `json:"payload_policy,omitempty"`
+	Title         string `json:"title"`
+	Status        string `json:"status"`
+	Summary       string `json:"summary,omitempty"`
+	CreatedAt     string `json:"created_at"`
+	UpdatedAt     string `json:"updated_at"`
 }
 
 type IntakeEvidenceSummary struct {
@@ -1519,18 +1520,19 @@ func isReviewableIntakeStatus(status string) bool {
 
 func rawIntakeSummary(item sqlite.IntakeItem) RawIntakeSummary {
 	return RawIntakeSummary{
-		ID:          item.ID,
-		Key:         fmt.Sprintf("intake-%d", item.ID),
-		ProjectKey:  rawIntakeProjectKey(item),
-		Source:      item.SourceFamily,
-		IntakeType:  item.EventKind,
-		DedupKey:    item.DedupeKey,
-		RequestedBy: rawIntakeRequestedBy(item.SourceFactsJSON),
-		Title:       item.Subject,
-		Status:      item.Status,
-		Summary:     item.Summary,
-		CreatedAt:   item.CreatedAt.UTC().Format(time.RFC3339),
-		UpdatedAt:   item.UpdatedAt.UTC().Format(time.RFC3339),
+		ID:            item.ID,
+		Key:           fmt.Sprintf("intake-%d", item.ID),
+		ProjectKey:    rawIntakeProjectKey(item),
+		Source:        item.SourceFamily,
+		IntakeType:    item.EventKind,
+		DedupKey:      item.DedupeKey,
+		RequestedBy:   rawIntakeRequestedBy(item.SourceFactsJSON, item.SourceFamily),
+		PayloadPolicy: rawIntakePayloadPolicy(item.SourceFactsJSON, item.SourceFamily),
+		Title:         item.Subject,
+		Status:        item.Status,
+		Summary:       item.Summary,
+		CreatedAt:     item.CreatedAt.UTC().Format(time.RFC3339),
+		UpdatedAt:     item.UpdatedAt.UTC().Format(time.RFC3339),
 	}
 }
 
@@ -1543,14 +1545,64 @@ func rawIntakeProjectKey(item sqlite.IntakeItem) string {
 	}
 }
 
-func rawIntakeRequestedBy(sourceFactsJSON string) string {
+func rawIntakeRequestedBy(sourceFactsJSON string, sourceFamily string) string {
 	var facts struct {
 		RequestedBy string `json:"requested_by"`
+		Actor       string `json:"actor"`
 	}
 	if err := json.Unmarshal([]byte(sourceFactsJSON), &facts); err != nil {
 		return ""
 	}
-	return facts.RequestedBy
+	if strings.TrimSpace(facts.RequestedBy) != "" {
+		return facts.RequestedBy
+	}
+	if requestedBy := rawIntakeAdapterStringFact(sourceFactsJSON, sourceFamily, "requested_by"); requestedBy != "" {
+		return requestedBy
+	}
+	return facts.Actor
+}
+
+func rawIntakePayloadPolicy(sourceFactsJSON string, sourceFamily string) string {
+	var facts struct {
+		PayloadPolicy string `json:"payload_policy"`
+	}
+	if err := json.Unmarshal([]byte(sourceFactsJSON), &facts); err != nil {
+		return ""
+	}
+	if strings.TrimSpace(facts.PayloadPolicy) != "" {
+		return facts.PayloadPolicy
+	}
+	return rawIntakeAdapterStringFact(sourceFactsJSON, sourceFamily, "payload_policy")
+}
+
+func rawIntakeAdapterStringFact(sourceFactsJSON string, sourceFamily string, key string) string {
+	var facts struct {
+		AdapterFacts map[string]map[string]json.RawMessage `json:"adapter_facts"`
+	}
+	if err := json.Unmarshal([]byte(sourceFactsJSON), &facts); err != nil {
+		return ""
+	}
+	if value := rawStringFromAdapterFacts(facts.AdapterFacts[sourceFamily], key); value != "" {
+		return value
+	}
+	for _, adapterFacts := range facts.AdapterFacts {
+		if value := rawStringFromAdapterFacts(adapterFacts, key); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func rawStringFromAdapterFacts(facts map[string]json.RawMessage, key string) string {
+	raw, ok := facts[key]
+	if !ok {
+		return ""
+	}
+	var value string
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return ""
+	}
+	return value
 }
 
 func intakeLaneStatus(lane IntakeInboxLane) string {
