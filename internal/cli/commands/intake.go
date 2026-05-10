@@ -10,7 +10,7 @@ import (
 	"unicode"
 )
 
-const IntakeUsage = "usage: odin intake enqueue --source <source> --project <key> --title <title> --type <type> [--action-key <key>] [--dedup-key <key>] [--requested-by <actor>] [--payload-file <path|-] [--json] | odin intake raw create --text <text> [--json] | odin intake raw create --source <source> --title <title> --type <type> --dedup-key <key> [--project <key>] [--requested-by <actor>] [--payload-file <path|-] [--json] | odin intake raw list [--project <key>] [--status <status>] [--json] | odin intake raw show <id|key> [--json] | odin intake process --id <id|key> [--json] | odin intake review list [--json] | odin intake review show|accept|reject|clarify|archive <id|key> [--json] | odin intake approval list [--json] | odin intake approval show|approve|deny <id|key> [--json]"
+const IntakeUsage = "usage: odin intake enqueue --source <source> --project <key> --title <title> --type <type> [--action-key <key>] [--dedup-key <key>] [--requested-by <actor>] [--payload-file <path|-] [--json] | odin intake raw create --text <text> [--json] | odin intake raw create --source <source> --title <title> --type <type> [--dedup-key <key>] [--project <key>] [--requested-by <actor>] [--payload-file <path|-] [--json] | odin intake raw list [--project <key>] [--status <status>] [--json] | odin intake raw show <id|key> [--json] | odin intake process --id <id|key> [--json] | odin intake review list [--json] | odin intake review show|accept|reject|clarify|archive <id|key> [--json] | odin intake approval list [--json] | odin intake approval show|approve|deny <id|key> [--json]"
 
 type IntakeCommand struct {
 	Name           string

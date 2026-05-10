@@ -104,6 +104,64 @@ func TestSourceEnvelopeDedupeKeyUsesStableExternalIdentity(t *testing.T) {
 	}
 }
 
+func TestSourceEnvelopeDedupeKeyUsesSourceURIFallback(t *testing.T) {
+	base := SourceEnvelope{
+		SourceFamily: "cli",
+		EventKind:    "request",
+		Subject:      "Original subject",
+		Body:         "Original body",
+		Summary:      "Original summary",
+		Actor:        "operator",
+		SourceURI:    " Odin://Manual/Intake/Manual-1 ",
+	}
+	changedContent := SourceEnvelope{
+		SourceFamily: "CLI",
+		EventKind:    "Request",
+		Subject:      "Different subject",
+		Body:         "Different body",
+		Summary:      "Different summary",
+		Actor:        "operator",
+		SourceURI:    "odin://manual/intake/manual-1",
+	}
+	if got, want := base.DedupeKey(" Default "), changedContent.DedupeKey("default"); got != want {
+		t.Fatalf("DedupeKey() = %q, want normalized source_uri key %q", got, want)
+	}
+
+	changedURI := base
+	changedURI.SourceURI = "odin://manual/intake/manual-2"
+	if got, unchanged := changedURI.DedupeKey("default"), base.DedupeKey("default"); got == unchanged {
+		t.Fatalf("DedupeKey() = %q, want different key when source uri changes", got)
+	}
+}
+
+func TestSourceEnvelopeDedupeKeyUsesContentFallback(t *testing.T) {
+	base := SourceEnvelope{
+		SourceFamily: "cli",
+		EventKind:    "request",
+		Subject:      "  Build   Universal Intake Proposal ",
+		Body:         "Preserve raw input.",
+		Summary:      "Prepare a reviewable proposal.",
+		Actor:        "operator",
+	}
+	normalized := SourceEnvelope{
+		SourceFamily: " CLI ",
+		EventKind:    "Request",
+		Subject:      "build universal intake proposal",
+		Body:         " preserve   raw input. ",
+		Summary:      "prepare a reviewable proposal.",
+		Actor:        "operator",
+	}
+	if got, want := base.DedupeKey(" Default "), normalized.DedupeKey("default"); got != want {
+		t.Fatalf("DedupeKey() = %q, want normalized content key %q", got, want)
+	}
+
+	changedSubject := base
+	changedSubject.Subject = "Build universal intake contract"
+	if got, unchanged := changedSubject.DedupeKey("default"), base.DedupeKey("default"); got == unchanged {
+		t.Fatalf("DedupeKey() = %q, want different key when content changes", got)
+	}
+}
+
 func TestSourceEnvelopeRejectsMissingCoreFields(t *testing.T) {
 	envelope := SourceEnvelope{SourceFamily: "cli", EventKind: "request"}
 	if err := envelope.Validate(); err == nil {
