@@ -868,14 +868,15 @@ type reviewWorkItemView struct {
 }
 
 type intakeProcessingNotes struct {
-	ProcessingStarted bool                  `json:"processing_started"`
-	Classification    intakeClassification  `json:"classification"`
-	Dedupe            intakeDedupeReview    `json:"dedupe"`
-	Routing           intakeRoutingResult   `json:"routing"`
-	DraftArtifact     *intakeDraftArtifact  `json:"draft_artifact,omitempty"`
-	Goal              *intakeGoalConversion `json:"goal,omitempty"`
-	Clarification     *intakeClarification  `json:"clarification,omitempty"`
-	Review            *intakeReviewDecision `json:"review,omitempty"`
+	ProcessingStarted bool                           `json:"processing_started"`
+	Classification    intakeClassification           `json:"classification"`
+	Dedupe            intakeDedupeReview             `json:"dedupe"`
+	Routing           intakeRoutingResult            `json:"routing"`
+	DraftArtifact     *intakeDraftArtifact           `json:"draft_artifact,omitempty"`
+	Proposal          *coreintake.ReviewableProposal `json:"proposal,omitempty"`
+	Goal              *intakeGoalConversion          `json:"goal,omitempty"`
+	Clarification     *intakeClarification           `json:"clarification,omitempty"`
+	Review            *intakeReviewDecision          `json:"review,omitempty"`
 }
 
 type intakeClassification struct {
@@ -1755,6 +1756,7 @@ func buildIntakeProcessOutcome(ctx context.Context, store *sqlite.Store, item sq
 				"Which project or operator surface owns this intake?",
 			},
 		}
+		notes.Proposal = clarificationReviewableProposal(item, notes)
 		outcome := intakeProcessOutcome{
 			status:  "needs_clarification",
 			summary: "Raw intake needs operator clarification before drafting work",
@@ -1805,12 +1807,71 @@ func buildIntakeProcessOutcome(ctx context.Context, store *sqlite.Store, item sq
 		ExecutionIntent:       route.ExecutionIntent,
 		ExecutionIntentSource: route.ExecutionIntentSource,
 	}
+	notes.Proposal = draftReviewableProposal(item, notes, route)
 	outcome := intakeProcessOutcome{
 		status:  "review_required",
 		summary: route.DraftArtifactKind + " prepared for human review; no work item created",
 		notes:   notes,
 	}
 	return outcome, nil
+}
+
+func draftReviewableProposal(item sqlite.IntakeItem, notes intakeProcessingNotes, route intakeDerivedRoute) *coreintake.ReviewableProposal {
+	proposal := coreintake.ReviewableProposal{
+		SourceIntakeKey: rawIntakeKey(item.ID),
+		Title:           item.Subject,
+		Category:        intakeProposalCategory(notes.Classification),
+		Route:           route.RoutingOutcome,
+		Summary:         route.DraftArtifactKind + " prepared for human review; no work item created",
+		DraftArtifact: coreintake.DraftArtifact{
+			Kind:                  route.DraftArtifactKind,
+			Title:                 item.Subject,
+			ReviewState:           coreintake.StateReviewRequired,
+			ExecutionIntent:       route.ExecutionIntent,
+			ExecutionIntentSource: route.ExecutionIntentSource,
+		},
+		RiskLevel:             coreintake.RiskLow,
+		ApprovalPosture:       coreintake.ApprovalNeedsReview,
+		DedupeResult:          notes.Dedupe.Result,
+		RecommendedNextAction: "review",
+		OperatorNextAction:    "odin intake review show " + rawIntakeKey(item.ID),
+	}
+	if route.ExecutionIntent == "governance" || route.ExecutionIntent == "destructive" {
+		proposal.RiskLevel = coreintake.RiskHigh
+		proposal.ApprovalPosture = coreintake.ApprovalRequired
+	}
+	return &proposal
+}
+
+func clarificationReviewableProposal(item sqlite.IntakeItem, notes intakeProcessingNotes) *coreintake.ReviewableProposal {
+	proposal := coreintake.ReviewableProposal{
+		SourceIntakeKey:       rawIntakeKey(item.ID),
+		Title:                 item.Subject,
+		Category:              intakeProposalCategory(notes.Classification),
+		Route:                 notes.Routing.Outcome,
+		Summary:               "Raw intake needs operator clarification before drafting work",
+		ClarificationPrompts:  append([]string(nil), notes.Clarification.Prompts...),
+		RiskLevel:             coreintake.RiskMedium,
+		ApprovalPosture:       coreintake.ApprovalBlocked,
+		DedupeResult:          notes.Dedupe.Result,
+		RecommendedNextAction: "clarify",
+		OperatorNextAction:    "odin intake review clarify " + rawIntakeKey(item.ID),
+	}
+	return &proposal
+}
+
+func intakeProposalCategory(classification intakeClassification) string {
+	encoded, err := json.Marshal(classification)
+	if err != nil {
+		return ""
+	}
+	var view struct {
+		Category string `json:"category"`
+	}
+	if err := json.Unmarshal(encoded, &view); err != nil {
+		return ""
+	}
+	return view.Category
 }
 
 func isGoalLikeIntake(item sqlite.IntakeItem) bool {
