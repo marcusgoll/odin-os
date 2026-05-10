@@ -114,6 +114,14 @@ Phase 03 replay support must be able to reconstruct:
 
 This replay is a correctness requirement for lifecycle auditing and restart safety.
 
+## Provenance trail expectation
+
+The SQLite event stream is also the canonical source for operator-facing provenance trails. `odin logs` remains the raw event listing surface. `odin logs show <event-id>` and `odin logs trail --task <id|key>`, `--run <id>`, or `--approval <id>` are read-only projections over the same events table.
+
+Trail rendering may enrich events with existing project and work item identifiers for readability, but it must not create a second event bus, audit table, dashboard-specific evidence store, or synthetic lifecycle authority. JSON trail output may include raw event payloads so operators can inspect the durable evidence behind the human-readable summary.
+
+Read-only provenance commands and `/overview` Activity Log rendering must not append runtime events.
+
 ## Transition expectation
 
 Phase 13 extends the runtime event stream so project onboarding and cutover remain auditable:

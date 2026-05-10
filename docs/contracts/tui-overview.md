@@ -177,6 +177,7 @@ This is the first-class runtime-understanding lane.
 
 It contains:
 
+- Activity Log
 - logs
 - health
 - metrics
@@ -188,6 +189,7 @@ It contains:
 Rules:
 
 - `Run Attempts` remain nested under `Work Item` detail in the default business view
+- `Activity Log` is a read-only recent-event projection from SQLite runtime events and must reuse the same provenance summary contract as `odin logs trail`
 - `Run Attempts` may also be browsed here for cross-scope debugging and operator understanding
 - observability consumes runtime truth and must not become a second authority
 

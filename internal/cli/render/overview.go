@@ -305,14 +305,32 @@ func RenderOverview(view overview.View) string {
 	lines = append(lines, "")
 	lines = append(lines, "Observability")
 	lines = append(lines, fmt.Sprintf(
-		"  wiring=%s active_runs=%d blocked_work=%d incidents=%d recoveries=%d freshness=%d",
+		"  wiring=%s activity_log=%d active_runs=%d blocked_work=%d incidents=%d recoveries=%d freshness=%d",
 		valueOrNone(string(view.Observability.Wiring)),
+		len(view.Observability.ActivityLog),
 		len(view.Observability.ActiveRuns),
 		len(view.Observability.BlockedWork),
 		len(view.Observability.Incidents),
 		len(view.Observability.Recoveries),
 		len(view.Observability.Freshness),
 	))
+	lines = append(lines, "  Activity Log")
+	if len(view.Observability.ActivityLog) == 0 {
+		lines = append(lines, "    none")
+	}
+	for _, event := range view.Observability.ActivityLog {
+		lines = append(lines, fmt.Sprintf(
+			"    event=%d type=%s scope=%s project=%s work_item=%s run=%s approval=%s summary=%s",
+			event.EventID,
+			valueOrNone(event.EventType),
+			valueOrNone(event.Scope),
+			valueOrNone(event.ProjectKey),
+			valueOrNone(event.WorkItemKey),
+			nullableInt64(event.RunID),
+			nullableInt64(event.ApprovalID),
+			valueOrNone(event.Summary),
+		))
+	}
 	lines = append(lines, "  Run Attempts")
 	if len(view.Observability.ActiveRuns) == 0 {
 		lines = append(lines, "    none")
