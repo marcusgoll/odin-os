@@ -501,6 +501,87 @@ func TestEvaluateEventsMaterializesGovernanceTriggerWithEnvelope(t *testing.T) {
 	}
 }
 
+func TestPreviewTriggerEventReportsCanonicalMatchWithoutMaterializing(t *testing.T) {
+	ctx := context.Background()
+	store := openTriggerStore(t)
+	defer store.Close()
+
+	service := Service{
+		Store:    store,
+		Registry: writeTriggerRegistry(t),
+	}
+	now := time.Date(2026, 5, 10, 12, 0, 0, 0, time.UTC)
+	store.Now = func() time.Time {
+		return now
+	}
+	trigger, err := service.Upsert(ctx, UpsertParams{
+		Key:             "gh-opened-proof",
+		InitiativeKey:   "odin-core",
+		Kind:            "event",
+		Status:          "enabled",
+		EventType:       CanonicalGitHubIssueEventType,
+		MatchProvider:   "github",
+		MatchRepo:       "marcusgoll/odin-os",
+		RuleSummary:     "github opened proof",
+		WorkItemTitle:   "Review opened issue",
+		ExecutionIntent: "governance",
+	})
+	if err != nil {
+		t.Fatalf("Upsert(event trigger) error = %v", err)
+	}
+
+	store.Now = func() time.Time {
+		return now.Add(time.Minute)
+	}
+	if _, err := service.IngestGitHubIssue(ctx, GitHubIssueIngestParams{
+		ProjectKey: "odin-core",
+		Repo:       "marcusgoll/odin-os",
+		Number:     123,
+		Action:     "opened",
+		Title:      "Issue opened",
+		Labels:     "bug",
+	}); err != nil {
+		t.Fatalf("IngestGitHubIssue() error = %v", err)
+	}
+
+	beforeTasks := countTasks(t, ctx, store)
+	result, err := service.PreviewTrigger(ctx, PreviewTriggerParams{
+		WorkspaceID: "default",
+		Key:         trigger.Key,
+		Now:         now.Add(2 * time.Minute),
+		Source:      "events",
+	})
+	if err != nil {
+		t.Fatalf("PreviewTrigger(event) error = %v", err)
+	}
+	if result.Evaluated != 1 || result.WouldRun != 1 {
+		t.Fatalf("PreviewTrigger(event) = %+v, want one would-run decision", result)
+	}
+	if len(result.Decisions) != 1 {
+		t.Fatalf("PreviewTrigger(event).Decisions = %d, want 1", len(result.Decisions))
+	}
+	decision := result.Decisions[0]
+	if decision.EventType != CanonicalGitHubIssueEventType || decision.CandidateEvents != 1 || len(decision.MatchedEvents) != 1 {
+		t.Fatalf("event decision = %+v, want one canonical event match", decision)
+	}
+	if !decision.ApprovalRequired {
+		t.Fatalf("decision approval required = false, want true for governance event trigger")
+	}
+	if tasks := countTasks(t, ctx, store); tasks != beforeTasks {
+		t.Fatalf("task count after preview = %d, want unchanged %d", tasks, beforeTasks)
+	}
+	if materializations := countAutomationTriggerMaterializations(t, ctx, store); materializations != 0 {
+		t.Fatalf("materialization count after preview = %d, want 0", materializations)
+	}
+	afterTrigger, err := store.GetAutomationTriggerByWorkspaceKey(ctx, "default", trigger.Key)
+	if err != nil {
+		t.Fatalf("GetAutomationTriggerByWorkspaceKey() error = %v", err)
+	}
+	if afterTrigger.LastWorkItemID != nil || afterTrigger.LastMaterializationKey != "" {
+		t.Fatalf("trigger after preview = %+v, want no materialized work", afterTrigger)
+	}
+}
+
 func TestEvaluateDueUsesWorkspaceProfileQuietHoursByDefault(t *testing.T) {
 	ctx := context.Background()
 	store := openTriggerStore(t)
@@ -758,6 +839,16 @@ func countTasks(t *testing.T, ctx context.Context, store *sqlite.Store) int {
 	var count int
 	if err := row.Scan(&count); err != nil {
 		t.Fatalf("count tasks: %v", err)
+	}
+	return count
+}
+
+func countAutomationTriggerMaterializations(t *testing.T, ctx context.Context, store *sqlite.Store) int {
+	t.Helper()
+	row := store.DB().QueryRowContext(ctx, `SELECT COUNT(1) FROM automation_trigger_materializations`)
+	var count int
+	if err := row.Scan(&count); err != nil {
+		t.Fatalf("count automation trigger materializations: %v", err)
 	}
 	return count
 }
