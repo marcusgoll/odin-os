@@ -45,20 +45,20 @@ const (
 )
 
 type ReviewableProposal struct {
-	SourceIntakeKey       string        `json:"source_intake_key"`
-	Title                 string        `json:"title"`
-	Category              string        `json:"category"`
-	Route                 string        `json:"route"`
-	Summary               string        `json:"summary"`
-	DraftArtifact         DraftArtifact `json:"draft_artifact"`
-	AcceptanceCriteria    []string      `json:"acceptance_criteria,omitempty"`
-	ClarificationPrompts  []string      `json:"clarification_prompts,omitempty"`
-	RiskLevel             string        `json:"risk_level"`
-	ApprovalPosture       string        `json:"approval_posture"`
-	MissingConstraints    []string      `json:"missing_constraints,omitempty"`
-	DedupeResult          string        `json:"dedupe_result"`
-	RecommendedNextAction string        `json:"recommended_next_action"`
-	OperatorNextAction    string        `json:"operator_next_action"`
+	SourceIntakeKey       string         `json:"source_intake_key"`
+	Title                 string         `json:"title"`
+	Category              string         `json:"category"`
+	Route                 string         `json:"route"`
+	Summary               string         `json:"summary"`
+	DraftArtifact         *DraftArtifact `json:"draft_artifact,omitempty"`
+	AcceptanceCriteria    []string       `json:"acceptance_criteria,omitempty"`
+	ClarificationPrompts  []string       `json:"clarification_prompts,omitempty"`
+	RiskLevel             string         `json:"risk_level"`
+	ApprovalPosture       string         `json:"approval_posture"`
+	MissingConstraints    []string       `json:"missing_constraints,omitempty"`
+	DedupeResult          string         `json:"dedupe_result"`
+	RecommendedNextAction string         `json:"recommended_next_action"`
+	OperatorNextAction    string         `json:"operator_next_action"`
 }
 
 type DraftArtifact struct {
@@ -76,15 +76,27 @@ func (proposal ReviewableProposal) Validate() error {
 	if strings.TrimSpace(proposal.Title) == "" {
 		return fmt.Errorf("title is required")
 	}
+	if strings.TrimSpace(proposal.Category) == "" {
+		return fmt.Errorf("category is required")
+	}
 	if strings.TrimSpace(proposal.Route) == "" {
 		return fmt.Errorf("route is required")
 	}
+	if strings.TrimSpace(proposal.Summary) == "" {
+		return fmt.Errorf("summary is required")
+	}
+	if strings.TrimSpace(proposal.RiskLevel) == "" {
+		return fmt.Errorf("risk_level is required")
+	}
 	isBlockedClarification := proposal.ApprovalPosture == ApprovalBlocked && len(proposal.ClarificationPrompts) > 0
-	if strings.TrimSpace(proposal.DraftArtifact.Kind) == "" && !isBlockedClarification {
+	if (proposal.DraftArtifact == nil || strings.TrimSpace(proposal.DraftArtifact.Kind) == "") && !isBlockedClarification {
 		return fmt.Errorf("draft_artifact.kind is required")
 	}
 	if strings.TrimSpace(proposal.ApprovalPosture) == "" {
 		return fmt.Errorf("approval_posture is required")
+	}
+	if strings.TrimSpace(proposal.RecommendedNextAction) == "" {
+		return fmt.Errorf("recommended_next_action is required")
 	}
 	if strings.TrimSpace(proposal.OperatorNextAction) == "" {
 		return fmt.Errorf("operator_next_action is required")

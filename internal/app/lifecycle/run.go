@@ -1824,7 +1824,7 @@ func draftReviewableProposal(item sqlite.IntakeItem, notes intakeProcessingNotes
 		Category:        intakeProposalCategory(item, notes.Classification, route),
 		Route:           route.RoutingOutcome,
 		Summary:         route.DraftArtifactKind + " prepared for human review; no work item created",
-		DraftArtifact: coreintake.DraftArtifact{
+		DraftArtifact: &coreintake.DraftArtifact{
 			Kind:                  route.DraftArtifactKind,
 			Title:                 item.Subject,
 			ReviewState:           coreintake.StateReviewRequired,
