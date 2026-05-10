@@ -96,3 +96,63 @@ func TestCreateIntakeItemPreservesDuplicateRawArrivalsBeforeWork(t *testing.T) {
 		t.Fatalf("intake created events = %d, want 2", intakeCreated)
 	}
 }
+
+func TestProcessIntakeItemPersistsCanonicalDuplicateLink(t *testing.T) {
+	ctx := context.Background()
+	store := openMigratedTaskIntakeStore(t, "intake-duplicate-link.db")
+	defer store.Close()
+
+	first, err := store.CreateIntakeItem(ctx, CreateIntakeItemParams{
+		WorkspaceID:         "default",
+		SourceFamily:        "n8n",
+		ExternalObjectID:    "evt-1",
+		EventKind:           "ci_failure",
+		Subject:             "pbs build failed",
+		DedupeKey:           "default:n8n:ci-failure:pbs",
+		DedupeRecipeVersion: "intake-v1",
+		SourceFactsJSON:     `{"source_family":"n8n","external_object_id":"evt-1","event_kind":"ci_failure","project":"pbs"}`,
+		Status:              "review_required",
+		Scope:               "project",
+		ScopeKey:            "pbs",
+		Summary:             "PBS CI failed",
+	})
+	if err != nil {
+		t.Fatalf("CreateIntakeItem(first) error = %v", err)
+	}
+
+	second, err := store.CreateIntakeItem(ctx, CreateIntakeItemParams{
+		WorkspaceID:         "default",
+		SourceFamily:        "n8n",
+		ExternalObjectID:    "evt-2",
+		EventKind:           "ci_failure",
+		Subject:             "pbs build failed",
+		DedupeKey:           "default:n8n:ci-failure:pbs",
+		DedupeRecipeVersion: "intake-v1",
+		SourceFactsJSON:     `{"source_family":"n8n","external_object_id":"evt-2","event_kind":"ci_failure","project":"pbs"}`,
+		Status:              "received",
+		Scope:               "project",
+		ScopeKey:            "pbs",
+		Summary:             "PBS CI failed again",
+	})
+	if err != nil {
+		t.Fatalf("CreateIntakeItem(second) error = %v", err)
+	}
+
+	processed, err := store.ProcessIntakeItem(ctx, ProcessIntakeItemParams{
+		ID:                    second.ID,
+		Status:                "duplicate_linked_or_suppressed",
+		Summary:               "Duplicate raw intake linked to canonical",
+		CanonicalIntakeItemID: &first.ID,
+		SuppressionReason:     "duplicate_dedupe_key",
+	})
+	if err != nil {
+		t.Fatalf("ProcessIntakeItem(second) error = %v", err)
+	}
+
+	if processed.CanonicalIntakeItemID == nil || *processed.CanonicalIntakeItemID != first.ID {
+		t.Fatalf("CanonicalIntakeItemID = %+v, want %d", processed.CanonicalIntakeItemID, first.ID)
+	}
+	if processed.SuppressionReason == "" {
+		t.Fatal("SuppressionReason is empty, want duplicate reason")
+	}
+}

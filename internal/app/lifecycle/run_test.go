@@ -881,6 +881,41 @@ func TestRunIntakeProcessDuplicateGoalLikeRawItemDoesNotCreateSecondGoal(t *test
 	}
 }
 
+func TestRunIntakeProcessDoesNotLinkToArchivedCanonicalDuplicate(t *testing.T) {
+	t.Parallel()
+
+	root := testRepoRoot(t)
+	createRaw := func() {
+		t.Helper()
+		if err := Run(context.Background(), root, []string{
+			"intake", "raw", "create",
+			"--text", "Prepare weekly intake summary for operator review",
+			"--json",
+		}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+			t.Fatalf("Run(intake raw create --text) error = %v", err)
+		}
+	}
+	createRaw()
+	if err := Run(context.Background(), root, []string{"intake", "process", "--id", "intake-1", "--json"}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+		t.Fatalf("Run(intake process intake-1) error = %v", err)
+	}
+	if err := Run(context.Background(), root, []string{"intake", "review", "archive", "intake-1", "--json"}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+		t.Fatalf("Run(intake review archive intake-1) error = %v", err)
+	}
+
+	createRaw()
+	var processOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"intake", "process", "--id", "intake-2", "--json"}, strings.NewReader(""), &processOutput); err != nil {
+		t.Fatalf("Run(intake process intake-2) error = %v", err)
+	}
+	if output := processOutput.String(); strings.Contains(output, `"canonical_intake_key": "intake-1"`) || strings.Contains(output, `"status": "duplicate_linked_or_suppressed"`) {
+		t.Fatalf("process output = %s, want fresh proposal after archived canonical", output)
+	}
+	if output := processOutput.String(); !strings.Contains(output, `"status": "review_required"`) {
+		t.Fatalf("process output = %s, want review_required", output)
+	}
+}
+
 func TestRunIntakeReviewPromotesOnlyOnOperatorAccept(t *testing.T) {
 	t.Parallel()
 

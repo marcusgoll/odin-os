@@ -1950,6 +1950,15 @@ func classifyIntakeItem(item sqlite.IntakeItem) intakeClassification {
 	return intakeClassification{Result: "actionable_request", Reason: "intake has enough subject detail for a draft review artifact"}
 }
 
+func isActiveCanonicalIntakeStatus(status string) bool {
+	switch coreintake.CanonicalState(status) {
+	case coreintake.StateReceived, coreintake.StateReviewRequired, coreintake.StateNeedsClarification:
+		return true
+	default:
+		return false
+	}
+}
+
 func findCanonicalDuplicate(ctx context.Context, store *sqlite.Store, item sqlite.IntakeItem) (*int64, error) {
 	if strings.TrimSpace(item.DedupeKey) == "" {
 		return nil, nil
@@ -1960,6 +1969,9 @@ func findCanonicalDuplicate(ctx context.Context, store *sqlite.Store, item sqlit
 	}
 	for _, candidate := range items {
 		if candidate.ID >= item.ID {
+			continue
+		}
+		if !isActiveCanonicalIntakeStatus(candidate.Status) {
 			continue
 		}
 		if candidate.DedupeKey == item.DedupeKey {
