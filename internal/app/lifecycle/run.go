@@ -43,6 +43,7 @@ import (
 	"odin-os/internal/e2e"
 	"odin-os/internal/executors/contract"
 	executorrouter "odin-os/internal/executors/router"
+	"odin-os/internal/registry"
 	approvalsvc "odin-os/internal/runtime/approvals"
 	"odin-os/internal/runtime/checkpoints"
 	conversationsvc "odin-os/internal/runtime/conversation"
@@ -62,6 +63,7 @@ import (
 	"odin-os/internal/store/sqlite"
 	"odin-os/internal/telemetry/logs"
 	metricsvc "odin-os/internal/telemetry/metrics"
+	"odin-os/internal/tools/catalog"
 	gitadapter "odin-os/internal/vcs/git"
 	"odin-os/internal/vcs/leases"
 	"odin-os/internal/vcs/worktrees"
@@ -5576,7 +5578,28 @@ func runServe(ctx context.Context, app bootstrap.App, cfg appconfig.Config, stdo
 }
 
 func newServeCapabilityGateway(app bootstrap.App) *capabilities.Gateway {
-	return nil
+	definitions := catalog.BuiltinDefinitions()
+	snapshot := capabilities.FromRegistrySnapshot("serve-capabilities", app.RegistrySnapshot)
+	snapshot = capabilities.WithBuiltinToolDescriptors(snapshot, definitions)
+	service, err := capabilities.NewService(snapshot)
+	if err != nil {
+		return nil
+	}
+
+	var runLookup capabilities.RunLookup
+	if app.Store != nil {
+		runLookup = runs.Service{
+			DB:    app.Store.DB(),
+			Store: app.Store,
+		}
+	}
+
+	return capabilities.NewGateway(service, func(ctx context.Context, request capabilities.InvokeRequest, descriptor capabilities.Descriptor) (capabilities.InvokeResponse, error) {
+		if descriptor.Kind == registry.KindTool {
+			return capabilities.InvokeBuiltinToolCapability(ctx, definitions, request, descriptor)
+		}
+		return servedCommandService{app: app}.Execute(ctx, request)
+	}, runLookup)
 }
 
 func recordServeStopped(ctx context.Context, service runtimestate.Service, bootID string, reason string, cause error) error {

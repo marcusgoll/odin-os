@@ -15,6 +15,7 @@ const (
 	KindSkill    Kind = "skill"
 	KindWorkflow Kind = "workflow"
 	KindCommand  Kind = "command"
+	KindTool     Kind = "tool"
 )
 
 const (
@@ -200,7 +201,7 @@ func (kind Kind) Valid() bool {
 
 func (kind Kind) ValidDependencyKind() bool {
 	switch kind {
-	case KindAgent, KindSkill, KindCommand, Kind("tool"):
+	case KindAgent, KindSkill, KindCommand, KindTool:
 		return true
 	default:
 		return false
@@ -209,7 +210,7 @@ func (kind Kind) ValidDependencyKind() bool {
 
 func (kind Kind) IsInvokable() bool {
 	switch kind {
-	case KindSkill, KindWorkflow, KindCommand:
+	case KindSkill, KindWorkflow, KindCommand, KindTool:
 		return true
 	default:
 		return false
