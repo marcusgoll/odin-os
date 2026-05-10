@@ -16,6 +16,90 @@ scopes:
   - odin-core
 tools:
   - filesystem
+delegation:
+  enabled: true
+  operator_surface: companion_delegate
+  inputs:
+    required:
+      - portal_track
+      - surface
+    optional:
+      - goal
+      - intent
+  convergence_mode: merge
+  children:
+    - delegation_key: ia-audit
+      role: ia_audit
+      wave: 1
+      action_class: portal_delivery
+      action_key_template: "{{portal_track}}:{{surface}}"
+      mutation_mode_source: intent
+      artifact_target: run_detail
+      executor: codex_headless
+      requested_tools:
+        - repo_read
+      requested_memory_scopes:
+        - workspace
+        - initiative
+        - companion
+    - delegation_key: design-direction
+      role: design_direction
+      wave: 1
+      action_class: portal_delivery
+      action_key_template: "{{portal_track}}:{{surface}}"
+      mutation_mode_source: intent
+      artifact_target: run_detail
+      executor: codex_headless
+      skill_key: pixel-perfect-ui-ux-designer
+      requested_tools:
+        - repo_read
+      requested_memory_scopes:
+        - workspace
+        - initiative
+        - companion
+    - delegation_key: implementation-handoff
+      role: implementation_handoff
+      wave: 2
+      action_class: portal_delivery
+      action_key_template: "{{portal_track}}:{{surface}}"
+      mutation_mode_source: intent
+      artifact_target: run_detail
+      executor: codex_headless
+      requested_tools:
+        - repo_read
+      requested_memory_scopes:
+        - workspace
+        - initiative
+        - companion
+    - delegation_key: visual-verification
+      role: visual_verification
+      wave: 2
+      action_class: portal_delivery
+      action_key_template: "{{portal_track}}:{{surface}}"
+      mutation_mode_source: intent
+      artifact_target: run_detail
+      executor: codex_headless
+      skill_key: pixel-perfect-ui-ux-designer
+      requested_tools:
+        - repo_read
+      requested_memory_scopes:
+        - workspace
+        - initiative
+        - companion
+    - delegation_key: learning-capture
+      role: learning_capture
+      wave: 3
+      action_class: portal_delivery
+      action_key_template: "{{portal_track}}:{{surface}}"
+      mutation_mode_source: intent
+      artifact_target: run_detail
+      executor: codex_headless
+      requested_tools:
+        - repo_read
+      requested_memory_scopes:
+        - workspace
+        - initiative
+        - companion
 ---
 
 # Portal Delivery Agent

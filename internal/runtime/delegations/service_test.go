@@ -95,6 +95,139 @@ func TestPortalDeliveryAgentCreatesParentAndChildWork(t *testing.T) {
 	}
 }
 
+func TestRegistryDelegatableAgentProfileCreatesChildWork(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	env := openDelegationEnv(t)
+	env.Delegations.RegistrySnapshot = registry.Snapshot{
+		Items: []registry.Item{testDelegatableAgentProfile()},
+		ByKey: map[string]registry.Item{
+			"test-delegatable-agent": testDelegatableAgentProfile(),
+		},
+		ByKind: map[registry.Kind][]registry.Item{
+			registry.KindAgent: {testDelegatableAgentProfile()},
+		},
+	}
+
+	parentTask, parentRun, result, err := env.Delegations.RunAgent(ctx, RunInput{
+		ResolvedScope: scope.Resolution{Kind: scope.ScopeProject, ProjectKey: "cfipros"},
+		AgentKey:      "test-delegatable-agent",
+		RequestedBy:   "operator",
+		Inputs: map[string]string{
+			"portal_track": "student",
+			"surface":      "dashboard",
+			"goal":         "prove registry-backed delegation",
+		},
+	})
+	if err != nil {
+		t.Fatalf("RunAgent(registry profile) error = %v", err)
+	}
+	if parentRun == nil {
+		t.Fatal("parentRun = nil, want parent run")
+	}
+	if len(result.ChildDelegations) != 2 {
+		t.Fatalf("child delegations = %d, want 2", len(result.ChildDelegations))
+	}
+	if parentTask.Key == "" || !strings.Contains(parentTask.Key, "test-delegatable-agent") {
+		t.Fatalf("parent task key = %q, want test-delegatable-agent in key", parentTask.Key)
+	}
+
+	first := result.ChildDelegations[0]
+	if first.DelegationKey != "research" ||
+		first.Role != "research" ||
+		first.ActionClass != "registry_profile" ||
+		first.ActionKey != "student:dashboard" ||
+		first.MutationMode != "read_only" ||
+		first.ConvergenceMode != "merge" ||
+		first.ArtifactTarget != "report" ||
+		first.Executor != "codex_headless" {
+		t.Fatalf("first delegation = %+v, want profile-derived research child", first)
+	}
+	var details map[string]string
+	if err := json.Unmarshal([]byte(first.DetailsJSON), &details); err != nil {
+		t.Fatalf("json.Unmarshal(details) error = %v", err)
+	}
+	for key, want := range map[string]string{
+		"agent_key":               "test-delegatable-agent",
+		"portal_track":            "student",
+		"surface":                 "dashboard",
+		"goal":                    "prove registry-backed delegation",
+		"role":                    "research",
+		"execution_intent":        "read_only",
+		"execution_intent_source": "companion_delegate",
+	} {
+		if got := details[key]; got != want {
+			t.Fatalf("details[%q] = %q, want %q", key, got, want)
+		}
+	}
+
+	second := result.ChildDelegations[1]
+	if second.DelegationKey != "review" || second.Role != "reviewer" || second.ActionKey != "review:student:dashboard" {
+		t.Fatalf("second delegation = %+v, want profile-derived reviewer child", second)
+	}
+}
+
+func TestRegistryAgentWithoutDelegationProfileIsRejectedBeforePersistence(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	env := openDelegationEnv(t)
+	env.Delegations.RegistrySnapshot = registry.Snapshot{
+		Items: []registry.Item{{
+			Kind:   registry.KindAgent,
+			Key:    "advisory-agent",
+			Title:  "Advisory Agent",
+			Status: "active",
+		}},
+		ByKey: map[string]registry.Item{
+			"advisory-agent": {
+				Kind:   registry.KindAgent,
+				Key:    "advisory-agent",
+				Title:  "Advisory Agent",
+				Status: "active",
+			},
+		},
+		ByKind: map[registry.Kind][]registry.Item{
+			registry.KindAgent: {{
+				Kind:   registry.KindAgent,
+				Key:    "advisory-agent",
+				Title:  "Advisory Agent",
+				Status: "active",
+			}},
+		},
+	}
+
+	_, _, _, err := env.Delegations.RunAgent(ctx, RunInput{
+		ResolvedScope: scope.Resolution{Kind: scope.ScopeProject, ProjectKey: "cfipros"},
+		AgentKey:      "advisory-agent",
+		RequestedBy:   "operator",
+		Inputs: map[string]string{
+			"portal_track": "student",
+			"surface":      "dashboard",
+			"goal":         "should fail closed",
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "not runtime-delegatable") {
+		t.Fatalf("RunAgent(advisory agent) error = %v, want not runtime-delegatable", err)
+	}
+
+	var persistedTasks int
+	if err := env.Store.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM tasks WHERE key LIKE '%advisory-agent%'`).Scan(&persistedTasks); err != nil {
+		t.Fatalf("count advisory tasks error = %v", err)
+	}
+	if persistedTasks != 0 {
+		t.Fatalf("persisted advisory tasks = %d, want 0 after unsupported agent rejection", persistedTasks)
+	}
+	delegations, err := env.Store.ListDelegations(ctx, sqlite.ListDelegationsParams{})
+	if err != nil {
+		t.Fatalf("ListDelegations() error = %v", err)
+	}
+	if len(delegations) != 0 {
+		t.Fatalf("delegations len = %d, want 0 after unsupported agent rejection", len(delegations))
+	}
+}
+
 func TestChildDelegationRecordsSkillTelemetryAndMemory(t *testing.T) {
 	t.Parallel()
 
@@ -693,6 +826,47 @@ func delegationTestRegistrySnapshot() registry.Snapshot {
 		},
 		ByKind: map[registry.Kind][]registry.Item{
 			registry.KindSkill: {skill},
+		},
+	}
+}
+
+func testDelegatableAgentProfile() registry.Item {
+	return registry.Item{
+		Kind:    registry.KindAgent,
+		Key:     "test-delegatable-agent",
+		Title:   "Test Delegatable Agent",
+		Summary: "Exercises registry-backed delegation profile compilation.",
+		Status:  "active",
+		Delegation: registry.DelegationProfile{
+			Enabled:         true,
+			OperatorSurface: "companion_delegate",
+			Inputs: registry.DelegationInputs{
+				Required: []string{"portal_track", "surface"},
+				Optional: []string{"goal", "intent"},
+			},
+			ConvergenceMode: "merge",
+			Children: []registry.DelegationChildProfile{
+				{
+					DelegationKey:      "research",
+					Role:               "research",
+					Wave:               1,
+					ActionClass:        "registry_profile",
+					ActionKeyTemplate:  "{{portal_track}}:{{surface}}",
+					MutationModeSource: "intent",
+					ArtifactTarget:     "report",
+					Executor:           "codex_headless",
+				},
+				{
+					DelegationKey:      "review",
+					Role:               "reviewer",
+					Wave:               2,
+					ActionClass:        "registry_profile",
+					ActionKeyTemplate:  "review:{{portal_track}}:{{surface}}",
+					MutationModeSource: "intent",
+					ArtifactTarget:     "report",
+					Executor:           "codex_headless",
+				},
+			},
 		},
 	}
 }

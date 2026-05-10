@@ -55,6 +55,7 @@ Do not create repo-local Codex `SKILL.md` files until Odin has a documented brid
 
 - A skill is procedure.
 - An agent is a role/persona.
+- A delegatable agent is the stricter subset of registry agents with an enabled `delegation` profile that compiles into Odin-owned child work records.
 - A worker is runtime implementation.
 - A prompt is text loaded by a future renderer.
 - An executor is the tool/model lane used by a run.
@@ -82,3 +83,5 @@ Promote a draft or duplicate only when:
 4. It does not create a second runtime authority.
 5. It preserves human approval boundaries.
 6. It has tests or real `odin` proof when runtime behavior changes.
+
+Runtime delegation requires the stricter delegatable-agent profile contract. Active registry status alone does not mean `odin companion delegate` may launch the agent.

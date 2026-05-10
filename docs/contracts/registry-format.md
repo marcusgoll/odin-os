@@ -47,6 +47,7 @@ Common optional legacy fields are:
 - `status`
 - `tags`
 - `owners`
+- `delegation` for agents that are allowed to launch bounded child work through an Odin operator surface
 
 Kind-specific legacy requirements:
 
@@ -56,6 +57,32 @@ Kind-specific legacy requirements:
 - `command`: `command`, `scopes`
 
 Legacy command manifests may also declare `aliases`.
+
+### Delegatable agent profile
+
+Most `agent` manifests are descriptive role definitions. An agent is runtime-delegatable only when it declares a valid optional `delegation` profile with `enabled: true`.
+
+The v1 profile fields are:
+
+- `delegation.enabled`
+- `delegation.operator_surface`, initially `companion_delegate`
+- `delegation.inputs.required`
+- `delegation.inputs.optional`
+- `delegation.convergence_mode`
+- `delegation.children[].delegation_key`
+- `delegation.children[].role`
+- `delegation.children[].wave`
+- `delegation.children[].action_class`
+- `delegation.children[].action_key_template`
+- `delegation.children[].mutation_mode_source`
+- `delegation.children[].convergence_mode`
+- `delegation.children[].artifact_target`
+- `delegation.children[].executor`
+- `delegation.children[].skill_key`
+- `delegation.children[].requested_tools`
+- `delegation.children[].requested_memory_scopes`
+
+Delegatable profiles compile into normal Odin delegation records. They do not create a second registry, worker runtime, policy engine, or provider-specific swarm path.
 
 ## Required Markdown sections
 
@@ -126,6 +153,7 @@ The registry compiler must reject a file clearly when:
 - path kind and frontmatter `kind` differ
 - a required normalized field is missing from an `odin/v1` manifest
 - a required legacy field is missing from a legacy manifest
+- an enabled agent `delegation` profile is missing required input, child, operator-surface, convergence, action, artifact, or executor fields
 - a skill `handler_ref` leaves the repo or points outside `scripts/skills/`
 - a required Markdown section is missing or empty
 - multiple files declare the same `key`
