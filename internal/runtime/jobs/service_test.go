@@ -2372,6 +2372,40 @@ func TestExecuteNextQueuedTreatsHighRiskReadOnlyTaskAsApprovalRequired(t *testin
 	}
 }
 
+func TestClassifyTaskExecutionIntentCoversHighRiskRealWorldMutationCategories(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name            string
+		title           string
+		wantValue       string
+		wantActionClass projects.ActionClass
+	}{
+		{name: "send message", title: "Send message to customer", wantValue: "governance", wantActionClass: projects.ActionClassGovernanceMutation},
+		{name: "calendar event with others", title: "Change calendar event with client", wantValue: "governance", wantActionClass: projects.ActionClassGovernanceMutation},
+		{name: "purchase", title: "Make purchase of subscription", wantValue: "governance", wantActionClass: projects.ActionClassGovernanceMutation},
+		{name: "delete data", title: "Delete data from customer records", wantValue: "destructive", wantActionClass: projects.ActionClassDestructiveMutation},
+		{name: "deploy code", title: "Deploy code to production", wantValue: "governance", wantActionClass: projects.ActionClassGovernanceMutation},
+		{name: "production system", title: "Modify production system config", wantValue: "governance", wantActionClass: projects.ActionClassGovernanceMutation},
+		{name: "permissions", title: "Change permissions for repository", wantValue: "governance", wantActionClass: projects.ActionClassGovernanceMutation},
+		{name: "public content", title: "Publish public launch post", wantValue: "governance", wantActionClass: projects.ActionClassGovernanceMutation},
+		{name: "financial records", title: "Update financial record", wantValue: "governance", wantActionClass: projects.ActionClassGovernanceMutation},
+		{name: "legal records", title: "Update legal records", wantValue: "governance", wantActionClass: projects.ActionClassGovernanceMutation},
+		{name: "medical records", title: "Update medical record", wantValue: "governance", wantActionClass: projects.ActionClassGovernanceMutation},
+	}
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			intent := classifyTaskExecutionIntent(tt.title)
+			if intent.Value != tt.wantValue || intent.ActionClass != tt.wantActionClass || !intent.Mutating {
+				t.Fatalf("classifyTaskExecutionIntent(%q) = value=%q action_class=%q mutating=%t, want %q/%q mutating", tt.title, intent.Value, intent.ActionClass, intent.Mutating, tt.wantValue, tt.wantActionClass)
+			}
+		})
+	}
+}
+
 func TestExecuteNextQueuedKeepsRunPreparingAndReleasesLeaseOnAdmissionFailure(t *testing.T) {
 	t.Parallel()
 

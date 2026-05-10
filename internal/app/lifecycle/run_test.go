@@ -2163,16 +2163,48 @@ func TestRunUnifiedReviewQueueListsShowsAndRoutesExistingReviewObjects(t *testin
 	}
 
 	accepted := run("review", "act", "intake-review:1", "accept", "--json")
-	if !strings.Contains(accepted, `"decision": "accepted"`) || !strings.Contains(accepted, `"work_created": true`) {
-		t.Fatalf("review act accept output = %s, want accepted intake work", accepted)
+	for _, want := range []string{
+		`"queue_id": "intake-review:1"`,
+		`"source_type": "intake_review"`,
+		`"action": "accept"`,
+		`"status": "resolved"`,
+		`"result": "accepted"`,
+		`"supported": true`,
+		`"mutation_scope": "review_state"`,
+		`"approval_required": false`,
+		`"mutated": true`,
+		`"audit_event": "intake.review_accepted"`,
+		`"source_result": {`,
+		`"decision": "accepted"`,
+		`"work_created": true`,
+	} {
+		if !strings.Contains(accepted, want) {
+			t.Fatalf("review act accept output = %s, want %s", accepted, want)
+		}
 	}
 	deniedIntake := run("review", "act", "intake-approval:2", "deny", "--json")
 	if !strings.Contains(deniedIntake, `"decision": "denied"`) || !strings.Contains(deniedIntake, `"work_created": false`) {
 		t.Fatalf("review act intake deny output = %s, want denied intake approval", deniedIntake)
 	}
 	deniedApproval := run("review", "act", "approval:1", "deny", "--json")
-	if !strings.Contains(deniedApproval, `"status": "denied"`) || !strings.Contains(deniedApproval, `"result": "denied"`) {
-		t.Fatalf("review act approval deny output = %s, want denied task approval", deniedApproval)
+	for _, want := range []string{
+		`"queue_id": "approval:1"`,
+		`"source_type": "task_approval"`,
+		`"action": "deny"`,
+		`"status": "resolved"`,
+		`"result": "denied"`,
+		`"supported": true`,
+		`"mutation_scope": "review_state"`,
+		`"approval_required": true`,
+		`"approval_status": "denied"`,
+		`"resolver_support": "supported"`,
+		`"mutated": true`,
+		`"audit_event": "approval.resolved"`,
+		`"source_result": {`,
+	} {
+		if !strings.Contains(deniedApproval, want) {
+			t.Fatalf("review act approval deny output = %s, want %s", deniedApproval, want)
+		}
 	}
 	archivedArtifact := run("review", "act", "skill-artifact:1", "archive", "--json")
 	if !strings.Contains(archivedArtifact, `"decision": "archived"`) || !strings.Contains(archivedArtifact, `"work_created": false`) {
@@ -2391,6 +2423,39 @@ func TestRunUnifiedReviewQueueSurfacesMemoryProposalsReadOnly(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "memory proposal review actions are not implemented") {
 		t.Fatalf("Run(review act memory proposal approve) error = %v output=%s, want forbidden action", err, actionOutput.String())
 	}
+	for _, want := range []string{
+		`"queue_id": "memory-proposal:` + int64String(recorded.ID) + `"`,
+		`"source_type": "memory_proposal"`,
+		`"action": "approve"`,
+		`"status": "unsupported"`,
+		`"result": "not_resolved"`,
+		`"supported": false`,
+		`"mutation_scope": "unsupported"`,
+		`"approval_required": true`,
+		`"mutated": false`,
+		`"error": "memory_proposal_review_not_implemented"`,
+	} {
+		if !strings.Contains(actionOutput.String(), want) {
+			t.Fatalf("review act memory proposal output = %s, want %s", actionOutput.String(), want)
+		}
+	}
+
+	store, err = sqlite.Open(filepath.Join(root, "data", "odin.db"))
+	if err != nil {
+		t.Fatalf("sqlite.Open(reopen) error = %v", err)
+	}
+	summary, err := findMemoryProposalSummary(context.Background(), store, recorded.ID)
+	if err != nil {
+		t.Fatalf("findMemoryProposalSummary() error = %v", err)
+	}
+	fields, err := memorySummaryFields(summary.DetailsJSON)
+	if err != nil {
+		t.Fatalf("memorySummaryFields() error = %v", err)
+	}
+	if fields["approval"] != "pending" {
+		t.Fatalf("memory proposal approval = %q, want pending after unsupported review action", fields["approval"])
+	}
+	store.Close()
 }
 
 func TestRunReviewQueueIncludesGoalReviewItems(t *testing.T) {
