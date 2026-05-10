@@ -22,6 +22,8 @@ type Service struct {
 	Registry projects.Registry
 }
 
+const CanonicalGitHubIssueEventType = string(runtimeevents.EventExternalGitHubIssue)
+
 type UpsertParams struct {
 	WorkspaceID         string
 	Key                 string
@@ -95,6 +97,13 @@ type PreviewResult struct {
 	Decisions        []PreviewDecision
 }
 
+type PreviewTriggerParams struct {
+	WorkspaceID string
+	Key         string
+	Now         time.Time
+	Source      string
+}
+
 type PreviewDecision struct {
 	Trigger          sqlite.AutomationTrigger
 	Decision         string
@@ -107,9 +116,19 @@ type PreviewDecision struct {
 	BatchKey         string
 	BatchWindow      string
 	BatchGroup       string
+	EventType        string
+	CandidateEvents  int
+	MatchedEvents    []PreviewEventMatch
 	ApprovalRequired bool
 	RecoveryState    string
 	Error            string
+}
+
+type PreviewEventMatch struct {
+	ID         int64
+	EventType  string
+	OccurredAt time.Time
+	Reason     string
 }
 
 type AuditEvent struct {
@@ -371,7 +390,7 @@ func (service Service) IngestGitHubIssue(ctx context.Context, params GitHubIssue
 	return GitHubIssueIngestResult{
 		Issue:            issue,
 		Source:           "github_issue",
-		EventType:        string(runtimeevents.EventExternalGitHubIssue),
+		EventType:        CanonicalGitHubIssueEventType,
 		ExternalEventKey: externalEventKey,
 		ProjectKey:       project.Key,
 		Action:           action,
@@ -528,13 +547,22 @@ func (service Service) PreviewDue(ctx context.Context, now time.Time) (PreviewRe
 	return result, nil
 }
 
-func (service Service) PreviewTrigger(ctx context.Context, workspaceID string, key string, now time.Time) (PreviewResult, error) {
-	trigger, err := service.Show(ctx, workspaceID, key)
+func (service Service) PreviewTrigger(ctx context.Context, params PreviewTriggerParams) (PreviewResult, error) {
+	trigger, err := service.Show(ctx, params.WorkspaceID, params.Key)
 	if err != nil {
 		return PreviewResult{}, err
 	}
-	result := PreviewResult{Now: now.UTC()}
-	result.append(service.previewScheduleTrigger(ctx, trigger, now.UTC(), false))
+	now := params.Now.UTC()
+	result := PreviewResult{Now: now}
+	if triggerPreviewUsesEvents(params.Source) {
+		decision, err := service.previewEventTrigger(ctx, trigger, now)
+		if err != nil {
+			return PreviewResult{}, err
+		}
+		result.append(decision)
+		return result, nil
+	}
+	result.append(service.previewScheduleTrigger(ctx, trigger, now, false))
 	return result, nil
 }
 
@@ -669,6 +697,65 @@ func (service Service) previewScheduleTrigger(ctx context.Context, trigger sqlit
 	return decision
 }
 
+func (service Service) previewEventTrigger(ctx context.Context, trigger sqlite.AutomationTrigger, now time.Time) (PreviewDecision, error) {
+	decision := PreviewDecision{
+		Trigger:       trigger,
+		Decision:      "wait",
+		Reason:        "no_matching_events",
+		RecoveryState: "not_started",
+	}
+	if trigger.Status != "enabled" {
+		decision.Decision = "disabled"
+		decision.Reason = trigger.Status
+		return decision, nil
+	}
+	if !strings.EqualFold(trigger.Kind, "event") {
+		decision.Reason = "not_event_trigger"
+		return decision, nil
+	}
+	rule, err := parseTriggerScheduleRule(trigger)
+	if err != nil {
+		decision.Decision = "error"
+		decision.Reason = "event-rule-evaluation"
+		decision.Error = err.Error()
+		return decision, nil
+	}
+	decision.EventType = strings.TrimSpace(rule.EventType)
+	decision.ApprovalRequired = triggerIntentNeedsApproval(rule.ExecutionIntent)
+	if decision.EventType == "" {
+		decision.Decision = "error"
+		decision.Reason = "event-rule-evaluation"
+		decision.Error = "event_type is required"
+		return decision, nil
+	}
+	records, err := service.Store.ListEvents(ctx, sqlite.ListEventsParams{})
+	if err != nil {
+		return PreviewDecision{}, err
+	}
+	for _, record := range records {
+		if record.OccurredAt.After(now) || !record.OccurredAt.After(trigger.CreatedAt) {
+			continue
+		}
+		if string(record.Type) == decision.EventType {
+			decision.CandidateEvents++
+		}
+		if !eventTriggerMatches(rule, record) {
+			continue
+		}
+		decision.MatchedEvents = append(decision.MatchedEvents, PreviewEventMatch{
+			ID:         record.ID,
+			EventType:  string(record.Type),
+			OccurredAt: record.OccurredAt.UTC(),
+			Reason:     eventTriggerReason(record),
+		})
+	}
+	if len(decision.MatchedEvents) > 0 {
+		decision.Decision = "run"
+		decision.Reason = decision.MatchedEvents[0].Reason
+	}
+	return decision, nil
+}
+
 func triggerIntentNeedsApproval(intent string) bool {
 	switch strings.ToLower(strings.TrimSpace(intent)) {
 	case "governance", "destructive":
@@ -676,6 +763,11 @@ func triggerIntentNeedsApproval(intent string) bool {
 	default:
 		return false
 	}
+}
+
+func triggerPreviewUsesEvents(source string) bool {
+	source = strings.ToLower(strings.TrimSpace(source))
+	return source == "event" || source == "events" || source == "internal_events"
 }
 
 func (service Service) fireDueScheduleBatch(ctx context.Context, batch []dueScheduleFire, result *DueEvaluationResult) error {

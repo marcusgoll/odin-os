@@ -20,7 +20,7 @@ func RunTrigger(ctx context.Context, service triggers.Service, args []string, st
 		return fmt.Errorf("usage: odin %s", TriggerUsage)
 	}
 	if args[0] == "--help" || args[0] == "help" {
-		_, err := fmt.Fprintf(stdout, "usage: odin %s\n\nScheduled triggers:\n  odin trigger create <key> initiative=<project> kind=schedule status=enabled next=<RFC3339> [cadence=<duration>] [cron=<expr>] [quiet=<HH:MM-HH:MM>] [batch=<key> batch_window=<duration>] [title=<text>] [summary=<text>] [intent=<read_only|mutation|governance|destructive>] [--json]\n  odin trigger upsert <key> initiative=<project> kind=schedule status=enabled next=<RFC3339> [cadence=<duration>] [cron=<expr>] [quiet=<HH:MM-HH:MM>] [batch=<key> batch_window=<duration>] [title=<text>] [summary=<text>] [intent=<read_only|mutation|governance|destructive>] [--json]\n  odin trigger test <key> now=<RFC3339> [--json]\n  odin trigger evaluate now=<RFC3339> [--json]\n\nManual trigger fire:\n  odin trigger fire <key> [reason=<reason>] [--json]\n\nAudit:\n  odin trigger audit <key> [--json]\n\nEvent triggers:\n  odin trigger create <key> initiative=<project> kind=event event=<event_type> [match_status=<status>] [match_previous_status=<status>] [match_task_id=<id>] [match_scope=<scope>] [match_provider=<provider>] [match_repo=<owner/repo>] [intent=<read_only|mutation|governance|destructive>] [--json]\n  odin trigger evaluate source=events [--json]\n\nExternal event ingest:\n  odin trigger ingest github-issue project=<project> repo=<owner/repo> number=<n> action=<opened> title=<text> [body=<text>] [url=<url>] [labels=a,b] [--json]\n", TriggerUsage)
+		_, err := fmt.Fprintf(stdout, "usage: odin %s\n\nScheduled triggers:\n  odin trigger create <key> initiative=<project> kind=schedule status=enabled next=<RFC3339> [cadence=<duration>] [cron=<expr>] [quiet=<HH:MM-HH:MM>] [batch=<key> batch_window=<duration>] [title=<text>] [summary=<text>] [intent=<read_only|mutation|governance|destructive>] [--json]\n  odin trigger upsert <key> initiative=<project> kind=schedule status=enabled next=<RFC3339> [cadence=<duration>] [cron=<expr>] [quiet=<HH:MM-HH:MM>] [batch=<key> batch_window=<duration>] [title=<text>] [summary=<text>] [intent=<read_only|mutation|governance|destructive>] [--json]\n  odin trigger test <key> now=<RFC3339> [--json]\n  odin trigger evaluate now=<RFC3339> [--json]\n\nManual trigger fire:\n  odin trigger fire <key> [reason=<reason>] [--json]\n\nAudit:\n  odin trigger audit <key> [--json]\n\nEvent triggers:\n  odin trigger create <key> initiative=<project> kind=event event=external.github.issue [match_status=<status>] [match_previous_status=<status>] [match_task_id=<id>] [match_scope=<scope>] [match_provider=<provider>] [match_repo=<owner/repo>] [intent=<read_only|mutation|governance|destructive>] [--json]\n  odin trigger test <key> source=events [--json]\n  odin trigger evaluate source=events [--json]\n\nExternal event ingest:\n  odin trigger ingest github-issue project=<project> repo=<owner/repo> number=<n> action=<opened> title=<text> [body=<text>] [url=<url>] [labels=a,b] [--json]\n", TriggerUsage)
 		return err
 	}
 	jsonOutput, args, err := consumeTriggerJSONFlag(args)
@@ -108,7 +108,12 @@ func RunTrigger(ctx context.Context, service triggers.Service, args []string, st
 		if err != nil {
 			return err
 		}
-		result, err := service.PreviewTrigger(ctx, options["workspace"], args[1], now)
+		result, err := service.PreviewTrigger(ctx, triggers.PreviewTriggerParams{
+			WorkspaceID: options["workspace"],
+			Key:         args[1],
+			Now:         now,
+			Source:      triggerFirstNonEmpty(options["source"], options["mode"]),
+		})
 		if err != nil {
 			return err
 		}
@@ -393,23 +398,33 @@ type triggerPreviewView struct {
 }
 
 type triggerPreviewDecisionView struct {
-	Key              string  `json:"key"`
-	Decision         string  `json:"decision"`
-	Reason           string  `json:"reason"`
-	TriggerType      string  `json:"trigger_type"`
-	Schedule         string  `json:"schedule"`
-	DueAt            *string `json:"due_at,omitempty"`
-	NextRun          *string `json:"next_run,omitempty"`
-	LastRun          *string `json:"last_run,omitempty"`
-	QuietHours       string  `json:"quiet_hours"`
-	QuietHourEffect  string  `json:"quiet_hour_effect"`
-	BatchKey         string  `json:"batch_key,omitempty"`
-	BatchWindow      string  `json:"batch_window,omitempty"`
-	BatchGroup       string  `json:"batch_group,omitempty"`
-	ApprovalRequired bool    `json:"approval_required"`
-	RecoveryState    string  `json:"recovery_state"`
-	Mutates          bool    `json:"mutates"`
-	Error            string  `json:"error,omitempty"`
+	Key              string                         `json:"key"`
+	Decision         string                         `json:"decision"`
+	Reason           string                         `json:"reason"`
+	TriggerType      string                         `json:"trigger_type"`
+	Schedule         string                         `json:"schedule"`
+	EventType        string                         `json:"event_type,omitempty"`
+	DueAt            *string                        `json:"due_at,omitempty"`
+	NextRun          *string                        `json:"next_run,omitempty"`
+	LastRun          *string                        `json:"last_run,omitempty"`
+	QuietHours       string                         `json:"quiet_hours"`
+	QuietHourEffect  string                         `json:"quiet_hour_effect"`
+	BatchKey         string                         `json:"batch_key,omitempty"`
+	BatchWindow      string                         `json:"batch_window,omitempty"`
+	BatchGroup       string                         `json:"batch_group,omitempty"`
+	CandidateEvents  int                            `json:"candidate_events,omitempty"`
+	MatchedEvents    []triggerPreviewEventMatchView `json:"matched_events,omitempty"`
+	ApprovalRequired bool                           `json:"approval_required"`
+	RecoveryState    string                         `json:"recovery_state"`
+	Mutates          bool                           `json:"mutates"`
+	Error            string                         `json:"error,omitempty"`
+}
+
+type triggerPreviewEventMatchView struct {
+	ID         int64  `json:"id"`
+	EventType  string `json:"event_type"`
+	OccurredAt string `json:"occurred_at"`
+	Reason     string `json:"reason"`
 }
 
 type triggerAuditView struct {
@@ -564,12 +579,22 @@ func newTriggerPreviewView(result triggers.PreviewResult) triggerPreviewView {
 func newTriggerPreviewDecisionView(decision triggers.PreviewDecision) triggerPreviewDecisionView {
 	details := triggerOperatorDetails(decision.Trigger, time.Now().UTC())
 	quietEffect := defaultTriggerOutput(decision.QuietHourEffect, details.QuietHourEffect)
+	matches := make([]triggerPreviewEventMatchView, 0, len(decision.MatchedEvents))
+	for _, match := range decision.MatchedEvents {
+		matches = append(matches, triggerPreviewEventMatchView{
+			ID:         match.ID,
+			EventType:  match.EventType,
+			OccurredAt: match.OccurredAt.UTC().Format(time.RFC3339),
+			Reason:     match.Reason,
+		})
+	}
 	return triggerPreviewDecisionView{
 		Key:              decision.Trigger.Key,
 		Decision:         decision.Decision,
 		Reason:           decision.Reason,
 		TriggerType:      decision.Trigger.Kind,
 		Schedule:         details.Schedule,
+		EventType:        decision.EventType,
 		DueAt:            formatOptionalTimePointer(decision.DueAt),
 		NextRun:          formatOptionalTimePointer(decision.NextEligibleAt),
 		LastRun:          formatOptionalTimePointer(decision.Trigger.LastMaterializedAt),
@@ -578,6 +603,8 @@ func newTriggerPreviewDecisionView(decision triggers.PreviewDecision) triggerPre
 		BatchKey:         decision.BatchKey,
 		BatchWindow:      decision.BatchWindow,
 		BatchGroup:       decision.BatchGroup,
+		CandidateEvents:  decision.CandidateEvents,
+		MatchedEvents:    matches,
 		ApprovalRequired: decision.ApprovalRequired,
 		RecoveryState:    decision.RecoveryState,
 		Mutates:          false,
