@@ -133,6 +133,30 @@ Rules:
 - adding a source adapter does not grant resolver behavior; resolver behavior belongs to the source-owned workflow or approval service
 - `odin overview` renders a read-only `review_queue` proof lane derived from existing runtime truth; it summarizes counts only and does not own review or approval mutation
 
+Review action receipt contract:
+
+`odin review act <queue-id> <action> --json` returns a standard receipt envelope around source-owned action results. The receipt is proof of the action outcome, not permission by itself. Source-owned handlers keep their business rules.
+
+Receipt fields:
+
+- `review_id` and `queue_id`: stable review item identity
+- `source_type` and `source_id`: source-owned runtime authority
+- `action`: requested operator action
+- `status`: `resolved`, `dry_run`, `unsupported`, or `not_resolved`
+- `result`: source-independent result such as `accepted`, `denied`, `approved`, `archived`, `retried`, or `not_resolved`
+- `supported`: whether the source/action has a supported resolver path
+- `mutation_scope`: one of `none`, `review_state`, `execution_resuming`, `external_world`, or `unsupported`
+- `approval_required`: whether the action is approval-backed or itself represents approval-gated governance
+- `approval_status`: resolved approval state when applicable
+- `resolver_support`: approval resolver support when applicable
+- `mutated`: whether the action changed durable state
+- `audit_event`: expected durable event family when applicable
+- `error`: stable refusal key for unsupported or failed-closed actions
+- `next_step`: operator-readable next action
+- `source_result`: nested source-owned JSON result when the action ran
+
+Unsupported or high-risk actions without a supported resolver must return `supported=false`, `status=unsupported`, `result=not_resolved`, `mutation_scope=unsupported`, `mutated=false`, and a stable `error`. External-world mutation remains forbidden from `odin review act` until a source-specific resolver contract, approval policy, and real `odin` proof are implemented.
+
 Source/action contract:
 
 | Source type | Queue ID prefix | Runtime authority | Allowed actions |

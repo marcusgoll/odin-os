@@ -1,6 +1,7 @@
 package lifecycle
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -68,6 +69,26 @@ type reviewUnsupportedActionView struct {
 	Summary    string            `json:"summary"`
 	Goal       commands.GoalView `json:"goal"`
 	Blocker    goalBlockerEntry  `json:"blocker"`
+}
+
+type reviewActionReceipt struct {
+	ReviewID         string          `json:"review_id"`
+	QueueID          string          `json:"queue_id"`
+	SourceType       string          `json:"source_type"`
+	SourceID         int64           `json:"source_id,omitempty"`
+	Action           string          `json:"action"`
+	Status           string          `json:"status"`
+	Result           string          `json:"result"`
+	Supported        bool            `json:"supported"`
+	MutationScope    string          `json:"mutation_scope"`
+	ApprovalRequired bool            `json:"approval_required"`
+	ApprovalStatus   string          `json:"approval_status,omitempty"`
+	ResolverSupport  string          `json:"resolver_support,omitempty"`
+	Mutated          bool            `json:"mutated"`
+	AuditEvent       string          `json:"audit_event,omitempty"`
+	Error            string          `json:"error,omitempty"`
+	NextStep         string          `json:"next_step,omitempty"`
+	SourceResult     json.RawMessage `json:"source_result,omitempty"`
 }
 
 type failedWorkGitHubIssueProposal struct {
@@ -343,6 +364,31 @@ func runReviewAct(ctx context.Context, app bootstrap.App, queueID string, action
 		return err
 	}
 	action = strings.ToLower(strings.TrimSpace(action))
+
+	if !jsonOutput {
+		return runReviewActSource(ctx, app, ref, action, dryRun, false, stdout)
+	}
+
+	receipt, err := reviewActionPreflight(ctx, app, ref, action, dryRun)
+	if err != nil {
+		if receipt.QueueID != "" {
+			if writeErr := commands.WriteJSON(stdout, receipt); writeErr != nil {
+				return writeErr
+			}
+		}
+		return err
+	}
+
+	var sourceOutput bytes.Buffer
+	if err := runReviewActSource(ctx, app, ref, action, dryRun, true, &sourceOutput); err != nil {
+		return err
+	}
+	receipt.SourceResult = compactReviewActionSourceResult(sourceOutput.Bytes())
+	applyReviewActionSourceResult(&receipt)
+	return commands.WriteJSON(stdout, receipt)
+}
+
+func runReviewActSource(ctx context.Context, app bootstrap.App, ref reviewQueueRef, action string, dryRun bool, jsonOutput bool, stdout io.Writer) error {
 	idRef := strconv.FormatInt(ref.ID, 10)
 
 	switch ref.Kind {
@@ -353,7 +399,7 @@ func runReviewAct(ctx context.Context, app bootstrap.App, queueID string, action
 		if action != "approve" {
 			return fmt.Errorf("goal review action must use review approve --id or review reject --id --reason")
 		}
-		return runReviewApprove(ctx, app, queueID, jsonOutput, stdout)
+		return runReviewApprove(ctx, app, fmt.Sprintf("%s:%d", ref.Kind, ref.ID), jsonOutput, stdout)
 	case "intake-review":
 		if dryRun {
 			return fmt.Errorf("--dry-run is only supported for failed-work follow-up review actions")
@@ -425,6 +471,247 @@ func runReviewAct(ctx context.Context, app bootstrap.App, queueID string, action
 		return fmt.Errorf("memory proposal review actions are not implemented; use the existing memory workflow")
 	default:
 		return fmt.Errorf("unsupported review queue source %q", ref.Kind)
+	}
+}
+
+func reviewActionPreflight(ctx context.Context, app bootstrap.App, ref reviewQueueRef, action string, dryRun bool) (reviewActionReceipt, error) {
+	receipt := reviewActionReceipt{
+		ReviewID:         fmt.Sprintf("%s:%d", ref.Kind, ref.ID),
+		QueueID:          fmt.Sprintf("%s:%d", ref.Kind, ref.ID),
+		SourceType:       reviewSourceTypeForKind(ref.Kind),
+		SourceID:         ref.ID,
+		Action:           action,
+		Status:           "resolved",
+		Result:           reviewActionResult(action),
+		Supported:        true,
+		MutationScope:    reviewActionMutationScope(ref.Kind, action),
+		ApprovalRequired: reviewActionRequiresApproval(ref.Kind),
+		ApprovalStatus:   reviewActionApprovalStatus(ref.Kind, action),
+		Mutated:          !dryRun,
+		AuditEvent:       reviewActionAuditEvent(ref.Kind, action),
+		NextStep:         reviewActionNextStep(ref.Kind, action),
+	}
+	if dryRun {
+		receipt.Status = "dry_run"
+		receipt.Result = "not_applied"
+		receipt.Mutated = false
+	}
+
+	switch ref.Kind {
+	case "intake-goal", "goal", "goal-approval":
+		if action != "approve" {
+			return reviewActionReceipt{}, fmt.Errorf("goal review action must use review approve --id or review reject --id --reason")
+		}
+	case "goal-blocker":
+		return unsupportedReviewActionReceipt(receipt, "blocker_resolution_not_supported", "goal blocker resolution is not implemented; inspect only"), fmt.Errorf("review %s does not support goal-blocker:%d; blocker resolution is not implemented", action, ref.ID)
+	case "intake-review":
+		if !oneOf(action, "accept", "reject", "archive", "clarify") {
+			return reviewActionReceipt{}, fmt.Errorf("intake review action must be one of accept, reject, archive, clarify")
+		}
+	case "intake-approval":
+		if !oneOf(action, "approve", "deny") {
+			return reviewActionReceipt{}, fmt.Errorf("intake approval action must be one of approve, deny")
+		}
+	case "approval":
+		if !oneOf(action, "approve", "deny") {
+			return reviewActionReceipt{}, fmt.Errorf("task approval action must be one of approve, deny")
+		}
+		detail, err := approvalsvc.Service{Store: app.Store}.Detail(ctx, ref.ID)
+		if err != nil {
+			return reviewActionReceipt{}, err
+		}
+		receipt.ResolverSupport = string(detail.ResolverSupport)
+		if detail.ResolverSupport != approvalsvc.ResolverSupported {
+			return unsupportedReviewActionReceipt(receipt, "approval_resolver_not_supported", "approval has no supported resolver/continuation contract"), approvalsvc.UnsupportedResolverError{ApprovalID: ref.ID}
+		}
+	case "skill-artifact":
+		if !oneOf(action, "accept", "reject", "archive") {
+			return reviewActionReceipt{}, fmt.Errorf("skill artifact action must be one of accept, reject, archive")
+		}
+	case "context-pack":
+		if !oneOf(action, "accept", "reject", "archive") {
+			return reviewActionReceipt{}, fmt.Errorf("context pack action must be one of accept, reject, archive")
+		}
+	case "failed-work":
+		if !oneOf(action, "retry", "follow-up") {
+			return reviewActionReceipt{}, fmt.Errorf("failed work action must be retry or follow-up")
+		}
+	case "memory-proposal":
+		return unsupportedReviewActionReceipt(receipt, "memory_proposal_review_not_implemented", "memory proposal review actions are not implemented; use the existing memory workflow"), fmt.Errorf("memory proposal review actions are not implemented; use the existing memory workflow")
+	default:
+		return reviewActionReceipt{}, fmt.Errorf("unsupported review queue source %q", ref.Kind)
+	}
+	return receipt, nil
+}
+
+func unsupportedReviewActionReceipt(receipt reviewActionReceipt, errorKey string, nextStep string) reviewActionReceipt {
+	receipt.Status = "unsupported"
+	receipt.Result = "not_resolved"
+	receipt.Supported = false
+	receipt.MutationScope = "unsupported"
+	receipt.Mutated = false
+	receipt.AuditEvent = ""
+	receipt.Error = errorKey
+	receipt.NextStep = nextStep
+	return receipt
+}
+
+func reviewSourceTypeForKind(kind string) string {
+	switch kind {
+	case "intake-goal":
+		return "intake_goal_conversion"
+	case "goal", "goal-approval":
+		return "goal"
+	case "goal-blocker":
+		return "goal_blocker"
+	case "intake-review":
+		return "intake_review"
+	case "intake-approval":
+		return "intake_approval"
+	case "approval":
+		return "task_approval"
+	case "skill-artifact":
+		return "skill_artifact"
+	case "context-pack":
+		return "context_pack"
+	case "failed-work":
+		return "failed_work"
+	case "memory-proposal":
+		return "memory_proposal"
+	default:
+		return kind
+	}
+}
+
+func reviewActionMutationScope(kind string, action string) string {
+	switch kind {
+	case "intake-goal", "goal", "goal-approval":
+		return "execution_resuming"
+	case "approval":
+		if action == "approve" {
+			return "execution_resuming"
+		}
+		return "review_state"
+	case "failed-work":
+		if action == "retry" {
+			return "execution_resuming"
+		}
+		return "review_state"
+	case "goal-blocker", "memory-proposal":
+		return "unsupported"
+	default:
+		return "review_state"
+	}
+}
+
+func reviewActionRequiresApproval(kind string) bool {
+	switch kind {
+	case "approval", "intake-approval", "goal-approval", "memory-proposal":
+		return true
+	default:
+		return false
+	}
+}
+
+func reviewActionApprovalStatus(kind string, action string) string {
+	if !reviewActionRequiresApproval(kind) {
+		return ""
+	}
+	switch action {
+	case "approve":
+		return "approved"
+	case "deny":
+		return "denied"
+	default:
+		return ""
+	}
+}
+
+func reviewActionResult(action string) string {
+	switch action {
+	case "accept":
+		return "accepted"
+	case "approve":
+		return "approved"
+	case "deny":
+		return "denied"
+	case "reject":
+		return "rejected"
+	case "archive":
+		return "archived"
+	case "clarify":
+		return "clarification_requested"
+	case "retry":
+		return "retried"
+	case "follow-up":
+		return "follow_up"
+	default:
+		return action
+	}
+}
+
+func reviewActionAuditEvent(kind string, action string) string {
+	switch kind {
+	case "intake-review":
+		return "intake.review_" + reviewActionResult(action)
+	case "intake-approval":
+		return "intake.approval_" + reviewActionResult(action)
+	case "approval":
+		return "approval.resolved"
+	case "skill-artifact":
+		return "skill.artifact_reviewed"
+	case "context-pack":
+		return "context_pack.reviewed"
+	case "intake-goal", "goal", "goal-approval":
+		return "review.approved"
+	case "failed-work":
+		return "work.review_" + action
+	default:
+		return ""
+	}
+}
+
+func reviewActionNextStep(kind string, action string) string {
+	switch kind {
+	case "approval":
+		if action == "approve" {
+			return "inspect linked work item and latest run attempt"
+		}
+		return "inspect linked work item for denied approval state"
+	case "failed-work":
+		return "inspect failed work item and retry/follow-up evidence"
+	case "memory-proposal":
+		return "use the existing memory workflow"
+	default:
+		return "inspect source result and review queue state"
+	}
+}
+
+func compactReviewActionSourceResult(output []byte) json.RawMessage {
+	trimmed := bytes.TrimSpace(output)
+	if len(trimmed) == 0 || !json.Valid(trimmed) {
+		return nil
+	}
+	return append(json.RawMessage(nil), trimmed...)
+}
+
+func applyReviewActionSourceResult(receipt *reviewActionReceipt) {
+	if receipt.SourceResult == nil {
+		return
+	}
+	var result struct {
+		Retried *bool  `json:"retried"`
+		Reason  string `json:"reason"`
+	}
+	if err := json.Unmarshal(receipt.SourceResult, &result); err != nil {
+		return
+	}
+	if result.Retried != nil {
+		receipt.Mutated = *result.Retried
+		if !*result.Retried {
+			receipt.Status = "not_resolved"
+			receipt.Result = firstNonBlank(result.Reason, receipt.Result)
+		}
 	}
 }
 
