@@ -127,8 +127,37 @@ existing disposable head branch, and `GITHUB_TOKEN`, then exercises
 `odin logs trail`. CI only runs the non-mutating contract test. No live
 GitHub.com PR was created in this audit update.
 
+PR #216 covers the failed-work observability gap without adding a second
+runtime authority. It renders existing recovery-guidance data as `Failed Work`
+inside `Attention` and `Observability`, including retry eligibility, retry
+counts, source, last error, and recovery recommendation. Its real `./bin/odin`
+proof used a fresh `ODIN_ROOT`, dispatched a fixture-backed failing Work Item,
+then verified `overview` and `overview --json` showed the failed-work lane.
+
+PR #218 covers the plugin-model naming gap through the canonical capability
+gateway. It adds read-only `odin capabilities list` and
+`odin capabilities show`, returns `source=capability_gateway`, and pins
+`plugin_model=plugins_are_packages_not_runtime_kind`. The documented contract
+keeps `agent`, `skill`, `workflow`, `command`, and `tool` as runtime capability
+kinds while plugins remain packages or distribution containers, not a scheduler,
+approval, executor, policy, or runtime kind.
+
+PR #221 covers the high-risk approval parity categories through the explicit
+operator dispatch path. Its lifecycle test starts read-only Work Items for
+sending messages, deleting data, deployment, calendar mutation, public posting,
+production changes, purchases, permission changes, financial records, legal
+records, and medical records, then proves `odin work dispatch --task --json`
+blocks each one with `reason=approval_required` and
+`execution_intent_source=safety_classifier`. Its job-service tests also cover
+the lower-level classifier and `ExecuteNextQueued` path, including durable
+approval request and audit-event evidence.
+
 ## What Is Open But Not Yet Main
 
+- PR #211: managed-project delivery profile surfaced through `odin work
+  profiles` and `work status`, without creating a parallel workflow runtime.
+- PR #212: capability truth overview gate that separates authored registry
+  inventory from runtime-proven capability claims.
 - PR #218: capability/plugin model clarification through `odin capabilities`.
 - PR #216: failed-work lane in overview/TUI.
 - PR #213: delivery evidence recording through `odin work`.
@@ -159,9 +188,14 @@ Current non-mutating stack-readiness check:
 
 | PR | Branch | Base | Remote checks | PR body contract |
 | --- | --- | --- | --- | --- |
+| #211 | `codex/approval-gates-policy-parity-current` | `main` | GitGuardian, two `go`, and `odin-e2e` passing | Has `## Summary`, `## Proven`, `## Unproven`, `## Commands Run` |
+| #212 | `codex/risk-hardening-design` | `main` | GitGuardian, two `go`, and `odin-e2e` passing | Has `## Summary`, `## Proven`, `## Unproven`, `## Commands Run` |
 | #213 | `codex/work-evidence-current` | `main` | GitGuardian, two `go`, and `odin-e2e` passing | Has `## Summary`, `## Proven`, `## Unproven`, `## Commands Run` |
 | #214 | `codex/work-advance-current` | `codex/work-evidence-current` | GitGuardian and two `go` passing | Has `## Summary`, `## Proven`, `## Unproven`, `## Commands Run` |
+| #216 | `codex/overview-failed-work-lane-current` | `main` | GitGuardian, two `go`, and `odin-e2e` passing | Has `## Summary`, `## Proven`, `## Unproven`, `## Commands Run` |
+| #218 | `codex/capabilities-operator-cli-current` | `main` | GitGuardian, two `go`, and `odin-e2e` passing | Has `## Summary`, `## Proven`, `## Unproven`, `## Commands Run` |
 | #219 | `codex/prompt-to-production-proof-design` | `main` | GitGuardian, two `go`, and `odin-e2e` passing | Has `## Summary`, `## Proven`, `## Unproven`, `## Commands Run` |
+| #221 | `codex/high-risk-approval-parity` | `main` | GitGuardian, two `go`, and `odin-e2e` passing | Has `## Summary`, `## Proven`, `## Unproven`, `## Commands Run` |
 | #222 | `codex/merge-deploy-approval-proof` | `main` | GitGuardian, two `go`, and `odin-e2e` passing | Has `## Summary`, `## Proven`, `## Unproven`, `## Commands Run` |
 | #223 | `codex/review-run-attempt-proof` | `codex/merge-deploy-approval-proof` | GitGuardian and two `go` passing | Has `## Summary`, `## Proven`, `## Unproven`, `## Commands Run` |
 | #224 | `codex/pr-handoff-live-smoke` | `codex/review-run-attempt-proof` | GitGuardian and two `go` passing | Has `## Summary`, `## Proven`, `## Unproven`, `## Commands Run` |
