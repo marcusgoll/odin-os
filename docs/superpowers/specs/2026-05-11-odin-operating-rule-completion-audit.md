@@ -77,6 +77,26 @@ Evidence checked:
 | approval before merge/deploy | PR #222 adds local-only `odin work approval request --kind merge\|deploy`, separate Approval Requests, approval-purpose proof readback, and fail-closed prerequisite checks before any merge/deploy mutation exists. PR #223 tightens this by requiring completed selected review role Run Attempts before merge/deploy approval requests. | Partial; PR #213/#214/#219/#222/#223 open |
 | operating rule applied everywhere | Many surfaces now satisfy real command + persistence + policy + audit. Open stacked draft PRs and the absence of real GitHub.com write proof mean the rule is not yet universal. | Not complete |
 
+## Traceability Matrix
+
+This matrix is the final-completion checklist. A row does not count complete
+until the named proof is on current `main` or the operator explicitly accepts
+the open PR proof as the target artifact.
+
+| Objective deliverable | Required proof before completion | Current evidence holder |
+| --- | --- | --- |
+| Trigger create/list/show/test flows | `odin trigger create`, `odin trigger list`, `odin trigger show`, and `odin trigger test` against a fresh `ODIN_ROOT`, plus persisted trigger and event readback | `main` after PR #169/#210 |
+| Trigger event envelope, dedupe, approval rules, audit events, next-run preview | Trigger tests and real command output showing envelope fields, materialization key or dedupe behavior, approval-required preview, `automation_trigger.*` events, and next due/run timing | `main` after PR #169/#210 |
+| High-risk approval gates for messages, deletion, deployment, calendar mutation, public posting, production changes, purchases, permissions, and financial/legal/medical records | `odin work start --intent read_only` plus `odin work dispatch --task --json` blocks each category with `reason=approval_required` and `execution_intent_source=safety_classifier`; `odin approvals all --json` and `odin logs --json` show pending approvals and audit events | PR #221 |
+| Review mutations preserve policy and receipt evidence | `odin review act ... --json` returns source-owned receipt/refusal fields and fails closed for unsupported/high-risk actions | `main` |
+| Plugin model clarified without parallel plugin runtime | `odin capabilities list --kind command --json` and `odin capabilities show project.status --json` report `source=capability_gateway` and `plugin_model=plugins_are_packages_not_runtime_kind`; docs state plugins are packages, not runtime kinds | PR #218 |
+| Overview/TUI raw intake, review queue, triggers, approvals, recovery, running work, failed work, blocked work | `odin overview` and `odin overview --json` show all required lanes, including `Failed Work` from recovery guidance | mostly `main`; failed-work rendering in PR #216 |
+| Vague issue or goal produces clarification and spec/ticket evidence | `odin work proof --intake <id|key> --json` shows `needs_clarification`, draft task/spec/ticket evidence, or no Work Item created until review conditions are met | PR #219 |
+| Prompt-to-production PR handoff with tests/review evidence | `odin work pr prepare --task ... --dry-run --json`, `odin work proof --task ... --json`, and controlled fixture/live proof show summary, tests, risk, review-role selection, PR URL/number when live, and audit events | PR #219 and PR #224 |
+| Reviewer, QA, and security review are Run Attempts before merge/deploy approval | `odin work pr review run --role reviewer|qa|security --json` records completed `pull_request_review:<role>` runs and `work proof` links review results to run IDs | PR #223 |
+| Approval before merge/deploy | `odin work approval request --kind merge` and `--kind deploy` create separate Approval Requests only after PR handoff, review Run Attempts, delivery evidence, and delivery gates are present; `work proof` reads back purpose/status and deploy fails closed until merge approval exists | PR #222 plus PR #223 |
+| Operating rule everywhere | For every claimed workflow, real `odin` command proof invokes the path, persists state, enforces policy, and emits audit evidence; green CI alone is insufficient | not complete until the open stack is merged or explicitly accepted |
+
 ## What Is Already Done
 
 Scheduler trigger workflow is not the next implementation gap. PR #169 and PR
