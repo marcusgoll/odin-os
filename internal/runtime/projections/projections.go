@@ -59,6 +59,7 @@ type PendingApprovalView struct {
 	ApprovalID    int64   `json:"approval_id"`
 	TaskID        int64   `json:"task_id"`
 	TaskKey       string  `json:"task_key"`
+	WorkKind      string  `json:"work_kind,omitempty"`
 	ProjectKey    string  `json:"project_key"`
 	TaskScope     string  `json:"task_scope"`
 	WorkspaceKey  string  `json:"workspace_key"`
@@ -455,6 +456,7 @@ func ListPendingApprovalViews(ctx context.Context, queryer Queryer) ([]PendingAp
 			a.id,
 			a.task_id,
 			t.key,
+			COALESCE(t.work_kind, ''),
 			p.key,
 			t.scope,
 			COALESCE(w.key, ''),
@@ -485,6 +487,7 @@ func ListPendingApprovalViews(ctx context.Context, queryer Queryer) ([]PendingAp
 			&view.ApprovalID,
 			&view.TaskID,
 			&view.TaskKey,
+			&view.WorkKind,
 			&view.ProjectKey,
 			&view.TaskScope,
 			&view.WorkspaceKey,

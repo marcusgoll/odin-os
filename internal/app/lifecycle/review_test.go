@@ -56,6 +56,7 @@ func TestReviewQueueIncludesAllGovernedDecisionSources(t *testing.T) {
 		"task_approval",
 		"skill_artifact",
 		"context_pack",
+		"memory_proposal",
 		"failed_work",
 	}
 	for _, source := range required {
@@ -63,6 +64,27 @@ func TestReviewQueueIncludesAllGovernedDecisionSources(t *testing.T) {
 			t.Fatalf("review queue missing source %q; got %#v", source, bySource)
 		}
 	}
+}
+
+func TestReviewQueueIncludesScheduledApprovalWorkAsTaskApproval(t *testing.T) {
+	ctx := context.Background()
+	app := newLifecycleReviewTestApp(t, ctx)
+	seedReviewQueueSourceFixture(t, ctx, app)
+
+	entries, err := listReviewQueueEntries(ctx, app)
+	if err != nil {
+		t.Fatalf("listReviewQueueEntries() error = %v", err)
+	}
+
+	for _, entry := range entries {
+		if entry.SourceType == "task_approval" && entry.TaskKey == "scheduled-approval-task" && entry.WorkKind == "automation_trigger" {
+			if entry.Status != "pending" {
+				t.Fatalf("scheduled approval status = %q, want pending", entry.Status)
+			}
+			return
+		}
+	}
+	t.Fatalf("review queue missing scheduled approval task; entries = %#v", entries)
 }
 
 func newLifecycleReviewTestApp(t *testing.T, ctx context.Context) bootstrap.App {
@@ -186,6 +208,27 @@ func seedReviewQueueSourceFixture(t *testing.T, ctx context.Context, app bootstr
 	}); err != nil {
 		t.Fatalf("RequestApproval() error = %v", err)
 	}
+	scheduledApprovalTask, err := app.Store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:             project.ID,
+		Key:                   "scheduled-approval-task",
+		Title:                 "Scheduled approval task",
+		Status:                "blocked",
+		Scope:                 "project",
+		RequestedBy:           "automation_trigger:scheduled-review",
+		WorkKind:              "automation_trigger",
+		ExecutionIntent:       "governance",
+		ExecutionIntentSource: "trigger",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask(scheduled approval) error = %v", err)
+	}
+	if _, err := app.Store.RequestApproval(ctx, sqlite.RequestApprovalParams{
+		TaskID:      scheduledApprovalTask.ID,
+		Status:      "pending",
+		RequestedBy: "automation_trigger:scheduled-review",
+	}); err != nil {
+		t.Fatalf("RequestApproval(scheduled) error = %v", err)
+	}
 
 	if _, err := app.Store.CreateSkillArtifact(ctx, sqlite.CreateSkillArtifactParams{
 		SkillKey:         "review-fixture-skill",
@@ -219,6 +262,17 @@ func seedReviewQueueSourceFixture(t *testing.T, ctx context.Context, app bootstr
 		ProjectKey: project.Key,
 	}); err != nil {
 		t.Fatalf("ProposeContextPack() error = %v", err)
+	}
+	if _, err := app.Store.RecordMemorySummary(ctx, sqlite.RecordMemorySummaryParams{
+		ProjectID:   &project.ID,
+		TaskID:      &contextTask.ID,
+		Scope:       "project",
+		ScopeKey:    project.Key,
+		MemoryType:  "memory_proposal",
+		Summary:     "Review fixture memory proposal",
+		DetailsJSON: `{"fields":{"approval":"pending","source":"review_fixture"}}`,
+	}); err != nil {
+		t.Fatalf("RecordMemorySummary(memory proposal) error = %v", err)
 	}
 
 	if _, err := app.Store.CreateTask(ctx, sqlite.CreateTaskParams{
