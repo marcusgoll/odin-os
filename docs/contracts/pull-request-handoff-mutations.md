@@ -37,7 +37,10 @@ artifact.
 - The Work Item owns task state.
 - The Approval Request owns the human decision.
 - `pull_request_handoffs` owns the durable handoff record.
-- `pull_request_review_results` owns selected review role evidence.
+- `pull_request_review_results` owns selected review role state and outcome
+  evidence.
+- `runs` owns first-class reviewer, QA, and security role execution attempts
+  through `pull_request_review:<role>` executors.
 - Runtime events own the audit trail.
 - The GitHub pull request must not approve merge or deployment.
 
@@ -72,6 +75,26 @@ merge, deploy, branch deletion, or future GitHub writes.
 Dry-run/local handoff remains the default. It may persist handoff and review
 selection evidence, but it must not call GitHub and must record
 `external_mutated=false`.
+
+## Review Role Execution
+
+`odin work pr review run --task <id|key> --role <reviewer|qa|security>
+--summary <text> --json` records selected role execution without calling
+GitHub, merging code, deploying code, or publishing public content.
+
+The command must:
+
+- require an existing PR handoff for the Work Item
+- reject roles that were not selected by the PR handoff
+- create and finish a normal `runs` row with executor
+  `pull_request_review:<role>`
+- update the matching `pull_request_review_results` row to
+  `state=completed` and `outcome=read_only_completed`
+- leave normal `run.started` and `run.finished` event evidence
+- expose the linked `run_id` through `odin work proof --task ... --json`
+
+Merge or deploy approval requests require completed review-result evidence and
+completed review Run Attempts for every selected role.
 
 ## Token Boundary
 

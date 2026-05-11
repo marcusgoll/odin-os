@@ -4370,6 +4370,153 @@ func TestRunWorkPRPreparePersistsDryRunHandoffAndProof(t *testing.T) {
 	}
 }
 
+func TestRunWorkPRReviewRunRecordsSelectedRolesAsRunAttempts(t *testing.T) {
+	t.Parallel()
+
+	root := testRepoRoot(t)
+	taskKey := createQueuedWorkItemForPRPrepare(t, root)
+	if err := Run(context.Background(), root, []string{
+		"work", "pr", "prepare",
+		"--task", taskKey,
+		"--summary", "PR handoff ready for role review runs.",
+		"--test", "go test ./internal/app/lifecycle -run TestRunWorkPRReviewRun -count=1",
+		"--risk", "review roles must produce runtime evidence before merge approval",
+		"--command", "go test ./internal/app/lifecycle -run TestRunWorkPRReviewRun -count=1",
+		"--changed-file", "internal/tracker/github/client.go",
+		"--dry-run",
+		"--json",
+	}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+		t.Fatalf("Run(work pr prepare) error = %v", err)
+	}
+
+	var roleRuns []workPRReviewRunTestView
+	for _, role := range []string{"reviewer", "qa", "security"} {
+		var output bytes.Buffer
+		if err := Run(context.Background(), root, []string{
+			"work", "pr", "review", "run",
+			"--task", taskKey,
+			"--role", role,
+			"--summary", role + " read-only review completed",
+			"--json",
+		}, strings.NewReader(""), &output); err != nil {
+			t.Fatalf("Run(work pr review run %s) error = %v\n%s", role, err, output.String())
+		}
+		var roleRun workPRReviewRunTestView
+		if err := json.Unmarshal(output.Bytes(), &roleRun); err != nil {
+			t.Fatalf("json.Unmarshal(review run %s) error = %v\n%s", role, err, output.String())
+		}
+		if roleRun.Role != role || roleRun.Run.ID == 0 || roleRun.Run.Executor != "pull_request_review:"+role || roleRun.Run.Status != "completed" {
+			t.Fatalf("review run %s = %+v, want completed first-class run attempt", role, roleRun)
+		}
+		if roleRun.ReviewResult.State != "completed" || roleRun.ReviewResult.Outcome != "read_only_completed" {
+			t.Fatalf("review result %s = %+v, want completed read-only review result", role, roleRun.ReviewResult)
+		}
+		roleRuns = append(roleRuns, roleRun)
+	}
+
+	var proofOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"work", "proof", "--task", taskKey, "--json"}, strings.NewReader(""), &proofOutput); err != nil {
+		t.Fatalf("Run(work proof after review runs) error = %v\n%s", err, proofOutput.String())
+	}
+	var proof struct {
+		Execution struct {
+			ActiveRunID *int64 `json:"active_run_id"`
+			Runs        []struct {
+				ID       int64  `json:"id"`
+				Executor string `json:"executor"`
+				Status   string `json:"status"`
+			} `json:"runs"`
+		} `json:"execution"`
+		PullRequest struct {
+			SelectedRoles []string `json:"selected_roles"`
+			ReviewResults []struct {
+				Role    string `json:"role"`
+				State   string `json:"state"`
+				Outcome string `json:"outcome"`
+				RunID   int64  `json:"run_id"`
+			} `json:"review_results"`
+		} `json:"pull_request"`
+	}
+	if err := json.Unmarshal(proofOutput.Bytes(), &proof); err != nil {
+		t.Fatalf("json.Unmarshal(proof) error = %v\n%s", err, proofOutput.String())
+	}
+	if proof.Execution.ActiveRunID != nil {
+		t.Fatalf("proof active run id = %v, want no active run after completed role reviews", *proof.Execution.ActiveRunID)
+	}
+	if !reflect.DeepEqual(proof.PullRequest.SelectedRoles, []string{"reviewer", "qa", "security"}) {
+		t.Fatalf("selected roles = %#v, want reviewer + qa + security", proof.PullRequest.SelectedRoles)
+	}
+	for _, roleRun := range roleRuns {
+		if !proofHasCompletedReviewRun(proof.Execution.Runs, roleRun.Run.ID, roleRun.Run.Executor) {
+			t.Fatalf("proof execution runs = %+v, want completed run %d/%s", proof.Execution.Runs, roleRun.Run.ID, roleRun.Run.Executor)
+		}
+		if !proofHasReviewResultRunID(proof.PullRequest.ReviewResults, roleRun.Role, roleRun.Run.ID) {
+			t.Fatalf("proof review results = %+v, want role %s linked to run %d", proof.PullRequest.ReviewResults, roleRun.Role, roleRun.Run.ID)
+		}
+	}
+
+	var logsOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"logs", "--json"}, strings.NewReader(""), &logsOutput); err != nil {
+		t.Fatalf("Run(logs) error = %v", err)
+	}
+	for _, want := range []string{`"type": "run.started"`, `"type": "run.finished"`} {
+		if !strings.Contains(logsOutput.String(), want) {
+			t.Fatalf("logs = %s, want %s", logsOutput.String(), want)
+		}
+	}
+}
+
+func TestRunWorkPRReviewRunRejectsRoleThatWasNotSelected(t *testing.T) {
+	t.Parallel()
+
+	root := testRepoRoot(t)
+	taskKey := createQueuedWorkItemForPRPrepare(t, root)
+	if err := Run(context.Background(), root, []string{
+		"work", "pr", "prepare",
+		"--task", taskKey,
+		"--summary", "PR handoff ready for role review runs.",
+		"--test", "go test ./internal/app/lifecycle -run TestRunWorkPRReviewRun -count=1",
+		"--risk", "security is not selected for low-risk paths",
+		"--command", "go test ./internal/app/lifecycle -run TestRunWorkPRReviewRun -count=1",
+		"--dry-run",
+		"--json",
+	}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+		t.Fatalf("Run(work pr prepare) error = %v", err)
+	}
+
+	var output bytes.Buffer
+	err := Run(context.Background(), root, []string{
+		"work", "pr", "review", "run",
+		"--task", taskKey,
+		"--role", "security",
+		"--summary", "security review should not run when not selected",
+		"--json",
+	}, strings.NewReader(""), &output)
+	if err == nil || !strings.Contains(err.Error(), "review role security was not selected") || output.Len() != 0 {
+		t.Fatalf("security review output/error = %q/%v, want fail closed for unselected role", output.String(), err)
+	}
+
+	var proofOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"work", "proof", "--task", taskKey, "--json"}, strings.NewReader(""), &proofOutput); err != nil {
+		t.Fatalf("Run(work proof) error = %v\n%s", err, proofOutput.String())
+	}
+	var proof struct {
+		Execution struct {
+			Runs []struct {
+				Executor string `json:"executor"`
+			} `json:"runs"`
+		} `json:"execution"`
+	}
+	if err := json.Unmarshal(proofOutput.Bytes(), &proof); err != nil {
+		t.Fatalf("json.Unmarshal(proof) error = %v\n%s", err, proofOutput.String())
+	}
+	for _, run := range proof.Execution.Runs {
+		if run.Executor == "pull_request_review:security" {
+			t.Fatalf("proof execution runs = %+v, want no unselected security run", proof.Execution.Runs)
+		}
+	}
+}
+
 func TestRunWorkPRPrepareRequiresEvidence(t *testing.T) {
 	t.Parallel()
 
@@ -4728,6 +4875,7 @@ func TestRunWorkApprovalRequestFailsClosedWithoutMergeEvidence(t *testing.T) {
 	}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
 		t.Fatalf("Run(work pr prepare) error = %v", err)
 	}
+	runPRReviewRolesForApprovalProof(t, root, taskKey, "reviewer", "qa")
 
 	var missingGateOutput bytes.Buffer
 	err = Run(context.Background(), root, []string{"work", "approval", "request", "--task", taskKey, "--kind", "merge", "--json"}, strings.NewReader(""), &missingGateOutput)
@@ -4741,6 +4889,39 @@ func TestRunWorkApprovalRequestFailsClosedWithoutMergeEvidence(t *testing.T) {
 	}
 	if strings.Contains(approvalsOutput.String(), `"approval_id"`) {
 		t.Fatalf("approvals output = %s, want no approval created for missing evidence", approvalsOutput.String())
+	}
+}
+
+func TestRunWorkApprovalRequestRequiresCompletedReviewRuns(t *testing.T) {
+	t.Parallel()
+
+	root := testRepoRoot(t)
+	taskKey := createQueuedWorkItemForPRPrepare(t, root)
+	if err := Run(context.Background(), root, []string{
+		"work", "pr", "prepare",
+		"--task", taskKey,
+		"--summary", "PR handoff ready for approval hardening.",
+		"--test", "go test ./internal/app/lifecycle -run TestRunWorkApprovalRequest -count=1",
+		"--risk", "merge approval must wait for role run evidence",
+		"--command", "go test ./internal/app/lifecycle -run TestRunWorkApprovalRequest -count=1",
+		"--dry-run",
+		"--json",
+	}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+		t.Fatalf("Run(work pr prepare) error = %v", err)
+	}
+	advanceDeliveryGatesForApprovalProof(t, root, taskKey)
+
+	var output bytes.Buffer
+	err := Run(context.Background(), root, []string{"work", "approval", "request", "--task", taskKey, "--kind", "merge", "--json"}, strings.NewReader(""), &output)
+	if err == nil || !strings.Contains(err.Error(), "completed review result evidence for reviewer is required before approval") || output.Len() != 0 {
+		t.Fatalf("approval request without role run output/error = %q/%v, want completed review result prerequisite", output.String(), err)
+	}
+
+	runPRReviewRoleForApprovalProof(t, root, taskKey, "reviewer")
+	output.Reset()
+	err = Run(context.Background(), root, []string{"work", "approval", "request", "--task", taskKey, "--kind", "merge", "--json"}, strings.NewReader(""), &output)
+	if err == nil || !strings.Contains(err.Error(), "completed review result evidence for qa is required before approval") || output.Len() != 0 {
+		t.Fatalf("approval request with partial role runs output/error = %q/%v, want every selected role complete", output.String(), err)
 	}
 }
 
@@ -4761,6 +4942,7 @@ func TestRunWorkApprovalRequestRecordsSeparateMergeAndDeployApprovalProof(t *tes
 	}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
 		t.Fatalf("Run(work pr prepare) error = %v", err)
 	}
+	runPRReviewRolesForApprovalProof(t, root, taskKey, "reviewer", "qa")
 	advanceDeliveryGatesForApprovalProof(t, root, taskKey)
 
 	var mergeOutput bytes.Buffer
@@ -4921,9 +5103,69 @@ func advanceDeliveryGatesForApprovalProof(t *testing.T, root string, taskKey str
 	}
 }
 
+func runPRReviewRolesForApprovalProof(t *testing.T, root string, taskKey string, roles ...string) {
+	t.Helper()
+	for _, role := range roles {
+		runPRReviewRoleForApprovalProof(t, root, taskKey, role)
+	}
+}
+
+func runPRReviewRoleForApprovalProof(t *testing.T, root string, taskKey string, role string) {
+	t.Helper()
+	if err := Run(context.Background(), root, []string{
+		"work", "pr", "review", "run",
+		"--task", taskKey,
+		"--role", role,
+		"--summary", role + " read-only review completed",
+		"--json",
+	}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+		t.Fatalf("Run(work pr review run %s) error = %v", role, err)
+	}
+}
+
 func containsStringPrefix(values []string, prefix string) bool {
 	for _, value := range values {
 		if strings.HasPrefix(value, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+type workPRReviewRunTestView struct {
+	Role string `json:"role"`
+	Run  struct {
+		ID       int64  `json:"id"`
+		Executor string `json:"executor"`
+		Status   string `json:"status"`
+	} `json:"run"`
+	ReviewResult struct {
+		State   string `json:"state"`
+		Outcome string `json:"outcome"`
+	} `json:"review_result"`
+}
+
+func proofHasCompletedReviewRun(runs []struct {
+	ID       int64  `json:"id"`
+	Executor string `json:"executor"`
+	Status   string `json:"status"`
+}, id int64, executor string) bool {
+	for _, run := range runs {
+		if run.ID == id && run.Executor == executor && run.Status == "completed" {
+			return true
+		}
+	}
+	return false
+}
+
+func proofHasReviewResultRunID(results []struct {
+	Role    string `json:"role"`
+	State   string `json:"state"`
+	Outcome string `json:"outcome"`
+	RunID   int64  `json:"run_id"`
+}, role string, runID int64) bool {
+	for _, result := range results {
+		if result.Role == role && result.RunID == runID && result.State == "completed" && result.Outcome == "read_only_completed" {
 			return true
 		}
 	}

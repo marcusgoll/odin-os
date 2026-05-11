@@ -26,7 +26,7 @@ import (
 	trackerintake "odin-os/internal/tracker/intake"
 )
 
-const workUsage = "usage: odin work status|profiles|start --project <key> --title <text> [--intent <read_only|mutation|governance|destructive>]|evidence --task <id|key> --gate <gate> --kind <kind> --summary <text> [--ref <ref>] [--json]|advance --task <id|key> --gate <gate> [--json]|intake --project <key> [--dry-run]|reconcile --project <key>|proof (--task <id|key>|--intake <id|key>) [--json]|pr prepare --task <id|key> --summary <text> --test <text> --risk <text> --command <text> [--dry-run|--live --approval <id>] [--json]|approval request --task <id|key> --kind <merge|deploy> [--json]|dispatch [--task <id|key>] [--json]|execute --task <id|key> [--json]|retry --task <id|key> [--json]"
+const workUsage = "usage: odin work status|profiles|start --project <key> --title <text> [--intent <read_only|mutation|governance|destructive>]|evidence --task <id|key> --gate <gate> --kind <kind> --summary <text> [--ref <ref>] [--json]|advance --task <id|key> --gate <gate> [--json]|intake --project <key> [--dry-run]|reconcile --project <key>|proof (--task <id|key>|--intake <id|key>) [--json]|pr prepare --task <id|key> --summary <text> --test <text> --risk <text> --command <text> [--changed-file <path>] [--dry-run|--live --approval <id>] [--json]|pr review run --task <id|key> --role <reviewer|qa|security> --summary <text> [--json]|approval request --task <id|key> --kind <merge|deploy> [--json]|dispatch [--task <id|key>] [--json]|execute --task <id|key> [--json]|retry --task <id|key> [--json]"
 
 const workProofUsage = "usage: odin work proof (--task <id|key>|--intake <id|key>) [--json]"
 
@@ -550,7 +550,8 @@ func runWorkRetry(ctx context.Context, store *sqlite.Store, projectRegistry proj
 	return err
 }
 
-const workPRPrepareUsage = "usage: odin work pr prepare --task <id|key> --summary <text> --test <text> --risk <text> --command <text> [--dry-run|--live --approval <id>] [--json]"
+const workPRPrepareUsage = "usage: odin work pr prepare --task <id|key> --summary <text> --test <text> --risk <text> --command <text> [--changed-file <path>] [--dry-run|--live --approval <id>] [--json]"
+const workPRReviewRunUsage = "usage: odin work pr review run --task <id|key> --role <reviewer|qa|security> --summary <text> [--json]"
 
 type workPRPrepareView struct {
 	Prepared         bool                      `json:"prepared"`
@@ -589,15 +590,29 @@ type workApprovalRequestView struct {
 	NextSteps        []string          `json:"next_steps"`
 }
 
+type workPRReviewRunView struct {
+	Executed     bool                    `json:"executed"`
+	Role         string                  `json:"role"`
+	Task         workProofTaskView       `json:"task"`
+	Handoff      workPRHandoffView       `json:"handoff"`
+	Run          workProofRunView        `json:"run"`
+	ReviewResult workProofPRReviewResult `json:"review_result"`
+	NextSteps    []string                `json:"next_steps"`
+}
+
 func runWorkPR(ctx context.Context, store *sqlite.Store, args []string, stdout io.Writer) error {
 	if len(args) == 0 || args[0] == "help" || args[0] == "--help" {
-		_, err := fmt.Fprintln(stdout, workPRPrepareUsage)
+		_, err := fmt.Fprintf(stdout, "%s\n%s\n", workPRPrepareUsage, workPRReviewRunUsage)
 		return err
 	}
-	if args[0] != "prepare" {
+	switch args[0] {
+	case "prepare":
+		return runWorkPRPrepare(ctx, store, args[1:], stdout)
+	case "review":
+		return runWorkPRReview(ctx, store, args[1:], stdout)
+	default:
 		return fmt.Errorf("unsupported work pr subcommand: %s", args[0])
 	}
-	return runWorkPRPrepare(ctx, store, args[1:], stdout)
 }
 
 func runWorkApproval(ctx context.Context, store *sqlite.Store, args []string, stdout io.Writer) error {
@@ -697,6 +712,173 @@ func writeWorkApprovalRequestView(stdout io.Writer, jsonOutput bool, view workAp
 	return err
 }
 
+func runWorkPRReview(ctx context.Context, store *sqlite.Store, args []string, stdout io.Writer) error {
+	if len(args) == 0 || args[0] == "help" || args[0] == "--help" {
+		_, err := fmt.Fprintln(stdout, workPRReviewRunUsage)
+		return err
+	}
+	if args[0] != "run" {
+		return fmt.Errorf("unsupported work pr review subcommand: %s", args[0])
+	}
+	return runWorkPRReviewRun(ctx, store, args[1:], stdout)
+}
+
+func runWorkPRReviewRun(ctx context.Context, store *sqlite.Store, args []string, stdout io.Writer) error {
+	params := parseWorkStartArgs(args)
+	jsonOutput := parseBoolFlag(params, "json")
+	if _, ok := params["help"]; ok {
+		_, err := fmt.Fprintln(stdout, workPRReviewRunUsage)
+		return err
+	}
+	if err := rejectUnknownWorkProofArgs(params, "task", "role", "summary", "json"); err != nil {
+		return err
+	}
+	taskRef := strings.TrimSpace(params["task"])
+	role := normalizePRReviewRole(params["role"])
+	summary := strings.TrimSpace(params["summary"])
+	if taskRef == "" || role == "" || summary == "" {
+		return fmt.Errorf(workPRReviewRunUsage)
+	}
+
+	task, err := findWorkTask(ctx, store, taskRef)
+	if err != nil {
+		return err
+	}
+	issueURL := ""
+	if intakeID, ok := intakeIDFromTask(task); ok {
+		item, err := store.GetIntakeItem(ctx, intakeID)
+		if err != nil {
+			return err
+		}
+		issueURL = urlFromJSON(item.SourceFactsJSON)
+	}
+	handoff, found, err := findWorkProofPullRequestHandoff(ctx, store, task.ProjectID, issueURL)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return fmt.Errorf("pull request handoff is required before review role execution")
+	}
+	if !stringListContains(handoff.SelectedRoles, role) {
+		return fmt.Errorf("review role %s was not selected for pull request handoff %d", role, handoff.ID)
+	}
+	results, err := store.ListPullRequestReviewResults(ctx, handoff.ID)
+	if err != nil {
+		return err
+	}
+	existing, found := findPullRequestReviewResult(results, role)
+	if !found {
+		return fmt.Errorf("review result row for role %s is required before review role execution", role)
+	}
+	runs, err := store.ListRuns(ctx, sqlite.ListRunsParams{TaskID: &task.ID})
+	if err != nil {
+		return err
+	}
+	run, err := store.StartRun(ctx, sqlite.StartRunParams{
+		TaskID:   task.ID,
+		Executor: workPRReviewExecutor(role),
+		Attempt:  len(runs) + 1,
+		Status:   "running",
+	})
+	if err != nil {
+		return err
+	}
+	runFinished := false
+	defer func() {
+		if run.ID == 0 || runFinished {
+			return
+		}
+		_, _ = store.FinishRun(ctx, sqlite.FinishRunParams{
+			RunID:          run.ID,
+			Status:         "failed",
+			Summary:        "pull request review role execution failed",
+			TerminalReason: "internal_error",
+		})
+	}()
+	details, err := json.Marshal(map[string]any{
+		"handoff_id":       handoff.ID,
+		"review_result_id": existing.ID,
+		"role":             role,
+		"outcome":          "read_only_completed",
+	})
+	if err != nil {
+		return err
+	}
+	if _, err := store.RecordRunArtifact(ctx, sqlite.RecordRunArtifactParams{
+		RunID:        run.ID,
+		ArtifactType: "pull_request_review_result",
+		Summary:      summary,
+		DetailsJSON:  string(details),
+	}); err != nil {
+		return err
+	}
+	reviewResult, err := store.UpsertPullRequestReviewResult(ctx, sqlite.UpsertPullRequestReviewResultParams{
+		HandoffID: handoff.ID,
+		Role:      role,
+		State:     "completed",
+		Summary:   summary,
+		Comments:  []string{summary},
+		Blockers:  []string{},
+		Outcome:   "read_only_completed",
+	})
+	if err != nil {
+		return err
+	}
+	finished, err := store.FinishRun(ctx, sqlite.FinishRunParams{
+		RunID:         run.ID,
+		Status:        "completed",
+		Summary:       summary,
+		ArtifactsJSON: string(details),
+	})
+	if err != nil {
+		return err
+	}
+	runFinished = true
+	runID := finished.ID
+	view := workPRReviewRunView{
+		Executed: true,
+		Role:     role,
+		Task:     workPRPrepareTaskView(task),
+		Handoff: workPRHandoffView{
+			ID:            handoff.ID,
+			URL:           handoff.URL,
+			State:         handoff.State,
+			ReviewState:   handoff.ReviewState,
+			SelectedRoles: handoff.SelectedRoles,
+		},
+		Run: workProofRunView{
+			ID:             finished.ID,
+			TaskID:         finished.TaskID,
+			Executor:       finished.Executor,
+			Status:         finished.Status,
+			Attempt:        finished.Attempt,
+			Summary:        finished.Summary,
+			TerminalReason: finished.TerminalReason,
+		},
+		ReviewResult: workProofPRReviewResult{
+			Role:     reviewResult.Role,
+			State:    reviewResult.State,
+			Summary:  reviewResult.Summary,
+			Comments: reviewResult.Comments,
+			Blockers: reviewResult.Blockers,
+			Outcome:  reviewResult.Outcome,
+			RunID:    &runID,
+		},
+		NextSteps: []string{"inspect work proof before requesting merge or deployment approval"},
+	}
+	if jsonOutput {
+		return WriteJSON(stdout, view)
+	}
+	_, err = fmt.Fprintf(stdout, "executed=true role=%s run=%d status=%s task=%s next_steps=%s\n",
+		view.Role,
+		view.Run.ID,
+		view.Run.Status,
+		view.Task.Key,
+		strings.Join(view.NextSteps, "; "),
+	)
+	return err
+}
+
 func runWorkPRPrepare(ctx context.Context, store *sqlite.Store, args []string, stdout io.Writer) error {
 	params := parseWorkStartArgs(args)
 	jsonOutput := parseBoolFlag(params, "json")
@@ -704,7 +886,7 @@ func runWorkPRPrepare(ctx context.Context, store *sqlite.Store, args []string, s
 		_, err := fmt.Fprintln(stdout, workPRPrepareUsage)
 		return err
 	}
-	if err := rejectUnknownWorkProofArgs(params, "task", "summary", "test", "risk", "blocker", "command", "branch", "title", "approval", "dry-run", "live", "json"); err != nil {
+	if err := rejectUnknownWorkProofArgs(params, "task", "summary", "test", "risk", "blocker", "command", "changed-file", "branch", "title", "approval", "dry-run", "live", "json"); err != nil {
 		return err
 	}
 	live := parseBoolFlag(params, "live")
@@ -826,7 +1008,7 @@ func runWorkPRPrepare(ctx context.Context, store *sqlite.Store, args []string, s
 		Risks:                  []string{risk},
 		Blockers:               optionalStringList(params["blocker"]),
 		CommandsRun:            []string{command},
-		ChangedFiles:           []string{},
+		ChangedFiles:           optionalStringList(params["changed-file"]),
 		RuntimeBehaviorChanged: false,
 		RealOdinProofIncluded:  strings.Contains(command, "odin"),
 		PostComment:            false,
@@ -962,15 +1144,15 @@ func validateWorkApprovalPrerequisites(ctx context.Context, store *sqlite.Store,
 	if !found {
 		return fmt.Errorf("pull request handoff is required before %s approval", kind)
 	}
-	if err := validateWorkApprovalReviewEvidence(ctx, store, handoff); err != nil {
-		return err
-	}
 	events, err := store.ListEvents(ctx, sqlite.ListEventsParams{TaskID: &task.ID})
 	if err != nil {
 		return err
 	}
 	if !deliveryGateAdvanced(events, "branch_finished") {
 		return fmt.Errorf("branch_finished gate must be advanced before %s approval", kind)
+	}
+	if err := validateWorkApprovalReviewEvidence(ctx, store, task, handoff); err != nil {
+		return err
 	}
 	if kind == "deploy" {
 		approvals, err := store.ListApprovals(ctx, sqlite.ListApprovalsParams{TaskID: &task.ID})
@@ -985,7 +1167,7 @@ func validateWorkApprovalPrerequisites(ctx context.Context, store *sqlite.Store,
 	return nil
 }
 
-func validateWorkApprovalReviewEvidence(ctx context.Context, store *sqlite.Store, handoff sqlite.PullRequestHandoff) error {
+func validateWorkApprovalReviewEvidence(ctx context.Context, store *sqlite.Store, task sqlite.Task, handoff sqlite.PullRequestHandoff) error {
 	if len(handoff.SelectedRoles) == 0 {
 		return fmt.Errorf("review selection evidence is required before approval")
 	}
@@ -993,15 +1175,32 @@ func validateWorkApprovalReviewEvidence(ctx context.Context, store *sqlite.Store
 	if err != nil {
 		return err
 	}
-	seen := make(map[string]bool, len(results))
+	completedResults := make(map[string]bool, len(results))
 	for _, result := range results {
-		if strings.TrimSpace(result.State) != "" && strings.TrimSpace(result.Outcome) != "" {
-			seen[result.Role] = true
+		if result.State == "completed" && result.Outcome == "read_only_completed" {
+			completedResults[result.Role] = true
+		}
+	}
+	runs, err := store.ListRuns(ctx, sqlite.ListRunsParams{TaskID: &task.ID})
+	if err != nil {
+		return err
+	}
+	completedRuns := make(map[string]bool, len(runs))
+	for _, run := range runs {
+		role, ok := strings.CutPrefix(run.Executor, "pull_request_review:")
+		if !ok {
+			continue
+		}
+		if run.Status == "completed" {
+			completedRuns[role] = true
 		}
 	}
 	for _, role := range handoff.SelectedRoles {
-		if !seen[role] {
-			return fmt.Errorf("review result evidence for %s is required before approval", role)
+		if !completedResults[role] {
+			return fmt.Errorf("completed review result evidence for %s is required before approval", role)
+		}
+		if !completedRuns[role] {
+			return fmt.Errorf("completed review run evidence for %s is required before approval", role)
 		}
 	}
 	return nil
@@ -1214,6 +1413,7 @@ type workProofPRReviewResult struct {
 	Comments []string `json:"comments"`
 	Blockers []string `json:"blockers"`
 	Outcome  string   `json:"outcome,omitempty"`
+	RunID    *int64   `json:"run_id,omitempty"`
 }
 
 type workProofApprovalsView struct {
@@ -1304,6 +1504,7 @@ func buildWorkProofView(ctx context.Context, store *sqlite.Store, task sqlite.Ta
 			TerminalReason: run.TerminalReason,
 		})
 	}
+	reviewRunIDs := workPRReviewRunIDs(runs)
 	view.Execution.ActiveRunID = task.CurrentRunID
 
 	events, err := store.ListEvents(ctx, sqlite.ListEventsParams{TaskID: &task.ID})
@@ -1372,6 +1573,7 @@ func buildWorkProofView(ctx context.Context, store *sqlite.Store, task sqlite.Ta
 				Comments: result.Comments,
 				Blockers: result.Blockers,
 				Outcome:  result.Outcome,
+				RunID:    reviewRunIDs[result.Role],
 			})
 		}
 	}
@@ -1571,6 +1773,57 @@ func optionalStringList(value string) []string {
 		return []string{}
 	}
 	return []string{value}
+}
+
+func normalizePRReviewRole(role string) string {
+	switch strings.ToLower(strings.TrimSpace(role)) {
+	case review.RoleReviewer:
+		return review.RoleReviewer
+	case review.RoleQA:
+		return review.RoleQA
+	case review.RoleSecurity:
+		return review.RoleSecurity
+	default:
+		return ""
+	}
+}
+
+func workPRReviewExecutor(role string) string {
+	return "pull_request_review:" + role
+}
+
+func workPRReviewRunIDs(runs []sqlite.Run) map[string]*int64 {
+	ids := make(map[string]*int64)
+	for _, run := range runs {
+		role, ok := strings.CutPrefix(run.Executor, "pull_request_review:")
+		if !ok {
+			continue
+		}
+		if normalizePRReviewRole(role) == "" {
+			continue
+		}
+		id := run.ID
+		ids[role] = &id
+	}
+	return ids
+}
+
+func findPullRequestReviewResult(results []sqlite.PullRequestReviewResult, role string) (sqlite.PullRequestReviewResult, bool) {
+	for _, result := range results {
+		if result.Role == role {
+			return result, true
+		}
+	}
+	return sqlite.PullRequestReviewResult{}, false
+}
+
+func stringListContains(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }
 
 func defaultWorkString(value string, fallback string) string {
