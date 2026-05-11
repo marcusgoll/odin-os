@@ -143,6 +143,36 @@ func TestObservabilityProjectionsExposeActiveRunsBlockedItemsIncidentsAndRecover
 	_ = project
 }
 
+func TestObservabilityProjectionsExposeRecoveryEvidenceForIncidentOnlyFaults(t *testing.T) {
+	ctx := context.Background()
+	store := openObservabilityStore(t)
+	defer store.Close()
+
+	incident, err := store.OpenIncident(ctx, sqlite.OpenIncidentParams{
+		Severity:    "error",
+		Status:      "open",
+		Summary:     "wake packet envelope is invalid",
+		DetailsJSON: `{"fault_key":"wake_packet_invalid","subject_key":"task:alpha","decision_mode":"incident_only","next_action":"review wake packet evidence"}`,
+	})
+	if err != nil {
+		t.Fatalf("OpenIncident() error = %v", err)
+	}
+
+	incidents, err := projections.ListIncidentViews(ctx, store.DB())
+	if err != nil {
+		t.Fatalf("ListIncidentViews() error = %v", err)
+	}
+	if len(incidents) != 1 || incidents[0].IncidentID != incident.ID {
+		t.Fatalf("incidents = %+v, want incident-only incident %d", incidents, incident.ID)
+	}
+	if incidents[0].RunID != 0 || incidents[0].TaskID != 0 {
+		t.Fatalf("incident run/task = %d/%d, want zero values for incident-only fault", incidents[0].RunID, incidents[0].TaskID)
+	}
+	if incidents[0].DetailsJSON == "" {
+		t.Fatalf("incident DetailsJSON is empty, want recovery evidence details")
+	}
+}
+
 func TestObservabilityProjectionsDeduplicateTaskBlockedItems(t *testing.T) {
 	ctx := context.Background()
 	store := openObservabilityStore(t)

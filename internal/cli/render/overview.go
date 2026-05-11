@@ -368,13 +368,17 @@ func RenderOverview(view overview.View) string {
 	}
 	for _, incident := range view.Observability.Incidents {
 		lines = append(lines, fmt.Sprintf(
-			"    incident=%d work_item=%s project=%s companion=%s severity=%s status=%s summary=%s",
+			"    incident=%d work_item=%s project=%s companion=%s severity=%s status=%s fault_key=%s subject_key=%s decision_mode=%s next_action=%s summary=%s",
 			incident.IncidentID,
 			valueOrNone(incident.WorkItemKey),
 			valueOrNone(incident.ProjectKey),
 			valueOrNone(ptrValue(incident.CompanionKey)),
 			valueOrNone(incident.Severity),
 			valueOrNone(incident.Status),
+			valueOrNone(incident.FaultKey),
+			valueOrNone(incident.SubjectKey),
+			valueOrNone(incident.DecisionMode),
+			valueOrNone(incident.NextAction),
 			valueOrNone(incident.Summary),
 		))
 	}
@@ -384,11 +388,16 @@ func RenderOverview(view overview.View) string {
 	}
 	for _, recovery := range view.Observability.Recoveries {
 		lines = append(lines, fmt.Sprintf(
-			"    recovery=%d run=%d status=%s strategy=%s started_at=%s",
+			"    recovery=%d run=%d status=%s strategy=%s fault_key=%s subject_key=%s decision_mode=%s action=%s next_action=%s started_at=%s",
 			recovery.RecoveryID,
 			recovery.RunID,
 			valueOrNone(recovery.Status),
 			valueOrNone(recovery.Strategy),
+			valueOrNone(recovery.FaultKey),
+			valueOrNone(recovery.SubjectKey),
+			valueOrNone(recovery.DecisionMode),
+			valueOrNone(recovery.ActionName),
+			valueOrNone(recovery.NextAction),
 			valueOrNone(recovery.StartedAt),
 		))
 	}

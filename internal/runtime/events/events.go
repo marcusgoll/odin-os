@@ -549,12 +549,20 @@ type RecoveryStartedPayload struct {
 }
 
 type RecoveryActionExecutedPayload struct {
-	Playbook    string `json:"playbook"`
-	FaultKey    string `json:"fault_key"`
-	ActionName  string `json:"action_name"`
-	Attempt     int    `json:"attempt"`
-	Result      string `json:"result"`
-	Description string `json:"description,omitempty"`
+	Playbook          string                           `json:"playbook"`
+	FaultKey          string                           `json:"fault_key"`
+	ActionName        string                           `json:"action_name"`
+	Attempt           int                              `json:"attempt"`
+	Result            string                           `json:"result"`
+	Description       string                           `json:"description,omitempty"`
+	ContractViolation *RecoveryActionContractViolation `json:"contract_violation,omitempty"`
+}
+
+const RecoveryActionContractViolationInvalidActionResultStatus = "invalid_action_result_status"
+
+type RecoveryActionContractViolation struct {
+	Key       string `json:"key"`
+	RawStatus string `json:"raw_status,omitempty"`
 }
 
 type RecoveryCompletedPayload struct {
