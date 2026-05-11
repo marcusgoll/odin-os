@@ -97,6 +97,44 @@ the open PR proof as the target artifact.
 | Approval before merge/deploy | `odin work approval request --kind merge` and `--kind deploy` create separate Approval Requests only after PR handoff, review Run Attempts, delivery evidence, and delivery gates are present; `work proof` reads back purpose/status and deploy fails closed until merge approval exists | PR #222 plus PR #223 |
 | Operating rule everywhere | For every claimed workflow, real `odin` command proof invokes the path, persists state, enforces policy, and emits audit evidence; green CI alone is insufficient | not complete until the open stack is merged or explicitly accepted |
 
+## Real Odin Trigger Proof
+
+Fresh proof on the doc-only audit branch after `make build`:
+
+```bash
+tmp=$(mktemp -d)
+ODIN_ROOT="$tmp" HOME=$(mktemp -d) ./bin/odin project select odin-core
+ODIN_ROOT="$tmp" HOME=$(mktemp -d) ./bin/odin trigger create operator-daily initiative=odin-core kind=schedule status=enabled cadence=1h next=2026-05-05T03:00:00Z title=Operator_daily_review summary=operator_review quiet=02:00-06:00 batch=ops-review batch_window=1h intent=governance --json
+ODIN_ROOT="$tmp" HOME=$(mktemp -d) ./bin/odin trigger list --json
+ODIN_ROOT="$tmp" HOME=$(mktemp -d) ./bin/odin trigger show operator-daily
+ODIN_ROOT="$tmp" HOME=$(mktemp -d) ./bin/odin trigger test operator-daily now=2026-05-05T03:30:00Z --json
+ODIN_ROOT="$tmp" HOME=$(mktemp -d) ./bin/odin jobs --json
+ODIN_ROOT="$tmp" HOME=$(mktemp -d) ./bin/odin trigger audit operator-daily --json
+rm -rf "$tmp"
+```
+
+Observed proof:
+
+- `trigger create` persisted `operator-daily` with `status=enabled`,
+  `kind=schedule`, `next_eligible_at=2026-05-05T03:00:00Z`, and
+  `execution_intent=governance` inside `rule_json`.
+- `trigger list --json` read back the persisted trigger.
+- `trigger show operator-daily` showed `next_run=2026-05-05T03:00:00Z`,
+  `quiet_hours=02:00-06:00`, `batch=ops-review window=1h`,
+  `approval_required=true`, `last_materialization=none`, and
+  `audit_events=1`.
+- `trigger test ... --json` returned `dry_run=true`, `mutates=false`,
+  `decision=defer`, `reason=quiet_hours`, `approval_required=true`, and an
+  `event_envelope` containing `source=schedule`, `trigger_type=schedule`,
+  `dedupe_key=default:operator-daily:schedule:quiet_hours`,
+  `due_at=2026-05-05T03:00:00Z`, and risk
+  `execution_intent=governance` / `approval_required=true`.
+- `jobs --json` returned an empty job list after `trigger test`, proving the
+  test path did not materialize work.
+- `trigger audit --json` returned `automation_trigger.created` and
+  `automation_trigger.tested` events, with the tested event carrying the same
+  approval-required envelope evidence.
+
 ## What Is Already Done
 
 Scheduler trigger workflow is not the next implementation gap. PR #169 and PR
