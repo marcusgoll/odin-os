@@ -182,6 +182,45 @@ persists the safety-classified governance/destructive intent before approval
 blocking and extends exact category coverage across all named high-risk
 actions.
 
+## Real Odin Overview Proof
+
+Fresh proof on the doc-only audit branch after `make build`:
+
+```bash
+tmp=$(mktemp -d)
+home=$(mktemp -d)
+ODIN_ROOT="$tmp" HOME="$home" ./bin/odin project select odin-core
+ODIN_ROOT="$tmp" HOME="$home" ./bin/odin transition set cutover confirm because audit-overview-current-main
+ODIN_ROOT="$tmp" HOME="$home" ./bin/odin trigger create overview-daily initiative=odin-core kind=schedule status=enabled cadence=1h next=2026-05-05T03:00:00Z title=Overview_daily summary=overview_review intent=governance --json
+start_output=$(ODIN_ROOT="$tmp" HOME="$home" ./bin/odin work start --project odin-core --title Send_message_to_customer --intent read_only)
+task_key=$(printf '%s\n' "$start_output" | tr ' ' '\n' | sed -n 's/^key=//p')
+ODIN_ROOT="$tmp" HOME="$home" ./bin/odin work dispatch --task "$task_key" --json
+ODIN_ROOT="$tmp" HOME="$home" ./bin/odin overview
+ODIN_ROOT="$tmp" HOME="$home" ./bin/odin overview --json
+rm -rf "$tmp" "$home"
+```
+
+Observed text overview proof:
+
+- `Attention` showed `approvals=1`, `blocked_work=1`, and the pending Approval
+  Request for the blocked Work Item.
+- `Review Queue` showed `wiring=live total=1 approvals=1`.
+- `Active Execution` showed `runs=0` and no active Run Attempts for the blocked
+  item.
+- `Work Items` showed the blocked Work Item and nested `Run Attempts`.
+- `Approvals` repeated the pending approval with resolver support.
+- `Observability` showed `activity_log=9`, `blocked_work=1`, `Activity Log`,
+  `Run Attempts`, `Blocked Work`, `Incidents`, and `Recoveries`.
+- `Intake Inbox` showed `wiring=live source=intake_items status=empty`.
+- `Automation Triggers` showed the created trigger with
+  `next_due_at=2026-05-05T03:00:00Z`.
+
+Observed JSON overview proof included `work_items`, `review_queue`,
+`approvals`, `observability`, `blocked_work`, `recovery_guidance`,
+`intake_inbox`, and `automation_triggers` keys. The scenario did not create a
+failed Work Item, so it does not prove failed-work rendering on current `main`;
+that remains the purpose of PR #216.
+
 ## What Is Already Done
 
 Scheduler trigger workflow is not the next implementation gap. PR #169 and PR
