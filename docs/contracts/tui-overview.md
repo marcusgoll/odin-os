@@ -108,6 +108,17 @@ It contains typed sections or filters for:
 
 It must not be split back into multiple top-level panes just because the shell currently exposes separate commands.
 
+The overview must also render a sibling `Capability Truth` readback so operators
+do not mistake authored inventory for implemented runtime capability.
+
+Rules:
+
+- keep `Capability Catalog` as authored inventory
+- render `Capability Truth` with authored asset, runtime-proven, partial, advisory, unknown, and high-risk counts
+- show registry agents as `authored_asset` unless runtime evidence proves a real Odin delegation path
+- keep high-risk integration posture in risk labels such as `read_only` or `approval_required`; do not use risk labels as generic completion states
+- preserve object-owned lifecycle state from Work Items, Run Attempts, Review Queue, Approvals, Triggers, and Skill Activity instead of adding a generic capability status enum
+
 ### Approvals
 
 This is the first-class governance triage lane.

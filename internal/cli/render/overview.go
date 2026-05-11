@@ -243,6 +243,41 @@ func RenderOverview(view overview.View) string {
 	))
 
 	lines = append(lines, "")
+	lines = append(lines, "Capability Truth")
+	lines = append(lines, fmt.Sprintf(
+		"  wiring=%s authored_assets=%d runtime_proven=%d partial=%d advisory=%d unknown=%d high_risk=%d",
+		valueOrNone(string(view.CapabilityTruth.Wiring)),
+		view.CapabilityTruth.AuthoredAssetCount,
+		view.CapabilityTruth.RuntimeProvenCount,
+		view.CapabilityTruth.PartialCount,
+		view.CapabilityTruth.AdvisoryCount,
+		view.CapabilityTruth.UnknownCount,
+		view.CapabilityTruth.HighRiskFamilyCount,
+	))
+	for _, note := range view.CapabilityTruth.Notes {
+		lines = append(lines, fmt.Sprintf("  note=%s", valueOrNone(note)))
+	}
+	if len(view.CapabilityTruth.Items) == 0 {
+		lines = append(lines, "  truth=none")
+	} else {
+		renderedTruthItems := capabilityTruthItemsForText(view.CapabilityTruth.Items)
+		for _, item := range renderedTruthItems {
+			lines = append(lines, fmt.Sprintf(
+				"  truth kind=%s key=%s level=%s implemented=%t risk=%s proof=%s",
+				valueOrNone(item.Kind),
+				valueOrNone(item.Key),
+				valueOrNone(item.TruthLevel),
+				item.CountsAsImplemented,
+				valueOrNone(item.RiskLabel),
+				valueOrNone(strings.Join(item.Proof, ",")),
+			))
+		}
+		if remaining := len(view.CapabilityTruth.Items) - len(renderedTruthItems); remaining > 0 {
+			lines = append(lines, fmt.Sprintf("  truth remaining=%d use_json=true", remaining))
+		}
+	}
+
+	lines = append(lines, "")
 	lines = append(lines, "Skill Activity")
 	lines = append(lines, fmt.Sprintf(
 		"  wiring=%s invoke_success=%d invoke_failure=%d stub_results=%d command_output_only=%d",
@@ -495,6 +530,39 @@ func countBlockedSwarms(swarms []overview.CompanionSwarmSummary) int {
 		}
 	}
 	return count
+}
+
+func capabilityTruthItemsForText(items []overview.CapabilityTruthSummary) []overview.CapabilityTruthSummary {
+	const limit = 20
+	if len(items) <= limit {
+		return items
+	}
+
+	selected := make([]overview.CapabilityTruthSummary, 0, limit)
+	seen := make(map[string]struct{}, limit)
+	appendIf := func(item overview.CapabilityTruthSummary, include bool) {
+		if !include || len(selected) >= limit {
+			return
+		}
+		key := item.Kind + "\x00" + item.Key
+		if _, ok := seen[key]; ok {
+			return
+		}
+		seen[key] = struct{}{}
+		selected = append(selected, item)
+	}
+
+	for _, item := range items {
+		appendIf(item, item.CountsAsImplemented)
+	}
+	for _, item := range items {
+		appendIf(item, item.HighRisk)
+	}
+	for _, item := range items {
+		appendIf(item, true)
+	}
+
+	return selected
 }
 
 func ptrValue(value *string) string {

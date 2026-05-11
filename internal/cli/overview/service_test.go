@@ -80,6 +80,28 @@ func TestBuildReturnsCanonicalOverviewFromCurrentAuthority(t *testing.T) {
 	if view.CapabilityCatalog.ToolCount == 0 {
 		t.Fatalf("Tool count = 0, want builtin tools")
 	}
+	if view.CapabilityTruth.AuthoredAssetCount <= view.CapabilityCatalog.AgentDefinitionCount {
+		t.Fatalf("CapabilityTruth.AuthoredAssetCount = %d, want registry assets plus builtin tools", view.CapabilityTruth.AuthoredAssetCount)
+	}
+	if view.CapabilityTruth.AuthoredInventory.AgentDefinitionCount != view.CapabilityCatalog.AgentDefinitionCount {
+		t.Fatalf("Capability truth agent inventory = %d, want catalog agent definitions %d", view.CapabilityTruth.AuthoredInventory.AgentDefinitionCount, view.CapabilityCatalog.AgentDefinitionCount)
+	}
+	if view.CapabilityTruth.RuntimeProvenCount != 0 {
+		t.Fatalf("CapabilityTruth.RuntimeProvenCount = %d, want 0 for authored-only registry fixture", view.CapabilityTruth.RuntimeProvenCount)
+	}
+	var agentTruth *CapabilityTruthSummary
+	for index := range view.CapabilityTruth.Items {
+		if view.CapabilityTruth.Items[index].Key == "finance-advisor" {
+			agentTruth = &view.CapabilityTruth.Items[index]
+			break
+		}
+	}
+	if agentTruth == nil {
+		t.Fatalf("Capability truth items missing finance-advisor: %+v", view.CapabilityTruth.Items)
+	}
+	if agentTruth.TruthLevel != "authored_asset" || agentTruth.CountsAsImplemented {
+		t.Fatalf("finance-advisor truth = %+v, want authored_asset not counted as implemented", *agentTruth)
+	}
 	if len(view.WorkItems) != 1 {
 		t.Fatalf("Work items len = %d, want 1", len(view.WorkItems))
 	}
