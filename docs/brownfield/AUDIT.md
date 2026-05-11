@@ -281,7 +281,7 @@ Known from code/tests:
   mutation and PR creation/update remain unfinished.
 - Pull request creation/update is absent.
 - `config/policies.yaml` is placeholder-only.
-- The active registry contains no delivery profile workflow tagged `delivery_profile`, so `odin work profiles` currently has no profiles unless uncommitted or future registry files add them.
+- The active registry exposes `managed-project-delivery-workflow` as the first workflow tagged `delivery_profile`, so `odin work profiles` has a repo-owned readback path for governed delivery profiles.
 
 ## Duplicate Or Conflicting Implementations
 

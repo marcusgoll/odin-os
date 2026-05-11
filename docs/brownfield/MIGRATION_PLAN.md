@@ -127,8 +127,8 @@ Codex app-server should remain behind the executor interface and should not leak
    - Implement `odin help` and `odin --help` through `internal/app/lifecycle`.
    - Proof: real commands print usage and exit cleanly.
 
-6. **Add one minimal delivery profile registry asset**
-   - Add a `registry/workflows/*` entry tagged `delivery_profile`.
+6. **Keep delivery profile registry assets visible**
+   - Add any new `registry/workflows/*` delivery profile with the `delivery_profile` tag.
    - Use existing registry loader/validator.
    - Proof: `ODIN_ROOT=<tmp> ./bin/odin work profiles` shows the profile.
 
