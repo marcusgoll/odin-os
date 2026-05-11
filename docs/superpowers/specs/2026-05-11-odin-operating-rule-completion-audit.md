@@ -236,6 +236,74 @@ Therefore the remaining action is an explicit operator decision, not another
 local design slice: either approve and provide a disposable GitHub live-smoke
 target for PR #224, or approve integration of the green draft stack.
 
+## Operator Decision Packet
+
+The next step must choose exactly one path.
+
+### Option A: Run PR #224 live smoke first
+
+Use this when the operator wants live GitHub.com proof before integrating the
+stack.
+
+Required operator-provided inputs:
+
+- explicit approval to create or update one visible disposable GitHub PR
+- disposable repository in `owner/repo` form
+- existing disposable head branch in that repository
+- token supplied as `GITHUB_TOKEN` with only the accepted pull-request write
+  scope for that disposable repository
+
+Allowed mutation:
+
+- one PR create/update handoff through
+  `odin work pr prepare --live --approval <id>`
+
+Forbidden mutations:
+
+- merge, deploy, branch deletion, release creation, repository settings
+  mutation, secret mutation, public follow-up publishing, or batch approval
+
+Required proof to capture:
+
+- disposable repo and branch, without token value
+- Approval Request ID and approval resolution event
+- PR URL and number from `work proof`
+- `logs trail` evidence for approval and `pull_request.handoff_prepared`
+- explicit `prs=not_merged` and `deploy=not_started` proof
+
+Stop if:
+
+- the target repository or branch is not disposable
+- `GITHUB_TOKEN`, `ODIN_LIVE_PR_HANDOFF_REPO`, or
+  `ODIN_LIVE_PR_HANDOFF_HEAD_BRANCH` is missing
+- the token scope is broader than the operator accepted
+- the command would mutate anything beyond the single PR handoff
+
+### Option B: Integrate the green draft stack first
+
+Use this when the operator accepts the existing local, fixture, and CI proof as
+enough to start making the open behavior current `main`.
+
+Recommended order:
+
+1. Merge #212 if accepted, because it is already ready-for-review and separates
+   authored assets from runtime-proven capability claims.
+2. Merge or retarget #213 and #214 as the delivery evidence/gate base.
+3. Merge #216, #218, and #221 as independent main-based objective closures.
+4. Merge or retarget #219, preserving its dependency on delivery evidence when
+   needed.
+5. Refresh #222, #223, and #224 after their bases are current, then decide
+   whether PR #224 live smoke is still required before merge.
+
+Integration stop conditions:
+
+- any PR body loses `## Summary`, `## Proven`, `## Unproven`, or
+  `## Commands Run`
+- any remote check fails
+- a rebase changes the real `odin` proof path or weakens approval policy
+- merge/deploy/live GitHub mutation appears outside the approved PR handoff
+  smoke path
+
 ## Draft Stack Readiness
 
 Current non-mutating stack-readiness check:
