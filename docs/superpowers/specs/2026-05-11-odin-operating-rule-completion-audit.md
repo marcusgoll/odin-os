@@ -74,8 +74,8 @@ Evidence checked:
 | prompt-to-production vague input clarification | PR #219 adds `odin work proof --intake` for `needs_clarification` intake before Work Item creation. | Open draft PR #219 |
 | prompt-to-production spec/ticket | Intake processing and review-required draft artifacts exist; PR #219 proves them through `odin work proof`. | Open draft PR #219 |
 | prompt-to-production atomic commits/tests/review/PR | PR #219 adds dry-run/local `odin work pr prepare`, approval-backed `--live --approval <id>`, PR handoff evidence, proof readback, and a controlled GitHub API fixture test. | Partial; PR #219 open |
-| approval before merge/deploy | PR body templates and proof gates preserve human merge/deploy boundaries; delivery evidence and advance gates are in PR #213 and PR #214. | Partial; PR #213/#214 open |
-| operating rule applied everywhere | Many surfaces now satisfy real command + persistence + policy + audit. Open PRs, merge/deploy resolver gaps, and reviewer execution gaps mean the rule is not yet universal. | Not complete |
+| approval before merge/deploy | PR #222 adds local-only `odin work approval request --kind merge\|deploy`, separate Approval Requests, approval-purpose proof readback, and fail-closed prerequisite checks before any merge/deploy mutation exists. | Partial; PR #213/#214/#219/#222 open |
+| operating rule applied everywhere | Many surfaces now satisfy real command + persistence + policy + audit. Open PRs and reviewer execution gaps mean the rule is not yet universal. | Not complete |
 
 ## What Is Already Done
 
@@ -99,6 +99,15 @@ selection evidence. It now also adds approval-backed
 `internal/review` PR handoff seam. That still deliberately keeps merge/deploy
 approval outside the command.
 
+PR #222 layers on top of PR #219 and the delivery evidence/gate work. It adds a
+local-only merge/deploy approval proof surface:
+`odin work approval request --task <id|key> --kind <merge|deploy>`. The command
+creates separate Approval Requests for merge and deploy, reads them back through
+`odin work proof --task`, and fails closed unless PR handoff, review-selection
+evidence, delivery gate evidence, and merge-before-deploy ordering are present.
+It intentionally does not merge, deploy, delete branches, create releases, or
+call production mutation APIs.
+
 ## What Is Open But Not Yet Main
 
 - PR #218: capability/plugin model clarification through `odin capabilities`.
@@ -108,11 +117,13 @@ approval outside the command.
 - PR #219: prompt-to-production proof command, including pre-work intake proof
   and dry-run/local plus approval-backed live PR handoff evidence.
 - PR #221: high-risk approval parity for explicit operator dispatch.
+- PR #222: merge/deploy approval resolver proof through local-only Approval
+  Requests and `work proof` gate readback.
 
 ## Remaining Gaps
 
-1. Merge and deploy approvals remain human boundaries, but end-to-end resolver
-   proof is not complete.
+1. Merge and deploy approval resolver proof exists in PR #222, but it is stacked
+   on open draft PRs and not current `main` behavior.
 2. Reviewer, QA, and security handoff rows exist, but reviewer execution is not
    yet represented as first-class Run Attempts.
 3. PR #219 does not perform a real live GitHub.com write; its approved live
@@ -123,9 +134,9 @@ approval outside the command.
 
 ## Next Concrete Slice
 
-The next non-duplicative implementation slice should be merge/deploy approval
-resolver proof, not more scheduler-trigger work and not another PR handoff
-command.
+The next non-duplicative implementation slice should be reviewer/QA/security
+execution as first-class Run Attempts, not more scheduler-trigger work and not
+another PR handoff or approval-request command.
 
 Existing proof and handoff command shape from PR #219:
 
@@ -143,6 +154,18 @@ Required constraints:
   decisions before any external merge or deployment mutation exists.
 - Keep merge and deploy as separate approvals.
 - Make `odin work proof --task` read back merge/deploy approval evidence.
+
+Implemented in PR #222:
+
+- `odin work approval request --task <id|key> --kind <merge|deploy> [--json]`
+- merge and deploy Approval Requests with `requested_by=work_merge_gate` and
+  `requested_by=work_deploy_gate`
+- `work proof` merge/deploy gate readback with approval IDs, approval statuses,
+  and approval purpose
+- fail-closed prerequisite checks for PR handoff, review-selection evidence,
+  `branch_finished` gate advancement, and merge-before-deploy ordering
+- no GitHub merge API, deployment system, branch deletion, release creation, or
+  production mutation
 
 ## Implementation Goal Prompt
 
