@@ -27,6 +27,7 @@ grep -Fqx 'bash scripts/tests/odin-e2e-workflow-test.sh' <<<"$output" || fail "m
 grep -Fqx 'bash scripts/tests/github-actions-permissions-test.sh' <<<"$output" || fail "missing GitHub Actions permissions test"
 grep -Fqx 'bash scripts/tests/google-driver-security-test.sh' <<<"$output" || fail "missing Google driver security test"
 grep -Fqx 'bash scripts/tests/work-intake-live-smoke-test.sh' <<<"$output" || fail "missing work intake live smoke contract test"
+grep -Fqx 'bash scripts/tests/pr-handoff-live-smoke-test.sh' <<<"$output" || fail "missing PR handoff live smoke contract test"
 grep -Fqx 'bash scripts/tests/docker-compose-smoke-test.sh' <<<"$output" || fail "missing Docker Compose smoke contract test"
 grep -Fqx 'go test ./tests/integration -run TestAlphaAcceptance -count=1 -v' <<<"$output" || fail "missing alpha acceptance command"
 grep -Fqx 'mkdir -p bin' <<<"$output" || fail "missing build mkdir"
