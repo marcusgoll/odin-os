@@ -167,6 +167,38 @@ Observed proof:
   `automation_trigger.materialized` event, and the repeated envelope
   `dedupe_key=default:dedupe-daily:manual:audit-dedupe`.
 
+Fresh governance-trigger approval proof on the same current-main-equivalent
+branch:
+
+```bash
+make build
+tmp=$(mktemp -d)
+home=$(mktemp -d)
+ODIN_ROOT="$tmp" HOME="$home" ./bin/odin project select odin-core
+ODIN_ROOT="$tmp" HOME="$home" ./bin/odin transition set cutover confirm because audit-trigger-governance-approval
+ODIN_ROOT="$tmp" HOME="$home" ./bin/odin trigger create governance-daily initiative=odin-core kind=schedule status=enabled cadence=1h next=2026-05-05T03:00:00Z title=Governance_daily summary=governance_review intent=governance --json
+ODIN_ROOT="$tmp" HOME="$home" ./bin/odin trigger fire governance-daily reason=audit-governance --json
+ODIN_ROOT="$tmp" HOME="$home" ./bin/odin work dispatch --task <materialized-task-key> --json
+ODIN_ROOT="$tmp" HOME="$home" ./bin/odin approvals all --json
+ODIN_ROOT="$tmp" HOME="$home" ./bin/odin logs --json
+rm -rf "$tmp" "$home"
+```
+
+Observed proof:
+
+- `trigger fire` materialized a blocked automation Work Item, not a queued one.
+- The materialized Work Item persisted `execution_intent=governance` and
+  `execution_intent_source=trigger`.
+- `work dispatch --task ... --json` returned `dispatched=false`,
+  `reason=task_not_queued`, and a task with `blocked_reason=approval_required`.
+- `approvals all --json` showed one pending approval with `risk=governance`,
+  `reason=approval_required`, resolver support, and approve/deny actions.
+- `logs --json` showed one `automation_trigger.materialized`, one
+  `approval.requested`, and one `task.queue_state_changed` event carrying
+  `execution_intent=governance`,
+  `execution_intent_source=trigger`, and
+  `blocked_reason=approval_required`.
+
 ## Current Main Gap Proof
 
 Fresh proof on the doc-only audit branch after `make build`:
