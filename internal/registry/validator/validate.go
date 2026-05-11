@@ -127,6 +127,7 @@ func validateLegacyDocument(document registry.ParsedDocument, diagnostics *[]reg
 		requireString(document.Source.Path, diagnostics, "missing_field", "role", document.Frontmatter.Role)
 		requireList(document.Source.Path, diagnostics, "missing_field", "scopes", document.Frontmatter.Scopes)
 		requireList(document.Source.Path, diagnostics, "missing_field", "tools", document.Frontmatter.Tools)
+		validateDelegationProfile(document.Source.Path, diagnostics, document.Frontmatter.Delegation)
 	case registry.KindSkill:
 		requireString(document.Source.Path, diagnostics, "missing_field", "version", document.Frontmatter.Version)
 		requireBool(document.Source.Path, diagnostics, "missing_field", "enabled", document.Frontmatter.Enabled)
@@ -148,6 +149,62 @@ func validateLegacyDocument(document registry.ParsedDocument, diagnostics *[]reg
 	case registry.KindCommand:
 		requireString(document.Source.Path, diagnostics, "missing_field", "command", document.Frontmatter.Command)
 		requireList(document.Source.Path, diagnostics, "missing_field", "scopes", document.Frontmatter.Scopes)
+	}
+}
+
+func validateDelegationProfile(path string, diagnostics *[]registry.Diagnostic, profile registry.DelegationProfile) {
+	if !profile.Enabled {
+		return
+	}
+	requireString(path, diagnostics, "missing_field", "delegation.operator_surface", profile.OperatorSurface)
+	if strings.TrimSpace(profile.OperatorSurface) != "" && strings.TrimSpace(profile.OperatorSurface) != "companion_delegate" {
+		*diagnostics = append(*diagnostics, registry.ErrorDiagnostic(
+			path,
+			"invalid_delegation_profile",
+			"delegation.operator_surface must be companion_delegate",
+		))
+	}
+	requireList(path, diagnostics, "missing_field", "delegation.inputs.required", profile.Inputs.Required)
+	requireString(path, diagnostics, "missing_field", "delegation.convergence_mode", profile.ConvergenceMode)
+	if !supportedDelegationConvergenceMode(profile.ConvergenceMode) {
+		*diagnostics = append(*diagnostics, registry.ErrorDiagnostic(
+			path,
+			"invalid_delegation_profile",
+			"delegation.convergence_mode must be merge, review_gate, rank, or quorum",
+		))
+	}
+	if len(profile.Children) == 0 {
+		*diagnostics = append(*diagnostics, registry.ErrorDiagnostic(path, "missing_field", "required frontmatter field delegation.children is missing"))
+		return
+	}
+	for index, child := range profile.Children {
+		prefix := fmt.Sprintf("delegation.children[%d].", index)
+		requireString(path, diagnostics, "missing_field", prefix+"delegation_key", child.DelegationKey)
+		requireString(path, diagnostics, "missing_field", prefix+"role", child.Role)
+		if child.Wave <= 0 {
+			*diagnostics = append(*diagnostics, registry.ErrorDiagnostic(path, "missing_field", "required frontmatter field "+prefix+"wave is missing"))
+		}
+		requireString(path, diagnostics, "missing_field", prefix+"action_class", child.ActionClass)
+		requireString(path, diagnostics, "missing_field", prefix+"action_key_template", child.ActionKeyTemplate)
+		requireString(path, diagnostics, "missing_field", prefix+"mutation_mode_source", child.MutationModeSource)
+		requireString(path, diagnostics, "missing_field", prefix+"artifact_target", child.ArtifactTarget)
+		requireString(path, diagnostics, "missing_field", prefix+"executor", child.Executor)
+		if strings.TrimSpace(child.ConvergenceMode) != "" && !supportedDelegationConvergenceMode(child.ConvergenceMode) {
+			*diagnostics = append(*diagnostics, registry.ErrorDiagnostic(
+				path,
+				"invalid_delegation_profile",
+				prefix+"convergence_mode must be merge, review_gate, rank, or quorum",
+			))
+		}
+	}
+}
+
+func supportedDelegationConvergenceMode(mode string) bool {
+	switch strings.TrimSpace(mode) {
+	case "merge", "review_gate", "rank", "quorum":
+		return true
+	default:
+		return false
 	}
 }
 

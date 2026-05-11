@@ -884,6 +884,9 @@ func TestLoadDirLoadsUniversalIntakeAgents(t *testing.T) {
 	}
 
 	subagentDelegationPlanner := snapshot.ByKey["subagent-delegation-planner-agent"]
+	if subagentDelegationPlanner.Delegation.Enabled {
+		t.Fatalf("subagent-delegation-planner-agent delegation enabled = true, want advisory-only agent")
+	}
 	subagentDelegationPlannerContract := strings.Join([]string{
 		subagentDelegationPlanner.Title,
 		subagentDelegationPlanner.Summary,
@@ -927,6 +930,35 @@ func TestLoadDirLoadsUniversalIntakeAgents(t *testing.T) {
 		if !strings.Contains(subagentDelegationPlannerContract, required) {
 			t.Fatalf("subagent delegation planner agent body missing %q", required)
 		}
+	}
+
+	portalDeliveryAgent := snapshot.ByKey["portal-delivery-agent"]
+	if !portalDeliveryAgent.Delegation.Enabled {
+		t.Fatal("portal-delivery-agent delegation enabled = false, want runtime-delegatable profile")
+	}
+	if portalDeliveryAgent.Delegation.OperatorSurface != "companion_delegate" {
+		t.Fatalf("portal-delivery-agent delegation surface = %q, want companion_delegate", portalDeliveryAgent.Delegation.OperatorSurface)
+	}
+	if got := portalDeliveryAgent.Delegation.Inputs.Required; !sameStrings(got, []string{"portal_track", "surface"}) {
+		t.Fatalf("portal-delivery-agent required inputs = %#v, want portal_track and surface", got)
+	}
+	if portalDeliveryAgent.Delegation.ConvergenceMode != "merge" {
+		t.Fatalf("portal-delivery-agent convergence mode = %q, want merge", portalDeliveryAgent.Delegation.ConvergenceMode)
+	}
+	if len(portalDeliveryAgent.Delegation.Children) != 5 {
+		t.Fatalf("portal-delivery-agent delegation children = %d, want 5", len(portalDeliveryAgent.Delegation.Children))
+	}
+	designChild := portalDeliveryAgent.Delegation.Children[1]
+	if designChild.DelegationKey != "design-direction" ||
+		designChild.Role != "design_direction" ||
+		designChild.Wave != 1 ||
+		designChild.ActionClass != "portal_delivery" ||
+		designChild.ActionKeyTemplate != "{{portal_track}}:{{surface}}" ||
+		designChild.MutationModeSource != "intent" ||
+		designChild.ArtifactTarget != "run_detail" ||
+		designChild.Executor != "codex_headless" ||
+		designChild.SkillKey != "pixel-perfect-ui-ux-designer" {
+		t.Fatalf("portal-delivery-agent design child profile = %+v, want registry-backed design delegation", designChild)
 	}
 
 	taskSplitter := snapshot.ByKey["task-splitter-agent"]
@@ -2107,4 +2139,16 @@ The queue is sorted.
 
 func sampleSkillHandlerScript() string {
 	return "#!/usr/bin/env bash\nset -euo pipefail\ncat >/dev/null\nprintf '%s\\n' '{\"status\":\"ok\",\"summary\":\"complete\",\"output\":{\"classification\":\"triage\"}}'\n"
+}
+
+func sameStrings(left []string, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
 }
