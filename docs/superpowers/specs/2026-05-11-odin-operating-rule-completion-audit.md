@@ -135,6 +135,38 @@ Observed proof:
   `automation_trigger.tested` events, with the tested event carrying the same
   approval-required envelope evidence.
 
+Fresh current-main dedupe/materialization proof on the same doc-only branch:
+
+```bash
+make build
+tmp=$(mktemp -d)
+home=$(mktemp -d)
+ODIN_ROOT="$tmp" HOME="$home" ./bin/odin project select odin-core
+ODIN_ROOT="$tmp" HOME="$home" ./bin/odin transition set cutover confirm because audit-trigger-dedupe
+ODIN_ROOT="$tmp" HOME="$home" ./bin/odin trigger create dedupe-daily initiative=odin-core kind=schedule status=enabled cadence=1h next=2026-05-05T03:00:00Z title=Dedupe_daily summary=dedupe_review intent=read_only --json
+ODIN_ROOT="$tmp" HOME="$home" ./bin/odin trigger fire dedupe-daily reason=audit-dedupe --json
+ODIN_ROOT="$tmp" HOME="$home" ./bin/odin trigger fire dedupe-daily reason=audit-dedupe --json
+ODIN_ROOT="$tmp" HOME="$home" ./bin/odin jobs --json
+ODIN_ROOT="$tmp" HOME="$home" ./bin/odin trigger audit dedupe-daily --json
+rm -rf "$tmp" "$home"
+```
+
+Observed proof:
+
+- First `trigger fire` returned
+  `materialization_key=default:dedupe-daily:manual:audit-dedupe`,
+  `created_work_item=true`, and a queued automation Work Item with
+  `requested_by=automation_trigger:dedupe-daily`,
+  `work_kind=automation_trigger`,
+  `execution_intent=read_only`, and `execution_intent_source=trigger`.
+- Second `trigger fire` with the same reason returned the same
+  materialization key and Work Item, but `created_work_item=false`.
+- `jobs --json` showed exactly one queued automation-trigger Work Item.
+- `trigger audit --json` showed two `automation_trigger.fire_requested` events,
+  two `automation_trigger.evaluated` events, one
+  `automation_trigger.materialized` event, and the repeated envelope
+  `dedupe_key=default:dedupe-daily:manual:audit-dedupe`.
+
 ## Current Main Gap Proof
 
 Fresh proof on the doc-only audit branch after `make build`:
