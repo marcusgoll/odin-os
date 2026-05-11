@@ -130,6 +130,8 @@ For schedule triggers, the command should report whether the trigger is ready, w
 
 For event triggers, the command should report candidate event matches and why an event did or did not match. It must use the same event type vocabulary as `trigger ingest github-issue`.
 
+For both schedule and event triggers, the proof output and tested audit event should expose the preview event envelope, deterministic dedupe/materialization key, next-run preview when applicable, approval-required posture, recovery state, and `mutates=false` so an operator can compare dry-run evidence to the later real evaluation events.
+
 Third, keep `scheduler tick` as the real mutation proof. After `make build`, the final proof should still show `scheduler tick` can evaluate and materialize work through the existing runtime path. Promotion to the installed `odin` binary must be explicitly proven whenever the installed command path differs from repo-local `./bin/odin`.
 
 ## Rejected Alternatives

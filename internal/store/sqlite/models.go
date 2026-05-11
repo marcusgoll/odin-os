@@ -599,18 +599,21 @@ type FireAutomationTriggerResult struct {
 }
 
 type RecordAutomationTriggerTestParams struct {
-	WorkspaceID      string
-	Key              string
-	Decision         string
-	Reason           string
-	DueAt            *time.Time
-	NextRun          *time.Time
-	QuietHourEffect  string
-	BatchKey         string
-	BatchWindow      string
-	ApprovalRequired bool
-	RecoveryState    string
-	Mutates          bool
+	WorkspaceID        string
+	Key                string
+	Decision           string
+	Reason             string
+	Source             string
+	MaterializationKey string
+	DueAt              *time.Time
+	SourceOccurredAt   *time.Time
+	NextRun            *time.Time
+	QuietHourEffect    string
+	BatchKey           string
+	BatchWindow        string
+	ApprovalRequired   bool
+	RecoveryState      string
+	Mutates            bool
 }
 
 type RecordSchedulerTickParams struct {

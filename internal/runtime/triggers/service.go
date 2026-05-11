@@ -106,23 +106,25 @@ type PreviewTriggerParams struct {
 }
 
 type PreviewDecision struct {
-	Trigger          sqlite.AutomationTrigger
-	Decision         string
-	Reason           string
-	DueAt            *time.Time
-	NextEligibleAt   *time.Time
-	DeferredUntil    *time.Time
-	QuietHours       string
-	QuietHourEffect  string
-	BatchKey         string
-	BatchWindow      string
-	BatchGroup       string
-	EventType        string
-	CandidateEvents  int
-	MatchedEvents    []PreviewEventMatch
-	ApprovalRequired bool
-	RecoveryState    string
-	Error            string
+	Trigger            sqlite.AutomationTrigger
+	Decision           string
+	Reason             string
+	MaterializationKey string
+	EventEnvelope      *runtimeevents.AutomationTriggerEnvelope
+	DueAt              *time.Time
+	NextEligibleAt     *time.Time
+	DeferredUntil      *time.Time
+	QuietHours         string
+	QuietHourEffect    string
+	BatchKey           string
+	BatchWindow        string
+	BatchGroup         string
+	EventType          string
+	CandidateEvents    int
+	MatchedEvents      []PreviewEventMatch
+	ApprovalRequired   bool
+	RecoveryState      string
+	Error              string
 }
 
 type PreviewEventMatch struct {
@@ -573,18 +575,21 @@ func (service Service) RecordTestAudit(ctx context.Context, result PreviewResult
 	}
 	for _, decision := range result.Decisions {
 		if err := service.Store.RecordAutomationTriggerTest(ctx, sqlite.RecordAutomationTriggerTestParams{
-			WorkspaceID:      decision.Trigger.WorkspaceID,
-			Key:              decision.Trigger.Key,
-			Decision:         decision.Decision,
-			Reason:           decision.Reason,
-			DueAt:            decision.DueAt,
-			NextRun:          decision.NextEligibleAt,
-			QuietHourEffect:  decision.QuietHourEffect,
-			BatchKey:         decision.BatchKey,
-			BatchWindow:      decision.BatchWindow,
-			ApprovalRequired: decision.ApprovalRequired,
-			RecoveryState:    decision.RecoveryState,
-			Mutates:          false,
+			WorkspaceID:        decision.Trigger.WorkspaceID,
+			Key:                decision.Trigger.Key,
+			Decision:           decision.Decision,
+			Reason:             decision.Reason,
+			Source:             previewDecisionSource(decision),
+			MaterializationKey: decision.MaterializationKey,
+			DueAt:              decision.DueAt,
+			SourceOccurredAt:   decisionSourceOccurredAt(decision),
+			NextRun:            decision.NextEligibleAt,
+			QuietHourEffect:    decision.QuietHourEffect,
+			BatchKey:           decision.BatchKey,
+			BatchWindow:        decision.BatchWindow,
+			ApprovalRequired:   decision.ApprovalRequired,
+			RecoveryState:      decision.RecoveryState,
+			Mutates:            false,
 		}); err != nil {
 			return err
 		}
@@ -670,8 +675,10 @@ func (service Service) previewScheduleTrigger(ctx context.Context, trigger sqlit
 		deferred := deferredUntil.UTC()
 		decision.Decision = "defer"
 		decision.Reason = "quiet_hours"
+		decision.MaterializationKey = triggerMaterializationKey(trigger, "schedule", decision.Reason)
 		decision.DeferredUntil = &deferred
 		decision.QuietHourEffect = "deferred_until:" + deferred.Format(time.RFC3339)
+		decision.EventEnvelope = previewAutomationTriggerEnvelope(trigger, rule, "schedule", decision.MaterializationKey, decision.Reason, decision.DueAt, nil, decision.RecoveryState, now)
 		return decision
 	}
 	nextEligibleAt, err := nextScheduleEligibleAt(rule, trigger, dueAt, now.UTC())
@@ -690,11 +697,15 @@ func (service Service) previewScheduleTrigger(ctx context.Context, trigger sqlit
 	} else if ok {
 		decision.Decision = "batch"
 		decision.Reason = reason
+		decision.MaterializationKey = triggerMaterializationKey(trigger, "schedule", decision.Reason)
 		decision.BatchGroup = groupKey
+		decision.EventEnvelope = previewAutomationTriggerEnvelope(trigger, rule, "schedule", decision.MaterializationKey, decision.Reason, decision.DueAt, nil, decision.RecoveryState, now)
 		return decision
 	}
 	decision.Decision = "run"
 	decision.Reason = scheduledDueReason(dueAt)
+	decision.MaterializationKey = triggerMaterializationKey(trigger, "schedule", decision.Reason)
+	decision.EventEnvelope = previewAutomationTriggerEnvelope(trigger, rule, "schedule", decision.MaterializationKey, decision.Reason, decision.DueAt, nil, decision.RecoveryState, now)
 	return decision
 }
 
@@ -753,8 +764,81 @@ func (service Service) previewEventTrigger(ctx context.Context, trigger sqlite.A
 	if len(decision.MatchedEvents) > 0 {
 		decision.Decision = "run"
 		decision.Reason = decision.MatchedEvents[0].Reason
+		decision.MaterializationKey = triggerMaterializationKey(trigger, "event", decision.Reason)
+		sourceOccurredAt := decision.MatchedEvents[0].OccurredAt
+		decision.EventEnvelope = previewAutomationTriggerEnvelope(trigger, rule, "event", decision.MaterializationKey, decision.Reason, nil, &sourceOccurredAt, decision.RecoveryState, now)
 	}
 	return decision, nil
+}
+
+func triggerMaterializationKey(trigger sqlite.AutomationTrigger, source string, reason string) string {
+	return strings.Join([]string{
+		defaultTriggerString(trigger.WorkspaceID, "default"),
+		strings.TrimSpace(trigger.Key),
+		defaultTriggerString(source, "manual"),
+		defaultTriggerString(reason, "manual"),
+	}, ":")
+}
+
+func previewDecisionSource(decision PreviewDecision) string {
+	if decision.EventEnvelope != nil && strings.TrimSpace(decision.EventEnvelope.Source) != "" {
+		return decision.EventEnvelope.Source
+	}
+	if strings.EqualFold(decision.Trigger.Kind, "event") {
+		return "event"
+	}
+	return "schedule"
+}
+
+func decisionSourceOccurredAt(decision PreviewDecision) *time.Time {
+	if len(decision.MatchedEvents) == 0 {
+		return nil
+	}
+	sourceOccurredAt := decision.MatchedEvents[0].OccurredAt
+	return &sourceOccurredAt
+}
+
+func previewAutomationTriggerEnvelope(trigger sqlite.AutomationTrigger, rule scheduleRule, source string, materializationKey string, reason string, dueAt *time.Time, sourceOccurredAt *time.Time, recoveryState string, now time.Time) *runtimeevents.AutomationTriggerEnvelope {
+	if strings.TrimSpace(materializationKey) == "" {
+		return nil
+	}
+	if recoveryState == "" {
+		recoveryState = "not_started"
+	}
+	envelope := &runtimeevents.AutomationTriggerEnvelope{
+		Source:        defaultTriggerString(source, "manual"),
+		TriggerType:   defaultTriggerString(trigger.Kind, "schedule"),
+		DedupeKey:     materializationKey,
+		OccurredAt:    now.UTC().Format(time.RFC3339),
+		RecoveryState: recoveryState,
+	}
+	if dueAt != nil {
+		envelope.DueAt = dueAt.UTC().Format(time.RFC3339)
+	}
+	if sourceOccurredAt != nil {
+		envelope.SourceOccurredAt = sourceOccurredAt.UTC().Format(time.RFC3339)
+	}
+	envelope.Schedule = &runtimeevents.AutomationTriggerScheduleEnvelope{
+		Summary:       strings.TrimSpace(trigger.RuleSummary),
+		Cadence:       strings.TrimSpace(rule.Cadence),
+		Cron:          strings.TrimSpace(rule.Cron),
+		QuietHours:    strings.TrimSpace(rule.QuietHours),
+		QuietTimezone: strings.TrimSpace(rule.QuietTimezone),
+	}
+	if envelope.Schedule.Summary == "" &&
+		envelope.Schedule.Cadence == "" &&
+		envelope.Schedule.Cron == "" &&
+		envelope.Schedule.QuietHours == "" &&
+		envelope.Schedule.QuietTimezone == "" {
+		envelope.Schedule = nil
+	}
+	if intent := strings.ToLower(strings.TrimSpace(rule.ExecutionIntent)); validTriggerExecutionIntent(intent) {
+		envelope.Risk = &runtimeevents.AutomationTriggerRiskEnvelope{
+			ExecutionIntent:  intent,
+			ApprovalRequired: triggerIntentNeedsApproval(intent),
+		}
+	}
+	return envelope
 }
 
 func triggerIntentNeedsApproval(intent string) bool {

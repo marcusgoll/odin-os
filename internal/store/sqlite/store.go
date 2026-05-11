@@ -1294,12 +1294,13 @@ func (store *Store) RecordAutomationTriggerTest(ctx context.Context, params Reco
 			RecoveryState:    strings.TrimSpace(params.RecoveryState),
 			Mutates:          params.Mutates,
 			Envelope: automationTriggerEnvelope(trigger, FireAutomationTriggerParams{
-				WorkspaceID: trigger.WorkspaceID,
-				Key:         trigger.Key,
-				Source:      "test",
-				Reason:      strings.TrimSpace(params.Reason),
-				DueAt:       params.DueAt,
-			}, "test", "", strings.TrimSpace(params.RecoveryState), now),
+				WorkspaceID:      trigger.WorkspaceID,
+				Key:              trigger.Key,
+				Source:           defaultString(params.Source, "test"),
+				Reason:           strings.TrimSpace(params.Reason),
+				DueAt:            params.DueAt,
+				SourceOccurredAt: params.SourceOccurredAt,
+			}, defaultString(params.Source, "test"), strings.TrimSpace(params.MaterializationKey), strings.TrimSpace(params.RecoveryState), now),
 		}
 		if params.DueAt != nil {
 			payload.DueAt = params.DueAt.UTC().Format(time.RFC3339)

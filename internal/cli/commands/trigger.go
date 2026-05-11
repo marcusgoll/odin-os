@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	runtimeevents "odin-os/internal/runtime/events"
 	"odin-os/internal/runtime/triggers"
 	"odin-os/internal/store/sqlite"
 )
@@ -398,26 +399,28 @@ type triggerPreviewView struct {
 }
 
 type triggerPreviewDecisionView struct {
-	Key              string                         `json:"key"`
-	Decision         string                         `json:"decision"`
-	Reason           string                         `json:"reason"`
-	TriggerType      string                         `json:"trigger_type"`
-	Schedule         string                         `json:"schedule"`
-	EventType        string                         `json:"event_type,omitempty"`
-	DueAt            *string                        `json:"due_at,omitempty"`
-	NextRun          *string                        `json:"next_run,omitempty"`
-	LastRun          *string                        `json:"last_run,omitempty"`
-	QuietHours       string                         `json:"quiet_hours"`
-	QuietHourEffect  string                         `json:"quiet_hour_effect"`
-	BatchKey         string                         `json:"batch_key,omitempty"`
-	BatchWindow      string                         `json:"batch_window,omitempty"`
-	BatchGroup       string                         `json:"batch_group,omitempty"`
-	CandidateEvents  int                            `json:"candidate_events,omitempty"`
-	MatchedEvents    []triggerPreviewEventMatchView `json:"matched_events,omitempty"`
-	ApprovalRequired bool                           `json:"approval_required"`
-	RecoveryState    string                         `json:"recovery_state"`
-	Mutates          bool                           `json:"mutates"`
-	Error            string                         `json:"error,omitempty"`
+	Key                string                                   `json:"key"`
+	Decision           string                                   `json:"decision"`
+	Reason             string                                   `json:"reason"`
+	MaterializationKey string                                   `json:"materialization_key,omitempty"`
+	EventEnvelope      *runtimeevents.AutomationTriggerEnvelope `json:"event_envelope,omitempty"`
+	TriggerType        string                                   `json:"trigger_type"`
+	Schedule           string                                   `json:"schedule"`
+	EventType          string                                   `json:"event_type,omitempty"`
+	DueAt              *string                                  `json:"due_at,omitempty"`
+	NextRun            *string                                  `json:"next_run,omitempty"`
+	LastRun            *string                                  `json:"last_run,omitempty"`
+	QuietHours         string                                   `json:"quiet_hours"`
+	QuietHourEffect    string                                   `json:"quiet_hour_effect"`
+	BatchKey           string                                   `json:"batch_key,omitempty"`
+	BatchWindow        string                                   `json:"batch_window,omitempty"`
+	BatchGroup         string                                   `json:"batch_group,omitempty"`
+	CandidateEvents    int                                      `json:"candidate_events,omitempty"`
+	MatchedEvents      []triggerPreviewEventMatchView           `json:"matched_events,omitempty"`
+	ApprovalRequired   bool                                     `json:"approval_required"`
+	RecoveryState      string                                   `json:"recovery_state"`
+	Mutates            bool                                     `json:"mutates"`
+	Error              string                                   `json:"error,omitempty"`
 }
 
 type triggerPreviewEventMatchView struct {
@@ -589,26 +592,28 @@ func newTriggerPreviewDecisionView(decision triggers.PreviewDecision) triggerPre
 		})
 	}
 	return triggerPreviewDecisionView{
-		Key:              decision.Trigger.Key,
-		Decision:         decision.Decision,
-		Reason:           decision.Reason,
-		TriggerType:      decision.Trigger.Kind,
-		Schedule:         details.Schedule,
-		EventType:        decision.EventType,
-		DueAt:            formatOptionalTimePointer(decision.DueAt),
-		NextRun:          formatOptionalTimePointer(decision.NextEligibleAt),
-		LastRun:          formatOptionalTimePointer(decision.Trigger.LastMaterializedAt),
-		QuietHours:       defaultTriggerOutput(decision.QuietHours, details.QuietHours),
-		QuietHourEffect:  quietEffect,
-		BatchKey:         decision.BatchKey,
-		BatchWindow:      decision.BatchWindow,
-		BatchGroup:       decision.BatchGroup,
-		CandidateEvents:  decision.CandidateEvents,
-		MatchedEvents:    matches,
-		ApprovalRequired: decision.ApprovalRequired,
-		RecoveryState:    decision.RecoveryState,
-		Mutates:          false,
-		Error:            decision.Error,
+		Key:                decision.Trigger.Key,
+		Decision:           decision.Decision,
+		Reason:             decision.Reason,
+		MaterializationKey: decision.MaterializationKey,
+		EventEnvelope:      decision.EventEnvelope,
+		TriggerType:        decision.Trigger.Kind,
+		Schedule:           details.Schedule,
+		EventType:          decision.EventType,
+		DueAt:              formatOptionalTimePointer(decision.DueAt),
+		NextRun:            formatOptionalTimePointer(decision.NextEligibleAt),
+		LastRun:            formatOptionalTimePointer(decision.Trigger.LastMaterializedAt),
+		QuietHours:         defaultTriggerOutput(decision.QuietHours, details.QuietHours),
+		QuietHourEffect:    quietEffect,
+		BatchKey:           decision.BatchKey,
+		BatchWindow:        decision.BatchWindow,
+		BatchGroup:         decision.BatchGroup,
+		CandidateEvents:    decision.CandidateEvents,
+		MatchedEvents:      matches,
+		ApprovalRequired:   decision.ApprovalRequired,
+		RecoveryState:      decision.RecoveryState,
+		Mutates:            false,
+		Error:              decision.Error,
 	}
 }
 
