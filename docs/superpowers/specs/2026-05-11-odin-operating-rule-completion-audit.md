@@ -176,11 +176,47 @@ Observed result:
   `execution_intent_source=operator`; it did not persist
   `execution_intent_source=safety_classifier`.
 
-This proves current `main` is category-aware enough to block this high-risk
-message task, but PR #221 remains necessary for operator-path parity because it
-persists the safety-classified governance/destructive intent before approval
-blocking and extends exact category coverage across all named high-risk
-actions.
+Fresh high-risk category matrix proof on the doc-only audit branch, whose code
+differs from `origin/main` only by this audit document:
+
+```bash
+make build
+# fresh ODIN_ROOT/HOME
+./bin/odin project select odin-core
+./bin/odin transition set cutover confirm because audit-high-risk-category-matrix
+# for each category below:
+./bin/odin work start --project odin-core --title <category> --intent read_only
+./bin/odin work dispatch --task <key> --json
+./bin/odin approvals all --json
+./bin/odin logs --json
+```
+
+Categories proven on current-main code:
+
+| Category | Result | Persisted intent |
+| --- | --- | --- |
+| Send message to customer | blocked with `approval_required` | `read_only` / `operator` |
+| Delete data from customer records | blocked with `approval_required` | `read_only` / `operator` |
+| Deploy code to production | blocked with `approval_required` | `read_only` / `operator` |
+| Change calendar event with client | blocked with `approval_required` | `read_only` / `operator` |
+| Publish public launch post | blocked with `approval_required` | `read_only` / `operator` |
+| Modify production system config | blocked with `approval_required` | `read_only` / `operator` |
+| Make purchase of subscription | blocked with `approval_required` | `read_only` / `operator` |
+| Change permissions for repository | blocked with `approval_required` | `read_only` / `operator` |
+| Update financial record | blocked with `approval_required` | `read_only` / `operator` |
+| Update legal records | blocked with `approval_required` | `read_only` / `operator` |
+| Update medical record | blocked with `approval_required` | `read_only` / `operator` |
+
+`odin approvals all --json` showed 11 pending approvals and `odin logs --json`
+showed 11 `approval.requested` events. All 11
+`task.queue_state_changed` events kept `execution_intent_source=operator`; none
+used `execution_intent_source=safety_classifier`.
+
+This proves current `main` is category-aware enough to block every named
+high-risk category in this audit. PR #221 remains necessary for operator-path
+parity because it persists the safety-classified governance/destructive intent
+before approval blocking, so durable task state, approval evidence, and runtime
+events agree on why the work was blocked.
 
 Fresh prompt-to-production command-surface proof on the doc-only audit branch,
 whose code differs from `origin/main` only by this audit document:
