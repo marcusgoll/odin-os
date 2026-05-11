@@ -65,6 +65,10 @@ Phase 03 through Phase 14 event types are:
 - `registry_version.recorded`
 - `executor_health.recorded`
 - `context_packet.created`
+- `memory.summary_recorded`
+- `memory.summary_updated`
+- `memory.proposal_created`
+- `memory.proposal_resolved`
 - `project.transition_changed`
 - `project.shadow_observation_recorded`
 - `project.compare_report_recorded`
@@ -218,6 +222,31 @@ Goal run, blocker, and evidence records use the same stream for future runner-fa
 The `goal` stream is the audit trail for goal CLI mutations. Goal state remains in SQLite; registry files, overview projections, and future runners must not become a parallel goal authority.
 
 Goal-derived review queue items use existing goal state as their authority. `intake-goal:<id>`, `goal:<id>`, and `goal-approval:<id>` can approve or reject created/planned goals through the review CLI. `goal-blocker:<id>` items are visible for inspection, but blocker resolution is not implemented until a store-level resolution primitive and lifecycle rule exist; approve/reject attempts must return an unsupported/not-resolved result without mutating goal or blocker state.
+
+## Memory proposal expectation
+
+Durable memory writes that are not already accepted runtime facts must enter
+Odin as reviewable Memory Proposals. `odin memory propose` records a
+`memory_summaries` row with `details_json.schema=memory_proposal.v1`, pending
+status, explicit scope, source/provenance fields, and safety classification.
+
+Proposal creation appends:
+
+- `memory.proposal_created`
+
+Proposal resolution through either `odin memory resolve` or
+`odin review act memory-proposal:<id> ...` appends:
+
+- `memory.proposal_resolved`
+
+Payloads must identify the memory summary ID, scope, scope key, memory type,
+proposal status, decision when resolved, source type, source ID or key,
+sensitivity, reviewer when present, and review reason when present. They must
+not include raw sensitive content.
+
+Pending, rejected, and archived Memory Proposals are audit records only. Normal
+active-memory recall must exclude them unless a command explicitly asks for that
+proposal status.
 
 ## Intake-to-goal expectation
 

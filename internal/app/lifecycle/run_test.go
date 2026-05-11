@@ -2444,7 +2444,7 @@ func TestRunApprovalGatedReviewHumanOutputExplainsOperatorAction(t *testing.T) {
 	}
 }
 
-func TestRunUnifiedReviewQueueSurfacesMemoryProposalsReadOnly(t *testing.T) {
+func TestRunMemoryProposalLifecycleUsesUnifiedReviewQueue(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	root := testRepoRoot(t)
 
@@ -2456,6 +2456,19 @@ func TestRunUnifiedReviewQueueSurfacesMemoryProposalsReadOnly(t *testing.T) {
 		}
 		return output.String()
 	}
+	extractMemoryID := func(output string) int64 {
+		t.Helper()
+		var payload struct {
+			ID int64 `json:"id"`
+		}
+		if err := json.Unmarshal([]byte(output), &payload); err != nil {
+			t.Fatalf("json.Unmarshal(memory output) error = %v\n%s", err, output)
+		}
+		if payload.ID == 0 {
+			t.Fatalf("memory output = %s, want id", output)
+		}
+		return payload.ID
+	}
 
 	store, err := sqlite.Open(filepath.Join(root, "data", "odin.db"))
 	if err != nil {
@@ -2464,44 +2477,82 @@ func TestRunUnifiedReviewQueueSurfacesMemoryProposalsReadOnly(t *testing.T) {
 	if err := store.Migrate(context.Background()); err != nil {
 		t.Fatalf("Migrate() error = %v", err)
 	}
-	project, err := store.CreateProject(context.Background(), sqlite.CreateProjectParams{
-		Key:  testProjectKey,
-		Name: "Alpha CLI",
-	})
-	if err != nil {
+	if _, err := store.CreateProject(context.Background(), sqlite.CreateProjectParams{
+		Key:           testProjectKey,
+		Name:          "Alpha CLI",
+		Scope:         "project",
+		GitRoot:       filepath.Join(root, testProjectKey),
+		DefaultBranch: "main",
+		ManifestPath:  "config/projects.yaml",
+	}); err != nil {
 		t.Fatalf("CreateProject() error = %v", err)
-	}
-	recorded, err := store.RecordMemorySummary(context.Background(), sqlite.RecordMemorySummaryParams{
-		ProjectID:   &project.ID,
-		Scope:       "project",
-		ScopeKey:    testProjectKey,
-		MemoryType:  "social_draft",
-		Summary:     "Draft social memory awaiting operator review",
-		DetailsJSON: `{"fields":{"approval":"pending","channel":"x","content_kind":"post"}}`,
-	})
-	if err != nil {
-		t.Fatalf("RecordMemorySummary() error = %v", err)
 	}
 	store.Close()
 
+	proposed := run("memory", "propose",
+		"scope=project",
+		"project="+testProjectKey,
+		"type=operating_note",
+		"source_type=operator",
+		"source_key=manual-proof",
+		"sensitivity=normal",
+		"--summary", "Pilot proof memory",
+		"--json",
+	)
+	memoryID := extractMemoryID(proposed)
+	for _, want := range []string{
+		`"queue_id": "memory-proposal:` + int64String(memoryID) + `"`,
+		`"status": "pending"`,
+		`"approval": "pending"`,
+		`"schema": "memory_proposal.v1"`,
+		`"active": false`,
+		`"source_type": "operator"`,
+		`"source_key": "manual-proof"`,
+	} {
+		if !strings.Contains(proposed, want) {
+			t.Fatalf("memory propose output = %s, want %s", proposed, want)
+		}
+	}
+
+	activeList := run("memory", "list", "--json")
+	if !strings.Contains(activeList, `"items": []`) {
+		t.Fatalf("memory list output = %s, want pending proposal excluded by default", activeList)
+	}
+
+	pendingList := run("memory", "list", "status=pending", "--json")
+	for _, want := range []string{
+		`"queue_id": "memory-proposal:` + int64String(memoryID) + `"`,
+		`"status": "pending"`,
+		`"active": false`,
+	} {
+		if !strings.Contains(pendingList, want) {
+			t.Fatalf("memory list pending output = %s, want %s", pendingList, want)
+		}
+	}
+
 	list := run("review", "list", "--json")
 	for _, want := range []string{
-		`"queue_id": "memory-proposal:` + int64String(recorded.ID) + `"`,
+		`"queue_id": "memory-proposal:` + int64String(memoryID) + `"`,
 		`"source_type": "memory_proposal"`,
 		`"source": "memory_summaries"`,
 		`"risk": "governance"`,
-		`"allowed_actions": []`,
+		`"allowed_actions": [
+        "accept",
+        "reject",
+        "archive"
+      ]`,
 	} {
 		if !strings.Contains(list, want) {
 			t.Fatalf("review list output = %s, want %s", list, want)
 		}
 	}
 
-	show := run("review", "show", "memory-proposal:"+int64String(recorded.ID), "--json")
+	show := run("review", "show", "memory-proposal:"+int64String(memoryID), "--json")
 	for _, want := range []string{
 		`"source_type": "memory_proposal"`,
-		`"memory_type": "social_draft"`,
+		`"memory_type": "operating_note"`,
 		`"approval": "pending"`,
+		`"schema": "memory_proposal.v1"`,
 		`"risk": "governance"`,
 	} {
 		if !strings.Contains(show, want) {
@@ -2509,44 +2560,122 @@ func TestRunUnifiedReviewQueueSurfacesMemoryProposalsReadOnly(t *testing.T) {
 		}
 	}
 
-	var actionOutput bytes.Buffer
-	err = Run(context.Background(), root, []string{"review", "act", "memory-proposal:" + int64String(recorded.ID), "approve", "--json"}, strings.NewReader(""), &actionOutput)
-	if err == nil || !strings.Contains(err.Error(), "memory proposal review actions are not implemented") {
-		t.Fatalf("Run(review act memory proposal approve) error = %v output=%s, want forbidden action", err, actionOutput.String())
-	}
+	actionOutput := run("review", "act", "memory-proposal:"+int64String(memoryID), "accept", "--json")
 	for _, want := range []string{
-		`"queue_id": "memory-proposal:` + int64String(recorded.ID) + `"`,
+		`"queue_id": "memory-proposal:` + int64String(memoryID) + `"`,
 		`"source_type": "memory_proposal"`,
-		`"action": "approve"`,
-		`"status": "unsupported"`,
-		`"result": "not_resolved"`,
-		`"supported": false`,
-		`"mutation_scope": "unsupported"`,
+		`"action": "accept"`,
+		`"status": "resolved"`,
+		`"result": "accepted"`,
+		`"supported": true`,
+		`"mutation_scope": "review_state"`,
 		`"approval_required": true`,
-		`"mutated": false`,
-		`"error": "memory_proposal_review_not_implemented"`,
+		`"mutated": true`,
+		`"audit_event": "memory.proposal_resolved"`,
 	} {
-		if !strings.Contains(actionOutput.String(), want) {
-			t.Fatalf("review act memory proposal output = %s, want %s", actionOutput.String(), want)
+		if !strings.Contains(actionOutput, want) {
+			t.Fatalf("review act memory proposal output = %s, want %s", actionOutput, want)
 		}
 	}
 
-	store, err = sqlite.Open(filepath.Join(root, "data", "odin.db"))
-	if err != nil {
-		t.Fatalf("sqlite.Open(reopen) error = %v", err)
+	acceptedList := run("memory", "list", "--json")
+	for _, want := range []string{
+		`"queue_id": "memory-proposal:` + int64String(memoryID) + `"`,
+		`"status": "accepted"`,
+		`"approval": "accepted"`,
+		`"active": true`,
+	} {
+		if !strings.Contains(acceptedList, want) {
+			t.Fatalf("memory list output = %s, want %s", acceptedList, want)
+		}
 	}
-	summary, err := findMemoryProposalSummary(context.Background(), store, recorded.ID)
-	if err != nil {
-		t.Fatalf("findMemoryProposalSummary() error = %v", err)
+
+	showAccepted := run("memory", "show", "memory-proposal:"+int64String(memoryID), "--json")
+	if !strings.Contains(showAccepted, `"review_reason": "unified review decision"`) || !strings.Contains(showAccepted, `"active": true`) {
+		t.Fatalf("memory show accepted output = %s, want accepted provenance", showAccepted)
 	}
-	fields, err := memorySummaryFields(summary.DetailsJSON)
-	if err != nil {
-		t.Fatalf("memorySummaryFields() error = %v", err)
+
+	rejectProposed := run("memory", "propose",
+		"scope=project",
+		"project="+testProjectKey,
+		"type=operating_note",
+		"source_type=operator",
+		"source_key=reject-proof",
+		"sensitivity=normal",
+		"--summary", "Rejected proof memory",
+		"--json",
+	)
+	rejectedID := extractMemoryID(rejectProposed)
+	rejectOutput := run("memory", "resolve", "memory-proposal:"+int64String(rejectedID), "reject", "because", "not durable enough", "--json")
+	for _, want := range []string{
+		`"status": "rejected"`,
+		`"approval": "rejected"`,
+		`"active": false`,
+		`"review_reason": "not durable enough"`,
+	} {
+		if !strings.Contains(rejectOutput, want) {
+			t.Fatalf("memory resolve reject output = %s, want %s", rejectOutput, want)
+		}
 	}
-	if fields["approval"] != "pending" {
-		t.Fatalf("memory proposal approval = %q, want pending after unsupported review action", fields["approval"])
+
+	archiveProposed := run("memory", "propose",
+		"scope=project",
+		"project="+testProjectKey,
+		"type=operating_note",
+		"source_type=operator",
+		"source_key=archive-proof",
+		"sensitivity=normal",
+		"--summary", "Archived proof memory",
+		"--json",
+	)
+	archivedID := extractMemoryID(archiveProposed)
+	archiveOutput := run("review", "act", "memory-proposal:"+int64String(archivedID), "archive", "--json")
+	for _, want := range []string{
+		`"result": "archived"`,
+		`"status": "archived"`,
+		`"approval": "archived"`,
+		`"active": false`,
+	} {
+		if !strings.Contains(archiveOutput, want) {
+			t.Fatalf("review act archive output = %s, want %s", archiveOutput, want)
+		}
 	}
-	store.Close()
+
+	repeatedOutput := run("memory", "resolve", "memory-proposal:"+int64String(memoryID), "accept", "because", "already accepted", "--json")
+	if !strings.Contains(repeatedOutput, `"repeated": true`) || !strings.Contains(repeatedOutput, `"status": "accepted"`) {
+		t.Fatalf("memory resolve repeated output = %s, want repeated accepted result", repeatedOutput)
+	}
+
+	activeAfterTerminal := run("memory", "list", "--json")
+	for _, blockedID := range []int64{rejectedID, archivedID} {
+		if strings.Contains(activeAfterTerminal, `"queue_id": "memory-proposal:`+int64String(blockedID)+`"`) {
+			t.Fatalf("memory list output = %s, want rejected/archived proposal %d excluded from active memory", activeAfterTerminal, blockedID)
+		}
+	}
+	rejectedList := run("memory", "list", "status=rejected", "--json")
+	if !strings.Contains(rejectedList, `"queue_id": "memory-proposal:`+int64String(rejectedID)+`"`) || !strings.Contains(rejectedList, `"active": false`) {
+		t.Fatalf("memory list rejected output = %s, want rejected proposal visible only by explicit status", rejectedList)
+	}
+	archivedList := run("memory", "list", "status=archived", "--json")
+	if !strings.Contains(archivedList, `"queue_id": "memory-proposal:`+int64String(archivedID)+`"`) || !strings.Contains(archivedList, `"active": false`) {
+		t.Fatalf("memory list archived output = %s, want archived proposal visible only by explicit status", archivedList)
+	}
+
+	logs := run("logs", "--json")
+	for _, want := range []string{
+		`"type": "memory.proposal_created"`,
+		`"type": "memory.proposal_resolved"`,
+		`"status": "accepted"`,
+		`"decision": "accept"`,
+		`"status": "rejected"`,
+		`"decision": "reject"`,
+		`"status": "archived"`,
+		`"decision": "archive"`,
+	} {
+		if !strings.Contains(logs, want) {
+			t.Fatalf("logs output = %s, want %s", logs, want)
+		}
+	}
 }
 
 func TestRunReviewQueueIncludesGoalReviewItems(t *testing.T) {

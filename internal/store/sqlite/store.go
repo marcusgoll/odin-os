@@ -4546,7 +4546,7 @@ func (store *Store) RecordMemorySummary(ctx context.Context, params RecordMemory
 			UpdatedAt:          now,
 		}
 
-		return appendEventTx(ctx, tx, eventInsert{
+		if err := appendEventTx(ctx, tx, eventInsert{
 			StreamType: runtimeevents.StreamMemorySummary,
 			StreamID:   summary.ID,
 			EventType:  runtimeevents.EventMemorySummaryRecorded,
@@ -4563,7 +4563,23 @@ func (store *Store) RecordMemorySummary(ctx context.Context, params RecordMemory
 				RunID:              summary.RunID,
 			},
 			OccurredAt: now,
-		})
+		}); err != nil {
+			return err
+		}
+		if payload, ok := memoryProposalEventPayload(summary); ok && payload.Status == "pending" {
+			return appendEventTx(ctx, tx, eventInsert{
+				StreamType: runtimeevents.StreamMemorySummary,
+				StreamID:   summary.ID,
+				EventType:  runtimeevents.EventMemoryProposalCreated,
+				Scope:      summary.Scope,
+				ProjectID:  summary.ProjectID,
+				TaskID:     summary.TaskID,
+				RunID:      summary.RunID,
+				Payload:    payload,
+				OccurredAt: now,
+			})
+		}
+		return nil
 	})
 
 	return summary, err
@@ -4599,7 +4615,7 @@ func (store *Store) UpdateMemorySummaryDetails(ctx context.Context, params Updat
 		current.UpdatedAt = now
 		summary = current
 
-		return appendEventTx(ctx, tx, eventInsert{
+		if err := appendEventTx(ctx, tx, eventInsert{
 			StreamType: runtimeevents.StreamMemorySummary,
 			StreamID:   summary.ID,
 			EventType:  runtimeevents.EventMemorySummaryUpdated,
@@ -4616,10 +4632,93 @@ func (store *Store) UpdateMemorySummaryDetails(ctx context.Context, params Updat
 				RunID:              summary.RunID,
 			},
 			OccurredAt: now,
-		})
+		}); err != nil {
+			return err
+		}
+		if payload, ok := memoryProposalEventPayload(summary); ok && memoryProposalResolvedStatus(payload.Status) {
+			return appendEventTx(ctx, tx, eventInsert{
+				StreamType: runtimeevents.StreamMemorySummary,
+				StreamID:   summary.ID,
+				EventType:  runtimeevents.EventMemoryProposalResolved,
+				Scope:      summary.Scope,
+				ProjectID:  summary.ProjectID,
+				TaskID:     summary.TaskID,
+				RunID:      summary.RunID,
+				Payload:    payload,
+				OccurredAt: now,
+			})
+		}
+		return nil
 	})
 
 	return summary, err
+}
+
+func memoryProposalEventPayload(summary MemorySummary) (runtimeevents.MemoryProposalPayload, bool) {
+	var details struct {
+		Schema   string `json:"schema"`
+		Status   string `json:"status"`
+		Approval string `json:"approval"`
+		Source   struct {
+			Type string `json:"type"`
+			ID   string `json:"id"`
+			Key  string `json:"key"`
+		} `json:"source"`
+		Provenance struct {
+			ReviewedBy   string `json:"reviewed_by"`
+			ReviewReason string `json:"review_reason"`
+		} `json:"provenance"`
+		Safety struct {
+			Sensitivity string `json:"sensitivity"`
+		} `json:"safety"`
+	}
+	if err := json.Unmarshal([]byte(summary.DetailsJSON), &details); err != nil {
+		return runtimeevents.MemoryProposalPayload{}, false
+	}
+	if strings.TrimSpace(details.Schema) != "memory_proposal.v1" {
+		return runtimeevents.MemoryProposalPayload{}, false
+	}
+	status := strings.TrimSpace(details.Status)
+	if status == "" {
+		status = strings.TrimSpace(details.Approval)
+	}
+	payload := runtimeevents.MemoryProposalPayload{
+		MemoryID:    summary.ID,
+		Scope:       summary.Scope,
+		ScopeKey:    summary.ScopeKey,
+		MemoryType:  summary.MemoryType,
+		Status:      status,
+		Decision:    memoryProposalDecisionForStatus(status),
+		SourceType:  details.Source.Type,
+		SourceID:    details.Source.ID,
+		SourceKey:   details.Source.Key,
+		Sensitivity: details.Safety.Sensitivity,
+		ReviewedBy:  details.Provenance.ReviewedBy,
+		Reason:      details.Provenance.ReviewReason,
+	}
+	return payload, true
+}
+
+func memoryProposalResolvedStatus(status string) bool {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "accepted", "rejected", "archived":
+		return true
+	default:
+		return false
+	}
+}
+
+func memoryProposalDecisionForStatus(status string) string {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "accepted":
+		return "accept"
+	case "rejected":
+		return "reject"
+	case "archived":
+		return "archive"
+	default:
+		return ""
+	}
 }
 
 func (store *Store) ListMemorySummaries(ctx context.Context, params ListMemorySummariesParams) ([]MemorySummary, error) {

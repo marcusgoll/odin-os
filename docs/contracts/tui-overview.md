@@ -203,6 +203,12 @@ Rules:
 - memory views must always use explicit `Memory Scope`
 - workspace, initiative, companion, and run-related memory may all appear here
 - relevant memory snippets should also appear contextually inside other detail views
+- `odin memory` owns durable memory proposal, inspection, and resolution flows
+- pending, rejected, and archived Memory Proposals are visible only through
+  explicit proposal filters or `odin review`; they must not be treated as active
+  recall material
+- `odin knowledge` remains the retrieval and context-pack surface over existing
+  runtime truth and must not become the generic memory write command
 - do not turn this into an unscoped notes dump
 
 ## Scoped controls

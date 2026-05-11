@@ -120,3 +120,45 @@ func TestMemorySummaryUpdatedContract(t *testing.T) {
 		t.Fatalf("decoded payload = %#v, want %#v", decoded, want)
 	}
 }
+
+func TestMemoryProposalContract(t *testing.T) {
+	t.Parallel()
+
+	if got := EventMemoryProposalCreated; got != Type("memory.proposal_created") {
+		t.Fatalf("EventMemoryProposalCreated = %q, want %q", got, Type("memory.proposal_created"))
+	}
+	if got := EventMemoryProposalResolved; got != Type("memory.proposal_resolved") {
+		t.Fatalf("EventMemoryProposalResolved = %q, want %q", got, Type("memory.proposal_resolved"))
+	}
+
+	want := MemoryProposalPayload{
+		MemoryID:    12,
+		Scope:       "project",
+		ScopeKey:    "odin-core",
+		MemoryType:  "operating_note",
+		Status:      "accepted",
+		Decision:    "accept",
+		SourceType:  "run",
+		SourceID:    "44",
+		SourceKey:   "run-44",
+		Sensitivity: "normal",
+		ReviewedBy:  "operator",
+		Reason:      "verified source",
+	}
+
+	payload, err := EncodePayload(want)
+	if err != nil {
+		t.Fatalf("EncodePayload(MemoryProposalPayload) error = %v", err)
+	}
+	if got := string(payload); got != `{"memory_id":12,"scope":"project","scope_key":"odin-core","memory_type":"operating_note","status":"accepted","decision":"accept","source_type":"run","source_id":"44","source_key":"run-44","sensitivity":"normal","reviewed_by":"operator","reason":"verified source"}` {
+		t.Fatalf("encoded payload = %s", got)
+	}
+
+	decoded, err := DecodePayload[MemoryProposalPayload](payload)
+	if err != nil {
+		t.Fatalf("DecodePayload(MemoryProposalPayload) error = %v", err)
+	}
+	if !reflect.DeepEqual(decoded, want) {
+		t.Fatalf("decoded payload = %#v, want %#v", decoded, want)
+	}
+}
