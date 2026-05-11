@@ -167,19 +167,33 @@ Added:
 
 No ADR is needed. This records and aligns already-selected product and runtime authority decisions rather than introducing a surprising architecture change.
 
+## Implementation Hardening Status
+
+The first follow-up hardening slice adds direct proof for the review source mappings that were weakly covered during the design pass:
+
+- `TestReviewQueueIncludesAllGovernedDecisionSources` now seeds and requires `memory_proposal`.
+- `TestReviewQueueIncludesScheduledApprovalWorkAsTaskApproval` proves scheduled approval work appears as `task_approval` with `work_kind=automation_trigger`.
+- `reviewEntryFromPendingApproval` now exposes `task_id`, `task_key`, and `work_kind` from the pending approval projection so scheduled approval work remains visible in the unified queue read model.
+
+Real `odin` proof for scheduled approval work:
+
+```bash
+ODIN_ROOT="$tmp" ./bin/odin trigger upsert scheduled-approval-proof initiative=odin-core kind=schedule status=enabled next=2026-05-11T02:00:00Z title=Scheduled_approval_proof summary=scheduled_review intent=governance --json
+ODIN_ROOT="$tmp" ./bin/odin trigger evaluate now=2026-05-11T03:00:00Z --json
+ODIN_ROOT="$tmp" ./bin/odin review list --json
+ODIN_ROOT="$tmp" ./bin/odin work status --json
+```
+
+The resulting review item has `source_type=task_approval`, `task_key=automation-scheduled-approval-proof-*`, and `work_kind=automation_trigger`.
+
 ## Open Blockers
 
 - The root checkout still has unrelated dirty changes; implementation should continue in isolated worktrees.
-- The review queue inventory test currently checks the source composition list for `memory_proposal`, but the all-governed-source fixture does not yet seed and require a `memory_proposal` entry.
-- Scheduled work requiring approval is represented by materialized task approvals; a focused fixture should prove that mapping explicitly.
+- Memory proposal creation still has no public `odin memory ...` creation command. The unified review read path is proven through lifecycle tests that seed `memory_summaries` and then exercise real `odin review list/show/act` command handling.
 
 ## Planning Handoff
 
-Implement one hardening PR after this doc-locking slice:
-
-1. Add or update review queue characterization tests so the all-source fixture includes `memory_proposal`.
-2. Add a scheduled-work approval fixture proving automation-trigger materialized approval work appears as `task_approval`.
-3. Run the focused review/intake tests and real `odin review list --json` proof.
+No additional hardening is required for the source-coverage fixtures in this slice. Future implementation should focus on a public memory-proposal creation operator path only if durable memory writes become an accepted product requirement.
 
 ## Implementation Goal Prompt
 
