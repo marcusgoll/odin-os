@@ -514,6 +514,31 @@ Current objective stack status:
 
 The next step must choose exactly one path.
 
+Because both paths cross an operational boundary, generic responses such as
+`yes`, `proceed`, or `continue` are not enough. The operator decision must name
+the selected path and scope.
+
+Approval wording that counts:
+
+- Option A live smoke:
+  `Approve Option A: run PR #224 live smoke against <owner/repo> branch <branch>.`
+  The approval must also confirm that the repository and branch are disposable
+  and that `GITHUB_TOKEN` is scoped only for the accepted pull-request write.
+- Option B integration:
+  `Approve Option B: integrate the green draft stack using the documented
+  runbook.`
+  The approval may narrow the scope to named PRs, for example
+  `Approve Option B for PRs #212, #213, and #214 only.`
+
+Replies that do not count as approval:
+
+- `yes`
+- `proceed`
+- `continue`
+- approval that does not name Option A or Option B
+- approval that names Option A but omits the disposable repository, branch, or
+  token-scope confirmation
+
 ### Option A: Run PR #224 live smoke first
 
 Use this when the operator wants live GitHub.com proof before integrating the
