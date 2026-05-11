@@ -486,13 +486,12 @@ target for PR #224, or approve integration of the green draft stack.
 
 ## Evidence Snapshot
 
-Latest read-only refresh:
+Latest read-only refresh: 2026-05-11T20:19:31Z.
 
 - `origin/main`: `eb51743e9321724b561a4b01aad674ed08939e77`
-- audit branch: `0ed7462468779843d7d41e6d2a73a5e194478a6d`
+- audit branch: `815afb1547fac0a28d61843214909e1b51946d07`
 - PR #220 state: draft, merge state `CLEAN`, GitGuardian, two `go` checks, and
-  `odin-e2e` passing after rerunning one transient `internal/skills`
-  timeout-test failure.
+  `odin-e2e` passing after the approval-parity proof update.
 
 Current objective stack status:
 
