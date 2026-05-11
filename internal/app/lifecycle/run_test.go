@@ -985,6 +985,17 @@ type routingEvidence struct {
 	ProjectKey            string `json:"project_key"`
 	ExecutionIntent       string `json:"execution_intent"`
 	ExecutionIntentSource string `json:"execution_intent_source"`
+	SkillInvocation       *struct {
+		SkillKey              string          `json:"skill_key"`
+		InputJSON             json.RawMessage `json:"input_json"`
+		SourceType            string          `json:"source_type"`
+		SourceKey             string          `json:"source_key"`
+		Scope                 string          `json:"scope"`
+		ProjectKey            string          `json:"project_key"`
+		ExecutionIntent       string          `json:"execution_intent"`
+		ExecutionIntentSource string          `json:"execution_intent_source"`
+		ReviewState           string          `json:"review_state"`
+	} `json:"skill_invocation,omitempty"`
 }
 
 type draftArtifactEvidence struct {
@@ -1228,6 +1239,85 @@ func TestRunIntakeProcessClassifiesOperatorTextIntoDesignedCategories(t *testing
 		if tc.wantArtifact == "draft_goal" && strings.Contains(output.String(), `"goal_id": 1`) {
 			t.Fatalf("process output for %q = %s, must draft goal review artifact without creating a goal", tc.title, output.String())
 		}
+	}
+}
+
+func TestRunIntakeSkillInvocationBindingPromotesAndRunsThroughSkillService(t *testing.T) {
+	t.Parallel()
+
+	root := testRepoRoot(t)
+	seedReviewableSkill(t, root, "triage-skill", "triage complete", `{"classification":"triage","next_step":"plan"}`)
+
+	run := func(args ...string) string {
+		t.Helper()
+		var stdout bytes.Buffer
+		if err := Run(context.Background(), root, args, strings.NewReader(""), &stdout); err != nil {
+			t.Fatalf("Run(%v) error = %v\nstdout=%s", args, err, stdout.String())
+		}
+		return stdout.String()
+	}
+
+	run("intake", "raw", "create",
+		"--source", "operator",
+		"--project", testProjectKey,
+		"--type", "skill",
+		"--title", "Triage this release-readiness note with the skill system",
+		"--dedup-key", "skill-binding-intake",
+		"--json",
+	)
+	processOutput := run("intake", "process", "--id", "intake-1", "--json")
+	view := decodeIntakeEvidenceView(t, []byte(processOutput))
+	if view.IntakeItem.Processing.Routing.SkillInvocation == nil {
+		t.Fatalf("process output = %s, want skill_invocation routing evidence", processOutput)
+	}
+	binding := view.IntakeItem.Processing.Routing.SkillInvocation
+	if binding.SkillKey != "triage-skill" ||
+		binding.SourceType != "intake" ||
+		binding.SourceKey != "intake-1" ||
+		binding.Scope != "project" ||
+		binding.ProjectKey != testProjectKey ||
+		binding.ExecutionIntent != "read_only" ||
+		binding.ExecutionIntentSource != "skill_binding:intake" ||
+		binding.ReviewState != "review_required" ||
+		!strings.Contains(string(binding.InputJSON), "release-readiness") {
+		t.Fatalf("skill invocation binding = %+v input=%s, want project-scoped triage-skill binding", binding, string(binding.InputJSON))
+	}
+
+	if artifacts := run("skills", "artifacts", "--json"); !strings.Contains(artifacts, `"artifacts": []`) {
+		t.Fatalf("skills artifacts before review = %s, want no pre-review skill execution", artifacts)
+	}
+
+	acceptOutput := run("intake", "review", "accept", "intake-1", "--json")
+	if !strings.Contains(acceptOutput, `"work_created": true`) || !strings.Contains(acceptOutput, `"key": "intake-review-1"`) {
+		t.Fatalf("accept output = %s, want promoted skill invocation work item", acceptOutput)
+	}
+	jobsOutput := run("jobs", "--json")
+	for _, want := range []string{
+		`"task_key": "intake-review-1"`,
+		`"work_kind": "skill_invocation"`,
+		`"execution_intent": "read_only"`,
+		`"execution_intent_source": "skill_binding:intake"`,
+	} {
+		if !strings.Contains(jobsOutput, want) {
+			t.Fatalf("jobs output = %s, want %s", jobsOutput, want)
+		}
+	}
+
+	runOutput := run("skills", "run", "intake-review-1", "--json")
+	for _, want := range []string{
+		`"task_key": "intake-review-1"`,
+		`"skill_key": "triage-skill"`,
+		`"status": "ok"`,
+		`"runtime_effect": "durable_reviewable_artifact"`,
+		`"artifact_id": 1`,
+	} {
+		if !strings.Contains(runOutput, want) {
+			t.Fatalf("skills run output = %s, want %s", runOutput, want)
+		}
+	}
+	reviewOutput := run("review", "list", "--json")
+	if !strings.Contains(reviewOutput, `"queue_id": "skill-artifact:1"`) || !strings.Contains(reviewOutput, `"source_type": "skill_artifact"`) {
+		t.Fatalf("review output = %s, want skill artifact in unified review", reviewOutput)
 	}
 }
 
@@ -3732,6 +3822,63 @@ func TestRunWorkExplicitTriggerIntentDoesNotDependOnTitleInference(t *testing.T)
 	overviewOutput := run("overview", "--json")
 	if !strings.Contains(overviewOutput, `"execution_intent": "governance"`) || !strings.Contains(overviewOutput, `"execution_intent_source": "trigger"`) {
 		t.Fatalf("overview output = %s, want trigger-created work intent visibility", overviewOutput)
+	}
+}
+
+func TestRunTriggerSkillInvocationBindingMaterializesRequestWithoutRunningHandler(t *testing.T) {
+	t.Parallel()
+
+	root := testRepoRoot(t)
+	seedReviewableSkill(t, root, "triage-skill", "scheduled triage complete", `{"classification":"scheduled","next_step":"review"}`)
+	run := func(args ...string) string {
+		t.Helper()
+		var stdout bytes.Buffer
+		if err := Run(context.Background(), root, args, strings.NewReader(""), &stdout); err != nil {
+			t.Fatalf("Run(%v) error = %v\nstdout=%s", args, err, stdout.String())
+		}
+		return stdout.String()
+	}
+
+	ruleJSON := `{"summary":"scheduled skill proof","cadence":"1h","execution_intent":"read_only","skill_invocation":{"skill_key":"triage-skill","input_json":{"message":"scheduled triage"},"scope":"project","project_key":"` + testProjectKey + `"}}`
+	run("trigger", "upsert", "scheduled-skill-triage",
+		"initiative="+testProjectKey,
+		"kind=schedule",
+		"status=enabled",
+		"next=2026-05-05T00:00:00Z",
+		"title=Scheduled_skill_triage",
+		"rule_json="+ruleJSON,
+		"--json",
+	)
+
+	fireOutput := run("trigger", "fire", "scheduled-skill-triage", "reason=skill-binding-proof", "--json")
+	var fire struct {
+		WorkItem struct {
+			Key                   string `json:"key"`
+			WorkKind              string `json:"work_kind"`
+			ExecutionIntent       string `json:"execution_intent"`
+			ExecutionIntentSource string `json:"execution_intent_source"`
+		} `json:"work_item"`
+	}
+	if err := json.Unmarshal([]byte(fireOutput), &fire); err != nil {
+		t.Fatalf("json.Unmarshal(fire output) error = %v\n%s", err, fireOutput)
+	}
+	if fire.WorkItem.Key == "" || fire.WorkItem.WorkKind != "skill_invocation" || fire.WorkItem.ExecutionIntent != "read_only" || fire.WorkItem.ExecutionIntentSource != "skill_binding:trigger" {
+		t.Fatalf("fire output = %+v, want read-only skill invocation work item", fire.WorkItem)
+	}
+	if artifacts := run("skills", "artifacts", "--json"); !strings.Contains(artifacts, `"artifacts": []`) {
+		t.Fatalf("skills artifacts after trigger fire = %s, want no trigger-side handler execution", artifacts)
+	}
+
+	runOutput := run("skills", "run", fire.WorkItem.Key, "--json")
+	for _, want := range []string{
+		`"task_key": "` + fire.WorkItem.Key + `"`,
+		`"skill_key": "triage-skill"`,
+		`"status": "ok"`,
+		`"artifact_id": 1`,
+	} {
+		if !strings.Contains(runOutput, want) {
+			t.Fatalf("skills run output = %s, want %s", runOutput, want)
+		}
 	}
 }
 

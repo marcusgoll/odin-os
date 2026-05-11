@@ -51,6 +51,8 @@ type CreateTaskParams struct {
 	RequestedBy           string
 	Key                   string
 	CompanionID           int64
+	WorkKind              string
+	ArtifactsJSON         string
 	ExecutionIntent       string
 	ExecutionIntentSource string
 }
@@ -350,6 +352,8 @@ func (service Service) CreateTaskOnce(ctx context.Context, params CreateTaskPara
 		requestedSwarmTrigger: "",
 		key:                   strings.TrimSpace(params.Key),
 		acceptanceCriteria:    sqlite.NormalizeAcceptanceCriteria(params.AcceptanceCriteria),
+		workKind:              params.WorkKind,
+		artifactsJSON:         params.ArtifactsJSON,
 		executionIntent:       params.ExecutionIntent,
 		executionIntentSource: params.ExecutionIntentSource,
 	})
@@ -370,6 +374,8 @@ type createManagedTaskInput struct {
 	actionKey             string
 	key                   string
 	acceptanceCriteria    []string
+	workKind              string
+	artifactsJSON         string
 	executionIntent       string
 	executionIntentSource string
 }
@@ -454,6 +460,11 @@ func (service Service) createManagedTaskOnce(ctx context.Context, resolved scope
 		executionIntentSource = "operator"
 	}
 
+	workKind := strings.TrimSpace(input.workKind)
+	if workKind == "" {
+		workKind = taskScope
+	}
+
 	task, err := service.Store.CreateTask(ctx, sqlite.CreateTaskParams{
 		ProjectID:             project.ID,
 		Key:                   key,
@@ -466,7 +477,8 @@ func (service Service) createManagedTaskOnce(ctx context.Context, resolved scope
 		WorkspaceID:           &workspace.ID,
 		InitiativeID:          &initiative.ID,
 		CompanionID:           &taskCompanionID,
-		WorkKind:              taskScope,
+		WorkKind:              workKind,
+		ArtifactsJSON:         input.artifactsJSON,
 		ExecutionIntent:       executionIntent,
 		ExecutionIntentSource: executionIntentSource,
 	})

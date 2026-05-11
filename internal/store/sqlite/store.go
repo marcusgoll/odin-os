@@ -1217,7 +1217,7 @@ func (store *Store) FireAutomationTrigger(ctx context.Context, params FireAutoma
 			if err != nil {
 				return err
 			}
-			task, err = store.createAutomationTriggerTaskTx(ctx, tx, trigger, project, materializationKey, now)
+			task, err = store.createAutomationTriggerTaskTx(ctx, tx, trigger, project, materializationKey, params, now)
 			if err != nil {
 				return err
 			}
@@ -1626,6 +1626,7 @@ func (store *Store) CreateTask(ctx context.Context, params CreateTaskParams) (Ta
 	var task Task
 	acceptanceCriteria := NormalizeAcceptanceCriteria(params.AcceptanceCriteria)
 	acceptanceCriteriaJSON := EncodeAcceptanceCriteriaJSON(acceptanceCriteria)
+	artifactsJSON := normalizeArtifactsJSON(params.ArtifactsJSON)
 
 	err := store.withTx(ctx, func(tx *sql.Tx) error {
 		project, err := store.getProjectTx(ctx, tx, params.ProjectID)
@@ -1658,7 +1659,7 @@ func (store *Store) CreateTask(ctx context.Context, params CreateTaskParams) (Ta
 				created_at,
 				updated_at
 			)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, '', '', '[]', ?, ?)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, '', '', ?, ?, ?)
 		`,
 			params.ProjectID,
 			params.Key,
@@ -1676,6 +1677,7 @@ func (store *Store) CreateTask(ctx context.Context, params CreateTaskParams) (Ta
 			nullIfEmpty(params.WorkKind),
 			params.ExecutionIntent,
 			params.ExecutionIntentSource,
+			artifactsJSON,
 			formatTime(now),
 			formatTime(now),
 		)
@@ -1705,7 +1707,7 @@ func (store *Store) CreateTask(ctx context.Context, params CreateTaskParams) (Ta
 					created_at,
 					updated_at
 				)
-				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, '', '', '[]', ?, ?)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, '', '', ?, ?, ?)
 			`,
 				params.ProjectID,
 				params.Key,
@@ -1720,6 +1722,7 @@ func (store *Store) CreateTask(ctx context.Context, params CreateTaskParams) (Ta
 				nullInt64(params.FollowUpObligationID),
 				nullIfEmpty(params.FollowUpOccurrenceKey),
 				nullIfEmpty(params.WorkKind),
+				artifactsJSON,
 				formatTime(now),
 				formatTime(now),
 			)
@@ -1752,7 +1755,7 @@ func (store *Store) CreateTask(ctx context.Context, params CreateTaskParams) (Ta
 					created_at,
 					updated_at
 				)
-				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, '', '', '[]', ?, ?)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, '', '', ?, ?, ?)
 			`,
 				params.ProjectID,
 				params.Key,
@@ -1769,6 +1772,7 @@ func (store *Store) CreateTask(ctx context.Context, params CreateTaskParams) (Ta
 				nullIfEmpty(params.WorkKind),
 				params.ExecutionIntent,
 				params.ExecutionIntentSource,
+				artifactsJSON,
 				formatTime(now),
 				formatTime(now),
 			)
@@ -1799,7 +1803,7 @@ func (store *Store) CreateTask(ctx context.Context, params CreateTaskParams) (Ta
 					created_at,
 					updated_at
 				)
-				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, '', '', '[]', ?, ?)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, '', '', ?, ?, ?)
 			`,
 				params.ProjectID,
 				params.Key,
@@ -1814,6 +1818,7 @@ func (store *Store) CreateTask(ctx context.Context, params CreateTaskParams) (Ta
 				nullInt64(params.FollowUpObligationID),
 				nullIfEmpty(params.FollowUpOccurrenceKey),
 				nullIfEmpty(params.WorkKind),
+				artifactsJSON,
 				formatTime(now),
 				formatTime(now),
 			)
@@ -1842,7 +1847,7 @@ func (store *Store) CreateTask(ctx context.Context, params CreateTaskParams) (Ta
 					created_at,
 					updated_at
 				)
-				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, '', '', '[]', ?, ?)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, '', '', ?, ?, ?)
 			`,
 				params.ProjectID,
 				params.Key,
@@ -1855,6 +1860,7 @@ func (store *Store) CreateTask(ctx context.Context, params CreateTaskParams) (Ta
 				nullInt64(params.InitiativeID),
 				nullInt64(params.CompanionID),
 				nullIfEmpty(params.WorkKind),
+				artifactsJSON,
 				formatTime(now),
 				formatTime(now),
 			)
@@ -1886,7 +1892,7 @@ func (store *Store) CreateTask(ctx context.Context, params CreateTaskParams) (Ta
 			WorkKind:              params.WorkKind,
 			ExecutionIntent:       params.ExecutionIntent,
 			ExecutionIntentSource: params.ExecutionIntentSource,
-			ArtifactsJSON:         "[]",
+			ArtifactsJSON:         artifactsJSON,
 			NextEligibleAt:        time.Time{},
 			Priority:              100,
 			LastError:             "",
@@ -9167,7 +9173,7 @@ func (store *Store) getAutomationTriggerMaterializationTx(ctx context.Context, t
 	return scanAutomationTriggerMaterialization(row)
 }
 
-func (store *Store) createAutomationTriggerTaskTx(ctx context.Context, tx *sql.Tx, trigger AutomationTrigger, project Project, materializationKey string, now time.Time) (Task, error) {
+func (store *Store) createAutomationTriggerTaskTx(ctx context.Context, tx *sql.Tx, trigger AutomationTrigger, project Project, materializationKey string, params FireAutomationTriggerParams, now time.Time) (Task, error) {
 	taskKey := automationTriggerTaskKey(trigger.Key, materializationKey)
 	title := trigger.WorkItemTitle
 	if title == "" {
@@ -9175,6 +9181,11 @@ func (store *Store) createAutomationTriggerTaskTx(ctx context.Context, tx *sql.T
 	}
 	requestedBy := "automation_trigger:" + trigger.Key
 	executionIntent, executionIntentSource := automationTriggerExecutionIntent(trigger)
+	if strings.TrimSpace(params.WorkKind) != "" && strings.TrimSpace(params.ArtifactsJSON) != "" {
+		executionIntentSource = "skill_binding:trigger"
+	}
+	workKind := defaultString(strings.TrimSpace(params.WorkKind), "automation_trigger")
+	artifactsJSON := normalizeArtifactsJSON(params.ArtifactsJSON)
 	result, err := tx.ExecContext(ctx, `
 		INSERT INTO tasks (
 			project_id, key, title, action_key, status, scope, requested_by, workspace_id, initiative_id,
@@ -9182,15 +9193,17 @@ func (store *Store) createAutomationTriggerTaskTx(ctx context.Context, tx *sql.T
 			execution_intent_source, current_run_id,
 			summary, terminal_reason, artifacts_json, created_at, updated_at
 		)
-		VALUES (?, ?, ?, '', 'queued', ?, ?, NULL, NULL, NULL, NULL, NULL, 'automation_trigger', ?, ?, NULL, '', '', '[]', ?, ?)
+		VALUES (?, ?, ?, '', 'queued', ?, ?, NULL, NULL, NULL, NULL, NULL, ?, ?, ?, NULL, '', '', ?, ?, ?)
 	`,
 		trigger.ProjectID,
 		taskKey,
 		title,
 		project.Scope,
 		requestedBy,
+		workKind,
 		executionIntent,
 		executionIntentSource,
+		artifactsJSON,
 		formatTime(now),
 		formatTime(now),
 	)
@@ -9209,10 +9222,10 @@ func (store *Store) createAutomationTriggerTaskTx(ctx context.Context, tx *sql.T
 		Status:                "queued",
 		Scope:                 project.Scope,
 		RequestedBy:           requestedBy,
-		WorkKind:              "automation_trigger",
+		WorkKind:              workKind,
 		ExecutionIntent:       executionIntent,
 		ExecutionIntentSource: executionIntentSource,
-		ArtifactsJSON:         "[]",
+		ArtifactsJSON:         artifactsJSON,
 		NextEligibleAt:        time.Time{},
 		Priority:              100,
 		MaxAttempts:           3,
