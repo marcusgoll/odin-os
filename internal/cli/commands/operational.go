@@ -26,6 +26,7 @@ type JobView struct {
 	TaskID                int64  `json:"task_id,omitempty"`
 	TaskKey               string `json:"task_key"`
 	Status                string `json:"status"`
+	WorkKind              string `json:"work_kind,omitempty"`
 	ExecutionIntent       string `json:"execution_intent,omitempty"`
 	ExecutionIntentSource string `json:"execution_intent_source,omitempty"`
 	BlockedReason         string `json:"blocked_reason,omitempty"`

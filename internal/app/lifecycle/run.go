@@ -38,6 +38,7 @@ import (
 	"odin-os/internal/core/followups"
 	"odin-os/internal/core/initiatives"
 	"odin-os/internal/core/projects"
+	"odin-os/internal/core/skillbinding"
 	coreworkspace "odin-os/internal/core/workspace"
 	"odin-os/internal/core/workspaces"
 	"odin-os/internal/e2e"
@@ -468,6 +469,7 @@ func runJobs(ctx context.Context, app bootstrap.App, args []string, stdout io.Wr
 				TaskID:                view.TaskID,
 				TaskKey:               view.TaskKey,
 				Status:                view.Status,
+				WorkKind:              view.WorkKind,
 				ExecutionIntent:       view.ExecutionIntent,
 				ExecutionIntentSource: view.ExecutionIntentSource,
 				BlockedReason:         view.BlockedReason,
@@ -1122,11 +1124,12 @@ type intakeDedupeReview struct {
 }
 
 type intakeRoutingResult struct {
-	Outcome               string `json:"outcome"`
-	ProjectKey            string `json:"project_key,omitempty"`
-	ExecutionIntent       string `json:"execution_intent,omitempty"`
-	ExecutionIntentSource string `json:"execution_intent_source,omitempty"`
-	GoalID                int64  `json:"goal_id,omitempty"`
+	Outcome               string                `json:"outcome"`
+	ProjectKey            string                `json:"project_key,omitempty"`
+	ExecutionIntent       string                `json:"execution_intent,omitempty"`
+	ExecutionIntentSource string                `json:"execution_intent_source,omitempty"`
+	SkillInvocation       *skillbinding.Binding `json:"skill_invocation,omitempty"`
+	GoalID                int64                 `json:"goal_id,omitempty"`
 }
 
 type intakeGoalConversion struct {
@@ -1857,6 +1860,20 @@ func createTaskFromReviewedIntake(ctx context.Context, app bootstrap.App, item s
 		},
 	})
 	intent := intakeExecutionIntentForTask(item)
+	workKind := ""
+	artifactsJSON := ""
+	if notes, err := intakeNotesFromItem(item); err == nil && notes.Routing.SkillInvocation != nil {
+		binding := *notes.Routing.SkillInvocation
+		binding.ReviewState = "accepted"
+		if encoded, err := skillbinding.EncodeArtifacts(binding); err != nil {
+			return sqlite.Task{}, false, err
+		} else {
+			workKind = skillbinding.WorkKind
+			artifactsJSON = encoded
+			intent.ExecutionIntent = binding.ExecutionIntent
+			intent.ExecutionIntentSource = binding.ExecutionIntentSource
+		}
+	}
 	result, err := jobs.Service{
 		Store:       app.Store,
 		Registry:    app.Registry,
@@ -1867,6 +1884,8 @@ func createTaskFromReviewedIntake(ctx context.Context, app bootstrap.App, item s
 		Title:                 item.Subject,
 		RequestedBy:           "intake_review:" + rawIntakeKey(item.ID),
 		Key:                   reviewedIntakeWorkItemKey(item.ID),
+		WorkKind:              workKind,
+		ArtifactsJSON:         artifactsJSON,
 		ExecutionIntent:       intent.ExecutionIntent,
 		ExecutionIntentSource: intent.ExecutionIntentSource,
 	})
@@ -2076,13 +2095,20 @@ func buildIntakeProcessOutcome(ctx context.Context, store *sqlite.Store, item sq
 		ExecutionIntent:       route.ExecutionIntent,
 		ExecutionIntentSource: route.ExecutionIntentSource,
 	}
+	if binding, ok, err := skillInvocationBindingFromIntake(item, route); err != nil {
+		return intakeProcessOutcome{}, err
+	} else if ok {
+		notes.Routing.SkillInvocation = &binding
+		notes.Routing.ExecutionIntent = binding.ExecutionIntent
+		notes.Routing.ExecutionIntentSource = binding.ExecutionIntentSource
+	}
 	populateIntakeClassificationRoute(&notes, item)
 	notes.DraftArtifact = &intakeDraftArtifact{
 		Kind:                  route.DraftArtifactKind,
 		Title:                 item.Subject,
 		ReviewState:           "review_required",
-		ExecutionIntent:       route.ExecutionIntent,
-		ExecutionIntentSource: route.ExecutionIntentSource,
+		ExecutionIntent:       notes.Routing.ExecutionIntent,
+		ExecutionIntentSource: notes.Routing.ExecutionIntentSource,
 	}
 	outcome := intakeProcessOutcome{
 		status:  "review_required",
@@ -2090,6 +2116,43 @@ func buildIntakeProcessOutcome(ctx context.Context, store *sqlite.Store, item sq
 		notes:   notes,
 	}
 	return outcome, nil
+}
+
+func skillInvocationBindingFromIntake(item sqlite.IntakeItem, route intakeDerivedRoute) (skillbinding.Binding, bool, error) {
+	intakeType := normalizedIntakeType(item.EventKind)
+	text := strings.ToLower(strings.Join([]string{item.Subject, item.Summary, item.SourceFactsJSON}, " "))
+	if intakeType != "skill" && !(strings.Contains(text, "skill system") && strings.Contains(text, "triage")) {
+		return skillbinding.Binding{}, false, nil
+	}
+	input, err := json.Marshal(map[string]any{
+		"message": item.Subject,
+		"scope":   item.Scope,
+	})
+	if err != nil {
+		return skillbinding.Binding{}, false, err
+	}
+	binding := skillbinding.Binding{
+		SkillKey:              "triage-skill",
+		InputJSON:             input,
+		SourceType:            "intake",
+		SourceID:              strconv.FormatInt(item.ID, 10),
+		SourceKey:             rawIntakeKey(item.ID),
+		Scope:                 item.Scope,
+		ProjectKey:            item.ScopeKey,
+		ExecutionIntent:       defaultIntakeBindingString(route.ExecutionIntent, "read_only"),
+		ExecutionIntentSource: "skill_binding:intake",
+		ReviewState:           "review_required",
+	}
+	normalized, err := skillbinding.Normalize(binding)
+	return normalized, true, err
+}
+
+func defaultIntakeBindingString(value string, fallback string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return fallback
+	}
+	return value
 }
 
 func isGoalLikeIntake(item sqlite.IntakeItem) bool {

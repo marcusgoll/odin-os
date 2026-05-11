@@ -415,6 +415,7 @@ type CreateTaskParams struct {
 	WorkKind              string
 	ExecutionIntent       string
 	ExecutionIntentSource string
+	ArtifactsJSON         string
 }
 
 func EncodeAcceptanceCriteriaJSON(criteria []string) string {
@@ -586,6 +587,8 @@ type FireAutomationTriggerParams struct {
 	SourceEventID     *int64
 	SourceEventType   string
 	ReuseTaskID       *int64
+	WorkKind          string
+	ArtifactsJSON     string
 }
 
 type FireAutomationTriggerResult struct {

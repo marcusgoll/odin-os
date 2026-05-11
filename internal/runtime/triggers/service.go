@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"odin-os/internal/core/projects"
+	"odin-os/internal/core/skillbinding"
 	runtimeevents "odin-os/internal/runtime/events"
 	"odin-os/internal/runtime/jobs"
 	"odin-os/internal/store/sqlite"
@@ -951,6 +952,10 @@ func (service Service) AuditEvents(ctx context.Context, workspaceID string, key 
 }
 
 func (service Service) fireAndApplyMaterializationPolicy(ctx context.Context, params sqlite.FireAutomationTriggerParams) (sqlite.FireAutomationTriggerResult, error) {
+	params, err := service.applySkillInvocationBinding(ctx, params)
+	if err != nil {
+		return sqlite.FireAutomationTriggerResult{}, err
+	}
 	fire, err := service.Store.FireAutomationTrigger(ctx, params)
 	if err != nil {
 		return sqlite.FireAutomationTriggerResult{}, err
@@ -968,6 +973,58 @@ func (service Service) fireAndApplyMaterializationPolicy(ctx context.Context, pa
 	}
 	fire.WorkItem = outcome.Task
 	return fire, nil
+}
+
+func (service Service) applySkillInvocationBinding(ctx context.Context, params sqlite.FireAutomationTriggerParams) (sqlite.FireAutomationTriggerParams, error) {
+	trigger, err := service.Store.GetAutomationTriggerByWorkspaceKey(ctx, defaultTriggerString(params.WorkspaceID, "default"), params.Key)
+	if err != nil {
+		return params, err
+	}
+	binding, ok, err := skillInvocationBindingFromTrigger(trigger)
+	if err != nil || !ok {
+		return params, err
+	}
+	artifactsJSON, err := skillbinding.EncodeArtifacts(binding)
+	if err != nil {
+		return params, err
+	}
+	params.WorkKind = skillbinding.WorkKind
+	params.ArtifactsJSON = artifactsJSON
+	return params, nil
+}
+
+func skillInvocationBindingFromTrigger(trigger sqlite.AutomationTrigger) (skillbinding.Binding, bool, error) {
+	var rule struct {
+		ExecutionIntent string                `json:"execution_intent"`
+		Intent          string                `json:"intent"`
+		SkillInvocation *skillbinding.Binding `json:"skill_invocation"`
+	}
+	if err := json.Unmarshal([]byte(trigger.RuleJSON), &rule); err != nil {
+		return skillbinding.Binding{}, false, err
+	}
+	if rule.SkillInvocation == nil {
+		return skillbinding.Binding{}, false, nil
+	}
+	binding := *rule.SkillInvocation
+	binding.SourceType = "trigger"
+	binding.SourceID = strconv.FormatInt(trigger.ID, 10)
+	binding.SourceKey = trigger.Key
+	if binding.Scope == "" {
+		binding.Scope = "project"
+	}
+	if binding.ProjectKey == "" {
+		binding.ProjectKey = trigger.InitiativeKey
+	}
+	if binding.ExecutionIntent == "" {
+		binding.ExecutionIntent = strings.TrimSpace(rule.ExecutionIntent)
+		if binding.ExecutionIntent == "" {
+			binding.ExecutionIntent = strings.TrimSpace(rule.Intent)
+		}
+	}
+	binding.ExecutionIntentSource = "skill_binding:trigger"
+	binding.ReviewState = "review_required"
+	normalized, err := skillbinding.Normalize(binding)
+	return normalized, true, err
 }
 
 func (service Service) ensureRuntimeProject(ctx context.Context, key string) (sqlite.Project, error) {

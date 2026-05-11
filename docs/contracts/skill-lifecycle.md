@@ -91,6 +91,35 @@ Invocation uses one envelope:
 
 Command-backed skills execute through the restricted wrapper. The wrapper pins the process cwd to the repo root, strips inherited environment variables down to the allowlisted execution context, and records `execution_profile=restricted_command_v1` on invoke in SQLite.
 
+## Workflow binding
+
+Intake and automation triggers may request skill execution only through a typed
+`skill_invocation` binding. A binding is an execution request, not a skill
+definition, and must include:
+
+- `skill_key`
+- `input_json`
+- `source_type`
+- `source_key` or `source_id`
+- `scope`
+- `project_key` when project scoped
+- `execution_intent`
+- `execution_intent_source`
+- `review_state`
+
+Bindings are persisted on governed Work Items as a `skill_invocation` artifact
+in `tasks.artifacts_json`. Intake processing and trigger evaluation may create
+or materialize a binding, but they must not execute handler scripts directly.
+
+Accepted bindings are invoked through:
+
+- `odin skills run <task-id|task-key>`
+
+That command resolves the Work Item binding, reloads the registry, calls
+`internal/skills.Service.Invoke`, runs the existing permission policy and
+restricted command wrapper, records the existing `skill_artifact`, and leaves
+result review in `odin review` as `skill-artifact:<id>`.
+
 ## CRUD lifecycle
 
 CRUD is owned by `internal/skills.Service` and exposed through `odin skills ...`.
