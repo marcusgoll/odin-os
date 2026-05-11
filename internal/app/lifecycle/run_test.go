@@ -3897,6 +3897,82 @@ func TestRunWorkDispatchEnforcesProjectExecutionPolicy(t *testing.T) {
 	}
 }
 
+func TestRunWorkReadOnlyHighRiskCategoriesRequireApprovalThroughOperatorPath(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	root := testRepoRoot(t)
+	run := func(args ...string) string {
+		t.Helper()
+		var stdout bytes.Buffer
+		if err := Run(context.Background(), root, args, strings.NewReader(""), &stdout); err != nil {
+			t.Fatalf("Run(%v) error = %v\nstdout=%s", args, err, stdout.String())
+		}
+		return stdout.String()
+	}
+	parseTaskKey := func(output string) string {
+		t.Helper()
+		for _, field := range strings.Fields(output) {
+			if value, ok := strings.CutPrefix(field, "key="); ok {
+				return value
+			}
+		}
+		t.Fatalf("work start output = %q, want task key", output)
+		return ""
+	}
+
+	run("project", "select", testProjectKey)
+	run("transition", "set", "cutover", "confirm", "because", "approval parity high risk proof")
+
+	tests := []struct {
+		name       string
+		title      string
+		wantIntent string
+	}{
+		{name: "sending messages", title: "Send message to customer", wantIntent: "governance"},
+		{name: "deleting data", title: "Delete data from customer records", wantIntent: "destructive"},
+		{name: "deployment", title: "Deploy code to production", wantIntent: "governance"},
+		{name: "calendar mutation", title: "Change calendar event with client", wantIntent: "governance"},
+		{name: "public posting", title: "Publish public launch post", wantIntent: "governance"},
+		{name: "production changes", title: "Modify production system config", wantIntent: "governance"},
+		{name: "purchases", title: "Make purchase of subscription", wantIntent: "governance"},
+		{name: "permissions", title: "Change permissions for repository", wantIntent: "governance"},
+		{name: "financial records", title: "Update financial record", wantIntent: "governance"},
+		{name: "legal records", title: "Update legal records", wantIntent: "governance"},
+		{name: "medical records", title: "Update medical record", wantIntent: "governance"},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			key := parseTaskKey(run("work", "start", "--project", testProjectKey, "--title", tt.title, "--intent", "read_only"))
+			dispatchOutput := run("work", "dispatch", "--task", key, "--json")
+			for _, want := range []string{
+				`"dispatched": false`,
+				`"reason": "approval_required"`,
+				`"status": "blocked"`,
+				`"execution_intent": "` + tt.wantIntent + `"`,
+				`"execution_intent_source": "safety_classifier"`,
+			} {
+				if !strings.Contains(dispatchOutput, want) {
+					t.Fatalf("%s dispatch output = %s, want %s", tt.name, dispatchOutput, want)
+				}
+			}
+		})
+	}
+
+	approvalsOutput := run("approvals", "all", "--json")
+	if count := strings.Count(approvalsOutput, `"status": "pending"`); count != len(tests) {
+		t.Fatalf("approvals output = %s, want %d pending approval requests", approvalsOutput, len(tests))
+	}
+
+	logsOutput := run("logs", "--json")
+	if count := strings.Count(logsOutput, `"type": "approval.requested"`); count != len(tests) {
+		t.Fatalf("logs output = %s, want %d approval.requested audit events", logsOutput, len(tests))
+	}
+	if !strings.Contains(logsOutput, `"execution_intent_source": "safety_classifier"`) {
+		t.Fatalf("logs output = %s, want safety classifier audit evidence", logsOutput)
+	}
+}
+
 func TestRunWorkExplicitTriggerIntentDoesNotDependOnTitleInference(t *testing.T) {
 	t.Parallel()
 
