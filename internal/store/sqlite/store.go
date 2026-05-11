@@ -2288,6 +2288,48 @@ func (store *Store) RecordTaskDispatchRequested(ctx context.Context, task Task, 
 	})
 }
 
+func (store *Store) RecordDeliveryEvidence(ctx context.Context, params RecordDeliveryEvidenceParams) (Task, error) {
+	now := store.now()
+	params.Gate = strings.TrimSpace(params.Gate)
+	params.Kind = strings.TrimSpace(params.Kind)
+	params.Summary = strings.TrimSpace(params.Summary)
+	params.Ref = strings.TrimSpace(params.Ref)
+	params.RecordedBy = strings.TrimSpace(params.RecordedBy)
+	if params.RecordedBy == "" {
+		params.RecordedBy = "operator"
+	}
+
+	var task Task
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		task, err = store.getTaskTx(ctx, tx, params.TaskID)
+		if err != nil {
+			return err
+		}
+		projectID := task.ProjectID
+		return appendEventTx(ctx, tx, eventInsert{
+			StreamType: runtimeevents.StreamTask,
+			StreamID:   task.ID,
+			EventType:  runtimeevents.EventDeliveryEvidenceRecorded,
+			Scope:      task.Scope,
+			ProjectID:  &projectID,
+			TaskID:     &task.ID,
+			RunID:      task.CurrentRunID,
+			Payload: runtimeevents.DeliveryEvidenceRecordedPayload{
+				TaskID:      task.ID,
+				WorkItemKey: task.Key,
+				Gate:        params.Gate,
+				Kind:        params.Kind,
+				Summary:     params.Summary,
+				Ref:         params.Ref,
+				RecordedBy:  params.RecordedBy,
+			},
+			OccurredAt: now,
+		})
+	})
+	return task, err
+}
+
 type RecordTaskRetryDecisionParams struct {
 	Task                   Task
 	Decision               string

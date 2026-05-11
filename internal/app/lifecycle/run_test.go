@@ -3465,6 +3465,66 @@ func TestRunWorkStartAndStatusUseCanonicalCommandPath(t *testing.T) {
 	}
 }
 
+func TestRunWorkEvidenceRecordsTaskScopedAuditEvent(t *testing.T) {
+	t.Parallel()
+
+	root := testRepoRoot(t)
+
+	var startOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"work", "start", "--project", "odin-core", "--title", "Prove delivery evidence"}, strings.NewReader(""), &startOutput); err != nil {
+		t.Fatalf("Run(work start) error = %v", err)
+	}
+	taskKey := ""
+	for _, field := range strings.Fields(startOutput.String()) {
+		if value, ok := strings.CutPrefix(field, "key="); ok {
+			taskKey = value
+			break
+		}
+	}
+	if taskKey == "" {
+		t.Fatalf("work start output = %q, want task key", startOutput.String())
+	}
+
+	var evidenceOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{
+		"work", "evidence",
+		"--task", taskKey,
+		"--gate", "domain_locked",
+		"--kind", "doc",
+		"--summary", "CONTEXT.md and work execution contract checked",
+		"--ref", "docs/contracts/work-execution-state.md",
+		"--json",
+	}, strings.NewReader(""), &evidenceOutput); err != nil {
+		t.Fatalf("Run(work evidence) error = %v\noutput=%s", err, evidenceOutput.String())
+	}
+	for _, want := range []string{
+		`"recorded": true`,
+		`"event_type": "delivery.evidence_recorded"`,
+		`"task_key": "` + taskKey + `"`,
+		`"gate": "domain_locked"`,
+		`"kind": "doc"`,
+	} {
+		if !strings.Contains(evidenceOutput.String(), want) {
+			t.Fatalf("work evidence output = %s, want %s", evidenceOutput.String(), want)
+		}
+	}
+
+	var trailOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"logs", "trail", "--task", taskKey, "--json"}, strings.NewReader(""), &trailOutput); err != nil {
+		t.Fatalf("Run(logs trail --task) error = %v", err)
+	}
+	for _, want := range []string{
+		`"event_type": "delivery.evidence_recorded"`,
+		`"gate": "domain_locked"`,
+		`"summary": "CONTEXT.md and work execution contract checked"`,
+		`"ref": "docs/contracts/work-execution-state.md"`,
+	} {
+		if !strings.Contains(trailOutput.String(), want) {
+			t.Fatalf("logs trail output = %s, want %s", trailOutput.String(), want)
+		}
+	}
+}
+
 func TestRunWorkDispatchCreatesRunAttemptFromAcceptedIntake(t *testing.T) {
 	t.Parallel()
 

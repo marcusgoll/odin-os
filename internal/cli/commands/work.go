@@ -14,6 +14,7 @@ import (
 	"odin-os/internal/core/projects"
 	"odin-os/internal/core/workspaces"
 	"odin-os/internal/registry"
+	runtimeevents "odin-os/internal/runtime/events"
 	"odin-os/internal/runtime/jobs"
 	"odin-os/internal/runtime/projections"
 	"odin-os/internal/store/sqlite"
@@ -21,7 +22,7 @@ import (
 	trackerintake "odin-os/internal/tracker/intake"
 )
 
-const workUsage = "usage: odin work status|profiles|start --project <key> --title <text> [--intent <read_only|mutation|governance|destructive>]|intake --project <key> [--dry-run]|reconcile --project <key>|dispatch [--task <id|key>] [--json]|execute --task <id|key> [--json]|retry --task <id|key> [--json]"
+const workUsage = "usage: odin work status|profiles|start --project <key> --title <text> [--intent <read_only|mutation|governance|destructive>]|evidence --task <id|key> --gate <gate> --kind <kind> --summary <text> [--ref <ref>] [--json]|intake --project <key> [--dry-run]|reconcile --project <key>|dispatch [--task <id|key>] [--json]|execute --task <id|key> [--json]|retry --task <id|key> [--json]"
 
 var newIntakeTracker = trackerintake.NewGitHubTracker
 
@@ -69,6 +70,8 @@ func RunWork(ctx context.Context, store *sqlite.Store, projectRegistry projects.
 		return runWorkProfiles(snapshot, stdout)
 	case "start":
 		return runWorkStart(ctx, store, projectRegistry, args[1:], stdout)
+	case "evidence":
+		return runWorkEvidence(ctx, store, args[1:], stdout)
 	case "intake":
 		return runWorkIntake(ctx, store, projectRegistry, args[1:], stdout)
 	case "reconcile":
@@ -82,6 +85,81 @@ func RunWork(ctx context.Context, store *sqlite.Store, projectRegistry projects.
 	default:
 		_, err := fmt.Fprintf(stdout, "unknown work command: %s\n%s\n", args[0], workUsage)
 		return err
+	}
+}
+
+type workEvidenceView struct {
+	Recorded  bool   `json:"recorded"`
+	EventType string `json:"event_type"`
+	TaskID    int64  `json:"task_id"`
+	TaskKey   string `json:"task_key"`
+	Gate      string `json:"gate"`
+	Kind      string `json:"kind"`
+	Summary   string `json:"summary"`
+	Ref       string `json:"ref,omitempty"`
+}
+
+func runWorkEvidence(ctx context.Context, store *sqlite.Store, args []string, stdout io.Writer) error {
+	params := parseWorkStartArgs(args)
+	jsonOutput := parseBoolFlag(params, "json")
+	if _, ok := params["help"]; ok {
+		_, err := fmt.Fprintln(stdout, "usage: odin work evidence --task <id|key> --gate <gate> --kind <kind> --summary <text> [--ref <ref>] [--json]")
+		return err
+	}
+	if err := rejectUnknownWorkArgsFor("evidence", params, "task", "gate", "kind", "summary", "ref", "json"); err != nil {
+		return err
+	}
+
+	taskRef := strings.TrimSpace(params["task"])
+	gate := strings.TrimSpace(params["gate"])
+	kind := strings.TrimSpace(params["kind"])
+	summary := strings.TrimSpace(params["summary"])
+	ref := strings.TrimSpace(params["ref"])
+	if taskRef == "" || gate == "" || kind == "" || summary == "" {
+		return fmt.Errorf("usage: odin work evidence --task <id|key> --gate <gate> --kind <kind> --summary <text> [--ref <ref>] [--json]")
+	}
+	if !isValidDeliveryGate(gate) {
+		return fmt.Errorf("gate must be one of domain_locked, design_approved, plan_ready, execution_selected, execution_complete, verified, branch_finished, learning_reviewed")
+	}
+
+	task, err := findWorkTask(ctx, store, taskRef)
+	if err != nil {
+		return err
+	}
+	task, err = store.RecordDeliveryEvidence(ctx, sqlite.RecordDeliveryEvidenceParams{
+		TaskID:     task.ID,
+		Gate:       gate,
+		Kind:       kind,
+		Summary:    summary,
+		Ref:        ref,
+		RecordedBy: "operator",
+	})
+	if err != nil {
+		return err
+	}
+	view := workEvidenceView{
+		Recorded:  true,
+		EventType: string(runtimeevents.EventDeliveryEvidenceRecorded),
+		TaskID:    task.ID,
+		TaskKey:   task.Key,
+		Gate:      gate,
+		Kind:      kind,
+		Summary:   summary,
+		Ref:       ref,
+	}
+	if jsonOutput {
+		return WriteJSON(stdout, view)
+	}
+	_, err = fmt.Fprintf(stdout, "recorded=true event_type=%s task=%s gate=%s kind=%s\n", view.EventType, task.Key, gate, kind)
+	return err
+}
+
+func isValidDeliveryGate(gate string) bool {
+	switch strings.ToLower(strings.TrimSpace(gate)) {
+	case "domain_locked", "design_approved", "plan_ready", "execution_selected", "execution_complete", "verified", "branch_finished", "learning_reviewed":
+		return true
+	default:
+		return false
 	}
 }
 
@@ -216,6 +294,10 @@ func runWorkDispatch(ctx context.Context, store *sqlite.Store, projectRegistry p
 }
 
 func rejectUnknownWorkArgs(params map[string]string, allowed ...string) error {
+	return rejectUnknownWorkArgsFor("dispatch", params, allowed...)
+}
+
+func rejectUnknownWorkArgsFor(command string, params map[string]string, allowed ...string) error {
 	allowedSet := make(map[string]struct{}, len(allowed))
 	for _, key := range allowed {
 		allowedSet[key] = struct{}{}
@@ -224,7 +306,7 @@ func rejectUnknownWorkArgs(params map[string]string, allowed ...string) error {
 		if _, ok := allowedSet[key]; ok {
 			continue
 		}
-		return fmt.Errorf("unknown work dispatch argument: %s", key)
+		return fmt.Errorf("unknown work %s argument: %s", command, key)
 	}
 	return nil
 }

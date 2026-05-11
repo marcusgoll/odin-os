@@ -1423,6 +1423,15 @@ type ListEventsParams struct {
 	RunID     *int64
 }
 
+type RecordDeliveryEvidenceParams struct {
+	TaskID     int64
+	Gate       string
+	Kind       string
+	Summary    string
+	Ref        string
+	RecordedBy string
+}
+
 type Delegation struct {
 	ID              int64
 	ParentTaskID    int64
