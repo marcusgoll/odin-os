@@ -219,6 +219,8 @@ Rules:
 - triggers create or update `Work Items` before any worker dispatch
 - v1 schedule-backed triggers are `Follow-Up Obligations`; they should appear as trigger definitions with derived due or overdue state
 - materialized follow-up occurrences remain `Work Items` with follow-up provenance and should not be duplicated as trigger definitions
+- trigger readback should expose next-run or due state, last materialization key, linked Work Item, trigger kind, and approval-required posture when available
+- trigger preview belongs in `odin trigger test`; overview may summarize previewable state but must not evaluate, fire, or test triggers itself
 
 ### Nested runtime and governance surfaces
 

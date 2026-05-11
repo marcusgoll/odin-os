@@ -105,6 +105,9 @@ func TestRunTriggerTestEventsReportsReadOnlyProof(t *testing.T) {
 	for _, want := range []string{
 		`"decision": "run"`,
 		`"event_type": "external.github.issue"`,
+		`"event_envelope"`,
+		`"source": "event"`,
+		`"dedupe_key": "default:gh-opened:event:external-github-issue-marcusgoll-odin-os-123-opened"`,
 		`"candidate_events": 1`,
 		`"matched_events"`,
 		`"approval_required": true`,
@@ -124,6 +127,15 @@ func TestRunTriggerTestEventsReportsReadOnlyProof(t *testing.T) {
 	auditOutput := run("audit", "gh-opened", "--json")
 	if !strings.Contains(auditOutput, `"event_type": "automation_trigger.tested"`) {
 		t.Fatalf("trigger audit output = %s, want tested audit event", auditOutput)
+	}
+	for _, want := range []string{
+		`"envelope"`,
+		`"source": "event"`,
+		`"dedupe_key": "default:gh-opened:event:external-github-issue-marcusgoll-odin-os-123-opened"`,
+	} {
+		if !strings.Contains(auditOutput, want) {
+			t.Fatalf("trigger audit output = %s, want %s", auditOutput, want)
+		}
 	}
 }
 

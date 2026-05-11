@@ -84,6 +84,14 @@ Phase 03 through Phase 14 event types are:
 - `browser.session_login_requested`
 - `browser.session_login_completed`
 - `browser.session_login_expired`
+- `automation_trigger.created`
+- `automation_trigger.fire_requested`
+- `automation_trigger.evaluated`
+- `automation_trigger.materialized`
+- `automation_trigger.tested`
+- `automation_trigger.deferred`
+- `automation_trigger.errored`
+- `automation_trigger.status_changed`
 
 ## Contract rules
 
@@ -249,3 +257,19 @@ Manual Huginn browser login and authenticated read-only session reuse are being 
 Browser session events must not include passwords, cookies, bearer tokens, passkey material, TOTP values, backup codes, profile bytes, or raw credential prompts. Login request events may include a log-safe opaque `handoff_id` and a metadata-only `handoff_url`; neither proves that a handoff HTTP route exists. Metadata-only session verification records operator-attested verification and `last_verified_at`; browser-observed account/domain verification remains future work. Profile preparation records only empty-directory preparation metadata plus `profile_storage_policy`; a prepared directory is not approval to write browser files. Encrypted profile artifact and attach events record only safe metadata such as artifact ID, session ID, runner ID, relative encrypted artifact path, key reference, relative materialization path, attach status, policy decision, actor, reason, and safe error code/message; they must not include fixture plaintext, key bytes, source fixture path, cookie values, credential stores, or browser profile bytes. Session verification may unblock a waiting goal only through normal policy checks; it must not approve or execute the goal by itself.
 
 `odin browser session handoff show --handoff-id <id>` is intentionally read-only. It validates the handoff ID, login request status, expiration, and linked session status, but emits no runtime event because it performs no state change.
+
+## Automation trigger expectation
+
+Automation Trigger events are the audit trail for scheduled and event-backed work creation. Trigger definitions and evaluations remain in SQLite; registry prompts, YAML policy, and design docs do not count as real automation unless a real `odin trigger` or `odin scheduler` command invokes the path.
+
+Trigger mutation events should preserve enough evidence to reconstruct:
+
+- trigger key and workspace
+- trigger source such as `schedule`, `event`, `manual`, or `test`
+- deterministic `materialization_key`
+- event envelope with `source`, `trigger_type`, `dedupe_key`, `occurred_at`, and `recovery_state`
+- due time or source-event time when applicable
+- execution intent and approval-required posture when present
+- linked Work Item when a real evaluation materializes work
+
+`automation_trigger.tested` is allowed for operator preview commands. It records preview/audit evidence with `mutates=false`, but it must not create Work Items, materialization rows, Run Attempts, Approval Requests, external adapter mutations, or dispatches.
