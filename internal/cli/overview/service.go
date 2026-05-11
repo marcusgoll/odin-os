@@ -1548,6 +1548,18 @@ func summarizeActivityEvent(record runtimeevents.Record, payload map[string]any,
 		appendPayloadPart(&parts, payload, "status", "status")
 		appendPayloadPart(&parts, payload, "title", "title")
 		return strings.Join(parts, " ")
+	case runtimeevents.EventDeliveryEvidenceRecorded:
+		parts := []string{"delivery evidence recorded"}
+		appendPayloadPart(&parts, payload, "gate", "gate")
+		appendPayloadPart(&parts, payload, "kind", "kind")
+		appendPayloadPart(&parts, payload, "summary", "summary")
+		return strings.Join(parts, " ")
+	case runtimeevents.EventDeliveryGateAdvanced:
+		parts := []string{"delivery gate advanced"}
+		appendPayloadPart(&parts, payload, "gate", "gate")
+		appendPayloadPart(&parts, payload, "next_gate", "next_gate")
+		appendPayloadPart(&parts, payload, "advanced_by", "advanced_by")
+		return strings.Join(parts, " ")
 	default:
 		parts := []string{fmt.Sprintf("event %s", record.Type)}
 		if workItemKey != "" {

@@ -1443,6 +1443,22 @@ type ListApprovalsParams struct {
 	Status string
 }
 
+type RecordDeliveryEvidenceParams struct {
+	TaskID     int64
+	Gate       string
+	Kind       string
+	Summary    string
+	Ref        string
+	RecordedBy string
+}
+
+type RecordDeliveryGateAdvancedParams struct {
+	TaskID     int64
+	Gate       string
+	NextGate   string
+	AdvancedBy string
+}
+
 type Delegation struct {
 	ID              int64
 	ParentTaskID    int64

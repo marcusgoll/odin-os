@@ -26,7 +26,7 @@ import (
 	trackerintake "odin-os/internal/tracker/intake"
 )
 
-const workUsage = "usage: odin work status|profiles|start --project <key> --title <text> [--intent <read_only|mutation|governance|destructive>]|intake --project <key> [--dry-run]|reconcile --project <key>|proof (--task <id|key>|--intake <id|key>) [--json]|pr prepare --task <id|key> --summary <text> --test <text> --risk <text> --command <text> [--dry-run|--live --approval <id>] [--json]|dispatch [--task <id|key>] [--json]|execute --task <id|key> [--json]|retry --task <id|key> [--json]"
+const workUsage = "usage: odin work status|profiles|start --project <key> --title <text> [--intent <read_only|mutation|governance|destructive>]|evidence --task <id|key> --gate <gate> --kind <kind> --summary <text> [--ref <ref>] [--json]|advance --task <id|key> --gate <gate> [--json]|intake --project <key> [--dry-run]|reconcile --project <key>|proof (--task <id|key>|--intake <id|key>) [--json]|pr prepare --task <id|key> --summary <text> --test <text> --risk <text> --command <text> [--dry-run|--live --approval <id>] [--json]|dispatch [--task <id|key>] [--json]|execute --task <id|key> [--json]|retry --task <id|key> [--json]"
 
 const workProofUsage = "usage: odin work proof (--task <id|key>|--intake <id|key>) [--json]"
 
@@ -76,6 +76,10 @@ func RunWork(ctx context.Context, store *sqlite.Store, projectRegistry projects.
 		return runWorkProfiles(snapshot, stdout)
 	case "start":
 		return runWorkStart(ctx, store, projectRegistry, args[1:], stdout)
+	case "evidence":
+		return runWorkEvidence(ctx, store, args[1:], stdout)
+	case "advance":
+		return runWorkAdvance(ctx, store, args[1:], stdout)
 	case "intake":
 		return runWorkIntake(ctx, store, projectRegistry, args[1:], stdout)
 	case "reconcile":
@@ -94,6 +98,234 @@ func RunWork(ctx context.Context, store *sqlite.Store, projectRegistry projects.
 		_, err := fmt.Fprintf(stdout, "unknown work command: %s\n%s\n", args[0], workUsage)
 		return err
 	}
+}
+
+type workEvidenceView struct {
+	Recorded  bool   `json:"recorded"`
+	EventType string `json:"event_type"`
+	TaskID    int64  `json:"task_id"`
+	TaskKey   string `json:"task_key"`
+	Gate      string `json:"gate"`
+	Kind      string `json:"kind"`
+	Summary   string `json:"summary"`
+	Ref       string `json:"ref,omitempty"`
+}
+
+type workAdvanceView struct {
+	Advanced  bool   `json:"advanced"`
+	Reason    string `json:"reason,omitempty"`
+	EventType string `json:"event_type,omitempty"`
+	TaskID    int64  `json:"task_id"`
+	TaskKey   string `json:"task_key"`
+	Gate      string `json:"gate"`
+	NextGate  string `json:"next_gate,omitempty"`
+}
+
+func runWorkEvidence(ctx context.Context, store *sqlite.Store, args []string, stdout io.Writer) error {
+	params := parseWorkStartArgs(args)
+	jsonOutput := parseBoolFlag(params, "json")
+	if _, ok := params["help"]; ok {
+		_, err := fmt.Fprintln(stdout, "usage: odin work evidence --task <id|key> --gate <gate> --kind <kind> --summary <text> [--ref <ref>] [--json]")
+		return err
+	}
+	if err := rejectUnknownWorkArgsFor("evidence", params, "task", "gate", "kind", "summary", "ref", "json"); err != nil {
+		return err
+	}
+
+	taskRef := strings.TrimSpace(params["task"])
+	gate := strings.TrimSpace(params["gate"])
+	kind := strings.TrimSpace(params["kind"])
+	summary := strings.TrimSpace(params["summary"])
+	ref := strings.TrimSpace(params["ref"])
+	if taskRef == "" || gate == "" || kind == "" || summary == "" {
+		return fmt.Errorf("usage: odin work evidence --task <id|key> --gate <gate> --kind <kind> --summary <text> [--ref <ref>] [--json]")
+	}
+	if !isValidDeliveryGate(gate) {
+		return fmt.Errorf("gate must be one of domain_locked, design_approved, plan_ready, execution_selected, execution_complete, verified, branch_finished, learning_reviewed")
+	}
+	gate = strings.ToLower(gate)
+
+	task, err := findWorkTask(ctx, store, taskRef)
+	if err != nil {
+		return err
+	}
+	task, err = store.RecordDeliveryEvidence(ctx, sqlite.RecordDeliveryEvidenceParams{
+		TaskID:     task.ID,
+		Gate:       gate,
+		Kind:       kind,
+		Summary:    summary,
+		Ref:        ref,
+		RecordedBy: "operator",
+	})
+	if err != nil {
+		return err
+	}
+	view := workEvidenceView{
+		Recorded:  true,
+		EventType: string(runtimeevents.EventDeliveryEvidenceRecorded),
+		TaskID:    task.ID,
+		TaskKey:   task.Key,
+		Gate:      gate,
+		Kind:      kind,
+		Summary:   summary,
+		Ref:       ref,
+	}
+	if jsonOutput {
+		return WriteJSON(stdout, view)
+	}
+	_, err = fmt.Fprintf(stdout, "recorded=true event_type=%s task=%s gate=%s kind=%s\n", view.EventType, task.Key, gate, kind)
+	return err
+}
+
+func runWorkAdvance(ctx context.Context, store *sqlite.Store, args []string, stdout io.Writer) error {
+	params := parseWorkStartArgs(args)
+	jsonOutput := parseBoolFlag(params, "json")
+	if _, ok := params["help"]; ok {
+		_, err := fmt.Fprintln(stdout, "usage: odin work advance --task <id|key> --gate <gate> [--json]")
+		return err
+	}
+	if err := rejectUnknownWorkArgsFor("advance", params, "task", "gate", "json"); err != nil {
+		return err
+	}
+
+	taskRef := strings.TrimSpace(params["task"])
+	gate := strings.TrimSpace(params["gate"])
+	if taskRef == "" || gate == "" {
+		return fmt.Errorf("usage: odin work advance --task <id|key> --gate <gate> [--json]")
+	}
+	if !isValidDeliveryGate(gate) {
+		return fmt.Errorf("gate must be one of domain_locked, design_approved, plan_ready, execution_selected, execution_complete, verified, branch_finished, learning_reviewed")
+	}
+	gate = strings.ToLower(gate)
+
+	task, err := findWorkTask(ctx, store, taskRef)
+	if err != nil {
+		return err
+	}
+	decision, err := deliveryAdvanceDecision(ctx, store, task.ID, gate)
+	if err != nil {
+		return err
+	}
+	if decision.reason != "" {
+		view := workAdvanceView{
+			Advanced: false,
+			Reason:   decision.reason,
+			TaskID:   task.ID,
+			TaskKey:  task.Key,
+			Gate:     gate,
+			NextGate: decision.nextGate,
+		}
+		if jsonOutput {
+			return WriteJSON(stdout, view)
+		}
+		_, err = fmt.Fprintf(stdout, "advanced=false reason=%s task=%s gate=%s\n", view.Reason, task.Key, gate)
+		return err
+	}
+
+	task, err = store.RecordDeliveryGateAdvanced(ctx, sqlite.RecordDeliveryGateAdvancedParams{
+		TaskID:     task.ID,
+		Gate:       gate,
+		NextGate:   decision.nextGate,
+		AdvancedBy: "operator",
+	})
+	if err != nil {
+		return err
+	}
+	view := workAdvanceView{
+		Advanced:  true,
+		EventType: string(runtimeevents.EventDeliveryGateAdvanced),
+		TaskID:    task.ID,
+		TaskKey:   task.Key,
+		Gate:      gate,
+		NextGate:  decision.nextGate,
+	}
+	if jsonOutput {
+		return WriteJSON(stdout, view)
+	}
+	_, err = fmt.Fprintf(stdout, "advanced=true event_type=%s task=%s gate=%s next_gate=%s\n", view.EventType, task.Key, gate, decision.nextGate)
+	return err
+}
+
+type workAdvanceDecision struct {
+	nextGate string
+	reason   string
+}
+
+func deliveryAdvanceDecision(ctx context.Context, store *sqlite.Store, taskID int64, gate string) (workAdvanceDecision, error) {
+	events, err := store.ListEvents(ctx, sqlite.ListEventsParams{TaskID: &taskID})
+	if err != nil {
+		return workAdvanceDecision{}, err
+	}
+	evidence := map[string]bool{}
+	advanced := map[string]bool{}
+	for _, event := range events {
+		switch event.Type {
+		case runtimeevents.EventDeliveryEvidenceRecorded:
+			payload, err := runtimeevents.DecodePayload[runtimeevents.DeliveryEvidenceRecordedPayload](event.Payload)
+			if err != nil {
+				return workAdvanceDecision{}, err
+			}
+			if strings.TrimSpace(payload.Gate) != "" && strings.TrimSpace(payload.Summary) != "" && strings.TrimSpace(payload.Kind) != "" {
+				evidence[payload.Gate] = true
+			}
+		case runtimeevents.EventDeliveryGateAdvanced:
+			payload, err := runtimeevents.DecodePayload[runtimeevents.DeliveryGateAdvancedPayload](event.Payload)
+			if err != nil {
+				return workAdvanceDecision{}, err
+			}
+			if strings.TrimSpace(payload.Gate) != "" {
+				advanced[payload.Gate] = true
+			}
+		}
+	}
+
+	nextGate := nextDeliveryGate(gate)
+	if !evidence[gate] {
+		return workAdvanceDecision{nextGate: nextGate, reason: "evidence_required"}, nil
+	}
+	if advanced[gate] {
+		return workAdvanceDecision{nextGate: nextGate, reason: "already_advanced"}, nil
+	}
+	for _, previous := range deliveryGatesBefore(gate) {
+		if !advanced[previous] {
+			return workAdvanceDecision{nextGate: nextGate, reason: "gate_out_of_order"}, nil
+		}
+	}
+	return workAdvanceDecision{nextGate: nextGate}, nil
+}
+
+func deliveryGatesBefore(gate string) []string {
+	gates := deliveryGateOrder()
+	for index, candidate := range gates {
+		if candidate == gate {
+			return gates[:index]
+		}
+	}
+	return nil
+}
+
+func nextDeliveryGate(gate string) string {
+	gates := deliveryGateOrder()
+	for index, candidate := range gates {
+		if candidate == gate && index+1 < len(gates) {
+			return gates[index+1]
+		}
+	}
+	return gate
+}
+
+func isValidDeliveryGate(gate string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(gate))
+	for _, candidate := range deliveryGateOrder() {
+		if normalized == candidate {
+			return true
+		}
+	}
+	return false
+}
+
+func deliveryGateOrder() []string {
+	return []string{"domain_locked", "design_approved", "plan_ready", "execution_selected", "execution_complete", "verified", "branch_finished", "learning_reviewed"}
 }
 
 func runWorkStatus(ctx context.Context, store *sqlite.Store, snapshot registry.Snapshot, stdout io.Writer) error {
@@ -227,6 +459,10 @@ func runWorkDispatch(ctx context.Context, store *sqlite.Store, projectRegistry p
 }
 
 func rejectUnknownWorkArgs(params map[string]string, allowed ...string) error {
+	return rejectUnknownWorkArgsFor("dispatch", params, allowed...)
+}
+
+func rejectUnknownWorkArgsFor(command string, params map[string]string, allowed ...string) error {
 	allowedSet := make(map[string]struct{}, len(allowed))
 	for _, key := range allowed {
 		allowedSet[key] = struct{}{}
@@ -235,7 +471,7 @@ func rejectUnknownWorkArgs(params map[string]string, allowed ...string) error {
 		if _, ok := allowedSet[key]; ok {
 			continue
 		}
-		return fmt.Errorf("unknown work dispatch argument: %s", key)
+		return fmt.Errorf("unknown work %s argument: %s", command, key)
 	}
 	return nil
 }
