@@ -31,14 +31,15 @@ func RenderOverview(view overview.View) string {
 	lines = append(lines, "")
 	lines = append(lines, "Attention")
 	lines = append(lines, fmt.Sprintf(
-		"  approvals=%d incidents=%d blocked_work=%d recoveries=%d blocked_swarms=%d",
+		"  approvals=%d incidents=%d blocked_work=%d failed_work=%d recoveries=%d blocked_swarms=%d",
 		len(view.Approvals),
 		len(view.Observability.Incidents),
 		len(view.Observability.BlockedWork),
+		len(view.Observability.RecoveryGuidance),
 		len(view.Observability.Recoveries),
 		countBlockedSwarms(view.CompanionSwarms),
 	))
-	if len(view.Approvals) == 0 && len(view.Observability.Incidents) == 0 && len(view.Observability.BlockedWork) == 0 && len(view.Observability.Recoveries) == 0 && countBlockedSwarms(view.CompanionSwarms) == 0 {
+	if len(view.Approvals) == 0 && len(view.Observability.Incidents) == 0 && len(view.Observability.BlockedWork) == 0 && len(view.Observability.RecoveryGuidance) == 0 && len(view.Observability.Recoveries) == 0 && countBlockedSwarms(view.CompanionSwarms) == 0 {
 		lines = append(lines, "  none")
 	} else {
 		for _, approval := range view.Approvals {
@@ -73,6 +74,17 @@ func RenderOverview(view overview.View) string {
 				valueOrNone(ptrValue(blocked.CompanionKey)),
 				valueOrNone(blocked.Source),
 				valueOrNone(blocked.Reason),
+			))
+		}
+		for _, failed := range view.Observability.RecoveryGuidance {
+			lines = append(lines, fmt.Sprintf(
+				"  failed_work=%s project=%s companion=%s decision=%s retry_eligible=%t recommendation=%s",
+				valueOrNone(failed.WorkItemKey),
+				valueOrNone(failed.ProjectKey),
+				valueOrNone(ptrValue(failed.CompanionKey)),
+				valueOrNone(failed.Decision),
+				failed.RetryEligible,
+				valueOrNone(failed.RecoveryRecommendation),
 			))
 		}
 		for _, recovery := range view.Observability.Recoveries {
@@ -305,11 +317,12 @@ func RenderOverview(view overview.View) string {
 	lines = append(lines, "")
 	lines = append(lines, "Observability")
 	lines = append(lines, fmt.Sprintf(
-		"  wiring=%s activity_log=%d active_runs=%d blocked_work=%d incidents=%d recoveries=%d freshness=%d",
+		"  wiring=%s activity_log=%d active_runs=%d blocked_work=%d failed_work=%d incidents=%d recoveries=%d freshness=%d",
 		valueOrNone(string(view.Observability.Wiring)),
 		len(view.Observability.ActivityLog),
 		len(view.Observability.ActiveRuns),
 		len(view.Observability.BlockedWork),
+		len(view.Observability.RecoveryGuidance),
 		len(view.Observability.Incidents),
 		len(view.Observability.Recoveries),
 		len(view.Observability.Freshness),
@@ -360,6 +373,26 @@ func RenderOverview(view overview.View) string {
 			valueOrNone(ptrValue(blocked.CompanionKey)),
 			valueOrNone(blocked.Source),
 			valueOrNone(blocked.Reason),
+		))
+	}
+	lines = append(lines, "  Failed Work")
+	if len(view.Observability.RecoveryGuidance) == 0 {
+		lines = append(lines, "    none")
+	}
+	for _, failed := range view.Observability.RecoveryGuidance {
+		lines = append(lines, fmt.Sprintf(
+			"    failed_work=%s project=%s companion=%s status=%s decision=%s retry_eligible=%t retries=%d/%d source=%s last_error=%s recommendation=%s",
+			valueOrNone(failed.WorkItemKey),
+			valueOrNone(failed.ProjectKey),
+			valueOrNone(ptrValue(failed.CompanionKey)),
+			valueOrNone(failed.Status),
+			valueOrNone(failed.Decision),
+			failed.RetryEligible,
+			failed.RetryCount,
+			failed.MaxAttempts,
+			valueOrNone(failed.Source),
+			valueOrNone(failed.LastError),
+			valueOrNone(failed.RecoveryRecommendation),
 		))
 	}
 	lines = append(lines, "  Incidents")

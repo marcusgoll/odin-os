@@ -35,7 +35,7 @@ This hierarchy is the primary business navigation. Future TUI work must not repl
 
 Rules:
 
-- render `Attention` first for approvals, incidents, blocked work, recoveries, and other items that need operator intervention
+- render `Attention` first for approvals, incidents, blocked work, failed work, recoveries, and other items that need operator intervention
 - render `Active Execution` second for live `Run Attempts` and active companion-swarm execution so operators can see who is working on what
 - keep the canonical lanes below those sections so dashboard triage does not replace `Workspace -> Initiative -> Work Item`
 - do not introduce a separate generic `Agents` or `Processes` dashboard to answer runtime triage questions already covered by `Companions`, `Run Attempts`, `Approvals`, and `Observability`
@@ -184,6 +184,7 @@ It contains:
 - metrics
 - incidents
 - recoveries
+- failed work with retry eligibility and recovery recommendation
 - projections
 - runtime readbacks that cut across initiatives or work items
 
@@ -192,6 +193,7 @@ Rules:
 - `Run Attempts` remain nested under `Work Item` detail in the default business view
 - `Activity Log` is a read-only recent-event projection from SQLite runtime events and must reuse the same provenance summary contract as `odin logs trail`
 - `Run Attempts` may also be browsed here for cross-scope debugging and operator understanding
+- failed `Work Items` render from the existing recovery-guidance projection, including decision, retry eligibility, retry count, last error, source, and recommended next action
 - observability consumes runtime truth and must not become a second authority
 
 ### Memory
