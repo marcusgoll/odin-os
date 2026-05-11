@@ -153,6 +153,26 @@ GitHub.com PR was created in this audit update.
 3. Several green PRs are still drafts or unmerged, so their behavior is not
    current `main` behavior.
 
+## Draft Stack Readiness
+
+Current non-mutating stack-readiness check:
+
+| PR | Branch | Base | Remote checks | PR body contract |
+| --- | --- | --- | --- | --- |
+| #213 | `codex/work-evidence-current` | `main` | GitGuardian, two `go`, and `odin-e2e` passing | Has `## Summary`, `## Proven`, `## Unproven`, `## Commands Run` |
+| #214 | `codex/work-advance-current` | `codex/work-evidence-current` | GitGuardian and two `go` passing | Has `## Summary`, `## Proven`, `## Unproven`, `## Commands Run` |
+| #219 | `codex/prompt-to-production-proof-design` | `main` | GitGuardian, two `go`, and `odin-e2e` passing | Has `## Summary`, `## Proven`, `## Unproven`, `## Commands Run` |
+| #222 | `codex/merge-deploy-approval-proof` | `main` | GitGuardian, two `go`, and `odin-e2e` passing | Has `## Summary`, `## Proven`, `## Unproven`, `## Commands Run` |
+| #223 | `codex/review-run-attempt-proof` | `codex/merge-deploy-approval-proof` | GitGuardian and two `go` passing | Has `## Summary`, `## Proven`, `## Unproven`, `## Commands Run` |
+| #224 | `codex/pr-handoff-live-smoke` | `codex/review-run-attempt-proof` | GitGuardian and two `go` passing | Has `## Summary`, `## Proven`, `## Unproven`, `## Commands Run` |
+
+The stack is ready for an operator decision, but not merged. The important
+integration caveat is that PR #222 currently has `main` as its GitHub base while
+its branch includes PR #213/#214 delivery-gate work and PR #219 prompt-to-
+production proof work. A merge of #222 would carry those prerequisite commits
+with it. Preserve this relationship when deciding whether to retarget, merge
+bottom-up, or close superseded draft PRs.
+
 ## Next Concrete Slice
 
 The next non-duplicative implementation slice should be either running the PR
@@ -160,6 +180,14 @@ The next non-duplicative implementation slice should be either running the PR
 repository, or draft-stack integration. It should not be more scheduler-trigger
 work and not another local-only PR handoff, review-run, or approval-request
 command.
+
+If live proof is blocked, the next operator integration action is to choose one
+of these options:
+
+- merge bottom-up: #213, #214, #219, then rebase/refresh #222/#223/#224
+- merge the aggregate #222 branch after accepting that it carries #213/#214/#219
+  prerequisite commits, then refresh #223/#224
+- keep all PRs draft and run the PR #224 live smoke first
 
 Existing proof and handoff command shape from PR #219:
 
