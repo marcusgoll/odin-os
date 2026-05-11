@@ -26,7 +26,7 @@ import (
 	trackerintake "odin-os/internal/tracker/intake"
 )
 
-const workUsage = "usage: odin work status|profiles|start --project <key> --title <text> [--intent <read_only|mutation|governance|destructive>]|evidence --task <id|key> --gate <gate> --kind <kind> --summary <text> [--ref <ref>] [--json]|advance --task <id|key> --gate <gate> [--json]|intake --project <key> [--dry-run]|reconcile --project <key>|proof (--task <id|key>|--intake <id|key>) [--json]|pr prepare --task <id|key> --summary <text> --test <text> --risk <text> --command <text> [--dry-run|--live --approval <id>] [--json]|dispatch [--task <id|key>] [--json]|execute --task <id|key> [--json]|retry --task <id|key> [--json]"
+const workUsage = "usage: odin work status|profiles|start --project <key> --title <text> [--intent <read_only|mutation|governance|destructive>]|evidence --task <id|key> --gate <gate> --kind <kind> --summary <text> [--ref <ref>] [--json]|advance --task <id|key> --gate <gate> [--json]|intake --project <key> [--dry-run]|reconcile --project <key>|proof (--task <id|key>|--intake <id|key>) [--json]|pr prepare --task <id|key> --summary <text> --test <text> --risk <text> --command <text> [--dry-run|--live --approval <id>] [--json]|approval request --task <id|key> --kind <merge|deploy> [--json]|dispatch [--task <id|key>] [--json]|execute --task <id|key> [--json]|retry --task <id|key> [--json]"
 
 const workProofUsage = "usage: odin work proof (--task <id|key>|--intake <id|key>) [--json]"
 
@@ -88,6 +88,8 @@ func RunWork(ctx context.Context, store *sqlite.Store, projectRegistry projects.
 		return runWorkProof(ctx, store, args[1:], stdout)
 	case "pr":
 		return runWorkPR(ctx, store, args[1:], stdout)
+	case "approval":
+		return runWorkApproval(ctx, store, args[1:], stdout)
 	case "dispatch":
 		return runWorkDispatch(ctx, store, projectRegistry, args[1:], stdout, options...)
 	case "execute":
@@ -579,6 +581,14 @@ type workPRHandoffView struct {
 	SelectedRoles []string `json:"selected_roles"`
 }
 
+type workApprovalRequestView struct {
+	ApprovalRequired bool              `json:"approval_required"`
+	ApprovalID       int64             `json:"approval_id"`
+	Kind             string            `json:"kind"`
+	Task             workProofTaskView `json:"task"`
+	NextSteps        []string          `json:"next_steps"`
+}
+
 func runWorkPR(ctx context.Context, store *sqlite.Store, args []string, stdout io.Writer) error {
 	if len(args) == 0 || args[0] == "help" || args[0] == "--help" {
 		_, err := fmt.Fprintln(stdout, workPRPrepareUsage)
@@ -588,6 +598,103 @@ func runWorkPR(ctx context.Context, store *sqlite.Store, args []string, stdout i
 		return fmt.Errorf("unsupported work pr subcommand: %s", args[0])
 	}
 	return runWorkPRPrepare(ctx, store, args[1:], stdout)
+}
+
+func runWorkApproval(ctx context.Context, store *sqlite.Store, args []string, stdout io.Writer) error {
+	if len(args) == 0 || args[0] == "help" || args[0] == "--help" {
+		_, err := fmt.Fprintln(stdout, "usage: odin work approval request --task <id|key> --kind <merge|deploy> [--json]")
+		return err
+	}
+	if args[0] != "request" {
+		return fmt.Errorf("unsupported work approval subcommand: %s", args[0])
+	}
+	return runWorkApprovalRequest(ctx, store, args[1:], stdout)
+}
+
+func runWorkApprovalRequest(ctx context.Context, store *sqlite.Store, args []string, stdout io.Writer) error {
+	params := parseWorkStartArgs(args)
+	jsonOutput := parseBoolFlag(params, "json")
+	if _, ok := params["help"]; ok {
+		_, err := fmt.Fprintln(stdout, "usage: odin work approval request --task <id|key> --kind <merge|deploy> [--json]")
+		return err
+	}
+	if err := rejectUnknownWorkProofArgs(params, "task", "kind", "json"); err != nil {
+		return err
+	}
+	taskRef := strings.TrimSpace(params["task"])
+	kind := normalizeWorkApprovalKind(params["kind"])
+	if taskRef == "" || kind == "" {
+		return fmt.Errorf("usage: odin work approval request --task <id|key> --kind <merge|deploy> [--json]")
+	}
+
+	task, err := findWorkTask(ctx, store, taskRef)
+	if err != nil {
+		return err
+	}
+	if err := validateWorkApprovalPrerequisites(ctx, store, task, kind); err != nil {
+		return err
+	}
+
+	events, err := store.ListEvents(ctx, sqlite.ListEventsParams{TaskID: &task.ID})
+	if err != nil {
+		return err
+	}
+	purposes := approvalPurposesFromEvents(events)
+	approvals, err := store.ListApprovals(ctx, sqlite.ListApprovalsParams{TaskID: &task.ID})
+	if err != nil {
+		return err
+	}
+	for _, approval := range approvals {
+		if approval.Status == "pending" && purposes[approval.ID] == kind {
+			currentTask, err := store.GetTask(ctx, task.ID)
+			if err != nil {
+				return err
+			}
+			return writeWorkApprovalRequestView(stdout, jsonOutput, workApprovalRequestView{
+				ApprovalRequired: true,
+				ApprovalID:       approval.ID,
+				Kind:             kind,
+				Task:             workPRPrepareTaskView(currentTask),
+				NextSteps:        []string{fmt.Sprintf("inspect approval %d, then resolve with odin approvals resolve %d <approve|deny> <reason...>", approval.ID, approval.ID)},
+			})
+		}
+	}
+
+	approval, err := store.RequestApproval(ctx, sqlite.RequestApprovalParams{
+		TaskID:      task.ID,
+		Status:      "pending",
+		RequestedBy: "work_" + kind + "_gate",
+	})
+	if err != nil {
+		return err
+	}
+	currentTask, err := store.BlockTask(ctx, sqlite.BlockTaskParams{
+		TaskID: task.ID,
+		Reason: "approval_required",
+	})
+	if err != nil {
+		return err
+	}
+	return writeWorkApprovalRequestView(stdout, jsonOutput, workApprovalRequestView{
+		ApprovalRequired: true,
+		ApprovalID:       approval.ID,
+		Kind:             kind,
+		Task:             workPRPrepareTaskView(currentTask),
+		NextSteps:        []string{fmt.Sprintf("inspect approval %d, then resolve with odin approvals resolve %d <approve|deny> <reason...>", approval.ID, approval.ID)},
+	})
+}
+
+func writeWorkApprovalRequestView(stdout io.Writer, jsonOutput bool, view workApprovalRequestView) error {
+	if jsonOutput {
+		return WriteJSON(stdout, view)
+	}
+	_, err := fmt.Fprintf(stdout, "approval_required=true kind=%s approval=%d task=%s next_steps=%s\n",
+		view.Kind,
+		view.ApprovalID,
+		view.Task.Key,
+		strings.Join(view.NextSteps, "; "),
+	)
+	return err
 }
 
 func runWorkPRPrepare(ctx context.Context, store *sqlite.Store, args []string, stdout io.Writer) error {
@@ -832,6 +939,74 @@ func pendingPullRequestApproval(ctx context.Context, store *sqlite.Store, task s
 	return approval, nil
 }
 
+func normalizeWorkApprovalKind(kind string) string {
+	switch strings.ToLower(strings.TrimSpace(kind)) {
+	case "merge":
+		return "merge"
+	case "deploy", "deployment":
+		return "deploy"
+	default:
+		return ""
+	}
+}
+
+func validateWorkApprovalPrerequisites(ctx context.Context, store *sqlite.Store, task sqlite.Task, kind string) error {
+	issueURL, err := issueURLForWorkTask(ctx, store, task)
+	if err != nil {
+		return err
+	}
+	handoff, found, err := findWorkProofPullRequestHandoff(ctx, store, task.ProjectID, issueURL)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return fmt.Errorf("pull request handoff is required before %s approval", kind)
+	}
+	if err := validateWorkApprovalReviewEvidence(ctx, store, handoff); err != nil {
+		return err
+	}
+	events, err := store.ListEvents(ctx, sqlite.ListEventsParams{TaskID: &task.ID})
+	if err != nil {
+		return err
+	}
+	if !deliveryGateAdvanced(events, "branch_finished") {
+		return fmt.Errorf("branch_finished gate must be advanced before %s approval", kind)
+	}
+	if kind == "deploy" {
+		approvals, err := store.ListApprovals(ctx, sqlite.ListApprovalsParams{TaskID: &task.ID})
+		if err != nil {
+			return err
+		}
+		purposes := approvalPurposesFromEvents(events)
+		if !hasResolvedApprovalPurpose(approvals, purposes, "merge", "approved") {
+			return fmt.Errorf("approved merge gate is required before deploy approval")
+		}
+	}
+	return nil
+}
+
+func validateWorkApprovalReviewEvidence(ctx context.Context, store *sqlite.Store, handoff sqlite.PullRequestHandoff) error {
+	if len(handoff.SelectedRoles) == 0 {
+		return fmt.Errorf("review selection evidence is required before approval")
+	}
+	results, err := store.ListPullRequestReviewResults(ctx, handoff.ID)
+	if err != nil {
+		return err
+	}
+	seen := make(map[string]bool, len(results))
+	for _, result := range results {
+		if strings.TrimSpace(result.State) != "" && strings.TrimSpace(result.Outcome) != "" {
+			seen[result.Role] = true
+		}
+	}
+	for _, role := range handoff.SelectedRoles {
+		if !seen[role] {
+			return fmt.Errorf("review result evidence for %s is required before approval", role)
+		}
+	}
+	return nil
+}
+
 func workPRPreparePullRequestView(pullRequest review.PullRequest) workPRPreparePRView {
 	return workPRPreparePRView{
 		Provider: pullRequest.Provider,
@@ -1051,6 +1226,7 @@ type workProofApprovalView struct {
 	TaskID     int64  `json:"task_id"`
 	RunID      *int64 `json:"run_id,omitempty"`
 	Status     string `json:"status"`
+	Purpose    string `json:"purpose,omitempty"`
 	Reason     string `json:"reason,omitempty"`
 	DecisionBy string `json:"decision_by,omitempty"`
 }
@@ -1059,6 +1235,8 @@ type workProofGateView struct {
 	Status                string `json:"status"`
 	HumanApprovalRequired bool   `json:"human_approval_required"`
 	Approved              bool   `json:"approved"`
+	ApprovalID            int64  `json:"approval_id,omitempty"`
+	ApprovalStatus        string `json:"approval_status,omitempty"`
 }
 
 type workProofEventsView struct {
@@ -1128,6 +1306,14 @@ func buildWorkProofView(ctx context.Context, store *sqlite.Store, task sqlite.Ta
 	}
 	view.Execution.ActiveRunID = task.CurrentRunID
 
+	events, err := store.ListEvents(ctx, sqlite.ListEventsParams{TaskID: &task.ID})
+	if err != nil {
+		return workProofView{}, err
+	}
+	view.Events = workProofEvents(events)
+	approvalPurposes := approvalPurposesFromEvents(events)
+	view.Delivery = workProofDeliveryFromEvents(events)
+
 	approvals, err := store.ListApprovals(ctx, sqlite.ListApprovalsParams{TaskID: &task.ID})
 	if err != nil {
 		return workProofView{}, err
@@ -1138,6 +1324,7 @@ func buildWorkProofView(ctx context.Context, store *sqlite.Store, task sqlite.Ta
 			TaskID:     approval.TaskID,
 			RunID:      approval.RunID,
 			Status:     approval.Status,
+			Purpose:    approvalPurposes[approval.ID],
 			Reason:     approval.Reason,
 			DecisionBy: approval.DecisionBy,
 		}
@@ -1189,11 +1376,7 @@ func buildWorkProofView(ctx context.Context, store *sqlite.Store, task sqlite.Ta
 		}
 	}
 
-	events, err := store.ListEvents(ctx, sqlite.ListEventsParams{TaskID: &task.ID})
-	if err != nil {
-		return workProofView{}, err
-	}
-	view.Events = workProofEvents(events)
+	applyApprovalGateProof(&view)
 
 	view.NextSteps = workProofNextSteps(view)
 	return view, nil
@@ -1339,6 +1522,17 @@ func intakeIDFromTask(task sqlite.Task) (int64, bool) {
 	return id, err == nil && id > 0
 }
 
+func issueURLForWorkTask(ctx context.Context, store *sqlite.Store, task sqlite.Task) (string, error) {
+	if intakeID, ok := intakeIDFromTask(task); ok {
+		item, err := store.GetIntakeItem(ctx, intakeID)
+		if err != nil {
+			return "", err
+		}
+		return urlFromJSON(item.SourceFactsJSON), nil
+	}
+	return "", nil
+}
+
 func rawIntakeProofKey(id int64) string {
 	return fmt.Sprintf("intake-%d", id)
 }
@@ -1438,6 +1632,146 @@ func workProofEvents(events []runtimeevents.Record) workProofEventsView {
 	return view
 }
 
+func approvalPurposesFromEvents(events []runtimeevents.Record) map[int64]string {
+	purposes := map[int64]string{}
+	for _, event := range events {
+		if event.Type != runtimeevents.EventApprovalRequested {
+			continue
+		}
+		payload, err := runtimeevents.DecodePayload[runtimeevents.ApprovalRequestedPayload](event.Payload)
+		if err != nil {
+			continue
+		}
+		purpose := approvalPurposeFromRequestedBy(payload.RequestedBy)
+		if purpose != "" {
+			purposes[event.StreamID] = purpose
+		}
+	}
+	return purposes
+}
+
+func approvalPurposeFromRequestedBy(requestedBy string) string {
+	switch strings.ToLower(strings.TrimSpace(requestedBy)) {
+	case "work_merge_gate":
+		return "merge"
+	case "work_deploy_gate":
+		return "deploy"
+	default:
+		return ""
+	}
+}
+
+func hasResolvedApprovalPurpose(approvals []sqlite.Approval, purposes map[int64]string, purpose string, status string) bool {
+	for _, approval := range approvals {
+		if purposes[approval.ID] == purpose && approval.Status == status {
+			return true
+		}
+	}
+	return false
+}
+
+func deliveryGateAdvanced(events []runtimeevents.Record, gate string) bool {
+	for _, event := range events {
+		if event.Type != runtimeevents.EventDeliveryGateAdvanced {
+			continue
+		}
+		payload, err := runtimeevents.DecodePayload[runtimeevents.DeliveryGateAdvancedPayload](event.Payload)
+		if err != nil {
+			continue
+		}
+		if payload.Gate == gate {
+			return true
+		}
+	}
+	return false
+}
+
+func workProofDeliveryFromEvents(events []runtimeevents.Record) workProofDeliveryView {
+	evidenceSeen := false
+	advancedSeen := false
+	for _, event := range events {
+		switch event.Type {
+		case runtimeevents.EventDeliveryEvidenceRecorded:
+			evidenceSeen = true
+		case runtimeevents.EventDeliveryGateAdvanced:
+			advancedSeen = true
+		}
+	}
+	view := workProofDeliveryView{EvidenceStatus: "missing", GateStatus: "not_started"}
+	if evidenceSeen {
+		view.EvidenceStatus = "recorded"
+	}
+	if advancedSeen {
+		view.GateStatus = "advanced"
+	}
+	return view
+}
+
+func applyApprovalGateProof(view *workProofView) {
+	mergeApproval := latestPurposeApproval(view.Approvals, "merge")
+	if mergeApproval != nil {
+		applyApprovalToGate(&view.MergeGate, *mergeApproval)
+	}
+
+	deployApproval := latestPurposeApproval(view.Approvals, "deploy")
+	if deployApproval != nil {
+		applyApprovalToGate(&view.DeploymentGate, *deployApproval)
+		return
+	}
+	if view.MergeGate.Approved {
+		view.DeploymentGate.Status = "approval_required"
+		view.DeploymentGate.HumanApprovalRequired = true
+		view.DeploymentGate.Approved = false
+	} else if view.PullRequest.Status != "missing" {
+		view.DeploymentGate.Status = "not_ready"
+		view.DeploymentGate.HumanApprovalRequired = true
+		view.DeploymentGate.Approved = false
+	}
+}
+
+func latestPurposeApproval(approvals workProofApprovalsView, purpose string) *workProofApprovalView {
+	var latest *workProofApprovalView
+	for _, approval := range approvals.Pending {
+		if approval.Purpose != purpose {
+			continue
+		}
+		candidate := approval
+		if latest == nil || candidate.ID > latest.ID {
+			latest = &candidate
+		}
+	}
+	for _, approval := range approvals.Resolved {
+		if approval.Purpose != purpose {
+			continue
+		}
+		candidate := approval
+		if latest == nil || candidate.ID > latest.ID {
+			latest = &candidate
+		}
+	}
+	return latest
+}
+
+func applyApprovalToGate(gate *workProofGateView, approval workProofApprovalView) {
+	gate.ApprovalID = approval.ID
+	gate.ApprovalStatus = approval.Status
+	gate.HumanApprovalRequired = true
+	switch approval.Status {
+	case "approved":
+		gate.Status = "approved"
+		gate.Approved = true
+	case "denied":
+		gate.Status = "denied"
+		gate.Approved = false
+	case "pending":
+		gate.Status = "approval_required"
+		gate.Approved = false
+	default:
+		gate.Status = approval.Status
+		gate.Approved = false
+	}
+}
+
 func workProofNextSteps(view workProofView) []string {
 	if view.Task == nil && view.Source.Type == "intake_item" {
 		switch view.ProofState {
@@ -1454,7 +1788,7 @@ func workProofNextSteps(view workProofView) []string {
 	if len(view.Approvals.Pending) > 0 {
 		return []string{"resolve pending approval before execution or external mutation"}
 	}
-	if len(view.Execution.Runs) == 0 {
+	if len(view.Execution.Runs) == 0 && view.Delivery.EvidenceStatus == "missing" && view.PullRequest.Status == "missing" {
 		return []string{"dispatch and execute the Work Item before delivery evidence or PR handoff"}
 	}
 	if view.Delivery.EvidenceStatus == "missing" {
@@ -1463,8 +1797,17 @@ func workProofNextSteps(view workProofView) []string {
 	if view.PullRequest.Status == "missing" {
 		return []string{"prepare a pull request handoff for human review"}
 	}
+	if view.MergeGate.Status == "denied" {
+		return []string{"merge approval denied; do not merge unless a fresh approval is requested"}
+	}
 	if !view.MergeGate.Approved {
 		return []string{"obtain explicit human merge approval before merge"}
+	}
+	if view.DeploymentGate.Status == "denied" {
+		return []string{"deployment approval denied; do not deploy unless a fresh approval is requested"}
+	}
+	if !view.DeploymentGate.Approved {
+		return []string{"obtain explicit human deploy approval before deployment"}
 	}
 	return []string{"inspect proof evidence before marking external work complete"}
 }

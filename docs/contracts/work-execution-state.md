@@ -60,6 +60,7 @@ Each state claim must map to one of these existing operator surfaces:
 | `odin work proof --task <id\|key> --json` | correlates source intake, review, Work Item, Run Attempts, approvals, PR handoff, merge gate, deployment gate, and task events without mutating runtime state |
 | `odin work proof --intake <id\|key> --json` | proves unclear or draft intake state before a Work Item exists, including clarification prompts, draft artifact, review queue state, and intake events without mutation |
 | `odin work pr prepare --task <id\|key> --summary <text> --test <text> --risk <text> --command <text> [--dry-run\|--live --approval <id>] --json` | prepares durable PR handoff and review-selection evidence; dry-run/local mode does not call GitHub, and live mode requires an approved same-task Approval Request before using the pull request handoff mutation contract |
+| `odin work approval request --task <id\|key> --kind <merge\|deploy> --json` | creates a task-scoped Approval Request for merge or deploy gate proof after PR handoff, review-selection evidence, and delivery gate evidence exist; it does not merge, deploy, delete branches, or call external mutation APIs |
 | `odin work dispatch --task <id\|key> --json` | admits dispatch, creates a Run Attempt, or blocks with a policy/approval reason |
 | `odin work execute --task <id\|key> --json` | executes an already dispatched Run Attempt and reports terminal state |
 | `odin task run --project <key> --title <text> --json` | proves the compatibility create-and-execute path |

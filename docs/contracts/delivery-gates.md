@@ -76,9 +76,42 @@ financial mutation, legal mutation, medical mutation, deletion, permissions
 changes, purchases, calendar mutations with others, or message sending
 automatic. Those operations remain approval-gated follow-up work.
 
-A future approval-enforcement slice must prove:
+## Merge and Deploy Approval Requests
 
-- current-gate and next-action projection
-- approval blocking before merge, deploy, production mutation, public posting,
-  financial mutation, legal mutation, medical mutation, deletion, permissions
-  changes, purchases, calendar mutations with others, or message sending
+`odin work approval request --task <id|key> --kind <merge|deploy>` creates or
+reuses one task-scoped Approval Request for the named release gate. It records
+the purpose through the existing `approval.requested` event stream:
+
+- merge approvals use `requested_by=work_merge_gate`
+- deploy approvals use `requested_by=work_deploy_gate`
+
+The command must reject approval creation unless Odin can see:
+
+- a PR handoff for the Work Item
+- review-selection evidence for every selected review role
+- an advanced `branch_finished` delivery gate
+- for deploy approval, an already approved merge gate
+
+`odin work proof --task <id|key> --json` reads the approval events back into
+`merge_gate` and `deployment_gate` fields with approval ID, approval status,
+and approved state. Merge and deploy approvals are separate approvals.
+
+The command must not call GitHub merge APIs, deployment systems, branch
+deletion, release creation, production mutation, or repository settings APIs.
+It only creates approval evidence and blocks the Work Item with
+`blocked_reason=approval_required`.
+
+## Remaining Approval Enforcement
+
+Future slices must still prove approval blocking before production mutation,
+public posting, financial mutation, legal mutation, medical mutation, deletion,
+permissions changes, purchases, calendar mutations with others, or message
+sending.
+
+## Security Review
+
+This slice adds no external mutation client and no token handling. It reuses the
+existing SQLite approval table, event stream, and `odin approvals resolve`
+surface. Approval request creation is local-only; approval resolution changes
+Odin runtime state but still does not merge, deploy, delete branches, or mutate
+production systems.

@@ -4704,6 +4704,186 @@ func TestRunWorkPRPrepareLiveMutationRejectsInvalidApprovalBeforeGitHub(t *testi
 	}
 }
 
+func TestRunWorkApprovalRequestFailsClosedWithoutMergeEvidence(t *testing.T) {
+	t.Parallel()
+
+	root := testRepoRoot(t)
+	taskKey := createQueuedWorkItemForPRPrepare(t, root)
+
+	var missingPROutput bytes.Buffer
+	err := Run(context.Background(), root, []string{"work", "approval", "request", "--task", taskKey, "--kind", "merge", "--json"}, strings.NewReader(""), &missingPROutput)
+	if err == nil || !strings.Contains(err.Error(), "pull request handoff is required before merge approval") || missingPROutput.Len() != 0 {
+		t.Fatalf("missing PR approval output/error = %q/%v, want fail closed before approval request", missingPROutput.String(), err)
+	}
+
+	if err := Run(context.Background(), root, []string{
+		"work", "pr", "prepare",
+		"--task", taskKey,
+		"--summary", "PR handoff ready for merge gate.",
+		"--test", "go test ./internal/app/lifecycle -run TestRunWorkApprovalRequest -count=1",
+		"--risk", "merge remains human approved",
+		"--command", "go test ./internal/app/lifecycle -run TestRunWorkApprovalRequest -count=1",
+		"--dry-run",
+		"--json",
+	}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+		t.Fatalf("Run(work pr prepare) error = %v", err)
+	}
+
+	var missingGateOutput bytes.Buffer
+	err = Run(context.Background(), root, []string{"work", "approval", "request", "--task", taskKey, "--kind", "merge", "--json"}, strings.NewReader(""), &missingGateOutput)
+	if err == nil || !strings.Contains(err.Error(), "branch_finished gate must be advanced before merge approval") || missingGateOutput.Len() != 0 {
+		t.Fatalf("missing gate approval output/error = %q/%v, want fail closed before approval request", missingGateOutput.String(), err)
+	}
+
+	var approvalsOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"approvals", "all", "--json"}, strings.NewReader(""), &approvalsOutput); err != nil {
+		t.Fatalf("Run(approvals all) error = %v", err)
+	}
+	if strings.Contains(approvalsOutput.String(), `"approval_id"`) {
+		t.Fatalf("approvals output = %s, want no approval created for missing evidence", approvalsOutput.String())
+	}
+}
+
+func TestRunWorkApprovalRequestRecordsSeparateMergeAndDeployApprovalProof(t *testing.T) {
+	t.Parallel()
+
+	root := testRepoRoot(t)
+	taskKey := createQueuedWorkItemForPRPrepare(t, root)
+	if err := Run(context.Background(), root, []string{
+		"work", "pr", "prepare",
+		"--task", taskKey,
+		"--summary", "PR handoff ready for release approvals.",
+		"--test", "go test ./internal/app/lifecycle -run TestRunWorkApprovalRequest -count=1",
+		"--risk", "merge and deploy remain separate approvals",
+		"--command", "go test ./internal/app/lifecycle -run TestRunWorkApprovalRequest -count=1",
+		"--dry-run",
+		"--json",
+	}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+		t.Fatalf("Run(work pr prepare) error = %v", err)
+	}
+	advanceDeliveryGatesForApprovalProof(t, root, taskKey)
+
+	var mergeOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"work", "approval", "request", "--task", taskKey, "--kind", "merge", "--json"}, strings.NewReader(""), &mergeOutput); err != nil {
+		t.Fatalf("Run(work approval request merge) error = %v\n%s", err, mergeOutput.String())
+	}
+	var mergeRequest struct {
+		ApprovalRequired bool   `json:"approval_required"`
+		ApprovalID       int64  `json:"approval_id"`
+		Kind             string `json:"kind"`
+		Task             struct {
+			Key           string `json:"key"`
+			Status        string `json:"status"`
+			BlockedReason string `json:"blocked_reason"`
+		} `json:"task"`
+	}
+	if err := json.Unmarshal(mergeOutput.Bytes(), &mergeRequest); err != nil {
+		t.Fatalf("json.Unmarshal(merge request) error = %v\n%s", err, mergeOutput.String())
+	}
+	if !mergeRequest.ApprovalRequired || mergeRequest.ApprovalID == 0 || mergeRequest.Kind != "merge" || mergeRequest.Task.Key != taskKey || mergeRequest.Task.Status != "blocked" || mergeRequest.Task.BlockedReason != "approval_required" {
+		t.Fatalf("merge request = %+v, want blocked merge approval request", mergeRequest)
+	}
+
+	var mergeProofOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"work", "proof", "--task", taskKey, "--json"}, strings.NewReader(""), &mergeProofOutput); err != nil {
+		t.Fatalf("Run(work proof after merge request) error = %v\n%s", err, mergeProofOutput.String())
+	}
+	var mergeProof struct {
+		ProofState string `json:"proof_state"`
+		MergeGate  struct {
+			Status         string `json:"status"`
+			ApprovalID     int64  `json:"approval_id"`
+			ApprovalStatus string `json:"approval_status"`
+			Approved       bool   `json:"approved"`
+		} `json:"merge_gate"`
+		DeploymentGate struct {
+			Status   string `json:"status"`
+			Approved bool   `json:"approved"`
+		} `json:"deployment_gate"`
+		Approvals struct {
+			Pending []struct {
+				ID      int64  `json:"id"`
+				Purpose string `json:"purpose"`
+			} `json:"pending"`
+		} `json:"approvals"`
+		Mutated bool `json:"mutated"`
+	}
+	if err := json.Unmarshal(mergeProofOutput.Bytes(), &mergeProof); err != nil {
+		t.Fatalf("json.Unmarshal(merge proof) error = %v\n%s", err, mergeProofOutput.String())
+	}
+	if mergeProof.ProofState != "approval_required" || mergeProof.MergeGate.Status != "approval_required" || mergeProof.MergeGate.ApprovalID != mergeRequest.ApprovalID || mergeProof.MergeGate.ApprovalStatus != "pending" || mergeProof.MergeGate.Approved || mergeProof.Mutated {
+		t.Fatalf("merge proof = %+v, want pending merge approval proof", mergeProof)
+	}
+	if len(mergeProof.Approvals.Pending) != 1 || mergeProof.Approvals.Pending[0].Purpose != "merge" {
+		t.Fatalf("merge proof approvals = %+v, want one pending merge approval", mergeProof.Approvals)
+	}
+	if mergeProof.DeploymentGate.Status != "not_ready" || mergeProof.DeploymentGate.Approved {
+		t.Fatalf("deployment gate before merge approval = %+v, want not ready", mergeProof.DeploymentGate)
+	}
+
+	if err := Run(context.Background(), root, []string{"approvals", "resolve", fmt.Sprintf("%d", mergeRequest.ApprovalID), "approve", "operator", "approved", "merge", "gate", "--json"}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+		t.Fatalf("Run(approvals resolve merge) error = %v", err)
+	}
+
+	var deployOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"work", "approval", "request", "--task", taskKey, "--kind", "deploy", "--json"}, strings.NewReader(""), &deployOutput); err != nil {
+		t.Fatalf("Run(work approval request deploy) error = %v\n%s", err, deployOutput.String())
+	}
+	var deployRequest struct {
+		ApprovalRequired bool   `json:"approval_required"`
+		ApprovalID       int64  `json:"approval_id"`
+		Kind             string `json:"kind"`
+	}
+	if err := json.Unmarshal(deployOutput.Bytes(), &deployRequest); err != nil {
+		t.Fatalf("json.Unmarshal(deploy request) error = %v\n%s", err, deployOutput.String())
+	}
+	if !deployRequest.ApprovalRequired || deployRequest.ApprovalID == 0 || deployRequest.ApprovalID == mergeRequest.ApprovalID || deployRequest.Kind != "deploy" {
+		t.Fatalf("deploy request = %+v, want separate deploy approval", deployRequest)
+	}
+
+	if err := Run(context.Background(), root, []string{"approvals", "resolve", fmt.Sprintf("%d", deployRequest.ApprovalID), "deny", "operator", "denied", "deployment", "gate", "--json"}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+		t.Fatalf("Run(approvals resolve deploy) error = %v", err)
+	}
+
+	var finalProofOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"work", "proof", "--task", taskKey, "--json"}, strings.NewReader(""), &finalProofOutput); err != nil {
+		t.Fatalf("Run(work proof final) error = %v\n%s", err, finalProofOutput.String())
+	}
+	var finalProof struct {
+		MergeGate struct {
+			Status         string `json:"status"`
+			ApprovalID     int64  `json:"approval_id"`
+			ApprovalStatus string `json:"approval_status"`
+			Approved       bool   `json:"approved"`
+		} `json:"merge_gate"`
+		DeploymentGate struct {
+			Status         string `json:"status"`
+			ApprovalID     int64  `json:"approval_id"`
+			ApprovalStatus string `json:"approval_status"`
+			Approved       bool   `json:"approved"`
+		} `json:"deployment_gate"`
+		Approvals struct {
+			Resolved []struct {
+				ID      int64  `json:"id"`
+				Purpose string `json:"purpose"`
+				Status  string `json:"status"`
+			} `json:"resolved"`
+		} `json:"approvals"`
+	}
+	if err := json.Unmarshal(finalProofOutput.Bytes(), &finalProof); err != nil {
+		t.Fatalf("json.Unmarshal(final proof) error = %v\n%s", err, finalProofOutput.String())
+	}
+	if finalProof.MergeGate.Status != "approved" || finalProof.MergeGate.ApprovalID != mergeRequest.ApprovalID || finalProof.MergeGate.ApprovalStatus != "approved" || !finalProof.MergeGate.Approved {
+		t.Fatalf("final merge gate = %+v, want approved merge gate", finalProof.MergeGate)
+	}
+	if finalProof.DeploymentGate.Status != "denied" || finalProof.DeploymentGate.ApprovalID != deployRequest.ApprovalID || finalProof.DeploymentGate.ApprovalStatus != "denied" || finalProof.DeploymentGate.Approved {
+		t.Fatalf("final deployment gate = %+v, want denied deploy gate", finalProof.DeploymentGate)
+	}
+	if len(finalProof.Approvals.Resolved) != 2 {
+		t.Fatalf("final resolved approvals = %+v, want merge and deploy approvals", finalProof.Approvals.Resolved)
+	}
+}
+
 func createQueuedWorkItemForPRPrepare(t *testing.T, root string) string {
 	t.Helper()
 	var output bytes.Buffer
@@ -4720,6 +4900,25 @@ func createQueuedWorkItemForPRPrepare(t *testing.T, root string) string {
 		t.Fatalf("work start output = %s, want key", output.String())
 	}
 	return key
+}
+
+func advanceDeliveryGatesForApprovalProof(t *testing.T, root string, taskKey string) {
+	t.Helper()
+	for _, gate := range []string{"domain_locked", "design_approved", "plan_ready", "execution_selected", "execution_complete", "verified", "branch_finished"} {
+		if err := Run(context.Background(), root, []string{
+			"work", "evidence",
+			"--task", taskKey,
+			"--gate", gate,
+			"--kind", "test",
+			"--summary", "approval proof evidence for " + gate,
+			"--json",
+		}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+			t.Fatalf("Run(work evidence %s) error = %v", gate, err)
+		}
+		if err := Run(context.Background(), root, []string{"work", "advance", "--task", taskKey, "--gate", gate, "--json"}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+			t.Fatalf("Run(work advance %s) error = %v", gate, err)
+		}
+	}
 }
 
 func containsStringPrefix(values []string, prefix string) bool {
