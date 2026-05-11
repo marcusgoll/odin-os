@@ -66,6 +66,8 @@ const (
 	EventConversationTranscriptRecorded     Type = "conversation.transcript_recorded"
 	EventMemorySummaryRecorded              Type = "memory.summary_recorded"
 	EventMemorySummaryUpdated               Type = "memory.summary_updated"
+	EventMemoryProposalCreated              Type = "memory.proposal_created"
+	EventMemoryProposalResolved             Type = "memory.proposal_resolved"
 	EventReviewApproved                     Type = "review.approved"
 	EventReviewRejected                     Type = "review.rejected"
 	EventIntakeItemCreated                  Type = "intake.item_created"
@@ -626,6 +628,21 @@ type MemorySummaryUpdatedPayload struct {
 	SourceTranscriptID *int64 `json:"source_transcript_id,omitempty"`
 	TaskID             *int64 `json:"task_id,omitempty"`
 	RunID              *int64 `json:"run_id,omitempty"`
+}
+
+type MemoryProposalPayload struct {
+	MemoryID    int64  `json:"memory_id"`
+	Scope       string `json:"scope"`
+	ScopeKey    string `json:"scope_key"`
+	MemoryType  string `json:"memory_type"`
+	Status      string `json:"status"`
+	Decision    string `json:"decision,omitempty"`
+	SourceType  string `json:"source_type,omitempty"`
+	SourceID    string `json:"source_id,omitempty"`
+	SourceKey   string `json:"source_key,omitempty"`
+	Sensitivity string `json:"sensitivity,omitempty"`
+	ReviewedBy  string `json:"reviewed_by,omitempty"`
+	Reason      string `json:"reason,omitempty"`
 }
 
 type IntakeItemCreatedPayload struct {

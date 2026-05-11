@@ -17,6 +17,7 @@ import (
 	approvalsvc "odin-os/internal/runtime/approvals"
 	jobsvc "odin-os/internal/runtime/jobs"
 	runtimeknowledge "odin-os/internal/runtime/knowledge"
+	"odin-os/internal/runtime/memoryproposal"
 	"odin-os/internal/runtime/projections"
 	"odin-os/internal/runtime/recovery"
 	"odin-os/internal/store/sqlite"
@@ -468,7 +469,10 @@ func runReviewActSource(ctx context.Context, app bootstrap.App, ref reviewQueueR
 		if dryRun {
 			return fmt.Errorf("--dry-run is only supported for failed-work follow-up review actions")
 		}
-		return fmt.Errorf("memory proposal review actions are not implemented; use the existing memory workflow")
+		if !oneOf(action, "accept", "reject", "archive") {
+			return fmt.Errorf("memory proposal action must be accept, reject, or archive")
+		}
+		return runMemoryProposalReview(ctx, app, ref.ID, action, "unified review decision", jsonOutput, stdout)
 	default:
 		return fmt.Errorf("unsupported review queue source %q", ref.Kind)
 	}
@@ -537,7 +541,9 @@ func reviewActionPreflight(ctx context.Context, app bootstrap.App, ref reviewQue
 			return reviewActionReceipt{}, fmt.Errorf("failed work action must be retry or follow-up")
 		}
 	case "memory-proposal":
-		return unsupportedReviewActionReceipt(receipt, "memory_proposal_review_not_implemented", "memory proposal review actions are not implemented; use the existing memory workflow"), fmt.Errorf("memory proposal review actions are not implemented; use the existing memory workflow")
+		if !oneOf(action, "accept", "reject", "archive") {
+			return reviewActionReceipt{}, fmt.Errorf("memory proposal action must be accept, reject, or archive")
+		}
 	case "recovery":
 		return unsupportedReviewActionReceipt(receipt, "recovery_review_actions_not_implemented", "recovery review is read-only until recovery proposal approval persistence is available"), fmt.Errorf("recovery review actions are not implemented")
 	default:
@@ -601,7 +607,7 @@ func reviewActionMutationScope(kind string, action string) string {
 			return "execution_resuming"
 		}
 		return "review_state"
-	case "goal-blocker", "memory-proposal", "recovery":
+	case "goal-blocker", "recovery":
 		return "unsupported"
 	default:
 		return "review_state"
@@ -670,6 +676,8 @@ func reviewActionAuditEvent(kind string, action string) string {
 		return "review.approved"
 	case "failed-work":
 		return "work.review_" + action
+	case "memory-proposal":
+		return "memory.proposal_resolved"
 	default:
 		return ""
 	}
@@ -685,7 +693,7 @@ func reviewActionNextStep(kind string, action string) string {
 	case "failed-work":
 		return "inspect failed work item and retry/follow-up evidence"
 	case "memory-proposal":
-		return "use the existing memory workflow"
+		return "inspect memory proposal and active memory list"
 	default:
 		return "inspect source result and review queue state"
 	}
@@ -1664,6 +1672,10 @@ func reviewEntryFromMemoryProposal(ctx context.Context, store *sqlite.Store, sum
 		status = value
 		reason = "memory_status_" + value
 	}
+	allowedActions := []string{}
+	if strings.EqualFold(status, "pending") && strings.EqualFold(fields["schema"], memoryproposal.SchemaV1) {
+		allowedActions = []string{"accept", "reject", "archive"}
+	}
 	return reviewQueueEntry{
 		ReviewID:       fmt.Sprintf("memory-proposal:%d", summary.ID),
 		QueueID:        fmt.Sprintf("memory-proposal:%d", summary.ID),
@@ -1681,7 +1693,7 @@ func reviewEntryFromMemoryProposal(ctx context.Context, store *sqlite.Store, sum
 		TaskID:         nullableInt64Value(summary.TaskID),
 		Source:         "memory_summaries",
 		Risk:           "governance",
-		AllowedActions: []string{},
+		AllowedActions: allowedActions,
 	}, nil
 }
 
@@ -1706,6 +1718,10 @@ func memoryProposalReviewDetailFromSummary(summary sqlite.MemorySummary) (memory
 	if err != nil {
 		return memoryProposalReviewDetail{}, err
 	}
+	allowedNotes := ""
+	if !strings.EqualFold(fields["schema"], memoryproposal.SchemaV1) {
+		allowedNotes = "read-only in odin review until migrated to memory_proposal.v1"
+	}
 	return memoryProposalReviewDetail{
 		ID:           summary.ID,
 		Scope:        summary.Scope,
@@ -1715,7 +1731,7 @@ func memoryProposalReviewDetailFromSummary(summary sqlite.MemorySummary) (memory
 		Fields:       fields,
 		CreatedAt:    formatReviewTime(summary.CreatedAt),
 		UpdatedAt:    formatReviewTime(summary.UpdatedAt),
-		AllowedNotes: "read-only in odin review until a memory resolve command is available on the operator surface",
+		AllowedNotes: allowedNotes,
 	}, nil
 }
 
@@ -1732,6 +1748,20 @@ func memorySummaryFields(detailsJSON string) (map[string]string, error) {
 	}
 	for key, value := range payload.Fields {
 		fields[key] = value
+	}
+	if details, ok, err := memoryproposal.DecodeDetails(detailsJSON); err != nil {
+		return nil, fmt.Errorf("memory summary details are invalid: %w", err)
+	} else if ok {
+		fields["schema"] = details.Schema
+		fields["status"] = details.Status
+		fields["approval"] = details.Approval
+		fields["source_type"] = details.Source.Type
+		fields["source_id"] = details.Source.ID
+		fields["source_key"] = details.Source.Key
+		fields["source_url"] = details.Source.URL
+		fields["sensitivity"] = details.Safety.Sensitivity
+		fields["reviewed_by"] = details.Provenance.ReviewedBy
+		fields["review_reason"] = details.Provenance.ReviewReason
 	}
 	return fields, nil
 }
@@ -2039,6 +2069,34 @@ func runContextPackReview(ctx context.Context, app bootstrap.App, packetID int64
 		return commands.WriteJSON(stdout, view)
 	}
 	_, err = fmt.Fprintf(stdout, "context_pack id=%d decision=%s status=%s repeated=%t\n", packetID, outcome.Decision, outcome.Status, outcome.Repeated)
+	return err
+}
+
+func runMemoryProposalReview(ctx context.Context, app bootstrap.App, memoryID int64, action string, reason string, jsonOutput bool, stdout io.Writer) error {
+	proposal, repeated, err := memoryproposal.Service{Store: app.Store}.Resolve(ctx, memoryproposal.ResolveParams{
+		ID:         memoryID,
+		Decision:   action,
+		ReviewedBy: "operator",
+		Reason:     reason,
+	})
+	if err != nil {
+		return err
+	}
+	view := struct {
+		Decision string                  `json:"decision"`
+		Status   string                  `json:"status"`
+		Repeated bool                    `json:"repeated"`
+		Memory   memoryproposal.Proposal `json:"memory"`
+	}{
+		Decision: action,
+		Status:   proposal.Status,
+		Repeated: repeated,
+		Memory:   proposal,
+	}
+	if jsonOutput {
+		return commands.WriteJSON(stdout, view)
+	}
+	_, err = fmt.Fprintf(stdout, "memory=%d decision=%s status=%s repeated=%t\n", memoryID, action, proposal.Status, repeated)
 	return err
 }
 

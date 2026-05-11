@@ -72,7 +72,7 @@ import (
 
 var errRuntimeNotReady = errors.New("runtime not ready")
 
-const rootUsageBanner = "Usage: odin <command> [args]\n\nCommands: help repl overview tui doctor healthcheck serve backup restore verify-backup status legacy project workspace work scope jobs runs leases approvals review intake agenda logs knowledge goal browser task initiative companion profile followup trigger scheduler transition skills e2e\n\nRun detail: odin runs show <id>"
+const rootUsageBanner = "Usage: odin <command> [args]\n\nCommands: help repl overview tui doctor healthcheck serve backup restore verify-backup status legacy project workspace work scope jobs runs leases approvals review intake agenda logs knowledge memory goal browser task initiative companion profile followup trigger scheduler transition skills e2e\n\nRun detail: odin runs show <id>"
 
 const schedulerUsage = "usage: odin scheduler tick [now=<RFC3339>] [recovery=<true|false>] [--dry-run|dry_run=<true|false>] [--json]"
 
@@ -336,6 +336,8 @@ func Run(ctx context.Context, root string, args []string, stdin io.Reader, stdou
 		return runLogs(ctx, app, args[1:], stdout)
 	case "knowledge":
 		return commands.RunKnowledge(ctx, app.Store, args[1:], stdout)
+	case "memory":
+		return commands.RunMemory(ctx, app.Store, args[1:], stdout)
 	case "goal":
 		return runGoal(ctx, app, args[1:], stdout)
 	case "browser":
