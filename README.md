@@ -7,7 +7,9 @@ updated: 2026-04-17
 
 # Odin OS
 
-Odin OS is the canonical future runtime for Odin: a Go-first, CLI-first orchestration system with SQLite as its initial runtime authority, Markdown with frontmatter as its canonical authored format, and Git-governed project execution as a baseline requirement.
+Odin OS is a proven universal inbox, personal/project operating system, agent orchestration layer, governed automation platform, safe prompt-to-production workflow system, and unified review queue without crossing into unsafe autonomous execution.
+
+It is the canonical future runtime for Odin: a Go-first, CLI-first orchestration system with SQLite as its initial runtime authority, Markdown with frontmatter as its canonical authored format, and Git-governed project execution as a baseline requirement.
 
 This repository is the runtime root. `odin-orchestrator` is a migration source only. The system is designed around a workspace-first semantic center that still operates across explicit scopes: global control, the reserved `odin-core` system project, managed local or GitHub-backed projects, and new-project setup flows. GitHub is optional, but Git is mandatory for any managed project.
 
@@ -160,3 +162,5 @@ Pull requests are expected to use the repo template and report:
 - `Commands Run`
 
 On `pull_request` events, CI validates that the PR body includes those sections and, for operator-visible changes, includes real `odin` command evidence.
+
+No Odin capability counts as implemented unless a real `odin` command invokes it, persists the result, enforces policy where relevant, and emits audit evidence readable through an operator surface.
