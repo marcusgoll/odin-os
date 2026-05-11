@@ -151,7 +151,7 @@ ODIN_ROOT="$tmp" ./bin/odin work status --json
 rm -rf "$tmp"
 ```
 
-Follow-up implementation hardening should add a test requiring `memory_proposal` in `TestReviewQueueIncludesAllGovernedDecisionSources` and a fixture that proves scheduled approval work enters the review queue as `task_approval`.
+The follow-up hardening in PR #208 added direct `memory_proposal` coverage and scheduled-approval `task_approval` coverage. Future implementation should focus on a public memory-proposal creation operator path only if durable memory writes become an accepted product requirement.
 
 ## Documentation Changes
 
@@ -195,7 +195,7 @@ The resulting review item has `source_type=task_approval`, `task_key=automation-
 
 No additional hardening is required for the source-coverage fixtures in this slice. Future implementation should focus on a public memory-proposal creation operator path only if durable memory writes become an accepted product requirement.
 
-## Implementation Goal Prompt
+## Implementation Goal Prompt (Completed By PR #208)
 
 ```text
 /goal Harden governed review queue source proof in /home/orchestrator/odin-os.
