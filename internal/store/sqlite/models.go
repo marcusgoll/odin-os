@@ -155,6 +155,14 @@ type ListPullRequestHandoffsParams struct {
 	ProjectID   *int64
 }
 
+type RecordPullRequestHandoffPreparedParams struct {
+	Handoff          PullRequestHandoff
+	TaskID           int64
+	DryRun           bool
+	ExternalMutated  bool
+	ApprovalRequired bool
+}
+
 type UpsertPullRequestReviewResultParams struct {
 	HandoffID int64
 	Role      string

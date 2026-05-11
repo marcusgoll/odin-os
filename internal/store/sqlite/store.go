@@ -356,6 +356,37 @@ func (store *Store) ListPullRequestHandoffs(ctx context.Context, params ListPull
 	return handoffs, rows.Err()
 }
 
+func (store *Store) RecordPullRequestHandoffPrepared(ctx context.Context, params RecordPullRequestHandoffPreparedParams) error {
+	handoff := params.Handoff
+	now := store.now()
+	return store.withTx(ctx, func(tx *sql.Tx) error {
+		return appendEventTx(ctx, tx, eventInsert{
+			StreamType: runtimeevents.StreamPullRequestHandoff,
+			StreamID:   handoff.ID,
+			EventType:  runtimeevents.EventPullRequestHandoffPrepared,
+			Scope:      "project",
+			ProjectID:  &handoff.ProjectID,
+			TaskID:     &params.TaskID,
+			Payload: runtimeevents.PullRequestHandoffPreparedPayload{
+				HandoffID:        handoff.ID,
+				ProjectID:        handoff.ProjectID,
+				TaskID:           params.TaskID,
+				Provider:         handoff.Provider,
+				Repo:             handoff.Repo,
+				Number:           handoff.Number,
+				State:            handoff.State,
+				Branch:           handoff.Branch,
+				Title:            handoff.Title,
+				ReviewState:      handoff.ReviewState,
+				DryRun:           params.DryRun,
+				ExternalMutated:  params.ExternalMutated,
+				ApprovalRequired: params.ApprovalRequired,
+			},
+			OccurredAt: now,
+		})
+	})
+}
+
 func (store *Store) UpsertPullRequestReviewResult(ctx context.Context, params UpsertPullRequestReviewResultParams) (PullRequestReviewResult, error) {
 	now := store.now()
 	var result PullRequestReviewResult

@@ -409,6 +409,7 @@ PR #219 implements the v1 read-only proof command:
 
 - `odin work proof --task <id|key> [--json]`
 - `odin work proof --intake <id|key> [--json]`
+- `odin work pr prepare --task <id|key> --summary <text> --test <text> --risk <text> --command <text> [--dry-run] [--json]`
 - `prompt_to_production_proof.v1` JSON envelope
 - pre-work intake proof for unclear and draft intake before Work Item creation
 - source intake correlation through reviewed intake Work Items
@@ -417,12 +418,16 @@ PR #219 implements the v1 read-only proof command:
 - PR handoff evidence for provider, repo, number, branch, tests, risks,
   blockers, selected review roles, and reviewer/QA/security result rows when
   they exist
+- dry-run/local PR handoff preparation that persists handoff/review-selection
+  evidence and emits `pull_request.handoff_prepared` without live GitHub
+  mutation
 - honest `missing` and `not_started` states for incomplete delivery and PR
   evidence
 - fail-closed unknown Work Item handling
+- fail-closed missing handoff evidence and unapproved live PR mutation handling
 - `mutated=false` with command-level proof that no log event is appended
 
-The implementation does not add live PR creation/update, merge approval
+The implementation does not add unapproved live PR creation/update, merge approval
 resolution, deployment approval resolution, worker dispatch, branch creation, or
 GitHub mutation.
 
@@ -490,24 +495,29 @@ Implement one PR-sized read-only proof slice:
 ```text
 /goal Implement the read-only prompt-to-production proof command in /home/orchestrator/odin-os.
 
-Use docs/superpowers/specs/2026-05-11-prompt-to-production-proof-path-design.md as the approved design. Keep the work PR-sized and make atomic commits. Reuse odin intake, odin review, odin work, odin jobs, odin runs, odin approvals, odin logs, internal/app/lifecycle, internal/runtime/jobs, internal/runtime/projections, internal/review, SQLite intake_items/tasks/runs/approvals/events/pull_request_handoffs, and existing store helpers. Do not introduce a new workflow runtime, queue, policy engine, PR mutation command, merge command, deploy command, or GitHub label authority.
+Use docs/superpowers/specs/2026-05-11-prompt-to-production-proof-path-design.md as the approved design. Keep the work PR-sized and make atomic commits. Reuse odin intake, odin review, odin work, odin jobs, odin runs, odin approvals, odin logs, internal/app/lifecycle, internal/runtime/jobs, internal/runtime/projections, internal/review, SQLite intake_items/tasks/runs/approvals/events/pull_request_handoffs, and existing store helpers. Do not introduce a new workflow runtime, queue, policy engine, merge command, deploy command, or GitHub label authority.
 
 Required behavior:
 - add `odin work proof (--task <id|key>|--intake <id|key>) [--json]`
+- add dry-run/local `odin work pr prepare --task <id|key> ... --json`
 - return a `prompt_to_production_proof.v1` envelope with source, proof_state, clarification, review, execution, delivery, pull_request, approvals, merge_gate, deployment_gate, events, next_steps, and `mutated=false`
 - for `--intake`, prove unclear/review-required source state before any Work Item exists
+- for `work pr prepare`, persist PR handoff/review-selection evidence and audit event without live GitHub mutation
 - represent missing optional evidence honestly as `missing` or `not_started`
 - fail closed for unknown task or intake selectors
-- do not make external network calls or state mutations
+- fail closed for missing PR handoff evidence or unapproved live PR mutation
+- do not make external network calls
 - update docs/contracts/work-execution-state.md with the command proof responsibility
 
 Required verification:
 - go test ./internal/app/lifecycle -run 'TestRunWorkProof|TestRunIntakeProcessCreatesReviewStatesWithoutExecution|TestRunUnifiedReviewQueue' -count=1
 - go test ./internal/app/lifecycle -run 'TestRunWorkProofReportsUnclearIntake|TestRunWorkProofReportsDraftIntake|TestRunWorkProofRequiresExactlyOneSelector' -count=1
+- go test ./internal/app/lifecycle -run 'TestRunWorkPRPrepare' -count=1
 - go test ./internal/review ./internal/store/sqlite -run 'PullRequest|Handoff' -count=1
 - make build
-- with a temporary ODIN_ROOT, prove intake raw create, intake process, review list, work status, work proof --intake --json, work proof --task --json, jobs --json, runs --json, approvals all --json, and logs --json
+- with a temporary ODIN_ROOT, prove intake raw create, intake process, review list, work status, work proof --intake --json, work proof --task --json, work pr prepare --json, jobs --json, runs --json, approvals all --json, and logs --json
 - prove `odin work proof --task missing-task --json` and `odin work proof --intake missing-intake --json` fail closed without mutation
+- prove `odin work pr prepare --live --json` fails closed without mutation
 
 Delivery:
 - preserve unrelated dirty worktree changes

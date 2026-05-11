@@ -4071,6 +4071,220 @@ func TestRunWorkProofRequiresExactlyOneSelector(t *testing.T) {
 	}
 }
 
+func TestRunWorkPRPreparePersistsDryRunHandoffAndProof(t *testing.T) {
+	t.Parallel()
+
+	root := testRepoRoot(t)
+	payloadPath := filepath.Join(t.TempDir(), "github-issue.json")
+	if err := os.WriteFile(payloadPath, []byte(`{"url":"https://github.example/acme/alpha/issues/103","original_content":"Build low risk intake work with tests and PR handoff"}`), 0o600); err != nil {
+		t.Fatalf("WriteFile(payload) error = %v", err)
+	}
+	if err := Run(context.Background(), root, []string{
+		"intake", "raw", "create",
+		"--source", "github",
+		"--project", testProjectKey,
+		"--title", "Build low risk intake work",
+		"--type", "github_issue",
+		"--dedup-key", "github:issue:acme/alpha:103",
+		"--requested-by", "codex",
+		"--payload-file", payloadPath,
+		"--json",
+	}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+		t.Fatalf("Run(intake raw create) error = %v", err)
+	}
+	if err := Run(context.Background(), root, []string{"intake", "process", "--id", "intake-1", "--json"}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+		t.Fatalf("Run(intake process) error = %v", err)
+	}
+
+	var acceptOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"intake", "review", "accept", "intake-1", "--json"}, strings.NewReader(""), &acceptOutput); err != nil {
+		t.Fatalf("Run(intake review accept) error = %v\n%s", err, acceptOutput.String())
+	}
+	var accept struct {
+		WorkItem struct {
+			Key string `json:"key"`
+		} `json:"work_item"`
+	}
+	if err := json.Unmarshal(acceptOutput.Bytes(), &accept); err != nil {
+		t.Fatalf("json.Unmarshal(accept) error = %v\n%s", err, acceptOutput.String())
+	}
+	if accept.WorkItem.Key == "" {
+		t.Fatalf("accept work item = %+v, want key", accept.WorkItem)
+	}
+
+	var prOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{
+		"work", "pr", "prepare",
+		"--task", accept.WorkItem.Key,
+		"--summary", "PR handoff ready for review.",
+		"--test", "go test ./internal/app/lifecycle -run TestRunWorkPRPrepare -count=1",
+		"--risk", "human merge remains required",
+		"--command", "go test ./internal/app/lifecycle -run TestRunWorkPRPrepare -count=1",
+		"--dry-run",
+		"--json",
+	}, strings.NewReader(""), &prOutput); err != nil {
+		t.Fatalf("Run(work pr prepare) error = %v\n%s", err, prOutput.String())
+	}
+	var prepared struct {
+		Prepared         bool `json:"prepared"`
+		ExternalMutated  bool `json:"external_mutated"`
+		ApprovalRequired bool `json:"approval_required"`
+		PullRequest      struct {
+			Provider string `json:"provider"`
+			Repo     string `json:"repo"`
+			State    string `json:"state"`
+		} `json:"pull_request"`
+		Handoff struct {
+			ID            int64    `json:"id"`
+			ReviewState   string   `json:"review_state"`
+			SelectedRoles []string `json:"selected_roles"`
+		} `json:"handoff"`
+		ReviewResults []struct {
+			Role    string `json:"role"`
+			State   string `json:"state"`
+			Outcome string `json:"outcome"`
+		} `json:"review_results"`
+	}
+	if err := json.Unmarshal(prOutput.Bytes(), &prepared); err != nil {
+		t.Fatalf("json.Unmarshal(pr prepare) error = %v\n%s", err, prOutput.String())
+	}
+	if !prepared.Prepared || prepared.ExternalMutated || prepared.ApprovalRequired {
+		t.Fatalf("prepared flags = prepared:%t external_mutated:%t approval_required:%t, want local dry-run handoff", prepared.Prepared, prepared.ExternalMutated, prepared.ApprovalRequired)
+	}
+	if prepared.PullRequest.Provider != "github" || prepared.PullRequest.State != "dry-run" || prepared.Handoff.ID == 0 || prepared.Handoff.ReviewState != "review_selected" {
+		t.Fatalf("prepared PR/handoff = %+v/%+v, want persisted dry-run review handoff", prepared.PullRequest, prepared.Handoff)
+	}
+	if !reflect.DeepEqual(prepared.Handoff.SelectedRoles, []string{"reviewer", "qa"}) {
+		t.Fatalf("selected roles = %#v, want reviewer + qa", prepared.Handoff.SelectedRoles)
+	}
+	if len(prepared.ReviewResults) != 2 {
+		t.Fatalf("review results = %+v, want reviewer + qa rows", prepared.ReviewResults)
+	}
+
+	var proofOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"work", "proof", "--task", accept.WorkItem.Key, "--json"}, strings.NewReader(""), &proofOutput); err != nil {
+		t.Fatalf("Run(work proof after pr prepare) error = %v\n%s", err, proofOutput.String())
+	}
+	var proof struct {
+		PullRequest struct {
+			Status        string   `json:"status"`
+			State         string   `json:"state"`
+			SelectedRoles []string `json:"selected_roles"`
+			ReviewResults []struct {
+				Role    string `json:"role"`
+				Outcome string `json:"outcome"`
+			} `json:"review_results"`
+		} `json:"pull_request"`
+		MergeGate struct {
+			Status                string `json:"status"`
+			HumanApprovalRequired bool   `json:"human_approval_required"`
+			Approved              bool   `json:"approved"`
+		} `json:"merge_gate"`
+		Mutated bool `json:"mutated"`
+	}
+	if err := json.Unmarshal(proofOutput.Bytes(), &proof); err != nil {
+		t.Fatalf("json.Unmarshal(proof) error = %v\n%s", err, proofOutput.String())
+	}
+	if proof.PullRequest.Status != "review_selected" || proof.PullRequest.State != "dry-run" || proof.Mutated {
+		t.Fatalf("proof PR/mutated = %+v/%t, want dry-run handoff readback", proof.PullRequest, proof.Mutated)
+	}
+	if !reflect.DeepEqual(proof.PullRequest.SelectedRoles, []string{"reviewer", "qa"}) || len(proof.PullRequest.ReviewResults) != 2 {
+		t.Fatalf("proof review rows = %+v, want selected reviewer + qa", proof.PullRequest)
+	}
+	if proof.MergeGate.Status != "approval_required" || !proof.MergeGate.HumanApprovalRequired || proof.MergeGate.Approved {
+		t.Fatalf("proof merge gate = %+v, want human merge approval still required", proof.MergeGate)
+	}
+
+	var logsOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"logs", "--json"}, strings.NewReader(""), &logsOutput); err != nil {
+		t.Fatalf("Run(logs) error = %v", err)
+	}
+	if !strings.Contains(logsOutput.String(), `"type": "pull_request.handoff_prepared"`) {
+		t.Fatalf("logs = %s, want pull_request.handoff_prepared audit event", logsOutput.String())
+	}
+}
+
+func TestRunWorkPRPrepareRequiresEvidence(t *testing.T) {
+	t.Parallel()
+
+	root := testRepoRoot(t)
+	var output bytes.Buffer
+	err := Run(context.Background(), root, []string{
+		"work", "pr", "prepare",
+		"--task", "task-1",
+		"--summary", "Missing required evidence",
+		"--risk", "human merge remains required",
+		"--command", "go test ./...",
+		"--json",
+	}, strings.NewReader(""), &output)
+	if err == nil {
+		t.Fatalf("Run(work pr prepare missing evidence) error = nil output=%s, want fail closed", output.String())
+	}
+	if !strings.Contains(err.Error(), "test evidence is required") || output.Len() != 0 {
+		t.Fatalf("Run(work pr prepare missing evidence) error/output = %v/%s, want missing evidence refusal", err, output.String())
+	}
+}
+
+func TestRunWorkPRPrepareRejectsUnapprovedLiveMutation(t *testing.T) {
+	t.Parallel()
+
+	root := testRepoRoot(t)
+	taskKey := createQueuedWorkItemForPRPrepare(t, root)
+
+	var output bytes.Buffer
+	err := Run(context.Background(), root, []string{
+		"work", "pr", "prepare",
+		"--task", taskKey,
+		"--summary", "Live mutation must be approval gated.",
+		"--test", "go test ./internal/app/lifecycle -run TestRunWorkPRPrepare -count=1",
+		"--risk", "human merge remains required",
+		"--command", "go test ./internal/app/lifecycle -run TestRunWorkPRPrepare -count=1",
+		"--live",
+		"--json",
+	}, strings.NewReader(""), &output)
+	if err == nil {
+		t.Fatalf("Run(work pr prepare --live) error = nil output=%s, want approval gate refusal", output.String())
+	}
+	if !strings.Contains(err.Error(), "approval required before live pull request mutation") || output.Len() != 0 {
+		t.Fatalf("Run(work pr prepare --live) error/output = %v/%s, want approval-gated live refusal", err, output.String())
+	}
+
+	var logsOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"logs", "--json"}, strings.NewReader(""), &logsOutput); err != nil {
+		t.Fatalf("Run(logs) error = %v", err)
+	}
+	if strings.Contains(logsOutput.String(), `"type": "pull_request.handoff_prepared"`) {
+		t.Fatalf("logs = %s, live refusal must not persist handoff event", logsOutput.String())
+	}
+}
+
+func createQueuedWorkItemForPRPrepare(t *testing.T, root string) string {
+	t.Helper()
+	var output bytes.Buffer
+	if err := Run(context.Background(), root, []string{
+		"work", "start",
+		"--project", testProjectKey,
+		"--title", "Build low risk handoff work",
+		"--intent", "read_only",
+	}, strings.NewReader(""), &output); err != nil {
+		t.Fatalf("Run(work start) error = %v\n%s", err, output.String())
+	}
+	key := valueAfterPrefix(output.String(), "key=")
+	if key == "" {
+		t.Fatalf("work start output = %s, want key", output.String())
+	}
+	return key
+}
+
+func valueAfterPrefix(output string, prefix string) string {
+	for _, field := range strings.Fields(output) {
+		if strings.HasPrefix(field, prefix) {
+			return strings.TrimPrefix(field, prefix)
+		}
+	}
+	return ""
+}
+
 func TestRunWorkDispatchCreatesRunAttemptFromAcceptedIntake(t *testing.T) {
 	t.Parallel()
 

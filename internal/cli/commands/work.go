@@ -16,6 +16,7 @@ import (
 	"odin-os/internal/core/projects"
 	"odin-os/internal/core/workspaces"
 	"odin-os/internal/registry"
+	"odin-os/internal/review"
 	runtimeevents "odin-os/internal/runtime/events"
 	"odin-os/internal/runtime/jobs"
 	"odin-os/internal/runtime/projections"
@@ -24,7 +25,7 @@ import (
 	trackerintake "odin-os/internal/tracker/intake"
 )
 
-const workUsage = "usage: odin work status|profiles|start --project <key> --title <text> [--intent <read_only|mutation|governance|destructive>]|intake --project <key> [--dry-run]|reconcile --project <key>|proof (--task <id|key>|--intake <id|key>) [--json]|dispatch [--task <id|key>] [--json]|execute --task <id|key> [--json]|retry --task <id|key> [--json]"
+const workUsage = "usage: odin work status|profiles|start --project <key> --title <text> [--intent <read_only|mutation|governance|destructive>]|intake --project <key> [--dry-run]|reconcile --project <key>|proof (--task <id|key>|--intake <id|key>) [--json]|pr prepare --task <id|key> --summary <text> --test <text> --risk <text> --command <text> [--dry-run|--live] [--json]|dispatch [--task <id|key>] [--json]|execute --task <id|key> [--json]|retry --task <id|key> [--json]"
 
 const workProofUsage = "usage: odin work proof (--task <id|key>|--intake <id|key>) [--json]"
 
@@ -80,6 +81,8 @@ func RunWork(ctx context.Context, store *sqlite.Store, projectRegistry projects.
 		return runWorkReconcile(ctx, store, projectRegistry, args[1:], stdout)
 	case "proof":
 		return runWorkProof(ctx, store, args[1:], stdout)
+	case "pr":
+		return runWorkPR(ctx, store, args[1:], stdout)
 	case "dispatch":
 		return runWorkDispatch(ctx, store, projectRegistry, args[1:], stdout, options...)
 	case "execute":
@@ -305,6 +308,193 @@ func runWorkRetry(ctx context.Context, store *sqlite.Store, projectRegistry proj
 		return WriteJSON(stdout, view)
 	}
 	_, err = fmt.Fprintf(stdout, "retried=%t reason=%s decision=%s retry_eligible=%t task=%s status=%s retry_count=%d recommendation=%q\n", view.Retried, view.Reason, view.Decision, view.RetryEligible, view.Task.Key, view.Task.Status, view.Task.RetryCount, view.RecoveryRecommendation)
+	return err
+}
+
+const workPRPrepareUsage = "usage: odin work pr prepare --task <id|key> --summary <text> --test <text> --risk <text> --command <text> [--dry-run|--live] [--json]"
+
+type workPRPrepareView struct {
+	Prepared         bool                      `json:"prepared"`
+	ApprovalRequired bool                      `json:"approval_required"`
+	ExternalMutated  bool                      `json:"external_mutated"`
+	DryRun           bool                      `json:"dry_run"`
+	Task             workProofTaskView         `json:"task"`
+	PullRequest      review.PullRequest        `json:"pull_request"`
+	Handoff          workPRHandoffView         `json:"handoff"`
+	ReviewResults    []workProofPRReviewResult `json:"review_results"`
+	NextSteps        []string                  `json:"next_steps"`
+}
+
+type workPRHandoffView struct {
+	ID            int64    `json:"id"`
+	URL           string   `json:"url"`
+	State         string   `json:"state"`
+	ReviewState   string   `json:"review_state"`
+	SelectedRoles []string `json:"selected_roles"`
+}
+
+func runWorkPR(ctx context.Context, store *sqlite.Store, args []string, stdout io.Writer) error {
+	if len(args) == 0 || args[0] == "help" || args[0] == "--help" {
+		_, err := fmt.Fprintln(stdout, workPRPrepareUsage)
+		return err
+	}
+	if args[0] != "prepare" {
+		return fmt.Errorf("unsupported work pr subcommand: %s", args[0])
+	}
+	return runWorkPRPrepare(ctx, store, args[1:], stdout)
+}
+
+func runWorkPRPrepare(ctx context.Context, store *sqlite.Store, args []string, stdout io.Writer) error {
+	params := parseWorkStartArgs(args)
+	jsonOutput := parseBoolFlag(params, "json")
+	if _, ok := params["help"]; ok {
+		_, err := fmt.Fprintln(stdout, workPRPrepareUsage)
+		return err
+	}
+	if err := rejectUnknownWorkProofArgs(params, "task", "summary", "test", "risk", "blocker", "command", "branch", "title", "dry-run", "live", "json"); err != nil {
+		return err
+	}
+	summary := strings.TrimSpace(params["summary"])
+	testEvidence := strings.TrimSpace(params["test"])
+	risk := strings.TrimSpace(params["risk"])
+	command := strings.TrimSpace(params["command"])
+	if summary == "" {
+		return fmt.Errorf("summary evidence is required")
+	}
+	if testEvidence == "" {
+		return fmt.Errorf("test evidence is required")
+	}
+	if risk == "" {
+		return fmt.Errorf("risk evidence is required")
+	}
+	if command == "" {
+		return fmt.Errorf("command evidence is required")
+	}
+	if parseBoolFlag(params, "live") {
+		return fmt.Errorf("approval required before live pull request mutation")
+	}
+
+	taskRef := strings.TrimSpace(params["task"])
+	if taskRef == "" {
+		return fmt.Errorf(workPRPrepareUsage)
+	}
+	task, err := findWorkTask(ctx, store, taskRef)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("work item not found: %s", taskRef)
+		}
+		return err
+	}
+	project, err := store.GetProject(ctx, task.ProjectID)
+	if err != nil {
+		return err
+	}
+
+	issueURL := ""
+	if intakeID, ok := intakeIDFromTask(task); ok {
+		item, err := store.GetIntakeItem(ctx, intakeID)
+		if err != nil {
+			return err
+		}
+		issueURL = urlFromJSON(item.SourceFactsJSON)
+	}
+	branch := strings.TrimSpace(params["branch"])
+	if branch == "" {
+		branch = task.Key
+	}
+	title := strings.TrimSpace(params["title"])
+	if title == "" {
+		title = task.Title
+	}
+	repoID := project.GitHubRepo
+	if repoID == "" {
+		repoID = "local/" + project.Key
+	}
+	owner, repoName := splitRepoID(repoID)
+	manager := review.NewGitHubPullRequestManager(review.GitHubPullRequestConfig{
+		Owner:      owner,
+		Repo:       repoName,
+		BaseBranch: defaultWorkString(project.DefaultBranch, "main"),
+		DryRun:     true,
+	})
+	result, err := review.HandoffOrchestrator{
+		Store:        store,
+		PullRequests: manager,
+	}.Upsert(ctx, review.PullRequestHandoffRequest{
+		ProjectID:              task.ProjectID,
+		IssueURL:               issueURL,
+		Title:                  title,
+		Branch:                 branch,
+		Summary:                summary,
+		Tests:                  []string{testEvidence},
+		Risks:                  []string{risk},
+		Blockers:               optionalStringList(params["blocker"]),
+		CommandsRun:            []string{command},
+		ChangedFiles:           []string{},
+		RuntimeBehaviorChanged: false,
+		RealOdinProofIncluded:  strings.Contains(command, "odin"),
+		PostComment:            false,
+	})
+	if err != nil {
+		return err
+	}
+	if err := store.RecordPullRequestHandoffPrepared(ctx, sqlite.RecordPullRequestHandoffPreparedParams{
+		Handoff:          result.Handoff,
+		TaskID:           task.ID,
+		DryRun:           true,
+		ExternalMutated:  false,
+		ApprovalRequired: false,
+	}); err != nil {
+		return err
+	}
+	view := workPRPrepareView{
+		Prepared:         true,
+		ApprovalRequired: false,
+		ExternalMutated:  false,
+		DryRun:           true,
+		Task: workProofTaskView{
+			ID:                    task.ID,
+			ProjectID:             task.ProjectID,
+			Key:                   task.Key,
+			Title:                 task.Title,
+			Status:                task.Status,
+			ExecutionIntent:       task.ExecutionIntent,
+			ExecutionIntentSource: task.ExecutionIntentSource,
+			BlockedReason:         task.BlockedReason,
+		},
+		PullRequest: result.PullRequest,
+		Handoff: workPRHandoffView{
+			ID:            result.Handoff.ID,
+			URL:           result.Handoff.URL,
+			State:         result.Handoff.State,
+			ReviewState:   result.Handoff.ReviewState,
+			SelectedRoles: result.Handoff.SelectedRoles,
+		},
+		ReviewResults: make([]workProofPRReviewResult, 0, len(result.ReviewResults)),
+		NextSteps:     []string{"inspect work proof and obtain explicit human approval before merge or deployment"},
+	}
+	for _, reviewResult := range result.ReviewResults {
+		view.ReviewResults = append(view.ReviewResults, workProofPRReviewResult{
+			Role:     reviewResult.Role,
+			State:    reviewResult.State,
+			Summary:  reviewResult.Summary,
+			Comments: reviewResult.Comments,
+			Blockers: reviewResult.Blockers,
+			Outcome:  reviewResult.Outcome,
+		})
+	}
+	if jsonOutput {
+		return WriteJSON(stdout, view)
+	}
+	_, err = fmt.Fprintf(stdout, "prepared=%t dry_run=%t external_mutated=%t task=%s pull_request=%s review=%s next_steps=%s\n",
+		view.Prepared,
+		view.DryRun,
+		view.ExternalMutated,
+		view.Task.Key,
+		defaultWorkString(view.PullRequest.State, "missing"),
+		view.Handoff.ReviewState,
+		strings.Join(view.NextSteps, "; "),
+	)
 	return err
 }
 
@@ -813,6 +1003,31 @@ func sourceFactFromJSON(raw string, key string) string {
 		return strings.TrimSpace(value)
 	}
 	return ""
+}
+
+func splitRepoID(repoID string) (string, string) {
+	repoID = strings.TrimSpace(repoID)
+	owner, repo, ok := strings.Cut(repoID, "/")
+	if !ok || strings.TrimSpace(owner) == "" || strings.TrimSpace(repo) == "" {
+		return "local", defaultWorkString(repoID, "odin")
+	}
+	return strings.TrimSpace(owner), strings.TrimSpace(repo)
+}
+
+func optionalStringList(value string) []string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return []string{}
+	}
+	return []string{value}
+}
+
+func defaultWorkString(value string, fallback string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return fallback
+	}
+	return value
 }
 
 func findURLValue(value any) string {

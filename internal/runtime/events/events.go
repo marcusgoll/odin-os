@@ -33,6 +33,7 @@ const (
 	StreamFollowUp           StreamType = "follow_up"
 	StreamGoal               StreamType = "goal"
 	StreamBrowserSession     StreamType = "browser_session"
+	StreamPullRequestHandoff StreamType = "pull_request_handoff"
 )
 
 type Type string
@@ -153,6 +154,7 @@ const (
 	EventBrowserProfileExpired              Type = "browser.profile_expired"
 	EventBrowserProfileCleaned              Type = "browser.profile_cleaned"
 	EventBrowserProfileCleanupFailed        Type = "browser.profile_cleanup_failed"
+	EventPullRequestHandoffPrepared         Type = "pull_request.handoff_prepared"
 )
 
 const (
@@ -243,6 +245,22 @@ type TaskRetryEvaluatedPayload struct {
 	NextEligibleAt         string `json:"next_eligible_at,omitempty"`
 	LastError              string `json:"last_error,omitempty"`
 	RecoveryRecommendation string `json:"recovery_recommendation,omitempty"`
+}
+
+type PullRequestHandoffPreparedPayload struct {
+	HandoffID        int64  `json:"handoff_id"`
+	ProjectID        int64  `json:"project_id"`
+	TaskID           int64  `json:"task_id"`
+	Provider         string `json:"provider"`
+	Repo             string `json:"repo"`
+	Number           int    `json:"number"`
+	State            string `json:"state"`
+	Branch           string `json:"branch"`
+	Title            string `json:"title"`
+	ReviewState      string `json:"review_state"`
+	DryRun           bool   `json:"dry_run"`
+	ExternalMutated  bool   `json:"external_mutated"`
+	ApprovalRequired bool   `json:"approval_required"`
 }
 
 type TaskRecoveryRecommendedPayload struct {
