@@ -182,6 +182,46 @@ persists the safety-classified governance/destructive intent before approval
 blocking and extends exact category coverage across all named high-risk
 actions.
 
+## PR #221 Approval-Parity Proof
+
+Fresh proof in `/home/orchestrator/odin-os/.worktrees/high-risk-approval-parity`:
+
+```bash
+go test ./internal/app/lifecycle -run TestRunWorkReadOnlyHighRiskCategoriesRequireApprovalThroughOperatorPath -count=1
+go test ./internal/runtime/jobs -run 'Test(ExecuteNextQueuedTreatsHighRiskReadOnlyTaskAsApprovalRequired|ClassifyTaskExecutionIntentCoversHighRiskRealWorldMutationCategories|DispatchTaskRunAttemptBlocksGovernanceAndDestructiveIntentsForApproval)' -count=1
+make build
+```
+
+Real `./bin/odin` proof then ran against a fresh `ODIN_ROOT`:
+
+- selected `odin-core`
+- set transition state to `cutover`
+- created each high-risk Work Item with `--intent read_only`
+- dispatched each Work Item with `odin work dispatch --task <key> --json`
+- read back approvals with `odin approvals all --json`
+- read back audit events with `odin logs --json`
+
+Categories proven:
+
+| Category | Persisted intent | Result |
+| --- | --- | --- |
+| Send message to customer | `governance` | blocked with `approval_required` and `execution_intent_source=safety_classifier` |
+| Delete data from customer records | `destructive` | blocked with `approval_required` and `execution_intent_source=safety_classifier` |
+| Deploy code to production | `governance` | blocked with `approval_required` and `execution_intent_source=safety_classifier` |
+| Change calendar event with client | `governance` | blocked with `approval_required` and `execution_intent_source=safety_classifier` |
+| Publish public launch post | `governance` | blocked with `approval_required` and `execution_intent_source=safety_classifier` |
+| Modify production system config | `governance` | blocked with `approval_required` and `execution_intent_source=safety_classifier` |
+| Make purchase of subscription | `governance` | blocked with `approval_required` and `execution_intent_source=safety_classifier` |
+| Change permissions for repository | `governance` | blocked with `approval_required` and `execution_intent_source=safety_classifier` |
+| Update financial record | `governance` | blocked with `approval_required` and `execution_intent_source=safety_classifier` |
+| Update legal records | `governance` | blocked with `approval_required` and `execution_intent_source=safety_classifier` |
+| Update medical record | `governance` | blocked with `approval_required` and `execution_intent_source=safety_classifier` |
+
+`odin approvals all --json` showed 11 pending approvals, and `odin logs --json`
+showed 11 `approval.requested` events. This closes the approval-parity proof in
+the open PR. It still does not count as current `main` behavior until PR #221 is
+merged or explicitly accepted as the target artifact.
+
 ## PR #218 Capability Proof
 
 Fresh proof in `/home/orchestrator/odin-os/.worktrees/capabilities-operator-cli-current`
