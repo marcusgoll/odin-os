@@ -51,11 +51,33 @@ gate-advancement command can evaluate.
 
 ## Follow-Up Boundary
 
-This contract does not make gate advancement automatic. A future
-`odin work advance` slice must prove:
+`odin work advance` records `delivery.gate_advanced` on the Work Item task
+stream only after Odin sees evidence for the requested gate.
 
-- gate order validation
-- missing-evidence blocking
+Required payload fields:
+
+- `task_id`
+- `work_item_key`
+- `gate`
+- `next_gate`
+
+Optional payload fields:
+
+- `advanced_by`
+
+The command must reject advancement when:
+
+- no valid evidence exists for the requested gate
+- a previous gate in the canonical spine has not advanced
+- the requested gate has already advanced
+
+This contract does not make merge, deploy, production mutation, public posting,
+financial mutation, legal mutation, medical mutation, deletion, permissions
+changes, purchases, calendar mutations with others, or message sending
+automatic. Those operations remain approval-gated follow-up work.
+
+A future approval-enforcement slice must prove:
+
 - current-gate and next-action projection
 - approval blocking before merge, deploy, production mutation, public posting,
   financial mutation, legal mutation, medical mutation, deletion, permissions

@@ -3525,6 +3525,110 @@ func TestRunWorkEvidenceRecordsTaskScopedAuditEvent(t *testing.T) {
 	}
 }
 
+func TestRunWorkAdvanceRequiresEvidenceAndRecordsGateAudit(t *testing.T) {
+	t.Parallel()
+
+	root := testRepoRoot(t)
+
+	var startOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"work", "start", "--project", "odin-core", "--title", "Advance delivery gate"}, strings.NewReader(""), &startOutput); err != nil {
+		t.Fatalf("Run(work start) error = %v", err)
+	}
+	taskKey := ""
+	for _, field := range strings.Fields(startOutput.String()) {
+		if value, ok := strings.CutPrefix(field, "key="); ok {
+			taskKey = value
+			break
+		}
+	}
+	if taskKey == "" {
+		t.Fatalf("work start output = %q, want task key", startOutput.String())
+	}
+
+	var blockedOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"work", "advance", "--task", taskKey, "--gate", "domain_locked", "--json"}, strings.NewReader(""), &blockedOutput); err != nil {
+		t.Fatalf("Run(work advance without evidence) error = %v\noutput=%s", err, blockedOutput.String())
+	}
+	for _, want := range []string{
+		`"advanced": false`,
+		`"reason": "evidence_required"`,
+		`"task_key": "` + taskKey + `"`,
+		`"gate": "domain_locked"`,
+	} {
+		if !strings.Contains(blockedOutput.String(), want) {
+			t.Fatalf("blocked advance output = %s, want %s", blockedOutput.String(), want)
+		}
+	}
+
+	if err := Run(context.Background(), root, []string{
+		"work", "evidence",
+		"--task", taskKey,
+		"--gate", "domain_locked",
+		"--kind", "doc",
+		"--summary", "domain checked",
+		"--json",
+	}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+		t.Fatalf("Run(work evidence) error = %v", err)
+	}
+
+	var advancedOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"work", "advance", "--task", taskKey, "--gate", "domain_locked", "--json"}, strings.NewReader(""), &advancedOutput); err != nil {
+		t.Fatalf("Run(work advance with evidence) error = %v\noutput=%s", err, advancedOutput.String())
+	}
+	for _, want := range []string{
+		`"advanced": true`,
+		`"event_type": "delivery.gate_advanced"`,
+		`"task_key": "` + taskKey + `"`,
+		`"gate": "domain_locked"`,
+		`"next_gate": "design_approved"`,
+	} {
+		if !strings.Contains(advancedOutput.String(), want) {
+			t.Fatalf("advanced output = %s, want %s", advancedOutput.String(), want)
+		}
+	}
+
+	var trailOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"logs", "trail", "--task", taskKey, "--json"}, strings.NewReader(""), &trailOutput); err != nil {
+		t.Fatalf("Run(logs trail --task) error = %v", err)
+	}
+	for _, want := range []string{
+		`"event_type": "delivery.evidence_recorded"`,
+		`"event_type": "delivery.gate_advanced"`,
+		`"next_gate": "design_approved"`,
+		`"advanced_by": "operator"`,
+	} {
+		if !strings.Contains(trailOutput.String(), want) {
+			t.Fatalf("logs trail output = %s, want %s", trailOutput.String(), want)
+		}
+	}
+
+	var repeatOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"work", "advance", "--task", taskKey, "--gate", "domain_locked", "--json"}, strings.NewReader(""), &repeatOutput); err != nil {
+		t.Fatalf("Run(work advance repeat) error = %v\noutput=%s", err, repeatOutput.String())
+	}
+	if output := repeatOutput.String(); !strings.Contains(output, `"advanced": false`) || !strings.Contains(output, `"reason": "already_advanced"`) {
+		t.Fatalf("repeat advance output = %s, want already_advanced block", output)
+	}
+
+	if err := Run(context.Background(), root, []string{
+		"work", "evidence",
+		"--task", taskKey,
+		"--gate", "plan_ready",
+		"--kind", "doc",
+		"--summary", "plan exists but design gate is not advanced",
+		"--json",
+	}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+		t.Fatalf("Run(work evidence plan_ready) error = %v", err)
+	}
+	var outOfOrderOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"work", "advance", "--task", taskKey, "--gate", "plan_ready", "--json"}, strings.NewReader(""), &outOfOrderOutput); err != nil {
+		t.Fatalf("Run(work advance out of order) error = %v\noutput=%s", err, outOfOrderOutput.String())
+	}
+	if output := outOfOrderOutput.String(); !strings.Contains(output, `"advanced": false`) || !strings.Contains(output, `"reason": "gate_out_of_order"`) {
+		t.Fatalf("out-of-order advance output = %s, want gate_out_of_order block", output)
+	}
+}
+
 func TestRunWorkDispatchCreatesRunAttemptFromAcceptedIntake(t *testing.T) {
 	t.Parallel()
 
