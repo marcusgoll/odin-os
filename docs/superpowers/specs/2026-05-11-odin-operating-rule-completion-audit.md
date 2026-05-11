@@ -87,7 +87,8 @@ the open PR proof as the target artifact.
 | --- | --- | --- |
 | Trigger create/list/show/test flows | `odin trigger create`, `odin trigger list`, `odin trigger show`, and `odin trigger test` against a fresh `ODIN_ROOT`, plus persisted trigger and event readback | `main` after PR #169/#210 |
 | Trigger event envelope, dedupe, approval rules, audit events, next-run preview | Trigger tests and real command output showing envelope fields, materialization key or dedupe behavior, approval-required preview, `automation_trigger.*` events, and next due/run timing | `main` after PR #169/#210 |
-| High-risk approval gates for messages, deletion, deployment, calendar mutation, public posting, production changes, purchases, permissions, and financial/legal/medical records | `odin work start --intent read_only` plus `odin work dispatch --task --json` blocks each category with `reason=approval_required` and `execution_intent_source=safety_classifier`; `odin approvals all --json` and `odin logs --json` show pending approvals and audit events | PR #221 |
+| High-risk approval blocking for messages, deletion, deployment, calendar mutation, public posting, production changes, purchases, permissions, and financial/legal/medical records | `odin work start --intent read_only` plus `odin work dispatch --task --json` blocks each category with `reason=approval_required`; `odin approvals all --json` and `odin logs --json` show 11 pending approvals and 11 `approval.requested` events | `main` |
+| High-risk operator-path intent parity for the same categories | The same dispatch proof must persist `execution_intent_source=safety_classifier` and governance/destructive intent before approval blocking, so durable task state, approval evidence, and audit events agree on the reason for blocking | PR #221 |
 | Review mutations preserve policy and receipt evidence | `odin review act ... --json` returns source-owned receipt/refusal fields and fails closed for unsupported/high-risk actions | `main` |
 | Plugin model clarified without parallel plugin runtime | `odin capabilities list --kind command --json` and `odin capabilities show project.status --json` report `source=capability_gateway` and `plugin_model=plugins_are_packages_not_runtime_kind`; docs state plugins are packages, not runtime kinds | PR #218 |
 | Overview/TUI raw intake, review queue, triggers, approvals, recovery, running work, failed work, blocked work | `odin overview` and `odin overview --json` show all required lanes, including `Failed Work` from recovery guidance | mostly `main`; failed-work rendering in PR #216 |
@@ -596,16 +597,18 @@ Concrete success criteria from the objective:
 Completion evidence status:
 
 - Criteria 1 is implemented on `main`.
-- Criteria 2 is partially implemented on `main`; exact explicit-dispatch parity
-  remains in green draft PR #221.
+- Criteria 2 blocks every named high-risk category on `main`; exact
+  safety-classified explicit-dispatch intent parity remains in green draft PR
+  #221.
 - Criteria 3 remains in green draft PR #218.
 - Criteria 4 is mostly implemented on `main`; failed-work rendering remains in
   green draft PR #216.
 - Criteria 5 remains split across green draft PRs #213, #214, #219, #222, #223,
   and #224. PR #224's live GitHub smoke has not run.
-- Criteria 6 is satisfied for merged trigger/review/overview pieces, but not
-  universal while the proof-path, approval-parity, capabilities, failed-work,
-  merge/deploy approval, and live-smoke pieces remain open.
+- Criteria 6 is satisfied for merged trigger/review/overview pieces and
+  current-main high-risk blocking, but not universal while the proof-path,
+  approval intent-parity, capabilities, failed-work, merge/deploy approval, and
+  live-smoke pieces remain open.
 
 Latest checked PR state for #211, #212, #213, #214, #216, #218, #219, #220,
 #221, #222, #223, and #224 was clean with green remote checks. PR #212 is
