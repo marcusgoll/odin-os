@@ -251,6 +251,32 @@ Observed JSON overview proof included `work_items`, `review_queue`,
 failed Work Item, so it does not prove failed-work rendering on current `main`;
 that remains the purpose of PR #216.
 
+## PR #216 Failed-Work Proof
+
+Fresh proof in `/home/orchestrator/odin-os/.worktrees/overview-failed-work-lane-current`:
+
+```bash
+go test ./internal/cli/render -run TestRenderOverviewUsesCanonicalLanes -count=1
+go test ./internal/app/lifecycle -run 'TestRunOverview|TestRunWorkExecuteSurfacesRepoDriverFailure|TestRunWorkExecuteSurfacesFailedDispatchedRun' -count=1
+```
+
+Observed proof:
+
+- `internal/cli/render/overview.go` renders a dedicated `Failed Work` section
+  from `view.Observability.RecoveryGuidance`.
+- `TestRenderOverviewUsesCanonicalLanes` asserts `Attention` and
+  `Observability` counts include `failed_work=1`.
+- The same renderer test asserts the row
+  `failed_work=alpha-task project=alpha companion=primary status=failed
+  decision=retry_allowed retry_eligible=true retries=1/3 source=codex
+  last_error=driver failed proof recommendation=retry from review queue`.
+- Focused lifecycle tests for overview and failed dispatched/repo-driver runs
+  pass in the PR #216 worktree.
+
+This closes the failed-work overview rendering gap in the open PR. It still
+does not count as current `main` behavior until PR #216 is merged or explicitly
+accepted as the target artifact.
+
 ## What Is Already Done
 
 Scheduler trigger workflow is not the next implementation gap. PR #169 and PR
