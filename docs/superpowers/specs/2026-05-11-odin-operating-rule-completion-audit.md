@@ -214,6 +214,33 @@ Observed result:
 - confirms the plugin/capability terminology closure remains in PR #218, not
   current `main`
 
+Fresh capability-surface distinction proof on the same branch:
+
+```bash
+tmp=$(mktemp -d)
+home=$(mktemp -d)
+ODIN_ROOT="$tmp" HOME="$home" ./bin/odin project select odin-core
+ODIN_ROOT="$tmp" HOME="$home" ./bin/odin overview --json
+ODIN_ROOT="$tmp" HOME="$home" ./bin/odin capabilities list --json
+ODIN_ROOT="$tmp" HOME="$home" ./bin/odin legacy capabilities --json
+rm -rf "$tmp" "$home"
+```
+
+Observed result:
+
+- `overview --json` returned a catalog-backed `capability_catalog` with
+  `agent_definition_count=60`, `skill_count=19`, `workflow_count=4`,
+  `command_count=2`, and `tool_count=14`.
+- `legacy capabilities --json` returned legacy capability summary keys:
+  `capabilities`, `generated_at`, `root`, `scripts_root`, and `summary`.
+- `capabilities list --json` still exited with
+  `unknown command: capabilities`.
+
+This proves current `main` already exposes a capability inventory, but not the
+operator-facing capability-gateway contract or the explicit
+`plugin_model=plugins_are_packages_not_runtime_kind` field required to close the
+plugin terminology gap.
+
 Fresh high-risk dispatch proof on the doc-only audit branch:
 
 ```bash
