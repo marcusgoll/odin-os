@@ -16,6 +16,7 @@ import (
 	"odin-os/internal/core/projects"
 	"odin-os/internal/core/workspaces"
 	"odin-os/internal/registry"
+	runtimeevents "odin-os/internal/runtime/events"
 	"odin-os/internal/runtime/jobs"
 	"odin-os/internal/runtime/projections"
 	"odin-os/internal/store/sqlite"
@@ -23,7 +24,9 @@ import (
 	trackerintake "odin-os/internal/tracker/intake"
 )
 
-const workUsage = "usage: odin work status|profiles|start --project <key> --title <text> [--intent <read_only|mutation|governance|destructive>]|intake --project <key> [--dry-run]|reconcile --project <key>|proof --task <id|key> [--json]|dispatch [--task <id|key>] [--json]|execute --task <id|key> [--json]|retry --task <id|key> [--json]"
+const workUsage = "usage: odin work status|profiles|start --project <key> --title <text> [--intent <read_only|mutation|governance|destructive>]|intake --project <key> [--dry-run]|reconcile --project <key>|proof (--task <id|key>|--intake <id|key>) [--json]|dispatch [--task <id|key>] [--json]|execute --task <id|key> [--json]|retry --task <id|key> [--json]"
+
+const workProofUsage = "usage: odin work proof (--task <id|key>|--intake <id|key>) [--json]"
 
 var newIntakeTracker = trackerintake.NewGitHubTracker
 
@@ -309,35 +312,57 @@ func runWorkProof(ctx context.Context, store *sqlite.Store, args []string, stdou
 	params := parseWorkStartArgs(args)
 	jsonOutput := parseBoolFlag(params, "json")
 	if _, ok := params["help"]; ok {
-		_, err := fmt.Fprintln(stdout, "usage: odin work proof --task <id|key> [--json]")
+		_, err := fmt.Fprintln(stdout, workProofUsage)
 		return err
 	}
-	if err := rejectUnknownWorkProofArgs(params, "task", "json"); err != nil {
+	if err := rejectUnknownWorkProofArgs(params, "task", "intake", "json"); err != nil {
 		return err
 	}
 	taskRef := strings.TrimSpace(params["task"])
-	if taskRef == "" {
-		return fmt.Errorf("usage: odin work proof --task <id|key> [--json]")
+	intakeRef := strings.TrimSpace(params["intake"])
+	if (taskRef == "") == (intakeRef == "") {
+		return fmt.Errorf("%s; requires exactly one of --task or --intake", workProofUsage)
 	}
 
-	task, err := findWorkTask(ctx, store, taskRef)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return fmt.Errorf("work item not found: %s", taskRef)
+	var view workProofView
+	if taskRef != "" {
+		task, err := findWorkTask(ctx, store, taskRef)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return fmt.Errorf("work item not found: %s", taskRef)
+			}
+			return err
 		}
-		return err
-	}
-	view, err := buildWorkProofView(ctx, store, task)
-	if err != nil {
-		return err
+		view, err = buildWorkProofView(ctx, store, task)
+		if err != nil {
+			return err
+		}
+	} else {
+		item, err := findWorkIntake(ctx, store, intakeRef)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return fmt.Errorf("intake item not found: %s", intakeRef)
+			}
+			return err
+		}
+		view, err = buildWorkProofForIntake(ctx, store, item)
+		if err != nil {
+			return err
+		}
 	}
 	if jsonOutput {
 		return WriteJSON(stdout, view)
 	}
-	_, err = fmt.Fprintf(stdout, "schema=%s task=%s status=%s proof_state=%s source=%s review=%s runs=%d approvals_pending=%d pull_request=%s mutated=%t next_steps=%s\n",
+	taskKey := "none"
+	taskStatus := "none"
+	if view.Task != nil {
+		taskKey = view.Task.Key
+		taskStatus = view.Task.Status
+	}
+	_, err := fmt.Fprintf(stdout, "schema=%s task=%s status=%s proof_state=%s source=%s review=%s runs=%d approvals_pending=%d pull_request=%s mutated=%t next_steps=%s\n",
 		view.Schema,
-		view.Task.Key,
-		view.Task.Status,
+		taskKey,
+		taskStatus,
 		view.ProofState,
 		noneIfEmpty(view.Source.Type),
 		noneIfEmpty(view.Review.Status),
@@ -366,9 +391,10 @@ func rejectUnknownWorkProofArgs(params map[string]string, allowed ...string) err
 
 type workProofView struct {
 	Schema         string                 `json:"schema"`
-	Task           workProofTaskView      `json:"task"`
+	Task           *workProofTaskView     `json:"task,omitempty"`
 	Source         workProofSourceView    `json:"source"`
 	ProofState     string                 `json:"proof_state"`
+	DraftArtifact  *workProofDraftView    `json:"draft_artifact,omitempty"`
 	Clarification  workProofStatusView    `json:"clarification"`
 	Review         workProofReviewView    `json:"review"`
 	Execution      workProofExecutionView `json:"execution"`
@@ -391,6 +417,14 @@ type workProofTaskView struct {
 	ExecutionIntent       string `json:"execution_intent,omitempty"`
 	ExecutionIntentSource string `json:"execution_intent_source,omitempty"`
 	BlockedReason         string `json:"blocked_reason,omitempty"`
+}
+
+type workProofDraftView struct {
+	Kind                  string `json:"kind"`
+	Title                 string `json:"title"`
+	ReviewState           string `json:"review_state"`
+	ExecutionIntent       string `json:"execution_intent,omitempty"`
+	ExecutionIntentSource string `json:"execution_intent_source,omitempty"`
 }
 
 type workProofSourceView struct {
@@ -491,28 +525,16 @@ type workProofEventView struct {
 }
 
 func buildWorkProofView(ctx context.Context, store *sqlite.Store, task sqlite.Task) (workProofView, error) {
-	view := workProofView{
-		Schema:     "prompt_to_production_proof.v1",
-		ProofState: workProofState(task),
-		Task: workProofTaskView{
-			ID:                    task.ID,
-			ProjectID:             task.ProjectID,
-			Key:                   task.Key,
-			Title:                 task.Title,
-			Status:                task.Status,
-			ExecutionIntent:       task.ExecutionIntent,
-			ExecutionIntentSource: task.ExecutionIntentSource,
-			BlockedReason:         task.BlockedReason,
-		},
-		Source:         workProofSourceView{Type: "none"},
-		Clarification:  workProofStatusView{Status: "not_required", Questions: []string{}},
-		Review:         workProofReviewView{Status: "not_started"},
-		Delivery:       workProofDeliveryView{EvidenceStatus: "missing", GateStatus: "not_started"},
-		PullRequest:    workProofPullRequest{Status: "missing", URL: "", Tests: []string{}, Risks: []string{}, Blockers: []string{}, SelectedRoles: []string{}, ReviewResults: []workProofPRReviewResult{}},
-		MergeGate:      workProofGateView{Status: "not_ready", HumanApprovalRequired: true, Approved: false},
-		DeploymentGate: workProofGateView{Status: "not_in_scope", HumanApprovalRequired: true, Approved: false},
-		NextSteps:      []string{},
-		Mutated:        false,
+	view := newWorkProofView(workProofState(task))
+	view.Task = &workProofTaskView{
+		ID:                    task.ID,
+		ProjectID:             task.ProjectID,
+		Key:                   task.Key,
+		Title:                 task.Title,
+		Status:                task.Status,
+		ExecutionIntent:       task.ExecutionIntent,
+		ExecutionIntentSource: task.ExecutionIntentSource,
+		BlockedReason:         task.BlockedReason,
 	}
 
 	if intakeID, ok := intakeIDFromTask(task); ok {
@@ -526,7 +548,7 @@ func buildWorkProofView(ctx context.Context, store *sqlite.Store, task sqlite.Ta
 			DedupeKey:   item.DedupeKey,
 			URL:         urlFromJSON(item.SourceFactsJSON),
 			SourceType:  item.EventKind,
-			RequestedBy: strings.TrimPrefix(task.RequestedBy, "intake_review:"),
+			RequestedBy: sourceFactFromJSON(item.SourceFactsJSON, "requested_by"),
 			Status:      item.Status,
 		}
 		view.Review = workProofReviewView{Status: item.Status, QueueID: "intake-review:" + rawIntakeProofKey(item.ID)}
@@ -624,17 +646,118 @@ func buildWorkProofView(ctx context.Context, store *sqlite.Store, task sqlite.Ta
 	if err != nil {
 		return workProofView{}, err
 	}
-	view.Events.Count = len(events)
-	start := len(events) - 5
-	if start < 0 {
-		start = 0
-	}
-	for _, event := range events[start:] {
-		view.Events.Latest = append(view.Events.Latest, workProofEventView{ID: event.ID, Type: string(event.Type)})
-	}
+	view.Events = workProofEvents(events)
 
 	view.NextSteps = workProofNextSteps(view)
 	return view, nil
+}
+
+func newWorkProofView(proofState string) workProofView {
+	return workProofView{
+		Schema:         "prompt_to_production_proof.v1",
+		ProofState:     proofState,
+		Source:         workProofSourceView{Type: "none"},
+		Clarification:  workProofStatusView{Status: "not_required", Questions: []string{}},
+		Review:         workProofReviewView{Status: "not_started"},
+		Delivery:       workProofDeliveryView{EvidenceStatus: "missing", GateStatus: "not_started"},
+		PullRequest:    workProofPullRequest{Status: "missing", URL: "", Tests: []string{}, Risks: []string{}, Blockers: []string{}, SelectedRoles: []string{}, ReviewResults: []workProofPRReviewResult{}},
+		Approvals:      workProofApprovalsView{Pending: []workProofApprovalView{}, Resolved: []workProofApprovalView{}},
+		MergeGate:      workProofGateView{Status: "not_ready", HumanApprovalRequired: true, Approved: false},
+		DeploymentGate: workProofGateView{Status: "not_in_scope", HumanApprovalRequired: true, Approved: false},
+		NextSteps:      []string{},
+		Mutated:        false,
+	}
+}
+
+func buildWorkProofForIntake(ctx context.Context, store *sqlite.Store, item sqlite.IntakeItem) (workProofView, error) {
+	view := newWorkProofView(workProofStateForIntake(item))
+	view.Source = workProofSourceView{
+		Type:        "intake_item",
+		ID:          item.ID,
+		DedupeKey:   item.DedupeKey,
+		URL:         urlFromJSON(item.SourceFactsJSON),
+		SourceType:  item.EventKind,
+		RequestedBy: sourceFactFromJSON(item.SourceFactsJSON, "requested_by"),
+		Status:      item.Status,
+	}
+	if view.Source.RequestedBy == "" {
+		view.Source.RequestedBy = item.SourceFamily
+	}
+	view.Review = workProofReviewView{Status: item.Status, QueueID: "intake-review:" + rawIntakeProofKey(item.ID)}
+
+	notes, err := workProofIntakeNotesFromItem(item)
+	if err != nil {
+		return workProofView{}, err
+	}
+	if notes.DraftArtifact != nil {
+		view.DraftArtifact = notes.DraftArtifact
+	}
+	if notes.Clarification != nil {
+		view.Clarification = workProofStatusView{
+			Status:    notes.Clarification.State,
+			Questions: append([]string{}, notes.Clarification.Prompts...),
+		}
+	}
+	if item.Status == "needs_clarification" && view.Clarification.Status != "needs_clarification" {
+		view.Clarification = workProofStatusView{
+			Status: "needs_clarification",
+			Questions: []string{
+				"What exact outcome should Odin prepare?",
+				"Which acceptance criteria make this ready for work?",
+			},
+		}
+	}
+
+	streamType := runtimeevents.StreamIntakeItem
+	streamID := item.ID
+	events, err := store.ListEvents(ctx, sqlite.ListEventsParams{StreamType: &streamType, StreamID: &streamID})
+	if err != nil {
+		return workProofView{}, err
+	}
+	view.Events = workProofEvents(events)
+	view.NextSteps = workProofNextSteps(view)
+	return view, nil
+}
+
+type workProofIntakeNotes struct {
+	DraftArtifact *workProofDraftView `json:"draft_artifact,omitempty"`
+	Clarification *struct {
+		State   string   `json:"state"`
+		Prompts []string `json:"prompts"`
+	} `json:"clarification,omitempty"`
+}
+
+func workProofIntakeNotesFromItem(item sqlite.IntakeItem) (workProofIntakeNotes, error) {
+	var notes workProofIntakeNotes
+	if strings.TrimSpace(item.RoutingNotes) == "" {
+		return notes, nil
+	}
+	if err := json.Unmarshal([]byte(item.RoutingNotes), &notes); err != nil {
+		return workProofIntakeNotes{}, fmt.Errorf("intake routing notes: %w", err)
+	}
+	return notes, nil
+}
+
+func workProofStateForIntake(item sqlite.IntakeItem) string {
+	switch strings.ToLower(strings.TrimSpace(item.Status)) {
+	case "needs_clarification":
+		return "needs_clarification"
+	case "review_required":
+		return "review_required"
+	case "approval_required":
+		return "approval_required"
+	case "accepted":
+		return "accepted"
+	case "duplicate_linked_or_suppressed":
+		return "blocked"
+	case "rejected", "archived":
+		return "completed"
+	default:
+		if strings.TrimSpace(item.Status) == "" {
+			return "blocked"
+		}
+		return item.Status
+	}
 }
 
 func workProofState(task sqlite.Task) string {
@@ -681,6 +804,17 @@ func urlFromJSON(raw string) string {
 	return findURLValue(value)
 }
 
+func sourceFactFromJSON(raw string, key string) string {
+	var facts map[string]any
+	if err := json.Unmarshal([]byte(strings.TrimSpace(raw)), &facts); err != nil {
+		return ""
+	}
+	if value, ok := facts[key].(string); ok {
+		return strings.TrimSpace(value)
+	}
+	return ""
+}
+
 func findURLValue(value any) string {
 	switch typed := value.(type) {
 	case map[string]any:
@@ -720,7 +854,31 @@ func findWorkProofPullRequestHandoff(ctx context.Context, store *sqlite.Store, p
 	return handoffs[0], true, nil
 }
 
+func workProofEvents(events []runtimeevents.Record) workProofEventsView {
+	view := workProofEventsView{Count: len(events), Latest: []workProofEventView{}}
+	start := len(events) - 5
+	if start < 0 {
+		start = 0
+	}
+	for _, event := range events[start:] {
+		view.Latest = append(view.Latest, workProofEventView{ID: event.ID, Type: string(event.Type)})
+	}
+	return view
+}
+
 func workProofNextSteps(view workProofView) []string {
+	if view.Task == nil && view.Source.Type == "intake_item" {
+		switch view.ProofState {
+		case "needs_clarification":
+			return []string{"answer clarification prompts before drafting or accepting a Work Item"}
+		case "review_required":
+			return []string{"accept, reject, or clarify the intake draft before any Work Item exists"}
+		case "approval_required":
+			return []string{"resolve intake approval before promoting work"}
+		default:
+			return []string{"review intake state before creating or dispatching work"}
+		}
+	}
 	if len(view.Approvals.Pending) > 0 {
 		return []string{"resolve pending approval before execution or external mutation"}
 	}
@@ -737,6 +895,15 @@ func workProofNextSteps(view workProofView) []string {
 		return []string{"obtain explicit human merge approval before merge"}
 	}
 	return []string{"inspect proof evidence before marking external work complete"}
+}
+
+func findWorkIntake(ctx context.Context, store *sqlite.Store, ref string) (sqlite.IntakeItem, error) {
+	ref = strings.TrimSpace(ref)
+	idRef := strings.TrimPrefix(ref, "intake-")
+	if id, err := strconv.ParseInt(idRef, 10, 64); err == nil && id > 0 {
+		return store.GetIntakeItem(ctx, id)
+	}
+	return sqlite.IntakeItem{}, sql.ErrNoRows
 }
 
 func findWorkTask(ctx context.Context, store *sqlite.Store, ref string) (sqlite.Task, error) {

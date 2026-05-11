@@ -1418,9 +1418,11 @@ type RecordProjectionFreshnessParams struct {
 }
 
 type ListEventsParams struct {
-	ProjectID *int64
-	TaskID    *int64
-	RunID     *int64
+	ProjectID  *int64
+	TaskID     *int64
+	RunID      *int64
+	StreamType *runtimeevents.StreamType
+	StreamID   *int64
 }
 
 type ListRunsParams struct {

@@ -7946,6 +7946,14 @@ func (store *Store) ListEvents(ctx context.Context, params ListEventsParams) ([]
 		query += ` AND run_id = ?`
 		args = append(args, *params.RunID)
 	}
+	if params.StreamType != nil {
+		query += ` AND stream_type = ?`
+		args = append(args, string(*params.StreamType))
+	}
+	if params.StreamID != nil {
+		query += ` AND stream_id = ?`
+		args = append(args, *params.StreamID)
+	}
 	query += ` ORDER BY id ASC`
 
 	rows, err := store.db.QueryContext(ctx, query, args...)

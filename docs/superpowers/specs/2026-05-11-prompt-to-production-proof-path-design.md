@@ -137,6 +137,7 @@ The proof path should reuse:
 Add one narrow read-only proof surface:
 
 - `odin work proof --task <id|key> [--json]`
+- `odin work proof --intake <id|key> [--json]`
 
 This command should assemble a `prompt_to_production_proof` read model from
 existing runtime state. It should not mutate state in v1.
@@ -305,10 +306,15 @@ The `--json` response should include:
 - `odin work proof --task <id|key>` prints a concise human-readable proof
   summary.
 - `odin work proof --task <id|key> --json` prints the stable JSON envelope.
+- `odin work proof --intake <id|key> --json` proves pre-work intake state when
+  an unclear or review-required source has no Work Item yet.
 - Missing optional evidence should be represented as `missing` or
   `not_started`, not as an error.
 - Unknown Work Item should return a stable not-found error and make no
   mutations.
+- Unknown intake selectors should return a stable not-found error and make no
+  mutations.
+- The command should require exactly one selector: `--task` or `--intake`.
 - A Work Item with no source intake should still produce a proof based on task,
   run, approval, and PR handoff state.
 - The command must include `mutated=false`.
@@ -376,6 +382,7 @@ printf '{"original_content":"build a vague GitHub issue into a safe proof path"}
 ODIN_ROOT="$tmp" ./bin/odin intake process --id intake-1 --json
 ODIN_ROOT="$tmp" ./bin/odin intake review list --json
 ODIN_ROOT="$tmp" ./bin/odin work status --json
+ODIN_ROOT="$tmp" ./bin/odin work proof --intake intake-1 --json
 ODIN_ROOT="$tmp" ./bin/odin work proof --task <created-or-accepted-task> --json
 ODIN_ROOT="$tmp" ./bin/odin jobs --json
 ODIN_ROOT="$tmp" ./bin/odin runs --json
@@ -389,6 +396,7 @@ Failure-path proof:
 ```bash
 tmp="$(mktemp -d)"
 ODIN_ROOT="$tmp" ./bin/odin work proof --task missing-task --json
+ODIN_ROOT="$tmp" ./bin/odin work proof --intake missing-intake --json
 rm -rf "$tmp"
 ```
 
@@ -400,7 +408,9 @@ mutations and shows honest missing evidence for incomplete workflows.
 PR #219 implements the v1 read-only proof command:
 
 - `odin work proof --task <id|key> [--json]`
+- `odin work proof --intake <id|key> [--json]`
 - `prompt_to_production_proof.v1` JSON envelope
+- pre-work intake proof for unclear and draft intake before Work Item creation
 - source intake correlation through reviewed intake Work Items
 - Run Attempt, approval, PR handoff, merge gate, deployment gate, and task event
   readback
@@ -483,19 +493,21 @@ Implement one PR-sized read-only proof slice:
 Use docs/superpowers/specs/2026-05-11-prompt-to-production-proof-path-design.md as the approved design. Keep the work PR-sized and make atomic commits. Reuse odin intake, odin review, odin work, odin jobs, odin runs, odin approvals, odin logs, internal/app/lifecycle, internal/runtime/jobs, internal/runtime/projections, internal/review, SQLite intake_items/tasks/runs/approvals/events/pull_request_handoffs, and existing store helpers. Do not introduce a new workflow runtime, queue, policy engine, PR mutation command, merge command, deploy command, or GitHub label authority.
 
 Required behavior:
-- add `odin work proof --task <id|key> [--json]`
+- add `odin work proof (--task <id|key>|--intake <id|key>) [--json]`
 - return a `prompt_to_production_proof.v1` envelope with source, proof_state, clarification, review, execution, delivery, pull_request, approvals, merge_gate, deployment_gate, events, next_steps, and `mutated=false`
+- for `--intake`, prove unclear/review-required source state before any Work Item exists
 - represent missing optional evidence honestly as `missing` or `not_started`
-- fail closed for unknown task selectors
+- fail closed for unknown task or intake selectors
 - do not make external network calls or state mutations
 - update docs/contracts/work-execution-state.md with the command proof responsibility
 
 Required verification:
 - go test ./internal/app/lifecycle -run 'TestRunWorkProof|TestRunIntakeProcessCreatesReviewStatesWithoutExecution|TestRunUnifiedReviewQueue' -count=1
+- go test ./internal/app/lifecycle -run 'TestRunWorkProofReportsUnclearIntake|TestRunWorkProofReportsDraftIntake|TestRunWorkProofRequiresExactlyOneSelector' -count=1
 - go test ./internal/review ./internal/store/sqlite -run 'PullRequest|Handoff' -count=1
 - make build
-- with a temporary ODIN_ROOT, prove intake raw create, intake process, review list, work status, work proof --json, jobs --json, runs --json, approvals all --json, and logs --json
-- prove `odin work proof --task missing-task --json` fails closed without mutation
+- with a temporary ODIN_ROOT, prove intake raw create, intake process, review list, work status, work proof --intake --json, work proof --task --json, jobs --json, runs --json, approvals all --json, and logs --json
+- prove `odin work proof --task missing-task --json` and `odin work proof --intake missing-intake --json` fail closed without mutation
 
 Delivery:
 - preserve unrelated dirty worktree changes

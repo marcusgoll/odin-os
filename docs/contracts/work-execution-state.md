@@ -58,6 +58,7 @@ Each state claim must map to one of these existing operator surfaces:
 | `odin work status` | counts Work Items, open Work Items, active Run Attempts, pending approvals, failed retryable Work Items, retry-blocked Work Items, explicit intent Work Items, and fallback intent Work Items |
 | `odin work start --project <key> --title <text> [--intent ...]` | creates a queued Work Item and persists explicit intent when provided |
 | `odin work proof --task <id\|key> --json` | correlates source intake, review, Work Item, Run Attempts, approvals, PR handoff, merge gate, deployment gate, and task events without mutating runtime state |
+| `odin work proof --intake <id\|key> --json` | proves unclear or draft intake state before a Work Item exists, including clarification prompts, draft artifact, review queue state, and intake events without mutation |
 | `odin work dispatch --task <id\|key> --json` | admits dispatch, creates a Run Attempt, or blocks with a policy/approval reason |
 | `odin work execute --task <id\|key> --json` | executes an already dispatched Run Attempt and reports terminal state |
 | `odin task run --project <key> --title <text> --json` | proves the compatibility create-and-execute path |
