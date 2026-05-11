@@ -478,6 +478,130 @@ func TestRunOverviewJSONUsesCanonicalView(t *testing.T) {
 	}
 }
 
+func TestRunCapabilitiesListAndShowUseGatewayTerminology(t *testing.T) {
+	t.Parallel()
+
+	root := testRepoRoot(t)
+	if err := os.MkdirAll(filepath.Join(root, "registry", "commands"), 0o755); err != nil {
+		t.Fatalf("mkdir registry/commands: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "registry", "commands", "project.status.md"), []byte(`---
+apiVersion: odin/v1
+kind: command
+name: project.status
+version: 1.0.0
+availability:
+  scope: global
+permissions:
+  - filesystem
+inputSchema:
+  ref: schema://odin/commands/project.status/input
+  type: object
+outputSchema:
+  ref: schema://odin/commands/project.status/output
+  type: string
+dependencies:
+  - kind: skill
+    name: triage-skill
+    version: 1.0.0
+execution:
+  mode: local
+  timeout: 30s
+implementation:
+  kind: markdown
+  path: registry/commands/project.status.md
+---
+
+# Project Status Command
+
+## Purpose
+Show the current project state in a concise operator-facing form.
+
+## When to Use
+Use this command when the operator needs a quick status readout.
+
+## Inputs
+The command takes the active scope and runtime projection.
+
+## Procedure
+Collect the current context and render the important details.
+
+## Outputs
+A compact status summary with any immediate blockers.
+
+## Constraints
+Do not mutate runtime state.
+
+## Success Criteria
+The operator can decide the next action without extra lookup.
+`), 0o644); err != nil {
+		t.Fatalf("write registry command: %v", err)
+	}
+
+	var listOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"capabilities", "list", "--kind", "command", "--json"}, strings.NewReader(""), &listOutput); err != nil {
+		t.Fatalf("Run(capabilities list --json) error = %v\n%s", err, listOutput.String())
+	}
+
+	var listPayload struct {
+		Source       string `json:"source"`
+		PluginModel  string `json:"plugin_model"`
+		Capabilities []struct {
+			ID      string `json:"id"`
+			Kind    string `json:"kind"`
+			Version string `json:"version"`
+			Scope   string `json:"scope"`
+		} `json:"capabilities"`
+	}
+	if err := json.Unmarshal(listOutput.Bytes(), &listPayload); err != nil {
+		t.Fatalf("capabilities list json = %v\n%s", err, listOutput.String())
+	}
+	if listPayload.Source != "capability_gateway" {
+		t.Fatalf("Source = %q, want capability_gateway", listPayload.Source)
+	}
+	if listPayload.PluginModel != "plugins_are_packages_not_runtime_kind" {
+		t.Fatalf("PluginModel = %q, want packaging-only plugin model", listPayload.PluginModel)
+	}
+	if strings.Contains(strings.ToLower(listOutput.String()), "plugin manager") {
+		t.Fatalf("capabilities list output = %s, must not expose plugin manager language", listOutput.String())
+	}
+	foundProjectStatus := false
+	for _, card := range listPayload.Capabilities {
+		if card.ID == "project.status" && card.Kind == "command" && card.Version == "1.0.0" && card.Scope == "global" {
+			foundProjectStatus = true
+			break
+		}
+	}
+	if !foundProjectStatus {
+		t.Fatalf("capabilities list output = %s, want project.status command card", listOutput.String())
+	}
+
+	var showOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"capabilities", "show", "project.status", "--json"}, strings.NewReader(""), &showOutput); err != nil {
+		t.Fatalf("Run(capabilities show --json) error = %v\n%s", err, showOutput.String())
+	}
+	var showPayload struct {
+		Capability struct {
+			ID             string `json:"id"`
+			Kind           string `json:"kind"`
+			Version        string `json:"version"`
+			Implementation struct {
+				Kind string `json:"kind"`
+				Path string `json:"path"`
+			} `json:"implementation"`
+		} `json:"capability"`
+	}
+	if err := json.Unmarshal(showOutput.Bytes(), &showPayload); err != nil {
+		t.Fatalf("capabilities show json = %v\n%s", err, showOutput.String())
+	}
+	if showPayload.Capability.ID != "project.status" || showPayload.Capability.Kind != "command" || showPayload.Capability.Version != "1.0.0" {
+		t.Fatalf("capability descriptor = %+v, want project.status command v1.0.0", showPayload.Capability)
+	}
+	if showPayload.Capability.Implementation.Kind != "markdown" || showPayload.Capability.Implementation.Path != "registry/commands/project.status.md" {
+		t.Fatalf("capability implementation = %+v, want registry-backed markdown descriptor", showPayload.Capability.Implementation)
+	}
+}
+
 func TestRunIntakeRawCreateListShowDoesNotCreateTask(t *testing.T) {
 	t.Parallel()
 

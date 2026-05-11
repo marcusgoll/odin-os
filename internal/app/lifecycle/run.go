@@ -72,9 +72,12 @@ import (
 
 var errRuntimeNotReady = errors.New("runtime not ready")
 
-const rootUsageBanner = "Usage: odin <command> [args]\n\nCommands: help repl overview tui doctor healthcheck serve backup restore verify-backup status legacy project workspace work scope jobs runs leases approvals review intake agenda logs knowledge memory goal browser task initiative companion profile followup trigger scheduler transition skills e2e\n\nRun detail: odin runs show <id>"
+const rootUsageBanner = "Usage: odin <command> [args]\n\nCommands: help repl overview capabilities tui doctor healthcheck serve backup restore verify-backup status legacy project workspace work scope jobs runs leases approvals review intake agenda logs knowledge memory goal browser task initiative companion profile followup trigger scheduler transition skills e2e\n\nRun detail: odin runs show <id>"
 
 const schedulerUsage = "usage: odin scheduler tick [now=<RFC3339>] [recovery=<true|false>] [--dry-run|dry_run=<true|false>] [--json]"
+const capabilitiesUsage = "usage: odin capabilities list [--kind agent|skill|workflow|command|tool] [--scope <scope>] [--json]\n       odin capabilities show <id> [--version <version>] [--json]"
+const capabilityCommandSource = "capability_gateway"
+const capabilityPluginModel = "plugins_are_packages_not_runtime_kind"
 
 var (
 	serveTaskLoopInterval     = 1 * time.Second
@@ -283,6 +286,8 @@ func Run(ctx context.Context, root string, args []string, stdin io.Reader, stdou
 		return runRepl(ctx, app, stdin, stdout, now)
 	case "overview":
 		return runOverview(ctx, app, args[1:], stdout)
+	case "capabilities":
+		return runCapabilities(ctx, app, args[1:], stdout)
 	case "tui":
 		return runTUI(ctx, args[1:], stdout)
 	case "status":
@@ -419,6 +424,357 @@ func runOverview(ctx context.Context, app bootstrap.App, args []string, stdout i
 	}
 	_, err = fmt.Fprintln(stdout, clirender.RenderOverview(view))
 	return err
+}
+
+type capabilityListView struct {
+	Source       string               `json:"source"`
+	PluginModel  string               `json:"plugin_model"`
+	Count        int                  `json:"count"`
+	Capabilities []capabilityCardView `json:"capabilities"`
+}
+
+type capabilityShowView struct {
+	Source      string                   `json:"source"`
+	PluginModel string                   `json:"plugin_model"`
+	Capability  capabilityDescriptorView `json:"capability"`
+}
+
+type capabilityCardView struct {
+	ID      string `json:"id"`
+	Kind    string `json:"kind"`
+	Name    string `json:"name,omitempty"`
+	Title   string `json:"title,omitempty"`
+	Version string `json:"version"`
+	Scope   string `json:"scope,omitempty"`
+	Summary string `json:"summary,omitempty"`
+	Status  string `json:"status,omitempty"`
+}
+
+type capabilityDescriptorView struct {
+	ID             string                         `json:"id"`
+	APIVersion     string                         `json:"api_version,omitempty"`
+	Kind           string                         `json:"kind"`
+	Name           string                         `json:"name,omitempty"`
+	Title          string                         `json:"title,omitempty"`
+	Version        string                         `json:"version"`
+	Summary        string                         `json:"summary,omitempty"`
+	Status         string                         `json:"status,omitempty"`
+	Availability   capabilityAvailabilityView     `json:"availability,omitempty"`
+	Permissions    []string                       `json:"permissions,omitempty"`
+	InputSchema    capabilitySchemaView           `json:"input_schema,omitempty"`
+	OutputSchema   capabilitySchemaView           `json:"output_schema,omitempty"`
+	Dependencies   []capabilityDependencyView     `json:"dependencies,omitempty"`
+	Execution      capabilityExecutionView        `json:"execution,omitempty"`
+	Implementation capabilityImplementationView   `json:"implementation,omitempty"`
+	Scopes         []string                       `json:"scopes,omitempty"`
+	Tags           []string                       `json:"tags,omitempty"`
+	Owners         []string                       `json:"owners,omitempty"`
+	Source         capabilityDescriptorSourceView `json:"source,omitempty"`
+}
+
+type capabilityAvailabilityView struct {
+	Scope string `json:"scope,omitempty"`
+	Mode  string `json:"mode,omitempty"`
+}
+
+type capabilitySchemaView struct {
+	Ref  string `json:"ref,omitempty"`
+	Type string `json:"type,omitempty"`
+}
+
+type capabilityDependencyView struct {
+	Kind    string `json:"kind,omitempty"`
+	Name    string `json:"name,omitempty"`
+	Version string `json:"version,omitempty"`
+}
+
+type capabilityExecutionView struct {
+	Mode    string `json:"mode,omitempty"`
+	Timeout string `json:"timeout,omitempty"`
+}
+
+type capabilityImplementationView struct {
+	Kind string `json:"kind,omitempty"`
+	Ref  string `json:"ref,omitempty"`
+	Path string `json:"path,omitempty"`
+}
+
+type capabilityDescriptorSourceView struct {
+	Path         string `json:"path,omitempty"`
+	RelativePath string `json:"relative_path,omitempty"`
+}
+
+func runCapabilities(ctx context.Context, app bootstrap.App, args []string, stdout io.Writer) error {
+	_ = ctx
+	if len(args) == 0 || args[0] == "help" {
+		_, err := fmt.Fprintln(stdout, capabilitiesUsage)
+		return err
+	}
+
+	gateway := newReadOnlyCapabilityGateway(app)
+	if gateway == nil {
+		return fmt.Errorf("capability gateway unavailable")
+	}
+
+	switch args[0] {
+	case "list":
+		return runCapabilitiesList(gateway, args[1:], stdout)
+	case "show":
+		return runCapabilitiesShow(gateway, args[1:], stdout)
+	default:
+		return fmt.Errorf("%s", capabilitiesUsage)
+	}
+}
+
+func runCapabilitiesList(gateway *capabilities.Gateway, args []string, stdout io.Writer) error {
+	jsonOutput, kind, scope, err := parseCapabilitiesListArgs(args)
+	if err != nil {
+		return err
+	}
+
+	cards := gateway.ListCapabilities(kind, scope)
+	view := capabilityListView{
+		Source:       capabilityCommandSource,
+		PluginModel:  capabilityPluginModel,
+		Count:        len(cards),
+		Capabilities: make([]capabilityCardView, 0, len(cards)),
+	}
+	for _, card := range cards {
+		view.Capabilities = append(view.Capabilities, capabilityCardToView(card))
+	}
+
+	if jsonOutput {
+		return commands.WriteJSON(stdout, view)
+	}
+
+	for _, card := range view.Capabilities {
+		if _, err := fmt.Fprintf(stdout, "%s version=%s kind=%s scope=%s status=%s\n", card.ID, card.Version, card.Kind, card.Scope, card.Status); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func runCapabilitiesShow(gateway *capabilities.Gateway, args []string, stdout io.Writer) error {
+	id, version, jsonOutput, err := parseCapabilitiesShowArgs(args)
+	if err != nil {
+		return err
+	}
+
+	descriptor, err := resolveCLICapabilityDescriptor(gateway, id, version)
+	if err != nil {
+		return err
+	}
+	view := capabilityShowView{
+		Source:      capabilityCommandSource,
+		PluginModel: capabilityPluginModel,
+		Capability:  capabilityDescriptorToView(descriptor),
+	}
+
+	if jsonOutput {
+		return commands.WriteJSON(stdout, view)
+	}
+
+	_, err = fmt.Fprintf(stdout, "%s version=%s kind=%s scope=%s status=%s implementation=%s:%s\n",
+		view.Capability.ID,
+		view.Capability.Version,
+		view.Capability.Kind,
+		view.Capability.Availability.Scope,
+		view.Capability.Status,
+		view.Capability.Implementation.Kind,
+		view.Capability.Implementation.Path,
+	)
+	return err
+}
+
+func parseCapabilitiesListArgs(args []string) (bool, registry.Kind, string, error) {
+	jsonOutput := false
+	kind := registry.KindUnknown
+	scope := ""
+	for index := 0; index < len(args); index++ {
+		switch args[index] {
+		case "--json":
+			if jsonOutput {
+				return false, registry.KindUnknown, "", fmt.Errorf("duplicate --json flag")
+			}
+			jsonOutput = true
+		case "--kind":
+			if kind != registry.KindUnknown {
+				return false, registry.KindUnknown, "", fmt.Errorf("duplicate --kind flag")
+			}
+			if index+1 >= len(args) {
+				return false, registry.KindUnknown, "", fmt.Errorf("--kind requires a value")
+			}
+			parsed, err := parseCapabilityKind(args[index+1])
+			if err != nil {
+				return false, registry.KindUnknown, "", err
+			}
+			kind = parsed
+			index++
+		case "--scope":
+			if scope != "" {
+				return false, registry.KindUnknown, "", fmt.Errorf("duplicate --scope flag")
+			}
+			if index+1 >= len(args) {
+				return false, registry.KindUnknown, "", fmt.Errorf("--scope requires a value")
+			}
+			scope = strings.TrimSpace(args[index+1])
+			if scope == "" {
+				return false, registry.KindUnknown, "", fmt.Errorf("--scope requires a value")
+			}
+			index++
+		default:
+			return false, registry.KindUnknown, "", fmt.Errorf("%s", capabilitiesUsage)
+		}
+	}
+	return jsonOutput, kind, scope, nil
+}
+
+func parseCapabilitiesShowArgs(args []string) (string, string, bool, error) {
+	id := ""
+	version := ""
+	jsonOutput := false
+	for index := 0; index < len(args); index++ {
+		switch args[index] {
+		case "--json":
+			if jsonOutput {
+				return "", "", false, fmt.Errorf("duplicate --json flag")
+			}
+			jsonOutput = true
+		case "--version":
+			if version != "" {
+				return "", "", false, fmt.Errorf("duplicate --version flag")
+			}
+			if index+1 >= len(args) {
+				return "", "", false, fmt.Errorf("--version requires a value")
+			}
+			version = strings.TrimSpace(args[index+1])
+			if version == "" {
+				return "", "", false, fmt.Errorf("--version requires a value")
+			}
+			index++
+		default:
+			if strings.HasPrefix(args[index], "-") {
+				return "", "", false, fmt.Errorf("%s", capabilitiesUsage)
+			}
+			if id != "" {
+				return "", "", false, fmt.Errorf("%s", capabilitiesUsage)
+			}
+			id = strings.TrimSpace(args[index])
+		}
+	}
+	if id == "" {
+		return "", "", false, fmt.Errorf("%s", capabilitiesUsage)
+	}
+	return id, version, jsonOutput, nil
+}
+
+func parseCapabilityKind(value string) (registry.Kind, error) {
+	switch registry.Kind(strings.TrimSpace(value)) {
+	case registry.KindAgent:
+		return registry.KindAgent, nil
+	case registry.KindSkill:
+		return registry.KindSkill, nil
+	case registry.KindWorkflow:
+		return registry.KindWorkflow, nil
+	case registry.KindCommand:
+		return registry.KindCommand, nil
+	case registry.KindTool:
+		return registry.KindTool, nil
+	default:
+		return registry.KindUnknown, fmt.Errorf("unknown capability kind %q", value)
+	}
+}
+
+func resolveCLICapabilityDescriptor(gateway *capabilities.Gateway, id, version string) (capabilities.Descriptor, error) {
+	if strings.TrimSpace(version) != "" {
+		descriptor, err := gateway.GetCapability(id, version)
+		if err != nil {
+			return capabilities.Descriptor{}, fmt.Errorf("capability %q version %q not found: %w", id, version, err)
+		}
+		return descriptor, nil
+	}
+
+	var matches []capabilities.CapabilityCard
+	for _, card := range gateway.ListCapabilities(registry.KindUnknown, "") {
+		if card.ID == id {
+			matches = append(matches, card)
+		}
+	}
+
+	switch len(matches) {
+	case 0:
+		return capabilities.Descriptor{}, fmt.Errorf("capability %q not found", id)
+	case 1:
+		return gateway.GetCapability(id, matches[0].Version)
+	default:
+		return capabilities.Descriptor{}, fmt.Errorf("capability %q requires --version", id)
+	}
+}
+
+func capabilityCardToView(card capabilities.CapabilityCard) capabilityCardView {
+	return capabilityCardView{
+		ID:      card.ID,
+		Kind:    string(card.Kind),
+		Name:    card.Name,
+		Title:   card.Title,
+		Version: card.Version,
+		Scope:   card.Scope,
+		Summary: card.Summary,
+		Status:  card.Status,
+	}
+}
+
+func capabilityDescriptorToView(descriptor capabilities.Descriptor) capabilityDescriptorView {
+	dependencies := make([]capabilityDependencyView, 0, len(descriptor.Dependencies))
+	for _, dependency := range descriptor.Dependencies {
+		dependencies = append(dependencies, capabilityDependencyView{
+			Kind:    string(dependency.Kind),
+			Name:    dependency.Name,
+			Version: dependency.Version,
+		})
+	}
+
+	return capabilityDescriptorView{
+		ID:         descriptor.Key,
+		APIVersion: descriptor.APIVersion,
+		Kind:       string(descriptor.Kind),
+		Name:       descriptor.Name,
+		Title:      descriptor.Title,
+		Version:    descriptor.Version,
+		Summary:    descriptor.Summary,
+		Status:     descriptor.Status,
+		Availability: capabilityAvailabilityView{
+			Scope: descriptor.Availability.Scope,
+			Mode:  descriptor.Availability.Mode,
+		},
+		Permissions: append([]string(nil), descriptor.Permissions...),
+		InputSchema: capabilitySchemaView{
+			Ref:  descriptor.InputSchema.Ref,
+			Type: descriptor.InputSchema.Type,
+		},
+		OutputSchema: capabilitySchemaView{
+			Ref:  descriptor.OutputSchema.Ref,
+			Type: descriptor.OutputSchema.Type,
+		},
+		Dependencies: dependencies,
+		Execution: capabilityExecutionView{
+			Mode:    descriptor.Execution.Mode,
+			Timeout: descriptor.Execution.Timeout,
+		},
+		Implementation: capabilityImplementationView{
+			Kind: descriptor.Implementation.Kind,
+			Ref:  descriptor.Implementation.Ref,
+			Path: descriptor.Implementation.Path,
+		},
+		Scopes: append([]string(nil), descriptor.Scopes...),
+		Tags:   append([]string(nil), descriptor.Tags...),
+		Owners: append([]string(nil), descriptor.Owners...),
+		Source: capabilityDescriptorSourceView{
+			Path:         descriptor.Source.Path,
+			RelativePath: descriptor.Source.RelativePath,
+		},
+	}
 }
 
 func runScope(app bootstrap.App, args []string, stdout io.Writer) error {
@@ -5644,8 +6000,7 @@ func runServe(ctx context.Context, app bootstrap.App, cfg appconfig.Config, stdo
 
 func newServeCapabilityGateway(app bootstrap.App) *capabilities.Gateway {
 	definitions := catalog.BuiltinDefinitions()
-	snapshot := capabilities.FromRegistrySnapshot("serve-capabilities", app.RegistrySnapshot)
-	snapshot = capabilities.WithBuiltinToolDescriptors(snapshot, definitions)
+	snapshot := newCapabilitySnapshot(app, definitions, "serve-capabilities")
 	service, err := capabilities.NewService(snapshot)
 	if err != nil {
 		return nil
@@ -5665,6 +6020,22 @@ func newServeCapabilityGateway(app bootstrap.App) *capabilities.Gateway {
 		}
 		return servedCommandService{app: app}.Execute(ctx, request)
 	}, runLookup)
+}
+
+func newReadOnlyCapabilityGateway(app bootstrap.App) *capabilities.Gateway {
+	definitions := catalog.BuiltinDefinitions()
+	snapshot := newCapabilitySnapshot(app, definitions, capabilityCommandSource)
+	service, err := capabilities.NewService(snapshot)
+	if err != nil {
+		return nil
+	}
+
+	return capabilities.NewGateway(service, nil, nil)
+}
+
+func newCapabilitySnapshot(app bootstrap.App, definitions map[string]catalog.ToolDefinition, digest string) capabilities.Snapshot {
+	snapshot := capabilities.FromRegistrySnapshot(digest, app.RegistrySnapshot)
+	return capabilities.WithBuiltinToolDescriptors(snapshot, definitions)
 }
 
 func recordServeStopped(ctx context.Context, service runtimestate.Service, bootID string, reason string, cause error) error {
