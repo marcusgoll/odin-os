@@ -311,9 +311,32 @@ Observed text overview proof:
 
 Observed JSON overview proof included `work_items`, `review_queue`,
 `approvals`, `observability`, `blocked_work`, `recovery_guidance`,
-`intake_inbox`, and `automation_triggers` keys. The scenario did not create a
-failed Work Item, so it does not prove failed-work rendering on current `main`;
-that remains the purpose of PR #216.
+`intake_inbox`, and `automation_triggers` keys.
+
+Fresh failed-work current-main proof:
+
+```bash
+rg -n "Failed Work|RecoveryGuidance|failed work|retry_eligible|retry_count|last_error" internal/cli internal/app/lifecycle internal/runtime internal/store tests
+go test ./internal/cli/render -run TestRenderOverviewUsesCanonicalLanes -count=1
+go test ./internal/app/lifecycle -run TestRunWorkRetryBlocksAtMaxAttemptsWithGuidance -count=1
+```
+
+Observed proof:
+
+- Current `internal/cli/overview/service.go` has
+  `Observability.RecoveryGuidance` and retry-guidance fields.
+- Current `TestRunWorkRetryBlocksAtMaxAttemptsWithGuidance` passes and asserts
+  `overview --json` includes `recovery_guidance`,
+  `decision=retry_blocked_max_attempts`, and the failed Work Item key.
+- Current `internal/cli/render/overview.go` does not render a dedicated
+  `Failed Work` section from `view.Observability.RecoveryGuidance`.
+- Current `TestRenderOverviewUsesCanonicalLanes` passes with a
+  `RecoveryGuidance` fixture but only asserts the review-queue `failed=1`
+  summary, not a human-readable failed-work row.
+
+This proves current `main` already carries failed-work recovery data in JSON,
+but not the operator-facing text/TUI failed-work lane required by the objective.
+That remains the purpose of PR #216.
 
 ## PR #216 Failed-Work Proof
 
