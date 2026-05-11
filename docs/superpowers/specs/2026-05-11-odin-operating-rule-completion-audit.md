@@ -73,7 +73,7 @@ Evidence checked:
 | overview/TUI blocked items | Attention/blocked work surfaces exist in overview. | Implemented on main |
 | prompt-to-production vague input clarification | PR #219 adds `odin work proof --intake` for `needs_clarification` intake before Work Item creation. | Open draft PR #219 |
 | prompt-to-production spec/ticket | Intake processing and review-required draft artifacts exist; PR #219 proves them through `odin work proof`. | Open draft PR #219 |
-| prompt-to-production atomic commits/tests/review/PR | PR #219 adds dry-run/local `odin work pr prepare`, approval-backed `--live --approval <id>`, PR handoff evidence, proof readback, and a controlled GitHub API fixture test. | Partial; PR #219 open |
+| prompt-to-production atomic commits/tests/review/PR | PR #219 adds dry-run/local `odin work pr prepare`, approval-backed `--live --approval <id>`, PR handoff evidence, proof readback, and a controlled GitHub API fixture test. PR #224 adds a gated operator live-smoke path for proving that same command against a disposable GitHub repository. | Partial; PR #219/#224 open |
 | approval before merge/deploy | PR #222 adds local-only `odin work approval request --kind merge\|deploy`, separate Approval Requests, approval-purpose proof readback, and fail-closed prerequisite checks before any merge/deploy mutation exists. PR #223 tightens this by requiring completed selected review role Run Attempts before merge/deploy approval requests. | Partial; PR #213/#214/#219/#222/#223 open |
 | operating rule applied everywhere | Many surfaces now satisfy real command + persistence + policy + audit. Open stacked draft PRs and the absence of real GitHub.com write proof mean the rule is not yet universal. | Not complete |
 
@@ -117,6 +117,16 @@ approval prerequisites from selection evidence to completed selected role run
 evidence. It remains local-only and does not perform GitHub review, merge,
 deploy, branch deletion, or production mutation.
 
+PR #224 layers on top of PR #223 and adds an opt-in live PR handoff smoke path:
+`scripts/ops/pr-handoff-live-smoke.sh` plus
+`docs/operations/pr-handoff-live-smoke.md`. The script is gated by
+`ODIN_LIVE_PR_HANDOFF_SMOKE=1`, requires a disposable GitHub repository, an
+existing disposable head branch, and `GITHUB_TOKEN`, then exercises
+`odin work pr prepare --live`, `odin approvals resolve`,
+`odin work pr prepare --live --approval <id>`, `odin work proof`, and
+`odin logs trail`. CI only runs the non-mutating contract test. No live
+GitHub.com PR was created in this audit update.
+
 ## What Is Open But Not Yet Main
 
 - PR #218: capability/plugin model clarification through `odin capabilities`.
@@ -130,23 +140,26 @@ deploy, branch deletion, or production mutation.
   Requests and `work proof` gate readback.
 - PR #223: reviewer, QA, and security role execution proof as first-class Run
   Attempts before merge/deploy approval requests.
+- PR #224: opt-in live PR handoff smoke path for disposable GitHub repositories.
 
 ## Remaining Gaps
 
 1. Merge and deploy approval resolver proof exists in PR #222, but it is stacked
    on open draft PRs and not current `main` behavior. PR #223 is also stacked
    and not current `main` behavior.
-2. PR #219 does not perform a real live GitHub.com write; its approved live
-   mutation path is proved against a controlled HTTP fixture and fails closed
-   without `GITHUB_TOKEN` in real `./bin/odin` proof.
+2. PR #224 provides a gated live GitHub.com PR handoff smoke path, but the
+   actual live smoke has not been run against a disposable repository with an
+   approved token and existing disposable head branch.
 3. Several green PRs are still drafts or unmerged, so their behavior is not
    current `main` behavior.
 
 ## Next Concrete Slice
 
-The next non-duplicative implementation slice should be real live GitHub.com PR
-handoff proof or draft-stack integration, not more scheduler-trigger work and
-not another local-only PR handoff, review-run, or approval-request command.
+The next non-duplicative implementation slice should be either running the PR
+#224 live smoke with explicit operator approval against a disposable GitHub
+repository, or draft-stack integration. It should not be more scheduler-trigger
+work and not another local-only PR handoff, review-run, or approval-request
+command.
 
 Existing proof and handoff command shape from PR #219:
 
@@ -189,26 +202,38 @@ Implemented in PR #223:
 - no GitHub review API, merge API, deployment system, branch deletion, release
   creation, or production mutation
 
+Implemented in PR #224:
+
+- `scripts/ops/pr-handoff-live-smoke.sh`
+- `docs/operations/pr-handoff-live-smoke.md`
+- `scripts/tests/pr-handoff-live-smoke-test.sh`
+- Makefile `ci` coverage for the non-mutating smoke contract test
+- fail-closed defaults unless `ODIN_LIVE_PR_HANDOFF_SMOKE=1`,
+  `ODIN_LIVE_PR_HANDOFF_REPO`, `ODIN_LIVE_PR_HANDOFF_HEAD_BRANCH`, and
+  `GITHUB_TOKEN` are provided
+- no live GitHub.com write during normal CI or local verification
+
 ## Implementation Goal Prompt
 
 ```text
-/goal Design and implement real live GitHub.com PR handoff proof for /home/orchestrator/odin-os.
+/goal Run or integrate real live GitHub.com PR handoff proof for /home/orchestrator/odin-os.
 
-Use docs/superpowers/specs/2026-05-11-odin-operating-rule-completion-audit.md and docs/superpowers/specs/2026-05-11-prompt-to-production-proof-path-design.md as the audit/design inputs. Keep the slice PR-sized. Build on PR #219 prompt-to-production proof, PR #222 merge/deploy approval proof, PR #223 review role run proof, and PR #213/#214 delivery evidence/gate work when available. Reuse odin work proof, approvals.Service, runtime events, pull_request_handoffs, pull_request_review_results, runs, delivery evidence records, and delivery gate records. Do not add autonomous merge, autonomous deploy, branch deletion, batch approval, or a new PR runtime.
+Use docs/superpowers/specs/2026-05-11-odin-operating-rule-completion-audit.md, docs/superpowers/specs/2026-05-11-prompt-to-production-proof-path-design.md, and docs/operations/pr-handoff-live-smoke.md as the audit/design inputs. Keep the slice PR-sized. Build on PR #219 prompt-to-production proof, PR #222 merge/deploy approval proof, PR #223 review role run proof, PR #224 PR handoff live smoke, and PR #213/#214 delivery evidence/gate work when available. Reuse odin work proof, approvals.Service, runtime events, pull_request_handoffs, pull_request_review_results, runs, delivery evidence records, and delivery gate records. Do not add autonomous merge, autonomous deploy, branch deletion, batch approval, or a new PR runtime.
 
 Required behavior:
-- prove the existing approval-backed `odin work pr prepare --live --approval <id>` path against GitHub.com or an explicitly operator-approved live test repository
+- either run PR #224's `scripts/ops/pr-handoff-live-smoke.sh` against an explicitly operator-approved disposable GitHub repository, or integrate the stacked draft PRs if live proof is still blocked
 - preserve human merge/deploy boundaries; do not call GitHub merge APIs, deployment systems, branch deletion, release creation, or repository settings APIs
 - keep live PR handoff scoped to creating/updating the PR handoff artifact and durable Odin evidence
-- record the real GitHub PR URL/number in `pull_request_handoffs` and `work proof`
+- record or verify the real GitHub PR URL/number in `pull_request_handoffs` and `work proof`
 - append runtime audit evidence for approval request, approval resolution, and handoff preparation
 - document any required operator token/repository setup and refusal behavior when credentials are absent
 
 Required verification:
-- focused lifecycle or integration tests covering approved live PR handoff, missing token refusal, wrong approval refusal, and token redaction
+- if running live smoke: capture exact disposable repo, branch, approval ID, PR URL/number, `work proof`, and `logs trail` evidence without exposing tokens
+- if integrating stack: verify every stacked PR body has Summary, Proven, Unproven, and Commands Run and every remote check is green
 - git diff --check
 - make build
-- real ./bin/odin proof on a fresh ODIN_ROOT covering Work Item -> approval request/resolution -> live PR handoff -> work proof readback
+- real ./bin/odin or `scripts/ops/pr-handoff-live-smoke.sh` proof on a fresh ODIN_ROOT covering Work Item -> approval request/resolution -> live PR handoff -> work proof readback, unless live proof remains blocked pending operator approval
 - make ci
 
 Open a PR with Summary, Proven, Unproven, and Commands Run. Do not merge or deploy without explicit approval.
