@@ -25,7 +25,9 @@ This contract covers outbound GitHub issue mutations exposed by
 
 It does not cover:
 
-- pull request creation, update, review, merge, or branch deletion
+- pull request creation, update, review, merge, or branch deletion, except for
+  the separate `odin work pr prepare` handoff path governed by
+  `docs/contracts/pull-request-handoff-mutations.md`
 - production deployment
 - repository settings, workflow, secret, release, or environment mutation
 - deleting GitHub issues, comments, or labels

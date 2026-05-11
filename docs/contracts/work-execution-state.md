@@ -59,7 +59,7 @@ Each state claim must map to one of these existing operator surfaces:
 | `odin work start --project <key> --title <text> [--intent ...]` | creates a queued Work Item and persists explicit intent when provided |
 | `odin work proof --task <id\|key> --json` | correlates source intake, review, Work Item, Run Attempts, approvals, PR handoff, merge gate, deployment gate, and task events without mutating runtime state |
 | `odin work proof --intake <id\|key> --json` | proves unclear or draft intake state before a Work Item exists, including clarification prompts, draft artifact, review queue state, and intake events without mutation |
-| `odin work pr prepare --task <id\|key> --summary <text> --test <text> --risk <text> --command <text> --dry-run --json` | prepares durable PR handoff and review-selection evidence without external GitHub mutation; live PR mutation remains approval-gated and unsupported until an Approval Request resolver is wired |
+| `odin work pr prepare --task <id\|key> --summary <text> --test <text> --risk <text> --command <text> [--dry-run\|--live --approval <id>] --json` | prepares durable PR handoff and review-selection evidence; dry-run/local mode does not call GitHub, and live mode requires an approved same-task Approval Request before using the pull request handoff mutation contract |
 | `odin work dispatch --task <id\|key> --json` | admits dispatch, creates a Run Attempt, or blocks with a policy/approval reason |
 | `odin work execute --task <id\|key> --json` | executes an already dispatched Run Attempt and reports terminal state |
 | `odin task run --project <key> --title <text> --json` | proves the compatibility create-and-execute path |

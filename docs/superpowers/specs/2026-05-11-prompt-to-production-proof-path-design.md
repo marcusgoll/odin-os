@@ -204,8 +204,9 @@ A read-only proof command is necessary because:
   SQLite remains runtime authority.
 - A pull request handoff is not approval to merge or deploy.
 - Merge and production deploy remain forbidden for unattended automation.
-- Live PR creation/update needs its own approval-gated operator contract before
-  it can be wired to `internal/review.GitHubPullRequestManager`.
+- Live PR creation/update is allowed only through the narrow
+  `docs/contracts/pull-request-handoff-mutations.md` contract and the
+  approval-backed `odin work pr prepare --live --approval <id>` path.
 - The v1 proof command must be read-only and safe against a fresh temporary
   `ODIN_ROOT`.
 
@@ -343,11 +344,11 @@ Live PR creation/update should be a later separate design that:
 Rejected. Work Items, Run Attempts, approvals, review entries, intake items,
 events, and PR handoff rows are already the durable authorities.
 
-### Wire live PR creation in the first slice
+### Treat live PR creation as ambient GitHub permission
 
-Rejected. The repo has PR manager package code, but no approved operator contract
-for live PR mutation. The first slice should prove correlation and missing
-evidence before creating external writes.
+Rejected. The approved live path must stay behind a same-task Approval Request,
+the `internal/review` handoff seam, token redaction, and audit evidence. A
+configured `GITHUB_TOKEN` alone never authorizes PR mutation.
 
 ### Treat PR handoff as merge approval
 
@@ -400,16 +401,18 @@ ODIN_ROOT="$tmp" ./bin/odin work proof --intake missing-intake --json
 rm -rf "$tmp"
 ```
 
-The implementation is done only when the command proves that it made no
-mutations and shows honest missing evidence for incomplete workflows.
+The proof command is done only when it proves that it made no mutations and
+shows honest missing evidence for incomplete workflows. The PR handoff command
+is done only when dry-run/local proof avoids GitHub I/O and approved live mode
+records the external mutation as audit evidence.
 
 ## Implementation Hardening Status
 
-PR #219 implements the v1 read-only proof command:
+PR #219 implements the v1 read-only proof command and PR handoff command:
 
 - `odin work proof --task <id|key> [--json]`
 - `odin work proof --intake <id|key> [--json]`
-- `odin work pr prepare --task <id|key> --summary <text> --test <text> --risk <text> --command <text> [--dry-run] [--json]`
+- `odin work pr prepare --task <id|key> --summary <text> --test <text> --risk <text> --command <text> [--dry-run|--live --approval <id>] [--json]`
 - `prompt_to_production_proof.v1` JSON envelope
 - pre-work intake proof for unclear and draft intake before Work Item creation
 - source intake correlation through reviewed intake Work Items
@@ -425,11 +428,14 @@ PR #219 implements the v1 read-only proof command:
   evidence
 - fail-closed unknown Work Item handling
 - fail-closed missing handoff evidence and unapproved live PR mutation handling
-- `mutated=false` with command-level proof that no log event is appended
+- approval-backed live PR handoff mutation through
+  `docs/contracts/pull-request-handoff-mutations.md`
+- `mutated=false` for `work proof`; PR handoff mutation state is reported
+  separately through `external_mutated`
 
-The implementation does not add unapproved live PR creation/update, merge approval
-resolution, deployment approval resolution, worker dispatch, branch creation, or
-GitHub mutation.
+The implementation does not add unapproved live PR creation/update, merge
+approval resolution, deployment approval resolution, worker dispatch, branch
+creation, or ambient GitHub mutation authority.
 
 ## Documentation Changes
 
@@ -441,35 +447,41 @@ During implementation, update:
   responsibility.
 - `docs/contracts/verification-model.md` only if the implementation introduces
   a new proof-report convention.
-- `docs/contracts/github-tracker-mutations.md` only in a later PR mutation
-  contract slice.
+- `docs/contracts/github-tracker-mutations.md` to point PR mutation work at the
+  separate handoff contract.
+- `docs/contracts/pull-request-handoff-mutations.md` with the approval-backed
+  live PR handoff contract.
 
 No ADR is required for this slice because the selected design deepens existing
 authority boundaries rather than making a hard-to-reverse architectural change.
 
 ## Security Review
 
-The v1 command must be read-only.
+The v1 `work proof` command must be read-only. The `work pr prepare` command is
+local-only by default and may use live GitHub mutation only through
+`--live --approval <id>` after the same-task Approval Request is approved.
 
-It must not:
+These commands must not:
 
 - create branches or worktrees;
 - start workers or dispatch Work Items;
-- write PRs, comments, labels, reviews, checks, releases, or deployments;
+- write PRs without the approved live handoff contract, or write comments,
+  labels, reviews, checks, releases, or deployments;
 - resolve approvals;
 - treat GitHub issue or PR state as runtime authority;
 - expose GitHub tokens, env values, or credential material;
 - mark merge or deploy as approved without an Odin-owned approval record.
 
-The command should fail closed for malformed task selectors and should redact any
-external error text if future sources are added.
+The command should fail closed for malformed task selectors, pending or
+wrong-task approvals, missing tokens, and GitHub API errors. Token-like strings
+must be redacted from operator output and runtime evidence.
 
 ## Open Blockers
 
 - PR #213 and PR #214 are open and may add the preferred delivery evidence and
   gate fields that `odin work proof` should read.
-- There is no approved live PR mutation contract for wiring
-  `GitHubPullRequestManager` to an operator command.
+- Approved live PR handoff is limited to same-task Approval Requests and does
+  not cover merge, deploy, branch deletion, or PR review approval.
 - Merge and deployment approval resolvers are not implemented end-to-end.
 - Reviewer, QA, and security role execution is not fully implemented as runtime
   Run Attempts.
@@ -502,11 +514,11 @@ Required behavior:
 - add dry-run/local `odin work pr prepare --task <id|key> ... --json`
 - return a `prompt_to_production_proof.v1` envelope with source, proof_state, clarification, review, execution, delivery, pull_request, approvals, merge_gate, deployment_gate, events, next_steps, and `mutated=false`
 - for `--intake`, prove unclear/review-required source state before any Work Item exists
-- for `work pr prepare`, persist PR handoff/review-selection evidence and audit event without live GitHub mutation
+- for `work pr prepare`, persist PR handoff/review-selection evidence and audit event; dry-run/local mode must not call GitHub
 - represent missing optional evidence honestly as `missing` or `not_started`
 - fail closed for unknown task or intake selectors
 - fail closed for missing PR handoff evidence or unapproved live PR mutation
-- do not make external network calls
+- for approved `--live --approval <id>`, use only the canonical PR handoff manager and persist `external_mutated=true` audit evidence
 - update docs/contracts/work-execution-state.md with the command proof responsibility
 
 Required verification:
@@ -517,7 +529,8 @@ Required verification:
 - make build
 - with a temporary ODIN_ROOT, prove intake raw create, intake process, review list, work status, work proof --intake --json, work proof --task --json, work pr prepare --json, jobs --json, runs --json, approvals all --json, and logs --json
 - prove `odin work proof --task missing-task --json` and `odin work proof --intake missing-intake --json` fail closed without mutation
-- prove `odin work pr prepare --live --json` fails closed without mutation
+- prove `odin work pr prepare --live --json` creates approval evidence without GitHub I/O
+- prove approved `odin work pr prepare --live --approval <id> --json` against a controlled GitHub API fixture
 
 Delivery:
 - preserve unrelated dirty worktree changes

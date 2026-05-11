@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -4232,7 +4234,7 @@ func TestRunWorkPRPrepareRejectsUnapprovedLiveMutation(t *testing.T) {
 	taskKey := createQueuedWorkItemForPRPrepare(t, root)
 
 	var output bytes.Buffer
-	err := Run(context.Background(), root, []string{
+	if err := Run(context.Background(), root, []string{
 		"work", "pr", "prepare",
 		"--task", taskKey,
 		"--summary", "Live mutation must be approval gated.",
@@ -4241,12 +4243,27 @@ func TestRunWorkPRPrepareRejectsUnapprovedLiveMutation(t *testing.T) {
 		"--command", "go test ./internal/app/lifecycle -run TestRunWorkPRPrepare -count=1",
 		"--live",
 		"--json",
-	}, strings.NewReader(""), &output)
-	if err == nil {
-		t.Fatalf("Run(work pr prepare --live) error = nil output=%s, want approval gate refusal", output.String())
+	}, strings.NewReader(""), &output); err != nil {
+		t.Fatalf("Run(work pr prepare --live) error = %v\n%s", err, output.String())
 	}
-	if !strings.Contains(err.Error(), "approval required before live pull request mutation") || output.Len() != 0 {
-		t.Fatalf("Run(work pr prepare --live) error/output = %v/%s, want approval-gated live refusal", err, output.String())
+	var approvalGate struct {
+		Prepared         bool  `json:"prepared"`
+		ApprovalRequired bool  `json:"approval_required"`
+		ExternalMutated  bool  `json:"external_mutated"`
+		ApprovalID       int64 `json:"approval_id"`
+		Task             struct {
+			Status        string `json:"status"`
+			BlockedReason string `json:"blocked_reason"`
+		} `json:"task"`
+	}
+	if err := json.Unmarshal(output.Bytes(), &approvalGate); err != nil {
+		t.Fatalf("json.Unmarshal(live approval gate) error = %v\n%s", err, output.String())
+	}
+	if approvalGate.Prepared || !approvalGate.ApprovalRequired || approvalGate.ExternalMutated || approvalGate.ApprovalID == 0 {
+		t.Fatalf("approval gate = %+v, want pending approval without external mutation", approvalGate)
+	}
+	if approvalGate.Task.Status != "blocked" || approvalGate.Task.BlockedReason != "approval_required" {
+		t.Fatalf("approval gate task = %+v, want blocked approval_required", approvalGate.Task)
 	}
 
 	var logsOutput bytes.Buffer
@@ -4255,6 +4272,271 @@ func TestRunWorkPRPrepareRejectsUnapprovedLiveMutation(t *testing.T) {
 	}
 	if strings.Contains(logsOutput.String(), `"type": "pull_request.handoff_prepared"`) {
 		t.Fatalf("logs = %s, live refusal must not persist handoff event", logsOutput.String())
+	}
+	if !strings.Contains(logsOutput.String(), `"type": "approval.requested"`) {
+		t.Fatalf("logs = %s, want approval request audit event", logsOutput.String())
+	}
+}
+
+func TestRunWorkPRPrepareLiveMutationRequiresApprovedApproval(t *testing.T) {
+	const token = "ghp_1234567890abcdefghijklmnopqrstuvwx"
+	var requests []string
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		body, err := io.ReadAll(request.Body)
+		if err != nil {
+			t.Fatalf("ReadAll() error = %v", err)
+		}
+		requests = append(requests, request.Method+" "+request.URL.RequestURI()+" "+string(body))
+		if got := request.Header.Get("Authorization"); got != "Bearer "+token {
+			t.Fatalf("authorization header = %q, want bearer token", got)
+		}
+		switch {
+		case request.Method == http.MethodGet && request.URL.Path == "/repos/acme/alpha/pulls":
+			response.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(response, `[]`)
+		case request.Method == http.MethodPost && request.URL.Path == "/repos/acme/alpha/pulls":
+			response.WriteHeader(http.StatusCreated)
+			fmt.Fprint(response, `{"number":42,"html_url":"https://github.example/acme/alpha/pull/42","state":"open"}`)
+		default:
+			t.Fatalf("unexpected request: %s %s", request.Method, request.URL.RequestURI())
+		}
+	}))
+	defer server.Close()
+
+	t.Setenv("ODIN_GITHUB_API_BASE_URL", server.URL)
+	t.Setenv("GITHUB_TOKEN", token)
+
+	root := testRepoRoot(t)
+	taskKey := createQueuedWorkItemForPRPrepare(t, root)
+
+	var approvalOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{
+		"work", "pr", "prepare",
+		"--task", taskKey,
+		"--summary", "Live mutation must be approval gated.",
+		"--test", "go test ./internal/app/lifecycle -run TestRunWorkPRPrepare -count=1",
+		"--risk", "human merge remains required",
+		"--command", "go test ./internal/app/lifecycle -run TestRunWorkPRPrepare -count=1",
+		"--live",
+		"--json",
+	}, strings.NewReader(""), &approvalOutput); err != nil {
+		t.Fatalf("Run(work pr prepare --live approval request) error = %v\n%s", err, approvalOutput.String())
+	}
+	var approvalGate struct {
+		Prepared         bool  `json:"prepared"`
+		ApprovalRequired bool  `json:"approval_required"`
+		ExternalMutated  bool  `json:"external_mutated"`
+		DryRun           bool  `json:"dry_run"`
+		ApprovalID       int64 `json:"approval_id"`
+	}
+	if err := json.Unmarshal(approvalOutput.Bytes(), &approvalGate); err != nil {
+		t.Fatalf("json.Unmarshal(approval gate) error = %v\n%s", err, approvalOutput.String())
+	}
+	if approvalGate.Prepared || !approvalGate.ApprovalRequired || approvalGate.ExternalMutated || approvalGate.DryRun || approvalGate.ApprovalID == 0 {
+		t.Fatalf("approval gate = %+v, want pending approval without external mutation", approvalGate)
+	}
+	if len(requests) != 0 {
+		t.Fatalf("GitHub requests before approval = %#v, want none", requests)
+	}
+
+	var resolveOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"approvals", "resolve", fmt.Sprintf("%d", approvalGate.ApprovalID), "approve", "operator", "approved", "live", "PR", "handoff", "--json"}, strings.NewReader(""), &resolveOutput); err != nil {
+		t.Fatalf("Run(approvals resolve) error = %v\n%s", err, resolveOutput.String())
+	}
+	if !strings.Contains(resolveOutput.String(), `"status": "approved"`) {
+		t.Fatalf("resolve output = %s, want approved", resolveOutput.String())
+	}
+
+	var liveOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{
+		"work", "pr", "prepare",
+		"--task", taskKey,
+		"--summary", "Live mutation approved.",
+		"--test", "go test ./internal/app/lifecycle -run TestRunWorkPRPrepare -count=1",
+		"--risk", "human merge remains required",
+		"--command", "go test ./internal/app/lifecycle -run TestRunWorkPRPrepare -count=1",
+		"--live",
+		"--approval", fmt.Sprintf("%d", approvalGate.ApprovalID),
+		"--json",
+	}, strings.NewReader(""), &liveOutput); err != nil {
+		t.Fatalf("Run(work pr prepare --live approved) error = %v\n%s", err, liveOutput.String())
+	}
+	if strings.Contains(liveOutput.String(), token) {
+		t.Fatalf("live output leaked token: %s", liveOutput.String())
+	}
+	var prepared struct {
+		Prepared         bool `json:"prepared"`
+		ApprovalRequired bool `json:"approval_required"`
+		ExternalMutated  bool `json:"external_mutated"`
+		DryRun           bool `json:"dry_run"`
+		PullRequest      struct {
+			Provider string `json:"provider"`
+			Repo     string `json:"repo"`
+			Number   int    `json:"number"`
+			URL      string `json:"url"`
+			State    string `json:"state"`
+		} `json:"pull_request"`
+	}
+	if err := json.Unmarshal(liveOutput.Bytes(), &prepared); err != nil {
+		t.Fatalf("json.Unmarshal(live prepare) error = %v\n%s", err, liveOutput.String())
+	}
+	if !prepared.Prepared || prepared.ApprovalRequired || !prepared.ExternalMutated || prepared.DryRun {
+		t.Fatalf("prepared flags = %+v, want approved live mutation", prepared)
+	}
+	if prepared.PullRequest.Provider != "github" || prepared.PullRequest.Repo != "acme/alpha" || prepared.PullRequest.Number != 42 || prepared.PullRequest.State != "open" {
+		t.Fatalf("pull request = %+v, want github acme/alpha#42 open", prepared.PullRequest)
+	}
+	for _, want := range []string{
+		`GET /repos/acme/alpha/pulls?head=acme%3A` + taskKey + `&state=open `,
+		`POST /repos/acme/alpha/pulls `,
+	} {
+		if !containsStringPrefix(requests, want) {
+			t.Fatalf("requests = %#v, want prefix %q", requests, want)
+		}
+	}
+
+	var logsOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"logs", "--json"}, strings.NewReader(""), &logsOutput); err != nil {
+		t.Fatalf("Run(logs) error = %v", err)
+	}
+	for _, want := range []string{
+		`"type": "approval.requested"`,
+		`"type": "approval.resolved"`,
+		`"type": "pull_request.handoff_prepared"`,
+		`"external_mutated": true`,
+	} {
+		if !strings.Contains(logsOutput.String(), want) {
+			t.Fatalf("logs = %s, want %s", logsOutput.String(), want)
+		}
+	}
+	if strings.Contains(logsOutput.String(), token) {
+		t.Fatalf("logs leaked token: %s", logsOutput.String())
+	}
+}
+
+func TestRunWorkPRPrepareLiveMutationRejectsInvalidApprovalBeforeGitHub(t *testing.T) {
+	var requests int
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		requests++
+		t.Fatalf("unexpected GitHub request before approval validation: %s %s", request.Method, request.URL.RequestURI())
+	}))
+	defer server.Close()
+	t.Setenv("ODIN_GITHUB_API_BASE_URL", server.URL)
+
+	root := testRepoRoot(t)
+	firstTaskKey := createQueuedWorkItemForPRPrepare(t, root)
+
+	var firstApprovalOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{
+		"work", "pr", "prepare",
+		"--task", firstTaskKey,
+		"--summary", "Live mutation must be approval gated.",
+		"--test", "go test ./internal/app/lifecycle -run TestRunWorkPRPrepare -count=1",
+		"--risk", "human merge remains required",
+		"--command", "go test ./internal/app/lifecycle -run TestRunWorkPRPrepare -count=1",
+		"--live",
+		"--json",
+	}, strings.NewReader(""), &firstApprovalOutput); err != nil {
+		t.Fatalf("Run(work pr prepare first approval) error = %v\n%s", err, firstApprovalOutput.String())
+	}
+	var firstApproval struct {
+		ApprovalID int64 `json:"approval_id"`
+	}
+	if err := json.Unmarshal(firstApprovalOutput.Bytes(), &firstApproval); err != nil {
+		t.Fatalf("json.Unmarshal(first approval) error = %v\n%s", err, firstApprovalOutput.String())
+	}
+
+	var pendingOutput bytes.Buffer
+	err := Run(context.Background(), root, []string{
+		"work", "pr", "prepare",
+		"--task", firstTaskKey,
+		"--summary", "Pending approval must not mutate.",
+		"--test", "go test ./internal/app/lifecycle -run TestRunWorkPRPrepare -count=1",
+		"--risk", "human merge remains required",
+		"--command", "go test ./internal/app/lifecycle -run TestRunWorkPRPrepare -count=1",
+		"--live",
+		"--approval", fmt.Sprintf("%d", firstApproval.ApprovalID),
+		"--json",
+	}, strings.NewReader(""), &pendingOutput)
+	if err == nil || !strings.Contains(err.Error(), "is pending, want approved") || pendingOutput.Len() != 0 {
+		t.Fatalf("pending approval output/error = %q/%v, want fail closed before GitHub", pendingOutput.String(), err)
+	}
+
+	if err := Run(context.Background(), root, []string{"approvals", "resolve", fmt.Sprintf("%d", firstApproval.ApprovalID), "approve", "operator", "approved", "for", "wrong", "task", "--json"}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+		t.Fatalf("Run(approve first approval) error = %v", err)
+	}
+	secondTaskKey := createQueuedWorkItemForPRPrepare(t, root)
+	var wrongTaskOutput bytes.Buffer
+	err = Run(context.Background(), root, []string{
+		"work", "pr", "prepare",
+		"--task", secondTaskKey,
+		"--summary", "Wrong task approval must not mutate.",
+		"--test", "go test ./internal/app/lifecycle -run TestRunWorkPRPrepare -count=1",
+		"--risk", "human merge remains required",
+		"--command", "go test ./internal/app/lifecycle -run TestRunWorkPRPrepare -count=1",
+		"--live",
+		"--approval", fmt.Sprintf("%d", firstApproval.ApprovalID),
+		"--json",
+	}, strings.NewReader(""), &wrongTaskOutput)
+	if err == nil || !strings.Contains(err.Error(), "belongs to task") || wrongTaskOutput.Len() != 0 {
+		t.Fatalf("wrong task approval output/error = %q/%v, want fail closed before GitHub", wrongTaskOutput.String(), err)
+	}
+
+	var secondApprovalOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{
+		"work", "pr", "prepare",
+		"--task", secondTaskKey,
+		"--summary", "Denied approval must not mutate.",
+		"--test", "go test ./internal/app/lifecycle -run TestRunWorkPRPrepare -count=1",
+		"--risk", "human merge remains required",
+		"--command", "go test ./internal/app/lifecycle -run TestRunWorkPRPrepare -count=1",
+		"--live",
+		"--json",
+	}, strings.NewReader(""), &secondApprovalOutput); err != nil {
+		t.Fatalf("Run(work pr prepare second approval) error = %v\n%s", err, secondApprovalOutput.String())
+	}
+	var secondApproval struct {
+		ApprovalID int64 `json:"approval_id"`
+	}
+	if err := json.Unmarshal(secondApprovalOutput.Bytes(), &secondApproval); err != nil {
+		t.Fatalf("json.Unmarshal(second approval) error = %v\n%s", err, secondApprovalOutput.String())
+	}
+	if err := Run(context.Background(), root, []string{"approvals", "resolve", fmt.Sprintf("%d", secondApproval.ApprovalID), "deny", "operator", "denied", "live", "handoff", "--json"}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+		t.Fatalf("Run(deny second approval) error = %v", err)
+	}
+	var deniedOutput bytes.Buffer
+	err = Run(context.Background(), root, []string{
+		"work", "pr", "prepare",
+		"--task", secondTaskKey,
+		"--summary", "Denied approval must not mutate.",
+		"--test", "go test ./internal/app/lifecycle -run TestRunWorkPRPrepare -count=1",
+		"--risk", "human merge remains required",
+		"--command", "go test ./internal/app/lifecycle -run TestRunWorkPRPrepare -count=1",
+		"--live",
+		"--approval", fmt.Sprintf("%d", secondApproval.ApprovalID),
+		"--json",
+	}, strings.NewReader(""), &deniedOutput)
+	if err == nil || !strings.Contains(err.Error(), "is denied, want approved") || deniedOutput.Len() != 0 {
+		t.Fatalf("denied approval output/error = %q/%v, want fail closed before GitHub", deniedOutput.String(), err)
+	}
+
+	var missingTokenOutput bytes.Buffer
+	err = Run(context.Background(), root, []string{
+		"work", "pr", "prepare",
+		"--task", firstTaskKey,
+		"--summary", "Missing token must not mutate.",
+		"--test", "go test ./internal/app/lifecycle -run TestRunWorkPRPrepare -count=1",
+		"--risk", "human merge remains required",
+		"--command", "go test ./internal/app/lifecycle -run TestRunWorkPRPrepare -count=1",
+		"--live",
+		"--approval", fmt.Sprintf("%d", firstApproval.ApprovalID),
+		"--json",
+	}, strings.NewReader(""), &missingTokenOutput)
+	if err == nil || !strings.Contains(err.Error(), "GITHUB_TOKEN is required") || missingTokenOutput.Len() != 0 {
+		t.Fatalf("missing token output/error = %q/%v, want fail closed before GitHub", missingTokenOutput.String(), err)
+	}
+	if requests != 0 {
+		t.Fatalf("GitHub requests = %d, want 0 for invalid approval cases", requests)
 	}
 }
 
@@ -4274,6 +4556,15 @@ func createQueuedWorkItemForPRPrepare(t *testing.T, root string) string {
 		t.Fatalf("work start output = %s, want key", output.String())
 	}
 	return key
+}
+
+func containsStringPrefix(values []string, prefix string) bool {
+	for _, value := range values {
+		if strings.HasPrefix(value, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 func valueAfterPrefix(output string, prefix string) string {

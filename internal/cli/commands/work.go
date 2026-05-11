@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -25,7 +26,7 @@ import (
 	trackerintake "odin-os/internal/tracker/intake"
 )
 
-const workUsage = "usage: odin work status|profiles|start --project <key> --title <text> [--intent <read_only|mutation|governance|destructive>]|intake --project <key> [--dry-run]|reconcile --project <key>|proof (--task <id|key>|--intake <id|key>) [--json]|pr prepare --task <id|key> --summary <text> --test <text> --risk <text> --command <text> [--dry-run|--live] [--json]|dispatch [--task <id|key>] [--json]|execute --task <id|key> [--json]|retry --task <id|key> [--json]"
+const workUsage = "usage: odin work status|profiles|start --project <key> --title <text> [--intent <read_only|mutation|governance|destructive>]|intake --project <key> [--dry-run]|reconcile --project <key>|proof (--task <id|key>|--intake <id|key>) [--json]|pr prepare --task <id|key> --summary <text> --test <text> --risk <text> --command <text> [--dry-run|--live --approval <id>] [--json]|dispatch [--task <id|key>] [--json]|execute --task <id|key> [--json]|retry --task <id|key> [--json]"
 
 const workProofUsage = "usage: odin work proof (--task <id|key>|--intake <id|key>) [--json]"
 
@@ -311,18 +312,27 @@ func runWorkRetry(ctx context.Context, store *sqlite.Store, projectRegistry proj
 	return err
 }
 
-const workPRPrepareUsage = "usage: odin work pr prepare --task <id|key> --summary <text> --test <text> --risk <text> --command <text> [--dry-run|--live] [--json]"
+const workPRPrepareUsage = "usage: odin work pr prepare --task <id|key> --summary <text> --test <text> --risk <text> --command <text> [--dry-run|--live --approval <id>] [--json]"
 
 type workPRPrepareView struct {
 	Prepared         bool                      `json:"prepared"`
 	ApprovalRequired bool                      `json:"approval_required"`
 	ExternalMutated  bool                      `json:"external_mutated"`
 	DryRun           bool                      `json:"dry_run"`
+	ApprovalID       *int64                    `json:"approval_id,omitempty"`
 	Task             workProofTaskView         `json:"task"`
-	PullRequest      review.PullRequest        `json:"pull_request"`
+	PullRequest      workPRPreparePRView       `json:"pull_request"`
 	Handoff          workPRHandoffView         `json:"handoff"`
 	ReviewResults    []workProofPRReviewResult `json:"review_results"`
 	NextSteps        []string                  `json:"next_steps"`
+}
+
+type workPRPreparePRView struct {
+	Provider string `json:"provider,omitempty"`
+	Repo     string `json:"repo,omitempty"`
+	Number   int    `json:"number,omitempty"`
+	URL      string `json:"url,omitempty"`
+	State    string `json:"state,omitempty"`
 }
 
 type workPRHandoffView struct {
@@ -351,8 +361,12 @@ func runWorkPRPrepare(ctx context.Context, store *sqlite.Store, args []string, s
 		_, err := fmt.Fprintln(stdout, workPRPrepareUsage)
 		return err
 	}
-	if err := rejectUnknownWorkProofArgs(params, "task", "summary", "test", "risk", "blocker", "command", "branch", "title", "dry-run", "live", "json"); err != nil {
+	if err := rejectUnknownWorkProofArgs(params, "task", "summary", "test", "risk", "blocker", "command", "branch", "title", "approval", "dry-run", "live", "json"); err != nil {
 		return err
+	}
+	live := parseBoolFlag(params, "live")
+	if live && parseBoolFlag(params, "dry-run") {
+		return fmt.Errorf("choose either --dry-run or --live, not both")
 	}
 	summary := strings.TrimSpace(params["summary"])
 	testEvidence := strings.TrimSpace(params["test"])
@@ -369,9 +383,6 @@ func runWorkPRPrepare(ctx context.Context, store *sqlite.Store, args []string, s
 	}
 	if command == "" {
 		return fmt.Errorf("command evidence is required")
-	}
-	if parseBoolFlag(params, "live") {
-		return fmt.Errorf("approval required before live pull request mutation")
 	}
 
 	taskRef := strings.TrimSpace(params["task"])
@@ -408,14 +419,56 @@ func runWorkPRPrepare(ctx context.Context, store *sqlite.Store, args []string, s
 	}
 	repoID := project.GitHubRepo
 	if repoID == "" {
+		if live {
+			return fmt.Errorf("GitHub repository is required before live pull request mutation")
+		}
 		repoID = "local/" + project.Key
 	}
 	owner, repoName := splitRepoID(repoID)
+
+	var approvalID *int64
+	if live {
+		approvedApprovalID, ready, err := livePullRequestApproval(ctx, store, task, strings.TrimSpace(params["approval"]))
+		if err != nil {
+			return err
+		}
+		approvalID = &approvedApprovalID
+		if !ready {
+			currentTask, err := store.GetTask(ctx, task.ID)
+			if err != nil {
+				return err
+			}
+			view := workPRPrepareView{
+				Prepared:         false,
+				ApprovalRequired: true,
+				ExternalMutated:  false,
+				DryRun:           false,
+				ApprovalID:       approvalID,
+				Task:             workPRPrepareTaskView(currentTask),
+				NextSteps:        []string{fmt.Sprintf("inspect approval %d, then resolve with odin approvals resolve %d <approve|deny> <reason...>", approvedApprovalID, approvedApprovalID)},
+			}
+			if jsonOutput {
+				return WriteJSON(stdout, view)
+			}
+			_, err = fmt.Fprintf(stdout, "prepared=false approval_required=true external_mutated=false task=%s approval=%d next_steps=%s\n",
+				task.Key,
+				approvedApprovalID,
+				strings.Join(view.NextSteps, "; "),
+			)
+			return err
+		}
+		if strings.TrimSpace(os.Getenv("GITHUB_TOKEN")) == "" {
+			return fmt.Errorf("GITHUB_TOKEN is required before live pull request mutation")
+		}
+	}
+
 	manager := review.NewGitHubPullRequestManager(review.GitHubPullRequestConfig{
 		Owner:      owner,
 		Repo:       repoName,
 		BaseBranch: defaultWorkString(project.DefaultBranch, "main"),
-		DryRun:     true,
+		BaseURL:    os.Getenv("ODIN_GITHUB_API_BASE_URL"),
+		TokenEnv:   "GITHUB_TOKEN",
+		DryRun:     !live,
 	})
 	result, err := review.HandoffOrchestrator{
 		Store:        store,
@@ -441,8 +494,8 @@ func runWorkPRPrepare(ctx context.Context, store *sqlite.Store, args []string, s
 	if err := store.RecordPullRequestHandoffPrepared(ctx, sqlite.RecordPullRequestHandoffPreparedParams{
 		Handoff:          result.Handoff,
 		TaskID:           task.ID,
-		DryRun:           true,
-		ExternalMutated:  false,
+		DryRun:           !live,
+		ExternalMutated:  live,
 		ApprovalRequired: false,
 	}); err != nil {
 		return err
@@ -450,19 +503,11 @@ func runWorkPRPrepare(ctx context.Context, store *sqlite.Store, args []string, s
 	view := workPRPrepareView{
 		Prepared:         true,
 		ApprovalRequired: false,
-		ExternalMutated:  false,
-		DryRun:           true,
-		Task: workProofTaskView{
-			ID:                    task.ID,
-			ProjectID:             task.ProjectID,
-			Key:                   task.Key,
-			Title:                 task.Title,
-			Status:                task.Status,
-			ExecutionIntent:       task.ExecutionIntent,
-			ExecutionIntentSource: task.ExecutionIntentSource,
-			BlockedReason:         task.BlockedReason,
-		},
-		PullRequest: result.PullRequest,
+		ExternalMutated:  live,
+		DryRun:           !live,
+		ApprovalID:       approvalID,
+		Task:             workPRPrepareTaskView(task),
+		PullRequest:      workPRPreparePullRequestView(result.PullRequest),
 		Handoff: workPRHandoffView{
 			ID:            result.Handoff.ID,
 			URL:           result.Handoff.URL,
@@ -496,6 +541,82 @@ func runWorkPRPrepare(ctx context.Context, store *sqlite.Store, args []string, s
 		strings.Join(view.NextSteps, "; "),
 	)
 	return err
+}
+
+func livePullRequestApproval(ctx context.Context, store *sqlite.Store, task sqlite.Task, approvalRef string) (int64, bool, error) {
+	if approvalRef == "" {
+		approval, err := pendingPullRequestApproval(ctx, store, task)
+		if err != nil {
+			return 0, false, err
+		}
+		return approval.ID, false, nil
+	}
+	approvalID, err := strconv.ParseInt(approvalRef, 10, 64)
+	if err != nil || approvalID <= 0 {
+		return 0, false, fmt.Errorf("approval id must be a positive integer")
+	}
+	approval, err := store.GetApproval(ctx, approvalID)
+	if err != nil {
+		return 0, false, err
+	}
+	if approval.TaskID != task.ID {
+		return 0, false, fmt.Errorf("approval %d belongs to task %d, not task %d", approval.ID, approval.TaskID, task.ID)
+	}
+	if approval.Status != "approved" {
+		return 0, false, fmt.Errorf("approval %d is %s, want approved before live pull request mutation", approval.ID, approval.Status)
+	}
+	return approval.ID, true, nil
+}
+
+func pendingPullRequestApproval(ctx context.Context, store *sqlite.Store, task sqlite.Task) (sqlite.Approval, error) {
+	pending, err := store.ListApprovals(ctx, sqlite.ListApprovalsParams{TaskID: &task.ID, Status: "pending"})
+	if err != nil {
+		return sqlite.Approval{}, err
+	}
+	if len(pending) > 0 {
+		return pending[0], nil
+	}
+	if task.Status == "blocked" {
+		return sqlite.Approval{}, fmt.Errorf("task %s is blocked without a pending live pull request approval", task.Key)
+	}
+	approval, err := store.RequestApproval(ctx, sqlite.RequestApprovalParams{
+		TaskID:      task.ID,
+		Status:      "pending",
+		RequestedBy: "work_pr_prepare",
+	})
+	if err != nil {
+		return sqlite.Approval{}, err
+	}
+	if _, err := store.BlockTask(ctx, sqlite.BlockTaskParams{
+		TaskID: task.ID,
+		Reason: "approval_required",
+	}); err != nil {
+		return sqlite.Approval{}, err
+	}
+	return approval, nil
+}
+
+func workPRPreparePullRequestView(pullRequest review.PullRequest) workPRPreparePRView {
+	return workPRPreparePRView{
+		Provider: pullRequest.Provider,
+		Repo:     pullRequest.Repo,
+		Number:   pullRequest.Number,
+		URL:      pullRequest.URL,
+		State:    pullRequest.State,
+	}
+}
+
+func workPRPrepareTaskView(task sqlite.Task) workProofTaskView {
+	return workProofTaskView{
+		ID:                    task.ID,
+		ProjectID:             task.ProjectID,
+		Key:                   task.Key,
+		Title:                 task.Title,
+		Status:                task.Status,
+		ExecutionIntent:       task.ExecutionIntent,
+		ExecutionIntentSource: task.ExecutionIntentSource,
+		BlockedReason:         task.BlockedReason,
+	}
 }
 
 func runWorkProof(ctx context.Context, store *sqlite.Store, args []string, stdout io.Writer) error {
