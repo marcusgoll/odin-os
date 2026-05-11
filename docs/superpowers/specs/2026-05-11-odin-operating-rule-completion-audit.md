@@ -46,21 +46,21 @@ Evidence checked:
 | --- | --- | --- |
 | `trigger` create/list/show/test operator flows | PR #169 merged. `internal/cli/commands/trigger.go` contains create, list, show, fire, and test paths. | Implemented on main |
 | trigger event envelope | PR #169 and PR #210 merged. `runtimeevents.AutomationTriggerEnvelope` is persisted by trigger fire/test/defer/error events. | Implemented on main |
-| trigger dedupe key | `FireAutomationTrigger` materialization key prevents duplicate Work Item creation for the same trigger/source. | Implemented on main |
-| trigger approval rules | Trigger execution intent and approval-required preview are surfaced through trigger test and scheduler tick views. | Implemented on main |
+| trigger dedupe key | Current-main `./bin/odin trigger fire` proof shows repeated manual fire with the same materialization key returns `created_work_item=false` and leaves one queued automation Work Item. | Implemented on main |
+| trigger approval rules | Trigger execution intent and approval-required preview are surfaced through trigger test and scheduler tick views; current-main governance `trigger fire` proof materializes a blocked Work Item with a pending governance Approval Request. | Implemented on main |
 | trigger audit event | `automation_trigger.created`, `fire_requested`, `evaluated`, `materialized`, `tested`, and related events are emitted from store/runtime paths. | Implemented on main |
 | trigger next-run preview | `trigger show` and trigger detail views expose next-run timing/readiness details. | Implemented on main |
-| approval gate for sending messages | Main classifies "Send message to customer" as governance mutation. PR #221 proves explicit `odin work dispatch --task` reclassifies read-only operator tasks before approval blocking. | Partial on main; operator-path parity in PR #221 |
-| approval gate for deleting data | Main classifies destructive deletion. PR #221 includes deleting data in operator-path parity coverage. | Partial on main; operator-path parity in PR #221 |
-| approval gate for deployment | Main classifies deploy-to-production as governance mutation. PR #221 includes deployment in operator-path parity coverage. | Partial on main; operator-path parity in PR #221 |
-| approval gate for calendar mutation | Main classifies changing a calendar event. PR #221 includes calendar mutation in operator-path parity coverage. | Partial on main; operator-path parity in PR #221 |
-| approval gate for public posting | Main classifies publishing public content. PR #221 includes public posting in operator-path parity coverage. | Partial on main; operator-path parity in PR #221 |
-| approval gate for production changes | Main classifies production system changes. PR #221 includes production changes in operator-path parity coverage. | Partial on main; operator-path parity in PR #221 |
-| approval gate for purchases | PR #221 adds explicit operator-path approval parity coverage for purchases. | Open draft PR #221 |
-| approval gate for permission changes | PR #221 adds explicit operator-path approval parity coverage for permission changes. | Open draft PR #221 |
-| approval gate for financial records | PR #221 adds explicit operator-path approval parity coverage for financial records. | Open draft PR #221 |
-| approval gate for legal records | PR #221 adds explicit operator-path approval parity coverage for legal records. | Open draft PR #221 |
-| approval gate for medical records | PR #221 adds explicit operator-path approval parity coverage for medical records. | Open draft PR #221 |
+| approval gate for sending messages | Current-main `./bin/odin work dispatch --task --json` blocks this read-only operator task with `approval_required`; PR #221 persists the safety-classified governance intent before blocking. | Partial on main; operator-path intent parity in PR #221 |
+| approval gate for deleting data | Current-main matrix blocks this read-only operator task with `approval_required`; PR #221 persists destructive safety-classified intent before blocking. | Partial on main; operator-path intent parity in PR #221 |
+| approval gate for deployment | Current-main matrix blocks this read-only operator task with `approval_required`; PR #221 persists safety-classified governance intent before blocking. | Partial on main; operator-path intent parity in PR #221 |
+| approval gate for calendar mutation | Current-main matrix blocks this read-only operator task with `approval_required`; PR #221 persists safety-classified governance intent before blocking. | Partial on main; operator-path intent parity in PR #221 |
+| approval gate for public posting | Current-main matrix blocks this read-only operator task with `approval_required`; PR #221 persists safety-classified governance intent before blocking. | Partial on main; operator-path intent parity in PR #221 |
+| approval gate for production changes | Current-main matrix blocks this read-only operator task with `approval_required`; PR #221 persists safety-classified governance intent before blocking. | Partial on main; operator-path intent parity in PR #221 |
+| approval gate for purchases | Current-main matrix blocks this read-only operator task with `approval_required`; PR #221 persists safety-classified governance intent before blocking. | Partial on main; operator-path intent parity in PR #221 |
+| approval gate for permission changes | Current-main matrix blocks this read-only operator task with `approval_required`; PR #221 persists safety-classified governance intent before blocking. | Partial on main; operator-path intent parity in PR #221 |
+| approval gate for financial records | Current-main matrix blocks this read-only operator task with `approval_required`; PR #221 persists safety-classified governance intent before blocking. | Partial on main; operator-path intent parity in PR #221 |
+| approval gate for legal records | Current-main matrix blocks this read-only operator task with `approval_required`; PR #221 persists safety-classified governance intent before blocking. | Partial on main; operator-path intent parity in PR #221 |
+| approval gate for medical records | Current-main matrix blocks this read-only operator task with `approval_required`; PR #221 persists safety-classified governance intent before blocking. | Partial on main; operator-path intent parity in PR #221 |
 | every review mutation path returns policy/receipt evidence | `reviewActionReceipt` and `reviewActionPreflight` exist in `internal/app/lifecycle/review.go`; review-action tests assert receipt/refusal behavior. | Implemented on main |
 | plugin model clarified | PR #218 adds `odin capabilities list/show` and documents plugins as packages, not a runtime kind. | Open draft PR #218 |
 | overview/TUI raw intake | `internal/cli/overview/service.go` has raw intake lane/projection code. | Implemented on main |
