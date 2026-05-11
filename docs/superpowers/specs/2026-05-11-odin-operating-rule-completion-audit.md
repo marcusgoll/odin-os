@@ -232,6 +232,14 @@ Live proof blocker:
 - `ODIN_LIVE_PR_HANDOFF_HEAD_BRANCH` was unset.
 - `GITHUB_TOKEN` was unset.
 
+Fail-closed preflight evidence:
+
+- `scripts/ops/pr-handoff-live-smoke.sh` exited with code 2 and printed
+  `set ODIN_LIVE_PR_HANDOFF_SMOKE=1 to run the live PR handoff smoke proof`.
+- `ODIN_LIVE_PR_HANDOFF_SMOKE=1 scripts/ops/pr-handoff-live-smoke.sh` exited
+  with code 2 and printed
+  `ODIN_LIVE_PR_HANDOFF_REPO must be owner/repo for a disposable repository`.
+
 Therefore the remaining action is an explicit operator decision, not another
 local design slice: either approve and provide a disposable GitHub live-smoke
 target for PR #224, or approve integration of the green draft stack.
