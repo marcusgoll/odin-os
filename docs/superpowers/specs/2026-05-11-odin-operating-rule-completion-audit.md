@@ -244,6 +244,33 @@ Therefore the remaining action is an explicit operator decision, not another
 local design slice: either approve and provide a disposable GitHub live-smoke
 target for PR #224, or approve integration of the green draft stack.
 
+## Evidence Snapshot
+
+Latest read-only refresh:
+
+- `origin/main`: `eb51743e9321724b561a4b01aad674ed08939e77`
+- audit branch: `0ed7462468779843d7d41e6d2a73a5e194478a6d`
+- PR #220 state: draft, merge state `CLEAN`, GitGuardian, two `go` checks, and
+  `odin-e2e` passing after rerunning one transient `internal/skills`
+  timeout-test failure.
+
+Current objective stack status:
+
+| PR | State | Merge state | Checks |
+| --- | --- | --- | --- |
+| #211 | draft | `CLEAN` | GitGuardian, two `go`, and `odin-e2e` passing |
+| #212 | ready for review | `CLEAN` | GitGuardian, two `go`, and `odin-e2e` passing |
+| #213 | draft | `CLEAN` | GitGuardian, two `go`, and `odin-e2e` passing |
+| #214 | draft | `CLEAN` | GitGuardian and two `go` passing |
+| #216 | draft | `CLEAN` | GitGuardian, two `go`, and `odin-e2e` passing |
+| #218 | draft | `CLEAN` | GitGuardian, two `go`, and `odin-e2e` passing |
+| #219 | draft | `CLEAN` | GitGuardian, two `go`, and `odin-e2e` passing |
+| #220 | draft | `CLEAN` | GitGuardian, two `go`, and `odin-e2e` passing |
+| #221 | draft | `CLEAN` | GitGuardian, two `go`, and `odin-e2e` passing |
+| #222 | draft | `CLEAN` | GitGuardian, two `go`, and `odin-e2e` passing |
+| #223 | draft | `CLEAN` | GitGuardian and two `go` passing |
+| #224 | draft | `CLEAN` | GitGuardian and two `go` passing |
+
 ## Operator Decision Packet
 
 The next step must choose exactly one path.
