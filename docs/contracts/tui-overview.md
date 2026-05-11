@@ -166,10 +166,11 @@ Source/action contract:
 | `intake_goal_conversion` | `intake-goal:<id>` | raw intake item linked to a goal | visible as a goal-derived decision; approve/reject goes through goal review handlers |
 | `goal` | `goal:<id>` or `goal-approval:<id>` | goal status | approve/reject through goal review handlers |
 | `goal_blocker` | `goal-blocker:<id>` | open goal blocker | visible for inspection; approve/reject is unsupported until blocker resolution exists |
-| `task_approval` | `approval:<id>` | pending task approval request | `approve`, `deny` through the approval resolver |
+| `task_approval` | `approval:<id>` | pending task approval request, including materialized scheduled work that requires approval | `approve`, `deny` through the approval resolver |
 | `skill_artifact` | `skill-artifact:<id>` | reviewable skill artifact | skill artifact review actions from artifact status (`accept`, `reject`, `archive`) |
 | `context_pack` | `context-pack:<id>` | proposed operator context packet | context-pack review actions (`accept`, `reject`, `archive`) |
-| `failed_work` | `failed-work:<id>` | failed work item projection and retry policy | `retry`, with retry eligibility enforced by failed-work policy |
+| `memory_proposal` | `memory-proposal:<id>` | review-required memory summary proposal | visible for inspection; mutation is unsupported in this queue until durable memory write review is implemented |
+| `failed_work` | `failed-work:<id>` | failed work item projection and retry policy, including failed automation-trigger work | `retry`, with retry eligibility enforced by failed-work policy |
 
 ### Observability
 

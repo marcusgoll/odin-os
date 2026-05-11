@@ -1,6 +1,8 @@
 # Odin OS
 
-Odin OS is a workspace-governed orchestration system for durable execution, memory, approvals, and delegated work across software and non-project operations. This context file captures the language boundaries for the control plane that owns ongoing responsibilities and routes bounded execution.
+Odin OS is a proven universal inbox, personal/project operating system, agent orchestration layer, governed automation platform, safe prompt-to-production workflow system, and unified review queue without crossing into unsafe autonomous execution.
+
+This context file captures the language boundaries for the control plane that owns ongoing responsibilities and routes bounded execution.
 
 ## Language
 
@@ -178,6 +180,7 @@ _Avoid_: analytics scrape, crawler result
 
 ## Relationships
 
+- No Odin capability counts as implemented unless a real `odin` command invokes it, persists the result, enforces policy where relevant, and emits audit evidence readable through an **Operator Surface**
 - A **Workspace** owns many **Initiatives**
 - A **Workspace** may assign one or more **Companions** across its **Initiatives**
 - A **Scope** resolves the active **Workspace** and may narrow to one **Initiative**
