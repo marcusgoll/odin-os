@@ -3,6 +3,8 @@ package commands
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"sort"
@@ -21,7 +23,7 @@ import (
 	trackerintake "odin-os/internal/tracker/intake"
 )
 
-const workUsage = "usage: odin work status|profiles|start --project <key> --title <text> [--intent <read_only|mutation|governance|destructive>]|intake --project <key> [--dry-run]|reconcile --project <key>|dispatch [--task <id|key>] [--json]|execute --task <id|key> [--json]|retry --task <id|key> [--json]"
+const workUsage = "usage: odin work status|profiles|start --project <key> --title <text> [--intent <read_only|mutation|governance|destructive>]|intake --project <key> [--dry-run]|reconcile --project <key>|proof --task <id|key> [--json]|dispatch [--task <id|key>] [--json]|execute --task <id|key> [--json]|retry --task <id|key> [--json]"
 
 var newIntakeTracker = trackerintake.NewGitHubTracker
 
@@ -73,6 +75,8 @@ func RunWork(ctx context.Context, store *sqlite.Store, projectRegistry projects.
 		return runWorkIntake(ctx, store, projectRegistry, args[1:], stdout)
 	case "reconcile":
 		return runWorkReconcile(ctx, store, projectRegistry, args[1:], stdout)
+	case "proof":
+		return runWorkProof(ctx, store, args[1:], stdout)
 	case "dispatch":
 		return runWorkDispatch(ctx, store, projectRegistry, args[1:], stdout, options...)
 	case "execute":
@@ -299,6 +303,392 @@ func runWorkRetry(ctx context.Context, store *sqlite.Store, projectRegistry proj
 	}
 	_, err = fmt.Fprintf(stdout, "retried=%t reason=%s decision=%s retry_eligible=%t task=%s status=%s retry_count=%d recommendation=%q\n", view.Retried, view.Reason, view.Decision, view.RetryEligible, view.Task.Key, view.Task.Status, view.Task.RetryCount, view.RecoveryRecommendation)
 	return err
+}
+
+func runWorkProof(ctx context.Context, store *sqlite.Store, args []string, stdout io.Writer) error {
+	params := parseWorkStartArgs(args)
+	jsonOutput := parseBoolFlag(params, "json")
+	if _, ok := params["help"]; ok {
+		_, err := fmt.Fprintln(stdout, "usage: odin work proof --task <id|key> [--json]")
+		return err
+	}
+	if err := rejectUnknownWorkProofArgs(params, "task", "json"); err != nil {
+		return err
+	}
+	taskRef := strings.TrimSpace(params["task"])
+	if taskRef == "" {
+		return fmt.Errorf("usage: odin work proof --task <id|key> [--json]")
+	}
+
+	task, err := findWorkTask(ctx, store, taskRef)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("work item not found: %s", taskRef)
+		}
+		return err
+	}
+	view, err := buildWorkProofView(ctx, store, task)
+	if err != nil {
+		return err
+	}
+	if jsonOutput {
+		return WriteJSON(stdout, view)
+	}
+	_, err = fmt.Fprintf(stdout, "schema=%s task=%s status=%s proof_state=%s source=%s review=%s runs=%d approvals_pending=%d pull_request=%s mutated=%t next_steps=%s\n",
+		view.Schema,
+		view.Task.Key,
+		view.Task.Status,
+		view.ProofState,
+		noneIfEmpty(view.Source.Type),
+		noneIfEmpty(view.Review.Status),
+		len(view.Execution.Runs),
+		len(view.Approvals.Pending),
+		view.PullRequest.Status,
+		view.Mutated,
+		strings.Join(view.NextSteps, "; "),
+	)
+	return err
+}
+
+func rejectUnknownWorkProofArgs(params map[string]string, allowed ...string) error {
+	allowedSet := make(map[string]struct{}, len(allowed))
+	for _, key := range allowed {
+		allowedSet[key] = struct{}{}
+	}
+	for key := range params {
+		if _, ok := allowedSet[key]; ok {
+			continue
+		}
+		return fmt.Errorf("unknown work proof argument: %s", key)
+	}
+	return nil
+}
+
+type workProofView struct {
+	Schema         string                 `json:"schema"`
+	Task           workProofTaskView      `json:"task"`
+	Source         workProofSourceView    `json:"source"`
+	ProofState     string                 `json:"proof_state"`
+	Clarification  workProofStatusView    `json:"clarification"`
+	Review         workProofReviewView    `json:"review"`
+	Execution      workProofExecutionView `json:"execution"`
+	Delivery       workProofDeliveryView  `json:"delivery"`
+	PullRequest    workProofPullRequest   `json:"pull_request"`
+	Approvals      workProofApprovalsView `json:"approvals"`
+	MergeGate      workProofGateView      `json:"merge_gate"`
+	DeploymentGate workProofGateView      `json:"deployment_gate"`
+	Events         workProofEventsView    `json:"events"`
+	NextSteps      []string               `json:"next_steps"`
+	Mutated        bool                   `json:"mutated"`
+}
+
+type workProofTaskView struct {
+	ID                    int64  `json:"id"`
+	ProjectID             int64  `json:"project_id"`
+	Key                   string `json:"key"`
+	Title                 string `json:"title"`
+	Status                string `json:"status"`
+	ExecutionIntent       string `json:"execution_intent,omitempty"`
+	ExecutionIntentSource string `json:"execution_intent_source,omitempty"`
+	BlockedReason         string `json:"blocked_reason,omitempty"`
+}
+
+type workProofSourceView struct {
+	Type        string `json:"type"`
+	ID          int64  `json:"id,omitempty"`
+	DedupeKey   string `json:"dedupe_key,omitempty"`
+	URL         string `json:"url,omitempty"`
+	SourceType  string `json:"source_type,omitempty"`
+	RequestedBy string `json:"requested_by,omitempty"`
+	Status      string `json:"status,omitempty"`
+}
+
+type workProofStatusView struct {
+	Status    string   `json:"status"`
+	Questions []string `json:"questions"`
+}
+
+type workProofReviewView struct {
+	Status  string `json:"status"`
+	QueueID string `json:"queue_id,omitempty"`
+}
+
+type workProofExecutionView struct {
+	Runs        []workProofRunView `json:"runs"`
+	ActiveRunID *int64             `json:"active_run_id"`
+}
+
+type workProofRunView struct {
+	ID             int64  `json:"id"`
+	TaskID         int64  `json:"task_id"`
+	Executor       string `json:"executor"`
+	Status         string `json:"status"`
+	Attempt        int    `json:"attempt"`
+	Summary        string `json:"summary,omitempty"`
+	TerminalReason string `json:"terminal_reason,omitempty"`
+}
+
+type workProofDeliveryView struct {
+	EvidenceStatus string `json:"evidence_status"`
+	GateStatus     string `json:"gate_status"`
+}
+
+type workProofPullRequest struct {
+	Status    string `json:"status"`
+	HandoffID *int64 `json:"handoff_id"`
+	URL       string `json:"url"`
+}
+
+type workProofApprovalsView struct {
+	Pending  []workProofApprovalView `json:"pending"`
+	Resolved []workProofApprovalView `json:"resolved"`
+}
+
+type workProofApprovalView struct {
+	ID         int64  `json:"id"`
+	TaskID     int64  `json:"task_id"`
+	RunID      *int64 `json:"run_id,omitempty"`
+	Status     string `json:"status"`
+	Reason     string `json:"reason,omitempty"`
+	DecisionBy string `json:"decision_by,omitempty"`
+}
+
+type workProofGateView struct {
+	Status                string `json:"status"`
+	HumanApprovalRequired bool   `json:"human_approval_required"`
+	Approved              bool   `json:"approved"`
+}
+
+type workProofEventsView struct {
+	Count  int                  `json:"count"`
+	Latest []workProofEventView `json:"latest"`
+}
+
+type workProofEventView struct {
+	ID   int64  `json:"id"`
+	Type string `json:"type"`
+}
+
+func buildWorkProofView(ctx context.Context, store *sqlite.Store, task sqlite.Task) (workProofView, error) {
+	view := workProofView{
+		Schema:     "prompt_to_production_proof.v1",
+		ProofState: workProofState(task),
+		Task: workProofTaskView{
+			ID:                    task.ID,
+			ProjectID:             task.ProjectID,
+			Key:                   task.Key,
+			Title:                 task.Title,
+			Status:                task.Status,
+			ExecutionIntent:       task.ExecutionIntent,
+			ExecutionIntentSource: task.ExecutionIntentSource,
+			BlockedReason:         task.BlockedReason,
+		},
+		Source:         workProofSourceView{Type: "none"},
+		Clarification:  workProofStatusView{Status: "not_required", Questions: []string{}},
+		Review:         workProofReviewView{Status: "not_started"},
+		Delivery:       workProofDeliveryView{EvidenceStatus: "missing", GateStatus: "not_started"},
+		PullRequest:    workProofPullRequest{Status: "missing", URL: ""},
+		MergeGate:      workProofGateView{Status: "not_ready", HumanApprovalRequired: true, Approved: false},
+		DeploymentGate: workProofGateView{Status: "not_in_scope", HumanApprovalRequired: true, Approved: false},
+		NextSteps:      []string{},
+		Mutated:        false,
+	}
+
+	if intakeID, ok := intakeIDFromTask(task); ok {
+		item, err := store.GetIntakeItem(ctx, intakeID)
+		if err != nil {
+			return workProofView{}, err
+		}
+		view.Source = workProofSourceView{
+			Type:        "intake_item",
+			ID:          item.ID,
+			DedupeKey:   item.DedupeKey,
+			URL:         urlFromJSON(item.SourceFactsJSON),
+			SourceType:  item.EventKind,
+			RequestedBy: strings.TrimPrefix(task.RequestedBy, "intake_review:"),
+			Status:      item.Status,
+		}
+		view.Review = workProofReviewView{Status: item.Status, QueueID: "intake-review:" + rawIntakeProofKey(item.ID)}
+		if item.Status == "needs_clarification" {
+			view.Clarification = workProofStatusView{
+				Status: "needs_clarification",
+				Questions: []string{
+					"What exact outcome should Odin prepare?",
+					"Which acceptance criteria make this ready for work?",
+				},
+			}
+		}
+	}
+
+	runs, err := store.ListRuns(ctx, sqlite.ListRunsParams{TaskID: &task.ID})
+	if err != nil {
+		return workProofView{}, err
+	}
+	view.Execution.Runs = make([]workProofRunView, 0, len(runs))
+	for _, run := range runs {
+		view.Execution.Runs = append(view.Execution.Runs, workProofRunView{
+			ID:             run.ID,
+			TaskID:         run.TaskID,
+			Executor:       run.Executor,
+			Status:         run.Status,
+			Attempt:        run.Attempt,
+			Summary:        run.Summary,
+			TerminalReason: run.TerminalReason,
+		})
+	}
+	view.Execution.ActiveRunID = task.CurrentRunID
+
+	approvals, err := store.ListApprovals(ctx, sqlite.ListApprovalsParams{TaskID: &task.ID})
+	if err != nil {
+		return workProofView{}, err
+	}
+	for _, approval := range approvals {
+		approvalView := workProofApprovalView{
+			ID:         approval.ID,
+			TaskID:     approval.TaskID,
+			RunID:      approval.RunID,
+			Status:     approval.Status,
+			Reason:     approval.Reason,
+			DecisionBy: approval.DecisionBy,
+		}
+		if strings.EqualFold(approval.Status, "pending") {
+			view.Approvals.Pending = append(view.Approvals.Pending, approvalView)
+		} else {
+			view.Approvals.Resolved = append(view.Approvals.Resolved, approvalView)
+		}
+	}
+	if len(view.Approvals.Pending) > 0 {
+		view.ProofState = "approval_required"
+	}
+
+	handoff, found, err := findWorkProofPullRequestHandoff(ctx, store, task.ProjectID, view.Source.URL)
+	if err != nil {
+		return workProofView{}, err
+	}
+	if found {
+		view.PullRequest.Status = handoff.ReviewState
+		id := handoff.ID
+		view.PullRequest.HandoffID = &id
+		view.PullRequest.URL = handoff.URL
+	}
+
+	events, err := store.ListEvents(ctx, sqlite.ListEventsParams{TaskID: &task.ID})
+	if err != nil {
+		return workProofView{}, err
+	}
+	view.Events.Count = len(events)
+	start := len(events) - 5
+	if start < 0 {
+		start = 0
+	}
+	for _, event := range events[start:] {
+		view.Events.Latest = append(view.Events.Latest, workProofEventView{ID: event.ID, Type: string(event.Type)})
+	}
+
+	view.NextSteps = workProofNextSteps(view)
+	return view, nil
+}
+
+func workProofState(task sqlite.Task) string {
+	switch strings.ToLower(strings.TrimSpace(task.Status)) {
+	case "blocked":
+		if strings.EqualFold(strings.TrimSpace(task.BlockedReason), "approval_required") {
+			return "approval_required"
+		}
+		return "blocked"
+	case "running", "preparing":
+		return "running"
+	case "failed":
+		return "failed"
+	case "completed", "canceled", "cancelled":
+		return "completed"
+	case "queued":
+		return "queued"
+	default:
+		if strings.TrimSpace(task.Status) == "" {
+			return "blocked"
+		}
+		return task.Status
+	}
+}
+
+func intakeIDFromTask(task sqlite.Task) (int64, bool) {
+	ref := strings.TrimPrefix(strings.TrimSpace(task.RequestedBy), "intake_review:")
+	if ref == task.RequestedBy || !strings.HasPrefix(ref, "intake-") {
+		return 0, false
+	}
+	id, err := strconv.ParseInt(strings.TrimPrefix(ref, "intake-"), 10, 64)
+	return id, err == nil && id > 0
+}
+
+func rawIntakeProofKey(id int64) string {
+	return fmt.Sprintf("intake-%d", id)
+}
+
+func urlFromJSON(raw string) string {
+	var value any
+	if err := json.Unmarshal([]byte(strings.TrimSpace(raw)), &value); err != nil {
+		return ""
+	}
+	return findURLValue(value)
+}
+
+func findURLValue(value any) string {
+	switch typed := value.(type) {
+	case map[string]any:
+		for _, key := range []string{"url", "html_url", "issue_url"} {
+			if found, ok := typed[key].(string); ok && strings.TrimSpace(found) != "" {
+				return strings.TrimSpace(found)
+			}
+		}
+		for _, child := range typed {
+			if found := findURLValue(child); found != "" {
+				return found
+			}
+		}
+	case []any:
+		for _, child := range typed {
+			if found := findURLValue(child); found != "" {
+				return found
+			}
+		}
+	}
+	return ""
+}
+
+func findWorkProofPullRequestHandoff(ctx context.Context, store *sqlite.Store, projectID int64, issueURL string) (sqlite.PullRequestHandoff, bool, error) {
+	handoffs, err := store.ListPullRequestHandoffs(ctx, sqlite.ListPullRequestHandoffsParams{ProjectID: &projectID})
+	if err != nil {
+		return sqlite.PullRequestHandoff{}, false, err
+	}
+	if len(handoffs) == 0 {
+		return sqlite.PullRequestHandoff{}, false, nil
+	}
+	for _, handoff := range handoffs {
+		if issueURL != "" && handoff.IssueURL == issueURL {
+			return handoff, true, nil
+		}
+	}
+	return handoffs[0], true, nil
+}
+
+func workProofNextSteps(view workProofView) []string {
+	if len(view.Approvals.Pending) > 0 {
+		return []string{"resolve pending approval before execution or external mutation"}
+	}
+	if len(view.Execution.Runs) == 0 {
+		return []string{"dispatch and execute the Work Item before delivery evidence or PR handoff"}
+	}
+	if view.Delivery.EvidenceStatus == "missing" {
+		return []string{"record delivery evidence before PR handoff"}
+	}
+	if view.PullRequest.Status == "missing" {
+		return []string{"prepare a pull request handoff for human review"}
+	}
+	if !view.MergeGate.Approved {
+		return []string{"obtain explicit human merge approval before merge"}
+	}
+	return []string{"inspect proof evidence before marking external work complete"}
 }
 
 func findWorkTask(ctx context.Context, store *sqlite.Store, ref string) (sqlite.Task, error) {

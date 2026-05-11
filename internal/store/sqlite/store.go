@@ -6596,6 +6596,36 @@ func (store *Store) GetRun(ctx context.Context, runID int64) (Run, error) {
 	return scanRun(row)
 }
 
+func (store *Store) ListRuns(ctx context.Context, params ListRunsParams) ([]Run, error) {
+	query := `
+		SELECT id, task_id, executor, status, attempt, started_at, finished_at, summary, terminal_reason, artifacts_json
+		FROM runs
+		WHERE 1 = 1
+	`
+	args := make([]any, 0, 1)
+	if params.TaskID != nil {
+		query += ` AND task_id = ?`
+		args = append(args, *params.TaskID)
+	}
+	query += ` ORDER BY id ASC`
+
+	rows, err := store.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var runs []Run
+	for rows.Next() {
+		run, err := scanRun(rows)
+		if err != nil {
+			return nil, err
+		}
+		runs = append(runs, run)
+	}
+	return runs, rows.Err()
+}
+
 func (store *Store) RecordRunArtifact(ctx context.Context, params RecordRunArtifactParams) (RunArtifact, error) {
 	now := store.now()
 	params.ArtifactType = strings.TrimSpace(params.ArtifactType)
@@ -6714,6 +6744,44 @@ func (store *Store) GetLatestTaskApproval(ctx context.Context, taskID int64) (Ap
 		LIMIT 1
 	`, taskID)
 	return scanApproval(row)
+}
+
+func (store *Store) ListApprovals(ctx context.Context, params ListApprovalsParams) ([]Approval, error) {
+	query := `
+		SELECT id, task_id, run_id, status, requested_at, resolved_at, decision_by, reason
+		FROM approvals
+		WHERE 1 = 1
+	`
+	args := make([]any, 0, 3)
+	if params.TaskID != nil {
+		query += ` AND task_id = ?`
+		args = append(args, *params.TaskID)
+	}
+	if params.RunID != nil {
+		query += ` AND run_id = ?`
+		args = append(args, *params.RunID)
+	}
+	if strings.TrimSpace(params.Status) != "" {
+		query += ` AND status = ?`
+		args = append(args, strings.TrimSpace(params.Status))
+	}
+	query += ` ORDER BY id ASC`
+
+	rows, err := store.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var approvals []Approval
+	for rows.Next() {
+		approval, err := scanApproval(rows)
+		if err != nil {
+			return nil, err
+		}
+		approvals = append(approvals, approval)
+	}
+	return approvals, rows.Err()
 }
 
 func (store *Store) GetIncident(ctx context.Context, incidentID int64) (Incident, error) {

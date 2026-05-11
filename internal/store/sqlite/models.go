@@ -1423,6 +1423,16 @@ type ListEventsParams struct {
 	RunID     *int64
 }
 
+type ListRunsParams struct {
+	TaskID *int64
+}
+
+type ListApprovalsParams struct {
+	TaskID *int64
+	RunID  *int64
+	Status string
+}
+
 type Delegation struct {
 	ID              int64
 	ParentTaskID    int64

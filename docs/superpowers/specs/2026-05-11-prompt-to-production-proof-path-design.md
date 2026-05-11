@@ -395,6 +395,24 @@ rm -rf "$tmp"
 The implementation is done only when the command proves that it made no
 mutations and shows honest missing evidence for incomplete workflows.
 
+## Implementation Hardening Status
+
+PR #219 implements the v1 read-only proof command:
+
+- `odin work proof --task <id|key> [--json]`
+- `prompt_to_production_proof.v1` JSON envelope
+- source intake correlation through reviewed intake Work Items
+- Run Attempt, approval, PR handoff, merge gate, deployment gate, and task event
+  readback
+- honest `missing` and `not_started` states for incomplete delivery and PR
+  evidence
+- fail-closed unknown Work Item handling
+- `mutated=false` with command-level proof that no log event is appended
+
+The implementation does not add live PR creation/update, merge approval
+resolution, deployment approval resolution, worker dispatch, branch creation, or
+GitHub mutation.
+
 ## Documentation Changes
 
 Add this design spec.

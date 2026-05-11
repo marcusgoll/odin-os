@@ -3594,6 +3594,161 @@ func TestRunWorkStartAndStatusUseCanonicalCommandPath(t *testing.T) {
 	}
 }
 
+func TestRunWorkProofReportsReadOnlyPromptToProductionEvidence(t *testing.T) {
+	t.Parallel()
+
+	root := testRepoRoot(t)
+	payloadPath := filepath.Join(t.TempDir(), "github-issue.json")
+	if err := os.WriteFile(payloadPath, []byte(`{"url":"https://github.example/acme/alpha/issues/77","original_content":"Build low risk intake work with tests and PR handoff"}`), 0o600); err != nil {
+		t.Fatalf("WriteFile(payload) error = %v", err)
+	}
+
+	if err := Run(context.Background(), root, []string{
+		"intake", "raw", "create",
+		"--source", "github",
+		"--project", testProjectKey,
+		"--title", "Build low risk intake work",
+		"--type", "github_issue",
+		"--dedup-key", "github:issue:acme/alpha:77",
+		"--requested-by", "codex",
+		"--payload-file", payloadPath,
+		"--json",
+	}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+		t.Fatalf("Run(intake raw create) error = %v", err)
+	}
+	if err := Run(context.Background(), root, []string{"intake", "process", "--id", "intake-1", "--json"}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+		t.Fatalf("Run(intake process) error = %v", err)
+	}
+
+	var acceptOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"intake", "review", "accept", "intake-1", "--json"}, strings.NewReader(""), &acceptOutput); err != nil {
+		t.Fatalf("Run(intake review accept) error = %v\n%s", err, acceptOutput.String())
+	}
+	var accept struct {
+		WorkItem struct {
+			ID  int64  `json:"id"`
+			Key string `json:"key"`
+		} `json:"work_item"`
+	}
+	if err := json.Unmarshal(acceptOutput.Bytes(), &accept); err != nil {
+		t.Fatalf("json.Unmarshal(accept) error = %v\n%s", err, acceptOutput.String())
+	}
+	if accept.WorkItem.ID == 0 || accept.WorkItem.Key == "" {
+		t.Fatalf("accept work item = %+v, want durable work identity", accept.WorkItem)
+	}
+
+	var beforeLogs bytes.Buffer
+	if err := Run(context.Background(), root, []string{"logs", "--json"}, strings.NewReader(""), &beforeLogs); err != nil {
+		t.Fatalf("Run(logs before proof) error = %v", err)
+	}
+
+	var proofOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"work", "proof", "--task", accept.WorkItem.Key, "--json"}, strings.NewReader(""), &proofOutput); err != nil {
+		t.Fatalf("Run(work proof) error = %v\n%s", err, proofOutput.String())
+	}
+	var proof struct {
+		Schema string `json:"schema"`
+		Task   struct {
+			ID              int64  `json:"id"`
+			Key             string `json:"key"`
+			Status          string `json:"status"`
+			ExecutionIntent string `json:"execution_intent"`
+		} `json:"task"`
+		Source struct {
+			Type      string `json:"type"`
+			ID        int64  `json:"id"`
+			DedupeKey string `json:"dedupe_key"`
+			URL       string `json:"url"`
+		} `json:"source"`
+		ProofState string `json:"proof_state"`
+		Review     struct {
+			Status  string `json:"status"`
+			QueueID string `json:"queue_id"`
+		} `json:"review"`
+		Execution struct {
+			Runs []struct {
+				ID int64 `json:"id"`
+			} `json:"runs"`
+			ActiveRunID *int64 `json:"active_run_id"`
+		} `json:"execution"`
+		Delivery struct {
+			EvidenceStatus string `json:"evidence_status"`
+			GateStatus     string `json:"gate_status"`
+		} `json:"delivery"`
+		PullRequest struct {
+			Status string `json:"status"`
+		} `json:"pull_request"`
+		MergeGate struct {
+			Status                string `json:"status"`
+			HumanApprovalRequired bool   `json:"human_approval_required"`
+			Approved              bool   `json:"approved"`
+		} `json:"merge_gate"`
+		DeploymentGate struct {
+			Status                string `json:"status"`
+			HumanApprovalRequired bool   `json:"human_approval_required"`
+			Approved              bool   `json:"approved"`
+		} `json:"deployment_gate"`
+		NextSteps []string `json:"next_steps"`
+		Mutated   bool     `json:"mutated"`
+	}
+	if err := json.Unmarshal(proofOutput.Bytes(), &proof); err != nil {
+		t.Fatalf("json.Unmarshal(proof) error = %v\n%s", err, proofOutput.String())
+	}
+	if proof.Schema != "prompt_to_production_proof.v1" || proof.Mutated {
+		t.Fatalf("proof schema/mutated = %q/%t, want prompt proof v1 and read-only\n%s", proof.Schema, proof.Mutated, proofOutput.String())
+	}
+	if proof.Task.ID != accept.WorkItem.ID || proof.Task.Key != accept.WorkItem.Key || proof.Task.Status != "queued" || proof.Task.ExecutionIntent == "" {
+		t.Fatalf("proof task = %+v, want queued work item with execution intent %s", proof.Task, accept.WorkItem.Key)
+	}
+	if proof.Source.Type != "intake_item" || proof.Source.ID != 1 || proof.Source.DedupeKey != "github:issue:acme/alpha:77" || proof.Source.URL == "" {
+		t.Fatalf("proof source = %+v, want linked intake evidence with URL", proof.Source)
+	}
+	if proof.ProofState != "queued" || proof.Review.Status != "accepted" || proof.Review.QueueID != "intake-review:intake-1" {
+		t.Fatalf("proof state/review = %q/%+v, want accepted queued intake work", proof.ProofState, proof.Review)
+	}
+	if len(proof.Execution.Runs) != 0 || proof.Execution.ActiveRunID != nil {
+		t.Fatalf("proof execution = %+v, want no run attempts before dispatch", proof.Execution)
+	}
+	if proof.Delivery.EvidenceStatus != "missing" || proof.Delivery.GateStatus != "not_started" || proof.PullRequest.Status != "missing" {
+		t.Fatalf("proof delivery/pr = %+v/%+v, want honest missing evidence", proof.Delivery, proof.PullRequest)
+	}
+	if proof.MergeGate.Status != "not_ready" || !proof.MergeGate.HumanApprovalRequired || proof.MergeGate.Approved {
+		t.Fatalf("proof merge gate = %+v, want human approval still required", proof.MergeGate)
+	}
+	if proof.DeploymentGate.Status != "not_in_scope" || !proof.DeploymentGate.HumanApprovalRequired || proof.DeploymentGate.Approved {
+		t.Fatalf("proof deployment gate = %+v, want deploy out of scope with human approval boundary", proof.DeploymentGate)
+	}
+	if len(proof.NextSteps) == 0 {
+		t.Fatalf("proof next steps empty, want operator guidance\n%s", proofOutput.String())
+	}
+
+	var afterLogs bytes.Buffer
+	if err := Run(context.Background(), root, []string{"logs", "--json"}, strings.NewReader(""), &afterLogs); err != nil {
+		t.Fatalf("Run(logs after proof) error = %v", err)
+	}
+	if beforeLogs.String() != afterLogs.String() {
+		t.Fatalf("work proof changed logs; before=%s after=%s", beforeLogs.String(), afterLogs.String())
+	}
+}
+
+func TestRunWorkProofFailsClosedForUnknownTask(t *testing.T) {
+	t.Parallel()
+
+	root := testRepoRoot(t)
+
+	var output bytes.Buffer
+	err := Run(context.Background(), root, []string{"work", "proof", "--task", "missing-task", "--json"}, strings.NewReader(""), &output)
+	if err == nil {
+		t.Fatalf("Run(work proof missing task) error = nil output=%s, want fail-closed error", output.String())
+	}
+	if !strings.Contains(err.Error(), "work item not found") {
+		t.Fatalf("Run(work proof missing task) error = %v, want stable not-found", err)
+	}
+	if output.Len() != 0 {
+		t.Fatalf("Run(work proof missing task) output = %s, want no partial JSON", output.String())
+	}
+}
+
 func TestRunWorkDispatchCreatesRunAttemptFromAcceptedIntake(t *testing.T) {
 	t.Parallel()
 
