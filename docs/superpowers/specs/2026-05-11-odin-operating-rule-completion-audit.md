@@ -135,6 +135,53 @@ Observed proof:
   `automation_trigger.tested` events, with the tested event carrying the same
   approval-required envelope evidence.
 
+## Current Main Gap Proof
+
+Fresh proof on the doc-only audit branch after `make build`:
+
+```bash
+./bin/odin capabilities list --json
+```
+
+Observed result:
+
+- exited non-zero with `unknown command: capabilities`
+- confirms the plugin/capability terminology closure remains in PR #218, not
+  current `main`
+
+Fresh high-risk dispatch proof on the doc-only audit branch:
+
+```bash
+tmp=$(mktemp -d)
+home=$(mktemp -d)
+ODIN_ROOT="$tmp" HOME="$home" ./bin/odin project select odin-core
+ODIN_ROOT="$tmp" HOME="$home" ./bin/odin transition set cutover confirm because audit-high-risk-current-main
+start_output=$(ODIN_ROOT="$tmp" HOME="$home" ./bin/odin work start --project odin-core --title Send_message_to_customer --intent read_only)
+task_key=$(printf '%s\n' "$start_output" | tr ' ' '\n' | sed -n 's/^key=//p')
+ODIN_ROOT="$tmp" HOME="$home" ./bin/odin work dispatch --task "$task_key" --json
+ODIN_ROOT="$tmp" HOME="$home" ./bin/odin approvals all --json
+ODIN_ROOT="$tmp" HOME="$home" ./bin/odin logs --json
+rm -rf "$tmp" "$home"
+```
+
+Observed result:
+
+- `work dispatch --task --json` returned `dispatched=false`,
+  `reason=approval_required`, and `status=blocked`.
+- `approvals all --json` returned a pending approval with
+  `risk=governance`, `resolver_support=supported`, and approve/deny actions.
+- `logs --json` returned `approval.requested`, `task.status_changed`,
+  `task.queue_state_changed`, and context packet events.
+- The blocked task still reported `execution_intent=read_only` and
+  `execution_intent_source=operator`; it did not persist
+  `execution_intent_source=safety_classifier`.
+
+This proves current `main` is category-aware enough to block this high-risk
+message task, but PR #221 remains necessary for operator-path parity because it
+persists the safety-classified governance/destructive intent before approval
+blocking and extends exact category coverage across all named high-risk
+actions.
+
 ## What Is Already Done
 
 Scheduler trigger workflow is not the next implementation gap. PR #169 and PR
