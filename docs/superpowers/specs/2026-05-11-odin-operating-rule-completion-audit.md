@@ -339,6 +339,85 @@ Integration stop conditions:
 - merge/deploy/live GitHub mutation appears outside the approved PR handoff
   smoke path
 
+#### Option B Execution Runbook
+
+Do not run these mutation steps without explicit operator approval to integrate
+the draft stack.
+
+Read-only preflight before any merge or retarget:
+
+```bash
+gh pr list --state open --json number,title,headRefName,baseRefName,isDraft,mergeStateStatus,statusCheckRollup
+gh pr view 220 --json mergeStateStatus,statusCheckRollup
+```
+
+For every PR selected for integration, verify before merging:
+
+```bash
+gh pr view <number> --json isDraft,mergeStateStatus,statusCheckRollup,body
+gh pr checks <number> --watch
+```
+
+Required PR body headings before merge:
+
+- `## Summary`
+- `## Proven`
+- `## Unproven`
+- `## Commands Run`
+
+Recommended bottom-up integration sequence after approval:
+
+1. Integrate #212.
+2. Integrate #213, then retarget or integrate #214 against current `main`.
+3. Integrate the independent objective closures #216, #218, and #221.
+4. Retarget or refresh #219 against current `main`; verify that
+   `odin work proof` and `odin work pr prepare` evidence still passes.
+5. Retarget or refresh #222 so its delivery and prompt-to-production
+   prerequisites are explicit rather than silently carried.
+6. Refresh #223 on top of the accepted #222 state.
+7. Refresh #224 on top of #223, then either run the approved live smoke or keep
+   it draft until live proof is approved.
+
+Permitted integration mutations after approval:
+
+- changing PR base branches
+- pushing conflict-resolution or rebase commits needed to preserve the already
+  proven behavior
+- merging approved PRs whose checks are green and whose body contract is intact
+
+Still forbidden during integration:
+
+- GitHub merge of delivery output produced by Odin itself
+- deployment system calls
+- production mutation
+- branch deletion
+- release creation
+- batch approval
+- running PR #224 live smoke without the explicit disposable repo, branch, and
+  token approval described in Option A
+
+Post-merge proof after each integrated PR:
+
+```bash
+git fetch origin main
+gh pr view <number> --json state,mergedAt,mergeCommit
+gh pr list --state open --json number,headRefName,baseRefName,mergeStateStatus,statusCheckRollup
+```
+
+Final integration proof before calling the objective complete:
+
+- real `odin trigger create/list/show/test` proof, or merged evidence that those
+  commands are already on `main`
+- real high-risk `odin work dispatch --task` approval-blocking proof on `main`
+- real `odin capabilities list/show` plugin-model proof on `main`
+- real `odin overview` and `overview --json` proof for raw intake, review
+  queue, triggers, approvals, recovery, running work, failed work, and blocked
+  work on `main`
+- real prompt-to-production `odin work proof`, PR handoff, review-role Run
+  Attempt, and merge/deploy approval-request proof on `main`
+- either approved PR #224 live-smoke evidence, or an explicit accepted decision
+  that fixture/local PR-handoff proof is sufficient before live smoke
+
 ## Draft Stack Readiness
 
 Current non-mutating stack-readiness check:
