@@ -32,6 +32,7 @@ func defaultReviewQueueSources() []reviewQueueSource {
 		skillArtifactReviewQueueSource{},
 		contextPackReviewQueueSource{},
 		memoryProposalReviewQueueSource{},
+		recoveryReviewQueueSource{},
 		failedWorkReviewQueueSource{},
 	}
 }
@@ -200,6 +201,31 @@ func (failedWorkReviewQueueSource) ListReviewQueueEntries(ctx context.Context, a
 			continue
 		}
 		entries = append(entries, reviewEntryFromFailedTask(task))
+	}
+	return entries, nil
+}
+
+type recoveryReviewQueueSource struct{}
+
+func (recoveryReviewQueueSource) Name() string {
+	return "recovery"
+}
+
+func (recoveryReviewQueueSource) ListReviewQueueEntries(ctx context.Context, app bootstrap.App, _ *reviewQueueSourceState) ([]reviewQueueEntry, error) {
+	incidents, err := projections.ListIncidentViews(ctx, app.Store.DB())
+	if err != nil {
+		return nil, err
+	}
+	entries := make([]reviewQueueEntry, 0)
+	for _, incident := range incidents {
+		if strings.EqualFold(strings.TrimSpace(incident.Status), "resolved") {
+			continue
+		}
+		entry := reviewEntryFromRecoveryIncidentView(incident)
+		if entry.Decision == "" {
+			continue
+		}
+		entries = append(entries, entry)
 	}
 	return entries, nil
 }

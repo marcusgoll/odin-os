@@ -538,6 +538,8 @@ func reviewActionPreflight(ctx context.Context, app bootstrap.App, ref reviewQue
 		}
 	case "memory-proposal":
 		return unsupportedReviewActionReceipt(receipt, "memory_proposal_review_not_implemented", "memory proposal review actions are not implemented; use the existing memory workflow"), fmt.Errorf("memory proposal review actions are not implemented; use the existing memory workflow")
+	case "recovery":
+		return unsupportedReviewActionReceipt(receipt, "recovery_review_actions_not_implemented", "recovery review is read-only until recovery proposal approval persistence is available"), fmt.Errorf("recovery review actions are not implemented")
 	default:
 		return reviewActionReceipt{}, fmt.Errorf("unsupported review queue source %q", ref.Kind)
 	}
@@ -578,6 +580,8 @@ func reviewSourceTypeForKind(kind string) string {
 		return "failed_work"
 	case "memory-proposal":
 		return "memory_proposal"
+	case "recovery":
+		return "recovery"
 	default:
 		return kind
 	}
@@ -597,7 +601,7 @@ func reviewActionMutationScope(kind string, action string) string {
 			return "execution_resuming"
 		}
 		return "review_state"
-	case "goal-blocker", "memory-proposal":
+	case "goal-blocker", "memory-proposal", "recovery":
 		return "unsupported"
 	default:
 		return "review_state"
@@ -1095,6 +1099,13 @@ func reviewQueueDetail(ctx context.Context, app bootstrap.App, ref reviewQueueRe
 			return reviewQueueEntry{}, nil, err
 		}
 		return entry, detail, nil
+	case "recovery":
+		incident, err := app.Store.GetIncident(ctx, ref.ID)
+		if err != nil {
+			return reviewQueueEntry{}, nil, err
+		}
+		entry := reviewEntryFromRecoveryIncident(incident, "")
+		return entry, recoveryReviewDetailFromIncident(incident), nil
 	case "memory-proposal":
 		summary, err := findMemoryProposalSummary(ctx, app.Store, ref.ID)
 		if err != nil {
@@ -1147,6 +1158,19 @@ type memoryProposalReviewDetail struct {
 	CreatedAt    string            `json:"created_at"`
 	UpdatedAt    string            `json:"updated_at"`
 	AllowedNotes string            `json:"allowed_notes,omitempty"`
+}
+
+type recoveryReviewDetail struct {
+	IncidentID   int64  `json:"incident_id"`
+	RunID        int64  `json:"run_id,omitempty"`
+	Severity     string `json:"severity"`
+	Status       string `json:"status"`
+	Summary      string `json:"summary"`
+	FaultKey     string `json:"fault_key,omitempty"`
+	SubjectKey   string `json:"subject_key,omitempty"`
+	DecisionMode string `json:"decision_mode,omitempty"`
+	NextAction   string `json:"next_action,omitempty"`
+	ReviewNotes  string `json:"review_notes"`
 }
 
 type failedWorkRetryView struct {
@@ -1498,6 +1522,114 @@ func reviewEntryFromFailedTask(task projections.TaskStatusView) reviewQueueEntry
 	}
 }
 
+func reviewEntryFromRecoveryIncidentView(incident projections.IncidentView) reviewQueueEntry {
+	return reviewEntryFromRecoveryEvidence(
+		incident.IncidentID,
+		incident.TaskID,
+		incident.TaskKey,
+		incident.ProjectKey,
+		incident.Severity,
+		incident.Status,
+		incident.Summary,
+		incident.OpenedAt,
+		incident.DetailsJSON,
+	)
+}
+
+func reviewEntryFromRecoveryIncident(incident sqlite.Incident, projectScope string) reviewQueueEntry {
+	return reviewEntryFromRecoveryEvidence(
+		incident.ID,
+		0,
+		"",
+		projectScope,
+		incident.Severity,
+		incident.Status,
+		incident.Summary,
+		formatReviewTime(incident.OpenedAt),
+		incident.DetailsJSON,
+	)
+}
+
+func reviewEntryFromRecoveryEvidence(incidentID int64, taskID int64, taskKey string, projectScope string, severity string, status string, summary string, createdAt string, detailsJSON string) reviewQueueEntry {
+	evidence := decodeRecoveryReviewEvidence(detailsJSON)
+	objectKey := firstNonBlank(evidence.ObjectKey(), fmt.Sprintf("incident-%d", incidentID))
+	return reviewQueueEntry{
+		ReviewID:               fmt.Sprintf("recovery:%d", incidentID),
+		QueueID:                fmt.Sprintf("recovery:%d", incidentID),
+		Type:                   "recovery_incident",
+		SourceType:             "recovery",
+		SourceID:               incidentID,
+		ObjectID:               incidentID,
+		ObjectKey:              objectKey,
+		Status:                 status,
+		Reason:                 firstNonBlank(evidence.DecisionMode, status),
+		Title:                  firstNonBlank(summary, objectKey),
+		CreatedAt:              createdAt,
+		ProjectScope:           projectScope,
+		Summary:                summary,
+		TaskID:                 taskID,
+		TaskKey:                taskKey,
+		Source:                 "incidents",
+		Risk:                   recoveryReviewRisk(severity, evidence.DecisionMode),
+		Decision:               evidence.DecisionMode,
+		RecoveryRecommendation: evidence.NextAction,
+		AllowedActions:         []string{},
+	}
+}
+
+type recoveryReviewEvidence struct {
+	FaultKey     string `json:"fault_key"`
+	SubjectKey   string `json:"subject_key"`
+	DecisionMode string `json:"decision_mode"`
+	NextAction   string `json:"next_action"`
+}
+
+func (e recoveryReviewEvidence) ObjectKey() string {
+	if strings.TrimSpace(e.FaultKey) == "" || strings.TrimSpace(e.SubjectKey) == "" {
+		return ""
+	}
+	return e.FaultKey + ":" + e.SubjectKey
+}
+
+func decodeRecoveryReviewEvidence(detailsJSON string) recoveryReviewEvidence {
+	if strings.TrimSpace(detailsJSON) == "" {
+		return recoveryReviewEvidence{}
+	}
+	var evidence recoveryReviewEvidence
+	if err := json.Unmarshal([]byte(detailsJSON), &evidence); err != nil {
+		return recoveryReviewEvidence{}
+	}
+	return evidence
+}
+
+func recoveryReviewRisk(severity string, decisionMode string) string {
+	if strings.EqualFold(strings.TrimSpace(decisionMode), "approval_required") {
+		return "high"
+	}
+	switch strings.ToLower(strings.TrimSpace(severity)) {
+	case "critical", "error", "high":
+		return "high"
+	default:
+		return "medium"
+	}
+}
+
+func recoveryReviewDetailFromIncident(incident sqlite.Incident) recoveryReviewDetail {
+	evidence := decodeRecoveryReviewEvidence(incident.DetailsJSON)
+	return recoveryReviewDetail{
+		IncidentID:   incident.ID,
+		RunID:        nullableInt64Value(incident.RunID),
+		Severity:     incident.Severity,
+		Status:       incident.Status,
+		Summary:      incident.Summary,
+		FaultKey:     evidence.FaultKey,
+		SubjectKey:   evidence.SubjectKey,
+		DecisionMode: evidence.DecisionMode,
+		NextAction:   evidence.NextAction,
+		ReviewNotes:  "read-only in odin review until recovery proposal approval persistence is available",
+	}
+}
+
 func isReviewQueueMemoryProposal(summary sqlite.MemorySummary) bool {
 	fields, err := memorySummaryFields(summary.DetailsJSON)
 	if err != nil {
@@ -1675,7 +1807,7 @@ func parseReviewQueueRef(queueID string) (reviewQueueRef, error) {
 	queueID = strings.TrimSpace(queueID)
 	parts := strings.SplitN(queueID, ":", 2)
 	if len(parts) != 2 {
-		return reviewQueueRef{}, fmt.Errorf("review queue id must look like intake-goal:<id>, goal:<id>, goal-approval:<id>, goal-blocker:<id>, intake-review:<id>, intake-approval:<id>, approval:<id>, skill-artifact:<id>, context-pack:<id>, failed-work:<id>, or memory-proposal:<id>")
+		return reviewQueueRef{}, fmt.Errorf("review queue id must look like intake-goal:<id>, goal:<id>, goal-approval:<id>, goal-blocker:<id>, intake-review:<id>, intake-approval:<id>, approval:<id>, skill-artifact:<id>, context-pack:<id>, failed-work:<id>, recovery:<id>, or memory-proposal:<id>")
 	}
 	kind := strings.ToLower(strings.TrimSpace(parts[0]))
 	idRef := strings.TrimSpace(parts[1])
@@ -1696,6 +1828,8 @@ func parseReviewQueueRef(queueID string) (reviewQueueRef, error) {
 		idRef = strings.TrimPrefix(idRef, "task-")
 	case "memory-proposal":
 		idRef = strings.TrimPrefix(idRef, "memory-proposal-")
+	case "recovery":
+		idRef = strings.TrimPrefix(idRef, "incident-")
 	default:
 		return reviewQueueRef{}, fmt.Errorf("unsupported review queue source %q", kind)
 	}

@@ -288,6 +288,10 @@ type IncidentSummary struct {
 	Severity     string  `json:"severity"`
 	Status       string  `json:"status"`
 	Summary      string  `json:"summary"`
+	FaultKey     string  `json:"fault_key,omitempty"`
+	SubjectKey   string  `json:"subject_key,omitempty"`
+	DecisionMode string  `json:"decision_mode,omitempty"`
+	NextAction   string  `json:"next_action,omitempty"`
 	OpenedAt     string  `json:"opened_at"`
 }
 
@@ -313,11 +317,16 @@ type CompanionSwarmSummary struct {
 }
 
 type RecoverySummary struct {
-	RecoveryID int64  `json:"recovery_id"`
-	RunID      int64  `json:"run_id"`
-	Status     string `json:"status"`
-	Strategy   string `json:"strategy"`
-	StartedAt  string `json:"started_at"`
+	RecoveryID   int64  `json:"recovery_id"`
+	RunID        int64  `json:"run_id"`
+	Status       string `json:"status"`
+	Strategy     string `json:"strategy"`
+	FaultKey     string `json:"fault_key,omitempty"`
+	SubjectKey   string `json:"subject_key,omitempty"`
+	DecisionMode string `json:"decision_mode,omitempty"`
+	ActionName   string `json:"action_name,omitempty"`
+	NextAction   string `json:"next_action,omitempty"`
+	StartedAt    string `json:"started_at"`
 }
 
 type FreshnessSummary struct {
@@ -765,10 +774,15 @@ func (service Service) Build(ctx context.Context, resolved scope.Resolution) (Vi
 		if !matchesProjectScope(incident.ProjectKey, resolved) {
 			continue
 		}
-		taskContext, err := resolveTaskContext(incident.TaskID)
-		if err != nil {
-			return View{}, err
+		taskContext := taskScopeContext{}
+		if incident.TaskID != 0 {
+			var err error
+			taskContext, err = resolveTaskContext(incident.TaskID)
+			if err != nil {
+				return View{}, err
+			}
 		}
+		evidence := decodeRecoveryEvidence(incident.DetailsJSON)
 		view.Observability.Incidents = append(view.Observability.Incidents, IncidentSummary{
 			IncidentID:   incident.IncidentID,
 			RunID:        incident.RunID,
@@ -779,6 +793,10 @@ func (service Service) Build(ctx context.Context, resolved scope.Resolution) (Vi
 			Severity:     incident.Severity,
 			Status:       incident.Status,
 			Summary:      incident.Summary,
+			FaultKey:     evidence.FaultKey,
+			SubjectKey:   evidence.SubjectKey,
+			DecisionMode: evidence.DecisionMode,
+			NextAction:   evidence.NextAction,
 			OpenedAt:     incident.OpenedAt,
 		})
 	}
@@ -886,12 +904,18 @@ func (service Service) Build(ctx context.Context, resolved scope.Resolution) (Vi
 		if !matchesProjectScope(recoveryProjectKey, resolved) {
 			continue
 		}
+		evidence := decodeRecoveryEvidence(recovery.DetailsJSON)
 		view.Observability.Recoveries = append(view.Observability.Recoveries, RecoverySummary{
-			RecoveryID: recovery.RecoveryID,
-			RunID:      recovery.RunID,
-			Status:     recovery.Status,
-			Strategy:   recovery.Strategy,
-			StartedAt:  recovery.StartedAt,
+			RecoveryID:   recovery.RecoveryID,
+			RunID:        recovery.RunID,
+			Status:       recovery.Status,
+			Strategy:     recovery.Strategy,
+			FaultKey:     evidence.FaultKey,
+			SubjectKey:   evidence.SubjectKey,
+			DecisionMode: evidence.DecisionMode,
+			ActionName:   evidence.ActionName,
+			NextAction:   evidence.NextAction,
+			StartedAt:    recovery.StartedAt,
 		})
 	}
 
@@ -1720,6 +1744,25 @@ func matchesProjectScope(projectKey string, resolved scope.Resolution) bool {
 	default:
 		return true
 	}
+}
+
+type recoveryEvidenceFields struct {
+	FaultKey     string `json:"fault_key"`
+	SubjectKey   string `json:"subject_key"`
+	DecisionMode string `json:"decision_mode"`
+	ActionName   string `json:"action_name"`
+	NextAction   string `json:"next_action"`
+}
+
+func decodeRecoveryEvidence(detailsJSON string) recoveryEvidenceFields {
+	if strings.TrimSpace(detailsJSON) == "" {
+		return recoveryEvidenceFields{}
+	}
+	var evidence recoveryEvidenceFields
+	if err := json.Unmarshal([]byte(detailsJSON), &evidence); err != nil {
+		return recoveryEvidenceFields{}
+	}
+	return evidence
 }
 
 func matchesInitiativeScope(initiative projections.InitiativePortfolioView, resolved scope.Resolution) bool {

@@ -941,13 +941,14 @@ type CompleteRecoveryParams struct {
 }
 
 type RecordRecoveryActionParams struct {
-	RecoveryID  int64
-	Playbook    string
-	FaultKey    string
-	ActionName  string
-	Attempt     int
-	Result      string
-	Description string
+	RecoveryID        int64
+	Playbook          string
+	FaultKey          string
+	ActionName        string
+	Attempt           int
+	Result            string
+	Description       string
+	ContractViolation *runtimeevents.RecoveryActionContractViolation
 }
 
 type RegistryVersion struct {

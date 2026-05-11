@@ -99,6 +99,11 @@ func (service Service) RunCycle(ctx context.Context) (CycleResult, error) {
 		Decisions:    decisions,
 	}
 	for _, decision := range decisions {
+		decision = normalizeDecision(decision)
+		if decision.Mode == DecisionModeIgnore {
+			service.logDecision(now, decision, string(DecisionModeIgnore), "")
+			continue
+		}
 		outcome, err := executor.Execute(ctx, decision)
 		if err != nil {
 			service.logDecision(now, decision, "error", err.Error())
@@ -124,13 +129,28 @@ func (service Service) logDecision(now time.Time, decision Decision, status stri
 	}
 
 	level := logs.LevelInfo
-	message := "self-heal playbook completed"
+	message := "self-heal decision handled"
 	if status == "escalated" || status == "suppressed" {
 		level = logs.LevelWarn
 	}
 	if errMessage != "" {
 		level = logs.LevelError
-		message = "self-heal playbook failed"
+		message = "self-heal decision failed"
+	}
+
+	fields := map[string]any{
+		"fault_key":     decision.Observation.FaultKey,
+		"subject_key":   decision.Observation.SubjectKey,
+		"decision_mode": decision.Mode,
+		"status":        status,
+		"error":         errMessage,
+		"observed_at":   now.Format(time.RFC3339Nano),
+	}
+	if decision.Playbook != "" {
+		fields["playbook"] = decision.Playbook
+	}
+	if decision.NextAction != "" {
+		fields["next_action"] = decision.NextAction
 	}
 
 	_ = service.Logger.Log(logs.Record{
@@ -142,13 +162,6 @@ func (service Service) logDecision(now time.Time, decision Decision, status stri
 		ProjectID:     decision.Observation.ProjectID,
 		TaskID:        decision.Observation.TaskID,
 		RunID:         decision.Observation.RunID,
-		Fields: map[string]any{
-			"fault_key":   decision.Observation.FaultKey,
-			"subject_key": decision.Observation.SubjectKey,
-			"playbook":    decision.Playbook,
-			"status":      status,
-			"error":       errMessage,
-			"observed_at": now.Format(time.RFC3339Nano),
-		},
+		Fields:        fields,
 	})
 }

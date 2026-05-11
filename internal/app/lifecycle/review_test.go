@@ -26,6 +26,7 @@ func TestReviewQueueSourceCompositionUsesGovernedSources(t *testing.T) {
 		"skill_artifact",
 		"context_pack",
 		"memory_proposal",
+		"recovery",
 		"failed_work",
 	}
 	if !reflect.DeepEqual(got, want) {
@@ -57,6 +58,7 @@ func TestReviewQueueIncludesAllGovernedDecisionSources(t *testing.T) {
 		"skill_artifact",
 		"context_pack",
 		"memory_proposal",
+		"recovery",
 		"failed_work",
 	}
 	for _, source := range required {
@@ -284,5 +286,14 @@ func seedReviewQueueSourceFixture(t *testing.T, ctx context.Context, app bootstr
 		RequestedBy: "test",
 	}); err != nil {
 		t.Fatalf("CreateTask(failed) error = %v", err)
+	}
+
+	if _, err := app.Store.OpenIncident(ctx, sqlite.OpenIncidentParams{
+		Severity:    "error",
+		Status:      "open",
+		Summary:     "Review recovery incident",
+		DetailsJSON: `{"fault_key":"wake_packet_invalid","subject_key":"task:failed-task","decision_mode":"incident_only","next_action":"review wake packet evidence"}`,
+	}); err != nil {
+		t.Fatalf("OpenIncident(recovery) error = %v", err)
 	}
 }
