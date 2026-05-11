@@ -182,6 +182,36 @@ persists the safety-classified governance/destructive intent before approval
 blocking and extends exact category coverage across all named high-risk
 actions.
 
+## PR #218 Capability Proof
+
+Fresh proof in `/home/orchestrator/odin-os/.worktrees/capabilities-operator-cli-current`
+after `make build`:
+
+```bash
+tmp=$(mktemp -d)
+home=$(mktemp -d)
+ODIN_ROOT="$tmp" HOME="$home" ./bin/odin capabilities list --kind command --json
+ODIN_ROOT="$tmp" HOME="$home" ./bin/odin capabilities show project.status --json
+rm -rf "$tmp" "$home"
+```
+
+Observed proof:
+
+- `capabilities list --kind command --json` returned
+  `source=capability_gateway` and
+  `plugin_model=plugins_are_packages_not_runtime_kind`.
+- The command list included `project.status` with `kind=command`,
+  `version=1.0.0`, and `scope=global`.
+- `capabilities show project.status --json` returned the same source and plugin
+  model fields, with a registry-backed descriptor:
+  `implementation.kind=markdown`,
+  `implementation.path=registry/commands/project.status.md`, and source path
+  rooted in the PR #218 worktree.
+
+This closes the plugin-model design in the open PR without introducing a
+parallel plugin runtime. It still does not count as current `main` behavior
+until PR #218 is merged or explicitly accepted as the target artifact.
+
 ## Real Odin Overview Proof
 
 Fresh proof on the doc-only audit branch after `make build`:
