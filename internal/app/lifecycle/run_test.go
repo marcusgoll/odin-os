@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -3676,7 +3677,15 @@ func TestRunWorkProofReportsReadOnlyPromptToProductionEvidence(t *testing.T) {
 			GateStatus     string `json:"gate_status"`
 		} `json:"delivery"`
 		PullRequest struct {
-			Status string `json:"status"`
+			Status        string   `json:"status"`
+			URL           string   `json:"url"`
+			Tests         []string `json:"tests"`
+			SelectedRoles []string `json:"selected_roles"`
+			ReviewResults []struct {
+				Role    string `json:"role"`
+				State   string `json:"state"`
+				Outcome string `json:"outcome"`
+			} `json:"review_results"`
 		} `json:"pull_request"`
 		MergeGate struct {
 			Status                string `json:"status"`
@@ -3728,6 +3737,89 @@ func TestRunWorkProofReportsReadOnlyPromptToProductionEvidence(t *testing.T) {
 	}
 	if beforeLogs.String() != afterLogs.String() {
 		t.Fatalf("work proof changed logs; before=%s after=%s", beforeLogs.String(), afterLogs.String())
+	}
+
+	store, err := sqlite.Open(filepath.Join(root, "data", "odin.db"))
+	if err != nil {
+		t.Fatalf("sqlite.Open() error = %v", err)
+	}
+	defer store.Close()
+	project, err := store.GetProjectByKey(context.Background(), testProjectKey)
+	if err != nil {
+		t.Fatalf("GetProjectByKey() error = %v", err)
+	}
+	handoff, err := store.UpsertPullRequestHandoff(context.Background(), sqlite.UpsertPullRequestHandoffParams{
+		ProjectID:     project.ID,
+		Provider:      "github",
+		Repo:          "acme/alpha",
+		Number:        77,
+		URL:           "https://github.example/acme/alpha/pull/77",
+		State:         "open",
+		IssueURL:      proof.Source.URL,
+		Branch:        "issue/77-proof",
+		Title:         "Build low risk intake work",
+		Summary:       "Proof handoff ready for review.",
+		Tests:         []string{"go test ./internal/app/lifecycle -run TestRunWorkProof -count=1"},
+		Risks:         []string{"human merge remains required"},
+		Blockers:      []string{"deployment approval not in scope"},
+		SelectedRoles: []string{"reviewer", "qa"},
+		ReviewState:   "review_selected",
+	})
+	if err != nil {
+		t.Fatalf("UpsertPullRequestHandoff() error = %v", err)
+	}
+	if _, err := store.UpsertPullRequestReviewResult(context.Background(), sqlite.UpsertPullRequestReviewResultParams{
+		HandoffID: handoff.ID,
+		Role:      "reviewer",
+		State:     "completed",
+		Summary:   "Read-only review completed.",
+		Comments:  []string{"proof output includes PR handoff evidence"},
+		Blockers:  []string{"human merge required"},
+		Outcome:   "approved_with_blocker",
+	}); err != nil {
+		t.Fatalf("UpsertPullRequestReviewResult() error = %v", err)
+	}
+
+	var handoffProofOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"work", "proof", "--task", accept.WorkItem.Key, "--json"}, strings.NewReader(""), &handoffProofOutput); err != nil {
+		t.Fatalf("Run(work proof after PR handoff) error = %v\n%s", err, handoffProofOutput.String())
+	}
+	var handoffProof struct {
+		PullRequest struct {
+			Status        string   `json:"status"`
+			URL           string   `json:"url"`
+			Tests         []string `json:"tests"`
+			SelectedRoles []string `json:"selected_roles"`
+			ReviewResults []struct {
+				Role    string `json:"role"`
+				State   string `json:"state"`
+				Outcome string `json:"outcome"`
+			} `json:"review_results"`
+		} `json:"pull_request"`
+		MergeGate struct {
+			Status                string `json:"status"`
+			HumanApprovalRequired bool   `json:"human_approval_required"`
+			Approved              bool   `json:"approved"`
+		} `json:"merge_gate"`
+		Mutated bool `json:"mutated"`
+	}
+	if err := json.Unmarshal(handoffProofOutput.Bytes(), &handoffProof); err != nil {
+		t.Fatalf("json.Unmarshal(handoff proof) error = %v\n%s", err, handoffProofOutput.String())
+	}
+	if handoffProof.PullRequest.Status != "review_selected" || handoffProof.PullRequest.URL != "https://github.example/acme/alpha/pull/77" {
+		t.Fatalf("handoff proof PR = %+v, want review-selected PR handoff", handoffProof.PullRequest)
+	}
+	if !reflect.DeepEqual(handoffProof.PullRequest.SelectedRoles, []string{"reviewer", "qa"}) {
+		t.Fatalf("handoff proof selected roles = %#v, want reviewer + qa", handoffProof.PullRequest.SelectedRoles)
+	}
+	if len(handoffProof.PullRequest.Tests) != 1 || !strings.Contains(handoffProof.PullRequest.Tests[0], "TestRunWorkProof") {
+		t.Fatalf("handoff proof tests = %#v, want persisted test evidence", handoffProof.PullRequest.Tests)
+	}
+	if len(handoffProof.PullRequest.ReviewResults) != 1 || handoffProof.PullRequest.ReviewResults[0].Role != "reviewer" || handoffProof.PullRequest.ReviewResults[0].Outcome != "approved_with_blocker" {
+		t.Fatalf("handoff proof review results = %+v, want reviewer outcome", handoffProof.PullRequest.ReviewResults)
+	}
+	if handoffProof.MergeGate.Status != "approval_required" || !handoffProof.MergeGate.HumanApprovalRequired || handoffProof.MergeGate.Approved || handoffProof.Mutated {
+		t.Fatalf("handoff proof merge/mutated = %+v/%t, want explicit human merge approval boundary", handoffProof.MergeGate, handoffProof.Mutated)
 	}
 }
 

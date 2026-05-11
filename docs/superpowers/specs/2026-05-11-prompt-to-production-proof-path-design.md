@@ -404,6 +404,9 @@ PR #219 implements the v1 read-only proof command:
 - source intake correlation through reviewed intake Work Items
 - Run Attempt, approval, PR handoff, merge gate, deployment gate, and task event
   readback
+- PR handoff evidence for provider, repo, number, branch, tests, risks,
+  blockers, selected review roles, and reviewer/QA/security result rows when
+  they exist
 - honest `missing` and `not_started` states for incomplete delivery and PR
   evidence
 - fail-closed unknown Work Item handling

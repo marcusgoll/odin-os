@@ -434,9 +434,30 @@ type workProofDeliveryView struct {
 }
 
 type workProofPullRequest struct {
-	Status    string `json:"status"`
-	HandoffID *int64 `json:"handoff_id"`
-	URL       string `json:"url"`
+	Status        string                    `json:"status"`
+	HandoffID     *int64                    `json:"handoff_id"`
+	URL           string                    `json:"url"`
+	Provider      string                    `json:"provider,omitempty"`
+	Repo          string                    `json:"repo,omitempty"`
+	Number        int                       `json:"number,omitempty"`
+	State         string                    `json:"state,omitempty"`
+	Branch        string                    `json:"branch,omitempty"`
+	Title         string                    `json:"title,omitempty"`
+	Summary       string                    `json:"summary,omitempty"`
+	Tests         []string                  `json:"tests"`
+	Risks         []string                  `json:"risks"`
+	Blockers      []string                  `json:"blockers"`
+	SelectedRoles []string                  `json:"selected_roles"`
+	ReviewResults []workProofPRReviewResult `json:"review_results"`
+}
+
+type workProofPRReviewResult struct {
+	Role     string   `json:"role"`
+	State    string   `json:"state"`
+	Summary  string   `json:"summary,omitempty"`
+	Comments []string `json:"comments"`
+	Blockers []string `json:"blockers"`
+	Outcome  string   `json:"outcome,omitempty"`
 }
 
 type workProofApprovalsView struct {
@@ -487,7 +508,7 @@ func buildWorkProofView(ctx context.Context, store *sqlite.Store, task sqlite.Ta
 		Clarification:  workProofStatusView{Status: "not_required", Questions: []string{}},
 		Review:         workProofReviewView{Status: "not_started"},
 		Delivery:       workProofDeliveryView{EvidenceStatus: "missing", GateStatus: "not_started"},
-		PullRequest:    workProofPullRequest{Status: "missing", URL: ""},
+		PullRequest:    workProofPullRequest{Status: "missing", URL: "", Tests: []string{}, Risks: []string{}, Blockers: []string{}, SelectedRoles: []string{}, ReviewResults: []workProofPRReviewResult{}},
 		MergeGate:      workProofGateView{Status: "not_ready", HumanApprovalRequired: true, Approved: false},
 		DeploymentGate: workProofGateView{Status: "not_in_scope", HumanApprovalRequired: true, Approved: false},
 		NextSteps:      []string{},
@@ -570,6 +591,33 @@ func buildWorkProofView(ctx context.Context, store *sqlite.Store, task sqlite.Ta
 		id := handoff.ID
 		view.PullRequest.HandoffID = &id
 		view.PullRequest.URL = handoff.URL
+		view.PullRequest.Provider = handoff.Provider
+		view.PullRequest.Repo = handoff.Repo
+		view.PullRequest.Number = handoff.Number
+		view.PullRequest.State = handoff.State
+		view.PullRequest.Branch = handoff.Branch
+		view.PullRequest.Title = handoff.Title
+		view.PullRequest.Summary = handoff.Summary
+		view.PullRequest.Tests = handoff.Tests
+		view.PullRequest.Risks = handoff.Risks
+		view.PullRequest.Blockers = handoff.Blockers
+		view.PullRequest.SelectedRoles = handoff.SelectedRoles
+		view.MergeGate.Status = "approval_required"
+		results, err := store.ListPullRequestReviewResults(ctx, handoff.ID)
+		if err != nil {
+			return workProofView{}, err
+		}
+		view.PullRequest.ReviewResults = make([]workProofPRReviewResult, 0, len(results))
+		for _, result := range results {
+			view.PullRequest.ReviewResults = append(view.PullRequest.ReviewResults, workProofPRReviewResult{
+				Role:     result.Role,
+				State:    result.State,
+				Summary:  result.Summary,
+				Comments: result.Comments,
+				Blockers: result.Blockers,
+				Outcome:  result.Outcome,
+			})
+		}
 	}
 
 	events, err := store.ListEvents(ctx, sqlite.ListEventsParams{TaskID: &task.ID})
