@@ -22,6 +22,7 @@ import (
 	"odin-os/internal/core/capabilities"
 	"odin-os/internal/core/initiatives"
 	"odin-os/internal/prompts"
+	"odin-os/internal/registry"
 	"odin-os/internal/runtime/checkpoints"
 	"odin-os/internal/runtime/jobs"
 	runtimestate "odin-os/internal/runtime/state"
@@ -7488,6 +7489,51 @@ func TestInvokeServedProjectStatusFallsBackToProjectScopeLabel(t *testing.T) {
 	}
 	if string(response.Output) != "scope=alpha mode=local\n" {
 		t.Fatalf("response output = %q, want %q", response.Output, "scope=alpha mode=local\n")
+	}
+}
+
+func TestNewServeCapabilityGatewayIncludesRegistryAndBuiltinTools(t *testing.T) {
+	t.Parallel()
+
+	gateway := newServeCapabilityGateway(bootstrap.App{
+		RegistrySnapshot: registry.Snapshot{
+			Items: []registry.Item{
+				{
+					Kind:         registry.KindCommand,
+					Key:          "project.status",
+					Name:         "project.status",
+					Version:      "1.0.0",
+					Title:        "Project Status",
+					Summary:      "Show the current project state.",
+					Availability: registry.Availability{Scope: "global"},
+					InputSchema:  registry.SchemaRef{Type: "object"},
+					OutputSchema: registry.SchemaRef{Type: "string"},
+					Execution:    registry.ExecutionPolicy{Mode: "local"},
+				},
+			},
+		},
+	})
+	if gateway == nil {
+		t.Fatal("newServeCapabilityGateway() = nil, want gateway")
+	}
+
+	command, err := gateway.GetCapability("project.status", "1.0.0")
+	if err != nil {
+		t.Fatalf("GetCapability(project.status) error = %v", err)
+	}
+	if command.Kind != registry.KindCommand {
+		t.Fatalf("project.status kind = %q, want command", command.Kind)
+	}
+
+	tool, err := gateway.GetCapability("project_status", "1.0.0")
+	if err != nil {
+		t.Fatalf("GetCapability(project_status) error = %v", err)
+	}
+	if tool.Kind != registry.KindTool {
+		t.Fatalf("project_status kind = %q, want tool", tool.Kind)
+	}
+	if tool.Implementation.Kind != "builtin_tool" {
+		t.Fatalf("project_status implementation = %+v, want builtin_tool", tool.Implementation)
 	}
 }
 

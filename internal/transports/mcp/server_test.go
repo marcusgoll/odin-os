@@ -89,6 +89,43 @@ func TestMCPListsCapabilitiesAsTools(t *testing.T) {
 	}
 }
 
+func TestMCPListsBuiltinToolCapabilities(t *testing.T) {
+	t.Parallel()
+
+	server := NewServer(testCapabilitySource{
+		cards: map[registry.Kind][]capabilities.CapabilityCard{
+			registry.KindTool: {
+				{ID: "project_status", Kind: registry.KindTool, Name: "project_status", Version: "1.0.0", Scope: "global"},
+			},
+		},
+		items: map[string]capabilities.Descriptor{
+			"project_status@1.0.0": {
+				Kind:         registry.KindTool,
+				Key:          "project_status",
+				Name:         "project_status",
+				Version:      "1.0.0",
+				Availability: registry.Availability{Scope: "global"},
+				InputSchema:  registry.SchemaRef{Type: "object"},
+				OutputSchema: registry.SchemaRef{Type: "object"},
+			},
+		},
+	})
+
+	tools, err := server.ListTools(context.Background(), "global")
+	if err != nil {
+		t.Fatalf("ListTools() error = %v", err)
+	}
+	if len(tools) != 1 {
+		t.Fatalf("ListTools() len = %d, want 1", len(tools))
+	}
+	if tools[0].CapabilityID != "project_status" {
+		t.Fatalf("ListTools()[0].CapabilityID = %q, want project_status", tools[0].CapabilityID)
+	}
+	if tools[0].Kind != registry.KindTool {
+		t.Fatalf("ListTools()[0].Kind = %q, want tool", tools[0].Kind)
+	}
+}
+
 func TestMCPListToolsSkipsDescriptorsThatDisappearBetweenListAndGet(t *testing.T) {
 	t.Parallel()
 
