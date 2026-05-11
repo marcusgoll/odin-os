@@ -182,6 +182,60 @@ approval request and audit-event evidence.
 3. Several green PRs are still drafts or unmerged, so their behavior is not
    current `main` behavior.
 
+## Completion Audit Verdict
+
+Current `origin/main` at the time of this update was `eb51743` (`Add governed
+memory proposal lifecycle (#217)`). The objective is not complete on current
+`main`.
+
+Concrete success criteria from the objective:
+
+1. Scheduler triggers must have real `odin` create/list/show/test flows with
+   event envelope, dedupe, approval preview, audit events, and next-run preview.
+2. Mutating-path approval gates must be proven for messages, data deletion,
+   deployment, calendar mutation, public posting, production changes, purchases,
+   permissions, and financial/legal/medical records.
+3. Plugin terminology must route through the capability/tool model or a thin
+   first-class plugin layer over the existing gateway, with no parallel plugin
+   runtime.
+4. Overview/TUI must surface raw intake, review queue, triggers, approvals,
+   recovery, running jobs, failed jobs, and blocked items.
+5. Prompt-to-production must prove vague intake or goal through clarification,
+   spec/ticket, atomic commits, tests, review, PR handoff, and approval before
+   merge/deploy.
+6. Each claimed automation path must be backed by a real `odin` command that
+   persists state, enforces policy, and emits audit evidence.
+
+Completion evidence status:
+
+- Criteria 1 is implemented on `main`.
+- Criteria 2 is partially implemented on `main`; exact explicit-dispatch parity
+  remains in green draft PR #221.
+- Criteria 3 remains in green draft PR #218.
+- Criteria 4 is mostly implemented on `main`; failed-work rendering remains in
+  green draft PR #216.
+- Criteria 5 remains split across green draft PRs #213, #214, #219, #222, #223,
+  and #224. PR #224's live GitHub smoke has not run.
+- Criteria 6 is satisfied for merged trigger/review/overview pieces, but not
+  universal while the proof-path, approval-parity, capabilities, failed-work,
+  merge/deploy approval, and live-smoke pieces remain open.
+
+Latest checked PR state for #211, #212, #213, #214, #216, #218, #219, #220,
+#221, #222, #223, and #224 was clean with green remote checks. PR #212 is
+ready-for-review rather than draft; the others are draft. That is readiness
+evidence, not completion evidence.
+
+Live proof blocker:
+
+- `ODIN_LIVE_PR_HANDOFF_SMOKE` was unset.
+- `ODIN_LIVE_PR_HANDOFF_REPO` was unset.
+- `ODIN_LIVE_PR_HANDOFF_HEAD_BRANCH` was unset.
+- `GITHUB_TOKEN` was unset.
+
+Therefore the remaining action is an explicit operator decision, not another
+local design slice: either approve and provide a disposable GitHub live-smoke
+target for PR #224, or approve integration of the green draft stack.
+
 ## Draft Stack Readiness
 
 Current non-mutating stack-readiness check:
