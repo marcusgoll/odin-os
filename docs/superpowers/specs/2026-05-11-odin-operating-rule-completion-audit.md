@@ -182,6 +182,30 @@ persists the safety-classified governance/destructive intent before approval
 blocking and extends exact category coverage across all named high-risk
 actions.
 
+Fresh prompt-to-production command-surface proof on the doc-only audit branch,
+whose code differs from `origin/main` only by this audit document:
+
+```bash
+make build
+./bin/odin work proof --help
+./bin/odin work pr prepare --help
+./bin/odin work approval request --help
+./bin/odin work pr review run --help
+```
+
+Observed result:
+
+- `which odin` resolved to `/home/orchestrator/.local/bin/odin`, so this proof
+  deliberately used the freshly built repo-local `./bin/odin`.
+- `work proof` exited with `unknown work command: proof`.
+- `work pr prepare` exited with `unknown work command: pr`.
+- `work approval request` exited with `unknown work command: approval`.
+- `work pr review run` exited with `unknown work command: pr`.
+
+This directly proves the prompt-to-production proof path, PR handoff, review
+Run Attempt, and merge/deploy approval-request commands remain open-PR behavior
+in #219/#222/#223/#224, not current `main` behavior.
+
 ## PR #221 Approval-Parity Proof
 
 Fresh proof in `/home/orchestrator/odin-os/.worktrees/high-risk-approval-parity`:
