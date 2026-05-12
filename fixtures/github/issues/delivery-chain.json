@@ -1,0 +1,10 @@
+[
+  {
+    "number": 201,
+    "title": "Implement fixture-backed PR-ready delivery proof",
+    "body": "Deliver a safe dry-run proof for GitHub issue delivery.\n\n## Acceptance Criteria\n- Create an isolated task worktree\n- Run deterministic local tests\n- Attach review evidence before PR creation",
+    "url": "https://github.example/acme/alpha/issues/201",
+    "state": "open",
+    "labels": ["odin:ready", "agent:go-orchestrator"]
+  }
+]
