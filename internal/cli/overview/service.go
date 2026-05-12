@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -37,9 +38,15 @@ type Service struct {
 	Registry         coreprojects.Registry
 	RegistrySnapshot registry.Snapshot
 	Now              func() time.Time
+	ReadinessStatus  string
+	HealthStatus     string
+	BinaryPath       string
+	SourceRoot       string
 }
 
 type View struct {
+	Readiness             ReadinessLane            `json:"readiness"`
+	ActualUse             ActualUseLane            `json:"actual_use"`
 	Workspace             WorkspaceLane            `json:"workspace"`
 	Initiatives           []InitiativeSummary      `json:"initiatives"`
 	WorkItems             []WorkItemSummary        `json:"work_items"`
@@ -56,6 +63,57 @@ type View struct {
 	KnowledgeContextPacks KnowledgeContextPackLane `json:"knowledge_context_packs"`
 	IntakeInbox           IntakeInboxLane          `json:"intake_inbox"`
 	AutomationTriggers    AutomationTriggerLane    `json:"automation_triggers"`
+	DeliveryProfiles      DeliveryProfileLane      `json:"delivery_profiles"`
+	ExecutionIntent       ExecutionIntentLane      `json:"execution_intent"`
+	BinarySource          BinarySourceLane         `json:"binary_source"`
+}
+
+type ReadinessLane struct {
+	Wiring       Wiring `json:"wiring"`
+	Status       string `json:"status"`
+	HealthStatus string `json:"health_status"`
+	Ready        bool   `json:"ready"`
+	Note         string `json:"note,omitempty"`
+}
+
+type ActualUseLane struct {
+	Wiring                        Wiring `json:"wiring"`
+	Status                        string `json:"status"`
+	ActionRequiredCount           int    `json:"action_required_count"`
+	WorkItemCount                 int    `json:"work_item_count"`
+	OpenWorkItemCount             int    `json:"open_work_item_count"`
+	ActiveRunCount                int    `json:"active_run_count"`
+	PendingApprovalCount          int    `json:"pending_approval_count"`
+	ReviewQueueCount              int    `json:"review_queue_count"`
+	BlockedWorkItemCount          int    `json:"blocked_work_item_count"`
+	FailedWorkItemCount           int    `json:"failed_work_item_count"`
+	RecoveryRecommendationCount   int    `json:"recovery_recommendation_count"`
+	IntakeReviewCount             int    `json:"intake_review_count"`
+	AutomationTriggerCount        int    `json:"automation_trigger_count"`
+	EnabledAutomationTriggerCount int    `json:"enabled_automation_trigger_count"`
+	DeliveryProfileCount          int    `json:"delivery_profile_count"`
+	ExplicitIntentWorkItemCount   int    `json:"explicit_intent_work_item_count"`
+	FallbackIntentWorkItemCount   int    `json:"fallback_intent_work_item_count"`
+}
+
+type DeliveryProfileLane struct {
+	Wiring       Wiring   `json:"wiring"`
+	ProfileCount int      `json:"profile_count"`
+	Keys         []string `json:"keys"`
+}
+
+type ExecutionIntentLane struct {
+	Wiring                Wiring `json:"wiring"`
+	ExplicitWorkItemCount int    `json:"explicit_work_item_count"`
+	FallbackWorkItemCount int    `json:"fallback_work_item_count"`
+}
+
+type BinarySourceLane struct {
+	Wiring     Wiring `json:"wiring"`
+	Status     string `json:"status"`
+	BinaryPath string `json:"binary_path,omitempty"`
+	SourceRoot string `json:"source_root,omitempty"`
+	Note       string `json:"note,omitempty"`
 }
 
 type WorkspaceLane struct {
@@ -465,6 +523,11 @@ func (service Service) Build(ctx context.Context, resolved scope.Resolution) (Vi
 	}
 
 	view := View{
+		Readiness: readinessLane(service),
+		ActualUse: ActualUseLane{
+			Wiring: WiringLive,
+			Status: "unknown",
+		},
 		Workspace: WorkspaceLane{
 			Wiring:       WiringNotYetWired,
 			ControlScope: controlScopeLabel(resolved),
@@ -507,6 +570,11 @@ func (service Service) Build(ctx context.Context, resolved scope.Resolution) (Vi
 		AutomationTriggers: AutomationTriggerLane{
 			Wiring: WiringNotYetWired,
 		},
+		DeliveryProfiles: deliveryProfileLane(service.RegistrySnapshot),
+		ExecutionIntent: ExecutionIntentLane{
+			Wiring: WiringLive,
+		},
+		BinarySource: binarySourceLane(service),
 	}
 
 	workspaceView, err := projections.GetWorkspaceOverviewView(ctx, service.Store.DB(), workspaces.DefaultWorkspaceKey)
@@ -1148,6 +1216,9 @@ func (service Service) Build(ctx context.Context, resolved scope.Resolution) (Vi
 	}
 	view.KnowledgeContextPacks = knowledgeContextPacks
 	view.ReviewQueue = reviewQueueLane(view)
+	view.DeliveryProfiles = deliveryProfileLane(service.RegistrySnapshot)
+	view.ExecutionIntent = executionIntentLane(view.WorkItems)
+	view.ActualUse = actualUseLane(view)
 
 	return view, nil
 }
@@ -1327,6 +1398,110 @@ func reviewQueueLane(view View) ReviewQueueLane {
 	}
 	lane.TotalCount = lane.IntakeCount + lane.ApprovalCount + lane.KnowledgeCount + lane.SkillArtifactCount + lane.FailedWorkCount
 	return lane
+}
+
+func readinessLane(service Service) ReadinessLane {
+	status := strings.ToLower(strings.TrimSpace(service.ReadinessStatus))
+	health := strings.ToLower(strings.TrimSpace(service.HealthStatus))
+	lane := ReadinessLane{
+		Wiring:       WiringLive,
+		Status:       status,
+		HealthStatus: health,
+	}
+	if lane.Status == "" {
+		lane.Status = "unknown"
+	}
+	if lane.HealthStatus == "" {
+		lane.HealthStatus = "unknown"
+	}
+	lane.Ready = lane.Status == "ready" && lane.HealthStatus == "healthy"
+	if lane.Status == "unknown" || lane.HealthStatus == "unknown" {
+		lane.Note = "readiness or health was not provided by the caller; unknown is not treated as healthy"
+	}
+	return lane
+}
+
+func deliveryProfileLane(snapshot registry.Snapshot) DeliveryProfileLane {
+	lane := DeliveryProfileLane{Wiring: WiringCatalogBacked}
+	for _, item := range snapshot.Items {
+		if item.Kind != registry.KindWorkflow || !hasRegistryTag(item, "delivery_profile") {
+			continue
+		}
+		lane.ProfileCount++
+		lane.Keys = append(lane.Keys, item.Key)
+	}
+	sort.Strings(lane.Keys)
+	return lane
+}
+
+func executionIntentLane(workItems []WorkItemSummary) ExecutionIntentLane {
+	lane := ExecutionIntentLane{Wiring: WiringLive}
+	for _, item := range workItems {
+		if strings.TrimSpace(item.ExecutionIntent) == "" {
+			lane.FallbackWorkItemCount++
+			continue
+		}
+		lane.ExplicitWorkItemCount++
+	}
+	return lane
+}
+
+func actualUseLane(view View) ActualUseLane {
+	lane := ActualUseLane{
+		Wiring:                        WiringLive,
+		WorkItemCount:                 len(view.WorkItems) + len(view.Observability.RecoveryGuidance),
+		OpenWorkItemCount:             len(view.WorkItems),
+		ActiveRunCount:                len(view.Observability.ActiveRuns),
+		PendingApprovalCount:          len(view.Approvals),
+		ReviewQueueCount:              view.ReviewQueue.TotalCount,
+		BlockedWorkItemCount:          len(view.Observability.BlockedWork),
+		FailedWorkItemCount:           len(view.Observability.RecoveryGuidance),
+		RecoveryRecommendationCount:   len(view.Observability.RecoveryGuidance),
+		IntakeReviewCount:             view.ReviewQueue.IntakeCount,
+		AutomationTriggerCount:        view.AutomationTriggers.TriggerCount,
+		EnabledAutomationTriggerCount: view.AutomationTriggers.EnabledCount,
+		DeliveryProfileCount:          view.DeliveryProfiles.ProfileCount,
+		ExplicitIntentWorkItemCount:   view.ExecutionIntent.ExplicitWorkItemCount,
+		FallbackIntentWorkItemCount:   view.ExecutionIntent.FallbackWorkItemCount,
+	}
+	lane.ActionRequiredCount = lane.ReviewQueueCount + lane.BlockedWorkItemCount
+	if lane.ActionRequiredCount > 0 {
+		lane.Status = "action_required"
+	} else {
+		lane.Status = "clear"
+	}
+	return lane
+}
+
+func binarySourceLane(service Service) BinarySourceLane {
+	binaryPath := strings.TrimSpace(service.BinaryPath)
+	sourceRoot := strings.TrimSpace(service.SourceRoot)
+	lane := BinarySourceLane{
+		Wiring:     WiringLive,
+		Status:     "unknown",
+		BinaryPath: binaryPath,
+		SourceRoot: sourceRoot,
+	}
+	if binaryPath == "" || sourceRoot == "" {
+		lane.Note = "binary path or source root was not provided by the caller"
+		return lane
+	}
+	rel, err := filepath.Rel(filepath.Clean(sourceRoot), filepath.Clean(binaryPath))
+	if err == nil && rel != "." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && rel != ".." {
+		lane.Status = "aligned"
+		return lane
+	}
+	lane.Status = "external_binary"
+	return lane
+}
+
+func hasRegistryTag(item registry.Item, tag string) bool {
+	for _, candidate := range item.Tags {
+		if strings.EqualFold(strings.TrimSpace(candidate), tag) {
+			return true
+		}
+	}
+	return false
 }
 
 func (service Service) knowledgeContextPacks(ctx context.Context, resolved scope.Resolution) (KnowledgeContextPackLane, error) {

@@ -22,6 +22,7 @@ import (
 	coremedia "odin-os/internal/core/media"
 	coreworkspace "odin-os/internal/core/workspace"
 	"odin-os/internal/core/workspaces"
+	"odin-os/internal/registry"
 	runtimeevents "odin-os/internal/runtime/events"
 	healthsvc "odin-os/internal/runtime/health"
 	"odin-os/internal/runtime/projections"
@@ -214,6 +215,32 @@ func TestOperationalHandlerExposesDashboardStatusWithoutSecretsOrTmuxDependency(
 	seedHealthyObservability(t, ctx, store)
 	seedRuntimeState(t, ctx, store, "ready")
 	seedOperatorReadModels(t, ctx, store)
+	project, err := store.GetProjectByKey(ctx, "alpha")
+	if err != nil {
+		t.Fatalf("GetProjectByKey(alpha) error = %v", err)
+	}
+	if _, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:             project.ID,
+		Key:                   "explicit-intent-task",
+		Title:                 "Explicit intent task",
+		Status:                "queued",
+		Scope:                 "project",
+		RequestedBy:           "test",
+		ExecutionIntent:       "deliver_with_evidence",
+		ExecutionIntentSource: "test",
+	}); err != nil {
+		t.Fatalf("CreateTask(explicit intent) error = %v", err)
+	}
+	if _, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "failed-task",
+		Title:       "Failed task",
+		Status:      "failed",
+		Scope:       "project",
+		RequestedBy: "test",
+	}); err != nil {
+		t.Fatalf("CreateTask(failed) error = %v", err)
+	}
 
 	const adminToken = "ghp_dashboard_secret_token"
 	server := httptest.NewServer(httpapi.NewOperationalHandler(httpapi.Dependencies{
@@ -224,6 +251,11 @@ func TestOperationalHandlerExposesDashboardStatusWithoutSecretsOrTmuxDependency(
 		ReadModels:      store.DB(),
 		RegistryHealthy: true,
 		AdminToken:      adminToken,
+		RegistrySnapshot: registry.Snapshot{Items: []registry.Item{{
+			Kind: registry.KindWorkflow,
+			Key:  "delivery-profile-fixture",
+			Tags: []string{"delivery_profile"},
+		}}},
 	}))
 	defer server.Close()
 
@@ -258,9 +290,17 @@ func TestOperationalHandlerExposesDashboardStatusWithoutSecretsOrTmuxDependency(
 			Reason   string `json:"reason"`
 		} `json:"worker_dispatch"`
 		Counts struct {
-			WorkItems         int `json:"work_items"`
-			ActiveRunAttempts int `json:"active_run_attempts"`
-			PendingApprovals  int `json:"pending_approvals"`
+			WorkItems               int `json:"work_items"`
+			ActiveRunAttempts       int `json:"active_run_attempts"`
+			PendingApprovals        int `json:"pending_approvals"`
+			ReviewQueueItems        int `json:"review_queue_items"`
+			BlockedWorkItems        int `json:"blocked_work_items"`
+			FailedWorkItems         int `json:"failed_work_items"`
+			RecoveryRecommendations int `json:"recovery_recommendations"`
+			DeliveryProfiles        int `json:"delivery_profiles"`
+			ExplicitIntentWorkItems int `json:"explicit_intent_work_items"`
+			FallbackIntentWorkItems int `json:"fallback_intent_work_items"`
+			ActionRequiredItems     int `json:"action_required_items"`
 		} `json:"counts"`
 		Tmux struct {
 			Available bool   `json:"available"`
@@ -278,6 +318,12 @@ func TestOperationalHandlerExposesDashboardStatusWithoutSecretsOrTmuxDependency(
 	}
 	if status.Counts.WorkItems == 0 || status.Counts.ActiveRunAttempts == 0 || status.Counts.PendingApprovals == 0 {
 		t.Fatalf("/status counts = %+v, want runtime-state-backed counts", status.Counts)
+	}
+	if status.Counts.ReviewQueueItems < 2 || status.Counts.BlockedWorkItems != 1 || status.Counts.FailedWorkItems != 1 || status.Counts.RecoveryRecommendations != 1 {
+		t.Fatalf("/status counts = %+v, want action-required counts", status.Counts)
+	}
+	if status.Counts.DeliveryProfiles != 1 || status.Counts.ExplicitIntentWorkItems != 1 || status.Counts.FallbackIntentWorkItems == 0 || status.Counts.ActionRequiredItems < status.Counts.ReviewQueueItems {
+		t.Fatalf("/status counts = %+v, want delivery/intent/action rollups", status.Counts)
 	}
 	if status.Tmux.Available || status.Tmux.Source != "not_configured" {
 		t.Fatalf("/status tmux = %+v, want absence reported without daemon failure", status.Tmux)

@@ -120,16 +120,41 @@ func (c Client) QueryOverview(ctx context.Context) (Model, error) {
 	if err != nil {
 		return Model{}, err
 	}
+	blockedItems, err := c.queryPrometheusScalar(ctx, "odin_blocked_items")
+	if err != nil {
+		return Model{}, err
+	}
+	approvalsWaiting, err := c.queryPrometheusScalar(ctx, "odin_approvals_waiting")
+	if err != nil {
+		return Model{}, err
+	}
+	reviewQueueItems, err := c.queryPrometheusScalar(ctx, "odin_review_queue_items")
+	if err != nil {
+		return Model{}, err
+	}
+	failedWorkItems, err := c.queryPrometheusScalar(ctx, "odin_failed_work_items")
+	if err != nil {
+		return Model{}, err
+	}
+	recoveryRecommendations, err := c.queryPrometheusScalar(ctx, "odin_recovery_recommendations")
+	if err != nil {
+		return Model{}, err
+	}
 
 	stale := telemetryStale >= 1
 	score := int(math.Round(healthScore))
 	return Model{
-		TelemetryAvailable: true,
-		Status:             status,
-		HealthScore:        score,
-		TelemetryStale:     stale,
-		LifecyclePhase:     lifecyclePhase,
-		ActiveRuns:         int(math.Round(activeRuns)),
+		TelemetryAvailable:      true,
+		Status:                  status,
+		HealthScore:             score,
+		TelemetryStale:          stale,
+		LifecyclePhase:          lifecyclePhase,
+		ActiveRuns:              int(math.Round(activeRuns)),
+		BlockedItems:            int(math.Round(blockedItems)),
+		ApprovalsWaiting:        int(math.Round(approvalsWaiting)),
+		ReviewQueueItems:        int(math.Round(reviewQueueItems)),
+		FailedWorkItems:         int(math.Round(failedWorkItems)),
+		RecoveryRecommendations: int(math.Round(recoveryRecommendations)),
 	}, nil
 }
 

@@ -35,6 +35,15 @@ func RenderOverview(model Model) string {
 	writeBoxBottom(&builder)
 	builder.WriteByte('\n')
 
+	writeBoxTop(&builder, "ACTION REQUIRED")
+	writeBoxRow(&builder, labelledRow("APPROVALS", fmt.Sprintf("%d", model.ApprovalsWaiting)))
+	writeBoxRow(&builder, labelledRow("BLOCKED", fmt.Sprintf("%d", model.BlockedItems)))
+	writeBoxRow(&builder, labelledRow("REVIEW QUEUE", fmt.Sprintf("%d", model.ReviewQueueItems)))
+	writeBoxRow(&builder, labelledRow("FAILED WORK", fmt.Sprintf("%d", model.FailedWorkItems)))
+	writeBoxRow(&builder, labelledRow("RECOVERY", fmt.Sprintf("%d", model.RecoveryRecommendations)))
+	writeBoxBottom(&builder)
+	builder.WriteByte('\n')
+
 	writeBoxTop(&builder, "RECENT LOGS")
 	if model.LogsUnavailable != "" {
 		writeBoxRow(&builder, "unavailable: "+model.LogsUnavailable)

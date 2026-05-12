@@ -411,10 +411,16 @@ func runOverview(ctx context.Context, app bootstrap.App, args []string, stdout i
 		return err
 	}
 
+	readinessStatus, healthStatus := overviewRuntimeStatus(ctx, app)
+	binaryPath, _ := os.Executable()
 	view, err := clioverview.Service{
 		Store:            app.Store,
 		Registry:         app.Registry,
 		RegistrySnapshot: app.RegistrySnapshot,
+		ReadinessStatus:  readinessStatus,
+		HealthStatus:     healthStatus,
+		BinaryPath:       binaryPath,
+		SourceRoot:       app.RepoRoot,
 	}.Build(ctx, state.Scope)
 	if err != nil {
 		return err
@@ -424,6 +430,23 @@ func runOverview(ctx context.Context, app bootstrap.App, args []string, stdout i
 	}
 	_, err = fmt.Fprintln(stdout, clirender.RenderOverview(view))
 	return err
+}
+
+func overviewRuntimeStatus(ctx context.Context, app bootstrap.App) (string, string) {
+	health := healthsvc.Service{DB: app.Store.DB()}
+	registryHealthy := len(app.RegistryDiagnostics) == 0
+	report, err := health.Doctor(ctx, registryHealthy)
+	if err != nil {
+		return "unknown", "unknown"
+	}
+	_, ready, err := health.Readiness(ctx, registryHealthy)
+	if err != nil {
+		return "unknown", string(report.Status)
+	}
+	if ready {
+		return "ready", string(report.Status)
+	}
+	return "not_ready", string(report.Status)
 }
 
 type capabilityListView struct {
@@ -5973,12 +5996,13 @@ func runServe(ctx context.Context, app bootstrap.App, cfg appconfig.Config, stdo
 			Gateway:    newServeCapabilityGateway(app),
 			AdminToken: cfg.AdminToken,
 			Fallback: apihttp.NewOperationalHandler(apihttp.Dependencies{
-				Health:          healthService,
-				Metrics:         metricsService,
-				Store:           app.Store,
-				ReadModels:      app.Store.DB(),
-				RegistryHealthy: healthDeps.RegistryHealthy,
-				Now:             now,
+				Health:           healthService,
+				Metrics:          metricsService,
+				Store:            app.Store,
+				ReadModels:       app.Store.DB(),
+				RegistryHealthy:  healthDeps.RegistryHealthy,
+				RegistrySnapshot: app.RegistrySnapshot,
+				Now:              now,
 				Tmux: apihttp.WorkspaceTmuxStatusProvider{
 					Workspaces: coreworkspace.Service{
 						Store:    app.Store,

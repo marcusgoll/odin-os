@@ -19,6 +19,7 @@ import (
 
 	coreworkspace "odin-os/internal/core/workspace"
 	"odin-os/internal/core/workspaces"
+	"odin-os/internal/registry"
 	healthsvc "odin-os/internal/runtime/health"
 	"odin-os/internal/runtime/projections"
 	"odin-os/internal/runtime/triggers"
@@ -38,6 +39,7 @@ type Dependencies struct {
 	Tmux                TmuxStatusProvider
 	GitHubWebhookSecret string
 	GitHubIssueIngester GitHubIssueIngester
+	RegistrySnapshot    registry.Snapshot
 }
 
 type AdminActions interface {
@@ -784,9 +786,23 @@ type runtimeStatus struct {
 }
 
 type dashboardCounts struct {
-	WorkItems         int `json:"work_items"`
-	ActiveRunAttempts int `json:"active_run_attempts"`
-	PendingApprovals  int `json:"pending_approvals"`
+	WorkItems                 int `json:"work_items"`
+	OpenWorkItems             int `json:"open_work_items"`
+	ActiveRunAttempts         int `json:"active_run_attempts"`
+	PendingApprovals          int `json:"pending_approvals"`
+	ReviewQueueItems          int `json:"review_queue_items"`
+	BlockedWorkItems          int `json:"blocked_work_items"`
+	FailedWorkItems           int `json:"failed_work_items"`
+	RecoveryRecommendations   int `json:"recovery_recommendations"`
+	IntakeReviewItems         int `json:"intake_review_items"`
+	KnowledgeReviewItems      int `json:"knowledge_review_items"`
+	SkillArtifactReviewItems  int `json:"skill_artifact_review_items"`
+	AutomationTriggers        int `json:"automation_triggers"`
+	EnabledAutomationTriggers int `json:"enabled_automation_triggers"`
+	DeliveryProfiles          int `json:"delivery_profiles"`
+	ExplicitIntentWorkItems   int `json:"explicit_intent_work_items"`
+	FallbackIntentWorkItems   int `json:"fallback_intent_work_items"`
+	ActionRequiredItems       int `json:"action_required_items"`
 }
 
 type dashboardIssue struct {
@@ -866,22 +882,28 @@ func buildStatusPayload(ctx context.Context, deps Dependencies, now func() time.
 			status.Runtime = runtimeState
 		}
 
-		workItems, err := projections.ListTaskStatusViews(ctx, deps.ReadModels)
-		if err != nil {
-			return dashboardStatus{}, err
-		}
-		activeRuns, err := projections.ListActiveRunViews(ctx, deps.ReadModels)
-		if err != nil {
-			return dashboardStatus{}, err
-		}
-		pendingApprovals, err := projections.ListPendingApprovalViews(ctx, deps.ReadModels)
+		actualUse, err := projections.GetActualUseSummaryView(ctx, deps.ReadModels, workspaces.DefaultWorkspaceKey)
 		if err != nil {
 			return dashboardStatus{}, err
 		}
 		status.Counts = dashboardCounts{
-			WorkItems:         len(workItems),
-			ActiveRunAttempts: len(activeRuns),
-			PendingApprovals:  len(pendingApprovals),
+			WorkItems:                 actualUse.WorkItems,
+			OpenWorkItems:             actualUse.OpenWorkItems,
+			ActiveRunAttempts:         actualUse.ActiveRunAttempts,
+			PendingApprovals:          actualUse.PendingApprovals,
+			ReviewQueueItems:          actualUse.ReviewQueueItems,
+			BlockedWorkItems:          actualUse.BlockedWorkItems,
+			FailedWorkItems:           actualUse.FailedWorkItems,
+			RecoveryRecommendations:   actualUse.RecoveryRecommendations,
+			IntakeReviewItems:         actualUse.IntakeReviewItems,
+			KnowledgeReviewItems:      actualUse.KnowledgeReviewItems,
+			SkillArtifactReviewItems:  actualUse.SkillArtifactReviewItems,
+			AutomationTriggers:        actualUse.AutomationTriggers,
+			EnabledAutomationTriggers: actualUse.EnabledAutomationTriggers,
+			DeliveryProfiles:          countDeliveryProfiles(deps.RegistrySnapshot),
+			ExplicitIntentWorkItems:   actualUse.ExplicitIntentWorkItems,
+			FallbackIntentWorkItems:   actualUse.FallbackIntentWorkItems,
+			ActionRequiredItems:       actualUse.ActionRequiredItems,
 		}
 	}
 
@@ -897,6 +919,22 @@ func buildStatusPayload(ctx context.Context, deps Dependencies, now func() time.
 	status.WorkerDispatch = healthsvc.NewWorkerDispatchStatus(ready, status.Runtime.Status, report.Status)
 
 	return status, nil
+}
+
+func countDeliveryProfiles(snapshot registry.Snapshot) int {
+	count := 0
+	for _, item := range snapshot.Items {
+		if item.Kind != registry.KindWorkflow {
+			continue
+		}
+		for _, tag := range item.Tags {
+			if strings.EqualFold(strings.TrimSpace(tag), "delivery_profile") {
+				count++
+				break
+			}
+		}
+	}
+	return count
 }
 
 func getRuntimeStatus(ctx context.Context, queryer projections.Queryer) (runtimeStatus, error) {
