@@ -23,7 +23,7 @@ import (
 	"odin-os/internal/store/sqlite"
 )
 
-const reviewUsage = "usage: odin review list [--json] | odin review show <queue-id>|--id <queue-id> [--json] | odin review approve --id <queue-id> [--json] | odin review reject --id <queue-id> --reason <reason> [--json] | odin review act <queue-id> <accept|reject|archive|approve|deny|clarify|retry|follow-up> [--dry-run] [--json]"
+const reviewUsage = "usage: odin review list [--json] [--source <source_type>] [--status <status>] [--severity <severity>] | odin review show <queue-id>|--id <queue-id> [--json] | odin review approve --id <queue-id> [--json] | odin review reject --id <queue-id> --reason <reason> [--json] | odin review act <queue-id> <accept|reject|archive|approve|deny|clarify|retry|follow-up> [--dry-run] [--json]"
 
 type reviewQueueListView struct {
 	Items []reviewQueueEntry `json:"items"`
@@ -134,6 +134,7 @@ type reviewQueueEntry struct {
 	Reason                 string   `json:"reason,omitempty"`
 	Title                  string   `json:"title,omitempty"`
 	CreatedAt              string   `json:"created_at,omitempty"`
+	UpdatedAt              string   `json:"updated_at,omitempty"`
 	ProjectScope           string   `json:"project_scope,omitempty"`
 	Summary                string   `json:"summary,omitempty"`
 	TaskID                 int64    `json:"task_id,omitempty"`
@@ -142,7 +143,10 @@ type reviewQueueEntry struct {
 	WorkKind               string   `json:"work_kind,omitempty"`
 	Source                 string   `json:"source,omitempty"`
 	Risk                   string   `json:"risk,omitempty"`
+	Severity               string   `json:"severity,omitempty"`
 	Decision               string   `json:"decision,omitempty"`
+	RecommendedAction      string   `json:"recommended_action,omitempty"`
+	OperatorNextStep       string   `json:"operator_next_step,omitempty"`
 	RetryEligible          *bool    `json:"retry_eligible,omitempty"`
 	RetryBlockReason       string   `json:"retry_block_reason,omitempty"`
 	RecoveryRecommendation string   `json:"recovery_recommendation,omitempty"`
@@ -181,10 +185,11 @@ func runReview(ctx context.Context, app bootstrap.App, args []string, stdout io.
 
 	switch strings.ToLower(strings.TrimSpace(remaining[0])) {
 	case "list":
-		if len(remaining) != 1 {
+		filters, err := reviewListOptions(remaining[1:])
+		if err != nil {
 			return fmt.Errorf(reviewUsage)
 		}
-		return runReviewList(ctx, app, jsonOutput, stdout)
+		return runReviewList(ctx, app, filters, jsonOutput, stdout)
 	case "show":
 		queueID, err := reviewShowID(remaining[1:])
 		if err != nil {
@@ -214,11 +219,71 @@ func runReview(ctx context.Context, app bootstrap.App, args []string, stdout io.
 	}
 }
 
-func runReviewList(ctx context.Context, app bootstrap.App, jsonOutput bool, stdout io.Writer) error {
+type reviewListFilters struct {
+	Source   string
+	Status   string
+	Severity string
+}
+
+func reviewListOptions(args []string) (reviewListFilters, error) {
+	var filters reviewListFilters
+	for index := 0; index < len(args); index++ {
+		arg := strings.TrimSpace(args[index])
+		switch {
+		case arg == "":
+			return reviewListFilters{}, fmt.Errorf(reviewUsage)
+		case arg == "--source":
+			if filters.Source != "" || index+1 >= len(args) {
+				return reviewListFilters{}, fmt.Errorf(reviewUsage)
+			}
+			filters.Source = strings.TrimSpace(args[index+1])
+			index++
+		case strings.HasPrefix(arg, "--source="):
+			if filters.Source != "" {
+				return reviewListFilters{}, fmt.Errorf(reviewUsage)
+			}
+			filters.Source = strings.TrimSpace(strings.TrimPrefix(arg, "--source="))
+		case arg == "--status":
+			if filters.Status != "" || index+1 >= len(args) {
+				return reviewListFilters{}, fmt.Errorf(reviewUsage)
+			}
+			filters.Status = strings.TrimSpace(args[index+1])
+			index++
+		case strings.HasPrefix(arg, "--status="):
+			if filters.Status != "" {
+				return reviewListFilters{}, fmt.Errorf(reviewUsage)
+			}
+			filters.Status = strings.TrimSpace(strings.TrimPrefix(arg, "--status="))
+		case arg == "--severity":
+			if filters.Severity != "" || index+1 >= len(args) {
+				return reviewListFilters{}, fmt.Errorf(reviewUsage)
+			}
+			filters.Severity = strings.TrimSpace(args[index+1])
+			index++
+		case strings.HasPrefix(arg, "--severity="):
+			if filters.Severity != "" {
+				return reviewListFilters{}, fmt.Errorf(reviewUsage)
+			}
+			filters.Severity = strings.TrimSpace(strings.TrimPrefix(arg, "--severity="))
+		default:
+			return reviewListFilters{}, fmt.Errorf(reviewUsage)
+		}
+	}
+	if filters.Source == "" && filters.Status == "" && filters.Severity == "" {
+		return filters, nil
+	}
+	if strings.TrimSpace(filters.Source) == "" && strings.TrimSpace(filters.Status) == "" && strings.TrimSpace(filters.Severity) == "" {
+		return filters, nil
+	}
+	return filters, nil
+}
+
+func runReviewList(ctx context.Context, app bootstrap.App, filters reviewListFilters, jsonOutput bool, stdout io.Writer) error {
 	entries, err := listReviewQueueEntries(ctx, app)
 	if err != nil {
 		return err
 	}
+	entries = filterReviewQueueEntries(entries, filters)
 	if jsonOutput {
 		return commands.WriteJSON(stdout, reviewQueueListView{Items: entries})
 	}
@@ -232,6 +297,30 @@ func runReviewList(ctx context.Context, app bootstrap.App, jsonOutput bool, stdo
 		}
 	}
 	return nil
+}
+
+func filterReviewQueueEntries(entries []reviewQueueEntry, filters reviewListFilters) []reviewQueueEntry {
+	if filters.Source == "" && filters.Status == "" && filters.Severity == "" {
+		return entries
+	}
+	filtered := make([]reviewQueueEntry, 0, len(entries))
+	for _, entry := range entries {
+		if filters.Source != "" && !reviewFilterEqual(filters.Source, entry.SourceType) && !reviewFilterEqual(filters.Source, entry.Type) {
+			continue
+		}
+		if filters.Status != "" && !reviewFilterEqual(filters.Status, entry.Status) {
+			continue
+		}
+		if filters.Severity != "" && !reviewFilterEqual(filters.Severity, entry.Severity) && !reviewFilterEqual(filters.Severity, entry.Risk) {
+			continue
+		}
+		filtered = append(filtered, entry)
+	}
+	return filtered
+}
+
+func reviewFilterEqual(want string, got string) bool {
+	return strings.EqualFold(strings.TrimSpace(want), strings.TrimSpace(got))
 }
 
 func reviewShowID(args []string) (string, error) {
@@ -353,6 +442,13 @@ func reviewHumanValue(value string) string {
 }
 
 func reviewNextStepsHuman(entry reviewQueueEntry) string {
+	if nextStep := strings.TrimSpace(entry.OperatorNextStep); nextStep != "" {
+		return nextStep
+	}
+	return reviewOperatorNextStep(entry)
+}
+
+func reviewOperatorNextStep(entry reviewQueueEntry) string {
 	if len(entry.AllowedActions) == 0 {
 		return fmt.Sprintf("inspect with odin review show %s; no direct review action available", entry.QueueID)
 	}
@@ -1503,6 +1599,14 @@ func reviewEntryFromFailedTask(task projections.TaskStatusView) reviewQueueEntry
 		RequestedBy: task.RequestedBy,
 	})
 	retryEligible := guidance.RetryEligible
+	allowedActions := []string{"follow-up"}
+	severity := "high"
+	recommendedAction := "follow-up"
+	if retryEligible {
+		allowedActions = []string{"retry", "follow-up"}
+		severity = "medium"
+		recommendedAction = "retry"
+	}
 	return reviewQueueEntry{
 		ReviewID:               fmt.Sprintf("failed-work:%d", task.TaskID),
 		QueueID:                fmt.Sprintf("failed-work:%d", task.TaskID),
@@ -1514,6 +1618,8 @@ func reviewEntryFromFailedTask(task projections.TaskStatusView) reviewQueueEntry
 		Status:                 task.Status,
 		Reason:                 guidance.Decision,
 		Title:                  task.Title,
+		CreatedAt:              task.CreatedAt,
+		UpdatedAt:              task.UpdatedAt,
 		ProjectScope:           task.ProjectKey,
 		Summary:                firstNonBlank(task.LastError, task.Title),
 		TaskID:                 task.TaskID,
@@ -1521,12 +1627,14 @@ func reviewEntryFromFailedTask(task projections.TaskStatusView) reviewQueueEntry
 		TaskStatus:             task.Status,
 		WorkKind:               task.WorkKind,
 		Source:                 guidance.Source,
-		Risk:                   "medium",
+		Risk:                   severity,
+		Severity:               severity,
 		Decision:               guidance.Decision,
+		RecommendedAction:      recommendedAction,
 		RetryEligible:          &retryEligible,
 		RetryBlockReason:       retryBlockReason(guidance.Decision, guidance.RetryEligible),
 		RecoveryRecommendation: guidance.RecoveryRecommendation,
-		AllowedActions:         []string{"retry", "follow-up"},
+		AllowedActions:         allowedActions,
 	}
 }
 

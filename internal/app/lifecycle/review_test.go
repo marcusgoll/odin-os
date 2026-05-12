@@ -1,10 +1,13 @@
 package lifecycle
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"path/filepath"
 	"reflect"
 	"testing"
+	"time"
 
 	"odin-os/internal/app/bootstrap"
 	"odin-os/internal/core/workspaces"
@@ -87,6 +90,114 @@ func TestReviewQueueIncludesScheduledApprovalWorkAsTaskApproval(t *testing.T) {
 		}
 	}
 	t.Fatalf("review queue missing scheduled approval task; entries = %#v", entries)
+}
+
+func TestReviewListJSONIncludesOperatorFieldsAndFilters(t *testing.T) {
+	ctx := context.Background()
+	app := newLifecycleReviewTestApp(t, ctx)
+	seedReviewQueueSourceFixture(t, ctx, app)
+
+	var stdout bytes.Buffer
+	if err := runReview(ctx, app, []string{"list", "--json", "--source", "failed_work", "--status", "failed", "--severity", "medium"}, &stdout); err != nil {
+		t.Fatalf("runReview(list filtered) error = %v", err)
+	}
+
+	var payload struct {
+		Items []map[string]any `json:"items"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("Unmarshal(review list JSON) error = %v\n%s", err, stdout.String())
+	}
+	if len(payload.Items) != 1 {
+		t.Fatalf("filtered review items len = %d, want 1; payload = %#v", len(payload.Items), payload.Items)
+	}
+
+	item := payload.Items[0]
+	if item["source_type"] != "failed_work" || item["status"] != "failed" || item["severity"] != "medium" {
+		t.Fatalf("filtered item source/status/severity = %v/%v/%v, want failed_work/failed/medium", item["source_type"], item["status"], item["severity"])
+	}
+	for _, field := range []string{"source_type", "source_id", "status", "severity", "created_at", "updated_at", "recommended_action", "operator_next_step"} {
+		value, ok := item[field]
+		if !ok {
+			t.Fatalf("filtered review item missing %q: %#v", field, item)
+		}
+		if text, ok := value.(string); ok && text == "" {
+			t.Fatalf("filtered review item field %q is empty: %#v", field, item)
+		}
+	}
+}
+
+func TestReviewQueueBlockedFailedWorkDoesNotAdvertiseRetry(t *testing.T) {
+	ctx := context.Background()
+	app := newLifecycleReviewTestApp(t, ctx)
+	project, err := app.Store.CreateProject(ctx, sqlite.CreateProjectParams{
+		Key:           "blocked-failed-work",
+		Name:          "Blocked Failed Work",
+		Scope:         "project",
+		GitRoot:       t.TempDir(),
+		DefaultBranch: "main",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+	task, err := app.Store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "retry-exhausted-task",
+		Title:       "Retry exhausted task",
+		Status:      "failed",
+		Scope:       "project",
+		RequestedBy: "test",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+	if _, err := app.Store.UpdateTaskQueueState(ctx, sqlite.UpdateTaskQueueStateParams{
+		TaskID:         task.ID,
+		Status:         "failed",
+		NextEligibleAt: time.Time{},
+		LastError:      "retry budget exhausted",
+		RetryCount:     2,
+		MaxAttempts:    3,
+	}); err != nil {
+		t.Fatalf("UpdateTaskQueueState() error = %v", err)
+	}
+
+	entries, err := listReviewQueueEntries(ctx, app)
+	if err != nil {
+		t.Fatalf("listReviewQueueEntries() error = %v", err)
+	}
+	for _, entry := range entries {
+		if entry.TaskKey != "retry-exhausted-task" {
+			continue
+		}
+		if entry.RetryEligible == nil || *entry.RetryEligible {
+			t.Fatalf("RetryEligible = %v, want false", entry.RetryEligible)
+		}
+		if containsString(entry.AllowedActions, "retry") {
+			t.Fatalf("AllowedActions = %#v, want retry omitted when retry policy blocks it", entry.AllowedActions)
+		}
+		if !containsString(entry.AllowedActions, "follow-up") {
+			t.Fatalf("AllowedActions = %#v, want follow-up action", entry.AllowedActions)
+		}
+		if entry.RecommendedAction != "follow-up" {
+			t.Fatalf("RecommendedAction = %q, want follow-up", entry.RecommendedAction)
+		}
+		if entry.Severity != "high" {
+			t.Fatalf("Severity = %q, want high for blocked failed work", entry.Severity)
+		}
+		return
+	}
+	t.Fatalf("review queue missing retry-exhausted-task; entries = %#v", entries)
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }
 
 func newLifecycleReviewTestApp(t *testing.T, ctx context.Context) bootstrap.App {

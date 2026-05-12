@@ -28,6 +28,8 @@ type TaskStatusView struct {
 	ExecutionIntentSource string
 	Status                string
 	Scope                 string
+	CreatedAt             string
+	UpdatedAt             string
 	CurrentRunID          *int64
 	CurrentRunStatus      string
 	NextEligibleAt        string
@@ -355,6 +357,8 @@ func ListTaskStatusViews(ctx context.Context, queryer Queryer) ([]TaskStatusView
 			COALESCE(t.execution_intent_source, ''),
 			t.status,
 			t.scope,
+			t.created_at,
+			t.updated_at,
 			t.current_run_id,
 			COALESCE(r.status, ''),
 			t.next_eligible_at,
@@ -389,6 +393,8 @@ func ListTaskStatusViews(ctx context.Context, queryer Queryer) ([]TaskStatusView
 			&view.ExecutionIntentSource,
 			&view.Status,
 			&view.Scope,
+			&view.CreatedAt,
+			&view.UpdatedAt,
 			&currentRunID,
 			&view.CurrentRunStatus,
 			&view.NextEligibleAt,
