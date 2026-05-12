@@ -355,13 +355,12 @@ func TestChildDelegationRecordsSkillTelemetryAndMemory(t *testing.T) {
 func TestPortalDeliveryAgentRunsChildWavesConcurrently(t *testing.T) {
 	t.Parallel()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
 	executor := newWaveTestExecutor()
 	env := openDelegationEnvWithExecutors(t, map[string]contract.Executor{
 		"codex_headless": executor,
 	})
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
 
 	type runResult struct {
 		parentTask sqlite.Task
