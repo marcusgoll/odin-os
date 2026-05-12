@@ -88,8 +88,11 @@ the purpose through the existing `approval.requested` event stream:
 The command must reject approval creation unless Odin can see:
 
 - a PR handoff for the Work Item
-- review-selection evidence for every selected review role
 - an advanced `branch_finished` delivery gate
+- completed `pull_request_review_results` evidence for every selected review
+  role
+- completed Run Attempt evidence for every selected review role through
+  `pull_request_review:<role>` executors
 - for deploy approval, an already approved merge gate
 
 `odin work proof --task <id|key> --json` reads the approval events back into
