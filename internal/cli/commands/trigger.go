@@ -14,14 +14,14 @@ import (
 	"odin-os/internal/store/sqlite"
 )
 
-const TriggerUsage = "trigger [list|show <key>|create <key>|upsert <key>|test <key>|audit <key>|fire <key>|evaluate|ingest github-issue] [key=value ...] [--json]"
+const TriggerUsage = "trigger [list|show <key>|create <key>|upsert <key>|test <key>|audit <key>|materialize <key>|fire <key>|evaluate|ingest github-issue] [key=value ...] [--json]"
 
 func RunTrigger(ctx context.Context, service triggers.Service, args []string, stdout io.Writer) error {
 	if len(args) == 0 {
 		return fmt.Errorf("usage: odin %s", TriggerUsage)
 	}
 	if args[0] == "--help" || args[0] == "help" {
-		_, err := fmt.Fprintf(stdout, "usage: odin %s\n\nScheduled triggers:\n  odin trigger create <key> initiative=<project> kind=schedule status=enabled next=<RFC3339> [cadence=<duration>] [cron=<expr>] [quiet=<HH:MM-HH:MM>] [batch=<key> batch_window=<duration>] [title=<text>] [summary=<text>] [intent=<read_only|mutation|governance|destructive>] [--json]\n  odin trigger upsert <key> initiative=<project> kind=schedule status=enabled next=<RFC3339> [cadence=<duration>] [cron=<expr>] [quiet=<HH:MM-HH:MM>] [batch=<key> batch_window=<duration>] [title=<text>] [summary=<text>] [intent=<read_only|mutation|governance|destructive>] [--json]\n  odin trigger test <key> now=<RFC3339> [--json]\n  odin trigger evaluate now=<RFC3339> [--json]\n\nManual trigger fire:\n  odin trigger fire <key> [reason=<reason>] [--json]\n\nAudit:\n  odin trigger audit <key> [--json]\n\nEvent triggers:\n  odin trigger create <key> initiative=<project> kind=event event=external.github.issue [match_status=<status>] [match_previous_status=<status>] [match_task_id=<id>] [match_scope=<scope>] [match_provider=<provider>] [match_repo=<owner/repo>] [intent=<read_only|mutation|governance|destructive>] [--json]\n  odin trigger test <key> source=events [--json]\n  odin trigger evaluate source=events [--json]\n\nExternal event ingest:\n  odin trigger ingest github-issue project=<project> repo=<owner/repo> number=<n> action=<opened> title=<text> [body=<text>] [url=<url>] [labels=a,b] [--json]\n", TriggerUsage)
+		_, err := fmt.Fprintf(stdout, "usage: odin %s\n\nScheduled triggers:\n  odin trigger create <key> initiative=<project> kind=schedule status=enabled next=<RFC3339> [cadence=<duration>] [cron=<expr>] [quiet=<HH:MM-HH:MM>] [batch=<key> batch_window=<duration>] [title=<text>] [summary=<text>] [intent=<read_only|mutation|governance|destructive>] [--json]\n  odin trigger upsert <key> initiative=<project> kind=schedule status=enabled next=<RFC3339> [cadence=<duration>] [cron=<expr>] [quiet=<HH:MM-HH:MM>] [batch=<key> batch_window=<duration>] [title=<text>] [summary=<text>] [intent=<read_only|mutation|governance|destructive>] [--json]\n  odin trigger test <key> now=<RFC3339> [--json]\n  odin trigger evaluate now=<RFC3339> [--json]\n\nManual trigger fire:\n  odin trigger materialize <key> [reason=<reason>] [--json]\n  odin trigger fire <key> [reason=<reason>] [--json]\n\nAudit:\n  odin trigger audit <key> [--json]\n\nEvent triggers:\n  odin trigger create <key> initiative=<project> kind=event event=external.github.issue [match_status=<status>] [match_previous_status=<status>] [match_task_id=<id>] [match_scope=<scope>] [match_provider=<provider>] [match_repo=<owner/repo>] [intent=<read_only|mutation|governance|destructive>] [--json]\n  odin trigger test <key> source=events [--json]\n  odin trigger evaluate source=events [--json]\n\nExternal event ingest:\n  odin trigger ingest github-issue project=<project> repo=<owner/repo> number=<n> action=<opened> title=<text> [body=<text>] [url=<url>] [labels=a,b] [--json]\n", TriggerUsage)
 		return err
 	}
 	jsonOutput, args, err := consumeTriggerJSONFlag(args)
@@ -177,7 +177,7 @@ func RunTrigger(ctx context.Context, service triggers.Service, args []string, st
 			}
 		}
 		return nil
-	case "fire":
+	case "fire", "materialize":
 		if len(args) < 2 {
 			return fmt.Errorf("usage: odin %s", TriggerUsage)
 		}
