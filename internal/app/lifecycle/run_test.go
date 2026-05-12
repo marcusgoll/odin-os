@@ -770,6 +770,50 @@ func TestRunIntakeRawTextShorthandPreservesRawEvidenceAndTimestamps(t *testing.T
 	}
 }
 
+func TestRunIntakeRawBodyAliasPreservesRawEvidence(t *testing.T) {
+	t.Parallel()
+
+	root := testRepoRoot(t)
+	rawBody := "Test intake: create a draft task to review Odin readiness"
+
+	var createOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{
+		"intake", "raw", "create",
+		"--source", "cli",
+		"--body", rawBody,
+		"--json",
+	}, strings.NewReader(""), &createOutput); err != nil {
+		t.Fatalf("Run(intake raw create --body) error = %v", err)
+	}
+
+	var created struct {
+		IntakeItem struct {
+			Key           string          `json:"key"`
+			Status        string          `json:"status"`
+			Source        string          `json:"source"`
+			IntakeType    string          `json:"intake_type"`
+			RequestedBy   string          `json:"requested_by"`
+			PayloadPolicy string          `json:"payload_policy"`
+			Payload       json.RawMessage `json:"payload"`
+		} `json:"intake_item"`
+	}
+	if err := json.Unmarshal(createOutput.Bytes(), &created); err != nil {
+		t.Fatalf("json.Unmarshal(create) error = %v\n%s", err, createOutput.String())
+	}
+	if created.IntakeItem.Key != "intake-1" || created.IntakeItem.Status != "received" || created.IntakeItem.Source != "cli" || created.IntakeItem.IntakeType != "request" || created.IntakeItem.RequestedBy != "cli" {
+		t.Fatalf("created intake = %+v, want received intake-1 cli request", created.IntakeItem)
+	}
+	var payload struct {
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal(created.IntakeItem.Payload, &payload); err != nil {
+		t.Fatalf("json.Unmarshal(payload) error = %v\npayload=%s", err, string(created.IntakeItem.Payload))
+	}
+	if payload.Text != rawBody || created.IntakeItem.PayloadPolicy != "stored_in_source_facts_json" {
+		t.Fatalf("created item = %+v payload=%+v, want raw body evidence", created.IntakeItem, payload)
+	}
+}
+
 func TestRunIntakeProcessCreatesReviewStatesWithoutExecution(t *testing.T) {
 	t.Parallel()
 
