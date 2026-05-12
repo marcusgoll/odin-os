@@ -154,7 +154,7 @@ func TestInvokeToolBlocksApprovalRequiredPublicPublish(t *testing.T) {
 
 	if _, err := broker.InvokeTool("browser_x_post_publish", map[string]string{"post_text": "publish"}); err == nil {
 		t.Fatal("InvokeTool(browser_x_post_publish) error = nil, want approval-required refusal")
-	} else if got := err.Error(); got != `tool "browser_x_post_publish" requires approval before invocation: public social publishing requires an approved social_outcome` {
+	} else if got := err.Error(); got != `approval_required: tool "browser_x_post_publish" requires approval before invocation: public social publishing requires an approved social_outcome` {
 		t.Fatalf("InvokeTool() error = %q", got)
 	}
 	if invoked {

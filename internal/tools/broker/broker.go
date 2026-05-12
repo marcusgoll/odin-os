@@ -1,8 +1,10 @@
 package broker
 
 import (
+	"context"
 	"fmt"
 
+	"odin-os/internal/core/policy"
 	"odin-os/internal/registry"
 	"odin-os/internal/tools/budgets"
 	"odin-os/internal/tools/catalog"
@@ -120,12 +122,12 @@ func (broker *Broker) InvokeTool(key string, input map[string]string) (catalog.S
 	if !ok {
 		return catalog.StructuredResult{}, fmt.Errorf("unknown tool %q", key)
 	}
-	if definition.RequiresApproval {
-		reason := definition.ApprovalReason
-		if reason == "" {
-			reason = "approval is required"
-		}
-		return catalog.StructuredResult{}, fmt.Errorf("tool %q requires approval before invocation: %s", definition.Key, reason)
+	if err := policy.NewService(nil).AuthorizeApproval(context.Background(), policy.ApprovalRequest{
+		Subject:  fmt.Sprintf("tool %q", definition.Key),
+		Required: definition.RequiresApproval,
+		Reason:   definition.ApprovalReason,
+	}); err != nil {
+		return catalog.StructuredResult{}, err
 	}
 	if err := broker.tracker.RecordInvocation(definition.BudgetCost); err != nil {
 		return catalog.StructuredResult{}, err

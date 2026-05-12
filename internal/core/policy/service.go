@@ -56,6 +56,31 @@ type Service struct {
 	callerPermissions map[string]map[string]struct{}
 }
 
+type ApprovalStatus string
+
+const (
+	ApprovalStatusNone     ApprovalStatus = ""
+	ApprovalStatusPending  ApprovalStatus = "pending"
+	ApprovalStatusApproved ApprovalStatus = "approved"
+	ApprovalStatusDenied   ApprovalStatus = "denied"
+)
+
+type ApprovalRequest struct {
+	Subject  string
+	Required bool
+	Status   ApprovalStatus
+	Reason   string
+}
+
+type ApprovalDecision struct {
+	Allowed          bool
+	ApprovalRequired bool
+	Denied           bool
+	Code             string
+	Reason           string
+	Message          string
+}
+
 func NewService(allowlist map[string][]string) *Service {
 	service := &Service{
 		callerPermissions: defaultCallerPermissions(),
@@ -64,6 +89,59 @@ func NewService(allowlist map[string][]string) *Service {
 		service.callerPermissions = normalizeAllowlist(allowlist)
 	}
 	return service
+}
+
+func RequiresApprovalForActionClass(actionClass string, systemProject bool) bool {
+	actionClass = strings.TrimSpace(actionClass)
+	if actionClass == "governance_mutation" || actionClass == "destructive_mutation" {
+		return true
+	}
+	return systemProject && actionClass != "" && actionClass != "read_only"
+}
+
+func (service *Service) DecideApproval(_ context.Context, request ApprovalRequest) ApprovalDecision {
+	if !request.Required {
+		return ApprovalDecision{Allowed: true, Code: "allowed"}
+	}
+
+	reason := strings.TrimSpace(request.Reason)
+	status := ApprovalStatus(strings.ToLower(strings.TrimSpace(string(request.Status))))
+	switch status {
+	case ApprovalStatusApproved:
+		return ApprovalDecision{Allowed: true, Code: "allowed", Reason: reason}
+	case ApprovalStatusDenied:
+		return ApprovalDecision{
+			Denied:  true,
+			Code:    "approval_denied",
+			Reason:  defaultApprovalReason(reason, "approval was denied"),
+			Message: approvalDeniedMessage(request.Subject, defaultApprovalReason(reason, "approval was denied")),
+		}
+	case ApprovalStatusPending, ApprovalStatusNone:
+		return ApprovalDecision{
+			ApprovalRequired: true,
+			Code:             "approval_required",
+			Reason:           defaultApprovalReason(reason, "approval is required"),
+			Message:          approvalDecisionMessage(request.Subject, defaultApprovalReason(reason, "approval is required")),
+		}
+	default:
+		return ApprovalDecision{
+			Denied:  true,
+			Code:    "approval_denied",
+			Reason:  defaultApprovalReason(reason, fmt.Sprintf("approval status %q is not executable", status)),
+			Message: approvalDeniedMessage(request.Subject, defaultApprovalReason(reason, fmt.Sprintf("approval status %q is not executable", status))),
+		}
+	}
+}
+
+func (service *Service) AuthorizeApproval(ctx context.Context, request ApprovalRequest) error {
+	decision := service.DecideApproval(ctx, request)
+	if decision.Allowed {
+		return nil
+	}
+	return &Error{
+		CodeValue: decision.Code,
+		Message:   decision.Message,
+	}
 }
 
 func (service *Service) AuthorizeInvocation(_ context.Context, desc Descriptor, scope ScopeRef, caller CallerRef) error {
@@ -110,6 +188,37 @@ func (service *Service) AuthorizeInvocation(_ context.Context, desc Descriptor, 
 	}
 
 	return nil
+}
+
+func defaultApprovalReason(reason string, fallback string) string {
+	if strings.TrimSpace(reason) != "" {
+		return strings.TrimSpace(reason)
+	}
+	return fallback
+}
+
+func approvalDecisionMessage(subject string, reason string) string {
+	subject = strings.TrimSpace(subject)
+	reason = strings.TrimSpace(reason)
+	if subject == "" {
+		subject = "action"
+	}
+	if reason == "" {
+		return subject + " requires approval before invocation"
+	}
+	return subject + " requires approval before invocation: " + reason
+}
+
+func approvalDeniedMessage(subject string, reason string) string {
+	subject = strings.TrimSpace(subject)
+	reason = strings.TrimSpace(reason)
+	if subject == "" {
+		subject = "action"
+	}
+	if reason == "" {
+		return subject + " cannot execute because approval was denied"
+	}
+	return subject + " cannot execute: " + reason
 }
 
 func matchesScope(desc Descriptor, requested string) bool {

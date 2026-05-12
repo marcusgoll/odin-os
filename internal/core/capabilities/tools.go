@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 
+	"odin-os/internal/core/policy"
 	"odin-os/internal/registry"
 	"odin-os/internal/tools/catalog"
 )
@@ -123,6 +124,13 @@ func InvokeBuiltinToolCapability(ctx context.Context, definitions map[string]cat
 	}
 	if definition.Hidden {
 		return InvokeResponse{}, fmt.Errorf("builtin tool %q is hidden", request.CapabilityID)
+	}
+	if err := policy.NewService(nil).AuthorizeApproval(ctx, policy.ApprovalRequest{
+		Subject:  fmt.Sprintf("tool %q", definition.Key),
+		Required: definition.RequiresApproval,
+		Reason:   definition.ApprovalReason,
+	}); err != nil {
+		return InvokeResponse{}, err
 	}
 	if definition.Invoke == nil {
 		return InvokeResponse{}, fmt.Errorf("builtin tool %q is not invokable", request.CapabilityID)

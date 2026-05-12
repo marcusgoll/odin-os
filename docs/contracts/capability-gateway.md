@@ -45,6 +45,8 @@ These routes expose the runtime capability snapshot and invocation envelope with
   require specific permissions.
 - Inputs are validated against the descriptor schema before dispatch.
 - Permissions are enforced centrally before dispatch.
+- Approval-required builtin tools are rejected through the canonical approval
+  policy decision before the tool handler runs.
 - Results return a canonical run envelope with status, structured output, artifacts, and structured errors.
 
 Read-only discovery routes remain unauthenticated:
