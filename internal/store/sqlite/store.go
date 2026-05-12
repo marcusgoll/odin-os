@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"hash/fnv"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -57,6 +59,31 @@ func Open(path string) (*Store, error) {
 		_ = db.Close()
 		return nil, err
 	}
+	tempDB := isTempSQLitePath(path)
+	if tempDB {
+		if _, err := db.Exec(`PRAGMA journal_mode = MEMORY`); err != nil {
+			_ = db.Close()
+			return nil, err
+		}
+	}
+	synchronous := strings.ToUpper(strings.TrimSpace(os.Getenv("ODIN_SQLITE_SYNCHRONOUS")))
+	if synchronous == "" {
+		if tempDB {
+			synchronous = "OFF"
+		} else {
+			synchronous = "NORMAL"
+		}
+	}
+	switch synchronous {
+	case "OFF", "NORMAL", "FULL", "EXTRA":
+	default:
+		_ = db.Close()
+		return nil, fmt.Errorf("unsupported ODIN_SQLITE_SYNCHRONOUS value %q", synchronous)
+	}
+	if _, err := db.Exec(`PRAGMA synchronous = ` + synchronous); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
 	if _, err := db.Exec(`PRAGMA busy_timeout = 5000`); err != nil {
 		_ = db.Close()
 		return nil, err
@@ -68,6 +95,25 @@ func Open(path string) (*Store, error) {
 	}
 
 	return &Store{db: db}, nil
+}
+
+func isTempSQLitePath(path string) bool {
+	if strings.TrimSpace(path) == ":memory:" {
+		return true
+	}
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return false
+	}
+	tempRoot, err := filepath.Abs(os.TempDir())
+	if err != nil {
+		return false
+	}
+	rel, err := filepath.Rel(tempRoot, absPath)
+	if err != nil {
+		return false
+	}
+	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
 }
 
 func (store *Store) Close() error {
