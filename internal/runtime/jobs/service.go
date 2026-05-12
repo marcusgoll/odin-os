@@ -62,6 +62,12 @@ type CreateTaskResult struct {
 	Created bool
 }
 
+type BackfillIntentStats struct {
+	Examined       int
+	Updated        int
+	LegacyFallback int
+}
+
 type ExecutionOutcome struct {
 	Task sqlite.Task
 	Run  *sqlite.Run
@@ -459,6 +465,11 @@ func (service Service) createManagedTaskOnce(ctx context.Context, resolved scope
 	if executionIntent != "" && executionIntentSource == "" {
 		executionIntentSource = "operator"
 	}
+	if executionIntent == "" {
+		intent := deriveExplicitTaskExecutionIntent(projectManifest, sqlite.Task{Title: title})
+		executionIntent = intent.Value
+		executionIntentSource = intent.Source
+	}
 
 	workKind := strings.TrimSpace(input.workKind)
 	if workKind == "" {
@@ -487,6 +498,53 @@ func (service Service) createManagedTaskOnce(ctx context.Context, resolved scope
 		return CreateTaskResult{Task: existing, Created: false}, getErr
 	}
 	return CreateTaskResult{Task: task, Created: true}, err
+}
+
+func (service Service) BackfillOpenTaskExecutionIntents(ctx context.Context) (BackfillIntentStats, error) {
+	if service.Store == nil {
+		return BackfillIntentStats{}, fmt.Errorf("job store is required")
+	}
+	tasks, err := service.Store.ListTasksMissingExecutionIntent(ctx)
+	if err != nil {
+		return BackfillIntentStats{}, err
+	}
+
+	stats := BackfillIntentStats{Examined: len(tasks)}
+	for _, task := range tasks {
+		if !isOpenTaskStatus(task.Status) {
+			stats.LegacyFallback++
+			continue
+		}
+
+		project, err := service.Store.GetProject(ctx, task.ProjectID)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				stats.LegacyFallback++
+				continue
+			}
+			return stats, err
+		}
+		manifest, ok := service.Registry.Lookup(project.Key)
+		if !ok {
+			stats.LegacyFallback++
+			continue
+		}
+		intent := deriveExplicitTaskExecutionIntent(manifest, task)
+		if intent.Value == "" || intent.Source == "" {
+			stats.LegacyFallback++
+			continue
+		}
+		_, err = service.Store.UpdateTaskExecutionIntent(ctx, sqlite.UpdateTaskExecutionIntentParams{
+			TaskID:                task.ID,
+			ExecutionIntent:       intent.Value,
+			ExecutionIntentSource: "backfill:" + intent.Source,
+		})
+		if err != nil {
+			return stats, err
+		}
+		stats.Updated++
+	}
+	return stats, nil
 }
 
 func isTaskKeyConflict(err error) bool {
@@ -2806,13 +2864,16 @@ func (service Service) latestTaskApproval(ctx context.Context, taskID int64) (sq
 
 func (service Service) resolveAndPersistTaskExecutionIntent(ctx context.Context, manifest projects.Manifest, task sqlite.Task) (sqlite.Task, executionIntent, error) {
 	intent := resolveTaskExecutionIntent(manifest, task)
+	if strings.TrimSpace(task.ExecutionIntent) == "" {
+		intent = deriveExplicitTaskExecutionIntent(manifest, task)
+	}
 	if intent.Value == "" {
 		return task, intent, nil
 	}
 	if strings.TrimSpace(task.ExecutionIntent) == intent.Value && strings.TrimSpace(task.ExecutionIntentSource) == intent.Source {
 		return task, intent, nil
 	}
-	if intent.Source != "safety_classifier" {
+	if strings.TrimSpace(task.ExecutionIntent) != "" && intent.Source != "safety_classifier" {
 		return task, intent, nil
 	}
 	updated, err := service.Store.UpdateTaskExecutionIntent(ctx, sqlite.UpdateTaskExecutionIntentParams{
@@ -2942,6 +3003,21 @@ func resolveTaskExecutionIntent(manifest projects.Manifest, task sqlite.Task) ex
 	return applyManifestExecutionDefaults(manifest, classifyTaskExecutionIntent(task.Title))
 }
 
+func deriveExplicitTaskExecutionIntent(manifest projects.Manifest, task sqlite.Task) executionIntent {
+	intent := applyManifestExecutionDefaults(manifest, classifyTaskExecutionIntent(task.Title))
+	switch intent.Reason {
+	case "mutation_keyword":
+		intent.Source = "delivery_profile:codex_code"
+	case "explicit_read_only", "default_read_only":
+		intent.Source = "delivery_profile:review_only"
+	case "high_risk_destructive_keyword", "high_risk_real_world_keyword", "destructive_keyword", "governance_keyword":
+		intent.Source = "safety_classifier"
+	case "system_project_default_approval_gate":
+		intent.Source = "system_project_default"
+	}
+	return intent
+}
+
 func normalizeIntentTitle(title string) string {
 	normalized := strings.ToLower(strings.TrimSpace(title))
 	normalized = strings.NewReplacer("_", " ", "-", " ").Replace(normalized)
@@ -3055,6 +3131,15 @@ func containsAny(value string, candidates []string) bool {
 		}
 	}
 	return false
+}
+
+func isOpenTaskStatus(status string) bool {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "", "completed", "failed", "cancelled", "canceled":
+		return false
+	default:
+		return true
+	}
 }
 
 func mutationRequiresIsolatedWorktree(manifest projects.Manifest) bool {

@@ -21,7 +21,7 @@ import (
 	trackerintake "odin-os/internal/tracker/intake"
 )
 
-const workUsage = "usage: odin work status|profiles|start --project <key> --title <text> [--intent <read_only|mutation|governance|destructive>]|intake --project <key> [--dry-run]|reconcile --project <key>|dispatch [--task <id|key>] [--json]|execute --task <id|key> [--json]|retry --task <id|key> [--json]"
+const workUsage = "usage: odin work status [--json]|profiles|start --project <key> --title <text> [--intent <read_only|mutation|governance|destructive>]|intake --project <key> [--dry-run]|reconcile --project <key>|dispatch [--task <id|key>] [--json]|execute --task <id|key> [--json]|retry --task <id|key> [--json]"
 
 var newIntakeTracker = trackerintake.NewGitHubTracker
 
@@ -56,6 +56,25 @@ type workDispatchRunView struct {
 	Summary  string `json:"summary,omitempty"`
 }
 
+type workStatusView struct {
+	WorkItems                   int    `json:"work_items"`
+	OpenWorkItems               int    `json:"open_work_items"`
+	ActiveRunAttempts           int    `json:"active_run_attempts"`
+	PendingApprovals            int    `json:"pending_approvals"`
+	DeliveryProfiles            int    `json:"delivery_profiles"`
+	RawIntakeItems              int    `json:"raw_intake_items"`
+	IntakeReviewItems           int    `json:"intake_review_items"`
+	IntakeApprovalRequiredItems int    `json:"intake_approval_required_items"`
+	FailedRetryableWorkItems    int    `json:"failed_retryable_work_items"`
+	RetryBlockedWorkItems       int    `json:"retry_blocked_work_items"`
+	ExplicitIntentWorkItems     int    `json:"explicit_intent_work_items"`
+	FallbackIntentWorkItems     int    `json:"fallback_intent_work_items"`
+	IntentBackfilledWorkItems   int    `json:"intent_backfilled_work_items"`
+	LegacyFallbackWorkItems     int    `json:"legacy_fallback_work_items"`
+	Dispatch                    string `json:"dispatch"`
+	Intake                      string `json:"intake"`
+}
+
 func RunWork(ctx context.Context, store *sqlite.Store, projectRegistry projects.Registry, snapshot registry.Snapshot, args []string, stdout io.Writer, options ...WorkOptions) error {
 	if len(args) == 0 || args[0] == "help" || args[0] == "--help" {
 		_, err := fmt.Fprintln(stdout, workUsage)
@@ -64,7 +83,7 @@ func RunWork(ctx context.Context, store *sqlite.Store, projectRegistry projects.
 
 	switch args[0] {
 	case "status":
-		return runWorkStatus(ctx, store, snapshot, stdout)
+		return runWorkStatus(ctx, store, projectRegistry, snapshot, args[1:], stdout)
 	case "profiles":
 		return runWorkProfiles(snapshot, stdout)
 	case "start":
@@ -85,7 +104,22 @@ func RunWork(ctx context.Context, store *sqlite.Store, projectRegistry projects.
 	}
 }
 
-func runWorkStatus(ctx context.Context, store *sqlite.Store, snapshot registry.Snapshot, stdout io.Writer) error {
+func runWorkStatus(ctx context.Context, store *sqlite.Store, projectRegistry projects.Registry, snapshot registry.Snapshot, args []string, stdout io.Writer) error {
+	params := parseWorkStartArgs(args)
+	jsonOutput := parseBoolFlag(params, "json")
+	if _, ok := params["help"]; ok {
+		_, err := fmt.Fprintln(stdout, "usage: odin work status [--json]")
+		return err
+	}
+	if err := rejectUnknownWorkArgs(params, "json", "help"); err != nil {
+		return err
+	}
+
+	backfillStats, err := jobs.Service{Store: store, Registry: projectRegistry}.BackfillOpenTaskExecutionIntents(ctx)
+	if err != nil {
+		return err
+	}
+
 	taskViews, err := projections.ListTaskStatusViews(ctx, store.DB())
 	if err != nil {
 		return err
@@ -143,21 +177,47 @@ func runWorkStatus(ctx context.Context, store *sqlite.Store, snapshot registry.S
 		}
 	}
 
+	view := workStatusView{
+		WorkItems:                   len(taskViews),
+		OpenWorkItems:               openWorkItems,
+		ActiveRunAttempts:           activeRunAttempts,
+		PendingApprovals:            len(approvalViews),
+		DeliveryProfiles:            len(deliveryProfiles(snapshot)),
+		RawIntakeItems:              len(rawIntakeItems),
+		IntakeReviewItems:           intakeReviewItems,
+		IntakeApprovalRequiredItems: intakeApprovalRequiredItems,
+		FailedRetryableWorkItems:    failedRetryableWorkItems,
+		RetryBlockedWorkItems:       retryBlockedWorkItems,
+		ExplicitIntentWorkItems:     explicitIntentWorkItems,
+		FallbackIntentWorkItems:     fallbackIntentWorkItems,
+		IntentBackfilledWorkItems:   backfillStats.Updated,
+		LegacyFallbackWorkItems:     backfillStats.LegacyFallback,
+		Dispatch:                    "work_dispatch",
+		Intake:                      "raw_cli",
+	}
+	if jsonOutput {
+		return WriteJSON(stdout, view)
+	}
+
 	_, err = fmt.Fprintf(
 		stdout,
-		"work_items=%d open_work_items=%d active_run_attempts=%d pending_approvals=%d delivery_profiles=%d raw_intake_items=%d intake_review_items=%d intake_approval_required_items=%d failed_retryable_work_items=%d retry_blocked_work_items=%d explicit_intent_work_items=%d fallback_intent_work_items=%d dispatch=work_dispatch intake=raw_cli\n",
-		len(taskViews),
-		openWorkItems,
-		activeRunAttempts,
-		len(approvalViews),
-		len(deliveryProfiles(snapshot)),
-		len(rawIntakeItems),
-		intakeReviewItems,
-		intakeApprovalRequiredItems,
-		failedRetryableWorkItems,
-		retryBlockedWorkItems,
-		explicitIntentWorkItems,
-		fallbackIntentWorkItems,
+		"work_items=%d open_work_items=%d active_run_attempts=%d pending_approvals=%d delivery_profiles=%d raw_intake_items=%d intake_review_items=%d intake_approval_required_items=%d failed_retryable_work_items=%d retry_blocked_work_items=%d explicit_intent_work_items=%d fallback_intent_work_items=%d intent_backfilled_work_items=%d legacy_fallback_work_items=%d dispatch=%s intake=%s\n",
+		view.WorkItems,
+		view.OpenWorkItems,
+		view.ActiveRunAttempts,
+		view.PendingApprovals,
+		view.DeliveryProfiles,
+		view.RawIntakeItems,
+		view.IntakeReviewItems,
+		view.IntakeApprovalRequiredItems,
+		view.FailedRetryableWorkItems,
+		view.RetryBlockedWorkItems,
+		view.ExplicitIntentWorkItems,
+		view.FallbackIntentWorkItems,
+		view.IntentBackfilledWorkItems,
+		view.LegacyFallbackWorkItems,
+		view.Dispatch,
+		view.Intake,
 	)
 	return err
 }

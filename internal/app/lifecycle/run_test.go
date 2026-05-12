@@ -3773,6 +3773,11 @@ func TestRunWorkProfilesExposeManagedProjectDeliveryProfile(t *testing.T) {
 	}
 	for _, want := range []string{
 		"managed-project-delivery-workflow",
+		"local-deterministic-workflow",
+		"review-only-workflow",
+		"codex-code-workflow",
+		"scheduler-created-workflow",
+		"approval-required-external-mutation-workflow",
 		"status=active",
 		"entrypoint=skill:triage-skill",
 	} {
@@ -3785,8 +3790,97 @@ func TestRunWorkProfilesExposeManagedProjectDeliveryProfile(t *testing.T) {
 	if err := Run(context.Background(), root, []string{"work", "status"}, strings.NewReader(""), &statusOutput); err != nil {
 		t.Fatalf("Run(work status) error = %v", err)
 	}
-	if !strings.Contains(statusOutput.String(), "delivery_profiles=1") {
-		t.Fatalf("Run(work status) output = %q, want delivery_profiles=1", statusOutput.String())
+	if !strings.Contains(statusOutput.String(), "delivery_profiles=6") {
+		t.Fatalf("Run(work status) output = %q, want delivery_profiles=6", statusOutput.String())
+	}
+}
+
+func TestRunWorkStatusJSONBackfillsOpenIntentAndFlagsLegacyFallback(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	root := testRepoRoot(t)
+	if err := Run(ctx, root, []string{"project", "select", testProjectKey}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+		t.Fatalf("Run(project select) error = %v", err)
+	}
+	if err := Run(ctx, root, []string{"work", "start", "--project", testProjectKey, "--title", "Bootstrap explicit intent"}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+		t.Fatalf("Run(work start) error = %v", err)
+	}
+
+	store, err := sqlite.Open(filepath.Join(root, "data", "odin.db"))
+	if err != nil {
+		t.Fatalf("sqlite.Open() error = %v", err)
+	}
+	project, err := store.GetProjectByKey(ctx, testProjectKey)
+	if err != nil {
+		t.Fatalf("GetProjectByKey() error = %v", err)
+	}
+	openTask, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:     project.ID,
+		Key:           "legacy-open",
+		Title:         "Fix JSON output",
+		Status:        "queued",
+		Scope:         "project",
+		RequestedBy:   "test",
+		WorkKind:      "project",
+		ArtifactsJSON: "{}",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask(open) error = %v", err)
+	}
+	_, err = store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:     project.ID,
+		Key:           "legacy-terminal",
+		Title:         "Old terminal item",
+		Status:        "completed",
+		Scope:         "project",
+		RequestedBy:   "test",
+		WorkKind:      "project",
+		ArtifactsJSON: "{}",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask(terminal) error = %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	var stdout bytes.Buffer
+	if err := Run(ctx, root, []string{"work", "status", "--json"}, strings.NewReader(""), &stdout); err != nil {
+		t.Fatalf("Run(work status --json) error = %v", err)
+	}
+
+	var payload struct {
+		DeliveryProfiles          int `json:"delivery_profiles"`
+		ExplicitIntentWorkItems   int `json:"explicit_intent_work_items"`
+		FallbackIntentWorkItems   int `json:"fallback_intent_work_items"`
+		IntentBackfilledWorkItems int `json:"intent_backfilled_work_items"`
+		LegacyFallbackWorkItems   int `json:"legacy_fallback_work_items"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("json.Unmarshal(%q) error = %v", stdout.String(), err)
+	}
+	if payload.DeliveryProfiles != 6 {
+		t.Fatalf("delivery_profiles = %d, want 6", payload.DeliveryProfiles)
+	}
+	if payload.ExplicitIntentWorkItems != 2 || payload.FallbackIntentWorkItems != 1 {
+		t.Fatalf("intent counts = explicit %d fallback %d, want 2/1", payload.ExplicitIntentWorkItems, payload.FallbackIntentWorkItems)
+	}
+	if payload.IntentBackfilledWorkItems != 1 || payload.LegacyFallbackWorkItems != 1 {
+		t.Fatalf("backfill counts = updated %d legacy %d, want 1/1", payload.IntentBackfilledWorkItems, payload.LegacyFallbackWorkItems)
+	}
+
+	store, err = sqlite.Open(filepath.Join(root, "data", "odin.db"))
+	if err != nil {
+		t.Fatalf("sqlite.Open(reload) error = %v", err)
+	}
+	defer store.Close()
+	updatedOpenTask, err := store.GetTask(ctx, openTask.ID)
+	if err != nil {
+		t.Fatalf("GetTask(open) error = %v", err)
+	}
+	if updatedOpenTask.ExecutionIntent != "mutation" || updatedOpenTask.ExecutionIntentSource != "backfill:delivery_profile:codex_code" {
+		t.Fatalf("open intent = %q/%q, want mutation/backfill:delivery_profile:codex_code", updatedOpenTask.ExecutionIntent, updatedOpenTask.ExecutionIntentSource)
 	}
 }
 
@@ -8268,6 +8362,50 @@ Do not bypass managed-project governance, branches, worktrees, approvals, or run
 ## Success Criteria
 Operators can inspect this profile through odin work profiles while Odin runtime state remains authoritative.
 `)
+	writeTestDeliveryProfile := func(key, title, summary, entrypoint, composedKey string) {
+		t.Helper()
+		mustWriteFile(filepath.Join(root, "registry", "workflows", key+".md"), fmt.Sprintf(`---
+kind: workflow
+key: %s
+title: %s
+summary: %s
+status: active
+tags:
+  - delivery_profile
+entrypoint: %s
+composes:
+  - %s
+---
+
+# %s
+
+## Purpose
+Fixture delivery profile for work status and profile selection tests.
+
+## When to Use
+Use this fixture when tests need multiple delivery profile workflows.
+
+## Inputs
+The fixture takes test runtime state and registry content.
+
+## Procedure
+Load the profile from the test registry and expose it through work profile commands.
+
+## Outputs
+The fixture outputs a visible delivery profile item.
+
+## Constraints
+Do not perform runtime execution from this fixture.
+
+## Success Criteria
+The profile is loaded and counted by work status.
+`, key, title, summary, entrypoint, composedKey, title))
+	}
+	writeTestDeliveryProfile("local-deterministic-workflow", "Local Deterministic Workflow", "Runs deterministic local checks without external mutation.", "command:status", "status-command")
+	writeTestDeliveryProfile("review-only-workflow", "Review Only Workflow", "Keeps ambiguous or review-only work in a non-mutating review lane.", "agent:review-agent", "review-agent")
+	writeTestDeliveryProfile("codex-code-workflow", "Codex Code Workflow", "Routes bounded code work through the canonical executor seam.", "skill:go-orchestration-feature", "go-orchestration-feature")
+	writeTestDeliveryProfile("scheduler-created-workflow", "Scheduler Created Workflow", "Materializes scheduled work without immediate execution.", "agent:automation-candidate-finder-agent", "automation-candidate-finder-agent")
+	writeTestDeliveryProfile("approval-required-external-mutation-workflow", "Approval Required External Mutation Workflow", "Requires approval before external mutation.", "agent:risk-review-agent", "risk-review-agent")
 
 	mustWriteFile(filepath.Join(root, "README.md"), "alpha test repo\n")
 	mustWriteFile(filepath.Join(root, "alpha", "README.md"), "alpha nested repo\n")

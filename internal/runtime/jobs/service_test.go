@@ -124,6 +124,144 @@ func TestCreateTaskOnceReusesDeterministicKey(t *testing.T) {
 	}
 }
 
+func TestCreateTaskOnceDerivesExplicitIntentForNewWork(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openJobStore(t)
+	defer store.Close()
+
+	service := Service{
+		Store:    store,
+		Registry: writeRegistry(t),
+		Now: func() time.Time {
+			return time.Date(2026, 5, 12, 14, 30, 0, 0, time.UTC)
+		},
+	}
+
+	result, err := service.CreateTaskOnce(ctx, CreateTaskParams{
+		Resolved:    scope.Resolution{Kind: scope.ScopeProject, ProjectKey: "alpha"},
+		Title:       "Implement explicit dispatch profile",
+		RequestedBy: "operator",
+		Key:         "explicit-dispatch-profile",
+	})
+	if err != nil {
+		t.Fatalf("CreateTaskOnce() error = %v", err)
+	}
+	if result.Task.ExecutionIntent != "mutation" {
+		t.Fatalf("ExecutionIntent = %q, want mutation", result.Task.ExecutionIntent)
+	}
+	if result.Task.ExecutionIntentSource != "delivery_profile:codex_code" {
+		t.Fatalf("ExecutionIntentSource = %q, want delivery_profile:codex_code", result.Task.ExecutionIntentSource)
+	}
+}
+
+func TestBackfillOpenTaskExecutionIntentsAuditsDecisionsAndLeavesTerminalLegacyFallback(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openJobStore(t)
+	defer store.Close()
+
+	registry := writeRegistry(t)
+	project, err := store.CreateProject(ctx, sqlite.CreateProjectParams{
+		Key:           "alpha",
+		Name:          "Alpha",
+		Scope:         "project",
+		GitRoot:       filepath.Join(t.TempDir(), "alpha"),
+		DefaultBranch: "main",
+		GitHubRepo:    "owner/alpha",
+		ManifestPath:  "registry/projects/alpha.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+	queued, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "queued-code",
+		Title:       "Fix dispatch bug",
+		ActionKey:   "run_task",
+		Status:      "queued",
+		Scope:       "project",
+		RequestedBy: "legacy",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask(queued) error = %v", err)
+	}
+	blocked, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "blocked-review",
+		Title:       "Review external request",
+		ActionKey:   "review",
+		Status:      "blocked",
+		Scope:       "project",
+		RequestedBy: "legacy",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask(blocked) error = %v", err)
+	}
+	terminal, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "completed-legacy",
+		Title:       "Completed legacy unknown",
+		ActionKey:   "run_task",
+		Status:      "completed",
+		Scope:       "project",
+		RequestedBy: "legacy",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask(terminal) error = %v", err)
+	}
+
+	stats, err := Service{Store: store, Registry: registry}.BackfillOpenTaskExecutionIntents(ctx)
+	if err != nil {
+		t.Fatalf("BackfillOpenTaskExecutionIntents() error = %v", err)
+	}
+	if stats.Updated != 2 || stats.LegacyFallback != 1 {
+		t.Fatalf("BackfillOpenTaskExecutionIntents() stats = %+v, want updated=2 legacy fallback=1", stats)
+	}
+
+	updatedQueued, err := store.GetTask(ctx, queued.ID)
+	if err != nil {
+		t.Fatalf("GetTask(queued) error = %v", err)
+	}
+	if updatedQueued.ExecutionIntent != "mutation" || updatedQueued.ExecutionIntentSource != "backfill:delivery_profile:codex_code" {
+		t.Fatalf("queued intent = %q/%q, want mutation/backfill:delivery_profile:codex_code", updatedQueued.ExecutionIntent, updatedQueued.ExecutionIntentSource)
+	}
+	updatedBlocked, err := store.GetTask(ctx, blocked.ID)
+	if err != nil {
+		t.Fatalf("GetTask(blocked) error = %v", err)
+	}
+	if updatedBlocked.ExecutionIntent != "read_only" || updatedBlocked.ExecutionIntentSource != "backfill:delivery_profile:review_only" {
+		t.Fatalf("blocked intent = %q/%q, want read_only/backfill:delivery_profile:review_only", updatedBlocked.ExecutionIntent, updatedBlocked.ExecutionIntentSource)
+	}
+	unchangedTerminal, err := store.GetTask(ctx, terminal.ID)
+	if err != nil {
+		t.Fatalf("GetTask(terminal) error = %v", err)
+	}
+	if unchangedTerminal.ExecutionIntent != "" || unchangedTerminal.ExecutionIntentSource != "" {
+		t.Fatalf("terminal intent = %q/%q, want legacy fallback empty", unchangedTerminal.ExecutionIntent, unchangedTerminal.ExecutionIntentSource)
+	}
+
+	events, err := store.ListEvents(ctx, sqlite.ListEventsParams{TaskID: &queued.ID})
+	if err != nil {
+		t.Fatalf("ListEvents() error = %v", err)
+	}
+	foundAudit := false
+	for _, event := range events {
+		if event.Type != runtimeevents.EventTaskQueueStateChanged {
+			continue
+		}
+		if strings.Contains(string(event.Payload), `"execution_intent":"mutation"`) &&
+			strings.Contains(string(event.Payload), `"execution_intent_source":"backfill:delivery_profile:codex_code"`) {
+			foundAudit = true
+		}
+	}
+	if !foundAudit {
+		t.Fatalf("events = %+v, want audited queue state event with backfilled intent", events)
+	}
+}
+
 func TestPauseIssueBlocksMaterializedGitHubIssueWorkItem(t *testing.T) {
 	t.Parallel()
 

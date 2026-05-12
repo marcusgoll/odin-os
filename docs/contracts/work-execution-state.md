@@ -55,8 +55,8 @@ Each state claim must map to one of these existing operator surfaces:
 
 | Command | Proof responsibility |
 | --- | --- |
-| `odin work status` | counts Work Items, open Work Items, active Run Attempts, pending approvals, failed retryable Work Items, retry-blocked Work Items, explicit intent Work Items, and fallback intent Work Items |
-| `odin work start --project <key> --title <text> [--intent ...]` | creates a queued Work Item and persists explicit intent when provided |
+| `odin work status [--json]` | counts Work Items, open Work Items, active Run Attempts, pending approvals, delivery profiles, failed retryable Work Items, retry-blocked Work Items, explicit intent Work Items, fallback intent Work Items, and any intent backfilled during the readback |
+| `odin work start --project <key> --title <text> [--intent ...]` | creates a queued Work Item and persists explicit operator intent when provided or derived delivery-profile intent when omitted |
 | `odin work dispatch --task <id\|key> --json` | admits dispatch, creates a Run Attempt, or blocks with a policy/approval reason |
 | `odin work execute --task <id\|key> --json` | executes an already dispatched Run Attempt and reports terminal state |
 | `odin task run --project <key> --title <text> --json` | proves the compatibility create-and-execute path |
@@ -69,6 +69,13 @@ Each state claim must map to one of these existing operator surfaces:
 
 Storage-era names such as `tasks`, `jobs`, and `runs` remain valid compatibility
 surfaces. They should not be renamed or replaced in this contract slice.
+
+Active legacy Work Items without `execution_intent` are backfilled by
+`odin work status` using the existing task execution-intent classifier and the
+current delivery profiles. This backfill only updates intent metadata and emits
+the normal `task.queue_state_changed` audit event; it must not dispatch,
+execute, approve, or otherwise advance old work. Terminal legacy items and
+unknown project records remain visibly counted as fallback intent.
 
 Do not introduce parallel queues, workflow-run tables, executor frameworks, or
 prompt-agent runtime authority to satisfy state readback. New workflow types

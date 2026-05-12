@@ -191,8 +191,8 @@ func TestEvaluateDueAppliesJobAdmissionForInferredHighRiskTriggerWork(t *testing
 	if err != nil {
 		t.Fatalf("GetTask(materialized) error = %v", err)
 	}
-	if task.ExecutionIntent != "" || task.ExecutionIntentSource != "" {
-		t.Fatalf("task stored intent = %q/%q, want empty stored intent so admission inference is proven", task.ExecutionIntent, task.ExecutionIntentSource)
+	if task.ExecutionIntent != "governance" || task.ExecutionIntentSource != "safety_classifier" {
+		t.Fatalf("task stored intent = %q/%q, want governance/safety_classifier", task.ExecutionIntent, task.ExecutionIntentSource)
 	}
 	if task.Status != "blocked" {
 		t.Fatalf("task status = %q, want blocked", task.Status)
