@@ -261,6 +261,10 @@ func Run(ctx context.Context, root string, args []string, stdin io.Reader, stdou
 		_, err := fmt.Fprintln(stdout, serveUsage)
 		return err
 	}
+	if len(args) > 0 && isOperationalHelpCommand(args[0]) && isHelpArgs(args[1:]) {
+		_, err := fmt.Fprintln(stdout, operationalHelpUsage(args[0]))
+		return err
+	}
 
 	loadCtx := ctx
 	if len(args) > 0 && args[0] == "serve" {
@@ -399,6 +403,28 @@ func Run(ctx context.Context, root string, args []string, stdin io.Reader, stdou
 		return runVerifyBackup(ctx, appbackup.Service{RepoRoot: root, RuntimeRoot: cfg.RuntimeRoot}, args[1:], stdout)
 	default:
 		return fmt.Errorf("unknown command: %s", args[0])
+	}
+}
+
+func isOperationalHelpCommand(command string) bool {
+	switch command {
+	case "backup", "restore", "verify-backup":
+		return true
+	default:
+		return false
+	}
+}
+
+func operationalHelpUsage(command string) string {
+	switch command {
+	case "backup":
+		return backupUsage
+	case "restore":
+		return restoreUsage
+	case "verify-backup":
+		return verifyBackupUsage
+	default:
+		return rootUsageBanner
 	}
 }
 
