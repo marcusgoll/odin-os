@@ -14,6 +14,7 @@ func TestRenderOverviewUsesCanonicalLanes(t *testing.T) {
 
 	for _, want := range []string{
 		"Attention",
+		"approvals=1 incidents=1 blocked_work=1 failed_work=1 recoveries=1 blocked_swarms=0",
 		"Review Queue",
 		"wiring=live total=5 intake=1 approvals=1 knowledge=1 skills=1 failed=1",
 		"Active Execution",
@@ -36,7 +37,10 @@ func TestRenderOverviewUsesCanonicalLanes(t *testing.T) {
 		"truth kind=agent key=portal-delivery-agent level=runtime_proven implemented=true",
 		"Approvals",
 		"Observability",
+		"wiring=live activity_log=0 active_runs=1 blocked_work=1 failed_work=1 incidents=1 recoveries=1 freshness=0",
 		"incident=1 work_item=alpha-task project=alpha companion=primary severity=warning status=open fault_key=wake_packet_invalid subject_key=task:alpha decision_mode=incident_only next_action=review wake packet evidence summary=Browser verification paused",
+		"Failed Work",
+		"failed_work=alpha-task project=alpha companion=primary status=failed decision=retry_allowed retry_eligible=true retries=1/3 source=codex last_error=driver failed proof recommendation=retry from review queue",
 		"recovery=1 run=7 status=running strategy=self_heal fault_key=projection_stale subject_key=doctor decision_mode=playbook action=refresh_projection_surface next_action=monitor recovery result started_at=none",
 		"Memory",
 		"Intake Inbox",
@@ -221,11 +225,18 @@ func sampleOverview() overview.View {
 			},
 			RecoveryGuidance: []overview.RetryRecoveryGuidanceSummary{
 				{
-					TaskID:      1,
-					WorkItemKey: "alpha-task",
-					ProjectKey:  "alpha",
-					Status:      "failed",
-					Decision:    "retry_allowed",
+					TaskID:                 1,
+					WorkItemKey:            "alpha-task",
+					ProjectKey:             "alpha",
+					CompanionKey:           &owner,
+					Source:                 "codex",
+					Status:                 "failed",
+					Decision:               "retry_allowed",
+					RetryEligible:          true,
+					RetryCount:             1,
+					MaxAttempts:            3,
+					LastError:              "driver failed proof",
+					RecoveryRecommendation: "retry from review queue",
 				},
 			},
 			Incidents: []overview.IncidentSummary{
