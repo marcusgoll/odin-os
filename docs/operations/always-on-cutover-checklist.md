@@ -41,10 +41,17 @@ Use this checklist before treating a single-daemon `odin serve` deployment as th
 
 ## Backup and restore drill
 
-- Create a fresh backup archive from the live runtime root.
-- Run backup verification and confirm it passes.
+- Create a fresh backup archive from the live runtime root with `odin backup <archive-path>`.
+- Run `odin verify-backup <archive-path>` and confirm it passes before release cutover.
 - Restore into a clean target root instead of overwriting the live one.
 - Open the restored SQLite database and confirm `odin doctor --json` can inspect it.
+
+## Release dry-run gate
+
+- `make homelab-release-dry-run` completes without installing, updating, restarting, or repointing production paths.
+- `make odin-actual-use-e2e` completes, or any failure is recorded as an explicit stop condition before cutover.
+- `./bin/odin backup --help`, `./bin/odin restore --help`, `./bin/odin verify-backup --help`, and `./bin/odin serve --help` return bounded usage output.
+- Service readiness gates include `doctor`, fail-closed `healthcheck`, `overview`, `work status`, `review list`, `approvals all`, and actual-use E2E proof.
 
 ## Operator sign-off
 

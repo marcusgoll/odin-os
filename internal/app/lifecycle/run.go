@@ -78,6 +78,10 @@ const schedulerUsage = "usage: odin scheduler tick [now=<RFC3339>] [recovery=<tr
 const capabilitiesUsage = "usage: odin capabilities list [--kind agent|skill|workflow|command|tool] [--scope <scope>] [--json]\n       odin capabilities show <id> [--version <version>] [--json]"
 const capabilityCommandSource = "capability_gateway"
 const capabilityPluginModel = "plugins_are_packages_not_runtime_kind"
+const serveUsage = "usage: odin serve"
+const backupUsage = "usage: odin backup <archive-path>"
+const restoreUsage = "usage: odin restore <archive-path> <destination-root>"
+const verifyBackupUsage = "usage: odin verify-backup <archive-path>"
 
 var (
 	serveTaskLoopInterval     = 1 * time.Second
@@ -253,6 +257,11 @@ func Run(ctx context.Context, root string, args []string, stdin io.Reader, stdou
 		return err
 	}
 
+	if len(args) > 0 && args[0] == "serve" && isHelpArgs(args[1:]) {
+		_, err := fmt.Fprintln(stdout, serveUsage)
+		return err
+	}
+
 	loadCtx := ctx
 	if len(args) > 0 && args[0] == "serve" {
 		serveLock, err := bootstrap.AcquireServiceLock(cfg.RuntimeRoot)
@@ -370,6 +379,13 @@ func Run(ctx context.Context, root string, args []string, stdin io.Reader, stdou
 	case "healthcheck":
 		return runHealthcheck(ctx, app, cfg, stdout)
 	case "serve":
+		if isHelpArgs(args[1:]) {
+			_, err := fmt.Fprintln(stdout, serveUsage)
+			return err
+		}
+		if len(args) != 1 {
+			return fmt.Errorf(serveUsage)
+		}
 		now, err := runtimeNow()
 		if err != nil {
 			return err
@@ -6810,8 +6826,12 @@ func logBackgroundEvent(logger *logs.Logger, level logs.Level, component, messag
 }
 
 func runBackup(ctx context.Context, service appbackup.Service, args []string, stdout io.Writer) error {
+	if isHelpArgs(args) {
+		_, err := fmt.Fprintln(stdout, backupUsage)
+		return err
+	}
 	if len(args) != 1 {
-		return fmt.Errorf("usage: odin backup <archive-path>")
+		return fmt.Errorf(backupUsage)
 	}
 	if err := service.CreateArchive(ctx, args[0]); err != nil {
 		return err
@@ -6821,8 +6841,12 @@ func runBackup(ctx context.Context, service appbackup.Service, args []string, st
 }
 
 func runRestore(ctx context.Context, service appbackup.Service, args []string, stdout io.Writer) error {
+	if isHelpArgs(args) {
+		_, err := fmt.Fprintln(stdout, restoreUsage)
+		return err
+	}
 	if len(args) != 2 {
-		return fmt.Errorf("usage: odin restore <archive-path> <destination-root>")
+		return fmt.Errorf(restoreUsage)
 	}
 	if err := service.RestoreArchive(ctx, args[0], args[1]); err != nil {
 		return err
@@ -6832,12 +6856,20 @@ func runRestore(ctx context.Context, service appbackup.Service, args []string, s
 }
 
 func runVerifyBackup(ctx context.Context, service appbackup.Service, args []string, stdout io.Writer) error {
+	if isHelpArgs(args) {
+		_, err := fmt.Fprintln(stdout, verifyBackupUsage)
+		return err
+	}
 	if len(args) != 1 {
-		return fmt.Errorf("usage: odin verify-backup <archive-path>")
+		return fmt.Errorf(verifyBackupUsage)
 	}
 	if err := service.VerifyArchive(ctx, args[0]); err != nil {
 		return err
 	}
 	_, err := fmt.Fprintln(stdout, "backup verified")
 	return err
+}
+
+func isHelpArgs(args []string) bool {
+	return len(args) == 1 && (args[0] == "help" || args[0] == "--help" || args[0] == "-h")
 }

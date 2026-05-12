@@ -2,7 +2,7 @@ GO ?= go
 GOFMT ?= gofmt
 GOFILES := $(shell git ls-files '*.go')
 
-.PHONY: format fmt fmtcheck lint vet test test-alpha test-media test-skills ci build docker-smoke odin-e2e-local odin-e2e-contract run clean install-local uninstall-local
+.PHONY: format fmt fmtcheck lint vet test test-alpha test-media test-skills ci build docker-smoke odin-e2e-local odin-e2e-contract odin-actual-use-e2e homelab-release-dry-run run clean install-local uninstall-local
 
 format:
 	$(GOFMT) -w $(GOFILES)
@@ -40,6 +40,7 @@ ci: fmtcheck lint test
 	bash scripts/tests/docker-compose-smoke-test.sh
 	bash scripts/tests/verify-pr-template-test.sh
 	bash scripts/tests/install-service-test.sh
+	bash scripts/tests/homelab-release-dry-run-test.sh
 	$(MAKE) test-alpha
 	$(MAKE) build
 
@@ -57,6 +58,12 @@ odin-e2e-local:
 
 odin-e2e-contract:
 	./scripts/assert-odin-e2e-contract.sh
+
+odin-actual-use-e2e:
+	ODIN_ACTUAL_USE_PHASE0_PROOF=1 ./scripts/ops/actual-use-phase0-proof.sh
+
+homelab-release-dry-run:
+	./scripts/ops/homelab-release-dry-run.sh
 
 run:
 	$(GO) run ./cmd/odin-os
