@@ -2215,7 +2215,10 @@ func (service Service) admitDirectTask(ctx context.Context, task sqlite.Task, pr
 }
 
 func (service Service) admitDispatchedTask(ctx context.Context, task sqlite.Task, project sqlite.Project, manifest projects.Manifest) (admissionDecision, error) {
-	intent := resolveTaskExecutionIntent(manifest, task)
+	task, intent, err := service.resolveAndPersistTaskExecutionIntent(ctx, manifest, task)
+	if err != nil {
+		return admissionDecision{}, err
+	}
 	approvalDecision, required, err := service.evaluateTaskApproval(ctx, task, manifest, intent)
 	if err != nil {
 		return admissionDecision{}, err
