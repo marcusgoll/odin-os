@@ -46,6 +46,7 @@ type View struct {
 	CompanionSwarms       []CompanionSwarmSummary  `json:"companion_swarms"`
 	Companions            CompanionLane            `json:"companions"`
 	CapabilityCatalog     CapabilityCatalogLane    `json:"capability_catalog"`
+	CapabilityTruth       CapabilityTruthLane      `json:"capability_truth"`
 	SkillActivity         SkillActivityLane        `json:"skill_activity"`
 	ReviewQueue           ReviewQueueLane          `json:"review_queue"`
 	DelegationTruth       DelegationTruthLane      `json:"delegation_truth"`
@@ -129,6 +130,30 @@ type CapabilityCatalogLane struct {
 	WorkflowCount        int    `json:"workflow_count"`
 	CommandCount         int    `json:"command_count"`
 	ToolCount            int    `json:"tool_count"`
+}
+
+type CapabilityTruthLane struct {
+	Wiring              Wiring                   `json:"wiring"`
+	AuthoredInventory   CapabilityCatalogLane    `json:"authored_inventory"`
+	AuthoredAssetCount  int                      `json:"authored_asset_count"`
+	RuntimeProvenCount  int                      `json:"runtime_proven_count"`
+	PartialCount        int                      `json:"partial_count"`
+	AdvisoryCount       int                      `json:"advisory_count"`
+	UnknownCount        int                      `json:"unknown_count"`
+	HighRiskFamilyCount int                      `json:"high_risk_family_count"`
+	Notes               []string                 `json:"notes,omitempty"`
+	Items               []CapabilityTruthSummary `json:"items"`
+}
+
+type CapabilityTruthSummary struct {
+	Kind                string   `json:"kind"`
+	Key                 string   `json:"key"`
+	Title               string   `json:"title,omitempty"`
+	TruthLevel          string   `json:"truth_level"`
+	CountsAsImplemented bool     `json:"counts_as_implemented"`
+	HighRisk            bool     `json:"high_risk,omitempty"`
+	RiskLabel           string   `json:"risk_label,omitempty"`
+	Proof               []string `json:"proof,omitempty"`
 }
 
 type SkillActivityLane struct {
@@ -1109,6 +1134,7 @@ func (service Service) Build(ctx context.Context, resolved scope.Resolution) (Vi
 			view.CapabilityCatalog.CommandCount++
 		}
 	}
+	view.CapabilityTruth = capabilityTruthLane(view.CapabilityCatalog, service.RegistrySnapshot, toolcatalog.BuiltinDefinitions())
 
 	skillActivity, err := service.skillActivity(ctx, resolved)
 	if err != nil {
@@ -1124,6 +1150,170 @@ func (service Service) Build(ctx context.Context, resolved scope.Resolution) (Vi
 	view.ReviewQueue = reviewQueueLane(view)
 
 	return view, nil
+}
+
+func capabilityTruthLane(catalog CapabilityCatalogLane, snapshot registry.Snapshot, tools map[string]toolcatalog.ToolDefinition) CapabilityTruthLane {
+	lane := CapabilityTruthLane{
+		Wiring:            WiringLive,
+		AuthoredInventory: catalog,
+		AuthoredAssetCount: catalog.AgentDefinitionCount +
+			catalog.SkillCount +
+			catalog.WorkflowCount +
+			catalog.CommandCount +
+			catalog.ToolCount,
+		Notes: []string{
+			"Registry prompts are authored assets until runtime invocation, persistence/output, policy, and audit evidence exist.",
+		},
+	}
+
+	for _, item := range snapshot.Items {
+		summary := capabilityTruthFromRegistryItem(item)
+		lane.appendTruthSummary(summary)
+	}
+
+	toolKeys := make([]string, 0, len(tools))
+	for key := range tools {
+		toolKeys = append(toolKeys, key)
+	}
+	sort.Strings(toolKeys)
+	for _, key := range toolKeys {
+		summary := capabilityTruthFromBuiltinTool(tools[key])
+		lane.appendTruthSummary(summary)
+	}
+
+	sort.SliceStable(lane.Items, func(i int, j int) bool {
+		if lane.Items[i].Kind != lane.Items[j].Kind {
+			return lane.Items[i].Kind < lane.Items[j].Kind
+		}
+		return lane.Items[i].Key < lane.Items[j].Key
+	})
+
+	return lane
+}
+
+func (lane *CapabilityTruthLane) appendTruthSummary(summary CapabilityTruthSummary) {
+	if summary.Key == "" {
+		return
+	}
+
+	lane.Items = append(lane.Items, summary)
+	if summary.HighRisk {
+		lane.HighRiskFamilyCount++
+	}
+
+	switch summary.TruthLevel {
+	case "runtime_proven":
+		lane.RuntimeProvenCount++
+	case "partial":
+		lane.PartialCount++
+	case "authored_asset", "approval_required", "read_only", "unsupported":
+		lane.AdvisoryCount++
+	default:
+		lane.UnknownCount++
+	}
+}
+
+func capabilityTruthFromRegistryItem(item registry.Item) CapabilityTruthSummary {
+	summary := CapabilityTruthSummary{
+		Kind:       string(item.Kind),
+		Key:        item.Key,
+		Title:      item.Title,
+		TruthLevel: "authored_asset",
+		Proof:      []string{registrySourceProof(item)},
+	}
+
+	switch item.Kind {
+	case registry.KindAgent:
+		if item.Delegation.Enabled && normalizeOperatorSurface(item.Delegation.OperatorSurface) == "companion_delegate" {
+			summary.TruthLevel = "runtime_proven"
+			summary.CountsAsImplemented = true
+			summary.Proof = []string{"odin companion delegate", "jobs", "runs", "delegations", "logs"}
+		}
+	case registry.KindSkill:
+		summary.TruthLevel = "partial"
+		summary.Proof = append(summary.Proof, "skill registry")
+	case registry.KindWorkflow:
+		summary.Proof = append(summary.Proof, "workflow registry")
+	case registry.KindCommand:
+		summary.Proof = append(summary.Proof, "command registry")
+	case registry.KindTool:
+		summary.TruthLevel = "partial"
+		summary.Proof = append(summary.Proof, "tool registry")
+	}
+
+	if highRisk, label := capabilityRiskLabel(summary.Key, item.Title, item.Tags, item.Permissions); highRisk {
+		summary.HighRisk = true
+		summary.RiskLabel = label
+	}
+
+	return summary
+}
+
+func capabilityTruthFromBuiltinTool(definition toolcatalog.ToolDefinition) CapabilityTruthSummary {
+	summary := CapabilityTruthSummary{
+		Kind:       string(registry.KindTool),
+		Key:        definition.Key,
+		Title:      definition.Title,
+		TruthLevel: "partial",
+		Proof:      []string{"builtin tool catalog", "capability gateway"},
+	}
+	if definition.Invoke != nil {
+		summary.Proof = append(summary.Proof, "invoke function registered")
+	}
+
+	if highRisk, label := capabilityRiskLabel(definition.Key, definition.Title, definition.Tags, definition.Scopes); highRisk {
+		summary.HighRisk = true
+		summary.RiskLabel = label
+		if label == "approval_required" && !definition.RequiresApproval {
+			summary.TruthLevel = "approval_required"
+			summary.Proof = append(summary.Proof, "approval required")
+		}
+	}
+	if definition.RequiresApproval {
+		summary.HighRisk = true
+		summary.RiskLabel = "approval_required"
+		summary.TruthLevel = "approval_required"
+		summary.Proof = append(summary.Proof, "approval required")
+	}
+
+	return summary
+}
+
+func registrySourceProof(item registry.Item) string {
+	if item.Source.RelativePath != "" {
+		return item.Source.RelativePath
+	}
+	if item.Kind != "" {
+		return "registry/" + string(item.Kind)
+	}
+	return "registry"
+}
+
+func normalizeOperatorSurface(value string) string {
+	normalized := strings.TrimSpace(strings.ToLower(value))
+	normalized = strings.ReplaceAll(normalized, " ", "_")
+	normalized = strings.ReplaceAll(normalized, "-", "_")
+	return normalized
+}
+
+func capabilityRiskLabel(key, title string, tags, permissions []string) (bool, string) {
+	haystack := []string{key, title}
+	haystack = append(haystack, tags...)
+	haystack = append(haystack, permissions...)
+	joined := strings.ToLower(strings.Join(haystack, " "))
+
+	switch {
+	case strings.Contains(joined, "visible_evidence"), strings.Contains(joined, "evidence bundle"), strings.Contains(joined, "evidence_bundle"):
+		return true, "read_only"
+	case strings.Contains(joined, "publish"), strings.Contains(joined, "post"), strings.Contains(joined, "send"):
+		return true, "approval_required"
+	case strings.Contains(joined, "delete"), strings.Contains(joined, "deploy"), strings.Contains(joined, "production"), strings.Contains(joined, "permission"):
+		return true, "approval_required"
+	case strings.Contains(joined, "calendar"), strings.Contains(joined, "email"), strings.Contains(joined, "finance"), strings.Contains(joined, "github"), strings.Contains(joined, "browser"):
+		return true, "read_only"
+	default:
+		return false, ""
+	}
 }
 
 func reviewQueueLane(view View) ReviewQueueLane {
