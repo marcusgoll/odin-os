@@ -3594,6 +3594,34 @@ func TestRunWorkStartAndStatusUseCanonicalCommandPath(t *testing.T) {
 	}
 }
 
+func TestRunWorkProfilesExposeManagedProjectDeliveryProfile(t *testing.T) {
+	t.Parallel()
+
+	root := testRepoRoot(t)
+
+	var profilesOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"work", "profiles"}, strings.NewReader(""), &profilesOutput); err != nil {
+		t.Fatalf("Run(work profiles) error = %v", err)
+	}
+	for _, want := range []string{
+		"managed-project-delivery-workflow",
+		"status=active",
+		"entrypoint=skill:triage-skill",
+	} {
+		if !strings.Contains(profilesOutput.String(), want) {
+			t.Fatalf("Run(work profiles) output = %q, want %q", profilesOutput.String(), want)
+		}
+	}
+
+	var statusOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"work", "status"}, strings.NewReader(""), &statusOutput); err != nil {
+		t.Fatalf("Run(work status) error = %v", err)
+	}
+	if !strings.Contains(statusOutput.String(), "delivery_profiles=1") {
+		t.Fatalf("Run(work status) output = %q, want delivery_profiles=1", statusOutput.String())
+	}
+}
+
 func TestRunWorkDispatchCreatesRunAttemptFromAcceptedIntake(t *testing.T) {
 	t.Parallel()
 
@@ -7832,7 +7860,7 @@ func testRepoRoot(t *testing.T) string {
 
 	mustMkdirAll(filepath.Join(root, "config"))
 	mustMkdirAll(filepath.Join(root, "data"))
-	mustMkdirAll(filepath.Join(root, "registry"))
+	mustMkdirAll(filepath.Join(root, "registry", "workflows"))
 	mustMkdirAll(filepath.Join(root, "state", "cache"))
 	mustMkdirAll(filepath.Join(root, "alpha"))
 
@@ -7913,6 +7941,44 @@ runtime:
 service:
   http_addr: 127.0.0.1:9443
   startup_recovery: true
+`)
+	mustWriteFile(filepath.Join(root, "registry", "workflows", "managed-project-delivery-workflow.md"), `---
+kind: workflow
+key: managed-project-delivery-workflow
+title: Managed Project Delivery Workflow
+summary: Guides Odin-native software delivery for managed projects from intake through close.
+status: active
+tags:
+  - managed-project
+  - delivery
+  - delivery_profile
+entrypoint: skill:triage-skill
+composes:
+  - triage-skill
+---
+
+# Managed Project Delivery Workflow
+
+## Purpose
+Define the reusable Odin-owned delivery workflow for Git-governed managed projects.
+
+## When to Use
+Use this workflow when a managed project request needs governed software delivery.
+
+## Inputs
+The workflow takes the active managed project, operator request, project policy, and runtime evidence.
+
+## Procedure
+Classify the request, clarify missing context, create a spec or ticket, execute governed work, validate, review, and ship through the approved project path.
+
+## Outputs
+The workflow outputs a scoped delivery plan, task breakdown, implementation evidence, validation evidence, and shipping evidence.
+
+## Constraints
+Do not bypass managed-project governance, branches, worktrees, approvals, or runtime evidence.
+
+## Success Criteria
+Operators can inspect this profile through odin work profiles while Odin runtime state remains authoritative.
 `)
 
 	mustWriteFile(filepath.Join(root, "README.md"), "alpha test repo\n")

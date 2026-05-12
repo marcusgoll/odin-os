@@ -81,13 +81,14 @@ func TestLoadDirLoadsRepositoryExamples(t *testing.T) {
 	}
 
 	for key, wantKind := range map[string]registry.Kind{
-		"portal-delivery-agent":        registry.KindAgent,
-		"triage-agent":                 registry.KindAgent,
-		"status-command":               registry.KindCommand,
-		"triage-skill":                 registry.KindSkill,
-		"karpathy-guidelines":          registry.KindSkill,
-		"project-intake":               registry.KindWorkflow,
-		"pixel-perfect-ui-ux-designer": registry.KindSkill,
+		"portal-delivery-agent":             registry.KindAgent,
+		"triage-agent":                      registry.KindAgent,
+		"status-command":                    registry.KindCommand,
+		"triage-skill":                      registry.KindSkill,
+		"karpathy-guidelines":               registry.KindSkill,
+		"project-intake":                    registry.KindWorkflow,
+		"managed-project-delivery-workflow": registry.KindWorkflow,
+		"pixel-perfect-ui-ux-designer":      registry.KindSkill,
 	} {
 		item, ok := byKey[key]
 		if !ok {
@@ -96,6 +97,11 @@ func TestLoadDirLoadsRepositoryExamples(t *testing.T) {
 		if item.Kind != wantKind {
 			t.Fatalf("snapshot item %q kind = %q, want %q", key, item.Kind, wantKind)
 		}
+	}
+
+	deliveryProfile := byKey["managed-project-delivery-workflow"]
+	if !containsString(deliveryProfile.Tags, "delivery_profile") {
+		t.Fatalf("managed-project-delivery-workflow tags = %v, want delivery_profile", deliveryProfile.Tags)
 	}
 }
 

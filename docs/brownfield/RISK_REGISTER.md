@@ -21,7 +21,7 @@ date: 2026-04-30
 | R11 | `go test ./...` includes untracked `node_modules` Go package. | Medium | Audit output includes `odin-os/node_modules/flatted/golang/pkg/flatted`. | Local dependencies can pollute Go package graph. | Remove `node_modules`; ensure ignored generated dirs are absent in clean worktrees. |
 | R12 | Storage names conflict with domain names. | Medium | `CONTEXT.md` says Work Item / Run Attempt; tables and many surfaces still say `tasks` / `runs`. | Confusing operator model and docs drift. | Keep storage compatibility; render canonical names at operator surfaces. |
 | R13 | `internal/store/sqlite/store.go` is very large. | Medium | Store has thousands of lines and many domain methods. | Changes have wide review burden and lower locality. | Split by domain files inside same package, preserving transaction model. |
-| R14 | Delivery profiles absent from active registry. | Medium | `odin work status` reports `delivery_profiles=0`; registry workflows lack `delivery_profile` tag. | Delivery workflow cannot select governed profiles yet. | Add one minimal delivery profile registry entry before scheduler work. |
+| R14 | Delivery profiles need a real operator readback path. | Medium | The active registry exposes `managed-project-delivery-workflow` with `delivery_profile`, and `odin work profiles`/`odin work status` are the readback path. | Delivery workflow remains governed catalog content, not autonomous execution. | Keep delivery profiles visible through `odin work profiles`; add any future profile through the registry and prove it with the same command. |
 | R15 | Plans can be mistaken for implemented behavior. | Medium | Many `docs/plans/*` describe future commands such as `odin workspace`, `odin knowledge`, `odin brief ceo`. | Agents may claim features exist from docs alone. | Audits and PRs must separate implemented, planned, and uncommitted states. |
 | R16 | Existing provider adapters report capabilities but do not execute. | Medium | Static executors return `ErrNotImplemented`; only `codex_headless` runs. | Router may select paths that cannot run if config changes. | Mark non-live adapters unavailable until implemented or gate selection. |
 | R17 | Policy config is placeholder. | Medium | `config/policies.yaml` contains Phase 01 placeholder comments. | Security expectations live in code/docs, not active config. | Either remove placeholder or wire a minimal policy config contract. |
@@ -47,6 +47,6 @@ The implementation already enforces some branch/worktree and transition rules in
 
 1. Remove uncommitted TypeScript scaffold and duplicate Go runner/config scaffolds.
 2. Add top-level help and command discovery.
-3. Add a minimal delivery profile registry entry.
+3. Keep delivery profiles proven through `odin work profiles` as new profiles are added.
 4. Implement real `codex_exec` only after policy checks are in the canonical executor path.
 5. Harden systemd before any 24/7 unattended deployment.
