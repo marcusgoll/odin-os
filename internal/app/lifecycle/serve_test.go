@@ -55,6 +55,34 @@ func TestRunDoctorJSONWritesStructuredReport(t *testing.T) {
 	}
 }
 
+func TestRunOperationalCommandHelpReturnsWithoutMutation(t *testing.T) {
+	t.Parallel()
+
+	root := createRuntimeRoot(t)
+	for _, args := range [][]string{
+		{"serve", "--help"},
+		{"backup", "--help"},
+		{"restore", "--help"},
+		{"verify-backup", "--help"},
+	} {
+		args := args
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			t.Parallel()
+
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+
+			var stdout bytes.Buffer
+			if err := Run(ctx, root, args, strings.NewReader(""), &stdout); err != nil {
+				t.Fatalf("Run(%v) error = %v\noutput=%s", args, err, stdout.String())
+			}
+			if !strings.Contains(stdout.String(), "usage: odin "+args[0]) {
+				t.Fatalf("Run(%v) output = %q, want command usage", args, stdout.String())
+			}
+		})
+	}
+}
+
 func TestRunDoctorJSONIncludesMediaChecksWhenMediaConfigOverrideIsSet(t *testing.T) {
 	root := createRuntimeRoot(t)
 	mediaConfigPath := filepath.Join(t.TempDir(), "media-stack.yaml")
