@@ -37,104 +37,115 @@ const (
 type Type string
 
 const (
-	EventServiceLifecycleChanged            Type = "service.lifecycle_changed"
-	EventServiceHeartbeatRecorded           Type = "service.heartbeat_recorded"
-	EventProjectCreated                     Type = "project.created"
-	EventTaskCreated                        Type = "task.created"
-	EventTaskDispatchRequested              Type = "task.dispatch_requested"
-	EventTaskRetryEvaluated                 Type = "task.retry_evaluated"
-	EventTaskRecoveryRecommended            Type = "task.recovery_recommended"
-	EventTaskStatusChanged                  Type = "task.status_changed"
-	EventTaskQueueStateChanged              Type = "task.queue_state_changed"
-	EventRunStarted                         Type = "run.started"
-	EventRunStatusChanged                   Type = "run.status_changed"
-	EventRunExecutionClaimed                Type = "run.execution_claimed"
-	EventRunFinished                        Type = "run.finished"
-	EventApprovalRequested                  Type = "approval.requested"
-	EventApprovalResolved                   Type = "approval.resolved"
-	EventIncidentOpened                     Type = "incident.opened"
-	EventIncidentResolved                   Type = "incident.resolved"
-	EventIncidentEscalated                  Type = "incident.escalated"
-	EventRecoveryStarted                    Type = "recovery.started"
-	EventRecoveryActionExecuted             Type = "recovery.action_executed"
-	EventRecoveryCompleted                  Type = "recovery.completed"
-	EventRegistryVersionRecorded            Type = "registry_version.recorded"
-	EventExecutorHealthRecorded             Type = "executor_health.recorded"
-	EventContextPacketCreated               Type = "context_packet.created"
-	EventContextPacketReviewed              Type = "context_packet.reviewed"
-	EventConversationTranscriptRecorded     Type = "conversation.transcript_recorded"
-	EventMemorySummaryRecorded              Type = "memory.summary_recorded"
-	EventMemorySummaryUpdated               Type = "memory.summary_updated"
-	EventReviewApproved                     Type = "review.approved"
-	EventReviewRejected                     Type = "review.rejected"
-	EventIntakeItemCreated                  Type = "intake.item_created"
-	EventIntakeProcessingStarted            Type = "intake.processing_started"
-	EventIntakeClassified                   Type = "intake.classified"
-	EventIntakeDedupeReviewed               Type = "intake.dedupe_reviewed"
-	EventIntakeRouted                       Type = "intake.routed"
-	EventIntakeProcessed                    Type = "intake.processed"
-	EventIntakeRoutedToGoal                 Type = "intake.routed_to_goal"
-	EventIntakeDraftArtifactCreated         Type = "intake.draft_artifact_created"
-	EventIntakeClarificationNeeded          Type = "intake.clarification_needed"
-	EventIntakeDuplicateLinkedOrSuppressed  Type = "intake.duplicate_linked_or_suppressed"
-	EventIntakeReviewAccepted               Type = "intake.review_accepted"
-	EventIntakeReviewRejected               Type = "intake.review_rejected"
-	EventIntakeReviewClarificationRequested Type = "intake.review_clarification_requested"
-	EventIntakeReviewArchived               Type = "intake.review_archived"
-	EventIntakeReviewDuplicateAcknowledged  Type = "intake.review_duplicate_acknowledged"
-	EventIntakeReviewApprovalRequired       Type = "intake.review_approval_required"
-	EventIntakeApprovalApproved             Type = "intake.approval_approved"
-	EventIntakeApprovalDenied               Type = "intake.approval_denied"
-	EventExternalGitHubIssue                Type = "external.github.issue"
-	EventAutomationTriggerCreated           Type = "automation_trigger.created"
-	EventAutomationTriggerFireRequested     Type = "automation_trigger.fire_requested"
-	EventAutomationTriggerEvaluated         Type = "automation_trigger.evaluated"
-	EventAutomationTriggerMaterialized      Type = "automation_trigger.materialized"
-	EventAutomationTriggerDeferred          Type = "automation_trigger.deferred"
-	EventAutomationTriggerErrored           Type = "automation_trigger.errored"
-	EventAutomationTriggerStatusChanged     Type = "automation_trigger.status_changed"
-	EventProjectTransitionChanged           Type = "project.transition_changed"
-	EventProjectShadowObservationRecorded   Type = "project.shadow_observation_recorded"
-	EventProjectCompareReportRecorded       Type = "project.compare_report_recorded"
-	EventProjectTransitionDenied            Type = "project.transition_denied"
-	EventLearningProposalCreated            Type = "learning.proposal_created"
-	EventLearningProposalSubmitted          Type = "learning.proposal_submitted"
-	EventLearningProposalPromotionReady     Type = "learning.proposal_promotion_ready"
-	EventLearningProposalRejected           Type = "learning.proposal_rejected"
-	EventLearningEvaluationRecorded         Type = "learning.evaluation_recorded"
-	EventLearningPromotionApplied           Type = "learning.promotion_applied"
-	EventLearningPromotionRolledBack        Type = "learning.promotion_rolled_back"
-	EventSkillLifecycleRecorded             Type = "skill.lifecycle_recorded"
-	EventSkillArtifactRecorded              Type = "skill.artifact_recorded"
-	EventSkillArtifactReviewed              Type = "skill.artifact_reviewed"
-	EventDelegationCreated                  Type = "delegation.created"
-	EventDelegationCreateReused             Type = "delegation.create_reused"
-	EventDelegationStatusChanged            Type = "delegation.status_changed"
-	EventDelegationChildAttached            Type = "delegation.child_attached"
-	EventDelegationArtifactRecorded         Type = "delegation.artifact_recorded"
-	EventDelegationRetryRequested           Type = "delegation.retry_requested"
-	EventDelegationRetrySkipped             Type = "delegation.retry_skipped"
-	EventCapabilitySnapshotPublished        Type = "capability.snapshot_published"
-	EventCapabilitySnapshotRejected         Type = "capability.snapshot_rejected"
-	EventFollowUpMaterialized               Type = "follow_up.materialized"
-	EventFollowUpPaused                     Type = "follow_up.paused"
-	EventGoalCreated                        Type = "goal.created"
-	EventGoalUpdated                        Type = "goal.updated"
-	EventGoalStatusChanged                  Type = "goal.status_changed"
-	EventGoalRunnerObserved                 Type = "goal_runner.observed"
-	EventGoalRunStarted                     Type = "goal_run.started"
-	EventGoalRunStatusChanged               Type = "goal_run.status_changed"
-	EventGoalRunFinished                    Type = "goal_run.finished"
-	EventGoalBlockerRecorded                Type = "goal.blocker_recorded"
-	EventGoalEvidenceRecorded               Type = "goal.evidence_recorded"
-	EventBrowserSessionCreated              Type = "browser.session_created"
-	EventBrowserSessionStatusChanged        Type = "browser.session_status_changed"
-	EventBrowserSessionVerified             Type = "browser.session_verified"
-	EventBrowserSessionRevoked              Type = "browser.session_revoked"
-	EventBrowserSessionProfilePrepared      Type = "browser.session_profile_prepared"
-	EventBrowserSessionLoginRequested       Type = "browser.session_login_requested"
-	EventBrowserSessionLoginCompleted       Type = "browser.session_login_completed"
-	EventBrowserSessionLoginExpired         Type = "browser.session_login_expired"
+	EventServiceLifecycleChanged              Type = "service.lifecycle_changed"
+	EventServiceHeartbeatRecorded             Type = "service.heartbeat_recorded"
+	EventProjectCreated                       Type = "project.created"
+	EventTaskCreated                          Type = "task.created"
+	EventTaskDispatchRequested                Type = "task.dispatch_requested"
+	EventTaskRetryEvaluated                   Type = "task.retry_evaluated"
+	EventTaskRecoveryRecommended              Type = "task.recovery_recommended"
+	EventTaskStatusChanged                    Type = "task.status_changed"
+	EventTaskQueueStateChanged                Type = "task.queue_state_changed"
+	EventRunStarted                           Type = "run.started"
+	EventRunStatusChanged                     Type = "run.status_changed"
+	EventRunExecutionClaimed                  Type = "run.execution_claimed"
+	EventRunFinished                          Type = "run.finished"
+	EventDesignRequestCreated                 Type = "design.request_created"
+	EventDesignExecutionStarted               Type = "design.execution_started"
+	EventDesignArtifactCreated                Type = "design.artifact_created"
+	EventApprovalRequested                    Type = "approval.requested"
+	EventApprovalResolved                     Type = "approval.resolved"
+	EventIncidentOpened                       Type = "incident.opened"
+	EventIncidentResolved                     Type = "incident.resolved"
+	EventIncidentEscalated                    Type = "incident.escalated"
+	EventRecoveryStarted                      Type = "recovery.started"
+	EventRecoveryActionExecuted               Type = "recovery.action_executed"
+	EventRecoveryCompleted                    Type = "recovery.completed"
+	EventRegistryVersionRecorded              Type = "registry_version.recorded"
+	EventExecutorHealthRecorded               Type = "executor_health.recorded"
+	EventContextPacketCreated                 Type = "context_packet.created"
+	EventContextPacketReviewed                Type = "context_packet.reviewed"
+	EventConversationTranscriptRecorded       Type = "conversation.transcript_recorded"
+	EventMemorySummaryRecorded                Type = "memory.summary_recorded"
+	EventMemorySummaryUpdated                 Type = "memory.summary_updated"
+	EventReviewApproved                       Type = "review.approved"
+	EventReviewRejected                       Type = "review.rejected"
+	EventIntakeItemCreated                    Type = "intake.item_created"
+	EventIntakeProcessingStarted              Type = "intake.processing_started"
+	EventIntakeClassified                     Type = "intake.classified"
+	EventIntakeDedupeReviewed                 Type = "intake.dedupe_reviewed"
+	EventIntakeRouted                         Type = "intake.routed"
+	EventIntakeProcessed                      Type = "intake.processed"
+	EventIntakeRoutedToGoal                   Type = "intake.routed_to_goal"
+	EventIntakeDraftArtifactCreated           Type = "intake.draft_artifact_created"
+	EventIntakeClarificationNeeded            Type = "intake.clarification_needed"
+	EventIntakeDuplicateLinkedOrSuppressed    Type = "intake.duplicate_linked_or_suppressed"
+	EventIntakeReviewAccepted                 Type = "intake.review_accepted"
+	EventIntakeReviewRejected                 Type = "intake.review_rejected"
+	EventIntakeReviewClarificationRequested   Type = "intake.review_clarification_requested"
+	EventIntakeReviewArchived                 Type = "intake.review_archived"
+	EventIntakeReviewDuplicateAcknowledged    Type = "intake.review_duplicate_acknowledged"
+	EventIntakeReviewApprovalRequired         Type = "intake.review_approval_required"
+	EventIntakeApprovalApproved               Type = "intake.approval_approved"
+	EventIntakeApprovalDenied                 Type = "intake.approval_denied"
+	EventExternalGitHubIssue                  Type = "external.github.issue"
+	EventAutomationTriggerCreated             Type = "automation_trigger.created"
+	EventAutomationTriggerFireRequested       Type = "automation_trigger.fire_requested"
+	EventAutomationTriggerEvaluated           Type = "automation_trigger.evaluated"
+	EventAutomationTriggerMaterialized        Type = "automation_trigger.materialized"
+	EventAutomationTriggerDeferred            Type = "automation_trigger.deferred"
+	EventAutomationTriggerErrored             Type = "automation_trigger.errored"
+	EventAutomationTriggerStatusChanged       Type = "automation_trigger.status_changed"
+	EventProjectTransitionChanged             Type = "project.transition_changed"
+	EventProjectShadowObservationRecorded     Type = "project.shadow_observation_recorded"
+	EventProjectCompareReportRecorded         Type = "project.compare_report_recorded"
+	EventProjectTransitionDenied              Type = "project.transition_denied"
+	EventLearningProposalCreated              Type = "learning.proposal_created"
+	EventLearningProposalSubmitted            Type = "learning.proposal_submitted"
+	EventLearningProposalPromotionReady       Type = "learning.proposal_promotion_ready"
+	EventLearningProposalRejected             Type = "learning.proposal_rejected"
+	EventLearningEvaluationRecorded           Type = "learning.evaluation_recorded"
+	EventLearningPromotionApplied             Type = "learning.promotion_applied"
+	EventLearningPromotionRolledBack          Type = "learning.promotion_rolled_back"
+	EventSkillLifecycleRecorded               Type = "skill.lifecycle_recorded"
+	EventSkillArtifactRecorded                Type = "skill.artifact_recorded"
+	EventSkillArtifactReviewed                Type = "skill.artifact_reviewed"
+	EventDelegationCreated                    Type = "delegation.created"
+	EventDelegationCreateReused               Type = "delegation.create_reused"
+	EventDelegationStatusChanged              Type = "delegation.status_changed"
+	EventDelegationChildAttached              Type = "delegation.child_attached"
+	EventDelegationArtifactRecorded           Type = "delegation.artifact_recorded"
+	EventDelegationRetryRequested             Type = "delegation.retry_requested"
+	EventDelegationRetrySkipped               Type = "delegation.retry_skipped"
+	EventCapabilitySnapshotPublished          Type = "capability.snapshot_published"
+	EventCapabilitySnapshotRejected           Type = "capability.snapshot_rejected"
+	EventFollowUpMaterialized                 Type = "follow_up.materialized"
+	EventFollowUpPaused                       Type = "follow_up.paused"
+	EventGoalCreated                          Type = "goal.created"
+	EventGoalUpdated                          Type = "goal.updated"
+	EventGoalStatusChanged                    Type = "goal.status_changed"
+	EventGoalRunnerObserved                   Type = "goal_runner.observed"
+	EventGoalRunStarted                       Type = "goal_run.started"
+	EventGoalRunStatusChanged                 Type = "goal_run.status_changed"
+	EventGoalRunFinished                      Type = "goal_run.finished"
+	EventGoalBlockerRecorded                  Type = "goal.blocker_recorded"
+	EventGoalEvidenceRecorded                 Type = "goal.evidence_recorded"
+	EventBrowserSessionCreated                Type = "browser.session_created"
+	EventBrowserSessionStatusChanged          Type = "browser.session_status_changed"
+	EventBrowserSessionVerified               Type = "browser.session_verified"
+	EventBrowserSessionRevoked                Type = "browser.session_revoked"
+	EventBrowserSessionProfilePrepared        Type = "browser.session_profile_prepared"
+	EventBrowserProfileAttached               Type = "browser.profile_attached"
+	EventBrowserProfileEncrypted              Type = "browser.profile_encrypted"
+	EventBrowserProfileRevoked                Type = "browser.profile_revoked"
+	EventBrowserProfileExpired                Type = "browser.profile_expired"
+	EventBrowserProfileCleaned                Type = "browser.profile_cleaned"
+	EventBrowserProfileCleanupFailed          Type = "browser.profile_cleanup_failed"
+	EventBrowserProfileMaterialized           Type = "browser.profile_materialized"
+	EventBrowserProfileMaterializationCleaned Type = "browser.profile_materialization_cleaned"
+	EventBrowserSessionLoginRequested         Type = "browser.session_login_requested"
+	EventBrowserSessionLoginCompleted         Type = "browser.session_login_completed"
+	EventBrowserSessionLoginExpired           Type = "browser.session_login_expired"
 )
 
 const (
@@ -387,6 +398,48 @@ type BrowserSessionProfilePreparedPayload struct {
 	ProfilePath          string `json:"profile_path"`
 	Created              bool   `json:"created"`
 	Actor                string `json:"actor,omitempty"`
+}
+
+type BrowserProfileAttachedPayload struct {
+	SessionID            int64  `json:"session_id"`
+	GoalID               int64  `json:"goal_id,omitempty"`
+	TaskID               int64  `json:"task_id,omitempty"`
+	Domain               string `json:"domain"`
+	PermissionTier       string `json:"permission_tier"`
+	ProfileStoragePolicy string `json:"profile_storage_policy"`
+	ProfilePath          string `json:"profile_path"`
+	Actor                string `json:"actor,omitempty"`
+	Reason               string `json:"reason,omitempty"`
+}
+
+type BrowserProfileArtifactPayload struct {
+	ArtifactID            int64  `json:"artifact_id"`
+	SessionID             int64  `json:"session_id"`
+	ProfilePath           string `json:"profile_path"`
+	EncryptedArtifactPath string `json:"encrypted_artifact_path"`
+	EncryptionKeyRef      string `json:"encryption_key_ref"`
+	PreviousStatus        string `json:"previous_status,omitempty"`
+	Status                string `json:"status"`
+	CreatedAt             string `json:"created_at,omitempty"`
+	UpdatedAt             string `json:"updated_at,omitempty"`
+	ExpiresAt             string `json:"expires_at,omitempty"`
+	RevokedAt             string `json:"revoked_at,omitempty"`
+	CleanedAt             string `json:"cleaned_at,omitempty"`
+	ErrorCode             string `json:"error_code,omitempty"`
+	ErrorMessage          string `json:"error_message,omitempty"`
+	Actor                 string `json:"actor,omitempty"`
+	Reason                string `json:"reason,omitempty"`
+}
+
+type BrowserProfileMaterializationPayload struct {
+	ArtifactID           int64  `json:"artifact_id"`
+	SessionID            int64  `json:"session_id"`
+	ArtifactPath         string `json:"artifact_path"`
+	MaterializationPath  string `json:"materialization_path"`
+	MaterializedFilePath string `json:"materialized_file_path,omitempty"`
+	Removed              bool   `json:"removed,omitempty"`
+	Actor                string `json:"actor,omitempty"`
+	Reason               string `json:"reason,omitempty"`
 }
 
 type BrowserSessionLoginRequestedPayload struct {
@@ -792,6 +845,35 @@ type SkillArtifactReviewedPayload struct {
 	FollowOnTaskID    *int64 `json:"follow_on_task_id,omitempty"`
 	FollowOnTaskKey   string `json:"follow_on_task_key,omitempty"`
 	FollowOnTaskState string `json:"follow_on_task_status,omitempty"`
+}
+
+type DesignRequestCreatedPayload struct {
+	RequestArtifactID int64  `json:"request_artifact_id"`
+	SkillKey          string `json:"skill_key"`
+	Scope             string `json:"scope"`
+	Status            string `json:"status"`
+	ArtifactType      string `json:"artifact_type"`
+	Summary           string `json:"summary,omitempty"`
+	ExecutionProfile  string `json:"execution_profile,omitempty"`
+}
+
+type DesignExecutionStartedPayload struct {
+	RequestArtifactID int64  `json:"request_artifact_id"`
+	SkillKey          string `json:"skill_key"`
+	Scope             string `json:"scope"`
+	ToolKey           string `json:"tool_key"`
+	Summary           string `json:"summary,omitempty"`
+	ExecutionProfile  string `json:"execution_profile,omitempty"`
+}
+
+type DesignArtifactCreatedPayload struct {
+	RequestArtifactID int64  `json:"request_artifact_id"`
+	OutputArtifactID  int64  `json:"output_artifact_id"`
+	SkillKey          string `json:"skill_key"`
+	Scope             string `json:"scope"`
+	ArtifactType      string `json:"artifact_type"`
+	Status            string `json:"status"`
+	Summary           string `json:"summary,omitempty"`
 }
 
 type DelegationCreatedPayload struct {

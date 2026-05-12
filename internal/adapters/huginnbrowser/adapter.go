@@ -27,6 +27,7 @@ type Request struct {
 	MaxDurationSeconds int           `json:"max_duration_seconds"`
 	EvidenceRequired   bool          `json:"evidence_required"`
 	SiteProfiles       []SiteProfile `json:"site_profiles,omitempty"`
+	BrowserSession     *SessionRef   `json:"browser_session,omitempty"`
 }
 
 type SiteProfile struct {
@@ -37,19 +38,35 @@ type SiteProfile struct {
 	ModeAllowed        string `json:"mode_allowed,omitempty"`
 }
 
+type SessionRef struct {
+	ID                   int64  `json:"id"`
+	Domain               string `json:"domain"`
+	PermissionTier       string `json:"permission_tier"`
+	Status               string `json:"status"`
+	ProfileStoragePolicy string `json:"profile_storage_policy"`
+	ProfilePath          string `json:"profile_path"`
+}
+
 type Response struct {
-	Status               string       `json:"status"`
-	AdapterKind          string       `json:"adapter_kind"`
-	VisitedURLs          []string     `json:"visited_urls"`
-	PageResults          []PageResult `json:"page_results"`
-	ExtractedTextSummary string       `json:"extracted_text_summary"`
-	Screenshots          []string     `json:"screenshots"`
-	ActionLog            []string     `json:"action_log"`
-	Stdout               string       `json:"stdout,omitempty"`
-	Stderr               string       `json:"stderr,omitempty"`
-	ExitCode             int          `json:"exit_code,omitempty"`
-	ErrorCode            string       `json:"error_code,omitempty"`
-	ErrorMessage         string       `json:"error_message,omitempty"`
+	Status               string               `json:"status"`
+	AdapterKind          string               `json:"adapter_kind"`
+	VisitedURLs          []string             `json:"visited_urls"`
+	PageResults          []PageResult         `json:"page_results"`
+	ExtractedTextSummary string               `json:"extracted_text_summary"`
+	Screenshots          []string             `json:"screenshots"`
+	ScreenshotMetadata   []ScreenshotMetadata `json:"screenshot_metadata,omitempty"`
+	SelectedLinks        []SelectedLink       `json:"selected_links,omitempty"`
+	DownloadedFiles      []DownloadedFile     `json:"downloaded_files,omitempty"`
+	FormStateSummary     []FormStateSummary   `json:"form_state_summary,omitempty"`
+	BrowserNotes         []string             `json:"browser_notes,omitempty"`
+	Confidence           string               `json:"confidence,omitempty"`
+	Limitations          []string             `json:"limitations,omitempty"`
+	ActionLog            []string             `json:"action_log"`
+	Stdout               string               `json:"stdout,omitempty"`
+	Stderr               string               `json:"stderr,omitempty"`
+	ExitCode             int                  `json:"exit_code,omitempty"`
+	ErrorCode            string               `json:"error_code,omitempty"`
+	ErrorMessage         string               `json:"error_message,omitempty"`
 }
 
 type PageResult struct {
@@ -60,6 +77,36 @@ type PageResult struct {
 	Summary      string `json:"summary,omitempty"`
 	ErrorCode    string `json:"error_code,omitempty"`
 	ErrorMessage string `json:"error_message,omitempty"`
+}
+
+type ScreenshotMetadata struct {
+	Path      string `json:"path"`
+	URL       string `json:"url,omitempty"`
+	Title     string `json:"title,omitempty"`
+	Timestamp string `json:"timestamp,omitempty"`
+}
+
+type SelectedLink struct {
+	Text string `json:"text"`
+	URL  string `json:"url"`
+}
+
+type DownloadedFile struct {
+	Path        string `json:"path"`
+	URL         string `json:"url,omitempty"`
+	Filename    string `json:"filename,omitempty"`
+	ContentType string `json:"content_type,omitempty"`
+	SizeBytes   int64  `json:"size_bytes,omitempty"`
+	SHA256      string `json:"sha256,omitempty"`
+}
+
+type FormStateSummary struct {
+	FormID     string   `json:"form_id,omitempty"`
+	ActionURL  string   `json:"action_url,omitempty"`
+	Method     string   `json:"method,omitempty"`
+	Fields     []string `json:"fields,omitempty"`
+	HasSecrets bool     `json:"has_secrets,omitempty"`
+	Notes      string   `json:"notes,omitempty"`
 }
 
 type Adapter interface {
@@ -80,6 +127,7 @@ func (StubAdapter) Run(_ context.Context, request Request) (Response, error) {
 			URL:     uri,
 			Status:  "visited",
 			Mode:    defaultString(request.Mode, "fetch"),
+			Title:   "Stub page",
 			Summary: "Stub/local read-only browser evidence for " + uri,
 		})
 	}
@@ -90,6 +138,13 @@ func (StubAdapter) Run(_ context.Context, request Request) (Response, error) {
 		PageResults:          pageResults,
 		ExtractedTextSummary: "Stub/local read-only browser evidence for " + firstURL,
 		Screenshots:          []string{"stub://huginnbrowser/screenshot/1"},
+		ScreenshotMetadata:   []ScreenshotMetadata{{Path: "stub://huginnbrowser/screenshot/1", URL: firstURL, Title: "Stub page"}},
+		SelectedLinks:        []SelectedLink{{Text: "Stub link", URL: firstURL}},
+		DownloadedFiles:      []DownloadedFile{},
+		FormStateSummary:     []FormStateSummary{{Fields: []string{"search"}, HasSecrets: false, Notes: "stub summary only; no field values captured"}},
+		BrowserNotes:         []string{"deterministic stub evidence; no live browser launched"},
+		Confidence:           "medium",
+		Limitations:          []string{"stub adapter does not inspect live DOM"},
 		ActionLog: []string{
 			"stub_local_adapter_selected",
 			"validated_read_only_request",
@@ -234,6 +289,9 @@ func normalizeLiveResponse(response Response, request Request, stdout string, st
 	}
 	if strings.TrimSpace(response.ExtractedTextSummary) == "" {
 		response.ExtractedTextSummary = "Huginn live browser command returned no text summary."
+	}
+	if strings.TrimSpace(response.Confidence) == "" {
+		response.Confidence = "unknown"
 	}
 	response.Stdout = stdout
 	response.Stderr = stderr

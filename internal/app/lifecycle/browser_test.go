@@ -3,6 +3,7 @@ package lifecycle
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -49,6 +50,94 @@ func TestRunBrowserRunRecordsGoalEvidenceAndKeepsGoalStatus(t *testing.T) {
 	logs := run("logs", "--json")
 	if !strings.Contains(logs, `"type": "goal.evidence_recorded"`) || !strings.Contains(logs, `"evidence_type": "browser_readonly"`) {
 		t.Fatalf("logs output = %s, want browser evidence audit event", logs)
+	}
+}
+
+func TestRunBrowserRunFromWorkSurfacesEvidenceInReviewAndOverview(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	root := testRepoRoot(t)
+
+	run := func(args ...string) string {
+		t.Helper()
+		var output bytes.Buffer
+		if err := Run(context.Background(), root, args, strings.NewReader(""), &output); err != nil {
+			t.Fatalf("Run(%v) error = %v\noutput=%s", args, err, output.String())
+		}
+		return output.String()
+	}
+
+	run("work", "start", "--project", "odin-core", "--title", "Collect browser evidence for docs", "--intent", "read_only")
+	browserRun := run("browser", "run", "--task-id", "1", "--url", "https://example.com/research", "--objective", "Collect public documentation", "--allowed-domain", "example.com", "--max-pages", "2", "--max-duration-seconds", "30", "--evidence-required", "--json")
+	for _, want := range []string{
+		`"status": "recorded"`,
+		`"task_id": 1`,
+		`"run_id": 1`,
+		`"adapter_kind": "stub_local"`,
+		`"screenshot_metadata":`,
+		`"selected_links":`,
+		`"form_state_summary":`,
+		`"confidence": "medium"`,
+	} {
+		if !strings.Contains(browserRun, want) {
+			t.Fatalf("browser run output = %s, want %s", browserRun, want)
+		}
+	}
+
+	reviewList := run("review", "list", "--json")
+	for _, want := range []string{`"queue_id": "browser-evidence:1"`, `"source_type": "browser_evidence"`, `"allowed_actions": [`} {
+		if !strings.Contains(reviewList, want) {
+			t.Fatalf("review list output = %s, want %s", reviewList, want)
+		}
+	}
+	reviewShow := run("review", "show", "browser-evidence:1", "--json")
+	for _, want := range []string{`"source_type": "browser_evidence"`, `"evidence": [`, `"adapter_status": "completed"`, `"selected_links":`} {
+		if !strings.Contains(reviewShow, want) {
+			t.Fatalf("review show output = %s, want %s", reviewShow, want)
+		}
+	}
+	overview := run("overview", "--json")
+	for _, want := range []string{`"blocked_reason": "browser_evidence_review"`, `"browser_evidence": [`, `"evidence_type": "browser_readonly"`} {
+		if !strings.Contains(overview, want) {
+			t.Fatalf("overview output = %s, want %s", overview, want)
+		}
+	}
+}
+
+func TestRunBrowserFailedCaptureCreatesRecoveryRecommendation(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	root := testRepoRoot(t)
+	fixture := filepath.Join(t.TempDir(), "huginn-fail.sh")
+	if err := os.WriteFile(fixture, []byte("#!/usr/bin/env bash\ncat >/dev/null\nprintf '{\"status\":\"failed\",\"adapter_kind\":\"huginn_live\",\"error_code\":\"selector_missing\",\"error_message\":\"selector missing\",\"extracted_text_summary\":\"Huginn live browser adapter did not produce browsing evidence.\"}'\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	t.Setenv("ODIN_BROWSER_ADAPTER", "live")
+	t.Setenv("ODIN_HUGINN_BROWSER_COMMAND", fixture)
+	t.Setenv("ODIN_HUGINN_BROWSER_ALLOWED_COMMANDS", fixture)
+
+	run := func(args ...string) string {
+		t.Helper()
+		var output bytes.Buffer
+		if err := Run(context.Background(), root, args, strings.NewReader(""), &output); err != nil {
+			t.Fatalf("Run(%v) error = %v\noutput=%s", args, err, output.String())
+		}
+		return output.String()
+	}
+
+	run("work", "start", "--project", "odin-core", "--title", "Capture failing browser evidence", "--intent", "read_only")
+	run("browser", "run", "--task-id", "1", "--url", "https://example.com/research", "--allowed-domain", "example.com", "--json")
+	reviewList := run("review", "list", "--json")
+	for _, want := range []string{
+		`"queue_id": "failed-work:1"`,
+		`"source_type": "failed_work"`,
+		`"recovery_recommendation": "Browser evidence capture failed.`,
+	} {
+		if !strings.Contains(reviewList, want) {
+			t.Fatalf("review list output = %s, want %s", reviewList, want)
+		}
+	}
+	overview := run("overview", "--json")
+	if !strings.Contains(overview, `"source": "browser_evidence"`) || !strings.Contains(overview, `"recovery_recommendation": "Browser evidence capture failed.`) {
+		t.Fatalf("overview output = %s, want browser recovery guidance", overview)
 	}
 }
 
@@ -570,6 +659,94 @@ func TestRunBrowserSessionPrepareProfileRejectsRevokedAndUnsafeMetadata(t *testi
 	}
 }
 
+func TestRunBrowserSessionProfileArtifactMaterializeAndCleanup(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("ODIN_BROWSER_PROFILE_KEY_B64", base64.StdEncoding.EncodeToString([]byte(strings.Repeat("k", 32))))
+	root := testRepoRoot(t)
+
+	run := func(args ...string) string {
+		t.Helper()
+		var output bytes.Buffer
+		if err := Run(context.Background(), root, args, strings.NewReader(""), &output); err != nil {
+			t.Fatalf("Run(%v) error = %v\noutput=%s", args, err, output.String())
+		}
+		return output.String()
+	}
+
+	created := decodeBrowserSessionEnvelope(t, []byte(run(
+		"browser", "session", "create",
+		"--name", "google-main",
+		"--domain", "google.com",
+		"--permission-tier", "authenticated_read",
+		"--json",
+	)))
+	plaintextPath := filepath.Join(t.TempDir(), "profile-state.json")
+	if err := os.WriteFile(plaintextPath, []byte(`{"state":"safe fixture"}`), 0o600); err != nil {
+		t.Fatalf("WriteFile(plaintext fixture) error = %v", err)
+	}
+
+	artifact := decodeBrowserSessionProfileArtifactEnvelope(t, []byte(run(
+		"browser", "session", "profile", "artifact", "create-fixture",
+		"--session-id", int64String(created.ID),
+		"--name", "google-main",
+		"--plaintext-file", plaintextPath,
+		"--json",
+	)))
+	if artifact.SessionID != created.ID || artifact.Status != "encrypted" || artifact.ArtifactPath != "browser-sessions/encrypted-profiles/google-main.enc" {
+		t.Fatalf("artifact = %+v, want encrypted artifact metadata for created session", artifact)
+	}
+	encryptedBytes, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(artifact.ArtifactPath)))
+	if err != nil {
+		t.Fatalf("ReadFile(encrypted artifact) error = %v", err)
+	}
+	if strings.Contains(string(encryptedBytes), "safe fixture") {
+		t.Fatalf("encrypted artifact contains plaintext fixture bytes: %s", string(encryptedBytes))
+	}
+
+	targetDir := "runtime/browser-profile-materializations/google-main"
+	materialization := decodeBrowserSessionProfileMaterializationEnvelope(t, []byte(run(
+		"browser", "session", "profile", "artifact", "materialize",
+		"--id", int64String(artifact.ID),
+		"--target-dir", targetDir,
+		"--json",
+	)))
+	if materialization.ArtifactID != artifact.ID || materialization.SessionID != created.ID || materialization.MaterializationPath != targetDir || materialization.MaterializedFilePath == "" || !materialization.ReadOnly {
+		t.Fatalf("materialization = %+v, want read-only materialized profile artifact", materialization)
+	}
+	materializedBytes, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(materialization.MaterializedFilePath)))
+	if err != nil {
+		t.Fatalf("ReadFile(materialized file) error = %v", err)
+	}
+	if string(materializedBytes) != `{"state":"safe fixture"}` {
+		t.Fatalf("materialized bytes = %q, want original fixture plaintext", string(materializedBytes))
+	}
+
+	cleanup := decodeBrowserSessionProfileMaterializationEnvelope(t, []byte(run(
+		"browser", "session", "profile", "artifact", "cleanup-materialization",
+		"--id", int64String(artifact.ID),
+		"--target-dir", targetDir,
+		"--json",
+	)))
+	if cleanup.ArtifactID != artifact.ID || !cleanup.Removed {
+		t.Fatalf("cleanup = %+v, want materialization removed", cleanup)
+	}
+	if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(targetDir))); !os.IsNotExist(err) {
+		t.Fatalf("materialization dir stat error = %v, want removed", err)
+	}
+
+	logs := run("logs", "--json")
+	for _, want := range []string{`"type": "browser.profile_encrypted"`, `"type": "browser.profile_materialized"`, `"type": "browser.profile_materialization_cleaned"`} {
+		if !strings.Contains(logs, want) {
+			t.Fatalf("logs output = %s, want %s", logs, want)
+		}
+	}
+	for _, forbidden := range []string{"password", "totp", "backup_code", "cookie", "profile_bytes", "safe fixture"} {
+		if strings.Contains(strings.ToLower(logs), forbidden) {
+			t.Fatalf("logs output contains forbidden token %q: %s", forbidden, logs)
+		}
+	}
+}
+
 type browserSessionJSON struct {
 	ID                   int64  `json:"id"`
 	Name                 string `json:"name"`
@@ -615,6 +792,31 @@ type browserSessionHandoffJSON struct {
 	AllowedActions string `json:"allowed_actions"`
 }
 
+type browserSessionProfileArtifactJSON struct {
+	ID               int64  `json:"id"`
+	SessionID        int64  `json:"session_id"`
+	Status           string `json:"status"`
+	ProfilePath      string `json:"profile_path"`
+	ArtifactPath     string `json:"artifact_path"`
+	EncryptionKeyRef string `json:"encryption_key_ref"`
+	CreatedAt        string `json:"created_at"`
+	UpdatedAt        string `json:"updated_at"`
+	RevokedAt        string `json:"revoked_at,omitempty"`
+	CleanedAt        string `json:"cleaned_at,omitempty"`
+	ErrorCode        string `json:"error_code,omitempty"`
+	ErrorMessage     string `json:"error_message,omitempty"`
+}
+
+type browserSessionProfileMaterializationJSON struct {
+	ArtifactID           int64  `json:"artifact_id"`
+	SessionID            int64  `json:"session_id"`
+	ArtifactPath         string `json:"artifact_path"`
+	MaterializationPath  string `json:"materialization_path"`
+	MaterializedFilePath string `json:"materialized_file_path,omitempty"`
+	ReadOnly             bool   `json:"read_only,omitempty"`
+	Removed              bool   `json:"removed,omitempty"`
+}
+
 func decodeBrowserSessionPrepareProfileEnvelope(t *testing.T, payload []byte) browserSessionPrepareProfileJSON {
 	t.Helper()
 	var envelope struct {
@@ -657,4 +859,26 @@ func decodeBrowserSessionHandoffEnvelope(t *testing.T, payload []byte) browserSe
 		t.Fatalf("browser session handoff json decode error = %v; output=%s", err, string(payload))
 	}
 	return envelope.Handoff
+}
+
+func decodeBrowserSessionProfileArtifactEnvelope(t *testing.T, payload []byte) browserSessionProfileArtifactJSON {
+	t.Helper()
+	var envelope struct {
+		Artifact browserSessionProfileArtifactJSON `json:"artifact"`
+	}
+	if err := json.Unmarshal(payload, &envelope); err != nil {
+		t.Fatalf("browser session profile artifact json decode error = %v; output=%s", err, string(payload))
+	}
+	return envelope.Artifact
+}
+
+func decodeBrowserSessionProfileMaterializationEnvelope(t *testing.T, payload []byte) browserSessionProfileMaterializationJSON {
+	t.Helper()
+	var envelope struct {
+		Materialization browserSessionProfileMaterializationJSON `json:"materialization"`
+	}
+	if err := json.Unmarshal(payload, &envelope); err != nil {
+		t.Fatalf("browser session profile materialization json decode error = %v; output=%s", err, string(payload))
+	}
+	return envelope.Materialization
 }

@@ -94,6 +94,103 @@ func TestReadOnlyServiceRecordsGoalEvidenceAndAudit(t *testing.T) {
 	}
 }
 
+func TestServiceMutatingRequestCreatesApprovalAndDoesNotExecute(t *testing.T) {
+	store := openBrowserTestStore(t)
+	defer store.Close()
+
+	ctx := context.Background()
+	goal, err := store.CreateGoal(ctx, sqlite.CreateGoalParams{Title: "Approve browser mutation"})
+	if err != nil {
+		t.Fatalf("CreateGoal() error = %v", err)
+	}
+	project, err := store.CreateProject(ctx, sqlite.CreateProjectParams{
+		Key:           "odin-core",
+		Name:          "Odin Core",
+		Scope:         "odin-core",
+		GitRoot:       "/home/orchestrator/odin-os",
+		DefaultBranch: "main",
+		GitHubRepo:    "example/odin-os",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+	task, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:       project.ID,
+		Key:             "browser-mutation",
+		Title:           "Submit browser form",
+		Status:          "queued",
+		Scope:           "odin-core",
+		RequestedBy:     "operator",
+		ExecutionIntent: "mutation",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+
+	adapter := &recordingAdapter{}
+	result, err := Service{Store: store, Adapter: adapter}.Run(ctx, ReadOnlyTask{
+		GoalID:             goal.ID,
+		TaskID:             task.ID,
+		WorkerMode:         "browser",
+		Objective:          "Submit the login form",
+		AllowedDomains:     []string{"example.com"},
+		StartURLs:          []string{"https://example.com/login"},
+		MaxPages:           1,
+		MaxDurationSeconds: 30,
+		EvidenceRequired:   true,
+		Actions:            []string{"submit_form"},
+	})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if adapter.called {
+		t.Fatal("adapter was called for approval-required mutation")
+	}
+	if result.Status != "approval_required" || !result.ApprovalRequired || result.ApprovalID <= 0 || result.RiskClass != RiskExternalMutation {
+		t.Fatalf("result = %+v, want approval_required external mutation with approval id", result)
+	}
+	if result.Evidence.ID <= 0 || result.EvidenceType != EvidenceTypeApprovalRequired {
+		t.Fatalf("result evidence = %+v type=%q, want blocked mutation evidence", result.Evidence, result.EvidenceType)
+	}
+	if !strings.Contains(result.Evidence.PayloadJSON, `"risk_class":"external_mutation"`) || !strings.Contains(result.Evidence.PayloadJSON, `"approval_required":true`) {
+		t.Fatalf("evidence payload = %s, want risk and approval flag", result.Evidence.PayloadJSON)
+	}
+
+	approval, err := store.GetLatestTaskApproval(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("GetLatestTaskApproval() error = %v", err)
+	}
+	if approval.ID != result.ApprovalID || approval.Status != "pending" {
+		t.Fatalf("approval = %+v, want pending approval %d", approval, result.ApprovalID)
+	}
+	updatedTask, err := store.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
+	}
+	if updatedTask.Status != "blocked" || updatedTask.BlockedReason != "approval_required" {
+		t.Fatalf("updated task status=%q blocked_reason=%q, want blocked approval_required", updatedTask.Status, updatedTask.BlockedReason)
+	}
+
+	events, err := store.ListEvents(ctx, sqlite.ListEventsParams{})
+	if err != nil {
+		t.Fatalf("ListEvents() error = %v", err)
+	}
+	var approvalEvent bool
+	var evidenceEvent bool
+	for _, event := range events {
+		if event.Type == runtimeevents.EventApprovalRequested && event.StreamID == approval.ID {
+			approvalEvent = true
+		}
+		if event.Type == runtimeevents.EventGoalEvidenceRecorded && event.StreamID == goal.ID {
+			evidenceEvent = true
+		}
+	}
+	if !approvalEvent || !evidenceEvent {
+		t.Fatalf("events = %+v, want approval requested and goal evidence audit events", events)
+	}
+}
+
 func TestReadOnlyServicePassesSiteProfilesToAdapter(t *testing.T) {
 	store := openBrowserTestStore(t)
 	defer store.Close()
@@ -139,6 +236,140 @@ func TestReadOnlyServicePassesSiteProfilesToAdapter(t *testing.T) {
 	}
 	if !strings.Contains(result.Evidence.PayloadJSON, `"site_profiles":[{"domain":"example.com","max_pages":1,"min_delay_ms":250,"max_duration_seconds":10,"mode_allowed":"fetch"}]`) {
 		t.Fatalf("evidence payload = %s, want site profile persisted in task payload", result.Evidence.PayloadJSON)
+	}
+}
+
+func TestReadOnlyServiceAttachesVerifiedBrowserSessionMetadata(t *testing.T) {
+	store := openBrowserTestStore(t)
+	defer store.Close()
+
+	ctx := context.Background()
+	goal, err := store.CreateGoal(ctx, sqlite.CreateGoalParams{Title: "Collect authenticated browser evidence"})
+	if err != nil {
+		t.Fatalf("CreateGoal() error = %v", err)
+	}
+	session, err := store.CreateBrowserSession(ctx, sqlite.CreateBrowserSessionParams{
+		Name:           "google-main",
+		Domain:         "google.com",
+		AccountHint:    "marcus",
+		PermissionTier: sqlite.BrowserSessionPermissionTierAuthenticatedReadOnly,
+	})
+	if err != nil {
+		t.Fatalf("CreateBrowserSession() error = %v", err)
+	}
+	session, _, err = store.VerifyBrowserSession(ctx, sqlite.VerifyBrowserSessionParams{
+		SessionID: session.ID,
+		Actor:     "operator",
+		Reason:    "operator attended login",
+	})
+	if err != nil {
+		t.Fatalf("VerifyBrowserSession() error = %v", err)
+	}
+
+	adapter := &recordingAdapter{response: huginnbrowser.Response{
+		Status:               "completed",
+		AdapterKind:          "stub_local",
+		VisitedURLs:          []string{"https://mail.google.com/mail/u/0/"},
+		ExtractedTextSummary: "Authenticated page evidence",
+		ActionLog:            []string{"browser_session_profile_attached"},
+	}}
+	result, err := Service{Store: store, Adapter: adapter}.Run(ctx, ReadOnlyTask{
+		GoalID:             goal.ID,
+		BrowserSessionID:   session.ID,
+		WorkerMode:         "browser",
+		Objective:          "Collect authenticated page evidence",
+		AllowedDomains:     []string{"google.com"},
+		StartURLs:          []string{"https://mail.google.com/mail/u/0/"},
+		MaxPages:           1,
+		MaxDurationSeconds: 30,
+		Actions:            []string{"read"},
+	})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if !adapter.called || adapter.request.BrowserSession == nil {
+		t.Fatalf("adapter called=%v browser_session=%#v, want attached session metadata", adapter.called, adapter.request.BrowserSession)
+	}
+	if adapter.request.BrowserSession.ID != session.ID || adapter.request.BrowserSession.Domain != "google.com" || adapter.request.BrowserSession.ProfilePath != session.ProfilePath {
+		t.Fatalf("adapter browser session = %+v, want safe verified session metadata", adapter.request.BrowserSession)
+	}
+	if result.BrowserSessionID != session.ID || result.BrowserSession == nil || result.BrowserSession.ProfilePath != session.ProfilePath {
+		t.Fatalf("result browser session = id:%d metadata:%+v, want safe session reference", result.BrowserSessionID, result.BrowserSession)
+	}
+	if strings.Contains(strings.ToLower(result.Evidence.PayloadJSON), "cookie") || strings.Contains(strings.ToLower(result.Evidence.PayloadJSON), "token") {
+		t.Fatalf("evidence payload exposes forbidden secret marker: %s", result.Evidence.PayloadJSON)
+	}
+
+	events, err := store.ListEvents(ctx, sqlite.ListEventsParams{})
+	if err != nil {
+		t.Fatalf("ListEvents() error = %v", err)
+	}
+	var attached bool
+	for _, event := range events {
+		if event.StreamType == runtimeevents.StreamBrowserSession && event.StreamID == session.ID && event.Type == runtimeevents.EventBrowserProfileAttached {
+			attached = true
+		}
+	}
+	if !attached {
+		t.Fatalf("events = %+v, want browser.profile_attached", events)
+	}
+}
+
+func TestReadOnlyServiceRejectsUnsafeBrowserSessionAttachment(t *testing.T) {
+	store := openBrowserTestStore(t)
+	defer store.Close()
+
+	ctx := context.Background()
+	goal, err := store.CreateGoal(ctx, sqlite.CreateGoalParams{Title: "Reject unsafe browser session"})
+	if err != nil {
+		t.Fatalf("CreateGoal() error = %v", err)
+	}
+	session, err := store.CreateBrowserSession(ctx, sqlite.CreateBrowserSessionParams{
+		Name:           "google-main",
+		Domain:         "google.com",
+		PermissionTier: sqlite.BrowserSessionPermissionTierAuthenticatedReadOnly,
+	})
+	if err != nil {
+		t.Fatalf("CreateBrowserSession() error = %v", err)
+	}
+	adapter := &recordingAdapter{}
+	_, err = Service{Store: store, Adapter: adapter}.Run(ctx, ReadOnlyTask{
+		GoalID:             goal.ID,
+		BrowserSessionID:   session.ID,
+		Objective:          "Collect authenticated page evidence",
+		AllowedDomains:     []string{"google.com"},
+		StartURLs:          []string{"https://mail.google.com/mail/u/0/"},
+		MaxPages:           1,
+		MaxDurationSeconds: 30,
+		Actions:            []string{"read"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "verified") {
+		t.Fatalf("Run(unverified session) error = %v, want verified rejection", err)
+	}
+	if adapter.called {
+		t.Fatal("adapter was called for unverified browser session")
+	}
+
+	session, _, err = store.VerifyBrowserSession(ctx, sqlite.VerifyBrowserSessionParams{
+		SessionID: session.ID,
+		Actor:     "operator",
+		Reason:    "operator attended login",
+	})
+	if err != nil {
+		t.Fatalf("VerifyBrowserSession() error = %v", err)
+	}
+	_, err = Service{Store: store, Adapter: adapter}.Run(ctx, ReadOnlyTask{
+		GoalID:             goal.ID,
+		BrowserSessionID:   session.ID,
+		Objective:          "Collect authenticated page evidence",
+		AllowedDomains:     []string{"example.com"},
+		StartURLs:          []string{"https://example.com/private"},
+		MaxPages:           1,
+		MaxDurationSeconds: 30,
+		Actions:            []string{"read"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "domain") {
+		t.Fatalf("Run(domain mismatch) error = %v, want domain rejection", err)
 	}
 }
 

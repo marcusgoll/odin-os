@@ -19,7 +19,9 @@ func TestParseBrowserRunAcceptsSafetyOptions(t *testing.T) {
 	command, err := ParseBrowser([]string{
 		"run",
 		"--goal-id", "42",
+		"--task-id", "9",
 		"--url", "https://docs.example.com/research",
+		"--session-id", "7",
 		"--objective", "Collect public docs",
 		"--allowed-domain", "example.com",
 		"--max-pages", "3",
@@ -32,8 +34,21 @@ func TestParseBrowserRunAcceptsSafetyOptions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseBrowser() error = %v", err)
 	}
-	if command.Objective != "Collect public docs" || command.AllowedDomains[0] != "example.com" || command.MaxPages != 3 || command.MaxDurationSeconds != 45 || command.WorkerMode != "browser" || !command.EvidenceRequired || command.Actions[0] != "read" {
+	if command.TaskID != 9 || command.Objective != "Collect public docs" || command.SessionID != 7 || command.AllowedDomains[0] != "example.com" || command.MaxPages != 3 || command.MaxDurationSeconds != 45 || command.WorkerMode != "browser" || !command.EvidenceRequired || command.Actions[0] != "read" {
 		t.Fatalf("command = %+v, want parsed safety options", command)
+	}
+}
+
+func TestParseBrowserRunCanTargetWorkItemWithoutGoal(t *testing.T) {
+	command, err := ParseBrowser([]string{"run", "--task-id", "7", "--url", "https://example.com/research", "--json"})
+	if err != nil {
+		t.Fatalf("ParseBrowser() error = %v", err)
+	}
+	if command.TaskID != 7 || command.GoalID != 0 {
+		t.Fatalf("command IDs = task:%d goal:%d, want task only", command.TaskID, command.GoalID)
+	}
+	if len(command.AllowedDomains) != 1 || command.AllowedDomains[0] != "example.com" {
+		t.Fatalf("AllowedDomains = %#v, want default host", command.AllowedDomains)
 	}
 }
 
@@ -144,5 +159,27 @@ func TestParseBrowserSessionPrepareProfileCommand(t *testing.T) {
 	_, err = ParseBrowser([]string{"session", "prepare-profile", "--id", "42", "--profile-path", "browser-sessions/profiles/other", "--json"})
 	if err == nil || !strings.Contains(err.Error(), "only accepts --id and --json") {
 		t.Fatalf("ParseBrowser(session prepare-profile with profile path) error = %v, want rejected profile path", err)
+	}
+}
+
+func TestParseBrowserSessionProfileArtifactCommands(t *testing.T) {
+	create, err := ParseBrowser([]string{"session", "profile", "artifact", "create-fixture", "--session-id", "42", "--name", "google-main", "--plaintext-file", "/tmp/profile-fixture.json", "--json"})
+	if err != nil {
+		t.Fatalf("ParseBrowser(profile artifact create-fixture) error = %v", err)
+	}
+	if create.Name != "session" || create.SessionAction != "profile" || create.ProfileAction != "artifact" || create.ArtifactAction != "create-fixture" || create.SessionID != 42 || create.ArtifactName != "google-main" || create.PlaintextFile != "/tmp/profile-fixture.json" || !create.JSON {
+		t.Fatalf("create command = %+v, want parsed profile artifact create-fixture", create)
+	}
+
+	materialize, err := ParseBrowser([]string{"session", "profile", "artifact", "materialize", "--id", "9", "--target-dir", "runtime/browser-profile-materializations/google-main", "--json"})
+	if err != nil {
+		t.Fatalf("ParseBrowser(profile artifact materialize) error = %v", err)
+	}
+	if materialize.ArtifactAction != "materialize" || materialize.ID != 9 || materialize.TargetDir != "runtime/browser-profile-materializations/google-main" || !materialize.JSON {
+		t.Fatalf("materialize command = %+v, want parsed materialize", materialize)
+	}
+
+	if _, err := ParseBrowser([]string{"session", "profile", "artifact", "create-fixture", "--session-id", "42", "--name", "google-main", "--json"}); err == nil || !strings.Contains(err.Error(), "--plaintext-file is required") {
+		t.Fatalf("ParseBrowser(profile artifact create-fixture missing plaintext) error = %v, want plaintext requirement", err)
 	}
 }

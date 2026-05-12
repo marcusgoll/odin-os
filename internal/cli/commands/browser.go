@@ -7,15 +7,20 @@ import (
 	"strings"
 )
 
-const BrowserUsage = "usage: odin browser run --goal-id <id> --url <url> [--objective <text>] [--allowed-domain <domain>] [--max-pages <n>] [--max-duration-seconds <n>] [--worker-mode <fetch|browser>] [--evidence-required] [--action <read|navigate|snapshot|extract>] [--json] | odin browser session create --name <name> --domain <domain> --permission-tier <tier> [--account-hint <hint>] [--profile-path <path>] [--json] | odin browser session list [--json] | odin browser session show --id <id> [--json] | odin browser session status --id <id> --status <status> [--json] | odin browser session revoke --id <id> [--json] | odin browser session login-request --id <id> [--handoff-base-url <url>] [--json] | odin browser session login-requests --id <id> [--json] | odin browser session handoff show --handoff-id <id> [--json] | odin browser session verify --id <id> [--login-request-id <id>] [--json] | odin browser session prepare-profile --id <id> [--json]"
+const BrowserUsage = "usage: odin browser run (--goal-id <id>|--task-id <id>) --url <url> [--session-id <id>] [--objective <text>] [--allowed-domain <domain>] [--max-pages <n>] [--max-duration-seconds <n>] [--worker-mode <fetch|browser>] [--evidence-required] [--action <read|navigate|snapshot|extract>] [--json] | odin browser session create --name <name> --domain <domain> --permission-tier <tier> [--account-hint <hint>] [--profile-path <path>] [--json] | odin browser session list [--json] | odin browser session show --id <id> [--json] | odin browser session status --id <id> --status <status> [--json] | odin browser session revoke --id <id> [--json] | odin browser session login-request --id <id> [--handoff-base-url <url>] [--json] | odin browser session login-requests --id <id> [--json] | odin browser session handoff show --handoff-id <id> [--json] | odin browser session verify --id <id> [--login-request-id <id>] [--json] | odin browser session prepare-profile --id <id> [--json] | odin browser session profile artifact create-fixture --session-id <id> --name <safe-name> --plaintext-file <path> [--json] | odin browser session profile artifact list [--session-id <id>] [--json] | odin browser session profile artifact show --id <id> [--json] | odin browser session profile artifact revoke --id <id> [--json] | odin browser session profile artifact materialize --id <id> --target-dir <path> [--json] | odin browser session profile artifact cleanup-materialization --id <id> --target-dir <path> [--json] | odin browser session profile retention cleanup [--session-id <id>] [--apply] [--json]"
 
 type BrowserCommand struct {
 	Name               string
 	SessionAction      string
 	HandoffAction      string
+	ProfileAction      string
+	RetentionAction    string
+	ArtifactAction     string
 	ID                 int64
 	LoginRequestID     int64
 	GoalID             int64
+	TaskID             int64
+	SessionID          int64
 	URL                string
 	URLs               []string
 	Objective          string
@@ -30,9 +35,13 @@ type BrowserCommand struct {
 	PermissionTier     string
 	AccountHint        string
 	ProfilePath        string
+	ArtifactName       string
+	PlaintextFile      string
+	TargetDir          string
 	HandoffID          string
 	HandoffBaseURL     string
 	Status             string
+	Apply              bool
 	JSON               bool
 }
 
@@ -67,6 +76,28 @@ func ParseBrowser(args []string) (BrowserCommand, error) {
 				return BrowserCommand{}, fmt.Errorf("--goal-id must be a positive integer")
 			}
 			command.GoalID = goalID
+			index = nextIndex
+		case "--task-id":
+			value, nextIndex, err := requiredValue(args, index, "--task-id")
+			if err != nil {
+				return BrowserCommand{}, err
+			}
+			taskID, err := strconv.ParseInt(value, 10, 64)
+			if err != nil || taskID <= 0 {
+				return BrowserCommand{}, fmt.Errorf("--task-id must be a positive integer")
+			}
+			command.TaskID = taskID
+			index = nextIndex
+		case "--session-id":
+			value, nextIndex, err := requiredValue(args, index, "--session-id")
+			if err != nil {
+				return BrowserCommand{}, err
+			}
+			sessionID, err := strconv.ParseInt(value, 10, 64)
+			if err != nil || sessionID <= 0 {
+				return BrowserCommand{}, fmt.Errorf("--session-id must be a positive integer")
+			}
+			command.SessionID = sessionID
 			index = nextIndex
 		case "--url":
 			value, nextIndex, err := requiredValue(args, index, "--url")
@@ -143,8 +174,8 @@ func ParseBrowser(args []string) (BrowserCommand, error) {
 			return BrowserCommand{}, fmt.Errorf("unknown browser argument: %s", args[index])
 		}
 	}
-	if command.GoalID <= 0 {
-		return BrowserCommand{}, fmt.Errorf("--goal-id is required")
+	if command.GoalID <= 0 && command.TaskID <= 0 {
+		return BrowserCommand{}, fmt.Errorf("--goal-id or --task-id is required")
 	}
 	if len(command.URLs) == 0 {
 		return BrowserCommand{}, fmt.Errorf("--url is required")
@@ -174,9 +205,37 @@ func parseBrowserSession(args []string, command BrowserCommand) (BrowserCommand,
 		if command.HandoffAction != "show" {
 			return BrowserCommand{}, fmt.Errorf("unsupported browser session handoff subcommand: %s", args[1])
 		}
+	} else if command.SessionAction == "profile" {
+		if len(args) < 2 || strings.HasPrefix(args[1], "--") {
+			return BrowserCommand{}, fmt.Errorf(BrowserUsage)
+		}
+		command.ProfileAction = strings.ToLower(strings.TrimSpace(args[1]))
+		flagStart = 2
+		switch command.ProfileAction {
+		case "retention":
+			if len(args) < 3 || strings.HasPrefix(args[2], "--") {
+				return BrowserCommand{}, fmt.Errorf("usage: odin browser session profile retention cleanup [--session-id <id>] [--apply] [--json]")
+			}
+			command.RetentionAction = strings.ToLower(strings.TrimSpace(args[2]))
+			flagStart = 3
+			if command.RetentionAction != "cleanup" {
+				return BrowserCommand{}, fmt.Errorf("unsupported browser session profile retention subcommand: %s", args[2])
+			}
+		case "artifact":
+			if len(args) < 3 || strings.HasPrefix(args[2], "--") {
+				return BrowserCommand{}, fmt.Errorf(BrowserUsage)
+			}
+			command.ArtifactAction = strings.ToLower(strings.TrimSpace(args[2]))
+			flagStart = 3
+			if !isKnownBrowserProfileArtifactAction(command.ArtifactAction) {
+				return BrowserCommand{}, fmt.Errorf("unsupported browser session profile artifact subcommand: %s", args[2])
+			}
+		default:
+			return BrowserCommand{}, fmt.Errorf("unsupported browser session profile subcommand: %s", args[1])
+		}
 	}
 	switch command.SessionAction {
-	case "create", "list", "show", "status", "revoke", "login-request", "login-requests", "verify", "prepare-profile", "handoff":
+	case "create", "list", "show", "status", "revoke", "login-request", "login-requests", "verify", "prepare-profile", "handoff", "profile":
 	default:
 		return BrowserCommand{}, fmt.Errorf("unsupported browser session subcommand: %s", args[0])
 	}
@@ -209,7 +268,36 @@ func parseBrowserSession(args []string, command BrowserCommand) (BrowserCommand,
 			if err != nil {
 				return BrowserCommand{}, err
 			}
-			command.SessionName = value
+			if command.SessionAction == "profile" && command.ProfileAction == "artifact" {
+				command.ArtifactName = value
+			} else {
+				command.SessionName = value
+			}
+			index = nextIndex
+		case "--session-id":
+			value, nextIndex, err := requiredValue(args, index, "--session-id")
+			if err != nil {
+				return BrowserCommand{}, err
+			}
+			id, err := strconv.ParseInt(value, 10, 64)
+			if err != nil || id <= 0 {
+				return BrowserCommand{}, fmt.Errorf("--session-id must be a positive integer")
+			}
+			command.SessionID = id
+			index = nextIndex
+		case "--plaintext-file":
+			value, nextIndex, err := requiredValue(args, index, "--plaintext-file")
+			if err != nil {
+				return BrowserCommand{}, err
+			}
+			command.PlaintextFile = value
+			index = nextIndex
+		case "--target-dir":
+			value, nextIndex, err := requiredValue(args, index, "--target-dir")
+			if err != nil {
+				return BrowserCommand{}, err
+			}
+			command.TargetDir = value
 			index = nextIndex
 		case "--domain":
 			value, nextIndex, err := requiredValue(args, index, "--domain")
@@ -274,9 +362,14 @@ func parseBrowserSession(args []string, command BrowserCommand) (BrowserCommand,
 				return BrowserCommand{}, fmt.Errorf("duplicate --json flag")
 			}
 			command.JSON = true
+		case "--apply":
+			command.Apply = true
 		default:
 			return BrowserCommand{}, fmt.Errorf("unknown browser session argument: %s", args[index])
 		}
+	}
+	if command.SessionAction != "profile" && (command.SessionID != 0 || command.ArtifactName != "" || command.PlaintextFile != "" || command.TargetDir != "" || command.Apply) {
+		return BrowserCommand{}, fmt.Errorf("browser session %s does not accept profile artifact fields", command.SessionAction)
 	}
 	switch command.SessionAction {
 	case "create":
@@ -337,8 +430,79 @@ func parseBrowserSession(args []string, command BrowserCommand) (BrowserCommand,
 		if command.HandoffAction != "" || command.SessionName != "" || command.SessionDomain != "" || command.PermissionTier != "" || command.AccountHint != "" || command.ProfilePath != "" || command.HandoffID != "" || command.HandoffBaseURL != "" || command.Status != "" {
 			return BrowserCommand{}, fmt.Errorf("browser session verify only accepts --id, --login-request-id, and --json")
 		}
+	case "profile":
+		return validateBrowserSessionProfileCommand(command)
 	}
 	return command, nil
+}
+
+func validateBrowserSessionProfileCommand(command BrowserCommand) (BrowserCommand, error) {
+	if command.HandoffAction != "" || command.LoginRequestID != 0 || command.SessionName != "" || command.SessionDomain != "" || command.PermissionTier != "" || command.AccountHint != "" || command.ProfilePath != "" || command.HandoffID != "" || command.HandoffBaseURL != "" || command.Status != "" {
+		return BrowserCommand{}, fmt.Errorf("browser session profile only accepts profile fields and --json")
+	}
+	switch command.ProfileAction {
+	case "retention":
+		if command.RetentionAction != "cleanup" {
+			return BrowserCommand{}, fmt.Errorf(BrowserUsage)
+		}
+		if command.ID != 0 || command.ArtifactAction != "" || command.ArtifactName != "" || command.PlaintextFile != "" || command.TargetDir != "" {
+			return BrowserCommand{}, fmt.Errorf("browser session profile retention cleanup only accepts --session-id, --apply, and --json")
+		}
+	case "artifact":
+		if command.RetentionAction != "" || command.Apply {
+			return BrowserCommand{}, fmt.Errorf("browser session profile artifact only accepts artifact fields and --json")
+		}
+		switch command.ArtifactAction {
+		case "create-fixture":
+			if command.SessionID <= 0 {
+				return BrowserCommand{}, fmt.Errorf("--session-id is required")
+			}
+			if strings.TrimSpace(command.ArtifactName) == "" {
+				return BrowserCommand{}, fmt.Errorf("--name is required")
+			}
+			if strings.TrimSpace(command.PlaintextFile) == "" {
+				return BrowserCommand{}, fmt.Errorf("--plaintext-file is required")
+			}
+			if command.ID != 0 || command.TargetDir != "" {
+				return BrowserCommand{}, fmt.Errorf("browser session profile artifact create-fixture only accepts --session-id, --name, --plaintext-file, and --json")
+			}
+		case "list":
+			if command.ID != 0 || command.ArtifactName != "" || command.PlaintextFile != "" || command.TargetDir != "" {
+				return BrowserCommand{}, fmt.Errorf("browser session profile artifact list only accepts --session-id and --json")
+			}
+		case "show", "revoke":
+			if command.ID <= 0 {
+				return BrowserCommand{}, fmt.Errorf("--id is required")
+			}
+			if command.SessionID != 0 || command.ArtifactName != "" || command.PlaintextFile != "" || command.TargetDir != "" {
+				return BrowserCommand{}, fmt.Errorf("browser session profile artifact %s only accepts --id and --json", command.ArtifactAction)
+			}
+		case "materialize", "cleanup-materialization":
+			if command.ID <= 0 {
+				return BrowserCommand{}, fmt.Errorf("--id is required")
+			}
+			if strings.TrimSpace(command.TargetDir) == "" {
+				return BrowserCommand{}, fmt.Errorf("--target-dir is required")
+			}
+			if command.SessionID != 0 || command.ArtifactName != "" || command.PlaintextFile != "" {
+				return BrowserCommand{}, fmt.Errorf("browser session profile artifact %s only accepts --id, --target-dir, and --json", command.ArtifactAction)
+			}
+		default:
+			return BrowserCommand{}, fmt.Errorf("unsupported browser session profile artifact subcommand: %s", command.ArtifactAction)
+		}
+	default:
+		return BrowserCommand{}, fmt.Errorf("unsupported browser session profile subcommand: %s", command.ProfileAction)
+	}
+	return command, nil
+}
+
+func isKnownBrowserProfileArtifactAction(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "create-fixture", "list", "show", "revoke", "materialize", "cleanup-materialization":
+		return true
+	default:
+		return false
+	}
 }
 
 func isKnownBrowserSessionPermissionTier(value string) bool {

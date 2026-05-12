@@ -2,6 +2,7 @@ package lifecycle
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -12,25 +13,44 @@ import (
 	"odin-os/internal/app/bootstrap"
 	commands "odin-os/internal/cli/commands"
 	browserexecutor "odin-os/internal/executors/browser"
+	"odin-os/internal/runtime/browserprofileartifacts"
+	"odin-os/internal/runtime/browserprofilekeys"
+	"odin-os/internal/runtime/browserprofilematerialize"
+	"odin-os/internal/runtime/recovery"
+	runsvc "odin-os/internal/runtime/runs"
 	"odin-os/internal/store/sqlite"
 )
 
 type browserRunView struct {
-	Status               string                       `json:"status"`
-	GoalID               int64                        `json:"goal_id"`
-	EvidenceID           int64                        `json:"evidence_id"`
-	EvidenceType         string                       `json:"evidence_type"`
-	AdapterStatus        string                       `json:"adapter_status,omitempty"`
-	AdapterKind          string                       `json:"adapter_kind,omitempty"`
-	StartURLs            []string                     `json:"start_urls"`
-	AllowedDomains       []string                     `json:"allowed_domains"`
-	MaxPages             int                          `json:"max_pages"`
-	MaxDurationSeconds   int                          `json:"max_duration_seconds"`
-	VisitedURLs          []string                     `json:"visited_urls,omitempty"`
-	PageResults          []browserexecutor.PageResult `json:"page_results,omitempty"`
-	ExtractedTextSummary string                       `json:"extracted_text_summary,omitempty"`
-	Screenshots          []string                     `json:"screenshots,omitempty"`
-	ActionLog            []string                     `json:"action_log,omitempty"`
+	Status                 string                               `json:"status"`
+	GoalID                 int64                                `json:"goal_id,omitempty"`
+	TaskID                 int64                                `json:"task_id,omitempty"`
+	RunID                  int64                                `json:"run_id,omitempty"`
+	BrowserSessionID       int64                                `json:"browser_session_id,omitempty"`
+	EvidenceID             int64                                `json:"evidence_id,omitempty"`
+	EvidenceType           string                               `json:"evidence_type"`
+	ApprovalRequired       bool                                 `json:"approval_required,omitempty"`
+	ApprovalID             int64                                `json:"approval_id,omitempty"`
+	RiskClass              string                               `json:"risk_class,omitempty"`
+	AdapterStatus          string                               `json:"adapter_status,omitempty"`
+	AdapterKind            string                               `json:"adapter_kind,omitempty"`
+	StartURLs              []string                             `json:"start_urls"`
+	AllowedDomains         []string                             `json:"allowed_domains"`
+	MaxPages               int                                  `json:"max_pages"`
+	MaxDurationSeconds     int                                  `json:"max_duration_seconds"`
+	VisitedURLs            []string                             `json:"visited_urls,omitempty"`
+	PageResults            []browserexecutor.PageResult         `json:"page_results,omitempty"`
+	ExtractedTextSummary   string                               `json:"extracted_text_summary,omitempty"`
+	Screenshots            []string                             `json:"screenshots,omitempty"`
+	ScreenshotMetadata     []browserexecutor.ScreenshotMetadata `json:"screenshot_metadata,omitempty"`
+	SelectedLinks          []browserexecutor.SelectedLink       `json:"selected_links,omitempty"`
+	DownloadedFiles        []browserexecutor.DownloadedFile     `json:"downloaded_files,omitempty"`
+	FormStateSummary       []browserexecutor.FormStateSummary   `json:"form_state_summary,omitempty"`
+	BrowserNotes           []string                             `json:"browser_notes,omitempty"`
+	Confidence             string                               `json:"confidence,omitempty"`
+	Limitations            []string                             `json:"limitations,omitempty"`
+	RecoveryRecommendation string                               `json:"recovery_recommendation,omitempty"`
+	ActionLog              []string                             `json:"action_log,omitempty"`
 }
 
 type browserSessionEnvelope struct {
@@ -57,6 +77,22 @@ type browserSessionProfileEnvelope struct {
 	Profile browserSessionProfileView `json:"profile"`
 }
 
+type browserSessionProfileRetentionEnvelope struct {
+	Retention browserSessionProfileRetentionView `json:"retention"`
+}
+
+type browserSessionProfileArtifactEnvelope struct {
+	Artifact browserSessionProfileArtifactView `json:"artifact"`
+}
+
+type browserSessionProfileArtifactListView struct {
+	Artifacts []browserSessionProfileArtifactView `json:"artifacts"`
+}
+
+type browserSessionProfileMaterializationEnvelope struct {
+	Materialization browserSessionProfileMaterializationView `json:"materialization"`
+}
+
 type browserSessionView struct {
 	ID                   int64  `json:"id"`
 	Name                 string `json:"name"`
@@ -79,6 +115,42 @@ type browserSessionProfileView struct {
 	ProfilePath       string `json:"profile_path"`
 	ProfilePathExists bool   `json:"profile_path_exists"`
 	Created           bool   `json:"created"`
+}
+
+type browserSessionProfileRetentionView struct {
+	DryRun    bool                                            `json:"dry_run"`
+	Apply     bool                                            `json:"apply"`
+	Eligible  int                                             `json:"eligible"`
+	Cleaned   int                                             `json:"cleaned"`
+	Failed    int                                             `json:"failed"`
+	Skipped   int                                             `json:"skipped"`
+	Artifacts []browserprofileartifacts.RetentionArtifactItem `json:"artifacts"`
+}
+
+type browserSessionProfileArtifactView struct {
+	ID               int64  `json:"id"`
+	SessionID        int64  `json:"session_id"`
+	Status           string `json:"status"`
+	ProfilePath      string `json:"profile_path"`
+	ArtifactPath     string `json:"artifact_path"`
+	EncryptionKeyRef string `json:"encryption_key_ref"`
+	CreatedAt        string `json:"created_at"`
+	UpdatedAt        string `json:"updated_at"`
+	ExpiresAt        string `json:"expires_at,omitempty"`
+	RevokedAt        string `json:"revoked_at,omitempty"`
+	CleanedAt        string `json:"cleaned_at,omitempty"`
+	ErrorCode        string `json:"error_code,omitempty"`
+	ErrorMessage     string `json:"error_message,omitempty"`
+}
+
+type browserSessionProfileMaterializationView struct {
+	ArtifactID           int64  `json:"artifact_id"`
+	SessionID            int64  `json:"session_id"`
+	ArtifactPath         string `json:"artifact_path"`
+	MaterializationPath  string `json:"materialization_path"`
+	MaterializedFilePath string `json:"materialized_file_path,omitempty"`
+	ReadOnly             bool   `json:"read_only,omitempty"`
+	Removed              bool   `json:"removed,omitempty"`
 }
 
 type browserSessionLoginRequestView struct {
@@ -118,16 +190,61 @@ func runBrowser(ctx context.Context, app bootstrap.App, args []string, stdout io
 		return runBrowserSession(ctx, app, command, stdout)
 	}
 
+	objective := strings.TrimSpace(command.Objective)
+	if command.TaskID > 0 {
+		task, err := app.Store.GetTask(ctx, command.TaskID)
+		if err != nil {
+			return err
+		}
+		if objective == "" {
+			objective = task.Title
+		}
+		run, err := (runsvc.Service{Store: app.Store}).Start(ctx, task, browserexecutor.EvidenceType)
+		if err != nil {
+			return err
+		}
+		result, runErr := browserexecutor.Service{Store: app.Store}.Run(ctx, browserexecutor.ReadOnlyTask{
+			GoalID:             command.GoalID,
+			TaskID:             command.TaskID,
+			RunID:              run.ID,
+			BrowserSessionID:   command.SessionID,
+			WorkerMode:         command.WorkerMode,
+			Objective:          objective,
+			AllowedDomains:     command.AllowedDomains,
+			StartURLs:          command.URLs,
+			MaxPages:           command.MaxPages,
+			MaxDurationSeconds: command.MaxDurationSeconds,
+			EvidenceRequired:   command.EvidenceRequired,
+			Actions:            command.Actions,
+		})
+		if runErr != nil {
+			if finishErr := finishBrowserRunFailed(ctx, app.Store, run.ID, command.TaskID, result, runErr); finishErr != nil {
+				return finishErr
+			}
+			return runErr
+		}
+		if result.Status == "approval_required" {
+			if err := finishBrowserRunApprovalRequired(ctx, app.Store, run.ID, result); err != nil {
+				return err
+			}
+			return writeBrowserRunView(stdout, command.JSON, result)
+		}
+		if err := finishBrowserRunFromWork(ctx, app.Store, run.ID, command.TaskID, result); err != nil {
+			return err
+		}
+		return writeBrowserRunView(stdout, command.JSON, result)
+	}
+
 	goal, err := app.Store.GetGoal(ctx, command.GoalID)
 	if err != nil {
 		return err
 	}
-	objective := strings.TrimSpace(command.Objective)
 	if objective == "" {
 		objective = goal.Title
 	}
 	result, err := browserexecutor.Service{Store: app.Store}.Run(ctx, browserexecutor.ReadOnlyTask{
 		GoalID:             command.GoalID,
+		BrowserSessionID:   command.SessionID,
 		WorkerMode:         command.WorkerMode,
 		Objective:          objective,
 		AllowedDomains:     command.AllowedDomains,
@@ -140,28 +257,132 @@ func runBrowser(ctx context.Context, app bootstrap.App, args []string, stdout io
 	if err != nil {
 		return err
 	}
+	return writeBrowserRunView(stdout, command.JSON, result)
+}
+
+func writeBrowserRunView(stdout io.Writer, jsonOutput bool, result browserexecutor.Result) error {
 	view := browserRunView{
-		Status:               result.Status,
-		GoalID:               result.GoalID,
-		EvidenceID:           result.EvidenceID,
-		EvidenceType:         result.EvidenceType,
-		AdapterStatus:        result.AdapterStatus,
-		AdapterKind:          result.AdapterKind,
-		StartURLs:            result.StartURLs,
-		AllowedDomains:       result.AllowedDomains,
-		MaxPages:             result.MaxPages,
-		MaxDurationSeconds:   result.MaxDurationSeconds,
-		VisitedURLs:          result.VisitedURLs,
-		PageResults:          result.PageResults,
-		ExtractedTextSummary: result.ExtractedTextSummary,
-		Screenshots:          result.Screenshots,
-		ActionLog:            result.ActionLog,
+		Status:                 result.Status,
+		GoalID:                 result.GoalID,
+		TaskID:                 result.TaskID,
+		RunID:                  result.RunID,
+		BrowserSessionID:       result.BrowserSessionID,
+		EvidenceID:             result.EvidenceID,
+		EvidenceType:           result.EvidenceType,
+		ApprovalRequired:       result.ApprovalRequired,
+		ApprovalID:             result.ApprovalID,
+		RiskClass:              result.RiskClass,
+		AdapterStatus:          result.AdapterStatus,
+		AdapterKind:            result.AdapterKind,
+		StartURLs:              result.StartURLs,
+		AllowedDomains:         result.AllowedDomains,
+		MaxPages:               result.MaxPages,
+		MaxDurationSeconds:     result.MaxDurationSeconds,
+		VisitedURLs:            result.VisitedURLs,
+		PageResults:            result.PageResults,
+		ExtractedTextSummary:   result.ExtractedTextSummary,
+		Screenshots:            result.Screenshots,
+		ScreenshotMetadata:     result.ScreenshotMetadata,
+		SelectedLinks:          result.SelectedLinks,
+		DownloadedFiles:        result.DownloadedFiles,
+		FormStateSummary:       result.FormStateSummary,
+		BrowserNotes:           result.BrowserNotes,
+		Confidence:             result.Confidence,
+		Limitations:            result.Limitations,
+		RecoveryRecommendation: result.RecoveryRecommendation,
+		ActionLog:              result.ActionLog,
 	}
-	if command.JSON {
+	if jsonOutput {
 		return commands.WriteJSON(stdout, view)
 	}
-	_, err = fmt.Fprintf(stdout, "browser goal=%d status=%s evidence=%d type=%s\n", view.GoalID, view.Status, view.EvidenceID, view.EvidenceType)
+	_, err := fmt.Fprintf(stdout, "browser goal=%d task=%d run=%d status=%s evidence=%d type=%s\n", view.GoalID, view.TaskID, view.RunID, view.Status, view.EvidenceID, view.EvidenceType)
 	return err
+}
+
+func finishBrowserRunFromWork(ctx context.Context, store *sqlite.Store, runID int64, taskID int64, result browserexecutor.Result) error {
+	artifactsJSON := browserResultArtifactsJSON(result)
+	runStatus := "completed"
+	taskStatus := "blocked"
+	blockedReason := "browser_evidence_review"
+	lastError := ""
+	if result.AdapterStatus == "failed" || result.AdapterStatus == "timeout" {
+		runStatus = "failed"
+		taskStatus = "failed"
+		blockedReason = ""
+		lastError = "browser evidence capture failed: " + firstNonBlank(result.ErrorMessage, result.ExtractedTextSummary, "unknown browser error")
+	}
+	if _, err := store.FinishRun(ctx, sqlite.FinishRunParams{
+		RunID:          runID,
+		Status:         runStatus,
+		Summary:        firstNonBlank(result.ExtractedTextSummary, result.AdapterStatus, result.Status),
+		TerminalReason: runStatus,
+		ArtifactsJSON:  artifactsJSON,
+	}); err != nil {
+		return err
+	}
+	task, err := store.GetTask(ctx, taskID)
+	if err != nil {
+		return err
+	}
+	updated, err := store.UpdateTaskQueueState(ctx, sqlite.UpdateTaskQueueStateParams{
+		TaskID:         task.ID,
+		Status:         taskStatus,
+		NextEligibleAt: task.NextEligibleAt,
+		Priority:       task.Priority,
+		LastError:      lastError,
+		RetryCount:     task.RetryCount,
+		MaxAttempts:    task.MaxAttempts,
+		BlockedReason:  blockedReason,
+	})
+	if err != nil {
+		return err
+	}
+	if taskStatus == "failed" {
+		guidance := recovery.RetryGuidanceForTask(recovery.RetryGuidanceInput{
+			RetryCount:  updated.RetryCount,
+			MaxAttempts: updated.MaxAttempts,
+			WorkKind:    "browser_evidence",
+			RequestedBy: updated.RequestedBy,
+		})
+		return store.RecordTaskRecoveryRecommendation(ctx, sqlite.RecordTaskRecoveryRecommendationParams{
+			Task:                   updated,
+			Decision:               guidance.Decision,
+			RetryEligible:          guidance.RetryEligible,
+			RecoveryRecommendation: guidance.RecoveryRecommendation,
+			Source:                 guidance.Source,
+		})
+	}
+	return nil
+}
+
+func finishBrowserRunApprovalRequired(ctx context.Context, store *sqlite.Store, runID int64, result browserexecutor.Result) error {
+	_, err := store.FinishRun(ctx, sqlite.FinishRunParams{
+		RunID:          runID,
+		Status:         "interrupted",
+		Summary:        "browser request requires approval before external mutation",
+		TerminalReason: "approval_required",
+		ArtifactsJSON:  browserResultArtifactsJSON(result),
+	})
+	return err
+}
+
+func finishBrowserRunFailed(ctx context.Context, store *sqlite.Store, runID int64, taskID int64, result browserexecutor.Result, runErr error) error {
+	if result.ErrorMessage == "" {
+		result.ErrorMessage = runErr.Error()
+	}
+	result.AdapterStatus = firstNonBlank(result.AdapterStatus, "failed")
+	return finishBrowserRunFromWork(ctx, store, runID, taskID, result)
+}
+
+func browserResultArtifactsJSON(result browserexecutor.Result) string {
+	if result.WorkArtifact == nil {
+		return "[]"
+	}
+	raw, err := json.Marshal([]browserexecutor.EvidenceArtifact{*result.WorkArtifact})
+	if err != nil {
+		return "[]"
+	}
+	return string(raw)
 }
 
 func runBrowserSession(ctx context.Context, app bootstrap.App, command commands.BrowserCommand, stdout io.Writer) error {
@@ -325,6 +546,180 @@ func runBrowserSession(ctx context.Context, app bootstrap.App, command commands.
 		}
 		_, err = fmt.Fprintf(stdout, "browser_session_handoff=%s login_request=%d session=%d status=%s allowed_actions=%s\n", view.HandoffID, view.LoginRequestID, view.SessionID, view.Status, view.AllowedActions)
 		return err
+	case "profile":
+		return runBrowserSessionProfile(ctx, app, command, stdout)
+	default:
+		return fmt.Errorf(commands.BrowserUsage)
+	}
+}
+
+func runBrowserSessionProfile(ctx context.Context, app bootstrap.App, command commands.BrowserCommand, stdout io.Writer) error {
+	switch command.ProfileAction {
+	case "retention":
+		return runBrowserSessionProfileRetention(ctx, app, command, stdout)
+	case "artifact":
+		return runBrowserSessionProfileArtifact(ctx, app, command, stdout)
+	default:
+		return fmt.Errorf(commands.BrowserUsage)
+	}
+}
+
+func runBrowserSessionProfileRetention(ctx context.Context, app bootstrap.App, command commands.BrowserCommand, stdout io.Writer) error {
+	if command.RetentionAction != "cleanup" {
+		return fmt.Errorf(commands.BrowserUsage)
+	}
+	result, err := browserprofileartifacts.Retain(ctx, browserprofileartifacts.RetentionParams{
+		Store:     app.Store,
+		ODINRoot:  app.RuntimeRoot,
+		Now:       time.Now().UTC(),
+		SessionID: command.SessionID,
+		Apply:     command.Apply,
+	})
+	if err != nil {
+		return err
+	}
+	view := browserSessionProfileRetentionView{
+		DryRun:    result.DryRun,
+		Apply:     command.Apply,
+		Eligible:  result.Eligible,
+		Cleaned:   result.Cleaned,
+		Failed:    result.Failed,
+		Skipped:   result.Skipped,
+		Artifacts: result.Artifacts,
+	}
+	if command.JSON {
+		return commands.WriteJSON(stdout, browserSessionProfileRetentionEnvelope{Retention: view})
+	}
+	_, err = fmt.Fprintf(stdout, "browser_session_profile_retention dry_run=%t apply=%t eligible=%d cleaned=%d failed=%d skipped=%d\n", view.DryRun, view.Apply, view.Eligible, view.Cleaned, view.Failed, view.Skipped)
+	return err
+}
+
+func runBrowserSessionProfileArtifact(ctx context.Context, app bootstrap.App, command commands.BrowserCommand, stdout io.Writer) error {
+	switch command.ArtifactAction {
+	case "create-fixture":
+		session, err := app.Store.GetBrowserSession(ctx, command.SessionID)
+		if err != nil {
+			return err
+		}
+		artifactPath, err := browserSessionFixtureArtifactPath(command.ArtifactName)
+		if err != nil {
+			return err
+		}
+		plaintext, err := readBrowserSessionFixturePlaintext(app.RuntimeRoot, command.PlaintextFile)
+		if err != nil {
+			return err
+		}
+		artifact, err := browserprofileartifacts.Write(ctx, browserprofileartifacts.Params{
+			Store:        app.Store,
+			ODINRoot:     app.RuntimeRoot,
+			SessionID:    session.ID,
+			ProfilePath:  session.ProfilePath,
+			Plaintext:    plaintext,
+			ArtifactPath: artifactPath,
+			KeyProvider:  browserprofilekeys.LoadFromEnv,
+		})
+		if err != nil {
+			return err
+		}
+		view := newBrowserSessionProfileArtifactView(artifact)
+		if command.JSON {
+			return commands.WriteJSON(stdout, browserSessionProfileArtifactEnvelope{Artifact: view})
+		}
+		_, err = fmt.Fprintf(stdout, "browser_session_profile_artifact=%d session=%d status=%s path=%s key_ref=%s\n", view.ID, view.SessionID, view.Status, view.ArtifactPath, view.EncryptionKeyRef)
+		return err
+	case "list":
+		artifacts, err := app.Store.ListBrowserEncryptedProfileArtifacts(ctx, sqlite.ListBrowserEncryptedProfileArtifactsParams{SessionID: command.SessionID})
+		if err != nil {
+			return err
+		}
+		views := make([]browserSessionProfileArtifactView, 0, len(artifacts))
+		for _, artifact := range artifacts {
+			views = append(views, newBrowserSessionProfileArtifactView(artifact))
+		}
+		if command.JSON {
+			return commands.WriteJSON(stdout, browserSessionProfileArtifactListView{Artifacts: views})
+		}
+		if len(views) == 0 {
+			_, err := fmt.Fprintln(stdout, "no browser session profile artifacts")
+			return err
+		}
+		for _, view := range views {
+			if _, err := fmt.Fprintf(stdout, "browser_session_profile_artifact=%d session=%d status=%s path=%s key_ref=%s\n", view.ID, view.SessionID, view.Status, view.ArtifactPath, view.EncryptionKeyRef); err != nil {
+				return err
+			}
+		}
+		return nil
+	case "show":
+		artifact, err := app.Store.GetBrowserEncryptedProfileArtifact(ctx, command.ID)
+		if err != nil {
+			return err
+		}
+		view := newBrowserSessionProfileArtifactView(artifact)
+		if command.JSON {
+			return commands.WriteJSON(stdout, browserSessionProfileArtifactEnvelope{Artifact: view})
+		}
+		_, err = fmt.Fprintf(stdout, "browser_session_profile_artifact=%d session=%d status=%s path=%s key_ref=%s\n", view.ID, view.SessionID, view.Status, view.ArtifactPath, view.EncryptionKeyRef)
+		return err
+	case "revoke":
+		artifact, err := app.Store.MarkBrowserEncryptedProfileArtifactRevoked(ctx, sqlite.MarkBrowserEncryptedProfileArtifactRevokedParams{
+			ID:     command.ID,
+			Actor:  "operator",
+			Reason: "operator revoked encrypted profile artifact metadata",
+		})
+		if err != nil {
+			return err
+		}
+		view := newBrowserSessionProfileArtifactView(artifact)
+		if command.JSON {
+			return commands.WriteJSON(stdout, browserSessionProfileArtifactEnvelope{Artifact: view})
+		}
+		_, err = fmt.Fprintf(stdout, "browser_session_profile_artifact=%d session=%d status=%s path=%s key_ref=%s\n", view.ID, view.SessionID, view.Status, view.ArtifactPath, view.EncryptionKeyRef)
+		return err
+	case "materialize":
+		artifact, err := app.Store.GetBrowserEncryptedProfileArtifact(ctx, command.ID)
+		if err != nil {
+			return err
+		}
+		result, err := browserprofilematerialize.Materialize(ctx, browserprofilematerialize.Params{
+			Store:       app.Store,
+			ODINRoot:    app.RuntimeRoot,
+			Artifact:    artifact,
+			TargetDir:   command.TargetDir,
+			KeyProvider: browserprofilekeys.LoadFromEnv,
+			Actor:       "operator",
+			Reason:      "operator materialized encrypted profile artifact read-only",
+		})
+		if err != nil {
+			return err
+		}
+		view := newBrowserSessionProfileMaterializationView(result)
+		if command.JSON {
+			return commands.WriteJSON(stdout, browserSessionProfileMaterializationEnvelope{Materialization: view})
+		}
+		_, err = fmt.Fprintf(stdout, "browser_session_profile_materialization artifact=%d session=%d path=%s file=%s read_only=%t\n", view.ArtifactID, view.SessionID, view.MaterializationPath, view.MaterializedFilePath, view.ReadOnly)
+		return err
+	case "cleanup-materialization":
+		artifact, err := app.Store.GetBrowserEncryptedProfileArtifact(ctx, command.ID)
+		if err != nil {
+			return err
+		}
+		result, err := browserprofilematerialize.Cleanup(ctx, browserprofilematerialize.CleanupParams{
+			Store:     app.Store,
+			ODINRoot:  app.RuntimeRoot,
+			Artifact:  artifact,
+			TargetDir: command.TargetDir,
+			Actor:     "operator",
+			Reason:    "operator cleaned encrypted profile materialization",
+		})
+		if err != nil {
+			return err
+		}
+		view := newBrowserSessionProfileMaterializationCleanupView(result)
+		if command.JSON {
+			return commands.WriteJSON(stdout, browserSessionProfileMaterializationEnvelope{Materialization: view})
+		}
+		_, err = fmt.Fprintf(stdout, "browser_session_profile_materialization artifact=%d session=%d path=%s removed=%t\n", view.ArtifactID, view.SessionID, view.MaterializationPath, view.Removed)
+		return err
 	default:
 		return fmt.Errorf(commands.BrowserUsage)
 	}
@@ -429,6 +824,126 @@ func browserSessionProfilePathExists(runtimeRoot string, profilePath string) boo
 	return err == nil
 }
 
+func newBrowserSessionProfileArtifactView(artifact sqlite.BrowserEncryptedProfileArtifact) browserSessionProfileArtifactView {
+	return browserSessionProfileArtifactView{
+		ID:               artifact.ID,
+		SessionID:        artifact.SessionID,
+		Status:           string(artifact.Status),
+		ProfilePath:      artifact.ProfilePath,
+		ArtifactPath:     artifact.EncryptedArtifactPath,
+		EncryptionKeyRef: artifact.EncryptionKeyRef,
+		CreatedAt:        formatBrowserSessionTime(artifact.CreatedAt),
+		UpdatedAt:        formatBrowserSessionTime(artifact.UpdatedAt),
+		ExpiresAt:        formatBrowserSessionOptionalTime(artifact.ExpiresAt),
+		RevokedAt:        formatBrowserSessionOptionalTime(artifact.RevokedAt),
+		CleanedAt:        formatBrowserSessionOptionalTime(artifact.CleanedAt),
+		ErrorCode:        browserSessionStringPtrValue(artifact.ErrorCode),
+		ErrorMessage:     browserSessionStringPtrValue(artifact.ErrorMessage),
+	}
+}
+
+func newBrowserSessionProfileMaterializationView(result browserprofilematerialize.Result) browserSessionProfileMaterializationView {
+	return browserSessionProfileMaterializationView{
+		ArtifactID:           result.ArtifactID,
+		SessionID:            result.SessionID,
+		ArtifactPath:         result.ArtifactPath,
+		MaterializationPath:  result.MaterializationPath,
+		MaterializedFilePath: result.MaterializedFilePath,
+		ReadOnly:             result.ReadOnly,
+	}
+}
+
+func newBrowserSessionProfileMaterializationCleanupView(result browserprofilematerialize.CleanupResult) browserSessionProfileMaterializationView {
+	return browserSessionProfileMaterializationView{
+		ArtifactID:          result.ArtifactID,
+		SessionID:           result.SessionID,
+		ArtifactPath:        result.ArtifactPath,
+		MaterializationPath: result.MaterializationPath,
+		Removed:             result.Removed,
+	}
+}
+
+func browserSessionFixtureArtifactPath(name string) (string, error) {
+	name = strings.TrimSpace(name)
+	if strings.HasSuffix(name, ".enc") {
+		name = strings.TrimSuffix(name, ".enc")
+	}
+	if name == "" || name == "." || name == ".." {
+		return "", fmt.Errorf("browser profile fixture artifact name is required")
+	}
+	if strings.ContainsAny(name, `/\`) {
+		return "", fmt.Errorf("browser profile fixture artifact name must be one safe component")
+	}
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z':
+		case r >= 'A' && r <= 'Z':
+		case r >= '0' && r <= '9':
+		case r == '-' || r == '_' || r == '.':
+		default:
+			return "", fmt.Errorf("browser profile fixture artifact name contains unsafe component %q", name)
+		}
+	}
+	if err := rejectBrowserSessionFixtureMetadata(name); err != nil {
+		return "", err
+	}
+	return filepath.ToSlash(filepath.Join("browser-sessions", "encrypted-profiles", name+".enc")), nil
+}
+
+func readBrowserSessionFixturePlaintext(runtimeRoot string, plaintextFile string) ([]byte, error) {
+	plaintextFile = strings.TrimSpace(plaintextFile)
+	if plaintextFile == "" {
+		return nil, fmt.Errorf("--plaintext-file is required")
+	}
+	absPath, err := filepath.Abs(plaintextFile)
+	if err != nil {
+		return nil, fmt.Errorf("browser profile fixture plaintext path: %w", err)
+	}
+	if err := rejectBrowserSessionFixtureRuntimePath(runtimeRoot, absPath); err != nil {
+		return nil, err
+	}
+	info, err := os.Stat(absPath)
+	if err != nil {
+		return nil, fmt.Errorf("read plaintext fixture: %w", err)
+	}
+	if info.IsDir() {
+		return nil, fmt.Errorf("read plaintext fixture: path is a directory")
+	}
+	plaintext, err := os.ReadFile(absPath)
+	if err != nil {
+		return nil, fmt.Errorf("read plaintext fixture: %w", err)
+	}
+	return plaintext, nil
+}
+
+func rejectBrowserSessionFixtureRuntimePath(runtimeRoot string, absPath string) error {
+	rootAbs, err := filepath.Abs(runtimeRoot)
+	if err != nil {
+		return fmt.Errorf("ODIN_ROOT absolute path: %w", err)
+	}
+	browserRoot := filepath.Join(filepath.Clean(rootAbs), "browser-sessions")
+	rel, err := filepath.Rel(browserRoot, absPath)
+	if err != nil {
+		return fmt.Errorf("read plaintext fixture path: %w", err)
+	}
+	if rel == "." || (!strings.HasPrefix(rel, ".."+string(filepath.Separator)) && rel != ".." && !filepath.IsAbs(rel)) {
+		return fmt.Errorf("read plaintext fixture: file must not come from ODIN_ROOT/browser-sessions")
+	}
+	return nil
+}
+
+func rejectBrowserSessionFixtureMetadata(values ...string) error {
+	for _, value := range values {
+		lower := strings.ToLower(value)
+		for _, forbidden := range []string{"password", "passkey", "totp", "backup_code", "cookie", "credential", "profile_bytes"} {
+			if strings.Contains(lower, forbidden) {
+				return fmt.Errorf("browser profile fixture artifact forbidden metadata marker %q", forbidden)
+			}
+		}
+	}
+	return nil
+}
+
 func newBrowserSessionLoginRequestView(request sqlite.BrowserSessionLoginRequest) browserSessionLoginRequestView {
 	return browserSessionLoginRequestView{
 		ID:          request.ID,
@@ -464,6 +979,13 @@ func cloneBrowserSessionStringPtr(value *string) *string {
 	ptr := new(string)
 	*ptr = *value
 	return ptr
+}
+
+func browserSessionStringPtrValue(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
 }
 
 func formatBrowserSessionOptionalTime(value *time.Time) string {

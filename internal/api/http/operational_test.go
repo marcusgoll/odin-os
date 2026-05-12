@@ -857,8 +857,8 @@ func TestOperationalHandlerBrowserSessionHandoffCompleteJSONVerifiesSessionAndRe
 		t.Fatalf("persistedRequest = %+v, want completed metadata", persistedRequest)
 	}
 	counts := countBrowserSessionEventTypes(t, ctx, store)
-	if counts[runtimeevents.EventBrowserSessionStatusChanged] != 1 || counts[runtimeevents.EventBrowserSessionVerified] != 1 || counts[runtimeevents.EventBrowserSessionLoginCompleted] != 1 {
-		t.Fatalf("browser session event counts = %#v, want status_changed, verified, and login_completed", counts)
+	if counts[runtimeevents.EventBrowserSessionStatusChanged] != 2 || counts[runtimeevents.EventBrowserSessionVerified] != 1 || counts[runtimeevents.EventBrowserSessionLoginCompleted] != 1 {
+		t.Fatalf("browser session event counts = %#v, want login_requested+verified status changes, verified, and login_completed", counts)
 	}
 }
 
