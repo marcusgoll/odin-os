@@ -14,6 +14,7 @@ func TestFixtureSetRunsLocallyWithoutLiveSystems(t *testing.T) {
 	repoRoot := filepath.Clean(filepath.Join("..", ".."))
 	fixtures := []string{
 		"github-readonly-intake.yaml",
+		"github-issue-delivery-dry-run.yaml",
 		"tracker-dry-run-lifecycle.yaml",
 		"workspace-safe-creation.yaml",
 		"prompt-rendering-brownfield.yaml",
