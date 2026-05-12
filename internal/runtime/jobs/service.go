@@ -14,6 +14,7 @@ import (
 
 	"odin-os/internal/cli/scope"
 	"odin-os/internal/core/companions"
+	corepolicy "odin-os/internal/core/policy"
 	"odin-os/internal/core/projects"
 	"odin-os/internal/core/workspaces"
 	"odin-os/internal/executors/contract"
@@ -2897,16 +2898,23 @@ func (service Service) evaluateTaskApproval(ctx context.Context, task sqlite.Tas
 	if err != nil {
 		return admissionDecision{}, true, err
 	}
-	switch approval.Status {
-	case "approved":
+
+	decision := corepolicy.NewService(nil).DecideApproval(ctx, corepolicy.ApprovalRequest{
+		Subject:  fmt.Sprintf("task %d", task.ID),
+		Required: true,
+		Status:   corepolicy.ApprovalStatus(approval.Status),
+		Reason:   requirement.Reason,
+	})
+	switch {
+	case decision.Allowed:
 		return admissionDecision{Outcome: admissionDispatchable}, true, nil
-	case "pending":
+	case decision.ApprovalRequired && approval.Status == "pending":
 		return admissionDecision{
 			Outcome:       admissionBlocked,
 			BlockedReason: "approval_required",
-			LastError:     requirement.Reason,
+			LastError:     decision.Reason,
 		}, true, nil
-	case "":
+	case decision.ApprovalRequired && approval.Status == "":
 		if _, err := service.Store.RequestApproval(ctx, sqlite.RequestApprovalParams{
 			TaskID:      task.ID,
 			Status:      "pending",
@@ -2917,12 +2925,12 @@ func (service Service) evaluateTaskApproval(ctx context.Context, task sqlite.Tas
 		return admissionDecision{
 			Outcome:       admissionBlocked,
 			BlockedReason: "approval_required",
-			LastError:     requirement.Reason,
+			LastError:     decision.Reason,
 		}, true, nil
 	default:
 		return admissionDecision{
 			Outcome:     admissionFailed,
-			LastError:   fmt.Sprintf("approval for task %d is %s", task.ID, approval.Status),
+			LastError:   fmt.Sprintf("%s: %s", decision.Code, decision.Reason),
 			FailureCode: recovery.FailureCodePolicyDenied,
 		}, true, nil
 	}

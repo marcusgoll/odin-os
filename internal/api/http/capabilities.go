@@ -311,6 +311,8 @@ func normalizeLookupError(id, version string, err error) error {
 
 func statusCodeForErrorCode(code string) int {
 	switch code {
+	case "approval_required", "approval_denied":
+		return http.StatusConflict
 	case "permission_denied":
 		return http.StatusForbidden
 	case "not_found":

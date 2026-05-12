@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	corepolicy "odin-os/internal/core/policy"
 	"odin-os/internal/core/projects"
 )
 
@@ -44,10 +45,8 @@ func ResolveInvocationPolicy(input InvocationPolicyInput) (InvocationPolicy, err
 	if err != nil {
 		return InvocationPolicy{}, err
 	}
-	policy.ApprovalNeeded = policy.ActionClass == projects.ActionClassGovernanceMutation || policy.ActionClass == projects.ActionClassDestructiveMutation
-	if input.Project != nil && input.Project.SystemProject && policy.Mutating {
-		policy.ApprovalNeeded = true
-	}
+	systemProject := input.Project != nil && input.Project.SystemProject && policy.Mutating
+	policy.ApprovalNeeded = corepolicy.RequiresApprovalForActionClass(string(policy.ActionClass), systemProject)
 	policy.Allowed = true
 
 	if policy.Mutating {
