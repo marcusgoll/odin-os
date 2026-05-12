@@ -530,8 +530,9 @@ func runWorkStart(ctx context.Context, store *sqlite.Store, projectRegistry proj
 	projectKey := strings.TrimSpace(params["project"])
 	title := strings.TrimSpace(params["title"])
 	intent := strings.TrimSpace(params["intent"])
+	acceptance := strings.TrimSpace(params["acceptance"])
 	if projectKey == "" || title == "" {
-		_, err := fmt.Fprintln(stdout, "usage: odin work start --project <key> --title <text> [--intent <read_only|mutation|governance|destructive>]")
+		_, err := fmt.Fprintln(stdout, "usage: odin work start --project <key> --title <text> [--intent <read_only|mutation|governance|destructive>] [--acceptance <criterion>]")
 		return err
 	}
 	if intent != "" && !isValidWorkIntent(intent) {
@@ -552,6 +553,7 @@ func runWorkStart(ctx context.Context, store *sqlite.Store, projectRegistry proj
 	}.CreateTaskOnce(ctx, jobs.CreateTaskParams{
 		Resolved:              resolved,
 		Title:                 title,
+		AcceptanceCriteria:    singleCriterion(acceptance),
 		RequestedBy:           "operator",
 		ExecutionIntent:       intent,
 		ExecutionIntentSource: intentSourceForWorkStart(intent),
@@ -562,6 +564,13 @@ func runWorkStart(ctx context.Context, store *sqlite.Store, projectRegistry proj
 
 	_, err = fmt.Fprintf(stdout, "work_item_id=%d project=%s key=%s status=%s intent=%s intent_source=%s\n", task.Task.ID, projectKey, task.Task.Key, task.Task.Status, noneIfEmpty(task.Task.ExecutionIntent), noneIfEmpty(task.Task.ExecutionIntentSource))
 	return err
+}
+
+func singleCriterion(value string) []string {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+	return []string{strings.TrimSpace(value)}
 }
 
 func isValidWorkIntent(intent string) bool {

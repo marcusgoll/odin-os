@@ -26,7 +26,14 @@ func TestParseTaskCreate(t *testing.T) {
 func TestParseTaskRunJSON(t *testing.T) {
 	t.Parallel()
 
-	command, err := ParseTask([]string{"run", "--project", "alpha", "--title", "run from cli", "--json"})
+	command, err := ParseTask([]string{
+		"run",
+		"--project", "alpha",
+		"--title", "run from cli",
+		"--acceptance", "fixture driver completes",
+		"--acceptance-criteria", "run is recorded",
+		"--json",
+	})
 	if err != nil {
 		t.Fatalf("ParseTask() error = %v", err)
 	}
@@ -35,6 +42,9 @@ func TestParseTaskRunJSON(t *testing.T) {
 	}
 	if !command.JSON {
 		t.Fatalf("JSON = false, want true")
+	}
+	if len(command.AcceptanceCriteria) != 2 || command.AcceptanceCriteria[0] != "fixture driver completes" || command.AcceptanceCriteria[1] != "run is recorded" {
+		t.Fatalf("AcceptanceCriteria = %#v", command.AcceptanceCriteria)
 	}
 }
 

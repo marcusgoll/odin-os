@@ -2,7 +2,7 @@ GO ?= go
 GOFMT ?= gofmt
 GOFILES := $(shell git ls-files '*.go')
 
-.PHONY: format fmt fmtcheck lint vet test test-alpha test-media test-skills ci build docker-smoke odin-e2e-local odin-e2e-contract odin-actual-use-e2e homelab-release-dry-run run clean install-local uninstall-local
+.PHONY: format fmt fmtcheck lint vet test test-alpha test-media test-skills ci build docker-smoke odin-e2e-local odin-e2e-contract odin-actual-use-e2e actual-use-phase0-proof homelab-release-dry-run run clean install-local uninstall-local
 
 format:
 	$(GOFMT) -w $(GOFILES)
@@ -33,6 +33,7 @@ ci: fmtcheck lint test
 	bash scripts/tests/assert-odin-e2e-contract-test.sh
 	bash scripts/tests/odin-e2e-workflow-test.sh
 	bash scripts/tests/actual-use-phase0-proof-test.sh
+	bash scripts/tests/odin-actual-use-e2e-test.sh
 	bash scripts/tests/github-actions-permissions-test.sh
 	bash scripts/tests/google-driver-security-test.sh
 	bash scripts/tests/work-intake-live-smoke-test.sh
@@ -59,11 +60,14 @@ odin-e2e-local:
 odin-e2e-contract:
 	./scripts/assert-odin-e2e-contract.sh
 
-odin-actual-use-e2e:
+actual-use-phase0-proof:
 	ODIN_ACTUAL_USE_PHASE0_PROOF=1 ./scripts/ops/actual-use-phase0-proof.sh
 
 homelab-release-dry-run:
 	./scripts/ops/homelab-release-dry-run.sh
+
+odin-actual-use-e2e: build
+	./scripts/odin-actual-use-e2e.sh
 
 run:
 	$(GO) run ./cmd/odin-os

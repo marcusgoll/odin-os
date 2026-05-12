@@ -5152,7 +5152,12 @@ func runTask(ctx context.Context, app bootstrap.App, args []string, stdout io.Wr
 	})
 
 	jobService := newJobService(app)
-	task, err := jobService.CreateTaskFromAct(ctx, resolved, command.Title)
+	task, err := jobService.Service.CreateTask(ctx, jobs.CreateTaskParams{
+		Resolved:           resolved,
+		Title:              command.Title,
+		AcceptanceCriteria: command.AcceptanceCriteria,
+		RequestedBy:        "operator",
+	})
 	if err != nil {
 		return err
 	}
