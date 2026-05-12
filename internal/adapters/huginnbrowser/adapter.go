@@ -18,15 +18,16 @@ const LiveAllowedCommandsEnvVar = "ODIN_HUGINN_BROWSER_ALLOWED_COMMANDS"
 const LiveTimeoutEnvVar = "ODIN_HUGINN_BROWSER_TIMEOUT_SECONDS"
 
 type Request struct {
-	GoalID             int64         `json:"goal_id,omitempty"`
-	Mode               string        `json:"mode,omitempty"`
-	Objective          string        `json:"objective"`
-	StartURLs          []string      `json:"start_urls"`
-	AllowedDomains     []string      `json:"allowed_domains"`
-	MaxPages           int           `json:"max_pages"`
-	MaxDurationSeconds int           `json:"max_duration_seconds"`
-	EvidenceRequired   bool          `json:"evidence_required"`
-	SiteProfiles       []SiteProfile `json:"site_profiles,omitempty"`
+	GoalID             int64                    `json:"goal_id,omitempty"`
+	Mode               string                   `json:"mode,omitempty"`
+	Objective          string                   `json:"objective"`
+	StartURLs          []string                 `json:"start_urls"`
+	AllowedDomains     []string                 `json:"allowed_domains"`
+	MaxPages           int                      `json:"max_pages"`
+	MaxDurationSeconds int                      `json:"max_duration_seconds"`
+	EvidenceRequired   bool                     `json:"evidence_required"`
+	SiteProfiles       []SiteProfile            `json:"site_profiles,omitempty"`
+	BrowserSession     *BrowserSessionReference `json:"browser_session,omitempty"`
 }
 
 type SiteProfile struct {
@@ -35,6 +36,16 @@ type SiteProfile struct {
 	MinDelayMS         int    `json:"min_delay_ms,omitempty"`
 	MaxDurationSeconds int    `json:"max_duration_seconds,omitempty"`
 	ModeAllowed        string `json:"mode_allowed,omitempty"`
+}
+
+type BrowserSessionReference struct {
+	ID                   int64  `json:"id"`
+	Domain               string `json:"domain"`
+	Status               string `json:"status"`
+	PermissionTier       string `json:"permission_tier"`
+	ProfileStoragePolicy string `json:"profile_storage_policy"`
+	ProfilePath          string `json:"profile_path"`
+	LastVerifiedAt       string `json:"last_verified_at,omitempty"`
 }
 
 type Response struct {
@@ -441,6 +452,20 @@ func validateRequest(request Request) error {
 		case "", "fetch", "browser", "both":
 		default:
 			return fmt.Errorf("site profile mode_allowed must be fetch, browser, or both")
+		}
+	}
+	if request.BrowserSession != nil {
+		if request.BrowserSession.ID <= 0 {
+			return fmt.Errorf("browser session id must be positive")
+		}
+		if strings.TrimSpace(request.BrowserSession.Domain) == "" {
+			return fmt.Errorf("browser session domain is required")
+		}
+		if strings.TrimSpace(request.BrowserSession.Status) == "" {
+			return fmt.Errorf("browser session status is required")
+		}
+		if strings.TrimSpace(request.BrowserSession.ProfilePath) == "" {
+			return fmt.Errorf("browser session profile path is required")
 		}
 	}
 	return nil

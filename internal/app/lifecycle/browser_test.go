@@ -79,6 +79,57 @@ func TestRunBrowserRunRejectsUnsafeInputs(t *testing.T) {
 	}
 }
 
+func TestRunBrowserRunCanReferenceBrowserSession(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	root := testRepoRoot(t)
+
+	run := func(args ...string) string {
+		t.Helper()
+		var output bytes.Buffer
+		if err := Run(context.Background(), root, args, strings.NewReader(""), &output); err != nil {
+			t.Fatalf("Run(%v) error = %v\noutput=%s", args, err, output.String())
+		}
+		return output.String()
+	}
+
+	goal := decodeGoalEnvelope(t, []byte(run("goal", "create", "--title", "Collect browser evidence", "--json")))
+	session := decodeBrowserSessionEnvelope(t, []byte(run(
+		"browser", "session", "create",
+		"--name", "google-main",
+		"--domain", "example.com",
+		"--permission-tier", "authenticated_read",
+		"--account-hint", "marcus",
+		"--json",
+	)))
+	verified := decodeBrowserSessionEnvelope(t, []byte(run("browser", "session", "status", "--id", int64String(session.ID), "--status", "verified", "--json")))
+	if verified.Status != "verified" {
+		t.Fatalf("verified.Status = %q, want verified", verified.Status)
+	}
+
+	browserRun := run("browser", "run", "--goal-id", int64String(goal.ID), "--url", "https://example.com/account", "--objective", "Collect account evidence", "--allowed-domain", "example.com", "--session-id", int64String(session.ID), "--worker-mode", "browser", "--json")
+	for _, want := range []string{
+		`"status": "recorded"`,
+		`"browser_session":`,
+		`"id": 1`,
+		`"domain": "example.com"`,
+		`"profile_path": "browser-sessions/profiles/google-main"`,
+	} {
+		if !strings.Contains(browserRun, want) {
+			t.Fatalf("browser run output = %s, want %s", browserRun, want)
+		}
+	}
+
+	logs := run("logs", "--json")
+	if !strings.Contains(logs, `"type": "goal.evidence_recorded"`) || !strings.Contains(logs, `"browser_session"`) {
+		t.Fatalf("logs output = %s, want evidence event with safe browser session metadata", logs)
+	}
+	for _, forbidden := range []string{"password", "totp", "backup_code", "cookie", "profile_bytes"} {
+		if strings.Contains(strings.ToLower(logs), forbidden) {
+			t.Fatalf("logs output contains forbidden credential/profile byte token %q: %s", forbidden, logs)
+		}
+	}
+}
+
 func TestRunBrowserSessionCreateListShowStatusAndRevoke(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	root := testRepoRoot(t)
@@ -142,6 +193,11 @@ func TestRunBrowserSessionCreateListShowStatusAndRevoke(t *testing.T) {
 	}
 	if len(entries) != 0 {
 		t.Fatalf("profile path entries = %v, want empty directory only", entries)
+	}
+
+	requiresLogin := decodeBrowserSessionEnvelope(t, []byte(run("browser", "session", "status", "--id", int64String(created.ID), "--status", "requires_attended_login", "--json")))
+	if requiresLogin.Status != "requires_attended_login" {
+		t.Fatalf("requiresLogin.Status = %q, want requires_attended_login", requiresLogin.Status)
 	}
 
 	verified := decodeBrowserSessionEnvelope(t, []byte(run("browser", "session", "status", "--id", int64String(created.ID), "--status", "verified", "--json")))
