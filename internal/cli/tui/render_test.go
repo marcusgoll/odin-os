@@ -49,6 +49,36 @@ func TestRenderOverviewStableTextOutput(t *testing.T) {
 	}
 }
 
+func TestRenderOverviewShowsActionRequiredPanel(t *testing.T) {
+	t.Parallel()
+
+	output := RenderOverview(Model{
+		TelemetryAvailable:      true,
+		Status:                  "degraded",
+		HealthScore:             87,
+		LifecyclePhase:          "run",
+		ActiveRuns:              3,
+		BlockedItems:            2,
+		ApprovalsWaiting:        4,
+		ReviewQueueItems:        6,
+		FailedWorkItems:         1,
+		RecoveryRecommendations: 1,
+	})
+
+	for _, want := range []string{
+		"┌─ ACTION REQUIRED ",
+		"│ APPROVALS     4",
+		"│ BLOCKED       2",
+		"│ REVIEW QUEUE  6",
+		"│ FAILED WORK   1",
+		"│ RECOVERY      1",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("output = %q, want action-required fragment %q", output, want)
+		}
+	}
+}
+
 func TestRenderOverviewUsesBoxedCockpitLayout(t *testing.T) {
 	t.Parallel()
 

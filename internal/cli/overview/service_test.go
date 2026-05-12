@@ -255,6 +255,65 @@ func TestOverviewShowsUnifiedReviewAndDecisionCounts(t *testing.T) {
 	}
 }
 
+func TestBuildSummarizesActualUseReadinessAndSourceAlignment(t *testing.T) {
+	ctx := context.Background()
+	env := newOverviewTestEnvironment(t)
+	seedOverviewReviewFixture(t, ctx, env)
+	env.snapshot.Items = append(env.snapshot.Items, registry.Item{
+		Kind:  registry.KindWorkflow,
+		Key:   "delivery-profile-fixture",
+		Title: "Delivery Profile Fixture",
+		Tags:  []string{"delivery_profile"},
+	})
+
+	if _, err := env.store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:             env.projectID,
+		Key:                   "explicit-intent-task",
+		Title:                 "Explicit intent task",
+		Status:                "queued",
+		Scope:                 "project",
+		RequestedBy:           "test",
+		ExecutionIntent:       "deliver_with_evidence",
+		ExecutionIntentSource: "test",
+	}); err != nil {
+		t.Fatalf("CreateTask(explicit intent) error = %v", err)
+	}
+
+	view, err := (Service{
+		Store:            env.store,
+		RegistrySnapshot: env.snapshot,
+		ReadinessStatus:  "ready",
+		HealthStatus:     "healthy",
+		BinaryPath:       "/tmp/odin/bin/odin",
+		SourceRoot:       "/tmp/odin",
+	}).Build(ctx, scope.Resolution{})
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+
+	if view.Readiness.Status != "ready" || view.Readiness.HealthStatus != "healthy" || !view.Readiness.Ready {
+		t.Fatalf("Readiness = %+v, want ready healthy", view.Readiness)
+	}
+	if view.ActualUse.Wiring != WiringLive || view.ActualUse.ReviewQueueCount != view.ReviewQueue.TotalCount || view.ActualUse.ActionRequiredCount < view.ReviewQueue.TotalCount {
+		t.Fatalf("ActualUse = %+v, ReviewQueue = %+v, want live review/action summary", view.ActualUse, view.ReviewQueue)
+	}
+	if view.ActualUse.PendingApprovalCount != 1 || view.ActualUse.BlockedWorkItemCount != 1 || view.ActualUse.FailedWorkItemCount != 1 {
+		t.Fatalf("ActualUse = %+v, want pending approval, blocked work, and failed work counts", view.ActualUse)
+	}
+	if view.ActualUse.WorkItemCount < view.ActualUse.OpenWorkItemCount+view.ActualUse.FailedWorkItemCount {
+		t.Fatalf("ActualUse = %+v, want work item count to include open and failed action-required work", view.ActualUse)
+	}
+	if view.DeliveryProfiles.ProfileCount != 1 || view.ActualUse.DeliveryProfileCount != 1 {
+		t.Fatalf("DeliveryProfiles = %+v ActualUse = %+v, want delivery profile count", view.DeliveryProfiles, view.ActualUse)
+	}
+	if view.ExecutionIntent.ExplicitWorkItemCount != 1 || view.ExecutionIntent.FallbackWorkItemCount == 0 {
+		t.Fatalf("ExecutionIntent = %+v, want explicit and fallback work item counts", view.ExecutionIntent)
+	}
+	if view.BinarySource.Status != "aligned" {
+		t.Fatalf("BinarySource = %+v, want aligned source/binary status", view.BinarySource)
+	}
+}
+
 func seedOverviewReviewFixture(t *testing.T, ctx context.Context, env overviewTestEnvironment) {
 	t.Helper()
 
