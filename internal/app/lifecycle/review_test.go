@@ -191,6 +191,53 @@ func TestReviewQueueBlockedFailedWorkDoesNotAdvertiseRetry(t *testing.T) {
 	t.Fatalf("review queue missing retry-exhausted-task; entries = %#v", entries)
 }
 
+func TestReviewShowFailedWorkIncludesNormalizedOperatorFields(t *testing.T) {
+	ctx := context.Background()
+	app := newLifecycleReviewTestApp(t, ctx)
+	project, err := app.Store.CreateProject(ctx, sqlite.CreateProjectParams{
+		Key:           "show-failed-work",
+		Name:          "Show Failed Work",
+		Scope:         "project",
+		GitRoot:       t.TempDir(),
+		DefaultBranch: "main",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+	task, err := app.Store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "show-failed-task",
+		Title:       "Show failed task",
+		Status:      "failed",
+		Scope:       "project",
+		RequestedBy: "test",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+
+	var stdout bytes.Buffer
+	if err := runReview(ctx, app, []string{"show", "failed-work:" + int64String(task.ID), "--json"}, &stdout); err != nil {
+		t.Fatalf("runReview(show failed-work) error = %v", err)
+	}
+	var payload struct {
+		Entry map[string]any `json:"entry"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("Unmarshal(review show JSON) error = %v\n%s", err, stdout.String())
+	}
+	for _, field := range []string{"source_type", "source_id", "status", "severity", "created_at", "updated_at", "recommended_action", "operator_next_step", "recovery_recommendation"} {
+		value, ok := payload.Entry[field]
+		if !ok {
+			t.Fatalf("failed-work show entry missing %q: %#v", field, payload.Entry)
+		}
+		if text, ok := value.(string); ok && text == "" {
+			t.Fatalf("failed-work show entry field %q is empty: %#v", field, payload.Entry)
+		}
+	}
+}
+
 func containsString(values []string, want string) bool {
 	for _, value := range values {
 		if value == want {

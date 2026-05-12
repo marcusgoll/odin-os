@@ -400,6 +400,7 @@ func runReviewShow(ctx context.Context, app bootstrap.App, queueID string, jsonO
 	if err != nil {
 		return err
 	}
+	normalizeReviewQueueEntry(&entry)
 	if jsonOutput {
 		return commands.WriteJSON(stdout, reviewQueueShowView{Entry: entry, Detail: detail})
 	}
@@ -1896,6 +1897,8 @@ func reviewFailedTaskDetail(ctx context.Context, store *sqlite.Store, task sqlit
 		WorkKind:    task.WorkKind,
 		Status:      task.Status,
 		Scope:       task.Scope,
+		CreatedAt:   formatReviewTime(task.CreatedAt),
+		UpdatedAt:   formatReviewTime(task.UpdatedAt),
 		RetryCount:  task.RetryCount,
 		MaxAttempts: task.MaxAttempts,
 		LastError:   task.LastError,
