@@ -47,7 +47,61 @@ func listReviewQueueEntries(ctx context.Context, app bootstrap.App) ([]reviewQue
 		}
 		entries = append(entries, sourceEntries...)
 	}
+	normalizeReviewQueueEntries(entries)
 	return entries, nil
+}
+
+func normalizeReviewQueueEntries(entries []reviewQueueEntry) {
+	for index := range entries {
+		normalizeReviewQueueEntry(&entries[index])
+	}
+}
+
+func normalizeReviewQueueEntry(entry *reviewQueueEntry) {
+	if entry == nil {
+		return
+	}
+	if entry.AllowedActions == nil {
+		entry.AllowedActions = []string{}
+	}
+	if strings.TrimSpace(entry.Severity) == "" {
+		entry.Severity = reviewEntrySeverity(*entry)
+	}
+	if strings.TrimSpace(entry.Risk) == "" {
+		entry.Risk = entry.Severity
+	}
+	if strings.TrimSpace(entry.UpdatedAt) == "" {
+		entry.UpdatedAt = entry.CreatedAt
+	}
+	if strings.TrimSpace(entry.RecommendedAction) == "" {
+		entry.RecommendedAction = reviewRecommendedAction(*entry)
+	}
+	if strings.TrimSpace(entry.OperatorNextStep) == "" {
+		entry.OperatorNextStep = reviewOperatorNextStep(*entry)
+	}
+}
+
+func reviewEntrySeverity(entry reviewQueueEntry) string {
+	if strings.TrimSpace(entry.Risk) != "" {
+		return strings.TrimSpace(entry.Risk)
+	}
+	if entry.SourceType == "recovery" {
+		return "high"
+	}
+	return "medium"
+}
+
+func reviewRecommendedAction(entry reviewQueueEntry) string {
+	if entry.SourceType == "failed_work" {
+		if entry.RetryEligible != nil && *entry.RetryEligible {
+			return "retry"
+		}
+		return "follow-up"
+	}
+	if len(entry.AllowedActions) > 0 {
+		return entry.AllowedActions[0]
+	}
+	return "inspect"
 }
 
 type intakeReviewQueueSource struct{}
