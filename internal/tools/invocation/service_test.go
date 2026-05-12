@@ -288,7 +288,7 @@ printf '{"status":"completed","tool_key":"browser_x_post_publish","summary":"Pub
 	t.Setenv("ODIN_HUGINN_X_PUBLISH_DRIVER", script)
 	t.Setenv("ODIN_DRIVER_REQUEST_PATH", requestPath)
 
-	service := Service{}
+	service := Service{ApprovedExternalMutation: true}
 	result, err := service.HuginnXPostPublish(context.Background(), webdriver.XPublishRequest{
 		ToolKey: "browser_x_post_publish",
 		Input: webdriver.XPublishInput{
@@ -312,6 +312,38 @@ printf '{"status":"completed","tool_key":"browser_x_post_publish","summary":"Pub
 	}
 }
 
+func TestServiceBlocksUnapprovedHuginnXPostPublish(t *testing.T) {
+	requestPath := filepath.Join(t.TempDir(), "huginn-x-post-publish-request.json")
+	script := writeFixtureDriver(t, `#!/usr/bin/env bash
+cat >"$ODIN_DRIVER_REQUEST_PATH"
+printf '{"status":"completed","tool_key":"browser_x_post_publish","summary":"Published unapproved X post."}'
+`)
+	t.Setenv("ODIN_HUGINN_X_PUBLISH_DRIVER", script)
+	t.Setenv("ODIN_DRIVER_REQUEST_PATH", requestPath)
+
+	service := Service{}
+	_, err := service.HuginnXPostPublish(context.Background(), webdriver.XPublishRequest{
+		ToolKey: "browser_x_post_publish",
+		Input: webdriver.XPublishInput{
+			PostText: "Unapproved X post must not publish.",
+			Label:    "direct-invocation",
+		},
+	})
+	if err == nil {
+		t.Fatal("HuginnXPostPublish() error = nil, want approval-required refusal")
+	}
+	coded, ok := err.(interface{ Code() string })
+	if !ok {
+		t.Fatalf("HuginnXPostPublish() error = %T, want coded approval error", err)
+	}
+	if coded.Code() != "approval_required" {
+		t.Fatalf("HuginnXPostPublish() code = %q, want approval_required", coded.Code())
+	}
+	if _, statErr := os.Stat(requestPath); !os.IsNotExist(statErr) {
+		t.Fatalf("unapproved publish driver was invoked; Stat(requestPath) error = %v", statErr)
+	}
+}
+
 func TestServiceExposesReplyModeXPublishResults(t *testing.T) {
 	requestPath := filepath.Join(t.TempDir(), "huginn-x-post-publish-request.json")
 	script := writeFixtureDriver(t, `#!/usr/bin/env bash
@@ -321,7 +353,7 @@ printf '{"status":"completed","tool_key":"browser_x_post_publish","summary":"Pub
 	t.Setenv("ODIN_HUGINN_X_PUBLISH_DRIVER", script)
 	t.Setenv("ODIN_DRIVER_REQUEST_PATH", requestPath)
 
-	service := Service{}
+	service := Service{ApprovedExternalMutation: true}
 	result, err := service.HuginnXPostPublish(context.Background(), webdriver.XPublishRequest{
 		ToolKey: "browser_x_post_publish",
 		Input: webdriver.XPublishInput{
@@ -364,7 +396,8 @@ func TestServiceFailsClosedWithoutDriverConfig(t *testing.T) {
 	if _, err := service.HuginnXPostVisibleEvidence(context.Background(), webdriver.XPostRequest{ToolKey: "browser_x_post_visible_evidence"}); err == nil {
 		t.Fatal("HuginnXPostVisibleEvidence() error = nil, want missing driver config failure")
 	}
-	if _, err := service.HuginnXPostPublish(context.Background(), webdriver.XPublishRequest{ToolKey: "browser_x_post_publish"}); err == nil {
+	approvedMutationService := Service{ApprovedExternalMutation: true}
+	if _, err := approvedMutationService.HuginnXPostPublish(context.Background(), webdriver.XPublishRequest{ToolKey: "browser_x_post_publish"}); err == nil {
 		t.Fatal("HuginnXPostPublish() error = nil, want missing driver config failure")
 	}
 }

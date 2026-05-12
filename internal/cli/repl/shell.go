@@ -1752,7 +1752,7 @@ func (shell *Shell) publishApprovedXOutcomeWithHuginn(ctx context.Context, summa
 	}
 	details = normalizeMemoryDetailsPayload(summary, details)
 
-	result, err := invocation.Service{}.HuginnXPostPublish(ctx, webdriver.XPublishRequest{
+	result, err := invocation.Service{ApprovedExternalMutation: true}.HuginnXPostPublish(ctx, webdriver.XPublishRequest{
 		ToolKey: "browser_x_post_publish",
 		Input: webdriver.XPublishInput{
 			PostText: approvedOutcomePublishText(summary.Summary),

@@ -21,6 +21,8 @@ Odin execution paths must resolve risky action decisions through
   used by jobs.
 - Tool broker invocation and Capability Gateway builtin-tool invocation must
   reject approval-required tools before the tool handler runs.
+- Low-level external mutation invocations must fail closed unless a source-owned
+  path passes an already-approved intent to the invocation service.
 - Executors may run only after admission has produced an allowed decision.
 
 ## Risk Classes

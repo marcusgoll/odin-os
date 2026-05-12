@@ -14,6 +14,7 @@ import (
 	"odin-os/internal/adapters/browserhuman"
 	caldriver "odin-os/internal/adapters/calendar"
 	webdriver "odin-os/internal/adapters/web"
+	"odin-os/internal/core/policy"
 )
 
 type Request struct {
@@ -41,10 +42,11 @@ type Invoker interface {
 }
 
 type Service struct {
-	RuntimeRoot             string
-	DriverPath              string
-	Driver                  browserhuman.Driver
-	RobinhoodTransferDriver webdriver.RobinhoodTransferDriver
+	RuntimeRoot              string
+	DriverPath               string
+	Driver                   browserhuman.Driver
+	RobinhoodTransferDriver  webdriver.RobinhoodTransferDriver
+	ApprovedExternalMutation bool
 }
 
 func (service Service) Invoke(ctx context.Context, key string, request Request) (Result, error) {
@@ -134,6 +136,13 @@ func (service Service) HuginnXPostVisibleEvidence(ctx context.Context, request w
 }
 
 func (service Service) HuginnXPostPublish(ctx context.Context, request webdriver.XPublishRequest) (BrowserResult, error) {
+	if !service.ApprovedExternalMutation {
+		return BrowserResult{}, policy.NewService(nil).AuthorizeApproval(ctx, policy.ApprovalRequest{
+			Subject:  `tool "browser_x_post_publish"`,
+			Required: true,
+			Reason:   "public social publishing requires an approved social_outcome",
+		})
+	}
 	response, err := webdriver.NewXPublishDriver().Invoke(ctx, request)
 	if err != nil {
 		return BrowserResult{}, err
