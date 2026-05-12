@@ -23,11 +23,12 @@ type BrowserHandoffRunnerStatus string
 type BrowserEncryptedProfileArtifactStatus string
 
 const (
-	BrowserSessionStatusCreated        BrowserSessionStatus = "created"
-	BrowserSessionStatusLoginRequested BrowserSessionStatus = "login_requested"
-	BrowserSessionStatusVerified       BrowserSessionStatus = "verified"
-	BrowserSessionStatusExpired        BrowserSessionStatus = "expired"
-	BrowserSessionStatusRevoked        BrowserSessionStatus = "revoked"
+	BrowserSessionStatusCreated               BrowserSessionStatus = "created"
+	BrowserSessionStatusLoginRequested        BrowserSessionStatus = "login_requested"
+	BrowserSessionStatusRequiresAttendedLogin BrowserSessionStatus = "requires_attended_login"
+	BrowserSessionStatusVerified              BrowserSessionStatus = "verified"
+	BrowserSessionStatusExpired               BrowserSessionStatus = "expired"
+	BrowserSessionStatusRevoked               BrowserSessionStatus = "revoked"
 )
 
 const (
@@ -1749,6 +1750,8 @@ func normalizeBrowserSessionStatus(status BrowserSessionStatus) BrowserSessionSt
 		return BrowserSessionStatusCreated
 	case BrowserSessionStatusLoginRequested:
 		return BrowserSessionStatusLoginRequested
+	case BrowserSessionStatusRequiresAttendedLogin:
+		return BrowserSessionStatusRequiresAttendedLogin
 	case BrowserSessionStatusVerified:
 		return BrowserSessionStatusVerified
 	case BrowserSessionStatusExpired:

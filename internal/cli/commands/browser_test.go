@@ -37,6 +37,23 @@ func TestParseBrowserRunAcceptsSafetyOptions(t *testing.T) {
 	}
 }
 
+func TestParseBrowserRunAcceptsBrowserSessionReference(t *testing.T) {
+	command, err := ParseBrowser([]string{
+		"run",
+		"--goal-id", "42",
+		"--url", "https://docs.example.com/research",
+		"--allowed-domain", "example.com",
+		"--session-id", "7",
+		"--json",
+	})
+	if err != nil {
+		t.Fatalf("ParseBrowser() error = %v", err)
+	}
+	if command.SessionID != 7 {
+		t.Fatalf("command.SessionID = %d, want 7", command.SessionID)
+	}
+}
+
 func TestParseBrowserSessionCreateAndShow(t *testing.T) {
 	create, err := ParseBrowser([]string{
 		"session",
@@ -76,6 +93,9 @@ func TestParseBrowserSessionValidatesRequiredFields(t *testing.T) {
 	}
 	if _, err := ParseBrowser([]string{"session", "status", "--id", "42", "--status", "unknown", "--json"}); err == nil {
 		t.Fatal("ParseBrowser(session status unknown status) error = nil, want error")
+	}
+	if _, err := ParseBrowser([]string{"session", "status", "--id", "42", "--status", "requires_attended_login", "--json"}); err != nil {
+		t.Fatalf("ParseBrowser(session status requires_attended_login) error = %v", err)
 	}
 }
 

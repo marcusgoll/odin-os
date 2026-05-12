@@ -142,6 +142,68 @@ func TestReadOnlyServicePassesSiteProfilesToAdapter(t *testing.T) {
 	}
 }
 
+func TestReadOnlyServiceReferencesBrowserSessionWithoutSecrets(t *testing.T) {
+	store := openBrowserTestStore(t)
+	defer store.Close()
+
+	ctx := context.Background()
+	goal, err := store.CreateGoal(ctx, sqlite.CreateGoalParams{Title: "Collect authenticated browser evidence"})
+	if err != nil {
+		t.Fatalf("CreateGoal() error = %v", err)
+	}
+	session, err := store.CreateBrowserSession(ctx, sqlite.CreateBrowserSessionParams{
+		Name:           "google-main",
+		Domain:         "example.com",
+		AccountHint:    "marcus",
+		PermissionTier: sqlite.BrowserSessionPermissionTierAuthenticatedReadOnly,
+	})
+	if err != nil {
+		t.Fatalf("CreateBrowserSession() error = %v", err)
+	}
+	session, err = store.UpdateBrowserSessionStatus(ctx, sqlite.UpdateBrowserSessionStatusParams{
+		SessionID: session.ID,
+		Status:    sqlite.BrowserSessionStatusVerified,
+		Actor:     "test",
+		Reason:    "test verified metadata",
+	})
+	if err != nil {
+		t.Fatalf("UpdateBrowserSessionStatus() error = %v", err)
+	}
+
+	adapter := &recordingAdapter{response: huginnbrowser.Response{
+		Status:               "completed",
+		AdapterKind:          "stub_local",
+		VisitedURLs:          []string{"https://example.com/account"},
+		ExtractedTextSummary: "Session referenced summary",
+		ActionLog:            []string{"validated_read_only_request"},
+	}}
+	result, err := Service{Store: store, Adapter: adapter}.Run(ctx, ReadOnlyTask{
+		GoalID:             goal.ID,
+		WorkerMode:         "browser",
+		Objective:          "Collect authenticated account evidence",
+		AllowedDomains:     []string{"example.com"},
+		StartURLs:          []string{"https://example.com/account"},
+		MaxPages:           1,
+		MaxDurationSeconds: 30,
+		BrowserSessionID:   session.ID,
+		Actions:            []string{"read"},
+	})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if result.BrowserSession == nil || result.BrowserSession.ID != session.ID || result.BrowserSession.ProfilePath != session.ProfilePath {
+		t.Fatalf("result.BrowserSession = %+v, want safe session reference", result.BrowserSession)
+	}
+	if adapter.request.BrowserSession == nil || adapter.request.BrowserSession.ID != session.ID {
+		t.Fatalf("adapter request browser session = %+v, want safe session reference", adapter.request.BrowserSession)
+	}
+	for _, forbidden := range []string{"password", "totp", "backup_code", "cookie", "profile_bytes"} {
+		if strings.Contains(strings.ToLower(result.Evidence.PayloadJSON), forbidden) {
+			t.Fatalf("evidence payload contains forbidden marker %q: %s", forbidden, result.Evidence.PayloadJSON)
+		}
+	}
+}
+
 func TestReadOnlyServiceDefaultsToStubAdapterSelection(t *testing.T) {
 	store := openBrowserTestStore(t)
 	defer store.Close()

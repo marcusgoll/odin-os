@@ -29,10 +29,13 @@ type ReadOnlyTask struct {
 	MaxDurationSeconds int                         `json:"max_duration_seconds"`
 	EvidenceRequired   bool                        `json:"evidence_required"`
 	SiteProfiles       []huginnbrowser.SiteProfile `json:"site_profiles,omitempty"`
+	BrowserSessionID   int64                       `json:"browser_session_id,omitempty"`
+	BrowserSession     *BrowserSessionReference    `json:"browser_session,omitempty"`
 	Actions            []string                    `json:"actions,omitempty"`
 }
 
 type PageResult = huginnbrowser.PageResult
+type BrowserSessionReference = huginnbrowser.BrowserSessionReference
 
 type Result struct {
 	Status               string                      `json:"status"`
@@ -46,6 +49,7 @@ type Result struct {
 	MaxPages             int                         `json:"max_pages"`
 	MaxDurationSeconds   int                         `json:"max_duration_seconds"`
 	SiteProfiles         []huginnbrowser.SiteProfile `json:"site_profiles,omitempty"`
+	BrowserSession       *BrowserSessionReference    `json:"browser_session,omitempty"`
 	VisitedURLs          []string                    `json:"visited_urls,omitempty"`
 	PageResults          []huginnbrowser.PageResult  `json:"page_results,omitempty"`
 	ExtractedTextSummary string                      `json:"extracted_text_summary,omitempty"`
@@ -72,25 +76,32 @@ func (service Service) Run(ctx context.Context, task ReadOnlyTask) (Result, erro
 	if err := ValidateReadOnlyTask(task); err != nil {
 		return Result{}, err
 	}
+	resolvedTask := task
+	sessionRef, err := service.resolveBrowserSession(ctx, task)
+	if err != nil {
+		return Result{}, err
+	}
+	resolvedTask.BrowserSession = sessionRef
 	adapter := service.Adapter
 	if adapter == nil {
 		adapter = huginnbrowser.SelectAdapterFromEnv()
 	}
 	adapterResponse, err := adapter.Run(ctx, huginnbrowser.Request{
-		GoalID:             task.GoalID,
-		Mode:               task.WorkerMode,
-		Objective:          task.Objective,
-		StartURLs:          append([]string{}, task.StartURLs...),
-		AllowedDomains:     append([]string{}, task.AllowedDomains...),
-		MaxPages:           task.MaxPages,
-		MaxDurationSeconds: task.MaxDurationSeconds,
-		EvidenceRequired:   task.EvidenceRequired,
-		SiteProfiles:       append([]huginnbrowser.SiteProfile{}, task.SiteProfiles...),
+		GoalID:             resolvedTask.GoalID,
+		Mode:               resolvedTask.WorkerMode,
+		Objective:          resolvedTask.Objective,
+		StartURLs:          append([]string{}, resolvedTask.StartURLs...),
+		AllowedDomains:     append([]string{}, resolvedTask.AllowedDomains...),
+		MaxPages:           resolvedTask.MaxPages,
+		MaxDurationSeconds: resolvedTask.MaxDurationSeconds,
+		EvidenceRequired:   resolvedTask.EvidenceRequired,
+		SiteProfiles:       append([]huginnbrowser.SiteProfile{}, resolvedTask.SiteProfiles...),
+		BrowserSession:     cloneBrowserSessionReference(resolvedTask.BrowserSession),
 	})
 	if err != nil {
 		return Result{
 			Status:       "failed",
-			GoalID:       task.GoalID,
+			GoalID:       resolvedTask.GoalID,
 			ErrorCode:    "adapter_failed",
 			ErrorMessage: err.Error(),
 		}, fmt.Errorf("browser adapter failed: %w", err)
@@ -98,17 +109,17 @@ func (service Service) Run(ctx context.Context, task ReadOnlyTask) (Result, erro
 	payload, err := json.Marshal(map[string]any{
 		"executor": "browser_readonly",
 		"status":   "adapter_response_recorded",
-		"task":     task,
+		"task":     resolvedTask,
 		"adapter":  adapterResponse,
 	})
 	if err != nil {
 		return Result{}, err
 	}
 	evidence, err := service.Store.AddGoalEvidence(ctx, sqlite.AddGoalEvidenceParams{
-		GoalID:       task.GoalID,
+		GoalID:       resolvedTask.GoalID,
 		EvidenceType: EvidenceType,
 		Summary:      defaultEvidenceSummary(adapterResponse),
-		URI:          defaultEvidenceURI(task, adapterResponse),
+		URI:          defaultEvidenceURI(resolvedTask, adapterResponse),
 		PayloadJSON:  string(payload),
 		CreatedBy:    defaultEvidenceCreatedBy,
 	})
@@ -117,16 +128,17 @@ func (service Service) Run(ctx context.Context, task ReadOnlyTask) (Result, erro
 	}
 	return Result{
 		Status:               "recorded",
-		GoalID:               task.GoalID,
+		GoalID:               resolvedTask.GoalID,
 		EvidenceID:           evidence.ID,
 		EvidenceType:         evidence.EvidenceType,
 		AdapterStatus:        adapterResponse.Status,
 		AdapterKind:          adapterResponse.AdapterKind,
-		StartURLs:            append([]string{}, task.StartURLs...),
-		AllowedDomains:       append([]string{}, task.AllowedDomains...),
-		MaxPages:             task.MaxPages,
-		MaxDurationSeconds:   task.MaxDurationSeconds,
-		SiteProfiles:         append([]huginnbrowser.SiteProfile{}, task.SiteProfiles...),
+		StartURLs:            append([]string{}, resolvedTask.StartURLs...),
+		AllowedDomains:       append([]string{}, resolvedTask.AllowedDomains...),
+		MaxPages:             resolvedTask.MaxPages,
+		MaxDurationSeconds:   resolvedTask.MaxDurationSeconds,
+		SiteProfiles:         append([]huginnbrowser.SiteProfile{}, resolvedTask.SiteProfiles...),
+		BrowserSession:       cloneBrowserSessionReference(resolvedTask.BrowserSession),
 		VisitedURLs:          append([]string{}, adapterResponse.VisitedURLs...),
 		PageResults:          append([]huginnbrowser.PageResult{}, adapterResponse.PageResults...),
 		ExtractedTextSummary: adapterResponse.ExtractedTextSummary,
@@ -134,6 +146,71 @@ func (service Service) Run(ctx context.Context, task ReadOnlyTask) (Result, erro
 		ActionLog:            append([]string{}, adapterResponse.ActionLog...),
 		Evidence:             evidence,
 	}, nil
+}
+
+func (service Service) resolveBrowserSession(ctx context.Context, task ReadOnlyTask) (*BrowserSessionReference, error) {
+	if task.BrowserSessionID == 0 {
+		return cloneBrowserSessionReference(task.BrowserSession), nil
+	}
+	session, err := service.Store.GetBrowserSession(ctx, task.BrowserSessionID)
+	if err != nil {
+		return nil, err
+	}
+	if session.Status != sqlite.BrowserSessionStatusVerified {
+		return nil, fmt.Errorf("browser session %d must be verified before read-only browser use; status=%s", session.ID, session.Status)
+	}
+	if err := ensureBrowserSessionDomainMatchesTask(session, task); err != nil {
+		return nil, err
+	}
+	ref := browserSessionReference(session)
+	return &ref, nil
+}
+
+func ensureBrowserSessionDomainMatchesTask(session sqlite.BrowserSession, task ReadOnlyTask) error {
+	allowedDomains, err := normalizeAllowedDomains(task.AllowedDomains)
+	if err != nil {
+		return err
+	}
+	sessionDomain := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(session.Domain)), ".")
+	if sessionDomain == "" {
+		return fmt.Errorf("browser session domain is required")
+	}
+	if !domainAllowed(sessionDomain, allowedDomains) {
+		return fmt.Errorf("browser session domain %q is not in allowed_domains", sessionDomain)
+	}
+	for _, rawURL := range task.StartURLs {
+		host, err := readOnlyURLHost(rawURL)
+		if err != nil {
+			return err
+		}
+		if !domainAllowed(host, []string{sessionDomain}) {
+			return fmt.Errorf("browser session domain %q cannot be used for start url host %q", sessionDomain, host)
+		}
+	}
+	return nil
+}
+
+func browserSessionReference(session sqlite.BrowserSession) BrowserSessionReference {
+	ref := BrowserSessionReference{
+		ID:                   session.ID,
+		Domain:               session.Domain,
+		Status:               string(session.Status),
+		PermissionTier:       string(session.PermissionTier),
+		ProfileStoragePolicy: string(session.ProfileStoragePolicy),
+		ProfilePath:          session.ProfilePath,
+	}
+	if session.LastVerifiedAt != nil {
+		ref.LastVerifiedAt = session.LastVerifiedAt.UTC().Format("2006-01-02T15:04:05Z07:00")
+	}
+	return ref
+}
+
+func cloneBrowserSessionReference(ref *BrowserSessionReference) *BrowserSessionReference {
+	if ref == nil {
+		return nil
+	}
+	clone := *ref
+	return &clone
 }
 
 func defaultEvidenceSummary(response huginnbrowser.Response) string {
@@ -170,6 +247,12 @@ func ValidateReadOnlyTask(task ReadOnlyTask) error {
 	}
 	if task.MaxDurationSeconds <= 0 || task.MaxDurationSeconds > MaxDurationSecondsLimit {
 		return fmt.Errorf("max_duration_seconds must be between 1 and %d", MaxDurationSecondsLimit)
+	}
+	if task.BrowserSessionID < 0 {
+		return fmt.Errorf("browser_session_id must not be negative")
+	}
+	if task.BrowserSession != nil && task.BrowserSession.ID <= 0 {
+		return fmt.Errorf("browser session id must be positive")
 	}
 	allowedDomains, err := normalizeAllowedDomains(task.AllowedDomains)
 	if err != nil {

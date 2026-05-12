@@ -20,21 +20,22 @@ import (
 )
 
 type browserRunView struct {
-	Status               string                       `json:"status"`
-	GoalID               int64                        `json:"goal_id"`
-	EvidenceID           int64                        `json:"evidence_id"`
-	EvidenceType         string                       `json:"evidence_type"`
-	AdapterStatus        string                       `json:"adapter_status,omitempty"`
-	AdapterKind          string                       `json:"adapter_kind,omitempty"`
-	StartURLs            []string                     `json:"start_urls"`
-	AllowedDomains       []string                     `json:"allowed_domains"`
-	MaxPages             int                          `json:"max_pages"`
-	MaxDurationSeconds   int                          `json:"max_duration_seconds"`
-	VisitedURLs          []string                     `json:"visited_urls,omitempty"`
-	PageResults          []browserexecutor.PageResult `json:"page_results,omitempty"`
-	ExtractedTextSummary string                       `json:"extracted_text_summary,omitempty"`
-	Screenshots          []string                     `json:"screenshots,omitempty"`
-	ActionLog            []string                     `json:"action_log,omitempty"`
+	Status               string                                   `json:"status"`
+	GoalID               int64                                    `json:"goal_id"`
+	EvidenceID           int64                                    `json:"evidence_id"`
+	EvidenceType         string                                   `json:"evidence_type"`
+	AdapterStatus        string                                   `json:"adapter_status,omitempty"`
+	AdapterKind          string                                   `json:"adapter_kind,omitempty"`
+	StartURLs            []string                                 `json:"start_urls"`
+	AllowedDomains       []string                                 `json:"allowed_domains"`
+	MaxPages             int                                      `json:"max_pages"`
+	MaxDurationSeconds   int                                      `json:"max_duration_seconds"`
+	BrowserSession       *browserexecutor.BrowserSessionReference `json:"browser_session,omitempty"`
+	VisitedURLs          []string                                 `json:"visited_urls,omitempty"`
+	PageResults          []browserexecutor.PageResult             `json:"page_results,omitempty"`
+	ExtractedTextSummary string                                   `json:"extracted_text_summary,omitempty"`
+	Screenshots          []string                                 `json:"screenshots,omitempty"`
+	ActionLog            []string                                 `json:"action_log,omitempty"`
 }
 
 type browserSessionEnvelope struct {
@@ -238,6 +239,7 @@ func runBrowser(ctx context.Context, app bootstrap.App, args []string, stdout io
 		MaxPages:           command.MaxPages,
 		MaxDurationSeconds: command.MaxDurationSeconds,
 		EvidenceRequired:   command.EvidenceRequired,
+		BrowserSessionID:   command.SessionID,
 		Actions:            command.Actions,
 	})
 	if err != nil {
@@ -254,6 +256,7 @@ func runBrowser(ctx context.Context, app bootstrap.App, args []string, stdout io
 		AllowedDomains:       result.AllowedDomains,
 		MaxPages:             result.MaxPages,
 		MaxDurationSeconds:   result.MaxDurationSeconds,
+		BrowserSession:       result.BrowserSession,
 		VisitedURLs:          result.VisitedURLs,
 		PageResults:          result.PageResults,
 		ExtractedTextSummary: result.ExtractedTextSummary,
