@@ -112,3 +112,43 @@ func TestInvokeBuiltinToolCapabilityUsesCatalogDefinition(t *testing.T) {
 		t.Fatalf("response.Output = %q, want valid JSON", string(response.Output))
 	}
 }
+
+func TestInvokeBuiltinToolCapabilityBlocksApprovalRequiredTool(t *testing.T) {
+	t.Parallel()
+
+	invoked := false
+	definitions := map[string]catalog.ToolDefinition{
+		"browser_x_post_publish": {
+			Key:              "browser_x_post_publish",
+			Scopes:           []string{"project"},
+			SourceRef:        "builtin://browser_x_post_publish",
+			Schema:           map[string]any{"type": "object"},
+			RequiresApproval: true,
+			ApprovalReason:   "public social publishing requires an approved social_outcome",
+			Invoke: func(map[string]string) (catalog.StructuredResult, error) {
+				invoked = true
+				return catalog.StructuredResult{CapabilityKey: "browser_x_post_publish"}, nil
+			},
+		},
+	}
+	descriptor := BuiltinToolDescriptors(definitions)["browser_x_post_publish"]
+
+	_, err := InvokeBuiltinToolCapability(context.Background(), definitions, InvokeRequest{
+		CapabilityID:      "browser_x_post_publish",
+		CapabilityVersion: "1.0.0",
+		Input:             json.RawMessage(`{"post_text":"publish"}`),
+	}, descriptor)
+	if err == nil {
+		t.Fatal("InvokeBuiltinToolCapability() error = nil, want approval-required refusal")
+	}
+	code, ok := errorCode(err)
+	if !ok {
+		t.Fatalf("InvokeBuiltinToolCapability() error = %v, want coded policy error", err)
+	}
+	if code != "approval_required" {
+		t.Fatalf("InvokeBuiltinToolCapability() code = %q, want approval_required", code)
+	}
+	if invoked {
+		t.Fatal("approval-required builtin tool invocation reached Invoke handler")
+	}
+}
