@@ -32,6 +32,7 @@ test-skills:
 ci: fmtcheck lint test
 	bash scripts/tests/assert-odin-e2e-contract-test.sh
 	bash scripts/tests/odin-e2e-workflow-test.sh
+	bash scripts/tests/actual-use-phase0-proof-test.sh
 	bash scripts/tests/github-actions-permissions-test.sh
 	bash scripts/tests/google-driver-security-test.sh
 	bash scripts/tests/work-intake-live-smoke-test.sh
