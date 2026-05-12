@@ -48,6 +48,7 @@ const (
 	EventTaskStatusChanged                  Type = "task.status_changed"
 	EventTaskQueueStateChanged              Type = "task.queue_state_changed"
 	EventDeliveryEvidenceRecorded           Type = "delivery.evidence_recorded"
+	EventDeliveryGateAdvanced               Type = "delivery.gate_advanced"
 	EventRunStarted                         Type = "run.started"
 	EventRunStatusChanged                   Type = "run.status_changed"
 	EventRunExecutionClaimed                Type = "run.execution_claimed"
@@ -272,6 +273,14 @@ type DeliveryEvidenceRecordedPayload struct {
 	Summary     string `json:"summary"`
 	Ref         string `json:"ref,omitempty"`
 	RecordedBy  string `json:"recorded_by,omitempty"`
+}
+
+type DeliveryGateAdvancedPayload struct {
+	TaskID      int64  `json:"task_id"`
+	WorkItemKey string `json:"work_item_key"`
+	Gate        string `json:"gate"`
+	NextGate    string `json:"next_gate"`
+	AdvancedBy  string `json:"advanced_by,omitempty"`
 }
 
 type GoalCreatedPayload struct {

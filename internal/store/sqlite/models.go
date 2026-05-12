@@ -1432,6 +1432,13 @@ type RecordDeliveryEvidenceParams struct {
 	RecordedBy string
 }
 
+type RecordDeliveryGateAdvancedParams struct {
+	TaskID     int64
+	Gate       string
+	NextGate   string
+	AdvancedBy string
+}
+
 type Delegation struct {
 	ID              int64
 	ParentTaskID    int64
