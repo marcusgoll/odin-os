@@ -114,6 +114,30 @@ func TestRunHealthcheckHealthyReturnsNil(t *testing.T) {
 	}
 }
 
+func TestRunHealthcheckUsesConfiguredEnvFileRuntimeRoot(t *testing.T) {
+	repoRoot := createRuntimeRoot(t)
+	runtimeRoot := createRuntimeRoot(t)
+	seedHealthyRuntime(t, runtimeRoot)
+	seedRuntimeState(t, runtimeRoot, "ready", time.Now().UTC())
+	holdServiceLock(t, runtimeRoot)
+
+	envFile := filepath.Join(t.TempDir(), "odin-os.env")
+	if err := os.WriteFile(envFile, []byte("ODIN_ROOT="+runtimeRoot+"\nODIN_HTTP_ADDR=127.0.0.1:9444\n"), 0o600); err != nil {
+		t.Fatalf("write env file: %v", err)
+	}
+	t.Setenv("ODIN_ENV_FILE", envFile)
+	t.Setenv("ODIN_ROOT", "")
+	t.Setenv("ODIN_HTTP_ADDR", "")
+
+	var stdout bytes.Buffer
+	if err := Run(context.Background(), repoRoot, []string{"healthcheck"}, strings.NewReader(""), &stdout); err != nil {
+		t.Fatalf("Run(healthcheck) error = %v\noutput=%s", err, stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "ready") {
+		t.Fatalf("healthcheck output = %q, want readiness message", stdout.String())
+	}
+}
+
 func TestRunHealthcheckReadyStateWithoutLiveServiceLockReturnsError(t *testing.T) {
 	t.Parallel()
 

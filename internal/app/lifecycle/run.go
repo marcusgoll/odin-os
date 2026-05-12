@@ -5350,12 +5350,116 @@ func runHealthcheck(ctx context.Context, app bootstrap.App, cfg appconfig.Config
 }
 
 func runtimeEnv() map[string]string {
+	fileEnv := runtimeEnvFile()
+	applyRuntimeEnvDefaults(fileEnv)
 	return map[string]string{
-		"ODIN_ROOT":         os.Getenv("ODIN_ROOT"),
-		"ODIN_HTTP_ADDR":    os.Getenv("ODIN_HTTP_ADDR"),
-		"ODIN_ADMIN_TOKEN":  os.Getenv("ODIN_ADMIN_TOKEN"),
-		"ODIN_NOW":          os.Getenv("ODIN_NOW"),
-		"ODIN_MEDIA_CONFIG": os.Getenv("ODIN_MEDIA_CONFIG"),
+		"ODIN_ROOT":         runtimeEnvValue(fileEnv, "ODIN_ROOT"),
+		"ODIN_HTTP_ADDR":    runtimeEnvValue(fileEnv, "ODIN_HTTP_ADDR"),
+		"ODIN_ADMIN_TOKEN":  runtimeEnvValue(fileEnv, "ODIN_ADMIN_TOKEN"),
+		"ODIN_NOW":          runtimeEnvValue(fileEnv, "ODIN_NOW"),
+		"ODIN_MEDIA_CONFIG": runtimeEnvValue(fileEnv, "ODIN_MEDIA_CONFIG"),
+	}
+}
+
+func runtimeEnvValue(fileEnv map[string]string, key string) string {
+	if value := os.Getenv(key); strings.TrimSpace(value) != "" {
+		return value
+	}
+	return fileEnv[key]
+}
+
+func applyRuntimeEnvDefaults(fileEnv map[string]string) {
+	for _, key := range []string{
+		"ODIN_ROOT",
+		"ODIN_HTTP_ADDR",
+		"ODIN_ADMIN_TOKEN",
+		"ODIN_NOW",
+		"ODIN_MEDIA_CONFIG",
+		"ODIN_PROJECTS_OVERLAY",
+		"ODIN_CODEX_DRIVER",
+	} {
+		if strings.TrimSpace(os.Getenv(key)) != "" {
+			continue
+		}
+		if value := strings.TrimSpace(fileEnv[key]); value != "" {
+			_ = os.Setenv(key, value)
+		}
+	}
+}
+
+func runtimeEnvFile() map[string]string {
+	env := make(map[string]string)
+	path := runtimeEnvFilePath()
+	if path == "" {
+		return env
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return env
+	}
+	for _, line := range strings.Split(string(content), "\n") {
+		key, value, ok := parseRuntimeEnvLine(line)
+		if !ok {
+			continue
+		}
+		env[key] = value
+	}
+	return env
+}
+
+func runtimeEnvFilePath() string {
+	if parseBoolEnv(os.Getenv("ODIN_DISABLE_ENV_FILE")) {
+		return ""
+	}
+	if path := strings.TrimSpace(os.Getenv("ODIN_ENV_FILE")); path != "" {
+		return path
+	}
+	configHome := strings.TrimSpace(os.Getenv("XDG_CONFIG_HOME"))
+	if configHome == "" {
+		home := strings.TrimSpace(os.Getenv("HOME"))
+		if home == "" {
+			return ""
+		}
+		configHome = filepath.Join(home, ".config")
+	}
+	return filepath.Join(configHome, "odin", "odin-os.env")
+}
+
+func parseRuntimeEnvLine(line string) (string, string, bool) {
+	line = strings.TrimSpace(line)
+	if line == "" || strings.HasPrefix(line, "#") {
+		return "", "", false
+	}
+	line = strings.TrimSpace(strings.TrimPrefix(line, "export "))
+	key, value, ok := strings.Cut(line, "=")
+	if !ok {
+		return "", "", false
+	}
+	key = strings.TrimSpace(key)
+	if !runtimeEnvKeyAllowed(key) {
+		return "", "", false
+	}
+	value = strings.TrimSpace(value)
+	if len(value) >= 2 {
+		if (value[0] == '"' && value[len(value)-1] == '"') || (value[0] == '\'' && value[len(value)-1] == '\'') {
+			value = value[1 : len(value)-1]
+		}
+	}
+	return key, value, true
+}
+
+func runtimeEnvKeyAllowed(key string) bool {
+	switch key {
+	case "ODIN_ROOT",
+		"ODIN_HTTP_ADDR",
+		"ODIN_ADMIN_TOKEN",
+		"ODIN_NOW",
+		"ODIN_MEDIA_CONFIG",
+		"ODIN_PROJECTS_OVERLAY",
+		"ODIN_CODEX_DRIVER":
+		return true
+	default:
+		return false
 	}
 }
 
