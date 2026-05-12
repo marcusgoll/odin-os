@@ -4722,6 +4722,50 @@ func TestRunTriggerOperatorWorkflowCreateShowTestAndAudit(t *testing.T) {
 	}
 }
 
+func TestRunTriggerMaterializeAliasesFireAndDedupes(t *testing.T) {
+	t.Parallel()
+
+	root := testRepoRoot(t)
+	run := func(args ...string) string {
+		t.Helper()
+		var stdout bytes.Buffer
+		if err := Run(context.Background(), root, args, strings.NewReader(""), &stdout); err != nil {
+			t.Fatalf("Run(%v) error = %v\nstdout=%s", args, err, stdout.String())
+		}
+		return stdout.String()
+	}
+
+	run("project", "select", testProjectKey)
+	run("trigger", "create", "operator-materialize",
+		"initiative="+testProjectKey,
+		"kind=schedule",
+		"status=enabled",
+		"next=2026-05-05T09:00:00Z",
+		"title=Operator_materialize",
+		"summary=operator_materialize",
+		"intent=read_only",
+		"--json",
+	)
+
+	first := run("trigger", "materialize", "operator-materialize", "reason=operator-proof", "--json")
+	for _, want := range []string{
+		`"key": "operator-materialize"`,
+		`"materialization_key": "default:operator-materialize:manual:operator-proof"`,
+		`"created_work_item": true`,
+		`"execution_intent": "read_only"`,
+		`"execution_intent_source": "trigger"`,
+	} {
+		if !strings.Contains(first, want) {
+			t.Fatalf("trigger materialize output = %s, want %s", first, want)
+		}
+	}
+
+	repeat := run("trigger", "materialize", "operator-materialize", "reason=operator-proof", "--json")
+	if !strings.Contains(repeat, `"created_work_item": false`) {
+		t.Fatalf("repeat trigger materialize output = %s, want deduped materialization", repeat)
+	}
+}
+
 func TestRunSchedulerTickDryRunExplainsDecisionsWithoutMutation(t *testing.T) {
 	t.Parallel()
 
