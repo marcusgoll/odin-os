@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"hash/fnv"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -61,6 +62,18 @@ func Open(path string) (*Store, error) {
 		_ = db.Close()
 		return nil, err
 	}
+	if fastTestPragmasEnabled() {
+		for _, statement := range []string{
+			`PRAGMA journal_mode = MEMORY`,
+			`PRAGMA synchronous = OFF`,
+			`PRAGMA temp_store = MEMORY`,
+		} {
+			if _, err := db.Exec(statement); err != nil {
+				_ = db.Close()
+				return nil, err
+			}
+		}
+	}
 
 	if err := db.Ping(); err != nil {
 		_ = db.Close()
@@ -68,6 +81,10 @@ func Open(path string) (*Store, error) {
 	}
 
 	return &Store{db: db}, nil
+}
+
+func fastTestPragmasEnabled() bool {
+	return os.Getenv("ODIN_SQLITE_FAST_TEST_PRAGMAS") == "1"
 }
 
 func (store *Store) Close() error {

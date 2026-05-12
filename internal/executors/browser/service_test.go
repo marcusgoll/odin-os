@@ -15,6 +15,7 @@ import (
 )
 
 var _ ReadOnlyRunner = Service{}
+var _ PluginRunner = Service{}
 
 func TestReadOnlyServiceRecordsGoalEvidenceAndAudit(t *testing.T) {
 	store := openBrowserTestStore(t)
@@ -91,6 +92,160 @@ func TestReadOnlyServiceRecordsGoalEvidenceAndAudit(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("events = %+v, want goal.evidence_recorded", events)
+	}
+}
+
+func TestPluginRunReadOnlyRecordsEvidenceWithoutApproval(t *testing.T) {
+	store := openBrowserTestStore(t)
+	defer store.Close()
+
+	ctx := context.Background()
+	goal, err := store.CreateGoal(ctx, sqlite.CreateGoalParams{Title: "Collect browser plugin evidence"})
+	if err != nil {
+		t.Fatalf("CreateGoal() error = %v", err)
+	}
+
+	adapter := &recordingAdapter{response: huginnbrowser.Response{
+		Status:               "completed",
+		AdapterKind:          "stub_local",
+		VisitedURLs:          []string{"https://example.com/docs"},
+		ExtractedTextSummary: "Plugin summary",
+		ActionLog:            []string{"validated_read_only_request"},
+	}}
+	response, err := Service{Store: store, Adapter: adapter}.RunPlugin(ctx, PluginRequest{
+		RequestID:          "browser-plugin-readonly-1",
+		GoalID:             goal.ID,
+		WorkerMode:         "browser",
+		Objective:          "Collect public documentation",
+		AllowedDomains:     []string{"example.com"},
+		StartURLs:          []string{"https://example.com/docs"},
+		MaxPages:           1,
+		MaxDurationSeconds: 30,
+		EvidenceRequired:   true,
+		Actions:            []string{"navigate", "snapshot"},
+	})
+	if err != nil {
+		t.Fatalf("RunPlugin() error = %v", err)
+	}
+	if response.Status != "recorded" || response.RiskClass != RiskClassReadOnly || response.ApprovalRequired {
+		t.Fatalf("response = %+v, want recorded read-only response without approval", response)
+	}
+	if response.Evidence == nil || response.Evidence.ID <= 0 || response.Evidence.Type != EvidenceType {
+		t.Fatalf("response evidence = %+v, want browser evidence artifact", response.Evidence)
+	}
+	if !adapter.called {
+		t.Fatal("adapter was not called for read-only plugin request")
+	}
+	events, err := store.ListEvents(ctx, sqlite.ListEventsParams{})
+	if err != nil {
+		t.Fatalf("ListEvents() error = %v", err)
+	}
+	var evidenceEvent bool
+	var approvalEvent bool
+	for _, event := range events {
+		if event.Type == runtimeevents.EventGoalEvidenceRecorded {
+			evidenceEvent = true
+		}
+		if event.Type == runtimeevents.EventApprovalRequested {
+			approvalEvent = true
+		}
+	}
+	if !evidenceEvent {
+		t.Fatalf("events = %+v, want goal.evidence_recorded", events)
+	}
+	if approvalEvent {
+		t.Fatalf("events = %+v, want no approval for read-only plugin request", events)
+	}
+}
+
+func TestPluginRunMutationCreatesApprovalAndDoesNotCallAdapter(t *testing.T) {
+	store := openBrowserTestStore(t)
+	defer store.Close()
+
+	ctx := context.Background()
+	task := createBrowserApprovalTask(t, store)
+	adapter := &recordingAdapter{}
+
+	response, err := Service{Store: store, Adapter: adapter}.RunPlugin(ctx, PluginRequest{
+		RequestID:          "browser-plugin-mutation-1",
+		TaskID:             task.ID,
+		Objective:          "Submit the reviewed external form",
+		AllowedDomains:     []string{"example.com"},
+		StartURLs:          []string{"https://example.com/form"},
+		MaxPages:           1,
+		MaxDurationSeconds: 30,
+		Actions:            []string{"navigate", "submit_form"},
+		RequestedBy:        "operator",
+	})
+	if err != nil {
+		t.Fatalf("RunPlugin() error = %v", err)
+	}
+	if response.Status != "approval_required" || response.RiskClass != RiskClassExternalMutation || !response.ApprovalRequired || response.ApprovalID <= 0 {
+		t.Fatalf("response = %+v, want approval-required mutation response", response)
+	}
+	if len(response.MutatingActions) != 1 || response.MutatingActions[0] != "submit_form" {
+		t.Fatalf("MutatingActions = %#v, want submit_form", response.MutatingActions)
+	}
+	if adapter.called {
+		t.Fatal("adapter was called for mutation-class plugin request")
+	}
+	blocked, err := store.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
+	}
+	if blocked.Status != "blocked" {
+		t.Fatalf("task status = %q, want blocked", blocked.Status)
+	}
+	approval, err := store.GetApproval(ctx, response.ApprovalID)
+	if err != nil {
+		t.Fatalf("GetApproval() error = %v", err)
+	}
+	if approval.Status != "pending" || approval.TaskID != task.ID {
+		t.Fatalf("approval = %+v, want pending approval linked to task %d", approval, task.ID)
+	}
+	events, err := store.ListEvents(ctx, sqlite.ListEventsParams{})
+	if err != nil {
+		t.Fatalf("ListEvents() error = %v", err)
+	}
+	var approvalEvent bool
+	var evidenceEvent bool
+	for _, event := range events {
+		if event.Type == runtimeevents.EventApprovalRequested {
+			approvalEvent = true
+		}
+		if event.Type == runtimeevents.EventGoalEvidenceRecorded {
+			evidenceEvent = true
+		}
+	}
+	if !approvalEvent {
+		t.Fatalf("events = %+v, want approval.requested", events)
+	}
+	if evidenceEvent {
+		t.Fatalf("events = %+v, want no browser evidence because mutation did not execute", events)
+	}
+}
+
+func TestPluginRunMutationRequiresTaskID(t *testing.T) {
+	store := openBrowserTestStore(t)
+	defer store.Close()
+
+	adapter := &recordingAdapter{}
+	response, err := Service{Store: store, Adapter: adapter}.RunPlugin(context.Background(), PluginRequest{
+		Objective:          "Submit external form",
+		AllowedDomains:     []string{"example.com"},
+		StartURLs:          []string{"https://example.com/form"},
+		MaxPages:           1,
+		MaxDurationSeconds: 30,
+		Actions:            []string{"submit_form"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "task_id is required") {
+		t.Fatalf("RunPlugin() error = %v, want task_id validation", err)
+	}
+	if response.RiskClass != RiskClassExternalMutation || response.ErrorCode != "invalid_request" {
+		t.Fatalf("response = %+v, want invalid mutation request response", response)
+	}
+	if adapter.called {
+		t.Fatal("adapter was called for invalid mutation-class plugin request")
 	}
 }
 
@@ -448,6 +603,35 @@ func openBrowserTestStore(t *testing.T) *sqlite.Store {
 		return time.Date(2026, 5, 5, 12, 0, 0, 0, time.UTC)
 	}
 	return store
+}
+
+func createBrowserApprovalTask(t *testing.T, store *sqlite.Store) sqlite.Task {
+	t.Helper()
+	ctx := context.Background()
+	project, err := store.CreateProject(ctx, sqlite.CreateProjectParams{
+		Key:           "odin-core",
+		Name:          "Odin Core",
+		Scope:         "odin-core",
+		GitRoot:       "/home/orchestrator/odin-os",
+		DefaultBranch: "main",
+		GitHubRepo:    "example/odin-os",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+	task, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "browser-mutation-approval",
+		Title:       "Review browser mutation",
+		Status:      "queued",
+		Scope:       "odin-core",
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+	return task
 }
 
 func writeBrowserExecutorFixture(t *testing.T, content string) string {

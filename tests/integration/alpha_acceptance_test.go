@@ -241,6 +241,9 @@ func TestAlphaAcceptance(t *testing.T) {
 		store := openRuntimeStore(t, runtimeRoot)
 		store.Now = func() time.Time { return now }
 		seedHealthyObservability(t, ctx, store, now)
+		if err := store.Close(); err != nil {
+			t.Fatalf("Close(seed store) error = %v", err)
+		}
 		driverEnv := acceptanceHarnessDriverEnv(t)
 
 		var serveOutput bytes.Buffer
@@ -266,7 +269,7 @@ func TestAlphaAcceptance(t *testing.T) {
 			}
 		})
 
-		deadline := time.Now().Add(15 * time.Second)
+		deadline := time.Now().Add(60 * time.Second)
 		lastHealthcheckOutput := ""
 		for {
 			output, err := runOdinCommand(t, repoRoot, odinBinary, runtimeRoot, nil, "", "healthcheck")

@@ -19,6 +19,13 @@ const (
 	defaultEvidenceCreatedBy = "browser_executor"
 )
 
+type RiskClass string
+
+const (
+	RiskClassReadOnly         RiskClass = "read_only"
+	RiskClassExternalMutation RiskClass = "external_mutation"
+)
+
 type ReadOnlyTask struct {
 	GoalID             int64                       `json:"goal_id"`
 	WorkerMode         string                      `json:"worker_mode,omitempty"`
@@ -36,6 +43,47 @@ type ReadOnlyTask struct {
 
 type PageResult = huginnbrowser.PageResult
 type BrowserSessionReference = huginnbrowser.BrowserSessionReference
+
+type PluginRequest struct {
+	RequestID          string                      `json:"request_id,omitempty"`
+	GoalID             int64                       `json:"goal_id,omitempty"`
+	TaskID             int64                       `json:"task_id,omitempty"`
+	WorkerMode         string                      `json:"worker_mode,omitempty"`
+	Objective          string                      `json:"objective"`
+	AllowedDomains     []string                    `json:"allowed_domains"`
+	StartURLs          []string                    `json:"start_urls"`
+	MaxPages           int                         `json:"max_pages"`
+	MaxDurationSeconds int                         `json:"max_duration_seconds"`
+	EvidenceRequired   bool                        `json:"evidence_required"`
+	SiteProfiles       []huginnbrowser.SiteProfile `json:"site_profiles,omitempty"`
+	BrowserSessionID   int64                       `json:"browser_session_id,omitempty"`
+	BrowserSession     *BrowserSessionReference    `json:"browser_session,omitempty"`
+	Actions            []string                    `json:"actions,omitempty"`
+	RequestedBy        string                      `json:"requested_by,omitempty"`
+}
+
+type EvidenceArtifact struct {
+	ID        int64  `json:"id"`
+	Type      string `json:"type"`
+	URI       string `json:"uri,omitempty"`
+	Summary   string `json:"summary"`
+	CreatedBy string `json:"created_by"`
+}
+
+type PluginResponse struct {
+	Status           string            `json:"status"`
+	RequestID        string            `json:"request_id,omitempty"`
+	RiskClass        RiskClass         `json:"risk_class"`
+	ApprovalRequired bool              `json:"approval_required"`
+	ApprovalID       int64             `json:"approval_id,omitempty"`
+	TaskID           int64             `json:"task_id,omitempty"`
+	Evidence         *EvidenceArtifact `json:"evidence,omitempty"`
+	Result           *Result           `json:"result,omitempty"`
+	MutatingActions  []string          `json:"mutating_actions,omitempty"`
+	ErrorCode        string            `json:"error_code,omitempty"`
+	ErrorMessage     string            `json:"error_message,omitempty"`
+	Approval         *sqlite.Approval  `json:"-"`
+}
 
 type Result struct {
 	Status               string                      `json:"status"`
@@ -64,9 +112,79 @@ type ReadOnlyRunner interface {
 	Run(context.Context, ReadOnlyTask) (Result, error)
 }
 
+type PluginRunner interface {
+	RunPlugin(context.Context, PluginRequest) (PluginResponse, error)
+}
+
 type Service struct {
 	Store   *sqlite.Store
 	Adapter huginnbrowser.Adapter
+}
+
+func (service Service) RunPlugin(ctx context.Context, request PluginRequest) (PluginResponse, error) {
+	riskClass := ClassifyRisk(request.Actions)
+	if riskClass == RiskClassReadOnly {
+		result, err := service.Run(ctx, request.readOnlyTask())
+		response := PluginResponse{
+			Status:           result.Status,
+			RequestID:        strings.TrimSpace(request.RequestID),
+			RiskClass:        riskClass,
+			ApprovalRequired: false,
+			Result:           &result,
+			ErrorCode:        result.ErrorCode,
+			ErrorMessage:     result.ErrorMessage,
+		}
+		if result.EvidenceID > 0 {
+			response.Evidence = &EvidenceArtifact{
+				ID:        result.EvidenceID,
+				Type:      result.EvidenceType,
+				URI:       result.Evidence.URI,
+				Summary:   result.Evidence.Summary,
+				CreatedBy: result.Evidence.CreatedBy,
+			}
+		}
+		return response, err
+	}
+
+	if service.Store == nil {
+		return PluginResponse{}, fmt.Errorf("browser executor requires store")
+	}
+	if err := validateMutationPluginRequest(request); err != nil {
+		return PluginResponse{
+			Status:          "failed",
+			RequestID:       strings.TrimSpace(request.RequestID),
+			RiskClass:       riskClass,
+			MutatingActions: mutatingActions(request.Actions),
+			ErrorCode:       "invalid_request",
+			ErrorMessage:    err.Error(),
+		}, err
+	}
+	blockedTask, approval, err := service.Store.BlockTaskAndRequestApproval(ctx, sqlite.BlockTaskAndRequestApprovalParams{
+		TaskID:      request.TaskID,
+		RequestedBy: defaultString(strings.TrimSpace(request.RequestedBy), defaultEvidenceCreatedBy),
+	})
+	if err != nil {
+		return PluginResponse{
+			Status:          "failed",
+			RequestID:       strings.TrimSpace(request.RequestID),
+			RiskClass:       riskClass,
+			MutatingActions: mutatingActions(request.Actions),
+			ErrorCode:       "approval_request_failed",
+			ErrorMessage:    err.Error(),
+		}, err
+	}
+	return PluginResponse{
+		Status:           "approval_required",
+		RequestID:        strings.TrimSpace(request.RequestID),
+		RiskClass:        riskClass,
+		ApprovalRequired: true,
+		ApprovalID:       approval.ID,
+		TaskID:           blockedTask.ID,
+		MutatingActions:  mutatingActions(request.Actions),
+		ErrorCode:        "approval_required",
+		ErrorMessage:     "external browser mutation requires Odin approval before execution",
+		Approval:         &approval,
+	}, nil
 }
 
 func (service Service) Run(ctx context.Context, task ReadOnlyTask) (Result, error) {
@@ -146,6 +264,33 @@ func (service Service) Run(ctx context.Context, task ReadOnlyTask) (Result, erro
 		ActionLog:            append([]string{}, adapterResponse.ActionLog...),
 		Evidence:             evidence,
 	}, nil
+}
+
+func (request PluginRequest) readOnlyTask() ReadOnlyTask {
+	return ReadOnlyTask{
+		GoalID:             request.GoalID,
+		WorkerMode:         request.WorkerMode,
+		Objective:          request.Objective,
+		AllowedDomains:     append([]string{}, request.AllowedDomains...),
+		StartURLs:          append([]string{}, request.StartURLs...),
+		MaxPages:           request.MaxPages,
+		MaxDurationSeconds: request.MaxDurationSeconds,
+		EvidenceRequired:   request.EvidenceRequired,
+		SiteProfiles:       append([]huginnbrowser.SiteProfile{}, request.SiteProfiles...),
+		BrowserSessionID:   request.BrowserSessionID,
+		BrowserSession:     cloneBrowserSessionReference(request.BrowserSession),
+		Actions:            append([]string{}, request.Actions...),
+	}
+}
+
+func validateMutationPluginRequest(request PluginRequest) error {
+	if request.TaskID <= 0 {
+		return fmt.Errorf("task_id is required for mutation-class browser requests")
+	}
+	task := request.readOnlyTask()
+	task.GoalID = 1
+	task.Actions = nil
+	return ValidateReadOnlyTask(task)
 }
 
 func (service Service) resolveBrowserSession(ctx context.Context, task ReadOnlyTask) (*BrowserSessionReference, error) {
@@ -347,4 +492,32 @@ func isReadOnlyAction(action string) bool {
 	default:
 		return false
 	}
+}
+
+func ClassifyRisk(actions []string) RiskClass {
+	for _, action := range actions {
+		if !isReadOnlyAction(action) {
+			return RiskClassExternalMutation
+		}
+	}
+	return RiskClassReadOnly
+}
+
+func mutatingActions(actions []string) []string {
+	mutating := make([]string, 0, len(actions))
+	for _, action := range actions {
+		normalized := strings.ToLower(strings.TrimSpace(action))
+		if normalized == "" || isReadOnlyAction(normalized) {
+			continue
+		}
+		mutating = append(mutating, normalized)
+	}
+	return mutating
+}
+
+func defaultString(value string, fallback string) string {
+	if strings.TrimSpace(value) != "" {
+		return strings.TrimSpace(value)
+	}
+	return fallback
 }
