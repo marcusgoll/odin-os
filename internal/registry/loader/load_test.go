@@ -99,9 +99,18 @@ func TestLoadDirLoadsRepositoryExamples(t *testing.T) {
 		}
 	}
 
-	deliveryProfile := byKey["managed-project-delivery-workflow"]
-	if !containsString(deliveryProfile.Tags, "delivery_profile") {
-		t.Fatalf("managed-project-delivery-workflow tags = %v, want delivery_profile", deliveryProfile.Tags)
+	for _, key := range []string{
+		"managed-project-delivery-workflow",
+		"local-deterministic-workflow",
+		"review-only-workflow",
+		"codex-code-workflow",
+		"scheduler-created-workflow",
+		"approval-required-external-mutation-workflow",
+	} {
+		deliveryProfile := byKey[key]
+		if !containsString(deliveryProfile.Tags, "delivery_profile") {
+			t.Fatalf("%s tags = %v, want delivery_profile", key, deliveryProfile.Tags)
+		}
 	}
 }
 

@@ -5828,6 +5828,30 @@ func (store *Store) ListEligibleQueuedTasks(ctx context.Context, now time.Time) 
 	return tasks, rows.Err()
 }
 
+func (store *Store) ListTasksMissingExecutionIntent(ctx context.Context) ([]Task, error) {
+	rows, err := store.db.QueryContext(ctx, `
+		SELECT id, project_id, key, title, acceptance_criteria_json, action_key, status, scope, requested_by, workspace_id, initiative_id, companion_id, follow_up_obligation_id, follow_up_occurrence_key, work_kind, execution_intent, execution_intent_source, summary, terminal_reason, artifacts_json, current_run_id, next_eligible_at, priority, last_error, retry_count, max_attempts, blocked_reason, created_at, updated_at
+		FROM tasks
+		WHERE COALESCE(NULLIF(TRIM(execution_intent), ''), '') = ''
+		ORDER BY id ASC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var tasks []Task
+	for rows.Next() {
+		task, err := scanTask(rows)
+		if err != nil {
+			return nil, err
+		}
+		tasks = append(tasks, task)
+	}
+
+	return tasks, rows.Err()
+}
+
 func (store *Store) GetWorkspaceByKey(ctx context.Context, key string) (Workspace, error) {
 	row := store.db.QueryRowContext(ctx, `
 		SELECT
