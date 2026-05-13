@@ -391,6 +391,7 @@ func NewOperationalHandler(deps Dependencies) http.Handler {
 		writeJSON(writer, http.StatusOK, view)
 	})
 	registerMobileRoutes(mux, deps, now)
+	registerPWAHandlers(mux)
 	return mux
 }
 
