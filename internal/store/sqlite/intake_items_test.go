@@ -103,3 +103,53 @@ func TestCreateIntakeItemPreservesDuplicateRawArrivalsBeforeWork(t *testing.T) {
 		t.Fatalf("intake created events = %d, want 2", intakeCreated)
 	}
 }
+
+func TestIntakeAttachmentsPersistMetadataAndBytes(t *testing.T) {
+	ctx := context.Background()
+	store := openMigratedTaskIntakeStore(t, "intake-attachments.db")
+	defer store.Close()
+
+	item, err := store.CreateIntakeItem(ctx, CreateIntakeItemParams{
+		WorkspaceID:         "default",
+		SourceFamily:        "mobile_api",
+		ExternalObjectID:    "mobile-photo-1",
+		EventKind:           "photo",
+		Subject:             "Panel photo",
+		DedupeKey:           "mobile:photo:1",
+		DedupeRecipeVersion: "mobile-api-v1",
+		SourceFactsJSON:     `{"source":"mobile_api","payload_policy":"stored_in_source_facts_json"}`,
+		Status:              "received",
+		Summary:             "Panel photo",
+	})
+	if err != nil {
+		t.Fatalf("CreateIntakeItem() error = %v", err)
+	}
+
+	attachment, err := store.CreateIntakeAttachment(ctx, CreateIntakeAttachmentParams{
+		IntakeItemID: item.ID,
+		Kind:         "photo",
+		Filename:     "panel.jpg",
+		ContentType:  "image/jpeg",
+		SizeBytes:    10,
+		SHA256:       "abc123",
+		Status:       "stored",
+		Bytes:        []byte("image-data"),
+	})
+	if err != nil {
+		t.Fatalf("CreateIntakeAttachment() error = %v", err)
+	}
+	if attachment.ID == 0 || attachment.IntakeItemID != item.ID || attachment.Status != "stored" {
+		t.Fatalf("attachment = %+v, want stored attachment linked to intake %d", attachment, item.ID)
+	}
+
+	attachments, err := store.ListIntakeAttachments(ctx, ListIntakeAttachmentsParams{IntakeItemID: item.ID})
+	if err != nil {
+		t.Fatalf("ListIntakeAttachments() error = %v", err)
+	}
+	if len(attachments) != 1 {
+		t.Fatalf("attachments len = %d, want 1", len(attachments))
+	}
+	if attachments[0].Filename != "panel.jpg" || string(attachments[0].Bytes) != "image-data" {
+		t.Fatalf("attachment = %+v, want metadata and bytes preserved", attachments[0])
+	}
+}
