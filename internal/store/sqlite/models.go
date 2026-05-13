@@ -990,6 +990,78 @@ type UpsertWorkspaceProfileParams struct {
 	BoundariesJSON      string
 	CadenceDefaultsJSON string
 }
+
+type NotificationDevice struct {
+	ID           int64      `json:"id"`
+	WorkspaceID  int64      `json:"workspace_id"`
+	DeviceKey    string     `json:"device_key"`
+	Label        string     `json:"label"`
+	EndpointHash string     `json:"endpoint_hash"`
+	UserAgent    string     `json:"user_agent,omitempty"`
+	Status       string     `json:"status"`
+	CreatedAt    time.Time  `json:"created_at"`
+	UpdatedAt    time.Time  `json:"updated_at"`
+	LastSeenAt   time.Time  `json:"last_seen_at"`
+	RevokedAt    *time.Time `json:"revoked_at,omitempty"`
+	RevokeReason string     `json:"revoke_reason,omitempty"`
+}
+
+type UpsertNotificationDeviceParams struct {
+	WorkspaceID int64
+	DeviceKey   string
+	Label       string
+	Endpoint    string
+	P256DH      string
+	Auth        string
+	UserAgent   string
+}
+
+type ListNotificationDevicesParams struct {
+	WorkspaceID    int64
+	IncludeRevoked bool
+}
+
+type RevokeNotificationDeviceParams struct {
+	WorkspaceID int64
+	DeviceID    int64
+	Reason      string
+}
+
+type Notification struct {
+	ID                int64      `json:"id"`
+	WorkspaceID       int64      `json:"workspace_id"`
+	SourceEventID     *int64     `json:"source_event_id,omitempty"`
+	NotificationType  string     `json:"notification_type"`
+	Priority          string     `json:"priority"`
+	Title             string     `json:"title"`
+	Body              string     `json:"body"`
+	Route             string     `json:"route"`
+	Status            string     `json:"status"`
+	PushPayloadJSON   string     `json:"push_payload_json,omitempty"`
+	SuppressionReason string     `json:"suppression_reason,omitempty"`
+	ReadAt            *time.Time `json:"read_at,omitempty"`
+	CreatedAt         time.Time  `json:"created_at"`
+	UpdatedAt         time.Time  `json:"updated_at"`
+}
+
+type CreateNotificationParams struct {
+	WorkspaceID       int64
+	SourceEventID     *int64
+	NotificationType  string
+	Priority          string
+	Title             string
+	Body              string
+	Route             string
+	Status            string
+	PushPayloadJSON   string
+	SuppressionReason string
+}
+
+type ListNotificationsParams struct {
+	WorkspaceID int64
+	Limit       int
+	UnreadOnly  bool
+}
 type RecordMemorySummaryParams struct {
 	ProjectID          *int64
 	SourceTranscriptID *int64

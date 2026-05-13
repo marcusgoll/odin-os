@@ -2,7 +2,7 @@ GO ?= go
 GOFMT ?= gofmt
 GOFILES := $(shell git ls-files '*.go')
 
-.PHONY: format fmt fmtcheck lint vet test test-alpha test-media test-skills ci build odin-e2e-local odin-e2e-contract run clean install-local uninstall-local
+.PHONY: format fmt fmtcheck lint vet test test-alpha test-media test-skills ci build odin-e2e-local odin-e2e-contract odin-pwa-e2e run clean install-local uninstall-local
 
 format:
 	$(GOFMT) -w $(GOFILES)
@@ -49,6 +49,9 @@ odin-e2e-local:
 
 odin-e2e-contract:
 	./scripts/assert-odin-e2e-contract.sh
+
+odin-pwa-e2e:
+	$(GO) test ./internal/api/http -run 'TestPWA|TestNotification' -count=1 -v
 
 run:
 	$(GO) run ./cmd/odin-os

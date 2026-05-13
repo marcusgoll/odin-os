@@ -10,6 +10,7 @@ import (
 
 	"odin-os/internal/cli/scope"
 	"odin-os/internal/core/initiatives"
+	coreprofile "odin-os/internal/core/profile"
 	coreprojects "odin-os/internal/core/projects"
 	knowledgememory "odin-os/internal/memory/knowledge"
 	"odin-os/internal/registry"
@@ -43,6 +44,27 @@ func TestBuildReturnsCanonicalOverviewFromCurrentAuthority(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("CreateTaskIntake() error = %v", err)
 	}
+	notificationsEnabled := true
+	batching := "quiet_hours"
+	quietHours := "22:00-07:00"
+	if _, err := (coreprofile.Service{Store: env.store, WorkspaceKey: coreprofile.DefaultWorkspaceKey}).Update(ctx, coreprofile.UpdateParams{
+		QuietHours:           &quietHours,
+		NotificationsEnabled: &notificationsEnabled,
+		NotificationBatching: &batching,
+	}); err != nil {
+		t.Fatalf("profile.Update(notifications) error = %v", err)
+	}
+	if _, err := env.store.UpsertNotificationDevice(ctx, sqlite.UpsertNotificationDeviceParams{
+		WorkspaceID: env.workspaceID,
+		DeviceKey:   "iphone-home-screen",
+		Label:       "iPhone Home Screen",
+		Endpoint:    "https://push.example.test/overview",
+		P256DH:      "public",
+		Auth:        "auth",
+		UserAgent:   "test",
+	}); err != nil {
+		t.Fatalf("UpsertNotificationDevice() error = %v", err)
+	}
 
 	view, err := Service{
 		Store:            env.store,
@@ -60,6 +82,9 @@ func TestBuildReturnsCanonicalOverviewFromCurrentAuthority(t *testing.T) {
 	}
 	if view.Workspace.WorkspaceKey != "default" {
 		t.Fatalf("Workspace key = %q, want default", view.Workspace.WorkspaceKey)
+	}
+	if view.Notifications.Wiring != WiringLive || !view.Notifications.NotificationsEnabled || view.Notifications.ActiveDeviceCount != 1 || view.Notifications.QuietHours != quietHours || view.Notifications.Batching != batching {
+		t.Fatalf("Notifications lane = %+v, want enabled quiet-hours projection with one active device", view.Notifications)
 	}
 	if len(view.Initiatives) != 1 {
 		t.Fatalf("Initiatives len = %d, want 1", len(view.Initiatives))

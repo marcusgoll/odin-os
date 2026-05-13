@@ -19,7 +19,9 @@ type OperatingProfile struct {
 }
 
 type Preferences struct {
-	QuietHours string `json:"quiet_hours,omitempty"`
+	QuietHours           string `json:"quiet_hours,omitempty"`
+	NotificationsEnabled bool   `json:"notifications_enabled,omitempty"`
+	NotificationBatching string `json:"notification_batching,omitempty"`
 }
 
 type Boundaries struct {
@@ -36,6 +38,8 @@ type CadenceDefaults struct {
 
 type UpdateParams struct {
 	QuietHours                             *string
+	NotificationsEnabled                   *bool
+	NotificationBatching                   *string
 	RequireHumanApprovalForExternalEffects *bool
 	ReviewCadence                          *string
 }

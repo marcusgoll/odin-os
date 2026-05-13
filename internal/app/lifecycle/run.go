@@ -52,6 +52,7 @@ import (
 	healthsvc "odin-os/internal/runtime/health"
 	"odin-os/internal/runtime/jobs"
 	mediasvc "odin-os/internal/runtime/media"
+	runtimenotifications "odin-os/internal/runtime/notifications"
 	"odin-os/internal/runtime/projections"
 	"odin-os/internal/runtime/recovery"
 	"odin-os/internal/runtime/runs"
@@ -146,6 +147,7 @@ type healthLoopDeps struct {
 	ShutdownRequested  *atomic.Bool
 	BootID             string
 	RuntimeRoot        string
+	Notifications      runtimenotifications.Service
 }
 
 type serveDashboardAdmin struct {
@@ -4351,6 +4353,7 @@ func runServe(ctx context.Context, app bootstrap.App, cfg appconfig.Config, stdo
 		ShutdownRequested:  &shutdownRequested,
 		BootID:             bootID,
 		RuntimeRoot:        cfg.RuntimeRoot,
+		Notifications:      runtimenotifications.Service{Store: app.Store},
 	}
 	if cfg.Service.SocialCopilot.Enabled {
 		socialCtx, cancel := serveOperationContext(operationCtx)
@@ -4714,6 +4717,9 @@ func runHealthCycle(ctx context.Context, deps healthLoopDeps, logger *logs.Logge
 		logBackgroundError(logger, "runtime_state", err)
 		markRuntimeDegraded(ctx, deps, logger, "runtime heartbeat failed", err)
 		return
+	}
+	if _, err := deps.Notifications.RoutePendingEvents(ctx); err != nil {
+		logBackgroundError(logger, "notifications", err)
 	}
 
 	report, safeToDispatch, err := deps.Health.DispatchReport(ctx, deps.RegistryHealthy)

@@ -32,6 +32,7 @@ const (
 	StreamFollowUp           StreamType = "follow_up"
 	StreamGoal               StreamType = "goal"
 	StreamBrowserSession     StreamType = "browser_session"
+	StreamNotification       StreamType = "notification"
 )
 
 type Type string
@@ -146,6 +147,9 @@ const (
 	EventBrowserSessionLoginRequested         Type = "browser.session_login_requested"
 	EventBrowserSessionLoginCompleted         Type = "browser.session_login_completed"
 	EventBrowserSessionLoginExpired           Type = "browser.session_login_expired"
+	EventNotificationDeviceSubscribed         Type = "notification.device_subscribed"
+	EventNotificationDeviceRevoked            Type = "notification.device_revoked"
+	EventNotificationCreated                  Type = "notification.created"
 )
 
 const (
@@ -180,6 +184,33 @@ type ServiceHeartbeatPayload struct {
 	BootID string `json:"boot_id"`
 	Status string `json:"status"`
 	PID    int    `json:"pid"`
+}
+
+type NotificationDeviceSubscribedPayload struct {
+	WorkspaceID  int64  `json:"workspace_id"`
+	DeviceID     int64  `json:"device_id"`
+	DeviceKey    string `json:"device_key"`
+	Label        string `json:"label"`
+	EndpointHash string `json:"endpoint_hash"`
+	Status       string `json:"status"`
+}
+
+type NotificationDeviceRevokedPayload struct {
+	WorkspaceID int64  `json:"workspace_id"`
+	DeviceID    int64  `json:"device_id"`
+	DeviceKey   string `json:"device_key"`
+	Reason      string `json:"reason,omitempty"`
+}
+
+type NotificationCreatedPayload struct {
+	WorkspaceID       int64  `json:"workspace_id"`
+	NotificationID    int64  `json:"notification_id"`
+	SourceEventID     *int64 `json:"source_event_id,omitempty"`
+	NotificationType  string `json:"notification_type"`
+	Priority          string `json:"priority"`
+	Route             string `json:"route"`
+	Status            string `json:"status"`
+	SuppressionReason string `json:"suppression_reason,omitempty"`
 }
 
 type ProjectCreatedPayload struct {
