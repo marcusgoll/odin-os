@@ -20,6 +20,10 @@ func registerPWAHandlers(mux *http.ServeMux) {
 	mux.HandleFunc("GET /app", func(writer http.ResponseWriter, request *http.Request) {
 		http.Redirect(writer, request, "/app/", http.StatusMovedPermanently)
 	})
+	mux.HandleFunc("GET /app/share", func(writer http.ResponseWriter, request *http.Request) {
+		writePWASharePage(writer, nil)
+	})
+	mux.HandleFunc("POST /app/share", handlePWASharePost)
 	mux.HandleFunc("GET /app/", func(writer http.ResponseWriter, request *http.Request) {
 		assetPath := strings.TrimPrefix(request.URL.Path, "/app/")
 		if assetPath == "" {

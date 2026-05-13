@@ -14,70 +14,9 @@ import (
 )
 
 const (
-	pwaSharePath = "/app/share"
-
 	mobileShareMaxBodyBytes = 8 << 20
 	mobileShareMaxFileBytes = 5 << 20
 )
-
-func registerPWARoutes(mux *http.ServeMux) {
-	mux.HandleFunc("GET /app", handlePWAHome)
-	mux.HandleFunc("GET /app/icon.svg", handlePWAIcon)
-	mux.HandleFunc("GET /app/manifest.webmanifest", handlePWAManifest)
-	mux.HandleFunc("GET /app/service-worker.js", handlePWAServiceWorker)
-	mux.HandleFunc("GET /app/share", func(writer http.ResponseWriter, request *http.Request) {
-		writePWASharePage(writer, nil)
-	})
-	mux.HandleFunc("POST /app/share", handlePWASharePost)
-}
-
-func handlePWAHome(writer http.ResponseWriter, request *http.Request) {
-	writer.Header().Set("Content-Type", "text/html; charset=utf-8")
-	_, _ = io.WriteString(writer, pwaHomeHTML)
-}
-
-func handlePWAManifest(writer http.ResponseWriter, request *http.Request) {
-	writer.Header().Set("Content-Type", "application/manifest+json; charset=utf-8")
-	_ = json.NewEncoder(writer).Encode(map[string]any{
-		"name":             "Odin Inbox",
-		"short_name":       "Odin",
-		"description":      "Capture raw inbox items for Odin review.",
-		"start_url":        "/app",
-		"scope":            "/app/",
-		"display":          "standalone",
-		"background_color": "#f4efe6",
-		"theme_color":      "#1f3d36",
-		"share_target": map[string]any{
-			"action":  pwaSharePath,
-			"method":  http.MethodPost,
-			"enctype": "multipart/form-data",
-			"params": map[string]any{
-				"title": "title",
-				"text":  "text",
-				"url":   "url",
-				"files": []map[string]any{
-					{
-						"name":   "files",
-						"accept": []string{"image/*", "application/pdf", "text/plain"},
-					},
-				},
-			},
-		},
-		"icons": []map[string]any{
-			{"src": "/app/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable"},
-		},
-	})
-}
-
-func handlePWAIcon(writer http.ResponseWriter, request *http.Request) {
-	writer.Header().Set("Content-Type", "image/svg+xml; charset=utf-8")
-	_, _ = io.WriteString(writer, pwaIconSVG)
-}
-
-func handlePWAServiceWorker(writer http.ResponseWriter, request *http.Request) {
-	writer.Header().Set("Content-Type", "text/javascript; charset=utf-8")
-	_, _ = io.WriteString(writer, pwaServiceWorkerJS)
-}
 
 func handlePWASharePost(writer http.ResponseWriter, request *http.Request) {
 	payload, _, _, err := decodePWAShareRequest(writer, request)
@@ -343,26 +282,6 @@ func writePWASharePage(writer http.ResponseWriter, preloaded map[string]any) {
 	_, _ = io.WriteString(writer, page)
 }
 
-const pwaHomeHTML = `<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <link rel="manifest" href="/app/manifest.webmanifest">
-  <title>Odin Inbox</title>
-</head>
-<body>
-  <h1>Odin Inbox</h1>
-  <p>Install this app to share links, text, and supported files into raw intake.</p>
-  <p><a href="/app/share">Open capture fallback</a></p>
-  <script>
-    if ('serviceWorker' in navigator) {
-      navigator.serviceWorker.register('/app/service-worker.js');
-    }
-  </script>
-</body>
-</html>`
-
 const pwaShareHTML = `<!doctype html>
 <html lang="en">
 <head>
@@ -468,55 +387,3 @@ const shareId = new URL(location.href).searchParams.get('share_id');
 </script>
 </body>
 </html>`
-
-const pwaIconSVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
-  <rect width="128" height="128" rx="28" fill="#1f3d36"/>
-  <path d="M31 84V44l33-19 33 19v40L64 103 31 84Z" fill="#f4efe6"/>
-  <path d="M45 54h38v10H45zm0 18h26v10H45z" fill="#1f3d36"/>
-</svg>`
-
-const pwaServiceWorkerJS = `const DB_NAME = 'odin-share-target';
-const STORE = 'pending-shares';
-self.addEventListener('install', event => self.skipWaiting());
-self.addEventListener('activate', event => event.waitUntil(self.clients.claim()));
-self.addEventListener('fetch', event => {
-  const url = new URL(event.request.url);
-  if (event.request.method === 'POST' && url.pathname === '/app/share') {
-    event.respondWith(captureShare(event.request));
-  }
-});
-async function captureShare(request) {
-  const form = await request.formData();
-  const id = crypto.randomUUID ? crypto.randomUUID() : String(Date.now());
-  await putPendingShare(id, form);
-  return Response.redirect('/app/share?share_id=' + encodeURIComponent(id), 303);
-}
-function openDB() {
-  return new Promise((resolve, reject) => {
-    const request = indexedDB.open(DB_NAME, 1);
-    request.onupgradeneeded = () => request.result.createObjectStore(STORE);
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error);
-  });
-}
-async function putPendingShare(id, form) {
-  const files = form.getAll('files');
-  const payload = {
-    status: 'pending_upload',
-    created_at: new Date().toISOString(),
-    payload: {
-      title: form.get('title') || '',
-      text: form.get('text') || '',
-      url: form.get('url') || '',
-      source: 'web-share-target',
-      files
-    }
-  };
-  const db = await openDB();
-  await new Promise((resolve, reject) => {
-    const tx = db.transaction(STORE, 'readwrite');
-    tx.objectStore(STORE).put(payload, id);
-    tx.oncomplete = resolve;
-    tx.onerror = () => reject(tx.error);
-  });
-}`
