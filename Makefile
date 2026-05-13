@@ -2,7 +2,7 @@ GO ?= go
 GOFMT ?= gofmt
 GOFILES := $(shell git ls-files '*.go')
 
-.PHONY: format fmt fmtcheck lint vet test test-alpha test-media test-skills ci build docker-smoke odin-e2e-local odin-e2e-contract odin-pwa-e2e odin-actual-use-e2e actual-use-phase0-proof homelab-release-dry-run run clean install-local uninstall-local
+.PHONY: format fmt fmtcheck lint vet test test-alpha test-media test-skills ci build docker-smoke odin-pwa-build odin-pwa-e2e odin-e2e-local odin-e2e-contract odin-actual-use-e2e actual-use-phase0-proof homelab-release-dry-run run clean install-local uninstall-local
 
 format:
 	$(GOFMT) -w $(GOFILES)
@@ -54,14 +54,17 @@ build:
 docker-smoke:
 	bash scripts/tests/docker-compose-smoke.sh
 
+odin-pwa-build:
+	$(GO) test ./internal/api/http -run TestPWA -count=1
+
+odin-pwa-e2e:
+	$(GO) test ./internal/api/http -run 'TestMobileShare|TestPWA|TestNotification' -count=1 -v
+
 odin-e2e-local:
 	./scripts/odin-e2e-local.sh
 
 odin-e2e-contract:
 	./scripts/assert-odin-e2e-contract.sh
-
-odin-pwa-e2e:
-	$(GO) test ./internal/api/http -run 'TestPWA|TestNotification' -count=1 -v
 
 actual-use-phase0-proof:
 	ODIN_ACTUAL_USE_PHASE0_PROOF=1 ./scripts/ops/actual-use-phase0-proof.sh
