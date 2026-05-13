@@ -380,6 +380,70 @@ type IntakeAttachment struct {
 	UpdatedAt    time.Time
 }
 
+type MobileDeviceStatus string
+
+const (
+	MobileDeviceStatusActive  MobileDeviceStatus = "active"
+	MobileDeviceStatusRevoked MobileDeviceStatus = "revoked"
+)
+
+type MobileSessionStatus string
+
+const (
+	MobileSessionStatusActive  MobileSessionStatus = "active"
+	MobileSessionStatusRevoked MobileSessionStatus = "revoked"
+	MobileSessionStatusExpired MobileSessionStatus = "expired"
+)
+
+type MobilePushSubscriptionStatus string
+
+const (
+	MobilePushSubscriptionStatusActive  MobilePushSubscriptionStatus = "active"
+	MobilePushSubscriptionStatusRevoked MobilePushSubscriptionStatus = "revoked"
+)
+
+type MobileDevice struct {
+	ID           int64
+	DeviceID     string
+	DeviceName   string
+	Status       MobileDeviceStatus
+	RegisteredAt time.Time
+	LastSeenAt   *time.Time
+	RevokedAt    *time.Time
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
+}
+
+type MobileSession struct {
+	ID          int64
+	DeviceRowID int64
+	TokenSHA256 string
+	CSRFSHA256  string
+	Status      MobileSessionStatus
+	ExpiresAt   time.Time
+	RevokedAt   *time.Time
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
+}
+
+type MobileAuthenticatedSession struct {
+	Device  MobileDevice
+	Session MobileSession
+}
+
+type MobilePushSubscription struct {
+	ID             int64
+	DeviceRowID    int64
+	EndpointSHA256 string
+	EndpointHost   string
+	UserAgent      string
+	Platform       string
+	Status         MobilePushSubscriptionStatus
+	RevokedAt      *time.Time
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
+}
+
 type AutomationTrigger struct {
 	ID                     int64
 	WorkspaceID            string
@@ -548,6 +612,54 @@ type ListIntakeItemsParams struct {
 	Status      string
 	Scope       string
 	ScopeKey    string
+}
+
+type CreateMobileDeviceSessionParams struct {
+	DeviceID    string
+	DeviceName  string
+	TokenSHA256 string
+	CSRFSHA256  string
+	ExpiresAt   time.Time
+	Actor       string
+}
+
+type GetMobileSessionByTokenHashParams struct {
+	TokenSHA256 string
+}
+
+type RevokeMobileDeviceParams struct {
+	DeviceID string
+	Actor    string
+	Reason   string
+}
+
+type RecordMobileIntakeEventParams struct {
+	DeviceID     string
+	SessionID    int64
+	IntakeItemID int64
+	IntakeType   string
+}
+
+type RecordMobileApprovalEventParams struct {
+	DeviceID   string
+	SessionID  int64
+	ApprovalID int64
+	Action     string
+}
+
+type CreateMobilePushSubscriptionParams struct {
+	DeviceID       string
+	EndpointSHA256 string
+	EndpointHost   string
+	UserAgent      string
+	Platform       string
+}
+
+type RevokeMobilePushSubscriptionParams struct {
+	DeviceID       string
+	SubscriptionID int64
+	Actor          string
+	Reason         string
 }
 
 type ProcessIntakeItemParams struct {

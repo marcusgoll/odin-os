@@ -16,7 +16,7 @@
             <h1>Odin Inbox</h1>
             <p id="capture-status">Raw capture stores evidence first.</p>
           </div>
-          <button id="save-token" type="button">Token</button>
+          <button id="register-device" type="button">Register</button>
         </div>
 
         <form id="capture-form" data-api-endpoint="/mobile/intake/raw">
@@ -71,10 +71,5 @@
       </section>
     </main>
     <script src="/app/app.js"></script>
-    <script>
-      if ('serviceWorker' in navigator) {
-        navigator.serviceWorker.register('/app/service-worker.js');
-      }
-    </script>
   </body>
 </html>

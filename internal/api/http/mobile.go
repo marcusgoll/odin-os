@@ -2,7 +2,10 @@ package httpapi
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -12,6 +15,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"odin-os/internal/cli/overview"
@@ -25,8 +29,22 @@ import (
 const mobileMaxBodyBytes = 1 << 20
 const mobileMaxImageBytes = 10 << 20
 const mobileMaxAudioBytes = 25 << 20
+const mobileSessionCookieName = "odin_mobile_session"
+const mobileIntakeRateLimit = 30
 
 func registerMobileRoutes(mux *http.ServeMux, deps Dependencies, now func() time.Time) {
+	intakeLimiter := newMobileRateLimiter(mobileIntakeRateLimit, time.Minute, now)
+	mux.HandleFunc("POST /mobile/devices/register", func(writer http.ResponseWriter, request *http.Request) {
+		if statusCode, ok := authorizeAdmin(request, deps.AdminToken); !ok {
+			writeAdminAuthorizationError(writer, statusCode)
+			return
+		}
+		handleMobileDeviceRegister(writer, request, deps, now)
+	})
+	mux.HandleFunc("POST /mobile/devices/{device_id}/revoke", mobileAuthorized(deps, func(writer http.ResponseWriter, request *http.Request) {
+		handleMobileDeviceRevoke(writer, request, deps)
+	}))
+
 	mux.HandleFunc("GET /mobile/status", mobileAuthorized(deps, func(writer http.ResponseWriter, request *http.Request) {
 		payload, err := buildStatusPayload(request.Context(), deps, now)
 		if err != nil {
@@ -114,6 +132,10 @@ func registerMobileRoutes(mux *http.ServeMux, deps Dependencies, now func() time
 	}))
 
 	mux.HandleFunc("POST /mobile/intake/raw", mobileAuthorized(deps, func(writer http.ResponseWriter, request *http.Request) {
+		if !intakeLimiter.allow(mobileRateLimitKey(request)) {
+			writeAPIError(writer, http.StatusTooManyRequests, "mobile_intake_rate_limited", "mobile intake rate limit exceeded")
+			return
+		}
 		handleMobileRawIntake(writer, request, deps, now)
 	}))
 
@@ -122,6 +144,10 @@ func registerMobileRoutes(mux *http.ServeMux, deps Dependencies, now func() time
 	}))
 
 	mux.HandleFunc("POST /mobile/intake/attachments", mobileAuthorized(deps, func(writer http.ResponseWriter, request *http.Request) {
+		if !intakeLimiter.allow(mobileRateLimitKey(request)) {
+			writeAPIError(writer, http.StatusTooManyRequests, "mobile_intake_rate_limited", "mobile intake rate limit exceeded")
+			return
+		}
 		handleMobileAttachmentIntake(writer, request, deps, now)
 	}))
 
@@ -137,6 +163,9 @@ func registerMobileRoutes(mux *http.ServeMux, deps Dependencies, now func() time
 	mux.HandleFunc("POST /mobile/notifications/subscriptions", mobileAuthorized(deps, func(writer http.ResponseWriter, request *http.Request) {
 		handleMobileNotificationSubscription(writer, request, deps, now)
 	}))
+	mux.HandleFunc("POST /mobile/notifications/subscriptions/{subscription_id}/revoke", mobileAuthorized(deps, func(writer http.ResponseWriter, request *http.Request) {
+		handleMobileNotificationSubscriptionRevoke(writer, request, deps)
+	}))
 
 	mux.HandleFunc("GET /mobile/browser/status", mobileAuthorized(deps, func(writer http.ResponseWriter, request *http.Request) {
 		status, err := mobileBrowserStatus(request.Context(), deps)
@@ -150,12 +179,61 @@ func registerMobileRoutes(mux *http.ServeMux, deps Dependencies, now func() time
 
 func mobileAuthorized(deps Dependencies, next func(http.ResponseWriter, *http.Request)) http.HandlerFunc {
 	return func(writer http.ResponseWriter, request *http.Request) {
-		if statusCode, ok := authorizeAdmin(request, deps.AdminToken); !ok {
-			writeAdminAuthorizationError(writer, statusCode)
+		auth, statusCode, code, message, ok := authorizeMobileRequest(request, deps)
+		if !ok {
+			if code == "" {
+				writeAdminAuthorizationError(writer, statusCode)
+				return
+			}
+			writeAPIError(writer, statusCode, code, message)
 			return
 		}
-		next(writer, request)
+		next(writer, request.WithContext(context.WithValue(request.Context(), mobileAuthContextKey{}, auth)))
 	}
+}
+
+type mobileAuthContextKey struct{}
+
+type mobileAuth struct {
+	Admin      bool
+	DeviceID   string
+	SessionID  int64
+	CSRFSHA256 string
+}
+
+func authorizeMobileRequest(request *http.Request, deps Dependencies) (mobileAuth, int, string, string, bool) {
+	if statusCode, ok := authorizeAdmin(request, deps.AdminToken); ok {
+		return mobileAuth{Admin: true}, http.StatusOK, "", "", true
+	} else if statusCode == http.StatusForbidden {
+		return mobileAuth{}, statusCode, "", "", false
+	}
+	if deps.Store == nil {
+		return mobileAuth{}, http.StatusServiceUnavailable, "mobile_session_store_unavailable", "mobile session store unavailable", false
+	}
+	cookie, err := request.Cookie(mobileSessionCookieName)
+	if err != nil || strings.TrimSpace(cookie.Value) == "" {
+		return mobileAuth{}, http.StatusUnauthorized, "admin_auth_required", "admin authentication is required", false
+	}
+	session, err := deps.Store.GetMobileSessionByTokenHash(request.Context(), sqlite.GetMobileSessionByTokenHashParams{TokenSHA256: mobileHash(cookie.Value)})
+	if err != nil {
+		return mobileAuth{}, http.StatusForbidden, "mobile_session_invalid", "mobile session is invalid or revoked", false
+	}
+	if request.Method != http.MethodGet && request.Method != http.MethodHead && request.Method != http.MethodOptions {
+		csrf := strings.TrimSpace(request.Header.Get("X-Odin-CSRF"))
+		if csrf == "" || subtle.ConstantTimeCompare([]byte(mobileHash(csrf)), []byte(session.Session.CSRFSHA256)) != 1 {
+			return mobileAuth{}, http.StatusForbidden, "mobile_csrf_required", "mobile browser session csrf token is required", false
+		}
+	}
+	return mobileAuth{
+		DeviceID:   session.Device.DeviceID,
+		SessionID:  session.Session.ID,
+		CSRFSHA256: session.Session.CSRFSHA256,
+	}, http.StatusOK, "", "", true
+}
+
+func currentMobileAuth(request *http.Request) mobileAuth {
+	auth, _ := request.Context().Value(mobileAuthContextKey{}).(mobileAuth)
+	return auth
 }
 
 func writeMobileJSON(writer http.ResponseWriter, statusCode int, payload any) {
@@ -260,8 +338,39 @@ type mobileNotificationSubscriptionRequest struct {
 }
 
 type mobileNotificationSubscriptionResponse struct {
-	Status     string               `json:"status"`
-	IntakeItem mobileIntakeItemView `json:"intake_item"`
+	Status         string               `json:"status"`
+	SubscriptionID int64                `json:"subscription_id,omitempty"`
+	IntakeItem     mobileIntakeItemView `json:"intake_item"`
+}
+
+type mobileDeviceRegisterRequest struct {
+	DeviceName string `json:"device_name"`
+}
+
+type mobileDeviceRegisterResponse struct {
+	DeviceID  string `json:"device_id"`
+	SessionID int64  `json:"session_id"`
+	CSRFToken string `json:"csrf_token"`
+	ExpiresAt string `json:"expires_at"`
+}
+
+type mobileDeviceRevokeRequest struct {
+	Reason string `json:"reason"`
+}
+
+type mobileDeviceRevokeResponse struct {
+	DeviceID  string `json:"device_id"`
+	Status    string `json:"status"`
+	RevokedAt string `json:"revoked_at,omitempty"`
+}
+
+type mobileNotificationSubscriptionRevokeRequest struct {
+	Reason string `json:"reason"`
+}
+
+type mobileNotificationSubscriptionRevokeResponse struct {
+	SubscriptionID int64  `json:"subscription_id"`
+	Status         string `json:"status"`
 }
 
 type mobileBrowserStatusResponse struct {
@@ -309,6 +418,107 @@ type mobileBrowserRunnerView struct {
 	UpdatedAt      string `json:"updated_at"`
 	ErrorCode      string `json:"error_code,omitempty"`
 	ErrorMessage   string `json:"error_message,omitempty"`
+}
+
+func handleMobileDeviceRegister(writer http.ResponseWriter, request *http.Request, deps Dependencies, now func() time.Time) {
+	if deps.Store == nil {
+		writeAPIError(writer, http.StatusServiceUnavailable, "mobile_session_store_unavailable", "mobile session store unavailable")
+		return
+	}
+	var body mobileDeviceRegisterRequest
+	if err := decodeMobileJSON(writer, request, &body); err != nil {
+		writeAPIError(writer, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	deviceID, err := randomMobileToken(18)
+	if err != nil {
+		writeAPIError(writer, http.StatusInternalServerError, "mobile_session_token_failed", err.Error())
+		return
+	}
+	sessionToken, err := randomMobileToken(32)
+	if err != nil {
+		writeAPIError(writer, http.StatusInternalServerError, "mobile_session_token_failed", err.Error())
+		return
+	}
+	csrfToken, err := randomMobileToken(32)
+	if err != nil {
+		writeAPIError(writer, http.StatusInternalServerError, "mobile_session_token_failed", err.Error())
+		return
+	}
+	expiresAt := now().UTC().Add(30 * 24 * time.Hour)
+	session, err := deps.Store.CreateMobileDeviceSession(request.Context(), sqlite.CreateMobileDeviceSessionParams{
+		DeviceID:    deviceID,
+		DeviceName:  strings.TrimSpace(body.DeviceName),
+		TokenSHA256: mobileHash(sessionToken),
+		CSRFSHA256:  mobileHash(csrfToken),
+		ExpiresAt:   expiresAt,
+		Actor:       "mobile-api",
+	})
+	if err != nil {
+		writeAPIError(writer, http.StatusBadRequest, "mobile_device_register_failed", err.Error())
+		return
+	}
+	http.SetCookie(writer, &http.Cookie{
+		Name:     mobileSessionCookieName,
+		Value:    sessionToken,
+		Path:     "/",
+		Expires:  expiresAt,
+		MaxAge:   int((30 * 24 * time.Hour).Seconds()),
+		HttpOnly: true,
+		Secure:   true,
+		SameSite: http.SameSiteStrictMode,
+	})
+	writeMobileJSON(writer, http.StatusCreated, mobileDeviceRegisterResponse{
+		DeviceID:  session.Device.DeviceID,
+		SessionID: session.Session.ID,
+		CSRFToken: csrfToken,
+		ExpiresAt: expiresAt.Format(time.RFC3339),
+	})
+}
+
+func handleMobileDeviceRevoke(writer http.ResponseWriter, request *http.Request, deps Dependencies) {
+	if deps.Store == nil {
+		writeAPIError(writer, http.StatusServiceUnavailable, "mobile_session_store_unavailable", "mobile session store unavailable")
+		return
+	}
+	deviceID := strings.TrimSpace(request.PathValue("device_id"))
+	auth := currentMobileAuth(request)
+	if deviceID == "" {
+		writeAPIError(writer, http.StatusBadRequest, "mobile_device_id_required", "device id is required")
+		return
+	}
+	if !auth.Admin && auth.DeviceID != deviceID {
+		writeAPIError(writer, http.StatusForbidden, "mobile_device_revoke_forbidden", "mobile session may only revoke its own device")
+		return
+	}
+	var body mobileDeviceRevokeRequest
+	if err := decodeMobileJSON(writer, request, &body); err != nil {
+		writeAPIError(writer, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	device, err := deps.Store.RevokeMobileDevice(request.Context(), sqlite.RevokeMobileDeviceParams{
+		DeviceID: deviceID,
+		Actor:    "mobile-api",
+		Reason:   strings.TrimSpace(body.Reason),
+	})
+	if err != nil {
+		writeAPIError(writer, http.StatusBadRequest, "mobile_device_revoke_failed", err.Error())
+		return
+	}
+	http.SetCookie(writer, &http.Cookie{
+		Name:     mobileSessionCookieName,
+		Value:    "",
+		Path:     "/",
+		MaxAge:   -1,
+		HttpOnly: true,
+		Secure:   true,
+		SameSite: http.SameSiteStrictMode,
+	})
+	writeMobileJSON(writer, http.StatusOK, mobileDeviceRevokeResponse{
+		DeviceID:  device.DeviceID,
+		Status:    string(device.Status),
+		RevokedAt: formatMobileOptionalTime(device.RevokedAt),
+	})
 }
 
 func mobileReviewQueue(ctx context.Context, deps Dependencies) ([]mobileReviewItem, error) {
@@ -448,6 +658,15 @@ func handleMobileApprovalDecision(writer http.ResponseWriter, request *http.Requ
 		writeAPIError(writer, http.StatusConflict, "approval_decision_failed", err.Error())
 		return
 	}
+	auth := currentMobileAuth(request)
+	if !auth.Admin && auth.DeviceID != "" {
+		_ = deps.Store.RecordMobileApprovalEvent(request.Context(), sqlite.RecordMobileApprovalEventParams{
+			DeviceID:   auth.DeviceID,
+			SessionID:  auth.SessionID,
+			ApprovalID: result.Approval.ID,
+			Action:     body.Action,
+		})
+	}
 	writeMobileJSON(writer, http.StatusOK, mobileApprovalDecisionResponse{
 		ApprovalID:      result.Approval.ID,
 		TaskID:          result.Approval.TaskID,
@@ -513,6 +732,7 @@ func handleMobileRawIntake(writer http.ResponseWriter, request *http.Request, de
 		writeAPIError(writer, http.StatusBadRequest, "mobile_intake_create_failed", err.Error())
 		return
 	}
+	recordMobileIntakeAudit(request.Context(), deps, request, item)
 	writeMobileJSON(writer, http.StatusAccepted, mobileIntakeResponse{IntakeItem: mobileIntakeView(item)})
 }
 
@@ -611,6 +831,7 @@ func handleMobileMultipartRawIntake(writer http.ResponseWriter, request *http.Re
 		writeAPIError(writer, http.StatusBadRequest, "mobile_attachment_store_failed", err.Error())
 		return
 	}
+	recordMobileIntakeAudit(request.Context(), deps, request, item)
 	writeMobileJSON(writer, http.StatusAccepted, mobileIntakeResponse{IntakeItem: mobileIntakeView(item)})
 }
 
@@ -646,6 +867,7 @@ func handleMobileAttachmentIntake(writer http.ResponseWriter, request *http.Requ
 		writeAPIError(writer, http.StatusBadRequest, "mobile_attachment_create_failed", err.Error())
 		return
 	}
+	recordMobileIntakeAudit(request.Context(), deps, request, item)
 	writeMobileJSON(writer, http.StatusAccepted, mobileIntakeResponse{IntakeItem: mobileIntakeView(item)})
 }
 
@@ -664,6 +886,7 @@ func handleMobileNotificationSubscription(writer http.ResponseWriter, request *h
 	if parsed, err := url.Parse(endpoint); err == nil {
 		endpointHost = parsed.Host
 	}
+	auth := currentMobileAuth(request)
 	facts := map[string]any{
 		"source":          "mobile_api",
 		"kind":            "notification_subscription",
@@ -683,9 +906,74 @@ func handleMobileNotificationSubscription(writer http.ResponseWriter, request *h
 		writeAPIError(writer, http.StatusBadRequest, "mobile_notification_subscription_failed", err.Error())
 		return
 	}
+	subscriptionID := int64(0)
+	if !auth.Admin && auth.DeviceID != "" {
+		subscription, err := deps.Store.CreateMobilePushSubscription(request.Context(), sqlite.CreateMobilePushSubscriptionParams{
+			DeviceID:       auth.DeviceID,
+			EndpointSHA256: mobileHash(endpoint),
+			EndpointHost:   endpointHost,
+			UserAgent:      strings.TrimSpace(body.UserAgent),
+			Platform:       strings.TrimSpace(body.Platform),
+		})
+		if err != nil {
+			writeAPIError(writer, http.StatusBadRequest, "mobile_notification_subscription_failed", err.Error())
+			return
+		}
+		subscriptionID = subscription.ID
+	}
 	writeMobileJSON(writer, http.StatusAccepted, mobileNotificationSubscriptionResponse{
-		Status:     "accepted_as_intake_metadata",
-		IntakeItem: mobileIntakeView(item),
+		Status:         "accepted_as_intake_metadata",
+		SubscriptionID: subscriptionID,
+		IntakeItem:     mobileIntakeView(item),
+	})
+}
+
+func handleMobileNotificationSubscriptionRevoke(writer http.ResponseWriter, request *http.Request, deps Dependencies) {
+	if deps.Store == nil {
+		writeAPIError(writer, http.StatusServiceUnavailable, "mobile_session_store_unavailable", "mobile session store unavailable")
+		return
+	}
+	auth := currentMobileAuth(request)
+	if auth.Admin || auth.DeviceID == "" {
+		writeAPIError(writer, http.StatusForbidden, "mobile_session_required", "mobile session is required to revoke a push subscription")
+		return
+	}
+	subscriptionID, err := parsePositivePathID(request.PathValue("subscription_id"), "subscription id")
+	if err != nil {
+		writeAPIError(writer, http.StatusBadRequest, "invalid_subscription_id", err.Error())
+		return
+	}
+	var body mobileNotificationSubscriptionRevokeRequest
+	if err := decodeMobileJSON(writer, request, &body); err != nil {
+		writeAPIError(writer, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	subscription, err := deps.Store.RevokeMobilePushSubscription(request.Context(), sqlite.RevokeMobilePushSubscriptionParams{
+		DeviceID:       auth.DeviceID,
+		SubscriptionID: subscriptionID,
+		Actor:          "mobile-api",
+		Reason:         strings.TrimSpace(body.Reason),
+	})
+	if err != nil {
+		writeAPIError(writer, http.StatusBadRequest, "mobile_push_subscription_revoke_failed", err.Error())
+		return
+	}
+	writeMobileJSON(writer, http.StatusOK, mobileNotificationSubscriptionRevokeResponse{
+		SubscriptionID: subscription.ID,
+		Status:         string(subscription.Status),
+	})
+}
+
+func recordMobileIntakeAudit(ctx context.Context, deps Dependencies, request *http.Request, item sqlite.IntakeItem) {
+	auth := currentMobileAuth(request)
+	if deps.Store == nil || auth.Admin || auth.DeviceID == "" {
+		return
+	}
+	_ = deps.Store.RecordMobileIntakeEvent(ctx, sqlite.RecordMobileIntakeEventParams{
+		DeviceID:     auth.DeviceID,
+		SessionID:    auth.SessionID,
+		IntakeItemID: item.ID,
+		IntakeType:   item.EventKind,
 	})
 }
 
@@ -883,6 +1171,62 @@ func mobileHash(value string) string {
 func mobileHashBytes(value []byte) string {
 	sum := sha256.Sum256(value)
 	return hex.EncodeToString(sum[:])
+}
+
+func randomMobileToken(byteCount int) (string, error) {
+	raw := make([]byte, byteCount)
+	if _, err := rand.Read(raw); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(raw), nil
+}
+
+type mobileRateLimiter struct {
+	limit  int
+	window time.Duration
+	now    func() time.Time
+	mu     sync.Mutex
+	hits   map[string][]time.Time
+}
+
+func newMobileRateLimiter(limit int, window time.Duration, now func() time.Time) *mobileRateLimiter {
+	if now == nil {
+		now = func() time.Time { return time.Now().UTC() }
+	}
+	return &mobileRateLimiter{
+		limit:  limit,
+		window: window,
+		now:    now,
+		hits:   make(map[string][]time.Time),
+	}
+}
+
+func (limiter *mobileRateLimiter) allow(key string) bool {
+	limiter.mu.Lock()
+	defer limiter.mu.Unlock()
+	current := limiter.now().UTC()
+	cutoff := current.Add(-limiter.window)
+	existing := limiter.hits[key]
+	kept := existing[:0]
+	for _, hit := range existing {
+		if hit.After(cutoff) {
+			kept = append(kept, hit)
+		}
+	}
+	if len(kept) >= limiter.limit {
+		limiter.hits[key] = kept
+		return false
+	}
+	limiter.hits[key] = append(kept, current)
+	return true
+}
+
+func mobileRateLimitKey(request *http.Request) string {
+	auth := currentMobileAuth(request)
+	if auth.DeviceID != "" {
+		return "device:" + auth.DeviceID
+	}
+	return "admin:" + request.RemoteAddr
 }
 
 func mobileIntakeView(item sqlite.IntakeItem) mobileIntakeItemView {

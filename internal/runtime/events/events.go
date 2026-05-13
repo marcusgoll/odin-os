@@ -34,6 +34,7 @@ const (
 	StreamGoal               StreamType = "goal"
 	StreamBrowserSession     StreamType = "browser_session"
 	StreamNotification       StreamType = "notification"
+	StreamMobileDevice       StreamType = "mobile_device"
 )
 
 type Type string
@@ -157,6 +158,11 @@ const (
 	EventNotificationDeviceSubscribed       Type = "notification.device_subscribed"
 	EventNotificationDeviceRevoked          Type = "notification.device_revoked"
 	EventNotificationCreated                Type = "notification.created"
+	EventMobileLogin                        Type = "mobile.login"
+	EventMobileLogout                       Type = "mobile.logout"
+	EventMobileIntakeCreated                Type = "mobile.intake_created"
+	EventMobileApprovalResolved             Type = "mobile.approval_resolved"
+	EventMobilePushSubscriptionRevoked      Type = "mobile.push_subscription_revoked"
 )
 
 const (
@@ -196,6 +202,42 @@ type ServiceHeartbeatPayload struct {
 	BootID string `json:"boot_id"`
 	Status string `json:"status"`
 	PID    int    `json:"pid"`
+}
+
+type MobileLoginPayload struct {
+	DeviceID   string `json:"device_id"`
+	DeviceName string `json:"device_name"`
+	SessionID  int64  `json:"session_id"`
+	Actor      string `json:"actor"`
+}
+
+type MobileLogoutPayload struct {
+	DeviceID  string `json:"device_id"`
+	SessionID int64  `json:"session_id,omitempty"`
+	Actor     string `json:"actor"`
+	Reason    string `json:"reason,omitempty"`
+}
+
+type MobileIntakeCreatedPayload struct {
+	DeviceID     string `json:"device_id"`
+	SessionID    int64  `json:"session_id"`
+	IntakeItemID int64  `json:"intake_item_id"`
+	IntakeType   string `json:"intake_type"`
+}
+
+type MobileApprovalResolvedPayload struct {
+	DeviceID   string `json:"device_id"`
+	SessionID  int64  `json:"session_id"`
+	ApprovalID int64  `json:"approval_id"`
+	Action     string `json:"action"`
+}
+
+type MobilePushSubscriptionRevokedPayload struct {
+	DeviceID       string `json:"device_id"`
+	SessionID      int64  `json:"session_id"`
+	SubscriptionID int64  `json:"subscription_id"`
+	Actor          string `json:"actor"`
+	Reason         string `json:"reason,omitempty"`
 }
 
 type ProjectCreatedPayload struct {
