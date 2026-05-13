@@ -190,7 +190,13 @@ func (approvalReviewQueueSource) ListReviewQueueEntries(ctx context.Context, app
 	}
 	entries := make([]reviewQueueEntry, 0, len(pendingApprovals))
 	for _, view := range pendingApprovals {
-		entries = append(entries, reviewEntryFromPendingApproval(view))
+		entry := reviewEntryFromPendingApproval(view)
+		count, err := countBrowserEvidenceForTask(ctx, app.Store, view.TaskID)
+		if err != nil {
+			return nil, err
+		}
+		entry.BrowserEvidenceCount = count
+		entries = append(entries, entry)
 	}
 	return entries, nil
 }
@@ -254,7 +260,13 @@ func (failedWorkReviewQueueSource) ListReviewQueueEntries(ctx context.Context, a
 		if !strings.EqualFold(strings.TrimSpace(task.Status), "failed") {
 			continue
 		}
-		entries = append(entries, reviewEntryFromFailedTask(task))
+		entry := reviewEntryFromFailedTask(task)
+		count, err := countBrowserEvidenceForTask(ctx, app.Store, task.TaskID)
+		if err != nil {
+			return nil, err
+		}
+		entry.BrowserEvidenceCount = count
+		entries = append(entries, entry)
 	}
 	return entries, nil
 }

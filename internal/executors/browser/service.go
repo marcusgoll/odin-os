@@ -14,6 +14,8 @@ import (
 
 const (
 	EvidenceType             = "browser_readonly"
+	WorkEvidenceType         = "browser_evidence"
+	WorkEvidenceExecutor     = "huginn_browser"
 	MaxPagesLimit            = 20
 	MaxDurationSecondsLimit  = 300
 	defaultEvidenceCreatedBy = "browser_executor"
@@ -43,6 +45,24 @@ type ReadOnlyTask struct {
 
 type PageResult = huginnbrowser.PageResult
 type BrowserSessionReference = huginnbrowser.BrowserSessionReference
+type ScreenshotMetadata = huginnbrowser.ScreenshotMetadata
+type SelectedLink = huginnbrowser.SelectedLink
+type DownloadedFileMetadata = huginnbrowser.DownloadedFileMetadata
+
+type WorkEvidenceTask struct {
+	TaskID             int64                       `json:"task_id"`
+	WorkerMode         string                      `json:"worker_mode,omitempty"`
+	Objective          string                      `json:"objective"`
+	AllowedDomains     []string                    `json:"allowed_domains"`
+	StartURLs          []string                    `json:"start_urls"`
+	MaxPages           int                         `json:"max_pages"`
+	MaxDurationSeconds int                         `json:"max_duration_seconds"`
+	EvidenceRequired   bool                        `json:"evidence_required"`
+	SiteProfiles       []huginnbrowser.SiteProfile `json:"site_profiles,omitempty"`
+	BrowserSessionID   int64                       `json:"browser_session_id,omitempty"`
+	BrowserSession     *BrowserSessionReference    `json:"browser_session,omitempty"`
+	Actions            []string                    `json:"actions,omitempty"`
+}
 
 type PluginRequest struct {
 	RequestID          string                      `json:"request_id,omitempty"`
@@ -86,26 +106,36 @@ type PluginResponse struct {
 }
 
 type Result struct {
-	Status               string                      `json:"status"`
-	GoalID               int64                       `json:"goal_id"`
-	EvidenceID           int64                       `json:"evidence_id"`
-	EvidenceType         string                      `json:"evidence_type"`
-	AdapterStatus        string                      `json:"adapter_status,omitempty"`
-	AdapterKind          string                      `json:"adapter_kind,omitempty"`
-	StartURLs            []string                    `json:"start_urls"`
-	AllowedDomains       []string                    `json:"allowed_domains"`
-	MaxPages             int                         `json:"max_pages"`
-	MaxDurationSeconds   int                         `json:"max_duration_seconds"`
-	SiteProfiles         []huginnbrowser.SiteProfile `json:"site_profiles,omitempty"`
-	BrowserSession       *BrowserSessionReference    `json:"browser_session,omitempty"`
-	VisitedURLs          []string                    `json:"visited_urls,omitempty"`
-	PageResults          []huginnbrowser.PageResult  `json:"page_results,omitempty"`
-	ExtractedTextSummary string                      `json:"extracted_text_summary,omitempty"`
-	Screenshots          []string                    `json:"screenshots,omitempty"`
-	ActionLog            []string                    `json:"action_log,omitempty"`
-	ErrorCode            string                      `json:"error_code,omitempty"`
-	ErrorMessage         string                      `json:"error_message,omitempty"`
-	Evidence             sqlite.GoalEvidence         `json:"-"`
+	Status                    string                      `json:"status"`
+	GoalID                    int64                       `json:"goal_id"`
+	TaskID                    int64                       `json:"task_id,omitempty"`
+	RunID                     int64                       `json:"run_id,omitempty"`
+	RunArtifactID             int64                       `json:"run_artifact_id,omitempty"`
+	EvidenceID                int64                       `json:"evidence_id"`
+	EvidenceType              string                      `json:"evidence_type"`
+	AdapterStatus             string                      `json:"adapter_status,omitempty"`
+	AdapterKind               string                      `json:"adapter_kind,omitempty"`
+	StartURLs                 []string                    `json:"start_urls"`
+	AllowedDomains            []string                    `json:"allowed_domains"`
+	MaxPages                  int                         `json:"max_pages"`
+	MaxDurationSeconds        int                         `json:"max_duration_seconds"`
+	SiteProfiles              []huginnbrowser.SiteProfile `json:"site_profiles,omitempty"`
+	BrowserSession            *BrowserSessionReference    `json:"browser_session,omitempty"`
+	VisitedURLs               []string                    `json:"visited_urls,omitempty"`
+	PageResults               []huginnbrowser.PageResult  `json:"page_results,omitempty"`
+	ExtractedTextSummary      string                      `json:"extracted_text_summary,omitempty"`
+	Screenshots               []string                    `json:"screenshots,omitempty"`
+	ScreenshotMetadata        []ScreenshotMetadata        `json:"screenshot_metadata,omitempty"`
+	SelectedLinks             []SelectedLink              `json:"selected_links,omitempty"`
+	DownloadedFiles           []DownloadedFileMetadata    `json:"downloaded_files,omitempty"`
+	FormStateSummary          string                      `json:"form_state_summary,omitempty"`
+	BrowserErrorRecoveryNotes []string                    `json:"browser_error_recovery_notes,omitempty"`
+	Confidence                string                      `json:"confidence,omitempty"`
+	Limitations               []string                    `json:"limitations,omitempty"`
+	ActionLog                 []string                    `json:"action_log,omitempty"`
+	ErrorCode                 string                      `json:"error_code,omitempty"`
+	ErrorMessage              string                      `json:"error_message,omitempty"`
+	Evidence                  sqlite.GoalEvidence         `json:"-"`
 }
 
 type ReadOnlyRunner interface {
@@ -124,6 +154,29 @@ type Service struct {
 func (service Service) RunPlugin(ctx context.Context, request PluginRequest) (PluginResponse, error) {
 	riskClass := ClassifyRisk(request.Actions)
 	if riskClass == RiskClassReadOnly {
+		if request.TaskID > 0 && request.GoalID == 0 {
+			result, err := service.RunWorkEvidence(ctx, request.workEvidenceTask())
+			response := PluginResponse{
+				Status:           result.Status,
+				RequestID:        strings.TrimSpace(request.RequestID),
+				RiskClass:        riskClass,
+				ApprovalRequired: false,
+				TaskID:           result.TaskID,
+				Result:           &result,
+				ErrorCode:        result.ErrorCode,
+				ErrorMessage:     result.ErrorMessage,
+			}
+			if result.RunArtifactID > 0 {
+				response.Evidence = &EvidenceArtifact{
+					ID:        result.RunArtifactID,
+					Type:      WorkEvidenceType,
+					URI:       defaultResultURI(result),
+					Summary:   result.ExtractedTextSummary,
+					CreatedBy: defaultEvidenceCreatedBy,
+				}
+			}
+			return response, err
+		}
 		result, err := service.Run(ctx, request.readOnlyTask())
 		response := PluginResponse{
 			Status:           result.Status,
@@ -245,25 +298,178 @@ func (service Service) Run(ctx context.Context, task ReadOnlyTask) (Result, erro
 		return Result{}, err
 	}
 	return Result{
-		Status:               "recorded",
-		GoalID:               resolvedTask.GoalID,
-		EvidenceID:           evidence.ID,
-		EvidenceType:         evidence.EvidenceType,
-		AdapterStatus:        adapterResponse.Status,
-		AdapterKind:          adapterResponse.AdapterKind,
-		StartURLs:            append([]string{}, resolvedTask.StartURLs...),
-		AllowedDomains:       append([]string{}, resolvedTask.AllowedDomains...),
-		MaxPages:             resolvedTask.MaxPages,
-		MaxDurationSeconds:   resolvedTask.MaxDurationSeconds,
-		SiteProfiles:         append([]huginnbrowser.SiteProfile{}, resolvedTask.SiteProfiles...),
-		BrowserSession:       cloneBrowserSessionReference(resolvedTask.BrowserSession),
-		VisitedURLs:          append([]string{}, adapterResponse.VisitedURLs...),
-		PageResults:          append([]huginnbrowser.PageResult{}, adapterResponse.PageResults...),
-		ExtractedTextSummary: adapterResponse.ExtractedTextSummary,
-		Screenshots:          append([]string{}, adapterResponse.Screenshots...),
-		ActionLog:            append([]string{}, adapterResponse.ActionLog...),
-		Evidence:             evidence,
+		Status:                    "recorded",
+		GoalID:                    resolvedTask.GoalID,
+		EvidenceID:                evidence.ID,
+		EvidenceType:              evidence.EvidenceType,
+		AdapterStatus:             adapterResponse.Status,
+		AdapterKind:               adapterResponse.AdapterKind,
+		StartURLs:                 append([]string{}, resolvedTask.StartURLs...),
+		AllowedDomains:            append([]string{}, resolvedTask.AllowedDomains...),
+		MaxPages:                  resolvedTask.MaxPages,
+		MaxDurationSeconds:        resolvedTask.MaxDurationSeconds,
+		SiteProfiles:              append([]huginnbrowser.SiteProfile{}, resolvedTask.SiteProfiles...),
+		BrowserSession:            cloneBrowserSessionReference(resolvedTask.BrowserSession),
+		VisitedURLs:               append([]string{}, adapterResponse.VisitedURLs...),
+		PageResults:               append([]huginnbrowser.PageResult{}, adapterResponse.PageResults...),
+		ExtractedTextSummary:      adapterResponse.ExtractedTextSummary,
+		Screenshots:               append([]string{}, adapterResponse.Screenshots...),
+		ScreenshotMetadata:        append([]ScreenshotMetadata{}, adapterResponse.ScreenshotMetadata...),
+		SelectedLinks:             append([]SelectedLink{}, adapterResponse.SelectedLinks...),
+		DownloadedFiles:           append([]DownloadedFileMetadata{}, adapterResponse.DownloadedFiles...),
+		FormStateSummary:          adapterResponse.FormStateSummary,
+		BrowserErrorRecoveryNotes: append([]string{}, adapterResponse.BrowserErrorRecoveryNotes...),
+		Confidence:                adapterResponse.Confidence,
+		Limitations:               append([]string{}, adapterResponse.Limitations...),
+		ActionLog:                 append([]string{}, adapterResponse.ActionLog...),
+		Evidence:                  evidence,
 	}, nil
+}
+
+func (service Service) RunWorkEvidence(ctx context.Context, task WorkEvidenceTask) (Result, error) {
+	if service.Store == nil {
+		return Result{}, fmt.Errorf("browser executor requires store")
+	}
+	if err := ValidateWorkEvidenceTask(task); err != nil {
+		return Result{}, err
+	}
+	storedTask, err := service.Store.GetTask(ctx, task.TaskID)
+	if err != nil {
+		return Result{}, err
+	}
+	resolvedTask := task
+	if strings.TrimSpace(resolvedTask.Objective) == "" {
+		resolvedTask.Objective = storedTask.Title
+	}
+	readOnlyTask := resolvedTask.readOnlyTask()
+	sessionRef, err := service.resolveBrowserSession(ctx, readOnlyTask)
+	if err != nil {
+		return Result{}, err
+	}
+	resolvedTask.BrowserSession = sessionRef
+	readOnlyTask.BrowserSession = sessionRef
+	attempt, err := service.nextWorkEvidenceAttempt(ctx, task.TaskID)
+	if err != nil {
+		return Result{}, err
+	}
+	run, err := service.Store.StartRun(ctx, sqlite.StartRunParams{
+		TaskID:   task.TaskID,
+		Executor: WorkEvidenceExecutor,
+		Attempt:  attempt,
+		Status:   "running",
+	})
+	if err != nil {
+		return Result{}, err
+	}
+	adapter := service.Adapter
+	if adapter == nil {
+		adapter = huginnbrowser.SelectAdapterFromEnv()
+	}
+	adapterResponse, adapterErr := adapter.Run(ctx, huginnbrowser.Request{
+		Mode:               resolvedTask.WorkerMode,
+		Objective:          resolvedTask.Objective,
+		StartURLs:          append([]string{}, resolvedTask.StartURLs...),
+		AllowedDomains:     append([]string{}, resolvedTask.AllowedDomains...),
+		MaxPages:           resolvedTask.MaxPages,
+		MaxDurationSeconds: resolvedTask.MaxDurationSeconds,
+		EvidenceRequired:   resolvedTask.EvidenceRequired,
+		SiteProfiles:       append([]huginnbrowser.SiteProfile{}, resolvedTask.SiteProfiles...),
+		BrowserSession:     cloneBrowserSessionReference(resolvedTask.BrowserSession),
+	})
+	if adapterErr != nil {
+		adapterResponse = huginnbrowser.Response{
+			Status:                    "failed",
+			AdapterKind:               "unknown",
+			VisitedURLs:               append([]string{}, resolvedTask.StartURLs...),
+			ExtractedTextSummary:      "Browser adapter failed before evidence capture completed.",
+			ErrorCode:                 "adapter_failed",
+			ErrorMessage:              adapterErr.Error(),
+			BrowserErrorRecoveryNotes: []string{"Inspect browser adapter configuration and retry the capture."},
+			Confidence:                "failed_capture",
+			Limitations:               []string{"Adapter returned an execution error."},
+		}
+	}
+	detailsJSON, err := browserWorkEvidenceDetailsJSON(resolvedTask, adapterResponse)
+	if err != nil {
+		return Result{}, err
+	}
+	artifact, err := service.Store.RecordRunArtifact(ctx, sqlite.RecordRunArtifactParams{
+		RunID:        run.ID,
+		ArtifactType: WorkEvidenceType,
+		Summary:      defaultEvidenceSummary(adapterResponse),
+		DetailsJSON:  detailsJSON,
+	})
+	if err != nil {
+		return Result{}, err
+	}
+	result := Result{
+		Status:                    "recorded",
+		TaskID:                    resolvedTask.TaskID,
+		RunID:                     run.ID,
+		RunArtifactID:             artifact.ID,
+		EvidenceType:              WorkEvidenceType,
+		AdapterStatus:             adapterResponse.Status,
+		AdapterKind:               adapterResponse.AdapterKind,
+		StartURLs:                 append([]string{}, resolvedTask.StartURLs...),
+		AllowedDomains:            append([]string{}, resolvedTask.AllowedDomains...),
+		MaxPages:                  resolvedTask.MaxPages,
+		MaxDurationSeconds:        resolvedTask.MaxDurationSeconds,
+		SiteProfiles:              append([]huginnbrowser.SiteProfile{}, resolvedTask.SiteProfiles...),
+		BrowserSession:            cloneBrowserSessionReference(resolvedTask.BrowserSession),
+		VisitedURLs:               append([]string{}, adapterResponse.VisitedURLs...),
+		PageResults:               append([]huginnbrowser.PageResult{}, adapterResponse.PageResults...),
+		ExtractedTextSummary:      adapterResponse.ExtractedTextSummary,
+		Screenshots:               append([]string{}, adapterResponse.Screenshots...),
+		ScreenshotMetadata:        append([]ScreenshotMetadata{}, adapterResponse.ScreenshotMetadata...),
+		SelectedLinks:             append([]SelectedLink{}, adapterResponse.SelectedLinks...),
+		DownloadedFiles:           append([]DownloadedFileMetadata{}, adapterResponse.DownloadedFiles...),
+		FormStateSummary:          adapterResponse.FormStateSummary,
+		BrowserErrorRecoveryNotes: append([]string{}, adapterResponse.BrowserErrorRecoveryNotes...),
+		Confidence:                adapterResponse.Confidence,
+		Limitations:               append([]string{}, adapterResponse.Limitations...),
+		ActionLog:                 append([]string{}, adapterResponse.ActionLog...),
+		ErrorCode:                 adapterResponse.ErrorCode,
+		ErrorMessage:              adapterResponse.ErrorMessage,
+	}
+	finishArtifacts := fmt.Sprintf(`[{"type":%q,"run_artifact_id":%d,"summary":%q}]`, WorkEvidenceType, artifact.ID, artifact.Summary)
+	if browserEvidenceFailed(adapterResponse) {
+		result.Status = "failed"
+		if result.ErrorCode == "" {
+			result.ErrorCode = "browser_capture_failed"
+		}
+		if result.ErrorMessage == "" {
+			result.ErrorMessage = "browser evidence capture failed"
+		}
+		finishedTask, _, err := service.Store.FinishRunAndSetTaskStatus(ctx, sqlite.FinishRunAndSetTaskStatusParams{
+			RunID:          run.ID,
+			RunStatus:      "failed",
+			TaskStatus:     "failed",
+			Summary:        defaultEvidenceSummary(adapterResponse),
+			TerminalReason: "browser_evidence_capture_failed",
+			ArtifactsJSON:  finishArtifacts,
+		})
+		if err != nil {
+			return Result{}, err
+		}
+		_ = service.Store.RecordTaskRecoveryRecommendation(ctx, sqlite.RecordTaskRecoveryRecommendationParams{
+			Task:                   finishedTask,
+			Decision:               "retry_browser_capture",
+			RetryEligible:          true,
+			RecoveryRecommendation: browserRecoveryRecommendation(adapterResponse),
+			Source:                 "browser_evidence",
+		})
+		return result, nil
+	}
+	if _, err := service.Store.FinishRun(ctx, sqlite.FinishRunParams{
+		RunID:          run.ID,
+		Status:         "completed",
+		Summary:        defaultEvidenceSummary(adapterResponse),
+		TerminalReason: "browser_evidence_recorded",
+		ArtifactsJSON:  finishArtifacts,
+	}); err != nil {
+		return Result{}, err
+	}
+	return result, nil
 }
 
 func (request PluginRequest) readOnlyTask() ReadOnlyTask {
@@ -280,6 +486,39 @@ func (request PluginRequest) readOnlyTask() ReadOnlyTask {
 		BrowserSessionID:   request.BrowserSessionID,
 		BrowserSession:     cloneBrowserSessionReference(request.BrowserSession),
 		Actions:            append([]string{}, request.Actions...),
+	}
+}
+
+func (request PluginRequest) workEvidenceTask() WorkEvidenceTask {
+	return WorkEvidenceTask{
+		TaskID:             request.TaskID,
+		WorkerMode:         request.WorkerMode,
+		Objective:          request.Objective,
+		AllowedDomains:     append([]string{}, request.AllowedDomains...),
+		StartURLs:          append([]string{}, request.StartURLs...),
+		MaxPages:           request.MaxPages,
+		MaxDurationSeconds: request.MaxDurationSeconds,
+		EvidenceRequired:   request.EvidenceRequired,
+		SiteProfiles:       append([]huginnbrowser.SiteProfile{}, request.SiteProfiles...),
+		BrowserSessionID:   request.BrowserSessionID,
+		BrowserSession:     cloneBrowserSessionReference(request.BrowserSession),
+		Actions:            append([]string{}, request.Actions...),
+	}
+}
+
+func (task WorkEvidenceTask) readOnlyTask() ReadOnlyTask {
+	return ReadOnlyTask{
+		WorkerMode:         task.WorkerMode,
+		Objective:          task.Objective,
+		AllowedDomains:     append([]string{}, task.AllowedDomains...),
+		StartURLs:          append([]string{}, task.StartURLs...),
+		MaxPages:           task.MaxPages,
+		MaxDurationSeconds: task.MaxDurationSeconds,
+		EvidenceRequired:   task.EvidenceRequired,
+		SiteProfiles:       append([]huginnbrowser.SiteProfile{}, task.SiteProfiles...),
+		BrowserSessionID:   task.BrowserSessionID,
+		BrowserSession:     cloneBrowserSessionReference(task.BrowserSession),
+		Actions:            append([]string{}, task.Actions...),
 	}
 }
 
@@ -374,9 +613,36 @@ func defaultEvidenceURI(task ReadOnlyTask, response huginnbrowser.Response) stri
 	return task.StartURLs[0]
 }
 
+func defaultResultURI(result Result) string {
+	for _, uri := range result.VisitedURLs {
+		if strings.TrimSpace(uri) != "" {
+			return strings.TrimSpace(uri)
+		}
+	}
+	for _, uri := range result.StartURLs {
+		if strings.TrimSpace(uri) != "" {
+			return strings.TrimSpace(uri)
+		}
+	}
+	return ""
+}
+
 func ValidateReadOnlyTask(task ReadOnlyTask) error {
+	return validateReadOnlyTask(task, true)
+}
+
+func ValidateWorkEvidenceTask(task WorkEvidenceTask) error {
+	if task.TaskID <= 0 {
+		return fmt.Errorf("task_id must be positive")
+	}
+	return validateReadOnlyTask(task.readOnlyTask(), false)
+}
+
+func validateReadOnlyTask(task ReadOnlyTask, requireGoal bool) error {
 	if task.GoalID <= 0 {
-		return fmt.Errorf("goal_id must be positive")
+		if requireGoal {
+			return fmt.Errorf("goal_id must be positive")
+		}
 	}
 	if strings.TrimSpace(task.Objective) == "" {
 		return fmt.Errorf("objective is required")
@@ -437,6 +703,87 @@ func ValidateReadOnlyTask(task ReadOnlyTask) error {
 		}
 	}
 	return nil
+}
+
+func (service Service) nextWorkEvidenceAttempt(ctx context.Context, taskID int64) (int, error) {
+	var attempt int
+	if err := service.Store.DB().QueryRowContext(ctx, `SELECT COALESCE(MAX(attempt), 0) + 1 FROM runs WHERE task_id = ?`, taskID).Scan(&attempt); err != nil {
+		return 0, err
+	}
+	return attempt, nil
+}
+
+func browserWorkEvidenceDetailsJSON(task WorkEvidenceTask, response huginnbrowser.Response) (string, error) {
+	payload, err := json.Marshal(map[string]any{
+		"executor":                     WorkEvidenceExecutor,
+		"artifact_type":                WorkEvidenceType,
+		"status":                       response.Status,
+		"task_id":                      task.TaskID,
+		"start_urls":                   task.StartURLs,
+		"allowed_domains":              task.AllowedDomains,
+		"adapter_kind":                 response.AdapterKind,
+		"visited_urls":                 response.VisitedURLs,
+		"page_results":                 response.PageResults,
+		"page_title":                   firstPageTitle(response.PageResults),
+		"url":                          firstVisitedURL(task, response),
+		"extracted_text_summary":       response.ExtractedTextSummary,
+		"screenshots":                  response.Screenshots,
+		"screenshot_metadata":          response.ScreenshotMetadata,
+		"selected_links":               response.SelectedLinks,
+		"downloaded_files":             response.DownloadedFiles,
+		"form_state_summary":           response.FormStateSummary,
+		"browser_error_recovery_notes": response.BrowserErrorRecoveryNotes,
+		"confidence":                   response.Confidence,
+		"limitations":                  response.Limitations,
+		"action_log":                   response.ActionLog,
+		"error_code":                   response.ErrorCode,
+		"error_message":                response.ErrorMessage,
+	})
+	if err != nil {
+		return "", err
+	}
+	return string(payload), nil
+}
+
+func browserEvidenceFailed(response huginnbrowser.Response) bool {
+	switch strings.ToLower(strings.TrimSpace(response.Status)) {
+	case "", "completed", "recorded", "ok", "success":
+		return false
+	default:
+		return true
+	}
+}
+
+func browserRecoveryRecommendation(response huginnbrowser.Response) string {
+	for _, note := range response.BrowserErrorRecoveryNotes {
+		if strings.TrimSpace(note) != "" {
+			return strings.TrimSpace(note)
+		}
+	}
+	return "Retry browser evidence capture with a narrower URL set or inspect the browser adapter error before retrying."
+}
+
+func firstPageTitle(results []huginnbrowser.PageResult) string {
+	for _, result := range results {
+		if strings.TrimSpace(result.Title) != "" {
+			return strings.TrimSpace(result.Title)
+		}
+	}
+	return ""
+}
+
+func firstVisitedURL(task WorkEvidenceTask, response huginnbrowser.Response) string {
+	for _, uri := range response.VisitedURLs {
+		if strings.TrimSpace(uri) != "" {
+			return strings.TrimSpace(uri)
+		}
+	}
+	for _, uri := range task.StartURLs {
+		if strings.TrimSpace(uri) != "" {
+			return strings.TrimSpace(uri)
+		}
+	}
+	return ""
 }
 
 func normalizeAllowedDomains(domains []string) ([]string, error) {
