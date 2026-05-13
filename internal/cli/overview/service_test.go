@@ -190,6 +190,37 @@ func TestBuildReturnsCanonicalOverviewFromCurrentAuthority(t *testing.T) {
 	}
 }
 
+func TestBuildIncludesBrowserEvidenceInObservabilityLane(t *testing.T) {
+	ctx := context.Background()
+	env := newOverviewTestEnvironment(t)
+	if _, err := env.store.RecordRunArtifact(ctx, sqlite.RecordRunArtifactParams{
+		RunID:        env.runID,
+		ArtifactType: "browser_evidence",
+		Summary:      "Browser evidence summary",
+		DetailsJSON:  `{"page_title":"Docs","url":"https://example.com/docs","selected_links":[{"text":"Docs","url":"https://example.com/docs"}],"confidence":"deterministic_test","limitations":["fixture"]}`,
+	}); err != nil {
+		t.Fatalf("RecordRunArtifact() error = %v", err)
+	}
+
+	view, err := Service{
+		Store:            env.store,
+		RegistrySnapshot: env.snapshot,
+	}.Build(ctx, scope.Resolution{Kind: scope.ScopeGlobal})
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+	if len(view.Observability.BrowserEvidence) != 1 {
+		t.Fatalf("BrowserEvidence len = %d, want 1", len(view.Observability.BrowserEvidence))
+	}
+	evidence := view.Observability.BrowserEvidence[0]
+	if evidence.RunID != env.runID || evidence.TaskID != env.taskID || evidence.WorkItemKey != "alpha-task" || evidence.Confidence != "deterministic_test" {
+		t.Fatalf("BrowserEvidence = %+v, want alpha-task deterministic evidence", evidence)
+	}
+	if len(evidence.SelectedLinks) != 1 || evidence.SelectedLinks[0].URL != "https://example.com/docs" {
+		t.Fatalf("SelectedLinks = %+v, want docs link", evidence.SelectedLinks)
+	}
+}
+
 func TestBuildWorkItemsExposeBlockedReason(t *testing.T) {
 	ctx := context.Background()
 	env := newOverviewTestEnvironment(t)
