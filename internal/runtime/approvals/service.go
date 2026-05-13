@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"odin-os/internal/adapters/web"
 	"odin-os/internal/runtime/checkpoints"
@@ -180,6 +181,11 @@ func (service Service) Resolve(ctx context.Context, params ResolveParams) (Resol
 	}
 
 	if detail.ResumeState == nil || !isPreparedTransfer(*detail.ResumeState) {
+		if isTaskBackedApproval(current, detail.Task) {
+			if _, err := service.Store.RequeueTaskAt(ctx, sqlite.RequeueTaskAtParams{TaskID: detail.Task.ID, NextEligibleAt: time.Now().UTC()}); err != nil {
+				return ResolveResult{}, err
+			}
+		}
 		return result, nil
 	}
 	result, err = service.resumePreparedTransfer(ctx, detail.Task, approval, *detail.ResumeState)

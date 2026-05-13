@@ -22,6 +22,7 @@ import (
 	"odin-os/internal/cli/scope"
 	"odin-os/internal/core/workspaces"
 	approvalsvc "odin-os/internal/runtime/approvals"
+	runtimeevents "odin-os/internal/runtime/events"
 	"odin-os/internal/runtime/projections"
 	"odin-os/internal/store/sqlite"
 )
@@ -118,6 +119,15 @@ func registerMobileRoutes(mux *http.ServeMux, deps Dependencies, now func() time
 		writeMobileJSON(writer, http.StatusOK, map[string]any{"items": items, "count": len(items)})
 	}))
 
+	mux.HandleFunc("GET /mobile/review-queue/detail", mobileAuthorized(deps, func(writer http.ResponseWriter, request *http.Request) {
+		items, err := mobileReviewQueueDetail(request.Context(), deps, request.URL.Query().Get("queue_id"))
+		if err != nil {
+			writeAPIError(writer, http.StatusServiceUnavailable, "mobile_review_detail_unavailable", err.Error())
+			return
+		}
+		writeMobileJSON(writer, http.StatusOK, map[string]any{"items": items, "count": len(items)})
+	}))
+
 	mux.HandleFunc("GET /mobile/approvals", mobileAuthorized(deps, func(writer http.ResponseWriter, request *http.Request) {
 		items, err := mobileApprovals(request.Context(), deps)
 		if err != nil {
@@ -129,6 +139,15 @@ func registerMobileRoutes(mux *http.ServeMux, deps Dependencies, now func() time
 
 	mux.HandleFunc("POST /mobile/approvals/{approval_id}/decision", mobileAuthorized(deps, func(writer http.ResponseWriter, request *http.Request) {
 		handleMobileApprovalDecision(writer, request, deps)
+	}))
+
+	mux.HandleFunc("GET /mobile/notifications", mobileAuthorized(deps, func(writer http.ResponseWriter, request *http.Request) {
+		items, err := mobileNotifications(request.Context(), deps)
+		if err != nil {
+			writeAPIError(writer, http.StatusServiceUnavailable, "mobile_notifications_unavailable", err.Error())
+			return
+		}
+		writeMobileJSON(writer, http.StatusOK, map[string]any{"items": items, "count": len(items)})
 	}))
 
 	mux.HandleFunc("POST /mobile/intake/raw", mobileAuthorized(deps, func(writer http.ResponseWriter, request *http.Request) {
@@ -242,25 +261,40 @@ func writeMobileJSON(writer http.ResponseWriter, statusCode int, payload any) {
 }
 
 type mobileReviewItem struct {
-	QueueID        string   `json:"queue_id"`
-	SourceType     string   `json:"source_type"`
-	ObjectID       int64    `json:"object_id"`
-	ObjectKey      string   `json:"object_key"`
-	Title          string   `json:"title"`
-	Status         string   `json:"status"`
-	Reason         string   `json:"reason,omitempty"`
-	ProjectKey     string   `json:"project_key,omitempty"`
-	AllowedActions []string `json:"allowed_actions"`
+	QueueID        string                  `json:"queue_id"`
+	SourceType     string                  `json:"source_type"`
+	ObjectID       int64                   `json:"object_id"`
+	ObjectKey      string                  `json:"object_key"`
+	Title          string                  `json:"title"`
+	Status         string                  `json:"status"`
+	Reason         string                  `json:"reason,omitempty"`
+	ProjectKey     string                  `json:"project_key,omitempty"`
+	AllowedActions []string                `json:"allowed_actions"`
+	BrowserEvent   string                  `json:"browser_event,omitempty"`
+	DeepLink       string                  `json:"deep_link,omitempty"`
+	Notification   *mobileNotificationView `json:"notification,omitempty"`
 }
 
 type mobileApprovalView struct {
-	ApprovalID      int64  `json:"approval_id"`
-	TaskID          int64  `json:"task_id"`
-	TaskKey         string `json:"task_key"`
-	ProjectKey      string `json:"project_key"`
-	Status          string `json:"status"`
-	RequestedAt     string `json:"requested_at"`
-	ResolverSupport string `json:"resolver_support,omitempty"`
+	ApprovalID      int64                   `json:"approval_id"`
+	TaskID          int64                   `json:"task_id"`
+	TaskKey         string                  `json:"task_key"`
+	ProjectKey      string                  `json:"project_key"`
+	Status          string                  `json:"status"`
+	RequestedAt     string                  `json:"requested_at"`
+	ResolverSupport string                  `json:"resolver_support,omitempty"`
+	BrowserEvent    string                  `json:"browser_event,omitempty"`
+	DeepLink        string                  `json:"deep_link,omitempty"`
+	Notification    *mobileNotificationView `json:"notification,omitempty"`
+}
+
+type mobileNotificationView struct {
+	ID        string `json:"id"`
+	Kind      string `json:"kind"`
+	Title     string `json:"title"`
+	Body      string `json:"body"`
+	DeepLink  string `json:"deep_link"`
+	ObjectKey string `json:"object_key,omitempty"`
 }
 
 type mobileIntakeResponse struct {
@@ -283,6 +317,7 @@ type mobileIntakeItemView struct {
 
 type mobileApprovalDecisionRequest struct {
 	Action     string `json:"action"`
+	Decision   string `json:"decision"`
 	Reason     string `json:"reason"`
 	DecisionBy string `json:"decision_by"`
 }
@@ -554,7 +589,7 @@ func mobileReviewQueue(ctx context.Context, deps Dependencies) ([]mobileReviewIt
 		return nil, err
 	}
 	for _, approval := range approvals {
-		items = append(items, mobileReviewItem{
+		item := mobileReviewItem{
 			QueueID:        fmt.Sprintf("approval:%d", approval.ApprovalID),
 			SourceType:     "approval",
 			ObjectID:       approval.ApprovalID,
@@ -564,17 +599,63 @@ func mobileReviewQueue(ctx context.Context, deps Dependencies) ([]mobileReviewIt
 			Reason:         "approval_required",
 			ProjectKey:     approval.ProjectKey,
 			AllowedActions: []string{"approve", "deny"},
-		})
+		}
+		if mobileIsBrowserApproval(ctx, deps.Store, approval) {
+			item.BrowserEvent = "browser_mutation_approval_required"
+			item.DeepLink = mobileApprovalDeepLink(approval.ApprovalID)
+			item.Notification = mobileNotification(item.BrowserEvent, item.ObjectKey, item.Title, item.DeepLink)
+		}
+		items = append(items, item)
 	}
 	tasks, err := projections.ListTaskStatusViews(ctx, deps.ReadModels)
 	if err != nil {
 		return nil, err
 	}
+	taskByID := make(map[int64]projections.TaskStatusView, len(tasks))
 	for _, task := range tasks {
-		if strings.EqualFold(task.Status, "failed") {
+		taskByID[task.TaskID] = task
+	}
+	runs, err := projections.ListRunSummaryViews(ctx, deps.ReadModels)
+	if err != nil {
+		return nil, err
+	}
+	browserFailedTasks := make(map[int64]struct{})
+	for _, run := range runs {
+		if run.Executor != "huginn_browser" {
+			continue
+		}
+		if run.Status == "failed" {
+			browserFailedTasks[run.TaskID] = struct{}{}
+		}
+		artifacts, err := deps.Store.ListRunArtifacts(ctx, sqlite.ListRunArtifactsParams{RunID: run.RunID, ArtifactType: "browser_evidence"})
+		if err != nil {
+			return nil, err
+		}
+		for _, artifact := range artifacts {
+			task := taskByID[run.TaskID]
 			items = append(items, mobileReviewItem{
-				QueueID:        fmt.Sprintf("failed-work:%d", task.TaskID),
-				SourceType:     "failed_work",
+				QueueID:        fmt.Sprintf("browser-evidence:%d", artifact.ID),
+				SourceType:     "browser_evidence",
+				ObjectID:       artifact.ID,
+				ObjectKey:      fmt.Sprintf("browser-evidence-%d", artifact.ID),
+				Title:          firstNonEmpty(artifact.Summary, "Browser evidence ready"),
+				Status:         "ready",
+				Reason:         "browser_evidence_ready",
+				ProjectKey:     task.ProjectKey,
+				AllowedActions: []string{"review"},
+				BrowserEvent:   "browser_evidence_ready",
+				DeepLink:       fmt.Sprintf("/app/?queue_id=browser-evidence:%d", artifact.ID),
+			})
+		}
+	}
+	for _, task := range tasks {
+		if !strings.EqualFold(task.Status, "failed") {
+			continue
+		}
+		if _, ok := browserFailedTasks[task.TaskID]; ok {
+			item := mobileReviewItem{
+				QueueID:        fmt.Sprintf("browser-run-failed:%d", task.TaskID),
+				SourceType:     "browser_run_failed",
 				ObjectID:       task.TaskID,
 				ObjectKey:      task.TaskKey,
 				Title:          task.Title,
@@ -582,9 +663,30 @@ func mobileReviewQueue(ctx context.Context, deps Dependencies) ([]mobileReviewIt
 				Reason:         "retry_allowed",
 				ProjectKey:     task.ProjectKey,
 				AllowedActions: []string{"retry", "follow-up"},
-			})
+				BrowserEvent:   "browser_run_failed_retryable",
+				DeepLink:       fmt.Sprintf("/app/?queue_id=browser-run-failed:%d", task.TaskID),
+			}
+			item.Notification = mobileNotification(item.BrowserEvent, item.ObjectKey, item.Title, item.DeepLink)
+			items = append(items, item)
+			continue
 		}
+		items = append(items, mobileReviewItem{
+			QueueID:        fmt.Sprintf("failed-work:%d", task.TaskID),
+			SourceType:     "failed_work",
+			ObjectID:       task.TaskID,
+			ObjectKey:      task.TaskKey,
+			Title:          task.Title,
+			Status:         task.Status,
+			Reason:         "retry_allowed",
+			ProjectKey:     task.ProjectKey,
+			AllowedActions: []string{"retry", "follow-up"},
+		})
 	}
+	loginItems, err := mobileBrowserLoginReviewItems(ctx, deps)
+	if err != nil {
+		return nil, err
+	}
+	items = append(items, loginItems...)
 	return items, nil
 }
 
@@ -610,7 +712,116 @@ func mobileApprovals(ctx context.Context, deps Dependencies) ([]mobileApprovalVi
 		if detail, err := service.Detail(ctx, approval.ApprovalID); err == nil {
 			item.ResolverSupport = string(detail.ResolverSupport)
 		}
+		if mobileIsBrowserApproval(ctx, deps.Store, approval) {
+			item.BrowserEvent = "browser_mutation_approval_required"
+			item.DeepLink = mobileApprovalDeepLink(approval.ApprovalID)
+			item.Notification = mobileNotification(item.BrowserEvent, fmt.Sprintf("approval-%d", approval.ApprovalID), approval.TaskKey, item.DeepLink)
+		}
 		items = append(items, item)
+	}
+	return items, nil
+}
+
+func mobileReviewQueueDetail(ctx context.Context, deps Dependencies, queueID string) ([]mobileReviewItem, error) {
+	queueID = strings.TrimSpace(queueID)
+	if queueID == "" {
+		return []mobileReviewItem{}, nil
+	}
+	items, err := mobileReviewQueue(ctx, deps)
+	if err != nil {
+		return nil, err
+	}
+	for _, item := range items {
+		if item.QueueID == queueID {
+			return []mobileReviewItem{item}, nil
+		}
+	}
+	return []mobileReviewItem{}, nil
+}
+
+func mobileNotifications(ctx context.Context, deps Dependencies) ([]mobileNotificationView, error) {
+	items, err := mobileReviewQueue(ctx, deps)
+	if err != nil {
+		return nil, err
+	}
+	notifications := make([]mobileNotificationView, 0)
+	for _, item := range items {
+		if item.Notification != nil {
+			notifications = append(notifications, *item.Notification)
+		}
+	}
+	return notifications, nil
+}
+
+func mobileApprovalDeepLink(approvalID int64) string {
+	return fmt.Sprintf("/app/?approval_id=%d", approvalID)
+}
+
+func mobileNotification(kind string, objectKey string, title string, deepLink string) *mobileNotificationView {
+	return &mobileNotificationView{
+		ID:        fmt.Sprintf("%s:%s", kind, objectKey),
+		Kind:      kind,
+		Title:     title,
+		Body:      "Odin browser work needs operator review.",
+		DeepLink:  deepLink,
+		ObjectKey: objectKey,
+	}
+}
+
+func mobileIsBrowserApproval(ctx context.Context, store *sqlite.Store, approval projections.PendingApprovalView) bool {
+	if strings.Contains(strings.ToLower(approval.TaskKey), "browser") || strings.Contains(strings.ToLower(approval.WorkKind), "browser") {
+		return true
+	}
+	events, err := store.ListEvents(ctx, sqlite.ListEventsParams{TaskID: &approval.TaskID})
+	if err != nil {
+		return false
+	}
+	for _, event := range events {
+		if event.Type != runtimeevents.EventApprovalRequested || event.StreamID != approval.ApprovalID {
+			continue
+		}
+		var payload runtimeevents.ApprovalRequestedPayload
+		if err := json.Unmarshal(event.Payload, &payload); err == nil && strings.Contains(strings.ToLower(payload.RequestedBy), "browser") {
+			return true
+		}
+	}
+	return false
+}
+
+func mobileBrowserLoginReviewItems(ctx context.Context, deps Dependencies) ([]mobileReviewItem, error) {
+	if deps.Store == nil {
+		return nil, fmt.Errorf("runtime store unavailable")
+	}
+	sessions, err := deps.Store.ListBrowserSessions(ctx, sqlite.ListBrowserSessionsParams{})
+	if err != nil {
+		return nil, err
+	}
+	items := make([]mobileReviewItem, 0)
+	for _, session := range sessions {
+		requests, err := deps.Store.ListBrowserSessionLoginRequests(ctx, sqlite.ListBrowserSessionLoginRequestsParams{SessionID: session.ID})
+		if err != nil {
+			return nil, err
+		}
+		for _, request := range requests {
+			if request.Status != sqlite.BrowserSessionLoginRequestStatusRequested {
+				continue
+			}
+			deepLink := fmt.Sprintf("/browser/session/handoff?handoff_id=%s", request.HandoffID)
+			item := mobileReviewItem{
+				QueueID:        fmt.Sprintf("browser-login:%d", request.ID),
+				SourceType:     "browser_attended_login",
+				ObjectID:       request.ID,
+				ObjectKey:      fmt.Sprintf("browser-login-%d", request.ID),
+				Title:          fmt.Sprintf("Attended login required: %s", firstNonEmpty(session.Name, session.Domain)),
+				Status:         string(request.Status),
+				Reason:         "manual_login_required",
+				AllowedActions: []string{"open-handoff"},
+				BrowserEvent:   "browser_attended_login_required",
+				DeepLink:       deepLink,
+			}
+			item.Notification = mobileNotification(item.BrowserEvent, item.ObjectKey, item.Title, item.DeepLink)
+			items = append(items, item)
+		}
 	}
 	return items, nil
 }
@@ -630,8 +841,8 @@ func handleMobileApprovalDecision(writer http.ResponseWriter, request *http.Requ
 		writeAPIError(writer, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
-	body.Action = strings.ToLower(strings.TrimSpace(body.Action))
-	if body.Action != "approve" && body.Action != "deny" {
+	body.Action = strings.ToLower(strings.TrimSpace(firstNonEmpty(body.Action, body.Decision)))
+	if body.Action != "approve" && body.Action != "approved" && body.Action != "deny" && body.Action != "denied" {
 		writeAPIError(writer, http.StatusBadRequest, "invalid_approval_action", "action must be approve or deny")
 		return
 	}
@@ -646,7 +857,7 @@ func handleMobileApprovalDecision(writer http.ResponseWriter, request *http.Requ
 	}
 	result, err := approvalsvc.Service{Store: deps.Store}.Resolve(request.Context(), approvalsvc.ResolveParams{
 		ApprovalID: approvalID,
-		Action:     body.Action,
+		Action:     mobileNormalizeApprovalAction(body.Action),
 		DecisionBy: decisionBy,
 		Reason:     body.Reason,
 	})
@@ -671,10 +882,21 @@ func handleMobileApprovalDecision(writer http.ResponseWriter, request *http.Requ
 		ApprovalID:      result.Approval.ID,
 		TaskID:          result.Approval.TaskID,
 		Status:          result.Approval.Status,
-		Action:          body.Action,
+		Action:          mobileNormalizeApprovalAction(body.Action),
 		ResolverSupport: string(result.ResolverSupport),
 		ResolvedAt:      formatMobileOptionalTime(result.Approval.ResolvedAt),
 	})
+}
+
+func mobileNormalizeApprovalAction(action string) string {
+	switch strings.ToLower(strings.TrimSpace(action)) {
+	case "approved":
+		return "approve"
+	case "denied":
+		return "deny"
+	default:
+		return strings.ToLower(strings.TrimSpace(action))
+	}
 }
 
 func handleMobileRawIntake(writer http.ResponseWriter, request *http.Request, deps Dependencies, now func() time.Time) {
