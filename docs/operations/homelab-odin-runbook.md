@@ -174,6 +174,8 @@ make build
 go test ./...
 make odin-e2e-local
 make odin-actual-use-e2e
+make odin-mobile-e2e
+make odin-phone-release-check
 ./bin/odin backup --help
 ./bin/odin restore --help
 ./bin/odin verify-backup --help

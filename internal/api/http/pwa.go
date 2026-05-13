@@ -59,6 +59,7 @@ func handleMobileShareIntake(writer http.ResponseWriter, request *http.Request, 
 		writeAPIError(writer, http.StatusBadRequest, "pwa_share_intake_create_failed", err.Error())
 		return
 	}
+	recordMobileIntakeAudit(request.Context(), deps, request, item)
 	writeMobileJSON(writer, http.StatusAccepted, mobileIntakeResponse{IntakeItem: mobileIntakeView(item)})
 }
 
