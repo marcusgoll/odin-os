@@ -93,12 +93,27 @@ func TestOperationalHandlerServesMobileCapturePWAShell(t *testing.T) {
 	html := getURLText(t, server.URL+"/app/")
 	for _, want := range []string{
 		`<link rel="manifest" href="/app/manifest.webmanifest">`,
+		`What needs me now?`,
+		`Action Required`,
+		`Approvals`,
+		`Failed/Blocked`,
+		`Today`,
+		`Inbox`,
+		`Running Work`,
+		`Browser Needs Help`,
+		`Quiet Later`,
+		`Critical confirmation`,
 		`data-capture-kind="note"`,
-		`data-capture-kind="prompt"`,
+		`data-capture-kind="voice_note"`,
+		`data-capture-kind="photo"`,
 		`accept="image/*"`,
 		`capture="environment"`,
 		`id="voice-record"`,
 		`id="failed-uploads"`,
+		`id="capture-fab"`,
+		`id="register-device"`,
+		`aria-label="Capture a note"`,
+		`aria-label="Register this mobile device"`,
 		`/mobile/intake/raw`,
 	} {
 		if !strings.Contains(html, want) {
@@ -119,8 +134,38 @@ func TestOperationalHandlerServesMobileCapturePWAShell(t *testing.T) {
 	}
 
 	appJS := getURLText(t, server.URL+"/app/app.js")
-	if !strings.Contains(appJS, `navigator.serviceWorker.register('/app/service-worker.js')`) {
-		t.Fatalf("app.js missing service worker registration:\n%s", appJS)
+	for _, want := range []string{
+		`navigator.serviceWorker.register('/app/service-worker.js')`,
+		`/mobile/devices/register`,
+		`/mobile/status`,
+		`/mobile/overview`,
+		`/mobile/review-queue`,
+		`/mobile/approvals`,
+		`/mobile/browser/status`,
+		`/mobile/notifications/preferences`,
+		`/mobile/approvals/${item.approval_id}/decision`,
+		`No production mock data is shown.`,
+		`No action-required rows in current projections.`,
+		`Approval reason is required.`,
+		`Risk: resolver=`,
+		`Consequence: approve lets the resolver continue`,
+	} {
+		if !strings.Contains(appJS, want) {
+			t.Fatalf("/app/app.js missing %q:\n%s", want, appJS)
+		}
+	}
+
+	styles := getURLText(t, server.URL+"/app/styles.css")
+	for _, want := range []string{
+		`prefers-color-scheme: dark`,
+		`.capture-fab`,
+		`.status-card`,
+		`.confirmation-panel`,
+		`@media (max-width: 560px)`,
+	} {
+		if !strings.Contains(styles, want) {
+			t.Fatalf("/app/styles.css missing visual smoke marker %q:\n%s", want, styles)
+		}
 	}
 }
 

@@ -10,82 +10,164 @@
   </head>
   <body>
     <main class="shell">
-      <section class="panel">
-        <div class="topline">
+      <header class="hero" aria-labelledby="home-title">
+        <div>
+          <p class="eyebrow">Daily operator</p>
+          <h1 id="home-title">What needs me now?</h1>
+          <p id="home-summary" class="summary">Load Odin projections to see action-required work.</p>
+        </div>
+        <button id="register-device" class="ghost-button" type="button" aria-label="Register this mobile device">Register</button>
+      </header>
+
+      <section class="capture-panel" aria-labelledby="capture-title-label">
+        <div class="section-heading">
           <div>
-            <h1>Odin Inbox</h1>
+            <h2 id="capture-title-label">Capture</h2>
             <p id="capture-status">Raw capture stores evidence first.</p>
           </div>
-          <button id="register-device" type="button">Register</button>
+          <button id="refresh-dashboard" class="icon-button" type="button" aria-label="Refresh Odin projections">Refresh</button>
         </div>
 
         <form id="capture-form" data-api-endpoint="/mobile/intake/raw">
-          <fieldset class="kind-grid" aria-label="Capture type">
-            <label><input type="radio" name="kind" value="note" data-capture-kind="note" checked> Note</label>
-            <label><input type="radio" name="kind" value="prompt" data-capture-kind="prompt"> Prompt</label>
-            <label><input type="radio" name="kind" value="idea" data-capture-kind="idea"> Idea</label>
-            <label><input type="radio" name="kind" value="task" data-capture-kind="task"> Task</label>
-            <label><input type="radio" name="kind" value="bug" data-capture-kind="bug"> Bug</label>
-            <label><input type="radio" name="kind" value="project_note" data-capture-kind="project_note"> Project</label>
+          <fieldset class="capture-tabs" aria-label="Capture type">
+            <label><input type="radio" name="kind" value="note" data-capture-kind="note" checked> Text</label>
+            <label><input type="radio" name="kind" value="voice_note" data-capture-kind="voice_note"> Voice</label>
+            <label><input type="radio" name="kind" value="photo" data-capture-kind="photo"> Photo</label>
           </fieldset>
 
           <label class="field">
+            <span>Quick note</span>
+            <textarea id="capture-body" name="content" rows="4" placeholder="Capture the raw note, prompt, task, or bug."></textarea>
+          </label>
+
+          <label class="field compact-field">
             <span>Title</span>
-            <input id="capture-title" name="title" autocomplete="off" placeholder="Optional short title">
+            <input id="capture-title" name="title" autocomplete="off" placeholder="Optional title">
           </label>
 
-          <label class="field">
-            <span>Body</span>
-            <textarea id="capture-body" name="content" rows="7" placeholder="Capture the raw note, prompt, task, or bug."></textarea>
-          </label>
-
-          <div class="media-row">
-            <label class="file-button">
+          <div class="media-row" aria-label="Capture attachments">
+            <label class="file-button" aria-label="Attach a photo">
               <input id="image-input" name="attachment" type="file" accept="image/*" capture="environment">
               Photo
             </label>
-            <button id="voice-record" type="button">Record voice</button>
+            <button id="voice-record" type="button" aria-label="Record a voice note">Voice</button>
             <span id="media-state">No media attached</span>
           </div>
 
-          <label class="field">
-            <span>Transcript placeholder</span>
-            <input id="capture-transcript" name="transcript" placeholder="Optional transcript or pending marker">
-          </label>
-
           <div class="field-grid">
-            <input id="source-app" name="source_app" placeholder="Source app">
-            <input id="share-url" name="share_url" placeholder="Share URL">
+            <label>
+              <span>Transcript</span>
+              <input id="capture-transcript" name="transcript" placeholder="Optional transcript">
+            </label>
+            <label>
+              <span>Source</span>
+              <input id="source-app" name="source_app" placeholder="App or context">
+            </label>
           </div>
 
-          <button class="primary" type="submit">Capture raw intake</button>
+          <label class="field compact-field">
+            <span>Share URL</span>
+            <input id="share-url" name="share_url" inputmode="url" placeholder="Optional source URL">
+          </label>
+
+          <button id="capture-submit" class="primary" type="submit" aria-label="Capture raw intake">Capture raw intake</button>
         </form>
       </section>
 
-      <section class="panel compact">
-        <div class="topline">
-          <h2>Approvals</h2>
-          <button id="refresh-approvals" type="button">Refresh</button>
-        </div>
-        <ul id="approval-list"></ul>
+      <section id="offline-state" class="state-banner" aria-live="polite" hidden>
+        Offline. The shell is available, but runtime projections and uploads need the Odin service.
       </section>
 
-      <section class="panel compact">
-        <div class="topline">
-          <h2>Browser Review</h2>
-          <button id="refresh-review" type="button">Refresh</button>
-        </div>
-        <ul id="review-list"></ul>
+      <section id="dashboard-error" class="state-banner danger" aria-live="polite" hidden></section>
+
+      <section class="section-stack" aria-label="Operator dashboard">
+        <section class="operator-section urgent" aria-labelledby="action-required-title">
+          <div class="section-heading">
+            <h2 id="action-required-title">Action Required</h2>
+            <span id="action-count" class="count-pill">0</span>
+          </div>
+          <div id="action-required-list" class="card-list"></div>
+        </section>
+
+        <section class="operator-section" aria-labelledby="approvals-title">
+          <div class="section-heading">
+            <h2 id="approvals-title">Approvals</h2>
+            <span id="approvals-count" class="count-pill">0</span>
+          </div>
+          <div id="approvals-list" class="card-list"></div>
+        </section>
+
+        <section id="approval-confirmation" class="confirmation-panel" aria-labelledby="approval-confirmation-title" hidden>
+          <h3 id="approval-confirmation-title">Critical confirmation</h3>
+          <p id="approval-confirmation-summary"></p>
+          <label class="field">
+            <span>Reason</span>
+            <textarea id="approval-reason" rows="3" placeholder="Required audit reason"></textarea>
+          </label>
+          <div class="button-row">
+            <button id="approval-cancel" type="button" class="ghost-button" aria-label="Cancel approval decision">Cancel</button>
+            <button id="approval-confirm" type="button" class="danger-button" aria-label="Confirm approval decision">Confirm</button>
+          </div>
+        </section>
+
+        <section class="operator-section" aria-labelledby="failed-blocked-title">
+          <div class="section-heading">
+            <h2 id="failed-blocked-title">Failed/Blocked</h2>
+            <span id="failed-blocked-count" class="count-pill">0</span>
+          </div>
+          <div id="failed-blocked-list" class="card-list"></div>
+        </section>
+
+        <section class="operator-section" aria-labelledby="today-title">
+          <div class="section-heading">
+            <h2 id="today-title">Today</h2>
+          </div>
+          <div id="today-list" class="card-list"></div>
+        </section>
+
+        <section class="operator-section" aria-labelledby="inbox-title">
+          <div class="section-heading">
+            <h2 id="inbox-title">Inbox</h2>
+            <span id="inbox-count" class="count-pill">0</span>
+          </div>
+          <div id="inbox-list" class="card-list"></div>
+        </section>
+
+        <section class="operator-section" aria-labelledby="running-work-title">
+          <div class="section-heading">
+            <h2 id="running-work-title">Running Work</h2>
+            <span id="running-work-count" class="count-pill">0</span>
+          </div>
+          <div id="running-work-list" class="card-list"></div>
+        </section>
+
+        <section class="operator-section" aria-labelledby="browser-title">
+          <div class="section-heading">
+            <h2 id="browser-title">Browser Needs Help</h2>
+            <span id="browser-count" class="count-pill">0</span>
+          </div>
+          <div id="browser-list" class="card-list"></div>
+        </section>
+
+        <section class="operator-section quiet" aria-labelledby="quiet-title">
+          <div class="section-heading">
+            <h2 id="quiet-title">Quiet Later</h2>
+          </div>
+          <div id="quiet-list" class="card-list"></div>
+        </section>
       </section>
 
-      <section class="panel compact">
-        <div class="topline">
-          <h2>Failed Uploads</h2>
-          <button id="retry-failed" type="button">Retry</button>
+      <section class="operator-section" aria-labelledby="failed-uploads-title">
+        <div class="section-heading">
+          <h2 id="failed-uploads-title">Failed Uploads</h2>
+          <button id="retry-failed" type="button" class="ghost-button" aria-label="Retry failed captures">Retry</button>
         </div>
-        <ul id="failed-uploads"></ul>
+        <ul id="failed-uploads" class="failed-list"></ul>
       </section>
     </main>
+
+    <button id="capture-fab" class="capture-fab" type="button" aria-label="Capture a note">Capture</button>
+
     <script src="/app/app.js"></script>
   </body>
 </html>
