@@ -55,10 +55,12 @@ docker-smoke:
 	bash scripts/tests/docker-compose-smoke.sh
 
 odin-pwa-build:
-	$(GO) test ./internal/api/http -run TestPWA -count=1
+	$(GO) test ./internal/api/http -run 'Test(PWA|OperationalHandler(ServesInstallablePWAShellAssets|ExposesMobileRuntimeAPIs))' -count=1
+	node scripts/tests/assert-odin-pwa-static.mjs
 
-odin-pwa-e2e:
+odin-pwa-e2e: build
 	$(GO) test ./internal/api/http -run 'TestMobileShare|TestPWA|TestNotification' -count=1 -v
+	./scripts/tests/odin-pwa-e2e.sh
 
 odin-mobile-e2e:
 	$(GO) test ./internal/api/http -run 'TestMobile|TestPWA|TestOperationalHandlerServesMobileCapturePWAShell' -count=1 -v

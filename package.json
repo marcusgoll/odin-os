@@ -1,0 +1,9 @@
+{
+  "private": true,
+  "scripts": {
+    "odin-pwa:e2e": "playwright test --config=playwright.config.js tests/pwa/odin-pwa.spec.js"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.60.0"
+  }
+}

@@ -46,6 +46,15 @@ func registerMobileRoutes(mux *http.ServeMux, deps Dependencies, now func() time
 		handleMobileDeviceRevoke(writer, request, deps)
 	}))
 
+	mux.HandleFunc("GET /mobile/summary", mobileAuthorized(deps, func(writer http.ResponseWriter, request *http.Request) {
+		summary, err := mobileSummary(request.Context(), deps, now)
+		if err != nil {
+			writeAPIError(writer, http.StatusServiceUnavailable, "mobile_summary_unavailable", err.Error())
+			return
+		}
+		writeMobileJSON(writer, http.StatusOK, summary)
+	}))
+
 	mux.HandleFunc("GET /mobile/status", mobileAuthorized(deps, func(writer http.ResponseWriter, request *http.Request) {
 		payload, err := buildStatusPayload(request.Context(), deps, now)
 		if err != nil {
@@ -128,6 +137,33 @@ func registerMobileRoutes(mux *http.ServeMux, deps Dependencies, now func() time
 		writeMobileJSON(writer, http.StatusOK, map[string]any{"items": items, "count": len(items)})
 	}))
 
+	mux.HandleFunc("GET /mobile/review", mobileAuthorized(deps, func(writer http.ResponseWriter, request *http.Request) {
+		items, err := mobileReviewQueue(request.Context(), deps)
+		if err != nil {
+			writeAPIError(writer, http.StatusServiceUnavailable, "mobile_review_unavailable", err.Error())
+			return
+		}
+		writeMobileJSON(writer, http.StatusOK, map[string]any{"items": items, "count": len(items)})
+	}))
+
+	mux.HandleFunc("GET /mobile/work", mobileAuthorized(deps, func(writer http.ResponseWriter, request *http.Request) {
+		if deps.ReadModels == nil {
+			writeAPIError(writer, http.StatusServiceUnavailable, "read_models_unavailable", "read models unavailable")
+			return
+		}
+		workItems, err := projections.ListTaskStatusViews(request.Context(), deps.ReadModels)
+		if err != nil {
+			writeAPIError(writer, http.StatusServiceUnavailable, "mobile_work_unavailable", err.Error())
+			return
+		}
+		runs, err := projections.ListRunSummaryViews(request.Context(), deps.ReadModels)
+		if err != nil {
+			writeAPIError(writer, http.StatusServiceUnavailable, "mobile_runs_unavailable", err.Error())
+			return
+		}
+		writeMobileJSON(writer, http.StatusOK, map[string]any{"work_items": workItems, "runs": runs})
+	}))
+
 	mux.HandleFunc("GET /mobile/approvals", mobileAuthorized(deps, func(writer http.ResponseWriter, request *http.Request) {
 		items, err := mobileApprovals(request.Context(), deps)
 		if err != nil {
@@ -168,6 +204,55 @@ func registerMobileRoutes(mux *http.ServeMux, deps Dependencies, now func() time
 			return
 		}
 		handleMobileAttachmentIntake(writer, request, deps, now)
+	}))
+
+	mux.HandleFunc("GET /mobile/inbox", mobileAuthorized(deps, func(writer http.ResponseWriter, request *http.Request) {
+		if deps.Store == nil {
+			writeAPIError(writer, http.StatusServiceUnavailable, "mobile_inbox_store_unavailable", "runtime store unavailable")
+			return
+		}
+		items, err := deps.Store.ListIntakeItems(request.Context(), sqlite.ListIntakeItemsParams{WorkspaceID: workspaces.DefaultWorkspaceKey})
+		if err != nil {
+			writeAPIError(writer, http.StatusServiceUnavailable, "mobile_inbox_unavailable", err.Error())
+			return
+		}
+		views := make([]mobileIntakeItemView, 0, len(items))
+		for _, item := range items {
+			views = append(views, mobileIntakeView(item))
+		}
+		writeMobileJSON(writer, http.StatusOK, map[string]any{
+			"raw_items":    views,
+			"linked_items": []mobileIntakeItemView{},
+			"capture": map[string]any{
+				"enabled":          true,
+				"endpoint":         "/mobile/intake/raw",
+				"policy_statement": "Mobile capture stores raw intake evidence first; review and promotion stay in Odin.",
+			},
+		})
+	}))
+
+	mux.HandleFunc("GET /mobile/settings", mobileAuthorized(deps, func(writer http.ResponseWriter, request *http.Request) {
+		writeMobileJSON(writer, http.StatusOK, map[string]any{
+			"runtime_source": "odin-api",
+			"admin_actions": map[string]any{
+				"enabled":          true,
+				"policy_statement": "Mutations require an Odin admin token and explicit API authorization.",
+			},
+			"offline": mobileOfflinePolicy(),
+			"capture": map[string]any{
+				"enabled":          true,
+				"policy_statement": "Capture requires a live Odin connection; failed browser uploads are visibly retained for attended retry.",
+			},
+			"endpoints": []string{
+				"/mobile/summary",
+				"/mobile/approvals",
+				"/mobile/review",
+				"/mobile/work",
+				"/mobile/inbox",
+				"/mobile/settings",
+				"/mobile/intake/raw",
+			},
+		})
 	}))
 
 	mux.HandleFunc("GET /mobile/notifications/preferences", mobileAuthorized(deps, func(writer http.ResponseWriter, request *http.Request) {
@@ -263,6 +348,7 @@ func writeMobileJSON(writer http.ResponseWriter, statusCode int, payload any) {
 type mobileReviewItem struct {
 	QueueID        string                  `json:"queue_id"`
 	SourceType     string                  `json:"source_type"`
+	Source         string                  `json:"source"`
 	ObjectID       int64                   `json:"object_id"`
 	ObjectKey      string                  `json:"object_key"`
 	Title          string                  `json:"title"`
@@ -277,12 +363,19 @@ type mobileReviewItem struct {
 
 type mobileApprovalView struct {
 	ApprovalID      int64                   `json:"approval_id"`
+	ID              int64                   `json:"id"`
 	TaskID          int64                   `json:"task_id"`
 	TaskKey         string                  `json:"task_key"`
 	ProjectKey      string                  `json:"project_key"`
 	Status          string                  `json:"status"`
 	RequestedAt     string                  `json:"requested_at"`
 	ResolverSupport string                  `json:"resolver_support,omitempty"`
+	Title           string                  `json:"title,omitempty"`
+	RequestedAction string                  `json:"requested_action,omitempty"`
+	RequiredReason  string                  `json:"required_reason,omitempty"`
+	RiskLevel       string                  `json:"risk_level,omitempty"`
+	SourceObject    string                  `json:"source_object,omitempty"`
+	Actions         []string                `json:"actions,omitempty"`
 	BrowserEvent    string                  `json:"browser_event,omitempty"`
 	DeepLink        string                  `json:"deep_link,omitempty"`
 	Notification    *mobileNotificationView `json:"notification,omitempty"`
@@ -329,6 +422,57 @@ type mobileApprovalDecisionResponse struct {
 	Action          string `json:"action"`
 	ResolverSupport string `json:"resolver_support"`
 	ResolvedAt      string `json:"resolved_at,omitempty"`
+}
+
+func mobileSummary(ctx context.Context, deps Dependencies, now func() time.Time) (map[string]any, error) {
+	status, err := buildStatusPayload(ctx, deps, now)
+	if err != nil {
+		return nil, err
+	}
+	runAttempts := status.Counts.ActiveRunAttempts
+	intakeItems := 0
+	if deps.Store != nil {
+		items, err := deps.Store.ListIntakeItems(ctx, sqlite.ListIntakeItemsParams{WorkspaceID: workspaces.DefaultWorkspaceKey})
+		if err != nil {
+			return nil, err
+		}
+		intakeItems = len(items)
+	}
+	if deps.ReadModels != nil {
+		runs, err := projections.ListRunSummaryViews(ctx, deps.ReadModels)
+		if err != nil {
+			return nil, err
+		}
+		runAttempts = len(runs)
+	}
+	return map[string]any{
+		"generated_at": status.GeneratedAt,
+		"readiness": map[string]any{
+			"ready":         status.Ready,
+			"health_status": status.HealthStatus,
+		},
+		"runtime": status.Runtime,
+		"counts": map[string]int{
+			"approvals":           status.Counts.PendingApprovals,
+			"review_queue":        status.Counts.ReviewQueueItems,
+			"work_items":          status.Counts.WorkItems,
+			"open_work_items":     status.Counts.OpenWorkItems,
+			"run_attempts":        runAttempts,
+			"active_run_attempts": status.Counts.ActiveRunAttempts,
+			"automation_triggers": status.Counts.AutomationTriggers,
+			"intake_items":        intakeItems,
+		},
+		"offline": mobileOfflinePolicy(),
+	}, nil
+}
+
+func mobileOfflinePolicy() map[string]any {
+	return map[string]any{
+		"mode":              "shell-only",
+		"actions_queued":    false,
+		"policy_statement":  "Only static app shell files are cached for offline use; runtime data must be fetched from Odin API.",
+		"cache_runtime_api": false,
+	}
 }
 
 type mobileRawIntakeRequest struct {
@@ -576,6 +720,7 @@ func mobileReviewQueue(ctx context.Context, deps Dependencies) ([]mobileReviewIt
 		items = append(items, mobileReviewItem{
 			QueueID:        fmt.Sprintf("intake-review:%d", item.ID),
 			SourceType:     "intake_review",
+			Source:         "intake_review",
 			ObjectID:       item.ID,
 			ObjectKey:      fmt.Sprintf("intake-%d", item.ID),
 			Title:          item.Subject,
@@ -592,6 +737,7 @@ func mobileReviewQueue(ctx context.Context, deps Dependencies) ([]mobileReviewIt
 		item := mobileReviewItem{
 			QueueID:        fmt.Sprintf("approval:%d", approval.ApprovalID),
 			SourceType:     "approval",
+			Source:         "approval",
 			ObjectID:       approval.ApprovalID,
 			ObjectKey:      fmt.Sprintf("approval-%d", approval.ApprovalID),
 			Title:          approval.TaskKey,
@@ -636,6 +782,7 @@ func mobileReviewQueue(ctx context.Context, deps Dependencies) ([]mobileReviewIt
 			items = append(items, mobileReviewItem{
 				QueueID:        fmt.Sprintf("browser-evidence:%d", artifact.ID),
 				SourceType:     "browser_evidence",
+				Source:         "browser_evidence",
 				ObjectID:       artifact.ID,
 				ObjectKey:      fmt.Sprintf("browser-evidence-%d", artifact.ID),
 				Title:          firstNonEmpty(artifact.Summary, "Browser evidence ready"),
@@ -656,6 +803,7 @@ func mobileReviewQueue(ctx context.Context, deps Dependencies) ([]mobileReviewIt
 			item := mobileReviewItem{
 				QueueID:        fmt.Sprintf("browser-run-failed:%d", task.TaskID),
 				SourceType:     "browser_run_failed",
+				Source:         "browser_run_failed",
 				ObjectID:       task.TaskID,
 				ObjectKey:      task.TaskKey,
 				Title:          task.Title,
@@ -673,6 +821,7 @@ func mobileReviewQueue(ctx context.Context, deps Dependencies) ([]mobileReviewIt
 		items = append(items, mobileReviewItem{
 			QueueID:        fmt.Sprintf("failed-work:%d", task.TaskID),
 			SourceType:     "failed_work",
+			Source:         "failed_work",
 			ObjectID:       task.TaskID,
 			ObjectKey:      task.TaskKey,
 			Title:          task.Title,
@@ -702,12 +851,21 @@ func mobileApprovals(ctx context.Context, deps Dependencies) ([]mobileApprovalVi
 	items := make([]mobileApprovalView, 0, len(approvals))
 	for _, approval := range approvals {
 		item := mobileApprovalView{
-			ApprovalID:  approval.ApprovalID,
-			TaskID:      approval.TaskID,
-			TaskKey:     approval.TaskKey,
-			ProjectKey:  approval.ProjectKey,
-			Status:      approval.Status,
-			RequestedAt: approval.RequestedAt,
+			ApprovalID:      approval.ApprovalID,
+			ID:              approval.ApprovalID,
+			TaskID:          approval.TaskID,
+			TaskKey:         approval.TaskKey,
+			ProjectKey:      approval.ProjectKey,
+			Status:          approval.Status,
+			RequestedAt:     approval.RequestedAt,
+			Title:           approval.TaskKey,
+			RequestedAction: "runtime action",
+			RequiredReason:  "approval_required",
+			RiskLevel:       "approval_required",
+			SourceObject:    approval.ProjectKey + "/" + approval.TaskKey,
+		}
+		if approval.Status == "pending" {
+			item.Actions = []string{"approve", "deny"}
 		}
 		if detail, err := service.Detail(ctx, approval.ApprovalID); err == nil {
 			item.ResolverSupport = string(detail.ResolverSupport)
