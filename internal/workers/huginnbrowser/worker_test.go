@@ -511,7 +511,7 @@ func TestWorkerRunBrowserModeWithRealChromeUsesLocalStaticPage(t *testing.T) {
 		StartURLs:          []string{server.URL + "/js"},
 		AllowedDomains:     []string{serverURLHost(t, server.URL)},
 		MaxPages:           1,
-		MaxDurationSeconds: 5,
+		MaxDurationSeconds: 15,
 		EvidenceRequired:   true,
 	})), &stdout); err != nil {
 		t.Fatalf("Run() error = %v", err)

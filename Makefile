@@ -58,7 +58,7 @@ odin-pwa-build:
 	$(GO) test ./internal/api/http -run TestPWA -count=1
 
 odin-pwa-e2e:
-	$(GO) test ./internal/api/http -run TestMobileShare -count=1
+	$(GO) test ./internal/api/http -run 'TestMobileShare|TestPWA|TestNotification' -count=1 -v
 
 odin-e2e-local:
 	./scripts/odin-e2e-local.sh

@@ -1007,6 +1007,30 @@ func (store *Store) CreateBrowserSessionLoginRequest(ctx context.Context, params
 		if err != nil {
 			return err
 		}
+		if session.Status != BrowserSessionStatusLoginRequested {
+			if _, err := tx.ExecContext(ctx, `
+				UPDATE browser_session_profiles
+				SET status = ?, updated_at = ?
+				WHERE id = ?
+			`, string(BrowserSessionStatusLoginRequested), formatTime(now), session.ID); err != nil {
+				return err
+			}
+			updated := session
+			updated.Status = BrowserSessionStatusLoginRequested
+			updated.UpdatedAt = now
+			if err := appendBrowserSessionEventTx(ctx, tx, updated, runtimeevents.EventBrowserSessionStatusChanged, runtimeevents.BrowserSessionStatusChangedPayload{
+				SessionID:      updated.ID,
+				PreviousStatus: string(session.Status),
+				Status:         string(updated.Status),
+				Actor:          "system",
+				Reason:         "browser session login requested",
+				LastVerifiedAt: formatOptionalTime(updated.LastVerifiedAt),
+				ExpiresAt:      formatOptionalTime(updated.ExpiresAt),
+			}, now); err != nil {
+				return err
+			}
+			session = updated
+		}
 		return appendBrowserSessionEventTx(ctx, tx, session, runtimeevents.EventBrowserSessionLoginRequested, runtimeevents.BrowserSessionLoginRequestedPayload{
 			SessionID:      session.ID,
 			LoginRequestID: request.ID,

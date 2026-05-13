@@ -10,6 +10,7 @@ import (
 
 	"odin-os/internal/cli/scope"
 	"odin-os/internal/core/initiatives"
+	coreprofile "odin-os/internal/core/profile"
 	coreprojects "odin-os/internal/core/projects"
 	knowledgememory "odin-os/internal/memory/knowledge"
 	"odin-os/internal/registry"
@@ -43,6 +44,26 @@ func TestBuildReturnsCanonicalOverviewFromCurrentAuthority(t *testing.T) {
 		PayloadJSON: `{"workflow_id":"alpha-ci","run_id":"42"}`,
 	}); err != nil {
 		t.Fatalf("CreateTaskIntake() error = %v", err)
+	}
+	notificationsEnabled := true
+	quietHours := "22:00-07:00"
+	batching := "quiet_hours"
+	if _, err := (coreprofile.Service{Store: env.store}).Update(ctx, coreprofile.UpdateParams{
+		NotificationsEnabled: &notificationsEnabled,
+		QuietHours:           &quietHours,
+		NotificationBatching: &batching,
+	}); err != nil {
+		t.Fatalf("profile Update(notifications) error = %v", err)
+	}
+	if _, err := env.store.UpsertNotificationDevice(ctx, sqlite.UpsertNotificationDeviceParams{
+		WorkspaceID: env.workspaceID,
+		DeviceKey:   "desktop",
+		Label:       "Desktop",
+		Endpoint:    "https://push.example.test/desktop",
+		P256DH:      "public",
+		Auth:        "auth",
+	}); err != nil {
+		t.Fatalf("UpsertNotificationDevice() error = %v", err)
 	}
 
 	view, err := Service{
@@ -187,6 +208,9 @@ func TestBuildReturnsCanonicalOverviewFromCurrentAuthority(t *testing.T) {
 	}
 	if trigger.NextDueAt != "2026-04-25T09:00:00Z" {
 		t.Fatalf("Automation trigger next due = %q, want 2026-04-25T09:00:00Z", trigger.NextDueAt)
+	}
+	if view.Notifications.Wiring != WiringLive || !view.Notifications.NotificationsEnabled || view.Notifications.ActiveDeviceCount != 1 || view.Notifications.QuietHours != quietHours || view.Notifications.Batching != batching {
+		t.Fatalf("Notifications lane = %+v, want live enabled lane with one device", view.Notifications)
 	}
 }
 

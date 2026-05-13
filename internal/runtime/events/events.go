@@ -33,6 +33,7 @@ const (
 	StreamFollowUp           StreamType = "follow_up"
 	StreamGoal               StreamType = "goal"
 	StreamBrowserSession     StreamType = "browser_session"
+	StreamNotification       StreamType = "notification"
 )
 
 type Type string
@@ -153,6 +154,9 @@ const (
 	EventBrowserProfileExpired              Type = "browser.profile_expired"
 	EventBrowserProfileCleaned              Type = "browser.profile_cleaned"
 	EventBrowserProfileCleanupFailed        Type = "browser.profile_cleanup_failed"
+	EventNotificationDeviceSubscribed       Type = "notification.device_subscribed"
+	EventNotificationDeviceRevoked          Type = "notification.device_revoked"
+	EventNotificationCreated                Type = "notification.created"
 )
 
 const (
@@ -435,6 +439,35 @@ type BrowserSessionLoginExpiredPayload struct {
 	PreviousStatus string `json:"previous_status"`
 	Status         string `json:"status"`
 	ExpiresAt      string `json:"expires_at"`
+}
+
+type NotificationDeviceSubscribedPayload struct {
+	DeviceID      int64  `json:"device_id"`
+	WorkspaceID   int64  `json:"workspace_id"`
+	DeviceKey     string `json:"device_key"`
+	Label         string `json:"label"`
+	EndpointHash  string `json:"endpoint_hash"`
+	Status        string `json:"status"`
+	Notifications bool   `json:"notifications_enabled"`
+}
+
+type NotificationDeviceRevokedPayload struct {
+	DeviceID     int64  `json:"device_id"`
+	WorkspaceID  int64  `json:"workspace_id"`
+	DeviceKey    string `json:"device_key"`
+	EndpointHash string `json:"endpoint_hash"`
+	Reason       string `json:"reason,omitempty"`
+}
+
+type NotificationCreatedPayload struct {
+	NotificationID    int64  `json:"notification_id"`
+	WorkspaceID       int64  `json:"workspace_id"`
+	SourceEventID     *int64 `json:"source_event_id,omitempty"`
+	NotificationType  string `json:"notification_type"`
+	Priority          string `json:"priority"`
+	Route             string `json:"route"`
+	Status            string `json:"status"`
+	SuppressionReason string `json:"suppression_reason,omitempty"`
 }
 
 type BrowserHandoffRunnerLifecyclePayload struct {

@@ -243,6 +243,33 @@ func NewOperationalHandler(deps Dependencies) http.Handler {
 	mux.HandleFunc("POST /browser/session/handoff/complete", func(writer http.ResponseWriter, request *http.Request) {
 		handleBrowserSessionHandoffComplete(writer, request, deps)
 	})
+	mux.HandleFunc("GET /pwa", func(writer http.ResponseWriter, request *http.Request) {
+		handlePWAShell(writer, request)
+	})
+	mux.HandleFunc("GET /manifest.webmanifest", func(writer http.ResponseWriter, request *http.Request) {
+		handlePWAManifest(writer, request)
+	})
+	mux.HandleFunc("GET /service-worker.js", func(writer http.ResponseWriter, request *http.Request) {
+		handlePWAServiceWorker(writer, request)
+	})
+	mux.HandleFunc("GET /notifications", func(writer http.ResponseWriter, request *http.Request) {
+		handleNotificationsList(writer, request, deps)
+	})
+	mux.HandleFunc("GET /notifications/preferences", func(writer http.ResponseWriter, request *http.Request) {
+		handleNotificationPreferences(writer, request, deps)
+	})
+	mux.HandleFunc("GET /notifications/devices", func(writer http.ResponseWriter, request *http.Request) {
+		handleNotificationDevices(writer, request, deps)
+	})
+	mux.HandleFunc("POST /notifications/subscriptions", func(writer http.ResponseWriter, request *http.Request) {
+		handleNotificationSubscriptionCreate(writer, request, deps)
+	})
+	mux.HandleFunc("DELETE /notifications/devices/{device_id}", func(writer http.ResponseWriter, request *http.Request) {
+		handleNotificationDeviceDelete(writer, request, deps)
+	})
+	mux.HandleFunc("POST /notifications/test-event", func(writer http.ResponseWriter, request *http.Request) {
+		handleNotificationTestEvent(writer, request, deps)
+	})
 	mux.HandleFunc("POST /kill-switch/on", func(writer http.ResponseWriter, request *http.Request) {
 		handleAdminAction(writer, request, deps, "kill_switch_on", func(ctx context.Context, admin AdminActions) error {
 			return admin.KillSwitchOn(ctx)

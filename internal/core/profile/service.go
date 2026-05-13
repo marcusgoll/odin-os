@@ -60,6 +60,12 @@ func (service Service) Update(ctx context.Context, params UpdateParams) (Operati
 	if params.QuietHours != nil {
 		current.Preferences.QuietHours = *params.QuietHours
 	}
+	if params.NotificationsEnabled != nil {
+		current.Preferences.NotificationsEnabled = *params.NotificationsEnabled
+	}
+	if params.NotificationBatching != nil {
+		current.Preferences.NotificationBatching = *params.NotificationBatching
+	}
 	if params.RequireHumanApprovalForExternalEffects != nil {
 		current.Boundaries.ApprovalDefaults.RequireHumanApprovalForExternalEffects = *params.RequireHumanApprovalForExternalEffects
 	}
@@ -158,6 +164,12 @@ func describeProfileUpdate(params UpdateParams) (string, string, bool, error) {
 	details := map[string]any{}
 	if params.QuietHours != nil {
 		details["quiet_hours"] = *params.QuietHours
+	}
+	if params.NotificationsEnabled != nil {
+		details["notifications_enabled"] = *params.NotificationsEnabled
+	}
+	if params.NotificationBatching != nil {
+		details["notification_batching"] = *params.NotificationBatching
 	}
 	if params.RequireHumanApprovalForExternalEffects != nil {
 		details["require_human_approval_for_external_effects"] = *params.RequireHumanApprovalForExternalEffects

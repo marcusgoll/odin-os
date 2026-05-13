@@ -12,6 +12,7 @@ import (
 
 	"odin-os/internal/cli/scope"
 	"odin-os/internal/core/initiatives"
+	coreprofile "odin-os/internal/core/profile"
 	coreprojects "odin-os/internal/core/projects"
 	"odin-os/internal/core/workspaces"
 	knowledgememory "odin-os/internal/memory/knowledge"
@@ -69,6 +70,7 @@ type View struct {
 	KnowledgeContextPacks KnowledgeContextPackLane `json:"knowledge_context_packs"`
 	IntakeInbox           IntakeInboxLane          `json:"intake_inbox"`
 	AutomationTriggers    AutomationTriggerLane    `json:"automation_triggers"`
+	Notifications         NotificationLane         `json:"notifications"`
 	DeliveryProfiles      DeliveryProfileLane      `json:"delivery_profiles"`
 	ExecutionIntent       ExecutionIntentLane      `json:"execution_intent"`
 	BinarySource          BinarySourceLane         `json:"binary_source"`
@@ -531,6 +533,15 @@ type AutomationTriggerLane struct {
 	Items             []AutomationTriggerSummary `json:"items"`
 }
 
+type NotificationLane struct {
+	Wiring               Wiring `json:"wiring"`
+	NotificationsEnabled bool   `json:"notifications_enabled"`
+	QuietHours           string `json:"quiet_hours,omitempty"`
+	Batching             string `json:"batching,omitempty"`
+	ActiveDeviceCount    int    `json:"active_device_count"`
+	InAppUnreadCount     int    `json:"in_app_unread_count"`
+}
+
 type AutomationTriggerSummary struct {
 	Source                 string  `json:"source"`
 	TriggerID              int64   `json:"trigger_id"`
@@ -603,6 +614,9 @@ func (service Service) Build(ctx context.Context, resolved scope.Resolution) (Vi
 		AutomationTriggers: AutomationTriggerLane{
 			Wiring: WiringNotYetWired,
 		},
+		Notifications: NotificationLane{
+			Wiring: WiringLive,
+		},
 		DeliveryProfiles: deliveryProfileLane(service.RegistrySnapshot),
 		ExecutionIntent: ExecutionIntentLane{
 			Wiring: WiringLive,
@@ -632,6 +646,29 @@ func (service Service) Build(ctx context.Context, resolved scope.Resolution) (Vi
 	case sql.ErrNoRows:
 	default:
 		return View{}, err
+	}
+
+	profile, err := (coreprofile.Service{Store: service.Store, WorkspaceKey: workspaces.DefaultWorkspaceKey}).Get(ctx)
+	if err != nil && err != sql.ErrNoRows {
+		return View{}, err
+	}
+	if err == nil {
+		devices, err := service.Store.ListNotificationDevices(ctx, sqlite.ListNotificationDevicesParams{WorkspaceID: profile.WorkspaceID})
+		if err != nil {
+			return View{}, err
+		}
+		notifications, err := service.Store.ListNotifications(ctx, sqlite.ListNotificationsParams{WorkspaceID: profile.WorkspaceID, UnreadOnly: true})
+		if err != nil {
+			return View{}, err
+		}
+		view.Notifications = NotificationLane{
+			Wiring:               WiringLive,
+			NotificationsEnabled: profile.Preferences.NotificationsEnabled,
+			QuietHours:           profile.Preferences.QuietHours,
+			Batching:             profile.Preferences.NotificationBatching,
+			ActiveDeviceCount:    len(devices),
+			InAppUnreadCount:     len(notifications),
+		}
 	}
 
 	initiativeViews, err := projections.ListInitiativePortfolioViews(ctx, service.Store.DB(), workspaces.DefaultWorkspaceKey)

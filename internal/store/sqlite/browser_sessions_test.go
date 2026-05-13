@@ -1321,10 +1321,19 @@ func TestBrowserSessionManualVerificationCompletesLoginRequestAndAudits(t *testi
 		t.Fatalf("ListEvents() error = %v", err)
 	}
 	counts := map[runtimeevents.Type]int{}
+	statusTransitions := map[string]bool{}
 	for _, event := range events {
 		if event.StreamType == runtimeevents.StreamBrowserSession {
 			counts[event.Type]++
 			payload := strings.ToLower(string(event.Payload))
+			if event.Type == runtimeevents.EventBrowserSessionStatusChanged {
+				if strings.Contains(payload, `"status":"login_requested"`) {
+					statusTransitions["login_requested"] = true
+				}
+				if strings.Contains(payload, `"status":"verified"`) {
+					statusTransitions["verified"] = true
+				}
+			}
 			for _, forbidden := range []string{"password", "totp", "backup_code", "cookie", "profile_bytes"} {
 				if strings.Contains(payload, forbidden) {
 					t.Fatalf("browser session verification payload contains forbidden token %q: %s", forbidden, payload)
@@ -1332,8 +1341,8 @@ func TestBrowserSessionManualVerificationCompletesLoginRequestAndAudits(t *testi
 			}
 		}
 	}
-	if counts[runtimeevents.EventBrowserSessionStatusChanged] != 1 {
-		t.Fatalf("browser.session_status_changed events = %d, want 1", counts[runtimeevents.EventBrowserSessionStatusChanged])
+	if counts[runtimeevents.EventBrowserSessionStatusChanged] != 2 || !statusTransitions["login_requested"] || !statusTransitions["verified"] {
+		t.Fatalf("browser.session_status_changed events = %d transitions=%v, want login_requested and verified", counts[runtimeevents.EventBrowserSessionStatusChanged], statusTransitions)
 	}
 	if counts[runtimeevents.EventBrowserSessionVerified] != 1 {
 		t.Fatalf("browser.session_verified events = %d, want 1", counts[runtimeevents.EventBrowserSessionVerified])

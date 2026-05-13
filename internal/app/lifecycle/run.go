@@ -54,6 +54,7 @@ import (
 	healthsvc "odin-os/internal/runtime/health"
 	"odin-os/internal/runtime/jobs"
 	mediasvc "odin-os/internal/runtime/media"
+	runtimenotifications "odin-os/internal/runtime/notifications"
 	"odin-os/internal/runtime/projections"
 	"odin-os/internal/runtime/recovery"
 	"odin-os/internal/runtime/runs"
@@ -151,6 +152,7 @@ type healthLoopDeps struct {
 	Store              *sqlite.Store
 	RuntimeState       runtimestate.Service
 	Health             healthsvc.Service
+	Notifications      runtimenotifications.Service
 	Executors          map[string]contract.Executor
 	ExecutorConfig     executorrouter.Config
 	RegistryHealthy    bool
@@ -6016,6 +6018,7 @@ func runServe(ctx context.Context, app bootstrap.App, cfg appconfig.Config, stdo
 		Store:              app.Store,
 		RuntimeState:       stateService,
 		Health:             healthService,
+		Notifications:      runtimenotifications.Service{Store: app.Store},
 		Executors:          app.Executors,
 		ExecutorConfig:     app.ExecutorConfig,
 		RegistryHealthy:    len(app.RegistryDiagnostics) == 0,
@@ -6435,6 +6438,9 @@ func runHealthCycle(ctx context.Context, deps healthLoopDeps, logger *logs.Logge
 		logBackgroundError(logger, "runtime_state", err)
 		markRuntimeDegraded(ctx, deps, logger, "runtime heartbeat failed", err)
 		return
+	}
+	if _, err := deps.Notifications.RoutePendingEvents(ctx); err != nil {
+		logBackgroundError(logger, "notifications", err)
 	}
 
 	report, safeToDispatch, err := deps.Health.DispatchReport(ctx, deps.RegistryHealthy)
