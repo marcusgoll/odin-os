@@ -1143,6 +1143,7 @@ func handleMobileNotificationSubscription(writer http.ResponseWriter, request *h
 		}
 		subscriptionID = subscription.ID
 	}
+	recordMobileIntakeAudit(request.Context(), deps, request, item)
 	writeMobileJSON(writer, http.StatusAccepted, mobileNotificationSubscriptionResponse{
 		Status:         "accepted_as_intake_metadata",
 		SubscriptionID: subscriptionID,
