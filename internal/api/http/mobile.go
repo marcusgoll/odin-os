@@ -117,6 +117,10 @@ func registerMobileRoutes(mux *http.ServeMux, deps Dependencies, now func() time
 		handleMobileRawIntake(writer, request, deps, now)
 	}))
 
+	mux.HandleFunc("POST /mobile/intake/share", mobileAuthorized(deps, func(writer http.ResponseWriter, request *http.Request) {
+		handleMobileShareIntake(writer, request, deps, now)
+	}))
+
 	mux.HandleFunc("POST /mobile/intake/attachments", mobileAuthorized(deps, func(writer http.ResponseWriter, request *http.Request) {
 		handleMobileAttachmentIntake(writer, request, deps, now)
 	}))
@@ -686,12 +690,14 @@ func handleMobileNotificationSubscription(writer http.ResponseWriter, request *h
 }
 
 type mobileCreateIntakeInput struct {
-	Kind       string
-	Title      string
-	DedupeKey  string
-	ProjectKey string
-	Facts      map[string]any
-	Now        func() time.Time
+	Kind                string
+	Title               string
+	DedupeKey           string
+	ProjectKey          string
+	SourceFamily        string
+	DedupeRecipeVersion string
+	Facts               map[string]any
+	Now                 func() time.Time
 }
 
 func createMobileIntakeItem(ctx context.Context, deps Dependencies, input mobileCreateIntakeInput) (sqlite.IntakeItem, error) {
@@ -719,15 +725,23 @@ func createMobileIntakeItem(ctx context.Context, deps Dependencies, input mobile
 	if dedupeKey == "" {
 		dedupeKey = "mobile:" + mobileHash(string(factsJSON))
 	}
+	sourceFamily := strings.TrimSpace(input.SourceFamily)
+	if sourceFamily == "" {
+		sourceFamily = "mobile_api"
+	}
+	dedupeRecipeVersion := strings.TrimSpace(input.DedupeRecipeVersion)
+	if dedupeRecipeVersion == "" {
+		dedupeRecipeVersion = "mobile-api-v1"
+	}
 	now := input.Now().UTC()
 	return deps.Store.CreateIntakeItem(ctx, sqlite.CreateIntakeItemParams{
 		WorkspaceID:         workspaces.DefaultWorkspaceKey,
-		SourceFamily:        "mobile_api",
+		SourceFamily:        sourceFamily,
 		ExternalObjectID:    dedupeKey,
 		EventKind:           input.Kind,
 		Subject:             input.Title,
 		DedupeKey:           dedupeKey,
-		DedupeRecipeVersion: "mobile-api-v1",
+		DedupeRecipeVersion: dedupeRecipeVersion,
 		SourceFactsJSON:     string(factsJSON),
 		Status:              "received",
 		Scope:               scopeKind,
