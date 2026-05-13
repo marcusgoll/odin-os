@@ -7,7 +7,7 @@ import (
 	"strings"
 )
 
-const BrowserUsage = "usage: odin browser run --goal-id <id> --url <url> [--objective <text>] [--allowed-domain <domain>] [--session-id <id>] [--max-pages <n>] [--max-duration-seconds <n>] [--worker-mode <fetch|browser>] [--evidence-required] [--action <read|navigate|snapshot|extract>] [--json] | odin browser session create --name <name> --domain <domain> --permission-tier <tier> [--account-hint <hint>] [--profile-path <path>] [--json] | odin browser session list [--json] | odin browser session show --id <id> [--json] | odin browser session status --id <id> --status <status> [--json] | odin browser session revoke --id <id> [--json] | odin browser session login-request --id <id> [--handoff-base-url <url>] [--json] | odin browser session login-requests --id <id> [--json] | odin browser session handoff show --handoff-id <id> [--json] | odin browser session runner create --login-request-id <id> [--json] | odin browser session runner list --login-request-id <id> [--json] | odin browser session runner show --id <id> [--json] | odin browser session runner start --id <id> [--json] | odin browser session runner plan-novnc --id <id> --browser-command <path> --browser-allowed-command <path> --display-command <path> --display-allowed-command <path> --novnc-command <path> --novnc-allowed-command <path> --bind-addr <addr> --private-base-url <url> --timeout-seconds <n> [--json] | odin browser session runner status --id <id> --status <status> [--json] | odin browser session runner cancel --id <id> [--json] | odin browser session verify --id <id> [--login-request-id <id>] [--json] | odin browser session prepare-profile --id <id> [--json] | odin browser session profile retention cleanup [--session-id <id>] [--apply] [--json] | odin browser session profile artifact create-fixture --session-id <id> --name <safe-name> --plaintext-file <path> [--json] | odin browser session profile artifact list --session-id <id> [--json] | odin browser session profile artifact show --id <id> [--json] | odin browser session profile artifact revoke --id <id> [--json] | odin browser session profile artifact materialize --id <id> --target-dir <path> [--json] | odin browser session profile artifact cleanup-materialization --id <id> --target-dir <path> [--json]"
+const BrowserUsage = "usage: odin browser run (--goal-id <id>|--task-id <id>) --url <url> [--objective <text>] [--allowed-domain <domain>] [--session-id <id>] [--max-pages <n>] [--max-duration-seconds <n>] [--worker-mode <fetch|browser>] [--evidence-required] [--action <read|navigate|snapshot|extract>] [--json] | odin browser session create --name <name> --domain <domain> --permission-tier <tier> [--account-hint <hint>] [--profile-path <path>] [--json] | odin browser session list [--json] | odin browser session show --id <id> [--json] | odin browser session status --id <id> --status <status> [--json] | odin browser session revoke --id <id> [--json] | odin browser session login-request --id <id> [--handoff-base-url <url>] [--json] | odin browser session login-requests --id <id> [--json] | odin browser session handoff show --handoff-id <id> [--json] | odin browser session runner create --login-request-id <id> [--json] | odin browser session runner list --login-request-id <id> [--json] | odin browser session runner show --id <id> [--json] | odin browser session runner start --id <id> [--json] | odin browser session runner plan-novnc --id <id> --browser-command <path> --browser-allowed-command <path> --display-command <path> --display-allowed-command <path> --novnc-command <path> --novnc-allowed-command <path> --bind-addr <addr> --private-base-url <url> --timeout-seconds <n> [--json] | odin browser session runner status --id <id> --status <status> [--json] | odin browser session runner cancel --id <id> [--json] | odin browser session verify --id <id> [--login-request-id <id>] [--json] | odin browser session prepare-profile --id <id> [--json] | odin browser session profile retention cleanup [--session-id <id>] [--apply] [--json] | odin browser session profile artifact create-fixture --session-id <id> --name <safe-name> --plaintext-file <path> [--json] | odin browser session profile artifact list --session-id <id> [--json] | odin browser session profile artifact show --id <id> [--json] | odin browser session profile artifact revoke --id <id> [--json] | odin browser session profile artifact materialize --id <id> --target-dir <path> [--json] | odin browser session profile artifact cleanup-materialization --id <id> --target-dir <path> [--json]"
 
 type BrowserCommand struct {
 	Name                        string
@@ -21,6 +21,7 @@ type BrowserCommand struct {
 	SessionID                   int64
 	LoginRequestID              int64
 	GoalID                      int64
+	TaskID                      int64
 	URL                         string
 	URLs                        []string
 	Objective                   string
@@ -85,6 +86,17 @@ func ParseBrowser(args []string) (BrowserCommand, error) {
 				return BrowserCommand{}, fmt.Errorf("--goal-id must be a positive integer")
 			}
 			command.GoalID = goalID
+			index = nextIndex
+		case "--task-id":
+			value, nextIndex, err := requiredValue(args, index, "--task-id")
+			if err != nil {
+				return BrowserCommand{}, err
+			}
+			taskID, err := strconv.ParseInt(value, 10, 64)
+			if err != nil || taskID <= 0 {
+				return BrowserCommand{}, fmt.Errorf("--task-id must be a positive integer")
+			}
+			command.TaskID = taskID
 			index = nextIndex
 		case "--url":
 			value, nextIndex, err := requiredValue(args, index, "--url")
@@ -172,8 +184,11 @@ func ParseBrowser(args []string) (BrowserCommand, error) {
 			return BrowserCommand{}, fmt.Errorf("unknown browser argument: %s", args[index])
 		}
 	}
-	if command.GoalID <= 0 {
-		return BrowserCommand{}, fmt.Errorf("--goal-id is required")
+	if command.GoalID <= 0 && command.TaskID <= 0 {
+		return BrowserCommand{}, fmt.Errorf("--goal-id or --task-id is required")
+	}
+	if command.GoalID > 0 && command.TaskID > 0 {
+		return BrowserCommand{}, fmt.Errorf("--goal-id and --task-id are mutually exclusive")
 	}
 	if len(command.URLs) == 0 {
 		return BrowserCommand{}, fmt.Errorf("--url is required")

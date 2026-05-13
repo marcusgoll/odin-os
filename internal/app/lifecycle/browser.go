@@ -20,22 +20,38 @@ import (
 )
 
 type browserRunView struct {
-	Status               string                                   `json:"status"`
-	GoalID               int64                                    `json:"goal_id"`
-	EvidenceID           int64                                    `json:"evidence_id"`
-	EvidenceType         string                                   `json:"evidence_type"`
-	AdapterStatus        string                                   `json:"adapter_status,omitempty"`
-	AdapterKind          string                                   `json:"adapter_kind,omitempty"`
-	StartURLs            []string                                 `json:"start_urls"`
-	AllowedDomains       []string                                 `json:"allowed_domains"`
-	MaxPages             int                                      `json:"max_pages"`
-	MaxDurationSeconds   int                                      `json:"max_duration_seconds"`
-	BrowserSession       *browserexecutor.BrowserSessionReference `json:"browser_session,omitempty"`
-	VisitedURLs          []string                                 `json:"visited_urls,omitempty"`
-	PageResults          []browserexecutor.PageResult             `json:"page_results,omitempty"`
-	ExtractedTextSummary string                                   `json:"extracted_text_summary,omitempty"`
-	Screenshots          []string                                 `json:"screenshots,omitempty"`
-	ActionLog            []string                                 `json:"action_log,omitempty"`
+	Status                    string                                   `json:"status"`
+	GoalID                    int64                                    `json:"goal_id"`
+	TaskID                    int64                                    `json:"task_id,omitempty"`
+	RunID                     int64                                    `json:"run_id,omitempty"`
+	RunArtifactID             int64                                    `json:"run_artifact_id,omitempty"`
+	EvidenceID                int64                                    `json:"evidence_id"`
+	EvidenceType              string                                   `json:"evidence_type"`
+	RiskClass                 browserexecutor.RiskClass                `json:"risk_class,omitempty"`
+	ApprovalRequired          bool                                     `json:"approval_required,omitempty"`
+	ApprovalID                int64                                    `json:"approval_id,omitempty"`
+	MutatingActions           []string                                 `json:"mutating_actions,omitempty"`
+	AdapterStatus             string                                   `json:"adapter_status,omitempty"`
+	AdapterKind               string                                   `json:"adapter_kind,omitempty"`
+	StartURLs                 []string                                 `json:"start_urls"`
+	AllowedDomains            []string                                 `json:"allowed_domains"`
+	MaxPages                  int                                      `json:"max_pages"`
+	MaxDurationSeconds        int                                      `json:"max_duration_seconds"`
+	BrowserSession            *browserexecutor.BrowserSessionReference `json:"browser_session,omitempty"`
+	VisitedURLs               []string                                 `json:"visited_urls,omitempty"`
+	PageResults               []browserexecutor.PageResult             `json:"page_results,omitempty"`
+	ExtractedTextSummary      string                                   `json:"extracted_text_summary,omitempty"`
+	Screenshots               []string                                 `json:"screenshots,omitempty"`
+	ScreenshotMetadata        []browserexecutor.ScreenshotMetadata     `json:"screenshot_metadata,omitempty"`
+	SelectedLinks             []browserexecutor.SelectedLink           `json:"selected_links,omitempty"`
+	DownloadedFiles           []browserexecutor.DownloadedFileMetadata `json:"downloaded_files,omitempty"`
+	FormStateSummary          string                                   `json:"form_state_summary,omitempty"`
+	BrowserErrorRecoveryNotes []string                                 `json:"browser_error_recovery_notes,omitempty"`
+	Confidence                string                                   `json:"confidence,omitempty"`
+	Limitations               []string                                 `json:"limitations,omitempty"`
+	ActionLog                 []string                                 `json:"action_log,omitempty"`
+	ErrorCode                 string                                   `json:"error_code,omitempty"`
+	ErrorMessage              string                                   `json:"error_message,omitempty"`
 }
 
 type browserSessionEnvelope struct {
@@ -221,6 +237,9 @@ func runBrowser(ctx context.Context, app bootstrap.App, args []string, stdout io
 	if command.Name == "session" {
 		return runBrowserSession(ctx, app, command, stdout)
 	}
+	if command.TaskID > 0 {
+		return runBrowserTask(ctx, app, command, stdout)
+	}
 
 	goal, err := app.Store.GetGoal(ctx, command.GoalID)
 	if err != nil {
@@ -246,27 +265,123 @@ func runBrowser(ctx context.Context, app bootstrap.App, args []string, stdout io
 		return err
 	}
 	view := browserRunView{
-		Status:               result.Status,
-		GoalID:               result.GoalID,
-		EvidenceID:           result.EvidenceID,
-		EvidenceType:         result.EvidenceType,
-		AdapterStatus:        result.AdapterStatus,
-		AdapterKind:          result.AdapterKind,
-		StartURLs:            result.StartURLs,
-		AllowedDomains:       result.AllowedDomains,
-		MaxPages:             result.MaxPages,
-		MaxDurationSeconds:   result.MaxDurationSeconds,
-		BrowserSession:       result.BrowserSession,
-		VisitedURLs:          result.VisitedURLs,
-		PageResults:          result.PageResults,
-		ExtractedTextSummary: result.ExtractedTextSummary,
-		Screenshots:          result.Screenshots,
-		ActionLog:            result.ActionLog,
+		Status:                    result.Status,
+		GoalID:                    result.GoalID,
+		EvidenceID:                result.EvidenceID,
+		EvidenceType:              result.EvidenceType,
+		AdapterStatus:             result.AdapterStatus,
+		AdapterKind:               result.AdapterKind,
+		StartURLs:                 result.StartURLs,
+		AllowedDomains:            result.AllowedDomains,
+		MaxPages:                  result.MaxPages,
+		MaxDurationSeconds:        result.MaxDurationSeconds,
+		BrowserSession:            result.BrowserSession,
+		VisitedURLs:               result.VisitedURLs,
+		PageResults:               result.PageResults,
+		ExtractedTextSummary:      result.ExtractedTextSummary,
+		Screenshots:               result.Screenshots,
+		ScreenshotMetadata:        result.ScreenshotMetadata,
+		SelectedLinks:             result.SelectedLinks,
+		DownloadedFiles:           result.DownloadedFiles,
+		FormStateSummary:          result.FormStateSummary,
+		BrowserErrorRecoveryNotes: result.BrowserErrorRecoveryNotes,
+		Confidence:                result.Confidence,
+		Limitations:               result.Limitations,
+		ActionLog:                 result.ActionLog,
+		ErrorCode:                 result.ErrorCode,
+		ErrorMessage:              result.ErrorMessage,
 	}
 	if command.JSON {
 		return commands.WriteJSON(stdout, view)
 	}
 	_, err = fmt.Fprintf(stdout, "browser goal=%d status=%s evidence=%d type=%s\n", view.GoalID, view.Status, view.EvidenceID, view.EvidenceType)
+	return err
+}
+
+func runBrowserTask(ctx context.Context, app bootstrap.App, command commands.BrowserCommand, stdout io.Writer) error {
+	service := browserexecutor.Service{Store: app.Store}
+	if browserexecutor.ClassifyRisk(command.Actions) != browserexecutor.RiskClassReadOnly {
+		response, err := service.RunPlugin(ctx, browserexecutor.PluginRequest{
+			TaskID:             command.TaskID,
+			WorkerMode:         command.WorkerMode,
+			Objective:          command.Objective,
+			AllowedDomains:     command.AllowedDomains,
+			StartURLs:          command.URLs,
+			MaxPages:           command.MaxPages,
+			MaxDurationSeconds: command.MaxDurationSeconds,
+			EvidenceRequired:   command.EvidenceRequired,
+			BrowserSessionID:   command.SessionID,
+			Actions:            command.Actions,
+			RequestedBy:        "operator",
+		})
+		view := browserRunView{
+			Status:             response.Status,
+			TaskID:             response.TaskID,
+			RiskClass:          response.RiskClass,
+			ApprovalRequired:   response.ApprovalRequired,
+			ApprovalID:         response.ApprovalID,
+			MutatingActions:    response.MutatingActions,
+			ErrorCode:          response.ErrorCode,
+			ErrorMessage:       response.ErrorMessage,
+			StartURLs:          append([]string{}, command.URLs...),
+			AllowedDomains:     append([]string{}, command.AllowedDomains...),
+			MaxPages:           command.MaxPages,
+			MaxDurationSeconds: command.MaxDurationSeconds,
+		}
+		if command.JSON {
+			if writeErr := commands.WriteJSON(stdout, view); writeErr != nil {
+				return writeErr
+			}
+		}
+		return err
+	}
+	result, err := service.RunWorkEvidence(ctx, browserexecutor.WorkEvidenceTask{
+		TaskID:             command.TaskID,
+		WorkerMode:         command.WorkerMode,
+		Objective:          command.Objective,
+		AllowedDomains:     command.AllowedDomains,
+		StartURLs:          command.URLs,
+		MaxPages:           command.MaxPages,
+		MaxDurationSeconds: command.MaxDurationSeconds,
+		EvidenceRequired:   command.EvidenceRequired,
+		BrowserSessionID:   command.SessionID,
+		Actions:            command.Actions,
+	})
+	if err != nil {
+		return err
+	}
+	view := browserRunView{
+		Status:                    result.Status,
+		TaskID:                    result.TaskID,
+		RunID:                     result.RunID,
+		RunArtifactID:             result.RunArtifactID,
+		EvidenceType:              result.EvidenceType,
+		AdapterStatus:             result.AdapterStatus,
+		AdapterKind:               result.AdapterKind,
+		StartURLs:                 result.StartURLs,
+		AllowedDomains:            result.AllowedDomains,
+		MaxPages:                  result.MaxPages,
+		MaxDurationSeconds:        result.MaxDurationSeconds,
+		BrowserSession:            result.BrowserSession,
+		VisitedURLs:               result.VisitedURLs,
+		PageResults:               result.PageResults,
+		ExtractedTextSummary:      result.ExtractedTextSummary,
+		Screenshots:               result.Screenshots,
+		ScreenshotMetadata:        result.ScreenshotMetadata,
+		SelectedLinks:             result.SelectedLinks,
+		DownloadedFiles:           result.DownloadedFiles,
+		FormStateSummary:          result.FormStateSummary,
+		BrowserErrorRecoveryNotes: result.BrowserErrorRecoveryNotes,
+		Confidence:                result.Confidence,
+		Limitations:               result.Limitations,
+		ActionLog:                 result.ActionLog,
+		ErrorCode:                 result.ErrorCode,
+		ErrorMessage:              result.ErrorMessage,
+	}
+	if command.JSON {
+		return commands.WriteJSON(stdout, view)
+	}
+	_, err = fmt.Fprintf(stdout, "browser task=%d status=%s run=%d artifact=%d type=%s\n", view.TaskID, view.Status, view.RunID, view.RunArtifactID, view.EvidenceType)
 	return err
 }
 

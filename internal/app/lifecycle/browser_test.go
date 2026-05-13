@@ -56,6 +56,60 @@ func TestRunBrowserRunRecordsGoalEvidenceAndKeepsGoalStatus(t *testing.T) {
 	}
 }
 
+func TestRunBrowserRunTaskRecordsWorkEvidence(t *testing.T) {
+	ctx := context.Background()
+	app := newLifecycleReviewTestApp(t, ctx)
+	project, err := app.Store.CreateProject(ctx, sqlite.CreateProjectParams{
+		Key:           "browser-work",
+		Name:          "Browser Work",
+		Scope:         "project",
+		GitRoot:       t.TempDir(),
+		DefaultBranch: "main",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+	task, err := app.Store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "browser-evidence-task",
+		Title:       "Collect browser evidence for work",
+		Status:      "queued",
+		Scope:       "project",
+		RequestedBy: "test",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+
+	var stdout bytes.Buffer
+	if err := runBrowser(ctx, app, []string{"run", "--task-id", int64String(task.ID), "--url", "https://example.com/research", "--allowed-domain", "example.com", "--objective", "Collect browser evidence", "--worker-mode", "browser", "--json"}, &stdout); err != nil {
+		t.Fatalf("runBrowser(task) error = %v\n%s", err, stdout.String())
+	}
+	for _, want := range []string{
+		`"status": "recorded"`,
+		`"task_id": 1`,
+		`"run_id": 1`,
+		`"run_artifact_id": 1`,
+		`"selected_links":`,
+		`"downloaded_files":`,
+		`"form_state_summary":`,
+		`"confidence":`,
+		`"limitations":`,
+	} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("browser run output = %s, want %s", stdout.String(), want)
+		}
+	}
+	shown, err := app.Store.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
+	}
+	if shown.Status != "queued" {
+		t.Fatalf("task status = %q, want queued after successful evidence capture", shown.Status)
+	}
+}
+
 func TestRunBrowserRunRejectsUnsafeInputs(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	root := testRepoRoot(t)

@@ -128,6 +128,21 @@ Read-only browser runs persist evidence through `goal_evidence` with:
 - `payload_json.adapter`: Huginn adapter response
 - audit event: `goal.evidence_recorded`
 
+Work-linked read-only browser runs use `odin browser run --task-id <id> ...`
+and persist evidence through canonical `run_artifacts` with:
+
+- `artifact_type`: `browser_evidence`
+- `run.executor`: `huginn_browser`
+- safe evidence fields: screenshot metadata/path, page title/url, DOM text
+  summary, selected links, downloaded file metadata, form state summary without
+  secrets, browser error/recovery notes, confidence, and limitations
+- audit event path: `run.started` and `run.finished` with the browser evidence
+  artifact summary in `artifacts_json`
+
+Successful work-linked browser evidence records the artifact without completing
+the work item. Failed capture marks the browser evidence work item failed and
+emits recovery guidance for operator review.
+
 Mutation-class requests do not create browser evidence because the browser
 adapter is not invoked. They create a pending Approval Request and emit
 `approval.requested`.
@@ -188,14 +203,18 @@ Unknown action names fail closed as `external_mutation`.
   converted into an Odin approval.
 
 Recovery is operator-driven: inspect `odin review list --json`,
-`odin review show <approval-id> --json`, goal evidence, and runtime logs.
+`odin review show <approval-id> --json`, failed work details, goal evidence,
+run artifacts, and runtime logs.
 
 ## CLI/API readback surfaces
 
 - `odin browser run ... --json` reads back read-only goal evidence execution.
-- `odin review list --json` reads back pending browser mutation approvals.
+- `odin browser run --task-id <id> ... --json` reads back work-linked browser
+  evidence execution.
+- `odin review list --json` reads back pending browser mutation approvals and
+  browser evidence counts for linked work.
 - `odin approvals ... --json` reads back approval state.
 - `odin logs ... --json` reads back `goal.evidence_recorded` and
   `approval.requested` audit events.
-- `odin overview --json` projects activity, approvals, and capability truth
-  without becoming a second runtime authority.
+- `odin overview --json` projects activity, approvals, browser evidence, and
+  capability truth without becoming a second runtime authority.

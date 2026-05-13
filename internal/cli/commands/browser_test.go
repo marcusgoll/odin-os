@@ -15,6 +15,16 @@ func TestParseBrowserRunDefaultsAllowedDomainFromURL(t *testing.T) {
 	}
 }
 
+func TestParseBrowserRunAcceptsTaskIDForWorkEvidence(t *testing.T) {
+	command, err := ParseBrowser([]string{"run", "--task-id", "77", "--url", "https://example.com/research", "--json"})
+	if err != nil {
+		t.Fatalf("ParseBrowser() error = %v", err)
+	}
+	if command.TaskID != 77 || command.GoalID != 0 {
+		t.Fatalf("TaskID/GoalID = %d/%d, want 77/0", command.TaskID, command.GoalID)
+	}
+}
+
 func TestParseBrowserRunAcceptsSafetyOptions(t *testing.T) {
 	command, err := ParseBrowser([]string{
 		"run",

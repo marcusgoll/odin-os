@@ -44,6 +44,12 @@ type Service struct {
 	SourceRoot       string
 }
 
+type taskScopeContext struct {
+	projectKey    string
+	initiativeKey *string
+	companionKey  *string
+}
+
 type View struct {
 	Readiness             ReadinessLane            `json:"readiness"`
 	ActualUse             ActualUseLane            `json:"actual_use"`
@@ -297,6 +303,7 @@ type ObservabilityLane struct {
 	ActiveRuns       []RunAttemptSummary            `json:"active_runs"`
 	BlockedWork      []BlockedWorkSummary           `json:"blocked_work"`
 	RecoveryGuidance []RetryRecoveryGuidanceSummary `json:"recovery_guidance"`
+	BrowserEvidence  []BrowserEvidenceSummary       `json:"browser_evidence,omitempty"`
 	Incidents        []IncidentSummary              `json:"incidents"`
 	Recoveries       []RecoverySummary              `json:"recoveries"`
 	Freshness        []FreshnessSummary             `json:"freshness"`
@@ -359,6 +366,32 @@ type RetryRecoveryGuidanceSummary struct {
 	MaxAttempts            int     `json:"max_attempts"`
 	LastError              string  `json:"last_error,omitempty"`
 	RecoveryRecommendation string  `json:"recovery_recommendation"`
+}
+
+type BrowserEvidenceSummary struct {
+	ArtifactID    int64                 `json:"artifact_id"`
+	RunID         int64                 `json:"run_id"`
+	TaskID        int64                 `json:"task_id"`
+	WorkItemKey   string                `json:"work_item_key"`
+	ProjectKey    string                `json:"project_key"`
+	InitiativeKey *string               `json:"initiative_key,omitempty"`
+	CompanionKey  *string               `json:"companion_key,omitempty"`
+	RunStatus     string                `json:"run_status,omitempty"`
+	RunAttempt    int                   `json:"run_attempt,omitempty"`
+	Executor      string                `json:"executor,omitempty"`
+	Summary       string                `json:"summary"`
+	PageTitle     string                `json:"page_title,omitempty"`
+	URL           string                `json:"url,omitempty"`
+	SelectedLinks []BrowserEvidenceLink `json:"selected_links,omitempty"`
+	Confidence    string                `json:"confidence,omitempty"`
+	Limitations   []string              `json:"limitations,omitempty"`
+	CreatedAt     string                `json:"created_at"`
+}
+
+type BrowserEvidenceLink struct {
+	Text   string `json:"text,omitempty"`
+	URL    string `json:"url"`
+	Reason string `json:"reason,omitempty"`
 }
 
 type IncidentSummary struct {
@@ -642,11 +675,6 @@ func (service Service) Build(ctx context.Context, resolved scope.Resolution) (Vi
 	for _, task := range taskViews {
 		taskProjectIndex[task.TaskID] = task.ProjectKey
 	}
-	type taskScopeContext struct {
-		projectKey    string
-		initiativeKey *string
-		companionKey  *string
-	}
 	taskContextCache := make(map[int64]taskScopeContext, len(taskViews))
 	initiativeKeyCache := make(map[int64]string)
 	companionKeyCache := make(map[int64]string)
@@ -771,6 +799,11 @@ func (service Service) Build(ctx context.Context, resolved scope.Resolution) (Vi
 			StartedAt:     run.StartedAt,
 		})
 	}
+	browserEvidence, err := service.browserEvidenceSummaries(ctx, resolved, resolveTaskContext)
+	if err != nil {
+		return View{}, err
+	}
+	view.Observability.BrowserEvidence = browserEvidence
 
 	visibleCompanionKeys := make(map[string]struct{})
 	for _, initiative := range view.Initiatives {
@@ -1348,6 +1381,64 @@ func capabilityTruthFromBuiltinTool(definition toolcatalog.ToolDefinition) Capab
 	}
 
 	return summary
+}
+
+func (service Service) browserEvidenceSummaries(ctx context.Context, resolved scope.Resolution, resolveTaskContext func(int64) (taskScopeContext, error)) ([]BrowserEvidenceSummary, error) {
+	rows, err := service.Store.DB().QueryContext(ctx, `
+		SELECT ra.id, ra.run_id, r.task_id, t.key, p.key, ra.summary, ra.details_json, ra.created_at, r.status, r.attempt, r.executor
+		FROM run_artifacts ra
+		JOIN runs r ON r.id = ra.run_id
+		JOIN tasks t ON t.id = r.task_id
+		JOIN projects p ON p.id = t.project_id
+		WHERE ra.artifact_type = 'browser_evidence'
+		ORDER BY ra.id DESC
+		LIMIT 20
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := make([]BrowserEvidenceSummary, 0)
+	for rows.Next() {
+		var item BrowserEvidenceSummary
+		var details string
+		if err := rows.Scan(&item.ArtifactID, &item.RunID, &item.TaskID, &item.WorkItemKey, &item.ProjectKey, &item.Summary, &details, &item.CreatedAt, &item.RunStatus, &item.RunAttempt, &item.Executor); err != nil {
+			return nil, err
+		}
+		if !matchesProjectScope(item.ProjectKey, resolved) {
+			continue
+		}
+		taskContext, err := resolveTaskContext(item.TaskID)
+		if err != nil {
+			return nil, err
+		}
+		item.InitiativeKey = taskContext.initiativeKey
+		item.CompanionKey = taskContext.companionKey
+		applyBrowserEvidenceOverviewDetails(&item, details)
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+func applyBrowserEvidenceOverviewDetails(item *BrowserEvidenceSummary, details string) {
+	if item == nil || strings.TrimSpace(details) == "" {
+		return
+	}
+	var payload struct {
+		PageTitle     string                `json:"page_title"`
+		URL           string                `json:"url"`
+		SelectedLinks []BrowserEvidenceLink `json:"selected_links"`
+		Confidence    string                `json:"confidence"`
+		Limitations   []string              `json:"limitations"`
+	}
+	if err := json.Unmarshal([]byte(details), &payload); err != nil {
+		return
+	}
+	item.PageTitle = payload.PageTitle
+	item.URL = payload.URL
+	item.SelectedLinks = payload.SelectedLinks
+	item.Confidence = payload.Confidence
+	item.Limitations = payload.Limitations
 }
 
 func registrySourceProof(item registry.Item) string {

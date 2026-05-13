@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -235,6 +236,88 @@ func TestReviewShowFailedWorkIncludesNormalizedOperatorFields(t *testing.T) {
 		if text, ok := value.(string); ok && text == "" {
 			t.Fatalf("failed-work show entry field %q is empty: %#v", field, payload.Entry)
 		}
+	}
+}
+
+func TestReviewQueueShowsBrowserEvidenceForApprovalAndFailedWork(t *testing.T) {
+	ctx := context.Background()
+	app := newLifecycleReviewTestApp(t, ctx)
+	project, err := app.Store.CreateProject(ctx, sqlite.CreateProjectParams{
+		Key:           "browser-review",
+		Name:          "Browser Review",
+		Scope:         "project",
+		GitRoot:       t.TempDir(),
+		DefaultBranch: "main",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+	task, err := app.Store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "browser-review-task",
+		Title:       "Review browser evidence",
+		Status:      "failed",
+		Scope:       "project",
+		RequestedBy: "test",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+	run, err := app.Store.StartRun(ctx, sqlite.StartRunParams{TaskID: task.ID, Executor: "huginn_browser", Attempt: 1, Status: "running"})
+	if err != nil {
+		t.Fatalf("StartRun() error = %v", err)
+	}
+	if _, err := app.Store.RecordRunArtifact(ctx, sqlite.RecordRunArtifactParams{
+		RunID:        run.ID,
+		ArtifactType: "browser_evidence",
+		Summary:      "Browser evidence summary",
+		DetailsJSON:  `{"page_title":"Docs","url":"https://example.com/docs","selected_links":[{"text":"Docs","url":"https://example.com/docs"}],"confidence":"deterministic_test","limitations":["fixture"]}`,
+	}); err != nil {
+		t.Fatalf("RecordRunArtifact() error = %v", err)
+	}
+	if _, _, err := app.Store.FinishRunAndSetTaskStatus(ctx, sqlite.FinishRunAndSetTaskStatusParams{
+		RunID:          run.ID,
+		RunStatus:      "failed",
+		TaskStatus:     "failed",
+		Summary:        "Browser capture failed",
+		TerminalReason: "browser_evidence_capture_failed",
+		ArtifactsJSON:  `[{"type":"browser_evidence","summary":"Browser evidence summary"}]`,
+	}); err != nil {
+		t.Fatalf("FinishRunAndSetTaskStatus() error = %v", err)
+	}
+	approval, err := app.Store.RequestApproval(ctx, sqlite.RequestApprovalParams{
+		TaskID:      task.ID,
+		RunID:       &run.ID,
+		Status:      "pending",
+		RequestedBy: "test",
+	})
+	if err != nil {
+		t.Fatalf("RequestApproval() error = %v", err)
+	}
+
+	var listOut bytes.Buffer
+	if err := runReview(ctx, app, []string{"list", "--json", "--source", "task_approval"}, &listOut); err != nil {
+		t.Fatalf("runReview(list) error = %v\n%s", err, listOut.String())
+	}
+	if !strings.Contains(listOut.String(), `"browser_evidence_count": 1`) {
+		t.Fatalf("review list output = %s, want browser evidence count", listOut.String())
+	}
+
+	var approvalOut bytes.Buffer
+	if err := runReview(ctx, app, []string{"show", "approval:" + int64String(approval.ID), "--json"}, &approvalOut); err != nil {
+		t.Fatalf("runReview(show approval) error = %v\n%s", err, approvalOut.String())
+	}
+	if !strings.Contains(approvalOut.String(), `"browser_evidence":`) || !strings.Contains(approvalOut.String(), `"selected_links"`) {
+		t.Fatalf("approval show output = %s, want browser evidence details", approvalOut.String())
+	}
+
+	var failedOut bytes.Buffer
+	if err := runReview(ctx, app, []string{"show", "failed-work:" + int64String(task.ID), "--json"}, &failedOut); err != nil {
+		t.Fatalf("runReview(show failed-work) error = %v\n%s", err, failedOut.String())
+	}
+	if !strings.Contains(failedOut.String(), `"browser_evidence":`) || !strings.Contains(failedOut.String(), `"confidence"`) {
+		t.Fatalf("failed-work show output = %s, want browser evidence details", failedOut.String())
 	}
 }
 

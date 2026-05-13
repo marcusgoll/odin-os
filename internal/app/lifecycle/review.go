@@ -150,6 +150,7 @@ type reviewQueueEntry struct {
 	RetryEligible          *bool    `json:"retry_eligible,omitempty"`
 	RetryBlockReason       string   `json:"retry_block_reason,omitempty"`
 	RecoveryRecommendation string   `json:"recovery_recommendation,omitempty"`
+	BrowserEvidenceCount   int      `json:"browser_evidence_count,omitempty"`
 	AllowedActions         []string `json:"allowed_actions"`
 }
 
@@ -1160,14 +1161,20 @@ func reviewQueueDetail(ctx context.Context, app bootstrap.App, ref reviewQueueRe
 			return reviewQueueEntry{}, nil, err
 		}
 		entry := reviewEntryFromApprovalDetail(ctx, app.Store, detail)
+		browserEvidence, err := listBrowserEvidenceForTask(ctx, app.Store, detail.Task.ID)
+		if err != nil {
+			return reviewQueueEntry{}, nil, err
+		}
+		entry.BrowserEvidenceCount = len(browserEvidence)
 		return entry, struct {
-			ID              int64  `json:"id"`
-			Status          string `json:"status"`
-			TaskID          int64  `json:"task_id"`
-			TaskKey         string `json:"task_key"`
-			TaskStatus      string `json:"task_status"`
-			RunID           *int64 `json:"run_id,omitempty"`
-			ResolverSupport string `json:"resolver_support"`
+			ID              int64                          `json:"id"`
+			Status          string                         `json:"status"`
+			TaskID          int64                          `json:"task_id"`
+			TaskKey         string                         `json:"task_key"`
+			TaskStatus      string                         `json:"task_status"`
+			RunID           *int64                         `json:"run_id,omitempty"`
+			ResolverSupport string                         `json:"resolver_support"`
+			BrowserEvidence []browserEvidenceReviewSummary `json:"browser_evidence,omitempty"`
 		}{
 			ID:              detail.Approval.ID,
 			Status:          detail.Approval.Status,
@@ -1176,6 +1183,7 @@ func reviewQueueDetail(ctx context.Context, app bootstrap.App, ref reviewQueueRe
 			TaskStatus:      detail.Task.Status,
 			RunID:           detail.Approval.RunID,
 			ResolverSupport: string(detail.ResolverSupport),
+			BrowserEvidence: browserEvidence,
 		}, nil
 	case "skill-artifact":
 		artifact, err := app.Store.GetSkillArtifact(ctx, ref.ID)
@@ -1231,19 +1239,40 @@ func reviewQueueDetail(ctx context.Context, app bootstrap.App, ref reviewQueueRe
 }
 
 type failedWorkReviewDetail struct {
-	TaskID                 int64                      `json:"task_id"`
-	TaskKey                string                     `json:"task_key"`
-	TaskStatus             string                     `json:"task_status"`
-	ProjectKey             string                     `json:"project_key"`
-	Decision               string                     `json:"decision"`
-	RetryEligible          bool                       `json:"retry_eligible"`
-	RetryBlockReason       string                     `json:"retry_block_reason,omitempty"`
-	RecoveryRecommendation string                     `json:"recovery_recommendation"`
-	RetryCount             int                        `json:"retry_count"`
-	MaxAttempts            int                        `json:"max_attempts"`
-	LastError              string                     `json:"last_error,omitempty"`
-	RunAttempts            []failedWorkRunAttempt     `json:"run_attempts"`
-	FollowUp               failedWorkFollowUpProposal `json:"follow_up"`
+	TaskID                 int64                          `json:"task_id"`
+	TaskKey                string                         `json:"task_key"`
+	TaskStatus             string                         `json:"task_status"`
+	ProjectKey             string                         `json:"project_key"`
+	Decision               string                         `json:"decision"`
+	RetryEligible          bool                           `json:"retry_eligible"`
+	RetryBlockReason       string                         `json:"retry_block_reason,omitempty"`
+	RecoveryRecommendation string                         `json:"recovery_recommendation"`
+	RetryCount             int                            `json:"retry_count"`
+	MaxAttempts            int                            `json:"max_attempts"`
+	LastError              string                         `json:"last_error,omitempty"`
+	RunAttempts            []failedWorkRunAttempt         `json:"run_attempts"`
+	BrowserEvidence        []browserEvidenceReviewSummary `json:"browser_evidence,omitempty"`
+	FollowUp               failedWorkFollowUpProposal     `json:"follow_up"`
+}
+
+type browserEvidenceReviewSummary struct {
+	ArtifactID                int64            `json:"artifact_id"`
+	RunID                     int64            `json:"run_id"`
+	RunStatus                 string           `json:"run_status,omitempty"`
+	RunAttempt                int              `json:"run_attempt,omitempty"`
+	Executor                  string           `json:"executor,omitempty"`
+	Summary                   string           `json:"summary"`
+	PageTitle                 string           `json:"page_title,omitempty"`
+	URL                       string           `json:"url,omitempty"`
+	ExtractedTextSummary      string           `json:"extracted_text_summary,omitempty"`
+	ScreenshotMetadata        []map[string]any `json:"screenshot_metadata,omitempty"`
+	SelectedLinks             []map[string]any `json:"selected_links,omitempty"`
+	DownloadedFiles           []map[string]any `json:"downloaded_files,omitempty"`
+	FormStateSummary          string           `json:"form_state_summary,omitempty"`
+	BrowserErrorRecoveryNotes []string         `json:"browser_error_recovery_notes,omitempty"`
+	Confidence                string           `json:"confidence,omitempty"`
+	Limitations               []string         `json:"limitations,omitempty"`
+	CreatedAt                 string           `json:"created_at"`
 }
 
 type failedWorkRunAttempt struct {
@@ -1531,6 +1560,10 @@ func reviewEntryFromApprovalDetail(ctx context.Context, store *sqlite.Store, det
 		CreatedAt:      formatReviewTime(detail.Approval.RequestedAt),
 		ProjectScope:   projectScope,
 		Summary:        detail.Task.Key,
+		TaskID:         detail.Task.ID,
+		TaskKey:        detail.Task.Key,
+		TaskStatus:     detail.Task.Status,
+		WorkKind:       detail.Task.WorkKind,
 		Source:         "approval_requests",
 		Risk:           "governance",
 		AllowedActions: taskApprovalAllowedActions(detail.Approval.Status),
@@ -1904,6 +1937,11 @@ func reviewFailedTaskDetail(ctx context.Context, store *sqlite.Store, task sqlit
 		LastError:   task.LastError,
 	}
 	entry := reviewEntryFromFailedTask(taskView)
+	browserEvidence, err := listBrowserEvidenceForTask(ctx, store, task.ID)
+	if err != nil {
+		return reviewQueueEntry{}, failedWorkReviewDetail{}, err
+	}
+	entry.BrowserEvidenceCount = len(browserEvidence)
 	guidance := recovery.RetryGuidanceForTask(recovery.RetryGuidanceInput{
 		RetryCount:  task.RetryCount,
 		MaxAttempts: task.MaxAttempts,
@@ -1940,8 +1978,74 @@ func reviewFailedTaskDetail(ctx context.Context, store *sqlite.Store, task sqlit
 		MaxAttempts:            task.MaxAttempts,
 		LastError:              task.LastError,
 		RunAttempts:            attempts,
+		BrowserEvidence:        browserEvidence,
 		FollowUp:               proposal,
 	}, nil
+}
+
+func countBrowserEvidenceForTask(ctx context.Context, store *sqlite.Store, taskID int64) (int, error) {
+	evidence, err := listBrowserEvidenceForTask(ctx, store, taskID)
+	if err != nil {
+		return 0, err
+	}
+	return len(evidence), nil
+}
+
+func listBrowserEvidenceForTask(ctx context.Context, store *sqlite.Store, taskID int64) ([]browserEvidenceReviewSummary, error) {
+	rows, err := store.DB().QueryContext(ctx, `
+		SELECT ra.id, ra.run_id, ra.summary, ra.details_json, ra.created_at, r.status, r.attempt, r.executor
+		FROM run_artifacts ra
+		JOIN runs r ON r.id = ra.run_id
+		WHERE r.task_id = ?
+		  AND ra.artifact_type = 'browser_evidence'
+		ORDER BY ra.id ASC
+	`, taskID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	evidence := make([]browserEvidenceReviewSummary, 0)
+	for rows.Next() {
+		var item browserEvidenceReviewSummary
+		var details string
+		if err := rows.Scan(&item.ArtifactID, &item.RunID, &item.Summary, &details, &item.CreatedAt, &item.RunStatus, &item.RunAttempt, &item.Executor); err != nil {
+			return nil, err
+		}
+		applyBrowserEvidenceDetails(&item, details)
+		evidence = append(evidence, item)
+	}
+	return evidence, rows.Err()
+}
+
+func applyBrowserEvidenceDetails(item *browserEvidenceReviewSummary, details string) {
+	if item == nil || strings.TrimSpace(details) == "" {
+		return
+	}
+	var payload struct {
+		PageTitle                 string           `json:"page_title"`
+		URL                       string           `json:"url"`
+		ExtractedTextSummary      string           `json:"extracted_text_summary"`
+		ScreenshotMetadata        []map[string]any `json:"screenshot_metadata"`
+		SelectedLinks             []map[string]any `json:"selected_links"`
+		DownloadedFiles           []map[string]any `json:"downloaded_files"`
+		FormStateSummary          string           `json:"form_state_summary"`
+		BrowserErrorRecoveryNotes []string         `json:"browser_error_recovery_notes"`
+		Confidence                string           `json:"confidence"`
+		Limitations               []string         `json:"limitations"`
+	}
+	if err := json.Unmarshal([]byte(details), &payload); err != nil {
+		return
+	}
+	item.PageTitle = payload.PageTitle
+	item.URL = payload.URL
+	item.ExtractedTextSummary = payload.ExtractedTextSummary
+	item.ScreenshotMetadata = payload.ScreenshotMetadata
+	item.SelectedLinks = payload.SelectedLinks
+	item.DownloadedFiles = payload.DownloadedFiles
+	item.FormStateSummary = payload.FormStateSummary
+	item.BrowserErrorRecoveryNotes = payload.BrowserErrorRecoveryNotes
+	item.Confidence = payload.Confidence
+	item.Limitations = payload.Limitations
 }
 
 func parseReviewQueueRef(queueID string) (reviewQueueRef, error) {

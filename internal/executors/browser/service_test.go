@@ -249,6 +249,129 @@ func TestPluginRunMutationRequiresTaskID(t *testing.T) {
 	}
 }
 
+func TestWorkEvidenceRecordsRunArtifactWithoutCompletingTask(t *testing.T) {
+	store := openBrowserTestStore(t)
+	defer store.Close()
+
+	ctx := context.Background()
+	task := createBrowserApprovalTask(t, store)
+	adapter := &recordingAdapter{response: huginnbrowser.Response{
+		Status:               "completed",
+		AdapterKind:          "stub_local",
+		VisitedURLs:          []string{"https://example.com/docs"},
+		PageResults:          []huginnbrowser.PageResult{{URL: "https://example.com/docs", Status: "visited", Mode: "browser", Title: "Docs", Summary: "Browser evidence summary"}},
+		ExtractedTextSummary: "Browser evidence summary",
+		Screenshots:          []string{"stub://screenshot/example"},
+		ScreenshotMetadata:   []huginnbrowser.ScreenshotMetadata{{Path: "stub://screenshot/example", URL: "https://example.com/docs", Title: "Docs"}},
+		SelectedLinks:        []huginnbrowser.SelectedLink{{Text: "Docs", URL: "https://example.com/docs#details", Reason: "primary evidence link"}},
+		DownloadedFiles:      []huginnbrowser.DownloadedFileMetadata{{Name: "evidence.txt", Path: "stub://downloads/evidence.txt", ContentType: "text/plain", SizeBytes: 12}},
+		FormStateSummary:     "No form values captured or submitted.",
+		BrowserErrorRecoveryNotes: []string{
+			"No browser recovery required.",
+		},
+		Confidence:  "deterministic_test",
+		Limitations: []string{"adapter fixture only"},
+		ActionLog:   []string{"validated_read_only_request"},
+	}}
+
+	result, err := Service{Store: store, Adapter: adapter}.RunWorkEvidence(ctx, WorkEvidenceTask{
+		TaskID:             task.ID,
+		WorkerMode:         "browser",
+		Objective:          "Collect public documentation",
+		AllowedDomains:     []string{"example.com"},
+		StartURLs:          []string{"https://example.com/docs"},
+		MaxPages:           1,
+		MaxDurationSeconds: 30,
+		EvidenceRequired:   true,
+		Actions:            []string{"read"},
+	})
+	if err != nil {
+		t.Fatalf("RunWorkEvidence() error = %v", err)
+	}
+	if !adapter.called {
+		t.Fatal("adapter was not called")
+	}
+	if result.Status != "recorded" || result.TaskID != task.ID || result.RunID <= 0 || result.RunArtifactID <= 0 {
+		t.Fatalf("result = %+v, want recorded run artifact linked to task", result)
+	}
+	artifacts, err := store.ListRunArtifacts(ctx, sqlite.ListRunArtifactsParams{RunID: result.RunID, ArtifactType: "browser_evidence"})
+	if err != nil {
+		t.Fatalf("ListRunArtifacts() error = %v", err)
+	}
+	if len(artifacts) != 1 {
+		t.Fatalf("browser artifacts len = %d, want 1", len(artifacts))
+	}
+	for _, want := range []string{"screenshot_metadata", "selected_links", "downloaded_files", "form_state_summary", "browser_error_recovery_notes", "confidence", "limitations"} {
+		if !strings.Contains(artifacts[0].DetailsJSON, want) {
+			t.Fatalf("artifact details = %s, want %q", artifacts[0].DetailsJSON, want)
+		}
+	}
+	shown, err := store.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
+	}
+	if shown.Status != "queued" {
+		t.Fatalf("task status = %q, want queued so browser evidence does not count as completion", shown.Status)
+	}
+}
+
+func TestWorkEvidenceTimeoutFailsTaskAndRecordsRecoveryRecommendation(t *testing.T) {
+	store := openBrowserTestStore(t)
+	defer store.Close()
+
+	ctx := context.Background()
+	task := createBrowserApprovalTask(t, store)
+	adapter := &recordingAdapter{response: huginnbrowser.Response{
+		Status:               "timeout",
+		AdapterKind:          "stub_local",
+		VisitedURLs:          []string{"https://example.com/docs"},
+		ExtractedTextSummary: "Browser capture timed out.",
+		ErrorCode:            "worker_timeout",
+		ErrorMessage:         "capture exceeded timeout",
+		BrowserErrorRecoveryNotes: []string{
+			"Retry with fewer pages or a longer timeout.",
+		},
+	}}
+
+	result, err := Service{Store: store, Adapter: adapter}.RunWorkEvidence(ctx, WorkEvidenceTask{
+		TaskID:             task.ID,
+		WorkerMode:         "browser",
+		Objective:          "Collect public documentation",
+		AllowedDomains:     []string{"example.com"},
+		StartURLs:          []string{"https://example.com/docs"},
+		MaxPages:           1,
+		MaxDurationSeconds: 30,
+		EvidenceRequired:   true,
+		Actions:            []string{"read"},
+	})
+	if err != nil {
+		t.Fatalf("RunWorkEvidence() error = %v", err)
+	}
+	if result.Status != "failed" || result.ErrorCode != "worker_timeout" || result.RunArtifactID <= 0 {
+		t.Fatalf("result = %+v, want failed timeout artifact", result)
+	}
+	shown, err := store.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
+	}
+	if shown.Status != "failed" {
+		t.Fatalf("task status = %q, want failed after browser capture failure", shown.Status)
+	}
+	events, err := store.ListEvents(ctx, sqlite.ListEventsParams{})
+	if err != nil {
+		t.Fatalf("ListEvents() error = %v", err)
+	}
+	var recoveryEvent bool
+	for _, event := range events {
+		if event.Type == runtimeevents.EventTaskRecoveryRecommended {
+			recoveryEvent = true
+		}
+	}
+	if !recoveryEvent {
+		t.Fatalf("events = %+v, want task.recovery_recommended for failed browser capture", events)
+	}
+}
+
 func TestReadOnlyServicePassesSiteProfilesToAdapter(t *testing.T) {
 	store := openBrowserTestStore(t)
 	defer store.Close()
