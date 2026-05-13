@@ -320,7 +320,7 @@ func (store *Store) recordMigrationApplied(ctx context.Context, tx migrationExec
 
 func migrationSchemaAlreadySatisfied(ctx context.Context, tx migrationExecutor, migration migration) (bool, error) {
 	switch migration.Version {
-	case 46:
+	case 47:
 		return tableHasColumns(ctx, tx, "approvals", "policy_snapshot_hash", "runtime_snapshot_hash")
 	default:
 		return false, nil

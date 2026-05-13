@@ -54,10 +54,10 @@ func TestMobileApprovalsAPIListsDetailAndRequiresExplicitHighRiskConfirmation(t 
 	defer htmlResponse.Body.Close()
 	htmlBody, err := io.ReadAll(htmlResponse.Body)
 	if err != nil {
-		t.Fatalf("ReadAll(/mobile/approvals) error = %v", err)
+		t.Fatalf("ReadAll(/app/) error = %v", err)
 	}
-	if htmlResponse.StatusCode != http.StatusOK || !strings.Contains(string(htmlBody), "Odin Operator") || !strings.Contains(string(htmlBody), "navigator.serviceWorker") {
-		t.Fatalf("/mobile/approvals status=%d body=%q, want PWA shell", htmlResponse.StatusCode, string(htmlBody))
+	if htmlResponse.StatusCode != http.StatusOK || !strings.Contains(string(htmlBody), "Odin Operator") || !strings.Contains(string(htmlBody), `id="approvals-list"`) {
+		t.Fatalf("/app/ status=%d body=%q, want PWA shell", htmlResponse.StatusCode, string(htmlBody))
 	}
 
 	listRequest, err := http.NewRequest(http.MethodGet, server.URL+"/mobile/approvals", nil)

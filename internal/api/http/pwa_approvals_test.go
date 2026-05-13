@@ -16,29 +16,29 @@ func TestPWAStaticShellIncludesApprovalControls(t *testing.T) {
 	server := httptest.NewServer(httpapi.NewOperationalHandler(httpapi.Dependencies{}))
 	defer server.Close()
 
-	html := pwaGetText(t, server.URL+"/app/")
+	html := pwaApprovalsGetText(t, server.URL+"/app/")
 	for _, want := range []string{
 		`<link rel="manifest" href="/app/manifest.webmanifest">`,
-		`navigator.serviceWorker.register('/app/service-worker.js')`,
-		`id="approvals-panel"`,
-		`id="approvals-status"`,
+		`id="approvals-title"`,
 		`id="approvals-list"`,
-		`id="refresh-approvals"`,
+		`id="approval-confirmation"`,
+		`id="approval-confirmation-text"`,
 	} {
 		if !strings.Contains(html, want) {
 			t.Fatalf("/app/ missing %q:\n%s", want, html)
 		}
 	}
 
-	appJS := pwaGetText(t, server.URL+"/app/app.js")
+	appJS := pwaApprovalsGetText(t, server.URL+"/app/app.js")
 	for _, want := range []string{
 		`/mobile/approvals`,
 		`data-approval-action`,
 		`confirmation_text`,
 		`expected_policy_snapshot_hash`,
 		`expected_runtime_snapshot_hash`,
-		`X-Odin-Admin-Token`,
-		`decision_by: 'pwa'`,
+		`X-Odin-CSRF`,
+		`decision_by: 'odin-pwa'`,
+		`navigator.serviceWorker.register('/app/service-worker.js')`,
 	} {
 		if !strings.Contains(appJS, want) {
 			t.Fatalf("app.js missing %q:\n%s", want, appJS)
@@ -46,7 +46,7 @@ func TestPWAStaticShellIncludesApprovalControls(t *testing.T) {
 	}
 }
 
-func pwaGetText(t *testing.T, url string) string {
+func pwaApprovalsGetText(t *testing.T, url string) string {
 	t.Helper()
 	response, err := http.Get(url)
 	if err != nil {
