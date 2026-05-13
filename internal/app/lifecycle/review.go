@@ -11,6 +11,7 @@ import (
 	"odin-os/internal/app/bootstrap"
 	commands "odin-os/internal/cli/commands"
 	"odin-os/internal/core/workspaces"
+	browserexecutor "odin-os/internal/executors/browser"
 	approvalsvc "odin-os/internal/runtime/approvals"
 	jobsvc "odin-os/internal/runtime/jobs"
 	runtimeknowledge "odin-os/internal/runtime/knowledge"
@@ -647,6 +648,14 @@ func listReviewQueueEntries(ctx context.Context, app bootstrap.App) ([]reviewQue
 		return nil, err
 	}
 	for _, task := range taskViews {
+		storedTask, err := app.Store.GetTask(ctx, task.TaskID)
+		if err != nil {
+			return nil, err
+		}
+		if artifacts := browserexecutor.ParseTaskEvidenceArtifacts(storedTask.ArtifactsJSON); len(artifacts) > 0 && strings.EqualFold(strings.TrimSpace(task.BlockedReason), "browser_evidence_review") {
+			entries = append(entries, reviewEntryFromBrowserEvidence(task, artifacts[len(artifacts)-1]))
+			continue
+		}
 		if !strings.EqualFold(strings.TrimSpace(task.Status), "failed") {
 			continue
 		}
@@ -727,6 +736,44 @@ func reviewQueueDetail(ctx context.Context, app bootstrap.App, ref reviewQueueRe
 			TaskStatus:      detail.Task.Status,
 			RunID:           detail.Approval.RunID,
 			ResolverSupport: string(detail.ResolverSupport),
+		}, nil
+	case "browser-evidence":
+		task, err := app.Store.GetTask(ctx, ref.ID)
+		if err != nil {
+			return reviewQueueEntry{}, nil, err
+		}
+		project, err := app.Store.GetProject(ctx, task.ProjectID)
+		if err != nil {
+			return reviewQueueEntry{}, nil, err
+		}
+		artifacts := browserexecutor.ParseTaskEvidenceArtifacts(task.ArtifactsJSON)
+		if len(artifacts) == 0 {
+			return reviewQueueEntry{}, nil, fmt.Errorf("browser evidence review %d has no browser evidence artifacts", ref.ID)
+		}
+		entry := reviewEntryFromBrowserEvidence(projections.TaskStatusView{
+			TaskID:        task.ID,
+			ProjectID:     task.ProjectID,
+			ProjectKey:    project.Key,
+			TaskKey:       task.Key,
+			Title:         task.Title,
+			RequestedBy:   task.RequestedBy,
+			WorkKind:      task.WorkKind,
+			Status:        task.Status,
+			Scope:         task.Scope,
+			BlockedReason: task.BlockedReason,
+		}, artifacts[len(artifacts)-1])
+		return entry, struct {
+			SourceType string                             `json:"source_type"`
+			TaskID     int64                              `json:"task_id"`
+			TaskKey    string                             `json:"task_key"`
+			Status     string                             `json:"status"`
+			Evidence   []browserexecutor.EvidenceArtifact `json:"evidence"`
+		}{
+			SourceType: "browser_evidence",
+			TaskID:     task.ID,
+			TaskKey:    task.Key,
+			Status:     task.Status,
+			Evidence:   artifacts,
 		}, nil
 	case "skill-artifact":
 		artifact, err := app.Store.GetSkillArtifact(ctx, ref.ID)
@@ -1066,13 +1113,61 @@ func reviewEntryFromContextPackProposal(proposal runtimeknowledge.ContextPackPro
 	}
 }
 
-func reviewEntryFromFailedTask(task projections.TaskStatusView) reviewQueueEntry {
+func reviewEntryFromBrowserEvidence(task projections.TaskStatusView, artifact browserexecutor.EvidenceArtifact) reviewQueueEntry {
+	return reviewQueueEntry{
+		ReviewID:       fmt.Sprintf("browser-evidence:%d", task.TaskID),
+		QueueID:        fmt.Sprintf("browser-evidence:%d", task.TaskID),
+		SourceType:     "browser_evidence",
+		SourceID:       task.TaskID,
+		ObjectID:       task.TaskID,
+		ObjectKey:      task.TaskKey,
+		Status:         firstNonBlank(artifact.Status, "review_required"),
+		Reason:         "browser_evidence_review",
+		Title:          task.Title,
+		ProjectScope:   task.ProjectKey,
+		Summary:        firstNonBlank(artifact.Summary, task.Title),
+		TaskID:         task.TaskID,
+		TaskKey:        task.TaskKey,
+		TaskStatus:     task.Status,
+		WorkKind:       task.WorkKind,
+		AllowedActions: []string{"inspect"},
+	}
+}
+
+func reviewRetryGuidanceForTask(task projections.TaskStatusView) recovery.RetryGuidance {
 	guidance := recovery.RetryGuidanceForTask(recovery.RetryGuidanceInput{
 		RetryCount:  task.RetryCount,
 		MaxAttempts: task.MaxAttempts,
 		WorkKind:    task.WorkKind,
 		RequestedBy: task.RequestedBy,
 	})
+	if isBrowserEvidenceFailure(task.LastError) {
+		guidance.Source = "browser_evidence"
+		guidance.RecoveryRecommendation = "Browser evidence capture failed. Inspect the browser run artifact, allowed-domain policy, and adapter error before retrying through odin review act failed-work ID retry or odin work retry."
+	}
+	return guidance
+}
+
+func recoveryGuidanceForStoredTask(task sqlite.Task) recovery.RetryGuidance {
+	guidance := recovery.RetryGuidanceForTask(recovery.RetryGuidanceInput{
+		RetryCount:  task.RetryCount,
+		MaxAttempts: task.MaxAttempts,
+		WorkKind:    task.WorkKind,
+		RequestedBy: task.RequestedBy,
+	})
+	if isBrowserEvidenceFailure(task.LastError) {
+		guidance.Source = "browser_evidence"
+		guidance.RecoveryRecommendation = "Browser evidence capture failed. Inspect the browser run artifact, allowed-domain policy, and adapter error before retrying through odin review act failed-work ID retry or odin work retry."
+	}
+	return guidance
+}
+
+func isBrowserEvidenceFailure(lastError string) bool {
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(lastError)), "browser evidence capture failed:")
+}
+
+func reviewEntryFromFailedTask(task projections.TaskStatusView) reviewQueueEntry {
+	guidance := reviewRetryGuidanceForTask(task)
 	retryEligible := guidance.RetryEligible
 	return reviewQueueEntry{
 		ReviewID:               fmt.Sprintf("failed-work:%d", task.TaskID),
@@ -1119,12 +1214,7 @@ func reviewFailedTaskDetail(ctx context.Context, store *sqlite.Store, task sqlit
 		LastError:   task.LastError,
 	}
 	entry := reviewEntryFromFailedTask(taskView)
-	guidance := recovery.RetryGuidanceForTask(recovery.RetryGuidanceInput{
-		RetryCount:  task.RetryCount,
-		MaxAttempts: task.MaxAttempts,
-		WorkKind:    task.WorkKind,
-		RequestedBy: task.RequestedBy,
-	})
+	guidance := recoveryGuidanceForStoredTask(task)
 	runs, err := projections.ListRunSummaryViews(ctx, store.DB())
 	if err != nil {
 		return reviewQueueEntry{}, failedWorkReviewDetail{}, err
@@ -1174,6 +1264,8 @@ func parseReviewQueueRef(queueID string) (reviewQueueRef, error) {
 		idRef = strings.TrimPrefix(idRef, "goal-blocker-")
 	case "approval":
 		idRef = strings.TrimPrefix(idRef, "approval-")
+	case "browser-evidence":
+		idRef = strings.TrimPrefix(idRef, "browser-evidence-")
 	case "skill-artifact":
 		idRef = strings.TrimPrefix(idRef, "skill-artifact-")
 	case "context-pack":

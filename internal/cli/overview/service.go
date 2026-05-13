@@ -14,6 +14,7 @@ import (
 	coreintake "odin-os/internal/core/intake"
 	coreprojects "odin-os/internal/core/projects"
 	"odin-os/internal/core/workspaces"
+	browserexecutor "odin-os/internal/executors/browser"
 	knowledgememory "odin-os/internal/memory/knowledge"
 	"odin-os/internal/registry"
 	approvalsvc "odin-os/internal/runtime/approvals"
@@ -90,19 +91,20 @@ type InitiativeSummary struct {
 }
 
 type WorkItemSummary struct {
-	ProjectKey            string              `json:"project_key"`
-	InitiativeKey         *string             `json:"initiative_key"`
-	CompanionKey          *string             `json:"companion_key"`
-	WorkItemKey           string              `json:"work_item_key"`
-	Title                 string              `json:"title"`
-	Status                string              `json:"status"`
-	Scope                 string              `json:"scope"`
-	BlockedReason         string              `json:"blocked_reason,omitempty"`
-	ExecutionIntent       string              `json:"execution_intent,omitempty"`
-	ExecutionIntentSource string              `json:"execution_intent_source,omitempty"`
-	CurrentRunID          *int64              `json:"current_run_id"`
-	CurrentRunStatus      string              `json:"current_run_status"`
-	RunAttempts           []RunAttemptSummary `json:"run_attempts"`
+	ProjectKey            string                             `json:"project_key"`
+	InitiativeKey         *string                            `json:"initiative_key"`
+	CompanionKey          *string                            `json:"companion_key"`
+	WorkItemKey           string                             `json:"work_item_key"`
+	Title                 string                             `json:"title"`
+	Status                string                             `json:"status"`
+	Scope                 string                             `json:"scope"`
+	BlockedReason         string                             `json:"blocked_reason,omitempty"`
+	ExecutionIntent       string                             `json:"execution_intent,omitempty"`
+	ExecutionIntentSource string                             `json:"execution_intent_source,omitempty"`
+	CurrentRunID          *int64                             `json:"current_run_id"`
+	CurrentRunStatus      string                             `json:"current_run_status"`
+	RunAttempts           []RunAttemptSummary                `json:"run_attempts"`
+	BrowserEvidence       []browserexecutor.EvidenceArtifact `json:"browser_evidence,omitempty"`
 }
 
 type CompanionLane struct {
@@ -658,12 +660,7 @@ func (service Service) Build(ctx context.Context, resolved scope.Resolution) (Vi
 			visibleCompanionKeys[*taskContext.companionKey] = struct{}{}
 		}
 		if strings.EqualFold(strings.TrimSpace(task.Status), "failed") {
-			guidance := recovery.RetryGuidanceForTask(recovery.RetryGuidanceInput{
-				RetryCount:  task.RetryCount,
-				MaxAttempts: task.MaxAttempts,
-				WorkKind:    task.WorkKind,
-				RequestedBy: task.RequestedBy,
-			})
+			guidance := overviewRetryGuidanceForTask(task)
 			view.Observability.RecoveryGuidance = append(view.Observability.RecoveryGuidance, RetryRecoveryGuidanceSummary{
 				TaskID:                 task.TaskID,
 				WorkItemKey:            task.TaskKey,
@@ -684,6 +681,10 @@ func (service Service) Build(ctx context.Context, resolved scope.Resolution) (Vi
 		if isClosedWorkItemStatus(task.Status) {
 			continue
 		}
+		browserEvidence, err := browserEvidenceForTask(ctx, service.Store, task.TaskID)
+		if err != nil {
+			return View{}, err
+		}
 		view.WorkItems = append(view.WorkItems, WorkItemSummary{
 			ProjectKey:            task.ProjectKey,
 			InitiativeKey:         taskContext.initiativeKey,
@@ -698,6 +699,7 @@ func (service Service) Build(ctx context.Context, resolved scope.Resolution) (Vi
 			CurrentRunID:          task.CurrentRunID,
 			CurrentRunStatus:      task.CurrentRunStatus,
 			RunAttempts:           append([]RunAttemptSummary(nil), runAttemptsByTaskID[task.TaskID]...),
+			BrowserEvidence:       browserEvidence,
 		})
 	}
 
@@ -1512,6 +1514,32 @@ func isClosedWorkItemStatus(status string) bool {
 	default:
 		return false
 	}
+}
+
+func browserEvidenceForTask(ctx context.Context, store *sqlite.Store, taskID int64) ([]browserexecutor.EvidenceArtifact, error) {
+	task, err := store.GetTask(ctx, taskID)
+	if err != nil {
+		return nil, err
+	}
+	return browserexecutor.ParseTaskEvidenceArtifacts(task.ArtifactsJSON), nil
+}
+
+func overviewRetryGuidanceForTask(task projections.TaskStatusView) recovery.RetryGuidance {
+	guidance := recovery.RetryGuidanceForTask(recovery.RetryGuidanceInput{
+		RetryCount:  task.RetryCount,
+		MaxAttempts: task.MaxAttempts,
+		WorkKind:    task.WorkKind,
+		RequestedBy: task.RequestedBy,
+	})
+	if isOverviewBrowserEvidenceFailure(task.LastError) {
+		guidance.Source = "browser_evidence"
+		guidance.RecoveryRecommendation = "Browser evidence capture failed. Inspect the browser run artifact, allowed-domain policy, and adapter error before retrying through odin review act failed-work ID retry or odin work retry."
+	}
+	return guidance
+}
+
+func isOverviewBrowserEvidenceFailure(lastError string) bool {
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(lastError)), "browser evidence capture failed:")
 }
 
 func isReviewableIntakeStatus(status string) bool {
