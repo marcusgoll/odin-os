@@ -23,6 +23,8 @@ import (
 )
 
 const mobileMaxBodyBytes = 1 << 20
+const mobileMaxImageBytes = 10 << 20
+const mobileMaxAudioBytes = 25 << 20
 
 func registerMobileRoutes(mux *http.ServeMux, deps Dependencies, now func() time.Time) {
 	mux.HandleFunc("GET /mobile/status", mobileAuthorized(deps, func(writer http.ResponseWriter, request *http.Request) {
@@ -221,6 +223,10 @@ type mobileRawIntakeRequest struct {
 	Idea       string `json:"idea"`
 	ProjectKey string `json:"project_key"`
 	DedupKey   string `json:"dedup_key"`
+	Transcript string `json:"transcript"`
+	SourceApp  string `json:"source_app"`
+	ShareURL   string `json:"share_url"`
+	ShareTitle string `json:"share_title"`
 }
 
 type mobileAttachmentIntakeRequest struct {
@@ -449,6 +455,10 @@ func handleMobileApprovalDecision(writer http.ResponseWriter, request *http.Requ
 }
 
 func handleMobileRawIntake(writer http.ResponseWriter, request *http.Request, deps Dependencies, now func() time.Time) {
+	if strings.HasPrefix(strings.ToLower(request.Header.Get("Content-Type")), "multipart/form-data") {
+		handleMobileMultipartRawIntake(writer, request, deps, now)
+		return
+	}
 	var body mobileRawIntakeRequest
 	if err := decodeMobileJSON(writer, request, &body); err != nil {
 		writeAPIError(writer, http.StatusBadRequest, "invalid_request", err.Error())
@@ -458,8 +468,8 @@ func handleMobileRawIntake(writer http.ResponseWriter, request *http.Request, de
 	if kind == "" {
 		kind = "text"
 	}
-	if kind != "text" && kind != "prompt" && kind != "idea" {
-		writeAPIError(writer, http.StatusBadRequest, "invalid_intake_kind", "kind must be text, prompt, or idea")
+	if !mobileCaptureKindAllowed(kind) {
+		writeAPIError(writer, http.StatusBadRequest, "invalid_intake_kind", "kind must be text, note, prompt, idea, task, bug, project_note, photo, or voice_note")
 		return
 	}
 	content := firstNonEmpty(body.Content, body.Text, body.Prompt, body.Idea)
@@ -473,11 +483,19 @@ func handleMobileRawIntake(writer http.ResponseWriter, request *http.Request, de
 	}
 	facts := map[string]any{
 		"source":         "mobile_api",
+		"requested_by":   "mobile_api",
+		"payload_policy": "stored_in_source_facts_json",
 		"kind":           kind,
 		"title":          title,
-		"content":        content,
+		"body":           content,
 		"content_sha256": mobileHash(content),
 		"received_via":   "odin_mobile_api",
+		"transcript":     strings.TrimSpace(body.Transcript),
+		"source_app":     strings.TrimSpace(body.SourceApp),
+		"share": map[string]string{
+			"url":   strings.TrimSpace(body.ShareURL),
+			"title": strings.TrimSpace(body.ShareTitle),
+		},
 	}
 	item, err := createMobileIntakeItem(request.Context(), deps, mobileCreateIntakeInput{
 		Kind:       kind,
@@ -489,6 +507,104 @@ func handleMobileRawIntake(writer http.ResponseWriter, request *http.Request, de
 	})
 	if err != nil {
 		writeAPIError(writer, http.StatusBadRequest, "mobile_intake_create_failed", err.Error())
+		return
+	}
+	writeMobileJSON(writer, http.StatusAccepted, mobileIntakeResponse{IntakeItem: mobileIntakeView(item)})
+}
+
+func handleMobileMultipartRawIntake(writer http.ResponseWriter, request *http.Request, deps Dependencies, now func() time.Time) {
+	request.Body = http.MaxBytesReader(writer, request.Body, mobileMaxAudioBytes+mobileMaxBodyBytes)
+	if err := request.ParseMultipartForm(mobileMaxAudioBytes + mobileMaxBodyBytes); err != nil {
+		writeAPIError(writer, http.StatusBadRequest, "invalid_multipart_request", err.Error())
+		return
+	}
+	kind := strings.ToLower(strings.TrimSpace(request.FormValue("kind")))
+	if kind == "" {
+		kind = "photo"
+	}
+	if !mobileCaptureKindAllowed(kind) {
+		writeAPIError(writer, http.StatusBadRequest, "invalid_intake_kind", "kind must be text, note, prompt, idea, task, bug, project_note, photo, or voice_note")
+		return
+	}
+	file, header, err := request.FormFile("attachment")
+	if err != nil {
+		writeAPIError(writer, http.StatusBadRequest, "attachment_required", "attachment file is required")
+		return
+	}
+	defer file.Close()
+
+	contentType := strings.TrimSpace(header.Header.Get("Content-Type"))
+	attachmentKind, maxBytes, ok := mobileAllowedAttachment(contentType)
+	if !ok {
+		writeAPIError(writer, http.StatusBadRequest, "attachment_type_not_allowed", "attachment content_type must be an allowed image or audio type; retry after choosing a supported file")
+		return
+	}
+	data, err := io.ReadAll(io.LimitReader(file, maxBytes+1))
+	if err != nil {
+		writeAPIError(writer, http.StatusBadRequest, "attachment_read_failed", err.Error())
+		return
+	}
+	if int64(len(data)) > maxBytes {
+		writeAPIError(writer, http.StatusBadRequest, "attachment_too_large", fmt.Sprintf("attachment exceeds %d bytes; retry with a smaller file", maxBytes))
+		return
+	}
+	title := strings.TrimSpace(request.FormValue("title"))
+	if title == "" {
+		title = header.Filename
+	}
+	content := strings.TrimSpace(request.FormValue("content"))
+	if content == "" {
+		content = strings.TrimSpace(request.FormValue("text"))
+	}
+	sha := mobileHashBytes(data)
+	attachmentFacts := map[string]any{
+		"kind":         attachmentKind,
+		"filename":     header.Filename,
+		"content_type": contentType,
+		"size_bytes":   len(data),
+		"sha256":       sha,
+		"status":       "stored",
+	}
+	facts := map[string]any{
+		"source":         "mobile_api",
+		"requested_by":   "mobile_api",
+		"payload_policy": "stored_in_source_facts_json",
+		"kind":           kind,
+		"title":          title,
+		"body":           content,
+		"content_sha256": mobileHash(content),
+		"received_via":   "odin_mobile_api",
+		"transcript":     strings.TrimSpace(request.FormValue("transcript")),
+		"source_app":     strings.TrimSpace(request.FormValue("source_app")),
+		"share": map[string]string{
+			"url":   strings.TrimSpace(request.FormValue("share_url")),
+			"title": strings.TrimSpace(request.FormValue("share_title")),
+		},
+		"attachments": []map[string]any{attachmentFacts},
+	}
+	item, err := createMobileIntakeItem(request.Context(), deps, mobileCreateIntakeInput{
+		Kind:       kind,
+		Title:      title,
+		DedupeKey:  strings.TrimSpace(request.FormValue("dedup_key")),
+		ProjectKey: strings.TrimSpace(request.FormValue("project_key")),
+		Facts:      facts,
+		Now:        now,
+	})
+	if err != nil {
+		writeAPIError(writer, http.StatusBadRequest, "mobile_intake_create_failed", err.Error())
+		return
+	}
+	if _, err := deps.Store.CreateIntakeAttachment(request.Context(), sqlite.CreateIntakeAttachmentParams{
+		IntakeItemID: item.ID,
+		Kind:         attachmentKind,
+		Filename:     header.Filename,
+		ContentType:  contentType,
+		SizeBytes:    int64(len(data)),
+		SHA256:       sha,
+		Status:       "stored",
+		Bytes:        data,
+	}); err != nil {
+		writeAPIError(writer, http.StatusBadRequest, "mobile_attachment_store_failed", err.Error())
 		return
 	}
 	writeMobileJSON(writer, http.StatusAccepted, mobileIntakeResponse{IntakeItem: mobileIntakeView(item)})
@@ -725,8 +841,33 @@ func mobileDefaultTitle(kind string, content string) string {
 	return content
 }
 
+func mobileCaptureKindAllowed(kind string) bool {
+	switch kind {
+	case "text", "note", "prompt", "idea", "task", "bug", "project_note", "photo", "image", "voice_note", "audio":
+		return true
+	default:
+		return false
+	}
+}
+
+func mobileAllowedAttachment(contentType string) (string, int64, bool) {
+	switch strings.ToLower(strings.TrimSpace(contentType)) {
+	case "image/jpeg", "image/png", "image/webp", "image/gif":
+		return "image", mobileMaxImageBytes, true
+	case "audio/webm", "audio/mpeg", "audio/mp4", "audio/wav", "audio/ogg", "audio/x-wav":
+		return "audio", mobileMaxAudioBytes, true
+	default:
+		return "", 0, false
+	}
+}
+
 func mobileHash(value string) string {
 	sum := sha256.Sum256([]byte(value))
+	return hex.EncodeToString(sum[:])
+}
+
+func mobileHashBytes(value []byte) string {
+	sum := sha256.Sum256(value)
 	return hex.EncodeToString(sum[:])
 }
 

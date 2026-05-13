@@ -825,6 +825,98 @@ func intakeSourceFact(sourceFactsJSON string, key string) string {
 	return value
 }
 
+func (store *Store) CreateIntakeAttachment(ctx context.Context, params CreateIntakeAttachmentParams) (IntakeAttachment, error) {
+	now := store.now()
+	status := strings.TrimSpace(params.Status)
+	if status == "" {
+		status = "stored"
+	}
+	var attachment IntakeAttachment
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		if _, err := store.getIntakeItemTx(ctx, tx, params.IntakeItemID); err != nil {
+			return err
+		}
+		result, err := tx.ExecContext(ctx, `
+			INSERT INTO intake_attachments (
+				intake_item_id,
+				kind,
+				filename,
+				content_type,
+				size_bytes,
+				sha256,
+				status,
+				bytes,
+				created_at,
+				updated_at
+			)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`,
+			params.IntakeItemID,
+			params.Kind,
+			params.Filename,
+			params.ContentType,
+			params.SizeBytes,
+			params.SHA256,
+			status,
+			params.Bytes,
+			formatTime(now),
+			formatTime(now),
+		)
+		if err != nil {
+			return err
+		}
+		attachmentID, err := result.LastInsertId()
+		if err != nil {
+			return err
+		}
+		attachment = IntakeAttachment{
+			ID:           attachmentID,
+			IntakeItemID: params.IntakeItemID,
+			Kind:         params.Kind,
+			Filename:     params.Filename,
+			ContentType:  params.ContentType,
+			SizeBytes:    params.SizeBytes,
+			SHA256:       params.SHA256,
+			Status:       status,
+			Bytes:        append([]byte(nil), params.Bytes...),
+			CreatedAt:    now,
+			UpdatedAt:    now,
+		}
+		return nil
+	})
+	return attachment, err
+}
+
+func (store *Store) ListIntakeAttachments(ctx context.Context, params ListIntakeAttachmentsParams) ([]IntakeAttachment, error) {
+	query := `
+		SELECT id, intake_item_id, kind, filename, content_type, size_bytes, sha256, status, bytes, created_at, updated_at
+		FROM intake_attachments
+		WHERE 1 = 1
+	`
+	var args []any
+	if params.IntakeItemID != 0 {
+		query += ` AND intake_item_id = ?`
+		args = append(args, params.IntakeItemID)
+	}
+	query += ` ORDER BY id ASC`
+
+	rows, err := store.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	attachments := make([]IntakeAttachment, 0)
+	for rows.Next() {
+		attachment, err := scanIntakeAttachment(rows)
+		if err != nil {
+			return nil, err
+		}
+		attachments = append(attachments, attachment)
+	}
+	return attachments, rows.Err()
+}
+
 func (store *Store) ListIntakeItems(ctx context.Context, params ListIntakeItemsParams) ([]IntakeItem, error) {
 	query := `
 		SELECT id, workspace_id, source_family, external_object_id, event_kind, subject, dedupe_key,
@@ -10054,6 +10146,37 @@ func scanIntakeItem(row interface{ Scan(...any) error }) (IntakeItem, error) {
 		return IntakeItem{}, err
 	}
 	return item, nil
+}
+
+func scanIntakeAttachment(row interface{ Scan(...any) error }) (IntakeAttachment, error) {
+	var attachment IntakeAttachment
+	var createdAt string
+	var updatedAt string
+	if err := row.Scan(
+		&attachment.ID,
+		&attachment.IntakeItemID,
+		&attachment.Kind,
+		&attachment.Filename,
+		&attachment.ContentType,
+		&attachment.SizeBytes,
+		&attachment.SHA256,
+		&attachment.Status,
+		&attachment.Bytes,
+		&createdAt,
+		&updatedAt,
+	); err != nil {
+		return IntakeAttachment{}, err
+	}
+	var err error
+	attachment.CreatedAt, err = parseTime(createdAt)
+	if err != nil {
+		return IntakeAttachment{}, err
+	}
+	attachment.UpdatedAt, err = parseTime(updatedAt)
+	if err != nil {
+		return IntakeAttachment{}, err
+	}
+	return attachment, nil
 }
 
 func scanAutomationTrigger(row interface{ Scan(...any) error }) (AutomationTrigger, error) {
