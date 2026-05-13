@@ -3271,14 +3271,15 @@ func (store *Store) BlockTaskAndRequestApproval(ctx context.Context, params Bloc
 		previousStatus := current.Status
 		if _, err := tx.ExecContext(ctx, `
 			UPDATE tasks
-			SET status = ?, updated_at = ?
+			SET status = ?, blocked_reason = ?, updated_at = ?
 			WHERE id = ?
-		`, "blocked", formatTime(now), params.TaskID); err != nil {
+		`, "blocked", "approval_required", formatTime(now), params.TaskID); err != nil {
 			return err
 		}
 
 		task = current
 		task.Status = "blocked"
+		task.BlockedReason = "approval_required"
 		task.UpdatedAt = now
 
 		projectID := task.ProjectID
@@ -3508,8 +3509,19 @@ func (store *Store) ResolveApproval(ctx context.Context, params ResolveApprovalP
 				if err != nil {
 					return err
 				}
-				if linkedRun.Status == "running" && task.BlockedReason != "approval_required" {
-					return fmt.Errorf("approval %d cannot be approved while run %d is still running", current.ID, linkedRun.ID)
+				if linkedRun.Status == "running" {
+					var activeApprovalWaitPackets int
+					row := tx.QueryRowContext(ctx, `
+						SELECT COUNT(*)
+						FROM context_packets
+						WHERE task_id = ? AND run_id = ? AND packet_kind = 'wake' AND trigger = 'approval_wait' AND status = 'active'
+					`, task.ID, linkedRun.ID)
+					if err := row.Scan(&activeApprovalWaitPackets); err != nil {
+						return err
+					}
+					if activeApprovalWaitPackets == 0 {
+						return fmt.Errorf("approval %d cannot be approved while run %d is still running", current.ID, linkedRun.ID)
+					}
 				}
 			}
 		}
