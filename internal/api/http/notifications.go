@@ -245,7 +245,16 @@ const pwaShellHTML = `<!doctype html>
         return;
       }
       const existing = await registration.pushManager.getSubscription();
-      const subscription = existing || await registration.pushManager.subscribe({ userVisibleOnly: true });
+      let subscription = existing;
+      if (!subscription) {
+        try {
+          subscription = await registration.pushManager.subscribe({ userVisibleOnly: true });
+        } catch (error) {
+          state.textContent = 'Push subscription failed. Odin will use the in-app notification center.';
+          await refreshNotifications();
+          return;
+        }
+      }
       await fetch('/notifications/subscriptions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },

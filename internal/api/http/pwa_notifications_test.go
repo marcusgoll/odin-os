@@ -39,6 +39,9 @@ func TestPWAExposesServiceWorkerManifestAndUserActionSubscriptionEndpoint(t *tes
 			t.Fatalf("/pwa body missing %q:\n%s", want, pwaBody)
 		}
 	}
+	if !strings.Contains(pwaBody, "Push subscription failed. Odin will use the in-app notification center.") {
+		t.Fatalf("/pwa body missing push subscription failure fallback:\n%s", pwaBody)
+	}
 	if got := getBody(t, server.URL+"/manifest.webmanifest", http.StatusOK); !strings.Contains(got, `"display":"standalone"`) {
 		t.Fatalf("/manifest.webmanifest = %s, want standalone manifest", got)
 	}
