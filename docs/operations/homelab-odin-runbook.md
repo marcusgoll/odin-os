@@ -76,11 +76,35 @@ Runtime config lives outside the repo at:
 The active container must include these environment values:
 
 ```bash
+PATH=/home/orchestrator/.npm-global/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 ODIN_ROOT=/state
 ODIN_HTTP_ADDR=127.0.0.1:9444
 ODIN_PROJECTS_OVERLAY=/config/odin-os-projects.local.yaml
 ODIN_CODEX_DRIVER=/config/odin-codex-live-driver.sh
 ODIN_CORE_GIT_ROOT=/home/orchestrator/odin-os
+```
+
+The active container must also mount the registered project git roots read-only
+so registry validation sees the same repositories the host sees:
+
+```bash
+/home/orchestrator/odin-os:/home/orchestrator/odin-os:ro
+/home/orchestrator/pbs:/home/orchestrator/pbs:ro
+/home/orchestrator/cfipros:/home/orchestrator/cfipros:ro
+/home/orchestrator/marcusgoll:/home/orchestrator/marcusgoll:ro
+/home/orchestrator/.config/superpowers/worktrees/family-ops/odin-os-cutover-main:/home/orchestrator/.config/superpowers/worktrees/family-ops/odin-os-cutover-main:ro
+```
+
+Because workspace-ready projects are registered, the container must expose the
+same operator prerequisites used by readiness:
+
+```bash
+/home/orchestrator/.npm-global:/home/orchestrator/.npm-global:ro
+/usr/bin/node:/usr/bin/node:ro
+/usr/bin/tmux:/usr/bin/tmux:ro
+/lib/x86_64-linux-gnu:/lib/x86_64-linux-gnu:ro
+/usr/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu:ro
+/lib64/ld-linux-x86-64.so.2:/lib64/ld-linux-x86-64.so.2:ro
 ```
 
 If the Docker-backed public PWA serve process owns the live runtime root,
