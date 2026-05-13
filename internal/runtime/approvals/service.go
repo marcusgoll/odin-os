@@ -28,6 +28,7 @@ const (
 )
 
 var ErrUnsupportedResolver = errors.New("unsupported approval resolver")
+var ErrStaleApproval = errors.New("stale approval")
 
 type UnsupportedResolverError struct {
 	ApprovalID int64
@@ -144,6 +145,11 @@ func (service Service) Resolve(ctx context.Context, params ResolveParams) (Resol
 			ResolverSupport: detail.ResolverSupport,
 		}, UnsupportedResolverError{ApprovalID: current.ID}
 	}
+	if action == "approve" {
+		if err := service.rejectStaleApproval(ctx, current); err != nil {
+			return ResolveResult{}, err
+		}
+	}
 
 	approval, err := service.Store.ResolveApproval(ctx, sqlite.ResolveApprovalParams{
 		ApprovalID: params.ApprovalID,
@@ -160,19 +166,31 @@ func (service Service) Resolve(ctx context.Context, params ResolveParams) (Resol
 		ResolverSupport: detail.ResolverSupport,
 	}
 	if action != "approve" {
+		blockingReason := "operator_denied"
+		summary := "approval denied"
+		if action == "clarify" {
+			blockingReason = "clarification_requested"
+			summary = "approval clarification requested"
+		}
 		if _, err := service.Store.UpdateTaskStatus(ctx, sqlite.UpdateTaskStatusParams{
 			TaskID:         detail.Task.ID,
 			Status:         "blocked",
-			Summary:        "approval denied",
-			TerminalReason: "operator_denied",
+			Summary:        summary,
+			TerminalReason: blockingReason,
+		}); err != nil {
+			return ResolveResult{}, err
+		}
+		if _, err := service.Store.BlockTask(ctx, sqlite.BlockTaskParams{
+			TaskID: detail.Task.ID,
+			Reason: blockingReason,
 		}); err != nil {
 			return ResolveResult{}, err
 		}
 		if detail.ResumeState != nil && detail.ResumeState.Trigger == checkpoints.TriggerApprovalWait {
 			if _, err := service.checkpointService().SealWakePacket(ctx, checkpoints.SealWakePacketParams{
 				PacketID:          detail.ResumeState.WakePacketID,
-				BlockingReason:    "operator_denied",
-				LastCompletedStep: "approval denied",
+				BlockingReason:    blockingReason,
+				LastCompletedStep: summary,
 			}); err != nil {
 				return ResolveResult{}, err
 			}
@@ -194,6 +212,23 @@ func (service Service) Resolve(ctx context.Context, params ResolveParams) (Resol
 	}
 	result.ResolverSupport = detail.ResolverSupport
 	return result, nil
+}
+
+func (service Service) rejectStaleApproval(ctx context.Context, approval sqlite.Approval) error {
+	if strings.TrimSpace(approval.PolicySnapshotHash) == "" && strings.TrimSpace(approval.RuntimeSnapshotHash) == "" {
+		return nil
+	}
+	policySnapshotHash, runtimeSnapshotHash, err := service.Store.CurrentApprovalSnapshotHashes(ctx, approval.ID)
+	if err != nil {
+		return err
+	}
+	if approval.PolicySnapshotHash != "" && approval.PolicySnapshotHash != policySnapshotHash {
+		return fmt.Errorf("%w: policy changed since approval %d was requested", ErrStaleApproval, approval.ID)
+	}
+	if approval.RuntimeSnapshotHash != "" && approval.RuntimeSnapshotHash != runtimeSnapshotHash {
+		return fmt.Errorf("%w: runtime state changed since approval %d was requested", ErrStaleApproval, approval.ID)
+	}
+	return nil
 }
 
 func (service Service) checkpointService() checkpoints.Service {
@@ -458,6 +493,8 @@ func resolutionStatusForAction(action string) (string, error) {
 		return "approved", nil
 	case "deny":
 		return "denied", nil
+	case "clarify":
+		return "clarification_requested", nil
 	default:
 		return "", fmt.Errorf("unsupported approval action %q", action)
 	}
@@ -498,6 +535,11 @@ func FormatReceipt(result ResolveResult) (Receipt, error) {
 		return Receipt{
 			Line:    fmt.Sprintf("approval=%d status=resolved result=denied", result.Approval.ID),
 			Summary: "summary=approval denied; later retry requires fresh prepare",
+		}, nil
+	case "clarification_requested":
+		return Receipt{
+			Line:    fmt.Sprintf("approval=%d status=resolved result=clarification_requested", result.Approval.ID),
+			Summary: "summary=clarification requested; work remains blocked for review",
 		}, nil
 	default:
 		return Receipt{}, fmt.Errorf("unsupported approval status %q", result.Approval.Status)

@@ -53,6 +53,9 @@ const (
 	EventRunStatusChanged                   Type = "run.status_changed"
 	EventRunExecutionClaimed                Type = "run.execution_claimed"
 	EventRunFinished                        Type = "run.finished"
+	EventDesignRequestCreated               Type = "design.request_created"
+	EventDesignExecutionStarted             Type = "design.execution_started"
+	EventDesignArtifactCreated              Type = "design.artifact_created"
 	EventApprovalRequested                  Type = "approval.requested"
 	EventApprovalResolved                   Type = "approval.resolved"
 	EventIncidentOpened                     Type = "incident.opened"
@@ -1044,6 +1047,35 @@ type SkillArtifactReviewedPayload struct {
 	FollowOnTaskID    *int64 `json:"follow_on_task_id,omitempty"`
 	FollowOnTaskKey   string `json:"follow_on_task_key,omitempty"`
 	FollowOnTaskState string `json:"follow_on_task_status,omitempty"`
+}
+
+type DesignRequestCreatedPayload struct {
+	RequestArtifactID int64  `json:"request_artifact_id"`
+	SkillKey          string `json:"skill_key"`
+	Scope             string `json:"scope"`
+	Status            string `json:"status"`
+	ArtifactType      string `json:"artifact_type"`
+	Summary           string `json:"summary,omitempty"`
+	ExecutionProfile  string `json:"execution_profile,omitempty"`
+}
+
+type DesignExecutionStartedPayload struct {
+	RequestArtifactID int64  `json:"request_artifact_id"`
+	SkillKey          string `json:"skill_key"`
+	Scope             string `json:"scope"`
+	ToolKey           string `json:"tool_key"`
+	Summary           string `json:"summary,omitempty"`
+	ExecutionProfile  string `json:"execution_profile,omitempty"`
+}
+
+type DesignArtifactCreatedPayload struct {
+	RequestArtifactID int64  `json:"request_artifact_id"`
+	OutputArtifactID  int64  `json:"output_artifact_id"`
+	SkillKey          string `json:"skill_key"`
+	Scope             string `json:"scope"`
+	ArtifactType      string `json:"artifact_type"`
+	Status            string `json:"status"`
+	Summary           string `json:"summary,omitempty"`
 }
 
 type DelegationCreatedPayload struct {

@@ -228,14 +228,19 @@ function renderApprovals(items) {
     return;
   }
   for (const item of items) {
-    const card = projectionCard('approval', item.task_key || `Approval ${item.approval_id}`, item.resolver_support || item.status, `Risk: resolver=${item.resolver_support || 'unknown'} on governed work. Consequence: approve lets the resolver continue; deny keeps the work blocked and records the reason.`);
+    const actions = Array.isArray(item.actions) && item.actions.length ? item.actions : ['approve', 'deny'];
+    const actionText = actions.join(', ');
+    const risk = item.risk_level || item.resolver_support || 'unknown';
+    const detail = item.requested_action || item.required_reason || 'governed work';
+    const card = projectionCard('approval', item.title || item.task_key || `Approval ${item.approval_id}`, risk, `Action: ${detail}. Allowed decisions: ${actionText}.`);
     const row = document.createElement('div');
     row.className = 'button-row';
-    for (const action of ['approve', 'deny']) {
+    for (const action of actions) {
       const button = document.createElement('button');
       button.type = 'button';
       button.className = action === 'approve' ? 'primary small' : 'danger-button small';
-      button.textContent = action === 'approve' ? 'Approve' : 'Deny';
+      button.setAttribute('data-approval-action', action);
+      button.textContent = actionLabel(action);
       button.setAttribute('aria-label', `${button.textContent} approval ${item.approval_id}`);
       button.addEventListener('click', () => openApprovalConfirmation(item, action));
       row.appendChild(button);
@@ -247,9 +252,15 @@ function renderApprovals(items) {
 
 function openApprovalConfirmation(item, action) {
   pendingApprovalDecision = { item, action };
+  const prompt = item.confirmation_prompt || '';
   document.querySelector('#approval-confirmation-summary').textContent =
     `${action.toUpperCase()} approval ${item.approval_id} for ${item.task_key}. This writes an approval audit event through Odin.`;
   document.querySelector('#approval-reason').value = '';
+  const confirmationField = document.querySelector('#approval-confirmation-text-field');
+  const confirmationInput = document.querySelector('#approval-confirmation-text');
+  confirmationField.hidden = !prompt || action !== 'approve';
+  confirmationInput.value = '';
+  confirmationInput.placeholder = prompt || 'Required confirmation text';
   document.querySelector('#approval-confirmation').hidden = false;
   document.querySelector('#approval-reason').focus();
 }
@@ -262,15 +273,37 @@ async function confirmApprovalDecision() {
     return;
   }
   const { item, action } = pendingApprovalDecision;
+  const confirmationText = document.querySelector('#approval-confirmation-text').value.trim();
   await mobileFetch(`/mobile/approvals/${item.approval_id}/decision`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ action, reason, decision_by: 'odin-pwa' }),
+    body: JSON.stringify({
+      action,
+      reason,
+      actor: 'pwa',
+      decision_by: 'odin-pwa',
+      confirmation_text: confirmationText,
+      expected_policy_snapshot_hash: item.policy_snapshot_hash || '',
+      expected_runtime_snapshot_hash: item.runtime_snapshot_hash || '',
+    }),
   });
   document.querySelector('#approval-confirmation').hidden = true;
   pendingApprovalDecision = null;
   setStatus(`Approval ${action} recorded.`);
   await refreshDashboard();
+}
+
+function actionLabel(action) {
+  switch (action) {
+    case 'approve':
+      return 'Approve';
+    case 'deny':
+      return 'Deny';
+    case 'clarify':
+      return 'Clarify';
+    default:
+      return action;
+  }
 }
 
 function renderFailedBlocked(overview, reviewItems) {

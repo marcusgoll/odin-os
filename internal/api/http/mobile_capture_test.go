@@ -147,8 +147,10 @@ func TestOperationalHandlerServesMobileCapturePWAShell(t *testing.T) {
 		`No production mock data is shown.`,
 		`No action-required rows in current projections.`,
 		`Approval reason is required.`,
-		`Risk: resolver=`,
-		`Consequence: approve lets the resolver continue`,
+		`Allowed decisions:`,
+		`confirmation_text`,
+		`expected_policy_snapshot_hash`,
+		`expected_runtime_snapshot_hash`,
 	} {
 		if !strings.Contains(appJS, want) {
 			t.Fatalf("/app/app.js missing %q:\n%s", want, appJS)

@@ -954,7 +954,7 @@ func TestRunIntakeProcessLinksNearDuplicateWithoutCreatingWork(t *testing.T) {
 	for _, want := range []string{
 		`"status": "duplicate_linked_or_suppressed"`,
 		`"canonical_intake_key": "intake-1"`,
-		`"dedupe_result": "near_duplicate_linked"`,
+		`"dedupe_result": "semantic_duplicate_linked"`,
 		`"suppression_reason": "near_duplicate_subject"`,
 	} {
 		if !strings.Contains(duplicateOutput.String(), want) {
@@ -1288,6 +1288,67 @@ func assertIntakeProcessingAuditEvidence(t *testing.T, raw []byte) {
 	}
 }
 
+func TestRunIntakeProcessLinksSemanticDuplicateWithDifferentAdapterKeys(t *testing.T) {
+	t.Parallel()
+
+	root := testRepoRoot(t)
+	payloadPath := filepath.Join(t.TempDir(), "payload.json")
+	if err := os.WriteFile(payloadPath, []byte(`{"body":"same operator request through different adapters"}`), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	createRaw := func(title, dedup string) {
+		t.Helper()
+		if err := Run(context.Background(), root, []string{
+			"intake", "raw", "create",
+			"--source", "operator",
+			"--project", "odin-core",
+			"--title", title,
+			"--type", "request",
+			"--dedup-key", dedup,
+			"--requested-by", "codex",
+			"--payload-file", payloadPath,
+			"--json",
+		}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+			t.Fatalf("Run(intake raw create %q) error = %v", title, err)
+		}
+	}
+
+	createRaw("Prepare weekly status summary", "adapter-a")
+	createRaw("prepare weekly status summary!", "adapter-b")
+
+	var firstOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"intake", "process", "--id", "intake-1", "--json"}, strings.NewReader(""), &firstOutput); err != nil {
+		t.Fatalf("Run(intake process first) error = %v", err)
+	}
+	if output := firstOutput.String(); !strings.Contains(output, `"dedupe_result": "unique"`) || !strings.Contains(output, `"category": "task"`) {
+		t.Fatalf("first process output = %s, want unique classified intake", output)
+	}
+
+	var duplicateOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"intake", "process", "--id", "intake-2", "--json"}, strings.NewReader(""), &duplicateOutput); err != nil {
+		t.Fatalf("Run(intake process semantic duplicate) error = %v", err)
+	}
+	for _, want := range []string{
+		`"status": "duplicate_linked_or_suppressed"`,
+		`"dedupe_result": "semantic_duplicate_linked"`,
+		`"canonical_intake_key": "intake-1"`,
+		`"match_reason": "normalized_subject"`,
+	} {
+		if !strings.Contains(duplicateOutput.String(), want) {
+			t.Fatalf("semantic duplicate output = %s, want %s", duplicateOutput.String(), want)
+		}
+	}
+
+	var logsOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"logs", "--json"}, strings.NewReader(""), &logsOutput); err != nil {
+		t.Fatalf("Run(logs --json) error = %v", err)
+	}
+	if output := logsOutput.String(); !strings.Contains(output, `"type": "intake.duplicate_linked_or_suppressed"`) || !strings.Contains(output, `"result": "semantic_duplicate_linked"`) {
+		t.Fatalf("logs output = %s, want semantic duplicate audit event", output)
+	}
+}
+
 func TestRunIntakeProcessDerivesTypeSpecificRoutingAndIntent(t *testing.T) {
 	t.Parallel()
 
@@ -1527,7 +1588,7 @@ func TestRunIntakeProcessRecordsNormalizedSubjectDuplicateEvidence(t *testing.T)
 	}
 	for _, want := range []string{
 		`"status": "duplicate_linked_or_suppressed"`,
-		`"dedupe_result": "near_duplicate_linked"`,
+		`"dedupe_result": "semantic_duplicate_linked"`,
 		`"canonical_intake_key": "intake-1"`,
 		`"suppression_reason": "near_duplicate_subject"`,
 		`"basis": "normalized_subject"`,
@@ -1542,7 +1603,7 @@ func TestRunIntakeProcessRecordsNormalizedSubjectDuplicateEvidence(t *testing.T)
 	if err := Run(context.Background(), root, []string{"logs", "--json"}, strings.NewReader(""), &logsOutput); err != nil {
 		t.Fatalf("Run(logs --json) error = %v", err)
 	}
-	if !strings.Contains(logsOutput.String(), `"type": "intake.duplicate_linked_or_suppressed"`) || !strings.Contains(logsOutput.String(), `"result": "near_duplicate_linked"`) {
+	if !strings.Contains(logsOutput.String(), `"type": "intake.duplicate_linked_or_suppressed"`) || !strings.Contains(logsOutput.String(), `"result": "semantic_duplicate_linked"`) {
 		t.Fatalf("logs output = %s, want normalized-subject duplicate event evidence", logsOutput.String())
 	}
 }
@@ -2562,8 +2623,8 @@ func TestRunApprovalGatedReviewHumanOutputExplainsOperatorAction(t *testing.T) {
 		"risk=governance",
 		"reason=task_approval_pending",
 		"status=pending",
-		"actions=approve,deny",
-		"next_steps=inspect with odin review show approval:1; act with odin review act approval:1 <approve|deny>",
+		"actions=approve,deny,clarify",
+		"next_steps=inspect with odin review show approval:1; act with odin review act approval:1 <approve|deny|clarify>",
 	} {
 		if !strings.Contains(reviewList, want) {
 			t.Fatalf("review list output = %q, want %q", reviewList, want)
@@ -2578,8 +2639,8 @@ func TestRunApprovalGatedReviewHumanOutputExplainsOperatorAction(t *testing.T) {
 		"risk=governance",
 		"reason=task_approval_pending",
 		"status=pending",
-		"actions=approve,deny",
-		"next_steps=inspect with odin review show approval:1; act with odin review act approval:1 <approve|deny>",
+		"actions=approve,deny,clarify",
+		"next_steps=inspect with odin review show approval:1; act with odin review act approval:1 <approve|deny|clarify>",
 	} {
 		if !strings.Contains(reviewShow, want) {
 			t.Fatalf("review show output = %q, want %q", reviewShow, want)
@@ -7369,6 +7430,17 @@ func TestRunApprovalsResolveTaskBackedCompanionWork(t *testing.T) {
 			t.Fatalf("approval resolve output = %s, want %s", approved, want)
 		}
 	}
+	allAfterApprove := run("approvals", "all", "--json")
+	for _, want := range []string{
+		`"approval_id": 1`,
+		`"status": "approved"`,
+		`"decision_by": "operator"`,
+		`"reason": "operator approved task work"`,
+	} {
+		if !strings.Contains(allAfterApprove, want) {
+			t.Fatalf("approvals all after approve = %s, want %s", allAfterApprove, want)
+		}
+	}
 
 	repeatApproved := run("approvals", "resolve", "1", "approve", "repeat", "approval", "--json")
 	if !strings.Contains(repeatApproved, `"status": "approved"`) || !strings.Contains(repeatApproved, `"result": "approved"`) {
@@ -7397,6 +7469,17 @@ func TestRunApprovalsResolveTaskBackedCompanionWork(t *testing.T) {
 	denied := run("approvals", "resolve", "2", "deny", "operator", "denied", "task", "work", "--json")
 	if !strings.Contains(denied, `"status": "denied"`) || !strings.Contains(denied, `"result": "denied"`) {
 		t.Fatalf("deny output = %s, want denied result", denied)
+	}
+	allAfterDeny := run("approvals", "all", "--json")
+	for _, want := range []string{
+		`"approval_id": 2`,
+		`"status": "denied"`,
+		`"decision_by": "operator"`,
+		`"reason": "operator denied task work"`,
+	} {
+		if !strings.Contains(allAfterDeny, want) {
+			t.Fatalf("approvals all after deny = %s, want %s", allAfterDeny, want)
+		}
 	}
 	repeatDenied := run("approvals", "resolve", "2", "deny", "repeat", "denial", "--json")
 	if !strings.Contains(repeatDenied, `"status": "denied"`) || !strings.Contains(repeatDenied, `"result": "denied"`) {

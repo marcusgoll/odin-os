@@ -338,7 +338,7 @@ func runBrowserTask(ctx context.Context, app bootstrap.App, command commands.Bro
 	result, err := service.RunWorkEvidence(ctx, browserexecutor.WorkEvidenceTask{
 		TaskID:             command.TaskID,
 		WorkerMode:         command.WorkerMode,
-		Objective:          command.Objective,
+		Objective:          browserTaskObjective(ctx, app.Store, command.TaskID, command.Objective),
 		AllowedDomains:     command.AllowedDomains,
 		StartURLs:          command.URLs,
 		MaxPages:           command.MaxPages,
@@ -383,6 +383,17 @@ func runBrowserTask(ctx context.Context, app bootstrap.App, command commands.Bro
 	}
 	_, err = fmt.Fprintf(stdout, "browser task=%d status=%s run=%d artifact=%d type=%s\n", view.TaskID, view.Status, view.RunID, view.RunArtifactID, view.EvidenceType)
 	return err
+}
+
+func browserTaskObjective(ctx context.Context, store *sqlite.Store, taskID int64, explicit string) string {
+	if strings.TrimSpace(explicit) != "" || store == nil || taskID <= 0 {
+		return strings.TrimSpace(explicit)
+	}
+	task, err := store.GetTask(ctx, taskID)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(firstNonBlank(task.Title, task.Summary, task.Key))
 }
 
 func runBrowserSession(ctx context.Context, app bootstrap.App, command commands.BrowserCommand, stdout io.Writer) error {

@@ -1002,14 +1002,16 @@ type InterruptRunAndRequeueTaskParams struct {
 }
 
 type Approval struct {
-	ID          int64
-	TaskID      int64
-	RunID       *int64
-	Status      string
-	RequestedAt time.Time
-	ResolvedAt  *time.Time
-	DecisionBy  string
-	Reason      string
+	ID                  int64
+	TaskID              int64
+	RunID               *int64
+	Status              string
+	RequestedAt         time.Time
+	ResolvedAt          *time.Time
+	DecisionBy          string
+	Reason              string
+	PolicySnapshotHash  string
+	RuntimeSnapshotHash string
 }
 
 type RequestApprovalParams struct {
@@ -1196,6 +1198,38 @@ type ReviewSkillArtifactParams struct {
 	FollowOnTaskID    *int64
 	FollowOnTaskKey   string
 	FollowOnTaskState string
+}
+
+type RecordDesignRequestCreatedEventParams struct {
+	RequestArtifactID int64
+	SkillKey          string
+	Scope             string
+	ProjectID         *int64
+	Status            string
+	ArtifactType      string
+	Summary           string
+	ExecutionProfile  string
+}
+
+type RecordDesignExecutionStartedEventParams struct {
+	RequestArtifactID int64
+	SkillKey          string
+	Scope             string
+	ProjectID         *int64
+	ToolKey           string
+	Summary           string
+	ExecutionProfile  string
+}
+
+type RecordDesignArtifactCreatedEventParams struct {
+	RequestArtifactID int64
+	OutputArtifactID  int64
+	SkillKey          string
+	ProjectID         *int64
+	Scope             string
+	ArtifactType      string
+	Status            string
+	Summary           string
 }
 
 type ContextPacket struct {
