@@ -13,6 +13,7 @@ import (
 	"html/template"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -419,7 +420,48 @@ func NewOperationalHandler(deps Dependencies) http.Handler {
 	})
 	registerMobileRoutes(mux, deps, now)
 	registerPWAHandlers(mux)
-	return mux
+	return withOperationalSecurity(mux)
+}
+
+func withOperationalSecurity(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("X-Content-Type-Options", "nosniff")
+		writer.Header().Set("X-Frame-Options", "DENY")
+		writer.Header().Set("Referrer-Policy", "no-referrer")
+		writer.Header().Set("Permissions-Policy", "camera=(self), microphone=(self), geolocation=()")
+		writer.Header().Set("Content-Security-Policy", "default-src 'self'; connect-src 'self'; img-src 'self' blob: data:; media-src 'self' blob:; script-src 'self'; style-src 'self'; manifest-src 'self'; base-uri 'self'; frame-ancestors 'none'")
+		applyLockedDownCORS(writer, request)
+		if request.Method == http.MethodOptions {
+			if request.Header.Get("Access-Control-Request-Method") != "" {
+				writer.WriteHeader(http.StatusNoContent)
+				return
+			}
+		}
+		next.ServeHTTP(writer, request)
+	})
+}
+
+func applyLockedDownCORS(writer http.ResponseWriter, request *http.Request) {
+	origin := strings.TrimSpace(request.Header.Get("Origin"))
+	if origin == "" {
+		return
+	}
+	writer.Header().Add("Vary", "Origin")
+	if !sameOriginRequest(origin, request.Host) {
+		return
+	}
+	writer.Header().Set("Access-Control-Allow-Origin", origin)
+	writer.Header().Set("Access-Control-Allow-Credentials", "true")
+	writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-Odin-CSRF")
+	writer.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+}
+
+func sameOriginRequest(origin string, host string) bool {
+	parsed, err := url.Parse(origin)
+	if err != nil {
+		return false
+	}
+	return strings.EqualFold(parsed.Host, host) && (parsed.Scheme == "https" || parsed.Scheme == "http")
 }
 
 type browserSessionHandoffResponse struct {

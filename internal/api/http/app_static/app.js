@@ -1,4 +1,4 @@
-const tokenKey = 'odin.mobile.adminToken';
+const csrfKey = 'odin.mobile.csrf';
 const failedKey = 'odin.mobile.failedUploads';
 const form = document.querySelector('#capture-form');
 const statusEl = document.querySelector('#capture-status');
@@ -9,8 +9,8 @@ let voiceBlob = null;
 let recorder = null;
 let chunks = [];
 
-function token() {
-  return localStorage.getItem(tokenKey) || '';
+function csrfToken() {
+  return sessionStorage.getItem(csrfKey) || '';
 }
 
 function failedUploads() {
@@ -57,7 +57,7 @@ function textPayload() {
 }
 
 async function sendCapture(payload, attachment) {
-  const headers = { Authorization: `Bearer ${token()}` };
+  const headers = { 'X-Odin-CSRF': csrfToken() };
   let body;
   if (attachment) {
     body = new FormData();
@@ -68,7 +68,7 @@ async function sendCapture(payload, attachment) {
     headers['Content-Type'] = 'application/json';
     body = JSON.stringify(payload);
   }
-  const response = await fetch('/mobile/intake/raw', { method: 'POST', headers, body });
+  const response = await fetch('/mobile/intake/raw', { method: 'POST', headers, body, credentials: 'same-origin' });
   if (!response.ok) {
     const text = await response.text();
     throw new Error(text || `HTTP ${response.status}`);
@@ -111,12 +111,27 @@ imageInput.addEventListener('change', () => {
   mediaState.textContent = file ? `Photo ready: ${file.name}` : 'No media attached';
 });
 
-document.querySelector('#save-token').addEventListener('click', () => {
-  const value = window.prompt('Odin admin token', token());
-  if (value !== null) {
-    localStorage.setItem(tokenKey, value.trim());
-    setStatus('Token saved locally in this browser.');
+document.querySelector('#register-device').addEventListener('click', async () => {
+  const value = window.prompt('One-time Odin admin token');
+  if (value === null || value.trim() === '') {
+    return;
   }
+  const response = await fetch('/mobile/devices/register', {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: {
+      Authorization: `Bearer ${value.trim()}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ device_name: navigator.userAgent || 'mobile browser' }),
+  });
+  if (!response.ok) {
+    setStatus('Device registration failed.');
+    return;
+  }
+  const payload = await response.json();
+  sessionStorage.setItem(csrfKey, payload.csrf_token || '');
+  setStatus('Device registered for this browser session.');
 });
 
 document.querySelector('#voice-record').addEventListener('click', async () => {
@@ -180,3 +195,7 @@ function dataURLToBlob(dataURL, fallbackType) {
 }
 
 renderFailed();
+
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('/app/service-worker.js');
+}
