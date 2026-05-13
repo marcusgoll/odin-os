@@ -28,6 +28,11 @@ It is intentionally conservative:
 - Runtime root: `~/.local/state/odin-os`
 - Loopback listener: `127.0.0.1:9444`
 
+Phone/PWA access is covered by `docs/operations/odin-mobile-security.md`.
+Keep mobile access private by default: use Tailscale or another private-network
+path with HTTPS/TLS at the phone-facing ingress, and do not publish Odin on the
+public internet without a separate exposure review.
+
 Legacy `odin.service`, `odin.env`, and `scripts/dev/install-systemd-service.sh`
 are compatibility assets only. New homelab operation uses `odin-os.service`.
 
