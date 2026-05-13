@@ -2,21 +2,26 @@ package lifecycle
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"strconv"
 	"strings"
 	"time"
 
+	"odin-os/internal/adapters/web"
 	"odin-os/internal/app/bootstrap"
 	commands "odin-os/internal/cli/commands"
 	"odin-os/internal/core/workspaces"
+	browserexecutor "odin-os/internal/executors/browser"
 	approvalsvc "odin-os/internal/runtime/approvals"
 	jobsvc "odin-os/internal/runtime/jobs"
 	runtimeknowledge "odin-os/internal/runtime/knowledge"
 	"odin-os/internal/runtime/projections"
 	"odin-os/internal/runtime/recovery"
+	"odin-os/internal/skills"
 	"odin-os/internal/store/sqlite"
+	"odin-os/internal/tools/invocation"
 )
 
 const reviewUsage = "usage: odin review list [--json] | odin review show <queue-id>|--id <queue-id> [--json] | odin review approve --id <queue-id> [--json] | odin review reject --id <queue-id> --reason <reason> [--json] | odin review act <queue-id> <accept|reject|archive|approve|deny|clarify|retry> [--json]"
@@ -271,8 +276,8 @@ func runReviewAct(ctx context.Context, app bootstrap.App, queueID string, action
 			ShowRef:        rawIntakeKey(ref.ID),
 		}, jsonOutput, stdout)
 	case "approval":
-		if !oneOf(action, "approve", "deny") {
-			return fmt.Errorf("task approval action must be one of approve, deny")
+		if !oneOf(action, "approve", "deny", "clarify") {
+			return fmt.Errorf("task approval action must be one of approve, deny, clarify")
 		}
 		args := []string{"resolve", idRef, action, "unified", "review", "decision"}
 		if jsonOutput {
@@ -284,6 +289,11 @@ func runReviewAct(ctx context.Context, app bootstrap.App, queueID string, action
 			return fmt.Errorf("skill artifact action must be one of accept, reject, archive")
 		}
 		return runSkillArtifactReview(ctx, app, action, idRef, jsonOutput, stdout)
+	case "design-artifact":
+		if !oneOf(action, "accept", "reject", "archive") {
+			return fmt.Errorf("design artifact action must be one of accept, reject, archive")
+		}
+		return runDesignArtifactReview(ctx, app, action, idRef, jsonOutput, stdout)
 	case "context-pack":
 		if !oneOf(action, "accept", "reject", "archive") {
 			return fmt.Errorf("context pack action must be one of accept, reject, archive")
@@ -624,6 +634,17 @@ func listReviewQueueEntries(ctx context.Context, app bootstrap.App) ([]reviewQue
 		return nil, err
 	}
 	for _, artifact := range artifacts {
+		if isDesignArtifactType(artifact.ArtifactType) {
+			if !isReviewQueueDesignArtifactStatus(artifact.Status) {
+				continue
+			}
+			entry, err := reviewEntryFromDesignArtifact(ctx, app.Store, artifact)
+			if err != nil {
+				return nil, err
+			}
+			entries = append(entries, entry)
+			continue
+		}
 		if !isReviewQueueSkillArtifactStatus(artifact.Status) {
 			continue
 		}
@@ -647,6 +668,18 @@ func listReviewQueueEntries(ctx context.Context, app bootstrap.App) ([]reviewQue
 		return nil, err
 	}
 	for _, task := range taskViews {
+		storedTask, err := app.Store.GetTask(ctx, task.TaskID)
+		if err != nil {
+			return nil, err
+		}
+		if artifacts := browserexecutor.ParseTaskEvidenceArtifacts(storedTask.ArtifactsJSON); len(artifacts) > 0 && strings.EqualFold(strings.TrimSpace(task.BlockedReason), "browser_evidence_review") {
+			entries = append(entries, reviewEntryFromBrowserEvidence(task, artifacts[len(artifacts)-1]))
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(task.Status), "blocked") && strings.EqualFold(strings.TrimSpace(task.BlockedReason), "clarification_requested") {
+			entries = append(entries, reviewEntryFromWorkClarification(task))
+			continue
+		}
 		if !strings.EqualFold(strings.TrimSpace(task.Status), "failed") {
 			continue
 		}
@@ -728,6 +761,53 @@ func reviewQueueDetail(ctx context.Context, app bootstrap.App, ref reviewQueueRe
 			RunID:           detail.Approval.RunID,
 			ResolverSupport: string(detail.ResolverSupport),
 		}, nil
+	case "browser-evidence":
+		task, err := app.Store.GetTask(ctx, ref.ID)
+		if err != nil {
+			return reviewQueueEntry{}, nil, err
+		}
+		project, err := app.Store.GetProject(ctx, task.ProjectID)
+		if err != nil {
+			return reviewQueueEntry{}, nil, err
+		}
+		artifacts := browserexecutor.ParseTaskEvidenceArtifacts(task.ArtifactsJSON)
+		if len(artifacts) == 0 {
+			return reviewQueueEntry{}, nil, fmt.Errorf("browser evidence review %d has no browser evidence artifacts", ref.ID)
+		}
+		taskView := projections.TaskStatusView{
+			TaskID:        task.ID,
+			ProjectID:     task.ProjectID,
+			ProjectKey:    project.Key,
+			TaskKey:       task.Key,
+			Title:         task.Title,
+			RequestedBy:   task.RequestedBy,
+			WorkKind:      task.WorkKind,
+			Status:        task.Status,
+			Scope:         task.Scope,
+			BlockedReason: task.BlockedReason,
+		}
+		entry := reviewEntryFromBrowserEvidence(taskView, artifacts[len(artifacts)-1])
+		return entry, struct {
+			TaskID   int64                              `json:"task_id"`
+			TaskKey  string                             `json:"task_key"`
+			Status   string                             `json:"status"`
+			Evidence []browserexecutor.EvidenceArtifact `json:"evidence"`
+		}{
+			TaskID:   task.ID,
+			TaskKey:  task.Key,
+			Status:   task.Status,
+			Evidence: artifacts,
+		}, nil
+	case "design-artifact":
+		artifact, err := app.Store.GetSkillArtifact(ctx, ref.ID)
+		if err != nil {
+			return reviewQueueEntry{}, nil, err
+		}
+		entry, err := reviewEntryFromDesignArtifact(ctx, app.Store, artifact)
+		if err != nil {
+			return reviewQueueEntry{}, nil, err
+		}
+		return entry, renderSkillReviewArtifact(artifact), nil
 	case "skill-artifact":
 		artifact, err := app.Store.GetSkillArtifact(ctx, ref.ID)
 		if err != nil {
@@ -989,7 +1069,7 @@ func reviewEntryFromPendingApproval(view projections.PendingApprovalView) review
 		CreatedAt:      view.RequestedAt,
 		ProjectScope:   view.ProjectKey,
 		Summary:        view.TaskKey,
-		AllowedActions: []string{"approve", "deny"},
+		AllowedActions: []string{"approve", "deny", "clarify"},
 	}
 }
 
@@ -1043,6 +1123,33 @@ func reviewEntryFromSkillArtifact(ctx context.Context, store *sqlite.Store, arti
 	}, nil
 }
 
+func reviewEntryFromDesignArtifact(ctx context.Context, store *sqlite.Store, artifact sqlite.SkillArtifact) (reviewQueueEntry, error) {
+	projectScope := ""
+	if artifact.ProjectID != nil {
+		project, err := store.GetProject(ctx, *artifact.ProjectID)
+		if err != nil {
+			return reviewQueueEntry{}, err
+		}
+		projectScope = project.Key
+	}
+
+	return reviewQueueEntry{
+		ReviewID:       fmt.Sprintf("design-artifact:%d", artifact.ID),
+		QueueID:        fmt.Sprintf("design-artifact:%d", artifact.ID),
+		SourceType:     "design_artifact",
+		SourceID:       artifact.ID,
+		ObjectID:       artifact.ID,
+		ObjectKey:      fmt.Sprintf("design-artifact-%d", artifact.ID),
+		Status:         artifact.Status,
+		Reason:         artifact.Status,
+		Title:          artifact.Summary,
+		CreatedAt:      formatReviewTime(artifact.CreatedAt),
+		ProjectScope:   projectScope,
+		Summary:        artifact.Summary,
+		AllowedActions: designArtifactReviewAllowedActions(artifact.Status),
+	}, nil
+}
+
 func reviewEntryFromContextPackProposal(proposal runtimeknowledge.ContextPackProposal) reviewQueueEntry {
 	projectScope := proposal.ContextPack.ProjectKey
 	return reviewQueueEntry{
@@ -1066,11 +1173,60 @@ func reviewEntryFromContextPackProposal(proposal runtimeknowledge.ContextPackPro
 	}
 }
 
+func reviewEntryFromBrowserEvidence(task projections.TaskStatusView, artifact browserexecutor.EvidenceArtifact) reviewQueueEntry {
+	return reviewQueueEntry{
+		ReviewID:       fmt.Sprintf("browser-evidence:%d", task.TaskID),
+		QueueID:        fmt.Sprintf("browser-evidence:%d", task.TaskID),
+		SourceType:     "browser_evidence",
+		SourceID:       task.TaskID,
+		ObjectID:       task.TaskID,
+		ObjectKey:      task.TaskKey,
+		Status:         firstNonBlank(artifact.Status, "review_required"),
+		Reason:         "browser_evidence_review",
+		Title:          task.Title,
+		ProjectScope:   task.ProjectKey,
+		Summary:        firstNonBlank(artifact.Summary, task.Title),
+		TaskID:         task.TaskID,
+		TaskKey:        task.TaskKey,
+		TaskStatus:     task.Status,
+		WorkKind:       task.WorkKind,
+		AllowedActions: []string{"inspect"},
+	}
+}
+
+func reviewEntryFromWorkClarification(task projections.TaskStatusView) reviewQueueEntry {
+	return reviewQueueEntry{
+		ReviewID:       fmt.Sprintf("work-clarification:%d", task.TaskID),
+		QueueID:        fmt.Sprintf("work-clarification:%d", task.TaskID),
+		SourceType:     "work_clarification",
+		SourceID:       task.TaskID,
+		ObjectID:       task.TaskID,
+		ObjectKey:      task.TaskKey,
+		Status:         task.Status,
+		Reason:         "clarification_requested",
+		Title:          task.Title,
+		ProjectScope:   task.ProjectKey,
+		Summary:        firstNonBlank(task.LastError, task.Title),
+		TaskID:         task.TaskID,
+		TaskKey:        task.TaskKey,
+		TaskStatus:     task.Status,
+		WorkKind:       task.WorkKind,
+		AllowedActions: []string{"inspect"},
+	}
+}
+
+func recoveryWorkKindForTask(workKind string, lastError string) string {
+	if strings.Contains(strings.ToLower(lastError), "browser") || strings.Contains(strings.ToLower(lastError), "huginn") {
+		return "browser_evidence"
+	}
+	return workKind
+}
+
 func reviewEntryFromFailedTask(task projections.TaskStatusView) reviewQueueEntry {
 	guidance := recovery.RetryGuidanceForTask(recovery.RetryGuidanceInput{
 		RetryCount:  task.RetryCount,
 		MaxAttempts: task.MaxAttempts,
-		WorkKind:    task.WorkKind,
+		WorkKind:    recoveryWorkKindForTask(task.WorkKind, task.LastError),
 		RequestedBy: task.RequestedBy,
 	})
 	retryEligible := guidance.RetryEligible
@@ -1122,7 +1278,7 @@ func reviewFailedTaskDetail(ctx context.Context, store *sqlite.Store, task sqlit
 	guidance := recovery.RetryGuidanceForTask(recovery.RetryGuidanceInput{
 		RetryCount:  task.RetryCount,
 		MaxAttempts: task.MaxAttempts,
-		WorkKind:    task.WorkKind,
+		WorkKind:    recoveryWorkKindForTask(task.WorkKind, task.LastError),
 		RequestedBy: task.RequestedBy,
 	})
 	runs, err := projections.ListRunSummaryViews(ctx, store.DB())
@@ -1161,7 +1317,7 @@ func parseReviewQueueRef(queueID string) (reviewQueueRef, error) {
 	queueID = strings.TrimSpace(queueID)
 	parts := strings.SplitN(queueID, ":", 2)
 	if len(parts) != 2 {
-		return reviewQueueRef{}, fmt.Errorf("review queue id must look like intake-goal:<id>, goal:<id>, goal-approval:<id>, goal-blocker:<id>, intake-review:<id>, intake-approval:<id>, approval:<id>, skill-artifact:<id>, context-pack:<id>, or failed-work:<id>")
+		return reviewQueueRef{}, fmt.Errorf("review queue id must look like intake-goal:<id>, goal:<id>, goal-approval:<id>, goal-blocker:<id>, intake-review:<id>, intake-approval:<id>, approval:<id>, browser-evidence:<id>, design-artifact:<id>, skill-artifact:<id>, context-pack:<id>, or failed-work:<id>")
 	}
 	kind := strings.ToLower(strings.TrimSpace(parts[0]))
 	idRef := strings.TrimSpace(parts[1])
@@ -1174,6 +1330,10 @@ func parseReviewQueueRef(queueID string) (reviewQueueRef, error) {
 		idRef = strings.TrimPrefix(idRef, "goal-blocker-")
 	case "approval":
 		idRef = strings.TrimPrefix(idRef, "approval-")
+	case "browser-evidence":
+		idRef = strings.TrimPrefix(idRef, "browser-evidence-")
+	case "design-artifact":
+		idRef = strings.TrimPrefix(idRef, "design-artifact-")
 	case "skill-artifact":
 		idRef = strings.TrimPrefix(idRef, "skill-artifact-")
 	case "context-pack":
@@ -1206,11 +1366,13 @@ func intakeReviewAllowedActions(status string) []string {
 func taskApprovalAllowedActions(status string) []string {
 	switch status {
 	case "pending":
-		return []string{"approve", "deny"}
+		return []string{"approve", "deny", "clarify"}
 	case "approved":
 		return []string{"approve"}
 	case "denied":
 		return []string{"deny"}
+	case "clarification_requested":
+		return []string{"clarify"}
 	default:
 		return nil
 	}
@@ -1219,6 +1381,8 @@ func taskApprovalAllowedActions(status string) []string {
 func skillArtifactAllowedActions(status string) []string {
 	switch status {
 	case "review_required":
+		return []string{"accept", "reject", "archive"}
+	case "needs_review":
 		return []string{"accept", "reject", "archive"}
 	case "accepted":
 		return []string{"accept"}
@@ -1229,6 +1393,294 @@ func skillArtifactAllowedActions(status string) []string {
 	default:
 		return nil
 	}
+}
+
+func designArtifactReviewAllowedActions(status string) []string {
+	return skillArtifactAllowedActions(status)
+}
+
+func runDesignArtifactReview(ctx context.Context, app bootstrap.App, action string, artifactRef string, jsonOutput bool, stdout io.Writer) error {
+	if app.Store == nil {
+		return fmt.Errorf("design artifact review requires runtime store")
+	}
+
+	artifactID, err := strconv.ParseInt(artifactRef, 10, 64)
+	if err != nil || artifactID <= 0 {
+		return fmt.Errorf("design artifact id must be a positive integer")
+	}
+
+	artifact, err := app.Store.GetSkillArtifact(ctx, artifactID)
+	if err != nil {
+		return err
+	}
+	if !isDesignArtifactType(artifact.ArtifactType) {
+		return fmt.Errorf("design artifact %d is not a design artifact", artifactID)
+	}
+
+	if isDesignRequestArtifactType(artifact.ArtifactType) {
+		return runDesignRequestArtifactReview(ctx, app, artifact, action, jsonOutput, stdout)
+	}
+
+	return runDesignOutputArtifactReview(ctx, app, artifact, action, jsonOutput, stdout)
+}
+
+func runDesignRequestArtifactReview(ctx context.Context, app bootstrap.App, artifact sqlite.SkillArtifact, action string, jsonOutput bool, stdout io.Writer) error {
+	decision := ""
+	status := ""
+	reason := ""
+	repeated := false
+	outputArtifactID := int64(0)
+
+	switch action {
+	case "accept":
+		decision = "accepted"
+		status = "accepted"
+		reason = "design request accepted by operator"
+		if artifact.Status == status {
+			repeated = true
+			break
+		}
+		if artifact.Status != designRequestQueue {
+			return fmt.Errorf("design artifact %d cannot be accepted from status %s", artifact.ID, artifact.Status)
+		}
+		outputArtifact, executeErr := executeDesignRequest(ctx, app, artifact)
+		if executeErr != nil {
+			decision = "rejected"
+			status = "rejected"
+			reason = fmt.Sprintf("design execution failed: %v", executeErr)
+			break
+		}
+		outputArtifactID = outputArtifact.ID
+	case "reject":
+		decision = "rejected"
+		status = "rejected"
+		reason = "design request rejected by operator"
+		if artifact.Status == status {
+			repeated = true
+			break
+		}
+		if artifact.Status != designRequestQueue {
+			return fmt.Errorf("design artifact %d cannot be rejected from status %s", artifact.ID, artifact.Status)
+		}
+	case "archive":
+		decision = "archived"
+		status = "archived"
+		reason = "design request archived by operator"
+		if artifact.Status == status {
+			repeated = true
+			break
+		}
+		if artifact.Status != designRequestQueue {
+			return fmt.Errorf("design artifact %d cannot be archived from status %s", artifact.ID, artifact.Status)
+		}
+	default:
+		return fmt.Errorf("design artifact action must be one of accept, reject, archive")
+	}
+
+	updated, err := app.Store.ReviewSkillArtifact(ctx, sqlite.ReviewSkillArtifactParams{
+		ArtifactID:        artifact.ID,
+		Decision:          decision,
+		Status:            status,
+		ReviewedBy:        "operator",
+		Reason:            reason,
+		Repeated:          repeated,
+		WorkCreated:       false,
+		FollowOnTaskID:    nil,
+		FollowOnTaskKey:   "",
+		FollowOnTaskState: "",
+	})
+	if err != nil {
+		return err
+	}
+
+	result := struct {
+		Artifact         skills.ReviewArtifact `json:"artifact"`
+		Decision         string                `json:"decision"`
+		Repeated         bool                  `json:"repeated"`
+		OutputArtifactID int64                 `json:"output_artifact_id,omitempty"`
+	}{
+		Artifact:         renderSkillReviewArtifact(updated),
+		Decision:         decision,
+		Repeated:         repeated,
+		OutputArtifactID: outputArtifactID,
+	}
+
+	if jsonOutput {
+		return commands.WriteJSON(stdout, result)
+	}
+	if outputArtifactID > 0 {
+		_, err = fmt.Fprintf(stdout, "design_artifact=%d decision=%s status=%s repeated=%t output_artifact=%d\n", artifact.ID, decision, updated.Status, repeated, outputArtifactID)
+		return err
+	}
+	_, err = fmt.Fprintf(stdout, "design_artifact=%d decision=%s status=%s repeated=%t\n", artifact.ID, decision, updated.Status, repeated)
+	return err
+}
+
+func runDesignOutputArtifactReview(ctx context.Context, app bootstrap.App, artifact sqlite.SkillArtifact, action string, jsonOutput bool, stdout io.Writer) error {
+	decision := ""
+	status := ""
+	reason := ""
+	repeated := false
+
+	switch action {
+	case "accept":
+		decision = "accepted"
+		status = "accepted"
+		reason = "design artifact accepted by operator"
+		if artifact.Status == status {
+			repeated = true
+			break
+		}
+		if artifact.Status != designArtifactQueue {
+			return fmt.Errorf("design artifact %d cannot be accepted from status %s", artifact.ID, artifact.Status)
+		}
+	case "reject":
+		decision = "rejected"
+		status = "rejected"
+		reason = "design artifact rejected by operator"
+		if artifact.Status == status {
+			repeated = true
+			break
+		}
+		if artifact.Status != designArtifactQueue {
+			return fmt.Errorf("design artifact %d cannot be rejected from status %s", artifact.ID, artifact.Status)
+		}
+	case "archive":
+		decision = "archived"
+		status = "archived"
+		reason = "design artifact archived by operator"
+		if artifact.Status == status {
+			repeated = true
+			break
+		}
+		if artifact.Status != designArtifactQueue {
+			return fmt.Errorf("design artifact %d cannot be archived from status %s", artifact.ID, artifact.Status)
+		}
+	default:
+		return fmt.Errorf("design artifact action must be one of accept, reject, archive")
+	}
+
+	updated, err := app.Store.ReviewSkillArtifact(ctx, sqlite.ReviewSkillArtifactParams{
+		ArtifactID:        artifact.ID,
+		Decision:          decision,
+		Status:            status,
+		ReviewedBy:        "operator",
+		Reason:            reason,
+		Repeated:          repeated,
+		WorkCreated:       false,
+		FollowOnTaskID:    nil,
+		FollowOnTaskKey:   "",
+		FollowOnTaskState: "",
+	})
+	if err != nil {
+		return err
+	}
+
+	result := struct {
+		Artifact skills.ReviewArtifact `json:"artifact"`
+		Decision string                `json:"decision"`
+		Repeated bool                  `json:"repeated"`
+	}{
+		Artifact: renderSkillReviewArtifact(updated),
+		Decision: decision,
+		Repeated: repeated,
+	}
+
+	if jsonOutput {
+		return commands.WriteJSON(stdout, result)
+	}
+	_, err = fmt.Fprintf(stdout, "design_artifact=%d decision=%s status=%s repeated=%t\n", artifact.ID, decision, updated.Status, repeated)
+	return err
+}
+
+func executeDesignRequest(ctx context.Context, app bootstrap.App, requestArtifact sqlite.SkillArtifact) (sqlite.SkillArtifact, error) {
+	var requestPayload map[string]any
+	if err := json.Unmarshal([]byte(requestArtifact.OutputJSON), &requestPayload); err != nil {
+		requestPayload = map[string]any{}
+	}
+
+	requestSummary := strings.TrimSpace(requestArtifact.Summary)
+	if requestSummary == "" {
+		requestSummary = strings.TrimSpace(requestArtifact.RawOutput)
+	}
+
+	if err := app.Store.RecordDesignExecutionStartedEvent(ctx, sqlite.RecordDesignExecutionStartedEventParams{
+		RequestArtifactID: requestArtifact.ID,
+		SkillKey:          requestArtifact.SkillKey,
+		Scope:             requestArtifact.Scope,
+		ToolKey:           strings.TrimSpace(requestArtifact.SkillKey),
+		Summary:           requestSummary,
+		ExecutionProfile:  "design_execution",
+	}); err != nil {
+		return sqlite.SkillArtifact{}, err
+	}
+
+	response, err := invocation.Service{RuntimeRoot: app.RuntimeRoot}.OpenDesign(ctx, web.OpenDesignRequest{
+		ToolKey: strings.TrimSpace(requestArtifact.SkillKey),
+		Input: web.OpenDesignInput{
+			ArtifactID: fmt.Sprintf("%d", requestArtifact.ID),
+			Artifact: map[string]any{
+				"id":       requestArtifact.ID,
+				"key":      requestArtifact.SkillKey,
+				"scope":    requestArtifact.Scope,
+				"status":   requestArtifact.Status,
+				"summary":  requestSummary,
+				"payload":  requestPayload,
+				"raw_body": requestArtifact.RawOutput,
+			},
+		},
+	})
+	if err != nil {
+		return sqlite.SkillArtifact{}, err
+	}
+
+	outputSummary := strings.TrimSpace(response.Summary)
+	if outputSummary == "" {
+		outputSummary = firstNonBlank(requestSummary, "design output")
+	}
+
+	outputPayload := map[string]any{
+		"request_id": requestArtifact.ID,
+		"summary":    outputSummary,
+		"tool_key":   response.ToolKey,
+	}
+	if len(response.Artifacts) != 0 {
+		outputPayload["artifacts"] = response.Artifacts
+	}
+
+	outputArtifact, err := app.Store.CreateSkillArtifact(ctx, sqlite.CreateSkillArtifactParams{
+		SkillKey:         requestArtifact.SkillKey,
+		Scope:            requestArtifact.Scope,
+		ProjectID:        requestArtifact.ProjectID,
+		Status:           designArtifactQueue,
+		ArtifactType:     designArtifactType,
+		Summary:          outputSummary,
+		OutputJSON:       artifactOutputJSON(outputPayload),
+		RawOutput:        response.RawOutput,
+		ExecutionProfile: "design_execution",
+		PermissionsJSON:  requestArtifact.PermissionsJSON,
+	})
+	if err != nil {
+		return sqlite.SkillArtifact{}, err
+	}
+
+	if err := app.Store.RecordDesignArtifactCreatedEvent(ctx, sqlite.RecordDesignArtifactCreatedEventParams{
+		RequestArtifactID: requestArtifact.ID,
+		OutputArtifactID:  outputArtifact.ID,
+		SkillKey:          outputArtifact.SkillKey,
+		ProjectID:         requestArtifact.ProjectID,
+		Scope:             outputArtifact.Scope,
+		ArtifactType:      outputArtifact.ArtifactType,
+		Status:            outputArtifact.Status,
+		Summary:           outputArtifact.Summary,
+	}); err != nil {
+		return outputArtifact, err
+	}
+	return outputArtifact, nil
+}
+
+func isReviewQueueDesignArtifactStatus(status string) bool {
+	return oneOf(status, designArtifactQueue, designRequestQueue, "accepted", "rejected", "archived")
 }
 
 func runFailedWorkReviewRetry(ctx context.Context, app bootstrap.App, taskID int64, jsonOutput bool, stdout io.Writer) error {

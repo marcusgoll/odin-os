@@ -17,6 +17,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode"
 
 	"github.com/google/uuid"
 	apihttp "odin-os/internal/api/http"
@@ -69,7 +70,9 @@ import (
 
 var errRuntimeNotReady = errors.New("runtime not ready")
 
-const rootUsageBanner = "Usage: odin <command> [args]\n\nCommands: help repl overview tui doctor healthcheck serve backup restore verify-backup status legacy project workspace work scope jobs runs approvals review intake agenda logs knowledge goal browser task initiative companion profile followup trigger transition skills e2e"
+const rootUsageBanner = "Usage: odin <command> [args]\n\nCommands: help repl overview tui doctor healthcheck serve backup restore verify-backup status legacy project workspace work scope jobs runs approvals review intake agenda logs knowledge goal browser task initiative companion profile followup trigger scheduler transition skills design e2e"
+
+const schedulerUsage = "usage: odin scheduler tick [now=<RFC3339>] [recovery=<true|false>] [--json]"
 
 var (
 	serveTaskLoopInterval     = 1 * time.Second
@@ -314,8 +317,12 @@ func Run(ctx context.Context, root string, args []string, stdin io.Reader, stdou
 		return runFollowup(ctx, app, args[1:], stdout)
 	case "trigger":
 		return commands.RunTrigger(ctx, triggers.Service{Store: app.Store, Registry: app.Registry}, args[1:], stdout)
+	case "scheduler":
+		return runScheduler(ctx, app, args[1:], stdout)
 	case "skills":
 		return runSkills(ctx, app, args[1:], stdout)
+	case "design":
+		return runDesign(ctx, app, args[1:], stdout)
 	case "doctor":
 		return runDoctor(ctx, app, cfg, args[1:], stdout)
 	case "healthcheck":
@@ -672,6 +679,12 @@ func runApprovals(ctx context.Context, app bootstrap.App, args []string, stdout 
 		return err
 	}
 	if jsonOutput {
+		if filter == commands.ApprovalSupportAll {
+			approvals, err = listAllApprovals(ctx, app.Store, state.Scope)
+			if err != nil {
+				return err
+			}
+		}
 		return commands.WriteJSON(stdout, commands.ApprovalsView{Approvals: approvals})
 	}
 	if len(approvals) == 0 {
@@ -881,14 +894,16 @@ type intakeProcessingNotes struct {
 }
 
 type intakeClassification struct {
-	Result   string `json:"result"`
-	Reason   string `json:"reason"`
-	Category string `json:"category,omitempty"`
+	Result        string `json:"result"`
+	Reason        string `json:"reason"`
+	Category      string `json:"category,omitempty"`
+	PriorityScore int    `json:"priority_score,omitempty"`
 }
 
 type intakeDedupeReview struct {
 	Result             string `json:"result"`
 	CanonicalIntakeKey string `json:"canonical_intake_key,omitempty"`
+	MatchReason        string `json:"match_reason,omitempty"`
 }
 
 type intakeRoutingResult struct {
@@ -1679,7 +1694,7 @@ func intakeExecutionIntentForTask(item sqlite.IntakeItem) intakeDerivedRoute {
 			}
 		}
 	}
-	route := deriveIntakeRoute(item)
+	route := deriveIntakeRoute(item, classifyIntakeItem(item))
 	return intakeDerivedRoute{
 		ExecutionIntent:       route.ExecutionIntent,
 		ExecutionIntentSource: route.ExecutionIntentSource,
@@ -1735,15 +1750,17 @@ func buildIntakeProcessOutcome(ctx context.Context, store *sqlite.Store, item sq
 	notes.Dedupe = intakeDedupeReview{Result: "unique"}
 	if duplicate != nil {
 		notes.Dedupe = intakeDedupeReview{
-			Result:             "duplicate_linked",
-			CanonicalIntakeKey: rawIntakeKey(*duplicate),
+			Result:             duplicate.Result,
+			CanonicalIntakeKey: rawIntakeKey(duplicate.IntakeItemID),
+			MatchReason:        duplicate.MatchReason,
 		}
 		notes.Routing = intakeRoutingResult{Outcome: "duplicate_linked_or_suppressed", ProjectKey: item.ScopeKey}
+		canonicalID := duplicate.IntakeItemID
 		outcome := intakeProcessOutcome{
 			status:                "duplicate_linked_or_suppressed",
-			summary:               "Duplicate raw intake linked to " + rawIntakeKey(*duplicate),
-			canonicalIntakeItemID: duplicate,
-			suppressionReason:     "duplicate_dedupe_key",
+			summary:               "Duplicate raw intake linked to " + rawIntakeKey(duplicate.IntakeItemID),
+			canonicalIntakeItemID: &canonicalID,
+			suppressionReason:     duplicate.SuppressionReason(),
 			notes:                 notes,
 		}
 		return outcome, nil
@@ -1767,7 +1784,7 @@ func buildIntakeProcessOutcome(ctx context.Context, store *sqlite.Store, item sq
 		return outcome, nil
 	}
 
-	if isGoalLikeIntake(item) {
+	if notes.Classification.Category == "project" {
 		notes.Routing = intakeRoutingResult{
 			Outcome:               "goal_created",
 			ProjectKey:            item.ScopeKey,
@@ -1795,7 +1812,7 @@ func buildIntakeProcessOutcome(ctx context.Context, store *sqlite.Store, item sq
 		return outcome, nil
 	}
 
-	route := deriveIntakeRoute(item)
+	route := deriveIntakeRoute(item, notes.Classification)
 	notes.Routing = intakeRoutingResult{
 		Outcome:               route.RoutingOutcome,
 		ProjectKey:            item.ScopeKey,
@@ -1909,7 +1926,7 @@ func isGoalLikeIntake(item sqlite.IntakeItem) bool {
 	return strings.Contains(text, "plan the ") && strings.Contains(text, " project")
 }
 
-func deriveIntakeRoute(item sqlite.IntakeItem) intakeDerivedRoute {
+func deriveIntakeRoute(item sqlite.IntakeItem, classification intakeClassification) intakeDerivedRoute {
 	intakeType := normalizedIntakeType(item.EventKind)
 	source := "intake_type:" + intakeType
 	switch intakeType {
@@ -1925,6 +1942,28 @@ func deriveIntakeRoute(item sqlite.IntakeItem) intakeDerivedRoute {
 		return intakeDerivedRoute{RoutingOutcome: "draft_policy_change", DraftArtifactKind: "draft_policy_change", ExecutionIntent: "governance", ExecutionIntentSource: source}
 	case "destructive":
 		return intakeDerivedRoute{RoutingOutcome: "draft_destructive_action", DraftArtifactKind: "draft_destructive_action", ExecutionIntent: "destructive", ExecutionIntentSource: source}
+	}
+
+	if classification.Category != "" && (intakeType == "request" || intakeType == "prompt") {
+		source = "classification_category:" + classification.Category
+	}
+	switch classification.Category {
+	case "idea":
+		return intakeDerivedRoute{RoutingOutcome: "draft_idea", DraftArtifactKind: "draft_idea", ExecutionIntent: "read_only", ExecutionIntentSource: source}
+	case "bug":
+		return intakeDerivedRoute{RoutingOutcome: "draft_incident_review", DraftArtifactKind: "draft_incident_review", ExecutionIntent: "read_only", ExecutionIntentSource: source}
+	case "research_item":
+		return intakeDerivedRoute{RoutingOutcome: "draft_research", DraftArtifactKind: "draft_research", ExecutionIntent: "read_only", ExecutionIntentSource: source}
+	case "writing_request":
+		return intakeDerivedRoute{RoutingOutcome: "draft_document", DraftArtifactKind: "draft_document", ExecutionIntent: "mutation", ExecutionIntentSource: source}
+	case "admin_item":
+		return intakeDerivedRoute{RoutingOutcome: "draft_admin_task", DraftArtifactKind: "draft_admin_task", ExecutionIntent: "mutation", ExecutionIntentSource: source}
+	case "routine":
+		return intakeDerivedRoute{RoutingOutcome: "draft_routine", DraftArtifactKind: "draft_routine", ExecutionIntent: "read_only", ExecutionIntentSource: source}
+	case "waiting_for_item":
+		return intakeDerivedRoute{RoutingOutcome: "draft_follow_up", DraftArtifactKind: "draft_follow_up", ExecutionIntent: "read_only", ExecutionIntentSource: source}
+	case "archive_worthy_noise":
+		return intakeDerivedRoute{RoutingOutcome: "archive_candidate", DraftArtifactKind: "archive_candidate", ExecutionIntent: "read_only", ExecutionIntentSource: source}
 	default:
 		return intakeDerivedRoute{RoutingOutcome: "draft_task", DraftArtifactKind: "draft_task", ExecutionIntent: "read_only", ExecutionIntentSource: source}
 	}
@@ -1945,9 +1984,75 @@ func normalizedIntakeType(value string) string {
 func classifyIntakeItem(item sqlite.IntakeItem) intakeClassification {
 	title := strings.ToLower(strings.TrimSpace(item.Subject))
 	if title == "" || title == "help" || title == "help with this" || title == "fix this" || len(strings.Fields(title)) < 3 {
-		return intakeClassification{Result: "ambiguous", Reason: "intake title is too vague to draft reviewable work"}
+		return intakeClassification{Result: "ambiguous", Reason: "intake title is too vague to draft reviewable work", Category: "clarification_needed"}
 	}
-	return intakeClassification{Result: "actionable_request", Reason: "intake has enough subject detail for a draft review artifact"}
+	category, priority := classifyIntakeCategory(item)
+	return intakeClassification{
+		Result:        "actionable_request",
+		Reason:        "intake has enough subject detail for a draft review artifact",
+		Category:      category,
+		PriorityScore: priority,
+	}
+}
+
+func classifyIntakeCategory(item sqlite.IntakeItem) (string, int) {
+	intakeType := normalizedIntakeType(item.EventKind)
+	switch intakeType {
+	case "research":
+		return "research_item", 40
+	case "writing":
+		return "writing_request", 50
+	case "admin":
+		return "admin_item", 45
+	case "bug", "incident":
+		return "bug", 80
+	}
+
+	text := strings.ToLower(strings.TrimSpace(item.Subject + " " + item.Summary))
+	switch {
+	case hasAnyPhrase(text, "no action needed", "fyi", "newsletter", "unsubscribe", "spam"):
+		return "archive_worthy_noise", 10
+	case hasAnyPhrase(text, "waiting for", "wait for", "follow up", "follow-up"):
+		return "waiting_for_item", 35
+	case hasAnyPhrase(text, "remind me", "every day", "every week", "every friday", "every monday", "recurring"):
+		return "routine", 35
+	case hasAnyPhrase(text, "bug", "error", "failed", "failure", "incident", "broken", "fix "):
+		return "bug", 80
+	case hasAnyPhrase(text, "idea", "someday", "maybe"):
+		return "idea", 30
+	case isGoalLikeIntake(item):
+		return "project", 70
+	case hasAnyPhrase(text, "research", "investigate", "analyze", "compare", "options"):
+		return "research_item", 40
+	case hasAnyPhrase(text, "write", "draft", "memo", "document"):
+		return "writing_request", 50
+	case hasAnyPhrase(text, "organize", "book", "file", "labels", "admin"):
+		return "admin_item", 45
+	default:
+		return "task", 50
+	}
+}
+
+func hasAnyPhrase(text string, phrases ...string) bool {
+	for _, phrase := range phrases {
+		if strings.Contains(text, phrase) {
+			return true
+		}
+	}
+	return false
+}
+
+type intakeDuplicateMatch struct {
+	IntakeItemID int64
+	Result       string
+	MatchReason  string
+}
+
+func (match intakeDuplicateMatch) SuppressionReason() string {
+	if match.MatchReason != "" {
+		return "duplicate_" + match.MatchReason
+	}
+	return "duplicate_dedupe_key"
 }
 
 func isActiveCanonicalIntakeStatus(status string) bool {
@@ -1959,14 +2064,12 @@ func isActiveCanonicalIntakeStatus(status string) bool {
 	}
 }
 
-func findCanonicalDuplicate(ctx context.Context, store *sqlite.Store, item sqlite.IntakeItem) (*int64, error) {
-	if strings.TrimSpace(item.DedupeKey) == "" {
-		return nil, nil
-	}
+func findCanonicalDuplicate(ctx context.Context, store *sqlite.Store, item sqlite.IntakeItem) (*intakeDuplicateMatch, error) {
 	items, err := store.ListIntakeItems(ctx, sqlite.ListIntakeItemsParams{WorkspaceID: item.WorkspaceID})
 	if err != nil {
 		return nil, err
 	}
+	itemFingerprint := normalizedIntakeSubjectFingerprint(item.Subject)
 	for _, candidate := range items {
 		if candidate.ID >= item.ID {
 			continue
@@ -1974,12 +2077,34 @@ func findCanonicalDuplicate(ctx context.Context, store *sqlite.Store, item sqlit
 		if !isActiveCanonicalIntakeStatus(candidate.Status) {
 			continue
 		}
-		if candidate.DedupeKey == item.DedupeKey {
-			id := candidate.ID
-			return &id, nil
+		if strings.TrimSpace(item.DedupeKey) != "" && candidate.DedupeKey == item.DedupeKey {
+			return &intakeDuplicateMatch{IntakeItemID: candidate.ID, Result: "duplicate_linked"}, nil
+		}
+		if candidate.WorkspaceID == item.WorkspaceID &&
+			candidate.Scope == item.Scope &&
+			candidate.ScopeKey == item.ScopeKey &&
+			normalizedIntakeType(candidate.EventKind) == normalizedIntakeType(item.EventKind) &&
+			itemFingerprint != "" &&
+			normalizedIntakeSubjectFingerprint(candidate.Subject) == itemFingerprint {
+			return &intakeDuplicateMatch{IntakeItemID: candidate.ID, Result: "semantic_duplicate_linked", MatchReason: "normalized_subject"}, nil
 		}
 	}
 	return nil, nil
+}
+
+func normalizedIntakeSubjectFingerprint(subject string) string {
+	words := strings.Fields(strings.Map(func(r rune) rune {
+		switch {
+		case unicode.IsLetter(r), unicode.IsDigit(r):
+			return unicode.ToLower(r)
+		default:
+			return ' '
+		}
+	}, subject))
+	if len(words) < 3 {
+		return ""
+	}
+	return strings.Join(words, " ")
 }
 
 func intakeProcessingEvents(itemID int64, status string, notes intakeProcessingNotes, canonical *int64) []sqlite.IntakeItemProcessingEvent {
@@ -2340,6 +2465,8 @@ func approvalResolveAction(decision string) string {
 		return "approve"
 	case "reject", "rejected", "deny", "denied":
 		return "deny"
+	case "clarify", "clarification_requested":
+		return "clarify"
 	default:
 		return strings.ToLower(strings.TrimSpace(decision))
 	}
@@ -2354,6 +2481,8 @@ func approvalResolveResultLabel(result approvalsvc.ResolveResult) string {
 		return "approved"
 	case "denied":
 		return "denied"
+	case "clarification_requested":
+		return "clarification_requested"
 	default:
 		return result.Approval.Status
 	}
@@ -3566,6 +3695,138 @@ func runFollowup(ctx context.Context, app bootstrap.App, args []string, stdout i
 	}
 }
 
+type schedulerTickView struct {
+	Now               string                         `json:"now"`
+	TriggerEvaluation schedulerTriggerEvaluationView `json:"trigger_evaluation"`
+	Supervision       schedulerSupervisionView       `json:"supervision"`
+	RecoveryRan       bool                           `json:"recovery_ran"`
+	Recovery          *schedulerRecoveryView         `json:"recovery,omitempty"`
+}
+
+type schedulerTriggerEvaluationView struct {
+	Evaluated    int `json:"evaluated"`
+	Materialized int `json:"materialized"`
+	Deferred     int `json:"deferred"`
+	Errored      int `json:"errored"`
+}
+
+type schedulerSupervisionView struct {
+	Promoted   int `json:"promoted"`
+	Reconciled int `json:"reconciled"`
+}
+
+type schedulerRecoveryView struct {
+	Observations int `json:"observations"`
+	Decisions    int `json:"decisions"`
+	Outcomes     int `json:"outcomes"`
+}
+
+func runScheduler(ctx context.Context, app bootstrap.App, args []string, stdout io.Writer) error {
+	if len(args) == 0 || args[0] == "help" || args[0] == "--help" {
+		_, err := fmt.Fprintln(stdout, schedulerUsage)
+		return err
+	}
+	switch args[0] {
+	case "tick":
+		return runSchedulerTick(ctx, app, args[1:], stdout)
+	default:
+		return fmt.Errorf("unsupported scheduler subcommand: %s", args[0])
+	}
+}
+
+func runSchedulerTick(ctx context.Context, app bootstrap.App, args []string, stdout io.Writer) error {
+	nowFunc, err := runtimeNow()
+	if err != nil {
+		return err
+	}
+	now := nowFunc().UTC()
+	recoveryEnabled := false
+	jsonOutput := false
+	for _, arg := range args {
+		switch {
+		case arg == "--help":
+			_, err := fmt.Fprintln(stdout, schedulerUsage)
+			return err
+		case arg == "--json":
+			jsonOutput = true
+		case strings.HasPrefix(arg, "now="):
+			parsed, err := time.Parse(time.RFC3339, strings.TrimPrefix(arg, "now="))
+			if err != nil {
+				return fmt.Errorf("scheduler tick now must be RFC3339: %w", err)
+			}
+			now = parsed.UTC()
+		case strings.HasPrefix(arg, "recovery="):
+			parsed, err := strconv.ParseBool(strings.TrimPrefix(arg, "recovery="))
+			if err != nil {
+				return fmt.Errorf("scheduler tick recovery must be true or false: %w", err)
+			}
+			recoveryEnabled = parsed
+		default:
+			return fmt.Errorf("unknown scheduler tick argument: %s", arg)
+		}
+	}
+
+	triggerResult, err := (triggers.Service{Store: app.Store, Registry: app.Registry}).EvaluateDue(ctx, now)
+	if err != nil {
+		return err
+	}
+	supervisionResult, err := (supervision.Service{
+		Store: app.Store,
+		Now:   func() time.Time { return now },
+	}).Tick(ctx)
+	if err != nil {
+		return err
+	}
+
+	view := schedulerTickView{
+		Now: now.Format(time.RFC3339),
+		TriggerEvaluation: schedulerTriggerEvaluationView{
+			Evaluated:    triggerResult.Evaluated,
+			Materialized: triggerResult.Materialized,
+			Deferred:     triggerResult.Deferred,
+			Errored:      triggerResult.Errored,
+		},
+		Supervision: schedulerSupervisionView{
+			Promoted:   supervisionResult.Promoted,
+			Reconciled: supervisionResult.Reconciled,
+		},
+		RecoveryRan: recoveryEnabled,
+	}
+	if recoveryEnabled {
+		result, err := (recovery.Service{
+			Store:           app.Store,
+			RegistryRoot:    filepath.Join(app.RepoRoot, "registry"),
+			ExecutorCatalog: app.Executors,
+			HealthConfig:    healthsvc.DefaultConfig(),
+			Now:             func() time.Time { return now },
+		}).RunCycle(ctx)
+		if err != nil {
+			return err
+		}
+		view.Recovery = &schedulerRecoveryView{
+			Observations: len(result.Observations),
+			Decisions:    len(result.Decisions),
+			Outcomes:     len(result.Outcomes),
+		}
+	}
+
+	if jsonOutput {
+		return commands.WriteJSON(stdout, view)
+	}
+	_, err = fmt.Fprintf(stdout,
+		"scheduler tick now=%s evaluated=%d materialized=%d deferred=%d errored=%d promoted=%d reconciled=%d recovery=%t\n",
+		view.Now,
+		view.TriggerEvaluation.Evaluated,
+		view.TriggerEvaluation.Materialized,
+		view.TriggerEvaluation.Deferred,
+		view.TriggerEvaluation.Errored,
+		view.Supervision.Promoted,
+		view.Supervision.Reconciled,
+		view.RecoveryRan,
+	)
+	return err
+}
+
 func runStatus(ctx context.Context, app bootstrap.App, cfg appconfig.Config, args []string, stdout io.Writer) error {
 	jsonOutput, remaining, err := consumeJSONFlag(args)
 	if err != nil {
@@ -3977,6 +4238,60 @@ func listPendingApprovals(ctx context.Context, store *sqlite.Store, resolved sco
 			RunID:           detail.Approval.RunID,
 			Status:          view.Status,
 			ResolverSupport: resolverSupport,
+		})
+	}
+	return approvals, nil
+}
+
+func listAllApprovals(ctx context.Context, store *sqlite.Store, resolved scope.Resolution) ([]commands.ApprovalView, error) {
+	rows, err := store.DB().QueryContext(ctx, `
+		SELECT a.id
+		FROM approvals a
+		JOIN tasks t ON t.id = a.task_id
+		ORDER BY a.id ASC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	approvalIDs := []int64{}
+	for rows.Next() {
+		var approvalID int64
+		if err := rows.Scan(&approvalID); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		approvalIDs = append(approvalIDs, approvalID)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+
+	approvalService := approvalsvc.Service{Store: store}
+	approvals := make([]commands.ApprovalView, 0, len(approvalIDs))
+	for _, approvalID := range approvalIDs {
+		detail, err := approvalService.Detail(ctx, approvalID)
+		if err != nil {
+			return nil, err
+		}
+		project, err := store.GetProject(ctx, detail.Task.ProjectID)
+		if err != nil {
+			return nil, err
+		}
+		if !matchesTaskProjectionScope(project.Key, detail.Task.Scope, resolved) {
+			continue
+		}
+		approvals = append(approvals, commands.ApprovalView{
+			ApprovalID:      detail.Approval.ID,
+			TaskKey:         detail.Task.Key,
+			RunID:           detail.Approval.RunID,
+			Status:          detail.Approval.Status,
+			ResolverSupport: string(detail.ResolverSupport),
+			DecisionBy:      detail.Approval.DecisionBy,
+			Reason:          detail.Approval.Reason,
 		})
 	}
 	return approvals, nil

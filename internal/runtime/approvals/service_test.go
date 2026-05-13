@@ -185,6 +185,89 @@ func TestResolveNonPendingApprovalRefusesReresolution(t *testing.T) {
 	}
 }
 
+func TestResolveRejectsApprovalWhenPolicySnapshotChanged(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openApprovalTestStore(t)
+	fixture := seedTaskBackedApproval(t, ctx, store)
+
+	if _, err := store.UpsertProject(ctx, sqlite.UpsertProjectParams{
+		Key:           "family-ops",
+		Name:          "Family Ops",
+		Scope:         "system",
+		GitRoot:       "/tmp/family-ops-new",
+		DefaultBranch: "main",
+		ManifestPath:  "/tmp/family-ops-new/project.yaml",
+	}); err != nil {
+		t.Fatalf("UpsertProject(policy drift) error = %v", err)
+	}
+
+	_, err := Service{Store: store}.Resolve(ctx, ResolveParams{
+		ApprovalID: fixture.Approval.ID,
+		Action:     "approve",
+		DecisionBy: "operator",
+		Reason:     "final confirmation",
+	})
+	if !errors.Is(err, ErrStaleApproval) {
+		t.Fatalf("Resolve() error = %v, want ErrStaleApproval", err)
+	}
+
+	persisted, err := store.GetApproval(ctx, fixture.Approval.ID)
+	if err != nil {
+		t.Fatalf("GetApproval() error = %v", err)
+	}
+	if persisted.Status != "pending" {
+		t.Fatalf("persisted.Status = %q, want pending after stale conflict", persisted.Status)
+	}
+}
+
+func TestResolveClarifyPreservesReasonAndRecordsAuditEvent(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openApprovalTestStore(t)
+	fixture := seedTaskBackedApproval(t, ctx, store)
+
+	result, err := Service{Store: store}.Resolve(ctx, ResolveParams{
+		ApprovalID: fixture.Approval.ID,
+		Action:     "clarify",
+		DecisionBy: "operator",
+		Reason:     "need current account balance evidence",
+	})
+	if err != nil {
+		t.Fatalf("Resolve(clarify) error = %v", err)
+	}
+	if result.Approval.Status != "clarification_requested" {
+		t.Fatalf("approval.Status = %q, want clarification_requested", result.Approval.Status)
+	}
+	if result.Approval.Reason != "need current account balance evidence" {
+		t.Fatalf("approval.Reason = %q, want preserved clarification reason", result.Approval.Reason)
+	}
+
+	task, err := store.GetTask(ctx, fixture.Task.ID)
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
+	}
+	if task.Status != "blocked" || task.BlockedReason != "clarification_requested" {
+		t.Fatalf("task status=%q blocked_reason=%q, want blocked clarification_requested", task.Status, task.BlockedReason)
+	}
+
+	events, err := store.ListEvents(ctx, sqlite.ListEventsParams{TaskID: &fixture.Task.ID})
+	if err != nil {
+		t.Fatalf("ListEvents() error = %v", err)
+	}
+	var resolved bool
+	for _, event := range events {
+		if event.Type == "approval.resolved" && strings.Contains(string(event.Payload), `"status":"clarification_requested"`) && strings.Contains(string(event.Payload), `"reason":"need current account balance evidence"`) {
+			resolved = true
+		}
+	}
+	if !resolved {
+		t.Fatalf("events = %+v, want clarification approval.resolved audit event", events)
+	}
+}
+
 func TestResolveApprovePreparedTransferStartsSubmitContinuation(t *testing.T) {
 	t.Parallel()
 
@@ -692,6 +775,50 @@ func seedPendingApproval(t *testing.T, ctx context.Context, store *sqlite.Store)
 		PrepareRun: run,
 		Approval:   approval,
 	}
+}
+
+func seedTaskBackedApproval(t *testing.T, ctx context.Context, store *sqlite.Store) approvalFixture {
+	t.Helper()
+
+	project, err := store.CreateProject(ctx, sqlite.CreateProjectParams{
+		Key:           "family-ops",
+		Name:          "Family Ops",
+		Scope:         "system",
+		GitRoot:       "/tmp/family-ops",
+		DefaultBranch: "main",
+		ManifestPath:  "/tmp/family-ops/project.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+	task, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:             project.ID,
+		Key:                   "task-backed-approval",
+		Title:                 "Task backed approval",
+		ActionKey:             "external_mutation",
+		Status:                "queued",
+		Scope:                 "project",
+		RequestedBy:           "operator",
+		WorkKind:              "external_mutation",
+		ExecutionIntent:       "mutate",
+		ExecutionIntentSource: "test",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+	blocked, err := store.BlockTask(ctx, sqlite.BlockTaskParams{TaskID: task.ID, Reason: "approval_required"})
+	if err != nil {
+		t.Fatalf("BlockTask() error = %v", err)
+	}
+	approval, err := store.RequestApproval(ctx, sqlite.RequestApprovalParams{
+		TaskID:      task.ID,
+		Status:      "pending",
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("RequestApproval() error = %v", err)
+	}
+	return approvalFixture{Task: blocked, Approval: approval}
 }
 
 func writeApprovalRegistry(t *testing.T) projects.Registry {

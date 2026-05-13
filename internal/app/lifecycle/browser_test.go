@@ -141,6 +141,44 @@ func TestRunBrowserFailedCaptureCreatesRecoveryRecommendation(t *testing.T) {
 	}
 }
 
+func TestRunBrowserTimeoutCaptureCreatesRecoveryRecommendation(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	root := testRepoRoot(t)
+	fixture := filepath.Join(t.TempDir(), "huginn-timeout.sh")
+	if err := os.WriteFile(fixture, []byte("#!/usr/bin/env bash\ncat >/dev/null\nprintf '{\"status\":\"timeout\",\"adapter_kind\":\"huginn_live\",\"error_code\":\"command_timeout\",\"error_message\":\"browser capture timed out\",\"extracted_text_summary\":\"Huginn live browser adapter timed out before evidence was complete.\"}'\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	t.Setenv("ODIN_BROWSER_ADAPTER", "live")
+	t.Setenv("ODIN_HUGINN_BROWSER_COMMAND", fixture)
+	t.Setenv("ODIN_HUGINN_BROWSER_ALLOWED_COMMANDS", fixture)
+
+	run := func(args ...string) string {
+		t.Helper()
+		var output bytes.Buffer
+		if err := Run(context.Background(), root, args, strings.NewReader(""), &output); err != nil {
+			t.Fatalf("Run(%v) error = %v\noutput=%s", args, err, output.String())
+		}
+		return output.String()
+	}
+
+	run("work", "start", "--project", "odin-core", "--title", "Capture timing-out browser evidence", "--intent", "read_only")
+	run("browser", "run", "--task-id", "1", "--url", "https://example.com/research", "--allowed-domain", "example.com", "--json")
+	reviewList := run("review", "list", "--json")
+	for _, want := range []string{
+		`"queue_id": "failed-work:1"`,
+		`"source_type": "failed_work"`,
+		`"recovery_recommendation": "Browser evidence capture failed.`,
+	} {
+		if !strings.Contains(reviewList, want) {
+			t.Fatalf("review list output = %s, want %s", reviewList, want)
+		}
+	}
+	overview := run("overview", "--json")
+	if !strings.Contains(overview, `"source": "browser_evidence"`) || !strings.Contains(overview, `"recovery_recommendation": "Browser evidence capture failed.`) {
+		t.Fatalf("overview output = %s, want browser timeout recovery guidance", overview)
+	}
+}
+
 func TestRunBrowserRunRejectsUnsafeInputs(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	root := testRepoRoot(t)

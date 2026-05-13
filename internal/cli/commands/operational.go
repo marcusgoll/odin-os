@@ -62,6 +62,8 @@ type ApprovalView struct {
 	RunID           *int64 `json:"run_id,omitempty"`
 	Status          string `json:"status"`
 	ResolverSupport string `json:"resolver_support"`
+	DecisionBy      string `json:"decision_by,omitempty"`
+	Reason          string `json:"reason,omitempty"`
 }
 
 type ApprovalsView struct {

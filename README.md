@@ -156,3 +156,7 @@ Pull requests are expected to use the repo template and report:
 - `Commands Run`
 
 On `pull_request` events, CI validates that the PR body includes those sections and, for operator-visible changes, includes real `odin` command evidence.
+
+## README Update Test
+
+This README has been updated in-repo to validate end-to-end repository documentation edits.

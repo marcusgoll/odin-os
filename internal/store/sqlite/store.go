@@ -2,7 +2,9 @@ package sqlite
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -2602,14 +2604,21 @@ func (store *Store) RequestApproval(ctx context.Context, params RequestApprovalP
 			return err
 		}
 
+		policySnapshotHash, runtimeSnapshotHash, err := store.approvalSnapshotHashesTx(ctx, tx, task, params.RunID)
+		if err != nil {
+			return err
+		}
+
 		result, err := tx.ExecContext(ctx, `
-			INSERT INTO approvals (task_id, run_id, status, requested_at, resolved_at, decision_by, reason)
-			VALUES (?, ?, ?, ?, NULL, '', '')
+			INSERT INTO approvals (task_id, run_id, status, requested_at, resolved_at, decision_by, reason, policy_snapshot_hash, runtime_snapshot_hash)
+			VALUES (?, ?, ?, ?, NULL, '', '', ?, ?)
 		`,
 			params.TaskID,
 			nullInt64(params.RunID),
 			params.Status,
 			formatTime(now),
+			policySnapshotHash,
+			runtimeSnapshotHash,
 		)
 		if err != nil {
 			return err
@@ -2621,11 +2630,13 @@ func (store *Store) RequestApproval(ctx context.Context, params RequestApprovalP
 		}
 
 		approval = Approval{
-			ID:          approvalID,
-			TaskID:      params.TaskID,
-			RunID:       params.RunID,
-			Status:      params.Status,
-			RequestedAt: now,
+			ID:                  approvalID,
+			TaskID:              params.TaskID,
+			RunID:               params.RunID,
+			Status:              params.Status,
+			RequestedAt:         now,
+			PolicySnapshotHash:  policySnapshotHash,
+			RuntimeSnapshotHash: runtimeSnapshotHash,
 		}
 
 		projectID := task.ProjectID
@@ -2697,14 +2708,21 @@ func (store *Store) BlockTaskAndRequestApproval(ctx context.Context, params Bloc
 			return err
 		}
 
+		policySnapshotHash, runtimeSnapshotHash, err := store.approvalSnapshotHashesTx(ctx, tx, task, params.RunID)
+		if err != nil {
+			return err
+		}
+
 		result, err := tx.ExecContext(ctx, `
-			INSERT INTO approvals (task_id, run_id, status, requested_at, resolved_at, decision_by, reason)
-			VALUES (?, ?, ?, ?, NULL, '', '')
+			INSERT INTO approvals (task_id, run_id, status, requested_at, resolved_at, decision_by, reason, policy_snapshot_hash, runtime_snapshot_hash)
+			VALUES (?, ?, ?, ?, NULL, '', '', ?, ?)
 		`,
 			params.TaskID,
 			nullInt64(params.RunID),
 			"pending",
 			formatTime(now),
+			policySnapshotHash,
+			runtimeSnapshotHash,
 		)
 		if err != nil {
 			return err
@@ -2716,11 +2734,13 @@ func (store *Store) BlockTaskAndRequestApproval(ctx context.Context, params Bloc
 		}
 
 		approval = Approval{
-			ID:          approvalID,
-			TaskID:      params.TaskID,
-			RunID:       params.RunID,
-			Status:      "pending",
-			RequestedAt: now,
+			ID:                  approvalID,
+			TaskID:              params.TaskID,
+			RunID:               params.RunID,
+			Status:              "pending",
+			RequestedAt:         now,
+			PolicySnapshotHash:  policySnapshotHash,
+			RuntimeSnapshotHash: runtimeSnapshotHash,
 		}
 
 		return appendEventTx(ctx, tx, eventInsert{
@@ -2834,14 +2854,21 @@ func (store *Store) AwaitApproval(ctx context.Context, params AwaitApprovalParam
 			return err
 		}
 
+		policySnapshotHash, runtimeSnapshotHash, err := store.approvalSnapshotHashesTx(ctx, tx, task, &currentRun.ID)
+		if err != nil {
+			return err
+		}
+
 		result, err := tx.ExecContext(ctx, `
-			INSERT INTO approvals (task_id, run_id, status, requested_at, resolved_at, decision_by, reason)
-			VALUES (?, ?, ?, ?, NULL, '', '')
+			INSERT INTO approvals (task_id, run_id, status, requested_at, resolved_at, decision_by, reason, policy_snapshot_hash, runtime_snapshot_hash)
+			VALUES (?, ?, ?, ?, NULL, '', '', ?, ?)
 		`,
 			currentTask.ID,
 			currentRun.ID,
 			"pending",
 			formatTime(now),
+			policySnapshotHash,
+			runtimeSnapshotHash,
 		)
 		if err != nil {
 			return err
@@ -2852,11 +2879,13 @@ func (store *Store) AwaitApproval(ctx context.Context, params AwaitApprovalParam
 			return err
 		}
 		approval = Approval{
-			ID:          approvalID,
-			TaskID:      currentTask.ID,
-			RunID:       &currentRun.ID,
-			Status:      "pending",
-			RequestedAt: now,
+			ID:                  approvalID,
+			TaskID:              currentTask.ID,
+			RunID:               &currentRun.ID,
+			Status:              "pending",
+			RequestedAt:         now,
+			PolicySnapshotHash:  policySnapshotHash,
+			RuntimeSnapshotHash: runtimeSnapshotHash,
 		}
 
 		return appendEventTx(ctx, tx, eventInsert{
@@ -2991,6 +3020,117 @@ func (store *Store) ResolveApproval(ctx context.Context, params ResolveApprovalP
 	})
 
 	return approval, err
+}
+
+func (store *Store) CurrentApprovalSnapshotHashes(ctx context.Context, approvalID int64) (string, string, error) {
+	var policySnapshotHash string
+	var runtimeSnapshotHash string
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		approval, task, err := store.getApprovalWithTaskTx(ctx, tx, approvalID)
+		if err != nil {
+			return err
+		}
+		policySnapshotHash, runtimeSnapshotHash, err = store.approvalSnapshotHashesTx(ctx, tx, task, approval.RunID)
+		return err
+	})
+	return policySnapshotHash, runtimeSnapshotHash, err
+}
+
+func (store *Store) approvalSnapshotHashesTx(ctx context.Context, tx *sql.Tx, task Task, runID *int64) (string, string, error) {
+	project, err := store.getProjectTx(ctx, tx, task.ProjectID)
+	if err != nil {
+		return "", "", err
+	}
+	policySnapshotHash, err := approvalPolicySnapshotHash(project, task)
+	if err != nil {
+		return "", "", err
+	}
+	var run *Run
+	if runID != nil {
+		loaded, err := store.getRunTx(ctx, tx, *runID)
+		if err != nil {
+			return "", "", err
+		}
+		run = &loaded
+	}
+	runtimeSnapshotHash, err := approvalRuntimeSnapshotHash(task, run)
+	if err != nil {
+		return "", "", err
+	}
+	return policySnapshotHash, runtimeSnapshotHash, nil
+}
+
+func approvalPolicySnapshotHash(project Project, task Task) (string, error) {
+	return stableApprovalHash(struct {
+		Version               int    `json:"version"`
+		ProjectKey            string `json:"project_key"`
+		ProjectScope          string `json:"project_scope"`
+		GitRoot               string `json:"git_root"`
+		DefaultBranch         string `json:"default_branch"`
+		GitHubRepo            string `json:"github_repo"`
+		ManifestPath          string `json:"manifest_path"`
+		TaskScope             string `json:"task_scope"`
+		ActionKey             string `json:"action_key"`
+		WorkKind              string `json:"work_kind"`
+		ExecutionIntent       string `json:"execution_intent"`
+		ExecutionIntentSource string `json:"execution_intent_source"`
+	}{
+		Version:               1,
+		ProjectKey:            project.Key,
+		ProjectScope:          project.Scope,
+		GitRoot:               project.GitRoot,
+		DefaultBranch:         project.DefaultBranch,
+		GitHubRepo:            project.GitHubRepo,
+		ManifestPath:          project.ManifestPath,
+		TaskScope:             task.Scope,
+		ActionKey:             task.ActionKey,
+		WorkKind:              task.WorkKind,
+		ExecutionIntent:       task.ExecutionIntent,
+		ExecutionIntentSource: task.ExecutionIntentSource,
+	})
+}
+
+func approvalRuntimeSnapshotHash(task Task, run *Run) (string, error) {
+	type runSnapshot struct {
+		ID             int64  `json:"id"`
+		Status         string `json:"status"`
+		Attempt        int    `json:"attempt"`
+		Executor       string `json:"executor"`
+		TerminalReason string `json:"terminal_reason"`
+		ArtifactsJSON  string `json:"artifacts_json"`
+	}
+	payload := struct {
+		Version      int          `json:"version"`
+		TaskID       int64        `json:"task_id"`
+		TaskKey      string       `json:"task_key"`
+		CurrentRunID *int64       `json:"current_run_id,omitempty"`
+		Run          *runSnapshot `json:"run,omitempty"`
+	}{
+		Version:      1,
+		TaskID:       task.ID,
+		TaskKey:      task.Key,
+		CurrentRunID: task.CurrentRunID,
+	}
+	if run != nil {
+		payload.Run = &runSnapshot{
+			ID:             run.ID,
+			Status:         run.Status,
+			Attempt:        run.Attempt,
+			Executor:       run.Executor,
+			TerminalReason: run.TerminalReason,
+			ArtifactsJSON:  normalizeArtifactsJSON(run.ArtifactsJSON),
+		}
+	}
+	return stableApprovalHash(payload)
+}
+
+func stableApprovalHash(payload any) (string, error) {
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(raw)
+	return hex.EncodeToString(sum[:]), nil
 }
 
 func (store *Store) ResolveStalledRun(ctx context.Context, params ResolveStalledRunParams) error {
@@ -3472,6 +3612,89 @@ func (store *Store) RecordSkillLifecycleEvent(ctx context.Context, params Record
 				DurationMS:       params.DurationMS,
 				ErrorCode:        params.ErrorCode,
 				ErrorText:        params.ErrorText,
+			},
+			OccurredAt: now,
+		})
+	})
+}
+
+func (store *Store) RecordDesignRequestCreatedEvent(ctx context.Context, params RecordDesignRequestCreatedEventParams) error {
+	now := store.now()
+	scope := strings.TrimSpace(params.Scope)
+	if scope == "" {
+		scope = "repo"
+	}
+
+	return store.withTx(ctx, func(tx *sql.Tx) error {
+		return appendEventTx(ctx, tx, eventInsert{
+			StreamType: runtimeevents.StreamSkill,
+			StreamID:   skillEventStreamID(params.SkillKey),
+			EventType:  runtimeevents.EventDesignRequestCreated,
+			Scope:      scope,
+			ProjectID:  params.ProjectID,
+			Payload: runtimeevents.DesignRequestCreatedPayload{
+				RequestArtifactID: params.RequestArtifactID,
+				SkillKey:          params.SkillKey,
+				Scope:             params.Scope,
+				Status:            params.Status,
+				ArtifactType:      params.ArtifactType,
+				Summary:           params.Summary,
+				ExecutionProfile:  params.ExecutionProfile,
+			},
+			OccurredAt: now,
+		})
+	})
+}
+
+func (store *Store) RecordDesignExecutionStartedEvent(ctx context.Context, params RecordDesignExecutionStartedEventParams) error {
+	now := store.now()
+	scope := strings.TrimSpace(params.Scope)
+	if scope == "" {
+		scope = "repo"
+	}
+
+	return store.withTx(ctx, func(tx *sql.Tx) error {
+		return appendEventTx(ctx, tx, eventInsert{
+			StreamType: runtimeevents.StreamSkill,
+			StreamID:   skillEventStreamID(params.SkillKey),
+			EventType:  runtimeevents.EventDesignExecutionStarted,
+			Scope:      scope,
+			ProjectID:  params.ProjectID,
+			Payload: runtimeevents.DesignExecutionStartedPayload{
+				RequestArtifactID: params.RequestArtifactID,
+				SkillKey:          params.SkillKey,
+				Scope:             params.Scope,
+				ToolKey:           params.ToolKey,
+				Summary:           params.Summary,
+				ExecutionProfile:  params.ExecutionProfile,
+			},
+			OccurredAt: now,
+		})
+	})
+}
+
+func (store *Store) RecordDesignArtifactCreatedEvent(ctx context.Context, params RecordDesignArtifactCreatedEventParams) error {
+	now := store.now()
+	scope := strings.TrimSpace(params.Scope)
+	if scope == "" {
+		scope = "repo"
+	}
+
+	return store.withTx(ctx, func(tx *sql.Tx) error {
+		return appendEventTx(ctx, tx, eventInsert{
+			StreamType: runtimeevents.StreamSkill,
+			StreamID:   skillEventStreamID(params.SkillKey),
+			EventType:  runtimeevents.EventDesignArtifactCreated,
+			Scope:      scope,
+			ProjectID:  params.ProjectID,
+			Payload: runtimeevents.DesignArtifactCreatedPayload{
+				RequestArtifactID: params.RequestArtifactID,
+				OutputArtifactID:  params.OutputArtifactID,
+				SkillKey:          params.SkillKey,
+				Scope:             params.Scope,
+				ArtifactType:      params.ArtifactType,
+				Status:            params.Status,
+				Summary:           params.Summary,
 			},
 			OccurredAt: now,
 		})
@@ -6087,7 +6310,7 @@ func (store *Store) ListRunsByStatus(ctx context.Context, status string) ([]Run,
 
 func (store *Store) GetApproval(ctx context.Context, approvalID int64) (Approval, error) {
 	row := store.db.QueryRowContext(ctx, `
-		SELECT id, task_id, run_id, status, requested_at, resolved_at, decision_by, reason
+		SELECT id, task_id, run_id, status, requested_at, resolved_at, decision_by, reason, policy_snapshot_hash, runtime_snapshot_hash
 		FROM approvals
 		WHERE id = ?
 	`, approvalID)
@@ -6096,7 +6319,7 @@ func (store *Store) GetApproval(ctx context.Context, approvalID int64) (Approval
 
 func (store *Store) GetLatestTaskApproval(ctx context.Context, taskID int64) (Approval, error) {
 	row := store.db.QueryRowContext(ctx, `
-		SELECT id, task_id, run_id, status, requested_at, resolved_at, decision_by, reason
+		SELECT id, task_id, run_id, status, requested_at, resolved_at, decision_by, reason, policy_snapshot_hash, runtime_snapshot_hash
 		FROM approvals
 		WHERE task_id = ?
 		ORDER BY id DESC
@@ -7743,7 +7966,7 @@ func (store *Store) getRunWithTaskTx(ctx context.Context, tx *sql.Tx, runID int6
 func (store *Store) getApprovalWithTaskTx(ctx context.Context, tx *sql.Tx, approvalID int64) (Approval, Task, error) {
 	row := tx.QueryRowContext(ctx, `
 		SELECT
-			a.id, a.task_id, a.run_id, a.status, a.requested_at, a.resolved_at, a.decision_by, a.reason,
+			a.id, a.task_id, a.run_id, a.status, a.requested_at, a.resolved_at, a.decision_by, a.reason, a.policy_snapshot_hash, a.runtime_snapshot_hash,
 			t.id, t.project_id, t.key, t.title, t.action_key, t.status, t.scope, t.requested_by, t.workspace_id, t.initiative_id, t.companion_id, t.follow_up_obligation_id, t.follow_up_occurrence_key, t.work_kind, t.execution_intent, t.execution_intent_source, t.summary, t.terminal_reason, t.artifacts_json, t.current_run_id, t.next_eligible_at, t.priority, t.last_error, t.retry_count, t.max_attempts, t.blocked_reason, t.created_at, t.updated_at
 		FROM approvals a
 		JOIN tasks t ON t.id = a.task_id
@@ -7757,6 +7980,8 @@ func (store *Store) getApprovalWithTaskTx(ctx context.Context, tx *sql.Tx, appro
 	var decisionBy sql.NullString
 	var reason sql.NullString
 	var requestedAt string
+	var policySnapshotHash string
+	var runtimeSnapshotHash string
 	var taskSummary sql.NullString
 	var taskTerminalReason sql.NullString
 	var taskArtifactsJSON sql.NullString
@@ -7787,6 +8012,8 @@ func (store *Store) getApprovalWithTaskTx(ctx context.Context, tx *sql.Tx, appro
 		&resolvedAt,
 		&decisionBy,
 		&reason,
+		&policySnapshotHash,
+		&runtimeSnapshotHash,
 		&task.ID,
 		&task.ProjectID,
 		&task.Key,
@@ -7831,6 +8058,8 @@ func (store *Store) getApprovalWithTaskTx(ctx context.Context, tx *sql.Tx, appro
 	}
 	approval.DecisionBy = decisionBy.String
 	approval.Reason = reason.String
+	approval.PolicySnapshotHash = policySnapshotHash
+	approval.RuntimeSnapshotHash = runtimeSnapshotHash
 
 	task.WorkspaceID = nullableInt64Ptr(workspaceID)
 	task.InitiativeID = nullableInt64Ptr(initiativeID)
@@ -9181,6 +9410,8 @@ func scanApproval(row interface{ Scan(...any) error }) (Approval, error) {
 	var decisionBy sql.NullString
 	var reason sql.NullString
 	var requestedAt string
+	var policySnapshotHash string
+	var runtimeSnapshotHash string
 	if err := row.Scan(
 		&approval.ID,
 		&approval.TaskID,
@@ -9190,6 +9421,8 @@ func scanApproval(row interface{ Scan(...any) error }) (Approval, error) {
 		&resolvedAt,
 		&decisionBy,
 		&reason,
+		&policySnapshotHash,
+		&runtimeSnapshotHash,
 	); err != nil {
 		return Approval{}, err
 	}
@@ -9206,6 +9439,8 @@ func scanApproval(row interface{ Scan(...any) error }) (Approval, error) {
 	}
 	approval.DecisionBy = decisionBy.String
 	approval.Reason = reason.String
+	approval.PolicySnapshotHash = policySnapshotHash
+	approval.RuntimeSnapshotHash = runtimeSnapshotHash
 	return approval, nil
 }
 

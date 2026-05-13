@@ -456,6 +456,10 @@ func (shell *Shell) handleTool(ctx context.Context, args []string, output io.Wri
 			_, err := fmt.Fprintf(output, "tool %s is not available in %s scope\n", args[1], shell.catalogScope())
 			return err
 		}
+		if toolRequiresApprovedSocialOutcome(expansion.Card.CanonicalKey) {
+			_, err := fmt.Fprintf(output, "tool %s requires an approved social_outcome; use /memory publish <id> via=huginn_x\n", expansion.Card.CanonicalKey)
+			return err
+		}
 
 		result, err := toolBroker.InvokeTool(args[1], input)
 		if err != nil {
@@ -469,6 +473,15 @@ func (shell *Shell) handleTool(ctx context.Context, args []string, output io.Wri
 	default:
 		_, err := fmt.Fprintf(output, "usage: %s\n", toolUsage)
 		return err
+	}
+}
+
+func toolRequiresApprovedSocialOutcome(canonicalKey string) bool {
+	switch strings.TrimSpace(canonicalKey) {
+	case "browser_x_post_publish":
+		return true
+	default:
+		return false
 	}
 }
 

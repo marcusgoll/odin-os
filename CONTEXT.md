@@ -102,6 +102,18 @@ _Avoid_: manual hack, hidden step, background credential handling
 A closed coarse token that states why a **Browser Intervention** requires human action across workflows.
 _Avoid_: driver error, UI failure, workflow-specific blocker string
 
+**Capability Gateway**:
+The Odin-owned runtime surface for dynamic capability discovery, versioned descriptor lookup, policy-gated invocation, and run readback across tools, skills, commands, workflows, and agents.
+_Avoid_: plugin manager, marketplace runtime, provider-specific tool router
+
+**Capability**:
+A discoverable Odin unit such as a `tool`, `skill`, `agent`, `command`, or `workflow` that is exposed through the **Capability Gateway** and governed by Odin policy before invocation.
+_Avoid_: plugin, ad hoc tool, direct integration hook
+
+**Plugin Package**:
+A possible future import or distribution container for capabilities. It is not a v1 Odin runtime kind, policy object, approval object, executor lane, or registry authority.
+_Avoid_: runtime plugin, plugin executor, plugin approval
+
 **Transfer Intent**:
 The operator-approved description of a requested money movement that Odin governs through existing workflow state rather than a dedicated v1 transfer aggregate.
 _Avoid_: transfer row, payment object
@@ -221,6 +233,8 @@ _Avoid_: analytics scrape, crawler result
 - A **Browser Intervention** should expose exactly one coarse **Browser Intervention Reason** from the closed v1 set `login_required`, `mfa_required`, `captcha_required`, `human_confirmation_required`, `unexpected_live_blocker`
 - Workflow-specific browser details such as `google_login_required`, `blocked_on_mfa`, `compose_surface_missing`, and `post_button_not_ready` should remain driver artifacts or **Run Attempt** evidence and should not expand the shared **Browser Intervention Reason** vocabulary automatically
 - `unexpected_live_blocker` should be used only when human step-in is required but no narrower shared **Browser Intervention Reason** fits; ordinary browser startup, selector, typing, navigation, or click failures remain driver or execution failures rather than **Browser Interventions**
+- In v1, **Capability Gateway** is the canonical runtime concept for capability discovery and controlled invocation; "plugin" is packaging language only and must not become a parallel runtime authority
+- V1 capability kinds are `tool`, `skill`, `agent`, `command`, and `workflow`; a future **Plugin Package** may publish those normal capabilities but must not introduce a separate plugin kind, executor lane, approval model, or policy system
 - In v1, generic **Browser Control** should reuse the existing `/tool` **Operator Surface** and builtin tool catalog rather than introducing a parallel `/browser` command family
 - On that `/tool` surface, the canonical future generic **Browser Control** tool family should use `browser_*` catalog keys rather than adapter-branded `huginn_*` keys; adapter-specific names may remain compatibility or implementation language during transition, but they are not the long-term platform vocabulary
 - A **Transfer Intent** may be represented in v1 by one governing **Work Item**, its latest **Run Attempt**, the active or terminal **Approval Request** chain, and the linked `approval_wait` wake packet history instead of a dedicated transfer-intent table
@@ -394,7 +408,8 @@ _Avoid_: analytics scrape, crawler result
 
 ## Status ownership
 
-- **Intake Item** intake status should be one of: `received`, `triaging`, `resolved`, `suppressed`, `errored`
+- V1 **Intake Item** intake status should be one of: `received`, `processing`, `review_required`, `needs_clarification`, `duplicate_linked_or_suppressed`, `approval_required`, `accepted`, `rejected`, `approval_denied`, `archived`, `errored`
+- `triaging`, `resolved`, and `suppressed` are compatibility or derived language for V1 intake readbacks; stored intake rows should use the explicit review-oriented statuses above so operator queues can distinguish review, clarification, duplicate, approval, acceptance, denial, and archive outcomes without reinterpreting routing notes
 - **Intake Item** should carry outcome references rather than a large branching status enum, including optional links to a **Conversation Transcript**, linked **Work Items**, canonical duplicate **Intake Item** reference, suppression or dedupe reason, routing notes, its explicit **Dedupe Key**, persisted **Source Facts**, and the **Dedupe Recipe Version**
 - **Work Item** operator status should be one of: `queued`, `running`, `blocked`, `completed`, `failed`, `canceled`
 - **Run Attempt** execution status should be one of: `running`, `completed`, `failed`, `cancelled`, `interrupted`

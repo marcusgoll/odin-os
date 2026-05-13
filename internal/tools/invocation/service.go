@@ -45,6 +45,7 @@ type Service struct {
 	DriverPath              string
 	Driver                  browserhuman.Driver
 	RobinhoodTransferDriver webdriver.RobinhoodTransferDriver
+	OpenDesignDriver        webdriver.OpenDesignDriver
 }
 
 func (service Service) Invoke(ctx context.Context, key string, request Request) (Result, error) {
@@ -155,6 +156,19 @@ func (service Service) RobinhoodTransfer(ctx context.Context, request webdriver.
 	driver := service.RobinhoodTransferDriver
 	if driver.InvokeFunc == nil && strings.TrimSpace(driver.Driver.EnvVar) == "" && strings.TrimSpace(driver.Driver.DefaultToolKey) == "" {
 		driver = webdriver.NewRobinhoodTransferDriver()
+	}
+
+	response, err := driver.Invoke(ctx, request)
+	if err != nil {
+		return BrowserResult{}, err
+	}
+	return toBrowserResult(response.ToolKey, response.Summary, response.Artifacts, response.RawOutput), nil
+}
+
+func (service Service) OpenDesign(ctx context.Context, request webdriver.OpenDesignRequest) (BrowserResult, error) {
+	driver := service.OpenDesignDriver
+	if driver.InvokeFunc == nil && strings.TrimSpace(driver.Driver.EnvVar) == "" && strings.TrimSpace(driver.Driver.DefaultToolKey) == "" {
+		driver = webdriver.NewOpenDesignDriver()
 	}
 
 	response, err := driver.Invoke(ctx, request)

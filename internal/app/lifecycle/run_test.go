@@ -682,6 +682,67 @@ func topLevelProposalFromProcessOutput(t *testing.T, output []byte) json.RawMess
 	return view.IntakeItem.Proposal
 }
 
+func TestRunIntakeProcessLinksSemanticDuplicateWithDifferentAdapterKeys(t *testing.T) {
+	t.Parallel()
+
+	root := testRepoRoot(t)
+	payloadPath := filepath.Join(t.TempDir(), "payload.json")
+	if err := os.WriteFile(payloadPath, []byte(`{"body":"same operator request through different adapters"}`), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	createRaw := func(title, dedup string) {
+		t.Helper()
+		if err := Run(context.Background(), root, []string{
+			"intake", "raw", "create",
+			"--source", "operator",
+			"--project", "odin-core",
+			"--title", title,
+			"--type", "request",
+			"--dedup-key", dedup,
+			"--requested-by", "codex",
+			"--payload-file", payloadPath,
+			"--json",
+		}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+			t.Fatalf("Run(intake raw create %q) error = %v", title, err)
+		}
+	}
+
+	createRaw("Prepare weekly status summary", "adapter-a")
+	createRaw("prepare weekly status summary!", "adapter-b")
+
+	var firstOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"intake", "process", "--id", "intake-1", "--json"}, strings.NewReader(""), &firstOutput); err != nil {
+		t.Fatalf("Run(intake process first) error = %v", err)
+	}
+	if output := firstOutput.String(); !strings.Contains(output, `"dedupe_result": "unique"`) || !strings.Contains(output, `"category": "task"`) {
+		t.Fatalf("first process output = %s, want unique classified intake", output)
+	}
+
+	var duplicateOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"intake", "process", "--id", "intake-2", "--json"}, strings.NewReader(""), &duplicateOutput); err != nil {
+		t.Fatalf("Run(intake process semantic duplicate) error = %v", err)
+	}
+	for _, want := range []string{
+		`"status": "duplicate_linked_or_suppressed"`,
+		`"dedupe_result": "semantic_duplicate_linked"`,
+		`"canonical_intake_key": "intake-1"`,
+		`"match_reason": "normalized_subject"`,
+	} {
+		if !strings.Contains(duplicateOutput.String(), want) {
+			t.Fatalf("semantic duplicate output = %s, want %s", duplicateOutput.String(), want)
+		}
+	}
+
+	var logsOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"logs", "--json"}, strings.NewReader(""), &logsOutput); err != nil {
+		t.Fatalf("Run(logs --json) error = %v", err)
+	}
+	if output := logsOutput.String(); !strings.Contains(output, `"type": "intake.duplicate_linked_or_suppressed"`) || !strings.Contains(output, `"result": "semantic_duplicate_linked"`) {
+		t.Fatalf("logs output = %s, want semantic duplicate audit event", output)
+	}
+}
+
 func TestRunIntakeProcessDerivesTypeSpecificRoutingAndIntent(t *testing.T) {
 	t.Parallel()
 
@@ -744,6 +805,77 @@ func TestRunIntakeProcessDerivesTypeSpecificRoutingAndIntent(t *testing.T) {
 			if !strings.Contains(output.String(), want) {
 				t.Fatalf("process output for %s = %s, want %s", tc.intakeType, output.String(), want)
 			}
+		}
+	}
+}
+
+func TestRunIntakeProcessClassifiesAndRoutesCommonInputCategories(t *testing.T) {
+	t.Parallel()
+
+	root := testRepoRoot(t)
+	payloadPath := filepath.Join(t.TempDir(), "payload.json")
+	if err := os.WriteFile(payloadPath, []byte(`{"body":"category proof"}`), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	cases := []struct {
+		title        string
+		wantCategory string
+		wantRoute    string
+		wantArtifact string
+		wantPriority string
+	}{
+		{title: "Create triage dashboard task", wantCategory: "task", wantRoute: "draft_task", wantArtifact: "draft_task", wantPriority: "50"},
+		{title: "Plan the onboarding project", wantCategory: "project", wantRoute: "goal_created", wantArtifact: "goal", wantPriority: "70"},
+		{title: "Idea for quieter morning brief", wantCategory: "idea", wantRoute: "draft_idea", wantArtifact: "draft_idea", wantPriority: "30"},
+		{title: "Fix import bug in intake flow", wantCategory: "bug", wantRoute: "draft_incident_review", wantArtifact: "draft_incident_review", wantPriority: "80"},
+		{title: "Research calendar adapter options", wantCategory: "research_item", wantRoute: "draft_research", wantArtifact: "draft_research", wantPriority: "40"},
+		{title: "Draft weekly operator memo", wantCategory: "writing_request", wantRoute: "draft_document", wantArtifact: "draft_document", wantPriority: "50"},
+		{title: "Organize inbox labels", wantCategory: "admin_item", wantRoute: "draft_admin_task", wantArtifact: "draft_admin_task", wantPriority: "45"},
+		{title: "Remind me every Friday to review goals", wantCategory: "routine", wantRoute: "draft_routine", wantArtifact: "draft_routine", wantPriority: "35"},
+		{title: "Waiting for vendor reply about invoice", wantCategory: "waiting_for_item", wantRoute: "draft_follow_up", wantArtifact: "draft_follow_up", wantPriority: "35"},
+		{title: "FYI no action needed newsletter", wantCategory: "archive_worthy_noise", wantRoute: "archive_candidate", wantArtifact: "archive_candidate", wantPriority: "10"},
+	}
+
+	for i, tc := range cases {
+		if err := Run(context.Background(), root, []string{
+			"intake", "raw", "create",
+			"--source", "operator",
+			"--project", "odin-core",
+			"--title", tc.title,
+			"--type", "request",
+			"--dedup-key", fmt.Sprintf("category-%d", i+1),
+			"--requested-by", "codex",
+			"--payload-file", payloadPath,
+			"--json",
+		}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+			t.Fatalf("Run(intake raw create %q) error = %v", tc.title, err)
+		}
+	}
+
+	for i, tc := range cases {
+		id := fmt.Sprintf("intake-%d", i+1)
+		var output bytes.Buffer
+		if err := Run(context.Background(), root, []string{"intake", "process", "--id", id, "--json"}, strings.NewReader(""), &output); err != nil {
+			t.Fatalf("Run(intake process %s) error = %v", id, err)
+		}
+		for _, want := range []string{
+			`"category": "` + tc.wantCategory + `"`,
+			`"priority_score": ` + tc.wantPriority,
+			`"routed_outcome": "` + tc.wantRoute + `"`,
+		} {
+			if !strings.Contains(output.String(), want) {
+				t.Fatalf("process output for %q = %s, want %s", tc.title, output.String(), want)
+			}
+		}
+		if tc.wantArtifact == "goal" {
+			if !strings.Contains(output.String(), `"goal_id":`) || !strings.Contains(output.String(), `"review_state": "created_not_approved"`) {
+				t.Fatalf("process output for %q = %s, want goal review artifact", tc.title, output.String())
+			}
+			continue
+		}
+		if !strings.Contains(output.String(), `"kind": "`+tc.wantArtifact+`"`) {
+			t.Fatalf("process output for %q = %s, want artifact %s", tc.title, output.String(), tc.wantArtifact)
 		}
 	}
 }
@@ -2174,26 +2306,62 @@ func TestRunHelpIncludesOverviewCommand(t *testing.T) {
 	if !strings.Contains(stdout.String(), "overview") {
 		t.Fatalf("help output = %q, want overview command", stdout.String())
 	}
-	if strings.Contains(stdout.String(), "scheduler") {
-		t.Fatalf("help output = %q, should not claim scheduler command", stdout.String())
+	if !strings.Contains(stdout.String(), "scheduler") {
+		t.Fatalf("help output = %q, want scheduler command", stdout.String())
 	}
 }
 
-func TestRunSchedulerCommandIsNotClaimedSurface(t *testing.T) {
+func TestRunSchedulerTickUsesExistingRuntimePaths(t *testing.T) {
 	t.Parallel()
 
 	root := testRepoRoot(t)
-	var stdout bytes.Buffer
 
-	err := Run(context.Background(), root, []string{"scheduler", "--help"}, strings.NewReader(""), &stdout)
-	if err == nil {
-		t.Fatal("Run(scheduler --help) error = nil, want unknown command")
+	if err := Run(context.Background(), root, []string{
+		"trigger", "upsert", "scheduler-proof",
+		"initiative=odin-core",
+		"kind=schedule",
+		"status=enabled",
+		"next=2026-05-02T00:00:00Z",
+		"title=Scheduler_proof",
+		"--json",
+	}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+		t.Fatalf("Run(trigger upsert) error = %v", err)
 	}
-	if got := err.Error(); got != "unknown command: scheduler" {
-		t.Fatalf("Run(scheduler --help) error = %q, want unknown command: scheduler", got)
+
+	var stdout bytes.Buffer
+	if err := Run(context.Background(), root, []string{
+		"scheduler", "tick",
+		"now=2026-05-02T00:00:00Z",
+		"recovery=false",
+		"--json",
+	}, strings.NewReader(""), &stdout); err != nil {
+		t.Fatalf("Run(scheduler tick) error = %v", err)
 	}
-	if stdout.Len() != 0 {
-		t.Fatalf("stdout = %q, want empty output", stdout.String())
+	for _, want := range []string{
+		`"now": "2026-05-02T00:00:00Z"`,
+		`"trigger_evaluation"`,
+		`"evaluated": 1`,
+		`"materialized": 1`,
+		`"supervision"`,
+		`"recovery_ran": false`,
+	} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("scheduler tick output = %s, want %s", stdout.String(), want)
+		}
+	}
+
+	var logs bytes.Buffer
+	if err := Run(context.Background(), root, []string{"logs", "--json"}, strings.NewReader(""), &logs); err != nil {
+		t.Fatalf("Run(logs --json) error = %v", err)
+	}
+	for _, want := range []string{
+		`"type": "automation_trigger.fire_requested"`,
+		`"type": "automation_trigger.materialized"`,
+		`"key": "scheduler-proof"`,
+	} {
+		if !strings.Contains(logs.String(), want) {
+			t.Fatalf("logs output = %s, want %s", logs.String(), want)
+		}
 	}
 }
 
@@ -5195,6 +5363,17 @@ func TestRunApprovalsResolveTaskBackedCompanionWork(t *testing.T) {
 			t.Fatalf("approval resolve output = %s, want %s", approved, want)
 		}
 	}
+	allAfterApprove := run("approvals", "all", "--json")
+	for _, want := range []string{
+		`"approval_id": 1`,
+		`"status": "approved"`,
+		`"decision_by": "operator"`,
+		`"reason": "operator approved task work"`,
+	} {
+		if !strings.Contains(allAfterApprove, want) {
+			t.Fatalf("approvals all after approve = %s, want %s", allAfterApprove, want)
+		}
+	}
 
 	repeatApproved := run("approvals", "resolve", "1", "approve", "repeat", "approval", "--json")
 	if !strings.Contains(repeatApproved, `"status": "approved"`) || !strings.Contains(repeatApproved, `"result": "approved"`) {
@@ -5223,6 +5402,17 @@ func TestRunApprovalsResolveTaskBackedCompanionWork(t *testing.T) {
 	denied := run("approvals", "resolve", "2", "deny", "operator", "denied", "task", "work", "--json")
 	if !strings.Contains(denied, `"status": "denied"`) || !strings.Contains(denied, `"result": "denied"`) {
 		t.Fatalf("deny output = %s, want denied result", denied)
+	}
+	allAfterDeny := run("approvals", "all", "--json")
+	for _, want := range []string{
+		`"approval_id": 2`,
+		`"status": "denied"`,
+		`"decision_by": "operator"`,
+		`"reason": "operator denied task work"`,
+	} {
+		if !strings.Contains(allAfterDeny, want) {
+			t.Fatalf("approvals all after deny = %s, want %s", allAfterDeny, want)
+		}
 	}
 	repeatDenied := run("approvals", "resolve", "2", "deny", "repeat", "denial", "--json")
 	if !strings.Contains(repeatDenied, `"status": "denied"`) || !strings.Contains(repeatDenied, `"result": "denied"`) {

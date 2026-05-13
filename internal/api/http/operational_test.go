@@ -27,6 +27,166 @@ import (
 	metricsvc "odin-os/internal/telemetry/metrics"
 )
 
+func TestMobileApprovalsAPIListsDetailAndRequiresExplicitHighRiskConfirmation(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openStore(t)
+	defer store.Close()
+	approval := seedMobileApproval(t, ctx, store, "mobile-high-risk", "external_mutation")
+
+	server := httptest.NewServer(httpapi.NewOperationalHandler(httpapi.Dependencies{
+		Store:      store,
+		ReadModels: store.DB(),
+		AdminToken: "mobile-token",
+	}))
+	defer server.Close()
+
+	htmlResponse, err := http.Get(server.URL + "/app/")
+	if err != nil {
+		t.Fatalf("GET /app/ error = %v", err)
+	}
+	defer htmlResponse.Body.Close()
+	htmlBody, err := io.ReadAll(htmlResponse.Body)
+	if err != nil {
+		t.Fatalf("ReadAll(/mobile/approvals) error = %v", err)
+	}
+	if htmlResponse.StatusCode != http.StatusOK || !strings.Contains(string(htmlBody), "Odin Operator") || !strings.Contains(string(htmlBody), "navigator.serviceWorker") {
+		t.Fatalf("/mobile/approvals status=%d body=%q, want PWA shell", htmlResponse.StatusCode, string(htmlBody))
+	}
+
+	listResponse, err := http.Get(server.URL + "/mobile/approvals")
+	if err != nil {
+		t.Fatalf("GET /mobile/approvals error = %v", err)
+	}
+	defer listResponse.Body.Close()
+	var list struct {
+		Approvals []struct {
+			ID                int64    `json:"id"`
+			Title             string   `json:"title"`
+			RiskLevel         string   `json:"risk_level"`
+			SourceObject      string   `json:"source_object"`
+			RequestedAction   string   `json:"requested_action"`
+			RequiredReason    string   `json:"required_reason"`
+			EvidenceContext   []string `json:"evidence_context"`
+			Consequences      []string `json:"consequences"`
+			ExpiresAt         string   `json:"expires_at"`
+			PolicySnapshot    string   `json:"policy_snapshot_hash"`
+			RuntimeSnapshot   string   `json:"runtime_snapshot_hash"`
+			AuditTrailPreview []string `json:"audit_trail_preview"`
+			Actions           []string `json:"actions"`
+		} `json:"approvals"`
+	}
+	if err := json.NewDecoder(listResponse.Body).Decode(&list); err != nil {
+		t.Fatalf("decode mobile approvals list error = %v", err)
+	}
+	if len(list.Approvals) != 1 {
+		t.Fatalf("mobile approvals len = %d, want 1", len(list.Approvals))
+	}
+	item := list.Approvals[0]
+	if item.ID != approval.ID || item.Title == "" || item.RiskLevel != "high" || item.SourceObject == "" || item.RequestedAction == "" || item.RequiredReason == "" {
+		t.Fatalf("mobile approval item = %+v, want populated high-risk summary", item)
+	}
+	if len(item.EvidenceContext) == 0 || len(item.Consequences) == 0 || len(item.AuditTrailPreview) == 0 {
+		t.Fatalf("mobile approval item = %+v, want evidence, consequences, and audit trail preview", item)
+	}
+	if item.PolicySnapshot == "" || item.RuntimeSnapshot == "" {
+		t.Fatalf("mobile approval item = %+v, want stale-protection snapshots", item)
+	}
+
+	body := fmt.Sprintf(`{"action":"approve","reason":"looks safe","actor":"operator","expected_policy_snapshot_hash":%q,"expected_runtime_snapshot_hash":%q}`, item.PolicySnapshot, item.RuntimeSnapshot)
+	request, err := http.NewRequest(http.MethodPost, fmt.Sprintf("%s/mobile/approvals/%d/decision", server.URL, approval.ID), strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("NewRequest approve error = %v", err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Odin-Admin-Token", "mobile-token")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatalf("POST approve without confirmation error = %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusConflict {
+		t.Fatalf("approve without confirmation status = %d, want %d", response.StatusCode, http.StatusConflict)
+	}
+}
+
+func TestMobileApprovalsAPIDetectsStaleConflictAndClarifiesWithAudit(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openStore(t)
+	defer store.Close()
+	staleApproval := seedMobileApproval(t, ctx, store, "mobile-stale", "external_mutation")
+	clarifyApproval := seedMobileApproval(t, ctx, store, "mobile-clarify", "external_mutation")
+
+	server := httptest.NewServer(httpapi.NewOperationalHandler(httpapi.Dependencies{
+		Store:      store,
+		ReadModels: store.DB(),
+		AdminToken: "mobile-token",
+	}))
+	defer server.Close()
+
+	staleDetail := fetchMobileApprovalDetail(t, server.URL, staleApproval.ID)
+	if _, err := store.UpsertProject(ctx, sqlite.UpsertProjectParams{
+		Key:           "odin-core",
+		Name:          "Odin Core",
+		Scope:         "system",
+		GitRoot:       "/tmp/odin-core-new",
+		DefaultBranch: "main",
+		ManifestPath:  "/tmp/odin-core-new/project.yaml",
+	}); err != nil {
+		t.Fatalf("UpsertProject(policy drift) error = %v", err)
+	}
+
+	staleBody := fmt.Sprintf(`{"action":"approve","reason":"final confirmation","actor":"operator","confirmation_text":"APPROVE %d","expected_policy_snapshot_hash":%q,"expected_runtime_snapshot_hash":%q}`, staleApproval.ID, staleDetail.PolicySnapshot, staleDetail.RuntimeSnapshot)
+	staleResponse := postMobileApprovalDecision(t, server.URL, staleApproval.ID, staleBody)
+	defer staleResponse.Body.Close()
+	if staleResponse.StatusCode != http.StatusConflict {
+		t.Fatalf("stale approve status = %d, want %d", staleResponse.StatusCode, http.StatusConflict)
+	}
+	if _, err := store.UpsertProject(ctx, sqlite.UpsertProjectParams{
+		Key:           "odin-core",
+		Name:          "Odin Core",
+		Scope:         "system",
+		GitRoot:       "/tmp/odin-core",
+		DefaultBranch: "main",
+		ManifestPath:  "/tmp/odin-core/project.yaml",
+	}); err != nil {
+		t.Fatalf("UpsertProject(restore policy) error = %v", err)
+	}
+
+	clarifyDetail := fetchMobileApprovalDetail(t, server.URL, clarifyApproval.ID)
+	clarifyBody := fmt.Sprintf(`{"action":"clarify","reason":"need current screenshot evidence","actor":"operator","expected_policy_snapshot_hash":%q,"expected_runtime_snapshot_hash":%q}`, clarifyDetail.PolicySnapshot, clarifyDetail.RuntimeSnapshot)
+	clarifyResponse := postMobileApprovalDecision(t, server.URL, clarifyApproval.ID, clarifyBody)
+	defer clarifyResponse.Body.Close()
+	if clarifyResponse.StatusCode != http.StatusOK {
+		payload, _ := io.ReadAll(clarifyResponse.Body)
+		t.Fatalf("clarify status = %d, want %d body=%s", clarifyResponse.StatusCode, http.StatusOK, payload)
+	}
+
+	persisted, err := store.GetApproval(ctx, clarifyApproval.ID)
+	if err != nil {
+		t.Fatalf("GetApproval(clarify) error = %v", err)
+	}
+	if persisted.Status != "clarification_requested" || persisted.Reason != "need current screenshot evidence" {
+		t.Fatalf("clarified approval = %+v, want clarification_requested with reason", persisted)
+	}
+	events, err := store.ListEvents(ctx, sqlite.ListEventsParams{TaskID: &persisted.TaskID})
+	if err != nil {
+		t.Fatalf("ListEvents() error = %v", err)
+	}
+	var audit bool
+	for _, event := range events {
+		if event.Type == runtimeevents.EventApprovalResolved && strings.Contains(string(event.Payload), `"status":"clarification_requested"`) {
+			audit = true
+		}
+	}
+	if !audit {
+		t.Fatalf("events = %+v, want clarification approval audit event", events)
+	}
+}
+
 func TestReadyzReturnsHealthyWhenRuntimeIsReady(t *testing.T) {
 	t.Parallel()
 
@@ -1108,6 +1268,90 @@ func openStore(t *testing.T) *sqlite.Store {
 		t.Fatalf("Migrate() error = %v", err)
 	}
 	return store
+}
+
+type mobileApprovalDetailTestView struct {
+	ID              int64  `json:"id"`
+	PolicySnapshot  string `json:"policy_snapshot_hash"`
+	RuntimeSnapshot string `json:"runtime_snapshot_hash"`
+}
+
+func seedMobileApproval(t *testing.T, ctx context.Context, store *sqlite.Store, key string, actionKey string) sqlite.Approval {
+	t.Helper()
+
+	project, err := store.UpsertProject(ctx, sqlite.UpsertProjectParams{
+		Key:           "odin-core",
+		Name:          "Odin Core",
+		Scope:         "system",
+		GitRoot:       "/tmp/odin-core",
+		DefaultBranch: "main",
+		ManifestPath:  "/tmp/odin-core/project.yaml",
+	})
+	if err != nil {
+		t.Fatalf("UpsertProject() error = %v", err)
+	}
+	task, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:             project.ID,
+		Key:                   key,
+		Title:                 "Approve " + key,
+		ActionKey:             actionKey,
+		Status:                "queued",
+		Scope:                 "project",
+		RequestedBy:           "operator",
+		WorkKind:              actionKey,
+		ExecutionIntent:       "mutate",
+		ExecutionIntentSource: "mobile-test",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+	if _, err := store.BlockTask(ctx, sqlite.BlockTaskParams{TaskID: task.ID, Reason: "approval_required"}); err != nil {
+		t.Fatalf("BlockTask() error = %v", err)
+	}
+	approval, err := store.RequestApproval(ctx, sqlite.RequestApprovalParams{
+		TaskID:      task.ID,
+		Status:      "pending",
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("RequestApproval() error = %v", err)
+	}
+	return approval
+}
+
+func fetchMobileApprovalDetail(t *testing.T, serverURL string, approvalID int64) mobileApprovalDetailTestView {
+	t.Helper()
+	response, err := http.Get(fmt.Sprintf("%s/mobile/approvals/%d", serverURL, approvalID))
+	if err != nil {
+		t.Fatalf("GET mobile approval detail error = %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("mobile approval detail status = %d body=%s", response.StatusCode, body)
+	}
+	var payload struct {
+		Approval mobileApprovalDetailTestView `json:"approval"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode mobile approval detail error = %v", err)
+	}
+	return payload.Approval
+}
+
+func postMobileApprovalDecision(t *testing.T, serverURL string, approvalID int64, body string) *http.Response {
+	t.Helper()
+	request, err := http.NewRequest(http.MethodPost, fmt.Sprintf("%s/mobile/approvals/%d/decision", serverURL, approvalID), strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("NewRequest mobile decision error = %v", err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Odin-Admin-Token", "mobile-token")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatalf("POST mobile decision error = %v", err)
+	}
+	return response
 }
 
 func countBrowserSessionEvents(t *testing.T, ctx context.Context, store *sqlite.Store) int {

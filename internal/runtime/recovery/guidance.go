@@ -18,6 +18,30 @@ type RetryGuidance struct {
 
 func RetryGuidanceForTask(input RetryGuidanceInput) RetryGuidance {
 	source := recoverySource(input.WorkKind, input.RequestedBy)
+	if source == "browser_evidence" {
+		if input.MaxAttempts <= 1 {
+			return RetryGuidance{
+				Decision:               "retry_blocked_non_retryable",
+				RetryEligible:          false,
+				RecoveryRecommendation: "Browser evidence capture is marked non-retryable. Inspect browser error notes, allowed domains, and session readiness before opening a follow-up or changing task policy.",
+				Source:                 source,
+			}
+		}
+		if input.RetryCount+1 >= input.MaxAttempts {
+			return RetryGuidance{
+				Decision:               "retry_blocked_max_attempts",
+				RetryEligible:          false,
+				RecoveryRecommendation: "Browser evidence capture reached the retry limit. Inspect browser error notes, allowed domains, and session readiness before any further retry.",
+				Source:                 source,
+			}
+		}
+		return RetryGuidance{
+			Decision:               "retry_allowed",
+			RetryEligible:          true,
+			RecoveryRecommendation: "Browser evidence capture failed. Inspect browser error notes, allowed domains, and session readiness, then retry through odin review act failed-work ID retry or odin work retry within policy.",
+			Source:                 source,
+		}
+	}
 	if input.MaxAttempts <= 1 {
 		if source == "automation_trigger" {
 			return RetryGuidance{
@@ -67,6 +91,9 @@ func RetryGuidanceForTask(input RetryGuidanceInput) RetryGuidance {
 }
 
 func recoverySource(workKind string, requestedBy string) string {
+	if strings.EqualFold(strings.TrimSpace(workKind), "browser_evidence") {
+		return "browser_evidence"
+	}
 	if strings.EqualFold(strings.TrimSpace(workKind), "automation_trigger") || strings.HasPrefix(strings.TrimSpace(requestedBy), "automation_trigger:") {
 		return "automation_trigger"
 	}
