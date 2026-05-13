@@ -21,6 +21,12 @@ type migration struct {
 	SQL     string
 }
 
+type migrationExecutor interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
 func (store *Store) Migrate(ctx context.Context) error {
 	if _, err := store.db.ExecContext(ctx, `
 		CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -215,57 +221,143 @@ func migrationByVersion(migrations []migration, version int) (migration, bool) {
 }
 
 func (store *Store) applyMigrationSQL(ctx context.Context, migration migration) error {
-	tx, err := store.db.BeginTx(ctx, nil)
+	conn, err := store.db.Conn(ctx)
 	if err != nil {
 		return err
 	}
-	defer rollbackOnError(tx)
+	defer conn.Close()
 
-	if _, err := tx.ExecContext(ctx, migration.SQL); err != nil {
+	committed := false
+	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
+		return err
+	}
+	defer rollbackImmediate(ctx, conn, &committed)
+
+	if _, err := conn.ExecContext(ctx, migration.SQL); err != nil {
 		return err
 	}
 
-	return tx.Commit()
+	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
+		return err
+	}
+	committed = true
+	return nil
 }
 
 func (store *Store) applyMigration(ctx context.Context, migration migration) error {
-	tx, err := store.db.BeginTx(ctx, nil)
+	conn, err := store.db.Conn(ctx)
 	if err != nil {
 		return err
 	}
-	defer rollbackOnError(tx)
+	defer conn.Close()
 
-	applied, err := migrationAlreadyApplied(ctx, tx, migration.Version)
+	committed := false
+	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
+		return err
+	}
+	defer rollbackImmediate(ctx, conn, &committed)
+
+	applied, err := migrationAlreadyApplied(ctx, conn, migration.Version)
 	if err != nil {
 		return err
 	}
 	if applied {
-		return tx.Commit()
+		if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
+			return err
+		}
+		committed = true
+		return nil
 	}
 
-	if _, err := tx.ExecContext(ctx, migration.SQL); err != nil {
+	satisfied, err := migrationSchemaAlreadySatisfied(ctx, conn, migration)
+	if err != nil {
+		return err
+	}
+	if satisfied {
+		if err := store.recordMigrationApplied(ctx, conn, migration); err != nil {
+			return err
+		}
+		if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
+			return err
+		}
+		committed = true
+		return nil
+	}
+
+	if _, err := conn.ExecContext(ctx, migration.SQL); err != nil {
 		return err
 	}
 
-	if _, err := tx.ExecContext(
-		ctx,
-		`INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)`,
-		migration.Version,
-		migration.Name,
-		formatTime(store.now()),
-	); err != nil {
+	if err := store.recordMigrationApplied(ctx, conn, migration); err != nil {
 		return err
 	}
 
-	return tx.Commit()
+	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
+		return err
+	}
+	committed = true
+	return nil
 }
 
-func migrationAlreadyApplied(ctx context.Context, tx *sql.Tx, version int) (bool, error) {
+func migrationAlreadyApplied(ctx context.Context, tx migrationExecutor, version int) (bool, error) {
 	var exists int
 	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = ?)`, version).Scan(&exists); err != nil {
 		return false, err
 	}
 	return exists == 1, nil
+}
+
+func (store *Store) recordMigrationApplied(ctx context.Context, tx migrationExecutor, migration migration) error {
+	_, err := tx.ExecContext(
+		ctx,
+		`INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)`,
+		migration.Version,
+		migration.Name,
+		formatTime(store.now()),
+	)
+	return err
+}
+
+func migrationSchemaAlreadySatisfied(ctx context.Context, tx migrationExecutor, migration migration) (bool, error) {
+	switch migration.Version {
+	case 41:
+		return tableHasColumns(ctx, tx, "approvals", "policy_snapshot_hash", "runtime_snapshot_hash")
+	default:
+		return false, nil
+	}
+}
+
+func tableHasColumns(ctx context.Context, tx migrationExecutor, tableName string, columnNames ...string) (bool, error) {
+	rows, err := tx.QueryContext(ctx, `SELECT name FROM pragma_table_info(?)`, tableName)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+
+	found := make(map[string]bool, len(columnNames))
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return false, err
+		}
+		found[name] = true
+	}
+	if err := rows.Err(); err != nil {
+		return false, err
+	}
+	for _, columnName := range columnNames {
+		if !found[columnName] {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+func rollbackImmediate(ctx context.Context, conn *sql.Conn, committed *bool) {
+	if *committed {
+		return
+	}
+	_, _ = conn.ExecContext(ctx, `ROLLBACK`)
 }
 
 func rollbackOnError(tx *sql.Tx) {
