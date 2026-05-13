@@ -1,13 +1,14 @@
 const { test, expect } = require('@playwright/test');
 
-test('Odin PWA shell is installable and navigates mobile screens', async ({ page, baseURL }) => {
-  await page.addInitScript(() => localStorage.setItem('odin_admin_token', 'mobile-token'));
+test('Odin PWA shell is installable and renders live operator sections', async ({ page, baseURL }) => {
+  await page.addInitScript(() => sessionStorage.setItem('odin.mobile.csrf', 'mobile-csrf'));
   await mockMobileAPI(page);
   await page.goto('/app/');
 
   await expect(page.locator('link[rel="manifest"]')).toHaveAttribute('href', '/app/manifest.webmanifest');
-  await expect(page.locator('.bottom-nav')).toBeVisible();
-  await expect(page.getByRole('heading', { name: 'Dashboard' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'What needs me now?' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Action Required' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Browser Needs Help' })).toBeVisible();
 
   const manifest = await page.request.get(`${baseURL}/app/manifest.webmanifest`);
   expect(manifest.ok()).toBeTruthy();
@@ -18,25 +19,19 @@ test('Odin PWA shell is installable and navigates mobile screens', async ({ page
 
   const serviceWorker = await page.request.get(`${baseURL}/app/service-worker.js`);
   expect(serviceWorker.ok()).toBeTruthy();
-  await expect.poll(async () => await page.locator('.metric').count()).toBeGreaterThanOrEqual(6);
+  await expect(page.getByText('No action-required rows', { exact: true })).toBeVisible();
 
-  for (const screen of ['Approvals', 'Review', 'Work', 'Inbox', 'Settings']) {
-    await page.getByRole('button', { name: screen }).click();
-    await expect(page.getByRole('heading', { name: screen === 'Work' ? 'Work & Runs' : screen === 'Inbox' ? 'Inbox Capture' : screen === 'Review' ? 'Review Queue' : screen })).toBeVisible();
-  }
-
-  await page.getByRole('button', { name: 'Inbox' }).click();
   await expect(page.getByRole('button', { name: 'Capture raw intake' })).toBeEnabled();
   await expect(page.locator('[data-capture-kind="note"]')).toBeChecked();
   await expect(page.getByRole('heading', { name: 'Failed Uploads' })).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Retry' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Retry failed captures' })).toBeVisible();
 });
 
 test('Odin PWA approval cards submit authenticated decisions', async ({ page }) => {
   let postedDecision = null;
   let approvalStatus = 'pending';
 
-  await page.addInitScript(() => localStorage.setItem('odin_admin_token', 'mobile-token'));
+  await page.addInitScript(() => sessionStorage.setItem('odin.mobile.csrf', 'mobile-csrf'));
   await mockMobileAPI(page, {
     onDecision: async (route) => {
       const request = route.request();
@@ -58,22 +53,21 @@ test('Odin PWA approval cards submit authenticated decisions', async ({ page }) 
         })
       });
     },
-    approval: () => approvalPayload(approvalStatus)
+    approval: () => approvalStatus === 'pending' ? approvalPayload() : null
   });
 
   await page.goto('/app/');
-  await page.getByRole('button', { name: 'Approvals' }).click();
 
-  await expect(page.getByRole('heading', { name: 'Critical deploy' })).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Approve' })).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Deny' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'deploy-prod' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Approve approval 99' })).toBeVisible();
+  await page.getByRole('button', { name: 'Approve approval 99' }).click();
+  await page.getByPlaceholder('Required audit reason').fill('safe deployment window');
+  await page.getByRole('button', { name: 'Confirm approval decision' }).click();
 
-  await page.getByPlaceholder('Decision reason').fill('safe deployment window');
-  await page.getByRole('button', { name: 'Approve' }).click();
   await expect.poll(() => postedDecision?.body?.action).toBe('approve');
-  expect(postedDecision.headers['x-odin-admin-token']).toBe('mobile-token');
-  expect(postedDecision.body.decision_by).toBe('pwa');
-  await expect(page.locator('[data-approval-id="99"]')).not.toContainText('Approve');
+  expect(postedDecision.headers['x-odin-csrf']).toBe('mobile-csrf');
+  expect(postedDecision.body.decision_by).toBe('odin-pwa');
+  await expect(page.getByText('No pending approvals')).toBeVisible();
 });
 
 async function mockMobileAPI(page, options = {}) {
@@ -88,12 +82,12 @@ async function mockMobileAPI(page, options = {}) {
     const approval = options.approval ? options.approval() : null;
 
     const responseByPath = {
-      '/mobile/summary': { generated_at: '2026-05-13T00:00:00Z', readiness: { ready: true, health_status: 'healthy' }, runtime: { status: 'ready' }, counts: { approvals: approval ? 1 : 0, review_queue: 0, work_items: 1, run_attempts: 1, automation_triggers: 0, intake_items: 0 }, offline: { mode: 'shell-only', policy_statement: 'No offline approvals.' } },
-      '/mobile/approvals': { generated_at: '2026-05-13T00:00:00Z', count: approval ? 1 : 0, approvals: approval ? [approval] : [], items: approval ? [approval] : [] },
-      '/mobile/review': { generated_at: '2026-05-13T00:00:00Z', count: 0, items: [] },
-      '/mobile/work': { generated_at: '2026-05-13T00:00:00Z', work_items: [], runs: [] },
-      '/mobile/inbox': { generated_at: '2026-05-13T00:00:00Z', raw_items: [], linked_items: [], capture: { enabled: true, policy_statement: 'Mobile capture stores raw intake evidence first.' } },
-      '/mobile/settings': { generated_at: '2026-05-13T00:00:00Z', runtime_source: 'odin-api', admin_actions: { enabled: true, policy_statement: 'Admin token required.' }, offline: { mode: 'shell-only', policy_statement: 'No offline approvals.' }, endpoints: ['/mobile/approvals'] }
+      '/mobile/status': { generated_at: '2026-05-13T00:00:00Z', ready: true, health_status: 'healthy' },
+      '/mobile/overview': overviewPayload(),
+      '/mobile/review-queue': { generated_at: '2026-05-13T00:00:00Z', count: 0, items: [] },
+      '/mobile/approvals': { generated_at: '2026-05-13T00:00:00Z', count: approval ? 1 : 0, items: approval ? [approval] : [] },
+      '/mobile/browser/status': { generated_at: '2026-05-13T00:00:00Z', session_count: 0, login_request_count: 0, runner_count: 0, sessions: [], login_requests: [], runners: [] },
+      '/mobile/notifications/preferences': { status: 'not_configured', enabled: false, delivery_modes: ['web_push'], subscriptions: [] }
     };
     await route.fulfill({
       status: 200,
@@ -103,21 +97,26 @@ async function mockMobileAPI(page, options = {}) {
   });
 }
 
-function approvalPayload(status) {
-  const pending = status === 'pending';
+function overviewPayload() {
   return {
-    id: 99,
-    title: 'Critical deploy',
-    status,
-    risk_level: 'critical',
-    source_object: 'odin-core/deploy-prod',
-    requested_action: 'deploy production',
-    required_reason: 'approval_required',
-    expires_at: '2026-05-13T01:00:00Z',
-    actions: pending ? ['approve', 'deny'] : [],
+    generated_at: '2026-05-13T00:00:00Z',
+    readiness: { status: 'ready', note: 'fixture ready' },
+    actual_use: { action_required_count: 0, open_work_item_count: 0, active_run_count: 0 },
+    review_queue: { total_count: 0 },
+    observability: { blocked_work: [], recovery_guidance: [], active_runs: [] },
+    notifications: { notifications_enabled: false, in_app_unread_count: 0, quiet_hours: 'none', batching: 'none' },
+    intake_inbox: { raw_item_count: 0, status: 'empty', note: 'No raw intake.' },
+    automation_triggers: { trigger_count: 0, enabled_count: 0 }
+  };
+}
+
+function approvalPayload() {
+  return {
+    approval_id: 99,
     task_id: 123,
     task_key: 'deploy-prod',
     project_key: 'odin-core',
+    status: 'pending',
     resolver_support: 'supported'
   };
 }

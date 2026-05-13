@@ -3,11 +3,11 @@ import { readFile } from 'node:fs/promises';
 const root = new URL('../../internal/api/http/app_static/', import.meta.url);
 
 const checks = [
-  ['index.html', ['<link rel="manifest" href="/app/manifest.webmanifest">', "navigator.serviceWorker.register('/app/service-worker.js')", 'bottom-nav', 'data-capture-kind="note"', 'id="voice-record"', 'id="failed-uploads"']],
+  ['index.html', ['<link rel="manifest" href="/app/manifest.webmanifest">', 'id="home-title"', 'Action Required', 'Browser Needs Help', 'data-capture-kind="note"', 'id="voice-record"', 'id="failed-uploads"']],
   ['manifest.webmanifest', ['"name":"Odin Operator"', '"start_url":"/app/"', '"display":"standalone"', '"icons"']],
   ['service-worker.js', ['shell-only', "event.request.method !== 'GET'", '/app/offline.html']],
-  ['offline.html', ['Offline shell', 'Runtime data is unavailable']],
-  ['app.js', ['/mobile/summary', '/mobile/approvals', '/mobile/review', '/mobile/work', '/mobile/inbox', '/mobile/settings', 'data-approval-action', 'confirmation_text', 'expected_policy_snapshot_hash']]
+  ['offline.html', ['Odin Offline', 'Runtime projections and uploads are unavailable']],
+  ['app.js', ['/mobile/status', '/mobile/overview', '/mobile/review-queue', '/mobile/approvals', '/mobile/browser/status', '/mobile/notifications/preferences', 'decision_by']]
 ];
 
 for (const [file, expected] of checks) {
