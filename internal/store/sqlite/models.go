@@ -366,6 +366,20 @@ type IntakeItem struct {
 	UpdatedAt                time.Time
 }
 
+type IntakeAttachment struct {
+	ID           int64
+	IntakeItemID int64
+	Kind         string
+	Filename     string
+	ContentType  string
+	SizeBytes    int64
+	SHA256       string
+	Status       string
+	Bytes        []byte
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
+}
+
 type AutomationTrigger struct {
 	ID                     int64
 	WorkspaceID            string
@@ -512,6 +526,21 @@ type CreateIntakeItemParams struct {
 	SuppressionReason        string
 	RoutingNotes             string
 	ReceivedAt               time.Time
+}
+
+type CreateIntakeAttachmentParams struct {
+	IntakeItemID int64
+	Kind         string
+	Filename     string
+	ContentType  string
+	SizeBytes    int64
+	SHA256       string
+	Status       string
+	Bytes        []byte
+}
+
+type ListIntakeAttachmentsParams struct {
+	IntakeItemID int64
 }
 
 type ListIntakeItemsParams struct {

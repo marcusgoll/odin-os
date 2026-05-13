@@ -85,14 +85,22 @@ Body:
   "kind": "idea",
   "title": "Short title",
   "content": "Raw mobile text, prompt, or idea",
-  "project_key": "optional-project-key"
+  "project_key": "optional-project-key",
+  "source_app": "optional share source",
+  "share_url": "optional source URL",
+  "transcript": "optional placeholder"
 }
 ```
 
 Rules:
 
-- `kind` is `text`, `prompt`, or `idea`.
+- JSON `kind` is one of `text`, `note`, `prompt`, `idea`, `task`, `bug`, or `project_note`.
 - Content is persisted in intake source facts; responses return metadata only.
+- Multipart `POST /mobile/intake/raw` accepts the same fields plus one `attachment` file. Attachment kinds are captured as `photo`/`image` or `voice_note`/`audio`.
+- Images must be `image/jpeg`, `image/png`, `image/webp`, or `image/gif` and no larger than 10 MiB.
+- Audio must be `audio/webm`, `audio/mpeg`, `audio/mp4`, `audio/wav`, `audio/x-wav`, or `audio/ogg` and no larger than 25 MiB.
+- Attachment bytes and metadata are stored under the canonical intake item as raw evidence. The API response returns intake metadata only.
+- Validation failures return stable error codes and do not store invalid attachment bytes; the PWA keeps failed captures visible in its retry queue.
 - The created item status is `received` and the dedupe recipe is `mobile-api-v1`.
 
 ### POST `/mobile/intake/attachments`
@@ -109,7 +117,7 @@ Body:
 }
 ```
 
-The route records attachment metadata only. It does not accept bytes, upload files, or create executable work.
+The route records attachment metadata only for clients that have already staged bytes elsewhere. PWA image and voice capture must use multipart `POST /mobile/intake/raw` so the raw intake row and attachment evidence are stored together.
 
 ### GET `/mobile/notifications/preferences`
 
@@ -141,6 +149,6 @@ Errors use the existing API envelope:
 - Mobile routes require token auth for reads and writes to keep the PWA authenticated by default.
 - Mutations reject missing or invalid tokens before executing runtime actions.
 - Approval decisions reuse the approval service and therefore preserve audit behavior.
-- Intake routes persist raw metadata through canonical intake items and do not create work items directly.
+- Intake routes persist raw metadata and image/audio evidence through canonical intake items and do not create work items directly.
 - Browser status readbacks intentionally omit profile paths, handoff tokens, URLs, process bind data, private viewer URLs, cookies, and credentials.
 - Notification subscription requests store only safe metadata and hashes, not push keys or endpoint URLs.

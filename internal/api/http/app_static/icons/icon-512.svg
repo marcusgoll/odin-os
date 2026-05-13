@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-label="Odin">
+  <rect width="512" height="512" rx="80" fill="#101820"/>
+  <path d="M128 326V186l128-74 128 74v140l-128 74-128-74Z" fill="#f4f2ec"/>
+  <path d="M192 224h128v64H192z" fill="#175a7a"/>
+  <path d="M208 310h96v26h-96z" fill="#d39b46"/>
+</svg>
