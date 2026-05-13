@@ -104,8 +104,8 @@ func ParseApprovalResolve(args []string) (ApprovalResolveCommand, error) {
 	if command.By == "" {
 		return ApprovalResolveCommand{}, fmt.Errorf("--by is required")
 	}
-	if command.Decision != "approve" && command.Decision != "approved" && command.Decision != "reject" && command.Decision != "rejected" && command.Decision != "deny" && command.Decision != "denied" {
-		return ApprovalResolveCommand{}, fmt.Errorf("--decision must be approve or reject")
+	if command.Decision != "approve" && command.Decision != "approved" && command.Decision != "reject" && command.Decision != "rejected" && command.Decision != "deny" && command.Decision != "denied" && command.Decision != "clarify" && command.Decision != "clarification_requested" {
+		return ApprovalResolveCommand{}, fmt.Errorf("--decision must be approve, reject, or clarify")
 	}
 	return command, nil
 }

@@ -83,11 +83,37 @@ type PluginRequest struct {
 }
 
 type EvidenceArtifact struct {
-	ID        int64  `json:"id"`
-	Type      string `json:"type"`
-	URI       string `json:"uri,omitempty"`
-	Summary   string `json:"summary"`
-	CreatedBy string `json:"created_by"`
+	ID                     int64                                  `json:"id"`
+	Type                   string                                 `json:"type"`
+	EvidenceType           string                                 `json:"evidence_type,omitempty"`
+	Status                 string                                 `json:"status,omitempty"`
+	GoalID                 int64                                  `json:"goal_id,omitempty"`
+	TaskID                 int64                                  `json:"task_id,omitempty"`
+	RunID                  int64                                  `json:"run_id,omitempty"`
+	EvidenceID             int64                                  `json:"evidence_id,omitempty"`
+	RunArtifactID          int64                                  `json:"run_artifact_id,omitempty"`
+	ApprovalID             int64                                  `json:"approval_id,omitempty"`
+	ApprovalRequired       bool                                   `json:"approval_required,omitempty"`
+	RiskClass              string                                 `json:"risk_class,omitempty"`
+	AdapterStatus          string                                 `json:"adapter_status,omitempty"`
+	AdapterKind            string                                 `json:"adapter_kind,omitempty"`
+	URI                    string                                 `json:"uri,omitempty"`
+	Summary                string                                 `json:"summary"`
+	StartURLs              []string                               `json:"start_urls,omitempty"`
+	AllowedDomains         []string                               `json:"allowed_domains,omitempty"`
+	PageResults            []huginnbrowser.PageResult             `json:"page_results,omitempty"`
+	Screenshots            []string                               `json:"screenshots,omitempty"`
+	ScreenshotMetadata     []huginnbrowser.ScreenshotMetadata     `json:"screenshot_metadata,omitempty"`
+	SelectedLinks          []huginnbrowser.SelectedLink           `json:"selected_links,omitempty"`
+	DownloadedFiles        []huginnbrowser.DownloadedFileMetadata `json:"downloaded_files,omitempty"`
+	DownloadedFileMetadata []huginnbrowser.DownloadedFileMetadata `json:"downloaded_file_metadata,omitempty"`
+	FormStateSummary       string                                 `json:"form_state_summary,omitempty"`
+	ExtractedTextSummary   string                                 `json:"extracted_text_summary,omitempty"`
+	BrowserNotes           []string                               `json:"browser_notes,omitempty"`
+	Confidence             string                                 `json:"confidence,omitempty"`
+	Limitations            []string                               `json:"limitations,omitempty"`
+	ActionLog              []string                               `json:"action_log,omitempty"`
+	CreatedBy              string                                 `json:"created_by"`
 }
 
 type PluginResponse struct {
@@ -867,4 +893,48 @@ func defaultString(value string, fallback string) string {
 		return strings.TrimSpace(value)
 	}
 	return fallback
+}
+
+func ParseTaskEvidenceArtifacts(raw string) []EvidenceArtifact {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || raw == "null" {
+		return nil
+	}
+	var artifacts []EvidenceArtifact
+	if err := json.Unmarshal([]byte(raw), &artifacts); err == nil {
+		return filterEvidenceArtifacts(artifacts)
+	}
+	var generic []map[string]any
+	if err := json.Unmarshal([]byte(raw), &generic); err != nil {
+		return nil
+	}
+	artifacts = make([]EvidenceArtifact, 0, len(generic))
+	for _, item := range generic {
+		if !isEvidenceArtifactType(fmt.Sprint(item["type"]), fmt.Sprint(item["evidence_type"])) {
+			continue
+		}
+		encoded, err := json.Marshal(item)
+		if err != nil {
+			continue
+		}
+		var artifact EvidenceArtifact
+		if err := json.Unmarshal(encoded, &artifact); err == nil {
+			artifacts = append(artifacts, artifact)
+		}
+	}
+	return artifacts
+}
+
+func filterEvidenceArtifacts(artifacts []EvidenceArtifact) []EvidenceArtifact {
+	filtered := make([]EvidenceArtifact, 0, len(artifacts))
+	for _, artifact := range artifacts {
+		if isEvidenceArtifactType(artifact.Type, artifact.EvidenceType) {
+			filtered = append(filtered, artifact)
+		}
+	}
+	return filtered
+}
+
+func isEvidenceArtifactType(artifactType string, evidenceType string) bool {
+	return artifactType == WorkEvidenceType || evidenceType == EvidenceType || evidenceType == WorkEvidenceType
 }

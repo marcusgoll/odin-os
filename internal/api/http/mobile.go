@@ -170,7 +170,15 @@ func registerMobileRoutes(mux *http.ServeMux, deps Dependencies, now func() time
 			writeAPIError(writer, http.StatusServiceUnavailable, "mobile_approvals_unavailable", err.Error())
 			return
 		}
-		writeMobileJSON(writer, http.StatusOK, map[string]any{"items": items, "count": len(items)})
+		writeMobileJSON(writer, http.StatusOK, map[string]any{"items": items, "approvals": items, "count": len(items)})
+	}))
+
+	mux.HandleFunc("GET /mobile/approvals/{approval_id}", mobileAuthorized(deps, func(writer http.ResponseWriter, request *http.Request) {
+		view, ok := handleMobileApprovalDetail(writer, request, deps)
+		if !ok {
+			return
+		}
+		writeMobileJSON(writer, http.StatusOK, map[string]any{"approval": view})
 	}))
 
 	mux.HandleFunc("POST /mobile/approvals/{approval_id}/decision", mobileAuthorized(deps, func(writer http.ResponseWriter, request *http.Request) {
@@ -362,23 +370,32 @@ type mobileReviewItem struct {
 }
 
 type mobileApprovalView struct {
-	ApprovalID      int64                   `json:"approval_id"`
-	ID              int64                   `json:"id"`
-	TaskID          int64                   `json:"task_id"`
-	TaskKey         string                  `json:"task_key"`
-	ProjectKey      string                  `json:"project_key"`
-	Status          string                  `json:"status"`
-	RequestedAt     string                  `json:"requested_at"`
-	ResolverSupport string                  `json:"resolver_support,omitempty"`
-	Title           string                  `json:"title,omitempty"`
-	RequestedAction string                  `json:"requested_action,omitempty"`
-	RequiredReason  string                  `json:"required_reason,omitempty"`
-	RiskLevel       string                  `json:"risk_level,omitempty"`
-	SourceObject    string                  `json:"source_object,omitempty"`
-	Actions         []string                `json:"actions,omitempty"`
-	BrowserEvent    string                  `json:"browser_event,omitempty"`
-	DeepLink        string                  `json:"deep_link,omitempty"`
-	Notification    *mobileNotificationView `json:"notification,omitempty"`
+	ID                  int64                   `json:"id"`
+	ApprovalID          int64                   `json:"approval_id"`
+	Title               string                  `json:"title"`
+	Status              string                  `json:"status"`
+	RiskLevel           string                  `json:"risk_level"`
+	SourceObject        string                  `json:"source_object"`
+	RequestedAction     string                  `json:"requested_action"`
+	RequiredReason      string                  `json:"required_reason"`
+	EvidenceContext     []string                `json:"evidence_context"`
+	Consequences        []string                `json:"consequences"`
+	ExpiresAt           string                  `json:"expires_at"`
+	PolicySnapshotHash  string                  `json:"policy_snapshot_hash"`
+	RuntimeSnapshotHash string                  `json:"runtime_snapshot_hash"`
+	AuditTrailPreview   []string                `json:"audit_trail_preview"`
+	Actions             []string                `json:"actions"`
+	ConfirmationPrompt  string                  `json:"confirmation_prompt,omitempty"`
+	TaskID              int64                   `json:"task_id"`
+	TaskKey             string                  `json:"task_key"`
+	ProjectKey          string                  `json:"project_key,omitempty"`
+	RequestedAt         string                  `json:"requested_at"`
+	ResolverSupport     string                  `json:"resolver_support,omitempty"`
+	DecisionBy          string                  `json:"decision_by,omitempty"`
+	DecisionReason      string                  `json:"decision_reason,omitempty"`
+	BrowserEvent        string                  `json:"browser_event,omitempty"`
+	DeepLink            string                  `json:"deep_link,omitempty"`
+	Notification        *mobileNotificationView `json:"notification,omitempty"`
 }
 
 type mobileNotificationView struct {
@@ -409,19 +426,26 @@ type mobileIntakeItemView struct {
 }
 
 type mobileApprovalDecisionRequest struct {
-	Action     string `json:"action"`
-	Decision   string `json:"decision"`
-	Reason     string `json:"reason"`
-	DecisionBy string `json:"decision_by"`
+	Action                      string `json:"action"`
+	Decision                    string `json:"decision"`
+	Reason                      string `json:"reason"`
+	Actor                       string `json:"actor"`
+	DecisionBy                  string `json:"decision_by"`
+	ConfirmationText            string `json:"confirmation_text"`
+	ExpectedPolicySnapshotHash  string `json:"expected_policy_snapshot_hash"`
+	ExpectedRuntimeSnapshotHash string `json:"expected_runtime_snapshot_hash"`
 }
 
 type mobileApprovalDecisionResponse struct {
-	ApprovalID      int64  `json:"approval_id"`
-	TaskID          int64  `json:"task_id"`
-	Status          string `json:"status"`
-	Action          string `json:"action"`
-	ResolverSupport string `json:"resolver_support"`
-	ResolvedAt      string `json:"resolved_at,omitempty"`
+	ApprovalID      int64              `json:"approval_id"`
+	TaskID          int64              `json:"task_id"`
+	Status          string             `json:"status"`
+	Action          string             `json:"action"`
+	ResolverSupport string             `json:"resolver_support,omitempty"`
+	ResolvedAt      string             `json:"resolved_at,omitempty"`
+	Approval        mobileApprovalView `json:"approval"`
+	Result          string             `json:"result"`
+	Summary         string             `json:"summary"`
 }
 
 func mobileSummary(ctx context.Context, deps Dependencies, now func() time.Time) (map[string]any, error) {
@@ -840,36 +864,28 @@ func mobileReviewQueue(ctx context.Context, deps Dependencies) ([]mobileReviewIt
 }
 
 func mobileApprovals(ctx context.Context, deps Dependencies) ([]mobileApprovalView, error) {
-	if deps.Store == nil || deps.ReadModels == nil {
-		return nil, fmt.Errorf("runtime store and read models are required")
+	if deps.Store == nil {
+		return nil, fmt.Errorf("runtime store is required")
 	}
-	approvals, err := projections.ListPendingApprovalViews(ctx, deps.ReadModels)
+	if deps.ReadModels == nil {
+		return []mobileApprovalView{}, nil
+	}
+	pending, err := projections.ListPendingApprovalViews(ctx, deps.ReadModels)
 	if err != nil {
 		return nil, err
 	}
 	service := approvalsvc.Service{Store: deps.Store}
-	items := make([]mobileApprovalView, 0, len(approvals))
-	for _, approval := range approvals {
-		item := mobileApprovalView{
-			ApprovalID:      approval.ApprovalID,
-			ID:              approval.ApprovalID,
-			TaskID:          approval.TaskID,
-			TaskKey:         approval.TaskKey,
-			ProjectKey:      approval.ProjectKey,
-			Status:          approval.Status,
-			RequestedAt:     approval.RequestedAt,
-			Title:           approval.TaskKey,
-			RequestedAction: "runtime action",
-			RequiredReason:  "approval_required",
-			RiskLevel:       "approval_required",
-			SourceObject:    approval.ProjectKey + "/" + approval.TaskKey,
+	items := make([]mobileApprovalView, 0, len(pending))
+	for _, approval := range pending {
+		detail, err := service.Detail(ctx, approval.ApprovalID)
+		if err != nil {
+			return nil, err
 		}
-		if approval.Status == "pending" {
-			item.Actions = []string{"approve", "deny"}
+		item, err := buildMobileApprovalView(ctx, deps.Store, detail)
+		if err != nil {
+			return nil, err
 		}
-		if detail, err := service.Detail(ctx, approval.ApprovalID); err == nil {
-			item.ResolverSupport = string(detail.ResolverSupport)
-		}
+		item.ProjectKey = firstNonEmpty(item.ProjectKey, approval.ProjectKey)
 		if mobileIsBrowserApproval(ctx, deps.Store, approval) {
 			item.BrowserEvent = "browser_mutation_approval_required"
 			item.DeepLink = mobileApprovalDeepLink(approval.ApprovalID)
@@ -984,14 +1000,32 @@ func mobileBrowserLoginReviewItems(ctx context.Context, deps Dependencies) ([]mo
 	return items, nil
 }
 
-func handleMobileApprovalDecision(writer http.ResponseWriter, request *http.Request, deps Dependencies) {
+func handleMobileApprovalDetail(writer http.ResponseWriter, request *http.Request, deps Dependencies) (mobileApprovalView, bool) {
 	if deps.Store == nil {
 		writeAPIError(writer, http.StatusServiceUnavailable, "mobile_approval_store_unavailable", "approval store unavailable")
-		return
+		return mobileApprovalView{}, false
 	}
 	approvalID, err := parsePositivePathID(request.PathValue("approval_id"), "approval id")
 	if err != nil {
 		writeAPIError(writer, http.StatusBadRequest, "invalid_approval_id", err.Error())
+		return mobileApprovalView{}, false
+	}
+	detail, err := (approvalsvc.Service{Store: deps.Store}).Detail(request.Context(), approvalID)
+	if err != nil {
+		writeAPIError(writer, http.StatusNotFound, "approval_not_found", err.Error())
+		return mobileApprovalView{}, false
+	}
+	view, err := buildMobileApprovalView(request.Context(), deps.Store, detail)
+	if err != nil {
+		writeAPIError(writer, http.StatusServiceUnavailable, "mobile_approval_unavailable", err.Error())
+		return mobileApprovalView{}, false
+	}
+	return view, true
+}
+
+func handleMobileApprovalDecision(writer http.ResponseWriter, request *http.Request, deps Dependencies) {
+	view, ok := handleMobileApprovalDetail(writer, request, deps)
+	if !ok {
 		return
 	}
 	var body mobileApprovalDecisionRequest
@@ -999,9 +1033,9 @@ func handleMobileApprovalDecision(writer http.ResponseWriter, request *http.Requ
 		writeAPIError(writer, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
-	body.Action = strings.ToLower(strings.TrimSpace(firstNonEmpty(body.Action, body.Decision)))
-	if body.Action != "approve" && body.Action != "approved" && body.Action != "deny" && body.Action != "denied" {
-		writeAPIError(writer, http.StatusBadRequest, "invalid_approval_action", "action must be approve or deny")
+	body.Action = mobileNormalizeApprovalAction(firstNonEmpty(body.Action, body.Decision))
+	if body.Action != "approve" && body.Action != "deny" && body.Action != "clarify" {
+		writeAPIError(writer, http.StatusBadRequest, "invalid_approval_action", "action must be approve, deny, or clarify")
 		return
 	}
 	body.Reason = strings.TrimSpace(body.Reason)
@@ -1009,22 +1043,58 @@ func handleMobileApprovalDecision(writer http.ResponseWriter, request *http.Requ
 		writeAPIError(writer, http.StatusBadRequest, "approval_reason_required", "reason is required")
 		return
 	}
-	decisionBy := strings.TrimSpace(body.DecisionBy)
+	decisionBy := strings.TrimSpace(body.Actor)
+	if decisionBy == "" {
+		decisionBy = strings.TrimSpace(body.DecisionBy)
+	}
 	if decisionBy == "" {
 		decisionBy = "mobile-api"
 	}
+	if body.ExpectedPolicySnapshotHash != "" && body.ExpectedPolicySnapshotHash != view.PolicySnapshotHash {
+		writeAPIError(writer, http.StatusConflict, "stale_approval", "policy snapshot changed since approval was displayed")
+		return
+	}
+	if body.ExpectedRuntimeSnapshotHash != "" && body.ExpectedRuntimeSnapshotHash != view.RuntimeSnapshotHash {
+		writeAPIError(writer, http.StatusConflict, "stale_approval", "runtime snapshot changed since approval was displayed")
+		return
+	}
+	if body.Action == "approve" && mobileApprovalRequiresConfirmation(view) {
+		want := fmt.Sprintf("APPROVE %d", view.ID)
+		if strings.TrimSpace(body.ConfirmationText) != want {
+			writeAPIError(writer, http.StatusConflict, "explicit_confirmation_required", "approval requires explicit confirmation text: "+want)
+			return
+		}
+	}
 	result, err := approvalsvc.Service{Store: deps.Store}.Resolve(request.Context(), approvalsvc.ResolveParams{
-		ApprovalID: approvalID,
-		Action:     mobileNormalizeApprovalAction(body.Action),
+		ApprovalID: view.ID,
+		Action:     body.Action,
 		DecisionBy: decisionBy,
 		Reason:     body.Reason,
 	})
 	if err != nil {
-		if errors.Is(err, approvalsvc.ErrUnsupportedResolver) {
+		switch {
+		case errors.Is(err, approvalsvc.ErrStaleApproval):
+			writeAPIError(writer, http.StatusConflict, "stale_approval", err.Error())
+		case errors.Is(err, approvalsvc.ErrUnsupportedResolver):
 			writeAPIError(writer, http.StatusConflict, "approval_resolver_unsupported", err.Error())
-			return
+		default:
+			writeAPIError(writer, http.StatusConflict, "approval_decision_failed", err.Error())
 		}
-		writeAPIError(writer, http.StatusConflict, "approval_decision_failed", err.Error())
+		return
+	}
+	updated, err := (approvalsvc.Service{Store: deps.Store}).Detail(request.Context(), result.Approval.ID)
+	if err != nil {
+		writeAPIError(writer, http.StatusServiceUnavailable, "approval_detail_unavailable", err.Error())
+		return
+	}
+	updatedView, err := buildMobileApprovalView(request.Context(), deps.Store, updated)
+	if err != nil {
+		writeAPIError(writer, http.StatusServiceUnavailable, "approval_detail_unavailable", err.Error())
+		return
+	}
+	receipt, err := approvalsvc.FormatReceipt(result)
+	if err != nil {
+		writeAPIError(writer, http.StatusServiceUnavailable, "approval_receipt_unavailable", err.Error())
 		return
 	}
 	auth := currentMobileAuth(request)
@@ -1037,12 +1107,15 @@ func handleMobileApprovalDecision(writer http.ResponseWriter, request *http.Requ
 		})
 	}
 	writeMobileJSON(writer, http.StatusOK, mobileApprovalDecisionResponse{
-		ApprovalID:      result.Approval.ID,
-		TaskID:          result.Approval.TaskID,
-		Status:          result.Approval.Status,
-		Action:          mobileNormalizeApprovalAction(body.Action),
+		ApprovalID:      updatedView.ID,
+		TaskID:          updatedView.TaskID,
+		Status:          updatedView.Status,
+		Action:          body.Action,
 		ResolverSupport: string(result.ResolverSupport),
 		ResolvedAt:      formatMobileOptionalTime(result.Approval.ResolvedAt),
+		Approval:        updatedView,
+		Result:          strings.TrimPrefix(receipt.Line, fmt.Sprintf("approval=%d status=resolved result=", result.Approval.ID)),
+		Summary:         strings.TrimPrefix(receipt.Summary, "summary="),
 	})
 }
 
@@ -1055,6 +1128,124 @@ func mobileNormalizeApprovalAction(action string) string {
 	default:
 		return strings.ToLower(strings.TrimSpace(action))
 	}
+}
+
+func buildMobileApprovalView(ctx context.Context, store *sqlite.Store, detail approvalsvc.Detail) (mobileApprovalView, error) {
+	projectKey := ""
+	if detail.Task.ProjectID > 0 {
+		project, err := store.GetProject(ctx, detail.Task.ProjectID)
+		if err != nil {
+			return mobileApprovalView{}, err
+		}
+		projectKey = project.Key
+	}
+	auditTrail, err := mobileApprovalAuditTrail(ctx, store, detail.Task.ID)
+	if err != nil {
+		return mobileApprovalView{}, err
+	}
+	risk := mobileApprovalRiskLevel(detail.Task)
+	view := mobileApprovalView{
+		ID:                  detail.Approval.ID,
+		ApprovalID:          detail.Approval.ID,
+		Title:               firstNonEmpty(detail.Task.Title, detail.Task.Key),
+		Status:              detail.Approval.Status,
+		RiskLevel:           risk,
+		SourceObject:        firstNonEmpty(projectKey+"/"+detail.Task.Key, detail.Task.Key),
+		RequestedAction:     firstNonEmpty(detail.Task.ActionKey, detail.Task.WorkKind, detail.Task.ExecutionIntent, "runtime action"),
+		RequiredReason:      firstNonEmpty(detail.Task.BlockedReason, detail.Task.TerminalReason, "approval_required"),
+		EvidenceContext:     mobileApprovalEvidence(detail.Task),
+		Consequences:        mobileApprovalConsequences(risk, detail.Task),
+		ExpiresAt:           "",
+		PolicySnapshotHash:  detail.Approval.PolicySnapshotHash,
+		RuntimeSnapshotHash: detail.Approval.RuntimeSnapshotHash,
+		AuditTrailPreview:   auditTrail,
+		Actions:             mobileApprovalActions(detail.Approval.Status),
+		TaskID:              detail.Task.ID,
+		TaskKey:             detail.Task.Key,
+		ProjectKey:          projectKey,
+		RequestedAt:         detail.Approval.RequestedAt.UTC().Format(time.RFC3339),
+		ResolverSupport:     string(detail.ResolverSupport),
+		DecisionBy:          detail.Approval.DecisionBy,
+		DecisionReason:      detail.Approval.Reason,
+	}
+	if mobileApprovalRequiresConfirmation(view) {
+		view.ConfirmationPrompt = fmt.Sprintf("APPROVE %d", view.ID)
+	}
+	return view, nil
+}
+
+func mobileApprovalActions(status string) []string {
+	if status == "pending" {
+		return []string{"approve", "deny", "clarify"}
+	}
+	return []string{}
+}
+
+func mobileApprovalRequiresConfirmation(view mobileApprovalView) bool {
+	return view.RiskLevel == "high" || view.RiskLevel == "critical"
+}
+
+func mobileApprovalRiskLevel(task sqlite.Task) string {
+	text := strings.ToLower(strings.Join([]string{task.ActionKey, task.WorkKind, task.ExecutionIntent, task.Title, task.Summary}, " "))
+	switch {
+	case strings.Contains(text, "critical") || strings.Contains(text, "delete") || strings.Contains(text, "force") || strings.Contains(text, "production"):
+		return "critical"
+	case strings.Contains(text, "external_mutation") || strings.Contains(text, "transfer") || strings.Contains(text, "deploy") || strings.Contains(text, "mutate"):
+		return "high"
+	case strings.Contains(text, "write") || strings.Contains(text, "publish"):
+		return "medium"
+	default:
+		return "low"
+	}
+}
+
+func mobileApprovalEvidence(task sqlite.Task) []string {
+	values := []string{
+		"task=" + task.Key,
+		"status=" + task.Status,
+		"blocked_reason=" + firstNonEmpty(task.BlockedReason, "approval_required"),
+	}
+	if task.ExecutionIntent != "" {
+		values = append(values, "execution_intent="+task.ExecutionIntent)
+	}
+	if task.Summary != "" {
+		values = append(values, "summary="+task.Summary)
+	}
+	if strings.TrimSpace(task.ArtifactsJSON) != "" && strings.TrimSpace(task.ArtifactsJSON) != "[]" {
+		values = append(values, "artifacts="+task.ArtifactsJSON)
+	}
+	return values
+}
+
+func mobileApprovalConsequences(risk string, task sqlite.Task) []string {
+	consequences := []string{
+		"approve: continue the blocked Odin work item through its registered resolver",
+		"deny: keep the work blocked and preserve the denial reason",
+		"clarify: keep the work blocked and route the question back to the review/work queue",
+	}
+	if risk == "high" || risk == "critical" {
+		consequences = append(consequences, "approval may allow external or irreversible side effects for "+task.Key)
+	}
+	return consequences
+}
+
+func mobileApprovalAuditTrail(ctx context.Context, store *sqlite.Store, taskID int64) ([]string, error) {
+	events, err := store.ListEvents(ctx, sqlite.ListEventsParams{TaskID: &taskID})
+	if err != nil {
+		return nil, err
+	}
+	start := len(events) - 5
+	if start < 0 {
+		start = 0
+	}
+	trail := make([]string, 0, len(events)-start)
+	for _, event := range events[start:] {
+		trail = append(trail, fmt.Sprintf("%s %s", event.OccurredAt.UTC().Format(time.RFC3339), event.Type))
+	}
+	if len(trail) == 0 {
+		trail = append(trail, "no audit events recorded yet")
+	}
+	return trail, nil
 }
 
 func handleMobileRawIntake(writer http.ResponseWriter, request *http.Request, deps Dependencies, now func() time.Time) {

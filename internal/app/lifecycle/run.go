@@ -73,7 +73,7 @@ import (
 
 var errRuntimeNotReady = errors.New("runtime not ready")
 
-const rootUsageBanner = "Usage: odin <command> [args]\n\nCommands: help repl overview capabilities tui doctor healthcheck serve backup restore verify-backup status legacy project workspace work scope jobs runs leases approvals review intake agenda logs knowledge memory goal browser task initiative companion profile followup trigger scheduler transition skills e2e\n\nRun detail: odin runs show <id>"
+const rootUsageBanner = "Usage: odin <command> [args]\n\nCommands: help repl overview capabilities tui doctor healthcheck serve backup restore verify-backup status legacy project workspace work scope jobs runs leases approvals review intake agenda logs knowledge memory goal browser task initiative companion profile followup trigger scheduler transition skills design e2e\n\nRun detail: odin runs show <id>"
 
 const schedulerUsage = "usage: odin scheduler tick [now=<RFC3339>] [recovery=<true|false>] [--dry-run|dry_run=<true|false>] [--json]"
 const capabilitiesUsage = "usage: odin capabilities list [--kind agent|skill|workflow|command|tool] [--scope <scope>] [--json]\n       odin capabilities show <id> [--version <version>] [--json]"
@@ -380,6 +380,8 @@ func Run(ctx context.Context, root string, args []string, stdin io.Reader, stdou
 		return runScheduler(ctx, app, args[1:], stdout)
 	case "skills":
 		return runSkills(ctx, app, args[1:], stdout)
+	case "design":
+		return runDesign(ctx, app, args[1:], stdout)
 	case "doctor":
 		return runDoctor(ctx, app, cfg, args[1:], stdout)
 	case "healthcheck":
@@ -1296,6 +1298,12 @@ func runApprovals(ctx context.Context, app bootstrap.App, args []string, stdout 
 		return err
 	}
 	if jsonOutput {
+		if filter == commands.ApprovalSupportAll {
+			approvals, err = listAllApprovals(ctx, app.Store, state.Scope)
+			if err != nil {
+				return err
+			}
+		}
 		return commands.WriteJSON(stdout, commands.ApprovalsView{Approvals: approvals})
 	}
 	if len(approvals) == 0 {
@@ -2802,7 +2810,7 @@ func findCanonicalDuplicate(ctx context.Context, store *sqlite.Store, item sqlit
 		if normalizedIntakeSubjectDedupeKey(candidate) == subjectKey {
 			return &intakeDuplicateMatch{
 				CanonicalIntakeItemID: candidate.ID,
-				Result:                "near_duplicate_linked",
+				Result:                "semantic_duplicate_linked",
 				Basis:                 "normalized_subject",
 				SuppressionReason:     "near_duplicate_subject",
 			}, nil
@@ -3184,6 +3192,8 @@ func approvalResolveAction(decision string) string {
 		return "approve"
 	case "reject", "rejected", "deny", "denied":
 		return "deny"
+	case "clarify", "clarification_requested":
+		return "clarify"
 	default:
 		return strings.ToLower(strings.TrimSpace(decision))
 	}
@@ -3198,6 +3208,8 @@ func approvalResolveResultLabel(result approvalsvc.ResolveResult) string {
 		return "approved"
 	case "denied":
 		return "denied"
+	case "clarification_requested":
+		return "clarification_requested"
 	default:
 		return result.Approval.Status
 	}
@@ -4853,7 +4865,6 @@ func runSchedulerTick(ctx context.Context, app bootstrap.App, args []string, std
 		}
 		return nil
 	}
-
 	triggerResult, err := (triggers.Service{Store: app.Store, Registry: app.Registry}).EvaluateDue(ctx, now)
 	if err != nil {
 		return err
@@ -5058,7 +5069,6 @@ func formatSchedulerBatch(key string, window string) string {
 	}
 	return key + " window=" + window
 }
-
 func runStatus(ctx context.Context, app bootstrap.App, cfg appconfig.Config, args []string, stdout io.Writer) error {
 	jsonOutput, remaining, err := consumeJSONFlag(args)
 	if err != nil {
@@ -5650,6 +5660,69 @@ func approvalOperatorOnApprove(resolverSupport string) string {
 		return "task unblocked or registered continuation starts"
 	}
 	return "not resolved; inspect only"
+}
+
+func listAllApprovals(ctx context.Context, store *sqlite.Store, resolved scope.Resolution) ([]commands.ApprovalView, error) {
+	rows, err := store.DB().QueryContext(ctx, `
+		SELECT a.id
+		FROM approvals a
+		JOIN tasks t ON t.id = a.task_id
+		ORDER BY a.id ASC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	approvalIDs := []int64{}
+	for rows.Next() {
+		var approvalID int64
+		if err := rows.Scan(&approvalID); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		approvalIDs = append(approvalIDs, approvalID)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+
+	approvalService := approvalsvc.Service{Store: store}
+	approvals := make([]commands.ApprovalView, 0, len(approvalIDs))
+	for _, approvalID := range approvalIDs {
+		detail, err := approvalService.Detail(ctx, approvalID)
+		if err != nil {
+			return nil, err
+		}
+		project, err := store.GetProject(ctx, detail.Task.ProjectID)
+		if err != nil {
+			return nil, err
+		}
+		if !matchesTaskProjectionScope(project.Key, detail.Task.Scope, resolved) {
+			continue
+		}
+		reason := strings.TrimSpace(detail.Approval.Reason)
+		if reason == "" {
+			reason = approvalOperatorReason(detail.Approval.Status, string(detail.ResolverSupport))
+		}
+		approvals = append(approvals, commands.ApprovalView{
+			ApprovalID:      detail.Approval.ID,
+			TaskKey:         detail.Task.Key,
+			RunID:           detail.Approval.RunID,
+			Status:          detail.Approval.Status,
+			ResolverSupport: string(detail.ResolverSupport),
+			DecisionBy:      detail.Approval.DecisionBy,
+			Source:          "approval_requests",
+			Risk:            "governance",
+			Reason:          reason,
+			AllowedActions:  approvalOperatorAllowedActions(detail.Approval.Status, string(detail.ResolverSupport)),
+			NextSteps:       approvalOperatorNextSteps(detail.Approval.ID, detail.Approval.Status, string(detail.ResolverSupport)),
+			OnApprove:       approvalOperatorOnApprove(string(detail.ResolverSupport)),
+		})
+	}
+	return approvals, nil
 }
 
 func approvalRunIDLabel(runID *int64) string {
